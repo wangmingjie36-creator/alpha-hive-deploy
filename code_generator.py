@@ -16,7 +16,7 @@ class CodeGenerator:
         生成数据爬取脚本
 
         Args:
-            source: 数据源（"yfinance", "sec", "polymarket", "stocktwits"）
+            source: 数据源（"yfinance", "sec", "stocktwits"）
             params: 参数字典
 
         Returns:
@@ -26,8 +26,6 @@ class CodeGenerator:
             return CodeGenerator._generate_yfinance(params)
         elif source == "sec":
             return CodeGenerator._generate_sec_fetch(params)
-        elif source == "polymarket":
-            return CodeGenerator._generate_polymarket(params)
         elif source == "stocktwits":
             return CodeGenerator._generate_stocktwits(params)
         else:
@@ -125,46 +123,6 @@ try:
             "form_type": form_type,
             "filings": data.get("filings", [])[:5],  # 最近 5 条
             "last_updated": datetime.now().isoformat()
-        }}, indent=2))
-    else:
-        print(json.dumps({{"error": f"HTTP {{response.status_code}}"}}))
-except (ConnectionError, TimeoutError, OSError, ValueError) as e:
-    print(json.dumps({{"error": str(e)}}))
-'''
-        return code.strip()
-
-    @staticmethod
-    def _generate_polymarket(params: Dict) -> str:
-        """生成 Polymarket 赔率爬取代码"""
-        keyword = params.get("keyword", "NVDA earnings")
-
-        code = f'''
-import requests
-import json
-
-# Polymarket 公开 API（无需认证）
-url = "https://clob.polymarket.com/markets"
-
-params = {{
-    "closed": False,
-    "limit": 100
-}}
-
-try:
-    response = requests.get(url, params=params, timeout=15)
-
-    if response.status_code == 200:
-        markets = response.json()
-
-        # 过滤相关市场
-        keyword = "{keyword}".lower()
-        filtered = [m for m in markets if keyword in m.get("question", "").lower()]
-
-        print(json.dumps({{
-            "keyword": "{keyword}",
-            "total_markets": len(markets),
-            "filtered_count": len(filtered),
-            "markets": filtered[:5]
         }}, indent=2))
     else:
         print(json.dumps({{"error": f"HTTP {{response.status_code}}"}}))

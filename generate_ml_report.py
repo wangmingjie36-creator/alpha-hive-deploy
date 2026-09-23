@@ -984,7 +984,7 @@ class MLEnhancedReportGenerator:
             ("signal",   "信号强度 (Signal)",   "聪明钱 SEC Form4 / 机构持仓"),
             ("catalyst", "催化剂 (Catalyst)",   "事件日历 / 财报 / 产品发布"),
             ("sentiment","情绪 (Sentiment)",    "X 平台 / Reddit / 新闻情绪"),
-            ("odds",     "赔率 (Odds)",          "期权 P/C / IV Rank / Polymarket"),
+            ("odds",     "赔率 (Odds)",          "期权 P/C / IV Rank / 异常流"),
             ("risk_adj", "风险调整 (RiskAdj)",  "拥挤度 / 波动 / 交叉验证调整"),
         ]
         weights_from_config = False

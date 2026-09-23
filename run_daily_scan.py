@@ -131,7 +131,7 @@ def _cleanup_stale_data(project_dir: Optional[Path] = None, max_cache_days: int 
 
     # 1. 缓存目录：删除 >max_cache_days 天的文件
     cache_dirs = [
-        "cache", "data_cache", "sec_cache", "polymarket_cache",
+        "cache", "data_cache", "sec_cache",
         "finviz_cache", "reddit_cache", "earnings_cache",
     ]
     for dirname in cache_dirs:

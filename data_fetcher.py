@@ -135,50 +135,6 @@ class DataFetcher:
             _log.error("❌ 社交热度获取失败 %s: %s", ticker, e)
             return {"messages_per_day": 0, "bullish_ratio": 0.5, "data_quality": "fallback"}
 
-    # ==================== Polymarket 赔率 ====================
-
-    def get_polymarket_odds(self, ticker: str) -> Dict:
-        """
-        获取 Polymarket 预测市场赔率
-
-        Returns:
-            {
-                "event": str,
-                "yes_odds": float (0-1),
-                "no_odds": float (0-1),
-                "volume_24h": float,
-                "odds_change_24h": float (%),
-            }
-        """
-        cache_key = self.cache.get_cache_key("polymarket", ticker)
-        cached = self.cache.load(cache_key, ttl=_ttl("polymarket"))
-        if cached:
-            _log.info("📦 使用 Polymarket 缓存: %s", ticker)
-            return cached
-
-        try:
-            _log.info("🔄 获取 Polymarket 赔率: %s", ticker)
-
-            # Polymarket 实时路径已迁移到 polymarket_client.py
-
-            # 示例数据
-            odds_data = {
-                "event": f"{ticker} Q1 2026 Earnings Beat",
-                "yes_odds": self._estimate_yes_odds(ticker),
-                "no_odds": 0.0,  # 自动计算
-                "volume_24h": self._estimate_volume(ticker),
-                "odds_change_24h": self._estimate_odds_change(ticker),
-                "last_updated": datetime.now().isoformat(),
-            }
-            odds_data["no_odds"] = 1.0 - odds_data["yes_odds"]
-
-            self.cache.save(cache_key, odds_data)
-            return odds_data
-
-        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
-            _log.error("❌ Polymarket 获取失败 %s: %s", ticker, e)
-            return {"yes_odds": 0.5, "no_odds": 0.5}
-
     # ==================== Yahoo Finance 数据 ====================
 
     def get_yahoo_finance_metrics(self, ticker: str) -> Dict:
@@ -407,21 +363,6 @@ class DataFetcher:
     # v0.40.0: _estimate_stocktwits_volume/_estimate_bullish_ratio 已删除——
     # 编造的样本数据反模式；社交热度改走 real_data_sources.get_social_buzz
 
-    def _estimate_yes_odds(self, ticker: str) -> float:
-        """估计 Polymarket YES 赔率"""
-        base_odds = {"NVDA": 0.65, "TSLA": 0.55, "VKTX": 0.48}
-        return base_odds.get(ticker, 0.50)
-
-    def _estimate_volume(self, ticker: str) -> float:
-        """估计 Polymarket 交易量"""
-        base_volumes = {"NVDA": 8200000, "TSLA": 5500000, "VKTX": 1200000}
-        return base_volumes.get(ticker, 1000000)
-
-    def _estimate_odds_change(self, ticker: str) -> float:
-        """估计 24h 赔率变化"""
-        base_changes = {"NVDA": 8.2, "TSLA": 5.5, "VKTX": 3.2}
-        return base_changes.get(ticker, 2.0)
-
     def _calculate_5d_change(self, stock) -> float:
         """计算 5 天价格变化"""
         try:
@@ -522,7 +463,7 @@ class DataFetcher:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         _source_tasks = {
             "social": self.get_social_metrics,
-            # v0.45.30: polymarket 已移除 —— 见 config.POLYMARKET_ENABLED
+            # v0.45.30: polymarket 已移除（v0.45.315 连同模块整体删除）
             "yahoo_finance": self.get_yahoo_finance_metrics,
             "google_trends": self.get_google_trends,
             "sec_filings": self.get_sec_filings,

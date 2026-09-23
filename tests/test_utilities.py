@@ -473,6 +473,20 @@ class TestWeightValidation:
             _cfg.AGENT_SCORING["buzz_weights"].clear()
             _cfg.AGENT_SCORING["buzz_weights"].update(orig)
 
+    @pytest.mark.parametrize("ow,uw", [(-0.1, 0.10), (0.0, 0.0), (0.55, -0.6)])
+    def test_bad_oracle_weights_detected(self, ow, uw):
+        """v0.45.315：Oracle 两权重是相对值（不要求和为 1），但须非负且和为正。"""
+        import config as _cfg
+        orig = (_cfg.AGENT_SCORING["oracle_options_weight"],
+                _cfg.AGENT_SCORING["oracle_unusual_weight"])
+        try:
+            _cfg.AGENT_SCORING["oracle_options_weight"] = ow
+            _cfg.AGENT_SCORING["oracle_unusual_weight"] = uw
+            assert any("oracle" in w for w in _cfg.validate_weights())
+        finally:
+            (_cfg.AGENT_SCORING["oracle_options_weight"],
+             _cfg.AGENT_SCORING["oracle_unusual_weight"]) = orig
+
 
 # ==================== 诊断摘要 (#E4) ====================
 

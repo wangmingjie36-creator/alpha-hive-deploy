@@ -231,7 +231,6 @@ _sessions_lock = threading.Lock()
 # 每个 source 的默认超时（秒）
 _SOURCE_TIMEOUTS = {
     "sec_edgar": 15,
-    "polymarket": 15,
     "reddit": 15,
     "slack": 20,
     "default": 15,
@@ -309,10 +308,6 @@ def singleton_client(lock: threading.Lock, factory, cache: dict, key: str = "_in
 # SEC EDGAR: 10 req/s（留 30% 余量防 429）
 sec_limiter = RateLimiter(rate=6.0, burst=2)
 sec_breaker = CircuitBreaker("sec_edgar", failure_threshold=6, recovery_timeout=120.0)
-
-# Polymarket: 保守 2 req/s
-polymarket_limiter = RateLimiter(rate=2.0, burst=2)
-polymarket_breaker = CircuitBreaker("polymarket", failure_threshold=5, recovery_timeout=60.0)
 
 # yfinance: 0.5 req/s（v0.45.56 从 3.0 下调）
 #

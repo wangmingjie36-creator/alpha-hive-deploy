@@ -51,15 +51,6 @@ def _env_bool(name: str, default: bool) -> bool:
 
 # ==================== API 配置 ====================
 API_KEYS = {
-    # Polymarket API（无需认证，公开数据）
-    "POLYMARKET": {
-        "base_url": "https://clob.polymarket.com",
-        "endpoints": {
-            "markets": "/markets",
-            "prices": "/prices",
-        }
-    },
-
     # v0.40.0: STOCKTWITS 配置块已删除（公开 API 停用 403，模块已移除）
 
     # Yahoo Finance（通过 yfinance 库）
@@ -169,8 +160,6 @@ CACHE_CONFIG = {
     "ttl": {  # 缓存过期时间（秒）— 所有模块从此处读取，避免硬编码
         # 高频数据源（5~15 分钟）
         # v0.40.0: "finviz"/"stocktwits" ttl 已随模块删除移除
-        "polymarket": 900,        # 15 分钟
-        "polymarket_macro": 1800, # 30 分钟
         "yahoo_finance": 300,     # 5 分钟
         "yahoo_trending": 900,    # 15 分钟
         "unusual_options": 300,   # 5 分钟
@@ -221,61 +210,51 @@ WATCHLIST = {
     "NVDA": {
         "name": "NVIDIA Corporation",
         "sector": "Technology",
-        "polymarket_slug": "nvidia-q1-2026-revenue",
         "monitor_events": ["earnings", "product_launch", "china_sanctions"],
     },
     "TSLA": {
         "name": "Tesla Inc",
         "sector": "Automotive",
-        "polymarket_slug": "tesla-delivery-forecast",
         "monitor_events": ["earnings", "production_update", "regulatory"],
     },
     "MSFT": {
         "name": "Microsoft Corporation",
         "sector": "Technology",
-        "polymarket_slug": "microsoft-cloud-growth",
         "monitor_events": ["earnings", "azure_adoption", "ai_partnership"],
     },
     "QCOM": {
         "name": "Qualcomm Inc",
         "sector": "Technology",
-        "polymarket_slug": "qualcomm-5g-adoption",
         "monitor_events": ["earnings", "flagship_launch"],
     },
     "VKTX": {
         "name": "Viking Therapeutics",
         "sector": "Healthcare",
-        "polymarket_slug": "viking-therapeutics-fda-approval",
         "monitor_events": ["trial_results", "fda_decision"],
     },
     "META": {
         "name": "Meta Platforms Inc",
         "sector": "Technology",
-        "polymarket_slug": "meta-ai-revenue",
         "monitor_events": ["earnings", "ai_product_launch", "regulatory"],
     },
     "BILI": {
         "name": "Bilibili Inc",
         "sector": "Technology",
-        "polymarket_slug": "bilibili-user-growth",
         "monitor_events": ["earnings", "monthly_active_users", "regulatory"],
     },
     "AMZN": {
         "name": "Amazon.com Inc",
         "sector": "Technology",
-        "polymarket_slug": "amazon-aws-revenue",
         "monitor_events": ["earnings", "aws_growth", "prime_day", "regulatory"],
     },
     "RKLB": {
         "name": "Rocket Lab USA",
         "sector": "Aerospace",
-        "polymarket_slug": "rocket-lab-launch",
         "monitor_events": ["launch_success", "contract_award", "earnings"],
     },
     "CRCL": {
         "name": "Circle Internet Financial",
         "sector": "FinTech",
-        "polymarket_slug": "circle-ipo",
         "monitor_events": ["ipo", "earnings", "usdc_growth", "regulatory", "crypto_policy"],
     },
     "CVX": {
@@ -291,7 +270,6 @@ WATCHLIST = {
     "JNJ": {
         "name": "Johnson & Johnson",
         "sector": "Healthcare",
-        "polymarket_slug": "jnj-pharma-pipeline",
         "monitor_events": ["earnings", "clinical_trial_results"],
     },
     "XOM": {
@@ -362,7 +340,6 @@ WATCHLIST = {
     "ENPH": {
         "name": "Enphase Energy",
         "sector": "CleanEnergy",
-        "polymarket_slug": "enphase-battery-sales",
         "monitor_events": ["earnings", "product_launch"],
     },
     "NFLX": {
@@ -373,7 +350,6 @@ WATCHLIST = {
     "NEE": {
         "name": "NextEra Energy",
         "sector": "CleanEnergy",
-        "polymarket_slug": "nextEra-renewable-expansion",
         "monitor_events": ["earnings", "capacity_expansion"],
     },
     "SNOW": {
@@ -393,17 +369,17 @@ WATCHLIST_EXTENDED = {
     # v0.45.6：原 WATCHLIST 中从未被扫过的 11 只降级至此——**不是删除**，
     # 扩池样本量直接决定统计功效（实测 10→30 把出结论时间缩短 5.18×），
     # 凭空砍掉 11 只样本不划算。
-    "AMD": {"name": "Advanced Micro Devices", "sector": "Technology", "polymarket_slug": "amd-market-share", "monitor_events": ["earnings", "product_launch", "supply"]},
-    "AMGN": {"name": "Amgen Inc", "sector": "Healthcare", "polymarket_slug": "amgen-oncology-pipeline", "monitor_events": ["trial_results", "fda_approval"]},
-    "BIIB": {"name": "Biogen Inc", "sector": "Healthcare", "polymarket_slug": "biogen-alzheimers", "monitor_events": ["clinical_trial", "regulatory_approval"]},
-    "REGN": {"name": "Regeneron Pharmaceuticals", "sector": "Healthcare", "polymarket_slug": "regn-obesity-drug", "monitor_events": ["clinical_data", "fda_decision"]},
-    "PLUG": {"name": "Plug Power Inc", "sector": "CleanEnergy", "polymarket_slug": "plug-hydrogen-adoption", "monitor_events": ["supply_deal", "partnership_announcement"]},
-    "RUN": {"name": "Sunrun Inc", "sector": "CleanEnergy", "polymarket_slug": "sunrun-irs-credits", "monitor_events": ["policy_change", "installation_growth"]},
-    "ICLN": {"name": "iClean Energy ETF", "sector": "CleanEnergy", "polymarket_slug": "clean-energy-policy", "monitor_events": ["legislation", "irs_guidance"]},
-    "SQ": {"name": "Block Inc", "sector": "FinTech", "polymarket_slug": "square-btc-adoption", "monitor_events": ["earnings", "product_launch"]},
-    "COIN": {"name": "Coinbase Global", "sector": "FinTech", "polymarket_slug": "coinbase-btc-price", "monitor_events": ["earnings", "regulatory_approval"]},
-    "MSTR": {"name": "MicroStrategy Inc", "sector": "FinTech", "polymarket_slug": "mstr-bitcoin-reserve", "monitor_events": ["btc_purchase", "quarterly_earnings"]},
-    "UPST": {"name": "Upstart Holdings", "sector": "AI", "polymarket_slug": "upstart-ai-lending", "monitor_events": ["earnings", "partnership"]},
+    "AMD": {"name": "Advanced Micro Devices", "sector": "Technology", "monitor_events": ["earnings", "product_launch", "supply"]},
+    "AMGN": {"name": "Amgen Inc", "sector": "Healthcare", "monitor_events": ["trial_results", "fda_approval"]},
+    "BIIB": {"name": "Biogen Inc", "sector": "Healthcare", "monitor_events": ["clinical_trial", "regulatory_approval"]},
+    "REGN": {"name": "Regeneron Pharmaceuticals", "sector": "Healthcare", "monitor_events": ["clinical_data", "fda_decision"]},
+    "PLUG": {"name": "Plug Power Inc", "sector": "CleanEnergy", "monitor_events": ["supply_deal", "partnership_announcement"]},
+    "RUN": {"name": "Sunrun Inc", "sector": "CleanEnergy", "monitor_events": ["policy_change", "installation_growth"]},
+    "ICLN": {"name": "iClean Energy ETF", "sector": "CleanEnergy", "monitor_events": ["legislation", "irs_guidance"]},
+    "SQ": {"name": "Block Inc", "sector": "FinTech", "monitor_events": ["earnings", "product_launch"]},
+    "COIN": {"name": "Coinbase Global", "sector": "FinTech", "monitor_events": ["earnings", "regulatory_approval"]},
+    "MSTR": {"name": "MicroStrategy Inc", "sector": "FinTech", "monitor_events": ["btc_purchase", "quarterly_earnings"]},
+    "UPST": {"name": "Upstart Holdings", "sector": "AI", "monitor_events": ["earnings", "partnership"]},
     "AAPL": {"name": "Apple Inc", "sector": "Technology", "monitor_events": ["earnings", "product_launch"]},
     "GOOGL": {"name": "Alphabet Inc", "sector": "Technology", "monitor_events": ["earnings", "ai_product", "antitrust"]},
     "AVGO": {"name": "Broadcom Inc", "sector": "Technology", "monitor_events": ["earnings", "vmware_integration"]},
@@ -517,7 +493,6 @@ RUNTIME_CONFIG = {
 HTTP_TIMEOUT = _env_int("ALPHA_HIVE_HTTP_TIMEOUT", 15)  # 秒（全局默认）
 HTTP_TIMEOUT_BY_SOURCE = {
     "sec_edgar": 15,
-    "polymarket": 10,
     "yfinance": 12,
     "edgar_rss": 10,
     "default": 15,
@@ -696,7 +671,7 @@ CATALYSTS = {
 #
 # 架构说明：
 #   - 5 个主维度参与加权平均（权重和 = 1.0）
-#   - Options 数据 → OracleBeeEcho 内部融合（55% options + 35% polymarket + 10% unusual）→ odds 维度
+#   - Options 数据 → OracleBeeEcho 内部融合（options + unusual，比例见 AGENT_SCORING）→ odds 维度
 #   - ML 预测 → RivalBeeVanguard → dimension="ml_auxiliary" → 不参与主公式
 #     作为独立调整项附加：final_score += (ml_score - 5.0) * 0.1 * ml_confidence（最大 ±0.5 分）
 #   - 两者不存在双重计算
@@ -720,7 +695,7 @@ EVALUATION_WEIGHTS = {
     "signal":    0.0000,   # ScoutBeeNova: SEC 披露 + 聪明钱 + 拥挤度 —— IC -0.088，归零（见上）
     "catalyst":    0.3320,   # ChronosBeeHorizon: 催化剂与时间线
     "sentiment":    0.3250,   # BuzzBeeWhisper: 情绪与叙事 —— 三维中唯一方向显著（未校正）
-    "odds":    0.3430,   # OracleBeeEcho: 期权 IV(55%) + Polymarket(35%) + 异动(10%)
+    "odds":    0.3430,   # OracleBeeEcho: 期权 IV + 异动（v0.45.315 删 Polymarket）
     "risk_adj":    0.0000,   # GuardBeeSentinel: 交叉验证 + 风险调整 —— IC -0.084，归零（见上）
     # ml_auxiliary: 不在此处（RivalBeeVanguard 作为 ±0.5 独立调整项）
 }
@@ -764,19 +739,6 @@ YFINANCE_OPTIONS_CONFIG = {
 # 不携带任何区分信息，只做常数抬升（同 experiments/final_score_dilution_report.md 的稀释形态）。
 # 其余五项按原比例重新归一化到 1.0（0.25/0.85 等），相对关系不变。
 # 唯一真相源：CrowdingDetector 自 v0.45.30 起读本字典，不再硬编码第二份。
-# ==================== Polymarket 开关 ====================
-# v0.45.30 关闭。实测证据（全部日志 455 条 polymarket 记录）：
-#   · 从无一条成功返回个股赔率，只有「无相关个股预测市场」与熔断器打开
-#   · 原因是结构性的 —— Polymarket 对大盘股基本不存在个股预测市场，非网络故障
-#   · 代价是每次扫描 30 只标的 × 最多 3 次尝试 × 15s 超时 + 429 退避，
-#     且它是 v0.43.27 那场 EOF 风暴命中的 7 个域名之一（白白扩大故障面）
-# 评分影响为零：oracle_bee 在 poly_markets=0 时本就把 0.55+0.10 重新归一化，
-# 不掺常数（见 swarm_agents/oracle_bee.py 的 poly_markets==0 分支）。
-# ⚠️ 改回 True 之前先确认目标名单里真有个股预测市场，否则只是恢复空转。
-# ⚠️ 消费方读取时的 fallback 默认值必须同为 False（v0.45.23 教训：
-#    关掉的开关若 fallback 是 True，import 失败会静默重开被否决的功能）。
-POLYMARKET_ENABLED = False
-
 CROWDING_WEIGHTS = {
     "social_volume": 0.2941,        # 原 0.25 / 0.85（Reddit ApeWisdom 代理消息量）
     "google_trends": 0.1765,        # 原 0.15 / 0.85
@@ -789,7 +751,6 @@ CROWDING_WEIGHTS = {
 THESIS_BREAK_THRESHOLDS = {
     "revenue_decline_pct": 5,
     "eps_miss_pct": 20,
-    "polymarket_probability": 60,
     "crowding_score": 75,
 }
 
@@ -854,12 +815,12 @@ def validate_weights() -> list:
     warnings += _validate_weight_sum("CROWDING_WEIGHTS", CROWDING_WEIGHTS)
     warnings += _validate_weight_sum("AGENT_SCORING.buzz_weights",
                                      AGENT_SCORING.get("buzz_weights", {}))
-    oracle_w = {
-        "options": AGENT_SCORING.get("oracle_options_weight", 0),
-        "poly": AGENT_SCORING.get("oracle_poly_weight", 0),
-        "unusual": AGENT_SCORING.get("oracle_unusual_weight", 0),
-    }
-    warnings += _validate_weight_sum("AGENT_SCORING.oracle_weights", oracle_w)
+    # v0.45.315：Oracle 两权重是**相对值**（oracle_bee 自行除以二者之和），
+    # 不要求和为 1 —— 只要求非负且和为正，否则融合分母为 0 / 符号反转
+    _ow = AGENT_SCORING.get("oracle_options_weight", 0)
+    _uw = AGENT_SCORING.get("oracle_unusual_weight", 0)
+    if _ow < 0 or _uw < 0 or _ow + _uw <= 0:
+        warnings.append(f"AGENT_SCORING.oracle_*_weight 须非负且和为正（options={_ow}, unusual={_uw}）")
     for w in warnings:
         _log.warning("[CONFIG] %s", w)
     return warnings
@@ -1113,9 +1074,12 @@ AGENT_SCORING = {
     "scout_min_insider_records": 2,      # insider 记录最少样本量
 
     # ── OracleBeeEcho 权重 ──
-    "oracle_options_weight": 0.55,       # 期权信号权重
-    "oracle_poly_weight": 0.35,          # Polymarket 信号权重
-    "oracle_unusual_weight": 0.10,       # 异常流向权重
+    # v0.45.315：删 Polymarket（原 0.35）。两值**刻意不改、也不归一到 1**：
+    # oracle_bee 自己除以 (options + unusual)，只看比例；生产自 v0.45.30 起一直是
+    # (options×0.55 + unusual×0.10)/0.65。改成同比例的 11/13、2/13 数学等价但浮点不等，
+    # 实测 1e6 组随机输入里 483 组在 round(,2) 后翻位 ⇒ 保留原值才逐位不变。
+    "oracle_options_weight": 0.55,       # 期权信号权重（相对值）
+    "oracle_unusual_weight": 0.10,       # 异常流向权重（相对值）
 
     # ── BuzzBeeWhisper 7 通道权重 ──
     "buzz_weights": {

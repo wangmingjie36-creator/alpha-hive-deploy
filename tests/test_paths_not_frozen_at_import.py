@@ -186,7 +186,6 @@ class TestSpeciesDoesNotSpread:
         # 中危：缓存目录，会往 checkout 根目录写缓存
         ("earnings_watcher.py", "CACHE_DIR"),
         ("sec_edgar.py", "CACHE_DIR"),
-        ("polymarket_client.py", "CACHE_DIR"),
         ("newsapi_client.py", "_CACHE_DIR"),
         ("edgar_rss.py", "_CACHE_PATH"),
         # v0.45.233: ("pead_analyzer.py", "_CACHE_DIR") 已摘除——改为调用时的 `_cache_dir()`。

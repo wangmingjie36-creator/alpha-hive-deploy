@@ -389,7 +389,6 @@ if __name__ == "__main__":
     test_metrics = {
         "datacenter_revenue_decline": 2.5,  # 2.5% 增长（< 5% 下滑阈值，不触发）
         "competitor_threat": 0,
-        "china_ban_risk": 35  # Polymarket 禁令概率 35%（< 60% 阈值，不触发）
     }
 
     result = nvda_monitor.check_all_conditions(test_metrics)

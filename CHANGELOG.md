@@ -5,7 +5,55 @@
 
 ---
 
-## [0.45.315] — 2026-09-23 — 占位（进行中：删除全部 Polymarket 相关代码——用户已不再使用）
+## [0.45.315] — 2026-09-23 — Removed：删除全部 Polymarket 代码（用户已停用）；OracleBee 融合分逐位不变，数据真实度去掉恒 0.7 的 Polymarket 通道（09-22 重算 96.7% → 97.6%）
+
+用户：「polymarket 我已经不用了，把有关 polymarket 的代码都删掉」。
+背景：v0.45.30 起 `POLYMARKET_ENABLED=False`，`.swarm_results` 台账最后一次 `polymarket=real` 是
+2026-08-25，此后 1627 行全是 `unavailable` ⇒ 生产一个月来只走 OracleBee 的「无 Polymarket」分支。
+
+### Removed
+- `polymarket_client.py`、`tests/test_polymarket_client.py`（38 条）。
+- `swarm_agents/oracle_bee.py`：Polymarket 取数块、`poly_markets>0` 融合分支、discovery 里的 `poly_signal`、
+  confidence 里恒 False 的 `(poly_markets > 0, 0.1)`、`data_quality["polymarket"]`、`extras.polymarket_*`；
+  发布源字符串 `options+polymarket` → `options`（全仓无按该字符串匹配的读者，只存储/展示）。
+- `config.py`：`API_KEYS["POLYMARKET"]`、缓存 TTL `polymarket`/`polymarket_macro`、24 个 `polymarket_slug`
+  （零读者）、`HTTP_TIMEOUT_BY_SOURCE["polymarket"]`、`POLYMARKET_ENABLED` 开关块、
+  `THESIS_BREAK_THRESHOLDS["polymarket_probability"]`、`oracle_poly_weight`。
+- `data_fetcher.py`：`get_polymarket_odds` 与三个编造样本值的 `_estimate_*`（零调用者）。
+- `code_generator.py`：`_generate_polymarket` 分支；`resilience.py`：超时项与 `polymarket_limiter/_breaker`。
+- `report_formatters.py` / `dashboard_renderer.py`：降级统计里「Polymarket 设计性缺失」豁免（通道已不存在）。
+- `thesis_breaks_config.json`：NVDA L1 条件 `china_ban_risk`（触发器就是「Polymarket 禁令概率 > 60%」，
+  数据源只有 Polymarket）；已用 JSON 对比核实只删了这一条。`thesis_breaks.py` 示例数据同步。
+- `run_daily_scan.py` 缓存清理名单与 `.gitignore` 的 `polymarket_cache`（本机该目录不存在）。
+- `tests/test_e2e_pipeline.py::TestPolymarketKeywordFix`（2 条，只测测试文件内自定义的正则，不触达生产代码）、
+  `tests/test_resilience.py` 的 Polymarket 实例测试、`test_paths_not_frozen_at_import.KNOWN` 的
+  `polymarket_client.py` 项（文件已删，留着就是过期白名单）。
+
+### Changed
+- **Oracle 权重刻意保留 0.55 / 0.10 原值、不归一到 1。** 先试过同比例的 11/13、2/13：数学等价，但
+  1e6 组随机输入里 raw 浮点 33% 不等、`round(,2)` 后 483 组翻位 ⇒ 不是逐位不变。OracleBee 本就除以
+  `(options + unusual)`，只看比例，所以保留原值、把 `validate_weights` 对 Oracle 的「和为 1」改成
+  「非负且和为正」（新增 3 条参数化测试证明它有牙）。改后 1e6 组 **0 差异**（raw 浮点层面）。
+- `tests/test_thesis_breaks.py`：单条触发改用 `datacenter_revenue_decline`；「多条叠加」改注入合成配置——
+  删掉 `china_ban_risk` 后真实配置里已没有两条可被简单解析器触发的 L1 条件。
+- `CLAUDE.md`：三处把 Polymarket 列为数据源的地方改为期权链，并注明「勿重新接入」；`README.md` 同步。
+- 世代边界 `("2026-09-18", "v0.45.315", …)` + `COHORT_SIGNAL_SCOPE["v0.45.315"] = ()`，**作废 0 条**：
+  融合分与 confidence 逐位不变；唯一口径变化是 `data_real_pct` 少了恒 0.7 的通道——均值 >70% 时去掉
+  一个 0.7 项只升不降，全史最低 84.2% ⇒ 不会新触发 80% 压缩线。
+
+### 保留（不是遗漏）
+- 历史说明性注释（`ic_rerun_readiness`/`signal_archive` 审计表只追加不改写；`crowding_detector`/
+  `real_data_sources`/`http_gate`/config 拥挤度权重注释解释的是 v0.45.30 为何删分量）。
+- `tests/test_real_data_sources.py` 两条 `"polymarket_odds_change_24h" not in metrics`——防复活的反向断言。
+- 历史日报、DB 备份、`PHASE*` 计划文档——历史记录，不改。
+- 仓库外 `~/.claude/scripts/alpha-hive-with-whatsapp.sh`（2026-02 的占位模板，含一行「Polymarket 赔率分析中...」，
+  无任何调度引用）——不在本仓，未动。
+
+### 验证
+- 09-22 用真实函数重算数据真实度：96.7% → **97.6%**（最低 96.9%）。
+- ruff 全仓通过；全套 **5275 passed**（排除已知红的 `TestCoverageHorizon`，同 v0.45.314）。
+  测试 ID 逐条对账：减少 47 = 刻意删除 41 + `test_pytestmark_placement` 按测试类参数化的 6 个用例
+  （正是被删的那 6 个类）；新增 3 = Oracle 权重校验。无意外丢失。
 
 ## [0.45.314] — 2026-09-23 — Fixed：网站「数据真实度」把两个**成功**标签 `peer_read`/`quiet` 记 0 分（比 API 挂掉的 `fallback` 0.7 还低），常年白扣约 5.3pp；补登 4 个未分类标签 + AST 全覆盖守卫 + 扫描期观测点
 

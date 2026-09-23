@@ -75,16 +75,17 @@ class TestThesisBreakMonitor:
     def test_l1_trigger_reduces_score(self):
         """Provide metric_data that triggers a Level 1 condition.
 
-        NVDA's 'china_ban_risk' trigger is 'Polymarket 禁令概率 > 60%'.
+        NVDA's 'datacenter_revenue_decline' trigger is '季度环比下降 > 5%'.
         _check_condition requires both '%' and '>' in the trigger string.
-        It parses: split('>')[1].strip().rstrip('%') -> '60'.
-        So passing a value > 60 should trigger it.
+        It parses: split('>')[1].strip().rstrip('%') -> '5'.
+        So passing a value > 5 should trigger it.
+        （v0.45.315 前本条用的是 'china_ban_risk'（Polymarket 禁令概率），已随 Polymarket 删除。）
         """
         monitor = ThesisBreakMonitor("NVDA", 8.0)
-        metric_data = {"china_ban_risk": 70}  # > 60 threshold
+        metric_data = {"datacenter_revenue_decline": 10}  # > 5 threshold
         result = monitor.check_all_conditions(metric_data)
         assert len(result["level_1_warnings"]) == 1
-        assert result["level_1_warnings"][0]["condition_id"] == "china_ban_risk"
+        assert result["level_1_warnings"][0]["condition_id"] == "datacenter_revenue_decline"
         assert result["score_adjustment"] == -0.15
         assert result["final_score"] == pytest.approx(7.85)
         assert result["score_adjusted"] is True
@@ -96,8 +97,8 @@ class TestThesisBreakMonitor:
         The trigger string contains '%' and doesn't contain '>' so it will NOT
         match the simple parser. We need a trigger with '% ... >' pattern.
 
-        Instead, use 'china_ban_risk' from Level 1 whose trigger is
-        'Polymarket 禁令概率 > 60%' (contains % and >) for L1, and for L2
+        Instead, use 'datacenter_revenue_decline' from Level 1 whose trigger is
+        '季度环比下降 > 5%' (contains % and >) for L1, and for L2
         we can't easily trigger with the simple parser since L2 triggers
         don't match the '% ... >' pattern for NVDA.
 
@@ -125,15 +126,18 @@ class TestThesisBreakMonitor:
     def test_multiple_l1_triggers_stack_penalty(self):
         """Triggering multiple L1 conditions should stack the -0.15 penalty.
 
-        NVDA's 'datacenter_revenue_decline' trigger is '季度环比下降 > 5%'
-        (has both '%' and '>'; threshold = 5).
-        NVDA's 'china_ban_risk' trigger is 'Polymarket 禁令概率 > 60%'
-        (has both '%' and '>'; threshold = 60).
+        v0.45.315 删掉 NVDA 的 'china_ban_risk'（Polymarket）后，真实配置里已没有
+        哪只标的有两条可被简单解析器（'%' 且 '>'）触发的 L1 条件 ⇒ 注入合成配置，
+        测的是叠加逻辑本身，与具体标的无关。
         """
         monitor = ThesisBreakMonitor("NVDA", 8.0)
+        monitor.config = {"level_1_warning": {"conditions": [
+            {"id": "cond_a", "metric": "A", "trigger": "季度环比下降 > 5%"},
+            {"id": "cond_b", "metric": "B", "trigger": "同比下降 > 60%"},
+        ]}}
         metric_data = {
-            "datacenter_revenue_decline": 10,  # > 5 threshold
-            "china_ban_risk": 70,              # > 60 threshold
+            "cond_a": 10,   # > 5 threshold
+            "cond_b": 70,   # > 60 threshold
         }
         result = monitor.check_all_conditions(metric_data)
         assert len(result["level_1_warnings"]) == 2

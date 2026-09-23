@@ -905,7 +905,7 @@ def write_weights_to_config(new_weights: dict, dry_run: bool = False) -> bool:
             "signal":    "# ScoutBeeNova: SEC 披露 + 聪明钱 + 拥挤度",
             "catalyst":  "# ChronosBeeHorizon: 催化剂与时间线",
             "sentiment": "# BuzzBeeWhisper: 情绪与叙事",
-            "odds":      "# OracleBeeEcho: 期权 IV(55%) + Polymarket(35%) + 异动(10%)",
+            "odds":      "# OracleBeeEcho: 期权 IV + 异动（v0.45.315 删 Polymarket）",
             "risk_adj":  "# GuardBeeSentinel: 交叉验证 + 风险调整",
         }
         m_old = re.search(r'EVALUATION_WEIGHTS\s*=\s*\{[^}]+\}', text, re.DOTALL)

@@ -23,15 +23,6 @@
           "severity": "HIGH"
         },
         {
-          "id": "china_ban_risk",
-          "metric": "中国芯片禁令",
-          "trigger": "Polymarket 禁令概率 > 60%",
-          "data_source": "Polymarket",
-          "check_frequency": "实时",
-          "current_status": "⚠️ 中等风险（概率 35%）",
-          "severity": "CRITICAL"
-        },
-        {
           "id": "margin_compression",
           "metric": "毛利率",
           "trigger": "季度环比下降 > 200bps",

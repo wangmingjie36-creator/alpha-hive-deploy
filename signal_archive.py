@@ -1209,6 +1209,9 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 09-18（v0.45.314 补登）：Queen 层 data_quality 源分类补登 4 个标签，只动
     # data_real_pct → quality_factor；各蜂自身输出不变（同 v0.45.209）
     "v0.45.314": (),
+    # 09-18（v0.45.315 补登）：删 Polymarket。Oracle 融合分逐位不变，只少了 data_quality
+    # 里恒为 unavailable 的通道 → 仅 Queen 层 data_real_pct 变化（同 v0.45.314）
+    "v0.45.315": (),
 }
 
 
