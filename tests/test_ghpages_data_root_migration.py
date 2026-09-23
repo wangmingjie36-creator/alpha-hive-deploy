@@ -1055,17 +1055,28 @@ class TestApplyCodeShippedFallbackPreconditionSurvivesOptimization:
             "python -O 下守卫失效——回到了 v0.45.312 assert 版本的原始 bug："
             f"stdout={r.stdout!r} stderr={r.stderr[-500:]!r}")
 
+    # v0.45.317 修复本身的最后一个 commit 是 c1aebfe7；它的父提交 61f21d37
+    # 是本次修复前的占位提交，report_deployer.py 在那里仍是 v0.45.312 的裸
+    # assert 版本。**必须钉死这个具体 SHA，不能用 `HEAD`**——首版测试写的是
+    # `git show HEAD:report_deployer.py`，这条前提只在修复提交之前（HEAD 还
+    # 指向父提交时）成立；修复一旦提交、成为新 HEAD，这个断言就永远为假，
+    # 测试永久变红（本条注释本身就是被这个 bug 逮到后改的：main 上实测过，
+    # 提交后立刻用 HEAD 重跑就会失败）。钉 SHA 而不是相对引用，才能让这条
+    # 变异测试在任何时候、任何分支上重跑都还原出同一份历史源码。
+    _OLD_ASSERT_SHA = "61f21d37"
+
     def test_mutation_old_assert_guard_is_silently_stripped_under_dash_O(self):
         """变异检验：换回 v0.45.312 的真实旧代码（`assert files, (...)`），
         证明"-O 下守卫消失"不是臆测——用改动前的真实源码真跑确认转红。"""
         old_source = subprocess.run(
-            ["git", "show", "HEAD:report_deployer.py"],
+            ["git", "show", f"{self._OLD_ASSERT_SHA}:report_deployer.py"],
             cwd=self._REPO_ROOT, capture_output=True, text=True, check=True,
         ).stdout
         assert "assert files, (" in old_source, (
-            "本条变异测试假定 HEAD 上 report_deployer.py 还是 v0.45.312 的裸 "
-            "assert 版本——如果这条断言失败，说明修复已经提交、HEAD 已经是新代码，"
-            "该拿更早的 revision 复现，而不是让这条测试悄悄测不出任何东西")
+            f"本条变异测试假定 {self._OLD_ASSERT_SHA} 上 report_deployer.py 是 "
+            "v0.45.312 的裸 assert 版本——如果这条断言失败，说明这个钉死的 SHA "
+            "选错了或历史被改写，该重新核实是哪个提交引入的 bug，而不是让这条"
+            "测试悄悄测不出任何东西")
         with tempfile.TemporaryDirectory() as tmp:
             shadow = os.path.join(tmp, "report_deployer.py")
             with open(shadow, "w", encoding="utf-8") as f:

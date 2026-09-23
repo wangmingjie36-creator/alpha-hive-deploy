@@ -5,6 +5,33 @@
 
 ---
 
+## [0.45.319] — 2026-09-23 — Fixed：v0.45.317 新增的变异测试用 `HEAD` 取旧代码，修复一合并自己就会永久变红
+
+数据根迁移阶段 5 前置核实时，协调 session 独立重跑 v0.45.317 新增的
+`TestApplyCodeShippedFallbackPreconditionSurvivesOptimization`（不是只读 diff
+就采信），发现第三条变异测试实测在 main 上是红的。
+
+### Fixed
+- `tests/test_ghpages_data_root_migration.py::TestApplyCodeShippedFallbackPreconditionSurvivesOptimization::test_mutation_old_assert_guard_is_silently_stripped_under_dash_O`：
+  用 `git show HEAD:report_deployer.py` 取"v0.45.312 的裸 assert 旧代码"——这个前提
+  只在 v0.45.317 那次修复提交**之前**（HEAD 还指向父提交时）成立；修复一旦提交、
+  成为新 HEAD，`assert "assert files, (" in old_source` 就永远为假，测试永久变红。
+  commit message 里"45 项相关测试全绿"是提交前本地跑的结果，提交后未重新核对。
+  改用钉死的 SHA（`61f21d37`，即 v0.45.317 修复提交 `c1aebfe7` 的父提交/占位提交，
+  那里的 `report_deployer.py` 永远是修复前的版本）取代 `HEAD`，测试结果不再随
+  未来提交变化。
+- 验证：修复前 `-m pytest tests/test_ghpages_data_root_migration.py::TestApplyCodeShippedFallbackPreconditionSurvivesOptimization`
+  实测 1 红 2 绿（复现问题）；修复后 3 绿；同文件全部 24 项测试绿；ruff 全过。
+
+### 教训
+同一个"变异测试拿改动前的真实代码复现"技巧，在这个仓库里已经反复用对过很多次
+（例如本次迁移项目里多轮 gh-pages 回归的验证），但这次第一次踩到一个新坑：拿
+`HEAD` 当"改动前"的引用是活的、会随分支推进而漂移，只有拿**具体 SHA**才是钉死的
+历史快照。写变异测试时若要引用"这次改动之前的代码"，必须钉一个不会变的提交号，
+不能用 `HEAD`/`HEAD^` 这类相对引用——相对引用在写测试当下是对的，合并后就不对了。
+
+---
+
 ## [0.45.318] — 2026-09-23 — docs：更正 v0.45.306 条目——`resolve()` 的必要性归因写错了，实测它在本测试里是防御性冗余而非在修一个真实存在的漏洞
 
 用户要求「二次检查」v0.45.306 时，自己复核出的一处不实表述（不是别人发现的）。
