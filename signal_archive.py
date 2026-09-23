@@ -20,7 +20,8 @@
 设计
 ----
 长表 `signal_archive(date, ticker, signal, value)`：新增信号无需改 schema。
-前瞻收益在分析时从 `predictions` 联表（已有 price_t7/t30），不重复存储。
+前瞻收益在分析时从 `predictions` 联表（终点价 close_t7 / price_t30，见
+`ic_diagnostics.FORWARD_CLOSE_COL`；**不是 price_t7**，那是离场价），不重复存储。
 
 用法
 ----
@@ -1268,38 +1269,85 @@ def generation_boundaries(signals: Iterable[str],
     return out
 
 
+def _forward_close_col(horizon: str) -> str:
+    """前瞻收益的终点价列。唯一真相 `ic_diagnostics.FORWARD_CLOSE_COL`，未登记即抛。"""
+    sys.path.insert(0, str(Path(__file__).parent))
+    import ic_diagnostics as icd
+    if horizon not in icd.FORWARD_CLOSE_COL:
+        # 不猜：按 f"price_{horizon}" 拼列名正是 v0.45.321 修掉的那个 bug
+        raise ValueError(f"horizon={horizon!r} 未在 ic_diagnostics.FORWARD_CLOSE_COL 登记"
+                         f"（已登记：{sorted(icd.FORWARD_CLOSE_COL)}）")
+    return icd.FORWARD_CLOSE_COL[horizon]
+
+
+#: 终点价列里「恰好等于 SL/TP 离场价」的行占 SL/TP 行的比例超过它 ⇒ 告警。
+#: 2026-09-23 快照实测：price_t7 87.6%（540 行）、close_t7 0.2%、price_t30 0% —— 两端相距甚远。
+_TRUNCATION_ALARM = 0.5
+
+
+def _truncation_share(con, end_col: str, checked_col: str) -> Tuple[int, float]:
+    """终点价列的**截断指纹**：SL/TP 行里它有多大比例恰好等于 `exit_price`。
+
+    `load_panel` 用对列只是代码层；这里管数据层 —— 哪天有人把离场价写进 close_t7、
+    或给 t30 也套上路径模拟，列名没变、测试不红，只有这个比例会跳。
+    库里没有 exit_* 列（旧库 / 测试夹具）⇒ (0, 0.0)，无从判断即不告警。
+    """
+    cols = {r[1] for r in con.execute("PRAGMA table_info(predictions)")}
+    if not {"exit_price", "exit_reason"} <= cols:
+        return 0, 0.0
+    n, hit = con.execute(
+        f"SELECT COUNT(*), SUM(ABS({end_col} - exit_price) < 0.01) FROM predictions "
+        f"WHERE {checked_col}=1 AND {end_col} IS NOT NULL AND exit_price IS NOT NULL "
+        f"  AND exit_reason IN ('SL', 'TP')").fetchone()
+    return n, ((hit or 0) / n if n else 0.0)
+
+
 def load_panel(db_path: Optional[Path] = None, horizon: str = "t7",
                min_width: int = 5,
                with_ticker: bool = False,
                target_metric: str = "return") -> Dict[str, Dict[str, List]]:
     """联表取 {signal: {date: [(值, 前瞻收益)]}}。
 
-    前瞻收益用**纯价格变动**（price_{h} / price_at_predict），而非 return_t7 列
-    ——后者是 `_simulate_trade_path` 的路径依赖收益，42.5% 的行被 SL/TP 档位截断，
-    会制造大量并列值破坏 rank-IC 的尾部排序（详见 ic_diagnostics 模块注释）。
+    前瞻收益 = `(终点收盘价 − price_at_predict) / price_at_predict`，终点列查
+    `ic_diagnostics.FORWARD_CLOSE_COL`（t7 → close_t7，t30 → price_t30）。
+
+    ⚠️ v0.45.321 更正：此前这里用 `f"price_{horizon}"`，docstring 称之为「纯价格变动」，
+    与 return_t7 的路径依赖收益相对。**这是 ic_diagnostics 在 v0.45.19 已更正过的同一个误解**：
+    `price_t7` 存的是 `_simulate_trade_path` 的 `exit_price`，触 SL/TP 即被钉在档位上，
+    与 return_t7 一样截断（2026-05 起 100% 等于 exit_price，与 close_t7 相差 >0.01 的行
+    每月 34%~76%）。另有 CRWD 两行 price_at_predict 已按 07-02 的 4:1 拆股复权、price_t7
+    仍是未复权价 ⇒ 旧口径读成 +325% / +340%。v0.45.321 之前的 `--analyze` 结论全部基于它。
 
     ⚠️ 返回的是**整张表**，不按世代切 —— 切片在做聚合的 `analyze()` 里（v0.45.265）。
     自己拿这个面板算跨日统计量的，先过一遍 `generation_boundaries()`。
     """
     db_path = Path(db_path) if db_path else _db_path()   # v0.45.160：调用时求值
-    price_col, checked_col = f"price_{horizon}", f"checked_{horizon}"
+    end_col, checked_col = _forward_close_col(horizon), f"checked_{horizon}"
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
         rets = {}
         for r in con.execute(
-            f"SELECT date, ticker, price_at_predict, {price_col} AS p1 "
-            f"FROM predictions WHERE {checked_col}=1 AND {price_col} IS NOT NULL "
+            f"SELECT date, ticker, price_at_predict, {end_col} AS p1 "
+            f"FROM predictions WHERE {checked_col}=1 AND {end_col} IS NOT NULL "
             f"  AND price_at_predict > 0"
         ):
             rets[(r["ticker"], r["date"][:10])] = (
                 (r["p1"] - r["price_at_predict"]) / r["price_at_predict"] * 100.0)
         if not rets:
             return {}
+        if target_metric == "return":
+            n_sltp, share = _truncation_share(con, end_col, checked_col)
+            if share > _TRUNCATION_ALARM:
+                print(f"⚠️  {end_col}：SL/TP 行里 {share:.0%}（{n_sltp} 行）恰好等于 exit_price"
+                      f" —— 这一列看起来是离场价而不是收盘价，下面的 IC 是对着截断收益算的，"
+                      f"勿据此下结论（见 ic_diagnostics.FORWARD_CLOSE_COL）", file=sys.stderr)
 
         if target_metric == "vol":
             # 换目标：未来 N 日已实现波动。样本集沿用同一批 (ticker, date)，
             # 保证与收益率口径可直接对照。
+            # v0.45.321 核对：波动值取自行情，从未用过 price_t7 的**值**；换终点列只改样本成员
+            # （生产快照：多 8 行 price_t7 为空、close_t7 已有的样本，零减少）。
             tks = sorted({k[0] for k in rets})
             dts = sorted({k[1] for k in rets})
             fwd = 7 if horizon == "t7" else 30
@@ -1422,6 +1470,8 @@ def print_report(rows: List[Dict], floor: Dict, horizon: str,
                  target_metric: str = "return",
                  generations: Optional[Dict] = None) -> None:
     tgt = {"return": "方向收益", "vol": "已实现波动"}.get(target_metric, target_metric)
+    if target_metric == "return":
+        tgt += f"（终点 {_forward_close_col(horizon)}）"
     print("=" * 112)
     print(f"【单信号 IC 档案】horizon={horizon}  目标={tgt}   "
           f"共 {len(rows)} 个信号达到最小样本量")

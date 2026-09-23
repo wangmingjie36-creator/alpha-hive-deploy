@@ -9,7 +9,104 @@
 
 ## [0.45.322] — 2026-09-23 — 占位（进行中：数据根迁移阶段 5——生产数据搬到 ~/alpha-hive-data；今天做仓库内准备，09-26 周六执行搬迁）
 
-## [0.45.321] — 2026-09-23 — 占位（进行中：signal_archive.load_panel 前向收益用了 SL/TP 截断的 price_t7，改为 close_t7 并量化 analyze() 判定变化）
+## [0.45.321] — 2026-09-23 — Fixed：`signal_archive.load_panel()` 的前瞻收益一直对着 SL/TP 截断的 `price_t7`（离场价）算——ic_diagnostics 在 v0.45.19 更正过的同一误解没传到这里；改用 `close_t7`，`--analyze` 的 🟢 候选 5 → 8（`price.momentum_5d` / `catalyst.count` 掉出）
+
+起草 `experiments/dim_ic_preregistration.md`（v0.45.320）时发现，当时 memory / CHANGELOG /
+测试都没记。`--analyze` 是就绪度闸（`ic_rerun_readiness`）在样本攒够后推荐的下一步，
+也是 `signal_ic_sweep.py` / `final_score_dilution.py` 护栏里「当前世代请用」指向的工具。
+
+### 核实（2026-09-23 生产库 `sqlite3.backup()` 快照，只读）
+- `load_panel` 用 `price_col = f"price_{horizon}"`，docstring 称之为「纯价格变动」、与路径依赖的
+  `return_t7` 相对。`price_t7` 实为 `backtester._simulate_trade_path` 的 `exit_price`：
+  2026-05 起 **100%** 等于 `exit_price`；`|price_t7 − close_t7| > 0.01` 的行
+  05 月 120/225、06 月 80/105、07 月 32/71、08 月 116/296、09 月 94/240（与发现时报的数逐位一致）。
+  `close_t7` 对每一条 `checked_t7=1` 的行都有值。
+- 差异的构成：SL/TP 行 479 条（主体）；另有 68 条 `T7_CLOSE` 行也不同——多数是盘中价 vs 收盘
+  （如 QCOM 05-20 228.15 vs 228.99），外加 **CRWD 两行拆股单位错配**：`close_correction` 已把
+  `price_at_predict` 按 07-02 的 4:1 拆股复权（448.13 → 112.03），`price_t7` 仍是未复权 476.53 ⇒
+  旧口径读成 **+325% / +340%**，`close_t7` 口径 +6.3%。即那次入场价修正让旧目标在这两行上**更错**了。
+- 截断指纹（SL/TP 行里终点价恰好等于 `exit_price` 的比例）：`price_t7` 87.6% / `close_t7` 0.2% /
+  `price_t30` 0%。
+- **t30 不是同一个问题**：`backtester` 的路径模拟只包在 t7 分支里，T+1/T+30 走「沿用旧逻辑」分支，
+  用 `_get_price_at_date`——与 `close_t7` 同一个取价函数（v16.0 / 2026-04-15 引入路径模拟时即如此）。
+  实测 `price_t30 == exit_price` 0/837。库里没有 `close_t30` 列，也不需要。
+
+### Fixed
+- `signal_archive.load_panel()`：终点价改查 `ic_diagnostics.FORWARD_CLOSE_COL`（t7 → `close_t7`，
+  t30 → `price_t30`）；未登记的 horizon **抛 `ValueError`**，不再按 `f"price_{h}"` 拼列名。
+  docstring 改写，注明旧口径与 v0.45.321 之前 `--analyze` 结论的来历。
+- 模块 docstring「已有 price_t7/t30」同步更正。
+- `vol` 目标核对：波动值取自行情，**从未用过 `price_t7` 的值**；换列只改样本成员
+  （快照上多 8 行 `price_t7` 为空、`close_t7` 已有，零减少），代码处加注。
+
+### Added
+- `signal_archive._truncation_share()` + `load_panel` 里的**数据层观测点**：终点列在 SL/TP 行里
+  >50% 恰好等于 `exit_price` 就向 stderr 告警。代码层的测试管「用哪一列」，这里管「那一列里装的是什么」
+  ——哪天有人把离场价写进 `close_t7`、或给 t30 也套路径模拟，列名不变、测试不红，只有它会跳。
+  库里没有 `exit_*` 列时不判（旧库 / 夹具）。生产快照上 t7/t30 均静默。
+- `print_report` 表头点名终点列（`目标=方向收益（终点 close_t7）`）——不是静默选择。
+- `tests/test_signal_archive_close_target.py`（9 条）：核心夹具让两列给出**相反的 IC 符号**
+  （信号高的票先跌穿止损再收涨、信号低的先冲过止盈再收跌），附夹具自检（两列 IC 分别 >+0.5 / <−0.5）、
+  单行取值、`price_t7` 为空仍入样本、t30 无 `close_t30` 列、未登记 horizon 抛错、截断指纹告警 + 负对照。
+
+### Changed
+- `ic_diagnostics`：新增 `FORWARD_CLOSE_COL` 作为终点列唯一真相（与 `signal_archive` 共用），
+  `load_daily_ic` 改读它——**数值逐位不变**（快照上 `--json` 两 horizon 全部比对相同）。
+- `ic_diagnostics.main` 的 t30 提示**更正**：旧文案「回退 price 口径（**仍含 SL/TP 截断**，勿据此出新结论）」
+  后半句是错的，会让人丢掉有效的 t30 结果；改为点名 `price_t30` 并说明其为收盘价。
+  `--target` 帮助文案（仍写着 v0.45.19 前的「price=默认，推荐」）与报告 meta 标签（t7 上写着
+  `price_t7` 而代码实际用 `close_t7`）一并更正。
+- `tests/test_signal_archive.py::TestAnalysisPanel`：原 `test_panel_uses_pure_price_return` 断言的
+  正是 bug 本身（从 `price_t7` 算出 10%），改名并改为断言 `close_t7`；其余 4 处夹具与
+  `test_signal_archive_generations._build_db` 的 `price_t7` 列换成 `close_t7`（行为不变）。
+
+### 影响量化（同一快照，`analyze()` 默认参数，**只作记录，不据此改任何权重**）
+t7：36 个信号达最小样本量，28 个至少一项（判定 / 通过口径数 / 稳定性 / 性质）变化。
+噪音地板 0.0646 → 0.0573（×200）；×2000 下 0.0708 → 0.0670——前者的差大半是 200 次 p95 的
+蒙特卡洛噪音，真实位移约 5%（收益并列值 27.5% → 2.6%，天数不变 84）。
+判定变化在 ×200 与 ×2000 下**完全一致**（`short_squeeze_risk` 的旧判定除外，贴地板）：
+
+| 信号 | 旧 → 新 | 日度 IC 旧 → 新 | 通过 |
+|---|---|---|---|
+| `price.momentum_5d` | 🟢 → ⚪ | −0.127 → −0.020 | 3 → 1 |
+| `catalyst.count` | 🟢 → ⚪ | +0.131 → +0.075 | 3 → 2 |
+| `catalyst.nearest_days` | 🟡 → ⚪ | −0.116 → −0.058 | 2 → 0 |
+| `insider.distinct_buyers` | 🟡 → 🟢 | −0.132 → −0.148 | 1 → 3 |
+| `insider.dollar_bought` | 🟡 → 🟢 | −0.131 → −0.146 | 1 → 3 |
+| `insider.filings` | 🟡 → 🟢 | +0.143 → +0.175 | 1 → 3 |
+| `options.gamma_exposure` | 🟡 → 🟢 | +0.130 → +0.155 | 2 → 3 |
+| `options.iv_percentile` | 🟡 → 🟢 | +0.130 → +0.144 | 2 → 3 |
+| `insider.dollar_sold` | ⚪ → 🟡 | +0.057 → +0.096 | 0 → 1 |
+| `sentiment.pct` | ⚪ → 🟡 | +0.034 → +0.072 | 0 → 2 |
+
+🟢 旧：reddit_signal / catalyst.count / market_cap / total_oi / momentum_5d；
+新：reddit_signal / market_cap / total_oi / distinct_buyers / dollar_bought / filings / gamma_exposure / iv_percentile。
+稳定性也有翻动（如 `gamma_exposure` 翻转 → 衰减、`market_cap` 衰减 → 稳定、`sentiment.pct` 均噪音 → 稳定）。
+⚠️ 读法：新 🟢 里 7/8 是「选股标签」或「混合」性质、多个稳定性为翻转/衰减；🟢 判据（|IC|>地板 且 ≥3/4）
+**没有跨 36 个信号的多重检验校正**。这些是「不再对着截断收益算」之后的探索性档案，不是新证据。
+`price.momentum_5d` 的 −0.127 几乎全是截断制造的（干净口径 −0.020，与 tradeable-signal 记的 +0.008 同在零附近）。
+
+t30：26 个信号，结果**逐字节相同**（对照组：t30 本来就用收盘价）。
+
+### 发现未处理
+- `experiments/ml_expected_return_replay.py` 同一误解（「不用 return_t7，它被截断」然后读 `price_t7`），
+  而它是就绪度闸 `next_step` 的**前半句**——闸推荐的两步此前都对着截断收益。需重跑并更新
+  `experiments/ml_expected_return_report.md`，另开任务。
+- `analyze()` 默认 `draws=200` 的 p95 地板在本快照上比 ×2000 低 9%~15%（0.0646 vs 0.0708；
+  0.0573 vs 0.0670），贴地板的 🟡/⚪ 判定受蒙特卡洛分辨率左右，另开任务。
+- 与 v0.45.320 的预注册协议不冲突：协议明文禁用 `price_t7`、执行器不是 `analyze()`。
+  `experiments/dim_ic_preregistration.md` 第 52、134 行「`signal_archive` 目前用 `price_t7`（另案处理/另案修）」
+  自本版起过时——**有意不改**：预注册文档写死后不动，那两句是带「目前」的现状描述，协议规则本身不受影响；
+  `analyze()` 修好后仍不是该协议的执行器。
+
+### 教训
+v0.45.19（08-25）更正了 `ic_diagnostics` 的列，却没去找**别的**读 `price_t7` 当收盘价的消费者——
+`signal_archive`（07-30 建成起就按 `f"price_{h}"` 拼列名，本次修）和 `ml_expected_return_replay`（未修）
+就这样带着「纯价格变动」的旧说法在更正之后又活了四周，docstring 反过来替 bug 背书。**更正一列的语义时，要 grep 这一列的全部读者，不是只修眼前那个。**
+本次把列选择收成一张表、两处共用，并给数据层加了指纹观测点：将来谁再拼列名，要么过不了表，要么指纹会跳。
+
+---
+
 
 ## [0.45.320] — 2026-09-23 — Added：维度 IC 证据协议预注册（P1）——在当前世代数据被看到之前，写死估计量 / 假设 / 检视点 / 动作表
 

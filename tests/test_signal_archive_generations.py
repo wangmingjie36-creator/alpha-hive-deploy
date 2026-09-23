@@ -54,7 +54,7 @@ def _build_db(tmp_path):
     con = sqlite3.connect(db)
     con.execute("""CREATE TABLE predictions (
         id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, ticker TEXT,
-        price_at_predict REAL, price_t7 REAL, checked_t7 INTEGER DEFAULT 0)""")
+        price_at_predict REAL, close_t7 REAL, checked_t7 INTEGER DEFAULT 0)""")
     con.commit()
     con.close()
     sa.ensure_schema(db)
@@ -81,7 +81,7 @@ def _build_db(tmp_path):
                 for s in pre_only:
                     arch.append((d, tk, s, x))
     with sqlite3.connect(db) as c:
-        c.executemany("INSERT INTO predictions (date,ticker,price_at_predict,price_t7,checked_t7)"
+        c.executemany("INSERT INTO predictions (date,ticker,price_at_predict,close_t7,checked_t7)"
                       " VALUES (?,?,?,?,?)", preds)
         c.executemany(f"INSERT INTO {sa.TABLE} (date,ticker,signal,value) VALUES (?,?,?,?)", arch)
     return db

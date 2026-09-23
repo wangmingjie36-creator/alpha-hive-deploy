@@ -112,6 +112,20 @@ HORIZONS = {
 # `price` 保留仅为复现历史报告，**不要用它出新结论**。
 TARGETS = ("close", "price", "path")
 
+#: 「未截断收盘价」口径下每个 horizon 的**终点价列**（v0.45.321 抽成唯一真相，
+#: 本模块 `load_daily_ic` 与 `signal_archive.load_panel` 共用）。
+#:
+#: · t7 → `close_t7`：见上一段。`price_t7` 是离场价，**不能**按 `f"price_{h}"` 拼列名——
+#:   `signal_archive.load_panel` 正是这么拼的，v0.45.19 更正了这里却没更正那里，
+#:   它的 `--analyze` 一直对着截断收益算 IC 直到 v0.45.321。
+#: · t30 → `price_t30`：这一列**本来就是收盘价**，不是回退。`backtester` 的 SL/TP
+#:   路径模拟只包在 t7 分支里；T+1 / T+30 走「沿用旧逻辑」分支，用
+#:   `_get_price_at_date`（与 close_t7 同一个取价函数）。生产库实测（2026-09-23 快照）
+#:   price_t30 == exit_price 0/837，SL/TP 行 0/360。没有 `close_t30` 列，也不需要。
+#:
+#: ⚠️ 新增 horizon 必须在这里显式登记，并先核对那一列存的是收盘价还是离场价。
+FORWARD_CLOSE_COL = {"t7": "close_t7", "t30": "price_t30"}
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # 统计工具
@@ -217,8 +231,8 @@ def load_daily_ic(db_path: Path, target_col: str, checked_col: str,
     con.row_factory = sqlite3.Row
     try:
         if target == "close":
-            # close_t7 目前只对 t7 回填；其它 horizon 回退 price 并在 main 里告警
-            _cc = "close_t7" if horizon == "t7" else price_col
+            # 终点价列见 FORWARD_CLOSE_COL（t30 的 price_t30 本身就是收盘价，不是回退）
+            _cc = FORWARD_CLOSE_COL[horizon]
             rows = con.execute(
                 f"SELECT date, dimension_scores, price_at_predict, {_cc} AS p_end "
                 f"FROM predictions WHERE {checked_col}=1 AND {_cc} IS NOT NULL "
@@ -634,8 +648,9 @@ def main() -> int:
     # v0.45.160：argparse 的 default 在 import 期求值，不能塞冻结值
     ap.add_argument("--db", type=str, default=None, help="pheromone.db 路径（默认 PATHS.db）")
     ap.add_argument("--target", choices=TARGETS, default="close",
-                    help="目标变量口径：price=纯价格变动（默认，推荐）；"
-                         "path=return_t7 列（含 SL/TP 截断，42.5%% 样本被钉在出场档位）")
+                    help="目标变量口径：close=未截断收盘价（默认，推荐；列见 FORWARD_CLOSE_COL）；"
+                         "price=price_{h} 列（t7 上是 SL/TP 离场价，仅复现历史报告）；"
+                         "path=return_{h} 列（路径依赖，含 SL/TP 截断）")
     ap.add_argument("--benchmark", action="store_true",
                     help="对照基准套件：噪音地板 + 经典因子 + 系统各维度（需联网拉行情）")
     ap.add_argument("--draws", type=int, default=RANDOM_DRAWS,
@@ -655,9 +670,10 @@ def main() -> int:
     for h in horizons:
         target, checked, lag, period = HORIZONS[h]
         if args.target == "close" and h != "t7":
-            # close_t7 只对 t7 存在；静默回退会让读者以为 t30 也走了干净口径
-            print(f"⚠️  {h}: close_t7 仅回填了 t7，本 horizon 回退 price 口径"
-                  f"（**仍含 SL/TP 截断**，勿据此出新结论）")
+            # v0.45.321 更正：旧文案说这里「回退 price 口径、仍含 SL/TP 截断」——前半对、
+            # 后半错。price_t30 本来就是收盘价（见 FORWARD_CLOSE_COL），照旧点名列，但不再误报截断
+            print(f"ℹ️  {h}: 终点价用 {FORWARD_CLOSE_COL[h]}（无 close_{h} 列；"
+                  f"该列即 T+30 收盘价，SL/TP 路径模拟只作用于 t7，不含截断）")
         ic, n_rows, widths = load_daily_ic(db, target, checked, args.min_width,
                                            target=args.target, horizon=h)
         if not widths:
@@ -665,8 +681,9 @@ def main() -> int:
             continue
         res = {dim: diagnose(ic[dim], lag, period) for dim in DIMS}
         res = {k: v for k, v in res.items() if v}
-        label = (f"price_{h} 相对 price_at_predict（纯价格变动）"
-                 if args.target in ("close", "price") else f"{target}（路径依赖，含 SL/TP 截断）")
+        label = {"close": f"{FORWARD_CLOSE_COL[h]} 相对 price_at_predict（未截断收盘价）",
+                 "price": f"price_{h} 相对 price_at_predict（⚠️ t7 为 SL/TP 离场价，仅复现历史）",
+                 }.get(args.target, f"{target}（路径依赖，含 SL/TP 截断）")
         meta = {
             "target": label, "target_mode": args.target,
             "rows": n_rows, "n_days": len(widths),
