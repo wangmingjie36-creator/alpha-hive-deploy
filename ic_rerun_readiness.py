@@ -803,6 +803,27 @@ def fg_exposure_gate_forward_status(today: Optional[str] = None) -> Dict:
                 "line": f"⚠️ F&G 敞口门前瞻检验无法判定：{type(e).__name__}: {e}"}
 
 
+def dim_ic_forward_status(db: Path, today: Optional[str] = None) -> Dict:
+    """顺带承载「维度 IC 证据协议」（v0.45.320 预注册 / v0.45.325 执行器）的进度——同上两条，
+    到期条件是数据条件（H1 攒够 26 / 52 个已结算合格周），不另起定时任务。
+
+    ⚠️ 失败**不改变本工具的判定与退出码**，渲染成可见的一行，不吞。
+    `db` 必传：协议的数据跟着 `--db` 走（同 `resonance_forward_status`）。
+    检视点之前返回值里没有效应量——盲化在执行器的数据结构上，这里只转交 `status` 与那一行。
+    """
+    try:
+        import importlib.util
+        path = ALPHAHIVE_DIR / "experiments" / "dim_ic_forward_test.py"  # 代码锚点
+        spec = importlib.util.spec_from_file_location("dim_ic_forward_test", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fres = mod.run(db_path=str(db), today=today)
+        return {"status": fres.get("status"), "line": mod.status_line(fres)}
+    except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
+        return {"status": "cannot_judge",
+                "line": f"⚠️ 维度 IC 协议无法判定：{type(e).__name__}: {e}"}
+
+
 _BOUNDARY_VERDICT_TEXT = {
     "matches": "✅ 与归档印记一致",
     "boundary_too_early": "🚨 边界写早了 —— 边界至印记之间的样本是旧口径，会被混算，请追加一条更正",
@@ -839,6 +860,8 @@ def main() -> int:
     res["resonance_forward_test"] = fwd
     fg_fwd = fg_exposure_gate_forward_status(today=args.today)
     res["fg_exposure_gate_forward_test"] = fg_fwd
+    dim_fwd = dim_ic_forward_status(db, today=args.today)
+    res["dim_ic_forward_test"] = dim_fwd
 
     if args.out:
         try:
@@ -852,8 +875,9 @@ def main() -> int:
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0 if res["ready"] else 1
     if args.quiet:
-        # 同一行：周度任务的约定是「把那一行摘要原样写进周报」，另起一行可能被漏抄
-        print(summary_line(res) + "｜" + fwd["line"] + "｜" + fg_fwd["line"])
+        # 同一行：周度任务的约定是「把那一行摘要原样写进周报」，另起一行可能被漏抄。
+        # ⚠️ 段的**顺序**是契约：周度任务 SKILL.md 按「第三段 = F&G」解析。新段只许追加在末尾。
+        print(summary_line(res) + "｜" + fwd["line"] + "｜" + fg_fwd["line"] + "｜" + dim_fwd["line"])
         return 0 if res["ready"] else 1
 
     c = res["cohort"]
@@ -890,6 +914,7 @@ def main() -> int:
     print(summary_line(res))
     print(fwd["line"])
     print(fg_fwd["line"])
+    print(dim_fwd["line"])
     if res["ready"]:
         print()
         print("  该跑:")
