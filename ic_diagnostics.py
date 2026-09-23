@@ -410,30 +410,104 @@ RANDOM_DRAWS = 200          # 噪音地板的重采样次数
 _PRICE_CACHE: Dict = {}
 
 
+def _close_panel(yf, tickers: List[str], start: str, end: str):
+    """一次 `yf.download` → 收盘价面板（列 = ticker）。
+
+    多票时 `["Close"]` 本就是「列 = ticker」；单票在旧版 yfinance 上是 Series、新版是单列
+    DataFrame（memory `alpha-hive-yfinance-multiindex`）—— 重试路径逐只下载两种都会遇到，
+    拍成同一形状。
+    """
+    px = yf.download(list(tickers), start=start, end=end,
+                     progress=False, auto_adjust=True)["Close"]
+    if not hasattr(px, "columns"):
+        px = px.to_frame(name=tickers[0])
+    return px
+
+
+def missing_tickers(px, tickers: List[str]) -> List[str]:
+    """请求了、但面板里一个有效收盘价都没有的标的（缺列，或整列 NaN）。
+
+    yfinance 批量下载的部分失败两种形状都有：失败的票要么整列 NaN，要么根本没有列。
+    只判「列在不在」会把整列 NaN 的票当成拿到了。
+    """
+    cols = set(px.columns) if px is not None else set()
+    return sorted(t for t in set(tickers)
+                  if t not in cols or not px[t].notna().any())
+
+
 def _load_prices(tickers: List[str], start: str, end: str):
-    """拉取收盘价（yfinance）。失败返回 None —— 基准降级而非整个工具崩掉。"""
+    """拉取收盘价（yfinance）。整批失败返回 None —— 基准降级而非整个工具崩掉。
+
+    v0.45.332：批量下载的**部分**失败不抛异常。2026-09-23 连跑 5 次，4 次各随机丢 1–2 只
+    （AVGO+RKLB / T+MSTR / CVX / ADBE），唯一痕迹是 yfinance 自己的一行 stderr
+    `N Failed download(s)`；旧实现只在异常时降级 ⇒ 残缺面板照常返回，`--benchmark` 的
+    经典因子行少算几只票、表上看不出来（20日动量 IC 0.0955–0.1142 随丢哪只而变）。
+    现在：缺的票逐只重试一轮（实测一轮通常补齐）；仍缺的写 stderr 点名。下游要看覆盖率就对
+    返回的面板调 `missing_tickers` —— 覆盖率从数据本身读，不另存一份（缓存命中时也成立）。
+
+    **为什么不接 Twelve Data 兜底**（`close_correction` v0.45.257 接了）：那边要的是官方
+    **原始**收盘，与数据源无关；这里是 `auto_adjust=True` 的**复权**价，而
+    `twelve_data._fetch_rows` 不传 `adjust`，其默认复权口径未核实（待验证）。同一个横截面里
+    混两个源，每只票的因子值就取决于它碰巧由谁供数 —— 正是本次要消灭的「随丢哪只而变」。
+    缺口改为如实报告，不用别的口径填。
+
+    一只都没拿到（空表）按整批失败处理，不逐只重试：v0.45.257 实测的 52/52 限流就是这个
+    形状（不抛、返回空），逐只重试只会往同一个限流里再撞 52 次。
+    """
     key = (tuple(sorted(tickers)), start, end)
     if key in _PRICE_CACHE:
         return _PRICE_CACHE[key]
+    want = sorted(set(tickers))
     try:
         import warnings
         warnings.filterwarnings("ignore")
         import yfinance as yf
-        px = yf.download(list(tickers), start=start, end=end,
-                         progress=False, auto_adjust=True)["Close"]
-        _PRICE_CACHE[key] = px
-        return px
+        px = _close_panel(yf, want, start, end)
     except Exception as e:  # noqa: BLE001 - 基准是可选功能，任何失败都降级
         print(f"⚠️  行情拉取失败，价格类基准跳过：{e}", file=sys.stderr)
         return None
 
+    missing = missing_tickers(px, want)
+    if len(missing) == len(want):
+        print(f"⚠️  行情批量下载 0/{len(want)} 只有数据（多半是整批限流），价格类基准跳过",
+              file=sys.stderr)
+        return None
+    if missing:
+        import pandas as pd
+        recovered = []
+        for t in missing:
+            try:
+                one = _close_panel(yf, [t], start, end)
+            except Exception:  # noqa: BLE001 - 单只重试失败 = 该票仍缺，下面照实报告
+                continue
+            if t in one.columns and one[t].notna().any():
+                px = pd.concat([px.drop(columns=[t], errors="ignore"), one[[t]]],
+                               axis=1).sort_index()
+                recovered.append(t)
+        still = [t for t in missing if t not in recovered]
+        if still:
+            print(f"⚠️  行情缺 {len(still)}/{len(want)} 只（批量下载漏掉、逐只重试 1 轮仍无数据）："
+                  f"{', '.join(still)} —— 下游只在其余 {len(want) - len(still)} 只上计算",
+                  file=sys.stderr)
+        else:
+            print(f"ℹ️  行情批量下载漏了 {len(missing)}/{len(want)} 只"
+                  f"（{', '.join(missing)}），逐只重试已补齐", file=sys.stderr)
+    _PRICE_CACHE[key] = px
+    return px
+
 
 def build_benchmark_panel(db_path: Path, target_col: str, checked_col: str,
                           horizon: str, min_width: int = 5,
-                          target: str = "close") -> Dict[str, Dict]:
-    """构造 {因子名: {date: [(值, 前瞻收益), ...]}} 面板。
+                          target: str = "close") -> Tuple[Dict[str, Dict], Dict]:
+    """构造 ({因子名: {date: [(值, 前瞻收益), ...]}} 面板, 经典因子行情覆盖率)。
 
     前瞻收益口径与 `load_daily_ic` 同源（`forward_return_sql`），`target` 语义相同。
+
+    v0.45.332：第二个返回值是经典因子（📈📉🌪）的覆盖率 —— `status` ok / partial /
+    unavailable、`n_priced`/`n_tickers`、`missing`、`n_factor_records`/`n_records`。
+    此前行情缺票时这三行只在其余标的上算、与综合分不是同一样本，输出里无从得知
+    （见 `_load_prices`）。**返回形状有意改成二元组**：旧调用方直接拿它当面板用会当场报错，
+    而不是静默丢掉覆盖率。
 
     ⚠️ v0.45.328 更正：此前这里写死 `f"price_{horizon}"`、不读 `target_col`、不收 `target`
     ⇒ t7 的 `--benchmark`（综合分 / 5 维 / 经典因子 / 噪音地板）全部对着 SL/TP 离场价算，
@@ -469,12 +543,13 @@ def build_benchmark_panel(db_path: Path, target_col: str, checked_col: str,
             "ret": ret,
         })
     if not recs:
-        return {}
+        return {}, {}
 
     # 价格类基准（可选，失败则只保留系统自身）
     tickers = sorted({r["ticker"] for r in recs})
     dates = sorted({r["date"] for r in recs})
     px = _load_prices(tickers, "2025-11-01", dates[-1])
+    missing = missing_tickers(px, tickers)
     mom20 = mom5 = vol20 = None
     if px is not None:
         try:
@@ -514,7 +589,37 @@ def build_benchmark_panel(db_path: Path, target_col: str, checked_col: str,
     out = {}
     for name, by_d in panel.items():
         out[name] = {d: v for d, v in by_d.items() if len(v) >= min_width}
-    return out
+
+    # 记录数也要比：缺票之外，`len(s) < 26` 等过滤同样会让经典因子少算一截
+    n_factor = len(mom20) if mom20 is not None else 0
+    if px is None or mom20 is None:
+        status = "unavailable"
+    elif missing or n_factor < len(recs):
+        status = "partial"
+    else:
+        status = "ok"
+    coverage = {
+        "status": status,
+        "n_tickers": len(tickers), "n_priced": len(tickers) - len(missing),
+        "missing": missing,
+        "n_records": len(recs), "n_factor_records": n_factor,
+    }
+    return out, coverage
+
+
+def format_price_coverage(cov: Dict) -> str:
+    """经典因子覆盖率的一行说明（`--benchmark` 表头用）。"""
+    if not cov:
+        return ""
+    if cov["status"] == "unavailable":
+        return "⚠️ 行情不可用 —— 经典因子（📈📉🌪）三行缺席，下表只有系统自身与随机"
+    frac = (f"{cov['n_priced']}/{cov['n_tickers']} 只"
+            f"（记录 {cov['n_factor_records']}/{cov['n_records']}）")
+    if cov["status"] == "ok":
+        return f"经典因子行情覆盖 {frac} ✅"
+    miss = f"，缺 {', '.join(cov['missing'])}" if cov["missing"] else ""
+    return (f"⚠️ 经典因子行情覆盖 {frac}{miss} —— 📈📉🌪 三行与综合分**不是同一样本**，"
+            f"两者的比较打折扣")
 
 
 def _ic_series_from_pairs(by_day: Dict[str, List]) -> Dict[str, float]:
@@ -590,7 +695,8 @@ def noise_floor(panel: Dict[str, Dict], lag: int, period: str,
 
 
 def print_benchmark(panel: Dict[str, Dict], lag: int, period: str,
-                    floor: Dict, target_label: Optional[str] = None) -> None:
+                    floor: Dict, target_label: Optional[str] = None,
+                    coverage: Optional[Dict] = None) -> None:
     rows = []
     for name, by_day in panel.items():
         s = _ic_series_from_pairs(by_day)
@@ -608,6 +714,9 @@ def print_benchmark(panel: Dict[str, Dict], lag: int, period: str,
     if target_label:
         # v0.45.328：点名终点列 —— 此前基准表静默用 price_t7，与上方维度表不是同一口径
         print(f"  目标={target_label}（与上方维度表同一口径）")
+    if coverage:
+        # v0.45.332：此前行情缺票时经典因子行静默少算几只，表上看不出来
+        print(f"  {format_price_coverage(coverage)}")
     if floor:
         print(f"  🎯 噪音地板（随机排序 ×{floor['n_draws']} 次）："
               f"|日度IC| 中位 {floor['ic_p50']:.3f}、**95分位 {floor['ic_p95']:.3f}**"
@@ -630,9 +739,13 @@ def print_benchmark(panel: Dict[str, Dict], lag: int, period: str,
                    key=lambda r: abs(r["daily_ic"]), default=None)
     if sysrow and best_ext:
         better = abs(sysrow["daily_ic"]) > abs(best_ext["daily_ic"])
+        caveat = ""
+        if coverage and coverage.get("status") == "partial":
+            caveat = (f"（⚠️ 经典因子只覆盖 {coverage['n_factor_records']}/"
+                      f"{coverage['n_records']} 条记录，不是同一样本）")
         print(f"  判定：综合分 |IC|={abs(sysrow['daily_ic']):.4f} vs "
               f"最佳经典因子 |IC|={abs(best_ext['daily_ic']):.4f} → "
-              f"{'系统占优' if better else '⚠️ 系统未能超过经典因子'}")
+              f"{'系统占优' if better else '⚠️ 系统未能超过经典因子'}{caveat}")
     if sysrow and math.isfinite(thr) and abs(sysrow["daily_ic"]) <= thr:
         print("  ⚠️ 综合分未超出噪音地板 —— 当前证据不支持任何基于它的选股决策")
 
@@ -773,12 +886,13 @@ def main() -> int:
                 print_scoreboard(res)
 
         if args.benchmark:
-            panel = build_benchmark_panel(db, target, checked, h, args.min_width,
-                                          target=args.target)
+            panel, coverage = build_benchmark_panel(db, target, checked, h, args.min_width,
+                                                    target=args.target)
             if panel:
                 floor = noise_floor(panel, lag, period, draws=args.draws)
                 out[h]["benchmark"] = {
                     "target_mode": args.target, "end_col": meta["end_col"],
+                    "price_coverage": coverage,
                     "noise_floor": floor,
                     "factors": {
                         n: diagnose(_ic_series_from_pairs(bd), lag, period)
@@ -787,7 +901,8 @@ def main() -> int:
                     },
                 }
                 if not args.json:
-                    print_benchmark(panel, lag, period, floor, target_label=label)
+                    print_benchmark(panel, lag, period, floor, target_label=label,
+                                    coverage=coverage)
 
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2, default=str))

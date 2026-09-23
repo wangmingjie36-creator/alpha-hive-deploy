@@ -118,7 +118,8 @@ def _mean_ic(by_day) -> float:
 
 
 def _panel(db, **kw):
-    return icd.build_benchmark_panel(db, "return_t7", "checked_t7", "t7", **kw)
+    panel, _cov = icd.build_benchmark_panel(db, "return_t7", "checked_t7", "t7", **kw)
+    return panel
 
 
 class TestFixtureDiscriminates:
@@ -164,8 +165,8 @@ class TestBenchmarkUsesClose:
     def test_path_reads_the_target_col_it_is_given(self, tmp_path, offline):
         """旧实现从不读 `target_col` 参数 —— 传什么都一样。"""
         db = _one_row_db(tmp_path, return_t7=9.945, return_alt=-3.0, close_t7=105.0)
-        panel = icd.build_benchmark_panel(db, "return_alt", "checked_t7", "t7",
-                                          min_width=1, target="path")
+        panel, _ = icd.build_benchmark_panel(db, "return_alt", "checked_t7", "t7",
+                                             min_width=1, target="path")
         assert panel[SYS]["2026-06-01"][0][1] == pytest.approx(-3.0)
 
     def test_rows_without_price_t7_are_kept(self, tmp_path, offline):
@@ -188,7 +189,7 @@ class TestBenchmarkUsesClose:
                 price_at_predict REAL, price_t30 REAL, return_t30 REAL, checked_t30 INTEGER)""")
             c.execute("INSERT INTO predictions VALUES ('2026-06-01','A',1.0,NULL,100.0,120.0,"
                       "7.0,1)")
-        panel = icd.build_benchmark_panel(db, "return_t30", "checked_t30", "t30", min_width=1)
+        panel, _ = icd.build_benchmark_panel(db, "return_t30", "checked_t30", "t30", min_width=1)
         assert panel[SYS]["2026-06-01"][0][1] == pytest.approx(20.0)
 
     def test_unregistered_horizon_raises_instead_of_guessing(self, tmp_path):

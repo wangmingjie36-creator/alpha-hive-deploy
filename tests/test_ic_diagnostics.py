@@ -421,10 +421,12 @@ class TestBenchmarkSuite:
         con.commit()
         con.close()
 
-        panel = icd.build_benchmark_panel(db, "return_t7", "checked_t7", "t7")
+        panel, cov = icd.build_benchmark_panel(db, "return_t7", "checked_t7", "t7")
         assert "🐝 综合分 final_score" in panel, "系统自身基准必须始终可用"
         assert not any(k.startswith("📈") for k in panel), \
             "行情不可用时不应出现价格类因子"
+        # v0.45.332：因子行缺席这件事本身要能从输出看出来
+        assert cov["status"] == "unavailable"
 
 
 class TestNoiseFloorBaseKey:
