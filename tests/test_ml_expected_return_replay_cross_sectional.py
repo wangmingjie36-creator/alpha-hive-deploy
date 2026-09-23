@@ -250,9 +250,12 @@ class TestSameAsCanonical:
         fsd = _load("final_score_dilution", "experiments/final_score_dilution.py")
         assert fsd.MIN_WIDTH == rep.MIN_WIDTH
         rows = _sign_flip_rows()
-        by_day = rep.group_by_day([(d, tk, m, c, r) for d, tk, m, c, r in rows])
-        fsd_by_day = {d: [{"mom": m, "crd": c, "ret": r} for m, c, r in recs]
-                      for d, recs in by_day.items()}
+        by_day = rep.group_by_day(rows)
+        # 参照侧直接从原始行分组，**不**经过 rep.group_by_day——共用被测代码的中间产物，
+        # 那段代码里的错（如按周而不是按日分组）两边一起吃，同源断言就看不见。
+        fsd_by_day = {}
+        for d, _tk, m, c, r in rows:
+            fsd_by_day.setdefault(d, []).append({"mom": m, "crd": c, "ret": r})
         for col, key in ((rep.MOM, "mom"), (rep.CRD, "crd")):
             ours = rep.weekly_series(rep.daily_cross_sectional_ic(by_day, col))
             theirs = fsd.weekly_ic(fsd_by_day, lambda r, _k=key: r[_k])
