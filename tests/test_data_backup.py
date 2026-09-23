@@ -216,6 +216,41 @@ class TestExportRestoreRoundTrip:
             assert d in manifest["state_dirs_skipped"]
 
 
+def _git_repo_with_commit(path: Path) -> str:
+    path.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "x"]):
+        subprocess.run(["git", "-C", str(path), *args], check=True, env=env, capture_output=True)
+    return subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+
+
+class TestSourceGitHeadAfterDataRootSplit:
+    """v0.45.322（阶段 5 前置）：`source_git_head` 取**代码**仓库的 HEAD，不是 `--src`（数据根）。
+
+    迁移后 `--src` 是 `~/alpha-hive-data`，没有 `.git`。旧写法 `git -C <src_root>` 只读 stdout
+    ⇒ 128 退出被吞成空串。第一条就是那个场景：旧实现在这里得到 ""，断言红。
+    """
+
+    def test_data_root_without_git_still_records_code_head(self, tmp_path, monkeypatch):
+        head = _git_repo_with_commit(tmp_path / "code")
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(tmp_path / "code"))
+        src_root = tmp_path / "data"          # 数据根：无 .git
+        src_root.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src_root / db_name)
+        manifest = export_mod.run_export(src_root, tmp_path / "out")
+        assert manifest["source_git_head"] == head
+
+    def test_non_git_code_repo_is_reported_not_blank(self, tmp_path):
+        not_repo = tmp_path / "not_a_repo"
+        not_repo.mkdir()
+        got = export_mod._code_git_head(not_repo)
+        assert got.startswith("unavailable: git rc="), got
+        assert got != ""
+
+
 class TestSecretScan:
     def _fake_key_files(self, tmp_path, av_key="AKIA_FAKE_TOKEN_123456"):
         key_dir = tmp_path / "home"

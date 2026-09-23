@@ -239,8 +239,35 @@ def copy_root_files(src_root: Path, patterns: list[str], out_dir: Path) -> list[
     return records
 
 
-def run_export(src_root: Path, out_dir: Path) -> dict:
-    """跑一整轮导出，返回 manifest dict（调用方负责写文件/扫描/提交）。"""
+def _code_git_head(code_repo: Path | None) -> str:
+    """产出这份数据的**代码**版本（`git rev-parse HEAD`），拿不到时返回 `unavailable: <原因>`。
+
+    数据根迁移阶段 5 前（v0.45.322）这里是 `git -C <src_root>`：那时数据根就是代码仓库根，
+    碰巧能用。迁移后 `src_root` 是 `~/alpha-hive-data`（没有 `.git`），git 退出码 128、
+    stdout 为空，而旧写法只读 stdout、不看退出码 ⇒ `source_git_head` **静默变成空串**，
+    不抛异常、也不进 except。现在：仓库位置走 `PATHS.git_repo_root`（阶段 4 与数据根拆开的那个），
+    且非零退出码一律写成 `unavailable: ...`——空串永远不再出现在清单里。
+    """
+    if code_repo is None:
+        from hive_logger import PATHS
+        code_repo = PATHS.git_repo_root
+    try:
+        r = subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(code_repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+    except Exception as e:  # noqa: BLE001 —— 只是记录用，git 不可用不该挡导出
+        return f"unavailable: {e}"
+    head = r.stdout.strip()
+    if r.returncode != 0 or not head:
+        return f"unavailable: git rc={r.returncode} in {code_repo}: {r.stderr.strip()[:200]}"
+    return head
+
+
+def run_export(src_root: Path, out_dir: Path, code_repo: Path | None = None) -> dict:
+    """跑一整轮导出，返回 manifest dict（调用方负责写文件/扫描/提交）。
+
+    `code_repo`：记录 `source_git_head` 用的代码仓库；默认 `PATHS.git_repo_root`（见 `_code_git_head`）。
+    """
     src_root = Path(src_root)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -253,12 +280,7 @@ def run_export(src_root: Path, out_dir: Path) -> dict:
         "excluded_from_this_pass": EXCLUDED_FROM_THIS_PASS,
         "databases": {}, "state_dirs": {}, "state_dirs_skipped": {}, "root_files": [],
     }
-    try:
-        manifest["source_git_head"] = subprocess.run(
-            ["git", "--no-optional-locks", "-C", str(src_root), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10).stdout.strip()
-    except Exception as e:  # noqa: BLE001 —— 只是记录用，git 不可用不该挡导出
-        manifest["source_git_head"] = f"unavailable: {e}"
+    manifest["source_git_head"] = _code_git_head(code_repo)
 
     for db_key, rel_path in DBS.items():
         info = export_db(src_root, db_key, rel_path, out_dir / "db_exports")
