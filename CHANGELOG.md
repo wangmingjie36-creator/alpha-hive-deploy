@@ -53,7 +53,38 @@ z 与 t 临界值之间的窄带，有效应时约 0.1–3%。**这一行守的�
 - 全量套件（`--maxfail=1000`）：5323 passed / 1 failed / 2 xfailed / 83 deselected。唯一失败仍是
   `TestCoverageHorizon`（BLS 2027 日程未发布，见 v0.45.320 核对），与本版无关。
 
-## [0.45.322] — 2026-09-23 — 占位（进行中：数据根迁移阶段 5——生产数据搬到 ~/alpha-hive-data；今天做仓库内准备，09-26 周六执行搬迁）
+## [0.45.322] — 2026-09-23 — Added/Fixed：数据根迁移阶段 5 的代码批次——迁移工具 `migrate_data_root`、搬迁后会读错位置的 4 处数据路径改走 `PATHS`；生产搬迁本身 09-26 周六另版执行
+
+**本版不搬任何数据、不改生产环境**。不设 `ALPHA_HIVE_HOME` 时 `PATHS.home` 仍是代码检出，全部改动行为不变；
+搬迁（停 launchd / 改编排器与 plist / 复制 / 旧数据退场）按 memory `alpha-hive-data-root-migration.md`「阶段 5 执行」节的 runbook 在 09-26 执行，届时另占号记录。
+
+### Added
+- `data_backup/migrate_data_root.py`：`plan / copy / verify / retire / unretire / check-old`。
+  - 旧根顶层逐项分类（MOVE / MOVE_DB / SKIP），分类表只在该文件维护；**未登记项 ⇒ plan 失败、copy 拒绝**（新产物不许被默认成搬或不搬）。
+  - 活库走 SQLite 在线备份 API（复用 `sqlite_readonly.db_open_uri`），读事务内前后行数一致、`integrity_check` ok 才落盘；`chroma_db/chroma.sqlite3` 同样处理。
+  - 目标已存在且内容不同 ⇒ 复制任何东西之前就中止。
+  - `retire` 只把**未被 git 跟踪**的 MOVE 项挪进 `_retired_pre_phase5/` 并去写权限；**被跟踪的数据原地冻结**——
+    日报白名单提交是 `git add report_snapshots/` 这类 pathspec，挪走被跟踪目录 ⇒ 下一次日报把全部账本的删除推上公开 main（那是阶段 6 该有意识做的事）。
+    `check-old` 用 retire 时的 sha256 基线抓「还有写入方没跟着 `ALPHA_HIVE_HOME` 走」。
+- `tests/test_migrate_data_root.py`（17 项）：WAL 未回写行必须带走、冲突零复制、verify 抓少行/改文件、retire 不产生 git 删除、check-old 抓旧根复活的库与被写的冻结文件、unretire 回退。
+  变异：DB 改成直接 `copy2` 主文件 + retire 连被跟踪项一起挪 ⇒ 4 红。
+- `tests/test_optimizer_analyst_data_root.py`（18 项）、`tests/test_deep_analysis_output_root.py`。
+
+### Fixed
+- `weekly_optimizer.py` / `self_analyst.py`（`task_8fbb827c`）：数据根写死 `~/Desktop/Alpha Hive` 且 import 期冻结。
+  `report_snapshots/`、`weight_history.jsonl`、`pheromone.db`、`self_analysis_briefs/` 改为默认 `None` 的覆盖钩子 + 调用时解析（照 `collect_data.py` v0.45.263 先例）；
+  `config.py` 与其权重备份锚代码检出。删掉 Cowork VM glob 与「两处 report_snapshots 谁多选谁」——另一处是停更目录（59 vs 1381 份），迁移后数据根一时缺文件就会被静默选中。
+  两个定时任务 09-27 / 10-01 紧跟搬迁运行，故必须先于搬迁合入。（后台 agent 实现，协调 session 复核 diff + 独立变异：换回旧文件 11 红。）
+- `data_backup/export.py`：`source_git_head` 原为 `git -C <--src>`，搬迁后 `--src` 是无 `.git` 的数据根 ⇒ 128 被吞成空串。改取 `PATHS.git_repo_root`，非零退出码写 `unavailable: git rc=…`。
+- `deep_analysis.py`：报告写进代码目录（`chdir` 后相对路径）⇒ 改落 `PATHS.home`（gh-pages 只从数据根取文件）。
+
+### 真实数据彩排（只读生产 → scratch，2026-09-23 11:46）
+- `copy` 3.7s、`verify` 4.0s：5 库（pheromone 136827 行、chroma 57029 行等）行数一致 + integrity ok；6908 文件 / 807 MB sha256 全一致；生产目录无新增 sidecar。
+- `probability_scorecard.py --published`、`ic_rerun_readiness.py` 分别读新旧根，输出逐字节一致。
+
+### 验收
+- 全套 5345 passed / 85 deselected / 2 xfailed（`--deselect TestCoverageHorizon`：日历覆盖期不足 90 天，按设计红，与本版无关）；`ruff check .` 全过。
+- 自身失误如实记：第一次全套误用 `-o addopts=""` 清掉了 `-m "not integration"`，跑了 17 分钟联网集成测试（中途 1 红，结果作废）。
 
 ## [0.45.321] — 2026-09-23 — Fixed：`signal_archive.load_panel()` 的前瞻收益一直对着 SL/TP 截断的 `price_t7`（离场价）算——ic_diagnostics 在 v0.45.19 更正过的同一误解没传到这里；改用 `close_t7`，`--analyze` 的 🟢 候选 5 → 8（`price.momentum_5d` / `catalyst.count` 掉出）
 
