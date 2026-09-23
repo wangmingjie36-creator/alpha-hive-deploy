@@ -59,6 +59,15 @@ F&G 挪到它真正适用的层次：组合层的仓位敞口控制——极度�
       不是异常，会稀释均值、需要更多周才能检出效应，不代表实现有问题。
       对周序列做单侧 t 检验（H1：均值 > 0，即敞口门让组合更好）。不用横截面 IC——
       敞口门改的是仓位大小、不改排序，横截面秩相关在这里没有意义。
+      【事前实现对齐 v0.45.323，2026-09-23 —— 不改任何规则】
+      上一句写的是「单侧 t 检验」，实现却用 `ic_diagnostics.normal_two_sided_p`（正态近似）换算 p。
+      现改为 t(n−1)（`scipy.stats.t.sf`，与共振加成姊妹检验同一实现）。窗口、变体、统计量的定义、
+      检视点（15/30）、α、盲化、自证全部未动。修订时离中期检视（15 个合格周，最早 2026-12-28）
+      还远；同日另一 session 实测本检验为 `cannot_judge`（自证 8/10，见 auto-memory
+      `alpha-hive-fear-greed-dead-wire`），`decide()` 从未走到出统计量的分支，修订人也未计算或查看任何
+      效应量，修订不受结果影响。
+      影响（两次检视合计误报率，Monte Carlo 30 万次）：iid 正态周差 0.066 → 0.055；多数周为 0 的
+      零膨胀情形 0.057 → 0.046。结论翻转只发生在 t 落在 z 与 t 临界值之间的窄带（有效应时约 0.1–3%）。
 检视  成组序贯两次，按**时间顺序最先攒到的**前 N 个合格周计算：
         中期  N=15  单侧 p < 0.02   → 确认
         终期  N=30  单侧 p < 0.045  → 确认；否则 → 未确认（结案）
@@ -137,9 +146,13 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+# v0.45.323：模块级导入，不放进函数里——scipy 缺失时 `ic_rerun_readiness` 每个交易日加载本脚本
+# 都会渲染出「无法判定：ModuleNotFoundError」那一行；放进函数则要等到检视点当天才炸。
+from scipy import stats as _scipy_stats
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 代码锚点：import 仓内模块
 
-from ic_diagnostics import basic_stats, normal_two_sided_p  # noqa: E402
+from ic_diagnostics import basic_stats  # noqa: E402
 
 # ── 预注册常量（改动 = 事后，须在 CHANGELOG 说明；测试钉住）──────────────────
 FORWARD_START = "2026-09-16"
@@ -496,17 +509,25 @@ def _weekly_nav_returns(equity: List[Dict]) -> Dict[Tuple[int, int], float]:
     return out
 
 
-# ── 统计（复用 ic_diagnostics 的规范实现，只补一层单侧转换）────────────────────
+# ── 统计：单侧 t 检验（均值 / SE 复用 ic_diagnostics.basic_stats，p 取 t(n−1)）───────────
 def one_sided_greater_than_zero(values: List[float]) -> Dict:
-    """H1: 均值 > 0。全部相同（含全 0——多数周没有极端 F&G 触发时的正常形态）时
-    `se=0`，`ic_diagnostics.basic_stats` 给的 t 是 nan，这里按符号显式判 p。"""
+    """H1: 均值 > 0 的单侧 t 检验，参考分布 t(n−1)（与共振加成姊妹检验
+    `resonance_boost_forward_test.one_sided_t` 同一实现）。
+
+    全部相同（含全 0——多数周没有极端 F&G 触发时的正常形态）时 `se=0`，
+    `ic_diagnostics.basic_stats` 给的 t 是 nan，这里按符号显式判 p。
+
+    v0.45.323（事前实现对齐，见文件头）：此前 p 由 `ic_diagnostics.normal_two_sided_p`
+    （正态近似）换算，与预注册写的「单侧 t 检验」不符。n=15 时它把单侧 p 低估约 1.5 倍——
+    t=2.15 给 0.0158 而非 0.0248，中期门槛 0.02 正好落在这段差里（判别用例见
+    `tests/test_fg_exposure_gate_forward_test.py::TestOneSidedStat`）。
+    """
     m, se, t, n = basic_stats(values)
     if n < 2:
         return {"n": n, "mean": m, "t": None, "p": 1.0}
     if se == 0 or not (t == t):  # se==0（全同值）或 t 非有限
         return {"n": n, "mean": m, "t": None, "p": 0.0 if m > 0 else 1.0}
-    p_two = normal_two_sided_p(t)
-    return {"n": n, "mean": m, "t": t, "p": (p_two / 2 if t > 0 else 1 - p_two / 2)}
+    return {"n": n, "mean": m, "t": t, "p": float(_scipy_stats.t.sf(t, n - 1))}
 
 
 def weekly_deltas(a_equity: List[Dict], b_equity: List[Dict]) -> List[Dict]:

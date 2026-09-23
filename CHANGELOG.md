@@ -5,7 +5,53 @@
 
 ---
 
-## [0.45.323] — 2026-09-23 — 占位（进行中：F&G 敞口门前瞻检验的单侧检验由正态近似改为 t(n−1)，事前实现对齐预注册）
+## [0.45.323] — 2026-09-23 — Fixed（事前实现对齐）：F&G 敞口门前瞻检验的单侧 p 由正态近似改为 t(n−1)，对齐预注册写的「单侧 t 检验」
+
+**不改任何规则。** 窗口、变体 A/B、统计量定义、检视点（15/30）、α（0.02/0.045）、盲化、自证全部未动；
+`LOOKS` / `FORWARD_START` 原样（`TestPreregistrationFrozen` 照旧钉住）。
+
+### 为什么是「事前」
+
+预注册（09-15）第 60 行写的是「对周序列做单侧 t 检验」，实现却用 `ic_diagnostics.normal_two_sided_p`
+（`erfc` 正态近似）换算 p——是实现偏离登记，不是登记本身要改。修订时离中期检视（15 个合格周，
+代码算最早 2026-12-28）还远；同日另一 session 实测本检验为 `cannot_judge`（自证 8/10），
+`decide()` 从未走到出统计量的分支，修订人也未计算或查看任何效应量。
+
+### Fixed
+
+- `experiments/fg_exposure_gate_forward_test.py::one_sided_greater_than_zero`：p 改为
+  `scipy.stats.t.sf(t, n − 1)`，与共振加成姊妹检验 `resonance_boost_forward_test.one_sided_t` 同一实现。
+  均值 / SE 仍复用 `ic_diagnostics.basic_stats`；零方差、n<2 两个退化分支原样。
+  `normal_two_sided_p` 的导入随之删除（`ic_diagnostics` 里的函数本身未动，`diagnose()` / `replay_scoring` 仍在用，
+  那些属维度 IC 证据协议 P2 的范围）。
+- scipy **模块级**导入，刻意不放进函数：scipy 缺失时 `ic_rerun_readiness` 每个交易日加载本脚本就会渲染出
+  「无法判定：ModuleNotFoundError」那一行；放进函数则要等到检视点当天才炸。
+  scipy 未在 `requirements.txt` 声明，但 scikit-learn 依赖它，姊妹检验已是同样的暴露面。
+- 文件头预注册段补「事前实现对齐 v0.45.323」修订记录。
+
+### Added
+
+- `tests/test_fg_exposure_gate_forward_test.py::TestOneSidedStat` 5 条：
+  - 与 `scipy.stats.ttest_1samp(alternative="greater")` 逐值相等（强正 / 零膨胀 / 偏负三组，含 t<0 一侧）。
+  - **判别用例（旧实现必红，已实测）**：中期 n=15、t=2.15——正态单侧 p=0.0158（<0.02，旧实现判 `confirmed`），
+    t(14) 给 0.0248（未过界，`not_ready`，且返回值不含效应量）；终期 n=30、t=1.72——正态 0.0427（<0.045，
+    旧实现判 `confirmed`），t(29) 给 0.0480（`not_confirmed` 结案），前 15 周 t≈1.45 不会提前触发中期。
+    两条都先断言「正态近似在这里会误判」作为前提，保证用例真的区分得了 z 与 t。
+  - 旧实现上跑：新增 5 条全红、既有 11 条全绿；改后全绿。
+- `test_final_look_can_confirm` 注释里的 p 更新为 t 分布数值（中期 0.051 / 终期 0.020；旧注释 0.040 / 0.016 是正态值），
+  判定不变。
+
+### 影响（量化，Monte Carlo 30 万次，H0 下两次检视合计误报率）
+
+iid 正态周差 0.066 → 0.055；多数周为 0 的零膨胀情形 0.057 → 0.046。结论翻转只发生在 t 落在
+z 与 t 临界值之间的窄带，有效应时约 0.1–3%。**这一行守的是「判得出来时判得准」，不是「判得出来」**——
+本检验能否在检视点前把自证率维持在 95% 以上，仍是它最大的风险（见 auto-memory `alpha-hive-fear-greed-dead-wire`）。
+
+### 核对
+
+- F&G 前瞻检验 / 共振前瞻检验 / 就绪度闸 / experiments 注入守卫四个测试文件 228 passed；ruff 0.13.3 All checks passed。
+- 全量套件（`--maxfail=1000`）：5323 passed / 1 failed / 2 xfailed / 83 deselected。唯一失败仍是
+  `TestCoverageHorizon`（BLS 2027 日程未发布，见 v0.45.320 核对），与本版无关。
 
 ## [0.45.322] — 2026-09-23 — 占位（进行中：数据根迁移阶段 5——生产数据搬到 ~/alpha-hive-data；今天做仓库内准备，09-26 周六执行搬迁）
 

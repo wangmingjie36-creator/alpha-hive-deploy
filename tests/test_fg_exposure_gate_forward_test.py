@@ -113,6 +113,53 @@ class TestOneSidedStat:
         st = fwd.one_sided_greater_than_zero([1.0])
         assert st["t"] is None and st["p"] == 1.0
 
+    # ── v0.45.323：p 取 t(n−1)，不是正态近似（事前实现对齐预注册「单侧 t 检验」）──
+
+    @pytest.mark.parametrize("values", [
+        [1.0, 1.2, 0.8, 1.5, 0.9, 1.1, 1.3, 0.7, 1.0, 1.4],
+        [0.3, -0.1, 0.0, 0.0, 0.5, -0.2, 0.0, 0.1, 0.0, 0.0, 0.4, -0.3, 0.0, 0.2, 0.0],
+        [-0.4, 0.1, -0.2, 0.0, -0.1, 0.3, -0.5],
+    ], ids=["强正", "零膨胀", "偏负"])
+    def test_p_equals_scipy_one_sample_t_greater(self, values):
+        """与 scipy 的单样本 t 检验（H1: 均值 > 0）逐值相等——包括 t<0 那一侧。"""
+        from scipy import stats
+        ref = stats.ttest_1samp(values, 0.0, alternative="greater").pvalue
+        assert fwd.one_sided_greater_than_zero(values)["p"] == pytest.approx(ref, rel=1e-9)
+
+    @staticmethod
+    def _series_with_t(base, target_t):
+        """把零均值的 base 平移，使单样本 t 恰为 target_t（平移不改标准差）。"""
+        import math
+        from statistics import mean, stdev
+        assert abs(mean(base)) < 1e-12
+        shift = target_t * stdev(base) / math.sqrt(len(base))
+        return [x + shift for x in base]
+
+    def test_interim_boundary_case_is_not_confirmed(self):
+        """判别用例：n=15、t=2.15 落在 [z 临界 2.054, t(14) 临界 2.264) 之间。
+        正态近似给单侧 p=0.0158（<0.02 ⇒ 中期「确认」），t(14) 给 0.0248（不确认）。
+        v0.45.323 之前的实现在这里判 confirmed——本条在旧实现上必红。"""
+        import math
+        deltas = self._series_with_t([1.0, -1.0] * 7 + [0.0], 2.15)
+        z_p = 0.5 * math.erfc(2.15 / math.sqrt(2))
+        assert z_p < 0.02, "前提：正态近似会在这里误判确认——否则本用例区分不了 z 与 t"
+        assert fwd.one_sided_greater_than_zero(deltas)["p"] == pytest.approx(0.02478, abs=1e-4)
+        res = fwd.decide(TestDecide()._weeks(deltas))
+        assert res["status"] == "not_ready"
+        assert not (_EFFECT_KEYS & set(_all_keys(res))), "中期未过界时不得带出效应量"
+
+    def test_final_boundary_case_is_not_confirmed(self):
+        """判别用例：n=30、t=1.72，正态近似单侧 p=0.0427（<0.045 ⇒ 终期「确认」），
+        t(29) 给 0.0480（未确认，结案）。前 15 周 t≈1.45，不会提前在中期触发。"""
+        import math
+        deltas = self._series_with_t([1.0, -1.0] * 15, 1.72)
+        assert 0.5 * math.erfc(1.72 / math.sqrt(2)) < 0.045, "前提：正态近似会在这里误判确认"
+        assert fwd.decide(TestDecide()._weeks(deltas[:15]))["status"] == "not_ready"
+        res = fwd.decide(TestDecide()._weeks(deltas))
+        assert res["status"] == "not_confirmed"
+        assert res["look"] == "终期"
+        assert res["stats"]["p"] == pytest.approx(0.04798, abs=1e-4)
+
 
 # ── 3. 周度净值差 ─────────────────────────────────────────────────────────────
 
@@ -177,8 +224,9 @@ class TestDecide:
         assert res["weeks_used"] == [f"2026-W{i:02d}" for i in range(15)]
 
     def test_final_look_can_confirm(self):
-        """需要精心选的数字：中期(p=0.040)不够格(<0.02)但终期(p=0.016)够格(<0.045)——
-        不能拿"处处都显著"的数据测，那测不出"两次检视门槛不同"这件事。"""
+        """需要精心选的数字：中期(t=1.75，t(14) 单侧 p=0.051)不够格(<0.02)但终期
+        (t=2.15，t(29) 单侧 p=0.020)够格(<0.045)——不能拿"处处都显著"的数据测，
+        那测不出"两次检视门槛不同"这件事。（v0.45.323 前是正态近似，同一组数据为 0.040 / 0.016。）"""
         deltas = ([1.4, -0.6] * 15)[:30]
         interim = fwd.decide(self._weeks(deltas[:15]))
         assert interim["status"] == "not_ready"  # 先确认中期确实没过
