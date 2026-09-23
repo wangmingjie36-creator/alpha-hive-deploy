@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.327] — 2026-09-23 — 占位（进行中：ic_power_analysis 前瞻收益改用 FORWARD_CLOSE_COL / close_t7，重算功效结论）
+
 ## [0.45.326] — 2026-09-23 — Fixed：`experiments/ml_expected_return_replay.py` 的「真实 7 日收益」一直对着 SL/TP 截断的 `price_t7`（离场价）算——与 v0.45.19 / v0.45.321 同一误解的第三个读者；改查 `FORWARD_CLOSE_COL`（close_t7），脚本印出的两条结论都翻了，主结论不变
 
 v0.45.321「发现未处理」第一条。本脚本是就绪度闸 `next_step`（`ml_expected_return_replay.py && signal_archive.py --analyze`）的**前半句**——v0.45.321 修了后半句，至此闸推荐的两步都不再对着截断收益算。
