@@ -38,7 +38,7 @@ def db(tmp_path):
         con.execute(
             "CREATE TABLE predictions ("
             " date TEXT, ticker TEXT, checked_t7 INTEGER,"
-            " price_t7 REAL, price_at_predict REAL)"
+            " close_t7 REAL, price_at_predict REAL)"
         )
         con.executemany(
             "INSERT INTO predictions VALUES (?,?,?,?,?)",

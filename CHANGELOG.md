@@ -91,9 +91,10 @@ z 与 t 临界值之间的窄带，有效应时约 0.1–3%。**这一行守的�
   ——哪天有人把离场价写进 `close_t7`、或给 t30 也套路径模拟，列名不变、测试不红，只有它会跳。
   库里没有 `exit_*` 列时不判（旧库 / 夹具）。生产快照上 t7/t30 均静默。
 - `print_report` 表头点名终点列（`目标=方向收益（终点 close_t7）`）——不是静默选择。
-- `tests/test_signal_archive_close_target.py`（9 条）：核心夹具让两列给出**相反的 IC 符号**
+- `tests/test_signal_archive_close_target.py`（10 条）：核心夹具让两列给出**相反的 IC 符号**
   （信号高的票先跌穿止损再收涨、信号低的先冲过止盈再收跌），附夹具自检（两列 IC 分别 >+0.5 / <−0.5）、
-  单行取值、`price_t7` 为空仍入样本、t30 无 `close_t30` 列、未登记 horizon 抛错、截断指纹告警 + 负对照。
+  单行取值、`price_t7` 为空仍入样本、t30 无 `close_t30` 列、未登记 horizon 抛错、截断指纹告警 + 负对照、
+  就绪度闸按同一列数成熟样本。
 
 ### Changed
 - `ic_diagnostics`：新增 `FORWARD_CLOSE_COL` 作为终点列唯一真相（与 `signal_archive` 共用），
@@ -102,6 +103,10 @@ z 与 t 临界值之间的窄带，有效应时约 0.1–3%。**这一行守的�
   后半句是错的，会让人丢掉有效的 t30 结果；改为点名 `price_t30` 并说明其为收盘价。
   `--target` 帮助文案（仍写着 v0.45.19 前的「price=默认，推荐」）与报告 meta 标签（t7 上写着
   `price_t7` 而代码实际用 `close_t7`）一并更正。
+- `ic_rerun_readiness.assess()`：「已成熟样本」由 `price_t7 IS NOT NULL` 改为 `close_t7 IS NOT NULL`
+  ——注释本就说「只有这些能进 IC 计算」，而 IC 现在读 close_t7。close_t7 在结算时另行取价、失败会滞后，
+  旧写法那时会把 `analyze()` 用不上的样本数成「已攒够」。快照上当前世代（09-18 起）前后同为 0 成熟 / 60 全部，
+  今天数字不动。新增 `TestReadinessGateCountsTheSameColumn`（改回 price_t7 实测红）。
 - `tests/test_signal_archive.py::TestAnalysisPanel`：原 `test_panel_uses_pure_price_return` 断言的
   正是 bug 本身（从 `price_t7` 算出 10%），改名并改为断言 `close_t7`；其余 4 处夹具与
   `test_signal_archive_generations._build_db` 的 `price_t7` 列换成 `close_t7`（行为不变）。
@@ -150,6 +155,11 @@ v0.45.19（08-25）更正了 `ic_diagnostics` 的列，却没去找**别的**读
 `signal_archive`（07-30 建成起就按 `f"price_{h}"` 拼列名，本次修）和 `ml_expected_return_replay`（未修）
 就这样带着「纯价格变动」的旧说法在更正之后又活了四周，docstring 反过来替 bug 背书。**更正一列的语义时，要 grep 这一列的全部读者，不是只修眼前那个。**
 本次把列选择收成一张表、两处共用，并给数据层加了指纹观测点：将来谁再拼列名，要么过不了表，要么指纹会跳。
+
+过程里又踩一次陈旧 pyc（memory 记录的第 5 次）：就绪度闸的变异是 `close_t7`↔`price_t7`，**恰好等长**，
+`sed` 变异与 `cp` 还原落在同一秒 ⇒ 还原后 16 条红、报 `no such column: price_t7`。变异那一跑是真的
+（mtime 变了 ⇒ 重编译），脏的是还原之后那一跑；清掉该 `.pyc` 后 243 绿。做法早写在
+`alpha-hive-test-guard-failures`，动手变异前没打开——已把「变异前必读」写进索引行。
 
 ---
 

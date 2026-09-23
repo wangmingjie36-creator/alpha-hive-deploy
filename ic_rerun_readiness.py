@@ -602,10 +602,13 @@ def assess(db_path: Optional[Path] = None, target_ic: float = DEFAULT_TARGET_IC,
 
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-        # 世代内**已回填 T+7** 的样本 —— 只有这些能进 IC 计算
+        # 世代内**已回填 T+7** 的样本 —— 只有这些能进 IC 计算。
+        # v0.45.321：按 close_t7 判成熟，与 IC 实际读的列一致（ic_diagnostics / signal_archive
+        # 都走 FORWARD_CLOSE_COL）。旧写法按 price_t7（SL/TP 离场价）判——close_t7 在结算时
+        # 另行取价、取价失败会滞后，那时闸会把 analyze() 用不上的样本也数成「已成熟」。
         ripe = con.execute(
             "SELECT date, ticker FROM predictions "
-            "WHERE date >= ? AND checked_t7 = 1 AND price_t7 IS NOT NULL "
+            "WHERE date >= ? AND checked_t7 = 1 AND close_t7 IS NOT NULL "
             "  AND price_at_predict > 0",
             (boundary,),
         ).fetchall()

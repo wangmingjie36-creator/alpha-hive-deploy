@@ -191,6 +191,26 @@ class TestHorizonRegistry:
             sa.load_panel(tmp_path / "nope.db", "t1")
 
 
+class TestReadinessGateCountsTheSameColumn:
+    """就绪度闸数「已成熟样本」要按 IC 实际读的列（close_t7），不按 price_t7。
+
+    close_t7 在结算时另行取价、失败会滞后；按 price_t7 数，闸会把 analyze() 用不上的样本
+    也算进「已攒够」。
+    """
+
+    def test_price_t7_without_close_t7_is_not_ripe(self, tmp_path):
+        start = irr._COHORT_HISTORY[-1][0]
+        db = tmp_path / "p.db"
+        with sqlite3.connect(db) as c:
+            c.execute("CREATE TABLE predictions (date TEXT, ticker TEXT, checked_t7 INTEGER,"
+                      " price_t7 REAL, close_t7 REAL, price_at_predict REAL)")
+            c.executemany("INSERT INTO predictions VALUES (?,?,?,?,?,?)", [
+                (start, "A", 1, 95.0, 103.0, 100.0),    # 两列都有 ⇒ 成熟
+                (start, "B", 1, 110.0, None, 100.0),    # 只有离场价 ⇒ IC 用不上
+            ])
+        assert irr.assess(db, today=start)["n_ripe_samples"] == 1
+
+
 class TestTruncationFingerprint:
     """数据层观测点：列名对了，但列里装的是离场价 —— 只有截断指纹会跳。"""
 
