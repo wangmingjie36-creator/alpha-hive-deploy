@@ -5,7 +5,36 @@
 
 ---
 
-## [0.45.318] — 2026-09-23 — 占位（进行中：更正 v0.45.306 条目——resolve() 必要性的归因写错了符号链接）
+## [0.45.318] — 2026-09-23 — docs：更正 v0.45.306 条目——`resolve()` 的必要性归因写错了，实测它在本测试里是防御性冗余而非在修一个真实存在的漏洞
+
+用户要求「二次检查」v0.45.306 时，自己复核出的一处不实表述（不是别人发现的）。
+
+**原表述**（v0.45.306 CHANGELOG、`test_paper_portfolio_vol_sizing.py` 该测试的
+docstring、commit message、auto-memory 四处都这么写）：「`resolve()` 之后再判断：
+macOS 上 `/tmp` 是 `/private/tmp` 的符号链接，字面量前缀比较会把沙箱路径本身
+误判成"没有落在里面"」——这句话有两处错：
+
+1. **点错了符号链接**：pytest 的 `tmp_path` 在本机走的是 `TMPDIR`
+   （`tempfile.gettempdir()` = `/var/folders/.../T/...`），相关的符号链接是
+   `/var → /private/var`，不是 `/tmp → /private/tmp`（`/tmp` 在这条路径上根本不出现）。
+2. **更根本的问题**：实测 `tmp_path == tmp_path.resolve()` 在本机 pytest 上恒为
+   `True`——pytest 的 `tmp_path_factory` 自己已经用 realpath 规范化过 `tmp_path`。
+   本测试里 `sandbox`（`(tmp_path / "paper_portfolio_state").resolve()`）与
+   `pp.POSITIONS_FILE` 等（经 conftest 的 `sandbox = tmp_path / "paper_portfolio_state"`
+   派生）全部源自同一个**已经规范化**的 `tmp_path`，不调用 `resolve()` 字面量比较
+   也会相等——`resolve()` 在这条断言里从未真的"堵住"过一次会误判的比较，纯粹是
+   防御性冗余（等幂、零成本，防的是"pytest 未来某天不再保证 tmp_path 已规范化"，
+   不是此刻真实存在的漏洞）。
+
+**教训**：把"防御性写法"包装成"在修一个观察到的具体 bug"，本身就是不实断言——
+跟本仓一贯要求的「不编数据」是同一条底线，只是这次编的不是业务数据，是代码注释里
+的因果链。验证方法：起一条最小探针测试单独打印 `tmp_path` 与
+`tmp_path.resolve()` 并断言二者相等，而不是从"听起来合理"的机制直接下笔。
+
+**改动**：仅更正 `tests/test_paper_portfolio_vol_sizing.py` 该测试 docstring 的表述
+与本 auto-memory 对应段落；`resolve()` 调用本身保留（防御性无害），未改判定逻辑、
+未改 `tests/conftest.py`、未改 `paper_portfolio.py`。整套只需重跑该测试类确认仍
+`2 passed`（已跑），不影响其余测试，未重跑全套。
 
 ## [0.45.317] — 2026-09-23 — 占位（进行中：第三轮复检 v0.45.313——`apply_code_shipped_fallback` 新加的裸 assert 违反本仓生产模块零 assert 惯例）
 

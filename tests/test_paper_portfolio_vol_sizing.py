@@ -465,8 +465,17 @@ class TestProductionStateIsIsolated:
         `monkeypatch.setattr` 整段删掉，这条测试仍然通过）。改判真路径：五个路径必须
         落在**本测试自己的** `tmp_path` 沙箱内——`tmp_path` 是 function 级夹具，
         本测试与 autouse 的 `_isolate_paper_portfolio_state` 在同一个测试节点里请求到
-        的是同一个实例，可以直接比较。`resolve()` 之后再判断：macOS 上 `/tmp` 是
-        `/private/tmp` 的符号链接，字面量前缀比较会把沙箱路径误判成"没有落在里面"。
+        的是同一个实例，可以直接比较。
+
+        v0.45.318 更正：这里的 `resolve()` 不是在修一个本测试观察到的符号链接错判
+        （原表述「macOS /tmp 是 /private/tmp 的符号链接」不准确，且即使准确也不构成
+        本测试需要 resolve() 的理由）——实测 `tmp_path == tmp_path.resolve()` 在本机
+        pytest 上恒为 `True`：pytest 的 `tmp_path_factory` 自己已经用 realpath 规范化过，
+        `sandbox` 与 `pp.POSITIONS_FILE` 等全部派生自同一个已规范化的 `tmp_path`，不调
+        `resolve()` 字面量比较也会相等。保留 `resolve()`是防御性的（等幂、零成本），
+        防的是「pytest 未来某天不再保证 tmp_path 已规范化」这类假设漂移，不是在堵一个
+        此刻真实存在的漏洞——写文档时把「防御性写法」和「此刻在修的 bug」混为一谈，
+        本身就是本条要改的那类不实断言。
         """
         sandbox = (tmp_path / "paper_portfolio_state").resolve()
         for f in (pp.POSITIONS_FILE, pp.CLOSED_FILE, pp.EQUITY_FILE, pp.META_FILE):
