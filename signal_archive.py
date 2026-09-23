@@ -1280,26 +1280,16 @@ def _forward_close_col(horizon: str) -> str:
     return icd.FORWARD_CLOSE_COL[horizon]
 
 
-#: 终点价列里「恰好等于 SL/TP 离场价」的行占 SL/TP 行的比例超过它 ⇒ 告警。
-#: 2026-09-23 快照实测：price_t7 87.6%（540 行）、close_t7 0.2%、price_t30 0% —— 两端相距甚远。
-_TRUNCATION_ALARM = 0.5
-
-
 def _truncation_share(con, end_col: str, checked_col: str) -> Tuple[int, float]:
-    """终点价列的**截断指纹**：SL/TP 行里它有多大比例恰好等于 `exit_price`。
+    """终点价列的截断指纹 —— 委托 `ic_diagnostics.truncation_share`（阈值 `TRUNCATION_ALARM`）。
 
-    `load_panel` 用对列只是代码层；这里管数据层 —— 哪天有人把离场价写进 close_t7、
-    或给 t30 也套上路径模拟，列名没变、测试不红，只有这个比例会跳。
-    库里没有 exit_* 列（旧库 / 测试夹具）⇒ (0, 0.0)，无从判断即不告警。
+    v0.45.321 首设于此；v0.45.328 搬到 `FORWARD_CLOSE_COL` 旁边，让 `ic_diagnostics`
+    自己的读者（维度表 / `--benchmark`）也能用同一个探测器，而不是再抄一份。
+    名字保留：`experiments/dim_ic_forward_test.py` 按这个名字调用。
     """
-    cols = {r[1] for r in con.execute("PRAGMA table_info(predictions)")}
-    if not {"exit_price", "exit_reason"} <= cols:
-        return 0, 0.0
-    n, hit = con.execute(
-        f"SELECT COUNT(*), SUM(ABS({end_col} - exit_price) < 0.01) FROM predictions "
-        f"WHERE {checked_col}=1 AND {end_col} IS NOT NULL AND exit_price IS NOT NULL "
-        f"  AND exit_reason IN ('SL', 'TP')").fetchone()
-    return n, ((hit or 0) / n if n else 0.0)
+    sys.path.insert(0, str(Path(__file__).parent))
+    import ic_diagnostics as icd
+    return icd.truncation_share(con, end_col, checked_col)
 
 
 def load_panel(db_path: Optional[Path] = None, horizon: str = "t7",
@@ -1337,11 +1327,8 @@ def load_panel(db_path: Optional[Path] = None, horizon: str = "t7",
         if not rets:
             return {}
         if target_metric == "return":
-            n_sltp, share = _truncation_share(con, end_col, checked_col)
-            if share > _TRUNCATION_ALARM:
-                print(f"⚠️  {end_col}：SL/TP 行里 {share:.0%}（{n_sltp} 行）恰好等于 exit_price"
-                      f" —— 这一列看起来是离场价而不是收盘价，下面的 IC 是对着截断收益算的，"
-                      f"勿据此下结论（见 ic_diagnostics.FORWARD_CLOSE_COL）", file=sys.stderr)
+            import ic_diagnostics as icd   # _forward_close_col 已把仓库根放进 sys.path
+            icd.warn_if_truncated(con, end_col, checked_col)
 
         if target_metric == "vol":
             # 换目标：未来 N 日已实现波动。样本集沿用同一批 (ticker, date)，
