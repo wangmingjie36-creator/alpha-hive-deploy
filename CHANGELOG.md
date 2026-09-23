@@ -112,6 +112,7 @@ v0.45.326「发现未处理」①（v0.45.324 发现）。`price_t7` 当收盘�
 
 ### Changed
 - 截断指纹 `truncation_share` / `TRUNCATION_ALARM` / `warn_if_truncated` 从 `signal_archive` 搬到 `ic_diagnostics`（`FORWARD_CLOSE_COL` 旁）。维度表与基准表在 close 口径上都查一次；price / path 口径不告警（本来就标明含截断，那里告警是恒真的噪音）。`signal_archive._truncation_share` 保留名字、只剩委托（`experiments/dim_ic_forward_test.py` 按名调用），`load_panel` 改调同一个 `warn_if_truncated`——两边一个阈值、一个探测器，没有第二份拷贝。
+- 未知 `target` 由「静默当 path」改为抛 `ValueError`（`forward_return_sql`）。改动前 `load_daily_ic` 的 else 分支接住**任何**未知值、读 return_{h}（含 SL/TP 截断）——拼错一个字母就静默换口径。无调用方受影响：CLI 由 argparse `choices` 限定，仓内两个外部调用方（`final_score_dilution` / `ic_power_analysis`）都传 `"close"`。〔二次检查补记：初版漏记这条行为变更，也没有测试〕
 - 输出点名终点列：文本基准表头 `目标=close_t7 相对 price_at_predict…（与上方维度表同一口径）`；`--json` 新增 `meta.end_col`、`benchmark.end_col` / `benchmark.target_mode`。
 
 ### 前后对照（t7，同一快照、`--draws 200`（main 现行默认）、同一进程同一份完整行情 52/52 只；**只作记录，不据此改任何权重或评分代码**）
@@ -137,8 +138,8 @@ v0.45.326「发现未处理」①（v0.45.324 发现）。`price_t7` 当收盘�
 - 与既有结论一致：综合分无效（`alpha-hive-tradeable-signal.md`）、sentiment 是唯一有证据的维度。**本版不改任何权重**，也不构成改权重的新证据——维度表那一侧本来就是 close 口径，本版只是让基准表跟上它。
 
 ### Added
-- `tests/test_ic_diagnostics_benchmark_close_target.py`（24 条）。核心夹具让 price_t7 / close_t7 给出**相反的** IC 符号（高分先破止损再收涨、低分先触止盈再收跌），final_score 与 5 维都取同一个分数、各被检验一次。另有夹具自检、三口径单行取值、path 读传入的 `target_col`、price_t7 为空仍入样本、哨兵列（调用时查表）、t30 无 close_t30 列、未登记 horizon 抛错、**维度表与基准表逐日逐维度 IC 相等（三口径）**、`main()` 的 `--target` 接线与点名终点列（JSON / 文本）、截断指纹正负对照（基准表 / 维度表 / price 口径不误报 / signal_archive 委托）。
-- `tests/test_ic_diagnostics.py::test_price_load_failure_does_not_crash` 夹具补 `close_t7` 列：原夹具只建 price_t7，恰因当时读的就是它——**夹具本身编码了这个 bug**。另：该文件的 `fake_db` 刻意让 close_t7 == price_t7，所以此前没有任何测试钉住「维度表读的是 close」，现由新文件 `test_dimension_table_itself_reads_close` 补上。
+- `tests/test_ic_diagnostics_benchmark_close_target.py`（26 条，含二次检查补的 2 条）。核心夹具让 price_t7 / close_t7 给出**相反的** IC 符号（高分先破止损再收涨、低分先触止盈再收跌），final_score 与 5 维都取同一个分数、各被检验一次。另有夹具自检、三口径单行取值、path 读传入的 `target_col`、price_t7 为空仍入样本、哨兵列（调用时查表）、t30 无 close_t30 列、未登记 horizon 抛错、未知 target 抛错（两个读者）、**维度表与基准表逐日逐维度 IC 相等（三口径）**、`main()` 的 `--target` 接线与点名终点列（JSON / 文本）、截断指纹正负对照（基准表 / 维度表 / price 口径不误报 / signal_archive 委托）。
+- `tests/test_ic_diagnostics.py::test_price_load_failure_does_not_crash` 夹具补 `close_t7` 列：原夹具只建 price_t7，恰因当时读的就是它——**夹具本身编码了这个 bug**。另：该文件的 `fake_db` 刻意让 close_t7 == price_t7，钉不住「维度表读的是 close」；新文件 `test_dimension_table_itself_reads_close` 是直接钉它的一条（〔二次检查更正〕原写「此前没有任何测试钉住」——推送时已不成立，v0.45.327 的测试间接钉住了，见文末）。
 
 变异台账（全部真跑：`PYTHONDONTWRITEBYTECODE=1`、每轮 `find … -name '*.pyc' -delete`、`--maxfail=1000`、每轮 69 条全收集、还原后 `cmp` 逐字节一致，收尾 69 绿）：
 
@@ -168,6 +169,13 @@ v0.45.326「发现未处理」①（v0.45.324 发现）。`price_t7` 当收盘�
 ### 教训
 v0.45.19 改对了 `load_daily_ic`，同一文件 150 行外的 `build_benchmark_panel` 各拼各的 SQL，没跟着改——**同一个语义有两份实现时，修一份等于制造分叉**。本版不是「把第二份也改对」，而是删掉第二份：两个读者走同一个 `forward_return_sql`，外加一条逐日逐维度比两张表的测试，谁再分叉谁红。截断探测器同理：v0.45.321 在 signal_archive 里写了一份，本版要在 ic_diagnostics 用时搬过来共用，不抄第二份。
 另一个形状：出错读者的测试夹具**只建了它读的那一列**（price_t7），于是正确的列在测试里根本不存在——测试不是没测到 bug，是把 bug 写成了前提。
+
+### 二次检查（同日，推送后）
+- **更正**：上文「此前没有任何测试钉住『维度表读的是 close』」写时成立、推送时已不成立。close-only 变异（只让 `load_daily_ic` 的 close 分支回退 price_t7，排除本版新文件）全套跑：5443 绿 5 红 = 日历告警 + `test_ic_power_analysis_close_target.py` 4 条——v0.45.327 比本版早一步进 main，经 `ic_power_analysis` 间接钉住了它。
+- **补测试**：未知 target 抛错（基准表 / 维度表各 1 条）。变异：改动前原文件（`508a4ca2^`，不用 `HEAD:`——提交后它已是新代码）维度表那条报 `DID NOT RAISE`，直接证明旧代码把 `"closee"` 静默当 path；「未知 target 当 path」2 红；基线 2 绿。
+- **核过、无问题**：三条「逐位相同」声明按 JSON 全精度复核成立（t7 / t30，5 维 7 个统计量）；`signal_archive.load_panel` 里的局部 `import ic_diagnostics as icd` 只在导入后用一次（AST 核，无 UnboundLocalError 风险）；`ic_power_analysis._load_day_pairs` 自抄的 SQL 过滤条件与新 `forward_return_sql` 逐条件一致；所有分支与各 worktree 工作区都没有新增对已删除的 `_TRUNCATION_ALARM` 的引用；当前 main × v0.45.324 分支（`claude/practical-bun-4c8e91`）试合并无冲突，ruff F821/F811/F401 净、两边 206 条测试绿。
+- **小瑕疵，未改**：若 close 列真被写成离场价，`--benchmark` 运行时告警会印两遍（维度表、基准表各一次），同一行文字。
+- 过程：审查时 zsh 把 `$b:signal_archive.py` 的 `:s` 当变量修饰符，`git show` 拿到错的 ref、计数恒 0，差点得出「这些分支里没有这个名字」——与 memory「zsh `:r` 吃 refspec」同形，写 `${b}:path` 即解。
 
 ---
 

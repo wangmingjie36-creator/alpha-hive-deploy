@@ -195,6 +195,17 @@ class TestBenchmarkUsesClose:
         with pytest.raises(ValueError, match="FORWARD_CLOSE_COL"):
             icd.build_benchmark_panel(tmp_path / "nope.db", "return_t1", "checked_t1", "t1")
 
+    @pytest.mark.parametrize("reader", ["benchmark", "dimension_table"])
+    def test_unknown_target_raises_instead_of_falling_into_path(self, tmp_path, offline, reader):
+        """v0.45.328 起未知 target 抛错。改动前 `load_daily_ic` 的 else 分支把**任何**未知值
+        都当 path（读 return_{h}，含 SL/TP 截断）——`"closee"` 拼错一个字母就静默换成截断口径。"""
+        db = _build_reversal_db(tmp_path)
+        with pytest.raises(ValueError, match="不在"):
+            if reader == "benchmark":
+                _panel(db, target="closee")
+            else:
+                icd.load_daily_ic(db, "return_t7", "checked_t7", target="closee")
+
 
 class TestSameTargetAsDimensionTable:
     """维度表（load_daily_ic）与基准表必须是同一口径 —— 这正是 v0.45.19 之后断开的那条线。
