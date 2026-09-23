@@ -889,3 +889,111 @@ class TestSyncGhpagesResilientToSingleFileFailure:
         assert not precheck.stdout.strip(), (
             "如果这条断言失败，说明旧写法在这个环境里没有复现'一个坏文件拖垮整次同步'——"
             "上面的正向测试就没有对照价值了")
+
+
+class TestAllHashObjectFailuresDoNotPushEmptyTree:
+    """v0.45.312：`/code-review high` 对 v0.45.311（把 `_sync_ghpages` 改成
+    逐文件容错）做二次复检时，真实执行发现的严重回归——**不是**v0.45.311
+    本身新写的代码，是 `deploy_static_to_ghpages` 里那段批量 hash-object 逻辑
+    从更早版本起就缺这道守卫：`cache_entries` 全空时（比如磁盘满/
+    `.git/objects` 权限损坏，导致每一个候选文件的 `hash-object` 都失败）此前
+    直接落到 `write-tree`——`GIT_INDEX_FILE` 指向一个从没写过内容的空 index，
+    `git write-tree` 返回 git 那个众所周知的**空树**哈希，`commit_and_push_
+    gh_pages` 照样把这棵空树提交推送上去，把 gh-pages **整站清空**、日志却
+    打印"部署成功"。
+
+    两条独立部署路径都验一次（`_sync_ghpages` 在 v0.45.311 已经有这道守卫，
+    这里补的是回归覆盖；`deploy_static_to_ghpages` 是本次新补的守卫）。
+    """
+
+    def test_deploy_static_to_ghpages_skips_when_all_hash_object_fail(self, tmp_path, monkeypatch):
+        import subprocess as _sp
+
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_all_hash_fail")
+        reporter = _make_reporter(monkeypatch, tmp_path, repo)
+
+        (data_root / "index.html").write_text("<html>real site</html>")
+        with patch("report_deployer.verify_cdn_deployment", return_value=True):
+            reporter._deploy_static_to_ghpages()
+
+        clone_before = tmp_path / "verify_before_allfail"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone_before)],
+                        check=True, capture_output=True)
+        assert (clone_before / "index.html").read_text() == "<html>real site</html>"
+
+        real_check_output = _sp.check_output
+
+        def _all_hash_object_fail(args, **kwargs):
+            if args[:2] == ["git", "hash-object"]:
+                raise _sp.CalledProcessError(1, args, output=b"", stderr=b"simulated total failure")
+            return real_check_output(args, **kwargs)
+
+        with patch("subprocess.check_output", side_effect=_all_hash_object_fail), \
+             patch("report_deployer.verify_cdn_deployment", return_value=True):
+            reporter._deploy_static_to_ghpages()
+
+        clone_after = tmp_path / "verify_after_allfail"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone_after)],
+                        check=True, capture_output=True)
+        assert (clone_after / "index.html").read_text() == "<html>real site</html>", (
+            "全部候选文件 hash-object 失败时必须跳过本次部署、保留线上原内容——"
+            "不能把 gh-pages 推成空树（git write-tree 在空 index 上返回的众所周知的"
+            "空树哈希，会让 commit_and_push_gh_pages 照常成功提交推送）")
+
+    def test_mutation_reverting_all_hash_fail_guard_pushes_empty_tree(self, tmp_path, monkeypatch):
+        """变异测试：还原成没有这道守卫的旧写法（`git show HEAD:report_deployer.py`
+        换出——那正是本次修复前的真实代码），必须复现"gh-pages 被清空成空树"。"""
+        import subprocess as _sp
+
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_all_hash_fail_mut")
+        reporter = _make_reporter(monkeypatch, tmp_path, repo)
+
+        (data_root / "index.html").write_text("<html>real site</html>")
+        with patch("report_deployer.verify_cdn_deployment", return_value=True):
+            reporter._deploy_static_to_ghpages()
+
+        real_check_output = _sp.check_output
+
+        def _all_hash_object_fail(args, **kwargs):
+            if args[:2] == ["git", "hash-object"]:
+                raise _sp.CalledProcessError(1, args, output=b"", stderr=b"simulated total failure")
+            return real_check_output(args, **kwargs)
+
+        # 旧写法：`if cache_entries:` 只包住 update-index 调用，`write-tree`
+        # 在它外面无条件执行——手工复刻这段（不是重新发明，是直接照抄修复前
+        # 的真实结构），证明"跳到 write-tree"这条路径真的会产出空树。
+        def _old_style_deploy(files, file_source, repo, env):
+            import os as _os
+            cache_entries = []
+            for f in sorted(files):
+                try:
+                    blob = _sp.check_output(
+                        ["git", "hash-object", "-w", _os.path.join(file_source[f], f)], cwd=repo
+                    ).decode().strip()
+                    cache_entries.append(f"100644 {blob}\t{f}")
+                except (_sp.CalledProcessError, OSError):
+                    pass
+            if cache_entries:
+                _idx_input = "\n".join(cache_entries) + "\n"
+                _sp.run(["git", "update-index", "--add", "--index-info"],
+                         input=_idx_input, env=env, cwd=repo, check=True, text=True)
+            tree = _sp.check_output(["git", "write-tree"], env=env, cwd=repo).decode().strip()
+            return tree
+
+        idx = str(repo / ".git" / "gh-pages-index-mut")
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = idx
+        with patch("subprocess.check_output", side_effect=_all_hash_object_fail):
+            tree = _old_style_deploy(["index.html"], {"index.html": str(data_root)}, str(repo), env)
+        os.remove(idx)
+
+        empty_tree_sha = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        assert tree == empty_tree_sha, (
+            "如果这条断言失败，说明旧写法在这个环境里没有产出空树——"
+            "上面的正向测试就没有对照价值了")

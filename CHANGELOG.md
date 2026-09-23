@@ -5,7 +5,88 @@
 
 ---
 
-## [0.45.313] — 2026-09-22 — 占位（进行中：第二轮 `/code-review high` 复检 v0.45.311——真实执行发现 `deploy_static_to_ghpages` 早就缺"全部 hash-object 失败"守卫，会把 gh-pages 推成空树、日志却打印"成功"；顺带修 git push 无超时/日志计数失真/日志级别不一致/回落函数前提未强制/JS 字面量转义）
+## [0.45.313] — 2026-09-22 — Fixed：第二轮 `/code-review high` 复检 v0.45.311 真实执行发现的严重回归——`deploy_static_to_ghpages` 早就缺"全部 hash-object 失败"守卫，会把 gh-pages 推成空树、日志却打印"部署成功"；顺带修 4 处伴生问题
+
+用户要求对 v0.45.311 再跑一遍 `/code-review high`。8 个 finder 角度独立复检后报出 10 条发现，其中
+头部 1 条是**已用真实执行复现**的严重回归——本条修复它，另附 4 条一并修掉的伴生问题；其余 5 条
+（reuse/altitude/simplification 类的清理型建议）记录在案未动，理由见文末「未处理的发现」。
+
+### Fixed ①（严重，已复现）：`deploy_static_to_ghpages` 全部候选文件 hash-object 失败时会把 gh-pages 推成空树
+
+这不是 v0.45.311 新写的代码引入的——是 v0.45.311 把"逐文件容错"的写法从 `deploy_static_to_ghpages`
+port 到 `_sync_ghpages` 时，`_sync_ghpages` 得到了一道"全部候选都失败就跳过本次部署"的守卫，而它的
+"参照实现" `deploy_static_to_ghpages` 从更早的版本起就一直没有这道守卫——复检特意把两个"应该已对齐"
+的函数放在一起比较，才把这个既存缺口翻出来。
+
+`cache_entries`（批量 hash-object 成功的文件）全空时（比如磁盘满、`.git/objects` 权限损坏，导致
+每一个候选文件的 `hash-object` 都失败），此前代码直接落到 `git write-tree`——`GIT_INDEX_FILE` 指向
+一个从没写过内容的空 index，`write-tree` 返回 git 那个众所周知的**空树**哈希
+（`4b825dc642cb6eb9a060e54bf8d69288fbee4904`），`commit_and_push_gh_pages` 照样把这棵空树当正常
+内容提交推送，把 gh-pages **整站清空**，日志却打印"部署成功"。
+
+**复现方式**（本地裸仓库）：先正常部署一次建立"线上已有真实内容"的前置状态，再 mock 全部文件的
+`hash-object` 抛错重跑——线上内容从 `['index.html']` 变成 `[]`，日志印
+`"gh-pages 部署成功 (1 静态文件, attempt 1, commit ...)"`。
+
+**修法**：在批量 hash-object 循环之后、`write-tree` 之前加 `if not cache_entries: ...; return`
+（对齐 `_sync_ghpages` 已有的写法），跳过本次部署、保留线上原内容。
+
+### Fixed ②：`commit_and_push_gh_pages` 的 `git push` 仍无超时
+
+v0.45.311 加的 `_run_git_network()` 超时只包了 `resolve_gh_pages_parent` 里的 `fetch`/`ls-remote`；
+同一个最多 4 次的重试循环里，真正传输对象数据、最可能挂起的 `git push` 反而漏了。改经
+`_run_git_network` 调用，超时按"这次推送失败"处理，走原有的重试逻辑。
+
+### Fixed ③：两处成功日志用候选数而不是实际写入数
+
+`deploy_static_to_ghpages`/`_sync_ghpages` 的"部署/同步成功"日志此前都用 `len(files)`（hash-object
+之前的候选总数），改成逐文件容错之后，如果有文件被跳过，日志会把候选数当成功数印出来，掩盖部分
+丢失。改成 `len(cache_entries)`（实际写进树里的）。
+
+### Fixed ④：`_sync_ghpages` 单文件 hash-object 失败仍用 `_log.warning`
+
+v0.45.311 同一个提交里，`apply_code_shipped_fallback` 的静态资源缺失分支已经从 `_log.warning`
+升级到 `_log.error`（理由：纯 warning 在这仓库的 Slack 通知精简规则下不会触达任何人），但
+`_sync_ghpages` 新写的单文件 hash 失败日志没有跟着升级——同一次提交里两处标准不一致。两处都改成
+`_log.error` + 🚨（`report_deployer.py`/`generate_ml_report.py`）。
+
+### Fixed ⑤：`apply_code_shipped_fallback` 的调用前提只写在 docstring 里，代码不强制
+
+该函数要求调用方必须先判完"无文件可部署"守卫再调用它，否则回落结果几乎总能命中、会让空
+`data_root` 看起来"有内容可部署"（正是 Fixed①这类 bug 的另一个潜在入口）。此前这条前提只靠
+两个现有调用点"恰好都按对了顺序"，函数本身不做任何检查。加 `assert files`，把文档里的前提
+变成强制断言。
+
+### 顺带（Simplification）：`report_web_assets.py` 的 JS 字符串字面量改用 `json.dumps()`
+
+此前用 Python `repr()`（`!r`）拼 JS 数组里的字符串字面量，`repr()` 的转义规则不保证对所有字符
+都产出合法 JS——今天 `CHART_JS_FILENAME` 是纯 ASCII 安全字面量所以没事，但这是纯理论风险，改用
+`json.dumps()` 从构造上保证是合法 JS/JSON 字符串。配套测试改成不锁死引号风格（`json.dumps()` 用
+双引号，原来的 `repr()` 用单引号，两者都合法）。
+
+### Added（`tests/test_ghpages_data_root_migration.py`，19→21 项）
+
+- `TestAllHashObjectFailuresDoNotPushEmptyTree`（2 条）：正向验证全部 hash 失败时线上内容原样
+  保留；变异测试还原成没有该守卫的旧写法，确认真的会产出空树哈希。正向测试额外用
+  `git show HEAD:report_deployer.py` 换出改动前的真实源码真跑一遍，确认按预期失败（`index.html`
+  消失、日志打印"部署成功"），再换回修复版确认转绿。
+
+**验证**：相关测试（`test_ghpages_data_root_migration.py`/`test_chart_js_single_source_of_truth.py`/
+`test_dashboard_contract.py`/`test_dashboard_renderer.py`）共 42 项全绿；ruff 全过；全套回归
+（`--deselect` 掉已知 flaky 的 `TestCoverageHorizon`）5277 passed / 0 failure。
+
+### 未处理的发现（10 项发现中的 4 项，记录在案）
+
+`/code-review high` 还报出 4 条 reuse/altitude/simplification 类的清理型建议，均属真实但非
+阻断性，本次未动：① `deploy_static_to_ghpages` 仍缺 `_sync_ghpages` 已有的 `try/finally` idx
+清理——中途异常会跳过 `os.remove(idx)`，留到下次运行的顶部守卫才清；② `_run_git_network` 现在是
+本仓第三个独立的"git 子进程 + 超时"实现（`agent_toolbox.GitTool.run_git_cmd` 用 30s、
+`data_backup/run_backup.py::_run_git` 用 60s），三份各自维护；③ `CORE_STATIC_FILES`/
+`CHART_JS_FILENAME` 只统一了 6 个文件名里的这几个，`manifest.json`/`rss.xml` 等仍分散硬编码在
+`REPORT_ARTIFACT_PATHS`/`_ARTIFACT_EXACT`/模板的 href 里；④ `_run_git_network` 返回
+`CompletedProcess | None`，每个调用点都要写"先判 None 再判 returncode"的双重守卫，容易漏写后半段；
+理由：均为存量设计权衡或需要跨模块（`agent_toolbox.py`/`data_backup/`）的更大改动，超出本次"修复
+已复现回归"的范围，留待下次改动前处理。
 
 ## [0.45.312] — 2026-09-22 — 占位（进行中：PR #8 CI 修复——`test_ghpages_data_root_migration.py` 的 single-branch clone 测试缺显式 git 身份，本机隐式回落蒙混过关，CI（Ubuntu 跑者）必现失败）
 
