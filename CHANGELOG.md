@@ -9,7 +9,66 @@
 
 ## [0.45.333] — 2026-09-23 — 占位（进行中：gamma/delta 卖权行权价选择器——对标 GEXBot 的水平地图（重定价扫描 zero gamma / 净 GEX majors / DEX / vanna·charm）+ 单腿/价差/宽跨候选 + 前向击穿账本）
 
-## [0.45.332] — 2026-09-23 — 占位（进行中：ic_diagnostics._load_prices 批量下载静默丢标的——检测缺列/全 NaN、逐只重试一轮、覆盖率进 --benchmark 输出）
+## [0.45.332] — 2026-09-23 — Fixed：`ic_diagnostics._load_prices` 批量下载**部分失败**被当成功——缺的票逐只重试一轮，仍缺的写 stderr 点名；`--benchmark` 表头 / 判定行 / JSON 带经典因子行情覆盖率
+
+v0.45.328「发现未处理」。「失败没传导到下游 / 谁会红？」同形（CLAUDE.md 硬检查项）。
+
+### 问题
+- `yf.download(52 只)["Close"]` 部分失败时**不抛异常**：v0.45.328 当天连跑 5 次，4 次各随机丢 1–2 只
+  （AVGO+RKLB / T+MSTR / CVX / ADBE），唯一痕迹是 yfinance 自己一行 stderr `N Failed download(s)`。
+  `_load_prices` 只在异常时降级 ⇒ 残缺面板照常返回。
+- 本版联网实测失败票的真实形状：**列在、整列 NaN**（注入不存在的代码 `ZZQXNOTREAL`，1.2.0）。
+  所以 `build_benchmark_panel` 的 `if t not in px.columns` 从来接不住它，真正把它静默跳过的是
+  `dropna()` 之后的 `len(s) < 26` ⇒ 📈20日动量 / 📉5日反转 / 🌪低波动 三行少算几只票、与综合分不是同一样本，
+  输出里无从得知（20日动量旧口径 IC 0.0955–0.1142 随丢哪只而变）。
+- `experiments/ic_power_analysis.py` 也 import `_load_prices`（算 N_eff）——那边本来就印「拿到数据的标的 n/30」，
+  覆盖率可见；本版给它的是重试。
+
+### Fixed
+- `ic_diagnostics.py`
+  - 新 `missing_tickers(px, tickers)`：缺列**或**整列 NaN 都算缺（只判列在不在正是上面那个洞）。
+  - 新 `_close_panel()`：一次下载 → 「列 = ticker」面板；单票的平列名 Series 形状（旧版 yfinance）拍成同一形状
+    （memory `yfinance-multiindex`；重试路径逐只下载两种都会遇到。1.2.0 单票实测是单列 DataFrame）。
+  - `_load_prices`：缺的票**逐只重试一轮**（单只失败 = 仍缺，不中断其余）；补齐 ⇒ stderr `ℹ️ … 逐只重试已补齐`；
+    仍缺 ⇒ stderr `⚠️ 行情缺 k/N 只（…重试 1 轮仍无数据）：<代码> —— 下游只在其余 N−k 只上计算`。
+    **一只都没拿到**（空表 / 全 NaN）按整批失败处理、**不逐只重试**、返回 None：v0.45.257 实测的 52/52 限流就是
+    不抛、返回空的形状，逐只重试只会往同一个限流里再撞 52 次。返回类型不变（`DataFrame | None`）。
+  - `build_benchmark_panel` 返回 **`(panel, coverage)` 二元组**（有意改形状：旧调用方拿它当面板用会当场报错，
+    不是静默丢掉覆盖率）。`coverage` = `status`（ok / partial / unavailable）、`n_priced`/`n_tickers`、`missing`、
+    `n_factor_records`/`n_records`。覆盖率**从返回的面板本身读**（`missing_tickers`），不另存一份 ⇒ `_PRICE_CACHE`
+    命中时同样成立。**记录数也比**：票一只不缺、但记录被 `len(s) < 26` 跳过（新上市形状）同样判 partial。
+  - `print_benchmark`：表头多一行 `format_price_coverage()`（ok ⇒ `经典因子行情覆盖 52/52 只（记录 1351/1351） ✅`；
+    partial ⇒ 点名缺的票 +「与综合分**不是同一样本**」；unavailable ⇒「三行缺席」）；partial 时「判定：综合分 vs
+    最佳经典因子」行尾附「经典因子只覆盖 x/y 条记录，不是同一样本」。`--json` 的 `benchmark` 多 `price_coverage`。
+
+### 为什么不接 Twelve Data 兜底（`close_correction` v0.45.257 接了）
+那边要的是官方**原始**收盘（`auto_adjust=False`），与数据源无关；这里是 `auto_adjust=True` 的**复权**价，而
+`twelve_data._fetch_rows` 不传 `adjust`，其默认复权口径在 API 规格里没写明（**待验证**）。同一个横截面里混两个源，
+每只票的因子值取决于它碰巧由谁供数——正是本版要消灭的「随丢哪只而变」。观测到的故障是随机、瞬时、重试一轮即补的，
+不是整批限流。缺口如实报告，不用另一种口径填。理由写进 `_load_prices` docstring。
+
+### Tests
+- 新 `tests/test_ic_diagnostics_price_coverage.py`（21 条，全离线：替换 `yfinance.download`，返回形状照 1.2 的
+  `(Price, Ticker)` 两层列名 + 旧版单票平列名）：缺失两形状（整列 NaN / 无列）× 重试响应两形状的补齐；重试仍 NaN /
+  重试抛异常 ⇒ stderr 点名且恰好重试一轮；**负对照**（完整面板 ⇒ 只下载一次、stderr 为空）；全空 ⇒ None 且不逐只重试；
+  面板覆盖率与面板实情一致（经典因子行每天确实 7 只、综合分 8 只）；票全在但记录不足 ⇒ partial；`main()` 文本表头 /
+  判定行 / `--json` 端到端 + 完整面板负对照（并断言判定行确实印出——否则「不含」是空转）。
+- `tests/test_ic_diagnostics.py`、`tests/test_ic_diagnostics_benchmark_close_target.py`：5 处调用点改拆二元组；
+  「行情不可用」那条加断言 `coverage.status == "unavailable"`。
+- **变异 12 条全红**（`PYTHONDONTWRITEBYTECODE=1`，每轮删 pyc，原文存内存、按字节写回、还原后 sha256 核对 + 重跑）：
+  去掉重试 / 只判列在不在 / 仍缺误报「补齐」/ 全空也逐只重试 / 不缺也进报告分支 / status 不看记录数 /
+  表头不印 / JSON 丢字段 / 判定行不附注 / 单票平列名不拍平 / 重试后列重复 / 面板侧 missing 恒空。
+  其中「status 不看记录数」「判定行不附注」两条**在补写对应测试之前是绿的**（前者无夹具覆盖；后者表头也有
+  「不是同一样本」，一条断言同时被两处满足）——跑变异前先按变异清单补了这两条。
+- 联网实测（生产库 `sqlite3.backup()` 快照，1351 行 / 52 只）：`--benchmark --horizon t7` ⇒ 表头 `52/52 只（记录 1351/1351） ✅`，
+  20日动量 +0.1683（t +4.60，3/4）与 v0.45.328 表逐位一致；本 session 4 次批量下载都完整（间歇性故障未复现）；
+  注入 `ZZQXNOTREAL` ⇒ 下载调用 `[批量 53, 'ZZQXNOTREAL']`、stderr 点名、其余 52 只完好。
+- ruff 过；全套 5493 passed / 1 failed —— 唯一的红是 `test_economic_calendar.py::TestCoverageHorizon`（BLS 2027 日程尚未发布的日期驱动告警，设计如此，与本版无关：该文件不 import ic_diagnostics / yfinance）。
+
+### 发现未处理
+- `build_benchmark_panel` 调 `_load_prices(tickers, "2025-11-01", dates[-1])`，而 `yf.download` 的 `end` **不含当日** ⇒
+  **最后一个预测日**的经典因子只用到 d−1 收盘，其余日期含 d 当日收盘。快照上是 105 天里 1 天（30/1351 行）。
+  口径不一致但影响面小；改它会挪动全部经典因子数字的最后一天，留作单独一版。
 
 ## [0.45.331] — 2026-09-23 — 占位（进行中：permuted_weekly_var docstring 与 ic_power_report 修正 2 的「并列压低置换方差」理由与精确结果 1/(n−1) 矛盾——复核并改正叙述）
 
