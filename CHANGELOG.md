@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.313] — 2026-09-22 — 占位（进行中：第二轮 `/code-review high` 复检 v0.45.311——真实执行发现 `deploy_static_to_ghpages` 早就缺"全部 hash-object 失败"守卫，会把 gh-pages 推成空树、日志却打印"成功"；顺带修 git push 无超时/日志计数失真/日志级别不一致/回落函数前提未强制/JS 字面量转义）
+
 ## [0.45.312] — 2026-09-22 — 占位（进行中：PR #8 CI 修复——`test_ghpages_data_root_migration.py` 的 single-branch clone 测试缺显式 git 身份，本机隐式回落蒙混过关，CI（Ubuntu 跑者）必现失败）
 
 ## [0.45.311] — 2026-09-22 — Changed/Fixed：补齐 v0.45.310「未处理的发现」5 条——核心白名单/回落逻辑去重、`chart.umd.min.js` 全仓库单一真相源、`resolve_gh_pages_parent` 的 fetch/ls-remote 加超时、`_sync_ghpages` 逐文件容错
