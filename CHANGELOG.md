@@ -83,7 +83,83 @@ nfp/cpi 只覆盖到 2026-12 初、剩 72 天 < 阈值 90）——按日期到�
 - `final_score_dilution.stat()` 仍是 erfc 正态 p（其 banner 已写明、memory `alpha-hive-t-vs-normal-p` 已登记）。
   本脚本的拥挤度那一行就是它会在哪里咬人的实例（0.040 vs 0.052）。脚本默认拒绝运行，未动。
 
-## [0.45.328] — 2026-09-23 — 占位（进行中：ic_diagnostics.build_benchmark_panel 前瞻收益改用 FORWARD_CLOSE_COL / 尊重 --target）
+## [0.45.328] — 2026-09-23 — Fixed：`ic_diagnostics --benchmark` 的前瞻收益一直写死 `f"price_{horizon}"`（t7 = SL/TP 离场价）且不认 `--target`——同一次默认运行里维度表与基准表对同一维度印两个 IC；改为与 `load_daily_ic` 共用一处取数（close_t7），综合分从「✅ 超出噪音地板」落回噪音带内
+
+v0.45.326「发现未处理」①（v0.45.324 发现）。`price_t7` 当收盘价读的第四个读者，与 v0.45.19 / v0.45.321 / v0.45.326 同一误解；「调权重前必跑」的正是这个 `--benchmark`（模块注释「使用规则」）。
+
+### 核实（2026-09-23 生产库 `sqlite3.backup()` 快照，只读；checked_t7 样本 2026-02-25 ~ 09-11）
+- `build_benchmark_panel(db, target_col, checked_col, horizon, min_width)`：`price_col = f"price_{horizon}"`，`target_col` 参数从未被读，也没有 `target` 参数 ⇒ `main()` 的 `--target` 传不进来。
+- **同一次默认运行（`--target close`）里两张表对同一维度印出不同的数**：维度表（`load_daily_ic`，close_t7）sentiment +0.1042 / risk_adj −0.1129 / odds +0.0301；基准表 `└` 行 +0.0738 / −0.1344 / +0.0475。
+- 修复前 `--target close` 与 `--target price` 的基准块**逐位相同**（`--target` 无效）；修复后 `--target price` 的基准块与修复前默认输出**逐位相同** ⇒ **v0.45.328 之前所有 t7 `--benchmark` 输出都是 price_t7 口径，且可用 `--target price` 原样复现**。
+- 样本：price 口径 1343 行、close 口径 1351 行（8 行 price_t7 为空）；两列都有值的行里 547 行 `|price_t7 − close_t7| > 0.01`。
+- 截断指纹（`truncation_share`）：price_t7 87.6%（540 行 SL/TP）、close_t7 0.2%、price_t30 0%。
+- **t30 不受影响**：前后逐位相同（price_t30 本来就是收盘价，见 `FORWARD_CLOSE_COL`）。
+
+### Fixed
+- `ic_diagnostics.forward_return_sql(target, target_col, horizon)` + `row_forward_return()`：**前瞻收益的唯一取数入口**，`load_daily_ic` 与 `build_benchmark_panel` 共用。只把第二个读者的列改对，两份 SQL 还会在下一次分叉；共用才堵得住。close 口径调用时查 `FORWARD_CLOSE_COL`，未登记 horizon 抛 `ValueError`（不猜 `price_{h}`）。
+- `build_benchmark_panel` 新增 `target="close"`（语义同 `load_daily_ic`：close / price 仅复现历史 / path 读 `target_col`），`main()` 传入 `--target`。
+- docstring 与「基准套件」注释写明：v0.45.328 之前的 t7 基准是截断口径。
+
+### Changed
+- 截断指纹 `truncation_share` / `TRUNCATION_ALARM` / `warn_if_truncated` 从 `signal_archive` 搬到 `ic_diagnostics`（`FORWARD_CLOSE_COL` 旁）。维度表与基准表在 close 口径上都查一次；price / path 口径不告警（本来就标明含截断，那里告警是恒真的噪音）。`signal_archive._truncation_share` 保留名字、只剩委托（`experiments/dim_ic_forward_test.py` 按名调用），`load_panel` 改调同一个 `warn_if_truncated`——两边一个阈值、一个探测器，没有第二份拷贝。
+- 输出点名终点列：文本基准表头 `目标=close_t7 相对 price_at_predict…（与上方维度表同一口径）`；`--json` 新增 `meta.end_col`、`benchmark.end_col` / `benchmark.target_mode`。
+
+### 前后对照（t7，同一快照、`--draws 200`（main 现行默认）、同一进程同一份完整行情 52/52 只；**只作记录，不据此改任何权重或评分代码**）
+
+| 因子 | 旧（price_t7） | 新（close_t7） |
+|---|---|---|
+| 噪音地板 \|IC\| p95 | 0.0659 | 0.0685 |
+| 🐝 综合分 final_score | −0.0686（t −2.48，2/4，**✅ 超出**） | **−0.0310**（t −1.10，0/4，**❌ 噪音带内**） |
+| └ signal | −0.0886（1/4，✅） | −0.0923（1/4，✅） |
+| └ catalyst | +0.0433（0/4，❌） | +0.0510（0/4，❌） |
+| └ sentiment | +0.0738（2/4，✅） | **+0.1042**（3/4，✅） |
+| └ odds | +0.0475（1/4，❌） | +0.0301（0/4，❌） |
+| └ risk_adj | −0.1344（4/4，✅） | −0.1129（3/4，✅） |
+| 📈 20日动量 | +0.1142（t +2.90，1/4） | +0.1683（t +4.60，3/4） |
+| 📉 5日反转 | −0.0071（1/4） | −0.0298（0/4） |
+| 🌪 低波动 | +0.0479（0/4） | +0.0365（0/4） |
+| 🎲 随机（单次） | −0.0258（0/4） | +0.0350（1/4） |
+| 判定行 | 系统未超过经典因子；**不印**「综合分未超出噪音地板」 | 系统未超过经典因子；**印**「⚠️ 综合分未超出噪音地板」 |
+
+- 修复后 5 维 `└` 行与维度表**逐位相同**；旧口径的综合分「✅ 超出地板」整个是截断造的。
+- **按 v0.45.324 的判定复核**（`claude/practical-bun-4c8e91` 与本版试合并，无冲突；2000 次抽样 + MC 带，离线只算系统自身）：旧口径综合分 0.0686 落带内（0.065–0.070）⇒ ◐；新口径 0.0310 远在带下（0.063–0.068）⇒ ❌。sentiment / risk_adj / signal 两种口径都 ✅。结论不依赖抽样数。
+- ⚠️ 20日动量的跳升**别读成「动量有效」**：不重叠周 t 只有 +1.76（3/4 里过的是会被重叠抬高的三个口径）；同一因子在 90 只 × 861 交易日上是 +0.011、0/4（见 auto-memory `alpha-hive-weight-learning-loop.md`）。它只说明截断也压扁了基准对照这一侧。
+- 与既有结论一致：综合分无效（`alpha-hive-tradeable-signal.md`）、sentiment 是唯一有证据的维度。**本版不改任何权重**，也不构成改权重的新证据——维度表那一侧本来就是 close 口径，本版只是让基准表跟上它。
+
+### Added
+- `tests/test_ic_diagnostics_benchmark_close_target.py`（24 条）。核心夹具让 price_t7 / close_t7 给出**相反的** IC 符号（高分先破止损再收涨、低分先触止盈再收跌），final_score 与 5 维都取同一个分数、各被检验一次。另有夹具自检、三口径单行取值、path 读传入的 `target_col`、price_t7 为空仍入样本、哨兵列（调用时查表）、t30 无 close_t30 列、未登记 horizon 抛错、**维度表与基准表逐日逐维度 IC 相等（三口径）**、`main()` 的 `--target` 接线与点名终点列（JSON / 文本）、截断指纹正负对照（基准表 / 维度表 / price 口径不误报 / signal_archive 委托）。
+- `tests/test_ic_diagnostics.py::test_price_load_failure_does_not_crash` 夹具补 `close_t7` 列：原夹具只建 price_t7，恰因当时读的就是它——**夹具本身编码了这个 bug**。另：该文件的 `fake_db` 刻意让 close_t7 == price_t7，所以此前没有任何测试钉住「维度表读的是 close」，现由新文件 `test_dimension_table_itself_reads_close` 补上。
+
+变异台账（全部真跑：`PYTHONDONTWRITEBYTECODE=1`、每轮 `find … -name '*.pyc' -delete`、`--maxfail=1000`、每轮 69 条全收集、还原后 `cmp` 逐字节一致，收尾 69 绿）：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M1 | 改动前两份原文件（`git show HEAD:`） | 19 红；核心条红在断言本身（final_score IC = −0.828），CLI close 条同 |
+| M2 | 基准表只换回 price 列 | 11 红 |
+| M3 | 基准表不认 target（恒 close） | 7 红（price 复现历史 / path / CLI price） |
+| M4 | close 写死 `"close_t7"`（不查表） | 2 红：哨兵列 + t30 |
+| M5 | `main()` 不把 `--target` 传给基准表 | 1 红：CLI price |
+| M6 | 基准表不调截断指纹 | 1 红 |
+| M7 | 基准表对所有口径都告警 | 4 红（price 不误报那条是真信号；path 三条红在 end_col=None 的 SQL 报错） |
+| M8 | path 写死 `return_{h}`（不读 `target_col`） | 1 红 |
+| M9 | 维度表换回 price 列 | 4 红 |
+| M10 | 维度表不调截断指纹 | 1 红 |
+| M11 | `sa._truncation_share` 桩成 (0, 0.0) | 1 红 |
+| M12 | `sa.load_panel` 不调告警 | 1 红（signal_archive 既有指纹测试） |
+
+全套 5446 绿 1 红：`test_economic_calendar::TestCoverageHorizon`（BLS 2027 日程未发布）——按设计的定期告警，与本版无关（v0.45.326 已记）。
+
+### 发现未处理
+- **`_load_prices` 部分下载失败是静默的**：本版 5 次联网跑里 4 次 yfinance 各丢 1–2 只（AVGO+RKLB / T+MSTR / CVX / ADBE，随机），只有 yfinance 自己一行 stderr，`_load_prices` 把残缺行情当成功返回 ⇒ 经典因子行少算几只票、**表上看不出来**（20日动量旧口径 0.0955–0.1142 随丢哪只而变）。上表用逐只补拉拼出的完整行情。「失败没传导到下游」同形，未修。
+- `--json` 在含 t30 的 close 口径下，stdout 先印一行 `ℹ️ t30: 终点价用 price_t30…` 再印 JSON ⇒ 输出不是合法 JSON。仓内无消费方，未修。
+- 旧 t7 基准数字的出处（截断口径，**未改写**，引用前先看本条）：`self_analysis_briefs/diagnostic_2026-07-30_scoring_quality.md`（综合分 −0.0903、噪音地板 0.077 等）、auto-memory `alpha-hive-weight-learning-loop.md` 的「首次结果（T+7，73 交易日）综合分 |IC| 0.090 < 20日动量 0.135」（memory 已加注）。
+- `experiments/ic_power_analysis.py`（v0.45.326 读者清单②）由 v0.45.327 另一 session 处理，本版未碰。
+
+### 教训
+v0.45.19 改对了 `load_daily_ic`，同一文件 150 行外的 `build_benchmark_panel` 各拼各的 SQL，没跟着改——**同一个语义有两份实现时，修一份等于制造分叉**。本版不是「把第二份也改对」，而是删掉第二份：两个读者走同一个 `forward_return_sql`，外加一条逐日逐维度比两张表的测试，谁再分叉谁红。截断探测器同理：v0.45.321 在 signal_archive 里写了一份，本版要在 ic_diagnostics 用时搬过来共用，不抄第二份。
+另一个形状：出错读者的测试夹具**只建了它读的那一列**（price_t7），于是正确的列在测试里根本不存在——测试不是没测到 bug，是把 bug 写成了前提。
+
+---
 
 ## [0.45.327] — 2026-09-23 — Fixed：`experiments/ic_power_analysis.py` 的前瞻收益一直读 SL/TP 截断的 `price_t7`（离场价）——`price_t7` 读者清单上的第四个；改查 `FORWARD_CLOSE_COL`（close_t7）。头条「扩池 5.18×」不变，「signal 是唯一检测到时间变异的维度、只有 1.78×」是截断造的，撤回
 
