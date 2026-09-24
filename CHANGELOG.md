@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.337] — 2026-09-23 — 占位（进行中：v0.45.332 二次检查——价格因子构造失败被误报成「行情不可用」+ CHANGELOG 调用点计数更正）
+
 ## [0.45.336] — 2026-09-23 — Fixed：`ic_diagnostics --benchmark` 下截断告警印两遍（v0.45.328 二次检查记下的小瑕疵）——维度表与基准表各查一次同一指纹；`main()` 关掉第二次，直接调 `build_benchmark_panel` 的人默认仍查
 
 v0.45.328 让 `load_daily_ic` 与 `build_benchmark_panel` 在 close 口径上都查截断指纹（`warn_if_truncated`）。`main()` 带 `--benchmark` 时两者对**同一库、同一 (终点列, checked 列)** 各查一次 ⇒ close 列真被写成离场价时，同一行告警连印两遍（每个 horizon）。指纹 SQL 只取决于这两列（`checked=1 AND 终点列 IS NOT NULL AND exit_price IS NOT NULL AND exit_reason IN ('SL','TP')`），与两边各自的行集（维度表多一个 `dimension_scores IS NOT NULL`）无关——第二次查不可能给出不同答案。
