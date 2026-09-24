@@ -509,7 +509,8 @@ def build_benchmark_panel(db_path: Path, target_col: str, checked_col: str,
     指纹只取决于 (终点列, checked 列)，与两边各自的行集无关，第二次查只会把同一行告警再印一遍。
 
     v0.45.332：第二个返回值是经典因子（📈📉🌪）的覆盖率 —— `status` ok / partial /
-    unavailable、`n_priced`/`n_tickers`、`missing`、`n_factor_records`/`n_records`。
+    unavailable（没拿到行情）/ factor_error（行情拿到了、构造因子时抛异常；v0.45.337 起与前者分开）、
+    `n_priced`/`n_tickers`、`missing`、`n_factor_records`/`n_records`。
     此前行情缺票时这三行只在其余标的上算、与综合分不是同一样本，输出里无从得知
     （见 `_load_prices`）。**返回形状有意改成二元组**：旧调用方直接拿它当面板用会当场报错，
     而不是静默丢掉覆盖率。
@@ -597,8 +598,12 @@ def build_benchmark_panel(db_path: Path, target_col: str, checked_col: str,
 
     # 记录数也要比：缺票之外，`len(s) < 26` 等过滤同样会让经典因子少算一截
     n_factor = len(mom20) if mom20 is not None else 0
-    if px is None or mom20 is None:
+    if px is None:
         status = "unavailable"
+    elif mom20 is None:
+        # v0.45.337：行情拿到了、是上面构造因子时抛了异常 —— 不能并进 unavailable，
+        # 否则表头印「行情不可用」，把人引去查网络/限流
+        status = "factor_error"
     elif missing or n_factor < len(recs):
         status = "partial"
     else:
@@ -618,6 +623,9 @@ def format_price_coverage(cov: Dict) -> str:
         return ""
     if cov["status"] == "unavailable":
         return "⚠️ 行情不可用 —— 经典因子（📈📉🌪）三行缺席，下表只有系统自身与随机"
+    if cov["status"] == "factor_error":
+        return (f"⚠️ 行情已拿到（{cov['n_priced']}/{cov['n_tickers']} 只），但价格因子构造失败"
+                f"（原因见 stderr）—— 经典因子（📈📉🌪）三行缺席")
     frac = (f"{cov['n_priced']}/{cov['n_tickers']} 只"
             f"（记录 {cov['n_factor_records']}/{cov['n_records']}）")
     if cov["status"] == "ok":

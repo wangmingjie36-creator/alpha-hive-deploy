@@ -266,6 +266,25 @@ class TestBenchmarkCoverage:
         panel, cov = _panel(_build_db(tmp_path))
         assert cov["status"] == "unavailable" and cov["n_priced"] == 0
         assert MOM not in panel
+        assert "行情不可用" in icd.format_price_coverage(cov)
+
+    def test_factor_construction_error_is_not_reported_as_missing_prices(
+            self, tmp_path, monkeypatch, capsys):
+        """行情齐全、构造因子时抛异常 ⇒ 不能印成「行情不可用」（v0.45.337）。
+
+        v0.45.332 把这种情况并进了 unavailable：`n_priced` 明明是 8/8，表头却说行情不可用，
+        把读表的人引去查网络 / 限流 —— 真因只在 stderr 那一行里。
+        """
+        px = _closes(TICKERS, START, DAYS[-1])
+        px.index = px.index.strftime("%Y-%m-%d")   # 非 DatetimeIndex ⇒ `.loc[:Timestamp]` 抛 TypeError
+        monkeypatch.setattr(icd, "_load_prices", lambda *a, **k: px)
+        panel, cov = _panel(_build_db(tmp_path))
+        assert "价格因子构造失败" in capsys.readouterr().err, "夹具没打进 except 分支"
+        assert cov["status"] == "factor_error"
+        assert (cov["n_priced"], cov["missing"], cov["n_factor_records"]) == (8, [], 0)
+        assert MOM not in panel
+        line = icd.format_price_coverage(cov)
+        assert "行情不可用" not in line and "构造失败" in line and "8/8" in line
 
 
 def _run_main(monkeypatch, db, *extra):

@@ -36,7 +36,49 @@
 
 ---
 
-## [0.45.337] — 2026-09-23 — 占位（进行中：v0.45.332 二次检查——价格因子构造失败被误报成「行情不可用」+ CHANGELOG 调用点计数更正）
+## [0.45.337] — 2026-09-23 — Fixed：v0.45.332 二次检查——价格因子构造抛异常时 `--benchmark` 表头误报「行情不可用」（新 status `factor_error`）；另核实 / 更正 v0.45.332 的三处文字，并量化「end 不含当日」（结论：不值得单独开版）
+
+### Fixed
+- `ic_diagnostics.build_benchmark_panel`：v0.45.332 把「没拿到行情」（`px is None`）与「行情拿到了、构造因子时抛异常」
+  （`except` 分支把 `mom20` 置 None）并成同一个 `unavailable`，表头印「⚠️ 行情不可用」。复现：8/8 只行情齐全
+  （`n_priced: 8`），非 DatetimeIndex 让 `.loc[:Timestamp]` 抛 TypeError ⇒ 表头照样说行情不可用，把读表的人引去查
+  网络 / 限流，真因只在 stderr 一行。**修可见性的那一版自己新造了一个「把一种失败误报成另一种」**（CLAUDE.md 硬检查项同形）。
+  现拆成 `unavailable`（没拿到行情）与 `factor_error`（`⚠️ 行情已拿到（8/8 只），但价格因子构造失败（原因见 stderr）
+  —— 经典因子三行缺席`）；`--json` 的 `price_coverage.status` 随之多一个取值。
+
+### 二次检查查过、不是 bug 的
+- `n_factor_records = len(mom20)` 数的是去重后的 (ticker, date) 键、`n_records` 数的是行——有重复行时全覆盖也会被判 partial。
+  **不可达**：`predictions` 有 `UNIQUE(date, ticker)`，日期是纯 `YYYY-MM-DD`，快照 0 重复；即便可达也是「多报 partial」
+  （出声的方向），未改。
+- 「失败票 = 列在、整列 NaN」此前只凭注入不存在代码（404）一条实测。读 yfinance 1.2.0 源码核实：`multi._download_one`
+  对**任何**异常（含 429 `YFRateLimitError`、超时）都存 `utils.empty_df()`，`history()` 隐藏异常时的各条 return 也是它，
+  而 `empty_df` 带 NaN 的 `Close` 列 ⇒ 所有失败路径汇合成同一形状，404 探针恰好有代表性。
+- `experiments/ic_power_analysis.py`：整批全空现返回 None ⇒ 走它既有的「⚠️ 行情不可用，降级到记忆里的 N_eff」
+  （`source=on_record_fallback`），可见。仓库内外无其他 `build_benchmark_panel` 调用方（.md 里只是文字引用）；
+  同日 v0.45.336（另一 session）在 v0.45.332 之后加的 `check_truncation` 参数基于二元组返回，兼容。
+
+### 更正 v0.45.332 条目（已就地改并注明）
+- 「5 处调用点改拆二元组」→ 实为 **4 处**（第 5 处在 `pytest.raises` 里、返回前就抛）。
+
+### 「end 不含当日」量化（v0.45.332 发现未处理；非代码）
+`build_benchmark_panel` 传 `end=dates[-1]`，yfinance 的 `end` 不含当日 ⇒ 最后一个预测日的经典因子只到 d−1 收盘，其余日含 d 当日收盘。
+- **哪边对**：扫描在 17:00 ET 收盘后跑，`price_at_predict` 校正为 d 官方收盘；生产库快照对账 1232/1241 行 = d 当日收盘、
+  0 行 = 前一交易日 ⇒「含 d」才对（与前瞻收益起点无缝），**其余 104 天无前视**，只有最后一天不一致。
+- **影响**（行情只拉一次、同一份喂两版；现状版复现 v0.45.328 的 +0.1683）：20日动量 +0.1683→+0.1683、
+  5日反转 −0.0298→−0.0281、低波动 +0.0365→+0.0362；周 t 与通过数全不变（09-11 是周五，该周代表日是 09-08）；
+  噪音地板判定与「综合分 vs 最佳经典因子」判定全不翻。
+- **上界**：日度 IC 是 N=94 天的均值，只改一天最多挪 2/N≈0.021，小于三因子到噪音地板的最近距离 0.032 ⇒ 这两个
+  基于 IC 的判定在本数据上不可能翻，且界随 N 缩小。⚠️ 该界**不管**「通过 x/4」（看 |t|≥2）——某口径 t 贴着 2 时
+  一天也可能翻它（本数据实测未变）。
+- **结论：不值得单独开版**。修法一行（`end` 传 `dates[-1]`+1 天；`dates[-1]` 已过 T+7，无未完成 K 线风险），
+  有人再动 `build_benchmark_panel` 时顺手带上。
+
+### Tests
+- `tests/test_ic_diagnostics_price_coverage.py`：新 `test_factor_construction_error_is_not_reported_as_missing_prices`
+  （先断言 stderr 真有「价格因子构造失败」——证明夹具打进了 except 分支）；`test_unavailable_prices` 加断言表头说
+  「行情不可用」——两个方向都钉住（因子错误不许冒充缺行情；真缺行情仍须如实说）。
+- 变异 15 条全红（v0.45.332 的 12 条重跑 + 新 3 条：factor_error 并回 unavailable / factor_error 无专属文案 /
+  unavailable 文案丢「行情不可用」——各恰好被对应的新断言杀死）。ruff 过；全套 5538 passed / 1 failed —— 唯一的红仍是 `test_economic_calendar.py::TestCoverageHorizon`（BLS 2027 日程未发布的日期驱动告警，与本版无关）。
 
 ## [0.45.336] — 2026-09-23 — Fixed：`ic_diagnostics --benchmark` 下截断告警印两遍（v0.45.328 二次检查记下的小瑕疵）——维度表与基准表各查一次同一指纹；`main()` 关掉第二次，直接调 `build_benchmark_panel` 的人默认仍查
 
@@ -100,7 +142,7 @@ v0.45.328「发现未处理」。「失败没传导到下游 / 谁会红？」�
 - `yf.download(52 只)["Close"]` 部分失败时**不抛异常**：v0.45.328 当天连跑 5 次，4 次各随机丢 1–2 只
   （AVGO+RKLB / T+MSTR / CVX / ADBE），唯一痕迹是 yfinance 自己一行 stderr `N Failed download(s)`。
   `_load_prices` 只在异常时降级 ⇒ 残缺面板照常返回。
-- 本版联网实测失败票的真实形状：**列在、整列 NaN**（注入不存在的代码 `ZZQXNOTREAL`，1.2.0）。
+- 本版联网实测失败票的真实形状：**列在、整列 NaN**（注入不存在的代码 `ZZQXNOTREAL`，1.2.0；v0.45.337 读源码核实所有失败路径同形，见该条）。
   所以 `build_benchmark_panel` 的 `if t not in px.columns` 从来接不住它，真正把它静默跳过的是
   `dropna()` 之后的 `len(s) < 26` ⇒ 📈20日动量 / 📉5日反转 / 🌪低波动 三行少算几只票、与综合分不是同一样本，
   输出里无从得知（20日动量旧口径 IC 0.0955–0.1142 随丢哪只而变）。
@@ -136,7 +178,7 @@ v0.45.328「发现未处理」。「失败没传导到下游 / 谁会红？」�
   重试抛异常 ⇒ stderr 点名且恰好重试一轮；**负对照**（完整面板 ⇒ 只下载一次、stderr 为空）；全空 ⇒ None 且不逐只重试；
   面板覆盖率与面板实情一致（经典因子行每天确实 7 只、综合分 8 只）；票全在但记录不足 ⇒ partial；`main()` 文本表头 /
   判定行 / `--json` 端到端 + 完整面板负对照（并断言判定行确实印出——否则「不含」是空转）。
-- `tests/test_ic_diagnostics.py`、`tests/test_ic_diagnostics_benchmark_close_target.py`：5 处调用点改拆二元组；
+- `tests/test_ic_diagnostics.py`、`tests/test_ic_diagnostics_benchmark_close_target.py`：**4 处**调用点改拆二元组（第 5 处在 `pytest.raises` 里、返回前就抛，无需改；v0.45.337 更正，原写「5 处」）；
   「行情不可用」那条加断言 `coverage.status == "unavailable"`。
 - **变异 12 条全红**（`PYTHONDONTWRITEBYTECODE=1`，每轮删 pyc，原文存内存、按字节写回、还原后 sha256 核对 + 重跑）：
   去掉重试 / 只判列在不在 / 仍缺误报「补齐」/ 全空也逐只重试 / 不缺也进报告分支 / status 不看记录数 /
@@ -151,7 +193,7 @@ v0.45.328「发现未处理」。「失败没传导到下游 / 谁会红？」�
 ### 发现未处理
 - `build_benchmark_panel` 调 `_load_prices(tickers, "2025-11-01", dates[-1])`，而 `yf.download` 的 `end` **不含当日** ⇒
   **最后一个预测日**的经典因子只用到 d−1 收盘，其余日期含 d 当日收盘。快照上是 105 天里 1 天（30/1351 行）。
-  口径不一致但影响面小；改它会挪动全部经典因子数字的最后一天，留作单独一版。
+  口径不一致但影响面小；改它会挪动全部经典因子数字的最后一天，留作单独一版。→ **v0.45.337 已量化：不值得单独开版**（见该条）。
 
 ## [0.45.331] — 2026-09-23 — Fixed（文档）：`permuted_weekly_var` docstring 与 `ic_power_report.md` 修正 2 / 3 的「并列压低 Spearman 置换方差」理由不成立——置换方差恒为 1/(n−1)；报告表里 0.127 vs 0.137 是骨架差 + 100 次 MC 噪声，并列贡献 0。另发现 N_eff 外推与零模型不自洽，头条 5.18× 存疑（未改）
 
