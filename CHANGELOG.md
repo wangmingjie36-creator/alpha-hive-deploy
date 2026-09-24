@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.335] — 2026-09-23 — 占位（进行中：v0.45.322 二次检查 6 条修复——定时任务读旧位置、冻结数据被 git 同步误报、copy 不可续跑等）
+
 ## [0.45.334] — 2026-09-23 — 占位（进行中：断开 GexRegimeModifier 对 rule_score 的 ±0.8 直接加减分（保留 RegimeWeightAdjuster 路由），登记世代边界）
 
 ## [0.45.333] — 2026-09-23 — 占位（进行中：gamma/delta 卖权行权价选择器——对标 GEXBot 的水平地图（重定价扫描 zero gamma / 净 GEX majors / DEX / vanna·charm）+ 单腿/价差/宽跨候选 + 前向击穿账本）
