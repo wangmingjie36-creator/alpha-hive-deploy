@@ -260,10 +260,10 @@ v0.45.326「有意没改」的那一半。v0.45.326 只换收益列，脚本印�
   全仓零程序化读者，已 grep）；新 `momentum_ic` / `crowding_ic`（含 `weekly`、`daily_mean_overlapping`、`verdict`、
   `pooled_across_dates`）、`new_accuracy_edge_vs_always_bullish`、`ic_method`、`alpha`、`date_range`。
 - 池化 IC 仍印，标「跨日期混算，主要在测『哪天涨』；只作对照、不参与判定」。
-- 样本含 ≥ `dim_ic_protocol.FORWARD_START`（2026-09-28）的日期时印一行提示：本输出只作探索、不构成维度 IC
+- 样本含 ≥ `dim_ic_protocol.FORWARD_START`（调用时读，不写死；同日 v0.45.330 修订 1 已由 09-28 推迟到 10-12，脚本自动跟随）的日期时印一行提示：本输出只作探索、不构成维度 IC
   预注册的证据，别为「看趋势」反复跑（协议 §8）。就绪度闸的 `next_step` 将来正会在窗口内推荐跑本脚本。
 
-### 重跑（2026-09-23 生产库 `sqlite3.backup()` 只读快照；配对 1237 条，03-10 ~ 09-11，**0 条 ≥ 09-28**）
+### 重跑（2026-09-23 生产库 `sqlite3.backup()` 只读快照；配对 1237 条，03-10 ~ 09-11，全部早于预注册窗口起点）
 
 | | 周序列（23 周） | 日度均值（重叠，仅参照） | 池化（仅对照） | 新判定 | 旧脚本印 |
 |---|---|---|---|---|---|
@@ -315,6 +315,11 @@ nfp/cpi 只覆盖到 2026-12 初、剩 72 天 < 阈值 90）——按日期到�
     现行权重重算 0.087→0.101），且横幅已声明正态近似、`test_experiments_pooled_guard` 钉住该声明 ⇒ 不改行为。
     只在 `stat()` 上加注释「照抄本文件口径时别抄这里的 p」，指向 `ml_expected_return_replay.weekly_t_test`——
     防的是有人照 memory 抄「标准实现」时把 erfc 一起抄走。
+- 二次检查（同日）：代码无功能性 bug——依赖的 `ic_diagnostics.spearman` / `subsample_non_overlapping` /
+  `FORWARD_CLOSE_COL` 在并行的 v0.45.328 / v0.45.332 里未动，同快照重跑 JSON 除 `dim_ic_forward_start` 外逐字段相同；
+  无重复 (date, ticker)；4 个周日从未被选作周代表日。改了两处**文档**：①本条与报告里写死的「09-28」
+  （v0.45.330 已推迟窗口，脚本读常量没受影响，写死数值的文字过期了——正是「文档只存指针」要防的）；
+  ②补记 `momentum_5d` 0.0 占位（101 行，两个周一被选作周代表日）的敏感性：剔除后 +0.004（p=0.943），判定不变。
 
 ## [0.45.328] — 2026-09-23 — Fixed：`ic_diagnostics --benchmark` 的前瞻收益一直写死 `f"price_{horizon}"`（t7 = SL/TP 离场价）且不认 `--target`——同一次默认运行里维度表与基准表对同一维度印两个 IC；改为与 `load_daily_ic` 共用一处取数（close_t7），综合分从「✅ 超出噪音地板」落回噪音带内
 
