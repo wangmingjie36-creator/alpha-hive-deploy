@@ -286,6 +286,10 @@ nfp/cpi 只覆盖到 2026-12 初、剩 72 天 < 阈值 90）——按日期到�
 ### 发现未处理
 - `final_score_dilution.stat()` 仍是 erfc 正态 p（其 banner 已写明、memory `alpha-hive-t-vs-normal-p` 已登记）。
   本脚本的拥挤度那一行就是它会在哪里咬人的实例（0.040 vs 0.052）。脚本默认拒绝运行，未动。
+  - 跟进（同日，仅注释）：评估过改不改——同快照 8 行 p 换 t(23) 后**无一跨 0.05**（sentiment 0.0034→0.0076，
+    现行权重重算 0.087→0.101），且横幅已声明正态近似、`test_experiments_pooled_guard` 钉住该声明 ⇒ 不改行为。
+    只在 `stat()` 上加注释「照抄本文件口径时别抄这里的 p」，指向 `ml_expected_return_replay.weekly_t_test`——
+    防的是有人照 memory 抄「标准实现」时把 erfc 一起抄走。
 
 ## [0.45.328] — 2026-09-23 — Fixed：`ic_diagnostics --benchmark` 的前瞻收益一直写死 `f"price_{horizon}"`（t7 = SL/TP 离场价）且不认 `--target`——同一次默认运行里维度表与基准表对同一维度印两个 IC；改为与 `load_daily_ic` 共用一处取数（close_t7），综合分从「✅ 超出噪音地板」落回噪音带内
 
