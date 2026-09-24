@@ -5,7 +5,30 @@
 
 ---
 
-## [0.45.342] — 2026-09-24 — 占位（进行中：数据仓库备份范围与 main 对齐——阶段 5 后 report_snapshots 等将零异地副本）
+## [0.45.342] — 2026-09-24 — Fixed：数据仓库备份范围与 main 对齐——阶段 5 后 `report_snapshots/` 与报告文件将零异地副本（排除理由被阶段 5 悄悄作废）；加守卫防两份清单再漂移
+
+阶段 6 准备（只读调查）时发现，属阶段 5 漏洞，须在 09-26 搬迁前合入。用户 09-24 批准「与 main 对齐」的范围。
+
+**问题**：`data_backup/export.py` 把「`report_snapshots/` 与根目录已跟踪报告」排除在数据仓库备份外，理由是「已被代码仓库 git 跟踪并推送」。
+阶段 5 让代码检出里的被跟踪数据原地冻结、新产物只写数据根 ⇒ 日报白名单提交再也提交不到新内容 ⇒
+09-26 起新的 `report_snapshots/`（weekly_optimizer / self_analyst 的 T+7 样本）**既不进 main 也不进数据仓库**；报告类至少还有 gh-pages 一份，快照连这个都没有。
+理由失效时没有任何东西会红——两份清单（迁移分类表 / 备份范围）各自维护、互不知道。
+
+### Fixed
+- `data_backup/export.py`：`STATE_DIRS` 加 `report_snapshots` / `paper_portfolio_state_backup` / `reports`；`ROOT_FILE_GLOBS` 加日报 json/md、X 线程、
+  ML 增强报告、`deep-*.html`、`*_raw.json`、站点文件（`index.html` / `dashboard-data.json` / `manifest.json` / `sw.js` / `rss.xml`）、参数优化产物、`watchlist_override.*`。
+- `EXCLUDED_FROM_THIS_PASS` 改为以 `migrate_data_root` 的 MOVE 规则原文为键、带理由：缓存 8 项（含 `.factor_cache` parquet、`.risk_cache`）、`chroma_db`、`logs`、`db_backups`、
+  `realtime_metrics.json`；`.swarm_results_*.json` / `analysis-*-ml-*.json` 仍标「用户未定」（它们从不在 main 里，不属「对齐」）。
+
+### Added
+- `tests/test_data_backup.py::TestExportScopeCoversMoveRules`（4 项）：MOVE 规则每一项要么被导出覆盖、要么写明排除理由；反向不许有过期 / 矛盾条目；
+  正面走一遍 `run_export` 确认新纳入的类别真进了产物。变异：去掉 `report_snapshots` ⇒ 2 红；迁移分类表新增目录而备份没做决定 ⇒ 1 红。
+
+### 验收
+- 真实数据导出（09-23 彩排根，生产副本）：1.4s，1549 个根文件 + 1383 份快照，产物 113 MB，`git gc` 后 pack **9.7 MB**；
+  用本机 13 个真实密钥扫 3024 个文件 **0 命中**。
+- 全套 5592 passed / 85 deselected / 2 xfailed（`--deselect TestCoverageHorizon`，按设计红）；`ruff check .` 全过。
+- 今晚生产 Step 14 会先以新范围跑一次（此时 `--src` 仍是代码检出），首次约 +10 MB——等于搬迁前在生产上预验新范围。
 
 ## [0.45.341] — 2026-09-24 — 占位（进行中：删 v0.45.339 后零生产调用方的 Slack 发送代码——SlackReportNotifier 告警类方法 / slack_notifier.SlackNotifier / run_daily_scan 无用 notifier）
 

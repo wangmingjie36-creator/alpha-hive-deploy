@@ -44,16 +44,35 @@ STATE_DIRS: list[str] = [
     "hedge_state", "paper_portfolio_state", "options_paper_state", "vrp_state",
     "probability_scorecard_state", "ml_model_history", "self_analysis_briefs",
     "db_snapshots",
+    # v0.45.342：与 main 对齐。阶段 5 前这些由代码仓库 git 跟踪、每天随日报推上 main，main 兼任异地副本；
+    # 阶段 5 后代码检出里那份冻结，新内容只写数据根 ⇒ 不进这里就零异地副本。
+    # `report_snapshots/` 是 weekly_optimizer / self_analyst 的 T+7 样本，连 gh-pages 都没有它。
+    "report_snapshots", "paper_portfolio_state_backup", "reports",
 ]
 ROOT_FILE_GLOBS: list[str] = [
     "weight_history.jsonl", "pheromone_fallback.jsonl",
     "ml_model.json", "ml_model_cache.json", "ml_model_extended.json",
+    # v0.45.342：与 main 对齐（理由同上）——日报 / ML 报告 / 站点文件 / 参数优化产物。
+    "alpha-hive-daily-*.json", "alpha-hive-daily-*.md", "alpha-hive-thread-*.txt",
+    "alpha-hive-*-ml-enhanced-*.html", "deep-*.html", "*_raw.json",
+    "index.html", "dashboard-data.json", "manifest.json", "sw.js", "rss.xml",
+    "paper_portfolio_card.html", "param_optimization_results.json", "param_optimization_report.html",
+    "watchlist_override.yaml", "watchlist_override.json",
 ]
-EXCLUDED_FROM_THIS_PASS = {
-    "chroma_db/chroma.sqlite3": "向量索引，可从 agent_memory 重建；BLOB 转十六进制文本会显著放大体积",
-    ".swarm_results_*.json（105 个，64 MB）": "体量大、非 *_state/ 目录，本次范围排除，留待确认",
-    "analysis-*-ml-*.json（863 个，90 MB）": "体量大、非 *_state/ 目录，本次范围排除，留待确认",
-    "report_snapshots/ 与根目录已跟踪报告 html/json": "已被 alpha-hive-deploy 代码仓库 git 跟踪并推送",
+#: 数据根里有、但**刻意不进**数据仓库的项，键 = `migrate_data_root` 的 MOVE 规则原文，值 = 理由。
+#: 不变式（`tests/test_data_backup.py::TestExportScopeCoversMoveRules`）：MOVE 规则的每一项
+#: 要么被 DBS / STATE_DIRS / ROOT_FILE_GLOBS 覆盖，要么在这里写明理由——新增数据产物时
+#: 两份表不许各自漂移（v0.45.342 前正是漂移：「已被代码仓库跟踪」这条排除理由被阶段 5 悄悄作废）。
+EXCLUDED_FROM_THIS_PASS: dict[str, str] = {
+    "chroma_db": "向量索引，可从 agent_memory 重建；BLOB 转十六进制文本会显著放大体积",
+    ".swarm_results_*.json": "体量大（~70 MB），不可重取，是否进数据仓库**用户未定**（需先定压缩方案）",
+    "analysis-*-ml-*.json": "体量大（~100 MB），不可重取，是否进数据仓库**用户未定**（需先定压缩方案）",
+    "logs": "日志；被跟踪的只有 4~5 月旧健康快照，历史已在 main",
+    "db_backups": "本机每日轮转备份；数据仓库本身就是它的异地版本",
+    "realtime_metrics.json": "每轮扫描覆盖的中间产物",
+    "cache": "可重建缓存", "data_cache": "可重建缓存", "earnings_cache": "可重建缓存",
+    "finviz_cache": "可重建缓存", "sec_cache": "可重建缓存", "reddit_cache": "可重建缓存",
+    ".factor_cache": "可重建缓存（Ken French 因子 parquet，二进制）", ".risk_cache": "可重建缓存（beta）",
 }
 
 
