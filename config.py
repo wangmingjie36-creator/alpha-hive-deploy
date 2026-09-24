@@ -82,8 +82,8 @@ API_KEYS = {
 
 # Slack 频道 ID（#alpha-hive）
 SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "C0AGUUWJXJS")
-# Slack 用户 DM 降级目标（当 bot 不在频道时自动 DM）
-SLACK_DM_FALLBACK = os.environ.get("SLACK_DM_FALLBACK", "U0AGQK74NKV")
+# v0.45.343：删掉了 SLACK_DM_FALLBACK（「Bot 不在频道 ⇒ 自动改发私信」）——它让频道推送静默变成私信、
+# 调用方照记「已推送到 #alpha-hive」。理由见 slack_report_notifier._send_via_api 的 docstring。
 
 # SEC EDGAR 要求的 User-Agent（SEC 政策要求包含联系方式）
 SEC_USER_AGENT = os.environ.get(

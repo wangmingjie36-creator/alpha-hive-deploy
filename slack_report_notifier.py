@@ -30,11 +30,6 @@ try:
 except ImportError:
     _SLACK_CH = "C0AGUUWJXJS"
 
-try:
-    from config import SLACK_DM_FALLBACK as _DM_FALLBACK
-except ImportError:
-    _DM_FALLBACK = "U0AGQK74NKV"
-
 
 class SlackReportNotifier:
     """Slack 报告通知器（支持 User Token 和 Webhook 双模式）"""
@@ -376,7 +371,7 @@ class SlackReportNotifier:
         return "\n".join(lines)
 
     def send_plain_text(self, text: str, channel: Optional[str] = None) -> bool:
-        """发送纯文本消息（02-27 格式，优先用 User Token）"""
+        """发送纯文本消息到 `channel`（缺省 #alpha-hive）。发不进去就返回 False，不换目的地。"""
         if not self.enabled:
             _log.warning("Slack 未配置")
             return False
@@ -387,7 +382,17 @@ class SlackReportNotifier:
         return self._send_slack_message_payload({"text": text})
 
     def _send_via_api(self, text: str, channel: str) -> bool:
-        """通过 Slack API 以用户身份发送（含 DM 降级）"""
+        """通过 Slack API 发到**指定的** `channel` —— 只发这一处，每条路径都返回 bool。
+
+        v0.45.343 删掉了「频道回 not_in_channel / channel_not_found ⇒ 自动改发私信用户」的降级
+        （原 `config.SLACK_DM_FALLBACK`）。Bot 从未被邀请进 #alpha-hive，于是这条降级：
+          * 让 `push_report_to_slack --force` 每次把日报**实发到私信**，调用方只拿到 True，
+            照样记「✅ 日报已成功推送到 Slack #alpha-hive」—— 目的地变了，下游无从得知；
+          * 是 v0.45.339 那批被禁告警漏成私信的机制；
+          * 频道与私信都回 channel 类错误时循环跑空，返回 None。
+        2026-03-13 已判定它「与频道推送意图不符」，当时只把脚本改成默认跳过，降级本身留着。
+        要发私信就显式把用户 ID 当 `channel` 传进来（`pre_scan_notify` 就是自己这么发的）。
+        """
         try:
             from resilience import slack_breaker
             if not slack_breaker.allow_request():
@@ -396,31 +401,14 @@ class SlackReportNotifier:
         except ImportError:
             slack_breaker = None
 
-        # 依次尝试：指定频道 → DM 降级
-        targets = [channel]
-        if _DM_FALLBACK and _DM_FALLBACK != channel:
-            targets.append(_DM_FALLBACK)
-
         try:
-            for target_ch in targets:
-                response = get_session("slack").post(
-                    "https://slack.com/api/chat.postMessage",
-                    headers={"Authorization": f"Bearer {self.user_token}"},
-                    json={"channel": target_ch, "text": text, "unfurl_links": False},
-                    timeout=15,
-                )
-                data = response.json()
-                if data.get("ok"):
-                    if slack_breaker:
-                        slack_breaker.record_success()
-                    _log.info("Slack 消息发送成功（用户身份 → %s）", target_ch)
-                    return True
-                err = data.get("error", "unknown")
-                if err in ("not_in_channel", "channel_not_found"):
-                    _log.warning("Slack API (%s): %s，尝试 DM 降级", target_ch, err)
-                    continue
-                _log.warning("Slack API 错误: %s", err)
-                return False
+            response = get_session("slack").post(
+                "https://slack.com/api/chat.postMessage",
+                headers={"Authorization": f"Bearer {self.user_token}"},
+                json={"channel": channel, "text": text, "unfurl_links": False},
+                timeout=15,
+            )
+            data = response.json()
         except requests.exceptions.RequestException as e:
             if slack_breaker:
                 try:
@@ -429,6 +417,19 @@ class SlackReportNotifier:
                     _log.debug("circuit_breaker.record_failure() failed: %s", e2)
             _log.error("Slack 发送失败: %s", e)
             return False
+
+        if data.get("ok"):
+            if slack_breaker:
+                slack_breaker.record_success()
+            _log.info("Slack 消息发送成功（用户身份 → %s）", channel)
+            return True
+        err = data.get("error", "unknown")
+        if err in ("not_in_channel", "channel_not_found"):
+            _log.warning("Slack 发送失败（→ %s）：%s —— Bot 不在该频道或频道不存在；"
+                         "不会改发私信，把 Bot 邀请进频道后重试", channel, err)
+        else:
+            _log.warning("Slack API 错误（→ %s）: %s", channel, err)
+        return False
 
     def _send_slack_message_payload(self, payload: Dict) -> bool:
         """发送 Slack 消息（webhook 模式）"""

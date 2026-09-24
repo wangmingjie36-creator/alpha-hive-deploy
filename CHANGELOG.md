@@ -5,7 +5,41 @@
 
 ---
 
-## [0.45.343] — 2026-09-24 — 占位（进行中：Slack 发送去掉静默 DM 降级（日报 --force 实发私信却报「已推送到 #alpha-hive」）+ 测试间全局熔断器状态泄漏）
+## [0.45.343] — 2026-09-24 — Fixed：Slack 发送去掉「频道失败 ⇒ 静默改发私信」降级——`push_report_to_slack --force` 此前每次把日报实发到私信、却记「✅ 已推送到 #alpha-hive」；另查明测试间熔断器状态泄漏当前零影响，根治方案留作任务
+
+v0.45.341 二次检查时发现两处遗留问题。按「根因还是症状」逐条定性后，一处根治，一处实测零影响、暂不动。
+
+### Fixed：`SlackReportNotifier._send_via_api` 的私信降级（根因），而不是「循环跑空返回 None」（症状）
+- **症状**：频道与私信都回 channel 类错误时，`for target in [频道, 私信]` 循环跑空，函数**返回 None**（签名 bool）。
+  只在末尾补 `return False` 就能让它消失 —— 那是治标。
+- **根因**：这个循环只为一件事存在 —— 频道回 `not_in_channel` / `channel_not_found` 时**自动改发私信用户**（`config.SLACK_DM_FALLBACK`）。
+  Bot 从未被邀请进 #alpha-hive，所以这条降级**每次都触发**。实测（桩：频道回 not_in_channel、私信成功，与生产一致）当前代码下
+  `push_report_to_slack.py --force`：发送目标 `['C0AGUUWJXJS', 'U0AGQK74NKV']`，**exit 0**，日志依次是
+  「not_in_channel，尝试 DM 降级」→「发送成功（→ U0AGQK74NKV）」→「✅ 日报已成功推送到 Slack #alpha-hive」。
+  即目的地变了、调用方只拿到 True、最后一行日志说谎（CLAUDE.md「这个失败，下游怎么知道？」）。它也是 v0.45.339 那批被禁告警漏成私信的机制。
+  2026-03-13 `push_report_to_slack.py` 的 docstring 已判定这条降级「与频道推送意图不符」，当时只把脚本改成默认跳过，降级本身留到今天。
+- **v0.45.341 之后它零合法消费者**：`_send_via_api` 唯一调用链是富文本日报（意图是频道）；需要私信的 `pre_scan_notify` 自己 `requests.post` 到用户 ID，从不走这里。
+- **修法**：删掉降级。`_send_via_api` 只发调用方给的 `channel`，每条路径显式返回 bool（循环随之消失，None 结构上不可能）；
+  `not_in_channel` 记一行「Bot 不在该频道…不会改发私信」。删 `config.SLACK_DM_FALLBACK`（唯一读者就是这里）。要发私信就显式把用户 ID 当 channel 传。
+  成功日志措辞不变（`Slack 消息发送成功（用户身份 → …）`），仓库与编排器里没有按这些字样解析日志的代码。
+
+### Added（测试）`tests/test_slack_notifier.py::TestNoSilentDmFallback`（8 条）
+- 桩按生产现实设：频道回 not_in_channel、私信成功。断言只发一次且发往频道、返回 False、日志带 not_in_channel；
+  逐结果（ok / not_in_channel / channel_not_found / 其它错误 / 缺 error 字段 / 传输异常）断言返回值 `is` bool；
+  端到端 `push_report_to_slack --force` ⇒ exit 1、**不出现**「已成功推送」、出现「日报推送失败」。
+- 修复前跑：4 红（改发私信 ×2、返回 None ×2）。
+- **治标对照**：旧代码只补 `return False` ⇒ 两条 None 用例转绿，但「改发私信」与「端到端不许谎报」**仍红** —— 测试钉的是根因，不是症状。
+
+### 未修：测试间全局熔断器状态泄漏 —— 实测当前零影响，根治成本不低，留作任务
+- 起因：两条旧测试在全局 `slack_breaker` 上 `record_success()`。往根上查：`resilience` 的 4 个模块级熔断器、`fred_macro` / `newsapi_client`
+  的模块级熔断器、`data_pipeline._fetcher` 单例里的 `ObservableCircuitBreaker`，**全套测试没有任何一处统一复位**；
+  `test_reddit_sentiment` / `test_newsapi_client` 各自在文件里复位，`test_resilience::TestPresetInstances` 断言全局熔断器是 closed（依赖顺序）。
+- 实测（插件给两类熔断器挂钩，在 fixture 之后、测试体之前拍快照，只算「测试体用到了开局就脏的熔断器」）：全套 **0 条**；
+  全局熔断器全程从未 OPEN。正对照：人为让前一条把 `yfinance_breaker` 打到 OPEN，后一条被记录到 —— 而且那条**照样通过**，
+  即泄漏发生时没人会红。首版插件在 `pytest_runtest_setup` 拍快照（早于各文件的复位 fixture），报出的 3 条「泄漏」是量具假象。
+- 根治要：两类熔断器的实例注册表（派生，不手抄名单）+ `ObservableCircuitBreaker.reset()` + conftest 统一复位，且复位**必须带超时**——
+  死锁变异会让某个熔断器的锁被守护线程永久持有，阻塞式复位会把后面每条测试都卡死。零现时影响下，这笔账不划算现在付；
+  逐条测试补复位则正是治标。完整方案已作为任务留给用户决定。
 
 ## [0.45.342] — 2026-09-24 — Fixed：数据仓库备份范围与 main 对齐——阶段 5 后 `report_snapshots/` 与报告文件将零异地副本（排除理由被阶段 5 悄悄作废）；加守卫防两份清单再漂移
 

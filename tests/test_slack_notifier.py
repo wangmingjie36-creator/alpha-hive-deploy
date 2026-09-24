@@ -239,3 +239,86 @@ class TestPreScanWebhookFallback:
         """反对照：文件不在 ⇒ 三级全落空、零发送（上一条的 True 不是恒真）。"""
         assert net.mod.send_slack_notification("x") == (False, None, None)
         assert net.calls == []
+
+
+# ==================== 频道发不进去 ≠ 改发私信（v0.45.343）====================
+
+class TestNoSilentDmFallback:
+    """发到哪就是哪：频道失败即失败，**不许悄悄改发私信**。
+
+    v0.45.343 之前 `_send_via_api` 在 `not_in_channel` / `channel_not_found` 时自动改发
+    私信用户（`config.SLACK_DM_FALLBACK`）。生产上 Bot 从未被邀请进 #alpha-hive，于是：
+      * `push_report_to_slack --force` 每次都把日报**实发到私信**，调用方只拿到 `True`，
+        照样记「✅ 日报已成功推送到 Slack #alpha-hive」—— 日志说谎；
+      * v0.45.339 那批被禁告警，正是经这条降级漏成了私信；
+      * 频道与私信都回 channel 类错误时循环跑空、**返回 None**（签名是 bool）。
+    桩按生产现实设：频道回 `not_in_channel`，其它目标（私信）成功 —— 旧代码在这里全绿地「发出去」。
+    """
+
+    @pytest.fixture
+    def slack(self, monkeypatch):
+        import slack_report_notifier as srn
+        box = types.SimpleNamespace(calls=[], channel_reply={"ok": False, "error": "not_in_channel"},
+                                    other_reply={"ok": True, "ts": "1"})
+
+        def _post(url, headers=None, json=None, timeout=None):
+            box.calls.append(json["channel"])
+            reply = (box.channel_reply if json["channel"] == srn.SlackReportNotifier.CHANNEL_ID
+                     else box.other_reply)
+            if isinstance(reply, Exception):
+                raise reply
+            return types.SimpleNamespace(json=lambda: reply)
+
+        monkeypatch.setattr(srn, "get_session", lambda *_a, **_k: types.SimpleNamespace(post=_post))
+        monkeypatch.setattr(srn.SlackReportNotifier, "_read_user_token",
+                            lambda self: "xoxb-test-not-a-real-token")
+        monkeypatch.setattr(srn.SlackReportNotifier, "_read_webhook_from_file", lambda self: None)
+        box.channel = srn.SlackReportNotifier.CHANNEL_ID
+        return box
+
+    def test_not_in_channel_is_a_failure_not_a_dm(self, slack, caplog):
+        from slack_report_notifier import SlackReportNotifier
+        with caplog.at_level(logging.WARNING, logger="alpha_hive.slack_report_notifier"):
+            ok = SlackReportNotifier().send_plain_text("日报")
+        assert slack.calls == [slack.channel], f"改发了别的目标：{slack.calls}"
+        assert ok is False
+        assert "not_in_channel" in caplog.text
+
+    @pytest.mark.parametrize("channel_reply", [
+        {"ok": True, "ts": "1"},
+        {"ok": False, "error": "not_in_channel"},
+        {"ok": False, "error": "channel_not_found"},
+        {"ok": False, "error": "invalid_auth"},
+        {"ok": False},
+    ], ids=["ok", "not_in_channel", "channel_not_found", "other_error", "no_error_field"])
+    def test_every_outcome_is_a_bool(self, slack, channel_reply):
+        """签名是 bool 就每条路径都返回 bool —— 旧代码在「私信也回 channel 类错误」时返回 None。"""
+        from slack_report_notifier import SlackReportNotifier
+        slack.channel_reply = channel_reply
+        slack.other_reply = {"ok": False, "error": "channel_not_found"}   # 旧降级目标也失败
+        result = SlackReportNotifier().send_plain_text("x")
+        assert result is channel_reply.get("ok", False)
+
+    def test_transport_error_is_a_bool_false(self, slack):
+        import requests
+        from slack_report_notifier import SlackReportNotifier
+        slack.channel_reply = requests.exceptions.ConnectionError("down")
+        assert SlackReportNotifier().send_plain_text("x") is False
+        assert slack.calls == [slack.channel]
+
+    def test_push_report_force_does_not_claim_channel_delivery(self, slack, monkeypatch, caplog):
+        """端到端：Bot 不在频道 ⇒ `--force` exit 1，且**不许**出现「已成功推送到 #alpha-hive」。"""
+        import json
+        import sys
+        from hive_logger import PATHS
+        import push_report_to_slack
+        (PATHS.home / "alpha-hive-daily-2026-09-24.json").write_text(json.dumps(
+            {"date": "2026-09-24", "opportunities": [
+                {"ticker": "NVDA", "opp_score": 7.1, "direction": "看多"}]}), encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", ["push_report_to_slack.py", "--force", "--date", "2026-09-24"])
+        with caplog.at_level(logging.INFO), pytest.raises(SystemExit) as ei:
+            push_report_to_slack.main()
+        assert slack.calls == [slack.channel], f"改发了别的目标：{slack.calls}"
+        assert ei.value.code == 1
+        assert "已成功推送" not in caplog.text
+        assert "日报推送失败" in caplog.text
