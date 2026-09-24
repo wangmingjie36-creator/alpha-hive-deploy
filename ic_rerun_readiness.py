@@ -610,6 +610,25 @@ _COHORT_HISTORY = [
      "同版连带：共振加成前瞻检验的 replay 按记录里的 `applied` 标记复现生产链（事后修订 1，"
      "盲化期内、0/10 合格周、0 条已到期）；`probability_scorecard._ML_ESTIMATOR_GENERATIONS` "
      "同日登记（ML 报告模型把 final_score 当特征）。"),
+    ("2026-09-28", "v0.45.340",
+     "BuzzBee 情绪动量调整改按**扫描业务日期**回看**归档**（维度 IC 协议修订 1 的 buzz_v1 锚点，§13.2）。"
+     "此前 `_get_sentiment_momentum` 用 SQLite `date('now')`（墙上时钟、且是 UTC，写基线却用本地日期）"
+     "回看 `sentiment_baseline.db`（任何一次 Buzz 运行都会写它）⇒ 同一业务日重跑取到另一段历史、不可复现。"
+     "现在：as_of = `_target_date`（报告 date_str），历史 = `signal_archive` 的 `sentiment.pct` 取「≤ as_of−N」"
+     "的最近一行，且参照不得早于 as_of−N−4 天（否则按无历史）。改的是产生 `agent.BuzzBeeWhisper.score` "
+     "的函数（调整层）⇒ 按本表判据登记；方向由合成值决定、在调整之前，不变。"
+     "**幅度如实读**：用新函数本身（生产库只读）对 `.swarm_results_*.json` 全史 1688 行重算，"
+     "动量调整值改变 250 行（14.8%；其中上限生效新增 36 行），与独立核算脚本逐行一致（差集为空）；"
+     "分数变化多为 ±0.2（197 行）、最大 +0.7（clamp 前）。"
+     "同版把 7 个通道 `details.components` 改为全精度（原 5 个 round(…,1)）——只是记录精度，量没变，"
+     "按 `signal_archive` 判据**不换代** `buzz.comp.*`。"
+     "边界代价：与 v0.45.334 同日（09-28）⇒ `assess()` 的世代切点不变，额外代价 0；"
+     "`signal_archive` 里 `agent.BuzzBeeWhisper.score` 及其下游自 09-28 新开世代。"
+     "原定 2026-09-25，阶段 1 未在那次扫描前推送（9-24/9-25 均跑旧代码）⇒ 本条未进 main 前改为 09-28，"
+     "不属「只挪日期的更正条目」。⚠️ **日期是前提**：须在 2026-09-28 14:00 PT 扫描之前推到 `origin/main`"
+     "（扫描前 `production_sync` 快进）；再晚则照表头追加更正条目（须早于 2026-10-12，否则 H1 回退，协议 §13.4）。"
+     "判别印记：`BuzzBeeWhisper.details.sentiment_momentum.as_of_source` 存在（此前 899/899 条归档均无此键），"
+     "登记在 `_BOUNDARY_MARKERS`。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -776,6 +795,17 @@ def _marker_gex_modifier_not_applied(d: dict) -> bool:
     return isinstance(m, dict) and m.get("applied") is False
 
 
+def _marker_buzz_momentum_as_of(d: dict) -> bool:
+    """v0.45.340：Buzz 情绪动量改按扫描日回看归档后，`sentiment_momentum` 带 `as_of_source` 键。
+
+    认「键存在」而不是某个取值：`as_of_source` 是本版新加的（`scan` / `wall_clock` 都是新代码），
+    此前的 `sentiment_momentum` 一律没有这个键（推送前生产归档 899/899 实测）。
+    """
+    b = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("BuzzBeeWhisper")
+    sm = ((b or {}).get("details") or {}).get("sentiment_momentum") if isinstance(b, dict) else None
+    return isinstance(sm, dict) and "as_of_source" in sm
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -787,6 +817,8 @@ _BOUNDARY_MARKERS = {
                   _marker_gex_full_chain_view),
     "v0.45.334": ("swarm_results.gex_regime_mod.applied is False",
                   _marker_gex_modifier_not_applied),
+    "v0.45.340": ("agent_details.BuzzBeeWhisper.details.sentiment_momentum 带 as_of_source 键",
+                  _marker_buzz_momentum_as_of),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
@@ -1000,17 +1032,32 @@ def boundary_evidence_status(home: Path) -> Dict:
     ⚠️ 异常渲染成 `cannot_judge`（同样 alarm），**不吞、也不往外抛**：抛出去 = Python
     退出码 1，编排器会把它读成「未就绪（正常，继续攒）」—— 把失败改写成正常状态。
     `home` 必传，理由同 `cohort_boundary_evidence`。
+
+    v0.45.340：核**与末条同日的全部边界**（表序），不只末条。v0.45.334 与 v0.45.340 同在 09-28：
+    只核末条 ⇒ 后追加的那条一登记，先登记那条的核对就从 `--quiet` 第五段里无声消失，
+    而两条都是「推送晚于边界日」的同一种风险。顶层字段取第一条报警的（无报警取末条，与此前相同）；
+    有报警时 `line` 用「；」连接每条报警的摘要；同日多于一条时全部结果在 `same_day` 键里。
     """
-    try:
-        ev = dict(cohort_boundary_evidence(home))
-    except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
-        date, version, _r = _COHORT_HISTORY[-1]
-        ev = {"version": version, "boundary": date, "marker": None, "marker_first_seen": None,
-              "verdict": "cannot_judge", "unmarked_after_boundary": [],
-              "error": f"{type(e).__name__}: {e}"}
-    ev["alarm"] = ev["verdict"] in BOUNDARY_ALARM_VERDICTS
-    ev["line"] = _boundary_line(ev)
-    return ev
+    last_date = _COHORT_HISTORY[-1][0]
+    versions = [v for d, v, _r in _COHORT_HISTORY if d == last_date]
+    evs = []
+    for version in versions:
+        try:
+            ev = dict(cohort_boundary_evidence(home, version))
+        except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
+            ev = {"version": version, "boundary": last_date, "marker": None, "marker_first_seen": None,
+                  "verdict": "cannot_judge", "unmarked_after_boundary": [],
+                  "error": f"{type(e).__name__}: {e}"}
+        ev["alarm"] = ev["verdict"] in BOUNDARY_ALARM_VERDICTS
+        ev["line"] = _boundary_line(ev)
+        evs.append(ev)
+    alarmed = [e for e in evs if e["alarm"]]
+    res = dict(alarmed[0] if alarmed else evs[-1])
+    if len(alarmed) > 1:
+        res["line"] = "；".join(e["line"] for e in alarmed)
+    if len(evs) > 1:
+        res["same_day"] = evs
+    return res
 
 
 def main() -> int:

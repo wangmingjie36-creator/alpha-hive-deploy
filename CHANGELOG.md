@@ -285,7 +285,107 @@ v0.45.339 把六处告警类发送改成只写日志后，发送器里留下一�
 | `slack_notifier.py` 原样写回 | **只有** `test_retired_names_are_really_gone` 红：全仓扫描走 `git ls-files`，未 `git add` 的文件看不见（已写进该测试 docstring；这是所有基于 `_repo_files` 的 AST 守卫的共同盲区） |
 | `run_daily_scan` 加回无用 notifier | 不红 —— 无害的浪费，不设守卫 |
 
-## [0.45.340] — 2026-09-23 — 占位（进行中：buzz_v1 阶段 1——Buzz 情绪动量改读归档、按扫描日期回看 + 通道全精度入档；计划 09-25 扫描上线）
+## [0.45.340] — 2026-09-23 — Fixed：Buzz 情绪动量调整按**扫描业务日期**回看**归档**（此前用墙上时钟 + UTC/本地混用、读任何运行都会写的 `sentiment_baseline.db`，同一业务日重跑不可复现）；通道值全精度入档；登记为维度 IC 协议 buzz_v1 的锚点（09-28 扫描上线；原定 09-25，未赶上推送窗口）
+
+维度 IC 协议修订 1（v0.45.330）的阶段 1。方案用户 2026-09-23 确认：改读归档、加陈旧上限、09-25 上线。
+
+### 问题
+
+`swarm_agents/sentiment.py::_get_sentiment_momentum` 有三处让 Buzz 分不可复现：
+
+1. 回看用 SQLite `date('now', -N days)`，即墙上时钟。补跑、重跑同一业务日会取到另一段历史。
+2. `date('now')` 是 **UTC**，写基线的 `_upsert_sentiment` 用的却是本地日期，两个时间基准混用。
+3. 历史来自 `sentiment_baseline.db`，任何一次 Buzz 运行（MCP、深度报告、重放）都会往里写，不只正式扫描。
+
+另外，读取失败只打一行 debug，然后静默按「无动量」处理。
+
+v0.45.330 的只读核实：按扫描日重算，与生产记录不一致 211/1688。
+
+### Fixed / Changed
+
+- `_get_sentiment_momentum(ticker, current_pct, as_of=None, db_path=None)`：
+  - **时间基准**：`as_of` 是扫描业务日期，截止日在 Python 里算。缺省（非扫描调用）才退回本地当天，并记 `as_of_source="wall_clock"`。
+  - **历史来源**：`signal_archive` 表的 `sentiment.pct`，取「≤ as_of − N」的最近一行。路径在调用时按 `PATHS.db` 解析，
+    09-26 数据根迁移后跟着走。
+  - **陈旧上限（新）**：参照不得早于 as_of − N − 4 天（`_MOMENTUM_REF_SLACK_DAYS`），否则该回看按无历史处理。
+    周末、漏扫一天都在上限内；扫描断档期「3 日动量」拿一两周前的值来比则不算。历史上这类情况 127 行，8 月占 105 行。
+  - **读不到归档要看得见**：库或表不存在、查询出错时，打 warning，并记 `history_source="unavailable"`。
+    连库用 `mode=ro`，**不会凭空建库**——否则「路径错了」会被伪装成「没有历史」。
+  - details 新增 `as_of` / `as_of_source` / `history_source` / `ref_dates`。原有键与阈值不变，`test_bee_details_contract` 全绿。
+- `BuzzBeeWhisper`：
+  - 传入 `as_of=self._target_date`。它由 `inject_prefetched` 注入，等于报告的 `date_str`；实时扫描与 `--date` 补跑都有。
+  - `details.components` 的 5 个通道去掉 `round(…, 1)`，改为全精度。这只是记录精度，量没变，按 `signal_archive` 判据不换代 `buzz.comp.*`。
+- 世代边界 `_COHORT_HISTORY`：`("2026-09-28", "v0.45.340", …)`；影响面 `COHORT_SIGNAL_SCOPE["v0.45.340"] = ("agent.BuzzBeeWhisper.score",)`。
+  方向由合成值决定、在调整之前，所以不变；下游 Guard 由依赖边带出。
+- 维度 IC 协议（**事前实现对齐**，只填修订 1 §13.2 预留的空）：`H1_ANCHOR_VERSION = "v0.45.340"`，文档 §13.2 写明阶段 1 口径。
+- `sentiment_baseline.db` 与 `_upsert_sentiment` 保留，只供情绪突变检测用。突变检测的 Slack 发送归 v0.45.339（另一 session），本版不碰。
+
+### 幅度（实测，生产库只读）
+
+用新函数本身对 `.swarm_results_*.json` 全史 1688 行重算：
+
+- 动量调整值改变 **250 行（14.8%）**：不加上限时 214 行，上限生效新增 36 行。
+- 分数变化：±0.2 共 197 行，最大 +0.7（clamp 前）。
+- 与独立核算脚本**逐行一致**，差集为空；1688 行全部读到归档。
+
+### 代价
+
+- IC 重跑闸：与 v0.45.334 同日（09-28）⇒ `assess()` 的世代切点不变，本版**额外代价 0**。
+- `analyze()` 的 Buzz 分、Guard 从 09-28 起算（`final_score` 本就被 v0.45.334 在 09-28 切开）。
+- 共振、F&G 前瞻检验的自证不受影响：共振从记录的各蜂结果开始重放，F&G 不实例化 Buzz。
+- 维度 IC 协议：边界早于窗口 10-12，零影响。
+
+### 上线
+
+原计划 09-24 扫描后、09-25 14:00（PDT）扫描前推 `origin/main`。**没推成**：推送要用户在窗口内口头触发，
+没有提醒、也没有会红的观测点，09-24/09-25 两次扫描都跑了旧代码。2026-09-27（周日，非交易日）rebase 后推送，
+边界改为 09-28（本条未进 main 前改，不属「只挪日期的更正条目」）。前提：推送早于 09-28 14:00 PT 扫描。
+
+补上当时缺的观测点：
+
+- `_BOUNDARY_MARKERS["v0.45.340"]`：印记 = Buzz `details.sentiment_momentum.as_of_source` 存在
+  （推送前生产归档 899/899 条带 `sentiment_momentum` 的记录均无此键）。
+- `boundary_evidence_status` 改为核**与末条同日的全部边界**，任一报警即报警。否则 v0.45.340 排到末条后，
+  v0.45.334 的 09-28 边界会从 `--quiet` 的第五段里无声消失——两条同日边界只核得到一条。
+
+上线后核对：
+
+- **09-28 扫描**：启动日志 `alpha_hive.code_version` 是本版；Buzz details 的 `as_of` = 业务日、`history_source="signal_archive"`、
+  `ref_dates` 合理；components 不再是一位小数。若首个跑新代码的扫描日不是 09-28，追加更正条目与协议 §13.2 的日期
+  （须早于 10-12，否则 H1 回退）。
+- 同一天也是数据根迁移后的首个扫描：`history_source` 须是 `signal_archive`（归档跟着库搬过去了），`unavailable` 即迁移路径问题。
+
+### 测试
+
+- `tests/test_sentiment_momentum_archive.py`（新，32 条），覆盖：
+  - 回看语义：截止日、取最近、当天行不许用、N+4 上限含边界、周一回看到周五、阈值不变；
+  - 与墙上时钟无关：把「今天」拨到 2030 年，结果逐位不变；
+  - 读不到可见，且不建库；归档表名与信号名同 `signal_archive`；
+  - 扫描路径把 `self.date_str` 传到 Buzz（AST 核对 + `inject_prefetched` 行为）；
+  - Buzz 端到端：打桩成不整齐的通道值——`as_of` 透传、从沙箱归档读到 3 天前、通道全精度、
+    由 details **逐位**重算 score（阶段 2 的前提）。
+- `tests/test_dim_ic_protocol.py`：锚点钉住；锚点边界真在表里且早于窗口；影响面只点名冻结层。
+- `tests/test_dim_ic_forward_test.py`：真实边界表下锚点为 `ok`。
+
+### 变异测试（真跑，15/15 被杀，0 存活）
+
+- 回看逻辑：忽略 as_of 改用墙上时钟、去掉上限、上限差一天、截止日偏一天、连库不用只读、
+  读失败不标 unavailable、读失败降回 debug、信号名写错、又从 sentiment_baseline 回看。
+- Buzz 与扫描路径：Buzz 不传扫描日期、通道又被 round、报告不传业务日期。
+- 锚点：锚点边界没登记、影响面误点名输入层、锚点日期晚于窗口。
+
+### 核对
+
+- ruff 0.13.3 All checks passed。
+- 全量套件（`--maxfail=1000`，无并发）：5584 passed / 1 failed / 2 xfailed / 83 deselected。唯一失败仍是 `TestCoverageHorizon`
+  （BLS 2027 日程未发布，既有）。
+- 冒烟（生产库只读）：维度 IC 执行器 `h1_anchor={'state': 'ok', 'version': 'v0.45.340', 'date': '2026-09-28'}`，无截断，
+  进度行不再提示「锚点待登记」。
+
+### 留给阶段 2
+
+冻结评分器重算历史 pct 时，应该用归档通道按冻结权重重算，不直接读 `sentiment.pct`，否则以后改合成权重会从
+「历史参照值」这条侧门漏进来。锚点之前的参照日例外：那几天的通道只有 0.1 精度，直接读归档 pct。
 
 ## [0.45.339] — 2026-09-23 — Fixed：Slack 只许发两类消息——六处告警类发送改为只写日志（日志行保留）；熔断器持锁发 Slack 的自死锁随之消失；新增 AST 白名单守卫
 

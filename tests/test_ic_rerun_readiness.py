@@ -568,7 +568,7 @@ class TestBoundaryEvidenceIsPerVersion:
         """
         versions = {v for _d, v, _r in rr._COHORT_HISTORY}
         assert set(rr._BOUNDARY_MARKERS) <= versions, sorted(set(rr._BOUNDARY_MARKERS) - versions)
-        assert {"v0.45.197", "v0.45.334"} <= set(rr._BOUNDARY_MARKERS)
+        assert {"v0.45.197", "v0.45.334", "v0.45.340"} <= set(rr._BOUNDARY_MARKERS)
 
     def test_cli_renders_no_marker_for_the_head(self, monkeypatch, db, capsys):
         """CLI 人读模式要能把 `no_marker` 印出来（带版本），不能 KeyError。
@@ -752,6 +752,96 @@ class TestBoundaryEvidenceReachesAutomatedCallers:
                         "no_marker", "cannot_judge"):
             line = rr._boundary_line({**base, "verdict": verdict})
             assert ("vX" in line) and (line.startswith("🚨") == (verdict in rr.BOUNDARY_ALARM_VERDICTS)), line
+
+
+def _write_two_marker_archive(root, date, gex_new, buzz_new, ticker="NVDA"):
+    """一份归档同时带 v0.45.334（GEX）与 v0.45.340（Buzz）两种印记的新 / 旧形态。"""
+    import json as _json
+    mod = {"gex_adjustment": -0.15, "gex_regime": "positive_gex"}
+    if gex_new:
+        mod["applied"] = False
+    sm = {"delta_3d": None, "momentum_regime": "unknown", "momentum_score_adj": 0.0}
+    if buzz_new:
+        sm.update(as_of=date, as_of_source="scan", history_source="signal_archive")
+    body = {"swarm_results": {"gex_regime_mod": mod,
+                              "agent_details": {"BuzzBeeWhisper": {"details": {"sentiment_momentum": sm}}}}}
+    (root / f"analysis-{ticker}-ml-{date}.json").write_text(_json.dumps(body), encoding="utf-8")
+
+
+class TestSameDayBoundariesAreAllChecked:
+    """v0.45.340：v0.45.334 与 v0.45.340 两条边界同在 09-28，都挂着「推送晚于边界日」的同一种风险。
+    判别器缺省只核末条 ⇒ 后登记的那条一追加，先登记那条的核对就从 `--quiet` 第五段无声消失。
+    """
+
+    @pytest.fixture
+    def two_boundaries(self, monkeypatch):
+        monkeypatch.setattr(rr, "_COHORT_HISTORY", list(rr._COHORT_HISTORY) + [
+            (_TQ_BOUNDARY, "vGEX", "测试用边界（GEX 印记）"),
+            (_TQ_BOUNDARY, "vBUZZ", "测试用边界（Buzz 印记）")])
+        monkeypatch.setitem(rr._BOUNDARY_MARKERS, "vGEX",
+                            ("applied is False（测试）", rr._marker_gex_modifier_not_applied))
+        monkeypatch.setitem(rr._BOUNDARY_MARKERS, "vBUZZ",
+                            ("as_of_source（测试）", rr._marker_buzz_momentum_as_of))
+
+    def test_earlier_same_day_boundary_still_alarms(self, db, two_boundaries):
+        """末条健康、同日前一条写早了 ⇒ 仍报警，顶层字段是报警的那条。
+
+        变红的变异：把 `boundary_evidence_status` 改回只核末条（`cohort_boundary_evidence(home)`）。
+        """
+        p = db([])
+        _write_two_marker_archive(p.parent, _TQ_BOUNDARY, gex_new=False, buzz_new=True)
+        ev = rr.boundary_evidence_status(p.parent)
+        assert ev["alarm"] is True and ev["version"] == "vGEX", ev
+        assert ev["verdict"] == "boundary_too_early", ev
+        assert [e["version"] for e in ev["same_day"]] == ["vGEX", "vBUZZ"], ev["same_day"]
+        assert ev["same_day"][1]["verdict"] == "matches", "前提：末条确实是健康的"
+
+    def test_both_alarm_lines_are_joined(self, db, two_boundaries):
+        """两条都写早了 ⇒ 一行里两条都点名（周度任务只抄这一行）。
+
+        变红的变异：删掉 `if len(alarmed) > 1:` 那段拼接。
+        """
+        p = db([])
+        _write_two_marker_archive(p.parent, _TQ_BOUNDARY, gex_new=False, buzz_new=False)
+        ev = rr.boundary_evidence_status(p.parent)
+        assert ev["alarm"] is True
+        assert "vGEX" in ev["line"] and "vBUZZ" in ev["line"] and "；" in ev["line"], ev["line"]
+
+    def test_all_healthy_is_quiet(self, db, two_boundaries):
+        p = db([])
+        _write_two_marker_archive(p.parent, _TQ_BOUNDARY, gex_new=True, buzz_new=True)
+        ev = rr.boundary_evidence_status(p.parent)
+        assert ev["alarm"] is False and ev["verdict"] == "matches" and ev["version"] == "vBUZZ", ev
+
+
+class TestBuzzMomentumMarker:
+    """v0.45.340 的归档印记：`sentiment_momentum` 带 `as_of_source` 键（旧代码从不写这个键）。"""
+
+    def test_new_shape_is_recognized(self):
+        d = {"swarm_results": {"agent_details": {"BuzzBeeWhisper": {"details": {
+            "sentiment_momentum": {"as_of_source": "wall_clock"}}}}}}
+        assert rr._marker_buzz_momentum_as_of(d) is True
+
+    @pytest.mark.parametrize("d", [
+        {},
+        {"swarm_results": {"agent_details": {"BuzzBeeWhisper": None}}},
+        {"swarm_results": {"agent_details": {"BuzzBeeWhisper": {"details": None}}}},
+        {"swarm_results": {"agent_details": {"BuzzBeeWhisper": {"details": {
+            "sentiment_momentum": {"delta_3d": 2, "momentum_regime": "stable"}}}}}},
+    ])
+    def test_old_or_missing_shapes_are_not(self, d):
+        """变红的变异：判定改成「有 sentiment_momentum 就算」（旧归档 899 条全有它）。"""
+        assert rr._marker_buzz_momentum_as_of(d) is False
+
+    def test_real_buzz_output_carries_the_marker(self, tmp_path):
+        """正对照拿**生产函数的真输出**：印记键名与 `_get_sentiment_momentum` 实际写的键一致。
+
+        变红的变异：把 sentiment.py 里的 `"as_of_source"` 键改名。
+        """
+        from swarm_agents.sentiment import _get_sentiment_momentum
+        sm = _get_sentiment_momentum("NVDA", 50, as_of="2099-01-05", db_path=tmp_path / "missing.db")
+        d = {"swarm_results": {"agent_details": {"BuzzBeeWhisper": {"details": {"sentiment_momentum": sm}}}}}
+        assert rr._marker_buzz_momentum_as_of(d) is True, sm
 
 
 class TestCorrectionEntriesKeepTheBoundaryCheckable:

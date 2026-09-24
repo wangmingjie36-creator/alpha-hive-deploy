@@ -1217,6 +1217,10 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 之后，各蜂自身输出不变；SIGNAL_UPSTREAM 里没有信号读 final_score/rule_score ⇒ 只动
     # composite.final_score（ALWAYS_SLICED，不必写）
     "v0.45.334": (),
+    # 09-28（原定 09-25，未赶上那次扫描）：Buzz 情绪动量改按扫描日回看归档（调整层，维度 IC 协议 buzz_v1 锚点）。
+    # 只点名 score：方向由合成值决定、在调整之前，不变；通道改全精度只是记录精度，不换代 buzz.comp.*。
+    # 下游（Guard 读 Buzz 分）由 _scope_closure 带出
+    "v0.45.340": ("agent.BuzzBeeWhisper.score",),
 }
 
 
