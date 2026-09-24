@@ -32,6 +32,8 @@ CLAUDE.md「Slack 通知精简规则」：Bot **只发两类消息** ——
 1. `TestOnlyWhitelistedModulesSend` —— 静态：AST 扫本仓每个非测试 .py。
    **双向**：白名单外不许有发送（怕它变大）；白名单内每个模块必须**真被扫到**在发送
    （怕它变小 —— 既防名单过期，也是探针在真代码上的正对照：扫描器瞎了这条先红）。
+   v0.45.341 删掉零生产调用方的发送代码后，被删的名字留作**墓碑**继续按发送认
+   （`RETIRED_SEND_METHODS` / `RETIRED_SENDER_MODULES`，理由在定义处）。
 2. `TestScannerHasTeeth` —— 合成源码 + 真文件注入变异：每种检测规则至少一个会红的
    样本、一个不该红的样本。**没有这一组，上一组的全绿证明不了任何事。**
 3. `TestForbiddenPathsStayLogOnly` / `TestBreakerDoesNotDeadlock` —— 行为：把 Slack
@@ -68,19 +70,34 @@ ALLOWED_SENDERS = {
     "push_report_to_slack.py": "② 富文本日报推送",
 }
 
-#: 发送器库：模块 → 类名。**类体内部**的调用是实现（`send_risk_alert` 调
-#: `_send_slack_message`），不算发起；同文件里类体之外（CLI 入口、模块级代码）照样算。
+#: 发送器库：模块 → 类名。**类体内部**的调用是实现（`send_plain_text` 调
+#: `_send_via_api`），不算发起；同文件里类体之外（CLI 入口、模块级代码）照样算。
 SENDER_LIBS = {
     "slack_report_notifier.py": "SlackReportNotifier",
-    "slack_notifier.py": "SlackNotifier",
 }
+
+#: 墓碑（v0.45.341）：零生产调用方、已删除的发送代码，**名字继续按发送认**。
+#:
+#: 为什么不能随代码一起删：发送方法集合是从库源码**推导**的，方法删了它就不在集合里。
+#: 这时有人把 v0.45.339 之前的旧调用块原样放回（历史里随处可 copy），扫描器会认不出；
+#: 而运行期 `send_risk_alert` 不存在 ⇒ `AttributeError` —— `sentiment` 与
+#: `real_data_sources` 那两处旧块包在 `except Exception` 里，**吞成一行 debug 日志**：
+#: 既没发、也没报，正是 CLAUDE.md「这个失败，下游怎么知道？」要治的形状。
+#: 若有人连库带调用一起 revert，推导会把方法重新收进集合 —— 两条复活路径都红。
+RETIRED_SEND_METHODS = frozenset({
+    "send_risk_alert", "send_opportunity_alert", "send_scan_progress", "send_x_thread",
+    "send_daily_report", "test_connection", "retry_failed", "_send_slack_message",
+})
+#: 整个删掉的发送器模块 → 它的类名。导入模块或引用类名即算。
+RETIRED_SENDER_MODULES = {"slack_notifier": "SlackNotifier"}
 
 #: 许出现 Slack 凭证名（token / webhook 文件名、secret 键）却不发送的模块：
 #: `config.py` 是 secret 名 → 文件路径的登记表，`scan_secrets.py` 是泄密扫描的清单。
 CREDENTIAL_REGISTRIES = {"config.py", "data_backup/scan_secrets.py"}
 
-#: 按方法名匹配会误伤的名字。发送方法里只要有一个是这种名字，该发送器类就改用
-#: 「类名出现即算」（例：`SlackNotifier.send` —— `sock.send` 满仓都是）。
+#: R1 按**方法名**认发送，前提是名字够独特：发送方法若叫 `send`，`sock.send` 满仓都会误红。
+#: v0.45.341 之前 `SlackNotifier.send` 就是这种名字，当时靠「按类名认」绕开；那个类删掉后
+#: 这条前提由 `test_no_sender_method_has_a_generic_name` 钉住，不再留一套没有实例的旁路。
 _GENERIC_METHOD_NAMES = {"send", "post", "get", "put", "run", "call", "emit", "notify", "write"}
 
 #: 出现在网络调用参数里即算「手搓发送」的 Slack 端点片段。
@@ -179,7 +196,7 @@ def _scan_source(src: str, rel: str, specs: dict, allowed=None) -> list[tuple[st
     skip = _docstring_nodes(tree)
     hits: list[tuple[str, int, str]] = []
 
-    # 本文件若是发送器库：类体内部豁免，类体外只查「自家发送方法被调」。
+    # 本文件若是发送器库：类体内部豁免（那是实现）；类体外（CLI 入口、模块级代码）照常全查。
     own_lib = specs.get(rel)
     exempt_ranges = _class_body_ranges(tree, own_lib[0]) if own_lib else []
 
@@ -187,38 +204,34 @@ def _scan_source(src: str, rel: str, specs: dict, allowed=None) -> list[tuple[st
         ln = getattr(node, "lineno", 0)
         return any(a <= ln <= b for a, b in exempt_ranges)
 
-    distinctive = set()      # 按方法名就能认出来的发送方法
-    by_class_name = set()    # 只能按类名认的发送器
-    for cls, methods in specs.values():
-        if methods & _GENERIC_METHOD_NAMES:
-            by_class_name.add(cls)
-        else:
-            distinctive |= methods
-    own_methods = own_lib[1] if own_lib else frozenset()
+    # 按方法名认的发送：现役（推导）∪ 墓碑（已删除）
+    send_names = set(RETIRED_SEND_METHODS)
+    for _cls, methods in specs.values():
+        send_names |= methods
+    retired_classes = set(RETIRED_SENDER_MODULES.values())
 
     for node in ast.walk(tree):
         if _exempt(node):
             continue
 
-        # R5：Slack SDK
+        # R5：Slack SDK；R2：已删除的发送器模块
         if isinstance(node, ast.Import):
             for a in node.names:
                 if a.name.split(".")[0] in _SLACK_SDK_ROOTS:
                     hits.append((rel, node.lineno, f"R5 import {a.name}"))
+                if a.name in RETIRED_SENDER_MODULES:
+                    hits.append((rel, node.lineno, f"R2 import 已删除的 {a.name}"))
         elif isinstance(node, ast.ImportFrom) and node.module:
             if node.module.split(".")[0] in _SLACK_SDK_ROOTS:
                 hits.append((rel, node.lineno, f"R5 from {node.module} import"))
-            if not own_lib:
-                for a in node.names:
-                    if a.name in by_class_name:
-                        hits.append((rel, node.lineno, f"R2 import {a.name}"))
+            if node.module in RETIRED_SENDER_MODULES:
+                hits.append((rel, node.lineno, f"R2 from 已删除的 {node.module} import"))
 
-        # R2：只能按类名认的发送器（非本库文件里出现类名即算）
-        if not own_lib:
-            if isinstance(node, ast.Name) and node.id in by_class_name:
-                hits.append((rel, node.lineno, f"R2 引用 {node.id}"))
-            elif isinstance(node, ast.Attribute) and node.attr in by_class_name:
-                hits.append((rel, node.lineno, f"R2 引用 .{node.attr}"))
+        # R2：已删除的发送器类名
+        if isinstance(node, ast.Name) and node.id in retired_classes:
+            hits.append((rel, node.lineno, f"R2 引用已删除的 {node.id}"))
+        elif isinstance(node, ast.Attribute) and node.attr in retired_classes:
+            hits.append((rel, node.lineno, f"R2 引用已删除的 .{node.attr}"))
 
         # R6：凭证
         if (rel not in CREDENTIAL_REGISTRIES and isinstance(node, ast.Constant)
@@ -230,15 +243,21 @@ def _scan_source(src: str, rel: str, specs: dict, allowed=None) -> list[tuple[st
             continue
         name = _callee_name(node)
 
-        # R1：调用发送方法（x.send_risk_alert(...) / getattr(x, "send_risk_alert")）
-        if isinstance(node.func, ast.Attribute) and (
-                name in distinctive or name in own_methods):
+        # R1：调用发送方法（x.send_plain_text(...) / getattr(x, "send_plain_text")）
+        if isinstance(node.func, ast.Attribute) and name in send_names:
             hits.append((rel, node.lineno, f"R1 .{name}()"))
         if name == "getattr" and len(node.args) >= 2:
             a1 = node.args[1]
             if (isinstance(a1, ast.Constant) and isinstance(a1.value, str)
-                    and (a1.value in distinctive or a1.value in own_methods)):
+                    and a1.value in send_names):
                 hits.append((rel, node.lineno, f"R1 getattr(…, {a1.value!r})"))
+
+        # R2：按字符串动态导入已删除的发送器模块
+        if name in {"import_module", "__import__"} and node.args:
+            a0 = node.args[0]
+            if (isinstance(a0, ast.Constant) and isinstance(a0.value, str)
+                    and a0.value in RETIRED_SENDER_MODULES):
+                hits.append((rel, node.lineno, f"R2 动态导入已删除的 {a0.value}"))
 
         # R3：把 Slack 端点传给网络调用
         if name in _NET_CALL_NAMES:
@@ -312,12 +331,46 @@ class TestOnlyWhitelistedModulesSend:
         """
         specs = _load_sender_specs(REPO_ROOT)
         srn = specs["slack_report_notifier.py"][1]
-        assert {"send_risk_alert", "send_opportunity_alert", "send_scan_progress",
-                "send_x_thread", "send_daily_report", "send_rich_daily_report",
-                "send_plain_text", "retry_failed", "test_connection"} <= srn
+        # 种子（方法体里有 .post）+ 一跳闭包（send_plain_text）+ 两跳闭包（send_rich_daily_report）
+        assert {"_send_via_api", "_send_slack_message_payload",
+                "send_plain_text", "send_rich_daily_report"} <= srn
         assert not {"_read_user_token", "_check_webhook_alive", "_is_valid_webhook",
-                    "_format_rich_daily_mrkdwn", "__init__"} & srn
-        assert specs["slack_notifier.py"][1] == {"send"}
+                    "_format_rich_daily_mrkdwn", "_load_json", "__init__"} & srn
+
+    def test_retired_names_are_really_gone(self):
+        """墓碑只记**已删除**的东西。墓碑里的方法又回到了库里 ⇒ 先回 CLAUDE.md 改规则
+        （新消息类型由用户决定），再把它从 `RETIRED_SEND_METHODS` 摘掉。
+
+        变红的变异：给 `SlackReportNotifier` 加回 `def send_risk_alert(self, *a): ...`；
+        把 `git show f2b03187:slack_notifier.py` 写回仓库根。
+
+        后一条为什么要在这里查文件存在：全仓扫描走 `git ls-files`（`own_python_files`），
+        **还没 `git add` 的文件它看不见** —— 实测把该文件原样写回，`test_only_whitelisted_modules_send`
+        照样绿，只有这里红。提交后全仓扫描才会接着以 R4/R6 报它（见 teeth 用例「复活的 slack_notifier.py」）。
+        """
+        tree = ast.parse((REPO_ROOT / "slack_report_notifier.py").read_text(encoding="utf-8"))
+        cls = next(n for n in tree.body
+                   if isinstance(n, ast.ClassDef) and n.name == "SlackReportNotifier")
+        members = {f.name for f in cls.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        assert "send_plain_text" in members          # 正对照：解析的确实是那个类
+        back = RETIRED_SEND_METHODS & members
+        assert not back, f"已删除的发送方法回到了 SlackReportNotifier：{sorted(back)}"
+        for mod in RETIRED_SENDER_MODULES:
+            assert not (REPO_ROOT / f"{mod}.py").exists(), f"已删除的 {mod}.py 回来了"
+
+    def test_no_sender_method_has_a_generic_name(self):
+        """R1 按方法名认发送的前提：没有一个发送方法叫 `send`/`post` 这类泛名。
+
+        先证这条检查能红（合成一个叫 `send` 的发送器），再查真库。
+        变红的变异：把 `send_plain_text` 改名为 `send`。
+        """
+        fake = _sender_methods("class K:\n    def send(self, t):\n        self.s.post(t)\n", "K")
+        assert fake & _GENERIC_METHOD_NAMES == {"send"}
+        live = {m for _cls, ms in _load_sender_specs(REPO_ROOT).values() for m in ms}
+        bad = (live | RETIRED_SEND_METHODS) & _GENERIC_METHOD_NAMES
+        assert not bad, (
+            f"发送方法 {sorted(bad)} 是泛名 —— R1 会把 `sock.send` 之类全仓误判为发送。"
+            "改个独特的名字，别在扫描器里加按类名认的旁路。")
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -356,16 +409,88 @@ _PRE_FIX_BREAKER = '''
                             pass
 '''
 
+#: 已删除的 `slack_notifier.py` 原样节选（`git show f2b03187:slack_notifier.py` 第 17 行 + 第 31–88 行）。
+#: 整个文件被原样放回时，它不在 `SENDER_LIBS` 里，要靠凭证（R6）与会话池（R4）自己露馅。
+_DELETED_SLACK_NOTIFIER = '''
+class SlackNotifier:
+    def _read_webhook_from_file(self) -> Optional[str]:
+        """从 config.get_secret > 环境变量 > 文件安全读取 Webhook URL"""
+        try:
+            from config import get_secret
+            url = get_secret("SLACK_WEBHOOK_URL")
+            if url:
+                return url
+        except ImportError:
+            pass
+        # 优先使用环境变量
+        env_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+        if env_url:
+            return env_url
+        # 降级到文件
+        webhook_file = os.path.expanduser("~/.alpha_hive_slack_webhook")
+        try:
+            with open(webhook_file, 'r') as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            return None
+
+    def send(self, alert: Alert) -> bool:
+        """
+        发送告警到 Slack
+
+        Args:
+            alert: Alert 对象
+
+        Returns:
+            是否发送成功
+        """
+        if not self.webhook_url:
+            _log.warning("Slack webhook URL not configured")
+            return False
+
+        payload = self._build_payload(alert)
+
+        try:
+            from resilience import slack_breaker
+            if not slack_breaker.allow_request():
+                _log.warning("Slack circuit breaker OPEN, skipping")
+                return False
+            response = get_session("slack").post(
+                self.webhook_url,
+                json=payload,
+                timeout=15
+            )
+            response.raise_for_status()
+            slack_breaker.record_success()
+            return True
+        except requests.exceptions.RequestException as e:
+            try:
+                from resilience import slack_breaker as _sb
+                _sb.record_failure()
+            except ImportError:
+                pass
+            _log.error("Slack notification failed: %s", e)
+            return False
+'''
+
 _MUST_FLAG = {
-    "别名导入": ("swarm_agents/x.py",
-             "from slack_report_notifier import SlackReportNotifier as S\n"
-             "S().send_opportunity_alert('NVDA', 8.0, '看多', 'd')\n"),
-    "getattr 字符串": ("x.py", "getattr(n, 'send_risk_alert')('t', 'm')\n"),
-    "retry 也是发送": ("x.py", "n.retry_failed()\n"),
+    "别名导入 + 一跳闭包": ("swarm_agents/x.py",
+                     "from slack_report_notifier import SlackReportNotifier as S\n"
+                     "S().send_plain_text('降级告警')\n"),
+    "两跳闭包": ("x.py", "n.send_rich_daily_report(p, c, d, f)\n"),
+    "私有发送方法": ("x.py", "n._send_via_api('t', 'C0AGUUWJXJS')\n"),
+    "getattr 字符串": ("x.py", "getattr(n, 'send_plain_text')('t')\n"),
     "SlackNotifier 经模块属性": ("alert_x.py",
                               "import slack_notifier\nslack_notifier.SlackNotifier().send(a)\n"),
     "SlackNotifier 直接导入": ("alert_x.py",
                             "from slack_notifier import SlackNotifier\n"),
+    "SlackNotifier 动态导入": ("alert_x.py",
+                            "importlib.import_module('slack_notifier')\n"),
+    "改前的 AlertDispatcher 两行": ("alert_manager.py",   # fd1dea85 第 395–397 行
+                                "if self.config.get('slack_enabled', False):\n"
+                                "    from slack_notifier import SlackNotifier\n"
+                                "    self.notifiers.append(SlackNotifier(self.config.get('slack_webhook')))\n"),
+    "复活的 slack_notifier.py": ("slack_notifier.py", _DELETED_SLACK_NOTIFIER),
     "裸 chat.postMessage": ("x.py",
                            "requests.post('https://slack.com/api/chat.postMessage', json={})\n"),
     "f-string webhook": ("x.py",
@@ -377,10 +502,7 @@ _MUST_FLAG = {
     "库文件的 CLI 入口": ("slack_report_notifier.py",
                        "class SlackReportNotifier:\n    pass\n\n"
                        "if __name__ == '__main__':\n"
-                       "    SlackReportNotifier().send_risk_alert('t', 'm')\n"),
-    "SlackNotifier 库外函数": ("slack_notifier.py",
-                           "class SlackNotifier:\n    pass\n\n"
-                           "def main():\n    SlackNotifier().send(alert)\n"),
+                       "    SlackReportNotifier().send_plain_text('t')\n"),
     "改前的情绪突变块": ("swarm_agents/sentiment.py",
                     "def _check_sentiment_spike(ticker, msg, delta):\n"
                     "    _log.warning('📡 情绪突变告警 %s', msg)" + _PRE_FIX_SENTIMENT),
@@ -426,6 +548,12 @@ class TestScannerHasTeeth:
         rel, src = _MUST_NOT_FLAG[case]
         assert not _scan_source(src, rel, specs), f"「{case}」不是发送，却被判为发送"
 
+    @pytest.mark.parametrize("method", sorted(RETIRED_SEND_METHODS))
+    def test_retired_method_call_still_flags(self, method, specs):
+        """墓碑逐个有牙：已删除的方法库里没有了，调用它照样按发送认。"""
+        assert method not in {m for _c, ms in specs.values() for m in ms}   # 真的不靠推导
+        assert _scan_source(f"n.{method}('t', 'm')\n", "swarm_agents/x.py", specs)
+
     def test_empty_whitelist_makes_allowed_module_red(self, specs):
         """白名单确实在起作用 —— 同一段代码，换掉路径豁免就红。"""
         rel, src = _MUST_NOT_FLAG["白名单模块"]
@@ -443,6 +571,9 @@ class TestScannerHasTeeth:
 
         锚点就是那行保留下来的日志 —— 所以这条同时断言了「日志还在」：
         有人把日志行删了，锚点找不到，这条先红（信息不许随 Slack 一起丢）。
+
+        v0.45.341 起两个块里的 `send_risk_alert` 已从库里删掉，认出它们靠的是
+        `RETIRED_SEND_METHODS` 墓碑（把墓碑清空，这两条红）。
         """
         src = (REPO_ROOT / rel).read_text(encoding="utf-8")
         assert not _scan_source(src, rel, specs), f"{rel} 当前就已违规"
@@ -490,20 +621,16 @@ def armed_slack(monkeypatch):
     `_block_slack` 为了安全**故意去掉**的状态 —— 在它的默认状态下，被禁路径
     改没改都发不出去，这里的断言就会恒绿。
     """
-    import slack_notifier
     import slack_report_notifier as srn
 
     rec = _Recorder()
     monkeypatch.setattr(srn, "get_session", rec)
-    monkeypatch.setattr(slack_notifier, "get_session", rec)
     monkeypatch.setattr(srn.SlackReportNotifier, "_read_user_token",
                         lambda self: "xoxb-armed-by-test-not-a-real-token")
     monkeypatch.setattr(srn.SlackReportNotifier, "_read_webhook_from_file",
                         lambda self: "https://hooks.slack.com/services/T0/B0/armed-by-test")
     monkeypatch.setattr(srn.SlackReportNotifier, "_check_webhook_alive",
                         staticmethod(lambda url: False))
-    monkeypatch.setattr(slack_notifier.SlackNotifier, "_read_webhook_from_file",
-                        lambda self: "https://hooks.slack.com/services/T0/B0/armed-by-test")
     # 熔断器用新实例：别让本文件（或旧代码的死锁）污染全局 slack_breaker
     import resilience
     monkeypatch.setattr(resilience, "slack_breaker", resilience.CircuitBreaker("slack"))
@@ -511,6 +638,19 @@ def armed_slack(monkeypatch):
 
 
 class TestForbiddenPathsStayLogOnly:
+    """⚠️ v0.45.341 删掉 `send_risk_alert` / `send_opportunity_alert` / `slack_notifier` 之后，
+    「把 fd1dea85 的旧块原样放回」在行为层分两种（逐条实测见 CHANGELOG v0.45.341）：
+
+    * 旧块外面包的 except **接不住** `AttributeError` / `ModuleNotFoundError`
+      （熔断器 / AlertDispatcher / 财报 / EDGAR）⇒ 异常外泄，本组对应那条照样红；
+    * 旧块包在 `except Exception` 里（情绪突变 / 数据源降级）⇒ 被吞成 debug 日志，
+      本来也发不出去。情绪突变那条**本组不红**；数据源降级那条红，但红在「日志少了
+      v0.45.339 并进来的那句」上，与发送无关。两处真正按「发送」红的都是静态那组的
+      `RETIRED_SEND_METHODS` 墓碑。
+
+    所以本组每条标注的「变红的变异」写的是**接回一个现役发送**（`send_plain_text`）——
+    那才是本组在防的事：武装状态下真的发出去。
+    """
 
     def test_fixture_really_arms_slack(self, armed_slack):
         """正对照：武装后，直接调发送方法**确实**会发（被记录）。
@@ -520,11 +660,11 @@ class TestForbiddenPathsStayLogOnly:
         from slack_report_notifier import SlackReportNotifier
         n = SlackReportNotifier()
         assert n.enabled is True
-        assert n.send_risk_alert("武装自检", "本条应被记录") is True
+        assert n.send_plain_text("武装自检：本条应被记录") is True
         assert len(armed_slack.attempts) == 1, armed_slack.attempts
 
     def test_sentiment_spike(self, armed_slack, monkeypatch, caplog):
-        """变红的变异：恢复 fd1dea85 的 `_check_sentiment_spike`（发 send_risk_alert）。"""
+        """变红的变异：在日志行后接回 `SlackReportNotifier().send_plain_text(msg)`。"""
         import swarm_agents.sentiment as s
         monkeypatch.setattr(s, "_get_sentiment_baseline", lambda t, days=30: 55.0)
         with caplog.at_level(logging.WARNING):
@@ -534,7 +674,7 @@ class TestForbiddenPathsStayLogOnly:
         assert "📡 情绪突变告警" in caplog.text and "DELL" in caplog.text
 
     def test_data_source_degradation(self, armed_slack, monkeypatch, caplog):
-        """变红的变异：恢复 `_try_src_slack_alert` 及其调用。"""
+        """变红的变异：在降级分支接回 `SlackReportNotifier().send_plain_text(...)`。"""
         import real_data_sources as r
         monkeypatch.setattr(r, "_src_fail_counts", {})
         monkeypatch.setattr(r, "_src_degraded", {})
@@ -547,7 +687,7 @@ class TestForbiddenPathsStayLogOnly:
         assert "数据质量受影响" in caplog.text      # 原 Slack 正文多出的那句并进了日志
 
     def test_edgar_rss_degradation(self, armed_slack, monkeypatch, caplog):
-        """变红的变异：恢复 `_try_rss_slack_alert` 及其调用。"""
+        """变红的变异：在降级分支接回 `SlackReportNotifier().send_plain_text(...)`。"""
         import edgar_rss
         monkeypatch.setattr(edgar_rss, "_rss_fail_count", 0)
         monkeypatch.setattr(edgar_rss, "_rss_degraded", False)
@@ -565,7 +705,7 @@ class TestForbiddenPathsStayLogOnly:
         assert "进入降级模式" in caplog.text and "实时内幕交易告警不可用" in caplog.text
 
     def test_circuit_breaker_open(self, armed_slack, caplog):
-        """变红的变异：恢复 fd1dea85 `record_failure` 里的 send_risk_alert 块。
+        """变红的变异：在 `record_failure` 的 OPEN 分支接回 `SlackReportNotifier().send_plain_text(...)`。
 
         名字刻意不含 "test" —— 旧代码对名字带 test 的熔断器跳过发送，
         用 test 命名会让这条对旧代码也恒绿。
@@ -580,7 +720,8 @@ class TestForbiddenPathsStayLogOnly:
         assert "CircuitBreaker[yfinance_probe] -> OPEN" in caplog.text
 
     def test_alert_dispatcher_ignores_slack(self, armed_slack, caplog):
-        """变红的变异：恢复 AlertDispatcher 里 `slack_enabled → SlackNotifier` 那两行。"""
+        """变红的变异：恢复 fd1dea85 AlertDispatcher 里 `slack_enabled → SlackNotifier` 那两行
+        （模块已删 ⇒ `ModuleNotFoundError` 外泄；静态 R2 墓碑也红）。"""
         from alert_manager import Alert, AlertDispatcher, AlertLevel
         with caplog.at_level(logging.INFO):
             d = AlertDispatcher({"slack_enabled": True})
@@ -590,10 +731,11 @@ class TestForbiddenPathsStayLogOnly:
         assert "slack_enabled 被忽略" in caplog.text
 
     def test_earnings_update_notice(self, armed_slack, caplog):
-        """变红的变异：恢复 check_earnings_updates 里的 send_opportunity_alert。
+        """变红的变异：在 check_earnings_updates 里接回 `self.slack_notifier.send_plain_text(...)`。
 
         `slack_notifier` 属性按旧接线挂一个**已武装**的通知器：谁把发送接回
-        `self.slack_notifier`，这里就真的「发出去」被记录。
+        `self.slack_notifier`，这里就真的「发出去」被记录。（原样放回 fd1dea85 的
+        `send_opportunity_alert` 调用 ⇒ 方法已删、`AttributeError` 不在它的 except 里 ⇒ 也红。）
         """
         from alpha_hive_daily_report import AlphaHiveDailyReporter
         from slack_report_notifier import SlackReportNotifier
@@ -627,22 +769,34 @@ class TestBreakerDoesNotDeadlock:
         `with self._lock` ⇒ 在自己手里的锁上永久阻塞。生产日志 4 次
         `CircuitBreaker[slack] -> OPEN` 后扫描进程都静默到被编排器超时杀掉。
 
-        变红的变异：恢复 fd1dea85 的 `record_failure`（该线程 10 秒不返回）。
+        变红的变异：在 `record_failure` 持锁区的 OPEN 分支接回
+        `SlackReportNotifier().send_plain_text(...)`（`_send_via_api` 同样先问
+        `slack_breaker.allow_request()` ⇒ 同一把锁，该线程 10 秒不返回）。
+        v0.45.341 起原样恢复 fd1dea85 的块**不再死锁**：`send_risk_alert` 已删，
+        `AttributeError` 先把线程炸掉 —— 所以线程里的异常单独接住、单独报，
+        免得「线程死于异常」被报成「死锁回来了」。
         `armed_slack` 已把 `resilience.slack_breaker` 换成新实例 —— 变异跑时死锁的
         只是这个临时实例，不会拖住同进程里后续测试。
         """
         import resilience
         br = resilience.slack_breaker
         done = threading.Event()
+        raised: list[BaseException] = []
 
         def _run():
-            for _ in range(br._failure_threshold):
-                br.record_failure()
+            try:
+                for _ in range(br._failure_threshold):
+                    br.record_failure()
+            except BaseException as e:      # noqa: BLE001 —— 要原样报出来，不吞
+                raised.append(e)
+                return
             done.set()
 
         t = threading.Thread(target=_run, daemon=True, name="slack-breaker-deadlock-probe")
         t.start()
         t.join(timeout=10)
-        assert done.is_set(), "slack_breaker.record_failure 没有返回 —— 持锁发 Slack 的自死锁回来了"
+        assert not raised, f"slack_breaker.record_failure 抛了异常（不是死锁）：{raised[0]!r}"
+        assert not t.is_alive() and done.is_set(), (
+            "slack_breaker.record_failure 没有返回 —— 持锁发 Slack 的自死锁回来了")
         assert br.state == resilience.CircuitBreaker.OPEN
         assert armed_slack.attempts == []

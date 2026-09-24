@@ -260,11 +260,12 @@ class TestMetricsCollectorThreads:
 # ==================== Slack webhook env var (#20) ====================
 
 class TestSlackWebhookEnvVar:
-    def test_env_var_takes_priority(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/from-env")
-        from slack_notifier import SlackNotifier
-        n = SlackNotifier()
-        assert n.webhook_url == "https://hooks.slack.com/from-env"
+    """`SlackReportNotifier` 的 webhook 解析顺序：环境变量 > `~/.alpha_hive_slack_webhook`。
+
+    v0.45.341：原本另有两条测的是 `slack_notifier.SlackNotifier`（同一套解析逻辑的
+    第二份拷贝），随该模块删除。「空环境变量落到文件」改测这里，并把 `HOME` 指到
+    tmp —— 旧写法会读你 Mac 上的真 webhook 文件，断言 `!= "" or is None` 也几乎恒真。
+    """
 
     def test_report_notifier_env_var(self, monkeypatch):
         monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/report-env")
@@ -272,12 +273,14 @@ class TestSlackWebhookEnvVar:
         n = SlackReportNotifier()
         assert n.webhook_url == "https://hooks.slack.com/report-env"
 
-    def test_empty_env_falls_through(self, monkeypatch):
+    def test_empty_env_falls_through_to_file(self, monkeypatch, tmp_path):
         monkeypatch.setenv("SLACK_WEBHOOK_URL", "")
-        from slack_notifier import SlackNotifier
-        n = SlackNotifier()
-        # Should fall through to file (which may or may not exist)
-        assert n.webhook_url != ""  or n.webhook_url is None
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from slack_report_notifier import SlackReportNotifier
+        assert SlackReportNotifier().webhook_url is None          # 文件不在
+        (tmp_path / ".alpha_hive_slack_webhook").write_text(
+            "https://hooks.slack.com/from-file\n", encoding="utf-8")
+        assert SlackReportNotifier().webhook_url == "https://hooks.slack.com/from-file"
 
 
 # ==================== ConfigLoader hot-reload (#22) ====================

@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """
-💬 Alpha Hive Slack 报告通知器 - Phase 3 P6
-专门用于将投资简报和各类信息推送到 Slack
-替代 Gmail，提供实时、富文本的通知体验
+💬 Alpha Hive Slack 报告通知器
+
+CLAUDE.md「Slack 通知精简规则」只许两类消息，本模块只服务这两处：
+  ① `pre_scan_notify.py`（LLM 模式确认）—— 只借用构造出的 token / 状态，自己发
+  ② `push_report_to_slack.py --force`（富文本日报）—— `send_rich_daily_report`
+
+v0.45.341 删掉了零生产调用方的发送方法：`send_risk_alert` / `send_opportunity_alert` /
+`send_scan_progress` / `send_x_thread` / `send_daily_report` 及其 blocks 构建器与
+`_send_slack_message`、连接测试 `test_connection`、以及从未被读过的失败重试队列
+（`retry_failed` / `_enqueue_failed`：队列只活在单次进程的内存里，而两个调用方都是
+发一条就退出的一次性进程 ⇒ 结构上不可能被重试）。想加新的消息类型，先改 CLAUDE.md 的
+规则（用户决定），再改 `tests/test_slack_send_whitelist.py` 的白名单 —— 那里把这些
+删掉的名字留作墓碑，把旧调用块原样放回会红。
 """
 
 import json
 import os
-import time
-import hashlib
 import requests
 from resilience import get_session
-from collections import deque
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from hive_logger import get_logger
@@ -49,8 +56,6 @@ class SlackReportNotifier:
             self._webhook_alive = self._check_webhook_alive(self.webhook_url)
 
         self.enabled = bool(self.user_token) or self._webhook_alive
-        self._failed_queue: deque = deque(maxlen=50)
-        self._sent_hashes: Dict[str, float] = {}  # hash → timestamp, 去重用
 
     @staticmethod
     def _is_valid_webhook(url: str) -> bool:
@@ -122,204 +127,6 @@ class SlackReportNotifier:
                 return f.read().strip()
         except FileNotFoundError:
             return None
-
-    def send_daily_report(self, report_data: Dict) -> bool:
-        """
-        发送每日投资简报到 Slack
-
-        Args:
-            report_data: 包含报告信息的字典
-
-        Returns:
-            是否发送成功
-        """
-        if not self.enabled:
-            _log.warning("Slack 通知已禁用")
-            return False
-
-        blocks = self._build_daily_report_blocks(report_data)
-        return self._send_slack_message(blocks)
-
-    def send_opportunity_alert(self, ticker: str, score: float, direction: str,
-                               discovery: str, risks: List[str] = None) -> bool:
-        """
-        发送高分机会告警
-
-        Args:
-            ticker: 股票代码
-            score: 综合评分（0-10）
-            direction: 方向（看多/看空/中性）
-            discovery: 发现摘要
-            risks: 风险列表
-
-        Returns:
-            是否发送成功
-        """
-        if not self.enabled:
-            return False
-
-        blocks = self._build_opportunity_alert_blocks(ticker, score, direction, discovery, risks)
-        return self._send_slack_message(blocks)
-
-    def send_risk_alert(self, alert_title: str, alert_message: str, severity: str = "HIGH") -> bool:
-        """
-        发送风险告警
-
-        Args:
-            alert_title: 告警标题
-            alert_message: 告警信息
-            severity: 严重级别（CRITICAL/HIGH/MEDIUM/LOW）
-
-        Returns:
-            是否发送成功
-        """
-        if not self.enabled:
-            return False
-
-        severity_config = {
-            "CRITICAL": {"color": "#FF0000", "emoji": "🚨"},
-            "HIGH": {"color": "#FF6600", "emoji": "⚠️"},
-            "MEDIUM": {"color": "#FFCC00", "emoji": "⚡"},
-            "LOW": {"color": "#0099FF", "emoji": "ℹ️"}
-        }
-
-        config = severity_config.get(severity, severity_config["MEDIUM"])
-
-        blocks = [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"{config['emoji']} *{alert_title}*\n\n{alert_message}"
-                }
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"🐝 Alpha Hive | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    }
-                ]
-            }
-        ]
-
-        attachments = [
-            {
-                "color": config["color"],
-                "footer": "Alpha Hive 风险告警系统"
-            }
-        ]
-
-        return self._send_slack_message(blocks, attachments=attachments)
-
-    def send_scan_progress(self, targets: List[str], current: int, total: int,
-                           status_message: str) -> bool:
-        """
-        发送扫描进度更新
-
-        Args:
-            targets: 目标标的列表
-            current: 当前完成数
-            total: 总数
-            status_message: 状态信息
-
-        Returns:
-            是否发送成功
-        """
-        if not self.enabled:
-            return False
-
-        progress_pct = (current / total * 100) if total > 0 else 0
-
-        blocks = [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"🔄 *Alpha Hive 蜂群扫描进度*\n\n{status_message}"
-                }
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*进度:*\n{current}/{total} ({progress_pct:.0f}%)"
-                    },
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*标的数:*\n{len(targets)}"
-                    }
-                ]
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*追踪标的:*\n{', '.join(targets[:5])}{'...' if len(targets) > 5 else ''}"
-                }
-            }
-        ]
-
-        return self._send_slack_message(blocks)
-
-    def send_x_thread(self, thread_content: str, date_str: str) -> bool:
-        """
-        发送 X (Twitter) 线程草稿到 Slack
-
-        Args:
-            thread_content: X 线程内容（多条推文）
-            date_str: 日期
-
-        Returns:
-            是否发送成功
-        """
-        if not self.enabled:
-            return False
-
-        # 将多条推文分离
-        tweets = [t.strip() for t in thread_content.split('\n') if t.strip() and t.strip().startswith(('【', '#', '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'))]
-
-        blocks = [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"🐦 *Alpha Hive X 线程草稿* - {date_str}"
-                }
-            },
-            {
-                "type": "divider"
-            }
-        ]
-
-        # 添加前 5 条推文
-        for i, tweet in enumerate(tweets[:5], 1):
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"{i}️⃣ {tweet[:200]}..."
-                }
-            })
-
-        blocks.extend([
-            {
-                "type": "divider"
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"📝 共 {len(tweets)} 条推文 | 🐝 Alpha Hive"
-                    }
-                ]
-            }
-        ])
-
-        return self._send_slack_message(blocks)
 
     # ------------------------------------------------------------------
     # 富文本日报（March-3 格式）
@@ -568,219 +375,6 @@ class SlackReportNotifier:
 
         return "\n".join(lines)
 
-    def _build_daily_report_blocks(self, report_data: Dict) -> List[Dict]:
-        """构建每日报告 Block"""
-
-        blocks = [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "📰 *Alpha Hive 每日投资简报*"
-                }
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"🐝 {datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')}"
-                    }
-                ]
-            },
-            {
-                "type": "divider"
-            }
-        ]
-
-        # 添加机会列表
-        opportunities = report_data.get('opportunities', [])
-        if opportunities:
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*📊 发现 {len(opportunities)} 个投资机会*"
-                }
-            })
-
-            # Top 3 机会
-            for i, opp in enumerate(opportunities[:3], 1):
-                blocks.append({
-                    "type": "section",
-                    "fields": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*#{i} {opp.get('ticker', '?')}*\n{opp.get('direction', '中性')}"
-                        },
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*评分*\n{opp.get('opp_score', 0):.1f}/10"
-                        }
-                    ]
-                })
-
-        # 添加风险提示
-        risks = report_data.get('risks', [])
-        if risks:
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*⚠️ 风险提示:*\n{', '.join(risks[:3])}"
-                }
-            })
-
-        # 添加免责声明
-        blocks.extend([
-            {
-                "type": "divider"
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": "📋 本报告为自动化数据分析，不构成投资建议。请根据自身风险承受能力做出投资决策。"
-                    }
-                ]
-            }
-        ])
-
-        return blocks
-
-    def _build_opportunity_alert_blocks(self, ticker: str, score: float, direction: str,
-                                        discovery: str, risks: List[str]) -> List[Dict]:
-        """构建机会告警 Block"""
-
-        direction_emoji = {
-            "看多": "📈",
-            "看空": "📉",
-            "中性": "➡️"
-        }
-        emoji = direction_emoji.get(direction, "•")
-
-        blocks = [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"{emoji} *高分机会告警: {ticker}*"
-                }
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*方向*\n{direction}"
-                    },
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*评分*\n{score:.1f}/10"
-                    }
-                ]
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*发现*\n{discovery[:200]}"
-                }
-            }
-        ]
-
-        if risks:
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*风险*\n• {chr(10).join(risks[:2])}"
-                }
-            })
-
-        blocks.extend([
-            {
-                "type": "divider"
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"🐝 Alpha Hive | {datetime.now().strftime('%H:%M:%S')}"
-                    }
-                ]
-            }
-        ])
-
-        return blocks
-
-    def _send_slack_message(self, blocks: List[Dict],
-                            attachments: Optional[List[Dict]] = None) -> bool:
-        """发送 Slack 消息（blocks 格式）— 优先 Bot Token API，降级 Webhook"""
-
-        # 优先通过 Bot Token API（与 send_plain_text 一致）
-        if self.use_user_token:
-            try:
-                from resilience import slack_breaker
-                if not slack_breaker.allow_request():
-                    _log.warning("Slack circuit breaker OPEN, skipping")
-                    return False
-            except ImportError:
-                slack_breaker = None
-            try:
-                # 依次尝试：频道 → DM 降级
-                targets = [self.CHANNEL_ID]
-                if _DM_FALLBACK and _DM_FALLBACK != self.CHANNEL_ID:
-                    targets.append(_DM_FALLBACK)
-
-                for target_ch in targets:
-                    api_payload: Dict[str, Any] = {
-                        "channel": target_ch,
-                        "blocks": blocks,
-                        "text": "Alpha Hive 通知",
-                        "unfurl_links": False,
-                    }
-                    if attachments:
-                        api_payload["attachments"] = attachments
-                    response = get_session("slack").post(
-                        "https://slack.com/api/chat.postMessage",
-                        headers={"Authorization": f"Bearer {self.user_token}"},
-                        json=api_payload,
-                        timeout=15,
-                    )
-                    data = response.json()
-                    if data.get("ok"):
-                        if slack_breaker:
-                            slack_breaker.record_success()
-                        _log.info("Slack 消息发送成功（Bot Token + blocks → %s）", target_ch)
-                        return True
-                    err = data.get("error", "unknown")
-                    # not_in_channel / channel_not_found → 可降级到 DM
-                    if err in ("not_in_channel", "channel_not_found"):
-                        _log.warning("Slack API (%s): %s，尝试 DM 降级", target_ch, err)
-                        continue
-                    # 其他错误不再重试
-                    _log.warning("Slack API 错误 (blocks): %s", err)
-                    break
-            except requests.exceptions.RequestException as e:
-                if slack_breaker:
-                    try:
-                        slack_breaker.record_failure()
-                    except Exception:
-                        pass
-                _log.warning("Slack API (blocks) 失败，降级到 Webhook: %s", e)
-
-        # 降级到 Webhook
-        payload: Dict[str, Any] = {
-            "blocks": blocks,
-            "text": "Alpha Hive 通知",
-        }
-        if attachments:
-            payload["attachments"] = attachments
-        return self._send_slack_message_payload(payload)
-
     def send_plain_text(self, text: str, channel: Optional[str] = None) -> bool:
         """发送纯文本消息（02-27 格式，优先用 User Token）"""
         if not self.enabled:
@@ -833,7 +427,6 @@ class SlackReportNotifier:
                     slack_breaker.record_failure()
                 except Exception as e2:
                     _log.debug("circuit_breaker.record_failure() failed: %s", e2)
-            self._enqueue_failed("api", text)
             _log.error("Slack 发送失败: %s", e)
             return False
 
@@ -869,66 +462,8 @@ class SlackReportNotifier:
                 _sb.record_failure()
             except ImportError:
                 pass
-            text = payload.get("text", "")
-            if text:
-                self._enqueue_failed("webhook", text)
             _log.error("Slack 发送失败: %s", e)
             return False
-
-    def _enqueue_failed(self, method: str, text: str):
-        """将失败消息加入重试队列（去重：5 分钟内相同内容不重复入队）"""
-        h = hashlib.md5(text[:200].encode()).hexdigest()
-        now = time.time()
-        if h in self._sent_hashes and now - self._sent_hashes[h] < 300:
-            return  # 5 分钟内重复，跳过
-        self._sent_hashes[h] = now
-        self._failed_queue.append({"method": method, "text": text, "ts": now, "hash": h})
-
-    def retry_failed(self) -> int:
-        """重试队列中的失败消息，返回成功数"""
-        if not self._failed_queue:
-            return 0
-        succeeded = 0
-        remaining = deque(maxlen=50)
-        while self._failed_queue:
-            item = self._failed_queue.popleft()
-            # 超过 1 小时的消息丢弃
-            if time.time() - item["ts"] > 3600:
-                continue
-            ok = False
-            if item["method"] == "api" and self.use_user_token:
-                ok = self._send_via_api(item["text"], self.CHANNEL_ID)
-            elif item["method"] == "webhook":
-                ok = self._send_slack_message_payload({"text": item["text"]})
-            if ok:
-                succeeded += 1
-                self._sent_hashes[item["hash"]] = time.time()
-            else:
-                remaining.append(item)
-        self._failed_queue = remaining
-        return succeeded
-
-    def test_connection(self) -> bool:
-        """测试 Slack 连接"""
-
-        if not self.enabled:
-            _log.error("Slack 未配置")
-            return False
-
-        mode = "User Token" if self.use_user_token else "Webhook"
-        msg = f"✅ Alpha Hive Slack 连接测试成功！\n模式：{mode}\n🐝 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-
-        if self.use_user_token:
-            success = self._send_via_api(msg, self.CHANNEL_ID)
-        else:
-            blocks = [
-                {"type": "section", "text": {"type": "mrkdwn", "text": msg}}
-            ]
-            success = self._send_slack_message(blocks)
-
-        if success:
-            _log.info("Slack 连接测试通过（%s）", mode)
-        return success
 
 
 if __name__ == "__main__":

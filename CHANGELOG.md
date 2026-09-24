@@ -30,7 +30,64 @@
 - 全套 5592 passed / 85 deselected / 2 xfailed（`--deselect TestCoverageHorizon`，按设计红）；`ruff check .` 全过。
 - 今晚生产 Step 14 会先以新范围跑一次（此时 `--src` 仍是代码检出），首次约 +10 MB——等于搬迁前在生产上预验新范围。
 
-## [0.45.341] — 2026-09-24 — 占位（进行中：删 v0.45.339 后零生产调用方的 Slack 发送代码——SlackReportNotifier 告警类方法 / slack_notifier.SlackNotifier / run_daily_scan 无用 notifier）
+## [0.45.341] — 2026-09-24 — Removed：v0.45.339 之后零生产调用方的 Slack 发送代码——SlackReportNotifier 告警类方法与失败重试队列、整个 slack_notifier.py、run_daily_scan 的无用 notifier；白名单守卫把删掉的名字留作墓碑
+
+v0.45.339 把六处告警类发送改成只写日志后，发送器里留下一批**没人调用、但一调就发**的方法。
+本版按成员粒度数读者后删除（auto-memory `alpha-hive-dead-field.md`「死代码可以是带电的」）。
+
+### 判死：两条独立证据，各带正对照
+- **静态**（`git ls-files -z | xargs -0 grep`，全文件类型）：下列成员在非测试 `.py` 里只剩注释/docstring 提及；
+  仓库外 `~/.claude/scripts/`、`~/.claude/scheduled-tasks/`、launchd、`~/alpha-hive-data` 零命中。
+  正对照：同一搜索在编排器里命中 `pre_scan_notify` / `push_report_to_slack` / `alert_manager`。
+- **运行期 dispatch 录制**（临时 pytest 插件给两个通知器类挂 `__getattribute__`，记「谁、从哪个文件、碰了哪个成员」；
+  Slack 武装成假 token + 记录器会话，零出网）：驱动全部六条旧发送路径 + `push_report_to_slack --force` +
+  `pre_scan_notify` 发送与轮询 + `run_daily_scan._run_scan`。生产文件对通知器的**全部**外部访问只有：
+  `pre_scan_notify` → `enabled` / `use_user_token` / `user_token`（它自己 `requests.post`，不调任何通知器方法）；
+  `push_report_to_slack` → `enabled` / `send_rich_daily_report`。`SlackNotifier` 零访问（含 `AlertDispatcher({"slack_enabled": True})`）。
+  正对照：武装自检直调的 `send_risk_alert` 被录到 ⇒ 录制器看得见发送方法。改后复跑：生产访问逐项不变，只少了 `run_daily_scan` 的构造。
+- 生产日志不能当第三条证据：最后一条 blocks 发送是 09-23 14:58（DELL，早于 v0.45.339 提交的 20:01），**此后还没有过扫描** ⇒ 待验证。
+- 顺带：`push_report_to_slack.py` 不带 `--force` 在构造通知器之前就 `exit 2`，编排器不传 ⇒ 日常生产里
+  碰 `SlackReportNotifier` 的只有 `pre_scan_notify`。
+
+### Removed
+- `slack_report_notifier.py`：`send_risk_alert` / `send_opportunity_alert` / `send_scan_progress` / `send_x_thread` /
+  `send_daily_report`、`_build_daily_report_blocks` / `_build_opportunity_alert_blocks`、`_send_slack_message`（只被前五个与下一条调用）。
+- 同文件 `test_connection`（零调用方；往频道发一条「连接测试」—— 不在许可的两类里；两份旧文档还在教人跑它）。
+- 同文件失败重试队列 `retry_failed` / `_enqueue_failed` / `_failed_queue` / `_sent_hashes`：`retry_failed` 零调用方 ⇒ 队列只写不读；
+  且队列是实例内存，两个调用方都是发一条就退出的一次性进程 ⇒ **结构上**不可能被重试。失败的出口仍是返回值
+  （`push_report_to_slack` 据此 exit 1）+ `Slack 发送失败` error 日志。`time` / `hashlib` / `deque` 随之无读者（ruff F401 确认）。
+- `slack_notifier.py` 整个删除。它的 `main()` 在 v0.45.339 后只剩「把 webhook URL 写进 `~/.alpha_hive_slack_webhook`」；
+  需要时手工写（`chmod 600`）即可。`pre_scan_notify` 第三级兜底**直接读该文件**，不依赖本模块（新测试钉住，见下）。
+- `run_daily_scan._run_scan` 的 `notifier = SlackReportNotifier()`：构造后从不使用，构造本身对已 404 的 webhook 发一次 HEAD。
+  `--dry-run` 的 Slack 状态检查保留（只读 `enabled` / `use_user_token`）。
+
+### Changed（测试）
+- `tests/test_slack_send_whitelist.py`：`SENDER_LIBS` 只剩 `SlackReportNotifier`。**删掉的名字留作墓碑**
+  `RETIRED_SEND_METHODS` / `RETIRED_SENDER_MODULES`，继续按发送认 —— 发送方法集合是从库源码推导的，方法一删推导就认不出
+  把 v0.45.339 之前的旧调用块原样放回；而 `sentiment` / `real_data_sources` 的旧块包在 `except Exception` 里，
+  运行期 `AttributeError` 被吞成 debug 日志：不发、也不报。原「按类名认 `SlackNotifier`」的 R2 改为墓碑规则（含 `import_module` 字符串）；
+  `SlackNotifier.send` 那种泛名的前提改由 `test_no_sender_method_has_a_generic_name` 钉住。新增 `test_retired_names_are_really_gone`、
+  逐个墓碑的 teeth、「复活的 slack_notifier.py」（`f2b03187` 原文节选）与「改前的 AlertDispatcher 两行」用例；
+  武装自检改用 `send_plain_text`；死锁测试把线程内异常单独接住 —— 否则「线程死于异常」会被报成「死锁回来了」。
+- `tests/test_slack_notifier.py`：删 blocks / 风险告警 / 重试队列测试；失败路径改断言「返回 False + error 日志 + 熔断器记一次」
+  （并换掉全局 `slack_breaker`，不再污染同进程）；新增 `TestPreScanWebhookFallback`（`HOME` 指 tmp、`requests.post` 换记录器）。
+- `tests/test_utilities.py::TestSlackWebhookEnvVar`：两条 `SlackNotifier` 用例随模块删除；「空环境变量落到文件」改测
+  `SlackReportNotifier` 且 `HOME` 指 tmp —— 旧写法会读本机真 webhook 文件，断言 `!= "" or is None` 也近乎恒真。
+- `tests/conftest.py::_block_slack`：只拦 `slack_report_notifier`；docstring 去掉会过期的「N 处」计数。
+- `QUICK_START.md` / `SLACK_INTEGRATION_GUIDE.md`：顶部加「已过时」横幅（不改正文）。
+
+### 变异（`PYTHONDONTWRITEBYTECODE=1`，每轮清 pyc、核 `collected N>0`、sha 还原）——18 条，17 红
+| 变异 | 红在哪 |
+|---|---|
+| 六个旧发送者各自整文件恢复 `fd1dea85` | 全部红静态扫描（墓碑 R1/R2）。行为层：熔断器 / EDGAR / 财报 `AttributeError` 外泄、AlertDispatcher `ModuleNotFoundError` ⇒ 红；数据源降级红在「日志少了一句」；**情绪突变行为层不红**（被吞）——墓碑正是为它 |
+| 五处各接回现役 `send_plain_text` | 静态 + 对应行为测试红（武装记录器录到 `chat.postMessage`）；熔断器那条死锁测试报「自死锁回来了」 |
+| 旧版 `record_failure` 原样恢复 | 死锁测试报「抛了异常（不是死锁）」—— 与上一条分得开 |
+| 墓碑方法集清空 / 墓碑模块清空 | 各 4 红（改前块 teeth + 真文件注入；SlackNotifier 三式 + AlertDispatcher 两行）；「复活的 slack_notifier.py」仍被 R4/R6 认出 |
+| 加回 `send_risk_alert` 定义 | `test_retired_names_are_really_gone` + 对应墓碑 teeth 红 |
+| `send_plain_text` 改名 `send` | `test_no_sender_method_has_a_generic_name` 等 11 红 |
+| `pre_scan_notify` webhook 路径改名 | `test_webhook_file_is_used` 红 |
+| `slack_notifier.py` 原样写回 | **只有** `test_retired_names_are_really_gone` 红：全仓扫描走 `git ls-files`，未 `git add` 的文件看不见（已写进该测试 docstring；这是所有基于 `_repo_files` 的 AST 守卫的共同盲区） |
+| `run_daily_scan` 加回无用 notifier | 不红 —— 无害的浪费，不设守卫 |
 
 ## [0.45.340] — 2026-09-23 — 占位（进行中：buzz_v1 阶段 1——Buzz 情绪动量改读归档、按扫描日期回看 + 通道全精度入档；计划 09-25 扫描上线）
 
