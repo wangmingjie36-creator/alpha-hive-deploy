@@ -15,7 +15,7 @@ CHANGELOG v0.45.327）：报告里「signal 是唯一能检测到时间变异的
 
   · close_t7：IC 逐周交替 +1 / −1（因子有效性随时间翻转）⇒ 周度方差 ≈ 1 ≫ 置换零分布
     ≈ 1/7 ⇒ σ_t² 占主导、**不**钳 0、扩池倍数 ≈ 1×（扩池帮不上忙）；
-  · price_t7：翻转那几周里高分票先冲过止盈（离场 +10%）再收跌、低分票先跌穿止损
+  · price_t7：翻转那几周里高分半先冲过止盈（离场 +10%）再收跌、低分半先跌穿止损
     （离场 −5%）再收涨 ⇒ 离场价的 IC 恒为正、周间几乎不动 ⇒ 周度方差 ≈ 0 ⇒ 钳 0、
     倍数 = 1/缩放系数 ≈ 5.7×（「扩池缩短 5 倍」）。
 
@@ -44,6 +44,11 @@ def _load_module():
 
 
 icp = _load_module()
+
+# 夹具自检、骨架比对、哨兵列直接用 ic_diagnostics，不经 icp 模块上的别名：那个别名是 v0.45.327
+# 才加的属性，经它取会让这几条在改动前的文件上因 AttributeError 变红——红的理由与它们要证的事无关。
+sys.path.insert(0, str(_ROOT))
+import ic_diagnostics as icd  # noqa: E402
 
 DIMS = ["signal", "catalyst", "sentiment", "odds", "risk_adj"]
 TICKERS = [f"T{i}" for i in range(8)]
@@ -79,10 +84,11 @@ def _insert(con, date, ticker, score, *, pap, price_t7, close_t7, reason):
 def _build_flipping_db(tmp_path):
     """close_t7 的 IC 逐周翻转（+1/−1）；price_t7（= 离场价）的 IC 周周为正。
 
-    分数 1..8 两两不同（五个维度共用同一套分数，每维都走同一条判定）。
-    偶数周：收盘收益 = +分数（IC=+1），不触 SL/TP，离场价 = 收盘价。
-    奇数周：收盘收益 = −分数（IC=−1）；高分半先冲止盈（离场 110）、低分半先破止损（离场 95）
-            ⇒ 离场价与分数同向（两档并列，IC ≈ +0.87）。
+    分数 1..8 两两不同（五个维度共用同一套分数，每维都走同一条判定）；收盘收益以 4.5 为中心，
+    故每天都有涨有跌。
+    偶数周：收盘收益 = +(分数 − 4.5)%（IC=+1），不触 SL/TP，离场价 = 收盘价。
+    奇数周：收盘收益 = −(分数 − 4.5)%（IC=−1）；高分半（收跌）先冲止盈（离场 110）、
+            低分半（收涨）先破止损（离场 95）⇒ 离场价与分数同向（两档并列，IC ≈ +0.87）。
     """
     db = tmp_path / "p.db"
     con = sqlite3.connect(db)
@@ -91,11 +97,12 @@ def _build_flipping_db(tmp_path):
         for i, tk in enumerate(TICKERS):
             score = float(i + 1)
             if w % 2 == 0:
-                close = 100.0 + score
+                close = 100.0 + (score - 4.5)
                 exit_px, reason = close, "T7_CLOSE"
             else:
-                close = 100.0 - score
+                close = 100.0 - (score - 4.5)
                 exit_px, reason = (110.0, "TP") if score > 4 else (95.0, "SL")
+                assert (close < 100.0) == (reason == "TP")   # 故事本身：止盈的收跌、止损的收涨
             _insert(con, d, tk, score, pap=100.0, price_t7=exit_px, close_t7=close,
                     reason=reason)
     con.commit()
@@ -113,7 +120,8 @@ def _run_json(monkeypatch, capsys, db):
 class TestFixtureDiscriminates:
     """没有这一组，下面「不钳 0 / 倍数 ≈ 1」可能只是夹具本来就分不出两列。
 
-    直接对夹具库算周度 IC 方差（不经被测脚本，右边的真值是独立来源）。
+    直接对夹具库算周度 IC 方差：不经被测脚本的取数 / 分解逻辑，只借用
+    `ic_diagnostics.spearman`，右边的真值是独立来源。
     """
 
     @pytest.mark.parametrize("col, big", [("close_t7", True), ("price_t7", False)])
@@ -129,7 +137,7 @@ class TestFixtureDiscriminates:
             wk = datetime.date.fromisoformat(d).isocalendar()[:2]
             if wk not in weekly:
                 pairs = by_day[d]
-                weekly[wk] = icp.spearman([s for s, _ in pairs], [r for _, r in pairs])
+                weekly[wk] = icd.spearman([s for s, _ in pairs], [r for _, r in pairs])
         assert len(weekly) == N_WEEKS
         var = statistics.variance(list(weekly.values()))
         assert (var > 0.5) if big else (var < 0.05), f"{col}: 周度 IC 方差 {var:.4f}"
@@ -166,6 +174,7 @@ class TestHeadlineFollowsClose:
         assert icp.main() == 0
         out = capsys.readouterr().out
         assert "【第 2~3 步】" in out
+        assert "样本不足" not in out, "分解表没印出来 ⇒ 下面「没有 ⚠钳0」是空洞地成立"
         assert "⚠钳0" not in out, "时间变异被截断收益抹平 ⇒ σ_t² 钳 0（对着离场价算的）"
 
     def test_power_table_needs_more_weeks_under_close(self, tmp_path, monkeypatch, capsys):
@@ -213,6 +222,96 @@ class TestLoadDayPairsValues:
             "price_t7 为空的行被过滤掉了 —— 过滤条件没跟终点列走")
 
 
+class TestSkeletonParity:
+    """第 3 步骨架（`_load_day_pairs`）与第 2 步（`observed_weekly_var` → `load_daily_ic`）必须落在
+    **同一批天、同一组 (分数, 收益)** 上——σ_cs² 与 σ_IC² 在不同的天集合或不同的收益序列上相减，
+    第 4 步的分解就没有意义。此前只靠 `_load_day_pairs` 末尾的注释（「过滤条件逐字一致」）维持；
+    本组逐维度逐日比对两边，谁的过滤或取数分叉谁红。
+
+    第 2 步那边不自己调 `load_daily_ic`，而是 spy `observed_weekly_var` 里**真实的那次调用**——
+    否则它传错参数（如 `target`）本组看不见。
+    """
+
+    DAYS = {
+        "A": "2026-06-01",   # 宽 6，正常
+        "B": "2026-06-02",   # 宽 6，其中 1 行 close_t7 为空 ⇒ 宽 5（恰好 = min_width）
+        "C": "2026-06-03",   # 宽 5，其中 1 行没有 catalyst 键 ⇒ catalyst 宽 4（剔除），其余维度宽 5
+        "D": "2026-06-04",   # 宽 6，odds 全员同分（剔除 odds），其余维度照常
+        "E": "2026-06-05",   # 宽 4 ⇒ 全维度剔除
+        "F": "2026-06-08",   # 宽 7：1 行 dimension_scores 为空、1 行入场价为 0 ⇒ 宽 5
+    }
+
+    def _db(self, tmp_path):
+        import random
+        rng = random.Random(327)
+        db = tmp_path / "p.db"
+        with sqlite3.connect(db) as con:
+            _create_table(con)
+
+            def put(day, i, ds, close="rand", pap=100.0):
+                close = 100.0 + rng.uniform(-6, 6) if close == "rand" else close
+                con.execute(
+                    "INSERT INTO predictions (date,ticker,dimension_scores,price_at_predict,price_t7,"
+                    "close_t7,exit_price,exit_reason,checked_t7) VALUES (?,?,?,?,?,?,?,?,1)",
+                    (day, f"T{i}", None if ds is None else json.dumps(ds), pap,
+                     100.0 + rng.uniform(-6, 6), close, 100.0, "T7_CLOSE"))
+
+            def scores(i):
+                return {d: float(rng.randint(1, 9)) for d in DIMS} | {"signal": float(i)}
+
+            D = self.DAYS
+            for i in range(6):
+                put(D["A"], i, scores(i))
+                put(D["B"], i, scores(i), close=None if i == 0 else "rand")
+                put(D["D"], i, scores(i) | {"odds": 6.0})
+            for i in range(5):
+                ds = scores(i)
+                if i == 0:
+                    del ds["catalyst"]
+                put(D["C"], i, ds)
+            for i in range(4):
+                put(D["E"], i, scores(i))
+            for i in range(7):
+                put(D["F"], i, None if i == 0 else scores(i), pap=0.0 if i == 1 else 100.0)
+        return db
+
+    def _step2_ic(self, db, monkeypatch):
+        seen = {}
+        real = icp.load_daily_ic
+
+        def spy(*a, **k):
+            out = real(*a, **k)
+            seen["ic"] = out[0]
+            return out
+
+        monkeypatch.setattr(icp, "load_daily_ic", spy)
+        icp.observed_weekly_var(db, "t7", min_width=5)
+        return seen["ic"]
+
+    def test_fixture_exercises_every_filter(self, tmp_path):
+        """夹具自检：每一条过滤都真的咬到了（否则下面的「两边一致」可能只是谁都没过滤）。"""
+        db = self._db(tmp_path)
+        D = self.DAYS
+        sig = icp._load_day_pairs(db, "t7", "signal", min_width=5)
+        assert set(sig) == {D["A"], D["B"], D["C"], D["D"], D["F"]}
+        assert len(sig[D["B"]]) == 5 and len(sig[D["F"]]) == 5
+        assert D["C"] not in icp._load_day_pairs(db, "t7", "catalyst", min_width=5)
+        assert D["D"] not in icp._load_day_pairs(db, "t7", "odds", min_width=5)
+
+    def test_both_steps_use_same_days_and_same_pairs(self, tmp_path, monkeypatch):
+        db = self._db(tmp_path)
+        ic2 = self._step2_ic(db, monkeypatch)
+        for dim in DIMS:
+            pairs = icp._load_day_pairs(db, "t7", dim, min_width=5)
+            assert set(pairs) == set(ic2[dim]), (
+                f"{dim}: 第 3 步骨架的天 {sorted(pairs)} ≠ 第 2 步的天 {sorted(ic2[dim])}"
+                f"——过滤条件分叉了")
+            for day, pp in pairs.items():
+                ic3 = icd.spearman([s for s, _ in pp], [r for _, r in pp])
+                assert ic3 == pytest.approx(ic2[dim][day]), (
+                    f"{dim} {day}: 第 3 步 IC {ic3} ≠ 第 2 步 {ic2[dim][day]}——两步读的收益不是同一列")
+
+
 class TestSingleSourceOfTruth:
     """两条路径的终点列都必须**调用时**查 `ic_diagnostics.FORWARD_CLOSE_COL`。
 
@@ -239,13 +338,12 @@ class TestSingleSourceOfTruth:
 
     def test_both_paths_follow_the_registry(self, tmp_path, monkeypatch):
         db = self._probe_db(tmp_path)
-        monkeypatch.setitem(icp._icd.FORWARD_CLOSE_COL, "t7", "probe_t7")
+        monkeypatch.setitem(icd.FORWARD_CLOSE_COL, "t7", "probe_t7")
 
         pairs = icp._load_day_pairs(db, "t7", "signal", min_width=5)
-        mon, tue = _week_days()[2][1], _week_days()[3][1]         # 第 1 周（奇数周）
+        mon = _week_days()[2][1]                                   # 第 1 周（奇数周）周一
         assert dict(pairs[mon])[8.0] == pytest.approx(-8.0), (
             "_load_day_pairs 没有查 FORWARD_CLOSE_COL（第 3 步骨架）")
-        assert tue in pairs
 
         obs = icp.observed_weekly_var(db, "t7", min_width=5)
         assert obs["by_dim"]["signal"]["var"] > 0.5, (
