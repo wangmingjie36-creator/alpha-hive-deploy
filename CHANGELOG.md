@@ -5,7 +5,32 @@
 
 ---
 
-## [0.45.336] — 2026-09-23 — 占位（进行中：ic_diagnostics --benchmark 下截断告警印两遍，去重）
+## [0.45.336] — 2026-09-23 — Fixed：`ic_diagnostics --benchmark` 下截断告警印两遍（v0.45.328 二次检查记下的小瑕疵）——维度表与基准表各查一次同一指纹；`main()` 关掉第二次，直接调 `build_benchmark_panel` 的人默认仍查
+
+v0.45.328 让 `load_daily_ic` 与 `build_benchmark_panel` 在 close 口径上都查截断指纹（`warn_if_truncated`）。`main()` 带 `--benchmark` 时两者对**同一库、同一 (终点列, checked 列)** 各查一次 ⇒ close 列真被写成离场价时，同一行告警连印两遍（每个 horizon）。指纹 SQL 只取决于这两列（`checked=1 AND 终点列 IS NOT NULL AND exit_price IS NOT NULL AND exit_reason IN ('SL','TP')`），与两边各自的行集（维度表多一个 `dimension_scores IS NOT NULL`）无关——第二次查不可能给出不同答案。
+
+### Fixed
+- `build_benchmark_panel(..., check_truncation=True)`：新关键字参数，默认照旧查。只有同一次运行里已对同一库、同一 target/horizon 调过 `load_daily_ic` 的调用方才该传 False——`main()` 是唯一这么做的。
+- 没改成「模块级已告警集合」去重：那是跨调用的隐藏状态，同一进程里库被改写后再查会被静默吞掉；显式开关的作用域只到 `main()` 这一次运行。
+
+### Added
+- `tests/test_ic_diagnostics_benchmark_close_target.py` +4 条：`main()` 在 `--benchmark` / `--benchmark --json` / 不带基准三种运行下告警**恰好一次**（不是「至多一次」——0 次是把告警关丢了，比两遍更糟）；`build_benchmark_panel` 默认仍告警。
+
+变异台账（`PYTHONDONTWRITEBYTECODE=1`、每轮 `find … -name '*.pyc' -delete`、每轮 65 条、还原后 `cmp` 一致）：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| D1 | 改动前原文件（`a32f0dce`，不用 `HEAD:`） | 2 红：两种 `--benchmark` 运行，断言本身 `assert 2 == 1`——即本版要修的现象 |
+| D2 | `main()` 仍让基准表查 | 2 红（同上） |
+| D3 | 基准表忽略开关 | 2 红（同上） |
+| D4 | 维度表不查（只剩被关掉的基准表） | 4 红：三种运行全部 0 次 + 维度表既有指纹测试 |
+| D5 | 开关默认改 False | 2 红：基准表默认告警的两条 |
+
+生产快照（09-23 `sqlite3.backup()`）复跑 `--benchmark`（离线）：t7 / t30 的因子、噪音地板、维度表与 v0.45.328 记录的输出全精度相同，stderr 0 行（生产 close_t7 本就不触发告警）——本版只动告警次数，不动任何数。
+
+全套 5537 绿 1 红：`test_economic_calendar::TestCoverageHorizon`（BLS 2027 日程未发布，按设计的定期告警，与本版无关）。
+
+---
 
 ## [0.45.335] — 2026-09-23 — 占位（进行中：v0.45.322 二次检查 6 条修复——定时任务读旧位置、冻结数据被 git 同步误报、copy 不可续跑等）
 
@@ -372,7 +397,7 @@ v0.45.19 改对了 `load_daily_ic`，同一文件 150 行外的 `build_benchmark
 - **更正**：上文「此前没有任何测试钉住『维度表读的是 close』」写时成立、推送时已不成立。close-only 变异（只让 `load_daily_ic` 的 close 分支回退 price_t7，排除本版新文件）全套跑：5443 绿 5 红 = 日历告警 + `test_ic_power_analysis_close_target.py` 4 条——v0.45.327 比本版早一步进 main，经 `ic_power_analysis` 间接钉住了它。
 - **补测试**：未知 target 抛错（基准表 / 维度表各 1 条）。变异：改动前原文件（`508a4ca2^`，不用 `HEAD:`——提交后它已是新代码）维度表那条报 `DID NOT RAISE`，直接证明旧代码把 `"closee"` 静默当 path；「未知 target 当 path」2 红；基线 2 绿。
 - **核过、无问题**：三条「逐位相同」声明按 JSON 全精度复核成立（t7 / t30，5 维 7 个统计量）；`signal_archive.load_panel` 里的局部 `import ic_diagnostics as icd` 只在导入后用一次（AST 核，无 UnboundLocalError 风险）；`ic_power_analysis._load_day_pairs` 自抄的 SQL 过滤条件与新 `forward_return_sql` 逐条件一致；所有分支与各 worktree 工作区都没有新增对已删除的 `_TRUNCATION_ALARM` 的引用；当前 main × v0.45.324 分支（`claude/practical-bun-4c8e91`）试合并无冲突，ruff F821/F811/F401 净、两边 206 条测试绿。
-- **小瑕疵，未改**：若 close 列真被写成离场价，`--benchmark` 运行时告警会印两遍（维度表、基准表各一次），同一行文字。
+- **小瑕疵，v0.45.336 已改**：若 close 列真被写成离场价，`--benchmark` 运行时告警会印两遍（维度表、基准表各一次），同一行文字。
 - 过程：审查时 zsh 把 `$b:signal_archive.py` 的 `:s` 当变量修饰符，`git show` 拿到错的 ref、计数恒 0，差点得出「这些分支里没有这个名字」——与 memory「zsh `:r` 吃 refspec」同形，写 `${b}:path` 即解。
 
 ---

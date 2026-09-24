@@ -498,10 +498,15 @@ def _load_prices(tickers: List[str], start: str, end: str):
 
 def build_benchmark_panel(db_path: Path, target_col: str, checked_col: str,
                           horizon: str, min_width: int = 5,
-                          target: str = "close") -> Tuple[Dict[str, Dict], Dict]:
+                          target: str = "close",
+                          check_truncation: bool = True) -> Tuple[Dict[str, Dict], Dict]:
     """构造 ({因子名: {date: [(值, 前瞻收益), ...]}} 面板, 经典因子行情覆盖率)。
 
     前瞻收益口径与 `load_daily_ic` 同源（`forward_return_sql`），`target` 语义相同。
+
+    check_truncation: close 口径下是否查截断指纹（默认查）。v0.45.336：只有**同一次运行里
+    已经对同一库、同一 target/horizon 调过 `load_daily_ic`** 的调用方才该传 False（`main()`）——
+    指纹只取决于 (终点列, checked 列)，与两边各自的行集无关，第二次查只会把同一行告警再印一遍。
 
     v0.45.332：第二个返回值是经典因子（📈📉🌪）的覆盖率 —— `status` ok / partial /
     unavailable、`n_priced`/`n_tickers`、`missing`、`n_factor_records`/`n_records`。
@@ -523,7 +528,7 @@ def build_benchmark_panel(db_path: Path, target_col: str, checked_col: str,
             f"SELECT date, ticker, final_score, dimension_scores, {sel} "
             f"FROM predictions WHERE {checked_col}=1 AND {where}"
         ).fetchall()
-        if target == "close":
+        if target == "close" and check_truncation:
             warn_if_truncated(con, end_col, checked_col)
     finally:
         con.close()
@@ -886,8 +891,10 @@ def main() -> int:
                 print_scoreboard(res)
 
         if args.benchmark:
+            # v0.45.336：上面的 load_daily_ic 已对同一库、同一口径查过截断指纹（结果与行集无关），
+            # 这里再查只会把同一行告警印第二遍
             panel, coverage = build_benchmark_panel(db, target, checked, h, args.min_width,
-                                                    target=args.target)
+                                                    target=args.target, check_truncation=False)
             if panel:
                 floor = noise_floor(panel, lag, period, draws=args.draws)
                 out[h]["benchmark"] = {

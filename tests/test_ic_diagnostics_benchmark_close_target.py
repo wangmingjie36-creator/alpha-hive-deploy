@@ -272,6 +272,25 @@ class TestTruncationFingerprint:
                           "return_t7", "checked_t7")
         assert "exit_price" in capsys.readouterr().err
 
+    @pytest.mark.parametrize("extra", [["--benchmark"], ["--benchmark", "--json"], []])
+    def test_cli_warns_exactly_once_per_horizon(self, tmp_path, offline, monkeypatch, capsys,
+                                                extra):
+        """v0.45.336：`--benchmark` 下维度表与基准表各查一次 ⇒ 同一行告警印两遍。
+
+        断言**恰好一次**，不是「至多一次」：0 次是把告警整个关丢了，比印两遍更糟。
+        """
+        db = _build_reversal_db(tmp_path, close_equals_exit=True)
+        monkeypatch.setattr(sys, "argv", ["ic_diagnostics.py", "--db", str(db), "--horizon",
+                                          "t7", "--draws", "10", *extra])
+        assert icd.main() == 0
+        err = capsys.readouterr().err
+        assert err.count("恰好等于 exit_price") == 1, err
+
+    def test_benchmark_panel_still_checks_by_default(self, tmp_path, offline, capsys):
+        """只有 main() 关掉第二次检查；其他直接调 build_benchmark_panel 的人默认仍被告警。"""
+        _panel(_build_reversal_db(tmp_path, close_equals_exit=True))
+        assert capsys.readouterr().err.count("恰好等于 exit_price") == 1
+
     def test_silent_on_clean_close_column(self, tmp_path, offline, capsys):
         """负对照：真收盘价不能误报，否则告警会被当噪音无视。"""
         db = _build_reversal_db(tmp_path)
