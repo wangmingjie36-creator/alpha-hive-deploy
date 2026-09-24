@@ -55,13 +55,21 @@ _src_degraded: Dict[str, bool] = {}
 
 
 def _record_src_failure(source: str):
-    """记录数据源连续失败，达到阈值时发出告警"""
+    """记录数据源连续失败，达到阈值时写 WARNING 日志（不发 Slack）。
+
+    v0.45.339：此前阈值处还调 `_try_src_slack_alert` → `send_risk_alert`。
+    本机有 Bot Token ⇒ `enabled` 恒真；Bot 不在频道 ⇒ 降级成**私信用户**
+    （生产日志实测：v0.45.131 修好测试隔离之后仍有 yfinance_short_interest 的
+    真实私信）。CLAUDE.md「Slack 通知精简规则」明令禁止「数据质量降级预警」，
+    故该函数整个删除，原 Slack 正文里唯一多出的一句（数据质量受影响）并进下面
+    这行日志。守卫 `tests/test_slack_send_whitelist.py`。
+    """
     _src_fail_counts[source] = _src_fail_counts.get(source, 0) + 1
     count = _src_fail_counts[source]
     if count == _HEALTH_FAIL_THRESHOLD:
-        _log.warning("⚠️ 数据源 [%s] 连续失败 %d 次，触发降级告警", source, count)
+        _log.warning("⚠️ 数据源 [%s] 连续失败 %d 次，触发降级告警：进入降级模式，数据质量受影响",
+                     source, count)
         _src_degraded[source] = True
-        _try_src_slack_alert(source, count)
     elif count > _HEALTH_FAIL_THRESHOLD and count % 5 == 0:
         _log.warning("⚠️ 数据源 [%s] 持续降级，累计失败 %d 次", source, count)
 
@@ -73,23 +81,6 @@ def _record_src_success(source: str):
         _log.info("✅ 数据源 [%s] 已恢复（之前连续失败 %d 次）", source, prev)
     _src_fail_counts[source] = 0
     _src_degraded[source] = False
-
-
-def _try_src_slack_alert(source: str, fail_count: int):
-    """尝试通过 Slack 发送降级告警（静默失败，跳过测试数据源）"""
-    if "test" in source.lower():
-        return
-    try:
-        from slack_report_notifier import SlackReportNotifier
-        n = SlackReportNotifier()
-        if getattr(n, "enabled", False):
-            n.send_risk_alert(
-                alert_title=f"数据源降级：{source}",
-                alert_message=f"*{source}* 已连续失败 {fail_count} 次，进入降级模式，数据质量受影响。",
-                severity="MEDIUM",
-            )
-    except Exception as _se:
-        _log.debug("Slack 数据源降级告警发送失败: %s", _se)
 
 
 def _read_cache(name: str, ttl: int = 3600) -> Optional[Dict]:

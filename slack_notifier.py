@@ -190,7 +190,13 @@ class SlackNotifier:
 
 
 def main():
-    """命令行测试"""
+    """命令行：保存 Webhook URL（v0.45.339 起**不再发测试告警**）。
+
+    此前保存后立刻发一条 HIGH 级测试告警 —— 属 CLAUDE.md「Slack 通知精简规则」
+    禁止的告警类。`SlackNotifier` 本身自 v0.45.339 起已无生产调用方
+    （`alert_manager.AlertDispatcher` 不再挂它），守卫 tests/test_slack_send_whitelist.py
+    会拦任何新接回它的模块。
+    """
     import sys
 
     if len(sys.argv) < 2:
@@ -198,33 +204,11 @@ def main():
         print("  Example: python slack_notifier.py 'https://hooks.slack.com/services/...'")
         return
 
-    webhook_url = sys.argv[1]
-
-    # 设置 webhook
-    SlackNotifier.setup_webhook(webhook_url)
-
-    # 测试发送
-    notifier = SlackNotifier()
-    if notifier.webhook_url:
-        from alert_manager import AlertLevel
-        test_alert = Alert(
-            AlertLevel.HIGH,
-            "Test Alert from Alpha Hive",
-            {
-                "test": "true",
-                "timestamp": "2026-02-24T10:00:00Z",
-                "message": "This is a test message"
-            },
-            ["test", "demo"]
-        )
-        if notifier.send(test_alert):
-            print("✅ Test alert sent successfully!")
-        else:
-            print("❌ Failed to send test alert")
+    if SlackNotifier.setup_webhook(sys.argv[1]):
+        print("✅ Webhook 已保存（未发送测试消息：Slack 只许发 LLM 模式确认与富文本日报）")
     else:
-        print("❌ Webhook URL not configured")
+        print("❌ Webhook 保存失败")
 
 
 if __name__ == "__main__":
-    import os
     main()

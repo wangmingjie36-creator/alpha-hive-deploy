@@ -7,7 +7,76 @@
 
 ## [0.45.340] — 2026-09-23 — 占位（进行中：buzz_v1 阶段 1——Buzz 情绪动量改读归档、按扫描日期回看 + 通道全精度入档；计划 09-25 扫描上线）
 
-## [0.45.339] — 2026-09-23 — 占位（进行中：Slack 发送白名单——告警类（数据源降级 / 情绪突变 / EDGAR / 高分机会等）改为只写日志，AST 守卫只许 pre_scan_notify / push_report_to_slack 发送）
+## [0.45.339] — 2026-09-23 — Fixed：Slack 只许发两类消息——六处告警类发送改为只写日志（日志行保留）；熔断器持锁发 Slack 的自死锁随之消失；新增 AST 白名单守卫
+
+CLAUDE.md「Slack 通知精简规则」只许 ① `pre_scan_notify.py`（LLM 模式确认）② `push_report_to_slack.py`（富文本日报）。
+此前这条只写在文档里，生产一直在违反。
+
+### 生产证据（逐发送者归因 `logs/alpha_hive.log{,.1,.2,.3}`；日志无日期，按「蜂群协作启动」锚点切）
+- 162 行「Slack 消息发送成功」里 **108 行是测试写进生产日志的桩**，不是真发送：`Slack 通知已禁用` → `用户身份 → C0AGUUWJXJS`
+  → 无括号「发送成功」→ `timeout` 四连（54/54 逐条对上），全在 v0.45.239 修日志隔离之前的 log.3/log.2。
+  粗分类「54 条频道 + 54 条私信」里频道那 54 条全是这个。
+- 其余 54 行全是 `Bot Token + blocks → U0AGQK74NKV`（**私信用户**），只来自两处：`real_data_sources._try_src_slack_alert`
+  （48，全是 yfinance_short_interest 降级）与 `sentiment._check_sentiment_spike`（6）。v0.45.239 之后只剩生产流量的日志里，
+  确定的真实私信 5 条：09-22 yfinance_short_interest 降级 + VKTX / RKLB / MU 情绪突变，09-23 DELL。更早那些大多紧邻测试夹具行
+  （v0.45.131 之前测试真发 Slack），逐条归属待验证。
+- `if getattr(n, "enabled", False)` 为什么挡不住：`enabled = bool(user_token) or webhook_alive`，本机有 Bot Token ⇒ 恒真；
+  Bot 不在 #alpha-hive ⇒ `not_in_channel` ⇒ 降级成私信。这道闸管「能不能发」，规则管的是「该不该发」。
+- EDGAR / 熔断器 / 财报 / `alert_manager --dispatch` 四处：日志里没有成功发送的记录，但代码路径是通的。
+
+### 顺带发现：熔断器持锁发 Slack 会自死锁
+`CircuitBreaker.record_failure` 在 `with self._lock`（不可重入的 `threading.Lock`）里调 `send_risk_alert` → `_send_slack_message`
+→ `slack_breaker.allow_request()` → `state` → 又拿同一把锁。熔断的恰是 `slack_breaker` 本身时，线程卡在自己持有的锁上永远等下去。
+隔离复现（网络全桩）：线程 5 秒未返回；换成别的熔断器则走到一次 `chat.postMessage` 尝试。生产 4 次 `CircuitBreaker[slack] -> OPEN`
+（08-28、09-21 各两次，分属 Step 2 与 Step 3）之后，扫描进程都**再没打出一行日志**，直到编排器超时杀掉（Step 2 静默
+14:16:45→14:41:41、14:24:08→15:11:35；Step 3 各静默约 4 分钟到 600s 上限）。与死锁吻合；没有线程转储，生产侧因果待验证。
+这两天的 Step 2 超时此前归因于限流变慢，这是另一个候选原因。本版删掉那次调用，这条路径随之消失。
+
+### Fixed / Changed（六处 → 只写日志，原日志行保留，Slack 正文里多出的信息并进日志）
+- `swarm_agents/sentiment.py::_check_sentiment_spike`（逐标的预警）：删 send_risk_alert 块，保留 `📡 情绪突变告警` WARNING。
+  **只动这一个函数**，没碰 `_get_sentiment_momentum`（另一 session 在改维度 IC 协议阶段 1）。
+- `real_data_sources.py`（数据质量降级）：删 `_try_src_slack_alert`；WARNING 行补「进入降级模式，数据质量受影响」。
+- `edgar_rss.py`（数据质量降级）：删 `_try_rss_slack_alert`；WARNING 行补「实时内幕交易告警不可用」。`tests/test_edgar_rss.py` 去掉对它的 monkeypatch。
+- `resilience.py::CircuitBreaker.record_failure`（SLO）：删持锁发送（即死锁修复），`-> OPEN` WARNING 保留。
+- `alpha_hive_daily_report.py`（逐标的通知）：`--check-earnings` 的财报更新改 `_log.info("📊 财报更新 …")`；reporter 不再构造
+  `SlackReportNotifier`（它唯一的用途就是这条通知和对它的 `retry_failed`，而构造时还要对已 404 的 webhook 发一次 HEAD）。
+  `tests/test_pipeline.py`（4 处）、`tests/test_ghpages_data_root_migration.py`（1 处）去掉对模块属性 `SlackReportNotifier` 的桩。
+- `alert_manager.AlertDispatcher`（扫描健康 / SLO）：不再挂 `SlackNotifier`，`slack_enabled` 为真只打一行 INFO；
+  `config.ALERT_CONFIG["slack_enabled"]` → False。编排器 Step 6 不带 `--dispatch`，生产之前没走到过这里。
+- `slack_report_notifier.py` 的 `__main__`、`slack_notifier.py` 的 `main()`（手动 CLI）：不再发演示消息（机会 / 风险 / 进度 / 测试告警），
+  只报状态 / 只保存 webhook。
+- 白名单两处与发送器类本身没动。`send_risk_alert` 等方法还在 `SlackReportNotifier` 里，已无生产调用方——守卫拦调用，不拦定义。
+
+### Added：`tests/test_slack_send_whitelist.py`（38 条，全部离线）
+- **静态**：AST 扫本仓全部非测试 .py（`tests/_repo_files.own_python_files`，git 口径）。六条规则：R1 调发送方法（方法集合**从发送器类源码推导**：
+  含 `.post(` 的方法沿 `self.` 边求闭包，将来新加 `send_xxx` 自动覆盖）/ R2 引用只能按类名认的发送器（`SlackNotifier` 的发送方法叫 `send`，太泛）/
+  R3 把 Slack 端点传给网络调用 / R4 `get_session("slack")` / R5 Slack SDK / R6 Slack 凭证。**双向**：白名单外零命中；
+  白名单内每个模块都必须被扫到在发送（防名单过期，也是扫描器在真代码上的正对照）。
+- **扫描器有牙**：15 个必红样本 + 9 个必不红样本 + 真文件注入（把改前的块插回当前 sentiment.py / resilience.py 那行保留下来的日志下面；
+  锚点找不到就红 ⇒ 顺带守住「日志行还在」）。
+- **行为**：把 Slack **武装起来**（假 token ⇒ enabled 为真，记录器 session 假装发送成功），逐条走六条被禁路径，断言零发送 + 日志行仍在；
+  先自证武装真的生效（直接调 `send_risk_alert` 必须被记录 1 次）——conftest `_block_slack` 默认让 enabled 恒假，那个状态下改没改都发不出去。
+  死锁回归：`slack_breaker`（换成新实例）熔断时 `record_failure` 必须在 10 秒内返回。
+
+### 验收
+- 变异 16 条（`PYTHONDONTWRITEBYTECODE=1`、每轮清 pyc、Python 驱动、每轮核 `collected 38`、JUnit 取失败原因、改前版本钉 `fd1dea85`），
+  全部按预期理由变红：六个文件和两个 CLI 各自回退到改前（白名单红 + 对应行为测试红在「记录到 chat.postMessage」上；熔断器另红在「10 秒未返回」上）；
+  三处只把发送加回当前代码，同样红在发送上；删日志行 / 删并进来的那句，红在日志断言上；扫描器按方法名失明 ⇒ 白名单反向断言红；
+  去掉类体豁免 ⇒ 误报红；夹具不武装 ⇒ 自检红。全部还原后 38/38。
+- 首轮变异有两处没对上，据此改了测试：驱动的正则漏掉了带空格的参数化 ID（改用 JUnit、给参数化加 ids）；M2/M3/M6 先红在**新日志措辞**上，
+  而不是「发了」上（把零发送断言挪到每条最前，重跑后理由对齐）。
+- 相邻 18 个测试文件 423 passed；全套 5587 passed / 85 deselected / 2 xfailed（`--deselect TestCoverageHorizon`，按设计红）；`ruff check` 全过。
+- 全程没有发出任何真实 Slack 消息：静态部分只读源码；行为部分的 get_session 是记录器，webhook 探活是常量，token 是假串。
+
+### 已知盲区
+- 仓库外编排器 `~/.claude/scripts/alpha-hive-orchestrator.sh` 扫不到；已人工核对，它不 curl Slack。
+- R1 按方法名匹配：将来别的类恰好有 `retry_failed` / `test_connection` 会误报，报错信息指向改名或收窄规则。
+
+### 教训
+「`new` 一个通知器、`if enabled` 就发」这个形状在六个模块里各自长出来过——它回答的是「能不能发」。所以守卫守的是「谁在调用发送」，
+不是某一处调用。另：拿日志数发送次数前，先剔掉测试写进来的行（这次 162 行里 108 行是桩）。
+
+---
 
 ## [0.45.338] — 2026-09-23 — docs：二次检查 v0.45.326——代码与测试无缺陷；报告 / CHANGELOG / docstring 里四处表述错（一处日期是从备份文件名推的）
 

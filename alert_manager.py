@@ -392,9 +392,13 @@ class AlertDispatcher:
         self.notifiers = []
 
         # 动态加载可用的 notifier
+        # v0.45.339：**不再挂 Slack**（此前 `slack_enabled` 为真就加 SlackNotifier）。
+        # 本分发器发的是扫描健康 / SLO 类告警，属 CLAUDE.md「Slack 通知精简规则」
+        # 明令只进日志的那一类；告警本身已由 `main()` 写入 alerts-*.json 与日志。
+        # 编排器 Step 6 不带 `--dispatch`，故生产此前未走到这里；堵的是手动那条路。
         if self.config.get('slack_enabled', False):
-            from slack_notifier import SlackNotifier
-            self.notifiers.append(SlackNotifier(self.config.get('slack_webhook')))
+            _log.info("ALERT_CONFIG.slack_enabled 被忽略：Slack 只许发 LLM 模式确认与富文本日报"
+                      "（CLAUDE.md「Slack 通知精简规则」），告警只写 alerts-*.json 与日志")
 
         if self.config.get('email_enabled', False):
             from email_notifier import EmailNotifier

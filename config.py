@@ -861,9 +861,10 @@ def init_cache():
 
 # ==================== 告警配置 (Phase 2) ====================
 ALERT_CONFIG = {
-    # Slack 通知配置
-    "slack_enabled": True,  # ✅ 已启用 Slack 通知
-    "slack_webhook": None,   # Webhook URL 从 ~/.alpha_hive_slack_webhook 文件读取
+    # Slack 通知配置 —— v0.45.339 起 AlertDispatcher 无论此值都不发 Slack
+    # （CLAUDE.md「Slack 通知精简规则」：SLO / 健康告警只进日志），置 False 以免误读
+    "slack_enabled": False,
+    "slack_webhook": None,
 
     # 邮件通知配置 - Gmail API
     "email_enabled": True,  # 改为 True 后启用邮件通知

@@ -245,9 +245,6 @@ class TestGetRecentForm4Alerts:
         """After _RSS_FAIL_THRESHOLD consecutive failures, _rss_degraded should be True."""
         import edgar_rss
 
-        # Suppress the Slack alert call
-        monkeypatch.setattr(edgar_rss, "_try_rss_slack_alert", lambda fc: None)
-
         _mock_session_raising(monkeypatch, ConnectionError("down"))
 
         client = edgar_rss.EdgarRSSClient()

@@ -932,43 +932,10 @@ class SlackReportNotifier:
 
 
 if __name__ == "__main__":
+    # v0.45.339：手动入口**只报配置状态，不发任何消息**。此前这里连发连接测试 /
+    # 机会告警 / 风险告警 / 扫描进度四条 —— 后三类正是 CLAUDE.md「Slack 通知精简
+    # 规则」明令禁止的类型。真要验证发送链路，用白名单内的
+    # `push_report_to_slack.py --force`（富文本日报）。守卫 tests/test_slack_send_whitelist.py。
     notifier = SlackReportNotifier()
-
-    print("\n" + "="*70)
-    print("🧪 Slack 报告通知器测试")
-    print("="*70 + "\n")
-
-    # 测试连接
-    print("测试 1：连接测试")
-    notifier.test_connection()
-
-    # 测试机会告警
-    print("\n测试 2：机会告警")
-    notifier.send_opportunity_alert(
-        ticker="NVDA",
-        score=8.5,
-        direction="看多",
-        discovery="AI 芯片需求强劲，财报指引乐观",
-        risks=["监管政策风险", "竞争加剧"]
-    )
-
-    # 测试风险告警
-    print("\n测试 3：风险告警")
-    notifier.send_risk_alert(
-        alert_title="市场波动告警",
-        alert_message="VIX 指数突破 25，市场风险偏好下降",
-        severity="HIGH"
-    )
-
-    # 测试扫描进度
-    print("\n测试 4：扫描进度")
-    notifier.send_scan_progress(
-        targets=["NVDA", "TSLA", "MSFT", "AMD", "QCOM"],
-        current=3,
-        total=5,
-        status_message="蜂群正在进行实时分析..."
-    )
-
-    print("\n" + "="*70)
-    print("✅ 所有测试完成")
-    print("="*70 + "\n")
+    mode = "Token" if notifier.use_user_token else ("Webhook" if notifier.enabled else "无")
+    print(f"Slack 通知器：enabled={notifier.enabled}  模式={mode}  频道={notifier.CHANNEL_ID}")
