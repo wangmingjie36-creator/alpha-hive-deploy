@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.342] — 2026-09-24 — 占位（进行中：数据仓库备份范围与 main 对齐——阶段 5 后 report_snapshots 等将零异地副本）
+
 ## [0.45.341] — 2026-09-24 — 占位（进行中：删 v0.45.339 后零生产调用方的 Slack 发送代码——SlackReportNotifier 告警类方法 / slack_notifier.SlackNotifier / run_daily_scan 无用 notifier）
 
 ## [0.45.340] — 2026-09-23 — 占位（进行中：buzz_v1 阶段 1——Buzz 情绪动量改读归档、按扫描日期回看 + 通道全精度入档；计划 09-25 扫描上线）
