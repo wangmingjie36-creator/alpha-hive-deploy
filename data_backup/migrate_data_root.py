@@ -1,16 +1,21 @@
 """数据根迁移 · 阶段 5：把生产数据从代码检出（`~/Desktop/Alpha Hive`）搬到 `~/alpha-hive-data`。
 
-子命令（全部幂等；除 `retire` / `unretire` 外不改旧根）：
+子命令（除 `retire` / `unretire` 外不改旧根）：
 
   plan      对旧根顶层逐项分类（MOVE / SKIP），**有任何一项归不了类就失败**（默认拒绝）。
   copy      按 plan 复制：SQLite 走在线备份 API（`sqlite_readonly.db_open_uri` 选打开方式，不 cp），
             其余逐文件复制保留 mtime；目标已存在且内容不同 ⇒ 在复制任何东西之前就中止。
+            **可续跑**：目标里已有、且与源一致的文件 / 库（逐表行数相同 + integrity ok）跳过——
+            中途失败后直接重跑，不必手删已复制的库。MOVE 项里出现符号链接 ⇒ 拒绝（见 `_symlinks`）。
   verify    逐库比表行数 + `integrity_check`；其余逐文件比 sha256。清单写进 `<新根>/_migration/`。
   retire    旧根里**未被 git 跟踪**的 MOVE 项整体挪进 `<旧根>/_retired_pre_phase5/` 并去写权限；
             **被跟踪的数据原地不动**——见下「为什么被跟踪的数据不挪」。同时记一份旧根指纹基线。
   unretire  retire 的逆操作（回退：去掉 `ALPHA_HIVE_HOME` 之前先跑它）。
-  check-old 比对旧根指纹与 retire 时的基线：MOVE 类名字在旧根顶层重新出现、或被跟踪的数据文件
-            内容变了 ⇒ 有写入方没跟着 `ALPHA_HIVE_HOME` 走（阶段 5 验收「旧位置零写入」）。
+  check-old 比对旧根指纹与 retire 时的基线（阶段 5 验收「旧位置零写入」），变化分两类：
+            · 工作区相对 HEAD 是脏的（改了 / 新增未跟踪）⇒ 有写入方没跟着 `ALPHA_HIVE_HOME` 走 ⇒ 红；
+            · 相对基线变了、但与 HEAD 一致 ⇒ 是生产同步 `pull --ff-only` 带来的提交，不是旁路写入 ⇒
+              不红，但单列 `synced_by_git` 并告警：**那份数据改动没进数据根**（阶段 6 之前，数据修复
+              要直接改数据根，提交到代码仓库对生产无效）。
 
 为什么被跟踪的数据不挪
 ----------------------
@@ -173,8 +178,21 @@ def _embedded_db_sidecar(rel: Path) -> bool:
     return any(rel.name == db + sfx for db in DIR_EMBEDDED_DBS[top] for sfx in ("-wal", "-shm", "-journal"))
 
 
+def _symlinks(old: Path, pl: dict) -> list[str]:
+    """MOVE 项里的符号链接。copy 按普通文件处理不了它们（跟随会复制目标、不跟随会丢），
+    所以一律拒绝、交给人决定——不许静默跳过（2026-09-23 生产普查为 0 个）。"""
+    out = []
+    for r in pl["rows"]:
+        if r["kind"] in ("MOVE", "MOVE_DB"):
+            for rel in _iter_files(old, Path(r["name"])):
+                if (old / rel).is_symlink():
+                    out.append(str(rel))
+    return out
+
+
 def _file_items(old: Path, pl: dict):
-    """(相对路径) 逐个列出 plan 里 MOVE 项的普通文件（不含内嵌库及其 sidecar）。"""
+    """(相对路径) 逐个列出 plan 里 MOVE 项的普通文件（不含内嵌库及其 sidecar、不含符号链接——
+    后者由 `_symlinks` 单独拦下，copy / verify 遇到就失败）。"""
     for r in pl["rows"]:
         if r["kind"] != "MOVE":
             continue
@@ -235,12 +253,24 @@ def backup_db(src: Path, dst: Path) -> dict:
     return {"open": how, "journal_mode": journal, "tables": len(got), "rows": sum(got.values())}
 
 
+def _db_same(src: Path, dst: Path) -> bool:
+    """目标库是否已是源库的完整副本：逐表行数相同且 integrity ok（续跑用）。"""
+    cs = sqlite3.connect(db_open_uri(src)[0], uri=True)
+    cd = sqlite3.connect(db_open_uri(dst)[0], uri=True)
+    try:
+        return (_table_counts(cs) == _table_counts(cd)
+                and [x[0] for x in cd.execute("PRAGMA integrity_check").fetchall()] == ["ok"])
+    finally:
+        cs.close()
+        cd.close()
+
+
 def conflicts(old: Path, new: Path, pl: dict) -> list[str]:
-    """目标已存在且内容不同的文件（DB 已存在也算冲突）。"""
+    """目标已存在且内容不同的文件 / 库（已存在且一致的不算：续跑）。"""
     out = []
     for rel in _db_items(old, pl):
-        if (new / rel).exists():
-            out.append(f"{rel}（库已存在）")
+        if (new / rel).exists() and not _db_same(old / rel, new / rel):
+            out.append(f"{rel}（库已存在且与源不一致）")
     for rel in _file_items(old, pl):
         dst = new / rel
         if dst.exists() and (not dst.is_file() or sha256_file(dst) != sha256_file(old / rel)):
@@ -251,11 +281,19 @@ def conflicts(old: Path, new: Path, pl: dict) -> list[str]:
 def copy(old: Path, new: Path, pl: dict) -> dict:
     if pl["unknown"]:
         raise RuntimeError(f"plan 有未登记项，拒绝复制：{pl['unknown']}")
+    links = _symlinks(old, pl)
+    if links:
+        raise RuntimeError(f"MOVE 项里有符号链接，拒绝复制（先人工决定怎么搬）：{links[:20]}")
     bad = conflicts(old, new, pl)
     if bad:
         raise RuntimeError(f"目标已存在且内容不同（一个都没复制）：{bad[:20]}"
                            + (f" …共 {len(bad)} 项" if len(bad) > 20 else ""))
-    dbs = {str(rel): backup_db(old / rel, new / rel) for rel in _db_items(old, pl)}
+    dbs = {}
+    for rel in _db_items(old, pl):
+        if (new / rel).exists():          # conflicts() 已证明一致：续跑
+            dbs[str(rel)] = {"skipped": "已存在且一致"}
+        else:
+            dbs[str(rel)] = backup_db(old / rel, new / rel)
     n = 0
     for rel in _file_items(old, pl):
         dst = new / rel
@@ -269,6 +307,7 @@ def copy(old: Path, new: Path, pl: dict) -> dict:
 
 def verify(old: Path, new: Path, pl: dict) -> dict:
     problems, db_report = [], {}
+    problems += [f"符号链接未处理 {x}" for x in _symlinks(old, pl)]
     for rel in _db_items(old, pl):
         o, n = old / rel, new / rel
         if not n.exists():
@@ -339,10 +378,9 @@ def fingerprint_tracked_data(old: Path, pl: dict, tracked_tops: set[str]) -> dic
 
 
 def retire(old: Path, new: Path, pl: dict) -> dict:
+    """先取齐基线（冻结清单 / 脏基线 / 指纹）再挪；挪动放进 try/finally，
+    中途失败也把「已挪走哪些」落进 RETIRE_RECORD.json，unretire 才找得回来。"""
     tracked = _git_tracked_tops(old)
-    hold = old / RETIRE_DIRNAME
-    hold.mkdir(exist_ok=True)
-    moved, frozen = [], []
     names = []
     for r in pl["rows"]:
         if r["kind"] not in ("MOVE", "MOVE_DB"):
@@ -350,24 +388,31 @@ def retire(old: Path, new: Path, pl: dict) -> dict:
         names.append(r["name"])
         if r["kind"] == "MOVE_DB":
             names += [r["name"] + s for s in ("-wal", "-shm") if (old / (r["name"] + s)).exists()]
-    for name in names:
-        if name in tracked:
-            frozen.append(name)
-            continue
-        src = old / name
-        if not src.exists():
-            continue
-        dst = hold / name
-        if dst.exists():
-            raise RuntimeError(f"暂存区已有 {name}，拒绝覆盖（上一次 retire 没清理？）")
-        os.rename(src, dst)
-        moved.append(name)
-    record = {"retired_at": dt.datetime.now().isoformat(timespec="seconds"), "moved": moved,
+    frozen = [n for n in names if n in tracked]
+    to_move = [n for n in names if n not in tracked and (old / n).exists()]
+    dirty0 = _git_dirty_paths(old, frozen)
+    if dirty0 is None:
+        raise RuntimeError("git status 失败，记不下冻结区的脏基线——未挪动任何东西")
+    hold = old / RETIRE_DIRNAME
+    for n in to_move:
+        if (hold / n).exists():
+            raise RuntimeError(f"暂存区已有 {n}，拒绝覆盖（上一次 retire 没清理？）——未挪动任何东西")
+    record = {"retired_at": dt.datetime.now().isoformat(timespec="seconds"), "moved": [],
               "frozen_tracked": frozen,
-              "tracked_fingerprint": fingerprint_tracked_data(old, pl, tracked)}
-    (hold / "RETIRE_RECORD.json").write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+              "tracked_fingerprint": fingerprint_tracked_data(old, pl, tracked),
+              # retire 那一刻冻结区里就已相对 HEAD 脏的路径（如生产检出里常年 `M` 的 NVDA_raw.json）。
+              # 它们内容不变就不算旁路写入，否则 check-old 会恒红。
+              "dirty_at_retire": sorted(dirty0)}
+    hold.mkdir(exist_ok=True)
+    try:
+        for n in to_move:
+            os.rename(old / n, hold / n)
+            record["moved"].append(n)
+    finally:
+        (hold / "RETIRE_RECORD.json").write_text(json.dumps(record, ensure_ascii=False, indent=1),
+                                                  encoding="utf-8")
     _chmod_readonly(hold)
-    return {"moved": len(moved), "frozen_tracked": frozen, "hold": str(hold)}
+    return {"moved": len(record["moved"]), "frozen_tracked": frozen, "hold": str(hold)}
 
 
 def unretire(old: Path) -> dict:
@@ -388,21 +433,47 @@ def unretire(old: Path) -> dict:
     return {"restored": len(back)}
 
 
+def _git_dirty_paths(old: Path, frozen: list[str]) -> set[str] | None:
+    """冻结项里相对 HEAD 脏的路径（修改 / 新增未跟踪 / 删除）；git 失败返回 None（调用方判红）。"""
+    if not frozen:
+        return set()
+    r = subprocess.run(["git", "-C", str(old), "status", "--porcelain", "-z", "--untracked-files=all",
+                        "--", *frozen], capture_output=True)
+    if r.returncode != 0:
+        return None
+    out = set()
+    for ent in r.stdout.decode().split("\0"):
+        if len(ent) > 3:
+            out.add(ent[3:])
+    return out
+
+
 def check_old(old: Path) -> dict:
-    """旧位置零写入：MOVE 类名字不许重新出现；被跟踪的冻结数据内容不许变。"""
+    """旧位置零写入：MOVE 类名字不许重新出现；冻结数据不许被**旁路写入**。
+
+    相对 retire 基线变了的文件，再问一句「git 能不能解释它」：与 HEAD 一致 ⇒ 是生产同步
+    `pull --ff-only` 带进来的提交（`synced_by_git`，不红但告警：那份改动没进数据根）；
+    工作区相对 HEAD 脏 ⇒ 真有写入方没跟 `ALPHA_HIVE_HOME` 走（红）。
+    """
     rec = json.loads((old / RETIRE_DIRNAME / "RETIRE_RECORD.json").read_text(encoding="utf-8"))
     pl = plan(old)
     reappeared = [r["name"] for r in pl["rows"] if r["kind"] in ("MOVE", "MOVE_DB")
                   and r["name"] not in rec["frozen_tracked"]]
-    changed = []
-    for rel, sha in rec["tracked_fingerprint"].items():
-        p = old / rel
-        if not p.is_file() or sha256_file(p) != sha:
-            changed.append(rel)
-    now_tracked = fingerprint_tracked_data(old, pl, set(rec["frozen_tracked"]))
-    added = sorted(set(now_tracked) - set(rec["tracked_fingerprint"]))
-    return {"ok": not (reappeared or changed or added or pl["unknown"]), "reappeared": reappeared,
-            "tracked_changed": changed, "tracked_added": added, "unknown": pl["unknown"]}
+    now_fp = fingerprint_tracked_data(old, pl, set(rec["frozen_tracked"]))
+    base = rec["tracked_fingerprint"]
+    moved = sorted(k for k in set(base) | set(now_fp) if base.get(k) != now_fp.get(k))
+    dirty = _git_dirty_paths(old, rec["frozen_tracked"])
+    if dirty is None:
+        written, synced, git_error = moved, [], True
+    else:
+        dirty0 = set(rec.get("dirty_at_retire", []))
+        # 旁路写入 = 相对基线变了且工作区脏；或 retire 之后才变脏（含新建未跟踪文件）
+        written = [p for p in moved if p in dirty] + [p for p in dirty if p not in moved and p not in dirty0]
+        synced = [p for p in moved if p not in dirty]
+        git_error = False
+    return {"ok": not (reappeared or written or pl["unknown"] or git_error),
+            "reappeared": reappeared, "written_outside_git": sorted(set(written)),
+            "synced_by_git": synced, "git_error": git_error, "unknown": pl["unknown"]}
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -431,6 +502,9 @@ def main(argv=None) -> int:
     if a.cmd == "check-old":
         res = check_old(old)
         print(json.dumps(res, ensure_ascii=False, indent=1))
+        if res["synced_by_git"]:
+            print(f"⚠️ {len(res['synced_by_git'])} 个冻结文件被 git 同步改过——这些数据改动**没进数据根**，"
+                  "需要的话手工同步到数据根（阶段 6 之前数据修复直接改数据根）")
         return 0 if res["ok"] else 1
 
     pl = plan(old)

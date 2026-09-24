@@ -34,7 +34,28 @@ v0.45.328 让 `load_daily_ic` 与 `build_benchmark_panel` 在 close 口径上都
 
 ---
 
-## [0.45.335] — 2026-09-23 — 占位（进行中：v0.45.322 二次检查 6 条修复——定时任务读旧位置、冻结数据被 git 同步误报、copy 不可续跑等）
+## [0.45.335] — 2026-09-23 — Fixed：v0.45.322（数据根迁移阶段 5 代码批次）二次检查的 6 条——冻结数据被 git 同步误报成旁路写入、copy 中途失败不能续跑、retire 中途失败丢记录、符号链接被静默跳过、导出因 import 崩、测试夹具可能写进真仓库；定时任务改为按脚本打印的绝对路径读结果
+
+`/code-review high` 复检 v0.45.322 的 5 个提交后全部修复。搬迁仍按原计划 09-26 周六执行，runbook 同步更新（memory `alpha-hive-data-root-migration.md`「阶段 5 执行」节）。
+
+### Fixed
+- **定时任务读旧位置**（最严重）：周/月任务的 SKILL.md 让 agent 在代码检出里按相对路径读 `weight_history.jsonl` / `self_analysis_briefs/`，
+  搬迁后那里是已退场或冻结的旧文件 ⇒ 09-27 会把 09-20 的记录当本周结果报出来。
+  代码侧：`weekly_optimizer.main()` 新打印 `审计日志: <绝对路径>`（`self_analyst` 本就打印简报绝对路径），两条都加了断言；
+  SKILL.md 侧（仓库外）：runbook 第 6 步改为「照脚本打印的绝对路径读」，周六执行。
+- `migrate_data_root.check_old`：冻结的被跟踪数据会被生产同步 `pull --ff-only` 改动，原实现把它报成旁路写入。现在按 `git status` 分两类：
+  工作区相对 HEAD 脏 ⇒ `written_outside_git`（红）；与 HEAD 一致 ⇒ `synced_by_git`（不红，但告警**这份改动没进数据根**）。
+  retire 时额外记 `dirty_at_retire`——生产检出里 `NVDA_raw.json` 常年是 `M`，不记会让 check-old 恒红（改之前先在生产实测到的）。
+- `migrate_data_root.copy` 可续跑：目标库已存在且逐表行数一致 + integrity ok ⇒ 跳过；不一致仍拒绝。原来任何已存在的库都算冲突，中途失败后必须手删。
+- `migrate_data_root.retire`：先取齐冻结清单 / 脏基线 / 指纹 / 暂存区冲突再动手，挪动放进 `try/finally`——中途失败也会写出 `RETIRE_RECORD.json`（原实现不会写，已挪走的项 unretire 找不回来）。
+- `migrate_data_root`：MOVE 项里的符号链接原先 `continue` 静默跳过（copy 不复制、verify 不检查）⇒ 改为 copy 拒绝、verify 报问题（生产现有 0 个）。
+- `data_backup/export._code_git_head`：延迟 `import hive_logger` 挪进 try，仓库根不在 `sys.path` 时落 `unavailable:` 而不是让整轮导出崩掉。
+- 测试夹具的 git 调用去掉继承的 `GIT_*`（`tests/test_migrate_data_root.py` 另加 autouse 清理）：在 git 钩子里跑时 `GIT_DIR`/`GIT_INDEX_FILE` 会把夹具的 add/commit 引到真仓库。
+
+### 验收
+- `tests/test_migrate_data_root.py` 17 → 24 项；逐条变异（去掉脏基线 / 变化全算写入 / 不拒符号链接 / 库存在即冲突 / 去掉 try-finally）各 1 红。
+- `export` 回退到上一版 ⇒ 新增的 import 失败用例红。
+- 全套 5540 passed / 85 deselected / 2 xfailed（`--deselect TestCoverageHorizon`，按设计红）；`ruff check .` 全过。
 
 ## [0.45.334] — 2026-09-23 — 占位（进行中：断开 GexRegimeModifier 对 rule_score 的 ±0.8 直接加减分（保留 RegimeWeightAdjuster 路由），登记世代边界）
 

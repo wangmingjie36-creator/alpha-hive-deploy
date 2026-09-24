@@ -248,10 +248,12 @@ def _code_git_head(code_repo: Path | None) -> str:
     不抛异常、也不进 except。现在：仓库位置走 `PATHS.git_repo_root`（阶段 4 与数据根拆开的那个），
     且非零退出码一律写成 `unavailable: ...`——空串永远不再出现在清单里。
     """
-    if code_repo is None:
-        from hive_logger import PATHS
-        code_repo = PATHS.git_repo_root
     try:
+        if code_repo is None:
+            # 延迟 import 也放进 try：从仓库根以外起跑（sys.path 里没有 hive_logger）时，
+            # 一个只作记录的字段不许把整轮导出搞崩——落成 `unavailable:`（v0.45.335）。
+            from hive_logger import PATHS
+            code_repo = PATHS.git_repo_root
         r = subprocess.run(
             ["git", "--no-optional-locks", "-C", str(code_repo), "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=10)

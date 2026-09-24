@@ -218,7 +218,9 @@ class TestExportRestoreRoundTrip:
 
 def _git_repo_with_commit(path: Path) -> str:
     path.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+    # 去掉继承的 GIT_*：在 git 钩子里跑时 GIT_DIR / GIT_INDEX_FILE 会把 init/commit 引到真仓库
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
     for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "x"]):
         subprocess.run(["git", "-C", str(path), *args], check=True, env=env, capture_output=True)
@@ -242,6 +244,20 @@ class TestSourceGitHeadAfterDataRootSplit:
             _make_synthetic_db(src_root / db_name)
         manifest = export_mod.run_export(src_root, tmp_path / "out")
         assert manifest["source_git_head"] == head
+
+    def test_missing_hive_logger_is_reported_not_raised(self, monkeypatch):
+        """仓库根不在 sys.path 时延迟 import 失败——只作记录的字段不许把导出搞崩。"""
+        import builtins
+        real_import = builtins.__import__
+
+        def no_hive_logger(name, *a, **k):
+            if name == "hive_logger":
+                raise ImportError("simulated: repo root not on sys.path")
+            return real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", no_hive_logger)
+        got = export_mod._code_git_head(None)
+        assert got.startswith("unavailable:") and "simulated" in got, got
 
     def test_non_git_code_repo_is_reported_not_blank(self, tmp_path):
         not_repo = tmp_path / "not_a_repo"
