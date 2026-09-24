@@ -57,21 +57,6 @@ _rss_fail_count = 0
 _rss_degraded = False
 
 
-def _try_rss_slack_alert(fail_count: int):
-    """尝试通过 Slack 发送 EDGAR RSS 降级告警（静默失败）"""
-    try:
-        from slack_report_notifier import SlackReportNotifier
-        n = SlackReportNotifier()
-        if getattr(n, "enabled", False):
-            n.send_risk_alert(
-                alert_title="EDGAR RSS 降级",
-                alert_message=f"SEC EDGAR Form4 RSS 已连续失败 {fail_count} 次，实时内幕交易告警不可用。",
-                severity="MEDIUM",
-            )
-    except (ImportError, OSError, RuntimeError, ValueError) as _se:
-        _log.debug("Slack RSS 降级告警发送失败: %s", _se)
-
-
 class EdgarRSSClient:
     """SEC EDGAR Form 4 RSS 实时告警客户端"""
 
@@ -141,8 +126,11 @@ class EdgarRSSClient:
                 _rss_fail_count += 1
                 if _rss_fail_count == _RSS_FAIL_THRESHOLD and not _rss_degraded:
                     _rss_degraded = True
-                    _log.warning("⚠️ EDGAR RSS 连续失败 %d 次，进入降级模式", _rss_fail_count)
-                    _try_rss_slack_alert(_rss_fail_count)
+                    # v0.45.339：只写日志，不再调 `_try_rss_slack_alert`（已删）——
+                    # CLAUDE.md「Slack 通知精简规则」禁止数据质量降级预警；原 Slack 正文
+                    # 多出的那句（实时内幕交易告警不可用）并进这行日志。
+                    _log.warning("⚠️ EDGAR RSS 连续失败 %d 次，进入降级模式：实时内幕交易告警不可用",
+                                 _rss_fail_count)
                 elif _rss_fail_count > _RSS_FAIL_THRESHOLD and _rss_fail_count % 5 == 0:
                     _log.warning("⚠️ EDGAR RSS 持续降级，累计失败 %d 次", _rss_fail_count)
                 return self._cache

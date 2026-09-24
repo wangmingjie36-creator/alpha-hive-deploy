@@ -13,6 +13,7 @@
 
 import sys
 import os
+import shlex
 import json
 import time
 import logging
@@ -952,9 +953,17 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-seri
 # 4. 主入口
 # ═══════════════════════════════════════════════════════════
 
+def _report_path(ticker: str, date_str: str):
+    """`deep-{TICKER}-{DATE}.html` 的落盘位置：数据根，调用时求值。"""
+    from hive_logger import PATHS
+    return PATHS.home / f"deep-{ticker}-{date_str}.html"
+
+
 def main():
     # ── 切换到脚本所在目录 ─────────────────────────────────────
-    # CLI 语义不变：`--json` 的相对路径按脚本目录解析、报告写进脚本目录、蜂群的相对读写同理。
+    # CLI 语义：`--json` 的相对路径按脚本目录解析、蜂群的相对读写同理。
+    # 报告**不**再写进脚本目录（v0.45.322，数据根迁移阶段 5）：`deep-*.html` 是产物（数据），
+    # 落 `PATHS.home`（调用时求值）。gh-pages 只从数据根取文件，写进代码目录等于永远上不了网站。
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, ".")
 
@@ -973,11 +982,11 @@ def main():
         p(f"{Y}[渲染] 生成 HTML 报告 · {ticker}{R}")
         html = generate_html(data)
         date_str = datetime.now().strftime("%Y-%m-%d")
-        fname = f"deep-{ticker}-{date_str}.html"
+        fname = _report_path(ticker, date_str)
         with open(fname, "w", encoding="utf-8") as f:
             f.write(html)
         p(f"{G}{B}✅ 报告已生成: {fname}{R}")
-        p(f"{D}   open ~/Desktop/Alpha\\ Hive/{fname}{R}\n")
+        p(f"{D}   open {shlex.quote(str(fname))}{R}\n")
         p(f"\n{'─'*50}")
         p(f"{D}💡 提示：此报告由规则引擎生成。{R}")
         p(f"{D}   推荐方式：把 JSON 内容粘贴给 Claude 获取深度推理版本。{R}")
@@ -997,13 +1006,13 @@ def main():
 
         # 保存文件
         date_str = datetime.now().strftime("%Y-%m-%d")
-        fname = f"deep-{ticker}-{date_str}.html"
+        fname = _report_path(ticker, date_str)
         with open(fname, "w", encoding="utf-8") as f:
             f.write(html)
 
         total = round(time.time() - t_start, 1)
         p(f"{G}{B}✅ 报告已生成: {fname}  ({total}s){R}")
-        p(f"{D}   open ~/Desktop/Alpha\\ Hive/{fname}{R}")
+        p(f"{D}   open {shlex.quote(str(fname))}{R}")
         p(f"\n{'─'*50}")
         p(f"{D}💡 提示：此报告由规则引擎生成（无 Claude 推理）。")
         p(f"   混合模式：python3 collect_data.py {ticker} → 粘贴 JSON 给 Claude{R}\n")

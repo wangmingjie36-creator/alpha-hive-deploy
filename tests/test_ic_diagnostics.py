@@ -388,14 +388,19 @@ class TestBenchmarkSuite:
         assert icd.noise_floor({}, lag=7, period="周", draws=10) == {}
 
     def test_price_load_failure_does_not_crash(self, monkeypatch, tmp_path):
-        """行情拉取失败时基准降级，不得让整个工具崩掉"""
+        """行情拉取失败时基准降级，不得让整个工具崩掉
+
+        v0.45.328：夹具补 close_t7 列（生产 schema 本来就有）——原夹具只建了 price_t7，
+        恰是因为当时 build_benchmark_panel 读的是它（离场价，见 FORWARD_CLOSE_COL）。
+        """
         monkeypatch.setattr(icd, "_load_prices", lambda *a, **k: None)
         db = tmp_path / "p.db"
         con = sqlite3.connect(db)
         con.execute("""CREATE TABLE predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT, ticker TEXT, final_score REAL, dimension_scores TEXT,
-            price_at_predict REAL, price_t7 REAL, checked_t7 INTEGER DEFAULT 0)""")
+            price_at_predict REAL, price_t7 REAL, close_t7 REAL,
+            checked_t7 INTEGER DEFAULT 0)""")
         d0 = datetime.date.fromisoformat("2026-03-02")
         n = 0
         i = 0
@@ -409,17 +414,19 @@ class TestBenchmarkSuite:
                 dims = {k: float(j) for k in icd.DIMS}
                 con.execute(
                     "INSERT INTO predictions (date,ticker,final_score,"
-                    "dimension_scores,price_at_predict,price_t7,checked_t7) "
-                    "VALUES (?,?,?,?,?,?,1)",
+                    "dimension_scores,price_at_predict,price_t7,close_t7,checked_t7) "
+                    "VALUES (?,?,?,?,?,?,?,1)",
                     (d.isoformat(), f"T{j}", float(j), json.dumps(dims),
-                     100.0, 100.0 + j))
+                     100.0, 100.0 + j, 100.0 + j))
         con.commit()
         con.close()
 
-        panel = icd.build_benchmark_panel(db, "return_t7", "checked_t7", "t7")
+        panel, cov = icd.build_benchmark_panel(db, "return_t7", "checked_t7", "t7")
         assert "🐝 综合分 final_score" in panel, "系统自身基准必须始终可用"
         assert not any(k.startswith("📈") for k in panel), \
             "行情不可用时不应出现价格类因子"
+        # v0.45.332：因子行缺席这件事本身要能从输出看出来
+        assert cov["status"] == "unavailable"
 
 
 class TestNoiseFloorBaseKey:

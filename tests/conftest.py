@@ -474,19 +474,21 @@ def _block_slack(monkeypatch):
 
       ① `_read_user_token → None`
          测试永不使用**生产**凭证。要测 token 分支的测试自己 setattr 一个假
-         token（`test_slack_notifier.py` 已有 3 处这么写），后设的赢。
+         token（`test_slack_notifier.py` 里就这么写），后设的赢。
       ② `_check_webhook_alive → False`
          掐掉 `__init__` 里那次 `requests.head`。
          ①② 合起来让 `enabled` 恒为 False，于是 `_try_src_slack_alert` 的
          `if getattr(n, "enabled", False)` 守卫会在任何发送之前短路。
-      ③ `get_session` 换成记录器 —— 掐掉三处 `get_session("slack").post`，
-         并**兼作观测点**：teardown 断言没有任何测试试图发送。
+      ③ `get_session` 换成记录器 —— 掐掉 `slack_report_notifier` 里每一处
+         `get_session("slack").post`，并**兼作观测点**：teardown 断言没有任何测试试图发送。
+         （v0.45.341 起只剩这一个模块：`slack_notifier.py` 已删，它的发送面随之消失；
+         `pre_scan_notify` 直接 `requests.post`，由 `_offline_transport` 的库级闸兜住。）
          没有③的话，将来谁把 `enabled` 又弄成 True，①②会静默失效而没人知道
          （与本文件 `_isolate_paper_portfolio_state`「默认重绑 + teardown
          核对真身」同构，也是 CLAUDE.md「这个失败，下游怎么知道？」那条）。
 
     真要测发送的测试自己 `patch("slack_report_notifier.get_session")`
-    （现成 4 处这么写），会覆盖③，本 fixture 不改它们的语义。
+    （`test_slack_notifier.py` 里就这么写），会覆盖③，本 fixture 不改它们的语义。
     """
     import importlib
 
@@ -507,21 +509,15 @@ def _block_slack(monkeypatch):
     def _fake_get_session(*_a, **_k):
         return _SlackSessionRecorder()
 
-    for mod_name in ("slack_report_notifier", "slack_notifier"):
-        try:
-            mod = importlib.import_module(mod_name)
-        except Exception:  # pragma: no cover - 模块不可得时无需拦
-            continue
-        monkeypatch.setattr(mod, "get_session", _fake_get_session, raising=False)
-
     try:
-        from slack_report_notifier import SlackReportNotifier
-    except Exception:  # pragma: no cover
+        mod = importlib.import_module("slack_report_notifier")
+    except Exception:  # pragma: no cover - 模块不可得时无需拦
         pass
     else:
-        monkeypatch.setattr(SlackReportNotifier, "_read_user_token",
+        monkeypatch.setattr(mod, "get_session", _fake_get_session, raising=False)
+        monkeypatch.setattr(mod.SlackReportNotifier, "_read_user_token",
                             lambda self: None)
-        monkeypatch.setattr(SlackReportNotifier, "_check_webhook_alive",
+        monkeypatch.setattr(mod.SlackReportNotifier, "_check_webhook_alive",
                             staticmethod(lambda url: False))
 
     yield
@@ -551,8 +547,11 @@ def pytest_collection_finish(session):
 def _isolate_weekly_optimizer_db(tmp_path, monkeypatch):
     """把 weekly_optimizer.PHEROMONE_DB_PATH 指向不存在的临时路径（v0.45.86）。
 
-    该常量不走 `_isolate_env` 的 ALPHA_HIVE_DB_PATH 隔离（weekly_optimizer.py
-    自己算 ALPHAHIVE_DIR，不读那个 env var）。v0.45.86 起 Track A 会用它
+    （数据根迁移阶段 5 前置起它是默认 None 的覆盖钩子，缺省经 `_pheromone_db_path()`
+    解析 `PATHS.db`，已会跟 `_isolate_env` 走；本夹具仍保留，因为测试依赖的是
+    「库**不存在**」这一语义，而沙箱里的库可能被同一测试的其他代码建出来。
+    此前该常量写死 `~/Desktop/Alpha Hive/pheromone.db`，完全不走隔离。）
+    v0.45.86 起 Track A 会用它
     覆盖快照的 T+7 价格（见 weekly_optimizer._load_close_t7_map）——测试
     构造的 (ticker,date) 在生产库里查无匹配，会被误判"没有干净价格"整批
     丢弃，而不是真的在测原本要测的语义。指向不存在的路径，让查表函数走

@@ -63,14 +63,12 @@ class TestBuildSwarmReport:
         monkeypatch.setattr(mod, "VECTOR_MEMORY_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "MetricsCollector", None)
         monkeypatch.setattr(mod, "EarningsWatcher", None)
-        monkeypatch.setattr(mod, "SlackReportNotifier", None)
         monkeypatch.setattr(mod, "Backtester", None)
 
         from alpha_hive_daily_report import AlphaHiveDailyReporter
         r = AlphaHiveDailyReporter()
         # 确保可选组件都是 None
         assert r.memory_store is None
-        assert r.slack_notifier is None
         return r
 
     def _make_swarm_results(self, tickers_scores):
@@ -185,7 +183,6 @@ class TestDataQualityGate:
         monkeypatch.setattr(mod, "VECTOR_MEMORY_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "MetricsCollector", None)
         monkeypatch.setattr(mod, "EarningsWatcher", None)
-        monkeypatch.setattr(mod, "SlackReportNotifier", None)
         monkeypatch.setattr(mod, "Backtester", None)
         from alpha_hive_daily_report import AlphaHiveDailyReporter
         return AlphaHiveDailyReporter()
@@ -351,7 +348,6 @@ class TestDeployStaticToGhPages:
         monkeypatch.setattr(mod, "VECTOR_MEMORY_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "MetricsCollector", None)
         monkeypatch.setattr(mod, "EarningsWatcher", None)
-        monkeypatch.setattr(mod, "SlackReportNotifier", None)
         monkeypatch.setattr(mod, "Backtester", None)
 
         from alpha_hive_daily_report import AlphaHiveDailyReporter
@@ -734,7 +730,6 @@ class _ReporterMixin:
         monkeypatch.setattr(mod, "VECTOR_MEMORY_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "MetricsCollector", None)
         monkeypatch.setattr(mod, "EarningsWatcher", None)
-        monkeypatch.setattr(mod, "SlackReportNotifier", None)
         monkeypatch.setattr(mod, "Backtester", None)
         from alpha_hive_daily_report import AlphaHiveDailyReporter
         r = AlphaHiveDailyReporter()

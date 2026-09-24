@@ -112,6 +112,92 @@ HORIZONS = {
 # `price` 保留仅为复现历史报告，**不要用它出新结论**。
 TARGETS = ("close", "price", "path")
 
+#: 「未截断收盘价」口径下每个 horizon 的**终点价列**（v0.45.321 抽成唯一真相，
+#: 本模块 `load_daily_ic` 与 `signal_archive.load_panel` 共用）。
+#:
+#: · t7 → `close_t7`：见上一段。`price_t7` 是离场价，**不能**按 `f"price_{h}"` 拼列名——
+#:   `signal_archive.load_panel` 正是这么拼的，v0.45.19 更正了这里却没更正那里，
+#:   它的 `--analyze` 一直对着截断收益算 IC 直到 v0.45.321。
+#: · t30 → `price_t30`：这一列**本来就是收盘价**，不是回退。`backtester` 的 SL/TP
+#:   路径模拟只包在 t7 分支里；T+1 / T+30 走「沿用旧逻辑」分支，用
+#:   `_get_price_at_date`（与 close_t7 同一个取价函数）。生产库实测（2026-09-23 快照）
+#:   price_t30 == exit_price 0/837，SL/TP 行 0/360。没有 `close_t30` 列，也不需要。
+#:
+#: ⚠️ 新增 horizon 必须在这里显式登记，并先核对那一列存的是收盘价还是离场价。
+FORWARD_CLOSE_COL = {"t7": "close_t7", "t30": "price_t30"}
+
+
+def forward_return_sql(target: str, target_col: str,
+                       horizon: str) -> Tuple[str, str, Optional[str]]:
+    """前瞻收益口径 → `(SELECT 片段, WHERE 片段, 终点价列)`。**本模块读前瞻收益的唯一入口。**
+
+    v0.45.328：`load_daily_ic` 与 `build_benchmark_panel` 以前各拼各的 SQL。v0.45.19 把前者
+    改成 close_t7，后者照旧 `f"price_{horizon}"` —— `--benchmark` 在 t7 上一直对着 SL/TP
+    离场价算，也从没读过传进来的 `target_col`（`--target` 对它无效），于是同一次默认运行里
+    维度表与基准表对同一个维度印出两个不同的 IC。两个读者共用这一处，才不会再分叉。
+
+    终点价列为 None ⇒ path 口径（直接读 `target_col`，不经价格）。
+    列名在**调用时**查 `FORWARD_CLOSE_COL`，不冻结。
+    """
+    if target == "close":
+        if horizon not in FORWARD_CLOSE_COL:
+            # 不猜：按 f"price_{horizon}" 拼列名正是 v0.45.19 / v0.45.321 / v0.45.328 修掉的那个 bug
+            raise ValueError(f"horizon={horizon!r} 未在 FORWARD_CLOSE_COL 登记"
+                             f"（已登记：{sorted(FORWARD_CLOSE_COL)}）")
+        end = FORWARD_CLOSE_COL[horizon]
+    elif target == "price":
+        end = f"price_{horizon}"          # 仅复现历史：t7 上是 SL/TP 离场价
+    elif target == "path":
+        return f"{target_col} AS ret", f"{target_col} IS NOT NULL", None
+    else:
+        raise ValueError(f"target={target!r} 不在 {TARGETS}")
+    return (f"price_at_predict, {end} AS p_end",
+            f"{end} IS NOT NULL AND price_at_predict > 0", end)
+
+
+def row_forward_return(r, end_col: Optional[str]) -> Optional[float]:
+    """按 `forward_return_sql` 取出的行算前瞻收益（%）。取不到（价为空/非正）返回 None。"""
+    if end_col is None:
+        return r["ret"]
+    p0, p1 = r["price_at_predict"], r["p_end"]
+    if not p0 or not p1 or p0 <= 0:
+        return None
+    return (p1 - p0) / p0 * 100.0
+
+
+#: 终点价列里「恰好等于 SL/TP 离场价」的行占 SL/TP 行的比例超过它 ⇒ 告警。
+#: 2026-09-23 快照实测：price_t7 87.6%（540 行）、close_t7 0.2%、price_t30 0% —— 两端相距甚远。
+#: v0.45.328 从 signal_archive 搬来（v0.45.321 首设），两边共用这一个阈值。
+TRUNCATION_ALARM = 0.5
+
+
+def truncation_share(con, end_col: str, checked_col: str) -> Tuple[int, float]:
+    """终点价列的**截断指纹**：SL/TP 行里它有多大比例恰好等于 `exit_price`。
+
+    读对列只是代码层；这里管数据层 —— 哪天有人把离场价写进 close_t7、
+    或给 t30 也套上路径模拟，列名没变、测试不红，只有这个比例会跳。
+    库里没有 exit_* 列（旧库 / 测试夹具）⇒ (0, 0.0)，无从判断即不告警。
+    """
+    cols = {r[1] for r in con.execute("PRAGMA table_info(predictions)")}
+    if not {"exit_price", "exit_reason"} <= cols:
+        return 0, 0.0
+    n, hit = con.execute(
+        f"SELECT COUNT(*), SUM(ABS({end_col} - exit_price) < 0.01) FROM predictions "
+        f"WHERE {checked_col}=1 AND {end_col} IS NOT NULL AND exit_price IS NOT NULL "
+        f"  AND exit_reason IN ('SL', 'TP')").fetchone()
+    return n, ((hit or 0) / n if n else 0.0)
+
+
+def warn_if_truncated(con, end_col: str, checked_col: str) -> Tuple[int, float]:
+    """截断指纹超阈值 ⇒ stderr 告警。只该在**自称未截断**的口径（close）上调用：
+    price / path 口径本来就标明含截断，在那里告警是恒真的噪音，会把告警养成被无视的东西。"""
+    n_sltp, share = truncation_share(con, end_col, checked_col)
+    if share > TRUNCATION_ALARM:
+        print(f"⚠️  {end_col}：SL/TP 行里 {share:.0%}（{n_sltp} 行）恰好等于 exit_price"
+              f" —— 这一列看起来是离场价而不是收盘价，下面的 IC 是对着截断收益算的，"
+              f"勿据此下结论（见 ic_diagnostics.FORWARD_CLOSE_COL）", file=sys.stderr)
+    return n_sltp, share
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # 统计工具
@@ -207,35 +293,21 @@ def load_daily_ic(db_path: Path, target_col: str, checked_col: str,
                 "price" = 由 price_{h} 算——⚠️ price_t7 实为离场价，同样被截断，
                           仅为复现历史报告保留；
                 "path"  = 直接用 return_{h} 列（含 SL/TP 提前出场）
-                详见模块顶部 TARGETS 说明。
+                详见模块顶部 TARGETS 说明；SQL 由 `forward_return_sql` 统一生成。
 
     Returns:
         (ic[dim][date], 样本行数, 每日横截面宽度列表)
     """
-    price_col = f"price_{horizon}"
+    sel, where, end_col = forward_return_sql(target, target_col, horizon)
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
+        rows = con.execute(
+            f"SELECT date, dimension_scores, {sel} FROM predictions "
+            f"WHERE {checked_col}=1 AND {where} AND dimension_scores IS NOT NULL"
+        ).fetchall()
         if target == "close":
-            # close_t7 目前只对 t7 回填；其它 horizon 回退 price 并在 main 里告警
-            _cc = "close_t7" if horizon == "t7" else price_col
-            rows = con.execute(
-                f"SELECT date, dimension_scores, price_at_predict, {_cc} AS p_end "
-                f"FROM predictions WHERE {checked_col}=1 AND {_cc} IS NOT NULL "
-                f"  AND price_at_predict > 0 AND dimension_scores IS NOT NULL"
-            ).fetchall()
-        elif target == "price":
-            rows = con.execute(
-                f"SELECT date, dimension_scores, price_at_predict, {price_col} AS p_end "
-                f"FROM predictions WHERE {checked_col}=1 AND {price_col} IS NOT NULL "
-                f"  AND price_at_predict > 0 AND dimension_scores IS NOT NULL"
-            ).fetchall()
-        else:
-            rows = con.execute(
-                f"SELECT date, dimension_scores, {target_col} AS ret FROM predictions "
-                f"WHERE {checked_col}=1 AND {target_col} IS NOT NULL "
-                f"  AND dimension_scores IS NOT NULL"
-            ).fetchall()
+            warn_if_truncated(con, end_col, checked_col)
     finally:
         con.close()
 
@@ -247,13 +319,9 @@ def load_daily_ic(db_path: Path, target_col: str, checked_col: str,
             continue
         if not (isinstance(ds, dict) and ds):
             continue
-        if target in ("close", "price"):
-            p0, p1 = r["price_at_predict"], r["p_end"]
-            if not p0 or not p1 or p0 <= 0:
-                continue
-            ret = (p1 - p0) / p0 * 100.0
-        else:
-            ret = r["ret"]
+        ret = row_forward_return(r, end_col)
+        if ret is None:
+            continue
         by_day[r["date"][:10]].append((ds, ret))
 
     ic: Dict[str, Dict[str, float]] = {d: {} for d in DIMS}
@@ -334,49 +402,142 @@ def diagnose(ic_by_day: Dict[str, float], lag: int, period: str) -> Dict:
 # ------------------------
 # **任何评分/权重改动上线前，必须先跑 `--benchmark` 并证明它相对基准有改善。**
 # 只比"改动前的自己"好是不够的 —— 那是在噪音里挑选。
+#
+# ⚠️ v0.45.328 之前 t7 的 `--benchmark` 是对着 SL/TP 离场价（price_t7）算的，
+# 与维度表不同口径、也不认 `--target`。引用旧基准数字前先看 CHANGELOG v0.45.328。
 
 RANDOM_DRAWS = 200          # 噪音地板的重采样次数
 _PRICE_CACHE: Dict = {}
 
 
+def _close_panel(yf, tickers: List[str], start: str, end: str):
+    """一次 `yf.download` → 收盘价面板（列 = ticker）。
+
+    多票时 `["Close"]` 本就是「列 = ticker」；单票在旧版 yfinance 上是 Series、新版是单列
+    DataFrame（memory `alpha-hive-yfinance-multiindex`）—— 重试路径逐只下载两种都会遇到，
+    拍成同一形状。
+    """
+    px = yf.download(list(tickers), start=start, end=end,
+                     progress=False, auto_adjust=True)["Close"]
+    if not hasattr(px, "columns"):
+        px = px.to_frame(name=tickers[0])
+    return px
+
+
+def missing_tickers(px, tickers: List[str]) -> List[str]:
+    """请求了、但面板里一个有效收盘价都没有的标的（缺列，或整列 NaN）。
+
+    yfinance 批量下载的部分失败两种形状都有：失败的票要么整列 NaN，要么根本没有列。
+    只判「列在不在」会把整列 NaN 的票当成拿到了。
+    """
+    cols = set(px.columns) if px is not None else set()
+    return sorted(t for t in set(tickers)
+                  if t not in cols or not px[t].notna().any())
+
+
 def _load_prices(tickers: List[str], start: str, end: str):
-    """拉取收盘价（yfinance）。失败返回 None —— 基准降级而非整个工具崩掉。"""
+    """拉取收盘价（yfinance）。整批失败返回 None —— 基准降级而非整个工具崩掉。
+
+    v0.45.332：批量下载的**部分**失败不抛异常。2026-09-23 连跑 5 次，4 次各随机丢 1–2 只
+    （AVGO+RKLB / T+MSTR / CVX / ADBE），唯一痕迹是 yfinance 自己的一行 stderr
+    `N Failed download(s)`；旧实现只在异常时降级 ⇒ 残缺面板照常返回，`--benchmark` 的
+    经典因子行少算几只票、表上看不出来（20日动量 IC 0.0955–0.1142 随丢哪只而变）。
+    现在：缺的票逐只重试一轮（实测一轮通常补齐）；仍缺的写 stderr 点名。下游要看覆盖率就对
+    返回的面板调 `missing_tickers` —— 覆盖率从数据本身读，不另存一份（缓存命中时也成立）。
+
+    **为什么不接 Twelve Data 兜底**（`close_correction` v0.45.257 接了）：那边要的是官方
+    **原始**收盘，与数据源无关；这里是 `auto_adjust=True` 的**复权**价，而
+    `twelve_data._fetch_rows` 不传 `adjust`，其默认复权口径未核实（待验证）。同一个横截面里
+    混两个源，每只票的因子值就取决于它碰巧由谁供数 —— 正是本次要消灭的「随丢哪只而变」。
+    缺口改为如实报告，不用别的口径填。
+
+    一只都没拿到（空表）按整批失败处理，不逐只重试：v0.45.257 实测的 52/52 限流就是这个
+    形状（不抛、返回空），逐只重试只会往同一个限流里再撞 52 次。
+    """
     key = (tuple(sorted(tickers)), start, end)
     if key in _PRICE_CACHE:
         return _PRICE_CACHE[key]
+    want = sorted(set(tickers))
     try:
         import warnings
         warnings.filterwarnings("ignore")
         import yfinance as yf
-        px = yf.download(list(tickers), start=start, end=end,
-                         progress=False, auto_adjust=True)["Close"]
-        _PRICE_CACHE[key] = px
-        return px
+        px = _close_panel(yf, want, start, end)
     except Exception as e:  # noqa: BLE001 - 基准是可选功能，任何失败都降级
         print(f"⚠️  行情拉取失败，价格类基准跳过：{e}", file=sys.stderr)
         return None
 
+    missing = missing_tickers(px, want)
+    if len(missing) == len(want):
+        print(f"⚠️  行情批量下载 0/{len(want)} 只有数据（多半是整批限流），价格类基准跳过",
+              file=sys.stderr)
+        return None
+    if missing:
+        import pandas as pd
+        recovered = []
+        for t in missing:
+            try:
+                one = _close_panel(yf, [t], start, end)
+            except Exception:  # noqa: BLE001 - 单只重试失败 = 该票仍缺，下面照实报告
+                continue
+            if t in one.columns and one[t].notna().any():
+                px = pd.concat([px.drop(columns=[t], errors="ignore"), one[[t]]],
+                               axis=1).sort_index()
+                recovered.append(t)
+        still = [t for t in missing if t not in recovered]
+        if still:
+            print(f"⚠️  行情缺 {len(still)}/{len(want)} 只（批量下载漏掉、逐只重试 1 轮仍无数据）："
+                  f"{', '.join(still)} —— 下游只在其余 {len(want) - len(still)} 只上计算",
+                  file=sys.stderr)
+        else:
+            print(f"ℹ️  行情批量下载漏了 {len(missing)}/{len(want)} 只"
+                  f"（{', '.join(missing)}），逐只重试已补齐", file=sys.stderr)
+    _PRICE_CACHE[key] = px
+    return px
+
 
 def build_benchmark_panel(db_path: Path, target_col: str, checked_col: str,
-                          horizon: str, min_width: int = 5) -> Dict[str, Dict]:
-    """构造 {因子名: {date: [(值, 前瞻收益), ...]}} 面板。"""
-    price_col = f"price_{horizon}"
+                          horizon: str, min_width: int = 5,
+                          target: str = "close",
+                          check_truncation: bool = True) -> Tuple[Dict[str, Dict], Dict]:
+    """构造 ({因子名: {date: [(值, 前瞻收益), ...]}} 面板, 经典因子行情覆盖率)。
+
+    前瞻收益口径与 `load_daily_ic` 同源（`forward_return_sql`），`target` 语义相同。
+
+    check_truncation: close 口径下是否查截断指纹（默认查）。v0.45.336：只有**同一次运行里
+    已经对同一库、同一 target/horizon 调过 `load_daily_ic`** 的调用方才该传 False（`main()`）——
+    指纹只取决于 (终点列, checked 列)，与两边各自的行集无关，第二次查只会把同一行告警再印一遍。
+
+    v0.45.332：第二个返回值是经典因子（📈📉🌪）的覆盖率 —— `status` ok / partial /
+    unavailable（没拿到行情）/ factor_error（行情拿到了、构造因子时抛异常；v0.45.337 起与前者分开）、
+    `n_priced`/`n_tickers`、`missing`、`n_factor_records`/`n_records`。
+    此前行情缺票时这三行只在其余标的上算、与综合分不是同一样本，输出里无从得知
+    （见 `_load_prices`）。**返回形状有意改成二元组**：旧调用方直接拿它当面板用会当场报错，
+    而不是静默丢掉覆盖率。
+
+    ⚠️ v0.45.328 更正：此前这里写死 `f"price_{horizon}"`、不读 `target_col`、不收 `target`
+    ⇒ t7 的 `--benchmark`（综合分 / 5 维 / 经典因子 / 噪音地板）全部对着 SL/TP 离场价算，
+    且 `--target` 对它无效；同一次默认运行里维度表（close_t7）与基准表（price_t7）
+    对同一维度印出两个 IC。**v0.45.328 之前的 t7 基准输出都是截断口径**，t30 不受影响
+    （price_t30 本来就是收盘价，见 FORWARD_CLOSE_COL）。
+    """
+    sel, where, end_col = forward_return_sql(target, target_col, horizon)
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
         rows = con.execute(
-            f"SELECT date, ticker, final_score, dimension_scores, "
-            f"       price_at_predict, {price_col} AS p_end "
-            f"FROM predictions WHERE {checked_col}=1 AND {price_col} IS NOT NULL "
-            f"  AND price_at_predict > 0"
+            f"SELECT date, ticker, final_score, dimension_scores, {sel} "
+            f"FROM predictions WHERE {checked_col}=1 AND {where}"
         ).fetchall()
+        if target == "close" and check_truncation:
+            warn_if_truncated(con, end_col, checked_col)
     finally:
         con.close()
 
     recs = []
     for r in rows:
-        p0, p1 = r["price_at_predict"], r["p_end"]
-        if not p0 or not p1 or p0 <= 0:
+        ret = row_forward_return(r, end_col)
+        if ret is None:
             continue
         try:
             ds = json.loads(r["dimension_scores"]) if r["dimension_scores"] else {}
@@ -385,15 +546,16 @@ def build_benchmark_panel(db_path: Path, target_col: str, checked_col: str,
         recs.append({
             "date": r["date"][:10], "ticker": r["ticker"],
             "score": r["final_score"], "ds": ds,
-            "ret": (p1 - p0) / p0 * 100.0,
+            "ret": ret,
         })
     if not recs:
-        return {}
+        return {}, {}
 
     # 价格类基准（可选，失败则只保留系统自身）
     tickers = sorted({r["ticker"] for r in recs})
     dates = sorted({r["date"] for r in recs})
     px = _load_prices(tickers, "2025-11-01", dates[-1])
+    missing = missing_tickers(px, tickers)
     mom20 = mom5 = vol20 = None
     if px is not None:
         try:
@@ -433,7 +595,44 @@ def build_benchmark_panel(db_path: Path, target_col: str, checked_col: str,
     out = {}
     for name, by_d in panel.items():
         out[name] = {d: v for d, v in by_d.items() if len(v) >= min_width}
-    return out
+
+    # 记录数也要比：缺票之外，`len(s) < 26` 等过滤同样会让经典因子少算一截
+    n_factor = len(mom20) if mom20 is not None else 0
+    if px is None:
+        status = "unavailable"
+    elif mom20 is None:
+        # v0.45.337：行情拿到了、是上面构造因子时抛了异常 —— 不能并进 unavailable，
+        # 否则表头印「行情不可用」，把人引去查网络/限流
+        status = "factor_error"
+    elif missing or n_factor < len(recs):
+        status = "partial"
+    else:
+        status = "ok"
+    coverage = {
+        "status": status,
+        "n_tickers": len(tickers), "n_priced": len(tickers) - len(missing),
+        "missing": missing,
+        "n_records": len(recs), "n_factor_records": n_factor,
+    }
+    return out, coverage
+
+
+def format_price_coverage(cov: Dict) -> str:
+    """经典因子覆盖率的一行说明（`--benchmark` 表头用）。"""
+    if not cov:
+        return ""
+    if cov["status"] == "unavailable":
+        return "⚠️ 行情不可用 —— 经典因子（📈📉🌪）三行缺席，下表只有系统自身与随机"
+    if cov["status"] == "factor_error":
+        return (f"⚠️ 行情已拿到（{cov['n_priced']}/{cov['n_tickers']} 只），但价格因子构造失败"
+                f"（原因见 stderr）—— 经典因子（📈📉🌪）三行缺席")
+    frac = (f"{cov['n_priced']}/{cov['n_tickers']} 只"
+            f"（记录 {cov['n_factor_records']}/{cov['n_records']}）")
+    if cov["status"] == "ok":
+        return f"经典因子行情覆盖 {frac} ✅"
+    miss = f"，缺 {', '.join(cov['missing'])}" if cov["missing"] else ""
+    return (f"⚠️ 经典因子行情覆盖 {frac}{miss} —— 📈📉🌪 三行与综合分**不是同一样本**，"
+            f"两者的比较打折扣")
 
 
 def _ic_series_from_pairs(by_day: Dict[str, List]) -> Dict[str, float]:
@@ -509,7 +708,8 @@ def noise_floor(panel: Dict[str, Dict], lag: int, period: str,
 
 
 def print_benchmark(panel: Dict[str, Dict], lag: int, period: str,
-                    floor: Dict) -> None:
+                    floor: Dict, target_label: Optional[str] = None,
+                    coverage: Optional[Dict] = None) -> None:
     rows = []
     for name, by_day in panel.items():
         s = _ic_series_from_pairs(by_day)
@@ -524,6 +724,12 @@ def print_benchmark(panel: Dict[str, Dict], lag: int, period: str,
     print("【基准对照】任何改动上线前必须证明相对这组基准有改善"
           " —— 只比「改动前的自己」好，是在噪音里挑选")
     print("=" * 104)
+    if target_label:
+        # v0.45.328：点名终点列 —— 此前基准表静默用 price_t7，与上方维度表不是同一口径
+        print(f"  目标={target_label}（与上方维度表同一口径）")
+    if coverage:
+        # v0.45.332：此前行情缺票时经典因子行静默少算几只，表上看不出来
+        print(f"  {format_price_coverage(coverage)}")
     if floor:
         print(f"  🎯 噪音地板（随机排序 ×{floor['n_draws']} 次）："
               f"|日度IC| 中位 {floor['ic_p50']:.3f}、**95分位 {floor['ic_p95']:.3f}**"
@@ -546,9 +752,13 @@ def print_benchmark(panel: Dict[str, Dict], lag: int, period: str,
                    key=lambda r: abs(r["daily_ic"]), default=None)
     if sysrow and best_ext:
         better = abs(sysrow["daily_ic"]) > abs(best_ext["daily_ic"])
+        caveat = ""
+        if coverage and coverage.get("status") == "partial":
+            caveat = (f"（⚠️ 经典因子只覆盖 {coverage['n_factor_records']}/"
+                      f"{coverage['n_records']} 条记录，不是同一样本）")
         print(f"  判定：综合分 |IC|={abs(sysrow['daily_ic']):.4f} vs "
               f"最佳经典因子 |IC|={abs(best_ext['daily_ic']):.4f} → "
-              f"{'系统占优' if better else '⚠️ 系统未能超过经典因子'}")
+              f"{'系统占优' if better else '⚠️ 系统未能超过经典因子'}{caveat}")
     if sysrow and math.isfinite(thr) and abs(sysrow["daily_ic"]) <= thr:
         print("  ⚠️ 综合分未超出噪音地板 —— 当前证据不支持任何基于它的选股决策")
 
@@ -634,8 +844,9 @@ def main() -> int:
     # v0.45.160：argparse 的 default 在 import 期求值，不能塞冻结值
     ap.add_argument("--db", type=str, default=None, help="pheromone.db 路径（默认 PATHS.db）")
     ap.add_argument("--target", choices=TARGETS, default="close",
-                    help="目标变量口径：price=纯价格变动（默认，推荐）；"
-                         "path=return_t7 列（含 SL/TP 截断，42.5%% 样本被钉在出场档位）")
+                    help="目标变量口径：close=未截断收盘价（默认，推荐；列见 FORWARD_CLOSE_COL）；"
+                         "price=price_{h} 列（t7 上是 SL/TP 离场价，仅复现历史报告）；"
+                         "path=return_{h} 列（路径依赖，含 SL/TP 截断）")
     ap.add_argument("--benchmark", action="store_true",
                     help="对照基准套件：噪音地板 + 经典因子 + 系统各维度（需联网拉行情）")
     ap.add_argument("--draws", type=int, default=RANDOM_DRAWS,
@@ -655,9 +866,10 @@ def main() -> int:
     for h in horizons:
         target, checked, lag, period = HORIZONS[h]
         if args.target == "close" and h != "t7":
-            # close_t7 只对 t7 存在；静默回退会让读者以为 t30 也走了干净口径
-            print(f"⚠️  {h}: close_t7 仅回填了 t7，本 horizon 回退 price 口径"
-                  f"（**仍含 SL/TP 截断**，勿据此出新结论）")
+            # v0.45.321 更正：旧文案说这里「回退 price 口径、仍含 SL/TP 截断」——前半对、
+            # 后半错。price_t30 本来就是收盘价（见 FORWARD_CLOSE_COL），照旧点名列，但不再误报截断
+            print(f"ℹ️  {h}: 终点价用 {FORWARD_CLOSE_COL[h]}（无 close_{h} 列；"
+                  f"该列即 T+30 收盘价，SL/TP 路径模拟只作用于 t7，不含截断）")
         ic, n_rows, widths = load_daily_ic(db, target, checked, args.min_width,
                                            target=args.target, horizon=h)
         if not widths:
@@ -665,10 +877,13 @@ def main() -> int:
             continue
         res = {dim: diagnose(ic[dim], lag, period) for dim in DIMS}
         res = {k: v for k, v in res.items() if v}
-        label = (f"price_{h} 相对 price_at_predict（纯价格变动）"
-                 if args.target in ("close", "price") else f"{target}（路径依赖，含 SL/TP 截断）")
+        label = {"close": f"{FORWARD_CLOSE_COL[h]} 相对 price_at_predict（未截断收盘价）",
+                 "price": f"price_{h} 相对 price_at_predict（⚠️ t7 为 SL/TP 离场价，仅复现历史）",
+                 }.get(args.target, f"{target}（路径依赖，含 SL/TP 截断）")
         meta = {
             "target": label, "target_mode": args.target,
+            # v0.45.328：终点价列（path 口径为 None）；维度表与 --benchmark 共用
+            "end_col": forward_return_sql(args.target, target, h)[2],
             "rows": n_rows, "n_days": len(widths),
             "avg_width": mean(widths), "min_width": min(widths),
             "max_width": max(widths), "period": period,
@@ -684,10 +899,15 @@ def main() -> int:
                 print_scoreboard(res)
 
         if args.benchmark:
-            panel = build_benchmark_panel(db, target, checked, h, args.min_width)
+            # v0.45.336：上面的 load_daily_ic 已对同一库、同一口径查过截断指纹（结果与行集无关），
+            # 这里再查只会把同一行告警印第二遍
+            panel, coverage = build_benchmark_panel(db, target, checked, h, args.min_width,
+                                                    target=args.target, check_truncation=False)
             if panel:
                 floor = noise_floor(panel, lag, period, draws=args.draws)
                 out[h]["benchmark"] = {
+                    "target_mode": args.target, "end_col": meta["end_col"],
+                    "price_coverage": coverage,
                     "noise_floor": floor,
                     "factors": {
                         n: diagnose(_ic_series_from_pairs(bd), lag, period)
@@ -696,7 +916,8 @@ def main() -> int:
                     },
                 }
                 if not args.json:
-                    print_benchmark(panel, lag, period, floor)
+                    print_benchmark(panel, lag, period, floor, target_label=label,
+                                    coverage=coverage)
 
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2, default=str))

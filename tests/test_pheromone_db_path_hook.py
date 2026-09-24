@@ -117,9 +117,10 @@ class TestNoRawHookReads:
     def test_no_module_imports_the_raw_hook(self):
         """`from feedback_loop import PHEROMONE_DB_PATH` 拿到的是钩子不是路径。
 
-        ⚠️ 不能按裸名字 grep：`weekly_optimizer` 有**自己的**同名常量
-        （`ALPHAHIVE_DIR / "pheromone.db"`，是真路径、显式传给 feedback_loop），
-        按名字数会把它误报。只认「从 feedback_loop 取这个名字」这一种形态。
+        ⚠️ 不能按裸名字 grep：`weekly_optimizer` 有**自己的**同名覆盖钩子
+        （数据根迁移阶段 5 前置起也是默认 None，经它自己的 `_pheromone_db_path()`
+        解析后显式传给 feedback_loop），按名字数会把它误报。
+        只认「从 feedback_loop 取这个名字」这一种形态。
         """
         offenders = []
         for p in _production_py_files():

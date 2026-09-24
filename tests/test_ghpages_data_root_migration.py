@@ -28,6 +28,7 @@
 """
 import os
 import subprocess
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import report_deployer as rd
@@ -80,7 +81,7 @@ def _make_reporter(monkeypatch, tmp_path, repo_path):
         ("CODE_EXECUTION_CONFIG", {"enabled": False}),
         ("VectorMemory", None), ("VECTOR_MEMORY_CONFIG", {"enabled": False}),
         ("MetricsCollector", None), ("EarningsWatcher", None),
-        ("SlackReportNotifier", None), ("Backtester", None),
+        ("Backtester", None),
     ]:
         monkeypatch.setattr(mod, name, val)
     from alpha_hive_daily_report import AlphaHiveDailyReporter
@@ -415,6 +416,15 @@ class TestResolveGhPagesParentSingleBranchClone:
             ["git", "clone", "-q", "--single-branch", "--branch", "main", str(bare), str(clone)],
             check=True, capture_output=True,
         )
+        # `commit_and_push_gh_pages` 走 `git commit-tree`（plumbing 命令），同
+        # `_init_repo_with_origin` 里 `repo` 的既有约定一样，必须显式配置本地
+        # 身份——不能依赖 git 从系统用户名/主机名猜身份这条隐式回落路径：
+        # macOS 的 Apple Git 会静默猜出一个可用身份，但 CI（Ubuntu 跑者，GECOS
+        # 全名字段常年为空）猜出的姓名部分是空字符串，新版 git 对此硬拒绝
+        # （`fatal: empty ident name ... not allowed`），导致本条测试只在
+        # 本机能过、CI 上必现失败——这不是环境噪音，是测试自己漏配了身份。
+        _git("config", "user.email", "single-branch-clone@test.com", cwd=clone)
+        _git("config", "user.name", "single-branch-clone", cwd=clone)
         # 前置条件：这确实是个 single-branch 克隆——默认 fetch refspec 只认 main。
         refspec = _git("config", "--get", "remote.origin.fetch", cwd=clone)
         assert refspec == "+refs/heads/main:refs/remotes/origin/main", (
@@ -889,3 +899,200 @@ class TestSyncGhpagesResilientToSingleFileFailure:
         assert not precheck.stdout.strip(), (
             "如果这条断言失败，说明旧写法在这个环境里没有复现'一个坏文件拖垮整次同步'——"
             "上面的正向测试就没有对照价值了")
+
+
+class TestAllHashObjectFailuresDoNotPushEmptyTree:
+    """v0.45.312：`/code-review high` 对 v0.45.311（把 `_sync_ghpages` 改成
+    逐文件容错）做二次复检时，真实执行发现的严重回归——**不是**v0.45.311
+    本身新写的代码，是 `deploy_static_to_ghpages` 里那段批量 hash-object 逻辑
+    从更早版本起就缺这道守卫：`cache_entries` 全空时（比如磁盘满/
+    `.git/objects` 权限损坏，导致每一个候选文件的 `hash-object` 都失败）此前
+    直接落到 `write-tree`——`GIT_INDEX_FILE` 指向一个从没写过内容的空 index，
+    `git write-tree` 返回 git 那个众所周知的**空树**哈希，`commit_and_push_
+    gh_pages` 照样把这棵空树提交推送上去，把 gh-pages **整站清空**、日志却
+    打印"部署成功"。
+
+    两条独立部署路径都验一次（`_sync_ghpages` 在 v0.45.311 已经有这道守卫，
+    这里补的是回归覆盖；`deploy_static_to_ghpages` 是本次新补的守卫）。
+    """
+
+    def test_deploy_static_to_ghpages_skips_when_all_hash_object_fail(self, tmp_path, monkeypatch):
+        import subprocess as _sp
+
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_all_hash_fail")
+        reporter = _make_reporter(monkeypatch, tmp_path, repo)
+
+        (data_root / "index.html").write_text("<html>real site</html>")
+        with patch("report_deployer.verify_cdn_deployment", return_value=True):
+            reporter._deploy_static_to_ghpages()
+
+        clone_before = tmp_path / "verify_before_allfail"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone_before)],
+                        check=True, capture_output=True)
+        assert (clone_before / "index.html").read_text() == "<html>real site</html>"
+
+        real_check_output = _sp.check_output
+
+        def _all_hash_object_fail(args, **kwargs):
+            if args[:2] == ["git", "hash-object"]:
+                raise _sp.CalledProcessError(1, args, output=b"", stderr=b"simulated total failure")
+            return real_check_output(args, **kwargs)
+
+        with patch("subprocess.check_output", side_effect=_all_hash_object_fail), \
+             patch("report_deployer.verify_cdn_deployment", return_value=True):
+            reporter._deploy_static_to_ghpages()
+
+        clone_after = tmp_path / "verify_after_allfail"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone_after)],
+                        check=True, capture_output=True)
+        assert (clone_after / "index.html").read_text() == "<html>real site</html>", (
+            "全部候选文件 hash-object 失败时必须跳过本次部署、保留线上原内容——"
+            "不能把 gh-pages 推成空树（git write-tree 在空 index 上返回的众所周知的"
+            "空树哈希，会让 commit_and_push_gh_pages 照常成功提交推送）")
+
+    def test_mutation_reverting_all_hash_fail_guard_pushes_empty_tree(self, tmp_path, monkeypatch):
+        """变异测试：还原成没有这道守卫的旧写法（`git show HEAD:report_deployer.py`
+        换出——那正是本次修复前的真实代码），必须复现"gh-pages 被清空成空树"。"""
+        import subprocess as _sp
+
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_all_hash_fail_mut")
+        reporter = _make_reporter(monkeypatch, tmp_path, repo)
+
+        (data_root / "index.html").write_text("<html>real site</html>")
+        with patch("report_deployer.verify_cdn_deployment", return_value=True):
+            reporter._deploy_static_to_ghpages()
+
+        real_check_output = _sp.check_output
+
+        def _all_hash_object_fail(args, **kwargs):
+            if args[:2] == ["git", "hash-object"]:
+                raise _sp.CalledProcessError(1, args, output=b"", stderr=b"simulated total failure")
+            return real_check_output(args, **kwargs)
+
+        # 旧写法：`if cache_entries:` 只包住 update-index 调用，`write-tree`
+        # 在它外面无条件执行——手工复刻这段（不是重新发明，是直接照抄修复前
+        # 的真实结构），证明"跳到 write-tree"这条路径真的会产出空树。
+        def _old_style_deploy(files, file_source, repo, env):
+            import os as _os
+            cache_entries = []
+            for f in sorted(files):
+                try:
+                    blob = _sp.check_output(
+                        ["git", "hash-object", "-w", _os.path.join(file_source[f], f)], cwd=repo
+                    ).decode().strip()
+                    cache_entries.append(f"100644 {blob}\t{f}")
+                except (_sp.CalledProcessError, OSError):
+                    pass
+            if cache_entries:
+                _idx_input = "\n".join(cache_entries) + "\n"
+                _sp.run(["git", "update-index", "--add", "--index-info"],
+                         input=_idx_input, env=env, cwd=repo, check=True, text=True)
+            tree = _sp.check_output(["git", "write-tree"], env=env, cwd=repo).decode().strip()
+            return tree
+
+        idx = str(repo / ".git" / "gh-pages-index-mut")
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = idx
+        with patch("subprocess.check_output", side_effect=_all_hash_object_fail):
+            tree = _old_style_deploy(["index.html"], {"index.html": str(data_root)}, str(repo), env)
+        os.remove(idx)
+
+        empty_tree_sha = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        assert tree == empty_tree_sha, (
+            "如果这条断言失败，说明旧写法在这个环境里没有产出空树——"
+            "上面的正向测试就没有对照价值了")
+
+
+class TestApplyCodeShippedFallbackPreconditionSurvivesOptimization:
+    """v0.45.312 把 `apply_code_shipped_fallback` 的"调用前 `files` 必须非空"
+    前提改成裸 `assert` 强制；v0.45.317 第三轮复检发现这就是新 bug——本仓
+    生产模块（非 tests/ 下）从无先例用 `assert` 做不变式强制，`probability_
+    scorecard.py` 586-591 行有明文理由：`python -O` 会把 assert 剥掉，一个
+    会被剥掉的不变式，正是"把失败改写成没发生过"。
+
+    真实执行验证（不是读代码猜）：用 `/usr/local/bin/python3 -O` 子进程
+    真跑同一次空 `files` 调用——`assert` 版本在 `-O` 下不抛任何异常、`files`
+    照常被回落结果撑满（v0.45.305/v0.45.310 那个"空 data_root 看起来像有
+    内容"的 bug 原样复活）；`raise ValueError` 版本与解释器优化开关无关，
+    `-O` 下依然抛出。
+    """
+
+    _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _PROBE = (
+        "import report_deployer as rd\n"
+        "files = []\n"
+        "try:\n"
+        "    rd.apply_code_shipped_fallback(files, {}, '/tmp/ah-nonexistent-data-root', '.', 't')\n"
+        "    print('GUARD_DID_NOT_FIRE:' + repr(files))\n"
+        "except (ValueError, AssertionError) as e:\n"
+        "    print('GUARD_FIRED:' + type(e).__name__)\n"
+    )
+
+    def _run_probe(self, extra_args):
+        return subprocess.run(
+            ["/usr/local/bin/python3", *extra_args, "-c", self._PROBE],
+            cwd=self._REPO_ROOT, capture_output=True, text=True,
+        )
+
+    def test_empty_files_raises_value_error_under_normal_python(self):
+        r = self._run_probe([])
+        assert "GUARD_FIRED:ValueError" in r.stdout, (
+            f"当前修复版应在普通解释器下也抛 ValueError；实际 stdout={r.stdout!r} "
+            f"stderr={r.stderr[-500:]!r}")
+
+    def test_empty_files_still_raises_under_python_dash_O(self):
+        """当前修复版（`raise ValueError`）必须在 `-O` 下依然拦得住——
+        这是本次修复真正要保证的东西，不是"正常模式下拦住"这件事本身
+        （那件事旧的 `assert` 版本也做得到）。"""
+        r = self._run_probe(["-O"])
+        assert "GUARD_FIRED:ValueError" in r.stdout, (
+            "python -O 下守卫失效——回到了 v0.45.312 assert 版本的原始 bug："
+            f"stdout={r.stdout!r} stderr={r.stderr[-500:]!r}")
+
+    # v0.45.317 修复本身的最后一个 commit 是 c1aebfe7；它的父提交 61f21d37
+    # 是本次修复前的占位提交，report_deployer.py 在那里仍是 v0.45.312 的裸
+    # assert 版本。**必须钉死这个具体 SHA，不能用 `HEAD`**——首版测试写的是
+    # `git show HEAD:report_deployer.py`，这条前提只在修复提交之前（HEAD 还
+    # 指向父提交时）成立；修复一旦提交、成为新 HEAD，这个断言就永远为假，
+    # 测试永久变红（本条注释本身就是被这个 bug 逮到后改的：main 上实测过，
+    # 提交后立刻用 HEAD 重跑就会失败）。钉 SHA 而不是相对引用，才能让这条
+    # 变异测试在任何时候、任何分支上重跑都还原出同一份历史源码。
+    _OLD_ASSERT_SHA = "61f21d37"
+
+    def test_mutation_old_assert_guard_is_silently_stripped_under_dash_O(self):
+        """变异检验：换回 v0.45.312 的真实旧代码（`assert files, (...)`），
+        证明"-O 下守卫消失"不是臆测——用改动前的真实源码真跑确认转红。"""
+        old_source = subprocess.run(
+            ["git", "show", f"{self._OLD_ASSERT_SHA}:report_deployer.py"],
+            cwd=self._REPO_ROOT, capture_output=True, text=True, check=True,
+        ).stdout
+        assert "assert files, (" in old_source, (
+            f"本条变异测试假定 {self._OLD_ASSERT_SHA} 上 report_deployer.py 是 "
+            "v0.45.312 的裸 assert 版本——如果这条断言失败，说明这个钉死的 SHA "
+            "选错了或历史被改写，该重新核实是哪个提交引入的 bug，而不是让这条"
+            "测试悄悄测不出任何东西")
+        with tempfile.TemporaryDirectory() as tmp:
+            shadow = os.path.join(tmp, "report_deployer.py")
+            with open(shadow, "w", encoding="utf-8") as f:
+                f.write(old_source)
+            env = os.environ.copy()
+            # tmp 排 PYTHONPATH 第一位，确保 `import report_deployer` 命中
+            # 影子（旧代码）版本，不是仓库里的真实文件；同时保留仓库根，
+            # 因为 report_deployer.py 自己还要 `import production_sync`/
+            # `hive_logger`，这两个模块不在影子目录里。
+            env["PYTHONPATH"] = (
+                tmp + os.pathsep + self._REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+            )
+            r = subprocess.run(
+                ["/usr/local/bin/python3", "-O", "-c", self._PROBE],
+                cwd=tmp, capture_output=True, text=True, env=env,
+            )
+        assert "GUARD_DID_NOT_FIRE:" in r.stdout, (
+            "如果这条断言失败，说明旧 assert 写法在这个环境的 -O 下没有被剥掉——"
+            f"上面两条正向测试就没有对照价值了。stdout={r.stdout!r} stderr={r.stderr[-500:]!r}")

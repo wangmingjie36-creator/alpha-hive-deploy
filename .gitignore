@@ -47,7 +47,6 @@ logs/*.jsonl.*
 cache/
 data_cache/
 sec_cache/
-polymarket_cache/
 finviz_cache/
 reddit_cache/
 earnings_cache/

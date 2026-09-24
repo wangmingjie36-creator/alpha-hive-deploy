@@ -47,7 +47,7 @@ Alpha Hive 是一个**去中心化、蜂群智能驱动**的投资研究系统�
 
 ✅ **多源数据融合**
 - SEC 交易披露（Form 4 / 13F）
-- Polymarket 预测市场赔率
+- 期权市场预期（IV / Put-Call / 异常流）
 - X（推特）舆情与情绪分析
 - 财报、事件催化剂、产业竞争格局
 
@@ -113,8 +113,8 @@ Alpha Hive 是一个**去中心化、蜂群智能驱动**的投资研究系统�
 ---
 
 ### 2. 市场预期（Market Expectations）
-🔹 **内容**: 分析师一致预期、Polymarket 赔率
-🔹 **来源**: 彭博、Polymarket、投资平台
+🔹 **内容**: 分析师一致预期、期权隐含预期
+🔹 **来源**: 彭博、期权链、投资平台
 🔹 **关键看点**:
 - 分析师目标价 vs 当前价
 - 共识方向是否一致？
@@ -210,7 +210,7 @@ Alpha Hive 是一个**去中心化、蜂群智能驱动**的投资研究系统�
 | **信号强度** | 30% | 披露 + 基本面的共振程度 |
 | **催化剂清晰度** | 20% | 未来事件触发概率与时间确定性 |
 | **舆情热度** | 20% | X 讨论热度 + 情绪方向 |
-| **赔率错配** | 15% | Polymarket 隐含概率 vs 基本面 |
+| **赔率错配** | 15% | 期权隐含预期 vs 基本面 |
 | **风险调整** | 15% | 波动率、流动性、拥挤度反向调整 |
 
 ### 评分区间
@@ -235,7 +235,7 @@ Alpha Hive 由 6 个专业 Agent 角色协作，每个 Agent 独立采集和分�
 |------|------|---------|---------|
 | **Scout 侦察蜂** | SEC 披露数据采集与核实 | Form 4 / 13F | Signal 维度 |
 | **SentimentBee 情绪蜂** | X 平台舆论分析与量化 | X API / Web Scraping | Sentiment 维度 |
-| **OddsBee 赔率蜂** | Polymarket 市场概率解读 | Polymarket API | Odds 维度 |
+| **OddsBee 赔率蜂** | 期权市场预期解读 | 期权链 | Odds 维度 |
 | **CatalystBee 催化蜂** | 事件时间窗梳理与评估 | 公司公告 / 日历 | Catalyst 维度 |
 | **CrossBee 交叉蜂** | 多源信号共振矩阵构建 | 综合多源 | 一致性验证 |
 | **ValidatorBee 校验蜂** | 事实核实与风险评估 | 所有来源 | 置信度调整 |
@@ -251,7 +251,7 @@ Alpha Hive 由 6 个专业 Agent 角色协作，每个 Agent 独立采集和分�
 ┌─────────────────────────────────────────────────┐
 │ Phase 2: 并行觅食 (Parallel Foraging)           │
 │ → 6 个 Agent 同步采集不同数据源                   │
-│   Scout → SEC | SentimentBee → X | OddsBee → Polymarket
+│   Scout → SEC | SentimentBee → X | OddsBee → 期权
 │   CatalystBee → 事件 | CrossBee → 共振 | ValidatorBee → 校验
 └────────────────┬────────────────────────────────┘
                  ↓
@@ -427,7 +427,6 @@ TSLA:  https://wangmingjie36-creator.github.io/alpha-hive-report/alpha-hive-tsla
 2. **数据风险**
    - SEC 披露可能存在延迟
    - X 舆论可能包含噪音与虚假信息
-   - Polymarket 赔率非实时更新
 
 3. **市场风险**
    - 股票价格波动剧烈，存在本金损失风险
@@ -467,7 +466,6 @@ A: 系统引入了 ValidatorBee 校验流程，所有事实都附有来源。如
 
 ### 投资研究最佳实践
 - SEC EDGAR 数据库使用指南
-- Polymarket 预测市场研究
 - 财报阅读与财务分析基础
 
 ### GitHub Pages 部署

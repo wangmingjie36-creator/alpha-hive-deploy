@@ -82,7 +82,26 @@ def apply_code_shipped_fallback(files: List[str], file_source: Dict[str, str],
     真实报告文件，再调用本函数——见 `deploy_static_to_ghpages`/`_sync_ghpages`
     调用点前那段 v0.45.310 的注释（本函数的回落结果几乎总能命中，不能拿它
     当"这次有没有东西可部署"的判据）。
+
+    v0.45.312：这条前提此前只写在 docstring 里、代码不强制——`/code-review
+    high` 复检指出，把它收进共享函数只是让两个现有调用点"恰好都按对了顺序"，
+    没有让这个前提本身变得不可能被违反。原改成 `assert` 强制，但 v0.45.317
+    第三轮复检发现这本身就是新 bug：`report_deployer.py` 由此成了全仓库
+    **唯一**在生产模块（非 tests/）写裸 `assert` 的文件（`probability_scorecard.py`
+    第 586-591 行早有明文先例："本仓生产模块无此先例……且 `python -O` 会把它
+    剥掉——一个会被剥掉的不变式，正是『把失败改写成没发生过』"）。真实执行
+    验证：`/usr/local/bin/python3 -O` 跑同样的空 `files` 调用，`assert` 被静默
+    剥掉，`files` 照常被回落结果撑满——这道守卫本该防的那个"空 data_root 换个
+    入口复活"的 bug，在 `-O` 下会原样复活，且没有任何东西会红。改用显式
+    `raise`：与解释器优化开关无关，永远生效。
     """
+    if not files:
+        raise ValueError(
+            "apply_code_shipped_fallback 被调用时 files 是空的——调用方必须先判完"
+            "「无文件可部署」的守卫再调用本函数，否则回落几乎总能命中 "
+            "CODE_SHIPPED_STATIC_ASSETS，会让一个空 data_root 看起来像有内容可"
+            "部署（v0.45.305/v0.45.310 修过的那个 bug 的另一个入口）"
+        )
     _repo_fallback = resolve_code_shipped_asset_sources(data_root, repo, file_source)
     for asset, src in _repo_fallback.items():
         files.append(asset)
@@ -306,14 +325,21 @@ def commit_and_push_gh_pages(repo: str, tree: str, message_fn, max_attempts: int
         result["commit"] = commit
         # 非 force：父提交就是 push 前一刻的远端真头，正常情况下天然快进；
         # 竞态时 git 自己会因非快进拒绝，落入下面的重试分支重新 fetch。
-        r = subprocess.run(
-            ["git", "push", "origin", f"{commit}:refs/heads/gh-pages"],
-            cwd=repo, capture_output=True, text=True,
+        # v0.45.312：改经 `_run_git_network` 加超时——`git push` 是这整个函数
+        # 里唯一真正传输对象数据（不只是交换 ref）的网络调用，也是最可能挂起
+        # 的一个；`_run_git_network` 当初只包了 `resolve_gh_pages_parent` 里的
+        # fetch/ls-remote，同一个重试循环里的 push 反而漏了，是`/code-review
+        # high` 复检指出的不一致。
+        r = _run_git_network(
+            ["git", "push", "origin", f"{commit}:refs/heads/gh-pages"], repo,
         )
-        if r.returncode == 0:
+        if r is not None and r.returncode == 0:
             result["success"] = True
             return result
-        result["last_error"] = (r.stderr or "").strip()[:300]
+        result["last_error"] = (
+            (r.stderr or "").strip()[:300] if r is not None
+            else f"push 超时（>{_GH_PAGES_NETWORK_TIMEOUT}s）"
+        )
         if attempt < max_attempts:
             delay = min(2.0 * (2 ** (attempt - 1)), 16.0)
             _log.warning(
@@ -496,14 +522,36 @@ def deploy_static_to_ghpages(reporter):
             ).decode().strip()
             cache_entries.append(f"100644 {blob}\t{f}")
         except (subprocess.CalledProcessError, OSError) as _e_blob:
-            _log.warning("hash-object 失败 (%s): %s", f, _e_blob)
-    if cache_entries:
-        # 用 --index-info 批量更新 index（一次 subprocess 代替 N 次）
-        _idx_input = "\n".join(cache_entries) + "\n"
-        subprocess.run(
-            ["git", "update-index", "--add", "--index-info"],
-            input=_idx_input, env=env, cwd=repo, check=True, text=True
+            # v0.45.312：升级到 error + 🚨——单个文件被 hash-object 拒收意味着
+            # 它这次不会出现在 gh-pages 上，纯 warning 在这仓库的 Slack 精简
+            # 规则下不会触达任何人（同 CODE_SHIPPED_STATIC_ASSETS 缺失那条
+            # 分支的理由）。
+            _log.error("🚨 hash-object 失败 (%s)：本次部署不含该文件 —— %s", f, _e_blob)
+    # v0.45.312 修复（`/code-review high` 对本文件抽出的 `_sync_ghpages` 逐文件
+    # 容错做二次复检时，真实执行发现的严重回归——**不是**这次改动本身引入的
+    # 新代码，是这段已存在的批量 hash-object 逻辑一直缺这道守卫）：
+    # `cache_entries` 全空时（比如磁盘满/`.git/objects` 权限损坏导致每个
+    # hash-object 都失败）此前直接落到下面 `write-tree`——`GIT_INDEX_FILE`
+    # 指向一个从没写过内容的空 index，`git write-tree` 会返回 git 那个
+    # 众所周知的**空树**哈希，`commit_and_push_gh_pages` 照样把这棵空树提交
+    # 推送上去，把 gh-pages **整站清空**、日志却打印"部署成功"。真实执行复现：
+    # mock 全部文件的 hash-object 抛错，线上内容从 `['index.html']` 变成 `[]`，
+    # 日志印"gh-pages 部署成功 (1 静态文件...)"。
+    if not cache_entries:
+        _log.error(
+            "🚨 全部 %d 个候选文件 hash-object 均失败，无内容可提交——跳过本次部署，"
+            "保留线上原内容（不能把 gh-pages 推成空树）",
+            len(files),
         )
+        if os.path.exists(idx):
+            os.remove(idx)
+        return
+    # 用 --index-info 批量更新 index（一次 subprocess 代替 N 次）
+    _idx_input = "\n".join(cache_entries) + "\n"
+    subprocess.run(
+        ["git", "update-index", "--add", "--index-info"],
+        input=_idx_input, env=env, cwd=repo, check=True, text=True
+    )
     tree = subprocess.check_output(
         ["git", "write-tree"], env=env, cwd=repo
     ).decode().strip()
@@ -548,7 +596,11 @@ def deploy_static_to_ghpages(reporter):
     if _push["success"]:
         _log.info(
             "gh-pages 部署成功 (%d 静态文件, attempt %d, commit %s)",
-            len(files), _push["attempts"], (_push["commit"] or "")[:7],
+            # v0.45.312：用 len(cache_entries)（实际写进树里的），不是
+            # len(files)（候选数）——`if not cache_entries` 早退之后走到这里
+            # 说明至少有一个候选跳过了个别 hash-object 失败的文件，「N 静态
+            # 文件部署成功」不该把跳过的也算进去。
+            len(cache_entries), _push["attempts"], (_push["commit"] or "")[:7],
         )
         # ── D4: 部署后 CDN 验证 ──
         verify_cdn_deployment(reporter, data_root)

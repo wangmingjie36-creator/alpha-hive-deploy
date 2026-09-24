@@ -131,7 +131,7 @@ def _cleanup_stale_data(project_dir: Optional[Path] = None, max_cache_days: int 
 
     # 1. 缓存目录：删除 >max_cache_days 天的文件
     cache_dirs = [
-        "cache", "data_cache", "sec_cache", "polymarket_cache",
+        "cache", "data_cache", "sec_cache",
         "finviz_cache", "reddit_cache", "earnings_cache",
     ]
     for dirname in cache_dirs:
@@ -182,7 +182,6 @@ def _cleanup_stale_data(project_dir: Optional[Path] = None, max_cache_days: int 
 def _run_scan(tickers: list[str]) -> None:
     """执行完整蜂群扫描"""
     from alpha_hive_daily_report import AlphaHiveDailyReporter
-    from slack_report_notifier import SlackReportNotifier
 
     start_time = time.time()
     print(f"\nAlpha Hive 蜂群启动 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -190,8 +189,9 @@ def _run_scan(tickers: list[str]) -> None:
     # 启动前清理过期数据
     _cleanup_stale_data()
 
+    # v0.45.341：此处曾 `notifier = SlackReportNotifier()` 却从不使用 —— 构造本身
+    # 就对已 404 的 webhook 发一次 HEAD。扫描结果不发 Slack（CLAUDE.md「Slack 通知精简规则」）。
     reporter = AlphaHiveDailyReporter()
-    notifier = SlackReportNotifier()
 
     print(f"扫描标的: {', '.join(tickers)}\n")
 

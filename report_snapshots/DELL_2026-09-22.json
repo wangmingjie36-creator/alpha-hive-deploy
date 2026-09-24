@@ -1,0 +1,44 @@
+{
+  "ticker": "DELL",
+  "date": "2026-09-22",
+  "composite_score": 4.89,
+  "direction": "bearish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 548.92,
+  "agent_votes": {
+    "BuzzBeeWhisper": 4.02,
+    "CodeExecutorAgent": 6.5,
+    "ChronosBeeHorizon": 5.62,
+    "OracleBeeEcho": 6.18,
+    "ScoutBeeNova": 6.4,
+    "RivalBeeVanguard": 5.99,
+    "GuardBeeSentinel": 6.25,
+    "BearBeeContrarian": 2.25,
+    "QueenDistiller": 4.89
+  },
+  "agent_votes_source": "agent_details",
+  "weights_used": {
+    "signal": 0.0,
+    "catalyst": 0.332,
+    "sentiment": 0.325,
+    "odds": 0.343,
+    "risk_adj": 0.0
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.069,
+    "signal": 0.828,
+    "catalyst": 0.517,
+    "sentiment": 0.241,
+    "odds": 0.241,
+    "risk_adj": 0.69
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-09-22T14:45:50.754643"
+}

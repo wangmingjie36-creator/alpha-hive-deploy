@@ -119,7 +119,23 @@ class CircuitBreaker:
             self._failure_count = 0
 
     def record_failure(self):
-        """记录失败调用（连续 N 次失败触发告警）"""
+        """记录失败调用（连续 N 次失败 → OPEN，并写一条 WARNING 日志）。
+
+        v0.45.339：熔断**只写日志，不发 Slack**。此前这里（持锁状态下）调
+        `SlackReportNotifier().send_risk_alert(...)`，两个问题：
+
+        1. 违反 CLAUDE.md「Slack 通知精简规则」（数据源降级 / SLO 类告警只进日志）；
+        2. **自死锁**：`self._lock` 是不可重入的 `threading.Lock`，而发送路径
+           `_send_slack_message` 会回头调 `slack_breaker.allow_request()` →
+           `state` → `with self._lock`。当熔断的恰好是 `slack_breaker` 本身
+           （Slack 连续 3 次网络失败）时，线程在自己持有的锁上永久阻塞；
+           之后任何经过这把锁的调用都跟着卡住。隔离复现（网络全桩）：线程 5 秒
+           未返回。生产日志 4 次 `CircuitBreaker[slack] -> OPEN`（08-28、09-21
+           的 Step 2 与 Step 3）之后，扫描进程都是**一行日志不再打、直到被编排器
+           超时杀掉**——与死锁吻合；生产侧因果未取线程转储，待验证。
+
+        守卫：`tests/test_slack_send_whitelist.py`（静态白名单 + 本函数的死锁回归）。
+        """
         with self._lock:
             self._failure_count += 1
             self._last_failure_time = time.monotonic()
@@ -129,18 +145,6 @@ class CircuitBreaker:
                         "CircuitBreaker[%s] -> OPEN (failures=%d)",
                         self.name, self._failure_count,
                     )
-                    # #18: 连续失败告警 → 尝试 Slack 通知（跳过测试用熔断器）
-                    if "test" not in self.name.lower():
-                        try:
-                            from slack_report_notifier import SlackReportNotifier
-                            _sn = SlackReportNotifier()
-                            _sn.send_risk_alert(
-                                f"数据源 {self.name} 连续失败",
-                                f"CircuitBreaker 熔断：连续 {self._failure_count} 次失败",
-                                severity="HIGH",
-                            )
-                        except (ImportError, OSError, ValueError):
-                            pass
                 self._state = self.OPEN
 
     def reset(self):
@@ -231,7 +235,6 @@ _sessions_lock = threading.Lock()
 # 每个 source 的默认超时（秒）
 _SOURCE_TIMEOUTS = {
     "sec_edgar": 15,
-    "polymarket": 15,
     "reddit": 15,
     "slack": 20,
     "default": 15,
@@ -309,10 +312,6 @@ def singleton_client(lock: threading.Lock, factory, cache: dict, key: str = "_in
 # SEC EDGAR: 10 req/s（留 30% 余量防 429）
 sec_limiter = RateLimiter(rate=6.0, burst=2)
 sec_breaker = CircuitBreaker("sec_edgar", failure_threshold=6, recovery_timeout=120.0)
-
-# Polymarket: 保守 2 req/s
-polymarket_limiter = RateLimiter(rate=2.0, burst=2)
-polymarket_breaker = CircuitBreaker("polymarket", failure_threshold=5, recovery_timeout=60.0)
 
 # yfinance: 0.5 req/s（v0.45.56 从 3.0 下调）
 #

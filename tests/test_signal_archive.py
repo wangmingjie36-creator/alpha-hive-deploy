@@ -151,22 +151,24 @@ class TestStorage:
 
 
 class TestAnalysisPanel:
-    def test_panel_uses_pure_price_return(self, tmp_path):
-        """前瞻收益必须用纯价格变动，而非 return_t7 列。
+    def test_panel_uses_close_t7_not_return_t7_nor_price_t7(self, tmp_path):
+        """前瞻收益必须用未截断收盘价 close_t7，return_t7 与 price_t7 都不行。
 
-        return_t7 是路径依赖收益（触 SL/TP 提前出场），42.5% 的行被档位截断，
-        会制造大量并列值破坏 rank-IC 尾部排序。
+        return_t7 是路径依赖收益（触 SL/TP 提前出场），被档位截断。
+        ⚠️ v0.45.321 更正：本测试原名 `test_panel_uses_pure_price_return`，断言用 price_t7
+        算出的 10% ——那正是 bug 本身。price_t7 = exit_price，同样截断（见
+        ic_diagnostics.FORWARD_CLOSE_COL；符号相反的回归夹具在 test_signal_archive_close_target）。
         """
         db = tmp_path / "p.db"
         con = sqlite3.connect(db)
         con.execute("""CREATE TABLE predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, ticker TEXT,
-            price_at_predict REAL, price_t7 REAL, return_t7 REAL,
+            price_at_predict REAL, price_t7 REAL, return_t7 REAL, close_t7 REAL,
             checked_t7 INTEGER DEFAULT 0)""")
-        # return_t7 故意与真实价格变动不符（模拟止盈档位）
+        # 止盈离场：price_t7 = 离场价 110、return_t7 = 钳位值 9.945、收盘 105
         con.execute("INSERT INTO predictions (date,ticker,price_at_predict,"
-                    "price_t7,return_t7,checked_t7) VALUES "
-                    "('2026-03-02','A',100.0,110.0,9.945,1)")
+                    "price_t7,return_t7,close_t7,checked_t7) VALUES "
+                    "('2026-03-02','A',100.0,110.0,9.945,105.0,1)")
         con.commit()
         con.close()
         sa.ensure_schema(db)
@@ -174,8 +176,8 @@ class TestAnalysisPanel:
 
         panel = sa.load_panel(db, "t7", min_width=1)
         vals = panel["composite.final_score"]["2026-03-02"]
-        assert vals[0][1] == pytest.approx(10.0), \
-            "应使用 (110-100)/100=10%，而非 return_t7 的 9.945"
+        assert vals[0][1] == pytest.approx(5.0), \
+            "应使用 (105-100)/100=5%，而非离场价 110 或 return_t7 的 9.945"
 
 
 class TestBackfill:
@@ -347,9 +349,9 @@ class TestFixedVsTimeVaryingDecomposition:
         con = sqlite3.connect(db)
         con.execute("""CREATE TABLE predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, ticker TEXT,
-            price_at_predict REAL, price_t7 REAL, checked_t7 INTEGER DEFAULT 0)""")
+            price_at_predict REAL, close_t7 REAL, checked_t7 INTEGER DEFAULT 0)""")
         con.execute("INSERT INTO predictions (date,ticker,price_at_predict,"
-                    "price_t7,checked_t7) VALUES ('2026-03-02','A',100.0,110.0,1)")
+                    "close_t7,checked_t7) VALUES ('2026-03-02','A',100.0,110.0,1)")
         con.commit(); con.close()
         sa.ensure_schema(db)
         sa.archive({"A": _tr()}, "2026-03-02", db)
@@ -457,9 +459,9 @@ class TestVolatilityTarget:
         con = sqlite3.connect(db)
         con.execute("""CREATE TABLE predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, ticker TEXT,
-            price_at_predict REAL, price_t7 REAL, checked_t7 INTEGER DEFAULT 0)""")
+            price_at_predict REAL, close_t7 REAL, checked_t7 INTEGER DEFAULT 0)""")
         con.execute("INSERT INTO predictions (date,ticker,price_at_predict,"
-                    "price_t7,checked_t7) VALUES ('2026-03-02','A',100.0,110.0,1)")
+                    "close_t7,checked_t7) VALUES ('2026-03-02','A',100.0,110.0,1)")
         con.commit(); con.close()
         sa.ensure_schema(db)
         sa.archive({"A": _tr()}, "2026-03-02", db)
@@ -473,9 +475,9 @@ class TestVolatilityTarget:
         con = sqlite3.connect(db)
         con.execute("""CREATE TABLE predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, ticker TEXT,
-            price_at_predict REAL, price_t7 REAL, checked_t7 INTEGER DEFAULT 0)""")
+            price_at_predict REAL, close_t7 REAL, checked_t7 INTEGER DEFAULT 0)""")
         con.execute("INSERT INTO predictions (date,ticker,price_at_predict,"
-                    "price_t7,checked_t7) VALUES ('2026-03-02','A',100.0,110.0,1)")
+                    "close_t7,checked_t7) VALUES ('2026-03-02','A',100.0,110.0,1)")
         con.commit(); con.close()
         sa.ensure_schema(db)
         sa.archive({"A": _tr()}, "2026-03-02", db)

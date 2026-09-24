@@ -170,8 +170,15 @@ def _detect_sentiment_price_divergence(
 
 def _check_sentiment_spike(ticker: str, current_pct: int, today: str) -> Optional[str]:
     """
-    对比当日情绪与 30 天基线，偏差 >THRESHOLD 时触发 Slack 告警。
+    对比当日情绪与 30 天基线，偏差 >THRESHOLD 时写一条 WARNING 日志。
     返回告警描述字符串（无告警时返回 None）。
+
+    v0.45.339：**只写日志，不发 Slack。** 此前这里在 `n.enabled` 时调
+    `send_risk_alert` —— 而 `enabled = bool(user_token) or webhook_alive`，
+    本机有 Bot Token ⇒ 恒真；Bot 不在 #alpha-hive ⇒ `not_in_channel` 降级成
+    **私信用户**（生产日志实测 6 条：CRM / DELL×2 / VKTX / RKLB / MU）。
+    CLAUDE.md「Slack 通知精简规则」明令禁止逐标的预警；守卫
+    `tests/test_slack_send_whitelist.py`。
     """
     baseline = _get_sentiment_baseline(ticker, days=30)
     if baseline is None:
@@ -186,15 +193,4 @@ def _check_sentiment_spike(ticker: str, current_pct: int, today: str) -> Optiona
         f"30日均值 {baseline:.1f}%，偏差 {delta:+.1f}ppt"
     )
     _log.warning("📡 情绪突变告警 %s", msg)
-    try:
-        from slack_report_notifier import SlackReportNotifier
-        n = SlackReportNotifier()
-        if getattr(n, "enabled", False):
-            n.send_risk_alert(
-                alert_title=f"{ticker} 情绪突变告警",
-                alert_message=msg,
-                severity="HIGH" if abs(delta) >= 30 else "MEDIUM",
-            )
-    except Exception as _se:
-        _log.debug("Slack 情绪突变告警发送失败: %s", _se)
     return msg

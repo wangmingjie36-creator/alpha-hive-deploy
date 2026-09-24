@@ -186,7 +186,6 @@ class TestSpeciesDoesNotSpread:
         # 中危：缓存目录，会往 checkout 根目录写缓存
         ("earnings_watcher.py", "CACHE_DIR"),
         ("sec_edgar.py", "CACHE_DIR"),
-        ("polymarket_client.py", "CACHE_DIR"),
         ("newsapi_client.py", "_CACHE_DIR"),
         ("edgar_rss.py", "_CACHE_PATH"),
         # v0.45.233: ("pead_analyzer.py", "_CACHE_DIR") 已摘除——改为调用时的 `_cache_dir()`。
@@ -541,8 +540,8 @@ class TestFileDerivedSpeciesDoesNotSpread:
         # 零读者被删，`ALLOWED_ROOTS` 随之消失。⚠️ 摘它**不是**因为有测试变红：
         # 子集语义下清干净不会红，它会静默变成过期项。是按本类 docstring 的对账法
         # （`KNOWN - _scan(marker="__file__")` 非空即过期）手动揪出来的。
-        ("gui/app.py", "_PROJECT_ROOT"),              # sys.path
-        ("scheduler.py", "_PROJECT_ROOT"),            # scheduler.log
+        # v0.45.316: ("gui/app.py", "_PROJECT_ROOT") / ("scheduler.py", "_PROJECT_ROOT")
+        # 已摘除——两个模块作为死代码整体删除（子集语义下留着不会红，只会静默过期）。
         # ── D. 未清，已登记（读多写少 / 牵动面大）──
         # v0.45.233: ("pead_analyzer.py", "_CACHE_DIR") 已摘除——except 兜底挪进调用时的 `_cache_dir()`。
         # v0.45.260（数据根迁移阶段 2）已摘除两条——**不是因为这里变红**（子集语义
@@ -841,9 +840,6 @@ class TestFrozenViaModuleLevelCall:
     静态扫描分不出「冻住」与「每次重新求值」——那由逐条理由和行为测试承担。
 
     不在管辖内（记账，不是漏看）：
-      · `scheduler.py:26` 模块级 `basicConfig(handlers=[FileHandler(<_PROJECT_ROOT>/…)])`：
-        没调本模块函数；它的冻结输入 `_PROJECT_ROOT` 已在
-        `TestFileDerivedSpeciesDoesNotSpread.KNOWN`。pytest 下 root 已有 handler，空操作。
       · 模块级裸表达式**直接**含标记：v0.45.244 实测 `PATHS` 0 处；`__file__` 5 处，
         全是 `sys.path.insert`（代码锚点，正确）。未加扫描。
       · 别的模块的函数、`Cls.static()`、继承来的构造器、`import PATHS as 别名`：不跟。

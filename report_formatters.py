@@ -770,9 +770,6 @@ def _build_data_quality_section(sorted_results) -> List[str]:
     degraded: Dict[str, List[str]] = {}   # "Agent.channel" -> [tickers]
     total_ch = 0
     real_ch = 0
-    # 设计性缺失通道不算降级（Polymarket 自 v0.45.30 已关闭，见 config.POLYMARKET_ENABLED；
-    # 权重在 oracle_bee 侧自动重归一化，不掺常数）
-    _by_design = {"polymarket"}
     for ticker, r in sorted_results:
         dq = r.get("data_quality") or {}
         if not isinstance(dq, dict):
@@ -781,8 +778,6 @@ def _build_data_quality_section(sorted_results) -> List[str]:
             if not isinstance(chans, dict):
                 continue
             for ch, v in chans.items():
-                if ch in _by_design:
-                    continue
                 total_ch += 1
                 if str(v).lower() in _DEGRADED_CHANNEL_STATES:
                     degraded.setdefault(f"{agent}.{ch}", []).append(ticker)

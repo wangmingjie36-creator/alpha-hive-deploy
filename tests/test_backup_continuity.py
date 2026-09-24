@@ -160,12 +160,89 @@ class TestAssess:
         _write_jsonl(p, [{"date": "2026-08-12", "stage": "done", "ok": True}])
         res = assess(history_path=p, since="2026-08-10", end="2026-08-14")
         assert res["window"]["start"] == "2026-08-10"
-        assert res["window"]["trading_days"] == 5
+
+    # ── issue 5（二次检查 2026-09-21）：默认窗口不能早于上线日 ──────────
+
+    def test_default_window_floors_at_earliest_history_record(self, tmp_path):
+        """复现场景：09-18 首跑，此后每个交易日都真实成功，但默认 `--days 30`
+        的窗口会把上线前（系统根本不存在）的日子也算进覆盖率分母，天天误报
+        "降级"。窗口起点必须收紧到历史里最早一条记录的日期。"""
+        days = recent_trading_days(60, end=_d("2026-09-22"))
+        launch = "2026-09-18"
+        since_launch = [d for d in days if d.isoformat() >= launch]
+        p = tmp_path / "h.jsonl"
+        _write_jsonl(p, [{"date": d.isoformat(), "stage": "done", "ok": True} for d in since_launch])
+
+        res = assess(history_path=p, days=30, end="2026-09-22")
+        assert res["window"]["start"] == launch, (
+            "窗口起点应该被收紧到上线日，而不是默认的 30 个交易日前")
+        assert res["window"]["trading_days"] == len(since_launch)
+        assert res["coverage"] == 1.0
+        assert res["healthy"] is True
+        assert alert_line(res) is None
+
+    def test_default_window_floor_does_not_hide_real_gaps_after_launch(self, tmp_path):
+        """上线日下限不能变成"只要有过一次成功就永远健康"——上线之后如果真的
+        又开始漏，还是要能被发现。"""
+        days = recent_trading_days(60, end=_d("2026-09-22"))
+        launch = "2026-09-18"
+        since_launch = [d for d in days if d.isoformat() >= launch]
+        p = tmp_path / "h.jsonl"
+        # 只记上线当天成功，之后（哪怕只差最后一天）全部漏了
+        _write_jsonl(p, [{"date": since_launch[0].isoformat(), "stage": "done", "ok": True}])
+
+        res = assess(history_path=p, days=30, end="2026-09-22")
+        assert res["window"]["start"] == launch
+        if len(since_launch) > 1:
+            assert res["healthy"] is False, "上线后真的又开始漏，不该被下限掩盖"
+
+    def test_default_window_floor_does_not_extend_window_when_history_predates_it(self, tmp_path):
+        """下限只收紧、不放宽——历史比 `days` 窗口更早时（早就上线很久了），
+        窗口起点仍是"days 个交易日前"，不会因为历史更长就把窗口拉大。"""
+        days = recent_trading_days(30, end=_d("2026-08-14"))
+        p = tmp_path / "h.jsonl"
+        # 历史记录早于窗口起点很久（比如上线已经半年），加一条很老的成功记录
+        old_record = {"date": "2020-01-02", "stage": "done", "ok": True}
+        _write_jsonl(p, [old_record] + [
+            {"date": d.isoformat(), "stage": "done", "ok": True} for d in days
+        ])
+        res = assess(history_path=p, days=10, end="2026-08-14")
+        expected_days = recent_trading_days(10, end=_d("2026-08-14"))
+        assert res["window"]["start"] == expected_days[0].isoformat(), (
+            "历史比窗口更早时，窗口起点不该被那条更老的记录拉远"
+        )
+        assert res["window"]["trading_days"] == 10
+
+    def test_since_explicit_override_is_not_floored(self, tmp_path):
+        """显式传 `--since` 是调用方主动选择的窗口起点，不做上线日下限收紧——
+        哪怕这个起点比历史里最早的记录还早（比如想看看上线前的空窗期）。"""
+        p = tmp_path / "h.jsonl"
+        _write_jsonl(p, [{"date": "2026-09-18", "stage": "done", "ok": True}])
+        res = assess(history_path=p, since="2026-09-01", end="2026-09-22")
+        assert res["window"]["start"] == "2026-09-01", "显式 since 不该被下限收紧"
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # 退出码——编排器 Step 15 唯一的判据
 # ────────────────────────────────────────────────────────────────────────────
+
+def _degraded_history_records():
+    """「10 个交易日只成功 1 天」这个降级场景专用的记录集。
+
+    v0.45.307 给 `assess()` 加了"上线日下限"后（见 issue 5 修复），只写窗口
+    最后一天的单条健康记录会被判成"这就是第一次跑、上线当天 100% 健康"，
+    不再是这组测试想测的"稀疏覆盖=降级"——`TestAssess`/`TestExitCodes` 里
+    多处曾用这个单记录写法（回归测试 `test_degraded_returns_1` 实测因此从
+    rc=1 变成 rc=0）。这里在窗口第一天额外补一条失败记录，把"历史里最早
+    记录的日期"钉在窗口起点，不让下限收紧窗口，覆盖率仍是 2/10=20%，
+    远低于 80% 门槛，维持"降级"这个测试意图。
+    """
+    days = recent_trading_days(10, end=_d("2026-08-14"))
+    return [
+        {"date": days[0].isoformat(), "stage": "push", "ok": False},
+        {"date": "2026-08-14", "stage": "done", "ok": True},
+    ]
+
 
 class TestExitCodes:
     """同 `scan_continuity.py`：3 是编排器 `run_step()` 保留给「脚本不存在」
@@ -191,7 +268,7 @@ class TestExitCodes:
 
     def test_degraded_returns_1(self, monkeypatch, tmp_path):
         p = tmp_path / "h.jsonl"
-        _write_jsonl(p, [{"date": "2026-08-14", "stage": "done", "ok": True}])
+        _write_jsonl(p, _degraded_history_records())
         rc = self._run(monkeypatch, [
             "--history", str(p), "--days", "10", "--end", "2026-08-14", "--quiet",
         ])
@@ -199,7 +276,7 @@ class TestExitCodes:
 
     def test_json_mode_preserves_exit_code(self, monkeypatch, tmp_path, capsys):
         p = tmp_path / "h.jsonl"
-        _write_jsonl(p, [{"date": "2026-08-14", "stage": "done", "ok": True}])
+        _write_jsonl(p, _degraded_history_records())
         rc = self._run(monkeypatch, [
             "--history", str(p), "--days", "10", "--end", "2026-08-14", "--json",
         ])
@@ -212,7 +289,7 @@ class TestExitCodes:
 
     def test_out_writes_json_file_and_keeps_exit_code(self, monkeypatch, tmp_path):
         p = tmp_path / "h.jsonl"
-        _write_jsonl(p, [{"date": "2026-08-14", "stage": "done", "ok": True}])
+        _write_jsonl(p, _degraded_history_records())
         out = tmp_path / "cont.json"
         rc = self._run(monkeypatch, [
             "--history", str(p), "--days", "10", "--end", "2026-08-14", "--quiet",
@@ -225,7 +302,7 @@ class TestExitCodes:
 
     def test_out_failure_does_not_change_verdict(self, monkeypatch, tmp_path):
         p = tmp_path / "h.jsonl"
-        _write_jsonl(p, [{"date": "2026-08-14", "stage": "done", "ok": True}])
+        _write_jsonl(p, _degraded_history_records())
         bad = tmp_path / "no_such_dir" / "cont.json"
         rc = self._run(monkeypatch, [
             "--history", str(p), "--days", "10", "--end", "2026-08-14", "--quiet",
@@ -236,7 +313,7 @@ class TestExitCodes:
 
     def test_slack_flag_does_not_send(self, monkeypatch, tmp_path):
         p = tmp_path / "h.jsonl"
-        _write_jsonl(p, [{"date": "2026-08-14", "stage": "done", "ok": True}])
+        _write_jsonl(p, _degraded_history_records())
         rc = self._run(monkeypatch, [
             "--history", str(p), "--days", "10", "--end", "2026-08-14", "--quiet", "--slack",
         ])

@@ -50,7 +50,8 @@ except ImportError:
     CodeExecutorAgent = None
     CODE_EXECUTION_CONFIG = {"enabled": False}
 
-SlackReportNotifier = optional_import("slack_report_notifier", "SlackReportNotifier")
+# v0.45.339：此处不再 import SlackReportNotifier —— 本模块唯一的 Slack 发送是
+# 财报更新通知（CLAUDE.md「Slack 通知精简规则」白名单之外），已改为只写日志。
 EarningsWatcher = optional_import("earnings_watcher", "EarningsWatcher")
 
 # Phase 3 内存优化: 向量记忆层（含 fallback dict，保留 try/except）
@@ -398,14 +399,6 @@ class AlphaHiveDailyReporter:
                 self.earnings_watcher = EarningsWatcher()
             except (OSError, ValueError, RuntimeError) as e:
                 _log.warning("EarningsWatcher 初始化失败: %s", e)
-
-        # Phase 3 P6: 初始化 Slack 报告通知器（替代 Gmail）
-        self.slack_notifier = None
-        if SlackReportNotifier:
-            try:
-                self.slack_notifier = SlackReportNotifier()
-            except (OSError, ValueError, RuntimeError, ConnectionError) as e:
-                _log.warning("Slack 通知器初始化失败: %s", e)
 
         # Phase 2: 共享线程池（替代所有 daemon 线程，退出时等待完成）
         import atexit
@@ -1196,15 +1189,6 @@ class AlphaHiveDailyReporter:
                     stored += 1
             if stored > 0:
                 _log.info("已存入 %d 条长期记忆 (Chroma)", stored)
-
-        # Slack 重试
-        if self.slack_notifier and self.slack_notifier.enabled:
-            try:
-                retried = self.slack_notifier.retry_failed()
-                if retried:
-                    _log.info("Slack 重试成功 %d 条", retried)
-            except Exception as e:
-                _log.debug("Slack 重试失败: %s", e)
 
         # 反馈循环快照
         try:
@@ -2000,8 +1984,10 @@ class AlphaHiveDailyReporter:
 
         result = self.earnings_watcher.check_and_update(tickers, report_path)
 
-        # 如果有更新，通过 Slack 发送通知
-        if result.get("updated") and self.slack_notifier and self.slack_notifier.enabled:
+        # 有更新就逐只写一条 INFO 日志。v0.45.339 起**不再发 Slack**（此前走
+        # send_opportunity_alert）：CLAUDE.md「Slack 通知精简规则」只允许 LLM 模式确认
+        # 与富文本日报两类，逐标的通知不在其内。守卫 tests/test_slack_send_whitelist.py。
+        if result.get("updated"):
             for ticker in result["updated"]:
                 ed = result["earnings_data"].get(ticker, {})
                 rev = ed.get("revenue_actual")
@@ -2017,16 +2003,8 @@ class AlphaHiveDailyReporter:
                 if eps is not None:
                     msg_parts.append(f"EPS ${eps:.2f}")
 
-                try:
-                    self.slack_notifier.send_opportunity_alert(
-                        ticker,
-                        0,  # score placeholder
-                        "财报更新",
-                        " | ".join(msg_parts),
-                        ["自动抓取", f"完整度: {ed.get('data_completeness', 'N/A')}"]
-                    )
-                except (OSError, ValueError, RuntimeError) as e:
-                    _log.warning("Slack 财报通知发送失败: %s", e)
+                msg_parts.append(f"完整度: {ed.get('data_completeness', 'N/A')}")
+                _log.info("📊 财报更新 %s", " | ".join(msg_parts))
 
         return result
 

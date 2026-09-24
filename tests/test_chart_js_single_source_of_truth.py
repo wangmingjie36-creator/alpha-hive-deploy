@@ -25,7 +25,11 @@ class TestServiceWorkerPrecacheFollowsConstant:
         rwa.write_pwa_files(reporter)
         sw_content = (tmp_path / "sw.js").read_text(encoding="utf-8")
         assert rd.CHART_JS_FILENAME in sw_content
-        assert f"'{rd.CHART_JS_FILENAME}'" in sw_content, (
+        # v0.45.312：改用 json.dumps() 生成（双引号）而不是 Python repr()
+        # （单引号）——两者都是合法 JS 字符串字面量，这里不锁死引号风格，只
+        # 锁住"是一个带引号的字符串字面量，不是裸文件名"这件事。
+        assert (f"'{rd.CHART_JS_FILENAME}'" in sw_content
+                or f'"{rd.CHART_JS_FILENAME}"' in sw_content), (
             "预缓存清单里应该是一个带引号的 JS 字符串字面量")
 
     def test_mutation_sw_js_precache_follows_renamed_constant(self, tmp_path, monkeypatch):

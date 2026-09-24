@@ -8,6 +8,8 @@ Bot Token (xoxb-) 仅保留用于 DM 交互式通知（pre_scan_notify.py）。
 
 原因：Bot Token 未被邀请进 #alpha-hive 频道，自动降级到 DM，
 与频道推送意图不符。Slack MCP 使用用户账号，天然有频道权限。
+（v0.45.343 起那条自动降级已删：Bot 不在频道时 `--force` 直接失败、exit 1，
+不再把日报改发私信后照记「已推送到 #alpha-hive」。）
 
 此脚本保留供手动调试用途；orchestrator Step 7 调用时直接返回 2（跳过），
 orchestrator 日志会显示"Step 7 跳过（Slack 推送由 Claude Code MCP 手动执行）"。

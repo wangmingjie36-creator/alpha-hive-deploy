@@ -2260,9 +2260,6 @@ def render_dashboard_html(report: Dict, date_str: str,
     try:
         _dqb_states = {"unavailable", "fallback", "sample", "error",
                        "fallback_momentum", "cached_stale", "stale"}
-        # 设计性缺失通道不算降级：Polymarket 无个股预测市场（OracleBee 已自动
-        # 重分配权重），计入会让横幅永久常亮变成噪音
-        _dqb_by_design = {"polymarket"}
         _dqb_degraded: Dict[str, list] = {}
         for _dqb_t, _dqb_r in swarm_detail.items():
             _dqb_dq = _dqb_r.get("data_quality") or {}
@@ -2272,8 +2269,6 @@ def render_dashboard_html(report: Dict, date_str: str,
                 if not isinstance(_dqb_chans, dict):
                     continue
                 for _dqb_ch, _dqb_v in _dqb_chans.items():
-                    if _dqb_ch in _dqb_by_design:
-                        continue
                     if str(_dqb_v).lower() in _dqb_states:
                         _dqb_degraded.setdefault(f"{_dqb_agent}.{_dqb_ch}", []).append(_dqb_t)
         _dqb_avg = (sum(real_pcts) / len(real_pcts)) if real_pcts else 100.0

@@ -51,7 +51,6 @@ import ast
 import json
 import logging
 import math
-import os
 import random
 import re
 import sys
@@ -61,62 +60,87 @@ from typing import Optional
 
 _log = logging.getLogger("alpha_hive.weekly_optimizer")
 
-# ── 路径配置（与 generate_deep_v2.py 保持一致）─────────────────────────────
-# v0.10.1 修复：VM 路径硬编码旧 session（keen-magical-wright）导致新 session
-# 找不到 snapshots 目录。改为 glob 动态扫描，任意 Cowork session 都能工作。
-ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))
-import glob as _glob_mod
-_VM_SESSIONS = sorted(_glob_mod.glob("/sessions/*/mnt/Alpha Hive"), reverse=True)
-_VM_PATH = Path(_VM_SESSIONS[0]) if _VM_SESSIONS else Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
-try:
-    if _VM_PATH.exists():
-        ALPHAHIVE_DIR = _VM_PATH
-except PermissionError:
-    pass
-
-_VM_DEEP_SESSIONS = sorted(_glob_mod.glob("/sessions/*/mnt/深度分析报告/深度"), reverse=True)
-_VM_DEEP_DIR = Path(_VM_DEEP_SESSIONS[0]) if _VM_DEEP_SESSIONS else Path("/sessions/keen-magical-wright/mnt/深度分析报告/深度")
-try:
-    if _VM_DEEP_DIR.exists():
-        OUTPUT_DIR = _VM_DEEP_DIR
-    else:
-        OUTPUT_DIR = Path(os.path.expanduser("~/Desktop/深度分析报告/深度"))
-except PermissionError:
-    OUTPUT_DIR = Path(os.path.expanduser("~/Desktop/深度分析报告/深度"))
-
-# v0.23.6 修复：始终优先用 Alpha Hive 项目目录的 snapshots（数据最完整）
-# 旧实现 OUTPUT_DIR/report_snapshots 即使存在也用（即使只有 28 个旧快照），
-# 导致 weekly_optimizer 跑时只看到 28 笔样本而非 Alpha Hive 实际的 245 笔。
-# 选择策略：取两者中文件数较多的（生产中 Alpha Hive 一定多于深度分析报告）。
-def _best_snapshots_dir() -> Path:
-    candidates = []
-    for p in [ALPHAHIVE_DIR / "report_snapshots", OUTPUT_DIR / "report_snapshots"]:
-        try:
-            if p.exists():
-                n = len(list(p.glob("*.json")))
-                candidates.append((n, p))
-        except (OSError, PermissionError):
-            pass
-    if not candidates:
-        return ALPHAHIVE_DIR / "report_snapshots"  # 兜底（即使不存在）
-    # 取样本数最多的目录
-    candidates.sort(reverse=True)
-    return candidates[0][1]
-_candidate_snapshots = _best_snapshots_dir()
-
-CONFIG_PATH    = ALPHAHIVE_DIR / "config.py"
-SNAPSHOTS_DIR  = _candidate_snapshots
-HISTORY_FILE   = ALPHAHIVE_DIR / "weight_history.jsonl"
-PHEROMONE_DB_PATH = ALPHAHIVE_DIR / "pheromone.db"
+# ── 路径配置：数据走 PATHS（调用时求值），代码锚 `__file__`（数据根迁移阶段 5 前置）──
+# 此前 `ALPHAHIVE_DIR = ~/Desktop/Alpha Hive`（字面量，另加 Cowork VM 挂载点 glob）
+# 同时充当「数据根」与「代码根」，快照 / 审计日志 / pheromone.db / config.py /
+# 权重备份全挂在它下面，且全在 import 期冻成常量。数据根迁到 `~/alpha-hive-data`
+# （`ALPHA_HIVE_HOME`）之后，它会继续读代码检出里被改名/过期的旧数据。
+#
+# 现在按 CLAUDE.md「这个路径指向代码还是数据」拆开：
+#   · 数据 —— `report_snapshots/`、`weight_history.jsonl`、`pheromone.db`
+#     ⇒ 模块级名字保留为**覆盖钩子（默认 None）**，调用时经 `_snapshots_dir()` /
+#     `_history_file()` / `_pheromone_db_path()` 解析 `PATHS.*`（照 collect_data.py
+#     v0.45.263 的先例；测试 `monkeypatch.setattr(wo, "HISTORY_FILE", tmp)` 照旧生效）。
+#     ⚠️ 不要把解析结果缓存回模块级常量——那是把冻结换个地方
+#     （tests/test_paths_not_frozen_at_import.py 盯着这一族）。
+#   · 代码 —— `config.py` 及其权重备份（`weight_backups/`、`config.py.weights.bak`）
+#     ⇒ 锚 `_CODE_DIR`（`__file__`）。备份是**代码文件**的备份，回滚要 `cp` 回它旁边，
+#     跟着代码走，不跟数据根走。
+#
+# 被删掉的两段逻辑及理由：
+#   · Cowork VM 挂载点 glob（`/sessions/*/mnt/Alpha Hive`）：在 VM 里跑时本文件就
+#     位于该挂载点，`PATHS.home` 的缺省值（hive_logger 所在目录）已经解到同一处；
+#     另设 `ALPHA_HIVE_HOME` 时则应以它为准，glob 反而会压过显式配置。
+#   · `_best_snapshots_dir()`「在 Alpha Hive 与 ~/Desktop/深度分析报告/深度 两处
+#     report_snapshots 里挑 *.json 更多的那个」：生产扫描早已只写数据根
+#     （见 v0.45.84 注释），另一处是停更的旧目录（2026-09-23 实测 59 份 vs 1381 份）。
+#     迁移后若数据根一时缺文件，按「谁多选谁」会**静默**切去读那份冻结的旧快照——
+#     正是 v0.23.6/v0.45.84 两次修的形状。现在缺省只认 `PATHS.home/report_snapshots`；
+#     目录不存在时 `main()` 打印「快照目录: <路径>」+「report_snapshots/ 不存在」后返回
+#     ——读错地方会在输出里直接看到路径，而不是换一份旧数据接着算。
+#     要读别处的快照，设 `SNAPSHOTS_DIR`（覆盖钩子）或 `ALPHA_HIVE_HOME`。
+ALPHAHIVE_DIR = None        # 数据根覆盖钩子；None ⇒ `PATHS.home`
+SNAPSHOTS_DIR = None        # 覆盖钩子；None ⇒ `<数据根>/report_snapshots`
+HISTORY_FILE = None         # 覆盖钩子；None ⇒ `<数据根>/weight_history.jsonl`
+PHEROMONE_DB_PATH = None    # 覆盖钩子；None ⇒ `PATHS.db`（兼顾 `ALPHA_HIVE_DB_PATH`）
 
 # ── import 根：锚本文件，**不是** ALPHAHIVE_DIR（v0.45.230）───────────────────
 # `sys.path.insert` 要的是「代码在哪」，ALPHAHIVE_DIR 答的是「生产数据在哪」——
-# 它写死 `~/Desktop/Alpha Hive`，只在生产上两者恰好重合。从 worktree 跑时它就是
+# 它当时写死 `~/Desktop/Alpha Hive`，只在生产上两者恰好重合。从 worktree 跑时它就是
 # **主 checkout**：此前 6 处函数体内 `sys.path.insert(0, str(ALPHAHIVE_DIR))`、从不拿掉，
 # 之后任何还没 import 过的模块都从主 checkout 加载（v0.45.224 实测：141 个顶层模块
 # 120 个如此；worktree 里改坏 `economic_calendar_watch` 单跑 4 failed，先跑一条本模块
 # 测试 ⇒ 6 passed）。CLAUDE.md「这个路径指向代码还是数据」表。
 _CODE_DIR = Path(__file__).resolve().parent
+
+CONFIG_PATH = _CODE_DIR / "config.py"   # 代码：权重写回的对象就是本检出里的 config.py
+
+
+def _data_dir() -> Path:
+    """数据根，**调用时求值**。`ALPHAHIVE_DIR` 钩子优先，否则 `PATHS.home`。"""
+    if ALPHAHIVE_DIR is not None:
+        return Path(ALPHAHIVE_DIR)
+    from hive_logger import PATHS
+    return PATHS.home
+
+
+def _snapshots_dir() -> Path:
+    """`report_snapshots/`（数据），调用时求值。"""
+    if SNAPSHOTS_DIR is not None:
+        return Path(SNAPSHOTS_DIR)
+    return _data_dir() / "report_snapshots"
+
+
+def _history_file() -> Path:
+    """`weight_history.jsonl`（数据，审计日志），调用时求值。"""
+    if HISTORY_FILE is not None:
+        return Path(HISTORY_FILE)
+    return _data_dir() / "weight_history.jsonl"
+
+
+def _pheromone_db_path():
+    """`pheromone.db`（数据），调用时求值。
+
+    钩子优先（原样返回，测试会塞 Path 以外的桩对象）；显式设了数据根钩子
+    `ALPHAHIVE_DIR` 时跟它走；否则 `PATHS.db`——它额外尊重 `ALPHA_HIVE_DB_PATH`，
+    与扫描主流程读同一个库。
+    """
+    if PHEROMONE_DB_PATH is not None:
+        return PHEROMONE_DB_PATH
+    if ALPHAHIVE_DIR is not None:
+        return Path(ALPHAHIVE_DIR) / "pheromone.db"
+    from hive_logger import PATHS
+    return Path(PATHS.db)
 
 
 def _ensure_code_dir_importable() -> None:
@@ -167,16 +191,16 @@ def _load_close_t7_map() -> "tuple[dict, str]":
     供全部消费者共用（weekly_optimizer 4 处 BacktestAnalyzer 构造 +
     generate_deep_v2.py / alpha_hive_daily_report.py /
     swarm_agents/queen_distiller.py）。这里是薄包装：显式传入本模块自己
-    解析出的 PHEROMONE_DB_PATH——它带 Cowork VM 挂载点探测逻辑，与
-    feedback_loop.py 自己的 `Path(__file__).parent` 缺省值不是恒等的，
-    所以不能省略这个参数、直接用 feedback_loop 的默认行为。
+    解析出的库路径（`_pheromone_db_path()`：覆盖钩子 `PHEROMONE_DB_PATH` 优先，
+    否则 `PATHS.db`）。保留显式传参是为了让本模块的覆盖钩子（conftest 与
+    tests/test_weekly_optimizer.py 的 monkeypatch 依赖它）继续生效。
 
     status 取值见 feedback_loop._load_close_t7_map 的 docstring：
     "ok" / "empty" / "missing" / "error"。
     """
     _ensure_code_dir_importable()
     from feedback_loop import _load_close_t7_map as _fl_load_close_t7_map
-    return _fl_load_close_t7_map(PHEROMONE_DB_PATH)
+    return _fl_load_close_t7_map(_pheromone_db_path())
 
 
 def _warn_if_close_t7_unavailable() -> None:
@@ -191,11 +215,11 @@ def _warn_if_close_t7_unavailable() -> None:
     """
     _, status = _load_close_t7_map()
     if status == "empty":
-        print(f"⚠️  {PHEROMONE_DB_PATH} 数据库存在，但没有任何 close_t7 非空行"
+        print(f"⚠️  {_pheromone_db_path()} 数据库存在，但没有任何 close_t7 非空行"
               f"（backfill_dir_accuracy.py 可能还没跑过/跑挂了），"
               f"本次回退到旧口径 actual_prices.t7。")
     elif status == "error":
-        print(f"⚠️  读取 {PHEROMONE_DB_PATH} 的 close_t7 数据失败，"
+        print(f"⚠️  读取 {_pheromone_db_path()} 的 close_t7 数据失败，"
               f"本次回退到旧口径 actual_prices.t7。")
 
 
@@ -211,7 +235,7 @@ def _apply_clean_t7_prices(analyzer):
     _ensure_code_dir_importable()
     from feedback_loop import _apply_clean_t7_prices as _fl_apply_clean_t7_prices
     _fl_apply_clean_t7_prices(getattr(analyzer, "snapshots", None) or [],
-                              db_path=PHEROMONE_DB_PATH)
+                              db_path=_pheromone_db_path())
     return analyzer
 
 
@@ -833,8 +857,9 @@ def read_current_weights() -> dict:
     return w
 
 
-BACKUP_DIR      = ALPHAHIVE_DIR / "weight_backups"
-BACKUP_LATEST   = ALPHAHIVE_DIR / "config.py.weights.bak"
+# 代码：config.py 的备份，跟 config.py 放一起（锚 `_CODE_DIR`，见文件头「路径配置」）
+BACKUP_DIR      = _CODE_DIR / "weight_backups"
+BACKUP_LATEST   = _CODE_DIR / "config.py.weights.bak"
 BACKUP_KEEP_N   = 8
 
 
@@ -905,7 +930,7 @@ def write_weights_to_config(new_weights: dict, dry_run: bool = False) -> bool:
             "signal":    "# ScoutBeeNova: SEC 披露 + 聪明钱 + 拥挤度",
             "catalyst":  "# ChronosBeeHorizon: 催化剂与时间线",
             "sentiment": "# BuzzBeeWhisper: 情绪与叙事",
-            "odds":      "# OracleBeeEcho: 期权 IV(55%) + Polymarket(35%) + 异动(10%)",
+            "odds":      "# OracleBeeEcho: 期权 IV + 异动（v0.45.315 删 Polymarket）",
             "risk_adj":  "# GuardBeeSentinel: 交叉验证 + 风险调整",
         }
         m_old = re.search(r'EVALUATION_WEIGHTS\s*=\s*\{[^}]+\}', text, re.DOTALL)
@@ -1114,7 +1139,7 @@ def append_history(old_weights: dict, new_weights: dict,
         },
     }
     try:
-        with HISTORY_FILE.open("a", encoding="utf-8") as f:
+        with _history_file().open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"⚠️  历史记录写入失败（不影响主流程）: {e}")
@@ -1157,11 +1182,11 @@ def _last_applied_record() -> Optional[dict]:
     schema_version < 2 的旧记录里 dry_run=true 可能伴随 applied=true（旧
     dry-run 分支返回 True 的产物），这类记录不可信，直接排除。
     """
-    if not HISTORY_FILE.exists():
+    if not _history_file().exists():
         return None
     last = None
     try:
-        with HISTORY_FILE.open("r", encoding="utf-8") as f:
+        with _history_file().open("r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -1178,7 +1203,7 @@ def _last_applied_record() -> Optional[dict]:
                     continue  # 排除旧 schema 的矛盾记录
                 last = rec
     except OSError as e:
-        print(f"⚠️  读取 {HISTORY_FILE.name} 失败: {e}")
+        print(f"⚠️  读取 {_history_file().name} 失败: {e}")
         return None
     return last
 
@@ -1289,22 +1314,28 @@ def main() -> None:
     write_requested = args.apply and not args.dry_run
     mode_label = "写入模式 (--apply)" if write_requested else "只读诊断（默认）"
 
+    # 调用时解析一次、本次运行内复用（数据根迁移阶段 5 前置：不在 import 期冻结）
+    snapshots_dir = _snapshots_dir()
+
     print(f"\n🐝 Alpha Hive · weekly_optimizer 启动 — {mode_label}")
-    print(f"   快照目录: {SNAPSHOTS_DIR}")
+    print(f"   快照目录: {snapshots_dir}")
     print(f"   config:   {CONFIG_PATH}")
+    # 审计日志的绝对路径必须印出来（v0.45.335）：定时任务里的 agent 按这行去读「最新一条」，
+    # 不许再按相对路径猜——数据根迁移后代码检出里那份是冻结 / 已退场的旧文件。
+    print(f"   审计日志: {_history_file()}")
     if args.apply and args.dry_run:
         print("   ⚠️  同时给了 --apply 与 --dry-run，按 --dry-run 处理（不写入）")
     if not write_requested:
         print("   ℹ️  本次不会修改 config.py。要写入需显式 --apply。")
 
     # 1. 检查快照目录
-    if not SNAPSHOTS_DIR.exists():
+    if not snapshots_dir.exists():
         print("⏭  report_snapshots/ 不存在，尚无历史数据，跳过。")
         return
 
     # 2. 计算有效样本数
     _warn_if_close_t7_unavailable()
-    n_samples = count_t7_samples(SNAPSHOTS_DIR)
+    n_samples = count_t7_samples(snapshots_dir)
     print(f"   T+7 已回填样本: {n_samples} 条")
 
     if n_samples < args.min_samples:
@@ -1315,10 +1346,10 @@ def main() -> None:
     # 3. 计算建议权重
     # 优先使用 WLS + 时间衰减，失败则回退标准方法
     print("🔍 运行 WLS 权重优化...")
-    result = compute_new_weights_wls(SNAPSHOTS_DIR)
+    result = compute_new_weights_wls(snapshots_dir)
     if result is None:
         print("   WLS 不可用，回退标准方法...")
-        result = compute_new_weights(SNAPSHOTS_DIR)
+        result = compute_new_weights(snapshots_dir)
     if not result or "new_weights" not in result:
         print("⚠️  BacktestAnalyzer 未返回有效权重，跳过。")
         return
@@ -1373,9 +1404,9 @@ def main() -> None:
     if blocked is not None:
         # 没有可行的投影结果可验：退而验 WLS 输出（compute_new_weights_wls 已做绝对上下限钳制）
         # 本身的重采样稳定性（不带 anchor ⇒ 不做逐次投影，与 v0.45.144 的口径一致）。
-        bootstrap = bootstrap_validate(SNAPSHOTS_DIR, raw_new)
+        bootstrap = bootstrap_validate(snapshots_dir, raw_new)
     else:
-        bootstrap = bootstrap_validate(SNAPSHOTS_DIR, new_weights, anchor=old_weights)
+        bootstrap = bootstrap_validate(snapshots_dir, new_weights, anchor=old_weights)
     gate_bootstrap_ok = bool(bootstrap.get("stable"))
     if gate_bootstrap_ok:
         print("   ✅ 通过：权重变动在 95% 置信区间内" if blocked is None
@@ -1385,7 +1416,7 @@ def main() -> None:
 
     # 7. 闸 2：样本基的标的池必须代表当前在扫的池
     print("🔍 闸 2/2：标的池世代一致性...")
-    pool = check_ticker_pool_consistency(SNAPSHOTS_DIR)
+    pool = check_ticker_pool_consistency(snapshots_dir)
     gate_pool_ok = bool(pool.get("ok"))
     if gate_pool_ok:
         print(f"   ✅ 通过：当前池 {pool.get('n_recent_pool')} 只，"

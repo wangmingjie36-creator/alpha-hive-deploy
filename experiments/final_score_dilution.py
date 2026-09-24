@@ -138,6 +138,8 @@ def weekly_ic(by_day, value_fn):
 
 
 def stat(ics):
+    # ⚠️ 照抄本文件口径时**别抄这里的 p**：erfc 是正态近似，周序列该用 t(n−1)
+    # （照抄范例：experiments/ml_expected_return_replay.py 的 weekly_t_test）。本脚本默认拒跑，此处有意未改（v0.45.329）
     n = len(ics)
     if n < 3 or stdev(ics) == 0:
         return None

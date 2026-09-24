@@ -178,11 +178,6 @@ class TestPresetInstances:
         assert sec_breaker is not None
         assert sec_breaker.state == "closed"
 
-    def test_polymarket_instances_exist(self):
-        from resilience import polymarket_limiter, polymarket_breaker
-        assert polymarket_limiter is not None
-        assert polymarket_breaker.state == "closed"
-
     def test_yfinance_instances_exist(self):
         from resilience import yfinance_limiter, yfinance_breaker
         assert yfinance_limiter is not None

@@ -525,6 +525,32 @@ _COHORT_HISTORY = [
      "09-19、作废约 30 条。"
      "已知不做：不改 `MAX_ENTRIES` / 淘汰逻辑；不加新口径字段（`data_sources` 已是"
      "自记录标记）；Scout/Buzz 按设计的回落（Scout 无内幕金额时本来就走 SEC）不动。"),
+    ("2026-09-18", "v0.45.314",
+     "`QueenDistiller` 的 data_quality 源分类补登 4 个此前未分类（按契约记 0 分）的标签："
+     "成功标签 `peer_read`（RivalBee 读到 ChronosBee 真实分数，v0.45.151 引入）与 "
+     "`quiet`（BuzzBee：ApeWisdom 正常返回、不在前 100 = 真实低热度）进 `REAL_SOURCES`；"
+     "降级标签 `unreadable`（RivalBee）与 `failed`（ChronosBee 日历查询失败）进 "
+     "`PROXY_SOURCES`（同 v0.45.191/209 判据：未分类记 0 = 把降级升格成全废）。"
+     "改的是 `_apply_triple_penalty` 的 `data_real_pct` → `quality_factor` → `rule_score` "
+     "这条函数 ⇒ 按本表判据登记。 "
+     "**幅度如实读**：用 `.swarm_results_*.json` 全史 1696 行重放（重放器先对 977 行"
+     "不含已退役 `finviz_api` 标签的行复现存档 `data_real_pct`，逐位吻合），修前最低值 "
+     "84.2%，**没有任何一行低于 80% 的压缩线** ⇒ `quality_factor` 恒为 1.0，"
+     "`rule_score` 全史逐位不变。可见变化只在 `data_real_pct` 本身（09-22 均值 "
+     "91.4% → 96.7%，网站 hero「数据真实度」）。`unreadable`/`failed` 全史出现 0 次。 "
+     "**边界日期取 2026-09-18、与 v0.45.279/288 同日扩展同一标签，不新开空分区，"
+     "作废 0 条**（同 v0.45.191/209 对「改动前后逐位相同」的处置）。"
+     "未来影响：数据差的日子里，此前白扣的 ~5.3pp 不再把标的推过 80% 压缩线。"),
+    ("2026-09-18", "v0.45.315",
+     "删除全部 Polymarket 代码（用户已停用）。OracleBee 的「无 Polymarket」分支原样成为唯一"
+     "路径——生产自 v0.45.30 起只走这条（台账最后一次 `polymarket=real` 是 2026-08-25，此后 "
+     "1627 行全是 `unavailable`）。**融合分逐位不变**：config 刻意保留 0.55/0.10 原值"
+     "（改成同比例的 11/13、2/13 数学等价但浮点不等，1e6 组随机输入 483 组 round 后翻位），"
+     "改后实测 1e6 组 0 差异；confidence 删掉的是恒 False 的加法项。"
+     "唯一口径变化：OracleBee 的 `data_quality` 少了恒为 0.7 的 `polymarket` 通道 ⇒ "
+     "`data_real_pct` 变化——从均值中去掉一个 0.7 项，均值 >70% 时只升不降；全史最低 84.2%，"
+     "故只升、不会新触发 80% 压缩线 ⇒ `rule_score` 不变。"
+     "**边界日期取 2026-09-18、与 v0.45.314 同日扩展同一标签，作废 0 条。**"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -576,10 +602,13 @@ def assess(db_path: Optional[Path] = None, target_ic: float = DEFAULT_TARGET_IC,
 
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-        # 世代内**已回填 T+7** 的样本 —— 只有这些能进 IC 计算
+        # 世代内**已回填 T+7** 的样本 —— 只有这些能进 IC 计算。
+        # v0.45.321：按 close_t7 判成熟，与 IC 实际读的列一致（ic_diagnostics / signal_archive
+        # 都走 FORWARD_CLOSE_COL）。旧写法按 price_t7（SL/TP 离场价）判——close_t7 在结算时
+        # 另行取价、取价失败会滞后，那时闸会把 analyze() 用不上的样本也数成「已成熟」。
         ripe = con.execute(
             "SELECT date, ticker FROM predictions "
-            "WHERE date >= ? AND checked_t7 = 1 AND price_t7 IS NOT NULL "
+            "WHERE date >= ? AND checked_t7 = 1 AND close_t7 IS NOT NULL "
             "  AND price_at_predict > 0",
             (boundary,),
         ).fetchall()
@@ -774,6 +803,27 @@ def fg_exposure_gate_forward_status(today: Optional[str] = None) -> Dict:
                 "line": f"⚠️ F&G 敞口门前瞻检验无法判定：{type(e).__name__}: {e}"}
 
 
+def dim_ic_forward_status(db: Path, today: Optional[str] = None) -> Dict:
+    """顺带承载「维度 IC 证据协议」（v0.45.320 预注册 / v0.45.325 执行器）的进度——同上两条，
+    到期条件是数据条件（H1 攒够 26 / 52 个已结算合格周），不另起定时任务。
+
+    ⚠️ 失败**不改变本工具的判定与退出码**，渲染成可见的一行，不吞。
+    `db` 必传：协议的数据跟着 `--db` 走（同 `resonance_forward_status`）。
+    检视点之前返回值里没有效应量——盲化在执行器的数据结构上，这里只转交 `status` 与那一行。
+    """
+    try:
+        import importlib.util
+        path = ALPHAHIVE_DIR / "experiments" / "dim_ic_forward_test.py"  # 代码锚点
+        spec = importlib.util.spec_from_file_location("dim_ic_forward_test", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fres = mod.run(db_path=str(db), today=today)
+        return {"status": fres.get("status"), "line": mod.status_line(fres)}
+    except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
+        return {"status": "cannot_judge",
+                "line": f"⚠️ 维度 IC 协议无法判定：{type(e).__name__}: {e}"}
+
+
 _BOUNDARY_VERDICT_TEXT = {
     "matches": "✅ 与归档印记一致",
     "boundary_too_early": "🚨 边界写早了 —— 边界至印记之间的样本是旧口径，会被混算，请追加一条更正",
@@ -810,6 +860,8 @@ def main() -> int:
     res["resonance_forward_test"] = fwd
     fg_fwd = fg_exposure_gate_forward_status(today=args.today)
     res["fg_exposure_gate_forward_test"] = fg_fwd
+    dim_fwd = dim_ic_forward_status(db, today=args.today)
+    res["dim_ic_forward_test"] = dim_fwd
 
     if args.out:
         try:
@@ -823,8 +875,9 @@ def main() -> int:
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0 if res["ready"] else 1
     if args.quiet:
-        # 同一行：周度任务的约定是「把那一行摘要原样写进周报」，另起一行可能被漏抄
-        print(summary_line(res) + "｜" + fwd["line"] + "｜" + fg_fwd["line"])
+        # 同一行：周度任务的约定是「把那一行摘要原样写进周报」，另起一行可能被漏抄。
+        # ⚠️ 段的**顺序**是契约：周度任务 SKILL.md 按「第三段 = F&G」解析。新段只许追加在末尾。
+        print(summary_line(res) + "｜" + fwd["line"] + "｜" + fg_fwd["line"] + "｜" + dim_fwd["line"])
         return 0 if res["ready"] else 1
 
     c = res["cohort"]
@@ -861,6 +914,7 @@ def main() -> int:
     print(summary_line(res))
     print(fwd["line"])
     print(fg_fwd["line"])
+    print(dim_fwd["line"])
     if res["ready"]:
         print()
         print("  该跑:")

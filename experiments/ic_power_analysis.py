@@ -26,17 +26,34 @@
    `N_eff = n / (1 + (n−1)·ρ̄)`（等相关近似）。会顺手复核记忆里的 3.25 / 13.8。
 2. **σ_IC 实测**：从 pheromone.db 取不重叠周度 IC 序列，直接算样本方差
    —— 这一步不含任何模型假设，是 10 只时代的真实读数。
-3. **σ_cs² 实测**：置换检验。保留真实的日期骨架、横截面宽度、以及**真实收益的
-   截面相关结构**，只把分数换成随机数（与 `ic_diagnostics.noise_floor` 同法），
-   得到 H0 下周度 IC 的方差。比理论式 1/(N_eff−1) 可靠，因为它不需要等相关假设。
+3. **σ_cs² 实测**：置换检验。保留真实的日期骨架与横截面宽度，把当日真实分数向量
+   随机置换，得到 H0 下周度 IC 的方差。⚠️（v0.45.331 更正）它有**精确解析值**：
+   置换下每日 IC 的方差恒等于 1/(n_d−1)（与分数并列、收益相关结构都无关），
+   故本步的期望值 = 各不重叠取样日 1/(n_d−1) 的均值；置换只是它的 Monte Carlo 估计。
+   原文「保留收益截面相关结构、比 1/(N_eff−1) 可靠」不成立——收益相关在这个零分布里
+   根本不出场。详见 `permuted_weekly_var`。
 4. **分解**：σ_t² = max(0, σ_IC² − σ_cs²)。
 5. **外推到 30 只**：σ_cs² 按 (N_eff₁₀−1)/(N_eff₃₀−1) 缩放 —— 这是全流程**唯一**
    的建模步骤（30 只时代还没有到期的 T+7 样本，无法实测）。同时给出按原始 n
    缩放的对照，作为增益下界。
+   ⚠️（v0.45.331 发现，未改）第 3 步量出的 σ_cs² 按构造就是原始 n 的 1/(n_d−1)，
+   再乘 N_eff 比值是两个模型混用；且 10 只时代实测周度 IC 总方差（0.08~0.14）
+   远低于 1/(N_eff₁₀−1)=0.46。与零分布自洽的是原始 n 口径。见 ic_power_report.md
+   「发现未处理」与 CHANGELOG v0.45.331。
 6. **功效**：W = ((z_{1−α/2} + z_β) · σ_IC / |IC|)²，α=0.05 双侧、power=80%。
 
 ⚠️ 已知精度限制：σ_IC² 只由约 20 个不重叠周估出，样本方差自身的相对标准误
    ≈ √(2/(n−1)) ≈ 32%。所以本工具的倍数结论应读作量级，不是三位有效数字。
+
+⚠️ 前瞻收益的终点价列（v0.45.327 更正）：第 2 步与第 3 步都由
+   `(终点价 − price_at_predict) / price_at_predict` 算前瞻收益，终点列**调用时**查
+   `ic_diagnostics.FORWARD_CLOSE_COL`（t7 → `close_t7`，t30 → `price_t30`，后者本来就是
+   收盘价）。v0.45.327 之前两步都读 `price_t7`——那是 `backtester._simulate_trade_path`
+   的 `exit_price`（SL/TP 离场价，2026-04-15 路径模拟起），与 `return_t7` 一样截断；
+   与 ic_diagnostics（v0.45.19）、signal_archive（v0.45.321）、ml_expected_return_replay
+   （v0.45.326）同一个误解。**两步必须读同一列**：σ_cs² 与 σ_IC² 若算在不同的收益序列上，
+   第 4 步的分解就没有意义（与下面「过滤条件逐字一致」是同一条约束）。
+   `ic_power_report.md` 的 2026-08-16 数字是截断口径，前后对照见该报告与 CHANGELOG v0.45.327。
 
 用法
 ----
@@ -69,6 +86,8 @@ from ic_diagnostics import (  # noqa: E402  - 必须在 sys.path 注入后导入
     spearman,
     subsample_non_overlapping,
 )
+
+import ic_diagnostics as _icd  # noqa: E402  前瞻终点列唯一真相 FORWARD_CLOSE_COL
 
 # v0.45.260（数据根迁移阶段 2）：此前是 `ALPHAHIVE_DIR / "pheromone.db"`
 # （`ALPHAHIVE_DIR` 是 `__file__` 派生）——不读 `ALPHA_HIVE_HOME`。改读
@@ -191,13 +210,28 @@ def compute_neff(start: str, end: str) -> Optional[Dict]:
 # 第 2~3 步：σ_IC 实测 + σ_cs² 置换实测
 # ────────────────────────────────────────────────────────────────────────────
 
+def forward_close_col(horizon: str) -> str:
+    """前瞻收益的终点价列。**调用时**查 `ic_diagnostics.FORWARD_CLOSE_COL`，
+    不在本文件写死、也不在模块层冻结（与 ml_expected_return_replay 同法）。
+
+    ⚠️ 不能按 `f"price_{horizon}"` 拼：`price_t7` 是 SL/TP 离场价，`price_t30` 才恰好是
+    收盘价——同一个前缀，两种语义。本函数之前本文件正是这么拼的（v0.45.327 修）。
+    """
+    return _icd.FORWARD_CLOSE_COL[horizon]
+
+
 def observed_weekly_var(db_path: Path, horizon: str = "t7",
                         min_width: int = 5) -> Dict[str, Dict]:
-    """各维度不重叠周度 IC 序列的样本方差（实测，无模型假设）。"""
+    """各维度不重叠周度 IC 序列的样本方差（实测，无模型假设）。
+
+    前瞻收益走 `load_daily_ic(target="close")`，终点列 = `forward_close_col(horizon)`
+    （t7 → close_t7）。v0.45.327 之前这里显式传 `target="price"`（读 price_t7 离场价）；
+    那个口径在 ic_diagnostics 里只为复现历史保留，不该用来出新结论。
+    """
     target_col, checked_col, _, period = HORIZONS[horizon]
     ic_by_dim, n_rows, widths = load_daily_ic(
         db_path, target_col, checked_col, min_width=min_width,
-        target="price", horizon=horizon,
+        target="close", horizon=horizon,
     )
     out: Dict[str, Dict] = {}
     for dim in DIMS:
@@ -226,20 +260,26 @@ def _load_day_pairs(db_path: Path, horizon: str, dim: str,
                     min_width: int = 5) -> Dict[str, List[Tuple[float, float]]]:
     """{date: [(维度分, 前瞻收益), ...]} —— 置换检验的骨架。
 
+    前瞻收益 = `(终点价 − price_at_predict) / price_at_predict × 100`，终点列 =
+    `forward_close_col(horizon)`——必须与 `observed_weekly_var` 那条路径
+    （`load_daily_ic(target="close")`）是**同一列**，σ_cs² 与 σ_IC² 才算在同一条收益
+    序列上。v0.45.327 之前这里拼 `f"price_{horizon}"`（t7 读到离场价），样本成员也跟着
+    `price_t7 IS NOT NULL` 走：生产快照有 8 行 price_t7 空、close_t7 有值，旧口径丢掉。
+
     自己读库而不复用 build_benchmark_panel：后者返回的是「因子名 → 面板」的
     全量字典（含 47 个 signal_archive 因子），这里只要一个维度，省一次全表扫。
     """
     import sqlite3
     from collections import defaultdict
 
-    price_col = f"price_{horizon}"
+    end_col = forward_close_col(horizon)
     _, checked_col, _, _ = HORIZONS[horizon]
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
         rows = con.execute(
-            f"SELECT date, dimension_scores, price_at_predict, {price_col} AS p_end "
-            f"FROM predictions WHERE {checked_col}=1 AND {price_col} IS NOT NULL "
+            f"SELECT date, dimension_scores, price_at_predict, {end_col} AS p_end "
+            f"FROM predictions WHERE {checked_col}=1 AND {end_col} IS NOT NULL "
             f"  AND price_at_predict > 0 AND dimension_scores IS NOT NULL"
         ).fetchall()
     finally:
@@ -264,8 +304,11 @@ def _load_day_pairs(db_path: Path, horizon: str, dim: str,
 
     # 过滤条件必须与 `ic_diagnostics.load_daily_ic` **逐字一致**，否则 σ_cs²
     # 与 σ_IC² 算在不同的天集合上，分解就没有意义。那边除了 min_width 还要求
-    # **当日该维度至少 2 个不同分数**（`len(set(...)) < 2 → continue`）——
-    # 对 catalyst 这种高度并列的维度，缺这一条会多纳入若干"全员同分"的日子。
+    # **当日该维度至少 2 个不同分数**（`len(set(...)) < 2 → continue`）。
+    # v0.45.331 实测：这一条在 08-12 备份与 09-23 快照上对五个维度**都没有删掉任何一天**
+    # （宽度 ≥5 的日子里不存在全员同分）；它留着是为了与 load_daily_ic 对齐，
+    # 不是因为当前数据里有「全员同分」的日子。真正让各维度天集合不同的是**有没有这个键**
+    # （例：2026-03-16 的 10 行 dimension_scores 全都没有 catalyst）。
     return {
         d: p for d, p in by_day.items()
         if len(p) >= min_width and len({s for s, _ in p}) >= 2
@@ -275,8 +318,10 @@ def _load_day_pairs(db_path: Path, horizon: str, dim: str,
 def _distinct_ratio(by_day: Dict[str, List[Tuple[float, float]]]) -> float:
     """分数的去重比 = distinct(分数) / 总数。<0.25 表示大量并列。
 
-    记录它是因为并列程度直接决定 σ_cs² 的大小 —— 这是本工具最初用
-    `noise_floor` 的随机分数时算错的根源，留在输出里便于复核。
+    只作描述性输出。⚠️ v0.45.331 更正：原文说「并列程度直接决定 σ_cs² 的大小，
+    是最初用 noise_floor 随机分数时算错的根源」——不成立。置换方差恒为 1/(n_d−1)，
+    与并列无关（见 `permuted_weekly_var`）；实测去重比 0.063 的 catalyst 与 0.322 的
+    signal 都落在各自解析值的 MC 误差内。
     """
     all_scores = [s for pairs in by_day.values() for s, _ in pairs]
     if not all_scores:
@@ -286,19 +331,32 @@ def _distinct_ratio(by_day: Dict[str, List[Tuple[float, float]]]) -> float:
 
 def permuted_weekly_var(by_day: Dict[str, List[Tuple[float, float]]],
                         period: str, draws: int) -> Dict:
-    """置换零分布下周度 IC 的方差 = 横截面抽样方差 σ_cs²（实测）。
+    """置换零分布下周度 IC 的方差 = 横截面抽样方差 σ_cs²（Monte Carlo 估计）。
 
-    关键：**打乱真实分数向量本身**，保留日期骨架、每日宽度、当日真实收益向量，
-    以及分数的边际分布（含并列结构）。因此标的间收益相关性与分数并列都被自然
-    保留 —— 不需要等相关假设。
+    打乱真实分数向量本身，保留日期骨架、每日宽度、当日真实收益向量。
 
-    ⚠️ 为什么不复用 `ic_diagnostics.noise_floor`：它把分数换成 `rng.random()`
-    ——**无并列值**的连续均匀分布。真实维度分大量并列（catalyst 有 55% 恰为
-    6.0，多个信号 `distinct_ratio<0.25`），而并列会压低 Spearman 的方差。
-    实测差别足以翻转结论：用 rng.random() 得 σ_cs²=0.127，比 4/5 个维度的
-    实测总方差还大，分解必然得到 σ_t²=0（被钳）；改成置换真实分数后才可比。
-    noise_floor 的做法对它自己的用途（跨异质因子的统一地板）是对的，
-    对方差分解则会系统性高估。
+    **精确值（v0.45.331）**：对固定 x、均匀置换 y，Pearson 相关的置换方差**恒等于
+    1/(n−1)**，对任何非常数的 x、y 成立——分数并列与否、收益截面相关与否都不改变它；
+    `spearman` 是中秩上的 Pearson，同样成立。各周独立且均值恰为 0，故本函数返回值的
+    期望 = 各不重叠取样日 1/(n_d−1) 的均值。300 次时 MC 标准误约 0.002（相对 ~1.5%）。
+    并列只改变 IC 分布的**形状**（峰度、max|r|），影响分位数类统计，不影响方差。
+
+    ⚠️ v0.45.331 更正原理由。原文说 noise_floor 的 `rng.random()`（无并列）会系统性
+    高估 σ_cs²、「并列会压低 Spearman 的方差」，并以 rng.random 0.127 vs 置换 0.137 为证。
+    三处都不成立：
+      1. 同一骨架上，rng.random 分数（其秩就是均匀随机置换）与置换真实分数的期望都是
+         上面的解析值；实测两者都落在解析值的 MC 误差内。
+      2. 0.127 与 0.137 不是同一个量：0.12746 = 第一版在 risk_adj 骨架（75 天，所有维度
+         共用）上跑 100 次；0.13728 = 定稿在 catalyst 自己的骨架上跑 300 次。08-12 备份
+         逐位复现二者后拆解：缺口 +0.0098 = 骨架差 +0.0063（2026-03-16 的 10 行都没有
+         catalyst 键 ⇒ W12 取样日由宽 10 的 03-16 变成宽 5 的 03-19）+ 第一版 100 次的
+         MC 噪声 +0.0035（低于自身解析值 0.99 SE）。并列的贡献为 0。
+      3. 方向也反：表里随机分数那一行（0.127）比置换那一行（catalyst 0.137）**小**。
+         换成置换后，钳 0 的四维 σ_cs² 略升（0.128~0.137）、signal 降到 0.120，
+         4/5 维照样钳 0——这次改动没有翻转任何结论。
+    仍用置换（标准的条件置换检验，结果正确）。不复用 noise_floor 的真正理由：它输出的是
+    |IC| 分位数而非周度方差；且每次调用只取一个 base_key 骨架（要逐维就得逐维造面板）。
+    noise_floor 对它自己的用途是对的，**不要去"修"它**。
     """
     variances: List[float] = []
     for i in range(draws):
@@ -369,7 +427,8 @@ def main() -> int:
         print(f"❌ 找不到 {db_path}", file=sys.stderr)
         return 2
 
-    result: Dict = {"horizon": args.horizon, "alpha": ALPHA, "power": POWER}
+    result: Dict = {"horizon": args.horizon, "alpha": ALPHA, "power": POWER,
+                    "forward_close_col": forward_close_col(args.horizon)}
 
     # ── 第 1 步：N_eff ──────────────────────────────────────────────────
     if args.no_network:
@@ -399,7 +458,7 @@ def main() -> int:
     obs = observed_weekly_var(db_path, args.horizon, args.min_width)
     result["observed"] = obs
 
-    # ── 第 3 步：置换实测 σ_cs²（逐维度：并列结构因维度而异）────────────
+    # ── 第 3 步：置换实测 σ_cs²（逐维度：各维度有分数的天集合不同）──────
     perm_by_dim: Dict[str, Dict] = {}
     for dim in DIMS:
         by_day = _load_day_pairs(db_path, args.horizon, dim, args.min_width)
@@ -484,6 +543,8 @@ def main() -> int:
     _draws_done = max((p.get("n_draws", 0) for p in perm_by_dim.values()), default=0)
     print(f"  horizon={args.horizon}  α={ALPHA}  power={POWER:.0%}  "
           f"置换次数={_draws_done}")
+    print(f"  前瞻收益终点列: {result['forward_close_col']}（未截断收盘价；price_t7 是 SL/TP "
+          f"离场价，见 ic_diagnostics.FORWARD_CLOSE_COL）")
     print()
 
     print("【第 1 步】N_eff —— 有效独立标的数")
@@ -503,7 +564,7 @@ def main() -> int:
     print("【第 2~3 步】周度 IC 方差：实测 vs 置换零分布")
     print(f"  DB 覆盖: {obs['n_days']} 个业务日, 日均横截面宽度 "
           f"{_f(obs['mean_width'], '.1f')}, 共 {obs['n_rows']} 行")
-    print("  σ_cs² 用**置换真实分数**得到（保留并列结构），逐维度分别算")
+    print("  σ_cs² 用**置换真实分数**得到，逐维度骨架分别算（期望 = 取样日 1/(n_d−1) 均值）")
     print()
     print("  维度        周数  去重比  实测方差   σ_cs²(置换)  σ_t²(不可约)  时间变异占比")
     print("  " + "─" * 76)

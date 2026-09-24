@@ -84,7 +84,7 @@ class CrowdingDetector:
         scores["consensus_strength"] = (None if bullish_agents is None
                                         else (bullish_agents / 6) * 100)
 
-        # 4. （v0.45.30 删除）Polymarket 赔率变化速度 —— 详见 config.POLYMARKET_ENABLED
+        # 4. （v0.45.30 删除）Polymarket 赔率变化速度 （v0.45.315 Polymarket 已整体删除，理由见 CHANGELOG v0.45.30）
 
         # 5. Seeking Alpha 页面浏览 —— 旧默认值落进 else 分支给 20（最低档）
         page_views = _num(metrics.get("seeking_alpha_page_views"))

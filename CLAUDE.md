@@ -69,7 +69,7 @@
 历史改动**不在本文件维护**（v0.40.3 清理了此前 ~75 行 v0.10-0.19 时代的实现细节清单）：
 - 版本级摘要 → MEMORY.md 末尾「版本历史」表
 - 逐项细节 → `CHANGELOG.md`
-- 定时任务（daily-scan / weekly-optimizer / self-analysis / sample-accumulator）的调度时刻 → 以 `list_scheduled_tasks` 返回的 `nextRunAt` 为唯一真相，勿引用文档里的旧时刻
+- 定时任务（weekly-optimizer / monthly-self-analysis；每日扫描走 launchd `com.alpha.hive.daily`，不走 scheduled-tasks）的调度时刻 → 以 `list_scheduled_tasks` 返回的 `nextRunAt` 为唯一真相，勿引用文档里的旧时刻
 
 ## 核心组件指针（只记"在哪、归谁管"，不记参数值）
 
@@ -256,7 +256,7 @@ v0.45.168 实测：只有子集守卫时，把 5 处「应保留」的错改成 
 
 每日核心任务：
 - 凌晨自动扫描影响力投资人/对冲基金的最新交易披露（SEC Form 4 / 13F）
-- 结合 Polymarket 赔率、X 平台情绪、目标公司财报/事件催化剂
+- 结合期权市场预期（IV / Put-Call / 异常流）、X 平台情绪、目标公司财报/事件催化剂
 - 涌现式判断潜在机会，并生成结构化中文投资简报 + X 线程分享版本
 
 ---
@@ -341,7 +341,7 @@ v0.45.168 实测：只有子集守卫时，把 5 处「应保留」的错改成 
 目标：多源并行采集事实，不做主观下结论。  
 最低覆盖源：
 - 交易披露：SEC Form 4 / 13F
-- 赔率市场：Polymarket
+- 市场预期：期权链（IV / Put-Call Ratio / 异常流）（v0.45.315 起不再使用 Polymarket，勿重新接入）
 - 舆情：X 平台公开讨论
 - 基本面：财报、指引、公告、产品/监管事件
 约束：
@@ -424,7 +424,7 @@ QueenDistiller 职责：
 
 - **第一梯队**（权重最高）：SEC 文件（Form 4/13F/10-K/10-Q）、财报实录、Bloomberg/Reuters/CNBC/WSJ
 - **第二梯队**（核心补充）：TipRanks/Seeking Alpha、Yahoo Finance、Fintel/WhaleWisdom、Unusual Whales/Barchart
-- **第三梯队**（情绪参考）：Reddit/Stocktwits、Polymarket
+- **第三梯队**（情绪参考）：Reddit/Stocktwits
 - **低优先级**：算法预测网站 — 通常不可靠，须交叉验证
 
 ---

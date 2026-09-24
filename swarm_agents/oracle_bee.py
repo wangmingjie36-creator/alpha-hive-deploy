@@ -21,9 +21,11 @@ def _finite_pos(x) -> bool:
 
 
 class OracleBeeEcho(BeeAgent):
-    """市场预期蜂 - 期权分析 + Polymarket 预测市场赔率
+    """市场预期蜂 - 期权分析 + 异常期权流
     对应维度：odds（权重唯一真相 = `config.EVALUATION_WEIGHTS`，此处不抄数值）
-    融合：期权信号 60% + Polymarket 赔率 40%
+    融合：期权信号 + 异常流（比例见 `config.AGENT_SCORING` 的 oracle_*_weight）
+    v0.45.315：Polymarket 已整体删除（用户已停用；v0.45.30 起默认关闭，
+    台账最后一次 `polymarket=real` 是 2026-08-25）。
     """
 
     # 「近端」的唯一定义：到期日距今 ≤ 7 个日历日。v0.45.188 之前这个词在代码里
@@ -290,30 +292,6 @@ class OracleBeeEcho(BeeAgent):
                 _log.warning("OracleBeeEcho options unavailable for %s: %s", ticker, e)
                 result = {}
 
-            # ---- Polymarket 赔率（权重 35%）----
-            # v0.45.30: 默认关闭（config.POLYMARKET_ENABLED=False）。本名单是大盘股，
-            # Polymarket 无对应个股预测市场，实测从未成功返回过赔率，只白耗
-            # 30 次 × 最多 3 重试 × 15s 超时。关闭后走下方 poly_markets==0 的
-            # 权重重归一化分支，评分口径不变。
-            # ⚠️ fallback 默认值必须与 config 同为 False（v0.45.23 教训）。
-            poly_score = 5.0
-            poly_signal = ""
-            poly_markets = 0
-            try:
-                from config import POLYMARKET_ENABLED as _POLY_ON
-            except (ImportError, AttributeError):
-                _POLY_ON = False
-            if _POLY_ON:
-                try:
-                    from polymarket_client import get_polymarket_odds
-                    poly = get_polymarket_odds(ticker)
-                    poly_score = _safe_score(poly.get("odds_score"), 5.0, 0, 10, "poly_score")
-                    poly_signal = poly.get("odds_signal", "")
-                    poly_markets = poly.get("markets_found", 0)
-                except LLM_ERRORS as e:
-                    _log.warning("OracleBeeEcho Polymarket unavailable for %s: %s", ticker, e)
-                    poly_markets = 0
-
             # ---- Phase 2: 期权深度分析（term structure / 25d skew / max pain）----
             # v0.45.128：期限结构 / skew 从上面 OptionsAgent 的 CBOE 结果派生，不再碰 yfinance
             term_structure = self._term_structure_adj(result)
@@ -345,37 +323,27 @@ class OracleBeeEcho(BeeAgent):
             except (ImportError, ConnectionError, ValueError, KeyError, TypeError) as e:
                 _log.debug("P2 unusual_options 不可用 %s: %s", ticker, e)
 
-            # ---- 融合评分（期权 + Polymarket + 异常流）----
+            # ---- 融合评分（期权 + 异常流）----
+            # v0.45.315：原「无 Polymarket」分支原样保留为唯一路径（生产自 v0.45.30
+            # 起只走这条）。两权重是相对值，除以 `_ow + _uw` 归一；config 刻意保留
+            # 原值 0.55/0.10 以保证浮点逐位不变（理由见 config.AGENT_SCORING 注释）。
             _ow = _AS.get("oracle_options_weight", 0.55)
-            _pw = _AS.get("oracle_poly_weight", 0.35)
             _uw = _AS.get("oracle_unusual_weight", 0.10)
-            if poly_markets > 0:
-                # BUG FIX: 原来 5.0 硬编码为 unusual_flow 的占位分，
-                # 改为使用实际 unusual_score（如无则 5.0 = 中性）
-                _unusual_base = unusual_flow.get("unusual_score", 5.0) if unusual_flow else 5.0
-                score = options_score * _ow + poly_score * _pw + _unusual_base * _uw
-            else:
-                # BUG FIX: poly_markets=0 时原来直接用 options_score（weight=1.0），
-                # 完全忽略了 unusual_flow 权重。
-                # 修复：将 _ow + _uw 重新归一化，按比例混合 options + unusual，
-                # 如果 unusual 也不可用则退回纯 options_score。
-                _unusual_base = unusual_flow.get("unusual_score", None) if unusual_flow else None
-                if _unusual_base is not None:
-                    _total_w = _ow + _uw  # 无 poly 时只用这两个权重
-                    if _total_w > 0:
-                        score = (options_score * _ow + _unusual_base * _uw) / _total_w
-                    else:
-                        score = options_score
+            _unusual_base = unusual_flow.get("unusual_score", None) if unusual_flow else None
+            if _unusual_base is not None:
+                _total_w = _ow + _uw
+                if _total_w > 0:
+                    score = (options_score * _ow + _unusual_base * _uw) / _total_w
                 else:
-                    score = options_score  # 无 poly 也无 unusual，直接用 options
+                    score = options_score
+            else:
+                score = options_score  # 无 unusual，直接用 options
             # 叠加异常流调整
             score = clamp_score(score + unusual_score_adj)
 
             direction = self._decide_direction(unusual_flow, score, signal_summary)
 
             discovery = f"{signal_summary} | ${current_price:.1f}"
-            if poly_signal:
-                discovery += f" | {poly_signal}"
             discovery = append_context(discovery, ctx)
 
             # ── P1: LLM 期权流结构解读（识别聪明钱意图，超越阈值规则）──
@@ -452,12 +420,11 @@ class OracleBeeEcho(BeeAgent):
                         })
                 if _ua:
                     _pub_details["unusual_activity"] = _ua[:15]  # 最多保留15条
-            self._publish(ticker, discovery, "options+polymarket", score, direction, details=_pub_details)
+            self._publish(ticker, discovery, "options", score, direction, details=_pub_details)
 
-            # Phase 2: confidence = 期权数据可用 + Polymarket 可用 + LLM 加成
+            # Phase 2: confidence = 期权数据可用 + LLM 加成
             confidence = build_confidence(0.4, [
                 (bool(result), 0.3),
-                (poly_markets > 0, 0.1),
                 (bool(llm_options), 0.2),
             ])
 
@@ -470,14 +437,9 @@ class OracleBeeEcho(BeeAgent):
                 dimension="odds",
                 data_quality={
                     "options": "real" if result else "fallback",
-                    "polymarket": "real" if poly_markets > 0 else "unavailable",
                 },
                 details={**(result or {}), "term_structure": term_structure,
                          "deep_skew": deep_skew, "max_pain": max_pain},
-                extras={
-                    "polymarket_score": poly_score,
-                    "polymarket_markets": poly_markets,
-                },
             ).to_dict()
 
         except AGENT_ERRORS as e:

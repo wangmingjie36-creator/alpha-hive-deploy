@@ -345,21 +345,3 @@ class TestOutcomeConsistency:
                 f"Bool: {direction} {ret}% → expected {expected_bool}"
             assert determine_correctness(direction, ret) == expected_str, \
                 f"Str: {direction} {ret}% → expected {expected_str}"
-
-
-class TestPolymarketKeywordFix:
-    """方案11：Polymarket 关键词匹配集成验证"""
-
-    def test_no_false_positive_on_update(self):
-        """'update' 不应被视为看涨"""
-        import re
-        _q = "nvidia driver update release schedule"
-        _BULLISH = r'\b(?:above|higher|beat|exceed|rise|up|bull|hit|rally|surge|gain)\b'
-        assert not re.search(_BULLISH, _q)
-
-    def test_no_false_positive_on_breakdown(self):
-        """'breakdown' 不应被视为看空"""
-        import re
-        _q = "earnings breakdown analysis for aapl"
-        _BEARISH = r'\b(?:below|lower|miss|fall|drop|down|crash|bear|decline|sink|lose)\b'
-        assert not re.search(_BEARISH, _q)

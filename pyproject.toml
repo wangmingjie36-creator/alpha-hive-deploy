@@ -38,7 +38,7 @@ markers = [
 
 [tool.coverage.run]
 source = ["."]
-omit = ["tests/*", "test_*.py", "setup_*.py", "alpha_hive_app.py"]
+omit = ["tests/*", "test_*.py", "setup_*.py"]
 
 [tool.coverage.report]
 show_missing = true

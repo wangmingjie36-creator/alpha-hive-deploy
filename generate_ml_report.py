@@ -984,7 +984,7 @@ class MLEnhancedReportGenerator:
             ("signal",   "信号强度 (Signal)",   "聪明钱 SEC Form4 / 机构持仓"),
             ("catalyst", "催化剂 (Catalyst)",   "事件日历 / 财报 / 产品发布"),
             ("sentiment","情绪 (Sentiment)",    "X 平台 / Reddit / 新闻情绪"),
-            ("odds",     "赔率 (Odds)",          "期权 P/C / IV Rank / Polymarket"),
+            ("odds",     "赔率 (Odds)",          "期权 P/C / IV Rank / 异常流"),
             ("risk_adj", "风险调整 (RiskAdj)",  "拥挤度 / 波动 / 交叉验证调整"),
         ]
         weights_from_config = False
@@ -3077,9 +3077,12 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
             ).decode().strip()
             cache_entries.append(f"100644 {blob}\t{f}")
         except (subprocess.CalledProcessError, OSError) as _e_blob:
-            _log.warning("hash-object 失败 (%s): %s", f, _e_blob)
+            # v0.45.312：升级到 error + 🚨——理由同 report_deployer.
+            # deploy_static_to_ghpages 同名分支（同一次 code review 里被指出
+            # 两处不一致，纯 warning 在这仓库的 Slack 精简规则下不会触达任何人）。
+            _log.error("🚨 hash-object 失败 (%s)：本次同步不含该文件 —— %s", f, _e_blob)
     if not cache_entries:
-        _log.warning("gh-pages 同步：全部 %d 个文件 hash-object 均失败，无内容可提交", len(files))
+        _log.error("🚨 gh-pages 同步：全部 %d 个文件 hash-object 均失败，无内容可提交", len(files))
         if os.path.exists(idx):
             os.remove(idx)
         return
@@ -3102,7 +3105,10 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
         if _push["success"]:
             _log.info(
                 "gh-pages 同步成功 (%d 文件，实测变更 %s，attempt %d)",
-                len(files),
+                # v0.45.312：用 len(cache_entries)（实际写进树里的），不是
+                # len(files)（候选数）——理由同 report_deployer.
+                # deploy_static_to_ghpages 同名分支。
+                len(cache_entries),
                 _push["n_changed"] if _push["n_changed"] >= 0 else "未知",
                 _push["attempts"],
             )

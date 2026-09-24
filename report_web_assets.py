@@ -45,7 +45,7 @@ def write_pwa_files(reporter):
     sw_content = f"""// Alpha Hive Service Worker - {_sw_ts}
 var CACHE_NAME='{cache_name}';
 var PRECACHE_URLS=['./', 'index.html', 'manifest.json',
-  {_chart_js!r}];  // v0.41.0: Chart.js 自托管（jsdelivr 大陆不可达）
+  {_json2.dumps(_chart_js)}];  // v0.41.0: Chart.js 自托管（jsdelivr 大陆不可达）
 
 self.addEventListener('install', function(e){{
   self.skipWaiting();
