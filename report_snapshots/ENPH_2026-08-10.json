@@ -13,6 +13,7 @@
     "RivalBeeVanguard": 6.06,
     "OracleBeeEcho": 6.015384615384616
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -26,7 +27,7 @@
   "actual_prices": {
     "t1": 40.7063,
     "t7": 37.18000030517578,
-    "t30": null
+    "t30": 34.42
   },
-  "created_at": "2026-08-25T12:44:58.112663"
+  "created_at": "2026-09-24T14:46:21.486920"
 }

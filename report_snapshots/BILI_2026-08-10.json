@@ -11,6 +11,7 @@
     "ScoutBeeNova": 6.2856,
     "RivalBeeVanguard": 6.06
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -24,7 +25,7 @@
   "actual_prices": {
     "t1": 18.01,
     "t7": 16.5,
-    "t30": null
+    "t30": 15.289999961853027
   },
-  "created_at": "2026-08-25T08:01:45.557384"
+  "created_at": "2026-09-24T14:45:54.305559"
 }
