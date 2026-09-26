@@ -480,9 +480,13 @@ def _select_expiries(by_expiry: Dict[str, dict], today: datetime, max_expiries: 
 # 负百分比 = 部分和与全链**符号相反**。⇒ `total_gex` 只有在全链上才是良定义的量，
 # 「近月窗口」是另一个指标（pin gamma），不是这个。下游
 # `RegimeWeightAdjuster` 消费的语义也是「做市商整体净 gamma 多还是空」，本就是全书概念。
-# v0.45.334 起它是 GEX 进评分的**唯一**通道（三值 regime → 五维权重偏移）；此前
+# v0.45.334 起它是**本视图**进评分的唯一通道（三值 regime → 五维权重偏移）；此前
 # `GexRegimeModifier` 还把 ±0.8 直接加进 rule_score（v0.45.197 写本段时漏提），现在只算诊断值、
 # 不施加（`queen_distiller` 步骤 4.5，`gex_regime_mod.applied=False`）。
+# ⚠️ 但它**不是 GEX 进评分的唯一通道**：OracleBee `options_score` 的 `gex_signal` 读的是
+# `options_analyzer.calculate_gamma_exposure` 在主链（`_select_expiries`，≤4 个到期日）上算的
+# 净 gamma，不经本视图，v0.45.334 未动。上表「截断可能翻转净 GEX 符号」对那个量同样适用
+# （公式不同、未量化，待验证）。
 #
 # 24 与 `fetch_cboe_full_chain_oi` 的 `max_expirations` 同值（实测当日全链到期日数
 # 中位 18 / 最大 25）；被上限砍掉的到期日数**记进计数**，别让上限的够不够变成假设。

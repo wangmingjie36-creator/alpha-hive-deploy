@@ -1213,7 +1213,7 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 09-18（v0.45.315 补登）：删 Polymarket。Oracle 融合分逐位不变，只少了 data_quality
     # 里恒为 unavailable 的通道 → 仅 Queen 层 data_real_pct 变化（同 v0.45.314）
     "v0.45.315": (),
-    # 09-24：断开 GexRegimeModifier 对 rule_score 的直接加减分 —— 只在 Queen 层方向投票
+    # 09-28（原定 09-24，未赶上那次扫描）：断开 GexRegimeModifier 对 rule_score 的直接加减分 —— 只在 Queen 层方向投票
     # 之后，各蜂自身输出不变；SIGNAL_UPSTREAM 里没有信号读 final_score/rule_score ⇒ 只动
     # composite.final_score（ALWAYS_SLICED，不必写）
     "v0.45.334": (),

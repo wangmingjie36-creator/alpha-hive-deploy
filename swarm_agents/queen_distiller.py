@@ -1061,7 +1061,8 @@ class QueenDistiller:
         双引擎：规则引擎始终运行作为基础，LLM 引擎在可用时叠加推理。
 
         升级 #1: GEX 政体联动评分 —— v0.45.334 起**只算不加**（诊断值，见步骤 4.5）
-        升级 #4: 政体条件权重（根据宏观/GEX/IV 动态调整 5 维权重）—— GEX 进评分的唯一通道
+        升级 #4: 政体条件权重（根据宏观/GEX/IV 动态调整 5 维权重）—— GEX 仍进评分的两条通道之一
+                 （另一条是 OracleBee `options_score` 里的 `gex_signal`，v0.45.334 未动；见步骤 4.5 注释）
         """
         # 降级护栏：蜂 future 超时 / 抛异常时 alpha_hive_daily_report 会向 agent_results
         # append(None)，而下方 GEX/F&G 预处理循环（line ~874/883/897/924）直接 _r.get(...)，
@@ -1165,9 +1166,14 @@ class QueenDistiller:
         rule_score = dv["rule_score"]
 
         # ===== 4.5 GEX 政体诊断（需要 direction）—— v0.45.334 起只算、不加进 rule_score =====
-        # 此前这里把 `GexRegimeModifier` 的 ±0.8 直接加到 rule_score 上，是 GEX 进评分的
-        # **第二条**通道（第一条是步骤 0 的 RegimeWeightAdjuster 三值 regime 偏移权重）；
-        # v0.45.197 的世代边界只记了第一条。断开的理由：
+        # 此前这里把 `GexRegimeModifier` 的 ±0.8 直接加到 rule_score 上，是 GEX 进评分的三条通道之一。
+        # 另两条：① 步骤 0 的 RegimeWeightAdjuster 三值 regime 偏移权重；② OracleBee `options_score`
+        # 里的 `gex_signal`（`options_analyzer.py`：主链 `gamma_exposure < -0.001` 得 2.0、否则 1.0，
+        # None 也按 1.0 ⇒ 经 odds 维进加权分）。v0.45.197 的世代边界只记了 ①。
+        # ⚠️ **本版只断开这一条，② 未动**（改它是评分口径变更，须用户决定）。评审只读重放
+        # 09-11~09-22：去掉 ② 那 +1，210 行里 47 行 final_score 变，中位 0.31、最大 0.38
+        # （47/210 已只读复核；Δ 幅度为评审实测、未复算）。② 同样挂着数据可得性：09-24/25 两天
+        # Oracle `gamma_exposure` 60/60 为 None ⇒ 负 gamma 标的少了那 +1。断开这一条的理由：
         #   · 它的非零值 67% 来自「正 GEX 且距 flip<2%」分支，而那个 flip 是逐行权价看净 GEX
         #     变号，结构上贴着现价 ⇒ 「近 flip」大多是定义的产物，不是环境信号；
         #   · 与数据可得性挂钩：GEX 取不到的日子（09-17 全天 30/30 unknown）没有这笔调整，

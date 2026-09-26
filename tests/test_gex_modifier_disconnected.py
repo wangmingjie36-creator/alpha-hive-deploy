@@ -1,8 +1,10 @@
 """v0.45.334 断线守卫：`GexRegimeModifier` 的调整值不许再进 rule_score / final_score。
 
-背景：GEX 此前经**两条**通道进评分 —— ① `RegimeWeightAdjuster` 按三值 regime 偏移五维权重；
-② `GexRegimeModifier` 在方向投票之后把 ±0.8 直接加进 rule_score。v0.45.197 的世代边界只记了 ①。
-v0.45.334 断开 ②：`QueenDistiller` 步骤 4.5 仍计算、落盘为诊断值（`gex_regime_mod.applied=False`），
+背景：GEX 此前经**三条**通道进评分 —— ① `RegimeWeightAdjuster` 按三值 regime 偏移五维权重；
+② `GexRegimeModifier` 在方向投票之后把 ±0.8 直接加进 rule_score；③ OracleBee `options_score` 里的
+`gex_signal`（`options_analyzer.py`：主链 `gamma_exposure` 为负得 2.0、否则 1.0，经 odds 维进加权分）。
+v0.45.197 的世代边界只记了 ①。v0.45.334 **只断开 ②**，① ③ 照旧（③ 本文件不守 —— 夹具里 Oracle
+直接给分，不经 `options_analyzer`）：`QueenDistiller` 步骤 4.5 仍计算、落盘为诊断值（`gex_regime_mod.applied=False`），
 不再施加。理由与幅度见 `queen_distiller.py` 步骤 4.5 注释与 `ic_rerun_readiness._COHORT_HISTORY`
 的 v0.45.334 条。
 
@@ -109,10 +111,12 @@ class TestGexModifierDoesNotMoveScores:
 
     @pytest.mark.parametrize("direction", _DIRECTIONS)
     def test_scores_equal_unknown_baseline_under_every_regime(self, monkeypatch, direction):
-        """任何政体 × flip 距离 × vanna 可翻转，rule_score 与 final_score 都等于 unknown 基线。
+        """任何政体 × flip 距离 × vanna 可翻转，rule_score / final_score / 最终方向都等于 unknown 基线。
 
         变红的变异：把 `queen_distiller` 步骤 4.5 的 `rule_score += _gex_adj`（或任何把
-        `gex_adjustment` 加回 rule_score 的写法）接回去 —— 本条会报出全部「咬得到」的组合。
+        `gex_adjustment` 加回 rule_score 的写法）接回去 —— 本条会报出全部「咬得到」的组合；
+        或在步骤 5 之后按调整值改 `final_direction`（如负调整把看多压成中性）—— 分数全不动，
+        只有 `direction` 那一项红。
         """
         _pin_config(monkeypatch)
         base = _distill(direction, _dealer_gex("unknown"))
@@ -141,9 +145,17 @@ class TestGexModifierDoesNotMoveScores:
                     for key in ("rule_score", "final_score"):
                         if out[key] != pytest.approx(base[key], abs=1e-9):
                             mismatches.append((regime, flip, can_flip, key, base[key], out[key], g))
+                    # 最终方向也不许动：诊断值只落盘，不能借「负 GEX 抑制看多」之类的写法改方向
+                    # （那不经 rule_score，上面两个键全绿也拦不住）
+                    if out["direction"] != base["direction"]:
+                        mismatches.append((regime, flip, can_flip, "direction",
+                                           base["direction"], out["direction"], g))
         assert not mismatches, (
-            f"GEX 政体改动了分数（方向 {direction}）：{mismatches[:6]} —— "
-            "GexRegimeModifier 的调整值又被加回了评分链（v0.45.334 已断开，见步骤 4.5 注释）")
+            f"GEX 政体改动了分数或方向（方向 {direction}）：{mismatches[:6]} —— "
+            "GexRegimeModifier 的调整值又被接回了评分链（v0.45.334 已断开，见步骤 4.5 注释）")
+        # 前提：基线的最终方向就是投出来的方向 —— 否则看多/看空被改成中性这类变异，
+        # 在一个本来就是中性的基线上看不出来
+        assert base["direction"] == direction, base["direction"]
         # 自证：同一夹具上旧 compute 真的给出足以改分的调整 —— 否则上面的「没变」恒真
         assert biting >= 8, f"只有 {biting} 个组合的调整值咬得到分数，夹具太弱"
         assert False in signs, "没有负向调整的组合 —— 负 GEX 分支没被覆盖"
@@ -226,7 +238,8 @@ class TestNoGexAdjustmentArithmeticInProduction:
 
     行为测试只盯 `QueenDistiller.distill` 一条路；这条盯的是「任何生产文件里有人把这个诊断值
     加到某个分数上」。它抓不住换了名字的写法（`x = mod["gex_adjustment"]; s += x`）——
-    那由上面的行为测试兜（对 distill 而言）。两层各管一半，缺一不可。
+    那由上面的行为测试兜（对 distill 而言），其余生产文件由下面 `TestGexAdjustmentKeyReadersAreKnown`
+    兜（键名是字符串常量，换变量名换不掉它）。三层各管一块，缺一不可。
 
     判定：`+`/`-` 的任一操作数子树里出现 ① 标识符 / 属性名含 `gex_adj`（`gex_adjustment`、
     `_gex_adj`、`gex_adj` …），或 ② 字符串常量恰为 `"gex_adjustment"`（`d["gex_adjustment"]`、
@@ -343,3 +356,100 @@ class TestNoGexAdjustmentArithmeticInProduction:
                        if "+ " in p.read_text(encoding="utf-8") or "+= " in p.read_text(encoding="utf-8"))
         assert naive == [".claude/worktrees/stale/queen_distiller.py", "experiments/replay.py",
                          "swarm_agents/queen_distiller.py", "tests/test_x.py"], naive
+
+
+class TestGexAdjustmentKeyReadersAreKnown:
+    """换名接回的静态兜底：生产代码里谁碰 `"gex_adjustment"` 这个键，名单钉死。
+
+    上一类只认 `gex_adj*` 标识符 / 键进 `+`/`-`，抓不住
+    `a = sr["gex_regime_mod"]["gex_adjustment"]; s = s + a`（运算里只剩 `a`）；行为测试只盯
+    `QueenDistiller.distill` 一条路。这里补「任何生产文件里出现这个键」：键名是字符串常量，
+    换变量名换不掉它。判定：`ast.Constant` 的值**恰为** `"gex_adjustment"`（docstring 里顺带提到
+    不算 —— 那是整段文本）。跳过的目录同上一类（tests/、experiments/ 是离线代码，
+    共振检验的 replay 就是要在旧记录上把它加回去）。
+
+    名单**双向**钉（怕它变大，也怕它过期）：
+      · 多出来 ⇒ 新读者：先回答「它是诊断展示，还是要进分」。前者写明用途加进名单；
+        后者先过前瞻检验并登记世代边界（v0.45.334 断开的理由见 `queen_distiller` 步骤 4.5）。
+      · 少了 ⇒ 名单里有人已不再读它：删掉那一项，别让名单替一个不存在的读者担保。
+    名单内的文件本身不在这条的管辖内 —— `queen_distiller` 由行为测试兜，其余两处是生产者 / 展示。
+    """
+
+    #: 相对仓库根 → 为什么允许碰这个键
+    ALLOWED = {
+        "gex_regime.py": "生产者：`GexRegimeModifier.compute` / `_neutral_result` 的返回字典",
+        "swarm_agents/queen_distiller.py": "步骤 0 的默认值 + 步骤 4.5 的诊断日志（applied=False 落盘）",
+        "generate_deep_v2.py": "深度报告徽章：只在记录的 applied 不为 False 时印「评分±x」",
+    }
+    _KEY = "gex_adjustment"
+
+    @classmethod
+    def _scan(cls, root=None):
+        """返回 ({相对路径: 该键出现次数}, 扫到的文件相对路径集合)。"""
+        root = Path(root) if root is not None else REPO_ROOT
+        found, scanned = {}, set()
+        for py in own_python_files(root)[0]:
+            rel = py.relative_to(root)
+            if rel.parts[0] in TestNoGexAdjustmentArithmeticInProduction._SKIP_TOP:
+                continue
+            try:
+                tree = ast.parse(py.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError, OSError):
+                continue
+            scanned.add(rel.as_posix())
+            n = sum(1 for node in ast.walk(tree)
+                    if isinstance(node, ast.Constant) and node.value == cls._KEY)
+            if n:
+                found[rel.as_posix()] = n
+        return found, scanned
+
+    def test_readers_match_the_allow_list(self):
+        """变红的变异：在任一名单外的生产文件里写
+        `a = sr["gex_regime_mod"]["gex_adjustment"]; s = s + a`（上一类的运算守卫对它全绿）。
+        """
+        found, scanned = self._scan()
+        assert len(scanned) > 50, f"只扫到 {len(scanned)} 个生产文件 —— 枚举坏了"
+        extra = sorted(set(found) - set(self.ALLOWED))
+        stale = sorted(set(self.ALLOWED) - set(found))
+        assert not extra, (
+            f"名单外的生产文件读了 `gex_adjustment`：{ {k: found[k] for k in extra} }。"
+            "v0.45.334 起它只是诊断值（applied=False）；是展示就写明用途加进 ALLOWED，"
+            "要进分先过前瞻检验并登记世代边界。")
+        assert not stale, f"名单里的文件已不再碰这个键：{stale} —— 删掉那一项"
+
+    @staticmethod
+    def _plant(root):
+        """一棵带病灶的树：一处名单外的换名接回 + 五处应被排除的「同形但不算」。"""
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "paper_portfolio.py").write_text(
+            "def f(sr, s):\n"
+            "    a = sr['gex_regime_mod']['gex_adjustment']\n"
+            "    s = s + a\n"
+            "    return s\n", encoding="utf-8")
+        (root / "generate_deep_v2.py").write_text(            # 名单内
+            "def badge(m):\n    return m.get('gex_adjustment', 0)\n", encoding="utf-8")
+        (root / "notes.py").write_text(                        # docstring 顺带提到：不算
+            '"""这里提到 gex_adjustment 只是文字。"""\n', encoding="utf-8")
+        for sub in ("tests", "experiments"):
+            (root / sub).mkdir()
+            (root / sub / "x.py").write_text("s = 1.0 + m['gex_adjustment']\n", encoding="utf-8")
+        nested = root / ".claude" / "worktrees" / "stale"
+        nested.mkdir(parents=True)
+        (nested / "paper_portfolio.py").write_text("a = m['gex_adjustment']\n", encoding="utf-8")
+
+    def test_renamed_reconnection_is_caught_where_the_arithmetic_guard_is_blind(self, tmp_path):
+        """病灶夹具：换名接回被本条抓到，而上一类的运算守卫**确实**抓不到（否则本类是冗余的）；
+        名单内 / docstring / tests / experiments / 嵌套副本都不报。
+
+        变红的变异：把 `node.value == cls._KEY` 改成 `cls._KEY in str(node.value)`（notes.py 误报）；
+        或把 `_SKIP_TOP` 的引用换成空集合（tests/、experiments/ 误报）。
+        """
+        self._plant(tmp_path)
+        found, scanned = self._scan(tmp_path)
+        assert set(found) - set(self.ALLOWED) == {"paper_portfolio.py"}, found
+        assert found.get("generate_deep_v2.py") == 1, "前提：名单内那份确实被扫到并认出"
+        assert "notes.py" in scanned and "notes.py" not in found, found
+        assert not any(s.startswith(".claude") for s in scanned), scanned
+        blind, _s, _m = TestNoGexAdjustmentArithmeticInProduction._scan(tmp_path)
+        assert "paper_portfolio.py" not in {h[0] for h in blind}, (
+            "前提失效：运算守卫已能抓到换名接回，本类的夹具没在测它补的那一块")

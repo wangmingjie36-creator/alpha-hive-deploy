@@ -27,7 +27,10 @@ class GexRegimeModifier:
 
     ⚠️ **v0.45.334 起这个值不再加进 rule_score / final_score** —— `QueenDistiller`
     步骤 4.5 仍调用 `compute()` 并把结果落盘为 `gex_regime_mod`（带 `applied=False`），
-    只作诊断与审计轨迹。GEX 进评分只剩 `RegimeWeightAdjuster` 一条通道。
+    只作诊断与审计轨迹。⚠️ 这**不等于** GEX 只剩一条通道进评分：仍有 ① 本模块的
+    `RegimeWeightAdjuster`（三值 regime → 五维权重偏移）与 ② OracleBee `options_score` 里的
+    `gex_signal`（`options_analyzer.py`，主链 `gamma_exposure` 为负得 2.0、否则 1.0，经 odds 维
+    进加权分；不读本模块，v0.45.334 未动）。
     断开理由见 `queen_distiller.py` 步骤 4.5 注释；守卫 `tests/test_gex_modifier_disconnected.py`。
 
     核心逻辑：

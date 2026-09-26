@@ -525,10 +525,11 @@ class TestBoundaryEvidenceIsPerVersion:
         assert ev["marker_first_seen"] == b and ev["verdict"] == "matches", ev
 
     def test_334_marker_later_than_boundary_is_too_early(self, tmp_path):
-        """推送晚于 09-24 扫描的情形：印记首见晚于边界 ⇒ boundary_too_early（危险方向，会混算）。
+        """推送晚于边界日（09-28）扫描的情形：印记首见晚于边界 ⇒ boundary_too_early（危险方向，会混算）。
 
         这是本条边界日期的**前提**失败时唯一会红的观测点（见 `_COHORT_HISTORY` v0.45.334 条）。
-        变红的变异：把 `_marker_gex_modifier_not_applied` 改成恒 False（判别器失明 ⇒ no_evidence_yet）。
+        变红的变异：把 `_marker_gex_modifier_not_applied` 改成恒 False（判别器失明 ⇒ `marker_first_seen`
+        为 None；v0.45.334 起 verdict 仍是 too_early —— 边界后有无印记的归档 —— 红在首见日那一半）。
         """
         import datetime as dt
         b = self._date_of("v0.45.334")
@@ -583,3 +584,258 @@ class TestBoundaryEvidenceIsPerVersion:
         out = capsys.readouterr().out
         assert rc == 1
         assert "没有登记可判别的归档印记" in out and "vNOMARK" in out, out
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 边界证据要到得了自动调用方（v0.45.334）
+# ════════════════════════════════════════════════════════════════════════════
+
+_TQ_BOUNDARY = "2099-01-05"
+_TQ_TODAY = "2099-01-20"
+
+
+def _write_gex_archive(root, date, applied="__missing__", ticker="NVDA"):
+    """归档形状同生产：`swarm_results.gex_regime_mod`；`applied` 缺省 = 旧记录（没有这个键）。"""
+    import json as _json
+    mod = {"gex_adjustment": -0.15, "gex_regime": "positive_gex"}
+    if applied != "__missing__":
+        mod["applied"] = applied
+    (root / f"analysis-{ticker}-ml-{date}.json").write_text(
+        _json.dumps({"swarm_results": {"gex_regime_mod": mod}}), encoding="utf-8")
+
+
+@pytest.fixture
+def tq_boundary(monkeypatch):
+    """表尾追加一条测试边界并登记 v0.45.334 同款印记 —— 不依赖「表头恰好是 v0.45.334」，
+    下一条真边界追加后本组测试不跟着失效。"""
+    monkeypatch.setattr(rr, "_COHORT_HISTORY",
+                        list(rr._COHORT_HISTORY) + [(_TQ_BOUNDARY, "vTQ", "测试用边界")])
+    monkeypatch.setitem(rr._BOUNDARY_MARKERS, "vTQ",
+                        ("applied is False（测试）", rr._marker_gex_modifier_not_applied))
+    return _TQ_BOUNDARY
+
+
+class TestBoundaryEvidenceReachesAutomatedCallers:
+    """`cohort_boundary_evidence()` 是 v0.45.334 那条 09-28 边界「推送晚了」时唯一会红的观测点，
+    但此前只有人读模式调用它：`--json` / `--quiet` 在它之前 return，`--out` 的 JSON 里也没有。
+    而**所有**自动调用方都走那几条路 —— 编排器 Step 11 是 `--quiet --out`，周度任务是 `--quiet`。
+    等于这个观测点在自动流程里从没被执行过。
+
+    契约（不许打破）：`--quiet` 仍是**一行**，前四段顺序不变（周度任务按「第三段 = F&G」解析），
+    证据**只在要人看时**（日期与印记不符 / 核不了）追加为第五段、以 🚨 开头，正常时仍是四段
+    （`tests/test_dim_ic_forward_test.py` 也钉着四段）；退出码 0/1/3 不因它改变；
+    `--json` / `--out` 恒带完整结果，编排器读的 JSON 键照旧都在。
+    """
+
+    @staticmethod
+    def _run(monkeypatch, argv):
+        import sys as _s
+        monkeypatch.setattr(_s, "argv", ["ic_rerun_readiness.py", *argv])
+        return rr.main()
+
+    def _quiet_segments(self, monkeypatch, capsys, db_path):
+        rc = self._run(monkeypatch, ["--db", str(db_path), "--today", _TQ_TODAY, "--quiet"])
+        out = capsys.readouterr().out
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        assert len(lines) == 1, f"--quiet 必须只打一行（周度任务原样抄那一行）：{lines}"
+        return rc, lines[0].split("｜")
+
+    def test_quiet_flags_marker_later_than_boundary(self, monkeypatch, capsys, db, tq_boundary):
+        """推送晚了一天：边界日是旧口径、次日才见印记 ⇒ 第五段以 🚨 开头。
+
+        变红的变异：把 `--quiet` 那行末尾的 `+ "｜" + bev["line"]` 删掉（回到 v0.45.334 之前）。
+        """
+        p = db([])
+        _write_gex_archive(p.parent, _TQ_BOUNDARY, ticker="AAA")                     # 旧链
+        _write_gex_archive(p.parent, "2099-01-06", applied=False, ticker="BBB")     # 新链
+        rc, seg = self._quiet_segments(monkeypatch, capsys, p)
+        assert rc == 1, "退出码契约不因边界证据改变（未就绪仍是 1）"
+        assert len(seg) == 5, seg
+        assert seg[0] == rr.summary_line(rr.assess(db_path=p, today=_TQ_TODAY)), "第一段必须仍是 IC 摘要"
+        assert seg[4].startswith("🚨"), seg[4]
+        assert "vTQ" in seg[4] and _TQ_BOUNDARY in seg[4] and "2099-01-06" in seg[4], seg[4]
+
+    def test_quiet_flags_old_archives_after_boundary_before_any_marker(
+            self, monkeypatch, capsys, db, tq_boundary):
+        """推送还没到：边界日已有归档、却一份印记都没有 ⇒ 也是「写早了」，**现在就红**，
+        不等新代码真跑起来（此前这种情形一直报 ⏳ no_evidence_yet「生产还没跑到」）。
+
+        变红的变异：把 `cohort_boundary_evidence` 里 `first is None` 分支改回恒 `no_evidence_yet`。
+        """
+        p = db([])
+        _write_gex_archive(p.parent, "2099-01-01", ticker="AAA")       # 边界前的旧记录：不算
+        _write_gex_archive(p.parent, _TQ_BOUNDARY, ticker="BBB")       # 边界当天仍是旧链
+        rc, seg = self._quiet_segments(monkeypatch, capsys, p)
+        assert rc == 1
+        assert seg[4].startswith("🚨") and "1 个归档日无印记" in seg[4], seg[4]
+        ev = rr.cohort_boundary_evidence(p.parent)
+        assert ev["verdict"] == "boundary_too_early" and ev["marker_first_seen"] is None, ev
+        assert ev["unmarked_after_boundary"] == [_TQ_BOUNDARY], ev
+
+    def test_before_boundary_archives_only_is_still_no_evidence(self, monkeypatch, capsys, db, tq_boundary):
+        """成对的另一半：边界日之后还没有任何归档 ⇒ 仍是 ⏳ no_evidence_yet，不许误报成 🚨。
+
+        变红的变异：把 `elif date >= boundary:` 改成 `else:`（边界前的旧记录也被数进去）。
+        """
+        p = db([])
+        _write_gex_archive(p.parent, "2099-01-01", ticker="AAA")
+        rc, seg = self._quiet_segments(monkeypatch, capsys, p)
+        assert rc == 1
+        assert len(seg) == 4, f"不该追加 🚨 段：{seg[4:]}"
+        ev = rr.boundary_evidence_status(p.parent)
+        assert ev["verdict"] == "no_evidence_yet" and ev["alarm"] is False, ev
+        assert ev["line"].startswith("⏳") and "vTQ" in ev["line"], ev["line"]
+
+    def test_quiet_healthy_boundary_is_not_flagged(self, monkeypatch, capsys, db, tq_boundary):
+        """边界日即见印记 ⇒ matches，不加段（一个恒在的 🚨 段，和没有这一段一样没人看）。
+
+        变红的变异：把 `if bev["alarm"]:` 改成恒真（正常时也追加第五段）。
+        """
+        p = db([])
+        _write_gex_archive(p.parent, _TQ_BOUNDARY, applied=False, ticker="AAA")
+        _rc, seg = self._quiet_segments(monkeypatch, capsys, p)
+        assert len(seg) == 4, f"正常时不该追加段：{seg[4:]}"
+        ev = rr.boundary_evidence_status(p.parent)
+        assert ev["verdict"] == "matches" and ev["alarm"] is False, "前提：夹具确实是健康的那一种"
+        assert ev["line"].startswith("✅"), ev["line"]
+
+    def test_json_and_out_carry_the_evidence(self, monkeypatch, capsys, db, tq_boundary, tmp_path):
+        """`--json` 与 `--out` 都带 `cohort_boundary_evidence`，且编排器读的键照旧都在。
+
+        变红的变异：删掉 `res["cohort_boundary_evidence"] = bev`；或把 `bev = …` 挪到 `--out`
+        写盘之后（`--json` 仍绿，`--out` 红 —— 编排器读的正是 `--out`）。
+        """
+        import json as _json
+        p = db([])
+        _write_gex_archive(p.parent, _TQ_BOUNDARY, ticker="AAA")
+        _write_gex_archive(p.parent, "2099-01-06", applied=False, ticker="BBB")
+        out_file = tmp_path / "readiness_out.json"
+        rc = self._run(monkeypatch, ["--db", str(p), "--today", _TQ_TODAY, "--json",
+                                     "--out", str(out_file)])
+        assert rc == 1
+        printed = _json.loads(capsys.readouterr().out)
+        written = _json.loads(out_file.read_text(encoding="utf-8"))
+        for payload in (printed, written):
+            ev = payload.get("cohort_boundary_evidence")
+            assert ev is not None, sorted(payload)
+            assert ev["verdict"] == "boundary_too_early" and ev["alarm"] is True, ev
+            assert ev["version"] == "vTQ" and ev["marker_first_seen"] == "2099-01-06", ev
+            # 编排器 Step 11 的 READINESS_LINE 读这几个键（~/.claude/scripts/alpha-hive-orchestrator.sh）
+            for key in ("cohort", "weeks_accrued", "weeks_required", "n_ripe_samples",
+                        "eta_date", "pool_note"):
+                assert key in payload, key
+
+    def test_evidence_exception_is_rendered_not_raised(self, monkeypatch, capsys, db, tq_boundary):
+        """判别器抛异常 ⇒ `cannot_judge`（同样 🚨），退出码照旧。
+
+        抛出去的代价：Python 未捕获异常退出码是 **1**，编排器把 1 读成「未就绪（正常，继续攒）」
+        —— 失败被改写成了正常状态，且没有任何一行说它坏了。
+        变红的变异：删掉 `boundary_evidence_status` 里的 try/except。
+        """
+        def boom(*_a, **_k):
+            raise RuntimeError("归档读炸了（测试注入）")
+        monkeypatch.setattr(rr, "cohort_boundary_evidence", boom)
+        rc, seg = self._quiet_segments(monkeypatch, capsys, db([]))
+        assert rc == 1
+        assert seg[4].startswith("🚨") and "RuntimeError" in seg[4], seg[4]
+        st = rr.boundary_evidence_status(db([]).parent)
+        assert st["verdict"] == "cannot_judge" and st["alarm"] is True, st
+
+    def test_every_verdict_renders_a_line(self):
+        """`_boundary_line` 对每个判定都要出得了一行（缺文案 ⇒ KeyError ⇒ 整个 main 崩）。
+
+        变红的变异：删掉 `_BOUNDARY_VERDICT_TEXT["cannot_judge"]`。
+        """
+        base = {"version": "vX", "boundary": "2099-01-01", "marker_first_seen": None,
+                "unmarked_after_boundary": []}
+        for verdict in ("matches", "boundary_too_early", "boundary_too_late", "no_evidence_yet",
+                        "no_marker", "cannot_judge"):
+            line = rr._boundary_line({**base, "verdict": verdict})
+            assert ("vX" in line) and (line.startswith("🚨") == (verdict in rr.BOUNDARY_ALARM_VERDICTS)), line
+
+
+class TestCorrectionEntriesKeepTheBoundaryCheckable:
+    """v0.45.334 那条边界自带预案：推送晚了就**追加**一条更正、把边界顺延。预案一执行，
+    判别器必须跟着核新日期 —— 否则它要么永远拿旧日期报 🚨（「狼来了」之后真报也没人看），
+    要么回 `no_marker`（这条边界从此核不了）。两种都是在预案**被正确执行之后**才坏。
+
+    修前：缺省版本取表尾，日期却用 `next(...)` 取**第一条**同名条目；更正若新开标签则查不到印记。
+    """
+
+    @pytest.fixture
+    def with_boundary(self, monkeypatch):
+        def _apply(extra):
+            monkeypatch.setattr(rr, "_COHORT_HISTORY", list(rr._COHORT_HISTORY) + extra)
+            monkeypatch.setitem(rr._BOUNDARY_MARKERS, "vTQ",
+                                ("applied is False（测试）", rr._marker_gex_modifier_not_applied))
+        return _apply
+
+    @staticmethod
+    def _archives(root):
+        _write_gex_archive(root, "2099-01-05", ticker="AAA")                  # 原边界日：旧链
+        _write_gex_archive(root, "2099-01-06", applied=False, ticker="BBB")   # 顺延后的边界日：新链
+
+    def test_same_label_correction_uses_the_last_entry(self, tmp_path, with_boundary):
+        """更正沿用同一标签：缺省与显式都核**最后一条**，且与 `assess()` 的边界一致。
+
+        变红的变异：把显式分支改回 `next(... for ... in _COHORT_HISTORY ...)`（第一条），
+        或把缺省改回「先取表尾的 version、再按 version 回查日期」。
+        """
+        with_boundary([("2099-01-05", "vTQ", "测试用边界"), ("2099-01-06", "vTQ", "更正：顺延一天")])
+        self._archives(tmp_path)
+        for ev in (rr.cohort_boundary_evidence(tmp_path),
+                   rr.cohort_boundary_evidence(tmp_path, version="vTQ")):
+            assert ev["boundary"] == "2099-01-06" == rr.cohort_start()["date"], ev
+            assert ev["verdict"] == "matches", ev
+
+    def test_new_label_correction_inherits_the_marker(self, tmp_path, with_boundary, monkeypatch):
+        """更正新开标签（表头约定的写法）+ 登记 `_CORRECTS` ⇒ 沿用被更正条目的印记。
+
+        变红的变异：删掉 `cohort_boundary_evidence` 里 `or _BOUNDARY_MARKERS.get(_CORRECTS.get(version))`
+        （本条拿到 no_marker）。
+        """
+        with_boundary([("2099-01-05", "vTQ", "测试用边界"), ("2099-01-06", "vTQ_fix", "更正：顺延一天")])
+        monkeypatch.setitem(rr._CORRECTS, "vTQ_fix", "vTQ")
+        self._archives(tmp_path)
+        ev = rr.cohort_boundary_evidence(tmp_path)
+        assert ev["version"] == "vTQ_fix" and ev["boundary"] == "2099-01-06", ev
+        assert ev["verdict"] == "matches" and ev["marker_first_seen"] == "2099-01-06", ev
+        # 显式核被更正的那条：如实报它当初写早了 —— 那正是它被更正的原因
+        assert rr.cohort_boundary_evidence(tmp_path, version="vTQ")["verdict"] == "boundary_too_early"
+
+    def test_unregistered_new_label_correction_is_no_marker(self, tmp_path, with_boundary):
+        """对照：新开标签却没登记 `_CORRECTS` ⇒ `no_marker`（表头约定 ② 为什么不能省）。"""
+        with_boundary([("2099-01-05", "vTQ", "测试用边界"), ("2099-01-06", "vTQ_fix", "更正：顺延一天")])
+        self._archives(tmp_path)
+        assert rr.cohort_boundary_evidence(tmp_path)["verdict"] == "no_marker"
+
+    @staticmethod
+    def _correction_problems(history, corrects):
+        """表头约定的静态核对：`_CORRECTS` 两端都是真实版本、更正在被更正者之后、reason 以「更正」开头；
+        反过来，reason 以「更正」开头的条目必须登记在 `_CORRECTS`（漏登 ⇒ 判别器回 no_marker）。"""
+        order = {}
+        for i, (_d, v, _r) in enumerate(history):
+            order.setdefault(v, i)
+        problems = []
+        for fix, target in corrects.items():
+            if fix not in order or target not in order:
+                problems.append(f"{fix}→{target}：不在 _COHORT_HISTORY 里")
+            elif order[fix] <= order[target]:
+                problems.append(f"{fix} 排在它更正的 {target} 之前")
+        for _d, v, r in history:
+            if v in corrects and not r.startswith("更正"):
+                problems.append(f"{v}：登记为更正，reason 却不以「更正」开头")
+            if r.startswith("更正") and v not in corrects:
+                problems.append(f"{v}：reason 以「更正」开头却没登记 _CORRECTS")
+        return problems
+
+    def test_real_correction_table_is_consistent(self):
+        assert self._correction_problems(rr._COHORT_HISTORY, rr._CORRECTS) == []
+
+    def test_correction_checker_has_teeth(self):
+        """反向自证：上一条对真表恒空时不能是因为核对器是瞎的。"""
+        h = [("2099-01-05", "vA", "改了什么"), ("2099-01-06", "vB", "更正：顺延一天")]
+        assert self._correction_problems(h, {}) != []                   # 漏登
+        assert self._correction_problems(h, {"vB": "vA"}) == []         # 正确登记
+        assert self._correction_problems(h, {"vA": "vB"}) != []         # 方向反了
+        assert self._correction_problems(h, {"vB": "vZ"}) != []         # 指向不存在的版本

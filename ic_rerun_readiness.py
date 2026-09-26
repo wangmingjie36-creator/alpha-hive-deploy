@@ -82,6 +82,14 @@ def _db_path() -> Path:
 # ⚠️ v0.45.265：追加时**同步**在 `signal_archive.COHORT_SIGNAL_SCOPE` 声明这条边界
 # **直接**改了哪些归档信号（只动 final_score 就写空元组；下游由依赖边自动推出）。
 # `signal_archive.analyze()` 靠它给每个信号切世代 —— 漏了测试红，运行时按全部信号切。
+#
+# ⚠️ v0.45.334：**只挪日期的更正条目怎么追加**（例：推送晚于边界日，要把边界顺延一天）——
+#   ① 新开一个 version 标签（`tests/test_signal_archive_generations.py::test_boundary_versions_are_unique`
+#      要求标签唯一），reason 以「更正」开头、写明更正的是哪条；
+#   ② 在下方 `_CORRECTS` 登记 `新标签 → 被更正的标签` ⇒ `cohort_boundary_evidence` 沿用被更正
+#      条目的归档印记（不登记 ⇒ 它如实回 `no_marker`，边界从此核不了）；
+#   ③ `signal_archive.COHORT_SIGNAL_SCOPE` 照被更正条目的范围抄一份（不抄测试红）。
+# 更正不是新改动，只挪「同一改动的首个受影响业务日」；`assess()` 照旧取末条，自动用新日期。
 _COHORT_HISTORY = [
     # v0.45.275（P1 补登）：以下两条真实发生在**表的第一条之前**——本表 2026-08-17
     # 才开张，此前的系统逻辑改动从未登记（见本文件与 signal_archive.py 顶部的
@@ -554,13 +562,21 @@ _COHORT_HISTORY = [
     ("2026-09-28", "v0.45.334",
      "断开 `GexRegimeModifier` 对 rule_score 的直接加减分（上限 ±0.8，在方向投票之后施加）。"
      "`queen_distiller` 步骤 4.5 仍计算并落盘，`gex_regime_mod.gex_adjustment` 保留原名原值、"
-     "语义改为「算了但没施加」，由新增的 `applied: False` 标明。自此 GEX 进评分只剩 "
-     "`RegimeWeightAdjuster` 的三值 regime 权重偏移一条通道。"
+     "语义改为「算了但没施加」，由新增的 `applied: False` 标明。"
+     "**本版只断开这一条，GEX 仍经两条通道进评分**：`RegimeWeightAdjuster` 的三值 regime 权重偏移；"
+     "OracleBee `options_score` 里的 `gex_signal`（`options_analyzer.py`：主链 `gamma_exposure < -0.001` "
+     "得 2.0、否则 1.0，None 也按 1.0；经 `oracle_bee` 融合进 odds 维）。后者本版未动（改它是评分口径"
+     "变更，须用户决定）。其幅度（评审只读重放 09-11~09-22）：去掉那 +1，210 行里 47 行 final_score 变，"
+     "中位 0.31、最大 0.38 —— 47/210 已只读复核（Oracle `gamma_exposure < -0.001` 恰 47 行），"
+     "Δ 幅度为评审实测、未复算；它同样挂着数据可得性：09-24/25 两天 Oracle `gamma_exposure` "
+     "60/60 为 None（只读复核），负 gamma 标的因此少了那 +1。本条初稿写「自此只剩 RegimeWeightAdjuster "
+     "一条通道」，评审指出后改正（本条未进 main 前）。"
      "⚠️ **更正 v0.45.197 条目**（不改写原文，照 v0.45.176 更正 v0.45.172 的先例）：那条写"
      "「GEX 只经 `gex_regime.RegimeWeightAdjuster` 的三值 `regime` 进评分」——**不成立**。"
-     "GEX 一直经**两条**通道进评分：① RegimeWeightAdjuster（该条实测的 |Δfinal_score| "
-     "中位 0.050 / 最大 0.127、跨阈值 2/249 只量了这一支）；② GexRegimeModifier 直接加减分，"
-     "该条没有提到。同段「`regime=\"unknown\"` ⇒ 不做权重偏移，是安全降级」对②也不成立："
+     "GEX 一直经**三条**通道进评分：① RegimeWeightAdjuster（该条实测的 |Δfinal_score| "
+     "中位 0.050 / 最大 0.127、跨阈值 2/249 只量了这一支）；② GexRegimeModifier 直接加减分；"
+     "③ 上述 Oracle `gex_signal`。②③ 该条都没有提到。"
+     "同段「`regime=\"unknown\"` ⇒ 不做权重偏移，是安全降级」对②也不成立："
      "取不到 GEX 的日子没有这笔（多数为负的）调整，全池分数系统性偏高约 0.11"
      "（例：09-17 全天 30/30 unknown）。"
      "**幅度**（生产 `.swarm_results_*.json` 只读逐行反推；全部为 rule_engine 模式，"
@@ -569,7 +585,9 @@ _COHORT_HISTORY = [
      "之后）；跨 6.0 共 **14 条**（上穿 13 / 下穿 1）、跨 7.5 共 **1 条**（上穿）；同日新旧分 "
      "Spearman 中位 0.969、最小 0.920；非零里 89/133（67%）来自「正 GEX 且距 flip<2%」分支"
      "（那个 flip 是逐行权价看净 GEX 变号，结构上贴着现价）。纸面组合入场资格失去 3 笔（全是看空）。"
-     "**边界代价：作废当前世代 120 条**（09-18、09-22、09-24、09-25 各 30；09-23 那天没有扫描产物；"
+     "**边界代价：作废当前世代 120 条**（09-18、09-22、09-24、09-25 各 30；09-23 没有 `predictions` 行、"
+     "也没有 `.swarm_results_2026-09-23.json`——虽有 12 份 `analysis-*-ml-2026-09-23.json`"
+     "（15:11–15:16 写出），它们不进样本计数；"
      "2026-09-26 迁移后的 `~/alpha-hive-data/pheromone.db` 只读实测），其中**已到期 0 条**、"
      "当前世代 0/25 个不重叠周 ⇒ 损失的是四个扫描日的累积量，不是已实现的证据。"
      "（09-24 / 09-25 两天 GEX 全员 unknown——09-25 的扫描时刻本机 DNS 解析失败——这笔调整恰好为 0，"
@@ -581,9 +599,14 @@ _COHORT_HISTORY = [
      "⚠️ **本条日期是前提，不是已核实的事实**：原定 2026-09-24，本版未能在那次扫描前推送 ⇒ "
      "改为 2026-09-28（周一），前提是本版在 **2026-09-28 14:00 PT 那次定时扫描之前推到 `origin/main`**"
      "（扫描前的 `production_sync` 会快进）。推送若晚于此，09-28 的样本仍是旧口径 ⇒ 须**追加**一条更正、把边界顺延到"
-     "首个真正跑新代码的业务日（照 v0.45.176 的先例，不改写本条）。判别印记已做成可执行的："
+     "首个真正跑新代码的业务日（照 v0.45.176 的先例，不改写本条；追加方法见表头「只挪日期的更正条目」"
+     "——新标签 + `_CORRECTS` 登记，否则判别器回 `no_marker`）。判别印记已做成可执行的："
      "`gex_regime_mod.applied is False` 的首见日期，`cohort_boundary_evidence()` 按版本查表比对"
      "（同版修掉它此前拿 v0.45.197 的印记去比表中最后一条、在 09-18 边界上误报 boundary_too_late 的 bug）。"
+     "判别结果恒进 `--json` / `--out` 的 `cohort_boundary_evidence` 键；日期与印记不符（含「边界日"
+     "之后已有归档、却一份印记都没有」——推送晚了但新代码还没跑起来的那几天）或判别器抛异常时，"
+     "`--quiet` 摘要行追加第五段、以 🚨 开头 —— 此前只有人读模式调用它，而编排器 Step 11"
+     "（`--quiet --out`）与周度任务（`--quiet`）都走不到，边界写错时没人会红。退出码不因它改变。"
      "同版连带：共振加成前瞻检验的 replay 按记录里的 `applied` 标记复现生产链（事后修订 1，"
      "盲化期内、0/10 合格周、0 条已到期）；`probability_scorecard._ML_ESTIMATOR_GENERATIONS` "
      "同日登记（ML 报告模型把 final_score 当特征）。"),
@@ -766,6 +789,11 @@ _BOUNDARY_MARKERS = {
                   _marker_gex_modifier_not_applied),
 }
 
+#: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
+#: 判别器取印记时先查自己、查不到再查被更正的那条 —— 更正不是新改动，印记是同一个。
+#: 当前为空：v0.45.334 的 09-28 边界尚无更正。
+_CORRECTS: Dict[str, str] = {}
+
 
 def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
     """边界日期写对没写对，从**数据**上回答，而不是从意图上。
@@ -774,7 +802,8 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
     之后 `analysis-<TK>-ml-<DATE>.json` 的 `advanced_analysis.dealer_gex.chain_view`
     为 `"cboe_full_expiries"`、v0.45.334 之后 `swarm_results.gex_regime_mod.applied` 为 `False`
     （此前的记录都没有这两个键）。本函数报出**该版本**印记**首次出现**的日期，与
-    `_COHORT_HISTORY` 里**同一版本**那条的日期比对。`version` 缺省 = 表中最后一条（当前世代边界）。
+    `_COHORT_HISTORY` 里**同一版本**那条的日期比对。`version` 缺省 = 表中最后一条（当前世代边界，
+    与 `assess()` 同一条）；显式版本取最后一条同名条目；`_CORRECTS` 登记的更正条目沿用被更正那条的印记。
 
     ⚠️ v0.45.334 修：此前写死认 v0.45.197 的印记、却拿表中**最后一条**的日期比 ——
     197 之后再追加任何边界，它就在拿一件事的印记去核另一件事的日期。
@@ -789,9 +818,14 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
 
     返回 `{"version": 版本, "boundary": 边界日期, "marker": 印记说明或 None,
            "marker_first_seen": 日期或 None,
-           "verdict": "matches"|"boundary_too_early"|"boundary_too_late"|"no_evidence_yet"|"no_marker"}`。
+           "verdict": "matches"|"boundary_too_early"|"boundary_too_late"|"no_evidence_yet"|"no_marker",
+           "unmarked_after_boundary": [日期…]}`。
     取不到归档时返回 `no_evidence_yet` —— **不返回 "matches"**，
     「还没有证据」和「证据说对了」必须可区分。
+    ⚠️ v0.45.334 起「印记一次都没出现」再分两种：边界日及之后**没有**归档 ⇒ `no_evidence_yet`
+    （生产还没跑到）；**已有**读得出的归档、却无一份带印记 ⇒ `boundary_too_early`
+    （那几天是旧代码产的，日期列在 `unmarked_after_boundary`）。此前后者也报 `no_evidence_yet`
+    ⇒ 推送晚于边界日时，在新代码真跑起来之前没人会红。
 
     ⚠️ `home` **是必传的，不给默认值**，这是初版的 bug 改出来的：初版默认
     `ALPHAHIVE_DIR`（= 代码所在目录），而归档是**数据**、在生产目录里。
@@ -800,17 +834,26 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
     要防的那种失效。调用方（`main()`）传 `--db` 所在目录，与库同一个安装。
     """
     root = Path(home)
+    # 缺省直接取末条的（日期, 版本）—— 与 `assess()` / `cohort_start()` 同一条，不按版本回查。
+    # 显式版本取**最后一条**同名条目。v0.45.334 前是 `next(...)`（第一条）配缺省取末条的版本：
+    # 两处只要有同名条目就各指一条，判别器拿旧日期比、`assess()` 按新日期切，而且没人会红。
     if version is None:
-        version = _COHORT_HISTORY[-1][1]
-    boundary = next((d for d, v, _r in _COHORT_HISTORY if v == version), None)
+        boundary, version = _COHORT_HISTORY[-1][0], _COHORT_HISTORY[-1][1]
+    else:
+        boundary = next((d for d, v, _r in reversed(_COHORT_HISTORY) if v == version), None)
     if boundary is None:
         raise ValueError(f"{version!r} 不在 _COHORT_HISTORY 里")
-    entry = _BOUNDARY_MARKERS.get(version)
+    # 更正条目（`_CORRECTS`）沿用被更正那条的印记 —— 否则顺延边界之后就再也核不了
+    entry = _BOUNDARY_MARKERS.get(version) or _BOUNDARY_MARKERS.get(_CORRECTS.get(version))
     if entry is None:
         return {"version": version, "boundary": boundary, "marker": None,
-                "marker_first_seen": None, "verdict": "no_marker"}
+                "marker_first_seen": None, "verdict": "no_marker", "unmarked_after_boundary": []}
     marker_desc, is_new = entry
     first = None
+    # 边界日及之后、读得出来却没有印记的归档日期。只在印记**一次都没出现**时用得上：
+    # 那时边界之后的归档全是旧代码产的 ⇒ 边界已经写早了，不必等新代码真跑起来才红。
+    # （推送晚于边界日正是这个形状：旧写法在推送之前一直报 no_evidence_yet「还没跑到」。）
+    unmarked_after = set()
     try:
         for f in sorted(root.glob("analysis-*-ml-*.json")):
             m = re.search(r"-ml-(\d{4}-\d{2}-\d{2})\.json$", f.name)
@@ -824,13 +867,18 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
                     d = json.load(fh)
             except (OSError, json.JSONDecodeError):
                 continue
-            if isinstance(d, dict) and is_new(d):
+            if not isinstance(d, dict):
+                continue
+            if is_new(d):
                 first = date if first is None else min(first, date)
+            elif date >= boundary:
+                unmarked_after.add(date)
     except OSError:
-        first = None
+        first, unmarked_after = None, set()
 
     if first is None:
-        verdict = "no_evidence_yet"
+        # 边界之后已有归档、却一份印记都没有 ⇒ 那几天跑的是旧代码，同属「写早了」
+        verdict = "boundary_too_early" if unmarked_after else "no_evidence_yet"
     elif first == boundary:
         verdict = "matches"
     elif first > boundary:
@@ -838,7 +886,8 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
     else:
         verdict = "boundary_too_late"       # 边界之前就已是新口径 ⇒ 白白丢掉一些新样本
     return {"version": version, "boundary": boundary, "marker": marker_desc,
-            "marker_first_seen": first, "verdict": verdict}
+            "marker_first_seen": first, "verdict": verdict,
+            "unmarked_after_boundary": sorted(unmarked_after) if first is None else []}
 
 
 def resonance_forward_status(home: Path, db: Path, today: Optional[str] = None) -> Dict:
@@ -909,11 +958,59 @@ def dim_ic_forward_status(db: Path, today: Optional[str] = None) -> Dict:
 
 _BOUNDARY_VERDICT_TEXT = {
     "matches": "✅ 与归档印记一致",
-    "boundary_too_early": "🚨 边界写早了 —— 边界至印记之间的样本是旧口径，会被混算，请追加一条更正",
+    "boundary_too_early": ("🚨 边界写早了 —— 边界至印记之间（或至今都没有印记）的样本是旧口径，"
+                           "会被混算，请追加一条更正（印记还没出现 ⇒ 先确认新代码已进生产）"),
     "boundary_too_late": "⚠️ 边界写晚了 —— 印记之前已是新口径，白丢了一些新样本",
     "no_evidence_yet": "⏳ 归档里还没有该口径的印记（生产尚未跑到这一版，或归档不可读）",
     "no_marker": "— 这条边界没有登记可判别的归档印记，日期只能靠推理、不能从数据核对",
+    "cannot_judge": "⚠️ 边界日期的数据证据无法判定（判别器抛异常）",
 }
+
+#: 要人看的判定：日期与印记不符（两个方向都算 —— 写早会混算、写晚白丢样本），或核不了。
+#: 只有这些判定才让 `--quiet` 追加第五段（🚨 开头）。**退出码不因它改变**（0/1/3 的契约是编排器
+#: 与周度任务共用的，另起一个码会被编排器记成「Step 11 异常」、周度任务不认识）。
+BOUNDARY_ALARM_VERDICTS = frozenset({"boundary_too_early", "boundary_too_late", "cannot_judge"})
+
+
+def _boundary_line(ev: Dict) -> str:
+    """判别结果的一行摘要 —— `--quiet` 末段与人读模式共用这一处，不各写各的。"""
+    head = f"世代边界 {ev['version']} / {ev['boundary']}"
+    extra = ""
+    if ev.get("marker_first_seen"):
+        extra = f"，印记首见 {ev['marker_first_seen']}"
+    elif ev.get("unmarked_after_boundary"):
+        u = ev["unmarked_after_boundary"]
+        extra = f"，边界后已有 {len(u)} 个归档日无印记（最早 {u[0]}）"
+    if ev.get("error"):
+        extra += f"，{ev['error']}"
+    text = _BOUNDARY_VERDICT_TEXT[ev["verdict"]]
+    if ev["verdict"] in BOUNDARY_ALARM_VERDICTS:
+        return f"🚨 {head} 数据核对未通过{extra}：{text.split(' ', 1)[-1]}"
+    return f"{text}（{head}{extra}）"
+
+
+def boundary_evidence_status(home: Path) -> Dict:
+    """`cohort_boundary_evidence` 的 CLI 承载：判别结果 + `alarm` + 一行摘要 `line`。
+
+    v0.45.334：此前只有人读模式调用判别器 —— `--json` / `--quiet` 在它之前就 return，
+    `--out` 写的 JSON 里也没有它。而**所有**自动调用方（编排器 Step 11 `--quiet --out`、
+    周度任务 `--quiet`）走的正是那几条路 ⇒ 边界写错时唯一会红的观测点，在自动流程里
+    从没被执行过。现在 `--json` / `--out` 恒带完整结果，`--quiet` 在 `alarm` 时追加一段 🚨。
+
+    ⚠️ 异常渲染成 `cannot_judge`（同样 alarm），**不吞、也不往外抛**：抛出去 = Python
+    退出码 1，编排器会把它读成「未就绪（正常，继续攒）」—— 把失败改写成正常状态。
+    `home` 必传，理由同 `cohort_boundary_evidence`。
+    """
+    try:
+        ev = dict(cohort_boundary_evidence(home))
+    except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
+        date, version, _r = _COHORT_HISTORY[-1]
+        ev = {"version": version, "boundary": date, "marker": None, "marker_first_seen": None,
+              "verdict": "cannot_judge", "unmarked_after_boundary": [],
+              "error": f"{type(e).__name__}: {e}"}
+    ev["alarm"] = ev["verdict"] in BOUNDARY_ALARM_VERDICTS
+    ev["line"] = _boundary_line(ev)
+    return ev
 
 
 def main() -> int:
@@ -946,6 +1043,10 @@ def main() -> int:
     res["fg_exposure_gate_forward_test"] = fg_fwd
     dim_fwd = dim_ic_forward_status(db, today=args.today)
     res["dim_ic_forward_test"] = dim_fwd
+    # 归档与 DB 同处一个安装 ⇒ 用 --db 的所在目录，别用代码目录（见 cohort_boundary_evidence docstring）。
+    # 放在 --out / --json / --quiet 之前：三种输出都要带上它（v0.45.334，见 boundary_evidence_status）
+    bev = boundary_evidence_status(db.parent)
+    res["cohort_boundary_evidence"] = bev
 
     if args.out:
         try:
@@ -961,7 +1062,14 @@ def main() -> int:
     if args.quiet:
         # 同一行：周度任务的约定是「把那一行摘要原样写进周报」，另起一行可能被漏抄。
         # ⚠️ 段的**顺序**是契约：周度任务 SKILL.md 按「第三段 = F&G」解析。新段只许追加在末尾。
-        print(summary_line(res) + "｜" + fwd["line"] + "｜" + fg_fwd["line"] + "｜" + dim_fwd["line"])
+        # 第五段（v0.45.334）= 世代边界的数据证据，**只在要人看时出现**（`bev["alarm"]`：日期与
+        # 印记不符 / 核不了），以 🚨 开头；正常时（✅ / ⏳ / —）不加段，一行仍是四段 ——
+        # 恒在的段会被当成背景噪音，而 `tests/test_dim_ic_forward_test.py` 也钉着四段。
+        # 完整判别结果不论好坏都在 `--json` / `--out` 的 `cohort_boundary_evidence` 键里。
+        line = summary_line(res) + "｜" + fwd["line"] + "｜" + fg_fwd["line"] + "｜" + dim_fwd["line"]
+        if bev["alarm"]:
+            line += "｜" + bev["line"]
+        print(line)
         return 0 if res["ready"] else 1
 
     c = res["cohort"]
@@ -980,11 +1088,7 @@ def main() -> int:
           f"（世代内总样本 {res['n_all_samples']} 条，其余未到期）")
     print(f"  已攒不重叠周:          {res['weeks_accrued']} / "
           f"{res['weeks_required']}   还差 {res['weeks_remaining']}")
-    # 归档与 DB 同处一个安装 ⇒ 用 --db 的所在目录，别用代码目录（见函数 docstring）
-    _ev = cohort_boundary_evidence(db.parent)
-    print(f"  边界日期的数据证据:    {_BOUNDARY_VERDICT_TEXT[_ev['verdict']]}"
-          f"（{_ev['version']} / {_ev['boundary']}）"
-          + (f"（印记首见 {_ev['marker_first_seen']}）" if _ev["marker_first_seen"] else ""))
+    print(f"  边界日期的数据证据:    {bev['line']}")
     print(f"  世代内有扫描的周:      {res['scan_weeks_in_cohort']}"
           f"（已过 {res['calendar_weeks_elapsed']} 个日历周，"
           f"产出率 {res['weeks_per_calendar_week']:.2f} 周/周）")

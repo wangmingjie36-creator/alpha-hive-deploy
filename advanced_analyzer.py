@@ -318,8 +318,14 @@ class DealerGEXAnalyzer:
         # `_calc_max_pain` 的先例：回退等于把「没数据」悄悄换成「错数据」。
         # 代价（本次改动唯一的代价）：CBOE 当日陈旧/失败的标的 GEX 变为不可得 ⇒
         # `regime="unknown"` ⇒ `RegimeWeightAdjuster` 不做偏移（基准权重）。
-        # v0.45.334 起 GEX 只经这一条通道（三值 regime）进评分，`GexRegimeModifier`
-        # 只算诊断值、不施加 ⇒ 不可得只少一次权重偏移，降级才算安全。
+        # v0.45.334 起**本视图**只经这一条通道（三值 regime）进评分，`GexRegimeModifier`
+        # 只算诊断值、不施加 ⇒ 本视图不可得只少一次权重偏移（v0.45.197 条目实测该支
+        # |Δfinal_score| 中位 0.050 / 最大 0.127）。这是「代价变小」，**不是**「安全」：
+        # 同一天可得 / 不可得两组的权重仍不同，横截面上仍略不可比。
+        # ⚠️ 也**不是**「GEX 只剩这一条通道」：OracleBee `options_score` 的 `gex_signal`
+        # （`options_analyzer.calculate_gamma_exposure` 在主链上另算，不读本视图）仍经 odds 维
+        # 进评分，且它自己的不可得（None → 1.0，与非负同档）同样让负 gamma 标的少 +1
+        # （09-24/25 Oracle `gamma_exposure` 60/60 为 None）。v0.45.334 未动那条。
         # ⚠️ 更正：v0.45.197 写这里时称「安全降级」并不成立 —— 当时 `GexRegimeModifier`
         # 还把 ±0.8 直接加进 rule_score，不可得的标的少了这一项、可得的照加，
         # 同一天横截面上不可比。频次记在 `cboe_options.gex_view_stats()` 里，别靠估。
