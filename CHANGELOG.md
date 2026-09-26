@@ -5,7 +5,39 @@
 
 ---
 
-## [0.45.345] — 2026-09-26 — 占位（进行中：数据根迁移阶段 5 执行记录 + 备份推送超时修复）
+## [0.45.345] — 2026-09-26 — 运维：**数据根迁移阶段 5 已执行**——生产数据搬到 `~/alpha-hive-data`，编排器 / plist / MCP / 两个定时任务切到新根；Fixed：备份推送超时 60s 太紧（09-24 新范围首推超时）
+
+按 memory `alpha-hive-data-root-migration.md`「阶段 5 执行」runbook，用户 09-23 授权 ①~⑦、09-26（周六，非交易日）执行。代码批次见 v0.45.322 / 335 / 342。
+
+### 执行前：备份核对（发现并补救）
+- 09-24 Step 14 `stage=git_error`：Step 14 启动 64s 后 git 异常——`_run_git` 统一 `timeout=60`，v0.45.342 扩大范围后的首推超时（推断，依据见下）。
+- 09-25 `stage=push`：`ssh: connect to host github.com port 22` 失败（网络），本地已提交。⇒ 异地最新停在 09-23。
+- 09-26 07:0x 手工补推（同一私有备份仓库、同一分支，即编排器每日动作）：`230899b..033d9b1`，**用时 43s**——离 60s 太近，佐证 09-24 为超时。
+  远端核对：`report_snapshots/` 1441 份（最新 `XOM_2026-09-25.json`）+ `paper_portfolio_state_backup/` + `reports/` + 1565 个报告/站点文件 ⇒ v0.45.342 新范围在生产上验证通过。
+
+### 执行（逐步自核，全部一次通过）
+0. 非交易日；无扫描进程；生产检出含 v0.45.342；编排器 md5 与 09-23 做 diff 时一致（`bc3a49cf…`）。
+1. `launchctl bootout gui/$UID/com.alpha.hive.daily`。
+2. 编排器 / plist 备份 `.bak-pre-phase5`；编排器按 `~/alpha-hive-data/_migration/orchestrator_phase5.diff` 打补丁（`DATA_DIR` + `export ALPHA_HIVE_HOME` + 8 处 `$PROJECT_DIR`→`$DATA_DIR`），`bash -n` 通过；plist `EnvironmentVariables` 加 `ALPHA_HIVE_HOME`，`plutil -lint` 通过。
+3. `migrate_data_root plan`（未登记 0）→ `copy`（13s；5 库在线备份 + 7086 文件）→ `verify`（5 库行数一致 + integrity ok；7086 文件 / 828 MB sha256 全一致）。
+4. `probability_scorecard --published` / `ic_rerun_readiness` 新旧根双跑：**逐字节一致**（账本 156 行）。
+5. `retire`：未跟踪项挪入 `_retired_pre_phase5/`（979 项），被跟踪项原地冻结；`git status` 删除 **0**；`check-old` ok（生产常年 `M` 的 `NVDA_raw.json` 正确进了脏基线）。
+6. `~/.claude.json` `mcpServers.alpha_hive.env` = `{"ALPHA_HIVE_HOME": …}`（备份在先；核对除此外 JSON 完全不变、权限 0600 不变）；
+   两个定时任务 prompt 经 `update_scheduled_task` 更新：命令加 `ALPHA_HIVE_HOME` 前缀、月任务 `python3`→`/usr/local/bin/python3`、读结果改为「按脚本打印的绝对路径，不在数据根下就停下报告」；仍 enabled、`nextRunAt` 不变。
+7. `launchctl bootstrap`：env 含 `ALPHA_HIVE_HOME`；`RunAtLoad` 那轮识别非交易日 `exit 0`（`skipped_non_trading_day`）。
+8. `check-old` 再核 ok。
+
+### Fixed
+- `data_backup/run_backup.py`：`push` 单独 `GIT_PUSH_TIMEOUT_S=240`（其余 git 仍 60s；上限留在编排器 Step 14 `run_step --timeout 300` 内）。
+  `tests/test_data_backup.py::TestPushTimeout`（2 项，变异：push 不传超时 ⇒ 红）。
+- `tests/test_scan_catchup.py`：编排器新增 `DATA_DIR="/Users/igg/alpha-hive-data"` 后，沙箱改绑守卫**按设计拒绝真跑**（闸前出现改绑不到的字面绝对路径）。
+  改绑清单加 `DATA_DIR`、幂等 marker 改造在沙箱 `data/`（编排器现从 `DATA_DIR` 读它）、迷你合成脚本同步。`-m integration` 的 3 条真跑编排器闸门用例亲手跑过：全过，生产日志未被写。
+
+### 已知 / 待办
+- ⚠️ `_retired_pre_phase5/` 里文件是只读（0444），但**目录权限会被 iCloud 在几秒内改回 0700**（Desktop 同步区实测；非 iCloud 目录 0555 保持）——文件内容受保护，目录仍可新建文件。代码修不了；根治是把项目移出 iCloud（用户的机器设置）。
+- 需用户**重启 Claude 应用**：运行中的 8 个 `alpha_hive_mcp.py` 进程仍是旧 env（读旧根，旧根数据已退场）。
+- 09-27 周任务跑完核对它读的是数据根；09-28 首个交易日扫描后跑 `check-old` + 看 `status.json` / 新根当日产物 / gh-pages / Step 14（`--src` 已是数据根，推送超时已放宽）。
+- 全套 5610 passed / 85 deselected / 2 xfailed（`--deselect TestCoverageHorizon`，按设计红）；`ruff check .` 全过。
 
 ## [0.45.344] — 2026-09-26 — Fixed（测试隔离）：熔断器状态跨测试泄漏根治——两类熔断器加 WeakSet 登记表，conftest 每条测试前后原地重置全部活实例（限时、拿不到锁即点名红，不阻塞）；撤掉四个文件的逐文件补丁
 
