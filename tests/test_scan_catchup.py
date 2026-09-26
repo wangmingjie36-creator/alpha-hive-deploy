@@ -55,13 +55,16 @@ def _orch_literal(orch_text, name):
 def _sandbox_orchestrator(orch_text, sandbox):
     """把编排器关进沙箱，返回 `(改绑后的脚本, {名字: 被替换掉的生产值})`。
 
-    只改绑闸前决定「写到哪 / 放不放行」的五个赋值，闸逻辑逐字节不动 ——
+    只改绑闸前决定「写到哪 / 放不放行」的六个赋值，闸逻辑逐字节不动 ——
     测的仍是编排器**此刻**的闸，不是一份会过期的抄本。改绑不上、或闸之前
     冒出新的字面绝对路径 ⇒ AssertionError，**在真跑之前**拒绝。
     """
     binds = {
         "LOCKDIR": sandbox / "lock",         # 不抢 /tmp 那把锁：抢到＝同时触发的真扫描被挤掉
-        "PROJECT_DIR": sandbox / "project",  # marker 在这里读
+        "PROJECT_DIR": sandbox / "project",  # 代码目录：闸前只做存在性 / TCC 预检
+        # 数据根迁移阶段 5（2026-09-26，v0.45.345）起编排器 `DATA_DIR` + `export ALPHA_HIVE_HOME`，
+        # 幂等 marker `.swarm_results_<今天>.json` 改在这里读。
+        "DATA_DIR": sandbox / "data",
         "LOGDIR": sandbox / "logs",
         "REPORTDIR": sandbox / "reports",    # status.json 在这里写
         # 时间闸恒拦：marker 没被读到时落进「早于收盘」分支 ⇒ 断言红，
@@ -152,7 +155,8 @@ class TestOrchLiteral:
     def test_counting(self, text, want):
         assert _orch_literal(text, "NAME") == want
 
-    _MINI = ('LOCKDIR="/tmp/l"\nPROJECT_DIR="/Users/u/p"\nLOGDIR="/Users/u/logs"\n'
+    _MINI = ('LOCKDIR="/tmp/l"\nPROJECT_DIR="/Users/u/p"\nDATA_DIR="/Users/u/data"\n'
+             'LOGDIR="/Users/u/logs"\n'
              'REPORTDIR="/Users/u/rep"\nCATCHUP_AFTER_HHMM="1330"\n{extra}STEP1_START=1\n')
 
     def test_sandbox_rebinds_every_value(self, tmp_path):
@@ -209,7 +213,7 @@ class TestCatchupGate:
         （安全），但默认套件不跑它 —— 写法变了要在这里先红，否则那组一直
         「跑不起来」而没人发现。"""
         script, prod = _sandbox_orchestrator(orch_text, tmp_path)
-        for name in ("LOCKDIR", "PROJECT_DIR", "LOGDIR", "REPORTDIR"):
+        for name in ("LOCKDIR", "PROJECT_DIR", "DATA_DIR", "LOGDIR", "REPORTDIR"):
             assert os.path.isabs(prod[name]), f"{name} 不是绝对路径：{prod[name]!r}"
             assert f'{name}="{tmp_path}' in script, f"{name} 没改绑进脚本"
         assert 'CATCHUP_AFTER_HHMM="2400"' in script
@@ -313,8 +317,9 @@ class TestGateBranchesLive:
             'raise SystemExit("沙箱桩：不该被执行")\n', encoding="utf-8")
         (tmp_path / "home").mkdir()
         today = datetime.date.today().isoformat()
+        (tmp_path / "data").mkdir()
         if with_marker:
-            (project / f".swarm_results_{today}.json").write_text("{}")
+            (tmp_path / "data" / f".swarm_results_{today}.json").write_text("{}")
 
         out_path = tmp_path / "orch.out"
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),

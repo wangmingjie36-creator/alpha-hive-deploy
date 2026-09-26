@@ -1436,3 +1436,36 @@ class TestExportScopeCoversMoveRules:
         assert (out / "alpha-hive-AAA-ml-enhanced-2026-09-24.html").exists()
         rels = {r["rel"] for r in manifest["root_files"]}
         assert {"alpha-hive-daily-2026-09-24.md", "alpha-hive-AAA-ml-enhanced-2026-09-24.html"} <= rels
+
+
+class TestPushTimeout:
+    """v0.45.345：push 单独放宽超时（09-24 扩大备份范围后首推超 60s 被判 git_error）。"""
+
+    def test_push_gets_longer_timeout_than_local_git_but_fits_step14_budget(self):
+        assert run_backup.GIT_PUSH_TIMEOUT_S >= 180
+        assert run_backup.GIT_PUSH_TIMEOUT_S < 300, "必须留在编排器 Step 14 的 run_step --timeout 300 之内"
+        assert run_backup.GIT_TIMEOUT_S < run_backup.GIT_PUSH_TIMEOUT_S
+
+    def test_push_call_actually_passes_the_push_timeout(self, tmp_path, monkeypatch, _sandbox_home):
+        _bypass_secret_scan(monkeypatch)   # 本类只测超时参数；密钥扫描另有专门的测试类
+        seen = []
+        real = run_backup._run_git
+
+        def spy(args, cwd, timeout=run_backup.GIT_TIMEOUT_S):
+            seen.append((args[0], timeout))
+            if args[0] == "push":
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return real(args, cwd, timeout=timeout)
+
+        monkeypatch.setattr(run_backup, "_run_git", spy)
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        (tmp_path / "bk").mkdir()
+        st = run_backup.run(src, tmp_path / "bk", status_file=tmp_path / "s.json",
+                            history_file=tmp_path / "h.jsonl")
+        assert st["stage"] == "done", st
+        pushes = [t for a, t in seen if a == "push"]
+        assert pushes == [run_backup.GIT_PUSH_TIMEOUT_S], seen
+        assert all(t == run_backup.GIT_TIMEOUT_S for a, t in seen if a != "push")
