@@ -7,6 +7,7 @@ Alpha Hive - 弹性层：RateLimiter + CircuitBreaker + retry
 import time
 import threading
 import functools
+import weakref
 from typing import Optional, Callable, Any
 from hive_logger import get_logger
 
@@ -76,6 +77,13 @@ class CircuitBreaker:
     OPEN = "open"
     HALF_OPEN = "half_open"
 
+    # v0.45.344：全部活着的实例（WeakSet，不延长任何实例的寿命）。
+    # 熔断状态是进程级全局量，而 `from resilience import sec_breaker` 让各模块
+    # 各持一份绑定 —— 换掉模块属性隔离不了它们，只能在同一批对象上 reset()。
+    # 唯一读者是 tests/conftest.py `_reset_circuit_breakers`（逐测试重置）。
+    _live: "weakref.WeakSet[CircuitBreaker]" = weakref.WeakSet()
+    _live_lock = threading.Lock()
+
     def __init__(
         self,
         name: str,
@@ -91,10 +99,22 @@ class CircuitBreaker:
         self.name = name
         self._failure_threshold = failure_threshold
         self._recovery_timeout = recovery_timeout
+        self._init_state()
+        self._lock = threading.Lock()
+        with CircuitBreaker._live_lock:
+            CircuitBreaker._live.add(self)
+
+    def _init_state(self):
+        """运行态字段的唯一出处：构造与 reset() 共用，新增字段不会漏重置。"""
         self._state = self.CLOSED
         self._failure_count = 0
         self._last_failure_time = 0.0
-        self._lock = threading.Lock()
+
+    @classmethod
+    def live_instances(cls) -> list:
+        """当前所有活着的实例（快照）。"""
+        with CircuitBreaker._live_lock:
+            return list(CircuitBreaker._live)
 
     @property
     def state(self) -> str:
@@ -147,11 +167,23 @@ class CircuitBreaker:
                     )
                 self._state = self.OPEN
 
-    def reset(self):
-        """手动重置"""
-        with self._lock:
-            self._state = self.CLOSED
-            self._failure_count = 0
+    def reset(self, timeout: Optional[float] = None):
+        """重置成刚构造时的运行态（阈值、冷却时长等配置不动）。
+
+        timeout=None：阻塞等锁（原行为）。给了 timeout：时限内拿不到锁就抛
+        RuntimeError —— 给测试间逐条重置用：锁在测试之间被人攥着本身就是 bug
+        （多半是上一条测试留下的线程卡死在锁里），阻塞等只会把它放大成整套卡死。
+        刻意不抛 TimeoutError：它是 OSError 的子类，`except NETWORK_ERRORS`
+        会把「锁被卡住」吞成「网络抖了一下」。
+        """
+        got = self._lock.acquire() if timeout is None else self._lock.acquire(timeout=timeout)
+        if not got:
+            raise RuntimeError(
+                f"CircuitBreaker[{self.name}] 的锁 {timeout}s 内拿不到（别的线程一直攥着）")
+        try:
+            self._init_state()
+        finally:
+            self._lock.release()
 
 
 # ==================== retry 装饰器 ====================

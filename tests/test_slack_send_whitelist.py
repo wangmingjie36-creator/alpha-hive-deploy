@@ -631,9 +631,7 @@ def armed_slack(monkeypatch):
                         lambda self: "https://hooks.slack.com/services/T0/B0/armed-by-test")
     monkeypatch.setattr(srn.SlackReportNotifier, "_check_webhook_alive",
                         staticmethod(lambda url: False))
-    # 熔断器用新实例：别让本文件（或旧代码的死锁）污染全局 slack_breaker
-    import resilience
-    monkeypatch.setattr(resilience, "slack_breaker", resilience.CircuitBreaker("slack"))
+    # slack_breaker 不必换新实例：conftest `_reset_circuit_breakers` 每条前后原地重置（v0.45.344）
     return rec
 
 
@@ -775,8 +773,11 @@ class TestBreakerDoesNotDeadlock:
         v0.45.341 起原样恢复 fd1dea85 的块**不再死锁**：`send_risk_alert` 已删，
         `AttributeError` 先把线程炸掉 —— 所以线程里的异常单独接住、单独报，
         免得「线程死于异常」被报成「死锁回来了」。
-        `armed_slack` 已把 `resilience.slack_breaker` 换成新实例 —— 变异跑时死锁的
-        只是这个临时实例，不会拖住同进程里后续测试。
+        变异跑时死锁的是全局 `slack_breaker`，守护线程永久攥着它的锁。v0.45.344 之前靠
+        `armed_slack` 换新实例把死锁关在临时对象里；现在换不换都一样 —— 卡死的线程让
+        那个对象一直活着、一直在熔断器登记表里。兜底改在 conftest `_reset_circuit_breakers`：
+        本条结束后的重置 2 秒内拿不到锁就点名红在**本条**上，之后每条测试开始前 0 秒即红，
+        不会把整套挂住（自证：`test_breaker_isolation.py::TestResetNeverBlocks`）。
         """
         import resilience
         br = resilience.slack_breaker

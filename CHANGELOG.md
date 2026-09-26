@@ -7,7 +7,65 @@
 
 ## [0.45.345] — 2026-09-26 — 占位（进行中：数据根迁移阶段 5 执行记录 + 备份推送超时修复）
 
-## [0.45.344] — 2026-09-26 — 占位（进行中：测试间熔断器状态泄漏根治——两类熔断器 WeakSet 注册表 + conftest 逐测试重置，撤掉逐文件补丁）
+## [0.45.344] — 2026-09-26 — Fixed（测试隔离）：熔断器状态跨测试泄漏根治——两类熔断器加 WeakSet 登记表，conftest 每条测试前后原地重置全部活实例（限时、拿不到锁即点名红，不阻塞）；撤掉四个文件的逐文件补丁
+
+v0.45.343 查明、当时实测零影响、留作任务的那条。根治而不是再补一个文件。
+
+### 问题（v0.45.343 实测）
+- 熔断状态是进程级全局量：`resilience` 的 `sec/yfinance/reddit/slack_breaker`、`fred_macro._fred_breaker`、
+  `newsapi_client._news_breaker`、`data_pipeline.get_fetcher()` 单例里各数据源的 `ObservableCircuitBreaker`。套件级零隔离。
+- 正对照：A 把 `yfinance_breaker` 连记到阈值不重置，B 断言 `allow_request() is False` **通过**——B 默默吃了 A 的 OPEN。
+- 全套当时 0 条消费泄漏（潜伏），但已有四个文件各自打补丁（reddit / newsapi 各 `reset()`，slack 两处换新实例），
+  `TestPresetInstances` 的「closed」断言依赖顺序——以前咬过人。
+- **换新实例隔离不了**：`sec_edgar` / `swarm_agents.cache` / `options_analyzer` 在模块顶部 `from resilience import …`，
+  各持一份绑定，换掉 `resilience` 上的名字够不到它们。只能在同一批对象上原地重置。
+
+### Changed
+- `resilience.CircuitBreaker` / `data_pipeline.ObservableCircuitBreaker`：类级 `weakref.WeakSet` 登记表，`__init__` 登记，
+  `live_instances()` 取快照。枚举是**推导**的：新增熔断器（模块级、单例里、测试自建）零改动即被覆盖；WeakSet 不延长寿命。
+- 两类的运行态字段收进 `_init_state()`，构造与 `reset()` 共用（防「构造里加字段、reset 忘了」）。
+  `ObservableCircuitBreaker` 新增 `reset()`（此前没有），含 `trip_count` 等指标。
+  `CircuitBreaker.reset()` 顺带清 `_last_failure_time`（此前只清两字段；生产零调用方，行为无差别）。
+- `reset(timeout=None)`：None 保持原阻塞语义；给了 timeout 拿不到锁就抛 `RuntimeError` 点名。
+  **刻意不抛 `TimeoutError`**：它是 `OSError` 子类，`NETWORK_ERRORS` 含 `OSError` ⇒ `except NETWORK_ERRORS` 会把「锁卡死」吞成「网络抖动」。
+
+### Added
+- `tests/conftest.py::_reset_circuit_breakers`（autouse）：每条测试**前后**各重置一次全部活实例。
+  类经 `sys.modules.get` 取、不 import（模块没被 import ⇒ 该类零实例；conftest import 会把它们提前到收集期）。
+  **后**那次让「锁被攥着」报在留下它的那条测试上，而不是无辜的下一条。
+- **死锁陷阱**：`TestBreakerDoesNotDeadlock` 的变异会留下永久攥锁的守护线程，且卡住的线程让那个实例一直活在登记表里——
+  阻塞式重置会把之后每一条测试都挂住。重置限时 2s，拿不到就 `pytest.fail` 点名；已知卡死的实例记进
+  `WeakKeyDictionary`，之后只试 0s，不每条再等 2s。
+- `tests/test_breaker_isolation.py`（11 条）：顺序成对的两条（第一条弄脏 from-import 绑定的 `yfinance_breaker`、
+  `slack_breaker`、一个靠模块级引用存活的独立 `ObservableCircuitBreaker`；第二条先核「第一条确实先跑且弄脏了」再断言全干净，
+  单独跑第二条会红——故意的）；登记表含 resilience 全部模块级实例（从 `vars(resilience)` 推导 + 四个名字正对照）、
+  fred / newsapi 模块级、数据源实例，且不延长寿命；reset 后与新构造实例逐字段相等（字段从 `vars()` 推导，
+  并先断言每个运行态字段确被弄脏）；锁被攥着时 `reset(timeout)` 与 conftest 重置都限时返回、点名、第二次不再等
+  （在工作线程里调，阻塞变异下红而不是挂）。
+
+### Removed
+- 逐文件补丁：`test_reddit_sentiment._clear_reddit_cache` 的 `reddit_breaker.reset()`、`test_newsapi_client._isolate_newsapi`
+  的 `_news_breaker.reset()`、`test_slack_send_whitelist.armed_slack` 与 `test_slack_notifier::test_send_failure_returns_false_and_logs`
+  的换新 `slack_breaker`。`test_sec_edgar` 在测试体内 monkeypatch 熔断状态是**布景**不是隔离，保留。
+
+### 验证
+- 全套（`--maxfail=1000`）：5622 passed / 2 failed，两条都与本版无关：
+  `test_economic_calendar::TestCoverageHorizon`（BLS 尚未发布 2027 CPI/NFP 日程，CPI 剩 75 天、NFP 剩 69 天 < 90 天阈值，设计内的定期红）；
+  `test_scan_catchup::TestCatchupGate::test_sandbox_rebind_applies`（读仓库外的编排器，该文件 2026-09-26 07:05 被加了字面绝对路径
+  `DATA_DIR="/Users/igg/alpha-hive-data"`，沙箱改绑拒绝真跑）。
+- 变异 10 条（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、锚点唯一 + 落地断言、`collected N` 非锚定解析、未变异基线同次序全绿）：
+
+  | # | 变异 | 结果 |
+  |---|---|---|
+  | M1 | conftest fixture 体改成裸 `yield` | 红：test_2「yfinance 漏过来了：open」 |
+  | M2 | 删 `CircuitBreaker` 登记 | 红 4 条：test_2 + 「sec_breaker 不在登记表里」等 |
+  | M3 | 删 `ObservableCircuitBreaker` 登记 | 红 3 条：test_2 + 数据源登记 |
+  | M4 | conftest 改阻塞 `reset()` | 红：工作线程 5s 未返回（红，不挂） |
+  | M5/M6 | 两类 reset 回到只清两字段 | 红：逐字段比对点出 `_last_failure_time` / `last_error`、`consecutive_failures` |
+  | M7 | `CircuitBreaker.reset` 无视 timeout | 红 2 条（36s，持锁线程 30s 后自放） |
+  | M8 | 死锁变异（持锁 OPEN 分支接回发送），真 reset | 12.8s 跑完：死锁测试 FAILED + **结束后** ERROR 点名 `CircuitBreaker[slack]`（2.0s），之后 11 条开始前 0s 即 ERROR |
+  | M9 | 阻塞 reset + 死锁，默认次序（`-x`） | 6.3s 红在自证文件（字母序在 slack 文件前），跑不到死锁那步 |
+  | M10 | 对照：阻塞 reset + 死锁，强制死锁测试在前、不 `-x` | **挂住**，150s 外部超时杀掉 —— 证明限时重置是承重的 |
 
 ## [0.45.343] — 2026-09-24 — Fixed：Slack 发送去掉「频道失败 ⇒ 静默改发私信」降级——`push_report_to_slack --force` 此前每次把日报实发到私信、却记「✅ 已推送到 #alpha-hive」；另查明测试间熔断器状态泄漏当前零影响，根治方案留作任务
 
