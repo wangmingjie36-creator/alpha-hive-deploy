@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 
 import sell_strike_levels as L
@@ -73,6 +73,9 @@ _STRUCT_LEGS = {
     "strangle": (("put", "short"), ("call", "short")),
     "iron_condor": (("put", "short"), ("put", "wing"), ("call", "short"), ("call", "wing")),
 }
+# 含价差（短腿 + 保护腿）的结构 → 哪几侧是垂直价差（credit ≥ 宽度的闸逐侧判）
+_VERTICAL_SIDES = {"bull_put_spread": ("put",), "bear_call_spread": ("call",),
+                   "iron_condor": ("put", "call")}
 
 
 def _num(x) -> Optional[float]:
@@ -150,6 +153,8 @@ def _contract_delta(c: dict, S: float, T: Optional[float], r: float) -> Tuple[Op
     """(Δ, 来源)。CBOE delta 优先；为 None / 0 / 与方向符号矛盾（put 给了正 Δ）⇒ BS 兜底；都没有 ⇒ (None, "none")。
 
     CBOE 的 delta 带股息与美式行权（BS 这里 q=0），股息股选 delta 应该信它；兜底只在它缺失时用。
+    `sell_strike_levels.strike_profile` 的 DEX 用**同一条**规则——它不能反向 import 本模块，只好各写一份；
+    改一处必须同改另一处（tests/test_sell_strike_levels.py 逐例核对两边一致）。
     """
     cp = c.get("cp")
     d = _num(c.get("delta"))
@@ -232,7 +237,7 @@ def build_ladder(contracts: List[dict], S, expiry: str, *, r: float = L.RISK_FRE
       辅档让位——理由见该常量注释），后来的那档给 None + reason `same_contract_as_<先占的档>`
       （不改选次优——该档没有新增信息，硬塞次优会让两档看起来都有观测，其实是同一个点附近的
       两次取样）。输出的档位键顺序仍按 LADDER_DELTAS。
-    · 平手（|Δ| 与目标等距）取更价外的那张（|Δ| 更小）。
+    · 平手（|Δ| 与目标等距）取更价外的那张（|Δ| 更小）；距离取 9 位后再比，否则等距会被浮点噪声拆开。
     返回 `{"expiry", "dte", "underlying_price", "put": {"0.10": {"short","wing","reasons"}, ...}, "call": {...}}`。
     `expiry/dte/underlying_price` 三个顶层键是 SPEC 之外加的：`structure_quote` 要 dte 年化、
     short_call 要 S 作备兑抵押，不带上就得让调用方再传一遍、两处口径可能不一。
@@ -266,7 +271,9 @@ def build_ladder(contracts: List[dict], S, expiry: str, *, r: float = L.RISK_FRE
             if not priced:
                 slot["reasons"].append("no_delta_available")
                 continue
-            dist, absd, K, c = min(((abs(a - target), a, k, cc) for a, k, cc in priced),
+            # 距离先取 9 位再比：|Δ| 0.18 与 0.22 对 0.20 的原始差是 0.020000000000000018 与
+            # 0.01999999999999999 —— 不取整，「等距取 |Δ| 更小」会被浮点噪声翻成取 0.22。
+            dist, absd, K, c = min(((round(abs(a - target), 9), a, k, cc) for a, k, cc in priced),
                                    key=lambda t: (t[0], t[1]))
             if dist - DELTA_TOL > _TOL_EPS:
                 slot["reasons"].append(f"no_delta_within_tol:nearest={absd:.4f}")
@@ -327,6 +334,9 @@ def structure_quote(ladder: dict, structure: str, rung) -> dict:
       · 腿缺失（`missing_leg:<side>_<role>`）或任一腿 quote_ok=False（`quote_not_ok:<side>_<role>`）
         ⇒ 所有金额为 None（bid=0 的腿算不出真实成交）；
       · 短腿 spread_pct > MAX_SPREAD_PCT（`short_spread_too_wide:<side>`）⇒ 金额照算（供展示），但不可报价；
+      · 价差某侧 credit ≥ 该侧宽度（`credit_ge_width:<side>`；铁鹰另判合计 credit ≥ 宽翼宽度，记
+        `credit_ge_width:combined`——两侧各自都没交叉时它也可能成立）⇒ max_loss ≤ 0 的无风险套利 =
+        交叉 / 陈旧报价；金额照算（供展示），但不可报价；
       · credit ≤ 0（`non_positive_credit`）⇒ credit 照记，max_loss/collateral/收益/BE 为 None。
     `rung=None`（route 判 unavailable）⇒ quotable=False，reason `rung_unavailable`。
     未知 structure / 非法 rung ⇒ ValueError（拼错不许静默变成「不可报价」）。
@@ -364,7 +374,9 @@ def structure_quote(ladder: dict, structure: str, rung) -> dict:
     for side, role in _STRUCT_LEGS[structure]:
         if role == "short":
             sp = _num(picked[(side, role)].get("spread_pct"))
-            if sp is not None and sp > MAX_SPREAD_PCT:
+            # 预注册写的是「点差 > 25%」才排除：恰好 25% 的 bid .35/ask .45 算出 0.25000000000000006、
+            # 1.05/1.35 算出 0.25 —— 直接比就由浮点噪声决定进不进检验。同 DELTA_TOL 闸用 _TOL_EPS 吸收。
+            if sp is not None and sp - MAX_SPREAD_PCT > _TOL_EPS:
                 reasons.append(f"short_spread_too_wide:{side}")
 
     def K(side, role):
@@ -417,6 +429,15 @@ def structure_quote(ladder: dict, structure: str, rung) -> dict:
 
     max_loss, collateral = _rnd(max_loss, MONEY_DP), _rnd(collateral, MONEY_DP)
     bes = [_rnd(b, MONEY_DP) for b in bes]
+    # 价差某侧 credit ≥ 该侧宽度 ⇒ 该侧最大亏损 ≤ 0，即无风险套利 —— 那是交叉 / 陈旧报价，不是能成交的市价。
+    # 金额照算（max_loss ≤ 0 本身就是证据，供展示），但不可报价。铁鹰逐侧判，另判合计：两侧各自都没交叉、
+    # 合计 credit 仍 ≥ 宽翼宽度时 max_loss 同样 ≤ 0。判定用取整后的金额（同 credit ≤ 0 的判定）。
+    for side in _VERTICAL_SIDES.get(structure, ()):
+        side_credit = _rnd(bid(side, "short") - ask(side, "wing"), MONEY_DP)
+        if _rnd(abs(K(side, "short") - K(side, "wing")) - side_credit, MONEY_DP) <= 0:
+            reasons.append(f"credit_ge_width:{side}")
+    if structure == "iron_condor" and max_loss is not None and max_loss <= 0:
+        reasons.append("credit_ge_width:combined")
     if credit <= 0:
         reasons.append("non_positive_credit")
         max_loss = collateral = None
@@ -520,6 +541,10 @@ def rung_for(route_label: Optional[str]) -> Optional[float]:
 # ─────────────────────────────── 财报标注
 
 def _as_date(x) -> Optional[date]:
+    # datetime 是 date 的子类：原样放过去，`d < a` 在 datetime 与 date 之间直接抛 TypeError；
+    # 两边都是 datetime 时又会按时刻比（同一天早于扫描时刻的财报被判 "none"）。一律归一成日期。
+    if isinstance(x, datetime):
+        return x.date()
     if isinstance(x, date):
         return x
     if not isinstance(x, str) or len(x) < 10:

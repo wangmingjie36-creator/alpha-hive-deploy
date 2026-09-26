@@ -19,7 +19,7 @@ iv 为**小数**，缺失为 None）。
 
   GEX   （每张合约）= sign·γ·OI·100·S²·0.01           USD per 1% move，sign: C=+1, P=−1
   DEX   （每张合约）= Δ·OI·100·S                       USD，**持有者口径**（call Δ>0、put Δ<0）
-        ⚠️ 与 GEX 的做市商符号不同，**不得混用 / 池化**。Δ 用 CBOE 原始 delta，None 时 BS 兜底。
+        ⚠️ 与 GEX 的做市商符号不同，**不得混用 / 池化**。Δ 用 CBOE 原始 delta，None / 0 / 符号矛盾时 BS 兜底。
   vanna 暴露        = sign·vanna·OI·100·S·0.01          USD delta per 1 vol point（做市商符号）
   charm 暴露        = sign·charm·OI·100·S/365           USD delta per calendar day（做市商符号）
 
@@ -214,7 +214,8 @@ def strike_profile(contracts: List[dict], S, *, r: float = RISK_FREE_RATE) -> di
     优先——它对应的就是当前价，不必重算；否则 BS（需 IV）。
     两者都没有 ⇒ 排除并计 `excluded_no_gamma`；`oi ≤ 0` ⇒ `excluded_no_oi`。
     vanna / charm 只能 BS 算：有 gamma 但没 IV 的合约照样进 GEX，但不进这两项，
-    计 `excluded_no_iv_for_greeks`。Δ 没有（CBOE None 且无 IV）⇒ 不进 DEX，delta_source 记 none。
+    计 `excluded_no_iv_for_greeks`。CBOE Δ 为 None / 0 / 符号与方向矛盾 ⇒ BS 兜底（记 delta_source bs）；
+    兜底也没有（无 IV）⇒ 不进 DEX，delta_source 记 none。
     形状非法（缺 strike / cp / dte）的计 `excluded_bad_contract`；S 非法时每张合约都
     计进这一项（全部被排除、n_contracts_used=0，下游看得见，不返回一份假装正常的空表）。
     """
@@ -250,7 +251,10 @@ def strike_profile(contracts: List[dict], S, *, r: float = RISK_FREE_RATE) -> di
         counts["n_contracts_used"] += 1
 
         dlt = _num(c.get("delta"))
-        if dlt is not None and dlt != 0.0:
+        # CBOE Δ 为 0 或与方向符号矛盾（put 给了 +0.25）⇒ 当缺失、BS 兜底。与
+        # sell_strike_candidates._contract_delta **同一条**规则：那边 import 本模块，这里不能反向 import，
+        # 只好各写一份——改一处必须同改另一处（tests/test_sell_strike_levels.py 逐例核对两边一致）。
+        if dlt is not None and dlt != 0.0 and ((cp == "C" and dlt > 0) or (cp == "P" and dlt < 0)):
             counts["delta_source"]["cboe"] += 1
         else:
             dlt = bs_delta(Sv, K, T, r, iv, cp) if iv is not None else None
@@ -499,15 +503,22 @@ def term_views(contracts: List[dict], S, *, r: float = RISK_FREE_RATE) -> dict:
     GEX 是带符号求和，对到期日集合截断可能翻号（v0.45.197 实测），所以三个视图并列给出、
     各自自洽，路由固定读 le_45dte（见 sell_strike_candidates.ROUTE_VIEW）。空视图给
     n_contracts=0 与 insufficient_contracts，不抛。
+    next_expiry 只在**有到期日**的行里选（dte 合法但缺 expiry / expiry 为空的行不参选、不进该视图，
+    计 next_expiry 视图的 `excluded_no_expiry`）；它们照样进 le_45dte / full（那两个视图按 dte 截，用不到到期日）。
     """
     allc = list(contracts or [])
     valid = [c for c in allc if isinstance(c, dict)
              and _num(c.get("dte")) is not None and _num(c.get("dte")) >= 0]
+    # 曾经在 valid 上直接取：dte 最小的行缺 expiry 键 ⇒ `min(...)["expiry"]` 抛 KeyError；
+    # expiry=None ⇒ next_exp=None，整个 next_expiry 视图变成「所有没有到期日的行」。
+    dated = [c for c in valid if c.get("expiry")]
     next_exp = None
-    if valid:
-        next_exp = min(valid, key=lambda c: (_num(c.get("dte")), str(c.get("expiry"))))["expiry"]
+    if dated:
+        next_exp = min(dated, key=lambda c: (_num(c.get("dte")), str(c.get("expiry"))))["expiry"]
+    nxt = _view([c for c in dated if c.get("expiry") == next_exp], S, r)
+    nxt["excluded_no_expiry"] = len(valid) - len(dated)
     return {
-        "next_expiry": _view([c for c in valid if c.get("expiry") == next_exp], S, r),
+        "next_expiry": nxt,
         "le_45dte": _view([c for c in valid if _num(c.get("dte")) <= 45], S, r),
         # full 收**原始全集**（含 dte 缺失/为负/形状非法的行）：它们在 profile 与扫描里
         # 各自计进 excluded_bad_contract —— 先在这里滤掉就没有任何地方会数到它们。

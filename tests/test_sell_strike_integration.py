@@ -7,8 +7,12 @@
      不 import 旧 GEX / Greeks 引擎与蜂群蒸馏；层间依赖只向下；两个纯计算层零 I/O。
   2. AST 火墙②（向外）：全仓只有日报钩子与 MCP 两处生产代码 import `sell_strike_*`。
      两条都带「确实扫到了」的正对照与 tmp 树病灶夹具（has-teeth）。
+     2b（评审 G3 补）：日报模块里对卖权模块的引用只许在 `_post_scan_notify` 方法体内（放行的是钩子，
+     不是评分所在的整个文件）；不 import 也能碰到的两个入口——账本目录 `sell_strike_state` 与
+     CBOE 原始合约视图 `fetch_cboe_raw_contracts`——各有一张**双向**的引用者白名单。
   3. 钩子非致命：**真跑** `_post_scan_notify`（兄弟钩子全换桩），卖权这一段任一处抛异常
-     ⇒ 方法不崩、有 warning、后面的步骤照跑。
+     ⇒ 方法不崩、有 warning、后面的步骤照跑；0 行告警**按档**响。开 / 关钩子两遍，report 逐字节相同、
+     swarm_results 前后深相等。3b：补跑时今天的链不许以旧日期入账（vintage 更新方向 + as_of 原样下传）。
   4. 不上公开网站：日报 `report["markdown_report"]` 里没有卖权小节（真跑钩子、正对照同时
      证明本地报告确实写出来了）；本地报告 / 账本路径不命中 `report_deployer` 的自动提交判定，
      真跑一遍 gh-pages 部署也不会被带上去；账本目录被 .gitignore 忽略、进私有备份清单。
@@ -21,12 +25,15 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import copy
 import json
 import logging
 import subprocess
 import sys
 import types
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -65,6 +72,52 @@ def _imports(tree) -> list:
             if (name in ("import_module", "__import__") and node.args
                     and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
                 out.append((node.args[0].value, node.lineno, ()))
+    return out
+
+
+def _doc_string_ids(tree) -> set:
+    """裸字符串语句（docstring，以及同形的「字符串当注释」）里那个 Constant 的 id——它们是文档不是代码。
+    不排除的话，hive_logger / scan_timing 的 docstring 提一句 `sell_strike_state` 就得进白名单，
+    白名单就失去意义。"""
+    return {id(n.value) for n in ast.walk(tree)
+            if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)}
+
+
+def code_refs(tree, token: str, *, prefix: bool = False, names=frozenset(), skip=frozenset()) -> list:
+    """`tree` 里**代码**（docstring 与注释不算）对 `token` 的全部引用 `[(行号, 描述)]`。
+
+    只查 import 的火墙，绕过去只要一行 `PATHS.sell_strike_state` 或 `getattr(cboe_options, "...")`
+    （评审变异 M17：蒸馏蜂里直接读账本目录，一个 `sell_strike_*` import 都没有，原火墙全绿）。
+    认六种写法：Name / Attribute / Import 与 ImportFrom 的点分段与导入名 / 调用关键字名 /
+    字符串字面量（含 f-string 片段——`import_module("x")`、`sys.modules["x"]`、`home / "x"` 都靠它）。
+    `prefix=True`：标识符按前缀比（`sell_strike_` 命中 `sell_strike_ledger`）；字符串一律按子串比。
+    `names`：额外算命中的裸名（import 别名，如 `_ssl`）。`skip`：不看的节点 id（钩子方法体）。
+    """
+    docs = _doc_string_ids(tree)
+    out = []
+    for n in ast.walk(tree):
+        if id(n) in skip or id(n) in docs:
+            continue
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            if token in n.value:
+                out.append((n.lineno, f"字符串 {n.value[:60]!r}"))
+            continue
+        if isinstance(n, ast.Name):
+            ids = [n.id]
+        elif isinstance(n, ast.Attribute):
+            ids = [n.attr]
+        elif isinstance(n, ast.Import):
+            ids = [p for a in n.names for p in a.name.split(".")]
+        elif isinstance(n, ast.ImportFrom):
+            ids = (n.module or "").split(".") + [a.name for a in n.names]
+        elif isinstance(n, ast.keyword) and n.arg:
+            ids = [n.arg]
+        else:
+            continue
+        hit = [i for i in ids if (i.startswith(token) if prefix else i == token)
+               or (isinstance(n, ast.Name) and i in names)]
+        if hit:
+            out.append((n.lineno, f"{type(n).__name__} {hit[0]}"))
     return out
 
 
@@ -238,6 +291,155 @@ class TestFirewallOutward:
         assert n == 6 and not unparsable
 
 
+# ═════════════════════════════════════════ 2b · 火墙②补三道：放行的文件≠放行整个文件；不 import 也能读账本
+
+#: 日报模块里唯一许碰卖权模块的方法
+HOOK = "_post_scan_notify"
+
+
+def daily_refs_outside_hook(source: str) -> list:
+    """日报模块里、`_post_scan_notify` 方法体**之外**对卖权模块的一切引用 `[(行号, 描述)]`。
+
+    火墙②把整个 `alpha_hive_daily_report.py` 放行了，而评分就在这个文件里——评审变异 M3：
+    `_build_swarm_report` 里 `import sell_strike_ledger`、给 put=far 的票 final_score −0.5，原火墙全绿。
+    放行的是**钩子**，不是钩子所在的文件。别名（`import sell_strike_ledger as _ssl` 的 `_ssl`）
+    在方法体外出现也算。
+    """
+    tree = ast.parse(source)
+    hooks = [n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == HOOK]
+    assert len(hooks) == 1, f"日报模块里应恰有一个 {HOOK}，找到 {len(hooks)}——火墙的「内」无从界定"
+    inside = frozenset(id(n) for n in ast.walk(hooks[0]))
+    aliases = frozenset(
+        a.asname for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names
+        if a.asname and (a.name.startswith("sell_strike_")
+                         or (isinstance(n, ast.ImportFrom) and (n.module or "").startswith("sell_strike_"))))
+    return code_refs(tree, "sell_strike_", prefix=True, names=aliases, skip=inside)
+
+
+#: 在代码里引用账本目录 `sell_strike_state` 的生产文件——**恰好**这几处（双向：多一处、少一处都红）。
+#: 定义（hive_logger 的 property）/ 唯一解析点（ledger `_state_dir()`）/ 私有备份清单 / 数据根迁移清单。
+#: sell_strike_report 经 ledger 的 `_state_dir()` 取目录，自己不引用。tests/、experiments/ 不扫（同火墙②）。
+STATE_DIR_REFERENCERS = {"hive_logger.py", "sell_strike_ledger.py",
+                         "data_backup/export.py", "data_backup/migrate_data_root.py"}
+#: 调 CBOE 原始合约视图的生产文件——**恰好**这一处（双向）。它是卖权专用的全链视图；
+#: 评分链要期权数据走 `fetch_cboe_chain` / GEX 视图，拿到这个视图就等于绕过了火墙②。
+RAW_FETCH_CALLERS = {"sell_strike_ledger.py"}
+
+
+def token_refs(token: str, root=REPO):
+    """全仓生产代码里对 `token` 的代码引用：`({相对路径: [(行号, 描述)]}, 扫过的文件数, 口径, 解析失败清单)`。
+    枚举口径同火墙②（`own_python_files`；跳过 tests/、experiments/）；四层自己也扫——白名单管它们。"""
+    root = Path(root)
+    files, how = own_python_files(root)
+    hits, n, unparsable = {}, 0, []
+    for py in files:
+        rel = py.relative_to(root)
+        if rel.parts[0] in _SKIP_TOP:
+            continue
+        n += 1
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError, ValueError):
+            unparsable.append(str(rel))
+            continue
+        refs = code_refs(tree, token)
+        if refs:
+            hits[rel.as_posix()] = refs
+    return hits, n, how, unparsable
+
+
+class TestFirewallBeyondImports:
+    def test_daily_report_touches_sell_strike_only_inside_the_hook(self):
+        """变异 M3：`_build_swarm_report` 里 `import sell_strike_ledger` 并按账本改 final_score。
+        正对照：同一探针不设「钩子内」豁免时，确实在钩子里看到了卖权 import（探针没瞎、钩子没拆）。"""
+        src = DAILY.read_text(encoding="utf-8")
+        bad = daily_refs_outside_hook(src)
+        assert not bad, (f"日报模块在 {HOOK} 之外引用了卖权模块：{bad}。评分就在这个文件里——"
+                         "卖权只记录与结算，只许日报钩子（本方法体内）碰它。")
+        tree = ast.parse(src)
+        hook = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == HOOK)
+        seen = code_refs(tree, "sell_strike_", prefix=True)
+        assert any("Import sell_strike_ledger" in w for _l, w in seen), seen
+        assert all(hook.lineno <= ln <= hook.end_lineno for ln, _w in seen), seen
+
+    @pytest.mark.parametrize("inject,why", [
+        ("def _mut(self, swarm_results):\n    import sell_strike_ledger\n"
+         "    for t, r in swarm_results.items():\n        r['final_score'] -= 0.5\n", "Import sell_strike_ledger"),
+        ("from sell_strike_report import rows_for_ticker\n", "ImportFrom sell_strike_report"),
+        ("import importlib\n_m = importlib.import_module('sell_strike_ledger')\n", "字符串"),
+        ("_m = sys.modules.get('sell_strike_ledger')\n", "字符串"),
+        ("def _mut():\n    return _ssl.load_rows('monthly')\n", "Name _ssl"),
+        ("def _mut():\n    return PATHS.sell_strike_state\n", "Attribute sell_strike_state"),
+    ])
+    def test_hook_scope_has_teeth(self, inject, why):
+        """每种写法注入到真日报源码（钩子外）都必被抓；只在 docstring 里提到不算（反向对照在下一条）。"""
+        src = DAILY.read_text(encoding="utf-8")
+        hits = daily_refs_outside_hook(src + "\n" + inject)
+        assert any(why in w for _l, w in hits), f"注入 {inject!r} 没被抓到（得到 {hits}）"
+
+    def test_hook_scope_ignores_docstrings(self):
+        """反向对照：docstring 里写 `sell_strike_ledger` 是文档不是引用——误报会逼人把整个文件加回豁免。"""
+        src = DAILY.read_text(encoding="utf-8")
+        doc = '\ndef _doc():\n    """见 sell_strike_ledger.run_for_date"""\n'
+        assert daily_refs_outside_hook(src + doc) == daily_refs_outside_hook(src)
+
+    def test_ledger_dir_and_raw_fetch_have_exact_referencers(self):
+        """变异 M17：`swarm_agents/queen_distiller.py` 里一个函数经 `PATHS.sell_strike_state` 读账本（零 import）；
+        评分组件调 `cboe_options.fetch_cboe_raw_contracts`。两张白名单双向：多出来的是越界，
+        少了的是被拆 / 改道（例如 ledger 不再经 PATHS 解析目录）——两种都要有人看一眼。"""
+        for token, allowed in (("sell_strike_state", STATE_DIR_REFERENCERS),
+                               ("fetch_cboe_raw_contracts", RAW_FETCH_CALLERS)):
+            hits, n, how, unparsable = token_refs(token)
+            assert n > 100, f"只扫到 {n} 个生产文件（口径 {how}）——枚举坏了"
+            assert not unparsable, f"这些生产文件解析失败、火墙看不了：{unparsable}"
+            extra = {f: v for f, v in hits.items() if f not in allowed}
+            assert not extra, (f"这些生产文件在代码里引用了 {token}：{extra}。卖权账本 / 原始链只许卖权模块"
+                               "与目录的定义 / 备份 / 迁移碰——评分链读它就是绕过火墙②。")
+            assert set(hits) == allowed, (f"{token} 的引用者少了 {sorted(allowed - set(hits))}——"
+                                          "被拆了还是改道了？改道就更新白名单并说明理由")
+
+    def test_token_scan_has_teeth_on_a_planted_tree(self, tmp_path):
+        """tmp 树种病灶：属性 / 字符串拼路径 / from-import 别名 / getattr 字符串 / 直接调用都抓；
+        docstring 提及、函数定义本身、tests/、experiments/、嵌套 worktree 都不算。
+        变异：去掉 Constant 分支（字符串拼路径漏抓）/ 不排除 docstring（cboe_options 与 scan_timing 误报）。"""
+        files = {
+            "hive_logger.py": ("class P:\n    @property\n    def sell_strike_state(self):\n"
+                               "        return self.home / 'sell_strike_state'\n"),
+            "sell_strike_ledger.py": ("import cboe_options\nfrom hive_logger import PATHS\n"
+                                      "def _state_dir():\n    return PATHS.sell_strike_state\n"
+                                      "def _default_fetch(t, *, as_of):\n"
+                                      "    return cboe_options.fetch_cboe_raw_contracts(t, as_of=as_of)\n"),
+            "data_backup/export.py": "STATE_DIRS = ('vrp_state', 'sell_strike_state')\n",
+            "data_backup/migrate_data_root.py": "DIRS = ['sell_strike_state']\n",
+            "swarm_agents/queen_distiller.py": ("from hive_logger import PATHS\ndef _peek():\n"
+                                                "    return sorted((PATHS.sell_strike_state / 'monthly').glob('*'))\n"),
+            "report_formatters.py": "import os\np = os.path.join(HOME, 'sell_strike_state', 'monthly')\n",
+            "gex_regime.py": "from cboe_options import fetch_cboe_raw_contracts as _raw\n",
+            "advanced_analyzer.py": "import cboe_options\nf = getattr(cboe_options, 'fetch_cboe_raw_contracts')\n",
+            "oracle_bee.py": "import cboe_options\nx = cboe_options.fetch_cboe_raw_contracts('NVDA', as_of=None)\n",
+            "cboe_options.py": ('def fetch_cboe_raw_contracts(ticker, *, as_of):\n'
+                                '    """账本写在 sell_strike_state 下"""\n    return None, "x"\n'),
+            "scan_timing.py": 'def f():\n    """fetch_cboe_raw_contracts 各出口计数"""\n',
+            "tests/test_x.py": "PATHS.sell_strike_state\nfetch_cboe_raw_contracts('A', as_of=None)\n",
+            "experiments/probe.py": "PATHS.sell_strike_state\n",
+            ".claude/worktrees/stale/gex_regime.py": "from cboe_options import fetch_cboe_raw_contracts\n",
+        }
+        for rel, src in files.items():
+            p = tmp_path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(src, encoding="utf-8")
+        state, n, how, unparsable = token_refs("sell_strike_state", tmp_path)
+        assert n == 11 and not unparsable, (n, how, unparsable)
+        assert sorted(f for f in state if f not in STATE_DIR_REFERENCERS) == [
+            "report_formatters.py", "swarm_agents/queen_distiller.py"], state
+        assert STATE_DIR_REFERENCERS <= set(state), state
+        raw, _n, _how, _u = token_refs("fetch_cboe_raw_contracts", tmp_path)
+        assert sorted(f for f in raw if f not in RAW_FETCH_CALLERS) == [
+            "advanced_analyzer.py", "gex_regime.py", "oracle_bee.py"], raw
+        assert set(raw) >= RAW_FETCH_CALLERS
+
+
 # ═════════════════════════════════════════ 3/4 · 真跑 `_post_scan_notify`
 
 #: 兄弟钩子的桩渲染出的小节——用来证明 `_extra_md` 回填这条路径在本测试里真的跑到了
@@ -296,17 +498,40 @@ def notify(monkeypatch, tmp_path):
     monkeypatch.setattr(LG, "_default_fetch", _fetch)
     monkeypatch.setattr(scan_timing, "_phases", {})      # 进程级计时表：换一张，测完还原
 
-    def run(swarm=None):
+    def run(swarm=None, report=None):
         r = ahdr.AlphaHiveDailyReporter.__new__(ahdr.AlphaHiveDailyReporter)
         r.date_str = AS_OF
         r.report_dir = tmp_path
         r.memory_store = r._session_id = r.vector_memory = r.slack_notifier = None
         r._submit_bg = lambda *a, **k: None
-        report = {"markdown_report": "# 日报正文\n", "opportunities": []}
+        if report is None:
+            report = {"markdown_report": "# 日报正文\n", "opportunities": []}
         r._post_scan_notify(types.SimpleNamespace(board=None, targets=[]),
                             _swarm() if swarm is None else swarm, report, 1.0)
         return report, r
     return run
+
+
+#: 真 `_default_fetch`（模块导入时抓住）：`notify` 夹具把它换成了 `_fetch`，要走真取数链的测试换回来
+_REAL_DEFAULT_FETCH = LG._default_fetch
+
+
+def _scored_swarm():
+    """带评分字段的蜂群结果：「钩子写回 final_score」这类变异要有东西可改才看得出来。
+    ScoutBee 带价 ⇒ 反馈循环快照不去打 yfinance 取入场价（快照写在 tmp 的 report_dir 下）。"""
+    sw = _swarm()
+    for i, t in enumerate(sorted(sw)):
+        sw[t].update(final_score=6.5 - i, rule_score=6.1 - i, direction="bullish", supporting_agents=4,
+                     dimension_scores={"signal": 5.0, "catalyst": 6.0, "sentiment": 6.5,
+                                       "odds": 5.5, "risk_adj": 5.0})
+        sw[t]["agent_details"]["ScoutBeeNova"] = {"score": 6.0, "details": {"price": 100.0 + i}}
+    return sw
+
+
+def _scored_report():
+    return {"markdown_report": "# 日报正文\n\n| AAA | 6.5 |\n| BBB | 5.5 |\n",
+            "opportunities": [{"ticker": "AAA", "opp_score": 6.5, "direction": "bullish"},
+                              {"ticker": "BBB", "opp_score": 5.5, "direction": "bullish"}]}
 
 
 def _messages(caplog, level):
@@ -332,6 +557,36 @@ class TestHookRecordsWithoutTouchingDailyMarkdown:
         text = local.read_text(encoding="utf-8")
         assert "卖权行权价候选" in text and "### AAA" in text
         assert any("卖权行权价账本已更新" in m for m in _messages(caplog, logging.INFO))
+
+    def test_hook_on_off_leaves_report_and_swarm_identical(self, notify, monkeypatch, caplog):
+        """上一条只 grep 几个标记词——评审变异 M2（往 `_extra_md` 里拼 `"\\n## Short premium ladder\\n"
+        + str(per_tenor)`，一个标记词都不含）与 M1（钩子里 `swarm_results[t]["final_score"] = -1.0`）都活了下来。
+        这里不猜泄漏长什么样：同一输入跑两遍，一遍关掉卖权钩子（`sell_strike_ledger` import 即失败，
+        整段只剩一条 warning），一遍照常——整个 report（含 opportunities）必须逐字节相同；
+        照常那遍前后 `swarm_results` 深相等。兄弟钩子的桩都是常量，两遍的差只可能来自卖权钩子。
+        正对照：开的那遍本地报告确实写出来了、关的那遍确实走了失败分支、兄弟小节两遍都回填了。"""
+        sw_off, sw_on = _scored_swarm(), _scored_swarm()
+        before = copy.deepcopy(sw_on)
+        with monkeypatch.context() as m:
+            m.setitem(sys.modules, "sell_strike_ledger", None)
+            with caplog.at_level(logging.INFO):
+                rep_off, _r = notify(swarm=sw_off, report=_scored_report())
+        assert any("卖权行权价账本更新失败(非致命)" in w for w in _messages(caplog, logging.WARNING)), \
+            "关掉的那遍没走失败分支——对照不成立"
+        assert not R.report_path(AS_OF).exists(), "关掉的那遍写了本地报告——对照不成立"
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            rep_on, _r = notify(swarm=sw_on, report=_scored_report())
+        assert any("卖权行权价账本已更新" in m for m in _messages(caplog, logging.INFO)), "开的那遍钩子没跑"
+        assert R.report_path(AS_OF).is_file(), "开的那遍没写本地报告——钩子没跑到底"
+
+        assert sw_on == before, "卖权钩子改了 swarm_results——它只记录与结算，不许写回评分"
+        assert rep_on["markdown_report"].encode("utf-8") == rep_off["markdown_report"].encode("utf-8"), (
+            "开 / 关卖权钩子，日报 markdown 不一样——它会被部署到公开网站。多出来的是："
+            f"{rep_on['markdown_report'][len(rep_off['markdown_report']):]!r}")
+        assert rep_on == rep_off, "卖权钩子改了 report 的其它字段（opportunities 等）"
+        for stub in _STUB_MD.values():
+            assert stub in rep_on["markdown_report"], "兄弟小节没回填——`_extra_md` 那条路径没跑到，比较不作数"
 
     def test_hook_passes_scan_tickers_and_swarm_earnings(self, notify, caplog):
         """钩子用本轮扫描的票、本轮 ChronosBee 的财报日（不另打 yfinance），日志计数与账本一致。
@@ -488,12 +743,15 @@ class TestHookIsNonFatal:
         assert any("卖权行权价账本已更新" in m for m in _messages(caplog, logging.INFO)), "月度照常记录"
 
     def test_zero_recorded_rows_is_loud(self, notify, monkeypatch, caplog):
-        """整轮 0 行可记（CBOE 全线不可得 / 快照模式）⇒ warning 带取数原因计数。变异：删掉那段 warning。"""
+        """整轮 0 行可记（CBOE 全线不可得 / 快照模式）⇒ 每档一条 warning，各带该档的原因计数。
+        变异：删掉那段 warning。"""
         monkeypatch.setattr(LG, "_default_fetch", lambda t, *, as_of: (None, "snapshot_mode_no_raw_chain"))
         with caplog.at_level(logging.INFO):
             notify()
         warns = [m for m in _messages(caplog, logging.WARNING) if "0 行可记" in m]
-        assert len(warns) == 1 and "snapshot_mode_no_raw_chain" in warns[0], _messages(caplog, logging.WARNING)
+        assert len(warns) == 2, _messages(caplog, logging.WARNING)
+        assert all("snapshot_mode_no_raw_chain" in w for w in warns), warns
+        assert sorted("月度（monthly）" in w for w in warns) == [False, True], "两档各一条"
 
     def test_zero_row_alarm_reports_row_reasons_not_fetch_reasons(self, notify, monkeypatch, caplog):
         """取数成功但窗口里没有到期日（只挂着 60 DTE 的链）⇒ 两档 0 行。告警给的必须是**行上**的原因
@@ -504,9 +762,124 @@ class TestHookIsNonFatal:
         with caplog.at_level(logging.INFO):
             notify()
         warns = [m for m in _messages(caplog, logging.WARNING) if "0 行可记" in m]
+        assert len(warns) == 2, _messages(caplog, logging.WARNING)
+        for w in warns:
+            assert "no_expiry_in_window" in w and "stale_vintage" in w and "'ok'" not in w, w
+        assert {"月度（monthly）" in warns[0], "周度（weekly）" in warns[0]} == {True, False}, "按档给原因"
+        assert ("月度（monthly）" in warns[0]) != ("月度（monthly）" in warns[1]), warns
+
+    @pytest.mark.parametrize("dtes,empty,full", [((14,), "monthly", "weekly"), ((30,), "weekly", "monthly")])
+    def test_zero_row_alarm_is_per_tenor(self, notify, monkeypatch, caplog, dtes, empty, full):
+        """评审 G3：一档对**全部**票 0 行、另一档照常 ⇒ 空的那一档必须响（档名 + 该档行上的原因），
+        照常的那档不响。原判据「两档都 0 行才响」下这里只有一条 INFO——一档账本天天断供没人知道。
+        变异：回到 `not any(_v.get("recorded") for _v in per_tenor.values())`。"""
+        monkeypatch.setattr(LG, "_default_fetch", lambda t, *, as_of: (
+            (None, "stale_vintage") if t == "BBB" else (_raw(t, as_of, dtes=dtes), None)))
+        with caplog.at_level(logging.INFO):
+            notify()
+        label = {"monthly": "月度", "weekly": "周度"}
+        warns = [m for m in _messages(caplog, logging.WARNING) if "0 行可记" in m]
         assert len(warns) == 1, _messages(caplog, logging.WARNING)
-        assert "no_expiry_in_window" in warns[0] and "'ok'" not in warns[0], warns[0]
-        assert "monthly" in warns[0] and "weekly" in warns[0], "按档给原因"
+        assert f"{label[empty]}（{empty}）" in warns[0], warns[0]
+        assert full not in warns[0] and label[full] not in warns[0], warns[0]
+        assert "no_expiry_in_window" in warns[0] and "stale_vintage" in warns[0], warns[0]
+        # 正对照：另一档确实记上了（「只有一条」不是因为另一档也没跑）
+        assert [r["ticker"] for r in LG.rows_for_date(AS_OF, full) if r["status"] == "recorded"] == ["AAA"]
+        assert not [r for r in LG.rows_for_date(AS_OF, empty) if r["status"] == "recorded"]
+
+    def test_tenor_missing_from_run_result_is_loud(self, notify, monkeypatch, caplog):
+        """`run_for_date` 的返回里漏了一档（重构丢键）也按 0 行响，而不是只看返回里有的档。
+        变异：按 `per_tenor` 的键迭代、不并上 `TENORS`。"""
+        monkeypatch.setattr(LG, "run_for_date", lambda *a, **k: {
+            "per_tenor": {"monthly": {"recorded": 2, "unavailable": {}, "errors": []}}})
+        with caplog.at_level(logging.INFO):
+            notify()
+        warns = [m for m in _messages(caplog, logging.WARNING) if "0 行可记" in m]
+        assert len(warns) == 1 and "周度（weekly）" in warns[0] and "未返回该档" in warns[0], \
+            _messages(caplog, logging.WARNING)
+
+
+# ═════════════════════════════════════════ 3b · 补跑的 vintage 保护：今天的链不许写到旧日期下
+#
+# 开机补跑 / CLI 带旧日期时，CBOE 给的是**今天**（更新）的链。原有的 mismatch 用例只喂了**更旧**的
+# payload ⇒ 评审变异 M13（`vintage != as_of` → `vintage < as_of`）活了下来——恰好放行真正的风险方向。
+# M19（`_default_fetch` 传 `as_of=None`）也活着：钩子测试全都把 `_default_fetch` 换成了桩。
+
+_NEWER = "2026-09-24"                                 # AS_OF（09-23）的下一交易日：补跑发生的那天
+
+
+@pytest.fixture
+def cboe_clean(monkeypatch):
+    """真 `fetch_cboe_raw_contracts` 的前置：关快照模式，进程级计数前后清零（同 test_sell_strike_candidates）。"""
+    import cboe_options as C
+    monkeypatch.setattr(C, "_SNAPSHOT_PROVIDER", None)
+    C.reset_raw_contracts_stats()
+    C.reset_payload_stats()
+    yield C
+    C.reset_raw_contracts_stats()
+    C.reset_payload_stats()
+
+
+def _serve_newer(monkeypatch, C):
+    """`_fetch_cboe_payload` → 一份 vintage = _NEWER 的 payload（09-24 收盘后抓到的链），不出网。"""
+    from tests.test_sell_strike_candidates import _payload, _row
+    rows = [_row(exp, cp, float(K), delta=(d if cp == "C" else d - 1.0))
+            for exp in ("2026-10-09", "2026-10-23") for K, d in zip(range(80, 125, 5),
+                                                                      (0.95, 0.9, 0.8, 0.65, 0.5, 0.35, 0.2, 0.1, 0.05))
+            for cp in "CP"]
+    payload = _payload(rows, last_trade=f"{_NEWER}T16:00:00")
+    monkeypatch.setattr(C, "_fetch_cboe_payload", lambda *a, **k: payload)
+
+
+class TestCatchUpVintageProtection:
+    def test_newer_payload_for_older_as_of_is_refused(self, monkeypatch, cboe_clean):
+        """09-24 收盘后补跑 as_of=09-23：payload 是 09-24 的 ⇒ `(None, "vintage_mismatch")`，计数 +1。
+        正对照：同一 payload、as_of=09-24 ⇒ 取得到——红只能来自 vintage 判据，不是夹具坏了。
+        变异 M13：`vintage != as_of` → `vintage < as_of`（只挡更旧的，放行更新的）。"""
+        C = cboe_clean
+        _serve_newer(monkeypatch, C)
+        now = datetime(2026, 9, 24, 17, 5, tzinfo=ZoneInfo("America/New_York"))   # 补跑：09-24 收盘后
+        ok, why = C.fetch_cboe_raw_contracts("XYZ", as_of=_NEWER, now_et=now)
+        assert why is None and ok["vintage_date"] == ok["as_of"] == _NEWER and ok["contracts"], why
+        assert C.raw_contracts_stats()["vintage_mismatch"] == 0
+        res, why = C.fetch_cboe_raw_contracts("XYZ", as_of=AS_OF, now_et=now)
+        assert (res, why) == (None, "vintage_mismatch"), (
+            f"{_NEWER} 的链被当成 {AS_OF} 的收下了：{why}"
+            + (f"，as_of={res.get('as_of')}" if res else ""))
+        assert C.raw_contracts_stats()["vintage_mismatch"] == 1
+
+    def test_default_fetch_forwards_as_of_unchanged(self, monkeypatch):
+        """`_default_fetch` 把 as_of 原样交给 `fetch_cboe_raw_contracts`（日报钩子的日期 / MCP 现算的 None）。
+        变异 M19：传 `as_of=None`（vintage 闸整个失效，补跑把今天的链写到旧日期下）。"""
+        import cboe_options
+        seen = []
+
+        def fake(ticker, **kw):
+            seen.append((ticker, kw.get("as_of", "<缺>")))
+            return None, "stub"
+        monkeypatch.setattr(cboe_options, "fetch_cboe_raw_contracts", fake)
+        assert _REAL_DEFAULT_FETCH("AAA", as_of=AS_OF) == (None, "stub")
+        assert _REAL_DEFAULT_FETCH("BBB", as_of=None) == (None, "stub")
+        assert seen == [("AAA", AS_OF), ("BBB", None)], seen
+
+    def test_hook_catch_up_with_todays_chain_records_nothing(self, notify, monkeypatch, cboe_clean, caplog):
+        """端到端：日报钩子（date_str = 09-23）→ 真 `run_for_date` → 真 `_default_fetch` → 真
+        `fetch_cboe_raw_contracts`，CBOE 给的是 09-24 的链 ⇒ 两档一行都不记、原因全是 vintage_mismatch，
+        两档各响一条 0 行告警。M13、M19 任一个都会让 09-24 的链以 09-23 的名义落进账本。"""
+        _serve_newer(monkeypatch, cboe_clean)
+        monkeypatch.setattr(LG, "_default_fetch", _REAL_DEFAULT_FETCH)
+        with caplog.at_level(logging.INFO):
+            notify()
+        for tenor in LG.TENORS:
+            rows = {r["ticker"]: r for r in LG.rows_for_date(AS_OF, tenor)}
+            got = {t: (r["status"], r.get("unavailable_reason")) for t, r in rows.items()}
+            assert set(got) == {"AAA", "BBB"}, got
+            assert not [t for t, (st, _why) in got.items() if st == "recorded"], \
+                f"{tenor}：{_NEWER} 的链以 {AS_OF} 的名义记进了账本：{got}"
+            # 第一只一定真取了数；后面的票允许被取数熔断之类的保护跳过，只要没记
+            assert got["AAA"] == ("unavailable", "vintage_mismatch"), got
+        warns = [m for m in _messages(caplog, logging.WARNING) if "0 行可记" in m]
+        assert len(warns) == 2 and all("vintage_mismatch" in w for w in warns), warns
 
 
 # ═════════════════════════════════════════ 4 · 不上公开网站：部署 / 自动提交 / git / 备份

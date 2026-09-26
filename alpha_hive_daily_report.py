@@ -1337,7 +1337,9 @@ class AlphaHiveDailyReporter:
         # ⚠️ **不得**拼进下面的 `_extra_md` / `report["markdown_report"]`：日报 md 同时在 gh-pages
         # 部署白名单与自动提交白名单里（report_deployer），用户明确要求本功能不上公开网站。
         # 报告只写 `<PATHS.sell_strike_state>/reports/sell-strike-<日期>.md`，MCP 工具按需读。
-        # 守卫：tests/test_sell_strike_integration.py 真跑本方法，断言日报 md 里没有这一节。
+        # 守卫：tests/test_sell_strike_integration.py 真跑本方法，断言日报 md 里没有这一节，
+        # 且开 / 关本钩子两次跑出的 report 逐字节相同、swarm_results 前后深相等（不许写回评分）；
+        # 本文件里对卖权模块的任何引用只许出现在本方法体内（AST 火墙）。
         # 顺序是刻意的：账本状态日志 / errors / 0 行告警**先**打，本地报告**后**写、单独 try——
         # 两者同在一个 try 且报告在前时，渲染一抛错，账本其实已写好，日志却只剩一条「更新失败」，
         # 同一天本该响的 0 行告警也被吞掉（评审探针实测）。
@@ -1369,12 +1371,21 @@ class AlphaHiveDailyReporter:
             _ss_errors = [_e for _v in _ss_pt.values() for _e in (_v.get("errors") or [])]
             if _ss_errors:
                 _log.warning("卖权行权价账本部分失败(非致命): %s", _ss_errors)
-            # 整轮 0 行可记（CBOE 全线不可得 / 快照模式没有原始链 / 水平地图全挂 / 窗口里没到期日）
+            # 0 行可记（CBOE 全线不可得 / 快照模式没有原始链 / 水平地图全挂 / 窗口里没到期日）
             # 同样要响，不然账本静默断供。原因取**行上**的 unavailable_reason（按档），不取 fetch_reasons：
             # 后者只管取数这一步，取数成功而行构造失败时它写的是 ok，诊断就自相矛盾了。
-            if swarm_results and not any(_v.get("recorded") for _v in _ss_pt.values()):
-                _log.warning("卖权行权价账本今日 0 行可记（%d 只票全部不可得）：%s", len(swarm_results),
-                             {_t: _v.get("unavailable") for _t, _v in _ss_pt.items()})
+            # **按档判、按档响**：原先只在两档**都** 0 行时才响——回归把某一档对全部票清空（例如那档的
+            # 到期窗口 / 行构造坏了）而另一档照常，就只剩一条 INFO，那一档账本天天断供没人知道。
+            # 档名以 `TENORS` 为准再并上返回里多出来的：run_for_date 漏返回一档，也按 0 行响。
+            # 原因字典原样打印，不认具体键（熔断 / 时间预算等新原因加进来不用改这里）。
+            if swarm_results:
+                for _tn in dict.fromkeys([*_ssl.TENORS, *_ss_pt]):
+                    _tv = _ss_pt.get(_tn)
+                    if _tv is None or not _tv.get("recorded"):
+                        _log.warning("卖权行权价账本今日%s（%s）0 行可记：%d 只票这一档全部不可得，原因 %s",
+                                     {"monthly": "月度", "weekly": "周度"}.get(_tn, _tn), _tn,
+                                     len(swarm_results),
+                                     _tv.get("unavailable") if _tv is not None else "run_for_date 未返回该档")
         except Exception as e:
             _log.warning("卖权行权价账本更新失败(非致命): %s", e)
         # freeze=True：预注册检验首次就绪时在这里跑并冻结——全仓**唯一**传 True 的地方（MCP / CLI 只读，

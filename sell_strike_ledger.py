@@ -41,11 +41,25 @@ freeze=True；MCP、CLI 缺省 freeze=False——就绪但未冻结时只显示�
 冻结的 ready_date = min(as_of, 数据视界)，写路径（run_for_date / settle / 冻结 / CLI）拒绝晚于
 PDT 今天的日期：手误写进一个未来的 ready_date 是永久的（改它 = 删冻结文件 = 协议变更）。
 `rows=` 注入（测试 / 探针）不读也不写冻结文件。
+
+─── 并发写者：分片读-改-写一律持 tenor 目录锁（2026-09-26 二次检查）─────────────────
+手动补跑与定时扫描、CLI `--run` 与 `--settle` 可能同时写同一个分片。原实现整片读 → 改 → 整片重写、
+不加锁：后写者用自己的旧快照覆盖先写者 ⇒ 对方刚记的行 / 刚补的结算**静默消失**（探针实测）。
+现在 `record` 与 `settle` 的每次读-改-写都在 `_tenor_lock`（对 `<state>/<tenor>/` 目录 fd 加
+`fcntl.flock` 排他锁）里做；settle 的取 K 线（网络 I/O）在锁**外**，套用结算时在锁内重读分片、
+按 `_row_key` 逐行套用，行已被别人改过（不再 pending / 到期日变了）⇒ 以对方为准、计 `skipped_concurrent`。
+
+─── 版本戳：协议变更前记的行默认不进检验（预注册文档 §10）─────────────────────────
+每行带 `schema_version` / `component_versions`（levels / candidates / route_rule / prereg）/
+`route.rule_version`。任一项与现行代码不符 ⇒ 该行不进检验（§10「截断，默认不进」），
+计入 `progress.n_rows_version_excluded`。声明「不截断」的修订须在 `_version_mismatch` 里显式放行旧戳。
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
 import json
 import math
 import os
@@ -97,7 +111,29 @@ PREREG = {"version": 1, "registered": "2026-09-23",
 # pending_overdue_days：到期已超过这么多个日历日仍 pending ⇒ run_for_date 打 warning、报告显示。
 # 取不到 K 线（Twelve Data key 过期 / 配额耗尽）不计 attempts（设计如此），放弃闸要到取数窗口外
 # （约 6.5 个月）才触发——这期间「结算 0」与「没有行到期」在日志里一模一样，只有这个数分得开。
-CONFIG = {"settle_max_attempts": 5, "settle_window_slack_days": 15, "pending_overdue_days": 5}
+# settle_max_attempts 数的是**天**不是运行次数（2026-09-26 二次检查）：同一个 as_of 至多计一次
+# （`settle_last_attempt_on`），K 线源最后一根还没越过到期日（源没追上）不计——否则同一天手动补跑
+# 五次、或一个滞后的 K 线源，就把行永久放弃了。
+#
+# 取数熔断 + 时间预算（2026-09-26 二次检查）：run_for_date 跑在生产扫描**之内**、save_report / 部署
+# **之前**，逐票顺序取数且取数层自带重试。DNS 故障实测多花 63 s；若是连接超时，30 票 ×（3×15 s + 2.1 s）
+# ≈ 1400 s，可能把整个扫描顶出步骤时限。所以：
+#   · fetch_breaker_consecutive_failures：连续这么多只票取数失败、且原因是网络类（`_BREAKER_REASONS`
+#     或 `exception:*`）⇒ 其余票不再取，记 `fetch_skipped_breaker`；任何一只取到（或非网络类失败，
+#     说明网络是通的）就清零；
+#   · fetch_time_budget_sec：从取数循环开始计，超了 ⇒ 其余票不再取，记 `fetch_skipped_time_budget`。
+#   两者都计进 fetch_reasons、打 WARNING；跳过的票记 unavailable（同日已 recorded 的旧行照「不降级」保留）。
+# ledger_lock_timeout_sec：分片读-改-写等 tenor 目录锁的上限（秒）；超时 ⇒ TimeoutError
+# （run_for_date 按档收进 errors + warning，CLI 退出码 1）——锁不住就不写，不退回无锁写。
+CONFIG = {"settle_max_attempts": 5, "settle_window_slack_days": 15, "pending_overdue_days": 5,
+          "fetch_breaker_consecutive_failures": 3, "fetch_time_budget_sec": 600,
+          "ledger_lock_timeout_sec": 60}
+
+# 熔断只数「网络 / 取数层整体不可用」类失败（另加 `exception:*`）。stale_vintage / vintage_mismatch 等
+# 说明 payload 取到了、只是内容不对——网络是通的，不计、并清零连续计数。
+_BREAKER_REASONS = ("payload_unavailable",)
+FETCH_SKIPPED_BREAKER = "fetch_skipped_breaker"
+FETCH_SKIPPED_TIME_BUDGET = "fetch_skipped_time_budget"
 
 TENORS = tuple(C.TENORS)          # ("monthly", "weekly")
 SIDES = ("put", "call")
@@ -105,10 +141,12 @@ SIDES = ("put", "call")
 # 只由 settle 写的字段。record 同日重写时按 (ticker, tenor, date) 键原样搬运——
 # 新增结算字段务必同步加进来，否则同日重跑会把它悄悄抹掉（vrp_signal v0.45.104 修的就是这个）。
 # settle_give_up_on：放弃那天的 as_of（assess(as_of) 据此判「那天是否已放弃」，同 settled_on）。
+# settle_last_attempt_on：最近一次**计了次**的失败尝试的 as_of（同一天至多计一次，见 CONFIG 注释）。
 _SETTLEMENT_FIELDS = ("settle_status", "expiry_close", "expiry_close_date", "expiry_close_source",
-                      "settled_on", "settle_attempts", "settle_give_up_reason", "settle_give_up_on")
+                      "settled_on", "settle_attempts", "settle_give_up_reason", "settle_give_up_on",
+                      "settle_last_attempt_on")
 # assess(as_of) 把「as_of 之后才结算 / 放弃」的行当 pending 时，副本上清掉的字段
-# （settle_attempts 不清：它不进任何判定）。
+# （settle_attempts / settle_last_attempt_on 不清：它们不进任何判定）。
 _OUTCOME_FIELDS = ("expiry_close", "expiry_close_date", "expiry_close_source", "settled_on",
                    "settle_give_up_reason", "settle_give_up_on")
 
@@ -128,6 +166,40 @@ def _state_dir(state_dir=None) -> Path:
 
 def _shard(tenor: str, date_str: str, state_dir=None) -> Path:
     return _state_dir(state_dir) / tenor / f"{date_str[:7]}.jsonl"
+
+
+@contextlib.contextmanager
+def _tenor_lock(tenor: str, state_dir=None):
+    """该 tenor 分片读-改-写的排他锁：对 `<state>/<tenor>/` **目录**的 fd 加 `fcntl.flock(LOCK_EX)`。
+
+    为什么锁目录而不是另建 `.lock` 文件：私有备份 `data_backup.export.copy_state_dir` 只拷文本后缀，
+    别的文件记进 `skipped`（`test_private_backup_covers_ledger_and_report` 断言卖权目录零跳过）——
+    多一个锁文件就是「每天出现在备份跳过清单里的噪声」。目录 fd 的 flock 在 macOS / Linux 本地盘上
+    与文件同语义（同进程两个 fd 也互斥），原子替换（tmp + os.replace）不影响目录上的锁。
+    等待超过 `CONFIG["ledger_lock_timeout_sec"]` ⇒ TimeoutError（不退回无锁写：那正是要堵的丢数据）。
+    fd 关闭即释放锁，进程崩了也不会留下死锁。"""
+    d = _state_dir(state_dir) / _check_tenor(tenor)
+    d.mkdir(parents=True, exist_ok=True)
+    timeout = float(CONFIG["ledger_lock_timeout_sec"])
+    fd = os.open(str(d), os.O_RDONLY)
+    try:
+        t0 = time.monotonic()
+        waited = False
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() - t0 >= timeout:
+                    raise TimeoutError(f"卖权账本 {d} 的写锁等了 {timeout:.0f}s 仍被占用（另一个写者卡住了？）"
+                                       "——本次不写，免得覆盖对方") from None
+                waited = True
+                time.sleep(0.02)
+        if waited:
+            _log.info("卖权账本 %s 写锁等待 %.2fs（另一个写者在写）", d, time.monotonic() - t0)
+        yield d
+    finally:
+        os.close(fd)
 
 
 # ─────────────────────────────── 小工具
@@ -209,40 +281,51 @@ def _clean(obj):
 
 def _load_shard(path: Path) -> Tuple[List[dict], List[str]]:
     """(行, 坏行原文)。坏行**不丢**：重写分片时原样保留在末尾，并在 assess 里计数——
-    静默跳过再整表重写，等于把「读不懂」改写成「从没有过」。"""
+    静默跳过再整表重写，等于把「读不懂」改写成「从没有过」。
+
+    按**字节**读、逐行解码（2026-09-26 二次检查）：原实现以文本模式迭代，一个非 UTF-8 字节在 json 的 try
+    **之外**抛 UnicodeDecodeError，整个 tenor 读不了（assess / settle / record 全挂）。现在解不了码的行
+    也只是坏行：以 `surrogateescape` 解码保存，`_write_shard` 以同一方式编码写回 ⇒ 逐字节原样。"""
     if not path.exists():
         return [], []
     rows: List[dict] = []
     bad: List[str] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            s = line.strip()
-            if not s:
-                continue
-            try:
-                rec = json.loads(s)
-            except ValueError:
-                bad.append(s)
-                continue
-            if isinstance(rec, dict):
-                rows.append(rec)
-            else:
-                bad.append(s)
+    n_undecodable = 0
+    for raw in path.read_bytes().split(b"\n"):
+        if not raw.strip():
+            continue
+        try:
+            s = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            bad.append(raw.decode("utf-8", "surrogateescape"))
+            n_undecodable += 1
+            continue
+        try:
+            rec = json.loads(s)
+        except ValueError:
+            bad.append(s)
+            continue
+        if isinstance(rec, dict):
+            rows.append(rec)
+        else:
+            bad.append(s)
     if bad:
-        _log.warning("卖权账本分片 %s 有 %d 行无法解析（已原样保留，不会被重写抹掉）", path, len(bad))
+        _log.warning("卖权账本分片 %s 有 %d 行无法解析（其中非 UTF-8 %d 行；已原样保留，不会被重写抹掉）",
+                     path, len(bad), n_undecodable)
     return rows, bad
 
 
 def _write_shard(path: Path, rows: List[dict], bad_lines: Iterable[str] = ()) -> None:
-    """原子写（tmp + os.replace，照 vrp_signal._write_jsonl）。"""
+    """原子写（tmp + os.replace，照 vrp_signal._write_jsonl）。好行严格 UTF-8；坏行按 `_load_shard`
+    的 `surrogateescape` 编回原始字节（非 UTF-8 的坏行逐字节原样）。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=str(path.parent))
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "wb") as f:
             for r in rows:
-                f.write(json.dumps(_clean(r), ensure_ascii=False, allow_nan=False) + "\n")
+                f.write((json.dumps(_clean(r), ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
             for s in bad_lines:
-                f.write(s + "\n")
+                f.write(s.encode("utf-8", "surrogateescape") + b"\n")
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp, 0o644)
@@ -290,12 +373,39 @@ def rows_for_date(as_of: str, tenor: str, state_dir=None) -> List[dict]:
 
 # ─────────────────────────────── 行构造（纯函数，compute_live 也用）
 
+def _component_versions() -> dict:
+    """现行代码的组件版本戳（写进每一行；`_version_mismatch` 拿它与行上的比）。
+    `prereg` = `PREREG["version"]`：协议修订（§10）不一定动任何组件版本（例如改 α、改财报排除），
+    没有这一项，修订前记的行就无从截断（2026-09-26 二次检查补）。"""
+    return {"levels": L.LEVELS_SCHEMA_VERSION, "candidates": C.CANDIDATES_SCHEMA_VERSION,
+            "route_rule": C.ROUTE_RULE_VERSION, "prereg": PREREG["version"]}
+
+
+def _version_mismatch(r: dict) -> List[str]:
+    """该行版本戳与现行代码不符的项（空表 = 全符，可进检验）。
+
+    预注册文档 §10：协议变更须声明截断，「变更之前记录的行是否还进检验；**默认不进**」。行上的版本戳是
+    「这行是按哪套规则记的」唯一的机器可读记录，所以默认就是：`schema_version`、`component_versions`
+    的每一项、`route.rule_version`，任一项 ≠ 现行代码 ⇒ 不进检验。缺戳 = 不符（判不了是哪个版本记的）。
+    schema_version 也算在内（保守）：账本布局改了，旧行的字段含义未必还是同一个。
+    声明「不截断」的修订须在这里**显式**放行对应的旧戳（可见的代码改动 + 修订节记录），不许靠忘记检查放行。"""
+    out: List[str] = []
+    if r.get("schema_version") != LEDGER_SCHEMA_VERSION:
+        out.append("schema_version")
+    cv, cur = r.get("component_versions"), _component_versions()
+    if not isinstance(cv, dict):
+        out.append("component_versions")
+    else:
+        out += [f"component_versions.{k}" for k in sorted(set(cur) | set(cv)) if cv.get(k) != cur.get(k)]
+    if (r.get("route") or {}).get("rule_version") != C.ROUTE_RULE_VERSION:
+        out.append("route.rule_version")
+    return out
+
+
 def _blank_row(as_of: str, ticker: str, tenor: str) -> dict:
     return {
         "schema_version": LEDGER_SCHEMA_VERSION,
-        "component_versions": {"levels": L.LEVELS_SCHEMA_VERSION,
-                               "candidates": C.CANDIDATES_SCHEMA_VERSION,
-                               "route_rule": C.ROUTE_RULE_VERSION},
+        "component_versions": _component_versions(),
         "date": as_of, "ticker": ticker, "tenor": tenor,
         "status": None, "unavailable_reason": None,
         "vintage_date": None, "underlying_price": None, "underlying_price_source": None,
@@ -314,7 +424,7 @@ def _blank_row(as_of: str, ticker: str, tenor: str) -> dict:
         "env": None, "route": None, "ladder": None,
         "settle_status": None, "expiry_close": None, "expiry_close_date": None,
         "expiry_close_source": None, "settled_on": None, "settle_attempts": 0,
-        "settle_give_up_reason": None, "settle_give_up_on": None,
+        "settle_give_up_reason": None, "settle_give_up_on": None, "settle_last_attempt_on": None,
     }
 
 
@@ -425,11 +535,20 @@ def _record_rows(as_of: str, tenor: str, rows: List[dict], state_dir=None) -> Tu
         seen.add(r.get("ticker"))
 
     path = _shard(tenor, as_of, state_dir)
+    stats = {"kept_previous_recorded": 0, "carried_settlement": 0, "expiry_changed": 0}
+    if not rows:            # 空批：什么都不改，也别为此造出一个空分片（也不建目录、不拿锁）
+        existing, _bad = _load_shard(path)
+        return sorted((r for r in existing if r.get("date") == as_of), key=_row_key), stats
+    # 读-改-写整段持锁：锁外读、锁内写的话，读与写之间别的写者记的行 / 补的结算会被本次覆盖掉
+    with _tenor_lock(tenor, state_dir):
+        return _record_rows_locked(as_of, tenor, rows, path, stats)
+
+
+def _record_rows_locked(as_of: str, tenor: str, rows: List[dict], path: Path,
+                        stats: dict) -> Tuple[List[dict], dict]:
+    """`_record_rows` 持锁的那一段：重读分片 → 按票合并 → 原子写回。"""
     existing, bad = _load_shard(path)
     old_today = {r.get("ticker"): r for r in existing if r.get("date") == as_of}
-    stats = {"kept_previous_recorded": 0, "carried_settlement": 0, "expiry_changed": 0}
-    if not rows:            # 空批：什么都不改，也别为此造出一个空分片
-        return sorted(old_today.values(), key=_row_key), stats
     others = [r for r in existing if r.get("date") != as_of]
     # 按票 upsert：本批没带的票，旧行保留（CLI 只跑一只票时不能把当天其余 29 只抹掉——
     # 那是比「unavailable 覆盖 recorded」更彻底的降级）。
@@ -519,6 +638,13 @@ def _close_on(bars: List[dict], day: str) -> Optional[float]:
     return None
 
 
+def _latest_bar_date(bars: List[dict]) -> Optional[str]:
+    """K 线序列里最晚那根的日期（YYYY-MM-DD）；一根有日期的都没有 ⇒ None。"""
+    ds = [str(b.get("date") or "")[:10] for b in bars or [] if isinstance(b, dict)]
+    ds = [d for d in ds if len(d) == 10]
+    return max(ds) if ds else None
+
+
 def _give_up(row: dict, reason: str, as_of: str) -> None:
     row["settle_status"] = "give_up"
     row["settle_give_up_reason"] = reason
@@ -527,42 +653,77 @@ def _give_up(row: dict, reason: str, as_of: str) -> None:
               row.get("tenor"), reason)
 
 
+def _apply_settle_action(r: dict, act: tuple, as_of: str, max_attempts: int, stats: dict) -> bool:
+    """在（锁内重读的）行上套用一个结算动作，返回是否改了行。动作只由 `_settle` 的前两段产出。"""
+    kind = act[0]
+    if kind == "give_up":
+        _give_up(r, act[1], as_of)
+        stats["gave_up"][act[1]] += 1
+        return True
+    if kind == "settle":
+        r["expiry_close"] = act[1]
+        r["expiry_close_date"] = r["expiry"]
+        r["expiry_close_source"] = act[2]
+        r["settled_on"] = as_of
+        r["settle_status"] = "settled"
+        stats["settled"] += 1
+        return True
+    # "attempt"：有 K 线、且已越过到期日，却没有到期日那一根——这才计一次失败，但同一个 as_of 至多一次
+    # （as_of 不晚于上次计次那天 ⇒ 不计：同日重跑 / 倒填日期的补跑都不再消耗放弃额度）
+    last = r.get("settle_last_attempt_on")
+    if isinstance(last, str) and as_of <= last[:10]:
+        stats["attempts_already_counted"] += 1
+        stats["pending_remaining"] += 1
+        return False
+    r["settle_attempts"] = int(r.get("settle_attempts") or 0) + 1
+    r["settle_last_attempt_on"] = as_of
+    stats["attempts_incremented"] += 1
+    if r["settle_attempts"] >= max_attempts:
+        _give_up(r, "max_attempts_exhausted", as_of)
+        stats["gave_up"]["max_attempts_exhausted"] += 1
+    else:
+        stats["pending_remaining"] += 1
+    return True
+
+
 def _settle(as_of: str, tenor: str, *, bars_fn=None, state_dir=None) -> dict:
+    """三段（2026-09-26 二次检查改）：① 读快照、定出每行该做什么（不加锁：分片原子替换，读到的是某个完整版本）；
+    ② 取 K 线（**锁外**：网络 I/O 可能很慢）；③ 持 tenor 锁**重读**分片、按 `_row_key` 逐行套用、写回。
+    ③ 时行已不再 pending 或到期日变了（别的写者先动过）⇒ 以对方为准、计 `skipped_concurrent`。
+    原实现在 ① 的快照上改、③ 整片写回，其间别人记的行 / 补的结算会被静默覆盖掉（探针实测）。"""
     _check_not_future(as_of, "settle")        # settled_on 会盖成 as_of
     _check_tenor(tenor)
     bars_fn = bars_fn or (lambda t: _default_bars(t, as_of))
     max_attempts = int(CONFIG["settle_max_attempts"])
     window = _fetch_window_bars() + int(CONFIG["settle_window_slack_days"])
-    stats = {"settled": 0, "gave_up": Counter(), "attempts_incremented": 0,
-             "bars_unavailable": 0, "not_yet_expired": 0, "pending_remaining": 0,
-             "pending": 0, "pending_overdue": 0}
+    stats = {"settled": 0, "gave_up": Counter(), "attempts_incremented": 0, "attempts_already_counted": 0,
+             "bars_unavailable": 0, "bars_lagging": 0, "not_yet_expired": 0, "pending_remaining": 0,
+             "skipped_concurrent": 0, "pending": 0, "pending_overdue": 0}
 
-    shards = {}
+    # ① 快照 + 不需要 K 线就能定的动作
+    snap: Dict[Path, List[dict]] = {}
+    plan: Dict[Path, Dict[Tuple[str, str], Tuple[object, tuple]]] = defaultdict(dict)  # 分片 → 行键 → (到期日, 动作)
     pending: Dict[str, List[Tuple[Path, dict]]] = defaultdict(list)
-    dirty = set()
     for p in _shard_paths(tenor, state_dir):
-        rows, bad = _load_shard(p)
-        shards[p] = (rows, bad)
+        rows, _bad = _load_shard(p)
+        snap[p] = rows
         for r in rows:
             if r.get("status") != "recorded" or r.get("settle_status") != "pending":
                 continue
             exp = r.get("expiry")
             if not isinstance(exp, str) or len(exp) != 10:
-                _give_up(r, "no_expiry", as_of)
-                stats["gave_up"]["no_expiry"] += 1
-                dirty.add(p)
+                plan[p][_row_key(r)] = (exp, ("give_up", "no_expiry"))
                 continue
             if not exp < as_of:
                 # 到期当天不结算：当日 K 线要到收盘后才完整，`_drop_forming_bar` 会丢它
                 stats["not_yet_expired"] += 1
                 continue
             if _weekdays_after(exp, as_of) > window:
-                _give_up(r, "out_of_fetch_window", as_of)
-                stats["gave_up"]["out_of_fetch_window"] += 1
-                dirty.add(p)
+                plan[p][_row_key(r)] = (exp, ("give_up", "out_of_fetch_window"))
                 continue
             pending[str(r.get("ticker"))].append((p, r))
 
+    # ② 取 K 线（锁外），每票一次
     for ticker in sorted(pending):
         try:
             bars, src = _call_bars(bars_fn, ticker)
@@ -574,31 +735,43 @@ def _settle(as_of: str, tenor: str, *, bars_fn=None, state_dir=None) -> dict:
             stats["bars_unavailable"] += len(pending[ticker])
             stats["pending_remaining"] += len(pending[ticker])
             continue
+        latest = _latest_bar_date(bars)
         for p, r in pending[ticker]:
             close = _close_on(bars, r["expiry"])
-            dirty.add(p)
-            if close is None:
-                # 有 K 线但没有到期日那一根——这才计一次失败
-                r["settle_attempts"] = int(r.get("settle_attempts") or 0) + 1
-                stats["attempts_incremented"] += 1
-                if r["settle_attempts"] >= max_attempts:
-                    _give_up(r, "max_attempts_exhausted", as_of)
-                    stats["gave_up"]["max_attempts_exhausted"] += 1
-                else:
-                    stats["pending_remaining"] += 1
-                continue
-            r["expiry_close"] = close
-            r["expiry_close_date"] = r["expiry"]
-            r["expiry_close_source"] = src
-            r["settled_on"] = as_of
-            r["settle_status"] = "settled"
-            stats["settled"] += 1
+            if close is not None:
+                plan[p][_row_key(r)] = (r["expiry"], ("settle", close, src))
+            elif latest is None or latest <= r["expiry"]:
+                # K 线源最后一根还没越过到期日：不是「那一根缺了」，是「源还没追上」——同取不到 K 线，不计次
+                # （仍计进 bars_unavailable，过期待结算的 warning 照响）
+                stats["bars_unavailable"] += 1
+                stats["bars_lagging"] += 1
+                stats["pending_remaining"] += 1
+            else:
+                plan[p][_row_key(r)] = (r["expiry"], ("attempt",))
 
-    for p in sorted(dirty):
-        rows, bad = shards[p]
-        _write_shard(p, rows, bad)
+    # ③ 持锁重读、按行键套用、写回
+    fresh: Dict[Path, List[dict]] = {}
+    if plan:
+        with _tenor_lock(tenor, state_dir):
+            for p in sorted(plan):
+                rows, bad = _load_shard(p)
+                by_key = {_row_key(r): r for r in rows}
+                changed = False
+                for key, (exp, act) in plan[p].items():
+                    r = by_key.get(key)
+                    if (r is None or r.get("status") != "recorded" or r.get("settle_status") != "pending"
+                            or r.get("expiry") != exp):
+                        stats["skipped_concurrent"] += 1
+                        continue
+                    changed |= _apply_settle_action(r, act, as_of, max_attempts, stats)
+                if changed:
+                    _write_shard(p, rows, bad)
+                fresh[p] = rows
+    if stats["skipped_concurrent"]:
+        _log.info("卖权账本结算 %s %s：%d 行在取 K 线期间已被别的写者改过，以对方为准", as_of, tenor,
+                  stats["skipped_concurrent"])
     stats["pending"], stats["pending_overdue"] = _pending_counts(
-        (r for rows, _bad in shards.values() for r in rows), as_of)
+        (r for p, rows in snap.items() for r in fresh.get(p, rows)), as_of)
     if stats["settled"] or stats["gave_up"]:
         _log.info("卖权账本结算 %s %s：结算 %d / 放弃 %s", as_of, tenor, stats["settled"],
                   dict(stats["gave_up"]))
@@ -630,8 +803,10 @@ def settle(as_of: str, tenor: str, *, bars_fn=None, state_dir=None) -> int:
     扫全部月分片（上月记的行这月才到期）；每票最多取一次 K 线。
     收盘价只认日期 == expiry 的那根（缺口 0）。放弃闸：
       · `out_of_fetch_window` —— expiry 离 as_of 的工作日数已超过取数窗口 + `settle_window_slack_days`；
-      · `max_attempts_exhausted` —— 拿到了 K 线却没有到期日那一根，累计 `settle_max_attempts` 次。
-    取不到 K 线（限流 / 断网）不计次。完整计数见 `run_for_date` 返回的 per_tenor。
+      · `max_attempts_exhausted` —— 拿到了**已越过到期日**的 K 线却没有到期日那一根，累计
+        `settle_max_attempts` **天**（同一个 as_of 至多计一次，记 `settle_last_attempt_on`）。
+    取不到 K 线（限流 / 断网）、或 K 线源最后一根不晚于到期日（源没追上，计 `bars_lagging`）都不计次。
+    持 tenor 锁套用，取 K 线在锁外（见 `_settle`）。完整计数见 `run_for_date` 返回的 per_tenor。
     """
     return _settle(as_of, tenor, bars_fn=bars_fn, state_dir=state_dir)["settled"]
 
@@ -640,6 +815,16 @@ def settle(as_of: str, tenor: str, *, bars_fn=None, state_dir=None) -> int:
 
 def _default_fetch(ticker: str, *, as_of: Optional[str]):
     return cboe_options.fetch_cboe_raw_contracts(ticker, as_of=as_of)
+
+
+def _monotonic() -> float:
+    """取数时间预算用的时钟。测试替换这一个点来注入时钟（同 `_today`）。"""
+    return time.monotonic()
+
+
+def _is_network_failure(reason) -> bool:
+    """熔断计数的失败：`_BREAKER_REASONS` 或 `exception:*`（取数层抛了——DNS / 连接超时都走这里）。"""
+    return isinstance(reason, str) and (reason in _BREAKER_REASONS or reason.startswith("exception:"))
 
 
 def _default_upcoming_fn() -> Callable[[str], Optional[dict]]:
@@ -667,7 +852,8 @@ def run_for_date(as_of: str, *, tickers=None, upcoming_fn=None, state_dir=None,
     （行记 `unavailable` + `exception:<ExcType>`，或 per_tenor.errors）不连坐另一档。
     返回 `{"as_of", "n_tickers", "per_tenor": {tenor: {recorded, unavailable{reason:n},
     kept_previous_recorded, earnings_status{..}, price_source{..}, settled, gave_up, gave_up_reasons,
-    settle_bars_unavailable, pending, pending_overdue, errors[]}}, "fetch_reasons", "elapsed_sec"}`。
+    settle_bars_unavailable, settle_bars_lagging, pending, pending_overdue, errors[]}}, "fetch_reasons",
+    "fetch_aborted", "elapsed_sec"}`。
 
     `fetch_reasons` 每票一个结果：`ok` = 取数**与**水平地图都成功；取数失败记取数原因
     （`exception:<Exc>` = fetch_fn 抛了）；取数成功但 level_map 抛了记 `levels_error:<Exc>`
@@ -677,6 +863,11 @@ def run_for_date(as_of: str, *, tickers=None, upcoming_fn=None, state_dir=None,
     （收盘后读到盘中文件）与 `cboe_intraday`（盘中就读了）的行照记、但不进检验
     （`PREREG["excluded_underlying_price_sources"]` + `session_live`），
     不数出来就没人知道样本在悄悄变少。as_of 晚于 PDT 今天 ⇒ ValueError（写路径日期闸）。
+
+    **取数熔断 + 时间预算**（理由见 `CONFIG` 注释）：连续 `fetch_breaker_consecutive_failures` 只票网络类
+    失败 ⇒ 其余票记 `fetch_skipped_breaker`；取数循环累计超过 `fetch_time_budget_sec` ⇒ 其余票记
+    `fetch_skipped_time_budget`。两者都进 `fetch_reasons`、打 WARNING，返回值 `fetch_aborted` 给出原因
+    （正常为 None）。任何一只取到、或非网络类失败，连续计数清零。
     """
     t0 = time.monotonic()
     _check_not_future(as_of, "run_for_date")
@@ -686,18 +877,40 @@ def run_for_date(as_of: str, *, tickers=None, upcoming_fn=None, state_dir=None,
     tickers = sorted({str(t) for t in tickers})
     fetch_fn = fetch_fn or _default_fetch
     upcoming_fn = upcoming_fn or _default_upcoming_fn()
+    breaker_n = int(CONFIG["fetch_breaker_consecutive_failures"])
+    budget = float(CONFIG["fetch_time_budget_sec"])
 
     new_rows: Dict[str, List[dict]] = {t: [] for t in TENORS}
     fetch_reasons: Counter = Counter()
-    for tk in tickers:
+    consecutive_net_fail = 0
+    aborted: Optional[str] = None
+    t_fetch0 = _monotonic()
+    for i, tk in enumerate(tickers):
         raw, fail = None, None
-        try:
-            raw, reason = fetch_fn(tk, as_of=as_of)
-            if raw is None:
-                fail = reason or "fetch_returned_none"
-        except Exception as exc:  # noqa: BLE001
-            fail = f"exception:{type(exc).__name__}"
-            _log.warning("[%s] 卖权账本取数异常: %s", tk, exc)
+        if aborted is None:
+            spent = _monotonic() - t_fetch0
+            if consecutive_net_fail >= breaker_n:
+                aborted = FETCH_SKIPPED_BREAKER
+                _log.warning("卖权账本取数熔断：连续 %d 只票网络类失败（%s），其余 %d 只本轮不再取"
+                             "（记 unavailable: %s；同日已记录的行不降级）", consecutive_net_fail,
+                             {k: v for k, v in fetch_reasons.items() if _is_network_failure(k)},
+                             len(tickers) - i, FETCH_SKIPPED_BREAKER)
+            elif spent >= budget:
+                aborted = FETCH_SKIPPED_TIME_BUDGET
+                _log.warning("卖权账本取数已用 %.0fs ≥ 预算 %.0fs，其余 %d 只本轮不再取（记 unavailable: %s；"
+                             "它跑在日报 save_report / 部署之前）", spent, budget, len(tickers) - i,
+                             FETCH_SKIPPED_TIME_BUDGET)
+        if aborted is not None:
+            fail = aborted
+        else:
+            try:
+                raw, reason = fetch_fn(tk, as_of=as_of)
+                if raw is None:
+                    fail = reason or "fetch_returned_none"
+            except Exception as exc:  # noqa: BLE001
+                fail = f"exception:{type(exc).__name__}"
+                _log.warning("[%s] 卖权账本取数异常: %s", tk, exc)
+            consecutive_net_fail = consecutive_net_fail + 1 if _is_network_failure(fail) else 0
 
         lm = None
         if fail is None:
@@ -734,7 +947,7 @@ def run_for_date(as_of: str, *, tickers=None, upcoming_fn=None, state_dir=None,
         out = {"recorded": 0, "unavailable": {}, "kept_previous_recorded": 0, "earnings_status": {},
                "price_source": {},
                "settled": 0, "gave_up": 0, "gave_up_reasons": {}, "settle_bars_unavailable": 0,
-               "pending": None, "pending_overdue": None, "errors": []}
+               "settle_bars_lagging": 0, "pending": None, "pending_overdue": None, "errors": []}
         try:
             today, st = _record_rows(as_of, tenor, new_rows[tenor], state_dir)
             batch = {r["ticker"] for r in new_rows[tenor]}
@@ -756,6 +969,7 @@ def run_for_date(as_of: str, *, tickers=None, upcoming_fn=None, state_dir=None,
             out["gave_up"] = sum(st["gave_up"].values())
             out["gave_up_reasons"] = st["gave_up"]
             out["settle_bars_unavailable"] = st["bars_unavailable"]
+            out["settle_bars_lagging"] = st["bars_lagging"]       # 其中：K 线源还没越过到期日
             out["pending"], out["pending_overdue"] = st["pending"], st["pending_overdue"]
             if st["pending_overdue"]:
                 _log.warning("卖权账本 %s %s：%d 行到期已超过 %d 个日历日仍未结算（本轮取不到 K 线 %d 行；"
@@ -768,7 +982,8 @@ def run_for_date(as_of: str, *, tickers=None, upcoming_fn=None, state_dir=None,
         per_tenor[tenor] = out
 
     return {"as_of": as_of, "n_tickers": len(tickers), "per_tenor": per_tenor,
-            "fetch_reasons": dict(fetch_reasons), "elapsed_sec": round(time.monotonic() - t0, 3)}
+            "fetch_reasons": dict(fetch_reasons), "fetch_aborted": aborted,
+            "elapsed_sec": round(time.monotonic() - t0, 3)}
 
 
 # ─────────────────────────────── 独立单位与检验
@@ -779,16 +994,18 @@ def _unit_key(r: dict) -> Tuple[str, str]:
 
 def _eligible_except_earnings(r: dict) -> bool:
     """已记录 + 已结算 + route 两侧可用 + 报价是已收盘那一场的收盘后快照（来源不在排除集合、
-    且 `session_live is not True`：盘中读到的与收盘后读到盘中文件的，权利金都不是收盘口径）。
-    按行判：同单位次日的正常行照样可以当单位的代表行——读取时刻 / 文件陈旧是数据源的属性，
-    与结局无关，改选次日不偷看结果。"""
+    且 `session_live is not True`：盘中读到的与收盘后读到盘中文件的，权利金都不是收盘口径）
+    + 版本戳与现行代码全符（`_version_mismatch` 为空：§10 协议变更前记的行默认不进检验）。
+    按行判：同单位次日的正常行照样可以当单位的代表行——读取时刻 / 文件陈旧 / 记录时的代码版本
+    都是与结局无关的属性，改选次日不偷看结果。"""
     rt = r.get("route") or {}
     return (r.get("status") == "recorded"
             and r.get("settle_status") == "settled"
             and r.get("underlying_price_source") not in PREREG["excluded_underlying_price_sources"]
             and r.get("session_live") is not True
             and rt.get("put") not in (None, "unavailable")
-            and rt.get("call") not in (None, "unavailable"))
+            and rt.get("call") not in (None, "unavailable")
+            and not _version_mismatch(r))
 
 
 def _eligible(r: dict) -> bool:
@@ -870,19 +1087,48 @@ def _check_side(side: str) -> str:
     return side
 
 
-def unit_outcome(row: dict, side: str, rung) -> Optional[float]:
-    """单腿 short_<side> 在该档的 `pnl_over_credit`（到期收盘口径）；不可报价 / 未结算 ⇒ None。"""
+def _outcome_or_reason(row: dict, side: str, rung) -> Tuple[Optional[float], Optional[str]]:
+    """(单腿 short_<side> 在该档的 pnl_over_credit, None)，或 (None, 缺失原因)。
+
+    原因取 `structure_quote` 的 reason 前缀（冒号前：`quote_not_ok` = bid=0 / ask<bid，
+    `short_spread_too_wide` = 点差 > 25%，`non_positive_credit` …）；缺腿（`missing_leg`）再接上梯子该档
+    第一条原因的前缀——`missing_leg:no_delta_within_tol` 即「容差内无合约」。§3 列的四类缺失据此分得开。
+    原因只看记录时的报价，不看结果的数值。"""
     _check_side(side)
     ladder = row.get("ladder")
     if not isinstance(ladder, dict):
-        return None
+        return None, "no_ladder"
     q = C.structure_quote(ladder, f"short_{side}", rung)
-    return C.pnl_over_credit(q, row.get("expiry_close"))
+    if not q.get("quotable"):
+        why = str(q.get("reason") or "unquotable").split(":", 1)[0]
+        if why == "missing_leg":
+            slot = (ladder.get(side) or {}).get(C.rung_key(rung)) or {}
+            first = next(iter(slot.get("reasons") or []), None)
+            if first:
+                why = f"missing_leg:{str(first).split(':', 1)[0]}"
+        return None, why
+    o = C.pnl_over_credit(q, row.get("expiry_close"))
+    if o is None:
+        return None, ("no_expiry_close" if _pos(row.get("expiry_close")) is None else "pnl_unavailable")
+    return o, None
 
 
-def _side_arrays(units: List[dict], side: str, rung) -> Tuple[List[str], List[bool], List[float], dict]:
+def unit_outcome(row: dict, side: str, rung) -> Optional[float]:
+    """单腿 short_<side> 在该档的 `pnl_over_credit`（到期收盘口径）；不可报价 / 未结算 ⇒ None。"""
+    return _outcome_or_reason(row, side, rung)[0]
+
+
+def _side_arrays(units: List[dict], side: str, rung
+                 ) -> Tuple[List[str], List[bool], List[float], dict, Dict[str, dict]]:
+    """(块, flag, 结果, 跳过计数, 按 flag 分的缺失计数)。
+
+    跳过计数：`no_flag`、`no_outcome`（合计）与 `no_outcome:<原因>`（原因见 `_outcome_or_reason`）。
+    按 flag 分（`{"flag": {...}, "normal": {...}}`，键同 `no_outcome:<原因>`）：缺失的**规则**两臂同等，
+    缺失**率**未必——§3 / §11 承诺就绪时按侧、按原因报告，差异缺失（flag 组缺得多）才查得出来。
+    flag 与报价可否都是记录时已知的，不含结果的数值（§7：进度计数任何时候可看）。"""
     blocks, flags, outs = [], [], []
     skipped = Counter()
+    by_flag = {"flag": Counter(), "normal": Counter()}
     # 规范顺序：块内元素的顺序决定随机数落在谁身上 ⇒ 不排序时 p 随调用方给的顺序变（实测 0.81 vs 0.85），
     # 预注册的 seed 就复现不了同一个 p。
     for u in sorted(units, key=lambda u: (str(u.get("date")), str(u.get("ticker")), str(u.get("expiry")))):
@@ -890,14 +1136,17 @@ def _side_arrays(units: List[dict], side: str, rung) -> Tuple[List[str], List[bo
         if f is None:
             skipped["no_flag"] += 1
             continue
-        o = unit_outcome(u, side, rung)
+        o, why = _outcome_or_reason(u, side, rung)
         if o is None:
+            key = f"no_outcome:{why}"
             skipped["no_outcome"] += 1
+            skipped[key] += 1
+            by_flag["flag" if bool(f) else "normal"][key] += 1
             continue
         blocks.append(str(u.get("date")))
         flags.append(bool(f))
         outs.append(float(o))
-    return blocks, flags, outs, dict(skipped)
+    return blocks, flags, outs, dict(skipped), {k: dict(v) for k, v in by_flag.items()}
 
 
 def _blocks(blocks: List[str], flags: List[bool]) -> Tuple[Dict[str, List[int]], List[str]]:
@@ -913,12 +1162,12 @@ def _blocks(blocks: List[str], flags: List[bool]) -> Tuple[Dict[str, List[int]],
 def _group_counts(units: List[dict], side: str, rung) -> dict:
     """某侧的组计数：全体与**信息块内**各一份（就绪闸按 `PREREG["per_group_scope"]` 取后者）。
     只数标签与「有没有结果」，不碰结果的数值——任何时候可看，不破盲。"""
-    blocks, flags, _o, skipped = _side_arrays(units, side, rung)
+    blocks, flags, _o, skipped, skipped_by_flag = _side_arrays(units, side, rung)
     by_block, informative = _blocks(blocks, flags)
     inf_ix = [i for b in informative for i in by_block[b]]
     n_flag_inf = sum(flags[i] for i in inf_ix)
     return {"n_flagged": sum(flags), "n_normal": len(flags) - sum(flags),
-            "n_units_with_outcome": len(flags), "skipped": skipped,
+            "n_units_with_outcome": len(flags), "skipped": skipped, "skipped_by_flag": skipped_by_flag,
             "n_blocks": len(by_block), "n_informative_blocks": len(informative),
             "n_flagged_informative": n_flag_inf, "n_normal_informative": len(inf_ix) - n_flag_inf}
 
@@ -945,14 +1194,14 @@ def block_permutation_p(units: List[dict], side: str, *, n_perm: int = PREREG["n
     _check_side(side)
     n_perm = int(n_perm)
     rung = PREREG["primary_rung"]
-    blocks, flags, outs, skipped = _side_arrays(units, side, rung)
+    blocks, flags, outs, skipped, skipped_by_flag = _side_arrays(units, side, rung)
     n = len(outs)
     n_flag = sum(flags)
     n_norm = n - n_flag
     by_block, informative = _blocks(blocks, flags)
     out = {"side": side, "rung": rung, "n_units": n, "n_flagged": n_flag, "n_normal": n_norm,
            "n_blocks": len(by_block), "n_informative_blocks": len(informative),
-           "n_perm": n_perm, "seed": int(seed), "skipped": skipped,
+           "n_perm": n_perm, "seed": int(seed), "skipped": skipped, "skipped_by_flag": skipped_by_flag,
            "observed": None, "p": None, "reason": None}
     if n_flag == 0 or n_norm == 0:
         out["reason"] = "empty_group"
@@ -1185,6 +1434,9 @@ def assess(tenor: str, *, rows: Optional[List[dict]] = None, state_dir=None,
         "n_rows_price_source_excluded": sum(1 for r in recorded
                                             if r.get("underlying_price_source") in excluded_src
                                             or r.get("session_live") is True),
+        # 版本戳与现行代码不符的行（§10：协议变更前记的行默认不进检验）；按不符的项计数
+        "n_rows_version_excluded": sum(1 for r in recorded if _version_mismatch(r)),
+        "version_mismatch": dict(Counter(k for r in recorded for k in _version_mismatch(r))),
         "n_route_unavailable": sum(1 for r in recorded
                                    if (r.get("route") or {}).get("put") in (None, "unavailable")),
         "n_independent": len(units),
@@ -1240,8 +1492,29 @@ def assess(tenor: str, *, rows: Optional[List[dict]] = None, state_dir=None,
     return out
 
 
+def _fmt_reasons(c: dict) -> str:
+    """{"no_outcome:short_spread_too_wide": 2, ...} → "（short_spread_too_wide 2、…）"；空 ⇒ ""。"""
+    items = [(k.split(":", 1)[1] if k.startswith("no_outcome:") else k, v) for k, v in sorted((c or {}).items())]
+    return ("（" + "、".join(f"{k} {v}" for k, v in items) + "）") if items else ""
+
+
+def _missing_line(ps: dict) -> str:
+    """就绪时报告的「基线档结果缺失」：按侧、按 flag / normal、按原因（预注册 §3 / §11 的承诺）。
+    差异缺失（某组缺得明显多）会让两组可比性打折——这一行让它在冻结判定旁边就看得见。"""
+    parts = []
+    for s in SIDES:
+        side = ps.get(s) or {}
+        bf = side.get("skipped_by_flag") or {}
+        fl, nm = bf.get("flag") or {}, bf.get("normal") or {}
+        no_flag = (side.get("skipped") or {}).get("no_flag", 0)
+        parts.append(f"{s} flag {sum(fl.values())}{_fmt_reasons(fl)}/normal {sum(nm.values())}{_fmt_reasons(nm)}"
+                     + (f"/无 flag {no_flag}" if no_flag else ""))
+    return f"{PREREG['primary_rung']:.2f} 档结果缺失（不进检验）：" + " · ".join(parts)
+
+
 def summary_line(res: dict) -> str:
-    """一行进度（报告 / CLI 共用）。未 ready 时显式标「样本不足，环境路由仅供参考」。"""
+    """一行进度（报告 / CLI 共用）。未 ready 时显式标「样本不足，环境路由仅供参考」；
+    ready 时追加基线档结果缺失（按侧 × flag/normal × 原因，§3 / §11 承诺就绪时报告）。"""
     tenor = res.get("tenor")
     pg = res.get("progress") or {}
     need = res.get("need") or {}
@@ -1254,11 +1527,14 @@ def summary_line(res: dict) -> str:
         f"/normal {ps.get(s, {}).get('n_normal', 0)}）"
         for s in SIDES)
     n_src_x = pg.get("n_rows_price_source_excluded", 0)
+    n_ver_x = pg.get("n_rows_version_excluded", 0)
     base = (f"独立单位 {pg.get('n_independent', 0)}/{need.get('min_independent_per_tenor')} · "
             f"不同到期日 {pg.get('n_distinct_expiries', 0)}/{need.get('min_distinct_expiries')} · "
             f"{groups}（每组需 ≥{need.get('min_per_group')}，只数信息块）· 已结算 {pg.get('n_settled', 0)} 行"
             f" · 放弃 {pg.get('n_give_up', 0)} 行"
-            + (f" · 非收盘后报价不进检验 {n_src_x} 行" if n_src_x else "") +
+            + (f" · 非收盘后报价不进检验 {n_src_x} 行" if n_src_x else "")
+            + (f" · 版本戳与现行协议不符不进检验 {n_ver_x} 行 {pg.get('version_mismatch') or {}}"
+               if n_ver_x else "") +
             # 待结算要写出来：取不到 K 线时「已结算 0 · 放弃 0」与「没有行到期」一模一样
             f" · 待结算 {pg.get('n_pending', 0)} 行（其中已过期超过 "
             f"{pg.get('pending_overdue_days', CONFIG['pending_overdue_days'])} 个日历日 "
@@ -1267,6 +1543,7 @@ def summary_line(res: dict) -> str:
         return f"❓ {tenor}：账本里还没有任何行"
     if res.get("status") != "ready":
         return f"◐ {tenor}：样本不足，环境路由仅供参考 —— {base}"
+    base += " · " + _missing_line(ps)
     fz = res.get("frozen") or {}
     if fz.get("applies"):
         return (f"✅ {tenor}：已达检验就绪闸，预注册检验已于 {fz.get('ready_date')} 冻结（只跑一次；"

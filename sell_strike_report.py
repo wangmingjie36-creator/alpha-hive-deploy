@@ -19,6 +19,9 @@ from typing import Dict, List, Optional
 import sell_strike_candidates as C
 import sell_strike_ledger as LG
 import sell_strike_levels as L
+from hive_logger import get_logger
+
+_log = get_logger("sell_strike_report")
 
 DISCLAIMER = "以下为公开信息研究与情景推演，**不构成投资建议**。仅记录与结算，不开仓、不影响任何评分。"
 
@@ -189,10 +192,22 @@ def _coverage_line(rows: List[dict]) -> str:
 
 def _assess_safe(tenor: str, state_dir, as_of: Optional[str], *, freeze: bool = False) -> dict:
     """`freeze=True` 只由 `render_markdown(freeze=True)` ← `write_local_report(freeze=True)` ← 日报钩子传；
-    MCP 两条路径都走缺省 False（就绪但未冻结 ⇒「已就绪，等待日报冻结」，不写文件）。"""
+    MCP 两条路径都走缺省 False（就绪但未冻结 ⇒「已就绪，等待日报冻结」，不写文件）。
+
+    失败**必须打 WARNING**（2026-09-26 二次检查）：原实现只把异常变成报告里的一行字，日志里什么都没有——
+    冻结文件坏了 / 冻结时磁盘满（ENOSPC），日报钩子每天都失败、每天都没人知道（钩子只在
+    `write_local_report` **抛**时才打 warning，而这里把异常吞成了返回值）。冻结路径另打一句专门的，
+    写明「检验不会被冻结」。"""
     try:
         return LG.assess(tenor, state_dir=state_dir, as_of=as_of, freeze=freeze)
-    except Exception as exc:  # noqa: BLE001 - 报告不因 assess 失败而空白，但原因要写出来
+    except Exception as exc:  # noqa: BLE001 - 报告不因 assess 失败而空白，但原因要写出来、日志要响
+        if freeze:
+            _log.warning("卖权预注册检验 就绪度判定/冻结失败（%s，日报钩子冻结路径）：%s: %s——"
+                         "本地报告只写一行原因，检验**不会**被冻结；修好之前每天都会在这里失败",
+                         tenor, type(exc).__name__, exc, exc_info=True)
+        else:
+            _log.warning("卖权账本就绪度判定失败（%s，只读路径 as_of=%s）：%s: %s",
+                         tenor, as_of, type(exc).__name__, exc)
         return {"tenor": tenor, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
 
@@ -309,14 +324,22 @@ def levels_summary(level_map: dict) -> dict:
 #: route flag 与现价是本产品每天的输出、收盘价是公开行情，到期日那天记录的行的 underlying_price
 #: 就是到期收盘，两次 MCP 调用照样拼得出每个单位的 pnl_over_credit。代码能保证的只有「不算、不显示效应量」；
 #: 从任何出口自己拼结果 = 偷看 = 协议变更（预注册文档 §7）。settle_status 保留：它只说结没结，不带方向。
+#: **只有全部 tenor 都冻结才返回**（`_all_unblinded`，2026-09-26 二次检查）：周度到期日多数同时是月度到期日
+#: （二次检查统计约 94%），月度先冻结就返回月度行的 expiry_close，等于把仍在盲期的周度单位的结果递了出去。
 BLINDED_ROW_FIELDS = ("expiry_close", "expiry_close_date", "expiry_close_source", "settled_on",
-                      "settle_attempts", "settle_give_up_reason", "settle_give_up_on")
+                      "settle_attempts", "settle_give_up_reason", "settle_give_up_on", "settle_last_attempt_on")
 
 
 def _unblinded(a: dict) -> bool:
-    """该 tenor 的检验**已冻结且适用**才返回结算字段；就绪但未冻结（等日报钩子）、判定失败（status=error）
-    都按未冻结处理。"""
+    """该 tenor 的检验**已冻结且适用**；就绪但未冻结（等日报钩子）、判定失败（status=error）都按未冻结处理。
+    单独一个 tenor 冻结**不够**解盲，见 `_all_unblinded`。"""
     return a.get("status") == "ready" and (a.get("frozen") or {}).get("applies") is True
+
+
+def _all_unblinded(assessed: Dict[str, dict]) -> bool:
+    """**每个** tenor 都冻结且适用才返回结算字段（任一 tenor 缺席 / 未冻结 / 判定失败 ⇒ 不返回）。
+    同一个 (ticker, 到期日) 往往同时是月度与周度的单位：结算字段按到期日泄露，不按 tenor。"""
+    return all(_unblinded(assessed.get(t) or {}) for t in LG.TENORS)
 
 
 def _row_view(row: dict, *, blind: bool = True) -> dict:
@@ -343,18 +366,19 @@ def _assess_brief(a: dict) -> dict:
 def rows_for_ticker(as_of: str, ticker: str, *, state_dir=None) -> dict:
     """读账本：某日某票两个 tenor 的行（MCP 给了 date 时用）。永不抛错、**不写任何文件**
     （assess 走 freeze=False：就绪但未冻结只显示「已就绪，等待日报冻结」）。
-    该 tenor 检验未冻结 ⇒ 行视图剔除结算字段（`BLINDED_ROW_FIELDS`；那不是盲化，见那里）。"""
+    **任一** tenor 检验未冻结 ⇒ 两档行视图都剔除结算字段（`BLINDED_ROW_FIELDS`；那不是盲化，见那里）。"""
     try:
         t = str(ticker).upper().strip()
         out = {"data_available": False, "ticker": t, "as_of": as_of, "source": "ledger",
                "tenors": {}, "assess": {}, "yield_note": YIELD_NOTE,
                "caveats": list(CAVEATS), "disclaimer": DISCLAIMER}
+        assessed = {tenor: _assess_safe(tenor, state_dir, None) for tenor in LG.TENORS}
+        blind = not _all_unblinded(assessed)
         for tenor in LG.TENORS:
-            a = _assess_safe(tenor, state_dir, None)
             rows = [r for r in LG.rows_for_date(as_of, tenor, state_dir)
                     if str(r.get("ticker")).upper() == t]
-            out["tenors"][tenor] = _row_view(rows[0], blind=not _unblinded(a)) if rows else None
-            out["assess"][tenor] = _assess_brief(a)
+            out["tenors"][tenor] = _row_view(rows[0], blind=blind) if rows else None
+            out["assess"][tenor] = _assess_brief(assessed[tenor])
         out["data_available"] = any(v is not None for v in out["tenors"].values())
         if not out["data_available"]:
             out["reason"] = "no_ledger_rows_for_date"

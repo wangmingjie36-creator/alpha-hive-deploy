@@ -192,6 +192,41 @@ def test_gex_sign_and_s_squared_units_and_dex_holder_sign():
     assert p1["counts"]["delta_source"] == {"cboe": 2, "bs": 0, "none": 0}
 
 
+@pytest.mark.parametrize("cp,cboe_delta,iv,want_src", [
+    ("P", 0.25, 0.30, "bs"),        # put 给了正 Δ（符号矛盾）
+    ("C", -0.30, 0.30, "bs"),       # call 给了负 Δ
+    ("P", 0.0, 0.30, "bs"),
+    ("P", None, 0.30, "bs"),
+    ("P", 0.25, None, "none"),      # 符号矛盾且无 IV ⇒ 兜底也没有，不进 DEX
+    ("P", -0.25, 0.30, "cboe"),
+    ("C", 0.30, 0.30, "cboe"),
+])
+def test_dex_rejects_wrong_sign_or_zero_cboe_delta_same_rule_as_candidates(cp, cboe_delta, iv, want_src):
+    """CBOE Δ 与方向符号矛盾 / 为 0 / None ⇒ 当缺失、BS 兜底（无 IV 则不进 DEX）；DEX 用兜底值。
+    同一张合约在 `sell_strike_candidates._contract_delta`（选档用）里必须得出同一个来源——
+    两处各写一份规则（候选层 import 本模块，这里不能反向 import），本条逐例核对它们没有漂移。
+
+    变红的变异：strike_profile 只判 None / 0（原写法）⇒ put 的 +0.25 原样进 DEX，持有者口径的 put DEX
+    成了正数、delta_source 记 cboe；两处规则只改了一处。
+    """
+    import sell_strike_candidates as SC
+    S, T = 100.0, 30 / 365
+    K = 95.0 if cp == "P" else 105.0
+    c = _k(cp, K, 100, iv, gamma=0.02, delta=cboe_delta)      # 给 CBOE gamma：无 IV 的那例也得进 profile
+    prof = L.strike_profile([c], S)
+    assert prof["counts"]["n_contracts_used"] == 1, "夹具自检：合约进了 profile"
+    assert prof["counts"]["delta_source"][want_src] == 1, prof["counts"]["delta_source"]
+    dex = prof["rows"][0]["net_dex_usd"]
+    if want_src == "none":
+        assert dex == 0.0
+    else:
+        want = cboe_delta if want_src == "cboe" else _delta(S, K, T, R, iv, cp)
+        assert dex == pytest.approx(want * 100 * 100 * S)
+        assert (dex > 0) == (cp == "C"), "持有者口径：call 的 DEX 为正、put 为负"
+    assert SC._contract_delta(c, S, L.year_fraction(30), L.RISK_FREE_RATE)[1] == want_src, \
+        "候选层选档用的 Δ 来源与本模块 DEX 的不一致 —— 两份规则漂移了"
+
+
 # ───────────────────────────── 6. zero gamma 是重定价扫描
 
 def _flip_chain():
@@ -322,6 +357,76 @@ def test_underflowed_tail_is_not_a_zero_crossing():
     assert zg["crossings"] == [] and zg["nearest_below"] is None
 
 
+# ───────────────────────────── 8b. 多个过零点：每侧取离现价最近的那个
+
+def _multi_root_chain():
+    """交替的 gamma 带（IV 8%、30DTE ⇒ 每条带宽约 S·σ·√T ≈ 2.3）：
+    现价下方 call 99–102 / put 96–97 / call 91–93 / put 85–88，上方 put 104–105 / call 108–110。
+    现价处为正；下方 3 个过零点（≈88.3 / 94.2 / 98.0）、上方 2 个（≈102.2 / 105.8）。
+    共 20 张合约 = MIN_SWEEP_CONTRACTS，恰好够路由门槛。"""
+    spec = [("C", (99, 100, 101, 102), 1000), ("P", (96, 96.5, 97), 1200),
+            ("C", (91, 92, 93), 1500), ("P", (85, 86, 87, 88), 600),
+            ("P", (104, 104.5, 105), 1200), ("C", (108, 109, 110), 1500)]
+    return [_k(cp, K, oi, 0.08) for cp, strikes, oi in spec for K in strikes]
+
+
+def _all_roots(f, lo, hi, step=0.05):
+    """独立根：按 step 找异号区间、逐个二分（不经被测模块的 81 点网格与线性插值）。"""
+    xs = [lo + step * i for i in range(int(round((hi - lo) / step)) + 1)]
+    return [_bisect_root(f, a, b) for a, b in zip(xs, xs[1:]) if f(a) * f(b) < 0]
+
+
+def test_nearest_crossing_on_each_side_is_the_closest_not_the_outermost():
+    """现价两侧各有 ≥2 个过零点时：nearest_below = 下方**最大**的根、nearest_above = 上方**最小**的根，
+    zg_below_pct / zg_above_pct 按它们算；crossings 与独立二分逐个对上。
+
+    此前所有夹具每侧至多一个过零点 ⇒ 下面两个变异在全部测试上都是绿的。
+    变红的变异：nearest_below 取 min(below)（报 ≈88.3 / 11.7%，而不是 ≈98.0 / 2.0%）；
+    nearest_above 取 max(above)（≈105.8 而不是 ≈102.2）。
+    """
+    S = 100.0
+    chain = _multi_root_chain()
+    roots = _all_roots(lambda p: _total_gex(p, chain), 80.0, 120.0)
+    below = [x for x in roots if x < S]
+    above = [x for x in roots if x > S]
+    assert len(below) >= 2 and len(above) >= 2, f"夹具自检：两侧都要 ≥2 个过零点，实为 {roots}"
+    assert max(below) - min(below) > 5.0 and max(above) - min(above) > 3.0, "夹具自检：根要分得开"
+
+    zg = L.zero_gamma_sweep(chain, S)
+    assert (zg["curve_state"], zg["sign_at_spot"]) == ("crosses", "positive")
+    assert zg["crossings"] == pytest.approx(roots, abs=0.02)
+    assert zg["nearest_below"] == pytest.approx(max(below), abs=0.02)
+    assert zg["nearest_above"] == pytest.approx(min(above), abs=0.02)
+    assert zg["zg_below_pct"] == pytest.approx((S - max(below)) / S * 100, abs=0.02)
+    assert zg["zg_above_pct"] == pytest.approx((min(above) - S) / S * 100, abs=0.02)
+    assert zg["nearest"] == pytest.approx(min(roots, key=lambda x: abs(x - S)), abs=0.02)
+
+
+def test_route_put_flag_follows_the_nearest_crossing_below():
+    """路由层：同一条多根链走真实 level_map 的路由视图 ⇒ 下方最近零点 ≈98.0（2.0% ≤ 3%）⇒ put far、
+    flag_put=True。下方其余的根都在 3% 外——扫描若报任何一个非最近的根，flag 就翻成 False
+    （下面把 zg_below_pct 换成那些根的距离逐个演示）。
+
+    变红的变异：`zero_gamma_sweep` 的 nearest_below 取 min(below) ⇒ zg_below_pct≈11.7 ⇒ put base / flag False。
+    """
+    import sell_strike_candidates as SC
+    S = 100.0
+    chain = _multi_root_chain()
+    zg = L.level_map(chain, S)["views"][SC.ROUTE_VIEW]["zero_gamma"]
+    assert zg["n_contracts"] >= SC.MIN_SWEEP_CONTRACTS, "夹具自检：扫描合约数够路由门槛"
+    below = [x for x in _all_roots(lambda p: _total_gex(p, chain), 80.0, 120.0) if x < S]
+    nearest, others = max(below), sorted(below)[:-1]
+    assert (S - nearest) / S * 100 <= SC.FLIP_BUFFER_PCT, "夹具自检：最近的根在缓冲内"
+    assert others and all((S - x) / S * 100 > SC.FLIP_BUFFER_PCT for x in others), \
+        "夹具自检：其余的根都在缓冲外（否则取错根也判 far，本测试没有牙）"
+
+    r = SC.route(zg)
+    assert (r["put"], r["flag_put"], r["call"], r["flag_call"]) == ("far", True, "base", False)
+    for x in others:
+        alt = SC.route(dict(zg, zg_below_pct=(S - x) / S * 100))
+        assert (alt["put"], alt["flag_put"]) == ("base", False)
+
+
 # ───────────────────────────── 9. majors 四值独立
 
 def test_majors_are_net_extremes_independent_of_side_extremes():
@@ -439,6 +544,34 @@ def test_term_views_split_and_empty_view_does_not_raise():
     assert lm["schema_version"] == L.LEVELS_SCHEMA_VERSION == 1
     assert lm["sign_convention"] == "naive_oi_dealer_long_calls_short_puts"
     assert set(lm["views"]) == {"next_expiry", "le_45dte", "full"}
+
+
+def test_next_expiry_skips_rows_without_a_usable_expiry():
+    """dte 最小的行缺 expiry 键 ⇒ 曾在 `min(...)["expiry"]` 抛 KeyError；expiry=None ⇒ next_exp=None，
+    整个 next_expiry 视图变成「没有到期日的那几行」。现在：缺键 / None / 空串的行都不参选、不进 next_expiry，
+    计 `excluded_no_expiry`；照样进 le_45dte / full（按 dte 截，用不到到期日）。
+
+    变红的变异：在全部 dte 合法的行里选 next_expiry（原写法）⇒ 缺键那组抛 KeyError、None 那组
+    expiries==[]；不计数（键缺失或恒 0）；顺手把这些行也从 le_45dte 滤掉。
+    """
+    good = [_k("C", 100, 100, 0.3, dte=7, expiry="2026-09-30"),
+            _k("P", 95, 100, 0.3, dte=7, expiry="2026-09-30"),
+            _k("C", 105, 100, 0.3, dte=14, expiry="2026-10-07")]
+    no_key = {k: v for k, v in _k("C", 101, 100, 0.3, dte=2).items() if k != "expiry"}
+    none_exp = _k("P", 99, 100, 0.3, dte=3, expiry=None)
+    blank_exp = _k("P", 98, 100, 0.3, dte=1, expiry="")
+    for bad in ([no_key], [none_exp], [no_key, none_exp, blank_exp]):
+        v = L.term_views(bad + good, 100.0)
+        nx = v["next_expiry"]
+        assert nx["expiries"] == ["2026-09-30"] and nx["n_contracts"] == 2, nx["expiries"]
+        assert nx["excluded_no_expiry"] == len(bad)
+        for name in ("le_45dte", "full"):
+            assert v[name]["n_contracts"] == len(bad) + 3
+            assert v[name]["profile"]["counts"]["n_contracts_used"] == len(bad) + 3
+    only_bad = L.term_views([no_key, none_exp], 100.0)["next_expiry"]
+    assert only_bad["n_contracts"] == 0 and only_bad["excluded_no_expiry"] == 2
+    assert only_bad["zero_gamma"]["curve_state"] == "insufficient_contracts"
+    assert L.term_views(good, 100.0)["next_expiry"]["excluded_no_expiry"] == 0
 
 
 def test_frozen_constants():

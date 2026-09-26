@@ -420,8 +420,10 @@ v0.45.328 让 `load_daily_ic` 与 `build_benchmark_panel` 在 close 口径上都
 ## [0.45.334] — 2026-09-26 — Changed：断开 `GexRegimeModifier` 对 `rule_score` 的 ±0.8 直接加减分（保留 `RegimeWeightAdjuster` 路由）；同版修订共振加成前瞻检验的 replay；登记世代边界 2026-09-28
 
 用户决定（2026-09-23 选「断开加分项」；看过「共振检验会自证失败」的代价后确认「同版修订 replay 再断开」）。
-依据：memory 路线图「GEX regime 应当路由结构而不是当加分项」；本次调研实测 GEX 此前经**两条**通道进评分，
-而 `ic_rerun_readiness` v0.45.197 条目只写了一条。
+依据：memory 路线图「GEX regime 应当路由结构而不是当加分项」；本次调研实测 GEX 此前经**三条**通道进评分
+（`RegimeWeightAdjuster` 政体路由 / `GexRegimeModifier` ±0.8 / OracleBee `options_score` 的 `gex_signal`），
+而 `ic_rerun_readiness` v0.45.197 条目只写了一条。**本版只断开第二条**；第三条初稿漏看、二次检查才发现（见文末），
+断开后 GEX 仍经两条通道进评分。
 
 ### 核实（生产 `.swarm_results_*.json` 只读逐行反推，全部 rule_engine 模式）
 - 09-11 ~ 09-22 共 210 行：133 行（63.3%）`gex_adjustment ≠ 0`，|Δ| 中位 0.15、最大 0.60；方向 **0** 条变
@@ -449,7 +451,7 @@ v0.45.328 让 `load_daily_ic` 与 `build_benchmark_panel` 在 close 口径上都
   `alpha_hive_mcp.alphahive_get_gex` docstring 如实描述 walls（GEX 加权单边极值，不是 highest OI）与 flip（相邻行权价变号）。
 
 ### 代价（已向用户说明；推送前按 09-26 实测更新）
-- 作废当前世代 **120 条**样本（09-18 / 09-22 / 09-24 / 09-25 各 30，09-23 无扫描产物；**0 条已到期**），约两个扫描周的积累。
+- 作废当前世代 **120 条**样本（09-18 / 09-22 / 09-24 / 09-25 各 30；09-23 无 predictions、无 `.swarm_results`，只有 12 份 15:11 写的 `analysis-*-ml` 不算样本；**0 条已到期**），约两个扫描周的积累。
   其中 09-24 / 09-25 两天 GEX 全员 unknown、那 60 条分数新旧口径相同，但边界按「首个跑新代码的业务日」划（印记可核验）。
 - 纸面组合 09-11 起少 3 笔看空入场资格；ML 报告前 12 名单 7 天里 5 天变化。
 - 共振加成检验：不修订 replay 的话自证率会从 97.2% 跌到约 87~90% ⇒ exit 3，本版已同版修订。
@@ -457,16 +459,37 @@ v0.45.328 让 `load_daily_ic` 与 `build_benchmark_panel` 在 close 口径上都
   F&G 敞口门检验不受影响。
 
 ### Tests
-- 新 `tests/test_gex_modifier_disconnected.py`（12）：行为（五维等分夹具，枚举 regime × flip × can_flip × 方向 ⇒ rule_score /
+- 新 `tests/test_gex_modifier_disconnected.py`（初版 12，二次检查后 14）：行为（五维等分夹具，枚举 regime × flip × can_flip × 方向 ⇒ rule_score /
   final_score 等于 unknown 基线，且 `dimension_weights` 随政体不同；夹具自证旧 compute 非零）+ `applied` 标记（含 compute 抛错）
   + 徽章 + AST（生产代码 `gex_adj*` / `"gex_adjustment"` 不得进 `+ - += -=`，带「确实扫到文件」自证与 tmp 树病灶）。
 - 共振检验：`TestReplayFollowsRecordedGexApplied`（新 / 旧记录、只认字面 False、混合窗口）；`TestReplayMatchesRealDistill`
   negative_gex 三例改断言。`test_ic_rerun_readiness::TestBoundaryEvidenceIsPerVersion`（8）；scorecard 夹具日期从登记表末条派生。
 
 ### 变异台账（`PYTHONDONTWRITEBYTECODE=1`、清 pyc、`--maxfail=1000`、还原 sha256 核对）
-- 接回 `rule_score += _gex_adj` → 14 红（行为 ×3、AST、replay ×10）；换变量名绕 AST → 行为测试兜住；`sum((…))` 绕 AST → 13 红；
+- 接回 `rule_score += _gex_adj` → 14 红（行为 ×3、AST、replay ×10）；换变量名绕 AST → 行为测试兜住（二次检查另加 `gex_adjustment` 读者白名单，外文件改名重连也红）；`sum((…))` 绕 AST → 13 红；
 - replay 忽略 applied → 7 红；缺键判未施加 → 5 红；删 applied 标记 → 15 红；标记挪进 try → 1 红；徽章两种 → 各 1 红；
 - 边界证据退回旧逻辑 → 6 红；缺键当印记 → 2 红；删 scope 条 / 改世代条名 / 改 scorecard 条名 → 各红。
+
+### 二次检查（2026-09-26，推送前；4 路对抗评审 + 逐条复核）
+确认无误：±0.8 不再进 `rule_score` / `final_score` / 方向（全仓 grep + AST）；`applied: False` 正常与异常路径都写；
+replay 在 96 条前瞻 + 693 条样本内记录上与 origin/main 版逐条一致，120 条真实记录新旧两条链各 120/120 复现；
+世代条目数字只读重推全部吻合；三张只追加表与 origin/main 前缀一致。修正：
+- **更正错误说法**：OracleBee `options_score` 的 `gex_signal`（`options_analyzer.py` 总 GEX < −0.001 记 2、否则 / None 记 1）
+  是第三条 GEX 进分通道，初稿漏看，却在 `queen_distiller` / `gex_regime` / `advanced_analyzer` / `cboe_options` 注释、
+  世代条目、CLAUDE.md 写了「GEX 进评分只剩 RegimeWeightAdjuster」。已全部改为「仍经两条通道」；世代条目趁未上 main 改正文。
+  评审实测：去掉那 +1，09-11~22 共 47/210 行 final_score 变动、中位 0.31；09-24/25 `gamma_exposure` 60/60 为 None。
+  **本版不动这条通道**（改它是另一项评分决定）。`advanced_analyzer`「降级才算安全」改为「代价较小但不安全」。
+- `ic_rerun_readiness`：边界证据此前只在人读分支输出，`--json` / `--quiet` / `--out`（编排器 Step 11 与 weekly-optimizer
+  用的全是这几种）拿不到 ⇒ 推送晚了没有任何东西会红。新 `boundary_evidence_status()`（抛错 ⇒ `cannot_judge`），
+  进 JSON / `--out` 的 `cohort_boundary_evidence` 键；`--quiet` 仅在告警时追加 🚨 第五段（常态四段不变，退出码不变）；
+  边界后有归档却无印记 ⇒ `boundary_too_early`（原先一直 ⏳）。
+- `cohort_boundary_evidence` 取「第一条匹配」而缺省版本取末条 ⇒ 照条目自己的顺延预案追加更正会永久误报；
+  改为缺省直取末条、显式版本取最后匹配；更正条目用新标签 + `_CORRECTS` 继承印记（版本号唯一性守卫不许复用标签）。
+- 残留「09-24」三处改 09-28；`test_gex_modifier_disconnected` 行为测试加断言最终 `direction`，
+  新增 `gex_adjustment` 键读者白名单（外文件 `a = sr[...]["gex_adjustment"]; s = s + a` 旧 AST 守卫抓不到）。
+- 变异（各自 APFS 克隆）15 个全红；「改方向」「外文件改名重连」两个对照在旧测试文件上**全绿**＝原缺口真实。
+- **仓库外未改（需用户决定）**：编排器 Step 11 只读 JSON 的旧键，🚨 行只进 $LOGFILE、STEPS_RESULT 仍记 accruing；
+  weekly-optimizer SKILL.md 仍写「三段」。
 
 ### 发现未处理
 - `confidence_modifier` 缩放 `band_width` 与 `confidence_band` / `discrimination` 不一致（09-11 起 119 行里 113 行）——只加注释。
@@ -543,6 +566,29 @@ S=100 夹具上恰好相等、扫描遇 CBOE gamma 的夹具全是 None——已
 扫描不重定价 / 线性 p / 用 CBOE gamma、梯子升序占档、负 gamma 判 base、DTE 含时分秒、休市与半日市判据、bid=0 放行、按 mid 成交、
 T−1 K 线结算、到期当天结算、取最新行、单行财报判定、全局置换、未就绪输出效应量、冻结后重算、as_of 用未来结算、MCP 触发冻结、
 钩子拼进日报 md、评分路径 import 本模块。
+
+### 二次检查（2026-09-26，推送前；4 路对抗评审 → 逐条复核 → 4 路按文件分组修复）
+确认无误：希腊字母对 50 位精度有限差分 450 组（delta 最大相对误差 4e-11）、N(d2) = 数字期权价、零点插值与多根、
+六种结构的 credit / max_loss / 盈亏平衡、`route()` 与预注册 §9 逐分支一致；置换检验单侧 + 1 校正、块内置换、冻结单写者。
+真实 09-25 收盘后文件全 30 只端到端：月度记 30、周度记 29（1 只窗口内无到期日），同日重跑零重复。修正（预注册定稿记录 #14–#18）：
+- **计算层**：点差恰好 25%（0.35/0.45 浮点为 0.25000000000000006）被判过宽 ⇒ 改 `sp − 0.25 > _TOL_EPS`（#17）；
+  |Δ| 等距平手约 80% 被浮点判给更大的 |Δ|、与 docstring 相反 ⇒ 距离取 9 位小数（#18）；`term_views` 最近到期行缺 `expiry` 抛
+  KeyError；`classify_earnings` 收 datetime 抛 TypeError；DEX 用了符号错的 CBOE delta（与梯子规则不一致）；价差 / 铁鹰
+  credit ≥ 宽度（交叉 / 陈旧报价）仍标可报价 ⇒ `credit_ge_width:<侧>`。补「多个零点取最近」测试（`min(below)` 变异原先全绿）。
+- **账本**：两个写者（手动补跑 × 定时扫描）整片重写会静默丢行 ⇒ tenor 目录 `fcntl.flock`，结算取 K 线在锁外、锁内重读按行键套用；
+  版本截断落地（§10 写了、代码没查；#14，行加 `component_versions.prereg`）；结算放弃闸数「天」不数「次」、K 线源滞后不计次（#15）；
+  月度先冻结会经 MCP 泄露周度单位结局（周度到期日约 94% 也是月度的）⇒ 全部 tenor 冻结才解盲（#16）；缺失原因按侧 × flag 计数
+  （§3/§11 承诺过）；一个非 UTF-8 字节让整档不可读 ⇒ 逐行解码、坏行原样保留。
+- **观测点（谁会红）**：冻结失败只写进私有 md、日志零 WARNING ⇒ 补 WARNING；0 行告警只在两档**都**空时响 ⇒ 按档；
+  取数无熔断而钩子在 save_report / 部署之前（DNS 秒挂实测 +63 s，连接超时型推算 ~23 分钟）⇒ 连续 3 只网络失败熔断 + 600 s 预算。
+- **火墙 / 测试缺口**：日报文件整体在白名单里、火墙只认 import 名 ⇒ 改为「`sell_strike_*` 引用只许出现在 `_post_scan_notify`」
+  + `sell_strike_state` / `fetch_cboe_raw_contracts` 引用者双向白名单；新增「钩子开 / 关日报 md 逐字节相同、swarm_results 深相等」；
+  补跑拿到**更新**日期的链被拒、`_default_fetch` 原样转发 as_of；Bonferroni（α_family 变异）、+1 校正、种子复现（金标 p）、
+  冻结当日边界、先写者赢——原先各自的变异全绿，现全红。
+- 变异：四组各在独立 APFS 克隆真跑（计算 12 / 账本 36 / 钩子与火墙 10 / GEX 与世代 15），全部红在预期断言上。
+- ⭐ **数据源性质（不是 bug，如实记录）**：CBOE 收盘后点差普遍宽（09-25 月度 0.20Δ put：MSFT 42%、WMT 62%、NEE 159%；
+  生产 quote_set 历史同形）⇒ 按「点差 > 25% 缺失」每侧约一半单位进不了检验，且偏向剔除防御型大盘股；就绪会比全样本估计慢。
+  **不放宽 25%**（协议变更）。冷启动每票下载 8~10 s（纯网络），生产扫描内命中 4 h payload 缓存不重下。
 
 ### 发现未处理
 - **生产数据缺口**：09-23 CBOE CDN 整源停更（09-24 01:42 PDT 仍是 09-22 文件）；09-25 扫描时刻本机 DNS 解析失败

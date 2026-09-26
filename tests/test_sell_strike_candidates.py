@@ -358,6 +358,27 @@ def test_ladder_respects_tolerance_and_one_contract_per_rung():
     assert list(put) == ["0.10", "0.16", "0.20", "0.25", "0.30"], "展示顺序仍按 LADDER_DELTAS"
 
 
+def test_ladder_equidistant_tie_goes_to_smaller_abs_delta():
+    """|Δ| 0.18 与 0.22 对 0.20 等距、0.08 与 0.12 对 0.10 等距 ⇒ 按 docstring 取 |Δ| 更小（更价外）的那张。
+    原始差是 0.020000000000000018 vs 0.01999999999999999（0.10 档同理），不取整就由浮点噪声选中 |Δ| 大的
+    那张——而 0.20 / 0.10 恰是预注册的 base / far 档。CBOE Δ 只给 4 位小数，这种等距在真实链上会出现。
+
+    变红的变异：min 的键用未取整的 `abs(a - target)`（原写法）⇒ 0.20 档取 0.22、0.10 档取 0.12。
+    """
+    assert abs(0.22 - 0.20) < abs(0.18 - 0.20) and abs(0.12 - 0.10) < abs(0.08 - 0.10), \
+        "夹具自证：不取整时浮点噪声确实偏向 |Δ| 大的那张"
+    chain = [_c("P", 85, -0.08), _c("P", 88, -0.12), _c("P", 90, -0.18), _c("P", 93, -0.22),
+             _c("C", 115, 0.08), _c("C", 112, 0.12), _c("C", 110, 0.18), _c("C", 107, 0.22)]
+    lad = SC.build_ladder(chain, 100.0, "2026-10-23")
+    want = {"put": {"0.20": (90.0, -0.18), "0.10": (85.0, -0.08)},
+            "call": {"0.20": (110.0, 0.18), "0.10": (115.0, 0.08)}}
+    for side, rungs in want.items():
+        for key, (K, d) in rungs.items():
+            short = lad[side][key]["short"]
+            assert short is not None, (side, key, lad[side][key]["reasons"])
+            assert (short["strike"], short["delta"]) == (K, d), (side, key, short["strike"])
+
+
 def _bs_abs_delta(S, K, dte, iv, cp, r=0.045):
     """独立 BS |Δ|（只用 math，不经被测模块），给稀疏链夹具当「CBOE delta」。"""
     import math
@@ -539,6 +560,62 @@ def test_structure_economics_spreads_condor_and_non_positive_credit():
         SC.structure_quote(lad, "short_put", 0.15)
 
 
+def test_spread_gate_at_exactly_25pct_is_not_decided_by_float_noise():
+    """预注册：短腿点差 **> 25%** 才排除。bid .35/ask .45 与 .70/.90 都恰好 25%，浮点却算出
+    0.25000000000000006（1.05/1.35 算出 0.25）——直接比 `sp > 0.25` 时前两个被排除、第三个放行，
+    进不进检验由浮点噪声决定。明显更宽的（.34/.46 = 30%、.35/.46 ≈ 27.2%）照样排除。
+
+    变红的变异：点差闸改回 `sp > MAX_SPREAD_PCT`（不吸收噪声）。
+    """
+    assert SC.quote_leg({"bid": 0.35, "ask": 0.45})["spread_pct"] > SC.MAX_SPREAD_PCT, \
+        "夹具自证：恰好 25% 的报价浮点上确实略大于 0.25"
+    for bid, ask in ((0.35, 0.45), (0.70, 0.90), (1.05, 1.35)):
+        assert SC.quote_leg({"bid": bid, "ask": ask})["spread_pct"] == pytest.approx(0.25, abs=1e-12)
+        for st, lad in (("short_put", _ladder(put_short=(90, bid, ask))),
+                        ("short_call", _ladder(call_short=(110, bid, ask)))):
+            q = SC.structure_quote(lad, st, 0.20)
+            assert q["quotable"] is True, (st, bid, ask, q["reasons"])
+            assert q["credit"] == bid
+    for bid, ask in ((0.34, 0.46), (0.35, 0.46)):
+        q = SC.structure_quote(_ladder(put_short=(90, bid, ask)), "short_put", 0.20)
+        assert q["quotable"] is False and q["reason"] == "short_spread_too_wide:put", (bid, ask)
+
+
+def test_credit_at_or_above_spread_width_is_not_quotable():
+    """价差 credit ≥ 宽度 ⇒ max_loss ≤ 0 = 无风险套利 = 交叉 / 陈旧报价，不是能成交的市价：
+    不可报价、reason `credit_ge_width:<side>`；金额照算（max_loss ≤ 0 就是证据）；到期盈亏给 None。
+    恰好等于宽度（max_loss = 0）同样排除。铁鹰逐侧判，另判合计（两侧各 3.0/5 都没交叉、
+    合计 6.0 ≥ 宽翼 5 ⇒ `credit_ge_width:combined`）。
+
+    变红的变异：不设此闸（原写法：credit 5.5、max_loss −0.5 的价差 quotable=True，结算时每一笔都「稳赚」）；
+    闸只判 >（漏掉 = 宽度）；铁鹰只判合计（put 侧交叉、合计未超宽翼那例放行）或只判逐侧（combined 那例放行）。
+    """
+    crossed_put = dict(put_short=(90, 6.0, 6.1), put_wing=(85, 0.4, 0.5))    # 6.0 − 0.5 = 5.5 ≥ 宽 5
+    bps = SC.structure_quote(_ladder(**crossed_put), "bull_put_spread", 0.20)
+    assert bps["quotable"] is False and bps["reasons"] == ["credit_ge_width:put"]
+    assert (bps["credit"], bps["max_loss"], bps["yield_raw"]) == (5.5, -0.5, None)
+    assert SC.structure_pnl_at_expiry(bps, 95.0) is None
+    eq = SC.structure_quote(_ladder(put_short=(90, 5.5, 5.6), put_wing=(85, 0.4, 0.5)), "bull_put_spread", 0.20)
+    assert eq["quotable"] is False and eq["reasons"] == ["credit_ge_width:put"] and eq["max_loss"] == 0.0
+    bcs = SC.structure_quote(_ladder(call_short=(110, 10.6, 10.7), call_wing=(120, 0.4, 0.5)),
+                             "bear_call_spread", 0.20)
+    assert bcs["quotable"] is False and bcs["reasons"] == ["credit_ge_width:call"]
+
+    ic = SC.structure_quote(_ladder(**crossed_put), "iron_condor", 0.20)     # call 侧 1.0/10 正常
+    assert ic["max_loss"] == 10.0 - 6.5, "夹具自检：合计没超宽翼，只有逐侧判得出来"
+    assert ic["quotable"] is False and ic["reasons"] == ["credit_ge_width:put"]
+    ic2 = SC.structure_quote(_ladder(put_short=(90, 3.5, 3.6), put_wing=(85, 0.4, 0.5),
+                                     call_short=(110, 3.5, 3.6), call_wing=(115, 0.4, 0.5)),
+                             "iron_condor", 0.20)
+    assert ic2["quotable"] is False and ic2["reasons"] == ["credit_ge_width:combined"]
+    assert ic2["max_loss"] == -1.0
+
+    assert SC.structure_quote(_ladder(**crossed_put), "short_put", 0.20)["quotable"] is True, \
+        "单腿结构没有宽度，不受此闸影响"
+    for st in ("bull_put_spread", "bear_call_spread", "iron_condor"):
+        assert SC.structure_quote(_ladder(), st, 0.20)["quotable"] is True, st
+
+
 def test_per_side_rungs_for_route_split():
     """route 可能 put far / call base：strangle 接受 {"put": 0.10, "call": 0.20}。
 
@@ -702,6 +779,26 @@ def test_classify_earnings_on_real_upcoming_fn_shapes(monkeypatch):
     assert SC.classify_earnings({"earnings_date": "2026-09-01"}, as_of, expiry) == "none"
     assert SC.classify_earnings({"earnings_date": "soon"}, as_of, expiry) == "unknown"
     assert SC.classify_earnings({"source": "x"}, as_of, expiry) == "unknown"
+
+
+def test_classify_earnings_accepts_datetimes_and_compares_calendar_dates():
+    """datetime 是 date 的子类：as_of / expiry / earnings_date 给 datetime 时曾在 `d < a` 抛 TypeError
+    （datetime 与 date 不可比；naive 与 aware 也不可比）。归一成日期后按**日历日**比：
+    财报在扫描当天早盘（08:00 早于扫描时刻 17:05）仍算 before_expiry，不是 "none"。
+
+    变红的变异：_as_date 原样放过 datetime（TypeError）；改成按 datetime 时刻比（同日早盘判 none）。
+    """
+    exp = "2026-10-23"
+    assert SC.classify_earnings({"earnings_date": datetime(2026, 10, 1, 16, 30)}, AFTER_CLOSE, exp) \
+        == "before_expiry"
+    assert SC.classify_earnings({"earnings_date": "2026-10-01"}, AFTER_CLOSE, exp) == "before_expiry"
+    assert SC.classify_earnings({"earnings_date": datetime(2026, 9, 23, 8, 0, tzinfo=ET)}, AFTER_CLOSE, exp) \
+        == "before_expiry"
+    assert SC.classify_earnings({"earnings_date": "2026-10-01"}, "2026-09-23", datetime(2026, 10, 23, 16, 0)) \
+        == "before_expiry"
+    assert SC.classify_earnings({"earnings_date": datetime(2026, 10, 24, 8, 0)}, AFTER_CLOSE,
+                                datetime(2026, 10, 23, 16, 0)) == "after_expiry"
+    assert SC.classify_earnings({"earnings_date": datetime(2026, 9, 22, 20, 0)}, AFTER_CLOSE, exp) == "none"
 
 
 # ───────────────────────────── 冻结常量

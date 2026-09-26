@@ -11,6 +11,8 @@ import json
 import logging
 import math
 import re
+import threading
+import time
 from collections import defaultdict
 from pathlib import Path, PurePosixPath
 
@@ -255,21 +257,24 @@ class TestSettle:
         assert r["settle_status"] == "pending" and r["settle_attempts"] == 0 and bars.calls == []
 
     def test_give_up_after_max_attempts(self, tmp_path):
-        """拿到 K 线却没有到期日那根，累计 settle_max_attempts 次 ⇒ give_up。变异：> 代替 >= / 删放弃闸。"""
+        """拿到**已越过到期日**的 K 线却没有到期日那根，累计 settle_max_attempts **天** ⇒ give_up
+        （同一天至多计一次、源没追上不计，见 TestSettleAttemptsCountDays）。变异：> 代替 >= / 删放弃闸。"""
         _pending(tmp_path)
-        bars = _Bars([{"date": "2026-10-15", "close": 81.0}])
+        bars = _Bars([{"date": "2026-10-15", "close": 81.0}, {"date": "2026-10-19", "close": 99.0}])
         n = LG.CONFIG["settle_max_attempts"]
-        for i in range(n - 1):
-            LG.settle("2026-10-20", "monthly", bars_fn=bars, state_dir=tmp_path)
+        days = [f"2026-10-{20 + i}" for i in range(n)]
+        for d in days[:-1]:
+            LG.settle(d, "monthly", bars_fn=bars, state_dir=tmp_path)
         assert LG.load_rows("monthly", state_dir=tmp_path)[0]["settle_status"] == "pending"
-        st = LG._settle("2026-10-20", "monthly", bars_fn=bars, state_dir=tmp_path)
+        st = LG._settle(days[-1], "monthly", bars_fn=bars, state_dir=tmp_path)
         r = LG.load_rows("monthly", state_dir=tmp_path)[0]
         assert (r["settle_status"], r["settle_give_up_reason"], r["settle_attempts"]) == \
             ("give_up", "max_attempts_exhausted", n)
+        assert (r["settle_give_up_on"], r["settle_last_attempt_on"]) == (days[-1], days[-1])
         assert st["gave_up"] == {"max_attempts_exhausted": 1}
         # 放弃后不再取 K 线
         before = len(bars.calls)
-        LG.settle("2026-10-21", "monthly", bars_fn=bars, state_dir=tmp_path)
+        LG.settle("2026-10-30", "monthly", bars_fn=bars, state_dir=tmp_path)
         assert len(bars.calls) == before
 
     def test_give_up_when_expiry_left_fetch_window(self, tmp_path):
@@ -717,7 +722,8 @@ def _persist(rows, state_dir, tenor="monthly"):
         LG.record_rows(day, tenor, by_day[day], state_dir=state_dir)
 
 
-def _ready_ledger_rows(n_units=60, n_expiries=12, n_flag=10, *, month=1, tag="T", outcome=None):
+def _ready_ledger_rows(n_units=60, n_expiries=12, n_flag=10, *, month=1, tag="T", outcome=None,
+                       tenor="monthly"):
     """刚好够就绪闸的一批已结算行，日期真实（结算日 = 到期次日），可写进账本。
     `outcome(i, flag)` 缺省同 `_ready_rows`：每 3 个里 1 个亏 0.5 倍权利金。"""
     rows = []
@@ -726,7 +732,7 @@ def _ready_ledger_rows(n_units=60, n_expiries=12, n_flag=10, *, month=1, tag="T"
         flag = i < n_flag
         o = outcome(i, flag) if outcome else (-0.5 if i % 3 == 0 else 0.8)
         r = _row(f"2026-{month:02d}-{1 + e:02d}", f"{tag}{i:03d}", f"2026-{month + 1:02d}-{1 + e:02d}",
-                 flag_put=flag, flag_call=flag, close=_put_close(o))
+                 tenor=tenor, flag_put=flag, flag_call=flag, close=_put_close(o))
         r["settled_on"] = f"2026-{month + 1:02d}-{2 + e:02d}"
         rows.append(r)
     return rows
@@ -848,12 +854,12 @@ class TestAssessAsOfUsesOnlyWhatWasKnown:
         _pending(tmp_path, date="2026-08-03", expiry="2026-09-02")
         _pending(tmp_path, date="2026-08-03", expiry="2026-09-03", ticker="BBB")
         before = LG.assess("monthly", state_dir=tmp_path, as_of="2026-09-01")["progress"]
-        LG.settle("2026-09-23", "monthly", state_dir=tmp_path,
-                  bars_fn=lambda t: [{"date": "2026-09-02", "close": 95.0}] if t == "AAA"
-                  else [{"date": "2026-09-01", "close": 1.0}])
-        for _ in range(LG.CONFIG["settle_max_attempts"] - 1):
-            LG.settle("2026-09-24", "monthly", state_dir=tmp_path,
-                      bars_fn=lambda t: [{"date": "2026-09-01", "close": 1.0}])
+        # BBB：K 线越过了到期日（09-04）却没有 09-03 那根 ⇒ 每天计一次失败（同一天只计一次），第 5 天放弃
+        no_expiry_bar = [{"date": "2026-09-01", "close": 1.0}, {"date": "2026-09-04", "close": 1.0}]
+        LG.settle("2026-09-20", "monthly", state_dir=tmp_path,
+                  bars_fn=lambda t: [{"date": "2026-09-02", "close": 95.0}] if t == "AAA" else no_expiry_bar)
+        for i in range(LG.CONFIG["settle_max_attempts"] - 1):
+            LG.settle(f"2026-09-{21 + i}", "monthly", state_dir=tmp_path, bars_fn=lambda t: no_expiry_bar)
         rows = {r["ticker"]: r for r in LG.load_rows("monthly", state_dir=tmp_path)}
         assert (rows["AAA"]["settle_status"], rows["BBB"]["settle_status"]) == ("settled", "give_up")
         assert rows["BBB"]["settle_give_up_on"] == "2026-09-24"
@@ -991,8 +997,10 @@ class TestMcpBlinding:
         assert "expiry_close" not in json.dumps(got)
 
     def test_settlement_fields_returned_once_frozen(self, tmp_path):
-        """冻结（日报钩子那条路径）后解盲：同一行返回到期收盘。变异：永远盲化（检验跑完了还看不到结果）。"""
+        """冻结（日报钩子那条路径）后解盲：同一行返回到期收盘。**两个 tenor 都冻结**才解盲（跨 tenor 泄露，
+        见 TestCrossTenorUnblinding）。变异：永远盲化（检验跑完了还看不到结果）。"""
         _persist(_ready_ledger_rows(), tmp_path)
+        _persist(_ready_ledger_rows(tenor="weekly"), tmp_path, "weekly")
         R.write_local_report(AS_OF, state_dir=tmp_path, freeze=True)
         got = R.rows_for_ticker("2026-01-01", "T000", state_dir=tmp_path)
         assert got["assess"]["monthly"]["status"] == "ready" and got["assess"]["monthly"]["frozen"]
@@ -1360,8 +1368,13 @@ class TestSingleFreezeWriter:
         R.write_local_report(AS_OF, state_dir=tmp_path)
         assert not path.exists()
         md = R.write_local_report(AS_OF, state_dir=tmp_path, freeze=True).read_text(encoding="utf-8")
-        assert path.is_file() and json.loads(path.read_text(encoding="utf-8"))["ready_date"] == "2026-02-13"
-        assert "预注册检验已于 2026-02-13 冻结" in md and "reject_h0" in md
+        d = json.loads(path.read_text(encoding="utf-8"))
+        assert path.is_file() and d["ready_date"] == "2026-02-13"
+        # 判定逐字核对冻结文件（`"reject_h0" in md` 也匹配 `fail_to_reject_h0`，两个判定都绿，测不出任何事）
+        dec = {s: d["per_side"][s]["decision"] for s in LG.SIDES}
+        assert set(dec.values()) <= {"reject_h0", "fail_to_reject_h0"}
+        assert "预注册检验已于 2026-02-13 冻结" in md
+        assert f"：put: {dec['put']} · call: {dec['call']}" in md, md
 
 
 class TestBlindingClaimIsHonest:
@@ -1374,3 +1387,458 @@ class TestBlindingClaimIsHonest:
         assert "不剔除就等于没盲" not in text
         assert "**不等于**盲化" in sec7 and "从任何出口" in sec7 and "偷看" in sec7
         assert "2026-09-24 最终评审" in text[text.index("## 登记前定稿记录（续"):]
+
+
+# ═════════════════════════════════════════ 登记前定稿（续，2026-09-26 二次检查）：S1 ~ S9
+# 每条对应二次检查里一条复核过的缺陷；docstring 写让它变红的变异（台账见预注册文档定稿记录 #14 起）。
+
+class TestConcurrentWriters:
+    """S1：record / settle 的分片读-改-写持 tenor 目录锁；settle 取 K 线在锁外、套用时锁内重读。"""
+
+    def test_row_recorded_during_settle_bar_fetch_survives(self, tmp_path):
+        """settle 取 K 线期间（锁外）另一个写者往同一分片记了一行：settle 写回后那行必须还在。
+        评审探针原样（原实现：BBB 消失）。变异：③ 不重读、在 ① 的快照上改完整片写回。"""
+        _pending(tmp_path, date="2026-10-01", expiry="2026-10-16")
+
+        def bars(_t):
+            LG.record_rows("2026-10-02", "monthly",
+                           [_row("2026-10-02", "BBB", "2026-10-30", settle_status="pending")], state_dir=tmp_path)
+            return [{"date": "2026-10-16", "close": 99.0}]
+
+        assert LG.settle("2026-10-19", "monthly", bars_fn=bars, state_dir=tmp_path) == 1
+        got = {r["ticker"]: r for r in LG.load_rows("monthly", tmp_path)}
+        assert set(got) == {"AAA", "BBB"}, f"settle 覆盖掉了并发记录的行：{sorted(got)}"
+        assert (got["AAA"]["settle_status"], got["AAA"]["expiry_close"]) == ("settled", 99.0)
+        assert got["BBB"]["settle_status"] == "pending"
+
+    def test_row_settled_by_another_writer_meanwhile_is_not_overwritten(self, tmp_path):
+        """取 K 线期间另一个 settle 已把同一行结算掉：本次以对方为准、计 skipped_concurrent，不改写、不重复计数。
+        变异：③ 不核对「仍是 pending 且到期日未变」。"""
+        _pending(tmp_path, date="2026-10-01", expiry="2026-10-16")
+
+        def bars(_t):
+            LG._settle("2026-10-19", "monthly", state_dir=tmp_path,
+                       bars_fn=lambda t: [{"date": "2026-10-16", "close": 99.0}])
+            return [{"date": "2026-10-16", "close": 88.0}]
+
+        st = LG._settle("2026-10-19", "monthly", bars_fn=bars, state_dir=tmp_path)
+        r = LG.load_rows("monthly", tmp_path)[0]
+        assert (r["settle_status"], r["expiry_close"]) == ("settled", 99.0)
+        assert (st["settled"], st["skipped_concurrent"]) == (0, 1)
+
+    def test_record_blocks_on_the_lock_and_rereads_under_it(self, tmp_path, monkeypatch):
+        """record 的读-改-写整段持锁：另一个写者持锁补结算期间，record 必须等它、再在锁内读到新版本。
+        变异：`_record_rows` 不拿锁（锁外读 → 对方写 → 用旧快照覆盖 ⇒ 结算丢失）。"""
+        _pending(tmp_path, date="2026-10-01", expiry="2026-10-16")
+        shard = LG._shard("monthly", "2026-10-01", tmp_path)
+        real_write = LG._write_shard
+        other_wrote = threading.Event()
+
+        def gated_write(path, rows, bad=()):
+            # 只拦 record 线程的写：没有锁时它此刻已拿着旧快照，等「另一个写者」写完再写 ⇒ 必然覆盖
+            if threading.current_thread().name == "record-thread":
+                other_wrote.wait(5)
+            return real_write(path, rows, bad)
+
+        monkeypatch.setattr(LG, "_write_shard", gated_write)
+        errors = []
+
+        def rec():
+            try:
+                LG.record_rows("2026-10-02", "monthly",
+                               [_row("2026-10-02", "BBB", "2026-10-30", settle_status="pending")], state_dir=tmp_path)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t = threading.Thread(target=rec, name="record-thread")
+        with LG._tenor_lock("monthly", tmp_path):
+            t.start()
+            time.sleep(0.3)                       # 无锁时 record 线程早已读完旧分片、卡在写之前
+            rows, bad = LG._load_shard(shard)
+            rows[0].update(settle_status="settled", expiry_close=101.0, expiry_close_date="2026-10-16",
+                           settled_on="2026-10-19")
+            real_write(shard, rows, bad)          # 「另一个进程」持锁补上结算
+            other_wrote.set()
+        t.join(10)
+        assert not t.is_alive() and not errors, errors
+        got = {r["ticker"]: r for r in LG.load_rows("monthly", tmp_path)}
+        assert set(got) == {"AAA", "BBB"}
+        assert (got["AAA"]["settle_status"], got["AAA"]["expiry_close"]) == ("settled", 101.0), \
+            "record 用旧快照覆盖了并发写入的结算"
+
+    def test_lock_is_on_the_directory_and_leaves_no_file_behind(self, tmp_path):
+        """锁的是 tenor 目录本身：不多出锁文件（私有备份只拷文本后缀，多一个文件就进 skipped 清单）。
+        同进程另一个 fd 也拿不到（flock 语义）。变异：改成另建 `.lock` 文件 / 不加锁。"""
+        LG.record_rows(AS_OF, "monthly", [_row(AS_OF, settle_status="pending")], state_dir=tmp_path)
+        assert sorted(p.name for p in (tmp_path / "monthly").iterdir()) == ["2026-09.jsonl"]
+        import fcntl
+        import os
+        with LG._tenor_lock("monthly", tmp_path) as d:
+            fd = os.open(str(d), os.O_RDONLY)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+
+
+class TestAssessSafeWarns:
+    """S2：`_assess_safe` 把异常变成报告里的一行字之外，必须打 WARNING（冻结路径另有专门一句）。"""
+
+    def test_corrupt_frozen_file_on_the_freeze_path_is_a_warning(self, tmp_path, caplog):
+        """冻结文件坏了：日报钩子那条路径（write_local_report(freeze=True)）每天都失败——原实现日志里一个字都没有。
+        变异：删掉 `_assess_safe` 里的 warning。"""
+        _persist(_ready_ledger_rows(), tmp_path)
+        p = LG.prereg_result_path("monthly", tmp_path)
+        p.write_text("{truncated", encoding="utf-8")
+        with caplog.at_level(logging.WARNING):
+            md = R.write_local_report(AS_OF, state_dir=tmp_path, freeze=True).read_text(encoding="utf-8")
+        assert "就绪度判定失败" in md
+        warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        hit = [r.getMessage() for r in warns if "卖权预注册检验 就绪度判定/冻结失败" in r.getMessage()]
+        assert hit and "monthly" in hit[0] and "RuntimeError" in hit[0], [r.getMessage() for r in warns]
+
+    def test_read_only_path_failure_is_a_warning_too(self, tmp_path, caplog):
+        """MCP 只读路径同样要响（不写「冻结」字样）。变异：只在 freeze=True 时打。"""
+        LG.prereg_result_path("weekly", tmp_path).parent.mkdir(parents=True)
+        LG.prereg_result_path("weekly", tmp_path).write_text("not json", encoding="utf-8")
+        with caplog.at_level(logging.WARNING):
+            assert R._assess_safe("weekly", tmp_path, None)["status"] == "error"
+        msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("就绪度判定失败" in m and "只读路径" in m and "weekly" in m for m in msgs), msgs
+
+
+class TestCrossTenorUnblinding:
+    """S3：结算字段只在**全部** tenor 都冻结后才返回——周度到期日 94% 同时是月度到期日，月度先冻结就返回
+    月度行的 expiry_close，等于替仍在盲期的周度单位递刀。"""
+
+    def test_one_frozen_tenor_does_not_unblind(self, tmp_path):
+        """月度冻结、周度未冻结 ⇒ 两档行视图都不返回结算字段；周度也冻结后才返回。
+        正对照：月度确实已冻结且适用。变异：按单个 tenor 的 `_unblinded` 决定。"""
+        _persist(_ready_ledger_rows(), tmp_path)
+        _persist(_ready_ledger_rows(40, 12, 10, tenor="weekly"), tmp_path, "weekly")     # 周度未就绪
+        R.write_local_report(AS_OF, state_dir=tmp_path, freeze=True)
+        got = R.rows_for_ticker("2026-01-01", "T000", state_dir=tmp_path)
+        assert got["assess"]["monthly"]["frozen"]["applies"] is True, "正对照：月度已冻结"
+        assert got["assess"]["weekly"]["status"] == "accruing"
+        for tenor in LG.TENORS:
+            view = got["tenors"][tenor]
+            assert view["settlement_blinded"] is True, f"{tenor}：只有月度冻结就解盲了"
+            assert not set(view) & set(R.BLINDED_ROW_FIELDS)
+        assert "expiry_close" not in json.dumps(got)
+
+        _persist(_ready_ledger_rows(60, 12, 10, tag="W", tenor="weekly"), tmp_path, "weekly")
+        R.write_local_report(AS_OF, state_dir=tmp_path, freeze=True)
+        got = R.rows_for_ticker("2026-01-01", "T000", state_dir=tmp_path)
+        assert all(got["assess"][t]["frozen"]["applies"] for t in LG.TENORS)
+        for tenor in LG.TENORS:
+            assert "settlement_blinded" not in got["tenors"][tenor]
+            assert got["tenors"][tenor]["expiry_close"] == _put_close(-0.5)
+
+    def test_missing_tenor_assessment_counts_as_blinded(self):
+        """`_all_unblinded` 缺一档（或判定失败）⇒ 不解盲。变异：只数传进来的那几档（空 / 缺档恒真）。"""
+        frozen = {"status": "ready", "frozen": {"applies": True}}
+        assert R._all_unblinded({t: frozen for t in LG.TENORS})
+        assert not R._all_unblinded({"monthly": frozen})
+        assert not R._all_unblinded({"monthly": frozen, "weekly": {"status": "error"}})
+
+
+def _with_missing_put_outcomes(rows, flagged, normal):
+    """把两个 flag 单位与一个 normal 单位的 0.20 put 腿改成三种不可报价：点差过宽 / 容差内无合约 / bid=0。"""
+    f1, f2 = flagged
+    f1["ladder"]["put"]["0.20"]["short"].update(bid=0.5, ask=1.5, spread_pct=1.0)
+    f2["ladder"]["put"]["0.20"] = {"short": None, "wing": None, "reasons": ["no_delta_within_tol:nearest=0.3100"]}
+    normal["ladder"]["put"]["0.20"]["short"].update(bid=0.0, quote_ok=False)
+    return rows
+
+
+class TestMissingnessByReasonAndFlag:
+    """S4：§3 / §11 承诺「按侧记缺失原因、就绪时一并报告」，原实现只有 no_flag / no_outcome 两个总数、
+    且不按 flag 分——差异缺失（flag 组缺得多）查不出来。"""
+
+    WANT = {"no_outcome": 3, "no_outcome:short_spread_too_wide": 1,
+            "no_outcome:missing_leg:no_delta_within_tol": 1, "no_outcome:quote_not_ok": 1}
+    WANT_BY_FLAG = {"flag": {"no_outcome:short_spread_too_wide": 1, "no_outcome:missing_leg:no_delta_within_tol": 1},
+                    "normal": {"no_outcome:quote_not_ok": 1}}
+
+    def _rows(self, n_units, n_flag):
+        rows = _ready_rows(n_units, 12, n_flag)
+        flagged = [r for r in rows if r["route"]["flag_put"]]
+        normal = [r for r in rows if not r["route"]["flag_put"]]
+        return _with_missing_put_outcomes(rows, flagged[:2], normal[0])
+
+    def test_counts_by_reason_and_by_flag_in_progress_and_in_the_frozen_test(self):
+        """72 单位、每天一个 flag（12 个信息块），挖掉 2 个 flag + 1 个 normal 的 put 结果 ⇒ 仍就绪。
+        变异：原因不带前缀 / 不按 flag 分 / 缺腿不接梯子原因 / 检验结果里不带按 flag 的缺失。"""
+        res = LG.assess("monthly", rows=self._rows(72, 12))
+        assert res["status"] == "ready", res["gates"]
+        put = res["progress"]["per_side"]["put"]
+        assert put["skipped"] == self.WANT
+        assert put["skipped_by_flag"] == self.WANT_BY_FLAG
+        assert res["progress"]["per_side"]["call"]["skipped_by_flag"] == {"flag": {}, "normal": {}}
+        assert res["test"]["put"]["skipped_by_flag"] == self.WANT_BY_FLAG, "冻结的检验结果里要带按 flag 的缺失"
+        assert (put["n_flagged"], put["n_normal"]) == (10, 59)
+
+    def test_reported_at_readiness_not_before(self):
+        """就绪时 summary_line（本地报告 / CLI / MCP 都转述它）写出按侧 × flag/normal × 原因的缺失；未就绪不写。
+        变异：summary_line 不写缺失 / 未就绪也写（§3：就绪时一并报告）。"""
+        line = LG.summary_line(LG.assess("monthly", rows=self._rows(72, 12)))
+        assert ("0.20 档结果缺失（不进检验）：put flag 2（missing_leg:no_delta_within_tol 1、short_spread_too_wide 1）"
+                "/normal 1（quote_not_ok 1） · call flag 0/normal 0") in line, line
+        early = LG.assess("monthly", rows=self._rows(40, 10))
+        assert early["status"] == "accruing"
+        assert early["progress"]["per_side"]["put"]["skipped_by_flag"] == self.WANT_BY_FLAG, \
+            "计数任何时候都在 progress 里（§7：进度计数任何时候可看）"
+        assert "档结果缺失" not in LG.summary_line(early)
+
+
+class TestVersionTruncation:
+    """S5：§10「协议变更前记的行默认不进检验」——原实现不看任何版本戳，rule_version 2 的行会被静默池化。"""
+
+    def test_rows_with_foreign_version_stamps_are_excluded_and_counted(self):
+        """变异：`_eligible_except_earnings` 不看版本戳 / `_component_versions` 不含 prereg。"""
+        ok = _row("2026-09-10", "OK")
+        rule2 = _row("2026-09-10", "RULE2")
+        rule2["route"]["rule_version"] = 2
+        comp2 = _row("2026-09-10", "COMP2")
+        comp2["component_versions"] = dict(comp2["component_versions"], route_rule=2)
+        no_prereg = _row("2026-09-10", "NOPRE")           # v0.45.333 首版的戳：没有 prereg 这一项
+        no_prereg["component_versions"] = {k: v for k, v in no_prereg["component_versions"].items() if k != "prereg"}
+        schema2 = _row("2026-09-10", "SCHEMA2")
+        schema2["schema_version"] = 2
+        bare = _row("2026-09-10", "BARE")
+        bare["component_versions"] = None
+        rows = [ok, rule2, comp2, no_prereg, schema2, bare]
+        assert [u["ticker"] for u in LG.independent_units(rows)] == ["OK"]
+        pg = LG.assess("monthly", rows=rows)["progress"]
+        assert pg["n_rows_version_excluded"] == 5
+        assert pg["version_mismatch"] == {"route.rule_version": 1, "component_versions.route_rule": 1,
+                                          "component_versions.prereg": 1, "schema_version": 1,
+                                          "component_versions": 1}
+        assert "版本戳与现行协议不符不进检验 5 行" in LG.summary_line(LG.assess("monthly", rows=rows))
+
+    def test_row_level_like_the_other_filters(self):
+        """按行判（同报价来源规则）：单位最早那行是旧版本 ⇒ 由同单位最早的新版本行代表。变异：按单位整体排除。"""
+        old = _row("2026-09-10", "AAA")
+        old["route"]["rule_version"] = 0
+        new = _row("2026-09-11", "AAA")
+        assert [(u["ticker"], u["date"]) for u in LG.independent_units([old, new])] == [("AAA", "2026-09-11")]
+
+    def test_rows_written_by_current_code_carry_matching_stamps(self):
+        """正对照：生产路径（build_tenor_row）写出的行版本戳全符——否则上面的过滤会把全部生产行排除。
+        变异：`_blank_row` 与 `_version_mismatch` 各用一份版本表、两边不同步。"""
+        raw = _raw("AAA", AS_OF)
+        lm = L.level_map(raw["contracts"], raw["underlying_price"])
+        for tenor in LG.TENORS:
+            row = LG.build_tenor_row(raw, lm, tenor, as_of=AS_OF, earnings_info=_no_earnings("AAA"), ticker="AAA")
+            assert LG._version_mismatch(row) == []
+            assert row["component_versions"]["prereg"] == LG.PREREG["version"]
+            assert row["route"]["rule_version"] == C.ROUTE_RULE_VERSION
+
+
+class TestSettleAttemptsCountDays:
+    """S6：settle_max_attempts 数的是天，不是运行次数；K 线源没追上到期日不计次。"""
+
+    def test_same_as_of_counts_at_most_once(self, tmp_path):
+        """同一 as_of 跑 5 次 ⇒ 只计 1 次、仍 pending（原实现：第 5 次永久放弃）；倒填更早的 as_of 也不计；
+        换到下一天才计第 2 次。变异：删掉「同一 as_of 至多一次」。"""
+        _pending(tmp_path)                        # 到期 2026-10-16
+        bars = lambda t: [{"date": "2026-10-15", "close": 81.0}, {"date": "2026-10-19", "close": 99.0}]  # noqa: E731
+        stats = [LG._settle("2026-10-20", "monthly", bars_fn=bars, state_dir=tmp_path) for _ in range(5)]
+        r = LG.load_rows("monthly", tmp_path)[0]
+        assert (r["settle_status"], r["settle_attempts"], r["settle_last_attempt_on"]) == ("pending", 1, "2026-10-20")
+        assert [s["attempts_incremented"] for s in stats] == [1, 0, 0, 0, 0]
+        assert [s["attempts_already_counted"] for s in stats] == [0, 1, 1, 1, 1]
+        LG.settle("2026-10-19", "monthly", bars_fn=bars, state_dir=tmp_path)       # 倒填
+        assert LG.load_rows("monthly", tmp_path)[0]["settle_attempts"] == 1
+        LG.settle("2026-10-21", "monthly", bars_fn=bars, state_dir=tmp_path)
+        r = LG.load_rows("monthly", tmp_path)[0]
+        assert (r["settle_attempts"], r["settle_last_attempt_on"]) == (2, "2026-10-21")
+
+    def test_lagging_bar_source_is_bars_unavailable_not_an_attempt(self, tmp_path):
+        """K 线源最后一根不晚于到期日（源没追上）⇒ 不计次，记进 bars_unavailable / bars_lagging（过期 warning 照响）。
+        连跑 settle_max_attempts 天也不放弃。变异：删掉「最后一根须晚于到期日」。"""
+        _pending(tmp_path)                        # 到期 2026-10-16
+        lag = lambda t: [{"date": "2026-10-14", "close": 80.0}, {"date": "2026-10-15", "close": 81.0}]  # noqa: E731
+        for i in range(LG.CONFIG["settle_max_attempts"] + 1):
+            st = LG._settle(f"2026-10-{20 + i}", "monthly", bars_fn=lag, state_dir=tmp_path)
+            assert (st["bars_unavailable"], st["bars_lagging"], st["attempts_incremented"]) == (1, 1, 0)
+        r = LG.load_rows("monthly", tmp_path)[0]
+        assert (r["settle_status"], r["settle_attempts"]) == ("pending", 0)
+        res = LG.run_for_date("2026-10-27", tickers=[], upcoming_fn=_no_earnings, fetch_fn=None,
+                              bars_fn=lag, state_dir=tmp_path)
+        m = res["per_tenor"]["monthly"]
+        assert (m["settle_bars_unavailable"], m["settle_bars_lagging"], m["pending_overdue"]) == (1, 1, 1)
+
+
+class TestUndecodableShardLine:
+    """S7：分片里一个非 UTF-8 字节原先在 json 的 try 之外抛 UnicodeDecodeError，整个 tenor 读不了。"""
+
+    BAD = b'{"ticker": "ZZZ", "note": "\xff\xfe broken"}'
+
+    def test_non_utf8_line_is_a_counted_corrupt_line_preserved_byte_exactly(self, tmp_path, caplog):
+        """读得了、计为坏行、打 WARNING；重写（record 同分片另一只票 + settle）后逐字节原样。
+        变异：文本模式读（UnicodeDecodeError）/ 坏行按 errors="replace" 写回（字节变了）。"""
+        _pending(tmp_path, date="2026-10-01", expiry="2026-10-16")
+        shard = LG._shard("monthly", "2026-10-01", tmp_path)
+        shard.write_bytes(shard.read_bytes() + self.BAD + b"\n" + b"{not json either\n")
+        with caplog.at_level(logging.WARNING):
+            LG.record_rows("2026-10-02", "monthly", [_row("2026-10-02", "BBB", "2026-10-30",
+                                                          settle_status="pending")], state_dir=tmp_path)
+        assert any("其中非 UTF-8 1 行" in r.getMessage() for r in caplog.records), \
+            [r.getMessage() for r in caplog.records]
+        assert LG.settle("2026-10-19", "monthly", state_dir=tmp_path,
+                         bars_fn=lambda t: [{"date": "2026-10-16", "close": 99.0}]) == 1
+        lines = shard.read_bytes().split(b"\n")
+        assert self.BAD in lines and b"{not json either" in lines, "坏行在重写后不再逐字节原样"
+        assert sorted(r["ticker"] for r in LG.load_rows("monthly", tmp_path)) == ["AAA", "BBB"]
+        assert LG.assess("monthly", state_dir=tmp_path)["progress"]["n_corrupt_lines"] == 2
+
+
+class TestFetchBreakerAndBudget:
+    """S8：run_for_date 跑在生产扫描之内、save_report / 部署之前——断网时逐票重试能把扫描顶出步骤时限。"""
+
+    TICKERS = ["A1", "A2", "A3", "A4", "A5", "A6"]
+
+    def _run(self, tmp_path, fetch):
+        return LG.run_for_date(AS_OF, tickers=self.TICKERS, upcoming_fn=_no_earnings, fetch_fn=fetch,
+                               bars_fn=lambda t: None, state_dir=tmp_path)
+
+    def test_consecutive_network_failures_trip_the_breaker(self, tmp_path, caplog):
+        """连续 3 只网络类失败（payload_unavailable / exception:*）⇒ 其余不再取、记 fetch_skipped_breaker、WARNING。
+        变异：删熔断 / 熔断不数 exception:*。"""
+        calls = []
+
+        def fetch(t, *, as_of):
+            calls.append(t)
+            if t == "A2":
+                raise ConnectionError("dns")
+            return None, "payload_unavailable"
+
+        with caplog.at_level(logging.WARNING):
+            res = self._run(tmp_path, fetch)
+        assert calls == ["A1", "A2", "A3"]
+        assert res["fetch_reasons"] == {"payload_unavailable": 2, "exception:ConnectionError": 1,
+                                        LG.FETCH_SKIPPED_BREAKER: 3}
+        assert res["fetch_aborted"] == LG.FETCH_SKIPPED_BREAKER
+        for tenor in LG.TENORS:
+            assert res["per_tenor"][tenor]["unavailable"][LG.FETCH_SKIPPED_BREAKER] == 3
+        assert any("熔断" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_success_or_non_network_failure_resets_the_count(self, tmp_path):
+        """一只取到、或非网络类失败（stale_vintage：payload 取到了，网络是通的）⇒ 连续计数清零，全部照取。
+        变异：成功不清零 / 所有失败都计。"""
+        plan = {"A1": "payload_unavailable", "A2": "payload_unavailable", "A3": None,
+                "A4": "payload_unavailable", "A5": "payload_unavailable", "A6": "stale_vintage"}
+        calls = []
+
+        def fetch(t, *, as_of):
+            calls.append(t)
+            return (_raw(t, as_of), None) if plan[t] is None else (None, plan[t])
+
+        res = self._run(tmp_path, fetch)
+        assert calls == self.TICKERS and res["fetch_aborted"] is None
+        assert res["fetch_reasons"] == {"payload_unavailable": 4, "ok": 1, "stale_vintage": 1}
+        plan.update(A3="stale_vintage", A6="payload_unavailable")
+        calls.clear()
+        assert self._run(tmp_path, fetch)["fetch_aborted"] is None and calls == self.TICKERS
+
+    def test_time_budget_skips_the_rest(self, tmp_path, monkeypatch, caplog):
+        """注入时钟：每次取数耗 250 s，预算 600 s ⇒ 取 3 只（0 / 250 / 500 时开始），其余记 fetch_skipped_time_budget。
+        变异：删时间预算。"""
+        clock = [1000.0]
+        monkeypatch.setattr(LG, "_monotonic", lambda: clock[0])
+        calls = []
+
+        def fetch(t, *, as_of):
+            calls.append(t)
+            clock[0] += 250.0
+            return None, "stale_vintage"
+
+        with caplog.at_level(logging.WARNING):
+            res = self._run(tmp_path, fetch)
+        assert calls == ["A1", "A2", "A3"]
+        assert res["fetch_reasons"] == {"stale_vintage": 3, LG.FETCH_SKIPPED_TIME_BUDGET: 3}
+        assert res["fetch_aborted"] == LG.FETCH_SKIPPED_TIME_BUDGET
+        assert any("预算" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_skipped_ticker_does_not_downgrade_a_row_recorded_earlier_that_day(self, tmp_path):
+        """熔断跳过的票记 unavailable，但同日已 recorded 的旧行照「不降级」保留。变异：跳过的票绕过 record 不变式。"""
+        LG.run_for_date(AS_OF, tickers=["A4"], upcoming_fn=_no_earnings, bars_fn=lambda t: None,
+                        fetch_fn=lambda t, as_of: (_raw(t, as_of), None), state_dir=tmp_path)
+        res = self._run(tmp_path, lambda t, as_of: (None, "payload_unavailable"))
+        assert res["per_tenor"]["monthly"]["kept_previous_recorded"] == 1
+        assert {r["ticker"]: r["status"] for r in LG.rows_for_date(AS_OF, "monthly", tmp_path)}["A4"] == "recorded"
+
+
+def _strong_flag_effect_rows(tenor="monthly"):
+    """每个信息块里被 flag 的那只都最差（-1.0 倍权利金）、其余全收（1.0）⇒ put 侧检验必拒绝。"""
+    return _ready_ledger_rows(tenor=tenor, outcome=lambda i, flag: -1.0 if flag else 1.0)
+
+
+#: 中等效应夹具的各日 flag 位置：结果按日固定为 (1.0, 0.8, 0.5, 0.0, -0.5)，flag 取第 k 个。
+_MID_P_PICKS = (4, 4, 4, 3, 3, 3, 3, 3, 2, 2, 2, 2)
+
+
+def _mid_p_rows():
+    """首日一个**非信息块**（排序在最前：它若也消耗随机数，后面每个块的抽样全都移位），其后 12 个信息块。
+    预注册 seed / n_perm 下 p = 118/5001 ≈ 0.0236：落在 α_each 0.0125 与 α_family 0.05 之间。"""
+    vals = (1.0, 0.8, 0.5, 0.0, -0.5)
+    rows = [_row("2026-01-01", f"N{j}", "2026-03-01", close=_put_close(1.0)) for j in range(5)]
+    for d, pick in enumerate(_MID_P_PICKS, start=1):
+        for j, v in enumerate(vals):
+            rows.append(_row(f"2026-01-{1 + d:02d}", f"T{j}", f"2026-03-{1 + d:02d}",
+                             flag_put=(j == pick), flag_call=(j == pick), close=_put_close(v)))
+    return rows
+
+
+class TestPreregTestPinned:
+    """S9：检验本身的几处关键实现，此前任何一个变异都能全绿通过。"""
+
+    def test_strong_effect_freezes_reject_h0_with_the_plus_one_p(self, tmp_path):
+        """冻结路径真能产出 reject_h0（此前的夹具全是纯日期效应，判定恒为 fail_to_reject_h0），报告逐字写出；
+        p 恰为 1/(1+n_perm)（+1 修正：没有一次置换 ≤ 观测值）。变异：`(count)/n_perm` / 判定写反 / 报告不转述。"""
+        _persist(_strong_flag_effect_rows(), tmp_path)
+        md = R.write_local_report(AS_OF, state_dir=tmp_path, freeze=True).read_text(encoding="utf-8")
+        d = json.loads(LG.prereg_result_path("monthly", tmp_path).read_text(encoding="utf-8"))["per_side"]
+        assert d["put"]["p"] == 1 / (1 + LG.PREREG["n_perm"])
+        assert (d["put"]["decision"], d["call"]["decision"]) == ("reject_h0", "fail_to_reject_h0")
+        assert re.search(r"：put: reject_h0 · call: fail_to_reject_h0", md), md
+
+    def test_golden_p_under_the_preregistered_seed(self):
+        """固定数据集 + 预注册 seed / n_perm ⇒ p 逐位钉死。变异：不用传入的 seed / 改抽样方式（如逐行 permutation）/
+        非信息块也消耗随机数 / 块不按日期排序 / 去掉 +1 修正。"""
+        t = LG.assess("monthly", rows=_mid_p_rows())["test"]["put"]
+        assert (t["n_blocks"], t["n_informative_blocks"]) == (13, 12)
+        assert t["p"] == 118 / 5001, repr(t["p"])
+
+    def test_decision_uses_alpha_each_not_alpha_family(self):
+        """α_each 0.0125 < p ≈ 0.024 ≤ α_family 0.05 ⇒ fail_to_reject_h0。变异：`p <= PREREG["alpha_family"]`。"""
+        t = LG.assess("monthly", rows=_mid_p_rows())["test"]["put"]
+        assert LG.PREREG["alpha_each"] < t["p"] <= LG.PREREG["alpha_family"]
+        assert t["decision"] == "fail_to_reject_h0"
+
+    def test_frozen_result_applies_on_the_ready_date_itself(self, tmp_path):
+        """as_of == ready_date ⇒ 冻结结果适用（给 test，报告写判定）；前一天不适用。
+        变异：`as_of > ready_date`（原有断言「预注册检验已于 … 冻结」两个分支都打印，测不出来）。"""
+        _persist(_ready_ledger_rows(), tmp_path)
+        LG.assess("monthly", state_dir=tmp_path, freeze=True)
+        on = LG.assess("monthly", state_dir=tmp_path, as_of="2026-02-13")
+        assert on["frozen"]["applies"] is True and "test" in on
+        line = R._assess_line(on)
+        assert "预注册检验（单侧" in line and "早于该日" not in line, line
+        before = LG.assess("monthly", state_dir=tmp_path, as_of="2026-02-12")
+        assert before["frozen"]["applies"] is False and "test" not in before
+
+    def test_first_writer_wins_an_existing_frozen_file_is_never_replaced(self, tmp_path):
+        """另一个写者在本进程判「尚未冻结」之后、link 之前抢先冻结：本次不得覆盖，返回的是对方那份，不留 tmp。
+        变异：`os.link` 换成 `os.replace`（原子，但后到者赢）。"""
+        _persist(_ready_ledger_rows(), tmp_path)
+        LG.assess("monthly", state_dir=tmp_path, freeze=True)
+        p = LG.prereg_result_path("monthly", tmp_path)
+        before = p.read_bytes()
+        late = dict(json.loads(before), frozen_at="LATE-WRITER")
+        got = LG._freeze_prereg_result("monthly", late, tmp_path)
+        assert p.read_bytes() == before, "后到的写者覆盖了已冻结的检验结果"
+        assert got == json.loads(before) and got["frozen_at"] != "LATE-WRITER"
+        assert [x.name for x in p.parent.iterdir() if ".tmp." in x.name] == []

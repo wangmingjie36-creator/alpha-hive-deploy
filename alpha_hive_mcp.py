@@ -490,9 +490,12 @@ async def alphahive_get_sell_strike_candidates(params: TickerDateInput) -> str:
     Behaviour:
       - date_str given  → read the forward ledger rows recorded by the daily scan
                           on that date (both tenors). No network, never writes.
-                          Until a tenor's pre-registered test has been frozen,
-                          settlement fields (expiry_close, settled_on, ...) are
-                          omitted from its rows (settlement_blinded: true). This
+                          Until EVERY tenor's pre-registered test has been
+                          frozen, settlement fields (expiry_close, settled_on,
+                          ...) are omitted from rows of both tenors
+                          (settlement_blinded: true) — most weekly expiries
+                          are also monthly expiries, so unblinding one tenor
+                          would expose the other's outcomes. This
                           is NOT blinding: route flags plus the underlying price
                           on the expiry date (a later ledger row, or public
                           market data) still reconstruct each outcome. Doing

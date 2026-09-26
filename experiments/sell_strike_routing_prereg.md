@@ -1,7 +1,7 @@
 # 卖权行权价 · GEX 环境路由检验 · 预注册（v0.45.333）
 
 **状态**：已登记（2026-09-23）。**登记时间 = 本文件首次提交进 git 的时间**。此后改动任何规则都属「事后」，见 §10。
-登记前经过三轮评审与变异检验（2026-09-23、2026-09-24 最终评审、2026-09-26 delta 评审），据此改过的规则逐条列在文末「登记前定稿记录」（改时账本零行，没有可偷看的效应量）。
+登记前经过四轮评审与变异检验（2026-09-23、2026-09-24 最终评审、2026-09-26 delta 评审、2026-09-26 二次检查），据此改过的规则逐条列在文末「登记前定稿记录」（改时账本零行，没有可偷看的效应量）。
 **机器可读常量**：文末 §13 的 `prereg-constants` 块；代码侧唯一真相是
 `sell_strike_ledger.PREREG` 与 `sell_strike_candidates` 的路由常量，由
 `tests/test_sell_strike_ledger.py::TestPreregPinned` 解析本文件逐项核对（文档不许漏键、不许多键、值必须相等）。
@@ -62,6 +62,8 @@ put 侧符号可能整个反了。这正是本检验可能得到零结果的一�
   就一进一出检验是不可接受的。按行判：同单位次日的正常行照样可以当代表行（读取时刻 / 文件陈旧是数据源的属性，
   与结局无关）。这类行照记，`run_for_date` 的
   `per_tenor.*.price_source` 与 `assess()` 的 `progress.price_source` / `n_rows_price_source_excluded` 计数。
+- 且行的**版本戳**与现行代码全符（§10 的截断：协议变更前记的行默认不进检验；机制见 §10 末段）。同样按行判，
+  `assess()` 的 `progress.n_rows_version_excluded` / `version_mismatch` 计数。
 - **财报：按单位排除，不按行**。同一 **(ticker, expiry)** 的**所有** recorded 行（不论是否已结算、route 是否可用）
   只要**任一行**的 `earnings_status` 是 `before_expiry`（财报落在记录日与到期日之间）或 `unknown`（查不到 / 判不了），
   **整个单位排除**；两臂同等。`after_expiry` 不在期权存续期内，不污染。
@@ -85,7 +87,10 @@ put 侧符号可能整个反了。这正是本检验可能得到零结果的一�
   结果档缺失率在两组间系统性不同。
 - 某侧在 0.20 档不可报价（容差内无合约 / 缺腿 / bid=0 / 点差 > 25%）的单位，该侧结果为缺失，**不进该侧检验**。
   规则两臂同等；但缺失**率**仍可能随 IV / 行权价间距与 flag 相关——`assess()` 的 `progress.per_side.*.skipped`
-  按侧记缺失原因计数，就绪时一并报告（§11）。
+  按侧记缺失原因计数（`no_outcome:<原因>`，原因取结构报价 reason 的前缀：`missing_leg:no_delta_within_tol` =
+  容差内无合约、`missing_leg:<梯子原因>` = 其余缺腿、`quote_not_ok` = bid=0 / ask<bid、`short_spread_too_wide` =
+  点差 > 25% …），`progress.per_side.*.skipped_by_flag` 再按 flag / normal 分开（差异缺失看这里）；
+  就绪时一并报告（就绪度一行与冻结的检验结果都带，§11）。
 
 ## 4. 统计量与置换
 
@@ -150,8 +155,11 @@ MCP 行视图在冻结前省掉结算字段（`sell_strike_report.BLINDED_ROW_FI
 
 **所以规则是行为规则**：检验冻结之前，**从任何出口**（MCP 按日期读账本、本地报告、账本 jsonl 原文件、公开行情）
 重建单位结果、按 flag 比较 = **偷看** = 协议变更（§10），须记修订号并声明截断。
-进度（行数、独立单位数、各组与信息块计数、结算 / 放弃 / 待结算数、各侧缺失原因、报价来源分布）任何时候可看：
-它们只是样本量与标签计数，不含结果的数值。检验冻结之后三个出口全部解盲（MCP 返回结算字段）。
+进度（行数、独立单位数、各组与信息块计数、结算 / 放弃 / 待结算数、各侧缺失原因（含按 flag / normal 分）、
+报价来源分布、版本戳不符行数）任何时候可看：它们只是样本量、标签与「报价可否」的计数，不含结果的数值。
+检验冻结之后三个出口全部解盲；但 MCP 返回结算字段要等**全部 tenor** 都冻结（2026-09-26 二次检查）：
+同一个 (ticker, 到期日) 往往同时是月度与周度的单位（二次检查统计：周度到期日约 94% 也是月度到期日），结算字段按到期日泄露、
+不按 tenor——月度先冻结就返回月度行的到期收盘，等于替仍在盲期的周度单位递刀。
 
 ## 8. 描述性分析（不触发任何动作）
 
@@ -195,13 +203,23 @@ zero gamma 由**重定价扫描**得到：每张合约固定自身 IV，在现�
 
 修 bug（实现与本文件描述不符）不是协议变更，但必须在修订节里记录，并说明受影响的已记录行。
 
+**截断的机制**（2026-09-26 二次检查落实；此前代码不看任何版本戳，`route.rule_version = 2` 的行会被静默池化）：
+每行带 `schema_version`、`component_versions`（`levels` / `candidates` / `route_rule` / `prereg` = `PREREG.version`）
+与 `route.rule_version`。任一项与现行代码不符（含缺戳）⇒ 该行**不进检验**（`sell_strike_ledger._version_mismatch`，
+按行判，同 §3 的报价来源规则），计入 `progress.n_rows_version_excluded` / `version_mismatch`，就绪度一行里写明。
+所以**协议修订（修订 N）必须同时把 `PREREG.version` 加一**（改路由另须加 `ROUTE_RULE_VERSION`）——
+改 α、财报排除、就绪闸这类不动任何组件版本的修订，没有这一步就无从截断。声明「不截断」的修订须在
+`_version_mismatch` 里**显式**放行对应的旧戳（可见的代码改动），不许靠「忘了查」放行。
+`schema_version` 也算在内（保守）：账本布局改了，旧行字段的含义未必还是同一个。
+
 ## 11. 已知局限
 
 - OI 是 t−1 的；朴素 OI 符号（§1）；只判到期收盘是否 ITM、不判存续期内触及；
 - 报价取 t 日收盘后快照，实际最早 t+1 成交 ⇒ 绝对收益乐观（两臂同等，不影响比较，但别拿绝对值当可实现收益）；
 - N(d2) 是风险中性概率；
 - 个股之间同日结果相关，分块置换只处理了「日」这一层；同一到期周的不同记录日之间仍有重叠（去重只到 (ticker, expiry)）；
-- 0.20 档结果缺失的**规则**两臂同等，缺失**率**未必同等（稀疏行权价 / 低 IV 与政体相关）；就绪时按侧报告缺失原因计数；
+- 0.20 档结果缺失的**规则**两臂同等，缺失**率**未必同等（稀疏行权价 / 低 IV 与政体相关）；就绪时按侧、按 flag / normal、
+  按原因报告缺失计数（§3），两组缺得明显不一样时，检验结果要打折看；
 - 财报按单位（及按票补的那一刀）排除会丢掉跨财报单位里财报之后的干净行（§3），样本攒得更慢；
 - 非收盘后报价（`cboe_stale_intraday` / `cboe_intraday` / `session_live`）行不进检验（§3），CBOE 文件陈旧频繁、
   或有人盘中手动跑日报的日子样本变少；这是数据源 / 读取时刻的属性，两臂同等；
@@ -214,6 +232,10 @@ zero gamma 由**重定价扫描**得到：每张合约固定自身 IV，在现�
 失败非致命；随后 `sell_strike_report.write_local_report(date, freeze=True)` 写本地报告，首次就绪时在这里跑检验并冻结
 （全仓唯一的冻结写者）。手动：`/usr/local/bin/python3 sell_strike_ledger.py --assess`（只读就绪度，**不冻结**，
 退出码 0 / 1 / 3；`--date` 晚于 PDT 今天 ⇒ 退出码 1）。
+`run_for_date` 跑在日报 save_report / 部署之前：取数有熔断（连续 `fetch_breaker_consecutive_failures` 只票网络类失败）
+与总时间预算（`fetch_time_budget_sec`），跳过的票记 `fetch_skipped_breaker` / `fetch_skipped_time_budget`（WARNING，
+同日已记录的行不降级）。记录 / 结算的分片读-改-写持 tenor 目录锁（`fcntl.flock`），手动补跑与定时扫描撞车不丢行。
+（这些是 `sell_strike_ledger.CONFIG` 里的运行参数，不是预注册常量。）
 
 ## 13. 机器可读常量
 
@@ -309,3 +331,40 @@ ledger.PREREG_RESULT_NAME = "prereg_result.json"
 （半日市 13:00）——半日市 13:00–16:00 ET 的读取按「该场已收盘」处理（当天到期合约排除、现价取该场 close、标签
 `cboe_close`），此前按 16:00 收盘会判成盘中。这会改变半日市当天那一时段读到的行进扫描的合约集合与标签；
 账本记录钩子在 17:00 ET 跑，不受影响；改时账本零行，没有受影响的已记录行。
+
+## 登记前定稿记录（续，2026-09-26 二次检查）
+
+来源：**2026-09-26 二次检查**（对 delta 评审之后代码的第四轮复核；每条先复现再修，探针与变异证据在对应测试的
+docstring 里：`tests/test_sell_strike_ledger.py` 的 `TestVersionTruncation`、`TestSettleAttemptsCountDays`、
+`TestCrossTenorUnblinding` 等 S1–S9 组）。由主会话拍板并入协议 v1（不另起修订号）。
+**改动时账本仍是零行（代码尚未上线），没有受影响的已记录行，没有看过效应量。**
+下表 #17、#18 是 calc 层（`sell_strike_candidates`）同批并行的修复，按 §10 末段「修 bug 也要记」登记在这里；
+两条都不改路由规则、不改统计量。
+
+| # | 改了什么 | 为什么 | 落在哪 |
+|---|---|---|---|
+| 14 | 截断落地：行上加 `component_versions.prereg`（= `PREREG.version`）；`schema_version` / `component_versions` 任一项 / `route.rule_version` 与现行代码不符（含缺戳）⇒ 该行不进检验（按行判），计 `n_rows_version_excluded` / `version_mismatch`；协议修订须同时把 `PREREG.version` 加一 | §10 写了「变更之前记录的行默认不进」，代码却不看任何版本戳：`route.rule_version = 2` 的行会被静默池化；且行上没有协议版本，改 α / 财报排除这类不动组件版本的修订根本无从截断 | §3、§10；`sell_strike_ledger._component_versions`、`_version_mismatch`、`_eligible_except_earnings`、`assess` |
+| 15 | 结算放弃闸数「天」不数「次」：同一 as_of（或更早的 as_of）至多计一次失败（`settle_last_attempt_on`，随同日重记搬运）；K 线源最后一根不晚于到期日（源还没追上）不计次，计进 `bars_unavailable` 与新的 `bars_lagging` | 原实现数运行次数：同一天手动补跑 5 次、或一个序列止于到期日之前的滞后 K 线源，就把行永久 `give_up`（探针：同一 as_of 连跑 5 次 ⇒ give_up）。放弃是不可逆的样本损失，且哪些行被放弃取决于补跑习惯与 K 线源节奏 | §3（候选行须已结算）；`sell_strike_ledger._settle`、`_apply_settle_action` |
+| 16 | MCP 按日期读账本时，结算字段只在**全部** tenor 的检验都冻结且适用后才返回（`_all_unblinded`）；任一 tenor 未冻结 / 判定失败 ⇒ 两档行视图都剔除 | 原实现按单个 tenor 判；周度到期日约 94% 同时是月度到期日（二次检查统计），月度先冻结就返回月度行的 `expiry_close`，据此可精确重建仍在盲期的周度单位结果。只收紧、不放松（§10「改盲化」指的是放松方向） | §7；`sell_strike_report._all_unblinded`、`rows_for_ticker`、`BLINDED_ROW_FIELDS` |
+| 17 | 点差闸改为 `sp − MAX_SPREAD_PCT > _TOL_EPS`：恰好 25% 的点差保留、可报价 | §3 写的是「点差 > 25%」不可报价；bid/ask 0.35/0.45 的点差浮点值是 0.25000000000000006，原实现 `sp > 0.25` 把恰好 25% 判成过宽（结果档缺失） | §3；`sell_strike_candidates.structure_quote` |
+| 18 | `build_ladder` 的 \|Δ\| 等距平手真的取 \|Δ\| 更小（更价外）的那张：距离先取 9 位小数再比 | docstring 与本意都是「平手取更价外」；原实现直接比较浮点距离，精确平手里约 80% 被浮点噪声判给 \|Δ\| 更大的那张 | §3（梯子选档）；`sell_strike_candidates.build_ladder` |
+
+同批**只增加可观测性 / 可靠性、不改任何判定**的（实现与本文件描述不符的按修 bug 记，改时零行、无受影响行）：
+
+- **缺失原因按侧 × flag / normal 计数**：`progress.per_side.*.skipped` 增加 `no_outcome:<原因>`（原因见 §3），
+  `skipped_by_flag` 按 flag / normal 分；冻结的检验结果（`per_side.*.skipped_by_flag`）也带；就绪时 `summary_line`
+  （本地报告 / CLI / MCP 都转述它）写出「0.20 档结果缺失（不进检验）：put flag …/normal …」。原实现只有
+  `no_flag` / `no_outcome` 两个总数、不按 flag 分，§3 / §11 承诺的差异缺失检查做不了。
+- **并发写者**：`record` / `settle` 的分片读-改-写持 tenor 目录锁（`fcntl.flock`，锁目录不另建锁文件：私有备份只拷
+  文本后缀）；settle 取 K 线在锁外，锁内重读分片、按行键套用，行已被别的写者改过则以对方为准（`skipped_concurrent`）。
+  原实现无锁整片重写：探针实测 settle 取 K 线期间另一个写者记下的行被抹掉。
+- **非 UTF-8 行**：分片按字节读、逐行解码；解不了码的行计为坏行（WARNING 写明其中非 UTF-8 几行），以
+  `surrogateescape` 逐字节原样写回。原实现一个坏字节在 json 的 try 之外抛 UnicodeDecodeError，整个 tenor 读不了。
+- **取数熔断 + 时间预算**（§12）：连续 3 只网络类失败（`payload_unavailable` / `exception:*`）或取数累计超过 600 s
+  ⇒ 其余票记 `fetch_skipped_breaker` / `fetch_skipped_time_budget`（WARNING、计进 `fetch_reasons`、同日已记录的行不降级）。
+  只在断网 / 超时的日子少记行，与结局无关、两臂同等。
+- **就绪度判定 / 冻结失败打 WARNING**（`sell_strike_report._assess_safe`；冻结路径另有专门一句）。原实现只写进报告
+  一行字，冻结文件损坏或冻结时磁盘满（ENOSPC）会让日报钩子每天静默失败。
+- 测试补强（不改代码行为）：冻结路径首次真能产出 `reject_h0` 且报告逐字核对判定（原断言 `"reject_h0" in md` 也匹配
+  `fail_to_reject_h0`）；+1 修正与预注册 seed 下的 p 逐位钉死（非信息块排在最前：它若消耗随机数，后面的抽样全移位）；
+  一个 α_each < p ≤ α_family 的夹具钉住判定用 α_each；冻结日当天适用（`>=` 边界）；先到者赢不覆盖已存在的冻结文件。
