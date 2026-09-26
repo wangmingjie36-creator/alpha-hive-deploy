@@ -34,6 +34,7 @@ import datetime as dt
 import fnmatch
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -438,8 +439,17 @@ def unretire(old: Path) -> dict:
     return {"restored": len(back)}
 
 
+#: macOS「桌面与文稿同步 iCloud」造的重名副本：`xxx 2.py` / `settings.local 2.json` / `foo.jsonl.5 2`。
+_ICLOUD_DUP = re.compile(r" \d+(\.[A-Za-z0-9]+)?$")
+
+
 def _git_dirty_paths(old: Path, frozen: list[str]) -> set[str] | None:
-    """冻结项里相对 HEAD 脏的路径（修改 / 新增未跟踪 / 删除）；git 失败返回 None（调用方判红）。"""
+    """冻结项里相对 HEAD 脏的路径（修改 / 新增未跟踪 / 删除）；git 失败返回 None（调用方判红）。
+
+    ⚠️ `git status` 看不见被 .gitignore 忽略的文件（冻结的 `logs/` 里 `*.log` / `*.jsonl.*` 全是）——
+    它们由 `check_old` 里的 `_git_ignored` 单独判（v0.45.346）。别在这里加 `--ignored` 做第二道：
+    变异实测两道并存时去掉它测试照绿，冗余防线只会让人误以为它在起作用。
+    """
     if not frozen:
         return set()
     r = subprocess.run(["git", "-C", str(old), "status", "--porcelain", "-z", "--untracked-files=all",
@@ -449,16 +459,30 @@ def _git_dirty_paths(old: Path, frozen: list[str]) -> set[str] | None:
     out = set()
     for ent in r.stdout.decode().split("\0"):
         if len(ent) > 3:
-            out.add(ent[3:])
+            out.add(ent[3:].rstrip("/"))
     return out
+
+
+def _git_ignored(old: Path, paths: list[str]) -> set[str] | None:
+    """`paths` 里命中 .gitignore 的那些（`git check-ignore` 退出码：0 有命中 / 1 无命中 / 其它=出错）。"""
+    if not paths:
+        return set()
+    r = subprocess.run(["git", "-C", str(old), "check-ignore", "-z", "--no-index", "--stdin"],
+                       input="\0".join(paths).encode() + b"\0", capture_output=True)
+    if r.returncode not in (0, 1):
+        return None
+    return {x for x in r.stdout.decode().split("\0") if x}
 
 
 def check_old(old: Path) -> dict:
     """旧位置零写入：MOVE 类名字不许重新出现；冻结数据不许被**旁路写入**。
 
-    相对 retire 基线变了的文件，再问一句「git 能不能解释它」：与 HEAD 一致 ⇒ 是生产同步
-    `pull --ff-only` 带进来的提交（`synced_by_git`，不红但告警：那份改动没进数据根）；
-    工作区相对 HEAD 脏 ⇒ 真有写入方没跟 `ALPHA_HIVE_HOME` 走（红）。
+    相对 retire 基线变了的文件（指纹覆盖冻结项下全部文件，含被忽略的；新建、删除都算变），
+    再问一句「git 能不能解释它」：与 HEAD 一致 ⇒ 生产同步 `pull --ff-only` 带进来的提交
+    （`synced_by_git`，不红但告警：那份改动没进数据根）；git 解释不了 ⇒ 真有写入方没跟
+    `ALPHA_HIVE_HOME` 走（`written_outside_git`，红）。iCloud 重名副本单列 `icloud_duplicates`
+    （照报不红：它是同步服务造的，不是生产写入方；不单列会让验收被 iCloud 噪音恒红）。
+    retire 时已脏且之后没变的（如常年 `M` 的 `NVDA_raw.json`）不在「变了」里，自然不算。
     """
     rec = json.loads((old / RETIRE_DIRNAME / "RETIRE_RECORD.json").read_text(encoding="utf-8"))
     pl = plan(old)
@@ -466,19 +490,26 @@ def check_old(old: Path) -> dict:
                   and r["name"] not in rec["frozen_tracked"]]
     now_fp = fingerprint_tracked_data(old, pl, set(rec["frozen_tracked"]))
     base = rec["tracked_fingerprint"]
-    moved = sorted(k for k in set(base) | set(now_fp) if base.get(k) != now_fp.get(k))
+    changed = sorted(k for k in set(base) | set(now_fp) if base.get(k) != now_fp.get(k))
+    icloud = [p for p in changed if _ICLOUD_DUP.search(Path(p).name)]
+    changed = [p for p in changed if p not in icloud]
     dirty = _git_dirty_paths(old, rec["frozen_tracked"])
     if dirty is None:
-        written, synced, git_error = moved, [], True
+        written, synced, git_error = changed, [], True
     else:
-        dirty0 = set(rec.get("dirty_at_retire", []))
-        # 旁路写入 = 相对基线变了且工作区脏；或 retire 之后才变脏（含新建未跟踪文件）
-        written = [p for p in moved if p in dirty] + [p for p in dirty if p not in moved and p not in dirty0]
-        synced = [p for p in moved if p not in dirty]
-        git_error = False
+        cand = [p for p in changed if p not in dirty]
+        ignored = _git_ignored(old, cand)
+        if ignored is None:
+            written, synced, git_error = changed, [], True
+        else:
+            # 被忽略的路径 git 永不同步：它「干净」只是因为 status 看不见（如被删掉的忽略文件）
+            written = [p for p in changed if p in dirty or p in ignored]
+            synced = [p for p in cand if p not in ignored]
+            git_error = False
     return {"ok": not (reappeared or written or pl["unknown"] or git_error),
-            "reappeared": reappeared, "written_outside_git": sorted(set(written)),
-            "synced_by_git": synced, "git_error": git_error, "unknown": pl["unknown"]}
+            "reappeared": reappeared, "written_outside_git": written,
+            "synced_by_git": synced, "icloud_duplicates": icloud,
+            "git_error": git_error, "unknown": pl["unknown"]}
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────

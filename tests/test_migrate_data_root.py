@@ -324,3 +324,68 @@ def test_retire_failure_midway_still_writes_record_so_unretire_works(roots, monk
     assert len(rec["moved"]) == 2
     m.unretire(old)
     assert (old / "pheromone.db").exists() and (old / "chroma_db").exists()
+
+
+# ── v0.45.346：check-old 看得见被 .gitignore 忽略的文件 ─────────────────────
+
+@pytest.fixture
+def roots_with_logs(tmp_path):
+    """带被跟踪 + 被忽略混居的 logs/（生产里就是这样：5 个跟踪的健康快照 + 一堆被忽略的 *.log）。"""
+    old, new = tmp_path / "old", tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    (old / ".gitignore").write_text("logs/*.log\nlogs/*.jsonl.*\n* [0-9]\n")
+    (old / "logs").mkdir()
+    (old / "logs" / "health_2026-04-29.json").write_text("{}")          # 被跟踪
+    _git(old, "init", "-q")
+    _git(old, "add", "-A")
+    _git(old, "commit", "-q", "-m", "init")
+    (old / "logs" / "alpha_hive.log").write_text("old line\n")           # 被忽略、retire 前就在
+    (old / "logs" / "alpha_hive_structured.jsonl.5").write_text("{}\n")  # 被忽略
+    pl = m.plan(old)
+    m.copy(old, new, pl)
+    m.retire(old, new, pl)
+    assert "logs" in json.loads((old / m.RETIRE_DIRNAME / "RETIRE_RECORD.json").read_text())["frozen_tracked"]
+    return old, new
+
+
+def test_preexisting_ignored_files_are_not_writes(roots_with_logs):
+    old, _ = roots_with_logs
+    r = m.check_old(old)
+    assert r["ok"], r
+
+
+def test_append_to_ignored_log_in_frozen_dir_is_a_write(roots_with_logs):
+    """旁路写入方往旧 logs/ 追加日志：v0.45.346 前被归进 synced_by_git、不红。"""
+    old, _ = roots_with_logs
+    with open(old / "logs" / "alpha_hive.log", "a") as f:
+        f.write("new line from a writer that ignored ALPHA_HIVE_HOME\n")
+    r = m.check_old(old)
+    assert not r["ok"]
+    assert r["written_outside_git"] == ["logs/alpha_hive.log"]
+    assert r["synced_by_git"] == []
+
+
+def test_new_ignored_file_in_frozen_dir_is_a_write(roots_with_logs):
+    old, _ = roots_with_logs
+    (old / "logs" / "scan_2026-09-28.log").write_text("x")
+    r = m.check_old(old)
+    assert r["written_outside_git"] == ["logs/scan_2026-09-28.log"]
+
+
+def test_deleted_ignored_file_is_a_write_not_git_sync(roots_with_logs):
+    old, _ = roots_with_logs
+    (old / "logs" / "alpha_hive.log").unlink()
+    r = m.check_old(old)
+    assert r["written_outside_git"] == ["logs/alpha_hive.log"]
+    assert r["synced_by_git"] == []
+
+
+def test_icloud_duplicate_is_reported_not_red(roots_with_logs):
+    """09-26 生产实测：retire 后 iCloud 冒出 `alpha_hive_structured.jsonl.5 2`。"""
+    old, _ = roots_with_logs
+    (old / "logs" / "alpha_hive_structured.jsonl.5 2").write_text("{}\n")
+    r = m.check_old(old)
+    assert r["ok"], r
+    assert r["icloud_duplicates"] == ["logs/alpha_hive_structured.jsonl.5 2"]
+    assert r["written_outside_git"] == [] and r["synced_by_git"] == []

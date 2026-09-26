@@ -5,7 +5,28 @@
 
 ---
 
-## [0.45.346] — 2026-09-26 — 占位（进行中：check-old 看不见 .gitignore 忽略的文件——冻结的 logs/ 被旁路写入不会红）
+## [0.45.346] — 2026-09-26 — Fixed：`migrate_data_root check-old` 看不见被 `.gitignore` 忽略的文件——旁路写旧 `logs/` 会被归进「git 同步」而不红；iCloud 重名副本单列
+
+用户 09-26 下午要求「核对阶段 5 验收」时（周日周任务、周一扫描都还没到）先核了搬迁后稳定性，`check-old` 报出
+`synced_by_git: ["logs/alpha_hive_structured.jsonl.5 2"]`——一个被忽略的 iCloud 重名副本（mtime 09-11、mode 0600、retire 基线里没有）
+被归成「git 同步」。git 从不同步被忽略的文件，这个归类本身就错；顺着它看到的盲区才是要修的：
+
+### Fixed
+- `data_backup/migrate_data_root.check_old`：判「git 能不能解释这个变化」只看 `git status`，而 `git status` 看不见被忽略的文件。
+  冻结的 `logs/` 里 `*.log` / `*.jsonl.*` 全被忽略 ⇒ 某个没跟上 `ALPHA_HIVE_HOME` 的写入方往旧 `logs/` 追加 / 新建 / 删除日志，
+  **全被归进 `synced_by_git`、不红**——正是阶段 5 验收「旧位置零写入」要抓的形状。
+  现在对 status 解释不了的候选再过一道 `git check-ignore`：命中忽略规则的一律算 `written_outside_git`（git 永不同步它们）。
+- 同时删掉原先「retire 后才变脏的也算写入」那条分支：指纹覆盖冻结项下全部文件（含被忽略的），新建 / 删除本来就在「相对基线变了」里，
+  那条分支是冗余的，且一旦把忽略文件算脏，就会把 retire 前就在的几十个日志误报成写入。
+- 新增 `icloud_duplicates`：iCloud「桌面与文稿」同步造的 `xxx 2.ext` 副本单列、照报、**不红**——不单列会让验收被同步服务的噪音恒红。
+- 曾试过在 `git status` 上加 `--ignored` 做第二道：变异实测两道并存时去掉它测试照绿（`check-ignore` 已全覆盖）⇒ 删掉，只留一种机制，docstring 写明勿加回。
+
+### 验收
+- `tests/test_migrate_data_root.py` 25 → 30 项（带「被跟踪 + 被忽略混居」的 `logs/` 夹具，照生产形状）：retire 前就在的忽略文件不误报、
+  追加 / 新建 / 删除忽略文件均红、iCloud 副本单列不红。变异：去掉忽略判定 ⇒ 3 红；不单列 iCloud ⇒ 1 红。
+- 新代码对生产实跑 `check-old`：`ok`，`icloud_duplicates` = 那一个副本，`written_outside_git` / `synced_by_git` 空。
+- 同时核对：编排器自 09-26 07:05:46 打补丁后未被改动（与 `.bak-pre-phase5` 的差异逐行等于阶段 5 diff）；launchd env、MCP 进程 env 均为新根；新根 `pheromone.db` `quick_check` ok。
+- 全套 5969 passed / 85 deselected / 2 xfailed（`--deselect TestCoverageHorizon`，按设计红）；`ruff check .` 全过。
 
 ## [0.45.345] — 2026-09-26 — 运维：**数据根迁移阶段 5 已执行**——生产数据搬到 `~/alpha-hive-data`，编排器 / plist / MCP / 两个定时任务切到新根；Fixed：备份推送超时 60s 太紧（09-24 新范围首推超时）
 
