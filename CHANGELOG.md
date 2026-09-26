@@ -488,8 +488,11 @@ replay 在 96 条前瞻 + 693 条样本内记录上与 origin/main 版逐条一�
 - 残留「09-24」三处改 09-28；`test_gex_modifier_disconnected` 行为测试加断言最终 `direction`，
   新增 `gex_adjustment` 键读者白名单（外文件 `a = sr[...]["gex_adjustment"]; s = s + a` 旧 AST 守卫抓不到）。
 - 变异（各自 APFS 克隆）15 个全红；「改方向」「外文件改名重连」两个对照在旧测试文件上**全绿**＝原缺口真实。
-- **仓库外未改（需用户决定）**：编排器 Step 11 只读 JSON 的旧键，🚨 行只进 $LOGFILE、STEPS_RESULT 仍记 accruing；
-  weekly-optimizer SKILL.md 仍写「三段」。
+- **仓库外（2026-09-26 用户批准后改）**：编排器 `~/.claude/scripts/alpha-hive-orchestrator.sh` Step 11 读 JSON 的
+  `cohort_boundary_evidence`，每天写进 `status.json.steps_result.step11_ic_rerun_readiness.cohort_boundary`（取不到记 null），
+  `alarm` 为真打 🚨 WARN 并指明「追加更正条目」；不改 OVERALL_STATUS；坏 JSON 退 null 防 STEPS_RESULT 被清空。
+  6 种输入（正常 / 告警 × 两种 RC / 旧代码缺键 / 坏 JSON / 文件缺失）抽段实测均得合法 JSON。
+  原版备份 `alpha-hive-orchestrator.sh.bak-20260926_pre-v0.45.334-step11`。weekly-optimizer SKILL.md 仍写「三段」（未改）。
 
 ### 发现未处理
 - `confidence_modifier` 缩放 `band_width` 与 `confidence_band` / `discrimination` 不一致（09-11 起 119 行里 113 行）——只加注释。
