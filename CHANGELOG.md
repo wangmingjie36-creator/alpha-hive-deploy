@@ -417,9 +417,141 @@ v0.45.328 让 `load_daily_ic` 与 `build_benchmark_panel` 在 close 口径上都
 - `export` 回退到上一版 ⇒ 新增的 import 失败用例红。
 - 全套 5540 passed / 85 deselected / 2 xfailed（`--deselect TestCoverageHorizon`，按设计红）；`ruff check .` 全过。
 
-## [0.45.334] — 2026-09-23 — 占位（进行中：断开 GexRegimeModifier 对 rule_score 的 ±0.8 直接加减分（保留 RegimeWeightAdjuster 路由），登记世代边界）
+## [0.45.334] — 2026-09-26 — Changed：断开 `GexRegimeModifier` 对 `rule_score` 的 ±0.8 直接加减分（保留 `RegimeWeightAdjuster` 路由）；同版修订共振加成前瞻检验的 replay；登记世代边界 2026-09-28
 
-## [0.45.333] — 2026-09-23 — 占位（进行中：gamma/delta 卖权行权价选择器——对标 GEXBot 的水平地图（重定价扫描 zero gamma / 净 GEX majors / DEX / vanna·charm）+ 单腿/价差/宽跨候选 + 前向击穿账本）
+用户决定（2026-09-23 选「断开加分项」；看过「共振检验会自证失败」的代价后确认「同版修订 replay 再断开」）。
+依据：memory 路线图「GEX regime 应当路由结构而不是当加分项」；本次调研实测 GEX 此前经**两条**通道进评分，
+而 `ic_rerun_readiness` v0.45.197 条目只写了一条。
+
+### 核实（生产 `.swarm_results_*.json` 只读逐行反推，全部 rule_engine 模式）
+- 09-11 ~ 09-22 共 210 行：133 行（63.3%）`gex_adjustment ≠ 0`，|Δ| 中位 0.15、最大 0.60；方向 **0** 条变
+  （该步在方向投票之后）；跨 6.0 共 14 条、跨 7.5 共 1 条；同日新旧分 Spearman 中位 0.969。
+- 非零调整 89/133（67%）来自「正 GEX 且距 flip <2%」分支——flip 是逐行权价看净 GEX 变号
+  （`advanced_analyzer._find_gex_flip`），83 条全链记录里 54% 离现价 <2%，结构上贴着现价 ⇒ 系统性扣分。
+- GEX 取不到的日子没有这笔调整（09-17、09-24、09-25 三天 30/30 unknown）⇒ 全池分数与数据可得性挂钩。
+- `_vanna_stress_test` 的 vanna 差 S√T 倍（有限差分 −0.4745 vs 代码 −0.01655，比值 28.669 = S√T），
+  `can_flip_gex` 因此几乎恒假。断开后它只剩展示用途（本版不改公式，见「发现未处理」）。
+
+### Changed
+- `swarm_agents/queen_distiller.py` 步骤 4.5：照常 `compute()`，**不再**加到 `rule_score`；`gex_regime_mod["applied"] = False`
+  （写在 try 外，compute 抛错也带标记）；日志改「诊断值，未施加」。`confidence_modifier` 对 band_width 的缩放本版不动。
+- `experiments/resonance_boost_forward_test.py`：`replay()` 只在记录 `gex_regime_mod.get("applied", True)` 为真时施加 GEX
+  （v0.45.334 前的记录无此键＝当时确实施加了）；输出加描述量 `gex_chain`（不含效应量）；docstring「修订 1」：
+  盲化期内（0/10 合格周、未看效应量）、H1 / 度量 / 自证门槛 / 检视点全部不变，只让 replay 跟着生产链走。
+- 世代边界 `("2026-09-28", "v0.45.334", …)`，`COHORT_SIGNAL_SCOPE["v0.45.334"] = ()`（只动 `composite.final_score`）；
+  理由里更正 v0.45.197 条目（不改写原文）。**日期前提：本版在 2026-09-28 14:00 PT 扫描前推到 main**
+  （原定 09-24，未赶上那次扫描，改 09-28；再晚则追加更正、顺延）。
+- `cohort_boundary_evidence` 按版本查印记表（原先写死 v0.45.197 印记却与表中最后一条比 ⇒ 追加任何新边界即误报
+  `boundary_too_late`）；v0.45.334 印记 = `gex_regime_mod.applied is False` 首见日期。
+- `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 追加 v0.45.334（ML 报告模型以 final_score 为特征）。
+- `generate_deep_v2.py`「评分±x」徽章只在 `applied is not False` 时渲染（旧记录照旧显示）。
+- 注释：`gex_regime.py` docstring、`advanced_analyzer.py`「安全降级」、`cboe_options.py` 只提 RegimeWeightAdjuster 处；
+  `alpha_hive_mcp.alphahive_get_gex` docstring 如实描述 walls（GEX 加权单边极值，不是 highest OI）与 flip（相邻行权价变号）。
+
+### 代价（已向用户说明；推送前按 09-26 实测更新）
+- 作废当前世代 **120 条**样本（09-18 / 09-22 / 09-24 / 09-25 各 30，09-23 无扫描产物；**0 条已到期**），约两个扫描周的积累。
+  其中 09-24 / 09-25 两天 GEX 全员 unknown、那 60 条分数新旧口径相同，但边界按「首个跑新代码的业务日」划（印记可核验）。
+- 纸面组合 09-11 起少 3 笔看空入场资格；ML 报告前 12 名单 7 天里 5 天变化。
+- 共振加成检验：不修订 replay 的话自证率会从 97.2% 跌到约 87~90% ⇒ exit 3，本版已同版修订。
+- 维度 IC 协议不受影响（H2 读 `dimension_scores × FROZEN_WEIGHTS`，边界声明 `()`，且 09-28 早于 `FORWARD_START` 10-12）；
+  F&G 敞口门检验不受影响。
+
+### Tests
+- 新 `tests/test_gex_modifier_disconnected.py`（12）：行为（五维等分夹具，枚举 regime × flip × can_flip × 方向 ⇒ rule_score /
+  final_score 等于 unknown 基线，且 `dimension_weights` 随政体不同；夹具自证旧 compute 非零）+ `applied` 标记（含 compute 抛错）
+  + 徽章 + AST（生产代码 `gex_adj*` / `"gex_adjustment"` 不得进 `+ - += -=`，带「确实扫到文件」自证与 tmp 树病灶）。
+- 共振检验：`TestReplayFollowsRecordedGexApplied`（新 / 旧记录、只认字面 False、混合窗口）；`TestReplayMatchesRealDistill`
+  negative_gex 三例改断言。`test_ic_rerun_readiness::TestBoundaryEvidenceIsPerVersion`（8）；scorecard 夹具日期从登记表末条派生。
+
+### 变异台账（`PYTHONDONTWRITEBYTECODE=1`、清 pyc、`--maxfail=1000`、还原 sha256 核对）
+- 接回 `rule_score += _gex_adj` → 14 红（行为 ×3、AST、replay ×10）；换变量名绕 AST → 行为测试兜住；`sum((…))` 绕 AST → 13 红；
+- replay 忽略 applied → 7 红；缺键判未施加 → 5 红；删 applied 标记 → 15 红；标记挪进 try → 1 红；徽章两种 → 各 1 红；
+- 边界证据退回旧逻辑 → 6 红；缺键当印记 → 2 红；删 scope 条 / 改世代条名 / 改 scorecard 条名 → 各红。
+
+### 发现未处理
+- `confidence_modifier` 缩放 `band_width` 与 `confidence_band` / `discrimination` 不一致（09-11 起 119 行里 113 行）——只加注释。
+- 早先的 final_score 口径改动（v0.45.172/176/212/228/235）从未登记进 `_ML_ESTIMATOR_GENERATIONS`，补登是另一项决定。
+- `advanced_analyzer` 的 flip（逐行权价变号）、vanna（差 S√T）、walls（单边极值 ≠ GEXBot majors）仍是旧口径——断开后已无评分读者，
+  改它们是纯展示改动（正确实现见 v0.45.333 `sell_strike_levels`）；**但凡改到 `total_gex` 符号（DTE / 取链范围 / 符号约定）仍要登记边界**。
+
+## [0.45.333] — 2026-09-26 — Added：gamma/delta 卖权行权价选择器——对标 GEXBot 的水平地图（重定价扫描 zero gamma / 净 GEX majors / DEX / vanna·charm）+ 单腿 / 价差 / 宽跨·铁鹰候选 + 月度 / 周度前向击穿账本（不进评分、不上网站）
+
+用户需求：「用 gamma / delta 找卖期权的好价位，加进 Alpha Hive，对标 GEXBot」。拍板：三类结构全要、月度 21–45 DTE +
+周度 7–21 DTE 两档分开记账、地图 + 候选 + 前向账本（不开纸面仓）、干净分层架构。
+**定位：测量先行。**本版不声称 GEX 能改善卖权结果——它记录「纯 delta 基线」与「GEX 路由」两种选择，
+等前向样本回答「GEX 比纯 delta 多给了什么」。
+
+### 证据等级（调研 + 对抗核查，一手来源）
+| 用法 | 等级 | 要点 |
+|---|---|---|
+| delta / N(d2) 定距离 | A | put 的 \|Δ\| **低估** ITM 概率：16Δ put 45DTE 在 IV 30/50/80% 下 N(−d2)=18.7/20.6/23.8%；1σ ≈ 1.25× ATM 跨式（「0.85× 跨式」只是约 50% 区间） |
+| 卖权溢价长期为正（VRP） | A（指数）/ 弱（个股） | Cboe PUT 1986–2018 夏普 0.65 vs S&P 0.49 |
+| 做市商净多 gamma → 后续实现波动更低 | B+ | Barbon-Buraschi 约 300 标的 1SD → \|日收益\| −12bp（均值 109bp）；Pearson-Poteshman-White 37bp/310bp |
+| 净空 gamma → 日内动量 / 闪崩 | B（指数） | Baltussen 等：仅 NGE<0 显著 |
+| zero gamma 作分界 | C | 依赖模型，各厂商不同 |
+| call / put wall 是硬支撑阻力 | D | 无同行评审证据、厂商统计无随机行权价基线（同本仓 Max Pain 教训） |
+个股上朴素符号（call+ / put−）最弱：GPP 2009 个股期权终端用户是净卖方 ⇒ 做市商常两边净多，put 侧符号可能反了。
+
+### 对标 GEXBot
+- **能做（EOD）**：GEX by strike（GEXBot 单位 γ·OI·100·S²·1%）、zero gamma（Perfiliev 式：每张合约固定自身 IV、在 [0.8S,1.2S]
+  81 点网格重算 BS gamma、线性插值全部过零点）、净 GEX majors + 单边极值（与旧 `largest_*_wall` 同口径者改名）、DEX、
+  逐合约 vanna / charm、next_expiry / ≤45DTE / full 三档视图。
+- **做不到**：Max Change（1/5/10/15/30 分钟）、Orderflow、State（按成交分类）、盘中按成交量 GEX——都需要逐笔成交，
+  本仓每天一个收盘后快照、OI 为 t−1。
+- GEXBot 本身不选行权价；delta 梯子 + 结构报价 + 前向账本是本仓自建。未接 GEXBot API（付费）。
+
+### 结构（四层单向依赖；新模块零调用任何评分符号，双向 AST 火墙）
+- `cboe_options.fetch_cboe_raw_contracts`：读原始 payload（成品链丢 delta、每到期日每边只留 OI 前 40）；4h 缓存零额外网络；
+  陈旧 / 网络失败 / 快照模式 / vintage 不符 / vintage 判不了 / 价格不可得分开返回原因并计数（`raw_contracts_stats`，进
+  `scan_timing` 的 `cboe_raw`）；纯日期相减的日历 DTE；已收盘那一场排除当天到期；`session_live` 认休市日与半日市
+  （`is_trading_day.session_close_et`）；透传 `payload_last_trade_time`、`iv30`。
+- `sell_strike_levels.py`（纯计算）：BS delta / gamma / vanna（−φ(d1)·d2/σ）/ charm（含 q，有限差分核对）/ N(d2)；
+  扫描曲线 `curve_state` 四态（全段为正 / 为负是最强信号，不是不可得）。
+- `sell_strike_candidates.py`：到期日选择（周度 [7,21)、月度 [21,45]）；delta 梯子 0.10/0.16/0.20/0.25/0.30，按
+  `LADDER_FILL_ORDER`（主档 0.20、远档 0.10 先占）；六种结构按 bid 卖 / ask 买报价，短腿点差 > 25% 不可报价；
+  路由 v1（先看符号再看距离：负 gamma ⇒ 两侧 far；正 gamma 且下方零点 ≤ 3% ⇒ put far；扫描合约 < 20 ⇒ unavailable）。
+- `sell_strike_ledger.py`：每 (date, ticker, tenor) 一行、按记录月分片、原子写；unavailable 不覆盖 recorded；
+  只用日期 == expiry 的 K 线结算、到期次日才结；放弃闸；独立单位 (ticker, expiry) 取最早行；分块（同记录日）置换；
+  首次就绪即冻结检验（唯一写者 = 日报钩子）。
+- `sell_strike_report.py`：本地报告 `<PATHS.sell_strike_state>/reports/sell-strike-<日期>.md`（**不拼进日报 md**——
+  那份在 gh-pages 与自动提交白名单里）；MCP 现算先 invalidate 缓存。
+- 集成：`_post_scan_notify` 钩子（先状态日志 / 0 行告警，报告写入单独 try；`_timing.record("sell_strike")`）；
+  MCP `alphahive_get_sell_strike_candidates`；`PATHS.sell_strike_state`；conftest 两道防线 + `_GUARDED_PRODUCTION_ARTIFACTS`；
+  `data_backup` STATE_DIRS 与迁移 MOVE_DIRS（守卫：STATE_DIRS ⊆ MOVE）；`.gitignore`。
+
+### 预注册（`experiments/sell_strike_routing_prereg.md`，协议 v1）
+H1：每个 tenor × side，GEX flag 组在基线 0.20 档的 `pnl_over_credit` 更差（单侧）；4 检验 Bonferroni α 0.0125；
+同记录日分块置换 5000 次；就绪闸 ≥60 独立单位、≥12 个不同到期日、每侧 flag / normal 各 ≥10（只数信息块）；
+财报冲突 / 判不了按单位与按票排除；非收盘后报价（`cboe_intraday` / `cboe_stale_intraday` / `session_live`）不进检验；
+盲化 = 代码未就绪时不算、不显示效应量（从任何出口重建结果 = 偷看）。三轮登记前评审的改动逐条记在文末「登记前定稿记录」
+（09-23 / 09-24 / 09-26，改时账本零行）。
+
+### 实测（真实 CBOE 链；09-24 01:42 PDT 起 CDN 仍是 09-22 文件，冒烟里刻意当 09-22 快照用）
+- NVDA S=228.87：≤45DTE zero gamma 213.29（下方 6.8%）、正 gamma ⇒ base；月度 0.20Δ put K=210 bid 2.12（N(d2) 19%）。
+- COST S=899.41：**负 gamma**、零点在上方 2.0% ⇒ 两侧 far；但 0.10Δ 两侧点差 31–36% ⇒ route 档结构不可报价（点差闸生效）。
+- XOM：正 gamma 但零点在下方 2.63% ⇒ put far / call base。
+- `level_map` 每票 0.01–0.03 s（30 只约 1 s）；账本行约 8.3KB（每月分片约 10MB）。
+
+### Tests
+新增 `tests/test_sell_strike_levels.py`（32）、`test_sell_strike_candidates.py`（48）、`test_sell_strike_ledger.py`（81）、
+`test_sell_strike_integration.py`（43）；改 `test_migrate_data_root.py`（STATE_DIRS ⊆ MOVE）、`test_scan_timing.py`（cboe_raw）、
+`test_root_data_guard.py`（守卫目录 7 项）。数值锚点在测试里独立推导（有限差分、自带 BS、二分反解 K），不和实现自比。
+
+### 变异台账（全部在 APFS 克隆里真跑，`PYTHONDONTWRITEBYTECODE=1`、清 pyc、`--maxfail=1000`、还原 sha256 核对）
+各实现阶段逐条变异 51 + 57 + 18 + 25 + 13 + 27 + 6 + 3 条全红；最终合并复跑 31 条 + 3 变体全红（首轮两条无牙——扫描单位在
+S=100 夹具上恰好相等、扫描遇 CBOE gamma 的夹具全是 None——已补测试并复跑变红）。代表性：vanna ÷S√T、\|Δ\| 当概率、put 符号、
+扫描不重定价 / 线性 p / 用 CBOE gamma、梯子升序占档、负 gamma 判 base、DTE 含时分秒、休市与半日市判据、bid=0 放行、按 mid 成交、
+T−1 K 线结算、到期当天结算、取最新行、单行财报判定、全局置换、未就绪输出效应量、冻结后重算、as_of 用未来结算、MCP 触发冻结、
+钩子拼进日报 md、评分路径 import 本模块。
+
+### 发现未处理
+- **生产数据缺口**：09-23 CBOE CDN 整源停更（09-24 01:42 PDT 仍是 09-22 文件）；09-25 扫描时刻本机 DNS 解析失败
+  （`nodename nor servname provided`）⇒ 09-24 / 09-25 GEX 全员 unknown。09-26 07:00 复查 CBOE 已恢复（09-25 文件）。
+- `tests/test_economic_calendar.py::TestCoverageHorizon` 按设计变红（CPI/NFP 只覆盖到 12 月、剩 77 天 < 90；BLS 2027 日程未发布），与本版无关。
+- ChronosBee `days_until` 用 `datetime.now()`（差一天族）会把财报当天丢成 −1——本版在账本侧按单位 + 按票排除绕过；
+  **没改 ChronosBee**（改它会截断维度 IC 协议 H2）。
+- 深虚值远档常因点差 > 25% 不可报价，far 路由的结构在低流动标的上多为不可报价（如实记录，不放宽闸）。
+- 价差 / 铁鹰的单利年化数字很大（如 255%），报告已改以单笔风险回报为主数字。
 
 ## [0.45.332] — 2026-09-23 — Fixed：`ic_diagnostics._load_prices` 批量下载**部分失败**被当成功——缺的票逐只重试一轮，仍缺的写 stderr 点名；`--benchmark` 表头 / 判定行 / JSON 带经典因子行情覆盖率
 
