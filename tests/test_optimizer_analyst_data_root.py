@@ -108,6 +108,8 @@ class TestEndToEndUsesHome:
         out = buf.getvalue()
         assert f"快照目录: {home / 'report_snapshots'}" in out, out
         assert f"config:   {REPO_ROOT / 'config.py'}" in out, out
+        # v0.45.335：定时任务 agent 按这行的绝对路径去读「最新一条」，不许再猜相对路径
+        assert f"审计日志: {home / 'weight_history.jsonl'}" in out, out
 
     def test_weekly_optimizer_reads_history_from_home(self, home):
         rec = {"action": "optimize", "applied": True, "dry_run": False,
@@ -137,6 +139,7 @@ class TestEndToEndUsesHome:
         assert "加载快照: 2 条" in out, out
         briefs = list((home / "self_analysis_briefs").glob("self_analysis_*.md"))
         assert len(briefs) == 1, f"简报没写进数据根：{out}"
+        assert str(briefs[0]) in out, "简报的绝对路径必须印出来（定时任务 agent 照它去读）"
 
 
 # ───────────────────────────────────────────── 2. 代码跟检出

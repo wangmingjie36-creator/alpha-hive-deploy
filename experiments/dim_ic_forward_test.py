@@ -19,6 +19,15 @@
 6. 进度行 —— `status_line()`，由 `ic_rerun_readiness.dim_ic_forward_status()` 接进 `--quiet` 那一行（第四段）。
 7. 判别测试 —— `tests/test_dim_ic_forward_test.py`。
 
+修订 1（v0.45.330，协议 §13）↔ 实现
+-----------------------------------
+8. H1 对象 buzz_v1 —— **冻结评分器（阶段 2）尚未实现**，所以 H1 读 `H1_PRODUCTION_DIM`（生产 sentiment 维度），
+   冻结层边界与输入层边界一律照截断（§13.4 的保守分支）。截断点之前 buzz_v1 ≡ 锚点之后的生产分，这是定义。
+   截断结果带 `layer`：`frozen` = 只触及冻结层，评分器自证通过后可解除；`input` = 触及输入层，不可解除。
+9. 锚点 —— `anchor_status()`：`H1_ANCHOR_VERSION` 须在边界表里且早于 `FORWARD_START`；到窗口起点仍不满足 ⇒
+   H1 回退到原登记对象（行为与第 8 条相同，只是对象名义不同），进度行标 ⚠️；截止前未登记在进度行提示截止日。
+10. 自证 —— 阶段 2 实现；本版没有评分器，因此也不吸收任何冻结层边界。
+
 事前实现选择（协议没写到、这里补的；改动须在 CHANGELOG 标「事前实现对齐」或「事后」）
 ---------------------------------------------------------------------------------
 - **「这些周的 T+7 全部结算」**：一个 ISO 周里所有窗口内行都有结果变量，或该周周日之后已过
@@ -98,6 +107,9 @@ def _check_protocol(P) -> None:
         raise ProtocolError(f"登记的结果变量 {P.OUTCOME_COLUMN!r} ≠ ic_diagnostics.FORWARD_CLOSE_COL['t7']={want!r}")
     if P.OUTCOME_COLUMN in P.FORBIDDEN_OUTCOME_COLUMNS:
         raise ProtocolError(f"结果变量 {P.OUTCOME_COLUMN!r} 在登记的禁用列里")
+    if P.HYPOTHESES[0][1] != "buzz_v1":
+        # 执行器只实现了修订 1 的 H1；登记换了对象而执行器没跟 ⇒ 读错量，不能照常算
+        raise ProtocolError(f"执行器不认识 H1 对象 {P.HYPOTHESES[0][1]!r}（只实现了修订 1 的 buzz_v1）")
 
 
 def items(P) -> Dict[str, Dict]:
@@ -110,8 +122,9 @@ def items(P) -> Dict[str, Dict]:
             return None          # 协议 §3：H2 只用 5 维齐全的标的
         return sum(w * ds[d] for d, w in P.FROZEN_WEIGHTS.items())
 
-    (h1, h1_obj, h1_sigs), (h2, _h2_obj, h2_sigs) = P.HYPOTHESES
-    out = {h1: {"value": _dim(h1_obj), "signals": h1_sigs},
+    (h1, _h1_obj, h1_sigs), (h2, _h2_obj, h2_sigs) = P.HYPOTHESES
+    # H1 = buzz_v1。冻结评分器未实现 ⇒ 读生产维度，冻结层边界照截断（见文件头第 8 条）
+    out = {h1: {"value": _dim(P.H1_PRODUCTION_DIM), "signals": h1_sigs},
            h2: {"value": _composite, "signals": h2_sigs}}
     for d in P.DESCRIPTIVE_DIMS:
         out[d] = {"value": _dim(d), "signals": (f"agent.{P.DIM_TO_AGENT[d]}.score",)}
@@ -240,6 +253,41 @@ def truncation_point(signals: Tuple[str, ...], P, history: Optional[list] = None
         if signal_archive.generation_boundaries(signals, [entry]):
             hits.append({"date": date, "version": version})
     return min(hits, key=lambda h: h["date"]) if hits else None
+
+
+def h1_truncation(P, history: Optional[list] = None) -> Optional[Dict]:
+    """H1 的截断点（修订 1）：输入层与冻结层一律截断（评分器未实现，§13.4 保守分支），并标出层。
+
+    `layer="frozen"`：截断点那天只触及冻结层 ⇒ 冻结评分器自证通过后可解除；`"input"`：不可解除。
+    """
+    cut = truncation_point(P.HYPOTHESES[0][2], P, history)
+    if cut is None:
+        return None
+    by_input = truncation_point(P.H1_INPUT_SIGNALS, P, history)
+    if by_input is not None and by_input["date"] <= cut["date"]:
+        return {**by_input, "layer": "input"}      # 同一天两层都有 ⇒ 报输入层那条（不可解除的才是真原因）
+    return {**cut, "layer": "frozen"}
+
+
+def anchor_status(P, today: str, history: Optional[list] = None) -> Dict:
+    """buzz_v1 的定义锚点（协议 §13.4）。
+
+    `state`：`ok` 锚点边界已登记且早于窗口起点 / `pending` 未满足但还没到窗口起点 /
+    `fallback` 到了窗口起点仍未满足 ⇒ H1 回退到原登记对象。`problem` 说明为什么不是 ok。
+    """
+    hist = signal_archive._cohort_history() if history is None else history
+    v = P.H1_ANCHOR_VERSION
+    dates = sorted(e[0] for e in hist if v and e[1] == v)
+    if dates and dates[0] < P.FORWARD_START:
+        return {"state": "ok", "version": v, "date": dates[0]}
+    if not v:
+        problem = "H1_ANCHOR_VERSION 未登记"
+    elif not dates:
+        problem = f"{v} 不在 _COHORT_HISTORY 里"
+    else:
+        problem = f"{v} 的边界日期 {dates[0]} 不早于窗口起点"
+    state = "fallback" if today >= P.FORWARD_START else "pending"
+    return {"state": state, "version": v, "date": dates[0] if dates else None, "problem": problem}
 
 
 def _clean_git_env() -> Dict[str, str]:
@@ -484,6 +532,8 @@ def run(db_path: Optional[str] = None, today: Optional[str] = None,
     its = items(P)
     h1, h2 = P.HYPOTHESES[0][0], P.HYPOTHESES[1][0]
     trunc = {k: truncation_point(v["signals"], P, history) for k, v in its.items()}
+    trunc[h1] = h1_truncation(P, history)          # 同一个截断日，多标一个层（修订 1）
+    anchor = anchor_status(P, today, history)
     wchg = weight_change(P, today, repo_root)
     h2_cut_dates = [d for d in ((trunc[h2] or {}).get("date"), wchg.get("date")) if d]
     h2_cut = min(h2_cut_dates) if h2_cut_dates else None
@@ -506,19 +556,26 @@ def run(db_path: Optional[str] = None, today: Optional[str] = None,
     stale = (not rows and (dt.date.fromisoformat(today) - dt.date.fromisoformat(P.FORWARD_START)).days
              >= STALE_DAYS)
     return {**base, **res, "truncation": {h1: trunc[h1], h2: trunc[h2]},
-            "weight_change": wchg, "stale": stale}
+            "weight_change": wchg, "stale": stale, "h1_anchor": anchor}
 
 
 def status_line(res: Dict) -> str:
     """给 `ic_rerun_readiness --quiet` 的一段。图标约定同 F&G 那段：⚠️ 要显著标出 / ⏳ 正常 / 🔔 已到检视点。"""
-    tag = "维度 IC 协议（v0.45.320 预注册）"
+    tag = "维度 IC 协议（v0.45.320 预注册·修订 1）"
     st = res.get("status")
     if st == "cannot_judge":
         return f"⚠️ {tag}无法判定：{res.get('reason')}"
-    warns = []
+    warns, notes = [], []
     tr = res.get("truncation") or {}
     if (tr.get("H1") or {}).get("date"):
-        warns.append(f"H1 已于 {tr['H1']['date']}（{tr['H1']['version']}）截断")
+        h = tr["H1"]
+        undo = "；只触及冻结层，冻结评分器自证通过后可解除" if h.get("layer") == "frozen" else ""
+        warns.append(f"H1 已于 {h['date']}（{h['version']}{undo}）截断")
+    anc = res.get("h1_anchor") or {}
+    if anc.get("state") == "fallback":
+        warns.append(f"H1 锚点：{anc['problem']} ⇒ 已回退到原登记对象（生产 sentiment，协议 §13.4）")
+    elif anc.get("state") == "pending":
+        notes.append(f"H1 锚点待登记（{anc['problem']}；须早于 {res.get('forward_start')}，否则回退）")
     if (tr.get("H2") or {}).get("date"):
         warns.append(f"H2 已于 {tr['H2']['date']}（{tr['H2']['version']}）截断")
     wc = res.get("weight_change") or {}
@@ -529,6 +586,7 @@ def status_line(res: Dict) -> str:
     if res.get("stale"):
         warns.append(f"登记窗口起点 {res.get('forward_start')} 后仍无任何样本——扫描停了或路径错了")
     tail = ("；⚠️ " + "；".join(warns)) if warns else ""
+    tail += "".join(f"；{n}" for n in notes)
     if st == "concluded":
         v = res.get("verdicts", {})
         parts = [f"{h}={v[h]['result']}" for h in ("H1", "H2") if h in v]
@@ -545,7 +603,7 @@ def status_line(res: Dict) -> str:
 
 def _print_report(res: Dict) -> None:
     print("━" * 72)
-    print("🐝 Alpha Hive · 维度 IC 证据协议（v0.45.320 预注册，执行器 v0.45.325）")
+    print("🐝 Alpha Hive · 维度 IC 证据协议（v0.45.320 预注册 · v0.45.330 修订 1，执行器 v0.45.325/330）")
     print("━" * 72)
     print(status_line(res))
     if res.get("status") == "cannot_judge":

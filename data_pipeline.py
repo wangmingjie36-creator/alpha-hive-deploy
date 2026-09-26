@@ -27,6 +27,7 @@ import time
 import math
 import logging
 import threading
+import weakref
 from typing import Dict, Optional, List
 from collections import deque
 
@@ -160,6 +161,12 @@ class StockData:
 class ObservableCircuitBreaker:
     """带指标暴露的熔断器"""
 
+    # v0.45.344：全部活着的实例（WeakSet，不延长寿命）。`get_fetcher()` 单例的各数据源
+    # 各持一个，状态跨测试存活；唯一读者是 tests/conftest.py `_reset_circuit_breakers`。
+    # 与 resilience.CircuitBreaker._live 同形，两个类互不继承，所以各自一份。
+    _live: "weakref.WeakSet[ObservableCircuitBreaker]" = weakref.WeakSet()
+    _live_lock = threading.Lock()
+
     def __init__(self, name: str, failure_threshold: int = 3,
                  recovery_timeout: float = 60.0, half_open_max: int = 1):
         self.name = name
@@ -167,18 +174,45 @@ class ObservableCircuitBreaker:
         self.recovery_timeout = recovery_timeout
         self.half_open_max = half_open_max
 
+        self._init_state()
+        self._lock = threading.Lock()
+        with ObservableCircuitBreaker._live_lock:
+            ObservableCircuitBreaker._live.add(self)
+
+    def _init_state(self):
+        """运行态与指标字段的唯一出处：构造与 reset() 共用，新增字段不会漏重置。"""
         self._failures = 0
         self._successes = 0
         self._total_calls = 0
         self._state = "closed"  # closed / open / half_open
         self._last_failure_time = 0.0
         self._half_open_calls = 0
-        self._lock = threading.Lock()
 
         # 指标
         self._consecutive_failures = 0
         self._last_error: str = ""
         self._trip_count = 0
+
+    @classmethod
+    def live_instances(cls) -> list:
+        """当前所有活着的实例（快照）。"""
+        with ObservableCircuitBreaker._live_lock:
+            return list(ObservableCircuitBreaker._live)
+
+    def reset(self, timeout: Optional[float] = None):
+        """重置成刚构造时的状态（含 trip_count 等指标；阈值等配置不动）。
+
+        timeout 语义同 `resilience.CircuitBreaker.reset`：None 阻塞等锁；给了就在
+        时限内拿不到锁时抛 RuntimeError（不抛 TimeoutError 的理由也见那里）。
+        """
+        got = self._lock.acquire() if timeout is None else self._lock.acquire(timeout=timeout)
+        if not got:
+            raise RuntimeError(
+                f"ObservableCircuitBreaker[{self.name}] 的锁 {timeout}s 内拿不到（别的线程一直攥着）")
+        try:
+            self._init_state()
+        finally:
+            self._lock.release()
 
     def allow_request(self) -> bool:
         with self._lock:

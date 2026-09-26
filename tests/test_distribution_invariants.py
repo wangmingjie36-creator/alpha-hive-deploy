@@ -354,8 +354,11 @@ class TestAgentDirectionReachability:
 class TestDimensionScoreSpread:
     """去重比过低 → 大量并列 → rank-IC 尾部排序失真。
 
-    `experiments/ic_power_analysis.py` 里实测过这件事的下游影响：并列结构直接
-    决定置换零分布的方差，是那份功效计算第一版算错的根源。
+    ⚠️ v0.45.331 更正：此处原写「并列结构直接决定置换零分布的方差，是
+    `experiments/ic_power_analysis.py` 第一版算错的根源」——不成立。置换下 rank-IC 的
+    方差恒为 1/(n−1)，与并列无关；那个第一版的差异来自天集合与 MC 噪声（见
+    `permuted_weekly_var` docstring）。本类守的是并列损失排序分辨率、塌成常数则
+    不再贡献信息，这条理由本身不依赖那个说法。
     """
 
     def test_healthy_dims_keep_enough_distinct_values(self, dimension_scores):

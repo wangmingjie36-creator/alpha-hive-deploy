@@ -5,6 +5,7 @@ Alpha Hive 测试 fixtures - 共享 mock 数据 + 隔离数据库
 import sys
 import os
 import pathlib
+import weakref
 import pytest
 
 # 确保项目根目录在 sys.path 中
@@ -474,19 +475,21 @@ def _block_slack(monkeypatch):
 
       ① `_read_user_token → None`
          测试永不使用**生产**凭证。要测 token 分支的测试自己 setattr 一个假
-         token（`test_slack_notifier.py` 已有 3 处这么写），后设的赢。
+         token（`test_slack_notifier.py` 里就这么写），后设的赢。
       ② `_check_webhook_alive → False`
          掐掉 `__init__` 里那次 `requests.head`。
          ①② 合起来让 `enabled` 恒为 False，于是 `_try_src_slack_alert` 的
          `if getattr(n, "enabled", False)` 守卫会在任何发送之前短路。
-      ③ `get_session` 换成记录器 —— 掐掉三处 `get_session("slack").post`，
-         并**兼作观测点**：teardown 断言没有任何测试试图发送。
+      ③ `get_session` 换成记录器 —— 掐掉 `slack_report_notifier` 里每一处
+         `get_session("slack").post`，并**兼作观测点**：teardown 断言没有任何测试试图发送。
+         （v0.45.341 起只剩这一个模块：`slack_notifier.py` 已删，它的发送面随之消失；
+         `pre_scan_notify` 直接 `requests.post`，由 `_offline_transport` 的库级闸兜住。）
          没有③的话，将来谁把 `enabled` 又弄成 True，①②会静默失效而没人知道
          （与本文件 `_isolate_paper_portfolio_state`「默认重绑 + teardown
          核对真身」同构，也是 CLAUDE.md「这个失败，下游怎么知道？」那条）。
 
     真要测发送的测试自己 `patch("slack_report_notifier.get_session")`
-    （现成 4 处这么写），会覆盖③，本 fixture 不改它们的语义。
+    （`test_slack_notifier.py` 里就这么写），会覆盖③，本 fixture 不改它们的语义。
     """
     import importlib
 
@@ -507,21 +510,15 @@ def _block_slack(monkeypatch):
     def _fake_get_session(*_a, **_k):
         return _SlackSessionRecorder()
 
-    for mod_name in ("slack_report_notifier", "slack_notifier"):
-        try:
-            mod = importlib.import_module(mod_name)
-        except Exception:  # pragma: no cover - 模块不可得时无需拦
-            continue
-        monkeypatch.setattr(mod, "get_session", _fake_get_session, raising=False)
-
     try:
-        from slack_report_notifier import SlackReportNotifier
-    except Exception:  # pragma: no cover
+        mod = importlib.import_module("slack_report_notifier")
+    except Exception:  # pragma: no cover - 模块不可得时无需拦
         pass
     else:
-        monkeypatch.setattr(SlackReportNotifier, "_read_user_token",
+        monkeypatch.setattr(mod, "get_session", _fake_get_session, raising=False)
+        monkeypatch.setattr(mod.SlackReportNotifier, "_read_user_token",
                             lambda self: None)
-        monkeypatch.setattr(SlackReportNotifier, "_check_webhook_alive",
+        monkeypatch.setattr(mod.SlackReportNotifier, "_check_webhook_alive",
                             staticmethod(lambda url: False))
 
     yield
@@ -850,6 +847,82 @@ def _fast_yfinance_limiter(monkeypatch):
             monkeypatch.setattr(_m, "yfinance_limiter", fast)
         if _mod == "yf_gate":
             monkeypatch.setattr(_m, "_bucket", fast, raising=False)
+
+
+# ==================== 熔断器状态不许跨测试泄漏（v0.45.344）====================
+
+# 按「类」枚举，不按「实例名单」：两个熔断器类在构造时把自己登记进各自的 WeakSet，
+# 这里只需知道类在哪个模块。新增熔断器（模块级、单例里、测试自建）零改动即被覆盖。
+_BREAKER_CLASSES = (("resilience", "CircuitBreaker"),
+                    ("data_pipeline", "ObservableCircuitBreaker"))
+_BREAKER_RESET_TIMEOUT_S = 2.0
+# 已知卡死的熔断器 → 最早发现它的测试。再遇到只试一次（timeout=0），不再每条等 2s。
+_stuck_breakers = weakref.WeakKeyDictionary()
+
+
+def _reset_live_breakers(where, timeout=_BREAKER_RESET_TIMEOUT_S):
+    """把每个活着的熔断器 reset() 回刚构造的样子；返回重置失败的说明列表（空 = 全部成功）。
+
+    类走 `sys.modules.get`、不 import：模块没被谁 import 过 ⇒ 这一类一个实例都不存在，
+    无事可做；而在 conftest 里 import `resilience` / `data_pipeline` 会把它们提前到
+    收集期（CLAUDE.md「新产物的默认路径」一节：收集期 import 是路径冻结的事故窗口）。
+    """
+    stuck = []
+    for modname, clsname in _BREAKER_CLASSES:
+        mod = sys.modules.get(modname)
+        if mod is None:
+            continue
+        cls = getattr(mod, clsname)     # 模块在、类没了 ⇒ 改名了：让它红，别静默跳过
+        for br in cls.live_instances():
+            known = _stuck_breakers.get(br)
+            try:
+                br.reset(timeout=0 if known else timeout)
+            except Exception as e:      # noqa: BLE001 —— 任何重置失败都要报出来，不吞
+                _stuck_breakers.setdefault(br, where)
+                stuck.append(f"{clsname}[{br.name}]（最早在 {_stuck_breakers[br]} 发现）：{e}")
+            else:
+                _stuck_breakers.pop(br, None)
+    return stuck
+
+
+def _fail_on_stuck_breakers(phase, stuck):
+    if stuck:
+        pytest.fail(
+            f"测试{phase}有熔断器重置不了。锁在测试之间被攥着本身就是 bug —— 多半是某条测试"
+            "留下的线程卡死在锁里（形状见 test_slack_send_whitelist.py::TestBreakerDoesNotDeadlock）；"
+            "阻塞等只会把整套卡死，所以直接红：\n  " + "\n  ".join(stuck),
+            pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_circuit_breakers(request):
+    """每条测试前后把**所有活着的**熔断器重置成刚构造的样子（v0.45.344）。
+
+    熔断状态是进程级全局量：`resilience` 的四个模块级实例、`fred_macro._fred_breaker`、
+    `newsapi_client._news_breaker`、`data_pipeline.get_fetcher()` 单例里各数据源的
+    `ObservableCircuitBreaker`。此前没有套件级隔离，实测（v0.45.343）：A 把
+    `yfinance_breaker` 连记到阈值、不重置，B 断言 `allow_request() is False` **通过**——
+    B 默默吃了 A 漏出来的 OPEN。当时全套零条测试受影响（潜伏，不是活跃），但已经有
+    四个文件各自打了补丁（重置 / 换新实例），说明以前咬过人。
+
+    为什么在同一批对象上 reset，不换新实例：`sec_edgar` / `swarm_agents.cache` /
+    `options_analyzer` 在模块顶部 `from resilience import sec_breaker` / `yfinance_breaker`，
+    各持一份绑定 —— 换掉 `resilience` 上的名字够不到它们（与 `_fast_yfinance_limiter`
+    要逐模块替换是同一个坑）。
+
+    **前后各一次**：开始前那次保证本条干净；结束后那次让「锁被攥着」报在**留下它的那条**
+    测试上，而不是报在无辜的下一条上。拿不到锁不阻塞（见 `_fail_on_stuck_breakers`）。
+    自证：`tests/test_breaker_isolation.py`。
+    """
+    _fail_on_stuck_breakers("开始前", _reset_live_breakers(request.node.nodeid))
+    yield
+    _fail_on_stuck_breakers("结束后", _reset_live_breakers(request.node.nodeid))
+
+
+@pytest.fixture
+def reset_live_breakers():
+    """把 `_reset_live_breakers` 暴露给它的自证测试（`conftest` 不可直接 import）。"""
+    return _reset_live_breakers
 
 
 # ==================== ML 模型产物隔离（v0.45.149）====================

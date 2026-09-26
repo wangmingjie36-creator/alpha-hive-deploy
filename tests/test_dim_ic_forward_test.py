@@ -8,6 +8,8 @@
 - 盲化：返回值顶层键白名单 + 未出结论的假设不得出现在 `verdicts`。
 - 截断：世代边界（沿用 `generation_boundaries` 的影响面）与 config 权重的 git 历史，各自正反两例。
 - 接线：就绪度闸 `--quiet` 那一行的**段顺序**是契约（周度任务按「第三段 = F&G」解析）。
+- 修订 1（v0.45.330）：H1 按层截断并标层；判别用例是「只点名行情量的边界」——原登记看不见、修订 1 会截断。
+  锚点三态（ok / pending / fallback）各自的进度行图标。窗口内夹具日期一律相对 `P.FORWARD_START`。
 
 全部用合成数据 / 合成 git 仓库，零外部依赖，不需要 skip。
 """
@@ -45,7 +47,18 @@ P = _load("dim_ic_protocol", "experiments/dim_ic_protocol.py")
 
 DIMS = ("signal", "catalyst", "sentiment", "odds", "risk_adj")
 _TOP_KEYS_ALWAYS = {"forward_start", "today", "status", "h1_weeks", "next_look_at", "looks_done",
-                    "verdicts", "truncation", "weight_change", "stale"}
+                    "verdicts", "truncation", "weight_change", "stale", "h1_anchor"}
+
+#: 窗口首日（周一）。窗口内的夹具日期一律相对它写——修订 1 把起点从 09-28 挪到 10-12 时，
+#: 写死的日期整批落到窗口前，测试红的原因变成「夹具过期」而不是「执行器错了」
+_W0 = dt.date.fromisoformat(P.FORWARD_START)
+
+
+def _d(days: int) -> str:
+    return (_W0 + dt.timedelta(days=days)).isoformat()
+
+
+_TODAY = _d(94)
 
 
 # ── 合成数据 ────────────────────────────────────────────────────────────────
@@ -128,68 +141,68 @@ class TestDataLayer:
 
     def test_reads_close_t7_not_price_t7(self, tmp_path):
         """判别：close_t7 与 sentiment 同向、price_t7/return_t7 反向。读对列 ⇒ IC=+1。"""
-        db = _make_db(tmp_path, _day_rows("2026-09-28", sign=+1))
-        rows = fx.load_rows(db, P, "2026-12-31")
+        db = _make_db(tmp_path, _day_rows(_d(0), sign=+1))
+        rows = fx.load_rows(db, P, _TODAY)
         w = self._h1(rows)
         assert len(w) == 1 and w[0][1] == pytest.approx(1.0)
 
     def test_width_below_min_drops_the_day(self, tmp_path):
-        rows19 = fx.load_rows(_make_db(tmp_path, _day_rows("2026-09-28", n=P.MIN_WIDTH - 1), "a.db"),
-                              P, "2026-12-31")
-        rows20 = fx.load_rows(_make_db(tmp_path, _day_rows("2026-09-28", n=P.MIN_WIDTH), "b.db"),
-                              P, "2026-12-31")
+        rows19 = fx.load_rows(_make_db(tmp_path, _day_rows(_d(0), n=P.MIN_WIDTH - 1), "a.db"),
+                              P, _TODAY)
+        rows20 = fx.load_rows(_make_db(tmp_path, _day_rows(_d(0), n=P.MIN_WIDTH), "b.db"),
+                              P, _TODAY)
         assert self._h1(rows19) == []
         assert len(self._h1(rows20)) == 1
 
     def test_all_tied_scores_drop_the_day(self, tmp_path):
-        rows = [r[:2] + (json.dumps({"sentiment": 5.0}),) + r[3:] for r in _day_rows("2026-09-28")]
-        assert self._h1(fx.load_rows(_make_db(tmp_path, rows), P, "2026-12-31")) == []
+        rows = [r[:2] + (json.dumps({"sentiment": 5.0}),) + r[3:] for r in _day_rows(_d(0))]
+        assert self._h1(fx.load_rows(_make_db(tmp_path, rows), P, _TODAY)) == []
 
     def test_weekend_prewindow_and_future_rows_are_ignored(self, tmp_path):
-        rows = (_day_rows("2026-10-03") + _day_rows("2026-09-25")      # 周六 / 窗口前（周五）
-                + _day_rows("2027-01-04"))                               # today 之后
-        loaded = fx.load_rows(_make_db(tmp_path, rows), P, "2026-12-31")
+        rows = (_day_rows(_d(5)) + _day_rows(_d(-3))                   # 周六 / 窗口前（周五）
+                + _day_rows(_d(98)))                                     # today 之后
+        loaded = fx.load_rows(_make_db(tmp_path, rows), P, _TODAY)
         assert loaded == []
 
     def test_unsettled_rows_carry_no_return(self, tmp_path):
-        loaded = fx.load_rows(_make_db(tmp_path, _day_rows("2026-09-28", ripe=False)), P, "2026-12-31")
+        loaded = fx.load_rows(_make_db(tmp_path, _day_rows(_d(0), ripe=False)), P, _TODAY)
         assert loaded and all(r["ret"] is None for r in loaded)
 
     def test_quarantine_excludes_only_the_named_hypothesis(self, tmp_path, monkeypatch):
         monkeypatch.setattr(signal_archive, "QUARANTINE", [
-            {"date": "2026-09-28", "signals": ("agent.BuzzBeeWhisper.score",), "reason": "t"}])
-        rows = fx.load_rows(_make_db(tmp_path, _day_rows("2026-09-28")), P, "2026-12-31")
+            {"date": _d(0), "signals": ("agent.BuzzBeeWhisper.score",), "reason": "t"}])
+        rows = fx.load_rows(_make_db(tmp_path, _day_rows(_d(0))), P, _TODAY)
         assert self._h1(rows) == []
         cat = fx.items(P)["catalyst"]
         assert len(fx.weekly_series(rows, cat["value"], cat["signals"], P)) == 1
 
     def test_week_value_is_equal_weight_mean_of_days(self, tmp_path):
-        rows = (_day_rows("2026-09-28", sign=+1) + _day_rows("2026-09-29", sign=-1)
-                + _day_rows("2026-09-30", sign=+1))
-        w = self._h1(fx.load_rows(_make_db(tmp_path, rows), P, "2026-12-31"))
+        rows = (_day_rows(_d(0), sign=+1) + _day_rows(_d(1), sign=-1)
+                + _day_rows(_d(2), sign=+1))
+        w = self._h1(fx.load_rows(_make_db(tmp_path, rows), P, _TODAY))
         assert len(w) == 1
         assert w[0][1] == pytest.approx(1 / 3) and w[0][2] == 3
 
     def test_truncation_date_cuts_samples_on_and_after_it(self, tmp_path):
-        rows = _day_rows("2026-09-28") + _day_rows("2026-10-05")
-        loaded = fx.load_rows(_make_db(tmp_path, rows), P, "2026-12-31")
-        assert len(self._h1(loaded, truncate_at="2026-10-05")) == 1
+        rows = _day_rows(_d(0)) + _day_rows(_d(7))
+        loaded = fx.load_rows(_make_db(tmp_path, rows), P, _TODAY)
+        assert len(self._h1(loaded, truncate_at=_d(7))) == 1
 
     def test_h2_requires_all_five_dims(self, tmp_path):
-        rows = _day_rows("2026-09-28", width_dims=("catalyst", "sentiment", "odds"))
-        loaded = fx.load_rows(_make_db(tmp_path, rows), P, "2026-12-31")
+        rows = _day_rows(_d(0), width_dims=("catalyst", "sentiment", "odds"))
+        loaded = fx.load_rows(_make_db(tmp_path, rows), P, _TODAY)
         h2 = fx.items(P)["H2"]
         assert fx.weekly_series(loaded, h2["value"], h2["signals"], P) == []
 
     def test_truncated_outcome_fingerprint_is_cannot_judge(self, tmp_path):
-        db = _make_db(tmp_path, _day_rows("2026-09-28", sltp_truncated=True))
-        res = fx.run(db_path=str(db), today="2026-12-31", repo_root=tmp_path, history=[])
+        db = _make_db(tmp_path, _day_rows(_d(0), sltp_truncated=True))
+        res = fx.run(db_path=str(db), today=_TODAY, repo_root=tmp_path, history=[])
         assert res["status"] == "cannot_judge" and "截断指纹" in res["reason"]
 
     def test_outcome_must_equal_the_repo_forward_close_column(self, tmp_path, monkeypatch):
         monkeypatch.setattr(ic_diagnostics, "FORWARD_CLOSE_COL", {"t7": "price_t7", "t30": "price_t30"})
         with pytest.raises(fx.ProtocolError):
-            fx.load_rows(_make_db(tmp_path, _day_rows("2026-09-28")), P, "2026-12-31")
+            fx.load_rows(_make_db(tmp_path, _day_rows(_d(0))), P, _TODAY)
 
 
 class TestSettledPrefix:
@@ -339,28 +352,106 @@ class TestTruncationPoint:
         return fx.items(P)[k]["signals"]
 
     def test_buzz_boundary_truncates_h1_and_h2(self):
-        hist = [("2026-10-20", "vT_buzz", "改了 Buzz")]
-        assert fx.truncation_point(self._h("H1"), P, hist) == {"date": "2026-10-20", "version": "vT_buzz"}
-        assert fx.truncation_point(self._h("H2"), P, hist)["date"] == "2026-10-20"
+        hist = [(_d(8), "vT_buzz", "改了 Buzz")]
+        assert fx.truncation_point(self._h("H1"), P, hist) == {"date": _d(8), "version": "vT_buzz"}
+        assert fx.truncation_point(self._h("H2"), P, hist)["date"] == _d(8)
 
     def test_scout_boundary_touches_neither_hypothesis(self):
-        hist = [("2026-10-20", "vT_scout", "改了 Scout")]
+        hist = [(_d(8), "vT_scout", "改了 Scout")]
         assert fx.truncation_point(self._h("H1"), P, hist) is None
         assert fx.truncation_point(self._h("H2"), P, hist) is None
-        assert fx.truncation_point(self._h("signal"), P, hist)["date"] == "2026-10-20"
+        assert fx.truncation_point(self._h("signal"), P, hist)["date"] == _d(8)
 
     def test_queen_only_boundary_touches_nothing(self):
-        assert fx.truncation_point(self._h("H1"), P, [("2026-10-20", "vT_queen", "")]) is None
+        assert fx.truncation_point(self._h("H1"), P, [(_d(8), "vT_queen", "")]) is None
 
     def test_boundary_before_window_is_ignored(self):
-        assert fx.truncation_point(self._h("H1"), P, [("2026-09-26", "vT_buzz", "")]) is None
+        assert fx.truncation_point(self._h("H1"), P, [(_d(-2), "vT_buzz", "")]) is None
 
     def test_undeclared_boundary_is_conservatively_everything(self):
-        assert fx.truncation_point(self._h("H1"), P, [("2026-11-02", "v_undeclared", "")])["date"] == "2026-11-02"
+        assert fx.truncation_point(self._h("H1"), P, [(_d(21), "v_undeclared", "")])["date"] == _d(21)
 
     def test_earliest_touching_boundary_wins(self):
-        hist = [("2026-12-01", "vT_buzz", ""), ("2026-11-02", "vT_buzz", "")]
-        assert fx.truncation_point(self._h("H1"), P, hist)["date"] == "2026-11-02"
+        hist = [(_d(50), "vT_buzz", ""), (_d(21), "vT_buzz", "")]
+        assert fx.truncation_point(self._h("H1"), P, hist)["date"] == _d(21)
+
+
+class TestH1Layers:
+    """修订 1：H1 按层截断。评分器未实现 ⇒ 两层都截断，但要标出层（冻结层的截断日后可解除）。"""
+
+    @pytest.fixture(autouse=True)
+    def _scopes(self, monkeypatch):
+        monkeypatch.setattr(signal_archive, "COHORT_SIGNAL_SCOPE", {
+            **signal_archive.COHORT_SIGNAL_SCOPE,
+            "vT_frozen": ("agent.BuzzBeeWhisper.*",),                                # 只改合成 / 调整层
+            "vT_channel": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*"),        # 改通道（按层声明）
+            "vT_price": ("price.volatility_20d",),                                    # 改通道读的行情量
+            "vT_fg": ("market.fear_greed",),
+            "vT_pct": ("sentiment.pct",)})
+
+    @pytest.mark.parametrize("version,layer", [
+        ("vT_frozen", "frozen"), ("vT_pct", "frozen"),
+        ("vT_channel", "input"), ("vT_price", "input"), ("vT_fg", "input")])
+    def test_every_layer_truncates_and_is_labelled(self, version, layer):
+        cut = fx.h1_truncation(P, [(_d(8), version, "")])
+        assert cut == {"date": _d(8), "version": version, "layer": layer}
+
+    def test_input_only_boundary_was_missed_by_the_original_registration(self):
+        """判别：原登记 H1 只看 `agent.BuzzBeeWhisper.score`，行情量换代它看不见；修订 1 会截断。"""
+        hist = [(_d(8), "vT_price", "")]
+        assert fx.truncation_point(("agent.BuzzBeeWhisper.score",), P, hist) is None
+        assert fx.h1_truncation(P, hist)["date"] == _d(8)
+
+    def test_input_on_the_same_day_as_frozen_is_input(self):
+        hist = [(_d(8), "vT_frozen", ""), (_d(8), "vT_price", "")]
+        assert fx.h1_truncation(P, hist) == {"date": _d(8), "version": "vT_price", "layer": "input"}
+
+    def test_earlier_frozen_then_later_input_is_frozen(self):
+        """截断日由较早的冻结层边界决定 ⇒ 这一天的截断可解除（较晚那条输入层边界到时再截）。"""
+        hist = [(_d(8), "vT_frozen", ""), (_d(30), "vT_price", "")]
+        assert fx.h1_truncation(P, hist) == {"date": _d(8), "version": "vT_frozen", "layer": "frozen"}
+
+    def test_no_boundary_is_none(self):
+        assert fx.h1_truncation(P, []) is None
+
+
+class TestAnchor:
+    """修订 1 §13.4：锚点（阶段 1 修复的世代边界）须早于窗口起点登记，否则到窗口起点 H1 回退。"""
+
+    def _P(self, version):
+        class _PP:
+            pass
+        p = _PP()
+        for k in dir(P):
+            if k.isupper():
+                setattr(p, k, getattr(P, k))
+        p.H1_ANCHOR_VERSION = version
+        return p
+
+    def test_registered_before_window_is_ok(self):
+        a = fx.anchor_status(self._P("vA"), _d(-10), [(_d(-5), "vA", "阶段 1")])
+        assert a == {"state": "ok", "version": "vA", "date": _d(-5)}
+
+    @pytest.mark.parametrize("version,hist,why", [
+        (None, [], "未登记"),
+        ("vA", [(_d(-5), "vB", "")], "不在 _COHORT_HISTORY 里"),
+        ("vA", [(_d(0), "vA", "")], "不早于窗口起点"),
+    ], ids=["常量为空", "边界表里没有", "边界太晚"])
+    def test_before_window_is_pending_after_window_is_fallback(self, version, hist, why):
+        before = fx.anchor_status(self._P(version), _d(-1), hist)
+        after = fx.anchor_status(self._P(version), _d(0), hist)
+        assert before["state"] == "pending" and why in before["problem"]
+        assert after["state"] == "fallback" and why in after["problem"]
+
+    def test_real_protocol_is_pending_today(self):
+        """当前登记：锚点未登记 ⇒ 窗口起点之前是 pending（不是 ok——阶段 1 还没做）。"""
+        assert fx.anchor_status(P, _d(-1), [])["state"] == "pending"
+
+    def test_unknown_h1_object_is_protocol_error(self, tmp_path):
+        p = self._P(None)
+        p.HYPOTHESES = (("H1", "sentiment", P.HYPOTHESES[0][2]), P.HYPOTHESES[1])
+        with pytest.raises(fx.ProtocolError):
+            fx.load_rows(_make_db(tmp_path, _day_rows(_d(0))), p, _TODAY)
 
 
 _GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
@@ -394,16 +485,16 @@ class TestWeightChange:
 
     def test_no_change(self, tmp_path):
         repo = _config_repo(tmp_path, [("2026-09-09", self.FROZEN), ("2026-10-01", self.FROZEN)])
-        assert fx.weight_change(P, "2026-12-31", repo) == {"date": None}
+        assert fx.weight_change(P, _TODAY, repo) == {"date": None}
 
     def test_committed_change_gives_its_date(self, tmp_path):
         repo = _config_repo(tmp_path, [("2026-09-09", self.FROZEN), ("2026-10-05", self.OTHER)])
-        wc = fx.weight_change(P, "2026-12-31", repo)
+        wc = fx.weight_change(P, _TODAY, repo)
         assert wc["date"] == "2026-10-05" and "提交" in wc["source"]
 
     def test_change_before_registration_is_ignored(self, tmp_path):
         repo = _config_repo(tmp_path, [("2026-09-01", self.OTHER), ("2026-09-09", self.FROZEN)])
-        assert fx.weight_change(P, "2026-12-31", repo) == {"date": None}
+        assert fx.weight_change(P, _TODAY, repo) == {"date": None}
 
     def test_uncommitted_change_counts_from_today(self, tmp_path):
         repo = _config_repo(tmp_path, [("2026-09-09", self.FROZEN)])
@@ -412,7 +503,7 @@ class TestWeightChange:
 
     def test_not_a_repo_is_unknown_not_unchanged(self, tmp_path):
         (tmp_path / "config.py").write_text(f"EVALUATION_WEIGHTS = {self.FROZEN!r}\n", encoding="utf-8")
-        wc = fx.weight_change(P, "2026-12-31", tmp_path)
+        wc = fx.weight_change(P, _TODAY, tmp_path)
         assert "unknown" in wc and wc.get("date") is None
 
     def test_weights_in_source_reads_the_real_config(self):
@@ -427,9 +518,9 @@ class TestRun:
         return _config_repo(tmp_path, [("2026-09-09", dict(P.FROZEN_WEIGHTS))])
 
     def test_not_ready_output_has_only_whitelisted_keys(self, tmp_path):
-        days = _weekdays("2026-09-28", 15)
+        days = _weekdays(_d(0), 15)
         rows = [r for d in days for r in _day_rows(d)]
-        res = fx.run(db_path=str(_make_db(tmp_path, rows)), today="2026-12-31",
+        res = fx.run(db_path=str(_make_db(tmp_path, rows)), today=_TODAY,
                      repo_root=self._repo(tmp_path), history=[])
         assert res["status"] == "not_ready" and res["h1_weeks"] == 3
         assert set(res) == _TOP_KEYS_ALWAYS
@@ -445,26 +536,51 @@ class TestRun:
         assert fx.status_line(res).startswith("⚠️")
 
     def test_stale_when_window_long_open_and_empty(self, tmp_path):
-        res = fx.run(db_path=str(_make_db(tmp_path, [])), today="2026-11-15",
+        res = fx.run(db_path=str(_make_db(tmp_path, [])), today=_d(fx.STALE_DAYS + 7),
                      repo_root=self._repo(tmp_path), history=[])
         assert res["stale"] is True
         assert fx.status_line(res).startswith("⚠️")
 
     def test_missing_db_is_cannot_judge(self, tmp_path):
-        res = fx.run(db_path=str(tmp_path / "absent.db"), today="2026-12-31", repo_root=tmp_path, history=[])
+        res = fx.run(db_path=str(tmp_path / "absent.db"), today=_TODAY, repo_root=tmp_path, history=[])
         assert res["status"] == "cannot_judge"
 
     def test_h1_boundary_in_window_shows_in_line(self, tmp_path, monkeypatch):
         monkeypatch.setattr(signal_archive, "COHORT_SIGNAL_SCOPE", {
             **signal_archive.COHORT_SIGNAL_SCOPE, "vT_buzz": ("agent.BuzzBeeWhisper.*",)})
-        days = _weekdays("2026-09-28", 10)
+        days = _weekdays(_d(0), 10)
         res = fx.run(db_path=str(_make_db(tmp_path, [r for d in days for r in _day_rows(d)])),
-                     today="2026-12-31", repo_root=self._repo(tmp_path),
-                     history=[("2026-10-05", "vT_buzz", "")])
-        assert res["truncation"]["H1"]["date"] == "2026-10-05"
+                     today=_TODAY, repo_root=self._repo(tmp_path),
+                     history=[(_d(7), "vT_buzz", "")])
+        assert res["truncation"]["H1"] == {"date": _d(7), "version": "vT_buzz", "layer": "frozen"}
         # 截断前只有 1 周 < 26 ⇒ H1 永远到不了中检 ⇒ 无法检验、协议结束
         assert res["verdicts"]["H1"]["result"] == "untestable"
-        assert "H1 已于 2026-10-05" in fx.status_line(res)
+        line = fx.status_line(res)
+        assert f"H1 已于 {_d(7)}" in line and "可解除" in line
+
+    def test_input_layer_cut_is_not_labelled_reversible(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(signal_archive, "COHORT_SIGNAL_SCOPE", {
+            **signal_archive.COHORT_SIGNAL_SCOPE, "vT_price": ("price.volatility_20d",)})
+        res = fx.run(db_path=str(_make_db(tmp_path, [])), today=_d(10), repo_root=self._repo(tmp_path),
+                     history=[(_d(7), "vT_price", "")])
+        line = fx.status_line(res)
+        # 截断前 0 周 < 26 ⇒ 协议已判「无法检验」（🔔 开头），截断原因在 ⚠️ 尾巴里
+        assert f"⚠️ H1 已于 {_d(7)}（vT_price）截断" in line and "可解除" not in line
+
+    def test_anchor_pending_is_a_note_not_a_warning(self, tmp_path):
+        """窗口前、锚点未登记：正常的待办，不该标 ⚠️（⚠️ 留给要显著标出的事）。"""
+        res = fx.run(db_path=str(_make_db(tmp_path, [])), today=_d(-3), repo_root=self._repo(tmp_path),
+                     history=[])
+        assert res["h1_anchor"]["state"] == "pending"
+        line = fx.status_line(res)
+        assert line.startswith("⏳") and "H1 锚点待登记" in line and P.FORWARD_START in line
+
+    def test_anchor_fallback_is_a_warning(self, tmp_path):
+        res = fx.run(db_path=str(_make_db(tmp_path, [])), today=_d(1), repo_root=self._repo(tmp_path),
+                     history=[])
+        assert res["h1_anchor"]["state"] == "fallback"
+        line = fx.status_line(res)
+        assert line.startswith("⚠️") and "回退到原登记对象" in line
 
 
 # ── 6. 进度行 ───────────────────────────────────────────────────────────────
@@ -472,7 +588,7 @@ class TestRun:
 class TestStatusLine:
     def test_not_ready_line_has_counts_and_no_effect(self):
         line = fx.status_line({"status": "not_ready", "h1_weeks": 3, "next_look_at": 26,
-                               "forward_start": "2026-09-28", "truncation": {}, "weight_change": {}})
+                               "forward_start": P.FORWARD_START, "truncation": {}, "weight_change": {}})
         assert line.startswith("⏳") and "3/26" in line
         import re
         assert not re.search(r"[+-]\d+\.\d+|p=", line), "进度行里出现了像效应量的数字"

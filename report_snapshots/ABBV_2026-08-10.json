@@ -12,6 +12,7 @@
     "OracleBeeEcho": 6.6923076923076925,
     "ScoutBeeNova": 6.637675
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -25,7 +26,7 @@
   "actual_prices": {
     "t1": 248.7,
     "t7": 264.5199890136719,
-    "t30": null
+    "t30": 265.2099914550781
   },
-  "created_at": "2026-08-25T08:01:32.586301"
+  "created_at": "2026-09-24T14:45:48.099862"
 }

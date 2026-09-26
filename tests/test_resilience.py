@@ -172,6 +172,9 @@ class TestRetryDecorator:
 
 
 class TestPresetInstances:
+    """下面的 `state == "closed"` 在 v0.45.344 之前依赖测试顺序（前面谁把全局实例熔断了，
+    这里就红）；现在由 conftest `_reset_circuit_breakers` 保证每条开始时是干净的。"""
+
     def test_sec_instances_exist(self):
         from resilience import sec_limiter, sec_breaker
         assert sec_limiter is not None

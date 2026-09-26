@@ -7,6 +7,7 @@ Alpha Hive - 弹性层：RateLimiter + CircuitBreaker + retry
 import time
 import threading
 import functools
+import weakref
 from typing import Optional, Callable, Any
 from hive_logger import get_logger
 
@@ -76,6 +77,13 @@ class CircuitBreaker:
     OPEN = "open"
     HALF_OPEN = "half_open"
 
+    # v0.45.344：全部活着的实例（WeakSet，不延长任何实例的寿命）。
+    # 熔断状态是进程级全局量，而 `from resilience import sec_breaker` 让各模块
+    # 各持一份绑定 —— 换掉模块属性隔离不了它们，只能在同一批对象上 reset()。
+    # 唯一读者是 tests/conftest.py `_reset_circuit_breakers`（逐测试重置）。
+    _live: "weakref.WeakSet[CircuitBreaker]" = weakref.WeakSet()
+    _live_lock = threading.Lock()
+
     def __init__(
         self,
         name: str,
@@ -91,10 +99,22 @@ class CircuitBreaker:
         self.name = name
         self._failure_threshold = failure_threshold
         self._recovery_timeout = recovery_timeout
+        self._init_state()
+        self._lock = threading.Lock()
+        with CircuitBreaker._live_lock:
+            CircuitBreaker._live.add(self)
+
+    def _init_state(self):
+        """运行态字段的唯一出处：构造与 reset() 共用，新增字段不会漏重置。"""
         self._state = self.CLOSED
         self._failure_count = 0
         self._last_failure_time = 0.0
-        self._lock = threading.Lock()
+
+    @classmethod
+    def live_instances(cls) -> list:
+        """当前所有活着的实例（快照）。"""
+        with CircuitBreaker._live_lock:
+            return list(CircuitBreaker._live)
 
     @property
     def state(self) -> str:
@@ -119,7 +139,23 @@ class CircuitBreaker:
             self._failure_count = 0
 
     def record_failure(self):
-        """记录失败调用（连续 N 次失败触发告警）"""
+        """记录失败调用（连续 N 次失败 → OPEN，并写一条 WARNING 日志）。
+
+        v0.45.339：熔断**只写日志，不发 Slack**。此前这里（持锁状态下）调
+        `SlackReportNotifier().send_risk_alert(...)`，两个问题：
+
+        1. 违反 CLAUDE.md「Slack 通知精简规则」（数据源降级 / SLO 类告警只进日志）；
+        2. **自死锁**：`self._lock` 是不可重入的 `threading.Lock`，而发送路径
+           `_send_slack_message` 会回头调 `slack_breaker.allow_request()` →
+           `state` → `with self._lock`。当熔断的恰好是 `slack_breaker` 本身
+           （Slack 连续 3 次网络失败）时，线程在自己持有的锁上永久阻塞；
+           之后任何经过这把锁的调用都跟着卡住。隔离复现（网络全桩）：线程 5 秒
+           未返回。生产日志 4 次 `CircuitBreaker[slack] -> OPEN`（08-28、09-21
+           的 Step 2 与 Step 3）之后，扫描进程都是**一行日志不再打、直到被编排器
+           超时杀掉**——与死锁吻合；生产侧因果未取线程转储，待验证。
+
+        守卫：`tests/test_slack_send_whitelist.py`（静态白名单 + 本函数的死锁回归）。
+        """
         with self._lock:
             self._failure_count += 1
             self._last_failure_time = time.monotonic()
@@ -129,25 +165,25 @@ class CircuitBreaker:
                         "CircuitBreaker[%s] -> OPEN (failures=%d)",
                         self.name, self._failure_count,
                     )
-                    # #18: 连续失败告警 → 尝试 Slack 通知（跳过测试用熔断器）
-                    if "test" not in self.name.lower():
-                        try:
-                            from slack_report_notifier import SlackReportNotifier
-                            _sn = SlackReportNotifier()
-                            _sn.send_risk_alert(
-                                f"数据源 {self.name} 连续失败",
-                                f"CircuitBreaker 熔断：连续 {self._failure_count} 次失败",
-                                severity="HIGH",
-                            )
-                        except (ImportError, OSError, ValueError):
-                            pass
                 self._state = self.OPEN
 
-    def reset(self):
-        """手动重置"""
-        with self._lock:
-            self._state = self.CLOSED
-            self._failure_count = 0
+    def reset(self, timeout: Optional[float] = None):
+        """重置成刚构造时的运行态（阈值、冷却时长等配置不动）。
+
+        timeout=None：阻塞等锁（原行为）。给了 timeout：时限内拿不到锁就抛
+        RuntimeError —— 给测试间逐条重置用：锁在测试之间被人攥着本身就是 bug
+        （多半是上一条测试留下的线程卡死在锁里），阻塞等只会把它放大成整套卡死。
+        刻意不抛 TimeoutError：它是 OSError 的子类，`except NETWORK_ERRORS`
+        会把「锁被卡住」吞成「网络抖了一下」。
+        """
+        got = self._lock.acquire() if timeout is None else self._lock.acquire(timeout=timeout)
+        if not got:
+            raise RuntimeError(
+                f"CircuitBreaker[{self.name}] 的锁 {timeout}s 内拿不到（别的线程一直攥着）")
+        try:
+            self._init_state()
+        finally:
+            self._lock.release()
 
 
 # ==================== retry 装饰器 ====================

@@ -81,7 +81,7 @@ def _make_reporter(monkeypatch, tmp_path, repo_path):
         ("CODE_EXECUTION_CONFIG", {"enabled": False}),
         ("VectorMemory", None), ("VECTOR_MEMORY_CONFIG", {"enabled": False}),
         ("MetricsCollector", None), ("EarningsWatcher", None),
-        ("SlackReportNotifier", None), ("Backtester", None),
+        ("Backtester", None),
     ]:
         monkeypatch.setattr(mod, name, val)
     from alpha_hive_daily_report import AlphaHiveDailyReporter

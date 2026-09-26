@@ -5,15 +5,594 @@
 
 ---
 
+## [0.45.345] — 2026-09-26 — 占位（进行中：数据根迁移阶段 5 执行记录 + 备份推送超时修复）
+
+## [0.45.344] — 2026-09-26 — Fixed（测试隔离）：熔断器状态跨测试泄漏根治——两类熔断器加 WeakSet 登记表，conftest 每条测试前后原地重置全部活实例（限时、拿不到锁即点名红，不阻塞）；撤掉四个文件的逐文件补丁
+
+v0.45.343 查明、当时实测零影响、留作任务的那条。根治而不是再补一个文件。
+
+### 问题（v0.45.343 实测）
+- 熔断状态是进程级全局量：`resilience` 的 `sec/yfinance/reddit/slack_breaker`、`fred_macro._fred_breaker`、
+  `newsapi_client._news_breaker`、`data_pipeline.get_fetcher()` 单例里各数据源的 `ObservableCircuitBreaker`。套件级零隔离。
+- 正对照：A 把 `yfinance_breaker` 连记到阈值不重置，B 断言 `allow_request() is False` **通过**——B 默默吃了 A 的 OPEN。
+- 全套当时 0 条消费泄漏（潜伏），但已有四个文件各自打补丁（reddit / newsapi 各 `reset()`，slack 两处换新实例），
+  `TestPresetInstances` 的「closed」断言依赖顺序——以前咬过人。
+- **换新实例隔离不了**：`sec_edgar` / `swarm_agents.cache` / `options_analyzer` 在模块顶部 `from resilience import …`，
+  各持一份绑定，换掉 `resilience` 上的名字够不到它们。只能在同一批对象上原地重置。
+
+### Changed
+- `resilience.CircuitBreaker` / `data_pipeline.ObservableCircuitBreaker`：类级 `weakref.WeakSet` 登记表，`__init__` 登记，
+  `live_instances()` 取快照。枚举是**推导**的：新增熔断器（模块级、单例里、测试自建）零改动即被覆盖；WeakSet 不延长寿命。
+- 两类的运行态字段收进 `_init_state()`，构造与 `reset()` 共用（防「构造里加字段、reset 忘了」）。
+  `ObservableCircuitBreaker` 新增 `reset()`（此前没有），含 `trip_count` 等指标。
+  `CircuitBreaker.reset()` 顺带清 `_last_failure_time`（此前只清两字段；生产零调用方，行为无差别）。
+- `reset(timeout=None)`：None 保持原阻塞语义；给了 timeout 拿不到锁就抛 `RuntimeError` 点名。
+  **刻意不抛 `TimeoutError`**：它是 `OSError` 子类，`NETWORK_ERRORS` 含 `OSError` ⇒ `except NETWORK_ERRORS` 会把「锁卡死」吞成「网络抖动」。
+
+### Added
+- `tests/conftest.py::_reset_circuit_breakers`（autouse）：每条测试**前后**各重置一次全部活实例。
+  类经 `sys.modules.get` 取、不 import（模块没被 import ⇒ 该类零实例；conftest import 会把它们提前到收集期）。
+  **后**那次让「锁被攥着」报在留下它的那条测试上，而不是无辜的下一条。
+- **死锁陷阱**：`TestBreakerDoesNotDeadlock` 的变异会留下永久攥锁的守护线程，且卡住的线程让那个实例一直活在登记表里——
+  阻塞式重置会把之后每一条测试都挂住。重置限时 2s，拿不到就 `pytest.fail` 点名；已知卡死的实例记进
+  `WeakKeyDictionary`，之后只试 0s，不每条再等 2s。
+- `tests/test_breaker_isolation.py`（11 条）：顺序成对的两条（第一条弄脏 from-import 绑定的 `yfinance_breaker`、
+  `slack_breaker`、一个靠模块级引用存活的独立 `ObservableCircuitBreaker`；第二条先核「第一条确实先跑且弄脏了」再断言全干净，
+  单独跑第二条会红——故意的）；登记表含 resilience 全部模块级实例（从 `vars(resilience)` 推导 + 四个名字正对照）、
+  fred / newsapi 模块级、数据源实例，且不延长寿命；reset 后与新构造实例逐字段相等（字段从 `vars()` 推导，
+  并先断言每个运行态字段确被弄脏）；锁被攥着时 `reset(timeout)` 与 conftest 重置都限时返回、点名、第二次不再等
+  （在工作线程里调，阻塞变异下红而不是挂）。
+
+### Removed
+- 逐文件补丁：`test_reddit_sentiment._clear_reddit_cache` 的 `reddit_breaker.reset()`、`test_newsapi_client._isolate_newsapi`
+  的 `_news_breaker.reset()`、`test_slack_send_whitelist.armed_slack` 与 `test_slack_notifier::test_send_failure_returns_false_and_logs`
+  的换新 `slack_breaker`。`test_sec_edgar` 在测试体内 monkeypatch 熔断状态是**布景**不是隔离，保留。
+
+### 验证
+- 全套（`--maxfail=1000`）：5622 passed / 2 failed，两条都与本版无关：
+  `test_economic_calendar::TestCoverageHorizon`（BLS 尚未发布 2027 CPI/NFP 日程，CPI 剩 75 天、NFP 剩 69 天 < 90 天阈值，设计内的定期红）；
+  `test_scan_catchup::TestCatchupGate::test_sandbox_rebind_applies`（读仓库外的编排器，该文件 2026-09-26 07:05 被加了字面绝对路径
+  `DATA_DIR="/Users/igg/alpha-hive-data"`，沙箱改绑拒绝真跑）。
+- 变异 10 条（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、锚点唯一 + 落地断言、`collected N` 非锚定解析、未变异基线同次序全绿）：
+
+  | # | 变异 | 结果 |
+  |---|---|---|
+  | M1 | conftest fixture 体改成裸 `yield` | 红：test_2「yfinance 漏过来了：open」 |
+  | M2 | 删 `CircuitBreaker` 登记 | 红 4 条：test_2 + 「sec_breaker 不在登记表里」等 |
+  | M3 | 删 `ObservableCircuitBreaker` 登记 | 红 3 条：test_2 + 数据源登记 |
+  | M4 | conftest 改阻塞 `reset()` | 红：工作线程 5s 未返回（红，不挂） |
+  | M5/M6 | 两类 reset 回到只清两字段 | 红：逐字段比对点出 `_last_failure_time` / `last_error`、`consecutive_failures` |
+  | M7 | `CircuitBreaker.reset` 无视 timeout | 红 2 条（36s，持锁线程 30s 后自放） |
+  | M8 | 死锁变异（持锁 OPEN 分支接回发送），真 reset | 12.8s 跑完：死锁测试 FAILED + **结束后** ERROR 点名 `CircuitBreaker[slack]`（2.0s），之后 11 条开始前 0s 即 ERROR |
+  | M9 | 阻塞 reset + 死锁，默认次序（`-x`） | 6.3s 红在自证文件（字母序在 slack 文件前），跑不到死锁那步 |
+  | M10 | 对照：阻塞 reset + 死锁，强制死锁测试在前、不 `-x` | **挂住**，150s 外部超时杀掉 —— 证明限时重置是承重的 |
+
+## [0.45.343] — 2026-09-24 — Fixed：Slack 发送去掉「频道失败 ⇒ 静默改发私信」降级——`push_report_to_slack --force` 此前每次把日报实发到私信、却记「✅ 已推送到 #alpha-hive」；另查明测试间熔断器状态泄漏当前零影响，根治方案留作任务
+
+v0.45.341 二次检查时发现两处遗留问题。按「根因还是症状」逐条定性后，一处根治，一处实测零影响、暂不动。
+
+### Fixed：`SlackReportNotifier._send_via_api` 的私信降级（根因），而不是「循环跑空返回 None」（症状）
+- **症状**：频道与私信都回 channel 类错误时，`for target in [频道, 私信]` 循环跑空，函数**返回 None**（签名 bool）。
+  只在末尾补 `return False` 就能让它消失 —— 那是治标。
+- **根因**：这个循环只为一件事存在 —— 频道回 `not_in_channel` / `channel_not_found` 时**自动改发私信用户**（`config.SLACK_DM_FALLBACK`）。
+  Bot 从未被邀请进 #alpha-hive，所以这条降级**每次都触发**。实测（桩：频道回 not_in_channel、私信成功，与生产一致）当前代码下
+  `push_report_to_slack.py --force`：发送目标 `['C0AGUUWJXJS', 'U0AGQK74NKV']`，**exit 0**，日志依次是
+  「not_in_channel，尝试 DM 降级」→「发送成功（→ U0AGQK74NKV）」→「✅ 日报已成功推送到 Slack #alpha-hive」。
+  即目的地变了、调用方只拿到 True、最后一行日志说谎（CLAUDE.md「这个失败，下游怎么知道？」）。它也是 v0.45.339 那批被禁告警漏成私信的机制。
+  2026-03-13 `push_report_to_slack.py` 的 docstring 已判定这条降级「与频道推送意图不符」，当时只把脚本改成默认跳过，降级本身留到今天。
+- **v0.45.341 之后它零合法消费者**：`_send_via_api` 唯一调用链是富文本日报（意图是频道）；需要私信的 `pre_scan_notify` 自己 `requests.post` 到用户 ID，从不走这里。
+- **修法**：删掉降级。`_send_via_api` 只发调用方给的 `channel`，每条路径显式返回 bool（循环随之消失，None 结构上不可能）；
+  `not_in_channel` 记一行「Bot 不在该频道…不会改发私信」。删 `config.SLACK_DM_FALLBACK`（唯一读者就是这里）。要发私信就显式把用户 ID 当 channel 传。
+  成功日志措辞不变（`Slack 消息发送成功（用户身份 → …）`），仓库与编排器里没有按这些字样解析日志的代码。
+
+### Added（测试）`tests/test_slack_notifier.py::TestNoSilentDmFallback`（8 条）
+- 桩按生产现实设：频道回 not_in_channel、私信成功。断言只发一次且发往频道、返回 False、日志带 not_in_channel；
+  逐结果（ok / not_in_channel / channel_not_found / 其它错误 / 缺 error 字段 / 传输异常）断言返回值 `is` bool；
+  端到端 `push_report_to_slack --force` ⇒ exit 1、**不出现**「已成功推送」、出现「日报推送失败」。
+- 修复前跑：4 红（改发私信 ×2、返回 None ×2）。
+- **治标对照**：旧代码只补 `return False` ⇒ 两条 None 用例转绿，但「改发私信」与「端到端不许谎报」**仍红** —— 测试钉的是根因，不是症状。
+
+### 未修：测试间全局熔断器状态泄漏 —— 实测当前零影响，根治成本不低，留作任务
+- 起因：两条旧测试在全局 `slack_breaker` 上 `record_success()`。往根上查：`resilience` 的 4 个模块级熔断器、`fred_macro` / `newsapi_client`
+  的模块级熔断器、`data_pipeline._fetcher` 单例里的 `ObservableCircuitBreaker`，**全套测试没有任何一处统一复位**；
+  `test_reddit_sentiment` / `test_newsapi_client` 各自在文件里复位，`test_resilience::TestPresetInstances` 断言全局熔断器是 closed（依赖顺序）。
+- 实测（插件给两类熔断器挂钩，在 fixture 之后、测试体之前拍快照，只算「测试体用到了开局就脏的熔断器」）：全套 **0 条**；
+  全局熔断器全程从未 OPEN。正对照：人为让前一条把 `yfinance_breaker` 打到 OPEN，后一条被记录到 —— 而且那条**照样通过**，
+  即泄漏发生时没人会红。首版插件在 `pytest_runtest_setup` 拍快照（早于各文件的复位 fixture），报出的 3 条「泄漏」是量具假象。
+- 根治要：两类熔断器的实例注册表（派生，不手抄名单）+ `ObservableCircuitBreaker.reset()` + conftest 统一复位，且复位**必须带超时**——
+  死锁变异会让某个熔断器的锁被守护线程永久持有，阻塞式复位会把后面每条测试都卡死。零现时影响下，这笔账不划算现在付；
+  逐条测试补复位则正是治标。完整方案已作为任务留给用户决定。
+
+## [0.45.342] — 2026-09-24 — Fixed：数据仓库备份范围与 main 对齐——阶段 5 后 `report_snapshots/` 与报告文件将零异地副本（排除理由被阶段 5 悄悄作废）；加守卫防两份清单再漂移
+
+阶段 6 准备（只读调查）时发现，属阶段 5 漏洞，须在 09-26 搬迁前合入。用户 09-24 批准「与 main 对齐」的范围。
+
+**问题**：`data_backup/export.py` 把「`report_snapshots/` 与根目录已跟踪报告」排除在数据仓库备份外，理由是「已被代码仓库 git 跟踪并推送」。
+阶段 5 让代码检出里的被跟踪数据原地冻结、新产物只写数据根 ⇒ 日报白名单提交再也提交不到新内容 ⇒
+09-26 起新的 `report_snapshots/`（weekly_optimizer / self_analyst 的 T+7 样本）**既不进 main 也不进数据仓库**；报告类至少还有 gh-pages 一份，快照连这个都没有。
+理由失效时没有任何东西会红——两份清单（迁移分类表 / 备份范围）各自维护、互不知道。
+
+### Fixed
+- `data_backup/export.py`：`STATE_DIRS` 加 `report_snapshots` / `paper_portfolio_state_backup` / `reports`；`ROOT_FILE_GLOBS` 加日报 json/md、X 线程、
+  ML 增强报告、`deep-*.html`、`*_raw.json`、站点文件（`index.html` / `dashboard-data.json` / `manifest.json` / `sw.js` / `rss.xml`）、参数优化产物、`watchlist_override.*`。
+- `EXCLUDED_FROM_THIS_PASS` 改为以 `migrate_data_root` 的 MOVE 规则原文为键、带理由：缓存 8 项（含 `.factor_cache` parquet、`.risk_cache`）、`chroma_db`、`logs`、`db_backups`、
+  `realtime_metrics.json`；`.swarm_results_*.json` / `analysis-*-ml-*.json` 仍标「用户未定」（它们从不在 main 里，不属「对齐」）。
+
+### Added
+- `tests/test_data_backup.py::TestExportScopeCoversMoveRules`（4 项）：MOVE 规则每一项要么被导出覆盖、要么写明排除理由；反向不许有过期 / 矛盾条目；
+  正面走一遍 `run_export` 确认新纳入的类别真进了产物。变异：去掉 `report_snapshots` ⇒ 2 红；迁移分类表新增目录而备份没做决定 ⇒ 1 红。
+
+### 验收
+- 真实数据导出（09-23 彩排根，生产副本）：1.4s，1549 个根文件 + 1383 份快照，产物 113 MB，`git gc` 后 pack **9.7 MB**；
+  用本机 13 个真实密钥扫 3024 个文件 **0 命中**。
+- 全套 5592 passed / 85 deselected / 2 xfailed（`--deselect TestCoverageHorizon`，按设计红）；`ruff check .` 全过。
+- 今晚生产 Step 14 会先以新范围跑一次（此时 `--src` 仍是代码检出），首次约 +10 MB——等于搬迁前在生产上预验新范围。
+
+## [0.45.341] — 2026-09-24 — Removed：v0.45.339 之后零生产调用方的 Slack 发送代码——SlackReportNotifier 告警类方法与失败重试队列、整个 slack_notifier.py、run_daily_scan 的无用 notifier；白名单守卫把删掉的名字留作墓碑
+
+v0.45.339 把六处告警类发送改成只写日志后，发送器里留下一批**没人调用、但一调就发**的方法。
+本版按成员粒度数读者后删除（auto-memory `alpha-hive-dead-field.md`「死代码可以是带电的」）。
+
+### 判死：两条独立证据，各带正对照
+- **静态**（`git ls-files -z | xargs -0 grep`，全文件类型）：下列成员在非测试 `.py` 里只剩注释/docstring 提及；
+  仓库外 `~/.claude/scripts/`、`~/.claude/scheduled-tasks/`、launchd、`~/alpha-hive-data` 零命中。
+  正对照：同一搜索在编排器里命中 `pre_scan_notify` / `push_report_to_slack` / `alert_manager`。
+- **运行期 dispatch 录制**（临时 pytest 插件给两个通知器类挂 `__getattribute__`，记「谁、从哪个文件、碰了哪个成员」；
+  Slack 武装成假 token + 记录器会话，零出网）：驱动全部六条旧发送路径 + `push_report_to_slack --force` +
+  `pre_scan_notify` 发送与轮询 + `run_daily_scan._run_scan`。生产文件对通知器的**全部**外部访问只有：
+  `pre_scan_notify` → `enabled` / `use_user_token` / `user_token`（它自己 `requests.post`，不调任何通知器方法）；
+  `push_report_to_slack` → `enabled` / `send_rich_daily_report`。`SlackNotifier` 零访问（含 `AlertDispatcher({"slack_enabled": True})`）。
+  正对照：武装自检直调的 `send_risk_alert` 被录到 ⇒ 录制器看得见发送方法。改后复跑：生产访问逐项不变，只少了 `run_daily_scan` 的构造。
+- 生产日志不能当第三条证据：最后一条 blocks 发送是 09-23 14:58（DELL，早于 v0.45.339 提交的 20:01），**此后还没有过扫描** ⇒ 待验证。
+- 顺带：`push_report_to_slack.py` 不带 `--force` 在构造通知器之前就 `exit 2`，编排器不传 ⇒ 日常生产里
+  碰 `SlackReportNotifier` 的只有 `pre_scan_notify`。
+
+### Removed
+- `slack_report_notifier.py`：`send_risk_alert` / `send_opportunity_alert` / `send_scan_progress` / `send_x_thread` /
+  `send_daily_report`、`_build_daily_report_blocks` / `_build_opportunity_alert_blocks`、`_send_slack_message`（只被前五个与下一条调用）。
+- 同文件 `test_connection`（零调用方；往频道发一条「连接测试」—— 不在许可的两类里；两份旧文档还在教人跑它）。
+- 同文件失败重试队列 `retry_failed` / `_enqueue_failed` / `_failed_queue` / `_sent_hashes`：`retry_failed` 零调用方 ⇒ 队列只写不读；
+  且队列是实例内存，两个调用方都是发一条就退出的一次性进程 ⇒ **结构上**不可能被重试。失败的出口仍是返回值
+  （`push_report_to_slack` 据此 exit 1）+ `Slack 发送失败` error 日志。`time` / `hashlib` / `deque` 随之无读者（ruff F401 确认）。
+- `slack_notifier.py` 整个删除。它的 `main()` 在 v0.45.339 后只剩「把 webhook URL 写进 `~/.alpha_hive_slack_webhook`」；
+  需要时手工写（`chmod 600`）即可。`pre_scan_notify` 第三级兜底**直接读该文件**，不依赖本模块（新测试钉住，见下）。
+- `run_daily_scan._run_scan` 的 `notifier = SlackReportNotifier()`：构造后从不使用，构造本身对已 404 的 webhook 发一次 HEAD。
+  `--dry-run` 的 Slack 状态检查保留（只读 `enabled` / `use_user_token`）。
+
+### Changed（测试）
+- `tests/test_slack_send_whitelist.py`：`SENDER_LIBS` 只剩 `SlackReportNotifier`。**删掉的名字留作墓碑**
+  `RETIRED_SEND_METHODS` / `RETIRED_SENDER_MODULES`，继续按发送认 —— 发送方法集合是从库源码推导的，方法一删推导就认不出
+  把 v0.45.339 之前的旧调用块原样放回；而 `sentiment` / `real_data_sources` 的旧块包在 `except Exception` 里，
+  运行期 `AttributeError` 被吞成 debug 日志：不发、也不报。原「按类名认 `SlackNotifier`」的 R2 改为墓碑规则（含 `import_module` 字符串）；
+  `SlackNotifier.send` 那种泛名的前提改由 `test_no_sender_method_has_a_generic_name` 钉住。新增 `test_retired_names_are_really_gone`、
+  逐个墓碑的 teeth、「复活的 slack_notifier.py」（`f2b03187` 原文节选）与「改前的 AlertDispatcher 两行」用例；
+  武装自检改用 `send_plain_text`；死锁测试把线程内异常单独接住 —— 否则「线程死于异常」会被报成「死锁回来了」。
+- `tests/test_slack_notifier.py`：删 blocks / 风险告警 / 重试队列测试；失败路径改断言「返回 False + error 日志 + 熔断器记一次」
+  （并换掉全局 `slack_breaker`，不再污染同进程）；新增 `TestPreScanWebhookFallback`（`HOME` 指 tmp、`requests.post` 换记录器）。
+- `tests/test_utilities.py::TestSlackWebhookEnvVar`：两条 `SlackNotifier` 用例随模块删除；「空环境变量落到文件」改测
+  `SlackReportNotifier` 且 `HOME` 指 tmp —— 旧写法会读本机真 webhook 文件，断言 `!= "" or is None` 也近乎恒真。
+- `tests/conftest.py::_block_slack`：只拦 `slack_report_notifier`；docstring 去掉会过期的「N 处」计数。
+- `QUICK_START.md` / `SLACK_INTEGRATION_GUIDE.md`：顶部加「已过时」横幅（不改正文）。
+
+### 变异（`PYTHONDONTWRITEBYTECODE=1`，每轮清 pyc、核 `collected N>0`、sha 还原）——18 条，17 红
+| 变异 | 红在哪 |
+|---|---|
+| 六个旧发送者各自整文件恢复 `fd1dea85` | 全部红静态扫描（墓碑 R1/R2）。行为层：熔断器 / EDGAR / 财报 `AttributeError` 外泄、AlertDispatcher `ModuleNotFoundError` ⇒ 红；数据源降级红在「日志少了一句」；**情绪突变行为层不红**（被吞）——墓碑正是为它 |
+| 五处各接回现役 `send_plain_text` | 静态 + 对应行为测试红（武装记录器录到 `chat.postMessage`）；熔断器那条死锁测试报「自死锁回来了」 |
+| 旧版 `record_failure` 原样恢复 | 死锁测试报「抛了异常（不是死锁）」—— 与上一条分得开 |
+| 墓碑方法集清空 / 墓碑模块清空 | 各 4 红（改前块 teeth + 真文件注入；SlackNotifier 三式 + AlertDispatcher 两行）；「复活的 slack_notifier.py」仍被 R4/R6 认出 |
+| 加回 `send_risk_alert` 定义 | `test_retired_names_are_really_gone` + 对应墓碑 teeth 红 |
+| `send_plain_text` 改名 `send` | `test_no_sender_method_has_a_generic_name` 等 11 红 |
+| `pre_scan_notify` webhook 路径改名 | `test_webhook_file_is_used` 红 |
+| `slack_notifier.py` 原样写回 | **只有** `test_retired_names_are_really_gone` 红：全仓扫描走 `git ls-files`，未 `git add` 的文件看不见（已写进该测试 docstring；这是所有基于 `_repo_files` 的 AST 守卫的共同盲区） |
+| `run_daily_scan` 加回无用 notifier | 不红 —— 无害的浪费，不设守卫 |
+
+## [0.45.340] — 2026-09-23 — 占位（进行中：buzz_v1 阶段 1——Buzz 情绪动量改读归档、按扫描日期回看 + 通道全精度入档；计划 09-25 扫描上线）
+
+## [0.45.339] — 2026-09-23 — Fixed：Slack 只许发两类消息——六处告警类发送改为只写日志（日志行保留）；熔断器持锁发 Slack 的自死锁随之消失；新增 AST 白名单守卫
+
+CLAUDE.md「Slack 通知精简规则」只许 ① `pre_scan_notify.py`（LLM 模式确认）② `push_report_to_slack.py`（富文本日报）。
+此前这条只写在文档里，生产一直在违反。
+
+### 生产证据（逐发送者归因 `logs/alpha_hive.log{,.1,.2,.3}`；日志无日期，按「蜂群协作启动」锚点切）
+- 162 行「Slack 消息发送成功」里 **108 行是测试写进生产日志的桩**，不是真发送：`Slack 通知已禁用` → `用户身份 → C0AGUUWJXJS`
+  → 无括号「发送成功」→ `timeout` 四连（54/54 逐条对上），全在 v0.45.239 修日志隔离之前的 log.3/log.2。
+  粗分类「54 条频道 + 54 条私信」里频道那 54 条全是这个。
+- 其余 54 行全是 `Bot Token + blocks → U0AGQK74NKV`（**私信用户**），只来自两处：`real_data_sources._try_src_slack_alert`
+  （48，全是 yfinance_short_interest 降级）与 `sentiment._check_sentiment_spike`（6）。v0.45.239 之后只剩生产流量的日志里，
+  确定的真实私信 5 条：09-22 yfinance_short_interest 降级 + VKTX / RKLB / MU 情绪突变，09-23 DELL。更早那些大多紧邻测试夹具行
+  （v0.45.131 之前测试真发 Slack），逐条归属待验证。
+- `if getattr(n, "enabled", False)` 为什么挡不住：`enabled = bool(user_token) or webhook_alive`，本机有 Bot Token ⇒ 恒真；
+  Bot 不在 #alpha-hive ⇒ `not_in_channel` ⇒ 降级成私信。这道闸管「能不能发」，规则管的是「该不该发」。
+- EDGAR / 熔断器 / 财报 / `alert_manager --dispatch` 四处：日志里没有成功发送的记录，但代码路径是通的。
+
+### 顺带发现：熔断器持锁发 Slack 会自死锁
+`CircuitBreaker.record_failure` 在 `with self._lock`（不可重入的 `threading.Lock`）里调 `send_risk_alert` → `_send_slack_message`
+→ `slack_breaker.allow_request()` → `state` → 又拿同一把锁。熔断的恰是 `slack_breaker` 本身时，线程卡在自己持有的锁上永远等下去。
+隔离复现（网络全桩）：线程 5 秒未返回；换成别的熔断器则走到一次 `chat.postMessage` 尝试。生产 4 次 `CircuitBreaker[slack] -> OPEN`
+（08-28、09-21 各两次，分属 Step 2 与 Step 3）之后，扫描进程都**再没打出一行日志**，直到编排器超时杀掉（Step 2 静默
+14:16:45→14:41:41、14:24:08→15:11:35；Step 3 各静默约 4 分钟到 600s 上限）。与死锁吻合；没有线程转储，生产侧因果待验证。
+这两天的 Step 2 超时此前归因于限流变慢，这是另一个候选原因。本版删掉那次调用，这条路径随之消失。
+
+### Fixed / Changed（六处 → 只写日志，原日志行保留，Slack 正文里多出的信息并进日志）
+- `swarm_agents/sentiment.py::_check_sentiment_spike`（逐标的预警）：删 send_risk_alert 块，保留 `📡 情绪突变告警` WARNING。
+  **只动这一个函数**，没碰 `_get_sentiment_momentum`（另一 session 在改维度 IC 协议阶段 1）。
+- `real_data_sources.py`（数据质量降级）：删 `_try_src_slack_alert`；WARNING 行补「进入降级模式，数据质量受影响」。
+- `edgar_rss.py`（数据质量降级）：删 `_try_rss_slack_alert`；WARNING 行补「实时内幕交易告警不可用」。`tests/test_edgar_rss.py` 去掉对它的 monkeypatch。
+- `resilience.py::CircuitBreaker.record_failure`（SLO）：删持锁发送（即死锁修复），`-> OPEN` WARNING 保留。
+- `alpha_hive_daily_report.py`（逐标的通知）：`--check-earnings` 的财报更新改 `_log.info("📊 财报更新 …")`；reporter 不再构造
+  `SlackReportNotifier`（它唯一的用途就是这条通知和对它的 `retry_failed`，而构造时还要对已 404 的 webhook 发一次 HEAD）。
+  `tests/test_pipeline.py`（4 处）、`tests/test_ghpages_data_root_migration.py`（1 处）去掉对模块属性 `SlackReportNotifier` 的桩。
+- `alert_manager.AlertDispatcher`（扫描健康 / SLO）：不再挂 `SlackNotifier`，`slack_enabled` 为真只打一行 INFO；
+  `config.ALERT_CONFIG["slack_enabled"]` → False。编排器 Step 6 不带 `--dispatch`，生产之前没走到过这里。
+- `slack_report_notifier.py` 的 `__main__`、`slack_notifier.py` 的 `main()`（手动 CLI）：不再发演示消息（机会 / 风险 / 进度 / 测试告警），
+  只报状态 / 只保存 webhook。
+- 白名单两处与发送器类本身没动。`send_risk_alert` 等方法还在 `SlackReportNotifier` 里，已无生产调用方——守卫拦调用，不拦定义。
+
+### Added：`tests/test_slack_send_whitelist.py`（38 条，全部离线）
+- **静态**：AST 扫本仓全部非测试 .py（`tests/_repo_files.own_python_files`，git 口径）。六条规则：R1 调发送方法（方法集合**从发送器类源码推导**：
+  含 `.post(` 的方法沿 `self.` 边求闭包，将来新加 `send_xxx` 自动覆盖）/ R2 引用只能按类名认的发送器（`SlackNotifier` 的发送方法叫 `send`，太泛）/
+  R3 把 Slack 端点传给网络调用 / R4 `get_session("slack")` / R5 Slack SDK / R6 Slack 凭证。**双向**：白名单外零命中；
+  白名单内每个模块都必须被扫到在发送（防名单过期，也是扫描器在真代码上的正对照）。
+- **扫描器有牙**：15 个必红样本 + 9 个必不红样本 + 真文件注入（把改前的块插回当前 sentiment.py / resilience.py 那行保留下来的日志下面；
+  锚点找不到就红 ⇒ 顺带守住「日志行还在」）。
+- **行为**：把 Slack **武装起来**（假 token ⇒ enabled 为真，记录器 session 假装发送成功），逐条走六条被禁路径，断言零发送 + 日志行仍在；
+  先自证武装真的生效（直接调 `send_risk_alert` 必须被记录 1 次）——conftest `_block_slack` 默认让 enabled 恒假，那个状态下改没改都发不出去。
+  死锁回归：`slack_breaker`（换成新实例）熔断时 `record_failure` 必须在 10 秒内返回。
+
+### 验收
+- 变异 16 条（`PYTHONDONTWRITEBYTECODE=1`、每轮清 pyc、Python 驱动、每轮核 `collected 38`、JUnit 取失败原因、改前版本钉 `fd1dea85`），
+  全部按预期理由变红：六个文件和两个 CLI 各自回退到改前（白名单红 + 对应行为测试红在「记录到 chat.postMessage」上；熔断器另红在「10 秒未返回」上）；
+  三处只把发送加回当前代码，同样红在发送上；删日志行 / 删并进来的那句，红在日志断言上；扫描器按方法名失明 ⇒ 白名单反向断言红；
+  去掉类体豁免 ⇒ 误报红；夹具不武装 ⇒ 自检红。全部还原后 38/38。
+- 首轮变异有两处没对上，据此改了测试：驱动的正则漏掉了带空格的参数化 ID（改用 JUnit、给参数化加 ids）；M2/M3/M6 先红在**新日志措辞**上，
+  而不是「发了」上（把零发送断言挪到每条最前，重跑后理由对齐）。
+- 相邻 18 个测试文件 423 passed；全套 5587 passed / 85 deselected / 2 xfailed（`--deselect TestCoverageHorizon`，按设计红）；`ruff check` 全过。
+- 全程没有发出任何真实 Slack 消息：静态部分只读源码；行为部分的 get_session 是记录器，webhook 探活是常量，token 是假串。
+
+### 已知盲区
+- 仓库外编排器 `~/.claude/scripts/alpha-hive-orchestrator.sh` 扫不到；已人工核对，它不 curl Slack。
+- R1 按方法名匹配：将来别的类恰好有 `retry_failed` / `test_connection` 会误报，报错信息指向改名或收窄规则。
+
+### 教训
+「`new` 一个通知器、`if enabled` 就发」这个形状在六个模块里各自长出来过——它回答的是「能不能发」。所以守卫守的是「谁在调用发送」，
+不是某一处调用。另：拿日志数发送次数前，先剔掉测试写进来的行（这次 162 行里 108 行是桩）。
+
+---
+
+## [0.45.338] — 2026-09-23 — docs：二次检查 v0.45.326——代码与测试无缺陷；报告 / CHANGELOG / docstring 里四处表述错（一处日期是从备份文件名推的）
+
+### 核实了什么
+- **代码与测试**：v0.45.329 之后脚本已重构（去池化）、我的测试夹具由 6 天改为 6 周 × 2 天。在**当前 main** 上重跑列变异
+  （`PYTHONDONTWRITEBYTECODE=1`、Python 驱动清 pyc、每轮核 `collected 20`、还原后逐字节比对）：只换列 `price_t7` 6 红、
+  写死 `close_t7` 仅「跟随 FORWARD_CLOSE_COL」1 红、过滤仍按 `price_t7` 仅「price_t7 为空的行」1 红——与 v0.45.326 当时同一格局，守卫仍有牙。
+- **数值声明**：逐条对 2026-09-23 快照重算；CRWD 时间线用生产库 13 份历史备份（`immutable=1` 只读）核对。
+
+### Fixed（均为表述，数值结论不变）
+1. **CRWD 复权日期是编的**：原写「09-15 的 `close_correction`」，依据只是备份文件名 `bak_close_correction_20260915`——而那份备份里 CRWD 04-26 的
+   `price_at_predict` 早已是 112.03。实测 08-12 备份仍是 448.13、09-10 备份已是 112.03 ⇒ 复权发生在 **08-12 ~ 09-10 之间**，具体哪天待验证。
+   「08-16 报告时这两行还不是垃圾」这句成立（08-12 未复权，原报告均值 +0.20 与无垃圾一致）。
+2. **均值拆解归因错**：原写「右尾被砍把均值压低约 0.87pp」。实测（同 1229 行、CRWD 单列）截断压低 583 行合计 −1.63pp、**抬高** 523 行合计 +0.78pp
+   （止损档把左尾也截短了：RKLB 06-15 收盘 −26.1%、记成 −15.0%），−0.85pp 是两尾**净**效应。CRWD 相对自身收盘值是 +0.52pp（原「+0.54」是相对剔除）。
+   1.216 − 0.849 + 0.522 = 0.889，与旧均值逐位对上。
+3. **基准比较混了行集**：「恒定看多 50.6% → 52.1%」前者 1229 行、后者 1237 行；同一 1229 行是 50.6% → 52.2%。
+4. **「全部输出都是截断口径」过头**：04-15（路径模拟上线）前的 162 行里只有 28 行 `price_t7 ≠ close_t7`。改为「都是对着 `price_t7` 算的，
+   配对样本整体 43.6% 与收盘价不符」。
+- 另：v0.45.326 条目里「准确率按周合并」一行补注——同属只去一半池化，同日配对口径 +0.01pp（p=1.00，v0.45.329），结论不变；
+  测试模块 docstring 补一句「接近 0 / 持平」是写死阈值印的判定、v0.45.329 已删。
+
+改动位置：`experiments/ml_expected_return_report.md`（v0.45.326 节三处，就地加〔v0.45.338 更正〕）、`experiments/ml_expected_return_replay.py`
+（docstring）、`tests/test_ml_expected_return_replay_close_target.py`（docstring）、本文件 v0.45.326 条目（四处就地标注，不删原文）。
+
+### 教训
+第 1 条是本仓「不编数据」规则的一个具体形状：**把文件名当事实**。`bak_close_correction_20260915` 读起来像「close_correction 前的备份」，
+我据此写了日期，没打开它看一眼——打开之后第一行就否定了这个推断。用来定时间的证据要是**数据里的值**，不是给文件起名的那个人当时的意图。
+第 2、3 条同源：v0.45.326 收尾时我把拆解数凑成了一个好讲的故事（「右尾砍掉」「基准被压低」），没回头核算它们是否在同一批行上、是否只有一个方向。
+
+---
+
+## [0.45.337] — 2026-09-23 — Fixed：v0.45.332 二次检查——价格因子构造抛异常时 `--benchmark` 表头误报「行情不可用」（新 status `factor_error`）；另核实 / 更正 v0.45.332 的三处文字，并量化「end 不含当日」（结论：不值得单独开版）
+
+### Fixed
+- `ic_diagnostics.build_benchmark_panel`：v0.45.332 把「没拿到行情」（`px is None`）与「行情拿到了、构造因子时抛异常」
+  （`except` 分支把 `mom20` 置 None）并成同一个 `unavailable`，表头印「⚠️ 行情不可用」。复现：8/8 只行情齐全
+  （`n_priced: 8`），非 DatetimeIndex 让 `.loc[:Timestamp]` 抛 TypeError ⇒ 表头照样说行情不可用，把读表的人引去查
+  网络 / 限流，真因只在 stderr 一行。**修可见性的那一版自己新造了一个「把一种失败误报成另一种」**（CLAUDE.md 硬检查项同形）。
+  现拆成 `unavailable`（没拿到行情）与 `factor_error`（`⚠️ 行情已拿到（8/8 只），但价格因子构造失败（原因见 stderr）
+  —— 经典因子三行缺席`）；`--json` 的 `price_coverage.status` 随之多一个取值。
+
+### 二次检查查过、不是 bug 的
+- `n_factor_records = len(mom20)` 数的是去重后的 (ticker, date) 键、`n_records` 数的是行——有重复行时全覆盖也会被判 partial。
+  **不可达**：`predictions` 有 `UNIQUE(date, ticker)`，日期是纯 `YYYY-MM-DD`，快照 0 重复；即便可达也是「多报 partial」
+  （出声的方向），未改。
+- 「失败票 = 列在、整列 NaN」此前只凭注入不存在代码（404）一条实测。读 yfinance 1.2.0 源码核实：`multi._download_one`
+  对**任何**异常（含 429 `YFRateLimitError`、超时）都存 `utils.empty_df()`，`history()` 隐藏异常时的各条 return 也是它，
+  而 `empty_df` 带 NaN 的 `Close` 列 ⇒ 所有失败路径汇合成同一形状，404 探针恰好有代表性。
+- `experiments/ic_power_analysis.py`：整批全空现返回 None ⇒ 走它既有的「⚠️ 行情不可用，降级到记忆里的 N_eff」
+  （`source=on_record_fallback`），可见。仓库内外无其他 `build_benchmark_panel` 调用方（.md 里只是文字引用）；
+  同日 v0.45.336（另一 session）在 v0.45.332 之后加的 `check_truncation` 参数基于二元组返回，兼容。
+
+### 更正 v0.45.332 条目（已就地改并注明）
+- 「5 处调用点改拆二元组」→ 实为 **4 处**（第 5 处在 `pytest.raises` 里、返回前就抛）。
+
+### 「end 不含当日」量化（v0.45.332 发现未处理；非代码）
+`build_benchmark_panel` 传 `end=dates[-1]`，yfinance 的 `end` 不含当日 ⇒ 最后一个预测日的经典因子只到 d−1 收盘，其余日含 d 当日收盘。
+- **哪边对**：扫描在 17:00 ET 收盘后跑，`price_at_predict` 校正为 d 官方收盘；生产库快照对账 1232/1241 行 = d 当日收盘、
+  0 行 = 前一交易日 ⇒「含 d」才对（与前瞻收益起点无缝），**其余 104 天无前视**，只有最后一天不一致。
+- **影响**（行情只拉一次、同一份喂两版；现状版复现 v0.45.328 的 +0.1683）：20日动量 +0.1683→+0.1683、
+  5日反转 −0.0298→−0.0281、低波动 +0.0365→+0.0362；周 t 与通过数全不变（09-11 是周五，该周代表日是 09-08）；
+  噪音地板判定与「综合分 vs 最佳经典因子」判定全不翻。
+- **上界**：日度 IC 是 N=94 天的均值，只改一天最多挪 2/N≈0.021，小于三因子到噪音地板的最近距离 0.032 ⇒ 这两个
+  基于 IC 的判定在本数据上不可能翻，且界随 N 缩小。⚠️ 该界**不管**「通过 x/4」（看 |t|≥2）——某口径 t 贴着 2 时
+  一天也可能翻它（本数据实测未变）。
+- **结论：不值得单独开版**。修法一行（`end` 传 `dates[-1]`+1 天；`dates[-1]` 已过 T+7，无未完成 K 线风险），
+  有人再动 `build_benchmark_panel` 时顺手带上。
+
+### Tests
+- `tests/test_ic_diagnostics_price_coverage.py`：新 `test_factor_construction_error_is_not_reported_as_missing_prices`
+  （先断言 stderr 真有「价格因子构造失败」——证明夹具打进了 except 分支）；`test_unavailable_prices` 加断言表头说
+  「行情不可用」——两个方向都钉住（因子错误不许冒充缺行情；真缺行情仍须如实说）。
+- 变异 15 条全红（v0.45.332 的 12 条重跑 + 新 3 条：factor_error 并回 unavailable / factor_error 无专属文案 /
+  unavailable 文案丢「行情不可用」——各恰好被对应的新断言杀死）。ruff 过；全套 5538 passed / 1 failed —— 唯一的红仍是 `test_economic_calendar.py::TestCoverageHorizon`（BLS 2027 日程未发布的日期驱动告警，与本版无关）。
+
+## [0.45.336] — 2026-09-23 — Fixed：`ic_diagnostics --benchmark` 下截断告警印两遍（v0.45.328 二次检查记下的小瑕疵）——维度表与基准表各查一次同一指纹；`main()` 关掉第二次，直接调 `build_benchmark_panel` 的人默认仍查
+
+v0.45.328 让 `load_daily_ic` 与 `build_benchmark_panel` 在 close 口径上都查截断指纹（`warn_if_truncated`）。`main()` 带 `--benchmark` 时两者对**同一库、同一 (终点列, checked 列)** 各查一次 ⇒ close 列真被写成离场价时，同一行告警连印两遍（每个 horizon）。指纹 SQL 只取决于这两列（`checked=1 AND 终点列 IS NOT NULL AND exit_price IS NOT NULL AND exit_reason IN ('SL','TP')`），与两边各自的行集（维度表多一个 `dimension_scores IS NOT NULL`）无关——第二次查不可能给出不同答案。
+
+### Fixed
+- `build_benchmark_panel(..., check_truncation=True)`：新关键字参数，默认照旧查。只有同一次运行里已对同一库、同一 target/horizon 调过 `load_daily_ic` 的调用方才该传 False——`main()` 是唯一这么做的。
+- 没改成「模块级已告警集合」去重：那是跨调用的隐藏状态，同一进程里库被改写后再查会被静默吞掉；显式开关的作用域只到 `main()` 这一次运行。
+
+### Added
+- `tests/test_ic_diagnostics_benchmark_close_target.py` +4 条：`main()` 在 `--benchmark` / `--benchmark --json` / 不带基准三种运行下告警**恰好一次**（不是「至多一次」——0 次是把告警关丢了，比两遍更糟）；`build_benchmark_panel` 默认仍告警。
+
+变异台账（`PYTHONDONTWRITEBYTECODE=1`、每轮 `find … -name '*.pyc' -delete`、每轮 65 条、还原后 `cmp` 一致）：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| D1 | 改动前原文件（`a32f0dce`，不用 `HEAD:`） | 2 红：两种 `--benchmark` 运行，断言本身 `assert 2 == 1`——即本版要修的现象 |
+| D2 | `main()` 仍让基准表查 | 2 红（同上） |
+| D3 | 基准表忽略开关 | 2 红（同上） |
+| D4 | 维度表不查（只剩被关掉的基准表） | 4 红：三种运行全部 0 次 + 维度表既有指纹测试 |
+| D5 | 开关默认改 False | 2 红：基准表默认告警的两条 |
+
+生产快照（09-23 `sqlite3.backup()`）复跑 `--benchmark`（离线）：t7 / t30 的因子、噪音地板、维度表与 v0.45.328 记录的输出全精度相同，stderr 0 行（生产 close_t7 本就不触发告警）——本版只动告警次数，不动任何数。
+
+全套 5537 绿 1 红：`test_economic_calendar::TestCoverageHorizon`（BLS 2027 日程未发布，按设计的定期告警，与本版无关）。
+
+---
+
+## [0.45.335] — 2026-09-23 — Fixed：v0.45.322（数据根迁移阶段 5 代码批次）二次检查的 6 条——冻结数据被 git 同步误报成旁路写入、copy 中途失败不能续跑、retire 中途失败丢记录、符号链接被静默跳过、导出因 import 崩、测试夹具可能写进真仓库；定时任务改为按脚本打印的绝对路径读结果
+
+`/code-review high` 复检 v0.45.322 的 5 个提交后全部修复。搬迁仍按原计划 09-26 周六执行，runbook 同步更新（memory `alpha-hive-data-root-migration.md`「阶段 5 执行」节）。
+
+### Fixed
+- **定时任务读旧位置**（最严重）：周/月任务的 SKILL.md 让 agent 在代码检出里按相对路径读 `weight_history.jsonl` / `self_analysis_briefs/`，
+  搬迁后那里是已退场或冻结的旧文件 ⇒ 09-27 会把 09-20 的记录当本周结果报出来。
+  代码侧：`weekly_optimizer.main()` 新打印 `审计日志: <绝对路径>`（`self_analyst` 本就打印简报绝对路径），两条都加了断言；
+  SKILL.md 侧（仓库外）：runbook 第 6 步改为「照脚本打印的绝对路径读」，周六执行。
+- `migrate_data_root.check_old`：冻结的被跟踪数据会被生产同步 `pull --ff-only` 改动，原实现把它报成旁路写入。现在按 `git status` 分两类：
+  工作区相对 HEAD 脏 ⇒ `written_outside_git`（红）；与 HEAD 一致 ⇒ `synced_by_git`（不红，但告警**这份改动没进数据根**）。
+  retire 时额外记 `dirty_at_retire`——生产检出里 `NVDA_raw.json` 常年是 `M`，不记会让 check-old 恒红（改之前先在生产实测到的）。
+- `migrate_data_root.copy` 可续跑：目标库已存在且逐表行数一致 + integrity ok ⇒ 跳过；不一致仍拒绝。原来任何已存在的库都算冲突，中途失败后必须手删。
+- `migrate_data_root.retire`：先取齐冻结清单 / 脏基线 / 指纹 / 暂存区冲突再动手，挪动放进 `try/finally`——中途失败也会写出 `RETIRE_RECORD.json`（原实现不会写，已挪走的项 unretire 找不回来）。
+- `migrate_data_root`：MOVE 项里的符号链接原先 `continue` 静默跳过（copy 不复制、verify 不检查）⇒ 改为 copy 拒绝、verify 报问题（生产现有 0 个）。
+- `data_backup/export._code_git_head`：延迟 `import hive_logger` 挪进 try，仓库根不在 `sys.path` 时落 `unavailable:` 而不是让整轮导出崩掉。
+- 测试夹具的 git 调用去掉继承的 `GIT_*`（`tests/test_migrate_data_root.py` 另加 autouse 清理）：在 git 钩子里跑时 `GIT_DIR`/`GIT_INDEX_FILE` 会把夹具的 add/commit 引到真仓库。
+
+### 验收
+- `tests/test_migrate_data_root.py` 17 → 24 项；逐条变异（去掉脏基线 / 变化全算写入 / 不拒符号链接 / 库存在即冲突 / 去掉 try-finally）各 1 红。
+- `export` 回退到上一版 ⇒ 新增的 import 失败用例红。
+- 全套 5540 passed / 85 deselected / 2 xfailed（`--deselect TestCoverageHorizon`，按设计红）；`ruff check .` 全过。
+
 ## [0.45.334] — 2026-09-23 — 占位（进行中：断开 GexRegimeModifier 对 rule_score 的 ±0.8 直接加减分（保留 RegimeWeightAdjuster 路由），登记世代边界）
 
 ## [0.45.333] — 2026-09-23 — 占位（进行中：gamma/delta 卖权行权价选择器——对标 GEXBot 的水平地图（重定价扫描 zero gamma / 净 GEX majors / DEX / vanna·charm）+ 单腿/价差/宽跨候选 + 前向击穿账本）
 
-## [0.45.332] — 2026-09-23 — 占位（进行中：ic_diagnostics._load_prices 批量下载静默丢标的——检测缺列/全 NaN、逐只重试一轮、覆盖率进 --benchmark 输出）
+## [0.45.332] — 2026-09-23 — Fixed：`ic_diagnostics._load_prices` 批量下载**部分失败**被当成功——缺的票逐只重试一轮，仍缺的写 stderr 点名；`--benchmark` 表头 / 判定行 / JSON 带经典因子行情覆盖率
 
-## [0.45.331] — 2026-09-23 — 占位（进行中：permuted_weekly_var docstring 与 ic_power_report 修正 2 的「并列压低置换方差」理由与精确结果 1/(n−1) 矛盾——复核并改正叙述）
+v0.45.328「发现未处理」。「失败没传导到下游 / 谁会红？」同形（CLAUDE.md 硬检查项）。
 
-## [0.45.330] — 2026-09-23 — 占位（进行中：维度 IC 协议修订 1——窗口推迟到 10-12，H1 改为检验冻结版 Buzz 评分）
+### 问题
+- `yf.download(52 只)["Close"]` 部分失败时**不抛异常**：v0.45.328 当天连跑 5 次，4 次各随机丢 1–2 只
+  （AVGO+RKLB / T+MSTR / CVX / ADBE），唯一痕迹是 yfinance 自己一行 stderr `N Failed download(s)`。
+  `_load_prices` 只在异常时降级 ⇒ 残缺面板照常返回。
+- 本版联网实测失败票的真实形状：**列在、整列 NaN**（注入不存在的代码 `ZZQXNOTREAL`，1.2.0；v0.45.337 读源码核实所有失败路径同形，见该条）。
+  所以 `build_benchmark_panel` 的 `if t not in px.columns` 从来接不住它，真正把它静默跳过的是
+  `dropna()` 之后的 `len(s) < 26` ⇒ 📈20日动量 / 📉5日反转 / 🌪低波动 三行少算几只票、与综合分不是同一样本，
+  输出里无从得知（20日动量旧口径 IC 0.0955–0.1142 随丢哪只而变）。
+- `experiments/ic_power_analysis.py` 也 import `_load_prices`（算 N_eff）——那边本来就印「拿到数据的标的 n/30」，
+  覆盖率可见；本版给它的是重试。
+
+### Fixed
+- `ic_diagnostics.py`
+  - 新 `missing_tickers(px, tickers)`：缺列**或**整列 NaN 都算缺（只判列在不在正是上面那个洞）。
+  - 新 `_close_panel()`：一次下载 → 「列 = ticker」面板；单票的平列名 Series 形状（旧版 yfinance）拍成同一形状
+    （memory `yfinance-multiindex`；重试路径逐只下载两种都会遇到。1.2.0 单票实测是单列 DataFrame）。
+  - `_load_prices`：缺的票**逐只重试一轮**（单只失败 = 仍缺，不中断其余）；补齐 ⇒ stderr `ℹ️ … 逐只重试已补齐`；
+    仍缺 ⇒ stderr `⚠️ 行情缺 k/N 只（…重试 1 轮仍无数据）：<代码> —— 下游只在其余 N−k 只上计算`。
+    **一只都没拿到**（空表 / 全 NaN）按整批失败处理、**不逐只重试**、返回 None：v0.45.257 实测的 52/52 限流就是
+    不抛、返回空的形状，逐只重试只会往同一个限流里再撞 52 次。返回类型不变（`DataFrame | None`）。
+  - `build_benchmark_panel` 返回 **`(panel, coverage)` 二元组**（有意改形状：旧调用方拿它当面板用会当场报错，
+    不是静默丢掉覆盖率）。`coverage` = `status`（ok / partial / unavailable）、`n_priced`/`n_tickers`、`missing`、
+    `n_factor_records`/`n_records`。覆盖率**从返回的面板本身读**（`missing_tickers`），不另存一份 ⇒ `_PRICE_CACHE`
+    命中时同样成立。**记录数也比**：票一只不缺、但记录被 `len(s) < 26` 跳过（新上市形状）同样判 partial。
+  - `print_benchmark`：表头多一行 `format_price_coverage()`（ok ⇒ `经典因子行情覆盖 52/52 只（记录 1351/1351） ✅`；
+    partial ⇒ 点名缺的票 +「与综合分**不是同一样本**」；unavailable ⇒「三行缺席」）；partial 时「判定：综合分 vs
+    最佳经典因子」行尾附「经典因子只覆盖 x/y 条记录，不是同一样本」。`--json` 的 `benchmark` 多 `price_coverage`。
+
+### 为什么不接 Twelve Data 兜底（`close_correction` v0.45.257 接了）
+那边要的是官方**原始**收盘（`auto_adjust=False`），与数据源无关；这里是 `auto_adjust=True` 的**复权**价，而
+`twelve_data._fetch_rows` 不传 `adjust`，其默认复权口径在 API 规格里没写明（**待验证**）。同一个横截面里混两个源，
+每只票的因子值取决于它碰巧由谁供数——正是本版要消灭的「随丢哪只而变」。观测到的故障是随机、瞬时、重试一轮即补的，
+不是整批限流。缺口如实报告，不用另一种口径填。理由写进 `_load_prices` docstring。
+
+### Tests
+- 新 `tests/test_ic_diagnostics_price_coverage.py`（21 条，全离线：替换 `yfinance.download`，返回形状照 1.2 的
+  `(Price, Ticker)` 两层列名 + 旧版单票平列名）：缺失两形状（整列 NaN / 无列）× 重试响应两形状的补齐；重试仍 NaN /
+  重试抛异常 ⇒ stderr 点名且恰好重试一轮；**负对照**（完整面板 ⇒ 只下载一次、stderr 为空）；全空 ⇒ None 且不逐只重试；
+  面板覆盖率与面板实情一致（经典因子行每天确实 7 只、综合分 8 只）；票全在但记录不足 ⇒ partial；`main()` 文本表头 /
+  判定行 / `--json` 端到端 + 完整面板负对照（并断言判定行确实印出——否则「不含」是空转）。
+- `tests/test_ic_diagnostics.py`、`tests/test_ic_diagnostics_benchmark_close_target.py`：**4 处**调用点改拆二元组（第 5 处在 `pytest.raises` 里、返回前就抛，无需改；v0.45.337 更正，原写「5 处」）；
+  「行情不可用」那条加断言 `coverage.status == "unavailable"`。
+- **变异 12 条全红**（`PYTHONDONTWRITEBYTECODE=1`，每轮删 pyc，原文存内存、按字节写回、还原后 sha256 核对 + 重跑）：
+  去掉重试 / 只判列在不在 / 仍缺误报「补齐」/ 全空也逐只重试 / 不缺也进报告分支 / status 不看记录数 /
+  表头不印 / JSON 丢字段 / 判定行不附注 / 单票平列名不拍平 / 重试后列重复 / 面板侧 missing 恒空。
+  其中「status 不看记录数」「判定行不附注」两条**在补写对应测试之前是绿的**（前者无夹具覆盖；后者表头也有
+  「不是同一样本」，一条断言同时被两处满足）——跑变异前先按变异清单补了这两条。
+- 联网实测（生产库 `sqlite3.backup()` 快照，1351 行 / 52 只）：`--benchmark --horizon t7` ⇒ 表头 `52/52 只（记录 1351/1351） ✅`，
+  20日动量 +0.1683（t +4.60，3/4）与 v0.45.328 表逐位一致；本 session 4 次批量下载都完整（间歇性故障未复现）；
+  注入 `ZZQXNOTREAL` ⇒ 下载调用 `[批量 53, 'ZZQXNOTREAL']`、stderr 点名、其余 52 只完好。
+- ruff 过；全套 5493 passed / 1 failed —— 唯一的红是 `test_economic_calendar.py::TestCoverageHorizon`（BLS 2027 日程尚未发布的日期驱动告警，设计如此，与本版无关：该文件不 import ic_diagnostics / yfinance）。
+
+### 发现未处理
+- `build_benchmark_panel` 调 `_load_prices(tickers, "2025-11-01", dates[-1])`，而 `yf.download` 的 `end` **不含当日** ⇒
+  **最后一个预测日**的经典因子只用到 d−1 收盘，其余日期含 d 当日收盘。快照上是 105 天里 1 天（30/1351 行）。
+  口径不一致但影响面小；改它会挪动全部经典因子数字的最后一天，留作单独一版。→ **v0.45.337 已量化：不值得单独开版**（见该条）。
+
+## [0.45.331] — 2026-09-23 — Fixed（文档）：`permuted_weekly_var` docstring 与 `ic_power_report.md` 修正 2 / 3 的「并列压低 Spearman 置换方差」理由不成立——置换方差恒为 1/(n−1)；报告表里 0.127 vs 0.137 是骨架差 + 100 次 MC 噪声，并列贡献 0。另发现 N_eff 外推与零模型不自洽，头条 5.18× 存疑（未改）
+
+v0.45.327「发现未处理」第一条。**只改 docstring / 注释 / 一行打印文案，计算逻辑、权重、`_WEEKS_REQUIRED`、`noise_floor` 都没动。**
+
+### 核实（08-12 备份与 09-23 生产库都用 `sqlite3.backup()` 取快照，只读；前者 `-wal` 为 0 字节，用 `immutable=1` 打开，不碰边车文件）
+- **精确结果**：对固定 x、均匀置换 y，Pearson 的置换方差 ≡ 1/(n−1)，对任何非常数 x、y 成立（中心化后 Var(Σaᵢb_π(i)) = Σa²·Σb²/(n−1)）；`spearman` 是中秩上的 Pearson。各周独立、均值恰为 0 ⇒ **脚本 σ_cs² 的期望 = 取样日 1/(n_d−1) 的均值**。
+- **合成数据**：n = 8，枚举全部 40320 个置换，用 Fraction 精确算术。五种形态（x 无并列 / 5/8 并列 / 7 个 0 + 1 个 1 / 两组各 4 / x 与 y 都有并列）的 Var(r) **都恰好 = 1/7**；并列只改变形状（峰度 1.76~2.53、max|r| 0.58~1.00）。`rng.random()` 分数跑 20 万次：0.14245 ± 0.00038。
+- **09-23 快照**（close_t7、现行骨架、300 次）：五维置换值都在解析值 ±3 SE 内，同一骨架换 `rng.random()` 也在（|z| ≤ 0.59）。catalyst（去重比 0.063）0.11556 vs 0.11807、signal 0.10463 vs 0.10271——与 v0.45.327 记录逐位相同。risk_adj 的 z = +2.7（五维共用同一串种子、两子集共享大部分天，不是独立检验）改跑 3000 次：新种子 +0.38、原种子延长 +0.67。
+- **0.127 vs 0.137 已查清，不是「待验证」**：第一版源码不在 git 里（5130e8a5 首次入库时已是置换版），从 08-16 会话记录取回。在 08-12 备份上**逐位复现两边**：第一版 0.12746（risk_adj 骨架 75 天、五维共用、100 次、`rng.random()`，与会话记录相同）；定稿五维 0.11991 / 0.13728 / 0.12768 / 0.13044 / 0.13582 与报告表相同。缺口 +0.00982 = **骨架** +0.00631（只差 W12：2026-03-16 的 10 行都没有 catalyst 键 ⇒ 取样日从宽 10 的 03-16 变成宽 5 的 03-19，(1/4 − 1/9)/22 = 0.00631）+ **MC 噪声** +0.00351（第一版低于自身解析值 0.99 SE）+ **分数随机化方式 0**（同骨架各 3000 次，两种方式 |z| ≤ 1.6）。
+- 「当日 ≥2 个不同分数」过滤在两份数据上对五个维度都**删 0 天**（宽度 ≥5 的日子里不存在全员同分）——这组数据里并列没有通过任何渠道影响 σ_cs²。
+- 当年那次改动其实没有翻转任何结论：钳 0 的四维 σ_cs² 反而略升（0.128~0.137），只有 signal 降到 0.120，4/5 维照样钳 0；会话记录里「修完 σ_cs² 会降、露出真实 σ_t²」的预期对钳 0 的四维没有兑现，也没人回头核对。
+
+### Fixed（文档）
+- `experiments/ic_power_analysis.py`：`permuted_weekly_var` docstring 重写，写明精确值、MC 标准误（300 次约 0.002）、0.127 / 0.137 的拆解；不复用 `noise_floor` 的真正理由改为「它只用一个 base_key 骨架、输出 |IC| 分位数」，保留「不要去修 noise_floor」。模块 docstring 第 3 步（原写「只把分数换成随机数、比 1/(N_eff−1) 可靠」，既与实现不符，理由也不成立）、`_distinct_ratio` docstring、`_load_day_pairs` 过滤注释、第 3 步注释与一行打印文案同步更正。
+- `experiments/ic_power_report.md`：新增顶部「v0.45.331 更正」一节；修正 2 保留两个数，改正理由并补上骨架 / 次数 / 解析值列（原表头「σ_cs²（catalyst）」对 0.127 那一行不准确，它是 risk_adj 骨架上五维共用的值）；修正 3 的理由由「并列程度」改为「各维有分数的日子不同」，并注明过滤删 0 天；v0.45.327「发现未处理」第一条标为已处理。
+- `tests/test_distribution_invariants.py::TestDimensionScoreSpread` docstring 里同一句错误理由更正（守卫本身不依赖它，行为不变）。
+
+### 发现未处理（本版不改，需用户决定）
+- **N_eff 外推与第 3 步的零模型不自洽 ⇒ 头条 5.18× 存疑（待验证）。** 第 3 步量出的 σ_cs² 按构造是原始 n 的 1/(n_d−1)（收益截面相关在置换零分布里根本不出场），第 5 步却按 (N_eff₁₀−1)/(N_eff₃₀−1) 缩放。从机制看：ρ̄ 大不等于横截面 IC 的有效样本少——分数与收益结构无关时，不论 ρ̄ 多大 Var(IC) 都是 1/(n−1)；β 不等的部分只在分数与 β 相关时进 IC，且表现为逐日摆动（归入 σ_t²），也不是 N_eff 形状。从数据看：若噪音真是 1/(N_eff₁₀−1) = 0.459，10 只时代周度 IC 总方差应 ≥ 0.46，实测五维 0.078~0.144（日度 0.095~0.140），贴着 1/(n−1) ≈ 0.115，低 3~6 倍。30 只时代只有 18 天 / 4 周，日度方差四维更接近原始 n——方向一致，但样本太少。
+  - 按原始 n：钳 0 的四维倍数 3.2~3.8×（9/29 为 3.22×，按 30 只实际日宽的解析值为 3.54~3.77×）；30 只 |IC| = 0.050 / 0.077 / 0.090 / 0.135 / 0.200 约需 110~128 / 46~54 / **34~39** / 15~17 / 7~8 周（现 `_WEEKS_REQUIRED` 82 / 35 / 25 / 11 / 5；由报告表 A 四位小数粗算）。
+  - 头条、功效表、`ic_rerun_readiness._WEEKS_REQUIRED` 都**未改**。`scan_continuity.py` / `weekly_optimizer.py` 的 docstring 仍引 5.18×，论证只依赖「扩池让测量变快」的方向，本版不动。
+- 推论（任务第 3 项，未做，待用户决定）：σ_cs² 有解析式，脚本可输出「取样日 1/(n_d−1) 均值」作交叉核对列，30 只的 σ_cs² 也可直接按实际宽度算、不必外推。
+
+### 二次检查（同日，推送后）
+- **代码侧无问题**：全套件 5495 passed / 2 xfailed；唯一失败是 `test_economic_calendar.py::TestCoverageHorizon`（BLS 日程只到 2026-12、剩 72 天低于 90 天阈值——设计上定期变红的时间炸弹，与本版无关，本版提交未碰 `economic_calendar.py`）。首次入库 5130e8a5 已是置换版、09-23 快照上 03-16 同样没有 catalyst——两条声明核过成立。
+- **更正 1（倍数区间）**：上文与报告原写「钳 0 维倍数 3.2~3.6×」，把**五维中位数** 3.57× 当成了钳 0 维的值；钳 0 的四维按解析值是 3.54~3.77×，区间应为 3.2~3.8×（signal 因 σ_t² > 0 只有 2.4×）。
+- **更正 2（「σ_cs² 反而略升」）**：只对钳 0 的四维成立；signal 从第一版共用的 0.127 降到 0.120。docstring、报告修正 2、本条、memory 同步改。
+- **更正 3（机制说法过简）**：原写「共同因子在同一天给所有标的加同一个量，横截面秩对它不变」只对 β 全等成立。模拟核过（6000 天）：ρ̄≈0.7、分数 iid 时，n=10/30 的 Var(IC) = 0.112/0.035，恰为 1/(n−1)，而 1/(N_eff−1) 预测 2.1~2.7；分数≈β 时 Var(IC) = 0.139/0.081，超出 1/(n−1) 的部分随 n **变大**（表现为 σ_t²），也不是 N_eff 形状。结论不变，措辞改为「ρ̄ 不决定横截面秩相关的有效样本量」。
+- **更正 4（noise_floor 理由）**：`noise_floor` 有 `base_key` 参数，「只用一个骨架」只对单次调用成立；主理由改为「它输出 |IC| 分位数而非周度方差」。
+- **补充（水平 ≠ 比值）**：10 只时代数据否定的是 1/(N_eff₁₀−1) 的**水平**；头条只用比值。最宽松的 signal（s² = 0.1435、20 周）σ² 的 95% 单侧上界 0.269 ⇒ 有效 n ≳ 4.7，极端组合下 5.18× 不能严格排除——它失去模型依据，未被证伪。已写进报告第 4 条。
+- **更正 5（过期指引）**：报告「已知限制」与 memory 原写「攒够 30 只样本后重跑、把 σ_cs² 外推换成实测」——按置换零模型 σ_cs²(30) 现在就能由实际日宽算出（≈0.035）；真正要攒的是 30 只的**实测 σ_IC²**（裁决原始 n 与 N_eff，σ_t² = 0 时约需 15 个不重叠周，现有 4 周）。
+- **第 3 项（解析核对列）评估**：单独加这一列不改变任何判断（300 次 MC 误差约 0.002，钳 0 判定最小余量约 7 SE，功效表只差约 0.4 周，远小于 σ_IC² 自身约 32% 的误差），也抓不到骨架 / 收益列类 bug（两者同源会一起错）。建议不单做，并入 N_eff 的决定。
+
+## [0.45.330] — 2026-09-23 — Changed（事后·窗口开始前、零数据）：维度 IC 协议修订 1——窗口推迟到 2026-10-12，H1 改为检验冻结版 Buzz 评分 `buzz_v1`，H1 截断按层判定
+
+**性质**：协议 §11 意义上的「事后」修订，但窗口还没开始、窗口内零数据，修订人没看过任何效应量。
+修订前做过的只读核实（§13.3 披露）只涉及「分数能不能复现」，不读任何收益列。
+用户 2026-09-23 确认两项：窗口推迟到 10-12；先冻 H1（Buzz），H2 仍检验生产分。
+
+### 为什么
+
+原登记下，H1 检验的是「生产代码现在的样子」。BuzzBee 在协议期内改一次，约一年的等待就作废（原 §6 代价条款）。
+被检验的对象变得比证据积累得快，这是根因。修订 1 让 H1 绑定一个**有版本、能由归档输入重算**的定义：
+锚点是阶段 1 修复后的生产 BuzzBee，定义锚在代码、不锚在实现。以后只改合成层 / 调整层，由冻结评分器吸收；
+只有改通道或输入才终止 H1。
+
+**诚实的边界**（写进了协议 §13.1）：冻结挡不住通道层。登记表 08-15 ~ 09-18 里唯一一条触及 Buzz 的边界
+（08-26，v0.45.2~0.45.15）同时改了调整层和输入层（`volatility_20d` 缺失哨兵），按修订后的规则**仍会截断 H1**。
+修订缩小了暴露面，没有消除它。
+
+### Changed
+
+- `experiments/dim_ic_preregistration.md`：头部加修订说明；§2 H1 对象；§3 窗口起点；§5 预计日期；
+  §6 按层截断、按层声明、代价；§8 自证不受盲化限制；§12 验收清单加第 8–10 条；新增 §13 修订记录，含：
+  - 13.1 为什么改；
+  - 13.2 `buzz_v1` 定义与自证：逐位一致，且缺输入行数为 0；
+  - 13.3 修订前看过什么；
+  - 13.4 截止与回退：锚点边界须早于窗口起点，否则 H1 回退到原对象，**窗口不再推迟**；冻结评分器可晚于窗口实现；
+  - 13.5 预计日期口径更正；
+  - 13.6 定稿。
+- `experiments/dim_ic_protocol.py`：
+  - `FORWARD_START` 2026-09-28 → **2026-10-12**；
+  - 新增 `AMENDMENTS`；
+  - H1 对象 `sentiment` → `buzz_v1`；
+  - 新增 `H1_INPUT_SIGNALS`（7 个 `buzz.comp.*`、`price.momentum_5d` / `volume_ratio` / `volatility_20d`、`market.fear_greed`）；
+  - 新增 `H1_FROZEN_LAYER_SIGNALS`（`agent.BuzzBeeWhisper.score`、`sentiment.pct`）；
+  - 新增 `H1_PRODUCTION_DIM`；
+  - 新增 `H1_ANCHOR_VERSION = None`（阶段 1 填）。
+- `experiments/dim_ic_forward_test.py`：
+  - `_check_protocol` 不认识的 H1 对象 ⇒ `ProtocolError`；`items()` 让 H1 读 `H1_PRODUCTION_DIM`。
+  - 新增 `h1_truncation()`：截断日带 `layer`。`frozen` 表示评分器自证后可解除；同一天两层都有时报输入层那条。
+  - 新增 `anchor_status()`，三态：`ok` / `pending` / `fallback`。
+  - `run()` 多一个 `h1_anchor` 键。
+  - 进度行：
+    - 截断标出是否可解除；
+    - 回退为 ⚠️；
+    - 窗口前锚点未登记，只作提示、不标 ⚠️。
+  - **行为差异**：只点名输入层的边界（如只点名 `price.volatility_20d`）现在会截断 H1——原登记只看
+    `agent.BuzzBeeWhisper.score`，这类边界它看不见（判别用例 `test_input_only_boundary_was_missed_by_the_original_registration`）。
+  - 冻结评分器（阶段 2）实现之前，两层一律截断，不吸收任何边界。
+  - 连带变化：`QUARANTINE` 隔离也按 H1 的 13 个信号判定。输入层坏行（如陈旧盘中价）会剔除当天该行的 buzz_v1，
+    因为它读的是坏输入。现有隔离条目都早于窗口，不影响任何样本。
+
+### Fixed（预计值口径，不影响任何规则）
+
+- 原登记的检视点预计日期 ≈2027-04-01 / ≈2027-09-30 是把 T+7 当成日历日算的，偏早 4–5 天。`close_t7` 的 T+7
+  是 `backtester._US_BDAY` 交易日。按「第 G 周最后一个 NYSE 交易日 + 7 个交易日」重算：
+  原起点应为 04-05 / 10-05，新起点为 **2027-04-20 / 2027-10-20**。
+
+### 测试
+
+- `tests/test_dim_ic_protocol.py` 30 → 48 条：
+  - 新常量逐值钉住；文档一致性检查覆盖全部 H1 截断信号、对象名、生产维度、锚点和修订记录。
+  - 篡改用例 9 → 15 个，包括「窗口改回 09-28」「H1 对象改回 sentiment」「多一条修订」。
+  - 「窗口开始前」的修订日期必须早于窗口起点。
+  - H1 通道集合与归档里的 `buzz.comp.*` 抽取器、生产合成读的 `AGENT_SCORING["buzz_weights"]` 两处对齐。
+  - 新增按层声明守卫 `_buzz_scope_gaps`：点名通道必须连带点名 Buzz 分，现有边界表 0 违规，5 个用例证明它有牙。
+- `tests/test_dim_ic_forward_test.py` 60 → 78 条：
+  - 按层截断与层标签 9 条；锚点三态 6 条；进度行图标 3 条。
+  - 窗口内夹具日期全部改成相对 `P.FORWARD_START`：原来写死 09-28，修订一挪窗口，这些日期就整批落到窗口前。
+
+### 变异测试（真跑，12/12 被杀，0 存活）
+
+逐个改坏以下各处，每次从保存的原文恢复并核对逐字节一致，禁用 pyc：
+
+- 执行器：层标签恒为 frozen、H1 截断只看冻结层、锚点与窗口同日算 ok、窗口首日不回退、H1 按对象名取维度、
+  待登记渲染成 ⚠️、不认识的 H1 对象照常算、回退不报警、`run()` 不带层标签。
+- 常量：截断信号只剩冻结层、少一个通道、窗口改回 09-28。
+
+### 冒烟（生产库，只读）
+
+`⏳ 维度 IC 协议（v0.45.320 预注册·修订 1）：H1 已结算合格周 0/26（窗口自 2026-10-12）；H1 锚点待登记（…；须早于 2026-10-12，否则回退）`。
+就绪度闸 `--quiet` 仍是四段，F&G 仍在第三段。
+
+### 环境：worktree 里的 iCloud 重名副本
+
+全量套件多红了 4 条，来源是 `tests/test_dim_ic_protocol 2.py`：修订前的旧测试，被 iCloud 复制，又被 pytest 收了进来。
+同目录共 5 个副本，逐个取证后移进 `~/.Trash/alpha-hive-icloud-dups-2026-09-23/`，没有用 `rm`：
+
+- 三个与登记提交 36f2895b 的 blob 逐字节相同；
+- `CHANGELOG 2.md` 是 11:35 的编辑中途快照，唯一独有的一行是后来已被替换的占位句「全量套件：见下一行补记」；
+- 另一个是由副本派生的 pyc。
+
+### 未做 / 下一步
+
+- **阶段 1（截止：边界日期须早于 2026-10-12）**：
+  - 修 Buzz 情绪动量调整：回看改按扫描日期取历史。补充一处本次新发现的问题：回看用的是 SQLite `date('now')`，
+    即 **UTC** 日期，而写入基线用的是 `_dt.now()` 的**本地**日期——两个时间基准不一致，要一起修。
+  - 通道值按全精度入档。
+  - 登记世代边界，填 `H1_ANCHOR_VERSION`。
+  - 这些都会改生产 BuzzBee 的每日分数，动手前先与用户确认改动细节。
+- **阶段 2**：冻结评分器、自证、吸收冻结层边界；守卫「改了通道代码却没点名通道」。
+- 周度任务 SKILL.md 仍只认前三段（同 v0.45.325，未改）。
+
+### 核对
+
+- 协议、执行器、就绪度闸、世代边界 4 个测试文件共 213 passed；ruff 0.13.3 All checks passed。
+- 全量套件（`--maxfail=1000`）：5509 passed / 1 failed / 2 xfailed / 83 deselected。唯一失败仍是
+  `TestCoverageHorizon`（BLS 2027 日程未发布，见 v0.45.320 核对），与本版无关。
+- ⚠️ 中间有一轮多出 11 个 ERROR，全是 conftest 的「真身指纹」检查报「本条测试写了 checkout 的真实日志」。
+  原因是我在全套后台运行期间，在**同一个 worktree** 里跑了冒烟（执行器、就绪度闸）。冒烟写了 worktree 的
+  `logs/alpha_hive.log`（最后一笔 16:37:38，是 F&G 重放打出的 `paper_portfolio` 仓位告警），
+  于是当时正在跑的无关测试背了锅。不做任何并发、原样重跑后 0 error，结果即上一行。
 
 ## [0.45.329] — 2026-09-23 — Fixed：`experiments/ml_expected_return_replay.py` 的动量 / 拥挤度 rank-IC 是全样本池化、判定来自写死的 ±0.02 / ±1pp——改为标准横截面周序列口径 + t(n−1)，判定只看显著性（横截面池化陷阱第三例的修复）
 
@@ -41,10 +620,10 @@ v0.45.326「有意没改」的那一半。v0.45.326 只换收益列，脚本印�
   全仓零程序化读者，已 grep）；新 `momentum_ic` / `crowding_ic`（含 `weekly`、`daily_mean_overlapping`、`verdict`、
   `pooled_across_dates`）、`new_accuracy_edge_vs_always_bullish`、`ic_method`、`alpha`、`date_range`。
 - 池化 IC 仍印，标「跨日期混算，主要在测『哪天涨』；只作对照、不参与判定」。
-- 样本含 ≥ `dim_ic_protocol.FORWARD_START`（2026-09-28）的日期时印一行提示：本输出只作探索、不构成维度 IC
+- 样本含 ≥ `dim_ic_protocol.FORWARD_START`（调用时读，不写死；同日 v0.45.330 修订 1 已由 09-28 推迟到 10-12，脚本自动跟随）的日期时印一行提示：本输出只作探索、不构成维度 IC
   预注册的证据，别为「看趋势」反复跑（协议 §8）。就绪度闸的 `next_step` 将来正会在窗口内推荐跑本脚本。
 
-### 重跑（2026-09-23 生产库 `sqlite3.backup()` 只读快照；配对 1237 条，03-10 ~ 09-11，**0 条 ≥ 09-28**）
+### 重跑（2026-09-23 生产库 `sqlite3.backup()` 只读快照；配对 1237 条，03-10 ~ 09-11，全部早于预注册窗口起点）
 
 | | 周序列（23 周） | 日度均值（重叠，仅参照） | 池化（仅对照） | 新判定 | 旧脚本印 |
 |---|---|---|---|---|---|
@@ -92,6 +671,15 @@ nfp/cpi 只覆盖到 2026-12 初、剩 72 天 < 阈值 90）——按日期到�
 ### 发现未处理
 - `final_score_dilution.stat()` 仍是 erfc 正态 p（其 banner 已写明、memory `alpha-hive-t-vs-normal-p` 已登记）。
   本脚本的拥挤度那一行就是它会在哪里咬人的实例（0.040 vs 0.052）。脚本默认拒绝运行，未动。
+  - 跟进（同日，仅注释）：评估过改不改——同快照 8 行 p 换 t(23) 后**无一跨 0.05**（sentiment 0.0034→0.0076，
+    现行权重重算 0.087→0.101），且横幅已声明正态近似、`test_experiments_pooled_guard` 钉住该声明 ⇒ 不改行为。
+    只在 `stat()` 上加注释「照抄本文件口径时别抄这里的 p」，指向 `ml_expected_return_replay.weekly_t_test`——
+    防的是有人照 memory 抄「标准实现」时把 erfc 一起抄走。
+- 二次检查（同日）：代码无功能性 bug——依赖的 `ic_diagnostics.spearman` / `subsample_non_overlapping` /
+  `FORWARD_CLOSE_COL` 在并行的 v0.45.328 / v0.45.332 里未动，同快照重跑 JSON 除 `dim_ic_forward_start` 外逐字段相同；
+  无重复 (date, ticker)；4 个周日从未被选作周代表日。改了两处**文档**：①本条与报告里写死的「09-28」
+  （v0.45.330 已推迟窗口，脚本读常量没受影响，写死数值的文字过期了——正是「文档只存指针」要防的）；
+  ②补记 `momentum_5d` 0.0 占位（101 行，两个周一被选作周代表日）的敏感性：剔除后 +0.004（p=0.943），判定不变。
 
 ## [0.45.328] — 2026-09-23 — Fixed：`ic_diagnostics --benchmark` 的前瞻收益一直写死 `f"price_{horizon}"`（t7 = SL/TP 离场价）且不认 `--target`——同一次默认运行里维度表与基准表对同一维度印两个 IC；改为与 `load_daily_ic` 共用一处取数（close_t7），综合分从「✅ 超出噪音地板」落回噪音带内
 
@@ -112,6 +700,7 @@ v0.45.326「发现未处理」①（v0.45.324 发现）。`price_t7` 当收盘�
 
 ### Changed
 - 截断指纹 `truncation_share` / `TRUNCATION_ALARM` / `warn_if_truncated` 从 `signal_archive` 搬到 `ic_diagnostics`（`FORWARD_CLOSE_COL` 旁）。维度表与基准表在 close 口径上都查一次；price / path 口径不告警（本来就标明含截断，那里告警是恒真的噪音）。`signal_archive._truncation_share` 保留名字、只剩委托（`experiments/dim_ic_forward_test.py` 按名调用），`load_panel` 改调同一个 `warn_if_truncated`——两边一个阈值、一个探测器，没有第二份拷贝。
+- 未知 `target` 由「静默当 path」改为抛 `ValueError`（`forward_return_sql`）。改动前 `load_daily_ic` 的 else 分支接住**任何**未知值、读 return_{h}（含 SL/TP 截断）——拼错一个字母就静默换口径。无调用方受影响：CLI 由 argparse `choices` 限定，仓内两个外部调用方（`final_score_dilution` / `ic_power_analysis`）都传 `"close"`。〔二次检查补记：初版漏记这条行为变更，也没有测试〕
 - 输出点名终点列：文本基准表头 `目标=close_t7 相对 price_at_predict…（与上方维度表同一口径）`；`--json` 新增 `meta.end_col`、`benchmark.end_col` / `benchmark.target_mode`。
 
 ### 前后对照（t7，同一快照、`--draws 200`（main 现行默认）、同一进程同一份完整行情 52/52 只；**只作记录，不据此改任何权重或评分代码**）
@@ -137,8 +726,8 @@ v0.45.326「发现未处理」①（v0.45.324 发现）。`price_t7` 当收盘�
 - 与既有结论一致：综合分无效（`alpha-hive-tradeable-signal.md`）、sentiment 是唯一有证据的维度。**本版不改任何权重**，也不构成改权重的新证据——维度表那一侧本来就是 close 口径，本版只是让基准表跟上它。
 
 ### Added
-- `tests/test_ic_diagnostics_benchmark_close_target.py`（24 条）。核心夹具让 price_t7 / close_t7 给出**相反的** IC 符号（高分先破止损再收涨、低分先触止盈再收跌），final_score 与 5 维都取同一个分数、各被检验一次。另有夹具自检、三口径单行取值、path 读传入的 `target_col`、price_t7 为空仍入样本、哨兵列（调用时查表）、t30 无 close_t30 列、未登记 horizon 抛错、**维度表与基准表逐日逐维度 IC 相等（三口径）**、`main()` 的 `--target` 接线与点名终点列（JSON / 文本）、截断指纹正负对照（基准表 / 维度表 / price 口径不误报 / signal_archive 委托）。
-- `tests/test_ic_diagnostics.py::test_price_load_failure_does_not_crash` 夹具补 `close_t7` 列：原夹具只建 price_t7，恰因当时读的就是它——**夹具本身编码了这个 bug**。另：该文件的 `fake_db` 刻意让 close_t7 == price_t7，所以此前没有任何测试钉住「维度表读的是 close」，现由新文件 `test_dimension_table_itself_reads_close` 补上。
+- `tests/test_ic_diagnostics_benchmark_close_target.py`（26 条，含二次检查补的 2 条）。核心夹具让 price_t7 / close_t7 给出**相反的** IC 符号（高分先破止损再收涨、低分先触止盈再收跌），final_score 与 5 维都取同一个分数、各被检验一次。另有夹具自检、三口径单行取值、path 读传入的 `target_col`、price_t7 为空仍入样本、哨兵列（调用时查表）、t30 无 close_t30 列、未登记 horizon 抛错、未知 target 抛错（两个读者）、**维度表与基准表逐日逐维度 IC 相等（三口径）**、`main()` 的 `--target` 接线与点名终点列（JSON / 文本）、截断指纹正负对照（基准表 / 维度表 / price 口径不误报 / signal_archive 委托）。
+- `tests/test_ic_diagnostics.py::test_price_load_failure_does_not_crash` 夹具补 `close_t7` 列：原夹具只建 price_t7，恰因当时读的就是它——**夹具本身编码了这个 bug**。另：该文件的 `fake_db` 刻意让 close_t7 == price_t7，钉不住「维度表读的是 close」；新文件 `test_dimension_table_itself_reads_close` 是直接钉它的一条（〔二次检查更正〕原写「此前没有任何测试钉住」——推送时已不成立，v0.45.327 的测试间接钉住了，见文末）。
 
 变异台账（全部真跑：`PYTHONDONTWRITEBYTECODE=1`、每轮 `find … -name '*.pyc' -delete`、`--maxfail=1000`、每轮 69 条全收集、还原后 `cmp` 逐字节一致，收尾 69 绿）：
 
@@ -169,6 +758,13 @@ v0.45.326「发现未处理」①（v0.45.324 发现）。`price_t7` 当收盘�
 v0.45.19 改对了 `load_daily_ic`，同一文件 150 行外的 `build_benchmark_panel` 各拼各的 SQL，没跟着改——**同一个语义有两份实现时，修一份等于制造分叉**。本版不是「把第二份也改对」，而是删掉第二份：两个读者走同一个 `forward_return_sql`，外加一条逐日逐维度比两张表的测试，谁再分叉谁红。截断探测器同理：v0.45.321 在 signal_archive 里写了一份，本版要在 ic_diagnostics 用时搬过来共用，不抄第二份。
 另一个形状：出错读者的测试夹具**只建了它读的那一列**（price_t7），于是正确的列在测试里根本不存在——测试不是没测到 bug，是把 bug 写成了前提。
 
+### 二次检查（同日，推送后）
+- **更正**：上文「此前没有任何测试钉住『维度表读的是 close』」写时成立、推送时已不成立。close-only 变异（只让 `load_daily_ic` 的 close 分支回退 price_t7，排除本版新文件）全套跑：5443 绿 5 红 = 日历告警 + `test_ic_power_analysis_close_target.py` 4 条——v0.45.327 比本版早一步进 main，经 `ic_power_analysis` 间接钉住了它。
+- **补测试**：未知 target 抛错（基准表 / 维度表各 1 条）。变异：改动前原文件（`508a4ca2^`，不用 `HEAD:`——提交后它已是新代码）维度表那条报 `DID NOT RAISE`，直接证明旧代码把 `"closee"` 静默当 path；「未知 target 当 path」2 红；基线 2 绿。
+- **核过、无问题**：三条「逐位相同」声明按 JSON 全精度复核成立（t7 / t30，5 维 7 个统计量）；`signal_archive.load_panel` 里的局部 `import ic_diagnostics as icd` 只在导入后用一次（AST 核，无 UnboundLocalError 风险）；`ic_power_analysis._load_day_pairs` 自抄的 SQL 过滤条件与新 `forward_return_sql` 逐条件一致；所有分支与各 worktree 工作区都没有新增对已删除的 `_TRUNCATION_ALARM` 的引用；当前 main × v0.45.324 分支（`claude/practical-bun-4c8e91`）试合并无冲突，ruff F821/F811/F401 净、两边 206 条测试绿。
+- **小瑕疵，v0.45.336 已改**：若 close 列真被写成离场价，`--benchmark` 运行时告警会印两遍（维度表、基准表各一次），同一行文字。
+- 过程：审查时 zsh 把 `$b:signal_archive.py` 的 `:s` 当变量修饰符，`git show` 拿到错的 ref、计数恒 0，差点得出「这些分支里没有这个名字」——与 memory「zsh `:r` 吃 refspec」同形，写 `${b}:path` 即解。
+
 ---
 
 ## [0.45.327] — 2026-09-23 — Fixed：`experiments/ic_power_analysis.py` 的前瞻收益一直读 SL/TP 截断的 `price_t7`（离场价）——`price_t7` 读者清单上的第四个；改查 `FORWARD_CLOSE_COL`（close_t7）。头条「扩池 5.18×」不变，「signal 是唯一检测到时间变异的维度、只有 1.78×」是截断造的，撤回
@@ -195,18 +791,18 @@ v0.45.326「发现未处理」第三条的 ②。两条路径都中：第 3 步 
 
 - **N_eff 不读库，逐位不变**；**5.18× 不变**：钳 0 的维度倍数 ≡ 1/缩放系数，只由 N_eff 决定，而 4/5 维度两种口径都钳 0。
 - **signal 的「检测到时间变异」是截断造的**：旧口径实测方差超出置换零分布 p95（0.2136 > 0.1776），新口径落回 90% 带内（p05–p95 = 0.068–0.181）⇒ **新口径 5/5 维度都检测不到时间变异**。σ_t² 点估计仍 > 0，脚本照算 2.98×。（「对照零分布 p95」是本次事后加的读法，脚本不输出这个判定。）
-- 功效表（`ic_rerun_readiness._WEEKS_REQUIRED` 的来源）：|IC| = 0.050/0.077/0.090/0.135/0.200 需 82/35/25/11/5 → 79/33/**24**/11/5 周。变化**几乎全来自样本成员**（上面那 8 行使一个取样周宽度 6 → 9），不是收益值。
+- 功效表（`ic_rerun_readiness._WEEKS_REQUIRED` 的来源）：|IC| = 0.050/0.077/0.090/0.135/0.200 脚本打印 82/35/25/11/5 → 79/33/**24**/11/5 周。〔二次检查更正：初版写「变化几乎全来自样本成员（8 行使一个取样周宽度 6 → 9）」——宽度是 **6 → 10**（06-05 那 4 行落在 W23 取样日上，05-29 不是取样日）；而且打印值是 MC + 取整，按 σ_cs² 解析值算 0.090 档是 **24.8 → 24.0**，全表 80.3/33.9/24.8/11.0/5.0 → 77.9/32.8/24.0/10.7/4.9，移动不到 1 周（最多 2.4 周，在 0.050 档）。解析值的移动全部来自样本成员、与收益值无关。〕
 - 截断对各维方差的影响方向不一（旧 ÷ 新：×0.92 ~ ×1.54），旧数不能乘系数修正。
 - 全快照（94 天，含 30 只时代）方向相同：signal 1.87× → 3.16×、另 4 维 5.18× 不变；但它把 30 只宽度的日子算进了「10 只」σ_cs²，与报告不是同一个量。
 
 ### 未改（需用户决定）
-- `ic_rerun_readiness._WEEKS_REQUIRED`（82/35/25/11/5）：新口径 0.090 档 25 → 24，现值偏保守 1 周。阈值变更，本版不动。
+- `ic_rerun_readiness._WEEKS_REQUIRED`（82/35/25/11/5）：~~新口径 0.090 档 25 → 24，现值偏保守 1 周~~〔二次检查更正：解析值 24.8 → 24.0，差距不到 1 周，在 MC 噪声与取整的量级，不构成改阈值的理由；N_eff 缩放本身另有疑问见 v0.45.331〕。阈值变更，本版不动。
 
 ### Changed
 - `experiments/ic_power_report.md`：顶部加「v0.45.327 更正」节（取证、10 只子集前后表、全快照摘要、结论怎么变、发现未处理）；正文受影响的表与句子逐处标〔截断口径〕（方差分解、signal 倍数行、周数全表、结论先行的 132/25 周与 signal 例外、修正 2 的 σ_cs² 表、倍数区间来源 3）；N_eff 两张表标明不受影响。
 
 ### Added
-- `tests/test_ic_power_analysis_close_target.py`（10 条）。**不能照搬 v0.45.321/326 的「两列 IC 反号」夹具**：本脚本的头条是方差，Var(−X) = Var(X)，反号夹具在这里照样绿。核心夹具改为让两列给出**相反的时间结构**：close_t7 的 IC 逐周翻转（+1/−1，方差 ≈ 1 ≫ 零分布 1/7 ⇒ 不钳 0、倍数 ≈ 1.1×）；翻转那几周高分票先冲止盈再收跌、低分票先破止损再收涨 ⇒ 离场价 IC 周周为正（方差 ≈ 0.005 ⇒ 钳 0、倍数 1/缩放系数 ≈ 5.7×）。附：夹具自检（不经被测脚本直接算两列周度方差）、`--json` 头条（实测方差 / 钳 0 / 倍数 / 功效表 10:30 周数比）、文本层无「⚠钳0」、单行取值（离场 110 vs 收盘 105）、CRWD 拆股错配行、`price_t7` 为空仍入样本、哨兵列证明**两条路径都**跟随 `FORWARD_CLOSE_COL`、输出点名终点列。
+- `tests/test_ic_power_analysis_close_target.py`（初版 10 条，二次检查后 12 条，见文末）。**不能照搬 v0.45.321/326 的「两列 IC 反号」夹具**：本脚本的头条是方差，Var(−X) = Var(X)，反号夹具在这里照样绿。核心夹具改为让两列给出**相反的时间结构**：close_t7 的 IC 逐周翻转（+1/−1，方差 ≈ 1 ≫ 零分布 1/7 ⇒ 不钳 0、倍数 ≈ 1.1×）；翻转那几周高分票先冲止盈再收跌、低分票先破止损再收涨 ⇒ 离场价 IC 周周为正（方差 ≈ 0.005 ⇒ 钳 0、倍数 1/缩放系数 ≈ 5.7×）。附：夹具自检（不经被测脚本直接算两列周度方差）、`--json` 头条（实测方差 / 钳 0 / 倍数 / 功效表 10:30 周数比）、文本层无「⚠钳0」、单行取值（离场 110 vs 收盘 105）、CRWD 拆股错配行、`price_t7` 为空仍入样本、哨兵列证明**两条路径都**跟随 `FORWARD_CLOSE_COL`、输出点名终点列。
 
 变异台账（全部真跑，`PYTHONDONTWRITEBYTECODE=1` + 每轮 `os.walk` 清 `.pyc`，每轮核 `collected 10`，锚点唯一 + 变异文本恰好一次；还原后核 sha，再跑 10 绿）：
 
@@ -229,6 +825,37 @@ M1 头条绿不是夹具没判别力，而是下一条「发现未处理」的�
 - **给「方差 / 离散度」类统计量写回归测试，反号夹具是瞎的**——前两个读者的夹具形状不能照搬，要问「头条统计量对什么变换不变」。
 - 变异驱动脚本第一版用 `^collected` 核收集数，addopts 带 `-v` 时那行是 `collecting ... collected 10 items` ⇒ 恒不中；护栏写成「不中即 assert 炸 + finally 还原」，方向安全（整轮作废，没有误报通过）。
 
+### 二次检查（同日）
+文档里两处数字错、测试五处问题，**代码逻辑没有 bug**（v0.45.328 把 `load_daily_ic` 的 SQL 改成共用 `forward_return_sql` 之后，WHERE 仍与 `_load_day_pairs` 逐项相同，已核）。
+
+**文档**（报告、本条、memory 同步改正）：
+- 「一个取样周宽度 6 → 9」应为 **6 → 10**：逐周比对两种口径的取样日，唯一不同的是 W23 的 06-05（4 行 price_t7 空）。当初是从宽度列表目测的，没算。
+- 「功效表只动 0~3 周 / 现值偏保守 1 周」：打印的 25 → 24 是 MC（±0.005）+ 取整跨过整数。σ_cs² 有解析值（v0.45.331），按解析值 0.090 档是 **24.8 → 24.0**。**与 v0.45.331 记下的教训同形**（两个 MC 数对比前先算解析值），而且是同一天、在发现解析式之后犯的。
+- 报告「新口径 127 / 24 周，年数不变」依赖原表的取整错误（132 周写作 ~2.4 年，实为 2.54 年）；改为直接给年数。
+- 报告修正 2 表头「σ_cs²〔截断口径〕」会让人以为截断改变了 σ_cs²；改为「旧样本成员；值本身与收益列无关」。
+- 报告里三处「顶部表 A / 顶部第 3 条」是按本节在最上面时写的；v0.45.331 节随后插到最上面，「顶部第 3 条」就落到了它的「3. 结论数字不受影响」上。改为具名指向「v0.45.327 更正节」（其中一处在 v0.45.331 节里，指的也是本节表 A）。
+
+**测试**（10 → 12 条）：
+- T1 模块 docstring 写「低分票先跌穿止损再收涨」，夹具奇数周收盘却是 `100 − 分数`（全部收跌）——故事是假的。收盘收益改为以 4.5 为中心（秩不变 ⇒ 所有统计量逐位不变），并在夹具里断言故事本身（止盈的收跌、止损的收涨）。
+- T2 哨兵测试里 `assert tue in pairs` 举不出能让它变红的变异，删。
+- T3 文本层「没有 ⚠钳0」在分解表没印出来时会空洞成立，补 `"样本不足" not in out`。
+- T4 夹具自检 docstring 称「不经被测脚本」，实际借用了 `spearman`；改为如实描述（不经取数 / 分解逻辑，只借用 `ic_diagnostics.spearman`）。
+- T5 新增 `TestSkeletonParity`（2 条）：spy `observed_weekly_var` 里**真实的那次** `load_daily_ic` 调用，逐维度逐日比两步的天集合与 IC——「两步必须同一列、同一批天」此前只有注释。夹具把每条过滤放到够得着的位置（终点列空、缺维度键、某维全员同分、宽度 = / < min_width、`dimension_scores` 空、入场价 0），并配一条夹具自检。
+- ⚠️ **二次检查自己引入过一个回归，被重跑变异接住**：做 T4 时起初把夹具自检改为经 `icp._icd.spearman` 取——`_icd` 是本版新加的属性，改动前的文件上这几条会因 `AttributeError` 变红，红的理由与它们要证的事无关（M0 一度 12/12 红）。改为测试文件直接 `import ic_diagnostics`。**「只是整理测试」的改动之后也要重跑 M0。**
+
+补充变异（同样真跑、核 `collected 12`、还原后核 sha 再跑 12 绿）：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M0 | 改动前原文件 | 9 红 3 绿；绿的是两条夹具自检（只测夹具）与骨架比对（旧代码两步都读 price_t7，彼此一致——它守的是「一致」不是「哪一列」） |
+| M1 | 只回退第 3 步 | 6 红（新增夹具自检与骨架比对：同日 IC 0.086 vs 0.886） |
+| M2 | 只回退第 2 步 | 5 红（新增骨架比对） |
+| P1 | 第 3 步去掉「至少 2 个不同分数」 | 2 红：夹具自检 + 骨架比对（odds 多出全员同分的 06-04） |
+| P2 | 第 3 步宽度 `>=` 改 `>` | 5 红 |
+| P3 | 第 3 步 SQL 去掉 `price_at_predict > 0` | **全绿——等价变异**：下面的 Python 循环已跳过 `not p0 or p0 <= 0`，恰是该 SQL 条件为假或 NULL 的全部情形（NULL / 0 / 负），可达域上逐行等价，写不出能区分的测试 |
+
+过程：一次 heredoc 自检（`"icp._icd" not in s`）被我新写的注释命中、正确地没写盘，但后面用换行接了变异驱动，照跑了一轮旧文件——无害（驱动不写 git），与 memory「自检只在它能中断后续步骤时才算自检」同形；重做时改为 `&&` 链。
+
 ---
 
 ## [0.45.326] — 2026-09-23 — Fixed：`experiments/ml_expected_return_replay.py` 的「真实 7 日收益」一直对着 SL/TP 截断的 `price_t7`（离场价）算——与 v0.45.19 / v0.45.321 同一误解的第三个读者；改查 `FORWARD_CLOSE_COL`（close_t7），脚本印出的两条结论都翻了，主结论不变
@@ -239,11 +866,11 @@ v0.45.321「发现未处理」第一条。本脚本是就绪度闸 `next_step`�
 - 模块 docstring 写「由 `price_t7` 直接算（不用 `return_t7`，后者路径依赖、42.5% 被 SL/TP 截断）」——理由对，列选错了：`price_t7` 是 `_simulate_trade_path` 的 `exit_price`。
 - 两列都有值的 1229 对配对样本里 **536 对（43.6%）`|price_t7 − close_t7| > 0.01`**（SL 328 / TP 140 / T7_CLOSE 68）；配对 SL/TP 行 `price_t7 == exit_price` 462/505，`close_t7` 1/505。另 8 对 `price_t7` 为空、`close_t7` 已有（旧口径丢掉）。
 - CRWD 两行（04-26 / 05-10）拆股单位错配，旧口径 **+325.4% / +339.8%**，收盘口径 +6.3% / +16.9%（v0.45.321 已记同一对行）。
-- 截断两头扭曲：止盈档砍掉右尾（RKLB 05-05 收盘 +68.3%、离场 +9.9%；p95 +10.85 → +16.85）；49 对截断 ≤0 而收盘 >0（41 对是看多单破止损后收回）、29 对反之 ⇒ 恒定看多基准被压低（50.6% → 52.1%）。CRWD 垃圾把均值抬高约 +0.54pp，与右尾被砍（约 −0.87pp）部分抵消。
+- 截断两头扭曲：止盈档砍掉右尾（RKLB 05-05 收盘 +68.3%、离场 +9.9%；p95 +10.85 → +16.85）；49 对截断 ≤0 而收盘 >0（41 对是看多单破止损后收回）、29 对反之 ⇒ 恒定看多基准被压低（50.6% → 52.1%）。CRWD 垃圾把均值抬高约 +0.54pp，与右尾被砍（约 −0.87pp）部分抵消。〔v0.45.338 更正：基准应比同一 1229 行（50.6% → 52.2%）；止损档还截短了左尾，−0.85pp 是两尾**净**效应（压低 583 行 −1.63、抬高 523 行 +0.78）；CRWD 相对其收盘值是 +0.52pp〕
 
 ### Fixed
 - `load_pairs()`：终点列改为调用时查 `ic_diagnostics.FORWARD_CLOSE_COL["t7"]`（新增 `forward_close_col()`，不在模块层冻结）；收益与 `IS NOT NULL` 过滤都跟终点列走。
-- 模块 docstring 更正，注明 v0.45.326 之前全部输出（含报告的 697 条回放）是截断口径。
+- 模块 docstring 更正，注明 v0.45.326 之前全部输出（含报告的 697 条回放）是截断口径。〔v0.45.338 更正：是「对着 price_t7 算的」，不是每行都截断——04-15 前 162 行只有 28 行与收盘价不符〕
 - 输出点名终点列：文本头一行、`--json` 新键 `forward_close_col`——不是静默选择。
 - 删掉文本输出里写死的「MEMORY 记载 crowding.adj_factor = −0.112, 3/4」：那是 v0.45.321 之前 `--analyze` 的截断口径数（已作废），改为指针。
 
@@ -261,12 +888,12 @@ v0.45.321「发现未处理」第一条。本脚本是就绪度闸 `next_step`�
 
 **脚本印出的两条结论都翻了，但两条都是跨过写死阈值（IC ±0.02、准确率 ±1pp）翻的，而阈值在噪音之下**。按不重叠 ISO 周复核（t(n−1)）：
 - 动量，标准横截面口径（同 `final_score_dilution.py`：日度横截面 IC → 每周第一天 → 周序列 t 检验）：周序列 −0.021（p=0.75）→ +0.016（p=0.77），**两列都没有反转证据**。日度横截面 IC 均值 −0.064 → −0.037：旧口径表观反转约 40% 是截断造的，方向与 v0.45.321 的 `price.momentum_5d` 日度 IC −0.127 → −0.020 一致（那边不需 crowding 配对、按世代切，量级不可直接比）。
-- 「v0.44.2 准确率 − 恒定看多」按周合并：+0.8pp（p=0.90）→ −2.0pp（p=0.77）：前后都是噪音。
+- 「v0.44.2 准确率 − 恒定看多」按周合并：+0.8pp（p=0.90）→ −2.0pp（p=0.77）：前后都是噪音。〔v0.45.338 注：按周合并同样只去了一半池化；同日配对口径 +0.01pp（p=1.00），见 v0.45.329，结论不变〕
 - ⚠️ 自我更正：起草时先用了「周内 5 天池化算一个 IC」，得出旧口径 −0.108（p=0.05，「边缘显著」）→ −0.066（p=0.25）。**那个边缘显著是周内池化造的**，标准口径下消失——复核池化陷阱时又踩了一次池化陷阱。报告与 memory 已改为标准口径，旧那组数别引用。
 
 不变：主结论「v0.44.1 修掉了约 +8pp 的系统性谎报，没有创造 alpha；RivalBee 在 `expected_returns` 路上不提供方向信息」**更站得住**；v0.44.2 否决拥挤倾斜（依据是符号不可辩护，换列后两者偏差都在 ±0.3pp 内）。
 
-原报告 697 条按行集可复原（`date ≤ 2026-08-07`，弃权 43、p5 −12.04 逐位相同），数值因 09-15 `close_correction` 改写入场价不能逐位复现；同行集收盘口径下「新公式 50.0% 略好于恒定看多 48.4%」变成 50.7% vs 50.5%——那 1.6pp 领先大半是截断压低基准造成的。
+原报告 697 条按行集可复原（`date ≤ 2026-08-07`，弃权 43、p5 −12.04 逐位相同），数值因 ~~09-15~~ 之后的 `close_correction` 改写入场价不能逐位复现〔v0.45.338 更正：CRWD 复权发生在 08-12 ~ 09-10 之间，「09-15」是从备份文件名推的，那份备份里早已复权〕；同行集收盘口径下「新公式 50.0% 略好于恒定看多 48.4%」变成 50.7% vs 50.5%——那 1.6pp 领先大半是截断压低基准造成的。
 
 ### Changed
 - `experiments/ml_expected_return_report.md`：顶部加口径更正横幅；v0.44.1 / v0.44.2 两节受影响的表逐处标〔截断口径〕（预测分布、`crowding.score` 分布、`probability` 地板、`generate_deep_v2` 触发率不受影响，也标明）；文末追加「v0.45.326 追加」节（全样本前后、周度复核、697 同行集三列并排、什么没变）。

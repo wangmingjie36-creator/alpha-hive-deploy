@@ -10,6 +10,7 @@
     "ScoutBeeNova": 6.5025,
     "ChronosBeeHorizon": 6.085
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -23,7 +24,7 @@
   "actual_prices": {
     "t1": 617.95,
     "t7": 648.6400146484375,
-    "t30": null
+    "t30": 703.1199951171875
   },
-  "created_at": "2026-08-25T12:44:55.583306"
+  "created_at": "2026-09-24T14:46:15.353356"
 }

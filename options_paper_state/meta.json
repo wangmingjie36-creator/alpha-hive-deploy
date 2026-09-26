@@ -3,7 +3,7 @@
   "starting_capital": 100000.0,
   "starting_date": "2026-09-04",
   "cash": 99220.0,
-  "last_run_date": "2026-09-22",
+  "last_run_date": "2026-09-24",
   "config_snapshot": {
     "starting_capital": 100000.0,
     "risk_per_trade_pct": 6.0,

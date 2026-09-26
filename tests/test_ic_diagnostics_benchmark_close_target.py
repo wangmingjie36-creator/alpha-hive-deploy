@@ -118,7 +118,8 @@ def _mean_ic(by_day) -> float:
 
 
 def _panel(db, **kw):
-    return icd.build_benchmark_panel(db, "return_t7", "checked_t7", "t7", **kw)
+    panel, _cov = icd.build_benchmark_panel(db, "return_t7", "checked_t7", "t7", **kw)
+    return panel
 
 
 class TestFixtureDiscriminates:
@@ -164,8 +165,8 @@ class TestBenchmarkUsesClose:
     def test_path_reads_the_target_col_it_is_given(self, tmp_path, offline):
         """旧实现从不读 `target_col` 参数 —— 传什么都一样。"""
         db = _one_row_db(tmp_path, return_t7=9.945, return_alt=-3.0, close_t7=105.0)
-        panel = icd.build_benchmark_panel(db, "return_alt", "checked_t7", "t7",
-                                          min_width=1, target="path")
+        panel, _ = icd.build_benchmark_panel(db, "return_alt", "checked_t7", "t7",
+                                             min_width=1, target="path")
         assert panel[SYS]["2026-06-01"][0][1] == pytest.approx(-3.0)
 
     def test_rows_without_price_t7_are_kept(self, tmp_path, offline):
@@ -188,12 +189,23 @@ class TestBenchmarkUsesClose:
                 price_at_predict REAL, price_t30 REAL, return_t30 REAL, checked_t30 INTEGER)""")
             c.execute("INSERT INTO predictions VALUES ('2026-06-01','A',1.0,NULL,100.0,120.0,"
                       "7.0,1)")
-        panel = icd.build_benchmark_panel(db, "return_t30", "checked_t30", "t30", min_width=1)
+        panel, _ = icd.build_benchmark_panel(db, "return_t30", "checked_t30", "t30", min_width=1)
         assert panel[SYS]["2026-06-01"][0][1] == pytest.approx(20.0)
 
     def test_unregistered_horizon_raises_instead_of_guessing(self, tmp_path):
         with pytest.raises(ValueError, match="FORWARD_CLOSE_COL"):
             icd.build_benchmark_panel(tmp_path / "nope.db", "return_t1", "checked_t1", "t1")
+
+    @pytest.mark.parametrize("reader", ["benchmark", "dimension_table"])
+    def test_unknown_target_raises_instead_of_falling_into_path(self, tmp_path, offline, reader):
+        """v0.45.328 起未知 target 抛错。改动前 `load_daily_ic` 的 else 分支把**任何**未知值
+        都当 path（读 return_{h}，含 SL/TP 截断）——`"closee"` 拼错一个字母就静默换成截断口径。"""
+        db = _build_reversal_db(tmp_path)
+        with pytest.raises(ValueError, match="不在"):
+            if reader == "benchmark":
+                _panel(db, target="closee")
+            else:
+                icd.load_daily_ic(db, "return_t7", "checked_t7", target="closee")
 
 
 class TestSameTargetAsDimensionTable:
@@ -259,6 +271,25 @@ class TestTruncationFingerprint:
         icd.load_daily_ic(_build_reversal_db(tmp_path, close_equals_exit=True),
                           "return_t7", "checked_t7")
         assert "exit_price" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("extra", [["--benchmark"], ["--benchmark", "--json"], []])
+    def test_cli_warns_exactly_once_per_horizon(self, tmp_path, offline, monkeypatch, capsys,
+                                                extra):
+        """v0.45.336：`--benchmark` 下维度表与基准表各查一次 ⇒ 同一行告警印两遍。
+
+        断言**恰好一次**，不是「至多一次」：0 次是把告警整个关丢了，比印两遍更糟。
+        """
+        db = _build_reversal_db(tmp_path, close_equals_exit=True)
+        monkeypatch.setattr(sys, "argv", ["ic_diagnostics.py", "--db", str(db), "--horizon",
+                                          "t7", "--draws", "10", *extra])
+        assert icd.main() == 0
+        err = capsys.readouterr().err
+        assert err.count("恰好等于 exit_price") == 1, err
+
+    def test_benchmark_panel_still_checks_by_default(self, tmp_path, offline, capsys):
+        """只有 main() 关掉第二次检查；其他直接调 build_benchmark_panel 的人默认仍被告警。"""
+        _panel(_build_reversal_db(tmp_path, close_equals_exit=True))
+        assert capsys.readouterr().err.count("恰好等于 exit_price") == 1
 
     def test_silent_on_clean_close_column(self, tmp_path, offline, capsys):
         """负对照：真收盘价不能误报，否则告警会被当噪音无视。"""

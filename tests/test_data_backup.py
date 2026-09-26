@@ -218,7 +218,9 @@ class TestExportRestoreRoundTrip:
 
 def _git_repo_with_commit(path: Path) -> str:
     path.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+    # 去掉继承的 GIT_*：在 git 钩子里跑时 GIT_DIR / GIT_INDEX_FILE 会把 init/commit 引到真仓库
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
     for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "x"]):
         subprocess.run(["git", "-C", str(path), *args], check=True, env=env, capture_output=True)
@@ -242,6 +244,20 @@ class TestSourceGitHeadAfterDataRootSplit:
             _make_synthetic_db(src_root / db_name)
         manifest = export_mod.run_export(src_root, tmp_path / "out")
         assert manifest["source_git_head"] == head
+
+    def test_missing_hive_logger_is_reported_not_raised(self, monkeypatch):
+        """仓库根不在 sys.path 时延迟 import 失败——只作记录的字段不许把导出搞崩。"""
+        import builtins
+        real_import = builtins.__import__
+
+        def no_hive_logger(name, *a, **k):
+            if name == "hive_logger":
+                raise ImportError("simulated: repo root not on sys.path")
+            return real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", no_hive_logger)
+        got = export_mod._code_git_head(None)
+        assert got.startswith("unavailable:") and "simulated" in got, got
 
     def test_non_git_code_repo_is_reported_not_blank(self, tmp_path):
         not_repo = tmp_path / "not_a_repo"
@@ -1371,3 +1387,52 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
         崩掉——python 摘要脚本要能优雅报"无法解析"而不是让 bash 片段整体失败。"""
         logs, steps_result = self._run(tmp_path, step15_rc=1, continuity_json=None)
         assert steps_result["step15_backup_continuity"]["status"] == "degraded"
+
+
+class TestExportScopeCoversMoveRules:
+    """v0.45.342：数据仓库备份范围 × 阶段 5 迁移分类表，两份表不许各自漂移。
+
+    v0.45.342 之前 `EXCLUDED_FROM_THIS_PASS` 以「已被代码仓库 git 跟踪并推送」为由排除了
+    `report_snapshots/` 与报告文件；阶段 5 让代码检出里那份冻结后，这个理由失效，却没有任何东西变红
+    ⇒ 新快照零异地副本。现在要求：MOVE 规则每一项要么被导出覆盖、要么写明排除理由；反向也不许有过期条目。
+    """
+
+    @staticmethod
+    def _tables():
+        from data_backup import migrate_data_root as mig
+        move = set(mig.MOVE_DBS) | set(mig.MOVE_DIRS) | set(mig.MOVE_GLOBS) | set(mig.MOVE_EXACT)
+        covered = set(export_mod.DBS.values()) | set(export_mod.STATE_DIRS) | set(export_mod.ROOT_FILE_GLOBS)
+        excluded = set(export_mod.EXCLUDED_FROM_THIS_PASS)
+        return move, covered, excluded
+
+    def test_every_move_rule_is_backed_up_or_explicitly_excluded(self):
+        move, covered, excluded = self._tables()
+        missing = sorted(move - covered - excluded)
+        assert not missing, f"这些数据项搬到了数据根，却既不备份也没写排除理由：{missing}"
+
+    def test_no_stale_or_contradictory_entries(self):
+        move, covered, excluded = self._tables()
+        assert not (covered & excluded), f"同时出现在备份范围与排除表：{sorted(covered & excluded)}"
+        assert not (excluded - move), f"排除表里有迁移分类表不认识的过期条目：{sorted(excluded - move)}"
+        assert not (covered - move), f"备份范围里有迁移分类表不认识的条目：{sorted(covered - move)}"
+
+    def test_every_exclusion_has_a_reason(self):
+        assert all(isinstance(v, str) and v.strip() for v in export_mod.EXCLUDED_FROM_THIS_PASS.values())
+
+    def test_report_snapshots_and_reports_are_actually_exported(self, tmp_path):
+        """正面走一遍 run_export：v0.45.342 新纳入的两类真的进了产物，而不只是出现在常量里。"""
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        (src / "report_snapshots").mkdir()
+        (src / "report_snapshots" / "AAA_2026-09-24.json").write_text('{"ticker": "AAA"}')
+        (src / "alpha-hive-daily-2026-09-24.md").write_text("# daily")
+        (src / "alpha-hive-AAA-ml-enhanced-2026-09-24.html").write_text("<html></html>")
+        out = tmp_path / "out"
+        manifest = export_mod.run_export(src, out, code_repo=tmp_path)
+        assert (out / "report_snapshots" / "AAA_2026-09-24.json").exists()
+        assert (out / "alpha-hive-daily-2026-09-24.md").exists()
+        assert (out / "alpha-hive-AAA-ml-enhanced-2026-09-24.html").exists()
+        rels = {r["rel"] for r in manifest["root_files"]}
+        assert {"alpha-hive-daily-2026-09-24.md", "alpha-hive-AAA-ml-enhanced-2026-09-24.html"} <= rels

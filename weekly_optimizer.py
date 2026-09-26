@@ -1320,6 +1320,9 @@ def main() -> None:
     print(f"\n🐝 Alpha Hive · weekly_optimizer 启动 — {mode_label}")
     print(f"   快照目录: {snapshots_dir}")
     print(f"   config:   {CONFIG_PATH}")
+    # 审计日志的绝对路径必须印出来（v0.45.335）：定时任务里的 agent 按这行去读「最新一条」，
+    # 不许再按相对路径猜——数据根迁移后代码检出里那份是冻结 / 已退场的旧文件。
+    print(f"   审计日志: {_history_file()}")
     if args.apply and args.dry_run:
         print("   ⚠️  同时给了 --apply 与 --dry-run，按 --dry-run 处理（不写入）")
     if not write_requested:

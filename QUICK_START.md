@@ -1,5 +1,12 @@
 # 🚀 Alpha Hive 快速开始指南
 
+> ⚠️ **已过时（v0.45.341 标注）——别照本文操作 Slack。** 本文写于 Phase 3（2026-02），路径与接口都已变。
+> 现行规则见 `CLAUDE.md`「Slack 通知精简规则」：Bot 只发 ① `pre_scan_notify.py` 的 LLM 模式确认
+> ② `push_report_to_slack.py --force` 的富文本日报；其余一律只写日志，由 `tests/test_slack_send_whitelist.py` 强制。
+> 文中的 `send_risk_alert` / `send_opportunity_alert` / `send_scan_progress` / `send_x_thread` /
+> `send_daily_report` / `test_connection` 与 `slack_notifier.py` 已于 v0.45.341 删除（零生产调用方）。
+> 看配置状态：`/usr/local/bin/python3 slack_report_notifier.py`（只打印，不发消息）。
+
 ## 5 分钟快速开始
 
 ### 1️⃣ 验证 Slack 连接

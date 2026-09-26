@@ -19,8 +19,20 @@ import pytest
 from data_backup import migrate_data_root as m
 
 
+def _clean_git_env():
+    """去掉继承来的 GIT_*：在 git 钩子里跑时 git 会导出 GIT_DIR / GIT_INDEX_FILE，
+    不去掉的话夹具的 add/commit 会落到真仓库（被测模块的 git 调用同理，见 _no_git_env）。"""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+@pytest.fixture(autouse=True)
+def _no_git_env(monkeypatch):
+    for k in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(k)
+
+
 def _git(root, *args):
-    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+    env = {**_clean_git_env(), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
     subprocess.run(["git", "-C", str(root), *args], check=True, env=env, capture_output=True)
 
@@ -152,7 +164,8 @@ def test_retire_moves_untracked_only_then_check_old_and_unretire(roots):
     r = m.check_old(old)
     assert not r["ok"]
     assert r["reappeared"] == ["pheromone.db"]
-    assert r["tracked_changed"] == ["index.html"]
+    assert r["written_outside_git"] == ["index.html"]
+    assert r["synced_by_git"] == []
 
     # 回退：旧根重新长出来的那份必须先人工处理，unretire 拒绝覆盖
     with pytest.raises(RuntimeError, match="拒绝覆盖"):
@@ -216,3 +229,98 @@ def test_every_backup_state_dir_is_moved():
     assert literal, "ROOT_FILE_GLOBS 里一个字面文件名都没有——下面的核对是空转"
     not_moved_files = {f: m.classify(f, False) for f in literal if m.classify(f, False)[0] != "MOVE"}
     assert not not_moved_files, f"备份清单里的根文件没登记为迁移 MOVE：{not_moved_files}"
+
+
+# ── v0.45.335：v0.45.322 二次检查修复 ────────────────────────────────────────
+
+def _retired(roots):
+    old, new = roots
+    pl = m.plan(old)
+    m.copy(old, new, pl)
+    m.retire(old, new, pl)
+    return old, new
+
+
+def test_check_old_git_synced_change_is_not_a_bypass_write(roots):
+    """生产同步 `pull --ff-only` 改了冻结文件 ⇒ 与 HEAD 一致 ⇒ 不红，但单列 synced_by_git。"""
+    old, _ = _retired(roots)
+    (old / "index.html").write_text("<html>fix-from-main</html>")
+    _git(old, "commit", "-q", "-am", "data fix landed via main")   # 等价于快进进来的提交
+    r = m.check_old(old)
+    assert r["ok"], r
+    assert r["synced_by_git"] == ["index.html"]
+    assert r["written_outside_git"] == []
+
+
+def test_check_old_preexisting_dirty_file_is_baseline_not_a_write(roots):
+    """retire 前就相对 HEAD 脏的冻结文件（生产里的 NVDA_raw.json）不许让 check-old 恒红；
+    但它之后再被改，照样要红。"""
+    old, new = roots
+    (old / "index.html").write_text("<html>dirty-before-retire</html>")
+    pl = m.plan(old)
+    m.copy(old, new, pl)
+    m.retire(old, new, pl)
+    assert m.check_old(old)["ok"]
+    (old / "index.html").write_text("<html>written-after-retire</html>")
+    assert m.check_old(old)["written_outside_git"] == ["index.html"]
+
+
+def test_check_old_new_untracked_file_in_frozen_dir_is_a_write(roots):
+    old, _ = _retired(roots)
+    (old / "report_snapshots" / "b.json").write_text("{}")
+    r = m.check_old(old)
+    assert not r["ok"]
+    assert r["written_outside_git"] == ["report_snapshots/b.json"]
+
+
+def test_copy_is_resumable_after_partial_failure(roots):
+    old, new = roots
+    pl = m.plan(old)
+    m.copy(old, new, pl)
+    (new / "analysis-AAA-ml-2026-09-01.json").unlink()        # 模拟文件复制中途失败
+    res = m.copy(old, new, pl)                                 # 库已在：不许报冲突
+    assert res["dbs"]["pheromone.db"] == {"skipped": "已存在且一致"}
+    assert res["files_copied"] == 1
+    assert m.verify(old, new, pl)["ok"]
+
+
+def test_copy_refuses_db_that_exists_but_differs(roots):
+    old, new = roots
+    pl = m.plan(old)
+    m.copy(old, new, pl)
+    with sqlite3.connect(str(new / "pheromone.db")) as c:
+        c.execute("DELETE FROM t WHERE rowid = 1")
+    with pytest.raises(RuntimeError, match="与源不一致"):
+        m.copy(old, new, pl)
+
+
+def test_symlink_in_move_item_is_refused_not_skipped(roots):
+    old, new = roots
+    (old / "report_snapshots" / "latest.json").symlink_to(old / "report_snapshots" / "a.json")
+    pl = m.plan(old)
+    with pytest.raises(RuntimeError, match="符号链接"):
+        m.copy(old, new, pl)
+    assert not (new / "report_snapshots").exists()
+    assert any("符号链接" in p for p in m.verify(old, new, pl)["problems"])
+
+
+def test_retire_failure_midway_still_writes_record_so_unretire_works(roots, monkeypatch):
+    old, new = roots
+    pl = m.plan(old)
+    m.copy(old, new, pl)
+    real_rename, calls = os.rename, []
+
+    def flaky(src, dst):
+        calls.append(src)
+        if len(calls) == 3:
+            raise OSError("boom")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(m.os, "rename", flaky)
+    with pytest.raises(OSError, match="boom"):
+        m.retire(old, new, pl)
+    monkeypatch.setattr(m.os, "rename", real_rename)
+    rec = json.loads((old / m.RETIRE_DIRNAME / "RETIRE_RECORD.json").read_text(encoding="utf-8"))
+    assert len(rec["moved"]) == 2
+    m.unretire(old)
+    assert (old / "pheromone.db").exists() and (old / "chroma_db").exists()
