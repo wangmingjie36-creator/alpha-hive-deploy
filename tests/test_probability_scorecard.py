@@ -410,6 +410,8 @@ class TestMLEstimatorGenerations:
     MUST_BE_ENUMERATED = frozenset({
         ("2026-09-06", "v0.45.137+v0.45.140+v0.45.141"),
         ("2026-09-07", "v0.45.146+v0.45.147"),
+        # v0.45.334：final_score 特征的上游定义变了（GexRegimeModifier 断开）
+        ("2026-09-28", "v0.45.334"),
     })
 
     def test_no_known_generation_has_vanished(self):
@@ -518,10 +520,20 @@ class TestGenerationVisibleToHumans:
 
     @staticmethod
     def _rows_two_generations():
-        """一半落在首条边界之前、一半在最新边界之后。"""
+        """一半落在首条边界之前、一半在最新边界之后。
+
+        v0.45.334：「最新边界之后」那一半的日期**从登记表末条派生**。此前写死 09-08~09-12，
+        那只在 09-07 那条是末条时成立；追加 09-24 一代后它们落进了倒数第二代，
+        `test_latest_filter_scores_one_generation_only` 照规矩追加就红（与本文件
+        `test_boundary_partitions_days` 改成派生是同一个理由：每加一代就手改日期的夹具，
+        改着改着就会被改成恒真）。
+        """
+        from datetime import date, timedelta
+        last = date.fromisoformat(PS._ML_ESTIMATOR_GENERATIONS[-1][0])
         old = [{"date": f"2026-08-{(i % 28) + 1:02d}", "ticker": f"T{i}", "hit": i % 2}
                for i in range(60)]
-        new = [{"date": f"2026-09-{8 + (i % 5):02d}", "ticker": f"U{i}", "hit": (i + 1) % 2}
+        new = [{"date": (last + timedelta(days=i % 5)).isoformat(), "ticker": f"U{i}",
+                "hit": (i + 1) % 2}
                for i in range(40)]
         rows = old + new
         ml = {(r["date"], r["ticker"]): 40.0 + (i % 40) for i, r in enumerate(rows)}

@@ -99,6 +99,9 @@ class TestCohortBoundary:
         ("2026-09-07", "v0.45.151"),
         ("2026-09-07", "v0.45.156"),
         ("2026-09-07", "v0.45.163"),
+        # v0.45.334：GexRegimeModifier 断开（作废 120 条的那条；原定 09-24 未赶上扫描，改 09-28）。
+        # 钉住它也钉住了 `test_cohort_start_never_moves_backwards` 的下限 —— 删掉它，边界会退回 09-18。
+        ("2026-09-28", "v0.45.334"),
     })
 
     def test_no_known_cohort_has_vanished(self):
@@ -380,9 +383,13 @@ class TestBoundaryDateHasDataEvidence:
 
     @pytest.fixture
     def boundary(self, monkeypatch):
+        # v0.45.334 起印记按版本查表（`_BOUNDARY_MARKERS`）：测试用边界要显式登记它的印记，
+        # 否则判别器会如实回 `no_marker`，而不是借 v0.45.197 的印记充数（那正是本版修的 bug）。
         monkeypatch.setattr(
             rr, "_COHORT_HISTORY",
             list(rr._COHORT_HISTORY[:-1]) + [("2026-09-11", "vTEST", "测试用边界")])
+        monkeypatch.setitem(rr._BOUNDARY_MARKERS, "vTEST",
+                            ("chain_view（测试）", rr._marker_gex_full_chain_view))
         return "2026-09-11"
 
     def test_marker_on_boundary_date_matches(self, tmp_path, boundary):
@@ -428,7 +435,8 @@ class TestBoundaryDateHasDataEvidence:
     def test_archives_without_the_marker_are_not_evidence(self, tmp_path, boundary):
         """没有该口径字段的旧归档不算证据 —— 否则判别器会把旧口径认成新口径。
 
-        变红的变异：把 `if view == "cboe_full_expiries"` 改成 `if True`。
+        变红的变异：把 `_marker_gex_full_chain_view` 的 `return view == "cboe_full_expiries"`
+        改成 `return True`（v0.45.334 前是 `cohort_boundary_evidence` 里的 `if view == ...`）。
         """
         self._write(tmp_path, "2026-09-01", view=None)
         self._write(tmp_path, "2026-09-02", view="something_else")
@@ -449,3 +457,129 @@ class TestBoundaryDateHasDataEvidence:
         self._write(tmp_path, "2026-09-20", ticker="MMM")
         self._write(tmp_path, "2026-09-12", ticker="ZZZ")   # 排最后、日期最早
         assert rr.cohort_boundary_evidence(tmp_path)["marker_first_seen"] == "2026-09-12"
+
+
+class TestBoundaryEvidenceIsPerVersion:
+    """v0.45.334：印记按版本查表（`_BOUNDARY_MARKERS`），只和**同一版本**那条边界的日期比。
+
+    修的 bug：旧实现写死认 v0.45.197 的 chain_view 印记，却拿 `_COHORT_HISTORY[-1]` 的日期比。
+    197 之后每追加一条边界，它就在拿一件事的印记去核另一件事的日期 —— 表头是 09-18
+    （v0.45.315）时实测报 `boundary_too_late`（印记 09-11 早于 09-18），而那两件事毫不相干。
+    **一个会误报的判别器和一个永远不报的一样糟**：误报几次之后，真报也没人看了。
+    """
+
+    @staticmethod
+    def _write(root, date, body, ticker="NVDA"):
+        import json as _json
+        (root / f"analysis-{ticker}-ml-{date}.json").write_text(_json.dumps(body), encoding="utf-8")
+
+    @staticmethod
+    def _chain_view_body():
+        return {"advanced_analysis": {"dealer_gex": {"chain_view": "cboe_full_expiries"}}}
+
+    @staticmethod
+    def _gex_mod_body(**extra):
+        mod = {"gex_adjustment": -0.15, "gex_regime": "positive_gex", **extra}
+        return {"swarm_results": {"gex_regime_mod": mod}}
+
+    @staticmethod
+    def _date_of(version):
+        return next(d for d, v, _r in rr._COHORT_HISTORY if v == version)
+
+    def test_197_marker_is_not_used_to_judge_the_head_boundary(self, tmp_path):
+        """只有 v0.45.197 的印记时，表头那条边界不得被判成「写晚了 / 一致」。
+
+        变红的变异：把 `cohort_boundary_evidence` 改回 v0.45.334 之前的写法 —— 固定用
+        chain_view 印记、固定比 `_COHORT_HISTORY[-1]`（本条会拿到 boundary_too_late）。
+        """
+        self._write(tmp_path, self._date_of("v0.45.197"), self._chain_view_body())
+        head = rr.cohort_boundary_evidence(tmp_path)
+        assert head["version"] == rr._COHORT_HISTORY[-1][1]
+        assert head["marker_first_seen"] is None, head
+        assert head["verdict"] in ("no_evidence_yet", "no_marker"), head
+
+    def test_197_marker_still_judges_its_own_boundary(self, tmp_path):
+        """成对的另一半：修 bug 不能把 197 的判据修没了。
+
+        变红的变异：把 `_BOUNDARY_MARKERS` 里 "v0.45.197" 那条删掉（本条会拿到 no_marker）。
+        """
+        self._write(tmp_path, self._date_of("v0.45.197"), self._chain_view_body())
+        own = rr.cohort_boundary_evidence(tmp_path, version="v0.45.197")
+        assert own["verdict"] == "matches", own
+        assert own["boundary"] == self._date_of("v0.45.197")
+
+    def test_334_marker_ignores_records_without_the_key(self, tmp_path):
+        """缺 `applied` 键的是 v0.45.334 之前的记录（当时施加过）⇒ **不是**印记。
+
+        变红的变异：把 `_marker_gex_modifier_not_applied` 的 `m.get("applied") is False`
+        改成 `not m.get("applied")` —— 缺键被当成印记 ⇒ 首见日落到边界前 ⇒ boundary_too_late，
+        生产上就是把全部旧归档认成新口径、恒报「写晚了」。
+        """
+        import datetime as dt
+        b = self._date_of("v0.45.334")
+        before = (dt.date.fromisoformat(b) - dt.timedelta(days=2)).isoformat()
+        self._write(tmp_path, before, self._gex_mod_body(), ticker="ZZZ")                 # 旧记录：无键
+        self._write(tmp_path, before, self._gex_mod_body(applied=True), ticker="YYY")     # 非字面量 False
+        self._write(tmp_path, b, self._gex_mod_body(applied=False), ticker="AAA")
+        ev = rr.cohort_boundary_evidence(tmp_path, version="v0.45.334")
+        assert ev["marker_first_seen"] == b and ev["verdict"] == "matches", ev
+
+    def test_334_marker_later_than_boundary_is_too_early(self, tmp_path):
+        """推送晚于 09-24 扫描的情形：印记首见晚于边界 ⇒ boundary_too_early（危险方向，会混算）。
+
+        这是本条边界日期的**前提**失败时唯一会红的观测点（见 `_COHORT_HISTORY` v0.45.334 条）。
+        变红的变异：把 `_marker_gex_modifier_not_applied` 改成恒 False（判别器失明 ⇒ no_evidence_yet）。
+        """
+        import datetime as dt
+        b = self._date_of("v0.45.334")
+        late = (dt.date.fromisoformat(b) + dt.timedelta(days=1)).isoformat()
+        self._write(tmp_path, b, self._gex_mod_body(), ticker="AAA")                # 边界当天仍是旧链
+        self._write(tmp_path, late, self._gex_mod_body(applied=False), ticker="BBB")
+        ev = rr.cohort_boundary_evidence(tmp_path, version="v0.45.334")
+        assert ev["verdict"] == "boundary_too_early" and ev["marker_first_seen"] == late, ev
+
+    def test_unregistered_boundary_reports_no_marker(self, tmp_path, monkeypatch):
+        """没登记印记的边界 ⇒ `no_marker`，不借别人的印记、也不说「还没证据」。
+
+        变红的变异：取不到 `_BOUNDARY_MARKERS[version]` 时退回 chain_view 印记
+        （本条会拿到 boundary_too_late），或退回 `no_evidence_yet`（读者会以为有判据、只是还没到）。
+        """
+        monkeypatch.setattr(rr, "_COHORT_HISTORY",
+                            list(rr._COHORT_HISTORY) + [("2099-01-01", "vNOMARK", "测试用")])
+        self._write(tmp_path, self._date_of("v0.45.197"), self._chain_view_body())
+        self._write(tmp_path, "2099-01-01", self._gex_mod_body(applied=False), ticker="AAA")
+        ev = rr.cohort_boundary_evidence(tmp_path)
+        assert ev["version"] == "vNOMARK"
+        assert ev["verdict"] == "no_marker" and ev["marker_first_seen"] is None, ev
+
+    def test_unknown_version_raises(self, tmp_path):
+        """版本号写错是调用方的错 —— 抛，而不是安静地回一个看起来正常的 verdict。
+
+        变红的变异：把 `raise ValueError(...)` 改成按表头边界继续算。
+        """
+        with pytest.raises(ValueError):
+            rr.cohort_boundary_evidence(tmp_path, version="v9.9.9")
+
+    def test_every_marker_names_a_real_boundary(self):
+        """印记表的键必须是真实边界 —— 版本号拼错，那条印记就永远用不上，且没人会红。
+
+        变红的变异：把 `_BOUNDARY_MARKERS` 的 "v0.45.334" 写成 "v0.45.34"。
+        """
+        versions = {v for _d, v, _r in rr._COHORT_HISTORY}
+        assert set(rr._BOUNDARY_MARKERS) <= versions, sorted(set(rr._BOUNDARY_MARKERS) - versions)
+        assert {"v0.45.197", "v0.45.334"} <= set(rr._BOUNDARY_MARKERS)
+
+    def test_cli_renders_no_marker_for_the_head(self, monkeypatch, db, capsys):
+        """CLI 人读模式要能把 `no_marker` 印出来（带版本），不能 KeyError。
+
+        变红的变异：删掉 `_BOUNDARY_VERDICT_TEXT["no_marker"]`（main() 会 KeyError）。
+        """
+        import sys as _s
+        monkeypatch.setattr(rr, "_COHORT_HISTORY",
+                            list(rr._COHORT_HISTORY) + [("2099-01-01", "vNOMARK", "测试用")])
+        monkeypatch.setattr(_s, "argv", ["ic_rerun_readiness.py", "--db", str(db([])),
+                                         "--today", "2099-01-08"])
+        rc = rr.main()
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "没有登记可判别的归档印记" in out and "vNOMARK" in out, out

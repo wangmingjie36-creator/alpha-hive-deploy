@@ -551,6 +551,42 @@ _COHORT_HISTORY = [
      "`data_real_pct` 变化——从均值中去掉一个 0.7 项，均值 >70% 时只升不降；全史最低 84.2%，"
      "故只升、不会新触发 80% 压缩线 ⇒ `rule_score` 不变。"
      "**边界日期取 2026-09-18、与 v0.45.314 同日扩展同一标签，作废 0 条。**"),
+    ("2026-09-28", "v0.45.334",
+     "断开 `GexRegimeModifier` 对 rule_score 的直接加减分（上限 ±0.8，在方向投票之后施加）。"
+     "`queen_distiller` 步骤 4.5 仍计算并落盘，`gex_regime_mod.gex_adjustment` 保留原名原值、"
+     "语义改为「算了但没施加」，由新增的 `applied: False` 标明。自此 GEX 进评分只剩 "
+     "`RegimeWeightAdjuster` 的三值 regime 权重偏移一条通道。"
+     "⚠️ **更正 v0.45.197 条目**（不改写原文，照 v0.45.176 更正 v0.45.172 的先例）：那条写"
+     "「GEX 只经 `gex_regime.RegimeWeightAdjuster` 的三值 `regime` 进评分」——**不成立**。"
+     "GEX 一直经**两条**通道进评分：① RegimeWeightAdjuster（该条实测的 |Δfinal_score| "
+     "中位 0.050 / 最大 0.127、跨阈值 2/249 只量了这一支）；② GexRegimeModifier 直接加减分，"
+     "该条没有提到。同段「`regime=\"unknown\"` ⇒ 不做权重偏移，是安全降级」对②也不成立："
+     "取不到 GEX 的日子没有这笔（多数为负的）调整，全池分数系统性偏高约 0.11"
+     "（例：09-17 全天 30/30 unknown）。"
+     "**幅度**（生产 `.swarm_results_*.json` 只读逐行反推；全部为 rule_engine 模式，"
+     "09-11 起 210 行全部可精确反推）：09-11~09-22 共 210 行里 **133 行（63.3%）调整非零**，"
+     "非零 |Δ| 中位 **0.15**、最大 **0.60**，断开后均值 +0.107；**方向变化 0 条**（该步在方向投票"
+     "之后）；跨 6.0 共 **14 条**（上穿 13 / 下穿 1）、跨 7.5 共 **1 条**（上穿）；同日新旧分 "
+     "Spearman 中位 0.969、最小 0.920；非零里 89/133（67%）来自「正 GEX 且距 flip<2%」分支"
+     "（那个 flip 是逐行权价看净 GEX 变号，结构上贴着现价）。纸面组合入场资格失去 3 笔（全是看空）。"
+     "**边界代价：作废当前世代 120 条**（09-18、09-22、09-24、09-25 各 30；09-23 那天没有扫描产物；"
+     "2026-09-26 迁移后的 `~/alpha-hive-data/pheromone.db` 只读实测），其中**已到期 0 条**、"
+     "当前世代 0/25 个不重叠周 ⇒ 损失的是四个扫描日的累积量，不是已实现的证据。"
+     "（09-24 / 09-25 两天 GEX 全员 unknown——09-25 的扫描时刻本机 DNS 解析失败——这笔调整恰好为 0，"
+     "那 60 条的分数在新旧口径下相同；但边界按「首个跑新代码的业务日」划，不按「恰好没被触发」划，"
+     "否则判别印记 `applied is False` 在那两天不存在、边界无从核验。）"
+     "`composite.final_score` 是 `ALWAYS_SLICED`，"
+     "无法切窄（`COHORT_SIGNAL_SCOPE[\"v0.45.334\"] = ()`，各蜂自身输出不变）。"
+     "**新开分区、不与 09-18 同日扩展**：09-18 / 09-22 的分确实含这笔调整，与新口径不可比。"
+     "⚠️ **本条日期是前提，不是已核实的事实**：原定 2026-09-24，本版未能在那次扫描前推送 ⇒ "
+     "改为 2026-09-28（周一），前提是本版在 **2026-09-28 14:00 PT 那次定时扫描之前推到 `origin/main`**"
+     "（扫描前的 `production_sync` 会快进）。推送若晚于此，09-28 的样本仍是旧口径 ⇒ 须**追加**一条更正、把边界顺延到"
+     "首个真正跑新代码的业务日（照 v0.45.176 的先例，不改写本条）。判别印记已做成可执行的："
+     "`gex_regime_mod.applied is False` 的首见日期，`cohort_boundary_evidence()` 按版本查表比对"
+     "（同版修掉它此前拿 v0.45.197 的印记去比表中最后一条、在 09-18 边界上误报 boundary_too_late 的 bug）。"
+     "同版连带：共振加成前瞻检验的 replay 按记录里的 `applied` 标记复现生产链（事后修订 1，"
+     "盲化期内、0/10 合格周、0 条已到期）；`probability_scorecard._ML_ESTIMATOR_GENERATIONS` "
+     "同日登记（ML 报告模型把 final_score 当特征）。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -701,21 +737,59 @@ def summary_line(res: Dict) -> str:
             f"个不重叠周{eta}")
 
 
-def cohort_boundary_evidence(home: Path) -> dict:
+def _marker_gex_full_chain_view(d: dict) -> bool:
+    """v0.45.197：Dealer GEX 换全到期日视图后，归档里 `chain_view` 为 `cboe_full_expiries`。"""
+    view = ((d.get("advanced_analysis") or {}).get("dealer_gex") or {}).get("chain_view")
+    return view == "cboe_full_expiries"
+
+
+def _marker_gex_modifier_not_applied(d: dict) -> bool:
+    """v0.45.334：GexRegimeModifier 只算不加后，`gex_regime_mod.applied` 为字面量 `False`。
+
+    只认 `is False`：此前的记录**没有**这个键（当时施加了），把「缺键」当印记会让判别器
+    把全部旧归档认成新口径 ⇒ 恒报 boundary_too_late。
+    """
+    m = (d.get("swarm_results") or {}).get("gex_regime_mod")
+    return isinstance(m, dict) and m.get("applied") is False
+
+
+#: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
+#: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
+#: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
+#: v0.45.197 之后每追加一条边界就在拿 197 的印记比别人的日期（09-18 边界上实测误报
+#: boundary_too_late：印记 09-11 早于 09-18，而那本来就是两件无关的事）。
+#: 不是每条边界都留得下印记；没登记的边界 `cohort_boundary_evidence` 如实回 `no_marker`。
+_BOUNDARY_MARKERS = {
+    "v0.45.197": ("advanced_analysis.dealer_gex.chain_view == \"cboe_full_expiries\"",
+                  _marker_gex_full_chain_view),
+    "v0.45.334": ("swarm_results.gex_regime_mod.applied is False",
+                  _marker_gex_modifier_not_applied),
+}
+
+
+def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
     """边界日期写对没写对，从**数据**上回答，而不是从意图上。
 
-    v0.45.197 的口径切换在归档里留了个可判别的印记：
-    `analysis-<TK>-ml-<DATE>.json` 的 `advanced_analysis.dealer_gex.chain_view`
-    自该口径起为 `"cboe_full_expiries"`，此前的记录没有这个键。
-    本函数报出它**首次出现**的日期，与 `_COHORT_HISTORY` 最后一条的日期比对。
+    有些口径切换在归档里留了可判别的印记（登记在 `_BOUNDARY_MARKERS`），例如 v0.45.197
+    之后 `analysis-<TK>-ml-<DATE>.json` 的 `advanced_analysis.dealer_gex.chain_view`
+    为 `"cboe_full_expiries"`、v0.45.334 之后 `swarm_results.gex_regime_mod.applied` 为 `False`
+    （此前的记录都没有这两个键）。本函数报出**该版本**印记**首次出现**的日期，与
+    `_COHORT_HISTORY` 里**同一版本**那条的日期比对。`version` 缺省 = 表中最后一条（当前世代边界）。
+
+    ⚠️ v0.45.334 修：此前写死认 v0.45.197 的印记、却拿表中**最后一条**的日期比 ——
+    197 之后再追加任何边界，它就在拿一件事的印记去核另一件事的日期。
+    该版本没登记印记 ⇒ `no_marker`（「这条边界从数据上核不了」），
+    **不**借别的版本的印记充数，也**不**报成 `no_evidence_yet`（那是「有判据、还没见到」）。
+    `version` 不在 `_COHORT_HISTORY` 里是调用方的错，抛 `ValueError`。
 
     ⚠️ 为什么要有这个：本仓记过同一处栽跟头 —— 此前几条世代边界「核过了」其实
     **零判别力**：世代内 0 条样本时，日期写对和写错的输出一模一样
     （见 auto-memory `alpha-hive-failure-propagation` 的「安全性论证与可观测性是
     同一个事实的两面」）。所以判据必须挂在一个**新旧可区分**的印记上。
 
-    返回 `{"marker_first_seen": 日期或 None, "boundary": 边界日期,
-           "verdict": "matches"|"boundary_too_early"|"boundary_too_late"|"no_evidence_yet"}`。
+    返回 `{"version": 版本, "boundary": 边界日期, "marker": 印记说明或 None,
+           "marker_first_seen": 日期或 None,
+           "verdict": "matches"|"boundary_too_early"|"boundary_too_late"|"no_evidence_yet"|"no_marker"}`。
     取不到归档时返回 `no_evidence_yet` —— **不返回 "matches"**，
     「还没有证据」和「证据说对了」必须可区分。
 
@@ -726,7 +800,16 @@ def cohort_boundary_evidence(home: Path) -> dict:
     要防的那种失效。调用方（`main()`）传 `--db` 所在目录，与库同一个安装。
     """
     root = Path(home)
-    boundary = _COHORT_HISTORY[-1][0]
+    if version is None:
+        version = _COHORT_HISTORY[-1][1]
+    boundary = next((d for d, v, _r in _COHORT_HISTORY if v == version), None)
+    if boundary is None:
+        raise ValueError(f"{version!r} 不在 _COHORT_HISTORY 里")
+    entry = _BOUNDARY_MARKERS.get(version)
+    if entry is None:
+        return {"version": version, "boundary": boundary, "marker": None,
+                "marker_first_seen": None, "verdict": "no_marker"}
+    marker_desc, is_new = entry
     first = None
     try:
         for f in sorted(root.glob("analysis-*-ml-*.json")):
@@ -741,8 +824,7 @@ def cohort_boundary_evidence(home: Path) -> dict:
                     d = json.load(fh)
             except (OSError, json.JSONDecodeError):
                 continue
-            view = ((d.get("advanced_analysis") or {}).get("dealer_gex") or {}).get("chain_view")
-            if view == "cboe_full_expiries":
+            if isinstance(d, dict) and is_new(d):
                 first = date if first is None else min(first, date)
     except OSError:
         first = None
@@ -755,7 +837,8 @@ def cohort_boundary_evidence(home: Path) -> dict:
         verdict = "boundary_too_early"      # 边界之后、印记之前的样本是旧口径 ⇒ 会被混算
     else:
         verdict = "boundary_too_late"       # 边界之前就已是新口径 ⇒ 白白丢掉一些新样本
-    return {"marker_first_seen": first, "boundary": boundary, "verdict": verdict}
+    return {"version": version, "boundary": boundary, "marker": marker_desc,
+            "marker_first_seen": first, "verdict": verdict}
 
 
 def resonance_forward_status(home: Path, db: Path, today: Optional[str] = None) -> Dict:
@@ -829,6 +912,7 @@ _BOUNDARY_VERDICT_TEXT = {
     "boundary_too_early": "🚨 边界写早了 —— 边界至印记之间的样本是旧口径，会被混算，请追加一条更正",
     "boundary_too_late": "⚠️ 边界写晚了 —— 印记之前已是新口径，白丢了一些新样本",
     "no_evidence_yet": "⏳ 归档里还没有该口径的印记（生产尚未跑到这一版，或归档不可读）",
+    "no_marker": "— 这条边界没有登记可判别的归档印记，日期只能靠推理、不能从数据核对",
 }
 
 
@@ -899,6 +983,7 @@ def main() -> int:
     # 归档与 DB 同处一个安装 ⇒ 用 --db 的所在目录，别用代码目录（见函数 docstring）
     _ev = cohort_boundary_evidence(db.parent)
     print(f"  边界日期的数据证据:    {_BOUNDARY_VERDICT_TEXT[_ev['verdict']]}"
+          f"（{_ev['version']} / {_ev['boundary']}）"
           + (f"（印记首见 {_ev['marker_first_seen']}）" if _ev["marker_first_seen"] else ""))
     print(f"  世代内有扫描的周:      {res['scan_weeks_in_cohort']}"
           f"（已过 {res['calendar_weeks_elapsed']} 个日历周，"
