@@ -480,6 +480,9 @@ def _select_expiries(by_expiry: Dict[str, dict], today: datetime, max_expiries: 
 # 负百分比 = 部分和与全链**符号相反**。⇒ `total_gex` 只有在全链上才是良定义的量，
 # 「近月窗口」是另一个指标（pin gamma），不是这个。下游
 # `RegimeWeightAdjuster` 消费的语义也是「做市商整体净 gamma 多还是空」，本就是全书概念。
+# v0.45.334 起它是 GEX 进评分的**唯一**通道（三值 regime → 五维权重偏移）；此前
+# `GexRegimeModifier` 还把 ±0.8 直接加进 rule_score（v0.45.197 写本段时漏提），现在只算诊断值、
+# 不施加（`queen_distiller` 步骤 4.5，`gex_regime_mod.applied=False`）。
 #
 # 24 与 `fetch_cboe_full_chain_oi` 的 `max_expirations` 同值（实测当日全链到期日数
 # 中位 18 / 最大 25）；被上限砍掉的到期日数**记进计数**，别让上限的够不够变成假设。
@@ -551,6 +554,206 @@ def fetch_cboe_chain_for_gex(ticker: str, stock_price: float = 0.0,
     with _cache_lock:
         _gex_view_stats["ok" if chain else "unavailable"] += 1
     return chain
+
+
+# ── 卖权行权价选择器的原始合约视图（v0.45.333）──────────────────────────
+# 同一份 payload 的第三个视图，给 `sell_strike_levels` / `sell_strike_candidates` 用。
+# 不能复用 `fetch_cboe_chain` 的成品链，三处口径都与选行权价冲突：
+#   · ATM 带宽 [0.3S, 1.7S] + 每边 OI 前 40 档 —— 10–15Δ 的低 OI 远翼正是会被裁掉的那批；
+#   · 成品链丢了 delta（选行权价的首要输入）；
+#   · 每张合约的 dte 用带时分秒的 today 算（差一天那一族），再被 `max(1, …)` 兜底。
+# 本视图：全链原样、纯 date 相减的日历 DTE、数值清洗成「有限值或 None」。
+#
+# 计数器：每个失败出口一个键，**不折叠**——「CDN 陈旧（等刷新可补）」「vintage 对不上
+# （调用方拿旧日期跑今天的链）」「判不了 vintage」是三种性质不同的失败，
+# 压成一个 None 就是 v0.45.91 那次事故的形状。
+_raw_contracts_stats = {"ok": 0, "snapshot_mode": 0, "stale_vintage": 0, "payload_unavailable": 0,
+                        "vintage_mismatch": 0, "vintage_unverifiable": 0, "price_unavailable": 0,
+                        "no_parseable_contracts": 0}
+# 场次不在进行时，取价用的时钟 = payload vintage 那天的这个钟点（美东）：
+# 任何一场（含 13:00 提前收盘日；常规收盘最晚 16:00）都已收完，official_price 走 close 分支，
+# 盘中陈旧判据（`_generated_mid_session`）按 payload 那一场算，而不是按「今天」算。
+_RAW_SESSION_CLOSED_CLOCK = _dtime(17, 5)
+
+
+def raw_contracts_stats() -> dict:
+    """`fetch_cboe_raw_contracts` 各出口的累计次数（拷贝）。"""
+    with _cache_lock:
+        return dict(_raw_contracts_stats)
+
+
+def reset_raw_contracts_stats() -> None:
+    with _cache_lock:
+        for k in _raw_contracts_stats:
+            _raw_contracts_stats[k] = 0
+
+
+def _raw_fail(key: str, reason: str) -> Tuple[None, str]:
+    with _cache_lock:
+        _raw_contracts_stats[key] += 1
+    return None, reason
+
+
+def _raw_session_live(vintage: str, now: datetime) -> bool:
+    """payload 那一场此刻还在进行吗：vintage 是 now 的美东日期，且 开盘 ≤ now < 那天的收盘。
+
+    收盘时刻取 `is_trading_day.session_close_et`（提前收盘日 13:00）：`is_market_open` 写死 16:00，
+    感恩节次日 14:00 ET 会判「盘中」⇒ 当天到期合约以 dte=0 留下、盘后价标 cboe_intraday
+    （2026-09-24 最终评审探针实测）。日历不可用退回平日收盘，与 `_generated_mid_session` 同口径。
+    `now` 须已换算到美东。
+    """
+    if vintage != now.date().isoformat() or now.weekday() >= 5:
+        return False
+    try:
+        from is_trading_day import session_close_et
+        close_t = session_close_et(now.date())
+    except Exception:  # noqa: BLE001 - 与 _generated_mid_session 同口径退回平日收盘
+        close_t = _ET_CLOSE
+    return _ET_OPEN <= now.time() < close_t
+
+
+def fetch_cboe_raw_contracts(ticker: str, *, as_of: Optional[str], timeout: int = 15,
+                             now_et: Optional[datetime] = None) -> Tuple[Optional[dict], Optional[str]]:
+    """CBOE 原始 payload → 逐合约列表（全链、不截断、日历 DTE）。返回 `(结果, None)` 或 `(None, 原因)`。
+
+    零额外网络：走 `_fetch_cboe_payload` 的进程缓存（同标的主链 / GEX 视图已拉过就命中）。
+    ⚠️ 例外：本函数用 `on_stale="raise"`，而陈旧 payload **不入缓存** ⇒ 陈旧的那几只票
+    会比 `on_stale="none"` 的消费方多发一次请求（它们已经各拉过一次、被弃）。
+    只有陈旧票如此，且陈旧本身就是要区分出来的那个原因，值得这一次请求。
+
+    `as_of`：
+      · 给了（日报钩子 / CLI）⇒ payload vintage 必须等于它，否则 `vintage_mismatch`。
+        防开机补跑 / CLI 带旧日期时把**今天**的链写到旧日期下。
+      · None（仅 MCP 现算）⇒ 以 payload vintage 为 as_of。
+    `now_et`：本次判定的唯一时钟（场次在不在进行、fetched_at）；缺省取美东此刻，
+    带时区的值先换算到美东。
+
+    **场次在不在进行** `session_live = vintage == now 的美东日期 且 09:30 ≤ now < session_close_et(今天)`
+    （`_raw_session_live`）。只看 `is_market_open` 不够，它两处都不认交易日历：
+      · 工作日休市日（劳动节 2026-09-07 11:00 ET）会判「盘中」，而 payload 是上一交易日（09-04）的
+        ⇒ 09-04 已到期的合约以 dte=0 留下、现价取 current_price（盘后价）还标成 cboe_intraday；
+      · 收盘写死 16:00：提前收盘日（感恩节次日 2026-11-27 13:00 收）14:00 ET 仍判「盘中」，同一形状
+        （两处都是评审探针实测）。
+      · session_live ⇒ `official_price(data, now)`（盘中取 current_price）；
+      · 否则 ⇒ `official_price(data, vintage 那天 17:05 ET)`：payload 那一场已经收了，按收盘取
+        close，`cboe_close` / `cboe_stale_intraday` 标签随之正确。平常收盘后（now 就在 vintage
+        当天收盘后）两种时钟给出同一个结果。
+
+    DTE = `date(expiry) − date(as_of)`，**纯 date 相减**（带时分秒的 today 会把
+    17:05 ET 时 7 日历日后的到期日算成 6）。丢弃规则，各记一个计数：
+      · OCC 符号解析失败            → n_dropped_unparseable
+      · dte < 0（已到期残留）        → n_expired_excluded
+      · dte == 0 且 not session_live → n_expiring_today_excluded
+        那一场收了，当天到期的合约已经结算；按 0.5 天下限算，它的 gamma 约为三日合约的
+        2.5 倍，会独占近月视图（next_expiry）。场次进行中它还活着，保留。
+
+    时效字段（v0.45.333 登记前定稿补）：
+      · `payload_last_trade_time`：payload 自带的 last_trade_time 原文 —— 报价**真正**是哪一刻的；
+      · `fetched_at`：**本函数被调用的时刻**（now），不是下载时刻。命中进程缓存时两者可差到
+        `_CACHE_MAX_AGE`（4h），判报价新旧看 payload_last_trade_time，别看它；
+      · `iv30`：payload 的 iv30，**百分数**原样透传（同 `select_quote_set` 顶层 iv30）；缺失为 None；
+      · `session_live`：上面那个判定的结果，dte==0 去留与取价时钟都由它决定。
+
+    数值清洗：iv ≤ 0 / 非有限 → None；delta / gamma 为 0 或非有限 → None
+    （CBOE 对零流动合约给 0，那不是观测值）；oi 缺失 → 0.0；bid/ask 有限值原样、否则 None。
+    **不做** ATM 带宽过滤、**不做** 40 档截断、**不调** `_select_expiries_for_gex`
+    （它会给 `_gex_view_stats["capped_expiries"]` 计数 ⇒ 一个计数器两个来源）。
+    """
+    if _SNAPSHOT_PROVIDER is not None:
+        # 快照不存原始 options 数组；补跑那天的真实链谁也拿不到，拿今天的冒充比缺失更糟。
+        return _raw_fail("snapshot_mode", "snapshot_mode_no_raw_chain")
+
+    try:
+        data = _fetch_cboe_payload(ticker, timeout, on_stale="raise")
+    except CboeStaleVintageError:
+        return _raw_fail("stale_vintage", "stale_vintage")
+    if not data or not data.get("options"):
+        return _raw_fail("payload_unavailable", "payload_unavailable")
+
+    vintage = _payload_vintage_date(data)
+    if vintage is None:
+        return _raw_fail("vintage_unverifiable", "vintage_unverifiable")
+    if as_of is not None and vintage != as_of:
+        return _raw_fail("vintage_mismatch", "vintage_mismatch")
+    as_of_eff = as_of if as_of is not None else vintage
+
+    now = now_et if now_et is not None else _et_now()
+    if now.tzinfo is not None:
+        now = now.astimezone(_ET_TZ)
+    session_live = _raw_session_live(vintage, now)
+
+    # 收盘后拿到盘中生成的文件（cboe_stale_intraday）照收：这个价与**同一份**链是同一时刻的，
+    # 链内计算（delta / 距离）要的正是它。标签原样记下，要官方收盘价的下游自己认。
+    price_clock = now if session_live else datetime.combine(
+        date.fromisoformat(vintage), _RAW_SESSION_CLOSED_CLOCK, tzinfo=_ET_TZ)
+    S, px_src = official_price(data, price_clock)
+    if not S or S <= 0:
+        return _raw_fail("price_unavailable", "price_unavailable")
+
+    as_of_date = date.fromisoformat(as_of_eff)
+    contracts: List[dict] = []
+    n_raw = n_unparseable = n_expired = n_today = 0
+    for o in data.get("options") or []:
+        n_raw += 1
+        parsed = _parse_occ(o.get("option", "")) if isinstance(o, dict) else None
+        if not parsed:
+            n_unparseable += 1
+            continue
+        expiry, cp, strike = parsed
+        dte = (date.fromisoformat(expiry) - as_of_date).days
+        if dte < 0:
+            n_expired += 1
+            continue
+        if dte == 0 and not session_live:
+            n_today += 1
+            continue
+        iv = _qs_num(o.get("iv"))
+        delta = _qs_num(o.get("delta"))
+        gamma = _qs_num(o.get("gamma"))
+        oi = _qs_num(o.get("open_interest"))
+        contracts.append({
+            "symbol": o.get("option"),
+            "expiry": expiry,
+            "cp": cp,
+            "strike": strike,
+            "dte": dte,
+            "iv": iv if (iv is not None and iv > 0) else None,
+            "delta": delta if delta else None,     # 0.0 → None（零流动合约的占位值）
+            "gamma": gamma if gamma else None,
+            "vega": _qs_num(o.get("vega")),
+            "theta": _qs_num(o.get("theta")),
+            "theo": _qs_num(o.get("theo")),
+            "oi": oi if oi is not None else 0.0,
+            "volume": _qs_num(o.get("volume")),
+            "bid": _qs_num(o.get("bid")),
+            "ask": _qs_num(o.get("ask")),
+            "last_trade_time": o.get("last_trade_time"),
+        })
+
+    if n_raw and n_unparseable > n_raw * 0.05:
+        _log.warning("CBOE %s 原始合约：%d/%d OCC 符号解析失败（疑格式变更）",
+                     ticker, n_unparseable, n_raw)
+    if not contracts:
+        return _raw_fail("no_parseable_contracts", "no_parseable_contracts")
+
+    with _cache_lock:
+        _raw_contracts_stats["ok"] += 1
+    return {
+        "ticker": ticker,
+        "as_of": as_of_eff,
+        "vintage_date": vintage,
+        "underlying_price": S,
+        "underlying_price_source": px_src,
+        "session_live": session_live,
+        "fetched_at": now.isoformat(),               # 调用时刻，不是下载时刻（见 docstring）
+        "payload_last_trade_time": data.get("last_trade_time"),
+        "iv30": _qs_num(data.get("iv30")),           # 百分数，原样
+        "contracts": contracts,
+        "n_raw": n_raw,
+        "n_dropped_unparseable": n_unparseable,
+        "n_expired_excluded": n_expired,
+        "n_expiring_today_excluded": n_today,
+    }, None
 
 
 def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,

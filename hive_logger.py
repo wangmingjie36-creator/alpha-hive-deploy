@@ -164,6 +164,20 @@ class _HivePaths:
         return self.home / "ml_model_extended.json"
 
     @property
+    def sell_strike_state(self) -> Path:
+        """卖权行权价选择器的前向账本目录（v0.45.333）。
+
+        写：`sell_strike_ledger.record_rows` / `settle`（`<本目录>/<tenor>/<YYYY-MM>.jsonl` 按月分片）
+            与 `sell_strike_report.write_local_report`（`<本目录>/reports/sell-strike-<日期>.md`）。
+        读：`sell_strike_ledger.load_rows` / `assess`、`sell_strike_report`、MCP 工具。
+        调用时求值（读 `ALPHA_HIVE_HOME`）——**不要**在消费方把它存成模块级常量：
+        四个老账本（vrp_state 等）的 `BASE_DIR = PATHS.home` 写法已在
+        `tests/test_paths_not_frozen_at_import.py::KNOWN` 登记为存量违规，别再添一个。
+        不建目录：写入方自己 `mkdir`，只读的调用方（assess / MCP）不该为了「看一眼」造出空目录。
+        """
+        return self.home / "sell_strike_state"
+
+    @property
     def google_credentials(self) -> str:
         return os.environ.get(
             "ALPHA_HIVE_GOOGLE_CREDENTIALS",

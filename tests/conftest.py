@@ -960,6 +960,7 @@ _GUARDED_PRODUCTION_ARTIFACTS = (
     "vrp_state",
     "options_paper_state",
     "hedge_state",
+    "sell_strike_state",
 )
 
 
@@ -985,6 +986,79 @@ def _artifact_signature(path):
             except OSError:
                 acc.append(f"{os.path.relpath(fp, path)}:ERR")
     return "dir:" + "|".join(sorted(acc))
+
+
+def _assert_sell_strike_state_in_sandbox(resolved, tmp_path):
+    """`_isolate_sell_strike_state` 防线①：每个解析结果都是绝对路径、且（词法上）落在 tmp 沙箱内。
+
+    返回 `{名字: 路径字符串}`——只有全部断言都过了才有返回值，所以「记下来的」就是「核对过的」。
+    先断言绝对、再做**纯词法**包含判定（`normpath` 消掉 `..`，不碰 cwd、不 resolve）：
+    `_isolate_env` 把 `ALPHA_HIVE_HOME` 设成 `str(tmp_path)`，正确解析时前缀逐字相同；
+    相对路径若拿 cwd 补全再判，测试期间 cwd 就在 tmp 里、判定恒真（`_assert_default_path_in_sandbox`
+    记的 v0.45.240 同一个坑），而 resolve 未锚定的路径又会被 test_reads_own_checkout 的 cwd 守卫判红。
+    """
+    checked = {}
+    for name, raw in resolved.items():
+        p = pathlib.Path(raw)
+        assert p.is_absolute(), (
+            f"{name} 解析成了相对路径 {raw!r}：测试期间 cwd 在 tmp 里看着无害，"
+            "生产从仓库根跑就会写穿仓库根的卖权账本。")
+        assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+            f"{name} = {p} 逃出了测试沙箱（应在 {tmp_path} 内）。"
+            "多半是它被求值成了模块级常量 / 类属性 / 默认参数（import 期冻结），"
+            "`_isolate_env` 的 setenv 追不上它。改成调用时读 `PATHS.sell_strike_state`。")
+        checked[name] = str(p)
+    return checked
+
+
+@pytest.fixture(autouse=True)
+def _isolate_sell_strike_state(_isolate_env, request, tmp_path):
+    """卖权行权价账本目录的两道防线（v0.45.333，照 `_isolate_ml_model_file` 的写法）。
+
+    ① **setup 正面核对**（`_assert_sell_strike_state_in_sandbox`）：`PATHS.sell_strike_state` 与账本
+       自己的解析器 `sell_strike_ledger._state_dir()` 此刻都落在本测试的 tmp 沙箱里。
+       不再 monkeypatch 一遍去「保证」它——盖住了就再也测不出它退化（有人把 `_state_dir`
+       冻成模块级常量时，这一道会在**每一条**测试上红）。
+    ② **teardown 比对真身指纹**：`hive_logger` 所在目录（checkout 根）与 pytest 调用目录下的
+       `sell_strike_state/`，用 `_artifact_signature`（stat 口径，理由见其 docstring）。
+       兜住任何绕过 ① 的写法：硬编码路径、subprocess 跑 CLI（带着现造的 env）、`__file__` 派生。
+       没有 ②，① 将来静默失效不会有人知道；没有 ①，② 只能事后发现。
+
+    显式依赖 `_isolate_env`：本闸核对的正是它设的 `ALPHA_HIVE_HOME`，不靠 autouse 名字字母序的巧合。
+    ① 核对过的 `{名字: 路径}` 记在 `request.config._alpha_hive_sell_strike_guard_checked`，供「防线确实
+    接上」的自证测试读（`conftest` 不可 import，只能经 config / fixture 传）；判据本身经
+    `sell_strike_state_sandbox_check` fixture 暴露给它的有牙自证。
+    """
+    import hive_logger
+
+    real_dirs = {pathlib.Path(hive_logger.__file__).resolve().parent / "sell_strike_state",
+                 pathlib.Path(request.config.invocation_params.dir).resolve() / "sell_strike_state"}
+    before = {p: _artifact_signature(str(p)) for p in real_dirs}
+
+    resolved = {"PATHS.sell_strike_state": hive_logger.PATHS.sell_strike_state}
+    try:
+        import sell_strike_ledger as _ssl
+    except Exception:  # pragma: no cover - 模块坏了由它自己的测试报红，这里只核 PATHS
+        _ssl = None
+    if _ssl is not None:
+        resolved["sell_strike_ledger._state_dir()"] = _ssl._state_dir()
+    request.config._alpha_hive_sell_strike_guard_checked = _assert_sell_strike_state_in_sandbox(
+        resolved, tmp_path)
+
+    yield
+
+    touched = sorted(str(p) for p in real_dirs if _artifact_signature(str(p)) != before[p])
+    assert not touched, (
+        f"测试写到了**真身** sell_strike_state/：{touched}。"
+        "路径已由 `PATHS.sell_strike_state` 调用时求值指向 tmp，还能写到真身说明有绕过它的写入路径"
+        "（硬编码 / `__file__` 派生 / subprocess 丢了 env）——去把那条路径接到 "
+        "`sell_strike_ledger._state_dir()` 上，不要在这里放行。")
+
+
+@pytest.fixture
+def sell_strike_state_sandbox_check():
+    """把 `_assert_sell_strike_state_in_sandbox` 暴露给它的有牙自证（同 `default_path_sandbox_check`）。"""
+    return _assert_sell_strike_state_in_sandbox
 
 
 @pytest.fixture

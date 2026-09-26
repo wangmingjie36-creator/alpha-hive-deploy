@@ -71,6 +71,7 @@ class TestCounters:
         assert c == {"yfinance": None, "twelve_data": None, "cboe": None,
                      "cboe_chain": None,   # v0.45.190 链构造观测
                      "gex_view": None,     # v0.45.197 GEX 全链视图可得性
+                     "cboe_raw": None,     # v0.45.333 卖权账本原始链各出口
                      "options_snapshot": None}  # v0.45.238 期权快照槽位
         line = st.summary_line({"phases": {}, "counters": c})
         assert "—" in line and "0次" not in line
@@ -91,6 +92,27 @@ class TestCounters:
                                         "near_excluded_oi", "chosen_oi", "errors"}
         # v0.45.197：GEX 视图不可得的次数是那次改动唯一的代价，必须可数。
         assert set(c["gex_view"]) == {"ok", "unavailable", "capped_expiries"}
+        # v0.45.333：卖权账本原始链各失败出口分开数（不折叠），同样进 status.json。
+        assert set(c["cboe_raw"]) == {"ok", "snapshot_mode", "stale_vintage", "payload_unavailable",
+                                      "vintage_mismatch", "vintage_unverifiable", "price_unavailable",
+                                      "no_parseable_contracts"}
+
+    def test_cboe_raw_counter_is_wired_to_the_fetch_path(self, monkeypatch):
+        """counters() 读的是 cboe_options 的**活**计数，不是一份拷贝或另一个 dict：真调一次
+        `fetch_cboe_raw_contracts`（快照模式出口，零网络）⇒ `cboe_raw.snapshot_mode` +1。
+        变异：counters() 漏接 `raw_contracts_stats()`（⇒ None）/ 接成 gex_view_stats。"""
+        import cboe_options
+        cboe_options.reset_raw_contracts_stats()
+        monkeypatch.setattr(cboe_options, "_SNAPSHOT_PROVIDER", lambda t: None)
+        try:
+            before = st.counters()["cboe_raw"]
+            assert before is not None and before["snapshot_mode"] == 0
+            assert cboe_options.fetch_cboe_raw_contracts("ZZZ", as_of="2026-09-23") == \
+                (None, "snapshot_mode_no_raw_chain")
+            after = st.counters()["cboe_raw"]
+            assert after["snapshot_mode"] == 1 and sum(after.values()) == 1
+        finally:
+            cboe_options.reset_raw_contracts_stats()   # 进程级计数，别漏给后面的测试
 
 
 class TestCboePayloadStats:
@@ -161,7 +183,7 @@ class TestWrite:
         assert d["date"] == "2026-09-05"
         assert d["phases"]["prefetch"] == 12.3
         assert set(d["counters"]) == {"yfinance", "twelve_data", "cboe",
-                                      "cboe_chain", "gex_view", "options_snapshot"}
+                                      "cboe_chain", "gex_view", "cboe_raw", "options_snapshot"}
         assert d["extra"] == {"note": "x"}
         assert not (tmp_path / "t.json.tmp").exists(), "临时文件必须被 os.replace 掉"
 

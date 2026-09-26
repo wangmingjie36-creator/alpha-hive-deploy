@@ -1347,6 +1347,61 @@ class AlphaHiveDailyReporter:
         except Exception as e:
             _log.warning("组合 Greeks 更新失败(非致命): %s", e)
 
+        # ── v0.45.333: gamma/delta 卖权行权价选择器（对标 GEXBot）—— 只记录与结算，不进评分、不上网站 ──
+        # 每票一次 CBOE 原始链 → 水平地图 → 月度 / 周度两档 delta 梯子各记一行，到期次日按到期日
+        # 那根 K 线结算。检验协议冻结在 experiments/sell_strike_routing_prereg.md。
+        # ⚠️ **不得**拼进下面的 `_extra_md` / `report["markdown_report"]`：日报 md 同时在 gh-pages
+        # 部署白名单与自动提交白名单里（report_deployer），用户明确要求本功能不上公开网站。
+        # 报告只写 `<PATHS.sell_strike_state>/reports/sell-strike-<日期>.md`，MCP 工具按需读。
+        # 守卫：tests/test_sell_strike_integration.py 真跑本方法，断言日报 md 里没有这一节。
+        # 顺序是刻意的：账本状态日志 / errors / 0 行告警**先**打，本地报告**后**写、单独 try——
+        # 两者同在一个 try 且报告在前时，渲染一抛错，账本其实已写好，日志却只剩一条「更新失败」，
+        # 同一天本该响的 0 行告警也被吞掉（评审探针实测）。
+        _t_ss = time.monotonic()
+        _ss = None
+        try:
+            import sell_strike_ledger as _ssl
+            import sell_strike_report as _ssr
+            _ss = _ssl.run_for_date(self.date_str, tickers=sorted(swarm_results.keys()),
+                                    upcoming_fn=self._earnings_date_from_swarm(swarm_results))
+            _ss_pt = _ss.get("per_tenor") or {}
+            _ss_m, _ss_w = _ss_pt.get("monthly") or {}, _ss_pt.get("weekly") or {}
+            # 放弃 / 取不到 K 线 / 待结算（其中过期）都打出来：Twelve Data key 过期时「结算 0」
+            # 与「没有行到期」一模一样，只有这几个数分得开（过期待结算另由 run_for_date 打 warning）。
+            _ss_tot = {_k: sum(int(_v.get(_k) or 0) for _v in _ss_pt.values())
+                       for _k in ("settled", "gave_up", "settle_bars_unavailable", "pending", "pending_overdue")}
+            # 报价来源按档计数：cboe_stale_intraday（收盘后读到盘中文件）的行照记、不进检验——
+            # 不打出来，样本悄悄变少没人知道（09-22 生产 30 只里 4 只）。
+            _log.info("卖权行权价账本已更新: %s (月度 记录 %d / 不可得 %d · 周度 记录 %d / 不可得 %d"
+                      " · 结算 %d · 放弃 %d · 取不到 K 线 %d · 待结算 %d（其中过期 %d）"
+                      " · 报价来源 月度 %s / 周度 %s)", self.date_str,
+                      _ss_m.get("recorded", 0), sum((_ss_m.get("unavailable") or {}).values()),
+                      _ss_w.get("recorded", 0), sum((_ss_w.get("unavailable") or {}).values()),
+                      _ss_tot["settled"], _ss_tot["gave_up"], _ss_tot["settle_bars_unavailable"],
+                      _ss_tot["pending"], _ss_tot["pending_overdue"],
+                      _ss_m.get("price_source") or {}, _ss_w.get("price_source") or {})
+            # run_for_date 把每档 record / settle 的异常收进 per_tenor[*]["errors"]（不连坐另一档），
+            # 不往外抛——这里不打出来，一档账本天天写不进去也不会有任何东西响。
+            _ss_errors = [_e for _v in _ss_pt.values() for _e in (_v.get("errors") or [])]
+            if _ss_errors:
+                _log.warning("卖权行权价账本部分失败(非致命): %s", _ss_errors)
+            # 整轮 0 行可记（CBOE 全线不可得 / 快照模式没有原始链 / 水平地图全挂 / 窗口里没到期日）
+            # 同样要响，不然账本静默断供。原因取**行上**的 unavailable_reason（按档），不取 fetch_reasons：
+            # 后者只管取数这一步，取数成功而行构造失败时它写的是 ok，诊断就自相矛盾了。
+            if swarm_results and not any(_v.get("recorded") for _v in _ss_pt.values()):
+                _log.warning("卖权行权价账本今日 0 行可记（%d 只票全部不可得）：%s", len(swarm_results),
+                             {_t: _v.get("unavailable") for _t, _v in _ss_pt.items()})
+        except Exception as e:
+            _log.warning("卖权行权价账本更新失败(非致命): %s", e)
+        # freeze=True：预注册检验首次就绪时在这里跑并冻结——全仓**唯一**传 True 的地方（MCP / CLI 只读，
+        # 就绪但未冻结时显示「已就绪，等待日报冻结」）。一次不可逆的写只许一个写者。
+        if _ss is not None:
+            try:
+                _log.info("卖权行权价本地报告: %s", _ssr.write_local_report(self.date_str, freeze=True))
+            except Exception as e:
+                _log.warning("卖权行权价本地报告写入失败(非致命，账本已更新): %s", e)
+        _timing.record("sell_strike", time.monotonic() - _t_ss)
+
         # ── v0.45.104: 三个新小节必须在**这里**回填，不能在 _build_swarm_report 里拼 ──
         # 二次复查实测：`_build_swarm_report`（run_swarm_scan 里早一行）先渲染 markdown，
         # `_post_scan_notify`（本方法）才跑上面三个钩子。于是渲染层读到的是钩子跑之前的

@@ -197,3 +197,22 @@ def test_cli_reports_are_written_under_new_root(roots):
 ])
 def test_classify_table(name, is_dir, kind):
     assert m.classify(name, is_dir)[0] == kind
+
+
+def test_every_backup_state_dir_is_moved():
+    """私有备份认定为「状态目录」的每一项，迁移表都必须判 MOVE（v0.45.333 起）。
+
+    两张表描述同一批目录、各管一件事：`export.STATE_DIRS`（备份什么）与本模块 `MOVE_DIRS`（搬什么）。
+    v0.45.333 起初只登记了前者，`sell_strike_state` 在 plan 里是 UNKNOWN ⇒ copy 拒绝整次迁移；
+    情急改 SKIP 则旧根里已记的账本行被留下（当日 CBOE 报价事后拿不回）。有这条，下一本新账本
+    只登记一张表时当场红。正对照：STATE_DIRS 非空且真含卖权账本（防两边同时被清空后恒绿）。
+    变异：从 MOVE_DIRS 删掉 `sell_strike_state`。"""
+    from data_backup import export
+    assert "sell_strike_state" in export.STATE_DIRS and len(export.STATE_DIRS) >= 5
+    not_moved = {d: m.classify(d, True) for d in export.STATE_DIRS if m.classify(d, True)[0] != "MOVE"}
+    assert not not_moved, f"备份清单里的状态目录没登记为迁移 MOVE：{not_moved}"
+    # 同一条链上的根文件：备份的也必须搬（只核字面文件名，glob 模式无从逐个判）
+    literal = [f for f in export.ROOT_FILE_GLOBS if not any(ch in f for ch in "*?[")]
+    assert literal, "ROOT_FILE_GLOBS 里一个字面文件名都没有——下面的核对是空转"
+    not_moved_files = {f: m.classify(f, False) for f in literal if m.classify(f, False)[0] != "MOVE"}
+    assert not not_moved_files, f"备份清单里的根文件没登记为迁移 MOVE：{not_moved_files}"

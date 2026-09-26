@@ -14,6 +14,8 @@ Available Tools
   alphahive_get_analysis          Full analysis JSON for a ticker + date
   alphahive_get_swarm_scores      Focused swarm/bee score + confidence band
   alphahive_get_gex               Dealer GEX snapshot from analysis JSON
+  alphahive_get_sell_strike_candidates
+                                  Sell-strike delta ladder + level map (ledger or live)
   alphahive_get_options_snapshot  Live P/C ratio + OI from yfinance
   alphahive_get_quote             Live price + fundamentals from yfinance
   alphahive_get_price_history     OHLCV candles from yfinance
@@ -409,9 +411,15 @@ async def alphahive_get_gex(params: TickerDateInput) -> str:
         str: JSON with:
             - total_gex (float): net gamma exposure in $ millions
             - regime (str): "positive_gex" | "negative_gex"
-            - gex_flip (float): price where GEX changes sign
-            - largest_call_wall (float): highest OI call strike
-            - largest_put_wall (float): highest OI put strike
+            - gex_flip (float): strike nearest spot where per-strike net GEX
+              changes sign between adjacent strikes (not a repricing
+              zero-gamma level)
+            - largest_call_wall (float): strike with the largest call-side
+              GEX (gamma x OI weighted, calls only) — a one-sided extreme,
+              not the highest-OI strike and not the net-GEX major
+            - largest_put_wall (float): strike with the most negative
+              put-side GEX (gamma x OI weighted, puts only) — a one-sided
+              extreme, not the highest-OI strike and not the net-GEX major
             - interpretation (str): human-readable regime explanation
     """
     try:
@@ -451,6 +459,92 @@ async def alphahive_get_gex(params: TickerDateInput) -> str:
         })
     except FileNotFoundError as e:
         return _err(str(e))
+    except Exception as e:
+        return _err(str(e))
+
+
+# ─── Tool 4b · Sell-Strike Candidates (v0.45.333) ────────────────────────────
+# 编号用 4b 而不是把后面 5~8 顺延：工具按 name 注册，编号只是本文件里的阅读锚点，
+# 顺延会让一条新增变成四处无关改动。
+# ⚠️ 这是卖权行权价账本**唯一**的对外出口之一（另一个是状态目录里的本地 markdown）——
+# 本功能刻意不进日报 markdown / 不上 gh-pages，见 alpha_hive_daily_report._post_scan_notify。
+
+@mcp.tool(
+    name="alphahive_get_sell_strike_candidates",
+    annotations={
+        "title": "Get Gamma/Delta Sell-Strike Candidates",
+        # 真只读：两条路径的 assess 都走 freeze=False，预注册检验的冻结只由日报钩子写
+        # （守卫 tests/test_sell_strike_integration.py::TestMcpTool::test_ready_ledger_is_not_frozen_by_the_tool）
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,     # no date_str ⇒ live CBOE chain, changes intraday
+        "openWorldHint": True,       # live path fetches the CBOE delayed-quote payload
+    },
+)
+async def alphahive_get_sell_strike_candidates(params: TickerDateInput) -> str:
+    """Short-premium strike candidates (delta ladder + GEX-style level map) for a ticker.
+
+    Research/record-keeping only: nothing here feeds any score, and it is NOT
+    investment advice. Two tenors: "monthly" (21-45 DTE) and "weekly" (7-<21 DTE).
+
+    Behaviour:
+      - date_str given  → read the forward ledger rows recorded by the daily scan
+                          on that date (both tenors). No network, never writes.
+                          Until a tenor's pre-registered test has been frozen,
+                          settlement fields (expiry_close, settled_on, ...) are
+                          omitted from its rows (settlement_blinded: true). This
+                          is NOT blinding: route flags plus the underlying price
+                          on the expiry date (a later ledger row, or public
+                          market data) still reconstruct each outcome. Doing
+                          that before the freeze counts as peeking, which the
+                          pre-registration treats as a protocol change.
+      - date_str omitted → compute live from the current CBOE chain (as_of = the
+                          payload's own vintage date). Does NOT write the ledger.
+                          Drops this ticker's in-process payload cache first
+                          (the long-running MCP process would otherwise serve
+                          quotes up to 4h old as current); judge quote age by
+                          payload_last_trade_time, not fetched_at (call time).
+
+    Args:
+        params (TickerDateInput): ticker + optional date_str (YYYY-MM-DD)
+
+    Returns:
+        str: JSON with:
+            - data_available (bool) and, when False, reason (str)
+            - source: "ledger" | "live"
+            - payload_last_trade_time, session_live, iv30 (live: top level;
+              ledger: per row) — quote timestamp from the CBOE payload itself,
+              whether that session was still trading, and 30-day IV in percent
+            - levels (live only): per-view zero-gamma state, net/side-extreme majors,
+              totals (GEX in USD per 1% move, naive OI sign: calls +, puts -)
+            - tenors.{monthly,weekly}: env (level-map summary on the <=45 DTE view),
+              route (which ladder rung each side uses: base 0.20Δ / far 0.10Δ /
+              unavailable), ladder (|Δ| 0.10-0.30 short + wing legs with bid/ask,
+              P(ITM)=N(d2), sigma distance), structures (single legs, vertical
+              spreads, strangle, iron condor: credit / max_loss / collateral /
+              yield_raw / yield_annualized, per-share, sell at bid / buy at ask).
+              yield_raw = credit / collateral (spreads and iron condor: credit /
+              max_loss) is the PRIMARY per-trade return on risk; yield_annualized
+              = yield_raw x 365 / DTE is simple (non-compounded) annualization,
+              secondary only — it looks very large for short-DTE spreads and is
+              not an achievable return
+            - yield_note (str): the same yield definition in Chinese, for display
+            - assess.{monthly,weekly}: pre-registered test readiness ("ready"
+              means testable, not validated; no effect size or p-value until
+              the test is frozen). This tool never runs or freezes the test:
+              only the daily scan does, once. When the gates are met but the
+              daily scan has not frozen the test yet, the tool reports
+              awaiting_freeze: true ("ready, awaiting the daily freeze").
+            - caveats (list[str]), disclaimer (str)
+    """
+    try:
+        # 惰性导入：这一个工具的依赖坏了，不该拖垮整个 MCP 进程的其余 8 个工具
+        import sell_strike_report as _ssr
+        if params.date_str:
+            out = await asyncio.to_thread(_ssr.rows_for_ticker, params.date_str, params.ticker)
+        else:
+            out = await asyncio.to_thread(_ssr.compute_live, params.ticker)
+        return _ok(out)
     except Exception as e:
         return _err(str(e))
 

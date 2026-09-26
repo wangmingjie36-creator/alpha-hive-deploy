@@ -55,6 +55,11 @@ MOVE_DIRS = (
     "hedge_state", "paper_portfolio_state", "paper_portfolio_state_backup", "options_paper_state",
     "vrp_state", "probability_scorecard_state", "ml_model_history", "report_snapshots",
     "self_analysis_briefs", "db_snapshots", "reports",
+    # v0.45.333 卖权行权价前向账本（月度 / 周度 jsonl 分片 + 冻结检验结果 + 本地报告）。当日 CBOE 双边报价
+    # 与 OI 事后拿不回来 ⇒ 不可重取。不登记的话 plan 判 UNKNOWN、copy 拒绝整次迁移；情急改成 SKIP
+    # 则新代码写新根、旧根里已记的行被留下，结算与预注册检验静默少几天。
+    # 守卫：tests/test_migrate_data_root.py::test_every_backup_state_dir_is_moved
+    "sell_strike_state",
     # 向量库 / 日志 / 备份轮转
     "chroma_db", "logs", "db_backups",
     # 缓存：可重建，但冷缓存会引发 yfinance 限流（头号数据丢失原因）⇒ 一并带走
