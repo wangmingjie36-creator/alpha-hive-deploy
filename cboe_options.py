@@ -487,6 +487,11 @@ def _select_expiries(by_expiry: Dict[str, dict], today: datetime, max_expiries: 
 # `options_analyzer.calculate_gamma_exposure` 在主链（`_select_expiries`，≤4 个到期日）上算的
 # 净 gamma，不经本视图，v0.45.334 未动。上表「截断可能翻转净 GEX 符号」对那个量同样适用
 # （公式不同、未量化，待验证）。
+# （v0.45.349 起上面「不是唯一通道」已不成立：Oracle `gex_signal` 恒 1.0，BearBee 读那个量的
+# `gex < 0` 地板已删 ⇒ 本视图**就是** GEX 进评分的唯一通道。主链那个量仍照算、落盘、展示
+# （Oracle `details.gamma_exposure`、`signal_archive` 的 `options.gamma_exposure`），不再进分；
+# 截断的警告对这些读者照样成立——别把它当全书净 GEX。2026-09-27 调查实测：它 < −0.001 的
+# 占比在 2026-06-30 换 CBOE 源时从 2.3% 跳到 18.2%。）
 #
 # 24 与 `fetch_cboe_full_chain_oi` 的 `max_expirations` 同值（实测当日全链到期日数
 # 中位 18 / 最大 25）；被上限砍掉的到期日数**记进计数**，别让上限的够不够变成假设。

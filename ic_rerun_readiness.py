@@ -629,6 +629,82 @@ _COHORT_HISTORY = [
      "（扫描前 `production_sync` 快进）；再晚则照表头追加更正条目（须早于 2026-10-12，否则 H1 回退，协议 §13.4）。"
      "判别印记：`BuzzBeeWhisper.details.sentiment_momentum.as_of_source` 存在（此前 899/899 条归档均无此键），"
      "登记在 `_BOUNDARY_MARKERS`。"),
+    ("2026-09-28", "v0.45.349",
+     "中性化读 OracleBee 主链 `gamma_exposure` 的两条进分通道（用户决定，同版落地）："
+     "① `options_analyzer` 的 `gex_signal`（`gamma_exposure < -0.001` 得 2.0、否则 1.0）改为恒 1.0——"
+     "取的是原 None 分支本来就给的值，`options_score` 标度不变；经 `oracle_bee` 融合进 Oracle 分（odds 维），"
+     "方向由分数带定（v0.45.201）⇒ 分与方向都变。"
+     "② BearBee `_assess_options_puts` 的 `gex < 0 ⇒ options_bear ≥ 5.0` 下限及看空信号「GEX 负值」删除"
+     "（Bear 不计票、无维度，但分数进 Queen 步骤 3 看空上限 bear_cap、方向进看空共振；BullVeto 当前 config 停用）。"
+     "自此在**规则引擎模式**（生产扫描 `--no-llm`）下 GEX 进评分**只剩** `gex_regime.RegimeWeightAdjuster`"
+     "（全链视图三值 regime 路由权重）；`GexRegimeModifier.confidence_modifier` 仍缩放 band_width，那是展示量、不进分。"
+     "**LLM 模式本版未动（用户决定）**：OracleBee 仍把含 `gamma_exposure` 的期权结果整份交给 "
+     "`llm_service.interpret_options_flow`（`smart_money_score` 以 0.6 融合进 Oracle 分，且可改写 Oracle 方向）；"
+     "BearBee 仍把 `options_data[\"gex\"]` 放进 LLM 看空论点（`generate_bear_thesis`，按 0.45 融合进 bear 分）。"
+     "**依据（2026-09-27 调查实测，只读）**：这个「GEX」是截断主链（≤4 个到期日、≥8 个日历日、前 40 个行权价）上的 "
+     "(Σcall − Σput)·S·100·Γ·OI·dte_weight/1e6，符号是朴素的 call−put 约定，−0.001 阈值实际等于看符号；"
+     "同日横截面与 P/C 相关 +0.47。2026-03-10~09-11（close_t7、同日横截面、t 分布）：被标记标的 −2.85pp"
+     "（n=31 日，p=0.009），但加标的控制 −0.43pp（p=0.67）、只取不重叠日期（n=9，p=0.41）、去掉标记最多的 5 只"
+     "（p=0.47）、标的内置换（CBOE 时代 p=0.78）全部消失 ⇒ 携带的是**标的身份**、不是时点；也无幅度效应"
+     "（|fwd7| 标记组−其余 −0.41pp，p=0.56）。"
+     "标记率（`gamma_exposure < -0.001`）在 2026-06-30 换 CBOE 源时跳升约 5–8 倍，倍数随口径而异、跳升本身稳健："
+     "调查口径＝全程在池的 10 只（NVDA/TSLA/MSFT/META/QCOM/VKTX/BILI/AMZN/CRCL/RKLB），06-30 之前 "
+     "15/639 = 2.3%、之后 58/318 = 18.2%（这两个分母 09-27 复核未能逐位复现，待验证）；复核的其它口径"
+     "（同 10 只全部行 / 限已有 close_t7 / 全池，截至 09-11 或 09-22，`.swarm_results` 只读）为约 2.5–2.9% → 15–17%。"
+     "09-24/25 两天 Oracle `gamma_exposure` 60/60 为 None（这两天两条通道恰好都没触发）。"
+     "**来历**（`git log -S` 实查）：① `gex_signal` 随 2026-02-24 批量提交 2b4314b2 加入（146 个文件，"
+     "`options_analyzer.py` 整文件新建）；② Bear 下限**不是**同一批：2026-03-06 的日报提交 2d757b09"
+     "（46 个文件，注释「E2: 消费 OracleBee 已发布的 iv_skew / gex」）才加入——同一提交把 OracleBee 发布的 "
+     "`_pub_details[\"gex\"]` 从 `result.get(\"gex\")` 改成读 `gamma_exposure`，此前结果里没有 `gex` 键、"
+     "板上发布的 gex 恒为 None ⇒ 下限自加入起即生效。两处提交都没有附任何检验证据。"
+     "**幅度**（同一调查）：① 那 +1 折到 Oracle 分是 +0.846；09-11~09-22 负 GEX 的 47 行里去掉它，"
+     "7 行 Oracle 方向翻转、final_score 直接 Δ 中位约 0.26（n=47；v0.45.334 条引的评审值「中位 0.31」未复算，"
+     "以本条为准）。② Bear 下限（窗口：`.swarm_results_*.json` 全史 2026-03-10~09-25 共 1761 行；09-24/25 的 "
+     "60 行 `gamma_exposure` 全为 None，故与 03-10~09-22 的 1701 行同数）：Oracle `gamma_exposure < 0` 共 178 行，"
+     "其中 157 行分支实际执行（Bear 看空信号里有「GEX 负值」）；下限**真正抬高** options_bear 的至多 84 行"
+     "（178 行里记录值恰为 5.0 的行数），按记录的 P/C / IV Rank / skew 重放为 79 行（该重放对 157 行的"
+     "记录值 0 差异；评审给的 81 未复现）——其中 60 行 GEX 是唯一的期权看空来源（去掉后 0）、19 行原为 4.0。"
+     "删除的连带效应：被下限抬高、且 Oracle 方向看空的行 options_bear 由 5.0 变 **5.5**（其后的 5.5 下限判 "
+     "`< 5.0`，原先被 5.0 挡住；按记录的 Oracle 方向只 1 行，但 ① 同版会改 Oracle 方向）；看空信号少一条 ⇒ "
+     "Bear confidence（0.3+0.1·信号数，加板源数后封顶 1.0；不入档）的信号项在 157 行里都少 0.1，按记录重放至多 "
+     "45 行实际下降、其余已封顶；5 行「GEX 负值」是唯一的看空信号 ⇒ 落入无信号分支（rule_bear_score 取该分支的"
+     "固定值，缺省 3.0 / 2.0）。"
+     "分数与方向的这些变化都在本条已声明的闭包内（`bear.options_bear` → `bear.score` → `agent.BearBeeContrarian.*`），"
+     "世代账不受影响。"
+     "⚠️ **更正 v0.45.334 条目**（不改写原文，照 v0.45.176 更正 v0.45.172 的先例）：那条写「本版只断开这一条，"
+     "GEX 仍经两条通道进评分」（RegimeWeightAdjuster + Oracle `gex_signal`）——**不全**，实为**三条**：还有上述 "
+     "BearBee `gex < 0` 下限。它在更正 v0.45.197 时列的「一直经三条通道」同样漏了这条（v0.45.334 之前实为四条；"
+     "以上均指规则引擎模式，且 Bear 那条自 2026-03-06 起）。"
+     "v0.45.349 之后规则引擎模式下只剩 RegimeWeightAdjuster 一条（LLM 模式见上）。"
+     "**边界代价**：与 v0.45.334/340 同日 ⇒ `assess()` 的世代切点不变；2026-09-27 用本模块 `assess()` 对 "
+     "`~/alpha-hive-data/pheromone.db` 只读实测当前世代 `n_all_samples=0`（predictions 最新业务日 09-25）"
+     "⇒ **作废 0 条** final_score 样本。`signal_archive`（`COHORT_SIGNAL_SCOPE[\"v0.45.349\"]` 经 "
+     "`_scope_closure`；同版补上 Bear 两个子分读同伴方向的依赖边——补边本身经前后对比不挪任何已有起点）："
+     "用 `generation_boundaries` 前后对比（生产库副本只读）。挂到 09-28/v0.45.349 的信号数有两种计数口径，"
+     "真正后移的 17 个在两种口径下相同："
+     "**闭包口径**＝`_scope_closure(COHORT_SIGNAL_SCOPE[\"v0.45.349\"])` 的 23 个 + `composite.final_score`"
+     "（ALWAYS_SLICED）= 24 个，其中 7 个本就被 v0.45.334/340 切在 09-28、只换标签；"
+     "**归档口径**＝对 `signal_archive` 表里实有的 70 个信号名跑 `generation_boundaries` 得 26 个，其中 9 个只换标签"
+     "——多出的 2 个是退役名 `guard.consistency` / `guard.top_signals_count`：不在抽取器里，按保守规则受**每一条**"
+     "边界约束。17 个真正后移：Oracle 分 09-05→09-28（360 行）、"
+     "Oracle 方向 09-11→09-28（270 行），其余 15 个（Scout / Rival 的分与方向、crowding.* 四个、ml.* 三个、"
+     "`guard.adj_factor`、`guard.consistency_census`、`bear.insider_bear`、`bear.options_bear`）09-18→09-28"
+     "（各 120 行），合计 **2430 行**不再进当前世代；其中已成熟（`load_panel` 口径）**150 条**"
+     "（Oracle 分 09-08~09-11 共 120、方向 09-11 共 30；09-14 起的 predictions 尚无 checked_t7）。"
+     "⚠️ **本条日期是前提**：须在 2026-09-28 **首次**编排器运行之前推到 `origin/main`，**且**生产 checkout "
+     "已快进到新代码（开机补跑闸最早 13:30 PT 就可能起跑，早于 14:00 的定时扫描）；否则 09-28 的样本是旧口径 ⇒ "
+     "照表头**追加**更正条目（新标签 + `_CORRECTS`，不改写本条）。判别印记：OracleBee "
+     "`details.gex_signal_in_score is False`（成功与 error 兜底两条路径都写；推送前生产归档 902/902 份均无此键），"
+     "登记在 `_BOUNDARY_MARKERS`；同日三条边界由 `boundary_evidence_status` 一并核对（同版改为按最差判定填顶层字段，"
+     "逐条结果在 `per_version`）。"
+     "**前瞻检验**：维度 IC 协议——本条早于 FORWARD_START 2026-10-12 ⇒ H1/H2 均不截断"
+     "（`dim_ic_forward_test.truncation_point` 内存实测为 None）；H2 读 `agent.OracleBeeEcho.score`，"
+     "若更正把日期顺延到 10-12 或之后则 H2 截断（H1 的信号不在本条闭包里）。共振加成前瞻检验（窗口自 09-15）"
+     "——replay 从记录的 agent_details 起算（Oracle / Bear 的分与方向都是记录值），无需修订 replay；"
+     "但检验期中途评分链变了（09-28 起记录里的 Oracle / Bear 不含 GEX 项），周序列不是严格同分布，"
+     "同 v0.45.334 修订 1 的已知代价；该检验输出的 `cohort_boundaries_during_test` 会列出本条。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登记（odds_score 是 ML 特征；该表要求日期唯一，"
+     "09-28 那条按 v0.45.146+147 先例改为合并标签 `v0.45.334+v0.45.340+v0.45.349`，顺带补登当时漏登的 v0.45.340）。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -806,6 +882,18 @@ def _marker_buzz_momentum_as_of(d: dict) -> bool:
     return isinstance(sm, dict) and "as_of_source" in sm
 
 
+def _marker_oracle_gex_signal_neutralized(d: dict) -> bool:
+    """v0.45.349：OracleBee 的 `details.gex_signal_in_score` 为字面量 `False`（成功与 error 兜底两条路径都写）。
+
+    只认 `is False`，同 `_marker_gex_modifier_not_applied`：此前的记录**没有**这个键（当时 gex_signal 进分，
+    推送前生产归档 902/902 份实测），把「缺键」当印记 ⇒ 全部旧归档被认成新口径、恒报 boundary_too_late。
+    `True` 也不算：新代码从不写 True，出现 True 只能是有人把通道接回去了，更不是「已中性化」。
+    """
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("OracleBeeEcho")
+    det = o.get("details") if isinstance(o, dict) else None
+    return isinstance(det, dict) and det.get("gex_signal_in_score") is False
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -819,11 +907,13 @@ _BOUNDARY_MARKERS = {
                   _marker_gex_modifier_not_applied),
     "v0.45.340": ("agent_details.BuzzBeeWhisper.details.sentiment_momentum 带 as_of_source 键",
                   _marker_buzz_momentum_as_of),
+    "v0.45.349": ("agent_details.OracleBeeEcho.details.gex_signal_in_score is False",
+                  _marker_oracle_gex_signal_neutralized),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
 #: 判别器取印记时先查自己、查不到再查被更正的那条 —— 更正不是新改动，印记是同一个。
-#: 当前为空：v0.45.334 的 09-28 边界尚无更正。
+#: 当前为空：09-28 的三条边界（v0.45.334 / v0.45.340 / v0.45.349）尚无更正。
 _CORRECTS: Dict[str, str] = {}
 
 
@@ -1003,6 +1093,15 @@ _BOUNDARY_VERDICT_TEXT = {
 #: 与周度任务共用的，另起一个码会被编排器记成「Step 11 异常」、周度任务不认识）。
 BOUNDARY_ALARM_VERDICTS = frozenset({"boundary_too_early", "boundary_too_late", "cannot_judge"})
 
+#: 同日多条边界时，顶层字段取**最差**那条（v0.45.349）。数字越小越差：报警判定全部排在前
+#: （写早了会混算 > 核不了 > 写晚了只是白丢样本），其后是「没登记印记、永远核不了」>「有判据、还没见到」>「一致」。
+#: 必须覆盖 `_BOUNDARY_VERDICT_TEXT` 的全部判定（`tests/test_ic_rerun_readiness.py` 核对）——
+#: 新判定漏排名 ⇒ `boundary_evidence_status` KeyError，而不是被悄悄排到哪一头。
+_VERDICT_SEVERITY = {
+    "boundary_too_early": 0, "cannot_judge": 1, "boundary_too_late": 2,
+    "no_marker": 3, "no_evidence_yet": 4, "matches": 5,
+}
+
 
 def _boundary_line(ev: Dict) -> str:
     """判别结果的一行摘要 —— `--quiet` 末段与人读模式共用这一处，不各写各的。"""
@@ -1035,8 +1134,17 @@ def boundary_evidence_status(home: Path) -> Dict:
 
     v0.45.340：核**与末条同日的全部边界**（表序），不只末条。v0.45.334 与 v0.45.340 同在 09-28：
     只核末条 ⇒ 后追加的那条一登记，先登记那条的核对就从 `--quiet` 第五段里无声消失，
-    而两条都是「推送晚于边界日」的同一种风险。顶层字段取第一条报警的（无报警取末条，与此前相同）；
-    有报警时 `line` 用「；」连接每条报警的摘要；同日多于一条时全部结果在 `same_day` 键里。
+    而两条都是「推送晚于边界日」的同一种风险。
+
+    v0.45.349（09-28 第三条）：顶层字段的**键不变**（编排器 Step 11 只抽 version / boundary / verdict /
+    marker_first_seen / unmarked_after_boundary / alarm / line / error），取值改为：
+      · 其余键取**最差**那条（`_VERDICT_SEVERITY`；并列取表序靠后的，即 `assess()` 用的那条一侧）——
+        此前取「第一条报警的、无报警取末条」，同日三条时末条健康就会盖住前面一条 no_marker 之类的非报警问题；
+      · `alarm` = 任一条报警（报警判定排在最前，与最差那条的 alarm 恒等）；
+      · `line` 概括**全部**：有报警 ⇒ 每条报警的摘要用「；」连接，再点名同日未报警的各条；
+        无报警 ⇒ 最差那条的摘要 + 同日各条判定。只有一条时就是那条自己的摘要（与此前逐字相同）。
+    逐条完整结果在 `per_version`（表序，恒在；替换 v0.45.340 的 `same_day`——它只在多于一条时出现，
+    且无人读：编排器与周度任务都只读顶层键）。
     """
     last_date = _COHORT_HISTORY[-1][0]
     versions = [v for d, v, _r in _COHORT_HISTORY if d == last_date]
@@ -1051,12 +1159,24 @@ def boundary_evidence_status(home: Path) -> Dict:
         ev["alarm"] = ev["verdict"] in BOUNDARY_ALARM_VERDICTS
         ev["line"] = _boundary_line(ev)
         evs.append(ev)
-    alarmed = [e for e in evs if e["alarm"]]
-    res = dict(alarmed[0] if alarmed else evs[-1])
-    if len(alarmed) > 1:
-        res["line"] = "；".join(e["line"] for e in alarmed)
+    # 最差在前；并列时表序靠后的在前（-i）
+    ordered = [e for _i, e in sorted(enumerate(evs),
+                                     key=lambda p: (_VERDICT_SEVERITY[p[1]["verdict"]], -p[0]))]
+    res = dict(ordered[0])
+    res["alarm"] = any(e["alarm"] for e in evs)
     if len(evs) > 1:
-        res["same_day"] = evs
+        alarmed = [e for e in ordered if e["alarm"]]
+        quiet = [e for e in ordered if not e["alarm"]]
+        if alarmed:
+            line = "；".join(e["line"] for e in alarmed)
+            if quiet:
+                line += (f"；同日另核 {len(quiet)} 条未报警："
+                         + "、".join(f"{e['version']}={e['verdict']}" for e in quiet))
+        else:
+            line = (ordered[0]["line"] + f"；同日共核 {len(evs)} 条："
+                    + "、".join(f"{e['version']}={e['verdict']}" for e in evs))
+        res["line"] = line
+    res["per_version"] = evs
     return res
 
 

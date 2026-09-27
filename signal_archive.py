@@ -1093,6 +1093,14 @@ SIGNAL_UPSTREAM: Dict[str, Tuple[str, ...]] = {
     "guard.adj_factor": ("crowding.score",) + _PHASE1_DIRS + ("agent.RivalBeeVanguard.direction",),
     "agent.GuardBeeSentinel.*": tuple(f"agent.{a}.*" for a in _PHASE1) + (
         "agent.RivalBeeVanguard.*", "guard.consistency_census", "guard.adj_factor"),
+    # v0.45.349：Bear 的两个子分读同伴的**方向**（系统输出），此前误登在 SIGNAL_LEAVES「不读任何系统输出」。
+    # `_assess_insider_selling`：`scout_entry.direction == "bearish"` ⇒ insider_bear 下限 6.0；
+    # `_assess_options_puts`：`oracle_entry.direction == "bearish"` ⇒ options_bear 下限 5.5（bear_bee.py）。
+    # 同处读的内幕金额 / P/C / IV Rank / skew / gex 是原始观测，不是边。
+    # 补边不挪任何已算出的世代起点（两者当前起点都由 v0.45.288 直接点名决定，其后再无边界触及
+    # Scout/Oracle 方向）——`tests/test_signal_archive_generations.py::TestBearPeerReadsAreEdges` 按 AST 核这两条边
+    "bear.insider_bear": ("agent.ScoutBeeNova.direction",),
+    "bear.options_bear": ("agent.OracleBeeEcho.direction",),
     # Bear 读 Rival 的 ml_probability / expected_7d、Guard 的 consistency / conflict_type
     "bear.score": ("ml.*", "agent.GuardBeeSentinel.*", "guard.consistency_census",
                    "bear.insider_bear", "bear.overval_bear", "bear.options_bear", "bear.short_int_bear"),
@@ -1114,7 +1122,8 @@ SIGNAL_LEAVES = frozenset({
     "options.iv_current", "options.put_call_ratio", "options.gamma_exposure", "options.total_oi",
     "options.iv_rank", "options.iv_percentile", "options.iv_rank_is_real",
     "sentiment.pct",
-    "bear.insider_bear", "bear.overval_bear", "bear.options_bear", "bear.short_int_bear",
+    # v0.45.349：bear.insider_bear / bear.options_bear 移出（读 Scout / Oracle 方向，见 SIGNAL_UPSTREAM）
+    "bear.overval_bear", "bear.short_int_bear",
     "crowding.comp.social_volume", "crowding.comp.google_trends",
     "crowding.comp.seeking_alpha_views", "crowding.comp.short_squeeze_risk",
     "catalyst.count", "catalyst.nearest_days", "catalyst.max_weight",
@@ -1221,6 +1230,14 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 只点名 score：方向由合成值决定、在调整之前，不变；通道改全精度只是记录精度，不换代 buzz.comp.*。
     # 下游（Guard 读 Buzz 分）由 _scope_closure 带出
     "v0.45.340": ("agent.BuzzBeeWhisper.score",),
+    # 09-28（与 v0.45.334/340 同日）：中性化读 Oracle 主链 gamma_exposure 的两条进分通道 ——
+    # ① options_analyzer 的 gex_signal 恒 1.0 ⇒ Oracle options_score ⇒ Oracle 分，且方向由分数带定
+    #   （v0.45.201）会跟着翻 ⇒ `agent.OracleBeeEcho.*` 两个都点名；
+    # ② BearBee `gex < 0 ⇒ options_bear ≥ 5.0` 下限删除 ⇒ `bear.options_bear` 直接点名。
+    # `options.gamma_exposure` 本身的算法没动（照算、照落盘），仍是叶子、不切。
+    # 下游经 SIGNAL_UPSTREAM：Oracle 方向 → consensus_strength → crowding.* → Scout → bear.insider_bear，
+    # 以及 ml.* / Rival / Guard / bear.score / Bear / swarm_agreement —— 由 _scope_closure 带出，不手写
+    "v0.45.349": ("agent.OracleBeeEcho.*", "bear.options_bear"),
 }
 
 

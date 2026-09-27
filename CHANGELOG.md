@@ -5,7 +5,71 @@
 
 ---
 
-## [0.45.349] — 2026-09-27 — 占位（进行中：中性化 OracleBee gex_signal + BearBee GEX 看空下限，与 09-28 世代边界同日）
+## [0.45.349] — 2026-09-27 — Changed：中性化读 OracleBee 主链 `gamma_exposure` 的两条进分通道（`options_analyzer.gex_signal` 恒 1.0、BearBee `gex<0` 看空下限删除），与 v0.45.334 / v0.45.340 同日登记世代边界 2026-09-28
+
+用户决定（2026-09-27「做第 1 层，Oracle 和 Bear 一起中性化」），依据当天只读根因调查（workflow，5 路调查 + 反驳审查）。
+**规则引擎（生产 `--no-llm`）下 GEX 进评分只剩 `RegimeWeightAdjuster` 全链政体路由**；`GexRegimeModifier.confidence_modifier`
+只缩放展示用 band_width；LLM 模式下 Oracle / Bear 的 LLM 提示仍带 GEX（未动，属另一项决定）。
+
+### 为什么（2026-09-27 调查实测，只读生产数据）
+- 这个「GEX」不是做市商 gamma 模型：`(Σcall − Σput)·S·100·Γ·OI·dte_weight/1e6`，只在截断主链上算（≤4 个到期日、≥8 个日历日、
+  每侧前 40 个行权价），朴素符号；`−0.001` 实为符号检验；与 P/C 同日相关 +0.47（与已计分的 flow_signal 基本重复）。
+- 同一个数两头推：Oracle 当看多 +1（Oracle 分 +0.846，09-11~22 的 47 行负 GEX 里 7 行 Oracle 方向被翻）；Bear 当看空
+  （`options_bear ≥ 5.0`：`.swarm_results` 全史 03-10~09-25 共 1761 行里负 GEX 178 行、分支触发 157 行，真正抬高 options_bear 最多 84 行、重放 79 行）。两头都随数据可得性开关（09-24/25 `gamma_exposure` 60/60 为 None）。
+- 无预测力证据（2026-03-10~09-11，close_t7，按日横截面、t 分布）：被标记名 T+7 −2.85pp（n=31 日，p=0.009），但控制标的后
+  −0.43pp（p=0.67）、不重叠日期 n=9 p=0.41、去掉最常被标记的 5 只 p=0.47、标的内打乱时点 p=0.78（CBOE 期）⇒ 是标的身份不是时点；
+  幅度无「放大波动」证据（|fwd7| 差 −0.41pp，p=0.56）；标记率在 2026-06-30 换 CBOE 源时跳变约 5–8 倍（调查口径「全程在册 10 只」
+  15/639=2.3% → 58/318=18.2%，分母**待验证**；其他口径约 2.5–2.9% → 15–17%）。
+- 来历：① `gex_signal` 随 2026-02-24 批量日报提交 `2b4314b2` 加入；② Bear 下限随 2026-03-06 `2d757b09` 加入；都没有引用证据。
+
+### Changed
+- `options_analyzer.generate_options_score`：`gex_signal = 1.0` 恒定（`gamma_exposure` / `gamma_squeeze_risk` 照算照存，供展示与归档）；
+  docstring 与摘要里「负 GEX 利于趋势」删除。
+- `OptionsAgent` 快照命中：旧代码同会话写下的快照 `options_score` 含 +1 ⇒ `_drop_legacy_gex_signal` 精确减 1.0 并打 OptionsAgent 层标记
+  `_options_score_has_gex: False`（幂等、计数 `gex_signal_corrected` 进 scan_timing、首次 WARNING、写回失败也只在内存改）。生产 1601 份快照只读核：新 = 旧 − 1.0（负 GEX 177 份）/ 其余不变，1601/1601。
+- `swarm_agents/oracle_bee.py`：每条返回路径（成功 / 无效标的 / 异常回退）的 details 写字面量 `"gex_signal_in_score": False`
+  ——世代印记；`_pub_details["gex"]` 照发（展示）。
+- `swarm_agents/bear_bee.py`：删 `gex<0 ⇒ options_bear ≥ 5.0` 与「GEX 负值」信号（GEX 仍进 LLM 看空论点的上下文）。连带：Oracle 看空行
+  options_bear 5.0→5.5（1 行）、Bear 置信度少一项信号（实际下降 ≤45 行）、5 行 GEX 是唯一看空信号的落入无信号分支——都在声明的影响范围内。
+- `alpha_hive_daily_report._generate_synthetic_swarm_results`（`.swarm_results` 缺失时的回退）同样无条件写印记，免得某天走回退被误报 boundary_too_early。
+- 记账：`_COHORT_HISTORY` 追加 `("2026-09-28", "v0.45.349", …)`（含对 v0.45.334 条目「仍经两条通道」的更正——当时其实是三条，
+  含 Bear 下限）；`_BOUNDARY_MARKERS["v0.45.349"]` 读 `agent_details.OracleBeeEcho.details.gex_signal_in_score is False`；
+  `COHORT_SIGNAL_SCOPE["v0.45.349"] = ("agent.OracleBeeEcho.*", "bear.options_bear")`；`SIGNAL_UPSTREAM` 补
+  `bear.options_bear ← Oracle 方向`、`bear.insider_bear ← Scout 方向`（原误登记为「不读系统输出」的叶子；补边本身对 70 个信号的现有世代起点 0 改动）；
+  `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 条合并标签为 `v0.45.334+v0.45.340+v0.45.349`（同日合并先例；**顺带补登了 v0.45.340**——它改 sentiment 维，是 ML 特征，原未登记）。
+- `boundary_evidence_status`：同日多条（09-28 现有 334 / 340 / 349）逐条核，顶层键取最坏判定（编排器读的键不变）、任一告警即告警、
+  新增 `per_version`；`--quiet` 四段 + 告警时 🚨 第五段不变。
+- 注释 / 文档：`queen_distiller` / `gex_regime` / `advanced_analyzer` / `cboe_options` / `tests/test_gex_modifier_disconnected.py` / CLAUDE.md 改为 349 后的真实情况。
+
+### 代价
+- **final_score 样本作废 0 条**（当前世代 `assess()` n_all_samples=0，最新预测 09-25）。
+- signal_archive：2430 行离开当前世代（Oracle score 360、direction 270、其余 15 个信号各 120），其中已到期 150 行。
+  计数口径：按影响范围闭包 23 个 + `composite.final_score` = 24 个信号（7 个只换标签）；按归档 70 个信号的
+  `generation_boundaries` 为 26 个（9 个只换标签），多出的是每条边界都约束的两个退役名 `guard.consistency` / `guard.top_signals_count`。
+- 维度 IC 协议：落在 FORWARD_START 2026-10-12 之前 ⇒ H1 / H2 均不截断（`truncation_point` 实测 None）；但 H2 的 odds 维（=Oracle 分）
+  定义在登记后又变了一次，照实记录。共振加成检验：replay 用记录的 agent 输出，不需修订；窗口内评分链再变一次，照修订 1 的「已知代价」声明。
+- **前提**：推到 main **且**生产 checkout 在 09-28 第一次编排器运行前（补跑闸最早 13:30 PT）已在新代码；否则追加更正条目（`_CORRECTS`），不改写本条。
+
+### Tests
+- 新 `tests/test_gex_oracle_bear_neutralized.py`：options_score / Oracle 分与方向 / Bear 分与信号对 GEX 符号不变（带「旧公式确会不同」自证）；
+  印记在每条路径（含合成回退，AST 核「无条件」）；旧快照修正精确且幂等；AST 守卫：生产代码里对 `gamma_exposure` / `gex` 键的比较与算术只许白名单读者。
+- `test_ic_rerun_readiness`：同日最坏判定、新印记三类、严重度顺序；`test_signal_archive_generations`：Bear 读同伴方向即登记边（AST）；scorecard 合并标签。
+
+### 变异台账
+（APFS 克隆里真跑、清 pyc、`--maxfail=1000`）实现 23 + 16 + 1 条、审查后修复约 30 条全红在预期断言上；两路对抗审查另跑 20+ 条，逃逸者已补（见下）。
+
+### 二次检查（推送前两路对抗审查）
+- 印记重名：OptionsAgent 层的标记曾与 Oracle 印记同名，旧代码 Oracle `{**result}` 会把它抄过去 ⇒ 旧代码的一天会被判成新代码。
+  已改名 `_options_score_has_gex`（旧名出现即 pop、视为已修正不再减），`gex_signal_in_score` 的写者钉死为 Oracle + 合成回退两处。
+- 守卫盲区：经 `gamma_squeeze_risk`（== / in / 查表）、元组赋值、lambda、循环 / 推导式目标、max/min/sorted 重连，及 fresh 路径只测负 GEX——已补
+  （审查的 5 个逃逸变异体在旧测试上全绿、新测试上全红）。仍刻意不追踪多层赋值与「GEX 作参数传入」，由行为测试兜。
+- 世代条目文字：Bear 下限的来历（2d757b09，非 2b4314b2）、157/178 的窗口与「真正抬分最多 84 行」、信号计数口径、「只剩一条」限定规则引擎——推送前改正。
+- 严重度顺序与已有世代条目正文此前无守卫（改顺序 / 原地改写旧条目全绿）——已补 digest 钉与顺序钉。
+
+### 发现未处理
+- LLM 模式下 GEX 仍经 Oracle / Bear 的 LLM 提示影响分数（生产不开 LLM）。
+- 09-24/25 期权链取不到时 Oracle 把恒定 5.0 标成 `real`、置信度 0.7（静默降级，另一项评分改动）。
+- 09-14~09-25 的预测 `checked_t7` 仍为 0（T+7 已过），回填疑似因 09-24/25 网络故障未跑，待查。
 
 ## [0.45.348] — 2026-09-27 — Fixed（编排器）：Step 11 边界报警分支第 1198 行 `$READINESS_JSON）` 裸变量紧跟全角括号——UTF-8 locale 下 bash 3.2 `set -u` 直接退出
 

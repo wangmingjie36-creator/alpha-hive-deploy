@@ -410,8 +410,10 @@ class TestMLEstimatorGenerations:
     MUST_BE_ENUMERATED = frozenset({
         ("2026-09-06", "v0.45.137+v0.45.140+v0.45.141"),
         ("2026-09-07", "v0.45.146+v0.45.147"),
-        # v0.45.334：final_score 特征的上游定义变了（GexRegimeModifier 断开）
-        ("2026-09-28", "v0.45.334"),
+        # 09-28：v0.45.334（final_score 特征的上游定义变了，GexRegimeModifier 断开）登记时标签是 "v0.45.334"；
+        # v0.45.349 照 v0.45.146+v0.45.147 的先例并成同日合并标签（本表日期唯一），顺带补登当时漏登的 v0.45.340。
+        # 改的是标签不是日期：改名时 09-28 尚未到来、该代 0 份报告 —— 是**有意**改写本最小集合，不是条目消失。
+        ("2026-09-28", "v0.45.334+v0.45.340+v0.45.349"),
     })
 
     def test_no_known_generation_has_vanished(self):

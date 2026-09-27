@@ -1061,8 +1061,8 @@ class QueenDistiller:
         双引擎：规则引擎始终运行作为基础，LLM 引擎在可用时叠加推理。
 
         升级 #1: GEX 政体联动评分 —— v0.45.334 起**只算不加**（诊断值，见步骤 4.5）
-        升级 #4: 政体条件权重（根据宏观/GEX/IV 动态调整 5 维权重）—— GEX 仍进评分的两条通道之一
-                 （另一条是 OracleBee `options_score` 里的 `gex_signal`，v0.45.334 未动；见步骤 4.5 注释）
+        升级 #4: 政体条件权重（根据宏观/GEX/IV 动态调整 5 维权重）—— v0.45.349 起是 GEX 进评分的
+                 **唯一**通道（OracleBee `gex_signal` 恒 1.0、BearBee 不再读 GEX；见步骤 4.5 注释）
         """
         # 降级护栏：蜂 future 超时 / 抛异常时 alpha_hive_daily_report 会向 agent_results
         # append(None)，而下方 GEX/F&G 预处理循环（line ~874/883/897/924）直接 _r.get(...)，
@@ -1184,6 +1184,13 @@ class QueenDistiller:
         # `gex_adjustment` 保留原名、原值，语义变成「算了但没施加」，由 `applied=False` 标明。
         # 守卫：`tests/test_gex_modifier_disconnected.py`（行为枚举 + AST：生产代码里
         # gex_adj* 不得进 +/- 运算）。⚠️ 不要接回来——要接先过前瞻检验，并登记世代边界。
+        # （v0.45.349 起）上面的「三条」也不全：还有一条 BearBee `options_bear` 的 `gex < 0 ⇒ ≥5.0`
+        # 地板（经 Bear 分数进步骤 3 的看空上限与 BullVeto），v0.45.334 漏提。用户决定后 v0.45.349 把 ②
+        # 与这条一并中性化（② 恒 1.0 = 原 None 分支，options_score 标度不变；Bear 那段删除），世代边界
+        # 同 09-28。2026-09-27 调查实测（03-10~09-11，close_t7 同日横截面、t 分布）：主链负 GEX 标记组
+        # −2.85pp（n=31 日，p=0.009），加标的控制后 −0.43pp（p=0.67）⇒ 是标的身份、不是时点。
+        # 自此规则引擎（生产 --no-llm）下 GEX 进评分**只剩** ① RegimeWeightAdjuster（全链视图三值 regime，取不到 ⇒ GEX 这项
+        # 不偏移）；本步骤的 `confidence_modifier` 只乘步骤 6 的 band_width（展示量，不进分）。
         try:
             from gex_regime import GexRegimeModifier
             _gex_mod_result = GexRegimeModifier().compute(_gex_data, direction=rule_direction)

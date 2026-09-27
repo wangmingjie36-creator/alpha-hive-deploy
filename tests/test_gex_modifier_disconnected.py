@@ -7,6 +7,10 @@ v0.45.197 的世代边界只记了 ①。v0.45.334 **只断开 ②**，① ③ �
 直接给分，不经 `options_analyzer`）：`QueenDistiller` 步骤 4.5 仍计算、落盘为诊断值（`gex_regime_mod.applied=False`），
 不再施加。理由与幅度见 `queen_distiller.py` 步骤 4.5 注释与 `ic_rerun_readiness._COHORT_HISTORY`
 的 v0.45.334 条。
+（v0.45.349 起）上面的「三条」也不全：还有 BearBee 的 `gex < 0 ⇒ options_bear ≥ 5.0` 地板（经 Bear
+分数进看空上限 / BullVeto）。v0.45.349 把 ③ 与这条一并中性化（③ 恒 1.0、Bear 那段删除），自此 GEX
+进评分（规则引擎，生产 --no-llm）只剩 ①。本文件仍只守 ② 与「① 还接着」；③ 与 Bear 地板的守卫在
+tests/test_gex_oracle_bear_neutralized.py。
 
 这里守三件事，照 `tests/test_zero_weight_invariant.py`（v0.45.176 断开 adapted_weights 旁路）的写法：
 

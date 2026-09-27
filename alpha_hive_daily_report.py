@@ -2326,6 +2326,9 @@ class AlphaHiveDailyReporter:
                     _opts_signal = _or.get("signal_summary", _opts_signal)
                 except Exception as _oe:
                     _log.debug("期权数据获取失败 %s: %s", _tk, _oe)
+            # v0.45.349 世代印记（与 OracleBee 各路径同一字面量）：合成回退里的分数同样出自本版代码、
+            # 不含 gex_signal。不写的话，某天走到这条回退，边界判别会把「缺键」读成旧代码 ⇒ 误报 boundary_too_early。
+            _oracle_details["gex_signal_in_score"] = False
             # ── BuzzBee discovery（含 F&G）──
             _buzz_disc = ""
             if _fg_value is not None:

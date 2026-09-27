@@ -214,8 +214,12 @@ DOCUMENTED_REDEFINITIONS = {
     "agent.GuardBeeSentinel.score": "2026-09-07",      # v0.45.163 普查读法
     "agent.GuardBeeSentinel.direction": "2026-09-07",  # v0.45.163 方向 26.2% 不一致
     "guard.consistency_census": "2026-09-07",          # v0.45.163
-    "agent.OracleBeeEcho.direction": "2026-09-11",     # v0.45.201 去掉关键词投票
-    "agent.OracleBeeEcho.score": "2026-09-05",         # v0.45.128 IV 换源
+    # v0.45.349：Oracle 分与方向由 09-05（v0.45.128 IV 换源）/ 09-11（v0.45.201 去掉关键词投票）
+    # 挪到 09-28 —— gex_signal 恒 1.0（那 +1 折到 Oracle 分 +0.846，负 GEX 47 行里方向翻 7 行，2026-09-27 调查实测）
+    "agent.OracleBeeEcho.direction": "2026-09-28",
+    "agent.OracleBeeEcho.score": "2026-09-28",
+    "bear.options_bear": "2026-09-28",                 # v0.45.349 删 gex<0 ⇒ ≥5.0 下限（178 行负 GEX 触发 157 行）
+    "bear.insider_bear": "2026-09-28",                 # 同上，经新依赖边：Oracle 方向 → consensus_strength → Scout 方向
     "bear.overval_bear": "2026-09-05",                 # v0.45.128 P/E 复活
     "ml.expected_7d": "2026-09-07",                    # v0.45.151 catalyst_quality
     "ml.expected_30d": "2026-09-07",
@@ -294,3 +298,98 @@ class TestCohortSignalScopeTable:
         g = sa.generation_boundaries([sig]).get(sig)
         assert g is not None and g["date"] >= not_before, (
             f"{sig} 在 {not_before} 换过量（见 CHANGELOG），世代起点却是 {g}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Bear 子分读同伴方向 ⇒ 是依赖边，不是叶子（v0.45.349）
+# ══════════════════════════════════════════════════════════════════════════
+
+#: BearBee 里产出各归档子分的方法 → 归档信号名（`agent_details.BearBeeContrarian.details.<名>`）。
+#: 方法改名 / 消失时 `test_bear_peer_direction_reads_have_edges` 先红，不会静默跳过。
+_BEAR_ASSESSORS = {
+    "_assess_insider_selling": "bear.insider_bear",
+    "_assess_options_puts": "bear.options_bear",
+    "_assess_valuation": "bear.overval_bear",
+    "_assess_short_interest": "bear.short_int_bear",
+}
+
+
+def _bear_peer_direction_reads():
+    """AST：各子分方法里 `x = self._read_peer(ticker, "<蜂>")` 之后读了 `x.direction` 的那些蜂。
+
+    只认 `.direction`：同处读的 details（内幕金额 / P/C / IV Rank / skew / gex）是原始观测、不是边；
+    `.self_score` 在这两个方法里只拼进看空理由的文字，不进分值。
+    """
+    import ast
+    src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "swarm_agents", "bear_bee.py")
+    with open(src_path, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "BearBeeContrarian")
+    methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
+    out = {}
+    for meth, sig in _BEAR_ASSESSORS.items():
+        assert meth in methods, f"BearBeeContrarian.{meth} 不见了 —— 更新 _BEAR_ASSESSORS 的映射"
+        peer_of = {}
+        for node in ast.walk(methods[meth]):
+            if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Attribute)
+                    and node.value.func.attr == "_read_peer" and len(node.value.args) >= 2
+                    and isinstance(node.value.args[1], ast.Constant)):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        peer_of[t.id] = node.value.args[1].value
+        agents = {peer_of[n.value.id] for n in ast.walk(methods[meth])
+                  if isinstance(n, ast.Attribute) and n.attr == "direction"
+                  and isinstance(n.value, ast.Name) and n.value.id in peer_of}
+        out[sig] = agents
+    return out
+
+
+class TestBearPeerReadsAreEdges:
+    """`bear.insider_bear` 读 Scout 方向（bearish ⇒ 下限 6.0）、`bear.options_bear` 读 Oracle 方向
+    （bearish ⇒ 下限 5.5）—— 此前却登记在 SIGNAL_LEAVES「不读任何系统输出」⇒ Oracle / Scout 换代时
+    这两个子分被静默池化。v0.45.349 改成 SIGNAL_UPSTREAM 的边（补边本身经前后对比不挪任何已有起点）。
+    """
+
+    def test_bear_peer_direction_reads_have_edges(self):
+        """变红的变异：把两条边删掉、两个名字放回 SIGNAL_LEAVES（v0.45.349 之前的状态）。"""
+        reads = _bear_peer_direction_reads()
+        assert reads["bear.insider_bear"] == {"ScoutBeeNova"} and reads["bear.options_bear"] == {"OracleBeeEcho"}, (
+            f"前提（AST 实测）变了：{reads} —— 核对 bear_bee.py 后更新本断言与 SIGNAL_UPSTREAM")
+        problems = []
+        for sig, agents in reads.items():
+            for a in agents:
+                ups = [p for k, ps in sa.SIGNAL_UPSTREAM.items() if fnmatchcase(sig, k) for p in ps]
+                if not any(fnmatchcase(f"agent.{a}.direction", p) for p in ups):
+                    problems.append(f"{sig} 读 {a} 的方向，SIGNAL_UPSTREAM 却没有这条边")
+            if agents and sig in sa.SIGNAL_LEAVES:
+                problems.append(f"{sig} 读系统输出，却登记在 SIGNAL_LEAVES")
+        assert not problems, problems
+
+    def test_upstream_direction_boundary_slices_the_bear_subscore(self, monkeypatch):
+        """行为：只直接点名 Oracle / Scout 方向的边界，要把对应的 Bear 子分一并切开；
+        不读同伴的 overval / short_int 不许被连坐（成对，防「一刀切」也能让前半绿）。
+
+        变红的变异：同上一条。
+        """
+        monkeypatch.setattr(sa, "COHORT_SIGNAL_SCOPE", {"vORA": ("agent.OracleBeeEcho.direction",),
+                                                        "vSCOUT": ("agent.ScoutBeeNova.direction",)})
+        sigs = list(_BEAR_ASSESSORS.values())
+        g_ora = sa.generation_boundaries(sigs, [("2099-01-05", "vORA", "测试")])
+        g_scout = sa.generation_boundaries(sigs, [("2099-01-05", "vSCOUT", "测试")])
+        assert "bear.options_bear" in g_ora and "bear.insider_bear" in g_scout, (g_ora, g_scout)
+        for g in (g_ora, g_scout):
+            assert "bear.overval_bear" not in g and "bear.short_int_bear" not in g, g
+
+    def test_v0_45_349_scope_reaches_both_bear_subscores(self):
+        """真表：v0.45.349 的闭包带出 options_bear（直接点名）与 insider_bear（经 Oracle 方向 → 拥挤度 → Scout 方向），
+        而 `options.gamma_exposure` 本身不切（算法没动，照算照落盘）。
+
+        变红的变异：把 `COHORT_SIGNAL_SCOPE["v0.45.349"]` 写成只有 `("agent.OracleBeeEcho.score",)`。
+        """
+        universe = set(sa.SIGNAL_EXTRACTORS) | set(sa.UNARCHIVED_NODES)
+        hit = sa._scope_closure(sa.COHORT_SIGNAL_SCOPE["v0.45.349"], universe)
+        assert {"agent.OracleBeeEcho.score", "agent.OracleBeeEcho.direction",
+                "bear.options_bear", "bear.insider_bear"} <= hit, sorted(hit)
+        assert "options.gamma_exposure" not in hit and "bear.overval_bear" not in hit, sorted(hit)

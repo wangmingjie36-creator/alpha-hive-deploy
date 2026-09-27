@@ -326,6 +326,9 @@ class DealerGEXAnalyzer:
         # （`options_analyzer.calculate_gamma_exposure` 在主链上另算，不读本视图）仍经 odds 维
         # 进评分，且它自己的不可得（None → 1.0，与非负同档）同样让负 gamma 标的少 +1
         # （09-24/25 Oracle `gamma_exposure` 60/60 为 None）。v0.45.334 未动那条。
+        # （v0.45.349 起上一段已不成立：Oracle `gex_signal` 恒 1.0，BearBee 的 `gex < 0 ⇒
+        # options_bear ≥ 5.0` 地板（当时也漏提）已删 ⇒ 本视图**就是** GEX 进评分的唯一通道；
+        # 主链那个量仍照算、落盘、展示，不再进分。）
         # ⚠️ 更正：v0.45.197 写这里时称「安全降级」并不成立 —— 当时 `GexRegimeModifier`
         # 还把 ±0.8 直接加进 rule_score，不可得的标的少了这一项、可得的照加，
         # 同一天横截面上不可比。频次记在 `cboe_options.gex_view_stats()` 里，别靠估。

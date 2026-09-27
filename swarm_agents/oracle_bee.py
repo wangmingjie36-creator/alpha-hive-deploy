@@ -20,6 +20,23 @@ def _finite_pos(x) -> bool:
             and _m.isfinite(x) and x > 0)
 
 
+def _mark_gex_out_of_score(out: Dict) -> Dict:
+    """v0.45.349：给 OracleBee 的**每一条**返回路径（成功 / 异常兜底 / 无效 ticker）的 details
+    打上字面量 `gex_signal_in_score: False`。
+
+    它是世代判别物：归档里 `swarm_results.agent_details.OracleBeeEcho.details.gex_signal_in_score`
+    缺键 ⇒ 旧代码（options_score 里负 GEX 标的多 1.0）。所以**无条件写字面量**，不从 OptionsAgent
+    的结果里抄 —— 抄的话，OptionsAgent 失败（result={}）那条路就没有标记，而那条路的分数同样不含 GEX。
+    异常路径也要带：`make_error_result` 的 5.0 同样不含 GEX 分量，缺键会被误认成旧代码。
+    """
+    det = out.get("details")
+    if not isinstance(det, dict):
+        det = {}
+        out["details"] = det
+    det["gex_signal_in_score"] = False
+    return out
+
+
 class OracleBeeEcho(BeeAgent):
     """市场预期蜂 - 期权分析 + 异常期权流
     对应维度：odds（权重唯一真相 = `config.EVALUATION_WEIGHTS`，此处不抄数值）
@@ -269,7 +286,7 @@ class OracleBeeEcho(BeeAgent):
     def analyze(self, ticker: str) -> Dict:
         _err = self._validate_ticker(ticker)
         if _err:
-            return _err
+            return _mark_gex_out_of_score(_err)
         try:
             ctx = self._get_history_context(ticker)
 
@@ -387,7 +404,9 @@ class OracleBeeEcho(BeeAgent):
             if result:
                 _pub_details["pc_ratio"] = result.get("put_call_ratio")
                 _pub_details["iv_rank"] = result.get("iv_rank")
-                _pub_details["gex"] = result.get("gamma_exposure")  # A2: OptionsAgent 返回 "gamma_exposure"
+                # A2: OptionsAgent 返回 "gamma_exposure"。v0.45.349 起**只供展示**：唯一的读者 BearBee
+                # 的 `gex < 0 ⇒ options_bear ≥ 5.0` 地板已删，options_score 里的 gex_signal 已恒 1.0。
+                _pub_details["gex"] = result.get("gamma_exposure")
                 if _skew_ratio is not None:
                     _pub_details["iv_skew"] = _skew_ratio  # S14: 仅有值时设置
                 if term_structure.get("structure") != "unknown":
@@ -439,9 +458,11 @@ class OracleBeeEcho(BeeAgent):
                     "options": "real" if result else "fallback",
                 },
                 details={**(result or {}), "term_structure": term_structure,
-                         "deep_skew": deep_skew, "max_pain": max_pain},
+                         "deep_skew": deep_skew, "max_pain": max_pain,
+                         # v0.45.349：字面量，放在展开之后 ⇒ 不依赖 OptionsAgent 结果里有没有这个键
+                         "gex_signal_in_score": False},
             ).to_dict()
 
         except AGENT_ERRORS as e:
             _log.error("OracleBeeEcho failed for %s: %s", ticker, e, exc_info=True)
-            return make_error_result("OracleBeeEcho", "odds", e)
+            return _mark_gex_out_of_score(make_error_result("OracleBeeEcho", "odds", e))
