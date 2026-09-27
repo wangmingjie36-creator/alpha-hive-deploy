@@ -5,7 +5,47 @@
 
 ---
 
-## [0.45.350] — 2026-09-27 — 占位（进行中：运维——补推 09-25 滞留的 gh-pages 部署、清理 8 个已并入/过时分支；记录 gh-pages 重试假成功缺陷）
+## [0.45.350] — 2026-09-27 — 运维：补推 09-25 滞留的 gh-pages 部署（网站停在 09-24 两天）；清理 8 个已并入/过时分支；发现 gh-pages 重试「假成功」缺陷（另开任务修）
+
+### 网站为什么停在 09-24
+- 09-24 的部署正常到了远端（`43a04ecc`）。**缺的只有 09-25 一次**；09-26/27 是周六日（代码算过星期），本就不扫描。
+- **起因**：09-25 14:00–14:46 PT 扫描期间这台机器连不上 GitHub——`production_sync` fetch（14:00）、main 推送与
+  gh-pages 推送（14:46）全报 `ssh: connect to host github.com port 22: Undefined error: 0`，CDN 校验也解析不了
+  `github.io`；同一轮 yfinance 803 次调用全成功，只有 GitHub 不通。全部 orchestrator 日志里**只有这一天**出现过。
+  网络侧具体原因待验证（本机代理/DNS 对 GitHub 的规则，或 GitHub 侧故障，均未核实）。
+- **没人知道的原因（真正的缺陷）**：`report_deployer.commit_and_push_gh_pages` 第 1 次重试 fetch 失败 ⇒ 父提交退回本地 ref
+  （未经校验）⇒ 建提交 `316ba1d` 并**先** `update-ref` 本地 gh-pages ⇒ push 失败。第 2 次重试 fetch 又失败 ⇒ 父提交 = 本地 ref
+  = 自己刚建、没推上去的 `316ba1d` ⇒ tree 相同 ⇒ 走「远端已是目标状态」捷径判 **success**。日志印「gh-pages 部署成功
+  (attempt 2, commit 316ba1d)」「gh-pages 已推送成功」，只有 main 推送那一行 WARN 是真话。捷径的前提是父提交为**已校验**
+  的远端真头，`verified=False` 时不成立，代码没查。——本仓头号元形状「失败被改写成没发生过」。修复另开任务（不在本版改代码）。
+
+### 运维（均经用户在对话里确认）
+- **补推 gh-pages**：`43a04ecc..316ba1dd`（快进、非 force；推前重新 fetch 确认远端仍是 `43a04ecc`）。
+  线上 `dashboard-data.json` 随即显示 `_date: 2026-09-25`。
+- **删除 8 个分支**（本地 8 个 + origin 3 个；agent worktree 已确认无未提交改动后 `git worktree remove`）。判据是**内容**：
+  本仓 `git cherry` 几乎失效（每个提交都改 CHANGELOG 顶部，rebase 后 patch-id 就变，v0.45.226 已记），故逐提交比对
+  「新增代码行在 main 同一文件里逐字出现的比例」，再辅以版本号对照 main 的 CHANGELOG 标题。删前记下的 tip（供旧条目里的
+  分支指针查找；对象保留到 gc 为止，内容本身都已在 main）：
+
+| 分支 | tip | 为什么可删 |
+|---|---|---|
+| `claude/distracted-heyrovsky-b7ebed`（+origin） | `1646db71` | v0.45.76，已由 v0.45.231 合入；改动反向应用于 main 通过 |
+| `claude/interesting-khayyam-a141ec`（+origin） | `366fa148` | v0.45.79，已由 v0.45.231 合入（据 v0.45.226 后续记录） |
+| `claude/jolly-boyd-47a45d` | `6816cc69` | v0.45.106/107，新增行 100% 在 main |
+| `claude/cool-chaplygin-b47e35` | 本地 `e3525962` / origin `67e782a9` | 本地是 main 祖先；origin 那次（ALPHAHIVE_DIR 收口，标 v0.45.279 但号被另一条用了）新增行 99% 在 main |
+| `claude/objective-hypatia-742440` | `afb29679` | v0.45.233 草稿提交：实质提交 92–93% 在 main；其余是只改 CHANGELOG / 分支内已撤回 / 针对 main 上已不存在的临时日志目录机制 |
+| `claude/hungry-hertz-19736c` | `c0463fca` | 未进 main（标 v0.45.273，号被另一条用了），但它修的「收集顺序捅到真实 yfinance」按原顺序在 main 上重跑 278 绿，不再复现 |
+| `worktree-agent-a2de4454213ce6f95` | `a0c37097` | 与 main 上某提交 patch 等价 |
+| `gh-pages-deploy` | `e96fa4cd` | 03-10 的旧部署分支，Pages 从 `gh-pages` 部署 |
+
+- **保留**：`gh-pages` / `origin/gh-pages`（部署）、`origin/cloud-snapshots`（数据；`tmus-backfill`、`cloud-snapshots-update`
+  已完整包含其中）、`worktree-gex-short-strike`（进行中）。
+- **仍未并入、问题仍在的 4 组**，已另开任务：`claude/happy-cannon-bc377f`（v0.45.77/78）+ `claude/nostalgic-cray-1fed0e`
+  （`var(--mt)`/`var(--t)` 未定义，main 上仍 9+8 处）→ 在当前 main 上重做，不硬合；`origin/fix/cboe-*`（v0.45.88）+
+  `origin/claude/backfill-cloud-snapshot`（原 0.45.118）→ 先评估是否仍需要。
+
+---
+
 
 ## [0.45.349] — 2026-09-27 — Changed：中性化读 OracleBee 主链 `gamma_exposure` 的两条进分通道（`options_analyzer.gex_signal` 恒 1.0、BearBee `gex<0` 看空下限删除），与 v0.45.334 / v0.45.340 同日登记世代边界 2026-09-28
 
