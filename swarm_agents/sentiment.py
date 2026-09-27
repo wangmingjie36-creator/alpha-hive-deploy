@@ -73,30 +73,76 @@ except ImportError:
                "divergence_hidden_opp_sentiment": 35, "divergence_price_threshold": 3.0}
 
 
-def _get_sentiment_momentum(ticker: str, current_pct: int) -> Dict:
+#: 回看参照允许的最大间隔 = N + 本常量（日历日）。3 日回看最多接受 7 天前的参照：周末（≤5 天）、
+#: 漏扫一天（6~7 天）都在内；扫描断档期拿一两周前的值来比「3 日动量」则不算（按无历史处理）。
+#: v0.45.340 起是 buzz_v1 定义的一部分（维度 IC 协议 §13.2）——改它 = 改冻结层。
+_MOMENTUM_REF_SLACK_DAYS = 4
+
+#: 历史来源：`signal_archive` 表里的 `sentiment.pct`（每次扫描收尾按业务日期写入）。
+#: 与 `signal_archive.TABLE` / 其抽取器同名——tests 钉住；这里不 import signal_archive（它反向依赖 swarm_agents）
+_ARCHIVE_TABLE = "signal_archive"
+_ARCHIVE_PCT_SIGNAL = "sentiment.pct"
+
+
+def _archive_db_path():
+    """`pheromone.db`，调用时求值（数据根迁移后跟着 `PATHS` 走）。"""
+    from pathlib import Path
+    from hive_logger import PATHS
+    return Path(PATHS.db)
+
+
+def _get_sentiment_momentum(ticker: str, current_pct: int, as_of: Optional[str] = None,
+                            db_path=None) -> Dict:
     """
-    计算情绪动量（基于 sentiment_baseline 历史数据）。
-    返回 1d/3d/7d 情绪变化率和动量体制分类。
+    计算情绪动量：当前情绪 − 归档里 N 天前（N=1/3/7）的情绪。
+    返回 1d/3d/7d 情绪变化和动量体制分类。
 
     momentum_regime: surging / rising / stable / declining / crashing / unknown
-    momentum_score_adj: -0.5 ~ +0.5 的评分调整
+    momentum_score_adj: -0.5 ~ +0.5 的评分调整（只看 delta_3d）
+
+    v0.45.340（buzz_v1 阶段 1，维度 IC 协议 §13.2 的锚点）——此前两处让它不可复现：
+      ① 回看用 SQLite `date('now')`（墙上时钟），补跑 / 重跑同一业务日会取到另一段历史；
+      ② `date('now')` 是 **UTC**，而写基线的 `_upsert_sentiment` 用本地日期——两个时间基准混用；
+      ③ 历史来自 `sentiment_baseline.db`，任何一次 Buzz 运行（MCP、深度报告、重放）都会往里写，不只正式扫描。
+    现在：
+      · 时间基准 = `as_of`（扫描业务日期，BuzzBee 传 `self._target_date` = 报告的 `date_str`）；
+        缺省（非扫描调用）才退回本地当天，并记 `as_of_source="wall_clock"`。
+      · 历史 = `signal_archive` 的 `sentiment.pct`，取「日期 ≤ as_of − N」的最近一行，且不早于
+        `as_of − N − _MOMENTUM_REF_SLACK_DAYS`（否则该回看按无历史处理）。
+      · 读不到归档（库 / 表不存在、查询出错）⇒ warning + `history_source="unavailable"`，不再静默。
+        「表在、但这只票没有够近的历史」是正常的无历史（`history_source="signal_archive"`、delta=None）。
     """
+    import datetime as _dt
     import sqlite3 as _sq
+
+    as_of_source = "scan" if as_of else "wall_clock"
+    day0 = _dt.date.fromisoformat(as_of) if as_of else _dt.date.today()   # 格式错直接抛：那是调用方的 bug
     result: Dict = {"delta_1d": None, "delta_3d": None, "delta_7d": None,
-                    "momentum_regime": "unknown", "momentum_score_adj": 0.0}
+                    "momentum_regime": "unknown", "momentum_score_adj": 0.0,
+                    "as_of": day0.isoformat(), "as_of_source": as_of_source,
+                    "history_source": "signal_archive", "ref_dates": {}}
+    path = db_path if db_path is not None else _archive_db_path()
     try:
-        with _sq.connect(str(_sentiment_db_path())) as conn:
-            for days, key in [(1, "delta_1d"), (3, "delta_3d"), (7, "delta_7d")]:
+        # mode=ro：库不存在时报错而不是凭空建一个空库（那会把「路径错了」伪装成「没有历史」）
+        conn = _sq.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            for days, key in ((1, "delta_1d"), (3, "delta_3d"), (7, "delta_7d")):
+                cutoff = (day0 - _dt.timedelta(days=days)).isoformat()
+                oldest = (day0 - _dt.timedelta(days=days + _MOMENTUM_REF_SLACK_DAYS)).isoformat()
                 row = conn.execute(
-                    "SELECT sentiment_pct FROM sentiment_baseline "
-                    "WHERE ticker=? AND date <= date('now', ? || ' days') "
+                    f"SELECT date, value FROM {_ARCHIVE_TABLE} "
+                    "WHERE signal=? AND ticker=? AND date <= ? AND value IS NOT NULL "
                     "ORDER BY date DESC LIMIT 1",
-                    (ticker, f"-{days}"),
+                    (_ARCHIVE_PCT_SIGNAL, ticker, cutoff),
                 ).fetchone()
-                if row:
-                    result[key] = current_pct - row[0]
-    except Exception as _e:
-        _log.debug("sentiment_momentum 查询失败: %s", _e)
+                if row and row[0] >= oldest:
+                    result[key] = current_pct - int(round(row[1]))
+                    result["ref_dates"][key] = row[0]
+        finally:
+            conn.close()
+    except _sq.Error as _e:
+        _log.warning("情绪动量：读归档 %s 失败（%s）——%s 本次按无历史处理，动量调整为 0", path, _e, ticker)
+        result["history_source"] = "unavailable"
         return result
 
     # 基于 3d delta 判断动量体制

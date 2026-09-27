@@ -5,6 +5,98 @@
 
 ---
 
+## [0.45.349] — 2026-09-27 — 占位（进行中：中性化 OracleBee gex_signal + BearBee GEX 看空下限，与 09-28 世代边界同日）
+
+## [0.45.348] — 2026-09-27 — Fixed（编排器）：Step 11 边界报警分支第 1198 行 `$READINESS_JSON）` 裸变量紧跟全角括号——UTF-8 locale 下 bash 3.2 `set -u` 直接退出
+
+`~/.claude/scripts/alpha-hive-orchestrator.sh`（仓库外、不受版本控制，本条是它的唯一改动记录）第 1198 行：
+`完整判别在 $READINESS_JSON）` → `完整判别在 ${READINESS_JSON}）`。只改这一处（`diff` 对备份确认仅此一行）。
+
+### 问题
+
+bash 3.2 在 UTF-8 locale 下把 `）` 的首字节并进变量名，查 `READINESS_JSON\xef` ⇒ `set -uo pipefail` 报 unbound variable、整个脚本退出。
+该行只在「世代边界核对报警」分支执行，由 v0.45.334（2026-09-26）加 Step 11 边界核对时引入。
+
+- **定时扫描不中**：launchd plist 无 `LANG`/`LC_*` ⇒ C locale；仓库内无其他代码拉起编排器。
+- **手动在终端跑会中**（en_US.UTF-8 / C.UTF-8 实测复现），且恰在边界报警那天——最可能手动重跑排查的时候——
+  脚本死在 Step 11 之后，Step 12~15 与 `status.json` 都不写。
+- 守卫 `tests/test_orchestrator_braced_vars.py::TestLiveOrchestrator` 读的就是这份真实文件，引入当天就会红；
+  但它不挂在任何提交钩子上，只在跑全套时看得见（本次是 v0.45.340 rebase 后跑全套撞见的）。
+
+### 验证
+
+- 备份：`alpha-hive-orchestrator.sh.bak-20260927_pre-v0.45.348`（`cp -p` 后 `cmp` 一致）；替换用脚本断言恰好匹配 1 次。
+- `bash -n` 通过；守卫 `test_orchestrator_braced_vars.py` 27 passed（修前 1 红）。
+- 把真实的报警分支（`# ── 世代边界核对（v0.45.334` 至 `fi`）抽出来，喂 `alarm=true`，在 `LC_ALL=en_US.UTF-8` 下真跑：
+  备份版在第三条 WARN 报 unbound variable 退出；修复版三条 WARN 全出、跑到分支之后。
+- 修改时编排器未在运行（`pgrep` 为空；下次运行 2026-09-28 14:00）。
+
+## [0.45.347] — 2026-09-27 — Fixed/docs：二次检查 v0.45.321——`load_panel` 改走共用取数入口（消掉第三份私有 SQL 与一处潜在分叉）；截断指纹「对 t30 也管用」的说法撤回；CHANGELOG / docstring 三处数字错更正
+
+### Fixed
+- `signal_archive.load_panel()`：前瞻收益改走 `ic_diagnostics.forward_return_sql` / `row_forward_return`
+  （v0.45.328 立的唯一入口）。v0.45.321 写的是第三份私有 SQL，与共用入口已有一处分叉：终点价为 0
+  （「没有这个价」，不是零元）时这里算 −100% 入面板，共用入口丢弃该行 ⇒ 同一份库两个工具样本集不同。
+  生产库（09-27 快照）close_t7 / price_t30 ≤0 的行为 **0**，是潜在分叉、今天零影响：HEAD 与本版在同一快照上
+  `analyze()` t7 / t30 输出**逐字节相同**。v0.45.328 的教训「两份实现，修一份等于制造分叉」对第三份同样成立。
+- 新增 `TestAnalyzeUsesClose::test_zero_end_price_is_dropped_like_the_shared_entry`：拿改动前的
+  `signal_archive.py`（`git show HEAD:`）实测红，本版绿（全程 `PYTHONDONTWRITEBYTECODE=1` + 清 `__pycache__`）。
+
+### docs（就地更正并注明〔v0.45.347 更正〕）
+- `ic_diagnostics.truncation_share` docstring 与 CHANGELOG v0.45.321：撤回「给 t30 也套路径模拟，只有这个比例会跳」。
+  `exit_price` / `exit_reason` 是 `backtester._store_path_result` 写死的 **T+7 路径**列；t30 若日后套路径模拟，
+  price_t30 里是 T+30 离场价，不等于 T+7 的 exit_price ⇒ 比例不跳。**探测器只对 t7 有效**，对 t30 恒≈0。
+- 「与 close_t7 相差 >0.01 的行每月 34%~76%」（`load_panel` docstring、`tests/test_signal_archive_close_target.py`）
+  → **39%~76%**。逐月是 05 53.3% / 06 76.2% / 07 45.1% / 08 39.2% / 09 39.2%，34% 是算错的。
+- CHANGELOG v0.45.321「28 个至少一项变化」→ 默认参数下按所列四项是 **27/36**（另 3 个只是 IC 变号）；28 是 ×2000 下
+  「四项或变号」的数，抽样数与口径两处都串了。v0.45.321 收尾给用户的汇报里也说了 28，同样错。
+- CHANGELOG v0.45.321「新 🟢 里 7/8 是选股标签或混合」→ **8/8**。
+- CHANGELOG v0.45.321「发现未处理」暗含「读者就剩 ml_expected_return_replay」——漏了两个拼列名的读者
+  （v0.45.327 / v0.45.328 已修）。memory 读者清单早已由 v0.45.326/327 更正，本版只补 CHANGELOG。
+
+### 复核过、无缺陷
+- 就绪度闸按 close_t7 数成熟：09-27 快照上 checked_t7=1 且 close_t7 为空、price_t7 不空的行为 0，9 月 240 行全有 close_t7
+  ——「close_t7 会滞后」是防御性理由，目前没有发生过，闸的数字不受影响。
+- 截断指纹在 09-27 快照上仍静默（close_t7 1/540）；无 ≤0 终点价。
+- 相关测试 285 绿（含 v0.45.325 后的闸第四段、v0.45.328 的基准表测试）。
+
+### 发现未处理（不是本版改动，需用户决定）
+- **v0.45.324（噪音地板 MC 误差：默认 draws 200→2000、MC 不确定带、◐ 贴地板）的修复提交 `dd006535` 从未进 main**：
+  只在本地分支 `claude/practical-bun-4c8e91`，未推送，worktree 已回收。CHANGELOG 里 v0.45.324 仍是占位，
+  main 上 `analyze()` 仍是 `draws=200`、没有 ◐——但 memory（`alpha-hive-ic-rerun-gate`、MEMORY.md 索引行
+  「报告里 ◐ 贴地板见文末」）按已上线描述。已在 memory 里标注「未合入」，是否合入由用户决定。
+
+### 教训
+二次检查找到的 5 处问题里，4 处是**我自己写的数字/能力声明**，不是代码：一个百分比算错、一个计数把两次运行和两种口径串了、
+一个「7/8」没回去数、一个「探测器也能抓 X」没验证 X 的数据会不会落到它看的那两列上。代码有变异测试守着，
+**CHANGELOG 里的数字没有任何东西守着**——写完就要拿产出它的那份 JSON 再数一遍，而不是凭当时屏幕上的印象。
+
+---
+
+
+## [0.45.346] — 2026-09-26 — Fixed：`migrate_data_root check-old` 看不见被 `.gitignore` 忽略的文件——旁路写旧 `logs/` 会被归进「git 同步」而不红；iCloud 重名副本单列
+
+用户 09-26 下午要求「核对阶段 5 验收」时（周日周任务、周一扫描都还没到）先核了搬迁后稳定性，`check-old` 报出
+`synced_by_git: ["logs/alpha_hive_structured.jsonl.5 2"]`——一个被忽略的 iCloud 重名副本（mtime 09-11、mode 0600、retire 基线里没有）
+被归成「git 同步」。git 从不同步被忽略的文件，这个归类本身就错；顺着它看到的盲区才是要修的：
+
+### Fixed
+- `data_backup/migrate_data_root.check_old`：判「git 能不能解释这个变化」只看 `git status`，而 `git status` 看不见被忽略的文件。
+  冻结的 `logs/` 里 `*.log` / `*.jsonl.*` 全被忽略 ⇒ 某个没跟上 `ALPHA_HIVE_HOME` 的写入方往旧 `logs/` 追加 / 新建 / 删除日志，
+  **全被归进 `synced_by_git`、不红**——正是阶段 5 验收「旧位置零写入」要抓的形状。
+  现在对 status 解释不了的候选再过一道 `git check-ignore`：命中忽略规则的一律算 `written_outside_git`（git 永不同步它们）。
+- 同时删掉原先「retire 后才变脏的也算写入」那条分支：指纹覆盖冻结项下全部文件（含被忽略的），新建 / 删除本来就在「相对基线变了」里，
+  那条分支是冗余的，且一旦把忽略文件算脏，就会把 retire 前就在的几十个日志误报成写入。
+- 新增 `icloud_duplicates`：iCloud「桌面与文稿」同步造的 `xxx 2.ext` 副本单列、照报、**不红**——不单列会让验收被同步服务的噪音恒红。
+- 曾试过在 `git status` 上加 `--ignored` 做第二道：变异实测两道并存时去掉它测试照绿（`check-ignore` 已全覆盖）⇒ 删掉，只留一种机制，docstring 写明勿加回。
+
+### 验收
+- `tests/test_migrate_data_root.py` 25 → 30 项（带「被跟踪 + 被忽略混居」的 `logs/` 夹具，照生产形状）：retire 前就在的忽略文件不误报、
+  追加 / 新建 / 删除忽略文件均红、iCloud 副本单列不红。变异：去掉忽略判定 ⇒ 3 红；不单列 iCloud ⇒ 1 红。
+- 新代码对生产实跑 `check-old`：`ok`，`icloud_duplicates` = 那一个副本，`written_outside_git` / `synced_by_git` 空。
+- 同时核对：编排器自 09-26 07:05:46 打补丁后未被改动（与 `.bak-pre-phase5` 的差异逐行等于阶段 5 diff）；launchd env、MCP 进程 env 均为新根；新根 `pheromone.db` `quick_check` ok。
+- 全套 5969 passed / 85 deselected / 2 xfailed（`--deselect TestCoverageHorizon`，按设计红）；`ruff check .` 全过。
+
 ## [0.45.345] — 2026-09-26 — 运维：**数据根迁移阶段 5 已执行**——生产数据搬到 `~/alpha-hive-data`，编排器 / plist / MCP / 两个定时任务切到新根；Fixed：备份推送超时 60s 太紧（09-24 新范围首推超时）
 
 按 memory `alpha-hive-data-root-migration.md`「阶段 5 执行」runbook，用户 09-23 授权 ①~⑦、09-26（周六，非交易日）执行。代码批次见 v0.45.322 / 335 / 342。
@@ -219,7 +311,107 @@ v0.45.339 把六处告警类发送改成只写日志后，发送器里留下一�
 | `slack_notifier.py` 原样写回 | **只有** `test_retired_names_are_really_gone` 红：全仓扫描走 `git ls-files`，未 `git add` 的文件看不见（已写进该测试 docstring；这是所有基于 `_repo_files` 的 AST 守卫的共同盲区） |
 | `run_daily_scan` 加回无用 notifier | 不红 —— 无害的浪费，不设守卫 |
 
-## [0.45.340] — 2026-09-23 — 占位（进行中：buzz_v1 阶段 1——Buzz 情绪动量改读归档、按扫描日期回看 + 通道全精度入档；计划 09-25 扫描上线）
+## [0.45.340] — 2026-09-23 — Fixed：Buzz 情绪动量调整按**扫描业务日期**回看**归档**（此前用墙上时钟 + UTC/本地混用、读任何运行都会写的 `sentiment_baseline.db`，同一业务日重跑不可复现）；通道值全精度入档；登记为维度 IC 协议 buzz_v1 的锚点（09-28 扫描上线；原定 09-25，未赶上推送窗口）
+
+维度 IC 协议修订 1（v0.45.330）的阶段 1。方案用户 2026-09-23 确认：改读归档、加陈旧上限、09-25 上线。
+
+### 问题
+
+`swarm_agents/sentiment.py::_get_sentiment_momentum` 有三处让 Buzz 分不可复现：
+
+1. 回看用 SQLite `date('now', -N days)`，即墙上时钟。补跑、重跑同一业务日会取到另一段历史。
+2. `date('now')` 是 **UTC**，写基线的 `_upsert_sentiment` 用的却是本地日期，两个时间基准混用。
+3. 历史来自 `sentiment_baseline.db`，任何一次 Buzz 运行（MCP、深度报告、重放）都会往里写，不只正式扫描。
+
+另外，读取失败只打一行 debug，然后静默按「无动量」处理。
+
+v0.45.330 的只读核实：按扫描日重算，与生产记录不一致 211/1688。
+
+### Fixed / Changed
+
+- `_get_sentiment_momentum(ticker, current_pct, as_of=None, db_path=None)`：
+  - **时间基准**：`as_of` 是扫描业务日期，截止日在 Python 里算。缺省（非扫描调用）才退回本地当天，并记 `as_of_source="wall_clock"`。
+  - **历史来源**：`signal_archive` 表的 `sentiment.pct`，取「≤ as_of − N」的最近一行。路径在调用时按 `PATHS.db` 解析，
+    09-26 数据根迁移后跟着走。
+  - **陈旧上限（新）**：参照不得早于 as_of − N − 4 天（`_MOMENTUM_REF_SLACK_DAYS`），否则该回看按无历史处理。
+    周末、漏扫一天都在上限内；扫描断档期「3 日动量」拿一两周前的值来比则不算。历史上这类情况 127 行，8 月占 105 行。
+  - **读不到归档要看得见**：库或表不存在、查询出错时，打 warning，并记 `history_source="unavailable"`。
+    连库用 `mode=ro`，**不会凭空建库**——否则「路径错了」会被伪装成「没有历史」。
+  - details 新增 `as_of` / `as_of_source` / `history_source` / `ref_dates`。原有键与阈值不变，`test_bee_details_contract` 全绿。
+- `BuzzBeeWhisper`：
+  - 传入 `as_of=self._target_date`。它由 `inject_prefetched` 注入，等于报告的 `date_str`；实时扫描与 `--date` 补跑都有。
+  - `details.components` 的 5 个通道去掉 `round(…, 1)`，改为全精度。这只是记录精度，量没变，按 `signal_archive` 判据不换代 `buzz.comp.*`。
+- 世代边界 `_COHORT_HISTORY`：`("2026-09-28", "v0.45.340", …)`；影响面 `COHORT_SIGNAL_SCOPE["v0.45.340"] = ("agent.BuzzBeeWhisper.score",)`。
+  方向由合成值决定、在调整之前，所以不变；下游 Guard 由依赖边带出。
+- 维度 IC 协议（**事前实现对齐**，只填修订 1 §13.2 预留的空）：`H1_ANCHOR_VERSION = "v0.45.340"`，文档 §13.2 写明阶段 1 口径。
+- `sentiment_baseline.db` 与 `_upsert_sentiment` 保留，只供情绪突变检测用。突变检测的 Slack 发送归 v0.45.339（另一 session），本版不碰。
+
+### 幅度（实测，生产库只读）
+
+用新函数本身对 `.swarm_results_*.json` 全史 1688 行重算：
+
+- 动量调整值改变 **250 行（14.8%）**：不加上限时 214 行，上限生效新增 36 行。
+- 分数变化：±0.2 共 197 行，最大 +0.7（clamp 前）。
+- 与独立核算脚本**逐行一致**，差集为空；1688 行全部读到归档。
+
+### 代价
+
+- IC 重跑闸：与 v0.45.334 同日（09-28）⇒ `assess()` 的世代切点不变，本版**额外代价 0**。
+- `analyze()` 的 Buzz 分、Guard 从 09-28 起算（`final_score` 本就被 v0.45.334 在 09-28 切开）。
+- 共振、F&G 前瞻检验的自证不受影响：共振从记录的各蜂结果开始重放，F&G 不实例化 Buzz。
+- 维度 IC 协议：边界早于窗口 10-12，零影响。
+
+### 上线
+
+原计划 09-24 扫描后、09-25 14:00（PDT）扫描前推 `origin/main`。**没推成**：推送要用户在窗口内口头触发，
+没有提醒、也没有会红的观测点，09-24/09-25 两次扫描都跑了旧代码。2026-09-27（周日，非交易日）rebase 后推送，
+边界改为 09-28（本条未进 main 前改，不属「只挪日期的更正条目」）。前提：推送早于 09-28 14:00 PT 扫描。
+
+补上当时缺的观测点：
+
+- `_BOUNDARY_MARKERS["v0.45.340"]`：印记 = Buzz `details.sentiment_momentum.as_of_source` 存在
+  （推送前生产归档 899/899 条带 `sentiment_momentum` 的记录均无此键）。
+- `boundary_evidence_status` 改为核**与末条同日的全部边界**，任一报警即报警。否则 v0.45.340 排到末条后，
+  v0.45.334 的 09-28 边界会从 `--quiet` 的第五段里无声消失——两条同日边界只核得到一条。
+
+上线后核对：
+
+- **09-28 扫描**：启动日志 `alpha_hive.code_version` 是本版；Buzz details 的 `as_of` = 业务日、`history_source="signal_archive"`、
+  `ref_dates` 合理；components 不再是一位小数。若首个跑新代码的扫描日不是 09-28，追加更正条目与协议 §13.2 的日期
+  （须早于 10-12，否则 H1 回退）。
+- 同一天也是数据根迁移后的首个扫描：`history_source` 须是 `signal_archive`（归档跟着库搬过去了），`unavailable` 即迁移路径问题。
+
+### 测试
+
+- `tests/test_sentiment_momentum_archive.py`（新，32 条），覆盖：
+  - 回看语义：截止日、取最近、当天行不许用、N+4 上限含边界、周一回看到周五、阈值不变；
+  - 与墙上时钟无关：把「今天」拨到 2030 年，结果逐位不变；
+  - 读不到可见，且不建库；归档表名与信号名同 `signal_archive`；
+  - 扫描路径把 `self.date_str` 传到 Buzz（AST 核对 + `inject_prefetched` 行为）；
+  - Buzz 端到端：打桩成不整齐的通道值——`as_of` 透传、从沙箱归档读到 3 天前、通道全精度、
+    由 details **逐位**重算 score（阶段 2 的前提）。
+- `tests/test_dim_ic_protocol.py`：锚点钉住；锚点边界真在表里且早于窗口；影响面只点名冻结层。
+- `tests/test_dim_ic_forward_test.py`：真实边界表下锚点为 `ok`。
+
+### 变异测试（真跑，15/15 被杀，0 存活）
+
+- 回看逻辑：忽略 as_of 改用墙上时钟、去掉上限、上限差一天、截止日偏一天、连库不用只读、
+  读失败不标 unavailable、读失败降回 debug、信号名写错、又从 sentiment_baseline 回看。
+- Buzz 与扫描路径：Buzz 不传扫描日期、通道又被 round、报告不传业务日期。
+- 锚点：锚点边界没登记、影响面误点名输入层、锚点日期晚于窗口。
+
+### 核对
+
+- ruff 0.13.3 All checks passed。
+- 全量套件（`--maxfail=1000`，无并发）：5584 passed / 1 failed / 2 xfailed / 83 deselected。唯一失败仍是 `TestCoverageHorizon`
+  （BLS 2027 日程未发布，既有）。
+- 冒烟（生产库只读）：维度 IC 执行器 `h1_anchor={'state': 'ok', 'version': 'v0.45.340', 'date': '2026-09-28'}`，无截断，
+  进度行不再提示「锚点待登记」。
+
+### 留给阶段 2
+
+冻结评分器重算历史 pct 时，应该用归档通道按冻结权重重算，不直接读 `sentiment.pct`，否则以后改合成权重会从
+「历史参照值」这条侧门漏进来。锚点之前的参照日例外：那几天的通道只有 0.1 精度，直接读归档 pct。
 
 ## [0.45.339] — 2026-09-23 — Fixed：Slack 只许发两类消息——六处告警类发送改为只写日志（日志行保留）；熔断器持锁发 Slack 的自死锁随之消失；新增 AST 白名单守卫
 
@@ -1327,6 +1519,8 @@ z 与 t 临界值之间的窄带，有效应时约 0.1–3%。**这一行守的�
 - `signal_archive._truncation_share()` + `load_panel` 里的**数据层观测点**：终点列在 SL/TP 行里
   >50% 恰好等于 `exit_price` 就向 stderr 告警。代码层的测试管「用哪一列」，这里管「那一列里装的是什么」
   ——哪天有人把离场价写进 `close_t7`、或给 t30 也套路径模拟，列名不变、测试不红，只有它会跳。
+  〔v0.45.347 更正：「给 t30 也套路径模拟」这半句不成立——`exit_price`/`exit_reason` 只记 T+7 路径，
+  t30 若套路径模拟，price_t30 里是 T+30 离场价，不等于 T+7 的 exit_price，指纹不会跳。探测器只对 t7 有效。〕
   库里没有 `exit_*` 列时不判（旧库 / 夹具）。生产快照上 t7/t30 均静默。
 - `print_report` 表头点名终点列（`目标=方向收益（终点 close_t7）`）——不是静默选择。
 - `tests/test_signal_archive_close_target.py`（10 条）：核心夹具让两列给出**相反的 IC 符号**
@@ -1351,6 +1545,9 @@ z 与 t 临界值之间的窄带，有效应时约 0.1–3%。**这一行守的�
 
 ### 影响量化（同一快照，`analyze()` 默认参数，**只作记录，不据此改任何权重**）
 t7：36 个信号达最小样本量，28 个至少一项（判定 / 通过口径数 / 稳定性 / 性质）变化。
+〔v0.45.347 更正：默认参数（×200）下按这四项是 **27/36**；另有 3 个只是日度 IC 变号、四项不变
+（`agent.ChronosBeeHorizon.score` / `guard.macro_adj` / `price.volatility_20d`）。28 是 ×2000 下「四项或变号」的数，
+口径与抽样数都串了。〕
 噪音地板 0.0646 → 0.0573（×200）；×2000 下 0.0708 → 0.0670——前者的差大半是 200 次 p95 的
 蒙特卡洛噪音，真实位移约 5%（收益并列值 27.5% → 2.6%，天数不变 84）。
 判定变化在 ×200 与 ×2000 下**完全一致**（`short_squeeze_risk` 的旧判定除外，贴地板）：
@@ -1371,13 +1568,16 @@ t7：36 个信号达最小样本量，28 个至少一项（判定 / 通过口径
 🟢 旧：reddit_signal / catalyst.count / market_cap / total_oi / momentum_5d；
 新：reddit_signal / market_cap / total_oi / distinct_buyers / dollar_bought / filings / gamma_exposure / iv_percentile。
 稳定性也有翻动（如 `gamma_exposure` 翻转 → 衰减、`market_cap` 衰减 → 稳定、`sentiment.pct` 均噪音 → 稳定）。
-⚠️ 读法：新 🟢 里 7/8 是「选股标签」或「混合」性质、多个稳定性为翻转/衰减；🟢 判据（|IC|>地板 且 ≥3/4）
+⚠️ 读法：新 🟢 里 7/8〔v0.45.347 更正：是 **8/8**——reddit/filings/gamma_exposure/iv_percentile/total_oi 选股标签，market_cap/distinct_buyers/dollar_bought 混合〕是「选股标签」或「混合」性质、多个稳定性为翻转/衰减；🟢 判据（|IC|>地板 且 ≥3/4）
 **没有跨 36 个信号的多重检验校正**。这些是「不再对着截断收益算」之后的探索性档案，不是新证据。
 `price.momentum_5d` 的 −0.127 几乎全是截断制造的（干净口径 −0.020，与 tradeable-signal 记的 +0.008 同在零附近）。
 
 t30：26 个信号，结果**逐字节相同**（对照组：t30 本来就用收盘价）。
 
 ### 发现未处理
+〔v0.45.347 更正：这份「未处理」暗含「读者就剩这一个」，不对——本版的「全仓 grep」搜的是字面量 `price_t7`，
+拼 `f"price_{horizon}"` 的读者搜不到：`experiments/ic_power_analysis.py`（v0.45.327 修）与
+`ic_diagnostics.build_benchmark_panel`（v0.45.328 修）都是后续 session 按拼法复查才找到的。〕
 - `experiments/ml_expected_return_replay.py` 同一误解（「不用 return_t7，它被截断」然后读 `price_t7`），
   而它是就绪度闸 `next_step` 的**前半句**——闸推荐的两步此前都对着截断收益。需重跑并更新
   `experiments/ml_expected_return_report.md`，另开任务。

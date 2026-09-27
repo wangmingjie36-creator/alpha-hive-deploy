@@ -189,7 +189,10 @@ class BuzzBeeWhisper(BeeAgent):
             score = clamp_score_cfg(score)
 
             # ── 情绪动量调整（时序信号）──
-            sent_momentum = _get_sentiment_momentum(ticker, int(sentiment_composite))
+            # v0.45.340：按扫描业务日期回看归档，不看墙上时钟（维度 IC 协议 §13.2 buzz_v1 锚点）。
+            # `_target_date` 由 `inject_prefetched` 注入 = 报告的 date_str；非扫描调用没有它 ⇒ 函数退回本地当天并标出
+            sent_momentum = _get_sentiment_momentum(ticker, int(sentiment_composite),
+                                                    as_of=getattr(self, "_target_date", None))
             score += sent_momentum["momentum_score_adj"]
 
             # ── 情绪-价格背离检测 ──
@@ -294,14 +297,16 @@ class BuzzBeeWhisper(BeeAgent):
                     # 七个通道进合成时的实际取值（不可得时就是合成里用的中性 50）。
                     # v0.45.247 补齐 news / yahoo / fear_greed 三个：此前只有四个，
                     # signal_archive 因此重放不了 sentiment 维度的计算层。
+                    # v0.45.340：**全精度**，不再 round(…, 1)——冻结评分器（buzz_v1）要由归档通道逐位重算
+                    # 生产分；0.1 取整实测让 150 条里 5 条落在 x.xx500 上重算不出来。只是记录精度，量没变
                     "components": {
-                        "momentum_signal": round(momentum_sentiment, 1),
+                        "momentum_signal": momentum_sentiment,
                         "volume_signal": volume_signal,
                         "volatility_signal": vol_sentiment,
-                        "reddit_signal": round(reddit_signal, 1),
-                        "news_signal": round(news_signal, 1),
-                        "yahoo_signal": round(yahoo_signal, 1),
-                        "fear_greed_signal": round(fg_signal, 1),
+                        "reddit_signal": reddit_signal,
+                        "news_signal": news_signal,
+                        "yahoo_signal": yahoo_signal,
+                        "fear_greed_signal": fg_signal,
                     },
                     # v0.45.247：F&G 观测值。**只有 is_real_data 时 value 才非 None** ——
                     # `fear_greed._default_result()` 是 value=50/is_real_data=False，

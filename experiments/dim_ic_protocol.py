@@ -57,7 +57,8 @@ H1_PRODUCTION_DIM = "sentiment"
 
 #: buzz_v1 的定义锚点 = 阶段 1 修复在 `ic_rerun_readiness._COHORT_HISTORY` 里的 version。None = 尚未登记。
 #: 到 FORWARD_START 仍未登记、或该边界日期不早于 FORWARD_START ⇒ H1 回退到原登记对象，窗口不再推迟（§13.4）
-H1_ANCHOR_VERSION: Optional[str] = None
+#: v0.45.340 填入（修订 1 预留的填空，事前实现对齐）：Buzz 情绪动量改按扫描日回看归档 + 通道全精度入档
+H1_ANCHOR_VERSION: Optional[str] = "v0.45.340"
 
 #: 固定序列，顺序即检验顺序（协议 §2）。
 #: 每项 = (编号, 对象, 用于截断判定的归档信号——`signal_archive.generation_boundaries()` 的输入)

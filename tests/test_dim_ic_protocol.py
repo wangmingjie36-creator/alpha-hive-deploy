@@ -60,7 +60,20 @@ class TestRegisteredConstants:
             "price.momentum_5d", "price.volume_ratio", "price.volatility_20d", "market.fear_greed")
         assert proto.H1_FROZEN_LAYER_SIGNALS == ("agent.BuzzBeeWhisper.score", "sentiment.pct")
         assert proto.H1_PRODUCTION_DIM == "sentiment"
-        assert proto.H1_ANCHOR_VERSION is None
+        assert proto.H1_ANCHOR_VERSION == "v0.45.340"          # 阶段 1 填入（修订 1 预留的空）
+
+    def test_anchor_is_registered_before_the_window(self):
+        """锚点必须真在边界表里、且早于窗口起点——否则 H1 到窗口起点会自动回退（§13.4）。"""
+        import ic_rerun_readiness as rr
+        dates = [d for d, v, _r in rr._COHORT_HISTORY if v == proto.H1_ANCHOR_VERSION]
+        assert dates, f"{proto.H1_ANCHOR_VERSION} 不在 _COHORT_HISTORY 里"
+        assert min(dates) < proto.FORWARD_START
+
+    def test_anchor_boundary_declares_only_the_frozen_layer(self):
+        """阶段 1 改的是调整层：影响面只许点名冻结层，点名输入层就会把 H1 自己截断。"""
+        import signal_archive as sa
+        scope = sa.COHORT_SIGNAL_SCOPE[proto.H1_ANCHOR_VERSION]
+        assert scope and set(scope) <= set(proto.H1_FROZEN_LAYER_SIGNALS)
 
     def test_looks_and_test_shape(self):
         assert proto.LOOKS == ((26, 0.01, "中检"), (52, 0.04, "终检"))
