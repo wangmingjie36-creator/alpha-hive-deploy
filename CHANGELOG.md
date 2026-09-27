@@ -5,7 +5,29 @@
 
 ---
 
-## [0.45.348] — 2026-09-27 — 占位（进行中：编排器第 1198 行 `$READINESS_JSON）` 裸变量紧跟全角括号，UTF-8 locale 下 set -u 退出）
+## [0.45.348] — 2026-09-27 — Fixed（编排器）：Step 11 边界报警分支第 1198 行 `$READINESS_JSON）` 裸变量紧跟全角括号——UTF-8 locale 下 bash 3.2 `set -u` 直接退出
+
+`~/.claude/scripts/alpha-hive-orchestrator.sh`（仓库外、不受版本控制，本条是它的唯一改动记录）第 1198 行：
+`完整判别在 $READINESS_JSON）` → `完整判别在 ${READINESS_JSON}）`。只改这一处（`diff` 对备份确认仅此一行）。
+
+### 问题
+
+bash 3.2 在 UTF-8 locale 下把 `）` 的首字节并进变量名，查 `READINESS_JSON\xef` ⇒ `set -uo pipefail` 报 unbound variable、整个脚本退出。
+该行只在「世代边界核对报警」分支执行，由 v0.45.334（2026-09-26）加 Step 11 边界核对时引入。
+
+- **定时扫描不中**：launchd plist 无 `LANG`/`LC_*` ⇒ C locale；仓库内无其他代码拉起编排器。
+- **手动在终端跑会中**（en_US.UTF-8 / C.UTF-8 实测复现），且恰在边界报警那天——最可能手动重跑排查的时候——
+  脚本死在 Step 11 之后，Step 12~15 与 `status.json` 都不写。
+- 守卫 `tests/test_orchestrator_braced_vars.py::TestLiveOrchestrator` 读的就是这份真实文件，引入当天就会红；
+  但它不挂在任何提交钩子上，只在跑全套时看得见（本次是 v0.45.340 rebase 后跑全套撞见的）。
+
+### 验证
+
+- 备份：`alpha-hive-orchestrator.sh.bak-20260927_pre-v0.45.348`（`cp -p` 后 `cmp` 一致）；替换用脚本断言恰好匹配 1 次。
+- `bash -n` 通过；守卫 `test_orchestrator_braced_vars.py` 27 passed（修前 1 红）。
+- 把真实的报警分支（`# ── 世代边界核对（v0.45.334` 至 `fi`）抽出来，喂 `alarm=true`，在 `LC_ALL=en_US.UTF-8` 下真跑：
+  备份版在第三条 WARN 报 unbound variable 退出；修复版三条 WARN 全出、跑到分支之后。
+- 修改时编排器未在运行（`pgrep` 为空；下次运行 2026-09-28 14:00）。
 
 ## [0.45.347] — 2026-09-27 — Fixed/docs：二次检查 v0.45.321——`load_panel` 改走共用取数入口（消掉第三份私有 SQL 与一处潜在分叉）；截断指纹「对 t30 也管用」的说法撤回；CHANGELOG / docstring 三处数字错更正
 
