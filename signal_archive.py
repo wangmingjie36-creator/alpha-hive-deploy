@@ -1309,29 +1309,34 @@ def load_panel(db_path: Optional[Path] = None, horizon: str = "t7",
     与 return_t7 的路径依赖收益相对。**这是 ic_diagnostics 在 v0.45.19 已更正过的同一个误解**：
     `price_t7` 存的是 `_simulate_trade_path` 的 `exit_price`，触 SL/TP 即被钉在档位上，
     与 return_t7 一样截断（2026-05 起 100% 等于 exit_price，与 close_t7 相差 >0.01 的行
-    每月 34%~76%）。另有 CRWD 两行 price_at_predict 已按 07-02 的 4:1 拆股复权、price_t7
+    每月 39%~76%）。另有 CRWD 两行 price_at_predict 已按 07-02 的 4:1 拆股复权、price_t7
     仍是未复权价 ⇒ 旧口径读成 +325% / +340%。v0.45.321 之前的 `--analyze` 结论全部基于它。
+
+    v0.45.347：取数改走 `ic_diagnostics.forward_return_sql` / `row_forward_return`
+    （v0.45.328 立的「前瞻收益唯一入口」）。此前这里是第三份私有 SQL，与共用入口已有一处
+    分叉：终点价为 0（「没有这个价」，不是零元）时这里算成 −100%，共用入口丢弃该行。
+    生产库目前 0 行，是潜在分叉；但 v0.45.328 的教训正是「两份实现，修一份等于制造分叉」。
 
     ⚠️ 返回的是**整张表**，不按世代切 —— 切片在做聚合的 `analyze()` 里（v0.45.265）。
     自己拿这个面板算跨日统计量的，先过一遍 `generation_boundaries()`。
     """
     db_path = Path(db_path) if db_path else _db_path()   # v0.45.160：调用时求值
     end_col, checked_col = _forward_close_col(horizon), f"checked_{horizon}"
+    import ic_diagnostics as icd   # _forward_close_col 已把仓库根放进 sys.path
+    sel, where, end_col = icd.forward_return_sql("close", f"return_{horizon}", horizon)
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
         rets = {}
         for r in con.execute(
-            f"SELECT date, ticker, price_at_predict, {end_col} AS p1 "
-            f"FROM predictions WHERE {checked_col}=1 AND {end_col} IS NOT NULL "
-            f"  AND price_at_predict > 0"
+            f"SELECT date, ticker, {sel} FROM predictions WHERE {checked_col}=1 AND {where}"
         ):
-            rets[(r["ticker"], r["date"][:10])] = (
-                (r["p1"] - r["price_at_predict"]) / r["price_at_predict"] * 100.0)
+            ret = icd.row_forward_return(r, end_col)
+            if ret is not None:
+                rets[(r["ticker"], r["date"][:10])] = ret
         if not rets:
             return {}
         if target_metric == "return":
-            import ic_diagnostics as icd   # _forward_close_col 已把仓库根放进 sys.path
             icd.warn_if_truncated(con, end_col, checked_col)
 
         if target_metric == "vol":

@@ -5,7 +5,48 @@
 
 ---
 
-## [0.45.347] — 2026-09-27 — 占位（进行中：v0.45.321 二次检查——CHANGELOG/docstring 数字与探测器能力表述更正、load_panel 改走共用取数入口）
+## [0.45.347] — 2026-09-27 — Fixed/docs：二次检查 v0.45.321——`load_panel` 改走共用取数入口（消掉第三份私有 SQL 与一处潜在分叉）；截断指纹「对 t30 也管用」的说法撤回；CHANGELOG / docstring 三处数字错更正
+
+### Fixed
+- `signal_archive.load_panel()`：前瞻收益改走 `ic_diagnostics.forward_return_sql` / `row_forward_return`
+  （v0.45.328 立的唯一入口）。v0.45.321 写的是第三份私有 SQL，与共用入口已有一处分叉：终点价为 0
+  （「没有这个价」，不是零元）时这里算 −100% 入面板，共用入口丢弃该行 ⇒ 同一份库两个工具样本集不同。
+  生产库（09-27 快照）close_t7 / price_t30 ≤0 的行为 **0**，是潜在分叉、今天零影响：HEAD 与本版在同一快照上
+  `analyze()` t7 / t30 输出**逐字节相同**。v0.45.328 的教训「两份实现，修一份等于制造分叉」对第三份同样成立。
+- 新增 `TestAnalyzeUsesClose::test_zero_end_price_is_dropped_like_the_shared_entry`：拿改动前的
+  `signal_archive.py`（`git show HEAD:`）实测红，本版绿（全程 `PYTHONDONTWRITEBYTECODE=1` + 清 `__pycache__`）。
+
+### docs（就地更正并注明〔v0.45.347 更正〕）
+- `ic_diagnostics.truncation_share` docstring 与 CHANGELOG v0.45.321：撤回「给 t30 也套路径模拟，只有这个比例会跳」。
+  `exit_price` / `exit_reason` 是 `backtester._store_path_result` 写死的 **T+7 路径**列；t30 若日后套路径模拟，
+  price_t30 里是 T+30 离场价，不等于 T+7 的 exit_price ⇒ 比例不跳。**探测器只对 t7 有效**，对 t30 恒≈0。
+- 「与 close_t7 相差 >0.01 的行每月 34%~76%」（`load_panel` docstring、`tests/test_signal_archive_close_target.py`）
+  → **39%~76%**。逐月是 05 53.3% / 06 76.2% / 07 45.1% / 08 39.2% / 09 39.2%，34% 是算错的。
+- CHANGELOG v0.45.321「28 个至少一项变化」→ 默认参数下按所列四项是 **27/36**（另 3 个只是 IC 变号）；28 是 ×2000 下
+  「四项或变号」的数，抽样数与口径两处都串了。v0.45.321 收尾给用户的汇报里也说了 28，同样错。
+- CHANGELOG v0.45.321「新 🟢 里 7/8 是选股标签或混合」→ **8/8**。
+- CHANGELOG v0.45.321「发现未处理」暗含「读者就剩 ml_expected_return_replay」——漏了两个拼列名的读者
+  （v0.45.327 / v0.45.328 已修）。memory 读者清单早已由 v0.45.326/327 更正，本版只补 CHANGELOG。
+
+### 复核过、无缺陷
+- 就绪度闸按 close_t7 数成熟：09-27 快照上 checked_t7=1 且 close_t7 为空、price_t7 不空的行为 0，9 月 240 行全有 close_t7
+  ——「close_t7 会滞后」是防御性理由，目前没有发生过，闸的数字不受影响。
+- 截断指纹在 09-27 快照上仍静默（close_t7 1/540）；无 ≤0 终点价。
+- 相关测试 285 绿（含 v0.45.325 后的闸第四段、v0.45.328 的基准表测试）。
+
+### 发现未处理（不是本版改动，需用户决定）
+- **v0.45.324（噪音地板 MC 误差：默认 draws 200→2000、MC 不确定带、◐ 贴地板）的修复提交 `dd006535` 从未进 main**：
+  只在本地分支 `claude/practical-bun-4c8e91`，未推送，worktree 已回收。CHANGELOG 里 v0.45.324 仍是占位，
+  main 上 `analyze()` 仍是 `draws=200`、没有 ◐——但 memory（`alpha-hive-ic-rerun-gate`、MEMORY.md 索引行
+  「报告里 ◐ 贴地板见文末」）按已上线描述。已在 memory 里标注「未合入」，是否合入由用户决定。
+
+### 教训
+二次检查找到的 5 处问题里，4 处是**我自己写的数字/能力声明**，不是代码：一个百分比算错、一个计数把两次运行和两种口径串了、
+一个「7/8」没回去数、一个「探测器也能抓 X」没验证 X 的数据会不会落到它看的那两列上。代码有变异测试守着，
+**CHANGELOG 里的数字没有任何东西守着**——写完就要拿产出它的那份 JSON 再数一遍，而不是凭当时屏幕上的印象。
+
+---
+
 
 ## [0.45.346] — 2026-09-26 — Fixed：`migrate_data_root check-old` 看不见被 `.gitignore` 忽略的文件——旁路写旧 `logs/` 会被归进「git 同步」而不红；iCloud 重名副本单列
 
@@ -1349,6 +1390,8 @@ z 与 t 临界值之间的窄带，有效应时约 0.1–3%。**这一行守的�
 - `signal_archive._truncation_share()` + `load_panel` 里的**数据层观测点**：终点列在 SL/TP 行里
   >50% 恰好等于 `exit_price` 就向 stderr 告警。代码层的测试管「用哪一列」，这里管「那一列里装的是什么」
   ——哪天有人把离场价写进 `close_t7`、或给 t30 也套路径模拟，列名不变、测试不红，只有它会跳。
+  〔v0.45.347 更正：「给 t30 也套路径模拟」这半句不成立——`exit_price`/`exit_reason` 只记 T+7 路径，
+  t30 若套路径模拟，price_t30 里是 T+30 离场价，不等于 T+7 的 exit_price，指纹不会跳。探测器只对 t7 有效。〕
   库里没有 `exit_*` 列时不判（旧库 / 夹具）。生产快照上 t7/t30 均静默。
 - `print_report` 表头点名终点列（`目标=方向收益（终点 close_t7）`）——不是静默选择。
 - `tests/test_signal_archive_close_target.py`（10 条）：核心夹具让两列给出**相反的 IC 符号**
@@ -1373,6 +1416,9 @@ z 与 t 临界值之间的窄带，有效应时约 0.1–3%。**这一行守的�
 
 ### 影响量化（同一快照，`analyze()` 默认参数，**只作记录，不据此改任何权重**）
 t7：36 个信号达最小样本量，28 个至少一项（判定 / 通过口径数 / 稳定性 / 性质）变化。
+〔v0.45.347 更正：默认参数（×200）下按这四项是 **27/36**；另有 3 个只是日度 IC 变号、四项不变
+（`agent.ChronosBeeHorizon.score` / `guard.macro_adj` / `price.volatility_20d`）。28 是 ×2000 下「四项或变号」的数，
+口径与抽样数都串了。〕
 噪音地板 0.0646 → 0.0573（×200）；×2000 下 0.0708 → 0.0670——前者的差大半是 200 次 p95 的
 蒙特卡洛噪音，真实位移约 5%（收益并列值 27.5% → 2.6%，天数不变 84）。
 判定变化在 ×200 与 ×2000 下**完全一致**（`short_squeeze_risk` 的旧判定除外，贴地板）：
@@ -1393,13 +1439,16 @@ t7：36 个信号达最小样本量，28 个至少一项（判定 / 通过口径
 🟢 旧：reddit_signal / catalyst.count / market_cap / total_oi / momentum_5d；
 新：reddit_signal / market_cap / total_oi / distinct_buyers / dollar_bought / filings / gamma_exposure / iv_percentile。
 稳定性也有翻动（如 `gamma_exposure` 翻转 → 衰减、`market_cap` 衰减 → 稳定、`sentiment.pct` 均噪音 → 稳定）。
-⚠️ 读法：新 🟢 里 7/8 是「选股标签」或「混合」性质、多个稳定性为翻转/衰减；🟢 判据（|IC|>地板 且 ≥3/4）
+⚠️ 读法：新 🟢 里 7/8〔v0.45.347 更正：是 **8/8**——reddit/filings/gamma_exposure/iv_percentile/total_oi 选股标签，market_cap/distinct_buyers/dollar_bought 混合〕是「选股标签」或「混合」性质、多个稳定性为翻转/衰减；🟢 判据（|IC|>地板 且 ≥3/4）
 **没有跨 36 个信号的多重检验校正**。这些是「不再对着截断收益算」之后的探索性档案，不是新证据。
 `price.momentum_5d` 的 −0.127 几乎全是截断制造的（干净口径 −0.020，与 tradeable-signal 记的 +0.008 同在零附近）。
 
 t30：26 个信号，结果**逐字节相同**（对照组：t30 本来就用收盘价）。
 
 ### 发现未处理
+〔v0.45.347 更正：这份「未处理」暗含「读者就剩这一个」，不对——本版的「全仓 grep」搜的是字面量 `price_t7`，
+拼 `f"price_{horizon}"` 的读者搜不到：`experiments/ic_power_analysis.py`（v0.45.327 修）与
+`ic_diagnostics.build_benchmark_panel`（v0.45.328 修）都是后续 session 按拼法复查才找到的。〕
 - `experiments/ml_expected_return_replay.py` 同一误解（「不用 return_t7，它被截断」然后读 `price_t7`），
   而它是就绪度闸 `next_step` 的**前半句**——闸推荐的两步此前都对着截断收益。需重跑并更新
   `experiments/ml_expected_return_report.md`，另开任务。

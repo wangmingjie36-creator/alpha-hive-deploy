@@ -5,7 +5,7 @@ signal_archive 前瞻收益的终点价列（v0.45.321）
 （对照路径依赖的 return_t7）。那是 ic_diagnostics 在 v0.45.19 已更正过的**同一个误解**：
 `price_t7` 存的是 `_simulate_trade_path` 的 `exit_price`，触 SL/TP 即钉在档位上。
 2026-09-23 生产快照：2026-05 起 price_t7 100% 等于 exit_price；与 close_t7 相差 >0.01
-的行每月 34%~76%。`analyze()` 的 🟢/🟡/⚪ 判定、噪音地板、固定/时变分解、稳定性
+的行每月 39%~76%（v0.45.347 更正：原写 34%，算错）。`analyze()` 的 🟢/🟡/⚪ 判定、噪音地板、固定/时变分解、稳定性
 全部是对着截断收益算的。修复后 🟢 由 5 个变 8 个（`price.momentum_5d` / `catalyst.count`
 掉出），详见 CHANGELOG v0.45.321。
 
@@ -162,6 +162,27 @@ class TestAnalyzeUsesClose:
                       f"VALUES ('2026-06-01','A',?,1.0)", (SIG,))
         assert sa.load_panel(db, "t7", min_width=1)[SIG]["2026-06-01"][0][1] == \
             pytest.approx(3.0)
+
+    def test_zero_end_price_is_dropped_like_the_shared_entry(self, tmp_path):
+        """v0.45.347：终点价 0 是「没有这个价」，不是零元 —— 与 ic_diagnostics 共用入口一样丢弃。
+
+        私有 SQL 时代这里会算出 −100% 混进面板，而 `row_forward_return` 丢弃同一行：
+        同一份库，两个工具的样本集不同。改走共用入口后两边由构造保证一致。
+        """
+        db = tmp_path / "p.db"
+        con = sqlite3.connect(db)
+        _create_predictions(con)
+        con.executemany("INSERT INTO predictions (date,ticker,price_at_predict,close_t7,checked_t7)"
+                        " VALUES (?,?,?,?,1)", [("2026-06-01", "A", 100.0, 103.0),
+                                                ("2026-06-01", "B", 100.0, 0.0)])
+        con.commit()
+        con.close()
+        sa.ensure_schema(db)
+        with sqlite3.connect(db) as c:
+            c.executemany(f"INSERT INTO {sa.TABLE} (date,ticker,signal,value) VALUES (?,?,?,?)",
+                          [("2026-06-01", "A", SIG, 1.0), ("2026-06-01", "B", SIG, 2.0)])
+        rows = sa.load_panel(db, "t7", min_width=1)[SIG]["2026-06-01"]
+        assert [r for _v, r in rows] == [pytest.approx(3.0)], f"终点价 0 的行混进了面板：{rows}"
 
 
 class TestHorizonRegistry:

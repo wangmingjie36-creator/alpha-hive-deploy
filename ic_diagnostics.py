@@ -174,8 +174,12 @@ TRUNCATION_ALARM = 0.5
 def truncation_share(con, end_col: str, checked_col: str) -> Tuple[int, float]:
     """终点价列的**截断指纹**：SL/TP 行里它有多大比例恰好等于 `exit_price`。
 
-    读对列只是代码层；这里管数据层 —— 哪天有人把离场价写进 close_t7、
-    或给 t30 也套上路径模拟，列名没变、测试不红，只有这个比例会跳。
+    读对列只是代码层；这里管数据层 —— 哪天有人把离场价写进 close_t7，
+    列名没变、测试不红，只有这个比例会跳。
+    ⚠️ **只对 t7 有效**（v0.45.347 更正 v0.45.321 的原话「或给 t30 也套上路径模拟…只有这个
+    比例会跳」）：`exit_price` / `exit_reason` 是 `backtester._store_path_result` 写死的 **T+7
+    路径**两列。t30 若日后也套路径模拟，写进 price_t30 的是 T+30 路径的离场价，与这里比对的
+    T+7 `exit_price` 不相等 ⇒ 比例不会跳。对 t30 调用只是在比两个不相干的价，恒≈0。
     库里没有 exit_* 列（旧库 / 测试夹具）⇒ (0, 0.0)，无从判断即不告警。
     """
     cols = {r[1] for r in con.execute("PRAGMA table_info(predictions)")}
