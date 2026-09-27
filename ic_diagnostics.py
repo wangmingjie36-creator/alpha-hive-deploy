@@ -410,7 +410,20 @@ def diagnose(ic_by_day: Dict[str, float], lag: int, period: str) -> Dict:
 # ⚠️ v0.45.328 之前 t7 的 `--benchmark` 是对着 SL/TP 离场价（price_t7）算的，
 # 与维度表不同口径、也不认 `--target`。引用旧基准数字前先看 CHANGELOG v0.45.328。
 
-RANDOM_DRAWS = 200          # 噪音地板的重采样次数
+# 噪音地板的重采样次数 —— `noise_floor` 与 `signal_archive.analyze()` 共用这一个默认值。
+#
+# v0.45.324：200 → 2000。p95 是尾部分位，200 次抽样只靠 ~10 个超出值定位，
+# 蒙特卡洛相对标准误 ≈ 0.94/√N（生产快照 6 个骨架 × 5 万次抽样实测，
+# 分块标准差 / bootstrap / 渐近公式三者一致）：
+#     N=200 → 6.7%   500 → 4.3%   1000 → 3.0%   2000 → 2.1%   5000 → 1.3%
+# 估计量的偏差很小且方向**偏高**：×200 时块均值比 5 万次池子高 0.7–1.3%（6 骨架全同向，
+# 次序统计量取第 ⌊0.95N⌋+1 个所致），×2000 时 ≤0.2%。v0.45.321 里「200 次比 2000 次低 9–15%」
+# 是种子 1000–1199 恰好落在 250 个互不重叠种子块的第 1 百分位——运气，不是偏差。
+# 选 2000：`signal_archive --analyze` 8.2s（200 次 1.5s；未缓存切片地板时 5000 次 29s），带宽 ±4.5%，
+# 贴带的判定再由 `floor_position` 显式标出，不靠加大 N 硬压。
+RANDOM_DRAWS = 2000
+# 地板 MC 不确定带的置信水平（双侧）。带由次序统计量精确给出，见 `quantile_band`。
+FLOOR_BAND_ALPHA = 0.05
 _PRICE_CACHE: Dict = {}
 
 
@@ -651,12 +664,88 @@ def _ic_series_from_pairs(by_day: Dict[str, List]) -> Dict[str, float]:
     return s
 
 
+def quantile_band(values: List[float], q: float = 0.95,
+                  alpha: Optional[float] = None) -> Tuple[float, float]:
+    """经验 q 分位的蒙特卡洛不确定带 —— 分布无关的次序统计量置信区间（精确二项）。
+
+    n 次独立抽样里落在真分位 ξ_q 以下的个数 B ~ Binomial(n, q)，故对 1-based 次序统计量
+    P(X_(l) ≤ ξ_q < X_(u)) = P(l ≤ B < u)。取 l 尽量大、u 尽量小，使两侧尾概率各 ≤ alpha/2。
+    不估密度、不用正态近似（v0.45.324 用 5 万次抽样池验证：6 个真实骨架 × N=200/500/1000/2000，
+    合并覆盖率 95.0–97.0%（150–1500 个互不重叠种子块），单骨架 88–100%）。
+
+    抽样太少时一侧不存在：q=0.95、alpha=0.05 下 **n < 72 给不出上界**（0.95^n > 0.025）——
+    返回 +inf，**不**退回样本最大值：那会把「分辨率不够、定不了」渲染成「定下来了」。
+
+    `alpha=None` 取调用时的 `FLOOR_BAND_ALPHA` —— 与 `floor_band_text` 印出的置信水平读同一处，
+    写成 def 默认值会在定义期冻结，改常量后标签变了、带没变。
+    """
+    if alpha is None:
+        alpha = FLOOR_BAND_ALPHA
+    v = sorted(values)
+    n = len(v)
+    if n == 0:
+        return float("nan"), float("nan")
+    lq, l1q, lg = math.log(q), math.log1p(-q), math.lgamma
+    pmf = [math.exp(lg(n + 1) - lg(k + 1) - lg(n - k + 1) + k * lq + (n - k) * l1q)
+           for k in range(n + 1)]
+    half = alpha / 2
+    # 下界：最大的 l 使 P(B ≤ l−1) ≤ alpha/2
+    l, below = 0, 0.0
+    for k in range(1, n + 1):
+        below += pmf[k - 1]
+        if below > half:
+            break
+        l = k
+    # 上界：最小的 u 使 P(B ≥ u) ≤ alpha/2（从上往下累加，避免 1−CDF 的相消误差）
+    u, above = None, 0.0
+    for k in range(n, 0, -1):
+        above += pmf[k]
+        if above > half:
+            break
+        u = k
+    return (v[l - 1] if l >= 1 else float("-inf"),
+            v[u - 1] if u is not None else float("inf"))
+
+
+def floor_position(abs_ic: float, lo: float, hi: float) -> str:
+    """|IC| 相对噪音地板 MC 不确定带的位置：'above' / 'band' / 'below'；带缺失时 'n/a'。
+
+    判定只认带的两沿，**不认点估计**：点估计会随抽样数 / 种子漂移，落在带内的信号
+    换一次抽样数就可能翻 🟡/⚪（v0.45.321 实测 `crowding.comp.short_squeeze_risk`）。
+    带内 = 蒙特卡洛分辨率定不了，由调用方显式标出（◐），不替它挑一边。
+    """
+    if any(isinstance(x, float) and math.isnan(x) for x in (abs_ic, lo, hi)):
+        return "n/a"
+    if abs_ic > hi:
+        return "above"
+    if abs_ic <= lo:
+        return "below"
+    return "band"
+
+
+def floor_band_text(floor: Dict) -> str:
+    """地板 MC 带的一句话渲染。上沿不存在时明说，不显示成一个数。"""
+    lo = floor.get("ic_p95_lo", float("nan"))
+    hi = floor.get("ic_p95_hi", float("nan"))
+    conf = f"{1 - FLOOR_BAND_ALPHA:.0%}"
+    if math.isinf(hi):
+        return (f"⚠️ MC {conf} 带无上沿：×{floor.get('n_draws', 0)} 次抽样太少，"
+                f"任何 |IC| 都不能判「超出」，加大 --draws")
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return "MC 带 n/a"
+    return f"MC {conf} 带 {lo:.3f}–{hi:.3f}"
+
+
 def noise_floor(panel: Dict[str, Dict], lag: int, period: str,
-                draws: int = RANDOM_DRAWS, base_key: Optional[str] = None) -> Dict:
+                draws: Optional[int] = None, base_key: Optional[str] = None) -> Dict:
     """随机排序重复 draws 次 → |日度IC| 与 |周度t| 的 95 分位。
 
     这是"什么都不知道"长什么样。任何未超过此带的因子都不应被采信 ——
     包括系统自己的综合分。
+
+    `draws=None` 取调用时的 `RANDOM_DRAWS`（不在 def 期冻结，测试替换常量才生效）。
+    返回里的 `ic_p95_lo` / `ic_p95_hi` 是 `ic_p95` 自身的蒙特卡洛不确定带（`quantile_band`），
+    判定一律用 `floor_position` 对带的两沿比，不对点估计比。
 
     Args:
         base_key: 用哪个因子的**日期/宽度骨架**做随机化模板。
@@ -679,6 +768,8 @@ def noise_floor(panel: Dict[str, Dict], lag: int, period: str,
         base = max(panel.values(), key=len, default={})
     if not base:
         return {}
+    if draws is None:
+        draws = RANDOM_DRAWS
     daily_abs, sub_abs, passed = [], [], []
     for i in range(draws):
         rng = random.Random(1000 + i)
@@ -701,9 +792,12 @@ def noise_floor(panel: Dict[str, Dict], lag: int, period: str,
         v = sorted(v)
         return v[min(len(v) - 1, int(q * len(v)))]
 
+    lo, hi = quantile_band(daily_abs, 0.95)
     return {
         "n_draws": len(daily_abs),
         "ic_p95": pct(daily_abs, 0.95),
+        "ic_p95_lo": lo,
+        "ic_p95_hi": hi,
         "ic_p50": pct(daily_abs, 0.50),
         "sub_t_p95": pct(sub_abs, 0.95),
         "passed_mean": mean(passed) if passed else float("nan"),
@@ -737,16 +831,19 @@ def print_benchmark(panel: Dict[str, Dict], lag: int, period: str,
     if floor:
         print(f"  🎯 噪音地板（随机排序 ×{floor['n_draws']} 次）："
               f"|日度IC| 中位 {floor['ic_p50']:.3f}、**95分位 {floor['ic_p95']:.3f}**"
+              f"（{floor_band_text(floor)}）"
               f" ｜ 通过口径数 均值 {floor['passed_mean']:.2f}、95分位 {floor['passed_p95']:.0f}/4")
-        print("     ↑ 低于 95 分位的一律视为无信号，无论 t 值多好看")
+        print("     ↑ 低于 95 分位的一律视为无信号，无论 t 值多好看；"
+              "落在 MC 带内的标 ◐（抽样数定不了，不替它挑一边）")
     print("-" * 104)
     print(f"{'因子':<26}{'日度IC':>9}{'t':>8}{'NW t':>8}{'不重叠'+period+'t':>10}"
           f"{'通过':>6}   {'是否超出噪音地板':<16}")
     print("-" * 104)
-    thr = floor.get("ic_p95", float("nan"))
+    lo = floor.get("ic_p95_lo", float("nan"))
+    hi = floor.get("ic_p95_hi", float("nan"))
     for name, r in rows:
-        beats = (math.isfinite(thr) and abs(r["daily_ic"]) > thr)
-        verdict = "✅ 超出" if beats else "❌ 噪音带内"
+        verdict = {"above": "✅ 超出", "band": "◐ 贴地板"}.get(
+            floor_position(abs(r["daily_ic"]), lo, hi), "❌ 噪音带内")
         print(f"{name:<26}{_fmt(r['daily_ic']):>9}{_fmt(r['daily_t'],'+.2f'):>8}"
               f"{_fmt(r['nw_t'],'+.2f'):>8}{_fmt(r['sub_t'],'+.2f'):>10}"
               f"{r['passed_methods']:>4}/4   {verdict:<16}")
@@ -763,8 +860,8 @@ def print_benchmark(panel: Dict[str, Dict], lag: int, period: str,
         print(f"  判定：综合分 |IC|={abs(sysrow['daily_ic']):.4f} vs "
               f"最佳经典因子 |IC|={abs(best_ext['daily_ic']):.4f} → "
               f"{'系统占优' if better else '⚠️ 系统未能超过经典因子'}{caveat}")
-    if sysrow and math.isfinite(thr) and abs(sysrow["daily_ic"]) <= thr:
-        print("  ⚠️ 综合分未超出噪音地板 —— 当前证据不支持任何基于它的选股决策")
+    if sysrow and floor_position(abs(sysrow["daily_ic"]), lo, hi) in ("below", "band"):
+        print("  ⚠️ 综合分未超出噪音地板（含贴带）—— 当前证据不支持任何基于它的选股决策")
 
 
 # ────────────────────────────────────────────────────────────────────────────
