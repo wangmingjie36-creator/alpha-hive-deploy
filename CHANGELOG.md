@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.349] — 2026-09-27 — 占位（进行中：中性化 OracleBee gex_signal + BearBee GEX 看空下限，与 09-28 世代边界同日）
+
 ## [0.45.348] — 2026-09-27 — Fixed（编排器）：Step 11 边界报警分支第 1198 行 `$READINESS_JSON）` 裸变量紧跟全角括号——UTF-8 locale 下 bash 3.2 `set -u` 直接退出
 
 `~/.claude/scripts/alpha-hive-orchestrator.sh`（仓库外、不受版本控制，本条是它的唯一改动记录）第 1198 行：
