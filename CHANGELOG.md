@@ -11,7 +11,57 @@
 
 ## [0.45.360] — 2026-09-28 — 占位（进行中：09-24/09-25 predictions 入场价 30/30 为 0——范围核实 + 可观测 + 官方收盘回填路径（dry-run））
 
-## [0.45.359] — 2026-09-28 — 占位（进行中：load_official_close 取价顺序对调——官方收盘优先用次日快照自带归属的 prev_day_close）
+## [0.45.359] — 2026-09-28 — Changed：`cloud_snapshot_loader.load_official_close` 取价顺序对调——某日官方收盘**先取次日快照自带归属的 `prev_day_close`**，当日快照的 60s 代理判据降为兜底；两者不一致时打 WARNING
+
+v0.45.354 登记的 NEE 残差的根治（用户 2026-09-28 决定「现在就改」）。
+
+### 根因
+
+当日快照是不是官方收盘，旧逻辑靠 `close_verdict` 的「last_trade 离收盘 ≤60s」判——这是**代理**判据。
+官方收盘是收盘竞价那一笔；文件若在竞价价写入前生成，离收盘 1 分钟内的最后一笔连续成交照样不是它。
+实例 NEE 2026-09-18：last_trade 15:59:05（54s ⇒ 判 official），`price_at_fetch` 80.555，官方 80.47。
+调容差只是挪误差（30–60s 带 4 份：2 精确 / 2 偏离）。**次日快照的 `prev_day_close` 自带场次归属**
+（`prev_close_session` 自证，隔了交易日就对不上），不依赖任何时间代理。
+
+### 证据（独立来源，不用次日 prev_day_close 当真值——那样是循环论证）
+
+对 yfinance 官方日线（27 只）+ Twelve Data（NEE / MSFT；yfinance 当时取不到），`origin/cloud-snapshots` 08-26~09-25：
+
+| 口径 | 可用 | 偏离官方收盘 >0.05% |
+|---|---|---|
+| 当日快照、close_verdict == official（旧第 1 步） | ~430 | **1**（NEE 09-18，0.106%） |
+| 次日快照 `prev_day_close`、归属 == 该日（旧第 2 步） | ~500 | **0**（最大 0.030%） |
+
+DE 两个源当时都没取到，未核。
+
+**端到端对比（真实分支、新旧两版函数各跑一遍，630 个（日期, 标的））**：取值改变 6、仅标签改变 376、
+新增可用 0、丢失 0。6 处里 NEE 80.555 → 80.47（修正 0.106%）；T 08-28 / VZ 09-08 / T 09-15 新值与 Twelve Data
+官方收盘**逐分相等**（旧值偏 0.019% / 0.050% / 0.037%）；TSLA 09-03 / META 09-21 差 0.001%（亚分舍入，TD 当时取不到，未判）。
+
+### Changed
+
+- `load_official_close`：① 其后第一份快照的 `prev_day_close` 且归属 == date → `SNAP_NEXT_PREV_CLOSE`；
+  ② 否则当日快照 official 且场次 == date → `SNAP_CLOSE`（最新一天必走这里）；③ 都不行 → `(None, "snapshot_<判决>")`，
+  失败判决仍取自当日快照（与旧版同一套字符串）。
+- 两步都有值且相差 > `_SAME_VS_NEXT_WARN`（0.05%，prev_day_close 自身舍入噪声实测 <0.05%）→ WARNING，点名两个价。
+  **谁会红**：60s 代理判据再漏一次，日志里有据可查。
+- 标签语义：`SNAP_CLOSE` 从「首选」变成「兜底」。调用方 `data_pipeline._fetch_historical_stock_data` 只把标签透传进
+  `price_source` / `source_name`，不按标签分支——已核。
+
+### Tests（`tests/test_stale_intraday_consumers.py`）
+
+- 新增 `TestNextPrevCloseFirst`（8 条）：NEE 09-18 真实值（先断言它确实被 close_verdict 判 official，再断言返回 80.47）、
+  分歧告警、一致时静默、最新一天兜底、后一份归属不符兜底、后一份 prev_day_close 无效（0 / None / NaN）兜底。
+- 改写 `test_fresh_snapshot_uses_own_price` → 拆成「无可用后一份时兜底用当日价」（VZ 08-31）与
+  「当日看似 official 也先取后一份」（T 09-10，同价 25.55，只有标签能区分）。
+- 变异（改真文件、`PYTHONDONTWRITEBYTECODE=1` + 清 `__pycache__`、`--maxfail` 覆盖 `-x`，复原后逐字节核对）：
+  换回旧顺序 → **3 红**；删分歧告警 → **1 红**；告警阈值恒真 → **1 红**。四个相关文件 87 passed。
+
+### 不做
+
+- 不动 `close_verdict` 的 60s 容差（实时管道仍用它，且那里没有「次日」可问）。
+- 生产账本 NEE 09-18 本来就是 80.47（v0.45.354 已核），本改动不回写任何历史数据。
+- 并行 session（09-24/25 入场价为 0 的回填）若经 `load_official_close` 取价，拿到的是新顺序——更准，无需协调。
 
 ## [0.45.358] — 2026-09-28 — 图表紫色换成令牌：单系列走 `--acc`，多标的趋势图新增已校验的分类令牌 `--series-1..4`；顺带修切换明暗后趋势图 chip 失灵
 
