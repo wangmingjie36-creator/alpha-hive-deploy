@@ -9,7 +9,88 @@
 
 ## [0.45.355] — 2026-09-28 — 占位（进行中：编排器工具输出契约——统一 JSON 外壳 + 显式 attention、未捕获异常退出码 3、仓内步骤解释器 + pre-push 契约守卫）
 
-## [0.45.354] — 2026-09-28 — 占位（进行中：复核两组未并入分支——v0.45.88 CBOE 新鲜度分层 / 原 v0.45.118 backfill_cloud_snapshot，移植或记录作废）
+## [0.45.354] — 2026-09-28 — 复核两组未并入分支：v0.45.88「CBOE 新鲜度分层」三条意图已被 v0.45.91 / 234 / 243 全部取代（无可移植）；原 v0.45.118 `backfill_cloud_snapshot.py` 不移植——缺口真实且可补，但工具前提有误、补跑窗口只到次日开盘、下游无消费者
+
+v0.45.350 把这两组列为「仍未并入、先评估是否仍需要」。本条逐项在当前 main 上取证后结案。**零生产代码行为改动**
+（只加一段注释 + 一个只读实验脚本）。分支未删，等用户决定（tip SHA 见文末）。
+
+### A. v0.45.88（`origin/fix/cboe-stale-vintage-passthrough` `6d8f3579`；`origin/fix/cboe-vintage-staleness-layering` `a8ab38eb`/`83bcab5c`/`b03012c6`）
+
+| 分支的意图 | main 上谁做了 | 真实数据 | 旧行为变异（main 现有测试） |
+|---|---|---|---|
+| 补抓从未触发（内层陈旧吞成 None → 进 `failed` 不进 `stale`） | **v0.45.91** `on_stale="raise"` + `CboeStaleVintageError`——与分支的 `raise_on_stale` 同一设计，docstring 点名的就是同三次事故 | 云端 manifest：08-31 / 09-01 / 09-02 仍是泛化 `RuntimeError: CBOE payload 为空`（bug 原形）；**09-04 起 19 个陈旧标的日全部**以 `StaleVintageError` 进 `vintage_stale` | 撤掉 `on_stale="raise"` → **3 红** |
+| 陈旧误入缓存 | 这条风险是分支自己的 `skip_staleness_check` 设计引入的；main 两种 `on_stale` 都**从不缓存陈旧** | — | 陈旧分支里写缓存 → **3 红** |
+| 盘中冻结静默通过（`intraday_freeze_suspect`，>120 分钟） | **v0.45.234** `close_verdict` / `official_price`（60s、识别半日市）+ **v0.45.243** 生产端 manifest `price_stale_intraday`、消费端 `load_official_close` | 见下 | 判据恒 False → **≥29 红**；容差放宽到分支的 120 分钟 → **17 红**（含 08-28 DE/CVX/VZ 真实快照用例） |
+
+**判据对照（真实语料，`experiments/cboe_freeze_criterion_corpus.py`，只读）**：`origin/cloud-snapshots` 21 天、
+548 份有 `last_trade_time_et`、480 份有次日 `prev_day_close` 真值（归属由 `prev_close_session` 自证）。
+价错（偏离官方收盘 >0.05%）**90 份：main 抓到 89，分支口径抓到 26**；分支判出的集合是 main 的**真子集**。
+分支漏掉的偏离 >0.5% 的有 **16 份**（最大 VKTX 09-16 2.10%、VKTX 09-11 1.14%、TMUS 09-16 0.91%、T 08-31 0.89%、
+DE 08-28 0.87%）。分支注释把 08-31 的 DE（100min）/ CVX（90min）当作「紧邻未命中、正常薄流动性」的反例来定阈值——
+实测这两份偏离官方收盘 0.72% / 0.40%，**恰是价错**。阈值按两天 60 个观测标定，标在了错的一侧。
+
+**分支的消费端设计与 main 相冲，不是缺口**：`b03012c6` 让 `load_ticker` 对冻结标的整只拒收；
+main 自 v0.45.234 起**刻意**更细——链 / IV / OI 与 `price_at_fetch` 同一时刻、照用，只把「这个价是不是官方收盘」
+交给同一条判据 `_generated_mid_session`（`official_price` 标签 → `data_pipeline` 实时拒收、`sell_strike_ledger` 排除；
+`close_verdict` → 补跑 `load_official_close`、`close_correction`）。
+
+**残差（待验证，未改判据）**：main 唯一漏判是 NEE 09-18（`last_trade` 15:59:05，离收盘 54s，偏离 0.106%）。
+近收盘分布：≤4s 426 份；30–60s 仅 **4 份**（2 份精确、VZ 09-08 0.050%、NEE 0.106%）。样本太薄，收紧 60s 容差
+等于拿 2 个假阳性换 1 个真阳性，不动生产判据。
+
+### B. 原 v0.45.118（`origin/claude/backfill-cloud-snapshot` `de4dcb8d`）
+
+**问题仍在**：`cloud_snapshot_fetch._business_date()` 仍取墙上时钟，`main()` 只有 `--out` / `--tickers`。
+**缺口是真的、而且是慢性的**：09-04 以来分支上 14 个快照日，**12 天**至少拒收一只陈旧标的，共丢 **19 个标的日**
+（BILI 10、TMO 4、DE 3、TMUS 2）。**也确实能补回**：2026-09-28 04:32 ET（开盘前）把工具抽到沙箱实跑
+`--dry-run --date 2026-09-25`——BILI（周五 17:0x ET 被拒，`last_trade=09-24`）此刻 `vintage=2026-09-25`、
+`price=14.895`、`cboe_close`；对照 NVDA 同样通过。`ALPHA_HIVE_HOME` 指向沙箱，未写任何生产文件。
+
+**但不移植**，四条理由：
+
+1. **补跑窗口到次日 09:30 ET 为止，工具不知道这件事。** CBOE 只发「最新一场」；开盘后 D 的文件被覆盖，
+   内层闸门（判据＝此刻应有的场次）也会拒掉 D。docstring 写的是泛泛的「事后补跑」，它的示例（09-04 周五 → 09-05 周六）
+   恰好落在窗口内。
+2. **场景自相矛盾。** 快照只在人工 `alpha_hive_daily_report.py --swarm --date D` 时被读（编排器从不给扫描传
+   `--date`；开机补跑 ≥13:30 PDT 扫的是「今天」）。本机 D 当晚午夜前开机，编排器就直接实时扫 D 了，用不着快照；
+   本机手工工具只在「D+1 00:00–06:30 PDT 开着机、或周五后的周末」且有人手动检出 `cloud-snapshots`、跑、提交、
+   与 routine 抢推时才有用。**需要快照的那天，恰恰是本机不在的那天。**
+3. **前提有误。** 它说本机「yfinance 降级链可用」、安全边界第 3 条「yfinance 就写 yfinance」——但它调的
+   `_fetch_one_ticker` 只走 CBOE，没有 yfinance 分支，那条边界**不可达**；也不更新 v0.45.243 的 `price_stale_intraday`。
+4. **下游没有读者的记录。** `~/.claude/logs`（122 个文件，含编排器逐日日志）与两处应用日志目录里「📦 云端快照模式」**0 次**，
+   唯一痕迹是一次手工 08-28 `[历史补跑]`；工具本身**从未碰过真实数据**——21 份 manifest 里 `backfilled` 键 0 个。
+
+**真要做时放哪**：云端 routine 开盘前补一轮（≈08:00 ET，`--date <上一场>` + 只补缺失标的并合并 manifest），
+不是本机手工工具。那要改 claude.ai 上的 routine 提示词（不在本仓），属用户决定。
+
+### Changed
+
+- `cloud_snapshot_fetch._business_date()`：只加注释——墙上时钟、无 `--date` 是已评估的现状，指向本条（勿重建）。
+- v0.45.88 条目补「结案」段；v0.45.118 顶部指针补结论。
+
+### Added
+
+- `experiments/cboe_freeze_criterion_corpus.py`：60s vs 120 分钟判据在真实云端快照上的对照（只读，`git show`，
+  不联网）；`--err-pct` / `--branch-min` / `--list` 可调。任意 cwd 可跑（`__file__` 锚到仓库——代码位置，不是数据）。
+
+### 验证
+
+- 8 个相关测试文件基线 **197 passed**。四个变异逐一改真文件、`PYTHONDONTWRITEBYTECODE=1` + 清 `__pycache__`、
+  跑完 `git checkout` 复原并确认工作区干净。
+- ⚠️ **`pyproject.toml` 的 addopts 带 `-x`**：第一次变异跑出「1 failed, 93 passed」——是停在第一个红，不是只有 1 个红。
+  **数变异打红几条必须加 `--maxfail=N` 覆盖**（同一变异覆盖后是 3 红，与 v0.45.91 记录一致）。
+- 全套 `tests/`：**6213 passed / 1 failed**——`test_economic_calendar::TestCoverageHorizon`（NFP 只覆盖到 2026-12-04、剩 67 天 < 90；
+  BLS 2027 日程未发布），干净 `origin/main` 上同样红，设计内的定期告警，与本版无关。`ruff check .` 通过。
+
+### 占号事故
+
+占号脚本的成功判定写成匹配 `main -> main`，而 git 输出是 `HEAD -> main` ⇒ 连推四次、占了 354–357；
+约一分钟内由 `1604b9d5` 释放 355–357。
+
+### 分支（未删，删除属对外动作，等用户确认）
+
+`origin/fix/cboe-stale-vintage-passthrough` = `6d8f3579`；`origin/fix/cboe-vintage-staleness-layering` = `b03012c6`；
+`origin/claude/backfill-cloud-snapshot` = `de4dcb8d`。
 
 ## [0.45.353] — 2026-09-28 — Added/Changed：编排器纳入版本控制·阶段 1（导入）——仓库 `scripts/alpha-hive-orchestrator.sh` 成为唯一真相；读编排器的测试改读仓库副本，CI 上首次真跑
 
@@ -18605,6 +18686,8 @@ GitHub runner 上 Python 在 `/opt/hostedtoolcache/Python/3.11.16/x64/bin/python
 > ⚠️ v0.45.226 补注：**同号另有一条从未并入 main 的工作。** `de4dcb8`（分支
 > `origin/claude/backfill-cloud-snapshot`，提交信息标 v0.45.118）是「事后补跑云端快照工具」，
 > 不是本条。两个 session 撞号，本条先进了 main。那条工作的实况见 v0.45.226。
+> 结论（v0.45.354）：**不移植**——缺口真实且开盘前可补，但工具前提有误、补跑窗口只到次日 09:30 ET、
+> 下游无消费者记录；真要做应放在云端 routine 开盘前补一轮。详见 v0.45.354。
 
 用户问「规则模式的定时任务为什么跑完这么慢，是不是代码沉重」。先量再答：
 
@@ -21035,6 +21118,12 @@ COST −2.25 / RKLB −4.15 两只负 GEX 正确判成 low
 那部分没上。读代码时看到 `vintage` 字样不等于本条已落地。
 
 **这个号同样是烧掉的**，处理方式同 v0.45.94。
+
+> **结案（v0.45.354，2026-09-28）：不移植，三条意图都已由后来的版本做了、且做得更严。**
+> 补抓分流 = v0.45.91（`on_stale="raise"`，同一设计）；陈旧不入缓存 = main 从未放松过；盘中冻结 =
+> v0.45.234 / 243（60s 判据）。真实云端快照 480 份里偏离官方收盘 >0.05% 的 90 份，60s 判据抓到 89、
+> 本分支的 120 分钟口径只抓到 26（且是前者的真子集）。`intraday_frozen` 在 main 上出现 0 次**是对的**——
+> 同一件事在 main 上叫 `cboe_stale_intraday` / `price_stale_intraday`。取证、变异、残差见 v0.45.354。
 
 ## [0.45.87] — 2026-08-31 — weekly_optimizer close_t7 上线后 7-agent 复查修复（6 项）
 
