@@ -1178,7 +1178,10 @@ def _load_accuracy_data() -> dict:
         # 两次之间若数据变化还会自相矛盾。
         from portfolio_backtest import BacktestConfig as _BC, run_backtest as _run_bt
 
-        _bt_cfg = _BC(exclude_nontrading_days=True)  # v32.3: 门面只算核心交易日
+        # v32.3: 门面只算核心交易日
+        # v0.45.366: 门面按零成本口径结算（用户实盘成本≈0，决定去掉成本模型）。
+        # 曲线/卡片仍同源 —— 同一次回测，只是 net_return_pct == 方向调整后的 gross。
+        _bt_cfg = _BC(exclude_nontrading_days=True, apply_trading_costs=False)
         _bt_result = _run_bt(_bt_cfg)
         if "error" in _bt_result:
             # ⚠️ 失败 = **没有曲线**，不是退回另一套模型。
@@ -2847,20 +2850,20 @@ def render_dashboard_html(report: Dict, date_str: str,
     </div>
     {_acc_enhanced_html}
     <!-- ── Sprint 1 / v16.0 Trading Stats 真实交易指标 ── -->
-    <div class="acc-section-title" style="margin-top:18px">真实策略回测（扣成本 · 路径依赖 · Sprint 1）</div>
+    <div class="acc-section-title" style="margin-top:18px">真实策略回测（零成本 · 路径依赖）</div>
     <div id="tradingStatsBox" style="margin:10px 0 16px">
       <div style="font-size:.78em;color:var(--ts);margin-bottom:8px">
         <strong>方法学</strong>：{_methodology_html}
-        -5% 硬止损 / +10% 止盈（盘中触发，跳空时 gap-aware），扣滑点 + 佣金 + 借券费（空头）。
+        -5% 硬止损 / +10% 止盈（盘中触发，跳空时 gap-aware），不计交易成本（实盘成本≈0）。
         <span style="color:#e99;">下方资金曲线就是这次回测的 NAV 路径，终点 = 上面的组合终值。</span>
         <span style="color:var(--ts);">Sharpe 已年化（×√36，T+7 周期）。</span>
       </div>
       <div id="tradingStatsCards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px"></div>
     </div>
 
-    <!-- ── Equity Curve 权益曲线 (3 lines: Gross/Net/SPY) ── -->
+    <!-- ── Equity Curve 权益曲线 (2 lines: 策略 / SPY；v0.45.366 起零成本，Gross 线与之重合已去掉) ── -->
     <div class="eq-section">
-      <div class="acc-section-title" style="margin-top:18px">资金曲线对比 · Gross · Net · SPY 基准</div>
+      <div class="acc-section-title" style="margin-top:18px">资金曲线 · 策略 vs SPY 基准</div>
       <div id="eqCurveContainer">
         <div class="eq-wrap"><canvas id="eqCurveChart"></canvas></div>
         <div class="eq-stats" id="eqStats"></div>

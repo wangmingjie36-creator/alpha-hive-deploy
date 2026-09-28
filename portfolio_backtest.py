@@ -78,6 +78,13 @@ class BacktestConfig:
     # 让 dashboard 净值/胜率只反映核心实盘策略。默认 False：optimizer / factor_attribution /
     # bootstrap 等研究路径保留全样本（样本积累本就要这些数据）。仅 dashboard 调用设 True。
     exclude_nontrading_days: bool = False
+    # ── 交易成本开关（v0.45.366）──
+    # True = 用回填好的 net_return_t7（滑点 + 佣金 + 借券费，见 trading_costs）结算；
+    # False = 零成本口径，按方向调整后的 gross 结算（路径依赖 SL/TP 不变，
+    # SL 触发时的出场滑点已含在 exit_price 里，属于价格路径而非成本模型）。
+    # 默认 True：研究路径（optimizer / bootstrap / 因子归因）口径不变；
+    # dashboard 按用户决定（实盘成本≈0）显式传 False。
+    apply_trading_costs: bool = True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -567,7 +574,8 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
                 holding_days=holding,
                 size_usd=round(size_usd, 2),
                 gross_return_pct=round(dir_adj_gross, 4),
-                net_return_pct=float(net_ret),
+                net_return_pct=(float(net_ret) if cfg.apply_trading_costs
+                                else round(dir_adj_gross, 4)),
                 exit_reason=p.get("exit_reason") or "T7_CLOSE",
                 score=score,
                 spy_return_pct=spy_ret,
@@ -791,6 +799,7 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
             "take_all": cfg.take_all,
             "max_agent_std": cfg.max_agent_std,
             "macro_gate": cfg.macro_gate,
+            "apply_trading_costs": cfg.apply_trading_costs,
         },
         "period": {"start": first_date, "end": last_date, "trading_days": len(all_dates)},
         "portfolio": {
@@ -1018,6 +1027,9 @@ def main():
     parser.add_argument("--bear-size", type=float, default=_d.bear_size_pct)
     parser.add_argument("--horizon", type=int, choices=[1, 7, 30], default=_d.horizon,
                         help="持仓期天数：1/7/30（默认 7）")
+    parser.add_argument("--no-costs", dest="apply_costs", action="store_false",
+                        default=_d.apply_trading_costs,
+                        help="零成本口径：按 gross 结算，不扣滑点/佣金/借券费（dashboard 口径）")
     parser.add_argument("--json", action="store_true", help="输出 JSON（供其他脚本消费）")
     parser.add_argument("--save", type=str, default=None, help="保存完整结果到 JSON 文件")
     args = parser.parse_args()
@@ -1035,6 +1047,7 @@ def main():
         bull_size_pct=args.bull_size,
         bear_size_pct=args.bear_size,
         horizon=args.horizon,
+        apply_trading_costs=args.apply_costs,
     )
 
     result = run_backtest(cfg)

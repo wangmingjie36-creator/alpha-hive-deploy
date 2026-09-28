@@ -5,6 +5,20 @@
 
 ---
 
+## [0.45.366] — 2026-09-28 — 网站资金曲线改零成本口径（用户实盘成本≈0）：去掉 Gross 线与「平均单笔成本」卡
+
+### Changed
+- `portfolio_backtest.py`：`BacktestConfig` 新增 `apply_trading_costs`（默认 `True`，研究路径口径不变）；`False` 时按方向调整后的 gross 结算（路径依赖 SL/TP 不变），结果 `config` 回显该字段；CLI 加 `--no-costs`。
+- `dashboard_renderer.py`：门面回测显式传 `apply_trading_costs=False`；标题 / 方法学文案改为「零成本 · 不计交易成本」；资金曲线标题改「策略 vs SPY 基准」。
+- `templates/dashboard.js`：去掉与主线重合的 Gross 虚线、「Gross 累计」统计与「平均单笔成本」卡；图例 / 统计改「策略净值 / 累计收益 / 最大回撤」。
+
+### Added
+- `tests/test_equity_curve_single_source.py::TestDashboardZeroCost`：夹具反向自证（扣成本口径 net≠gross）+ 回测层 net==gross + 渲染层曲线零成本；变异（dashboard 不传开关）实测变红。
+
+### 备注
+- 研究脚本（optimizer / bootstrap / 因子归因）与 DB 里的 `net_return_t7` 均未动。
+- 按止损距离定仓的平滑分析见本 session 对话，未落代码。
+
 ## [0.45.365] — 2026-09-28 — 占位（进行中：图表坐标轴刻度 / 网格线换令牌）
 
 ## [0.45.364] — 2026-09-28 — 资金曲线 SPY 基准灰线换令牌 `--ts`
