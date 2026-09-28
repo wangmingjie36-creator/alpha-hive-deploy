@@ -5,6 +5,17 @@
 
 ---
 
+## [0.45.369] — 2026-09-28 — 回测新增「按止损距离定仓」选项（默认关闭）；止损距离收口为单一真相
+
+### Added
+- `portfolio_backtest.BacktestConfig.risk_per_trade_pct`（默认 `None` = 关闭）：开启后仓位占比 = `min(风险预算 / 止损距离, 原方向仓位)`，让每次止损亏的钱大致相等；只缩仓不加仓；`(0,1)` 之外直接 `ValueError`（0 会让每笔 $0 仍「入场」）。CLI `--risk-per-trade 0.004`；结果 `config` 回显。
+- `backtester.stop_loss_pct_for(ticker, direction)`：止损距离唯一真相（`config.TRADING_EXITS_CONFIG`）；`Backtester` 路径依赖出场改经它取数，定仓与出场同源。
+- `tests/test_risk_based_sizing.py`（9 条）：helper 读 config、出场代码不再自读 `sl_overrides`、默认关闭逐笔等同旧仓位、开启后逐笔 = 公式且止损名义亏损 ≤ 预算、非法预算抛错；变异（去掉上限 / 中性走错止损）实测变红。
+
+### 备注
+- 网站**未启用**：等用户在 Mac 生产库上跑 `portfolio_backtest.py --no-costs --risk-per-trade 0.004`（可加 `--reject-neutral`）确认后再决定。
+- 本 session 用网站 191 笔重放（零成本）估算：每笔风险 0.4% ⇒ 最大回撤 −13.2% → −5.4%、累计 +0.1% → +1.5%；加排除中性 ⇒ −4.9% / +1.7%。重放不含「腾出名额补入新单」效应，以真实回测为准。
+
 ## [0.45.368] — 2026-09-28 — 网站资金曲线改零成本口径（用户实盘成本≈0）：去掉 Gross 线与「平均单笔成本」卡
 
 ### Changed
