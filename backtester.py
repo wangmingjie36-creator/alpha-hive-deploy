@@ -843,7 +843,7 @@ def stop_loss_pct_for(ticker: str, direction: str, exit_cfg: Optional[Dict] = No
 
     唯一真相 = `config.TRADING_EXITS_CONFIG`：多空走 `sl_overrides`（缺省 `stop_loss_pct`），
     中性（及任何未知方向，与 `_compute_path_dependent_exit` 的规范化一致）走 `neutral_sl_pct`。
-    `Backtester` 的出场模拟与 `portfolio_backtest` 的按止损距离定仓（v0.45.369）都经这里取数，
+    `Backtester` 的出场模拟与 `portfolio_backtest` 的按止损距离定仓（v0.45.370）都经这里取数，
     两边不会各抄一份后漂移。
     """
     if exit_cfg is None:

@@ -78,14 +78,14 @@ class BacktestConfig:
     # 让 dashboard 净值/胜率只反映核心实盘策略。默认 False：optimizer / factor_attribution /
     # bootstrap 等研究路径保留全样本（样本积累本就要这些数据）。仅 dashboard 调用设 True。
     exclude_nontrading_days: bool = False
-    # ── 交易成本开关（v0.45.368）──
+    # ── 交易成本开关（v0.45.369）──
     # True = 用回填好的 net_return_t7（滑点 + 佣金 + 借券费，见 trading_costs）结算；
     # False = 零成本口径，按方向调整后的 gross 结算（路径依赖 SL/TP 不变，
     # SL 触发时的出场滑点已含在 exit_price 里，属于价格路径而非成本模型）。
     # 默认 True：研究路径（optimizer / bootstrap / 因子归因）口径不变；
     # dashboard 按用户决定（实盘成本≈0）显式传 False。
     apply_trading_costs: bool = True
-    # ── 按止损距离定仓（v0.45.369）──
+    # ── 按止损距离定仓（v0.45.370）──
     # None = 关闭（沿用上面的方向仓位 bull/bear/position_size_pct）。
     # 设为小数（如 0.004 = 每笔止损最多亏 0.4% NAV）时：
     #   仓位占比 = min(risk_per_trade_pct / 止损距离, 该方向原仓位占比)
