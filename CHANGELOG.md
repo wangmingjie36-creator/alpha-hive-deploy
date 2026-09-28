@@ -5,6 +5,22 @@
 
 ---
 
+## [0.45.371] — 2026-09-28 — CI 红的四条测试按根因修：沙箱 HOME 丢了 git 身份、测试写死 Mac 解释器、变异测试依赖浅克隆里没有的历史
+
+### Fixed
+- `tests/test_data_backup.py::_sandbox_home`：沙箱 HOME 同时隔掉了 `~/.gitconfig`（提交身份）。`git commit` 能否成功于是取决于主机名——Mac 的 `xxx.local` 推得出邮箱，Linux runner 推不出 ⇒ "Author identity unknown" ⇒ `TestPushTimeout` 停在 stage=commit（Mac 绿、CI 红）。夹具里写一份只含测试身份 + `commit.gpgsign=false` 的 `.gitconfig`，此前各测试手抄 `git config user.email` 的做法不再需要人记。
+- `tests/test_ghpages_data_root_migration.py::TestApplyCodeShippedFallbackPreconditionSurvivesOptimization`（3 条）：
+  - 子进程解释器 `/usr/local/bin/python3` → `sys.executable`（runner 上无此路径 ⇒ FileNotFoundError；同 v0.45.117 `test_no_undefined_names.py` 的修法）。
+  - 变异测试不再运行时 `git show 61f21d37:report_deployer.py`（CI 浅克隆里没有该提交 ⇒ 退出 128）：旧 `assert` 守卫原样节选嵌入测试（与历史逐字核对一致），变异体 = 当前源码只替换那一处守卫；找不到当前守卫原文即红，不许变异静默落空。
+- 验证：仿 CI 环境（`git clone --depth 1` + 移除 `/usr/local/bin/python3`）下，原版 4 红、修复版 4 绿（另 1 条同组正向测试两边都绿）。
+
+### Added
+- `tests/test_tests_use_running_interpreter.py`：AST 扫 `tests/`，恰好等于 `/usr/local/bin/python3` 的字符串常量（当 argv[0] 用的形状）即红；说明文字里提到该路径不算。同一形状已出现两次，注释挡不住第三次。含有牙自证（对原版测试文件实测命中 2 处）。
+
+### 未处理
+- `test_economic_calendar::TestCoverageHorizon`：BLS 官方尚未发布后续日程，无数据可补，按用户判断维持现状。
+- `test_gh_pages_unverified_parent::TestRecovery::test_network_returns_mid_retry_and_deploy_really_lands`：本机间歇失败（未改动版本 6 次 1 红），CI 未出现；根因未查，另列任务。
+
 ## [0.45.370] — 2026-09-28 — 策略层优势检验：预注册 + 执行器（未就绪盲化、只看世代前 52 周）
 
 ### Added
