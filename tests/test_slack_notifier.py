@@ -131,8 +131,7 @@ class TestSendWithMock:
         monkeypatch.setattr(SlackReportNotifier, "_read_user_token",
                             lambda self: "xoxp-test-token")
         monkeypatch.setattr(SlackReportNotifier, "_read_webhook_from_file", lambda self: None)
-        br = resilience.CircuitBreaker("slack")          # 别动全局 slack_breaker
-        monkeypatch.setattr(resilience, "slack_breaker", br)
+        br = resilience.slack_breaker    # conftest `_reset_circuit_breakers` 保证它此刻是干净的
         import requests
         n = SlackReportNotifier()
 

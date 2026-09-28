@@ -108,10 +108,12 @@ def test_legacy_artifact_list_is_subset_of_coverage(name, tmp_path):
     assert name in fp
 
 
-def test_legacy_list_still_has_six_items():
-    """纵深防御的旧闸别被顺手删掉（任务要求保留）。"""
+def test_legacy_list_is_pinned():
+    """纵深防御的旧闸别被顺手删掉（任务要求保留）。原 6 项 + v0.45.333 追加的 `sell_strike_state`。
+    写成精确相等而不是子集：加一项也得来这里改一行——增删都是有意的动作，不是顺手。"""
     assert _legacy_guarded_names() == (
-        "pheromone.db", "metrics.db", "chroma_db", "vrp_state", "options_paper_state", "hedge_state")
+        "pheromone.db", "metrics.db", "chroma_db", "vrp_state", "options_paper_state", "hedge_state",
+        "sell_strike_state")
 
 
 # ─────────────────────────────── 2. 指纹比对 ───────────────────────────────

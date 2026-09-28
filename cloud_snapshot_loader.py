@@ -153,6 +153,11 @@ def load_ticker(date: str, ticker: str, *, ref: Optional[str] = None,
 # load_official_close 的判决标签（进 StockData.price_source / 补跑结果的 _reason）
 SNAP_CLOSE = "cloud_snapshot_close"
 SNAP_NEXT_PREV_CLOSE = "cloud_snapshot_next_prev_day_close"
+# 两步都有值时的分歧告警阈值（相对）。标定（v0.45.359 二次检查，origin/cloud-snapshots 08-26~09-25）：
+# 两步都有值 382 对，376 对逐分相等；其余 6 对里 4 对 0.019%~0.106% 是**真漏判**（NEE 09-18、VZ 09-08、
+# T 09-15、T 08-28——后三者 Twelve Data 官方收盘与次日值逐分相等），2 对 ≤0.0013% 是高价股半分舍入
+# （TSLA 376.365/376.36、META 741.245/741.24）。0.01% 恰好分开两类；初版 0.05% 只抓到 NEE、放过另 3 个真漏判。
+_SAME_VS_NEXT_WARN = 0.0001
 
 
 def _fetched_at(snap: dict):
@@ -179,16 +184,25 @@ def load_official_close(date: str, ticker: str, *, ref: Optional[str] = None,
     09:45:27）、CVX、VZ 就是经补跑兜底这么进的库。**所以按 `last_trade_time_et` 判，
     不看标签**（判据是 `cboe_options.close_verdict`，与数据管道同一份）。
 
-    取价顺序：
-      1. 当日快照 close_verdict == official 且场次 == date → `price_at_fetch`（SNAP_CLOSE）
-      2. 当日快照不是官方收盘 ⇒ **其后第一份快照的 `prev_day_close`**，且它自述的归属
-         （`prev_close_session`）必须恰为 date（SNAP_NEXT_PREV_CLOSE）。这不是凑数：
-         290 份实测 289 份 ≤0.01%、含全部 71 份陈旧文件；08-31 快照的 prev_day_close
-         恰还原 08-28 的 DE 630.33 / CVX 201.86 / VZ 50.10。归属自证，下一份若隔了
-         交易日（如 09-05 没跑）就对不上而返回 None，不需要另算日历。
-         当日快照根本不存在时同样问这一步。
+    取价顺序（v0.45.359 起对调：**先问自带归属的来源，时间代理判据只作兜底**）：
+      1. **其后第一份快照的 `prev_day_close`**，且它自述的归属（`prev_close_session`）
+         必须恰为 date（SNAP_NEXT_PREV_CLOSE）。290 份实测 289 份 ≤0.01%、含全部 71 份
+         陈旧文件；08-31 快照的 prev_day_close 恰还原 08-28 的 DE 630.33 / CVX 201.86 /
+         VZ 50.10。归属自证，下一份若隔了交易日（如 09-05 没跑）就对不上，落到第 2 步，
+         不需要另算日历。
+      2. 没有可用的后一份 ⇒ 当日快照 close_verdict == official 且场次 == date →
+         `price_at_fetch`（SNAP_CLOSE）。最新一天必走这里。
       3. 都不行 → `(None, "snapshot_<判决>")`，判决说明当日快照卡在哪一步
          （no_snapshot / stale_intraday / session_open / unverifiable / …）——调用方据此标不可用。
+
+    为什么对调：第 2 步的「last_trade 离收盘 ≤60s ⇒ 是官方收盘」是**代理**判据——官方收盘是
+    收盘竞价那一笔，文件若在竞价价写入前生成，离收盘 1 分钟内的最后一笔连续成交照样不是它。
+    实例 NEE 2026-09-18：last_trade 15:59:05（54s，判 official）、price_at_fetch 80.555，官方 80.47；
+    次日快照 prev_day_close = 80.47。独立核对（yfinance / Twelve Data 官方日线，08-26~09-25）：
+    第 2 步口径可用 ~430 份、偏离 >0.05% 1 份（就是 NEE）；第 1 步口径可用 ~500 份、0 份
+    （DE 两个独立源当时都没取到，未核）。
+    **不要用收紧 60s 容差来修**：30–60s 带 4 份里 2 份精确、2 份偏离，调容差只是挪误差。
+    两步都有值且不一致时打 WARNING（谁会红：代理判据又漏了一次，值得回来看）。
 
     ⚠️ 为什么不「照用 + 降级标签」：这个价的终点是 `price_at_predict`（T+7 收益的
     入场价），而 predictions 表**没有**价格来源列 —— 标签到不了库里，降级在账本上
@@ -197,7 +211,19 @@ def load_official_close(date: str, ticker: str, *, ref: Optional[str] = None,
     """
     import cboe_options as co
 
-    verdict = "no_snapshot"
+    # 1. 其后第一份快照的 prev_day_close（归属自证）
+    next_px = None
+    later = [d for d in available_dates(ref, repo) if d > date]
+    if later:
+        nxt = load_ticker(later[0], ticker, ref=ref, repo=repo)
+        if nxt:
+            pc = co.prev_close_session({"last_trade_time": nxt.get("last_trade_time_et"),
+                                        "prev_day_close": nxt.get("prev_day_close")})
+            if pc and pc[0].isoformat() == date:
+                next_px = pc[1]
+
+    # 2. 当日快照（兜底；有 next_px 时只用来比对）
+    verdict, same_px = "no_snapshot", None
     snap = load_ticker(date, ticker, ref=ref, repo=repo)
     if snap:
         # now = 抓取时刻：判的是「抓的时候这一场收了没有」，不是补跑此刻
@@ -210,18 +236,18 @@ def load_official_close(date: str, ticker: str, *, ref: Optional[str] = None,
         elif verdict == co.CLOSE_OFFICIAL:
             if (isinstance(px, (int, float)) and not isinstance(px, bool)
                     and math.isfinite(px) and px > 0):
-                return float(px), SNAP_CLOSE
-            verdict = "price_invalid"
+                same_px = float(px)
+            else:
+                verdict = "price_invalid"
 
-    # 当日快照没有 / 不是官方收盘 ⇒ 问其后第一份快照的 prev_day_close（归属自证）
-    later = [d for d in available_dates(ref, repo) if d > date]
-    if later:
-        nxt = load_ticker(later[0], ticker, ref=ref, repo=repo)
-        if nxt:
-            pc = co.prev_close_session({"last_trade_time": nxt.get("last_trade_time_et"),
-                                        "prev_day_close": nxt.get("prev_day_close")})
-            if pc and pc[0].isoformat() == date:
-                return pc[1], SNAP_NEXT_PREV_CLOSE
+    if next_px is not None:
+        if same_px is not None and abs(same_px / next_px - 1) > _SAME_VS_NEXT_WARN:
+            _log.warning("%s @ %s：当日快照判为官方收盘的 %.4f 与次日快照 prev_day_close %.4f "
+                         "相差 %.3f%%——取后者（自带归属）；60s 代理判据又漏了一次",
+                         ticker, date, same_px, next_px, abs(same_px / next_px - 1) * 100)
+        return next_px, SNAP_NEXT_PREV_CLOSE
+    if same_px is not None:
+        return same_px, SNAP_CLOSE
     return None, f"snapshot_{verdict}"
 
 

@@ -1093,6 +1093,14 @@ SIGNAL_UPSTREAM: Dict[str, Tuple[str, ...]] = {
     "guard.adj_factor": ("crowding.score",) + _PHASE1_DIRS + ("agent.RivalBeeVanguard.direction",),
     "agent.GuardBeeSentinel.*": tuple(f"agent.{a}.*" for a in _PHASE1) + (
         "agent.RivalBeeVanguard.*", "guard.consistency_census", "guard.adj_factor"),
+    # v0.45.349：Bear 的两个子分读同伴的**方向**（系统输出），此前误登在 SIGNAL_LEAVES「不读任何系统输出」。
+    # `_assess_insider_selling`：`scout_entry.direction == "bearish"` ⇒ insider_bear 下限 6.0；
+    # `_assess_options_puts`：`oracle_entry.direction == "bearish"` ⇒ options_bear 下限 5.5（bear_bee.py）。
+    # 同处读的内幕金额 / P/C / IV Rank / skew / gex 是原始观测，不是边。
+    # 补边不挪任何已算出的世代起点（两者当前起点都由 v0.45.288 直接点名决定，其后再无边界触及
+    # Scout/Oracle 方向）——`tests/test_signal_archive_generations.py::TestBearPeerReadsAreEdges` 按 AST 核这两条边
+    "bear.insider_bear": ("agent.ScoutBeeNova.direction",),
+    "bear.options_bear": ("agent.OracleBeeEcho.direction",),
     # Bear 读 Rival 的 ml_probability / expected_7d、Guard 的 consistency / conflict_type
     "bear.score": ("ml.*", "agent.GuardBeeSentinel.*", "guard.consistency_census",
                    "bear.insider_bear", "bear.overval_bear", "bear.options_bear", "bear.short_int_bear"),
@@ -1114,7 +1122,8 @@ SIGNAL_LEAVES = frozenset({
     "options.iv_current", "options.put_call_ratio", "options.gamma_exposure", "options.total_oi",
     "options.iv_rank", "options.iv_percentile", "options.iv_rank_is_real",
     "sentiment.pct",
-    "bear.insider_bear", "bear.overval_bear", "bear.options_bear", "bear.short_int_bear",
+    # v0.45.349：bear.insider_bear / bear.options_bear 移出（读 Scout / Oracle 方向，见 SIGNAL_UPSTREAM）
+    "bear.overval_bear", "bear.short_int_bear",
     "crowding.comp.social_volume", "crowding.comp.google_trends",
     "crowding.comp.seeking_alpha_views", "crowding.comp.short_squeeze_risk",
     "catalyst.count", "catalyst.nearest_days", "catalyst.max_weight",
@@ -1213,6 +1222,30 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 09-18（v0.45.315 补登）：删 Polymarket。Oracle 融合分逐位不变，只少了 data_quality
     # 里恒为 unavailable 的通道 → 仅 Queen 层 data_real_pct 变化（同 v0.45.314）
     "v0.45.315": (),
+    # 09-28（原定 09-24，未赶上那次扫描）：断开 GexRegimeModifier 对 rule_score 的直接加减分 —— 只在 Queen 层方向投票
+    # 之后，各蜂自身输出不变；SIGNAL_UPSTREAM 里没有信号读 final_score/rule_score ⇒ 只动
+    # composite.final_score（ALWAYS_SLICED，不必写）
+    "v0.45.334": (),
+    # 09-28（原定 09-25，未赶上那次扫描）：Buzz 情绪动量改按扫描日回看归档（调整层，维度 IC 协议 buzz_v1 锚点）。
+    # 只点名 score：方向由合成值决定、在调整之前，不变；通道改全精度只是记录精度，不换代 buzz.comp.*。
+    # 下游（Guard 读 Buzz 分）由 _scope_closure 带出
+    "v0.45.340": ("agent.BuzzBeeWhisper.score",),
+    # 09-28（与 v0.45.334/340 同日）：中性化读 Oracle 主链 gamma_exposure 的两条进分通道 ——
+    # ① options_analyzer 的 gex_signal 恒 1.0 ⇒ Oracle options_score ⇒ Oracle 分，且方向由分数带定
+    #   （v0.45.201）会跟着翻 ⇒ `agent.OracleBeeEcho.*` 两个都点名；
+    # ② BearBee `gex < 0 ⇒ options_bear ≥ 5.0` 下限删除 ⇒ `bear.options_bear` 直接点名。
+    # `options.gamma_exposure` 本身的算法没动（照算、照落盘），仍是叶子、不切。
+    # 下游经 SIGNAL_UPSTREAM：Oracle 方向 → consensus_strength → crowding.* → Scout → bear.insider_bear，
+    # 以及 ml.* / Rival / Guard / bear.score / Bear / swarm_agreement —— 由 _scope_closure 带出，不手写
+    "v0.45.349": ("agent.OracleBeeEcho.*", "bear.options_bear"),
+    # 09-28（与 v0.45.334/340/349 同日）：日报 VIX 改当日收盘（收盘后延迟报价优先，CSV 兜底）+
+    # 陈旧 VIX 不计 Guard 宏观票 ⇒ `_calc_macro_adjustment` 的输入换了量 ⇒ `guard.macro_adj`
+    # （SIGNAL_LEAVES，只在被点名时换代）与 Guard 分（macro_adj 直接加进 risk_adj 维分）都点名。
+    # Guard 的 macro_regime 还经 RegimeWeightAdjuster 改权重 ⇒ 只动 composite.final_score（ALWAYS_SLICED）。
+    "v0.45.357": ("guard.macro_adj", "agent.GuardBeeSentinel.*"),
+    # 09-28（与 v0.45.357 同日同集合）：补跑的 Guard 宏观票对齐目标日（VIX 取 CSV 的 D 行并计票、期限结构读快照、
+    # FOMC 按 D 数、板块按 D 对齐）⇒ 同样只动 `_calc_macro_adjustment` 的输入 ⇒ 同样点名这两项。只改补跑行。
+    "v0.45.366": ("guard.macro_adj", "agent.GuardBeeSentinel.*"),
 }
 
 
@@ -1305,29 +1338,34 @@ def load_panel(db_path: Optional[Path] = None, horizon: str = "t7",
     与 return_t7 的路径依赖收益相对。**这是 ic_diagnostics 在 v0.45.19 已更正过的同一个误解**：
     `price_t7` 存的是 `_simulate_trade_path` 的 `exit_price`，触 SL/TP 即被钉在档位上，
     与 return_t7 一样截断（2026-05 起 100% 等于 exit_price，与 close_t7 相差 >0.01 的行
-    每月 34%~76%）。另有 CRWD 两行 price_at_predict 已按 07-02 的 4:1 拆股复权、price_t7
+    每月 39%~76%）。另有 CRWD 两行 price_at_predict 已按 07-02 的 4:1 拆股复权、price_t7
     仍是未复权价 ⇒ 旧口径读成 +325% / +340%。v0.45.321 之前的 `--analyze` 结论全部基于它。
+
+    v0.45.347：取数改走 `ic_diagnostics.forward_return_sql` / `row_forward_return`
+    （v0.45.328 立的「前瞻收益唯一入口」）。此前这里是第三份私有 SQL，与共用入口已有一处
+    分叉：终点价为 0（「没有这个价」，不是零元）时这里算成 −100%，共用入口丢弃该行。
+    生产库目前 0 行，是潜在分叉；但 v0.45.328 的教训正是「两份实现，修一份等于制造分叉」。
 
     ⚠️ 返回的是**整张表**，不按世代切 —— 切片在做聚合的 `analyze()` 里（v0.45.265）。
     自己拿这个面板算跨日统计量的，先过一遍 `generation_boundaries()`。
     """
     db_path = Path(db_path) if db_path else _db_path()   # v0.45.160：调用时求值
     end_col, checked_col = _forward_close_col(horizon), f"checked_{horizon}"
+    import ic_diagnostics as icd   # _forward_close_col 已把仓库根放进 sys.path
+    sel, where, end_col = icd.forward_return_sql("close", f"return_{horizon}", horizon)
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
         rets = {}
         for r in con.execute(
-            f"SELECT date, ticker, price_at_predict, {end_col} AS p1 "
-            f"FROM predictions WHERE {checked_col}=1 AND {end_col} IS NOT NULL "
-            f"  AND price_at_predict > 0"
+            f"SELECT date, ticker, {sel} FROM predictions WHERE {checked_col}=1 AND {where}"
         ):
-            rets[(r["ticker"], r["date"][:10])] = (
-                (r["p1"] - r["price_at_predict"]) / r["price_at_predict"] * 100.0)
+            ret = icd.row_forward_return(r, end_col)
+            if ret is not None:
+                rets[(r["ticker"], r["date"][:10])] = ret
         if not rets:
             return {}
         if target_metric == "return":
-            import ic_diagnostics as icd   # _forward_close_col 已把仓库根放进 sys.path
             icd.warn_if_truncated(con, end_col, checked_col)
 
         if target_metric == "vol":
@@ -1360,7 +1398,7 @@ def load_panel(db_path: Optional[Path] = None, horizon: str = "t7",
 
 def analyze(db_path: Optional[Path] = None, horizon: str = "t7",
             min_samples: int = 50, min_width: int = 5,
-            draws: int = 200, target_metric: str = "return",
+            draws: Optional[int] = None, target_metric: str = "return",
             pool_generations: bool = False):
     """对每个归档信号跑四口径 IC + 噪音地板对照。
 
@@ -1372,6 +1410,9 @@ def analyze(db_path: Optional[Path] = None, horizon: str = "t7",
             "vol" = 预测未来已实现波动。后者的可学性高一个数量级
             （实测同宇宙同特征 IC 0.710 vs 0.012），见 `_forward_realized_vol` 注释。
         pool_generations: True = 旧行为（跨世代混算），只作对照；报告会标出。
+        draws: 噪音地板抽样数；None = 调用时的 `ic_diagnostics.RANDOM_DRAWS`（唯一真相，
+            v0.45.324 起 2000）。每行带 `noise_floor_lo/hi`（地板自身的 MC 不确定带）与
+            `floor_position`；`beats_noise` 只在 |IC| 超出**带上沿**时为真，带内由报告标 ◐。
 
     Returns:
         面板为空时 `[]`；否则 `(rows, floor, generations)`。
@@ -1392,12 +1433,23 @@ def analyze(db_path: Optional[Path] = None, horizon: str = "t7",
     panel = {s: {d: [(v, r) for v, r, _ in rows] for d, rows in bd.items()}
              for s, bd in panel_t.items()}
     lag, period = (7, "周") if horizon == "t7" else (30, "月")
+    if draws is None:
+        draws = icd.RANDOM_DRAWS
     # 显式指定地板基准：`composite.final_score` 覆盖最全（每个标的每天都有）。
     # 不能依赖默认 fallback —— 地板对基准的日期覆盖高度敏感（实测 0.076 vs 0.116）。
     # 用**未切**的面板：地板只用骨架（日期 / 宽度 / 收益），随机化掉了信号取值，与世代无关。
     floor = icd.noise_floor(panel, lag, period, draws=draws,
                             base_key="composite.final_score")
-    thr_full = floor.get("ic_p95", float("nan"))
+
+    def _band(f: Dict) -> tuple:
+        return (f.get("ic_p95", float("nan")), f.get("ic_p95_lo", float("nan")),
+                f.get("ic_p95_hi", float("nan")), f.get("n_draws", 0))
+
+    band_full = _band(floor)
+    # 被切信号的地板按**逐字相同的骨架**（日期序 + 每天收益序）缓存：noise_floor 只读骨架、
+    # 种子固定，同骨架必得同地板，缓存是精确的。生产快照 9 个被切信号只有 5 种骨架
+    # （同一边界切出来的 agent.* / catalyst.count 骨架相同），×2000 总耗时 11.7s → 8.2s。
+    sliced_floor: Dict[tuple, tuple] = {}
 
     history = _cohort_history()
     gens = {} if pool_generations else generation_boundaries(panel, history)
@@ -1429,9 +1481,15 @@ def analyze(db_path: Optional[Path] = None, horizon: str = "t7",
             continue
         # 被切过 ⇒ 骨架（天数）变了，地板必须在本世代骨架上重算：天数少 ⇒ 地板高，
         # 沿用全史骨架的地板会系统性偏低 ⇒ 假阳性。未被切的沿用全表地板（既有行为）。
-        thr = (thr_full if n == n_total else
-               icd.noise_floor({sig: by_day}, lag, period, draws=draws,
-                               base_key=sig).get("ic_p95", float("nan")))
+        if n == n_total:
+            thr, lo, hi, nd = band_full
+        else:
+            key = tuple((d, tuple(ret for _, ret in pairs)) for d, pairs in by_day.items())
+            if key not in sliced_floor:
+                sliced_floor[key] = _band(icd.noise_floor({sig: by_day}, lag, period,
+                                                          draws=draws, base_key=sig))
+            thr, lo, hi, nd = sliced_floor[key]
+        pos = icd.floor_position(abs(r["daily_ic"]), lo, hi)
         # 覆盖度：非并列值的比例——稀疏事件型信号（如 cluster buying）
         # 大量并列会让 rank-IC 失真，必须显式暴露
         vals = [a for v in by_day.values() for a, _ in v]
@@ -1440,7 +1498,12 @@ def analyze(db_path: Optional[Path] = None, horizon: str = "t7",
             "signal": sig, "n_samples": n, "n_days": len(by_day),
             "distinct_ratio": distinct_ratio,
             "noise_floor": thr,
-            "beats_noise": bool(math.isfinite(thr) and abs(r["daily_ic"]) > thr),
+            "noise_floor_lo": lo,
+            "noise_floor_hi": hi,
+            "noise_floor_draws": nd,
+            "floor_position": pos,
+            # v0.45.324：只认带上沿。点估计随抽样数漂移，贴它的判定会跟着翻（见 floor_position）
+            "beats_noise": pos == "above",
             **{k: report["signals"][sig][k] for k in ("gen_start", "gen_version", "n_excluded")},
         })
         # 固定效应 vs 时变分解 —— 区分「选股标签」与「择时信号」
@@ -1453,9 +1516,27 @@ def analyze(db_path: Optional[Path] = None, horizon: str = "t7",
     return out, floor, report
 
 
+def verdict_mark(r: Dict) -> str:
+    """一行的判定标记。报告与测试共用这一处，免得两边各写一套。
+
+    🟢 候选 = 超出地板带上沿且 ≥3/4 口径；🟡 = 超出带上沿但口径不足；
+    ◐ 贴地板 = |IC| 落在地板的蒙特卡洛不确定带内（抽样数定不了，加 --draws 或按 ⚪ 对待，
+    **不据此动任何东西**）；⚪ = 不超过带下沿。
+    """
+    pos = r.get("floor_position")
+    if pos == "band":
+        return "◐ 贴地板"
+    if r["beats_noise"]:
+        return "🟢 候选" if r["passed_methods"] >= 3 else "🟡 口径不足"
+    return "⚪ 噪音带内"
+
+
 def print_report(rows: List[Dict], floor: Dict, horizon: str,
                  target_metric: str = "return",
                  generations: Optional[Dict] = None) -> None:
+    sys.path.insert(0, str(Path(__file__).parent))
+    import ic_diagnostics as icd
+
     tgt = {"return": "方向收益", "vol": "已实现波动"}.get(target_metric, target_metric)
     if target_metric == "return":
         tgt += f"（终点 {_forward_close_col(horizon)}）"
@@ -1468,8 +1549,10 @@ def print_report(rows: List[Dict], floor: Dict, horizon: str,
         print("     下表的 IC 是几个不同量的混合，不描述任何一个世代 —— 只作对照，勿据此下结论")
     if floor:
         print(f"  🎯 噪音地板（随机 ×{floor['n_draws']}）：|日度IC| 95分位 = "
-              f"{floor['ic_p95']:.3f} ｜ 通过口径数 95分位 = {floor['passed_p95']:.0f}/4")
-        print("     判定为真信号需同时满足：|IC| > 地板 **且** 通过 ≥3/4")
+              f"{floor['ic_p95']:.3f}（{icd.floor_band_text(floor)}）"
+              f" ｜ 通过口径数 95分位 = {floor['passed_p95']:.0f}/4")
+        print("     判定为真信号需同时满足：|IC| > 地板带上沿 **且** 通过 ≥3/4；"
+              "带内 = ◐ 贴地板（MC 分辨率定不了，不是 🟡 也不是 ⚪）")
     print("-" * 132)
     print(f"{'信号':<32}{'样本':>6}{'日度IC':>9}{'t':>7}{'通过':>6}"
           f"{'训练IC':>9}{'测试IC':>9}{'稳定性':>9}"
@@ -1482,10 +1565,13 @@ def print_report(rows: List[Dict], floor: Dict, horizon: str,
     STAB_MARK = {"稳定": "✅稳定", "衰减": "⚠️衰减", "翻转": "❌翻转",
                  "均噪音": "  噪音", "样本不足": "  不足"}
     for r in rows:
-        real = r["beats_noise"] and r["passed_methods"] >= 3
-        mark = "🟢 候选" if real else ("🟡 口径不足" if r["beats_noise"] else "⚪ 噪音带内")
+        mark = verdict_mark(r)
         warn = " ⚠️稀疏" if r["distinct_ratio"] < 0.25 else ""
+        own = {"ic_p95_lo": r.get("noise_floor_lo", float("nan")),
+               "ic_p95_hi": r.get("noise_floor_hi", float("nan")),
+               "n_draws": r.get("noise_floor_draws", 0)}
         gen = (f" ｜世代自 {r['gen_start']}，地板 {r['noise_floor']:.3f}"
+               f"（{icd.floor_band_text(own)}）"
                if r.get("gen_start") and r.get("n_excluded") else "")
         print(f"{r['signal']:<32}{r['n_samples']:>6}"
               f"{r['daily_ic']:>+9.4f}{r['daily_t']:>+7.2f}{r['passed_methods']:>4}/4"
@@ -1550,7 +1636,9 @@ def main() -> int:
     ap.add_argument("--horizon", choices=["t7", "t30"], default="t7")
     ap.add_argument("--min-samples", type=int, default=50)
     ap.add_argument("--min-width", type=int, default=5)
-    ap.add_argument("--draws", type=int, default=200)
+    ap.add_argument("--draws", type=int, default=None,
+                    help="噪音地板抽样数（默认 ic_diagnostics.RANDOM_DRAWS）。报告给出地板自身的"
+                         " MC 不确定带，贴带信号标 ◐——想把 ◐ 定下来就加大它，别改判定规则")
     ap.add_argument("--target", choices=TARGET_METRICS, default="return",
                     help="预测目标：return=方向收益（现状）；vol=未来已实现波动"
                          "（实测可学性高一个数量级，需联网取行情）")

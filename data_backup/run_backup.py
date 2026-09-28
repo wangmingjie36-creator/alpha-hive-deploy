@@ -100,8 +100,16 @@ from . import export as export_mod
 from .scan_secrets import load_known_secrets_with_diagnostics, scan_directory
 
 
-def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=60)
+#: 本地 git 命令的超时。
+GIT_TIMEOUT_S = 60
+#: push 单独放宽（v0.45.345）：2026-09-24 备份范围扩大（v0.45.342）后首次推送超过 60s 被判 `git_error`；
+#: 09-26 手工补推同一批两天的提交实测 43s——离 60s 太近。仓库从未 gc（全是松散对象，每次推送现场打包），
+#: 网速一慢就会再超。上限留在编排器 Step 14 的 `run_step --timeout 300` 之内（导出 + add/commit 十几秒）。
+GIT_PUSH_TIMEOUT_S = 240
+
+
+def _run_git(args: list[str], cwd: Path, timeout: int = GIT_TIMEOUT_S) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
 
 
 def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main",
@@ -213,7 +221,7 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
 
     # ── 4. 推送（本地裸仓库路径——不是 GitHub）───────────────────────
     try:
-        push = _run_git(["push", remote, branch], backup_dir)
+        push = _run_git(["push", remote, branch], backup_dir, timeout=GIT_PUSH_TIMEOUT_S)
     except Exception as e:  # noqa: BLE001 —— push 异常（如超时）同上
         status.update(stage="git_error", ok=False, error=f"push 阶段异常：{e}")
         return _finish(status_file, history_file, status)

@@ -443,9 +443,10 @@ class TestAnchor:
         assert before["state"] == "pending" and why in before["problem"]
         assert after["state"] == "fallback" and why in after["problem"]
 
-    def test_real_protocol_is_pending_today(self):
-        """当前登记：锚点未登记 ⇒ 窗口起点之前是 pending（不是 ok——阶段 1 还没做）。"""
-        assert fx.anchor_status(P, _d(-1), [])["state"] == "pending"
+    def test_real_protocol_anchor_is_ok_with_the_real_history(self):
+        """v0.45.340 起锚点已登记：真实边界表下是 ok；边界表里没有它（如被误删）则到窗口起点回退。"""
+        assert fx.anchor_status(P, _d(0))["state"] == "ok"
+        assert fx.anchor_status(P, _d(0), [])["state"] == "fallback"
 
     def test_unknown_h1_object_is_protocol_error(self, tmp_path):
         p = self._P(None)

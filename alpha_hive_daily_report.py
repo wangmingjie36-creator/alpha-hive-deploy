@@ -1331,6 +1331,72 @@ class AlphaHiveDailyReporter:
         except Exception as e:
             _log.warning("组合 Greeks 更新失败(非致命): %s", e)
 
+        # ── v0.45.333: gamma/delta 卖权行权价选择器（对标 GEXBot）—— 只记录与结算，不进评分、不上网站 ──
+        # 每票一次 CBOE 原始链 → 水平地图 → 月度 / 周度两档 delta 梯子各记一行，到期次日按到期日
+        # 那根 K 线结算。检验协议冻结在 experiments/sell_strike_routing_prereg.md。
+        # ⚠️ **不得**拼进下面的 `_extra_md` / `report["markdown_report"]`：日报 md 同时在 gh-pages
+        # 部署白名单与自动提交白名单里（report_deployer），用户明确要求本功能不上公开网站。
+        # 报告只写 `<PATHS.sell_strike_state>/reports/sell-strike-<日期>.md`，MCP 工具按需读。
+        # 守卫：tests/test_sell_strike_integration.py 真跑本方法，断言日报 md 里没有这一节，
+        # 且开 / 关本钩子两次跑出的 report 逐字节相同、swarm_results 前后深相等（不许写回评分）；
+        # 本文件里对卖权模块的任何引用只许出现在本方法体内（AST 火墙）。
+        # 顺序是刻意的：账本状态日志 / errors / 0 行告警**先**打，本地报告**后**写、单独 try——
+        # 两者同在一个 try 且报告在前时，渲染一抛错，账本其实已写好，日志却只剩一条「更新失败」，
+        # 同一天本该响的 0 行告警也被吞掉（评审探针实测）。
+        _t_ss = time.monotonic()
+        _ss = None
+        try:
+            import sell_strike_ledger as _ssl
+            import sell_strike_report as _ssr
+            _ss = _ssl.run_for_date(self.date_str, tickers=sorted(swarm_results.keys()),
+                                    upcoming_fn=self._earnings_date_from_swarm(swarm_results))
+            _ss_pt = _ss.get("per_tenor") or {}
+            _ss_m, _ss_w = _ss_pt.get("monthly") or {}, _ss_pt.get("weekly") or {}
+            # 放弃 / 取不到 K 线 / 待结算（其中过期）都打出来：Twelve Data key 过期时「结算 0」
+            # 与「没有行到期」一模一样，只有这几个数分得开（过期待结算另由 run_for_date 打 warning）。
+            _ss_tot = {_k: sum(int(_v.get(_k) or 0) for _v in _ss_pt.values())
+                       for _k in ("settled", "gave_up", "settle_bars_unavailable", "pending", "pending_overdue")}
+            # 报价来源按档计数：cboe_stale_intraday（收盘后读到盘中文件）的行照记、不进检验——
+            # 不打出来，样本悄悄变少没人知道（09-22 生产 30 只里 4 只）。
+            _log.info("卖权行权价账本已更新: %s (月度 记录 %d / 不可得 %d · 周度 记录 %d / 不可得 %d"
+                      " · 结算 %d · 放弃 %d · 取不到 K 线 %d · 待结算 %d（其中过期 %d）"
+                      " · 报价来源 月度 %s / 周度 %s)", self.date_str,
+                      _ss_m.get("recorded", 0), sum((_ss_m.get("unavailable") or {}).values()),
+                      _ss_w.get("recorded", 0), sum((_ss_w.get("unavailable") or {}).values()),
+                      _ss_tot["settled"], _ss_tot["gave_up"], _ss_tot["settle_bars_unavailable"],
+                      _ss_tot["pending"], _ss_tot["pending_overdue"],
+                      _ss_m.get("price_source") or {}, _ss_w.get("price_source") or {})
+            # run_for_date 把每档 record / settle 的异常收进 per_tenor[*]["errors"]（不连坐另一档），
+            # 不往外抛——这里不打出来，一档账本天天写不进去也不会有任何东西响。
+            _ss_errors = [_e for _v in _ss_pt.values() for _e in (_v.get("errors") or [])]
+            if _ss_errors:
+                _log.warning("卖权行权价账本部分失败(非致命): %s", _ss_errors)
+            # 0 行可记（CBOE 全线不可得 / 快照模式没有原始链 / 水平地图全挂 / 窗口里没到期日）
+            # 同样要响，不然账本静默断供。原因取**行上**的 unavailable_reason（按档），不取 fetch_reasons：
+            # 后者只管取数这一步，取数成功而行构造失败时它写的是 ok，诊断就自相矛盾了。
+            # **按档判、按档响**：原先只在两档**都** 0 行时才响——回归把某一档对全部票清空（例如那档的
+            # 到期窗口 / 行构造坏了）而另一档照常，就只剩一条 INFO，那一档账本天天断供没人知道。
+            # 档名以 `TENORS` 为准再并上返回里多出来的：run_for_date 漏返回一档，也按 0 行响。
+            # 原因字典原样打印，不认具体键（熔断 / 时间预算等新原因加进来不用改这里）。
+            if swarm_results:
+                for _tn in dict.fromkeys([*_ssl.TENORS, *_ss_pt]):
+                    _tv = _ss_pt.get(_tn)
+                    if _tv is None or not _tv.get("recorded"):
+                        _log.warning("卖权行权价账本今日%s（%s）0 行可记：%d 只票这一档全部不可得，原因 %s",
+                                     {"monthly": "月度", "weekly": "周度"}.get(_tn, _tn), _tn,
+                                     len(swarm_results),
+                                     _tv.get("unavailable") if _tv is not None else "run_for_date 未返回该档")
+        except Exception as e:
+            _log.warning("卖权行权价账本更新失败(非致命): %s", e)
+        # freeze=True：预注册检验首次就绪时在这里跑并冻结——全仓**唯一**传 True 的地方（MCP / CLI 只读，
+        # 就绪但未冻结时显示「已就绪，等待日报冻结」）。一次不可逆的写只许一个写者。
+        if _ss is not None:
+            try:
+                _log.info("卖权行权价本地报告: %s", _ssr.write_local_report(self.date_str, freeze=True))
+            except Exception as e:
+                _log.warning("卖权行权价本地报告写入失败(非致命，账本已更新): %s", e)
+        _timing.record("sell_strike", time.monotonic() - _t_ss)
+
         # ── v0.45.104: 三个新小节必须在**这里**回填，不能在 _build_swarm_report 里拼 ──
         # 二次复查实测：`_build_swarm_report`（run_swarm_scan 里早一行）先渲染 markdown，
         # `_post_scan_notify`（本方法）才跑上面三个钩子。于是渲染层读到的是钩子跑之前的
@@ -2260,6 +2326,9 @@ class AlphaHiveDailyReporter:
                     _opts_signal = _or.get("signal_summary", _opts_signal)
                 except Exception as _oe:
                     _log.debug("期权数据获取失败 %s: %s", _tk, _oe)
+            # v0.45.349 世代印记（与 OracleBee 各路径同一字面量）：合成回退里的分数同样出自本版代码、
+            # 不含 gex_signal。不写的话，某天走到这条回退，边界判别会把「缺键」读成旧代码 ⇒ 误报 boundary_too_early。
+            _oracle_details["gex_signal_in_score"] = False
             # ── BuzzBee discovery（含 F&G）──
             _buzz_disc = ""
             if _fg_value is not None:
@@ -2832,11 +2901,13 @@ def main():
     # 2026-09-01~11 六次被拒无人发现（告警那条规则读的 deploy_status 从来没人写）。
     _git_push = None
     _git_commit = None
+    _gh_pages = None
     try:
         with _timing.timed("deploy"):
             sync_results = reporter.auto_commit_and_notify(report)
         _git_push = sync_results.get("git_push")
         _git_commit = sync_results.get("git_commit")
+        _gh_pages = sync_results.get("gh_pages")   # v0.45.351：此前 gh-pages 结局不进 status.json
         git_ok = sync_results.get("git_push", {}).get("success", False)
         deploy_env = sync_results.get("deploy_env", "production")
         remote_label = sync_results.get("git_push", {}).get("remote", "origin")
@@ -2851,16 +2922,21 @@ def main():
                       f"{', '.join(_left[:5])}" + (" …" if len(_left) > 5 else ""))
         else:
             print(f"   GitHub push : {'✅' if git_ok else '⚠️  失败'} → 🧠 生产环境 https://wangmingjie36-creator.github.io/alpha-hive-deploy/")
+            _ghp_ok = isinstance(_gh_pages, dict) and _gh_pages.get("success") is True
+            print(f"   gh-pages    : {'✅' if _ghp_ok else '⚠️  失败（本轮网站未更新）'}")
         print(f"   Hive App    : ✅ .swarm_results 已落盘，下次启动自动加载")
     except (OSError, ValueError, KeyError, RuntimeError) as e:
         _log.warning("三端同步部分失败: %s", e)
         print(f"   ⚠️  三端同步出错：{e}")
         if _git_push is None:   # 推送之前就抛了：记成失败，不能让「没记录」看起来像「没问题」
             _git_push = {"success": False, "error": f"三端同步抛异常：{type(e).__name__}: {e}"}
+        if _gh_pages is None:   # 同上：gh-pages 部署没跑到
+            _gh_pages = {"success": False, "error": f"三端同步抛异常（gh-pages 未部署）：{type(e).__name__}: {e}"}
 
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
     _timing.write(reporter.date_str, extra={"git_push": _timing.git_push_summary(_git_push),
-                                            "git_commit": _timing.git_commit_summary(_git_commit)})
+                                            "git_commit": _timing.git_commit_summary(_git_commit),
+                                            "gh_pages": _timing.gh_pages_summary(_gh_pages)})
     return report
 
 

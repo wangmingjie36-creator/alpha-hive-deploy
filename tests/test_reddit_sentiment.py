@@ -11,9 +11,10 @@ import pytest
 @pytest.fixture(autouse=True)
 def _clear_reddit_cache(tmp_path, monkeypatch):
     """Clear singleton _holder dict AND RedditSentimentClient._ranking_cache
-    before each test; redirect CACHE_DIR to tmp_path to avoid disk pollution."""
+    before each test; redirect CACHE_DIR to tmp_path to avoid disk pollution.
+
+    （`reddit_breaker` 的逐测试重置 v0.45.344 起由 conftest `_reset_circuit_breakers` 统一做。）"""
     import reddit_sentiment
-    from resilience import reddit_breaker
 
     # Redirect disk cache to tmp_path
     cache_dir = tmp_path / "reddit_cache"
@@ -22,9 +23,6 @@ def _clear_reddit_cache(tmp_path, monkeypatch):
 
     # Reset singleton holder
     reddit_sentiment._holder.clear()
-
-    # Reset circuit breaker so it starts CLOSED
-    reddit_breaker.reset()
 
     yield
 

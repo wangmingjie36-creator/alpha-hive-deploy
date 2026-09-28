@@ -1060,8 +1060,9 @@ class QueenDistiller:
 
         双引擎：规则引擎始终运行作为基础，LLM 引擎在可用时叠加推理。
 
-        升级 #1: GEX 政体联动评分（在方向投票后施加 GEX 调整）
-        升级 #4: 政体条件权重（根据宏观/GEX/IV 动态调整 5 维权重）
+        升级 #1: GEX 政体联动评分 —— v0.45.334 起**只算不加**（诊断值，见步骤 4.5）
+        升级 #4: 政体条件权重（根据宏观/GEX/IV 动态调整 5 维权重）—— v0.45.349 起是 GEX 进评分的
+                 **唯一**通道（OracleBee `gex_signal` 恒 1.0、BearBee 不再读 GEX；见步骤 4.5 注释）
         """
         # 降级护栏：蜂 future 超时 / 抛异常时 alpha_hive_daily_report 会向 agent_results
         # append(None)，而下方 GEX/F&G 预处理循环（line ~874/883/897/924）直接 _r.get(...)，
@@ -1164,20 +1165,46 @@ class QueenDistiller:
         rule_direction = dv["rule_direction"]
         rule_score = dv["rule_score"]
 
-        # ===== 4.5 GEX 政体联动评分（需要 direction）=====
+        # ===== 4.5 GEX 政体诊断（需要 direction）—— v0.45.334 起只算、不加进 rule_score =====
+        # 此前这里把 `GexRegimeModifier` 的 ±0.8 直接加到 rule_score 上，是 GEX 进评分的三条通道之一。
+        # 另两条：① 步骤 0 的 RegimeWeightAdjuster 三值 regime 偏移权重；② OracleBee `options_score`
+        # 里的 `gex_signal`（`options_analyzer.py`：主链 `gamma_exposure < -0.001` 得 2.0、否则 1.0，
+        # None 也按 1.0 ⇒ 经 odds 维进加权分）。v0.45.197 的世代边界只记了 ①。
+        # ⚠️ **本版只断开这一条，② 未动**（改它是评分口径变更，须用户决定）。评审只读重放
+        # 09-11~09-22：去掉 ② 那 +1，210 行里 47 行 final_score 变，中位 0.31、最大 0.38
+        # （47/210 已只读复核；Δ 幅度为评审实测、未复算）。② 同样挂着数据可得性：09-24/25 两天
+        # Oracle `gamma_exposure` 60/60 为 None ⇒ 负 gamma 标的少了那 +1。断开这一条的理由：
+        #   · 它的非零值 67% 来自「正 GEX 且距 flip<2%」分支，而那个 flip 是逐行权价看净 GEX
+        #     变号，结构上贴着现价 ⇒ 「近 flip」大多是定义的产物，不是环境信号；
+        #   · 与数据可得性挂钩：GEX 取不到的日子（09-17 全天 30/30 unknown）没有这笔调整，
+        #     全池分数系统性偏高 ~0.11 ⇒ 分数里混进了「那天 CBOE 好不好用」；
+        #   · 唯一一次量测（`experiments/resonance_boost_insample_report.md` §3.1 逐级 IC）里
+        #     GEX 这一步 +0.003 / +0.005，不显著；没有任何证据说它改善排序。
+        # **继续计算并落盘**（审计轨迹 + 共振前瞻检验 `_REQUIRED` 需要 `gex_regime_mod` 这个键）；
+        # `gex_adjustment` 保留原名、原值，语义变成「算了但没施加」，由 `applied=False` 标明。
+        # 守卫：`tests/test_gex_modifier_disconnected.py`（行为枚举 + AST：生产代码里
+        # gex_adj* 不得进 +/- 运算）。⚠️ 不要接回来——要接先过前瞻检验，并登记世代边界。
+        # （v0.45.349 起）上面的「三条」也不全：还有一条 BearBee `options_bear` 的 `gex < 0 ⇒ ≥5.0`
+        # 地板（经 Bear 分数进步骤 3 的看空上限与 BullVeto），v0.45.334 漏提。用户决定后 v0.45.349 把 ②
+        # 与这条一并中性化（② 恒 1.0 = 原 None 分支，options_score 标度不变；Bear 那段删除），世代边界
+        # 同 09-28。2026-09-27 调查实测（03-10~09-11，close_t7 同日横截面、t 分布）：主链负 GEX 标记组
+        # −2.85pp（n=31 日，p=0.009），加标的控制后 −0.43pp（p=0.67）⇒ 是标的身份、不是时点。
+        # 自此规则引擎（生产 --no-llm）下 GEX 进评分**只剩** ① RegimeWeightAdjuster（全链视图三值 regime，取不到 ⇒ GEX 这项
+        # 不偏移）；本步骤的 `confidence_modifier` 只乘步骤 6 的 band_width（展示量，不进分）。
         try:
             from gex_regime import GexRegimeModifier
-            _gex_modifier = GexRegimeModifier()
-            _gex_mod_result = _gex_modifier.compute(_gex_data, direction=rule_direction)
+            _gex_mod_result = GexRegimeModifier().compute(_gex_data, direction=rule_direction)
             _gex_adj = _gex_mod_result["gex_adjustment"]
             if abs(_gex_adj) > 0.01:
-                _pre_gex = rule_score
-                rule_score = round(max(0.0, min(10.0, rule_score + _gex_adj)), 2)
-                _log.info("[%s] GEX政体调整: %+.2f (%.2f→%.2f) | %s",
-                          ticker, _gex_adj, _pre_gex, rule_score,
-                          _gex_mod_result["regime_description"])
+                _log.info("[%s] GEX政体诊断值 %+.2f（诊断值，未施加；rule_score 仍为 %.2f）| %s",
+                          ticker, _gex_adj, rule_score, _gex_mod_result["regime_description"])
         except Exception as _e_gex:
-            _log.debug("GEX 政体调整失败 (%s): %s", ticker, _e_gex)
+            _log.debug("GEX 政体诊断计算失败 (%s): %s", ticker, _e_gex)
+        # 刻意放在 try 之外：compute 抛异常时 `_gex_mod_result` 是步骤 0 的默认值，
+        # 那条路落盘的也必须带上标记 —— 下游（共振检验 replay、深度报告徽章、
+        # `ic_rerun_readiness.cohort_boundary_evidence`）靠「键缺失 ⇒ 旧记录、当时施加过」
+        # 区分新旧两代，新记录缺键会被误认成旧记录。
+        _gex_mod_result["applied"] = False
 
         # v0.45.247 删：步骤 4.6「Fear & Greed 政体调整」（极度恐惧+看空 +0.3 / +看多 −0.4 等）。
         # 它读的 BuzzBee `fear_greed_value` 从未出现在 AgentResult.details 里 ⇒ 自 2026-03-30
@@ -1259,6 +1286,9 @@ class QueenDistiller:
         confidence_calibration = self._compute_confidence_calibration(
             final_score, dim_scores, dv, present_count)
         # GEX 政体修正置信带宽
+        # v0.45.334 刻意**未动**这一支（它不是评分输入，只改 band_width）。已知既有不一致：
+        # `confidence_band` / `discrimination` 在上面那行就算好了、这里只乘 band_width ⇒
+        # 两者对不上（09-11 起 119 行里 113 行半宽 ≠ band_width）。另开任务处理，别顺手改。
         _gex_conf_mod = _gex_mod_result.get("confidence_modifier", 1.0)
         if _gex_conf_mod > 1.0 and "band_width" in confidence_calibration:
             confidence_calibration["band_width"] = round(
@@ -1342,7 +1372,7 @@ class QueenDistiller:
             # Enhancement C: ML 反馈权重
             "ml_weight_adjustments": dict(self.ml_adjustments),
             "ml_feedback_enabled": self.ml_feedback_enabled,
-            # 升级 #1: GEX 政体联动
+            # 升级 #1: GEX 政体诊断（v0.45.334 起 applied=False：gex_adjustment 算了但没施加）
             "gex_regime_mod": _gex_mod_result,
             # 升级 #4: 政体条件权重
             "regime_weights_description": _regime_weights_desc,

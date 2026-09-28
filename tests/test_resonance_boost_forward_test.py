@@ -300,6 +300,13 @@ class TestReplayMatchesRealDistill:
         prod_b3 = _distill("SYN", results, no_boost=True, gex=gex)
         detected = prod_b0["resonance"]["resonance_detected"]
         assert detected == (case != "无共振")                       # 前提：夹具真的造出了共振
+        # v0.45.334：负 GEX 用例的记录是**新链**（GEX 只算不加、`applied=False`）。前提断言：
+        # 诊断值确实非零 —— 否则「重放跳过 GEX 步骤」与「GEX 本来就是 0」同形，这个参数化
+        # 就退化成和 gex=None 一样的用例。旧链（缺 applied 键）的复现见 TestReplayFollowsRecordedGexApplied。
+        if gex is not None:
+            mod = prod_b0["gex_regime_mod"]
+            assert mod["gex_regime"] == "negative_gex" and mod["applied"] is False, mod
+            assert abs(mod["gex_adjustment"]) > 0.01, mod
         r0 = fwd.replay(prod_b0, drop_boost=False)
         r3 = fwd.replay(prod_b0, drop_boost=True)
         assert (r0["final"], r0["direction"]) == (pytest.approx(prod_b0["final_score"], abs=fwd.SCORE_TOL),
@@ -310,6 +317,119 @@ class TestReplayMatchesRealDistill:
             assert abs(prod_b0["final_score"] - prod_b3["final_score"]) > 0.05
         else:
             assert prod_b0["final_score"] == prod_b3["final_score"]
+
+
+# ── 3b'. 修订 1（v0.45.334）：重放按记录的 applied 标记复现生产链 ────────────────
+_NEG_GEX = {"regime": "negative_gex", "stock_price": 100.0, "gex_flip": 102.0,
+            "vanna_stress": {"can_flip_gex": False}}
+
+
+def _distill_legacy(monkeypatch, ticker, results, no_boost=False, gex=None):
+    """v0.45.334 **之前**的生产链：方向投票之后把 GexRegimeModifier 的调整加进 rule_score，
+    且记录里**没有** `applied` 键。
+
+    做法：包一层 `_compute_direction_vote`，在它返回后原样执行旧步骤 4.5 的那三行
+    （`abs(g) > 0.01` 才加、clamp 到 [0,10]、round 2）。它是 distill 里唯一的调用点、
+    旧步骤 4.5 紧跟其后，中间没有别的步骤 ⇒ 位置与旧代码逐步相同。g 用**真实**
+    dealer_gex 算（旧生产就是这样），而重放用的是从记录反建的输入 —— 两条路不同源，
+    所以「旧记录能被精确复现」不是同义反复。
+    """
+    from gex_regime import GexRegimeModifier
+    from swarm_agents.queen_distiller import QueenDistiller
+    gex_in = copy.deepcopy(gex or {"regime": "unknown"})
+    orig = QueenDistiller._compute_direction_vote
+
+    def old_vote(self, *a, **k):
+        dv = orig(self, *a, **k)
+        g = GexRegimeModifier().compute(gex_in, direction=dv["rule_direction"])["gex_adjustment"]
+        if abs(g) > 0.01:
+            dv = dict(dv, rule_score=round(max(0.0, min(10.0, dv["rule_score"] + g)), 2))
+        return dv
+
+    with monkeypatch.context() as m:
+        m.setattr(QueenDistiller, "_compute_direction_vote", old_vote)
+        out = _distill(ticker, results, no_boost=no_boost, gex=gex)
+    assert out["gex_regime_mod"].pop("applied") is False   # 现行代码写的；旧记录没有这个键
+    return out
+
+
+class TestReplayFollowsRecordedGexApplied:
+    """修订 1：B0 重放对**新旧两种记录**都要逐位复现生产（两个方向各一条变异）。
+
+    新记录（`applied=False`）：生产没加 GEX ⇒ 重放也不能加。
+    旧记录（缺 `applied`）：生产加了 GEX ⇒ 重放必须加。
+    任一方向错了，窗口里就有一半的行自证失败，检验判「无法判定」。
+    """
+
+    @pytest.mark.parametrize("case", list(_CASES))
+    def test_new_record_is_replayed_without_gex(self, case):
+        """变红的变异：`replay()` 忽略 applied 标记、无条件走 GEX 步骤（即修订前的写法）。"""
+        results = _agent_results(_CASES[case])
+        prod_b0 = _distill("SYN", results, gex=_NEG_GEX)
+        prod_b3 = _distill("SYN", results, no_boost=True, gex=_NEG_GEX)
+        mod = prod_b0["gex_regime_mod"]
+        g = mod["gex_adjustment"]
+        # 前提：这笔诊断值若被施加，改分幅度**超出自证容差**（非零、不被 [0,10] 夹掉）——
+        # 否则「错加了 GEX」也落在容差内，本条对那个变异没有牙。
+        assert mod["applied"] is False, mod
+        for rec in (prod_b0, prod_b3):
+            assert abs(round(max(0.0, min(10.0, rec["final_score"] + g)), 2)
+                       - rec["final_score"]) > 3 * fwd.SCORE_TOL, (rec["final_score"], g)
+        r0 = fwd.replay(prod_b0, drop_boost=False)
+        r3 = fwd.replay(prod_b0, drop_boost=True)
+        # 「一致」= 预注册的自证判据（容差 SCORE_TOL）：重放从记录里取整到两位的
+        # base_score_before_resonance 起算，乘共振加成后与生产的未取整链可差 0.01。
+        assert (r0["final"], r0["direction"]) == (pytest.approx(prod_b0["final_score"], abs=fwd.SCORE_TOL),
+                                                  prod_b0["direction"])
+        assert (r3["final"], r3["direction"]) == (pytest.approx(prod_b3["final_score"], abs=fwd.SCORE_TOL),
+                                                  prod_b3["direction"])
+        assert r0["gex_applied"] is False and r3["gex_applied"] is False
+
+    @pytest.mark.parametrize("case", list(_CASES))
+    def test_legacy_record_is_replayed_with_gex(self, monkeypatch, case):
+        """变红的变异：`gex_was_applied` 把缺键当成「没施加」（`.get("applied", False)`）——
+        v0.45.334 之前的整段窗口会全部自证失败。"""
+        results = _agent_results(_CASES[case])
+        old_b0 = _distill_legacy(monkeypatch, "SYN", results, gex=_NEG_GEX)
+        old_b3 = _distill_legacy(monkeypatch, "SYN", results, no_boost=True, gex=_NEG_GEX)
+        new_b0 = _distill("SYN", results, gex=_NEG_GEX)
+        assert "applied" not in old_b0["gex_regime_mod"]
+        # 前提：旧链与新链在这条夹具上确实分得开、且超出自证容差（否则两个方向的测试是同一条）
+        assert abs(old_b0["final_score"] - new_b0["final_score"]) > 3 * fwd.SCORE_TOL
+        r0 = fwd.replay(old_b0, drop_boost=False)
+        r3 = fwd.replay(old_b0, drop_boost=True)
+        assert (r0["final"], r0["direction"]) == (pytest.approx(old_b0["final_score"], abs=fwd.SCORE_TOL),
+                                                  old_b0["direction"])
+        assert (r3["final"], r3["direction"]) == (pytest.approx(old_b3["final_score"], abs=fwd.SCORE_TOL),
+                                                  old_b3["direction"])
+        assert r0["gex_applied"] is True
+
+    def test_only_literal_false_skips_gex(self):
+        """只认生产会写的字面量 `False`。`None` / `0` 不是生产会写的值，不许被悄悄读成「没施加」。
+
+        变红的变异：把 `is not False` 改成真值判断（`bool(...get("applied", True))`）。
+        """
+        assert fwd.gex_was_applied({"gex_regime_mod": {"gex_regime": "negative_gex"}}) is True
+        assert fwd.gex_was_applied({"gex_regime_mod": {"applied": False}}) is False
+        assert fwd.gex_was_applied({"gex_regime_mod": {"applied": None}}) is True
+        assert fwd.gex_was_applied({"gex_regime_mod": {"applied": 0}}) is True
+        assert fwd.gex_was_applied({}) is True                     # 连 gex_regime_mod 都没有 ⇒ 旧记录
+
+    def test_mixed_window_selfproof_is_complete_and_chain_is_counted(self, monkeypatch):
+        """边界前后混在同一个窗口：真 replay 下两种记录都算「复现」，且两段各计数可见。
+
+        变红的变异：上面两条任一；或删掉 `_evaluate` 里的 `gex_chain` 计数。
+        """
+        results = _agent_results(_CASES["看空共振"])
+        old = _distill_legacy(monkeypatch, "OLD", results, gex=_NEG_GEX)
+        new = _distill("NEW", results, gex=_NEG_GEX)
+        rows = [{"date": "2026-09-23", "ticker": "OLD", "sr": old},
+                {"date": "2026-09-24", "ticker": "NEW", "sr": new}]
+        res = fwd.evaluate(rows, {})
+        assert res["selfproof"] == {"total": 2, "reproduced": 2}, res["selfproof"]
+        assert res["gex_chain"] == {"applied": 1, "not_applied": 1}
+        assert res["status"] == "not_ready"
+        assert not (_EFFECT_KEYS & set(_all_keys(json.loads(json.dumps(res, default=str)))))
 
 
 # ── 3c. 取数与 run() 的「永远说还没样本」防线 ─────────────────────────────────

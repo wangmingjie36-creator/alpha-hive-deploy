@@ -410,6 +410,12 @@ class TestMLEstimatorGenerations:
     MUST_BE_ENUMERATED = frozenset({
         ("2026-09-06", "v0.45.137+v0.45.140+v0.45.141"),
         ("2026-09-07", "v0.45.146+v0.45.147"),
+        # 09-28：v0.45.334（final_score 特征的上游定义变了，GexRegimeModifier 断开）登记时标签是 "v0.45.334"；
+        # v0.45.349 照 v0.45.146+v0.45.147 的先例并成同日合并标签（本表日期唯一），顺带补登当时漏登的 v0.45.340。
+        # 改的是标签不是日期：改名时 09-28 尚未到来、该代 0 份报告 —— 是**有意**改写本最小集合，不是条目消失。
+        # v0.45.357 再扩一段（日报 VIX 当日收盘 ⇒ risk_adj_score / volatility / final_score 特征），同理有意改写。
+        # v0.45.366 再扩一段（补跑的 Guard 宏观票对齐目标日，同一组特征、只在补跑行变），同理有意改写。
+        ("2026-09-28", "v0.45.334+v0.45.340+v0.45.349+v0.45.357+v0.45.366"),
     })
 
     def test_no_known_generation_has_vanished(self):
@@ -518,10 +524,20 @@ class TestGenerationVisibleToHumans:
 
     @staticmethod
     def _rows_two_generations():
-        """一半落在首条边界之前、一半在最新边界之后。"""
+        """一半落在首条边界之前、一半在最新边界之后。
+
+        v0.45.334：「最新边界之后」那一半的日期**从登记表末条派生**。此前写死 09-08~09-12，
+        那只在 09-07 那条是末条时成立；追加 09-28 一代（原定 09-24）后它们落进了倒数第二代，
+        `test_latest_filter_scores_one_generation_only` 照规矩追加就红（与本文件
+        `test_boundary_partitions_days` 改成派生是同一个理由：每加一代就手改日期的夹具，
+        改着改着就会被改成恒真）。
+        """
+        from datetime import date, timedelta
+        last = date.fromisoformat(PS._ML_ESTIMATOR_GENERATIONS[-1][0])
         old = [{"date": f"2026-08-{(i % 28) + 1:02d}", "ticker": f"T{i}", "hit": i % 2}
                for i in range(60)]
-        new = [{"date": f"2026-09-{8 + (i % 5):02d}", "ticker": f"U{i}", "hit": (i + 1) % 2}
+        new = [{"date": (last + timedelta(days=i % 5)).isoformat(), "ticker": f"U{i}",
+                "hit": (i + 1) % 2}
                for i in range(40)]
         rows = old + new
         ml = {(r["date"], r["ticker"]): 40.0 + (i % 40) for i, r in enumerate(rows)}

@@ -91,31 +91,35 @@ class TestRealDataUnchanged:
 
     def test_full_row_is_byte_identical_to_legacy(self):
         """五项齐全时的输出必须与 v0.45.113 之前逐字节一致。
-        生产 1342 条齐全条目实测 0 处变化。"""
+        生产 1342 条齐全条目实测 0 处变化。
+
+        v0.45.352：颜色从硬编码 hex 换成站点令牌（`#28a745` → `var(--bull)` 等，
+        重做 v0.45.77 的意图）。本条防的是「粗暴实现把所有维度都渲染成 —」，
+        不是锁调色板——只把颜色字面量换掉，结构逐字节不变。"""
         expected = (
             '<div class="dim-dq-row">'
             '<span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span>'
-            '<span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span>'
+            '<span class="dq-bar"><span class="dq-fill" style="width:87%;background:var(--bull);"></span></span>'
             '<span class="dq-val">87%</span></span>'
             '<span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span>'
-            '<span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span>'
+            '<span class="dq-bar"><span class="dq-fill" style="width:100%;background:var(--bull);"></span></span>'
             '<span class="dq-val">100%</span></span>'
             '<span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span>'
-            '<span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span>'
+            '<span class="dq-bar"><span class="dq-fill" style="width:100%;background:var(--bull);"></span></span>'
             '<span class="dq-val">100%</span></span>'
             '<span class="dq-item" title="赔率 数据质量 85%"><span class="dq-lbl">赔率</span>'
-            '<span class="dq-bar"><span class="dq-fill" style="width:85%;background:#28a745;"></span></span>'
+            '<span class="dq-bar"><span class="dq-fill" style="width:85%;background:var(--bull);"></span></span>'
             '<span class="dq-val">85%</span></span>'
             '<span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span>'
-            '<span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span>'
+            '<span class="dq-bar"><span class="dq-fill" style="width:100%;background:var(--bull);"></span></span>'
             '<span class="dq-val">100%</span></span>'
             '</div>'
         )
         assert _build_dim_dq_html(FULL) == expected
 
-    @pytest.mark.parametrize("pct,color", [(90.0, "#28a745"), (80.0, "#28a745"),
-                                           (79.9, "#ffc107"), (50.0, "#ffc107"),
-                                           (49.9, "#dc3545"), (0.0, "#dc3545")])
+    @pytest.mark.parametrize("pct,color", [(90.0, "var(--bull)"), (80.0, "var(--bull)"),
+                                           (79.9, "var(--neut)"), (50.0, "var(--neut)"),
+                                           (49.9, "var(--bear)"), (0.0, "var(--bear)")])
     def test_color_thresholds_unchanged(self, pct, color):
         assert color in _build_dim_dq_html({**FULL, "signal": pct})
 

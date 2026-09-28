@@ -14,7 +14,7 @@
 - 状态目录（原样拷贝 jsonl/json，保持仓库相对路径不变）：
   `hedge_state/ paper_portfolio_state/ options_paper_state/ vrp_state/
   probability_scorecard_state/ ml_model_history/ self_analysis_briefs/
-  db_snapshots/`
+  db_snapshots/ sell_strike_state/`
 - 根目录文本文件：`weight_history.jsonl pheromone_fallback.jsonl
   ml_model.json ml_model_cache.json ml_model_extended.json`
 
@@ -48,6 +48,11 @@ STATE_DIRS: list[str] = [
     # 阶段 5 后代码检出里那份冻结，新内容只写数据根 ⇒ 不进这里就零异地副本。
     # `report_snapshots/` 是 weekly_optimizer / self_analyst 的 T+7 样本，连 gh-pages 都没有它。
     "report_snapshots", "paper_portfolio_state_backup", "reports",
+    # v0.45.333 卖权行权价前向账本（月度/周度 jsonl 分片 + 本地 md 报告）。攒数期数据、丢了无法回溯
+    # 重取（当日的 CBOE 双边报价与 OI 事后拿不到），但用户要求**不上公开网站**：它被 .gitignore
+    # 忽略、也**不在** report_deployer.REPORT_ARTIFACT_PATHS 里（那是自动提交进代码仓库）——
+    # 耐久性只靠这里的私有备份。
+    "sell_strike_state",
 ]
 ROOT_FILE_GLOBS: list[str] = [
     "weight_history.jsonl", "pheromone_fallback.jsonl",

@@ -338,6 +338,30 @@ def _classify_vix(vix: float) -> str:
     return "spike"
 
 
+# v0.45.357：`cboe_vix.get_vix_observation` 带出的元数据 → 宏观输出里的键名。
+# 降级路径（base）也带齐这些键、值为 None —— 同 v0.45.92 的理由：「键不存在」
+# 与「键在、值为 None」不可区分，就是本项目治过多次的静默降级形态。
+_VIX_OBS_KEYS = {
+    "vix_feed": "feed",                  # delayed_quote（当日收盘）| history_csv（CSV 最后一行）
+    "vix_feed_note": "quote_reason",     # 报价没被采用的原因（before_close / quote_unavailable …）
+    "vix_history_fetch": "history_fetch",  # download | cache_fresh | cache_stale（下载失败）…
+    "vix_lag_sessions": "lag_sessions",  # 落后最新一场已收完的 VIX 几个交易日
+    "vix_stale": "stale",                # as_of 早于扫描日的前一交易日 ⇒ GuardBee 不计这票
+    "vix_quote_check": "quote_check",    # 报价收盘 vs 次日 CSV 官方收盘的核对账本摘要
+}
+
+
+def _vix_obs_fields(obs: Dict) -> Dict:
+    return {k: (obs or {}).get(src) for k, src in _VIX_OBS_KEYS.items()}
+
+
+def _vix_change_pct(vix, prev) -> Optional[float]:
+    """同一对观测（当前值与**它自己的**前一收盘）的变动百分比；缺一个就是 None。"""
+    if isinstance(vix, (int, float)) and isinstance(prev, (int, float)) and prev > 0:
+        return round((vix / prev - 1) * 100, 2)
+    return None
+
+
 def _fetch_macro_data() -> Dict:
     """内部：实际拉取宏观数据"""
 
@@ -366,6 +390,15 @@ def _fetch_macro_data() -> Dict:
         # 且 mode 明写 fallback，不冒充 realtime。
         "as_of": None,
         "as_of_mode": "fallback",
+        # v0.45.352：VIX 的 CBOE 观测日与前一收盘（仅 CBOE 路径有值，其余 None；
+        # v0.45.366 起补跑取 CSV 目标日那一行时也有值）。
+        "vix_as_of": None,
+        "vix_prev_close": None,
+        "vix_prev_as_of": None,
+        # v0.45.357：与 `vix` 同一对观测算出的变动；取不到就是 None（旧兜底 0.0 冒充「持平」）。
+        # 以及 VIX 怎么拿到的、新不新鲜（`_vix_obs_fields`）。
+        "vix_change_pct": None,
+        **{k: None for k in _VIX_OBS_KEYS},
     }
 
     try:
@@ -438,24 +471,70 @@ def _fetch_macro_data() -> Dict:
         # 而当天真实 VIX 是 14.25。CBOE 的 VIX_History.csv 无 key、无限流。
         _cboe_vix = None
         _vix_src_override = ""
-        # v0.45.59：补跑时 VIX 取目标日快照里的观测值。
-        # 实时问 CBOE 拿到的是**今天**的 VIX —— 对 8/27 的报告是错的，
-        # 而 market.json 里正躺着当天 17:05 ET 抓下的真值。
+        _vix_as_of = _vix_prev_close = _vix_prev_as_of = None
+        _vix_obs: Dict = {}
+        # v0.45.59：补跑时 VIX 必须是**目标日**的 —— 实时问 CBOE 拿到的是今天的。
+        #
+        # v0.45.366：目标日的值改取 CBOE CSV 里 **D 那一行**（官方收盘），不再先信快照的 `vix_spot`：
+        # 云端 17:05 ET 抓它时 CSV 还没追加 D 行 ⇒ 08-27/28/31 三份补跑日报与 08-26~09-11 那 12 份
+        # market.json 全落后一场；且快照不记观测日，分辨不出哪天是对的。补跑是事后跑，D 行早已在 CSV 里。
+        # 取到 ⇒ 标 `cboe`（与实时同一种观测：CBOE 某场的官方收盘，观测日见 `vix_as_of`，GuardBee 照常计票，
+        # 用户 2026-09-28 决定）；取不到 ⇒ 退回快照值、标 `cloud_snapshot_cboe`（无观测日，Guard 不计票）。
+        #
+        # ⚠️ 快照模式下**绝不**落到下面的实时 `get_vix_observation()`：快照缺 `vix_term`（`load_market`
+        # 剔除了兜底段）或整份 market.json 缺失时，旧代码会把**运行当天**的 VIX 贴到 D 上、标 `cboe`、
+        # `vix_stale=False` ⇒ Guard 拿今天的数给过去某天投票（2026-09-28 离线复现；历史上 0 次触发）。
         if _snap:
             try:
-                _vt = ((_snap.get("market") or {}).get("cboe") or {}).get("vix_term") or {}
-                _sv = _vt.get("vix_spot")
-                if isinstance(_sv, (int, float)) and _sv > 0:
-                    _cboe_vix = float(_sv)
-                    _vix_src_override = "cloud_snapshot_cboe"
-            except Exception as _e_sv:  # noqa: BLE001
-                _log.debug("快照 VIX 读取失败: %s", _e_sv)
-        if _cboe_vix is None:
+                from cboe_vix import get_vix_observation_asof as _cboe_vix_asof
+                _vix_obs = _cboe_vix_asof(_as_of) or {}
+            except Exception as _e_asof:  # noqa: BLE001 - 取不到就走快照退路，但要看得见
+                _log.warning("补跑 VIX：CBOE CSV 取目标日 %s 失败，退回快照值: %s", _as_of, _e_asof)
+                _vix_obs = {"quote_reason": f"asof_error:{type(_e_asof).__name__}"}
+            if _vix_obs.get("vix") is not None:
+                _cboe_vix = _vix_obs["vix"]
+                _vix_as_of = _vix_obs.get("as_of")
+                _vix_prev_close = _vix_obs.get("prev_close")
+                _vix_prev_as_of = _vix_obs.get("prev_as_of")
+            else:
+                try:
+                    _vt = ((_snap.get("market") or {}).get("cboe") or {}).get("vix_term") or {}
+                    _sv = _vt.get("vix_spot")
+                    # 只判 `> 0` 挡不住兜底常量 15.0（`cboe_fetcher` 拿不到期货时整组落
+                    # 15.0/15.75/16.5、标 `default_fallback`）。生产路径上 `load_market` 已先剔除该段，
+                    # 这里再判一次，不让直接喂未过滤 market 的调用方把兜底值当观测。
+                    if (_vt.get("source") != "default_fallback"
+                            and isinstance(_sv, (int, float)) and 5.0 <= _sv <= 150.0):
+                        _cboe_vix = float(_sv)
+                        _vix_src_override = "cloud_snapshot_cboe"
+                        _vix_obs["feed"] = "cloud_snapshot"
+                except Exception as _e_sv:  # noqa: BLE001
+                    _log.debug("快照 VIX 读取失败: %s", _e_sv)
+                if _cboe_vix is None:
+                    _log.warning("补跑 %s：CBOE CSV 与快照都给不出 VIX（%s）",
+                                 _as_of, _vix_obs.get("quote_reason"))
+        # v0.45.352：同一份 CBOE 历史里取最后两行 —— 当前值（= get_vix_spot 的口径）
+        # 连同**它自己的观测日**，外加前一收盘。仪表板宏观条的 VIX 涨跌只用这对：
+        #   · `vix_change_pct` 对不上 `vix`：它来自 yfinance 那条腿。CBOE 的 CSV 在
+        #     17:00 ET 扫描时通常还没更新当日，于是 `vix` 是**上一交易日**收盘，而
+        #     `vix_change_pct` 是当日的（09-11 实测：vix=17.84=CBOE 09-10 收盘，
+        #     vix_change_pct=−11.21%=09-11 当日 15.84/17.84−1）。两者拼起来就错位一天。
+        #   · 拿两份日报的 `vix` 相减也不行：没有日期，CBOE 缓存陈旧时两天会读到同一个
+        #     收盘（09-24 / 09-25 都是 09-22 的 14.21），相减得一个假的「+0.0」。
+        #
+        # v0.45.357：改走 `cboe_vix.get_vix_observation` —— 17:00 ET 扫描时 CSV 还没有当日行，
+        # 先试收盘后的延迟报价（时间戳必须证明是这一场收盘），拿不到才退回 CSV 最后一行；
+        # 连同取数方式、落后几场、是否陈旧一起带出（见 `_VIX_OBS_KEYS`）。
+        # v0.45.366：只在实时口径走这里（快照模式见上，绝不回落实时 VIX）。
+        if _cboe_vix is None and not _snap:
             try:
-                from cboe_vix import get_vix_spot as _cboe_vix_spot
-                _spot = _cboe_vix_spot()
-                if _spot:
-                    _cboe_vix = _spot[0]
+                from cboe_vix import get_vix_observation as _cboe_vix_obs
+                _vix_obs = _cboe_vix_obs() or {}
+                if _vix_obs.get("vix") is not None:
+                    _cboe_vix = _vix_obs["vix"]
+                    _vix_as_of = _vix_obs.get("as_of")
+                    _vix_prev_close = _vix_obs.get("prev_close")
+                    _vix_prev_as_of = _vix_obs.get("prev_as_of")
             except Exception as _e_cv:  # noqa: BLE001
                 _log.debug("CBOE VIX 不可用，回落 yfinance: %s", _e_cv)
 
@@ -466,7 +545,14 @@ def _fetch_macro_data() -> Dict:
                 _partial = dict(base)
                 _partial["vix"] = _cboe_vix
                 _partial["vix_regime"] = _classify_vix(_cboe_vix)
-                _partial["vix_source"] = "cboe"
+                # v0.45.366：旧代码此处写死 "cboe" ⇒ 补跑时快照值（无观测日）在其余宏观全灭的日子
+                # 被冒标成实时观测、进 Guard 计票。标签与正常路径同一个来源判定。
+                _partial["vix_source"] = _vix_src_override or "cboe"
+                _partial["vix_as_of"] = _vix_as_of
+                _partial["vix_prev_close"] = _vix_prev_close
+                _partial["vix_prev_as_of"] = _vix_prev_as_of
+                _partial["vix_change_pct"] = _vix_change_pct(_cboe_vix, _vix_prev_close)
+                _partial.update(_vix_obs_fields(_vix_obs))
                 _partial["summary"] = f"宏观数据不可用（VIX {_cboe_vix:.1f} 来自 CBOE，其余降级）"
                 return _partial
             return base
@@ -482,7 +568,15 @@ def _fetch_macro_data() -> Dict:
         else:
             vix = data.get("VIX", {}).get("last", 20.0)
             _vix_source = "yfinance" if "VIX" in data else "fallback"
-        vix_change = data.get("VIX", {}).get("change_pct", 0.0)
+        # v0.45.357：变动必须与 `vix` 出自**同一对**观测。旧写法恒取 yfinance 那条腿，
+        # 而 `vix` 是 CBOE 的上一场收盘 ⇒ 错位一天（09-11：vix=17.84 是 09-10 收盘，
+        # vix_change_pct=−11.21% 却是 09-11 当日），喂给下面的「VIX 单日飙升」逆风晚报一天。
+        # 快照 VIX 没有配对的前一收盘 ⇒ None；yfinance 路径本就同出一份日 K ⇒ 照用；
+        # 缺 VIX 时旧默认 0.0（冒充「持平」）改为 None。
+        if _cboe_vix is not None:
+            vix_change = _vix_change_pct(vix, _vix_prev_close)
+        else:
+            vix_change = data["VIX"].get("change_pct") if "VIX" in data else None
 
         vix_regime = _classify_vix(vix)
 
@@ -572,7 +666,8 @@ def _fetch_macro_data() -> Dict:
                 _set_curve(fred_data["treasury_2y"], "fred")
 
         # ---- 板块轮动 ----
-        sector_rotation = _fetch_sector_rotation(yf)
+        # v0.45.366：补跑对齐目标日（旧：`period="5d"` 永远取最近 5 天，GuardBee 的板块票是运行当天的）
+        sector_rotation = _fetch_sector_rotation(yf, as_of=_as_of)
 
         # ---- 宏观综合评分（0-10）----
         # 越多顺风 → 分越高
@@ -636,8 +731,9 @@ def _fetch_macro_data() -> Dict:
 
         if vix_regime in ("high", "spike"):
             headwinds.append(f"VIX {vix:.1f}（市场恐慌{'' if vix_regime=='high' else '极度'}升温）")
-        if vix_change > 10:
-            headwinds.append(f"VIX 单日飙升 {vix_change:+.1f}%（波动率冲击）")
+        if vix_change is not None and vix_change > 10:
+            _vspan = f"{_vix_prev_as_of}→{_vix_as_of}，" if _vix_as_of and _vix_prev_as_of else ""
+            headwinds.append(f"VIX 单日飙升 {vix_change:+.1f}%（{_vspan}波动率冲击）")
         if rate_env == "high" and tnx_change > 2:
             headwinds.append(f"10Y 利率 {tnx:.2f}% 持续走高（压制成长估值）")
         if dollar_trend == "strong":
@@ -730,7 +826,7 @@ def _fetch_macro_data() -> Dict:
             "macro_regime": macro_regime,
             "macro_score": round(score, 1),
             "vix": round(vix, 2),
-            "vix_change_pct": round(vix_change, 2),
+            "vix_change_pct": round(vix_change, 2) if vix_change is not None else None,
             "vix_regime": vix_regime,
             "treasury_10y": round(tnx, 3),
             "treasury_2y": treasury_2y,
@@ -763,6 +859,13 @@ def _fetch_macro_data() -> Dict:
             "field_sources": dict(_src_map),   # 逐字段来源，空 = 该项走了 yfinance
             "treasury_2y_source": _2y_source,  # treasury_gov / fred / approx_from_5y
             "vix_source": _vix_source,
+            # v0.45.352：只在 CBOE 路径有值（快照退路 / yfinance / 兜底都是 None）。
+            # v0.45.366：补跑取 CSV 目标日那一行（`vix_feed=history_csv_asof`）也算 CBOE 路径。
+            "vix_as_of": _vix_as_of,
+            "vix_prev_close": _vix_prev_close,
+            "vix_prev_as_of": _vix_prev_as_of,
+            # v0.45.357：取数方式 / 新鲜度 / 报价核对（同上；补跑时 `vix_quote_check` 恒 None）
+            **_vix_obs_fields(_vix_obs),
             # v0.45.92：两条路径都给日期戳。
             # `_as_of` 本身**不能动** —— 它是控制流：非 None 会让上面走
             # `_asof_history` 对齐历史日，实时路径填了它会改变取数行为。
@@ -886,9 +989,23 @@ _SECTOR_TO_ETF = {
 }
 
 
-def _fetch_sector_rotation(yf_module=None) -> Dict:
-    """获取 11 个 SPDR 板块 ETF 的 5 日表现，返回板块轮动数据（并行 + 单 ETF 缓存）"""
+def _fetch_sector_rotation(yf_module=None, as_of: Optional[str] = None) -> Dict:
+    """获取 11 个 SPDR 板块 ETF 的 5 日表现，返回板块轮动数据（并行 + 单 ETF 缓存）
+
+    v0.45.366：`as_of`（补跑目标日）给定时对齐到该日 —— 此前恒 `period="5d"` 取**最近** 5 天，
+    补跑时 GuardBee 的板块顺逆风票是运行当天的（同 v0.45.59 治过的国债/SPX 那类错位）。
+    补跑口径：`_asof_history` 取到 D 为止、窗口取末 5 根（与实时 `period="5d"` 同宽）、
+    末根必须**正是 D**（缺 D 那根就不算，不拿 D 之前的冒充）；不读也不写单 ETF 缓存
+    （缓存只按 ETF 键，读了会把实时值混进补跑，写了会把 D 的值混进之后的实时）。
+    结果多带 `as_of` 与 `not_on_as_of`（末根不是 D 的 ETF）两键；实时口径输出不变。
+    """
     result = {"hot": [], "cold": [], "full": {}}
+    _d = None
+    if as_of:
+        import datetime as _dt
+        _d = _dt.date.fromisoformat(as_of)
+        result["as_of"] = as_of
+        result["not_on_as_of"] = []
     try:
         yf = yf_module
         if yf is None:
@@ -896,12 +1013,12 @@ def _fetch_sector_rotation(yf_module=None) -> Dict:
         tickers = list(_SECTOR_ETFS.keys())
         now = time.time()
 
-        # 分离：已缓存 vs 需拉取
+        # 分离：已缓存 vs 需拉取（补跑口径不读缓存）
         to_fetch = []
         performances = []
         with _etf_lock:
             for etf in tickers:
-                cached = _etf_cache.get(etf)
+                cached = None if _d else _etf_cache.get(etf)
                 if cached and (now - cached[0]) < _CACHE_TTL:
                     name, chg = cached[1]
                     performances.append((etf, name, chg))
@@ -912,22 +1029,33 @@ def _fetch_sector_rotation(yf_module=None) -> Dict:
         # 并行拉取缺失 ETF
         def _fetch_one(etf):
             try:
-                t = yf.Ticker(etf)
-                hist = t.history(period="5d", interval="1d")
-                if hist is not None and len(hist) >= 2:
+                if _d is not None:
+                    hist = _asof_history(yf, etf, as_of)
+                    if hist is None or len(hist) < 2:
+                        return None
+                    if hist.index.date[-1] != _d:
+                        result["not_on_as_of"].append(etf)
+                        return None
+                    first_close = float(hist["Close"].iloc[-min(5, len(hist))])
+                    last_close = float(hist["Close"].iloc[-1])
+                else:
+                    t = yf.Ticker(etf)
+                    hist = t.history(period="5d", interval="1d")
+                    if hist is None or len(hist) < 2:
+                        return None
                     first_close = float(hist["Close"].iloc[0])
                     last_close = float(hist["Close"].iloc[-1])
-                    # < 5 防 yfinance sample data ~1.0 哨兵值（ETF 真实价格均 > $5）；
-                    # isfinite 防 NaN——first_close 正常、last_close 是 NaN 时
-                    # `>= 5` 单独挡不住（NaN 只挡得住"分母"这一半）。
-                    if (math.isfinite(first_close) and math.isfinite(last_close)
-                            and first_close >= 5):
-                        chg = round((last_close / first_close - 1) * 100, 2)
-                        # 5 日涨跌 ±50% 以上为数据异常，归零保守处理
-                        if abs(chg) > 50:
-                            chg = 0.0
-                        name = _SECTOR_ETFS[etf]
-                        return (etf, name, chg)
+                # < 5 防 yfinance sample data ~1.0 哨兵值（ETF 真实价格均 > $5）；
+                # isfinite 防 NaN——first_close 正常、last_close 是 NaN 时
+                # `>= 5` 单独挡不住（NaN 只挡得住"分母"这一半）。
+                if (math.isfinite(first_close) and math.isfinite(last_close)
+                        and first_close >= 5):
+                    chg = round((last_close / first_close - 1) * 100, 2)
+                    # 5 日涨跌 ±50% 以上为数据异常，归零保守处理
+                    if abs(chg) > 50:
+                        chg = 0.0
+                    name = _SECTOR_ETFS[etf]
+                    return (etf, name, chg)
             except Exception as e:
                 _log.debug("Sector ETF %s fetch failed: %s", etf, e)
             return None
@@ -941,8 +1069,9 @@ def _fetch_sector_rotation(yf_module=None) -> Dict:
                         etf, name, chg = fetched
                         performances.append(fetched)
                         result["full"][etf] = (name, chg)
-                        with _etf_lock:
-                            _etf_cache[etf] = (time.time(), (name, chg))
+                        if _d is None:          # 补跑口径不写缓存（见 docstring）
+                            with _etf_lock:
+                                _etf_cache[etf] = (time.time(), (name, chg))
 
         if performances:
             performances.sort(key=lambda x: x[2], reverse=True)
@@ -958,6 +1087,10 @@ def _fetch_sector_rotation(yf_module=None) -> Dict:
                 result["cold"] = []
     except Exception as e:
         _log.debug("板块轮动数据获取失败: %s", e)
+    if _d is not None and result["not_on_as_of"]:
+        result["not_on_as_of"].sort()
+        _log.warning("补跑板块轮动 %s：%d 只 ETF 没有该日日K，未计入（%s）",
+                     as_of, len(result["not_on_as_of"]), ", ".join(result["not_on_as_of"]))
     return result
 
 

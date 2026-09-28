@@ -142,10 +142,20 @@ class BearBeeContrarian(BeeAgent):
             if iv_skew is not None and iv_skew > 1.15:
                 options_bear = max(options_bear, 6.5)
                 bearish_signals.append(f"IV Skew {iv_skew:.2f}（看跌期权溢价偏高）")
+            # v0.45.349：此处原有 `gex < 0 ⇒ options_bear ≥ 5.0` + 看空信号「GEX 负值（做市商助跌）」，已删。
+            # 它是 2026-03-06 提交 2d757b09 加的（不是 gex_signal 那次 02-24 批量提交；同一提交才让 OracleBee
+            # 发布的 gex 不再恒为 None），读的是 OracleBee 主链截断 GEX 的朴素符号（与 options_analyzer 的
+            # gex_signal 同一个量、同版中性化）。2026-09-27 实测（`.swarm_results` 全史 03-10~09-25 共 1761 行，
+            # 只读）：负 GEX 178 行，分支执行 157 行；真正抬高 options_bear 的至多 84 行（记录值恰为 5.0）、
+            # 按记录重放 79 行，其中 60 行 GEX 是唯一的期权看空来源；标记组的前瞻收益差加标的控制后消失（p=0.67）。
+            # 删除的连带：被它抬高且 Oracle 看空的行，下面的 5.5 下限（判 `< 5.0`）不再被 5.0 挡住 ⇒ 5.0→5.5；
+            # 看空信号少一条 ⇒ confidence 的 0.1·信号数 项变小（未封顶的行才看得出）；「GEX 负值」是唯一
+            # 看空信号的行落入 `_compute_bear_score` 的无信号分支。都在 v0.45.349 已声明的世代闭包内。
+            # 数字与理由全文：ic_rerun_readiness._COHORT_HISTORY 的 v0.45.349 条、options_analyzer.generate_options_score
+            # 的 GEX 注释；守卫 tests/test_gex_oracle_bear_neutralized.py。
+            # 下面的 `gex` 只进 options_data：规则分不读它；LLM 模式下经 `generate_bear_thesis` 仍影响 bear 分
+            # （按 0.45 融合，本版未动，用户决定）。
             gex = _od.get("gex")
-            if gex is not None and gex < 0:
-                options_bear = max(options_bear, 5.0)
-                bearish_signals.append(f"GEX 负值 {gex:,.0f}（做市商助跌）")
 
             if oracle_entry.direction == "bearish" and options_bear < 5.0:
                 options_bear = max(options_bear, 5.5)

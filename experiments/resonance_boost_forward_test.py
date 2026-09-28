@@ -46,6 +46,29 @@
 附带  （不参与判定）按行数加权 ΔIC、纸面组合入场资格变化行数（闸门读
       `paper_portfolio.CONFIG`）、检验期内 `ic_rerun_readiness._COHORT_HISTORY` 新增的世代边界条数。
 
+────────────────────────────────────────────────────────────────────
+修订 1（v0.45.334，2026-09-23，事后修订；盲化期内、0/10 合格周、未看任何效应量）
+────────────────────────────────────────────────────────────────────
+写这条时前瞻窗口（09-15 起 5 个扫描日、150 条 predictions）**0 条**已到期
+（`close_t7`/`spy_return_t7` 全空，只读核对），任何效应量都还算不出来 ⇒ 修订不可能受结果影响。
+改了什么  生产自 v0.45.334 起去掉 `GexRegimeModifier` 对 rule_score 的直接加减分（仍计算，落盘为
+      诊断值，`gex_regime_mod.applied = False`）。`replay()` 的 GEX 步骤随之改为按**记录自己的**
+      `applied` 标记走：缺这个键（v0.45.334 之前的记录，当时确实施加了）⇒ 照旧走；
+      `applied is False` ⇒ 不走。即重放复现的是「产生这条记录的那条生产链」。
+没改什么  H1、度量（ΔIC = IC(B3) − IC(B0)）、自证门槛与容差、MIN_CS、检视点与 α、盲化 —— 全部不变。
+      B0 与 B3 对同一条记录仍走同一条链，唯一差别仍只是共振加成。
+为什么修订而不是推迟断开  修订时自证 70/72（97.2%），窗口里重放 g≠0 的行 34/72；正常 GEX 日
+      12 份里 8~9 份 g≠0。不修订的话，断开后第一个正常扫描日自证率约 73~76/84（87%~90%）< 95%
+      ⇒ 判「无法判定」，且自证率整窗累计、不会自愈 —— 检验等于作废。
+已知代价（修订时就知道，不是看了结果找的理由）  窗口内 B0/B3 的链在 v0.45.334 生效日（原定 09-24，
+      未赶上那次扫描，改为 2026-09-28）前后不同：
+      之前含 GEX 步骤、之后不含。ΔIC 仍是**同日同链**上「有 / 无加成」的配对差，不跨链比较；
+      但 GEX 步骤按标的的政体与方向加减分，会和加成一起决定截面排序 ⇒ 边界前后 ΔIC 的期望
+      可能不同，周序列不是严格同分布。两段各有多少行见输出的 `gex_chain`。
+守卫  `tests/test_resonance_boost_forward_test.py::TestReplayFollowsRecordedGexApplied`
+      （新旧两种记录都按预注册自证判据 —— 方向一致、分数差 ≤ SCORE_TOL —— 复现真 distill 的
+      输出；「新记录错加 GEX」「旧记录漏加 GEX」两个方向各一条变异）。
+
 样本内复核：`--insample` 在 FORWARD_START 之前的样本上，用**现行权重**重算加权分后跑同一条链
 （加权分自证：用当时记录的权重应能复现当时记录的基础分）。它就是生成假设的那份数据，
 **只供复核报告数字，不能拿来确认。**
@@ -167,8 +190,23 @@ def _resonance(ticker: str, results: List[Dict]) -> Dict:
     return board.detect_resonance(ticker)
 
 
+def gex_was_applied(sr: Dict) -> bool:
+    """这条记录产生时，生产有没有把 GEX 调整加进分数（修订 1，v0.45.334）。
+
+    生产自 v0.45.334 起在 `gex_regime_mod` 里写 `applied: False`；此前的记录**没有这个键**，
+    而那时确实施加了 ⇒ 缺键按「施加过」算。只认字面量 `False`：`None`/`0` 之类不是生产
+    会写的值，不该被悄悄解读成「没施加」（那会让旧记录的 GEX 步骤被跳过，自证率掉下来才看得见）。
+    """
+    return (sr.get("gex_regime_mod") or {}).get("applied", True) is not False
+
+
 def replay(sr: Dict, drop_boost: bool, base: Optional[float] = None) -> Dict:
-    """共振 → 三重惩罚 → 投票 → GEX。`drop_boost=True` 即 B3。抛异常由调用方计数。"""
+    """共振 → 三重惩罚 → 投票 → GEX（仅当记录里当时施加过）。`drop_boost=True` 即 B3。抛异常由调用方计数。
+
+    GEX 这一步按**记录自己的** `applied` 标记决定走不走（修订 1，见模块 docstring）：
+    重放要复现的是「产生这条记录的那条生产链」，而生产链在 v0.45.334 前后不同。
+    B0 与 B3 对同一条记录走同一条链，两者唯一的差别仍只是共振加成。
+    """
     from gex_regime import GexRegimeModifier
     from swarm_agents.queen_distiller import QueenDistiller
 
@@ -187,11 +225,13 @@ def replay(sr: Dict, drop_boost: bool, base: Optional[float] = None) -> Dict:
     tp = q._apply_triple_penalty(ticker, pre, results)
     vote = q._compute_direction_vote(ticker, results, results, tp["rule_score"])
     score, direction = vote["rule_score"], vote["rule_direction"]
-    g = GexRegimeModifier().compute(_gex_input(sr), direction=direction)["gex_adjustment"]
-    if abs(g) > 0.01:
-        score = round(max(0.0, min(10.0, score + g)), 2)
+    applied = gex_was_applied(sr)
+    if applied:
+        g = GexRegimeModifier().compute(_gex_input(sr), direction=direction)["gex_adjustment"]
+        if abs(g) > 0.01:
+            score = round(max(0.0, min(10.0, score + g)), 2)
     return {"final": score, "direction": direction, "resonance": bool(z["resonance_detected"]),
-            "resonance_direction": z["direction"], "boost": boost}
+            "resonance_direction": z["direction"], "boost": boost, "gex_applied": applied}
 
 
 def rebase_with_current_weights(sr: Dict, use_recorded_weights: bool = False) -> Optional[float]:
@@ -336,12 +376,16 @@ def evaluate(rows: List[Dict], excess: Dict, *, insample: bool = False,
 
 def _evaluate(rows, excess, *, insample, replay_fn, rebase_fn) -> Dict:
     selfproof = collections.Counter()
+    # 修订 1：两段生产链各有多少行。2026-09-28 之后 `not_applied` 仍为 0 ⇒ 生产没跑到
+    # v0.45.334（或标记没落盘），重放走的仍是旧链 —— 描述量，不含效应量，不破盲。
+    gex_chain = collections.Counter()
     fail_examples: List[str] = []
     pairs: Dict[Tuple[str, str], Tuple[float, float]] = {}
     gate_rows: Dict[Tuple[str, str], Tuple[Dict, Dict]] = {}
     for row in rows:
         sr, key = row["sr"], (row["date"], row["ticker"])
         selfproof["total"] += 1
+        gex_chain["applied" if gex_was_applied(sr) else "not_applied"] += 1
         try:
             base = None
             if insample:
@@ -373,7 +417,8 @@ def _evaluate(rows, excess, *, insample, replay_fn, rebase_fn) -> Dict:
     total = selfproof["total"]
     rate = selfproof["reproduced"] / total if total else None
     out = {"mode": "insample" if insample else "forward", "n_reports": total,
-           "selfproof": dict(selfproof), "selfproof_rate": rate, "fail_examples": fail_examples}
+           "selfproof": dict(selfproof), "selfproof_rate": rate, "fail_examples": fail_examples,
+           "gex_chain": dict(gex_chain)}
     if insample:
         base_rate = selfproof["base_reproduced"] / total if total else None
         out["base_selfproof_rate"] = base_rate
@@ -507,7 +552,8 @@ def _print_human(res: Dict) -> None:
     print("━" * 72)
     print(f"🐝 共振加成前瞻检验（{res.get('mode', '?')}）")
     print("━" * 72)
-    print(f"  报告份数 {res.get('n_reports')}｜自证 {res.get('selfproof')}｜跳过文件 {res.get('skipped_files')}")
+    print(f"  报告份数 {res.get('n_reports')}｜自证 {res.get('selfproof')}｜跳过文件 {res.get('skipped_files')}"
+          f"｜GEX 链（修订 1）{res.get('gex_chain')}")
     for ex in res.get("fail_examples") or []:
         print(f"    不一致样例：{ex}")
     s = res.get("status")

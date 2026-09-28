@@ -76,8 +76,9 @@ SAMPLE_AV_RESPONSE = {
 @pytest.fixture(autouse=True)
 def _isolate_newsapi(tmp_path, monkeypatch):
     """
-    Redirect _CACHE_DIR to tmp_path, reset circuit breaker, reset AV daily
-    quota counter, and mock _load_av_key to return None (prevent AV calls).
+    Redirect _CACHE_DIR to tmp_path, reset AV daily quota counter, and mock
+    _load_av_key to return None (prevent AV calls).
+    （`_news_breaker` 的逐测试重置 v0.45.344 起由 conftest `_reset_circuit_breakers` 统一做。）
     """
     import newsapi_client
 
@@ -85,10 +86,6 @@ def _isolate_newsapi(tmp_path, monkeypatch):
     cache_dir = tmp_path / "news_cache"
     cache_dir.mkdir()
     monkeypatch.setattr(newsapi_client, "_CACHE_DIR", cache_dir)
-
-    # Reset circuit breaker if present
-    if newsapi_client._news_breaker is not None:
-        newsapi_client._news_breaker.reset()
 
     # Reset AV daily quota
     newsapi_client._av_daily["count"] = 0

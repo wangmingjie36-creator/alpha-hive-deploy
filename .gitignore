@@ -113,6 +113,13 @@ DESIGN_BRIEF.md
 .fuse_hidden*
 paper_portfolio_state.bak-*/
 
+# ==================== 卖权行权价前向账本（v0.45.333）====================
+# ⚠️ 与 vrp_state/ options_paper_state/ hedge_state/ **相反**：那三本被跟踪、且在
+# report_deployer.REPORT_ARTIFACT_PATHS 里每日自动提交；本账本用户明确要求**不上公开网站**
+# （月度/周度候选与本地 md 报告都在这里），所以忽略、不进自动提交白名单，耐久性只靠
+# data_backup/export.py 的 STATE_DIRS 私有备份。守卫：tests/test_sell_strike_integration.py。
+sell_strike_state/
+
 # ==================== Claude Code worktrees ====================
 # v0.45.124：`.claude/worktrees/` 是**每台机器各自的**临时 checkout，不该进版本库。
 # 事故：`.claude/worktrees/recursing-hopper` 以 gitlink（mode 160000，裸 commit 指针）

@@ -41,7 +41,7 @@ def _sandbox_home(tmp_path_factory, monkeypatch):
 
 
 # 整个文件套沙箱 HOME：新增的测试即使忘了传路径也不会写真实目录。
-# `_ORCH` 在 import 时已算好、bash 沙箱不读 HOME，所以读编排器的那批不受影响。
+# 读编排器的那批读仓库 `scripts/` 里那份（`__file__` 锚点，v0.45.353），不经 HOME，所以不受影响。
 pytestmark = pytest.mark.usefixtures("_sandbox_home")
 
 
@@ -1129,13 +1129,13 @@ class TestHomeSandboxHasTeeth:
         assert (logs / "backup_status.json").is_file()
 
 
-_ORCH = os.path.expanduser("~/.claude/scripts/alpha-hive-orchestrator.sh")
+from tests._orchestrator import repo_orchestrator_text  # 仓库里那份（v0.45.353）
 _STEP14_RC2_START = "elif [ $STEP14_RC -eq 2 ]; then"
 _STEP14_RC2_END = "elif [ $STEP14_RC -eq 124 ]; then"
 
 
 class TestOrchestratorStep14StageDispatch:
-    """编排器 Step 14 的 rc==2 分支不受版本控制、pytest import 不到——抽出这段
+    """编排器 Step 14 的 rc==2 分支是 bash、pytest import 不到——抽出这段
     真实脚本片段，接进一个最小 bash 沙箱（假 `log()` 收日志、真 `jq` 判断）跑，
     锁定 stage 分发 + 新鲜度校验的行为。
 
@@ -1147,9 +1147,7 @@ class TestOrchestratorStep14StageDispatch:
     """
 
     def _extract_block(self):
-        if not os.path.isfile(_ORCH):
-            pytest.skip("编排器不在本机（仓库外文件）")
-        text = Path(_ORCH).read_text(encoding="utf-8")
+        text = repo_orchestrator_text()
         start = text.index(_STEP14_RC2_START) + len(_STEP14_RC2_START)
         end = text.index(_STEP14_RC2_END, start)
         return text[start:end]
@@ -1237,9 +1235,7 @@ class TestOrchestratorStep14Rc1Dispatch:
     """
 
     def _extract_block(self):
-        if not os.path.isfile(_ORCH):
-            pytest.skip("编排器不在本机（仓库外文件）")
-        text = Path(_ORCH).read_text(encoding="utf-8")
+        text = repo_orchestrator_text()
         start = text.index(_STEP14_RC1_START) + len(_STEP14_RC1_START)
         end = text.index(_STEP14_RC1_END, start)
         return text[start:end]
@@ -1318,9 +1314,7 @@ class TestOrchestratorStep15Dispatch:
     """
 
     def _extract_block(self):
-        if not os.path.isfile(_ORCH):
-            pytest.skip("编排器不在本机（仓库外文件）")
-        text = Path(_ORCH).read_text(encoding="utf-8")
+        text = repo_orchestrator_text()
         start = text.index(_STEP15_START)
         end = text.index(_STEP15_END, start)
         return text[start:end]
@@ -1436,3 +1430,36 @@ class TestExportScopeCoversMoveRules:
         assert (out / "alpha-hive-AAA-ml-enhanced-2026-09-24.html").exists()
         rels = {r["rel"] for r in manifest["root_files"]}
         assert {"alpha-hive-daily-2026-09-24.md", "alpha-hive-AAA-ml-enhanced-2026-09-24.html"} <= rels
+
+
+class TestPushTimeout:
+    """v0.45.345：push 单独放宽超时（09-24 扩大备份范围后首推超 60s 被判 git_error）。"""
+
+    def test_push_gets_longer_timeout_than_local_git_but_fits_step14_budget(self):
+        assert run_backup.GIT_PUSH_TIMEOUT_S >= 180
+        assert run_backup.GIT_PUSH_TIMEOUT_S < 300, "必须留在编排器 Step 14 的 run_step --timeout 300 之内"
+        assert run_backup.GIT_TIMEOUT_S < run_backup.GIT_PUSH_TIMEOUT_S
+
+    def test_push_call_actually_passes_the_push_timeout(self, tmp_path, monkeypatch, _sandbox_home):
+        _bypass_secret_scan(monkeypatch)   # 本类只测超时参数；密钥扫描另有专门的测试类
+        seen = []
+        real = run_backup._run_git
+
+        def spy(args, cwd, timeout=run_backup.GIT_TIMEOUT_S):
+            seen.append((args[0], timeout))
+            if args[0] == "push":
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return real(args, cwd, timeout=timeout)
+
+        monkeypatch.setattr(run_backup, "_run_git", spy)
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        (tmp_path / "bk").mkdir()
+        st = run_backup.run(src, tmp_path / "bk", status_file=tmp_path / "s.json",
+                            history_file=tmp_path / "h.jsonl")
+        assert st["stage"] == "done", st
+        pushes = [t for a, t in seen if a == "push"]
+        assert pushes == [run_backup.GIT_PUSH_TIMEOUT_S], seen
+        assert all(t == run_backup.GIT_TIMEOUT_S for a, t in seen if a != "push")

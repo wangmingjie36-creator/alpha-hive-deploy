@@ -86,10 +86,16 @@ def counters() -> Dict[str, Optional[dict]]:
     的可得性——它取不到时**不回退截断链**，所以「今天有几只标的没有 GEX」是这次
     改动唯一的代价，必须可数而不是可估。两者放在这里是因为编排器已把本文件并进
     status.json，挂上即随每轮扫描落盘，无需改编排器（同 `code_version` 的走法）。
+
+    `cboe_raw`（v0.45.333）：卖权行权价账本取原始链（`fetch_cboe_raw_contracts`）各出口的次数——
+    ok / snapshot_mode / stale_vintage / payload_unavailable / vintage_mismatch / vintage_unverifiable /
+    price_unavailable / no_parseable_contracts 分开数，不折叠。此前这组计数只有 cboe_options 自己和
+    测试读，账本「今天为什么 0 行」只能翻日志拼。
     """
     out: Dict[str, Optional[dict]] = {"yfinance": None, "twelve_data": None,
                                       "cboe": None, "cboe_chain": None,
-                                      "gex_view": None, "options_snapshot": None}
+                                      "gex_view": None, "cboe_raw": None,
+                                      "options_snapshot": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -105,6 +111,7 @@ def counters() -> Dict[str, Optional[dict]]:
         out["cboe"] = cboe_options.payload_stats()
         out["cboe_chain"] = cboe_options.chain_selection_stats()
         out["gex_view"] = cboe_options.gex_view_stats()
+        out["cboe_raw"] = cboe_options.raw_contracts_stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("cboe stats 不可得: %s", e)
     # v0.45.238：期权快照槽位。`session_mismatch` 非零 = 槽位里躺着别的会话的数据
@@ -179,6 +186,31 @@ def git_push_summary(git_push: Optional[dict]) -> Optional[dict]:
     out = {k: git_push[k] for k in _GIT_PUSH_KEYS if k in git_push}
     if git_push.get("output"):
         out["output"] = str(git_push["output"])[:500]
+    return out
+
+
+_GH_PAGES_KEYS = ("success", "action", "attempts", "parent_verified", "tree_unchanged",
+                  "n_changed", "skipped", "reason", "cdn_verified")
+
+
+def gh_pages_summary(gh_pages: Optional[dict]) -> Optional[dict]:
+    """`results["gh_pages"]` 进 status.json 的精简版（v0.45.351）。
+
+    此前 `auto_commit_and_notify` 根本不返回 gh-pages 结局，status.json / 告警对它全盲
+    （2026-09-25 推送失败被重试捷径判成「成功」，网站停两天零告警）。
+    None 原样返回（「没记录」≠「成功」，告警侧记为未执行的检查）。
+    `transport_probe` 只在推送失败时存在（为「是否切 ssh.github.com:443」攒判据），原样保留。
+    """
+    if not isinstance(gh_pages, dict):
+        return None
+    out = {k: gh_pages[k] for k in _GH_PAGES_KEYS if k in gh_pages}
+    if gh_pages.get("commit"):
+        out["commit"] = str(gh_pages["commit"])[:12]
+    reason = gh_pages.get("error") or gh_pages.get("last_error")
+    if reason:
+        out["error"] = str(reason)[:300]
+    if gh_pages.get("transport_probe"):
+        out["transport_probe"] = gh_pages["transport_probe"]
     return out
 
 
@@ -269,6 +301,10 @@ def summary_line(snap: dict) -> str:
     cb = c.get("cboe")
     yf_s = "—" if yf is None else f"{yf.get('calls', '?')}次(429×{yf.get('rate_limited', '?')})"
     td_s = "—" if td is None else f"请求{td.get('fetches', '?')}/命中{td.get('hits', '?')}"
+    if td is not None and td.get("failed"):
+        # v0.45.363：点名失败的标的与原因——BRK-B 恒 404 曾只活在 WARNING 日志里
+        td_s += f"/失败{td.get('failures', '?')}(" + ",".join(
+            f"{t}:{r}" for t, r in sorted(td["failed"].items())) + ")"
     cb_s = "—" if cb is None else f"抓取{cb.get('fetches', '?')}/命中{cb.get('hits', '?')}"
     os_ = c.get("options_snapshot")
     os_s = "—" if os_ is None else (

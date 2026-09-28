@@ -1350,7 +1350,10 @@ def _render_regime_badge(ctx: dict) -> str:
         if flip_pct is not None and flip_pct < 10:
             parts.append(f'<span style="font-size:12px;color:#a3a3a3;">距翻转 {flip_pct:.1f}%</span> ')
 
-        if abs(gex_adj) > 0.01:
+        # v0.45.334：「评分±x」只在这笔调整**真的施加了**时才印。之后的记录
+        # `applied=False`（gex_adjustment 是算了没加的诊断值），照印就是徽章在说谎。
+        # 旧记录没有这个键 ⇒ 当时确实施加了 ⇒ 缺省按已施加处理，历史报告的展示不变。
+        if gex_mod.get("applied", True) is not False and abs(gex_adj) > 0.01:
             adj_color = "#ef4444" if gex_adj < 0 else "#22c55e"
             parts.append(
                 f'<span style="font-size:12px;color:{adj_color};">评分{gex_adj:+.2f}</span> '

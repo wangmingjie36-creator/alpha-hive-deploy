@@ -5,6 +5,7 @@ Alpha Hive 测试 fixtures - 共享 mock 数据 + 隔离数据库
 import sys
 import os
 import pathlib
+import weakref
 import pytest
 
 # 确保项目根目录在 sys.path 中
@@ -138,6 +139,27 @@ def _block_same_day_macro(monkeypatch):
     except Exception:  # pragma: no cover
         return
     monkeypatch.setattr(twelve_data, "api_key", lambda: "")
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_macro_snapshot():
+    """测试结束时 `fred_macro` 的宏观快照必须已卸载；没卸 ⇒ 卸掉并让**留下它的那条**报错（v0.45.366）。
+
+    为什么要有：快照是进程级全局，v0.45.366 起 GuardBee 拿 `get_macro_snapshot()` 判「这次是补跑」
+    （期限结构读快照、FOMC 按目标日数）。一条测试忘了卸，之后同进程里每条调 Guard 的测试都**静默**
+    跑在补跑口径下——绿不绿取决于执行顺序。实测 `test_vix_same_day` 的 `_offline` 只在 setup 卸、
+    teardown 不卸，靠下一条的 setup 兜着才没出事。
+
+    只看已导入的模块（没导入过就不可能装过），不为此 import fred_macro。
+    """
+    yield
+    fm = sys.modules.get("fred_macro")
+    snap = fm.get_macro_snapshot() if fm is not None else None
+    if snap is not None:
+        fm.set_macro_snapshot(None)
+        pytest.fail(f"测试结束时宏观快照仍装着（{snap.get('date')}）：请在 teardown 里 "
+                    "`fred_macro.set_macro_snapshot(None)`——它会让之后的 GuardBee 静默跑在补跑口径下",
+                    pytrace=False)
 
 
 # ==================== 全局离线闸（传输层）====================
@@ -278,6 +300,38 @@ def _offline_transport(request, monkeypatch):
             "若这条测试的意图**就是**打真外网，给它加 @pytest.mark.network。")
 
 
+@pytest.fixture(autouse=True)
+def _block_git_transport_probe(request, monkeypatch):
+    """`git_transport_probe`（v0.45.351）用**裸 socket**（getaddrinfo + TCP connect）探
+    github.com:22 / ssh.github.com:443——上面 `_offline_transport` 挡在 urllib / requests /
+    curl_cffi 库级 API 上，**挡不住它**。而探测在每次 gh-pages 推送失败时都会跑，
+    本仓好几条测试（竞态重试、离线序列）会走到那条路径 ⇒ 不钉死就会真去连 GitHub、
+    每次最多卡 20 秒。
+
+    钉成抛 `_OfflineInTests`（OSError 子类，与真断网同一条降级路径），并记账：
+    需要测探测本身的用例在测试体里 `monkeypatch.setattr` 覆盖这两个函数即可
+    （函数级 monkeypatch 晚于本 autouse fixture 生效）。`network` 标记的用例不钉。
+    """
+    if request.node.get_closest_marker("network"):
+        yield
+        return
+    import git_transport_probe as _gtp
+    calls = []
+
+    def _deny_resolve(host, port):
+        calls.append(("resolve", host, port))
+        raise _OfflineInTests(f"测试默认离线：git_transport_probe 解析 {host}（tests/conftest.py）")
+
+    def _deny_connect(family, sockaddr, timeout):
+        calls.append(("connect", sockaddr))
+        raise _OfflineInTests(f"测试默认离线：git_transport_probe 连接 {sockaddr}（tests/conftest.py）")
+
+    monkeypatch.setattr(_gtp, "_resolve", _deny_resolve)
+    monkeypatch.setattr(_gtp, "_tcp_connect", _deny_connect)
+    request.node._git_probe_calls = calls
+    yield
+
+
 # ==================== 可复用的显式源桩（各模块 opt-in）====================
 #
 # `_offline_transport` 是**兜底**：它让取数失败、行为与真离线一致，但生产代码
@@ -315,9 +369,14 @@ def stub_cboe_vix(monkeypatch):
     ⚠️ 走缓存是刻意保留的既有行为：`cboe_vix` 的缓存是
     `Path(__file__).parent / "cache"`（仓库本地目录，**不受 ALPHA_HIVE_CACHE_DIR
     隔离**），本机热、CI 冷。桩只负责不出网，不改缓存语义。
+
+    v0.45.357：同时钉 `cboe_vix._download_quote` → None（延迟报价，契约同上）。
+    ⚠️ 这一条**只在美东 16:15 之后的交易日**才会被走到（之前 `get_vix_session_close`
+    直接回 `before_close`、不出网）—— 不钉它，同一批测试下午跑红、上午跑绿。
     """
     import cboe_vix
     monkeypatch.setattr(cboe_vix, "_download", lambda: None)
+    monkeypatch.setattr(cboe_vix, "_download_quote", lambda: None)
 
 
 @pytest.fixture
@@ -848,6 +907,82 @@ def _fast_yfinance_limiter(monkeypatch):
             monkeypatch.setattr(_m, "_bucket", fast, raising=False)
 
 
+# ==================== 熔断器状态不许跨测试泄漏（v0.45.344）====================
+
+# 按「类」枚举，不按「实例名单」：两个熔断器类在构造时把自己登记进各自的 WeakSet，
+# 这里只需知道类在哪个模块。新增熔断器（模块级、单例里、测试自建）零改动即被覆盖。
+_BREAKER_CLASSES = (("resilience", "CircuitBreaker"),
+                    ("data_pipeline", "ObservableCircuitBreaker"))
+_BREAKER_RESET_TIMEOUT_S = 2.0
+# 已知卡死的熔断器 → 最早发现它的测试。再遇到只试一次（timeout=0），不再每条等 2s。
+_stuck_breakers = weakref.WeakKeyDictionary()
+
+
+def _reset_live_breakers(where, timeout=_BREAKER_RESET_TIMEOUT_S):
+    """把每个活着的熔断器 reset() 回刚构造的样子；返回重置失败的说明列表（空 = 全部成功）。
+
+    类走 `sys.modules.get`、不 import：模块没被谁 import 过 ⇒ 这一类一个实例都不存在，
+    无事可做；而在 conftest 里 import `resilience` / `data_pipeline` 会把它们提前到
+    收集期（CLAUDE.md「新产物的默认路径」一节：收集期 import 是路径冻结的事故窗口）。
+    """
+    stuck = []
+    for modname, clsname in _BREAKER_CLASSES:
+        mod = sys.modules.get(modname)
+        if mod is None:
+            continue
+        cls = getattr(mod, clsname)     # 模块在、类没了 ⇒ 改名了：让它红，别静默跳过
+        for br in cls.live_instances():
+            known = _stuck_breakers.get(br)
+            try:
+                br.reset(timeout=0 if known else timeout)
+            except Exception as e:      # noqa: BLE001 —— 任何重置失败都要报出来，不吞
+                _stuck_breakers.setdefault(br, where)
+                stuck.append(f"{clsname}[{br.name}]（最早在 {_stuck_breakers[br]} 发现）：{e}")
+            else:
+                _stuck_breakers.pop(br, None)
+    return stuck
+
+
+def _fail_on_stuck_breakers(phase, stuck):
+    if stuck:
+        pytest.fail(
+            f"测试{phase}有熔断器重置不了。锁在测试之间被攥着本身就是 bug —— 多半是某条测试"
+            "留下的线程卡死在锁里（形状见 test_slack_send_whitelist.py::TestBreakerDoesNotDeadlock）；"
+            "阻塞等只会把整套卡死，所以直接红：\n  " + "\n  ".join(stuck),
+            pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_circuit_breakers(request):
+    """每条测试前后把**所有活着的**熔断器重置成刚构造的样子（v0.45.344）。
+
+    熔断状态是进程级全局量：`resilience` 的四个模块级实例、`fred_macro._fred_breaker`、
+    `newsapi_client._news_breaker`、`data_pipeline.get_fetcher()` 单例里各数据源的
+    `ObservableCircuitBreaker`。此前没有套件级隔离，实测（v0.45.343）：A 把
+    `yfinance_breaker` 连记到阈值、不重置，B 断言 `allow_request() is False` **通过**——
+    B 默默吃了 A 漏出来的 OPEN。当时全套零条测试受影响（潜伏，不是活跃），但已经有
+    四个文件各自打了补丁（重置 / 换新实例），说明以前咬过人。
+
+    为什么在同一批对象上 reset，不换新实例：`sec_edgar` / `swarm_agents.cache` /
+    `options_analyzer` 在模块顶部 `from resilience import sec_breaker` / `yfinance_breaker`，
+    各持一份绑定 —— 换掉 `resilience` 上的名字够不到它们（与 `_fast_yfinance_limiter`
+    要逐模块替换是同一个坑）。
+
+    **前后各一次**：开始前那次保证本条干净；结束后那次让「锁被攥着」报在**留下它的那条**
+    测试上，而不是报在无辜的下一条上。拿不到锁不阻塞（见 `_fail_on_stuck_breakers`）。
+    自证：`tests/test_breaker_isolation.py`。
+    """
+    _fail_on_stuck_breakers("开始前", _reset_live_breakers(request.node.nodeid))
+    yield
+    _fail_on_stuck_breakers("结束后", _reset_live_breakers(request.node.nodeid))
+
+
+@pytest.fixture
+def reset_live_breakers():
+    """把 `_reset_live_breakers` 暴露给它的自证测试（`conftest` 不可直接 import）。"""
+    return _reset_live_breakers
+
+
 # ==================== ML 模型产物隔离（v0.45.149）====================
 
 _ML_MODEL_FILES = ("ml_model.json", "ml_model_cache.json", "ml_model_extended.json")
@@ -956,6 +1091,7 @@ _GUARDED_PRODUCTION_ARTIFACTS = (
     "vrp_state",
     "options_paper_state",
     "hedge_state",
+    "sell_strike_state",
 )
 
 
@@ -981,6 +1117,79 @@ def _artifact_signature(path):
             except OSError:
                 acc.append(f"{os.path.relpath(fp, path)}:ERR")
     return "dir:" + "|".join(sorted(acc))
+
+
+def _assert_sell_strike_state_in_sandbox(resolved, tmp_path):
+    """`_isolate_sell_strike_state` 防线①：每个解析结果都是绝对路径、且（词法上）落在 tmp 沙箱内。
+
+    返回 `{名字: 路径字符串}`——只有全部断言都过了才有返回值，所以「记下来的」就是「核对过的」。
+    先断言绝对、再做**纯词法**包含判定（`normpath` 消掉 `..`，不碰 cwd、不 resolve）：
+    `_isolate_env` 把 `ALPHA_HIVE_HOME` 设成 `str(tmp_path)`，正确解析时前缀逐字相同；
+    相对路径若拿 cwd 补全再判，测试期间 cwd 就在 tmp 里、判定恒真（`_assert_default_path_in_sandbox`
+    记的 v0.45.240 同一个坑），而 resolve 未锚定的路径又会被 test_reads_own_checkout 的 cwd 守卫判红。
+    """
+    checked = {}
+    for name, raw in resolved.items():
+        p = pathlib.Path(raw)
+        assert p.is_absolute(), (
+            f"{name} 解析成了相对路径 {raw!r}：测试期间 cwd 在 tmp 里看着无害，"
+            "生产从仓库根跑就会写穿仓库根的卖权账本。")
+        assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+            f"{name} = {p} 逃出了测试沙箱（应在 {tmp_path} 内）。"
+            "多半是它被求值成了模块级常量 / 类属性 / 默认参数（import 期冻结），"
+            "`_isolate_env` 的 setenv 追不上它。改成调用时读 `PATHS.sell_strike_state`。")
+        checked[name] = str(p)
+    return checked
+
+
+@pytest.fixture(autouse=True)
+def _isolate_sell_strike_state(_isolate_env, request, tmp_path):
+    """卖权行权价账本目录的两道防线（v0.45.333，照 `_isolate_ml_model_file` 的写法）。
+
+    ① **setup 正面核对**（`_assert_sell_strike_state_in_sandbox`）：`PATHS.sell_strike_state` 与账本
+       自己的解析器 `sell_strike_ledger._state_dir()` 此刻都落在本测试的 tmp 沙箱里。
+       不再 monkeypatch 一遍去「保证」它——盖住了就再也测不出它退化（有人把 `_state_dir`
+       冻成模块级常量时，这一道会在**每一条**测试上红）。
+    ② **teardown 比对真身指纹**：`hive_logger` 所在目录（checkout 根）与 pytest 调用目录下的
+       `sell_strike_state/`，用 `_artifact_signature`（stat 口径，理由见其 docstring）。
+       兜住任何绕过 ① 的写法：硬编码路径、subprocess 跑 CLI（带着现造的 env）、`__file__` 派生。
+       没有 ②，① 将来静默失效不会有人知道；没有 ①，② 只能事后发现。
+
+    显式依赖 `_isolate_env`：本闸核对的正是它设的 `ALPHA_HIVE_HOME`，不靠 autouse 名字字母序的巧合。
+    ① 核对过的 `{名字: 路径}` 记在 `request.config._alpha_hive_sell_strike_guard_checked`，供「防线确实
+    接上」的自证测试读（`conftest` 不可 import，只能经 config / fixture 传）；判据本身经
+    `sell_strike_state_sandbox_check` fixture 暴露给它的有牙自证。
+    """
+    import hive_logger
+
+    real_dirs = {pathlib.Path(hive_logger.__file__).resolve().parent / "sell_strike_state",
+                 pathlib.Path(request.config.invocation_params.dir).resolve() / "sell_strike_state"}
+    before = {p: _artifact_signature(str(p)) for p in real_dirs}
+
+    resolved = {"PATHS.sell_strike_state": hive_logger.PATHS.sell_strike_state}
+    try:
+        import sell_strike_ledger as _ssl
+    except Exception:  # pragma: no cover - 模块坏了由它自己的测试报红，这里只核 PATHS
+        _ssl = None
+    if _ssl is not None:
+        resolved["sell_strike_ledger._state_dir()"] = _ssl._state_dir()
+    request.config._alpha_hive_sell_strike_guard_checked = _assert_sell_strike_state_in_sandbox(
+        resolved, tmp_path)
+
+    yield
+
+    touched = sorted(str(p) for p in real_dirs if _artifact_signature(str(p)) != before[p])
+    assert not touched, (
+        f"测试写到了**真身** sell_strike_state/：{touched}。"
+        "路径已由 `PATHS.sell_strike_state` 调用时求值指向 tmp，还能写到真身说明有绕过它的写入路径"
+        "（硬编码 / `__file__` 派生 / subprocess 丢了 env）——去把那条路径接到 "
+        "`sell_strike_ledger._state_dir()` 上，不要在这里放行。")
+
+
+@pytest.fixture
+def sell_strike_state_sandbox_check():
+    """把 `_assert_sell_strike_state_in_sandbox` 暴露给它的有牙自证（同 `default_path_sandbox_check`）。"""
+    return _assert_sell_strike_state_in_sandbox
 
 
 @pytest.fixture

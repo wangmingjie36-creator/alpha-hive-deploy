@@ -38,7 +38,9 @@ Twelve Data 日K 客户端（v0.45.61）
 from __future__ import annotations
 
 import json
+import re
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Dict, List, Optional, Tuple
@@ -75,7 +77,10 @@ SHARED_BARS_WINDOW = 120   # 三个消费方谈拢的统一窗口，见 `fetch_b
 # （portfolio_greeks / vrp / options_paper_leg，end_date=as_of=今天）共用一份。
 _BARS_CACHE: Dict[Tuple[str, Optional[str]], Tuple[int, List[dict]]] = {}
 _bars_cache_stats = {"hits": 0, "misses": 0, "refetch_larger": 0, "fetches": 0,
-                     "inflight_waits": 0, "warmed": 0}
+                     "inflight_waits": 0, "warmed": 0, "failures": 0}
+# v0.45.363：取数失败按标的记最近一次原因（仓内 ticker → 原因码），随
+# `bars_cache_stats()["failed"]` 进 scan_timing → status.json。见 `_record_failure`。
+_FAILED: Dict[str, str] = {}
 _BARS_LOCK = threading.Lock()                       # 护 _BARS_CACHE / _INFLIGHT / 计数
 _INFLIGHT: Dict[Tuple[str, Optional[str]], threading.Lock] = {}   # 同键并发只发一次请求
 
@@ -87,6 +92,56 @@ class TwelveDataUnavailable(ConnectionError):
     确保被现有的 `except NETWORK_ERRORS` 接住 —— v0.45.56 在 `YFRateLimited`
     上踩过这个坑：新造的异常若不继承既有网络异常族，会穿透所有降级路径。
     """
+
+
+# ── 代号映射（v0.45.363）──────────────────────────────────────────────────────
+# 类份额：仓内（config.WATCHLIST / yfinance）用连字符 `BRK-B`，Twelve Data 用点 `BRK.B`。
+# 只认「1~5 个字母 + 连字符/点 + 1 个字母」这一个形状——Twelve Data 的其它资产类
+# 标点各不相同（加密货币是 `BTC/USD`），一刀切 `replace("-", ".")` 会把将来传进来的
+# 别的写法改坏。与 `cboe_options._cboe_symbol` 同一个病、同一条原则：只在线上规范化。
+_CLASS_SHARE_DASH = re.compile(r"^([A-Z]{1,5})-([A-Z])$")
+_CLASS_SHARE_DOT = re.compile(r"^([A-Z]{1,5})\.([A-Z])$")
+
+
+def api_symbol(ticker: str) -> str:
+    """仓内 ticker → Twelve Data 请求里的 `symbol`。
+
+    2026-09-28 实测：`BRK-B` → HTTP 404，`BRK.B` 正常返回（08-12 收 510.0、
+    08-14 收 504.03）。映射前每条 Twelve Data 兜底对 BRK-B 都 404，只留一行
+    WARNING——`close_correction._twelve_data_closes`、日报 rv_30d / iv_rank
+    兜底、`entry_price_backfill` 第二源一起静默失效。
+
+    **只用于拼请求**。缓存键、日志、失败记录、返回给调用方的一切都沿用仓内
+    写法（见 `repo_ticker`），不让下游出现第二种拼法。
+    """
+    t = (ticker or "").strip().upper()
+    m = _CLASS_SHARE_DASH.match(t)
+    return f"{m.group(1)}.{m.group(2)}" if m else t
+
+
+def repo_ticker(ticker: str) -> str:
+    """任意写法 → 仓内写法（`BRK.B` → `BRK-B`），`api_symbol` 的逆。
+
+    用在缓存键与失败记录上：调用方传 `BRK.B` 与传 `BRK-B` 必须落在**同一个**
+    缓存键，否则同一只票会被取两次、`bars_cache_stats` 也会把一只数成两只。
+    """
+    t = (ticker or "").strip().upper()
+    m = _CLASS_SHARE_DOT.match(t)
+    return f"{m.group(1)}-{m.group(2)}" if m else t
+
+
+def _record_failure(ticker: str, reason: str) -> None:
+    """记一次取数失败。「这个失败，下游怎么知道？」的答案就在这里：
+
+    此前 `_fetch_rows` 的每个失败出口只打一行 WARNING 然后 `return None`，
+    调用方各自按「源不可用」退回下一条腿——**哪只票、为什么、是不是每天都这样**，
+    只能翻日志拼。BRK-B 的 404 就这样在每一次兜底里被改写成了「没发生过」。
+    现在：计数进 `bars_cache_stats()["failures"]`，逐标的最近一次原因进
+    `["failed"]`，scan_timing 把整份 dict 并进 status.json 并在摘要行打出来。
+    """
+    with _BARS_LOCK:
+        _bars_cache_stats["failures"] += 1
+        _FAILED[repo_ticker(ticker)] = reason
 
 
 def _get_limiter():
@@ -261,10 +316,10 @@ def _fetch_rows(ticker: str, days: int,
     """
     key = api_key()
     if not key:
-        return None
+        return None      # 未配置不算失败：这是「没开这条腿」，不是「这条腿坏了」
 
     params = {
-        "symbol": ticker,
+        "symbol": api_symbol(ticker),   # v0.45.363：BRK-B → BRK.B，见 `api_symbol`
         "interval": "1day",
         "outputsize": str(max(days, 10)),
         "apikey": key,
@@ -277,6 +332,7 @@ def _fetch_rows(ticker: str, days: int,
     rl = _get_limiter()
     if rl is not None and not rl.acquire(timeout=90.0):
         _log.warning("[%s] Twelve Data 限流令牌等待超时", ticker)
+        _record_failure(ticker, "limiter_timeout")
         return None
 
     try:
@@ -285,8 +341,19 @@ def _fetch_rows(ticker: str, days: int,
             f"{_BASE}?{urllib.parse.urlencode(params)}",
             headers={"User-Agent": "alpha-hive/1.0"})
         raw = urlopen_gated(req, timeout=25)
+    except urllib.error.HTTPError as e:
+        # 404 = 接口不认这个 symbol。它不是瞬时故障、不会自愈——每天、每条兜底腿
+        # 都会同样失败，所以报 ERROR 并点名发出去的 symbol（映射问题一眼能看出）。
+        if e.code == 404:
+            _log.error("[%s] Twelve Data 404：symbol=%r 不被识别（代号映射问题，不会自愈）",
+                       ticker, params["symbol"])
+        else:
+            _log.warning("[%s] Twelve Data HTTP %s", ticker, e.code)
+        _record_failure(ticker, f"http{e.code}")
+        return None
     except Exception as e:  # noqa: BLE001
         _log.warning("[%s] Twelve Data 请求失败: %s", ticker, e)
+        _record_failure(ticker, f"network:{type(e).__name__}")
         return None
 
     global _daily_used
@@ -296,6 +363,7 @@ def _fetch_rows(ticker: str, days: int,
         d = json.loads(raw)
     except ValueError:
         _log.warning("[%s] Twelve Data 返回非 JSON", ticker)
+        _record_failure(ticker, "non_json")
         return None
 
     # 免费档超额/参数错时返回 {"code":..,"message":..,"status":"error"}，
@@ -304,11 +372,13 @@ def _fetch_rows(ticker: str, days: int,
     if isinstance(d, dict) and d.get("status") == "error":
         _log.warning("[%s] Twelve Data 错误 %s: %s", ticker,
                      d.get("code"), str(d.get("message"))[:120])
+        _record_failure(ticker, f"api_error:{d.get('code')}")
         return None
 
     values = d.get("values") if isinstance(d, dict) else None
     if not values:
         _log.warning("[%s] Twelve Data 无 values 段", ticker)
+        _record_failure(ticker, "no_values")
         return None
 
     rows: List[dict] = []
@@ -431,7 +501,7 @@ def fetch_bars(ticker: str, days: int = SHARED_BARS_WINDOW,
 def _bars_key(ticker: str, end_date: Optional[str]) -> Tuple[str, Optional[str]]:
     """缓存键。`None`（最新）归一为美东当日——同日里两者返回逐行相同（见 fetch_bars 文档）。
     只改键，**不改请求**：`None` 调用方发出的请求仍不带 `end_date` 参数。"""
-    return (ticker, end_date if end_date else _et_today())
+    return (repo_ticker(ticker), end_date if end_date else _et_today())
 
 
 def warm_bars_cache(tickers: List[str], days: int = SHARED_BARS_WINDOW,
@@ -475,9 +545,17 @@ def start_bars_warmer(tickers: List[str], days: int = SHARED_BARS_WINDOW,
 
 def bars_cache_stats() -> Dict:
     """`fetch_bars` 的命中情况。`hits + misses + refetch_larger` = 总调用次数，
-    `fetches` = 真正发出去的请求数（= misses + refetch_larger）。"""
-    d = dict(_bars_cache_stats)
-    d["entries"] = len(_BARS_CACHE)
+    `fetches` = 真正发出去的请求数（= misses + refetch_larger）。
+
+    `failures` / `failed`（v0.45.363）：`_fetch_rows` 失败次数与逐标的最近一次原因
+    （`http404` / `api_error:<code>` / `no_values` / `non_json` / `limiter_timeout` /
+    `network:<异常名>`）。未配置 key 不计入——那是没开这条腿，不是腿坏了。
+    `failures` 也数 `earnings_history` 直接调 `_fetch_rows` 的那几次，所以它**不受**
+    `fetches` 约束。"""
+    with _BARS_LOCK:
+        d = dict(_bars_cache_stats)
+        d["entries"] = len(_BARS_CACHE)
+        d["failed"] = dict(_FAILED)
     return d
 
 
@@ -486,6 +564,7 @@ def clear_bars_cache() -> None:
     with _BARS_LOCK:
         _BARS_CACHE.clear()
         _INFLIGHT.clear()
+        _FAILED.clear()
         for k in _bars_cache_stats:
             _bars_cache_stats[k] = 0
 

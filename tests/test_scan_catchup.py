@@ -20,7 +20,9 @@ import types
 
 import pytest
 
-ORCH = os.path.expanduser("~/.claude/scripts/alpha-hive-orchestrator.sh")
+from tests._orchestrator import REPO_ORCH, repo_orchestrator_text
+
+ORCH = str(REPO_ORCH)  # 仓库里那份（v0.45.353 起受版本控制）
 PLIST = os.path.expanduser("~/Library/LaunchAgents/com.alpha.hive.daily.plist")
 
 # 行首的 bash 赋值：可缩进、可带 export / readonly / local
@@ -55,13 +57,16 @@ def _orch_literal(orch_text, name):
 def _sandbox_orchestrator(orch_text, sandbox):
     """把编排器关进沙箱，返回 `(改绑后的脚本, {名字: 被替换掉的生产值})`。
 
-    只改绑闸前决定「写到哪 / 放不放行」的五个赋值，闸逻辑逐字节不动 ——
+    只改绑闸前决定「写到哪 / 放不放行」的六个赋值，闸逻辑逐字节不动 ——
     测的仍是编排器**此刻**的闸，不是一份会过期的抄本。改绑不上、或闸之前
     冒出新的字面绝对路径 ⇒ AssertionError，**在真跑之前**拒绝。
     """
     binds = {
         "LOCKDIR": sandbox / "lock",         # 不抢 /tmp 那把锁：抢到＝同时触发的真扫描被挤掉
-        "PROJECT_DIR": sandbox / "project",  # marker 在这里读
+        "PROJECT_DIR": sandbox / "project",  # 代码目录：闸前只做存在性 / TCC 预检
+        # 数据根迁移阶段 5（2026-09-26，v0.45.345）起编排器 `DATA_DIR` + `export ALPHA_HIVE_HOME`，
+        # 幂等 marker `.swarm_results_<今天>.json` 改在这里读。
+        "DATA_DIR": sandbox / "data",
         "LOGDIR": sandbox / "logs",
         "REPORTDIR": sandbox / "reports",    # status.json 在这里写
         # 时间闸恒拦：marker 没被读到时落进「早于收盘」分支 ⇒ 断言红，
@@ -152,7 +157,8 @@ class TestOrchLiteral:
     def test_counting(self, text, want):
         assert _orch_literal(text, "NAME") == want
 
-    _MINI = ('LOCKDIR="/tmp/l"\nPROJECT_DIR="/Users/u/p"\nLOGDIR="/Users/u/logs"\n'
+    _MINI = ('LOCKDIR="/tmp/l"\nPROJECT_DIR="/Users/u/p"\nDATA_DIR="/Users/u/data"\n'
+             'LOGDIR="/Users/u/logs"\n'
              'REPORTDIR="/Users/u/rep"\nCATCHUP_AFTER_HHMM="1330"\n{extra}STEP1_START=1\n')
 
     def test_sandbox_rebinds_every_value(self, tmp_path):
@@ -172,10 +178,7 @@ class TestOrchLiteral:
 
 @pytest.fixture(scope="module")
 def orch_text():
-    if not os.path.isfile(ORCH):
-        pytest.skip("编排器不在本机（仓库外文件）")
-    with open(ORCH, encoding="utf-8") as f:
-        return f.read()
+    return repo_orchestrator_text()
 
 
 class TestCatchupGate:
@@ -209,15 +212,14 @@ class TestCatchupGate:
         （安全），但默认套件不跑它 —— 写法变了要在这里先红，否则那组一直
         「跑不起来」而没人发现。"""
         script, prod = _sandbox_orchestrator(orch_text, tmp_path)
-        for name in ("LOCKDIR", "PROJECT_DIR", "LOGDIR", "REPORTDIR"):
+        for name in ("LOCKDIR", "PROJECT_DIR", "DATA_DIR", "LOGDIR", "REPORTDIR"):
             assert os.path.isabs(prod[name]), f"{name} 不是绝对路径：{prod[name]!r}"
             assert f'{name}="{tmp_path}' in script, f"{name} 没改绑进脚本"
         assert 'CATCHUP_AFTER_HHMM="2400"' in script
 
     def test_syntax_valid(self, orch_text):
-        # 取 orch_text 只为借它「不在本机就 skip」那一步：同 class 其他用例都有
-        # 这层保护，唯独这条漏了，于是在任何没有编排器的环境（CI、云沙箱）
-        # 都以 `returncode 127 / No such file` 假报「编排器语法错误」。
+        # 取 orch_text 为借它的存在性断言：否则文件缺失时 `bash -n` 以
+        # `returncode 127 / No such file` 假报「编排器语法错误」。
         r = subprocess.run(["bash", "-n", ORCH], capture_output=True, text=True)
         assert r.returncode == 0, f"编排器语法错误：{r.stderr}"
 
@@ -248,8 +250,8 @@ class TestPlistRunAtLoad:
 
 @pytest.mark.integration
 class TestGateBranchesLive:
-    """真跑编排器的补跑闸 —— **在沙箱里跑**。标 integration：依赖本机那份仓库外的
-    编排器。默认套件跑静态守卫即可，这组用 `pytest -m integration tests/test_scan_catchup.py` 单跑。
+    """真跑编排器的补跑闸 —— **在沙箱里跑**。标 integration：真起进程、依赖 macOS 的
+    launchd 式环境（v0.45.353 起跑的是仓库 `scripts/` 里那份）。默认套件跑静态守卫即可，这组用 `pytest -m integration tests/test_scan_catchup.py` 单跑。
     （三条分支都已在 v0.45.34 落地时手工端到端验证过，含真实 RunAtLoad 触发。）
 
     为什么必须沙箱（v0.45.221）—— 编排器走到闸上 `exit 0` 之前就写了生产，
@@ -313,8 +315,9 @@ class TestGateBranchesLive:
             'raise SystemExit("沙箱桩：不该被执行")\n', encoding="utf-8")
         (tmp_path / "home").mkdir()
         today = datetime.date.today().isoformat()
+        (tmp_path / "data").mkdir()
         if with_marker:
-            (project / f".swarm_results_{today}.json").write_text("{}")
+            (tmp_path / "data" / f".swarm_results_{today}.json").write_text("{}")
 
         out_path = tmp_path / "orch.out"
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),

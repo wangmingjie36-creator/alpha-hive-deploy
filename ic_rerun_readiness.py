@@ -82,6 +82,14 @@ def _db_path() -> Path:
 # ⚠️ v0.45.265：追加时**同步**在 `signal_archive.COHORT_SIGNAL_SCOPE` 声明这条边界
 # **直接**改了哪些归档信号（只动 final_score 就写空元组；下游由依赖边自动推出）。
 # `signal_archive.analyze()` 靠它给每个信号切世代 —— 漏了测试红，运行时按全部信号切。
+#
+# ⚠️ v0.45.334：**只挪日期的更正条目怎么追加**（例：推送晚于边界日，要把边界顺延一天）——
+#   ① 新开一个 version 标签（`tests/test_signal_archive_generations.py::test_boundary_versions_are_unique`
+#      要求标签唯一），reason 以「更正」开头、写明更正的是哪条；
+#   ② 在下方 `_CORRECTS` 登记 `新标签 → 被更正的标签` ⇒ `cohort_boundary_evidence` 沿用被更正
+#      条目的归档印记（不登记 ⇒ 它如实回 `no_marker`，边界从此核不了）；
+#   ③ `signal_archive.COHORT_SIGNAL_SCOPE` 照被更正条目的范围抄一份（不抄测试红）。
+# 更正不是新改动，只挪「同一改动的首个受影响业务日」；`assess()` 照旧取末条，自动用新日期。
 _COHORT_HISTORY = [
     # v0.45.275（P1 补登）：以下两条真实发生在**表的第一条之前**——本表 2026-08-17
     # 才开张，此前的系统逻辑改动从未登记（见本文件与 signal_archive.py 顶部的
@@ -551,6 +559,227 @@ _COHORT_HISTORY = [
      "`data_real_pct` 变化——从均值中去掉一个 0.7 项，均值 >70% 时只升不降；全史最低 84.2%，"
      "故只升、不会新触发 80% 压缩线 ⇒ `rule_score` 不变。"
      "**边界日期取 2026-09-18、与 v0.45.314 同日扩展同一标签，作废 0 条。**"),
+    ("2026-09-28", "v0.45.334",
+     "断开 `GexRegimeModifier` 对 rule_score 的直接加减分（上限 ±0.8，在方向投票之后施加）。"
+     "`queen_distiller` 步骤 4.5 仍计算并落盘，`gex_regime_mod.gex_adjustment` 保留原名原值、"
+     "语义改为「算了但没施加」，由新增的 `applied: False` 标明。"
+     "**本版只断开这一条，GEX 仍经两条通道进评分**：`RegimeWeightAdjuster` 的三值 regime 权重偏移；"
+     "OracleBee `options_score` 里的 `gex_signal`（`options_analyzer.py`：主链 `gamma_exposure < -0.001` "
+     "得 2.0、否则 1.0，None 也按 1.0；经 `oracle_bee` 融合进 odds 维）。后者本版未动（改它是评分口径"
+     "变更，须用户决定）。其幅度（评审只读重放 09-11~09-22）：去掉那 +1，210 行里 47 行 final_score 变，"
+     "中位 0.31、最大 0.38 —— 47/210 已只读复核（Oracle `gamma_exposure < -0.001` 恰 47 行），"
+     "Δ 幅度为评审实测、未复算；它同样挂着数据可得性：09-24/25 两天 Oracle `gamma_exposure` "
+     "60/60 为 None（只读复核），负 gamma 标的因此少了那 +1。本条初稿写「自此只剩 RegimeWeightAdjuster "
+     "一条通道」，评审指出后改正（本条未进 main 前）。"
+     "⚠️ **更正 v0.45.197 条目**（不改写原文，照 v0.45.176 更正 v0.45.172 的先例）：那条写"
+     "「GEX 只经 `gex_regime.RegimeWeightAdjuster` 的三值 `regime` 进评分」——**不成立**。"
+     "GEX 一直经**三条**通道进评分：① RegimeWeightAdjuster（该条实测的 |Δfinal_score| "
+     "中位 0.050 / 最大 0.127、跨阈值 2/249 只量了这一支）；② GexRegimeModifier 直接加减分；"
+     "③ 上述 Oracle `gex_signal`。②③ 该条都没有提到。"
+     "同段「`regime=\"unknown\"` ⇒ 不做权重偏移，是安全降级」对②也不成立："
+     "取不到 GEX 的日子没有这笔（多数为负的）调整，全池分数系统性偏高约 0.11"
+     "（例：09-17 全天 30/30 unknown）。"
+     "**幅度**（生产 `.swarm_results_*.json` 只读逐行反推；全部为 rule_engine 模式，"
+     "09-11 起 210 行全部可精确反推）：09-11~09-22 共 210 行里 **133 行（63.3%）调整非零**，"
+     "非零 |Δ| 中位 **0.15**、最大 **0.60**，断开后均值 +0.107；**方向变化 0 条**（该步在方向投票"
+     "之后）；跨 6.0 共 **14 条**（上穿 13 / 下穿 1）、跨 7.5 共 **1 条**（上穿）；同日新旧分 "
+     "Spearman 中位 0.969、最小 0.920；非零里 89/133（67%）来自「正 GEX 且距 flip<2%」分支"
+     "（那个 flip 是逐行权价看净 GEX 变号，结构上贴着现价）。纸面组合入场资格失去 3 笔（全是看空）。"
+     "**边界代价：作废当前世代 120 条**（09-18、09-22、09-24、09-25 各 30；09-23 没有 `predictions` 行、"
+     "也没有 `.swarm_results_2026-09-23.json`——虽有 12 份 `analysis-*-ml-2026-09-23.json`"
+     "（15:11–15:16 写出），它们不进样本计数；"
+     "2026-09-26 迁移后的 `~/alpha-hive-data/pheromone.db` 只读实测），其中**已到期 0 条**、"
+     "当前世代 0/25 个不重叠周 ⇒ 损失的是四个扫描日的累积量，不是已实现的证据。"
+     "（09-24 / 09-25 两天 GEX 全员 unknown——09-25 的扫描时刻本机 DNS 解析失败——这笔调整恰好为 0，"
+     "那 60 条的分数在新旧口径下相同；但边界按「首个跑新代码的业务日」划，不按「恰好没被触发」划，"
+     "否则判别印记 `applied is False` 在那两天不存在、边界无从核验。）"
+     "`composite.final_score` 是 `ALWAYS_SLICED`，"
+     "无法切窄（`COHORT_SIGNAL_SCOPE[\"v0.45.334\"] = ()`，各蜂自身输出不变）。"
+     "**新开分区、不与 09-18 同日扩展**：09-18 / 09-22 的分确实含这笔调整，与新口径不可比。"
+     "⚠️ **本条日期是前提，不是已核实的事实**：原定 2026-09-24，本版未能在那次扫描前推送 ⇒ "
+     "改为 2026-09-28（周一），前提是本版在 **2026-09-28 14:00 PT 那次定时扫描之前推到 `origin/main`**"
+     "（扫描前的 `production_sync` 会快进）。推送若晚于此，09-28 的样本仍是旧口径 ⇒ 须**追加**一条更正、把边界顺延到"
+     "首个真正跑新代码的业务日（照 v0.45.176 的先例，不改写本条；追加方法见表头「只挪日期的更正条目」"
+     "——新标签 + `_CORRECTS` 登记，否则判别器回 `no_marker`）。判别印记已做成可执行的："
+     "`gex_regime_mod.applied is False` 的首见日期，`cohort_boundary_evidence()` 按版本查表比对"
+     "（同版修掉它此前拿 v0.45.197 的印记去比表中最后一条、在 09-18 边界上误报 boundary_too_late 的 bug）。"
+     "判别结果恒进 `--json` / `--out` 的 `cohort_boundary_evidence` 键；日期与印记不符（含「边界日"
+     "之后已有归档、却一份印记都没有」——推送晚了但新代码还没跑起来的那几天）或判别器抛异常时，"
+     "`--quiet` 摘要行追加第五段、以 🚨 开头 —— 此前只有人读模式调用它，而编排器 Step 11"
+     "（`--quiet --out`）与周度任务（`--quiet`）都走不到，边界写错时没人会红。退出码不因它改变。"
+     "同版连带：共振加成前瞻检验的 replay 按记录里的 `applied` 标记复现生产链（事后修订 1，"
+     "盲化期内、0/10 合格周、0 条已到期）；`probability_scorecard._ML_ESTIMATOR_GENERATIONS` "
+     "同日登记（ML 报告模型把 final_score 当特征）。"),
+    ("2026-09-28", "v0.45.340",
+     "BuzzBee 情绪动量调整改按**扫描业务日期**回看**归档**（维度 IC 协议修订 1 的 buzz_v1 锚点，§13.2）。"
+     "此前 `_get_sentiment_momentum` 用 SQLite `date('now')`（墙上时钟、且是 UTC，写基线却用本地日期）"
+     "回看 `sentiment_baseline.db`（任何一次 Buzz 运行都会写它）⇒ 同一业务日重跑取到另一段历史、不可复现。"
+     "现在：as_of = `_target_date`（报告 date_str），历史 = `signal_archive` 的 `sentiment.pct` 取「≤ as_of−N」"
+     "的最近一行，且参照不得早于 as_of−N−4 天（否则按无历史）。改的是产生 `agent.BuzzBeeWhisper.score` "
+     "的函数（调整层）⇒ 按本表判据登记；方向由合成值决定、在调整之前，不变。"
+     "**幅度如实读**：用新函数本身（生产库只读）对 `.swarm_results_*.json` 全史 1688 行重算，"
+     "动量调整值改变 250 行（14.8%；其中上限生效新增 36 行），与独立核算脚本逐行一致（差集为空）；"
+     "分数变化多为 ±0.2（197 行）、最大 +0.7（clamp 前）。"
+     "同版把 7 个通道 `details.components` 改为全精度（原 5 个 round(…,1)）——只是记录精度，量没变，"
+     "按 `signal_archive` 判据**不换代** `buzz.comp.*`。"
+     "边界代价：与 v0.45.334 同日（09-28）⇒ `assess()` 的世代切点不变，额外代价 0；"
+     "`signal_archive` 里 `agent.BuzzBeeWhisper.score` 及其下游自 09-28 新开世代。"
+     "原定 2026-09-25，阶段 1 未在那次扫描前推送（9-24/9-25 均跑旧代码）⇒ 本条未进 main 前改为 09-28，"
+     "不属「只挪日期的更正条目」。⚠️ **日期是前提**：须在 2026-09-28 14:00 PT 扫描之前推到 `origin/main`"
+     "（扫描前 `production_sync` 快进）；再晚则照表头追加更正条目（须早于 2026-10-12，否则 H1 回退，协议 §13.4）。"
+     "判别印记：`BuzzBeeWhisper.details.sentiment_momentum.as_of_source` 存在（此前 899/899 条归档均无此键），"
+     "登记在 `_BOUNDARY_MARKERS`。"),
+    ("2026-09-28", "v0.45.349",
+     "中性化读 OracleBee 主链 `gamma_exposure` 的两条进分通道（用户决定，同版落地）："
+     "① `options_analyzer` 的 `gex_signal`（`gamma_exposure < -0.001` 得 2.0、否则 1.0）改为恒 1.0——"
+     "取的是原 None 分支本来就给的值，`options_score` 标度不变；经 `oracle_bee` 融合进 Oracle 分（odds 维），"
+     "方向由分数带定（v0.45.201）⇒ 分与方向都变。"
+     "② BearBee `_assess_options_puts` 的 `gex < 0 ⇒ options_bear ≥ 5.0` 下限及看空信号「GEX 负值」删除"
+     "（Bear 不计票、无维度，但分数进 Queen 步骤 3 看空上限 bear_cap、方向进看空共振；BullVeto 当前 config 停用）。"
+     "自此在**规则引擎模式**（生产扫描 `--no-llm`）下 GEX 进评分**只剩** `gex_regime.RegimeWeightAdjuster`"
+     "（全链视图三值 regime 路由权重）；`GexRegimeModifier.confidence_modifier` 仍缩放 band_width，那是展示量、不进分。"
+     "**LLM 模式本版未动（用户决定）**：OracleBee 仍把含 `gamma_exposure` 的期权结果整份交给 "
+     "`llm_service.interpret_options_flow`（`smart_money_score` 以 0.6 融合进 Oracle 分，且可改写 Oracle 方向）；"
+     "BearBee 仍把 `options_data[\"gex\"]` 放进 LLM 看空论点（`generate_bear_thesis`，按 0.45 融合进 bear 分）。"
+     "**依据（2026-09-27 调查实测，只读）**：这个「GEX」是截断主链（≤4 个到期日、≥8 个日历日、前 40 个行权价）上的 "
+     "(Σcall − Σput)·S·100·Γ·OI·dte_weight/1e6，符号是朴素的 call−put 约定，−0.001 阈值实际等于看符号；"
+     "同日横截面与 P/C 相关 +0.47。2026-03-10~09-11（close_t7、同日横截面、t 分布）：被标记标的 −2.85pp"
+     "（n=31 日，p=0.009），但加标的控制 −0.43pp（p=0.67）、只取不重叠日期（n=9，p=0.41）、去掉标记最多的 5 只"
+     "（p=0.47）、标的内置换（CBOE 时代 p=0.78）全部消失 ⇒ 携带的是**标的身份**、不是时点；也无幅度效应"
+     "（|fwd7| 标记组−其余 −0.41pp，p=0.56）。"
+     "标记率（`gamma_exposure < -0.001`）在 2026-06-30 换 CBOE 源时跳升约 5–8 倍，倍数随口径而异、跳升本身稳健："
+     "调查口径＝全程在池的 10 只（NVDA/TSLA/MSFT/META/QCOM/VKTX/BILI/AMZN/CRCL/RKLB），06-30 之前 "
+     "15/639 = 2.3%、之后 58/318 = 18.2%（这两个分母 09-27 复核未能逐位复现，待验证）；复核的其它口径"
+     "（同 10 只全部行 / 限已有 close_t7 / 全池，截至 09-11 或 09-22，`.swarm_results` 只读）为约 2.5–2.9% → 15–17%。"
+     "09-24/25 两天 Oracle `gamma_exposure` 60/60 为 None（这两天两条通道恰好都没触发）。"
+     "**来历**（`git log -S` 实查）：① `gex_signal` 随 2026-02-24 批量提交 2b4314b2 加入（146 个文件，"
+     "`options_analyzer.py` 整文件新建）；② Bear 下限**不是**同一批：2026-03-06 的日报提交 2d757b09"
+     "（46 个文件，注释「E2: 消费 OracleBee 已发布的 iv_skew / gex」）才加入——同一提交把 OracleBee 发布的 "
+     "`_pub_details[\"gex\"]` 从 `result.get(\"gex\")` 改成读 `gamma_exposure`，此前结果里没有 `gex` 键、"
+     "板上发布的 gex 恒为 None ⇒ 下限自加入起即生效。两处提交都没有附任何检验证据。"
+     "**幅度**（同一调查）：① 那 +1 折到 Oracle 分是 +0.846；09-11~09-22 负 GEX 的 47 行里去掉它，"
+     "7 行 Oracle 方向翻转、final_score 直接 Δ 中位约 0.26（n=47；v0.45.334 条引的评审值「中位 0.31」未复算，"
+     "以本条为准）。② Bear 下限（窗口：`.swarm_results_*.json` 全史 2026-03-10~09-25 共 1761 行；09-24/25 的 "
+     "60 行 `gamma_exposure` 全为 None，故与 03-10~09-22 的 1701 行同数）：Oracle `gamma_exposure < 0` 共 178 行，"
+     "其中 157 行分支实际执行（Bear 看空信号里有「GEX 负值」）；下限**真正抬高** options_bear 的至多 84 行"
+     "（178 行里记录值恰为 5.0 的行数），按记录的 P/C / IV Rank / skew 重放为 79 行（该重放对 157 行的"
+     "记录值 0 差异；评审给的 81 未复现）——其中 60 行 GEX 是唯一的期权看空来源（去掉后 0）、19 行原为 4.0。"
+     "删除的连带效应：被下限抬高、且 Oracle 方向看空的行 options_bear 由 5.0 变 **5.5**（其后的 5.5 下限判 "
+     "`< 5.0`，原先被 5.0 挡住；按记录的 Oracle 方向只 1 行，但 ① 同版会改 Oracle 方向）；看空信号少一条 ⇒ "
+     "Bear confidence（0.3+0.1·信号数，加板源数后封顶 1.0；不入档）的信号项在 157 行里都少 0.1，按记录重放至多 "
+     "45 行实际下降、其余已封顶；5 行「GEX 负值」是唯一的看空信号 ⇒ 落入无信号分支（rule_bear_score 取该分支的"
+     "固定值，缺省 3.0 / 2.0）。"
+     "分数与方向的这些变化都在本条已声明的闭包内（`bear.options_bear` → `bear.score` → `agent.BearBeeContrarian.*`），"
+     "世代账不受影响。"
+     "⚠️ **更正 v0.45.334 条目**（不改写原文，照 v0.45.176 更正 v0.45.172 的先例）：那条写「本版只断开这一条，"
+     "GEX 仍经两条通道进评分」（RegimeWeightAdjuster + Oracle `gex_signal`）——**不全**，实为**三条**：还有上述 "
+     "BearBee `gex < 0` 下限。它在更正 v0.45.197 时列的「一直经三条通道」同样漏了这条（v0.45.334 之前实为四条；"
+     "以上均指规则引擎模式，且 Bear 那条自 2026-03-06 起）。"
+     "v0.45.349 之后规则引擎模式下只剩 RegimeWeightAdjuster 一条（LLM 模式见上）。"
+     "**边界代价**：与 v0.45.334/340 同日 ⇒ `assess()` 的世代切点不变；2026-09-27 用本模块 `assess()` 对 "
+     "`~/alpha-hive-data/pheromone.db` 只读实测当前世代 `n_all_samples=0`（predictions 最新业务日 09-25）"
+     "⇒ **作废 0 条** final_score 样本。`signal_archive`（`COHORT_SIGNAL_SCOPE[\"v0.45.349\"]` 经 "
+     "`_scope_closure`；同版补上 Bear 两个子分读同伴方向的依赖边——补边本身经前后对比不挪任何已有起点）："
+     "用 `generation_boundaries` 前后对比（生产库副本只读）。挂到 09-28/v0.45.349 的信号数有两种计数口径，"
+     "真正后移的 17 个在两种口径下相同："
+     "**闭包口径**＝`_scope_closure(COHORT_SIGNAL_SCOPE[\"v0.45.349\"])` 的 23 个 + `composite.final_score`"
+     "（ALWAYS_SLICED）= 24 个，其中 7 个本就被 v0.45.334/340 切在 09-28、只换标签；"
+     "**归档口径**＝对 `signal_archive` 表里实有的 70 个信号名跑 `generation_boundaries` 得 26 个，其中 9 个只换标签"
+     "——多出的 2 个是退役名 `guard.consistency` / `guard.top_signals_count`：不在抽取器里，按保守规则受**每一条**"
+     "边界约束。17 个真正后移：Oracle 分 09-05→09-28（360 行）、"
+     "Oracle 方向 09-11→09-28（270 行），其余 15 个（Scout / Rival 的分与方向、crowding.* 四个、ml.* 三个、"
+     "`guard.adj_factor`、`guard.consistency_census`、`bear.insider_bear`、`bear.options_bear`）09-18→09-28"
+     "（各 120 行），合计 **2430 行**不再进当前世代；其中已成熟（`load_panel` 口径）**150 条**"
+     "（Oracle 分 09-08~09-11 共 120、方向 09-11 共 30；09-14 起的 predictions 尚无 checked_t7）。"
+     "⚠️ **本条日期是前提**：须在 2026-09-28 **首次**编排器运行之前推到 `origin/main`，**且**生产 checkout "
+     "已快进到新代码（开机补跑闸最早 13:30 PT 就可能起跑，早于 14:00 的定时扫描）；否则 09-28 的样本是旧口径 ⇒ "
+     "照表头**追加**更正条目（新标签 + `_CORRECTS`，不改写本条）。判别印记：OracleBee "
+     "`details.gex_signal_in_score is False`（成功与 error 兜底两条路径都写；推送前生产归档 902/902 份均无此键），"
+     "登记在 `_BOUNDARY_MARKERS`；同日三条边界由 `boundary_evidence_status` 一并核对（同版改为按最差判定填顶层字段，"
+     "逐条结果在 `per_version`）。"
+     "**前瞻检验**：维度 IC 协议——本条早于 FORWARD_START 2026-10-12 ⇒ H1/H2 均不截断"
+     "（`dim_ic_forward_test.truncation_point` 内存实测为 None）；H2 读 `agent.OracleBeeEcho.score`，"
+     "若更正把日期顺延到 10-12 或之后则 H2 截断（H1 的信号不在本条闭包里）。共振加成前瞻检验（窗口自 09-15）"
+     "——replay 从记录的 agent_details 起算（Oracle / Bear 的分与方向都是记录值），无需修订 replay；"
+     "但检验期中途评分链变了（09-28 起记录里的 Oracle / Bear 不含 GEX 项），周序列不是严格同分布，"
+     "同 v0.45.334 修订 1 的已知代价；该检验输出的 `cohort_boundaries_during_test` 会列出本条。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登记（odds_score 是 ML 特征；该表要求日期唯一，"
+     "09-28 那条按 v0.45.146+147 先例改为合并标签 `v0.45.334+v0.45.340+v0.45.349`，顺带补登当时漏登的 v0.45.340）。"),
+    ("2026-09-28", "v0.45.357",
+     "日报 VIX 改当日收盘 + 陈旧 VIX 不计 Guard 宏观票（用户 2026-09-28 决定，同版落地）。"
+     "① `fred_macro` 的 VIX 改走 `cboe_vix.get_vix_observation`：收盘后先取 CBOE 延迟报价 "
+     "`delayed_quotes/quotes/_VIX.json`，**只在**钟已过 VIX 停算（交易所收盘 +15min）且报价 `last_trade_time` "
+     "落在 [收盘, 收盘+30min]、日期是当天时采用，否则退回 `VIX_History.csv` 最后一行；采用过的报价次日拿 CSV 官方收盘"
+     "自动核对（不符 ⇒ WARNING + 14 天内停用报价），同场还拿报价 `prev_day_close` 比 CSV 上一场收盘。"
+     "② GuardBee `_calc_macro_adjustment`：`vix_stale is True`（观测日早于扫描日的前一交易日）时 VIX 不投票，同兜底常量。"
+     "**依据（2026-09-28 实测，只读）**：CSV 当日行约 20:30 ET 才追加（09-25 那行 `Last-Modified` 20:30:54 ET），"
+     "扫描 17:00 ET ⇒ 19 份 `vix_source=cboe` 日报里 12 份落后一场、09-24/25 两份落后两三场"
+     "（下载失败读过期缓存，日志只有 INFO）、5 份当日（深夜补跑 / 次日补跑 3+1，另 09-02 一份原因待验证——日志已轮转）；"
+     "v0.43.24 之前走 yfinance 时可匹配的 65/65 份都是当日 ⇒ **滞后是 v0.43.24 改 CBOE 优先时引入的**。"
+     "`vix_change_pct` 来自 yfinance 腿、是当日变动，与 `vix` 错位一天（同版改为同一对观测，只进展示用的逆风文案，不进分）。"
+     "**幅度**：按归档的 `macro_regime_votes` 重放（逐行先复现记录的 regime、全部一致），把 VIX 票换成当日收盘："
+     "293 行 Guard 里 38 行宏观政体会不同（5/21 天：09-01 10/24 risk_on→neutral、09-03 3/12 risk_off→neutral、"
+     "09-18 9/12 neutral→risk_on、09-23 4/12 与 09-24 12/12 risk_on→neutral）。②单独重放（09-24/25 两天断网、"
+     "新代码下报价与 CSV 都拿不到 ⇒ 陈旧 ⇒ 不投票）：09-24 12/12、09-25 12/12 risk_on→neutral"
+     "（票面只剩这一张，如 AMC 09-25 `{'risk_on': 1}`）。"
+     "政体经 `RegimeWeightAdjuster` 改 catalyst / sentiment 权重、`macro_adj` 直接加进 Guard 分（risk_adj 维，config 权重 0）。"
+     "**边界代价**：与 v0.45.334/340/349 同日 ⇒ `assess()` 切点不变；2026-09-28 用本模块 `assess()` 对生产 "
+     "`pheromone.db` 副本只读实测 `n_all_samples=0` ⇒ **作废 0 条** final_score 样本。`signal_archive`"
+     "（`COHORT_SIGNAL_SCOPE[\"v0.45.357\"]` = `guard.macro_adj` + `agent.GuardBeeSentinel.*`）：`generation_boundaries` "
+     "对归档实有 70 个信号名前后对比，挂到本条的 10 个里 9 个本就切在 09-28（Guard / Bear 分与方向、bear.score、"
+     "composite.*、两个退役名）只换标签；**唯一后移的是 `guard.macro_adj`**（SIGNAL_LEAVES，此前只受 v0.43.24 约束）"
+     "08-15→09-28，661 行（08-16~09-25）不再进当前世代，其中已成熟（`load_panel` t7 口径）420 条（08-24~09-11，14 个日期）。"
+     "⚠️ **本条日期是前提**（同 v0.45.349）：须在 2026-09-28 首次编排器运行之前推到 `origin/main` 且生产 checkout 已快进；"
+     "否则追加更正条目（新标签 + `_CORRECTS`）。判别印记：Guard 宏观细节（归档键名 `vix_term_structure`）带 `vix_feed` 键"
+     "（推送前生产归档 959/959 份均无），登记在 `_BOUNDARY_MARKERS`。"
+     "⚠️ 报价路径本身待首跑验证：若 09-28 日报 `macro_context.vix_feed_note` 是 `quote_vintage_mismatch`（VIX 报价的 "
+     "`last_trade_time` 不落在收盘窗口），报价会一直被拒、VIX 仍是 CSV 上一场收盘 —— 那时本条①等于未生效，②照常生效，"
+     "边界仍成立（Guard 票的口径已由②改变）。"
+     "**前瞻检验**：维度 IC 协议 H1（buzz_v1）/ H2（Oracle 分）都不在本条闭包里，且早于 FORWARD_START 2026-10-12 ⇒ 不截断。"
+     "共振加成前瞻检验从记录的 agent_details 起算（Guard 的政体是记录值），无需修订 replay。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登记（risk_adj_score / volatility / final_score 是 ML 特征），"
+     "09-28 那条合并标签扩为 `v0.45.334+v0.45.340+v0.45.349+v0.45.357`。"),
+    ("2026-09-28", "v0.45.366",
+     "补跑（`--date D`，云端快照模式）的 GuardBee 宏观票对齐到目标日（用户 2026-09-28 决定：修法 (a)、VIX 计票、"
+     "同形泄漏同版修）。**只改补跑路径，实时扫描逐票不变。** "
+     "① `fred_macro` 补跑 VIX 改取 CBOE `VIX_History.csv` 里 **D 那一行**（`cboe_vix.get_vix_observation_asof`，"
+     "绝不取最后一行），标 `vix_source=cboe` / `vix_feed=history_csv_asof`、`vix_stale=False` ⇒ Guard 照实时口径计票；"
+     "CSV 缺 D 行（强制重下一次仍缺）才退回快照 `vix_spot`、标 `cloud_snapshot_cboe`（不计票，同旧）。"
+     "旧口径：补跑一律用快照值且 **不计票**（`cloud_snapshot_cboe` 不在 Guard 的 `(\"cboe\",\"yfinance\")` 白名单里）。"
+     "② Guard 的 VIX 期限结构（backwardation ⇒ risk_off +2）补跑改读快照 `market.json` 的 `cboe.vix_term.term_structure`"
+     "（旧：实时 `get_vix_term_structure()` = 运行当天的曲线）；快照缺该段 ⇒ 不投票、不回落实时。"
+     "③ FOMC 临近（≤3 天 ⇒ risk_off +1）补跑按 D 数（旧：按运行当天）。"
+     "④ 板块轮动（`fred_macro._fetch_sector_rotation`）补跑按 `_asof_history` 对齐 D、末根须为 D、不读写单 ETF 缓存"
+     "（旧：`period=\"5d\"` 恒取最近 5 天）。"
+     "另：`steep_contango` 分支删除（上游从不产出该值，死分支，不改分）；快照模式绝不回落实时 VIX"
+     "（旧：`load_market` 剔除兜底段或 market.json 缺失时，运行当天的 VIX 被贴到 D 上、标 `cboe`、`vix_stale=False` ⇒ "
+     "会计票——离线复现，历史 0 次触发）；部分降级路径的 VIX 标签不再写死 `cboe`（同，0 次触发）。"
+     "**依据（2026-09-28 只读实测，真值 = 新拉的 CSV，交易日按 `is_trading_day` 数）**：`cloud_snapshot_cboe` 日报 3 份"
+     "（08-27/28/31）全部落后一场；`market.json` 08-26~09-11 12 份全部落后一场（09-08 那份 = CSV 的 09-07 劳动节行 15.30），"
+     "09-14~09-25 9 份为当日（同刻 SKEW CSV 仍是上一场 ⇒ 不是 CSV 来的，疑 yfinance，待验证；快照不记观测日，事前无从分辨）。"
+     "`default_fallback` 的 15.0 从未进过快照（21/21 份 `vx_futures`）。"
+     "**幅度**：按归档 `macro_regime_votes` 重放三天补跑（先复现记录的 regime，58/58 一致；其中 08-31 有 4 行是当天实时"
+     "残留、已带 VIX 票，不计），给 54 行补跑 Guard 加一张 D 官方收盘的 VIX 票（14.51 / 14.43 / 14.92，均 <15 ⇒ risk_on）："
+     "**14/54 行 neutral→risk_on**（08-27 10/30、08-28 1/12、08-31 3/12）。②③④未单独重放（归档里 Guard 的期限结构"
+     "是运行当天值，D 当天的票面无记录可对）。政体经 `RegimeWeightAdjuster` 改 catalyst / sentiment 权重、"
+     "`macro_adj` 直接加进 Guard 分。"
+     "**边界代价**：与 v0.45.334/340/349/357 同日 ⇒ `assess()` 切点不变；生产 `pheromone.db` 备份副本只读实测 "
+     "`n_all_samples=0`（predictions 最新 09-25）⇒ **作废 0 条**。补跑行按目标日 D 落盘：D < 09-28 的补跑本就在旧世代外，"
+     "D ≥ 09-28 的补跑只可能在本版部署之后发生 ⇒ 09-28 这个日期对补跑样本恰好切得开。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.366\"]` = `guard.macro_adj` + `agent.GuardBeeSentinel.*`"
+     "（与 v0.45.357 同集合、同日；`generation_boundaries` 对归档实有 70 个信号名前后对比：**0 个后移**，"
+     "10 个只换标签——Guard / Bear 分与方向、bear.score、composite.*、两个退役名）。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.366\"]`：Guard 宏观细节（归档键名 `vix_term_structure`）带 `macro_as_of_mode` 键 ——"
+     "**实时与补跑两种口径都写**：本条只改补跑，若印记只出现在补跑行，每一份实时归档都会被判「边界之后无印记」⇒ "
+     "恒报 boundary_too_early，而补跑行按 D 落盘还会在 D < 边界时报 boundary_too_late；两头都是误报。"
+     "所以印记证明的是「新代码自边界日起在生产跑」——对只改补跑的本条，这是充分条件。"
+     "⚠️ **日期前提**（同 v0.45.349/357）：须在 2026-09-28 14:00 PT 扫描前推到 `origin/main` 且生产 checkout 已快进；"
+     "否则 09-28 实时归档无印记 ⇒ boundary_too_early —— 那时**不要**顺延日期（实时样本本就未变，顺延只会白切 09-28），"
+     "改为追加更正条目说明并撤掉本条印记。"
+     "**前瞻检验**：维度 IC 协议 H1 / H2 均不在本条闭包里、早于 FORWARD_START 2026-10-12 ⇒ 不截断；"
+     "共振加成前瞻检验从记录的 agent_details 起算（Guard 政体是记录值），无需修订 replay。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段（risk_adj_score / volatility / "
+     "final_score 是 ML 特征；只在补跑行变）。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -701,23 +930,128 @@ def summary_line(res: Dict) -> str:
             f"个不重叠周{eta}")
 
 
-def cohort_boundary_evidence(home: Path) -> dict:
+def _marker_gex_full_chain_view(d: dict) -> bool:
+    """v0.45.197：Dealer GEX 换全到期日视图后，归档里 `chain_view` 为 `cboe_full_expiries`。"""
+    view = ((d.get("advanced_analysis") or {}).get("dealer_gex") or {}).get("chain_view")
+    return view == "cboe_full_expiries"
+
+
+def _marker_gex_modifier_not_applied(d: dict) -> bool:
+    """v0.45.334：GexRegimeModifier 只算不加后，`gex_regime_mod.applied` 为字面量 `False`。
+
+    只认 `is False`：此前的记录**没有**这个键（当时施加了），把「缺键」当印记会让判别器
+    把全部旧归档认成新口径 ⇒ 恒报 boundary_too_late。
+    """
+    m = (d.get("swarm_results") or {}).get("gex_regime_mod")
+    return isinstance(m, dict) and m.get("applied") is False
+
+
+def _marker_buzz_momentum_as_of(d: dict) -> bool:
+    """v0.45.340：Buzz 情绪动量改按扫描日回看归档后，`sentiment_momentum` 带 `as_of_source` 键。
+
+    认「键存在」而不是某个取值：`as_of_source` 是本版新加的（`scan` / `wall_clock` 都是新代码），
+    此前的 `sentiment_momentum` 一律没有这个键（推送前生产归档 899/899 实测）。
+    """
+    b = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("BuzzBeeWhisper")
+    sm = ((b or {}).get("details") or {}).get("sentiment_momentum") if isinstance(b, dict) else None
+    return isinstance(sm, dict) and "as_of_source" in sm
+
+
+def _marker_oracle_gex_signal_neutralized(d: dict) -> bool:
+    """v0.45.349：OracleBee 的 `details.gex_signal_in_score` 为字面量 `False`（成功与 error 兜底两条路径都写）。
+
+    只认 `is False`，同 `_marker_gex_modifier_not_applied`：此前的记录**没有**这个键（当时 gex_signal 进分，
+    推送前生产归档 902/902 份实测），把「缺键」当印记 ⇒ 全部旧归档被认成新口径、恒报 boundary_too_late。
+    `True` 也不算：新代码从不写 True，出现 True 只能是有人把通道接回去了，更不是「已中性化」。
+    """
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("OracleBeeEcho")
+    det = o.get("details") if isinstance(o, dict) else None
+    return isinstance(det, dict) and det.get("gex_signal_in_score") is False
+
+
+def _marker_guard_vix_feed(d: dict) -> bool:
+    """v0.45.357：GuardBee 宏观细节（归档键名 `vix_term_structure`）带 `vix_feed` 键。
+
+    认「键存在」而不是某个取值（同 v0.45.340）：Guard 在三种情形下都写这个键——CBOE 当日报价、
+    CSV 兜底、宏观整个取不到（值为 None）；此前的归档一律没有（推送前生产归档 959/959 实测）。
+    """
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    vt = det.get("vix_term_structure") if isinstance(det, dict) else None
+    return isinstance(vt, dict) and "vix_feed" in vt
+
+
+def _marker_guard_macro_as_of_mode(d: dict) -> bool:
+    """v0.45.366：GuardBee 宏观细节（归档键名 `vix_term_structure`）带 `macro_as_of_mode` 键。
+
+    认「键存在」（同 v0.45.340/357）：Guard 在实时（`realtime`）与补跑（`backfill`）两种口径下都写、
+    宏观整个取不到时也写；此前的归档一律没有。⚠️ 两种口径都写是刻意的——本条只改补跑，
+    只在补跑行写的印记会让每份实时归档都被判「边界之后无印记」（见 `_COHORT_HISTORY` 本条原因）。
+    """
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    vt = det.get("vix_term_structure") if isinstance(det, dict) else None
+    return isinstance(vt, dict) and "macro_as_of_mode" in vt
+
+
+#: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
+#: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
+#: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
+#: v0.45.197 之后每追加一条边界就在拿 197 的印记比别人的日期（09-18 边界上实测误报
+#: boundary_too_late：印记 09-11 早于 09-18，而那本来就是两件无关的事）。
+#: 不是每条边界都留得下印记；没登记的边界 `cohort_boundary_evidence` 如实回 `no_marker`。
+_BOUNDARY_MARKERS = {
+    "v0.45.197": ("advanced_analysis.dealer_gex.chain_view == \"cboe_full_expiries\"",
+                  _marker_gex_full_chain_view),
+    "v0.45.334": ("swarm_results.gex_regime_mod.applied is False",
+                  _marker_gex_modifier_not_applied),
+    "v0.45.340": ("agent_details.BuzzBeeWhisper.details.sentiment_momentum 带 as_of_source 键",
+                  _marker_buzz_momentum_as_of),
+    "v0.45.349": ("agent_details.OracleBeeEcho.details.gex_signal_in_score is False",
+                  _marker_oracle_gex_signal_neutralized),
+    "v0.45.357": ("agent_details.GuardBeeSentinel.details.vix_term_structure 带 vix_feed 键",
+                  _marker_guard_vix_feed),
+    "v0.45.366": ("agent_details.GuardBeeSentinel.details.vix_term_structure 带 macro_as_of_mode 键",
+                  _marker_guard_macro_as_of_mode),
+}
+
+#: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
+#: 判别器取印记时先查自己、查不到再查被更正的那条 —— 更正不是新改动，印记是同一个。
+#: 当前为空：09-28 的三条边界（v0.45.334 / v0.45.340 / v0.45.349）尚无更正。
+_CORRECTS: Dict[str, str] = {}
+
+
+def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
     """边界日期写对没写对，从**数据**上回答，而不是从意图上。
 
-    v0.45.197 的口径切换在归档里留了个可判别的印记：
-    `analysis-<TK>-ml-<DATE>.json` 的 `advanced_analysis.dealer_gex.chain_view`
-    自该口径起为 `"cboe_full_expiries"`，此前的记录没有这个键。
-    本函数报出它**首次出现**的日期，与 `_COHORT_HISTORY` 最后一条的日期比对。
+    有些口径切换在归档里留了可判别的印记（登记在 `_BOUNDARY_MARKERS`），例如 v0.45.197
+    之后 `analysis-<TK>-ml-<DATE>.json` 的 `advanced_analysis.dealer_gex.chain_view`
+    为 `"cboe_full_expiries"`、v0.45.334 之后 `swarm_results.gex_regime_mod.applied` 为 `False`
+    （此前的记录都没有这两个键）。本函数报出**该版本**印记**首次出现**的日期，与
+    `_COHORT_HISTORY` 里**同一版本**那条的日期比对。`version` 缺省 = 表中最后一条（当前世代边界，
+    与 `assess()` 同一条）；显式版本取最后一条同名条目；`_CORRECTS` 登记的更正条目沿用被更正那条的印记。
+
+    ⚠️ v0.45.334 修：此前写死认 v0.45.197 的印记、却拿表中**最后一条**的日期比 ——
+    197 之后再追加任何边界，它就在拿一件事的印记去核另一件事的日期。
+    该版本没登记印记 ⇒ `no_marker`（「这条边界从数据上核不了」），
+    **不**借别的版本的印记充数，也**不**报成 `no_evidence_yet`（那是「有判据、还没见到」）。
+    `version` 不在 `_COHORT_HISTORY` 里是调用方的错，抛 `ValueError`。
 
     ⚠️ 为什么要有这个：本仓记过同一处栽跟头 —— 此前几条世代边界「核过了」其实
     **零判别力**：世代内 0 条样本时，日期写对和写错的输出一模一样
     （见 auto-memory `alpha-hive-failure-propagation` 的「安全性论证与可观测性是
     同一个事实的两面」）。所以判据必须挂在一个**新旧可区分**的印记上。
 
-    返回 `{"marker_first_seen": 日期或 None, "boundary": 边界日期,
-           "verdict": "matches"|"boundary_too_early"|"boundary_too_late"|"no_evidence_yet"}`。
+    返回 `{"version": 版本, "boundary": 边界日期, "marker": 印记说明或 None,
+           "marker_first_seen": 日期或 None,
+           "verdict": "matches"|"boundary_too_early"|"boundary_too_late"|"no_evidence_yet"|"no_marker",
+           "unmarked_after_boundary": [日期…]}`。
     取不到归档时返回 `no_evidence_yet` —— **不返回 "matches"**，
     「还没有证据」和「证据说对了」必须可区分。
+    ⚠️ v0.45.334 起「印记一次都没出现」再分两种：边界日及之后**没有**归档 ⇒ `no_evidence_yet`
+    （生产还没跑到）；**已有**读得出的归档、却无一份带印记 ⇒ `boundary_too_early`
+    （那几天是旧代码产的，日期列在 `unmarked_after_boundary`）。此前后者也报 `no_evidence_yet`
+    ⇒ 推送晚于边界日时，在新代码真跑起来之前没人会红。
 
     ⚠️ `home` **是必传的，不给默认值**，这是初版的 bug 改出来的：初版默认
     `ALPHAHIVE_DIR`（= 代码所在目录），而归档是**数据**、在生产目录里。
@@ -726,8 +1060,26 @@ def cohort_boundary_evidence(home: Path) -> dict:
     要防的那种失效。调用方（`main()`）传 `--db` 所在目录，与库同一个安装。
     """
     root = Path(home)
-    boundary = _COHORT_HISTORY[-1][0]
+    # 缺省直接取末条的（日期, 版本）—— 与 `assess()` / `cohort_start()` 同一条，不按版本回查。
+    # 显式版本取**最后一条**同名条目。v0.45.334 前是 `next(...)`（第一条）配缺省取末条的版本：
+    # 两处只要有同名条目就各指一条，判别器拿旧日期比、`assess()` 按新日期切，而且没人会红。
+    if version is None:
+        boundary, version = _COHORT_HISTORY[-1][0], _COHORT_HISTORY[-1][1]
+    else:
+        boundary = next((d for d, v, _r in reversed(_COHORT_HISTORY) if v == version), None)
+    if boundary is None:
+        raise ValueError(f"{version!r} 不在 _COHORT_HISTORY 里")
+    # 更正条目（`_CORRECTS`）沿用被更正那条的印记 —— 否则顺延边界之后就再也核不了
+    entry = _BOUNDARY_MARKERS.get(version) or _BOUNDARY_MARKERS.get(_CORRECTS.get(version))
+    if entry is None:
+        return {"version": version, "boundary": boundary, "marker": None,
+                "marker_first_seen": None, "verdict": "no_marker", "unmarked_after_boundary": []}
+    marker_desc, is_new = entry
     first = None
+    # 边界日及之后、读得出来却没有印记的归档日期。只在印记**一次都没出现**时用得上：
+    # 那时边界之后的归档全是旧代码产的 ⇒ 边界已经写早了，不必等新代码真跑起来才红。
+    # （推送晚于边界日正是这个形状：旧写法在推送之前一直报 no_evidence_yet「还没跑到」。）
+    unmarked_after = set()
     try:
         for f in sorted(root.glob("analysis-*-ml-*.json")):
             m = re.search(r"-ml-(\d{4}-\d{2}-\d{2})\.json$", f.name)
@@ -741,21 +1093,27 @@ def cohort_boundary_evidence(home: Path) -> dict:
                     d = json.load(fh)
             except (OSError, json.JSONDecodeError):
                 continue
-            view = ((d.get("advanced_analysis") or {}).get("dealer_gex") or {}).get("chain_view")
-            if view == "cboe_full_expiries":
+            if not isinstance(d, dict):
+                continue
+            if is_new(d):
                 first = date if first is None else min(first, date)
+            elif date >= boundary:
+                unmarked_after.add(date)
     except OSError:
-        first = None
+        first, unmarked_after = None, set()
 
     if first is None:
-        verdict = "no_evidence_yet"
+        # 边界之后已有归档、却一份印记都没有 ⇒ 那几天跑的是旧代码，同属「写早了」
+        verdict = "boundary_too_early" if unmarked_after else "no_evidence_yet"
     elif first == boundary:
         verdict = "matches"
     elif first > boundary:
         verdict = "boundary_too_early"      # 边界之后、印记之前的样本是旧口径 ⇒ 会被混算
     else:
         verdict = "boundary_too_late"       # 边界之前就已是新口径 ⇒ 白白丢掉一些新样本
-    return {"marker_first_seen": first, "boundary": boundary, "verdict": verdict}
+    return {"version": version, "boundary": boundary, "marker": marker_desc,
+            "marker_first_seen": first, "verdict": verdict,
+            "unmarked_after_boundary": sorted(unmarked_after) if first is None else []}
 
 
 def resonance_forward_status(home: Path, db: Path, today: Optional[str] = None) -> Dict:
@@ -826,10 +1184,104 @@ def dim_ic_forward_status(db: Path, today: Optional[str] = None) -> Dict:
 
 _BOUNDARY_VERDICT_TEXT = {
     "matches": "✅ 与归档印记一致",
-    "boundary_too_early": "🚨 边界写早了 —— 边界至印记之间的样本是旧口径，会被混算，请追加一条更正",
+    "boundary_too_early": ("🚨 边界写早了 —— 边界至印记之间（或至今都没有印记）的样本是旧口径，"
+                           "会被混算，请追加一条更正（印记还没出现 ⇒ 先确认新代码已进生产）"),
     "boundary_too_late": "⚠️ 边界写晚了 —— 印记之前已是新口径，白丢了一些新样本",
     "no_evidence_yet": "⏳ 归档里还没有该口径的印记（生产尚未跑到这一版，或归档不可读）",
+    "no_marker": "— 这条边界没有登记可判别的归档印记，日期只能靠推理、不能从数据核对",
+    "cannot_judge": "⚠️ 边界日期的数据证据无法判定（判别器抛异常）",
 }
+
+#: 要人看的判定：日期与印记不符（两个方向都算 —— 写早会混算、写晚白丢样本），或核不了。
+#: 只有这些判定才让 `--quiet` 追加第五段（🚨 开头）。**退出码不因它改变**（0/1/3 的契约是编排器
+#: 与周度任务共用的，另起一个码会被编排器记成「Step 11 异常」、周度任务不认识）。
+BOUNDARY_ALARM_VERDICTS = frozenset({"boundary_too_early", "boundary_too_late", "cannot_judge"})
+
+#: 同日多条边界时，顶层字段取**最差**那条（v0.45.349）。数字越小越差：报警判定全部排在前
+#: （写早了会混算 > 核不了 > 写晚了只是白丢样本），其后是「没登记印记、永远核不了」>「有判据、还没见到」>「一致」。
+#: 必须覆盖 `_BOUNDARY_VERDICT_TEXT` 的全部判定（`tests/test_ic_rerun_readiness.py` 核对）——
+#: 新判定漏排名 ⇒ `boundary_evidence_status` KeyError，而不是被悄悄排到哪一头。
+_VERDICT_SEVERITY = {
+    "boundary_too_early": 0, "cannot_judge": 1, "boundary_too_late": 2,
+    "no_marker": 3, "no_evidence_yet": 4, "matches": 5,
+}
+
+
+def _boundary_line(ev: Dict) -> str:
+    """判别结果的一行摘要 —— `--quiet` 末段与人读模式共用这一处，不各写各的。"""
+    head = f"世代边界 {ev['version']} / {ev['boundary']}"
+    extra = ""
+    if ev.get("marker_first_seen"):
+        extra = f"，印记首见 {ev['marker_first_seen']}"
+    elif ev.get("unmarked_after_boundary"):
+        u = ev["unmarked_after_boundary"]
+        extra = f"，边界后已有 {len(u)} 个归档日无印记（最早 {u[0]}）"
+    if ev.get("error"):
+        extra += f"，{ev['error']}"
+    text = _BOUNDARY_VERDICT_TEXT[ev["verdict"]]
+    if ev["verdict"] in BOUNDARY_ALARM_VERDICTS:
+        return f"🚨 {head} 数据核对未通过{extra}：{text.split(' ', 1)[-1]}"
+    return f"{text}（{head}{extra}）"
+
+
+def boundary_evidence_status(home: Path) -> Dict:
+    """`cohort_boundary_evidence` 的 CLI 承载：判别结果 + `alarm` + 一行摘要 `line`。
+
+    v0.45.334：此前只有人读模式调用判别器 —— `--json` / `--quiet` 在它之前就 return，
+    `--out` 写的 JSON 里也没有它。而**所有**自动调用方（编排器 Step 11 `--quiet --out`、
+    周度任务 `--quiet`）走的正是那几条路 ⇒ 边界写错时唯一会红的观测点，在自动流程里
+    从没被执行过。现在 `--json` / `--out` 恒带完整结果，`--quiet` 在 `alarm` 时追加一段 🚨。
+
+    ⚠️ 异常渲染成 `cannot_judge`（同样 alarm），**不吞、也不往外抛**：抛出去 = Python
+    退出码 1，编排器会把它读成「未就绪（正常，继续攒）」—— 把失败改写成正常状态。
+    `home` 必传，理由同 `cohort_boundary_evidence`。
+
+    v0.45.340：核**与末条同日的全部边界**（表序），不只末条。v0.45.334 与 v0.45.340 同在 09-28：
+    只核末条 ⇒ 后追加的那条一登记，先登记那条的核对就从 `--quiet` 第五段里无声消失，
+    而两条都是「推送晚于边界日」的同一种风险。
+
+    v0.45.349（09-28 第三条）：顶层字段的**键不变**（编排器 Step 11 只抽 version / boundary / verdict /
+    marker_first_seen / unmarked_after_boundary / alarm / line / error），取值改为：
+      · 其余键取**最差**那条（`_VERDICT_SEVERITY`；并列取表序靠后的，即 `assess()` 用的那条一侧）——
+        此前取「第一条报警的、无报警取末条」，同日三条时末条健康就会盖住前面一条 no_marker 之类的非报警问题；
+      · `alarm` = 任一条报警（报警判定排在最前，与最差那条的 alarm 恒等）；
+      · `line` 概括**全部**：有报警 ⇒ 每条报警的摘要用「；」连接，再点名同日未报警的各条；
+        无报警 ⇒ 最差那条的摘要 + 同日各条判定。只有一条时就是那条自己的摘要（与此前逐字相同）。
+    逐条完整结果在 `per_version`（表序，恒在；替换 v0.45.340 的 `same_day`——它只在多于一条时出现，
+    且无人读：编排器与周度任务都只读顶层键）。
+    """
+    last_date = _COHORT_HISTORY[-1][0]
+    versions = [v for d, v, _r in _COHORT_HISTORY if d == last_date]
+    evs = []
+    for version in versions:
+        try:
+            ev = dict(cohort_boundary_evidence(home, version))
+        except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
+            ev = {"version": version, "boundary": last_date, "marker": None, "marker_first_seen": None,
+                  "verdict": "cannot_judge", "unmarked_after_boundary": [],
+                  "error": f"{type(e).__name__}: {e}"}
+        ev["alarm"] = ev["verdict"] in BOUNDARY_ALARM_VERDICTS
+        ev["line"] = _boundary_line(ev)
+        evs.append(ev)
+    # 最差在前；并列时表序靠后的在前（-i）
+    ordered = [e for _i, e in sorted(enumerate(evs),
+                                     key=lambda p: (_VERDICT_SEVERITY[p[1]["verdict"]], -p[0]))]
+    res = dict(ordered[0])
+    res["alarm"] = any(e["alarm"] for e in evs)
+    if len(evs) > 1:
+        alarmed = [e for e in ordered if e["alarm"]]
+        quiet = [e for e in ordered if not e["alarm"]]
+        if alarmed:
+            line = "；".join(e["line"] for e in alarmed)
+            if quiet:
+                line += (f"；同日另核 {len(quiet)} 条未报警："
+                         + "、".join(f"{e['version']}={e['verdict']}" for e in quiet))
+        else:
+            line = (ordered[0]["line"] + f"；同日共核 {len(evs)} 条："
+                    + "、".join(f"{e['version']}={e['verdict']}" for e in evs))
+        res["line"] = line
+    res["per_version"] = evs
+    return res
 
 
 def main() -> int:
@@ -862,6 +1314,10 @@ def main() -> int:
     res["fg_exposure_gate_forward_test"] = fg_fwd
     dim_fwd = dim_ic_forward_status(db, today=args.today)
     res["dim_ic_forward_test"] = dim_fwd
+    # 归档与 DB 同处一个安装 ⇒ 用 --db 的所在目录，别用代码目录（见 cohort_boundary_evidence docstring）。
+    # 放在 --out / --json / --quiet 之前：三种输出都要带上它（v0.45.334，见 boundary_evidence_status）
+    bev = boundary_evidence_status(db.parent)
+    res["cohort_boundary_evidence"] = bev
 
     if args.out:
         try:
@@ -877,7 +1333,14 @@ def main() -> int:
     if args.quiet:
         # 同一行：周度任务的约定是「把那一行摘要原样写进周报」，另起一行可能被漏抄。
         # ⚠️ 段的**顺序**是契约：周度任务 SKILL.md 按「第三段 = F&G」解析。新段只许追加在末尾。
-        print(summary_line(res) + "｜" + fwd["line"] + "｜" + fg_fwd["line"] + "｜" + dim_fwd["line"])
+        # 第五段（v0.45.334）= 世代边界的数据证据，**只在要人看时出现**（`bev["alarm"]`：日期与
+        # 印记不符 / 核不了），以 🚨 开头；正常时（✅ / ⏳ / —）不加段，一行仍是四段 ——
+        # 恒在的段会被当成背景噪音，而 `tests/test_dim_ic_forward_test.py` 也钉着四段。
+        # 完整判别结果不论好坏都在 `--json` / `--out` 的 `cohort_boundary_evidence` 键里。
+        line = summary_line(res) + "｜" + fwd["line"] + "｜" + fg_fwd["line"] + "｜" + dim_fwd["line"]
+        if bev["alarm"]:
+            line += "｜" + bev["line"]
+        print(line)
         return 0 if res["ready"] else 1
 
     c = res["cohort"]
@@ -896,10 +1359,7 @@ def main() -> int:
           f"（世代内总样本 {res['n_all_samples']} 条，其余未到期）")
     print(f"  已攒不重叠周:          {res['weeks_accrued']} / "
           f"{res['weeks_required']}   还差 {res['weeks_remaining']}")
-    # 归档与 DB 同处一个安装 ⇒ 用 --db 的所在目录，别用代码目录（见函数 docstring）
-    _ev = cohort_boundary_evidence(db.parent)
-    print(f"  边界日期的数据证据:    {_BOUNDARY_VERDICT_TEXT[_ev['verdict']]}"
-          + (f"（印记首见 {_ev['marker_first_seen']}）" if _ev["marker_first_seen"] else ""))
+    print(f"  边界日期的数据证据:    {bev['line']}")
     print(f"  世代内有扫描的周:      {res['scan_weeks_in_cohort']}"
           f"（已过 {res['calendar_weeks_elapsed']} 个日历周，"
           f"产出率 {res['weeks_per_calendar_week']:.2f} 周/周）")

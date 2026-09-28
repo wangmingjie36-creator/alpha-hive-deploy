@@ -1,7 +1,7 @@
 """
 🐝 Alpha Hive — GEX 政体联动评分 + 政体条件权重调节器
 
-升级 #1: GexRegimeModifier
+升级 #1: GexRegimeModifier（v0.45.334 起只作诊断，调整值不再施加到分数上）
   - 读取 DealerGEXAnalyzer 输出（total_gex, gex_flip, regime, vanna_stress）
   - 当 GEX 负值 + flip 临近 → 抑制看多信号，增强看空信号
   - 当 GEX 正值 + 远离 flip → 信号正常
@@ -23,7 +23,17 @@ _log = logging.getLogger("alpha_hive.gex_regime")
 
 class GexRegimeModifier:
     """
-    根据 Dealer GEX 状态对蜂群 final_score 施加调整。
+    根据 Dealer GEX 状态算一个对蜂群分数的调整值。
+
+    ⚠️ **v0.45.334 起这个值不再加进 rule_score / final_score** —— `QueenDistiller`
+    步骤 4.5 仍调用 `compute()` 并把结果落盘为 `gex_regime_mod`（带 `applied=False`），
+    只作诊断与审计轨迹；`confidence_modifier` 仍乘同一处步骤 6 的 `band_width`（展示量、不进分）。
+    **v0.45.349 起规则引擎（生产 `--no-llm`）下 GEX 进评分只剩本模块的 `RegimeWeightAdjuster`**（全链视图的三值 regime →
+    五维权重偏移；regime 取不到 ⇒ GEX 这项不偏移）。v0.45.334 时另有两条、都不读本模块：
+    OracleBee `options_score` 里的 `gex_signal`（主链 `gamma_exposure < -0.001` 得 2.0、否则 1.0）
+    与 BearBee 的 `gex < 0 ⇒ options_bear ≥ 5.0` 地板（当时只写了前者）；v0.45.349 一并中性化
+    （前者恒 1.0，后者删除）。
+    断开理由见 `queen_distiller.py` 步骤 4.5 注释；守卫 `tests/test_gex_modifier_disconnected.py`。
 
     核心逻辑：
     - GEX 负值（dealer 做空 gamma）→ 市场波动放大，看多信号可靠性下降
@@ -46,7 +56,7 @@ class GexRegimeModifier:
 
         Returns:
             {
-                "gex_adjustment": float,     # 对 final_score 的调整（-0.8 ~ +0.8）
+                "gex_adjustment": float,     # 调整值（-0.8 ~ +0.8）；v0.45.334 起只诊断、不施加
                 "gex_regime": str,           # "positive_gex" / "negative_gex" / "unknown"
                 "flip_proximity_pct": float, # 当前价距 flip 的百分比
                 "can_flip_vanna": bool,      # vanna 压力是否可翻转 GEX

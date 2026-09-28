@@ -1337,8 +1337,8 @@ class OptionsAnalyzer:
         公式：
         iv_signal (0-3): IV 在 30-70 最高，极端高低扣分
         flow_signal (0-3): P/C 越低（多头）得分越高
-        gex_signal (0-2): 负 GEX 加分（波动放大利于趋势）
-        unusual_signal (0-2): 每 1 个多头大单 +1，上限 2
+        gex_signal (恒 1.0): v0.45.349 起中性化，`gex` 不再影响分数（入参保留，见下方注释）
+        unusual_signal (0-2): 每 1 个多头大单 +0.5，上限 2
         """
 
         # IV Signal (0-3)：IV Rank 在 40-70 得分最高
@@ -1365,15 +1365,32 @@ class OptionsAnalyzer:
         else:
             flow_signal = 0.0
 
-        # GEX Signal (0-2)：负 GEX 有利趋势跟踪
-        # v0.45.63 二次检查：gex 自本版起可能是 None（算不出）。照上面 iv_rank
-        # 那条既有先例——「不可信 → 中性，不奖不罚」。取 1.0 还有一层好处：
-        # 它**恰好等于**改动前 gex=0.0 时走的分支，所以此前拿 0.0 的那些情形
-        # 评分逐字节不变，不产生口径世代边界。
-        if gex is None:
-            gex_signal = 1.0
-        else:
-            gex_signal = 2.0 if gex < -0.001 else 1.0
+        # GEX Signal：v0.45.349 起**恒 1.0**，`gex` 不再进分（`gamma_exposure` 照算、照返回、照落盘，
+        # 只供展示与归档）。此前是「主链 `gex < -0.001` 得 2.0、否则 1.0」，2026-02-24 随批量提交
+        # 2b4314b2 加入，当时没有任何证据。1.0 取的是原 None 分支的值（v0.45.63：「不可信 → 中性」），
+        # 所以 options_score 的标度不变：非负 / None 的标的逐字节不变，负 GEX 的标的恰好少 1.0。
+        #
+        # 为什么中性化（2026-09-27 调查实测，只读）：
+        #   · 这个「GEX」是截断链（≤4 个到期日、DTE≥8 日历日、前 40 个行权价）上的
+        #     (Σcall − Σput)·S·100·Γ·OI·dte_weight/1e6，符号是朴素假设；-0.001 实际上就是符号检验；
+        #     同日横截面与 P/C 相关 +0.47 ⇒ 与 flow_signal 大半重复计票。
+        #   · 这 +1 ⇒ Oracle 分 +0.846，09-11~09-22 负 GEX 的 47 行里 7 行被它翻了 Oracle 方向；
+        #     final_score 直接 Δ 中位 ≈0.26（n=47）。
+        #   · 2026-03-10~09-11（close_t7、同日横截面、t 分布）：标记组 −2.85pp（n=31 日，p=0.009）——
+        #     方向与 +1 **相反**；且加标的控制后 −0.43pp（p=0.67）、不重叠日期 p=0.41、去掉被标记最多的
+        #     5 只 p=0.47、标的内置换 p=0.78（CBOE 时代）⇒ 是标的身份，不是时点。幅度效应也没有
+        #     （|fwd7| 标记组 − 其余 −0.41pp，p=0.56）。
+        #   · 标记率在 2026-06-30 切 CBOE 数据源时跳变约 5–8 倍（调查口径「全程在册 10 只」2.3%→18.2%，
+        #     分母待验证；其他口径约 2.5–2.9%→15–17%）；09-24/25 `gamma_exposure`
+        #     60/60 为 None ⇒ 这一分挂在「那天链取得怎么样」上。
+        # 同版一并删掉 BearBee `options_bear` 的 `gex < 0 ⇒ ≥5.0` 地板（读的是同一个量），
+        # 世代边界同 2026-09-28（ic_rerun_readiness._COHORT_HISTORY 已有 v0.45.334 / v0.45.340 两条）。
+        # 自此规则引擎（生产 --no-llm）下 GEX 进评分只剩 `gex_regime.RegimeWeightAdjuster`（全链视图三值 regime
+        # 偏移权重）；LLM 模式下 Oracle 送给 LLM 的期权结果里仍有 gamma_exposure（未动）。
+        # ⚠️ 不要接回去——要接先过前瞻检验并登记世代边界。旧快照（同一会话旧代码写的）里的
+        # options_score 含这 +1，命中时由 `OptionsAgent._drop_legacy_gex_signal` 减掉。
+        # 守卫：tests/test_gex_oracle_bear_neutralized.py（行为 + 快照修正 + AST）。
+        gex_signal = 1.0
 
         # Unusual Signal (0-2)：按 call 侧异动条数加分。
         #
@@ -1413,13 +1430,9 @@ class OptionsAnalyzer:
             signals.append("IV 处于理想水位")
         if flow_signal >= 3.0:
             signals.append("做多气氛浓厚（P/C低）")
-        # v0.45.63 二次检查（第二轮）：**同一个函数里的第二处 gex 比较，第一轮漏了。**
-        # 第一轮我甚至在上面写了「只修一处就是 v0.45.49 那种五分之一」的注释，
-        # 然后在同一个函数里犯了同样的事 —— 因为我按「精确匹配带上下文的字符串」
-        # 去改，`assert count==1` 通过了，但那只证明**那段上下文**唯一，
-        # 不证明**这个比较**唯一。改类型契约必须 grep 裸符号，不能 grep 带注释的块。
-        if gex is not None and gex < -0.001:
-            signals.append("负 GEX 利于趋势")
+        # v0.45.349：此处原有 `gex < -0.001 ⇒ "负 GEX 利于趋势"`。摘要列的是**计分理由**，
+        # GEX 不再计分，这句留着就是在替一个不存在的加分作证 ⇒ 删掉，不改写成别的措辞。
+        # （v0.45.63 的教训仍适用：同一函数里的 gex 比较要 grep 裸符号，上面那处删了、这处也要删。）
         if bullish_unusual > 0:
             signals.append(f"检测到 {bullish_unusual} 个看涨异动")
 
@@ -1454,12 +1467,27 @@ _snap_stats_lock = threading.Lock()
 #                            本可以拿到完整会话数据却用了盘中的（只观测，不拒收，见 analyze 内注释）
 #   calendar_fallback        交易日历不可用、会话日期退回「只看周一至周五」规则（每个会话日记一次）
 #   writes_before_close      收盘前写入的快照数（写入本身不重复，按次即按份）
+#   gex_signal_corrected     命中了几份**旧代码写的**快照、其 options_score 含已撤销的负 GEX +1.0，
+#                            被就地减掉（v0.45.349，按份计；见 `_drop_legacy_gex_signal`）
 #
 # 为什么要去重：一只标的一轮扫描要调 3~4 次 analyze()（OracleBee / BearBee / advanced_analyzer /
 # 日报收尾），v0.45.238 按调用计时，一份盘中快照会被报 3~4 遍、一天可达上百条 WARNING，
 # 计数也读不出「几份快照有问题」。去重键带冻结时间戳：同一路径被重写成新快照后再出事，照样会报。
 _SNAP_STATS_KEYS = ("hits", "writes", "session_mismatch", "hits_before_close",
-                    "writes_before_close", "calendar_fallback")
+                    "writes_before_close", "calendar_fallback", "gex_signal_corrected")
+
+# v0.45.349：OptionsAgent 每条返回路径都带这个键、值恒为 False ——「本结果的 options_score
+# 不含 GEX 分量」。旧代码写的快照没有这个键 ⇒ 命中时据此判定要不要减掉旧的 +1.0。
+# ⚠️ 键名**必须**与 OracleBee 的世代印记 `gex_signal_in_score` 不同（复核 D1）：旧代码的 OracleBee
+# 把 details 拼成 `{**result, ...}`，本键若也叫那个名字，同一会话里旧 Oracle 命中新代码写（或修过）
+# 的快照就会把它原样抄进 details ⇒ 归档里「旧 Oracle + 旧 Bear 地板」的一天被边界判别器认成新口径
+# （复核实测复现：旧 Oracle 带印记、旧 Bear 地板照触发）。印记只能由 Oracle 自己无条件写字面量；
+# 守卫 tests/test_gex_oracle_bear_neutralized.py（旧 Oracle 展开模拟 + 印记字面量产出者 AST 钉）。
+OPTIONS_GEX_MARKER = "_options_score_has_gex"
+# 旧公式 `gex < -0.001 ⇒ gex_signal 2.0` 的阈值与分差。只用于识别、修正旧快照，**不是**评分参数。
+_LEGACY_GEX_THRESHOLD = -0.001
+_LEGACY_GEX_BONUS = 1.0
+_LEGACY_GEX_SUMMARY = "负 GEX 利于趋势"
 _snap_stats = {k: 0 for k in _SNAP_STATS_KEYS}
 _snap_reported: set = set()
 
@@ -1941,6 +1969,93 @@ class OptionsAgent:
                 _log.warning("[%s] 快照回写失败（本次结果仍已回填）: %s", ticker, _e)
         return True
 
+    def _drop_legacy_gex_signal(self, cached: dict, ticker: str,
+                                snap_path: str = "") -> bool:
+        """命中的快照若是旧代码写的（缺 `OPTIONS_GEX_MARKER`），减掉 options_score 里已撤销的
+        负 GEX +1.0，打上标记并回写。v0.45.349。
+
+        为什么要管：快照按 ET 会话冻结。同一会话里若先跑过旧代码（例如生产同步之前的一次 MCP
+        调用），槽位里就躺着一份含 +1 的 options_score；新代码命中后原样返回 ⇒ 负 GEX 标的当天
+        照吃这 +1，而 OracleBee details 上又带着「分数不含 GEX」的标记 —— 标记在替错分作证。
+
+        为什么减 1.0 是**精确**的：旧 options_score = round(iv + flow + gex + unusual, 2)，
+        四项都是 0.5 的整数倍（iv∈{1,2,3}、flow∈{0,1,2,3}、gex∈{1,2}、unusual=min(2, 0.5·n)），
+        和 ≤10、没有夹取 ⇒ 浮点精确、round 不改值；新旧公式只差 gex 项 2.0→1.0。快照写入后会改
+        字段的只有 `_refresh_price_derived`（补 rv / iv_rank）与 `_refill_empty_quote_set`，
+        二者都**不重算** options_score ⇒ 快照里的 options_score 就是当时公式的输出。
+        （补上的 iv_rank 与 options_score 对不上是 v0.45.43 起的既有现象，与本修正无关。）
+        判据用快照里存的 `gamma_exposure` —— 它就是当时喂给公式的值。`_sanitize_result` 只会把
+        NaN/Inf 写成 0.0：NaN 当时本就得 1.0，不用修；-Inf 会漏修，但 GEX 是有限项之和，不出现。
+
+        幂等：标记已为 False（新代码写的，或已修过的）一律不动；修完立即打标记，标记与分数在
+        同一次 json.dump 里回写 ⇒ 任何时刻读到的文件都满足「有标记 ⇔ 分数不含 GEX 分量」。
+        缺标记但 GEX 不为负（旧公式本就给 1.0）⇒ 只在内存里补标记，不回写。
+        **旧键名也算已修**：本键改名（复核 D1）之前，同版草稿用的是 `gex_signal_in_score`，新公式直出
+        与修过的快照都带它 = False ⇒ 分数早已不含 GEX；只认新键名就会再减一次（−2.0）。旧键在内存里
+        一律 pop 掉（值是 False 就换成新键）：本模块返回的 dict **永远不带** Oracle 的印记键 —— 否则新代码
+        把它交给同会话的旧 Oracle，D1 原样复发。本函数不为此回写（不做迁移）；之后两个回写者若回写，
+        文件里的旧键随之消失，无害。2026-09-27 只读核对生产 cache 1601 份快照 0 份带旧键名（草稿从未
+        进生产），这一支只防测试 / scratch 缓存或手动跑过草稿的槽位。
+        命中路径上必须排在 `_refresh_price_derived` / `_refill_empty_quote_set` 之前：二者回写的是
+        同一个 dict，排在前面它们写出去的也已是修过、带标记的版本（排在后面会先落盘一次
+        「旧分、无标记」的中间态）。守卫：tests/test_gex_oracle_bear_neutralized.py 的回写者间谍。
+
+        谁会红：修正按份计入 `snapshot_slot_stats()["gex_signal_corrected"]`（进 status.json 的
+        scan_timing），首次打 WARNING；快照里留 `_gex_signal_legacy_correction` 审计轨迹（原值）。
+
+        Returns: 是否减了 1.0（供测试与日志用）
+        """
+        if not isinstance(cached, dict):
+            return False
+        # 改名前草稿的键（= Oracle 印记名）只读、只删，绝不往外传（见上「旧键名也算已修」）
+        _draft_mark = cached.pop("gex_signal_in_score", None)
+        if cached.get(OPTIONS_GEX_MARKER) is False:
+            return False
+        if _draft_mark is False:
+            cached[OPTIONS_GEX_MARKER] = False
+            return False
+
+        def _finite(x) -> bool:
+            return (isinstance(x, (int, float)) and not isinstance(x, bool)
+                    and _math.isfinite(x))
+
+        _gex = cached.get("gamma_exposure")
+        _old = cached.get("options_score")
+        _corrected = False
+        if _finite(_gex) and _gex < _LEGACY_GEX_THRESHOLD:
+            if _finite(_old):
+                cached["options_score"] = round(_old - _LEGACY_GEX_BONUS, 2)
+                _sum = cached.get("signal_summary")
+                if isinstance(_sum, str) and _LEGACY_GEX_SUMMARY in _sum:
+                    _parts = [p for p in _sum.split(" | ") if p != _LEGACY_GEX_SUMMARY]
+                    cached["signal_summary"] = " | ".join(_parts) if _parts else "信号平衡"
+                cached["_gex_signal_legacy_correction"] = {
+                    "options_score_before": _old,
+                    "delta": -_LEGACY_GEX_BONUS,
+                    "at": datetime.now().isoformat(),
+                }
+                _corrected = True
+            else:
+                # 分数不是数：OracleBee 的 `_safe_score` 会兜成 5.0，本就不含 +1 ⇒ 无可修，只记一笔
+                _log.warning("[%s] 旧快照 GEX 为负但 options_score=%r 不是数，未修正（下游按缺省分处理）",
+                             ticker, _old)
+        cached[OPTIONS_GEX_MARKER] = False
+        if not _corrected:
+            return False
+
+        _ident = (snap_path, cached.get("_snapshot_timestamp"))
+        _lvl = (logging.WARNING if _snap_count_once("gex_signal_corrected", _ident)
+                else logging.DEBUG)
+        _log.log(_lvl, "[%s] 期权快照由旧代码写入，options_score 含已撤销的负 GEX +1.0（GEX=%.4g）："
+                 "%.2f → %.2f（v0.45.349）", ticker, _gex, _old, cached["options_score"])
+        if snap_path:
+            try:
+                with open(snap_path, "w") as _f:
+                    json.dump(cached, _f, ensure_ascii=False, default=str)
+            except Exception as _e:  # noqa: BLE001 - 回写失败不影响本次返回值
+                _log.warning("[%s] 快照回写失败（本次结果仍已修正）: %s", ticker, _e)
+        return True
+
     def analyze(self, ticker: str, stock_price: Optional[float] = None,
                 force_refresh: bool = False) -> Dict:
         """
@@ -2031,6 +2146,8 @@ class OptionsAgent:
                     # 早已恢复，重跑扫描却**原样复现失败**——快照命中即返回，
                     # 根本没再去算。一次瞬时故障被快照升级成了当日永久缺失。
                     # 现在：命中后若这些字段是空的，就地重算并回写快照。
+                    # v0.45.349 旧快照负 GEX +1.0 修正，须排在两个回写者之前（理由见其 docstring）
+                    self._drop_legacy_gex_signal(_cached, ticker, _snap_path)
                     self._refresh_price_derived(_cached, ticker, _snap_path)
                     # v0.45.104：同理，空的 quote_set 也不该被冻一整天。
                     # **已捕获的不动**——见 _refill_empty_quote_set 的 docstring。
@@ -2094,6 +2211,7 @@ class OptionsAgent:
                 "key_levels": {},
                 "flow_direction": "neutral",
                 "options_score": 5.0,
+                OPTIONS_GEX_MARKER: False,    # v0.45.349：见 generate_options_score 的 GEX 注释
                 "signal_summary": "期权数据不可用（真实链获取失败）",
                 "expiration_dates": [],
                 "iv_skew_ratio": None,
@@ -2509,6 +2627,8 @@ class OptionsAgent:
             "key_levels": key_levels,
             "flow_direction": flow_direction,
             "options_score": options_score,  # 0-10
+            # v0.45.349：options_score 不含 GEX 分量。快照命中时缺这个键 ⇒ 旧代码写的，见 _drop_legacy_gex_signal
+            OPTIONS_GEX_MARKER: False,
             "signal_summary": signal_summary,
             "expiration_dates": options_chain.get("expirations", [])[:3],
             # S14: IV Skew
