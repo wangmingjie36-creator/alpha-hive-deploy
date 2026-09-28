@@ -45,6 +45,20 @@ bls.gov 用 UA 做准入：浏览器 UA、`curl/8.4.0`、`python-urllib/3.11` �
 BLS 设这个字段本意是留联系人，想做个好公民就设环境变量：
 
     export ALPHA_HIVE_CONTACT_EMAIL="you@example.com"
+
+## 输出契约（v0.45.355，`step_contract`）
+
+`--out` 写 `step_contract.envelope(...)`：原有键原样留在顶层（编排器 Step 13 现行内联解析照读；
+注意编排器读的是 `calendar_health.status`，与外壳顶层 `status` 不同层、不撞名）。
+`date` = `--today`（v0.45.355 新增，缺省 `step_contract.business_today()` = 洛杉矶当日；本地体检与节流按这一天算）。
+⚠️ 缺省值**不等于**编排器本机时区的 `DATE_STR`（2026-11-01 起冬令时每天有一小时差一天，见 `business_today`
+的 docstring）——消费方要比新鲜度就显式传 `--today`。
+0 ⇒ ok、1 ⇒ attention、3 ⇒ undetermined；未捕获异常 ⇒ 退出码 3 + `status: "error"` 外壳
+（此前 Python 默认 1 = 「要人动手」，崩溃会被编排器当成「有新日程可抄」）。
+`step_contract` 本身导入失败 ⇒ 入口也是退出码 3（不写 `--out`）；**本模块其余的导入期失败仍是 1**
+（`run_tool` 兜不到 import，见其 docstring）。
+`attention` 由 `contract_attention()` 显式列出：上游新日程 / 本地表低于地平线阈值各一条，
+`deadline` = 该表覆盖到的最后一天（此后该类事件从日历里消失）。
 """
 
 import argparse
@@ -58,6 +72,19 @@ from datetime import date, datetime
 from html import unescape
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# `step_contract` 本身导入失败 ⇒ 置哨兵，`__main__` 入口见哨兵退出码 3——不让它落成 Python 默认的 1
+# （= 本工具的「要人动手」）。⚠️ 只兜这一个 import：本模块其余的导入期失败仍是 1（见 step_contract.run_tool）。
+try:
+    import step_contract
+    _STEP_CONTRACT_IMPORT_ERROR: Optional[str] = None
+except Exception as _e:  # noqa: BLE001 —— 连语法错也要兜：哨兵只记下原因，入口据此退出码 3
+    step_contract = None
+    _STEP_CONTRACT_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
+
+_TOOL = "economic_calendar_watch"
+#: 退出码 → 外壳 status（v0.45.355）。退出码约定本身不变；崩溃的 3 由 run_tool 写 "error"。
+_STATUS_BY_RC = {0: "ok", 1: "attention", 3: "undetermined"}
 
 _DEFAULT_CONTACT = "alpha-hive-calendar-watch@localhost.invalid"
 _UA_TEMPLATE = "AlphaHive-calendar-watch/1.0 ({contact})"
@@ -454,6 +481,76 @@ def _render(res: Dict[str, Any]) -> str:
     return "\n".join(out)
 
 
+def _exit_code(res: Dict[str, Any]) -> int:
+    """退出码优先级 action > health > undetermined（v0.45.355 从 `main()` 原样抽出——
+    外壳 `status` 与退出码必须出自同一处判定）。"""
+    if res["action_required"]:
+        return 1
+    if res["calendar_health"]["status"] != "ok":
+        return 1
+    if res["undeterminable_tables"]:
+        return 3
+    return 0
+
+
+def _coverage_end(per_table: Dict[str, Any], key: str) -> Optional[str]:
+    """该表覆盖到的最后一天（`last_date`，缺则 `verified_through`）——过了这天该类事件就从日历里消失。"""
+    pt = per_table.get(key) or {}
+    return pt.get("last_date") or pt.get("verified_through")
+
+
+def contract_attention(res: Dict[str, Any], health: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """把结果**显式**翻成 `step_contract` 的 attention 条目（v0.45.355）。
+
+    `health` 是 `economic_calendar.get_calendar_health(ref_date=<同一天>)` 的完整返回——
+    JSON 里的 `calendar_health` 只留了 binding/shortest 两张表，逐表的截止日要从这里取
+    （不往 `--out` 的原有键里加东西，键集合保持不变）。
+
+    · 上游新日程（每表一条 warn）：deadline = 本地该表覆盖到的最后一天——得在那之前抄完。
+    · 本地表低于地平线阈值（每表一条）：stale ⇒ warn；exhausted（表已用尽，该类事件此刻就不在
+      日历里）⇒ alarm。deadline 同上（exhausted 的截止日已过，照写，表示「已经断供」）。
+    · 上游有源无法判定 ⇒ warn（「看不出来」≠「没有新的」，见模块 docstring）。
+    末尾兜底：退出码是 1/3 却一条 warn/alarm 都没有 ⇒ 补一条，不让「要人看」变成空列表。
+    """
+    A = step_contract.attention_item
+    per_table = health.get("per_table") or {}
+    items: List[Dict[str, Any]] = []
+    for k in res.get("new_schedule_tables") or []:
+        u = (res.get("upstream") or {}).get(k) or {}
+        new = u.get("new_items") or []
+        shown = "、".join(new[:6]) + (f" 等 {len(new)} 条" if len(new) > 6 else "")
+        items.append(A(
+            f"{_TOOL}.new_schedule.{k}", "warn",
+            f"上游已发布 {k} 新日程 {len(new)} 条（{shown}）—— 待人工抄进 economic_calendar.py 并同步上移"
+            f" verified_through（只抄官方已发布日程，禁止按规律推算）；源 {u.get('source', '')}",
+            deadline=_coverage_end(per_table, k)))
+    for k in health.get("exhausted_tables") or []:
+        pt = per_table.get(k) or {}
+        items.append(A(
+            f"{_TOOL}.horizon.{k}", "alarm",
+            f"本地 {k} 表已用尽：最后一条 {pt.get('last_date')}，此后该类宏观事件已不在日历里",
+            deadline=_coverage_end(per_table, k)))
+    for k in health.get("stale_tables") or []:
+        pt = per_table.get(k) or {}
+        items.append(A(
+            f"{_TOOL}.horizon.{k}", "warn",
+            f"本地 {k} 表只到 {pt.get('last_date')}（剩 {pt.get('horizon_days')} 天，"
+            f"低于该表阈值 {pt.get('min_horizon_days')} 天）",
+            deadline=_coverage_end(per_table, k)))
+    undet = res.get("undeterminable_tables") or []
+    if undet:
+        why = "；".join(f"{k}: {((res.get('upstream') or {}).get(k) or {}).get('reason')}" for k in undet)
+        items.append(A(
+            f"{_TOOL}.upstream_undetermined", "warn",
+            f"上游 {len(undet)} 个源无法判定（{why}）—— 这不等于「没有新日程」，需人工看一眼源站"))
+    if _exit_code(res) != 0 and not any(a["level"] != "info" for a in items):
+        h = res.get("calendar_health") or {}
+        items.append(A(f"{_TOOL}.needs_review", "warn",
+                       f"本地日历 {h.get('status')}：{h.get('binding_table')} 表只到 "
+                       f"{h.get('binding_last_date')}（判据未归类）"))
+    return items
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="上游宏观日程发布监视器")
     ap.add_argument("--force", action="store_true", help="忽略周节流，强制联网检查")
@@ -464,17 +561,32 @@ def main() -> int:
     ap.add_argument("--state", default=None, help="节流状态文件路径（默认 PATHS.cache_dir 下）")
     ap.add_argument("--quiet", action="store_true", help="只输出结论行")
     ap.add_argument("--out", default=None, help="把完整结果写成 JSON")
+    # v0.45.355：业务日期。外壳 `date`、本地体检、节流窗口都按这一天算——三者同源，
+    # 消费方拿 `date` 比新鲜度时比的就是这次判定真正用的那一天。缺省 = 洛杉矶当日（business_today）；
+    # 此前是 `date.today()`（本机 America/Vancouver）：两地目前同日，但 2026-11-01 起温哥华常年 UTC-7，
+    # 冬令时每天本机 00:00–01:00 两者差一天，那一小时里缺省值从此按洛杉矶日——也就**不等于**编排器的
+    # DATE_STR（本机日），要比新鲜度就显式传 --today（见 step_contract.business_today）。也供测试 / 回放钉日期。
+    ap.add_argument("--today", default=None, help="业务日期 YYYY-MM-DD（默认洛杉矶当日）")
     args = ap.parse_args()
+
+    # 非法 --today 在这里抛 ⇒ run_tool 记为崩溃（退出码 3）
+    today = date.fromisoformat(args.today or step_contract.business_today())
 
     res = check(force=args.force, max_age_days=args.max_age_days,
                 state_path=Path(args.state) if args.state else None,
-                timeout=args.timeout)
+                timeout=args.timeout, today=today)
+    rc = _exit_code(res)
 
     if args.out:
+        from economic_calendar import get_calendar_health
+        env = step_contract.envelope(
+            _TOOL, today.isoformat(), _STATUS_BY_RC[rc], payload=res,
+            attention=contract_attention(res, get_calendar_health(ref_date=today)))
         try:
+            # 建父目录是本工具改造前（v0.45.67 起）就有的行为，照旧保留在这里；`write_out` 本身不建目录
+            # （崩溃路径 run_tool 因此不会建目录——它只打 stderr、仍退出码 3）。
             Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-            Path(args.out).write_text(
-                json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
+            step_contract.write_out(args.out, env)
         except OSError as e:
             print(f"⚠️  JSON 写入失败: {e}", file=sys.stderr)
 
@@ -490,23 +602,30 @@ def main() -> int:
     _up_note = ("上游暂无新日程" if res["upstream_conclusive"]
                 else f"⚠️ 上游 {len(undet)} 个源无法判定（{'、'.join(undet)}），"
                      f"本次**无法确认**上游有没有新日程")
+    # 分支顺序与 `_exit_code` 一致（action > health > undetermined）；返回值统一用 rc
     if res["action_required"]:
         if args.quiet:
             print(f"🆕 上游已发布新日程：{'、'.join(res['new_schedule_tables'])} —— 待人工抄录")
-        return 1
+        return rc
     if h["status"] != "ok":
         if args.quiet:
             print(f"⚠️  本地日历 {h['status']}：{h['binding_table']} 只到 "
                   f"{h['binding_last_date']}（剩 {h['binding_horizon_days']} 天），{_up_note}")
-        return 1
+        return rc
     if res["undeterminable_tables"]:
         if args.quiet:
             print(f"❓ 无法判定：{'、'.join(res['undeterminable_tables'])}")
-        return 3
+        return rc
     if args.quiet:
         print("✅ 日历健康，上游无新日程")
-    return 0
+    return rc
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if step_contract is None:
+        # 没有 step_contract 就写不出外壳：只打 stderr，退出码 3（「无法判定」），不写 --out
+        print(f"{_TOOL}: 无法导入 step_contract（{_STEP_CONTRACT_IMPORT_ERROR}）—— 退出码 3，按「无法判定」处理；"
+              "本次不写 --out", file=sys.stderr)
+        sys.exit(3)
+    # v0.45.355：未捕获异常 ⇒ 退出码 3 + error 外壳（不再是 Python 默认的 1 = 「要人动手」）
+    sys.exit(step_contract.run_tool(_TOOL, main))

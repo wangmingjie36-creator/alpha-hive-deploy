@@ -40,8 +40,25 @@ v0.44.1~0.44.3 修了 ML 预期收益的结构性看多偏斜、并把 RivalBee 
 ------
     0 = 已就绪（该重跑 IC 了）
     1 = 未就绪（正常状态，继续攒）
-    3 = 无法判定（找不到库等）
+    3 = 无法判定（找不到库等）**或本工具自己崩了**（v0.45.355：入口经 `step_contract.run_tool`，
+        未捕获异常不再落成 Python 默认的 1——那会被编排器记成「未就绪（正常）」；`step_contract` 本身
+        导入失败也是 3，此时不写 `--out`）。⚠️ **本模块其余的导入期失败仍是 1**（`run_tool` 兜不到 import，
+        见其 docstring；要等编排器改走 `orchestrator_steps.py` 才与「未就绪」分得开）
         ⚠️ 3 而非 2：编排器 `run_step()` 把 2 保留给"脚本不存在"。
+
+`--json` / `--out` 的输出契约（v0.45.355，`step_contract`）
+---------------------------------------------------------
+原有的键**原样留在顶层**（编排器 Step 11 的内联解析照常读），外加外壳六键：
+`schema_version / tool / date / generated_at / status / attention`。
+    · `date` = 这次运行服务的业务日（`--today`，缺省 `step_contract.business_today()` = 洛杉矶当日）——
+      消费方拿它与自己的 DATE_STR 比新鲜度，所以**要显式传 `--today`**：编排器的 DATE_STR 取本机时区，
+      2026-11-01 起冬令时每天有一小时与洛杉矶日差一天（见 `business_today` 的 docstring）；
+    · `status` 是「要不要人看」，与退出码**分开**：`ok` / `attention` / `undetermined`（找不到库，退出码 3）/
+      `error`（崩溃，退出码 3，由 `run_tool` 写）；
+    · `attention` 由本工具从**结构化数据**逐条列出（就绪、池漂移、世代边界报警、三个前瞻检验的
+      无法判定 / 陈旧 / 已到检视点、维度 IC 协议 H1 锚点的截止日 …），**不从 `--quiet` 那行的图标反推**——
+      H1 锚点「须早于 2026-10-12」那种写在 ⏳ 段里的截止日，按图标读永远报不出来。
+`--quiet` 那一行的格式与退出码 0/1/3 **不因外壳改变**。
 """
 
 from __future__ import annotations
@@ -53,10 +70,20 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Set
+from typing import Dict, List, Optional, Set
 
 ALPHAHIVE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ALPHAHIVE_DIR))
+
+# 编排器工具输出契约（v0.45.355），仓内同目录模块，需先插 sys.path。
+# 它本身导入失败（缺文件 / 语法错 …）⇒ 置哨兵，`__main__` 入口见哨兵退出码 3——不让它落成 Python 默认的 1
+# （= 本工具的「未就绪（正常，继续攒）」）。⚠️ 只兜这一个 import：本模块其余的导入期失败仍是 1。
+try:
+    import step_contract  # noqa: E402
+    _STEP_CONTRACT_IMPORT_ERROR: Optional[str] = None
+except Exception as _e:  # noqa: BLE001 —— 连语法错也要兜：哨兵只记下原因，入口据此退出码 3
+    step_contract = None
+    _STEP_CONTRACT_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
 
 # v0.45.260（数据根迁移阶段 2）：DB_PATH 此前是从 ALPHAHIVE_DIR（`__file__`
 # 派生）算出的模块级常量——完全不读 `ALPHA_HIVE_HOME`。改为覆盖钩子 +
@@ -1012,6 +1039,23 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
             "unmarked_after_boundary": sorted(unmarked_after) if first is None else []}
 
 
+#: 三个 `*_forward_status` 返回值里的**私有**键：执行器 `run()` 的结构化结果（按下方白名单截取），
+#: 供 `main()` 列 `attention` 用。`main()` 取走它（`_take_detail`），**不进 `--json` / `--out`**——
+#: 那两处的 `{status, line}` 形状有测试钉着（`test_*_forward_test.py::TestCarriedByReadiness`）。
+#: 为什么不从 `line` 反推：图标是给人看的渲染，H1 锚点的截止日写在 ⏳ 段里，按图标永远报不出来（v0.45.355）。
+_DETAIL_KEY = "_detail"
+#: 共振 / F&G 两个检验 `run()` 返回值里 `attention` 用得上的键（不含效应量）
+_FWD_DETAIL_KEYS = ("status", "reason", "stale", "look", "weeks", "next_look_at")
+#: 维度 IC 协议执行器 `run()` 返回值里 `attention` 用得上的键——刻意**不含** `verdicts` / `descriptive`
+#: （结论与效应量只在检视点之后出现，本工具只报「到点了、去跑脚本看」，不转述结论）
+_DIM_DETAIL_KEYS = ("status", "reason", "forward_start", "today", "h1_weeks", "next_look_at",
+                    "looks_done", "truncation", "weight_change", "stale", "h1_anchor")
+
+
+def _detail(fres: Dict, keys) -> Dict:
+    return {k: fres[k] for k in keys if k in fres}
+
+
 def resonance_forward_status(home: Path, db: Path, today: Optional[str] = None) -> Dict:
     """顺带承载「共振加成前瞻检验」（v0.45.242）的进度。
 
@@ -1022,6 +1066,7 @@ def resonance_forward_status(home: Path, db: Path, today: Optional[str] = None) 
     ⚠️ 失败**不改变本工具的判定与退出码**，但必须出现在摘要里（「谁会红？」）：
     任何异常都渲染成一行「无法判定」，而不是吞掉。
     `home` 与 `cohort_boundary_evidence` 同理必传 —— 归档是数据，跟着 `--db` 走。
+    返回 `{status, line, _detail}`；`_detail` 见 `_DETAIL_KEY`（v0.45.355）。
     """
     try:
         import importlib.util
@@ -1030,10 +1075,12 @@ def resonance_forward_status(home: Path, db: Path, today: Optional[str] = None) 
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         fres = mod.run(home=home, db_path=str(db), today=today)
-        return {"status": fres.get("status"), "line": mod.status_line(fres)}
+        return {"status": fres.get("status"), "line": mod.status_line(fres),
+                _DETAIL_KEY: _detail(fres, _FWD_DETAIL_KEYS)}
     except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
         return {"status": "cannot_judge",
-                "line": f"⚠️ 共振加成前瞻检验无法判定：{type(e).__name__}: {e}"}
+                "line": f"⚠️ 共振加成前瞻检验无法判定：{type(e).__name__}: {e}",
+                _DETAIL_KEY: {"status": "cannot_judge", "reason": f"{type(e).__name__}: {e}"}}
 
 
 def fg_exposure_gate_forward_status(today: Optional[str] = None) -> Dict:
@@ -1051,10 +1098,12 @@ def fg_exposure_gate_forward_status(today: Optional[str] = None) -> Dict:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         fres = mod.run(today=today)
-        return {"status": fres.get("status"), "line": mod.status_line(fres)}
+        return {"status": fres.get("status"), "line": mod.status_line(fres),
+                _DETAIL_KEY: _detail(fres, _FWD_DETAIL_KEYS)}
     except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
         return {"status": "cannot_judge",
-                "line": f"⚠️ F&G 敞口门前瞻检验无法判定：{type(e).__name__}: {e}"}
+                "line": f"⚠️ F&G 敞口门前瞻检验无法判定：{type(e).__name__}: {e}",
+                _DETAIL_KEY: {"status": "cannot_judge", "reason": f"{type(e).__name__}: {e}"}}
 
 
 def dim_ic_forward_status(db: Path, today: Optional[str] = None) -> Dict:
@@ -1063,7 +1112,8 @@ def dim_ic_forward_status(db: Path, today: Optional[str] = None) -> Dict:
 
     ⚠️ 失败**不改变本工具的判定与退出码**，渲染成可见的一行，不吞。
     `db` 必传：协议的数据跟着 `--db` 走（同 `resonance_forward_status`）。
-    检视点之前返回值里没有效应量——盲化在执行器的数据结构上，这里只转交 `status` 与那一行。
+    检视点之前返回值里没有效应量——盲化在执行器的数据结构上，这里只转交 `status` 与那一行
+    （外加白名单截取的结构化进度 `_detail`，不含结论与效应量，见 `_DIM_DETAIL_KEYS`）。
     """
     try:
         import importlib.util
@@ -1072,10 +1122,31 @@ def dim_ic_forward_status(db: Path, today: Optional[str] = None) -> Dict:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         fres = mod.run(db_path=str(db), today=today)
-        return {"status": fres.get("status"), "line": mod.status_line(fres)}
+        detail = _detail(fres, _DIM_DETAIL_KEYS)
+        if "h1_anchor" not in detail:
+            # 执行器 cannot_judge 时早退、不算锚点；而锚点只取决于登记常量与边界表、与库读不读得出无关——
+            # 补算一次（`anchor_status` 只读、不碰库），免得截止日被一个无关的故障挡住。
+            # 补算本身失败 ⇒ 记成 state=error，`_dim_ic_attention` 会单列一条 warn，不吞。
+            try:
+                detail["h1_anchor"] = mod.anchor_status(mod._protocol(), fres.get("today") or today)
+            except Exception as e:  # noqa: BLE001
+                detail["h1_anchor"] = {"state": "error", "problem": f"{type(e).__name__}: {e}"}
+        return {"status": fres.get("status"), "line": mod.status_line(fres), _DETAIL_KEY: detail}
     except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
         return {"status": "cannot_judge",
-                "line": f"⚠️ 维度 IC 协议无法判定：{type(e).__name__}: {e}"}
+                "line": f"⚠️ 维度 IC 协议无法判定：{type(e).__name__}: {e}",
+                _DETAIL_KEY: {"status": "cannot_judge", "reason": f"{type(e).__name__}: {e}"}}
+
+
+def _take_detail(st: Dict) -> Dict:
+    """从 `*_forward_status` 的返回值里**取走**私有的 `_detail`（之后 `st` 只剩 `{status, line}`）。
+
+    取不到（例：测试把 `*_forward_status` 换成只回 `{status, line}` 的桩）⇒ 退回 `{"status": st["status"]}`
+    ——`status` 本身也是结构化字段，据它仍能列出「无法判定 / 已到检视点 / 状态未知」；
+    只有依赖细节的条目（陈旧、H1 锚点截止日 …）会缺，而维度 IC 那边缺锚点会单列一条 warn（见 `_dim_ic_attention`）。
+    """
+    d = st.pop(_DETAIL_KEY, None)
+    return dict(d) if isinstance(d, dict) else {"status": st.get("status")}
 
 
 _BOUNDARY_VERDICT_TEXT = {
@@ -1180,6 +1251,176 @@ def boundary_evidence_status(home: Path) -> Dict:
     return res
 
 
+# ── 输出契约：`attention` 条目（v0.45.355）─────────────────────────────────────
+# 规则：每一条都从**结构化字段**判（`assess()` 的结果、`boundary_evidence_status` 的 `alarm`、
+# 三个执行器 `run()` 的返回值），不解析 `--quiet` 那行、不看段首图标。`id` 是稳定机器键，
+# 消费方靠它去重 / 路由；改名等于改接口。条目是否与段首图标一致由
+# `tests/test_step_contract_ic_rerun.py::TestAttentionMatchesRenderedIcons` 对照（测试侧对照，生产侧不反推）。
+
+_FWD_TESTS = {
+    # key → (人读名, 脚本)
+    "resonance_forward": ("共振加成前瞻检验", "experiments/resonance_boost_forward_test.py"),
+    "fg_exposure_gate_forward": ("F&G 敞口门前瞻检验", "experiments/fg_exposure_gate_forward_test.py"),
+}
+_DIM_SCRIPT = "experiments/dim_ic_forward_test.py"
+
+
+def _forward_test_attention(key: str, d: Dict) -> List[Dict]:
+    """共振 / F&G 两个前瞻检验的条目。两者状态词表相同（`status_line` 同构）：
+    `cannot_judge`（含自证率跌破阈值）/ `not_ready`（`stale` 时要人看）/ `confirmed`·`not_confirmed`
+    （已到检视点）/ 其他（未知状态——执行器改了词表而这里没跟上，也要有人红）。"""
+    name, script = _FWD_TESTS[key]
+    iid = f"ic_rerun.{key}"
+    st = d.get("status")
+    item = step_contract.attention_item
+    if st == "cannot_judge":
+        return [item(f"{iid}.cannot_judge", "warn",
+                     f"{name}无法判定：{d.get('reason') or '（执行器未给原因）'}"
+                     " —— 本周这份检验没跑成或不可信（自证率跌破阈值也落在这里），需人看原因")]
+    if st == "not_ready":
+        if d.get("stale"):
+            return [item(f"{iid}.stale", "warn",
+                         f"{name}：{d.get('reason') or '登记后长期无前瞻样本'}")]
+        return []
+    if st in ("confirmed", "not_confirmed"):
+        return [item(f"{iid}.checkpoint", "info",
+                     f"{name}已到{d.get('look') or ''}检视点 —— 手动跑 `/usr/local/bin/python3 {script}` 看结论"
+                     "（需人判断，勿自动改评分 / CONFIG）")]
+    return [item(f"{iid}.unknown_status", "warn", f"{name}状态未知：{st!r}（执行器的状态词表变了？）")]
+
+
+def _dim_ic_attention(d: Dict) -> List[Dict]:
+    """维度 IC 协议执行器的条目。与 `dim_ic_forward_test.status_line` 读同一批字段，但**逐项**列出，
+    其中 H1 锚点「待登记」带截止日 `forward_start`（协议 §13.4：锚点边界须早于窗口起点，否则 H1 回退）——
+    那一项在进度行里只是 ⏳ 段尾的一句话，按图标读的消费方永远看不见它。"""
+    name, iid, item = "维度 IC 协议", "ic_rerun.dim_ic", step_contract.attention_item
+    st = d.get("status")
+    out = []
+    run_it = f"手动跑 `/usr/local/bin/python3 {_DIM_SCRIPT}` 看全文（需人判断，协议 §7 的动作由人执行）"
+    if st == "cannot_judge":
+        # 无法判定时截断 / 权重 / 陈旧都无从谈起，只剩锚点（`dim_ic_forward_status` 已补算，见那里）
+        out.append(item(f"{iid}.cannot_judge", "warn", f"{name}无法判定：{d.get('reason') or '（执行器未给原因）'}"))
+    elif st == "concluded":
+        out.append(item(f"{iid}.checkpoint", "info", f"{name}已出结论 —— {run_it}"))
+    elif st == "in_progress":
+        looks = "/".join(d.get("looks_done") or []) or "?"
+        out.append(item(f"{iid}.checkpoint", "info", f"{name}已过 {looks} 检视 —— {run_it}"))
+    elif st != "not_ready":
+        out.append(item(f"{iid}.unknown_status", "warn", f"{name}状态未知：{st!r}（执行器的状态词表变了？）"))
+    tr = d.get("truncation") or {}
+    h1 = tr.get("H1") or {}
+    if h1.get("date"):
+        layer = "只触及冻结层，冻结评分器自证通过后可解除" if h1.get("layer") == "frozen" else "触及输入层，不可解除"
+        out.append(item(f"{iid}.h1_truncated", "warn", f"{name}：H1 已于 {h1['date']}（{h1.get('version')}）截断，{layer}"))
+    anc, fs = d.get("h1_anchor"), d.get("forward_start")
+    state = anc.get("state") if isinstance(anc, dict) else None
+    if state == "pending":
+        out.append(item(f"{iid}.h1_anchor_pending", "warn",
+                        f"{name}：H1 锚点待登记（{anc.get('problem')}）—— 须早于 {fs} 进边界表，"
+                        "否则 H1 回退到原登记对象（生产 sentiment，协议 §13.4）",
+                        deadline=fs))
+    elif state == "fallback":
+        out.append(item(f"{iid}.h1_anchor_fallback", "warn",
+                        f"{name}：H1 锚点 {anc.get('problem')} ⇒ 已回退到原登记对象（生产 sentiment，协议 §13.4）"))
+    elif state != "ok" and not (st == "cannot_judge" and anc is None):
+        # 执行器不再给出锚点状态 / 补算失败 ⇒ 上面那条截止日会无声消失；宁可多一条 warn，不让它变成「没发生过」。
+        # 唯一例外：执行器根本没加载起来（cannot_judge 且无从补算）——那时 cannot_judge 那条已经在报了。
+        by = f"须早于 {fs} " if fs else ""
+        out.append(item(f"{iid}.h1_anchor_unknown", "warn",
+                        f"{name}：读不到 H1 锚点状态（h1_anchor={anc!r}）—— 锚点{by}登记的截止日可能漏报",
+                        deadline=fs))
+    h2 = tr.get("H2") or {}
+    if h2.get("date"):
+        out.append(item(f"{iid}.h2_truncated", "warn", f"{name}：H2 已于 {h2['date']}（{h2.get('version')}）截断"))
+    wc = d.get("weight_change") or {}
+    if wc.get("date"):
+        out.append(item(f"{iid}.weight_changed", "warn",
+                        f"{name}：config 权重已偏离冻结值（{wc['date']}，{wc.get('source')}）⇒ H2 截断"))
+    if "unknown" in wc:
+        out.append(item(f"{iid}.weight_history_unknown", "warn",
+                        f"{name}：权重历史无法判定（{wc['unknown']}）"))
+    if d.get("stale"):
+        out.append(item(f"{iid}.stale", "warn",
+                        f"{name}：登记窗口起点 {fs} 后仍无任何样本 —— 扫描停了或路径错了"))
+    return out
+
+
+def _boundary_attention(bev: Dict, dim: Dict) -> List[Dict]:
+    """世代边界核对报警 ⇒ 每条报警的边界一条 alarm（逐条结果在 `per_version`），id = `ic_rerun.boundary_evidence.<版本>`。
+
+    id 带版本：同日可有多条边界同时报警（09-28 就登记了三条），而 id 是消费方去重 / 路由的键、同一外壳内必须
+    唯一（`step_contract.validate` 查）。v0.45.355 初版每条都叫 `ic_rerun.boundary_evidence` ⇒ 按 id 保留首条的
+    消费方会丢掉后面的——带截止日 2026-10-12 的 v0.45.340 那条恰好排在 v0.45.334 之后。
+
+    该条恰是维度 IC 协议 H1 的锚点版本时带截止日 `forward_start`：锚点日期写错要**追加更正**，
+    而更正须早于窗口起点进表，否则 H1 回退（协议 §13.4；`_COHORT_HISTORY` 里 v0.45.340 条原文
+    「须早于 2026-10-12」）。锚点版本与窗口起点取自执行器的结构化结果，不在这里抄常量。
+    """
+    anc = dim.get("h1_anchor")
+    anchor_version = anc.get("version") if isinstance(anc, dict) else None
+    fs = dim.get("forward_start")
+    per = bev.get("per_version")
+    entries = [e for e in per if isinstance(e, dict)] if isinstance(per, list) and per else [bev]
+    out = []
+    for i, e in enumerate(entries):
+        if not e.get("alarm"):
+            continue
+        deadline = fs if (anchor_version and fs and e.get("version") == anchor_version) else None
+        msg = e.get("line") or f"世代边界 {e.get('version')} / {e.get('boundary')} 核对未通过：{e.get('verdict')}"
+        msg += " —— 按本文件顶部「更正条目」流程**追加**一条更正（新标签 + _CORRECTS），不改写原条目"
+        if deadline:
+            msg += f"；该条是维度 IC 协议 H1 的锚点，更正须早于 {deadline} 进表，否则 H1 回退（协议 §13.4）"
+        # 同日各条的版本互不相同（`_COHORT_HISTORY` 的 (日期, 版本) 唯一，有测试钉着）；缺版本时退回表序号
+        out.append(step_contract.attention_item(
+            f"ic_rerun.boundary_evidence.{e.get('version') or f'#{i}'}", "alarm", msg, deadline=deadline))
+    if bev.get("alarm") and not out:
+        # 顶层说报警、逐条却一条都没有 ⇒ 两处不一致；照顶层报，不让它因为形状不对而消失
+        out.append(step_contract.attention_item(
+            "ic_rerun.boundary_evidence.inconsistent", "alarm",
+            f"{bev.get('line') or bev.get('verdict')}（per_version 里没有对应的报警条目，形状不一致）"))
+    return out
+
+
+def build_attention(res: Dict, bev: Dict, fwd: Dict, fg: Dict, dim: Dict) -> List[Dict]:
+    """本工具的全部 `attention` 条目。`fwd` / `fg` / `dim` 是三个执行器的结构化结果（`_take_detail`）。"""
+    item = step_contract.attention_item
+    out = []
+    if res.get("ready"):
+        out.append(item("ic_rerun.ready", "info",
+                        f"IC 重跑已就绪：世代内已攒 {res.get('weeks_accrued')}/{res.get('weeks_required')} 个不重叠周"
+                        f"（{res.get('n_ripe_samples')} 条已回填样本）—— 该跑（需人看结果，刻意不自动跑）："
+                        f"{res.get('next_step')}"))
+    if res.get("pool_note"):
+        out.append(item("ic_rerun.pool_note", "warn",
+                        f"样本世代已被标的池变动打断：{res['pool_note']} —— 需人决定是否重设 _COHORT_HISTORY 的世代边界"))
+    out += _boundary_attention(bev or {}, dim)
+    out += _forward_test_attention("resonance_forward", fwd)
+    out += _forward_test_attention("fg_exposure_gate_forward", fg)
+    out += _dim_ic_attention(dim)
+    return out
+
+
+def contract_envelope(res: Dict, date: str, attention: List[Dict]) -> Dict:
+    """`--json` / `--out` 的外壳：`res` 原样作顶层 payload（编排器 Step 11 读的键一个不动）。
+
+    `status`：有任何条目 ⇒ `attention`（含 info 级的「已就绪 / 已到检视点」——那也是要人去做的事），否则 `ok`。
+    `res` 的顶层键与外壳保留键不重名（实测；`step_contract.envelope` 撞名即抛，不会静默覆盖）。
+    """
+    return step_contract.envelope("ic_rerun_readiness", date, "attention" if attention else "ok",
+                                  attention=attention, payload=res)
+
+
+def _emit(args, env: Dict) -> None:
+    """`--out` 原子写 + `--json` 打印同一份外壳。写不出去不改变判定（判定在写盘之前就完成了）。"""
+    if args.out:
+        try:
+            step_contract.write_out(args.out, env)
+        except OSError as e:
+            print(f"⚠️  无法写入 {args.out}: {e}", file=sys.stderr)
+    if args.json:
+        print(json.dumps(env, indent=2, ensure_ascii=False))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="IC 重跑就绪度")
     ap.add_argument("--db", default=None, help="pheromone.db 路径（默认走 PATHS.db）")
@@ -1198,41 +1439,53 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true", help="只输出一行摘要")
     args = ap.parse_args()
 
+    # 外壳的 `date`：这次运行服务的业务日（v0.45.355）。消费方拿它与自己的 DATE_STR 比，
+    # 读到上一次留下的文件时就知道不是今天的（此前 JSON 里没有日期，超时后会无声读到旧文件）。
+    # 缺省是洛杉矶当日，**不等于**编排器本机时区的 DATE_STR（2026-11-01 起冬令时每天有一小时差一天）——
+    # 所以消费方要显式传 --today（见 step_contract.business_today）。
+    date = args.today or step_contract.business_today()
     db = Path(args.db) if args.db else _db_path()
     if not db.exists():
-        print(f"❌ 找不到 {db} —— 无法判定", file=sys.stderr)
+        msg = f"找不到 {db} —— 无法判定"
+        print(f"❌ {msg}", file=sys.stderr)
+        if args.out or args.json:
+            # 此前这条路不写 --out ⇒ 编排器读到的是「文件不存在」（或同名旧文件），与「没跑」分不开
+            _emit(args, step_contract.envelope(
+                "ic_rerun_readiness", date, "undetermined", payload={"reason": msg},
+                attention=[step_contract.attention_item(
+                    "ic_rerun.undetermined", "warn", f"IC 重跑就绪度无法判定：找不到 {db}（退出码 3）")]))
         return 3
 
     res = assess(db_path=db, target_ic=args.target_ic, today=args.today)
     fwd = resonance_forward_status(db.parent, db, today=args.today)
+    fwd_detail = _take_detail(fwd)      # 取走私有细节后 fwd 只剩 {status, line}，payload 形状不变
     res["resonance_forward_test"] = fwd
     fg_fwd = fg_exposure_gate_forward_status(today=args.today)
+    fg_detail = _take_detail(fg_fwd)
     res["fg_exposure_gate_forward_test"] = fg_fwd
     dim_fwd = dim_ic_forward_status(db, today=args.today)
+    dim_detail = _take_detail(dim_fwd)
     res["dim_ic_forward_test"] = dim_fwd
     # 归档与 DB 同处一个安装 ⇒ 用 --db 的所在目录，别用代码目录（见 cohort_boundary_evidence docstring）。
     # 放在 --out / --json / --quiet 之前：三种输出都要带上它（v0.45.334，见 boundary_evidence_status）
     bev = boundary_evidence_status(db.parent)
     res["cohort_boundary_evidence"] = bev
 
-    if args.out:
-        try:
-            Path(args.out).write_text(
-                json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")
-        except OSError as e:
-            # 写不出去不改变判定 —— 判定在写盘之前就完成了
-            print(f"⚠️  无法写入 {args.out}: {e}", file=sys.stderr)
+    if args.out or args.json:
+        # 只在要外壳时才列条目：`--quiet` 单跑（周度任务）的路径与 v0.45.355 之前逐字节相同
+        _emit(args, contract_envelope(res, date, build_attention(res, bev, fwd_detail, fg_detail, dim_detail)))
 
     if args.json:
-        print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0 if res["ready"] else 1
     if args.quiet:
         # 同一行：周度任务的约定是「把那一行摘要原样写进周报」，另起一行可能被漏抄。
-        # ⚠️ 段的**顺序**是契约：周度任务 SKILL.md 按「第三段 = F&G」解析。新段只许追加在末尾。
+        # ⚠️ 段的**顺序**是契约，**段数不是**：周度任务 SKILL.md 自 2026-09-28 起按段首的名字 / 图标认段
+        # （不再按「第三段 = F&G」），`tests/test_dim_ic_forward_test.py` 也改成钉「已知段按序出现、
+        # 新段只许追加在末尾」。已知段不许挪位、不许删；新段只许追加在末尾。
         # 第五段（v0.45.334）= 世代边界的数据证据，**只在要人看时出现**（`bev["alarm"]`：日期与
-        # 印记不符 / 核不了），以 🚨 开头；正常时（✅ / ⏳ / —）不加段，一行仍是四段 ——
-        # 恒在的段会被当成背景噪音，而 `tests/test_dim_ic_forward_test.py` 也钉着四段。
-        # 完整判别结果不论好坏都在 `--json` / `--out` 的 `cohort_boundary_evidence` 键里。
+        # 印记不符 / 核不了），以 🚨 开头；正常时（✅ / ⏳ / —）不加段 —— 恒在的段会被当成背景噪音。
+        # 完整判别结果不论好坏都在 `--json` / `--out` 的 `cohort_boundary_evidence` 键里；
+        # 「要人看」的机读清单在 `--json` / `--out` 的 `attention` 里（v0.45.355，带截止日）。
         line = summary_line(res) + "｜" + fwd["line"] + "｜" + fg_fwd["line"] + "｜" + dim_fwd["line"]
         if bev["alarm"]:
             line += "｜" + bev["line"]
@@ -1280,4 +1533,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if step_contract is None:
+        # 没有 step_contract 就写不出外壳：只打 stderr，退出码 3（「无法判定」），不写 --out
+        print(f"ic_rerun_readiness: 无法导入 step_contract（{_STEP_CONTRACT_IMPORT_ERROR}）—— 退出码 3，"
+              "按「无法判定」处理；本次不写 --out", file=sys.stderr)
+        sys.exit(3)
+    # v0.45.355：未捕获异常 ⇒ 退出码 3（「无法判定」）+ `--out` 照样写出 status=error 的外壳。
+    # 此前是 Python 默认的 1 = 本工具的「未就绪（正常，继续攒）」⇒ 崩溃被编排器记成正常
+    # （实测：`--db <坏库>` rc=1、不写 --out、stdout 为空）。
+    sys.exit(step_contract.run_tool("ic_rerun_readiness", main))

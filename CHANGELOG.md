@@ -5,7 +5,52 @@
 
 ---
 
-## [0.45.355] — 2026-09-28 — 占位（进行中：编排器工具输出契约——统一 JSON 外壳 + 显式 attention、未捕获异常退出码 3、仓内步骤解释器 + pre-push 契约守卫）
+## [0.45.355] — 2026-09-28 — Added：编排器步骤工具的输出契约——统一 JSON 外壳 + 生产方显式 attention、未捕获异常退出码 3、仓内步骤解释器（未接线）、pre-push 契约闸
+
+用户决定（2026-09-27 根因分析后选「第 2 项先做仓内 A」）。根因：生产方（仓内 CLI，有 git + 测试）与消费方（编排器、周度 SKILL.md）
+之间的接口（`--out` 键 / `--quiet` 段 / 退出码）没有机器可核的定义，只在 ≥4 处用散文各抄一份 ⇒ 一端变了另一端不红。实测后果：
+`--quiet` 12 天变 4 次、SKILL 一直写「三段」；未捕获异常退出 1 = 与「未就绪 / 降级（正常）」同码 ⇒ 崩溃被记成正常；JSON 无日期 ⇒
+同日重跑超时会无声读上一次的文件；「要人看」靠图标推断 ⇒ H1 锚点「须早于 2026-10-12」藏在 ⏳ 段里永远不报。
+
+### Added
+- `step_contract.py`：外壳 `schema_version / tool / date / generated_at / status / attention`（原有键原样留在顶层，**向后兼容**：
+  现行编排器解析照常）；`status`（ok / attention / undetermined / error）是「要不要人看」，与退出码**分开**；`attention` 条目
+  （id / level / message / deadline / source）由生产方从结构化数据**显式**给出，id 在同一外壳内唯一；`validate()` 与构造函数同一套规则；
+  `run_tool`：未捕获异常 ⇒ **退出码 3** + 写 `status:"error"` 外壳（`step_contract` 本身导入失败也 3；其余导入期失败仍 1，文档写明）；
+  `write_out` 原子写、不建缺失目录、权限随 umask（不是 mkstemp 的 0600——环境记忆拿 0600 认 iCloud 副本）。
+- 五个工具接入（编排器 Step 10 / 11 / 12 / 13 / 15）：`scan_continuity`、`ic_rerun_readiness`、`scan_coverage_gate`、
+  `economic_calendar_watch`、`backup_continuity`。`--out` 原有键无一删除或改名；退出码除崩溃外不变；`--quiet` 逐字节不变。
+  attention 例：IC 就绪（info，带 next_step）、世代边界告警（每个版本一条 `ic_rerun.boundary_evidence.<版本>`）、H1 锚点待登记
+  （warn，deadline 2026-10-12）、F&G / 共振自证失败、覆盖率降级字段、日历表见底（deadline = 覆盖到期日）。
+- `orchestrator_steps.py`（**未接线**，供步骤 B）：`--step --rc --json --date [--run-start]` ⇒ 一行 JSON `{level, message, steps_fragment}`，
+  永不抛。对旧格式 JSON 与现行 bash 逐字一致（黄金对照按块名从仓库副本 `scripts/alpha-hive-orchestrator.sh` 真跑 bash）；刻意修正：
+  陈旧 JSON（`date` ≠ 本轮）不再冒充本轮、跨午夜（次日 + 本轮内写的）按 `date_rollover` 接受、契约错 / 崩溃 = error、attention 全部转述、
+  Step 2 退出 1 且当天产物齐全 ⇒ `success_with_warning`（ML 准常数，v0.45.145 起的退出 1 此前被读成「网站不会更新」）。
+  FIFO / 超大 / 超深 JSON 不卡不崩。**B 接线须知**：必须把 `DATE_STR` 显式传给各工具（`--end` / `--today` / `--date`）。
+- `changelog_guard.py` pre-push **契约闸**（CI 连续红、只放 CI 等于没人看）：推往 main 且改到代码（`*.py` / `*.sh` / `tests/` / `scripts/` /
+  配置 / `SKILL.md` / `.gitattributes`）时，在**被推送提交的导出**里跑 `CONTRACT_REQUIRED_TESTS` + `tests/test_step_contract*.py`；
+  必需文件缺失 / 被 export-ignore、整文件 skip、某文件 0 条通过、收集错误、超时都拦；剥掉 `PYTHONPATH` 等（防工作区文件替提交顶包）；
+  只含报告的每日自动推送不触发。已装 hook 调的就是本文件，**无需重装**。实测 15–25 s。
+  另一 session（编排器入仓，v0.45.353）的检查可直接加进 `CONTRACT_REQUIRED_TESTS`。
+
+### Changed
+- `tests/test_dim_ic_forward_test.py`：`--quiet` 不再钉「四段」，改钉「已知段按序出现 + 段首图标合法 + 新段只能以 🚨 追加在末尾」
+  （段数不是契约；周度 SKILL 已于 09-28 改为按段名 / 图标读，仓库外、用户批准）。
+
+### 验证
+- 两路对抗审查：在生产 shell 设置（`set -uo pipefail`、`LC_ALL=en_US.UTF-8`）下把现行编排器 Step 10–15 的内联解析逐字抽出，
+  喂新旧工具的真实输出（生产数据只读 / APFS 克隆）共 384 对：日志行与 STEPS_RESULT 除「崩溃 ⇒ 3」外逐字一致。
+- 审查抓到并已修：守卫整文件 skip / 契约文件被删或 export-ignore 静默放行、继承 PYTHONPATH 顶包；解释器跨午夜误判陈旧、info 级
+  「该跑分析」被吞、alarm 映射成 error（bash 刻意记 WARN）、FIFO 卡死 / 深 JSON 栈溢出、文档里写死行号与 sha；工具侧同 id 三条、
+  导入期失败退 1、`write_out` 建目录与 0600、validate 比构造宽松、「本机即 PDT」的错误注释。三路修复各经独立复核全部 VERIFIED。
+- 变异：各路在独立 APFS 克隆真跑，合计约 150 条全红在预期断言上。
+
+### 发现未处理
+- **时区（需另一版本，用户已拍板方案）**：本机 `America/Vancouver` 按 tzdata 2026c 自 2026-11-01 起常年 UTC-7，与 LA / ET 分家 ⇒ 冬季
+  launchd 14:00 = 16:00 ET 恰收盘、补跑闸 13:30 = 15:30 ET 收盘前；本机 00:00–01:00 `DATE_STR` 比 LA 业务日早一天。
+  补跑闸改按美东收盘判 + plist 加 15:00 触发，另起一版（截止 11-01）。
+- 编排器三条跳过路径 `cat > status.json` 覆盖当天真实状态（09-26 周六开机补跑已把 09-25 的 status.json 冲成 skipped_non_trading_day）。
+- 编排器 exit 3 的日志文案（「找不到 pheromone.db」等）现在也覆盖「崩溃」，原因不准——随 B 接线改。
 
 ## [0.45.354] — 2026-09-28 — 占位（进行中：复核两组未并入分支——v0.45.88 CBOE 新鲜度分层 / 原 v0.45.118 backfill_cloud_snapshot，移植或记录作废）
 
