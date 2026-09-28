@@ -2,7 +2,7 @@
 
 为什么需要这条
 --------------
-`~/.claude/scripts/alpha-hive-orchestrator.sh`（仓库外、不受版本控制）在 v0.45.287 之前有
+编排器（v0.45.353 前在仓库外、不受版本控制；现为仓库 `scripts/alpha-hive-orchestrator.sh`）在 v0.45.287 之前有
 18 处形如 `"…（exit=$STEP10_RC），不影响主流程"` 的写法：裸变量后面紧跟全角标点，中间没有 ASCII 边界。
 macOS `/bin/bash`（3.2.57）在 UTF-8 的 LC_CTYPE 下，把 UTF-8 **首字节**当成变量名的一部分
 （实测：UTF-8 的 51 个首字节 0xC2–0xF4 里，被吃 ⇔ macOS 单字节 `isalpha()` 为真，0 处不一致，
@@ -29,21 +29,21 @@ macOS `/bin/bash`（3.2.57）在 UTF-8 的 LC_CTYPE 下，把 UTF-8 **首字节*
 
 守卫自己也要有牙（CLAUDE.md：检测器两个方向都要自证）
 ------------------------------------------------------
-`TestDetectorHasTeeth` 全是合成文本、零外部依赖，**在任何机器上都跑**；只有「读真编排器」那一类
-在文件不在本机时 skip（编排器只存在于装了定时任务的那台 Mac——恰好也是唯一需要它的地方）。
-条件性挂在**类/用例**上，不用模块级 `pytestmark`（那会连坐把 teeth 一起跳掉）。
+`TestDetectorHasTeeth` 全是合成文本、零外部依赖，**在任何机器上都跑**。
+v0.45.353 起「读真编排器」那一类读的是仓库 `scripts/` 里的那份（`tests/_orchestrator.py`），
+也在任何机器上都跑——此前它读仓库外的部署副本、不在本机就 skip ⇒ CI 上恒 skip，
+v0.45.334 引入的 `$READINESS_JSON）` 因此隔了一天、靠别人碰巧跑全套才撞见（v0.45.348 修）。
+条件性（macOS bash 3.2 那组）挂在**类**上，不用模块级 `pytestmark`（那会连坐把 teeth 一起跳掉）。
 """
 
-import os
 import re
 import shlex
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
-ORCH = Path(os.path.expanduser("~/.claude/scripts/alpha-hive-orchestrator.sh"))
+from tests._orchestrator import REPO_ORCH as ORCH, repo_orchestrator_text
 
 # 裸变量名（不含 `${…}`、`$1`/`$?`/`$#` 这类特殊参数——实测它们不会吞后面的字节）
 # 紧跟任意非 ASCII 字符。故意宽于「实测会中招的那些首字节」：多抓一个 `א` 无害（加花括号总是对的），
@@ -135,9 +135,7 @@ class TestDetectorHasTeeth:
 
 @pytest.fixture(scope="module")
 def orch_text():
-    if not ORCH.is_file():
-        pytest.skip("编排器不在本机（仓库外文件）")
-    return ORCH.read_text(encoding="utf-8")
+    return repo_orchestrator_text()
 
 
 class TestLiveOrchestrator:

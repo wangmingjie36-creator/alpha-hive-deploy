@@ -9,7 +9,46 @@
 
 ## [0.45.354] — 2026-09-28 — 占位（进行中：复核两组未并入分支——v0.45.88 CBOE 新鲜度分层 / 原 v0.45.118 backfill_cloud_snapshot，移植或记录作废）
 
-## [0.45.353] — 2026-09-28 — 占位（进行中：编排器纳入版本控制·阶段 1 导入——仓库 scripts/ 成为唯一真相，测试改读仓库副本）
+## [0.45.353] — 2026-09-28 — Added/Changed：编排器纳入版本控制·阶段 1（导入）——仓库 `scripts/alpha-hive-orchestrator.sh` 成为唯一真相；读编排器的测试改读仓库副本，CI 上首次真跑
+
+### 为什么
+
+v0.45.334（09-26）往编排器第 1198 行写了 `$READINESS_JSON）`，守卫 `test_orchestrator_braced_vars.py` 当天就会红，
+却隔一天、靠别的会话碰巧在本机跑全套才撞见（v0.45.348 修）。「谁会红？」实查的答案是**没人**：
+编排器在仓库外 ⇒ GitHub CI（ubuntu）上 8 个读它的测试文件全部恒 skip；git 钩子只跑 changelog_guard；
+launchd 不跑 pytest；零 Claude Code hook。「改编排器后必跑守卫」只是纪律，而它恰恰是那次没被执行的一步。
+先考虑过 PostToolUse hook，否决：只治表层、漏掉 sed/脚本式改法（v0.45.348 本身就是脚本改的），
+且本身又是一个不进 git、丢了没人知道的机制。
+
+### 设计（全计划四阶段；本版只做阶段 1，对生产零影响）
+
+- 仓库是唯一真相；launchd 仍执行 `~/.claude/scripts/` 下的**部署副本**（plist 不动）。不用软链接：
+  编排器注释实测 launchd 下 bash 对 `~/Desktop` 有 TCC 限制，直接跑仓库里那份能否读到**待验证**，读不到就是整轮扫描失败。
+- 阶段 2 部署工具（`bash -n` + 静态检测器 + 漂移检查 → 原子 `mv`）、阶段 3 接进扫描前同步、阶段 4 规则收口，另版进行；
+  阶段 3 等 09-28 世代边界扫描核对完。
+- 实测（临时仓库）：git fast-forward 以**新 inode** 替换文件，正在运行的 bash 读完旧版不受影响——
+  此前担心的「运行中自我改写」不成立；真实代价只是「合入后下一轮才生效」。
+
+### 改动
+
+- Added `scripts/alpha-hive-orchestrator.sh`：部署副本逐字节导入（`cmp` 一致，sha256 `c0e9cf9b…`，mode 755）。
+  公开仓库，提交前扫过密钥形状字符串 / URL / 邮箱 / Slack ID：只有本机代理 `127.0.0.1:7897` 与 CBOE 公开 CDN。
+- Added `tests/_orchestrator.py`：`REPO_ORCH` / `DEPLOYED_ORCH` 唯一定义 + `repo_orchestrator_text()`（缺文件是断言不是 skip）。
+- Added `tests/test_orchestrator_deployed_matches_repo.py`：部署副本 vs `origin/main` 的 blob 比对，两种坏法各一条——
+  **漂移**（内容不在 main 任何一版里 = 有人直接改了生产）/ **未部署**（是 main 的旧版）；纯函数 `classify` 另配任意机器都跑的三向 teeth。
+  部署副本只在那台 Mac 上 ⇒ 类级 skip。⚠️ 阶段 3 后「未部署」在合入到下一轮扫描之间是正常态，那条要改。
+- Changed 7 个测试文件改读仓库副本、撤掉「不在本机就 skip」：`test_orchestrator_braced_vars` / `test_scan_timing` /
+  `test_code_version`（**撤 `@pytest.mark.integration`**，默认套件与 CI 都跑）/ `test_watchlist_single_source` /
+  `test_data_backup`（3 个 Step 14/15 bash 沙箱类，只用 bash+jq+python，已核对可移植）/ `test_silent_failure_guards` / `test_scan_catchup`；
+  另更正 `test_slack_send_whitelist` 与 `test_data_backup` 各一处过期注释。ruff 清掉因此变成未用的 5 个 import。
+- Changed `CLAUDE.md` 核心组件指针加一条：不许直接改部署副本；改仓库 → 合入 → 部署。
+
+### 验证
+
+- 改动涉及的 12 个测试文件 + 元守卫全绿；`-m integration tests/test_scan_catchup.py`（沙箱里真跑仓库副本走闸）3 passed。
+- 变异：往仓库副本追加 `$DATE_STR）` ⇒ 裸变量守卫红并点名第 1546 行（证明读的是仓库副本）；还原后 `cmp` 与部署副本一致。
+- 一致性判定：以本地提交代替 origin/main ⇒ 真部署副本 `latest`；临时拷贝追加一行 ⇒ `drift`；旧版 ⇒ `stale`。未触碰部署副本。
+- 推送后在 origin/main 上复跑 `test_orchestrator_deployed_matches_repo.py`（推送前它按设计红：main 历史里还没有该文件）。
 
 ## [0.45.352] — 2026-09-28 — 占位（进行中：重做 v0.45.77/78 + e8bac95 的仪表板令牌化意图——未定义 var(--mt)/var(--t)、公司卡扁平网格、宏观条日环比；加未定义 CSS 变量守卫）
 

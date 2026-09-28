@@ -12,17 +12,13 @@ SQ/COIN/MSTR/UPST）**从未被扫过**。改 config 以为生效，扫描其实
 """
 
 import re
-from pathlib import Path
 
-import pytest
 
-ORCH = Path.home() / ".claude/scripts/alpha-hive-orchestrator.sh"
+from tests._orchestrator import repo_orchestrator_text
 
 
 def _orch_source() -> str:
-    if not ORCH.exists():
-        pytest.skip(f"编排器脚本不存在: {ORCH}")
-    return ORCH.read_text()
+    return repo_orchestrator_text()
 
 
 def _fallback_tickers() -> list:

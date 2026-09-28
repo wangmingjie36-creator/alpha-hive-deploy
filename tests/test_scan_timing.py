@@ -194,11 +194,10 @@ class TestWrite:
 
 
 # ───────────────────────────────────────────── 编排器并入
-_ORCH = os.path.expanduser("~/.claude/scripts/alpha-hive-orchestrator.sh")
+from tests._orchestrator import REPO_ORCH as _ORCH  # 仓库里那份（v0.45.353）
 
 
-@pytest.mark.skipif(not shutil.which("jq") or not os.path.exists(_ORCH),
-                    reason="需要 jq 与编排器脚本")
+@pytest.mark.skipif(not shutil.which("jq"), reason="需要 jq")
 class TestOrchestratorMerge:
     """从编排器**原文**里抠出两条 jq 过滤器来跑，不在测试里另抄一份。"""
 
