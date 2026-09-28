@@ -78,7 +78,7 @@ class BacktestConfig:
     # 让 dashboard 净值/胜率只反映核心实盘策略。默认 False：optimizer / factor_attribution /
     # bootstrap 等研究路径保留全样本（样本积累本就要这些数据）。仅 dashboard 调用设 True。
     exclude_nontrading_days: bool = False
-    # ── 交易成本开关（v0.45.366）──
+    # ── 交易成本开关（v0.45.368）──
     # True = 用回填好的 net_return_t7（滑点 + 佣金 + 借券费，见 trading_costs）结算；
     # False = 零成本口径，按方向调整后的 gross 结算（路径依赖 SL/TP 不变，
     # SL 触发时的出场滑点已含在 exit_price 里，属于价格路径而非成本模型）。

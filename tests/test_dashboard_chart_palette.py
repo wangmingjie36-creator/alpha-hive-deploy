@@ -240,3 +240,11 @@ def test_spy_benchmark_line_uses_secondary_ink():
     code = _strip_comments(JS, "js")
     assert "rgba(150,150,150" not in code
     assert re.search(r"label:'SPY 基准[^']*'[^}]*borderColor:_tok\('--ts'\)", code, re.S)
+
+
+def test_axis_ticks_and_grid_use_tokens():
+    """v0.45.365：六个图的坐标轴刻度 / 网格从明暗二选一的半透明黑白换成 --ts / 半透明 --border。"""
+    code = _strip_comments(JS, "js")
+    assert not re.search(r"rgba\((0,0,0,\.(55|06)|255,255,255,\.(65|07))\)", code), "坐标轴 / 网格又写死了黑白"
+    assert len(re.findall(r"(?:const|var) tc2?=_tok\('--ts'\);", code)) == 6
+    assert len(re.findall(r"(?:const|var) gc2?=_tokA\('--border',\.5\);", code)) == 6
