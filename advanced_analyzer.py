@@ -406,7 +406,9 @@ class DealerGEXAnalyzer:
             "gamma_source":      "bs_computed",
             # v0.45.197 口径字段：只记数值时，事后分不清「到期日集合变了」和
             # 「仓位真变了」—— v0.45.188 的 NVDA 225→200 误判正是卡在这里。
-            "chain_view":        "cboe_full_expiries",
+            # v0.45.362：取自链上的 `gex_view`（快照模式下是 `snapshot_main_chain`，此前这里写死 `cboe_full_expiries`）。
+            # 缺键（注入的取链函数）沿用旧标签。
+            "chain_view":        chain.get("gex_view") or "cboe_full_expiries",
             "expiries_used":     list(chain.get("expirations") or []),
             "flip_acceleration": flip_accel,
             "vanna_stress":      vanna_stress,

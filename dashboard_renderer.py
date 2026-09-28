@@ -16,6 +16,7 @@ _log = logging.getLogger("alpha_hive.dashboard_renderer")
 
 from pathlib import Path as _Path_mod
 from jinja2 import Environment
+import gex_state as _gex_state
 
 
 # ── 报告文件名 → 日期：iCloud 重名副本闸（v0.45.192） ──
@@ -633,9 +634,14 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     pc = oracle.get("put_call_ratio", None)
     real_pct = sd.get("data_real_pct", None)
     # ── 新增期权信号字段（#1）──
-    gex = oracle.get("gamma_exposure", None)
+    # v0.45.362：GEX 改读蒸馏结果的 gex_state（全到期日视图，就是政体路由用的那份；不可得 ⇒ None ⇒ "-"）。
+    # 原先读 OracleBee `gamma_exposure`（主链 ≤4 个到期日的截断量，可与全书净 GEX 符号相反）。
+    # 缺状态**不回退**主链那个数——两个量同叫 GEX 正是要消灭的事（见 gex_state 模块 docstring）。
+    _gst = _gex_state.of(sd)
+    gex = _gst["total_gex"] if _gst and _gst.get("available") else None
     flow_dir = oracle.get("flow_direction", None)
-    gsr = oracle.get("gamma_squeeze_risk", None)
+    # v0.45.362：分档同样取自 gex_state（Oracle 的 gamma_squeeze_risk 是主链分档、方向相反）。本字段当前无渲染点
+    gsr = _gex_state.squeeze_label(_gex_state.display_regime(sd)) if _gst else None
     iv_current = oracle.get("iv_current", None)
     signal_sum = oracle.get("signal_summary", "")
     # ── v0.45.52：IV-RV 价差与 30 日实现波动率 ──

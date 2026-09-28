@@ -23,6 +23,8 @@ import re
 from datetime import date
 from pathlib import Path
 
+import gex_state as _gex_state
+
 # ── 路径 ─────────────────────────────────────────────────────────────────────
 # 数据根迁移阶段 2 收口遗留项：`ALPHAHIVE_DIR` 现在是**覆盖钩子**，默认 `None`
 # ⇒ 调用时经 `_alphahive_dir()` 解析 `PATHS.home`。此前是硬编码字面量
@@ -251,7 +253,9 @@ def extract_raw(data: dict) -> dict:
             "flow_direction": odet.get("flow_direction"),
             "options_score": odet.get("options_score"),
             "signal_summary": odet.get("signal_summary", ""),
-            "gamma_squeeze_risk": odet.get("gamma_squeeze_risk"),
+            # v0.45.362：按扫描时的 GEX 状态分档（负 gamma ⇒ high）。Oracle details 里那个是主链分档、方向相反
+            "gamma_squeeze_risk": _gex_state.squeeze_label(
+                _gex_state.display_regime(sr, aa.get("dealer_gex"))),
             "support_levels": fmt_levels(key_levels.get("support", [])),
             "resistance_levels": fmt_levels(key_levels.get("resistance", [])),
             "unusual_activity": unusual,

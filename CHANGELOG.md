@@ -92,7 +92,67 @@ WATCHLIST 30 只里只有 BRK-B 带非字母数字。
 - 已落盘的 BRK-B rv_30d / iv_rank / close_correction 历史值没有补算。
 
 
-## [0.45.362] — 2026-09-28 — 占位（进行中：GEX 第 2 层——每只标的一份全链 GEX 状态（带可得性标记），展示与政体路由共用；不改分数）
+## [0.45.362] — 2026-09-28 — Added/Fixed：GEX 第 2 层——每只标的一份 GEX 状态 `gex_state`（政体路由用的那份，带可得性标记），网站 / 日报 / 深度与 ML 报告 / MCP / 存档只读它；「Gamma 压榨风险」方向反了的展示改正。**不改分数**
+
+用户决定（09-27 根因分析的第 2 层，09-28「第 2 层现在开始做」）。根因：同一份 CBOE payload 切成三个视图各算一个「GEX」——
+① OracleBee 主链（≤4 个到期日）`gamma_exposure`；② 全到期日视图 `DealerGEXAnalyzer` → `RegimeWeightAdjuster`（规则引擎下 GEX
+进评分的唯一通道）；③ 卖权选择器的原始合约视图。截断能翻转净 GEX 符号（K=4 最低 −73.3%，见 `cboe_options`），而网站、日报、
+深度报告一直把 ① 当「GEX」展示 ⇒ 读者看到的数与进分的数不是同一个、还都叫 GEX。普查（只读）另查出：① 的 `gamma_squeeze_risk`
+分档方向与报告文案**相反**（正 GEX ⇒ "high"，文案按「high = 做市商 short gamma」解读）⇒ 公开的 ML 报告把正 gamma 标的写成
+「Gamma 压榨风险 高」；快照模式补跑时 ② 拿到的其实是 ≤4 个到期日的截断主链，却标 `cboe_full_expiries`、计进 `ok`。
+
+### Added
+- `gex_state.py`：`build(dealer_gex)` → `{available, reason, regime, total_gex, gex_flip, largest_call/put_wall, gex_normalized_pct,
+  stock_price, chain_view, n_expiries, score_channel, schema_version}`。不可得 ⇒ 数值一律 None（旧出错 dict 的 `total_gex=0.0`
+  是哨兵，不是零 GEX），`reason` 写明原因（`no_scout_price` / `exception:<类型>` / 出错 dict 的 error / `non_finite_total_gex` /
+  `chain_view:<视图>`）。`build` 不抛（它在步骤 0 的大 try 里，抛了会让权重退回基准）。`of()` / `display_line()` /
+  `display_regime()`（有状态就以它为准，旧记录才退到同一视图的 `dealer_gex`、且用 `build` 同一套可得性规则）/
+  `squeeze_label()`（负 gamma ⇒ high）。`routing_applied`：政体权重调整真跑完才由步骤 0 置 True（`adjust_weights` 抛了 ⇒
+  权重退回基准、这里留 False——状态不替失败的路由作证）。
+- `QueenDistiller.distill` 步骤 0 落盘 `gex_state`。**不改分数**：路由处表达式原样挪进 `gex_state.routing_regime()`，在同一个
+  try 里调用（抛异常走向不变）；状态由同一函数、同一输入另算一份。状态不可得而路由拿到正 / 负 regime 时打 **error**
+  （已知两种：NaN total ⇒ 旧代码判负 gamma；快照模式截断主链）——两者都是真 bug，修了改分数，**另登边界**，本版只让它们可见。
+- `signal_archive`：`gex.available`（有状态 ⇒ 1/0，旧记录 ⇒ 缺，覆盖率本身可观测）、`gex.total_gex`、`gex.negative`（仅可得时有值），
+  登记为叶子。本版上线后才有数据，早于它的边界无从作用。`gex.available` 会进 IC 扫描的 Bonferroni 族（同
+  `options.iv_rank_is_real` / `market.fear_greed_is_cnn` 先例）。
+
+### Changed（展示改读 `gex_state`，缺了显示「不可得」，**不回退** Oracle 主链值）
+- 网站 `dashboard_renderer._detail`（`gsr` 死字段也改用状态分档，免得日后接线接到反向那个）；日报 `report_formatters`
+  （「Gamma Exposure：主链值」→「净 GEX：+x.xxM$ · 正/负 gamma」或「不可得（原因）」；挪出 Oracle details 判断，Oracle 失败时照样印）。
+- 深度报告 `generate_deep_v2.extract`：状态 → 旧记录才读 `dealer_gex` → 不可得；删掉回退 Oracle 主链那一支（它连同方向相反的分档一起
+  漏进来）。`_try_compute_gex`：扫描记录里有状态（哪怕不可得）就不在报告生成时现算顶上。GEX / OI 归一化、vanna 压力、
+  翻转加速度只在状态可得（或旧记录 dealer_gex 可用）时读；GEX Profile 图：状态不可得不画，可得时标题总量 / regime / flip 用状态的
+  （柱形仍是 ML 报告那份 profile）；GEX 卡片按可得性判（可得的真零不再标「采集失败」，不可得写明原因）；CH1 政体徽章在
+  「状态不可得、路由仍按某 regime」时照实加注。
+- ML 报告 `generate_ml_report`：期权段 / 第 3 章 / 第 6 章的「Gamma 压榨风险」一律由状态分档；不可得显示「—」（第 3 章此前把
+  非 high 一律渲染成「可控」）。
+- MCP `alphahive_get_gex`：报告里有状态就以它为准；新增 `source` / `available` / `reason` / `routed_regime`（不可得时路由实际收到的
+  regime——快照截断链 / NaN 两种情形它不是 unknown）。**不可得时 `total_gex` 由 0.0（哨兵）改为 None**；可得的真零不再报「缺失」；
+  旧报告的 `dealer_gex` 按 `build` 同一规则判（v0.45.197 之前没有 `chain_view` 的报告判不可得——那时本就是截断视图）。
+- `collect_data`（手动喂 Claude 的材料）同样改用状态分档；图表标题补认 `positive_gex` / `negative_gex`（旧映射只认无人产出的 `*_gamma`）。
+
+### Fixed
+- 快照模式如实标注：`fetch_cboe_chain_for_gex` 在链上标 `gex_view`（`cboe_full_expiries` / `snapshot_main_chain`），快照模式单独计数
+  `gex_view_stats()["snapshot_main_chain"]`（此前计进 `ok`）；`DealerGEXAnalyzer` 的 `chain_view` 取自链（此前写死）。**返回值不变、
+  路由照旧**。
+
+### 刻意不做
+- 卖权选择器不共用状态：它的路由读 `le_45dte` 视图重定价扫描的 zero gamma，是冻结的预注册规则 v1（改输入即协议变更），且是另一个量。
+- Oracle 主链 `gamma_exposure` / `gamma_squeeze_risk` 照算、照落盘（`options.gamma_exposure` 存档列、LLM 模式 Oracle / Bear 提示词仍读，
+  LLM 那条用户决定不动），只是不再以 GEX 之名展示。
+- ② 自身也非整本书：ATM 带宽 [0.3S, 1.7S] + 每到期日每边 OI 前 40 档。对符号的影响**待验证**；改它的输入就是改分数。
+- ML 报告的 `advanced_analysis.dealer_gex`（GEX 图表 / 旧记录回退）仍是同进程同 payload 另算一次，价格源不同；普查核实符号与传入价无关
+  （仅 BS 兜底 gamma 例外）⇒ regime 与路由那份实际一致，量级可能差。
+
+- 守卫 `tests/test_gex_state.py`；`tests/test_gex_oracle_bear_neutralized.py` 白名单删 `dashboard_renderer::_detail`（网站不再读主链值，
+  自检夹具换成名单内仍在的 `_drop_legacy_gex_signal`）；`test_scan_timing` / `test_gex_full_chain_view` 认新计数键。
+- 世代边界：**无**（不改分数）。
+- 验证：`tests/test_gex_state.py` 62 条；变异 24/24 变红（路由改读状态、不可得不置 None、build 不兜异常、各展示点回退主链或另算、
+  ML 报告三处接线、存档旧记录写 0、快照不标视图 …，驱动核对 collected 数并逐条还原核哈希）。独立审查（只读）拿新旧两棵树跑同一套
+  62 种输入的蒸馏探针（传入 / 现场算 × 各种出错形状 × 价格 100/0/None/"abc"/−5、`adjust_weights` 抛异常），
+  路由收到的 regime、是否调用、`dimension_weights`、`final_score`、方向、权重说明**零差异**；审查的 5 条应修 + 7 条小项已处理
+  （仅 `gex.available` 进 Bonferroni 族一条按先例保留）。
+- 全套：**6555 passed、2 xfailed**，1 失败为已知的经济日历到期测试（`TestCoverageHorizon`，到期变红是设计意图，与本版无关）。
 
 ## [0.45.361] — 2026-09-28 — 图表剩余硬编码色换令牌：涨跌语义色 / 均收益胶囊 / 旧蜂蜜金；恐惧贪婪仪表盘对齐宏观条 3 档
 

@@ -266,6 +266,29 @@ def _iv_rank_is_real(tr: Dict) -> Optional[float]:
     return 0.0 if src == "hv_proxy" else 1.0
 
 
+def _gex_state_sig(kind: str) -> Callable:
+    """v0.45.362：蒸馏结果里的 `gex_state`（全到期日视图，就是政体路由用的那份；见 `gex_state` 模块）。
+
+    · `gex.available`：有状态 ⇒ 1.0 / 0.0；没有状态（v0.45.362 之前的记录）⇒ None —— 覆盖率本身的观测点，
+      不可得的日子**不**以缺行的形式消失。
+    · `gex.total_gex` / `gex.negative`：仅可得时有值（不可得的 total 在状态里就是 None，不是 0.0 哨兵）。
+    ⚠️ 与 `options.gamma_exposure` 不是同一个量：那是 OracleBee 主链（≤4 个到期日）的截断量，可与这里符号相反。
+    """
+    def _f(tr: Dict) -> Optional[float]:
+        import gex_state as _gs
+        st = _gs.of(tr)
+        if st is None:
+            return None
+        if kind == "available":
+            return 1.0 if st.get("available") else 0.0
+        if not st.get("available"):
+            return None
+        if kind == "negative":
+            return 1.0 if st.get("regime") == "negative_gex" else 0.0
+        return _num(st.get("total_gex"))
+    return _f
+
+
 def _code_exec_fetch(key: str) -> Callable:
     """CodeExecutorAgent 取数脚本（`CodeGenerator._generate_yfinance`）的输出字段。
 
@@ -365,6 +388,10 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     "options.put_call_ratio": _path("agent_details.OracleBeeEcho.details.put_call_ratio"),
     "options.gamma_exposure": _path("agent_details.OracleBeeEcho.details.gamma_exposure"),
     "options.total_oi": _path("agent_details.OracleBeeEcho.details.total_oi"),
+    # v0.45.362：政体路由用的那份 GEX（全到期日视图）。上面的 options.gamma_exposure 是主链截断量，另一个量
+    "gex.available": _gex_state_sig("available"),
+    "gex.total_gex": _gex_state_sig("total_gex"),
+    "gex.negative": _gex_state_sig("negative"),
 
     # ── 情绪 ──────────────────────────────────────────────────
     "sentiment.pct": _path("agent_details.BuzzBeeWhisper.details.sentiment_pct"),
@@ -1121,6 +1148,8 @@ SIGNAL_LEAVES = frozenset({
     "price.momentum_5d", "price.volatility_20d", "price.volume_ratio",
     "options.iv_current", "options.put_call_ratio", "options.gamma_exposure", "options.total_oi",
     "options.iv_rank", "options.iv_percentile", "options.iv_rank_is_real",
+    # v0.45.362：CBOE 链 + Scout 价（同 price.* 按原始数据算）；只有本版上线后的记录才有，早于它的边界无从作用
+    "gex.available", "gex.total_gex", "gex.negative",
     "sentiment.pct",
     # v0.45.349：bear.insider_bear / bear.options_bear 移出（读 Scout / Oracle 方向，见 SIGNAL_UPSTREAM）
     "bear.overval_bear", "bear.short_int_bear",
