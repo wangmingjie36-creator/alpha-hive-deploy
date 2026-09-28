@@ -5,7 +5,36 @@
 
 ---
 
-## [0.45.368] — 2026-09-28 — 占位（进行中：dashboard.css 剩余硬编码色换令牌）
+## [0.45.368] — 2026-09-28 — dashboard.css 组件层硬编码色换令牌：修 4 处对比度不达标 + 零字面量守卫
+
+接 v0.45.367（dashboard.js 已零颜色字面量），把同一条线画到 `templates/dashboard.css`：颜色只在 `:root` / `html.dark` 定义，组件规则一律走令牌。改前组件层有 ~100 处写死的色值。
+
+### Fixed（改前某一种主题下读不清，WCAG 对比度实算）
+- `.fresh-*`（顶部「N 分钟前更新」徽章）：用的是暗色主题的高亮色 `#4ade80`/`#fbbf24`/`#f87171`，**浅色主题下 1.57 / 1.52 / 2.37:1** → `var(--bull/--neut/--bear)`，4.9–6.4:1。
+- `.tb-title` / `.tb-l1` / `.tb-l2` / `.rss-badge`（失效条件分级、Form4 徽章）：反过来用浅色深红深橙，**暗色下 2.34 / 2.69:1** → `var(--bear/--neut)`。
+- `.sec-hot` / `.sec-cold`：Bootstrap `#28a745`/`#dc3545`（浅色 2.88:1）→ `var(--bull/--bear)`。
+- 实色块上的字：`.trend-chip.active` / `.slogo-fb` / 四个 `--acc` hover 用 `color:#fff`，**暗色下压 `--acc2`/`--acc3` 只剩 2.28 / 2.15:1**；`.srank` 用写死近黑，浅色下 3.44:1。新令牌 `--on-solid`（浅 `#FFFFFF` / 暗 `#0A0F1C`），六个组合全 ≥5.15:1。
+- `.bnav-item`（手机底部导航文字）浅色用 `--tm`（2.2:1）、`.acc-sig-no`（「不显著」标签，注释写明必须与数字同处一个视线内）用 `--tm` → `--ts`。
+
+### Changed
+- 半透明淡染改走 RGB 通道令牌 `--tint-bull/bear/neut/acc/slate/ink`，写法 `rgba(var(--tint-bull),.12)`。**不用 `color-mix()`**：站点要照顾微信 X5 内核，不认就整条声明作废、底色直接消失。前五个通道两套主题共用、取值与改前相同（淡染外观零变化）；`--tint-ink` 随主题翻转。Bootstrap `rgba(40,167,69)`/`rgba(220,53,69)` 并入 bull/bear，`rgba(148,163,184,.16)` 并入 slate。
+- 删掉主题分叉覆盖：`html.dark .nav` / `.nav-link` / `.dark-btn`（底规则本就走 `--bg/--border/--ts`，覆盖反而写死了白色半透明）、`html:not(.dark) .bottom-nav` / `.bnav-item` / `.hm-tk`——底规则改走令牌后两套主题一条规则。底部导航顶边线的旧金色 `rgba(244,165,50,.15)` → `--border`。
+- `.toast` `#333`/`#fff` → `var(--tp)`/`var(--surface)`（反色提示条，暗色下是浅条深字）；`.skip-link` → `var(--tp)`/`var(--bg)`。
+
+### 保留的字面量（守卫白名单逐条写理由）
+`@media print` 整段（纸永远是白的）、`.slogo` 白底（logo 按白底设计）、`.share-btn-x:hover`（X 品牌色）、`.scard-share` / `.kb-help` / `.nav-overlay` 的黑色遮罩、`.ah-macro-viewport` 的 `mask-image`（只取 alpha）。
+
+### Added
+- `tests/test_dashboard_css_no_color_literals.py`（21 条）：除打印与白名单外零颜色字面量；白名单只许缩（条目对应规则没了就红）；`--tint-*` 必须是合法 r,g,b 三元组；`--on-solid` 压 `--acc/--acc2/--acc3` 两主题 ≥4.5:1；`--acc*` 实底规则的字色必须是 `--on-solid`；扫描器反向自证（含改前原文）。变异实测 4/4 变红：写回 `#4ade80`、暗色 `--on-solid` 改回白、通道少一位、hover 字改 `--tp`。
+
+### 验证
+- 离线渲染（socket 闸 + yfinance 桩、`pheromone.db` 用 `.backup` 副本）后 `getComputedStyle` 实测 25 个类两种主题，全部等于对应令牌；⚠️ 测时要先关掉 `transition`，否则带过渡的元素在切主题同一帧读到的是**旧主题值**（首测 trend-chip / nav-link 就这样看起来「没变」）。
+- 全套 6509 passed / 2 xfailed（照例 deselect 两条环境测试）。
+
+### 未做（记录在案）
+- 暗色 `--bear #ef4444` 压 `--surface2` 上的红淡染只有 3.71–3.84:1（`.pill-red` / `.sdir-bear` 等），这是令牌本身的取值问题、改前即如此；动它会波及全站所有看空色，需单独决定。
+- `dashboard_renderer.py` 内联样式里的 `rgba(...)` 淡染（如板块热力图单元格）仍是字面量——现在可以改写成 `rgba(var(--tint-x),α)`，本版只动 CSS。
+
 
 ## [0.45.367] — 2026-09-28 — 过期数据横幅 / JS 报错浮层换令牌：拆掉整条色块，改中性底 + 语义色左边条
 
