@@ -296,11 +296,18 @@ let chartInstances=[];
       const scCtx=document.getElementById('scoresChart');
       if(!scCtx)return;
       const sc=__AH__.scores;
-      const clrs=sc.map(function(x){return x[1]>=7?'rgba(34,197,94,.85)':x[1]>=5.5?'rgba(245,158,11,.85)':'rgba(239,68,68,.85)';});
+      // v0.45.352（重做 v0.45.78）：柱色取 :root 令牌的**实算值**（canvas 不认 var()），
+      // 明暗切换时 toggleDark 会销毁重画，这里自然拿到另一套。不抄 hex 副本——
+      // 抄了就是第二份真相，令牌一改就静默漂移。方头、细柱，与站点其余细横条一致。
+      const rootCS=getComputedStyle(document.documentElement);
+      const cBull=rootCS.getPropertyValue('--bull').trim(),
+            cNeut=rootCS.getPropertyValue('--neut').trim(),
+            cBear=rootCS.getPropertyValue('--bear').trim();
+      const clrs=sc.map(function(x){return x[1]>=7?cBull:x[1]>=5.5?cNeut:cBear;});
       chartInstances.push(new Chart(scCtx,{
         type:'bar',
         data:{labels:sc.map(function(x){return x[0];}),
-               datasets:[{data:sc.map(function(x){return x[1];}),backgroundColor:clrs,borderRadius:5,borderSkipped:false}]},
+               datasets:[{data:sc.map(function(x){return x[1];}),backgroundColor:clrs,borderRadius:0,borderSkipped:false,barPercentage:0.6}]},
         options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
                  onClick:function(evt,elems){
                    if(!elems.length)return;
@@ -609,9 +616,9 @@ window.AH.initTradingStats=function(){
   if(!box||!ts||Object.keys(ts).length===0)return;
 
   function card(value,label,color,sub){
-    var c=color||'var(--t)';
+    var c=color||'var(--tp)';
     var subHtml=sub?'<div style="font-size:.72em;color:var(--ts);margin-top:2px">'+sub+'</div>':'';
-    return '<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px">'+
+    return '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:10px 12px">'+
       '<div style="font-size:1.25em;font-weight:700;color:'+c+'">'+value+'</div>'+
       '<div style="font-size:.78em;color:var(--ts);margin-top:2px">'+label+'</div>'+
       subHtml+
@@ -645,12 +652,12 @@ window.AH.initTradingStats=function(){
     if(real.initial_capital!=null)initCap=Number(real.initial_capital);
 
     var netColor=netPct>=0?'var(--bull)':'var(--bear)';
-    var spyColor=!spyAvail?'var(--mt)':(spyPct>=0?'var(--bull)':'var(--bear)');
-    var alphaColor=(alphaPct==null)?'var(--mt)':(alphaPct>=0?'var(--bull)':'var(--bear)');
-    var pfColor=pf>=1.5?'var(--bull)':(pf>=1?'#f59e0b':'var(--bear)');
-    var shColor=sharpe>=1?'var(--bull)':(sharpe>=0?'#f59e0b':'var(--bear)');
+    var spyColor=!spyAvail?'var(--ts)':(spyPct>=0?'var(--bull)':'var(--bear)');
+    var alphaColor=(alphaPct==null)?'var(--ts)':(alphaPct>=0?'var(--bull)':'var(--bear)');
+    var pfColor=pf>=1.5?'var(--bull)':(pf>=1?'var(--neut)':'var(--bear)');
+    var shColor=sharpe>=1?'var(--bull)':(sharpe>=0?'var(--neut)':'var(--bear)');
 
-    html+='<div style="grid-column:1/-1;font-size:.78em;color:var(--mt);margin:2px 0 6px">'+
+    html+='<div style="grid-column:1/-1;font-size:.78em;color:var(--ts);margin:2px 0 6px">'+
       // v0.45.180：这行以前写「固定每笔 $5,000」——那是被删掉的独立累加模型的参数，
       // 就印在一批用 NAV×8%/12%/10% 复利算出来的数字正上方。v0.45.179 修了
       // Python 侧那份方法学文案，漏了**用户实际看到的**这一份。
@@ -668,20 +675,20 @@ window.AH.initTradingStats=function(){
       (alphaPct!=null)?'剥离市场后超额':'无基准，无法计算');
     html+=card((sharpe!=null?(sharpe>=0?'+':'')+Number(sharpe).toFixed(2):'—'),'Sharpe (净值)',shColor,'年化 ×√36');
     html+=card((pf!=null?Number(pf).toFixed(2):'—'),'Profit Factor',pfColor,'>1.5 好');
-    html+=card(winRate.toFixed(1)+'%','净值胜率','var(--t)',trades+' 笔入场');
+    html+=card(winRate.toFixed(1)+'%','净值胜率','var(--tp)',trades+' 笔入场');
     html+=card('-'+maxDd.toFixed(2)+'%','最大回撤','var(--bear)','基于 NAV');
     // v0.45.179：这四张卡以前在**全部候选预测**（963 条）上算，却渲染在写着
     // 「172 笔入场」的「真实回测口径」标题下。现在与上面同源，只数实际入场的笔。
     // 且 null 渲染「—」——0 在这些位置全是合法可解读的假读数（「止损从没触发过」
     // 「平均成本 0bp」）。
     html+=card(ts.exit_sl_count!=null?ts.exit_sl_count:'—','止损触发',
-      (ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--t)'),'-5% 硬止损');
+      (ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--tp)'),'-5% 硬止损');
     html+=card(ts.exit_tp_count!=null?ts.exit_tp_count:'—','止盈触发','var(--bull)','+10% 止盈');
-    html+=card(ts.exit_close_count!=null?ts.exit_close_count:'—','持有到 T+7','var(--t)','未触发 SL/TP');
+    html+=card(ts.exit_close_count!=null?ts.exit_close_count:'—','持有到 T+7','var(--tp)','未触发 SL/TP');
     // 只在真出现时才占一张卡：WINDOW_CUTOFF = 回测窗口结束时仍未到期、按 0 收益强平。
     // 它以前被并进「持有到 T+7」；单列出来又不给它读者，就成了另一个死字段。
     if(ts.exit_cutoff_count)
-      html+=card(ts.exit_cutoff_count,'窗口截断强平','#f59e0b','未到期，按 0 收益结算');
+      html+=card(ts.exit_cutoff_count,'窗口截断强平','var(--neut)','未到期，按 0 收益结算');
     html+=card(ts.avg_cost!=null?(ts.avg_cost*100).toFixed(1)+'bp':'—','平均单笔成本','var(--ts)','滑点+佣金+借券');
 
     // v0.45.179：曲线与本区块**同源**——都来自 portfolio_backtest 的同一次
@@ -697,7 +704,7 @@ window.AH.initTradingStats=function(){
     // 0.0 / 100000.0，于是"回测没算出来"长得和"回测算出来了，结果是这样"一模一样
     // （2026-08-26 用户看到的 Alpha +4.29% 就是这么来的，真值 −5.62%，符号还是反的）。
     // 现在后端预置值全为 null、失败时 equity_curve 为空，这里只说实话。
-    html+='<div style="grid-column:1/-1;font-size:.85em;color:#f59e0b;padding:10px 0">'+
+    html+='<div style="grid-column:1/-1;font-size:.85em;color:var(--neut);padding:10px 0">'+
       '<b>真实策略回测本次不可用</b><br>'+
       '<span style="font-size:.9em;color:var(--ts)">portfolio_backtest 未能产出结果'+
       '（详见扫描日志里的 warning）。此处不显示任何替代口径的数字 —— '+
@@ -803,7 +810,7 @@ window.AH.initEquityCurve=function(){
     var ts=__AH__.trading_stats||{};
     function pct(v){return v==null?'—':((v>=0?'+':'')+Number(v).toFixed(2)+'%');}
     var netCum=last.cum_net_pct, grossCum=last.cum_gross_pct, spyCum=last.cum_spy_pct;
-    var netColor=netCum==null?'var(--mt)':(netCum>=0?'var(--bull)':'var(--bear)');
+    var netColor=netCum==null?'var(--ts)':(netCum>=0?'var(--bull)':'var(--bear)');
     // Max DD 取 trading_stats（= 回测 NAV 路径口径），与卡片「最大回撤」同一个数。
     // 旧实现这里另算一份、且 ||0 会把"没算出来"渲染成"零回撤"。
     var mdd=ts.max_dd_net_pct;

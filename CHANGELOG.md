@@ -5,6 +5,45 @@
 
 ---
 
+## [0.45.358] — 2026-09-28 — 占位（进行中：dashboard.js 其余 Chart.js 图表的紫色 #667eea/#764ba2 等换成站点令牌）
+
+## [0.45.357] — 2026-09-28 — 占位（进行中：日报 VIX 滞后一日 / 陈旧缓存照标 cboe / vix_change_pct 错位——量化 + 可观测 + 处置）
+
+## [0.45.356] — 2026-09-28 — Added：编排器纳入版本控制·阶段 2——`deploy_orchestrator.py` 部署工具（关卡 + 漂移检查 + 原子替换；**未接入编排器**，阶段 3 另版）
+
+### 做什么
+
+把 git 里某个提交的 `scripts/alpha-hive-orchestrator.sh` 部署到 launchd 执行的 `~/.claude/scripts/`。
+部署是唯一能拦住坏版本的时刻（软链接没有这个时刻）——v0.45.348 那次裸变量若走这条路，会在部署时被拒。
+
+- **只部署 git blob**（`--ref` 必填），从不读工作区 ⇒ 未提交改动 / 生产 checkout 脏文件到不了 launchd。
+- **关卡**（作用在将写入的字节上，任一不过 ⇒ 不部署、保留现有副本，退出码 1）：
+  blob 须出现在 origin/main 该文件历史里（按 blob 不按提交判——生产 HEAD 可能带没推上去的日报提交，09-25 分叉形状）；
+  形状（`set -uo pipefail`、>500 行）；`/bin/bash -n`（launchd 实际用的 3.2）；裸 `$VAR` 紧跟非 ASCII。
+- **漂移**：现有部署副本不是 main 历史里任何一版 = 有人直接改了生产 ⇒ 默认拒绝覆盖（退出码 2）；
+  `--accept-drift` 才覆盖且先备份。**无状态文件**：「在不在 git 历史里」本身就是判据；
+  同理非漂移时**不写 `.bak`**——被覆盖的那版就在 git 里（阶段 4 退役 `.bak` 惯例的依据）。
+- **写入**：同目录临时文件 → 关卡 → chmod 755 → fsync → `os.replace`（新 inode，运行中的编排器读完旧版）→ 回读核对 blob。
+- 退出码 0/1/2/3 = 成功（含 already_current / dry-run 的 would_deploy）/ 关卡 / 漂移 / 判定不了，不揉；stdout 一行 JSON，`--out` 无默认路径（不新增 PATHS 产物）。
+
+### 改动
+
+- Added `deploy_orchestrator.py`；Added `orchestrator_lint.py`：裸变量检测器 `find_unbraced` 从 `tests/test_orchestrator_braced_vars.py`
+  原样抽出成唯一实现，测试与部署关卡共用（测试改为 import）。
+- Added `tests/test_deploy_orchestrator.py`（18 条）：临时 git 仓库 + 临时部署位置，autouse 把 HOME 指向沙箱并断言默认位置跟着走。
+  含**真跑**的「替换正在执行的 bash」：旧进程输出 OLD-END、下一次执行 NEW-END。
+- Changed `tests/test_orchestrator_deployed_matches_repo.py` 与 `CLAUDE.md`：手动部署改为 `deploy_orchestrator.py --ref origin/main`。
+
+### 验证
+
+- 变异 5 处各自变红：去裸变量关卡 / 去漂移拒绝 / 去「在 main 上」检查 / 去 `bash -n` / **`os.replace` 改成原地写**
+  ——最后一条让「正在跑的 bash」用例红，实证原地覆盖确实会打乱运行中的脚本，`os.replace` 不是可有可无。
+- 真实环境只读核对：`--ref origin/main --dry-run` ⇒ `already_current`，部署副本 mtime 不变、无临时文件残留；
+  关卡直接跑真实编排器 ⇒ 零命中；跑 v0.45.348 修复前的备份 ⇒ 精确拒在第 1198 行。
+- 附：阶段 1（v0.45.353）CI 实测——skipped 40 → 9（31 条原先在 CI 恒 skip 的编排器测试首次在 ubuntu 跑、全绿）；
+  CI 另有 5 条红在阶段 1 之前的 c59d9480 上就已存在（`test_data_backup::TestPushTimeout`、`test_ghpages_data_root_migration` 3 条、
+  经济日历覆盖期限到点），非本线引入。
+
 ## [0.45.355] — 2026-09-28 — Added：编排器步骤工具的输出契约——统一 JSON 外壳 + 生产方显式 attention、未捕获异常退出码 3、仓内步骤解释器（未接线）、pre-push 契约闸
 
 用户决定（2026-09-27 根因分析后选「第 2 项先做仓内 A」）。根因：生产方（仓内 CLI，有 git + 测试）与消费方（编排器、周度 SKILL.md）
@@ -52,13 +91,377 @@
 - 编排器三条跳过路径 `cat > status.json` 覆盖当天真实状态（09-26 周六开机补跑已把 09-25 的 status.json 冲成 skipped_non_trading_day）。
 - 编排器 exit 3 的日志文案（「找不到 pheromone.db」等）现在也覆盖「崩溃」，原因不准——随 B 接线改。
 
-## [0.45.354] — 2026-09-28 — 占位（进行中：复核两组未并入分支——v0.45.88 CBOE 新鲜度分层 / 原 v0.45.118 backfill_cloud_snapshot，移植或记录作废）
+## [0.45.354] — 2026-09-28 — 复核两组未并入分支：v0.45.88「CBOE 新鲜度分层」三条意图已被 v0.45.91 / 234 / 243 全部取代（无可移植）；原 v0.45.118 `backfill_cloud_snapshot.py` 不移植——缺口真实且可补，但工具前提有误、补跑窗口只到次日开盘、下游无消费者
 
-## [0.45.353] — 2026-09-28 — 占位（进行中：编排器纳入版本控制·阶段 1 导入——仓库 scripts/ 成为唯一真相，测试改读仓库副本）
+v0.45.350 把这两组列为「仍未并入、先评估是否仍需要」。本条逐项在当前 main 上取证后结案。**零生产代码行为改动**
+（只加一段注释 + 一个只读实验脚本）。分支未删，等用户决定（tip SHA 见文末）。
 
-## [0.45.352] — 2026-09-28 — 占位（进行中：重做 v0.45.77/78 + e8bac95 的仪表板令牌化意图——未定义 var(--mt)/var(--t)、公司卡扁平网格、宏观条日环比；加未定义 CSS 变量守卫）
+### A. v0.45.88（`origin/fix/cboe-stale-vintage-passthrough` `6d8f3579`；`origin/fix/cboe-vintage-staleness-layering` `a8ab38eb`/`83bcab5c`/`b03012c6`）
 
-## [0.45.351] — 2026-09-28 — 占位（进行中：修 gh-pages 重试「假成功」——未校验父提交不得产出 success，失败要在 status/编排器里变红）
+| 分支的意图 | main 上谁做了 | 真实数据 | 旧行为变异（main 现有测试） |
+|---|---|---|---|
+| 补抓从未触发（内层陈旧吞成 None → 进 `failed` 不进 `stale`） | **v0.45.91** `on_stale="raise"` + `CboeStaleVintageError`——与分支的 `raise_on_stale` 同一设计，docstring 点名的就是同三次事故 | 云端 manifest：08-31 / 09-01 / 09-02 仍是泛化 `RuntimeError: CBOE payload 为空`（bug 原形）；**09-04 起 19 个陈旧标的日全部**以 `StaleVintageError` 进 `vintage_stale` | 撤掉 `on_stale="raise"` → **3 红** |
+| 陈旧误入缓存 | 这条风险是分支自己的 `skip_staleness_check` 设计引入的；main 两种 `on_stale` 都**从不缓存陈旧** | — | 陈旧分支里写缓存 → **3 红** |
+| 盘中冻结静默通过（`intraday_freeze_suspect`，>120 分钟） | **v0.45.234** `close_verdict` / `official_price`（60s、识别半日市）+ **v0.45.243** 生产端 manifest `price_stale_intraday`、消费端 `load_official_close` | 见下 | 判据恒 False → **≥29 红**；容差放宽到分支的 120 分钟 → **17 红**（含 08-28 DE/CVX/VZ 真实快照用例） |
+
+**判据对照（真实语料，`experiments/cboe_freeze_criterion_corpus.py`，只读）**：`origin/cloud-snapshots` 21 天、
+548 份有 `last_trade_time_et`、480 份有次日 `prev_day_close` 真值（归属由 `prev_close_session` 自证）。
+价错（偏离官方收盘 >0.05%）**90 份：main 抓到 89，分支口径抓到 26**；分支判出的集合是 main 的**真子集**。
+分支漏掉的偏离 >0.5% 的有 **16 份**（最大 VKTX 09-16 2.10%、VKTX 09-11 1.14%、TMUS 09-16 0.91%、T 08-31 0.89%、
+DE 08-28 0.87%）。分支注释把 08-31 的 DE（100min）/ CVX（90min）当作「紧邻未命中、正常薄流动性」的反例来定阈值——
+实测这两份偏离官方收盘 0.72% / 0.40%，**恰是价错**。阈值按两天 60 个观测标定，标在了错的一侧。
+
+**分支的消费端设计与 main 相冲，不是缺口**：`b03012c6` 让 `load_ticker` 对冻结标的整只拒收；
+main 自 v0.45.234 起**刻意**更细——链 / IV / OI 与 `price_at_fetch` 同一时刻、照用，只把「这个价是不是官方收盘」
+交给同一条判据 `_generated_mid_session`（`official_price` 标签 → `data_pipeline` 实时拒收、`sell_strike_ledger` 排除；
+`close_verdict` → 补跑 `load_official_close`、`close_correction`）。
+
+**残差（待验证，未改判据）**：main 唯一漏判是 NEE 09-18（`last_trade` 15:59:05，离收盘 54s，偏离 0.106%）。
+近收盘分布：≤4s 426 份；30–60s 仅 **4 份**（2 份精确、VZ 09-08 0.050%、NEE 0.106%）。样本太薄，收紧 60s 容差
+等于拿 2 个假阳性换 1 个真阳性，不动生产判据。
+
+### B. 原 v0.45.118（`origin/claude/backfill-cloud-snapshot` `de4dcb8d`）
+
+**问题仍在**：`cloud_snapshot_fetch._business_date()` 仍取墙上时钟，`main()` 只有 `--out` / `--tickers`。
+**缺口是真的、而且是慢性的**：09-04 以来分支上 14 个快照日，**12 天**至少拒收一只陈旧标的，共丢 **19 个标的日**
+（BILI 10、TMO 4、DE 3、TMUS 2）。**也确实能补回**：2026-09-28 04:32 ET（开盘前）把工具抽到沙箱实跑
+`--dry-run --date 2026-09-25`——BILI（周五 17:0x ET 被拒，`last_trade=09-24`）此刻 `vintage=2026-09-25`、
+`price=14.895`、`cboe_close`；对照 NVDA 同样通过。`ALPHA_HIVE_HOME` 指向沙箱，未写任何生产文件。
+
+**但不移植**，四条理由：
+
+1. **补跑窗口到次日 09:30 ET 为止，工具不知道这件事。** CBOE 只发「最新一场」；开盘后 D 的文件被覆盖，
+   内层闸门（判据＝此刻应有的场次）也会拒掉 D。docstring 写的是泛泛的「事后补跑」，它的示例（09-04 周五 → 09-05 周六）
+   恰好落在窗口内。
+2. **场景自相矛盾。** 快照只在人工 `alpha_hive_daily_report.py --swarm --date D` 时被读（编排器从不给扫描传
+   `--date`；开机补跑 ≥13:30 PDT 扫的是「今天」）。本机 D 当晚午夜前开机，编排器就直接实时扫 D 了，用不着快照；
+   本机手工工具只在「D+1 00:00–06:30 PDT 开着机、或周五后的周末」且有人手动检出 `cloud-snapshots`、跑、提交、
+   与 routine 抢推时才有用。**需要快照的那天，恰恰是本机不在的那天。**
+3. **前提有误。** 它说本机「yfinance 降级链可用」、安全边界第 3 条「yfinance 就写 yfinance」——但它调的
+   `_fetch_one_ticker` 只走 CBOE，没有 yfinance 分支，那条边界**不可达**；也不更新 v0.45.243 的 `price_stale_intraday`。
+4. **下游没有读者的记录。** `~/.claude/logs`（122 个文件，含编排器逐日日志）与两处应用日志目录里「📦 云端快照模式」**0 次**，
+   唯一痕迹是一次手工 08-28 `[历史补跑]`；工具本身**从未碰过真实数据**——21 份 manifest 里 `backfilled` 键 0 个。
+
+**真要做时放哪**：云端 routine 开盘前补一轮（≈08:00 ET，`--date <上一场>` + 只补缺失标的并合并 manifest），
+不是本机手工工具。那要改 claude.ai 上的 routine 提示词（不在本仓），属用户决定。
+
+### Changed
+
+- `cloud_snapshot_fetch._business_date()`：只加注释——墙上时钟、无 `--date` 是已评估的现状，指向本条（勿重建）。
+- v0.45.88 条目补「结案」段；v0.45.118 顶部指针补结论。
+
+### Added
+
+- `experiments/cboe_freeze_criterion_corpus.py`：60s vs 120 分钟判据在真实云端快照上的对照（只读，`git show`，
+  不联网）；`--err-pct` / `--branch-min` / `--list` 可调。任意 cwd 可跑（`__file__` 锚到仓库——代码位置，不是数据）。
+
+### 验证
+
+- 8 个相关测试文件基线 **197 passed**。四个变异逐一改真文件、`PYTHONDONTWRITEBYTECODE=1` + 清 `__pycache__`、
+  跑完 `git checkout` 复原并确认工作区干净。
+- ⚠️ **`pyproject.toml` 的 addopts 带 `-x`**：第一次变异跑出「1 failed, 93 passed」——是停在第一个红，不是只有 1 个红。
+  **数变异打红几条必须加 `--maxfail=N` 覆盖**（同一变异覆盖后是 3 红，与 v0.45.91 记录一致）。
+- 全套 `tests/`：**6213 passed / 1 failed**——`test_economic_calendar::TestCoverageHorizon`（NFP 只覆盖到 2026-12-04、剩 67 天 < 90；
+  BLS 2027 日程未发布），干净 `origin/main` 上同样红，设计内的定期告警，与本版无关。`ruff check .` 通过。
+
+### 占号事故
+
+占号脚本的成功判定写成匹配 `main -> main`，而 git 输出是 `HEAD -> main` ⇒ 连推四次、占了 354–357；
+约 90 秒后由 `1604b9d5` 释放 355–357（其间 355 未被他人拿走；之后另一 session 重新合法占用了 355）。
+
+### 分支（2026-09-28 用户确认后已删除）
+
+`origin/fix/cboe-stale-vintage-passthrough` = `6d8f3579`；`origin/fix/cboe-vintage-staleness-layering` = `b03012c6`；
+`origin/claude/backfill-cloud-snapshot` = `de4dcb8d`。
+
+删除前核对「不会影响 CBOE 数据」：三条分支只改代码 / 测试 / CHANGELOG，不含任何数据文件；main 上唯一提到分支名的是本条加的注释；
+本机编排器、LaunchAgents、定时任务 0 处引用；生产 checkout 在 `main`；云端快照 routine（`trig_01QzhoHiNxSWMgxWAQztnLA6`）的提示词
+只用 `main` 与 `cloud-snapshots`。删除后 `origin/cloud-snapshots`（`aecd5044`）与 `origin/main` 原样在。三个 tip 提交本机对象库仍在（可按 SHA 找回，直到 gc）。
+另有一条 `origin/fix/cboe-vintage-signal-passthrough`（`440ec51f`）不在这三条之内：它领先 main 0 个提交、tip 是 main 的祖先，**已完整并入**；同日经用户确认一并删除（删前复核：领先 0、为 main 祖先）。
+
+## [0.45.353] — 2026-09-28 — Added/Changed：编排器纳入版本控制·阶段 1（导入）——仓库 `scripts/alpha-hive-orchestrator.sh` 成为唯一真相；读编排器的测试改读仓库副本，CI 上首次真跑
+
+### 为什么
+
+v0.45.334（09-26）往编排器第 1198 行写了 `$READINESS_JSON）`，守卫 `test_orchestrator_braced_vars.py` 当天就会红，
+却隔一天、靠别的会话碰巧在本机跑全套才撞见（v0.45.348 修）。「谁会红？」实查的答案是**没人**：
+编排器在仓库外 ⇒ GitHub CI（ubuntu）上 8 个读它的测试文件全部恒 skip；git 钩子只跑 changelog_guard；
+launchd 不跑 pytest；零 Claude Code hook。「改编排器后必跑守卫」只是纪律，而它恰恰是那次没被执行的一步。
+先考虑过 PostToolUse hook，否决：只治表层、漏掉 sed/脚本式改法（v0.45.348 本身就是脚本改的），
+且本身又是一个不进 git、丢了没人知道的机制。
+
+### 设计（全计划四阶段；本版只做阶段 1，对生产零影响）
+
+- 仓库是唯一真相；launchd 仍执行 `~/.claude/scripts/` 下的**部署副本**（plist 不动）。不用软链接：
+  编排器注释实测 launchd 下 bash 对 `~/Desktop` 有 TCC 限制，直接跑仓库里那份能否读到**待验证**，读不到就是整轮扫描失败。
+- 阶段 2 部署工具（`bash -n` + 静态检测器 + 漂移检查 → 原子 `mv`）、阶段 3 接进扫描前同步、阶段 4 规则收口，另版进行；
+  阶段 3 等 09-28 世代边界扫描核对完。
+- 实测（临时仓库）：git fast-forward 以**新 inode** 替换文件，正在运行的 bash 读完旧版不受影响——
+  此前担心的「运行中自我改写」不成立；真实代价只是「合入后下一轮才生效」。
+
+### 改动
+
+- Added `scripts/alpha-hive-orchestrator.sh`：部署副本逐字节导入（`cmp` 一致，sha256 `c0e9cf9b…`，mode 755）。
+  公开仓库，提交前扫过密钥形状字符串 / URL / 邮箱 / Slack ID：只有本机代理 `127.0.0.1:7897` 与 CBOE 公开 CDN。
+- Added `tests/_orchestrator.py`：`REPO_ORCH` / `DEPLOYED_ORCH` 唯一定义 + `repo_orchestrator_text()`（缺文件是断言不是 skip）。
+- Added `tests/test_orchestrator_deployed_matches_repo.py`：部署副本 vs `origin/main` 的 blob 比对，两种坏法各一条——
+  **漂移**（内容不在 main 任何一版里 = 有人直接改了生产）/ **未部署**（是 main 的旧版）；纯函数 `classify` 另配任意机器都跑的三向 teeth。
+  部署副本只在那台 Mac 上 ⇒ 类级 skip。⚠️ 阶段 3 后「未部署」在合入到下一轮扫描之间是正常态，那条要改。
+- Changed 7 个测试文件改读仓库副本、撤掉「不在本机就 skip」：`test_orchestrator_braced_vars` / `test_scan_timing` /
+  `test_code_version`（**撤 `@pytest.mark.integration`**，默认套件与 CI 都跑）/ `test_watchlist_single_source` /
+  `test_data_backup`（3 个 Step 14/15 bash 沙箱类，只用 bash+jq+python，已核对可移植）/ `test_silent_failure_guards` / `test_scan_catchup`；
+  另更正 `test_slack_send_whitelist` 与 `test_data_backup` 各一处过期注释。ruff 清掉因此变成未用的 5 个 import。
+- Changed `CLAUDE.md` 核心组件指针加一条：不许直接改部署副本；改仓库 → 合入 → 部署。
+
+### 验证
+
+- 改动涉及的 12 个测试文件 + 元守卫全绿；`-m integration tests/test_scan_catchup.py`（沙箱里真跑仓库副本走闸）3 passed。
+- 变异：往仓库副本追加 `$DATE_STR）` ⇒ 裸变量守卫红并点名第 1546 行（证明读的是仓库副本）；还原后 `cmp` 与部署副本一致。
+- 一致性判定：以本地提交代替 origin/main ⇒ 真部署副本 `latest`；临时拷贝追加一行 ⇒ `drift`；旧版 ⇒ `stale`。未触碰部署副本。
+- 推送后在 origin/main 上复跑 `test_orchestrator_deployed_matches_repo.py`（推送前它按设计红：main 历史里还没有该文件）。
+
+## [0.45.352] — 2026-09-28 — 重做 v0.45.77 / v0.45.78 / `e8bac95`（从未并入 main 的仪表板令牌化）：18 处未定义 CSS 变量、公司卡扁平网格、宏观条带日期的涨跌
+
+v0.45.226 对账、v0.45.350 复核：这三处改动一直停在分支上（`claude/happy-cannon-bc377f` 的 `3581d8d` / `6024fbf`，
+`claude/nostalgic-cray-1fed0e` 的 `e8bac95`），分支落后 main 约 800 个提交。用户决定**在现 main 上重做意图、不强合分支**；
+三个原提交只用 `git show` 作参考。77 / 78 两个号已写进 git 历史，重做的工作记在本号下，原号条目改为指向这里。
+
+### Fixed — 未定义的 CSS 变量（`e8bac95` + v0.45.77 的一部分）
+
+- **共 18 处，不是 9 处**：`dashboard_renderer.py` 9 处（`var(--mt)` ×6、`var(--t)` ×3）+ `templates/dashboard.js` 9 处
+  （`var(--mt)` ×4、`var(--t)` ×4、**`var(--card)` ×1**）。`e8bac95` 只看到 renderer 那 9 处；`--card`（交易统计卡底色）此前没人提过。
+- **真实后果**（离线渲染 09-11 真实日报，main 的代码，`getComputedStyle` 实测）：引用这三个名字的元素 284 个；其中写 `color` 的
+  **273 个全部等于父元素颜色**（按规范「计算值阶段失效」退化为继承）——「今日 Actionable」「全链 OI 视图」标题与交易统计口径说明
+  本该弱化，实际渲染成主色 `rgb(26,18,8)`；交易统计卡的 `background` 不继承、退化为 `transparent`，底色从未出现过。
+  不是 `e8bac95` 提交信息说的「恒黑」。
+- **令牌怎么选**（WCAG 对比度，`:root` / `html.dark` 实值算）：
+
+  | 文字令牌 | 浅色 bg / surface / surface2 | 暗色 bg / surface / surface2 |
+  |---|---|---|
+  | `--tm` | 2.37 / 2.54 / **2.24** | 4.02 / 3.68 / **3.39** |
+  | `--ts` | 5.81 / 6.21 / 5.47 | 7.46 / 6.83 / 6.29 |
+
+  - `--mt` → **`--ts`**：`--tm` 两套主题都达不到正文 4.5:1。与 v0.45.77 的选择、v0.45.231 `gld-dn` 的先例同一判据；`e8bac95` 选的 `--tm` 不取。
+  - `--t` → `--tp`（无歧义）。
+  - `--card` → `--surface2`：与同一区块里的兄弟统计卡 `.eq-stat` / `.acc-kpi` 同底色；圆角 8px → 4px。
+
+### Changed — v0.45.77 重做（`3581d8d`）
+
+- **CSS**：原提交的 `templates/dashboard.css` 补丁用 `git apply --3way` 重放，唯一冲突是 `.top6-grid` 那几行——v0.45.80 已删过，两边删的是同一段，取 77 一侧。
+  落地内容：评分卡 `.scard` 与公司卡 `.company-grid/.company-card` 改单线共享网格（去 18/20px 间距、hover 浮影）；卡头 `.cc-header`
+  拆掉「方向色通栏 + 白字」改中性底；紫蓝残留 `rgba(102,126,234,*)` / `#667eea→#764ba2` 清零（此前 10 + 2 处）；装饰性渐变、浮空
+  `box-shadow` 清掉（剩下的渐变都是功能性的：滚动渐隐遮罩、骨架屏、宏观条边缘淡出）；`border-radius` > 4px 从 63 处降到 0，
+  只留 5 处功能性圆（方向点、状态点、骨架圆、共识环、分歧点）；删掉旧深色汉堡菜单死块时把它独有的 iOS 安全区 padding 并进存活规则。
+- **renderer**：43 处断言计数的精确替换（任何一处漂移即中止）。涨跌 / 中性硬编码色（DQ 条、今日 Actionable、Top 6 维度迷你条 /
+  sparkline / 共识环、`_detail` 内幕与期权流向、全链 OI 的 P/C / 磁吸箭头 / 阻力支撑墙、准确率个股表与方向 KPI）全部换
+  `var(--bull/--bear/--neut)`；Actionable 空状态与板块外框去渐变、圆角 ≤4px；全链 OI 卡去紫罗兰底、两块 `rgba(0,0,0,.18)`
+  深色补丁改 `--surface`、到期日徽标改描边；公司卡头改 `.sdir-*` 徽标 + 公司名 · 板块（取 `config.WATCHLIST` / `WATCHLIST_EXTENDED`，
+  查不到不渲染该行）；冲突图标 ⚠️ → ▲。刻意保留的灰白（`#94a3b8` / `#666` / `#fff` / `#e99`）与 `rgba()` 淡染照 77 原判据不动。
+- 实测 main 上这张卡头还有一个 77 没写到的可读性问题：「低风险」徽标压在绿色通栏上几乎看不见。拆结构后顺带消失。
+- `tests/test_dashboard_dim_dq_missing.py` 锁着旧 hex（`#28a745` 等 11 处）：它防的是「粗暴实现把所有维度渲染成 —」，不是锁调色板；
+  只换颜色字面量，结构逐字节断言保留，docstring 写明缘由。
+
+### Changed — v0.45.78 重做（`6024fbf`），但**没有照搬原做法**
+
+原做法是「今天的 `vix` 减上一份日报里的 `vix`」（10Y 同理）。拿 09-10 ~ 09-25 的真实日报一核，会造出看起来真实的假数：
+
+- 日报里的 `vix` **不带观测日**。09-24 / 09-25 两份都是 14.21 —— CBOE 历史里那是 **09-22** 的收盘（缓存 09-23 后没再更新，仍标
+  `vix_source: "cboe"`）⇒ 原做法在 09-25 会显示「+0.0」。
+- `vix` 是 CBOE 的**上一交易日**收盘（CSV 在 17:00 ET 扫描时还没更新当日），而现成的 `vix_change_pct` 来自 yfinance、是**当日**的：
+  09-11 的 `vix`=17.84=CBOE 09-10 收盘，`vix_change_pct`=−11.21%=09-11 当日 15.84/17.84−1。两者拼起来错位一天。
+- 10Y 在兜底日是常量 4.5（无日期）；中间缺日报时「上一份」可能是几天前（09-22 的上一份是 09-18）。
+
+判据改为：**每个涨跌都必须说得出是哪两次观测之差，说不出就不显示**；三项统一只表示「较前一交易日」。
+
+- **VIX**：`fred_macro` 实时 CBOE 路径从同一份历史取最后两行，新增 `vix_as_of` / `vix_prev_close` / `vix_prev_as_of`
+  （base 与快照 / yfinance / 兜底路径为 `None`，键形一致）。当前值口径与 `get_vix_spot` 相同（最后一行）。
+- **10Y**：今天与上一份日报各自的财政部观测（`field_sources.TNX == "treasury_gov@日期"`）做差，基准观测必须**正好是**前一交易日
+  （交易日走 `is_trading_day` 假日表）。代价：债市休市、股市开市的日子（哥伦布日 / 退伍军人日）次日不显示——少显示，不是错显示。
+- **黄金**：`gold_change_pct` 本身就是 GLD「现价 / 前收盘 − 1」，只在有价格时才信（GLD 没取到时它是默认 0.0）。主值改为固定显示价格
+  （78 的意图；旧逻辑按 `gold_trend` 二选一），价格缺失时仍按旧门槛兜底显示涨跌幅。
+- **新鲜度窗口**：VIX / 10Y 较新那次观测必须落在 [报告日前一交易日, 报告日]；陈旧缓存（09-25 读到 09-22）与补跑时拿到「未来」
+  观测都不显示；报告日解析不了也不显示。
+- 小字颜色按**显示出来的**舍入值定（+0.004 显示成 +0.0 就不标绿，也不显示「-0.0」）；`title` 写明两次观测的日期与数值。
+- `.ah-macro-delta` 此前定义了从没用过，基色 `--tm`（10px 小字 2.37:1）→ `--ts`。
+- 真实日报回放（旧日报没有 VIX 日期 ⇒ VIX 小字从下一次扫描起才出现）：
+
+  | 报告日 | 上一份 | VIX | 10Y | 黄金 |
+  |---|---|---|---|---|
+  | 09-11 | 09-10 | —（旧日报无日期） | +0.01 | +0.6% |
+  | 09-16 | 09-15 | — | +0.01 | −0.6% |
+  | 09-22 | 09-18 | — | —（隔了 09-21） | +0.4% |
+  | 09-24 / 09-25 | 兜底日 | — | — | — |
+
+- **评分分布图 `scoresChart`**：柱色改取 `getComputedStyle(:root)` 的 `--bull/--neut/--bear` 实算值（canvas 不认 `var()`；
+  `toggleDark` 会销毁重画，自然拿到另一套）。**没有照抄 78 的「浅色 hex / 暗色 hex」两份副本**——那是令牌的第二份真相，改令牌就静默漂移。
+  `borderRadius` 5 → 0，`barPercentage` 0.6。
+
+### Fixed — 顺带
+
+- 分数变化与宏观涨跌共用新的 `_iter_prev_reports()`（iCloud 副本 / 非交易日过滤原样搬过去，v0.45.192 的 AST 守卫仍覆盖）。
+  补一个旧循环的洞：它只跳过 `== date_str`，**补跑历史某日时会拿更晚的日报当「昨天」**；现为 `>= date_str` 都跳过。生产渲染的永远是最新一天，不受影响。
+
+### Added — 守卫
+
+- `tests/test_dashboard_css_vars_defined.py`（11 条）：renderer + `templates/` 的 css/html/js 里每个 `var(--x)` 与
+  `getPropertyValue('--x')` 必须在 `dashboard.css` 的 `:root` 定义；`:root` 的每个颜色令牌必须在 `html.dark` 重定义。
+  「已定义」只认 `:root` 规则（全文 grep `--x:` 会把 renderer 里 Markdown 表格的 `|---|:---:|` 当成定义了 `---`）。
+  尺子自证：解析器读到站点令牌、扫描器扫到 >200 处引用、把 `--mt`/`--t`/`--card` 喂回去必须点名。
+  **变异**：把 renderer 与 dashboard.js 换回 main 的版本 ⇒ 红，逐条点名全部 18 处；删掉 `html.dark` 的 `--bull` ⇒ 暗色对等断言点名 `--bull`。
+- `tests/test_macro_bar_deltas.py`（47 条）：真实日报回放、VIX 源 / 日期 / 新鲜度窗口（含周一、劳动节次日）、10Y 相邻交易日、黄金默认 0.0、
+  舍入与转义、`_iter_prev_reports` 过滤、`fred_macro` 三条路径产出新键、整页渲染 3×8 份小字。
+  **变异 9 处全红**：10Y 退回 78 的「日期不同即可」、去掉 VIX 新鲜度、去掉黄金价格门槛、`>=` 退回 `==`、按原始值定色、VIX 不看源、
+  `fred_macro` 两条路径各去掉前收盘、模板删掉 10Y 小字。
+- `tests/test_dashboard_tokenized_components.py`（10 条）：renderer 无涨跌硬编码色、卡头无内联背景、`.sdir-*` 徽标、公司名 · 板块、
+  未知标的不渲染名称行、冲突图标。对 main 的 renderer 跑 ⇒ 8 红 2 绿（绿的两条是正则自证与未知标的，main 本来也满足）。
+
+### 验证
+
+- **离线整页渲染**：09-11 真实日报 + `.swarm_results` + `pheromone.db` 的 `.backup` 快照放进 scratch，`ALPHA_HIVE_HOME` / report_dir 指向它；
+  socket 闸拦一切非 localhost 出网，yfinance 换抛异常桩，宏观取日报里的 `macro_context`（另补三个 VIX 键，值取 CBOE 历史真实收盘
+  09-10 17.84 / 09-09 16.46）。同一份数据分别用 main（临时 worktree）与本版渲染，`getComputedStyle` 对比：
+
+  | 项 | main | 本版 |
+  |---|---|---|
+  | 引用未定义变量的元素 | 284 | 0 |
+  | 「今日 Actionable」标题 | `rgb(26,18,8)`（继承的主色） | `rgb(107,95,82)` = `--ts` |
+  | 全链 OI 标题 / 底 / 圆角 | 主色 / `rgba(99,102,241,.06)` / 8px | `--ts` / `--surface2` / 4px |
+  | 交易统计卡底色 | `transparent` | `rgb(245,240,232)` = `--surface2` |
+  | 公司卡头 | `rgb(26,122,58)` 通栏 + 白字、无徽标 | 透明底、`--bull` 徽标、30/30 张有公司名 · 板块 |
+  | 公司网格 gap / 卡圆角 | 20px / 13px | 0 / 0 |
+  | 宏观条 | 无涨跌；黄金只显示「+0.6%」 | VIX 17.8 +1.4、10Y 4.96% +0.01、黄金 $399 +0.6%，24 个小字（3×8 份），title 带日期 |
+  | DQ 条 / 冲突图标 | `#28a745` / ⚠️ | `--bull` / ▲ |
+
+  暗色主题（`toggleDark`）复测：`scoresChart` 柱色 `#1D6B3A/#92601A/#9B2C2C` → `#22c55e/#f59e0b/#ef4444`，与暗色令牌逐字一致，
+  圆角 0、30 根柱；Actionable 标题 `rgb(148,163,184)`、统计卡 `rgb(26,32,53)`，都是暗色令牌值。控制台无新错误。
+- `ruff check`（项目配置）通过；`node --check templates/dashboard.js` 通过。
+- 全套（rebase 到 `ffe373a2` 之后）：**6304 passed、2 xfailed**，84 deselected = 项目 addopts 排除的 integration 82 条 + 显式排除的两条环境态测试：
+  `TestCoverageHorizon`（BLS 2027 日程未发布，按设计定期变红）与 `test_deployed_copy_is_not_hand_edited`（见下「未做」最后一条，与本版无关）。
+  ⚠️ addopts 带 `-x`：前两轮各停在其中一条上，没有排除就跑不到后面 3/4 的测试。
+- `index.html` 未手改：GitHub Pages 从 `gh-pages` 部署，**网站要等下一次日报扫描重新生成并部署后才会变**。
+
+### 未做 / 已知残留（刻意不扩范围）
+
+- `templates/dashboard.js` 其余 Chart.js 图仍是硬编码色，含 5 处紫色 `#667eea`（雷达、准确率趋势、资金曲线、多标的趋势调色板等）——78 只做了 `scoresChart`。
+- CSS 里 77 本就没动的 hex：`.sec-hot/.sec-cold`（板块轮动）、`.fresh-*`、`.tb-title`。
+- 未定义变量守卫只罩仪表板。`generate_ml_report.py` / `generate_deep_v2.py` / `paper_portfolio.py` 是独立页面，令牌来自别处拼装的 CSS，
+  要先确认各自的定义来源再立守卫。
+- **发现、未修（另开任务）**：日报里的 VIX 系统性地是上一交易日收盘；CBOE 缓存下载失败时静默用陈旧缓存且仍标 `cboe`
+  （`cboe_vix.get_vix_history`「用陈旧缓存也好过没有」）；`vix_change_pct` 与 `vix` 错位一天，而它喂 `macro_headwinds` 的「VIX 单日飙升」判断。
+- **两个分支已删除（2026-09-28，用户确认后；本地 + origin）**：`claude/happy-cannon-bc377f` tip `6024fbf00a64a4575c2c5442cccd9ec59319fcdf`（含 `3581d8d6` v0.45.77、`6024fbf0` v0.45.78），`claude/nostalgic-cray-1fed0e` tip `e8bac95b3af66a742697763bcad46de994e8fed6`。origin 端带 `--force-with-lease` 删（删前复核 tip 未变、无 worktree 占用）。
+  删前逐行核对（三个提交新增的每一行代码，去空白后在 origin/main 对应文件里查）：`3581d8d6` 163 行中 161 行已在 main，余 2 行是一句注释措辞与 `_fg_color`（v0.45.231 已改走 `_fg_cls`）；`6024fbf0` 59 行中 41 行不在，全是刻意未采用的写法（跨日报直接相减的宏观涨跌、未过 `_report_stem_date` 的 stem 去前缀、`scoresChart` 两份 hex 副本）；`e8bac95b` 9 行中 6 行不在，全是被否决的 `--tm`。⇒ **分支独有内容 = 被否决的写法 + 原始 CHANGELOG 正文**，没有该并未并的改动。
+  ⚠️ 上面引用的原提交 SHA 此后无分支引用，本地会被 gc 回收、GitHub 按 SHA 可访问多久无保证——原始正文不再承诺可取回。
+- **跑全套时撞见、未处理（不是本版造成）**：生产部署的 `~/.claude/scripts/alpha-hive-orchestrator.sh` 于 09-28 02:03 被改过，blob `9905c98` 不在 origin/main 该文件任何一版里（main 最新一版是 01:36 的 v0.45.353）⇒ `test_orchestrator_deployed_matches_repo` 判 drift。多半是并行的编排器 session 直接改了部署副本或部署了未推送的版本；已告知用户，未动。
+
+## [0.45.351] — 2026-09-28 — Fixed：gh-pages 重试「假成功」（未经校验的父提交不再能产出 success；本地 gh-pages 只在推送成功后前移）；gh-pages 结局第一次进 status.json / 告警 / 编排器 Step 5；CDN 检查不再替推送背书。Added：推送失败时的 git 传输探测（为「是否切 ssh.github.com:443」攒判据）。发现：scan_timing 自 09-14 起每个扫描日都没并进 status.json
+
+### 事故（09-25，取证见 v0.45.350）
+GitHub 不可达（`ssh: connect to host github.com port 22: Undefined error: 0`；`github.io` 解析失败；yfinance 803 次正常）。
+`commit_and_push_gh_pages`：attempt 1 fetch 败 ⇒ 父 = 本地 ref（未校验）⇒ commit-tree `316ba1d` ⇒ **推送前**就 `update-ref` 本地
+gh-pages ⇒ push 败；attempt 2 fetch 又败 ⇒ 父 = 本地 ref = **自己没推上去的 `316ba1d`** ⇒ tree 相同 ⇒「远端已是目标状态」捷径
+⇒ `success=True`。日志「gh-pages 部署成功」「CDN 验证跳过……gh-pages 已推送成功」，网站停在 09-24 两天，零告警。
+
+### Fixed — 假成功（`report_deployer.commit_and_push_gh_pages`）
+两处都修，**任一处单独修都不够**（变异 M1 / M2 各自只打红守它的那几条）：
+- **a. 捷径要求 `verified`**。未校验的父提交 tree 相同时不据此判成功、也不造空提交——把那个已有提交**推一次**，成败只认远端
+  （`action="pushed_existing_local"`）。只修 b 不够：09-25 留下的那种存量状态（本地 ref = 没推上去的目标 tree）照样触发捷径；
+  本地 ref 也可能落后于别人后来推的远端，「本地 = 目标」证明不了「远端 = 目标」。
+- **b. 本地 gh-pages ref 只在推送被接受后前移**。只修 a 不够：本地 ref 仍会指向没推上去的提交，下一轮 fetch 再失败时它会被当父。
+  前移失败只打 warning、不改判（远端已收到；落后的后果是下次非快进被拒，会红）。
+- 不变式（docstring）：**`success=True` 只有两条来路——fetch 校验过的远端真头已是目标 tree，或本轮一次 push 被远端接受。**
+- 返回值新增 `action`（`remote_already_current` / `pushed_new_commit` / `pushed_existing_local`）与 `transport_probe`。
+- 未校验时的 ERROR 文案更正：旧文案「仍可能把对方的提交挤成不可达对象」自 v0.45.268 改非 force 推送起已不成立，真实后果是「远端现状未知」。
+- v0.45.305/310/312 的空树守卫（无文件 / 全部 hash-object 失败）不变，仍在调用本函数之前拦截；只是现在这两支也返回失败并留记录。
+
+### Fixed — CDN 检查不替没核过的事背书（`verify_cdn_deployment`）
+解析不了部署域名时，旧代码 log「（沙箱网络限制），gh-pages 已推送成功」并 `return True`（与「验证通过」同形）——「沙箱」是
+Cowork VM 时代的假设，「已推送成功」是它没核过的事，09-25 恰是伪证。改为 warning「CDN 验证未执行……未经确认」+ `return None`
+（同 v0.45.54 读不到本地文件那支）。顺带：`setdefaulttimeout(5)` 改的是整个进程的默认 socket 超时且从不复原（getaddrinfo 也不认它），现用完复原。
+
+### Fixed — 「谁会红？」：gh-pages 失败此前在任何状态通道里都不存在
+
+| 通道 | 之前 | 现在 |
+|---|---|---|
+| `deploy_static_to_ghpages` 返回值 | `None`（调用方丢弃） | 结局 dict；**每条出口**（含两个早退）都返回 `success` 并写一行 `.gh_pages_deploy_log.jsonl` |
+| `auto_commit_and_notify` → `results` | 无 gh-pages 项；异常只打 warning | `results["gh_pages"]`（返回失败 / 抛 / 返回 None 三种都记失败） |
+| `scan_timing.extra` → status.json | 只有 git_push / git_commit | 加 `gh_pages`（`scan_timing.gh_pages_summary`） |
+| `alert_manager` | 无；main 推送告警还写「网站走 gh-pages 不受影响」 | P1「gh-pages 部署失败（网站停在上一次成功部署）」；无记录 ⇒ `checks_skipped`；main 推送那句改为「本条不代表网站状态」 |
+| 编排器 Step 5 | RC=0 ⇒ 恒 `skipped_builtin`（从不核网站）；RC≠0 ⇒「本轮网站不会更新」（09-24 RC=1 是 ML 常数闸、网站其实更新了 ⇒ 误报） | `_step5_gh_pages_verdict`：调 `report_deployer.py --gh-pages-step-status --since $STEP2_START` 读部署日志里 Step 2 之后的最后一条；失败 / 本轮无记录 ⇒ `failed` + `set_status partial` + ERROR；helper 不可用（生产代码早于本版）⇒ 退回旧逻辑并标 `unverified` |
+| 控制台 / 日志 | 「gh-pages 部署成功」 | 成功分「远端已接受 <commit>」与「无需推送：远端（fetch 已校验）已是本次内容」两种说法；失败为 ERROR「本轮网站未更新」+ 传输探测结论 |
+
+- 判据放仓库（`report_deployer.gh_pages_step_status`，有测试），编排器只调用 + 映射。`generate_ml_report._sync_ghpages`（Step 3 补跑）
+  推送失败 warning → ERROR；它不写部署日志（Step 5 判的是 Step 2 主部署）。
+- 编排器改动：本 session 02:03 先直接改了部署副本（v0.45.353 在 01:40 把编排器纳入版本控制，我开工时尚未合入），已按
+  CLAUDE.md 新规搬进仓库 `scripts/alpha-hive-orchestrator.sh`：**部署副本与仓库副本逐字节相同**（sha256 `d62336e0…`），无需重新部署；
+  改前版本 = 仓库 v0.45.353 那份 = `~/.claude/scripts/alpha-hive-orchestrator.sh.bak-20260928_pre-v0.45.351`（sha256 `c0e9cf9b…`）。
+
+### ⚠️ 发现：scan_timing 自 09-14 起**每个扫描日**都没并进 status.json（不是 v0.45.255 以为的一次性故障）
+- 逐日数编排器日志 alert_manager 的「status.json 无 scan_timing」：09-14/15/16/17/18/22/24/25 **全中**（09-21/23 是 P0 早返回，看不到）。
+  v0.45.255 的 P1「扫描已完成，但 status.json 缺整段 scan_timing」在 `alerts-*.json` 里 09-15/16/17/18/22 **连响 5 个扫描日，没有读者**。
+  ⇒ v0.45.214/223/227 加的推送 / 提交 / 生产同步告警，这两周在生产上**一条都触发不了**。09-25 真正「红」了的只有 Step 2/4/5 失败——而那是
+  ML 常数闸（RC=1）碰巧造成的，理由还是错的。
+- v0.45.255 称「09-10/11 合并成功」**从日志核不了**：那句 WARNING 是 v0.45.214（09-13）才有的。
+- **根因假设（待验证）：TCC**。编排器里唯一 `open()` ~/Desktop 下文件的 `/usr/bin/jq` 就是这次合并（其余 jq 读 stdin 或 ~/.claude/reports，全正常）；
+  同一进程树每天打 `getcwd: Operation not permitted`；bash 的 `[ -f ]`（stat）能过。python3 有 Desktop 授权，扫描本身不受影响。
+  统一日志只留 error 级，09-25 的 TCC 记录已不可查。
+- **自然实验**：阶段 5（v0.45.345，09-26）把 scan_timing.json 搬到 `~/alpha-hive-data/logs` ⇒ **09-28 是第一个不经 Desktop 的扫描日**。
+  核法：`grep -c "status.json 无 scan_timing" ~/.claude/logs/orchestrator-2026-09-28.log` 为 0，且 `~/.claude/reports/status.json` 有 `scan_timing` ⇒ 假设成立。
+- 在它坐实之前不把新观测只押在 scan_timing 上：gh-pages 结局另走编排器 Step 5（读的部署日志同在 `~/alpha-hive-data/logs`）。
+- 本版**未改** `write_status()`（那条合并吞 stderr 的 `2>/dev/null` 仍在）——等 09-28 结果再定，免得同时动两个变量。
+
+### Added — `git_transport_probe.py`（⚠️ 平时不触发，**别当死代码删**）
+**目的：为「是否把 git 远端切到 ssh.github.com:443」攒判据**（用户 09-27/28 决定暂不切、先攒证据；443 入口已在本机实测可用）。
+`commit_and_push_gh_pages` **首次推送失败时**跑一次（成功路径零开销），记录：`github.com` / `ssh.github.com` 的 DNS 成败、
+TCP `:22` / `:443` 成败与耗时（每步硬上限 5s，getaddrinfo 放守护线程限时）、git stderr 最后一行、是否带 `HTTP(S)_PROXY`
+（只记变量名；launchd 下没有、Claude 会话里有 ⇒ 手测不代表生产）、带日期与时区的时间戳。结论 `verdict`：
+`port22_blocked_443_ok`（切 443 能救）/ `dns_failed`（救不了，09-25 那种）/ `both_blocked` / `transport_ok` / `port443_blocked_22_ok` / `probe_error`。
+进返回值 → 部署日志 / `scan_timing.extra.gh_pages.transport_probe` / 告警「传输探测」栏 + 一行 warning。纯观测：任何异常只记录，不重试、不改判、不改远端 URL、不碰 ~/.ssh。
+测试侧：conftest 的离线闸挡在 urllib/requests/curl_cffi 库级 API，**挡不住裸 socket** ⇒ 新增 autouse `_block_git_transport_probe`，否则任何走到推送失败路径的测试都会真连 GitHub。
+
+### 传输层（未改，供决定）
+远端 `git@github.com:…`（ssh 22）。全部编排器日志里只有 09-25 一天失败，且那天 `github.io` 的 DNS 也失败 ⇒ 切 443 大概率救不了那一次。
+可选：① 不动（现状）；② `~/.ssh/config` 给 `Host github.com` 加 `HostName ssh.github.com` / `Port 443` / `HostKeyAlias github.com`（不动 known_hosts 与各仓库远端，
+本仓与 memory 仓同时生效）；③ HTTPS 远端 + 凭据助手（launchd 下要能无交互取凭据）。判据由上面的探测攒，**改前先问用户**。
+
+### 测试
+- 新 `tests/test_gh_pages_unverified_parent.py`（35 条，真 git + 本地裸仓库，断网 = 把 origin 指向不存在的路径，fetch / ls-remote / push 真失败）：
+  事故原序（4 次与恰 2 次）、存量「本地 = 目标」状态、网络中途恢复后真送达、半故障（只有 fetch 坏）推已有提交、合法捷径不推送、
+  部署函数端到端（日志不印「部署成功」、CDN 只在成功时调、部署日志 failed、Step 5 判红）、空数据根早退留记录、Step 5 判定器与 CLI、
+  CDN 不背书、结局进 results / scan_timing / 告警、真 `main()` 写入、传输探测六种形状（含解析器挂住被限时、探测抛异常不冒泡、代理只记名）。
+- 新 `tests/test_orchestrator_step5_gh_pages.py`（14 条）：从仓库编排器（`tests/_orchestrator.py`）抽出 `_step5_gh_pages_verdict`，
+  在 bash 里配真 `report_deployer.py` 跑，C 与 UTF-8 两种 locale；含抽取器自证。
+- **变异真跑**（`PYTHONDONTWRITEBYTECODE=1`、每轮清 pyc、`--maxfail=1000`、每轮核 collected = 基线 35 / 14、锚点唯一断言；
+  改动前代码取钉死 SHA `8202ed99cabf1c5cc4bf7446435d07c055dd08de`，不用 HEAD）：
+
+| # | 变异 | 结果（红的理由） |
+|---|---|---|
+| M0 | 整份 `report_deployer.py` 退回钉死的改动前版本 | 21 红：事故序列各条红在「推送从未成功却判了成功」，`parent == commit`（自己的未推送提交）——09-25 机制原样复现；其余红在新 API 不存在 |
+| M1 | 只撤修法 a | 3 红：存量状态、半故障推已有提交、远端已是它（均因捷径冒领） |
+| M2 | 只撤修法 b | 2 红：本地 ref 被前移到没推上去的提交 |
+| M3 | 删掉合法捷径 | 1 红：已校验且无变化时仍去推送 |
+| M4 | CDN 退回 `return True` +「已推送成功」 | 1 红 |
+| M5 | `results` 不放 gh_pages | 3 红 |
+| M6 | Step 5：本轮无记录判成功 | 1 红 |
+| M7 | 早退不留记录、返回 None | 1 红 |
+| M8 | 探测异常不再吞 | 1 红（`RuntimeError: boom` 冒泡） |
+| M9 | 每次推送失败都探测 | 1 红 |
+| M10 | 删 gh-pages P1 | 1 红 |
+| M11 | `main()` 不写 gh_pages | 2 红 |
+| M12 | 恢复「网站走 gh-pages 不受影响」 | 1 红 |
+| O1 | 编排器：部署失败不 `set_status partial` | 2 红（两种 locale） |
+| O2 | 编排器：helper 不可用 + RC=0 记 success | 2 红 |
+| O3 | 编排器：不调 helper（退回只看 RC） | 8 红 |
+
+  还原后 35 / 35 绿。
+- 全套：**6287 passed / 2 failed / 2 xfailed**（`--maxfail=1000`，12 分钟）。两条红：`TestCoverageHorizon`（按设计红）；`test_orchestrator_deployed_matches_repo`（部署副本 ≠ origin/main 任何一版——正是本版要合入的编排器改动，推上 main 后转绿）；`ruff check .`：All checks passed。
+
+### 未做 / 残留
+- `write_status()` 的 scan_timing 合并：见上「发现」，待 09-28 结果。
+- Step 4 在 RC≠0 时仍报「未生成仪表板」（09-24/25 的 RC=1 是 ML 常数闸，仪表板其实生成了）——未动。
+- 「性能异常」P1（基线写死 5 秒）每个扫描日都响，是 `alerts-*.json` 里的常驻噪音；而 `alerts-*.json` 本身**没有自动读者**。
+  本版让 gh-pages 失败「会红」，但红在 status.json / alerts / 编排器日志，**仍要有人去看**；推 Slack 受 CLAUDE.md 精简规则所限，未做。
+- `~/alpha-hive-data/logs/.gh_pages_deploy_log.jsonl` 里 09-25 那条仍写着 `"status": "success"`（改动前代码写的假成功，`parent_verified: false`、`attempts: 2`、`tree_unchanged: true` 是它的指纹）。审计日志不改写；读历史时按此识别。
+- 09-24/25 Step 2 的 RC=1 来自 ML 准常数闸（12 份报告唯一值 2 个），与本版无关，未查。
 
 ## [0.45.350] — 2026-09-27 — 运维：补推 09-25 滞留的 gh-pages 部署（网站停在 09-24 两天）；清理 8 个已并入/过时分支；发现 gh-pages 重试「假成功」缺陷（另开任务修）
 
@@ -8495,6 +8898,7 @@ U0 = 现行 origin/main、U1 = 本修复；两语料（历史原样 / 现行规�
 ⚠️ 标「仅本地」的两条只存在于这台 Mac 的 `.git` 里，删分支就没了。
 
 > 后续（2026-09-14）：两个「仅本地」分支已推到 origin 备份；0.45.76 / 0.45.79 已由 v0.45.231 合入 main；
+> 后续（2026-09-28）：0.45.77 / 0.45.78 / `e8bac95` 由 v0.45.352 在现 main 上重做（非合并）；原 0.45.118 由 v0.45.354 结案不移植；
 > 下文「未提交的一处」（宏观条自动滚动）已由 v0.45.232 移植进 main。
 
 **main 上的实况**（本版逐项核验）。静态部分看 `origin/main`；渲染部分把 `index.html`
@@ -18609,6 +19013,8 @@ GitHub runner 上 Python 在 `/opt/hostedtoolcache/Python/3.11.16/x64/bin/python
 > ⚠️ v0.45.226 补注：**同号另有一条从未并入 main 的工作。** `de4dcb8`（分支
 > `origin/claude/backfill-cloud-snapshot`，提交信息标 v0.45.118）是「事后补跑云端快照工具」，
 > 不是本条。两个 session 撞号，本条先进了 main。那条工作的实况见 v0.45.226。
+> 结论（v0.45.354）：**不移植**——缺口真实且开盘前可补，但工具前提有误、补跑窗口只到次日 09:30 ET、
+> 下游无消费者记录；真要做应放在云端 routine 开盘前补一轮。详见 v0.45.354。
 
 用户问「规则模式的定时任务为什么跑完这么慢，是不是代码沉重」。先量再答：
 
@@ -21040,6 +21446,12 @@ COST −2.25 / RKLB −4.15 两只负 GEX 正确判成 low
 
 **这个号同样是烧掉的**，处理方式同 v0.45.94。
 
+> **结案（v0.45.354，2026-09-28）：不移植，三条意图都已由后来的版本做了、且做得更严。**
+> 补抓分流 = v0.45.91（`on_stale="raise"`，同一设计）；陈旧不入缓存 = main 从未放松过；盘中冻结 =
+> v0.45.234 / 243（60s 判据）。真实云端快照 480 份里偏离官方收盘 >0.05% 的 90 份，60s 判据抓到 89、
+> 本分支的 ≥120 分钟口径只抓到 26（且是前者的真子集）。`intraday_frozen` 在 main 上出现 0 次**是对的**——
+> 同一件事在 main 上叫 `cboe_stale_intraday` / `price_stale_intraday`。取证、变异、残差见 v0.45.354。
+
 ## [0.45.87] — 2026-08-31 — weekly_optimizer close_t7 上线后 7-agent 复查修复（6 项）
 
 v0.45.86 落地后对 `weekly_optimizer.py` 做了一次独立代码复查，发现 6 个
@@ -21512,12 +21924,18 @@ JS `querySelector` 挂钩——class 本就不承担样式职责，不是 bug。
 
 > 标题由 v0.45.226 对账补写。本号在 main 上此前从未出现过。
 > 改动与原正文在 `6024fbf`（本地 + origin 均有该分支），**未合并**。详见 v0.45.226。
+> ✅ **2026-09-28 由 v0.45.352 在现 main 上重做**（未合并该分支）。宏观涨跌**没有照搬原做法**——「今天减上一份日报」在真实数据上
+> 会造出假数（陈旧 CBOE 缓存两天同值 ⇒ 假「+0.0」；`vix` 与 `vix_change_pct` 错位一天），改为每个涨跌必须带两次观测的日期。
+> 评分分布图柱色改取令牌实算值，不抄 hex 副本。见 v0.45.352。
 
 ## [0.45.77] — 2026-08-30 — 未并入 main：网站去 AI 味收尾，公司卡改扁平网格（工作在 `claude/happy-cannon-bc377f`）
 
 > 标题由 v0.45.226 对账补写。本号在 main 上此前从未出现过。
 > 改动与原正文在 `3581d8d`，**未合并**。⚠️ 它与未合并的 `e8bac95` 改同几行 `var(--mt)`、
 > 目标令牌不同，不能都照原样合。详见 v0.45.226。
+> ✅ **2026-09-28 由 v0.45.352 在现 main 上重做**（CSS 补丁 3-way 重放，renderer 手工移植；未合并该分支）。
+> `var(--mt)` 取 77 的 `--ts`（`e8bac95` 的 `--tm` 浅色底 2.24~2.54:1，不取）；另补了 77 与 `e8bac95` 都没看到的
+> `dashboard.js` 9 处（含 `var(--card)`）。见 v0.45.352。
 
 ## [0.45.76] — 2026-08-30 — 方向小圆点 `.dot-*` 补样式（当时未并入 main，已由 v0.45.231 合入）
 

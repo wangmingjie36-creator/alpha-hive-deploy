@@ -20,7 +20,9 @@ import types
 
 import pytest
 
-ORCH = os.path.expanduser("~/.claude/scripts/alpha-hive-orchestrator.sh")
+from tests._orchestrator import REPO_ORCH, repo_orchestrator_text
+
+ORCH = str(REPO_ORCH)  # 仓库里那份（v0.45.353 起受版本控制）
 PLIST = os.path.expanduser("~/Library/LaunchAgents/com.alpha.hive.daily.plist")
 
 # 行首的 bash 赋值：可缩进、可带 export / readonly / local
@@ -176,10 +178,7 @@ class TestOrchLiteral:
 
 @pytest.fixture(scope="module")
 def orch_text():
-    if not os.path.isfile(ORCH):
-        pytest.skip("编排器不在本机（仓库外文件）")
-    with open(ORCH, encoding="utf-8") as f:
-        return f.read()
+    return repo_orchestrator_text()
 
 
 class TestCatchupGate:
@@ -219,9 +218,8 @@ class TestCatchupGate:
         assert 'CATCHUP_AFTER_HHMM="2400"' in script
 
     def test_syntax_valid(self, orch_text):
-        # 取 orch_text 只为借它「不在本机就 skip」那一步：同 class 其他用例都有
-        # 这层保护，唯独这条漏了，于是在任何没有编排器的环境（CI、云沙箱）
-        # 都以 `returncode 127 / No such file` 假报「编排器语法错误」。
+        # 取 orch_text 为借它的存在性断言：否则文件缺失时 `bash -n` 以
+        # `returncode 127 / No such file` 假报「编排器语法错误」。
         r = subprocess.run(["bash", "-n", ORCH], capture_output=True, text=True)
         assert r.returncode == 0, f"编排器语法错误：{r.stderr}"
 
@@ -252,8 +250,8 @@ class TestPlistRunAtLoad:
 
 @pytest.mark.integration
 class TestGateBranchesLive:
-    """真跑编排器的补跑闸 —— **在沙箱里跑**。标 integration：依赖本机那份仓库外的
-    编排器。默认套件跑静态守卫即可，这组用 `pytest -m integration tests/test_scan_catchup.py` 单跑。
+    """真跑编排器的补跑闸 —— **在沙箱里跑**。标 integration：真起进程、依赖 macOS 的
+    launchd 式环境（v0.45.353 起跑的是仓库 `scripts/` 里那份）。默认套件跑静态守卫即可，这组用 `pytest -m integration tests/test_scan_catchup.py` 单跑。
     （三条分支都已在 v0.45.34 落地时手工端到端验证过，含真实 RunAtLoad 触发。）
 
     为什么必须沙箱（v0.45.221）—— 编排器走到闸上 `exit 0` 之前就写了生产，

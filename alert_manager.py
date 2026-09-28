@@ -252,7 +252,12 @@ class AlertAnalyzer:
         v0.45.214 前这里读 `status['deploy_status']` —— 全仓零写入者，规则结构上不可能触发；
         2026-09-01~11 生产 `git push origin main` 六次 non-fast-forward 被拒，零告警。
           - `scan_timing.extra.git_push`：`alpha_hive_daily_report.main` 写（部署结果精简版）
+          - `scan_timing.extra.gh_pages`（v0.45.351）：同上，网站部署结局
           - `scan_timing.production_sync`：编排器 Step 1 前跑 `production_sync.py` 写
+        ⚠️ `scan_timing` 进 status.json 靠编排器 `write_status()` 的 jq 合并，而那一步 09-14~09-25
+        每个扫描日都没生效（见 v0.45.351 CHANGELOG：疑为 TCC 拦 /usr/bin/jq 读 ~/Desktop，
+        阶段 5 已把文件搬出 Desktop，待验证）。所以 gh-pages 另有一条不经 scan_timing 的路：
+        编排器 Step 5 读部署日志（`report_deployer.gh_pages_step_status`）→ `steps_result`。
 
         v0.45.255：`scan_timing` 整段缺失以前**一律**当「早退未部署，本来就没写」处理——静默
         `checks_skipped` + 一行 WARNING。2026-09-14 14:48 实测反例：蜂群扫描真跑完了（`step2` 成功、
@@ -324,10 +329,35 @@ class AlertAnalyzer:
                     "原因": push.get("error") or push.get("output") or "（无输出）",
                     "冲突路径": push.get("conflicts"),
                     "本地落后": push.get("behind"),
-                    "建议": "网站走 gh-pages 不受影响；账本的异地副本缺这一天。"
+                    # v0.45.351：原文「网站走 gh-pages 不受影响」——是无条件断言，而 09-25 断网时
+                    # main 与 gh-pages 一起失败。网站有没有更新看同一份告警里的 gh-pages 那条。
+                    "建议": "账本的异地副本缺这一天；网站是否更新另见 gh-pages 部署检查（本条不代表网站状态）。"
                             "冲突需在生产 checkout 人工合并，勿 reset",
                 },
                 ["deployment", "github"]
+            ))
+
+        # v0.45.351：gh-pages（= 网站）部署结局。此前 status.json 里根本没有这一项——
+        # 2026-09-25 推送失败被重试捷径判成「成功」，网站停在 09-24 两天，零告警。
+        ghp = (st.get("extra") or {}).get("gh_pages")
+        if ghp is None:
+            self.checks_skipped.append("gh-pages 部署检查（scan_timing 无 gh_pages 记录）")
+        elif ghp.get("success") is not True:
+            probe = ghp.get("transport_probe") or {}
+            details = {
+                "原因": ghp.get("error") or ghp.get("reason") or ghp.get("skipped") or "（无输出）",
+                "尝试次数": ghp.get("attempts"),
+                "父提交已校验": ghp.get("parent_verified"),
+                "建议": "网络恢复后下一轮扫描会重新 fetch 远端头再提交；急需时人工补推。"
+                        "判网站是否最新只认远端（线上 dashboard-data.json 的 _date），不认部署日志",
+            }
+            if probe:
+                details["传输探测"] = f"{probe.get('verdict')}：{probe.get('meaning')}"
+            self.alerts.append(Alert(
+                AlertLevel.HIGH,
+                "⚠️ 【P1 高】gh-pages 部署失败（网站停在上一次成功部署）",
+                details,
+                ["deployment", "gh_pages"]
             ))
 
         sync = st.get("production_sync")

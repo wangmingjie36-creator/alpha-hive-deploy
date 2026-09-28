@@ -560,11 +560,8 @@ class TestNoTickerMayBeDropped:
 
     def test_orchestrator_compares_intended_vs_actual(self):
         """编排器不能再拿配置数组长度冒充实际产出。"""
-        import pathlib
-        sh = pathlib.Path.home() / ".claude/scripts/alpha-hive-orchestrator.sh"
-        if not sh.exists():
-            pytest.skip("编排器脚本不在本机")
-        text = sh.read_text(encoding="utf-8")
+        from tests._orchestrator import repo_orchestrator_text
+        text = repo_orchestrator_text()
         assert "ticker_completeness" in text
         assert "ACTUAL_COUNT" in text and "INTENDED_COUNT" in text
 

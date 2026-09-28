@@ -80,6 +80,7 @@
 - **卖权行权价选择器（对标 GEXBot）** `sell_strike_levels / _candidates / _ledger / _report`（v0.45.333）：CBOE 原始链 → 重定价扫描 zero gamma / 净 GEX majors / DEX / vanna·charm → delta 梯子与六种结构 → 月度 / 周度前向账本（`PATHS.sell_strike_state`）。**不进评分、不上网站**（本地报告 + MCP `alphahive_get_sell_strike_candidates`）；双向 AST 火墙在 `tests/test_sell_strike_integration.py`。检验协议冻结在 `experiments/sell_strike_routing_prereg.md`（首次就绪只跑一次）
 - **月度自诊断** `self_analyst.py`（Track B）：输出 `self_analysis_briefs/YYYY-MM.md`，含每蜂维度 rank-IC 小节（v0.40.0）
 - **IBKR 桥接** `ibkr_sync.py`：手动流程（export actions → 用户 TWS 下单 → import CSV → reconcile），状态在 `paper_account/`
+- **编排器（v0.45.353 起受版本控制）**：唯一真相 = 仓库 `scripts/alpha-hive-orchestrator.sh`；launchd 跑的是**部署副本** `~/.claude/scripts/alpha-hive-orchestrator.sh`（路径不变：Desktop 有 TCC 限制）。⚠️ **不许直接改部署副本**——改仓库那份 → 合入 origin/main → 部署（阶段 3 前手动：`/usr/local/bin/python3 deploy_orchestrator.py --ref origin/main`，带 `bash -n`/裸变量/漂移关卡、原子替换；阶段 3 起改由扫描前自动部署）。一致性守卫（漂移 / 未部署）即该文件；读编排器原文的测试一律经 `tests/_orchestrator.py`，CI 上也跑
 
 ## GitHub Pages 部署规则（永久设置）
 

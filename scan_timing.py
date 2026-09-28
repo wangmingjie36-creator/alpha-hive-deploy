@@ -189,6 +189,31 @@ def git_push_summary(git_push: Optional[dict]) -> Optional[dict]:
     return out
 
 
+_GH_PAGES_KEYS = ("success", "action", "attempts", "parent_verified", "tree_unchanged",
+                  "n_changed", "skipped", "reason", "cdn_verified")
+
+
+def gh_pages_summary(gh_pages: Optional[dict]) -> Optional[dict]:
+    """`results["gh_pages"]` 进 status.json 的精简版（v0.45.351）。
+
+    此前 `auto_commit_and_notify` 根本不返回 gh-pages 结局，status.json / 告警对它全盲
+    （2026-09-25 推送失败被重试捷径判成「成功」，网站停两天零告警）。
+    None 原样返回（「没记录」≠「成功」，告警侧记为未执行的检查）。
+    `transport_probe` 只在推送失败时存在（为「是否切 ssh.github.com:443」攒判据），原样保留。
+    """
+    if not isinstance(gh_pages, dict):
+        return None
+    out = {k: gh_pages[k] for k in _GH_PAGES_KEYS if k in gh_pages}
+    if gh_pages.get("commit"):
+        out["commit"] = str(gh_pages["commit"])[:12]
+    reason = gh_pages.get("error") or gh_pages.get("last_error")
+    if reason:
+        out["error"] = str(reason)[:300]
+    if gh_pages.get("transport_probe"):
+        out["transport_probe"] = gh_pages["transport_probe"]
+    return out
+
+
 def git_commit_summary(git_commit: Optional[dict]) -> Optional[dict]:
     """`results["git_commit"]` 进 status.json 的精简版（v0.45.223）。
 

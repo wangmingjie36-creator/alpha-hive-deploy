@@ -46,7 +46,7 @@ CLAUDE.md「Slack 通知精简规则」：Bot **只发两类消息** ——
 记录器，`_check_webhook_alive` 换成常量（掐掉构造时那次 HEAD），token 是假串。
 conftest 的 `_block_slack` 仍在底下兜底（它的记录器会被本文件的覆盖，但 ①② 两道闸不变）。
 
-⚠️ 已知盲区：本仓之外的编排器 `~/.claude/scripts/alpha-hive-orchestrator.sh` 扫不到。
+⚠️ 已知盲区：编排器（v0.45.353 起在仓库 `scripts/alpha-hive-orchestrator.sh`）是 bash，本守卫只做 Python AST，扫不到。
 2026-09-23 人工核对：它只调 `pre_scan_notify.py` / `push_report_to_slack.py` /
 不带 `--dispatch` 的 `alert_manager.py`，没有 curl 到 Slack 的行。
 """

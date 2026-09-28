@@ -366,6 +366,10 @@ def _fetch_macro_data() -> Dict:
         # 且 mode 明写 fallback，不冒充 realtime。
         "as_of": None,
         "as_of_mode": "fallback",
+        # v0.45.352：VIX 的 CBOE 观测日与前一收盘（仅实时 CBOE 路径有值，其余 None）。
+        "vix_as_of": None,
+        "vix_prev_close": None,
+        "vix_prev_as_of": None,
     }
 
     try:
@@ -450,12 +454,23 @@ def _fetch_macro_data() -> Dict:
                     _vix_src_override = "cloud_snapshot_cboe"
             except Exception as _e_sv:  # noqa: BLE001
                 _log.debug("快照 VIX 读取失败: %s", _e_sv)
+        # v0.45.352：同一份 CBOE 历史里取最后两行 —— 当前值（= get_vix_spot 的口径）
+        # 连同**它自己的观测日**，外加前一收盘。仪表板宏观条的 VIX 涨跌只用这对：
+        #   · `vix_change_pct` 对不上 `vix`：它来自 yfinance 那条腿。CBOE 的 CSV 在
+        #     17:00 ET 扫描时通常还没更新当日，于是 `vix` 是**上一交易日**收盘，而
+        #     `vix_change_pct` 是当日的（09-11 实测：vix=17.84=CBOE 09-10 收盘，
+        #     vix_change_pct=−11.21%=09-11 当日 15.84/17.84−1）。两者拼起来就错位一天。
+        #   · 拿两份日报的 `vix` 相减也不行：没有日期，CBOE 缓存陈旧时两天会读到同一个
+        #     收盘（09-24 / 09-25 都是 09-22 的 14.21），相减得一个假的「+0.0」。
+        _vix_as_of = _vix_prev_close = _vix_prev_as_of = None
         if _cboe_vix is None:
             try:
-                from cboe_vix import get_vix_spot as _cboe_vix_spot
-                _spot = _cboe_vix_spot()
-                if _spot:
-                    _cboe_vix = _spot[0]
+                from cboe_vix import get_vix_history as _cboe_vix_hist
+                _h2 = _cboe_vix_hist(max_days=2)
+                if _h2:
+                    _vix_as_of, _cboe_vix = _h2[-1]
+                    if len(_h2) >= 2:
+                        _vix_prev_as_of, _vix_prev_close = _h2[-2]
             except Exception as _e_cv:  # noqa: BLE001
                 _log.debug("CBOE VIX 不可用，回落 yfinance: %s", _e_cv)
 
@@ -467,6 +482,9 @@ def _fetch_macro_data() -> Dict:
                 _partial["vix"] = _cboe_vix
                 _partial["vix_regime"] = _classify_vix(_cboe_vix)
                 _partial["vix_source"] = "cboe"
+                _partial["vix_as_of"] = _vix_as_of
+                _partial["vix_prev_close"] = _vix_prev_close
+                _partial["vix_prev_as_of"] = _vix_prev_as_of
                 _partial["summary"] = f"宏观数据不可用（VIX {_cboe_vix:.1f} 来自 CBOE，其余降级）"
                 return _partial
             return base
@@ -763,6 +781,10 @@ def _fetch_macro_data() -> Dict:
             "field_sources": dict(_src_map),   # 逐字段来源，空 = 该项走了 yfinance
             "treasury_2y_source": _2y_source,  # treasury_gov / fred / approx_from_5y
             "vix_source": _vix_source,
+            # v0.45.352：只在实时 CBOE 路径有值（快照 / yfinance / 兜底都是 None）。
+            "vix_as_of": _vix_as_of,
+            "vix_prev_close": _vix_prev_close,
+            "vix_prev_as_of": _vix_prev_as_of,
             # v0.45.92：两条路径都给日期戳。
             # `_as_of` 本身**不能动** —— 它是控制流：非 None 会让上面走
             # `_asof_history` 对齐历史日，实时路径填了它会改变取数行为。

@@ -281,47 +281,84 @@ def commit_and_push_gh_pages(repo: str, tree: str, message_fn, max_attempts: int
          没同步到的远端提交挤成不可达对象"）。git 拒绝后重试循环会重新
          fetch、拿到最新父提交、重新 commit-tree、再推——不是重复同一次
          必然还会被拒的推送。
-      3. tree 与刚 fetch 到的父提交的 tree 完全相同 ⇒ 远端已经是我们要发布
-         的状态，直接判成功、不新建提交也不推送（比"仍然尝试推一次"更准确，
-         也避免了对一个不存在实际变化的 ref 做推送）。
+      3. tree 与刚 fetch 到的父提交的 tree 完全相同 **且父提交经过校验** ⇒
+         远端已经是我们要发布的状态，直接判成功、不新建提交也不推送（比"仍然
+         尝试推一次"更准确，也避免了对一个不存在实际变化的 ref 做推送）。
 
-    返回 dict：{success, commit, parent, parent_verified, tree_unchanged,
-                n_changed, attempts, last_error}。
+    ⚠️ v0.45.351（2026-09-25 事故，09-27 发现）：第 3 条捷径的前提是「父提交 =
+    已校验的远端真头」，而旧代码对**未经校验**的父提交（fetch 失败 ⇒ 退回本地
+    ref）也照走捷径。叠加旧代码在 push **之前**就把本地 gh-pages 前移到新提交，
+    GitHub 不可达那天的序列是：
+      attempt 1：fetch 败 ⇒ 父 = 本地 ref（昨天的部署）⇒ commit-tree 316ba1d ⇒
+                 本地 ref 前移到 316ba1d ⇒ push 败；
+      attempt 2：fetch 败 ⇒ 父 = 本地 ref = **自己没推上去的 316ba1d** ⇒ tree 相同 ⇒
+                 捷径判 success=True（「远端已经是我们要发布的状态」——假的）。
+    日志印「部署成功」、网站停在 09-24 两天，直到 09-27 手工补推 `43a04ecc..316ba1dd`。
+    两处都修，任一处单独修都不够：
+      a. **捷径要求 `verified`**。未校验的父提交 tree 相同时，不据此判成功，
+         也不再造一个空提交——直接把那个已有提交推一次，**成败只认远端的回答**
+         （`action="pushed_existing_local"`）。只修 b 不修 a：本地 ref 仍可能落后
+         于别人后来推的远端（它只记「我们上次推成功的」），「本地 = 目标」
+         照样证明不了「远端 = 目标」。
+      b. **本地 gh-pages ref 只在推送成功之后前移**。只修 a 不修 b：本地 ref 仍会
+         指向没推上去的提交，下一轮若 fetch 恰好又失败，就会把它当父提交用，
+         历史里混进一个远端从没见过的父。
+    ⇒ 不变式：**`success=True` 只有两条来路——fetch 校验过的远端真头已是目标 tree，
+    或本轮一次 `git push` 被远端接受。** 本地状态单独不构成成功。
+    (`tests/test_gh_pages_unverified_parent.py` 按事故原序复现，旧代码下红。)
+
+    返回 dict：{success, action, commit, parent, parent_verified, tree_unchanged,
+                n_changed, attempts, last_error, transport_probe}。
+      action ∈ remote_already_current（已校验远端 = 目标，未推送）/
+               pushed_new_commit / pushed_existing_local / None（失败）。
+      transport_probe：首次推送失败时跑一次 `git_transport_probe`（纯观测，为
+               「是否切 ssh.github.com:443」攒判据；不影响成败判定），成功路径为 None。
     """
     import subprocess
     import time as _t
     result: Dict = {
-        "success": False, "commit": None, "parent": None, "parent_verified": None,
-        "tree_unchanged": None, "n_changed": None, "attempts": 0, "last_error": None,
+        "success": False, "action": None, "commit": None, "parent": None,
+        "parent_verified": None, "tree_unchanged": None, "n_changed": None,
+        "attempts": 0, "last_error": None, "transport_probe": None,
     }
     for attempt in range(1, max_attempts + 1):
         result["attempts"] = attempt
         parent, verified = resolve_gh_pages_parent(repo)
         result["parent"], result["parent_verified"] = parent, verified
         if not verified:
+            # v0.45.351 改文案：旧文案说「仍可能把对方的提交挤成不可达对象」——自 v0.45.268
+            # 改非 force 推送起已不成立（远端领先时推送会被拒，不会被覆盖）。真正的后果是
+            # 「远端现状未知」，所以下面不许走「远端已是目标」的捷径。
             _log.error(
                 "🚨 gh-pages fetch 失败（attempt %d/%d），父提交退回本地 ref（未经校验）："
-                "若远端此刻领先本地，本次仍可能把对方的提交挤成不可达对象",
+                "远端现状未知——不走「远端已是目标状态」捷径，成败只认推送结果"
+                "（非 force：远端若领先会被拒，不会被覆盖）",
                 attempt, max_attempts,
             )
         has_change, n_changed = ghpages_tree_delta(repo, tree, parent)
         result["tree_unchanged"], result["n_changed"] = not has_change, n_changed
-        if not has_change:
-            # tree 与此刻的远端真头完全一致：远端已经是我们要发布的状态。
+        if not has_change and verified:
+            # tree 与此刻**经 fetch 校验**的远端真头完全一致：远端已经是我们要发布的状态。
             result["success"] = True
+            result["action"] = "remote_already_current"
             result["commit"] = parent
             return result
-        parent_args = ["-p", parent] if parent else []
-        try:
-            commit = subprocess.check_output(
-                ["git", "commit-tree", tree] + parent_args + ["-m", message_fn(n_changed)],
-                cwd=repo,
-            ).decode().strip()
-        except subprocess.CalledProcessError as e:
-            result["last_error"] = f"commit-tree 失败: {e}"
-            return result
-        subprocess.run(["git", "update-ref", "refs/heads/gh-pages", commit],
-                        cwd=repo, check=True)
+        if not has_change:
+            # 未经校验的父提交（本地 ref）已经是这棵 tree：本地 = 目标，远端未知。
+            # 不造空提交，把它本身推一次——远端已有它 ⇒ git 回 up-to-date（成功）；
+            # 远端没有且可快进 ⇒ 送达（成功）；网络不通 / 远端已走到别处 ⇒ 失败。
+            commit, action = parent, "pushed_existing_local"
+        else:
+            parent_args = ["-p", parent] if parent else []
+            try:
+                commit = subprocess.check_output(
+                    ["git", "commit-tree", tree] + parent_args + ["-m", message_fn(n_changed)],
+                    cwd=repo,
+                ).decode().strip()
+            except subprocess.CalledProcessError as e:
+                result["last_error"] = f"commit-tree 失败: {e}"
+                return result
+            action = "pushed_new_commit"
         result["commit"] = commit
         # 非 force：父提交就是 push 前一刻的远端真头，正常情况下天然快进；
         # 竞态时 git 自己会因非快进拒绝，落入下面的重试分支重新 fetch。
@@ -335,11 +372,31 @@ def commit_and_push_gh_pages(repo: str, tree: str, message_fn, max_attempts: int
         )
         if r is not None and r.returncode == 0:
             result["success"] = True
+            result["action"] = action
+            # v0.45.351：本地 ref 只在远端接受之后前移（见 docstring b）。前移失败不改判成败——
+            # 远端已经收到；本地 ref 只是下次 fetch 失败时的兜底父提交，落后的后果是那次推送
+            # 被非快进拒绝（会红），不是静默错误。
+            try:
+                subprocess.run(["git", "update-ref", "refs/heads/gh-pages", commit],
+                               cwd=repo, check=True, capture_output=True, text=True)
+            except (subprocess.CalledProcessError, OSError) as e:
+                _log.warning("gh-pages 已推送成功，但本地 gh-pages ref 未能前移到 %s：%s",
+                             commit[:7], getattr(e, "stderr", None) or e)
             return result
         result["last_error"] = (
             (r.stderr or "").strip()[:300] if r is not None
             else f"push 超时（>{_GH_PAGES_NETWORK_TIMEOUT}s）"
         )
+        if result["transport_probe"] is None:
+            # 只在首次推送失败时跑一次（≤~20s），成功路径零开销。纯观测：连 import 出错也只记一笔。
+            try:
+                import git_transport_probe as _gtp
+                result["transport_probe"] = _gtp.probe_github_transport(result["last_error"])
+                _log.warning("git 传输探测（为「是否切 ssh.github.com:443」攒判据）：%s",
+                             _gtp.one_line(result["transport_probe"]))
+            except Exception as _pe:  # noqa: BLE001
+                result["transport_probe"] = {"verdict": "probe_error",
+                                             "probe_error": f"{type(_pe).__name__}: {_pe}"[:200]}
         if attempt < max_attempts:
             delay = min(2.0 * (2 ** (attempt - 1)), 16.0)
             _log.warning(
@@ -355,6 +412,8 @@ def verify_cdn_deployment(reporter, data_root: str,
     """Push 成功后轮询 CDN，验证 dashboard-data.json 已更新。
 
     纯 advisory — 超时只记 WARNING，不回滚/阻塞。
+    返回 True = 线上已是本轮数据；False = 等满 `max_wait` 仍是旧数据；
+    None = **没验**（本地文件读不到 / 部署域名解析不了）——None 不能渲染成 True。
 
     数据根迁移阶段 4：`data_root` 现在是**数据根**（`PATHS.home`），不再是
     git 仓库根。此前这里读 `dashboard-data.json` 走的是 `reporter.agent_helper.
@@ -385,17 +444,28 @@ def verify_cdn_deployment(reporter, data_root: str,
         return None
 
     # ── 快速连通性探测：如果网络出口无法访问 github.io，直接跳过，避免浪费 3 分钟 ──
+    # v0.45.351：旧分支 log「（沙箱网络限制），gh-pages 已推送成功」并 `return True`。
+    # 两句都没有依据：「沙箱」是 Cowork VM 时代的假设（09-25 生产机上是真断网），
+    # 「已推送成功」是本函数没核过的事——09-25 那次推送恰恰没成功（重试假成功，见
+    # `commit_and_push_gh_pages` docstring），这行日志替它作了伪证。改为「未执行」+ None，
+    # 与上面读不到本地文件那支（v0.45.54）同一口径：跳过 ≠ 已验证。
+    # 顺带：旧代码 `setdefaulttimeout(5)` 改的是**整个进程**的默认 socket 超时且从不复原
+    # （getaddrinfo 走系统解析器，根本不认这个超时）；现在用完即复原。
     _deploy_host = reporter._DEPLOY_BASE_URL.split("/")[2]  # e.g. "wangmingjie36-creator.github.io"
+    import socket as _sock
+    _prev_timeout = _sock.getdefaulttimeout()
     try:
-        import socket as _sock
         _sock.setdefaulttimeout(5)
         _sock.getaddrinfo(_deploy_host, 443)
-    except OSError:
-        _log.info(
-            "CDN 验证跳过：无法解析 %s（沙箱网络限制），gh-pages 已推送成功",
-            _deploy_host,
+    except OSError as _dns_e:
+        _log.warning(
+            "CDN 验证未执行：无法解析 %s（%s）——线上是否已更新**未经确认**"
+            "（本检查不为推送结果背书，推送结局见上一行）",
+            _deploy_host, _dns_e,
         )
-        return True
+        return None
+    finally:
+        _sock.setdefaulttimeout(_prev_timeout)
 
     _log.info("验证 CDN 部署... (期望: %s, 最长等待 %ds)", expected_ts, max_wait)
     start = _time_v.monotonic()
@@ -431,8 +501,83 @@ def verify_cdn_deployment(reporter, data_root: str,
     return False
 
 
-def deploy_static_to_ghpages(reporter):
+#: gh-pages 部署结局的持久化日志（每次调用 `deploy_static_to_ghpages` 追加一行）。
+#: 读者：编排器 Step 5（经 `gh_pages_step_status`）与人工排查。在 `PATHS.logs_dir` 下。
+GH_PAGES_DEPLOY_LOG_NAME = ".gh_pages_deploy_log.jsonl"
+
+
+def _append_gh_pages_deploy_log(record: Dict) -> bool:
+    """追加一行部署结局。写不进去返回 False 并打 warning。
+
+    v0.45.351 起编排器 Step 5 靠这一行判「本轮网站更新了没有」——写失败时 Step 5
+    会读到「本轮无部署记录」并判红（`no_deploy_record`），不会被渲染成成功；
+    所以这里只打 warning（旧代码是 debug，写失败完全不可见）。
+    """
+    import json as _json_q
+    from hive_logger import PATHS as _P
+    try:
+        with open(_P.logs_dir / GH_PAGES_DEPLOY_LOG_NAME, "a", encoding="utf-8") as _qf:
+            _qf.write(_json_q.dumps(record, ensure_ascii=False, default=str) + "\n")
+        return True
+    except Exception as _qe:  # noqa: BLE001 - 观测文件写不出来不能拖垮部署
+        _log.warning("gh-pages 部署日志写入失败（编排器 Step 5 将判「无部署记录」）: %s", _qe)
+        return False
+
+
+def gh_pages_step_status(since_epoch: float, log_path: Optional[str] = None) -> Dict:
+    """编排器 Step 5 用：`since_epoch`（Step 2 启动时刻）之后最近一次 gh-pages 部署的结局。
+
+    返回 `steps_result.step5_github_deploy` 要写的对象（`status` 只取 success / failed，
+    `alert_manager` 只认 'failed'）：
+      - 本轮有记录且 status=success ⇒ success（附 action / attempts / commit）
+      - 本轮有记录且 status≠success ⇒ failed，reason=gh_pages_deploy_failed（附原因）
+      - 本轮无记录 ⇒ failed，reason=no_deploy_record——「没核到」不是「成功」：
+        部署函数没跑到 / 抛了 / 日志写不进去，三种情况网站都没有被证实更新过。
+      - 日志文件读不了 ⇒ failed，reason=deploy_log_unreadable
+
+    为什么由 Python 判而不是编排器里写 jq：编排器在仓库外、不受版本控制、没有测试；
+    判据放这里有测试守着。编排器调用失败（如生产代码尚未快进到含本函数的版本）时
+    自己退回旧的按 Step 2 退出码判定，见编排器 Step 4/5 注释。
+    """
+    import json as _json_r
+    from datetime import datetime as _dt_r, timezone as _tz_r
+    from hive_logger import PATHS as _P
+    path = log_path or str(_P.logs_dir_unmade() / GH_PAGES_DEPLOY_LOG_NAME)
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        lines = []
+    except OSError as e:
+        return {"status": "failed", "reason": "deploy_log_unreadable", "detail": str(e)[:200]}
+    latest = None
+    for ln in lines:
+        try:
+            rec = _json_r.loads(ln)
+            ts = _dt_r.strptime(rec["timestamp"].rstrip("Z").split(".")[0], "%Y-%m-%dT%H:%M:%S")
+            epoch = ts.replace(tzinfo=_tz_r.utc).timestamp()
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue                           # 坏行不参与判定（也不让它把整份日志判成不可读）
+        if epoch >= since_epoch:
+            latest = rec
+    if latest is None:
+        return {"status": "failed", "reason": "no_deploy_record",
+                "detail": "Step 2 启动之后没有任何 gh-pages 部署记录——网站未被证实更新"}
+    out = {k: latest.get(k) for k in ("action", "attempts", "parent_verified", "commit")
+           if latest.get(k) is not None}
+    if latest.get("status") == "success":
+        return {"status": "success", "verified_by": "gh_pages_deploy_log", **out}
+    return {"status": "failed", "reason": "gh_pages_deploy_failed",
+            "detail": str(latest.get("last_error") or latest.get("reason") or "")[:300], **out}
+
+
+def deploy_static_to_ghpages(reporter) -> Dict:
     """用 git plumbing 构建仅含静态文件的 gh-pages 提交并推送。
+
+    v0.45.351：返回部署结局 dict（此前返回 None ⇒ `auto_commit_and_notify` 的
+    `results` 里根本没有 gh-pages 这一项，status.json / 告警对它全盲）。**每条路径**
+    都返回 `success` 键、并往 `GH_PAGES_DEPLOY_LOG_NAME` 追加一行——包括两个早退
+    （无文件可部署 / 全部 hash-object 失败），它们此前只打日志、不留记录。
 
     数据根迁移阶段 4：`repo`（git 仓库根，= `reporter.agent_helper.git.
     repo_path`，经 `agent_toolbox.GitHubTool` 已改读 `PATHS.git_repo_root`）
@@ -460,6 +605,30 @@ def deploy_static_to_ghpages(reporter):
         pass
     repo = reporter.agent_helper.git.repo_path or "."
     data_root = str(_PATHS_ghp.home)
+
+    def _finish(outcome: Dict, file_count: int) -> Dict:
+        """落一行部署日志并原样返回 `outcome`（每条出口都经过这里）。"""
+        import datetime as _dt_q
+        _record = {
+            "timestamp": _dt_q.datetime.now(_dt_q.timezone.utc).replace(tzinfo=None).isoformat() + "Z",
+            "date_str": getattr(reporter, "date_str", None),
+            "file_count": file_count,
+            "changed_files": outcome.get("n_changed"),   # v0.45.2: 实测值（-1=无法判定）
+            "tree_unchanged": outcome.get("tree_unchanged"),
+            "status": "success" if outcome.get("success") else "failed",
+            "action": outcome.get("action"),              # v0.45.351
+            "commit": (outcome.get("commit") or "")[:12] or None,
+            "attempts": outcome.get("attempts"),
+            "parent_verified": outcome.get("parent_verified"),  # v0.45.268: fetch 校验过父提交与否
+            "last_error": outcome.get("last_error") or "",
+        }
+        if outcome.get("reason"):
+            _record["reason"] = outcome["reason"]
+        if outcome.get("transport_probe"):
+            _record["transport_probe"] = outcome["transport_probe"]
+        _append_gh_pages_deploy_log(_record)
+        return outcome
+
     idx = os.path.join(repo, ".git", "gh-pages-index")
     if os.path.exists(idx):
         os.remove(idx)
@@ -504,8 +673,10 @@ def deploy_static_to_ghpages(reporter):
     # 是空的——guard 形同虚设，会把 gh-pages 整棵重建成只剩这两个文件，等于
     # 清空线上网站（v0.45.305 review 实测复现：确认此前版本会造成这个后果）。
     if not files:
-        _log.warning("无静态文件可部署（数据根 %s 未发现任何报告文件）", data_root)
-        return
+        # v0.45.351：warning → error，并留记录、返回失败——生产扫描走到这里就是网站本轮没更新。
+        _log.error("🚨 无静态文件可部署（数据根 %s 未发现任何报告文件）——本轮网站不会更新", data_root)
+        return _finish({"success": False, "reason": "no_files",
+                        "last_error": f"数据根 {data_root} 无报告文件"}, 0)
     # 随代码发布的静态资源：data_root 里没找到的，退回 git 仓库根读
     # （v0.45.305：此前这里只看 data_root，阶段 5 后 `.nojekyll`/
     # `chart.umd.min.js` 会从此在线上消失，见 CODE_SHIPPED_STATIC_ASSETS 注释）。
@@ -545,7 +716,8 @@ def deploy_static_to_ghpages(reporter):
         )
         if os.path.exists(idx):
             os.remove(idx)
-        return
+        return _finish({"success": False, "reason": "all_hash_object_failed",
+                        "last_error": f"全部 {len(files)} 个候选文件 hash-object 失败"}, len(files))
     # 用 --index-info 批量更新 index（一次 subprocess 代替 N 次）
     _idx_input = "\n".join(cache_entries) + "\n"
     subprocess.run(
@@ -573,44 +745,39 @@ def deploy_static_to_ghpages(reporter):
     # v0.45.260（数据根迁移阶段 2）：此前落在 `repo`（git 仓库根），
     # 而它是纯本地审计日志（`.gitignore` 已忽略，从不参与 git 提交）——
     # 与 git plumbing 无关，理应跟 `PATHS.logs_dir` 走。
-    _ghp_queue = str(_PATHS_ghp.logs_dir / ".gh_pages_deploy_log.jsonl")
-    try:
-        import json as _json_q
-        import datetime as _dt_q
-        _status = {
-            "timestamp": _dt_q.datetime.utcnow().isoformat() + "Z",
-            "date_str": reporter.date_str,
-            "file_count": len(files),
-            "changed_files": _push["n_changed"],   # v0.45.2: 实测值（-1=无法判定）
-            "tree_unchanged": _push["tree_unchanged"],
-            "status": "success" if _push["success"] else "failed",
-            "attempts": _push["attempts"],
-            "parent_verified": _push["parent_verified"],  # v0.45.268: fetch 校验过父提交与否
-            "last_error": _push["last_error"] or "",
-        }
-        with open(_ghp_queue, "a", encoding="utf-8") as _qf:
-            _qf.write(_json_q.dumps(_status, ensure_ascii=False) + "\n")
-    except Exception as _qe:
-        _log.debug("gh-pages deploy log write failed: %s", _qe)
+    # v0.45.351：写入收进 `_finish`（早退路径也写），编排器 Step 5 读它判本轮网站更新没有。
+    _ghp_queue = str(_PATHS_ghp.logs_dir / GH_PAGES_DEPLOY_LOG_NAME)
+    # v0.45.312：计数用 len(cache_entries)（实际写进树里的），不是 len(files)（候选数）——
+    # `if not cache_entries` 早退之后走到这里说明至少有一个候选跳过了个别 hash-object
+    # 失败的文件，「N 静态文件」不该把跳过的也算进去。
+    outcome = _finish(dict(_push), len(cache_entries))
 
     if _push["success"]:
-        _log.info(
-            "gh-pages 部署成功 (%d 静态文件, attempt %d, commit %s)",
-            # v0.45.312：用 len(cache_entries)（实际写进树里的），不是
-            # len(files)（候选数）——`if not cache_entries` 早退之后走到这里
-            # 说明至少有一个候选跳过了个别 hash-object 失败的文件，「N 静态
-            # 文件部署成功」不该把跳过的也算进去。
-            len(cache_entries), _push["attempts"], (_push["commit"] or "")[:7],
-        )
-        # ── D4: 部署后 CDN 验证 ──
-        verify_cdn_deployment(reporter, data_root)
+        _commit7 = (_push["commit"] or "")[:7]
+        if _push["action"] == "remote_already_current":
+            # 与「推送成功」分开说：这一支没推任何东西，成功的依据是 fetch 校验过的远端真头。
+            _log.info("gh-pages 无需推送：远端（fetch 已校验）已是本次内容 (%d 静态文件, commit %s)",
+                      len(cache_entries), _commit7)
+        else:
+            _log.info(
+                "gh-pages 部署成功：远端已接受 %s (%d 静态文件, attempt %d%s)",
+                _commit7, len(cache_entries), _push["attempts"],
+                "" if _push["parent_verified"] else "，本轮 fetch 失败但推送被接受",
+            )
+        # ── D4: 部署后 CDN 验证 ──（True / False / None=未执行，只作记录，不改判成败）
+        outcome["cdn_verified"] = verify_cdn_deployment(reporter, data_root)
     else:
+        _probe = _push.get("transport_probe") or {}
         _log.error(
-            "gh-pages push 失败 (所有 %d 次尝试用尽): %s\n"
-            "→ 失败已记录到 %s，下次扫描会重新 fetch 最新远端头再提交（不再是无脑 --force）\n"
-            "→ 如需紧急修复：检查 %s 确认 pending 日，必要时手动重跑扫描",
-            _push["attempts"], _push["last_error"], _ghp_queue, _ghp_queue,
+            "🚨 gh-pages push 失败 (所有 %d 次尝试用尽)，**本轮网站未更新**: %s\n"
+            "→ 失败已记录到 %s（编排器 Step 5 据此判红），下次扫描会重新 fetch 最新远端头再提交\n"
+            "→ 判网站是否最新只认远端：线上 dashboard-data.json 的 _date，或 "
+            "`git fetch origin +refs/heads/gh-pages:refs/remotes/origin/gh-pages`"
+            "（本地 gh-pages 自 v0.45.351 起只在推送成功后前移，不再领先远端）%s",
+            _push["attempts"], _push["last_error"], _ghp_queue,
+            f"\n→ 传输探测：{_probe.get('verdict')}（{_probe.get('meaning')}）" if _probe else "",
         )
+    return outcome
 
 
 #: 日报自动提交的**白名单**（v0.43.4）
@@ -767,6 +934,7 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
         )
         results["git_commit"] = {"success": False, "skipped": "non_production"}
         results["git_push"] = {"success": False, "skipped": "non_production", "remote": None}
+        results["gh_pages"] = {"success": False, "skipped": "non_production"}
         results["deploy_env"] = "none"
         results["uncommitted_report_artifacts"] = left
         results["slack_notification"] = {"skipped": "handled_by_claude_mcp"}
@@ -843,10 +1011,18 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
                      if push_result.get("fetch_error") else "")
 
     # gh-pages 与 main 同步（生产模式 = LLM 或蜂群）
+    # v0.45.351：结局进 results["gh_pages"] ⇒ scan_timing.extra.gh_pages ⇒ status.json ⇒
+    # alert_manager。此前这里丢掉返回值、异常只打 warning：gh-pages 失败在 status.json 与
+    # 告警里完全不存在（09-25 那次还被重试捷径改写成了「成功」）。
     try:
-        deploy_static_to_ghpages(reporter)
+        gh_pages = deploy_static_to_ghpages(reporter)
+        if not isinstance(gh_pages, dict):
+            # 部署函数每条出口都返回 dict；走到这里说明它被换掉了 / 回退了——「没结果」≠「成功」
+            gh_pages = {"success": False, "error": "deploy_static_to_ghpages 未返回结局"}
     except Exception as e:
-        _log.warning("gh-pages 部署失败: %s", e)
+        _log.error("🚨 gh-pages 部署抛异常，本轮网站未更新: %s: %s", type(e).__name__, e)
+        gh_pages = {"success": False, "error": f"部署抛异常：{type(e).__name__}: {e}"}
+    results["gh_pages"] = gh_pages
 
     # 3. Slack 通知（由 Claude Code MCP 工具推送，不用 webhook bot）
     _log.info("Slack 推送由 Claude Code 负责（用户账号）")
@@ -855,3 +1031,26 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
     _log.info("Auto-commit & Notify 完成")
     return results
 
+
+
+def _main(argv: Optional[List[str]] = None) -> int:
+    """`python3 report_deployer.py --gh-pages-step-status --since <epoch>`（v0.45.351）。
+
+    给编排器 Step 5 用：stdout 只打**一行** JSON（`gh_pages_step_status` 的返回值），
+    日志走 stderr（`hive_logger` 的控制台 handler 本就是 stderr）。退出码恒 0——
+    判定结果在 JSON 里；非 0 / 输出不是 JSON 由编排器当「判定不可得」处理。
+    """
+    import argparse
+    import json as _json_m
+    ap = argparse.ArgumentParser(description="report_deployer 辅助命令")
+    ap.add_argument("--gh-pages-step-status", action="store_true", required=True,
+                    help="打印 Step 2 启动之后 gh-pages 部署结局（一行 JSON）")
+    ap.add_argument("--since", type=float, required=True, help="Step 2 启动时刻（epoch 秒）")
+    args = ap.parse_args(argv)
+    print(_json_m.dumps(gh_pages_step_status(args.since), ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys as _sys_rd
+    _sys_rd.exit(_main())

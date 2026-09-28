@@ -21,7 +21,6 @@ import ast
 import re
 from pathlib import Path
 
-import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
 _PLACEHOLDERS = {"unknown", "UNKNOWN", "n/a", "N/A", "0000000", "none", "-", ""}
@@ -428,21 +427,15 @@ class TestActuallyWired:
                   and n.args[0].func.attr == "log_startup"]
         assert handed, "扫描启动处没有把 log_startup() 的结果交给 scan_timing.note_code_version"
 
-    @pytest.mark.integration  # 编排器在仓库外（~/.claude/scripts），干净检出与 CI 上不存在
     def test_orchestrator_merges_timing_into_status(self):
         """本模块挂在 `scan_timing` 上，前提是编排器确实把它并进 `status.json`。
         若那行 jq 被改掉，版本就进不了 status.json，而本文件其余断言照样全绿。
 
-        ⚠️ 条件性写在 **marker** 上，不写进 `skip`：marker 在默认摘要里是
-        `N deselected`（看得见），`skip` 平时和 PASSED 一样是一个点。
-        本条第一版就写成了 `pytest.skip`，docstring 却写着「用 marker 不用 skip」
-        ——原则写对了、做的相反，正是 CLAUDE.md 那节要治的形状。
+        v0.45.353 起读仓库 `scripts/` 里的编排器，撤掉原先的 `@pytest.mark.integration`
+        （当时编排器只在仓库外、CI 上不存在）——现在默认套件与 CI 都跑。
         """
-        orch = Path.home() / ".claude" / "scripts" / "alpha-hive-orchestrator.sh"
-        assert orch.exists(), (
-            f"编排器不在 {orch} —— 本条已标 @pytest.mark.integration，"
-            "只在装了定时任务的机器上跑")
-        text = orch.read_text(encoding="utf-8", errors="replace")
+        from tests._orchestrator import repo_orchestrator_text
+        text = repo_orchestrator_text()
         assert "scan_timing.json" in text and "scan_timing:" in text, (
             "编排器不再把 scan_timing.json 并进 status.json —— "
             "code_version 也就进不了 status.json")

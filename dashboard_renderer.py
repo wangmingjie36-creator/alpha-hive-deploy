@@ -59,6 +59,127 @@ def _report_stem_date(stem: str) -> Optional[str]:
     return None
 
 
+def _iter_prev_reports(report_dir, date_str: str):
+    """新→旧给出「有资格当对比基准」的往日日报 `(日期, 路径)`。
+
+    分数变化与宏观涨跌（v0.45.352）共用这一份过滤，此前是分数变化那段循环独有：
+    不是日期的 stem（iCloud 重名副本，v0.45.192）、非交易日幽灵、**以及今天和今天之后**。
+    「之后」是 v0.45.352 补的：补跑历史某日时，旧循环只跳过 `== date_str`，
+    会拿**更晚**的日报当「昨天」。生产渲染的永远是最新一天，不受影响。
+
+    只管「哪些文件有资格」；读不读得动由调用方自己 try，读坏了就接着往更早找 ——
+    这是原循环的语义，抽出来时刻意保留。
+    """
+    import glob as _glob_p
+    for _pjf in sorted(_glob_p.glob(str(_Path_mod(report_dir) / "alpha-hive-daily-*.json")),
+                       reverse=True):
+        _pdate = _report_stem_date(
+            _Path_mod(_pjf).stem.replace("alpha-hive-daily-", ""))
+        if _pdate is None:
+            continue  # 幽灵不能当「对比基准日」，helper 已 warning
+        if _pdate >= str(date_str):
+            continue  # 今天，或补跑时比目标日更晚的日报
+        # 跳过非交易日幽灵，与历史/趋势序列基准日保持一致（fail-safe）
+        try:
+            from is_trading_day import filename_is_nontrading_day as _fnt_p
+            if _fnt_p(_pdate):
+                continue
+        except Exception:
+            pass
+        yield _pdate, _pjf
+
+
+# ── 宏观条涨跌（v0.45.352，重做 v0.45.78 的意图）──
+# 原则同 v0.45.78：真实观测值做差，取不到就留空，不凑数。但 v0.45.78 的做法
+# （今天的 `vix` 减昨天日报里的 `vix`）在现数据上会造出假数：日报里的 VIX
+# 不带观测日，CBOE 缓存陈旧时相邻两份日报读到同一个收盘（09-24 / 09-25
+# 都是 09-22 的 14.21），相减得一个看似真实的「+0.0」。所以**每个涨跌都必须
+# 能说出它是哪两次观测之差**，说不出就不显示；说得出就写进 title。
+_OBSERVED_VIX_SOURCES = ("cboe",)   # 只有实时 CBOE 路径带 vix_prev_close 与日期
+
+
+def _macro_delta_span(delta: float, ndigits: int, suffix: str, title: str) -> str:
+    """涨跌小字。按**显示出来的**舍入值定颜色：+0.004 显示成 +0.0 就不该标绿。"""
+    d = round(delta, ndigits) + 0.0          # + 0.0 把 -0.0 规整成 0.0，免得显示「-0.0」
+    cls = "up" if d > 0 else ("dn" if d < 0 else "")
+    return (f'<span class="ah-macro-delta {cls}" title="{_html.escape(title)}">'
+            f'{d:+.{ndigits}f}{suffix}</span>')
+
+
+def _prev_trading_day(date_str: str) -> Optional[str]:
+    """`date_str` 之前最近的美股交易日（走 is_trading_day 的假日表，不心算）。
+    解析不了或 10 天内找不到 → None（调用方据此不显示，fail-closed）。"""
+    from datetime import date as _date_p, timedelta as _td_p
+    try:
+        from is_trading_day import is_trading_day as _itd_p
+        d = _date_p.fromisoformat(str(date_str))
+    except Exception:
+        return None
+    for _ in range(10):
+        d -= _td_p(days=1)
+        if _itd_p(d)[0]:
+            return d.isoformat()
+    return None
+
+
+def _macro_deltas(mctx: dict, prev_mctx: Optional[dict], prev_report_date: Optional[str],
+                  report_date: str) -> Dict[str, str]:
+    """→ {"vix": html, "10y": html, "gld": html}，拿不到的一项为空串。
+
+    **新鲜度窗口**（VIX / 10Y）：较新那次观测必须落在 [报告日前一交易日, 报告日]。
+    CBOE 的 CSV 在 17:00 ET 扫描时常还没更新当日，落后一个交易日是常态；
+    再旧就是缓存陈旧（09-25 的日报读到的是 09-22 收盘）—— 那时主数值本身就是旧的
+    （另案），涨跌小字至少不能再给它添一层「这是今天的变化」的假象。
+    判不出窗口（报告日解析失败）也不显示。
+
+    - VIX：`fred_macro` 从同一份 CBOE 历史取的「最新收盘 − 前一收盘」，两个日期都在。
+      **不用 `vix_change_pct`**：它来自 yfinance 那条腿，是扫描**当日**的变动，
+      而 `vix` 是 CBOE 的上一交易日收盘——两者错位一天（09-11 实测 +8.4% vs −11.21%）。
+    - 10Y：今天与上一份日报各自的财政部观测（`field_sources.TNX == "treasury_gov@日期"`）
+      做差。两边都要带财政部日期 —— 兜底常量 4.5 没有日期；且基准观测必须**正好是**
+      较新观测的前一交易日：同一次观测相减是假「0.00」，隔了几天（中间日报缺失，
+      09-22 的上一份是 09-18）则是多日变化冒充日环比。三项的小字统一只表示「较前一交易日」。
+      代价：债市休市而股市开市的日子（哥伦布日 / 退伍军人日）次日不显示，是少显示不是错显示。
+    - 黄金：`gold_change_pct` 本身就是 GLD 的「现价 / 前收盘 − 1」（Finnhub `c`/`pc`
+      或 yfinance 最后两根日 K），不需要跨日报做差。只在有价格时才信它：GLD 没取到时
+      它是默认值 0.0，不是观测。
+    """
+    def _finite(x):
+        return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+    out = {"vix": "", "10y": "", "gld": ""}
+    _floor = _prev_trading_day(report_date)
+
+    def _fresh(d):
+        return _floor is not None and isinstance(d, str) and _floor <= d <= str(report_date)
+
+    v, v0 = mctx.get("vix"), mctx.get("vix_prev_close")
+    d1, d0 = mctx.get("vix_as_of"), mctx.get("vix_prev_as_of")
+    if (mctx.get("vix_source") in _OBSERVED_VIX_SOURCES and _finite(v) and _finite(v0)
+            and _fresh(d1) and isinstance(d0, str) and d0 < d1):
+        out["vix"] = _macro_delta_span(
+            v - v0, 1, "", f"CBOE {d1} 收盘 {v:.2f}，较 {d0} 收盘 {v0:.2f}")
+
+    def _tsy(m):
+        src = str(((m or {}).get("field_sources") or {}).get("TNX") or "")
+        val = (m or {}).get("treasury_10y")
+        if src.startswith("treasury_gov@") and _finite(val):
+            return src.split("@", 1)[1], val
+        return None, None
+
+    t_d1, t1 = _tsy(mctx)
+    t_d0, t0 = _tsy(prev_mctx)
+    if _fresh(t_d1) and t_d0 and t_d0 == _prev_trading_day(t_d1):
+        out["10y"] = _macro_delta_span(
+            t1 - t0, 2, "",
+            f"财政部 {t_d1} 收益率 {t1:.2f}%，较 {t_d0} {t0:.2f}%（百分点；基准取自 {prev_report_date} 日报）")
+
+    gp, gc = mctx.get("gold_price"), mctx.get("gold_change_pct")
+    if _finite(gp) and _finite(gc):
+        out["gld"] = _macro_delta_span(gc, 1, "%", "GLD 较前一交易日收盘")
+    return out
+
+
 # ── 模板文件路径 ──
 _TPL_DIR = _Path_mod(__file__).parent / "templates"
 
@@ -156,7 +277,7 @@ def _build_dim_dq_html(dim_dq: dict) -> str:
                 f'</span>'
             )
             continue
-        color = "#28a745" if pct >= 80 else ("#ffc107" if pct >= 50 else "#dc3545")
+        color = "var(--bull)" if pct >= 80 else ("var(--neut)" if pct >= 50 else "var(--bear)")
         items.append(
             f'<span class="dq-item" title="{label} 数据质量 {pct:.0f}%">'
             f'<span class="dq-lbl">{label}</span>'
@@ -326,7 +447,7 @@ def _signal_conflicts(ticker: str, sd: dict) -> str:
         return ""
     items = "；".join(conflicts[:2])
     return (f'<div class="conflict-warn">'
-            f'<span class="cw-icon">\u26a0\ufe0f</span>'
+            f'<span class="cw-icon">▲</span>'
             f'<span class="cw-text">信号冲突：{_html.escape(items)}</span>'
             f'</div>')
 
@@ -556,9 +677,9 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     dim_dq = sd.get("dim_data_quality", {})
     # 内幕信号：取 ScoutBeeNova discovery 第一个 | 段
     insider_hint = scout_disc.split("|")[0].strip() if scout_disc else ""
-    insider_color = "#28a745" if "买入" in insider_hint else ("#dc3545" if "卖出" in insider_hint else "#666")
+    insider_color = "var(--bull)" if "买入" in insider_hint else ("var(--bear)" if "卖出" in insider_hint else "#666")
     # 期权流向颜色
-    _flow_colors = {"bullish": "#28a745", "bearish": "#dc3545", "neutral": "#666"}
+    _flow_colors = {"bullish": "var(--bull)", "bearish": "var(--bear)", "neutral": "var(--neut)"}
     flow_color = _flow_colors.get(flow_dir, "#666")
     # GEX 格式化（已除以1e6，≥1 显示 M，否则显示 k）
     if gex is None:
@@ -1446,9 +1567,9 @@ def _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail) 
 
     if not candidates:
         return (
-            '<div class="actionable-empty" style="padding:18px;background:rgba(148,163,184,.08);'
-            'border-left:4px solid #94a3b8;border-radius:6px;margin:12px 0">'
-            '<div style="font-weight:700;color:var(--mt);margin-bottom:6px">今日 Actionable</div>'
+            '<div class="actionable-empty" style="padding:18px;background:var(--surface2);'
+            'border-left:2px solid var(--border);border-radius:0 4px 4px 0;margin:12px 0">'
+            '<div style="font-weight:700;color:var(--ts);margin-bottom:6px">今日 Actionable</div>'
             '<div style="color:var(--ts);font-size:.95em">'
             '今日无强信号通过 4 重门控（score 极端 + 蜂群一致 + 近期催化剂 + 不在 risk-off）。'
             '<b>建议观望</b>，避免低置信度交易。'
@@ -1465,7 +1586,7 @@ def _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail) 
         unusual = c["unusual"]
 
         bg = "rgba(34,197,94,.10)" if is_bull else "rgba(239,68,68,.10)"
-        border = "#22c55e" if is_bull else "#ef4444"
+        border = "var(--bull)" if is_bull else "var(--bear)"
         dot_cls = "dot-bull" if is_bull else "dot-bear"
         label = "看多" if is_bull else "看空"
         action = "考虑买入" if is_bull else "考虑做空 / 减仓"
@@ -1486,32 +1607,32 @@ def _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail) 
         std_text = f"蜂群一致度 {(1.5 - c['agent_std']):.1f}/1.5（std={c['agent_std']:.2f}）"
 
         cards.append(f'''
-<div class="actionable-card" style="background:{bg};border:2px solid {border};border-radius:10px;
+<div class="actionable-card" style="background:{bg};border:1px solid {border};border-radius:4px;
     padding:16px;margin:10px 0;display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center">
   <div><span class="{dot_cls}" style="width:14px;height:14px;display:inline-block;border-radius:50%;"></span></div>
   <div>
     <div style="font-size:1.4em;font-weight:800;color:{border};margin-bottom:4px">
       {tk} · {score:.1f}分 · <span style="font-size:.7em;background:{border};color:#fff;padding:2px 8px;border-radius:4px">{label}</span>
     </div>
-    <div style="color:var(--t);font-size:.92em;margin-bottom:3px"><strong>{action}</strong></div>
-    {f'<div style="color:var(--mt);font-size:.86em;margin-top:2px">{cat_text}</div>' if cat_text else ''}
-    {f'<div style="color:var(--mt);font-size:.86em;margin-top:2px">{unusual_text}</div>' if unusual_text else ''}
+    <div style="color:var(--tp);font-size:.92em;margin-bottom:3px"><strong>{action}</strong></div>
+    {f'<div style="color:var(--ts);font-size:.86em;margin-top:2px">{cat_text}</div>' if cat_text else ''}
+    {f'<div style="color:var(--ts);font-size:.86em;margin-top:2px">{unusual_text}</div>' if unusual_text else ''}
     <div style="color:var(--ts);font-size:.78em;margin-top:4px">{std_text}</div>
   </div>
   <a href="#tk-{tk}" style="text-decoration:none;color:{border};font-weight:700;
-    border:1px solid {border};padding:8px 14px;border-radius:6px;font-size:.85em">查看详情 →</a>
+    border:1px solid {border};padding:8px 14px;border-radius:4px;font-size:.85em">查看详情 →</a>
 </div>''')
 
     return (
         '<div class="section actionable-section" id="actionable-top" '
-        'style="margin:18px 0;padding:18px;background:linear-gradient(135deg,rgba(255,193,7,.06),rgba(34,197,94,.04));'
-        'border:1px solid var(--border);border-radius:12px">'
+        'style="margin:18px 0;padding:18px;background:var(--surface2);'
+        'border-left:2px solid var(--acc);border-radius:0 4px 4px 0">'
         '<h2 class="sec-title" style="margin:0 0 12px">今日 Actionable Top {n}</h2>'
         '<div style="font-size:.82em;color:var(--ts);margin-bottom:6px">'
         '通过 4 重门控（score 极端 + 蜂群一致 + 近期催化剂 + 非 risk-off）的高置信信号'
         '</div>'
         '{cards}'
-        '<div style="font-size:.78em;color:var(--ts);margin-top:8px;padding:8px;background:rgba(0,0,0,.04);border-radius:4px">'
+        '<div style="font-size:.78em;color:var(--ts);margin-top:8px;padding:8px;background:var(--surface);border-radius:4px">'
         '注：本板块仅展示通过严格筛选的信号；其余标的（含中性 / 高分歧）请见下方"今日 Top 6 机会"完整列表'
         '</div></div>'
     ).format(n=len(candidates), cards=''.join(cards))
@@ -1561,7 +1682,7 @@ def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             for _dlbl6x, _dkey6 in _dl6:
                 _dv6  = float(_dims6.get(_dkey6, 5.0))
                 _dpct6 = max(5, int(_dv6 * 10))
-                _dcol6 = "#22c55e" if _dv6 >= 7 else ("#f59e0b" if _dv6 >= 5.5 else "#ef4444")
+                _dcol6 = "var(--bull)" if _dv6 >= 7 else ("var(--neut)" if _dv6 >= 5.5 else "var(--bear)")
                 _tip6 = _DIM_TOOLTIPS.get(_dlbl6x, "")
                 _db6 += (f'<div class="dim-b-item" title="{_html.escape(_tip6)}">'
                          f'<div class="dim-val" style="color:{_dcol6}">{_dv6:.0f}</div>'
@@ -1603,7 +1724,7 @@ def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                     _sy = round(max(0, min(_svgh, _svgh - (_sv6 - _smin) / _srange * _svgh)), 1)
                     _pts.append(f"{_sx},{_sy}")
                 _polyline = " ".join(_pts)
-                _scol = "#22c55e" if _hist_scores6[-1] >= 7 else ("#f59e0b" if _hist_scores6[-1] >= 5.5 else "#ef4444")
+                _scol = "var(--bull)" if _hist_scores6[-1] >= 7 else ("var(--neut)" if _hist_scores6[-1] >= 5.5 else "var(--bear)")
                 _area_pts = f"0,{_svgh} {_polyline} {_svgw},{_svgh}"
                 _last_x, _last_y = _pts[-1].split(",")
                 _spark6 = (f'<div class="spark-wrap">'
@@ -1629,20 +1750,20 @@ def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                 # 边缘情况：只有一种票型时用纯色，避免零宽 conic-gradient 段
                 _active_segs = sum(1 for x in (_bp6, _ep6, _np6) if x > 0)
                 if _active_segs <= 1:
-                    _solo_col = "#22c55e" if _bp6 > 0 else ("#ef4444" if _ep6 > 0 else "#f59e0b")
+                    _solo_col = "var(--bull)" if _bp6 > 0 else ("var(--bear)" if _ep6 > 0 else "var(--neut)")
                     _cg6 = _solo_col
                 else:
                     # 构建仅包含非零段的 conic-gradient
                     _stops = []
                     _cur = 0
                     if _bp6 > 0:
-                        _stops.append(f"#22c55e {_cur}% {_cur + _bp6}%")
+                        _stops.append(f"var(--bull) {_cur}% {_cur + _bp6}%")
                         _cur += _bp6
                     if _ep6 > 0:
-                        _stops.append(f"#ef4444 {_cur}% {_cur + _ep6}%")
+                        _stops.append(f"var(--bear) {_cur}% {_cur + _ep6}%")
                         _cur += _ep6
                     if _np6 > 0:
-                        _stops.append(f"#f59e0b {_cur}% 100%")
+                        _stops.append(f"var(--neut) {_cur}% 100%")
                     _cg6 = f"conic-gradient({', '.join(_stops)})"
                 _donut6 = (f'<div class="consensus-wrap">'
                            f'<div class="consensus-donut" style="background:{_cg6}" '
@@ -1785,7 +1906,15 @@ def _build_table_rows_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
 def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                               report_dir, date_str, score_deltas) -> str:
     """Build Deep Analysis cards HTML with radar canvas."""
-    _dir_hdr3 = {"bullish":"#1a7a3a","bearish":"#8b1a1a","neutral":"#7a5c1a"}
+    # v0.45.352（重做 v0.45.77）：卡头不再是「整栏方向色 + 白字」通栏——暗色主题下
+    # 那种结构接令牌会变成白字压亮色，只能拆结构。改为中性底 + `.sdir-*` 徽标，
+    # 并补公司名/板块（查不到就不渲染该行，不编）。
+    try:
+        from config import WATCHLIST as _WL_D, WATCHLIST_EXTENDED as _WLX_D
+        _TICKER_INFO_D = {**_WLX_D, **_WL_D}
+    except ImportError:  # pragma: no cover - 名称/板块缺失不阻断卡片渲染
+        _TICKER_INFO_D = {}
+    _dcls_map3 = {"bullish": "sdir-bull", "bearish": "sdir-bear", "neutral": "sdir-neut"}
     new_company_html = ""
     for _tkrd in all_tickers_sorted:
         _sdd = swarm_detail.get(_tkrd, {})
@@ -1796,7 +1925,11 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
         elif "空" in _drd: _drd = "bearish"
         elif _drd not in ("bullish","bearish","neutral"): _drd = "neutral"
         _dlbld = {"bullish":"看多 ↑","bearish":"看空 ↓","neutral":"中性 →"}[_drd]
-        _hcd   = _dir_hdr3.get(_drd, "#1a3a7a")
+        _dclsd = _dcls_map3[_drd]
+        _infod = _TICKER_INFO_D.get(_tkrd, {})
+        _cnamed = _html.escape(_infod.get("name", ""))
+        _csectord = _html.escape(_infod.get("sector", ""))
+        _subtitled = " · ".join(p for p in (_cnamed, _csectord) if p)
         _detd  = _detail(_tkrd, swarm_detail)
         # F10: 预计算价格 HTML（避免嵌套 f-string）
         _pd = _detd["price"]
@@ -1877,9 +2010,9 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             _full_pc_str = f"{_full_pc:.2f}" if _full_pc is not None else "-"
             # full P/C 颜色：>1.2 偏空（红）/ <0.6 偏多（绿）/ 中间黄
             if _full_pc is None: _pc_color = "#94a3b8"
-            elif _full_pc > 1.2: _pc_color = "#dc3545"
-            elif _full_pc < 0.6: _pc_color = "#28a745"
-            else: _pc_color = "#d97706"
+            elif _full_pc > 1.2: _pc_color = "var(--bear)"
+            elif _full_pc < 0.6: _pc_color = "var(--bull)"
+            else: _pc_color = "var(--neut)"
             _pc_label = ("偏空" if _full_pc and _full_pc > 1.2 else
                          ("偏多" if _full_pc and _full_pc < 0.6 else "均衡"))
             # v0.26.1: 近端 Max Pain（真正的磁吸目标价）为主显示
@@ -1894,7 +2027,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                 _mp_main_str = f"${_near_mp:.0f}"
                 if _near_mp_pct is not None:
                     _mp_arrow = "↑" if _near_mp_pct > 1 else ("↓" if _near_mp_pct < -1 else "→")
-                    _mp_color = "#28a745" if _near_mp_pct > 1 else ("#dc3545" if _near_mp_pct < -1 else "#94a3b8")
+                    _mp_color = "var(--bull)" if _near_mp_pct > 1 else ("var(--bear)" if _near_mp_pct < -1 else "var(--neut)")
                     _mp_main_str += f' <span style="color:{_mp_color};font-size:.78em">{_mp_arrow}{_near_mp_pct:+.1f}%</span>'
                 # 到期日数量提示
                 # ⚠️ 旧文案是 `近 {len} 周到期` —— 数的是**到期日个数**却写成**周数**
@@ -1912,7 +2045,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                     _mp_main_str = f"${_mp:.0f}"
                     if _mp_pct is not None:
                         _mp_arrow = "↑" if _mp_pct > 1 else ("↓" if _mp_pct < -1 else "→")
-                        _mp_color = "#28a745" if _mp_pct > 1 else ("#dc3545" if _mp_pct < -1 else "#94a3b8")
+                        _mp_color = "var(--bull)" if _mp_pct > 1 else ("var(--bear)" if _mp_pct < -1 else "var(--neut)")
                         _mp_main_str += f' <span style="color:{_mp_color};font-size:.78em">{_mp_arrow}{_mp_pct:+.1f}%</span>'
                     _exp_label = "全链聚合"
                 else:
@@ -1961,59 +2094,64 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                     pct_str = f"{pct:+.1f}%" if isinstance(pct, (int, float)) else "—"
                     oi_k = w["oi"] / 1000.0
                     oi_str = f"{oi_k:.0f}k" if oi_k >= 1 else f"{w['oi']}"
-                    exp_tag = f' <span style="background:#374151;color:#cbd5e1;padding:1px 4px;border-radius:3px;font-size:.65em">{w["dom_exp"]}</span>' if w.get("dom_exp") else ""
+                    exp_tag = f' <span style="background:transparent;border:0.5px solid var(--border);color:var(--ts);padding:1px 4px;border-radius:4px;font-size:.65em">{w["dom_exp"]}</span>' if w.get("dom_exp") else ""
                     rows.append(
                         f'<div style="display:flex;justify-content:space-between;font-size:.78em;padding:2px 0;'
                         f'border-bottom:1px dashed rgba(148,163,184,.2)">'
                         f'<span style="color:{side_color};font-weight:600">${w["strike"]:.0f}{exp_tag}</span>'
                         f'<span style="color:var(--ts);font-size:.85em">{pct_str}</span>'
-                        f'<span style="color:var(--t);font-weight:500">{oi_str}</span>'
+                        f'<span style="color:var(--tp);font-weight:500">{oi_str}</span>'
                         f'</div>'
                     )
                 return ''.join(rows)
 
             _full_oi_html = f'''
-            <div class="full-oi-card" style="background:rgba(99,102,241,.06);border:1px solid rgba(99,102,241,.25);
-                border-radius:8px;padding:10px 12px;margin:10px 0">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:.85em;font-weight:700;color:var(--mt)">
+            <div class="full-oi-card" style="background:var(--surface2);border:0.5px solid var(--border);
+                border-radius:4px;padding:10px 12px;margin:10px 0">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:.85em;font-weight:700;color:var(--ts)">
                 <span>全链 OI 视图</span>
                 <span style="font-size:.7em;color:var(--ts);font-weight:400">影响价格判断核心</span>
               </div>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-                <div style="background:rgba(0,0,0,.18);border-radius:6px;padding:6px 8px">
+                <div style="background:var(--surface);border-radius:4px;padding:6px 8px">
                   <div style="font-size:.7em;color:var(--ts)">全链 P/C</div>
                   <div style="font-size:1.15em;font-weight:700;color:{_pc_color}">{_full_pc_str}
                     <span style="font-size:.55em;font-weight:400;color:var(--ts)">({_pc_label})</span>
                   </div>
                   <div style="font-size:.62em;color:var(--ts);margin-top:1px">近端 {_near_pc}</div>
                 </div>
-                <div style="background:rgba(0,0,0,.18);border-radius:6px;padding:6px 8px">
+                <div style="background:var(--surface);border-radius:4px;padding:6px 8px">
                   <div style="font-size:.7em;color:var(--ts)">近端磁吸目标价</div>
-                  <div style="font-size:1.15em;font-weight:700;color:var(--t)">{_mp_str}</div>
+                  <div style="font-size:1.15em;font-weight:700;color:var(--tp)">{_mp_str}</div>
                   {_mp_compare}
                 </div>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center;margin:6px 0 3px">
-                <div style="font-size:.7em;color:var(--ts)">OI 墙位 · <b style="color:var(--mt)">{_wall_label}</b></div>
+                <div style="font-size:.7em;color:var(--ts)">OI 墙位 · <b style="color:var(--ts)">{_wall_label}</b></div>
                 <div style="font-size:.62em;color:var(--ts)">数据={int(_detd.get("near_call_total") or 0):,}C / {int(_detd.get("near_put_total") or 0):,}P {f"(近端P/C {_detd.get('near_pc'):.2f})" if _detd.get('near_pc') else ""}</div>
               </div>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
                 <div>
-                  <div style="font-size:.72em;color:#dc3545;font-weight:600;margin-bottom:3px">阻力墙 (Top Call OI)</div>
-                  {_wall_rows(_calls, "#dc3545", "C")}
+                  <div style="font-size:.72em;color:var(--bear);font-weight:600;margin-bottom:3px">阻力墙 (Top Call OI)</div>
+                  {_wall_rows(_calls, "var(--bear)", "C")}
                 </div>
                 <div>
-                  <div style="font-size:.72em;color:#28a745;font-weight:600;margin-bottom:3px">支撑墙 (Top Put OI)</div>
-                  {_wall_rows(_puts, "#28a745", "P")}
+                  <div style="font-size:.72em;color:var(--bull);font-weight:600;margin-bottom:3px">支撑墙 (Top Put OI)</div>
+                  {_wall_rows(_puts, "var(--bull)", "P")}
                 </div>
               </div>
             </div>'''
         new_company_html += f"""
         <div class="company-card" data-dir="{_drd}" data-score="{_scd:.1f}" id="deep-{_html.escape(_tkrd)}">
-          <div class="cc-header" style="background:{_hcd};">
-            <span class="cc-ticker">{_html.escape(_tkrd)}</span>
-            <span class="cc-dir">{_dlbld}</span> {_risk_d}
-            <span class="cc-score">{_scd:.1f}/10 {_delta_d}</span>
+          <div class="cc-header">
+            <div class="cc-id">
+              <span class="cc-ticker">{_html.escape(_tkrd)}</span>
+              {f'<span class="cc-name">{_subtitled}</span>' if _subtitled else ''}
+            </div>
+            <div class="cc-meta">
+              <div class="cc-dir-row"><span class="sdir {_dclsd}">{_dlbld}</span>{_risk_d}</div>
+              <span class="cc-score">{_scd:.1f}/10 {_delta_d}</span>
+            </div>
           </div>
           <div class="cc-body">
             {f'<div class="sinsight" style="margin-bottom:10px">{_ins_d}</div>' if _ins_d else ''}
@@ -2370,6 +2508,8 @@ def render_dashboard_html(report: Dict, date_str: str,
     _macro_gld = "—"
     _macro_gld_cls = ""
     _macro_sector_html = ""
+    _macro_delta = {"vix": "", "10y": "", "gld": ""}
+    _mctx_ok = None   # 非兜底时的宏观 dict，供下面「涨跌」段用
     try:
         from fred_macro import get_macro_context as _get_macro_ctx
         _mctx = _get_macro_ctx()
@@ -2399,15 +2539,19 @@ def render_dashboard_html(report: Dict, date_str: str,
             _yc_cls_map = {"normal": "yc-ok", "flat": "yc-warn", "inverted": "yc-bad"}
             _macro_yc = _yc_map.get(_yc, "—")
             _macro_yc_cls = _yc_cls_map.get(_yc, "")
-            # 黄金指标
+            # 黄金指标。v0.45.352（重做 v0.45.78）：主值固定显示价格，涨跌幅挪到独立的
+            # 涨跌小字里。旧逻辑靠 gold_trend 二选一——走势明显时只显示涨跌幅、看不到价格，
+            # 平稳时只显示价格、看不到涨跌。价格缺失时仍按旧规则兜底显示涨跌幅（门槛
+            # 保留：GLD 没取到时 gold_change_pct 是默认 0.0，trend 门槛恰好挡住它）。
             _gld_trend = _mctx.get("gold_trend", "stable")
             _gld_chg = _mctx.get("gold_change_pct")
             _gld_price = _mctx.get("gold_price")
-            if _gld_trend in ("surging", "rising", "falling") and _finite(_gld_chg):
+            if _finite(_gld_price):
+                _macro_gld = f"${_gld_price:.0f}"
+            elif _gld_trend in ("surging", "rising", "falling") and _finite(_gld_chg):
                 _macro_gld = f"{_gld_chg:+.1f}%"
                 _macro_gld_cls = "gld-up" if _gld_chg > 0 else "gld-dn"
-            elif _finite(_gld_price):
-                _macro_gld = f"${_gld_price:.0f}"
+            _mctx_ok = _mctx
             # 板块轮动 HTML
             _sr = _mctx.get("sector_rotation", {})
             if _sr.get("hot") or _sr.get("cold"):
@@ -2435,29 +2579,30 @@ def render_dashboard_html(report: Dict, date_str: str,
         logging.getLogger("alpha_hive.dashboard").warning(
             "宏观指标加载失败，本次 dashboard 宏观区块将全部显示「—」: %s", e)
 
+    # ── 宏观条涨跌（v0.45.352）：只对比紧邻的上一份日报，与下面分数变化同一个基准 ──
+    if _mctx_ok is not None:
+        try:
+            _prev_mctx, _prev_mdate = None, None
+            for _pdate_m, _pjf_m in _iter_prev_reports(report_dir, date_str):
+                try:
+                    with open(_pjf_m, encoding="utf-8") as _pfp_m:
+                        _prev_mctx = _json.load(_pfp_m).get("macro_context") or {}
+                    _prev_mdate = _pdate_m
+                    break  # 只看最近一天；它没有可比数据就不显示，不往更早翻
+                except Exception as _e_pm:
+                    _log.debug("往日宏观加载失败 (%s): %s", _pjf_m, _e_pm)
+                    continue
+            _macro_delta = _macro_deltas(_mctx_ok, _prev_mctx, _prev_mdate, date_str)
+        except Exception as _e_md:
+            # 涨跌是附加信息，缺了只少一行小字；但缺得要有痕迹。
+            logging.getLogger("alpha_hive.dashboard").warning(
+                "宏观涨跌计算失败，本次宏观条不显示涨跌: %s", _e_md)
+
     # ── 升级 E: 快速预计算 Score Delta（对比昨天） ──
     _score_deltas = {}  # {ticker: {"delta": float, "html": str}}
     try:
-        import glob as _glob_e
-        _prev_jsons = sorted(
-            _glob_e.glob(str(report_dir / "alpha-hive-daily-*.json")),
-            reverse=True
-        )
         _prev_scores = {}
-        for _pjf in _prev_jsons:
-            _pdate = _report_stem_date(
-                _Path(_pjf).stem.replace("alpha-hive-daily-", ""))
-            if _pdate is None:
-                continue  # 同站点 A：幽灵不能当「对比基准日」
-            if _pdate == date_str:
-                continue  # 跳过今天
-            # 跳过非交易日幽灵，与历史/趋势序列基准日保持一致（fail-safe）
-            try:
-                from is_trading_day import filename_is_nontrading_day as _fnt_e
-                if _fnt_e(_pdate):
-                    continue
-            except Exception:
-                pass
+        for _pdate, _pjf in _iter_prev_reports(report_dir, date_str):
             try:
                 with open(_pjf, encoding="utf-8") as _pfp:
                     _prpt = _json.load(_pfp)
@@ -2549,7 +2694,7 @@ def render_dashboard_html(report: Dict, date_str: str,
         _tacc  = _tv.get("accuracy", 0)
         _tpill = "pill-green" if _tacc >= 0.6 else ("pill-red" if _tacc < 0.4 else "pill-gray")
         _tret  = _tv.get("avg_return", 0)
-        _tret_color = "#16a34a" if _tret > 0 else "#dc2626"
+        _tret_color = "var(--bull)" if _tret > 0 else "var(--bear)"
         _acc_ticker_rows += (
             f'<tr><td><strong>{_tk}</strong></td>'
             f'<td>{_tv.get("total", 0)}</td>'
@@ -2610,9 +2755,9 @@ def render_dashboard_html(report: Dict, date_str: str,
 
     # 方向分组 KPI 卡片
     _dir_kpi_cfg = [
-        ("bullish", "看多", "#22c55e", "rgba(34,197,94,.08)"),
-        ("bearish", "看空", "#ef4444", "rgba(239,68,68,.08)"),
-        ("neutral", "中性", "#94a3b8", "rgba(148,163,184,.08)"),
+        ("bullish", "看多", "var(--bull)", "rgba(34,197,94,.08)"),
+        ("bearish", "看空", "var(--bear)", "rgba(239,68,68,.08)"),
+        ("neutral", "中性", "var(--neut)", "rgba(148,163,184,.08)"),
     ]
     _acc_dir_kpi_html = ""
     for _dk, _dlabel, _dcol, _dbg in _dir_kpi_cfg:
@@ -2621,7 +2766,7 @@ def render_dashboard_html(report: Dict, date_str: str,
         _dtot = _di.get("total", 0)
         _dcor = _di.get("correct", 0)
         _dret = _di.get("avg_return", 0)
-        _dret_col = "#22c55e" if _dret >= 0 else "#ef4444"
+        _dret_col = "var(--bull)" if _dret >= 0 else "var(--bear)"
         _acc_dir_kpi_html += (
             f'<div class="acc-dir-kpi" style="border-color:{_dcol};background:{_dbg}">'
             f'<div class="dkpi-label" style="color:{_dcol}">{_dlabel}</div>'
@@ -2703,7 +2848,7 @@ def render_dashboard_html(report: Dict, date_str: str,
         <strong>方法学</strong>：{_methodology_html}
         -5% 硬止损 / +10% 止盈（盘中触发，跳空时 gap-aware），扣滑点 + 佣金 + 借券费（空头）。
         <span style="color:#e99;">下方资金曲线就是这次回测的 NAV 路径，终点 = 上面的组合终值。</span>
-        <span style="color:var(--mt);">Sharpe 已年化（×√36，T+7 周期）。</span>
+        <span style="color:var(--ts);">Sharpe 已年化（×√36，T+7 周期）。</span>
       </div>
       <div id="tradingStatsCards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px"></div>
     </div>
@@ -3027,6 +3172,9 @@ def render_dashboard_html(report: Dict, date_str: str,
         macro_yc_cls=_macro_yc_cls,
         macro_gld=_macro_gld,
         macro_gld_cls=_macro_gld_cls,
+        macro_vix_delta=_macro_delta["vix"],
+        macro_10y_delta=_macro_delta["10y"],
+        macro_gld_delta=_macro_delta["gld"],
         macro_sector_html=_macro_sector_html,
         deploy_ts=_data_obj.get("_deploy_ts", 0),
         changes_html=_changes_html,

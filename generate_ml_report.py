@@ -3113,7 +3113,11 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
                 _push["attempts"],
             )
         else:
-            _log.warning("gh-pages push 失败: %s", _push["last_error"])
+            # v0.45.351：warning → error + 🚨（纯 warning 在本仓 Slack 精简规则下不触达任何人）。
+            # 本路径（Step 3 补跑）不写 `.gh_pages_deploy_log.jsonl`：编排器 Step 5 判的是
+            # Step 2 那次主部署；这里失败只影响补跑的那几只标的的 ML 页。
+            _log.error("🚨 gh-pages 同步 push 失败（%d 次尝试），补跑的 ML 报告未上线: %s",
+                       _push["attempts"], _push["last_error"])
     except Exception as e:
         _log.warning("gh-pages 同步异常: %s", e)
     finally:
