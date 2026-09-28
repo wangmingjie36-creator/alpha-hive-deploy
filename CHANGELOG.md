@@ -7,7 +7,50 @@
 
 ## [0.45.364] — 2026-09-28 — 占位（进行中：资金曲线 SPY 基准灰线换令牌 --ts）
 
-## [0.45.363] — 2026-09-28 — 占位（进行中：twelve_data 类股代号映射 BRK-B→BRK.B，修 Twelve Data 兜底对 BRK-B 恒 404 + 失败可观测）
+## [0.45.363] — 2026-09-28 — Fixed：Twelve Data 对 BRK-B 恒 404（请求原样发仓内连字符写法）→ 类份额代号映射 `BRK-B`→`BRK.B`；取数失败逐标的可观测（进 status.json）
+
+### 根因
+
+`twelve_data._fetch_rows` 把 ticker 原样填进 `symbol`。Twelve Data 的类份额写法是点：2026-09-28 实测
+`BRK-B` → HTTP 404，`BRK.B` 正常（`end_date=2026-08-20` 返回 08-12 收 510.0、08-14 收 504.03）。
+自 v0.45.61 起，所有 Twelve Data 兜底对 BRK-B 都会失败：`close_correction._twelve_data_closes`、日报 rv_30d / iv_rank
+兜底、`earnings_history`（直调 `_fetch_rows`），以及 `entry_price_backfill`（v0.45.360）的第二源。
+CBOE 在 v0.45.8 犯过同一个病（`_cboe_symbol`），当时写进 memory 的是「接新源先问符号惯例」——没有牙。
+WATCHLIST 30 只里只有 BRK-B 带非字母数字。
+
+### 「这个失败，下游怎么知道？」
+
+之前不知道。失败只落一行 WARNING，调用方拿到 None 就当「源不可用」退下一条腿，
+**哪只票、为什么、是不是每天如此**都没有任何计数。现在：
+
+- `bars_cache_stats()` 新增 `failures`（次数）与 `failed`（仓内 ticker → 最近一次原因：
+  `http404` / `api_error:<code>` / `no_values` / `non_json` / `limiter_timeout` / `network:<异常名>`）。
+  scan_timing 本来就把整份 dict 并进 `status.json`，现在摘要行也会点名，例如 `TwelveData 请求N/命中M/失败1(BRK-B:http404)`。
+- HTTP 404 升为 ERROR，并点名实际发出去的 symbol：它不是瞬时故障，不会自愈。
+- 未配置 key **不**计为失败：那是没开这条腿，不是腿坏了。
+
+### Fixed / Changed
+
+- `twelve_data.py`：新增 `api_symbol()`（只改 `^[A-Z]{1,5}-[A-Z]$` 这一种形状；Twelve Data 的加密货币写作 `BTC/USD`，
+  所以不能像 CBOE 那样一刀切 `-`→`.`）和逆映射 `repo_ticker()`。映射放在 `_fetch_rows`，即唯一拼请求的地方。
+  缓存键 `_bars_key` 经 `repo_ticker` 归一，传 `BRK.B` 与传 `BRK-B` 同键，不会拆成两份、也不会取两次。
+  日志、失败记录、返回行一律用仓内写法。`bars_cache_stats()` 改在锁内拷贝。
+- `scan_timing.summary_line`：Twelve Data 有失败时追加 `失败N(ticker:原因,…)`。
+
+### Tests
+
+- 新增 `tests/test_twelve_data_symbol_mapping.py`（20 条，全离线）：假 HTTP 层照真实接口应答，
+  连字符写法回 404、点写法回数据；另有一条遍历 `config.WATCHLIST`，断言发出去的 symbol 都不含连字符。
+  **真跑变异**（`PYTHONDONTWRITEBYTECODE=1`、清 `__pycache__`、`--maxfail`，并逐个 grep 确认变异已落盘）：
+  ① 恢复 `"symbol": ticker` → 6 条红；② 缓存键退回原始 ticker → 2 条红；③ `_record_failure` 置空 → 3 条红。
+- `tests/test_twelve_data.py`：`clear_bars_cache` 后 stats 的形状断言加上 `failures` / `failed`。
+- 全套：6451 passed，1 failed（`test_economic_calendar::TestCoverageHorizon`，硬编码日历到期的设计性告警，与本改动无关）。
+
+### 未做
+
+- 生产 checkout 未重跑，BRK-B 的 Twelve Data 兜底未在真实扫描里复核（待 09-29 扫描后看 `status.json` 的 `scan_timing.counters.twelve_data.failed`）。
+- 已落盘的 BRK-B rv_30d / iv_rank / close_correction 历史值没有补算。
+
 
 ## [0.45.362] — 2026-09-28 — 占位（进行中：GEX 第 2 层——每只标的一份全链 GEX 状态（带可得性标记），展示与政体路由共用；不改分数）
 

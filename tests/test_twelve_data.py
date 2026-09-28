@@ -649,7 +649,7 @@ class TestBarsCacheIsolation:
         td.clear_bars_cache()
         assert td.bars_cache_stats() == {"hits": 0, "misses": 0, "refetch_larger": 0,
                                          "fetches": 0, "inflight_waits": 0, "warmed": 0,
-                                         "entries": 0}
+                                         "failures": 0, "entries": 0, "failed": {}}
         td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
         assert http.n == 2
 
