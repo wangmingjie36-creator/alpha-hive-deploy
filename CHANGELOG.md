@@ -99,7 +99,53 @@ WATCHLIST 30 只里只有 BRK-B 带非字母数字。
 - 全套：**6430 passed、2 xfailed**，84 deselected（integration 82 + 同 v0.45.352 的两条环境态测试）。`node --check` 通过。
 - 网站要等下一次日报扫描重新部署 `gh-pages` 后才变。
 
-## [0.45.360] — 2026-09-28 — 占位（进行中：09-24/09-25 predictions 入场价 30/30 为 0——范围核实 + 可观测 + 官方收盘回填路径（dry-run））
+## [0.45.360] — 2026-09-28 — Added：账本入场价观测点（Step 12 对 `price_at_predict` 不可用即红）+ `entry_price_backfill.py`（两源印证的官方收盘回填，默认 dry-run，**未对生产库落笔**）。Fixed：`--check-prices` 静默跳过入场价为 0 的行
+
+### 发现
+
+生产 `predictions`（快照 via `sqlite3.backup()`）入场价不可用（NULL / ≤0）的行：**62 行、4 天**——
+09-24 30/30、09-25 30/30、08-12 BRK-B、08-14 BRK-B（后两行 v0.45.50 记过，从未补）。其余 109 天为 0。
+全仓统计一律 `price_at_predict > 0` ⇒ 这些行对全部收益 / IC 计算不可见；`close_correction.load_rows` 只选 `> 0` ⇒ 永远补不回来；
+`checked_t*` 恒 0，`run_backtest` 每天把它们计进 `skipped` 且不出声。
+
+**「这个失败，下游怎么知道？」**——当时的答案：
+- 09-24/25：Step 2 RC=1、status=partial、Step 12 **字段**覆盖率 0/30——都在说「这天数据差」，没有一处说「账本少了 30 个样本、不会自愈」；
+- `Backtester.last_save_stats["unusable_no_price"]`（v0.45.50）数了这件事，**全仓零读者**；那 30 条 WARNING 只进日志；
+- 08-12 / 08-14（字段健康、只丢 BRK-B 入场价）：**什么都不红**；
+- `scan_coverage_gate.check_prices`（需 `--check-prices`，编排器不传）对 `not px` 直接 `continue`——全 0 的日子会报「无可比对样本」而非「全坏」。
+
+### 改动
+
+- Added `scan_coverage_gate.check_entry_prices` / `merge_entry_prices`：查**终点**（账本）不查中间量——09-17 Scout 价 0/30 而 yfinance 兜底补上、账本 30/30 可用，看中间量会误报。
+  任何一行不可用（或扫描有、账本无）即把 `entry_price` 作为一个 degraded 行并进 `fields`/`degraded_fields`/`healthy` ⇒ 退出码 1；
+  **不改编排器**，Step 12 的 WARN 摘要与 status.json `step12_scan_coverage` 自动带上 `entry_price 0/30`。
+  其他日期未补的行作为 `backlog` 报一行 ⚠️，**不进退出码**（用户可能决定不补，恒红会把人养成不看）。
+  库不存在 ⇒ 无法判定、不改结论，且先判存在（sqlite 打开不存在的路径会建空库）。新增 `--db`。
+  历史对照（本地 41 份 `.swarm_results`）：自 08-12 起「扫描有账本无」恒 0，零价行只在上述 4 天 ⇒ 该闸只会在这 4 天变红。
+- Fixed `check_prices`：不可用入场价计入 `bad`（`deviation_pct=-100`），不再静默跳过。
+- Added `entry_price_backfill.py`：三个独立家族——yfinance 日线（交易日必须命中当天，**不带** close_correction 的 Twelve Data 兜底，防同一个价两家族各计一票）/
+  CBOE 云端快照（当日 `close_verdict==official` 的 `price_at_fetch` 与次日快照 `prev_close_session` 自述归属的 `prev_day_close`，两者都有时须自洽）/
+  Twelve Data（只对无快照的行）。≥2 家族两两偏差 ≤0.2% 才写；单源 / 分歧 / 无源不写。
+  写入 `price_at_predict`、`price_at_predict_raw=COALESCE(raw, 原值, 0.0)`、`close_corrected_at`、`close_correction_source="entry_backfill:<家族>"`；
+  UPDATE 带「仍不可用」条件（幂等、不覆盖他处写好的价）；`--apply` 前 `backup()`；**不动派生列**，下一次 `run_backtest` 自然回测。
+  CBOE 两个子来源分别取、不经 `load_official_close`（它只返回一个，且 v0.45.359 在调其取价顺序）。
+- Added `tests/test_entry_price_ledger.py`（26 条，全离线）。
+
+### Dry-run（生产库快照，未落笔）
+
+60 行 `backfill`（09-24 29 只 yf+cboe 快照双子来源、09-25 29 只 yf+当日快照；BILI 两天无快照 → yf+Twelve Data；两两最大偏差 0.007%），
+2 行 `single_source`（BRK-B 08-12 510.00 / 08-14 504.03：无快照；Twelve Data 对 `BRK-B` 返回 404——它要 `BRK.B`，
+手动用 `BRK.B` 取回 510.0 / 504.03 与 yf 一致；符号映射另开任务）。
+
+⚠️ **补不补是用户的决定，且不只是价格问题**：09-24/25 的**分数**是降级输入算的（字段 0/30、全部数据源 FALLBACK、`catalyst` 维缺失、0 只看多、分数挤在 4.5–5.7）。
+入场价为 0 恰好把它们挡在统计外；补上后它们会进 IC 重跑世代（09-18 起）与共振加成前瞻检验（09-15 起，预注册）。
+
+### 验证
+
+- 变异 12 处各自变红（`PYTHONDONTWRITEBYTECODE=1`、清 `__pycache__`、`--maxfail=1000` 真跑）：merge 空转 / main 不调 merge / `check_prices` 恢复 `not px` 跳过 /
+  yf 带 Twelve Data 兜底 / UPDATE 去「仍不可用」条件 / cboe 子来源不自洽仍计票 / Twelve Data 对全部行调 / 次日快照归属不核 / 陈旧当日文件照收 /
+  raw 不留痕 / 单源照写 / backlog 进退出码。
+- 真实数据：09-22 健康 + backlog 62 行；09-24、08-12 均 `entry_price` degraded。dry-run 前后快照 md5 不变。
 
 ## [0.45.359] — 2026-09-28 — Changed：`cloud_snapshot_loader.load_official_close` 取价顺序对调——某日官方收盘**先取次日快照自带归属的 `prev_day_close`**，当日快照的 60s 代理判据降为兜底；两者不一致时打 WARNING
 

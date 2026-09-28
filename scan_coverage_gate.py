@@ -139,10 +139,121 @@ def check(date: str, results_path: Optional[Path] = None) -> Dict[str, Any]:
     srcs = {r["source"].split()[0] for r in degraded}
     return {
         "date": date, "determinable": True, "tickers": n,
+        "ticker_names": sorted(results),    # v0.45.360：账本核对要知道「该有哪些」
         "healthy": not degraded, "fields": rows,
         "degraded_fields": [r["field"] for r in degraded],
         "likely_network_layer": len(srcs) > 1,
     }
+
+
+# ── 账本入场价可用性（v0.45.360，离线，默认跑）──────────────────────
+# 2026-09-24 / 09-25 两天 predictions 各 30/30 行 price_at_predict=0：
+# 09-24 CBOE 源站整源停更 + yfinance 限流冷却，09-25 本机 DNS 解析失败。
+# 0 是本仓「没有这个价」的标记——全仓统计一律 `price_at_predict > 0`，
+# 所以这 60 行对**全部**收益 / IC 计算不可见，且 close_correction 也只选
+# `> 0` 的行，永远补不回来。
+#
+# 当时谁红了？Step 2 RC=1、Step 12 的**字段**覆盖率 0/30 —— 都是「这一天
+# 数据差」，没有一处说「账本少了 30 个样本、而且不会自己回来」。
+# `Backtester.last_save_stats` 数了这件事，但全仓零读者；那条 WARNING 只进日志。
+# 更糟的是字段全健康、只丢入场价的日子（08-12 / 08-14 的 BRK-B）：**什么都不红**。
+#
+# 所以直接查**终点**（账本），不查中间量（Scout 价）：09-17 Scout 价 0/30，
+# 可 yfinance 兜底补上了、账本 30/30 可用——看中间量会误报。
+# 阈值是「任何一行」而不是覆盖率比例：字段缺一只是报告少个数，入场价缺一只是
+# 永久少一个样本，且每一行都可用 entry_price_backfill.py 补回。
+# 历史全量对照（本地 41 份 .swarm_results）：自 08-12 起 missing 恒为 0，
+# 零价行只出现在 08-12 / 08-14 / 09-24 / 09-25 —— 该闸只会在这四天变红。
+_ENTRY_FIELD = "entry_price"
+
+
+def _usable_price(p: Any) -> bool:
+    import math
+    return (isinstance(p, (int, float)) and not isinstance(p, bool)
+            and math.isfinite(p) and p > 0)
+
+
+def check_entry_prices(date: str, tickers: Optional[List[str]] = None,
+                       db_path: Optional[str] = None) -> Dict[str, Any]:
+    """当日扫描标的在 predictions 里是否都落了**可用**入场价。纯离线，只读。
+
+    - `zero`：落库了但价不可用（NULL / 0 / 负 / 非有限）——对全部统计不可见
+    - `missing`：扫描结果有、账本没有（`tickers` 给了才判）
+    - `backlog`：**其他日期**仍未补的不可用行 {date: [ticker…]}，只报不进退出码
+      （用户可能决定某些行不补，恒红会把人养成不看的习惯）
+    """
+    import os
+    import sqlite3
+    if db_path is None:
+        from hive_logger import PATHS
+        db_path = str(PATHS.db)
+    if not os.path.exists(db_path):          # 先判存在：sqlite 打开不存在的路径会建空库
+        return {"determinable": False, "reason": f"{db_path} 不存在"}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            rows = {t: p for t, p in conn.execute(
+                "SELECT ticker, price_at_predict FROM predictions WHERE date=?", (date,))}
+            bl_rows = conn.execute(
+                "SELECT date, ticker, price_at_predict FROM predictions "
+                "WHERE date <> ? ORDER BY date, ticker", (date,)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        return {"determinable": False, "reason": f"账本读取失败：{type(e).__name__}: {e}"}
+
+    backlog: Dict[str, List[str]] = {}
+    for d, t, p in bl_rows:
+        if not _usable_price(p):
+            backlog.setdefault(d, []).append(t)
+
+    expected = sorted(set(tickers)) if tickers else sorted(rows)
+    if not expected:
+        return {"determinable": False, "reason": f"{date} 无预测记录，也没给扫描标的",
+                "backlog": backlog}
+    zero = sorted(t for t, p in rows.items() if not _usable_price(p))
+    missing = sorted(set(expected) - set(rows)) if tickers else []
+    have = sum(1 for t in expected if t in rows and _usable_price(rows[t]))
+    return {
+        "determinable": True, "date": date, "expected": len(expected), "have": have,
+        "zero": zero, "missing": missing,
+        "backlog": backlog, "backlog_rows": sum(len(v) for v in backlog.values()),
+        "healthy": not zero and not missing,
+    }
+
+
+def merge_entry_prices(res: Dict[str, Any], ep: Dict[str, Any]) -> None:
+    """把账本入场价作为一个 `fields` 行并进覆盖率结果。
+
+    刻意并进 `fields` / `degraded_fields` / `healthy`，而不是另起一段：编排器
+    Step 12 的摘要行只列 `fields` 里 degraded 的项、status.json 只记 healthy/degraded
+    ——并进去，**不改编排器**就能让「entry_price 0/30」出现在 WARN 行和 status.json 里。
+    无法判定（库不存在等）不改结论：那不是这一步能证明的失败，照实写进 `entry_price` 段。
+    """
+    res["entry_price"] = ep
+    if not ep.get("determinable") or not res.get("determinable"):
+        return
+    bad = not ep["healthy"]
+    res["fields"].append({
+        "field": _ENTRY_FIELD, "source": "predictions 账本",
+        "have": ep["have"], "total": ep["expected"],
+        "coverage": round(ep["have"] / ep["expected"], 4) if ep["expected"] else 0.0,
+        "min_coverage": 1.0, "degraded": bad,
+        "note": ("入场价不可用的行对全部收益/IC 统计不可见、且不会自愈；"
+                 "补：/usr/local/bin/python3 entry_price_backfill.py --date " + ep["date"]
+                 + "（默认 dry-run）"),
+    })
+    if bad:
+        res["healthy"] = False
+        res["degraded_fields"] = list(res.get("degraded_fields") or []) + [_ENTRY_FIELD]
+
+
+def _render_entry_backlog(ep: Dict[str, Any]) -> str:
+    if not ep.get("backlog"):
+        return ""
+    days = ", ".join(f"{d}×{len(v)}" for d, v in sorted(ep["backlog"].items()))
+    return (f"⚠️  账本积压：其他日期仍有 {sum(len(v) for v in ep['backlog'].values())} 行"
+            f"入场价不可用（{days}）——entry_price_backfill.py 可补")
 
 
 # ── 价格可信度交叉核验（v0.45.45，需网络，默认不跑）─────────────────
@@ -209,7 +320,14 @@ def check_prices(date: str, db_path: Optional[str] = None) -> Dict[str, Any]:
             real = float(row[tk])
         except Exception:  # noqa: BLE001
             continue
-        if real != real or real <= 0 or not px:
+        if real != real or real <= 0:
+            continue
+        if not _usable_price(px):
+            # v0.45.360：原先 `not px` 与「取不到收盘」一起 continue——入场价为 0 的行
+            # 被静默剔出核验，30/30 为 0 的日子会报「无可比对样本」而不是「全坏」
+            bad.append({"ticker": tk, "recorded": 0.0, "actual_close": round(real, 2),
+                        "deviation_pct": -100.0})
+            devs.append(100.0)
             continue
         d = (px - real) / real * 100
         devs.append(abs(d))
@@ -410,6 +528,8 @@ def main() -> int:
     ap.add_argument("--out", default=None, help="把完整结果写成 JSON")
     ap.add_argument("--log-dir", default="",
                     help="编排器日志目录（默认 ~/.claude/logs）；限流检查从这里读")
+    ap.add_argument("--db", default=None,
+                    help="predictions 库（默认 PATHS.db，调用时求值）；账本入场价核对读它")
     ap.add_argument("--check-prices", action="store_true",
                     help="额外核验 price_at_predict 与真实收盘（需网络，较慢）")
     args = ap.parse_args()
@@ -424,6 +544,9 @@ def main() -> int:
             date = _d.today().isoformat()
 
     res = check(date, Path(args.file) if args.file else None)
+    # v0.45.360：账本入场价。必须在渲染/写盘之前并进 res，否则 --quiet 摘要与 --out 都看不见
+    ep = check_entry_prices(date, res.get("ticker_names"), args.db)
+    merge_entry_prices(res, ep)
 
     # v0.45.54 二次检查：`--out` 原先在这里就写盘，而 label_honesty / price_check
     # 是之后才算出来的 —— 默认路径（编排器用的 `--quiet --out`）写出的 JSON
@@ -435,6 +558,10 @@ def main() -> int:
         print(f"⚠️  {res['reason']}")
     elif not res["healthy"]:
         print(f"❌ {res['date']} 降级字段：{', '.join(res['degraded_fields'])}")
+
+    _bl = _render_entry_backlog(ep)
+    if _bl:
+        print(_bl)
 
     lh = check_label_honesty(date, Path(args.file) if args.file else None)
     res["label_honesty"] = lh
@@ -462,7 +589,7 @@ def main() -> int:
         print(f"❌ {date} yfinance 限流 {rl['count']} 次 —— {_tail}")
 
     if args.check_prices:
-        pr = check_prices(date)
+        pr = check_prices(date, args.db)
         res["price_check"] = pr
         if not args.quiet:
             print()
