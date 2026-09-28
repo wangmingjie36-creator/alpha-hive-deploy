@@ -204,7 +204,9 @@ WATCHLIST 30 只里只有 BRK-B 带非字母数字。
 
 ### 未做
 
-- 生产 checkout 未重跑，BRK-B 的 Twelve Data 兜底未在真实扫描里复核（待 09-29 扫描后看 `status.json` 的 `scan_timing.counters.twelve_data.failed`）。
+- ~~生产复核~~ **09-28 扫描已复核**（代码 `d97e4d6`，含本修复）：Twelve Data 日线预热 **31/31**（修前生产日志是 30/31，缺的就是 BRK-B，
+  `HTTP Error 404` 共 3 行）；`status.json` 的 `scan_timing.counters.twelve_data` = fetches 31 / failures 0 / `failed {}`。
+  （同一轮 `scan_timing` 自 09-14 起首次重新并进 `status.json`，所以这个观测点确实能看见。）
 - 已落盘的 BRK-B rv_30d / iv_rank / close_correction 历史值没有补算。
 
 
