@@ -6,7 +6,7 @@ v0.45.353 起编排器的唯一真相是仓库 `scripts/alpha-hive-orchestrator.
 `~/.claude/scripts/alpha-hive-orchestrator.sh`（部署副本，路径不变——Desktop 有 TCC 限制，
 不让 launchd 下的 bash 直接跑仓库里那份，见编排器 production_sync 段注释）。
 
-阶段 1 还没有自动部署：**改编排器 = 改仓库那份 → 合入 origin/main → 手动 `cp -p` 到部署位置**。
+阶段 3 之前还没有自动部署：**改编排器 = 改仓库那份 → 合入 origin/main → 手动跑 `deploy_orchestrator.py`**（v0.45.356）。
 两份文件就有了两种坏法，本文件各拦一种：
 
 * **漂移**：部署副本的内容在 `origin/main` 的历史里从没出现过 ⇒ 有人绕过仓库直接改了生产。
@@ -79,7 +79,6 @@ class TestDeployedMatchesRepo:
         deployed, history, tip = blobs
         assert classify(deployed, history, tip) != "stale", (
             f"{_REF} 上的编排器比部署副本新 —— 合入了但没部署，新代码不会跑。"
-            f"阶段 1 手动部署：先备份部署副本，再从 main 取出覆盖：\n"
-            f"  cp -p {DEPLOYED_ORCH} {DEPLOYED_ORCH}.bak-$(date +%Y%m%d)_pre-<版本>\n"
-            f"  git -C '{_ROOT}' show {_REF}:{_REL} > {DEPLOYED_ORCH}.new && "
-            f"chmod 755 {DEPLOYED_ORCH}.new && mv {DEPLOYED_ORCH}.new {DEPLOYED_ORCH}")
+            f"手动部署（带关卡、原子替换；v0.45.356）：\n"
+            f"  /usr/local/bin/python3 '{_ROOT}/deploy_orchestrator.py' --ref {_REF} --dry-run\n"
+            f"  /usr/local/bin/python3 '{_ROOT}/deploy_orchestrator.py' --ref {_REF}")

@@ -5,7 +5,40 @@
 
 ---
 
-## [0.45.356] — 2026-09-28 — 占位（进行中：编排器纳入版本控制·阶段 2——deploy_orchestrator.py 部署工具，未接入编排器）
+## [0.45.356] — 2026-09-28 — Added：编排器纳入版本控制·阶段 2——`deploy_orchestrator.py` 部署工具（关卡 + 漂移检查 + 原子替换；**未接入编排器**，阶段 3 另版）
+
+### 做什么
+
+把 git 里某个提交的 `scripts/alpha-hive-orchestrator.sh` 部署到 launchd 执行的 `~/.claude/scripts/`。
+部署是唯一能拦住坏版本的时刻（软链接没有这个时刻）——v0.45.348 那次裸变量若走这条路，会在部署时被拒。
+
+- **只部署 git blob**（`--ref` 必填），从不读工作区 ⇒ 未提交改动 / 生产 checkout 脏文件到不了 launchd。
+- **关卡**（作用在将写入的字节上，任一不过 ⇒ 不部署、保留现有副本，退出码 1）：
+  blob 须出现在 origin/main 该文件历史里（按 blob 不按提交判——生产 HEAD 可能带没推上去的日报提交，09-25 分叉形状）；
+  形状（`set -uo pipefail`、>500 行）；`/bin/bash -n`（launchd 实际用的 3.2）；裸 `$VAR` 紧跟非 ASCII。
+- **漂移**：现有部署副本不是 main 历史里任何一版 = 有人直接改了生产 ⇒ 默认拒绝覆盖（退出码 2）；
+  `--accept-drift` 才覆盖且先备份。**无状态文件**：「在不在 git 历史里」本身就是判据；
+  同理非漂移时**不写 `.bak`**——被覆盖的那版就在 git 里（阶段 4 退役 `.bak` 惯例的依据）。
+- **写入**：同目录临时文件 → 关卡 → chmod 755 → fsync → `os.replace`（新 inode，运行中的编排器读完旧版）→ 回读核对 blob。
+- 退出码 0/1/2/3 = 成功（含 already_current / dry-run 的 would_deploy）/ 关卡 / 漂移 / 判定不了，不揉；stdout 一行 JSON，`--out` 无默认路径（不新增 PATHS 产物）。
+
+### 改动
+
+- Added `deploy_orchestrator.py`；Added `orchestrator_lint.py`：裸变量检测器 `find_unbraced` 从 `tests/test_orchestrator_braced_vars.py`
+  原样抽出成唯一实现，测试与部署关卡共用（测试改为 import）。
+- Added `tests/test_deploy_orchestrator.py`（18 条）：临时 git 仓库 + 临时部署位置，autouse 把 HOME 指向沙箱并断言默认位置跟着走。
+  含**真跑**的「替换正在执行的 bash」：旧进程输出 OLD-END、下一次执行 NEW-END。
+- Changed `tests/test_orchestrator_deployed_matches_repo.py` 与 `CLAUDE.md`：手动部署改为 `deploy_orchestrator.py --ref origin/main`。
+
+### 验证
+
+- 变异 5 处各自变红：去裸变量关卡 / 去漂移拒绝 / 去「在 main 上」检查 / 去 `bash -n` / **`os.replace` 改成原地写**
+  ——最后一条让「正在跑的 bash」用例红，实证原地覆盖确实会打乱运行中的脚本，`os.replace` 不是可有可无。
+- 真实环境只读核对：`--ref origin/main --dry-run` ⇒ `already_current`，部署副本 mtime 不变、无临时文件残留；
+  关卡直接跑真实编排器 ⇒ 零命中；跑 v0.45.348 修复前的备份 ⇒ 精确拒在第 1198 行。
+- 附：阶段 1（v0.45.353）CI 实测——skipped 40 → 9（31 条原先在 CI 恒 skip 的编排器测试首次在 ubuntu 跑、全绿）；
+  CI 另有 5 条红在阶段 1 之前的 c59d9480 上就已存在（`test_data_backup::TestPushTimeout`、`test_ghpages_data_root_migration` 3 条、
+  经济日历覆盖期限到点），非本线引入。
 
 ## [0.45.355] — 2026-09-28 — 占位（进行中：编排器工具输出契约——统一 JSON 外壳 + 显式 attention、未捕获异常退出码 3、仓内步骤解释器 + pre-push 契约守卫）
 
