@@ -346,6 +346,17 @@ class GuardBeeSentinel(BeeAgent):
         _vix_src = macro.get("vix_source")
         _vix_real = (_vix_src in ("cboe", "yfinance")) if _vix_src else not _macro_degraded
         details["vix_source"] = macro.get("vix_source", "unknown")
+        # v0.45.357：VIX 属于哪一天、怎么拿到的。三个键**始终写**（值可为 None）——
+        # `vix_feed` 键的有无就是 ic_rerun_readiness 核对 09-28 世代边界的印记。
+        details["vix_feed"] = macro.get("vix_feed")
+        details["vix_as_of"] = macro.get("vix_as_of")
+        details["vix_stale"] = macro.get("vix_stale")
+        # 陈旧 VIX（早于扫描日前一交易日，如 09-24/25 下载失败读到 09-22 的 14.21）
+        # 与兜底常量同等对待：不是这一天的观测，不投票（用户 2026-09-28 决定）。
+        # 实测那两天 Guard 的 risk_on 票**只有**这一张（AMC 09-25：{'risk_on': 1}）。
+        # 只认 `is True`：None = 判不了（快照 / yfinance 路径），照旧计票。
+        if macro.get("vix_stale") is True:
+            _vix_real = False
         vix = macro.get("vix") if _vix_real else None
         if vix is not None:
             details["vix"] = vix

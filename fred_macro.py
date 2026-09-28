@@ -338,6 +338,30 @@ def _classify_vix(vix: float) -> str:
     return "spike"
 
 
+# v0.45.357：`cboe_vix.get_vix_observation` 带出的元数据 → 宏观输出里的键名。
+# 降级路径（base）也带齐这些键、值为 None —— 同 v0.45.92 的理由：「键不存在」
+# 与「键在、值为 None」不可区分，就是本项目治过多次的静默降级形态。
+_VIX_OBS_KEYS = {
+    "vix_feed": "feed",                  # delayed_quote（当日收盘）| history_csv（CSV 最后一行）
+    "vix_feed_note": "quote_reason",     # 报价没被采用的原因（before_close / quote_unavailable …）
+    "vix_history_fetch": "history_fetch",  # download | cache_fresh | cache_stale（下载失败）…
+    "vix_lag_sessions": "lag_sessions",  # 落后最新一场已收完的 VIX 几个交易日
+    "vix_stale": "stale",                # as_of 早于扫描日的前一交易日 ⇒ GuardBee 不计这票
+    "vix_quote_check": "quote_check",    # 报价收盘 vs 次日 CSV 官方收盘的核对账本摘要
+}
+
+
+def _vix_obs_fields(obs: Dict) -> Dict:
+    return {k: (obs or {}).get(src) for k, src in _VIX_OBS_KEYS.items()}
+
+
+def _vix_change_pct(vix, prev) -> Optional[float]:
+    """同一对观测（当前值与**它自己的**前一收盘）的变动百分比；缺一个就是 None。"""
+    if isinstance(vix, (int, float)) and isinstance(prev, (int, float)) and prev > 0:
+        return round((vix / prev - 1) * 100, 2)
+    return None
+
+
 def _fetch_macro_data() -> Dict:
     """内部：实际拉取宏观数据"""
 
@@ -370,6 +394,10 @@ def _fetch_macro_data() -> Dict:
         "vix_as_of": None,
         "vix_prev_close": None,
         "vix_prev_as_of": None,
+        # v0.45.357：与 `vix` 同一对观测算出的变动；取不到就是 None（旧兜底 0.0 冒充「持平」）。
+        # 以及 VIX 怎么拿到的、新不新鲜（`_vix_obs_fields`）。
+        "vix_change_pct": None,
+        **{k: None for k in _VIX_OBS_KEYS},
     }
 
     try:
@@ -462,15 +490,21 @@ def _fetch_macro_data() -> Dict:
         #     vix_change_pct=−11.21%=09-11 当日 15.84/17.84−1）。两者拼起来就错位一天。
         #   · 拿两份日报的 `vix` 相减也不行：没有日期，CBOE 缓存陈旧时两天会读到同一个
         #     收盘（09-24 / 09-25 都是 09-22 的 14.21），相减得一个假的「+0.0」。
+        #
+        # v0.45.357：改走 `cboe_vix.get_vix_observation` —— 17:00 ET 扫描时 CSV 还没有当日行，
+        # 先试收盘后的延迟报价（时间戳必须证明是这一场收盘），拿不到才退回 CSV 最后一行；
+        # 连同取数方式、落后几场、是否陈旧一起带出（见 `_VIX_OBS_KEYS`）。
         _vix_as_of = _vix_prev_close = _vix_prev_as_of = None
+        _vix_obs: Dict = {}
         if _cboe_vix is None:
             try:
-                from cboe_vix import get_vix_history as _cboe_vix_hist
-                _h2 = _cboe_vix_hist(max_days=2)
-                if _h2:
-                    _vix_as_of, _cboe_vix = _h2[-1]
-                    if len(_h2) >= 2:
-                        _vix_prev_as_of, _vix_prev_close = _h2[-2]
+                from cboe_vix import get_vix_observation as _cboe_vix_obs
+                _vix_obs = _cboe_vix_obs() or {}
+                if _vix_obs.get("vix") is not None:
+                    _cboe_vix = _vix_obs["vix"]
+                    _vix_as_of = _vix_obs.get("as_of")
+                    _vix_prev_close = _vix_obs.get("prev_close")
+                    _vix_prev_as_of = _vix_obs.get("prev_as_of")
             except Exception as _e_cv:  # noqa: BLE001
                 _log.debug("CBOE VIX 不可用，回落 yfinance: %s", _e_cv)
 
@@ -485,6 +519,8 @@ def _fetch_macro_data() -> Dict:
                 _partial["vix_as_of"] = _vix_as_of
                 _partial["vix_prev_close"] = _vix_prev_close
                 _partial["vix_prev_as_of"] = _vix_prev_as_of
+                _partial["vix_change_pct"] = _vix_change_pct(_cboe_vix, _vix_prev_close)
+                _partial.update(_vix_obs_fields(_vix_obs))
                 _partial["summary"] = f"宏观数据不可用（VIX {_cboe_vix:.1f} 来自 CBOE，其余降级）"
                 return _partial
             return base
@@ -500,7 +536,15 @@ def _fetch_macro_data() -> Dict:
         else:
             vix = data.get("VIX", {}).get("last", 20.0)
             _vix_source = "yfinance" if "VIX" in data else "fallback"
-        vix_change = data.get("VIX", {}).get("change_pct", 0.0)
+        # v0.45.357：变动必须与 `vix` 出自**同一对**观测。旧写法恒取 yfinance 那条腿，
+        # 而 `vix` 是 CBOE 的上一场收盘 ⇒ 错位一天（09-11：vix=17.84 是 09-10 收盘，
+        # vix_change_pct=−11.21% 却是 09-11 当日），喂给下面的「VIX 单日飙升」逆风晚报一天。
+        # 快照 VIX 没有配对的前一收盘 ⇒ None；yfinance 路径本就同出一份日 K ⇒ 照用；
+        # 缺 VIX 时旧默认 0.0（冒充「持平」）改为 None。
+        if _cboe_vix is not None:
+            vix_change = _vix_change_pct(vix, _vix_prev_close)
+        else:
+            vix_change = data["VIX"].get("change_pct") if "VIX" in data else None
 
         vix_regime = _classify_vix(vix)
 
@@ -654,8 +698,9 @@ def _fetch_macro_data() -> Dict:
 
         if vix_regime in ("high", "spike"):
             headwinds.append(f"VIX {vix:.1f}（市场恐慌{'' if vix_regime=='high' else '极度'}升温）")
-        if vix_change > 10:
-            headwinds.append(f"VIX 单日飙升 {vix_change:+.1f}%（波动率冲击）")
+        if vix_change is not None and vix_change > 10:
+            _vspan = f"{_vix_prev_as_of}→{_vix_as_of}，" if _vix_as_of and _vix_prev_as_of else ""
+            headwinds.append(f"VIX 单日飙升 {vix_change:+.1f}%（{_vspan}波动率冲击）")
         if rate_env == "high" and tnx_change > 2:
             headwinds.append(f"10Y 利率 {tnx:.2f}% 持续走高（压制成长估值）")
         if dollar_trend == "strong":
@@ -748,7 +793,7 @@ def _fetch_macro_data() -> Dict:
             "macro_regime": macro_regime,
             "macro_score": round(score, 1),
             "vix": round(vix, 2),
-            "vix_change_pct": round(vix_change, 2),
+            "vix_change_pct": round(vix_change, 2) if vix_change is not None else None,
             "vix_regime": vix_regime,
             "treasury_10y": round(tnx, 3),
             "treasury_2y": treasury_2y,
@@ -785,6 +830,8 @@ def _fetch_macro_data() -> Dict:
             "vix_as_of": _vix_as_of,
             "vix_prev_close": _vix_prev_close,
             "vix_prev_as_of": _vix_prev_as_of,
+            # v0.45.357：取数方式 / 新鲜度 / 报价核对（同上，只在实时 CBOE 路径有值）
+            **_vix_obs_fields(_vix_obs),
             # v0.45.92：两条路径都给日期戳。
             # `_as_of` 本身**不能动** —— 它是控制流：非 None 会让上面走
             # `_asof_history` 对齐历史日，实时路径填了它会改变取数行为。

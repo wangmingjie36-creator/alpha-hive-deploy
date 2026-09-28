@@ -109,6 +109,9 @@ class TestCohortBoundary:
         # 70 个信号名跑 `generation_boundaries` 为 26 个（9 个只换标签——多出退役名 guard.consistency /
         # guard.top_signals_count，不认识的名字受每一条边界约束）。真正后移的 17 个两种口径相同。
         ("2026-09-28", "v0.45.349"),
+        # v0.45.357：日报 VIX 当日收盘 + 陈旧 VIX 不计 Guard 票。唯一真正后移的归档信号是 guard.macro_adj
+        # （08-15→09-28，661 行 / 已成熟 420 条），其余 9 个挂在它上面的只换标签。
+        ("2026-09-28", "v0.45.357"),
     })
 
     def test_no_known_cohort_has_vanished(self):
@@ -668,7 +671,7 @@ class TestBoundaryEvidenceIsPerVersion:
         """
         versions = {v for _d, v, _r in rr._COHORT_HISTORY}
         assert set(rr._BOUNDARY_MARKERS) <= versions, sorted(set(rr._BOUNDARY_MARKERS) - versions)
-        assert {"v0.45.197", "v0.45.334", "v0.45.340", "v0.45.349"} <= set(rr._BOUNDARY_MARKERS)
+        assert {"v0.45.197", "v0.45.334", "v0.45.340", "v0.45.349", "v0.45.357"} <= set(rr._BOUNDARY_MARKERS)
 
     def test_cli_renders_no_marker_for_the_head(self, monkeypatch, db, capsys):
         """CLI 人读模式要能把 `no_marker` 印出来（带版本），不能 KeyError。

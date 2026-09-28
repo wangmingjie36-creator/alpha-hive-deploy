@@ -348,9 +348,14 @@ def stub_cboe_vix(monkeypatch):
     ⚠️ 走缓存是刻意保留的既有行为：`cboe_vix` 的缓存是
     `Path(__file__).parent / "cache"`（仓库本地目录，**不受 ALPHA_HIVE_CACHE_DIR
     隔离**），本机热、CI 冷。桩只负责不出网，不改缓存语义。
+
+    v0.45.357：同时钉 `cboe_vix._download_quote` → None（延迟报价，契约同上）。
+    ⚠️ 这一条**只在美东 16:15 之后的交易日**才会被走到（之前 `get_vix_session_close`
+    直接回 `before_close`、不出网）—— 不钉它，同一批测试下午跑红、上午跑绿。
     """
     import cboe_vix
     monkeypatch.setattr(cboe_vix, "_download", lambda: None)
+    monkeypatch.setattr(cboe_vix, "_download_quote", lambda: None)
 
 
 @pytest.fixture

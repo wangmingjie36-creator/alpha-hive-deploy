@@ -705,6 +705,40 @@ _COHORT_HISTORY = [
      "同 v0.45.334 修订 1 的已知代价；该检验输出的 `cohort_boundaries_during_test` 会列出本条。"
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登记（odds_score 是 ML 特征；该表要求日期唯一，"
      "09-28 那条按 v0.45.146+147 先例改为合并标签 `v0.45.334+v0.45.340+v0.45.349`，顺带补登当时漏登的 v0.45.340）。"),
+    ("2026-09-28", "v0.45.357",
+     "日报 VIX 改当日收盘 + 陈旧 VIX 不计 Guard 宏观票（用户 2026-09-28 决定，同版落地）。"
+     "① `fred_macro` 的 VIX 改走 `cboe_vix.get_vix_observation`：收盘后先取 CBOE 延迟报价 "
+     "`delayed_quotes/quotes/_VIX.json`，**只在**钟已过 VIX 停算（交易所收盘 +15min）且报价 `last_trade_time` "
+     "落在 [收盘, 收盘+30min]、日期是当天时采用，否则退回 `VIX_History.csv` 最后一行；采用过的报价次日拿 CSV 官方收盘"
+     "自动核对（不符 ⇒ WARNING + 14 天内停用报价），同场还拿报价 `prev_day_close` 比 CSV 上一场收盘。"
+     "② GuardBee `_calc_macro_adjustment`：`vix_stale is True`（观测日早于扫描日的前一交易日）时 VIX 不投票，同兜底常量。"
+     "**依据（2026-09-28 实测，只读）**：CSV 当日行约 20:30 ET 才追加（09-25 那行 `Last-Modified` 20:30:54 ET），"
+     "扫描 17:00 ET ⇒ 19 份 `vix_source=cboe` 日报里 12 份落后一场、09-24/25 两份落后两三场"
+     "（下载失败读过期缓存，日志只有 INFO）、5 份当日（深夜补跑 / 次日补跑 3+1，另 09-02 一份原因待验证——日志已轮转）；"
+     "v0.43.24 之前走 yfinance 时可匹配的 65/65 份都是当日 ⇒ **滞后是 v0.43.24 改 CBOE 优先时引入的**。"
+     "`vix_change_pct` 来自 yfinance 腿、是当日变动，与 `vix` 错位一天（同版改为同一对观测，只进展示用的逆风文案，不进分）。"
+     "**幅度**：按归档的 `macro_regime_votes` 重放（逐行先复现记录的 regime、全部一致），把 VIX 票换成当日收盘："
+     "293 行 Guard 里 38 行宏观政体会不同（5/21 天：09-01 10/24 risk_on→neutral、09-03 3/12 risk_off→neutral、"
+     "09-18 9/12 neutral→risk_on、09-23 4/12 与 09-24 12/12 risk_on→neutral）。②单独重放（09-24/25 两天断网、"
+     "新代码下报价与 CSV 都拿不到 ⇒ 陈旧 ⇒ 不投票）：09-24 12/12、09-25 12/12 risk_on→neutral"
+     "（票面只剩这一张，如 AMC 09-25 `{'risk_on': 1}`）。"
+     "政体经 `RegimeWeightAdjuster` 改 catalyst / sentiment 权重、`macro_adj` 直接加进 Guard 分（risk_adj 维，config 权重 0）。"
+     "**边界代价**：与 v0.45.334/340/349 同日 ⇒ `assess()` 切点不变；2026-09-28 用本模块 `assess()` 对生产 "
+     "`pheromone.db` 副本只读实测 `n_all_samples=0` ⇒ **作废 0 条** final_score 样本。`signal_archive`"
+     "（`COHORT_SIGNAL_SCOPE[\"v0.45.357\"]` = `guard.macro_adj` + `agent.GuardBeeSentinel.*`）：`generation_boundaries` "
+     "对归档实有 70 个信号名前后对比，挂到本条的 10 个里 9 个本就切在 09-28（Guard / Bear 分与方向、bear.score、"
+     "composite.*、两个退役名）只换标签；**唯一后移的是 `guard.macro_adj`**（SIGNAL_LEAVES，此前只受 v0.43.24 约束）"
+     "08-15→09-28，661 行（08-16~09-25）不再进当前世代，其中已成熟（`load_panel` t7 口径）420 条（08-24~09-11，14 个日期）。"
+     "⚠️ **本条日期是前提**（同 v0.45.349）：须在 2026-09-28 首次编排器运行之前推到 `origin/main` 且生产 checkout 已快进；"
+     "否则追加更正条目（新标签 + `_CORRECTS`）。判别印记：Guard 宏观细节（归档键名 `vix_term_structure`）带 `vix_feed` 键"
+     "（推送前生产归档 959/959 份均无），登记在 `_BOUNDARY_MARKERS`。"
+     "⚠️ 报价路径本身待首跑验证：若 09-28 日报 `macro_context.vix_feed_note` 是 `quote_vintage_mismatch`（VIX 报价的 "
+     "`last_trade_time` 不落在收盘窗口），报价会一直被拒、VIX 仍是 CSV 上一场收盘 —— 那时本条①等于未生效，②照常生效，"
+     "边界仍成立（Guard 票的口径已由②改变）。"
+     "**前瞻检验**：维度 IC 协议 H1（buzz_v1）/ H2（Oracle 分）都不在本条闭包里，且早于 FORWARD_START 2026-10-12 ⇒ 不截断。"
+     "共振加成前瞻检验从记录的 agent_details 起算（Guard 的政体是记录值），无需修订 replay。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登记（risk_adj_score / volatility / final_score 是 ML 特征），"
+     "09-28 那条合并标签扩为 `v0.45.334+v0.45.340+v0.45.349+v0.45.357`。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -894,6 +928,18 @@ def _marker_oracle_gex_signal_neutralized(d: dict) -> bool:
     return isinstance(det, dict) and det.get("gex_signal_in_score") is False
 
 
+def _marker_guard_vix_feed(d: dict) -> bool:
+    """v0.45.357：GuardBee 宏观细节（归档键名 `vix_term_structure`）带 `vix_feed` 键。
+
+    认「键存在」而不是某个取值（同 v0.45.340）：Guard 在三种情形下都写这个键——CBOE 当日报价、
+    CSV 兜底、宏观整个取不到（值为 None）；此前的归档一律没有（推送前生产归档 959/959 实测）。
+    """
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    vt = det.get("vix_term_structure") if isinstance(det, dict) else None
+    return isinstance(vt, dict) and "vix_feed" in vt
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -909,6 +955,8 @@ _BOUNDARY_MARKERS = {
                   _marker_buzz_momentum_as_of),
     "v0.45.349": ("agent_details.OracleBeeEcho.details.gex_signal_in_score is False",
                   _marker_oracle_gex_signal_neutralized),
+    "v0.45.357": ("agent_details.GuardBeeSentinel.details.vix_term_structure 带 vix_feed 键",
+                  _marker_guard_vix_feed),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。

@@ -1238,6 +1238,11 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 下游经 SIGNAL_UPSTREAM：Oracle 方向 → consensus_strength → crowding.* → Scout → bear.insider_bear，
     # 以及 ml.* / Rival / Guard / bear.score / Bear / swarm_agreement —— 由 _scope_closure 带出，不手写
     "v0.45.349": ("agent.OracleBeeEcho.*", "bear.options_bear"),
+    # 09-28（与 v0.45.334/340/349 同日）：日报 VIX 改当日收盘（收盘后延迟报价优先，CSV 兜底）+
+    # 陈旧 VIX 不计 Guard 宏观票 ⇒ `_calc_macro_adjustment` 的输入换了量 ⇒ `guard.macro_adj`
+    # （SIGNAL_LEAVES，只在被点名时换代）与 Guard 分（macro_adj 直接加进 risk_adj 维分）都点名。
+    # Guard 的 macro_regime 还经 RegimeWeightAdjuster 改权重 ⇒ 只动 composite.final_score（ALWAYS_SLICED）。
+    "v0.45.357": ("guard.macro_adj", "agent.GuardBeeSentinel.*"),
 }
 
 
