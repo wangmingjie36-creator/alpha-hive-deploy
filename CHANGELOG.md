@@ -120,10 +120,15 @@ main 自 v0.45.234 起**刻意**更细——链 / IV / OI 与 `price_at_fetch` �
 占号脚本的成功判定写成匹配 `main -> main`，而 git 输出是 `HEAD -> main` ⇒ 连推四次、占了 354–357；
 约一分钟内由 `1604b9d5` 释放 355–357。
 
-### 分支（未删，删除属对外动作，等用户确认）
+### 分支（2026-09-28 用户确认后已删除）
 
 `origin/fix/cboe-stale-vintage-passthrough` = `6d8f3579`；`origin/fix/cboe-vintage-staleness-layering` = `b03012c6`；
 `origin/claude/backfill-cloud-snapshot` = `de4dcb8d`。
+
+删除前核对「不会影响 CBOE 数据」：三条分支只改代码 / 测试 / CHANGELOG，不含任何数据文件；main 上唯一提到分支名的是本条加的注释；
+本机编排器、LaunchAgents、定时任务 0 处引用；生产 checkout 在 `main`；云端快照 routine（`trig_01QzhoHiNxSWMgxWAQztnLA6`）的提示词
+只用 `main` 与 `cloud-snapshots`。删除后 `origin/cloud-snapshots`（`aecd5044`）与 `origin/main` 原样在。三个 tip 提交本机对象库仍在（可按 SHA 找回，直到 gc）。
+另有一条 `origin/fix/cboe-vintage-signal-passthrough`（`440ec51f`）不在这三条之内：它领先 main 0 个提交、tip 是 main 的祖先，**已完整并入**，未删。
 
 ## [0.45.353] — 2026-09-28 — Added/Changed：编排器纳入版本控制·阶段 1（导入）——仓库 `scripts/alpha-hive-orchestrator.sh` 成为唯一真相；读编排器的测试改读仓库副本，CI 上首次真跑
 
