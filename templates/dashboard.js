@@ -269,8 +269,9 @@ function _tokA(n,a){var h=_tok(n),m=/^#([0-9a-f]{6})$/i.exec(h);if(!m)return h;
     if(typeof Chart==='undefined')return;
     rendered[id]=true;
     const dark=document.documentElement.classList.contains('dark');
-    const tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-    const gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+    // v0.45.365：刻度 = 次要文字色，网格 = 半透明边框色；0.5 透明度与原 6–7% 黑/白网格的淡度相当（对比度 1.1–1.4）
+    const tc=_tok('--ts');
+    const gc=_tokA('--border',.5);
     try{
 
     if(id==='fgChart'){
@@ -399,8 +400,8 @@ function _tokA(n,a){var h=_tok(n),m=/^#([0-9a-f]{6})$/i.exec(h);if(!m)return h;
     if(rendered['radar-'+tk])return;
     if(typeof Chart==='undefined')return;
     const dark=document.documentElement.classList.contains('dark');
-    const tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-    const gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+    const tc=_tok('--ts');
+    const gc=_tokA('--border',.5);
     rendered['radar-'+tk]=true;
     const cv=document.getElementById('radar-'+tk);
     if(!cv)return;
@@ -568,8 +569,8 @@ window.AH.initAccWinTrend=function(){
   const wbd=__AH__.acc_weekly_by_dir||[];
   if(!wd||!wd.length)return;
   const dark=document.documentElement.classList.contains('dark');
-  const tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-  const gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+  const tc=_tok('--ts');
+  const gc=_tokA('--border',.5);
   // 如果有分方向数据，用三条线；否则退回整体线
   const useByDir = wbd.length > 0;
   const labels = useByDir ? wbd.map(function(d){return d.week;}) : wd.map(function(d){return d.week;});
@@ -761,8 +762,8 @@ window.AH.initEquityCurve=function(){
   }
   var existing=Chart.getChart(cv);if(existing)existing.destroy();
   var dark=document.documentElement.classList.contains('dark');
-  var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-  var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+  var tc=_tok('--ts');
+  var gc=_tokA('--border',.5);
   var labels=eq.map(function(d){return d.date.slice(5);});
   // 三条曲线：net (绿, 主), gross (锈红虚线, 辅参考), spy (灰, 基准)
   var netData =eq.map(function(d){return d.cum_net_pct!=null?d.cum_net_pct:d.cum;});
@@ -952,8 +953,8 @@ window.AH.initTrendChart=function(){
   if(!cv||typeof Chart==='undefined')return;
   if(window.AH.trendChart) return; // 已初始化
   const dark=document.documentElement.classList.contains('dark');
-  const tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-  const gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+  const tc=_tok('--ts');
+  const gc=_tokA('--border',.5);
   // v0.45.358：分类色取 :root 的 --series-1..4（校验数字见 dashboard.css 注释）。
   // 旧的 10 色表：3 个紫（#667eea / #764ba2 / #8b5cf6），外加看多绿 #22c55e、看空红 #ef4444 ——本站红 = 看空，
   // 标的线被涂红会被读成信号（09-11 实测 AMC 恰好是红线）；且按 i%10 循环，30 只里每 3 只共用一个色。
@@ -1518,8 +1519,8 @@ function toggleKbHelp(){
           var rd=__AH__.radar;
           if(rd&&rd[ticker]){
             var dark=document.documentElement.classList.contains('dark');
-            var tc2=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-            var gc2=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+            var tc2=_tok('--ts');
+            var gc2=_tokA('--border',.5);
             chartInstances.push(new Chart(cv,{
               type:'radar',
               data:{labels:['\u4fe1\u53f7','\u50ac\u5316','\u60c5\u7eea','\u8d54\u7387','\u98ce\u63a7'],
