@@ -119,7 +119,94 @@ main 上实测：切换后之前用 chip 加上的标的从图上消失（chip �
 - 其余非紫的硬编码色仍在 JS 图表里：资金曲线 Net 线 / 胜率三线的 `#22c55e`/`#ef4444`/`#94a3b8`（语义对、但不随主题）、F&G 仪表与趋势、`#F4A532`（旧蜂蜜金）、
   雷达点击高亮 `rgba(244,165,50,.15)`。趋势图激活 chip 仍是 `--acc2` 绿底（UI 状态色，与数据无关，未动）。
 
-## [0.45.357] — 2026-09-28 — 占位（进行中：日报 VIX 滞后一日 / 陈旧缓存照标 cboe / vix_change_pct 错位——量化 + 可观测 + 处置）
+## [0.45.357] — 2026-09-28 — Fixed/Changed：日报 VIX 一直是**上一交易日**收盘（v0.43.24 改 CBOE 优先时引入）→ 收盘后延迟报价优先 + 次日自动核对；陈旧缓存照标 `cboe` → 可见且不计 Guard 票；`vix_change_pct` 与 `vix` 错位一天 → 同出一对观测。**改评分**，世代边界并入 09-28（作废 0 条 final_score 样本）
+
+承 v0.45.352 的发现（仪表板宏观条涨跌），用户 2026-09-28 在对话里决定两处评分改动：①「收盘后报价优先 + 自动核对」②「陈旧 VIX 不投票」。
+
+### 取证（全部只读）
+
+- **滞后机制已证实**：CBOE `VIX_History.csv` 当日行约 **20:30 ET** 才追加（09-25 那行 `Last-Modified: Sat, 26 Sep 2026 00:30:54 GMT`），
+  日报扫描 17:00 ET（launchd 14:00 PT）。
+- **全量量化**（115 份日报 × 新拉的 CBOE CSV，交易日按 `is_trading_day` 数，不心算）：
+  | `vix_source` | n | 当日 | 落后 1 场 | 落后 2–3 场 |
+  |---|---|---|---|---|
+  | `cboe`（v0.43.24 起） | 19 | 5 | **12** | 2（09-24 / 09-25） |
+  | 无此键（v0.43.24 之前，yfinance） | 可匹配 66 | **65** | 0 | 1 |
+
+  当日的 5 份：3 份深夜补跑（CSV 已更新）、1 份次日补跑、**09-02 一份 17:10 ET 就拿到当日行——原因待验证**（日志已轮转）。
+  ⇒ **滞后是 v0.43.24 修 `vix=20.0` 兜底时顺带引入的回归**：yfinance 在 17:00 ET 给的是当日收盘，CBOE CSV 不是。
+- **陈旧缓存**：结构化日志 09-24 四次 `EOF occurred in violation of protocol` / `handshake timed out`、09-25 三次 `nodename nor servname`，
+  每次都「使用陈旧缓存」（旧代码只打 INFO）⇒ 两份日报都是 09-22 的 14.21，标 `vix_source: "cboe"`；
+  那两天其余宏观也全灭（`data_source: fallback`），走部分降级路径，**连 `vix_change_pct` 键都没有**。
+- **`vix_change_pct` 错位**：15/19 份与扫描**当日**的 CBOE 变动吻合，而 `vix` 是上一场 ⇒ 错位一天（09-11：17.84 配 −11.21%）。
+- **读者清单**（改前先数）：
+  | 字段 | 读者 | 进分？ |
+  |---|---|---|
+  | `vix`（水平） | GuardBee `_calc_macro_adjustment`：`<15` 投 risk_on、`>25/>35` 投 risk_off → Guard `macro_regime` → Queen `RegimeWeightAdjuster` 改 catalyst / sentiment 权重；`macro_adj` 直接加进 Guard 分（risk_adj 维，config 权重 0） | **是** |
+  | `vix` / `vix_regime` / `macro_score` | `fred_macro` 摘要与顺逆风文案、`report_formatters._build_macro`、仪表板宏观条 | 否（展示） |
+  | `vix_change_pct` | 只有 `fred_macro` 自己的「VIX 单日飙升 >10%」逆风文案（日报 markdown 前三条逆风） | 否（展示） |
+- **评分影响**（归档 `analysis-*-ml-*.json` 里 Guard 的 `macro_regime_votes` 重放；逐行先复现记录的 regime，293/293 一致）：
+  把 VIX 票换成当日收盘，**293 行里 38 行 Guard 宏观政体不同**（5/21 天：09-01 10/24 risk_on→neutral、09-03 3/12 risk_off→neutral、
+  09-18 9/12 neutral→risk_on、09-23 4/12 与 09-24 12/12 risk_on→neutral）；阈值翻转计数：19 份 CBOE 日报里 4 份的 Guard VIX 票与 `vix_regime` 翻转。
+  陈旧规则单独重放（09-24/25 断网 ⇒ 新代码下同样陈旧 ⇒ 不投票）：两天各 12/12 risk_on→neutral（票面只剩这一张，如 AMC 09-25 `{'risk_on': 1}`）。
+
+### Changed — `cboe_vix`：当日收盘 = 收盘后的延迟报价（`get_vix_observation`，`fred_macro` 的唯一入口）
+
+- 先试 `cdn.cboe.com/api/global/delayed_quotes/quotes/_VIX.json`，**只在**两件事同时成立时采用：钟已过 VIX 停算
+  （`is_trading_day.session_close_et` + 15 分钟，提前收盘日 13:15），**且**报价自带 `last_trade_time` 是当天、落在 [收盘, 收盘+30min]。
+  盘中 / 盘前 / CDN 发来的盘中陈旧文件（`cboe_options` v0.45.234 实测过同形）/ GTH 值一律拒收、退回 CSV 最后一行——**盘中值绝不冒充收盘**。
+  拒收原因原样带出：`before_close` / `not_trading_day` / `quote_unavailable` / `quote_bad_value` / `quote_vintage_mismatch` /
+  `quote_prev_close_disagrees` / `disabled_after_mismatch` / `clock_unavailable`。
+- **自动核对**：采用过的报价收盘记进 `PATHS.cache_dir/vix_quote_ledger.json`（调用时求值、`_LEDGER_PATH` 覆盖钩子，同 `_cache_path`），
+  每次取数先拿 CSV 官方收盘核对待核条目；不符 ⇒ WARNING + **14 天内停用报价**（fail-closed，退回 CSV）+ 写进 `vix_quote_check.mismatches`。
+  同场再拿报价的 `prev_day_close` 比 CSV 已公布的上一场收盘，不一致当场拒收。前一收盘优先用 CSV 官方值。
+- `get_vix_history` 记录这次怎么拿到的（`last_history_fetch()`：`download` / `cache_fresh` / `cache_stale` / `none`）；
+  下载失败退回过期缓存从 INFO 升为 **WARNING**。
+- `vix_staleness(as_of)` → `(lag_sessions, stale)`：`stale` = 观测日**早于扫描日的前一交易日**（CSV 常态落后一场不算陈旧，09-24/25 那种才算）；
+  判不了（无观测日）返回 `(None, None)`，不冒充新鲜。
+- 本版实测报价接口可用（今晨盘中 `current_price` 16.04 / `prev_day_close` 14.87 = 09-25 收盘 / `last_trade_time` 09:46 ET——盘中值，按规则会被拒）。
+  ⚠️ **收盘后 `last_trade_time` 的实际形状未见过**（待验证）：若 09-28 日报 `vix_feed_note` 为 `quote_vintage_mismatch`，报价会一直被拒、VIX 仍是 CSV 上一场，
+  只需按实际时间戳调窗口；拒收是 fail-closed，不会把错值送进评分。
+
+### Changed — `fred_macro`：新键 + `vix_change_pct` 对齐（降级路径同样带齐，值为 None）
+
+- 新键：`vix_feed`（`delayed_quote` / `history_csv`）、`vix_feed_note`、`vix_history_fetch`、`vix_lag_sessions`、`vix_stale`、`vix_quote_check`。
+  部分降级路径（09-24/25 那种）此前连 `vix_change_pct` 都没有，现在键齐全。
+- `vix_change_pct` 改为**与 `vix` 同一对观测**（`vix / vix_prev_close − 1`）；快照 VIX 没有配对前一收盘 ⇒ None；yfinance 路径照用它自己那份日 K；
+  取不到时旧默认 **0.0（冒充「持平」）→ None**。「VIX 单日飙升」逆风文案写明是哪两场（`09-09→09-10`）。
+
+### Changed — GuardBee：陈旧 VIX 不投票（用户决定）
+
+`vix_stale is True` ⇒ 同兜底常量处理，不进 `regime_votes`、不写 `details["vix"]`；`None`（判不了：快照 / yfinance 路径）照旧计票。
+`details` 始终写 `vix_feed` / `vix_as_of` / `vix_stale`（`vix_feed` 键的有无是世代边界印记）。
+
+### Added — 看得见
+
+- 日报宏观表 VIX 行写明「`<观测日>` 收盘」，陈旧时加「⚠️ 陈旧，未计入宏观投票」。
+- 仪表板宏观条：陈旧时涨跌位显示「陈旧」（title 写观测日）——此前涨跌被新鲜度窗口藏掉后，主数值看起来完全正常。
+
+### 世代边界（`ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-09-28", "v0.45.357", …)`）
+
+- 与 v0.45.334/340/349 同日 ⇒ `assess()` 切点不变；生产库副本只读实测 `n_all_samples=0` ⇒ **作废 0 条** final_score 样本。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.357"] = ("guard.macro_adj", "agent.GuardBeeSentinel.*")`：对归档实有 70 个信号名前后对比，
+  挂到本条 10 个，9 个本就切在 09-28 只换标签；**唯一后移 `guard.macro_adj`**（08-15→09-28，661 行，其中已成熟 420 条 / 14 个日期）。
+- 印记 `_BOUNDARY_MARKERS["v0.45.357"]`：Guard 宏观细节（归档键名 `vix_term_structure`）带 `vix_feed` 键（推送前生产归档 959/959 无）。
+- `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签扩为 `v0.45.334+v0.45.340+v0.45.349+v0.45.357`（risk_adj_score / volatility / final_score 是 ML 特征；该代仍 0 份报告）。
+- ⚠️ **日期前提**：须在 09-28 首次编排器运行前推到 origin/main 且生产 checkout 快进（推送前实测生产 `main...origin/main` = 0/8，无分叉）。
+
+### 测试
+
+`tests/test_vix_same_day.py`（新，47 项）：收盘门（含提前收盘日、四种错时间戳）、账本核对与 fail-closed / 老不符滚出窗口、陈旧七例（含跨劳动节、周一盘前）、
+观测组装（报价胜出且记账 / prev_close 不符拒收 / 盘前退 CSV / 过期缓存可见）、`fred_macro` 对齐五例 + 降级键齐全、Guard 陈旧不投票、日报 / 仪表板标记、边界印记（含真 Guard 输出正对照）。
+**12 个变异逐一让它变红**（含：变动退回 yfinance 腿、Guard 留陈旧票、去掉时间戳窗口 / 停算门 / 核对 / 同场自检 / fail-closed、陈旧阈值改成落后一场、两个展示标记、
+删 conftest 报价桩——后者由传输层闸在 teardown 抓到）。
+`conftest.stub_cboe_vix` 同时钉 `_download_quote`：报价路径只在美东 16:15 之后的交易日才走到，不钉则同一批测试下午红、上午绿。
+
+### 未做 / 另案
+
+- 补跑（`--date`）的快照 VIX（`cloud_snapshot_cboe`）同样是上一场收盘（08-27/28/31 三份实测落后一场）：来源是云端 `cboe_fetcher` → `get_vix_spot()` 读的 CSV，本版未动，另开任务。
+- `_cache_fresh` 的 6h TTL：20:30 ET 之后、距上次下载不足 6h 的手动重跑仍读到缺当日行的缓存（`vix_lag_sessions=1`，如实标出，不算陈旧）。
+- 09-02 那份 17:10 ET 拿到当日行的原因待验证。
 
 ## [0.45.356] — 2026-09-28 — Added：编排器纳入版本控制·阶段 2——`deploy_orchestrator.py` 部署工具（关卡 + 漂移检查 + 原子替换；**未接入编排器**，阶段 3 另版）
 
