@@ -85,7 +85,7 @@ def classify(dates, snaps, branch_min: float):
             "date": d, "ticker": t, "last_trade": lt_raw[11:19], "lag_s": lag_s,
             "main_flags": verdict == co.CLOSE_STALE_INTRADAY,
             # 分支口径（6d8f3579 `_freeze_lag_min` / 83bcab5c）：收盘后 last_trade 早于收盘超过 N 分钟
-            "branch_flags": lag_s > branch_min * 60,
+            "branch_flags": lag_s >= branch_min * 60,   # 分支原文 `lag >= _FREEZE_LAG_WARN_MIN`
             "price": px, "truth": truth, "err_pct": err,
         })
     return rows
@@ -94,7 +94,7 @@ def classify(dates, snaps, branch_min: float):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ref", default="origin/cloud-snapshots")
-    ap.add_argument("--branch-min", type=float, default=120.0, help="分支的冻结阈值（分钟）")
+    ap.add_argument("--branch-min", type=float, default=120.0, help="分支的冻结阈值（分钟，含等号）")
     ap.add_argument("--err-pct", type=float, default=0.05, help="与官方收盘偏离多少算「价错」")
     ap.add_argument("--list", action="store_true", help="列出分支漏判的价错行")
     args = ap.parse_args()
@@ -107,7 +107,7 @@ def main() -> int:
     print(f"{args.ref}: {len(dates)} 天，{len(rows)} 份有 last_trade，{len(judged)} 份有次日真值")
     print(f"价错（偏离官方收盘 >{args.err_pct}%）：{len(bad)}")
     print(f"  main 60s 判陈旧：{sum(r['main_flags'] for r in rows)}，其中抓到价错 {sum(r['main_flags'] for r in bad)}")
-    print(f"  分支 >{args.branch_min:g}min：{sum(r['branch_flags'] for r in rows)}，"
+    print(f"  分支 ≥{args.branch_min:g}min：{sum(r['branch_flags'] for r in rows)}，"
           f"其中抓到价错 {sum(r['branch_flags'] for r in bad)}")
     print(f"  分支判出的 ⊆ main 判出的：{all(r['main_flags'] for r in rows if r['branch_flags'])}")
     print(f"  main 漏判的价错：{[(r['date'], r['ticker'], r['last_trade'], round(r['err_pct'], 3)) for r in bad if not r['main_flags']]}")

@@ -66,7 +66,7 @@ def _business_date() -> str:
     # 取墙上时钟、没有 --date 入口是**已评估过的现状**，不是遗漏（v0.45.354）。
     # 事后补跑某一天在结构上只有一个窗口：CBOE 只发「最新一场」的文件，D 的数据在
     # D+1 09:30 ET 开盘后就不可得了，而且内层 vintage 闸门（判据＝此刻应有的场次）
-    # 也会在开盘后拒掉 D。那个补跑工具（分支 claude/backfill-cloud-snapshot）没并进来的
+    # 也会在开盘后拒掉 D。那个补跑工具（提交 de4dcb8d，其分支 2026-09-28 已删）没并进来的
     # 理由、能补回的实测、以及真要做时该放在哪（云端 routine 开盘前补一轮，不是
     # 本机手工工具），都在 CHANGELOG v0.45.354。
     return datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
