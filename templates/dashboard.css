@@ -840,3 +840,13 @@ html:not(.dark) .bnav-item.active{color:var(--acc)}
 .acc-sig-yes{background:rgba(34,197,94,.15);color:var(--bull)}
 .acc-sig-no{background:rgba(148,163,184,.16);color:var(--tm)}
 .acc-kpi .kv em{font-style:normal;font-size:.5em;font-weight:600;opacity:.65;margin-left:4px}
+/* v0.45.367：过期数据横幅 / JS 报错浮层。原为「整条色块 + 固定前景」（琥珀底黑字、亮红底白字）——这种结构接令牌在暗色下
+   会变成白字压亮色，只能拆结构：中性底 + --tp 文字 + 语义色左边条与 ▲ 标记（与站点其余信号标记一致，emoji 不能着色）。 */
+.ah-stale-banner{position:sticky;top:0;z-index:9999;display:flex;justify-content:center;align-items:center;gap:8px;
+  padding:8px 16px;background:var(--surface2);color:var(--tp);border-bottom:0.5px solid var(--border);
+  border-left:3px solid var(--neut);font-size:14px;font-weight:600}
+.ah-err-toast{position:fixed;right:20px;z-index:99999;max-width:350px;padding:10px 16px;
+  background:var(--surface);color:var(--tp);border:0.5px solid var(--border);border-left:3px solid var(--bear);
+  border-radius:4px;font-size:13px;transition:opacity .3s}
+.ah-stale-banner .ah-mark{color:var(--neut)}
+.ah-err-toast .ah-mark{color:var(--bear);margin-right:6px}

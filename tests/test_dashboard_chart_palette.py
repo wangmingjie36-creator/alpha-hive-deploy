@@ -212,8 +212,8 @@ def test_series_count_matches_css():
 # 且与旁边已走令牌的文字两种绿。暗色下它们恰好等于暗色令牌值，所以换令牌暗色零变化。
 _DIRECTIONAL = re.compile(
     r"#(22c55e|ef4444|f59e0b|94a3b8|16a34a|f97316|F4A532)\b|rgba\(\s*(34,197,94|239,68,68|245,158,11|244,165,50)", re.I)
-# 唯一刻意保留：过期数据横幅（状态 UI，黑字压琥珀 9.78:1，两主题都可读）
-_ALLOWED_LINES = ("banner.style.cssText='background:#f59e0b;color:#000;",)
+# v0.45.367 起横幅也走令牌，不再有白名单
+_ALLOWED_LINES = ()
 
 
 def test_no_directional_hex_in_dashboard_js():
@@ -248,3 +248,22 @@ def test_axis_ticks_and_grid_use_tokens():
     assert not re.search(r"rgba\((0,0,0,\.(55|06)|255,255,255,\.(65|07))\)", code), "坐标轴 / 网格又写死了黑白"
     assert len(re.findall(r"(?:const|var) tc2?=_tok\('--ts'\);", code)) == 6
     assert len(re.findall(r"(?:const|var) gc2?=_tokA\('--border',\.5\);", code)) == 6
+
+
+def test_dashboard_js_has_no_color_literals_at_all():
+    """v0.45.367：横幅与报错浮层也改走 CSS 类后，dashboard.js 代码里不再有任何颜色字面量。
+    唯一例外是 _tokA 拼 rgba 字符串的那一行（它把令牌 hex 转成带透明度的 rgba）。"""
+    code = _strip_comments(JS, "js")
+    lits = [(i, m.group(0)) for i, line in enumerate(code.split("\n"), 1)
+            if "function _tokA" not in line and "return 'rgba('" not in line
+            for m in re.finditer(r"#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3}\b(?![0-9a-fA-F-])|rgba?\(\s*\d", line)]
+    assert not lits, f"dashboard.js 又出现颜色字面量，改用 _tok / CSS 类：{lits}"
+
+
+@pytest.mark.parametrize("cls,sem", [(".ah-stale-banner", "--neut"), (".ah-err-toast", "--bear")])
+def test_status_ui_is_neutral_surface_with_semantic_bar(cls, sem):
+    """整条色块 + 固定前景在暗色下接令牌会变成白字压亮色——结构必须是中性底 + 语义色左边条。"""
+    body = re.search(re.escape(cls) + r"\{([^}]*)\}", CSS).group(1)
+    assert "background:var(--surface" in body and "color:var(--tp)" in body
+    assert f"border-left:3px solid var({sem})" in body
+    assert "box-shadow" not in body

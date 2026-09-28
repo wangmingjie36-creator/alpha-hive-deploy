@@ -9,12 +9,12 @@ window.AH=window.AH||{};
     if(errCount>=maxToast)return;
     errCount++;
     var t=document.createElement('div');
+    // v0.45.367：样式挪进 dashboard.css 的 .ah-err-toast（中性底 + --bear 左边条，暗色下不再是白字压亮红）；
+    // 这里只留随条数变化的 bottom。报错文本走 textContent，不拼 HTML。
     t.className='ah-err-toast';
-    t.textContent='\u26a0\ufe0f '+msg;
-    t.style.cssText='position:fixed;bottom:'+(20+errCount*50)+'px;right:20px;'
-      +'background:#ff4444;color:#fff;padding:10px 16px;border-radius:8px;'
-      +'font-size:13px;z-index:99999;opacity:0.95;max-width:350px;'
-      +'box-shadow:0 2px 8px rgba(0,0,0,.3);transition:opacity .3s';
+    var mk=document.createElement('span');mk.className='ah-mark';mk.textContent='\u25b2';
+    t.appendChild(mk);t.appendChild(document.createTextNode(msg));
+    t.style.bottom=(20+errCount*50)+'px';
     document.body.appendChild(t);
     setTimeout(function(){t.style.opacity='0';setTimeout(function(){t.remove();errCount--;},400)},6000);
   }
@@ -1355,11 +1355,12 @@ function toggleKbHelp(){
     var ageHours=(Date.now()-genTime)/(1000*60*60);
     if(ageHours>24){
       var banner=document.createElement('div');
+      // v0.45.367：样式在 dashboard.css 的 .ah-stale-banner（中性底 + --neut 左边条），不再整条琥珀底。
       banner.className='ah-stale-banner';
-      banner.style.cssText='background:#f59e0b;color:#000;text-align:center;'
-        +'padding:8px 16px;font-size:14px;font-weight:600;position:sticky;top:0;z-index:9999';
-      banner.textContent='\u26a0\ufe0f \u6570\u636e\u53ef\u80fd\u5df2\u8fc7\u671f\uff08\u4e0a\u6b21\u66f4\u65b0: '
-        +new Date(genTime).toLocaleString('zh-CN')+'\uff09';
+      var bmk=document.createElement('span');bmk.className='ah-mark';bmk.textContent='\u25b2';
+      banner.appendChild(bmk);
+      banner.appendChild(document.createTextNode('\u6570\u636e\u53ef\u80fd\u5df2\u8fc7\u671f\uff08\u4e0a\u6b21\u66f4\u65b0: '
+        +new Date(genTime).toLocaleString('zh-CN')+'\uff09'));
       document.body.prepend(banner);
     }
   }
