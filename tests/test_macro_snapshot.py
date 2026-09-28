@@ -188,10 +188,13 @@ class TestMacroContextUsesSnapshot:
                             lambda yf, sym, as_of: _FakeHist(rows))
 
     def test_vix_comes_from_snapshot_and_is_labelled(self, monkeypatch):
-        """VIX 必须来自快照，且 vix_source 要能区分「今天问的」与「快照里的」。
+        """VIX 必须是目标日的，且 vix_source 要能区分「今天问的」与「快照里的」。
 
         两者同形（都是 float），标成同一个 "cboe" 就无从分辨报告里的 VIX
         属于哪一天 —— 正是 MEMORY「读 vix 前先看 vix_source」要防的事。
+
+        v0.45.366：快照值降为**退路**（主路径 = CBOE CSV 里 D 那一行，见
+        `tests/test_backfill_macro_asof.py`）。本类的 `stub_cboe_vix` 让 CSV 取不到 ⇒ 这里测的正是退路。
         """
         self._patch(monkeypatch)
         monkeypatch.setattr(fm, "_fetch_fred_series", lambda *a, **k: {}, raising=False)
@@ -252,7 +255,12 @@ class TestMacroContextUsesSnapshot:
         assert r.get("as_of") == "2026-09-01"
 
     def test_snapshot_without_vix_does_not_fake_one(self, monkeypatch):
-        """快照里没有 vix_term 时不得凭空造一个 —— 退回既有降级链。"""
+        """快照里没有 vix_term 时不得凭空造一个 —— 退回既有降级链。
+
+        v0.45.366：「既有降级链」**不含**实时 `get_vix_observation()`（那会把运行当天的 VIX 贴到 D 上、
+        标 cboe）。本条在 `stub_cboe_vix` 下拿不到实时值、区分不了这件事；由
+        `test_backfill_macro_asof.py::TestFredMacroBackfill::test_snapshot_mode_never_falls_through_to_live_vix` 守。
+        """
         self._patch(monkeypatch)
         fm.set_macro_snapshot("2026-08-27", {"cboe": {}})
         r = fm.get_macro_context()

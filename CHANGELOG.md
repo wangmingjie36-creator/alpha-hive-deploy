@@ -51,7 +51,94 @@ v0.45.361 列为「没必要」的最后两项，用户要求也改。两者原�
   「▲数据可能已过期（上次更新: 2026/9/11 13:00:00）」为 body 第一个元素，`--surface2` 底、`--tp` 字、`--neut` 边条。
 - 全套 **6488 passed、2 xfailed**，84 deselected（同 v0.45.352）。网站下一次日报部署后生效。
 
-## [0.45.366] — 2026-09-28 — 占位（进行中：补跑快照路径 VIX 落后一场——量化 + 修法待用户选）
+## [0.45.366] — 2026-09-28 — Fixed/Changed：补跑（`--date`）的 Guard 宏观票对齐目标日——VIX 改取 CBOE CSV 里 D 那一行并计票（旧：快照值落后一场且不计票）；期限结构读快照、FOMC 按 D 数、板块按 D 对齐（旧：三者都是运行当天的）；快照模式绝不回落实时 VIX。**只改补跑，实时逐票不变**；世代边界并入 09-28（作废 0 条）
+
+承 v0.45.357「未做 / 另案」第一条。用户 2026-09-28 在对话里决定：修法 (a)「CSV 目标日官方收盘」、补跑 VIX **计票**、同形泄漏**本版一起修**。
+
+### 取证（全部只读；真值 = 新拉的 CBOE `VIX_History.csv`（存 scratchpad，未写生产缓存），交易日按 `is_trading_day` 数）
+
+- **来源链核实**：云端 `cloud_snapshot_fetch` → `CBOEDailyFetcher.fetch_all`（先 pcce、后 vix_term）→ `fetch_vix_term_structure` →
+  `vix_term_structure.get_vix_term_structure()._get_spot_vix()`（yfinance `^VIX`），为 None 时兜底 `cboe_vix.get_vix_spot()`（CSV 最后一行）；
+  **VX 期货 ≥3 个才写 spot**，否则整组落 15.0/15.75/16.5、标 `default_fallback`。`market.json` 的 `vix_term` **不记观测日**。
+- **量化**：
+  | 集合 | n | 当日 | 落后 1 场 |
+  |---|---|---|---|
+  | `cloud_snapshot_cboe` 日报（08-27/28/31，全部补跑日报） | 3 | 0 | **3** |
+  | `market.json` 08-26 ~ 09-11 | 12 | 0 | **12** |
+  | `market.json` 09-14 ~ 09-25 | 9 | **9** | 0 |
+
+  09-08 那份（15.30）起初对不上任何交易日收盘——**CSV 里有 09-07（劳动节）一行 15.30**，按日历日匹配才对上（落后一场）。
+  09-14 起转为当日：同刻同一 CDN 的 SKEW CSV 仍是上一场（09-14 快照 `skew.date=09-11`）、同周本机 17:00 ET 实时扫描读 CSV 仍落后一场
+  ⇒ **不是 CSV 来的，疑为 yfinance 腿**（`_get_spot_vix`）；机制**待验证**——`yf_gate` 在云端路径上没装，我最初「P/C 先走 yfinance 触发闸门冷却」的解释不成立。
+  09-14 正是云端首次跑 v0.45.241（P/C 改走 CBOE、不再先打 yfinance）的日子，时间上吻合但未证实因果。
+- **疑似问题二（`default_fallback` 的 15.0 被当观测）**：**生产路径上不可能、历史上 0 次**——21/21 份快照都是 `vx_futures`，且 `load_market` 先把
+  `degraded_sections` 列出的段剔除。**但剔除本身造出另一个隐患**（离线复现，socket 探针在场）：
+  - B/C：快照缺 `vix_term`（被剔除）或整份 market.json 缺失 ⇒ `fred_macro` 落到实时 `get_vix_observation()` ⇒ 补跑 08-27 拿到**运行当天**的 16.04、标 `cboe`、`vix_stale=False` ⇒ Guard 计票；
+  - D：快照有 VIX + 当日其余宏观全灭 ⇒ 部分降级路径写死 `vix_source="cboe"` ⇒ 无观测日的快照值被冒标成实时观测、进 Guard 计票。
+  - 三者历史上均 0 次触发（3 份补跑日报都走了快照、`data_source` 非空）。
+- **GuardBee 补跑不计 VIX 票**：已证实（`cloud_snapshot_cboe` 不在 `("cboe","yfinance")` 白名单）。另查出同形三处：Guard 的 **VIX 期限结构**（backwardation ⇒ risk_off +2）
+  直接调实时 `get_vix_term_structure()`、**FOMC 临近**（≤3 天 ⇒ risk_off +1）按运行当天数、**板块轮动**（`fred_macro._fetch_sector_rotation`）`period="5d"` 恒取最近 5 天
+  ——补跑时三者都是运行当天的。另：Guard 的 `steep_contango ⇒ risk_on +1` 是**死分支**（上游只产 contango/backwardation/flat/unknown，03-16 引入起从未出现）。
+- **评分影响**（归档 `macro_regime_votes` 重放，先复现记录的 regime：58/58 一致）：三天补跑 54 行 Guard（08-31 另有 4 行是当天 17:40 ET 实时残留、已带 VIX 票，不计）
+  加一张 D 官方收盘的 VIX 票（14.51 / 14.43 / 14.92，均 <15 ⇒ risk_on）⇒ **14/54 行 neutral→risk_on**（08-27 10/30、08-28 1/12、08-31 3/12）。
+  期限结构 / FOMC / 板块三项未单独重放：归档里 Guard 记的就是运行当天值，D 当天的票面无记录可对。
+- **读者清单**：`vix` → Guard `_calc_macro_adjustment`（`macro_regime` → Queen `RegimeWeightAdjuster` 改 catalyst / sentiment 权重；`macro_adj` 直接加进 Guard 分）；
+  `vix_source` → Guard 白名单、仪表板 `_OBSERVED_VIX_SOURCES=("cboe",)`；两处白名单**都没改**（新值照实时标 `cboe`，观测日由 `vix_as_of` 承载）。
+
+### Changed — `cboe_vix.get_vix_observation_asof(D)`（新）
+
+CSV 里**按日期精确取** D 那一行（绝不取最后一行）；缺 D 行 ⇒ 强制重下一次；仍缺 ⇒ `vix=None`、`quote_reason="asof_row_missing"` + WARNING。
+不走延迟报价（`quote_reason="backfill"`）；新鲜度按 D 判（`lag_sessions=0`、`stale=False`——`vix_staleness` 按「此刻」判，会把任何过去的 D 判成陈旧、Guard 一票不投）；
+前一收盘取 D 的**前一交易日**那一行（CSV 含非交易日行，「上一行」不一定是上一交易日）。键与 `get_vix_observation` 同形。
+
+### Changed — `fred_macro` 补跑口径
+
+- VIX：CSV 的 D 行 ⇒ `vix_source="cboe"`、`vix_feed="history_csv_asof"`、`vix_as_of=D`、带 `vix_prev_close` / `vix_change_pct`；取不到才退回快照 `vix_spot`
+  （`cloud_snapshot_cboe`、`vix_feed="cloud_snapshot"`、`vix_feed_note` 写原因；**并判 `source != "default_fallback"` 与合理区间**，不再只判 `> 0`）。
+- **快照模式绝不落到实时 `get_vix_observation()`**（修 B/C）；部分降级路径的标签与正常路径同一判定（修 D）。
+- 板块轮动 `_fetch_sector_rotation(yf, as_of=D)`：`_asof_history` 对齐 D、窗口取末 5 根（同实时宽度）、末根须**正是 D**（否则不计入、进 `not_on_as_of` + WARNING）、
+  不读不写单 ETF 缓存（缓存只按 ETF 键）。实时口径输出不变。
+
+### Changed — GuardBee 补跑口径（判据 = `fred_macro.get_macro_snapshot()`，与期权链供给器同进同出）
+
+- VIX 期限结构读快照 `cboe.vix_term.term_structure`（source 为 `vx_futures` 等非兜底值时）；缺该段 ⇒ 不投票、`vix_term_source="cloud_snapshot_unavailable"`，**不回落实时**。
+- FOMC：`get_next_event(ref_date=D)`、`get_calendar_health(ref_date=D)`。
+- 删 `steep_contango` 死分支（不改任何分数）。
+- `details` 新键：`macro_as_of_mode`（`realtime` / `backfill`，两种口径都写）、`macro_ref_date`、`vix_term_source`（`live` / `cloud_snapshot` / `cloud_snapshot_unavailable`）。
+- 实时口径每一票不变（`TestGuardLiveUnchanged` 逐值钉住）。
+
+### 世代边界（`ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-09-28", "v0.45.366", …)`）
+
+- 与 v0.45.334/340/349/357 同日 ⇒ `assess()` 切点不变；生产 `pheromone.db` 备份副本（SQLite backup API，只读源）实测 `n_all_samples=0`（predictions 最新 09-25）⇒ **作废 0 条**。
+  补跑行按目标日落盘：D < 09-28 的本就在旧世代外，D ≥ 09-28 的补跑只可能在本版部署后发生 ⇒ 09-28 对补跑样本恰好切得开。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.366"] = ("guard.macro_adj", "agent.GuardBeeSentinel.*")`：对归档实有 70 个信号名前后对比，**0 个后移**、10 个只换标签。
+- 印记 `_BOUNDARY_MARKERS["v0.45.366"]`：Guard 宏观细节带 `macro_as_of_mode` 键——**实时与补跑都写**（只在补跑行写会让每份实时归档被判「边界后无印记」⇒ 恒报 too_early，
+  补跑行按 D 落盘又会在 D < 边界时报 too_late）。它证明「新代码自边界日起在生产跑」，对只改补跑的本条是充分条件。
+- `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签扩为 `…+v0.45.357+v0.45.366`。
+- 顺带履行 `TestCohortReasonsAreNotRewrittenInPlace` 的交接：补钉 v0.45.349 / v0.45.357 的原因摘要（取 origin/main 574e5505 原文；同法算出的 v0.45.340 摘要与既有钉值逐位相同，作方法正对照），`LAST_FROZEN` → v0.45.357。
+- ⚠️ **日期前提**：须在 09-28 14:00 PT 扫描前进 origin/main 且生产 checkout 快进；否则 09-28 实时归档无印记 ⇒ `boundary_too_early`——那时**不要**顺延日期（实时样本本未变，顺延只会白切 09-28），改为追加更正条目并撤掉印记。
+
+### 测试
+
+`tests/test_backfill_macro_asof.py`（新，39 项）：as-of 取行 / 前一交易日 / 重下一次 / 缺行不冒充 / 不碰报价 / 新鲜度按 D；fred_macro 主路径与退路、B/C/D 三隐患、兜底值不当观测、板块 as_of 透传；
+板块对齐（末 5 根、末根须为 D、缓存不读不写）；Guard 计票（含不打桩的端到端）、期限结构读快照 / 缺段不投不回落、FOMC 按 D（含真日历正对照）、印记两种口径都写；实时逐票不变；边界印记与判别器。
+**31 个变异逐一真跑、全部变红且命中预期用例**（`PYTHONDONTWRITEBYTECODE=1` + 每轮清 `__pycache__`、`--maxfail=1000`、锚点唯一断言、每轮 passed+failed == collected 292、字节级还原核对）。
+`test_macro_snapshot.py` 两条的 docstring 改写（`test_vix_comes_from_snapshot_and_is_labelled` 现测的是退路；`test_snapshot_without_vix_does_not_fake_one` 在 `stub_cboe_vix` 下区分不了 B/C，改由新文件守）。
+
+**新增 conftest 守卫 `_no_leaked_macro_snapshot`**：宏观快照是进程级全局，本版起 GuardBee 读它判「是不是补跑」⇒ 一条测试忘了卸，之后同进程里调 Guard 的测试都静默跑在补跑口径下、绿不绿取决于顺序。
+teardown 发现仍装着 ⇒ 卸掉并让**留下它的那条**报错。首跑即点名真实泄漏者 `test_vix_same_day::TestFredMacroAlignment::test_no_pair_means_none_not_zero`
+（其 `_offline` 只在 setup 卸、teardown 不卸，此前靠下一条的 setup 兜着），已补 teardown 卸载——这就是该守卫的正对照。
+
+全量（`-m "not integration and not network"`）：1 条红为既有、与本版无关——`test_economic_calendar::TestCoverageHorizon`（NFP 表只覆盖到 2026-12-04，剩 67 天 < 阈值 90；
+BLS 2027 日程尚未发布，按设计要人去抄新日程，**不是调阈值**，见 auto-memory `alpha-hive-hardcoded-calendar`）。
+
+### 未做 / 另案
+
+- 09-14 起快照 `vix_spot` 转为当日的机制待验证（疑 yfinance 腿）；补跑已不依赖它。
+- `--date D --no-snapshot`：宏观与 Guard 仍全是运行当天口径（既有设计，该路径本就打印「不可与正常扫描日同池比较」），本版未动。
+- 快照模式下 CSV 与快照都取不到时 VIX 走 `_asof_history` 的 yfinance 腿，该腿**不核末根是否为 D**（与其余宏观字段同一既有形状），本版未动。
+- 实时 CSV 路径的前一收盘取「CSV 上一行」，节后首日会取到假日行（如 09-08 配 09-07 的 15.30）；只影响展示用的 `vix_change_pct`，本版未动。
+
 
 ## [0.45.365] — 2026-09-28 — 图表坐标轴刻度换 `--ts`、网格线换半透明 `--border`
 

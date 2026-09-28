@@ -739,6 +739,47 @@ _COHORT_HISTORY = [
      "共振加成前瞻检验从记录的 agent_details 起算（Guard 的政体是记录值），无需修订 replay。"
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登记（risk_adj_score / volatility / final_score 是 ML 特征），"
      "09-28 那条合并标签扩为 `v0.45.334+v0.45.340+v0.45.349+v0.45.357`。"),
+    ("2026-09-28", "v0.45.366",
+     "补跑（`--date D`，云端快照模式）的 GuardBee 宏观票对齐到目标日（用户 2026-09-28 决定：修法 (a)、VIX 计票、"
+     "同形泄漏同版修）。**只改补跑路径，实时扫描逐票不变。** "
+     "① `fred_macro` 补跑 VIX 改取 CBOE `VIX_History.csv` 里 **D 那一行**（`cboe_vix.get_vix_observation_asof`，"
+     "绝不取最后一行），标 `vix_source=cboe` / `vix_feed=history_csv_asof`、`vix_stale=False` ⇒ Guard 照实时口径计票；"
+     "CSV 缺 D 行（强制重下一次仍缺）才退回快照 `vix_spot`、标 `cloud_snapshot_cboe`（不计票，同旧）。"
+     "旧口径：补跑一律用快照值且 **不计票**（`cloud_snapshot_cboe` 不在 Guard 的 `(\"cboe\",\"yfinance\")` 白名单里）。"
+     "② Guard 的 VIX 期限结构（backwardation ⇒ risk_off +2）补跑改读快照 `market.json` 的 `cboe.vix_term.term_structure`"
+     "（旧：实时 `get_vix_term_structure()` = 运行当天的曲线）；快照缺该段 ⇒ 不投票、不回落实时。"
+     "③ FOMC 临近（≤3 天 ⇒ risk_off +1）补跑按 D 数（旧：按运行当天）。"
+     "④ 板块轮动（`fred_macro._fetch_sector_rotation`）补跑按 `_asof_history` 对齐 D、末根须为 D、不读写单 ETF 缓存"
+     "（旧：`period=\"5d\"` 恒取最近 5 天）。"
+     "另：`steep_contango` 分支删除（上游从不产出该值，死分支，不改分）；快照模式绝不回落实时 VIX"
+     "（旧：`load_market` 剔除兜底段或 market.json 缺失时，运行当天的 VIX 被贴到 D 上、标 `cboe`、`vix_stale=False` ⇒ "
+     "会计票——离线复现，历史 0 次触发）；部分降级路径的 VIX 标签不再写死 `cboe`（同，0 次触发）。"
+     "**依据（2026-09-28 只读实测，真值 = 新拉的 CSV，交易日按 `is_trading_day` 数）**：`cloud_snapshot_cboe` 日报 3 份"
+     "（08-27/28/31）全部落后一场；`market.json` 08-26~09-11 12 份全部落后一场（09-08 那份 = CSV 的 09-07 劳动节行 15.30），"
+     "09-14~09-25 9 份为当日（同刻 SKEW CSV 仍是上一场 ⇒ 不是 CSV 来的，疑 yfinance，待验证；快照不记观测日，事前无从分辨）。"
+     "`default_fallback` 的 15.0 从未进过快照（21/21 份 `vx_futures`）。"
+     "**幅度**：按归档 `macro_regime_votes` 重放三天补跑（先复现记录的 regime，58/58 一致；其中 08-31 有 4 行是当天实时"
+     "残留、已带 VIX 票，不计），给 54 行补跑 Guard 加一张 D 官方收盘的 VIX 票（14.51 / 14.43 / 14.92，均 <15 ⇒ risk_on）："
+     "**14/54 行 neutral→risk_on**（08-27 10/30、08-28 1/12、08-31 3/12）。②③④未单独重放（归档里 Guard 的期限结构"
+     "是运行当天值，D 当天的票面无记录可对）。政体经 `RegimeWeightAdjuster` 改 catalyst / sentiment 权重、"
+     "`macro_adj` 直接加进 Guard 分。"
+     "**边界代价**：与 v0.45.334/340/349/357 同日 ⇒ `assess()` 切点不变；生产 `pheromone.db` 备份副本只读实测 "
+     "`n_all_samples=0`（predictions 最新 09-25）⇒ **作废 0 条**。补跑行按目标日 D 落盘：D < 09-28 的补跑本就在旧世代外，"
+     "D ≥ 09-28 的补跑只可能在本版部署之后发生 ⇒ 09-28 这个日期对补跑样本恰好切得开。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.366\"]` = `guard.macro_adj` + `agent.GuardBeeSentinel.*`"
+     "（与 v0.45.357 同集合、同日；`generation_boundaries` 对归档实有 70 个信号名前后对比：**0 个后移**，"
+     "10 个只换标签——Guard / Bear 分与方向、bear.score、composite.*、两个退役名）。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.366\"]`：Guard 宏观细节（归档键名 `vix_term_structure`）带 `macro_as_of_mode` 键 ——"
+     "**实时与补跑两种口径都写**：本条只改补跑，若印记只出现在补跑行，每一份实时归档都会被判「边界之后无印记」⇒ "
+     "恒报 boundary_too_early，而补跑行按 D 落盘还会在 D < 边界时报 boundary_too_late；两头都是误报。"
+     "所以印记证明的是「新代码自边界日起在生产跑」——对只改补跑的本条，这是充分条件。"
+     "⚠️ **日期前提**（同 v0.45.349/357）：须在 2026-09-28 14:00 PT 扫描前推到 `origin/main` 且生产 checkout 已快进；"
+     "否则 09-28 实时归档无印记 ⇒ boundary_too_early —— 那时**不要**顺延日期（实时样本本就未变，顺延只会白切 09-28），"
+     "改为追加更正条目说明并撤掉本条印记。"
+     "**前瞻检验**：维度 IC 协议 H1 / H2 均不在本条闭包里、早于 FORWARD_START 2026-10-12 ⇒ 不截断；"
+     "共振加成前瞻检验从记录的 agent_details 起算（Guard 政体是记录值），无需修订 replay。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段（risk_adj_score / volatility / "
+     "final_score 是 ML 特征；只在补跑行变）。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -940,6 +981,19 @@ def _marker_guard_vix_feed(d: dict) -> bool:
     return isinstance(vt, dict) and "vix_feed" in vt
 
 
+def _marker_guard_macro_as_of_mode(d: dict) -> bool:
+    """v0.45.366：GuardBee 宏观细节（归档键名 `vix_term_structure`）带 `macro_as_of_mode` 键。
+
+    认「键存在」（同 v0.45.340/357）：Guard 在实时（`realtime`）与补跑（`backfill`）两种口径下都写、
+    宏观整个取不到时也写；此前的归档一律没有。⚠️ 两种口径都写是刻意的——本条只改补跑，
+    只在补跑行写的印记会让每份实时归档都被判「边界之后无印记」（见 `_COHORT_HISTORY` 本条原因）。
+    """
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    vt = det.get("vix_term_structure") if isinstance(det, dict) else None
+    return isinstance(vt, dict) and "macro_as_of_mode" in vt
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -957,6 +1011,8 @@ _BOUNDARY_MARKERS = {
                   _marker_oracle_gex_signal_neutralized),
     "v0.45.357": ("agent_details.GuardBeeSentinel.details.vix_term_structure 带 vix_feed 键",
                   _marker_guard_vix_feed),
+    "v0.45.366": ("agent_details.GuardBeeSentinel.details.vix_term_structure 带 macro_as_of_mode 键",
+                  _marker_guard_macro_as_of_mode),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
