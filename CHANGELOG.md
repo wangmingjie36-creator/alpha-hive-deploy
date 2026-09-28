@@ -301,7 +301,9 @@ v0.45.226 对账、v0.45.350 复核：这三处改动一直停在分支上（`cl
   要先确认各自的定义来源再立守卫。
 - **发现、未修（另开任务）**：日报里的 VIX 系统性地是上一交易日收盘；CBOE 缓存下载失败时静默用陈旧缓存且仍标 `cboe`
   （`cboe_vix.get_vix_history`「用陈旧缓存也好过没有」）；`vix_change_pct` 与 `vix` 错位一天，而它喂 `macro_headwinds` 的「VIX 单日飙升」判断。
-- 两个分支（`claude/happy-cannon-bc377f`、`claude/nostalgic-cray-1fed0e`，本地 + origin）尚未删除：删分支是对外动作，待用户确认。
+- **两个分支已删除（2026-09-28，用户确认后；本地 + origin）**：`claude/happy-cannon-bc377f` tip `6024fbf00a64a4575c2c5442cccd9ec59319fcdf`（含 `3581d8d6` v0.45.77、`6024fbf0` v0.45.78），`claude/nostalgic-cray-1fed0e` tip `e8bac95b3af66a742697763bcad46de994e8fed6`。origin 端带 `--force-with-lease` 删（删前复核 tip 未变、无 worktree 占用）。
+  删前逐行核对（三个提交新增的每一行代码，去空白后在 origin/main 对应文件里查）：`3581d8d6` 163 行中 161 行已在 main，余 2 行是一句注释措辞与 `_fg_color`（v0.45.231 已改走 `_fg_cls`）；`6024fbf0` 59 行中 41 行不在，全是刻意未采用的写法（跨日报直接相减的宏观涨跌、未过 `_report_stem_date` 的 stem 去前缀、`scoresChart` 两份 hex 副本）；`e8bac95b` 9 行中 6 行不在，全是被否决的 `--tm`。⇒ **分支独有内容 = 被否决的写法 + 原始 CHANGELOG 正文**，没有该并未并的改动。
+  ⚠️ 上面引用的原提交 SHA 此后无分支引用，本地会被 gc 回收、GitHub 按 SHA 可访问多久无保证——原始正文不再承诺可取回。
 - **跑全套时撞见、未处理（不是本版造成）**：生产部署的 `~/.claude/scripts/alpha-hive-orchestrator.sh` 于 09-28 02:03 被改过，blob `9905c98` 不在 origin/main 该文件任何一版里（main 最新一版是 01:36 的 v0.45.353）⇒ `test_orchestrator_deployed_matches_repo` 判 drift。多半是并行的编排器 session 直接改了部署副本或部署了未推送的版本；已告知用户，未动。
 
 ## [0.45.351] — 2026-09-28 — Fixed：gh-pages 重试「假成功」（未经校验的父提交不再能产出 success；本地 gh-pages 只在推送成功后前移）；gh-pages 结局第一次进 status.json / 告警 / 编排器 Step 5；CDN 检查不再替推送背书。Added：推送失败时的 git 传输探测（为「是否切 ssh.github.com:443」攒判据）。发现：scan_timing 自 09-14 起每个扫描日都没并进 status.json
