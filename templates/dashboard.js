@@ -277,11 +277,13 @@ function _tokA(n,a){var h=_tok(n),m=/^#([0-9a-f]{6})$/i.exec(h);if(!m)return h;
       const fgCtx=document.getElementById('fgChart');
       if(!fgCtx)return;
       const fv=__AH__.fv;
-      const fc=fv<=25?'#ef4444':fv<=45?'#f97316':fv<=55?'#f59e0b':fv<=75?'#22c55e':'#16a34a';
+      // v0.45.361：与宏观条 `_fg_cls` 同阈值同令牌（≤45 恐惧 / ≤55 中性 / 其余贪婪）。旧的 5 档硬编码色让同一个值
+      // 在同一页上两种颜色（F&G 33：宏观条 --bear，这里 #f97316 橙）。改阈值必须两边一起改。
+      const fc=fv<=45?_tok('--bear'):fv<=55?_tok('--neut'):_tok('--bull');
       const fl=__AH__.fg_label;
       chartInstances.push(new Chart(fgCtx,{
         type:'doughnut',
-        data:{datasets:[{data:[fv,100-fv],backgroundColor:[fc,dark?'#2a3050':'#e8ecf3'],
+        data:{datasets:[{data:[fv,100-fv],backgroundColor:[fc,_tok('--border')],
                            borderWidth:0,circumference:180,rotation:-90}]},
         options:{responsive:true,maintainAspectRatio:false,cutout:'72%',
                  plugins:{legend:{display:false},tooltip:{enabled:false}}},
@@ -334,7 +336,7 @@ function _tokA(n,a){var h=_tok(n),m=/^#([0-9a-f]{6})$/i.exec(h);if(!m)return h;
         type:'doughnut',
         data:{labels:['看多','看空','中性'],
                datasets:[{data:dd,
-                           backgroundColor:['rgba(34,197,94,.85)','rgba(239,68,68,.85)','rgba(245,158,11,.85)'],
+                           backgroundColor:[_tok('--bull'),_tok('--bear'),_tok('--neut')],
                            borderColor:'transparent',borderWidth:0}]},
         options:{responsive:true,maintainAspectRatio:false,cutout:'58%',
                  plugins:{legend:{position:'bottom',labels:{color:tc,font:{size:10},boxWidth:11,padding:10}},
@@ -365,8 +367,8 @@ function _tokA(n,a){var h=_tok(n),m=/^#([0-9a-f]{6})$/i.exec(h);if(!m)return h;
       if(dateEl) dateEl.textContent=eq[0].date+' ~ '+eq[eq.length-1].date;
       const curEl=document.getElementById('eqCurrent');
       if(curEl) curEl.textContent=lastVal.toFixed(2);
-      const lineColor=up?'#22c55e':'#ef4444';
-      const fillColor=up?'rgba(34,197,94,.08)':'rgba(239,68,68,.08)';
+      const lineColor=up?_tok('--bull'):_tok('--bear');
+      const fillColor=up?_tokA('--bull',.08):_tokA('--bear',.08);
       chartInstances.push(new Chart(eqCtx,{
         type:'line',
         data:{labels:labels,datasets:[{data:idxData,
@@ -416,7 +418,7 @@ function _tokA(n,a){var h=_tok(n),m=/^#([0-9a-f]{6})$/i.exec(h);if(!m)return h;
                  if(!card)return;
                  const metrics=card.querySelectorAll('.cc-metric');
                  metrics.forEach(function(m,i){
-                   m.style.background=i===dimIdx?'rgba(244,165,50,.15)':'';
+                   m.style.background=i===dimIdx?_tokA('--acc',.12):'';
                  });
                  card.scrollIntoView({behavior:'smooth',block:'center'});
                },
@@ -498,7 +500,7 @@ window.AH.initAccDirChart=function(){
       datasets: [{
         label: '准确率 %',
         data: accs,
-        backgroundColor: ['#22c55e','#ef4444','#94a3b8'],
+        backgroundColor: [_tok('--bull'),_tok('--bear'),_tok('--neut')],
         borderRadius: 6,
         maxBarThickness: 40,
       }]
@@ -522,13 +524,12 @@ window.AH.initAccDirChart=function(){
   // 渲染收益率 pills
   const pillBox = document.getElementById('accDirRets');
   if (pillBox && rets.length) {
-    const colors = ['#22c55e','#ef4444','#94a3b8'];
     pillBox.innerHTML = dirs.map(function(d,i){
       const r = rets[i];
       if (r === undefined) return '';
       const sign = r >= 0 ? '+' : '';
-      const col = r >= 0 ? '#22c55e' : '#ef4444';
-      return '<span style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:20px;padding:4px 12px;font-size:.82em;color:'+col+'">'
+      const col = r >= 0 ? 'var(--bull)' : 'var(--bear)';
+      return '<span style="background:var(--surface2);border:0.5px solid var(--border);border-radius:20px;padding:4px 12px;font-size:.82em;color:'+col+'">'
         +d+' 均收益 '+sign+r.toFixed(2)+'%</span>';
     }).join('');
   }
@@ -574,13 +575,13 @@ window.AH.initAccWinTrend=function(){
   const labels = useByDir ? wbd.map(function(d){return d.week;}) : wd.map(function(d){return d.week;});
   const datasets = useByDir ? [
     {label:'看多胜率%', data:wbd.map(function(d){return d.bullish;}),
-      borderColor:'#22c55e', backgroundColor:'rgba(34,197,94,.08)', fill:false,
+      borderColor:_tok('--bull'), backgroundColor:_tokA('--bull',.08), fill:false,
       tension:.3, pointRadius:3, borderWidth:2, spanGaps:true},
     {label:'看空胜率%', data:wbd.map(function(d){return d.bearish;}),
-      borderColor:'#ef4444', backgroundColor:'rgba(239,68,68,.08)', fill:false,
+      borderColor:_tok('--bear'), backgroundColor:_tokA('--bear',.08), fill:false,
       tension:.3, pointRadius:3, borderWidth:2, spanGaps:true},
     {label:'中性胜率%', data:wbd.map(function(d){return d.neutral;}),
-      borderColor:'#94a3b8', backgroundColor:'transparent', fill:false,
+      borderColor:_tok('--neut'), backgroundColor:'transparent', fill:false,
       borderDash:[4,3], tension:.3, pointRadius:2, borderWidth:1.5, spanGaps:true}
   ] : [
     {label:'胜率%', data:wd.map(function(d){return d.accuracy;}),
@@ -775,7 +776,7 @@ window.AH.initEquityCurve=function(){
       labels:labels,
       datasets:[
         {label:'Net (真实可交易)', data:netData,
-         borderColor:'#22c55e', backgroundColor:'rgba(34,197,94,.08)', fill:true,
+         borderColor:_tok('--bull'), backgroundColor:_tokA('--bull',.08), fill:true,
          tension:.25, pointRadius:0, borderWidth:2.5, order:1},
         {label:'Gross (不扣成本)', data:grossData,
          borderColor:_tok('--acc'), backgroundColor:'transparent', fill:false,
@@ -928,7 +929,7 @@ window.AH.initFgTrend=function(){
       labels:_fgTrendHist.map(function(d){return d.date.slice(5);}),
       datasets:[{
         data:_fgTrendHist.map(function(d){return d.value;}),
-        borderColor:'#F4A532',backgroundColor:'rgba(244,165,50,.1)',
+        borderColor:_tok('--acc'),backgroundColor:_tokA('--acc',.1),
         fill:true,tension:.3,pointRadius:_fgSingle?5:2,borderWidth:1.5
       }]
     },
@@ -1212,7 +1213,7 @@ function toggleKbHelp(){
     rows.forEach(function(r){
       const tickerCell=r.cells[1];
       if(tickerCell&&tickerCell.textContent.trim()===ticker){
-        r.style.background='rgba(244,165,50,.12)';
+        r.style.background=_tokA('--acc',.12);
         setTimeout(function(){r.style.background='';},2000);
       }
     });

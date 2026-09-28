@@ -205,3 +205,30 @@ def test_trend_chart_uses_series_tokens_without_cycling():
 
 def test_series_count_matches_css():
     assert set(SERIES) <= set(_tokens(":root")), "JS 用到的 --series-N 在 :root 里没定义全"
+
+
+# ────────── D. 涨跌语义色也走令牌（v0.45.361）──────────
+# 浅色主题下这些 Tailwind 亮色对比度不足（#22c55e 在米底 2.01:1、#f59e0b 1.89:1、#F4A532 1.80:1，图形标记要 ≥3:1），
+# 且与旁边已走令牌的文字两种绿。暗色下它们恰好等于暗色令牌值，所以换令牌暗色零变化。
+_DIRECTIONAL = re.compile(
+    r"#(22c55e|ef4444|f59e0b|94a3b8|16a34a|f97316|F4A532)\b|rgba\(\s*(34,197,94|239,68,68|245,158,11|244,165,50)", re.I)
+# 唯一刻意保留：过期数据横幅（状态 UI，黑字压琥珀 9.78:1，两主题都可读）
+_ALLOWED_LINES = ("banner.style.cssText='background:#f59e0b;color:#000;",)
+
+
+def test_no_directional_hex_in_dashboard_js():
+    hits = []
+    for i, line in enumerate(_strip_comments(JS, "js").split("\n"), 1):
+        if any(a in line for a in _ALLOWED_LINES):
+            continue
+        hits += [f"{i}:{m.group(0)}" for m in _DIRECTIONAL.finditer(line)]
+    assert not hits, f"dashboard.js 又出现硬编码涨跌 / 旧蜂蜜金色，改用 _tok('--bull|--bear|--neut|--acc')：{hits}"
+
+
+def test_fear_greed_gauge_matches_macro_bar_thresholds():
+    """同一个 F&G 值在同一页上只能一个颜色：仪表盘与宏观条 `_fg_cls` 阈值必须一致。"""
+    py = (ROOT / "dashboard_renderer.py").read_text(encoding="utf-8")
+    m_py = re.search(r'_fg_cls = "fg-low" if _fv3 <= (\d+) else \("fg-mid" if _fv3 <= (\d+) else "fg-high"\)', py)
+    m_js = re.search(r"const fc=fv<=(\d+)\?_tok\('--bear'\):fv<=(\d+)\?_tok\('--neut'\):_tok\('--bull'\);", JS)
+    assert m_py and m_js, "找不到仪表盘或宏观条的恐惧贪婪分档（改写法了？同步更新本测试）"
+    assert m_py.groups() == m_js.groups(), f"阈值不一致：宏观条 {m_py.groups()} vs 仪表盘 {m_js.groups()}"
