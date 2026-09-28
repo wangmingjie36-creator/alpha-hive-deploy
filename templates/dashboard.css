@@ -1,9 +1,15 @@
 :root{--bg:#FAF7F2;--surface:#FFFFFF;--surface2:#F5F0E8;--border:#C8BAA8;
   --tp:#1A1208;--ts:#6B5F52;--tm:#B0A090;--acc:#B7410E;--acc2:#1D6B3A;--acc3:#92601A;
-  --bull:#1D6B3A;--bear:#9B2C2C;--neut:#92601A;--nav-h:52px}
+  --bull:#1D6B3A;--bear:#9B2C2C;--neut:#92601A;--nav-h:52px;
+  /* v0.45.358 图表分类色（「哪只标的」，不表方向）。dataviz 校验器 all-pairs 实测：浅色 CVD 13.3 / 常视 17.0，
+     暗色 10.9 / 18.6；两种底色（surface / surface2）对比度都 ≥3:1。刻意避开 --bull/--bear/--neut 的色相——
+     本站红=看空，标的线被涂成红会被读成信号。只有 4 个：能过校验的第 5 色只剩长春花紫（即被清掉的 #667eea）。
+     改任何一个值都要重跑 tests/test_dashboard_chart_palette.py。 */
+  --series-1:var(--acc);--series-2:#0250ab;--series-3:#1a9a95;--series-4:#8c1d62}
 html.dark{--bg:#0A0F1C;--surface:#141928;--surface2:#1a2035;--border:#2a3050;
   --tp:#e2e8f0;--ts:#94a3b8;--tm:#64748b;--acc:#E05A1F;--acc2:#22c55e;--acc3:#f59e0b;
-  --bull:#22c55e;--bear:#ef4444;--neut:#f59e0b}
+  --bull:#22c55e;--bear:#ef4444;--neut:#f59e0b;
+  --series-2:#1c6ec9;--series-3:#09aba2;--series-4:#ad4389}  /* --series-1 跟 --acc 走 */
 *{margin:0;padding:0;box-sizing:border-box}
 /* v0.41.0 移动端修复：html+body 双重 overflow-x（微信 X5 不认 body 单独 hidden，
    任一子元素溢出会把布局视口撑宽 → media query 误判为桌面 → 双导航+横向两屏） */

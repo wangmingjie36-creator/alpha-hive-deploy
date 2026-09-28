@@ -247,6 +247,11 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){
 
 // ── Charts (lazy via IntersectionObserver) ──
 let chartInstances=[];
+// v0.45.358：canvas 不认 var()，图表颜色一律取 :root 令牌的**实算值**。toggleDark 会销毁并重画全部图表，
+// 所以这里读到的永远是当前主题那一套；不要再在 JS 里抄「浅色 hex / 暗色 hex」副本（第二份真相，改令牌就漂移）。
+function _tok(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+function _tokA(n,a){var h=_tok(n),m=/^#([0-9a-f]{6})$/i.exec(h);if(!m)return h;
+  var v=parseInt(m[1],16);return 'rgba('+(v>>16&255)+','+(v>>8&255)+','+(v&255)+','+a+')';}
 (function(){
   const rendered={};
 
@@ -299,10 +304,7 @@ let chartInstances=[];
       // v0.45.352（重做 v0.45.78）：柱色取 :root 令牌的**实算值**（canvas 不认 var()），
       // 明暗切换时 toggleDark 会销毁重画，这里自然拿到另一套。不抄 hex 副本——
       // 抄了就是第二份真相，令牌一改就静默漂移。方头、细柱，与站点其余细横条一致。
-      const rootCS=getComputedStyle(document.documentElement);
-      const cBull=rootCS.getPropertyValue('--bull').trim(),
-            cNeut=rootCS.getPropertyValue('--neut').trim(),
-            cBear=rootCS.getPropertyValue('--bear').trim();
+      const cBull=_tok('--bull'),cNeut=_tok('--neut'),cBear=_tok('--bear');
       const clrs=sc.map(function(x){return x[1]>=7?cBull:x[1]>=5.5?cNeut:cBear;});
       chartInstances.push(new Chart(scCtx,{
         type:'bar',
@@ -404,8 +406,8 @@ let chartInstances=[];
     chartInstances.push(new Chart(cv,{
       type:'radar',
       data:{labels:rl,datasets:[{data:rd[tk],fill:true,
-               backgroundColor:'rgba(102,126,234,.13)',borderColor:'#667eea',
-               pointBackgroundColor:'#667eea',pointBorderColor:'#fff',pointRadius:2,borderWidth:1.5}]},
+               backgroundColor:_tokA('--acc',.13),borderColor:_tok('--acc'),
+               pointBackgroundColor:_tok('--acc'),pointBorderColor:_tok('--surface'),pointRadius:2,borderWidth:1.5}]},
       options:{responsive:true,maintainAspectRatio:true,
                onClick:function(evt,elems){
                  if(!elems.length)return;
@@ -582,7 +584,7 @@ window.AH.initAccWinTrend=function(){
       borderDash:[4,3], tension:.3, pointRadius:2, borderWidth:1.5, spanGaps:true}
   ] : [
     {label:'胜率%', data:wd.map(function(d){return d.accuracy;}),
-      borderColor:'#667eea', backgroundColor:'rgba(102,126,234,.1)', fill:true,
+      borderColor:_tok('--acc'), backgroundColor:_tokA('--acc',.1), fill:true,
       tension:.3, pointRadius:3, borderWidth:2}
   ];
   chartInstances.push(new Chart(cv,{
@@ -761,7 +763,7 @@ window.AH.initEquityCurve=function(){
   var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
   var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
   var labels=eq.map(function(d){return d.date.slice(5);});
-  // 三条曲线：net (绿, 主), gross (蓝, 辅参考), spy (灰, 基准)
+  // 三条曲线：net (绿, 主), gross (锈红虚线, 辅参考), spy (灰, 基准)
   var netData =eq.map(function(d){return d.cum_net_pct!=null?d.cum_net_pct:d.cum;});
   var grossData=eq.map(function(d){return d.cum_gross_pct!=null?d.cum_gross_pct:d.cum;});
   // null 保持 null（Chart.js 会断开该点），不许变 0 —— 0 读作"大盘当天没动"。
@@ -776,7 +778,7 @@ window.AH.initEquityCurve=function(){
          borderColor:'#22c55e', backgroundColor:'rgba(34,197,94,.08)', fill:true,
          tension:.25, pointRadius:0, borderWidth:2.5, order:1},
         {label:'Gross (不扣成本)', data:grossData,
-         borderColor:'#667eea', backgroundColor:'rgba(102,126,234,.0)', fill:false,
+         borderColor:_tok('--acc'), backgroundColor:'transparent', fill:false,
          tension:.25, pointRadius:0, borderWidth:1.5, borderDash:[4,3], order:2},
         // v0.45.179：这条线现在**真的是**买入持有（首日建仓、持有至各结算日），
         // 与上方卡片「SPY 同期基准」同口径同区间。旧实现是"每笔 7 日 SPY 收益 ×
@@ -951,7 +953,11 @@ window.AH.initTrendChart=function(){
   const dark=document.documentElement.classList.contains('dark');
   const tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
   const gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
-  const colors=['#667eea','#F4A532','#22c55e','#ef4444','#764ba2','#f59e0b','#06b6d4','#ec4899','#8b5cf6','#14b8a6'];
+  // v0.45.358：分类色取 :root 的 --series-1..4（校验数字见 dashboard.css 注释）。
+  // 旧的 10 色表：3 个紫（#667eea / #764ba2 / #8b5cf6），外加看多绿 #22c55e、看空红 #ef4444 ——本站红 = 看空，
+  // 标的线被涂红会被读成信号（09-11 实测 AMC 恰好是红线）；且按 i%10 循环，30 只里每 3 只共用一个色。
+  // 颜色跟标的走：激活时领最小空闲槽、取消时归还，其余标的不重涂；4 槽用满就不再加——色不够分时宁可少画。
+  const SERIES=['--series-1','--series-2','--series-3','--series-4'];
   const tickers=Object.keys(trendData);
   // 收集所有日期
   const allDates={};
@@ -959,21 +965,30 @@ window.AH.initTrendChart=function(){
     trendData[tk].forEach(function(d){allDates[d.date]=true;});
   });
   const dates=Object.keys(allDates).sort();
-  // 默认显示前 5 个 ticker
-  const activeTickers={};
-  tickers.slice(0,5).forEach(function(tk){activeTickers[tk]=true;});
-  // 生成 chips
+  // 选中状态放在 window.AH 上：切换明暗会销毁并重建本图，但 chip 不重建。旧实现把状态关在闭包里，
+  // chip 的 onclick 一直指着第一次的闭包 ⇒ 切换后 chip 点了不起作用、已勾选的也从图上消失（09-28 实测）。
+  const st=window.AH._trendState||(window.AH._trendState={slot:{}});
+  if(!st.init){st.init=true;tickers.slice(0,SERIES.length).forEach(function(tk,i){st.slot[tk]=i;});}
+  window.AH.toggleTrendTicker=function(tk){
+    if(tk in st.slot){delete st.slot[tk];}
+    else{
+      const used=Object.keys(st.slot).map(function(k){return st.slot[k];});
+      let free=-1;
+      for(let k=0;k<SERIES.length;k++){if(used.indexOf(k)<0){free=k;break;}}
+      if(free<0){showToast('最多同时比较 '+SERIES.length+' 只，先取消一只');return;}
+      st.slot[tk]=free;
+    }
+    window.AH.updateTrendChart();
+  };
+  // 生成 chips（只生成一次；点击走 window.AH 上的最新实现）
   const chipWrap=document.getElementById('trendChips');
   if(chipWrap && !chipWrap.children.length){
-    tickers.forEach(function(tk,i){
+    tickers.forEach(function(tk){
       const chip=document.createElement('button');
-      chip.className='trend-chip'+(activeTickers[tk]?' active':'');
+      chip.className='trend-chip';
+      chip.dataset.tk=tk;
       chip.textContent=tk;
-      chip.onclick=function(){
-        activeTickers[tk]=!activeTickers[tk];
-        chip.classList.toggle('active');
-        updateTrendChart();
-      };
+      chip.onclick=function(){window.AH.toggleTrendTicker(tk);};
       chipWrap.appendChild(chip);
     });
   }
@@ -992,22 +1007,28 @@ window.AH.initTrendChart=function(){
   });
   chartInstances.push(trendChart);
   function updateTrendChart(){
+    const colors=SERIES.map(_tok);
     const datasets=[];
-    tickers.forEach(function(tk,i){
-      if(!activeTickers[tk])return;
+    tickers.forEach(function(tk){
+      if(!(tk in st.slot))return;
       const scoreMap={};
       trendData[tk].forEach(function(d){scoreMap[d.date]=d.score;});
+      const c=colors[st.slot[tk]];
       datasets.push({
         label:tk,
         data:dates.map(function(d){return d in scoreMap?scoreMap[d]:null;}),
-        borderColor:colors[i%colors.length],
-        backgroundColor:colors[i%colors.length]+'22',
+        borderColor:c,
+        backgroundColor:c,
         tension:.3,pointRadius:3,borderWidth:2,
         spanGaps:true
       });
     });
     trendChart.data.datasets=datasets;
     trendChart.update();
+    // chip 的勾选态与图同源，不再各自翻转
+    if(chipWrap) chipWrap.querySelectorAll('.trend-chip').forEach(function(ch){
+      ch.classList.toggle('active', ch.dataset.tk in st.slot);
+    });
   }
   updateTrendChart();
   window.AH.updateTrendChart=updateTrendChart;
@@ -1502,8 +1523,8 @@ function toggleKbHelp(){
               type:'radar',
               data:{labels:['\u4fe1\u53f7','\u50ac\u5316','\u60c5\u7eea','\u8d54\u7387','\u98ce\u63a7'],
                     datasets:[{data:rd[ticker],fill:true,
-                      backgroundColor:'rgba(102,126,234,.13)',borderColor:'#667eea',
-                      pointBackgroundColor:'#667eea',pointRadius:2,borderWidth:1.5}]},
+                      backgroundColor:_tokA('--acc',.13),borderColor:_tok('--acc'),
+                      pointBackgroundColor:_tok('--acc'),pointRadius:2,borderWidth:1.5}]},
               options:{responsive:true,maintainAspectRatio:true,
                 scales:{r:{min:0,max:100,beginAtZero:true,grid:{color:gc2},angleLines:{color:gc2},
                   ticks:{display:false},pointLabels:{color:tc2,font:{size:8}}}},
