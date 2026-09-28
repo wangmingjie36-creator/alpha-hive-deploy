@@ -217,6 +217,26 @@ class TestNextPrevCloseFirst:
             csl.load_official_close("2026-09-10", "T")
         assert not [r for r in caplog.records if r.name == "alpha_hive.cloud_snapshot_loader"]
 
+    @pytest.mark.parametrize("d,d_next,t,same,nxt,warns", [
+        # 真漏判：last_trade 15:59:13（47s），50.385；次日 prev_day_close 50.41 = Twelve Data 官方收盘
+        ("2026-09-08", "2026-09-09", "VZ",
+         ("2026-09-08T15:59:13", "2026-09-08T21:03:14.272675+00:00", 50.385, 50.14),
+         ("2026-09-09T15:59:59", "2026-09-09T21:03:40.078632+00:00", 49.74, 50.41), True),
+        # 高价股半分舍入（0.0013%），不是漏判，不许告警
+        ("2026-09-03", "2026-09-04", "TSLA",
+         ("2026-09-03T15:59:59", "2026-09-03T21:02:46.410116+00:00", 376.365, 357.01),
+         ("2026-09-04T15:59:59", "2026-09-04T21:02:42.620556+00:00", 354.08, 376.36), False),
+    ])
+    def test_warning_threshold_separates_miss_from_rounding(self, snapshots, caplog, d, d_next, t,
+                                                            same, nxt, warns):
+        """初版阈值 0.05% 放过了 VZ 09-08（0.0496%）这类真漏判——告警等于只对 NEE 一例有效"""
+        snapshots({d: {t: _snap(t, same[2], same[0], same[1], same[3])},
+                   d_next: {t: _snap(t, nxt[2], nxt[0], nxt[1], nxt[3])}})
+        with caplog.at_level("WARNING", logger="alpha_hive.cloud_snapshot_loader"):
+            assert csl.load_official_close(d, t) == (nxt[3], csl.SNAP_NEXT_PREV_CLOSE)
+        got = [r for r in caplog.records if r.name == "alpha_hive.cloud_snapshot_loader"]
+        assert bool(got) is warns, [r.getMessage() for r in got]
+
     def test_latest_day_falls_back_to_same_day(self, snapshots):
         """没有后一份快照（最新一天）⇒ 仍用当日贴收盘的价"""
         snapshots({"2026-09-21": {"NEE": NEE_0921}})

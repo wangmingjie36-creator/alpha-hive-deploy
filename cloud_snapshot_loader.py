@@ -153,8 +153,11 @@ def load_ticker(date: str, ticker: str, *, ref: Optional[str] = None,
 # load_official_close 的判决标签（进 StockData.price_source / 补跑结果的 _reason）
 SNAP_CLOSE = "cloud_snapshot_close"
 SNAP_NEXT_PREV_CLOSE = "cloud_snapshot_next_prev_day_close"
-# 两步都有值时的分歧告警阈值：prev_day_close 自身的舍入噪声实测 <0.05%（BILI 16.76 vs 16.765）
-_SAME_VS_NEXT_WARN = 0.0005
+# 两步都有值时的分歧告警阈值（相对）。标定（v0.45.359 二次检查，origin/cloud-snapshots 08-26~09-25）：
+# 两步都有值 382 对，376 对逐分相等；其余 6 对里 4 对 0.019%~0.106% 是**真漏判**（NEE 09-18、VZ 09-08、
+# T 09-15、T 08-28——后三者 Twelve Data 官方收盘与次日值逐分相等），2 对 ≤0.0013% 是高价股半分舍入
+# （TSLA 376.365/376.36、META 741.245/741.24）。0.01% 恰好分开两类；初版 0.05% 只抓到 NEE、放过另 3 个真漏判。
+_SAME_VS_NEXT_WARN = 0.0001
 
 
 def _fetched_at(snap: dict):

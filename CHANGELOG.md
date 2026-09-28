@@ -82,19 +82,23 @@ DE 两个源当时都没取到，未核。
 - `load_official_close`：① 其后第一份快照的 `prev_day_close` 且归属 == date → `SNAP_NEXT_PREV_CLOSE`；
   ② 否则当日快照 official 且场次 == date → `SNAP_CLOSE`（最新一天必走这里）；③ 都不行 → `(None, "snapshot_<判决>")`，
   失败判决仍取自当日快照（与旧版同一套字符串）。
-- 两步都有值且相差 > `_SAME_VS_NEXT_WARN`（0.05%，prev_day_close 自身舍入噪声实测 <0.05%）→ WARNING，点名两个价。
+- 两步都有值且相差 > `_SAME_VS_NEXT_WARN` → WARNING，点名两个价。**阈值 0.01%**（二次检查从初版 0.05% 下调：
+  两步都有值 382 对里 376 对逐分相等，其余 4 对真漏判 0.019%~0.106%、2 对高价股半分舍入 ≤0.0013%；
+  0.05% 只抓到 NEE，把 VZ 09-08 0.0496% / T 09-15 / T 08-28 三个真漏判全放过了——初版理由拿的是
+  「prev_day_close 对 yfinance 的舍入噪声」，比错了对象：这里比的是两份 CBOE 值）。
   **谁会红**：60s 代理判据再漏一次，日志里有据可查。
 - 标签语义：`SNAP_CLOSE` 从「首选」变成「兜底」。调用方 `data_pipeline._fetch_historical_stock_data` 只把标签透传进
   `price_source` / `source_name`，不按标签分支——已核。
 
 ### Tests（`tests/test_stale_intraday_consumers.py`）
 
-- 新增 `TestNextPrevCloseFirst`（8 条）：NEE 09-18 真实值（先断言它确实被 close_verdict 判 official，再断言返回 80.47）、
+- 新增 `TestNextPrevCloseFirst`（10 条）：NEE 09-18 真实值（先断言它确实被 close_verdict 判 official，再断言返回 80.47）、
   分歧告警、一致时静默、最新一天兜底、后一份归属不符兜底、后一份 prev_day_close 无效（0 / None / NaN）兜底。
 - 改写 `test_fresh_snapshot_uses_own_price` → 拆成「无可用后一份时兜底用当日价」（VZ 08-31）与
   「当日看似 official 也先取后一份」（T 09-10，同价 25.55，只有标签能区分）。
 - 变异（改真文件、`PYTHONDONTWRITEBYTECODE=1` + 清 `__pycache__`、`--maxfail` 覆盖 `-x`，复原后逐字节核对）：
-  换回旧顺序 → **3 红**；删分歧告警 → **1 红**；告警阈值恒真 → **1 红**。四个相关文件 87 passed。
+  换回旧顺序 → **5 红**；删分歧告警 → **2 红**；告警阈值恒真 → **2 红**；阈值改回 0.05% → **1 红**（VZ 09-08）。
+  四个相关文件 89 passed。
 
 ### 不做
 
