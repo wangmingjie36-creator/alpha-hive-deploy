@@ -149,6 +149,16 @@ WATCHLIST 30 只里只有 BRK-B 带非字母数字。
   raw 不留痕 / 单源照写 / backlog 进退出码。
 - 真实数据：09-22 健康 + backlog 62 行；09-24、08-12 均 `entry_price` degraded。dry-run 前后快照 md5 不变。
 
+### 结局（2026-09-28 09:14 PDT，用户确认后落笔）
+
+- **只补 BRK-B 08-12 / 08-14 两行**（生产库）：合入 v0.45.363 的 `BRK-B`→`BRK.B` 映射后 Twelve Data 取得到，
+  两行成为 yf + td **双源一致**（510.00 / 504.03，偏差 0.0），**无需** `--allow-single-source`。
+  写后对备份逐行逐列比对：1593 行，只有 id 1425 / 1506 变、每行只变 4 列（price_at_predict、raw=0.0、corrected_at、source=`entry_backfill:td+yf`）；`quick_check` ok。
+  备份：`~/alpha-hive-data/_manual_backups/pheromone.db.bak-entry-backfill-20260928-091413`。
+- **09-24 / 09-25 的 60 行按用户决定保持 0**：分数是降级输入算的，入场价为 0 正好把它们挡在统计外。
+  ⇒ Step 12 此后每天会打一行「账本积压 60 行（09-24×30, 09-25×30）」——**这是已知、已决定的，不是新故障**；退出码不受影响。
+- 派生列未动：两行 `checked_t*` 仍 0，下一次 `run_backtest` 自然回测（T+1/T+7/T+30 均已到期）。
+
 ## [0.45.359] — 2026-09-28 — Changed：`cloud_snapshot_loader.load_official_close` 取价顺序对调——某日官方收盘**先取次日快照自带归属的 `prev_day_close`**，当日快照的 60s 代理判据降为兜底；两者不一致时打 WARNING
 
 v0.45.354 登记的 NEE 残差的根治（用户 2026-09-28 决定「现在就改」）。
