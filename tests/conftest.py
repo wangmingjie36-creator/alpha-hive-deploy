@@ -279,6 +279,38 @@ def _offline_transport(request, monkeypatch):
             "若这条测试的意图**就是**打真外网，给它加 @pytest.mark.network。")
 
 
+@pytest.fixture(autouse=True)
+def _block_git_transport_probe(request, monkeypatch):
+    """`git_transport_probe`（v0.45.351）用**裸 socket**（getaddrinfo + TCP connect）探
+    github.com:22 / ssh.github.com:443——上面 `_offline_transport` 挡在 urllib / requests /
+    curl_cffi 库级 API 上，**挡不住它**。而探测在每次 gh-pages 推送失败时都会跑，
+    本仓好几条测试（竞态重试、离线序列）会走到那条路径 ⇒ 不钉死就会真去连 GitHub、
+    每次最多卡 20 秒。
+
+    钉成抛 `_OfflineInTests`（OSError 子类，与真断网同一条降级路径），并记账：
+    需要测探测本身的用例在测试体里 `monkeypatch.setattr` 覆盖这两个函数即可
+    （函数级 monkeypatch 晚于本 autouse fixture 生效）。`network` 标记的用例不钉。
+    """
+    if request.node.get_closest_marker("network"):
+        yield
+        return
+    import git_transport_probe as _gtp
+    calls = []
+
+    def _deny_resolve(host, port):
+        calls.append(("resolve", host, port))
+        raise _OfflineInTests(f"测试默认离线：git_transport_probe 解析 {host}（tests/conftest.py）")
+
+    def _deny_connect(family, sockaddr, timeout):
+        calls.append(("connect", sockaddr))
+        raise _OfflineInTests(f"测试默认离线：git_transport_probe 连接 {sockaddr}（tests/conftest.py）")
+
+    monkeypatch.setattr(_gtp, "_resolve", _deny_resolve)
+    monkeypatch.setattr(_gtp, "_tcp_connect", _deny_connect)
+    request.node._git_probe_calls = calls
+    yield
+
+
 # ==================== 可复用的显式源桩（各模块 opt-in）====================
 #
 # `_offline_transport` 是**兜底**：它让取数失败、行为与真离线一致，但生产代码

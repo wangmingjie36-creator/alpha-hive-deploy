@@ -302,7 +302,115 @@ v0.45.226 对账、v0.45.350 复核：这三处改动一直停在分支上（`cl
 - 两个分支（`claude/happy-cannon-bc377f`、`claude/nostalgic-cray-1fed0e`，本地 + origin）尚未删除：删分支是对外动作，待用户确认。
 - **跑全套时撞见、未处理（不是本版造成）**：生产部署的 `~/.claude/scripts/alpha-hive-orchestrator.sh` 于 09-28 02:03 被改过，blob `9905c98` 不在 origin/main 该文件任何一版里（main 最新一版是 01:36 的 v0.45.353）⇒ `test_orchestrator_deployed_matches_repo` 判 drift。多半是并行的编排器 session 直接改了部署副本或部署了未推送的版本；已告知用户，未动。
 
-## [0.45.351] — 2026-09-28 — 占位（进行中：修 gh-pages 重试「假成功」——未校验父提交不得产出 success，失败要在 status/编排器里变红）
+## [0.45.351] — 2026-09-28 — Fixed：gh-pages 重试「假成功」（未经校验的父提交不再能产出 success；本地 gh-pages 只在推送成功后前移）；gh-pages 结局第一次进 status.json / 告警 / 编排器 Step 5；CDN 检查不再替推送背书。Added：推送失败时的 git 传输探测（为「是否切 ssh.github.com:443」攒判据）。发现：scan_timing 自 09-14 起每个扫描日都没并进 status.json
+
+### 事故（09-25，取证见 v0.45.350）
+GitHub 不可达（`ssh: connect to host github.com port 22: Undefined error: 0`；`github.io` 解析失败；yfinance 803 次正常）。
+`commit_and_push_gh_pages`：attempt 1 fetch 败 ⇒ 父 = 本地 ref（未校验）⇒ commit-tree `316ba1d` ⇒ **推送前**就 `update-ref` 本地
+gh-pages ⇒ push 败；attempt 2 fetch 又败 ⇒ 父 = 本地 ref = **自己没推上去的 `316ba1d`** ⇒ tree 相同 ⇒「远端已是目标状态」捷径
+⇒ `success=True`。日志「gh-pages 部署成功」「CDN 验证跳过……gh-pages 已推送成功」，网站停在 09-24 两天，零告警。
+
+### Fixed — 假成功（`report_deployer.commit_and_push_gh_pages`）
+两处都修，**任一处单独修都不够**（变异 M1 / M2 各自只打红守它的那几条）：
+- **a. 捷径要求 `verified`**。未校验的父提交 tree 相同时不据此判成功、也不造空提交——把那个已有提交**推一次**，成败只认远端
+  （`action="pushed_existing_local"`）。只修 b 不够：09-25 留下的那种存量状态（本地 ref = 没推上去的目标 tree）照样触发捷径；
+  本地 ref 也可能落后于别人后来推的远端，「本地 = 目标」证明不了「远端 = 目标」。
+- **b. 本地 gh-pages ref 只在推送被接受后前移**。只修 a 不够：本地 ref 仍会指向没推上去的提交，下一轮 fetch 再失败时它会被当父。
+  前移失败只打 warning、不改判（远端已收到；落后的后果是下次非快进被拒，会红）。
+- 不变式（docstring）：**`success=True` 只有两条来路——fetch 校验过的远端真头已是目标 tree，或本轮一次 push 被远端接受。**
+- 返回值新增 `action`（`remote_already_current` / `pushed_new_commit` / `pushed_existing_local`）与 `transport_probe`。
+- 未校验时的 ERROR 文案更正：旧文案「仍可能把对方的提交挤成不可达对象」自 v0.45.268 改非 force 推送起已不成立，真实后果是「远端现状未知」。
+- v0.45.305/310/312 的空树守卫（无文件 / 全部 hash-object 失败）不变，仍在调用本函数之前拦截；只是现在这两支也返回失败并留记录。
+
+### Fixed — CDN 检查不替没核过的事背书（`verify_cdn_deployment`）
+解析不了部署域名时，旧代码 log「（沙箱网络限制），gh-pages 已推送成功」并 `return True`（与「验证通过」同形）——「沙箱」是
+Cowork VM 时代的假设，「已推送成功」是它没核过的事，09-25 恰是伪证。改为 warning「CDN 验证未执行……未经确认」+ `return None`
+（同 v0.45.54 读不到本地文件那支）。顺带：`setdefaulttimeout(5)` 改的是整个进程的默认 socket 超时且从不复原（getaddrinfo 也不认它），现用完复原。
+
+### Fixed — 「谁会红？」：gh-pages 失败此前在任何状态通道里都不存在
+
+| 通道 | 之前 | 现在 |
+|---|---|---|
+| `deploy_static_to_ghpages` 返回值 | `None`（调用方丢弃） | 结局 dict；**每条出口**（含两个早退）都返回 `success` 并写一行 `.gh_pages_deploy_log.jsonl` |
+| `auto_commit_and_notify` → `results` | 无 gh-pages 项；异常只打 warning | `results["gh_pages"]`（返回失败 / 抛 / 返回 None 三种都记失败） |
+| `scan_timing.extra` → status.json | 只有 git_push / git_commit | 加 `gh_pages`（`scan_timing.gh_pages_summary`） |
+| `alert_manager` | 无；main 推送告警还写「网站走 gh-pages 不受影响」 | P1「gh-pages 部署失败（网站停在上一次成功部署）」；无记录 ⇒ `checks_skipped`；main 推送那句改为「本条不代表网站状态」 |
+| 编排器 Step 5 | RC=0 ⇒ 恒 `skipped_builtin`（从不核网站）；RC≠0 ⇒「本轮网站不会更新」（09-24 RC=1 是 ML 常数闸、网站其实更新了 ⇒ 误报） | `_step5_gh_pages_verdict`：调 `report_deployer.py --gh-pages-step-status --since $STEP2_START` 读部署日志里 Step 2 之后的最后一条；失败 / 本轮无记录 ⇒ `failed` + `set_status partial` + ERROR；helper 不可用（生产代码早于本版）⇒ 退回旧逻辑并标 `unverified` |
+| 控制台 / 日志 | 「gh-pages 部署成功」 | 成功分「远端已接受 <commit>」与「无需推送：远端（fetch 已校验）已是本次内容」两种说法；失败为 ERROR「本轮网站未更新」+ 传输探测结论 |
+
+- 判据放仓库（`report_deployer.gh_pages_step_status`，有测试），编排器只调用 + 映射。`generate_ml_report._sync_ghpages`（Step 3 补跑）
+  推送失败 warning → ERROR；它不写部署日志（Step 5 判的是 Step 2 主部署）。
+- 编排器改动：本 session 02:03 先直接改了部署副本（v0.45.353 在 01:40 把编排器纳入版本控制，我开工时尚未合入），已按
+  CLAUDE.md 新规搬进仓库 `scripts/alpha-hive-orchestrator.sh`：**部署副本与仓库副本逐字节相同**（sha256 `d62336e0…`），无需重新部署；
+  改前版本 = 仓库 v0.45.353 那份 = `~/.claude/scripts/alpha-hive-orchestrator.sh.bak-20260928_pre-v0.45.351`（sha256 `c0e9cf9b…`）。
+
+### ⚠️ 发现：scan_timing 自 09-14 起**每个扫描日**都没并进 status.json（不是 v0.45.255 以为的一次性故障）
+- 逐日数编排器日志 alert_manager 的「status.json 无 scan_timing」：09-14/15/16/17/18/22/24/25 **全中**（09-21/23 是 P0 早返回，看不到）。
+  v0.45.255 的 P1「扫描已完成，但 status.json 缺整段 scan_timing」在 `alerts-*.json` 里 09-15/16/17/18/22 **连响 5 个扫描日，没有读者**。
+  ⇒ v0.45.214/223/227 加的推送 / 提交 / 生产同步告警，这两周在生产上**一条都触发不了**。09-25 真正「红」了的只有 Step 2/4/5 失败——而那是
+  ML 常数闸（RC=1）碰巧造成的，理由还是错的。
+- v0.45.255 称「09-10/11 合并成功」**从日志核不了**：那句 WARNING 是 v0.45.214（09-13）才有的。
+- **根因假设（待验证）：TCC**。编排器里唯一 `open()` ~/Desktop 下文件的 `/usr/bin/jq` 就是这次合并（其余 jq 读 stdin 或 ~/.claude/reports，全正常）；
+  同一进程树每天打 `getcwd: Operation not permitted`；bash 的 `[ -f ]`（stat）能过。python3 有 Desktop 授权，扫描本身不受影响。
+  统一日志只留 error 级，09-25 的 TCC 记录已不可查。
+- **自然实验**：阶段 5（v0.45.345，09-26）把 scan_timing.json 搬到 `~/alpha-hive-data/logs` ⇒ **09-28 是第一个不经 Desktop 的扫描日**。
+  核法：`grep -c "status.json 无 scan_timing" ~/.claude/logs/orchestrator-2026-09-28.log` 为 0，且 `~/.claude/reports/status.json` 有 `scan_timing` ⇒ 假设成立。
+- 在它坐实之前不把新观测只押在 scan_timing 上：gh-pages 结局另走编排器 Step 5（读的部署日志同在 `~/alpha-hive-data/logs`）。
+- 本版**未改** `write_status()`（那条合并吞 stderr 的 `2>/dev/null` 仍在）——等 09-28 结果再定，免得同时动两个变量。
+
+### Added — `git_transport_probe.py`（⚠️ 平时不触发，**别当死代码删**）
+**目的：为「是否把 git 远端切到 ssh.github.com:443」攒判据**（用户 09-27/28 决定暂不切、先攒证据；443 入口已在本机实测可用）。
+`commit_and_push_gh_pages` **首次推送失败时**跑一次（成功路径零开销），记录：`github.com` / `ssh.github.com` 的 DNS 成败、
+TCP `:22` / `:443` 成败与耗时（每步硬上限 5s，getaddrinfo 放守护线程限时）、git stderr 最后一行、是否带 `HTTP(S)_PROXY`
+（只记变量名；launchd 下没有、Claude 会话里有 ⇒ 手测不代表生产）、带日期与时区的时间戳。结论 `verdict`：
+`port22_blocked_443_ok`（切 443 能救）/ `dns_failed`（救不了，09-25 那种）/ `both_blocked` / `transport_ok` / `port443_blocked_22_ok` / `probe_error`。
+进返回值 → 部署日志 / `scan_timing.extra.gh_pages.transport_probe` / 告警「传输探测」栏 + 一行 warning。纯观测：任何异常只记录，不重试、不改判、不改远端 URL、不碰 ~/.ssh。
+测试侧：conftest 的离线闸挡在 urllib/requests/curl_cffi 库级 API，**挡不住裸 socket** ⇒ 新增 autouse `_block_git_transport_probe`，否则任何走到推送失败路径的测试都会真连 GitHub。
+
+### 传输层（未改，供决定）
+远端 `git@github.com:…`（ssh 22）。全部编排器日志里只有 09-25 一天失败，且那天 `github.io` 的 DNS 也失败 ⇒ 切 443 大概率救不了那一次。
+可选：① 不动（现状）；② `~/.ssh/config` 给 `Host github.com` 加 `HostName ssh.github.com` / `Port 443` / `HostKeyAlias github.com`（不动 known_hosts 与各仓库远端，
+本仓与 memory 仓同时生效）；③ HTTPS 远端 + 凭据助手（launchd 下要能无交互取凭据）。判据由上面的探测攒，**改前先问用户**。
+
+### 测试
+- 新 `tests/test_gh_pages_unverified_parent.py`（35 条，真 git + 本地裸仓库，断网 = 把 origin 指向不存在的路径，fetch / ls-remote / push 真失败）：
+  事故原序（4 次与恰 2 次）、存量「本地 = 目标」状态、网络中途恢复后真送达、半故障（只有 fetch 坏）推已有提交、合法捷径不推送、
+  部署函数端到端（日志不印「部署成功」、CDN 只在成功时调、部署日志 failed、Step 5 判红）、空数据根早退留记录、Step 5 判定器与 CLI、
+  CDN 不背书、结局进 results / scan_timing / 告警、真 `main()` 写入、传输探测六种形状（含解析器挂住被限时、探测抛异常不冒泡、代理只记名）。
+- 新 `tests/test_orchestrator_step5_gh_pages.py`（14 条）：从仓库编排器（`tests/_orchestrator.py`）抽出 `_step5_gh_pages_verdict`，
+  在 bash 里配真 `report_deployer.py` 跑，C 与 UTF-8 两种 locale；含抽取器自证。
+- **变异真跑**（`PYTHONDONTWRITEBYTECODE=1`、每轮清 pyc、`--maxfail=1000`、每轮核 collected = 基线 35 / 14、锚点唯一断言；
+  改动前代码取钉死 SHA `8202ed99cabf1c5cc4bf7446435d07c055dd08de`，不用 HEAD）：
+
+| # | 变异 | 结果（红的理由） |
+|---|---|---|
+| M0 | 整份 `report_deployer.py` 退回钉死的改动前版本 | 21 红：事故序列各条红在「推送从未成功却判了成功」，`parent == commit`（自己的未推送提交）——09-25 机制原样复现；其余红在新 API 不存在 |
+| M1 | 只撤修法 a | 3 红：存量状态、半故障推已有提交、远端已是它（均因捷径冒领） |
+| M2 | 只撤修法 b | 2 红：本地 ref 被前移到没推上去的提交 |
+| M3 | 删掉合法捷径 | 1 红：已校验且无变化时仍去推送 |
+| M4 | CDN 退回 `return True` +「已推送成功」 | 1 红 |
+| M5 | `results` 不放 gh_pages | 3 红 |
+| M6 | Step 5：本轮无记录判成功 | 1 红 |
+| M7 | 早退不留记录、返回 None | 1 红 |
+| M8 | 探测异常不再吞 | 1 红（`RuntimeError: boom` 冒泡） |
+| M9 | 每次推送失败都探测 | 1 红 |
+| M10 | 删 gh-pages P1 | 1 红 |
+| M11 | `main()` 不写 gh_pages | 2 红 |
+| M12 | 恢复「网站走 gh-pages 不受影响」 | 1 红 |
+| O1 | 编排器：部署失败不 `set_status partial` | 2 红（两种 locale） |
+| O2 | 编排器：helper 不可用 + RC=0 记 success | 2 红 |
+| O3 | 编排器：不调 helper（退回只看 RC） | 8 红 |
+
+  还原后 35 / 35 绿。
+- 全套：**6287 passed / 2 failed / 2 xfailed**（`--maxfail=1000`，12 分钟）。两条红：`TestCoverageHorizon`（按设计红）；`test_orchestrator_deployed_matches_repo`（部署副本 ≠ origin/main 任何一版——正是本版要合入的编排器改动，推上 main 后转绿）；`ruff check .`：All checks passed。
+
+### 未做 / 残留
+- `write_status()` 的 scan_timing 合并：见上「发现」，待 09-28 结果。
+- Step 4 在 RC≠0 时仍报「未生成仪表板」（09-24/25 的 RC=1 是 ML 常数闸，仪表板其实生成了）——未动。
+- 「性能异常」P1（基线写死 5 秒）每个扫描日都响，是 `alerts-*.json` 里的常驻噪音；而 `alerts-*.json` 本身**没有自动读者**。
+  本版让 gh-pages 失败「会红」，但红在 status.json / alerts / 编排器日志，**仍要有人去看**；推 Slack 受 CLAUDE.md 精简规则所限，未做。
+- `~/alpha-hive-data/logs/.gh_pages_deploy_log.jsonl` 里 09-25 那条仍写着 `"status": "success"`（改动前代码写的假成功，`parent_verified: false`、`attempts: 2`、`tree_unchanged: true` 是它的指纹）。审计日志不改写；读历史时按此识别。
+- 09-24/25 Step 2 的 RC=1 来自 ML 准常数闸（12 份报告唯一值 2 个），与本版无关，未查。
 
 ## [0.45.350] — 2026-09-27 — 运维：补推 09-25 滞留的 gh-pages 部署（网站停在 09-24 两天）；清理 8 个已并入/过时分支；发现 gh-pages 重试「假成功」缺陷（另开任务修）
 

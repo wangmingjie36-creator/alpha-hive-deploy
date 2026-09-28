@@ -2901,11 +2901,13 @@ def main():
     # 2026-09-01~11 六次被拒无人发现（告警那条规则读的 deploy_status 从来没人写）。
     _git_push = None
     _git_commit = None
+    _gh_pages = None
     try:
         with _timing.timed("deploy"):
             sync_results = reporter.auto_commit_and_notify(report)
         _git_push = sync_results.get("git_push")
         _git_commit = sync_results.get("git_commit")
+        _gh_pages = sync_results.get("gh_pages")   # v0.45.351：此前 gh-pages 结局不进 status.json
         git_ok = sync_results.get("git_push", {}).get("success", False)
         deploy_env = sync_results.get("deploy_env", "production")
         remote_label = sync_results.get("git_push", {}).get("remote", "origin")
@@ -2920,16 +2922,21 @@ def main():
                       f"{', '.join(_left[:5])}" + (" …" if len(_left) > 5 else ""))
         else:
             print(f"   GitHub push : {'✅' if git_ok else '⚠️  失败'} → 🧠 生产环境 https://wangmingjie36-creator.github.io/alpha-hive-deploy/")
+            _ghp_ok = isinstance(_gh_pages, dict) and _gh_pages.get("success") is True
+            print(f"   gh-pages    : {'✅' if _ghp_ok else '⚠️  失败（本轮网站未更新）'}")
         print(f"   Hive App    : ✅ .swarm_results 已落盘，下次启动自动加载")
     except (OSError, ValueError, KeyError, RuntimeError) as e:
         _log.warning("三端同步部分失败: %s", e)
         print(f"   ⚠️  三端同步出错：{e}")
         if _git_push is None:   # 推送之前就抛了：记成失败，不能让「没记录」看起来像「没问题」
             _git_push = {"success": False, "error": f"三端同步抛异常：{type(e).__name__}: {e}"}
+        if _gh_pages is None:   # 同上：gh-pages 部署没跑到
+            _gh_pages = {"success": False, "error": f"三端同步抛异常（gh-pages 未部署）：{type(e).__name__}: {e}"}
 
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
     _timing.write(reporter.date_str, extra={"git_push": _timing.git_push_summary(_git_push),
-                                            "git_commit": _timing.git_commit_summary(_git_commit)})
+                                            "git_commit": _timing.git_commit_summary(_git_commit),
+                                            "gh_pages": _timing.gh_pages_summary(_gh_pages)})
     return report
 
 

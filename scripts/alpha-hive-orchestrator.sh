@@ -892,22 +892,51 @@ fi
 # 现直接判 STEP2_RC。status.json 里 step4_dashboard / step5_github_deploy 的取值
 # 与原 rc=2 分支逐字相同（Step 6 告警照旧读它们）；ERROR 日志只去掉了
 # 「xxx.py 不存在」那半句，其余同原文。
+#
+# v0.45.351：Step 5 改判 gh-pages 部署的**实际结局**，不再只看 Step 2 退出码。
+#   旧逻辑 RC=0 ⇒ skipped_builtin，从不核网站是否真更新了：推送失败（2026-09-25 断网，
+#   还被重试捷径判成「部署成功」）在 RC=0 的日子里恒为零告警。RC≠0 ⇒「本轮网站不会更新」
+#   也不一定对：09-24 的 RC=1 是 ML 常数闸，部署其实成功了。
+#   判据在仓库里（report_deployer.gh_pages_step_status，有测试），这里只调用 + 映射：
+#   读 $DATA_DIR/logs/.gh_pages_deploy_log.jsonl 里 Step 2 启动之后的最后一条。
+#   不经 scan_timing → status.json 那条 jq 合并（09-14~09-25 每个扫描日都没生效）。
+#   helper 不可用（生产代码早于 v0.45.351 / 输出不是合法 JSON）⇒ 退回旧逻辑并 WARN「未核实」。
+#   守卫：tests/test_orchestrator_step5_gh_pages.py（抽出本函数真跑）。
+#   回滚 = 用 alpha-hive-orchestrator.sh.bak-20260928_pre-v0.45.351 覆盖本文件。
 # ================================================================
+_step5_gh_pages_verdict() {
+    local _json=""
+    if [ -f "${PROJECT_DIR}/report_deployer.py" ]; then
+        _json=$("$PYTHON3" "${PROJECT_DIR}/report_deployer.py" --gh-pages-step-status --since "${STEP2_START}" 2>>"$LOGFILE" | tail -n 1)
+    fi
+    if [ -n "$_json" ] && printf '%s' "$_json" | jq -e 'type == "object" and (.status == "success" or .status == "failed")' >/dev/null 2>&1; then
+        if [ "$(printf '%s' "$_json" | jq -r '.status')" = "success" ]; then
+            log "INFO" "✅ Step 5：gh-pages 部署已确认（$(printf '%s' "$_json" | jq -r '(.action // "?") + "，attempt " + ((.attempts // "?") | tostring)')）"
+        else
+            log "ERROR" "🚨 Step 5：gh-pages 部署未成功——**本轮网站没有更新**（$(printf '%s' "$_json" | jq -r '(.reason // "?") + "：" + ((.detail // "") | tostring | .[0:200])')）"
+            set_status partial
+        fi
+        STEPS_RESULT=$(echo "$STEPS_RESULT" | jq --argjson s "$_json" '. + {"step5_github_deploy": $s}')
+    elif [ "${STEP2_RC}" -eq 0 ]; then
+        log "WARN" "⚠️ Step 5：gh-pages 部署结局不可得（report_deployer.py --gh-pages-step-status 无有效输出，生产代码可能早于 v0.45.351）——记 skipped_builtin，**未核实**网站是否更新"
+        STEPS_RESULT=$(echo "$STEPS_RESULT" | jq '. + {"step5_github_deploy": {"status": "skipped_builtin", "unverified": true}}')
+    else
+        log "ERROR" "🚨 Step 5 未部署！部署由 Step 2 pipeline 完成，"
+        log "ERROR" "   而 Step 2 没跑完（RC=${STEP2_RC}）—— **本轮网站不会更新**"
+        STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step5_github_deploy\": {\"status\": \"failed\", \"reason\": \"step2_did_not_complete\", \"step2_rc\": ${STEP2_RC}}}")
+    fi
+}
 log "INFO" ""
 log "INFO" "【Step 4/5】仪表板更新 + GitHub 部署（由 Step 2 pipeline 完成）- 确认"
 if [ $STEP2_RC -eq 0 ]; then
     log "INFO" "⏭️  Step 4 跳过（仪表板已由 Step 2 pipeline 生成）"
     STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step4_dashboard\": {\"status\": \"skipped_builtin\"}}")
-    log "INFO" "⏭️  Step 5 跳过（部署已由 Step 2 pipeline 完成）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step5_github_deploy\": {\"status\": \"skipped_builtin\"}}")
 else
     log "ERROR" "🚨 Step 4 未生成仪表板！仪表板由 Step 2 pipeline 生成，"
     log "ERROR" "   而 Step 2 没跑完（RC=${STEP2_RC}）"
     STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step4_dashboard\": {\"status\": \"failed\", \"reason\": \"step2_did_not_complete\", \"step2_rc\": $STEP2_RC}}")
-    log "ERROR" "🚨 Step 5 未部署！部署由 Step 2 pipeline 完成，"
-    log "ERROR" "   而 Step 2 没跑完（RC=${STEP2_RC}）—— **本轮网站不会更新**"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step5_github_deploy\": {\"status\": \"failed\", \"reason\": \"step2_did_not_complete\", \"step2_rc\": $STEP2_RC}}")
 fi
+_step5_gh_pages_verdict
 
 # ================================================================
 # 写状态文件（v0.45.66 提取成函数，因为要写两次）
