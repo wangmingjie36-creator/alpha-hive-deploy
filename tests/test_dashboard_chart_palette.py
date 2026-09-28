@@ -232,3 +232,11 @@ def test_fear_greed_gauge_matches_macro_bar_thresholds():
     m_js = re.search(r"const fc=fv<=(\d+)\?_tok\('--bear'\):fv<=(\d+)\?_tok\('--neut'\):_tok\('--bull'\);", JS)
     assert m_py and m_js, "找不到仪表盘或宏观条的恐惧贪婪分档（改写法了？同步更新本测试）"
     assert m_py.groups() == m_js.groups(), f"阈值不一致：宏观条 {m_py.groups()} vs 仪表盘 {m_js.groups()}"
+
+
+def test_spy_benchmark_line_uses_secondary_ink():
+    """v0.45.364：SPY 基准线原为 rgba(150,150,150,.8)（浅色下约 2.3:1、不随主题）；改 --ts（浅 5.81 / 暗 7.46:1）。
+    不用 --tm：浅色下 2.37:1，线会看不见。"""
+    code = _strip_comments(JS, "js")
+    assert "rgba(150,150,150" not in code
+    assert re.search(r"label:'SPY 基准[^']*'[^}]*borderColor:_tok\('--ts'\)", code, re.S)

@@ -786,7 +786,7 @@ window.AH.initEquityCurve=function(){
         // $5K 累加"——会随交易笔数放大，实测 +19.33% vs 买入持有 +15.73%，
         // 同页两个"SPY 基准"差 3.6pp，而图例就写着"买入持有"。
         {label:'SPY 基准 (买入持有)', data:spyData,
-         borderColor:'rgba(150,150,150,.8)', backgroundColor:'rgba(150,150,150,.04)', fill:false,
+         borderColor:_tok('--ts'), backgroundColor:'transparent', fill:false,  // v0.45.364：基准线用次要文字色，比数据线淡但浅色下 5.8:1 仍可读
          tension:.25, pointRadius:0, borderWidth:1.5, order:3}
       ]
     },
