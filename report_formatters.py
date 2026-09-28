@@ -659,17 +659,23 @@ def _build_macro(macro_context) -> List[str]:
     # 仍照常显示 low/high/neutral —— 一整行看起来完全正常的宏观快照。
     # 上游 fred_macro 的兜底（VIX 20.0、TNX 4.5）更隐蔽：4.5 恰好落在
     # rate_environment 的 high 档边界上（见 v0.45.42 记录）。
-    def _mrow(label, key, spec, suffix, state_key):
+    def _mrow(label, key, spec, suffix, state_key, note=""):
         v = macro_context.get(key)
         # isinstance 挡不住 NaN——float('nan') 也是 float 实例，
         # 格式化不报错、只吐出字面文本 "nan"，印成一行看起来正常的假数据。
         txt = (format(v, spec) + suffix
                if isinstance(v, (int, float)) and not isinstance(v, bool)
                and math.isfinite(v) else "—")
-        state = macro_context.get(state_key, "") if txt != "—" else "不可得"
+        state = (macro_context.get(state_key, "") + note) if txt != "—" else "不可得"
         md.append(f"| {label} | {txt} | {state} |")
 
-    _mrow("VIX", "vix", ".1f", "", "vix_regime")
+    # v0.45.357：VIX 写明是哪一场的收盘；陈旧（早于扫描日前一交易日）显式标出 ——
+    # 09-24/25 的日报印着 09-22 的 14.21，表里看不出任何异样。
+    _vas = macro_context.get("vix_as_of")
+    _vnote = f" · {_vas} 收盘" if _vas else ""
+    if macro_context.get("vix_stale") is True:
+        _vnote += "（⚠️ 陈旧，未计入宏观投票）"
+    _mrow("VIX", "vix", ".1f", "", "vix_regime", _vnote)
     _mrow("10Y利率", "treasury_10y", ".2f", "%", "rate_environment")
     _mrow("大盘(5日)", "spx_change_pct", "+.2f", "%", "market_trend")
     md.append(f"| 美元 | — | {macro_context.get('dollar_trend', '')} |")

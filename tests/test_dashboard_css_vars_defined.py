@@ -44,6 +44,9 @@ _REF_PATTERNS = (
     re.compile(rf"var\(\s*({_NAME})"),
     re.compile(rf"getPropertyValue\(\s*['\"]({_NAME})['\"]"),
 )
+# JS 里把令牌名当字符串传的写法（v0.45.358 起 `_tok('--acc')` / `SERIES=['--series-1',...]`）。
+# 只对 .js 生效：.py 里的 '--xxx' 多半是命令行参数。
+_JS_QUOTED = re.compile(rf"['\"]({_NAME})['\"]")
 _COLOR_VALUE = re.compile(r"^\s*(#[0-9A-Fa-f]{3,8}|rgba?\(|hsla?\()")
 
 
@@ -62,17 +65,17 @@ def _tokens(css: str, selector: str) -> dict:
     return out
 
 
-def _references(text: str):
-    """→ [(name, lineno)]，按出现顺序。"""
+def _references(text: str, js: bool = False):
+    """→ [(name, lineno)]，按出现顺序。`js=True` 时另收字符串字面量里的令牌名。"""
     refs = []
-    for pat in _REF_PATTERNS:
+    for pat in _REF_PATTERNS + ((_JS_QUOTED,) if js else ()):
         for m in pat.finditer(text):
             refs.append((m.group(1), text.count("\n", 0, m.start()) + 1))
-    return sorted(refs, key=lambda r: r[1])
+    return sorted(set(refs), key=lambda r: r[1])
 
 
-def _undefined(text: str, defined) -> list:
-    return [(n, ln) for n, ln in _references(text) if n not in defined]
+def _undefined(text: str, defined, js: bool = False) -> list:
+    return [(n, ln) for n, ln in _references(text, js) if n not in defined]
 
 
 @pytest.fixture(scope="module")
@@ -85,7 +88,7 @@ def root_tokens():
 def test_every_referenced_custom_property_is_defined_in_root(root_tokens):
     offenders = []
     for src in SOURCES:
-        for name, ln in _undefined(src.read_text(encoding="utf-8"), root_tokens):
+        for name, ln in _undefined(src.read_text(encoding="utf-8"), root_tokens, js=src.suffix == ".js"):
             offenders.append(f"{src.relative_to(ROOT)}:{ln} {name}")
     assert not offenders, (
         "引用了 :root 里没有的 CSS 变量（不会报错，只会悄悄退化成继承色 / 透明）：\n  "
@@ -128,7 +131,9 @@ def test_scanner_sees_the_real_references():
     assert total > 200, f"四个文件只扫到 {total} 处引用，扫描器多半坏了"
     assert {"--bull", "--bear", "--neut", "--tp", "--ts", "--border"} <= names
     js = (ROOT / "templates" / "dashboard.js").read_text(encoding="utf-8")
-    assert _REF_PATTERNS[1].search(js), "dashboard.js 里的 getPropertyValue 取令牌没被扫到"
+    js_names = {n for n, _ in _references(js, js=True)}
+    assert {"--acc", "--bull", "--series-1", "--series-4", "--surface"} <= js_names, (
+        f"dashboard.js 里 `_tok('--x')` / SERIES 数组的令牌名没被扫到：{sorted(js_names)}")
 
 
 @pytest.mark.parametrize("snippet,expected", [
@@ -136,12 +141,14 @@ def test_scanner_sees_the_real_references():
     ("var c=color||'var(--t)';", ["--t"]),
     ("background:var(--card);border:1px", ["--card"]),
     ("rootCS.getPropertyValue('--nope').trim()", ["--nope"]),
+    ("borderColor:_tok('--nope2'),", ["--nope2"]),
+    ("const SERIES=['--series-1','--series-9'];", ["--series-9"]),
     ('color:var( --spaced )', ["--spaced"]),
     ('color:var(--bull);background:var(--surface2)', []),
 ])
 def test_scanner_catches_undefined_names(root_tokens, snippet, expected):
     """反向自证：把本版修掉的三个名字喂回去，扫描器必须点名。"""
-    assert [n for n, _ in _undefined(snippet, root_tokens)] == expected
+    assert [n for n, _ in _undefined(snippet, root_tokens, js=True)] == expected
 
 
 def test_scanner_flags_the_pre_fix_sources(root_tokens):

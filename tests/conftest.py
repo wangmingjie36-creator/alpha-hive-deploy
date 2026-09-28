@@ -141,6 +141,27 @@ def _block_same_day_macro(monkeypatch):
     monkeypatch.setattr(twelve_data, "api_key", lambda: "")
 
 
+@pytest.fixture(autouse=True)
+def _no_leaked_macro_snapshot():
+    """测试结束时 `fred_macro` 的宏观快照必须已卸载；没卸 ⇒ 卸掉并让**留下它的那条**报错（v0.45.366）。
+
+    为什么要有：快照是进程级全局，v0.45.366 起 GuardBee 拿 `get_macro_snapshot()` 判「这次是补跑」
+    （期限结构读快照、FOMC 按目标日数）。一条测试忘了卸，之后同进程里每条调 Guard 的测试都**静默**
+    跑在补跑口径下——绿不绿取决于执行顺序。实测 `test_vix_same_day` 的 `_offline` 只在 setup 卸、
+    teardown 不卸，靠下一条的 setup 兜着才没出事。
+
+    只看已导入的模块（没导入过就不可能装过），不为此 import fred_macro。
+    """
+    yield
+    fm = sys.modules.get("fred_macro")
+    snap = fm.get_macro_snapshot() if fm is not None else None
+    if snap is not None:
+        fm.set_macro_snapshot(None)
+        pytest.fail(f"测试结束时宏观快照仍装着（{snap.get('date')}）：请在 teardown 里 "
+                    "`fred_macro.set_macro_snapshot(None)`——它会让之后的 GuardBee 静默跑在补跑口径下",
+                    pytrace=False)
+
+
 # ==================== 全局离线闸（传输层）====================
 
 #: 允许**伸手取数**的测试模块白名单。**v0.45.136 起为空，并且应当保持为空。**
@@ -348,9 +369,14 @@ def stub_cboe_vix(monkeypatch):
     ⚠️ 走缓存是刻意保留的既有行为：`cboe_vix` 的缓存是
     `Path(__file__).parent / "cache"`（仓库本地目录，**不受 ALPHA_HIVE_CACHE_DIR
     隔离**），本机热、CI 冷。桩只负责不出网，不改缓存语义。
+
+    v0.45.357：同时钉 `cboe_vix._download_quote` → None（延迟报价，契约同上）。
+    ⚠️ 这一条**只在美东 16:15 之后的交易日**才会被走到（之前 `get_vix_session_close`
+    直接回 `before_close`、不出网）—— 不钉它，同一批测试下午跑红、上午跑绿。
     """
     import cboe_vix
     monkeypatch.setattr(cboe_vix, "_download", lambda: None)
+    monkeypatch.setattr(cboe_vix, "_download_quote", lambda: None)
 
 
 @pytest.fixture

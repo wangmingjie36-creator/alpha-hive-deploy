@@ -6,7 +6,7 @@ v0.45.354 用它结案 `origin/fix/cboe-*` 两条分支。只读：经 `git show
 
 真值 = **其后第一份快照**的 `prev_day_close`，归属由 `cboe_options.prev_close_session`
 自证（隔了交易日就对不上、该行无真值），与 `cloud_snapshot_loader.load_official_close`
-第 2 步同一口径——云端 290 份实测 289 份 ≤0.01%，不随当日文件陈旧而错。
+第 1 步同一口径（v0.45.359 起为首选）——云端 290 份实测 289 份 ≤0.01%，不随当日文件陈旧而错。
 
 用法（仓库根或任意 cwd 均可）：
     /usr/local/bin/python3 experiments/cboe_freeze_criterion_corpus.py

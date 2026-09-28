@@ -159,6 +159,11 @@ def _macro_deltas(mctx: dict, prev_mctx: Optional[dict], prev_report_date: Optio
             and _fresh(d1) and isinstance(d0, str) and d0 < d1):
         out["vix"] = _macro_delta_span(
             v - v0, 1, "", f"CBOE {d1} 收盘 {v:.2f}，较 {d0} 收盘 {v0:.2f}")
+    elif mctx.get("vix_stale") is True and isinstance(d1, str):
+        # v0.45.357：陈旧时涨跌本来就不显示（上面的新鲜度窗口），但主数值照印 —— 不标出来
+        # 就是一个看起来正常的 VIX。上游 `fred_macro` 给的判定，这里只负责让人看见。
+        _t = f"VIX 观测日 {d1}，早于报告日前一交易日（CBOE 取数失败、读的是过期缓存）"
+        out["vix"] = f'<span class="ah-macro-delta" title="{_html.escape(_t)}">陈旧</span>'
 
     def _tsy(m):
         src = str(((m or {}).get("field_sources") or {}).get("TNX") or "")

@@ -9,12 +9,12 @@ window.AH=window.AH||{};
     if(errCount>=maxToast)return;
     errCount++;
     var t=document.createElement('div');
+    // v0.45.367：样式挪进 dashboard.css 的 .ah-err-toast（中性底 + --bear 左边条，暗色下不再是白字压亮红）；
+    // 这里只留随条数变化的 bottom。报错文本走 textContent，不拼 HTML。
     t.className='ah-err-toast';
-    t.textContent='\u26a0\ufe0f '+msg;
-    t.style.cssText='position:fixed;bottom:'+(20+errCount*50)+'px;right:20px;'
-      +'background:#ff4444;color:#fff;padding:10px 16px;border-radius:8px;'
-      +'font-size:13px;z-index:99999;opacity:0.95;max-width:350px;'
-      +'box-shadow:0 2px 8px rgba(0,0,0,.3);transition:opacity .3s';
+    var mk=document.createElement('span');mk.className='ah-mark';mk.textContent='\u25b2';
+    t.appendChild(mk);t.appendChild(document.createTextNode(msg));
+    t.style.bottom=(20+errCount*50)+'px';
     document.body.appendChild(t);
     setTimeout(function(){t.style.opacity='0';setTimeout(function(){t.remove();errCount--;},400)},6000);
   }
@@ -247,6 +247,11 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){
 
 // ── Charts (lazy via IntersectionObserver) ──
 let chartInstances=[];
+// v0.45.358：canvas 不认 var()，图表颜色一律取 :root 令牌的**实算值**。toggleDark 会销毁并重画全部图表，
+// 所以这里读到的永远是当前主题那一套；不要再在 JS 里抄「浅色 hex / 暗色 hex」副本（第二份真相，改令牌就漂移）。
+function _tok(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+function _tokA(n,a){var h=_tok(n),m=/^#([0-9a-f]{6})$/i.exec(h);if(!m)return h;
+  var v=parseInt(m[1],16);return 'rgba('+(v>>16&255)+','+(v>>8&255)+','+(v&255)+','+a+')';}
 (function(){
   const rendered={};
 
@@ -264,19 +269,22 @@ let chartInstances=[];
     if(typeof Chart==='undefined')return;
     rendered[id]=true;
     const dark=document.documentElement.classList.contains('dark');
-    const tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-    const gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+    // v0.45.365：刻度 = 次要文字色，网格 = 半透明边框色；0.5 透明度与原 6–7% 黑/白网格的淡度相当（对比度 1.1–1.4）
+    const tc=_tok('--ts');
+    const gc=_tokA('--border',.5);
     try{
 
     if(id==='fgChart'){
       const fgCtx=document.getElementById('fgChart');
       if(!fgCtx)return;
       const fv=__AH__.fv;
-      const fc=fv<=25?'#ef4444':fv<=45?'#f97316':fv<=55?'#f59e0b':fv<=75?'#22c55e':'#16a34a';
+      // v0.45.361：与宏观条 `_fg_cls` 同阈值同令牌（≤45 恐惧 / ≤55 中性 / 其余贪婪）。旧的 5 档硬编码色让同一个值
+      // 在同一页上两种颜色（F&G 33：宏观条 --bear，这里 #f97316 橙）。改阈值必须两边一起改。
+      const fc=fv<=45?_tok('--bear'):fv<=55?_tok('--neut'):_tok('--bull');
       const fl=__AH__.fg_label;
       chartInstances.push(new Chart(fgCtx,{
         type:'doughnut',
-        data:{datasets:[{data:[fv,100-fv],backgroundColor:[fc,dark?'#2a3050':'#e8ecf3'],
+        data:{datasets:[{data:[fv,100-fv],backgroundColor:[fc,_tok('--border')],
                            borderWidth:0,circumference:180,rotation:-90}]},
         options:{responsive:true,maintainAspectRatio:false,cutout:'72%',
                  plugins:{legend:{display:false},tooltip:{enabled:false}}},
@@ -299,10 +307,7 @@ let chartInstances=[];
       // v0.45.352（重做 v0.45.78）：柱色取 :root 令牌的**实算值**（canvas 不认 var()），
       // 明暗切换时 toggleDark 会销毁重画，这里自然拿到另一套。不抄 hex 副本——
       // 抄了就是第二份真相，令牌一改就静默漂移。方头、细柱，与站点其余细横条一致。
-      const rootCS=getComputedStyle(document.documentElement);
-      const cBull=rootCS.getPropertyValue('--bull').trim(),
-            cNeut=rootCS.getPropertyValue('--neut').trim(),
-            cBear=rootCS.getPropertyValue('--bear').trim();
+      const cBull=_tok('--bull'),cNeut=_tok('--neut'),cBear=_tok('--bear');
       const clrs=sc.map(function(x){return x[1]>=7?cBull:x[1]>=5.5?cNeut:cBear;});
       chartInstances.push(new Chart(scCtx,{
         type:'bar',
@@ -332,7 +337,7 @@ let chartInstances=[];
         type:'doughnut',
         data:{labels:['看多','看空','中性'],
                datasets:[{data:dd,
-                           backgroundColor:['rgba(34,197,94,.85)','rgba(239,68,68,.85)','rgba(245,158,11,.85)'],
+                           backgroundColor:[_tok('--bull'),_tok('--bear'),_tok('--neut')],
                            borderColor:'transparent',borderWidth:0}]},
         options:{responsive:true,maintainAspectRatio:false,cutout:'58%',
                  plugins:{legend:{position:'bottom',labels:{color:tc,font:{size:10},boxWidth:11,padding:10}},
@@ -363,8 +368,8 @@ let chartInstances=[];
       if(dateEl) dateEl.textContent=eq[0].date+' ~ '+eq[eq.length-1].date;
       const curEl=document.getElementById('eqCurrent');
       if(curEl) curEl.textContent=lastVal.toFixed(2);
-      const lineColor=up?'#22c55e':'#ef4444';
-      const fillColor=up?'rgba(34,197,94,.08)':'rgba(239,68,68,.08)';
+      const lineColor=up?_tok('--bull'):_tok('--bear');
+      const fillColor=up?_tokA('--bull',.08):_tokA('--bear',.08);
       chartInstances.push(new Chart(eqCtx,{
         type:'line',
         data:{labels:labels,datasets:[{data:idxData,
@@ -395,8 +400,8 @@ let chartInstances=[];
     if(rendered['radar-'+tk])return;
     if(typeof Chart==='undefined')return;
     const dark=document.documentElement.classList.contains('dark');
-    const tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-    const gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+    const tc=_tok('--ts');
+    const gc=_tokA('--border',.5);
     rendered['radar-'+tk]=true;
     const cv=document.getElementById('radar-'+tk);
     if(!cv)return;
@@ -404,8 +409,8 @@ let chartInstances=[];
     chartInstances.push(new Chart(cv,{
       type:'radar',
       data:{labels:rl,datasets:[{data:rd[tk],fill:true,
-               backgroundColor:'rgba(102,126,234,.13)',borderColor:'#667eea',
-               pointBackgroundColor:'#667eea',pointBorderColor:'#fff',pointRadius:2,borderWidth:1.5}]},
+               backgroundColor:_tokA('--acc',.13),borderColor:_tok('--acc'),
+               pointBackgroundColor:_tok('--acc'),pointBorderColor:_tok('--surface'),pointRadius:2,borderWidth:1.5}]},
       options:{responsive:true,maintainAspectRatio:true,
                onClick:function(evt,elems){
                  if(!elems.length)return;
@@ -414,7 +419,7 @@ let chartInstances=[];
                  if(!card)return;
                  const metrics=card.querySelectorAll('.cc-metric');
                  metrics.forEach(function(m,i){
-                   m.style.background=i===dimIdx?'rgba(244,165,50,.15)':'';
+                   m.style.background=i===dimIdx?_tokA('--acc',.12):'';
                  });
                  card.scrollIntoView({behavior:'smooth',block:'center'});
                },
@@ -496,7 +501,7 @@ window.AH.initAccDirChart=function(){
       datasets: [{
         label: '准确率 %',
         data: accs,
-        backgroundColor: ['#22c55e','#ef4444','#94a3b8'],
+        backgroundColor: [_tok('--bull'),_tok('--bear'),_tok('--neut')],
         borderRadius: 6,
         maxBarThickness: 40,
       }]
@@ -520,13 +525,12 @@ window.AH.initAccDirChart=function(){
   // 渲染收益率 pills
   const pillBox = document.getElementById('accDirRets');
   if (pillBox && rets.length) {
-    const colors = ['#22c55e','#ef4444','#94a3b8'];
     pillBox.innerHTML = dirs.map(function(d,i){
       const r = rets[i];
       if (r === undefined) return '';
       const sign = r >= 0 ? '+' : '';
-      const col = r >= 0 ? '#22c55e' : '#ef4444';
-      return '<span style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:20px;padding:4px 12px;font-size:.82em;color:'+col+'">'
+      const col = r >= 0 ? 'var(--bull)' : 'var(--bear)';
+      return '<span style="background:var(--surface2);border:0.5px solid var(--border);border-radius:20px;padding:4px 12px;font-size:.82em;color:'+col+'">'
         +d+' 均收益 '+sign+r.toFixed(2)+'%</span>';
     }).join('');
   }
@@ -565,24 +569,24 @@ window.AH.initAccWinTrend=function(){
   const wbd=__AH__.acc_weekly_by_dir||[];
   if(!wd||!wd.length)return;
   const dark=document.documentElement.classList.contains('dark');
-  const tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-  const gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+  const tc=_tok('--ts');
+  const gc=_tokA('--border',.5);
   // 如果有分方向数据，用三条线；否则退回整体线
   const useByDir = wbd.length > 0;
   const labels = useByDir ? wbd.map(function(d){return d.week;}) : wd.map(function(d){return d.week;});
   const datasets = useByDir ? [
     {label:'看多胜率%', data:wbd.map(function(d){return d.bullish;}),
-      borderColor:'#22c55e', backgroundColor:'rgba(34,197,94,.08)', fill:false,
+      borderColor:_tok('--bull'), backgroundColor:_tokA('--bull',.08), fill:false,
       tension:.3, pointRadius:3, borderWidth:2, spanGaps:true},
     {label:'看空胜率%', data:wbd.map(function(d){return d.bearish;}),
-      borderColor:'#ef4444', backgroundColor:'rgba(239,68,68,.08)', fill:false,
+      borderColor:_tok('--bear'), backgroundColor:_tokA('--bear',.08), fill:false,
       tension:.3, pointRadius:3, borderWidth:2, spanGaps:true},
     {label:'中性胜率%', data:wbd.map(function(d){return d.neutral;}),
-      borderColor:'#94a3b8', backgroundColor:'transparent', fill:false,
+      borderColor:_tok('--neut'), backgroundColor:'transparent', fill:false,
       borderDash:[4,3], tension:.3, pointRadius:2, borderWidth:1.5, spanGaps:true}
   ] : [
     {label:'胜率%', data:wd.map(function(d){return d.accuracy;}),
-      borderColor:'#667eea', backgroundColor:'rgba(102,126,234,.1)', fill:true,
+      borderColor:_tok('--acc'), backgroundColor:_tokA('--acc',.1), fill:true,
       tension:.3, pointRadius:3, borderWidth:2}
   ];
   chartInstances.push(new Chart(cv,{
@@ -758,10 +762,10 @@ window.AH.initEquityCurve=function(){
   }
   var existing=Chart.getChart(cv);if(existing)existing.destroy();
   var dark=document.documentElement.classList.contains('dark');
-  var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-  var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+  var tc=_tok('--ts');
+  var gc=_tokA('--border',.5);
   var labels=eq.map(function(d){return d.date.slice(5);});
-  // 三条曲线：net (绿, 主), gross (蓝, 辅参考), spy (灰, 基准)
+  // 三条曲线：net (绿, 主), gross (锈红虚线, 辅参考), spy (灰, 基准)
   var netData =eq.map(function(d){return d.cum_net_pct!=null?d.cum_net_pct:d.cum;});
   var grossData=eq.map(function(d){return d.cum_gross_pct!=null?d.cum_gross_pct:d.cum;});
   // null 保持 null（Chart.js 会断开该点），不许变 0 —— 0 读作"大盘当天没动"。
@@ -773,17 +777,17 @@ window.AH.initEquityCurve=function(){
       labels:labels,
       datasets:[
         {label:'Net (真实可交易)', data:netData,
-         borderColor:'#22c55e', backgroundColor:'rgba(34,197,94,.08)', fill:true,
+         borderColor:_tok('--bull'), backgroundColor:_tokA('--bull',.08), fill:true,
          tension:.25, pointRadius:0, borderWidth:2.5, order:1},
         {label:'Gross (不扣成本)', data:grossData,
-         borderColor:'#667eea', backgroundColor:'rgba(102,126,234,.0)', fill:false,
+         borderColor:_tok('--acc'), backgroundColor:'transparent', fill:false,
          tension:.25, pointRadius:0, borderWidth:1.5, borderDash:[4,3], order:2},
         // v0.45.179：这条线现在**真的是**买入持有（首日建仓、持有至各结算日），
         // 与上方卡片「SPY 同期基准」同口径同区间。旧实现是"每笔 7 日 SPY 收益 ×
         // $5K 累加"——会随交易笔数放大，实测 +19.33% vs 买入持有 +15.73%，
         // 同页两个"SPY 基准"差 3.6pp，而图例就写着"买入持有"。
         {label:'SPY 基准 (买入持有)', data:spyData,
-         borderColor:'rgba(150,150,150,.8)', backgroundColor:'rgba(150,150,150,.04)', fill:false,
+         borderColor:_tok('--ts'), backgroundColor:'transparent', fill:false,  // v0.45.364：基准线用次要文字色，比数据线淡但浅色下 5.8:1 仍可读
          tension:.25, pointRadius:0, borderWidth:1.5, order:3}
       ]
     },
@@ -926,7 +930,7 @@ window.AH.initFgTrend=function(){
       labels:_fgTrendHist.map(function(d){return d.date.slice(5);}),
       datasets:[{
         data:_fgTrendHist.map(function(d){return d.value;}),
-        borderColor:'#F4A532',backgroundColor:'rgba(244,165,50,.1)',
+        borderColor:_tok('--acc'),backgroundColor:_tokA('--acc',.1),
         fill:true,tension:.3,pointRadius:_fgSingle?5:2,borderWidth:1.5
       }]
     },
@@ -949,9 +953,13 @@ window.AH.initTrendChart=function(){
   if(!cv||typeof Chart==='undefined')return;
   if(window.AH.trendChart) return; // 已初始化
   const dark=document.documentElement.classList.contains('dark');
-  const tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-  const gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
-  const colors=['#667eea','#F4A532','#22c55e','#ef4444','#764ba2','#f59e0b','#06b6d4','#ec4899','#8b5cf6','#14b8a6'];
+  const tc=_tok('--ts');
+  const gc=_tokA('--border',.5);
+  // v0.45.358：分类色取 :root 的 --series-1..4（校验数字见 dashboard.css 注释）。
+  // 旧的 10 色表：3 个紫（#667eea / #764ba2 / #8b5cf6），外加看多绿 #22c55e、看空红 #ef4444 ——本站红 = 看空，
+  // 标的线被涂红会被读成信号（09-11 实测 AMC 恰好是红线）；且按 i%10 循环，30 只里每 3 只共用一个色。
+  // 颜色跟标的走：激活时领最小空闲槽、取消时归还，其余标的不重涂；4 槽用满就不再加——色不够分时宁可少画。
+  const SERIES=['--series-1','--series-2','--series-3','--series-4'];
   const tickers=Object.keys(trendData);
   // 收集所有日期
   const allDates={};
@@ -959,21 +967,30 @@ window.AH.initTrendChart=function(){
     trendData[tk].forEach(function(d){allDates[d.date]=true;});
   });
   const dates=Object.keys(allDates).sort();
-  // 默认显示前 5 个 ticker
-  const activeTickers={};
-  tickers.slice(0,5).forEach(function(tk){activeTickers[tk]=true;});
-  // 生成 chips
+  // 选中状态放在 window.AH 上：切换明暗会销毁并重建本图，但 chip 不重建。旧实现把状态关在闭包里，
+  // chip 的 onclick 一直指着第一次的闭包 ⇒ 切换后 chip 点了不起作用、已勾选的也从图上消失（09-28 实测）。
+  const st=window.AH._trendState||(window.AH._trendState={slot:{}});
+  if(!st.init){st.init=true;tickers.slice(0,SERIES.length).forEach(function(tk,i){st.slot[tk]=i;});}
+  window.AH.toggleTrendTicker=function(tk){
+    if(tk in st.slot){delete st.slot[tk];}
+    else{
+      const used=Object.keys(st.slot).map(function(k){return st.slot[k];});
+      let free=-1;
+      for(let k=0;k<SERIES.length;k++){if(used.indexOf(k)<0){free=k;break;}}
+      if(free<0){showToast('最多同时比较 '+SERIES.length+' 只，先取消一只');return;}
+      st.slot[tk]=free;
+    }
+    window.AH.updateTrendChart();
+  };
+  // 生成 chips（只生成一次；点击走 window.AH 上的最新实现）
   const chipWrap=document.getElementById('trendChips');
   if(chipWrap && !chipWrap.children.length){
-    tickers.forEach(function(tk,i){
+    tickers.forEach(function(tk){
       const chip=document.createElement('button');
-      chip.className='trend-chip'+(activeTickers[tk]?' active':'');
+      chip.className='trend-chip';
+      chip.dataset.tk=tk;
       chip.textContent=tk;
-      chip.onclick=function(){
-        activeTickers[tk]=!activeTickers[tk];
-        chip.classList.toggle('active');
-        updateTrendChart();
-      };
+      chip.onclick=function(){window.AH.toggleTrendTicker(tk);};
       chipWrap.appendChild(chip);
     });
   }
@@ -992,22 +1009,28 @@ window.AH.initTrendChart=function(){
   });
   chartInstances.push(trendChart);
   function updateTrendChart(){
+    const colors=SERIES.map(_tok);
     const datasets=[];
-    tickers.forEach(function(tk,i){
-      if(!activeTickers[tk])return;
+    tickers.forEach(function(tk){
+      if(!(tk in st.slot))return;
       const scoreMap={};
       trendData[tk].forEach(function(d){scoreMap[d.date]=d.score;});
+      const c=colors[st.slot[tk]];
       datasets.push({
         label:tk,
         data:dates.map(function(d){return d in scoreMap?scoreMap[d]:null;}),
-        borderColor:colors[i%colors.length],
-        backgroundColor:colors[i%colors.length]+'22',
+        borderColor:c,
+        backgroundColor:c,
         tension:.3,pointRadius:3,borderWidth:2,
         spanGaps:true
       });
     });
     trendChart.data.datasets=datasets;
     trendChart.update();
+    // chip 的勾选态与图同源，不再各自翻转
+    if(chipWrap) chipWrap.querySelectorAll('.trend-chip').forEach(function(ch){
+      ch.classList.toggle('active', ch.dataset.tk in st.slot);
+    });
   }
   updateTrendChart();
   window.AH.updateTrendChart=updateTrendChart;
@@ -1191,7 +1214,7 @@ function toggleKbHelp(){
     rows.forEach(function(r){
       const tickerCell=r.cells[1];
       if(tickerCell&&tickerCell.textContent.trim()===ticker){
-        r.style.background='rgba(244,165,50,.12)';
+        r.style.background=_tokA('--acc',.12);
         setTimeout(function(){r.style.background='';},2000);
       }
     });
@@ -1336,11 +1359,12 @@ function toggleKbHelp(){
     var ageHours=(Date.now()-genTime)/(1000*60*60);
     if(ageHours>24){
       var banner=document.createElement('div');
+      // v0.45.367：样式在 dashboard.css 的 .ah-stale-banner（中性底 + --neut 左边条），不再整条琥珀底。
       banner.className='ah-stale-banner';
-      banner.style.cssText='background:#f59e0b;color:#000;text-align:center;'
-        +'padding:8px 16px;font-size:14px;font-weight:600;position:sticky;top:0;z-index:9999';
-      banner.textContent='\u26a0\ufe0f \u6570\u636e\u53ef\u80fd\u5df2\u8fc7\u671f\uff08\u4e0a\u6b21\u66f4\u65b0: '
-        +new Date(genTime).toLocaleString('zh-CN')+'\uff09';
+      var bmk=document.createElement('span');bmk.className='ah-mark';bmk.textContent='\u25b2';
+      banner.appendChild(bmk);
+      banner.appendChild(document.createTextNode('\u6570\u636e\u53ef\u80fd\u5df2\u8fc7\u671f\uff08\u4e0a\u6b21\u66f4\u65b0: '
+        +new Date(genTime).toLocaleString('zh-CN')+'\uff09'));
       document.body.prepend(banner);
     }
   }
@@ -1496,14 +1520,14 @@ function toggleKbHelp(){
           var rd=__AH__.radar;
           if(rd&&rd[ticker]){
             var dark=document.documentElement.classList.contains('dark');
-            var tc2=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-            var gc2=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+            var tc2=_tok('--ts');
+            var gc2=_tokA('--border',.5);
             chartInstances.push(new Chart(cv,{
               type:'radar',
               data:{labels:['\u4fe1\u53f7','\u50ac\u5316','\u60c5\u7eea','\u8d54\u7387','\u98ce\u63a7'],
                     datasets:[{data:rd[ticker],fill:true,
-                      backgroundColor:'rgba(102,126,234,.13)',borderColor:'#667eea',
-                      pointBackgroundColor:'#667eea',pointRadius:2,borderWidth:1.5}]},
+                      backgroundColor:_tokA('--acc',.13),borderColor:_tok('--acc'),
+                      pointBackgroundColor:_tok('--acc'),pointRadius:2,borderWidth:1.5}]},
               options:{responsive:true,maintainAspectRatio:true,
                 scales:{r:{min:0,max:100,beginAtZero:true,grid:{color:gc2},angleLines:{color:gc2},
                   ticks:{display:false},pointLabels:{color:tc2,font:{size:8}}}},

@@ -5,9 +5,506 @@
 
 ---
 
-## [0.45.358] — 2026-09-28 — 占位（进行中：dashboard.js 其余 Chart.js 图表的紫色 #667eea/#764ba2 等换成站点令牌）
+## [0.45.368] — 2026-09-28 — dashboard.css 组件层硬编码色换令牌：修 4 处对比度不达标 + 零字面量守卫
 
-## [0.45.357] — 2026-09-28 — 占位（进行中：日报 VIX 滞后一日 / 陈旧缓存照标 cboe / vix_change_pct 错位——量化 + 可观测 + 处置）
+接 v0.45.367（dashboard.js 已零颜色字面量），把同一条线画到 `templates/dashboard.css`：颜色只在 `:root` / `html.dark` 定义，组件规则一律走令牌。改前组件层有 ~100 处写死的色值。
+
+### Fixed（改前某一种主题下读不清，WCAG 对比度实算）
+- `.fresh-*`（顶部「N 分钟前更新」徽章）：用的是暗色主题的高亮色 `#4ade80`/`#fbbf24`/`#f87171`，**浅色主题下 1.57 / 1.52 / 2.37:1** → `var(--bull/--neut/--bear)`，4.9–6.4:1。
+- `.tb-title` / `.tb-l1` / `.tb-l2` / `.rss-badge`（失效条件分级、Form4 徽章）：反过来用浅色深红深橙，**暗色下 2.34 / 2.69:1** → `var(--bear/--neut)`。
+- `.sec-hot` / `.sec-cold`：Bootstrap `#28a745`/`#dc3545`（浅色 2.88:1）→ `var(--bull/--bear)`。
+- 实色块上的字：`.trend-chip.active` / `.slogo-fb` / 四个 `--acc` hover 用 `color:#fff`，**暗色下压 `--acc2`/`--acc3` 只剩 2.28 / 2.15:1**；`.srank` 用写死近黑，浅色下 3.44:1。新令牌 `--on-solid`（浅 `#FFFFFF` / 暗 `#0A0F1C`），六个组合全 ≥5.15:1。
+- `.bnav-item`（手机底部导航文字）浅色用 `--tm`（2.2:1）、`.acc-sig-no`（「不显著」标签，注释写明必须与数字同处一个视线内）用 `--tm` → `--ts`。
+
+### Changed
+- 半透明淡染改走 RGB 通道令牌 `--tint-bull/bear/neut/acc/slate/ink`，写法 `rgba(var(--tint-bull),.12)`。**不用 `color-mix()`**：站点要照顾微信 X5 内核，不认就整条声明作废、底色直接消失。前五个通道两套主题共用、取值与改前相同（淡染外观零变化）；`--tint-ink` 随主题翻转。Bootstrap `rgba(40,167,69)`/`rgba(220,53,69)` 并入 bull/bear，`rgba(148,163,184,.16)` 并入 slate。
+- 删掉主题分叉覆盖：`html.dark .nav` / `.nav-link` / `.dark-btn`（底规则本就走 `--bg/--border/--ts`，覆盖反而写死了白色半透明）、`html:not(.dark) .bottom-nav` / `.bnav-item` / `.hm-tk`——底规则改走令牌后两套主题一条规则。底部导航顶边线的旧金色 `rgba(244,165,50,.15)` → `--border`。
+- `.toast` `#333`/`#fff` → `var(--tp)`/`var(--surface)`（反色提示条，暗色下是浅条深字）；`.skip-link` → `var(--tp)`/`var(--bg)`。
+
+### 保留的字面量（守卫白名单逐条写理由）
+`@media print` 整段（纸永远是白的）、`.slogo` 白底（logo 按白底设计）、`.share-btn-x:hover`（X 品牌色）、`.scard-share` / `.kb-help` / `.nav-overlay` 的黑色遮罩、`.ah-macro-viewport` 的 `mask-image`（只取 alpha）。
+
+### Added
+- `tests/test_dashboard_css_no_color_literals.py`（21 条）：除打印与白名单外零颜色字面量；白名单只许缩（条目对应规则没了就红）；`--tint-*` 必须是合法 r,g,b 三元组；`--on-solid` 压 `--acc/--acc2/--acc3` 两主题 ≥4.5:1；`--acc*` 实底规则的字色必须是 `--on-solid`；扫描器反向自证（含改前原文）。变异实测 4/4 变红：写回 `#4ade80`、暗色 `--on-solid` 改回白、通道少一位、hover 字改 `--tp`。
+
+### 验证
+- 离线渲染（socket 闸 + yfinance 桩、`pheromone.db` 用 `.backup` 副本）后 `getComputedStyle` 实测 25 个类两种主题，全部等于对应令牌；⚠️ 测时要先关掉 `transition`，否则带过渡的元素在切主题同一帧读到的是**旧主题值**（首测 trend-chip / nav-link 就这样看起来「没变」）。
+- 全套 6509 passed / 2 xfailed（照例 deselect 两条环境测试）。
+
+### 未做（记录在案）
+- 暗色 `--bear #ef4444` 压 `--surface2` 上的红淡染只有 3.71–3.84:1（`.pill-red` / `.sdir-bear` 等），这是令牌本身的取值问题、改前即如此；动它会波及全站所有看空色，需单独决定。
+- `dashboard_renderer.py` 内联样式里的 `rgba(...)` 淡染（如板块热力图单元格）仍是字面量——现在可以改写成 `rgba(var(--tint-x),α)`，本版只动 CSS。
+
+
+## [0.45.367] — 2026-09-28 — 过期数据横幅 / JS 报错浮层换令牌：拆掉整条色块，改中性底 + 语义色左边条
+
+v0.45.361 列为「没必要」的最后两项，用户要求也改。两者原本都是「整条色块 + 固定前景」（琥珀 `#f59e0b` 底黑字、亮红 `#ff4444` 底白字）。
+**不能直接换令牌**：设计系统记忆里的判据——这种结构接 `--neut`/`--bear`，暗色下它们切到高亮版，白字压亮琥珀约 2.2:1。所以拆结构：
+
+- 样式从 JS 内联 `cssText` 挪进 `templates/dashboard.css` 的 `.ah-stale-banner` / `.ah-err-toast`：`--surface2`/`--surface` 底、`--tp` 文字、
+  3px `--neut`/`--bear` 左边条；⚠️ emoji → 可着色的 ▲ 标记（`.ah-mark`，与站点其余信号标记一致）；报错浮层去掉浮空投影、圆角 8→4px。
+  JS 只留随条数变化的 `bottom`；报错文本仍走文本节点，不拼 HTML。
+- 至此 `dashboard.js` 代码里**没有任何颜色字面量**（除 `_tokA` 拼 rgba 的那一行）。守卫：`test_dashboard_js_has_no_color_literals_at_all`、
+  `test_status_ui_is_neutral_surface_with_semantic_bar`；原涨跌色测试的横幅白名单撤掉。变异（浮层加回 `#ff4444`）⇒ 红。
+- 验证（离线渲染 + 浏览器）：报错浮层用页面自己的 `window.onerror` 真触发——浅色白底 `rgb(26,18,8)` 字、`rgb(155,44,44)` 边条与 ▲，暗色 `rgb(20,25,40)` 底、
+  `rgb(239,68,68)` 边条，无投影；探针消息里的 `<b>` 按文本显示（未被当 HTML）。过期横幅用把 `data-generated` 改成 09-11 的页面副本真触发：
+  「▲数据可能已过期（上次更新: 2026/9/11 13:00:00）」为 body 第一个元素，`--surface2` 底、`--tp` 字、`--neut` 边条。
+- 全套 **6488 passed、2 xfailed**，84 deselected（同 v0.45.352）。网站下一次日报部署后生效。
+
+## [0.45.366] — 2026-09-28 — Fixed/Changed：补跑（`--date`）的 Guard 宏观票对齐目标日——VIX 改取 CBOE CSV 里 D 那一行并计票（旧：快照值落后一场且不计票）；期限结构读快照、FOMC 按 D 数、板块按 D 对齐（旧：三者都是运行当天的）；快照模式绝不回落实时 VIX。**只改补跑，实时逐票不变**；世代边界并入 09-28（作废 0 条）
+
+承 v0.45.357「未做 / 另案」第一条。用户 2026-09-28 在对话里决定：修法 (a)「CSV 目标日官方收盘」、补跑 VIX **计票**、同形泄漏**本版一起修**。
+
+### 取证（全部只读；真值 = 新拉的 CBOE `VIX_History.csv`（存 scratchpad，未写生产缓存），交易日按 `is_trading_day` 数）
+
+- **来源链核实**：云端 `cloud_snapshot_fetch` → `CBOEDailyFetcher.fetch_all`（先 pcce、后 vix_term）→ `fetch_vix_term_structure` →
+  `vix_term_structure.get_vix_term_structure()._get_spot_vix()`（yfinance `^VIX`），为 None 时兜底 `cboe_vix.get_vix_spot()`（CSV 最后一行）；
+  **VX 期货 ≥3 个才写 spot**，否则整组落 15.0/15.75/16.5、标 `default_fallback`。`market.json` 的 `vix_term` **不记观测日**。
+- **量化**：
+  | 集合 | n | 当日 | 落后 1 场 |
+  |---|---|---|---|
+  | `cloud_snapshot_cboe` 日报（08-27/28/31，全部补跑日报） | 3 | 0 | **3** |
+  | `market.json` 08-26 ~ 09-11 | 12 | 0 | **12** |
+  | `market.json` 09-14 ~ 09-25 | 9 | **9** | 0 |
+
+  09-08 那份（15.30）起初对不上任何交易日收盘——**CSV 里有 09-07（劳动节）一行 15.30**，按日历日匹配才对上（落后一场）。
+  09-14 起转为当日：同刻同一 CDN 的 SKEW CSV 仍是上一场（09-14 快照 `skew.date=09-11`）、同周本机 17:00 ET 实时扫描读 CSV 仍落后一场
+  ⇒ **不是 CSV 来的，疑为 yfinance 腿**（`_get_spot_vix`）；机制**待验证**——`yf_gate` 在云端路径上没装，我最初「P/C 先走 yfinance 触发闸门冷却」的解释不成立。
+  09-14 正是云端首次跑 v0.45.241（P/C 改走 CBOE、不再先打 yfinance）的日子，时间上吻合但未证实因果。
+- **疑似问题二（`default_fallback` 的 15.0 被当观测）**：**生产路径上不可能、历史上 0 次**——21/21 份快照都是 `vx_futures`，且 `load_market` 先把
+  `degraded_sections` 列出的段剔除。**但剔除本身造出另一个隐患**（离线复现，socket 探针在场）：
+  - B/C：快照缺 `vix_term`（被剔除）或整份 market.json 缺失 ⇒ `fred_macro` 落到实时 `get_vix_observation()` ⇒ 补跑 08-27 拿到**运行当天**的 16.04、标 `cboe`、`vix_stale=False` ⇒ Guard 计票；
+  - D：快照有 VIX + 当日其余宏观全灭 ⇒ 部分降级路径写死 `vix_source="cboe"` ⇒ 无观测日的快照值被冒标成实时观测、进 Guard 计票。
+  - 三者历史上均 0 次触发（3 份补跑日报都走了快照、`data_source` 非空）。
+- **GuardBee 补跑不计 VIX 票**：已证实（`cloud_snapshot_cboe` 不在 `("cboe","yfinance")` 白名单）。另查出同形三处：Guard 的 **VIX 期限结构**（backwardation ⇒ risk_off +2）
+  直接调实时 `get_vix_term_structure()`、**FOMC 临近**（≤3 天 ⇒ risk_off +1）按运行当天数、**板块轮动**（`fred_macro._fetch_sector_rotation`）`period="5d"` 恒取最近 5 天
+  ——补跑时三者都是运行当天的。另：Guard 的 `steep_contango ⇒ risk_on +1` 是**死分支**（上游只产 contango/backwardation/flat/unknown，03-16 引入起从未出现）。
+- **评分影响**（归档 `macro_regime_votes` 重放，先复现记录的 regime：58/58 一致）：三天补跑 54 行 Guard（08-31 另有 4 行是当天 17:40 ET 实时残留、已带 VIX 票，不计）
+  加一张 D 官方收盘的 VIX 票（14.51 / 14.43 / 14.92，均 <15 ⇒ risk_on）⇒ **14/54 行 neutral→risk_on**（08-27 10/30、08-28 1/12、08-31 3/12）。
+  期限结构 / FOMC / 板块三项未单独重放：归档里 Guard 记的就是运行当天值，D 当天的票面无记录可对。
+- **读者清单**：`vix` → Guard `_calc_macro_adjustment`（`macro_regime` → Queen `RegimeWeightAdjuster` 改 catalyst / sentiment 权重；`macro_adj` 直接加进 Guard 分）；
+  `vix_source` → Guard 白名单、仪表板 `_OBSERVED_VIX_SOURCES=("cboe",)`；两处白名单**都没改**（新值照实时标 `cboe`，观测日由 `vix_as_of` 承载）。
+
+### Changed — `cboe_vix.get_vix_observation_asof(D)`（新）
+
+CSV 里**按日期精确取** D 那一行（绝不取最后一行）；缺 D 行 ⇒ 强制重下一次；仍缺 ⇒ `vix=None`、`quote_reason="asof_row_missing"` + WARNING。
+不走延迟报价（`quote_reason="backfill"`）；新鲜度按 D 判（`lag_sessions=0`、`stale=False`——`vix_staleness` 按「此刻」判，会把任何过去的 D 判成陈旧、Guard 一票不投）；
+前一收盘取 D 的**前一交易日**那一行（CSV 含非交易日行，「上一行」不一定是上一交易日）。键与 `get_vix_observation` 同形。
+
+### Changed — `fred_macro` 补跑口径
+
+- VIX：CSV 的 D 行 ⇒ `vix_source="cboe"`、`vix_feed="history_csv_asof"`、`vix_as_of=D`、带 `vix_prev_close` / `vix_change_pct`；取不到才退回快照 `vix_spot`
+  （`cloud_snapshot_cboe`、`vix_feed="cloud_snapshot"`、`vix_feed_note` 写原因；**并判 `source != "default_fallback"` 与合理区间**，不再只判 `> 0`）。
+- **快照模式绝不落到实时 `get_vix_observation()`**（修 B/C）；部分降级路径的标签与正常路径同一判定（修 D）。
+- 板块轮动 `_fetch_sector_rotation(yf, as_of=D)`：`_asof_history` 对齐 D、窗口取末 5 根（同实时宽度）、末根须**正是 D**（否则不计入、进 `not_on_as_of` + WARNING）、
+  不读不写单 ETF 缓存（缓存只按 ETF 键）。实时口径输出不变。
+
+### Changed — GuardBee 补跑口径（判据 = `fred_macro.get_macro_snapshot()`，与期权链供给器同进同出）
+
+- VIX 期限结构读快照 `cboe.vix_term.term_structure`（source 为 `vx_futures` 等非兜底值时）；缺该段 ⇒ 不投票、`vix_term_source="cloud_snapshot_unavailable"`，**不回落实时**。
+- FOMC：`get_next_event(ref_date=D)`、`get_calendar_health(ref_date=D)`。
+- 删 `steep_contango` 死分支（不改任何分数）。
+- `details` 新键：`macro_as_of_mode`（`realtime` / `backfill`，两种口径都写）、`macro_ref_date`、`vix_term_source`（`live` / `cloud_snapshot` / `cloud_snapshot_unavailable`）。
+- 实时口径每一票不变（`TestGuardLiveUnchanged` 逐值钉住）。
+
+### 世代边界（`ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-09-28", "v0.45.366", …)`）
+
+- 与 v0.45.334/340/349/357 同日 ⇒ `assess()` 切点不变；生产 `pheromone.db` 备份副本（SQLite backup API，只读源）实测 `n_all_samples=0`（predictions 最新 09-25）⇒ **作废 0 条**。
+  补跑行按目标日落盘：D < 09-28 的本就在旧世代外，D ≥ 09-28 的补跑只可能在本版部署后发生 ⇒ 09-28 对补跑样本恰好切得开。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.366"] = ("guard.macro_adj", "agent.GuardBeeSentinel.*")`：对归档实有 70 个信号名前后对比，**0 个后移**、10 个只换标签。
+- 印记 `_BOUNDARY_MARKERS["v0.45.366"]`：Guard 宏观细节带 `macro_as_of_mode` 键——**实时与补跑都写**（只在补跑行写会让每份实时归档被判「边界后无印记」⇒ 恒报 too_early，
+  补跑行按 D 落盘又会在 D < 边界时报 too_late）。它证明「新代码自边界日起在生产跑」，对只改补跑的本条是充分条件。
+- `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签扩为 `…+v0.45.357+v0.45.366`。
+- 顺带履行 `TestCohortReasonsAreNotRewrittenInPlace` 的交接：补钉 v0.45.349 / v0.45.357 的原因摘要（取 origin/main 574e5505 原文；同法算出的 v0.45.340 摘要与既有钉值逐位相同，作方法正对照），`LAST_FROZEN` → v0.45.357。
+- ⚠️ **日期前提**：须在 09-28 14:00 PT 扫描前进 origin/main 且生产 checkout 快进；否则 09-28 实时归档无印记 ⇒ `boundary_too_early`——那时**不要**顺延日期（实时样本本未变，顺延只会白切 09-28），改为追加更正条目并撤掉印记。
+
+### 测试
+
+`tests/test_backfill_macro_asof.py`（新，39 项）：as-of 取行 / 前一交易日 / 重下一次 / 缺行不冒充 / 不碰报价 / 新鲜度按 D；fred_macro 主路径与退路、B/C/D 三隐患、兜底值不当观测、板块 as_of 透传；
+板块对齐（末 5 根、末根须为 D、缓存不读不写）；Guard 计票（含不打桩的端到端）、期限结构读快照 / 缺段不投不回落、FOMC 按 D（含真日历正对照）、印记两种口径都写；实时逐票不变；边界印记与判别器。
+**31 个变异逐一真跑、全部变红且命中预期用例**（`PYTHONDONTWRITEBYTECODE=1` + 每轮清 `__pycache__`、`--maxfail=1000`、锚点唯一断言、每轮 passed+failed == collected 292、字节级还原核对）。
+`test_macro_snapshot.py` 两条的 docstring 改写（`test_vix_comes_from_snapshot_and_is_labelled` 现测的是退路；`test_snapshot_without_vix_does_not_fake_one` 在 `stub_cboe_vix` 下区分不了 B/C，改由新文件守）。
+
+**新增 conftest 守卫 `_no_leaked_macro_snapshot`**：宏观快照是进程级全局，本版起 GuardBee 读它判「是不是补跑」⇒ 一条测试忘了卸，之后同进程里调 Guard 的测试都静默跑在补跑口径下、绿不绿取决于顺序。
+teardown 发现仍装着 ⇒ 卸掉并让**留下它的那条**报错。首跑即点名真实泄漏者 `test_vix_same_day::TestFredMacroAlignment::test_no_pair_means_none_not_zero`
+（其 `_offline` 只在 setup 卸、teardown 不卸，此前靠下一条的 setup 兜着），已补 teardown 卸载——这就是该守卫的正对照。
+
+全量（`-m "not integration and not network"`）：1 条红为既有、与本版无关——`test_economic_calendar::TestCoverageHorizon`（NFP 表只覆盖到 2026-12-04，剩 67 天 < 阈值 90；
+BLS 2027 日程尚未发布，按设计要人去抄新日程，**不是调阈值**，见 auto-memory `alpha-hive-hardcoded-calendar`）。
+
+### 未做 / 另案
+
+- 09-14 起快照 `vix_spot` 转为当日的机制待验证（疑 yfinance 腿）；补跑已不依赖它。
+- `--date D --no-snapshot`：宏观与 Guard 仍全是运行当天口径（既有设计，该路径本就打印「不可与正常扫描日同池比较」），本版未动。
+- 快照模式下 CSV 与快照都取不到时 VIX 走 `_asof_history` 的 yfinance 腿，该腿**不核末根是否为 D**（与其余宏观字段同一既有形状），本版未动。
+- 实时 CSV 路径的前一收盘取「CSV 上一行」，节后首日会取到假日行（如 09-08 配 09-07 的 15.30）；只影响展示用的 `vix_change_pct`，本版未动。
+
+
+## [0.45.365] — 2026-09-28 — 图表坐标轴刻度换 `--ts`、网格线换半透明 `--border`
+
+v0.45.361 分析时列为「没必要」（原写法已按明暗二选一、两套主题都可读），用户要求也改。`templates/dashboard.js` 六个图
+（评分分布 / 方向等 `renderChart` 一组、雷达、胜率趋势、资金曲线、多标的趋势、展开卡雷达）的 `tc`/`gc`：
+
+- 刻度 `rgba(0,0,0,.55)` / `rgba(255,255,255,.65)` → `_tok('--ts')`：对比度浅 4.6–4.7 → 5.5–6.2、暗 7.5–7.9 → 6.3–6.8，均 ≥4.5（文字门槛），色相随站点暖灰。
+- 网格 `rgba(0,0,0,.06)` / `rgba(255,255,255,.07)` → `_tokA('--border', .5)`：透明度按「与原网格同样淡」**算出来**的——原网格对底色对比度 1.14–1.23，
+  0.5 下浅 1.28–1.36 / 暗 1.11–1.15（实心 `--border` 会到 1.9，太重）。
+- 守卫 `test_axis_ticks_and_grid_use_tokens`（六处各计数 + 禁写死黑白）；变异（退回一处硬编码网格）⇒ 红。
+- 验证：离线渲染后四个图的刻度浅 `#6B5F52` / 暗 `#94a3b8`，y 网格 `rgba(200,186,168,0.5)` / `rgba(42,48,80,0.5)`（胜率、资金曲线的 x 网格本就 `display:false`）。
+  未截图（浏览器窗格当时未显示）。全套 **6485 passed、2 xfailed**，84 deselected（同 v0.45.352）。网站下一次日报部署后生效。
+- 至此 `dashboard.js` 图表里只剩两处刻意保留的写死色：过期数据横幅、JS 报错浮层（状态 UI，理由见 v0.45.361）。
+
+## [0.45.364] — 2026-09-28 — 资金曲线 SPY 基准灰线换令牌 `--ts`
+
+v0.45.361 分析时列为「没必要」的一项，用户要求也改。`rgba(150,150,150,.8)` 浅色下约 2.3:1、且不随主题 → `_tok('--ts')`
+（浅 `#6B5F52` 5.81:1 / 暗 `#94a3b8` 7.46:1），比数据线淡、仍可读；不用 `--tm`（浅色 2.37:1，线会看不见）。填充 `rgba(…,.04)` → `transparent`（本就 `fill:false`）。
+
+- 守卫：`test_spy_benchmark_line_uses_secondary_ink`；变异（退回旧灰）⇒ 红。
+- 验证：离线渲染后 `Chart.getChart('eqCurveChart')` 的 SPY 线色浅 `#6B5F52` / 暗 `#94a3b8`。⚠️ 离线沙箱拦了 yfinance，SPY 数据 191 点全空，
+  **只验证了颜色赋值、没看到线实际画出来**；生产有数据，本改动不碰数据。
+- 全套：**6433 passed、2 xfailed**，84 deselected（同 v0.45.352）。网站下一次日报部署后生效。
+
+## [0.45.363] — 2026-09-28 — Fixed：Twelve Data 对 BRK-B 恒 404（请求原样发仓内连字符写法）→ 类份额代号映射 `BRK-B`→`BRK.B`；取数失败逐标的可观测（进 status.json）
+
+### 根因
+
+`twelve_data._fetch_rows` 把 ticker 原样填进 `symbol`。Twelve Data 的类份额写法是点：2026-09-28 实测
+`BRK-B` → HTTP 404，`BRK.B` 正常（`end_date=2026-08-20` 返回 08-12 收 510.0、08-14 收 504.03）。
+自 v0.45.61 起，所有 Twelve Data 兜底对 BRK-B 都会失败：`close_correction._twelve_data_closes`、日报 rv_30d / iv_rank
+兜底、`earnings_history`（直调 `_fetch_rows`），以及 `entry_price_backfill`（v0.45.360）的第二源。
+CBOE 在 v0.45.8 犯过同一个病（`_cboe_symbol`），当时写进 memory 的是「接新源先问符号惯例」——没有牙。
+WATCHLIST 30 只里只有 BRK-B 带非字母数字。
+
+### 「这个失败，下游怎么知道？」
+
+之前不知道。失败只落一行 WARNING，调用方拿到 None 就当「源不可用」退下一条腿，
+**哪只票、为什么、是不是每天如此**都没有任何计数。现在：
+
+- `bars_cache_stats()` 新增 `failures`（次数）与 `failed`（仓内 ticker → 最近一次原因：
+  `http404` / `api_error:<code>` / `no_values` / `non_json` / `limiter_timeout` / `network:<异常名>`）。
+  scan_timing 本来就把整份 dict 并进 `status.json`，现在摘要行也会点名，例如 `TwelveData 请求N/命中M/失败1(BRK-B:http404)`。
+- HTTP 404 升为 ERROR，并点名实际发出去的 symbol：它不是瞬时故障，不会自愈。
+- 未配置 key **不**计为失败：那是没开这条腿，不是腿坏了。
+
+### Fixed / Changed
+
+- `twelve_data.py`：新增 `api_symbol()`（只改 `^[A-Z]{1,5}-[A-Z]$` 这一种形状；Twelve Data 的加密货币写作 `BTC/USD`，
+  所以不能像 CBOE 那样一刀切 `-`→`.`）和逆映射 `repo_ticker()`。映射放在 `_fetch_rows`，即唯一拼请求的地方。
+  缓存键 `_bars_key` 经 `repo_ticker` 归一，传 `BRK.B` 与传 `BRK-B` 同键，不会拆成两份、也不会取两次。
+  日志、失败记录、返回行一律用仓内写法。`bars_cache_stats()` 改在锁内拷贝。
+- `scan_timing.summary_line`：Twelve Data 有失败时追加 `失败N(ticker:原因,…)`。
+
+### Tests
+
+- 新增 `tests/test_twelve_data_symbol_mapping.py`（20 条，全离线）：假 HTTP 层照真实接口应答，
+  连字符写法回 404、点写法回数据；另有一条遍历 `config.WATCHLIST`，断言发出去的 symbol 都不含连字符。
+  **真跑变异**（`PYTHONDONTWRITEBYTECODE=1`、清 `__pycache__`、`--maxfail`，并逐个 grep 确认变异已落盘）：
+  ① 恢复 `"symbol": ticker` → 6 条红；② 缓存键退回原始 ticker → 2 条红；③ `_record_failure` 置空 → 3 条红。
+- `tests/test_twelve_data.py`：`clear_bars_cache` 后 stats 的形状断言加上 `failures` / `failed`。
+- 全套：6451 passed，1 failed（`test_economic_calendar::TestCoverageHorizon`，硬编码日历到期的设计性告警，与本改动无关）。
+
+### 未做
+
+- 生产 checkout 未重跑，BRK-B 的 Twelve Data 兜底未在真实扫描里复核（待 09-29 扫描后看 `status.json` 的 `scan_timing.counters.twelve_data.failed`）。
+- 已落盘的 BRK-B rv_30d / iv_rank / close_correction 历史值没有补算。
+
+
+## [0.45.362] — 2026-09-28 — 占位（进行中：GEX 第 2 层——每只标的一份全链 GEX 状态（带可得性标记），展示与政体路由共用；不改分数）
+
+## [0.45.361] — 2026-09-28 — 图表剩余硬编码色换令牌：涨跌语义色 / 均收益胶囊 / 旧蜂蜜金；恐惧贪婪仪表盘对齐宏观条 3 档
+
+承 v0.45.358「未做」。用户先让分析「有没有必要」，结论是约一半有实际缺陷、一半没必要；用户选做前三项 + 仪表盘 3 档对齐。
+
+### 为什么要改（浅色主题下的缺陷；浅色是默认主题）
+
+实测对比度（白底 / 米底 `--surface2`）：`#22c55e` 2.28 / 2.01、`#f59e0b` 2.15 / 1.89、`#94a3b8` 2.56 / 2.26、`#F4A532` 2.04 / 1.80 ——
+图形标记要 ≥3:1；令牌 `--bull/--bear/--neut` 是 4.7–7.5:1。暗色下这些硬编码值**恰好等于暗色令牌**，所以换令牌暗色零变化。
+
+### Changed — `templates/dashboard.js`
+
+- **涨跌语义色 → `_tok('--bull'|'--bear'|'--neut')`**：方向环形图、首页资金曲线（旁边的收益数字早已是 `var(--bull)`，线却是亮绿——同面板两种绿）、
+  准确率方向柱图、胜率三线、资金曲线 Net 线。中性从灰 `#94a3b8` 改为 `--neut`，与全站「中性」一致。
+- **准确率「均收益」胶囊**：文字亮绿压白 2.28:1（正文要 4.5:1）；底色 / 边框是 6–10% 透明白，只为暗色设计，浅色下**完全看不见**。
+  改为 `--surface2` 底 + `--border` 细边 + `var(--bull/--bear)` 文字。
+- **旧蜂蜜金 `#F4A532`（废弃主题残留）→ `--acc`**：恐惧贪婪历史趋势线、雷达点击高亮、表格行高亮。
+- **恐惧贪婪仪表盘 5 档 → 3 档**：与宏观条 `_fg_cls` 同阈值同令牌（≤45 `--bear` / ≤55 `--neut` / 其余 `--bull`）。此前同一个值同一页两种颜色
+  （F&G 33：宏观条深红，仪表盘橙 `#f97316`）。底轨冷灰 `#e8ecf3` → `--border`。代价：失去 5 级渐变。
+
+### 刻意不动（分析时判为没必要）
+
+坐标轴刻度 / 网格（已按明暗二选一的半透明黑白）、SPY 基准灰线（参照线本该退后）、过期数据横幅（黑字压琥珀 9.78:1）、JS 报错浮层（白字压红 3.41:1，仅出错时出现）。
+
+### Added — 守卫（`tests/test_dashboard_chart_palette.py`）
+
+- `dashboard.js` 去注释后不许出现涨跌 / 旧蜂蜜金硬编码色（唯一白名单：过期数据横幅那一行）。
+- 仪表盘阈值必须与宏观条 `_fg_cls` 一致（两边各自正则取数比对）。
+- **变异 3 处全红**：Net 线退回 `#22c55e`、仪表盘中性阈值改 60、行高亮退回旧蜂蜜金。
+
+### 验证
+
+- 离线整页渲染（09-10 / 09-11 真实日报 + `pheromone.db` 快照、socket 闸）后浏览器实测，浅色：方向环 / 准确率方向 / 胜率三线 / Net 线全是
+  `#1D6B3A/#9B2C2C/#92601A`；仪表盘 F&G 33 = `#9B2C2C`，与宏观条 `rgb(155,44,44)` 相同；胶囊文字 `rgb(29,107,58)`、底 `rgb(245,240,232)`、边 `rgb(200,186,168)`；
+  F&G 趋势线 `#B7410E`。暗色：与改前值一致（仅中性线灰→琥珀、仪表盘分档变化）。
+- 全套：**6430 passed、2 xfailed**，84 deselected（integration 82 + 同 v0.45.352 的两条环境态测试）。`node --check` 通过。
+- 网站要等下一次日报扫描重新部署 `gh-pages` 后才变。
+
+## [0.45.360] — 2026-09-28 — Added：账本入场价观测点（Step 12 对 `price_at_predict` 不可用即红）+ `entry_price_backfill.py`（两源印证的官方收盘回填，默认 dry-run，**未对生产库落笔**）。Fixed：`--check-prices` 静默跳过入场价为 0 的行
+
+### 发现
+
+生产 `predictions`（快照 via `sqlite3.backup()`）入场价不可用（NULL / ≤0）的行：**62 行、4 天**——
+09-24 30/30、09-25 30/30、08-12 BRK-B、08-14 BRK-B（后两行 v0.45.50 记过，从未补）。其余 109 天为 0。
+全仓统计一律 `price_at_predict > 0` ⇒ 这些行对全部收益 / IC 计算不可见；`close_correction.load_rows` 只选 `> 0` ⇒ 永远补不回来；
+`checked_t*` 恒 0，`run_backtest` 每天把它们计进 `skipped` 且不出声。
+
+**「这个失败，下游怎么知道？」**——当时的答案：
+- 09-24/25：Step 2 RC=1、status=partial、Step 12 **字段**覆盖率 0/30——都在说「这天数据差」，没有一处说「账本少了 30 个样本、不会自愈」；
+- `Backtester.last_save_stats["unusable_no_price"]`（v0.45.50）数了这件事，**全仓零读者**；那 30 条 WARNING 只进日志；
+- 08-12 / 08-14（字段健康、只丢 BRK-B 入场价）：**什么都不红**；
+- `scan_coverage_gate.check_prices`（需 `--check-prices`，编排器不传）对 `not px` 直接 `continue`——全 0 的日子会报「无可比对样本」而非「全坏」。
+
+### 改动
+
+- Added `scan_coverage_gate.check_entry_prices` / `merge_entry_prices`：查**终点**（账本）不查中间量——09-17 Scout 价 0/30 而 yfinance 兜底补上、账本 30/30 可用，看中间量会误报。
+  任何一行不可用（或扫描有、账本无）即把 `entry_price` 作为一个 degraded 行并进 `fields`/`degraded_fields`/`healthy` ⇒ 退出码 1；
+  **不改编排器**，Step 12 的 WARN 摘要与 status.json `step12_scan_coverage` 自动带上 `entry_price 0/30`。
+  其他日期未补的行作为 `backlog` 报一行 ⚠️，**不进退出码**（用户可能决定不补，恒红会把人养成不看）。
+  库不存在 ⇒ 无法判定、不改结论，且先判存在（sqlite 打开不存在的路径会建空库）。新增 `--db`。
+  历史对照（本地 41 份 `.swarm_results`）：自 08-12 起「扫描有账本无」恒 0，零价行只在上述 4 天 ⇒ 该闸只会在这 4 天变红。
+- Fixed `check_prices`：不可用入场价计入 `bad`（`deviation_pct=-100`），不再静默跳过。
+- Added `entry_price_backfill.py`：三个独立家族——yfinance 日线（交易日必须命中当天，**不带** close_correction 的 Twelve Data 兜底，防同一个价两家族各计一票）/
+  CBOE 云端快照（当日 `close_verdict==official` 的 `price_at_fetch` 与次日快照 `prev_close_session` 自述归属的 `prev_day_close`，两者都有时须自洽）/
+  Twelve Data（只对无快照的行）。≥2 家族两两偏差 ≤0.2% 才写；单源 / 分歧 / 无源不写。
+  写入 `price_at_predict`、`price_at_predict_raw=COALESCE(raw, 原值, 0.0)`、`close_corrected_at`、`close_correction_source="entry_backfill:<家族>"`；
+  UPDATE 带「仍不可用」条件（幂等、不覆盖他处写好的价）；`--apply` 前 `backup()`；**不动派生列**，下一次 `run_backtest` 自然回测。
+  CBOE 两个子来源分别取、不经 `load_official_close`（它只返回一个，且 v0.45.359 在调其取价顺序）。
+- Added `tests/test_entry_price_ledger.py`（26 条，全离线）。
+
+### Dry-run（生产库快照，未落笔）
+
+60 行 `backfill`（09-24 29 只 yf+cboe 快照双子来源、09-25 29 只 yf+当日快照；BILI 两天无快照 → yf+Twelve Data；两两最大偏差 0.007%），
+2 行 `single_source`（BRK-B 08-12 510.00 / 08-14 504.03：无快照；Twelve Data 对 `BRK-B` 返回 404——它要 `BRK.B`，
+手动用 `BRK.B` 取回 510.0 / 504.03 与 yf 一致；符号映射另开任务）。
+
+⚠️ **补不补是用户的决定，且不只是价格问题**：09-24/25 的**分数**是降级输入算的（字段 0/30、全部数据源 FALLBACK、`catalyst` 维缺失、0 只看多、分数挤在 4.5–5.7）。
+入场价为 0 恰好把它们挡在统计外；补上后它们会进 IC 重跑世代（09-18 起）与共振加成前瞻检验（09-15 起，预注册）。
+
+### 验证
+
+- 变异 12 处各自变红（`PYTHONDONTWRITEBYTECODE=1`、清 `__pycache__`、`--maxfail=1000` 真跑）：merge 空转 / main 不调 merge / `check_prices` 恢复 `not px` 跳过 /
+  yf 带 Twelve Data 兜底 / UPDATE 去「仍不可用」条件 / cboe 子来源不自洽仍计票 / Twelve Data 对全部行调 / 次日快照归属不核 / 陈旧当日文件照收 /
+  raw 不留痕 / 单源照写 / backlog 进退出码。
+- 真实数据：09-22 健康 + backlog 62 行；09-24、08-12 均 `entry_price` degraded。dry-run 前后快照 md5 不变。
+
+### 结局（2026-09-28 09:14 PDT，用户确认后落笔）
+
+- **只补 BRK-B 08-12 / 08-14 两行**（生产库）：合入 v0.45.363 的 `BRK-B`→`BRK.B` 映射后 Twelve Data 取得到，
+  两行成为 yf + td **双源一致**（510.00 / 504.03，偏差 0.0），**无需** `--allow-single-source`。
+  写后对备份逐行逐列比对：1593 行，只有 id 1425 / 1506 变、每行只变 4 列（price_at_predict、raw=0.0、corrected_at、source=`entry_backfill:td+yf`）；`quick_check` ok。
+  备份：`~/alpha-hive-data/_manual_backups/pheromone.db.bak-entry-backfill-20260928-091413`。
+- **09-24 / 09-25 的 60 行按用户决定保持 0**：分数是降级输入算的，入场价为 0 正好把它们挡在统计外。
+  ⇒ Step 12 此后每天会打一行「账本积压 60 行（09-24×30, 09-25×30）」——**这是已知、已决定的，不是新故障**；退出码不受影响。
+- 派生列未动：两行 `checked_t*` 仍 0，下一次 `run_backtest` 自然回测（T+1/T+7/T+30 均已到期）。
+
+## [0.45.359] — 2026-09-28 — Changed：`cloud_snapshot_loader.load_official_close` 取价顺序对调——某日官方收盘**先取次日快照自带归属的 `prev_day_close`**，当日快照的 60s 代理判据降为兜底；两者不一致时打 WARNING
+
+v0.45.354 登记的 NEE 残差的根治（用户 2026-09-28 决定「现在就改」）。
+
+### 根因
+
+当日快照是不是官方收盘，旧逻辑靠 `close_verdict` 的「last_trade 离收盘 ≤60s」判——这是**代理**判据。
+官方收盘是收盘竞价那一笔；文件若在竞价价写入前生成，离收盘 1 分钟内的最后一笔连续成交照样不是它。
+实例 NEE 2026-09-18：last_trade 15:59:05（54s ⇒ 判 official），`price_at_fetch` 80.555，官方 80.47。
+调容差只是挪误差（30–60s 带 4 份：2 精确 / 2 偏离）。**次日快照的 `prev_day_close` 自带场次归属**
+（`prev_close_session` 自证，隔了交易日就对不上），不依赖任何时间代理。
+
+### 证据（独立来源，不用次日 prev_day_close 当真值——那样是循环论证）
+
+对 yfinance 官方日线（27 只）+ Twelve Data（NEE / MSFT；yfinance 当时取不到），`origin/cloud-snapshots` 08-26~09-25：
+
+| 口径 | 可用 | 偏离官方收盘 >0.05% |
+|---|---|---|
+| 当日快照、close_verdict == official（旧第 1 步） | ~430 | **1**（NEE 09-18，0.106%） |
+| 次日快照 `prev_day_close`、归属 == 该日（旧第 2 步） | ~500 | **0**（最大 0.030%） |
+
+DE 两个源当时都没取到，未核。
+
+**端到端对比（真实分支、新旧两版函数各跑一遍，630 个（日期, 标的））**：取值改变 6、仅标签改变 376、
+新增可用 0、丢失 0。6 处里 NEE 80.555 → 80.47（修正 0.106%）；T 08-28 / VZ 09-08 / T 09-15 新值与 Twelve Data
+官方收盘**逐分相等**（旧值偏 0.019% / 0.050% / 0.037%）；TSLA 09-03 / META 09-21 差 0.001%（亚分舍入，TD 当时取不到，未判）。
+
+### Changed
+
+- `load_official_close`：① 其后第一份快照的 `prev_day_close` 且归属 == date → `SNAP_NEXT_PREV_CLOSE`；
+  ② 否则当日快照 official 且场次 == date → `SNAP_CLOSE`（最新一天必走这里）；③ 都不行 → `(None, "snapshot_<判决>")`，
+  失败判决仍取自当日快照（与旧版同一套字符串）。
+- 两步都有值且相差 > `_SAME_VS_NEXT_WARN` → WARNING，点名两个价。**阈值 0.01%**（二次检查从初版 0.05% 下调：
+  两步都有值 382 对里 376 对逐分相等，其余 4 对真漏判 0.019%~0.106%、2 对高价股半分舍入 ≤0.0013%；
+  0.05% 只抓到 NEE，把 VZ 09-08 0.0496% / T 09-15 / T 08-28 三个真漏判全放过了——初版理由拿的是
+  「prev_day_close 对 yfinance 的舍入噪声」，比错了对象：这里比的是两份 CBOE 值）。
+  **谁会红**：60s 代理判据再漏一次，日志里有据可查。
+- 标签语义：`SNAP_CLOSE` 从「首选」变成「兜底」。调用方 `data_pipeline._fetch_historical_stock_data` 只把标签透传进
+  `price_source` / `source_name`，不按标签分支——已核。
+
+### Tests（`tests/test_stale_intraday_consumers.py`）
+
+- 新增 `TestNextPrevCloseFirst`（10 条）：NEE 09-18 真实值（先断言它确实被 close_verdict 判 official，再断言返回 80.47）、
+  分歧告警、一致时静默、最新一天兜底、后一份归属不符兜底、后一份 prev_day_close 无效（0 / None / NaN）兜底。
+- 改写 `test_fresh_snapshot_uses_own_price` → 拆成「无可用后一份时兜底用当日价」（VZ 08-31）与
+  「当日看似 official 也先取后一份」（T 09-10，同价 25.55，只有标签能区分）。
+- 变异（改真文件、`PYTHONDONTWRITEBYTECODE=1` + 清 `__pycache__`、`--maxfail` 覆盖 `-x`，复原后逐字节核对）：
+  换回旧顺序 → **5 红**；删分歧告警 → **2 红**；告警阈值恒真 → **2 红**；阈值改回 0.05% → **1 红**（VZ 09-08）。
+  四个相关文件 89 passed。
+
+### 不做
+
+- 不动 `close_verdict` 的 60s 容差（实时管道仍用它，且那里没有「次日」可问）。
+- 生产账本 NEE 09-18 本来就是 80.47（v0.45.354 已核），本改动不回写任何历史数据。
+- 并行 session（09-24/25 入场价为 0 的回填）若经 `load_official_close` 取价，拿到的是新顺序——更准，无需协调。
+
+## [0.45.358] — 2026-09-28 — 图表紫色换成令牌：单系列走 `--acc`，多标的趋势图新增已校验的分类令牌 `--series-1..4`；顺带修切换明暗后趋势图 chip 失灵
+
+承 v0.45.352「未做」第一条：`templates/dashboard.js` 其余 Chart.js 图表还硬编码着紫色 `#667eea` / `#764ba2` / `#8b5cf6`（6 处）。
+
+### Changed — 单系列：紫 → `--acc`
+
+雷达图（个股深度卡 + 评分卡展开区两份）、胜率趋势的单线回退、资金曲线「Gross（不扣成本）」参考线。
+新增 `_tok(name)` / `_tokA(name, α)`：canvas 不认 `var()`，取 `:root` 令牌的**实算值**；`toggleDark` 会销毁重画全部图表，
+读到的永远是当前主题（v0.45.352 的 `scoresChart` 也改走它）。雷达点描边 `#fff` → `--surface`（暗色下不再是白圈）。
+
+### Changed — 多标的趋势图：不是换个色，是补一套分类令牌
+
+- **为什么不能只把 3 个紫换成现有令牌**：站点令牌里没有分类色（`--acc2`/`--acc3` 与 `--bull`/`--neut` 同值）；旧 10 色表还混着看多绿
+  `#22c55e`、看空红 `#ef4444`——本站红 = 看空，09-11 离线渲染实测 **AMC 的线恰好是红的**，与它的方向无关；且按 `i%10` 循环，30 只里每 3 只共用一色。
+- **按 dataviz skill 的流程选色、跑校验器**（`validate_palette.js`：Machado 2009 CVD 模拟、OKLab ΔE×100），不凭眼：
+  - 色相普查：站点已占满暖半圈（涨跌 / 中性 / 强调都在 0–160°），与它们都拉得开的只有 240–330° —— 恰好是紫所在的地方。
+  - 颜色跟标的走（激活时领最小空闲槽）⇒ 任意两槽都可能同屏 ⇒ 按 **all-pairs** 校验，不是 adjacent。
+  - 锁色相族（±8°）、彩度 ≤0.16 后爬山搜索：5 槽过不了（能过的第 5 色只剩长春花紫，即被清掉的 `#667eea`）；**4 槽**：
+    锈红（= `--acc`）/ 蓝 / 青 / 梅紫红。
+
+  | 主题 | `--series-1..4` | all-pairs CVD ΔE | 常视 ΔE | 对比度（surface / surface2） |
+  |---|---|---|---|---|
+  | 浅色 | `var(--acc)`=#B7410E / #0250ab / #1a9a95 / #8c1d62 | 13.3 | 17.0 | 全部 ≥3:1 |
+  | 暗色 | `var(--acc)`=#E05A1F / #1c6ec9 / #09aba2 / #ad4389 | 10.9 | 18.6 | 全部 ≥3:1 |
+
+  标的线（槽 2–4）与涨跌色常视 ΔE 浅色 ≥10.2、暗色 ≥13.6；槽 1 是全站本就与涨跌色并用的强调色，与中性琥珀较近（8.2 / 5.9），趋势图里不出现涨跌色，接受。
+- **行为**：默认显示前 4 只（原 5 只）；激活第 5 只弹提示「最多同时比较 4 只，先取消一只」；取消一只再加，新标的领走空出的那个色、其余不重涂。
+
+### Fixed — 切换明暗后趋势图 chip 失灵（原有 bug，本次改状态时顺带修）
+
+旧实现把选中状态关在 `initTrendChart` 的闭包里；`toggleDark` 会重建图表但不重建 chip ⇒ chip 的 onclick 一直指着**第一次**的闭包和已销毁的旧图。
+main 上实测：切换后之前用 chip 加上的标的从图上消失（chip 仍显示勾选），再点 chip 只翻 chip 样式、图不变。
+现状态放在 `window.AH._trendState`，chip 点击走 `window.AH.toggleTrendTicker`，chip 勾选态由重画时与图同源同步。
+
+### Added — 守卫
+
+- `tests/test_dashboard_chart_palette.py`：校验器算法照抄进测试（常数逐字一致），**先复现校验器报出的 13.3 / 17.0、10.9 / 18.6 自证抄对**，
+  再对 `:root` / `html.dark` 解析出的 `--series-*` 跑门槛（亮度带、彩度、all-pairs CVD ≥8、常视 ≥15、两种底色 ≥3:1、标的线离涨跌色 ≥10）；
+  仪表板四个源文件去注释后无紫；趋势图用 `SERIES` 令牌、不循环、状态在 `window.AH`。不直接调 skill 目录里的脚本——那个路径只在一台机器上存在。
+- `test_dashboard_css_vars_defined.py`：扫描器补收 JS 里当字符串传的令牌名（`_tok('--x')`、`SERIES=['--series-1',…]`），只对 `.js` 生效。
+- **变异 6 处全红**：JS 退回 main、浅色槽 4 换长春花紫、槽 3 换海绿、暗色删 `--series-2`、JS 令牌名拼错、调色板退回 `i%colors.length`。
+  （第一轮变异脚本在 zsh 下 `$T` 未分词 ⇒「no tests ran」——假绿，改 `${=T}` 后重跑才算数。）
+
+### 验证
+
+- 离线整页渲染（09-10 / 09-11 真实日报 + `pheromone.db` 快照、socket 闸、yfinance 抛异常桩）后浏览器实测：雷达 `rgba(183,65,14,0.13)` 填充 + `#B7410E` 描边、
+  暗色 `#E05A1F`；Gross 线 `#B7410E` → 暗色 `#E05A1F`；胜率单线回退（强制 `acc_weekly_by_dir=[]`）`#B7410E`；趋势图默认 4 线取 4 个槽色，
+  第 5 只被拒并提示，换入的标的领空槽色；切换暗色后选中集合保留、换成暗色槽色、chip 仍能驱动当前图。`--series-1: var(--acc)` 经 `getPropertyValue` 读回的是解引用后的 hex。
+- 全套（rebase 到 `db4c944d` 之后）：**6371 passed、2 xfailed**，84 deselected（integration 82 + 同 v0.45.352 的两条环境态测试）。`node --check`、`ruff` 通过。
+- 网站要等下一次日报扫描重新生成并部署 `gh-pages` 后才变。
+
+### 未做
+
+- 其余非紫的硬编码色仍在 JS 图表里：资金曲线 Net 线 / 胜率三线的 `#22c55e`/`#ef4444`/`#94a3b8`（语义对、但不随主题）、F&G 仪表与趋势、`#F4A532`（旧蜂蜜金）、
+  雷达点击高亮 `rgba(244,165,50,.15)`。趋势图激活 chip 仍是 `--acc2` 绿底（UI 状态色，与数据无关，未动）。
+
+## [0.45.357] — 2026-09-28 — Fixed/Changed：日报 VIX 一直是**上一交易日**收盘（v0.43.24 改 CBOE 优先时引入）→ 收盘后延迟报价优先 + 次日自动核对；陈旧缓存照标 `cboe` → 可见且不计 Guard 票；`vix_change_pct` 与 `vix` 错位一天 → 同出一对观测。**改评分**，世代边界并入 09-28（作废 0 条 final_score 样本）
+
+承 v0.45.352 的发现（仪表板宏观条涨跌），用户 2026-09-28 在对话里决定两处评分改动：①「收盘后报价优先 + 自动核对」②「陈旧 VIX 不投票」。
+
+### 取证（全部只读）
+
+- **滞后机制已证实**：CBOE `VIX_History.csv` 当日行约 **20:30 ET** 才追加（09-25 那行 `Last-Modified: Sat, 26 Sep 2026 00:30:54 GMT`），
+  日报扫描 17:00 ET（launchd 14:00 PT）。
+- **全量量化**（115 份日报 × 新拉的 CBOE CSV，交易日按 `is_trading_day` 数，不心算）：
+  | `vix_source` | n | 当日 | 落后 1 场 | 落后 2–3 场 |
+  |---|---|---|---|---|
+  | `cboe`（v0.43.24 起） | 19 | 5 | **12** | 2（09-24 / 09-25） |
+  | 无此键（v0.43.24 之前，yfinance） | 可匹配 66 | **65** | 0 | 1 |
+
+  当日的 5 份：3 份深夜补跑（CSV 已更新）、1 份次日补跑、**09-02 一份 17:10 ET 就拿到当日行——原因待验证**（日志已轮转）。
+  ⇒ **滞后是 v0.43.24 修 `vix=20.0` 兜底时顺带引入的回归**：yfinance 在 17:00 ET 给的是当日收盘，CBOE CSV 不是。
+- **陈旧缓存**：结构化日志 09-24 四次 `EOF occurred in violation of protocol` / `handshake timed out`、09-25 三次 `nodename nor servname`，
+  每次都「使用陈旧缓存」（旧代码只打 INFO）⇒ 两份日报都是 09-22 的 14.21，标 `vix_source: "cboe"`；
+  那两天其余宏观也全灭（`data_source: fallback`），走部分降级路径，**连 `vix_change_pct` 键都没有**。
+- **`vix_change_pct` 错位**：15/19 份与扫描**当日**的 CBOE 变动吻合，而 `vix` 是上一场 ⇒ 错位一天（09-11：17.84 配 −11.21%）。
+- **读者清单**（改前先数）：
+  | 字段 | 读者 | 进分？ |
+  |---|---|---|
+  | `vix`（水平） | GuardBee `_calc_macro_adjustment`：`<15` 投 risk_on、`>25/>35` 投 risk_off → Guard `macro_regime` → Queen `RegimeWeightAdjuster` 改 catalyst / sentiment 权重；`macro_adj` 直接加进 Guard 分（risk_adj 维，config 权重 0） | **是** |
+  | `vix` / `vix_regime` / `macro_score` | `fred_macro` 摘要与顺逆风文案、`report_formatters._build_macro`、仪表板宏观条 | 否（展示） |
+  | `vix_change_pct` | 只有 `fred_macro` 自己的「VIX 单日飙升 >10%」逆风文案（日报 markdown 前三条逆风） | 否（展示） |
+- **评分影响**（归档 `analysis-*-ml-*.json` 里 Guard 的 `macro_regime_votes` 重放；逐行先复现记录的 regime，293/293 一致）：
+  把 VIX 票换成当日收盘，**293 行里 38 行 Guard 宏观政体不同**（5/21 天：09-01 10/24 risk_on→neutral、09-03 3/12 risk_off→neutral、
+  09-18 9/12 neutral→risk_on、09-23 4/12 与 09-24 12/12 risk_on→neutral）；阈值翻转计数：19 份 CBOE 日报里 4 份的 Guard VIX 票与 `vix_regime` 翻转。
+  陈旧规则单独重放（09-24/25 断网 ⇒ 新代码下同样陈旧 ⇒ 不投票）：两天各 12/12 risk_on→neutral（票面只剩这一张，如 AMC 09-25 `{'risk_on': 1}`）。
+
+### Changed — `cboe_vix`：当日收盘 = 收盘后的延迟报价（`get_vix_observation`，`fred_macro` 的唯一入口）
+
+- 先试 `cdn.cboe.com/api/global/delayed_quotes/quotes/_VIX.json`，**只在**两件事同时成立时采用：钟已过 VIX 停算
+  （`is_trading_day.session_close_et` + 15 分钟，提前收盘日 13:15），**且**报价自带 `last_trade_time` 是当天、落在 [收盘, 收盘+30min]。
+  盘中 / 盘前 / CDN 发来的盘中陈旧文件（`cboe_options` v0.45.234 实测过同形）/ GTH 值一律拒收、退回 CSV 最后一行——**盘中值绝不冒充收盘**。
+  拒收原因原样带出：`before_close` / `not_trading_day` / `quote_unavailable` / `quote_bad_value` / `quote_vintage_mismatch` /
+  `quote_prev_close_disagrees` / `disabled_after_mismatch` / `clock_unavailable`。
+- **自动核对**：采用过的报价收盘记进 `PATHS.cache_dir/vix_quote_ledger.json`（调用时求值、`_LEDGER_PATH` 覆盖钩子，同 `_cache_path`），
+  每次取数先拿 CSV 官方收盘核对待核条目；不符 ⇒ WARNING + **14 天内停用报价**（fail-closed，退回 CSV）+ 写进 `vix_quote_check.mismatches`。
+  同场再拿报价的 `prev_day_close` 比 CSV 已公布的上一场收盘，不一致当场拒收。前一收盘优先用 CSV 官方值。
+- `get_vix_history` 记录这次怎么拿到的（`last_history_fetch()`：`download` / `cache_fresh` / `cache_stale` / `none`）；
+  下载失败退回过期缓存从 INFO 升为 **WARNING**。
+- `vix_staleness(as_of)` → `(lag_sessions, stale)`：`stale` = 观测日**早于扫描日的前一交易日**（CSV 常态落后一场不算陈旧，09-24/25 那种才算）；
+  判不了（无观测日）返回 `(None, None)`，不冒充新鲜。
+- 本版实测报价接口可用（今晨盘中 `current_price` 16.04 / `prev_day_close` 14.87 = 09-25 收盘 / `last_trade_time` 09:46 ET——盘中值，按规则会被拒）。
+  ⚠️ **收盘后 `last_trade_time` 的实际形状未见过**（待验证）：若 09-28 日报 `vix_feed_note` 为 `quote_vintage_mismatch`，报价会一直被拒、VIX 仍是 CSV 上一场，
+  只需按实际时间戳调窗口；拒收是 fail-closed，不会把错值送进评分。
+
+### Changed — `fred_macro`：新键 + `vix_change_pct` 对齐（降级路径同样带齐，值为 None）
+
+- 新键：`vix_feed`（`delayed_quote` / `history_csv`）、`vix_feed_note`、`vix_history_fetch`、`vix_lag_sessions`、`vix_stale`、`vix_quote_check`。
+  部分降级路径（09-24/25 那种）此前连 `vix_change_pct` 都没有，现在键齐全。
+- `vix_change_pct` 改为**与 `vix` 同一对观测**（`vix / vix_prev_close − 1`）；快照 VIX 没有配对前一收盘 ⇒ None；yfinance 路径照用它自己那份日 K；
+  取不到时旧默认 **0.0（冒充「持平」）→ None**。「VIX 单日飙升」逆风文案写明是哪两场（`09-09→09-10`）。
+
+### Changed — GuardBee：陈旧 VIX 不投票（用户决定）
+
+`vix_stale is True` ⇒ 同兜底常量处理，不进 `regime_votes`、不写 `details["vix"]`；`None`（判不了：快照 / yfinance 路径）照旧计票。
+`details` 始终写 `vix_feed` / `vix_as_of` / `vix_stale`（`vix_feed` 键的有无是世代边界印记）。
+
+### Added — 看得见
+
+- 日报宏观表 VIX 行写明「`<观测日>` 收盘」，陈旧时加「⚠️ 陈旧，未计入宏观投票」。
+- 仪表板宏观条：陈旧时涨跌位显示「陈旧」（title 写观测日）——此前涨跌被新鲜度窗口藏掉后，主数值看起来完全正常。
+
+### 世代边界（`ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-09-28", "v0.45.357", …)`）
+
+- 与 v0.45.334/340/349 同日 ⇒ `assess()` 切点不变；生产库副本只读实测 `n_all_samples=0` ⇒ **作废 0 条** final_score 样本。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.357"] = ("guard.macro_adj", "agent.GuardBeeSentinel.*")`：对归档实有 70 个信号名前后对比，
+  挂到本条 10 个，9 个本就切在 09-28 只换标签；**唯一后移 `guard.macro_adj`**（08-15→09-28，661 行，其中已成熟 420 条 / 14 个日期）。
+- 印记 `_BOUNDARY_MARKERS["v0.45.357"]`：Guard 宏观细节（归档键名 `vix_term_structure`）带 `vix_feed` 键（推送前生产归档 959/959 无）。
+- `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签扩为 `v0.45.334+v0.45.340+v0.45.349+v0.45.357`（risk_adj_score / volatility / final_score 是 ML 特征；该代仍 0 份报告）。
+- ⚠️ **日期前提**：须在 09-28 首次编排器运行前推到 origin/main 且生产 checkout 快进（推送前实测生产 `main...origin/main` = 0/8，无分叉）。
+
+### 测试
+
+`tests/test_vix_same_day.py`（新，47 项）：收盘门（含提前收盘日、四种错时间戳）、账本核对与 fail-closed / 老不符滚出窗口、陈旧七例（含跨劳动节、周一盘前）、
+观测组装（报价胜出且记账 / prev_close 不符拒收 / 盘前退 CSV / 过期缓存可见）、`fred_macro` 对齐五例 + 降级键齐全、Guard 陈旧不投票、日报 / 仪表板标记、边界印记（含真 Guard 输出正对照）。
+**12 个变异逐一让它变红**（含：变动退回 yfinance 腿、Guard 留陈旧票、去掉时间戳窗口 / 停算门 / 核对 / 同场自检 / fail-closed、陈旧阈值改成落后一场、两个展示标记、
+删 conftest 报价桩——后者由传输层闸在 teardown 抓到）。
+`conftest.stub_cboe_vix` 同时钉 `_download_quote`：报价路径只在美东 16:15 之后的交易日才走到，不钉则同一批测试下午红、上午绿。
+
+### 未做 / 另案
+
+- 补跑（`--date`）的快照 VIX（`cloud_snapshot_cboe`）同样是上一场收盘（08-27/28/31 三份实测落后一场）：来源是云端 `cboe_fetcher` → `get_vix_spot()` 读的 CSV，本版未动，另开任务。
+- `_cache_fresh` 的 6h TTL：20:30 ET 之后、距上次下载不足 6h 的手动重跑仍读到缺当日行的缓存（`vix_lag_sessions=1`，如实标出，不算陈旧）。
+- 09-02 那份 17:10 ET 拿到当日行的原因待验证。
 
 ## [0.45.356] — 2026-09-28 — Added：编排器纳入版本控制·阶段 2——`deploy_orchestrator.py` 部署工具（关卡 + 漂移检查 + 原子替换；**未接入编排器**，阶段 3 另版）
 
@@ -342,7 +839,7 @@ v0.45.226 对账、v0.45.350 复核：这三处改动一直停在分支上（`cl
 
 ### 未做 / 已知残留（刻意不扩范围）
 
-- `templates/dashboard.js` 其余 Chart.js 图仍是硬编码色，含 5 处紫色 `#667eea`（雷达、准确率趋势、资金曲线、多标的趋势调色板等）——78 只做了 `scoresChart`。
+- `templates/dashboard.js` 其余 Chart.js 图仍是硬编码色，含 5 处紫色 `#667eea`（雷达、准确率趋势、资金曲线、多标的趋势调色板等）——78 只做了 `scoresChart`。 ✅ 紫色由 v0.45.358 清掉（含新增分类令牌 `--series-1..4`）。
 - CSS 里 77 本就没动的 hex：`.sec-hot/.sec-cold`（板块轮动）、`.fresh-*`、`.tb-title`。
 - 未定义变量守卫只罩仪表板。`generate_ml_report.py` / `generate_deep_v2.py` / `paper_portfolio.py` 是独立页面，令牌来自别处拼装的 CSS，
   要先确认各自的定义来源再立守卫。

@@ -301,6 +301,10 @@ def summary_line(snap: dict) -> str:
     cb = c.get("cboe")
     yf_s = "—" if yf is None else f"{yf.get('calls', '?')}次(429×{yf.get('rate_limited', '?')})"
     td_s = "—" if td is None else f"请求{td.get('fetches', '?')}/命中{td.get('hits', '?')}"
+    if td is not None and td.get("failed"):
+        # v0.45.363：点名失败的标的与原因——BRK-B 恒 404 曾只活在 WARNING 日志里
+        td_s += f"/失败{td.get('failures', '?')}(" + ",".join(
+            f"{t}:{r}" for t, r in sorted(td["failed"].items())) + ")"
     cb_s = "—" if cb is None else f"抓取{cb.get('fetches', '?')}/命中{cb.get('hits', '?')}"
     os_ = c.get("options_snapshot")
     os_s = "—" if os_ is None else (

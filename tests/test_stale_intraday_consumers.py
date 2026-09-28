@@ -180,9 +180,79 @@ class TestLoadOfficialClose:
     def test_across_holiday(self, snapshots):
         assert csl.load_official_close("2026-09-04", "DE") == (693.53, csl.SNAP_NEXT_PREV_CLOSE)
 
-    @pytest.mark.parametrize("d,t,px", [("2026-08-31", "VZ", 50.02), ("2026-09-10", "T", 25.55)])
-    def test_fresh_snapshot_uses_own_price(self, snapshots, d, t, px):
-        assert csl.load_official_close(d, t) == (px, csl.SNAP_CLOSE)
+    def test_fresh_snapshot_is_fallback_when_no_usable_next(self, snapshots):
+        """当日快照贴收盘、但后一份（09-01）没有 VZ ⇒ 兜底用当日价（v0.45.359 起是第 2 步）"""
+        assert csl.load_official_close("2026-08-31", "VZ") == (50.02, csl.SNAP_CLOSE)
+
+    def test_next_prev_close_preferred_even_when_same_day_looks_official(self, snapshots):
+        """T 09-10 当日快照 15:59:59 判 official；09-11 快照的 prev_day_close 归属 09-10 ⇒ 取后者。
+        两者同为 25.55，只有标签能区分先问了哪一步（v0.45.359 对调）"""
+        assert csl.load_official_close("2026-09-10", "T") == (25.55, csl.SNAP_NEXT_PREV_CLOSE)
+
+
+# 实测 origin/cloud-snapshots：官方收盘 80.47（yfinance 缺该标的；Twelve Data 日线 = 80.47）
+NEE_0918 = _snap("NEE", 80.555, "2026-09-18T15:59:05", "2026-09-18T21:02:52.231000+00:00", 81.28)
+NEE_0921 = _snap("NEE", 79.63, "2026-09-21T15:59:59", "2026-09-21T21:03:03.743475+00:00", 80.47)
+
+
+class TestNextPrevCloseFirst:
+    """v0.45.359：官方收盘先问自带归属的次日 prev_day_close，60s 代理判据只作兜底。"""
+
+    def test_nee_0918_proxy_miss_is_not_served(self, snapshots):
+        """当日文件离收盘 54s ⇒ close_verdict 判 official，但 80.555 不是收盘竞价价"""
+        assert co.close_verdict(_payload(NEE_0918), _fetched(NEE_0918))[0] == co.CLOSE_OFFICIAL
+        snapshots({"2026-09-18": {"NEE": NEE_0918}, "2026-09-21": {"NEE": NEE_0921}})
+        px, src = csl.load_official_close("2026-09-18", "NEE")
+        assert (px, src) == (80.47, csl.SNAP_NEXT_PREV_CLOSE), "80.555 不许再作为官方收盘返回"
+
+    def test_disagreement_is_logged(self, snapshots, caplog):
+        snapshots({"2026-09-18": {"NEE": NEE_0918}, "2026-09-21": {"NEE": NEE_0921}})
+        with caplog.at_level("WARNING", logger="alpha_hive.cloud_snapshot_loader"):
+            csl.load_official_close("2026-09-18", "NEE")
+        hits = [r for r in caplog.records if "80.5550" in r.getMessage() and "80.4700" in r.getMessage()]
+        assert len(hits) == 1, [r.getMessage() for r in caplog.records]
+
+    def test_agreement_is_silent(self, snapshots, caplog):
+        with caplog.at_level("WARNING", logger="alpha_hive.cloud_snapshot_loader"):
+            csl.load_official_close("2026-09-10", "T")
+        assert not [r for r in caplog.records if r.name == "alpha_hive.cloud_snapshot_loader"]
+
+    @pytest.mark.parametrize("d,d_next,t,same,nxt,warns", [
+        # 真漏判：last_trade 15:59:13（47s），50.385；次日 prev_day_close 50.41 = Twelve Data 官方收盘
+        ("2026-09-08", "2026-09-09", "VZ",
+         ("2026-09-08T15:59:13", "2026-09-08T21:03:14.272675+00:00", 50.385, 50.14),
+         ("2026-09-09T15:59:59", "2026-09-09T21:03:40.078632+00:00", 49.74, 50.41), True),
+        # 高价股半分舍入（0.0013%），不是漏判，不许告警
+        ("2026-09-03", "2026-09-04", "TSLA",
+         ("2026-09-03T15:59:59", "2026-09-03T21:02:46.410116+00:00", 376.365, 357.01),
+         ("2026-09-04T15:59:59", "2026-09-04T21:02:42.620556+00:00", 354.08, 376.36), False),
+    ])
+    def test_warning_threshold_separates_miss_from_rounding(self, snapshots, caplog, d, d_next, t,
+                                                            same, nxt, warns):
+        """初版阈值 0.05% 放过了 VZ 09-08（0.0496%）这类真漏判——告警等于只对 NEE 一例有效"""
+        snapshots({d: {t: _snap(t, same[2], same[0], same[1], same[3])},
+                   d_next: {t: _snap(t, nxt[2], nxt[0], nxt[1], nxt[3])}})
+        with caplog.at_level("WARNING", logger="alpha_hive.cloud_snapshot_loader"):
+            assert csl.load_official_close(d, t) == (nxt[3], csl.SNAP_NEXT_PREV_CLOSE)
+        got = [r for r in caplog.records if r.name == "alpha_hive.cloud_snapshot_loader"]
+        assert bool(got) is warns, [r.getMessage() for r in got]
+
+    def test_latest_day_falls_back_to_same_day(self, snapshots):
+        """没有后一份快照（最新一天）⇒ 仍用当日贴收盘的价"""
+        snapshots({"2026-09-21": {"NEE": NEE_0921}})
+        assert csl.load_official_close("2026-09-21", "NEE") == (79.63, csl.SNAP_CLOSE)
+
+    def test_misattributed_next_falls_back_to_same_day(self, snapshots):
+        """后一份隔了交易日（prev_day_close 属于别的场次）⇒ 不许冒充，退回当日价"""
+        gap = _snap("NEE", 79.0, "2026-09-22T15:59:59", "2026-09-22T21:03:00+00:00", 79.63)
+        snapshots({"2026-09-18": {"NEE": NEE_0918}, "2026-09-22": {"NEE": gap}})
+        assert csl.load_official_close("2026-09-18", "NEE") == (80.555, csl.SNAP_CLOSE)
+
+    @pytest.mark.parametrize("bad_prev", [0.0, None, float("nan")])
+    def test_invalid_next_prev_close_falls_back(self, snapshots, bad_prev):
+        nxt = dict(NEE_0921, prev_day_close=bad_prev)
+        snapshots({"2026-09-18": {"NEE": NEE_0918}, "2026-09-21": {"NEE": nxt}})
+        assert csl.load_official_close("2026-09-18", "NEE") == (80.555, csl.SNAP_CLOSE)
 
     def test_latest_stale_with_no_later_snapshot(self, snapshots):
         assert csl.load_official_close("2026-09-11", "T") == (None, "snapshot_stale_intraday")
