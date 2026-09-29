@@ -1275,6 +1275,14 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 09-28（与 v0.45.357 同日同集合）：补跑的 Guard 宏观票对齐目标日（VIX 取 CSV 的 D 行并计票、期限结构读快照、
     # FOMC 按 D 数、板块按 D 对齐）⇒ 同样只动 `_calc_macro_adjustment` 的输入 ⇒ 同样点名这两项。只改补跑行。
     "v0.45.366": ("guard.macro_adj", "agent.GuardBeeSentinel.*"),
+    # 09-28（v0.45.369，新代码 09-29 上线，等价论证见 ic_rerun_readiness 同版条目）：Oracle 期权数据「可用」
+    # 改按 OptionsAgent 的 data_quality 判 —— 只改 Oracle 的 data_quality 标签与置信度，分与方向不变；
+    # 没有归档信号读 confidence / data_quality ⇒ 只动 Queen 层（同 v0.45.314 / 315）
+    "v0.45.369": (),
+    # 09-28（v0.45.383，新代码 09-29 上线，等价证据见 ic_rerun_readiness 同版条目）：日线完整性校验 ⇒ 缺口日的 iv_rank
+    # 置空、Oracle 期权分的 iv_signal 走中性 ⇒ Oracle 分变、方向随分数带变（同 v0.45.349 的两条）⇒ `agent.OracleBeeEcho.*`
+    # 点名；BearBee 的 options_bear 读 Oracle 方向 ⇒ `bear.options_bear` 点名（同 349）。只在缺口日×标的上变。
+    "v0.45.383": ("agent.OracleBeeEcho.*", "bear.options_bear"),
 }
 
 
@@ -1698,6 +1706,13 @@ def main() -> int:
                   f"（跳过 {st['skipped']}）")
 
     if args.list:
+        if not db.exists():
+            # --list 是只读查询，不许为了「看一眼」建库（v0.45.382）：原先 ensure_schema 读写模式连接 +
+            # CREATE TABLE ⇒ 数据根找错时凭空造出一个 pheromone.db，此后别的模块「库不存在」的
+            # 判定全部失效（变成「表不存在 / 没数据」）。表缺失的旧库照旧由 ensure_schema 补表。
+            print(f"❓ 无法判定：样本库不存在：{db}（--list 只读、不建库；"
+                  "未设 ALPHA_HIVE_HOME / ALPHA_HIVE_DB_PATH 时 PATHS.db 回落到代码目录）", file=sys.stderr)
+            return 3
         ensure_schema(db)
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         rows = con.execute(

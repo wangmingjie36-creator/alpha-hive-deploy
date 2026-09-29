@@ -223,7 +223,15 @@ def main() -> int:
     args = ap.parse_args()
 
     # v0.45.160：argparse 的 default 是 None（不能塞 import 期冻结值），此处解析
-    rows = load_day(args.date, Path(args.db) if args.db else None)
+    db = Path(args.db) if args.db else _db_path()
+    if not db.exists():
+        # 缺库 ≠ 当日无归档（v0.45.382）：原先两者同一句「先跑 --backfill」——库找错了地方时
+        # 照做会在错的数据根下新建一个库，把「找错地方」固化下来
+        print(f"❓ {args.date} 无法判定：样本库不存在：{db}（这不是「无归档信号」；"
+              "未设 ALPHA_HIVE_HOME / ALPHA_HIVE_DB_PATH 时 PATHS.db 回落到代码目录——先核对数据根，别急着 --backfill）",
+              file=sys.stderr)
+        return 3
+    rows = load_day(args.date, db)
     if not rows:
         print(f"⏭  {args.date} 无归档信号。先跑 signal_archive.py --backfill",
               file=sys.stderr)

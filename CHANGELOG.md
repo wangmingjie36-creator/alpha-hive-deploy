@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.386] — 2026-09-29 — 占位（进行中：编排器 B2——Step 2/4/5 经步骤解释器 + alert_manager 新规则；B1 干净跑过一天后合入）
+
 ## [0.45.385] — 2026-09-29 — Changed：编排器 Step 10/11/12/13/15 改调步骤解释器（B1）——bash 不再持有这五步的格式知识；先删后跑 + 日期显式传入；解释器不可用时按退出码兜底并留痕
 
 接 v0.45.355（`orchestrator_steps.py` 只提供解释器、编排器未调用）。设计走了一轮工作流（两套独立设计 → 对抗评审合成最终规格，
@@ -81,7 +83,201 @@ Step 2/4/5 的调用点与 alert_manager 新规则是 B2（v0.45.386），本版
 - 已知、不改：解释器不可用时 Step 11 兜底片段没有 `cohort_boundary` 键（B 之前恒有、未知时为 null）。`.get` 与 `jq .cohort_boundary.alarm`
   两种读法结果相同（都为空）；兜底那天本来就没人解读 JSON，可见信号是 ERROR 行 + `interp_fallback`。
 
-## [0.45.381] — 2026-09-29 — 占位（进行中：期权墙行虚线改 var(--border)）
+## [0.45.384] — 2026-09-29 — 占位（进行中：vrp_signal.record_day 零快照时不再清空当天账本行（含已结算行）；局部重跑改 upsert；CLI 零快照 exit 3）
+
+## [0.45.383] — 2026-09-29 — Fixed/Changed：日线完整性校验——`fetch_historical_hv` 缺交易日 ⇒ 重取一次、仍缺则 `iv_rank` 置空并计数；**改评分输入**，世代边界登记 09-28（作废 0 条 final_score 样本）
+
+用户 2026-09-29 决定：阶段 1 直接做、缺口降级为「置空」、边界照 v0.45.369 先例登记 09-28 不作废样本。承接 v0.45.372 / v0.45.379 对 09-23 的根因调查。
+
+### 根因（v0.45.379 已查清，这里只记结论）
+
+2026-09-23 扫描时 yfinance 的 1y 日线缺了 09-22 那一根，8 只标的的 `iv_rank` 静默错位（DE 存 43.26、正确 33.45），BRK-B 的 `rv_30d` 也是这根。
+真正的缺陷不是 Yahoo 掉了一根（外部因素，还会再发生），而是**系统对「拿到的价格序列完整不完整」从没问过**：
+`fetch_historical_hv` 返回不带日期的 HV 列表，少一根让 20 日窗口后移一天，产出的仍是「合理的数字」；
+覆盖率闸门 `scan_coverage_gate` 只判字段是否非空，缺口日它也是绿的。
+
+⚠️ **更正 v0.45.379 里一处未核实的猜测**：当时把 `last_hist_hv_is_sample` 挂在共享对象上「并发时可能被别的线程改写」标为待验证。
+已核：每次分析都 `new` 一个 `OptionsAgent`（自带 fetcher），此标志**不跨线程共享**，该风险不存在。
+
+### Added / Changed
+
+- `bars_integrity.py`（新，纯函数、不联网）：`find_gaps(dates)` 按交易日历找缺失日，分两档，**理由来自依赖关系而非拍的阈值**——
+  `critical` = 缺口落在**最后 21 根内**（20 日滚动 HV 的当前值只依赖最后 21 根，这里少一根当前 HV 就是错的）；
+  `minor` = 更早的缺口（只挪动窗口里 ≤20 个历史 HV 点，不值得为它把当天指标置空，但计数）。
+  末端只要求覆盖到「上一个已完成交易日」，**不要求今天那根**（收盘后几分钟 Yahoo 还没发当日 bar 是常态，拿它当缺口会制造假降级，降级会改分数）。
+  交易日历复用 `is_trading_day`（按规则算假日，不会过期）+ 一张 `AD_HOC_CLOSURES` 临时休市表。
+- **写这个模块时用真实数据核出一个真实误报**：29 只标的的日线里 **28 只在 2025-01-09 缺一根**——卡特国葬日 NYSE 休市，`is_trading_day` 的规则历不知道（它对这天仍答「交易日」，
+  **未改**：它还管着扫描调度，语义超出本次范围，待验证是否要单独处理）。表里补了这一天并写明来源；补后 29 只 × 约 21 个月**零缺口**。
+- `options_analyzer.fetch_historical_hv`：缺口落在 critical 内 ⇒ **重取一次**；重取后仍缺 ⇒ 仍返回序列（`min(hist_hv)` 等只要量级的用法不受影响），
+  但 `last_hist_hv_gaps` 非空、**不写缓存**（缓存键 `hist_hv_v4` → `v5`：只放通过校验的序列，否则 5 分钟内后续调用会把错位数据当好数据读走），
+  调用方据 `hist_hv_untrusted()`（样本 **或** 缺口）把 `iv_rank` / `iv_percentile` 置 None——走既有的「None ⇒ Oracle 期权分 `iv_signal` 中性 2.0」分支。
+  结果新增 `hv_gap`（缺的日期；只在 hv_proxy 口径下有意义）。
+- ⚠️ **不新增 `iv_rank_source` 取值**：`signal_archive._iv_rank_is_real` 把非 `hv_proxy` 一律当真实 IV（=1.0），加一个 `hv_proxy_gap` 会被悄悄记成「真实 IV 历史」。
+- **校验器自己出错**不把全部 iv_rank 置空、也不悄悄当「没缺口」：按未校验放行，但计 `check_errors`、日志打 ERROR。
+- 可观测：`options_analyzer.hv_gap_stats()`（checked / clean / repaired / degraded / minor / check_errors / 逐标的缺口日期）→ `scan_timing.counters.hv_gap` → status.json；
+  摘要行**出事才点名**（`日线缺口 修复N/置空M/校验出错K(DE:2026-09-22)`），平时不占位。
+- 世代印记：Oracle details 带字面量 `hv_gap_checked: True`，每条返回路径都写（成功 / 异常兜底 / 无效 ticker / 日报合成回退）。
+
+### 世代边界（`ic_rerun_readiness._COHORT_HISTORY` 新增 v0.45.383，日期 2026-09-28，作废 0 条）
+
+新代码 09-29 才首跑，边界却写 09-28，前提是**证明 09-28 那天新旧代码输出逐项相同 = 30 只当天都没有缺口**。
+难点：旧代码不记日期，归档里没有字段能直接说「当时缺没缺」，所以只能**用外部数据重放**（`experiments/hv_gap_equivalence_audit.py`，证据冻结在 `experiments/hv_gap_equivalence_20260928.json`）：
+拿 09-28 归档的 (iv_rank, iv_percentile)，看完整序列能否精确复现（容差 0.011），并看「删掉最后 21 根里任一根」能否同样复现。
+
+- **29/30 只唯一证明为完整序列**（完整序列复现，且没有任何单根缺失能同样复现）。
+- **VKTX 一只只能按天推断**：它的 HV 是全年最高（rank=100、percentile=99.57），删哪根输出都不变，单看这只分辨不出。同日 29 只被唯一证明无缺口、0 只不一致，缺口按天发生
+  （09-23 一天 8/22 只），故判其无缺口。⚠️ **这是概率推断，不是直接证明**，证据文件里单独标 `day_level_inference`，此处如实记。
+- 判定机制：`_BOUNDARY_EQUIVALENCE["v0.45.383"]` 读该证据文件，**逐（日期，标的）**判；证据里没有 / 状态不在放行集合 / 文件读不出 ⇒ 不等价（举证责任在放宽一侧）。
+  为此 `_equivalence_scan` 把 `_date` / `_ticker` 传给判据（其它边界的判据只读 `swarm_results`，忽略这两个键）。
+- 三张表同步登记：`signal_archive.COHORT_SIGNAL_SCOPE["v0.45.383"]` = `agent.OracleBeeEcho.*` + `bear.options_bear`（同 v0.45.349）；
+  `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段（`odds_score` / `agent_agreement` / `final_score` 是 ML 特征，只在缺口日变）。
+- 预期判定：新代码首跑前 `no_evidence_yet`（09-28 等价、无印记）；首跑后 `matches`。
+- 前瞻检验：维度 IC 协议 H2 会随 final_score 变，但本条早于 FORWARD_START 2026-10-12 ⇒ 不截断（同 v0.45.369）。
+- 路径锚点守卫（`test_paths_not_frozen_at_import`）当场拦下 `_HV_GAP_EVIDENCE_PATH`（模块级 `__file__` 派生）：它是随代码发布的只读证据，`__file__` 是对的，
+  已按规矩登记进 `KNOWN`（类别 B）与 `MUST_STAY_FILE_ANCHORED`。
+
+### 验证
+
+- **正常路径逐位不变**：真实 yfinance 数据上 BRK-B / XOM / NVDA 与旧公式逐位相等、零误报；单测里无缺口序列与旧公式逐位相同（正对照）。
+- 真实帧人为去掉一根 ⇒ 降级路径按预期触发（重取一次、置空、不写缓存）。
+- 新增测试 72 条（`tests/test_hv_gap_integrity.py` 24 + `tests/test_hv_gap_boundary.py` 48），全离线；**变异 29 个全部落盘、全部被抓**
+  （校验器恒放行 / 不重取 / 缺口序列也写缓存 / critical 恒空 / 消费方只认样本 / 临时休市表清空 / 末端不要求覆盖 / 假日不认 / 今天那根也要求 / hv_gap 不落字段 /
+  摘要不点名 / 校验出错不计数 / 缺口标志被丢 / 等价登记删掉 / 判据恒真 / 状态集混入 mismatch / 兜底或成功路径不写印记 / 扫描不传日期标的 / 证据加载恒空 /
+  分类不做歧义扫描 / 按天推断不要求 0 mismatch / 不要求足够多 / 容差放大 / 合成回退不写印记 / 印记认补跑行 / 世代条目删掉 / SCOPE 登记删掉 / ML 标签不含本版）。
+  每个变异先断言改动落盘、清 `__pycache__`、`PYTHONDONTWRITEBYTECODE=1`、`--maxfail` 放大、还原后逐字节比对。
+- 全套：**7527 通过、1 失败**（`test_economic_calendar::TestCoverageHorizon`，硬编码日历到期的设计性告警，用户 2026-09-29 明确说不用管）；ruff 全绿。中途全套还拦下 1 条真实问题（路径锚点守卫，见上），已按规矩登记。
+- 测试夹具的两处自查：「缺一根确实改变输出」、「饱和序列确实删哪根都不变」——否则相应用例可能是空跑。
+
+### 更正：2026-09-23 那 8 只标的当天**没有落库的分数**（发现于开工重放时，2026-09-29）
+
+用户批准「09-23 那 8 只当天的分数要重放」，开工读原料时发现前提不成立：
+
+- **09-23 整轮扫描失败**：编排器 status=failed、「无扫描产出 —— 网站未更新、日报未生成」；当天 CBOE 全天陈旧（`last_trade` 停在 09-22，vintage 陈旧率 27/27），
+  Step 2 上限 3600s、全程 4630s。**这次扫描失败本身的根因我没有查**，只如实记下。
+- `predictions` 表 09-22 / 09-24 / 09-25 各 30 行，**唯独没有 09-23**；`.swarm_results_2026-09-23.json`、日报 JSON 都不存在（`scan_coverage-2026-09-23.json` 也写「结果文件不存在」）。
+- 当天只留下 12 只标的的 ML 归档（`analysis-*-ml-2026-09-23.json`），8 只里**只有 BILI 与 CVX**：BILI 归档 iv_rank 44.94（正确 45.58，差 0.64，Oracle 档位 / Bear 阈值 / 政体路由都没跨线，
+  只剩 Rival ML 的连续特征，**未量化**）；**CVX 归档里 iv_rank 本就是 None**（14:36 该票期权链 TLS 失败走样本早退），错的 60.85 根本没进它的归档分数。
+  BRK-B / DE / XOM / COST / ABBV / CRM 这 6 只**没有任何落库的分数**（只有日志里的「[16/30] BRK-B: 5.8/10 bearish」这类行）。
+- ⇒ **错的 iv_rank 没有进入任何落库的评分**，没有东西可重放；强行「重放」只会生成一份从未存在过的分数。
+
+**本次及此前几版里因此错误的表述**（旧条目不改写，在此集中更正）：
+
+- v0.45.372「影响面」：「已存的 predictions / final_score / 信号存档一概没动——09-23 当天的评分用的是当时的值」——**暗示有这些分数，实际没有**。
+- v0.45.379「影响面」同一句；以及我在对话里说过的「09-23 那 8 只当天已存的分数用了错误输入（DE 差近 10 点）」——**不成立**。
+- v0.45.383 世代边界条目（`ic_rerun_readiness._COHORT_HISTORY`）最初写的「另行重放 09-23 那 8 只当天分数、改已落库的 predictions 行」——已改（本版，部署前）。
+- 因此 09-23 的错值只存在于：期权快照（5 只已重算，BILI / CRM / ABBV 三只未重算）与上述 12 只 ML 归档。**不影响 IC / 世代 / 前瞻检验**。
+- 我在建议「重放」、以及此前几条「影响面」里，**没有先核「那天到底有没有落库的分数」**，是我的疏漏；发现于开工读原料时。
+
+### 未做 / 待验证
+
+- ~~2026-09-23 那 8 只当天分数的重放~~ **无可重放之物**（前提错了，见下节「更正」）。
+- 阶段 2（缺口时用 Twelve Data 补第二源）、阶段 4（盘点其他读 yfinance 日线做窗口统计的模块）未做。
+- BILI / CRM / ABBV 三只 09-23 的 `iv_rank`（差 0.64 / 0.05 / 0.27）尚未重算，随重放一并处理。
+- 覆盖率闸门仍只判「非空」：单只标的的缺口降级靠计数与 `hv_gap` 字段可见，未接进告警。
+
+
+## [0.45.382] — 2026-09-29 — Fixed：卖权账本只读出口（CLI `--assess` / MCP 两条路径 / 本地报告就绪度行）把「状态目录不存在」报成「账本为空」→ 分开说：缺目录写明解析出的路径与病因、仍 undetermined（退出码 3）；不建目录，写路径 / 预注册 / 盲化 / 闸门均未动；同形普查顺手修 `replay_scoring` / `vol_forecast` / `signal_archive --list` 三个缺 `pheromone.db` 的出口（后者读一次就建库）
+
+> 让号记录：本条开工时占 0.45.373，占位提交因推送被自动模式拦下而只在本地；另一 session 的 0.45.373（世代印记）先进了 origin/main ⇒ 让到 0.45.379；推送前 379（09-23 iv_rank 重算）/ 380 / 381 又被别的 session 先占进主干 ⇒ 再让到 0.45.382。按「先进 git 历史者得号」。教训：占位推送被拦时，号等于没占，完工前要重新核对一次。
+
+### 事故
+
+2026-09-28 不带 `ALPHA_HIVE_HOME` 手动跑 `/usr/local/bin/python3 sell_strike_ledger.py --assess`：`PATHS.home` 回落到代码目录，
+`<仓库>/sell_strike_state/` 不存在，`_shard_paths` 对缺目录返回 `[]`，CLI 印「❓ monthly/weekly：账本里还没有任何行」。
+生产账本（`/Users/igg/alpha-hive-data/sell_strike_state`）当时每档 30 行、29 行 pending。「找错了地方」被说成「账本是空的」，
+并据此误报给了用户。编排器 export 了 env，生产不受影响；危险在手动 / 诊断跑，以及 env 不全的 MCP 进程。
+（本机 MCP：`~/.claude.json` 的 alpha_hive 条目设了 `ALPHA_HIVE_HOME`，09-29 经工具实读 NVDA 09-28 两档行、各 29 pending ⇒ 当前正常。）
+
+### 「这个失败，下游怎么知道？」
+
+之前不知道：缺目录与空目录在 `assess()` 之前就被压成同一个 `[]`，下游只看得到行数。现在「目录在不在」作为独立事实随结果一起走：
+
+- `sell_strike_ledger.state_dir_status(state_dir=None)` → `{"path", "exists", "hint"}`，**不建目录**。hint 分三种病因：
+  显式 `--state-dir` 不存在 / 未设 `ALPHA_HIVE_HOME`（回落代码目录，指向编排器 export 那一行）/ 设了但该数据根下没有账本。
+- `assess()` 从账本读时多一个 `state_dir` 键（`rows=` 注入不给）。**status 语义不变**：缺目录照旧 `undetermined`，
+  闸门、冻结、盲化逻辑一行没动（`state_dir` 不在 `BLINDED_KEYS` 里，也不进冻结文件）。
+- `summary_line()`：`state_dir.exists is False` 先于 status 判 ⇒「❓ {tenor}：无法判定——账本状态目录不存在：<路径>（不是「账本为空」；<病因>）」。
+  目录在但无行 ⇒ 原话「账本里还没有任何行」不变。CLI、本地报告、MCP 的 `assess.*.summary` 共用这一行。
+- CLI `main()`：未设 `ALPHA_HIVE_HOME` 且没给 `--state-dir` ⇒ stderr 先点名本次读写的目录。目录**碰巧存在**
+  （比如之前有人 env-less 跑过 `--run`）时摘要行不会报缺目录，这句是唯一线索。只打印，不改读写。退出码不变（两档都 undetermined ⇒ 3）。
+- MCP `sell_strike_report.rows_for_ticker`（给日期读账本）：无行时区分 `reason`：`ledger_state_dir_missing`（附 `state_dir`）
+  vs 原 `no_ledger_rows_for_date`（目录在、当日无该票行）。`_assess_brief` 透传 `state_dir`（现算路径也看得到读的是哪个账本）。
+  `alpha_hive_mcp.alphahive_get_sell_strike_candidates` docstring 写明两种 reason 的区别。
+- `hive_logger.PATHS.sell_strike_state` docstring 加指针。
+
+### Tests
+
+- `tests/test_sell_strike_ledger.py::TestMissingStateDirIsNotEmpty`（4 条，全离线、tmp 目录）：assess + summary 两情形对照（含 `rows=` 注入对照）；
+  三种病因的 hint（`PATHS.home` 回落目标经 `hive_logger.__file__` 换成 tmp 替身，同 `TestConftestDefensesWired`，不依赖真仓库里有没有该目录）；
+  CLI（缺目录 / 空目录 / env 未设三种，含 stderr 提醒与退出码）；MCP 两条路径。每条都断言缺的目录读完仍不存在。
+- `tests/test_sell_strike_integration.py::TestMcpTool::test_missing_ledger_dir_is_not_reported_as_no_rows`：经 MCP 工具本体。
+- **真跑变异**（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、`--maxfail=1000`、还原后逐文件 sha256 核对）：
+  M0 改动前的真实文件（`git show HEAD:`）⇒ 5/5 红，其中 4 条红在「账本里还没有任何行」/ `no_ledger_rows_for_date`（误诊本身），
+  hint 那条因新函数不存在而红（新功能，无旧行为可比）；M1 summary_line 不看 state_dir ⇒ 4 红；M2 assess 不给 state_dir ⇒ 4 红；
+  M3 MCP reason 不分 ⇒ 2 红；M4 `_assess_brief` 丢 state_dir ⇒ 1 红；M5 删 stderr 提醒 ⇒ 1 红；M6 读路径顺手 mkdir ⇒ 5 红；M7 hint 不分 env 未设 ⇒ 2 红。
+- 手动复现：改前 env-less `--assess` ⇒ 两行「账本里还没有任何行」、exit 3；改后 ⇒ stderr 提醒 + 两行「账本状态目录不存在：<worktree>/sell_strike_state（…未设置 ALPHA_HIVE_HOME…）」、exit 3、目录未被创建；
+  带 `ALPHA_HIVE_HOME=/Users/igg/alpha-hive-data` ⇒ 两档 accruing、各 30 行 / 29 pending、`state_dir.exists=True`。
+- ruff 通过。全套（含下文三个 CLI 的修复与 6 条新测；基线 origin/main `adbf13b2`，即 v0.45.378；其后到 `c256e7c6` 主干只改了 CHANGELOG）：7388 passed，1 failed（`test_economic_calendar::TestCoverageHorizon`：CPI / NFP 表只覆盖到 2026-12、BLS 未发布 2027 日程的设计性告警，与本改动无关，同 v0.45.363）。
+
+### 同形普查（其它基于 `PATHS` 的只读 CLI：缺目录 / 缺文件被说成「空」）
+
+普查范围：带 `__main__` / argparse 的模块与 `alpha_hive_mcp.py` 的工具，凡经 `PATHS.*`（含模块级 `BASE_DIR = PATHS.home`）解析数据位置的只读出口。
+**标 ✔ 的本 session 逐条读代码复核过；其余是只读普查代理的结论，动手前再核（待验证）。**
+
+⚠️ 先读这一条再看清单：不带 env 时 `PATHS.home` = checkout，而其中一批数据目录**被 git 跟踪**（✔ `git ls-files` 实数：
+`report_snapshots/` 1441、`hedge_state/` 18、`self_analysis_briefs/` 9、`paper_portfolio_state/` 4、`options_paper_state/` 4、
+`probability_scorecard_state/` 2、`vrp_state/` 1、`weight_history.jsonl`）⇒ 那些工具在 checkout 里读到的是**陈旧的已提交副本**，
+不是空——病形是「读错数据还不报」，比「报空」更难发现。「缺目录被说成空」只在 git 忽略 / 不存在的数据上当场发作：
+`pheromone.db`、`analysis-*.json`、`.swarm_results_*.json`、`cache/`、`sell_strike_state/`、`paper_account/`。
+
+**本版顺手修了（只改出口文字 / 退出码，不动任何写路径；新测 `tests/test_missing_db_not_reported_as_empty.py` 6 条，含库在的对照）：**
+
+- ✔ `replay_scoring.py`：`load_samples` 库打不开时 notes 里写了路径，`main()` 却不打印、照说「无可用样本 … 这是正常状态」。
+  现在有 ⛔ note ⇒「❓ 无法判定：样本库读不到」+ 逐条 note + env 提示，退出码仍 3。
+- ✔ `vol_forecast.py`：缺库与「当日无归档」同一句「先跑 signal_archive.py --backfill」——库找错地方时照做 = 在错的数据根下建库。
+  现在 `main()` 先判 `exists()` ⇒ 路径 + 提示，退出 3（原无归档分支仍是 1，`test_vol_forecast` 的子进程测试不变）。
+- ✔ `signal_archive.py --list`：读写模式 `ensure_schema` ⇒ **读一次就造出 `pheromone.db`**，此后 `ic_rerun_readiness` /
+  `scan_continuity` / `health_check` 等「库不存在」的明确判定全部退化成「表不存在 / SQL 错误」。现在缺库 ⇒ 退出 3、不建库；
+  库在但缺表照旧补表（`--analyze` 走 `mode=ro`，缺库是响亮的异常，不在此列）。
+- 变异：M0 取三个文件改动前的真实版本 ⇒ 3 条「缺库」测试全红，红在误诊原文本身
+  （「这是正常状态」/「先跑 signal_archive.py --backfill」/「--list 读一次就造出了 …db」），3 条对照全绿。
+
+**只列不修（不是几行的事，或碰写路径 / 刻意设计，留给后续）：**
+
+- ✔ `earnings_vol_signal.py` 的 `__main__`（**写路径，最危险**）：`scan()` 零快照时不提前返回，照样把 `earnings_signals.jsonl`
+  改写为「其它日期的行 + 本日空列表」⇒ cache 找错 / 当日缺快照时**删掉该日已有行**。
+- ✔ `paper_portfolio.py`：模块级 `STATE_DIR.mkdir(exist_ok=True)`（import 即建目录，`portfolio_greeks` / `ibkr_sync` / `ic_rerun_readiness`
+  都会触发）；`kpi` / `card` 缺状态时印「NAV 50000、0 笔」或「尚未启动，运行 bootstrap」，与新账本无从区分。去掉 import 期 mkdir 要动写者，不 trivial。
+- ✔ `ml_model_guard.py`：`describe()` 在 0 份报告时只说「共 0 份报告」，不给 `report_dir`（exit 3 本身是对的）。
+- `portfolio_greeks.py --dry-run`：状态缺失 ⇒「三本账均无持仓」；且 `--dry-run` 仍写 `hedge_state/beta_cache.json`（待验证）。
+- `ibkr_sync.py reconcile`：`real_fills.jsonl` 缺失与「零成交」同一份 0/0 报告，且 reconcile 会建 `paper_account/reconcile/` 落盘（待验证）。
+- `weekly_optimizer.py`：`_warn_if_close_t7_unavailable` 对 `missing` **刻意**不告警（docstring 写明）、随后静默退回旧口径计数（待验证；改前先读那段理由与测试）。
+- `alpha_hive_mcp.py` 的 `get_analysis` / `get_swarm_scores` / `get_gex`：找不到报告只回「No analysis report found」不给路径；
+  `list_reports` 给了 `path`，算半诚实（待验证）。
+- `experiments/penalty_replay.py`（「样本不足（0），中止」）、`self_analyst.py`（「无可分析数据」，但前面印了路径）（待验证）。
+- 读路径**建出空库**再报 `no such table` 的四个：`dynamic_exit_backtest.py`、`bootstrap_ci.py`、`portfolio_factor_attribution.py`、
+  `experiments/vol_regime_filter.py`（读写模式 `sqlite3.connect(PATHS.db)` 无 exists 判定）——报错本身响亮，但留下的空库会让别处
+  「库不存在」判定失效，同 `signal_archive --list`（待验证）。
+- `PATHS.cache_dir` 的 getter 会 mkdir ⇒ `vrp_signal.py --assess` 缺数据根时建出 `<checkout>/cache/`（提示文字本身是诚实的「无法判定」）（待验证）。
+- 同形但不经 `PATHS`（cwd 相对路径）：`iv_history.py` / `price_history.py`（缺省 `"cache"`）、`backtest_engine.py` / `regime_analyzer.py` /
+  `finrl_bridge.py`（`report_snapshots`）、`data_backup/export.py`（缺目录 ⇒「DIR x: 0 文件」，`--src` 缺省写死路径）（待验证）。
+- 已核无此病（缺路径会明说或抛）：`ic_rerun_readiness`、`scan_continuity`、`ic_diagnostics`、`backup_continuity`、`health_check`、
+  `portfolio_backtest`、`walk_forward_validator`；`probability_scorecard` 报 `ledger_missing` + exit 3 但不给路径（待验证）。
+
+### 未做
+
+- 写路径没改（按要求）：env-less 的 `--run` 仍会按 `PATHS.home` 回落把账本写进代码目录（`--settle` 对缺目录不建：
+  没有分片就没有待套用的结算，`_settle` 只在 `if plan:` 时才取会 mkdir 的 tenor 锁）；
+  之后 `--assess` 读到的是「目录在但为空 / 很少」，只有新的 stderr 提醒能看出来。要不要让写路径在 env 未设时拒写，留给用户定。
+- `render_markdown` 的「今日无数据」段落文字没改：它只经日报钩子（写路径）调用，缺目录时下面的就绪度行已会写明「状态目录不存在」。
+
+## [0.45.381] — 2026-09-29 — 期权墙行虚线改 `var(--border)`
+
+v0.45.371 复查时记下的副作用：期权墙逐行的虚线分隔从 `rgba(148,163,184,.2)` 并入 `rgba(var(--tint-slate),.2)` 后，暗色主题下变淡（对底色 1.42 → 1.24:1）。改用站点分隔线令牌 `--border`，与其余分隔线同源。
+
+### Changed
+- `dashboard_renderer.py` 期权墙行 `border-bottom:1px dashed var(--border)`。对底色（`--surface`）：浅色 1.18（原）/ 1.29（371）→ **1.90**；暗色 1.42（原）/ 1.24（371）→ **1.36**（略低于原值、高于 371，暗色 `--border` 本身就是这个亮度，与全站其余分隔线一致）。
+- 纯装饰分隔，不承载信息；无新增测试（`test_dashboard_css_vars_defined` 已覆盖 `--border` 已定义）。全套 7374 passed / 2 xfailed。
 
 ## [0.45.380] — 2026-09-29 — 占位（进行中：earnings_vol_signal.scan 零快照时不再清空当天账本行（含已结算行））
 
@@ -114,8 +310,37 @@ v0.45.372 的只读核对（其余 29 只）发现 09-23 有 4 只 `iv_rank` 对
 
 ### 未做
 
-- **成因仍未查**：为什么 09-23 只有这 5 只（含 BRK-B）的 `iv_rank`（yfinance-only 的 hv_proxy 路径）坏了，而同日 `rv_30d` 全部正常。
-- 21 只有 09-23 快照，其余 16 只经核对无异常（JNJ 有固定 2~3 点的偏差，判为复权口径时间差，未改）。
+- ~~成因仍未查~~ **成因已查清（2026-09-29，只读）**，见下节。
+- JNJ 有固定 2~3 点的偏差，**仍未定性**（见下节）。
+
+### 成因：09-23 扫描时 yfinance 的 1y 日线里缺了 2026-09-22 那一根 bar
+
+**反推法**：对每只标的，试「删掉/重复/换掉某根 bar」「序列停在前一天」等扰动，看哪个能复现**改前的原值**（取自备份，不是改后的值——第一遍我误读了已改的值，
+得到「完全吻合」的假象，发现后用备份重做）。
+
+- **BRK-B / DE / XOM / COST / CVX：「去掉 09-22 那根」复现原 `iv_rank`，残差 0.00**；次优解释差得远（DE：0.00 对 1.89）。
+- **同一扰动下再扫 09-23 全部 22 份快照**，又找到 3 只也是这个缺口的受害者，只是量小、被我之前 1.0 的阈值漏掉：
+  **ABBV**（存 23.69 / 正确 23.42）、**BILI**（44.94 / 45.58）、**CRM**（98.87 / 98.82）。共 **8 只**受影响；其余 14 只无异常。
+- **BRK-B 的 `rv_30d` 也是同一根 bar**：去掉 09-22 得 **14.52**，正好等于当时存的值。另外 4 只（DE/XOM/COST/CVX）当天 `rv_30d` 正常——
+  **与「它们的 rv 有 Twelve Data 可用、BRK-B 的 Twelve Data 404 只能吃同一份缺口数据」一致**（未直接证实各票 rv 当天走的哪条路径）。
+  也就是说 v0.45.363 修的 404 在这天恰好是**保护层缺失**：有第二源的票 rv 没被缺口带偏，没有的那只被带偏了。
+- ⚠️ 缺口本身**无法在事后直接看到**：今天的 yfinance 已有 09-22 这根（数据后来被补上），只能靠「哪种扰动复现原值」反推。8 个精确复现足以确认，但**为什么 Yahoo 那天缺这根、为什么只缺这 8 只未知**。
+- 已排除：`hist_hv_v4` 缓存陈旧（TTL 仅 5 分钟）；走了样本 HV 回落（09-23 日志 0 条）。
+
+**为什么没人发现**：`fetch_historical_hv` 只返回 HV 数值列表，**不带日期**，也没有连续性检查——少一根 bar 让 20 日窗口悄悄整体后移一天，
+产出的仍是「合理的数字」。09-23 当天没有任何告警（「这个失败，下游怎么知道？」的又一个实例：没有失败被触发，因为数据缺失不抛异常）。
+
+**建议（未做，待用户决定）**：`fetch_historical_hv` 在计算前校验末根日期与相邻交易日连续性（近 25 根内缺工作日 ⇒ 重取一次；仍缺则 `iv_rank` 置 None 并留计数），
+让缺口变成可见的降级而不是无声的错位。
+
+### JNJ（仍未定性）
+
+09-10 ~ 09-23 固定偏 2~3 点，但**不是单根缺 bar**：逐日试「删一根」，最优解释在不同日子指向不同的 bar（08-24 / 09-17），残差 0.03~0.67 不稳定。
+疑与复权因子的时间差有关（JNJ 08 月底除息），未证实，未改。
+
+### 仍未改的
+
+- BILI / CRM / ABBV 三只 09-23 的 `iv_rank`（差 0.64 / 0.05 / 0.27，量小）——沿同一方法可重算，等用户决定。
 - 旧时期（2026-04 ~ 08-27）`rv_30d` 串票问题仍未处理，见 v0.45.372 条目。
 
 ## [0.45.378] — 2026-09-29 — 二次检查 v0.45.351：两处小 bug（CDN 无期望时间戳仍报「已验证」；传输探测可能连 IPv6 误判端口不通）；09-28 生产首跑核对全绿
@@ -374,7 +599,56 @@ VRP 账本 BRK-B 的 rv / iv 也全非空。真正有问题的是**值**，不�
 - 变异 12/12 红（去同步判断 / 去先删记录 / run_step 进命令替换 / 加 set_status / 裸变量紧跟全角 / 非成功不写记录 / `=1` 挪出 else /
   按退出码判成功 / 历史退回 `git log --raw` / 不记 main_commit / pending 恒放行 / PENDING_MAX 无穷），驱动核对 collected 并逐条还原核哈希。
 
-## [0.45.369] — 2026-09-29 — 占位（进行中：OracleBee 期权链不可得仍标 real + 置信度 0.7 → 按 OptionsAgent data_quality 判；并入 09-28 世代边界）
+## [0.45.369] — 2026-09-29 — Fixed：OracleBee 期权链取不到仍标 `real` + 置信度 0.7 → 按 OptionsAgent 自己的 `data_quality` 判；世代边界**并入 09-28**（等价论证，作废 0 条）
+
+用户决定（09-28「Oracle bug 另登边界」；09-29「09-28 期权链完整数据就用」）。
+**根因**：`oracle_bee` 用 `bool(result)` 判「期权数据可用」。真实链取不到时 OptionsAgent 走「样本链早退」，返回**非空** dict
+（`data_quality: "unavailable"`、`options_score` 5.0、指标全 None）⇒ Oracle 把固定 5.0 分标成 `data_quality.options="real"`、
+置信度照加 0.3（规则模式 0.4→0.7）。生产 `.swarm_results` 只读普查：112 个扫描日里 26 天有这种行、100% 标 real；
+扩到 30 只后是 09-24、09-25（各 30/30）。
+
+### Fixed
+- `swarm_agents/oracle_bee.py`：`_options_data_usable(result)` = 非空且 `data_quality != "unavailable"`，置信度与标签同用它；
+  该情形标 `"unavailable"`（已在 Queen `PROXY_SOURCES`，权 0.7，与 `"fallback"` 同档）、置信度不加 0.3。
+  OptionsAgent 抛异常仍 `"fallback"`；`"degraded"`（链在、IV 缺）新旧都算取到，**不动**。Oracle 分与方向不变。
+
+### Added（世代记账）
+- 印记 `details.options_dq_from_agent: True`（成功 / 异常兜底 / 无效 ticker / 日报合成回退都无条件写）；
+  `ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.369"]`。
+- **`_BOUNDARY_EQUIVALENCE`（新，只对登记的边界生效）**：边界日至印记首见之间的旧代码记录，逐只标的读 `.swarm_results_<日期>.json`
+  （全部 30 只，不是 ML 归档的前 12 只）核「在本版改动下输出不变」——Oracle details 的 `data_quality` 不是 unavailable ⇒ 等价。
+  只放宽「写早了」一个方向：不等价（旧代码又碰上断链）照报 `boundary_too_early`；读不出记为不等价；等价判据不当印记用
+  （否则历史上 bug 没触发的日子全被认成新口径 ⇒ 恒报 boundary_too_late）。结果新增 `equivalent_before_marker`，摘要行点名。
+- `_COHORT_HISTORY` 09-28 / v0.45.369（同日第 6 条，`assess()` 切点不变 ⇒ **作废 0 条** final_score 样本；另登 09-29 会作废 09-28 的 30 条）。
+  依据：09-28 扫描 30/30 取到链（只读核对）⇒ 09-28 记录新旧评分与标签逐项相同（新代码只多写一个印记键）。生产数据只读试跑 `boundary_evidence_status`：
+  不报警，369=`no_evidence_yet`（摘要行写明 09-28 为等价旧记录），其余 5 条照旧 `matches`；新代码首跑后预期 `matches`。
+  反向对照：同一扫描对 09-24/25 判不等价。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.369"] = ()`（分与方向不变、无归档信号读 confidence / data_quality，同 v0.45.314/315）；
+  `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签扩 `+v0.45.369`（此时 09-28 已有 1 天报告，同一代只换标签）。
+
+### 幅度（重放：现行代码 + 记录输入，外部依赖钉成记录值；另一代理独立复核一致）
+- 对照先复现存档：09-24/25 **60/60** 行 final_score / 方向 / data_real_pct / quality_factor 逐位一致。
+- 修复后 final_score **58/60** 行变：09-24 |Δ| 中位 0.10、最大 0.25（VKTX）；09-25 中位 0.075、最大 0.19；**方向 0 翻转**；
+  data_real_pct 每行 −1.2pp（≈89→88，仍 ≥80 ⇒ quality_factor 不变）。机制：odds 维（Oracle 恒 5.0）有效权重
+  `max(0.3, conf^1.5)` 0.586→0.3（地板），分数被推离 5.0。
+- 更早 24 天（03-31~07-02，59 行）对照复现不了（v0.45.212 起 Guard/Bear 退出计票等现行代码改动）⇒ **不给数**。
+
+### 刻意不做
+- LLM 模式：`llm_service.interpret_options_flow` 仍在 `result` 非空时调用（样本链结果也会送进去），另议。
+- BearBee 同一天仍把期权通道标 `real`（`bear_bee.py` 读到 Oracle 板上条目即记 real；其 OptionsAgent 兜底分支也是
+  `if result:` ⇒ `options_api`）。既有代码、本版未动；对分数零影响（Bear 置信度不进维度、Bear 不计票，data_real_pct 仍 ≥80），
+  但同一条记录里 Oracle 与 Bear 的标签会不一致，另议。
+- 前瞻检验：维度 IC 协议 H2 随 final_score 变，但本条早于 FORWARD_START 2026-10-12 ⇒ 不截断；共振 replay 读记录值，无需修订。
+
+- 二次审查（四视角对抗 + 逐条驳斥复核，16 个代理）：Oracle 修复每条路径正确、「分与方向不变」成立；确认 1 应修 + 若干小项已同版修：
+  ① 等价分支原先只认 `.swarm_results`，把原分支看得见的 ML 归档证据丢了 ⇒ 现逐（日期, 标的）核：旧代码写过归档、却没在当日可读的
+  `.swarm_results` 里被核过（文件缺 / `{}` / 缺这只票）一律算不等价；② 窗口含印记首见那天（新代码补跑并进旧代码断链行的合并文件）；
+  ③ 报警行点名不等价日、首跑前那行也写明「按等价放过」；④ 「逐字节相同」改为「评分与标签逐项相同（新代码只多一个印记键）」。
+  驳倒 2 条（「手搓桩不驱动真 OptionsAgent」「生产未部署时 Step 11 永远 no_evidence_yet」）。
+- 合入主干 v0.45.373（「世代印记只认实时行」）后同形补上：本条的**日期**印记排除补跑行（Guard `macro_as_of_mode == "backfill"`，
+  只认显式、缺键照实时算，同 373）——否则部署后补跑一份早于边界的日期会把首见日拉到边界前、假报 boundary_too_late；
+  等价扫描判「这行是不是新代码」仍用不排补跑的原始印记（新代码的补跑行不是旧口径）。
+- 守卫 `tests/test_oracle_options_dq_from_agent.py`（43 条：行为 / 每条路径印记 / 写端↔读端 / 等价边界各路径 / 补跑行）；变异 21/21 红。
 
 ## [0.45.368] — 2026-09-28 — dashboard.css 组件层硬编码色换令牌：修 4 处对比度不达标 + 零字面量守卫
 

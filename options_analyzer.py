@@ -47,6 +47,54 @@ except ImportError:
 _TOTAL_OI_NOOP_WARNED = False
 
 
+# ── v0.45.383：日线完整性计数 ───────────────────────────────────────────────
+# 进 `scan_timing.counters.hv_gap` → status.json。只数**真发生了取数**的次数（缓存命中不计）。
+_HV_GAP_LOCK = threading.Lock()
+_HV_GAP_STATS: Dict[str, int] = {"checked": 0, "clean": 0, "repaired": 0, "degraded": 0,
+                                 "minor": 0, "check_errors": 0}
+_HV_GAP_TICKERS: Dict[str, Dict[str, List[str]]] = {}   # {ticker: {"critical": [...], "minor": [...]}}
+
+
+def _hv_gap_note(ticker: str, outcome: str, gaps: Optional[Dict[str, List[str]]]) -> None:
+    """记一次校验结果。outcome: clean / repaired / degraded。"""
+    with _HV_GAP_LOCK:
+        _HV_GAP_STATS["checked"] += 1
+        _HV_GAP_STATS[outcome] += 1
+        if gaps and gaps.get("minor"):
+            _HV_GAP_STATS["minor"] += 1
+        if gaps and (gaps.get("critical") or gaps.get("minor")):
+            _HV_GAP_TICKERS[ticker] = {"critical": list(gaps.get("critical") or []),
+                                       "minor": list(gaps.get("minor") or [])}
+
+
+def _check_bars_gaps(ticker: str, hist) -> Optional[Dict[str, List[str]]]:
+    """对 yfinance 日线做完整性校验。校验**本身**出错返回 None 并计 `check_errors`——
+    校验器的 bug 不该把全部 iv_rank 置空，但也不能悄悄当作「没缺口」：错误进计数器、日志打 ERROR。"""
+    try:
+        from bars_integrity import find_gaps
+        return find_gaps([d.strftime("%Y-%m-%d") for d in hist.index])
+    except Exception as e:  # noqa: BLE001
+        with _HV_GAP_LOCK:
+            _HV_GAP_STATS["check_errors"] += 1
+        _log.error("[%s] 日线完整性校验自身出错（本次按未校验放行）: %s: %s", ticker, type(e).__name__, e)
+        return None
+
+
+def hv_gap_stats() -> Dict:
+    """日线完整性校验的累计计数，供 scan_timing 收集。"""
+    with _HV_GAP_LOCK:
+        d = dict(_HV_GAP_STATS)
+        d["tickers"] = {t: {k: list(v) for k, v in g.items()} for t, g in _HV_GAP_TICKERS.items()}
+    return d
+
+
+def reset_hv_gap_stats() -> None:
+    with _HV_GAP_LOCK:
+        for k in _HV_GAP_STATS:
+            _HV_GAP_STATS[k] = 0
+        _HV_GAP_TICKERS.clear()
+
+
 class OptionsDataFetcher:
     """期权数据采集器 - 支持多源降级策略"""
 
@@ -57,6 +105,10 @@ class OptionsDataFetcher:
         self.cache_dir = cache_dir or str(PATHS.cache_dir)
         self.cache_ttl = 300  # 5 分钟缓存
         self.last_hist_hv_is_sample = False  # P0-1: 最近一次 fetch_historical_iv 是否落样本
+        # v0.45.383：最近一次 fetch_historical_hv 里「落在最后 21 根内」的缺失交易日（非空 ⇒ 当前 HV 不可信）。
+        # 每次分析都 new 一个 OptionsAgent（自带 fetcher），此标志不跨线程共享——
+        # 「并发改写」的担心 2026-09-29 已排除（见 CHANGELOG v0.45.383）。
+        self.last_hist_hv_gaps: List[str] = []
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def _get_cache_path(self, ticker: str, data_type: str) -> str:
@@ -392,8 +444,11 @@ class OptionsDataFetcher:
         # P0-1 (v0.38.0): 标记本次历史 IV 是否为样本数据，供 analyze() 决定
         # IV Rank 是否可信（样本历史区间与真实现价 IV 错配会产生假 0/100 极值）
         self.last_hist_hv_is_sample = False
+        self.last_hist_hv_gaps = []
 
-        cached = self._read_cache(ticker, "hist_hv_v4")
+        # v0.45.383：缓存键 v4 → v5。v5 里只放**通过完整性校验**的序列——缺口序列绝不进缓存，
+        # 否则 5 分钟内的后续调用会把错位的 HV 当成好数据直接读走（且读缓存时无从知道它有缺口）。
+        cached = self._read_cache(ticker, "hist_hv_v5")
         if cached:
             return cached
 
@@ -403,19 +458,31 @@ class OptionsDataFetcher:
             return self._get_sample_historical_hv(ticker)
 
         try:
-            try:                                # v0.45.56 限流闸门
-                from yf_gate import ensure as _yf_ensure
-                _yf_ensure()
-            except Exception:                   # pragma: no cover - 闸门不可得不阻断
-                pass
-
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="1y")
+            hist = None
+            gaps = None
+            repaired = False
+            for attempt in (1, 2):
+                try:                            # v0.45.56 限流闸门
+                    from yf_gate import ensure as _yf_ensure
+                    _yf_ensure()
+                except Exception:               # pragma: no cover - 闸门不可得不阻断
+                    pass
 
-            if hist.empty:
-                _log.warning("%s 历史数据不可用，使用样本数据", ticker)
-                self.last_hist_hv_is_sample = True
-                return self._get_sample_historical_hv(ticker)
+                hist = stock.history(period="1y")
+
+                if hist.empty:
+                    _log.warning("%s 历史数据不可用，使用样本数据", ticker)
+                    self.last_hist_hv_is_sample = True
+                    return self._get_sample_historical_hv(ticker)
+
+                gaps = _check_bars_gaps(ticker, hist)
+                if gaps is None or not gaps["critical"]:
+                    repaired = attempt == 2
+                    break
+                if attempt == 1:
+                    _log.warning("[%s] 日线缺交易日 %s（落在最后 21 根内，当前 HV 会错位），重取一次",
+                                 ticker, gaps["critical"])
 
             # 计算历史已实现波动率（20日滚动）
             returns = hist["Close"].pct_change().dropna()
@@ -430,13 +497,28 @@ class OptionsDataFetcher:
             # 且 clamp 生效时反而制造失真）。如实返回 HV 序列，最后 252 个点。
             hv_list = hv_values[-days:]
 
-            self._write_cache(ticker, "hist_hv_v4", hv_list)
+            if gaps is not None and gaps["critical"]:
+                # 重取后仍缺：仍返回序列（`min(hist_hv)` 等只需要量级的用法照旧），
+                # 但标记不可信、**不写缓存**；调用方据此把 iv_rank / iv_percentile 置 None（评分走中性）。
+                self.last_hist_hv_gaps = list(gaps["critical"])
+                _hv_gap_note(ticker, "degraded", gaps)
+                _log.warning("[%s] 重取后日线仍缺交易日 %s：HV Rank 将置 None（不用错位的数据冒充）",
+                             ticker, gaps["critical"])
+                return hv_list
+
+            _hv_gap_note(ticker, "repaired" if repaired else "clean", gaps)
+            self._write_cache(ticker, "hist_hv_v5", hv_list)
             return hv_list
 
         except (*NETWORK_ERRORS, TypeError) as e:
             _log.warning("获取 %s 历史 HV 失败：%s，使用样本数据", ticker, e)
             self.last_hist_hv_is_sample = True
             return self._get_sample_historical_hv(ticker)
+
+    def hist_hv_untrusted(self) -> bool:
+        """最近一次 `fetch_historical_hv` 的结果不可用于算 iv_rank：落了样本，或当前 HV 受缺口影响。"""
+        return bool(getattr(self, "last_hist_hv_is_sample", False)
+                    or getattr(self, "last_hist_hv_gaps", None))
 
     def fetch_expirations(self, ticker: str) -> List[str]:
         """获取期权到期日列表"""
@@ -1899,7 +1981,7 @@ class OptionsAgent:
                 and cached.get("iv_rank_source") == "hv_proxy"):
             try:
                 _hist_hv = self.fetcher.fetch_historical_hv(ticker)
-                if _hist_hv and not getattr(self.fetcher, "last_hist_hv_is_sample", False):
+                if _hist_hv and not self.fetcher.hist_hv_untrusted():
                     _cur_hv = _hist_hv[-1]
                     _rank, _ = self.analyzer.calculate_iv_rank(_cur_hv, _hist_hv)
                     if _rank is not None:
@@ -2447,12 +2529,18 @@ class OptionsAgent:
             iv_current = round(current_iv, 2)  # 展示值仍是真实 IV，不受 rank 口径影响
         # P0-1 (v0.38.0): 历史 IV 为样本数据时，IV Rank 不可信（样本区间与真实
         # 现价 IV 错配 → 假 0/100 极值），置 None 并在评分中走中性
+        # v0.45.383：「不可信」= 样本数据 **或** 当前 HV 受缺失交易日影响（`hist_hv_untrusted`）。
+        _hv_gap_dates = list(getattr(self.fetcher, "last_hist_hv_gaps", None) or [])
         if (_iv_rank_source == "hv_proxy"
-                and getattr(self.fetcher, "last_hist_hv_is_sample", False)):
+                and self.fetcher.hist_hv_untrusted()):
             # v0.43.19: ① 属性名随 fetch_historical_hv 改名同步（此处是字符串
             # 字面量，全局改名碰不到，漏改会让守卫因 getattr 默认 False 永久失效）
             # ② 限定 hv_proxy——真实 IV 历史路径不依赖 hist_hv，不该被它置 None
-            _log.warning("[%s] 历史 HV 为样本数据，HV Rank/Percentile 置 None（不可信）", ticker)
+            if _hv_gap_dates:
+                _log.warning("[%s] 日线缺交易日 %s，HV Rank/Percentile 置 None（不用错位的数据冒充）",
+                             ticker, _hv_gap_dates)
+            else:
+                _log.warning("[%s] 历史 HV 为样本数据，HV Rank/Percentile 置 None（不可信）", ticker)
             iv_rank = None
             iv_percentile = None
         put_call_ratio = self.analyzer.calculate_put_call_ratio(calls_df, puts_df)
@@ -2614,6 +2702,9 @@ class OptionsAgent:
             # v0.43.18 自攒 IV 历史原料：当日真实观测 IV（降级前），只记账不进评分
             "iv_raw_observed": _iv_raw_observed,
             "iv_rank_source": _iv_rank_source,      # "real_iv_{N}d" | "hv_proxy"
+            # v0.45.383：因日线缺交易日而把 iv_rank 置空时，缺的是哪几天（否则只看到一个 None，看不出为什么）。
+            # 只在 hv_proxy 口径下有意义；真实 IV 历史口径恒为 []。
+            "hv_gap": _hv_gap_dates if _iv_rank_source == "hv_proxy" else [],
             "iv_rank_window_days": _iv_rank_window,  # 真实 IV 样本天数（hv_proxy 时为 None）
             "put_call_ratio": put_call_ratio,
             # v0.17.0: total_oi 双口径 — raw（原始总和）+ stable（排除 DTE<7 近到期）
