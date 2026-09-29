@@ -211,117 +211,6 @@ run_step() {
 }
 
 # ================================================================
-# 步骤解释器接线（B）：Step 2/4/10/11/12/13/15 的「退出码 + --out JSON → 日志 + steps_result 片段」
-# 唯一真相在 orchestrator_steps.py（有测试）。bash 只做三件事：调用、校验形状、合并。
-#   · 恒不中断扫描、恒不调 set_status：OVERALL_STATUS 只由 Step 2 调用点按 STEP2_RC 定（与 B 之前逐支相同）
-#   · 解释器缺失 / 超时 / 输出不是「恰好一个期望键、status 为字符串」/ render_error /
-#     Step 2、4 给出 B 之前不存在的判定（rc=1 的 success_with_warning、skipped_builtin 除外）
-#     ⇒ 退回 _step_rc_fallback：Step 2/4 按退出码逐字复现 B 之前的 status（alert_manager 读它们），
-#       10–15 记 interpreter_unavailable + rc（无程序读者）；片段带 interp_fallback、日志多一行 ERROR ⇒ 谁会红：这两处
-#   · 经 run_step --timeout 跑、stdout 重定向到文件：放进命令替换会白等满超时（看门狗的 sleep 握着 stdout）
-#   · 合并失败 ⇒ STEPS_RESULT 原样保留（write_status 原样嵌入它，变空 = status.json 非法）
-# 调用后 _SI_STATUS = 实际并进片段的 status（Step 5 降级支读 Step 2 的这个值）。
-# bash 3.2 + set -u：数组只追加、恒非空；非 ASCII 旁一律 ${VAR}。
-# 守卫：tests/test_orchestrator_step_interp.py
-# ================================================================
-STEP_INTERP_TIMEOUT=30
-_SI_STATUS=""
-
-_step_rc_fallback() {
-    # 用法：_step_rc_fallback <sid> <rc> <duration|"">；设 _FB_LVL / _FB_FRAG。不读 JSON。
-    # Step 2/4 的 status 与 B 之前的分支链逐字相同（对照：tests/fixtures/orchestrator_pre_b.sh.frozen）。
-    local _sid="$1" _rc="$2" _dur="${3:-}"
-    local _d=""
-    case "${_dur}" in ''|*[!0-9]*) _d="" ;; *) _d=", \"duration_seconds\": ${_dur}" ;; esac
-    case "${_sid}:${_rc}" in
-        2:0)   _FB_LVL="info";  _FB_FRAG="{\"status\": \"success\"${_d}}" ;;
-        2:124) _FB_LVL="error"; _FB_FRAG="{\"status\": \"timeout\"${_d}}" ;;
-        2:2)   _FB_LVL="warn";  _FB_FRAG='{"status": "skipped"}' ;;
-        2:*)   _FB_LVL="warn";  _FB_FRAG="{\"status\": \"failed\"${_d}}" ;;
-        4:0)   _FB_LVL="info";  _FB_FRAG='{"status": "skipped_builtin"}' ;;
-        4:*)   _FB_LVL="error"; _FB_FRAG="{\"status\": \"failed\", \"reason\": \"step2_did_not_complete\", \"step2_rc\": ${_rc}}" ;;
-        *)     _FB_LVL="warn";  _FB_FRAG="{\"status\": \"interpreter_unavailable\", \"rc\": ${_rc}}" ;;
-    esac
-}
-
-_apply_step_interp() {
-    # 用法：_apply_step_interp <sid> <key> <rc> <duration|""> <tool_script|""> [传给解释器的其余参数...]
-    local _sid="$1" _key="$2" _rc="$3" _dur="$4" _script="$5"
-    shift 5
-    local _out="" _line="" _frag="" _lvl="" _msg="" _new="" _why="" _irc=0 _st="" _fbst=""
-    _SI_STATUS=""
-    case "${_rc}" in ''|*[!0-9]*) _rc=1 ;; esac      # 退出码恒为整数；防御：非数字按「失败」记
-    # 退出码 2 而脚本在：run_step 的「脚本不存在」之外，2 只可能是 argparse 用法错（step_contract.run_tool 放行 SystemExit）
-    if [ "${_rc}" = "2" ] && [ -n "${_script}" ] && [ -f "${_script}" ]; then
-        log "WARN" "⚠️ Step ${_sid}：退出码 2 但 $(basename "${_script}") 存在——多半是参数错误（日期参数不被识别？），下面的「跳过」不可信"
-    fi
-    _out="$(mktemp "${TMPDIR:-/tmp}/alpha_hive_stepinterp.XXXXXX" 2>/dev/null)" || _out=""
-    [ -n "${_out}" ] || _out="${TMPDIR:-/tmp}/alpha_hive_stepinterp.$$"
-    run_step --timeout "${STEP_INTERP_TIMEOUT}" "${PROJECT_DIR}/orchestrator_steps.py" \
-        --step "${_sid}" --rc "${_rc}" --date "${DATE_STR}" ${_dur:+--duration "${_dur}"} "$@" > "${_out}" 2>> "${LOGFILE}"
-    _irc=$?
-    _line="$(tail -n 1 "${_out}" 2>/dev/null)"
-    rm -f "${_out}"
-    if printf '%s' "${_line}" | jq -e --arg k "${_key}" '
-            type == "object"
-            and (.level == "info" or .level == "warn" or .level == "error")
-            and (.message | type) == "string"
-            and (.steps_fragment | type) == "object"
-            and (.steps_fragment | keys) == [$k]
-            and (.steps_fragment[$k] | type) == "object"
-            and (.steps_fragment[$k].status | type) == "string"' >/dev/null 2>&1; then
-        _lvl="$(printf '%s' "${_line}" | jq -r '.level' 2>/dev/null)"
-        _msg="$(printf '%s' "${_line}" | jq -r '.message' 2>/dev/null)"
-        _frag="$(printf '%s' "${_line}" | jq -c --arg k "${_key}" '.steps_fragment[$k]' 2>/dev/null)"
-        _st="$(printf '%s' "${_frag}" | jq -r '.status' 2>/dev/null)"
-        if [ "${_st}" = "render_error" ]; then
-            _why="解释器内部出错：$(printf '%s' "${_line}" | jq -r '.message | .[0:300]' 2>/dev/null)"
-        fi
-    elif [ "${_irc}" -eq 124 ]; then
-        _why="解释器超时（>${STEP_INTERP_TIMEOUT}s）"
-    elif [ "${_irc}" -eq 2 ]; then
-        _why="orchestrator_steps.py 不存在"
-    else
-        _why="解释器输出不是合法的一行（exit=${_irc}）"
-    fi
-    # Step 2 / 4 的键 alert_manager 读（'failed' / 'success'）：只放行 B 之前就有的判定 + rc=1 的那一处刻意改动
-    case "${_sid}" in
-        2|4)
-            if [ -z "${_why}" ]; then
-                _step_rc_fallback "${_sid}" "${_rc}" "${_dur}"
-                _fbst="$(printf '%s' "${_FB_FRAG}" | jq -r '.status' 2>/dev/null)"
-                if [ "${_st}" != "${_fbst}" ] \
-                   && ! { [ "${_rc}" = "1" ] && { [ "${_sid}:${_st}" = "2:success_with_warning" ] || [ "${_sid}:${_st}" = "4:skipped_builtin" ]; }; }; then
-                    _why="解释器判定「${_st}」不在允许集合里（按退出码应为「${_fbst}」）"
-                fi
-            fi
-            ;;
-    esac
-    if [ -n "${_why}" ]; then
-        _step_rc_fallback "${_sid}" "${_rc}" "${_dur}"
-        log "ERROR" "🚨 Step ${_sid}：步骤解释器不可用（${_why}）——退回只按退出码记（rc=${_rc}），摘要缺失；不影响主流程"
-        _lvl="${_FB_LVL}"
-        _frag="$(printf '%s' "${_FB_FRAG}" | jq -c --arg w "${_why}" '. + {interp_fallback: $w}' 2>/dev/null)"
-        [ -n "${_frag}" ] || _frag="${_FB_FRAG}"
-        _st="$(printf '%s' "${_frag}" | jq -r '.status' 2>/dev/null)"
-        _msg="Step ${_sid}：按退出码记 ${_st}（rc=${_rc}）"
-    fi
-    _SI_STATUS="${_st}"
-    case "${_lvl}" in
-        info)  log "INFO" "${_msg}" ;;
-        error) log "ERROR" "${_msg}" ;;
-        *)     log "WARN" "${_msg}" ;;
-    esac
-    _new="$(printf '%s' "${STEPS_RESULT}" | jq -c --arg k "${_key}" --argjson f "${_frag}" '. + {($k): $f}' 2>/dev/null)"
-    if [ -n "${_new}" ]; then
-        STEPS_RESULT="${_new}"
-    else
-        log "WARN" "⚠️ Step ${_sid}：结果没并进 steps_result（jq 合并失败），status=${_SI_STATUS}，STEPS_RESULT 保持原样"
-    fi
-    return 0
-}
-
-# ================================================================
 # 主流程
 # ================================================================
 log "INFO" "🐝 Alpha Hive 自动编排启动"
@@ -1275,22 +1164,52 @@ fi
 log "INFO" ""
 log "INFO" "【Step 10】扫描连续性体检 - 启动"
 STEP10_START=$(date +%s)
-STEP10_TIMEOUT=120
-CONTINUITY_JSON="${LOGDIR}/scan_continuity-${DATE_STR}.json"
+
+CONTINUITY_JSON="$LOGDIR/scan_continuity-$DATE_STR.json"
 # 用 --out 让脚本自己写 JSON，**不要** `> "$CONTINUITY_JSON"` 捕获 stdout：
 # 本文件的 log() 用 `tee -a` 会写 stdout，而 run_step 在"脚本不存在"(return 2)
 # 与 TCC 权限被拒两条路径上都会 log —— 那些行会混进 JSON 让下游解析失败。
-# B：先删后跑——同一 DATE_STR 重跑 / 本步超时时，上一次留下的文件不许冒充本轮（解释器另按 --run-start 复核）；
-# 日期参数显式传 DATE_STR：跨午夜时工具按时钟取的日期会与本轮错开（orchestrator_steps「B 接线须知」）
-rm -f "${CONTINUITY_JSON}"
-run_step --timeout "${STEP10_TIMEOUT}" "${PROJECT_DIR}/scan_continuity.py" --days 30 --quiet \
-         --end "${DATE_STR}" --out "${CONTINUITY_JSON}" >> "${LOGFILE}" 2>&1
+run_step --timeout 120 "$PROJECT_DIR/scan_continuity.py" --days 30 --quiet \
+         --out "$CONTINUITY_JSON" >> "$LOGFILE" 2>&1
 STEP10_RC=$?
 STEP10_END=$(date +%s)
 STEP10_DURATION=$((STEP10_END - STEP10_START))
-# B：日志与 step10_scan_continuity 片段由 orchestrator_steps.py 判（不动 OVERALL_STATUS：历史覆盖率问题，非本轮失败）
-_apply_step_interp 10 step10_scan_continuity "${STEP10_RC}" "${STEP10_DURATION}" "${PROJECT_DIR}/scan_continuity.py" \
-    --json "${CONTINUITY_JSON}" --run-start "${STEP10_START}" --timeout-seconds "${STEP10_TIMEOUT}"
+
+if [ $STEP10_RC -eq 0 ]; then
+    log "INFO" "✅ Step 10：连续性健康（耗时 ${STEP10_DURATION}s）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step10_scan_continuity\": {\"status\": \"healthy\", \"duration_seconds\": $STEP10_DURATION}}")
+elif [ $STEP10_RC -eq 1 ]; then
+    # 降级：把聚合事实写进日志，供人事后查，但不动 OVERALL_STATUS
+    CONT_SUMMARY=$("$PYTHON3" -c "
+import json,sys
+try:
+    d=json.load(open('$CONTINUITY_JSON'))
+except Exception as e:
+    print(f'（无法解析连续性 JSON: {e}）'); sys.exit(0)
+w=d.get('window',{})
+print(f\"过去 {w.get('trading_days','?')} 个交易日跑了 {d.get('scanned_days','?')} 次\"
+      f\"（覆盖率 {d.get('coverage',0):.0%}），ISO 周覆盖 \"
+      f\"{d.get('weeks_covered','?')}/{d.get('weeks_total','?')}，\"
+      f\"最长空档 {d.get('longest_gap','?')} 个交易日\")
+miss=d.get('weeks_missed') or []
+if miss: print(f\"  完全无扫描的周: {', '.join(miss)} ← 每个都是一个永久丢失的 T+7 观测\")
+" 2>/dev/null)
+    log "WARN" "⚠️ Step 10：扫描连续性降级 — $CONT_SUMMARY"
+    log "WARN" "   （不计入 OVERALL_STATUS：这是历史覆盖率问题，非本轮失败）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step10_scan_continuity\": {\"status\": \"degraded\", \"duration_seconds\": $STEP10_DURATION, \"detail_json\": \"$CONTINUITY_JSON\"}}")
+elif [ $STEP10_RC -eq 3 ]; then
+    log "WARN" "⚠️ Step 10：无法判定连续性（找不到 pheromone.db）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step10_scan_continuity\": {\"status\": \"undetermined\"}}")
+elif [ $STEP10_RC -eq 2 ]; then
+    log "WARN" "⏭️  Step 10 跳过（scan_continuity.py 不存在）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step10_scan_continuity\": {\"status\": \"skipped\"}}")
+elif [ $STEP10_RC -eq 124 ]; then
+    log "ERROR" "⏰ Step 10 超时（>120s）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step10_scan_continuity\": {\"status\": \"timeout\"}}")
+else
+    log "WARN" "⚠️ Step 10 异常（exit=${STEP10_RC}），不影响主流程"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step10_scan_continuity\": {\"status\": \"error\", \"rc\": $STEP10_RC}}")
+fi
 
 # ================================================================
 # Step 11: IC 重跑就绪度 (v0.44.4 新增)
@@ -1305,18 +1224,89 @@ _apply_step_interp 10 step10_scan_continuity "${STEP10_RC}" "${STEP10_DURATION}"
 log "INFO" ""
 log "INFO" "【Step 11】IC 重跑就绪度 - 启动"
 
-STEP11_START=$(date +%s)
-READINESS_JSON="${LOGDIR}/ic_rerun_readiness-${DATE_STR}.json"
+READINESS_JSON="$LOGDIR/ic_rerun_readiness-$DATE_STR.json"
 # 与 Step 10 同一模式：用 --out 写 JSON，**不用** `> FILE` 捕获 stdout
-# （本文件的 log() 走 tee 会污染 stdout）。B：先删后跑 + --today 显式传 DATE_STR（同 Step 10）。
-rm -f "${READINESS_JSON}"
-run_step --timeout 60 "${PROJECT_DIR}/ic_rerun_readiness.py" \
-         --quiet --today "${DATE_STR}" --out "${READINESS_JSON}" >> "${LOGFILE}" 2>&1
+# （本文件的 log() 走 tee 会污染 stdout）。
+run_step --timeout 60 "$PROJECT_DIR/ic_rerun_readiness.py" \
+         --quiet --out "$READINESS_JSON" >> "$LOGFILE" 2>&1
 STEP11_RC=$?
-# B：就绪度一行 + 世代边界核对（v0.45.334；cohort_boundary 恒在，取不到记 null、不假装正常；alarm ⇒ WARN）
-# 都由解释器给；与就绪度同理不改 OVERALL_STATUS。无 --duration：Step 11 的片段历来不带 duration_seconds。
-_apply_step_interp 11 step11_ic_rerun_readiness "${STEP11_RC}" "" "${PROJECT_DIR}/ic_rerun_readiness.py" \
-    --json "${READINESS_JSON}" --run-start "${STEP11_START}"
+
+READINESS_LINE=$("$PYTHON3" -c "
+import json,sys
+try:
+    d=json.load(open('$READINESS_JSON'))
+except Exception:
+    print('（无法解析就绪度 JSON）'); sys.exit(0)
+c=d.get('cohort',{})
+print(f\"世代自 {c.get('date','?')}（{c.get('version','?')}）起，\"
+      f\"已攒 {d.get('weeks_accrued','?')}/{d.get('weeks_required','?')} 个不重叠周\"
+      f\"（{d.get('n_ripe_samples','?')} 条已回填样本）\", end='')
+if d.get('eta_date'): print(f\"，预计 ≈{d['eta_date']} 到位\", end='')
+if d.get('pool_note'): print(f\" ⚠️ {d['pool_note']}\", end='')
+print()
+" 2>/dev/null)
+
+# v0.45.334（2026-09-26）：世代边界核对结果。此前 Step 11 只读就绪度，边界写错（代码推晚了 /
+# 推早了 / 核不了）时唯一会红的判别器只在人读模式里跑，`--quiet --out` 拿不到 ⇒ 自动流程里
+# 从没人看。现在 ic_rerun_readiness 把它恒写进 JSON 的 `cohort_boundary_evidence` 键，这里：
+#   ① 每天把判别结果（含正常的 ⏳/✅）写进 status.json 的 step11 条目 —— 事后可查哪天开始不对；
+#   ② alarm 为真时打 WARN（🚨 行），指明处理方式（追加更正条目，只追加不改写）。
+# 与就绪度同理**不改 OVERALL_STATUS**：边界核对不过是数据口径问题，不是本轮扫描失败。
+# 取不到这个键（旧代码 / JSON 坏）⇒ 记 null，不假装「正常」。
+# 回滚：删掉本段与下方「世代边界核对」段；原版 alpha-hive-orchestrator.sh.bak-20260926_pre-v0.45.334-step11
+BOUNDARY_JSON=$("$PYTHON3" -c "
+import json,sys
+try:
+    d=json.load(open('$READINESS_JSON'))
+except Exception:
+    print('null'); sys.exit(0)
+b=d.get('cohort_boundary_evidence')
+if not isinstance(b,dict):
+    print('null'); sys.exit(0)
+keep=('version','boundary','verdict','marker_first_seen','unmarked_after_boundary','alarm','line','error')
+print(json.dumps({k:b.get(k) for k in keep if k in b}, ensure_ascii=False))
+" 2>/dev/null)
+# 任何非法 JSON 都退成 null：jq --argjson 吃到坏值会让下面整条 STEPS_RESULT 变空
+if ! printf '%s' "$BOUNDARY_JSON" | jq -e . >/dev/null 2>&1; then
+    BOUNDARY_JSON=null
+fi
+
+if [ $STEP11_RC -eq 0 ]; then
+    log "INFO" "🎯 Step 11：IC 重跑**已就绪** — $READINESS_LINE"
+    log "INFO" "   → 该跑: experiments/ml_expected_return_replay.py 与 signal_archive.py --analyze"
+    log "INFO" "   （刻意不自动跑：IC 分析要人看结果并做判断）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step11_ic_rerun_readiness\": {\"status\": \"ready\"}}")
+elif [ $STEP11_RC -eq 1 ]; then
+    log "INFO" "⏳ Step 11：$READINESS_LINE"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step11_ic_rerun_readiness\": {\"status\": \"accruing\"}}")
+elif [ $STEP11_RC -eq 3 ]; then
+    log "WARN" "⚠️ Step 11：无法判定 IC 重跑就绪度"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step11_ic_rerun_readiness\": {\"status\": \"undetermined\"}}")
+elif [ $STEP11_RC -eq 2 ]; then
+    log "WARN" "⏭️  Step 11 跳过（ic_rerun_readiness.py 不存在）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step11_ic_rerun_readiness\": {\"status\": \"skipped\"}}")
+else
+    log "WARN" "⚠️ Step 11 异常（exit=${STEP11_RC}），不影响主流程"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step11_ic_rerun_readiness\": {\"status\": \"error\", \"rc\": $STEP11_RC}}")
+fi
+
+# ── 世代边界核对（v0.45.334，说明见上方 BOUNDARY_JSON 处）──
+if [ "$BOUNDARY_JSON" = "null" ]; then
+    log "INFO" "   Step 11 世代边界核对：就绪度 JSON 里没有 cohort_boundary_evidence（代码早于 v0.45.334 或 JSON 不可读），本轮未核对"
+elif printf '%s' "$BOUNDARY_JSON" | jq -e '.alarm == true' >/dev/null 2>&1; then
+    log "WARN" "🚨 Step 11：世代边界核对未通过 — $(printf '%s' "$BOUNDARY_JSON" | jq -r '.line // .verdict')"
+    log "WARN" "   → 处理：按 ic_rerun_readiness.py 顶部「更正条目」流程**追加**一条更正（新标签 + _CORRECTS），不改写原条目"
+    log "WARN" "   （不计入 OVERALL_STATUS：口径问题，非本轮失败；完整判别在 ${READINESS_JSON}）"
+else
+    log "INFO" "   Step 11 世代边界核对：$(printf '%s' "$BOUNDARY_JSON" | jq -r '.line // .verdict')"
+fi
+_S11_NEW=$(printf '%s' "$STEPS_RESULT" | jq --argjson b "$BOUNDARY_JSON" \
+    '.step11_ic_rerun_readiness = ((.step11_ic_rerun_readiness // {}) + {cohort_boundary: $b})' 2>/dev/null)
+if [ -n "$_S11_NEW" ]; then
+    STEPS_RESULT="$_S11_NEW"
+else
+    log "WARN" "⚠️ Step 11：世代边界核对结果写入 status 失败（jq），STEPS_RESULT 保持原样"
+fi
 
 
 # ================================================================
@@ -1333,16 +1323,43 @@ _apply_step_interp 11 step11_ic_rerun_readiness "${STEP11_RC}" "" "${PROJECT_DIR
 log "INFO" ""
 log "INFO" "【Step 12】扫描字段覆盖率 - 启动"
 
-STEP12_START=$(date +%s)
-COVERAGE_JSON="${LOGDIR}/scan_coverage-${DATE_STR}.json"
-# 同 Step 10/11：用 --out 写 JSON，**不用** `> FILE` 捕获 stdout；先删后跑 + --date 显式传 DATE_STR
-rm -f "${COVERAGE_JSON}"
-run_step --timeout 60 "${PROJECT_DIR}/scan_coverage_gate.py" \
-         --quiet --date "${DATE_STR}" --out "${COVERAGE_JSON}" >> "${LOGFILE}" 2>&1
+COVERAGE_JSON="$LOGDIR/scan_coverage-$DATE_STR.json"
+# 同 Step 10/11：用 --out 写 JSON，**不用** `> FILE` 捕获 stdout
+run_step --timeout 60 "$PROJECT_DIR/scan_coverage_gate.py" \
+         --quiet --out "$COVERAGE_JSON" >> "$LOGFILE" 2>&1
 STEP12_RC=$?
-# B：退出码 1 = 检出降级或来源标签矛盾（v0.45.51，scan_coverage_gate.check_label_honesty），摘要由解释器给
-_apply_step_interp 12 step12_scan_coverage "${STEP12_RC}" "" "${PROJECT_DIR}/scan_coverage_gate.py" \
-    --json "${COVERAGE_JSON}" --run-start "${STEP12_START}"
+
+if [ $STEP12_RC -eq 0 ]; then
+    log "INFO" "✅ Step 12：字段覆盖率健康 + 来源标签自洽"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step12_scan_coverage\": {\"status\": \"healthy\"}}")
+elif [ $STEP12_RC -eq 1 ]; then
+    COV_SUMMARY=$("$PYTHON3" -c "
+import json,sys
+try:
+    d=json.load(open('$COVERAGE_JSON'))
+except Exception:
+    print('（无法解析覆盖率 JSON）'); sys.exit(0)
+bad=[f for f in d.get('fields',[]) if f.get('degraded')]
+print('; '.join(f\"{f['field']} {f['have']}/{f['total']}\" for f in bad), end='')
+if d.get('likely_network_layer'):
+    print('  ⚠️ 多个不同数据源同时降级，疑为网络/闸门层', end='')
+print()
+" 2>/dev/null)
+    # v0.45.51：退出码 1 现在也可能来自**来源标签矛盾**
+    # （标签宣称取数成功，它管辖的值却为空）—— 见 scan_coverage_gate.check_label_honesty
+    log "WARN" "⚠️ Step 12：检出字段降级或来源标签矛盾 — $COV_SUMMARY"
+    log "WARN" "   → 本次报告里这些指标会显示「—」；若需补数据，重跑当日扫描"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step12_scan_coverage\": {\"status\": \"degraded\"}}")
+elif [ $STEP12_RC -eq 3 ]; then
+    log "WARN" "⚠️ Step 12：无法判定字段覆盖率（扫描结果文件缺失或不可解析）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step12_scan_coverage\": {\"status\": \"undetermined\"}}")
+elif [ $STEP12_RC -eq 2 ]; then
+    log "WARN" "⏭️  Step 12 跳过（scan_coverage_gate.py 不存在）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step12_scan_coverage\": {\"status\": \"skipped\"}}")
+else
+    log "WARN" "⚠️ Step 12 异常（exit=${STEP12_RC}），不影响主流程"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step12_scan_coverage\": {\"status\": \"error\", \"rc\": $STEP12_RC}}")
+fi
 
 
 # ================================================================
@@ -1365,16 +1382,55 @@ _apply_step_interp 12 step12_scan_coverage "${STEP12_RC}" "" "${PROJECT_DIR}/sca
 log "INFO" ""
 log "INFO" "【Step 13】上游宏观日程监视 - 启动"
 
-STEP13_START=$(date +%s)
-CALWATCH_JSON="${LOGDIR}/economic_calendar_watch-${DATE_STR}.json"
-# 同 Step 10/11/12：用 --out 写 JSON，**不用** `> FILE` 捕获 stdout；先删后跑 + --today 显式传 DATE_STR
-rm -f "${CALWATCH_JSON}"
-run_step --timeout 120 "${PROJECT_DIR}/economic_calendar_watch.py" \
-         --quiet --timeout 15 --today "${DATE_STR}" --out "${CALWATCH_JSON}" >> "${LOGFILE}" 2>&1
+CALWATCH_JSON="$LOGDIR/economic_calendar_watch-$DATE_STR.json"
+# 同 Step 10/11/12：用 --out 写 JSON，**不用** `> FILE` 捕获 stdout
+run_step --timeout 120 "$PROJECT_DIR/economic_calendar_watch.py" \
+         --quiet --timeout 15 --out "$CALWATCH_JSON" >> "$LOGFILE" 2>&1
 STEP13_RC=$?
-# B：「上游暂无新日程」只有四个源都查通了才说（v0.45.68）、抄录必须人工——这些文案都在解释器里
-_apply_step_interp 13 step13_calendar_watch "${STEP13_RC}" "" "${PROJECT_DIR}/economic_calendar_watch.py" \
-    --json "${CALWATCH_JSON}" --run-start "${STEP13_START}"
+
+if [ $STEP13_RC -eq 0 ]; then
+    log "INFO" "✅ Step 13：宏观日历健康，上游无新日程"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step13_calendar_watch\": {\"status\": \"healthy\"}}")
+elif [ $STEP13_RC -eq 1 ]; then
+    CALWATCH_SUMMARY=$("$PYTHON3" -c "
+import json,sys
+try:
+    d=json.load(open('$CALWATCH_JSON'))
+except Exception:
+    print('（无法解析监视器 JSON）'); sys.exit(0)
+h=d.get('calendar_health',{})
+new=d.get('new_schedule_tables') or []
+if new:
+    print('上游已发布新日程：' + '、'.join(new) + ' —— 待人工抄录', end='')
+    for k in new:
+        u=d.get('upstream',{}).get(k,{})
+        items=u.get('new_items') or []
+        print(f\"；{k} 新增 {len(items)} 条（{u.get('source','')}）\", end='')
+    print()
+else:
+    # v0.45.68：「上游暂无新日程」只有四个源都查通了才有资格说。
+    # 少一个源就只能说不知道 —— 否则抓取失败会被这句话整个吃掉。
+    undet = d.get('undeterminable_tables') or []
+    tail = ('上游暂无新日程可抄' if d.get('upstream_conclusive')
+            else f\"⚠️ 上游 {len(undet)} 个源无法判定（{'、'.join(undet)}），本次无法确认上游有无新日程\")
+    print(f\"本地日历 {h.get('status')}：{h.get('binding_table')} 表只到 \"
+          f\"{h.get('binding_last_date')}（剩 {h.get('binding_horizon_days')} 天），{tail}\")
+" 2>/dev/null)
+    log "WARN" "⚠️ Step 13：$CALWATCH_SUMMARY"
+    log "WARN" "   → 抄录必须人工：只抄官方已发布日程，禁止按「每月第二周/第一个周五」推算"
+    log "WARN" "   → 抄完同步上移 economic_calendar._TABLE_SPECS 里该表的 verified_through"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step13_calendar_watch\": {\"status\": \"action_required\", \"detail_json\": \"$CALWATCH_JSON\"}}")
+elif [ $STEP13_RC -eq 3 ]; then
+    log "WARN" "⚠️ Step 13：无法判定上游日程（抓取失败或页面改版）"
+    log "WARN" "   → 这**不等于**「上游没有新日程」；需人工看一眼源站，必要时修解析器"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step13_calendar_watch\": {\"status\": \"undetermined\"}}")
+elif [ $STEP13_RC -eq 2 ]; then
+    log "WARN" "⏭️  Step 13 跳过（economic_calendar_watch.py 不存在）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step13_calendar_watch\": {\"status\": \"skipped\"}}")
+else
+    log "WARN" "⚠️ Step 13 异常（exit=${STEP13_RC}），不影响主流程"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step13_calendar_watch\": {\"status\": \"error\", \"rc\": $STEP13_RC}}")
+fi
 
 
 # ================================================================
@@ -1484,18 +1540,47 @@ fi
 log "INFO" ""
 log "INFO" "【Step 15】数据备份连续性体检 - 启动"
 STEP15_START=$(date +%s)
-STEP15_TIMEOUT=60
-BACKUP_CONTINUITY_JSON="${LOGDIR}/backup_continuity-${DATE_STR}.json"
-# 同 Step 10：先删后跑 + --end 显式传 DATE_STR；BACKUP_HISTORY_JSONL 是 Step 14 定义的
-rm -f "${BACKUP_CONTINUITY_JSON}"
-run_step --timeout "${STEP15_TIMEOUT}" "${PROJECT_DIR}/backup_continuity.py" --days 30 --quiet \
-         --end "${DATE_STR}" --history "${BACKUP_HISTORY_JSONL}" \
-         --out "${BACKUP_CONTINUITY_JSON}" >> "${LOGFILE}" 2>&1
+
+BACKUP_CONTINUITY_JSON="$LOGDIR/backup_continuity-$DATE_STR.json"
+run_step --timeout 60 "$PROJECT_DIR/backup_continuity.py" --days 30 --quiet \
+         --history "$BACKUP_HISTORY_JSONL" \
+         --out "$BACKUP_CONTINUITY_JSON" >> "$LOGFILE" 2>&1
 STEP15_RC=$?
 STEP15_END=$(date +%s)
 STEP15_DURATION=$((STEP15_END - STEP15_START))
-_apply_step_interp 15 step15_backup_continuity "${STEP15_RC}" "${STEP15_DURATION}" "${PROJECT_DIR}/backup_continuity.py" \
-    --json "${BACKUP_CONTINUITY_JSON}" --run-start "${STEP15_START}" --timeout-seconds "${STEP15_TIMEOUT}"
+
+if [ $STEP15_RC -eq 0 ]; then
+    log "INFO" "✅ Step 15：备份连续性健康（耗时 ${STEP15_DURATION}s）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step15_backup_continuity\": {\"status\": \"healthy\", \"duration_seconds\": $STEP15_DURATION}}")
+elif [ $STEP15_RC -eq 1 ]; then
+    BACKUP_CONT_SUMMARY=$("$PYTHON3" -c "
+import json,sys
+try:
+    d=json.load(open('$BACKUP_CONTINUITY_JSON'))
+except Exception as e:
+    print(f'（无法解析连续性 JSON: {e}）'); sys.exit(0)
+w=d.get('window',{})
+print(f\"过去 {w.get('trading_days','?')} 个交易日只成功了 {d.get('backed_up_days','?')} 次\"
+      f\"（覆盖率 {d.get('coverage',0):.0%}），最长空档 {d.get('longest_gap','?')} 个交易日\")
+miss=d.get('weeks_missed') or []
+if miss: print(f\"  完全无成功备份的周: {', '.join(miss)}\")
+" 2>/dev/null)
+    log "WARN" "⚠️ Step 15：备份连续性降级 — $BACKUP_CONT_SUMMARY"
+    log "WARN" "   （不计入 OVERALL_STATUS：单次失败是噪音，这是聚合信号，需要人工介入排查）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step15_backup_continuity\": {\"status\": \"degraded\", \"duration_seconds\": $STEP15_DURATION, \"detail_json\": \"$BACKUP_CONTINUITY_JSON\"}}")
+elif [ $STEP15_RC -eq 3 ]; then
+    log "WARN" "⚠️ Step 15：无法判定连续性（找不到 backup_status_history.jsonl，可能是刚接入生产）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step15_backup_continuity\": {\"status\": \"undetermined\"}}")
+elif [ $STEP15_RC -eq 2 ]; then
+    log "WARN" "⏭️  Step 15 跳过（backup_continuity.py 不存在）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step15_backup_continuity\": {\"status\": \"skipped\"}}")
+elif [ $STEP15_RC -eq 124 ]; then
+    log "ERROR" "⏰ Step 15 超时（>60s）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step15_backup_continuity\": {\"status\": \"timeout\"}}")
+else
+    log "WARN" "⚠️ Step 15 异常（exit=${STEP15_RC}），不影响主流程"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step15_backup_continuity\": {\"status\": \"error\", \"rc\": $STEP15_RC}}")
+fi
 
 
 log "INFO" ""

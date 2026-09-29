@@ -16,7 +16,9 @@
     「Step 2 没跑完……本轮网站不会更新」。
 
 本模块把这些格式知识收成一个**有测试**的解释器，供下一步（B）接进编排器，让 bash 不再持有任何格式知识。
-**本版只提供解释器，编排器尚未调用它。**
+B（v0.45.385）起编排器经 `_apply_step_interp` 调用（本版接了 Step 10/11/12/13/15；Step 2/4 随 B2 接）；
+解释器不可用时 `_step_rc_fallback` 退回按退出码记（Step 2/4 逐字复现 B 之前的 status，10–15 记 interpreter_unavailable），
+片段带 `interp_fallback`、日志多一行 ERROR。
 
 用法
 ----
@@ -59,16 +61,19 @@ B 接线须知：日期必须**显式**传给生产方
      与「上一轮留下的文件」无从区分，**不**放行，只会是 `stale_json`。
 所以 B **必须**把 DATE_STR 原样传给每个工具（参数名各不相同：`--end` / `--today` / `--date`，
 唯一真相是下方 `_TOOL_STEPS` 各条的 `date_flag`，测试核对它在生产方的 argparse 里真实存在），
-让外壳日期由编排器决定、与 `--date` 恒等；不要依赖工具按时钟取日期。
+让外壳日期由编排器决定、与 `--date` 恒等；不要依赖工具按时钟取日期。（B 起编排器已照做：各步 `run_step` 行
+带 `date_flag "${DATE_STR}"`，由 `tests/test_orchestrator_step_interp.py` 的结构守卫按 `_TOOL_STEPS` 核对。）
 
 与现行内联的关系
 ----------------
-对照对象是仓库 `scripts/alpha-hive-orchestrator.sh` 里各步的**分支链**（按 shell 变量名定位，不记行号：
+对照对象是 B 之前的冻结副本 `tests/fixtures/orchestrator_pre_b.sh.frozen` 里各步的**分支链**
+（B 起仓库编排器里的这些内联已删、换成 `_apply_step_interp` 调用；按 shell 变量名定位，不记行号：
 `STEP10_RC` / `STEP11_RC` / `STEP12_RC` / `STEP13_RC` / `STEP15_RC` / `STEP2_RC` 的 `if … elif … fi`，
 以及 `CONT_SUMMARY` / `READINESS_LINE` / `BOUNDARY_JSON` / `_S11_NEW` / `COV_SUMMARY` / `CALWATCH_SUMMARY` /
 `BACKUP_CONT_SUMMARY` 这几段内联）。对**旧格式 JSON（无 `schema_version`）**，各步的 `status` / 其余键 /
-日志级别与现行 bash **逐字相同**，只多一个 `"contract": "legacy"`——`tests/test_orchestrator_steps.py::TestGoldenLegacy`
-把这些分支链按模式从仓库副本里抽出来、在 bash 里配同一批夹具**真跑**对照。以下是**刻意的改动**，每条都有测试：
+日志级别与 B 之前的 bash **逐字相同**，只多一个 `"contract": "legacy"`——`tests/test_orchestrator_steps.py::TestGoldenLegacy`
+把这些分支链按模式从冻结副本里抽出来、在 bash 里配同一批夹具**真跑**对照（摘要钉在
+`tests/test_orchestrator_step_interp.py`，副本永远不许从 B 之后的编排器重新生成）。以下是**刻意的改动**，每条都有测试：
 
   (a) 新鲜度：外壳 `date` ≠ `--date`，或（给了 `--run-start` 时）`generated_at` 早于本步开始；
       旧格式则看 mtime（早于 `--run-start`，或 mtime 的本地日期早于 `--date`）⇒ 该 JSON「不是本轮的」。
@@ -775,7 +780,7 @@ def _rollover_text(step: _ToolStep, json_name: str, roll: dict) -> str:
            if roll.get("basis") == "generated_at>=run_start"
            else f"写于 {roll.get('written_at')}、mtime {roll.get('mtime')}（未给 --run-start，按日期与 mtime 判）")
     return (f"ℹ️ {step.label}：{json_name} 外壳 date={roll.get('json_date')} 是本轮 {roll.get('expected_date')} 的次日"
-            f"——工具跑过了午夜、按时钟取了日期（{why}），按本轮结果采用；B 应把 DATE_STR 用 {step.date_flag} 显式传入")
+            f"——工具跑过了午夜、按时钟取了日期（{why}），按本轮结果采用；编排器已用 {step.date_flag} 传 DATE_STR，仍出现 ⇒ 生产方没收到它")
 
 
 def _json_problem(step: _ToolStep, doc: _Doc, rc: int, json_name: str,

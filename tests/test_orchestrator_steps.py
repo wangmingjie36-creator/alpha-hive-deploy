@@ -3,13 +3,12 @@
 分组：
   · TestGoldenLegacy —— 旧格式 JSON（无 `schema_version`）：片段去掉 `contract` 后与**现行 bash 逐字相同**、
     级别相同。期望值写成常量表 `GOLDEN`（好读），**且**这张表本身由 `test_row_is_what_the_repo_orchestrator_does`
-    对照仓库 `scripts/alpha-hive-orchestrator.sh`（唯一真相；部署副本与它逐字一致，由
-    `tests/test_orchestrator_deployed_matches_repo.py` 管）：按**模式**（shell 变量名 / 步骤标题，不按行号）
+    对照 B 之前的编排器：按**模式**（shell 变量名 / 步骤标题，不按行号）
     把各步的分支链抽出来，在 bash 里配同一批夹具**真跑**，逐条比片段、级别与日志原文。
-    本 worktree 尚未合入那份文件时退到 `git show origin/main:scripts/alpha-hive-orchestrator.sh`；两处都拿不到
-    就**红**（不是 skip：它随仓库发布，拿不到就是真缺）。需要 `/bin/bash` 与 `jq`（编排器本身就依赖二者）。
-    ⚠️ 等 B 把这些内联分支链换成 `orchestrator_steps.py` 调用后，按模式会找不到分支链而变红——那时把对照
-    钉到 B 之前的最后一个提交（`git show <sha>:scripts/…`）或让这组退役，别改成 skip。
+    B（v0.45.385）起编排器经 `_apply_step_interp` 调解释器、内联分支链已删 ⇒ 对照已钉到 B 之前的冻结副本
+    `tests/fixtures/orchestrator_pre_b.sh.frozen`（逐字节、摘要钉在 `test_orchestrator_step_interp.py`；
+    不用 `git show <sha>`：CI 是浅克隆）。副本缺失就**红**（不是 skip：它随仓库发布，拿不到就是真缺）。
+    新接线的守卫在 `tests/test_orchestrator_step_interp.py`。需要 `/bin/bash` 与 `jq`（编排器本身就依赖二者）。
   · TestVariants —— 每个工具步骤 × 八种 JSON 形态：v1 ok / attention / legacy / stale / 契约不符 / 崩溃 / 缺失 / 不可解析
   · TestDateRollover —— 跨午夜：外壳日期恰是次日且确是本轮写的 ⇒ 采用并标 `date_rollover`；其余日期不符照旧
   · TestAttention —— 外壳 status=attention ⇒ 全部条目进 message（封顶 + 「…(+N)」）；alarm ⇒ warn + 🚨
@@ -166,35 +165,28 @@ def frag(out: dict, step: str) -> dict:
     return out["steps_fragment"][KEY[step]]
 
 
-# ─────────────────────── 仓库里的编排器：按模式抽出分支链，在 bash 里真跑 ───────────────────────
-ORCH_REL = "scripts/alpha-hive-orchestrator.sh"
+# ─────────────────── B 之前的编排器（冻结副本）：按模式抽出分支链，在 bash 里真跑 ───────────────────
+#: B 之前最后一版编排器的逐字节副本。**永远不许**从 B 之后的编排器重新生成——摘要钉在
+#: `tests/test_orchestrator_step_interp.py::test_frozen_fixture_pinned`，改一个字节就红。
+PRE_B_REL = "tests/fixtures/orchestrator_pre_b.sh.frozen"
 
 
 @functools.lru_cache(maxsize=1)
-def _orchestrator_text_cached() -> Tuple[str, str]:
-    p = REPO_ROOT / ORCH_REL
-    if p.is_file():
-        return p.read_text(encoding="utf-8"), str(p)
-    try:
-        r = subprocess.run(["git", "-C", str(REPO_ROOT), "show", f"origin/main:{ORCH_REL}"],
-                           capture_output=True, timeout=60)
-    except (OSError, subprocess.SubprocessError) as e:
-        return "", f"git 不可用（{type(e).__name__}: {e}）"
-    if r.returncode == 0 and r.stdout:
-        return r.stdout.decode("utf-8"), f"git show origin/main:{ORCH_REL}"
-    return "", f"git show origin/main:{ORCH_REL} 失败：{r.stderr.decode(errors='replace').strip()}"
+def _orchestrator_text_cached() -> str:
+    p = REPO_ROOT / PRE_B_REL
+    return p.read_text(encoding="utf-8") if p.is_file() else ""
 
 
 def orchestrator_text() -> str:
-    text, where = _orchestrator_text_cached()
+    text = _orchestrator_text_cached()
     if not text:
-        pytest.fail(f"拿不到编排器原文：{REPO_ROOT / ORCH_REL} 不存在，且 {where}。它随仓库发布"
-                    "（v0.45.353 起受版本控制），拿不到就是真缺——不是 skip 的理由")
+        pytest.fail(f"拿不到 B 之前的编排器冻结副本 {REPO_ROOT / PRE_B_REL}。它随仓库发布，"
+                    "拿不到就是真缺——不是 skip 的理由")
     return text
 
 
 class _BashStep:
-    """一步分支链在仓库副本里的位置（全按模式）与它读的 shell 变量。
+    """一步分支链在 B 之前的冻结副本里的位置（全按模式）与它读的 shell 变量。
 
     anchor   该步之后第一处 `start` 才是它的分支链（Step 4 与 Step 2 的链都以 `if [ $STEP2_RC -eq 0 ]` 开头）
     start    抽取的第一行
@@ -230,10 +222,9 @@ BASH: Dict[str, _BashStep] = {
 def bash_block(step: str) -> str:
     text, spec = orchestrator_text(), BASH[step]
     a = re.search(spec.anchor, text, re.M)
-    assert a, (f"编排器里找不到 Step {step} 的锚点 {spec.anchor!r}——若 B 已把内联分支链换成 orchestrator_steps.py "
-               "调用，按本文件 docstring 把对照钉到 B 之前的提交或让这组退役")
+    assert a, f"B 之前的编排器冻结副本里找不到 Step {step} 的锚点 {spec.anchor!r}（副本被改过？摘要守卫应已先红）"
     s = re.compile(spec.start, re.M).search(text, a.end())
-    assert s, f"编排器里 Step {step} 的锚点之后找不到分支链起点 {spec.start!r}（B 已接线？见本文件 docstring）"
+    assert s, f"冻结副本里 Step {step} 的锚点之后找不到分支链起点 {spec.start!r}"
     from_ = s.start()
     if spec.through:
         t = re.compile(spec.through, re.M).search(text, s.end())
@@ -258,7 +249,7 @@ _LEVEL_OF = {"INFO": "info", "WARN": "warn", "ERROR": "error"}
 
 def run_bash(step: str, rc: int, json_path=None, *, timeout_seconds: int = 3600
              ) -> Tuple[str, List[str], dict]:
-    """在 bash 里跑仓库副本里该步的分支链。返回 (最高日志级别, 各条 log 原文, 该步的 STEPS_RESULT 条目)。"""
+    """在 bash 里跑 B 之前的冻结副本里该步的分支链。返回 (最高日志级别, 各条 log 原文, 该步的 STEPS_RESULT 条目)。"""
     spec = BASH[step]
     assigns = {spec.rc_var: rc}
     if spec.json_var:
@@ -377,7 +368,7 @@ class TestGoldenLegacy:
 
     @pytest.mark.parametrize("step,rc,with_json,level,expected", GOLDEN, ids=GOLDEN_IDS)
     def test_row_is_what_the_repo_orchestrator_does(self, tmp_path, step, rc, with_json, level, expected):
-        """上面那张表不是凭记忆写的：把仓库副本里该步的分支链抽出来、同一夹具在 bash 里真跑，逐条相等。"""
+        """上面那张表不是凭记忆写的：把 B 之前的冻结副本里该步的分支链抽出来、同一夹具在 bash 里真跑，逐条相等。"""
         p = legacy_json(tmp_path, step) if with_json else tmp_path / "absent.json"
         b_level, b_texts, b_frag = run_bash(step, rc, p)
         assert b_frag == _subst(expected, p)
@@ -385,8 +376,8 @@ class TestGoldenLegacy:
         assert_message_carries_bash_lines(run(step, rc, p)["message"], b_texts)
 
     @pytest.mark.parametrize("step", STEPS)
-    def test_json_read_branches_match_repo_orchestrator(self, step):
-        """(a') 「哪几支读 JSON」不是凭记忆写的：从仓库副本的分支链里数 `open('$<JSON 变量>')` 出现在哪。
+    def test_json_read_branches_match_pre_b_orchestrator(self, step):
+        """(a') 「哪几支读 JSON」不是凭记忆写的：从 B 之前的冻结副本的分支链里数 `open('$<JSON 变量>')` 出现在哪。
         rc=2 除外——解释器在那一支刻意不读（(a)：脚本不存在，路径上的 JSON 不可能是本轮的）。"""
         spec = BASH[step]
         pre, branches = bash_branches(bash_block(step), spec.rc_var)
@@ -504,7 +495,7 @@ def _problem_frag(step: str, status: str, rc: int, rc_status: str, **extra) -> d
 
 
 def _reads(step: str, rc: int) -> bool:
-    """bash 在哪几支读 JSON（`test_json_read_branches_match_repo_orchestrator` 从仓库副本核对过）。"""
+    """bash 在哪几支读 JSON（`test_json_read_branches_match_pre_b_orchestrator` 从冻结副本核对过）。"""
     return rc != 2 and (step == "11" or rc == 1)
 
 
@@ -1104,7 +1095,7 @@ class TestStep2:
         unverified = f.pop("rc1_unverified", None)
         assert f == expected and out["level"] == level
         assert (unverified is not None) == (rc == 1)
-        b_level, b_texts, b_frag = run_bash("2", rc)          # 仓库副本里 STEP2_RC 的分支链真跑
+        b_level, b_texts, b_frag = run_bash("2", rc)          # 冻结副本里 STEP2_RC 的分支链真跑
         assert (b_level, b_frag) == (level, expected)
         assert_message_carries_bash_lines(out["message"], b_texts)
 

@@ -54,8 +54,8 @@ def _load(name, rel):
 
 P = _load("dim_ic_protocol", "experiments/dim_ic_protocol.py")
 
-#: 编排器 Step 11 **今天**读的键（2026-09-28 版 `~/.claude/scripts/alpha-hive-orchestrator.sh` 的
-#: `READINESS_LINE=` 与 `BOUNDARY_JSON=` 两段内联 python，逐条抄出；不记行号——那个文件在仓库外、行号会漂）。
+#: 编排器 Step 11 读的键（最初逐条抄自 2026-09-28 版编排器的 `READINESS_LINE=` 与 `BOUNDARY_JSON=` 两段内联 python；
+#: B（v0.45.385）起那两段已删，编排器经 orchestrator_steps.py 的 `_readiness_line` / `_BOUNDARY_KEEP` 读——清单照旧）。
 #: READINESS_LINE 段读 `cohort.date/version`、`weeks_accrued`、`weeks_required`、`n_ripe_samples`、
 #: `eta_date`、`pool_note`；BOUNDARY_JSON 段读 `cohort_boundary_evidence` 的 keep 元组。
 #: 那边一律 `d.get(...)`，缺键不崩、只会印 '?' —— 正因为不崩，缺了没人会红，所以钉在这里。

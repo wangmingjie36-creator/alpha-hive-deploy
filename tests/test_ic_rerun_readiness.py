@@ -831,7 +831,7 @@ class TestBoundaryEvidenceReachesAutomatedCallers:
             assert ev is not None, sorted(payload)
             assert ev["verdict"] == "boundary_too_early" and ev["alarm"] is True, ev
             assert ev["version"] == "vTQ" and ev["marker_first_seen"] == "2099-01-06", ev
-            # 编排器 Step 11 的 READINESS_LINE 读这几个键（~/.claude/scripts/alpha-hive-orchestrator.sh）
+            # 编排器 Step 11 读这几个键（B 起经 orchestrator_steps.py 的 _readiness_line；B 之前是 READINESS_LINE 内联）
             for key in ("cohort", "weeks_accrued", "weeks_required", "n_ripe_samples",
                         "eta_date", "pool_note"):
                 assert key in payload, key
@@ -984,7 +984,7 @@ class TestSameDayWorstVerdictDrivesTopLevel:
         rc = self._main(monkeypatch, ["--db", str(p), "--today", _TQ_TODAY, "--quiet", "--out", str(out_file)])
         capsys.readouterr()
         bev = _json.loads(out_file.read_text(encoding="utf-8"))["cohort_boundary_evidence"]
-        # 编排器 Step 11 抽的键（~/.claude/scripts/alpha-hive-orchestrator.sh 的 `keep=(...)`；error 只在核不了时有）
+        # 编排器 Step 11 抽的键（B 起经 orchestrator_steps.py 的 _BOUNDARY_KEEP；B 之前是内联 `keep=(...)`；error 只在核不了时有）
         for key in ("version", "boundary", "verdict", "marker_first_seen", "unmarked_after_boundary",
                     "alarm", "line"):
             assert key in bev, key

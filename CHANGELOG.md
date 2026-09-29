@@ -5,6 +5,75 @@
 
 ---
 
+## [0.45.385] — 2026-09-29 — Changed：编排器 Step 10/11/12/13/15 改调步骤解释器（B1）——bash 不再持有这五步的格式知识；先删后跑 + 日期显式传入；解释器不可用时按退出码兜底并留痕
+
+接 v0.45.355（`orchestrator_steps.py` 只提供解释器、编排器未调用）。设计走了一轮工作流（两套独立设计 → 对抗评审合成最终规格，
+评审在 `/bin/bash` 3.2 下实测了兜底 / 超时 / 合并守卫 / 两种 locale）。按规格分两个 PR：**本版 = B1（helper + 10–15）**；
+Step 2/4/5 的调用点与 alert_manager 新规则是 B2（v0.45.386），本版**不动**它们。
+
+### Changed
+- `scripts/alpha-hive-orchestrator.sh`：
+  - 新增 `_step_rc_fallback` / `_apply_step_interp` 与全局 `STEP_INTERP_TIMEOUT=30` / `_SI_STATUS`（紧跟 `run_step()`）。
+    helper 只做三件事：经 `run_step --timeout` 调 `orchestrator_steps.py`（stdout **重定向到 mktemp 文件**，不进 `$( )`——
+    看门狗的 sleep 握着 stdout，命令替换会白等满超时）、用 jq 校验「恰一个期望键、status 是字符串、级别合法」、并进 STEPS_RESULT。
+    **恒不调 `set_status`、恒不中断扫描**；合并失败 ⇒ STEPS_RESULT 原样保留（此前 `STEPS_RESULT=$(…jq…)` 失败会把它清空、status.json 非法）。
+  - 兜底（解释器缺失 / 超时 / 输出不合形状 / `render_error` / Step 2、4 给出允许集合外的判定）：Step 2/4 按退出码**逐字复现 B 之前**的
+    status（alert_manager 读它们；允许集合只多放行 rc=1 的 `success_with_warning` / `skipped_builtin`）；10–15 记
+    `{status: interpreter_unavailable, rc}`（无程序读者，不在 bash 里再抄一份 rc 表）。片段带 `interp_fallback`、日志多一行 ERROR ⇒ 谁会红：这两处。
+  - Step 10/11/12/13/15：`STEPn_START` → `rm -f` 该步 `--out` JSON → `run_step` 带日期参数（`--end` / `--today` / `--date` / `--today` / `--end`，
+    唯一真相 `orchestrator_steps._TOOL_STEPS[*].date_flag`）→ 一行 `_apply_step_interp … --json … --run-start "${STEPn_START}"`。
+    删掉 `CONT_SUMMARY` / `READINESS_LINE` / `BOUNDARY_JSON` / `_S11_NEW` / `COV_SUMMARY` / `CALWATCH_SUMMARY` / `BACKUP_CONT_SUMMARY`
+    七段内联 python 与五条 `if [ $STEPn_RC -eq … ]` 分支链。10 / 15 照旧带 `duration_seconds`，11/12/13 照旧不带。
+  - 为什么先删后跑：同一 DATE_STR 重跑、或本步超时没写出 JSON 时，上一次留下的文件会被当成本轮（解释器另按 `--run-start` 复核，两道一起上）。
+    为什么显式传日期：跨午夜 / 2026-11-01 起温哥华与洛杉矶冬令时错开时，工具按时钟取的日期会与 DATE_STR 不同（`orchestrator_steps`「B 接线须知」）。
+  - 刻意的行为变化（全部来自 v0.45.355 解释器的既定规则 (a)–(f)，OVERALL_STATUS 不受影响）：`stale_json` / `missing_json` /
+    `unparsable_json` / `contract_error` / 崩溃 ⇒ `error` 级；片段追加 `json_problem` / `attention` / `envelope_status` / `date_rollover`；
+    Step 11 rc=2 ⇒ `cohort_boundary: null`；多行日志合成一行、以 ` ｜ ` 分段（例：Step 15 rc=1 无 JSON 由 WARN `degraded` 变为
+    ERROR `missing_json`，原判定进 `rc_status`）。
+- `orchestrator_steps.py`：仅 docstring / 一条日志文案（CLI 与输出形状不变，与前一天的编排器兼容一轮）——「本版只提供解释器」改为 B 起的接线说明；
+  对照对象改为冻结副本；跨午夜 `date_rollover` 文案改为「编排器已用 {flag} 传 DATE_STR，仍出现 ⇒ 生产方没收到它」。
+- 注释（键清单不变）：`tests/test_step_contract_producers.py` / `tests/test_step_contract_ic_rerun.py` / `tests/test_ic_rerun_readiness.py`
+  里「编排器内联 python 读这些键」改指 `orchestrator_steps` 的 `_cont_summary` / `_readiness_line` / `_BOUNDARY_KEEP` / `_cov_summary` /
+  `_calwatch_summary` / `_backup_summary`。
+
+### Added
+- `tests/fixtures/orchestrator_pre_b.sh.frozen`：B 之前编排器（orch-phase3 分支最新提交 f32726e5 那版）的**逐字节**副本，摘要钉在
+  `test_frozen_fixture_pinned`。`tests/test_orchestrator_steps.py` 的 bash 对照（GOLDEN / Step 2 / Step 4 / 读 JSON 分支）改读它、只读它
+  （不 `git show`：CI 是浅克隆；缺失即红，不 skip）；`test_json_read_branches_match_repo_orchestrator` 改名 `…_match_pre_b_orchestrator`。
+- `tests/test_orchestrator_step_interp.py`（130 条）：经 `tests/_orchestrator.py` 抽原文函数在 `/bin/bash` + `set -uo pipefail` 下真跑——
+  GOLDEN 全表经 helper + 真解释器 = B 之前的片段与级别；5 步 × 6 个退出码 × 8 种 JSON 形态 × 起点 success/partial 下 OVERALL_STATUS 恒不变；
+  Step 2/4 兜底与冻结副本逐字相同（2 × 6 个退出码）；五种触发（解释器缺失 / 非 JSON / 错键 / 多一个键 / render_error）× 7 步 × 5 个退出码 +
+  挂死（`STEP_INTERP_TIMEOUT=2`，约 2s 收掉）+ 允许集合 10 格；合并守卫；退出码 2 而工具在 ⇒ WARN「参数错误」；正常调用远快于看门狗；
+  调用点结构（每步恰一个调用、START → `rm -f` → `run_step` 顺序、日期参数、`--json` / `--run-start`、内联已删、helper 里无 `set_status` /
+  `$(run_step`）；macOS `/bin/bash` 3.2 在 `env -i`（C locale）与 `LC_ALL=en_US.UTF-8` 下无 `unbound variable`。日期按运行时算，无时间炸弹。
+- `tests/test_data_backup.py::TestOrchestratorStep15Dispatch`：改为贴 helper、`run_step` 替身（解释器转真的、工具记参数并把夹具拷到 `--out`）；
+  新增「工具收到 `--end <DATE_STR>` / `--history` / `--out`」与「上一次留下的 JSON 先被删」两条；无 JSON 的 rc=1 期望改为 `missing_json`
+  + `rc_status: degraded` + ERROR（刻意改动 (f)）；rc=0 那条改为给一份健康 JSON（无 JSON 的 rc=0 现在多一条 `json_problem` WARN）。
+
+### 上线（按规格 rollout 第 1 节）
+- 前提：阶段 3 先合入并由用户手动部署一次、至少一轮 `steps_result.orchestrator_deploy` 为 `already_current` / `deployed`。
+- 合入日 M 那轮仍是旧编排器（配本版 Python：只有 docstring / 文案 / 测试，与今天等价）；**M+1 起**执行本版。M+1 扫描后只读核对：
+  `grep -c '步骤解释器不可用' ~/.claude/logs/orchestrator-<M+1>.log` 为 0 且无 `unbound variable`；`steps_result` 的 step10/11/12/13/15 都带
+  `contract`、无 `interp_fallback`、step11 有 `cohort_boundary`；五个 `<tool>-<M+1>.json` 的 `.date` 都等于 M+1；无「退出码 2 但 … 存在」WARN；
+  顶层 status 与旧逻辑一致；扫描时长只多几次解释器调用（每次约 0.05s）。
+- 回滚 = 在 main 上 revert 本版（下一扫描日自动部署、再下一日生效）；解释器坏了不需要回滚——helper 自己兜底并留痕。
+
+### 验证
+- 编排器相关测试（step_interp / orchestrator_steps / data_backup / autodeploy / braced_vars / deployed_matches_repo / deploy_orchestrator /
+  scan_catchup / scan_timing / code_version / step_contract* / ic_rerun_readiness）1107 passed / 3 deselected；另加读编排器原文的
+  step5_gh_pages / silent_failure_guards / watchlist_single_source / changelog_guard_contract_gate 121 条全绿。`/bin/bash -n` 通过、
+  `find_unbraced` 为空、改动文件 ruff 全过。
+- 全套（`--timeout=300 --maxfail=1000`）：7562 passed / 1 failed / 82 deselected / 2 xfailed（455s）；唯一失败是已知的
+  `test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`（BLS 2027 日程未发布，设计内变红）。
+  跑前跑后 `git status --porcelain --ignored` 逐字相同（未往仓库写任何东西）。全套跑在补「多一个键」替身之前（当时 step_interp 129 条），
+  补上的那一格已在上一条的复跑里。
+- 变异（在 `git archive` 副本上逐个改、核锚点恰一处、`bash -n` 仍过、复原）20/20 红：删 Step 12 / 15 的 `rm -f`、删 Step 13 / 15 的日期参数、
+  `run_step` 进 `$( )`（20.6s 才跑完、两条红）、helper 里 `set_status partial`（33 红）、删 `keys == [$k]`、10–15 兜底改 status、删合并守卫、
+  删 2/4 允许集合（5 格红）、删退出码 2 的 WARN、冻结副本改一个字节、Step 2 兜底 rc=2 带上 duration、Step 11 漏 `--run-start`、
+  `STEP10_START` 挪到 `run_step` 之后、info 映射成 WARN、删 render_error 判断、兜底片段不带 `interp_fallback`、Step 11 `--json` 传错变量、
+  steps 测试的对照改回读仓库编排器（42 红）。首轮有两条没红，均为**测试或变异本身**的问题，已修后复验：`keys == [$k]` 的只有「错键」替身时
+  被 `.steps_fragment[$k] | type` 顺带挡住 ⇒ 新增「本步键 + 多一个键」替身；允许集合的变异写成 `2|4NEVER)` 仍匹配 `2` ⇒ 改成 `NEVER2|NEVER4)`。
+
 ## [0.45.381] — 2026-09-29 — 占位（进行中：期权墙行虚线改 var(--border)）
 
 ## [0.45.380] — 2026-09-29 — 占位（进行中：earnings_vol_signal.scan 零快照时不再清空当天账本行（含已结算行））

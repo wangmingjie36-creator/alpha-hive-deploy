@@ -8,10 +8,12 @@
 import json
 import os
 import pwd
+import re
 import shlex
 import sqlite3
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -1139,7 +1141,7 @@ class TestHomeSandboxHasTeeth:
         assert (logs / "backup_status.json").is_file()
 
 
-from tests._orchestrator import repo_orchestrator_text  # 仓库里那份（v0.45.353）
+from tests._orchestrator import extract_function, repo_orchestrator_text  # 仓库里那份（v0.45.353）
 _STEP14_RC2_START = "elif [ $STEP14_RC -eq 2 ]; then"
 _STEP14_RC2_END = "elif [ $STEP14_RC -eq 124 ]; then"
 
@@ -1311,49 +1313,85 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
         assert steps_result["step14_data_backup"]["status"] == "rc1_unverified_failed"
 
 
-_STEP15_START = "if [ $STEP15_RC -eq 0 ]; then"
+_STEP15_START = 'log "INFO" "【Step 15】'
 _STEP15_END = 'log "INFO" "【Final】写入系统状态"'
 
 
 class TestOrchestratorStep15Dispatch:
-    """编排器 Step 15（数据备份连续性体检，v0.45.284）的 rc 分发同样不受版本
-    控制、pytest import 不到——同 `TestOrchestratorStep14StageDispatch` 的做法，
-    抽出真实脚本片段接进最小 bash 沙箱跑，锁定 exit code → 日志级别/文案 →
-    `STEPS_RESULT` 状态字符串的映射，不然这条新加的分发逻辑可能被静默改坏
-    而没有测试报红。
+    """编排器 Step 15（数据备份连续性体检，v0.45.284）的 rc 分发——抽出真实脚本片段接进最小 bash 沙箱跑，
+    锁定 exit code → 日志级别/文案 → `STEPS_RESULT` 状态字符串的映射。
+
+    B（v0.45.385）起这段不再是内联分支链：`run_step` 之后一行 `_apply_step_interp`，判定在
+    `orchestrator_steps.py`（`_base15`）。所以这里贴上原文的两个 helper 与全局量，`run_step` 换成替身：
+    跑 `orchestrator_steps.py` 时转给真解释器；跑 `backup_continuity.py` 时记下参数、把夹具拷到 `--out`
+    （拷贝发生在段内 `STEP15_START` 之后 ⇒ mtime 是本轮的）、返回 `FAKE_RC`。
+    日期按运行时的今天算（不写死）。
     """
 
     def _extract_block(self):
         text = repo_orchestrator_text()
         start = text.index(_STEP15_START)
         end = text.index(_STEP15_END, start)
-        return text[start:end]
+        return text, text[start:end]
 
-    def _run(self, tmp_path, *, step15_rc, continuity_json=None):
-        block = self._extract_block()
-        json_file = tmp_path / "backup_continuity.json"
+    def _run(self, tmp_path, *, step15_rc, continuity_json=None, leftover=None):
+        text, block = self._extract_block()
+        helpers = "\n".join([extract_function(text, "_step_rc_fallback"), extract_function(text, "_apply_step_interp"),
+                             *re.findall(r'^(?:STEP_INTERP_TIMEOUT=\d+|_SI_STATUS="")$', text, re.M)])
+        fixture = tmp_path / "fixture.json"
         if continuity_json is not None:
-            json_file.write_text(json.dumps(continuity_json), encoding="utf-8")
+            fixture.write_text(json.dumps(continuity_json), encoding="utf-8")
+        logdir = tmp_path / "logs"
+        logdir.mkdir()
+        today = date.today().isoformat()
+        out_json = logdir / f"backup_continuity-{today}.json"
+        if leftover is not None:                       # 上一次（同一 DATE_STR）留下的文件
+            out_json.write_text(leftover, encoding="utf-8")
+        args_file = tmp_path / "tool_args.txt"
+        repo_root = Path(__file__).resolve().parent.parent      # 指向代码（真解释器），故用 __file__
         script = f'''
 set -uo pipefail
 log() {{ printf 'LOG\\t%s\\t%s\\n' "$1" "$2"; }}
 PYTHON3={shlex.quote(sys.executable)}
-BACKUP_CONTINUITY_JSON={shlex.quote(str(json_file))}
-STEP15_RC={step15_rc}
-STEP15_DURATION=1
+PROJECT_DIR={shlex.quote(str(repo_root))}
+DATE_STR={shlex.quote(today)}
+LOGDIR={shlex.quote(str(logdir))}
+LOGFILE={shlex.quote(str(logdir / "orchestrator.log"))}
+BACKUP_HISTORY_JSONL={shlex.quote(str(tmp_path / "history.jsonl"))}
+FAKE_RC={step15_rc}
+FAKE_JSON={shlex.quote(str(fixture) if continuity_json is not None else "")}
+ARGS_FILE={shlex.quote(str(args_file))}
 STEPS_RESULT='{{}}'
+{helpers}
+run_step() {{
+    if [ "$1" = "--timeout" ]; then shift 2; fi
+    local script="$1" prev="" out="" a
+    shift
+    if [ "$(basename "$script")" = "orchestrator_steps.py" ]; then "$PYTHON3" "$script" "$@"; return $?; fi
+    printf '%s\\n' "$@" > "$ARGS_FILE"
+    for a in "$@"; do [ "$prev" = "--out" ] && out="$a"; prev="$a"; done
+    if [ -n "$FAKE_JSON" ] && [ -n "$out" ]; then cp "$FAKE_JSON" "$out"; fi
+    return "$FAKE_RC"
+}}
 {block}
 printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
 '''
-        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60, env=env,
+                                cwd=str(tmp_path))
         assert result.returncode == 0, f"bash 片段本身跑挂了：{result.stderr}"
         logs = [tuple(ln.split("\t", 2)[1:]) for ln in result.stdout.splitlines() if ln.startswith("LOG\t")]
         steps_line = next(ln for ln in result.stdout.splitlines() if ln.startswith("STEPS_RESULT_JSON\t"))
         steps_result = json.loads(steps_line.split("\t", 1)[1])
+        self.tool_args = args_file.read_text(encoding="utf-8").splitlines() if args_file.exists() else None
+        self.out_json, self.today = out_json, today
         return logs, steps_result
 
+    _HEALTHY = {"window": {"trading_days": 30}, "backed_up_days": 30, "coverage": 1.0, "longest_gap": 0,
+                "weeks_missed": [], "healthy": True}
+
     def test_healthy_rc0_dispatches_info(self, tmp_path):
-        logs, steps_result = self._run(tmp_path, step15_rc=0)
+        logs, steps_result = self._run(tmp_path, step15_rc=0, continuity_json=self._HEALTHY)
         assert any(lvl == "INFO" and "连续性健康" in msg for lvl, msg in logs), logs
         assert steps_result["step15_backup_continuity"]["status"] == "healthy"
 
@@ -1362,7 +1400,7 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
             "window": {"trading_days": 10}, "backed_up_days": 6, "coverage": 0.6,
             "longest_gap": 4, "weeks_missed": ["2026-W10"],
         })
-        assert any(lvl == "WARN" and "连续性降级" in msg for lvl, msg in logs), logs
+        assert any(lvl == "WARN" and "连续性降级" in msg and "只成功了 6 次" in msg for lvl, msg in logs), logs
         assert steps_result["step15_backup_continuity"]["status"] == "degraded"
 
     def test_undetermined_rc3_dispatches_warn(self, tmp_path):
@@ -1377,7 +1415,7 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
 
     def test_timeout_rc124_dispatches_error(self, tmp_path):
         logs, steps_result = self._run(tmp_path, step15_rc=124)
-        assert any(lvl == "ERROR" and "超时" in msg for lvl, msg in logs), logs
+        assert any(lvl == "ERROR" and "超时（>60s）" in msg for lvl, msg in logs), logs
         assert steps_result["step15_backup_continuity"]["status"] == "timeout"
 
     def test_unexpected_rc_dispatches_warn_error_status(self, tmp_path):
@@ -1387,10 +1425,29 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
         assert steps_result["step15_backup_continuity"]["rc"] == 99
 
     def test_degraded_summary_survives_unparseable_json(self, tmp_path):
-        """连 continuity JSON 都读不出来（比如脚本半途被杀）不能让整段 Step 15
-        崩掉——python 摘要脚本要能优雅报"无法解析"而不是让 bash 片段整体失败。"""
+        """退出码 1 却没有 JSON（比如脚本半途被杀 / 崩在写盘前）：整段不许崩。B 起这是**刻意的改动**
+        （orchestrator_steps docstring (f)）：旧代码的未捕获异常退出码也是 1，「降级」与「崩了」分不开，
+        不再按正常的 degraded 记，而是 missing_json（原判定进 rc_status）+ 一行 ERROR。"""
         logs, steps_result = self._run(tmp_path, step15_rc=1, continuity_json=None)
-        assert steps_result["step15_backup_continuity"]["status"] == "degraded"
+        f = steps_result["step15_backup_continuity"]
+        assert f["status"] == "missing_json" and f["rc_status"] == "degraded", f
+        assert any(lvl == "ERROR" for lvl, _ in logs), logs
+
+    def test_tool_gets_date_history_and_out(self, tmp_path):
+        """B：日期显式传 DATE_STR（跨午夜时工具按时钟取的日期会与本轮错开）。
+        变异：删 `--end "${DATE_STR}"` ⇒ 红。"""
+        self._run(tmp_path, step15_rc=0, continuity_json=self._HEALTHY)
+        a = self.tool_args
+        assert a is not None and a[a.index("--end") + 1] == self.today, a
+        assert a[a.index("--history") + 1] == str(tmp_path / "history.jsonl"), a
+        assert a[a.index("--out") + 1] == str(self.out_json), a
+
+    def test_leftover_json_from_an_earlier_run_is_removed_first(self, tmp_path):
+        """同一 DATE_STR 重跑、工具这次没写出 JSON：上一次留下的文件不许冒充本轮。
+        变异：删 `rm -f "${BACKUP_CONTINUITY_JSON}"` ⇒ 读到遗留文件、状态不再是 missing_json 红。"""
+        logs, steps_result = self._run(tmp_path, step15_rc=1, leftover=json.dumps(self._HEALTHY))
+        assert not self.out_json.exists()
+        assert steps_result["step15_backup_continuity"]["status"] == "missing_json"
 
 
 class TestExportScopeCoversMoveRules:
