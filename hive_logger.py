@@ -174,6 +174,8 @@ class _HivePaths:
         四个老账本（vrp_state 等）的 `BASE_DIR = PATHS.home` 写法已在
         `tests/test_paths_not_frozen_at_import.py::KNOWN` 登记为存量违规，别再添一个。
         不建目录：写入方自己 `mkdir`，只读的调用方（assess / MCP）不该为了「看一眼」造出空目录。
+        反过来，目录不存在也**不许**被只读出口说成「账本为空」（未设 env 时这里就是代码目录）：
+        判定走 `sell_strike_ledger.state_dir_status`（v0.45.382）。
         """
         return self.home / "sell_strike_state"
 

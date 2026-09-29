@@ -5,6 +5,101 @@
 
 ---
 
+## [0.45.382] — 2026-09-29 — Fixed：卖权账本只读出口（CLI `--assess` / MCP 两条路径 / 本地报告就绪度行）把「状态目录不存在」报成「账本为空」→ 分开说：缺目录写明解析出的路径与病因、仍 undetermined（退出码 3）；不建目录，写路径 / 预注册 / 盲化 / 闸门均未动；同形普查顺手修 `replay_scoring` / `vol_forecast` / `signal_archive --list` 三个缺 `pheromone.db` 的出口（后者读一次就建库）
+
+> 让号记录：本条开工时占 0.45.373，占位提交因推送被自动模式拦下而只在本地；另一 session 的 0.45.373（世代印记）先进了 origin/main ⇒ 让到 0.45.379；推送前 379（09-23 iv_rank 重算）/ 380 / 381 又被别的 session 先占进主干 ⇒ 再让到 0.45.382。按「先进 git 历史者得号」。教训：占位推送被拦时，号等于没占，完工前要重新核对一次。
+
+### 事故
+
+2026-09-28 不带 `ALPHA_HIVE_HOME` 手动跑 `/usr/local/bin/python3 sell_strike_ledger.py --assess`：`PATHS.home` 回落到代码目录，
+`<仓库>/sell_strike_state/` 不存在，`_shard_paths` 对缺目录返回 `[]`，CLI 印「❓ monthly/weekly：账本里还没有任何行」。
+生产账本（`/Users/igg/alpha-hive-data/sell_strike_state`）当时每档 30 行、29 行 pending。「找错了地方」被说成「账本是空的」，
+并据此误报给了用户。编排器 export 了 env，生产不受影响；危险在手动 / 诊断跑，以及 env 不全的 MCP 进程。
+（本机 MCP：`~/.claude.json` 的 alpha_hive 条目设了 `ALPHA_HIVE_HOME`，09-29 经工具实读 NVDA 09-28 两档行、各 29 pending ⇒ 当前正常。）
+
+### 「这个失败，下游怎么知道？」
+
+之前不知道：缺目录与空目录在 `assess()` 之前就被压成同一个 `[]`，下游只看得到行数。现在「目录在不在」作为独立事实随结果一起走：
+
+- `sell_strike_ledger.state_dir_status(state_dir=None)` → `{"path", "exists", "hint"}`，**不建目录**。hint 分三种病因：
+  显式 `--state-dir` 不存在 / 未设 `ALPHA_HIVE_HOME`（回落代码目录，指向编排器 export 那一行）/ 设了但该数据根下没有账本。
+- `assess()` 从账本读时多一个 `state_dir` 键（`rows=` 注入不给）。**status 语义不变**：缺目录照旧 `undetermined`，
+  闸门、冻结、盲化逻辑一行没动（`state_dir` 不在 `BLINDED_KEYS` 里，也不进冻结文件）。
+- `summary_line()`：`state_dir.exists is False` 先于 status 判 ⇒「❓ {tenor}：无法判定——账本状态目录不存在：<路径>（不是「账本为空」；<病因>）」。
+  目录在但无行 ⇒ 原话「账本里还没有任何行」不变。CLI、本地报告、MCP 的 `assess.*.summary` 共用这一行。
+- CLI `main()`：未设 `ALPHA_HIVE_HOME` 且没给 `--state-dir` ⇒ stderr 先点名本次读写的目录。目录**碰巧存在**
+  （比如之前有人 env-less 跑过 `--run`）时摘要行不会报缺目录，这句是唯一线索。只打印，不改读写。退出码不变（两档都 undetermined ⇒ 3）。
+- MCP `sell_strike_report.rows_for_ticker`（给日期读账本）：无行时区分 `reason`：`ledger_state_dir_missing`（附 `state_dir`）
+  vs 原 `no_ledger_rows_for_date`（目录在、当日无该票行）。`_assess_brief` 透传 `state_dir`（现算路径也看得到读的是哪个账本）。
+  `alpha_hive_mcp.alphahive_get_sell_strike_candidates` docstring 写明两种 reason 的区别。
+- `hive_logger.PATHS.sell_strike_state` docstring 加指针。
+
+### Tests
+
+- `tests/test_sell_strike_ledger.py::TestMissingStateDirIsNotEmpty`（4 条，全离线、tmp 目录）：assess + summary 两情形对照（含 `rows=` 注入对照）；
+  三种病因的 hint（`PATHS.home` 回落目标经 `hive_logger.__file__` 换成 tmp 替身，同 `TestConftestDefensesWired`，不依赖真仓库里有没有该目录）；
+  CLI（缺目录 / 空目录 / env 未设三种，含 stderr 提醒与退出码）；MCP 两条路径。每条都断言缺的目录读完仍不存在。
+- `tests/test_sell_strike_integration.py::TestMcpTool::test_missing_ledger_dir_is_not_reported_as_no_rows`：经 MCP 工具本体。
+- **真跑变异**（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、`--maxfail=1000`、还原后逐文件 sha256 核对）：
+  M0 改动前的真实文件（`git show HEAD:`）⇒ 5/5 红，其中 4 条红在「账本里还没有任何行」/ `no_ledger_rows_for_date`（误诊本身），
+  hint 那条因新函数不存在而红（新功能，无旧行为可比）；M1 summary_line 不看 state_dir ⇒ 4 红；M2 assess 不给 state_dir ⇒ 4 红；
+  M3 MCP reason 不分 ⇒ 2 红；M4 `_assess_brief` 丢 state_dir ⇒ 1 红；M5 删 stderr 提醒 ⇒ 1 红；M6 读路径顺手 mkdir ⇒ 5 红；M7 hint 不分 env 未设 ⇒ 2 红。
+- 手动复现：改前 env-less `--assess` ⇒ 两行「账本里还没有任何行」、exit 3；改后 ⇒ stderr 提醒 + 两行「账本状态目录不存在：<worktree>/sell_strike_state（…未设置 ALPHA_HIVE_HOME…）」、exit 3、目录未被创建；
+  带 `ALPHA_HIVE_HOME=/Users/igg/alpha-hive-data` ⇒ 两档 accruing、各 30 行 / 29 pending、`state_dir.exists=True`。
+- ruff 通过。全套（含下文三个 CLI 的修复与 6 条新测；基线 origin/main `adbf13b2`，即 v0.45.378；其后到 `c256e7c6` 主干只改了 CHANGELOG）：7388 passed，1 failed（`test_economic_calendar::TestCoverageHorizon`：CPI / NFP 表只覆盖到 2026-12、BLS 未发布 2027 日程的设计性告警，与本改动无关，同 v0.45.363）。
+
+### 同形普查（其它基于 `PATHS` 的只读 CLI：缺目录 / 缺文件被说成「空」）
+
+普查范围：带 `__main__` / argparse 的模块与 `alpha_hive_mcp.py` 的工具，凡经 `PATHS.*`（含模块级 `BASE_DIR = PATHS.home`）解析数据位置的只读出口。
+**标 ✔ 的本 session 逐条读代码复核过；其余是只读普查代理的结论，动手前再核（待验证）。**
+
+⚠️ 先读这一条再看清单：不带 env 时 `PATHS.home` = checkout，而其中一批数据目录**被 git 跟踪**（✔ `git ls-files` 实数：
+`report_snapshots/` 1441、`hedge_state/` 18、`self_analysis_briefs/` 9、`paper_portfolio_state/` 4、`options_paper_state/` 4、
+`probability_scorecard_state/` 2、`vrp_state/` 1、`weight_history.jsonl`）⇒ 那些工具在 checkout 里读到的是**陈旧的已提交副本**，
+不是空——病形是「读错数据还不报」，比「报空」更难发现。「缺目录被说成空」只在 git 忽略 / 不存在的数据上当场发作：
+`pheromone.db`、`analysis-*.json`、`.swarm_results_*.json`、`cache/`、`sell_strike_state/`、`paper_account/`。
+
+**本版顺手修了（只改出口文字 / 退出码，不动任何写路径；新测 `tests/test_missing_db_not_reported_as_empty.py` 6 条，含库在的对照）：**
+
+- ✔ `replay_scoring.py`：`load_samples` 库打不开时 notes 里写了路径，`main()` 却不打印、照说「无可用样本 … 这是正常状态」。
+  现在有 ⛔ note ⇒「❓ 无法判定：样本库读不到」+ 逐条 note + env 提示，退出码仍 3。
+- ✔ `vol_forecast.py`：缺库与「当日无归档」同一句「先跑 signal_archive.py --backfill」——库找错地方时照做 = 在错的数据根下建库。
+  现在 `main()` 先判 `exists()` ⇒ 路径 + 提示，退出 3（原无归档分支仍是 1，`test_vol_forecast` 的子进程测试不变）。
+- ✔ `signal_archive.py --list`：读写模式 `ensure_schema` ⇒ **读一次就造出 `pheromone.db`**，此后 `ic_rerun_readiness` /
+  `scan_continuity` / `health_check` 等「库不存在」的明确判定全部退化成「表不存在 / SQL 错误」。现在缺库 ⇒ 退出 3、不建库；
+  库在但缺表照旧补表（`--analyze` 走 `mode=ro`，缺库是响亮的异常，不在此列）。
+- 变异：M0 取三个文件改动前的真实版本 ⇒ 3 条「缺库」测试全红，红在误诊原文本身
+  （「这是正常状态」/「先跑 signal_archive.py --backfill」/「--list 读一次就造出了 …db」），3 条对照全绿。
+
+**只列不修（不是几行的事，或碰写路径 / 刻意设计，留给后续）：**
+
+- ✔ `earnings_vol_signal.py` 的 `__main__`（**写路径，最危险**）：`scan()` 零快照时不提前返回，照样把 `earnings_signals.jsonl`
+  改写为「其它日期的行 + 本日空列表」⇒ cache 找错 / 当日缺快照时**删掉该日已有行**。
+- ✔ `paper_portfolio.py`：模块级 `STATE_DIR.mkdir(exist_ok=True)`（import 即建目录，`portfolio_greeks` / `ibkr_sync` / `ic_rerun_readiness`
+  都会触发）；`kpi` / `card` 缺状态时印「NAV 50000、0 笔」或「尚未启动，运行 bootstrap」，与新账本无从区分。去掉 import 期 mkdir 要动写者，不 trivial。
+- ✔ `ml_model_guard.py`：`describe()` 在 0 份报告时只说「共 0 份报告」，不给 `report_dir`（exit 3 本身是对的）。
+- `portfolio_greeks.py --dry-run`：状态缺失 ⇒「三本账均无持仓」；且 `--dry-run` 仍写 `hedge_state/beta_cache.json`（待验证）。
+- `ibkr_sync.py reconcile`：`real_fills.jsonl` 缺失与「零成交」同一份 0/0 报告，且 reconcile 会建 `paper_account/reconcile/` 落盘（待验证）。
+- `weekly_optimizer.py`：`_warn_if_close_t7_unavailable` 对 `missing` **刻意**不告警（docstring 写明）、随后静默退回旧口径计数（待验证；改前先读那段理由与测试）。
+- `alpha_hive_mcp.py` 的 `get_analysis` / `get_swarm_scores` / `get_gex`：找不到报告只回「No analysis report found」不给路径；
+  `list_reports` 给了 `path`，算半诚实（待验证）。
+- `experiments/penalty_replay.py`（「样本不足（0），中止」）、`self_analyst.py`（「无可分析数据」，但前面印了路径）（待验证）。
+- 读路径**建出空库**再报 `no such table` 的四个：`dynamic_exit_backtest.py`、`bootstrap_ci.py`、`portfolio_factor_attribution.py`、
+  `experiments/vol_regime_filter.py`（读写模式 `sqlite3.connect(PATHS.db)` 无 exists 判定）——报错本身响亮，但留下的空库会让别处
+  「库不存在」判定失效，同 `signal_archive --list`（待验证）。
+- `PATHS.cache_dir` 的 getter 会 mkdir ⇒ `vrp_signal.py --assess` 缺数据根时建出 `<checkout>/cache/`（提示文字本身是诚实的「无法判定」）（待验证）。
+- 同形但不经 `PATHS`（cwd 相对路径）：`iv_history.py` / `price_history.py`（缺省 `"cache"`）、`backtest_engine.py` / `regime_analyzer.py` /
+  `finrl_bridge.py`（`report_snapshots`）、`data_backup/export.py`（缺目录 ⇒「DIR x: 0 文件」，`--src` 缺省写死路径）（待验证）。
+- 已核无此病（缺路径会明说或抛）：`ic_rerun_readiness`、`scan_continuity`、`ic_diagnostics`、`backup_continuity`、`health_check`、
+  `portfolio_backtest`、`walk_forward_validator`；`probability_scorecard` 报 `ledger_missing` + exit 3 但不给路径（待验证）。
+
+### 未做
+
+- 写路径没改（按要求）：env-less 的 `--run` 仍会按 `PATHS.home` 回落把账本写进代码目录（`--settle` 对缺目录不建：
+  没有分片就没有待套用的结算，`_settle` 只在 `if plan:` 时才取会 mkdir 的 tenor 锁）；
+  之后 `--assess` 读到的是「目录在但为空 / 很少」，只有新的 stderr 提醒能看出来。要不要让写路径在 env 未设时拒写，留给用户定。
+- `render_markdown` 的「今日无数据」段落文字没改：它只经日报钩子（写路径）调用，缺目录时下面的就绪度行已会写明「状态目录不存在」。
+
 ## [0.45.381] — 2026-09-29 — 占位（进行中：期权墙行虚线改 var(--border)）
 
 ## [0.45.380] — 2026-09-29 — 占位（进行中：earnings_vol_signal.scan 零快照时不再清空当天账本行（含已结算行））
