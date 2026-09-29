@@ -62,7 +62,9 @@ COST 4.62%/5.11%、AMC 16.00%/10.53%；点差 16% 的"中价"是两个相隔 16%
 --------
 - 全程 None 代替 NaN（`bool(nan) is True`，比较也全 False，守卫挡不住）。
 - 不合格也返回能算出的全部中间量，方便事后看"差在哪一步"。
-- 信号落盘 `options_paper_state/earnings_signals.jsonl`，同 (ticker, as_of) 幂等。
+- 信号落盘 `options_paper_state/earnings_signals.jsonl`，同 (ticker, as_of) 幂等（按票 upsert）。
+  零快照 / 一条信号都没算出 ⇒ **不改写账本**，WARNING 写明读的是哪个目录、它在不在
+  （v0.45.380；此前会把该日已有的行——含已结算的——整批删掉）。
 - `settle_signals` 在财报过后用同一两日窗口回填实际波动，这是**测量管道**，
   为以后的校准 / IC 研究攒样本；`summary_stats` 在 n<3 时给 None 而不是均值。
 
@@ -76,11 +78,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from hive_logger import PATHS, get_logger
 
@@ -408,14 +411,66 @@ def _iter_snapshots(cache_dir: Path, as_of: str):
         yield m.group(1).upper(), snap
 
 
+def _snapshot_dir_diagnosis(cdir: Path, as_of: str) -> str:
+    """零快照时说清楚「去哪找的、那里有什么」。只读：不建目录、不碰账本。
+
+    v0.45.380 之前这几种情形都被压成「本日 0 条信号」，然后把该日账本行整批删掉；
+    要分开说，是因为病因和处置完全不同——目录不存在多半是数据根找错了，
+    目录在但只有别的日期，才是当天快照真的缺了。
+    """
+    if not cdir.exists():
+        return "目录不存在"
+    if not cdir.is_dir():
+        return "路径存在但不是目录"
+    same_day = [p for p in cdir.glob(f"options_snapshot_*_{as_of}.json") if _SNAP_RE.match(p.name)]
+    if same_day:
+        return f"目录存在，有 {len(same_day)} 份该日快照文件但都读不出（见上方 WARNING）"
+    dates = sorted({m.group(2) for m in (_SNAP_RE.match(p.name) for p in cdir.glob("options_snapshot_*.json")) if m})
+    if not dates:
+        return "目录存在，但里面没有任何 options_snapshot"
+    return f"目录存在，但没有 {as_of} 的快照（共 {len(dates)} 个日期，最新 {dates[-1]}）"
+
+
+def _cache_dir_hint(cdir: Path) -> str:
+    """两种「读错目录」的常见来路，命中才说；都不命中返回空串。"""
+    hints = []
+    if "ALPHA_HIVE_HOME" not in os.environ:
+        hints.append("未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录（生产由编排器 export）")
+    # 快照的写者 options_analyzer 用 PATHS.cache_dir（读 ALPHA_HIVE_CACHE_DIR）；本模块读的是
+    # `BASE_DIR / "cache"`。生产只 export ALPHA_HIVE_HOME，两者相同；设了前者就会分叉。
+    # 直接读 env 而不调 PATHS.cache_dir：那个 getter 会 mkdir，诊断不该有副作用。
+    env_cache = os.environ.get("ALPHA_HIVE_CACHE_DIR")
+    if env_cache and Path(env_cache) != cdir:
+        hints.append(f"快照写者按 ALPHA_HIVE_CACHE_DIR 写在 {env_cache}，与本次读取目录不同")
+    return "；".join(hints)
+
+
 def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
          watcher=None, stats_fn: Optional[Callable[[str], Optional[dict]]] = None,
          upcoming_fn: Optional[Callable[[str], Optional[dict]]] = None) -> List[dict]:
-    """当日全部常规快照 → 信号列表，并幂等落盘（先删该日旧行再追加）。
+    """当日全部常规快照 → 信号列表，并按 (ticker, as_of) upsert 落盘。
 
     `upcoming_fn(ticker) -> {"earnings_date": ..., "earnings_time": ...} | None` 可注入：
     调用方（日报）手里已经有财报日时直接给过来，不必再造一个 EarningsWatcher。
-    缺省为 None 时行为与以前完全一致（延迟构造 EarningsWatcher）。"""
+    缺省为 None 时行为与以前完全一致（延迟构造 EarningsWatcher）。
+
+    落盘语义（v0.45.380，与 `sell_strike_ledger._record_rows` 同）：
+      · 零快照 / 有快照但一条信号都没算出 ⇒ **账本一个字节都不改**，WARNING 写明读的目录
+        与它在不在，返回 []。此前会照常改写成「其它日期的行 + 空列表」，即把该日已有的行
+        （含 settle 过的）整批删掉——cache 目录找错、当日快照缺失时都会触发。
+      · 本次重算到的票 ⇒ 替换该票该日的旧行（结算字段照 M4 搬过来）。
+      · 该日已有、但本次**没有重算到**的票 ⇒ 旧行原样保留并打 WARNING。缺快照不是
+        「这条信号作废」的证据，只是这次没有输入；已结算的样本删了就再也补不回来。
+        要撤掉某条信号，请直接编辑账本，别指望靠删快照重跑。
+    返回值只含本次算出的信号（日报把它交给 options_paper_leg 开仓），不含保留的旧行。"""
+    return _scan_with_info(as_of, cache_dir, earnings_cache_dir, watcher, stats_fn, upcoming_fn)[0]
+
+
+def _scan_with_info(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
+                    watcher=None, stats_fn: Optional[Callable[[str], Optional[dict]]] = None,
+                    upcoming_fn: Optional[Callable[[str], Optional[dict]]] = None
+                    ) -> Tuple[List[dict], Dict]:
+    """`scan` 的本体，另返回诊断信息给 CLI 决定退出码（`scan` 的返回类型不能变：日报与账本都在用）。"""
     cdir = _resolve_dir(cache_dir, "cache")
     ecdir = _resolve_dir(earnings_cache_dir, "earnings_cache")
 
@@ -438,7 +493,9 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
     stats_fn = stats_fn or _default_stats
     upcoming_fn = upcoming_fn or _upcoming
     signals: List[dict] = []
+    n_snapshots = 0
     for ticker, snap in _iter_snapshots(cdir, as_of):
+        n_snapshots += 1
         qs = snap.get("quote_set")
         rv = snap.get("rv_30d")
         upcoming = None
@@ -457,11 +514,29 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
         except Exception as exc:  # noqa: BLE001 - 单票失败不拖死整轮
             _log.warning("[%s] 信号计算失败: %s", ticker, exc, exc_info=True)
 
-    # M4（v0.45.104）：重写该日的行之前，把 settle_signals 已经填好的实际波动搬过来。
-    # 正常日更不会触发（一行不可能在自己的 as_of 当天就结算），但 `--date` 回补
-    # 或手动重跑会：不搬就是把已结算的样本删了，而新行还未必更好。
     all_rows = load_signals()
     prev = {s.get("ticker"): s for s in all_rows if s.get("as_of") == as_of}
+    info: Dict = {"cache_dir": cdir, "cache_dir_exists": cdir.is_dir(), "n_snapshots": n_snapshots,
+                  "n_existing_for_date": sum(1 for s in all_rows if s.get("as_of") == as_of),
+                  "written": False, "kept": [], "diagnosis": None}
+
+    # 「这个失败，下游怎么知道？」——没有输入就不许写：写了等于把「找错地方 / 当天缺快照」
+    # 改写成「该日没有信号」，连同已结算的样本一起删掉。
+    if not signals:
+        if n_snapshots == 0:
+            info["diagnosis"] = "；".join(x for x in (_snapshot_dir_diagnosis(cdir, as_of),
+                                                     _cache_dir_hint(cdir)) if x)
+            _log.warning("财报事件波动率信号 %s：未找到快照（读取目录 %s：%s）——账本未改写"
+                         "（%s，该日已有 %d 行原样保留）", as_of, cdir, info["diagnosis"],
+                         SIGNALS_FILE, info["n_existing_for_date"])
+        else:
+            _log.warning("财报事件波动率信号 %s：%s 有 %d 份快照，但一条信号都没算出（见上方 WARNING）"
+                         "——账本未改写（%s）", as_of, cdir, n_snapshots, SIGNALS_FILE)
+        return signals, info
+
+    # M4（v0.45.104）：替换该票的行之前，把 settle_signals 已经填好的实际波动搬过来。
+    # 正常日更不会触发（一行不可能在自己的 as_of 当天就结算），但 `--date` 回补
+    # 或手动重跑会：不搬就是把已结算的样本删了，而新行还未必更好。
     for sig in signals:
         old = prev.get(sig["ticker"])
         if not old:
@@ -469,12 +544,22 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
         for k in ("realized_abs_move_pct", "realized_move_pct", "realized_ratio", "settled_on"):
             if old.get(k) is not None:
                 sig[k] = old[k]
-    existing = [s for s in all_rows if s.get("as_of") != as_of]
-    _write_jsonl(SIGNALS_FILE, existing + signals)
+    # 按票 upsert：只顶掉本次重算到的票；该日其余旧行留在原位（见 scan 的 docstring）。
+    new_tickers = {s["ticker"] for s in signals}
+    kept = [s for s in all_rows if s.get("as_of") == as_of and s.get("ticker") not in new_tickers]
+    if kept:
+        info["kept"] = [s.get("ticker") for s in kept]
+        settled = [s.get("ticker") for s in kept if s.get("settled_on")]
+        _log.warning("财报事件波动率信号 %s：该日已有 %d 行本次没有重算到（无快照），原样保留：%s%s",
+                     as_of, len(kept), ", ".join(str(t) for t in info["kept"]),
+                     f"（其中已结算：{', '.join(str(t) for t in settled)}）" if settled else "")
+    rest = [s for s in all_rows if not (s.get("as_of") == as_of and s.get("ticker") in new_tickers)]
+    _write_jsonl(SIGNALS_FILE, rest + signals)
+    info["written"] = True
     n_el = sum(1 for s in signals if s.get("eligible"))
     _log.info("财报事件波动率信号 %s：快照 %d，合格 %d（%s）", as_of, len(signals), n_el,
               ", ".join(f"{s['ticker']}={s['label']}" for s in signals if s.get("eligible")) or "-")
-    return signals
+    return signals, info
 
 
 # ---------------------------------------------------------------- 事后回填
@@ -544,11 +629,35 @@ def summary_stats(min_n: int = 3) -> dict:
     return out
 
 
-if __name__ == "__main__":
+def main(argv: Optional[List[str]] = None) -> int:
+    """`python earnings_vol_signal.py [YYYY-MM-DD]`。
+
+    退出码：0 = 扫到快照并已落盘；3 = 无法判定（零快照 / 有快照但一条信号都没算出），
+    账本未改写。此前零快照时打印一个空列表 + 汇总、退出 0，与「当天确实没有合格信号」无从区分。
+    """
     import sys
     from hive_logger import pdt_today
-    d = sys.argv[1] if len(sys.argv) > 1 else pdt_today()
-    for s in scan(d):
+    args = sys.argv[1:] if argv is None else list(argv)
+    d = args[0] if args else pdt_today()
+    signals, info = _scan_with_info(d)
+    if info["n_snapshots"] == 0:
+        print(f"❓ {d}：no snapshots found in {info['cache_dir']}（{info['diagnosis']}）"
+              f"——未改写 {SIGNALS_FILE}（该日已有 {info['n_existing_for_date']} 行原样保留）",
+              file=sys.stderr)
+        return 3
+    if not signals:
+        print(f"❓ {d}：{info['cache_dir']} 有 {info['n_snapshots']} 份快照，但一条信号都没算出"
+              f"（见 WARNING）——未改写 {SIGNALS_FILE}", file=sys.stderr)
+        return 3
+    for s in signals:
         print(f"{s['ticker']:6s} eligible={s['eligible']!s:5s} label={s['label']} ratio={s['ratio']} "
               f"reason={s['reason']}")
+    if info["kept"]:
+        print(f"⚠️ {d} 另有 {len(info['kept'])} 行本次没有重算到，原样保留："
+              f"{', '.join(str(t) for t in info['kept'])}", file=sys.stderr)
     print(json.dumps(summary_stats(), ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

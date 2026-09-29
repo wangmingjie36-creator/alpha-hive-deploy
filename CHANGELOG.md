@@ -5,7 +5,70 @@
 
 ---
 
-## [0.45.380] — 2026-09-29 — 占位（进行中：earnings_vol_signal.scan 零快照时不再清空当天账本行（含已结算行））
+## [0.45.380] — 2026-09-29 — Fixed：`earnings_vol_signal.scan` 零快照时不再清空该日账本行（含已结算行）；部分重跑改为按票 upsert、没重算到的旧行保留；CLI 零快照退出 3 并点名读取目录
+
+### 事故形状（v0.45.382 同形普查里「只列不修」的第一条；那一版开工时编号 0.45.379）
+- `scan(as_of)` 遍历完 `_iter_snapshots(cdir, as_of)` 后**无条件** `_write_jsonl(SIGNALS_FILE, 其它日期的行 + 本次信号)`。
+  零快照 ⇒ 该日已有的行（含 `settle_signals` 回填过的）整批删掉；M4（v0.45.104）的结算字段搬运只救得了本次重新产出的票；
+  部分快照缺失 ⇒ 只删缺的那几只。`__main__` 印一个空列表 + 汇总、退出 0，与「当天确实没有合格信号」无从区分。
+- 触发：cache 目录找错（不带 `ALPHA_HIVE_HOME` 手动跑 ⇒ `PATHS.home` 回落到代码目录，那里的 `options_paper_state/`
+  被 git 跟踪 ⇒ 改写的是陈旧的已提交副本）/ 当天快照缺失。
+  更正任务描述一处：缺省 `"cache"` 不是 cwd 相对——`_resolve_dir` 把相对路径挂在 `BASE_DIR`（import 期冻结的 `PATHS.home`）下。
+- **复现**（数据根指向 scratch，里面拷的是 checkout 里被跟踪的 334 行账本）：改前 `earnings_vol_signal.py 2026-09-22` ⇒
+  exit 0、日志只有 INFO「快照 0，合格 0（-）」、账本 334 → 304 行（09-22 的 30 行没了）；
+  改后 ⇒ exit 3、「no snapshots found in <scratch>/home/cache（目录不存在）」、sha256 不变。
+  改后 env-less 在 worktree 里跑 ⇒ exit 3 + 「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录」，被跟踪的账本与 `git status` 均无变化，未建出 `cache/`。
+- **生产**（只读核对）：账本 364 行，其中已结算 10 行，都暴露在这条路径上。**09-24、09-25 日更钩子真的走过零快照分支**
+  （`~/alpha-hive-data/cache` 该两日 0 份 `options_snapshot`；日志 INFO「快照 0，合格 0（-）」+「期权纸面腿已更新 … 信号 0」）——
+  那两天账本里原本没有该日行，所以没删到东西，但在日志里与「当天没有合格信号」一模一样。那两天为什么没有期权快照：待验证（不在本版范围）。
+  另：09-23 cache 有 22 份快照、账本无 09-23 行、日志（含轮转的 .1–.3）也无该日钩子记录 ⇒ 钩子那天没跑到，与本 bug 无关（原因待验证）。
+
+### Fixed
+- `earnings_vol_signal.py`
+  - `scan()`：零快照 / 有快照但一条信号都没算出 ⇒ **不写账本**（连原子替换都不做），返回 `[]`，WARNING 写明读取目录、
+    它在不在、该日已有几行原样保留。`_snapshot_dir_diagnosis` 分四种：目录不存在 / 有该日文件但都读不出 / 只有别的日期（给出最新日期）/ 空目录；
+    `_cache_dir_hint` 命中才附：未设 `ALPHA_HIVE_HOME`；`ALPHA_HIVE_CACHE_DIR` 与读取目录不同（快照写者 `options_analyzer` 用 `PATHS.cache_dir`
+    读它，本模块读 `BASE_DIR / "cache"`，不读它）。诊断只读：不建目录，也不调会 mkdir 的 `PATHS.cache_dir` getter。
+  - 落盘改为按 `(ticker, as_of)` **upsert**：本次重算到的票替换旧行（M4 搬运不变）；该日其余旧行**原位保留**，WARNING 列出票并标出其中已结算的。
+    **决定**（写进 `scan` docstring）：缺快照不是「信号作废」的证据，只是这次没有输入；已结算样本删了补不回来；
+    与 `sell_strike_ledger._record_rows`（空批不改、按票 upsert）同一语义。要撤掉某条信号请直接编辑账本。同样的快照重跑仍字节幂等。
+  - 返回值不变（只含本次算出的信号），日报钩子与 `options_paper_leg` 无需改。本体拆成 `_scan_with_info()`（多返回诊断 dict），`scan()` 取第一项。
+  - `__main__` → `main(argv)`：零快照 ⇒ stderr「❓ <日期>：no snapshots found in <目录>（诊断）——未改写 <账本>（该日已有 N 行原样保留）」、**退出 3**；
+    有快照但零信号 ⇒ 同样退出 3；正常 ⇒ 原输出、退出 0，有保留旧行时 stderr 列出。
+
+### 调用方（行为变化是有意的）
+- `alpha_hive_daily_report._post_scan_enrichment`（日更钩子）：零快照日从「静默改写账本 + INFO」变为「不写 + WARNING」；仍返回 `[]`，
+  `settle_signals` 与 `options_paper_leg.run_for_date(signals=[])` 照跑（旧信号照样结算、持仓照样盯市 / 平仓），与改前一致。
+  **没有改成抛异常**：钩子的 try 包着三步，抛了会连带跳过当天的结算与平仓。
+- `options_paper_leg.run_for_date(signals=None)` 的兜底 `signals_for_date(as_of) or scan(as_of)`：零快照照旧拿到 `[]`，只是不再顺手改写账本。
+  `render_markdown` 读 `signals_for_date`，部分重跑后会连保留的旧行一起显示——它们本就是该日由真实快照算出的信号。
+- `tests/test_sell_strike_integration.py` 把 `scan` 桩成 `lambda: []`，不受影响。编排器在非交易日整体跳过（`is_trading_day.py`），新 WARNING 不会每个周末报一次。
+
+### Tests
+- `tests/test_earnings_vol_signal.py` +8 条（全离线、tmp 目录）：
+  - `TestScanNeverDeletesRowsItDidNotRecompute`：零快照 × 三种目录形态（缺目录 / 空目录 / 只有别的日期）⇒ 账本**字节与 inode 都不变**
+    （夹具刻意用紧凑分隔符写：upsert 语义下「内容相同的改写」只有这样才抓得到）、WARNING 含目录路径与在 / 不在、缺的目录读完仍不存在；
+    有快照但全部计算失败 ⇒ 不写；部分重跑 ⇒ 已结算行与未重算行逐字段不变、WARNING 列出并标已结算、再跑一次字节幂等；两种错目录提示。
+  - `TestMainExitCodes`：真跑 `__main__` 子进程（继承 `_isolate_env` 的沙箱 `ALPHA_HIVE_HOME`，cwd=tmp）⇒ 退出 3、stderr 点名 `<tmp>/cache`、账本不变；`main()` 有快照 ⇒ 退出 0。
+- **真跑变异**（`PYTHONDONTWRITEBYTECODE=1`、每轮用 Python 删 pyc、`--maxfail=1000`、锚点唯一断言、每轮 passed+failed = collected 51、
+  还原后 sha256 核对并复跑 51/51 绿）：
+  - M0 改动前真实文件（`git show b7a9fb5f:`）⇒ 8 红：零快照 3 条红在「零快照改写了账本」、零信号那条红在字节、部分重跑红在该日行被删、
+    CLI 红在退出码 0（误报本身）；错目录提示那条红在「没有 WARNING」（新功能，无旧行为可比）；`main()` 那条是 AttributeError（新接口，正向对照，不算证据）。
+  - M1 删「没有信号就不写」守卫 ⇒ 5 红（upsert 下改写内容相同，全靠字节 / inode 抓到）；M2 upsert 改回整日替换 ⇒ 1；M3 诊断不分在不在 ⇒ 1；
+    M4 WARNING 只写目录末级名 ⇒ 3；M5 CLI 零快照退 0 ⇒ 1；M6 保留旧行不报 ⇒ 1；M7 未设 HOME 不提示 ⇒ 1；M8 诊断顺手建目录 ⇒ 1。
+- ruff 通过。全套（基线 `9e6bc675` = v0.45.378 + 本版占位）：7384 passed、1 failed、82 deselected、2 xfailed（合计 = collected 7469）；
+  唯一红是 `test_economic_calendar::TestCoverageHorizon`（BLS 未发布 2027 日程的设计性告警，同 v0.45.377 / v0.45.382，与本改动无关）。
+
+### 同形普查（全仓 `get("as_of"|"date") != as_of` 式重写，只列不修）
+- ⚠️ `vrp_signal.record_day`（**同一个日更钩子紧接着调用**）：`keep = 其它日期的行` + 本次行 ⇒ 零快照同样删光该日行，
+  含 `settle()` 回填的 `rv_forward` / `vrp_realized`（v0.45.104 的搬运同样只救重新产出的票）；缺省目录还走会 mkdir 的 `PATHS.cache_dir`。已另开任务。
+- `options_paper_leg` / `paper_portfolio` / `portfolio_greeks` 的 equity 曲线重写：每日恒写一行重算的 NAV，不是数据驱动的行集合，零输入不删行——非同形。
+- `sell_strike_ledger._record_rows`：早已「空批不改、按票 upsert」，本版照抄其语义。
+
+### 未做
+- 读者 / 写者目录不一致（本模块 `BASE_DIR / "cache"` vs `options_analyzer` 的 `PATHS.cache_dir`）只加了提示，没改默认值：生产只 export `ALPHA_HIVE_HOME`，两者相同。
+- `BASE_DIR` / `STATE_DIR` / `SIGNALS_FILE` 仍是 import 期冻结（`test_paths_not_frozen_at_import` KNOWN 存量），未动。
+- `_load_jsonl` 静默跳过坏行 ⇒ 每次正常改写都会把坏行丢掉：本版只让零输入不写，坏行问题未处理。
 
 ## [0.45.378] — 2026-09-29 — 二次检查 v0.45.351：两处小 bug（CDN 无期望时间戳仍报「已验证」；传输探测可能连 IPv6 误判端口不通）；09-28 生产首跑核对全绿
 
