@@ -429,32 +429,46 @@ async def alphahive_get_gex(params: TickerDateInput) -> str:
         data  = _load_json(params.ticker, d)
         dgex  = data.get("advanced_analysis", {}).get("dealer_gex", {}) or {}
 
-        if not dgex or float(dgex.get("total_gex", 0) or 0) == 0.0:
-            return _ok({
-                "ticker":         params.ticker,
-                "date":           d,
-                "total_gex":      0.0,
-                "regime":         None,
-                "gex_flip":       None,
-                "largest_call_wall": None,
-                "largest_put_wall":  None,
-                "interpretation": "⚠️ GEX数据缺失 — 请重新运行 alpha_hive.py 采集期权链数据",
-            })
+        # v0.45.362：报告里带扫描时的 gex_state（政体路由用的那份）就以它为准——不可得如实返回不可得，
+        # 不拿 ML 报告里另算的 dealer_gex 顶上；没有状态的旧报告才读 dealer_gex，且用同一套可得性规则
+        # （`gex_state.build`：出错 / 非有限 / 非全到期日视图都算不可得）。
+        import gex_state as _gex_state
+        _st = _gex_state.of(data.get("swarm_results"))
+        if _st is not None:
+            st, source = _st, "scan_gex_state"
+        else:
+            st = _gex_state.build(dgex or None, missing_reason="no_dealer_gex_in_report")
+            source = "ml_report_dealer_gex"
+        out = {"ticker": params.ticker, "date": d, "source": source,
+               "available": bool(st.get("available")), "reason": st.get("reason")}
 
-        regime = dgex.get("regime", "")
+        if not st.get("available"):
+            # 路由实际收到的 regime（扫描时状态才有）：快照截断链 / NaN 两种已知情形下它不是 unknown
+            routed = st.get("regime") if source == "scan_gex_state" else None
+            out["routed_regime"] = routed
+            if routed in ("positive_gex", "negative_gex"):
+                _how = f"政体路由仍按 {routed} 偏移权重（已知问题，见 gex_state 模块说明）"
+            elif source == "scan_gex_state":
+                _how = "政体路由按 unknown 处理（不偏移权重）"
+            else:
+                _how = "旧报告，无扫描时状态"
+            return _ok({**out, "total_gex": None, "regime": None, "gex_flip": None,
+                        "largest_call_wall": None, "largest_put_wall": None,
+                        "interpretation": f"⚠️ GEX 不可得（{st.get('reason')}）；{_how}"})
+
+        regime = st.get("regime", "")
         interp = {
             "positive_gex": "✅ 正GEX：做市商持净多gamma，价格被压制在区间内，波动率偏低",
             "negative_gex": "⚠️ 负GEX：做市商持净空gamma，价格走势被放大，尾部风险上升",
         }.get(regime, "中性GEX")
 
         return _ok({
-            "ticker":            params.ticker,
-            "date":              d,
-            "total_gex":         dgex.get("total_gex"),
+            **out,
+            "total_gex":         st.get("total_gex"),
             "regime":            regime,
-            "gex_flip":          dgex.get("gex_flip"),
-            "largest_call_wall": dgex.get("largest_call_wall"),
-            "largest_put_wall":  dgex.get("largest_put_wall"),
+            "gex_flip":          st.get("gex_flip"),
+            "largest_call_wall": st.get("largest_call_wall"),
+            "largest_put_wall":  st.get("largest_put_wall"),
             "interpretation":    interp,
         })
     except FileNotFoundError as e:
@@ -513,7 +527,12 @@ async def alphahive_get_sell_strike_candidates(params: TickerDateInput) -> str:
 
     Returns:
         str: JSON with:
-            - data_available (bool) and, when False, reason (str)
+            - data_available (bool) and, when False, reason (str). Ledger path:
+              "no_ledger_rows_for_date" = the ledger exists but has no row for
+              that date/ticker; "ledger_state_dir_missing" = the ledger
+              directory itself was not found (state_dir.path / state_dir.hint
+              say where the server looked — usually ALPHA_HIVE_HOME missing
+              from this server's environment). The latter is NOT "no data".
             - source: "ledger" | "live"
             - payload_last_trade_time, session_live, iv30 (live: top level;
               ledger: per row) — quote timestamp from the CBOE payload itself,
@@ -538,6 +557,9 @@ async def alphahive_get_sell_strike_candidates(params: TickerDateInput) -> str:
               only the daily scan does, once. When the gates are met but the
               daily scan has not frozen the test yet, the tool reports
               awaiting_freeze: true ("ready, awaiting the daily freeze").
+              state_dir {path, exists, hint}: which ledger was read; status
+              "undetermined" with exists=false means "ledger not found",
+              not "ledger empty".
             - caveats (list[str]), disclaimer (str)
     """
     try:

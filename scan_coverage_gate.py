@@ -36,6 +36,24 @@
     /usr/local/bin/python3 scan_coverage_gate.py                    # 判当日
     /usr/local/bin/python3 scan_coverage_gate.py --date 2026-08-26
     /usr/local/bin/python3 scan_coverage_gate.py --quiet --out cov.json
+
+输出契约（v0.45.355，`step_contract`）
+--------------------------------------
+`--out` 写 `step_contract.envelope(...)`：原有键原样留在顶层（编排器 Step 12 现行内联解析照读）。
+⚠️ **撞名**：本工具是四个里唯一一个结果里本来就有 `date` 的（`check()` 的返回值）。外壳把
+`date` 列为保留键、撞名即抛，所以写盘时把它从 payload 里**拿出来、同值交给外壳**——JSON 顶层
+`date` 的键名与取值都与改造前一致（`--date` 或缺省业务日），`check()` 的返回值本身不变
+（`_render` 与进程内调用方照读 `res["date"]`）。缺省业务日 = `step_contract.business_today()`（洛杉矶当日，
+与扫描给 `.swarm_results_<date>.json` 取名的口径相同）；⚠️ 它**不等于**编排器本机时区的 `DATE_STR`
+（2026-11-01 起冬令时每天有一小时差一天，见 `business_today` 的 docstring）。
+0 ⇒ ok、1 ⇒ attention、3 ⇒ undetermined；未捕获异常 ⇒ 退出码 3 + `status: "error"` 外壳
+（此前 Python 默认 1 = 「检出降级」）。`attention` 由 `contract_attention()` 显式列出。
+`step_contract` 本身导入失败 ⇒ 入口也是退出码 3（不写 `--out`）；**本模块其余的导入期失败仍是 1**
+（`run_tool` 兜不到 import，见其 docstring）。
+`--out` 的父目录不存在 ⇒ 与改造前一样是未捕获异常（`write_out` 不建目录），现在按崩溃记退出码 3，
+崩溃路径同样写不出外壳、只打 stderr。
+⚠️ 非规范的 `--date`（如 `2026-8-26`）过不了外壳的日期校验 ⇒ 按崩溃记（退出码 3，
+改造前同一输入也是 3：结果文件名对不上 ⇒ 无法判定）。编排器不传 `--date`。
 """
 
 from __future__ import annotations
@@ -47,12 +65,25 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# `step_contract` 本身导入失败 ⇒ 置哨兵，`__main__` 入口见哨兵退出码 3——不让它落成 Python 默认的 1
+# （= 本工具的「检出降级」）。⚠️ 只兜这一个 import：本模块其余的导入期失败仍是 1（见 step_contract.run_tool）。
+try:
+    import step_contract
+    _STEP_CONTRACT_IMPORT_ERROR: Optional[str] = None
+except Exception as _e:  # noqa: BLE001 —— 连语法错也要兜：哨兵只记下原因，入口据此退出码 3
+    step_contract = None
+    _STEP_CONTRACT_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
+
 # v0.45.260（数据根迁移阶段 2）：`ROOT` 此前是 `Path(__file__).parent`（模块级
 # 常量），完全不读 `ALPHA_HIVE_HOME`——本模块是编排器 Step 12 每日活跃调用的
 # 覆盖率闸（`alpha-hive-orchestrator.sh:1240-1241`，只传 `--quiet --out`，
 # **不传** `--file`，走的正是这条默认分支）。改为覆盖钩子 + 调用时求值。
 # 生产今天不设 `ALPHA_HIVE_HOME` 时兜底到同一个仓库根，行为不变。
 ROOT = None
+
+_TOOL = "scan_coverage_gate"
+#: 退出码 → 外壳 status（v0.45.355）。退出码约定本身不变；崩溃的 3 由 run_tool 写 "error"。
+_STATUS_BY_RC = {0: "ok", 1: "attention", 3: "undetermined"}
 
 
 def _root() -> Path:
@@ -520,9 +551,95 @@ def _render_rate_limit(r: Dict[str, Any], fields_healthy: bool = False) -> str:
             + _rate_limit_verdict(r, fields_healthy))
 
 
+def _exit_code(res: Dict[str, Any]) -> int:
+    """退出码语义（与 scan_continuity 一致）：0 健康 / 1 检出降级 / 3 无法判定。
+
+    v0.45.355 从 `main()` 末尾原样抽出——外壳 `status` 与退出码必须出自同一处判定。"""
+    if not res.get("determinable"):
+        return 3
+    lh = res.get("label_honesty") or {}
+    _degraded = (
+        (not res["healthy"])
+        or (lh.get("determinable") and not lh["healthy"])
+        or (res.get("price_check", {}).get("determinable")
+            and not res.get("price_check", {}).get("healthy", True))
+    )
+    return 1 if _degraded else 0
+
+
+def contract_attention(res: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """把全部检查结果**显式**翻成 `step_contract` 的 attention 条目（v0.45.355）。
+
+    与 `_exit_code` 的三条降级判据一一对应（字段降级 / 标签矛盾 / 坏价格），各出一条
+    warn 或 alarm；「疑为网络层」另出一条 warn（它是对降级的定性，决定修法方向）。
+    级别取舍：字段缺失 = 数据**缺**（报告里显示「—」）⇒ warn；标签宣称成功而值为空、
+    入场价是坏读数 = 数据或口径**可能已经错了** ⇒ alarm。
+    限流是诊断项、**不进退出码**：字段降了它是病因 ⇒ warn；字段还全 ⇒ 早期预警，只作 info
+    （status 仍 ok——`status=ok` 不许带 warn/alarm）。
+    """
+    A = step_contract.attention_item
+    items: List[Dict[str, Any]] = []
+    if not res.get("determinable"):
+        items.append(A(f"{_TOOL}.undetermined", "warn",
+                       f"无法判定字段覆盖率：{res.get('reason')}"))
+        return items
+
+    bad = [f for f in res.get("fields") or [] if f.get("degraded")]
+    if bad:
+        items.append(A(f"{_TOOL}.fields_degraded", "warn",
+                       "降级字段：" + "；".join(
+                           f"{f['field']} {f['have']}/{f['total']}"
+                           f"（闸 {f['min_coverage']:.0%}，{f['source']}）" for f in bad)
+                       + " —— 本次报告里这些指标会显示「—」"))
+        if res.get("likely_network_layer"):
+            srcs = sorted({f["source"].split()[0] for f in bad})
+            items.append(A(f"{_TOOL}.likely_network_layer", "warn",
+                           f"多个不同数据源同时降级（{'、'.join(srcs)}）⇒ 疑为网络/闸门层，"
+                           f"而非单一数据源不可用"))
+    elif not res.get("healthy", True):
+        items.append(A(f"{_TOOL}.fields_degraded", "warn",
+                       f"字段覆盖率降级：{', '.join(res.get('degraded_fields') or []) or '（未列出字段）'}"))
+
+    lh = res.get("label_honesty") or {}
+    if lh.get("determinable") and not lh.get("healthy", True):
+        cs = lh.get("contradictions") or []
+        shown = "；".join(f"{c['ticker']} {c['label_field']}={c['label']!r} 但 "
+                         f"{c['value_field'].split('.')[-1]} 为空" for c in cs[:10])
+        more = f" 等共 {len(cs)} 处" if len(cs) > 10 else ""
+        items.append(A(f"{_TOOL}.label_contradictions", "alarm",
+                       f"来源标签矛盾 {len(cs)} 处（标签宣称取数成功，值却为空）：{shown}{more}"))
+    elif not lh.get("determinable"):
+        items.append(A(f"{_TOOL}.label_honesty_undetermined", "info",
+                       f"来源标签核对无法判定：{lh.get('reason')}"))
+
+    pr = res.get("price_check")
+    if isinstance(pr, dict):
+        if pr.get("determinable") and not pr.get("healthy", True):
+            items.append(A(f"{_TOOL}.bad_prices", "alarm",
+                           "坏价格（入场价不可用于收益计算）：" + "；".join(
+                               f"{r['ticker']} 记录 {r['recorded']} vs 收盘 {r['actual_close']}"
+                               f"（{r['deviation_pct']:+.2f}%）" for r in pr.get("bad") or [])))
+        elif pr.get("determinable") and pr.get("warn"):
+            items.append(A(f"{_TOOL}.price_drift", "info",
+                           "价格偏差 1%~5%（多为补跑窗口漂移）：" + "、".join(
+                               r["ticker"] for r in pr["warn"])))
+        elif not pr.get("determinable"):
+            items.append(A(f"{_TOOL}.price_check_undetermined", "info",
+                           f"价格核验无法判定：{pr.get('reason')}"))
+
+    rl = res.get("rate_limit") or {}
+    if rl.get("determinable") and not rl.get("healthy", True):
+        fields_ok = bool(res.get("healthy"))
+        items.append(A(f"{_TOOL}.rate_limit", "info" if fields_ok else "warn",
+                       f"yfinance 限流 {rl.get('count')} 次（闸 {rl.get('threshold')}，"
+                       f"{rl.get('first')}–{rl.get('last')}）："
+                       + (rl.get("verdict") or _rate_limit_verdict(rl, fields_ok))))
+    return items
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="扫描字段覆盖率闸")
-    ap.add_argument("--date", default=None, help="业务日期 YYYY-MM-DD（默认 PDT 当日）")
+    ap.add_argument("--date", default=None, help="业务日期 YYYY-MM-DD（默认洛杉矶当日）")
     ap.add_argument("--file", default=None, help="直接指定 .swarm_results_*.json")
     ap.add_argument("--quiet", action="store_true", help="只输出结论行")
     ap.add_argument("--out", default=None, help="把完整结果写成 JSON")
@@ -534,14 +651,13 @@ def main() -> int:
                     help="额外核验 price_at_predict 与真实收盘（需网络，较慢）")
     args = ap.parse_args()
 
-    date = args.date
-    if not date:
-        try:
-            from timezone_utils import pdt_today
-            date = pdt_today().isoformat()
-        except Exception:  # noqa: BLE001
-            from datetime import date as _d
-            date = _d.today().isoformat()
+    # v0.45.355：缺省业务日改走 `step_contract.business_today()`（洛杉矶当日 = 扫描给结果文件取名的口径，
+    # 也就是外壳 `date` 的定义）。原写法 `from timezone_utils import pdt_today` 引用的模块在本仓
+    # **从未存在过**（git 历史里零提交），每次都静默落进 `except` 用本机日历日（America/Vancouver）——
+    # 那条「PDT」是写在注释里、从没被执行过的断言。两地目前同日；2026-11-01 起温哥华常年 UTC-7，冬令时每天
+    # 本机 00:00–01:00 两者差一天，那一小时里缺省值从此跟扫描的文件名走，而**不等于**编排器的 DATE_STR
+    # （本机日）——要比新鲜度就显式传 --date（见 step_contract.business_today）。
+    date = args.date or step_contract.business_today()
 
     res = check(date, Path(args.file) if args.file else None)
     # v0.45.360：账本入场价。必须在渲染/写盘之前并进 res，否则 --quiet 摘要与 --out 都看不见
@@ -601,19 +717,21 @@ def main() -> int:
     # 原先坏价格那条是**提前 return 1**，会绕过写盘 —— 于是「检出问题」的那次
     # 恰好是 --out 拿不到 JSON 的那次，下游想查都查不了。
     # 退出码语义（与 scan_continuity 一致）：0 健康 / 1 检出降级 / 3 无法判定。
+    rc = _exit_code(res)
     if args.out:
-        Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2))
-
-    if not res.get("determinable"):
-        return 3
-    _degraded = (
-        (not res["healthy"])
-        or (lh.get("determinable") and not lh["healthy"])
-        or (res.get("price_check", {}).get("determinable")
-            and not res.get("price_check", {}).get("healthy", True))
-    )
-    return 1 if _degraded else 0
+        # `date` 是外壳保留键：同值交给外壳，JSON 顶层 `date` 键名与取值不变（见模块 docstring）
+        payload = {k: v for k, v in res.items() if k != "date"}
+        step_contract.write_out(args.out, step_contract.envelope(
+            _TOOL, res.get("date") or date, _STATUS_BY_RC[rc],
+            attention=contract_attention(res), payload=payload))
+    return rc
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if step_contract is None:
+        # 没有 step_contract 就写不出外壳：只打 stderr，退出码 3（「无法判定」），不写 --out
+        print(f"{_TOOL}: 无法导入 step_contract（{_STEP_CONTRACT_IMPORT_ERROR}）—— 退出码 3，按「无法判定」处理；"
+              "本次不写 --out", file=sys.stderr)
+        sys.exit(3)
+    # v0.45.355：未捕获异常 ⇒ 退出码 3 + error 外壳（不再是 Python 默认的 1 = 「检出降级」）
+    sys.exit(step_contract.run_tool(_TOOL, main))

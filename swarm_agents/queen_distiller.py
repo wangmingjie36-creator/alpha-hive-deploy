@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional
 from pheromone_board import PheromoneBoard
 from models import DataQualityChecker as _DQChecker
+import gex_state as _gex_state_mod
 from swarm_agents._config import _log
 from swarm_agents.cache import _safe_score
 from swarm_agents.utils import LLM_ERRORS
@@ -1076,6 +1077,9 @@ class QueenDistiller:
 
         # ===== 0. GEX 政体 + 政体权重预计算 =====
         _gex_data = {}
+        # v0.45.362：步骤 0 的大 try 若在构造状态之前就抛了，落盘的是这份（原因如实写明）
+        _gex_missing_reason = "not_computed"
+        _gex_state = _gex_state_mod.build(None, missing_reason="regime_step_failed")
         _gex_mod_result = {"gex_adjustment": 0.0, "gex_regime": "unknown",
                            "flip_proximity_pct": None, "can_flip_vanna": False,
                            "regime_description": "未计算", "confidence_modifier": 1.0}
@@ -1107,18 +1111,30 @@ class QueenDistiller:
                     if _scout_price and float(_scout_price) > 0:
                         _gex_analyzer = DealerGEXAnalyzer()
                         _gex_data = _gex_analyzer.analyze(ticker, float(_scout_price))
+                    else:
+                        _gex_missing_reason = "no_scout_price"
                 except Exception as _e_gex_lazy:
+                    _gex_missing_reason = f"exception:{type(_e_gex_lazy).__name__}"
                     _log.debug("按需 GEX 计算失败 (%s): %s", ticker, _e_gex_lazy)
 
             # 升级 #4: 根据政体调整权重
             _rwa = RegimeWeightAdjuster()
-            _gex_regime_str = _gex_data.get("regime", "unknown") if _gex_data else "unknown"
+            # v0.45.362：表达式原样挪进 routing_regime()（同一个 try 里调用，抛异常走向不变 ⇒ 不改分数）；
+            # 同一输入再构造一份带可得性标记的 GEX 状态落盘，展示 / 存档只读它（理由见 gex_state 模块 docstring）。
+            _gex_regime_str = _gex_state_mod.routing_regime(_gex_data)
+            _gex_state = _gex_state_mod.build(_gex_data, missing_reason=_gex_missing_reason)
+            if not _gex_state["available"] and _gex_regime_str != "unknown":
+                # 已知 bug、刻意不修（修了改分数，要另登边界）：状态不可得（NaN total / 快照模式截断主链），
+                # 路由却照旧拿到了正 / 负 regime。只让它可见。
+                _log.error("[%s] GEX 状态不可得（%s），政体路由仍按 regime=%s（见 gex_state 模块 docstring）",
+                           ticker, _gex_state["reason"], _gex_regime_str)
             _regime_weights_used, _regime_weights_desc = _rwa.adjust_weights(
                 base_weights=dict(self.DIMENSION_WEIGHTS),
                 macro_regime=_macro_regime,
                 gex_regime=_gex_regime_str,
                 iv_rank=_iv_rank_val,
             )
+            _gex_state["routing_applied"] = True   # v0.45.362：状态不替失败的路由作证（抛了就停在 False）
             if _regime_weights_desc != "权重未调整（中性环境）":
                 _log.info("[%s] 政体权重调整: %s | %s", ticker, _regime_weights_desc,
                           {k: f"{v:.3f}" for k, v in _regime_weights_used.items()})
@@ -1374,6 +1390,9 @@ class QueenDistiller:
             "ml_feedback_enabled": self.ml_feedback_enabled,
             # 升级 #1: GEX 政体诊断（v0.45.334 起 applied=False：gex_adjustment 算了但没施加）
             "gex_regime_mod": _gex_mod_result,
+            # v0.45.362：每只标的一份 GEX 状态（全到期日视图 + 可得性标记），展示 / 存档只读这一份；
+            # regime 就是上面政体路由收到的值。OracleBee 的 gamma_exposure 是主链截断量，不是它。
+            "gex_state": _gex_state,
             # 升级 #4: 政体条件权重
             "regime_weights_description": _regime_weights_desc,
             "macro_regime": _macro_regime,

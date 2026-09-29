@@ -20,12 +20,19 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 CSS = ROOT / "templates" / "dashboard.css"
 
+# CSS 命名色：常见的这批写进来（全表 148 个，罕见名不值得换可读性）。复查时发现最初只认 white/black，
+# `color:red` 能原样溜过去。
+_NAMED = ("white|black|red|green|blue|gray|grey|orange|yellow|purple|pink|brown|navy|teal|silver|gold|"
+          "maroon|lime|olive|aqua|cyan|magenta|crimson|tomato|coral|salmon|khaki|ivory|beige|indigo|violet|"
+          "darkred|darkgreen|darkblue|darkorange|lightgray|lightgrey|darkgray|darkgrey|dimgray|dimgrey|"
+          "whitesmoke|gainsboro|slategray|slategrey|steelblue|firebrick|forestgreen|goldenrod|orangered")
 _LITERAL = re.compile(
     r"#[0-9A-Fa-f]{3,8}\b"
     r"|rgba?\((?!\s*var\()[^)]*\)"          # rgba(var(--tint-x),α) 是令牌写法，放行
-    r"|hsla?\([^)]*\)"
-    r"|(?<![-\w])(?:white|black)(?![-\w])"  # 不误伤 white-space
+    r"|hsla?\([^)]*\)|(?:ok)?(?:lab|lch)\([^)]*\)|hwb\([^)]*\)|color\([^)]*\)"
+    rf"|(?<![-\w])(?:{_NAMED})(?![-\w])"    # 不误伤 white-space / --bull
 )
+_QUOTED = re.compile(r"\"[^\"]*\"|'[^']*'")  # font-family / content 里的字符串不算颜色
 
 # (选择器, 声明里出现的字面量) → 为什么它不该是令牌
 ALLOWED = {
@@ -57,7 +64,7 @@ def _strip_print(css: str) -> str:
 
 
 def _offenders(css: str, allowed=ALLOWED):
-    css = _strip_print(re.sub(r"/\*.*?\*/", "", css, flags=re.S))
+    css = _QUOTED.sub('""', _strip_print(re.sub(r"/\*.*?\*/", "", css, flags=re.S)))
     hits = []
     for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
         sel = m.group(1).strip()
@@ -158,6 +165,11 @@ def test_solid_fills_use_on_solid_ink():
     (".x{background:rgba(34,197,94,.12)}", [".x → rgba(34,197,94,.12)"]),
     (".x{border:1px solid white}", [".x → white"]),
     (".x{background:hsl(0 0% 0%)}", [".x → hsl(0 0% 0%)"]),
+    (".x{color:red}", [".x → red"]),
+    (".x{border-color:slategray}", [".x → slategray"]),
+    (".x{color:oklch(60% .1 30)}", [".x → oklch(60% .1 30)"]),
+    (".x{font-family:'Gold Sans',serif;content:\"red\"}", []),
+    (".x{color:var(--bull);border-left:3px solid var(--bear)}", []),
     (".x{background:rgba(var(--tint-bull),.12);color:var(--bull);white-space:nowrap}", []),
     ("@media print{body{background:#fff;color:#000}.hero{background:#f8f8f8}}", []),
     ("@media print{body{color:#000}}.y{color:#333}", [".y → #333"]),

@@ -351,6 +351,16 @@ def main() -> int:
     need = required_weeks(args.target_ic)
 
     if not rows:
+        # 库打不开 / 表查不了 ≠ 没样本（v0.45.382）：原先 notes 里写了路径却不打印，一律说「这是正常状态」——
+        # 不带 ALPHA_HIVE_HOME 手动跑时库在代码目录下根本不存在，也会被读成「正常，继续攒」
+        blocked = [n for n in data.get("notes", []) if n.startswith("⛔")]
+        if blocked:
+            print("❓ 无法判定：样本库读不到（这不是「无可用样本」）")
+            for n in blocked:
+                print(f"   {n}")
+            print("   未设 ALPHA_HIVE_HOME / ALPHA_HIVE_DB_PATH 时 PATHS.db 回落到代码目录；"
+                  "生产数据根由编排器 export（scripts/alpha-hive-orchestrator.sh）")
+            return 3
         print("❌ 无可用样本（世代内还没有已验证的 T+7 结果）")
         print("   这是正常状态 —— 见 ic_rerun_readiness.py 的进度")
         return 3

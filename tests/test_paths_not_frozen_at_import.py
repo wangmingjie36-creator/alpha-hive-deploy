@@ -514,7 +514,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
     与 `TestSpeciesDoesNotSpread` 一样是**子集**语义：清掉存量不会变红，新增必红。
     """
 
-    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**；v0.45.230 +1 `weekly_optimizer._CODE_DIR`；v0.45.289 +1 `backup_continuity.ALPHAHIVE_DIR`）。清掉一处就从这里删一行。
+    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**；v0.45.230 +1 `weekly_optimizer._CODE_DIR`；v0.45.289 +1 `backup_continuity.ALPHAHIVE_DIR`；v0.45.383 +1 `ic_rerun_readiness._HV_GAP_EVIDENCE_PATH`）。清掉一处就从这里删一行。
     # ⚠️ 子集语义的副作用：**清干净了也不会变红**，过期项会悄悄留下。
     #    定期对账：`KNOWN - _scan(marker="__file__")` 非空即是过期项
     #    （本版就这么揪出 2 条已清却还挂着的）。
@@ -535,6 +535,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("thesis_breaks.py", "_CONFIG_JSON_PATH"),    # thesis_breaks_config.json，生产只读
         ("market_intelligence.py", "_BASE"),          # 同上
         ("watchlist_events.py", "EVENTS_FILE"),       # watchlist_events.md
+        ("ic_rerun_readiness.py", "_HV_GAP_EVIDENCE_PATH"),  # experiments/hv_gap_equivalence_20260928.json，v0.45.383 冻结的等价证据，随代码发布、判定时只读
         # ── C. 已读 `ALPHA_HIVE_HOME`、`__file__` 只作兜底（另一个子物种，冻在 import 期）──
         # v0.45.198: ("agent_toolbox.py", "ALLOWED_ROOTS") 已摘除 —— `FilesystemTool`
         # 零读者被删，`ALLOWED_ROOTS` 随之消失。⚠️ 摘它**不是**因为有测试变红：
@@ -730,10 +731,11 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("thesis_breaks.py", "_CONFIG_JSON_PATH"),
         ("market_intelligence.py", "_BASE"),
         ("watchlist_events.py", "EVENTS_FILE"),
+        ("ic_rerun_readiness.py", "_HV_GAP_EVIDENCE_PATH"),  # v0.45.383：冻结证据，判定时只读；指向代码同址的文件、不是数据
     }
 
     def test_code_anchored_paths_were_not_wrongly_converted(self):
-        """这 13 处必须**仍然**是 `__file__` 派生 —— 防「一刀切清理」。
+        """这 14 处必须**仍然**是 `__file__` 派生 —— 防「一刀切清理」。
 
         ⚠️ 这条断言的方向和 `test_no_new_file_derived_paths` **相反**。
         只有子集守卫时，「把模板路径改成 `PATHS.home`」会静默通过，

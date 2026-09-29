@@ -16,6 +16,7 @@ _log = logging.getLogger("alpha_hive.dashboard_renderer")
 
 from pathlib import Path as _Path_mod
 from jinja2 import Environment
+import gex_state as _gex_state
 
 
 # ── 报告文件名 → 日期：iCloud 重名副本闸（v0.45.192） ──
@@ -633,9 +634,14 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     pc = oracle.get("put_call_ratio", None)
     real_pct = sd.get("data_real_pct", None)
     # ── 新增期权信号字段（#1）──
-    gex = oracle.get("gamma_exposure", None)
+    # v0.45.362：GEX 改读蒸馏结果的 gex_state（全到期日视图，就是政体路由用的那份；不可得 ⇒ None ⇒ "-"）。
+    # 原先读 OracleBee `gamma_exposure`（主链 ≤4 个到期日的截断量，可与全书净 GEX 符号相反）。
+    # 缺状态**不回退**主链那个数——两个量同叫 GEX 正是要消灭的事（见 gex_state 模块 docstring）。
+    _gst = _gex_state.of(sd)
+    gex = _gst["total_gex"] if _gst and _gst.get("available") else None
     flow_dir = oracle.get("flow_direction", None)
-    gsr = oracle.get("gamma_squeeze_risk", None)
+    # v0.45.362：分档同样取自 gex_state（Oracle 的 gamma_squeeze_risk 是主链分档、方向相反）。本字段当前无渲染点
+    gsr = _gex_state.squeeze_label(_gex_state.display_regime(sd)) if _gst else None
     iv_current = oracle.get("iv_current", None)
     signal_sum = oracle.get("signal_summary", "")
     # ── v0.45.52：IV-RV 价差与 30 日实现波动率 ──
@@ -1178,7 +1184,10 @@ def _load_accuracy_data() -> dict:
         # 两次之间若数据变化还会自相矛盾。
         from portfolio_backtest import BacktestConfig as _BC, run_backtest as _run_bt
 
-        _bt_cfg = _BC(exclude_nontrading_days=True)  # v32.3: 门面只算核心交易日
+        # v32.3: 门面只算核心交易日
+        # v0.45.374: 门面按零成本口径结算（用户实盘成本≈0，决定去掉成本模型）。
+        # 曲线/卡片仍同源 —— 同一次回测，只是 net_return_pct == 方向调整后的 gross。
+        _bt_cfg = _BC(exclude_nontrading_days=True, apply_trading_costs=False)
         _bt_result = _run_bt(_bt_cfg)
         if "error" in _bt_result:
             # ⚠️ 失败 = **没有曲线**，不是退回另一套模型。
@@ -1590,7 +1599,7 @@ def _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail) 
         cat = c["nearest_cat"]
         unusual = c["unusual"]
 
-        bg = "rgba(34,197,94,.10)" if is_bull else "rgba(239,68,68,.10)"
+        bg = "rgba(var(--tint-bull),.10)" if is_bull else "rgba(var(--tint-bear),.10)"
         border = "var(--bull)" if is_bull else "var(--bear)"
         dot_cls = "dot-bull" if is_bull else "dot-bear"
         label = "看多" if is_bull else "看空"
@@ -2102,7 +2111,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                     exp_tag = f' <span style="background:transparent;border:0.5px solid var(--border);color:var(--ts);padding:1px 4px;border-radius:4px;font-size:.65em">{w["dom_exp"]}</span>' if w.get("dom_exp") else ""
                     rows.append(
                         f'<div style="display:flex;justify-content:space-between;font-size:.78em;padding:2px 0;'
-                        f'border-bottom:1px dashed rgba(148,163,184,.2)">'
+                        f'border-bottom:1px dashed var(--border)">'
                         f'<span style="color:{side_color};font-weight:600">${w["strike"]:.0f}{exp_tag}</span>'
                         f'<span style="color:var(--ts);font-size:.85em">{pct_str}</span>'
                         f'<span style="color:var(--tp);font-weight:500">{oi_str}</span>'
@@ -2422,8 +2431,8 @@ def render_dashboard_html(report: Dict, date_str: str,
                 for _k, _v in sorted(_dqb_wide, key=lambda x: -len(x[1]))[:4]
             ) or f"整体数据真实度 {_dqb_avg:.0f}%"
             dq_banner_html = (
-                '<div class="dq-banner" style="background:rgba(224,160,60,.12);'
-                'border:1px solid rgba(224,160,60,.5);border-radius:4px;'
+                '<div class="dq-banner" style="background:rgba(var(--tint-neut),.12);'
+                'border:1px solid rgba(var(--tint-neut),.5);border-radius:4px;'
                 'padding:10px 16px;margin:12px 0;font-size:.85em;">'
                 f'<strong>数据部分降级</strong>：{_dqb_items}。'
                 '受影响通道已按中性处理，今日结论可靠性下降，建议交叉验证。</div>'
@@ -2760,9 +2769,9 @@ def render_dashboard_html(report: Dict, date_str: str,
 
     # 方向分组 KPI 卡片
     _dir_kpi_cfg = [
-        ("bullish", "看多", "var(--bull)", "rgba(34,197,94,.08)"),
-        ("bearish", "看空", "var(--bear)", "rgba(239,68,68,.08)"),
-        ("neutral", "中性", "var(--neut)", "rgba(148,163,184,.08)"),
+        ("bullish", "看多", "var(--bull)", "rgba(var(--tint-bull),.08)"),
+        ("bearish", "看空", "var(--bear)", "rgba(var(--tint-bear),.08)"),
+        ("neutral", "中性", "var(--neut)", "rgba(var(--tint-slate),.08)"),
     ]
     _acc_dir_kpi_html = ""
     for _dk, _dlabel, _dcol, _dbg in _dir_kpi_cfg:
@@ -2847,20 +2856,20 @@ def render_dashboard_html(report: Dict, date_str: str,
     </div>
     {_acc_enhanced_html}
     <!-- ── Sprint 1 / v16.0 Trading Stats 真实交易指标 ── -->
-    <div class="acc-section-title" style="margin-top:18px">真实策略回测（扣成本 · 路径依赖 · Sprint 1）</div>
+    <div class="acc-section-title" style="margin-top:18px">真实策略回测（零成本 · 路径依赖）</div>
     <div id="tradingStatsBox" style="margin:10px 0 16px">
       <div style="font-size:.78em;color:var(--ts);margin-bottom:8px">
         <strong>方法学</strong>：{_methodology_html}
-        -5% 硬止损 / +10% 止盈（盘中触发，跳空时 gap-aware），扣滑点 + 佣金 + 借券费（空头）。
+        -5% 硬止损 / +10% 止盈（盘中触发，跳空时 gap-aware），不计交易成本（实盘成本≈0）。
         <span style="color:#e99;">下方资金曲线就是这次回测的 NAV 路径，终点 = 上面的组合终值。</span>
         <span style="color:var(--ts);">Sharpe 已年化（×√36，T+7 周期）。</span>
       </div>
       <div id="tradingStatsCards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px"></div>
     </div>
 
-    <!-- ── Equity Curve 权益曲线 (3 lines: Gross/Net/SPY) ── -->
+    <!-- ── Equity Curve 权益曲线 (2 lines: 策略 / SPY；v0.45.374 起零成本，Gross 线与之重合已去掉) ── -->
     <div class="eq-section">
-      <div class="acc-section-title" style="margin-top:18px">资金曲线对比 · Gross · Net · SPY 基准</div>
+      <div class="acc-section-title" style="margin-top:18px">资金曲线 · 策略 vs SPY 基准</div>
       <div id="eqCurveContainer">
         <div class="eq-wrap"><canvas id="eqCurveChart"></canvas></div>
         <div class="eq-stats" id="eqStats"></div>
@@ -3010,19 +3019,19 @@ def render_dashboard_html(report: Dict, date_str: str,
                 _bear_n = sum(1 for d in _sec_data["dirs"] if d == "bearish")
                 # 颜色：基于动量 + 情绪综合
                 if _avg_mom > 1.5 and _avg_sent > 55:
-                    _hm_bg = "rgba(34,197,94,.18)"
-                    _hm_border = "rgba(34,197,94,.35)"
+                    _hm_bg = "rgba(var(--tint-bull),.18)"
+                    _hm_border = "rgba(var(--tint-bull),.35)"
                 elif _avg_mom < -1.5 and _avg_sent < 45:
-                    _hm_bg = "rgba(239,68,68,.14)"
-                    _hm_border = "rgba(239,68,68,.3)"
+                    _hm_bg = "rgba(var(--tint-bear),.14)"
+                    _hm_border = "rgba(var(--tint-bear),.3)"
                 elif _avg_mom > 0.5 or _avg_sent > 52:
-                    _hm_bg = "rgba(34,197,94,.08)"
-                    _hm_border = "rgba(34,197,94,.2)"
+                    _hm_bg = "rgba(var(--tint-bull),.08)"
+                    _hm_border = "rgba(var(--tint-bull),.2)"
                 elif _avg_mom < -0.5 or _avg_sent < 48:
-                    _hm_bg = "rgba(239,68,68,.07)"
-                    _hm_border = "rgba(239,68,68,.18)"
+                    _hm_bg = "rgba(var(--tint-bear),.07)"
+                    _hm_border = "rgba(var(--tint-bear),.18)"
                 else:
-                    _hm_bg = "rgba(100,116,139,.06)"
+                    _hm_bg = "rgba(var(--tint-slate),.06)"
                     _hm_border = "var(--border)"
                 _mom_cls = "hm-up" if _avg_mom > 0 else ("hm-dn" if _avg_mom < 0 else "")
                 _tk_chips = " ".join(f'<span class="hm-tk">{t}</span>' for t in _sec_data["tickers"][:5])

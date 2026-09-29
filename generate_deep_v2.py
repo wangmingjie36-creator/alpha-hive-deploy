@@ -56,6 +56,8 @@ except ImportError:
     def _load_prompt(name, fallback=""):
         return fallback
 
+import gex_state as _gex_state   # v0.45.362：GEX 只读扫描时那一份状态（纯标准库，无需防御式导入）
+
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
 # 数据根迁移阶段 4 遗留项（v0.45.268 CHANGELOG 记录，本次单独排期修复）：
 # `ALPHAHIVE_DIR` 此前是硬编码字面量 `Path(os.path.expanduser("~/Desktop/Alpha Hive"))`
@@ -596,19 +598,30 @@ def extract(data: dict) -> dict:
                           .get("expected_returns", {})
                           .get("sample_size", None))
 
-    # GEX（Gamma Exposure）：优先读 advanced_analysis.dealer_gex，其次 OracleBee
+    # GEX（v0.45.362 起）：① 蒸馏结果的 gex_state（扫描时政体路由用的那份，全到期日视图；有就以它为准）；
+    # ② 没有状态的旧记录才读 advanced_analysis.dealer_gex（同一视图、ML 报告里另算的一份）；③ 都没有 ⇒ 不可得。
+    # **不再回退 OracleBee 主链**：那是另一个量（≤4 个到期日截断，可与全书净 GEX 符号相反），而且它的
+    # `gamma_squeeze_risk` 分档方向与这里**相反**（options_analyzer：正 GEX ⇒ "high"；这里：负 GEX ⇒ "high"，
+    # 下游文案按「high = 做市商 short gamma」解读）——旧回退分支会把正 gamma 标的写成「Squeeze 风险较高」。
+    _gst = _gex_state.of(sr)
     _dgex = aa.get("dealer_gex", {}) or {}
-    if _dgex and float(_dgex.get("total_gex", 0) or 0) != 0:
-        gamma_exposure     = _dgex.get("total_gex", 0)
-        _gex_regime        = _dgex.get("regime", "")
-        _gex_flip          = _dgex.get("gex_flip")
-        _gex_call_wall     = _dgex.get("largest_call_wall")
-        _gex_put_wall      = _dgex.get("largest_put_wall")
+    if _gst is not None:            # 扫描记录里有状态就以它为准：不可得就是不可得，不拿另算的顶上
+        _gex_src = _gst if _gst.get("available") else None
+    elif _dgex and _gex_state.build(_dgex)["available"]:
+        _gex_src = _dgex            # 仅限 v0.45.362 之前、没有状态的旧记录；可得与否与状态同一套规则
+    else:
+        _gex_src = None
+    if _gex_src is not None:
+        gamma_exposure     = _gex_src.get("total_gex", 0)
+        _gex_regime        = _gex_src.get("regime", "")
+        _gex_flip          = _gex_src.get("gex_flip")
+        _gex_call_wall     = _gex_src.get("largest_call_wall")
+        _gex_put_wall      = _gex_src.get("largest_put_wall")
         gamma_squeeze_risk = ("high"   if _gex_regime == "negative_gex" else
                               "low"    if _gex_regime == "positive_gex" else "medium")
     else:
-        gamma_exposure     = odet.get("gamma_exposure", 0)
-        gamma_squeeze_risk = odet.get("gamma_squeeze_risk", "")
+        gamma_exposure     = 0          # 下游一律 float(x or 0)；0 触发 _try_compute_gex（仅限没有 gex_state 的旧记录）
+        gamma_squeeze_risk = ""
         _gex_regime        = ""
         _gex_flip          = None
         _gex_call_wall     = None
@@ -784,14 +797,19 @@ def extract(data: dict) -> dict:
         "aa_hist_sample_n": aa_hist_sample_n,
         # GEX
         "gamma_exposure": gamma_exposure,
+        # v0.45.362：扫描记录里有没有 GEX 状态（有但不可得 ⇒ 如实显示不可得，_try_compute_gex 不现算顶上）
+        "gex_state_present": _gst is not None,
         "gamma_squeeze_risk": gamma_squeeze_risk,
         "gex_regime": _gex_regime,
         "gex_flip": _gex_flip,
         "gex_call_wall": _gex_call_wall,
         "gex_put_wall": _gex_put_wall,
-        "flip_acceleration": _dgex.get("flip_acceleration", {}),
-        "vanna_stress": _dgex.get("vanna_stress", {}),
-        "gex_normalized_pct": _dgex.get("gex_normalized_pct", None),
+        # v0.45.362：状态可得（或旧记录的 dealer_gex 可用）才读这几项；状态不可得时不拿 ML 报告另算的那份顶上
+        "gex_available": _gex_src is not None,
+        "gex_state_reason": (_gst or {}).get("reason"),
+        "flip_acceleration": (_dgex if _gex_src is not None else {}).get("flip_acceleration", {}),
+        "vanna_stress": (_dgex if _gex_src is not None else {}).get("vanna_stress", {}),
+        "gex_normalized_pct": (_gex_src or {}).get("gex_normalized_pct"),
         # 升级 #1/#4: GEX 政体联动 + 政体权重
         "gex_regime_mod": sr.get("gex_regime_mod", {}),
         "regime_weights_description": sr.get("regime_weights_description", ""),
@@ -1318,6 +1336,12 @@ ScoutBee {ctx['scout'].get('score',5)}/10，OracleBee {ctx['oracle'].get('score'
     return {}
 
 
+def _html_escape_gex(v) -> str:
+    """GEX 状态 reason 进 HTML 前转义（reason 可能是异常信息原文）。"""
+    import html as _h
+    return _h.escape(str(v or ""))
+
+
 def _render_regime_badge(ctx: dict) -> str:
     """渲染 GEX 政体 + 权重调整徽章（CH1 底部）"""
     gex_mod = ctx.get("gex_regime_mod", {})
@@ -1340,6 +1364,9 @@ def _render_regime_badge(ctx: dict) -> str:
         else:
             badge_color = "#22c55e"
             badge_label = "🟢 正GEX（波动压缩）"
+        # v0.45.362：状态不可得、路由却拿到了 regime（NaN / 快照截断链，见 gex_state）——徽章照实说明
+        if ctx.get("gex_state_present") and not ctx.get("gex_available"):
+            badge_label += f" ⚠️ GEX 状态不可得（{_html_escape_gex(ctx.get('gex_state_reason'))}），路由仍按此"
 
         parts.append(
             f'<span style="display:inline-block;background:{badge_color}15;border:1px solid {badge_color}40;'
@@ -4826,6 +4853,10 @@ def _try_compute_gex(ctx: dict) -> None:
     # 已有非零 GEX 数据 → 无需重算
     if float(ctx.get("gamma_exposure", 0) or 0) != 0:
         return
+    # v0.45.362：扫描记录里有 GEX 状态（可得或不可得）就不现算——现算的是报告生成时刻的另一份，
+    # 不是政体路由当时用的那份；不可得就该如实显示不可得（与网站 / 日报一致）。只有旧记录（没有状态）才走下面。
+    if ctx.get("gex_state_present"):
+        return
 
     price = ctx.get("price")
     if not price or float(price) <= 0:
@@ -4841,6 +4872,7 @@ def _try_compute_gex(ctx: dict) -> None:
         if not result or float(result.get("total_gex", 0) or 0) == 0:
             return
         ctx["gamma_exposure"]     = result["total_gex"]
+        ctx["gex_available"]      = True    # v0.45.362：GEX 卡片按它判「有没有数」，不再按 total==0
         ctx["gex_regime"]         = result.get("regime", "")
         ctx["gex_flip"]           = result.get("gex_flip")
         ctx["gex_call_wall"]      = result.get("largest_call_wall")
@@ -4882,7 +4914,20 @@ def _try_charts(ctx: dict) -> tuple:
         conf_b64        = render_confidence_chart(raw_data, ticker, report_date)
         opts_b64        = render_options_chart(raw_data, ticker, report_date, price)
         iv_term_b64     = render_iv_term_chart(raw_data, ticker, report_date)
-        gex_profile_b64 = render_gex_profile_chart(raw_data, ticker, report_date, price)
+        # v0.45.362：扫描记录里有 GEX 状态时——不可得 ⇒ 不画（不拿 ML 报告另算的那份顶上）；可得 ⇒ 标题的总量 /
+        # regime / flip 用状态里的（柱形仍是 ML 报告那份 profile：同一视图同一 payload，逐行权价符号与传入价无关）
+        _gex_chart_data = raw_data
+        if ctx.get("gex_state_present"):
+            if not ctx.get("gex_available"):
+                _gex_chart_data = None
+            else:
+                _aa = dict(raw_data.get("advanced_analysis") or {})
+                _aa["dealer_gex"] = {**(_aa.get("dealer_gex") or {}),
+                                     "total_gex": ctx.get("gamma_exposure"),
+                                     "regime": ctx.get("gex_regime"), "gex_flip": ctx.get("gex_flip")}
+                _gex_chart_data = {**raw_data, "advanced_analysis": _aa}
+        gex_profile_b64 = (render_gex_profile_chart(_gex_chart_data, ticker, report_date, price)
+                           if _gex_chart_data is not None else None)
         skew_b64        = render_deep_skew_chart(raw_data, ticker, report_date)
 
         return (_wrap(conf_b64, "置信区间图表"), _wrap(opts_b64, "期权水位图表"),
@@ -6258,10 +6303,12 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
         _gex_float = float(_gex_val)
     except (TypeError, ValueError):
         _gex_float = 0.0
-    if _gex_float == 0.0:
+    # v0.45.362：按可得性判，不按 total==0（可得的真零会被误标「采集失败」）；缺键的旧 ctx 沿用旧判据
+    if not ctx.get("gex_available", _gex_float != 0.0):
         gex_display = "N/A"
         gex_color   = "var(--text3)"
-        gex_sub     = "⚠️ 数据采集失败"
+        gex_sub     = ("⚠️ 数据采集失败" if not ctx.get("gex_state_reason")
+                       else f"⚠️ 不可得（{_html_escape_gex(ctx.get('gex_state_reason'))}）")
         gex_card_class = "oc-neut"
         gex_extra_html = ""
     else:

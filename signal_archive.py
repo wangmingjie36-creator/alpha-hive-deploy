@@ -266,6 +266,29 @@ def _iv_rank_is_real(tr: Dict) -> Optional[float]:
     return 0.0 if src == "hv_proxy" else 1.0
 
 
+def _gex_state_sig(kind: str) -> Callable:
+    """v0.45.362：蒸馏结果里的 `gex_state`（全到期日视图，就是政体路由用的那份；见 `gex_state` 模块）。
+
+    · `gex.available`：有状态 ⇒ 1.0 / 0.0；没有状态（v0.45.362 之前的记录）⇒ None —— 覆盖率本身的观测点，
+      不可得的日子**不**以缺行的形式消失。
+    · `gex.total_gex` / `gex.negative`：仅可得时有值（不可得的 total 在状态里就是 None，不是 0.0 哨兵）。
+    ⚠️ 与 `options.gamma_exposure` 不是同一个量：那是 OracleBee 主链（≤4 个到期日）的截断量，可与这里符号相反。
+    """
+    def _f(tr: Dict) -> Optional[float]:
+        import gex_state as _gs
+        st = _gs.of(tr)
+        if st is None:
+            return None
+        if kind == "available":
+            return 1.0 if st.get("available") else 0.0
+        if not st.get("available"):
+            return None
+        if kind == "negative":
+            return 1.0 if st.get("regime") == "negative_gex" else 0.0
+        return _num(st.get("total_gex"))
+    return _f
+
+
 def _code_exec_fetch(key: str) -> Callable:
     """CodeExecutorAgent 取数脚本（`CodeGenerator._generate_yfinance`）的输出字段。
 
@@ -365,6 +388,10 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     "options.put_call_ratio": _path("agent_details.OracleBeeEcho.details.put_call_ratio"),
     "options.gamma_exposure": _path("agent_details.OracleBeeEcho.details.gamma_exposure"),
     "options.total_oi": _path("agent_details.OracleBeeEcho.details.total_oi"),
+    # v0.45.362：政体路由用的那份 GEX（全到期日视图）。上面的 options.gamma_exposure 是主链截断量，另一个量
+    "gex.available": _gex_state_sig("available"),
+    "gex.total_gex": _gex_state_sig("total_gex"),
+    "gex.negative": _gex_state_sig("negative"),
 
     # ── 情绪 ──────────────────────────────────────────────────
     "sentiment.pct": _path("agent_details.BuzzBeeWhisper.details.sentiment_pct"),
@@ -1121,6 +1148,8 @@ SIGNAL_LEAVES = frozenset({
     "price.momentum_5d", "price.volatility_20d", "price.volume_ratio",
     "options.iv_current", "options.put_call_ratio", "options.gamma_exposure", "options.total_oi",
     "options.iv_rank", "options.iv_percentile", "options.iv_rank_is_real",
+    # v0.45.362：CBOE 链 + Scout 价（同 price.* 按原始数据算）；只有本版上线后的记录才有，早于它的边界无从作用
+    "gex.available", "gex.total_gex", "gex.negative",
     "sentiment.pct",
     # v0.45.349：bear.insider_bear / bear.options_bear 移出（读 Scout / Oracle 方向，见 SIGNAL_UPSTREAM）
     "bear.overval_bear", "bear.short_int_bear",
@@ -1246,6 +1275,14 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 09-28（与 v0.45.357 同日同集合）：补跑的 Guard 宏观票对齐目标日（VIX 取 CSV 的 D 行并计票、期限结构读快照、
     # FOMC 按 D 数、板块按 D 对齐）⇒ 同样只动 `_calc_macro_adjustment` 的输入 ⇒ 同样点名这两项。只改补跑行。
     "v0.45.366": ("guard.macro_adj", "agent.GuardBeeSentinel.*"),
+    # 09-28（v0.45.369，新代码 09-29 上线，等价论证见 ic_rerun_readiness 同版条目）：Oracle 期权数据「可用」
+    # 改按 OptionsAgent 的 data_quality 判 —— 只改 Oracle 的 data_quality 标签与置信度，分与方向不变；
+    # 没有归档信号读 confidence / data_quality ⇒ 只动 Queen 层（同 v0.45.314 / 315）
+    "v0.45.369": (),
+    # 09-28（v0.45.383，新代码 09-29 上线，等价证据见 ic_rerun_readiness 同版条目）：日线完整性校验 ⇒ 缺口日的 iv_rank
+    # 置空、Oracle 期权分的 iv_signal 走中性 ⇒ Oracle 分变、方向随分数带变（同 v0.45.349 的两条）⇒ `agent.OracleBeeEcho.*`
+    # 点名；BearBee 的 options_bear 读 Oracle 方向 ⇒ `bear.options_bear` 点名（同 349）。只在缺口日×标的上变。
+    "v0.45.383": ("agent.OracleBeeEcho.*", "bear.options_bear"),
 }
 
 
@@ -1669,6 +1706,13 @@ def main() -> int:
                   f"（跳过 {st['skipped']}）")
 
     if args.list:
+        if not db.exists():
+            # --list 是只读查询，不许为了「看一眼」建库（v0.45.382）：原先 ensure_schema 读写模式连接 +
+            # CREATE TABLE ⇒ 数据根找错时凭空造出一个 pheromone.db，此后别的模块「库不存在」的
+            # 判定全部失效（变成「表不存在 / 没数据」）。表缺失的旧库照旧由 ensure_schema 补表。
+            print(f"❓ 无法判定：样本库不存在：{db}（--list 只读、不建库；"
+                  "未设 ALPHA_HIVE_HOME / ALPHA_HIVE_DB_PATH 时 PATHS.db 回落到代码目录）", file=sys.stderr)
+            return 3
         ensure_schema(db)
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         rows = con.execute(

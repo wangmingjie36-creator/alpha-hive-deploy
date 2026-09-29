@@ -7,7 +7,8 @@
 - p 值：判别用例的 t 落在 [z 临界, t(25) 临界) 之间，正态近似会在中检误判「拒绝」。
 - 盲化：返回值顶层键白名单 + 未出结论的假设不得出现在 `verdicts`。
 - 截断：世代边界（沿用 `generation_boundaries` 的影响面）与 config 权重的 git 历史，各自正反两例。
-- 接线：就绪度闸 `--quiet` 那一行的**段顺序**是契约（周度任务按「第三段 = F&G」解析）。
+- 接线：就绪度闸 `--quiet` 那一行的**段顺序**是契约，**段数不是**（周度任务 2026-09-28 起按段首名字 / 图标认段，
+  规则见 `_check_quiet_segments`）。
 - 修订 1（v0.45.330）：H1 按层截断并标层；判别用例是「只点名行情量的边界」——原登记看不见、修订 1 会截断。
   锚点三态（ok / pending / fallback）各自的进度行图标。窗口内夹具日期一律相对 `P.FORWARD_START`。
 
@@ -650,6 +651,30 @@ class TestStaticGuards:
 
 # ── 8. 接线：就绪度闸 ────────────────────────────────────────────────────────
 
+#: `ic_rerun_readiness --quiet` 已知各段的名字（段首图标后面紧跟的文字），**按文档顺序**。
+#: 新段只许追加在末尾（且以 🚨 开头）——要在这里加名字，就是在改周度任务读的格式。
+_QUIET_SEGMENT_NAMES = ("IC 重跑", "共振加成前瞻检验", "F&G 敞口门前瞻检验", "维度 IC 协议")
+#: 段首状态图标（与 `ic_rerun_readiness` / 三个执行器 `status_line` 的图标约定一致）
+_QUIET_ICONS = ("⏳", "✅", "⚠️", "🔔", "🚨")
+
+
+def _check_quiet_segments(segs):
+    """`--quiet` 那一行的段结构问题清单（空 = 合规）。不数段数：段数不是契约（见调用处 docstring）。"""
+    problems = []
+    for i, seg in enumerate(segs):
+        if not any(seg.startswith(ic + " ") for ic in _QUIET_ICONS):
+            problems.append(f"第 {i + 1} 段不以已知状态图标开头：{seg[:30]!r}")
+    if len(segs) < len(_QUIET_SEGMENT_NAMES):
+        problems.append(f"只有 {len(segs)} 段，已知段至少 {len(_QUIET_SEGMENT_NAMES)} 段——有已知段被删了")
+    for i, name in enumerate(_QUIET_SEGMENT_NAMES):
+        if i < len(segs) and not segs[i].split(" ", 1)[-1].startswith(name):
+            problems.append(f"第 {i + 1} 段应为「{name}」，实为 {segs[i][:30]!r}（已知段挪位或被删）")
+    for j, seg in enumerate(segs[len(_QUIET_SEGMENT_NAMES):], start=len(_QUIET_SEGMENT_NAMES) + 1):
+        if not seg.startswith("🚨 "):
+            problems.append(f"第 {j} 段是已知段之后的追加段，只许以 🚨 开头：{seg[:30]!r}")
+    return problems
+
+
 class TestCarriedByReadiness:
     def _stub(self, monkeypatch, rr):
         monkeypatch.setattr(rr, "assess", lambda *a, **k: {
@@ -664,7 +689,14 @@ class TestCarriedByReadiness:
                             lambda *a, **k: {"status": "not_ready", "line": "⏳ F&G 敞口门前瞻检验：桩"})
 
     def test_quiet_line_appends_dim_segment_last(self, monkeypatch, tmp_path, capsys):
-        """段顺序是契约：周度任务 SKILL.md 按「第三段 = F&G」解析，新段只许追加在末尾。"""
+        """段的**顺序**是契约，段的**个数**不是（v0.45.355 起）。
+
+        周度任务 SKILL.md 自 2026-09-28 起按段首的**名字 / 图标**认段（「以『F&G 敞口门前瞻检验』开头的那段」），
+        不再按「第三段 = F&G」，也写明「段数会随版本变，不要按段号解析」。所以这里不钉 `len(segs) == 4`——
+        那样每加一段（例如 v0.45.334 的 🚨 第五段）都要回来改测试，而改测试的人最容易顺手把真正的契约也放掉。
+        钉的是 `_check_quiet_segments` 的三条：已知段按文档顺序出现（不许挪位、不许删）、每段以已知状态图标开头、
+        已知段之后只许**追加**、且追加段以 🚨 开头。
+        """
         import sys
         import ic_rerun_readiness as rr
         self._stub(monkeypatch, rr)
@@ -675,8 +707,24 @@ class TestCarriedByReadiness:
         out = capsys.readouterr().out.strip().splitlines()
         assert len(out) == 1
         segs = out[0].split("｜")
-        assert len(segs) == 4
-        assert "F&G" in segs[2] and "维度 IC 协议" in segs[3]
+        assert _check_quiet_segments(segs) == [], (_check_quiet_segments(segs), segs)
+        assert segs[_QUIET_SEGMENT_NAMES.index("维度 IC 协议")].split(" ", 1)[1].startswith("维度 IC 协议")
+
+    @pytest.mark.parametrize("mutate,why", [
+        (lambda s: [s[0], s[2], s[1], s[3]], "已知段挪位"),
+        (lambda s: [s[0], s[1], s[3]], "删掉 F&G 段"),
+        (lambda s: s[:3], "删掉末段（维度 IC）"),
+        (lambda s: [s[0], s[1], s[2], "🚨 插队", s[3]], "新段插在已知段中间"),
+        (lambda s: s + ["⏳ 新段不许用非 🚨 图标追加"], "追加段不以 🚨 开头"),
+        (lambda s: [s[0].split(" ", 1)[1]] + s[1:], "段首丢了状态图标"),
+    ])
+    def test_segment_rule_has_teeth(self, mutate, why):
+        """规则本身要会红：上面那条只用了一个合规的行，证明不了规则不是恒真。"""
+        segs = ["⏳ IC 重跑未就绪：…", "⏳ 共振加成前瞻检验：…", "⚠️ F&G 敞口门前瞻检验无法判定：…",
+                "⏳ 维度 IC 协议（v0.45.320 预注册·修订 1）：…"]
+        assert _check_quiet_segments(segs) == []
+        assert _check_quiet_segments(segs + ["🚨 世代边界 vX / 2099-01-01 数据核对未通过"]) == [], "末尾追加 🚨 段是合法的"
+        assert _check_quiet_segments(mutate(list(segs))), f"{why} 却没被判出来"
 
     def test_json_payload_has_dim_key(self, monkeypatch, tmp_path, capsys):
         import sys

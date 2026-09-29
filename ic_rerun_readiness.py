@@ -40,8 +40,25 @@ v0.44.1~0.44.3 修了 ML 预期收益的结构性看多偏斜、并把 RivalBee 
 ------
     0 = 已就绪（该重跑 IC 了）
     1 = 未就绪（正常状态，继续攒）
-    3 = 无法判定（找不到库等）
+    3 = 无法判定（找不到库等）**或本工具自己崩了**（v0.45.355：入口经 `step_contract.run_tool`，
+        未捕获异常不再落成 Python 默认的 1——那会被编排器记成「未就绪（正常）」；`step_contract` 本身
+        导入失败也是 3，此时不写 `--out`）。⚠️ **本模块其余的导入期失败仍是 1**（`run_tool` 兜不到 import，
+        见其 docstring；要等编排器改走 `orchestrator_steps.py` 才与「未就绪」分得开）
         ⚠️ 3 而非 2：编排器 `run_step()` 把 2 保留给"脚本不存在"。
+
+`--json` / `--out` 的输出契约（v0.45.355，`step_contract`）
+---------------------------------------------------------
+原有的键**原样留在顶层**（编排器 Step 11 的内联解析照常读），外加外壳六键：
+`schema_version / tool / date / generated_at / status / attention`。
+    · `date` = 这次运行服务的业务日（`--today`，缺省 `step_contract.business_today()` = 洛杉矶当日）——
+      消费方拿它与自己的 DATE_STR 比新鲜度，所以**要显式传 `--today`**：编排器的 DATE_STR 取本机时区，
+      2026-11-01 起冬令时每天有一小时与洛杉矶日差一天（见 `business_today` 的 docstring）；
+    · `status` 是「要不要人看」，与退出码**分开**：`ok` / `attention` / `undetermined`（找不到库，退出码 3）/
+      `error`（崩溃，退出码 3，由 `run_tool` 写）；
+    · `attention` 由本工具从**结构化数据**逐条列出（就绪、池漂移、世代边界报警、三个前瞻检验的
+      无法判定 / 陈旧 / 已到检视点、维度 IC 协议 H1 锚点的截止日 …），**不从 `--quiet` 那行的图标反推**——
+      H1 锚点「须早于 2026-10-12」那种写在 ⏳ 段里的截止日，按图标读永远报不出来。
+`--quiet` 那一行的格式与退出码 0/1/3 **不因外壳改变**。
 """
 
 from __future__ import annotations
@@ -53,10 +70,20 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Set
+from typing import Dict, List, Optional, Set
 
 ALPHAHIVE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ALPHAHIVE_DIR))
+
+# 编排器工具输出契约（v0.45.355），仓内同目录模块，需先插 sys.path。
+# 它本身导入失败（缺文件 / 语法错 …）⇒ 置哨兵，`__main__` 入口见哨兵退出码 3——不让它落成 Python 默认的 1
+# （= 本工具的「未就绪（正常，继续攒）」）。⚠️ 只兜这一个 import：本模块其余的导入期失败仍是 1。
+try:
+    import step_contract  # noqa: E402
+    _STEP_CONTRACT_IMPORT_ERROR: Optional[str] = None
+except Exception as _e:  # noqa: BLE001 —— 连语法错也要兜：哨兵只记下原因，入口据此退出码 3
+    step_contract = None
+    _STEP_CONTRACT_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
 
 # v0.45.260（数据根迁移阶段 2）：DB_PATH 此前是从 ALPHAHIVE_DIR（`__file__`
 # 派生）算出的模块级常量——完全不读 `ALPHA_HIVE_HOME`。改为覆盖钩子 +
@@ -780,6 +807,60 @@ _COHORT_HISTORY = [
      "共振加成前瞻检验从记录的 agent_details 起算（Guard 政体是记录值），无需修订 replay。"
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段（risk_adj_score / volatility / "
      "final_score 是 ML 特征；只在补跑行变）。"),
+    ("2026-09-28", "v0.45.369",
+     "OracleBee 期权数据「可用」改按 OptionsAgent 自己的 `data_quality` 判（用户 2026-09-28 决定另登边界，"
+     "09-29 决定「09-28 期权链完整、数据就用」⇒ 并入 09-28 这一代）。旧判据是 `bool(result)`：真实链取不到时 "
+     "OptionsAgent 走「样本链早退」，返回**非空** dict（`data_quality: \"unavailable\"`、`options_score` 5.0、指标全 None）"
+     "⇒ Oracle 把固定的 5.0 分标成 `data_quality.options=\"real\"`、置信度照加 0.3（规则模式 0.4→0.7）。"
+     "新：该情形标 `\"unavailable\"`（与 \"fallback\" 同在 Queen 的 `PROXY_SOURCES`，权 0.7；\"real\" 权 1.0）、"
+     "置信度不加那 0.3。Oracle 分与方向**不变**；变的是 Queen 层 `data_real_pct`（→ `quality_factor`）与 Oracle 的"
+     "投票权重（方向计票按 confidence 加权）。`\"degraded\"`（链在、IV 缺）新旧都算取到，本版不动。"
+     "**依据（2026-09-28 只读实测，生产 `.swarm_results_*.json`）**：03-10~09-25 共 112 个扫描日里 26 天有这种行、"
+     "被标 real 的比例 100%；扩到 30 只之后只有 09-24、09-25（各 30/30）。**幅度（重放，现行代码 + 记录输入，外部依赖钉成记录值；对照先复现存档：09-24/25 60/60 行 final_score / 方向 / data_real_pct / quality_factor 逐位一致，另一代理独立复核一致）**：final_score 58/60 行变（09-24 |Δ| 中位 0.10、最大 0.25；09-25 中位 0.075、最大 0.19；有符号均值 +0.02），**方向 0 翻转**，data_real_pct 每行 −1.2pp（25 个 DQ 通道里一项 1.0→0.7，约 89→88，仍高于 80 ⇒ quality_factor 不变）；变动来自 odds 维（Oracle 恒 5.0）的有效权重 `max(0.3, conf^1.5)` 从 0.586 落到地板 0.3、中性票权 −0.15。更早 24 天（03-31~07-02，59 行）对照复现不了（v0.45.212 起 Guard/Bear 退出计票等现行代码改动），**不给数**。"
+     "**为什么日期写 09-28 而新代码 09-29 才上线**：本版改动只在「Oracle details 的 data_quality 是 unavailable」"
+     "那一种输入上改变输出；09-28 扫描 30/30 只取到了链（同日只读核对）⇒ 09-28 的记录在新旧代码下**评分与标签逐项相同**（新代码只多写一个印记键），"
+     "并进 09-28 不混算任何口径 ⇒ **作废 0 条** final_score 样本（另登 09-29 会作废 09-28 的 30 条）。"
+     "这个论证由数据核对、不靠推理：新增 `_BOUNDARY_EQUIVALENCE`（只对登记了的边界生效）——印记首见之前的旧代码记录"
+     "逐只标的读 `.swarm_results_<日期>.json` 核等价，**不等价**（旧代码又碰上断链）照报 boundary_too_early；"
+     "读不出的文件记为不等价（举证责任在放宽一侧）。印记 `_BOUNDARY_MARKERS[\"v0.45.369\"]`："
+     "Oracle details 带字面量 `options_dq_from_agent: True`（成功 / 异常兜底 / 无效 ticker / 日报合成回退都写）。"
+     "预期判定：新代码首跑之前 `no_evidence_yet`（09-28 等价、无印记）；首跑后 `matches`（其前 1 个扫描日为等价旧记录）。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.369\"]` = `()`：Oracle 分与方向不变、没有归档信号读 confidence 或"
+     "data_quality（同 v0.45.314 / 315，只动 Queen 层）⇒ 只有 `composite.final_score`（ALWAYS_SLICED）。"
+     "**前瞻检验**：维度 IC 协议 H2（加权合成）会随 final_score 变，但本条早于 FORWARD_START 2026-10-12 ⇒ 不截断；"
+     "H1（buzz_v1）不在闭包里。共振加成前瞻检验从记录的 agent_details 起算，无需修订 replay。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段（`final_score` 是 ML 特征，只在断链行变）。"
+     "LLM 模式本版未动：`llm_service.interpret_options_flow` 仍在 `result` 非空时调用（样本链结果也会送进去），"
+     "那是 LLM 模式的另一件事。"),
+    ("2026-09-28", "v0.45.383",
+     "日线完整性校验（用户 2026-09-29 决定：阶段 1 直接做、缺口降级为「置空」、边界照 v0.45.369 先例登记 09-28 不作废样本）。"
+     "`options_analyzer.fetch_historical_hv` 对 yfinance 的 1y 日线校验交易日连续性（`bars_integrity.find_gaps`，交易日历复用 "
+     "`is_trading_day` + 一张临时休市表）：缺口落在**最后 21 根内** ⇒ 重取一次，仍缺 ⇒ 该标的 `iv_rank` / `iv_percentile` 置 None"
+     "（`iv_rank_source` 仍是 `hv_proxy`——`signal_archive` 把非 hv_proxy 一律当真实 IV，不能新增取值），结果带 `hv_gap`（缺的日期）；"
+     "Oracle 期权分的 `iv_signal` 走既有的「None ⇒ 中性 2.0」分支。缺口序列不写缓存（缓存键 v4→v5）。"
+     "**起因**：2026-09-23 yfinance 的 1y 日线缺了 09-22 一根，当天 8/22 只标的 iv_rank 静默错位（DE 存 43.26、正确 33.45；"
+     "BRK-B 的 rv_30d 14.52、正确 12.55）——旧代码返回的 HV 列表不带日期，少一根让 20 日窗口后移一天，没有任何告警。"
+     "**改变输出的输入**：只有「最后 21 根内缺交易日」的标的；其余逐位不变（真实 yfinance 数据上 BRK-B/XOM/NVDA 与旧公式逐位相等）。"
+     "`iv_signal` 是阶梯函数（<20 → 1.0，<40 → 2.0，40–70 → 3.0，≤85 → 2.0，其余 1.0），置空变 2.0 的幅度取决于原来落哪一档。"
+     "**为什么日期写 09-28 而新代码 09-29 才上线**：09-28 那天新旧代码输出逐项相同的前提是 30 只标的当天都没有缺口。旧代码不记日期，"
+     "归档里没有字段能直接说「当时缺没缺」，所以是**用外部数据重放**证明的（`experiments/hv_gap_equivalence_audit.py`，"
+     "证据冻结在 `experiments/hv_gap_equivalence_20260928.json`）：拿 09-28 归档的 (iv_rank, iv_percentile)，看完整序列能否精确复现"
+     "（容差 0.011），并看「删掉最后 21 根里任一根」能否同样复现。**29/30 只唯一证明为完整序列**；"
+     "**VKTX 一只只能按天推断**——它的 HV 是全年最高（rank=100 / percentile=99.57），删哪根输出都不变，单看这只分辨不出；"
+     "同日 29 只被唯一证明无缺口、0 只不一致，缺口按天发生（09-23 一天 8/22 只），故判其无缺口。"
+     "⚠️ 这一只是**概率推断，不是直接证明**，证据文件里单独标 `day_level_inference`，此处如实记。"
+     "⇒ **作废 0 条** final_score 样本（另登 09-29 会作废 09-28 的 30 条）。判定机制：`_BOUNDARY_EQUIVALENCE[\"v0.45.383\"]` 读该证据文件，"
+     "**逐（日期，标的）**判；证据里没有 ⇒ 不等价（举证责任在放宽一侧），`_equivalence_scan` 为此把日期与标的传给判据。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.383\"]`：Oracle details 带字面量 `hv_gap_checked: True`（成功 / 异常兜底 / 无效 ticker / 日报合成回退都写）。"
+     "预期判定：新代码首跑之前 `no_evidence_yet`（09-28 等价、无印记）；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.383\"]` = `agent.OracleBeeEcho.*` + `bear.options_bear`（同 v0.45.349：Oracle 分与方向、"
+     "Bear 读同伴方向）；`composite.final_score` 是 ALWAYS_SLICED。前瞻检验：维度 IC 协议 H2 会随 final_score 变，但本条早于 "
+     "FORWARD_START 2026-10-12 ⇒ 不截断（同 v0.45.369）。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段"
+     "（`odds_score` / `agent_agreement` / `final_score` 是 ML 特征，只在缺口日变）。"
+     "**关于 2026-09-23 的说明（更正，同日、部署前）**：本条最初写「另行重放 09-23 那 8 只当天分数、改已落库的 predictions 行」，前提是错的——"
+     "09-23 整轮扫描失败（status=failed，无扫描产出），`predictions` 无该日行、无 `.swarm_results`，8 只标的当天**没有落库的分数**；"
+     "只留下 12 只 ML 归档，8 只里仅 BILI（iv_rank 存 44.94、正确 45.58，未跨任何档位）与 CVX（当天期权链 TLS 失败走样本早退，归档里 iv_rank 本就是 None）在其中。"
+     "错的 iv_rank 没有进入任何落库的评分，故无需重放；详见 CHANGELOG v0.45.383「更正」。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -978,7 +1059,9 @@ def _marker_guard_vix_feed(d: dict) -> bool:
     g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
     det = g.get("details") if isinstance(g, dict) else None
     vt = det.get("vix_term_structure") if isinstance(det, dict) else None
-    return isinstance(vt, dict) and "vix_feed" in vt
+    # v0.45.373：补跑行不算证据（见 `_marker_guard_macro_as_of_mode`）；缺 `macro_as_of_mode` 键的
+    # v0.45.357 时代归档照旧认（那时补跑与实时同形、也没有这个键）。
+    return isinstance(vt, dict) and "vix_feed" in vt and vt.get("macro_as_of_mode") != "backfill"
 
 
 def _marker_guard_macro_as_of_mode(d: dict) -> bool:
@@ -987,11 +1070,99 @@ def _marker_guard_macro_as_of_mode(d: dict) -> bool:
     认「键存在」（同 v0.45.340/357）：Guard 在实时（`realtime`）与补跑（`backfill`）两种口径下都写、
     宏观整个取不到时也写；此前的归档一律没有。⚠️ 两种口径都写是刻意的——本条只改补跑，
     只在补跑行写的印记会让每份实时归档都被判「边界之后无印记」（见 `_COHORT_HISTORY` 本条原因）。
+
+    ⚠️ **但只有实时行才算证据（v0.45.373 二次检查补）**：补跑行按目标日 D 落盘，D 的日期不代表代码
+    何时上线。部署后补跑一份早于边界的日期（如 09-25）带着同一个键 ⇒ `marker_first_seen` 被拉到 09-25
+    ⇒ 假 `boundary_too_late` 报警（离线复现；v0.45.357 的 `vix_feed` 印记同形）。
+    v0.45.366 写「两种口径都写……是充分条件」漏了这一头。
     """
     g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
     det = g.get("details") if isinstance(g, dict) else None
     vt = det.get("vix_term_structure") if isinstance(det, dict) else None
-    return isinstance(vt, dict) and "macro_as_of_mode" in vt
+    return isinstance(vt, dict) and "macro_as_of_mode" in vt and vt["macro_as_of_mode"] != "backfill"
+
+
+def _oracle_row_is_new_code(d: dict) -> bool:
+    """这行是 v0.45.369 之后的代码写的吗：OracleBee `details.options_dq_from_agent` 为字面量 `True`
+    （成功 / 异常兜底 / 无效 ticker / 日报合成回退都写）。只认 `is True`：此前的记录**没有**这个键
+    （同 `_marker_oracle_gex_signal_neutralized` 的理由）。**不看**实时 / 补跑——那是日期证据的问题，见下一个函数。"""
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("OracleBeeEcho")
+    det = o.get("details") if isinstance(o, dict) else None
+    return isinstance(det, dict) and det.get("options_dq_from_agent") is True
+
+
+def _is_backfill_row(d: dict) -> bool:
+    """这行是补跑（`--date D`）产的吗：Guard 宏观细节 `macro_as_of_mode == "backfill"`（v0.45.366 起两种口径都写）。
+    只认**显式** backfill，缺键照实时算（同 v0.45.373 对 357 时代归档的处理）。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    vt = det.get("vix_term_structure") if isinstance(det, dict) else None
+    return isinstance(vt, dict) and vt.get("macro_as_of_mode") == "backfill"
+
+
+def _marker_oracle_options_dq_from_agent(d: dict) -> bool:
+    """v0.45.369 的**日期**印记：新代码写的、且是**实时行**。
+
+    ⚠️ 补跑行不算日期证据（v0.45.373 二次检查 v0.45.366 揪出的同一形状）：补跑按目标日 D 落盘，D 不代表代码
+    何时上线 —— 部署后补跑一份早于边界的日期会把 `marker_first_seen` 拉到边界之前 ⇒ 假 `boundary_too_late`。
+    等价扫描判「这行是不是新代码」用的是 `_oracle_row_is_new_code`（不排补跑：新代码的补跑行同样不是旧口径）。"""
+    return _oracle_row_is_new_code(d) and not _is_backfill_row(d)
+
+
+def _equiv_oracle_chain_available(d: dict) -> bool:
+    """v0.45.369 的**等价判据**（见 `_BOUNDARY_EQUIVALENCE`）：这份旧代码记录在本版改动下输出不变吗？
+
+    本版只改 OptionsAgent 返回 `data_quality == "unavailable"`（样本链早退）那一种结果的标签与置信度。
+    Oracle details 里的 `data_quality` 不是 `"unavailable"` ⇒ 本版改动在这份记录上是空操作 ⇒ 等价。
+    缺 details（Oracle 走异常兜底）两版同一条路 ⇒ 也等价。
+    """
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("OracleBeeEcho")
+    det = o.get("details") if isinstance(o, dict) else None
+    return not (isinstance(det, dict) and det.get("data_quality") == "unavailable")
+
+
+def _oracle_row_has_hv_gap_marker(d: dict) -> bool:
+    """这行是 v0.45.383 之后的代码写的吗：OracleBee `details.hv_gap_checked` 为字面量 `True`
+    （成功 / 异常兜底 / 无效 ticker / 日报合成回退都写）。只认 `is True`：此前的记录**没有**这个键。
+    **不看**实时 / 补跑——那是日期证据的问题，见 `_marker_oracle_hv_gap_checked`。"""
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("OracleBeeEcho")
+    det = o.get("details") if isinstance(o, dict) else None
+    return isinstance(det, dict) and det.get("hv_gap_checked") is True
+
+
+def _marker_oracle_hv_gap_checked(d: dict) -> bool:
+    """v0.45.383 的**日期**印记：新代码写的、且是**实时行**（补跑行不算日期证据，理由同 v0.45.373 对 369 的处理）。"""
+    return _oracle_row_has_hv_gap_marker(d) and not _is_backfill_row(d)
+
+
+#: v0.45.383 等价证据（冻结文件，由 `experiments/hv_gap_equivalence_audit.py` 生成）。代码随发布 ⇒ 锚 `__file__`，
+#: 不是生产数据（不随 `ALPHA_HIVE_HOME` 走）。
+_HV_GAP_EVIDENCE_PATH = Path(__file__).resolve().parent / "experiments" / "hv_gap_equivalence_20260928.json"
+#: 证据里算「新旧代码输出相同」的状态：唯一证明无缺口 / 按天推断（概率推断，见审计脚本）/ 新代码是空操作（非 hv_proxy 口径）
+_HV_GAP_EQUIV_STATUSES = frozenset({"verified", "day_level_inference", "not_applicable"})
+
+
+def _load_hv_gap_evidence() -> Dict[str, Dict[str, str]]:
+    """{日期: {标的: 状态}}。读不出 / 结构不对 ⇒ 空（**证不出等价就不算等价**）。每次现读——文件很小，且不缓存
+    就不会有「测试改了路径却读到旧缓存」的问题。"""
+    try:
+        with open(_HV_GAP_EVIDENCE_PATH, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return {day: {t: v.get("status") for t, v in (rec.get("tickers") or {}).items()}
+                for day, rec in (doc.get("days") or {}).items()}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _equiv_hv_gap_free(d: dict) -> bool:
+    """v0.45.383 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？= 那天那只标的的日线没有缺口。
+
+    旧代码不记日期，记录本身回答不了 ⇒ 判据读**冻结的外部证据**，按（日期，标的）查；
+    `_equivalence_scan` 把日期与标的放在 `_date` / `_ticker` 里传进来。缺这两个键或证据里没有 ⇒ False。"""
+    day, tk = d.get("_date"), d.get("_ticker")
+    if not day or not tk:
+        return False
+    return _load_hv_gap_evidence().get(day, {}).get(tk) in _HV_GAP_EQUIV_STATUSES
 
 
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
@@ -1013,11 +1184,39 @@ _BOUNDARY_MARKERS = {
                   _marker_guard_vix_feed),
     "v0.45.366": ("agent_details.GuardBeeSentinel.details.vix_term_structure 带 macro_as_of_mode 键",
                   _marker_guard_macro_as_of_mode),
+    "v0.45.369": ("agent_details.OracleBeeEcho.details.options_dq_from_agent is True",
+                  _marker_oracle_options_dq_from_agent),
+    "v0.45.383": ("agent_details.OracleBeeEcho.details.hv_gap_checked is True",
+                  _marker_oracle_hv_gap_checked),
+}
+
+#: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
+#: 其余边界的判定逐字不变。
+#:
+#: 用途：改动只在**少数输入**上改变输出时（v0.45.369 只改「期权链取不到」那一种结果），边界日至印记首见日之间
+#: 的旧代码记录，若在本条改动下**输出不变**，就不是「边界之后的旧口径样本」——它与新代码的输出评分与标签逐项相同，
+#: 混算不引入任何口径差 ⇒ 不算「写早了」。判定函数吃与印记同一形状的 `{"swarm_results": <一只标的的蒸馏结果>}`。
+#:
+#: 逐只标的核：读**当日全部标的**的 `.swarm_results_<日期>.json`（ML 报告归档只有前 12 只；印记是代码版本的事实、
+#: 看 12 只就够，等价却是逐只标的的数据事实，另 18 只里有一只不等价就漏了）。
+#:
+#: ⚠️ 只放宽「写早了」这一个方向：窗口内出现**不等价**的旧记录 ⇒ 照报 boundary_too_early（新代码没赶上、
+#: 又恰好碰上改动生效的输入 ⇒ 真混算了）；印记早于边界（boundary_too_late）不受影响。
+#: ⚠️ **不能拿等价判据当印记**：它对历史上绝大多数记录都成立（bug 没触发的日子），当印记用会把全部旧归档
+#: 认成新口径 ⇒ 恒报 boundary_too_late。
+#: 值：（说明, 等价判据, 「这行是新代码写的」判据）。第三项不排补跑行——日期印记排补跑（见
+#: `_marker_oracle_options_dq_from_agent`），但新代码的补跑行同样不是「旧口径样本」，等价扫描里要跳过它。
+_BOUNDARY_EQUIVALENCE = {
+    "v0.45.369": ("OracleBeeEcho.details.data_quality != \"unavailable\"（期权链取到了 ⇒ 本版改动是空操作）",
+                  _equiv_oracle_chain_available, _oracle_row_is_new_code),
+    "v0.45.383": ("冻结证据 experiments/hv_gap_equivalence_20260928.json：该（日期，标的）的日线无缺口"
+                  "（verified / day_level_inference / not_applicable）",
+                  _equiv_hv_gap_free, _oracle_row_has_hv_gap_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
 #: 判别器取印记时先查自己、查不到再查被更正的那条 —— 更正不是新改动，印记是同一个。
-#: 当前为空：09-28 的三条边界（v0.45.334 / v0.45.340 / v0.45.349）尚无更正。
+#: 当前为空：09-28 的六条边界（v0.45.334 / 340 / 349 / 357 / 366 / 369）尚无更正。
 _CORRECTS: Dict[str, str] = {}
 
 
@@ -1075,11 +1274,15 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
         return {"version": version, "boundary": boundary, "marker": None,
                 "marker_first_seen": None, "verdict": "no_marker", "unmarked_after_boundary": []}
     marker_desc, is_new = entry
+    equiv_entry = (_BOUNDARY_EQUIVALENCE.get(version)
+                   or _BOUNDARY_EQUIVALENCE.get(_CORRECTS.get(version)))
     first = None
     # 边界日及之后、读得出来却没有印记的归档日期。只在印记**一次都没出现**时用得上：
     # 那时边界之后的归档全是旧代码产的 ⇒ 边界已经写早了，不必等新代码真跑起来才红。
     # （推送晚于边界日正是这个形状：旧写法在推送之前一直报 no_evidence_yet「还没跑到」。）
     unmarked_after = set()
+    # v0.45.369：无印记的 ML 归档逐（日期, 标的）记下——只给等价分支用（那边要核这些票在当日 .swarm_results 里被核过）
+    unmarked_pairs: Set[tuple] = set()
     try:
         for f in sorted(root.glob("analysis-*-ml-*.json")):
             m = re.search(r"-ml-(\d{4}-\d{2}-\d{2})\.json$", f.name)
@@ -1099,8 +1302,33 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
                 first = date if first is None else min(first, date)
             elif date >= boundary:
                 unmarked_after.add(date)
+                _tk = re.match(r"analysis-(.+)-ml-\d{4}-\d{2}-\d{2}\.json$", f.name)
+                unmarked_pairs.add((date, _tk.group(1) if _tk else f.name))
     except OSError:
-        first, unmarked_after = None, set()
+        first, unmarked_after, unmarked_pairs = None, set(), set()
+
+    equivalent_dates: List[str] = []
+    if equiv_entry is not None:
+        # v0.45.369：登记了等价判据的边界，窗口 [边界, 印记首见) 内的旧代码记录逐只标的核等价；
+        # 只有**不等价**的日子才算「写早了」（见 `_BOUNDARY_EQUIVALENCE`）
+        bad, equivalent_dates, examined = _equivalence_scan(root, boundary, first, equiv_entry[2], equiv_entry[1])
+        # 旧代码写过 ML 归档、却没在当日可读的 .swarm_results 里被核过的（文件缺 / 空 / 缺这只票）⇒ 证不出等价 ⇒ 不等价。
+        # 否则换成等价分支反而丢掉了原分支本来看得见的证据（二次审查 v0.45.369）。
+        _missed = {d for d, tk in unmarked_pairs
+                   if (first is None or d <= first) and (d, tk) not in examined}
+        if _missed:
+            bad = sorted(set(bad) | _missed)
+            equivalent_dates = [d for d in equivalent_dates if d not in _missed]
+        if first is None or first > boundary:
+            unmarked_after = set(bad)
+            if first is not None:
+                verdict = "boundary_too_early" if bad else "matches"
+            else:
+                verdict = "boundary_too_early" if bad else "no_evidence_yet"
+            return {"version": version, "boundary": boundary, "marker": marker_desc,
+                    "marker_first_seen": first, "verdict": verdict,
+                    "unmarked_after_boundary": sorted(unmarked_after),
+                    "equivalence": equiv_entry[0], "equivalent_before_marker": equivalent_dates}
 
     if first is None:
         # 边界之后已有归档、却一份印记都没有 ⇒ 那几天跑的是旧代码，同属「写早了」
@@ -1116,6 +1344,67 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
             "unmarked_after_boundary": sorted(unmarked_after) if first is None else []}
 
 
+def _equivalence_scan(root: Path, boundary: str, first: Optional[str], is_new, is_equiv):
+    """窗口 [boundary, first]（first 为 None ⇒ 至今）内逐日读 `.swarm_results_<日期>.json`，逐只标的：
+    带印记 ⇒ 新代码，跳过；不带印记且 `is_equiv` 为真 ⇒ 等价旧记录；否则 ⇒ 不等价旧记录。
+
+    窗口**含**印记首见那天：那天的文件可能是新代码补跑并进旧代码断链那一轮的合并结果（`save_report` 的
+    `merged_swarm.update`），带印记的照样跳过，不花代价。
+
+    返回 `(不等价日期列表, 等价日期列表, 核过的 {(日期, 标的)})`。读不出的文件 / 顶层不是 dict ⇒ 该日记为不等价
+    （**证不出等价就不算等价**——这是放宽判定的那一侧，举证责任在「放宽」这边）。
+    同一天既有等价又有不等价的票 ⇒ 只算不等价。
+    """
+    bad, ok, examined = set(), set(), set()
+    try:
+        files = sorted(root.glob(".swarm_results_*.json"))
+    except OSError:
+        return [], [], set()
+    for f in files:
+        m = re.search(r"_(\d{4}-\d{2}-\d{2})\.json$", f.name)
+        if not m:
+            continue
+        date = m.group(1)
+        if date < boundary or (first is not None and date > first):
+            continue
+        try:
+            with open(f, encoding="utf-8") as fh:
+                sr = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            bad.add(date)
+            continue
+        if not isinstance(sr, dict):
+            bad.add(date)
+            continue
+        for _tk, r in sr.items():
+            if not isinstance(r, dict):
+                continue
+            examined.add((date, _tk))
+            # v0.45.383：判据要按（日期，标的）查冻结证据，故一并传入；其余判据只读 swarm_results，忽略这两个键
+            wrapped = {"swarm_results": r, "_date": date, "_ticker": _tk}
+            if is_new(wrapped):
+                continue
+            (ok if is_equiv(wrapped) else bad).add(date)
+    return sorted(bad), sorted(ok - bad), examined
+
+
+#: 三个 `*_forward_status` 返回值里的**私有**键：执行器 `run()` 的结构化结果（按下方白名单截取），
+#: 供 `main()` 列 `attention` 用。`main()` 取走它（`_take_detail`），**不进 `--json` / `--out`**——
+#: 那两处的 `{status, line}` 形状有测试钉着（`test_*_forward_test.py::TestCarriedByReadiness`）。
+#: 为什么不从 `line` 反推：图标是给人看的渲染，H1 锚点的截止日写在 ⏳ 段里，按图标永远报不出来（v0.45.355）。
+_DETAIL_KEY = "_detail"
+#: 共振 / F&G 两个检验 `run()` 返回值里 `attention` 用得上的键（不含效应量）
+_FWD_DETAIL_KEYS = ("status", "reason", "stale", "look", "weeks", "next_look_at")
+#: 维度 IC 协议执行器 `run()` 返回值里 `attention` 用得上的键——刻意**不含** `verdicts` / `descriptive`
+#: （结论与效应量只在检视点之后出现，本工具只报「到点了、去跑脚本看」，不转述结论）
+_DIM_DETAIL_KEYS = ("status", "reason", "forward_start", "today", "h1_weeks", "next_look_at",
+                    "looks_done", "truncation", "weight_change", "stale", "h1_anchor")
+
+
+def _detail(fres: Dict, keys) -> Dict:
+    return {k: fres[k] for k in keys if k in fres}
+
+
 def resonance_forward_status(home: Path, db: Path, today: Optional[str] = None) -> Dict:
     """顺带承载「共振加成前瞻检验」（v0.45.242）的进度。
 
@@ -1126,6 +1415,7 @@ def resonance_forward_status(home: Path, db: Path, today: Optional[str] = None) 
     ⚠️ 失败**不改变本工具的判定与退出码**，但必须出现在摘要里（「谁会红？」）：
     任何异常都渲染成一行「无法判定」，而不是吞掉。
     `home` 与 `cohort_boundary_evidence` 同理必传 —— 归档是数据，跟着 `--db` 走。
+    返回 `{status, line, _detail}`；`_detail` 见 `_DETAIL_KEY`（v0.45.355）。
     """
     try:
         import importlib.util
@@ -1134,10 +1424,12 @@ def resonance_forward_status(home: Path, db: Path, today: Optional[str] = None) 
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         fres = mod.run(home=home, db_path=str(db), today=today)
-        return {"status": fres.get("status"), "line": mod.status_line(fres)}
+        return {"status": fres.get("status"), "line": mod.status_line(fres),
+                _DETAIL_KEY: _detail(fres, _FWD_DETAIL_KEYS)}
     except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
         return {"status": "cannot_judge",
-                "line": f"⚠️ 共振加成前瞻检验无法判定：{type(e).__name__}: {e}"}
+                "line": f"⚠️ 共振加成前瞻检验无法判定：{type(e).__name__}: {e}",
+                _DETAIL_KEY: {"status": "cannot_judge", "reason": f"{type(e).__name__}: {e}"}}
 
 
 def fg_exposure_gate_forward_status(today: Optional[str] = None) -> Dict:
@@ -1155,10 +1447,12 @@ def fg_exposure_gate_forward_status(today: Optional[str] = None) -> Dict:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         fres = mod.run(today=today)
-        return {"status": fres.get("status"), "line": mod.status_line(fres)}
+        return {"status": fres.get("status"), "line": mod.status_line(fres),
+                _DETAIL_KEY: _detail(fres, _FWD_DETAIL_KEYS)}
     except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
         return {"status": "cannot_judge",
-                "line": f"⚠️ F&G 敞口门前瞻检验无法判定：{type(e).__name__}: {e}"}
+                "line": f"⚠️ F&G 敞口门前瞻检验无法判定：{type(e).__name__}: {e}",
+                _DETAIL_KEY: {"status": "cannot_judge", "reason": f"{type(e).__name__}: {e}"}}
 
 
 def dim_ic_forward_status(db: Path, today: Optional[str] = None) -> Dict:
@@ -1167,7 +1461,8 @@ def dim_ic_forward_status(db: Path, today: Optional[str] = None) -> Dict:
 
     ⚠️ 失败**不改变本工具的判定与退出码**，渲染成可见的一行，不吞。
     `db` 必传：协议的数据跟着 `--db` 走（同 `resonance_forward_status`）。
-    检视点之前返回值里没有效应量——盲化在执行器的数据结构上，这里只转交 `status` 与那一行。
+    检视点之前返回值里没有效应量——盲化在执行器的数据结构上，这里只转交 `status` 与那一行
+    （外加白名单截取的结构化进度 `_detail`，不含结论与效应量，见 `_DIM_DETAIL_KEYS`）。
     """
     try:
         import importlib.util
@@ -1176,10 +1471,31 @@ def dim_ic_forward_status(db: Path, today: Optional[str] = None) -> Dict:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         fres = mod.run(db_path=str(db), today=today)
-        return {"status": fres.get("status"), "line": mod.status_line(fres)}
+        detail = _detail(fres, _DIM_DETAIL_KEYS)
+        if "h1_anchor" not in detail:
+            # 执行器 cannot_judge 时早退、不算锚点；而锚点只取决于登记常量与边界表、与库读不读得出无关——
+            # 补算一次（`anchor_status` 只读、不碰库），免得截止日被一个无关的故障挡住。
+            # 补算本身失败 ⇒ 记成 state=error，`_dim_ic_attention` 会单列一条 warn，不吞。
+            try:
+                detail["h1_anchor"] = mod.anchor_status(mod._protocol(), fres.get("today") or today)
+            except Exception as e:  # noqa: BLE001
+                detail["h1_anchor"] = {"state": "error", "problem": f"{type(e).__name__}: {e}"}
+        return {"status": fres.get("status"), "line": mod.status_line(fres), _DETAIL_KEY: detail}
     except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
         return {"status": "cannot_judge",
-                "line": f"⚠️ 维度 IC 协议无法判定：{type(e).__name__}: {e}"}
+                "line": f"⚠️ 维度 IC 协议无法判定：{type(e).__name__}: {e}",
+                _DETAIL_KEY: {"status": "cannot_judge", "reason": f"{type(e).__name__}: {e}"}}
+
+
+def _take_detail(st: Dict) -> Dict:
+    """从 `*_forward_status` 的返回值里**取走**私有的 `_detail`（之后 `st` 只剩 `{status, line}`）。
+
+    取不到（例：测试把 `*_forward_status` 换成只回 `{status, line}` 的桩）⇒ 退回 `{"status": st["status"]}`
+    ——`status` 本身也是结构化字段，据它仍能列出「无法判定 / 已到检视点 / 状态未知」；
+    只有依赖细节的条目（陈旧、H1 锚点截止日 …）会缺，而维度 IC 那边缺锚点会单列一条 warn（见 `_dim_ic_attention`）。
+    """
+    d = st.pop(_DETAIL_KEY, None)
+    return dict(d) if isinstance(d, dict) else {"status": st.get("status")}
 
 
 _BOUNDARY_VERDICT_TEXT = {
@@ -1213,9 +1529,19 @@ def _boundary_line(ev: Dict) -> str:
     extra = ""
     if ev.get("marker_first_seen"):
         extra = f"，印记首见 {ev['marker_first_seen']}"
+        if ev.get("equivalent_before_marker"):
+            _eq = ev["equivalent_before_marker"]
+            extra += f"（其前 {len(_eq)} 个扫描日为等价旧记录：{'、'.join(_eq)}）"
+        if ev.get("unmarked_after_boundary"):
+            # 等价分支在印记出现后仍可能报「写早了」：点名是哪几天的旧记录不等价
+            u = ev["unmarked_after_boundary"]
+            extra += f"；{len(u)} 个扫描日有不等价的旧代码记录（{'、'.join(u)}）"
     elif ev.get("unmarked_after_boundary"):
         u = ev["unmarked_after_boundary"]
         extra = f"，边界后已有 {len(u)} 个归档日无印记（最早 {u[0]}）"
+    elif ev.get("equivalent_before_marker"):
+        _eq = ev["equivalent_before_marker"]
+        extra = f"，边界后 {len(_eq)} 个扫描日为等价旧记录（{'、'.join(_eq)}；新旧评分输出相同，不算写早）"
     if ev.get("error"):
         extra += f"，{ev['error']}"
     text = _BOUNDARY_VERDICT_TEXT[ev["verdict"]]
@@ -1284,6 +1610,176 @@ def boundary_evidence_status(home: Path) -> Dict:
     return res
 
 
+# ── 输出契约：`attention` 条目（v0.45.355）─────────────────────────────────────
+# 规则：每一条都从**结构化字段**判（`assess()` 的结果、`boundary_evidence_status` 的 `alarm`、
+# 三个执行器 `run()` 的返回值），不解析 `--quiet` 那行、不看段首图标。`id` 是稳定机器键，
+# 消费方靠它去重 / 路由；改名等于改接口。条目是否与段首图标一致由
+# `tests/test_step_contract_ic_rerun.py::TestAttentionMatchesRenderedIcons` 对照（测试侧对照，生产侧不反推）。
+
+_FWD_TESTS = {
+    # key → (人读名, 脚本)
+    "resonance_forward": ("共振加成前瞻检验", "experiments/resonance_boost_forward_test.py"),
+    "fg_exposure_gate_forward": ("F&G 敞口门前瞻检验", "experiments/fg_exposure_gate_forward_test.py"),
+}
+_DIM_SCRIPT = "experiments/dim_ic_forward_test.py"
+
+
+def _forward_test_attention(key: str, d: Dict) -> List[Dict]:
+    """共振 / F&G 两个前瞻检验的条目。两者状态词表相同（`status_line` 同构）：
+    `cannot_judge`（含自证率跌破阈值）/ `not_ready`（`stale` 时要人看）/ `confirmed`·`not_confirmed`
+    （已到检视点）/ 其他（未知状态——执行器改了词表而这里没跟上，也要有人红）。"""
+    name, script = _FWD_TESTS[key]
+    iid = f"ic_rerun.{key}"
+    st = d.get("status")
+    item = step_contract.attention_item
+    if st == "cannot_judge":
+        return [item(f"{iid}.cannot_judge", "warn",
+                     f"{name}无法判定：{d.get('reason') or '（执行器未给原因）'}"
+                     " —— 本周这份检验没跑成或不可信（自证率跌破阈值也落在这里），需人看原因")]
+    if st == "not_ready":
+        if d.get("stale"):
+            return [item(f"{iid}.stale", "warn",
+                         f"{name}：{d.get('reason') or '登记后长期无前瞻样本'}")]
+        return []
+    if st in ("confirmed", "not_confirmed"):
+        return [item(f"{iid}.checkpoint", "info",
+                     f"{name}已到{d.get('look') or ''}检视点 —— 手动跑 `/usr/local/bin/python3 {script}` 看结论"
+                     "（需人判断，勿自动改评分 / CONFIG）")]
+    return [item(f"{iid}.unknown_status", "warn", f"{name}状态未知：{st!r}（执行器的状态词表变了？）")]
+
+
+def _dim_ic_attention(d: Dict) -> List[Dict]:
+    """维度 IC 协议执行器的条目。与 `dim_ic_forward_test.status_line` 读同一批字段，但**逐项**列出，
+    其中 H1 锚点「待登记」带截止日 `forward_start`（协议 §13.4：锚点边界须早于窗口起点，否则 H1 回退）——
+    那一项在进度行里只是 ⏳ 段尾的一句话，按图标读的消费方永远看不见它。"""
+    name, iid, item = "维度 IC 协议", "ic_rerun.dim_ic", step_contract.attention_item
+    st = d.get("status")
+    out = []
+    run_it = f"手动跑 `/usr/local/bin/python3 {_DIM_SCRIPT}` 看全文（需人判断，协议 §7 的动作由人执行）"
+    if st == "cannot_judge":
+        # 无法判定时截断 / 权重 / 陈旧都无从谈起，只剩锚点（`dim_ic_forward_status` 已补算，见那里）
+        out.append(item(f"{iid}.cannot_judge", "warn", f"{name}无法判定：{d.get('reason') or '（执行器未给原因）'}"))
+    elif st == "concluded":
+        out.append(item(f"{iid}.checkpoint", "info", f"{name}已出结论 —— {run_it}"))
+    elif st == "in_progress":
+        looks = "/".join(d.get("looks_done") or []) or "?"
+        out.append(item(f"{iid}.checkpoint", "info", f"{name}已过 {looks} 检视 —— {run_it}"))
+    elif st != "not_ready":
+        out.append(item(f"{iid}.unknown_status", "warn", f"{name}状态未知：{st!r}（执行器的状态词表变了？）"))
+    tr = d.get("truncation") or {}
+    h1 = tr.get("H1") or {}
+    if h1.get("date"):
+        layer = "只触及冻结层，冻结评分器自证通过后可解除" if h1.get("layer") == "frozen" else "触及输入层，不可解除"
+        out.append(item(f"{iid}.h1_truncated", "warn", f"{name}：H1 已于 {h1['date']}（{h1.get('version')}）截断，{layer}"))
+    anc, fs = d.get("h1_anchor"), d.get("forward_start")
+    state = anc.get("state") if isinstance(anc, dict) else None
+    if state == "pending":
+        out.append(item(f"{iid}.h1_anchor_pending", "warn",
+                        f"{name}：H1 锚点待登记（{anc.get('problem')}）—— 须早于 {fs} 进边界表，"
+                        "否则 H1 回退到原登记对象（生产 sentiment，协议 §13.4）",
+                        deadline=fs))
+    elif state == "fallback":
+        out.append(item(f"{iid}.h1_anchor_fallback", "warn",
+                        f"{name}：H1 锚点 {anc.get('problem')} ⇒ 已回退到原登记对象（生产 sentiment，协议 §13.4）"))
+    elif state != "ok" and not (st == "cannot_judge" and anc is None):
+        # 执行器不再给出锚点状态 / 补算失败 ⇒ 上面那条截止日会无声消失；宁可多一条 warn，不让它变成「没发生过」。
+        # 唯一例外：执行器根本没加载起来（cannot_judge 且无从补算）——那时 cannot_judge 那条已经在报了。
+        by = f"须早于 {fs} " if fs else ""
+        out.append(item(f"{iid}.h1_anchor_unknown", "warn",
+                        f"{name}：读不到 H1 锚点状态（h1_anchor={anc!r}）—— 锚点{by}登记的截止日可能漏报",
+                        deadline=fs))
+    h2 = tr.get("H2") or {}
+    if h2.get("date"):
+        out.append(item(f"{iid}.h2_truncated", "warn", f"{name}：H2 已于 {h2['date']}（{h2.get('version')}）截断"))
+    wc = d.get("weight_change") or {}
+    if wc.get("date"):
+        out.append(item(f"{iid}.weight_changed", "warn",
+                        f"{name}：config 权重已偏离冻结值（{wc['date']}，{wc.get('source')}）⇒ H2 截断"))
+    if "unknown" in wc:
+        out.append(item(f"{iid}.weight_history_unknown", "warn",
+                        f"{name}：权重历史无法判定（{wc['unknown']}）"))
+    if d.get("stale"):
+        out.append(item(f"{iid}.stale", "warn",
+                        f"{name}：登记窗口起点 {fs} 后仍无任何样本 —— 扫描停了或路径错了"))
+    return out
+
+
+def _boundary_attention(bev: Dict, dim: Dict) -> List[Dict]:
+    """世代边界核对报警 ⇒ 每条报警的边界一条 alarm（逐条结果在 `per_version`），id = `ic_rerun.boundary_evidence.<版本>`。
+
+    id 带版本：同日可有多条边界同时报警（09-28 就登记了三条），而 id 是消费方去重 / 路由的键、同一外壳内必须
+    唯一（`step_contract.validate` 查）。v0.45.355 初版每条都叫 `ic_rerun.boundary_evidence` ⇒ 按 id 保留首条的
+    消费方会丢掉后面的——带截止日 2026-10-12 的 v0.45.340 那条恰好排在 v0.45.334 之后。
+
+    该条恰是维度 IC 协议 H1 的锚点版本时带截止日 `forward_start`：锚点日期写错要**追加更正**，
+    而更正须早于窗口起点进表，否则 H1 回退（协议 §13.4；`_COHORT_HISTORY` 里 v0.45.340 条原文
+    「须早于 2026-10-12」）。锚点版本与窗口起点取自执行器的结构化结果，不在这里抄常量。
+    """
+    anc = dim.get("h1_anchor")
+    anchor_version = anc.get("version") if isinstance(anc, dict) else None
+    fs = dim.get("forward_start")
+    per = bev.get("per_version")
+    entries = [e for e in per if isinstance(e, dict)] if isinstance(per, list) and per else [bev]
+    out = []
+    for i, e in enumerate(entries):
+        if not e.get("alarm"):
+            continue
+        deadline = fs if (anchor_version and fs and e.get("version") == anchor_version) else None
+        msg = e.get("line") or f"世代边界 {e.get('version')} / {e.get('boundary')} 核对未通过：{e.get('verdict')}"
+        msg += " —— 按本文件顶部「更正条目」流程**追加**一条更正（新标签 + _CORRECTS），不改写原条目"
+        if deadline:
+            msg += f"；该条是维度 IC 协议 H1 的锚点，更正须早于 {deadline} 进表，否则 H1 回退（协议 §13.4）"
+        # 同日各条的版本互不相同（`_COHORT_HISTORY` 的 (日期, 版本) 唯一，有测试钉着）；缺版本时退回表序号
+        out.append(step_contract.attention_item(
+            f"ic_rerun.boundary_evidence.{e.get('version') or f'#{i}'}", "alarm", msg, deadline=deadline))
+    if bev.get("alarm") and not out:
+        # 顶层说报警、逐条却一条都没有 ⇒ 两处不一致；照顶层报，不让它因为形状不对而消失
+        out.append(step_contract.attention_item(
+            "ic_rerun.boundary_evidence.inconsistent", "alarm",
+            f"{bev.get('line') or bev.get('verdict')}（per_version 里没有对应的报警条目，形状不一致）"))
+    return out
+
+
+def build_attention(res: Dict, bev: Dict, fwd: Dict, fg: Dict, dim: Dict) -> List[Dict]:
+    """本工具的全部 `attention` 条目。`fwd` / `fg` / `dim` 是三个执行器的结构化结果（`_take_detail`）。"""
+    item = step_contract.attention_item
+    out = []
+    if res.get("ready"):
+        out.append(item("ic_rerun.ready", "info",
+                        f"IC 重跑已就绪：世代内已攒 {res.get('weeks_accrued')}/{res.get('weeks_required')} 个不重叠周"
+                        f"（{res.get('n_ripe_samples')} 条已回填样本）—— 该跑（需人看结果，刻意不自动跑）："
+                        f"{res.get('next_step')}"))
+    if res.get("pool_note"):
+        out.append(item("ic_rerun.pool_note", "warn",
+                        f"样本世代已被标的池变动打断：{res['pool_note']} —— 需人决定是否重设 _COHORT_HISTORY 的世代边界"))
+    out += _boundary_attention(bev or {}, dim)
+    out += _forward_test_attention("resonance_forward", fwd)
+    out += _forward_test_attention("fg_exposure_gate_forward", fg)
+    out += _dim_ic_attention(dim)
+    return out
+
+
+def contract_envelope(res: Dict, date: str, attention: List[Dict]) -> Dict:
+    """`--json` / `--out` 的外壳：`res` 原样作顶层 payload（编排器 Step 11 读的键一个不动）。
+
+    `status`：有任何条目 ⇒ `attention`（含 info 级的「已就绪 / 已到检视点」——那也是要人去做的事），否则 `ok`。
+    `res` 的顶层键与外壳保留键不重名（实测；`step_contract.envelope` 撞名即抛，不会静默覆盖）。
+    """
+    return step_contract.envelope("ic_rerun_readiness", date, "attention" if attention else "ok",
+                                  attention=attention, payload=res)
+
+
+def _emit(args, env: Dict) -> None:
+    """`--out` 原子写 + `--json` 打印同一份外壳。写不出去不改变判定（判定在写盘之前就完成了）。"""
+    if args.out:
+        try:
+            step_contract.write_out(args.out, env)
+        except OSError as e:
+            print(f"⚠️  无法写入 {args.out}: {e}", file=sys.stderr)
+    if args.json:
+        print(json.dumps(env, indent=2, ensure_ascii=False))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="IC 重跑就绪度")
     ap.add_argument("--db", default=None, help="pheromone.db 路径（默认走 PATHS.db）")
@@ -1302,41 +1798,53 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true", help="只输出一行摘要")
     args = ap.parse_args()
 
+    # 外壳的 `date`：这次运行服务的业务日（v0.45.355）。消费方拿它与自己的 DATE_STR 比，
+    # 读到上一次留下的文件时就知道不是今天的（此前 JSON 里没有日期，超时后会无声读到旧文件）。
+    # 缺省是洛杉矶当日，**不等于**编排器本机时区的 DATE_STR（2026-11-01 起冬令时每天有一小时差一天）——
+    # 所以消费方要显式传 --today（见 step_contract.business_today）。
+    date = args.today or step_contract.business_today()
     db = Path(args.db) if args.db else _db_path()
     if not db.exists():
-        print(f"❌ 找不到 {db} —— 无法判定", file=sys.stderr)
+        msg = f"找不到 {db} —— 无法判定"
+        print(f"❌ {msg}", file=sys.stderr)
+        if args.out or args.json:
+            # 此前这条路不写 --out ⇒ 编排器读到的是「文件不存在」（或同名旧文件），与「没跑」分不开
+            _emit(args, step_contract.envelope(
+                "ic_rerun_readiness", date, "undetermined", payload={"reason": msg},
+                attention=[step_contract.attention_item(
+                    "ic_rerun.undetermined", "warn", f"IC 重跑就绪度无法判定：找不到 {db}（退出码 3）")]))
         return 3
 
     res = assess(db_path=db, target_ic=args.target_ic, today=args.today)
     fwd = resonance_forward_status(db.parent, db, today=args.today)
+    fwd_detail = _take_detail(fwd)      # 取走私有细节后 fwd 只剩 {status, line}，payload 形状不变
     res["resonance_forward_test"] = fwd
     fg_fwd = fg_exposure_gate_forward_status(today=args.today)
+    fg_detail = _take_detail(fg_fwd)
     res["fg_exposure_gate_forward_test"] = fg_fwd
     dim_fwd = dim_ic_forward_status(db, today=args.today)
+    dim_detail = _take_detail(dim_fwd)
     res["dim_ic_forward_test"] = dim_fwd
     # 归档与 DB 同处一个安装 ⇒ 用 --db 的所在目录，别用代码目录（见 cohort_boundary_evidence docstring）。
     # 放在 --out / --json / --quiet 之前：三种输出都要带上它（v0.45.334，见 boundary_evidence_status）
     bev = boundary_evidence_status(db.parent)
     res["cohort_boundary_evidence"] = bev
 
-    if args.out:
-        try:
-            Path(args.out).write_text(
-                json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")
-        except OSError as e:
-            # 写不出去不改变判定 —— 判定在写盘之前就完成了
-            print(f"⚠️  无法写入 {args.out}: {e}", file=sys.stderr)
+    if args.out or args.json:
+        # 只在要外壳时才列条目：`--quiet` 单跑（周度任务）的路径与 v0.45.355 之前评分与标签逐项相同
+        _emit(args, contract_envelope(res, date, build_attention(res, bev, fwd_detail, fg_detail, dim_detail)))
 
     if args.json:
-        print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0 if res["ready"] else 1
     if args.quiet:
         # 同一行：周度任务的约定是「把那一行摘要原样写进周报」，另起一行可能被漏抄。
-        # ⚠️ 段的**顺序**是契约：周度任务 SKILL.md 按「第三段 = F&G」解析。新段只许追加在末尾。
+        # ⚠️ 段的**顺序**是契约，**段数不是**：周度任务 SKILL.md 自 2026-09-28 起按段首的名字 / 图标认段
+        # （不再按「第三段 = F&G」），`tests/test_dim_ic_forward_test.py` 也改成钉「已知段按序出现、
+        # 新段只许追加在末尾」。已知段不许挪位、不许删；新段只许追加在末尾。
         # 第五段（v0.45.334）= 世代边界的数据证据，**只在要人看时出现**（`bev["alarm"]`：日期与
-        # 印记不符 / 核不了），以 🚨 开头；正常时（✅ / ⏳ / —）不加段，一行仍是四段 ——
-        # 恒在的段会被当成背景噪音，而 `tests/test_dim_ic_forward_test.py` 也钉着四段。
-        # 完整判别结果不论好坏都在 `--json` / `--out` 的 `cohort_boundary_evidence` 键里。
+        # 印记不符 / 核不了），以 🚨 开头；正常时（✅ / ⏳ / —）不加段 —— 恒在的段会被当成背景噪音。
+        # 完整判别结果不论好坏都在 `--json` / `--out` 的 `cohort_boundary_evidence` 键里；
+        # 「要人看」的机读清单在 `--json` / `--out` 的 `attention` 里（v0.45.355，带截止日）。
         line = summary_line(res) + "｜" + fwd["line"] + "｜" + fg_fwd["line"] + "｜" + dim_fwd["line"]
         if bev["alarm"]:
             line += "｜" + bev["line"]
@@ -1384,4 +1892,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if step_contract is None:
+        # 没有 step_contract 就写不出外壳：只打 stderr，退出码 3（「无法判定」），不写 --out
+        print(f"ic_rerun_readiness: 无法导入 step_contract（{_STEP_CONTRACT_IMPORT_ERROR}）—— 退出码 3，"
+              "按「无法判定」处理；本次不写 --out", file=sys.stderr)
+        sys.exit(3)
+    # v0.45.355：未捕获异常 ⇒ 退出码 3（「无法判定」）+ `--out` 照样写出 status=error 的外壳。
+    # 此前是 Python 默认的 1 = 本工具的「未就绪（正常，继续攒）」⇒ 崩溃被编排器记成正常
+    # （实测：`--db <坏库>` rc=1、不写 --out、stdout 为空）。
+    sys.exit(step_contract.run_tool("ic_rerun_readiness", main))

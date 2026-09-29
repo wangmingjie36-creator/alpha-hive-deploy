@@ -399,3 +399,34 @@ class TestNoDeadCorrectField:
         assert d["equity_curve"], "夹具没产生曲线点，这条断言证明不了什么"
         assert all("correct" not in pt for pt in d["equity_curve"]), (
             "曲线点又带上了没人读的 correct 字段（且它的语义变过）")
+
+
+# ── ⑤ v0.45.374：dashboard 零成本口径 ─────────────────────────────────────────
+class TestDashboardZeroCost:
+    """用户实盘成本≈0，决定网站不再扣成本模型（滑点 + 佣金 + 借券费）。
+
+    夹具里 return_t7 = net + 0.2，扣与不扣成本的数值不同 —— 断言分得清两种口径。
+    """
+
+    def test_fixture_distinguishes_cost_modes(self, bt):
+        """反向自证：默认（扣成本）口径下 net != gross，否则下面的断言恒真。"""
+        r = bt()
+        assert all(t["net_pct"] != t["gross_pct"] for t in r["all_trades"])
+
+    def test_backtest_no_costs_settles_on_gross(self, bt):
+        """变异：apply_trading_costs 分支写反 / 忽略 ⇒ net != gross ⇒ 红。"""
+        r = bt(apply_trading_costs=False)
+        assert r["config"]["apply_trading_costs"] is False
+        assert r["all_trades"], "夹具没有产生入场交易"
+        for t in r["all_trades"]:
+            assert t["net_pct"] == pytest.approx(t["gross_pct"])
+        for p in r["equity_curve"]:
+            assert p["nav_pct"] == pytest.approx(p["gross_nav_pct"])
+
+    def test_dashboard_uses_zero_cost(self, dash):
+        """渲染层：变异＝dashboard 不传 apply_trading_costs=False ⇒ 曲线扣了成本 ⇒ 红。"""
+        d = dash()
+        assert d["equity_curve"]
+        for p in d["equity_curve"]:
+            assert p["cum_net_pct"] == pytest.approx(p["cum_gross_pct"])
+        assert d["trading_stats"]["avg_cost"] == pytest.approx(0.0)

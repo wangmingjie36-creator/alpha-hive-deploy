@@ -121,8 +121,12 @@ def _probe_target(host: str, port: int) -> Dict[str, Any]:
         entry["dns_ok"] = False
         entry["tcp_ok"] = None                 # 没解析出地址，TCP 无从谈起（不是「连上了」也不是「没连上」）
         return entry
-    family, _type, _proto, _canon, sockaddr = val[0]
+    # v0.45.378：优先 IPv4。getaddrinfo 可能把 AAAA 排在前面；本机没有 IPv6 路由时连 IPv6 地址必败，
+    # 会被读成「端口不通」——正是要拿来判「该不该切 443」的那一格被污染。ssh 自己也会回落到 IPv4。
+    infos = sorted(val, key=lambda i: 0 if i[0] == socket.AF_INET else 1)
+    family, _type, _proto, _canon, sockaddr = infos[0]
     entry["addr"] = str(sockaddr[0])
+    entry["family"] = "ipv4" if family == socket.AF_INET else "ipv6"
     t1 = time.monotonic()
     ok2, val2 = _bounded(_tcp_connect, _STEP_TIMEOUT + 1, family, sockaddr, _STEP_TIMEOUT)
     entry["tcp_ok"] = ok2

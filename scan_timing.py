@@ -95,12 +95,17 @@ def counters() -> Dict[str, Optional[dict]]:
     out: Dict[str, Optional[dict]] = {"yfinance": None, "twelve_data": None,
                                       "cboe": None, "cboe_chain": None,
                                       "gex_view": None, "cboe_raw": None,
-                                      "options_snapshot": None}
+                                      "options_snapshot": None, "hv_gap": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
     except Exception as e:  # noqa: BLE001 - 观测代码不得影响主流程
         _log.debug("yf_gate stats 不可得: %s", e)
+    try:
+        import options_analyzer
+        out["hv_gap"] = options_analyzer.hv_gap_stats()   # v0.45.383：日线缺交易日的校验/重取/降级计数
+    except Exception as e:  # noqa: BLE001
+        _log.debug("hv_gap stats 不可得: %s", e)
     try:
         import twelve_data
         out["twelve_data"] = twelve_data.bars_cache_stats()
@@ -306,9 +311,17 @@ def summary_line(snap: dict) -> str:
         td_s += f"/失败{td.get('failures', '?')}(" + ",".join(
             f"{t}:{r}" for t, r in sorted(td["failed"].items())) + ")"
     cb_s = "—" if cb is None else f"抓取{cb.get('fetches', '?')}/命中{cb.get('hits', '?')}"
+    hg = c.get("hv_gap")
+    hg_s = ""
+    if hg and (hg.get("degraded") or hg.get("repaired") or hg.get("check_errors")):
+        # 只在出过事时才占摘要行的位置：缺口已重取修好 / 仍缺而置空 / 校验器自身出错，都点名
+        bad = ",".join(f"{t}:{'+'.join(g.get('critical') or [])}" for t, g in sorted((hg.get("tickers") or {}).items())
+                       if g.get("critical"))
+        hg_s = (f" | 日线缺口 修复{hg.get('repaired', '?')}/置空{hg.get('degraded', '?')}"
+                f"/校验出错{hg.get('check_errors', '?')}" + (f"({bad})" if bad else ""))
     os_ = c.get("options_snapshot")
     os_s = "—" if os_ is None else (
         f"写入{os_.get('writes', '?')}/命中{os_.get('hits', '?')}"
         f"/会话不符弃用{os_.get('session_mismatch', '?')}份/盘中快照命中{os_.get('hits_before_close', '?')}份")
     return ("耗时 " + " | ".join(parts) +
-            f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}")
+            f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s)

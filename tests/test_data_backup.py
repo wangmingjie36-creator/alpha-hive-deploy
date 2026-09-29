@@ -37,6 +37,16 @@ def _sandbox_home(tmp_path_factory, monkeypatch):
     """
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
+    # 沙箱 HOME 同时隔掉了 `~/.gitconfig` —— 也就隔掉了提交身份。此时 `git commit`
+    # 能否成功取决于**机器主机名**：git 退回 `用户@主机名` 推邮箱，Mac 的 `xxx.local`
+    # 推得出，Linux 容器 / GitHub runner 的无域名主机名推不出 ⇒ "Author identity
+    # unknown" ⇒ `run()` 停在 stage="commit"。于是同一条测试 Mac 绿、CI 红
+    # （v0.45.345 的 TestPushTimeout 正是这样红了一路；它之前的同类测试各自手写
+    # `git config user.email`，新测试忘了抄）。在夹具里一次给全，谁再写新测试都不用记。
+    # commit.gpgsign=false：宿主全局配置若开了签名，沙箱里没有签名程序也不该让提交失败。
+    (home / ".gitconfig").write_text(
+        "[user]\n\tname = Alpha Hive Test\n\temail = test@example.com\n"
+        "[commit]\n\tgpgsign = false\n", encoding="utf-8")
     return home
 
 
