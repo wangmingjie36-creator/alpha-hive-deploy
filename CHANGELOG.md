@@ -17,15 +17,16 @@
 - `.bnav-item`（手机底部导航文字）浅色用 `--tm`（2.2:1）、`.acc-sig-no`（「不显著」标签，注释写明必须与数字同处一个视线内）用 `--tm` → `--ts`。
 
 ### Changed
-- 半透明淡染改走 RGB 通道令牌 `--tint-bull/bear/neut/acc/slate/ink`，写法 `rgba(var(--tint-bull),.12)`。**不用 `color-mix()`**：站点要照顾微信 X5 内核，不认就整条声明作废、底色直接消失。前五个通道两套主题共用、取值与改前相同（淡染外观零变化）；`--tint-ink` 随主题翻转。Bootstrap `rgba(40,167,69)`/`rgba(220,53,69)` 并入 bull/bear，`rgba(148,163,184,.16)` 并入 slate。
+- 半透明淡染改走 RGB 通道令牌 `--tint-bull/bear/neut/acc/slate/ink`，写法 `rgba(var(--tint-bull),.12)`。**不用 `color-mix()`**：站点要照顾微信 X5 内核，不认就整条声明作废、底色直接消失。前五个通道两套主题共用、取值与改前相同；`--tint-ink` 随主题翻转。**有外观变化的只有这几处**（复查补记，原文误写「零变化」）：`.sec-hot/.sec-cold` 的 Bootstrap 淡染 `rgba(40,167,69)`/`rgba(220,53,69)` 并入 bull/bear、`.acc-sig-no` 的 `rgba(148,163,184,.16)` 并入 slate（略深）；`.hm-tk` 透明度统一为 .06（原浅 .04/.06、暗 .08/.05）；底部导航由 .98 半透明改为不透明 `--bg`。
 - 删掉主题分叉覆盖：`html.dark .nav` / `.nav-link` / `.dark-btn`（底规则本就走 `--bg/--border/--ts`，覆盖反而写死了白色半透明）、`html:not(.dark) .bottom-nav` / `.bnav-item` / `.hm-tk`——底规则改走令牌后两套主题一条规则。底部导航顶边线的旧金色 `rgba(244,165,50,.15)` → `--border`。
+- 删 `html.dark .dark-btn` 的副作用（复查发现，属修复）：它的特异性 (0,2,1) 高于 `.dark-btn:hover` (0,2,0)，暗色主题下主题切换按钮悬停**从来不变强调色**；删掉后恢复。
 - `.toast` `#333`/`#fff` → `var(--tp)`/`var(--surface)`（反色提示条，暗色下是浅条深字）；`.skip-link` → `var(--tp)`/`var(--bg)`。
 
 ### 保留的字面量（守卫白名单逐条写理由）
 `@media print` 整段（纸永远是白的）、`.slogo` 白底（logo 按白底设计）、`.share-btn-x:hover`（X 品牌色）、`.scard-share` / `.kb-help` / `.nav-overlay` 的黑色遮罩、`.ah-macro-viewport` 的 `mask-image`（只取 alpha）。
 
 ### Added
-- `tests/test_dashboard_css_no_color_literals.py`（21 条）：除打印与白名单外零颜色字面量；白名单只许缩（条目对应规则没了就红）；`--tint-*` 必须是合法 r,g,b 三元组；`--on-solid` 压 `--acc/--acc2/--acc3` 两主题 ≥4.5:1；`--acc*` 实底规则的字色必须是 `--on-solid`；扫描器反向自证（含改前原文）。变异实测 4/4 变红：写回 `#4ade80`、暗色 `--on-solid` 改回白、通道少一位、hover 字改 `--tp`。
+- `tests/test_dashboard_css_no_color_literals.py`（21 条）：除打印与白名单外零颜色字面量；白名单只许缩（条目对应规则没了就红）；`--tint-*` 必须是合法 r,g,b 三元组；`--on-solid` 压 `--acc/--acc2/--acc3` 两主题 ≥4.5:1；`--acc*` 实底规则的字色必须是 `--on-solid`；扫描器反向自证（含改前原文）。复查补：原先只认 `white`/`black` 两个命名色，`color:red` 能溜过去 → 扩到常见命名色 + `oklch/lab/lch/hwb/color()`，引号里的字符串（font-family / content）剔除后再扫。变异实测 5/5 变红（含 `color:red`）：写回 `#4ade80`、暗色 `--on-solid` 改回白、通道少一位、hover 字改 `--tp`。
 
 ### 验证
 - 离线渲染（socket 闸 + yfinance 桩、`pheromone.db` 用 `.backup` 副本）后 `getComputedStyle` 实测 25 个类两种主题，全部等于对应令牌；⚠️ 测时要先关掉 `transition`，否则带过渡的元素在切主题同一帧读到的是**旧主题值**（首测 trend-chip / nav-link 就这样看起来「没变」）。
