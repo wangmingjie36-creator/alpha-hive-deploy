@@ -341,3 +341,33 @@ class TestCliFromCheckoutAsPhase3CallsIt:
         deployed = home / ".claude" / "scripts" / "alpha-hive-orchestrator.sh"
         assert deployed.read_text(encoding="utf-8") == _script("P3")
         assert os.stat(deployed).st_mode & 0o777 == 0o755
+
+
+class TestSigtermCleansUp:
+    """编排器 run_step 超时先发 SIGTERM：临时文件不许留在部署目录（二次审查实测过 Python 默认 TERM 不跑 finally）。
+    变红的变异：删掉 `signal.signal(SIGTERM, _exit_on_sigterm)`。"""
+
+    def test_term_mid_gate_leaves_no_tmp(self, repo, dest, tmp_path):
+        import signal
+        import sys
+        repo.set_main(repo.commit(_script("T1")))
+        stall = tmp_path / "stall_bash.sh"
+        stall.write_text("#!/bin/bash\nexec sleep 6\n", encoding="utf-8")   # 孤儿最多活 6s
+        stall.chmod(0o755)
+        driver = tmp_path / "driver.py"
+        driver.write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {str(Path(dep.__file__).resolve().parent)!r})\n"
+            "import deploy_orchestrator as d\n"
+            f"d._repo_root = lambda: __import__('pathlib').Path({str(repo.root)!r})\n"
+            f"d.BASH = {str(stall)!r}\n"
+            f"sys.exit(d.main(['--ref', 'origin/main', '--dest', {str(dest)!r}]))\n", encoding="utf-8")
+        p = subprocess.Popen([sys.executable, str(driver)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not (dest.parent.exists() and _leftovers(dest)):
+            time.sleep(0.05)
+        assert _leftovers(dest), "前提：临时文件已建出、正卡在关卡里"
+        p.send_signal(signal.SIGTERM)
+        p.wait(timeout=15)
+        assert p.returncode == 143, (p.returncode, p.stderr.read())
+        assert _leftovers(dest) == [] and not dest.exists()

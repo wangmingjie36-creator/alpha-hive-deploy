@@ -130,13 +130,17 @@ OVERALL_STATUS=success
 {body}
 {_FUNC}
 echo SENTINEL
+printf 'CHARMAP=%s\\n' "$(locale charmap 2>/dev/null)"
 printf 'STATUS=%s\\n' "$OVERALL_STATUS"
 printf 'RESULT=%s\\n' "$(printf '%s' "$STEPS_RESULT" | jq -c .)"
 """
     env = dict(os.environ, FAKE_MODE=mode, FAKE_ARGS=str(tmp_path / "args.txt"))
-    env.pop("LC_ALL", None)
-    if locale:
-        env["LC_ALL"] = locale
+    # 三个都要清：PEP 538 让 Python 3.7+ 往自己的 os.environ 塞 LC_CTYPE=C.UTF-8，只 pop LC_ALL 的话「C」那一路
+    # 其实也是 UTF-8（二次审查实测）。再显式设 LC_ALL，两路才真的分开。
+    for k in ("LC_ALL", "LC_CTYPE", "LANG"):
+        env.pop(k, None)
+    env["LC_ALL"] = locale
+    _LAST_ENV[0] = f"LC_ALL={locale}\n"
     t0 = time.monotonic()
     r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
     dt = time.monotonic() - t0
@@ -145,11 +149,17 @@ printf 'RESULT=%s\\n' "$(printf '%s' "$STEPS_RESULT" | jq -c .)"
     return r, out, res, rec, dt, tmp_path / "args.txt"
 
 
-_LOCALES = ["", "en_US.UTF-8"]
+_LOCALES = ["C", "en_US.UTF-8"]
+_LAST_ENV = [""]
 
 
 def _common(r, out, res, dt, limit=10):
     assert r.returncode == 0, r.stderr
+    # C 那一路必须真是 C（不是被 PEP 538 塞进来的 C.UTF-8）——否则两路 locale 是同一路，裸变量紧跟全角的风险测不到
+    cm = re.search(r"^CHARMAP=(.*)$", out, re.M)
+    assert cm, out
+    if "LC_ALL=C\n" in _LAST_ENV[0]:
+        assert "UTF-8" not in cm.group(1).upper(), cm.group(1)
     assert "SENTINEL" in out and "STATUS=success" in out, out
     assert res["db_backup"] == {"status": "success"}, res
     assert "unbound variable" not in r.stderr, r.stderr
@@ -210,9 +220,10 @@ class TestLiveFunction:
         assert res["orchestrator_deploy"]["outcome"] == "tool_missing" and not args.exists()
 
     def test_hang_is_bounded(self, tmp_path, locale):
-        """超时 ⇒ run_step 124 ⇒ no_record；整块不超过「超时 + 10s KILL 宽限」。
-        变红的变异：把 run_step 包进 `$(...)`（看门狗的 sleep 握着 stdout ⇒ 白等满）。"""
+        """超时 ⇒ run_step 124 ⇒ no_record。正常约 1s（超时 1s，`exec sleep` 收 TERM 即死）。
+        变红的变异：把 run_step 包进 `$(...)`——看门狗 KILL 宽限里的 `sleep 10` 握着替换管道 ⇒ 约 11s，
+        所以上限取 8s 而不是「超时 + 10s」（二次审查：原先 15s 的上限抓不住这个变异，只有静态形状测试抓得住）。"""
         r, out, res, rec, dt, _a = _run(tmp_path, "hang", locale=locale, timeout_override=1)
-        _common(r, out, res, dt, limit=15)
+        _common(r, out, res, dt, limit=8)
         e = res["orchestrator_deploy"]
         assert e["status"] == "failed" and e["rc"] == 124 and e["outcome"] == "no_record"

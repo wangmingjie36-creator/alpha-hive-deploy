@@ -105,9 +105,22 @@ def _load_record():
     return rec
 
 
-def _is_ancestor(a: str, b: str):
-    r = subprocess.run(["git", "-C", str(_ROOT), "merge-base", "--is-ancestor", a, b], capture_output=True)
+def _is_ancestor(root, a: str, b: str):
+    r = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", a, b], capture_output=True)
     return {0: True, 1: False}.get(r.returncode)
+
+
+def stale_verdict(root, ref: str, rel: str, record, deployed: str, now):
+    """stale 时的完整判定（读记录之后的胶水）：记录里的 main 提交在不在 `ref` 上、那个提交里的编排器是哪版，
+    再交给 `pending_verdict`。抽成函数是为了能在临时仓库里测（二次审查：原先这段只在生产 Mac 上、且副本恰好
+    stale 时才跑到）。"""
+    mc = (record or {}).get("main_commit")
+    on_main = _is_ancestor(root, mc, ref) if mc else None
+    mblob = None
+    if mc:
+        r = subprocess.run(["git", "-C", str(root), "rev-parse", f"{mc}:{rel}"], capture_output=True, text=True)
+        mblob = r.stdout.strip() if r.returncode == 0 else None
+    return pending_verdict(record, deployed, mblob, on_main, now)
 
 
 class TestClassifyHasTeeth:
@@ -164,6 +177,10 @@ class TestDeployedMatchesRepo:
     def blobs(self):
         if not DEPLOYED_ORCH.is_file():
             pytest.skip("部署副本不在本机（只在装了定时任务的那台 Mac 上）")
+        # 浅克隆没有完整历史 ⇒ 判不了「在不在 main 历史里」（会把合入后待下一轮误判成漂移，二次审查实测）。
+        # 「浅克隆在哪些环境里存在」：只有刻意 `--depth 1` 仿 CI 的检出；那里本就判不了，skip 是如实。
+        if _git("rev-parse", "--is-shallow-repository") == "true":
+            pytest.skip("浅克隆：没有完整历史，判不了漂移 / 未部署")
         # 仓库与 git 在任何开发检出里都在 ⇒ 下面取不到就是真错，断言不 skip
         # v0.45.370：历史与部署工具同一个定义（逐可达提交枚举，合并产物不漏）
         history = deploy_orchestrator.main_history_blobs(_ROOT, _REF)
@@ -185,13 +202,67 @@ class TestDeployedMatchesRepo:
         if classify(deployed, history, tip) != "stale":
             return
         rec = _load_record()
-        mc = (rec or {}).get("main_commit")
-        on_main = _is_ancestor(mc, _REF) if mc else None
-        mblob = None
-        if mc:
-            r = subprocess.run(["git", "-C", str(_ROOT), "rev-parse", f"{mc}:{_REL}"], capture_output=True, text=True)
-            mblob = r.stdout.strip() if r.returncode == 0 else None
-        why = pending_verdict(rec, deployed, mblob, on_main, datetime.now())
+        why = stale_verdict(_ROOT, _REF, _REL, rec, deployed, datetime.now())
         assert why is None, (
             f"{_REF} 上的编排器比部署副本新，且不属于「合入后待下一轮」：{why} —— {_REMEDY.get(why, '')}"
             + (f"\n  记录：outcome={rec.get('outcome')} reason={rec.get('reason')} detail={rec.get('detail')}" if rec else ""))
+
+
+class TestStaleVerdictInATempRepo:
+    """胶水 `stale_verdict` 在临时仓库里真跑 git（任何机器都跑）：A→B 两版合入 main，副本停在 A。"""
+
+    @pytest.fixture
+    def repo(self, tmp_path):
+        root = tmp_path / "r"
+        root.mkdir()
+
+        def g(*a):
+            r = subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t",
+                                "-c", "commit.gpgsign=false", *a], capture_output=True, text=True)
+            assert r.returncode == 0, r.stderr
+            return r.stdout.strip()
+        g("init", "-q", "-b", "main")
+        f = root / "orch.sh"
+        f.write_text("A\n")
+        g("add", "-A"); g("commit", "-q", "-m", "A")
+        A = g("rev-parse", "HEAD")
+        f.write_text("B\n")
+        g("add", "-A"); g("commit", "-q", "-m", "B")
+        B = g("rev-parse", "HEAD")
+        g("checkout", "-q", "-b", "side", A)
+        f.write_text("S\n")
+        g("add", "-A"); g("commit", "-q", "-m", "S")
+        S = g("rev-parse", "HEAD")
+        g("checkout", "-q", "main")
+
+        def blob(c):
+            return g("rev-parse", f"{c}:orch.sh")
+        return root, {"A": A, "B": B, "S": S}, blob
+
+    def _rec(self, mc, cand):
+        return {"outcome": "deployed", "candidate_blob": cand, "main_commit": mc,
+                "at": (datetime.now() - timedelta(days=1)).isoformat(timespec="seconds")}
+
+    def test_pending_after_merge_passes(self, repo):
+        root, c, blob = repo
+        a = blob(c["A"])
+        assert stale_verdict(root, "main", "orch.sh", self._rec(c["A"], a), a, datetime.now()) is None
+
+    def test_last_run_deployed_older_than_its_main(self, repo):
+        """上一轮时 main 已是 B，却部署了 A（例：手动 `--ref <旧提交>` 回滚）⇒ 红。"""
+        root, c, blob = repo
+        a = blob(c["A"])
+        assert (stale_verdict(root, "main", "orch.sh", self._rec(c["B"], a), a, datetime.now())
+                == "last_run_deployed_older_than_its_main")
+
+    def test_record_main_commit_not_on_main(self, repo):
+        root, c, blob = repo
+        a = blob(c["A"])
+        assert (stale_verdict(root, "main", "orch.sh", self._rec(c["S"], a), a, datetime.now())
+                == "record_main_commit_not_on_main")
+
+    def test_unknown_commit(self, repo):
+        root, c, blob = repo
+        a = blob(c["A"])
+        assert (stale_verdict(root, "main", "orch.sh", self._rec("f" * 40, a), a, datetime.now())
+                == "record_main_commit_unknown")

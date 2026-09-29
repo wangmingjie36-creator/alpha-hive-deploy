@@ -39,7 +39,8 @@ v0.45.353 起编排器受版本控制，但 launchd 仍执行 `~/.claude/scripts
 结果：stdout 一行 JSON；`--out` 另写一份（**无默认路径**：调用方显式给，
 免得凭空多一个要登记进 `PATHS` 的产物）。
 
-手动部署（首次上线 / 急用 / 回滚，从任一处于 origin/main 的 worktree；带 `--out` 留下记录，一致性守卫读它）：
+手动部署（首次上线 / 急用，或坏编排器在部署块之前就崩、救不了自己时；从任一处于 origin/main 的 worktree；
+带 `--out` 留下记录，一致性守卫读它）。回滚走 main 上的 revert（下一扫描日自动部署）——手动部署旧提交只管一轮：
   /usr/local/bin/python3 deploy_orchestrator.py --ref origin/main --dry-run
   /usr/local/bin/python3 deploy_orchestrator.py --ref origin/main --out ~/.claude/logs/orchestrator_deploy.json
 """
@@ -48,6 +49,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -60,6 +62,9 @@ from orchestrator_lint import find_unbraced
 REL_PATH = "scripts/alpha-hive-orchestrator.sh"
 DEFAULT_MAIN_REF = "origin/main"
 BASH = "/bin/bash"          # launchd plist 用的就是它（3.2）；关卡要测真执行者
+#: 内部子进程超时（git / bash -n）。v0.45.370：必须小于编排器给本工具的 30s（`run_step --timeout 30`），否则
+#: 「TimeoutExpired → except → finally 清临时文件」这条干净路径在生产里永远轮不到，外层 TERM 总是先到。
+_SUBPROC_TIMEOUT = 20
 
 OK_OUTCOMES = frozenset({"deployed", "already_current", "would_deploy"})
 _EXIT = {"deployed": 0, "already_current": 0, "would_deploy": 0,
@@ -82,7 +87,7 @@ def default_dest() -> Path:
 
 def _git(repo: Path, *args: str, stdin: Optional[bytes] = None) -> bytes:
     r = subprocess.run(["git", "-C", str(repo), *args], input=stdin,
-                       capture_output=True, timeout=60)
+                       capture_output=True, timeout=_SUBPROC_TIMEOUT)
     if r.returncode != 0:
         raise _GitError(f"git {' '.join(args)} 失败（rc={r.returncode}）："
                         f"{r.stderr.decode(errors='replace').strip() or '无错误输出'}")
@@ -120,7 +125,7 @@ def gate_failures(data: bytes, tmp_file: Path) -> List[str]:
         return [f"不是合法 UTF-8：{e}"]
     if "set -uo pipefail" not in text or text.count("\n") <= 500:
         fails.append("形状不像编排器（缺 `set -uo pipefail` 或不足 500 行）")
-    r = subprocess.run([BASH, "-n", str(tmp_file)], capture_output=True, text=True, timeout=60)
+    r = subprocess.run([BASH, "-n", str(tmp_file)], capture_output=True, text=True, timeout=_SUBPROC_TIMEOUT)
     if r.returncode != 0:
         fails.append(f"bash -n 失败：{r.stderr.strip()[:500]}")
     for no, name, line in find_unbraced(text):
@@ -205,9 +210,17 @@ def deploy(ref: str, *, repo: Optional[Path] = None, dest: Optional[Path] = None
             tmp.unlink(missing_ok=True)
 
 
+def _exit_on_sigterm(signum, frame):  # noqa: ARG001
+    """v0.45.370：编排器的 run_step 超时先发 SIGTERM。Python 默认对 SIGTERM 直接退出、**不跑 finally** ⇒
+    `deploy()` 里 mkstemp 出的临时文件（`.alpha-hive-orchestrator.sh.deploy-*`）会留在部署目录里（二次审查实测）。
+    转成 SystemExit ⇒ finally 照跑、临时文件被清掉；退出码 143 与「被 TERM 杀」同值（run_step 按超时 124 记）。"""
+    raise SystemExit(143)
+
+
 def main(argv=None) -> int:
     import argparse
 
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
     ap = argparse.ArgumentParser(description="把仓库里的编排器部署到 launchd 执行的位置")
     ap.add_argument("--ref", required=True,
                     help="部署哪个提交里的编排器（必填：手动用 origin/main；阶段 3 生产 checkout 用 HEAD）")

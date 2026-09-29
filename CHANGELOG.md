@@ -285,6 +285,16 @@ VRP 账本 BRK-B 的 rv / iv 也全非空。真正有问题的是**值**，不�
 ### 验证
 - 编排器相关测试 746 条全绿（本版三个新 / 改测试文件 + scan_catchup / braced_vars / step5 / scan_timing / code_version /
   orchestrator_steps / data_backup）；`/bin/bash -n` 通过、`find_unbraced` 为空。
+- 二次审查（四视角对抗 + 逐条驳斥复核，17 个代理）：新代码块在任何构造出的情形下都不中断 / 不拖慢扫描、不改 OVERALL_STATUS、
+  不弄坏 steps_result / status.json。确认并同版修：① 测试里「C locale」那一路其实是 UTF-8（Python 3.7+ 的 PEP 538 往环境塞
+  `LC_CTYPE=C.UTF-8`，只 pop `LC_ALL` 不够）⇒ 三个变量全清再显式设，并断言 C 那一路 `locale charmap` 不是 UTF-8；
+  ② 挂死用例上限 15s 抓不住「run_step 进命令替换」（≈11s）⇒ 收到 8s；③ 部署工具被 run_step 超时 SIGTERM 时不跑 finally、
+  mkstemp 临时文件留在 `~/.claude/scripts/` ⇒ SIGTERM 转 SystemExit(143)，内部 git / `bash -n` 超时 60→20s（小于外层 30s 预算）；
+  ④ 一致性守卫读记录后的胶水抽成 `stale_verdict` 并在临时仓库真跑 git 测；⑤ 浅克隆判不了历史 ⇒ 该守卫按类 skip（如实）；
+  ⑥ 文档：回滚 = main 上 revert；坏编排器在部署块之前就崩时自动部署救不了自己。驳倒 2 条（jq 失败覆盖记录、手动回滚被盖回）。
+  **已知、不修**：生产同步与部署之间另一个 worktree 的 fetch 挪动 origin/main（一秒内的窗口）⇒ 一致性守卫可能红一天
+  （`last_run_deployed_older_than_its_main`），下一轮自愈；改成 `--main-ref HEAD` 能消掉它，但会失去「候选必须在 origin/main 上」
+  这道独立关卡，不值。
 - 变异 12/12 红（去同步判断 / 去先删记录 / run_step 进命令替换 / 加 set_status / 裸变量紧跟全角 / 非成功不写记录 / `=1` 挪出 else /
   按退出码判成功 / 历史退回 `git log --raw` / 不记 main_commit / pending 恒放行 / PENDING_MAX 无穷），驱动核对 collected 并逐条还原核哈希。
 
