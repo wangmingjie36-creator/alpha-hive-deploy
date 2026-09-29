@@ -52,7 +52,23 @@ VRP 账本 BRK-B 的 rv / iv 也全非空。真正有问题的是**值**，不�
 - 其他 29 只标的没有做同样的逐日核对（本轮范围只到 BRK-B）；Twelve Data 对它们不 404，理论上不在这条成因里，但同日 CBOE 陈旧的影响未查。
 - 补丁脚本是一次性的，没入仓库（数据修补，痕迹在文件内 `_rv_recheck` 与备份里）。
 
-## [0.45.371] — 2026-09-29 — 占位（进行中：renderer 内联 rgba 淡染换 --tint 令牌）
+## [0.45.371] — 2026-09-29 — renderer 内联 rgba 淡染换 `--tint-*` 令牌
+
+接 v0.45.368 的「未做」第二条。`dashboard_renderer.py` 内联样式里 17 处数字通道淡染 → `rgba(var(--tint-x),α)`，与 dashboard.css 共用同一套通道令牌，改一处两边一起变；透明度一个没动。
+
+### Changed
+- 12 处涨跌（`34,197,94` / `239,68,68`）：今日 Actionable 卡底、方向 KPI 卡底、板块热力图单元格底与边（强/弱两档）。取值与令牌相同，**外观零变化**。
+- 3 处石板灰：热力图中性格底 `100,116,139`（零变化）；方向 KPI「中性」卡底与期权墙行虚线 `148,163,184` 并入 `--tint-slate`（略深一档，同 v0.45.368 `.acc-sig-no` 的处理）。
+- 2 处「数据部分降级」横幅 `224,160,60` → `--tint-neut`（`245,158,11`），色相与站点其余中性 / 警示淡染统一。
+
+### Added
+- `tests/test_dashboard_tokenized_components.py`：renderer 里出现数字通道的 `rgb(a)/hsl(a)(` 即红，另断言 `rgba(var(--tint-` ≥15 处防扫描器空转；正则自证。变异实测：把 Actionable 卡底改回 `rgba(34,197,94,.10)` → 红。模块 docstring 里「rgba 淡染是站点惯例、不在此列」的旧豁免同步删去。
+
+### 验证
+- 离线渲染 09-11 后 `getComputedStyle`：页面里 14 个带内联 `--tint` 的元素（11 个热力图格 + 3 张方向 KPI 卡）底色全部解析为预期 rgba，无一退化成透明；当天数据里不出现的分支（Actionable 卡、降级横幅、热力图强/弱格、期权墙虚线）用源码里的原样 style 串注入探针，8/8 解析正确。
+- `--tint-*` 未定义时这些淡染会**静默变透明**：确认过 renderer 片段唯一的生产出口是 `render_dashboard_html`（经 `report_web_assets`），整页内联 dashboard.css，不存在脱离 `:root` 单独嵌入的路径；`test_dashboard_css_vars_defined` 也会对未定义令牌报红。
+- 全套 7274 passed / 2 xfailed（照例 deselect 两条环境测试）。
+
 
 ## [0.45.370] — 2026-09-29 — 占位（进行中：编排器纳入版本控制·阶段 3——扫描前自动部署编排器；接手原会话）
 
