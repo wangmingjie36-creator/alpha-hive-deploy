@@ -5,6 +5,22 @@
 
 ---
 
+## [0.45.379] — 2026-09-29 — Fixed：gh-pages 重试测试间歇红——全局 `time.sleep` 计数被 `subprocess` 内部忙等污染
+
+### 根因
+- `tests/test_gh_pages_unverified_parent.py` 替换**进程全局** `time.sleep` 并按次数计数（「第 2 次 sleep 时恢复网络」、`sleeps == [2.0]`）。
+- 但 `commit_and_push_gh_pages` 的 fetch / push 都走 `subprocess.run(timeout=...)`：子进程 pipe 已关、尚未被回收时，CPython `Popen._wait(timeout)` 进入 `time.sleep(delay)` 忙等——同一个全局函数。计数混进毫秒级 sleep，网络提前恢复 ⇒ `attempts == 3` 断言落空。是否混入取决于子进程退出与 `waitpid` 谁先（机器越忙越易），单跑几乎复现不了（本 session 单条 30 次、整文件 25 次全绿；09-28 负载下 6 次红 1、3 次红 2）。
+- 同根因还有一条潜伏：`TestIncidentSequence::test_two_attempts_exactly_as_logged`（`sleeps == [2.0]`）。
+
+### Fixed
+- `report_deployer.py`：退避等待抽成 `_backoff_sleep(seconds)`（调用时才查 `time`，全局替换 `time.sleep` 的旧测试照样不真等）；`commit_and_push_gh_pages` 改调它。
+- `tests/test_gh_pages_unverified_parent.py`：`no_sleep` 夹具与恢复用例只替换 `rd._backoff_sleep`，不再碰全局 `time.sleep`。
+
+### Added
+- `TestSleepCountIsolatedFromSubprocess`（3 条）+ `slow_reap` 夹具：让每个子进程第一次非阻塞 `waitpid` 报「未退出」，**确定性**造出该竞态；含反向自证（确认真走进了全局 `time.sleep`）。
+- 验证：修复前用同样注入跑整文件 ⇒ 2 红（即上述两条）；修复后 38/38 绿；变异（替身点改回全局 `time.sleep`）⇒ 新守卫 2 条红。
+- 普查：全仓只有本文件在全局 `time.sleep` 上**计数**；其余替换都是不计数的 no-op，或计数路径不起子进程（`test_llm_service`）。
+
 ## [0.45.378] — 2026-09-29 — 二次检查 v0.45.351：两处小 bug（CDN 无期望时间戳仍报「已验证」；传输探测可能连 IPv6 误判端口不通）；09-28 生产首跑核对全绿
 
 ### 生产核对（09-28 14:00 扫描，v0.45.351 首次在生产跑）
