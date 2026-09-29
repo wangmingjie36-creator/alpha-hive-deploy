@@ -2,14 +2,20 @@
 
 import datetime as dt
 import json
+import logging
 import math
+import os
 import statistics
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 import vrp_signal as vrp
 
 AS_OF = "2026-09-03"
+ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(autouse=True)
@@ -294,6 +300,139 @@ class TestRecord:
         for line in vrp.SIGNALS_FILE.read_text().splitlines():
             _all_floats_finite(json.loads(line))
         assert "NaN" not in vrp.SIGNALS_FILE.read_text()
+
+
+# ==================== 没有输入就不许删行（v0.45.384） ====================
+
+_LOGGER = "alpha_hive.vrp_signal"
+_SETTLED = {"rv_forward": 12.5, "vrp_realized": 17.5, "settled_on": "2026-10-02"}
+
+
+def _seed_ledger_compact(path=None):
+    """该日 3 行（AAA 已结算、BBB 带一次结算尝试、CCC）+ BBB 之前 3 天的历史行。
+
+    刻意用紧凑分隔符写（`_write_jsonl` 用的是默认 `", "`/`": "`）：即便被改写成**同样的内容**，
+    字节也会变。这里要钉的是「根本没写」，不只是「内容没丢」。"""
+    rows = [_row("BBB", _day(i + 1), v) for i, v in enumerate([1.0, 2.0, 3.0])]
+    rows += [_row("AAA", AS_OF, 9.0, **_SETTLED),
+             _row("BBB", AS_OF, 8.0, settle_attempts=2),
+             _row("CCC", AS_OF, 7.0)]
+    path = path or vrp.SIGNALS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows), encoding="utf-8")
+    return {(r["ticker"], r["date"]): r for r in rows}
+
+
+def _warnings(caplog):
+    return "\n".join(r.getMessage() for r in caplog.records
+                     if r.name == _LOGGER and r.levelno >= logging.WARNING)
+
+
+class TestRecordNeverDeletesRowsItDidNotRewrite:
+    """2026-09-29 v0.45.380 同形普查发现：`record_day` 零快照时照样把账本改写成「其它日期的行 + 空列表」，
+    数据根找错（未设 ALPHA_HIVE_HOME ⇒ PATHS.home 回落到代码目录，而那里的 vrp_state/ 被 git 跟踪）
+    或当天缺快照时，**该日已有的行连同已结算的一起删掉**，日志只有 INFO「VRP 记录 0 行」。
+    v0.45.104 的结算字段搬运只救得了本次重新产出的票。生产 09-24 / 09-25 日更钩子真的走过这条路
+    （当时该日无行，没删到东西）。"""
+
+    @pytest.mark.parametrize("layout", ["missing_dir", "empty_dir", "other_day_only",
+                                        "unreadable_same_day", "non_object_same_day", "backfilled_only"])
+    def test_zero_snapshots_leave_ledger_byte_identical(self, state, tmp_path, caplog, layout):
+        _seed_ledger_compact()
+        before, ino = vrp.SIGNALS_FILE.read_bytes(), vrp.SIGNALS_FILE.stat().st_ino
+        cdir = tmp_path / "wrong_root" / "cache" if layout == "missing_dir" else state
+        if layout == "other_day_only":
+            _snap(state, "AAA", _day(1))
+        elif layout == "unreadable_same_day":
+            (state / f"options_snapshot_AAA_{AS_OF}.json").write_text("{not json")
+        elif layout == "non_object_same_day":             # 合法 JSON 但不是对象：_iter_snapshots 静默跳过
+            (state / f"options_snapshot_AAA_{AS_OF}.json").write_text("[]")
+        elif layout == "backfilled_only":
+            (state / f"options_snapshot_AAA_{AS_OF}_backfilled-{_day(-1)}.json").write_text(
+                json.dumps({"iv_raw_observed": 30.0, "rv_30d": 20.0}))
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            r = vrp.record_day(AS_OF, cache_dir=cdir)
+
+        assert r == []
+        assert vrp.SIGNALS_FILE.read_bytes() == before, "零快照改写了账本"
+        assert vrp.SIGNALS_FILE.stat().st_ino == ino, "零快照做了一次原子替换（内容恰好没变也不许写）"
+        msg = _warnings(caplog)
+        assert str(cdir) in msg, f"WARNING 没点名读的是哪个目录：{msg!r}"
+        assert "账本未改写" in msg and "3 行原样保留" in msg
+        diag = {"missing_dir": "目录不存在",
+                "empty_dir": "里面没有任何常规 options_snapshot",
+                "other_day_only": f"最新 {_day(1)}",
+                "unreadable_same_day": "1 份该日快照文件，但都读不出（坏 JSON",
+                "non_object_same_day": "或内容不是 JSON 对象（静默跳过）",
+                "backfilled_only": "1 份该业务日的补跑快照"}[layout]
+        assert diag in msg, msg
+        if layout == "missing_dir":
+            assert not cdir.exists(), "诊断不许顺手把缺的目录建出来"
+        else:
+            assert "目录存在" in msg and "目录不存在" not in msg
+
+    def test_partial_rerun_keeps_rows_it_did_not_rewrite(self, state, caplog):
+        """该日 3 行、这次只有 BBB 的快照可用：BBB 被替换，AAA（已结算，无快照文件）与 CCC（快照坏 JSON）
+        原样保留并报出来——两种保留成因各有一个夹具，告警文案里的病因词都对得上。
+
+        选「保留」而不是「整日替换」：缺快照不是这行作废的证据；已结算样本删了补不回来；
+        与 `earnings_vol_signal.scan`（v0.45.380）、`sell_strike_ledger._record_rows` 同一语义。"""
+        seeded = _seed_ledger_compact()
+        _snap(state, "BBB", AS_OF, iv_raw=30.0, rv=20.0)
+        (state / f"options_snapshot_CCC_{AS_OF}.json").write_text("{not json")
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            r = vrp.record_day(AS_OF, cache_dir=state)
+
+        assert [x["ticker"] for x in r] == ["BBB"]          # 返回值只含本次写入的
+        rows = {(x["ticker"], x["date"]): x for x in vrp.load_rows()}
+        assert set(rows) == set(seeded)
+        assert rows[("AAA", AS_OF)] == seeded[("AAA", AS_OF)]      # 已结算行一个字段都没动
+        assert rows[("CCC", AS_OF)] == seeded[("CCC", AS_OF)]
+        for i in range(1, 4):
+            assert rows[("BBB", _day(i))] == seeded[("BBB", _day(i))]
+        bbb = rows[("BBB", AS_OF)]
+        assert bbb["vrp_ex_ante"] == pytest.approx(10.0)            # 真的换成了新快照算的
+        assert bbb["settle_attempts"] == 2                          # v0.45.104 搬运照旧
+        # 历史只看 BBB 严格早于 as_of 的 3 行：保留的同日行（别的票）不进分母
+        assert bbb["n_obs"] == 3
+        msg = _warnings(caplog)
+        assert "原样保留：AAA, CCC（其中已结算：AAA）" in msg
+        assert "无该日快照" in msg and "快照读不出" in msg
+
+        # upsert 仍幂等：同样的快照再跑一次，账本字节不变
+        after_first = vrp.SIGNALS_FILE.read_bytes()
+        vrp.record_day(AS_OF, cache_dir=state)
+        assert vrp.SIGNALS_FILE.read_bytes() == after_first
+
+    def test_warning_names_the_two_wrong_directory_causes(self, state, tmp_path, monkeypatch, caplog):
+        _seed_ledger_compact()
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        monkeypatch.setenv("ALPHA_HIVE_CACHE_DIR", str(tmp_path / "writer_cache"))
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            vrp.record_day(AS_OF, cache_dir=tmp_path / "reader_cache")
+        msg = _warnings(caplog)
+        assert "未设 ALPHA_HIVE_HOME" in msg
+        assert str(tmp_path / "writer_cache") in msg and "与本次读取目录不同" in msg
+        assert not (tmp_path / "writer_cache").exists() and not (tmp_path / "reader_cache").exists()
+
+    def test_default_cache_dir_is_not_created(self, state, tmp_path, monkeypatch, caplog):
+        """缺省目录从前走会 mkdir 的 `PATHS.cache_dir`：不带 ALPHA_HIVE_HOME 手动跑一次，
+        代码 checkout 里就多出一个空 `cache/`，「数据根找错了」从此看起来像「目录在、只是没快照」。
+        `assess` 的 docstring 自称「纯读取，无副作用」，走的是同一个 `_cache_dir(None)`。"""
+        _seed_ledger_compact()
+        before = vrp.SIGNALS_FILE.read_bytes()
+        missing = tmp_path / "no_such_root" / "cache"
+        monkeypatch.setenv("ALPHA_HIVE_CACHE_DIR", str(missing))
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            assert vrp.record_day(AS_OF) == []
+        assert not missing.exists(), "record_day 把缺的缺省目录建出来了"
+        msg = _warnings(caplog)
+        assert str(missing) in msg and "目录不存在" in msg
+        vrp.assess(rows=[], as_of=AS_OF)
+        assert not missing.exists(), "assess 把缺的缺省目录建出来了"
+        assert vrp.SIGNALS_FILE.read_bytes() == before
 
 
 # ==================== 结算 ====================
@@ -688,26 +827,49 @@ class TestCliAndMarkdown:
                 _snap(state, f"T{i:02d}", d, iv_raw=30.0, rv=20.0)
         assert vrp.main(["--cache-dir", str(state), "--date", AS_OF]) == 0
 
-    def test_record_zero_rows_warns_without_changing_exit_code(self, state, tmp_path, capsys):
+    def test_record_zero_snapshots_exits_3_and_names_dir(self, state, tmp_path, capsys):
         """v0.45.104 回归：`--date D --record` 一行没写时，退出码与健康的"攒数中"
-        逐字节相同 —— 报错和正常态长得一模一样。退出码归就绪度（编排器契约不动），
-        成败改由 WARNING + JSON 计数表达。"""
+        逐字节相同 —— 报错和正常态长得一模一样。那一版只加了 WARNING + JSON 计数、
+        退出码仍归就绪度（理由是编排器契约——但编排器从未调用本脚本）。
+        v0.45.384：零快照 ⇒ 不论就绪度一律退出 3，stderr 点名读取目录，账本不改写。"""
         for i in range(25):
-            _index(state, f"T{i:02d}", _past_dates(10))       # 有索引、无当日快照
+            _index(state, f"T{i:02d}", _past_dates(10))       # 有索引（就绪度 = 攒数中 1）、无当日快照
+        _seed_ledger_compact()
+        before = vrp.SIGNALS_FILE.read_bytes()
         out = tmp_path / "vrp.json"
         code = vrp.main(["--record", "--json", "--out", str(out),
                          "--cache-dir", str(state), "--date", AS_OF])
-        assert code == 1                                      # 契约不变
+        assert code == 3, "零快照报成了就绪度（攒数中 1），与健康的一天无从区分"
+        err = capsys.readouterr().err
+        assert f"no snapshots found in {state}" in err
+        assert vrp.SIGNALS_FILE.read_bytes() == before
         j = json.loads(out.read_text())
-        assert j["recorded"] == 0
-        assert j["warnings"] and "一行没写" in j["warnings"][0]
-        assert AS_OF in j["warnings"][0]
-        # 健康那一天：写了行就不该有告警
-        _snap(state, "AAA", AS_OF)
-        vrp.main(["--record", "--json", "--out", str(out),
-                  "--cache-dir", str(state), "--date", AS_OF])
+        assert j["recorded"] == 0 and j["assessment"]["status"] == "accruing"
+        assert j["warnings"] and "no snapshots found in" in j["warnings"][0] and AS_OF in j["warnings"][0]
+        assert "3 行原样保留" in j["warnings"][0]
+        # 健康那一天：三只都有快照 ⇒ 退出码回到就绪度，不该有告警
+        for t in ("AAA", "BBB", "CCC"):
+            _snap(state, t, AS_OF)
+        code = vrp.main(["--record", "--json", "--out", str(out),
+                         "--cache-dir", str(state), "--date", AS_OF])
         j = json.loads(out.read_text())
-        assert j["recorded"] == 1 and j["warnings"] == []
+        assert code == 1 and j["recorded"] == 3 and j["warnings"] == []
+
+    def test_cli_subprocess_zero_snapshots_exits_3_and_creates_nothing(self, state, tmp_path):
+        """真跑 `__main__`：`_isolate_env` 已把 ALPHA_HIVE_HOME 指向 tmp_path，子进程继承它 ⇒
+        账本在 `<tmp>/vrp_state/`；缓存目录另指一个不存在的路径，钉住「缺省目录不被建出来」。"""
+        ledger = tmp_path / "vrp_state" / "vrp_signals.jsonl"
+        _seed_ledger_compact(ledger)
+        before = ledger.read_bytes()
+        missing = tmp_path / "no_such_cache"
+        env = dict(os.environ, ALPHA_HIVE_HOME=str(tmp_path), ALPHA_HIVE_CACHE_DIR=str(missing))
+        rc = subprocess.run([sys.executable, str(ROOT / "vrp_signal.py"), "--record", "--date", AS_OF],
+                            capture_output=True, text=True, cwd=tmp_path, env=env, timeout=60)
+        assert rc.returncode == 3, (rc.returncode, rc.stdout, rc.stderr)
+        assert f"no snapshots found in {missing}" in rc.stderr and "目录不存在" in rc.stderr
+        assert "3 行原样保留" in rc.stderr
+        assert ledger.read_bytes() == before
+        assert not missing.exists(), "CLI 把缺的缓存目录建出来了"
 
     def test_record_flag_writes_rows(self, state, tmp_path, capsys):
         _snap(state, "AAA", AS_OF)

@@ -5,7 +5,81 @@
 
 ---
 
-## [0.45.384] — 2026-09-29 — 占位（进行中：vrp_signal.record_day 零快照时不再清空当天账本行（含已结算行）；局部重跑改 upsert；CLI 零快照 exit 3）
+## [0.45.384] — 2026-09-29 — Fixed：`vrp_signal.record_day` 零快照时不再清空该日账本行（含已结算行）；部分重跑改为按票 upsert、没有可用快照的旧行保留；CLI `--record` 零快照退出 3 并点名读取目录；缺省缓存目录不再被凭空建出
+
+### 事故形状（v0.45.380 同形普查「只列不修」的那一条，照其语义修）
+- `record_day(as_of)` 取 `keep = 其它日期的行`，遍历 `_iter_snapshots(cdir, as_of)` 后**无条件** `_write_jsonl(SIGNALS_FILE, sorted(keep + 本次行))`。
+  零快照 ⇒ 该日已有的行（含 `settle()` 回填过 `rv_forward` / `vrp_realized` / `settled_on` 的）整批删掉；v0.45.104 的结算字段搬运只救得了本次重新产出的票；
+  部分快照缺失 ⇒ 只删缺的那几只。日志只有 INFO「VRP 记录 0 行」。
+- 另一半：`_cache_dir(None)` 走 `PATHS.cache_dir`，那个 getter 会 mkdir ⇒ 不带 `ALPHA_HIVE_HOME` 手动跑一次，代码 checkout 里就多出空 `cache/`，
+  随后的告警只能说「该日在 <目录> 里没有任何常规期权快照」——「数据根找错了」被改写成「目录在、只是没快照」。`assess` 自称「纯读取，无副作用」，走的是同一个函数。
+- 触发：数据根找错（env-less 手动跑 ⇒ `PATHS.home` 回落到代码目录，那里的 `vrp_state/vrp_signals.jsonl` 被 git 跟踪）/ 当日快照缺失。
+- **复现**（数据根指向 scratch，里面拷的是 checkout 里被跟踪的 304 行账本）：改前 `vrp_signal.py --record --date 2026-09-22` ⇒
+  账本 304 → 274 行（09-22 的 30 行没了）、`<scratch>/cache` 被建出、stderr「该日在 …/cache 里没有任何常规期权快照」；
+  改后 ⇒ exit 3、「no snapshots found in <scratch>/cache（目录不存在）——未改写 …（该日已有 30 行原样保留）」、sha256 不变、目录未建。
+  改后 env-less 在 worktree 里跑 ⇒ exit 3 + 「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录」，被跟踪账本的 sha256 **与 inode** 均不变，未建出 `cache/`。
+- **生产**（只读核对）：账本 334 行、**已结算 0 行**（首行 09-04，按 `is_trading_day` 算第 21 个交易日最早 2026-10-06 才能结算）⇒ 眼下没有已结算样本暴露，一周后开始暴露。
+  **09-24、09-25 日更钩子真的走过零快照分支**（`alpha_hive.log*` 里 INFO「VRP 记录 0 行（2026-09-24 / 09-25 …）」+「VRP 信号已更新 … 记录 0」，同 v0.45.380 对 earnings 的核对）——
+  那两天账本里原本没有该日行，没删到东西，但账本被原子替换了一次；日志只有 INFO，看不出读的是哪个目录、它在不在——「数据根找错」与「当天真缺快照」在日志里长得一样。
+
+### Fixed
+- `vrp_signal.py`
+  - `record_day()`：零快照 ⇒ **不写账本**（连原子替换都不做），返回 `[]`，WARNING 写明读取目录、它在不在、该日已有几行原样保留。
+    `_snapshot_dir_diagnosis` 分：目录不存在 / 路径不是目录 / 有该日文件但都读不出（坏 JSON，有 WARNING）或不是 JSON 对象（`_iter_snapshots` 静默跳过）/ 只有别的日期（给出最新日期）/ 空目录；另有该业务日补跑文件时附一句「`record_day` 不认补跑文件」。
+    `_cache_dir_hint` 命中才附：未设 `ALPHA_HIVE_HOME`；读取目录与快照写者（`options_analyzer`，`PATHS.cache_dir`）不同。诊断只读：不建目录。
+    （每份可读快照恰好产出一行——缺数也记一行带 `reason`——所以本模块没有 earnings 那种「有快照、零信号」分支。）
+  - 落盘改为按 `(ticker, date)` **upsert**：本次有可用快照的票替换旧行（v0.45.104 搬运不变）；该日其余旧行**原位保留**，WARNING 列出票、并列写出三种保留成因（无该日快照 / 快照读不出 / 不是 JSON 对象）、标出其中已结算的。
+    **决定**（写进 `record_day` docstring）：缺快照不是「这行作废」的证据，只是这次没有输入；已结算样本删了补不回来；与 `earnings_vol_signal.scan`（v0.45.380）/ `sell_strike_ledger._record_rows` 同一语义。
+    同样的快照重跑仍字节幂等。
+  - `_prior_history` 仍收 upsert 之前那份「其它日期的行」，**n_obs / ts_pct 逐字不变**：它先跳过 `d >= as_of` 的行、再碰 `covered` / `hist`，本日行无论保留与否都进不了分母
+    （变异 M13 把实参换成全表 ⇒ 67/67 绿，即等价；另有断言钉住部分重跑后 BBB 的 `n_obs == 3`）。
+  - 返回值不变（只含本次写入的行），日报钩子无需改。本体拆成 `_record_day_with_info()`（多返回诊断 dict），`record_day()` 取第一项。
+  - `_cache_dir(None)` 改走 `PATHS.cache_dir_unmade()`：本模块对缓存目录只读（`_default_bars` 的本地价格索引兜底由 `price_history` 自己在写标记时 mkdir）。
+  - CLI：`--record` 零快照 ⇒ stderr「❓ --record <日>：no snapshots found in <目录>（诊断）——未改写 <账本>（该日已有 N 行原样保留）」、**退出 3**（不论就绪度）；
+    部分重跑 ⇒ stderr 列出保留的票，退出码照旧是就绪度；`--json` 另有 `record_info`；告警在 `--json` 下也走 stderr（stdout 仍是纯 JSON）。`--settle` / 就绪度照跑，`--out` 照写。
+- `hive_logger.py`：新增 `PATHS.cache_dir_unmade()`（同 `logs_dir_unmade` v0.45.239 的做法：解析逻辑只写一份，`cache_dir` getter 改为调它再 mkdir，行为不变）。
+
+### ⚠️ 推翻了 v0.45.104 的一个决定（退出码）
+- v0.45.104 刻意让 `--record` 写 0 行时退出码**仍归就绪度**（攒数中 = 1），理由是「编排器契约」，只加了 WARNING + JSON 计数，并有测试钉住 `code == 1  # 契约不变`。
+- 查证：**编排器从未调用过 `vrp_signal.py`**（仓库版与部署副本均 0 处；`git log -S vrp_signal -- scripts/alpha-hive-orchestrator.sh` 全历史 0 条；`~/.claude/scheduled-tasks` 10 个任务 0 处）——唯一的生产调用方是日报钩子 import 调 `record_day`。
+  而零快照报 1 与健康的「攒数中」逐字节相同，正是 v0.45.104 自己要治的「报错和正常态长得一样」。本版改为零快照一律 3（本 CLI 里 3 本来就是「无法判定」），该测试改写为 `test_record_zero_snapshots_exits_3_and_names_dir`。
+
+### 调用方（行为变化是有意的）
+- `alpha_hive_daily_report._post_scan_enrichment`（日更钩子，紧跟 earnings 那块）：零快照日从「静默改写账本 + INFO」变为「不写 + WARNING」；仍返回 `[]`，
+  `settle()` 照跑（旧行照样结算），钩子的 INFO「VRP 信号已更新 … 记录 0」照打。**没有改成抛异常**：钩子的 try 包着 record + settle，抛了会连带跳过当天结算。
+- `render_markdown` 读 `rows_for_date`：部分重跑后会连保留的旧行一起显示——它们本就是该日由真实快照算出的行。
+- `tests/test_sell_strike_integration.py` 把 `record_day` 桩成 `lambda: []`，不受影响。
+
+### Tests
+- `tests/test_vrp_signal.py` 57 → 67（11 新、1 条改写替换；全离线、tmp 目录）：
+  - `TestRecordNeverDeletesRowsItDidNotRewrite`：零快照 × 六种目录形态（缺目录 / 空目录 / 只有别的日期 / 该日文件坏 JSON / 该日文件是合法 JSON 但不是对象 / 只有补跑文件）⇒ 账本**字节与 inode 都不变**
+    （夹具刻意用紧凑分隔符写：upsert 语义下「内容相同的改写」只有这样才抓得到）、WARNING 含完整目录路径与对应诊断、缺的目录读完仍不存在；
+    部分重跑（AAA 无快照文件、CCC 快照坏 JSON，两种保留成因各一个夹具）⇒ 已结算行与保留行逐字段不变、被替换的票 `n_obs` 只数自己的历史、结算搬运照旧、WARNING 列出并标已结算、再跑一次字节幂等；
+    两种错目录提示（且两个目录都没被建出）；缺省目录（`cache_dir=None`）`record_day` 与 `assess` 都不建。
+  - `TestCliAndMarkdown`：`main()` 有索引（攒数中）无快照 ⇒ 退出 3、stderr 点名目录、账本字节不变、JSON 告警含「3 行原样保留」，三只都有快照 ⇒ 回到 1 且无告警；
+    真跑 `__main__` 子进程（`ALPHA_HIVE_HOME`=tmp、`ALPHA_HIVE_CACHE_DIR`=不存在的路径）⇒ 退出 3、stderr 点名目录与「目录不存在」、账本不变、目录未建。
+- **真跑变异**（在 `git archive HEAD` + 本版三个文件拼出的 scratch 副本里做，并发读 worktree 的会话看不到变异；`PYTHONDONTWRITEBYTECODE=1`、每轮用 Python 删 pyc、`--maxfail=1000`、
+  锚点唯一且「文件变了 + 新文本恰好出现一次」、每轮 passed+failed = collected 67、还原后 sha256 核对并复跑 67/67 绿；另用 `--tb=line` 逐条核对了 M0 / M1 / M5 / M14 **红的理由**）：
+  （第二轮时这道「恰好出现一次」闸还拦下了驱动自己的一个坏变异：替换成空串，`count("")` 恒为 len+1 ⇒ 整轮作废而非误报通过，改成非空替换后重跑。）
+  - M0 改动前真实文件（`git show b7a9fb5f:`）⇒ 11 红，理由逐条对得上：零快照 6 条红在「零快照改写了账本」、部分重跑红在 AAA/CCC 被删、错目录提示红在「没有任何 WARNING」、
+    缺省目录红在「record_day 把缺的缺省目录建出来了」、CLI 红在退出码 1（误报本身）、子进程红在 stderr 没有「no snapshots found」。新测试只经改动前就有的接口（`record_day` / `main` / `assess` / `__main__`），没有一条是 AttributeError。
+  - M1 删零行守卫 ⇒ 10 红（改写内容相同，全靠字节 / inode 抓到）；M2 upsert 改回整日替换 ⇒ 1；M3 诊断不分缺目录 ⇒ 3；M4 WARNING 只写末级目录名 ⇒ 7；
+    M5 CLI 零快照退就绪度 ⇒ 1；M6 保留旧行不报 ⇒ 1；M7 未设 HOME 不提示 ⇒ 1；M8 `_cache_dir(None)` 回到会 mkdir 的 getter ⇒ 2；M9 诊断顺手建目录 ⇒ 4；
+    M10 写者目录不同不提示 ⇒ 1；M11 补跑文件不提 ⇒ 1；M12 该日文件读不出不分 ⇒ 2；M14 该日行数写死 0 ⇒ 8；M15 保留成因只写「无快照」⇒ 1；M16 诊断不提非对象 JSON ⇒ 1；
+    M13（`_prior_history` 喂全表）⇒ 0 红＝等价变异，证明见上。
+- ruff 通过。全套：（基线 `e248b171` = v0.45.383 占位 + 本版占位）1 failed、7441 passed、82 deselected、2 xfailed（合计 = selected 7444）；
+  唯一红是 `test_economic_calendar::TestCoverageHorizon`（BLS 未发布 2027 日程的设计性告警，同 v0.45.377 / v0.45.380 / v0.45.382，与本改动无关）。
+
+### 自查（照 v0.45.380 二次检查的判据：诊断文案里每个病因词都要有一个会让它出现的夹具）
+- 第一版保留旧行的 WARNING 写的是「本次没有快照」，零快照诊断写的是「都读不出（见上方 WARNING）」——逐词对夹具时发现两处都不对：
+  快照在、但坏 JSON / 不是 JSON 对象时旧行同样会被保留；而非对象 JSON 在 `_iter_snapshots` 里是**静默**跳过的，「见上方 WARNING」指向一条不存在的日志。
+  改为并列写出成因，并给「坏 JSON」「非对象」各补一个夹具（M12 / M15 / M16 证明这几条断言有牙）。
+
+### 未做
+- `BASE_DIR` / `STATE_DIR` / `SIGNALS_FILE` 仍是 import 期冻结（`test_paths_not_frozen_at_import` KNOWN 存量），未动。
+- `_load_jsonl` 静默跳过坏行 ⇒ 每次正常改写都会把坏行丢掉：本版只让零输入不写，坏行问题未处理（同 v0.45.380）。
+- v0.45.380（earnings）仍只在本地分支 `claude/angry-bhabha-8426f1`、未进 main；本版不依赖它，两边各自独立。
+- 09-24 / 09-25 为什么没有期权快照：待验证（同 v0.45.380，不在本版范围）。
 
 ## [0.45.383] — 2026-09-29 — 占位（进行中：yfinance 日线完整性校验——`fetch_historical_hv` 缺交易日 ⇒ 重取一次、仍缺则 iv_rank 置空并计数；09-23 那 8 只当天分数重放）
 

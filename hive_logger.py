@@ -90,9 +90,18 @@ class _HivePaths:
 
     @property
     def cache_dir(self) -> Path:
-        p = Path(os.environ.get("ALPHA_HIVE_CACHE_DIR", str(self.home / "cache")))
+        p = self.cache_dir_unmade()
         p.mkdir(parents=True, exist_ok=True)
         return p
+
+    def cache_dir_unmade(self) -> Path:
+        """同 `cache_dir`，但**不建目录**（v0.45.384，照 `logs_dir_unmade`）。
+
+        给只读 / 找不到就该如实报的调用方用：不带 `ALPHA_HIVE_HOME` 手动跑时数据根
+        回落到代码目录，`cache_dir` 的 getter 会在 checkout 里凭空建出一个空 `cache/`，
+        把「数据根找错了」改写成「目录在、只是没快照」。解析逻辑只在这里写一份。
+        """
+        return Path(os.environ.get("ALPHA_HIVE_CACHE_DIR", str(self.home / "cache")))
 
     @property
     def cboe_daily_cache(self) -> Path:

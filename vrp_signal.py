@@ -41,11 +41,18 @@ K 线，不偷看未来。
 
 重跑不得抹掉结算（v0.45.104）
 ----------------------------
-`record_day` 同日重跑会整日重写。**重写必须把 `settle()` 已经填好的字段
+`record_day` 同日重跑会重写本次有快照的票。**重写必须把 `settle()` 已经填好的字段
 原样搬过来**（`_SETTLEMENT_FIELDS`），否则日报 `--date` 回填路径重跑一次旧
 日期，就把当天所有行的 `rv_forward`/`vrp_realized`/`settled_on` 抹成 None，
 而日志照旧打印成功行。只要基准日还落在 `_default_bars` 的 120 根窗口里，
 下次 settle 还能补回来 —— 出了窗口就是永久丢失，且全程无声。
+
+没有输入就不许删行（v0.45.384）
+------------------------------
+搬运只救得了**本次重新产出**的票。从前零快照（数据根找错 / 当日快照缺失）照样把账本
+改写成「其它日期的行 + 空列表」，该日已有的行——含已结算的——整批删掉，日志只有
+INFO「VRP 记录 0 行」。现在：零快照 ⇒ 账本一个字节都不改 + WARNING 点名读取目录与它在
+不在；部分重跑 ⇒ 按 (ticker, date) upsert，没有可用快照的旧行原样保留并告警。
 
 补跑快照（backfilled）是单向的 —— 已修
 --------------------------------------
@@ -66,7 +73,7 @@ K 线，不偷看未来。
   IV 索引里已有、且同日快照能提供 `rv_30d` 的旧日期一并计入（启动期多
   十来条历史，纯读取、不落盘）。
 
-状态：`vrp_state/vrp_signals.jsonl`（每票每日一行，按日期幂等重写）。
+状态：`vrp_state/vrp_signals.jsonl`（每票每日一行，按 (ticker, date) 幂等 upsert；零快照不改写）。
 
 用法
 ----
@@ -78,8 +85,12 @@ K 线，不偷看未来。
         1 = 攒数中（正常态）
         3 = 无法判定（缓存目录里连一个 IV 索引都没有）
         ⚠️ 3 而非 2：编排器 `run_step()` 把 2 保留给"脚本不存在"。
-        ⚠️ 退出码只表达就绪度（编排器契约），**不**表达 --record/--settle 的
-        成败：那两个的条数在 `--json` 里，写 0 行时另有一条 WARNING。
+        ⚠️ 退出码表达就绪度，**不**表达 --settle 的成败（条数在 `--json` 里）。
+        唯一例外（v0.45.384）：`--record` 被要求了、但该日一份常规快照都没找到
+        ⇒ 不论就绪度一律 3，stderr「no snapshots found in <目录>（诊断）」，账本未改写。
+        v0.45.104 曾刻意让 --record 的成败不进退出码，理由是「编排器契约」——
+        但编排器从未调用过本脚本（仅日报钩子 import 调用），而零快照的 1 与健康的
+        「攒数中」逐字节相同，正是那一版自己要治的「报错和正常态长得一样」。
 """
 
 from __future__ import annotations
@@ -148,8 +159,12 @@ def _r(v, nd=4) -> Optional[float]:
 
 
 def _cache_dir(cache_dir) -> Path:
+    """缓存目录（快照 / IV 索引所在）。本模块对它**只读**，所以缺省走不建目录的
+    `PATHS.cache_dir_unmade()`（v0.45.384）：从前走会 mkdir 的 `PATHS.cache_dir`，
+    不带 `ALPHA_HIVE_HOME` 手动跑一次就在代码 checkout 里建出空 `cache/`，
+    「数据根找错了」从此看起来像「目录在、只是没快照」。"""
     if cache_dir is None:
-        return Path(PATHS.cache_dir)
+        return PATHS.cache_dir_unmade()
     p = Path(cache_dir)
     return p if p.is_absolute() else BASE_DIR / p
 
@@ -336,17 +351,71 @@ def _label(ts_pct: float) -> str:
     return "mid"
 
 
+def _snapshot_dir_diagnosis(cdir: Path, as_of: str) -> str:
+    """零快照时说清楚「去哪找的、那里有什么」。只读：不建目录、不碰账本。
+
+    v0.45.384 之前这几种情形都被压成 INFO「VRP 记录 0 行」，然后把该日账本行整批删掉；
+    要分开说，是因为病因和处置完全不同——目录不存在多半是数据根找错了，
+    目录在但只有别的日期，才是当天快照真的缺了。
+    """
+    if not cdir.exists():
+        return "目录不存在"
+    if not cdir.is_dir():
+        return "路径存在但不是目录"
+    same_day = [p for p in cdir.glob(f"options_snapshot_*_{as_of}.json") if _SNAP_RE.match(p.name)]
+    if same_day:
+        return (f"目录存在，有 {len(same_day)} 份该日快照文件，但都读不出（坏 JSON，见上方 WARNING）"
+                f"或内容不是 JSON 对象（静默跳过）")
+    dates = sorted({m.group(2) for m in (_SNAP_RE.match(p.name) for p in cdir.glob("options_snapshot_*.json")) if m})
+    out = (f"目录存在，但没有 {as_of} 的快照（共 {len(dates)} 个日期，最新 {dates[-1]}）" if dates
+           else "目录存在，但里面没有任何常规 options_snapshot")
+    backfilled = list(cdir.glob(f"options_snapshot_*_{as_of}_backfilled-*.json"))
+    if backfilled:
+        out += f"；另有 {len(backfilled)} 份该业务日的补跑快照，record_day 不认补跑文件（见 `_iter_snapshots`）"
+    return out
+
+
+def _cache_dir_hint(cdir: Path) -> str:
+    """两种「读错目录」的常见来路，命中才说；都不命中返回空串。"""
+    hints = []
+    if "ALPHA_HIVE_HOME" not in os.environ:
+        hints.append("未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录（生产由编排器 export）")
+    # 快照的写者 options_analyzer 用 PATHS.cache_dir；显式传了别的 cache_dir 就会分叉。
+    # 用不建目录的同一解析：诊断不该有副作用。
+    writer = PATHS.cache_dir_unmade()
+    if Path(cdir) != writer:
+        hints.append(f"快照写者（options_analyzer）按 PATHS.cache_dir 写在 {writer}，与本次读取目录不同")
+    return "；".join(hints)
+
+
 def record_day(as_of: str, cache_dir=None) -> List[Dict]:
-    """为 `as_of` 的每份常规快照写一行 VRP 记录（同日重跑 = 整日重写）。返回写入的行。
+    """为 `as_of` 的每份常规快照写一行 VRP 记录，按 (ticker, date) upsert 落盘。返回本次写入的行。
 
     v0.45.104：重写**不得**抹掉 `settle()` 已经填好的字段。日报 `--date` 回填路径
     （`date_override` → `self.date_str` → VRP 钩子）会拿旧日期重跑 `record_day`，
     从前那一下会把当天所有行的 `rv_forward`/`vrp_realized`/`settled_on` 清成 None，
     日志却照常打印"记录 N 行"。基准日还在 120 根窗口内时下次 settle 能补回来，
     出了窗口就是永久丢失 —— 全程无声。
+
+    落盘语义（v0.45.384，与 `earnings_vol_signal.scan` v0.45.380 / `sell_strike_ledger._record_rows` 同）：
+      · 零快照 ⇒ **账本一个字节都不改**（连原子替换都不做），WARNING 写明读的目录与它在不在，
+        返回 []。此前照常改写成「其它日期的行 + 空列表」，即把该日已有的行（含 settle 过的）
+        整批删掉——数据根找错（不带 `ALPHA_HIVE_HOME` 手动跑 ⇒ 读写的是代码目录里被 git
+        跟踪的 `vrp_state/`）、当日快照缺失时都会触发；v0.45.104 的搬运只救得了本次重新产出的票。
+      · 本次有快照的票 ⇒ 替换该票该日的旧行（结算字段照 v0.45.104 搬过来）。
+      · 该日已有、但本次**没有可用快照**的票（缺文件 / 坏 JSON / 不是对象）⇒ 旧行原样保留并打 WARNING。缺快照不是「这行作废」
+        的证据，只是这次没有输入；已结算的样本删了就再也补不回来。要撤掉某行请直接编辑账本。
+    返回值只含本次写入的行，不含保留的旧行。
     """
+    return _record_day_with_info(as_of, cache_dir)[0]
+
+
+def _record_day_with_info(as_of: str, cache_dir=None) -> Tuple[List[Dict], Dict]:
+    """`record_day` 的本体，另返回诊断信息给 CLI 决定退出码（`record_day` 的返回类型不能变：日报在用）。"""
     cdir = _cache_dir(cache_dir)
     existing = load_rows()
+    # 其它日期的行，只喂 `_prior_history`。它本来就只看**严格早于** as_of 的日期，
+    # 所以本日行（无论保留与否）进不进这个列表都一样；沿用 upsert 之前的列表，结果逐字不变。
     keep = [r for r in existing if r.get("date") != as_of]
     # 被本次重写顶掉的旧行，按票索引，用来搬运结算字段
     superseded = {r.get("ticker"): r for r in existing if r.get("date") == as_of}
@@ -397,12 +466,37 @@ def record_day(as_of: str, cache_dir=None) -> List[Dict]:
             row.update({"ready": True, "ts_pct": _r(ts_pct), "label": _label(ts_pct)})
         new_rows.append(row)
 
-    all_rows = keep + new_rows
+    # 每份可读快照恰好产出一行（缺数也记一行带 reason），所以「零行」就是「零快照」。
+    info: Dict = {"cache_dir": cdir, "cache_dir_exists": cdir.is_dir(), "n_snapshots": len(new_rows),
+                  "n_existing_for_date": sum(1 for r in existing if r.get("date") == as_of), "written": False, "kept": [], "diagnosis": None}
+
+    # 「这个失败，下游怎么知道？」——没有输入就不许写：写了等于把「找错地方 / 当天缺快照」
+    # 改写成「该日没有记录」，连同已结算的样本一起删掉。
+    if not new_rows:
+        info["diagnosis"] = "；".join(x for x in (_snapshot_dir_diagnosis(cdir, as_of),
+                                                 _cache_dir_hint(cdir)) if x)
+        _log.warning("VRP 记录 %s：没有可用的快照（读取目录 %s：%s）——账本未改写（%s，该日已有 %d 行原样保留）",
+                     as_of, cdir, info["diagnosis"], SIGNALS_FILE, info["n_existing_for_date"])
+        return new_rows, info
+
+    # 按票 upsert：只顶掉本次有可用快照的票；该日其余旧行留在原位（见 record_day 的 docstring）。
+    new_tickers = {r["ticker"] for r in new_rows}
+    kept = [r for r in existing if r.get("date") == as_of and r.get("ticker") not in new_tickers]
+    if kept:
+        info["kept"] = [r.get("ticker") for r in kept]
+        settled = [r.get("ticker") for r in kept if r.get("settled_on")]
+        _log.warning("VRP 记录 %s：该日已有 %d 行本次没有重写到（该票无该日快照 / 快照读不出 / 不是 JSON 对象），"
+                     "原样保留：%s%s", as_of, len(kept),
+                     ", ".join(str(t) for t in info["kept"]),
+                     f"（其中已结算：{', '.join(str(t) for t in settled)}）" if settled else "")
+    all_rows = [r for r in existing if not (r.get("date") == as_of and r.get("ticker") in new_tickers)]
+    all_rows += new_rows
     all_rows.sort(key=lambda r: (str(r.get("date")), str(r.get("ticker"))))
     _write_jsonl(SIGNALS_FILE, all_rows)
+    info["written"] = True
     _log.info("VRP 记录 %d 行（%s，其中 ready %d / 缺数 %d）", len(new_rows), as_of,
               sum(1 for r in new_rows if r["ready"]), sum(1 for r in new_rows if r["reason"]))
-    return new_rows
+    return new_rows, info
 
 
 # ---------------------------------------------------------------- 结算
@@ -771,17 +865,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
     as_of = args.date or pdt_today()
 
-    # v0.45.104：退出码只表达就绪度（编排器契约），--record/--settle 的成败另走
-    # warnings + JSON 计数。从前 `--date D --record` 一行没写，退出码与健康的
-    # 「攒数中」逐字节相同 —— 报错和正常态长得一样，等于没报。
+    # v0.45.104：从前 `--date D --record` 一行没写，退出码与健康的「攒数中」逐字节相同
+    # —— 报错和正常态长得一样，等于没报；当时只加了 warnings + JSON 计数。
+    # v0.45.384：零快照另外改退出 3（见模块 docstring 的退出码一节）。
     result: Dict = {"date": as_of, "recorded": None, "settled": None, "warnings": []}
+    no_snapshots = False
     if args.record:
-        result["recorded"] = len(record_day(as_of, cache_dir=args.cache_dir))
-        if result["recorded"] == 0:
-            msg = (f"--record 被要求了，但 {as_of} 一行没写 —— "
-                   f"该日在 {_cache_dir(args.cache_dir)} 里没有任何常规期权快照")
-            _log.warning(msg)
-            result["warnings"].append(msg)
+        rows, rinfo = _record_day_with_info(as_of, cache_dir=args.cache_dir)
+        result["recorded"] = len(rows)
+        result["record_info"] = {k: (str(v) if isinstance(v, Path) else v) for k, v in rinfo.items()}
+        if not rows:
+            no_snapshots = True
+            result["warnings"].append(
+                f"--record {as_of}：no snapshots found in {rinfo['cache_dir']}（{rinfo['diagnosis']}）"
+                f"——未改写 {SIGNALS_FILE}（该日已有 {rinfo['n_existing_for_date']} 行原样保留）")
+        elif rinfo["kept"]:
+            result["warnings"].append(
+                f"--record {as_of}：另有 {len(rinfo['kept'])} 行本次没有重写到（无快照 / 快照读不出），原样保留："
+                f"{', '.join(str(t) for t in rinfo['kept'])}")
     if args.settle:
         result["settled"] = settle(as_of)
     res = assess(cache_dir=args.cache_dir, as_of=as_of)
@@ -795,6 +896,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         except OSError as e:
             print(f"⚠️  无法写入 {args.out}: {e}", file=sys.stderr)
 
+    # 告警一律走 stderr（--json 时 stdout 仍是纯 JSON）
+    for w in result["warnings"]:
+        print(f"{'❓' if no_snapshots else '⚠️ '} {w}", file=sys.stderr)
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
@@ -802,13 +906,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"记录 {result['recorded']} 行（{as_of}）")
         if args.settle:
             print(f"结算 {result['settled']} 行（{as_of}）")
-        for w in result["warnings"]:
-            print(f"⚠️  {w}", file=sys.stderr)
         print(summary_line(res))
         if res["status"] != "undetermined":
             top = sorted(res["per_ticker_obs"].items(), key=lambda kv: -kv[1])[:10]
             print("  " + ", ".join(f"{t} {n}" for t, n in top))
 
+    if no_snapshots:
+        return 3
     return {"ready": 0, "accruing": 1, "undetermined": 3}[res["status"]]
 
 
