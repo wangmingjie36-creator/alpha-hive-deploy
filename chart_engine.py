@@ -547,8 +547,11 @@ def render_gex_profile_chart(
             except Exception:
                 pass
 
+        # v0.45.362：DealerGEX 产出的是 positive_gex / negative_gex，旧映射只认 *_gamma（无人产出）⇒ 标题一直印英文原值
         regime_zh = {"positive_gamma": "正Gamma（做市商抑制波动）",
-                     "negative_gamma": "负Gamma（做市商放大波动）"}.get(regime, regime)
+                     "negative_gamma": "负Gamma（做市商放大波动）",
+                     "positive_gex": "正Gamma（做市商抑制波动）",
+                     "negative_gex": "负Gamma（做市商放大波动）"}.get(regime, regime)
         ax.set_xlabel("行权价（Strike）", fontsize=9, color=_T3)
         ax.set_ylabel("Gamma Exposure", fontsize=9, color=_T3)
         ax.tick_params(colors=_T3, labelsize=8)

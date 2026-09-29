@@ -91,7 +91,8 @@ class TestCounters:
         assert set(c["cboe_chain"]) == {"chains", "min_cal_dte_max", "near_excluded",
                                         "near_excluded_oi", "chosen_oi", "errors"}
         # v0.45.197：GEX 视图不可得的次数是那次改动唯一的代价，必须可数。
-        assert set(c["gex_view"]) == {"ok", "unavailable", "capped_expiries"}
+        # v0.45.362：快照模式拿到的是截断主链，单独计数（此前混进 ok）
+        assert set(c["gex_view"]) == {"ok", "unavailable", "capped_expiries", "snapshot_main_chain"}
         # v0.45.333：卖权账本原始链各失败出口分开数（不折叠），同样进 status.json。
         assert set(c["cboe_raw"]) == {"ok", "snapshot_mode", "stale_vintage", "payload_unavailable",
                                       "vintage_mismatch", "vintage_unverifiable", "price_unavailable",

@@ -5,6 +5,204 @@
 
 ---
 
+## [0.45.378] — 2026-09-29 — 二次检查 v0.45.351：两处小 bug（CDN 无期望时间戳仍报「已验证」；传输探测可能连 IPv6 误判端口不通）；09-28 生产首跑核对全绿
+
+### 生产核对（09-28 14:00 扫描，v0.45.351 首次在生产跑）
+- 生产 fast_forwarded 到 `d97e4d6`（含 v0.45.351）。gh-pages：「部署成功：远端已接受 da5dd1f（attempt 1）」、CDN 验证通过；
+  `git ls-remote origin refs/heads/gh-pages` = 本地 `gh-pages` = `da5dd1f9`（推送后才前移，符合修法 b）。
+- `.gh_pages_deploy_log.jsonl` 新行带 `action` / `commit`；编排器「✅ Step 5：gh-pages 部署已确认（pushed_new_commit，attempt 1）」，
+  `status.json.steps_result.step5_github_deploy.verified_by = gh_pages_deploy_log`。
+- ⭐ `status.json` **有了 `scan_timing`**（含 `extra.gh_pages`），编排器日志无「status.json 无 scan_timing」——09-14~25 每日缺失后首次恢复，
+  且 09-28 是阶段 5 后第一个不经 ~/Desktop 读该文件的扫描日 ⇒ **支持** v0.45.351 的 TCC 假设（单日，尚不算坐实）。
+- 失败路径（重试 / 探测 / Step 5 判红）生产上未触发过，只有测试覆盖。
+- CI（ubuntu）：v0.45.351 新增 49 条全 PASSED，编排器函数两种 locale 均过。
+
+### Fixed
+- `report_deployer.verify_cdn_deployment`：`dashboard-data.json` 无 `_generated_at` 时 `return True`（与「验证通过」同形，是 v0.45.351
+  在 DNS 分支修掉的同一形状漏在这里）→ `return None` + warning。
+- `git_transport_probe._probe_target`：取 `getaddrinfo` 第一个结果，AAAA 排前且本机无 IPv6 路由时必连不上 ⇒ 被读成「端口不通」，
+  正好污染「该不该切 443」那一格 → 优先 IPv4，记录 `family`。（github.com / ssh.github.com 目前无 AAAA，属潜伏。）
+
+### 测试
+- `TestSecondReview` 2 条；各自在钉死的改动前文件（`3a56ae25`）上红、还原后绿。相关部署测试 239 + 本文件 51 全绿，`ruff` 通过。
+
+### 复查过、判为非 bug
+- Step 2 超时（RC=124）但部署已写成功记录 ⇒ Step 5 判 success：网站确实更新了，正确。
+- helper 在旧生产代码上（无 `--gh-pages-step-status`）argparse 报错走 stderr、stdout 空 ⇒ 退回旧逻辑并标 unverified：正确。
+- 失败记录里的 `commit` 是**尝试推送**的提交（没到远端）：字段含义如此，读者只有 Step 5 且只在 failed 时当诊断用。
+
+## [0.45.377] — 2026-09-28 — CI 红的四条测试按根因修：沙箱 HOME 丢了 git 身份、测试写死 Mac 解释器、变异测试依赖浅克隆里没有的历史
+
+### Fixed
+- `tests/test_data_backup.py::_sandbox_home`：沙箱 HOME 同时隔掉了 `~/.gitconfig`（提交身份）。`git commit` 能否成功于是取决于主机名——Mac 的 `xxx.local` 推得出邮箱，Linux runner 推不出 ⇒ "Author identity unknown" ⇒ `TestPushTimeout` 停在 stage=commit（Mac 绿、CI 红）。夹具里写一份只含测试身份 + `commit.gpgsign=false` 的 `.gitconfig`，此前各测试手抄 `git config user.email` 的做法不再需要人记。
+- `tests/test_ghpages_data_root_migration.py::TestApplyCodeShippedFallbackPreconditionSurvivesOptimization`（3 条）：
+  - 子进程解释器 `/usr/local/bin/python3` → `sys.executable`（runner 上无此路径 ⇒ FileNotFoundError；同 v0.45.117 `test_no_undefined_names.py` 的修法）。
+  - 变异测试不再运行时 `git show 61f21d37:report_deployer.py`（CI 浅克隆里没有该提交 ⇒ 退出 128）：旧 `assert` 守卫原样节选嵌入测试（与历史逐字核对一致），变异体 = 当前源码只替换那一处守卫；找不到当前守卫原文即红，不许变异静默落空。
+- 验证：仿 CI 环境（`git clone --depth 1` + 移除 `/usr/local/bin/python3`）下，原版 4 红、修复版 4 绿（另 1 条同组正向测试两边都绿）。
+
+### Added
+- `tests/test_tests_use_running_interpreter.py`：AST 扫 `tests/`，恰好等于 `/usr/local/bin/python3` 的字符串常量（当 argv[0] 用的形状）即红；说明文字里提到该路径不算。同一形状已出现两次，注释挡不住第三次。含有牙自证（对原版测试文件实测命中 2 处）。
+
+### 未处理
+- `test_economic_calendar::TestCoverageHorizon`：BLS 官方尚未发布后续日程，无数据可补，按用户判断维持现状。
+- `test_gh_pages_unverified_parent::TestRecovery::test_network_returns_mid_retry_and_deploy_really_lands`：本机间歇失败（未改动版本 6 次 1 红），CI 未出现；根因未查，另列任务。
+
+## [0.45.376] — 2026-09-28 — 策略层优势检验：预注册 + 执行器（未就绪盲化、只看世代前 52 周）
+
+### Added
+- `experiments/strategy_edge_prereg.md`：问「网站那套策略在当前世代每笔期望收益是否 > 0」。单位 = 入场 ISO 周的周均收益（零成本 gross）；样本 = 当前世代（`ic_rerun_readiness.cohort_start()`）前 52 个已结清周（周日 + 21 天）；单样本 t、t 分布、单侧 α=0.05；判定后行动（半凯利 / 不加仓）登记时写死。如实披露：起草人只看过旧世代 191 笔；MDE ≈ +1.44%/周均；**若评分逻辑持续登记新世代（登记当天就 4 条），本检验永远不会就绪**。
+- `experiments/strategy_edge_test.py`：`assess()` 就绪闸；未就绪只返回周数 / 笔数（`BLINDED_KEYS` 不出现）；就绪后只取前 52 周 ⇒ 之后再跑答案不变（无需冻结文件）；回测失败 ⇒ `undetermined`（退出码 3），不冒充「未就绪」。
+- `tests/test_strategy_edge_test.py`（12 条）：文档常量块 ↔ `PREREG` 逐项对钉；**网站实际回测实参 == 预注册冻结实参**（网站启用按止损定仓等 ⇒ 红，迫使显式重登记）；盲化 / 前 N 周 / 结清宽限 / 世代与 WINDOW_CUTOFF 排除 / 周均非逐笔 / 单侧判定。变异 4 处（用全部周、未就绪也算、去结清判断、网站改实参）实测变红。
+
+## [0.45.375] — 2026-09-28 — 回测新增「按止损距离定仓」选项（默认关闭）；止损距离收口为单一真相
+
+### Added
+- `portfolio_backtest.BacktestConfig.risk_per_trade_pct`（默认 `None` = 关闭）：开启后仓位占比 = `min(风险预算 / 止损距离, 原方向仓位)`，让每次止损亏的钱大致相等；只缩仓不加仓；`(0,1)` 之外直接 `ValueError`（0 会让每笔 $0 仍「入场」）。CLI `--risk-per-trade 0.004`；结果 `config` 回显。
+- `backtester.stop_loss_pct_for(ticker, direction)`：止损距离唯一真相（`config.TRADING_EXITS_CONFIG`）；`Backtester` 路径依赖出场改经它取数，定仓与出场同源。
+- `tests/test_risk_based_sizing.py`（9 条）：helper 读 config、出场代码不再自读 `sl_overrides`、默认关闭逐笔等同旧仓位、开启后逐笔 = 公式且止损名义亏损 ≤ 预算、非法预算抛错；变异（去掉上限 / 中性走错止损）实测变红。
+
+### 备注
+- 网站**未启用**：等用户在 Mac 生产库上跑 `portfolio_backtest.py --no-costs --risk-per-trade 0.004`（可加 `--reject-neutral`）确认后再决定。
+- 本 session 用网站 191 笔重放（零成本）估算：每笔风险 0.4% ⇒ 最大回撤 −13.2% → −5.4%、累计 +0.1% → +1.5%；加排除中性 ⇒ −4.9% / +1.7%。重放不含「腾出名额补入新单」效应，以真实回测为准。
+
+## [0.45.374] — 2026-09-28 — 网站资金曲线改零成本口径（用户实盘成本≈0）：去掉 Gross 线与「平均单笔成本」卡
+
+### Changed
+- `portfolio_backtest.py`：`BacktestConfig` 新增 `apply_trading_costs`（默认 `True`，研究路径口径不变）；`False` 时按方向调整后的 gross 结算（路径依赖 SL/TP 不变），结果 `config` 回显该字段；CLI 加 `--no-costs`。
+- `dashboard_renderer.py`：门面回测显式传 `apply_trading_costs=False`；标题 / 方法学文案改为「零成本 · 不计交易成本」；资金曲线标题改「策略 vs SPY 基准」。
+- `templates/dashboard.js`：去掉与主线重合的 Gross 虚线、「Gross 累计」统计与「平均单笔成本」卡；图例 / 统计改「策略净值 / 累计收益 / 最大回撤」。
+
+### Added
+- `tests/test_equity_curve_single_source.py::TestDashboardZeroCost`：夹具反向自证（扣成本口径 net≠gross）+ 回测层 net==gross + 渲染层曲线零成本；变异（dashboard 不传开关）实测变红。
+
+### 备注
+- 研究脚本（optimizer / bootstrap / 因子归因）与 DB 里的 `net_return_t7` 均未动。
+- 按止损距离定仓的平滑分析见本 session 对话，未落代码。
+
+## [0.45.373] — 2026-09-29 — Fixed：世代印记被「部署后补跑早于边界的日期」拉早 ⇒ 假 `boundary_too_late` 报警（v0.45.357 / v0.45.366 两条印记同形）；印记判别器只认实时行。二次检查 v0.45.366，**只动判别器，不改评分**
+
+### 二次检查（09-29，只读核对 09-28 真实产物）
+
+- ✅ **两条边界都被真实归档证实**：`cohort_boundary_evidence` 对 09-28 的 12 份 `analysis-*-ml-2026-09-28.json`，v0.45.357 / v0.45.366 均 `matches`、印记首见 2026-09-28，同日共核 5 条全部 `matches`；生产 checkout 已含 `d97e4d64`。
+  Guard 细节实测 `(macro_as_of_mode, vix_feed, vix_source, vix_stale, vix_term_source) = ('realtime','delayed_quote','cboe',False,'live')` × 12。
+- ✅ **v0.45.357 首跑遗留待核项收口**：日报 `macro_context.vix_feed='delayed_quote'`、`vix_feed_note='ok'`、`vix_as_of=2026-09-28`，报价 16.07 = 新拉 CSV 09-28 官方收盘 16.07（拒收窗口未误伤）；
+  账本 09-28 条为 `pending`（`last_trade_time=16:15:01`），待下一次取数用 CSV 核成 `verified`。
+- ✅ 信号归档正常摄入新键：`signal_archive` 09-28 `guard.macro_adj` 30 行（0.0 ~ 0.5）。
+
+### 缺陷（离线复现）
+
+补跑行按目标日 D 落盘，D 的日期不代表代码何时上线。部署后补跑一份**早于边界**的日期（如 09-25）会带着同一个印记键 ⇒ `marker_first_seen` 被拉到 09-25 ⇒ 判 `boundary_too_late`
+⇒ `boundary_evidence_status` 的 `alarm=True` ⇒ 编排器 Step 11 一条假 🚨。**不污染任何样本**（只是判别器误报），但报警的意义就是它响了要有事——假报警会把人养成忽略它。
+v0.45.366 的世代原因里写「印记两种口径都写……对只改补跑的本条，这是充分条件」，漏了这一头：「两种口径都写」只解决了「每份实时归档被判无印记」，没解决「补跑行日期不可信」。
+**v0.45.357 的 `vix_feed` 印记同形**（补跑行也带该键），只是靠「部署后没人补跑过早于边界的日期」才没触发。
+
+### Fixed
+
+`_marker_guard_macro_as_of_mode`（v0.45.366）与 `_marker_guard_vix_feed`（v0.45.357）都排除 `macro_as_of_mode == "backfill"` 的行。
+排除的是**显式 backfill**，不是「缺键」：357 时代的归档没有这个键，仍是证据（`test_357_era_archives_without_the_mode_key_still_count` 钉住）。
+`_COHORT_HISTORY` 里 v0.45.366 的原因文本**不就地改写**（审计轨迹惯例，且 `TestCohortReasonsAreNotRewrittenInPlace` 的先例）——上一段即为更正，以本条为准。
+两条判别器的 docstring 已更正。
+
+### 测试 / 变异
+
+`tests/test_backfill_macro_asof.py::TestBoundaryMarker`：原 `test_real_guard_output_carries_the_marker_in_both_modes` 改为 `..._marker_is_evidence_only_when_realtime`（两种口径都写键、但只有实时算证据，真 Guard 输出正对照）；
+新增 `test_late_backfill_of_an_older_date_does_not_pull_the_marker_earlier`（参数化 357 / 366）、`test_357_era_archives_without_the_mode_key_still_count`。
+3 个变异真跑（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、每轮 passed+failed == collected 171、字节级还原）：366 判别器不排除 backfill → 2 红；357 同 → 1 红；
+357 改成「只认 realtime」→ 2 红（含既有的 `test_boundary_day_matches`）。
+
+### 未做 / 另案（二次检查顺带记录，非缺陷）
+
+- **同晚早于 20:30 ET 的补跑**：CSV 还没有 D 行 ⇒ 强制重下仍缺 ⇒ 退回快照 `vix_spot`（`cloud_snapshot_cboe`，Guard 不计票）。这是设计内的退路，但要知道：补跑「当天」与补跑「次日/深夜」的 Guard 票数不同。
+- 补跑走全降级（`not data` 且 CSV / 快照都无 VIX）时 `return base`，`vix_feed_note` 里没有 `asof_row_missing` 原因（只有 WARNING 日志）。
+
+
+## [0.45.372] — 2026-09-29 — Fixed（数据）：BRK-B 期权快照 2026-09-23 的 `rv_30d` / `iv_rank` 等派生字段被污染，按正确收盘价重算（**仅此一行**；范围核实后无「缺失」）
+
+v0.45.363 修 Twelve Data 的 BRK-B 404 后，「已落盘的 BRK-B 历史 rv_30d / iv_rank 要不要补」的核实与处理。
+
+### 范围（先纠正上一版的措辞）
+
+v0.45.363 的「未做」写「已存下来的 BRK-B 历史值没有补算」，暗示有缺口——**核实后没有缺口**：
+22 份 BRK-B 快照的 `rv_30d` / `iv_rank` 全部非空（yfinance 主源一直在供，404 的 Twelve Data 只是被兜底链绕开）；
+VRP 账本 BRK-B 的 rv / iv 也全非空。真正有问题的是**值**，不是**有没有**：
+
+- `rv_30d`：用 Twelve Data 日线（与 yfinance 当下日线逐日一致，64 个交易日无 >0.05 的差）按生产口径逐日重算，
+  22 份里 21 份与已存值差 ≤0.07（含 `_backfilled` 补跑文件）；**2026-09-09 差 +2.66 但不是错**——该文件写于 00:09（开盘前），
+  内容是 09-08 那场（15.99 恰为截至 09-08 的窗口、价 505.83 = 09-08 收盘），是已知的「盘前快照归到次日」槽位问题；
+  **唯一真错的是 2026-09-23**：已存 14.52，按收盘重算 12.55（已存值隐含末根收盘 ≈489.9，实际 507.17）。
+- `iv_rank`（hv_proxy，走 yfinance 1y，**不经 Twelve Data**）：用生产同一公式重算，2026-09-11 ~ 09-28 共 10 个可比日期
+  **9 个精确相等**，唯一不等的仍是 09-23（已存 18.26，重算 16.63）。**2026-08-25 ~ 09-10 无法验证**（当下 yfinance 1y 窗口起点
+  晚于当时窗口，min/max 取不到）——标「待验证」，未改。
+
+### 成因（相关，未证因果）
+
+09-23 扫描日志：BRK-B 的 Twelve Data 在 14:17 与 14:55:42 各 404 一次，且 CBOE 判陈旧（last_trade=09-22），
+`iv_raw_observed` 走「盘后实拉 IV 20.51%」路径——这天 BRK-B 没有任何一条可用的第二源。哪个输入产出了 14.52 无法从日志直接还原。
+
+### Fixed
+
+- `~/alpha-hive-data/cache/options_snapshot_BRK-B_2026-09-23.json`（数据，不在仓库）：
+  `rv_30d` 14.52→12.55、`iv_rv_spread` 5.98→7.96（`iv_raw_observed − rv`，信号仍是 `fair`，阈值 >10）、
+  `iv_rank` 18.26→16.63、`iv_percentile` 19.13→14.04、`iv_rv_detail` 内 3 个键含说明文字同步。
+  **`iv_raw_observed` / `iv_current` 没动**（那条 20.51 的可信度另有疑点：同日 CBOE 陈旧、且比前一日 15.9 高出 4.6，未核）。
+- 原值与理由写进文件内 `_rv_recheck`；改前副本 `~/alpha-hive-data/_manual_backups/options_snapshot_BRK-B_2026-09-23.pre_v0.45.372.json`。
+- 复用生产函数（`calculate_iv_rank` / `calculate_iv_percentile`），dry-run 先行；改后与备份逐键 diff，仅上述键有变。
+
+### 影响面（为什么可以改）
+
+读这些字段的：`vrp_signal`（BRK-B 09-23 无账本行，读到 12.55 无影响）、`earnings_vol_signal`（只在财报窗口用，09-23 不在）、
+`iv_history`（只索引 `iv_raw_observed`，没动）。**已存的 predictions / final_score / 信号存档一概没动**——09-23 当天的评分照旧用的是当时的值，
+这次只改快照这份记录。因此不进 IC 重跑世代、不影响共振加成前瞻检验。
+
+### 未做
+
+- 2026-08-25 ~ 09-10 的 `iv_rank` 未验证（见上）；`rv_30d` 已验，无需改。
+- 2026-09-24 / 09-25：**所有标的**都没有快照（09-24/25 数据源整体中断），不是 BRK-B 专属，未补。
+- ~~其他 29 只未核~~ **已核（只读，未改任何数据）**，见下节。
+
+### 其余 29 只（WATCHLIST 去 BRK-B）的只读核对（2026-09-29）
+
+方法：每只取 Twelve Data 450 根日线（29 次请求，失败 0），按生产口径对**每份快照**重算；判「一致」= 对得上当日**或**前一交易日
+（挡掉 09-09 那种盘前快照的误判）。`iv_rank` 只核 `iv_rank_source == hv_proxy` 的。
+
+**rv_30d：2026-08-28 起零不一致**（431 个九月值 + 8 月末，全部对得上）。已存 rv_30d 为空的快照 323 份，**全在 08-25 之前**，08-25 起为 0。
+
+**iv_rank：**
+- 09-09：14 只不一致，**全是凌晨 00:0x 写的盘前文件**（09-08 场数据），槽位问题，不算错。
+- JNJ：09-10 ~ 09-23 每天固定偏 2~3 点，不是某天的问题；两种独立算法都对不上生产值，判断是复权口径的时间差（生产当时的复权因子 vs 今天的），
+  **未定性，未当作错误**。
+- 分红股（ABBV / XOM / TMUS / NEE 等）用 Twelve Data 未复权价核会偏 1~3 点——**这是我的口径问题不是坏数据**：换成生产同款复权数据，
+  这 4 只 09-11 / 09-17 / 09-22 / 09-28 **逐位相等**。
+- ⚠️ **09-23 是真异常日**：21 只有该日快照，除 BRK-B（已在本版修）外还有 **DE 存 43.26 / 重算 33.13~33.45、XOM 64.45 / 58.71、COST 11.57 / 9.37、
+  CVX 60.85 / 59.36**（两个独立来源互相印证）；同一批标的当天 `rv_30d` 全部正常，所以只坏在 `iv_rank`（yfinance-only 的 hv_proxy 路径）。成因未查。
+  **本版未改这 4 行**（等用户决定）；它们对应的 iv_percentile 也会连带偏。
+
+**VRP 账本**：323 行的 rv_30d 对照重算 0 不一致（账本只从 09-04 起，`ready` 行 0）。
+
+**旧时期的坏 rv_30d（不在本版范围，仅登记）**：2026-04 ~ 08-27 的快照里 rv_30d 大量对不上——4 月 145/152、5 月 168/214、6 月 25/74、7 月 12/67、8 月 24/249；
+其中至少 48 个 **>300**（生产代码本身有 rv≤300 的 sanity 上限，说明当时走的不是同一条路径），且大量**同一数值出现在多只标的上**
+（如 04-28 NVDA / MSFT / QCOM 都是 1273.92）——像是某个共享变量/缓存串了票。**尚无下游受害**（VRP 账本从 09-04 起，未读这些旧文件），
+但 `vrp_signal._prior_history` 会读旧快照的 rv 回填历史，等 VRP 闸门（63 条）攒够之前应先处理它。**未改。**
+- 补丁脚本是一次性的，没入仓库（数据修补，痕迹在文件内 `_rv_recheck` 与备份里）。
+
+## [0.45.371] — 2026-09-29 — renderer 内联 rgba 淡染换 `--tint-*` 令牌
+
+接 v0.45.368 的「未做」第二条。`dashboard_renderer.py` 内联样式里 17 处数字通道淡染 → `rgba(var(--tint-x),α)`，与 dashboard.css 共用同一套通道令牌，改一处两边一起变；透明度一个没动。
+
+### Changed
+- 12 处涨跌（`34,197,94` / `239,68,68`）：今日 Actionable 卡底、方向 KPI 卡底、板块热力图单元格底与边（强/弱两档）。取值与令牌相同，**外观零变化**。
+- 3 处石板灰：热力图中性格底 `100,116,139`（零变化）；方向 KPI「中性」卡底与期权墙行虚线 `148,163,184` 并入 `--tint-slate`（略深一档，同 v0.45.368 `.acc-sig-no` 的处理）。
+- 2 处「数据部分降级」横幅 `224,160,60` → `--tint-neut`（`245,158,11`），色相与站点其余中性 / 警示淡染统一。
+
+### Added
+- `tests/test_dashboard_tokenized_components.py`：renderer 里出现数字通道的 `rgb(a)/hsl(a)(` 即红，另断言 `rgba(var(--tint-` ≥15 处防扫描器空转；正则自证。变异实测：把 Actionable 卡底改回 `rgba(34,197,94,.10)` → 红。模块 docstring 里「rgba 淡染是站点惯例、不在此列」的旧豁免同步删去。
+
+### 验证
+- 离线渲染 09-11 后 `getComputedStyle`：页面里 14 个带内联 `--tint` 的元素（11 个热力图格 + 3 张方向 KPI 卡）底色全部解析为预期 rgba，无一退化成透明；当天数据里不出现的分支（Actionable 卡、降级横幅、热力图强/弱格、期权墙虚线）用源码里的原样 style 串注入探针，8/8 解析正确。
+- `--tint-*` 未定义时这些淡染会**静默变透明**：确认过 renderer 片段唯一的生产出口是 `render_dashboard_html`（经 `report_web_assets`），整页内联 dashboard.css，不存在脱离 `:root` 单独嵌入的路径；`test_dashboard_css_vars_defined` 也会对未定义令牌报红。
+- 全套 7274 passed / 2 xfailed（照例 deselect 两条环境测试）。
+
+
 ## [0.45.370] — 2026-09-29 — 占位（进行中：编排器纳入版本控制·阶段 3——扫描前自动部署编排器；接手原会话）
 
 ## [0.45.369] — 2026-09-29 — Fixed：OracleBee 期权链取不到仍标 `real` + 置信度 0.7 → 按 OptionsAgent 自己的 `data_quality` 判；世代边界**并入 09-28**（等价论证，作废 0 条）
@@ -261,7 +459,67 @@ WATCHLIST 30 只里只有 BRK-B 带非字母数字。
 - 已落盘的 BRK-B rv_30d / iv_rank / close_correction 历史值没有补算。
 
 
-## [0.45.362] — 2026-09-28 — 占位（进行中：GEX 第 2 层——每只标的一份全链 GEX 状态（带可得性标记），展示与政体路由共用；不改分数）
+## [0.45.362] — 2026-09-28 — Added/Fixed：GEX 第 2 层——每只标的一份 GEX 状态 `gex_state`（政体路由用的那份，带可得性标记），网站 / 日报 / 深度与 ML 报告 / MCP / 存档只读它；「Gamma 压榨风险」方向反了的展示改正。**不改分数**
+
+用户决定（09-27 根因分析的第 2 层，09-28「第 2 层现在开始做」）。根因：同一份 CBOE payload 切成三个视图各算一个「GEX」——
+① OracleBee 主链（≤4 个到期日）`gamma_exposure`；② 全到期日视图 `DealerGEXAnalyzer` → `RegimeWeightAdjuster`（规则引擎下 GEX
+进评分的唯一通道）；③ 卖权选择器的原始合约视图。截断能翻转净 GEX 符号（K=4 最低 −73.3%，见 `cboe_options`），而网站、日报、
+深度报告一直把 ① 当「GEX」展示 ⇒ 读者看到的数与进分的数不是同一个、还都叫 GEX。普查（只读）另查出：① 的 `gamma_squeeze_risk`
+分档方向与报告文案**相反**（正 GEX ⇒ "high"，文案按「high = 做市商 short gamma」解读）⇒ 公开的 ML 报告把正 gamma 标的写成
+「Gamma 压榨风险 高」；快照模式补跑时 ② 拿到的其实是 ≤4 个到期日的截断主链，却标 `cboe_full_expiries`、计进 `ok`。
+
+### Added
+- `gex_state.py`：`build(dealer_gex)` → `{available, reason, regime, total_gex, gex_flip, largest_call/put_wall, gex_normalized_pct,
+  stock_price, chain_view, n_expiries, score_channel, schema_version}`。不可得 ⇒ 数值一律 None（旧出错 dict 的 `total_gex=0.0`
+  是哨兵，不是零 GEX），`reason` 写明原因（`no_scout_price` / `exception:<类型>` / 出错 dict 的 error / `non_finite_total_gex` /
+  `chain_view:<视图>`）。`build` 不抛（它在步骤 0 的大 try 里，抛了会让权重退回基准）。`of()` / `display_line()` /
+  `display_regime()`（有状态就以它为准，旧记录才退到同一视图的 `dealer_gex`、且用 `build` 同一套可得性规则）/
+  `squeeze_label()`（负 gamma ⇒ high）。`routing_applied`：政体权重调整真跑完才由步骤 0 置 True（`adjust_weights` 抛了 ⇒
+  权重退回基准、这里留 False——状态不替失败的路由作证）。
+- `QueenDistiller.distill` 步骤 0 落盘 `gex_state`。**不改分数**：路由处表达式原样挪进 `gex_state.routing_regime()`，在同一个
+  try 里调用（抛异常走向不变）；状态由同一函数、同一输入另算一份。状态不可得而路由拿到正 / 负 regime 时打 **error**
+  （已知两种：NaN total ⇒ 旧代码判负 gamma；快照模式截断主链）——两者都是真 bug，修了改分数，**另登边界**，本版只让它们可见。
+- `signal_archive`：`gex.available`（有状态 ⇒ 1/0，旧记录 ⇒ 缺，覆盖率本身可观测）、`gex.total_gex`、`gex.negative`（仅可得时有值），
+  登记为叶子。本版上线后才有数据，早于它的边界无从作用。`gex.available` 会进 IC 扫描的 Bonferroni 族（同
+  `options.iv_rank_is_real` / `market.fear_greed_is_cnn` 先例）。
+
+### Changed（展示改读 `gex_state`，缺了显示「不可得」，**不回退** Oracle 主链值）
+- 网站 `dashboard_renderer._detail`（`gsr` 死字段也改用状态分档，免得日后接线接到反向那个）；日报 `report_formatters`
+  （「Gamma Exposure：主链值」→「净 GEX：+x.xxM$ · 正/负 gamma」或「不可得（原因）」；挪出 Oracle details 判断，Oracle 失败时照样印）。
+- 深度报告 `generate_deep_v2.extract`：状态 → 旧记录才读 `dealer_gex` → 不可得；删掉回退 Oracle 主链那一支（它连同方向相反的分档一起
+  漏进来）。`_try_compute_gex`：扫描记录里有状态（哪怕不可得）就不在报告生成时现算顶上。GEX / OI 归一化、vanna 压力、
+  翻转加速度只在状态可得（或旧记录 dealer_gex 可用）时读；GEX Profile 图：状态不可得不画，可得时标题总量 / regime / flip 用状态的
+  （柱形仍是 ML 报告那份 profile）；GEX 卡片按可得性判（可得的真零不再标「采集失败」，不可得写明原因）；CH1 政体徽章在
+  「状态不可得、路由仍按某 regime」时照实加注。
+- ML 报告 `generate_ml_report`：期权段 / 第 3 章 / 第 6 章的「Gamma 压榨风险」一律由状态分档；不可得显示「—」（第 3 章此前把
+  非 high 一律渲染成「可控」）。
+- MCP `alphahive_get_gex`：报告里有状态就以它为准；新增 `source` / `available` / `reason` / `routed_regime`（不可得时路由实际收到的
+  regime——快照截断链 / NaN 两种情形它不是 unknown）。**不可得时 `total_gex` 由 0.0（哨兵）改为 None**；可得的真零不再报「缺失」；
+  旧报告的 `dealer_gex` 按 `build` 同一规则判（v0.45.197 之前没有 `chain_view` 的报告判不可得——那时本就是截断视图）。
+- `collect_data`（手动喂 Claude 的材料）同样改用状态分档；图表标题补认 `positive_gex` / `negative_gex`（旧映射只认无人产出的 `*_gamma`）。
+
+### Fixed
+- 快照模式如实标注：`fetch_cboe_chain_for_gex` 在链上标 `gex_view`（`cboe_full_expiries` / `snapshot_main_chain`），快照模式单独计数
+  `gex_view_stats()["snapshot_main_chain"]`（此前计进 `ok`）；`DealerGEXAnalyzer` 的 `chain_view` 取自链（此前写死）。**返回值不变、
+  路由照旧**。
+
+### 刻意不做
+- 卖权选择器不共用状态：它的路由读 `le_45dte` 视图重定价扫描的 zero gamma，是冻结的预注册规则 v1（改输入即协议变更），且是另一个量。
+- Oracle 主链 `gamma_exposure` / `gamma_squeeze_risk` 照算、照落盘（`options.gamma_exposure` 存档列、LLM 模式 Oracle / Bear 提示词仍读，
+  LLM 那条用户决定不动），只是不再以 GEX 之名展示。
+- ② 自身也非整本书：ATM 带宽 [0.3S, 1.7S] + 每到期日每边 OI 前 40 档。对符号的影响**待验证**；改它的输入就是改分数。
+- ML 报告的 `advanced_analysis.dealer_gex`（GEX 图表 / 旧记录回退）仍是同进程同 payload 另算一次，价格源不同；普查核实符号与传入价无关
+  （仅 BS 兜底 gamma 例外）⇒ regime 与路由那份实际一致，量级可能差。
+
+- 守卫 `tests/test_gex_state.py`；`tests/test_gex_oracle_bear_neutralized.py` 白名单删 `dashboard_renderer::_detail`（网站不再读主链值，
+  自检夹具换成名单内仍在的 `_drop_legacy_gex_signal`）；`test_scan_timing` / `test_gex_full_chain_view` 认新计数键。
+- 世代边界：**无**（不改分数）。
+- 验证：`tests/test_gex_state.py` 62 条；变异 24/24 变红（路由改读状态、不可得不置 None、build 不兜异常、各展示点回退主链或另算、
+  ML 报告三处接线、存档旧记录写 0、快照不标视图 …，驱动核对 collected 数并逐条还原核哈希）。独立审查（只读）拿新旧两棵树跑同一套
+  62 种输入的蒸馏探针（传入 / 现场算 × 各种出错形状 × 价格 100/0/None/"abc"/−5、`adjust_weights` 抛异常），
+  路由收到的 regime、是否调用、`dimension_weights`、`final_score`、方向、权重说明**零差异**；审查的 5 条应修 + 7 条小项已处理
+  （仅 `gex.available` 进 Bonferroni 族一条按先例保留）。
+- 全套：**6555 passed、2 xfailed**，1 失败为已知的经济日历到期测试（`TestCoverageHorizon`，到期变红是设计意图，与本版无关）。
 
 ## [0.45.361] — 2026-09-28 — 图表剩余硬编码色换令牌：涨跌语义色 / 均收益胶囊 / 旧蜂蜜金；恐惧贪婪仪表盘对齐宏观条 3 档
 

@@ -606,3 +606,30 @@ class TestTransportProbe:
         assert [c[0] for c in calls].count("resolve") == 2, calls   # 两个目标各解析一次，只探一轮
         assert r["transport_probe"]["verdict"] == "dns_failed"
         assert "测试默认离线" in r["transport_probe"]["targets"]["github.com:22"]["dns_error"]
+
+
+# ─────────────────────── ⑨ 二次检查（v0.45.378）───────────────────────
+
+class TestSecondReview:
+
+    def test_cdn_without_expected_timestamp_is_not_verified(self, tmp_path):
+        """dashboard-data.json 没有 `_generated_at` ⇒ 无从比对 ⇒ 没验（None），不是 True。"""
+        (tmp_path / "dashboard-data.json").write_text(json.dumps({"x": 1}))
+        reporter = SimpleNamespace(_DEPLOY_BASE_URL="https://example-user.github.io/alpha-hive-deploy")
+        assert rd.verify_cdn_deployment(reporter, str(tmp_path)) is None
+
+    def test_probe_prefers_ipv4_when_resolver_lists_ipv6_first(self, monkeypatch):
+        """AAAA 排在前面、IPv6 不通时，探测不能把它读成「端口不通」。"""
+        def _resolve(host, port):
+            return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:db8::1", port, 0, 0)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", port))]
+
+        def _connect(family, sockaddr, timeout):
+            if family == socket.AF_INET6:
+                raise OSError(65, "No route to host")
+
+        monkeypatch.setattr(gtp, "_resolve", _resolve)
+        monkeypatch.setattr(gtp, "_tcp_connect", _connect)
+        rec = gtp.probe_github_transport(None)
+        assert rec["verdict"] == "transport_ok", rec
+        assert rec["targets"]["github.com:22"]["family"] == "ipv4"

@@ -847,9 +847,9 @@ class TestGexKeyComparisonsAreKnown:
     """
 
     #: (相对仓库根, 函数限定名) → 为什么允许。v0.45.349 起逐条从全树扫描结果里核过，全是展示
+    #: v0.45.362 删 `dashboard_renderer.py::_detail`：网站 GEX 改读蒸馏结果的 `gex_state`
+    #: （全到期日视图、政体路由用的那份），不再读 Oracle 主链 `gamma_exposure`（守卫 tests/test_gex_state.py）。
     ALLOWED = {
-        ("dashboard_renderer.py", "_detail"):
-            "展示：GEX 量级格式化（`abs(gex) >= 1.0` 选 M/k 单位、`gex*1000`），不进任何分数",
         ("generate_deep_v2.py", "_build_options_narrative"):
             "展示：深度报告期权段按 `squeeze == 'high' / 'medium'`（`ctx.get('gamma_squeeze_risk')`）选一句解读文案",
         ("generate_ml_report.py", "MLEnhancedReportGenerator._ch3_oracle"):
@@ -1104,10 +1104,13 @@ class TestGexKeyComparisonsAreKnown:
             "\n\n"
             "def rank_like(rows):\n"
             "    return sorted(rows, key=lambda r: r[\"gamma_exposure\"])[:3]\n", encoding="utf-8")
-        (root / "dashboard_renderer.py").write_text(        # 名单内：展示格式化
-            "def _detail(oracle):\n"
-            "    gex = oracle.get('gex')\n"
-            "    return f'{gex:+.1f}M' if gex is not None and abs(gex) >= 1.0 else f'{gex*1000:+.1f}k'\n",
+        # 名单内：旧快照修正（数值键 + 方法限定名）。v0.45.362 前这里种的是 dashboard_renderer::_detail，
+        # 那一项随网站改读 gex_state 从名单删了。
+        (root / "options_analyzer.py").write_text(
+            "class OptionsAgent:\n"
+            "    def _drop_legacy_gex_signal(self, cached):\n"
+            "        g = cached.get('gamma_exposure')\n"
+            "        return g is not None and g < -0.001\n",
             encoding="utf-8")
         (root / "generate_deep_v2.py").write_text(          # 名单内：分档选文案
             "def _build_options_narrative(ctx):\n"
@@ -1142,7 +1145,7 @@ class TestGexKeyComparisonsAreKnown:
         ("tuple.py", "rival_like"): [5], ("tuple.py", "starred"): [12],
         ("loops.py", "loop_like"): [3], ("loops.py", "comp_like"): [9],
         ("loops.py", "guard_like"): [13], ("loops.py", "rank_like"): [17],
-        ("dashboard_renderer.py", "_detail"): [3],
+        ("options_analyzer.py", "OptionsAgent._drop_legacy_gex_signal"): [4],
         ("generate_deep_v2.py", "_build_options_narrative"): [3],
     }
 
@@ -1159,7 +1162,8 @@ class TestGexKeyComparisonsAreKnown:
         found, scanned, _r = self._scan(tmp_path)
         assert found == self._PLANTED_HITS, found
         assert {k for k in found if k not in self.ALLOWED} == set(self._PLANTED_HITS) - {
-            ("dashboard_renderer.py", "_detail"), ("generate_deep_v2.py", "_build_options_narrative")}
+            ("options_analyzer.py", "OptionsAgent._drop_legacy_gex_signal"),
+            ("generate_deep_v2.py", "_build_options_narrative")}
         assert "display.py" in scanned
         assert not any(s.startswith((".claude", "tests", "experiments")) for s in scanned), scanned
 

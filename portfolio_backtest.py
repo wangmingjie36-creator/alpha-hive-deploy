@@ -78,6 +78,28 @@ class BacktestConfig:
     # 让 dashboard 净值/胜率只反映核心实盘策略。默认 False：optimizer / factor_attribution /
     # bootstrap 等研究路径保留全样本（样本积累本就要这些数据）。仅 dashboard 调用设 True。
     exclude_nontrading_days: bool = False
+    # ── 交易成本开关（v0.45.374）──
+    # True = 用回填好的 net_return_t7（滑点 + 佣金 + 借券费，见 trading_costs）结算；
+    # False = 零成本口径，按方向调整后的 gross 结算（路径依赖 SL/TP 不变，
+    # SL 触发时的出场滑点已含在 exit_price 里，属于价格路径而非成本模型）。
+    # 默认 True：研究路径（optimizer / bootstrap / 因子归因）口径不变；
+    # dashboard 按用户决定（实盘成本≈0）显式传 False。
+    apply_trading_costs: bool = True
+    # ── 按止损距离定仓（v0.45.375）──
+    # None = 关闭（沿用上面的方向仓位 bull/bear/position_size_pct）。
+    # 设为小数（如 0.004 = 每笔止损最多亏 0.4% NAV）时：
+    #   仓位占比 = min(risk_per_trade_pct / 止损距离, 该方向原仓位占比)
+    # 止损距离取 backtester.stop_loss_pct_for（与路径依赖出场同一真相）。
+    # 目的是让每次止损亏的钱大致相等 —— 不再出现 12% 止损的票与 5% 止损的票
+    # 同仓位、单次亏损差 2.4 倍。上限封在原方向仓位，只会缩仓、不会加仓。
+    # ⚠️ 跳空穿过止损时实际亏损仍可能超过预算（如 SNOW −23%），这是价格路径，不是 bug。
+    risk_per_trade_pct: Optional[float] = None
+
+    def __post_init__(self):
+        # 0 / 负数会让每笔仓位变 $0 仍照常「入场」—— 回测看起来跑完了，其实什么都没交易。
+        if self.risk_per_trade_pct is not None and not (0 < self.risk_per_trade_pct < 1):
+            raise ValueError(
+                f"risk_per_trade_pct 须在 (0, 1) 内（小数，如 0.004），收到 {self.risk_per_trade_pct!r}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -524,11 +546,16 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
             # 旧实现复利下仓位占比漂移：赚了 20% 后新仓还按初始 NAV 的 8% 开
             nav_est = cfg.initial_capital + cum_realized  # 已实现口径 MTM
             if "bear" in direction:
-                size_usd = nav_est * cfg.bear_size_pct
+                size_pct = cfg.bear_size_pct
             elif "bull" in direction:
-                size_usd = nav_est * cfg.bull_size_pct
+                size_pct = cfg.bull_size_pct
             else:
-                size_usd = nav_est * cfg.position_size_pct
+                size_pct = cfg.position_size_pct
+            if cfg.risk_per_trade_pct is not None:
+                from backtester import stop_loss_pct_for
+                _sl_frac = stop_loss_pct_for(p["ticker"], direction) / 100.0
+                size_pct = min(cfg.risk_per_trade_pct / _sl_frac, size_pct)
+            size_usd = nav_est * size_pct
             # 总敞口保护：防止 bear 12% × max_concurrent 10 = 120% 杠杆
             gross_exposure = sum(pos.size_usd for pos in active) + size_usd
             if gross_exposure > nav_est * 1.0:  # 不允许净敞口 > NAV
@@ -567,7 +594,8 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
                 holding_days=holding,
                 size_usd=round(size_usd, 2),
                 gross_return_pct=round(dir_adj_gross, 4),
-                net_return_pct=float(net_ret),
+                net_return_pct=(float(net_ret) if cfg.apply_trading_costs
+                                else round(dir_adj_gross, 4)),
                 exit_reason=p.get("exit_reason") or "T7_CLOSE",
                 score=score,
                 spy_return_pct=spy_ret,
@@ -791,6 +819,8 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
             "take_all": cfg.take_all,
             "max_agent_std": cfg.max_agent_std,
             "macro_gate": cfg.macro_gate,
+            "apply_trading_costs": cfg.apply_trading_costs,
+            "risk_per_trade_pct": cfg.risk_per_trade_pct,
         },
         "period": {"start": first_date, "end": last_date, "trading_days": len(all_dates)},
         "portfolio": {
@@ -1018,6 +1048,11 @@ def main():
     parser.add_argument("--bear-size", type=float, default=_d.bear_size_pct)
     parser.add_argument("--horizon", type=int, choices=[1, 7, 30], default=_d.horizon,
                         help="持仓期天数：1/7/30（默认 7）")
+    parser.add_argument("--no-costs", dest="apply_costs", action="store_false",
+                        default=_d.apply_trading_costs,
+                        help="零成本口径：按 gross 结算，不扣滑点/佣金/借券费（dashboard 口径）")
+    parser.add_argument("--risk-per-trade", type=float, default=_d.risk_per_trade_pct,
+                        help="按止损距离定仓：每笔止损最多亏的 NAV 比例（小数，如 0.004）；不填=关闭")
     parser.add_argument("--json", action="store_true", help="输出 JSON（供其他脚本消费）")
     parser.add_argument("--save", type=str, default=None, help="保存完整结果到 JSON 文件")
     args = parser.parse_args()
@@ -1035,6 +1070,8 @@ def main():
         bull_size_pct=args.bull_size,
         bear_size_pct=args.bear_size,
         horizon=args.horizon,
+        apply_trading_costs=args.apply_costs,
+        risk_per_trade_pct=args.risk_per_trade,
     )
 
     result = run_backtest(cfg)
