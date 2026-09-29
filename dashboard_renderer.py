@@ -1179,7 +1179,7 @@ def _load_accuracy_data() -> dict:
         from portfolio_backtest import BacktestConfig as _BC, run_backtest as _run_bt
 
         # v32.3: 门面只算核心交易日
-        # v0.45.369: 门面按零成本口径结算（用户实盘成本≈0，决定去掉成本模型）。
+        # v0.45.371: 门面按零成本口径结算（用户实盘成本≈0，决定去掉成本模型）。
         # 曲线/卡片仍同源 —— 同一次回测，只是 net_return_pct == 方向调整后的 gross。
         _bt_cfg = _BC(exclude_nontrading_days=True, apply_trading_costs=False)
         _bt_result = _run_bt(_bt_cfg)
@@ -2861,7 +2861,7 @@ def render_dashboard_html(report: Dict, date_str: str,
       <div id="tradingStatsCards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px"></div>
     </div>
 
-    <!-- ── Equity Curve 权益曲线 (2 lines: 策略 / SPY；v0.45.369 起零成本，Gross 线与之重合已去掉) ── -->
+    <!-- ── Equity Curve 权益曲线 (2 lines: 策略 / SPY；v0.45.371 起零成本，Gross 线与之重合已去掉) ── -->
     <div class="eq-section">
       <div class="acc-section-title" style="margin-top:18px">资金曲线 · 策略 vs SPY 基准</div>
       <div id="eqCurveContainer">
