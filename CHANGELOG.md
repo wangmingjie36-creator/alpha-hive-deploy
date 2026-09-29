@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.384] — 2026-09-29 — 占位（进行中：vrp_signal.record_day 零快照时不再清空当天账本行（含已结算行）；局部重跑改 upsert；CLI 零快照 exit 3）
+
 ## [0.45.383] — 2026-09-29 — 占位（进行中：yfinance 日线完整性校验——`fetch_historical_hv` 缺交易日 ⇒ 重取一次、仍缺则 iv_rank 置空并计数；09-23 那 8 只当天分数重放）
 
 ## [0.45.382] — 2026-09-29 — Fixed：卖权账本只读出口（CLI `--assess` / MCP 两条路径 / 本地报告就绪度行）把「状态目录不存在」报成「账本为空」→ 分开说：缺目录写明解析出的路径与病因、仍 undetermined（退出码 3）；不建目录，写路径 / 预注册 / 盲化 / 闸门均未动；同形普查顺手修 `replay_scoring` / `vol_forecast` / `signal_archive --list` 三个缺 `pheromone.db` 的出口（后者读一次就建库）
