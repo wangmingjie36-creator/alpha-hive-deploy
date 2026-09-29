@@ -112,6 +112,9 @@ class TestCohortBoundary:
         # v0.45.357：日报 VIX 当日收盘 + 陈旧 VIX 不计 Guard 票。唯一真正后移的归档信号是 guard.macro_adj
         # （08-15→09-28，661 行 / 已成熟 420 条），其余 9 个挂在它上面的只换标签。
         ("2026-09-28", "v0.45.357"),
+        # v0.45.366：补跑的 Guard 宏观票对齐目标日（VIX 取 CSV 的 D 行并计票 / 期限结构读快照 / FOMC 与板块按 D）。
+        # 同日同 signal_archive 集合，0 个信号后移。
+        ("2026-09-28", "v0.45.366"),
     })
 
     def test_no_known_cohort_has_vanished(self):
@@ -197,11 +200,12 @@ class TestCohortReasonsAreNotRewrittenInPlace:
     `FROZEN` 的摘要 = `sha256(reason.encode("utf-8"))`，**取自 `origin/main` 4c5c0e62 的原文**
     （`git show origin/main:ic_rerun_readiness.py`，不是工作区；当时工作区前 30 条与之逐字节相同）。
     ⚠️ 刻意写死、不从 `_COHORT_HISTORY` 派生——派生即恒真。
-    **只钉已进 main 的**：截至 v0.45.340。v0.45.349 那条在进 main 之前还在改，不钉；它进 main 之后，
+    **只钉已进 main 的**：截至 v0.45.357（v0.45.366 补进 349 / 357，摘要取 origin/main 574e5505）。
+    本版自己那条（v0.45.366）进 main 之前还可能改，不钉；它进 main 之后，
     下一个动本文件的人把它（及其后已进 main 的条目）补进来，摘要照样取 `origin/main` 的原文，并把 `LAST_FROZEN` 后移。
     """
 
-    LAST_FROZEN = "v0.45.340"
+    LAST_FROZEN = "v0.45.357"
 
     #: version → (日期, sha256(reason))。
     FROZEN = {
@@ -235,6 +239,10 @@ class TestCohortReasonsAreNotRewrittenInPlace:
         "v0.45.315": ("2026-09-18", "95cfb80a2e1fe104c523a76b2775ff46941b9cb9405811b90836f98fdeb41aed"),
         "v0.45.334": ("2026-09-28", "8a5454cb5b47b25a8b1f17d09c5620eb2dca3b361069d98af4e5611dca5bca6d"),
         "v0.45.340": ("2026-09-28", "78c82cbce84dd80dc04d13083903a594636f56559c247bd099207cf449e0f2b7"),
+        # v0.45.366 补进（本类 docstring 的交接：「下一个动本文件的人」），摘要取 origin/main 574e5505 的原文；
+        # 同法算出的 v0.45.340 摘要与上一行逐位相同，作为方法的正对照。
+        "v0.45.349": ("2026-09-28", "c10d24b0e05d4b07db989c44a0ef757dfe578c4c49995dc6d572cfbbfc38f329"),
+        "v0.45.357": ("2026-09-28", "ebd6459aa28d72802f9a5f05537651bdb0012037e477fc5a7bbb107a93b86630"),
     }
 
     _HOW_TO_CORRECT = (
@@ -671,7 +679,7 @@ class TestBoundaryEvidenceIsPerVersion:
         """
         versions = {v for _d, v, _r in rr._COHORT_HISTORY}
         assert set(rr._BOUNDARY_MARKERS) <= versions, sorted(set(rr._BOUNDARY_MARKERS) - versions)
-        assert {"v0.45.197", "v0.45.334", "v0.45.340", "v0.45.349", "v0.45.357"} <= set(rr._BOUNDARY_MARKERS)
+        assert {"v0.45.197", "v0.45.334", "v0.45.340", "v0.45.349", "v0.45.357", "v0.45.366"} <= set(rr._BOUNDARY_MARKERS)
 
     def test_cli_renders_no_marker_for_the_head(self, monkeypatch, db, capsys):
         """CLI 人读模式要能把 `no_marker` 印出来（带版本），不能 KeyError。

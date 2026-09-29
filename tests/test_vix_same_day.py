@@ -211,6 +211,9 @@ class TestFredMacroAlignment:
         import cboe_options
         monkeypatch.setattr(cboe_options, "_et_now", lambda: _et(2026, 9, 11, 17, 10))
         yield
+        # v0.45.366：teardown 也卸（此前只在 setup 卸，`test_no_pair_means_none_not_zero` 装的快照
+        # 会留给下一条；Guard 读这个全局，conftest `_no_leaked_macro_snapshot` 现在会把它报出来）
+        fm.set_macro_snapshot(None)
         fm._CACHE, fm._CACHE_TS = {}, 0.0
 
     def _same_day(self, monkeypatch, vix_leg=None):

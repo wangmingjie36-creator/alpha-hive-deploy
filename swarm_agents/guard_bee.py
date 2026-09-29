@@ -322,6 +322,20 @@ class GuardBeeSentinel(BeeAgent):
         regime_votes = {"risk_on": 0, "neutral": 0, "risk_off": 0}
         details = {}
 
+        # v0.45.366：补跑（`--date D`，`cloud_snapshot_loader.snapshot_mode` 装了宏观快照）时，
+        # 下面每一票都必须是 **D** 的。`fred_macro` 那一侧（VIX / 曲线 / 黄金 / 板块）自己对齐；
+        # 本函数另外直接取的两样 —— FOMC 距离与 VIX 期限结构 —— 此前恒按运行当天算
+        # （用户 2026-09-28 决定同版修）。判据取 `get_macro_snapshot()`：它与期权链供给器同进同出，
+        # 是「这次是补跑」的唯一真相。`macro_as_of_mode` 两种口径都写（键的有无是世代边界印记）。
+        _ref_date = None
+        try:
+            from fred_macro import get_macro_snapshot
+            _ref_date = (get_macro_snapshot() or {}).get("date")
+        except (ImportError, Exception) as _e_snap:
+            _log.debug("宏观快照状态不可读，按实时口径: %s", _e_snap)
+        details["macro_as_of_mode"] = "backfill" if _ref_date else "realtime"
+        details["macro_ref_date"] = _ref_date
+
         # ===== 1. FRED 宏观数据 =====
         macro = {}
         try:
@@ -393,7 +407,12 @@ class GuardBeeSentinel(BeeAgent):
         # ===== 2. FOMC 临近 =====
         try:
             from economic_calendar import get_next_event, get_calendar_health
-            nxt = get_next_event()
+            # v0.45.366：补跑按 D 数「距 FOMC 几天」（旧：恒按运行当天，补跑 08-27 时数的是 09-xx 的距离）
+            _cal_ref = None
+            if _ref_date:
+                import datetime as _dt_cal
+                _cal_ref = _dt_cal.date.fromisoformat(_ref_date)
+            nxt = get_next_event(ref_date=_cal_ref)
             if nxt and nxt.get("days_until", 99) <= 3 and nxt.get("type") == "fomc":
                 regime_votes["risk_off"] += 1
                 signals.append(f"FOMC {nxt['days_until']}天后")
@@ -402,7 +421,7 @@ class GuardBeeSentinel(BeeAgent):
             # get_next_event() 返回 None，与「未来 60 天真的没有宏观事件」完全同形——
             # risk_off 票就此少一张，而结果里不留任何痕迹。
             # 把体检结论落进 details，让降级在 analysis JSON 里可见（不影响评分口径）。
-            _cal = get_calendar_health()
+            _cal = get_calendar_health(ref_date=_cal_ref)   # 体检口径与上面的查询同一天
             if not _cal["ok"]:
                 # v0.45.68 二次检查：日期必须取自 binding_table（余量最小 = 肇事表），
                 # 不能取 _cal["last_date"]（那是 shortest_table 的）。两者常非同一张：
@@ -417,16 +436,32 @@ class GuardBeeSentinel(BeeAgent):
             _log.debug("宏观日历读取失败: %s", _e_cal, exc_info=True)
 
         # ===== 3. VIX 期限结构 =====
+        # v0.45.366：补跑取**目标日快照**里的期限结构（`market.json` 的 `cboe.vix_term.term_structure`，
+        # 云端 D 日 17:05 ET 由同一个 `vix_term_structure.get_vix_term_structure()` 算出，取值集合相同）。
+        # 旧代码补跑也调实时函数 ⇒ 那张 ±2 的 backwardation 票是运行当天的。快照缺这一段
+        # （`load_market` 剔除了兜底段 / 整份 market.json 缺失）⇒ 这一项不投票，**不回落实时**。
+        #
+        # 同版删掉 `elif structure == "steep_contango": risk_on += 1`：上游只产 contango /
+        # backwardation / flat / unknown，这个值自 03-16 引入起从未出现过（死分支，删除不改任何分数）。
         try:
-            from vix_term_structure import get_vix_term_structure
-            vix_term = get_vix_term_structure()
-            structure = vix_term.get("structure", "")
-            details["vix_term"] = structure
+            if _ref_date:
+                _snap_vt = ((((get_macro_snapshot() or {}).get("market") or {}).get("cboe") or {})
+                            .get("vix_term") or {})
+                if _snap_vt.get("source") not in (None, "default_fallback"):
+                    structure = _snap_vt.get("term_structure") or ""
+                    details["vix_term"] = structure
+                    details["vix_term_source"] = "cloud_snapshot"
+                else:
+                    structure = ""
+                    details["vix_term_source"] = "cloud_snapshot_unavailable"
+            else:
+                from vix_term_structure import get_vix_term_structure
+                structure = get_vix_term_structure().get("structure", "")
+                details["vix_term"] = structure
+                details["vix_term_source"] = "live"
             if structure == "backwardation":
                 regime_votes["risk_off"] += 2
                 signals.append("VIX Backwardation（恐慌结构）")
-            elif structure == "steep_contango":
-                regime_votes["risk_on"] += 1
         except (ImportError, Exception):
             pass
 
