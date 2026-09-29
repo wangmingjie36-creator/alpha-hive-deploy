@@ -434,8 +434,10 @@ def verify_cdn_deployment(reporter, data_root: str,
         with open(dj_path, encoding="utf-8") as _f:
             expected_ts = _json_v.load(_f).get("_generated_at", "")
         if not expected_ts:
-            _log.debug("dashboard-data.json 无 _generated_at，跳过 CDN 验证")
-            return True
+            # v0.45.378（二次检查 v0.45.351）：原来 `return True`——与「验证通过」同形，是 v0.45.351
+            # 在 DNS 分支修掉的同一个形状漏在这里。没有期望值就没法比对 ⇒ 没验。
+            _log.warning("dashboard-data.json 无 _generated_at，**CDN 验证未执行**（不报告为已验证）")
+            return None
     except (OSError, _json_v.JSONDecodeError) as e:
         # v0.45.54：读不到本地文件 → 返回 True =「CDN 部署已验证」，
         # 与真正轮询成功的返回值完全同形。改为 None ＝「未验证」。

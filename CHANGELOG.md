@@ -5,7 +5,31 @@
 
 ---
 
-## [0.45.378] — 2026-09-29 — 占位（进行中：二次检查 v0.45.351——CDN 无 _generated_at 仍返回 True；传输探测取第一个地址可能是 IPv6）
+## [0.45.378] — 2026-09-29 — 二次检查 v0.45.351：两处小 bug（CDN 无期望时间戳仍报「已验证」；传输探测可能连 IPv6 误判端口不通）；09-28 生产首跑核对全绿
+
+### 生产核对（09-28 14:00 扫描，v0.45.351 首次在生产跑）
+- 生产 fast_forwarded 到 `d97e4d6`（含 v0.45.351）。gh-pages：「部署成功：远端已接受 da5dd1f（attempt 1）」、CDN 验证通过；
+  `git ls-remote origin refs/heads/gh-pages` = 本地 `gh-pages` = `da5dd1f9`（推送后才前移，符合修法 b）。
+- `.gh_pages_deploy_log.jsonl` 新行带 `action` / `commit`；编排器「✅ Step 5：gh-pages 部署已确认（pushed_new_commit，attempt 1）」，
+  `status.json.steps_result.step5_github_deploy.verified_by = gh_pages_deploy_log`。
+- ⭐ `status.json` **有了 `scan_timing`**（含 `extra.gh_pages`），编排器日志无「status.json 无 scan_timing」——09-14~25 每日缺失后首次恢复，
+  且 09-28 是阶段 5 后第一个不经 ~/Desktop 读该文件的扫描日 ⇒ **支持** v0.45.351 的 TCC 假设（单日，尚不算坐实）。
+- 失败路径（重试 / 探测 / Step 5 判红）生产上未触发过，只有测试覆盖。
+- CI（ubuntu）：v0.45.351 新增 49 条全 PASSED，编排器函数两种 locale 均过。
+
+### Fixed
+- `report_deployer.verify_cdn_deployment`：`dashboard-data.json` 无 `_generated_at` 时 `return True`（与「验证通过」同形，是 v0.45.351
+  在 DNS 分支修掉的同一形状漏在这里）→ `return None` + warning。
+- `git_transport_probe._probe_target`：取 `getaddrinfo` 第一个结果，AAAA 排前且本机无 IPv6 路由时必连不上 ⇒ 被读成「端口不通」，
+  正好污染「该不该切 443」那一格 → 优先 IPv4，记录 `family`。（github.com / ssh.github.com 目前无 AAAA，属潜伏。）
+
+### 测试
+- `TestSecondReview` 2 条；各自在钉死的改动前文件（`3a56ae25`）上红、还原后绿。相关部署测试 239 + 本文件 51 全绿，`ruff` 通过。
+
+### 复查过、判为非 bug
+- Step 2 超时（RC=124）但部署已写成功记录 ⇒ Step 5 判 success：网站确实更新了，正确。
+- helper 在旧生产代码上（无 `--gh-pages-step-status`）argparse 报错走 stderr、stdout 空 ⇒ 退回旧逻辑并标 unverified：正确。
+- 失败记录里的 `commit` 是**尝试推送**的提交（没到远端）：字段含义如此，读者只有 Step 5 且只在 failed 时当诊断用。
 
 ## [0.45.377] — 2026-09-28 — CI 红的四条测试按根因修：沙箱 HOME 丢了 git 身份、测试写死 Mac 解释器、变异测试依赖浅克隆里没有的历史
 
