@@ -9,7 +9,38 @@
 
 ## [0.45.380] — 2026-09-29 — 占位（进行中：earnings_vol_signal.scan 零快照时不再清空当天账本行（含已结算行））
 
-## [0.45.379] — 2026-09-29 — 占位（进行中：DE / XOM / COST / CVX 期权快照 2026-09-23 的 iv_rank / iv_percentile 重算，沿 v0.45.372 做法）
+## [0.45.379] — 2026-09-29 — Fixed（数据）：DE / XOM / COST / CVX 期权快照 2026-09-23 的 `iv_rank` / `iv_percentile` 重算（沿 v0.45.372 做法；仅这两个字段）
+
+v0.45.372 的只读核对（其余 29 只）发现 09-23 有 4 只 `iv_rank` 对不上，用户决定按 BRK-B 的方式重算。
+
+### 改了什么（数据，不在仓库）
+
+`~/alpha-hive-data/cache/options_snapshot_{T}_2026-09-23.json`，仅 `iv_rank` / `iv_percentile`：
+
+| 标的 | iv_rank | iv_percentile |
+|---|---|---|
+| DE | 43.26 → 33.45 | 47.39 → 22.37 |
+| XOM | 64.45 → 58.71 | 73.91 → 66.23 |
+| COST | 11.57 → 9.37 | 4.78 → 3.95 |
+| CVX | 60.85 → 59.36 | 53.04 → 51.32 |
+
+- **取值**：yfinance 复权 1y（生产同款）经生产的 `calculate_iv_rank` / `calculate_iv_percentile` 算；写入前要求与 **Twelve Data 未复权、完整一年日历窗口**的独立算法相差 ≤1.0，
+  否则该只跳过（本次 4 只差 +0.32 / 0 / 0 / 0，全部通过）。
+- **没动**：`rv_30d`（这 4 只当天都对）、`iv_rv_spread`、`iv_raw_observed`、`iv_current` 等其余字段。
+- 原值与理由写进文件内 `_iv_rank_recheck`；改前副本 `~/alpha-hive-data/_manual_backups/options_snapshot_{T}_2026-09-23.pre_v0.45.379.json`；
+  改后与备份逐键 diff，仅 `iv_rank` / `iv_percentile` / `_iv_rank_recheck` 变化；`iv_history` 读取正常。
+- dry-run 先行；补丁脚本一次性、未入库。
+
+### 影响面
+
+与 v0.45.372 相同：已存的 predictions / final_score / 信号存档**一概没动**（09-23 当天的评分用的是当时的值），只改快照这份记录；不进 IC 重跑世代。
+`iv_history` 只索引 `iv_raw_observed`，未受影响。
+
+### 未做
+
+- **成因仍未查**：为什么 09-23 只有这 5 只（含 BRK-B）的 `iv_rank`（yfinance-only 的 hv_proxy 路径）坏了，而同日 `rv_30d` 全部正常。
+- 21 只有 09-23 快照，其余 16 只经核对无异常（JNJ 有固定 2~3 点的偏差，判为复权口径时间差，未改）。
+- 旧时期（2026-04 ~ 08-27）`rv_30d` 串票问题仍未处理，见 v0.45.372 条目。
 
 ## [0.45.378] — 2026-09-29 — 二次检查 v0.45.351：两处小 bug（CDN 无期望时间戳仍报「已验证」；传输探测可能连 IPv6 误判端口不通）；09-28 生产首跑核对全绿
 
