@@ -465,6 +465,57 @@ def get_vix_observation(now_et: Optional[datetime] = None) -> dict:
     return obs
 
 
+def get_vix_observation_asof(as_of: str) -> dict:
+    """补跑（`--date D`）专用：D 的 CBOE 官方收盘 —— CSV 里**按日期精确取**那一行（v0.45.366）。
+
+    返回与 `get_vix_observation` 同形（键始终齐全），区别三处：
+
+    - **绝不取「最后一行」**：补跑在 D 之后跑，最后一行属于运行当天 —— 正是 v0.45.59 要治的
+      「今天的数贴上那天的日期」。
+    - **不走延迟报价**：报价只代表「此刻最新一场」，对过去某天没有意义（`quote_reason="backfill"`）。
+    - **新鲜度按 D 判**：观测日就是 D ⇒ `lag_sessions=0`、`stale=False`。`vix_staleness` 按「此刻」判，
+      拿它判补跑会把任何过去的 D 都判成陈旧、Guard 一票不投。
+
+    为什么不用快照里的 `vix_spot`：云端 17:05 ET 抓它时 CSV 还没有 D 行，08-26~09-11 那 12 份
+    `market.json` 全是上一场收盘（2026-09-28 实测，对照新拉的 CSV、交易日按 `is_trading_day` 数）；
+    且快照不记观测日，09-14 起它变成当日值（来源待验证，同刻 SKEW CSV 仍是上一场）后也分辨不出来。
+    补跑是事后跑，D 的官方收盘早已在 CSV 里。
+
+    CSV 里没有 D（缓存是 D 当晚 CSV 追加之前下的 / 下载失败读到旧缓存）⇒ 强制重下一次；
+    仍没有 ⇒ `vix=None`、`quote_reason="asof_row_missing"` 并打 WARNING，由调用方决定退路
+    （`fred_macro` 退回快照值、标 `cloud_snapshot_cboe`，GuardBee 不计这票）。
+
+    前一收盘取 D 的**前一交易日**那一行（同 `get_vix_observation` 的报价路径）。
+    ⚠️ CSV 含非交易日行（2026-09-07 劳动节有一行 15.30），「上一行」不一定是上一交易日。
+    """
+    obs = {"vix": None, "as_of": None, "prev_close": None, "prev_as_of": None,
+           "feed": None, "quote_reason": "backfill", "history_fetch": None,
+           "lag_sessions": None, "stale": None, "quote_check": None}
+    try:
+        d = _date.fromisoformat(str(as_of))
+    except (TypeError, ValueError):
+        obs["quote_reason"] = "asof_invalid"
+        return obs
+    closes = dict(get_vix_history())
+    obs["history_fetch"] = last_history_fetch()
+    if d.isoformat() not in closes:
+        closes = dict(get_vix_history(force_refresh=True))
+        obs["history_fetch"] = last_history_fetch()
+    close = closes.get(d.isoformat())
+    if close is None:
+        _log.warning("CBOE VIX CSV 里没有 %s 这一行（取数方式 %s）—— 补跑取不到该日官方收盘",
+                     d, obs["history_fetch"])
+        obs["quote_reason"] = "asof_row_missing"
+        return obs
+    prev_d = _prev_trading_day(d)
+    prev_iso = prev_d.isoformat() if prev_d else None
+    pc = closes.get(prev_iso) if prev_iso else None
+    obs.update(vix=close, as_of=d.isoformat(), feed="history_csv_asof",
+               prev_close=pc, prev_as_of=prev_iso if pc is not None else None,
+               lag_sessions=0, stale=False)
+    return obs
+
+
 def get_vix_spot() -> Optional[Tuple[float, str]]:
     """最新收盘 VIX → (值, ISO 日期)。拿不到返回 None，**不返回猜测值**。"""
     hist = get_vix_history()

@@ -1272,6 +1272,9 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # （SIGNAL_LEAVES，只在被点名时换代）与 Guard 分（macro_adj 直接加进 risk_adj 维分）都点名。
     # Guard 的 macro_regime 还经 RegimeWeightAdjuster 改权重 ⇒ 只动 composite.final_score（ALWAYS_SLICED）。
     "v0.45.357": ("guard.macro_adj", "agent.GuardBeeSentinel.*"),
+    # 09-28（与 v0.45.357 同日同集合）：补跑的 Guard 宏观票对齐目标日（VIX 取 CSV 的 D 行并计票、期限结构读快照、
+    # FOMC 按 D 数、板块按 D 对齐）⇒ 同样只动 `_calc_macro_adjustment` 的输入 ⇒ 同样点名这两项。只改补跑行。
+    "v0.45.366": ("guard.macro_adj", "agent.GuardBeeSentinel.*"),
 }
 
 

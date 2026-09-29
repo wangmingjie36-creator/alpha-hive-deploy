@@ -61,6 +61,18 @@ run()` 的 `status_file` 参数）每次调用**整份覆盖**，只反映"最�
 ⚠️ 「无法判定」刻意用 3 而非更自然的 2：同 `scan_continuity.py` 的理由——
    编排器 `run_step()` 把 **2 保留给「脚本不存在」**。若这里也用 2，编排器
    就无法区分"检查器没装"和"检查器跑了但判不了"。
+
+输出契约（v0.45.355，`step_contract`）
+--------------------------------------
+同 `scan_continuity.py`：`--out` / `--json` 写 `step_contract.envelope(...)`，原有键原样留在
+顶层（编排器 Step 15 现行内联解析照读）。`date` = `--end`（未给则 `step_contract.business_today()`
+= 洛杉矶当日，窗口终点同取这一天；⚠️ 不等于编排器本机时区的 `DATE_STR`，要比新鲜度就显式传 `--end`，
+见 `business_today` 的 docstring）；
+0 ⇒ ok、1 ⇒ attention、3 ⇒ undetermined（历史文件缺失时**也写** `--out`）；
+未捕获异常 ⇒ 退出码 3 + `status: "error"` 外壳（此前 Python 默认 1 = 「降级」）。
+`step_contract` 本身导入失败 ⇒ 入口也是退出码 3（不写 `--out`）；**本模块其余的导入期失败仍是 1**
+（`run_tool` 兜不到 import，见其 docstring）。
+`attention` 由 `contract_attention()` 显式列出（降级判据各一条 warn，附涉及的失败阶段）。
 """
 
 from __future__ import annotations
@@ -69,17 +81,29 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 ALPHAHIVE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ALPHAHIVE_DIR))
 
+# `step_contract` 本身导入失败 ⇒ 置哨兵，`__main__` 入口见哨兵退出码 3（同 scan_continuity 的理由：
+# Python 默认的 1 = 本工具的「降级」）。⚠️ 只兜这一个 import：下面 scan_continuity 等其余导入期失败仍是 1。
+try:
+    import step_contract  # noqa: E402
+    _STEP_CONTRACT_IMPORT_ERROR: Optional[str] = None
+except Exception as _e:  # noqa: BLE001 —— 连语法错也要兜：哨兵只记下原因，入口据此退出码 3
+    step_contract = None
+    _STEP_CONTRACT_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
 from scan_continuity import (  # noqa: E402
     find_gaps,
     recent_trading_days,
     trading_days_between,
     week_coverage,
 )
+
+_TOOL = "backup_continuity"
+#: 退出码 → 外壳 status（v0.45.355）。退出码约定本身不变；崩溃的 3 由 run_tool 写 "error"。
+_STATUS_BY_RC = {0: "ok", 1: "attention", 3: "undetermined"}
 
 # 默认历史日志位置。刻意写死绝对路径（同 `data_backup/run_backup.py::main()`
 # 的 `--status-file`/`--history-file` 默认值同一约定），**不走** `hive_logger.
@@ -222,6 +246,60 @@ def alert_line(res: Dict) -> Optional[str]:
     return "；".join(parts)
 
 
+def contract_attention(res: Dict) -> List[Dict]:
+    """把判定结果**显式**翻成 `step_contract` 的 attention 条目（v0.45.355）。
+
+    同 `scan_continuity.contract_attention`：降级时 `healthy` 的三条判据（窗口非空 /
+    覆盖率 / 最长空档）每条不达标的各出一条 warn，无成功备份的 ISO 周另出一条 warn；
+    末尾兜底保证「不健康」必有 warn。健康时漏掉的周只作 info（status 仍 ok、退出码仍 0）。
+    最长空档那条附上空档内各天**最后一次**卡住的阶段——那是人去查的第一线索。
+    """
+    items: List[Dict] = []
+    healthy = bool(res["healthy"])
+    w, th = res["window"], res["thresholds"]
+    if not healthy:
+        if not w["trading_days"]:
+            items.append(step_contract.attention_item(
+                f"{_TOOL}.empty_window", "warn",
+                "窗口内 0 个交易日 —— 无从计算覆盖率（检查 --since/--end 或历史日志的日期）"))
+        elif res["coverage"] < th["min_coverage"]:
+            items.append(step_contract.attention_item(
+                f"{_TOOL}.coverage_below_threshold", "warn",
+                f"过去 {w['trading_days']} 个交易日只成功备份 {res['backed_up_days']} 次"
+                f"（覆盖率 {res['coverage']:.0%}，门槛 {th['min_coverage']:.0%}）"))
+        if res["longest_gap"] > th["max_gap"] and res["gaps"]:
+            g = max(res["gaps"], key=lambda x: x["n_days"])
+            stages = sorted({res["last_stage_by_day"].get(d) for d in res["missing_days"]
+                             if res["last_stage_by_day"].get(d)})
+            tail = f"；涉及阶段: {', '.join(stages)}" if stages else "；空档内无任何历史记录（Step 14 可能根本没跑）"
+            items.append(step_contract.attention_item(
+                f"{_TOOL}.longest_gap", "warn",
+                f"最长空档 {res['longest_gap']} 个交易日（{g['start']} → {g['end']}，"
+                f"门槛 ≤{th['max_gap']}）{tail}"))
+    if res["weeks_missed"]:
+        items.append(step_contract.attention_item(
+            f"{_TOOL}.weeks_missed", "info" if healthy else "warn",
+            f"完全无成功备份的 ISO 周: {', '.join(res['weeks_missed'])}"))
+    if not healthy and not any(a["level"] != "info" for a in items):
+        items.append(step_contract.attention_item(
+            f"{_TOOL}.degraded", "warn", alert_line(res) or "数据备份连续性降级（判据未归类）"))
+    return items
+
+
+def _emit(args, env: Dict) -> None:
+    """`--out` 写外壳；写不出去不改变判定结果（判定本身已经完成）。
+
+    `step_contract.write_out` 原子写、**不替调用方建目录**（父目录不存在 ⇒ `FileNotFoundError`）——与改造前
+    `Path.write_text` 同语义；`tests/test_backup_continuity.py::test_out_failure_does_not_change_verdict`
+    正是用「父目录不存在」注入写失败，且断言文件不会被建出来。"""
+    if not args.out:
+        return
+    try:
+        step_contract.write_out(args.out, env)
+    except OSError as e:
+        print(f"⚠️  无法写入 {args.out}: {e}", file=sys.stderr)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="数据备份连续性体检")
     ap.add_argument("--history", default=None,
@@ -245,25 +323,37 @@ def main() -> int:
                     help="（未实现）推送聚合告警。对外动作需先确认，故留占位")
     args = ap.parse_args()
 
+    import datetime as dt
+    # v0.45.355：外壳 `date` 与窗口终点取**同一天**——未给 --end 时两者都是洛杉矶当日（business_today）。
+    # 此前窗口终点是 `dt.date.today()`（本机 America/Vancouver）：两地目前同日，但 2026-11-01 起温哥华常年 UTC-7，
+    # 冬令时每天本机 00:00–01:00 两者差一天——那一小时里缺省窗口从此按洛杉矶日。
+    # 编排器的 DATE_STR 是本机日 ⇒ 要比新鲜度就显式传 --end（见 step_contract.business_today）。
+    # 非法 --end 在这里抛 ⇒ run_tool 记为崩溃（退出码 3），与改造前「崩溃」同一类。
+    run_date = (dt.date.fromisoformat(args.end).isoformat() if args.end
+                else step_contract.business_today())
+
     history_path = Path(args.history) if args.history else _history_file()
     if not history_path.exists():
-        print(f"❌ 找不到 {history_path} —— 无法判定连续性（可能是刚接入生产，一天都还没跑过）",
-              file=sys.stderr)
+        msg = f"找不到 {history_path} —— 无法判定连续性（可能是刚接入生产，一天都还没跑过）"
+        print(f"❌ {msg}", file=sys.stderr)
+        # v0.45.355：这条路径此前不写 --out ⇒ 编排器只能看到「文件不存在」，与「没跑」分不开
+        env = step_contract.envelope(
+            _TOOL, run_date, _STATUS_BY_RC[3], payload={"reason": msg},
+            attention=[step_contract.attention_item(f"{_TOOL}.history_missing", "warn", msg)])
+        _emit(args, env)
+        if args.json:
+            print(json.dumps(env, indent=2, ensure_ascii=False))
         return 3  # 3 而非 2：编排器把 2 保留给"脚本不存在"，见模块 docstring
 
     res = assess(
         history_path=history_path,
-        days=args.days, since=args.since, end=args.end,
+        days=args.days, since=args.since, end=run_date,
         min_coverage=args.min_coverage, max_gap=args.max_gap,
     )
-
-    if args.out:
-        try:
-            Path(args.out).write_text(
-                json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")
-        except OSError as e:
-            # 写不出去不改变判定结果 —— 判定本身已经完成
-            print(f"⚠️  无法写入 {args.out}: {e}", file=sys.stderr)
+    rc = 0 if res["healthy"] else 1
+    env = step_contract.envelope(_TOOL, run_date, _STATUS_BY_RC[rc],
+                                 attention=contract_attention(res), payload=res)
+    _emit(args, env)
 
     if args.slack:
         # 刻意不实现：发消息是对外动作，需要用户在对话里明确同意后再接线。
@@ -271,14 +361,14 @@ def main() -> int:
               "本次仅本地判定。", file=sys.stderr)
 
     if args.json:
-        print(json.dumps(res, indent=2, ensure_ascii=False))
-        return 0 if res["healthy"] else 1
+        print(json.dumps(env, indent=2, ensure_ascii=False))
+        return rc
 
     line = alert_line(res)
     if args.quiet:
         if line:
             print(line)
-        return 0 if res["healthy"] else 1
+        return rc
 
     w = res["window"]
     print("━" * 68)
@@ -314,8 +404,14 @@ def main() -> int:
     else:
         print(alert_line(res))
     print("━" * 68)
-    return 0 if res["healthy"] else 1
+    return rc
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if step_contract is None:
+        # 没有 step_contract 就写不出外壳：只打 stderr，退出码 3（「无法判定」），不写 --out
+        print(f"{_TOOL}: 无法导入 step_contract（{_STEP_CONTRACT_IMPORT_ERROR}）—— 退出码 3，按「无法判定」处理；"
+              "本次不写 --out", file=sys.stderr)
+        sys.exit(3)
+    # v0.45.355：未捕获异常 ⇒ 退出码 3 + error 外壳（不再是 Python 默认的 1 = 「降级」）
+    sys.exit(step_contract.run_tool(_TOOL, main, date_args=("--end",)))
