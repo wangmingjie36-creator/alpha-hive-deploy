@@ -900,7 +900,8 @@ STEP2_DURATION=$((STEP2_END - STEP2_START))
 # --data-dir 必须是 DATA_DIR（日报 / .swarm_results / logs/scan_timing.json 都在那），不是 REPORTDIR。
 _apply_step_interp 2 step2_hive_analysis "${STEP2_RC}" "${STEP2_DURATION}" "" \
     --run-start "${STEP2_START}" --timeout-seconds "${STEP2_TIMEOUT}" --data-dir "${DATA_DIR}"
-STEP2_STATUS="${_SI_STATUS}"      # 立刻取：下一次 _apply_step_interp（Step 4）会覆盖 _SI_STATUS
+STEP2_STATUS="${_SI_STATUS:-}"   # 立刻取：下一次 _apply_step_interp（Step 4）会覆盖 _SI_STATUS
+                                 # `:-`：B1（helper + _SI_STATUS）被单独撤掉时这里不因 set -u 中断扫描（回滚顺序仍是先撤 B2）
 if [ "${STEP2_RC}" -ne 0 ]; then
     set_status partial
 fi

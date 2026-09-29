@@ -160,6 +160,23 @@ class TestRealOrchestratorStep5:
             assert "不会更新" in r["log"]
 
 
+class TestB2DependsOnB1:
+    """审查跟进（B2，核为 should-fix）：B2 的 Step 2/4 调用点与 `STEP2_STATUS` 用的是 B1 的 helper 与全局 `_SI_STATUS`。
+    单独 revert B1、留着 B2 ⇒ 部署关卡（`bash -n` / 裸变量 / 漂移）全过，扫描却在 Step 2 找不到函数、摘要全丢。
+    B1 自己的测试文件会随它一起被撤掉，指望不上 ⇒ 这条放在 B2 动过的文件里，让那种回滚在 CI 上红。"""
+
+    def test_helpers_and_global_defined_before_first_use(self):
+        text = repo_orchestrator_text()
+        extract_function(text, "_apply_step_interp")        # 抽不到就抛
+        extract_function(text, "_step_rc_fallback")
+        lines = text.splitlines()
+        glob_at = lines.index('_SI_STATUS=""')
+        def_at = next(i for i, ln in enumerate(lines) if ln.startswith("_apply_step_interp() {"))
+        call_at = next(i for i, ln in enumerate(lines) if ln.startswith("_apply_step_interp 2 "))
+        read_at = next(i for i, ln in enumerate(lines) if ln.startswith('STEP2_STATUS="${_SI_STATUS'))
+        assert glob_at < call_at and def_at < call_at < read_at, (glob_at, def_at, call_at, read_at)
+
+
 class TestExtractorHasTeeth:
     """抽取器自证（纯合成文本，任何机器都跑）：抽不到时要抛，不能返回空串让上面的类「测了个寂寞」。"""
 

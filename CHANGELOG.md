@@ -445,7 +445,7 @@ v0.45.383 遇到重取仍缺的日线只能把 `iv_rank` 置空（分数走中�
     rc=0 说 failed ⇒ 两步都退回、OVERALL 只按退出码）；`test_reportdir_would_lose_the_completion_proof`。harness 故意给 REPORTDIR 一个别的目录，
     调用点改传它时是行为红而不是 set -u 崩。
   - `TestLiveWiring` 加 Step 2/4：每个 STEP_KEYS 恰一个调用；2/4 传 `--data-dir "${DATA_DIR}"` / `--run-start "${STEP2_START}"`、不碰 REPORTDIR；
-    `STEP2_STATUS="${_SI_STATUS}"` 紧跟 Step 2 调用、随后是按 STEP2_RC 的 `set_status partial`；旧分支链与 jq 内联已删；Step 5 降级支那一行在。
+    `STEP2_STATUS="${_SI_STATUS:-}"` 紧跟 Step 2 调用、随后是按 STEP2_RC 的 `set_status partial`；旧分支链与 jq 内联已删；Step 5 降级支那一行在。
   - `TestMacBash` 加调用点矩阵（rc=1 跑完 / 没跑完 / 124 × 解释器真 / 缺）在 `env -i`（C locale）与 `LC_ALL=en_US.UTF-8` 下重跑。
 - `tests/test_alert_step_interp.py`（新，17 条）：success_with_warning 两种 warning 各恰一条 HIGH；warning 缺失照报；只认 step2；`failed` 通用 HIGH 逐字不变；
   success 零告警；`interp_fallback` 恰一条 MEDIUM（failed / success / 工具步骤三形）；非对象条目（str / None / int / list）不崩、记 `checks_skipped`、
@@ -461,7 +461,9 @@ v0.45.383 遇到重取仍缺的日线只能把 `iv_rank` 置空（分数走中�
   恰在 step2 为 success_with_warning 时出现；`~/.claude/logs/alerts-<date>.json` 的新 HIGH 只在 rc=1 跑完的日子出现；顶层 status 恰在 rc≠0 时为 partial。
   rc=1 路径在生产上还没有真实样本（09-28 是 rc=0），第一次触发要人工读一遍。
 - **回滚顺序：先 revert 编排器（本版 `scripts/alpha-hive-orchestrator.sh` 的改动），次日再 revert alert_manager**——反过来会有一轮「B 编排器 + 旧 alert_manager」，
-  rc=1 跑完的日子零步骤 P1。解释器坏了不需要回滚：helper 自己兜底、按退出码复现 B 之前的 status 并出 MEDIUM。
+  rc=1 跑完的日子零步骤 P1。⇒ **不要整版 `git revert` 本版**（一次撤两者 ⇒ 次日正是那一轮）：`git revert --no-commit` 后
+  `git checkout HEAD -- alert_manager.py tests/test_alert_step_interp.py tests/test_scan_timing_missing_alert.py` 保住新 alert_manager 再提交，次日另撤。
+  **也不许在本版之前单独撤 B1**（本版的调用点依赖 B1 的 helper，`TestB2DependsOnB1` 会红）。解释器坏了不需要回滚：helper 自己兜底、按退出码复现 B 之前的 status 并出 MEDIUM。
 
 ### 验证
 - 目标测试（step_interp / step5_gh_pages / alert_step_interp / scan_timing_missing_alert 与全部读编排器原文或 step2/step4 键的文件：orchestrator_steps /
@@ -471,6 +473,18 @@ v0.45.383 遇到重取仍缺的日线只能把 `iv_rank` 置空（分数走中�
 - 全套（`--timeout=300 --maxfail=1000`）：7627 passed / 1 failed / 82 deselected / 2 xfailed（417s）；唯一失败仍是已知的
   `test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`。跑前跑后 `git status --porcelain --ignored` 逐字相同。
 - 变异（`git archive` 副本 + 本版改动拷入，逐个改、核锚点恰一处、跑 216 条目标测试、复原）13/13 红（每条的红格数）：Step 2 调用点删 `set_status partial`（15）、STEP2_STATUS 挪到 Step 4 调用之后（20）、删 2/4 允许集合（8）、Step 2 改传 REPORTDIR（5）、删 success_with_warning HIGH（3）、`_swarm_scan_actually_ran` 退回只认 success（2）、删 interp_fallback MEDIUM（3）、删非对象守卫（4）、Step 5 降级支退回只判 STEP2_RC（3）、Step 5 读 `${STEP2_STATUS}` 不带 `:-`（3，set -u 下旧调用环境崩）、partial 改按解释器 status 判（只认 failed/timeout，7）、Step 4 调用漏 `--run-start`（3）、success_with_warning 规则去掉步骤名限定（1）。一次过，没有需要返修的变异。
+
+### 审查跟进（与 B1 同一轮对抗审查）
+- ⭐ should-fix：本版读 B1 的全局 `_SI_STATUS` 不带默认值 ⇒ 若只撤 B1、留着本版，`set -u` 下扫描在 Step 2 之后中断，而部署关卡全过。
+  改 `STEP2_STATUS="${_SI_STATUS:-}"`（不中断，但仍丢摘要 ⇒ 回滚顺序才是根治，写进上面「上线」）；新增
+  `test_orchestrator_step5_gh_pages.py::TestB2DependsOnB1`：helper 与全局定义在 Step 2 调用之前，缺一个就红——放在本版动过的文件里，
+  因为 B1 自己的测试文件会随 B1 一起被撤。
+- 核为 nit、**接受现状并钉住**：只有 Step 2 的解释器兜底、Step 4 的照常 ⇒ step2 `{failed, interp_fallback}` 与 step4
+  `{skipped_builtin, step2_status: success_with_warning}` 不一致（Step 4 自己重核跑完证据，不读 Step 2 的判定）。OVERALL 与 B 之前相同，
+  仍有 step2 的 P1 + 兜底 MEDIUM；丢的是 B 之前那条 step4「failed」，它在跑完的日子是误报。审查建议的「Step 4 看 STEP2_STATUS」会把误报请回来，
+  故不改；`test_step2_only_fallback_is_inconsistent_but_accepted`（替身只让 Step 2 出垃圾、Step 4 转真解释器）钉住，要改先改它。
+  无确定性触发：解释器只导入标准库，单次约 0.05s 对 30s 超时。
+- 核为 nit、不改：`TestPreBStatusUnchanged` 对照的是手写的旧 P1 循环模型、且只比三类步骤标签——测试强度缺口，不是现有 bug。
 
 ## [0.45.385] — 2026-09-29 — Changed：编排器 Step 10/11/12/13/15 改调步骤解释器（B1）——bash 不再持有这五步的格式知识；先删后跑 + 日期显式传入；解释器不可用时按退出码兜底并留痕
 

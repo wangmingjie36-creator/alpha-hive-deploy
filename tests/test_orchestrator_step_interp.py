@@ -30,7 +30,7 @@ B 把 Step 10–15 的内联分支链（`CONT_SUMMARY` / `READINESS_LINE` / `BOU
     STEP2_STATUS 在 Step 4 调用之后仍是它；删 `set_status partial` / STEP2_STATUS 挪到 Step 4 之后 /
     --data-dir 改传 REPORTDIR / 删允许集合 ⇒ 各自红
   · TestLiveWiring 的 Step 2/4 部分（B2）—— 两处调用各恰一个、传 `--data-dir "${DATA_DIR}"`、不碰 REPORTDIR；
-    `STEP2_STATUS="${_SI_STATUS}"` 紧跟 Step 2 调用，随后是按 STEP2_RC 的 `set_status partial`；旧分支链已删
+    `STEP2_STATUS="${_SI_STATUS:-}"` 紧跟 Step 2 调用，随后是按 STEP2_RC 的 `set_status partial`；旧分支链已删
 
 helper 对 2/4 的兜底与允许集合按 helper 层测（B1 起），调用点与 OVERALL_STATUS 矩阵按原文测（B2 起）。
 """
@@ -332,7 +332,8 @@ def _fallback(tmp_path: Path, sid: str, rc: int, dur: str) -> Tuple[str, dict]:
     return lvl, json.loads(frag_)
 
 
-#: 可控的替身解释器：STUB_MODE = garbage / unknown_step / extra_key / status（STUB_STATUS）/ sleep
+#: 可控的替身解释器：STUB_MODE = garbage / unknown_step / extra_key / status（STUB_STATUS）/ sleep /
+#: real_except（STUB_FAIL_STEP 出垃圾、其余转真解释器 STUB_REAL）
 _STUB = r'''
 import json, os, sys, time
 argv = sys.argv[1:]
@@ -351,6 +352,15 @@ elif mode == "status":
                       "steps_fragment": {key: {"status": os.environ["STUB_STATUS"]}}}))
 elif mode == "sleep":
     time.sleep(60)
+elif mode == "real_except":      # 只有 STUB_FAIL_STEP 那一步出垃圾，其余转给真解释器（原样 argv）
+    if sid == os.environ["STUB_FAIL_STEP"]:
+        print("definitely not json")
+    else:
+        import runpy
+        real = os.environ["STUB_REAL"]
+        sys.path.insert(0, os.path.dirname(real))
+        sys.argv = [real, *argv]
+        runpy.run_path(real, run_name="__main__")
 '''
 
 
@@ -681,14 +691,14 @@ class TestStep2CallSite:
 
     def test_step2_status_survives_the_step4_call(self, tmp_path):
         """Step 4 的调用会把 _SI_STATUS 改成 skipped_builtin；STEP2_STATUS 必须还是 Step 2 的 success_with_warning。
-        变异：把 `STEP2_STATUS="${_SI_STATUS}"` 挪到 Step 4 调用之后 ⇒ 这里读到 skipped_builtin 红。"""
+        变异：把 `STEP2_STATUS="${_SI_STATUS:-}"` 挪到 Step 4 调用之后 ⇒ 这里读到 skipped_builtin 红。"""
         s2, s4 = _live_sites()
-        head, _, tail = s2.partition('\nSTEP2_STATUS="${_SI_STATUS}"')
+        head, _, tail = s2.partition('\nSTEP2_STATUS="${_SI_STATUS:-}"')
         assert tail, "调用点里找不到 STEP2_STATUS 取值行"
         res = run_sites(tmp_path, 1, data_dir=_data_dir(tmp_path, True))
         assert {r.step2_status for r in res.values()} == {"success_with_warning"}
         # 反证：同样的原文、只把取值挪到 Step 4 之后，就读到 Step 4 的 status——证明上面那条不是恒真
-        moved = (head + "\n" + tail.split("\n", 1)[1], s4 + '\nSTEP2_STATUS="${_SI_STATUS}"')
+        moved = (head + "\n" + tail.split("\n", 1)[1], s4 + '\nSTEP2_STATUS="${_SI_STATUS:-}"')
         res_moved = run_sites(tmp_path, 1, data_dir=_data_dir(tmp_path, True), sites=moved)
         assert {r.step2_status for r in res_moved.values()} == {"skipped_builtin"}
 
@@ -707,6 +717,21 @@ class TestStep2CallSite:
             assert (s2["status"], s4["status"]) == (want2, want4), (s2, s4)
             assert "不在允许集合里" in s2["interp_fallback"] and "不在允许集合里" in s4["interp_fallback"]
             assert r.step2_status == want2 and r.overall == pre_b_overall(rc, start)
+
+    def test_step2_only_fallback_is_inconsistent_but_accepted(self, tmp_path):
+        """审查跟进（B2，核为 nit）：只有 Step 2 的解释器兜底、Step 4 的照常 ⇒ 两步记录不一致——step2 {failed, interp_fallback}、
+        step4 {skipped_builtin, step2_status: success_with_warning}（Step 4 自己重核了 Step 2 的跑完证据）。**接受它**：
+        OVERALL 与 B 之前相同；alert_manager 仍有 step2 的 'failed' P1 + 兜底 MEDIUM；丢的只是 B 之前那条 step4 'failed'，
+        它在跑完的日子本来是误报（仪表板确实生成了）。改成「Step 4 看 STEP2_STATUS」会把这条误报请回来——要改先改这里。"""
+        res = run_sites(tmp_path, 1, data_dir=_data_dir(tmp_path, True), project_dir=_stub_dir(tmp_path),
+                        exports={"STUB_MODE": "real_except", "STUB_FAIL_STEP": "2",
+                                 "STUB_REAL": str(REPO_ROOT / "orchestrator_steps.py")})
+        for start, r in res.items():
+            s2, s4 = r.steps[KEY["2"]], r.steps[KEY["4"]]
+            assert s2["status"] == "failed" and "不是合法的一行" in s2["interp_fallback"], s2
+            assert s4 == {"status": "skipped_builtin", "step2_status": "success_with_warning"}, s4
+            assert r.step2_status == "failed" and r.overall == pre_b_overall(1, start)
+            assert len([m for lv, m in r.logs if lv == "ERROR" and "步骤解释器不可用" in m]) == 1, r.logs
 
     def test_reportdir_would_lose_the_completion_proof(self, tmp_path):
         """--data-dir 传错（REPORTDIR）⇒ rc=1 跑完的日子被判 failed。结构守卫在 TestLiveWiring，这里证明它不是空谈。"""
@@ -788,7 +813,7 @@ class TestLiveWiring:
         assert len(i2) == 1
         i = i2[0]
         assert [l for _, l in lines[i + 1:i + 5]] == [
-            'STEP2_STATUS="${_SI_STATUS}"',
+            'STEP2_STATUS="${_SI_STATUS:-}"',
             'if [ "${STEP2_RC}" -ne 0 ]; then',
             "set_status partial",
             "fi",
