@@ -2329,6 +2329,8 @@ class AlphaHiveDailyReporter:
             # v0.45.349 世代印记（与 OracleBee 各路径同一字面量）：合成回退里的分数同样出自本版代码、
             # 不含 gex_signal。不写的话，某天走到这条回退，边界判别会把「缺键」读成旧代码 ⇒ 误报 boundary_too_early。
             _oracle_details["gex_signal_in_score"] = False
+            # v0.45.369 世代印记，理由同上（本回退不贴 data_quality 标签、data_real_pct 恒 0，那个 bug 本来就不在这条路上）
+            _oracle_details["options_dq_from_agent"] = True
             # ── BuzzBee discovery（含 F&G）──
             _buzz_disc = ""
             if _fg_value is not None:

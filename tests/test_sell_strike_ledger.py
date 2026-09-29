@@ -522,6 +522,105 @@ class TestPaths:
                 check({"bad": bad}, tmp_path)
 
 
+class TestMissingStateDirIsNotEmpty:
+    """缺目录 ≠ 空账本（v0.45.382）。2026-09-28 实测：不带 `ALPHA_HIVE_HOME` 手动跑 `--assess`，
+    `PATHS.home` 回落到代码目录、`<仓库>/sell_strike_state/` 不存在，CLI 却印「账本里还没有任何行」——
+    生产账本每档 29 行 pending。每个只读出口都要把两种情形分开说，且读路径**不建目录**。"""
+
+    def test_assess_and_summary_distinguish_missing_from_empty(self, tmp_path):
+        """变异：summary_line 不看 state_dir / assess 不给 state_dir ⇒ 缺目录又被说成「空」。"""
+        missing, empty = tmp_path / "missing", tmp_path / "empty"
+        empty.mkdir()
+        for tenor in LG.TENORS:
+            a = LG.assess(tenor, state_dir=missing)
+            b = LG.assess(tenor, state_dir=empty)
+            # 先断言出口文字（改动前的代码在这里红，红的理由就是「缺目录被说成空」），再断言新键
+            la, lb = LG.summary_line(a), LG.summary_line(b)
+            assert lb == f"❓ {tenor}：账本里还没有任何行"
+            assert "账本里还没有任何行" not in la, la
+            assert "不存在" in la and str(missing) in la
+            # 闸门逻辑不变：两者都是 undetermined（无行）；区别只在「目录在不在」这个独立事实
+            assert a["status"] == b["status"] == "undetermined"
+            assert a["state_dir"]["path"] == str(missing) and a["state_dir"]["exists"] is False
+            assert a["state_dir"]["hint"] in la
+            assert b["state_dir"] == {"path": str(empty), "exists": True, "hint": None}
+        # rows= 注入（测试 / 探针）不读账本 ⇒ 无 state_dir 键，照旧是「空」
+        injected = LG.assess("monthly", rows=[])
+        assert "state_dir" not in injected
+        assert LG.summary_line(injected) == "❓ monthly：账本里还没有任何行"
+        assert not missing.exists(), "只读出口不许为了看一眼造出目录"
+
+    def test_hint_names_the_likely_cause(self, tmp_path, monkeypatch):
+        """三种病因各给各的提示；目录在 ⇒ 无提示。`PATHS.home` 的回落目标换成 tmp 替身
+        （同 `TestConftestDefensesWired`），不依赖真仓库里碰巧有没有 `sell_strike_state/`。
+        变异：不区分 env 未设 / 显式路径 / env 已设。"""
+        import hive_logger
+        fake_code = tmp_path / "checkout"
+        monkeypatch.setattr(hive_logger, "__file__", str(fake_code / "hive_logger.py"))
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        st = LG.state_dir_status()
+        assert st["path"] == str(fake_code / "sell_strike_state") and st["exists"] is False
+        assert "未设置 ALPHA_HIVE_HOME" in st["hint"]
+
+        data = tmp_path / "data"
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data))
+        st = LG.state_dir_status()
+        assert st["exists"] is False and str(data) in st["hint"] and "未设置" not in st["hint"]
+        assert "--state-dir" in LG.state_dir_status(tmp_path / "typo")["hint"]
+
+        (data / "sell_strike_state").mkdir(parents=True)
+        assert LG.state_dir_status() == {"path": str(data / "sell_strike_state"), "exists": True, "hint": None}
+        assert not fake_code.exists()
+
+    def test_cli_assess_says_missing_not_empty(self, tmp_path, monkeypatch, capsys):
+        """CLI 就是事故现场：缺目录 ⇒ 退出码 3（无法判定）+ 摘要写明路径与病因；目录在但无行 ⇒ 老话。
+        env 未设且没给 --state-dir ⇒ stderr 先提醒读的是哪个目录（目录碰巧在时这是唯一的线索）。
+        变异：CLI 摘要回到「账本里还没有任何行」/ 缺目录时退出码 0 / 删掉 stderr 提醒。"""
+        missing, empty = tmp_path / "missing", tmp_path / "empty"
+        empty.mkdir()
+        assert LG.main(["--assess", "--date", AS_OF, "--state-dir", str(missing)]) == 3
+        cap = capsys.readouterr()
+        assert "账本里还没有任何行" not in cap.out
+        assert cap.out.count("账本状态目录不存在") == len(LG.TENORS) and str(missing) in cap.out
+        assert "未设置 ALPHA_HIVE_HOME" not in cap.err, "给了 --state-dir 就不该提醒 env"
+        assert not missing.exists()
+
+        assert LG.main(["--assess", "--date", AS_OF, "--state-dir", str(empty)]) == 3
+        assert capsys.readouterr().out.count("账本里还没有任何行") == len(LG.TENORS)
+
+        import hive_logger
+        fake_code = tmp_path / "checkout"
+        monkeypatch.setattr(hive_logger, "__file__", str(fake_code / "hive_logger.py"))
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert LG.main(["--assess", "--date", AS_OF]) == 3
+        cap = capsys.readouterr()
+        assert "未设置 ALPHA_HIVE_HOME" in cap.err and str(fake_code / "sell_strike_state") in cap.err
+        assert "账本里还没有任何行" not in cap.out and "未设置 ALPHA_HIVE_HOME" in cap.out
+        assert not fake_code.exists()
+
+    def test_mcp_exits_distinguish_missing_from_empty(self, tmp_path):
+        """MCP 两条路径（给日期读账本 / 现算）：缺目录 ⇒ reason `ledger_state_dir_missing` + 路径，
+        assess 摘要不说「空」；目录在但当日无行 ⇒ `no_ledger_rows_for_date`。都不建目录。
+        变异：rows_for_ticker 不查目录 / `_assess_brief` 丢了 state_dir。"""
+        missing, empty = tmp_path / "missing", tmp_path / "empty"
+        empty.mkdir()
+        out = R.rows_for_ticker(AS_OF, "AAA", state_dir=missing)
+        assert out["data_available"] is False and out["reason"] == "ledger_state_dir_missing"
+        assert out["state_dir"]["path"] == str(missing) and out["state_dir"]["exists"] is False
+        for tenor in LG.TENORS:
+            brief = out["assess"][tenor]
+            assert brief["state_dir"]["exists"] is False
+            assert "账本里还没有任何行" not in brief["summary"] and "不存在" in brief["summary"]
+        assert R.rows_for_ticker(AS_OF, "AAA", state_dir=empty)["reason"] == "no_ledger_rows_for_date"
+
+        live = R.compute_live("AAA", fetch_fn=lambda t, as_of: (_raw(t, AS_OF), None), state_dir=missing)
+        assert live["data_available"] is True           # 现算不靠账本
+        for tenor in LG.TENORS:
+            assert live["assess"][tenor]["state_dir"]["exists"] is False
+            assert "账本里还没有任何行" not in live["assess"][tenor]["summary"]
+        assert not missing.exists()
+
+
 # ═════════════════════════════════════════ 10 · run_for_date
 
 class TestRunForDate:

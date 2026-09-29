@@ -164,6 +164,28 @@ def _state_dir(state_dir=None) -> Path:
     return Path(state_dir) if state_dir else PATHS.sell_strike_state
 
 
+def state_dir_status(state_dir=None) -> dict:
+    """只读出口的前置判定：账本状态目录在不在（**不建目录**）。`{"path", "exists", "hint"}`，
+    exists=False 时 hint 写明可能病因。
+
+    为什么要单独判（2026-09-28 实测）：不带 `ALPHA_HIVE_HOME` 手动跑 `--assess`，`PATHS.home` 回落到
+    代码目录，`<仓库>/sell_strike_state/` 根本不存在——`_shard_paths` 对缺目录返回 `[]`，于是 CLI 印出
+    「账本里还没有任何行」，而生产账本（真数据根下）每档 29 行 pending。「找错了地方」被说成了「账本是空的」。
+    读路径照旧不建目录；这里只把「目录不在」作为事实交给出口去说。"""
+    p = _state_dir(state_dir)
+    if p.is_dir():
+        return {"path": str(p), "exists": True, "hint": None}
+    env = os.environ.get("ALPHA_HIVE_HOME")
+    if state_dir:
+        hint = "显式传入的 --state-dir / state_dir 不存在（路径写错了？）"
+    elif env is None:
+        hint = ("未设置 ALPHA_HIVE_HOME ⇒ PATHS.home 回落到代码目录，读的不是生产数据根；"
+                "生产由编排器 export（scripts/alpha-hive-orchestrator.sh），手动 / 诊断跑请先 export 同一个值")
+    else:
+        hint = f"ALPHA_HIVE_HOME={env!r} 下没有卖权账本目录：首次扫描之前？还是指错了数据根？"
+    return {"path": str(p), "exists": False, "hint": hint}
+
+
 def _shard(tenor: str, date_str: str, state_dir=None) -> Path:
     return _state_dir(state_dir) / tenor / f"{date_str[:7]}.jsonl"
 
@@ -1477,6 +1499,10 @@ def assess(tenor: str, *, rows: Optional[List[dict]] = None, state_dir=None,
            "frozen": None, "awaiting_freeze": awaiting_freeze,
            "note": "ready 只代表可以开始检验，不代表已验证；未 ready 时不计算任何效应量；"
                    "检验只跑一次（日报钩子首次看到就绪即冻结）。"}
+    if from_ledger:
+        # 目录在不在是独立事实：缺目录时 rows 也是 []，status 同为 undetermined（闸门逻辑不变），
+        # 只是出口要说「没找到账本」而不是「账本为空」（summary_line / MCP reason 读这个键）
+        out["state_dir"] = state_dir_status(state_dir)
     if frozen is not None:
         out["frozen"] = {"ready_date": frozen.get("ready_date"), "frozen_at": frozen.get("frozen_at"),
                          "n_units": frozen.get("n_units"), "applies": frozen_applies,
@@ -1539,6 +1565,11 @@ def summary_line(res: dict) -> str:
             f" · 待结算 {pg.get('n_pending', 0)} 行（其中已过期超过 "
             f"{pg.get('pending_overdue_days', CONFIG['pending_overdue_days'])} 个日历日 "
             f"{pg.get('n_pending_overdue', 0)} 行）")
+    sd = res.get("state_dir") or {}
+    if sd.get("exists") is False:
+        # 先于 status 判：缺目录 ⇒ 读到的 [] 不是「空账本」，是「没找到账本」（rows= 注入时无此键）
+        return (f"❓ {tenor}：无法判定——账本状态目录不存在：{sd.get('path')}"
+                f"（不是「账本为空」；{sd.get('hint')}）")
     if res.get("status") == "undetermined":
         return f"❓ {tenor}：账本里还没有任何行"
     if res.get("status") != "ready":
@@ -1558,9 +1589,11 @@ def summary_line(res: dict) -> str:
 
 def main(argv: Optional[List[str]] = None) -> int:
     """退出码：0 成功 / 1 部分失败（有不可得行或记录/结算异常；或 --date 非法 / 晚于 PDT 今天）/
-    3 无法判定（一行都没记上，或两档都无数据）。
+    3 无法判定（一行都没记上，或两档都无数据——含状态目录不存在：摘要行写明路径与病因，不说「账本为空」）。
     ⚠️ 3 而非 2：编排器 `run_step()` 把 2 保留给「脚本不存在」（同 vrp_signal）。多个动作取最大码。
-    `--assess` 只读、**不冻结**（冻结的唯一写者是日报钩子）：就绪但未冻结时显示「已就绪，等待日报冻结」。"""
+    `--assess` 只读、**不冻结**（冻结的唯一写者是日报钩子）：就绪但未冻结时显示「已就绪，等待日报冻结」。
+    未设 `ALPHA_HIVE_HOME` 且没给 `--state-dir` ⇒ stderr 先提醒一句读写的是哪个目录（目录碰巧存在时，
+    摘要行不会报缺目录，这是唯一能看出「找错了数据根」的地方）。只打印，不改任何读写行为。"""
     ap = argparse.ArgumentParser(description="卖权行权价账本：记录 / 结算 / 就绪度")
     ap.add_argument("--date", default=None, help="业务日 YYYY-MM-DD（默认 PDT 今天）")
     ap.add_argument("--run", action="store_true", help="run_for_date：取链、记录两档、结算")
@@ -1570,6 +1603,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--state-dir", default=None, help="账本目录（缺省 PATHS.sell_strike_state）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
+    if not args.state_dir and os.environ.get("ALPHA_HIVE_HOME") is None:
+        print(f"⚠️ 未设置 ALPHA_HIVE_HOME：PATHS.home 回落到代码目录，本次读写的是 {_state_dir()}"
+              "（生产数据根由编排器 export；手动 / 诊断跑请先 export 同一个值，或传 --state-dir）",
+              file=sys.stderr)
     try:
         # 未来日期一律拒绝（不止写路径）：CLI 的 --date 是人手敲的，年份写错最常见
         as_of = _check_not_future(args.date or _today(), "--date")

@@ -527,7 +527,12 @@ async def alphahive_get_sell_strike_candidates(params: TickerDateInput) -> str:
 
     Returns:
         str: JSON with:
-            - data_available (bool) and, when False, reason (str)
+            - data_available (bool) and, when False, reason (str). Ledger path:
+              "no_ledger_rows_for_date" = the ledger exists but has no row for
+              that date/ticker; "ledger_state_dir_missing" = the ledger
+              directory itself was not found (state_dir.path / state_dir.hint
+              say where the server looked — usually ALPHA_HIVE_HOME missing
+              from this server's environment). The latter is NOT "no data".
             - source: "ledger" | "live"
             - payload_last_trade_time, session_live, iv30 (live: top level;
               ledger: per row) — quote timestamp from the CBOE payload itself,
@@ -552,6 +557,9 @@ async def alphahive_get_sell_strike_candidates(params: TickerDateInput) -> str:
               only the daily scan does, once. When the gates are met but the
               daily scan has not frozen the test yet, the tool reports
               awaiting_freeze: true ("ready, awaiting the daily freeze").
+              state_dir {path, exists, hint}: which ledger was read; status
+              "undetermined" with exists=false means "ledger not found",
+              not "ledger empty".
             - caveats (list[str]), disclaimer (str)
     """
     try:

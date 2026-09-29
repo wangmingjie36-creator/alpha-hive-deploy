@@ -2111,7 +2111,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                     exp_tag = f' <span style="background:transparent;border:0.5px solid var(--border);color:var(--ts);padding:1px 4px;border-radius:4px;font-size:.65em">{w["dom_exp"]}</span>' if w.get("dom_exp") else ""
                     rows.append(
                         f'<div style="display:flex;justify-content:space-between;font-size:.78em;padding:2px 0;'
-                        f'border-bottom:1px dashed rgba(var(--tint-slate),.2)">'
+                        f'border-bottom:1px dashed var(--border)">'
                         f'<span style="color:{side_color};font-weight:600">${w["strike"]:.0f}{exp_tag}</span>'
                         f'<span style="color:var(--ts);font-size:.85em">{pct_str}</span>'
                         f'<span style="color:var(--tp);font-weight:500">{oi_str}</span>'

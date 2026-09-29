@@ -360,7 +360,9 @@ def _row_view(row: dict, *, blind: bool = True) -> dict:
 def _assess_brief(a: dict) -> dict:
     return {"status": a.get("status"), "summary": (_assess_line(a)),
             "awaiting_freeze": a.get("awaiting_freeze"),
-            "progress": a.get("progress"), "frozen": a.get("frozen"), "error": a.get("error")}
+            "progress": a.get("progress"), "frozen": a.get("frozen"), "error": a.get("error"),
+            # 读的是哪个账本、在不在（缺目录 ⇒ undetermined 是「没找到」不是「空」，见 LG.state_dir_status）
+            "state_dir": a.get("state_dir")}
 
 
 def rows_for_ticker(as_of: str, ticker: str, *, state_dir=None) -> dict:
@@ -381,7 +383,10 @@ def rows_for_ticker(as_of: str, ticker: str, *, state_dir=None) -> dict:
             out["assess"][tenor] = _assess_brief(assessed[tenor])
         out["data_available"] = any(v is not None for v in out["tenors"].values())
         if not out["data_available"]:
-            out["reason"] = "no_ledger_rows_for_date"
+            # 缺目录 ≠ 当日无行：前者多半是 MCP 进程没拿到 ALPHA_HIVE_HOME（读到了代码目录）
+            loc = LG.state_dir_status(state_dir)
+            out["reason"] = "no_ledger_rows_for_date" if loc["exists"] else "ledger_state_dir_missing"
+            out["state_dir"] = loc
         return out
     except Exception as exc:  # noqa: BLE001
         return {"data_available": False, "ticker": ticker, "as_of": as_of,

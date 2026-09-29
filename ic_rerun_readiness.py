@@ -807,6 +807,31 @@ _COHORT_HISTORY = [
      "共振加成前瞻检验从记录的 agent_details 起算（Guard 政体是记录值），无需修订 replay。"
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段（risk_adj_score / volatility / "
      "final_score 是 ML 特征；只在补跑行变）。"),
+    ("2026-09-28", "v0.45.369",
+     "OracleBee 期权数据「可用」改按 OptionsAgent 自己的 `data_quality` 判（用户 2026-09-28 决定另登边界，"
+     "09-29 决定「09-28 期权链完整、数据就用」⇒ 并入 09-28 这一代）。旧判据是 `bool(result)`：真实链取不到时 "
+     "OptionsAgent 走「样本链早退」，返回**非空** dict（`data_quality: \"unavailable\"`、`options_score` 5.0、指标全 None）"
+     "⇒ Oracle 把固定的 5.0 分标成 `data_quality.options=\"real\"`、置信度照加 0.3（规则模式 0.4→0.7）。"
+     "新：该情形标 `\"unavailable\"`（与 \"fallback\" 同在 Queen 的 `PROXY_SOURCES`，权 0.7；\"real\" 权 1.0）、"
+     "置信度不加那 0.3。Oracle 分与方向**不变**；变的是 Queen 层 `data_real_pct`（→ `quality_factor`）与 Oracle 的"
+     "投票权重（方向计票按 confidence 加权）。`\"degraded\"`（链在、IV 缺）新旧都算取到，本版不动。"
+     "**依据（2026-09-28 只读实测，生产 `.swarm_results_*.json`）**：03-10~09-25 共 112 个扫描日里 26 天有这种行、"
+     "被标 real 的比例 100%；扩到 30 只之后只有 09-24、09-25（各 30/30）。**幅度（重放，现行代码 + 记录输入，外部依赖钉成记录值；对照先复现存档：09-24/25 60/60 行 final_score / 方向 / data_real_pct / quality_factor 逐位一致，另一代理独立复核一致）**：final_score 58/60 行变（09-24 |Δ| 中位 0.10、最大 0.25；09-25 中位 0.075、最大 0.19；有符号均值 +0.02），**方向 0 翻转**，data_real_pct 每行 −1.2pp（25 个 DQ 通道里一项 1.0→0.7，约 89→88，仍高于 80 ⇒ quality_factor 不变）；变动来自 odds 维（Oracle 恒 5.0）的有效权重 `max(0.3, conf^1.5)` 从 0.586 落到地板 0.3、中性票权 −0.15。更早 24 天（03-31~07-02，59 行）对照复现不了（v0.45.212 起 Guard/Bear 退出计票等现行代码改动），**不给数**。"
+     "**为什么日期写 09-28 而新代码 09-29 才上线**：本版改动只在「Oracle details 的 data_quality 是 unavailable」"
+     "那一种输入上改变输出；09-28 扫描 30/30 只取到了链（同日只读核对）⇒ 09-28 的记录在新旧代码下**评分与标签逐项相同**（新代码只多写一个印记键），"
+     "并进 09-28 不混算任何口径 ⇒ **作废 0 条** final_score 样本（另登 09-29 会作废 09-28 的 30 条）。"
+     "这个论证由数据核对、不靠推理：新增 `_BOUNDARY_EQUIVALENCE`（只对登记了的边界生效）——印记首见之前的旧代码记录"
+     "逐只标的读 `.swarm_results_<日期>.json` 核等价，**不等价**（旧代码又碰上断链）照报 boundary_too_early；"
+     "读不出的文件记为不等价（举证责任在放宽一侧）。印记 `_BOUNDARY_MARKERS[\"v0.45.369\"]`："
+     "Oracle details 带字面量 `options_dq_from_agent: True`（成功 / 异常兜底 / 无效 ticker / 日报合成回退都写）。"
+     "预期判定：新代码首跑之前 `no_evidence_yet`（09-28 等价、无印记）；首跑后 `matches`（其前 1 个扫描日为等价旧记录）。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.369\"]` = `()`：Oracle 分与方向不变、没有归档信号读 confidence 或"
+     "data_quality（同 v0.45.314 / 315，只动 Queen 层）⇒ 只有 `composite.final_score`（ALWAYS_SLICED）。"
+     "**前瞻检验**：维度 IC 协议 H2（加权合成）会随 final_score 变，但本条早于 FORWARD_START 2026-10-12 ⇒ 不截断；"
+     "H1（buzz_v1）不在闭包里。共振加成前瞻检验从记录的 agent_details 起算，无需修订 replay。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段（`final_score` 是 ML 特征，只在断链行变）。"
+     "LLM 模式本版未动：`llm_service.interpret_options_flow` 仍在 `result` 非空时调用（样本链结果也会送进去），"
+     "那是 LLM 模式的另一件事。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1028,6 +1053,45 @@ def _marker_guard_macro_as_of_mode(d: dict) -> bool:
     return isinstance(vt, dict) and "macro_as_of_mode" in vt and vt["macro_as_of_mode"] != "backfill"
 
 
+def _oracle_row_is_new_code(d: dict) -> bool:
+    """这行是 v0.45.369 之后的代码写的吗：OracleBee `details.options_dq_from_agent` 为字面量 `True`
+    （成功 / 异常兜底 / 无效 ticker / 日报合成回退都写）。只认 `is True`：此前的记录**没有**这个键
+    （同 `_marker_oracle_gex_signal_neutralized` 的理由）。**不看**实时 / 补跑——那是日期证据的问题，见下一个函数。"""
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("OracleBeeEcho")
+    det = o.get("details") if isinstance(o, dict) else None
+    return isinstance(det, dict) and det.get("options_dq_from_agent") is True
+
+
+def _is_backfill_row(d: dict) -> bool:
+    """这行是补跑（`--date D`）产的吗：Guard 宏观细节 `macro_as_of_mode == "backfill"`（v0.45.366 起两种口径都写）。
+    只认**显式** backfill，缺键照实时算（同 v0.45.373 对 357 时代归档的处理）。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    vt = det.get("vix_term_structure") if isinstance(det, dict) else None
+    return isinstance(vt, dict) and vt.get("macro_as_of_mode") == "backfill"
+
+
+def _marker_oracle_options_dq_from_agent(d: dict) -> bool:
+    """v0.45.369 的**日期**印记：新代码写的、且是**实时行**。
+
+    ⚠️ 补跑行不算日期证据（v0.45.373 二次检查 v0.45.366 揪出的同一形状）：补跑按目标日 D 落盘，D 不代表代码
+    何时上线 —— 部署后补跑一份早于边界的日期会把 `marker_first_seen` 拉到边界之前 ⇒ 假 `boundary_too_late`。
+    等价扫描判「这行是不是新代码」用的是 `_oracle_row_is_new_code`（不排补跑：新代码的补跑行同样不是旧口径）。"""
+    return _oracle_row_is_new_code(d) and not _is_backfill_row(d)
+
+
+def _equiv_oracle_chain_available(d: dict) -> bool:
+    """v0.45.369 的**等价判据**（见 `_BOUNDARY_EQUIVALENCE`）：这份旧代码记录在本版改动下输出不变吗？
+
+    本版只改 OptionsAgent 返回 `data_quality == "unavailable"`（样本链早退）那一种结果的标签与置信度。
+    Oracle details 里的 `data_quality` 不是 `"unavailable"` ⇒ 本版改动在这份记录上是空操作 ⇒ 等价。
+    缺 details（Oracle 走异常兜底）两版同一条路 ⇒ 也等价。
+    """
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("OracleBeeEcho")
+    det = o.get("details") if isinstance(o, dict) else None
+    return not (isinstance(det, dict) and det.get("data_quality") == "unavailable")
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1047,11 +1111,34 @@ _BOUNDARY_MARKERS = {
                   _marker_guard_vix_feed),
     "v0.45.366": ("agent_details.GuardBeeSentinel.details.vix_term_structure 带 macro_as_of_mode 键",
                   _marker_guard_macro_as_of_mode),
+    "v0.45.369": ("agent_details.OracleBeeEcho.details.options_dq_from_agent is True",
+                  _marker_oracle_options_dq_from_agent),
+}
+
+#: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
+#: 其余边界的判定逐字不变。
+#:
+#: 用途：改动只在**少数输入**上改变输出时（v0.45.369 只改「期权链取不到」那一种结果），边界日至印记首见日之间
+#: 的旧代码记录，若在本条改动下**输出不变**，就不是「边界之后的旧口径样本」——它与新代码的输出评分与标签逐项相同，
+#: 混算不引入任何口径差 ⇒ 不算「写早了」。判定函数吃与印记同一形状的 `{"swarm_results": <一只标的的蒸馏结果>}`。
+#:
+#: 逐只标的核：读**当日全部标的**的 `.swarm_results_<日期>.json`（ML 报告归档只有前 12 只；印记是代码版本的事实、
+#: 看 12 只就够，等价却是逐只标的的数据事实，另 18 只里有一只不等价就漏了）。
+#:
+#: ⚠️ 只放宽「写早了」这一个方向：窗口内出现**不等价**的旧记录 ⇒ 照报 boundary_too_early（新代码没赶上、
+#: 又恰好碰上改动生效的输入 ⇒ 真混算了）；印记早于边界（boundary_too_late）不受影响。
+#: ⚠️ **不能拿等价判据当印记**：它对历史上绝大多数记录都成立（bug 没触发的日子），当印记用会把全部旧归档
+#: 认成新口径 ⇒ 恒报 boundary_too_late。
+#: 值：（说明, 等价判据, 「这行是新代码写的」判据）。第三项不排补跑行——日期印记排补跑（见
+#: `_marker_oracle_options_dq_from_agent`），但新代码的补跑行同样不是「旧口径样本」，等价扫描里要跳过它。
+_BOUNDARY_EQUIVALENCE = {
+    "v0.45.369": ("OracleBeeEcho.details.data_quality != \"unavailable\"（期权链取到了 ⇒ 本版改动是空操作）",
+                  _equiv_oracle_chain_available, _oracle_row_is_new_code),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
 #: 判别器取印记时先查自己、查不到再查被更正的那条 —— 更正不是新改动，印记是同一个。
-#: 当前为空：09-28 的三条边界（v0.45.334 / v0.45.340 / v0.45.349）尚无更正。
+#: 当前为空：09-28 的六条边界（v0.45.334 / 340 / 349 / 357 / 366 / 369）尚无更正。
 _CORRECTS: Dict[str, str] = {}
 
 
@@ -1109,11 +1196,15 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
         return {"version": version, "boundary": boundary, "marker": None,
                 "marker_first_seen": None, "verdict": "no_marker", "unmarked_after_boundary": []}
     marker_desc, is_new = entry
+    equiv_entry = (_BOUNDARY_EQUIVALENCE.get(version)
+                   or _BOUNDARY_EQUIVALENCE.get(_CORRECTS.get(version)))
     first = None
     # 边界日及之后、读得出来却没有印记的归档日期。只在印记**一次都没出现**时用得上：
     # 那时边界之后的归档全是旧代码产的 ⇒ 边界已经写早了，不必等新代码真跑起来才红。
     # （推送晚于边界日正是这个形状：旧写法在推送之前一直报 no_evidence_yet「还没跑到」。）
     unmarked_after = set()
+    # v0.45.369：无印记的 ML 归档逐（日期, 标的）记下——只给等价分支用（那边要核这些票在当日 .swarm_results 里被核过）
+    unmarked_pairs: Set[tuple] = set()
     try:
         for f in sorted(root.glob("analysis-*-ml-*.json")):
             m = re.search(r"-ml-(\d{4}-\d{2}-\d{2})\.json$", f.name)
@@ -1133,8 +1224,33 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
                 first = date if first is None else min(first, date)
             elif date >= boundary:
                 unmarked_after.add(date)
+                _tk = re.match(r"analysis-(.+)-ml-\d{4}-\d{2}-\d{2}\.json$", f.name)
+                unmarked_pairs.add((date, _tk.group(1) if _tk else f.name))
     except OSError:
-        first, unmarked_after = None, set()
+        first, unmarked_after, unmarked_pairs = None, set(), set()
+
+    equivalent_dates: List[str] = []
+    if equiv_entry is not None:
+        # v0.45.369：登记了等价判据的边界，窗口 [边界, 印记首见) 内的旧代码记录逐只标的核等价；
+        # 只有**不等价**的日子才算「写早了」（见 `_BOUNDARY_EQUIVALENCE`）
+        bad, equivalent_dates, examined = _equivalence_scan(root, boundary, first, equiv_entry[2], equiv_entry[1])
+        # 旧代码写过 ML 归档、却没在当日可读的 .swarm_results 里被核过的（文件缺 / 空 / 缺这只票）⇒ 证不出等价 ⇒ 不等价。
+        # 否则换成等价分支反而丢掉了原分支本来看得见的证据（二次审查 v0.45.369）。
+        _missed = {d for d, tk in unmarked_pairs
+                   if (first is None or d <= first) and (d, tk) not in examined}
+        if _missed:
+            bad = sorted(set(bad) | _missed)
+            equivalent_dates = [d for d in equivalent_dates if d not in _missed]
+        if first is None or first > boundary:
+            unmarked_after = set(bad)
+            if first is not None:
+                verdict = "boundary_too_early" if bad else "matches"
+            else:
+                verdict = "boundary_too_early" if bad else "no_evidence_yet"
+            return {"version": version, "boundary": boundary, "marker": marker_desc,
+                    "marker_first_seen": first, "verdict": verdict,
+                    "unmarked_after_boundary": sorted(unmarked_after),
+                    "equivalence": equiv_entry[0], "equivalent_before_marker": equivalent_dates}
 
     if first is None:
         # 边界之后已有归档、却一份印记都没有 ⇒ 那几天跑的是旧代码，同属「写早了」
@@ -1148,6 +1264,49 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
     return {"version": version, "boundary": boundary, "marker": marker_desc,
             "marker_first_seen": first, "verdict": verdict,
             "unmarked_after_boundary": sorted(unmarked_after) if first is None else []}
+
+
+def _equivalence_scan(root: Path, boundary: str, first: Optional[str], is_new, is_equiv):
+    """窗口 [boundary, first]（first 为 None ⇒ 至今）内逐日读 `.swarm_results_<日期>.json`，逐只标的：
+    带印记 ⇒ 新代码，跳过；不带印记且 `is_equiv` 为真 ⇒ 等价旧记录；否则 ⇒ 不等价旧记录。
+
+    窗口**含**印记首见那天：那天的文件可能是新代码补跑并进旧代码断链那一轮的合并结果（`save_report` 的
+    `merged_swarm.update`），带印记的照样跳过，不花代价。
+
+    返回 `(不等价日期列表, 等价日期列表, 核过的 {(日期, 标的)})`。读不出的文件 / 顶层不是 dict ⇒ 该日记为不等价
+    （**证不出等价就不算等价**——这是放宽判定的那一侧，举证责任在「放宽」这边）。
+    同一天既有等价又有不等价的票 ⇒ 只算不等价。
+    """
+    bad, ok, examined = set(), set(), set()
+    try:
+        files = sorted(root.glob(".swarm_results_*.json"))
+    except OSError:
+        return [], [], set()
+    for f in files:
+        m = re.search(r"_(\d{4}-\d{2}-\d{2})\.json$", f.name)
+        if not m:
+            continue
+        date = m.group(1)
+        if date < boundary or (first is not None and date > first):
+            continue
+        try:
+            with open(f, encoding="utf-8") as fh:
+                sr = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            bad.add(date)
+            continue
+        if not isinstance(sr, dict):
+            bad.add(date)
+            continue
+        for _tk, r in sr.items():
+            if not isinstance(r, dict):
+                continue
+            examined.add((date, _tk))
+            wrapped = {"swarm_results": r}
+            if is_new(wrapped):
+                continue
+            (ok if is_equiv(wrapped) else bad).add(date)
+    return sorted(bad), sorted(ok - bad), examined
 
 
 #: 三个 `*_forward_status` 返回值里的**私有**键：执行器 `run()` 的结构化结果（按下方白名单截取），
@@ -1291,9 +1450,19 @@ def _boundary_line(ev: Dict) -> str:
     extra = ""
     if ev.get("marker_first_seen"):
         extra = f"，印记首见 {ev['marker_first_seen']}"
+        if ev.get("equivalent_before_marker"):
+            _eq = ev["equivalent_before_marker"]
+            extra += f"（其前 {len(_eq)} 个扫描日为等价旧记录：{'、'.join(_eq)}）"
+        if ev.get("unmarked_after_boundary"):
+            # 等价分支在印记出现后仍可能报「写早了」：点名是哪几天的旧记录不等价
+            u = ev["unmarked_after_boundary"]
+            extra += f"；{len(u)} 个扫描日有不等价的旧代码记录（{'、'.join(u)}）"
     elif ev.get("unmarked_after_boundary"):
         u = ev["unmarked_after_boundary"]
         extra = f"，边界后已有 {len(u)} 个归档日无印记（最早 {u[0]}）"
+    elif ev.get("equivalent_before_marker"):
+        _eq = ev["equivalent_before_marker"]
+        extra = f"，边界后 {len(_eq)} 个扫描日为等价旧记录（{'、'.join(_eq)}；新旧评分输出相同，不算写早）"
     if ev.get("error"):
         extra += f"，{ev['error']}"
     text = _BOUNDARY_VERDICT_TEXT[ev["verdict"]]
@@ -1583,7 +1752,7 @@ def main() -> int:
     res["cohort_boundary_evidence"] = bev
 
     if args.out or args.json:
-        # 只在要外壳时才列条目：`--quiet` 单跑（周度任务）的路径与 v0.45.355 之前逐字节相同
+        # 只在要外壳时才列条目：`--quiet` 单跑（周度任务）的路径与 v0.45.355 之前评分与标签逐项相同
         _emit(args, contract_envelope(res, date, build_attention(res, bev, fwd_detail, fg_detail, dim_detail)))
 
     if args.json:

@@ -1003,6 +1003,19 @@ class TestMcpTool:
             assert out["assess"][tenor]["status"] in ("accruing", "ready", "undetermined")
         assert out["caveats"] and out["disclaimer"] == R.DISCLAIMER
 
+    def test_missing_ledger_dir_is_not_reported_as_no_rows(self, tmp_path):
+        """经 MCP 工具本体（v0.45.382）：数据根下没有账本目录（典型：MCP 进程没拿到 ALPHA_HIVE_HOME）⇒
+        reason 是 `ledger_state_dir_missing` 并给出它找的路径，不是「当日无行」；只读、不建目录。
+        目录建出来之后同一调用回到 `no_ledger_rows_for_date`。变异：工具换回不查目录的读法。"""
+        state = tmp_path / "sell_strike_state"          # conftest 把 ALPHA_HIVE_HOME 设成了 tmp_path
+        out = self._call(ticker="AAA", date_str=AS_OF)
+        assert out["data_available"] is False and out["reason"] == "ledger_state_dir_missing"
+        assert out["state_dir"]["path"] == str(state) and out["state_dir"]["exists"] is False
+        assert all("账本里还没有任何行" not in out["assess"][t]["summary"] for t in LG.TENORS)
+        assert not state.exists(), "readOnly 工具不许为了看一眼造出账本目录"
+        state.mkdir()
+        assert self._call(ticker="AAA", date_str=AS_OF)["reason"] == "no_ledger_rows_for_date"
+
     def test_live_computes_and_does_not_write_ledger(self, monkeypatch):
         """不给 date ⇒ 现算（as_of = payload vintage），返回 levels 摘要；账本一行都不许多。
         变异：live 分支调 `run_for_date` / `record_rows`。"""
