@@ -7,7 +7,45 @@
 
 ## [0.45.370] — 2026-09-29 — 占位（进行中：编排器纳入版本控制·阶段 3——扫描前自动部署编排器；接手原会话）
 
-## [0.45.369] — 2026-09-29 — 占位（进行中：OracleBee 期权链不可得仍标 real + 置信度 0.7 → 按 OptionsAgent data_quality 判；并入 09-28 世代边界）
+## [0.45.369] — 2026-09-29 — Fixed：OracleBee 期权链取不到仍标 `real` + 置信度 0.7 → 按 OptionsAgent 自己的 `data_quality` 判；世代边界**并入 09-28**（等价论证，作废 0 条）
+
+用户决定（09-28「Oracle bug 另登边界」；09-29「09-28 期权链完整数据就用」）。
+**根因**：`oracle_bee` 用 `bool(result)` 判「期权数据可用」。真实链取不到时 OptionsAgent 走「样本链早退」，返回**非空** dict
+（`data_quality: "unavailable"`、`options_score` 5.0、指标全 None）⇒ Oracle 把固定 5.0 分标成 `data_quality.options="real"`、
+置信度照加 0.3（规则模式 0.4→0.7）。生产 `.swarm_results` 只读普查：112 个扫描日里 26 天有这种行、100% 标 real；
+扩到 30 只后是 09-24、09-25（各 30/30）。
+
+### Fixed
+- `swarm_agents/oracle_bee.py`：`_options_data_usable(result)` = 非空且 `data_quality != "unavailable"`，置信度与标签同用它；
+  该情形标 `"unavailable"`（已在 Queen `PROXY_SOURCES`，权 0.7，与 `"fallback"` 同档）、置信度不加 0.3。
+  OptionsAgent 抛异常仍 `"fallback"`；`"degraded"`（链在、IV 缺）新旧都算取到，**不动**。Oracle 分与方向不变。
+
+### Added（世代记账）
+- 印记 `details.options_dq_from_agent: True`（成功 / 异常兜底 / 无效 ticker / 日报合成回退都无条件写）；
+  `ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.369"]`。
+- **`_BOUNDARY_EQUIVALENCE`（新，只对登记的边界生效）**：边界日至印记首见之间的旧代码记录，逐只标的读 `.swarm_results_<日期>.json`
+  （全部 30 只，不是 ML 归档的前 12 只）核「在本版改动下输出不变」——Oracle details 的 `data_quality` 不是 unavailable ⇒ 等价。
+  只放宽「写早了」一个方向：不等价（旧代码又碰上断链）照报 `boundary_too_early`；读不出记为不等价；等价判据不当印记用
+  （否则历史上 bug 没触发的日子全被认成新口径 ⇒ 恒报 boundary_too_late）。结果新增 `equivalent_before_marker`，摘要行点名。
+- `_COHORT_HISTORY` 09-28 / v0.45.369（同日第 6 条，`assess()` 切点不变 ⇒ **作废 0 条** final_score 样本；另登 09-29 会作废 09-28 的 30 条）。
+  依据：09-28 扫描 30/30 取到链（只读核对）⇒ 09-28 记录新旧逐字节相同。生产数据只读试跑 `boundary_evidence_status`：
+  不报警，369=`no_evidence_yet`（09-28 列为等价旧记录），其余 5 条照旧 `matches`；新代码首跑后预期 `matches`。
+  反向对照：同一扫描对 09-24/25 判不等价。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.369"] = ()`（分与方向不变、无归档信号读 confidence / data_quality，同 v0.45.314/315）；
+  `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签扩 `+v0.45.369`（此时 09-28 已有 1 天报告，同一代只换标签）。
+
+### 幅度（重放：现行代码 + 记录输入，外部依赖钉成记录值；另一代理独立复核一致）
+- 对照先复现存档：09-24/25 **60/60** 行 final_score / 方向 / data_real_pct / quality_factor 逐位一致。
+- 修复后 final_score **58/60** 行变：09-24 |Δ| 中位 0.10、最大 0.25（VKTX）；09-25 中位 0.075、最大 0.19；**方向 0 翻转**；
+  data_real_pct 每行 −1.2pp（≈89→88，仍 ≥80 ⇒ quality_factor 不变）。机制：odds 维（Oracle 恒 5.0）有效权重
+  `max(0.3, conf^1.5)` 0.586→0.3（地板），分数被推离 5.0。
+- 更早 24 天（03-31~07-02，59 行）对照复现不了（v0.45.212 起 Guard/Bear 退出计票等现行代码改动）⇒ **不给数**。
+
+### 刻意不做
+- LLM 模式：`llm_service.interpret_options_flow` 仍在 `result` 非空时调用（样本链结果也会送进去），另议。
+- 前瞻检验：维度 IC 协议 H2 随 final_score 变，但本条早于 FORWARD_START 2026-10-12 ⇒ 不截断；共振 replay 读记录值，无需修订。
+
+- 守卫 `tests/test_oracle_options_dq_from_agent.py`（行为 / 每条路径印记 / 写端↔读端 / 等价边界各路径；变异 13/13 红）。
 
 ## [0.45.368] — 2026-09-28 — dashboard.css 组件层硬编码色换令牌：修 4 处对比度不达标 + 零字面量守卫
 
