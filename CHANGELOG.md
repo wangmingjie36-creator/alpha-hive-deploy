@@ -5,7 +5,42 @@
 
 ---
 
-## [0.45.373] — 2026-09-29 — 占位（进行中：二次检查 v0.45.366——世代印记被「部署后补跑早于边界的日期」拉早 ⇒ 假 boundary_too_late 报警）
+## [0.45.373] — 2026-09-29 — Fixed：世代印记被「部署后补跑早于边界的日期」拉早 ⇒ 假 `boundary_too_late` 报警（v0.45.357 / v0.45.366 两条印记同形）；印记判别器只认实时行。二次检查 v0.45.366，**只动判别器，不改评分**
+
+### 二次检查（09-29，只读核对 09-28 真实产物）
+
+- ✅ **两条边界都被真实归档证实**：`cohort_boundary_evidence` 对 09-28 的 12 份 `analysis-*-ml-2026-09-28.json`，v0.45.357 / v0.45.366 均 `matches`、印记首见 2026-09-28，同日共核 5 条全部 `matches`；生产 checkout 已含 `d97e4d64`。
+  Guard 细节实测 `(macro_as_of_mode, vix_feed, vix_source, vix_stale, vix_term_source) = ('realtime','delayed_quote','cboe',False,'live')` × 12。
+- ✅ **v0.45.357 首跑遗留待核项收口**：日报 `macro_context.vix_feed='delayed_quote'`、`vix_feed_note='ok'`、`vix_as_of=2026-09-28`，报价 16.07 = 新拉 CSV 09-28 官方收盘 16.07（拒收窗口未误伤）；
+  账本 09-28 条为 `pending`（`last_trade_time=16:15:01`），待下一次取数用 CSV 核成 `verified`。
+- ✅ 信号归档正常摄入新键：`signal_archive` 09-28 `guard.macro_adj` 30 行（0.0 ~ 0.5）。
+
+### 缺陷（离线复现）
+
+补跑行按目标日 D 落盘，D 的日期不代表代码何时上线。部署后补跑一份**早于边界**的日期（如 09-25）会带着同一个印记键 ⇒ `marker_first_seen` 被拉到 09-25 ⇒ 判 `boundary_too_late`
+⇒ `boundary_evidence_status` 的 `alarm=True` ⇒ 编排器 Step 11 一条假 🚨。**不污染任何样本**（只是判别器误报），但报警的意义就是它响了要有事——假报警会把人养成忽略它。
+v0.45.366 的世代原因里写「印记两种口径都写……对只改补跑的本条，这是充分条件」，漏了这一头：「两种口径都写」只解决了「每份实时归档被判无印记」，没解决「补跑行日期不可信」。
+**v0.45.357 的 `vix_feed` 印记同形**（补跑行也带该键），只是靠「部署后没人补跑过早于边界的日期」才没触发。
+
+### Fixed
+
+`_marker_guard_macro_as_of_mode`（v0.45.366）与 `_marker_guard_vix_feed`（v0.45.357）都排除 `macro_as_of_mode == "backfill"` 的行。
+排除的是**显式 backfill**，不是「缺键」：357 时代的归档没有这个键，仍是证据（`test_357_era_archives_without_the_mode_key_still_count` 钉住）。
+`_COHORT_HISTORY` 里 v0.45.366 的原因文本**不就地改写**（审计轨迹惯例，且 `TestCohortReasonsAreNotRewrittenInPlace` 的先例）——上一段即为更正，以本条为准。
+两条判别器的 docstring 已更正。
+
+### 测试 / 变异
+
+`tests/test_backfill_macro_asof.py::TestBoundaryMarker`：原 `test_real_guard_output_carries_the_marker_in_both_modes` 改为 `..._marker_is_evidence_only_when_realtime`（两种口径都写键、但只有实时算证据，真 Guard 输出正对照）；
+新增 `test_late_backfill_of_an_older_date_does_not_pull_the_marker_earlier`（参数化 357 / 366）、`test_357_era_archives_without_the_mode_key_still_count`。
+3 个变异真跑（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、每轮 passed+failed == collected 171、字节级还原）：366 判别器不排除 backfill → 2 红；357 同 → 1 红；
+357 改成「只认 realtime」→ 2 红（含既有的 `test_boundary_day_matches`）。
+
+### 未做 / 另案（二次检查顺带记录，非缺陷）
+
+- **同晚早于 20:30 ET 的补跑**：CSV 还没有 D 行 ⇒ 强制重下仍缺 ⇒ 退回快照 `vix_spot`（`cloud_snapshot_cboe`，Guard 不计票）。这是设计内的退路，但要知道：补跑「当天」与补跑「次日/深夜」的 Guard 票数不同。
+- 补跑走全降级（`not data` 且 CSV / 快照都无 VIX）时 `return base`，`vix_feed_note` 里没有 `asof_row_missing` 原因（只有 WARNING 日志）。
+
 
 ## [0.45.372] — 2026-09-29 — Fixed（数据）：BRK-B 期权快照 2026-09-23 的 `rv_30d` / `iv_rank` 等派生字段被污染，按正确收盘价重算（**仅此一行**；范围核实后无「缺失」）
 
