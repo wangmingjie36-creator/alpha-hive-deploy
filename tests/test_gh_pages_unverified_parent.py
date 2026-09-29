@@ -92,8 +92,15 @@ def _online(repo, bare):
 
 @pytest.fixture
 def no_sleep(monkeypatch):
+    """记录**退避**等待（不真等）。
+
+    ⚠️ 只替换 `rd._backoff_sleep`，不替换全局 `time.sleep`（v0.45.379）：后者也被
+    `subprocess.run(timeout=...)` 的 `Popen._wait` 在子进程未及回收时调用，计数会混进
+    毫秒级的忙等 sleep ⇒ 「第 N 次 sleep 恢复网络」「sleeps == [2.0]」间歇红，
+    机器越忙越容易。确定性复现与守卫见 `TestSleepCountIsolatedFromSubprocess`。
+    """
     calls = []
-    monkeypatch.setattr(time, "sleep", lambda s: calls.append(s))
+    monkeypatch.setattr(rd, "_backoff_sleep", calls.append)
     return calls
 
 
@@ -189,7 +196,7 @@ class TestRecovery:
             if len(sleeps) == 2:
                 _online(d.repo, d.bare)
 
-        monkeypatch.setattr(time, "sleep", _sleep)
+        monkeypatch.setattr(rd, "_backoff_sleep", _sleep)
         r = rd.commit_and_push_gh_pages(str(d.repo), tree1, lambda n: "day1")
 
         assert r["success"] and r["attempts"] == 3, r
@@ -606,3 +613,67 @@ class TestTransportProbe:
         assert [c[0] for c in calls].count("resolve") == 2, calls   # 两个目标各解析一次，只探一轮
         assert r["transport_probe"]["verdict"] == "dns_failed"
         assert "测试默认离线" in r["transport_probe"]["targets"]["github.com:22"]["dns_error"]
+
+
+# ─────────────── ⑥ 退避计数与 subprocess 内部 sleep 隔离（v0.45.379） ───────────────
+
+@pytest.fixture
+def slow_reap(monkeypatch):
+    """确定性造出「pipe 已关、子进程尚未被回收」：每个子进程第一次非阻塞 waitpid 报「还没退出」
+    ⇒ `Popen._wait(timeout)` 必走一次 `time.sleep(delay)` 忙等。真实环境里这取决于调度，
+    机器忙时才出现 —— 正是本文件两条测试间歇红的根因（全局 `time.sleep` 计数被它污染）。"""
+    import subprocess as _sp
+    orig = _sp.Popen._try_wait
+    seen = []
+
+    def _try_wait(self, wait_flags):
+        if wait_flags == os.WNOHANG and not getattr(self, "_slow_reap_once", False):
+            self._slow_reap_once = True
+            seen.append(self.args)
+            return (0, 0)
+        return orig(self, wait_flags)
+
+    monkeypatch.setattr(_sp.Popen, "_try_wait", _try_wait)
+    return seen
+
+
+class TestSleepCountIsolatedFromSubprocess:
+    """把上面两条曾间歇红的场景放在 `slow_reap` 下各跑一遍：计数必须只反映退避本身。
+
+    变异：`no_sleep` / 恢复用例改回替换全局 `time.sleep` ⇒ 两条都稳定红（实测）。
+    """
+
+    def test_slow_reap_really_reaches_subprocess_sleep(self, slow_reap, monkeypatch):
+        """反向自证：夹具确实让 `subprocess.run(timeout=...)` 走进了全局 `time.sleep`，
+        否则下面两条在旧写法下也会是绿的，证明不了隔离。"""
+        global_sleeps = []
+        monkeypatch.setattr(time, "sleep", lambda s: global_sleeps.append(s))
+        subprocess.run(["git", "--version"], capture_output=True, timeout=5)
+        assert slow_reap and global_sleeps, "slow_reap 没能触发 Popen._wait 的忙等 sleep"
+
+    def test_backoff_sequence_exact_under_slow_reap(self, slow_reap, deployed, tmp_path):
+        d = deployed
+        _offline(d.repo, tmp_path)
+        tree1 = _tree(d.repo, "day1.html", "d1")
+        r = rd.commit_and_push_gh_pages(str(d.repo), tree1, lambda n: "day1", max_attempts=2)
+        assert r["success"] is False and r["attempts"] == 2, r
+        assert d.sleeps == [2.0], d.sleeps
+        assert slow_reap, "夹具没生效：本条没有测到任何东西"
+
+    def test_recovery_on_second_backoff_under_slow_reap(self, slow_reap, deployed, tmp_path,
+                                                         monkeypatch):
+        d = deployed
+        _offline(d.repo, tmp_path)
+        tree1 = _tree(d.repo, "day1.html", "d1")
+        sleeps = []
+
+        def _sleep(s):
+            sleeps.append(s)
+            if len(sleeps) == 2:
+                _online(d.repo, d.bare)
+
+        monkeypatch.setattr(rd, "_backoff_sleep", _sleep)
+        r = rd.commit_and_push_gh_pages(str(d.repo), tree1, lambda n: "day1")
+        assert r["success"] and r["attempts"] == 3, r
+        assert sleeps == [2.0, 4.0]
+        assert _remote_head(d.bare) == r["commit"]

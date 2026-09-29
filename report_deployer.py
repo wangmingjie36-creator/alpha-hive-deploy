@@ -267,6 +267,21 @@ def resolve_gh_pages_parent(repo: str) -> Tuple[Optional[str], bool]:
         return None, False
 
 
+def _backoff_sleep(seconds: float) -> None:
+    """`commit_and_push_gh_pages` 重试之间的退避等待。
+
+    单独成函数是为了给测试一个**只属于退避**的替身点（v0.45.379）。测试以前替换的是
+    进程全局的 `time.sleep` 并按调用次数计数，但标准库 `subprocess.run(timeout=...)`
+    在子进程 pipe 已关、尚未被回收时，`Popen._wait` 会进入 `time.sleep(delay)` 忙等
+    ——同一个全局函数。本函数的每次推送 / fetch 都带超时，于是计数混进了与退避无关的
+    毫秒级 sleep，是否混入取决于子进程退出与 waitpid 谁先到（机器越忙越容易）。
+    ⇒ 「第 N 次 sleep 时恢复网络」一类的测试间歇红，且单跑几乎复现不了。
+    `time` 在调用时才查，全局替换 `time.sleep` 的旧测试照样能让它不真等。
+    """
+    import time
+    time.sleep(seconds)
+
+
 def commit_and_push_gh_pages(repo: str, tree: str, message_fn, max_attempts: int = 4) -> Dict:
     """把 `tree` 提交到 gh-pages 并推送——每次重试都重新 fetch 校验父提交。
 
@@ -315,7 +330,6 @@ def commit_and_push_gh_pages(repo: str, tree: str, message_fn, max_attempts: int
                「是否切 ssh.github.com:443」攒判据；不影响成败判定），成功路径为 None。
     """
     import subprocess
-    import time as _t
     result: Dict = {
         "success": False, "action": None, "commit": None, "parent": None,
         "parent_verified": None, "tree_unchanged": None, "n_changed": None,
@@ -403,7 +417,7 @@ def commit_and_push_gh_pages(repo: str, tree: str, message_fn, max_attempts: int
                 "gh-pages push 被拒 (attempt %d/%d)：%s —— %.0fs 后重新 fetch + 提交 + 推送",
                 attempt, max_attempts, result["last_error"], delay,
             )
-            _t.sleep(delay)
+            _backoff_sleep(delay)
     return result
 
 
