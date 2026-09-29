@@ -56,7 +56,7 @@ Step 2/4/5 的调用点与 alert_manager 新规则是 B2（v0.45.386），本版
   `grep -c '步骤解释器不可用' ~/.claude/logs/orchestrator-<M+1>.log` 为 0 且无 `unbound variable`；`steps_result` 的 step10/11/12/13/15 都带
   `contract`、无 `interp_fallback`、step11 有 `cohort_boundary`；五个 `<tool>-<M+1>.json` 的 `.date` 都等于 M+1；无「退出码 2 但 … 存在」WARN；
   顶层 status 与旧逻辑一致；扫描时长只多几次解释器调用（每次约 0.05s）。
-- 回滚 = 在 main 上 revert 本版（下一扫描日自动部署、再下一日生效）；解释器坏了不需要回滚——helper 自己兜底并留痕。
+- 回滚 = 在 main 上 revert 本版（下一扫描日自动部署、再下一日生效）；⚠️ **B2（v0.45.386）已合入时不许单独撤本版**——B2 的 Step 2/4 调用点依赖本版的 helper 与 `_SI_STATUS`，先撤 B2、再撤本版。解释器坏了不需要回滚——helper 自己兜底并留痕。
 
 ### 验证
 - 编排器相关测试（step_interp / orchestrator_steps / data_backup / autodeploy / braced_vars / deployed_matches_repo / deploy_orchestrator /
@@ -73,6 +73,13 @@ Step 2/4/5 的调用点与 alert_manager 新规则是 B2（v0.45.386），本版
   `STEP10_START` 挪到 `run_step` 之后、info 映射成 WARN、删 render_error 判断、兜底片段不带 `interp_fallback`、Step 11 `--json` 传错变量、
   steps 测试的对照改回读仓库编排器（42 红）。首轮有两条没红，均为**测试或变异本身**的问题，已修后复验：`keys == [$k]` 的只有「错键」替身时
   被 `.steps_fragment[$k] | type` 顺带挡住 ⇒ 新增「本步键 + 多一个键」替身；允许集合的变异写成 `2|4NEVER)` 仍匹配 `2` ⇒ 改成 `NEVER2|NEVER4)`。
+
+### 审查跟进（B1/B2 对抗审查：3 个视角 × 找 + 逐条再核，12 个代理；变异都在 `git archive` 副本上做）
+- helper 临时文件：TMPDIR 不存在 / 不可写 ⇒ 先退到 LOGDIR；两处都建不了 ⇒ 不跑解释器，`interp_fallback` 如实写「建不了临时文件」。
+  此前的退路 `${TMPDIR}/…$$` 与刚失败的 mktemp 在同一目录 ⇒ 每步都兜底、原因却写成「输出不是合法的一行（exit=1）」。新增一条两段测试。
+- 两个生产方文档过时：`scan_coverage_gate` docstring「编排器不传 `--date`」、`ic_rerun_readiness --today` 标「测试用」——本版起编排器都传，改文案。
+- 已知、不改：解释器不可用时 Step 11 兜底片段没有 `cohort_boundary` 键（B 之前恒有、未知时为 null）。`.get` 与 `jq .cohort_boundary.alarm`
+  两种读法结果相同（都为空）；兜底那天本来就没人解读 JSON，可见信号是 ERROR 行 + `interp_fallback`。
 
 ## [0.45.381] — 2026-09-29 — 占位（进行中：期权墙行虚线改 var(--border)）
 

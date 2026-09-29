@@ -436,6 +436,23 @@ class TestFallback:
         assert run.elapsed < 20, run.elapsed
         _assert_fell_back(c, run.results[0], "解释器超时（>2s）")
 
+    def test_unwritable_tmpdir_falls_to_logdir_then_says_why(self, tmp_path):
+        """审查跟进：TMPDIR 坏了 ⇒ 临时文件退到 LOGDIR，解释器照常跑；两处都坏 ⇒ 兜底且原因写「建不了临时文件」，
+        不冒充「输出不是合法的一行」。变异：删 LOGDIR 那一退 ⇒ 第一段红；删 else 分支的原因 ⇒ 第二段原因对不上红。"""
+        ro = tmp_path / "ro_tmp"
+        ro.mkdir()
+        ro.chmod(0o555)
+        try:
+            p = fresh_legacy(tmp_path, "12")
+            ok = run_helper(tmp_path, [tool_call(tmp_path, "12", 0, p)], exports={"TMPDIR": str(ro)}).results[0]
+            assert "interp_fallback" not in ok.frag(KEY["12"]) and not ok.errors_with("步骤解释器不可用"), ok.logs
+            calls = _fallback_calls(tmp_path, rcs=(1,))
+            run = run_helper(tmp_path, calls, exports={"TMPDIR": str(ro), "LOGDIR": str(ro)})
+            for c, r in zip(calls, run.results):
+                _assert_fell_back(c, r, "建不了临时文件")
+        finally:
+            ro.chmod(0o755)
+
     @pytest.mark.parametrize("sid,rc,stub_status,accepted", [
         ("2", 124, "success", False),               # 超时却说成功：B 之前不存在的判定 ⇒ 退回 timeout
         ("2", 0, "success_with_warning", False),    # 放行只限 rc=1

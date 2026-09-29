@@ -1538,7 +1538,7 @@ def main() -> int:
     ap.add_argument("--target-ic", type=float, default=DEFAULT_TARGET_IC,
                     choices=sorted(_WEEKS_REQUIRED),
                     help=f"要检出的真实 |IC|（默认 {DEFAULT_TARGET_IC}=系统综合分实测）")
-    ap.add_argument("--today", help="覆盖今天的日期（测试用，YYYY-MM-DD）")
+    ap.add_argument("--today", help="覆盖今天的日期（YYYY-MM-DD；编排器 v0.45.385 起传扫描日 DATE_STR，过零点也评估扫描那天）")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--out", help=(
         "把 JSON 结果写到该文件（供编排器读）。"

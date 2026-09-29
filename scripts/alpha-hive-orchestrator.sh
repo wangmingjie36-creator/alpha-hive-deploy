@@ -255,14 +255,22 @@ _apply_step_interp() {
     if [ "${_rc}" = "2" ] && [ -n "${_script}" ] && [ -f "${_script}" ]; then
         log "WARN" "⚠️ Step ${_sid}：退出码 2 但 $(basename "${_script}") 存在——多半是参数错误（日期参数不被识别？），下面的「跳过」不可信"
     fi
-    _out="$(mktemp "${TMPDIR:-/tmp}/alpha_hive_stepinterp.XXXXXX" 2>/dev/null)" || _out=""
-    [ -n "${_out}" ] || _out="${TMPDIR:-/tmp}/alpha_hive_stepinterp.$$"
-    run_step --timeout "${STEP_INTERP_TIMEOUT}" "${PROJECT_DIR}/orchestrator_steps.py" \
-        --step "${_sid}" --rc "${_rc}" --date "${DATE_STR}" ${_dur:+--duration "${_dur}"} "$@" > "${_out}" 2>> "${LOGFILE}"
-    _irc=$?
-    _line="$(tail -n 1 "${_out}" 2>/dev/null)"
-    rm -f "${_out}"
-    if printf '%s' "${_line}" | jq -e --arg k "${_key}" '
+    # TMPDIR 坏了（不存在 / 不可写）退到 LOGDIR；两处都建不了 ⇒ 不跑解释器、原因照实写（不冒充「输出不合法」）
+    _out="$(mktemp "${TMPDIR:-/tmp}/alpha_hive_stepinterp.XXXXXX" 2>/dev/null)" \
+        || _out="$(mktemp "${LOGDIR:-/tmp}/alpha_hive_stepinterp.XXXXXX" 2>/dev/null)" \
+        || _out=""
+    if [ -n "${_out}" ]; then
+        run_step --timeout "${STEP_INTERP_TIMEOUT}" "${PROJECT_DIR}/orchestrator_steps.py" \
+            --step "${_sid}" --rc "${_rc}" --date "${DATE_STR}" ${_dur:+--duration "${_dur}"} "$@" > "${_out}" 2>> "${LOGFILE}"
+        _irc=$?
+        _line="$(tail -n 1 "${_out}" 2>/dev/null)"
+        rm -f "${_out}"
+    else
+        _why="建不了临时文件（TMPDIR 与 LOGDIR 都不可写）"
+    fi
+    if [ -n "${_why}" ]; then
+        :
+    elif printf '%s' "${_line}" | jq -e --arg k "${_key}" '
             type == "object"
             and (.level == "info" or .level == "warn" or .level == "error")
             and (.message | type) == "string"
