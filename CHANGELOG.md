@@ -161,6 +161,8 @@ v0.45.371 复查时记下的副作用：期权墙逐行的虚线分隔从 `rgba(
     M4 WARNING 只写目录末级名 ⇒ 3；M5 CLI 零快照退 0 ⇒ 1；M6 保留旧行不报 ⇒ 1；M7 未设 HOME 不提示 ⇒ 1；M8 诊断顺手建目录 ⇒ 1。
 - ruff 通过。全套（基线 `9e6bc675` = v0.45.378 + 本版占位）：7384 passed、1 failed、82 deselected、2 xfailed（合计 = collected 7469）；
   唯一红是 `test_economic_calendar::TestCoverageHorizon`（BLS 未发布 2027 日程的设计性告警，同 v0.45.377 / v0.45.382，与本改动无关）。
+  合入 origin/main（v0.45.379 / 381 / 382）后重跑：7439 passed、同 1 failed、82 deselected、2 xfailed（= collected 7524）；
+  其后删掉诊断 dict 里两个无人读的键（`cache_dir_exists` / `written`），变异台账原样重跑结果一致。
 
 ### 同形普查（全仓 `get("as_of"|"date") != as_of` 式重写，只列不修）
 - ⚠️ `vrp_signal.record_day`（**同一个日更钩子紧接着调用**）：`keep = 其它日期的行` + 本次行 ⇒ 零快照同样删光该日行，

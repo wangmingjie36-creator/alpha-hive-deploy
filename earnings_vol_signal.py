@@ -516,9 +516,9 @@ def _scan_with_info(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_
 
     all_rows = load_signals()
     prev = {s.get("ticker"): s for s in all_rows if s.get("as_of") == as_of}
-    info: Dict = {"cache_dir": cdir, "cache_dir_exists": cdir.is_dir(), "n_snapshots": n_snapshots,
+    info: Dict = {"cache_dir": cdir, "n_snapshots": n_snapshots,
                   "n_existing_for_date": sum(1 for s in all_rows if s.get("as_of") == as_of),
-                  "written": False, "kept": [], "diagnosis": None}
+                  "kept": [], "diagnosis": None}
 
     # 「这个失败，下游怎么知道？」——没有输入就不许写：写了等于把「找错地方 / 当天缺快照」
     # 改写成「该日没有信号」，连同已结算的样本一起删掉。
@@ -555,7 +555,6 @@ def _scan_with_info(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_
                      f"（其中已结算：{', '.join(str(t) for t in settled)}）" if settled else "")
     rest = [s for s in all_rows if not (s.get("as_of") == as_of and s.get("ticker") in new_tickers)]
     _write_jsonl(SIGNALS_FILE, rest + signals)
-    info["written"] = True
     n_el = sum(1 for s in signals if s.get("eligible"))
     _log.info("财报事件波动率信号 %s：快照 %d，合格 %d（%s）", as_of, len(signals), n_el,
               ", ".join(f"{s['ticker']}={s['label']}" for s in signals if s.get("eligible")) or "-")
