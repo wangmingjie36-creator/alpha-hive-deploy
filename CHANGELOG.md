@@ -28,8 +28,8 @@
   只放宽「写早了」一个方向：不等价（旧代码又碰上断链）照报 `boundary_too_early`；读不出记为不等价；等价判据不当印记用
   （否则历史上 bug 没触发的日子全被认成新口径 ⇒ 恒报 boundary_too_late）。结果新增 `equivalent_before_marker`，摘要行点名。
 - `_COHORT_HISTORY` 09-28 / v0.45.369（同日第 6 条，`assess()` 切点不变 ⇒ **作废 0 条** final_score 样本；另登 09-29 会作废 09-28 的 30 条）。
-  依据：09-28 扫描 30/30 取到链（只读核对）⇒ 09-28 记录新旧逐字节相同。生产数据只读试跑 `boundary_evidence_status`：
-  不报警，369=`no_evidence_yet`（09-28 列为等价旧记录），其余 5 条照旧 `matches`；新代码首跑后预期 `matches`。
+  依据：09-28 扫描 30/30 取到链（只读核对）⇒ 09-28 记录新旧评分与标签逐项相同（新代码只多写一个印记键）。生产数据只读试跑 `boundary_evidence_status`：
+  不报警，369=`no_evidence_yet`（摘要行写明 09-28 为等价旧记录），其余 5 条照旧 `matches`；新代码首跑后预期 `matches`。
   反向对照：同一扫描对 09-24/25 判不等价。
 - `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.369"] = ()`（分与方向不变、无归档信号读 confidence / data_quality，同 v0.45.314/315）；
   `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签扩 `+v0.45.369`（此时 09-28 已有 1 天报告，同一代只换标签）。
@@ -43,9 +43,17 @@
 
 ### 刻意不做
 - LLM 模式：`llm_service.interpret_options_flow` 仍在 `result` 非空时调用（样本链结果也会送进去），另议。
+- BearBee 同一天仍把期权通道标 `real`（`bear_bee.py` 读到 Oracle 板上条目即记 real；其 OptionsAgent 兜底分支也是
+  `if result:` ⇒ `options_api`）。既有代码、本版未动；对分数零影响（Bear 置信度不进维度、Bear 不计票，data_real_pct 仍 ≥80），
+  但同一条记录里 Oracle 与 Bear 的标签会不一致，另议。
 - 前瞻检验：维度 IC 协议 H2 随 final_score 变，但本条早于 FORWARD_START 2026-10-12 ⇒ 不截断；共振 replay 读记录值，无需修订。
 
-- 守卫 `tests/test_oracle_options_dq_from_agent.py`（行为 / 每条路径印记 / 写端↔读端 / 等价边界各路径；变异 13/13 红）。
+- 二次审查（四视角对抗 + 逐条驳斥复核，16 个代理）：Oracle 修复每条路径正确、「分与方向不变」成立；确认 1 应修 + 若干小项已同版修：
+  ① 等价分支原先只认 `.swarm_results`，把原分支看得见的 ML 归档证据丢了 ⇒ 现逐（日期, 标的）核：旧代码写过归档、却没在当日可读的
+  `.swarm_results` 里被核过（文件缺 / `{}` / 缺这只票）一律算不等价；② 窗口含印记首见那天（新代码补跑并进旧代码断链行的合并文件）；
+  ③ 报警行点名不等价日、首跑前那行也写明「按等价放过」；④ 「逐字节相同」改为「评分与标签逐项相同（新代码只多一个印记键）」。
+  驳倒 2 条（「手搓桩不驱动真 OptionsAgent」「生产未部署时 Step 11 永远 no_evidence_yet」）。
+- 守卫 `tests/test_oracle_options_dq_from_agent.py`（41 条：行为 / 每条路径印记 / 写端↔读端 / 等价边界各路径）；变异 19/19 红。
 
 ## [0.45.368] — 2026-09-28 — dashboard.css 组件层硬编码色换令牌：修 4 处对比度不达标 + 零字面量守卫
 

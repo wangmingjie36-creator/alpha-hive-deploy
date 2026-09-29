@@ -818,7 +818,7 @@ _COHORT_HISTORY = [
      "**依据（2026-09-28 只读实测，生产 `.swarm_results_*.json`）**：03-10~09-25 共 112 个扫描日里 26 天有这种行、"
      "被标 real 的比例 100%；扩到 30 只之后只有 09-24、09-25（各 30/30）。**幅度（重放，现行代码 + 记录输入，外部依赖钉成记录值；对照先复现存档：09-24/25 60/60 行 final_score / 方向 / data_real_pct / quality_factor 逐位一致，另一代理独立复核一致）**：final_score 58/60 行变（09-24 |Δ| 中位 0.10、最大 0.25；09-25 中位 0.075、最大 0.19；有符号均值 +0.02），**方向 0 翻转**，data_real_pct 每行 −1.2pp（25 个 DQ 通道里一项 1.0→0.7，约 89→88，仍高于 80 ⇒ quality_factor 不变）；变动来自 odds 维（Oracle 恒 5.0）的有效权重 `max(0.3, conf^1.5)` 从 0.586 落到地板 0.3、中性票权 −0.15。更早 24 天（03-31~07-02，59 行）对照复现不了（v0.45.212 起 Guard/Bear 退出计票等现行代码改动），**不给数**。"
      "**为什么日期写 09-28 而新代码 09-29 才上线**：本版改动只在「Oracle details 的 data_quality 是 unavailable」"
-     "那一种输入上改变输出；09-28 扫描 30/30 只取到了链（同日只读核对）⇒ 09-28 的记录在新旧代码下**逐字节相同**，"
+     "那一种输入上改变输出；09-28 扫描 30/30 只取到了链（同日只读核对）⇒ 09-28 的记录在新旧代码下**评分与标签逐项相同**（新代码只多写一个印记键），"
      "并进 09-28 不混算任何口径 ⇒ **作废 0 条** final_score 样本（另登 09-29 会作废 09-28 的 30 条）。"
      "这个论证由数据核对、不靠推理：新增 `_BOUNDARY_EQUIVALENCE`（只对登记了的边界生效）——印记首见之前的旧代码记录"
      "逐只标的读 `.swarm_results_<日期>.json` 核等价，**不等价**（旧代码又碰上断链）照报 boundary_too_early；"
@@ -1093,7 +1093,7 @@ _BOUNDARY_MARKERS = {
 #: 其余边界的判定逐字不变。
 #:
 #: 用途：改动只在**少数输入**上改变输出时（v0.45.369 只改「期权链取不到」那一种结果），边界日至印记首见日之间
-#: 的旧代码记录，若在本条改动下**输出不变**，就不是「边界之后的旧口径样本」——它与新代码的输出逐字节相同，
+#: 的旧代码记录，若在本条改动下**输出不变**，就不是「边界之后的旧口径样本」——它与新代码的输出评分与标签逐项相同，
 #: 混算不引入任何口径差 ⇒ 不算「写早了」。判定函数吃与印记同一形状的 `{"swarm_results": <一只标的的蒸馏结果>}`。
 #:
 #: 逐只标的核：读**当日全部标的**的 `.swarm_results_<日期>.json`（ML 报告归档只有前 12 只；印记是代码版本的事实、
@@ -1175,6 +1175,8 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
     # 那时边界之后的归档全是旧代码产的 ⇒ 边界已经写早了，不必等新代码真跑起来才红。
     # （推送晚于边界日正是这个形状：旧写法在推送之前一直报 no_evidence_yet「还没跑到」。）
     unmarked_after = set()
+    # v0.45.369：无印记的 ML 归档逐（日期, 标的）记下——只给等价分支用（那边要核这些票在当日 .swarm_results 里被核过）
+    unmarked_pairs: Set[tuple] = set()
     try:
         for f in sorted(root.glob("analysis-*-ml-*.json")):
             m = re.search(r"-ml-(\d{4}-\d{2}-\d{2})\.json$", f.name)
@@ -1194,14 +1196,23 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
                 first = date if first is None else min(first, date)
             elif date >= boundary:
                 unmarked_after.add(date)
+                _tk = re.match(r"analysis-(.+)-ml-\d{4}-\d{2}-\d{2}\.json$", f.name)
+                unmarked_pairs.add((date, _tk.group(1) if _tk else f.name))
     except OSError:
-        first, unmarked_after = None, set()
+        first, unmarked_after, unmarked_pairs = None, set(), set()
 
     equivalent_dates: List[str] = []
     if equiv_entry is not None:
         # v0.45.369：登记了等价判据的边界，窗口 [边界, 印记首见) 内的旧代码记录逐只标的核等价；
         # 只有**不等价**的日子才算「写早了」（见 `_BOUNDARY_EQUIVALENCE`）
-        bad, equivalent_dates = _equivalence_scan(root, boundary, first, is_new, equiv_entry[1])
+        bad, equivalent_dates, examined = _equivalence_scan(root, boundary, first, is_new, equiv_entry[1])
+        # 旧代码写过 ML 归档、却没在当日可读的 .swarm_results 里被核过的（文件缺 / 空 / 缺这只票）⇒ 证不出等价 ⇒ 不等价。
+        # 否则换成等价分支反而丢掉了原分支本来看得见的证据（二次审查 v0.45.369）。
+        _missed = {d for d, tk in unmarked_pairs
+                   if (first is None or d <= first) and (d, tk) not in examined}
+        if _missed:
+            bad = sorted(set(bad) | _missed)
+            equivalent_dates = [d for d in equivalent_dates if d not in _missed]
         if first is None or first > boundary:
             unmarked_after = set(bad)
             if first is not None:
@@ -1228,23 +1239,27 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
 
 
 def _equivalence_scan(root: Path, boundary: str, first: Optional[str], is_new, is_equiv):
-    """窗口 [boundary, first)（first 为 None ⇒ 至今）内逐日读 `.swarm_results_<日期>.json`，逐只标的：
+    """窗口 [boundary, first]（first 为 None ⇒ 至今）内逐日读 `.swarm_results_<日期>.json`，逐只标的：
     带印记 ⇒ 新代码，跳过；不带印记且 `is_equiv` 为真 ⇒ 等价旧记录；否则 ⇒ 不等价旧记录。
 
-    返回 `(不等价日期列表, 等价日期列表)`。读不出的文件 ⇒ 该日记为不等价（**证不出等价就不算等价**——
-    这是放宽判定的那一侧，举证责任在「放宽」这边）。
+    窗口**含**印记首见那天：那天的文件可能是新代码补跑并进旧代码断链那一轮的合并结果（`save_report` 的
+    `merged_swarm.update`），带印记的照样跳过，不花代价。
+
+    返回 `(不等价日期列表, 等价日期列表, 核过的 {(日期, 标的)})`。读不出的文件 / 顶层不是 dict ⇒ 该日记为不等价
+    （**证不出等价就不算等价**——这是放宽判定的那一侧，举证责任在「放宽」这边）。
+    同一天既有等价又有不等价的票 ⇒ 只算不等价。
     """
-    bad, ok = set(), set()
+    bad, ok, examined = set(), set(), set()
     try:
         files = sorted(root.glob(".swarm_results_*.json"))
     except OSError:
-        return [], []
+        return [], [], set()
     for f in files:
         m = re.search(r"_(\d{4}-\d{2}-\d{2})\.json$", f.name)
         if not m:
             continue
         date = m.group(1)
-        if date < boundary or (first is not None and date >= first):
+        if date < boundary or (first is not None and date > first):
             continue
         try:
             with open(f, encoding="utf-8") as fh:
@@ -1258,11 +1273,12 @@ def _equivalence_scan(root: Path, boundary: str, first: Optional[str], is_new, i
         for _tk, r in sr.items():
             if not isinstance(r, dict):
                 continue
+            examined.add((date, _tk))
             wrapped = {"swarm_results": r}
             if is_new(wrapped):
                 continue
             (ok if is_equiv(wrapped) else bad).add(date)
-    return sorted(bad), sorted(ok - bad)
+    return sorted(bad), sorted(ok - bad), examined
 
 
 #: 三个 `*_forward_status` 返回值里的**私有**键：执行器 `run()` 的结构化结果（按下方白名单截取），
@@ -1409,9 +1425,16 @@ def _boundary_line(ev: Dict) -> str:
         if ev.get("equivalent_before_marker"):
             _eq = ev["equivalent_before_marker"]
             extra += f"（其前 {len(_eq)} 个扫描日为等价旧记录：{'、'.join(_eq)}）"
+        if ev.get("unmarked_after_boundary"):
+            # 等价分支在印记出现后仍可能报「写早了」：点名是哪几天的旧记录不等价
+            u = ev["unmarked_after_boundary"]
+            extra += f"；{len(u)} 个扫描日有不等价的旧代码记录（{'、'.join(u)}）"
     elif ev.get("unmarked_after_boundary"):
         u = ev["unmarked_after_boundary"]
         extra = f"，边界后已有 {len(u)} 个归档日无印记（最早 {u[0]}）"
+    elif ev.get("equivalent_before_marker"):
+        _eq = ev["equivalent_before_marker"]
+        extra = f"，边界后 {len(_eq)} 个扫描日为等价旧记录（{'、'.join(_eq)}；新旧评分输出相同，不算写早）"
     if ev.get("error"):
         extra += f"，{ev['error']}"
     text = _BOUNDARY_VERDICT_TEXT[ev["verdict"]]
@@ -1701,7 +1724,7 @@ def main() -> int:
     res["cohort_boundary_evidence"] = bev
 
     if args.out or args.json:
-        # 只在要外壳时才列条目：`--quiet` 单跑（周度任务）的路径与 v0.45.355 之前逐字节相同
+        # 只在要外壳时才列条目：`--quiet` 单跑（周度任务）的路径与 v0.45.355 之前评分与标签逐项相同
         _emit(args, contract_envelope(res, date, build_attention(res, bev, fwd_detail, fg_detail, dim_detail)))
 
     if args.json:

@@ -216,9 +216,9 @@ class TestEquivalenceBoundary:
         assert ev["verdict"] == "boundary_too_early" and ev["unmarked_after_boundary"] == [b], ev
         assert rr.BOUNDARY_ALARM_VERDICTS >= {ev["verdict"]}
 
-    def test_only_the_window_before_first_seen_is_checked(self, tmp_path):
-        """窗口是 [边界, 印记首见)：首见之后零星的无印记记录不在本判别器的问题范围里（与原有印记逻辑一致——
-        原逻辑对首见之后的无印记归档同样不看）。变红的变异：去掉扫描的上界 `date >= first`。"""
+    def test_only_the_window_up_to_first_seen_is_checked(self, tmp_path):
+        """窗口是 [边界, 印记首见]：首见**之后**零星的无印记记录不在本判别器的问题范围里（与原有印记逻辑一致——
+        原逻辑对首见之后的无印记归档同样不看）。变红的变异：去掉扫描的上界。"""
         b, nxt, later = _b(), _shift(_b(), 1), _shift(_b(), 2)
         _write_swarm(tmp_path, b, {"AAA": _rec(new=False)})
         _write_archive(tmp_path, nxt, "AAA", _rec(new=True))
@@ -226,6 +226,65 @@ class TestEquivalenceBoundary:
         _write_swarm(tmp_path, later, {"ZZZ": _rec(new=False, chain_ok=False)})
         ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
         assert ev["verdict"] == "matches" and ev["equivalent_before_marker"] == [b], ev
+
+    def test_first_seen_day_merged_with_old_outage_rows_is_too_early(self, tmp_path):
+        """印记首见那天也在窗口里：新代码补跑并进旧代码断链那一轮（`merged_swarm.update`），旧的不等价行留在文件里 ⇒ 照报。
+        带印记的断链行（新代码自己的）照样跳过。变红的变异：窗口上界退回 `date >= first`；删掉 `if is_new(wrapped): continue`。"""
+        b, nxt = _b(), _shift(_b(), 1)
+        _write_swarm(tmp_path, b, {"AAA": _rec(new=False)})
+        _write_archive(tmp_path, nxt, "AAA", _rec(new=True))
+        _write_swarm(tmp_path, nxt, {"AAA": _rec(new=True, chain_ok=False), "OLD": _rec(new=False, chain_ok=False)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
+        assert ev["verdict"] == "boundary_too_early" and ev["unmarked_after_boundary"] == [nxt], ev
+        assert "不等价的旧代码记录" in rr._boundary_line(ev)
+
+    def test_marked_outage_rows_are_skipped(self, tmp_path):
+        """新代码自己的断链行（带印记、data_quality 仍是 unavailable）不是「旧口径」。变红的变异：删掉 is_new 跳过。"""
+        b = _b()
+        _write_archive(tmp_path, b, "AAA", _rec(new=True))
+        _write_swarm(tmp_path, b, {"AAA": _rec(new=True, chain_ok=False), "BBB": _rec(new=True, chain_ok=False)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
+        assert ev["verdict"] == "matches", ev
+
+    @pytest.mark.parametrize("swarm", ["missing", "empty", "no_such_ticker"])
+    def test_unmarked_archive_not_examined_in_swarm_file_is_too_early(self, tmp_path, swarm):
+        """旧代码写过 ML 归档，但当日 .swarm_results 缺 / 是 {} / 没有这只票 ⇒ 证不出等价 ⇒ 照报（等价分支不许丢掉原分支看得见的证据）。
+        变红的变异：删掉 `_missed` 那段。"""
+        b, nxt = _b(), _shift(_b(), 1)
+        _write_archive(tmp_path, b, "AAA", _rec(new=False))
+        if swarm == "empty":
+            _write_swarm(tmp_path, b, {})
+        elif swarm == "no_such_ticker":
+            _write_swarm(tmp_path, b, {"BBB": _rec(new=False)})
+        _write_archive(tmp_path, nxt, "AAA", _rec(new=True))
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
+        assert ev["verdict"] == "boundary_too_early" and ev["unmarked_after_boundary"] == [b], ev
+        assert ev["equivalent_before_marker"] == [], ev
+
+    def test_non_dict_swarm_file_is_not_equivalent(self, tmp_path):
+        b, nxt = _b(), _shift(_b(), 1)
+        (tmp_path / f".swarm_results_{b}.json").write_text("[]", encoding="utf-8")
+        _write_archive(tmp_path, nxt, "AAA", _rec(new=True))
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
+        assert ev["verdict"] == "boundary_too_early" and ev["unmarked_after_boundary"] == [b], ev
+
+    def test_mixed_day_counts_as_not_equivalent(self, tmp_path):
+        """同一天既有等价又有不等价的票 ⇒ 只算不等价，不进等价日列表。变红的变异：返回 `sorted(ok)` 而不是 `ok - bad`。"""
+        b, nxt, n2 = _b(), _shift(_b(), 1), _shift(_b(), 2)
+        _write_swarm(tmp_path, b, {"AAA": _rec(new=False), "ZZZ": _rec(new=False, chain_ok=False)})
+        _write_swarm(tmp_path, nxt, {"AAA": _rec(new=False)})
+        _write_archive(tmp_path, n2, "AAA", _rec(new=True))
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
+        assert ev["verdict"] == "boundary_too_early", ev
+        assert ev["unmarked_after_boundary"] == [b] and ev["equivalent_before_marker"] == [nxt], ev
+
+    def test_line_mentions_equivalence_before_any_marker(self, tmp_path):
+        """首跑前（今天）Step 11 那一行也要说明 09-28 是按等价放过的，而不是只写「还没证据」。"""
+        b = _b()
+        _write_swarm(tmp_path, b, {"AAA": _rec(new=False)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
+        assert ev["verdict"] == "no_evidence_yet" and ev["equivalent_before_marker"] == [b]
+        assert "等价旧记录" in rr._boundary_line(ev)
 
     def test_outage_before_any_marker_is_too_early(self, tmp_path):
         b = _b()
