@@ -1,4 +1,4 @@
-# 策略层优势检验 · 预注册（v0.45.373）
+# 策略层优势检验 · 预注册（v0.45.376）
 
 **状态**：已登记（2026-09-28）。**登记时间 = 本文件首次提交进 git 的时间**。此后改动任何规则都属「事后」，见 §8。
 **机器可读常量**：文末 §7 的 `prereg-constants` 块；代码侧唯一真相 = `experiments/strategy_edge_test.py::PREREG`，
@@ -37,10 +37,10 @@
 = 网站门面回测：`portfolio_backtest.run_backtest(BacktestConfig(**backtest_kwargs))`，
 `backtest_kwargs` 见 §7，其余字段取 `BacktestConfig` 登记时的默认值。
 
-- 收益口径 = 零成本（`apply_trading_costs=False`，用户实盘成本≈0 的决定，v0.45.371），
+- 收益口径 = 零成本（`apply_trading_costs=False`，用户实盘成本≈0 的决定，v0.45.374），
   路径依赖 SL/TP 不变。
 - 仓位方式**不影响**单笔收益，只经并发 / 现金约束影响「哪些单入场」。按止损距离定仓
-  （v0.45.372）登记时**未启用**；若网站日后启用，即属策略变更，见 §8。
+  （v0.45.375）登记时**未启用**；若网站日后启用，即属策略变更，见 §8。
 - `tests/test_strategy_edge_test.py` 钉住：网站实际传的回测实参 == 本节冻结的实参。
   网站改了而本文件没改 ⇒ 测试红，迫使有人显式决定「重新登记」还是「不改网站」。
 

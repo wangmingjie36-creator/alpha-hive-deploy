@@ -693,7 +693,7 @@ window.AH.initTradingStats=function(){
     // 它以前被并进「持有到 T+7」；单列出来又不给它读者，就成了另一个死字段。
     if(ts.exit_cutoff_count)
       html+=card(ts.exit_cutoff_count,'窗口截断强平','var(--neut)','未到期，按 0 收益结算');
-    // v0.45.371：门面改零成本口径，「平均单笔成本」卡恒为 0bp，已去掉。
+    // v0.45.374：门面改零成本口径，「平均单笔成本」卡恒为 0bp，已去掉。
 
     // v0.45.179：曲线与本区块**同源**——都来自 portfolio_backtest 的同一次
     // run_backtest()，曲线就是那次回测的 NAV 路径，终点 == 上面的 final_nav。
@@ -718,7 +718,7 @@ window.AH.initTradingStats=function(){
   box.innerHTML=html;
 };
 
-// ── Equity Curve (2 lines: 策略 / SPY, compound；v0.45.371 起零成本口径) ──
+// ── Equity Curve (2 lines: 策略 / SPY, compound；v0.45.374 起零成本口径) ──
 window.AH.initEquityCurve=function(){
   var eq=__AH__.equity_curve;
   var container=document.getElementById('eqCurveContainer');
@@ -766,7 +766,7 @@ window.AH.initEquityCurve=function(){
   var gc=_tokA('--border',.5);
   var labels=eq.map(function(d){return d.date.slice(5);});
   // 两条曲线：策略 (绿, 主), spy (灰, 基准)。
-  // v0.45.371：回测改零成本口径后 gross == net，Gross 虚线与主线完全重合，已去掉。
+  // v0.45.374：回测改零成本口径后 gross == net，Gross 虚线与主线完全重合，已去掉。
   var netData =eq.map(function(d){return d.cum_net_pct!=null?d.cum_net_pct:d.cum;});
   // null 保持 null（Chart.js 会断开该点），不许变 0 —— 0 读作"大盘当天没动"。
   var spyData =eq.map(function(d){return d.cum_spy_pct!=null?d.cum_spy_pct:null;});
