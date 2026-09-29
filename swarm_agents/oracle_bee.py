@@ -34,7 +34,29 @@ def _mark_gex_out_of_score(out: Dict) -> Dict:
         det = {}
         out["details"] = det
     det["gex_signal_in_score"] = False
+    det[OPTIONS_DQ_MARKER] = True
+    det[HV_GAP_MARKER] = True
     return out
+
+
+#: v0.45.369 世代印记：本结果的期权数据质量标签 / 置信度按 OptionsAgent 自己的 `data_quality` 判
+#: （见 `_options_data_usable`），不再按「结果非空」。每条返回路径都写字面量 True（同 `gex_signal_in_score`）。
+OPTIONS_DQ_MARKER = "options_dq_from_agent"
+
+#: v0.45.383 世代印记：本结果的 iv_rank 经过日线完整性校验（`fetch_historical_hv` 缺交易日 ⇒ 重取、仍缺 ⇒ 置空）。
+#: 每条返回路径都写字面量 True（同上两个印记；`_mark_gex_out_of_score` 覆盖异常 / 无效 ticker / 兜底路径）。
+HV_GAP_MARKER = "hv_gap_checked"
+
+
+def _options_data_usable(result) -> bool:
+    """OptionsAgent 的结果算不算「取到了期权数据」。v0.45.369。
+
+    旧判据是 `bool(result)`：OptionsAgent 在真实链取不到时走「样本链早退」，返回的是一个**非空** dict
+    （`data_quality: "unavailable"`、`options_score` 5.0、指标全 None）⇒ Oracle 把固定的 5.0 分标成
+    `options: "real"`、置信度照加 0.3（→ 0.7）。实测 26 个扫描日踩中（扩到 30 只后是 09-24 / 09-25，各 30/30）。
+    只认 `"unavailable"` 这一个值：`"degraded"`（链在、IV 缺）新旧都算取到，本版不动它。
+    """
+    return bool(result) and result.get("data_quality") != "unavailable"
 
 
 class OracleBeeEcho(BeeAgent):
@@ -442,8 +464,10 @@ class OracleBeeEcho(BeeAgent):
             self._publish(ticker, discovery, "options", score, direction, details=_pub_details)
 
             # Phase 2: confidence = 期权数据可用 + LLM 加成
+            # v0.45.369：「可用」按 OptionsAgent 自己的 data_quality 判（样本链早退的非空结果不算）
+            _opts_ok = _options_data_usable(result)
             confidence = build_confidence(0.4, [
-                (bool(result), 0.3),
+                (_opts_ok, 0.3),
                 (bool(llm_options), 0.2),
             ])
 
@@ -455,12 +479,18 @@ class OracleBeeEcho(BeeAgent):
                 source="OracleBeeEcho",
                 dimension="odds",
                 data_quality={
-                    "options": "real" if result else "fallback",
+                    # v0.45.369：样本链早退 ⇒ "unavailable"（与 "fallback" 同在 Queen 的 PROXY_SOURCES）；
+                    # OptionsAgent 抛异常（result={}）⇒ "fallback"，同旧
+                    "options": "real" if _opts_ok else ("unavailable" if result else "fallback"),
                 },
                 details={**(result or {}), "term_structure": term_structure,
                          "deep_skew": deep_skew, "max_pain": max_pain,
                          # v0.45.349：字面量，放在展开之后 ⇒ 不依赖 OptionsAgent 结果里有没有这个键
-                         "gex_signal_in_score": False},
+                         "gex_signal_in_score": False,
+                         # v0.45.369：同理，世代印记（见 OPTIONS_DQ_MARKER）
+                         OPTIONS_DQ_MARKER: True,
+                         # v0.45.383：同理（见 HV_GAP_MARKER）；放在展开之后，不依赖 OptionsAgent 结果里有没有 hv_gap
+                         HV_GAP_MARKER: True},
             ).to_dict()
 
         except AGENT_ERRORS as e:
