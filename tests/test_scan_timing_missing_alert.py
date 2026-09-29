@@ -94,11 +94,27 @@ class TestSwarmScanActuallyRanPredicate:
 
     @pytest.mark.parametrize("steps_result,expected", [
         ({"step2_hive_analysis": {"status": "success"}}, True),
+        # v0.45.386（编排器 B2）：rc=1 但主流程跑完 ⇒ 解释器记 success_with_warning，而这个判定本身
+        # 要求本轮 scan_timing.json 带 git_push（orchestrator_steps._step2_rc1_evidence）⇒ 必然真跑过。
+        # 变异：判别器退回只认 "success" ⇒ 这格红（ML 常数日 scan_timing 丢了不报）。
+        ({"step2_hive_analysis": {"status": "success_with_warning"}}, True),
         ({"step2_hive_analysis": {"status": "skipped"}}, False),
         ({"step2_hive_analysis": {"status": "failed"}}, False),
+        ({"step2_hive_analysis": {"status": "timeout"}}, False),
+        ({"step2_hive_analysis": "success"}, False),      # 非对象：不崩、不算
         ({}, False),
         (None, False),
     ])
     def test_predicate(self, steps_result, expected):
         status = {"steps_result": steps_result} if steps_result is not None else {}
         assert am.AlertAnalyzer._swarm_scan_actually_ran(status) is expected
+
+
+class TestSuccessWithWarningDayEndToEnd:
+    def test_completed_rc1_scan_with_missing_scan_timing_raises_p1(self, tmp_path):
+        """ML 常数日（rc=1 但跑完了）+ scan_timing 整段缺失 ⇒ 与 success 日同样报 P1。"""
+        status = {"status": "partial", "total_duration_seconds": 2889,
+                  "steps_result": {"step2_hive_analysis": {"status": "success_with_warning",
+                                                           "warning": "ml_model_constant"}}}
+        a, msgs = _alerts(tmp_path, status)
+        assert any("缺整段 scan_timing" in m for m in msgs), msgs

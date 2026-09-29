@@ -1,4 +1,4 @@
-"""编排器的步骤解释器接线（B，v0.45.385）：`_apply_step_interp` / `_step_rc_fallback` 与 Step 10/11/12/13/15 的调用点。
+"""编排器的步骤解释器接线（B：v0.45.385 = B1，v0.45.386 = B2）：`_apply_step_interp` / `_step_rc_fallback` 与 Step 2/4/10/11/12/13/15 的调用点。
 
 B 把 Step 10–15 的内联分支链（`CONT_SUMMARY` / `READINESS_LINE` / `BOUNDARY_JSON` / `_S11_NEW` / … 与
 `if [ $STEPn_RC -eq … ]` 链）换成一行 `_apply_step_interp`，格式知识只剩 `orchestrator_steps.py` 一份。
@@ -25,8 +25,14 @@ B 把 Step 10–15 的内联分支链（`CONT_SUMMARY` / `READINESS_LINE` / `BOU
     内联分支链与 `"$PYTHON3" -c` 摘要已删；helper 里没有 `set_status`、没有 `$(run_step`
   · TestMacBash —— `/usr/bin/env -i`（C locale）与 `LC_ALL=en_US.UTF-8` 下重跑：无 `unbound variable`、结果不变
 
-Step 2 / 4 的调用点与 OVERALL_STATUS 矩阵随 B2 加进本文件（B1 只接了 10–15；helper 对 2/4 的兜底与
-允许集合已在 B1，这里按 helper 层测）。
+  · TestStep2CallSite（B2）—— Step 2 / 4 调用点**原文**抽出来真跑：rc × 起点 × 解释器真 / 缺，OVERALL_STATUS
+    与 B 之前的冻结副本逐格相同（只看退出码：rc≠0 ⇒ partial，永不下调）；rc=1 且跑完 ⇒ success_with_warning、
+    STEP2_STATUS 在 Step 4 调用之后仍是它；删 `set_status partial` / STEP2_STATUS 挪到 Step 4 之后 /
+    --data-dir 改传 REPORTDIR / 删允许集合 ⇒ 各自红
+  · TestLiveWiring 的 Step 2/4 部分（B2）—— 两处调用各恰一个、传 `--data-dir "${DATA_DIR}"`、不碰 REPORTDIR；
+    `STEP2_STATUS="${_SI_STATUS}"` 紧跟 Step 2 调用，随后是按 STEP2_RC 的 `set_status partial`；旧分支链已删
+
+helper 对 2/4 的兜底与允许集合按 helper 层测（B1 起），调用点与 OVERALL_STATUS 矩阵按原文测（B2 起）。
 """
 from __future__ import annotations
 
@@ -524,6 +530,194 @@ class TestNoCommandSubstitution:
         assert all(r.frag(KEY["12"])["status"] == "healthy" for r in run.results)
 
 
+# ═══════════════════════════════════════════ 6b. Step 2 / 4 调用点原文真跑（B2）═══════════════════════════════════════════
+
+_STATUS_RANK = {"success": 0, "partial": 1, "failed": 2}
+STARTS = ("success", "partial", "failed")
+#: 退出码情形：(标签, STEP2_RC, 有无「主流程跑完」证据)。99 = 其余一切（B 之前的 else 支）
+RC_CASES = [("rc0", 0, True), ("rc1_done", 1, True), ("rc1_not_done", 1, False), ("rc2", 2, True),
+            ("rc124", 124, True), ("rc99", 99, True)]
+
+
+def _site(text: str, head: str, *, through_fi: bool) -> str:
+    """调用点原文：从 `head` 那一行（含 `\\` 续行）起；through_fi ⇒ 一直到其后第一个顶格 `fi`。"""
+    m = re.search(rf"^{re.escape(head)}(?:[^\n]*\\\n)*[^\n]*$", text, re.M)
+    assert m, f"编排器里找不到调用点 {head!r}"
+    if not through_fi:
+        return m.group(0)
+    f = re.compile(r"^fi$", re.M).search(text, m.end())
+    assert f, head
+    return text[m.start():f.end()]
+
+
+def _live_sites() -> Tuple[str, str]:
+    text = _live_text()
+    return (_site(text, "_apply_step_interp 2 step2_hive_analysis ", through_fi=True),
+            _site(text, "_apply_step_interp 4 step4_dashboard ", through_fi=False))
+
+
+def make_proof_day(root: Path) -> Path:
+    """今天（运行时算）的 Step 2 产物，scan_timing 写于「现在」——晚于 step2_start ⇒ 算本轮跑完。"""
+    return tos.make_day(root, TODAY, written_at=datetime.now().isoformat(timespec="seconds"))
+
+
+@dataclass
+class SiteResult:
+    overall: str
+    step2_status: str
+    steps: dict
+    logs: List[Tuple[str, str]]
+
+
+def run_sites(tmp_path: Path, rc: int, *, data_dir: Path, project_dir: Path = REPO_ROOT,
+              exports: Optional[Dict[str, str]] = None, sites: Optional[Tuple[str, str]] = None,
+              argv_prefix: Sequence[str] = (), env: Optional[Dict[str, str]] = None) -> Dict[str, SiteResult]:
+    """贴仓库编排器里 Step 2 / 4 调用点**原文**，每个起点 OVERALL_STATUS 各跑一遍（同一 bash 进程）。"""
+    logdir = tmp_path / "logs"
+    logdir.mkdir(exist_ok=True)
+    s2, s4 = sites or _live_sites()
+    lines = [
+        "set -uo pipefail",
+        r"""log() { printf '\036LOG\037%s\037%s' "$1" "$2"; }""",
+        f"PYTHON3={shlex.quote(sys.executable)}",
+        f"PROJECT_DIR={shlex.quote(str(project_dir))}",
+        f"DATA_DIR={shlex.quote(str(data_dir))}",
+        # 故意给一个**别的**目录：调用点若改传 REPORTDIR，rc=1 跑完那格就拿不到证据（而不是 set -u 直接崩）
+        f"REPORTDIR={shlex.quote(str(tmp_path / 'reports'))}",
+        f"LOGDIR={shlex.quote(str(logdir))}",
+        f"LOGFILE={shlex.quote(str(logdir / 'orchestrator.log'))}",
+        f"DATE_STR={shlex.quote(TODAY)}",
+        *(f"export {k}={shlex.quote(v)}" for k, v in (exports or {}).items()),
+        _live_parts(),
+        f"STEP2_RC={int(rc)}",
+        f"STEP2_DURATION={tos.DUR}",
+        f"STEP2_START={int(time.time()) - 120}",
+        "STEP2_TIMEOUT=3600",
+    ]
+    for start in STARTS:
+        lines += [f"STEPS_RESULT={shlex.quote(json.dumps(SENTINEL))}",
+                  f"OVERALL_STATUS={start}",
+                  "unset STEP2_STATUS",
+                  r"printf '\036CALL\037'",
+                  s2, s4,
+                  r"""printf '\036STATE\037%s\037%s\037%s' "${OVERALL_STATUS}" "${STEP2_STATUS-UNSET}" "${STEPS_RESULT}" """]
+    p = subprocess.run([*argv_prefix, "/bin/bash", "-c", "\n".join(lines) + "\n"], capture_output=True, text=True,
+                       env=env if env is not None else _bash_env(), timeout=90, cwd=str(tmp_path))
+    assert p.returncode == 0, f"bash rc={p.returncode}\nSTDERR:{p.stderr}\nSTDOUT:{p.stdout}"
+    assert "unbound variable" not in p.stderr, p.stderr
+    out: List[SiteResult] = []
+    for rec in p.stdout.split("\x1e"):
+        f = rec.split("\x1f")
+        if f[0] == "CALL":
+            out.append(SiteResult("", "", {}, []))
+        elif f[0] == "LOG" and len(f) == 3:
+            out[-1].logs.append((f[1], f[2]))
+        elif f[0] == "STATE" and len(f) == 4:
+            out[-1].overall, out[-1].step2_status, out[-1].steps = f[1], f[2], json.loads(f[3])
+    assert len(out) == len(STARTS) and all(r.overall for r in out), p.stdout
+    return dict(zip(STARTS, out))
+
+
+@functools.lru_cache(maxsize=None)
+def pre_b_overall(rc: int, start: str) -> str:
+    """B 之前（冻结副本）Step 2 分支链 + 真 set_status / _status_rank 跑出来的 OVERALL_STATUS。"""
+    frozen = tos.orchestrator_text()
+    script = "\n".join([
+        "set -uo pipefail", "log() { :; }",
+        extract_function(frozen, "_status_rank"), extract_function(frozen, "set_status"),
+        "STEPS_RESULT='{}'", f"OVERALL_STATUS={start}",
+        f"STEP2_RC={int(rc)}", f"STEP2_DURATION={tos.DUR}", "STEP2_TIMEOUT=3600",
+        tos.bash_block("2"),
+        r"""printf '%s' "${OVERALL_STATUS}" """]) + "\n"
+    p = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, env=_bash_env(), timeout=30)
+    assert p.returncode == 0 and p.stdout in _STATUS_RANK, (p.stdout, p.stderr)
+    return p.stdout
+
+
+def _data_dir(tmp_path: Path, done: bool) -> Path:
+    return make_proof_day(tmp_path / "data") if done else tmp_path / "empty"
+
+
+class TestStep2CallSite:
+    @pytest.mark.parametrize("interp", ["real", "missing"])
+    @pytest.mark.parametrize("label,rc,done", RC_CASES, ids=[c[0] for c in RC_CASES])
+    def test_overall_status_matrix(self, tmp_path, label, rc, done, interp):
+        """OVERALL_STATUS 只看退出码、与 B 之前（冻结副本）逐格相同：rc≠0 ⇒ 至少 partial，永不下调；解释器真 / 缺都一样。
+        变异：删调用点的 `set_status partial` / 改成按解释器 status 判 ⇒ 红。"""
+        pd = REPO_ROOT if interp == "real" else tmp_path / "no_interp"
+        res = run_sites(tmp_path, rc, data_dir=_data_dir(tmp_path, done), project_dir=pd)
+        for start, r in res.items():
+            want = max(start, "partial" if rc != 0 else "success", key=_STATUS_RANK.__getitem__)
+            assert r.overall == want == pre_b_overall(rc, start), (label, interp, start, r.overall, r.logs)
+            s2, s4 = r.steps[KEY["2"]], r.steps[KEY["4"]]
+            assert r.steps["sentinel"] == SENTINEL["sentinel"]
+            assert r.step2_status == s2["status"], "STEP2_STATUS 必须是 Step 2 那次调用并进片段的 status"
+            pre2, pre4 = _pre_b("2", rc)[1], _pre_b("4", rc)[1]
+            if interp == "missing":
+                # 兜底：逐字复现 B 之前 + interp_fallback；alert_manager 的 'failed' P1 一条不丢
+                assert {k: v for k, v in s2.items() if k != "interp_fallback"} == pre2, s2
+                assert {k: v for k, v in s4.items() if k != "interp_fallback"} == pre4, s4
+                assert s2["interp_fallback"] and s4["interp_fallback"]
+                assert len([m for lv, m in r.logs if lv == "ERROR" and "步骤解释器不可用" in m]) == 2, r.logs
+            elif rc == 1 and done:
+                assert s2["status"] == "success_with_warning" and s2["warning"] == "ml_model_constant", s2
+                assert s4 == {"status": "skipped_builtin", "step2_status": "success_with_warning"}, s4
+            else:
+                assert {k: v for k, v in s2.items() if k != "rc1_unverified"} == pre2, s2
+                assert s4 == pre4, s4
+                assert "interp_fallback" not in s2 and "interp_fallback" not in s4
+                assert ("rc1_unverified" in s2) == (rc == 1)
+
+    @pytest.mark.parametrize("interp", ["real", "missing"])
+    @pytest.mark.parametrize("label,rc,done", RC_CASES, ids=[c[0] for c in RC_CASES])
+    def test_step4_call_site_never_touches_overall(self, tmp_path, label, rc, done, interp):
+        """Step 4 调用点单独跑：任何退出码 × 起点 × 解释器真 / 缺，OVERALL_STATUS 原样（B 之前那段也不调 set_status）。"""
+        pd = REPO_ROOT if interp == "real" else tmp_path / "no_interp"
+        _s2, s4 = _live_sites()
+        res = run_sites(tmp_path, rc, data_dir=_data_dir(tmp_path, done), project_dir=pd, sites=(":", s4))
+        for start, r in res.items():
+            assert r.overall == start, (label, interp, start, r.logs)
+            assert r.steps[KEY["4"]]["status"] in ("skipped_builtin", "failed")
+
+    def test_step2_status_survives_the_step4_call(self, tmp_path):
+        """Step 4 的调用会把 _SI_STATUS 改成 skipped_builtin；STEP2_STATUS 必须还是 Step 2 的 success_with_warning。
+        变异：把 `STEP2_STATUS="${_SI_STATUS}"` 挪到 Step 4 调用之后 ⇒ 这里读到 skipped_builtin 红。"""
+        s2, s4 = _live_sites()
+        head, _, tail = s2.partition('\nSTEP2_STATUS="${_SI_STATUS}"')
+        assert tail, "调用点里找不到 STEP2_STATUS 取值行"
+        res = run_sites(tmp_path, 1, data_dir=_data_dir(tmp_path, True))
+        assert {r.step2_status for r in res.values()} == {"success_with_warning"}
+        # 反证：同样的原文、只把取值挪到 Step 4 之后，就读到 Step 4 的 status——证明上面那条不是恒真
+        moved = (head + "\n" + tail.split("\n", 1)[1], s4 + '\nSTEP2_STATUS="${_SI_STATUS}"')
+        res_moved = run_sites(tmp_path, 1, data_dir=_data_dir(tmp_path, True), sites=moved)
+        assert {r.step2_status for r in res_moved.values()} == {"skipped_builtin"}
+
+    @pytest.mark.parametrize("rc,stub_status,want2,want4", [
+        (124, "success", "timeout", "failed"),          # 超时却说成功 ⇒ 两处都退回 B 之前的值
+        (1, "brand_new", "failed", "failed"),           # 允许集合外的新字符串 ⇒ 退回 failed（alert_manager 的 P1 在）
+        (0, "failed", "success", "skipped_builtin"),    # rc=0 却说 failed ⇒ 退回 success
+    ])
+    def test_allow_list_fallback_at_call_site(self, tmp_path, rc, stub_status, want2, want4):
+        """解释器回归成 B 之前不存在的判定 ⇒ 调用点上照样退回、OVERALL_STATUS 照样只按退出码。
+        变异：删 helper 里 `2|4)` 允许集合 ⇒ 片段带上替身的 status 红。"""
+        res = run_sites(tmp_path, rc, data_dir=_data_dir(tmp_path, False), project_dir=_stub_dir(tmp_path),
+                        exports={"STUB_MODE": "status", "STUB_STATUS": stub_status})
+        for start, r in res.items():
+            s2, s4 = r.steps[KEY["2"]], r.steps[KEY["4"]]
+            assert (s2["status"], s4["status"]) == (want2, want4), (s2, s4)
+            assert "不在允许集合里" in s2["interp_fallback"] and "不在允许集合里" in s4["interp_fallback"]
+            assert r.step2_status == want2 and r.overall == pre_b_overall(rc, start)
+
+    def test_reportdir_would_lose_the_completion_proof(self, tmp_path):
+        """--data-dir 传错（REPORTDIR）⇒ rc=1 跑完的日子被判 failed。结构守卫在 TestLiveWiring，这里证明它不是空谈。"""
+        s2, s4 = _live_sites()
+        wrong = (s2.replace('--data-dir "${DATA_DIR}"', '--data-dir "${REPORTDIR}"'),
+                 s4.replace('--data-dir "${DATA_DIR}"', '--data-dir "${REPORTDIR}"'))
+        assert wrong != (s2, s4)
+        res = run_sites(tmp_path, 1, data_dir=_data_dir(tmp_path, True), sites=wrong)
+        assert {r.step2_status for r in res.values()} == {"failed"}
+
+
 # ═══════════════════════════════════════════ 6. 调用点结构（仓库编排器原文）═══════════════════════════════════════════
 
 def _logical_lines(text: str) -> List[Tuple[int, str]]:
@@ -561,14 +755,58 @@ def _opt(argv: List[str], name: str) -> Optional[str]:
 
 class TestLiveWiring:
     def test_each_tool_step_has_exactly_one_call_with_its_key(self):
-        """每个工具步骤恰一个调用、键 = STEP_KEYS[sid]；没有未知步骤的调用。（B2 起 2/4 也在里面）"""
+        """每个步骤（2/4 与 10–15，即 STEP_KEYS 全集）恰一个调用、键 = STEP_KEYS[sid]；没有未知步骤的调用。"""
         calls = _interp_calls(_live_text())
         pairs = [(c[1], c[2]) for c in calls]
         assert len(pairs) == len(set(pairs)), pairs
         for sid, key in pairs:
             assert KEY.get(sid) == key, (sid, key)
-        for sid in TOOL_SIDS:
+        for sid in KEY:
             assert [p for p in pairs if p[0] == sid] == [(sid, KEY[sid])], (sid, pairs)
+        assert set(KEY) == {"2", "4", *TOOL_SIDS}
+
+    def test_step2_and_4_calls_pass_data_dir_not_reportdir(self):
+        """Step 2/4 的完成证据（日报 / .swarm_results / logs/scan_timing.json）都在 DATA_DIR。
+        变异：改传 REPORTDIR ⇒ 这里红（行为面：TestStep2CallSite 里 rc=1 跑完那格变 failed 也红）。"""
+        by_sid = {c[1]: c for c in _interp_calls(_live_text())}
+        s2, s4 = by_sid["2"], by_sid["4"]
+        assert s2[3:6] == ["${STEP2_RC}", "${STEP2_DURATION}", ""], s2
+        assert s4[3:6] == ["${STEP2_RC}", "", ""], s4
+        for argv in (s2, s4):
+            assert _opt(argv, "--data-dir") == "${DATA_DIR}" and _opt(argv, "--run-start") == "${STEP2_START}", argv
+            assert not any("REPORTDIR" in a for a in argv), argv
+            assert "--report-dir" not in argv and "--json" not in argv, argv
+        assert _opt(s2, "--timeout-seconds") == "${STEP2_TIMEOUT}", s2
+
+    def test_step2_status_captured_right_after_step2_call_then_partial_on_rc(self):
+        """_SI_STATUS 会被下一次调用（Step 4）覆盖 ⇒ 必须紧跟 Step 2 调用取走；OVERALL_STATUS 只按 STEP2_RC 定。
+        变异：STEP2_STATUS 挪到 Step 4 调用之后 / 删 `set_status partial` / 改成按 _SI_STATUS 判 ⇒ 红。"""
+        text = _live_text()
+        lines = [(off, re.sub(r"\s+#.*$", "", l).strip()) for off, l in _logical_lines(text)]
+        lines = [(off, l) for off, l in lines if l and not l.startswith("#")]
+        i2 = [i for i, (_, l) in enumerate(lines) if l.startswith("_apply_step_interp 2 ")]
+        assert len(i2) == 1
+        i = i2[0]
+        assert [l for _, l in lines[i + 1:i + 5]] == [
+            'STEP2_STATUS="${_SI_STATUS}"',
+            'if [ "${STEP2_RC}" -ne 0 ]; then',
+            "set_status partial",
+            "fi",
+        ], lines[i + 1:i + 5]
+        assert len(re.findall(r'^\s*STEP2_STATUS=', text, re.M)) == 1
+        # Step 2 调用在 STEP2_DURATION 算完之后；Step 4 调用在【Step 4/5】段里、Step 5 判定之前
+        assert text.index("STEP2_DURATION=$((") < lines[i][0]
+        i4 = next(off for off, l in lines if l.startswith("_apply_step_interp 4 "))
+        assert text.index("【Step 4/5】仪表板更新") < i4 < text.rindex("_step5_gh_pages_verdict")
+        assert not re.search(r"^_step5_gh_pages_verdict$", text[:i4], re.M)
+
+    def test_step2_4_inline_chains_are_gone(self):
+        text = _live_text()
+        assert not re.search(r"^if \[ \$\{?STEP2_RC\}? -eq 0 \]", text, re.M)
+        assert "\"step2_hive_analysis\": {\"status\"" not in text.replace("\\\"", "\"")
+        assert "\"step4_dashboard\": {\"status\"" not in text.replace("\\\"", "\"")
+        assert 'elif [ "${STEP2_RC}" -eq 0 ] || [ "${STEP2_STATUS:-}" = "success_with_warning" ]; then' in \
+            extract_function(text, "_step5_gh_pages_verdict")
 
     @pytest.mark.parametrize("sid", TOOL_SIDS)
     def test_tool_step_segment_shape(self, sid):
@@ -652,6 +890,14 @@ class TestMacBash:
             p = tmp_path / f"legacy-{sid}.json"
             expected = next(g[4] for g in tos.GOLDEN if g[0] == sid and g[1] == 1)
             assert f == tos._subst(expected, p), (sid, f)
+        for rc, done in ((1, True), (1, False), (124, True)):
+            for interp_dir in (REPO_ROOT, tmp_path / "none"):
+                res = run_sites(tmp_path, rc, data_dir=_data_dir(tmp_path, done), project_dir=interp_dir,
+                                argv_prefix=env_prefix, env={})
+                for start, r in res.items():
+                    assert r.overall == pre_b_overall(rc, start), (rc, done, interp_dir, start)
+                    if rc == 1 and done and interp_dir == REPO_ROOT:
+                        assert r.step2_status == "success_with_warning", r.logs
         fb = run_helper(tmp_path, _fallback_calls(tmp_path, rcs=(1,)), project_dir=tmp_path / "none",
                         argv_prefix=env_prefix, env={})
         assert "unbound variable" not in fb.stderr, fb.stderr

@@ -405,7 +405,72 @@ v0.45.383 遇到重取仍缺的日线只能把 `iv_rank` 置空（分数走中�
 - 2026-08-27 之前快照里的坏 `rv_30d`（跨标的重复 / >300 的值）及其对 `vrp_signal._prior_history` 的潜在影响。
 - JNJ 有固定 2~3 点偏差，仍未定性；`is_trading_day` 不认识 2025-01-09；覆盖率闸门仍只判非空。
 
-## [0.45.386] — 2026-09-29 — 占位（进行中：编排器 B2——Step 2/4/5 经步骤解释器 + alert_manager 新规则；B1 干净跑过一天后合入）
+## [0.45.386] — 2026-09-29 — Changed：编排器 Step 2/4 改调步骤解释器 + Step 5 降级支读 STEP2_STATUS + alert_manager 接住新判定（B2）——ML 常数日不再误报「Step 2 没跑完 / 网站不会更新」，告警换成一条专门的 P1
+
+接 v0.45.385（B1：helper + Step 10–15）。按同一份最终规格的第二个 PR：Step 2/4/5 与 alert_manager 必须**同版**上，
+否则 rc=1 跑完的日子会一条步骤告警都没有（旧两条 `failed` P1 变成 `success_with_warning` / `skipped_builtin`，而没有规则接住）。
+
+### Changed
+- `scripts/alpha-hive-orchestrator.sh`：
+  - Step 2：`if [ $STEP2_RC -eq 0 ] … fi` 四支链换成 `_apply_step_interp 2 step2_hive_analysis "${STEP2_RC}" "${STEP2_DURATION}" "" --run-start
+    "${STEP2_START}" --timeout-seconds "${STEP2_TIMEOUT}" --data-dir "${DATA_DIR}"`；紧跟一行 `STEP2_STATUS="${_SI_STATUS}"`（**必须立刻取**：
+    Step 4 的调用会覆盖 `_SI_STATUS`），再 `if [ "${STEP2_RC}" -ne 0 ]; then set_status partial; fi`。**OVERALL_STATUS 仍只看退出码**，
+    与 B 之前逐支相同（124 / 2 / 其余含 1 ⇒ partial）；解释器的 status/level 不参与。刻意的改动只有一处：rc=1 且主流程确实跑完
+    （当日 `.swarm_results`、日报 JSON+MD、本轮写的 `logs/scan_timing.json` 带 git_push）⇒ `success_with_warning`（附 `warning` /
+    `ml_model_guard` / `git_push_success`），日志 WARN，不再打「Step 2 失败」。`--data-dir` 必须是 DATA_DIR（证据都在那），传 REPORTDIR 会让每个 rc=1 都判 failed。
+  - Step 4：`if [ $STEP2_RC -eq 0 ] … else … fi` 换成 `_apply_step_interp 4 step4_dashboard "${STEP2_RC}" "" "" --run-start "${STEP2_START}"
+    --data-dir "${DATA_DIR}"`（判据与 Step 2 共用 `_step2_outcome`）；rc=1 跑完 ⇒ `skipped_builtin` + `step2_status`，不再打「Step 4 未生成仪表板！」ERROR。仍不调 `set_status`。
+  - Step 5 `_step5_gh_pages_verdict` 的降级支（`report_deployer.py --gh-pages-step-status` 无有效输出时）一行：
+    `elif [ "${STEP2_RC}" -eq 0 ] || [ "${STEP2_STATUS:-}" = "success_with_warning" ]; then`——rc=1 跑完的日子与 rc=0 同一支（`skipped_builtin` + `unverified`），
+    判据不在 bash 里再写一遍（`:-` 让 set -u 下没设 STEP2_STATUS 的环境照旧能跑）。
+  - Step 2/4 的兜底与允许集合沿用 B1 的 helper：解释器不可用 / 给出 B 之前不存在的判定 ⇒ 按退出码**逐字复现** B 之前的 status + `interp_fallback` + 一行 ERROR。
+- `alert_manager.py`：
+  - P1 步骤循环加固：条目不是对象 ⇒ 记 `checks_skipped` + WARNING 后 `continue`（此前 `.get` 直接 AttributeError、整个 Step 6 崩）。
+  - 新 HIGH：`step2_hive_analysis.status == "success_with_warning"` ⇒「扫描已跑完但退出码 1：…（warning）」，details 带原因 / 推送结果 / 处理建议。
+    这是 ML 常数日（09-24/25）**唯一**的告警来源，标签更准了它不许跟着消失；`ml_model_constant` 与 `rc1_after_completion_unexplained` 都报，warning 缺失写「原因未记」。
+  - 新 MEDIUM：任何条目带 `interp_fallback` ⇒「步骤解释器不可用，<步骤> 按退出码兜底记」（原因截 300 字）。兜底的 `failed` 照旧另有通用 HIGH。
+  - `_swarm_scan_actually_ran` 放宽为 `status in ("success", "success_with_warning")`：后者要求本轮 `scan_timing.json` 带 git_push
+    （`orchestrator_steps._step2_rc1_evidence`），正是 `write_status` 并入的那份，故只会增加真阳性；step2 条目不是对象 ⇒ False（不崩）。
+  - 未改：`'failed'` 通用规则、P0、`main()`；没有 `--steps-only`（规格已否决 Design 2 的最终 pass）。
+- `orchestrator_steps.py`：仅 docstring（CLI / 输出形状不变）——接线说明改为「v0.45.385 接 10–15、v0.45.386 接 2/4」；Step 5 段改为「降级支已读 STEP2_STATUS」；
+  「bash 应退回只按 rc 记（B 的事）」改指 `_step_rc_fallback`。
+
+### Added
+- `tests/test_orchestrator_step_interp.py`（130 → 162 条）：
+  - `TestStep2CallSite`：从仓库编排器抽 Step 2 / Step 4 **调用点原文**（非重写）真跑。`test_overall_status_matrix` = 6 种退出码情形（0 / 1 跑完 / 1 没跑完 /
+    2 / 124 / 99）× 起点 success/partial/failed × 解释器真 / 缺，OVERALL_STATUS 逐格等于**冻结副本**的 Step 2 分支链配真 `set_status` 跑出来的值
+    （且 = max(起点, rc≠0 ? partial : success)）；解释器缺失时两步片段 = B 之前 + `interp_fallback`、各一行 ERROR；rc=1 跑完 ⇒ `success_with_warning` /
+    `skipped_builtin` + `step2_status`。`test_step4_call_site_never_touches_overall`（同 12 格）；`test_step2_status_survives_the_step4_call`（含反证：
+    同一原文把取值挪到 Step 4 之后就读到 `skipped_builtin`，证明断言不是恒真）；`test_allow_list_fallback_at_call_site`（替身回归成 success / 新字符串 /
+    rc=0 说 failed ⇒ 两步都退回、OVERALL 只按退出码）；`test_reportdir_would_lose_the_completion_proof`。harness 故意给 REPORTDIR 一个别的目录，
+    调用点改传它时是行为红而不是 set -u 崩。
+  - `TestLiveWiring` 加 Step 2/4：每个 STEP_KEYS 恰一个调用；2/4 传 `--data-dir "${DATA_DIR}"` / `--run-start "${STEP2_START}"`、不碰 REPORTDIR；
+    `STEP2_STATUS="${_SI_STATUS}"` 紧跟 Step 2 调用、随后是按 STEP2_RC 的 `set_status partial`；旧分支链与 jq 内联已删；Step 5 降级支那一行在。
+  - `TestMacBash` 加调用点矩阵（rc=1 跑完 / 没跑完 / 124 × 解释器真 / 缺）在 `env -i`（C locale）与 `LC_ALL=en_US.UTF-8` 下重跑。
+- `tests/test_alert_step_interp.py`（新，17 条）：success_with_warning 两种 warning 各恰一条 HIGH；warning 缺失照报；只认 step2；`failed` 通用 HIGH 逐字不变；
+  success 零告警；`interp_fallback` 恰一条 MEDIUM（failed / success / 工具步骤三形）；非对象条目（str / None / int / list）不崩、记 `checks_skipped`、
+  后面条目照查；B 之前格式的 status.json（rc 0/1/124/2 四形）步骤告警与旧 P1 循环逐字相同（合并当天「旧编排器 + 新 alert_manager」）。
+- `tests/test_scan_timing_missing_alert.py`：判别器加 `success_with_warning` ⇒ True、`timeout` ⇒ False、非对象 ⇒ False；端到端一条（rc=1 跑完 + 缺 scan_timing ⇒ P1）。
+- `tests/test_orchestrator_step5_gh_pages.py`：harness 可注入 `STEP2_STATUS`（不传 = 不设，覆盖 B2 之前的调用环境）；新增 5 格 × 2 locale：
+  rc=1 + success_with_warning ⇒ `skipped_builtin` + `unverified`、不说「不会更新」；rc=1 + failed / 124 + timeout / 2 + skipped ⇒ 照旧 failed；OVERALL 两边都不动。
+
+### 上线（规格 rollout 第 2 节）
+- **只在 B1（v0.45.385）至少一个干净的生产日之后再合入本版**（B1 的 M+1 核对清单全过）。
+- 合入日 M2 那轮仍是旧编排器 + 新 alert_manager：新规则对旧格式片段惰性，告警与今天相同（`TestPreBStatusUnchanged` 守）。M2+1 起执行本版编排器。
+- M2+1 扫描后只读核对：`step2_hive_analysis.status` ∈ {success, success_with_warning, …} 且无 `interp_fallback`；`step4_dashboard.step2_status`
+  恰在 step2 为 success_with_warning 时出现；`~/.claude/logs/alerts-<date>.json` 的新 HIGH 只在 rc=1 跑完的日子出现；顶层 status 恰在 rc≠0 时为 partial。
+  rc=1 路径在生产上还没有真实样本（09-28 是 rc=0），第一次触发要人工读一遍。
+- **回滚顺序：先 revert 编排器（本版 `scripts/alpha-hive-orchestrator.sh` 的改动），次日再 revert alert_manager**——反过来会有一轮「B 编排器 + 旧 alert_manager」，
+  rc=1 跑完的日子零步骤 P1。解释器坏了不需要回滚：helper 自己兜底、按退出码复现 B 之前的 status 并出 MEDIUM。
+
+### 验证
+- 目标测试（step_interp / step5_gh_pages / alert_step_interp / scan_timing_missing_alert 与全部读编排器原文或 step2/step4 键的文件：orchestrator_steps /
+  data_backup / autodeploy / braced_vars / deployed_matches_repo / deploy_orchestrator / scan_catchup / scan_timing / code_version / step_contract* /
+  ic_rerun_readiness / silent_failure_guards / watchlist_single_source / changelog_guard_contract_gate / reads_own_checkout / slack_send_whitelist /
+  gh_pages_unverified_parent / production_sync）1383 passed / 3 deselected。`/bin/bash -n` 通过、`find_unbraced` 为空、`ruff check .` 全过。
+- 全套（`--timeout=300 --maxfail=1000`）：7627 passed / 1 failed / 82 deselected / 2 xfailed（417s）；唯一失败仍是已知的
+  `test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`。跑前跑后 `git status --porcelain --ignored` 逐字相同。
+- 变异（`git archive` 副本 + 本版改动拷入，逐个改、核锚点恰一处、跑 216 条目标测试、复原）13/13 红（每条的红格数）：Step 2 调用点删 `set_status partial`（15）、STEP2_STATUS 挪到 Step 4 调用之后（20）、删 2/4 允许集合（8）、Step 2 改传 REPORTDIR（5）、删 success_with_warning HIGH（3）、`_swarm_scan_actually_ran` 退回只认 success（2）、删 interp_fallback MEDIUM（3）、删非对象守卫（4）、Step 5 降级支退回只判 STEP2_RC（3）、Step 5 读 `${STEP2_STATUS}` 不带 `:-`（3，set -u 下旧调用环境崩）、partial 改按解释器 status 判（只认 failed/timeout，7）、Step 4 调用漏 `--run-start`（3）、success_with_warning 规则去掉步骤名限定（1）。一次过，没有需要返修的变异。
 
 ## [0.45.385] — 2026-09-29 — Changed：编排器 Step 10/11/12/13/15 改调步骤解释器（B1）——bash 不再持有这五步的格式知识；先删后跑 + 日期显式传入；解释器不可用时按退出码兜底并留痕
 

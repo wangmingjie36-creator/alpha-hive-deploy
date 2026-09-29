@@ -147,6 +147,13 @@ class AlertAnalyzer:
                          "本次「无告警」不等于「无失败」")
             steps_result = {}
         for step_name, step_result in steps_result.items():
+            if not isinstance(step_result, dict):
+                # v0.45.386：此前 .get 直接 AttributeError、整个 Step 6 崩；编排器 B 的兜底恒写对象，
+                # 这里只是兜底并留痕（「没查成」不渲染成「查过了没事」）
+                self.checks_skipped.append(f"步骤失败检查：{step_name} 不是对象（{type(step_result).__name__}）")
+                _log.warning("steps_result.%s 不是对象（%s）—— 该步的失败检查未执行",
+                             step_name, type(step_result).__name__)
+                continue
             if step_result.get('status') == 'failed':
                 self.alerts.append(Alert(
                     AlertLevel.HIGH,
@@ -157,6 +164,36 @@ class AlertAnalyzer:
                         "状态": "失败"
                     },
                     ["step_failure", step_name]
+                ))
+            elif step_name == 'step2_hive_analysis' and step_result.get('status') == 'success_with_warning':
+                # v0.45.386（编排器 B2）：rc=1 但主流程确实跑完 ⇒ 解释器记 success_with_warning（此前是 failed，
+                # 且 step4_dashboard 也记 failed，共两条 P1）。这是 ML 常数日（09-24/25）唯一的告警来源，
+                # 不许因为标签更准了就消失；warning 取值 ml_model_constant / rc1_after_completion_unexplained 都报。
+                self.alerts.append(Alert(
+                    AlertLevel.HIGH,
+                    f"⚠️ 【P1 高】扫描已跑完但退出码 1：{step_name}（{step_result.get('warning', '原因未记')}）",
+                    {
+                        "步骤": step_name,
+                        "耗时": f"{step_result.get('duration_seconds', 'N/A')}秒",
+                        "状态": "已跑完但退出码 1",
+                        "原因": step_result.get('warning', '原因未记'),
+                        "推送": step_result.get('git_push_success'),
+                        "建议": "ml_model_constant ⇒ /usr/local/bin/python3 ml_model_guard.py --date <当日>；"
+                                "其余 ⇒ 查编排器日志 Step 2 行",
+                    },
+                    ["step_warning", step_name]
+                ))
+            if step_result.get('interp_fallback'):
+                # v0.45.386（编排器 B）：步骤解释器不可用、按退出码兜底记——摘要缺失，本身就是要人看的事（谁会红：这条）
+                self.alerts.append(Alert(
+                    AlertLevel.MEDIUM,
+                    f"【P2】步骤解释器不可用，{step_name} 按退出码兜底记",
+                    {
+                        "步骤": step_name,
+                        "状态": step_result.get('status'),
+                        "原因": str(step_result.get('interp_fallback'))[:300],
+                    },
+                    ["step_interp_fallback", step_name]
                 ))
 
         # 3. 检测 P1: 性能异常 (>150% baseline)
@@ -242,9 +279,15 @@ class AlertAnalyzer:
         只看 `step2_hive_analysis` 是否成功——它是 `scan_timing.write()` 所在的那条扫描路径
         唯一的先决条件：空扫描护栏 / `--no-swarm` 早退等路径到不了这一步，`scan_timing` 缺失
         对它们是设计内的正常状态，不该被下面新加的 P1 误伤。
+
+        v0.45.386 起 `success_with_warning`（Step 2 退出 1 但主流程跑完）也算：该判定要求本轮
+        `scan_timing.json` 带 git_push（`orchestrator_steps._step2_rc1_evidence`）——正是 write_status
+        并入的那份，故放宽只会增加真阳性。
         """
         step2 = (status.get("steps_result") or {}).get("step2_hive_analysis") or {}
-        return step2.get("status") == "success"
+        if not isinstance(step2, dict):
+            return False
+        return step2.get("status") in ("success", "success_with_warning")
 
     def _check_deploy_and_code_sync(self, status: Dict) -> None:
         """读 `status.scan_timing` 里两个**真有写入者**的字段。
@@ -267,7 +310,8 @@ class AlertAnalyzer:
         真正触发条件仍不明。**不追那个可能永远抓不住的瞬时原因，把这一类失败本身变成可观测的**：
         真扫描跑完了、`scan_timing` 却整段没进 `status.json`，本身就是「不知道自己不知道」——
         比任何一条已知的推送/提交失败都更危险，因为它连「有没有出事」都看不出来。
-        判别用 `steps_result.step2_hive_analysis.status == "success"`——它是 `scan_timing.write()`
+        判别用 `steps_result.step2_hive_analysis.status` ∈ {"success", "success_with_warning"}（后者 v0.45.386 起，
+        见 `_swarm_scan_actually_ran`）——它是 `scan_timing.write()`
         所在的那条扫描路径唯一的先决条件，早退路径（空扫描护栏等）到不了这一步，不会被误伤。
         """
         st = status.get("scan_timing")
