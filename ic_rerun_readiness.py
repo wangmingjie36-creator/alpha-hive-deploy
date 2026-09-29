@@ -857,7 +857,10 @@ _COHORT_HISTORY = [
      "Bear 读同伴方向）；`composite.final_score` 是 ALWAYS_SLICED。前瞻检验：维度 IC 协议 H2 会随 final_score 变，但本条早于 "
      "FORWARD_START 2026-10-12 ⇒ 不截断（同 v0.45.369）。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段"
      "（`odds_score` / `agent_agreement` / `final_score` 是 ML 特征，只在缺口日变）。"
-     "**不在本条内**：2026-09-23 那 8 只当天分数的重放（改的是已落库的历史 predictions 行，不是口径变更，另行处理）。"),
+     "**关于 2026-09-23 的说明（更正，同日、部署前）**：本条最初写「另行重放 09-23 那 8 只当天分数、改已落库的 predictions 行」，前提是错的——"
+     "09-23 整轮扫描失败（status=failed，无扫描产出），`predictions` 无该日行、无 `.swarm_results`，8 只标的当天**没有落库的分数**；"
+     "只留下 12 只 ML 归档，8 只里仅 BILI（iv_rank 存 44.94、正确 45.58，未跨任何档位）与 CVX（当天期权链 TLS 失败走样本早退，归档里 iv_rank 本就是 None）在其中。"
+     "错的 iv_rank 没有进入任何落库的评分，故无需重放；详见 CHANGELOG v0.45.383「更正」。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
