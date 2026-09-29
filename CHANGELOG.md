@@ -11,7 +11,77 @@
 
 ## [0.45.384] — 2026-09-29 — 占位（进行中：vrp_signal.record_day 零快照时不再清空当天账本行（含已结算行）；局部重跑改 upsert；CLI 零快照 exit 3）
 
-## [0.45.383] — 2026-09-29 — 占位（进行中：yfinance 日线完整性校验——`fetch_historical_hv` 缺交易日 ⇒ 重取一次、仍缺则 iv_rank 置空并计数；09-23 那 8 只当天分数重放）
+## [0.45.383] — 2026-09-29 — Fixed/Changed：日线完整性校验——`fetch_historical_hv` 缺交易日 ⇒ 重取一次、仍缺则 `iv_rank` 置空并计数；**改评分输入**，世代边界登记 09-28（作废 0 条 final_score 样本）
+
+用户 2026-09-29 决定：阶段 1 直接做、缺口降级为「置空」、边界照 v0.45.369 先例登记 09-28 不作废样本。承接 v0.45.372 / v0.45.379 对 09-23 的根因调查。
+
+### 根因（v0.45.379 已查清，这里只记结论）
+
+2026-09-23 扫描时 yfinance 的 1y 日线缺了 09-22 那一根，8 只标的的 `iv_rank` 静默错位（DE 存 43.26、正确 33.45），BRK-B 的 `rv_30d` 也是这根。
+真正的缺陷不是 Yahoo 掉了一根（外部因素，还会再发生），而是**系统对「拿到的价格序列完整不完整」从没问过**：
+`fetch_historical_hv` 返回不带日期的 HV 列表，少一根让 20 日窗口后移一天，产出的仍是「合理的数字」；
+覆盖率闸门 `scan_coverage_gate` 只判字段是否非空，缺口日它也是绿的。
+
+⚠️ **更正 v0.45.379 里一处未核实的猜测**：当时把 `last_hist_hv_is_sample` 挂在共享对象上「并发时可能被别的线程改写」标为待验证。
+已核：每次分析都 `new` 一个 `OptionsAgent`（自带 fetcher），此标志**不跨线程共享**，该风险不存在。
+
+### Added / Changed
+
+- `bars_integrity.py`（新，纯函数、不联网）：`find_gaps(dates)` 按交易日历找缺失日，分两档，**理由来自依赖关系而非拍的阈值**——
+  `critical` = 缺口落在**最后 21 根内**（20 日滚动 HV 的当前值只依赖最后 21 根，这里少一根当前 HV 就是错的）；
+  `minor` = 更早的缺口（只挪动窗口里 ≤20 个历史 HV 点，不值得为它把当天指标置空，但计数）。
+  末端只要求覆盖到「上一个已完成交易日」，**不要求今天那根**（收盘后几分钟 Yahoo 还没发当日 bar 是常态，拿它当缺口会制造假降级，降级会改分数）。
+  交易日历复用 `is_trading_day`（按规则算假日，不会过期）+ 一张 `AD_HOC_CLOSURES` 临时休市表。
+- **写这个模块时用真实数据核出一个真实误报**：29 只标的的日线里 **28 只在 2025-01-09 缺一根**——卡特国葬日 NYSE 休市，`is_trading_day` 的规则历不知道（它对这天仍答「交易日」，
+  **未改**：它还管着扫描调度，语义超出本次范围，待验证是否要单独处理）。表里补了这一天并写明来源；补后 29 只 × 约 21 个月**零缺口**。
+- `options_analyzer.fetch_historical_hv`：缺口落在 critical 内 ⇒ **重取一次**；重取后仍缺 ⇒ 仍返回序列（`min(hist_hv)` 等只要量级的用法不受影响），
+  但 `last_hist_hv_gaps` 非空、**不写缓存**（缓存键 `hist_hv_v4` → `v5`：只放通过校验的序列，否则 5 分钟内后续调用会把错位数据当好数据读走），
+  调用方据 `hist_hv_untrusted()`（样本 **或** 缺口）把 `iv_rank` / `iv_percentile` 置 None——走既有的「None ⇒ Oracle 期权分 `iv_signal` 中性 2.0」分支。
+  结果新增 `hv_gap`（缺的日期；只在 hv_proxy 口径下有意义）。
+- ⚠️ **不新增 `iv_rank_source` 取值**：`signal_archive._iv_rank_is_real` 把非 `hv_proxy` 一律当真实 IV（=1.0），加一个 `hv_proxy_gap` 会被悄悄记成「真实 IV 历史」。
+- **校验器自己出错**不把全部 iv_rank 置空、也不悄悄当「没缺口」：按未校验放行，但计 `check_errors`、日志打 ERROR。
+- 可观测：`options_analyzer.hv_gap_stats()`（checked / clean / repaired / degraded / minor / check_errors / 逐标的缺口日期）→ `scan_timing.counters.hv_gap` → status.json；
+  摘要行**出事才点名**（`日线缺口 修复N/置空M/校验出错K(DE:2026-09-22)`），平时不占位。
+- 世代印记：Oracle details 带字面量 `hv_gap_checked: True`，每条返回路径都写（成功 / 异常兜底 / 无效 ticker / 日报合成回退）。
+
+### 世代边界（`ic_rerun_readiness._COHORT_HISTORY` 新增 v0.45.383，日期 2026-09-28，作废 0 条）
+
+新代码 09-29 才首跑，边界却写 09-28，前提是**证明 09-28 那天新旧代码输出逐项相同 = 30 只当天都没有缺口**。
+难点：旧代码不记日期，归档里没有字段能直接说「当时缺没缺」，所以只能**用外部数据重放**（`experiments/hv_gap_equivalence_audit.py`，证据冻结在 `experiments/hv_gap_equivalence_20260928.json`）：
+拿 09-28 归档的 (iv_rank, iv_percentile)，看完整序列能否精确复现（容差 0.011），并看「删掉最后 21 根里任一根」能否同样复现。
+
+- **29/30 只唯一证明为完整序列**（完整序列复现，且没有任何单根缺失能同样复现）。
+- **VKTX 一只只能按天推断**：它的 HV 是全年最高（rank=100、percentile=99.57），删哪根输出都不变，单看这只分辨不出。同日 29 只被唯一证明无缺口、0 只不一致，缺口按天发生
+  （09-23 一天 8/22 只），故判其无缺口。⚠️ **这是概率推断，不是直接证明**，证据文件里单独标 `day_level_inference`，此处如实记。
+- 判定机制：`_BOUNDARY_EQUIVALENCE["v0.45.383"]` 读该证据文件，**逐（日期，标的）**判；证据里没有 / 状态不在放行集合 / 文件读不出 ⇒ 不等价（举证责任在放宽一侧）。
+  为此 `_equivalence_scan` 把 `_date` / `_ticker` 传给判据（其它边界的判据只读 `swarm_results`，忽略这两个键）。
+- 三张表同步登记：`signal_archive.COHORT_SIGNAL_SCOPE["v0.45.383"]` = `agent.OracleBeeEcho.*` + `bear.options_bear`（同 v0.45.349）；
+  `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段（`odds_score` / `agent_agreement` / `final_score` 是 ML 特征，只在缺口日变）。
+- 预期判定：新代码首跑前 `no_evidence_yet`（09-28 等价、无印记）；首跑后 `matches`。
+- 前瞻检验：维度 IC 协议 H2 会随 final_score 变，但本条早于 FORWARD_START 2026-10-12 ⇒ 不截断（同 v0.45.369）。
+- 路径锚点守卫（`test_paths_not_frozen_at_import`）当场拦下 `_HV_GAP_EVIDENCE_PATH`（模块级 `__file__` 派生）：它是随代码发布的只读证据，`__file__` 是对的，
+  已按规矩登记进 `KNOWN`（类别 B）与 `MUST_STAY_FILE_ANCHORED`。
+
+### 验证
+
+- **正常路径逐位不变**：真实 yfinance 数据上 BRK-B / XOM / NVDA 与旧公式逐位相等、零误报；单测里无缺口序列与旧公式逐位相同（正对照）。
+- 真实帧人为去掉一根 ⇒ 降级路径按预期触发（重取一次、置空、不写缓存）。
+- 新增测试 72 条（`tests/test_hv_gap_integrity.py` 24 + `tests/test_hv_gap_boundary.py` 48），全离线；**变异 29 个全部落盘、全部被抓**
+  （校验器恒放行 / 不重取 / 缺口序列也写缓存 / critical 恒空 / 消费方只认样本 / 临时休市表清空 / 末端不要求覆盖 / 假日不认 / 今天那根也要求 / hv_gap 不落字段 /
+  摘要不点名 / 校验出错不计数 / 缺口标志被丢 / 等价登记删掉 / 判据恒真 / 状态集混入 mismatch / 兜底或成功路径不写印记 / 扫描不传日期标的 / 证据加载恒空 /
+  分类不做歧义扫描 / 按天推断不要求 0 mismatch / 不要求足够多 / 容差放大 / 合成回退不写印记 / 印记认补跑行 / 世代条目删掉 / SCOPE 登记删掉 / ML 标签不含本版）。
+  每个变异先断言改动落盘、清 `__pycache__`、`PYTHONDONTWRITEBYTECODE=1`、`--maxfail` 放大、还原后逐字节比对。
+- 全套：**7527 通过、1 失败**（`test_economic_calendar::TestCoverageHorizon`，硬编码日历到期的设计性告警，用户 2026-09-29 明确说不用管）；ruff 全绿。中途全套还拦下 1 条真实问题（路径锚点守卫，见上），已按规矩登记。
+- 测试夹具的两处自查：「缺一根确实改变输出」、「饱和序列确实删哪根都不变」——否则相应用例可能是空跑。
+
+### 未做 / 待验证
+
+- **2026-09-23 那 8 只当天分数的重放**（用户已批准）：不在本条内，另行处理。下游有 4 个 `iv_rank` 消费者，比预想的多：Oracle 的 `iv_signal`（按档位，只有 DE 跨档 3.0→2.0）、
+  **BearBee 的 `iv_rank` > 60 / > 80 看空信号（XOM 64.45→58.71、CVX 60.85→59.36 跨过 60）**、政体权重路由、RivalBee 的 ML 特征。
+- 阶段 2（缺口时用 Twelve Data 补第二源）、阶段 4（盘点其他读 yfinance 日线做窗口统计的模块）未做。
+- BILI / CRM / ABBV 三只 09-23 的 `iv_rank`（差 0.64 / 0.05 / 0.27）尚未重算，随重放一并处理。
+- 覆盖率闸门仍只判「非空」：单只标的的缺口降级靠计数与 `hv_gap` 字段可见，未接进告警。
+
 
 ## [0.45.382] — 2026-09-29 — Fixed：卖权账本只读出口（CLI `--assess` / MCP 两条路径 / 本地报告就绪度行）把「状态目录不存在」报成「账本为空」→ 分开说：缺目录写明解析出的路径与病因、仍 undetermined（退出码 3）；不建目录，写路径 / 预注册 / 盲化 / 闸门均未动；同形普查顺手修 `replay_scoring` / `vol_forecast` / `signal_archive --list` 三个缺 `pheromone.db` 的出口（后者读一次就建库）
 
