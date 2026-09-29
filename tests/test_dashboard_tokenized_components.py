@@ -7,9 +7,10 @@ v0.45.77（`3581d8d`，08-30）在分支上把组件层迁到令牌系统，从�
    `--bull` 切到高亮绿，白字压亮绿对比度更差。v0.45.77 的解法是拆结构：中性底 + `.sdir-*`
    徽标 + 公司名/板块（取自 config，查不到就不渲染该行，不编）。
 2. **renderer 里不再有硬编码的涨跌 / 中性十六进制色。** 它们在浅色主题下对比度不够
-   （`#ffc107` 1.53:1、`#28a745` 2.93:1），且不随暗色切换。`rgba(r,g,b,α)` 淡染底色是站点惯例、
-   不在此列；`#94a3b8` / `#666` / `#fff` 这类「无数据 / 纯装饰」的灰白也不在此列
-   （套 `--neut` 会把「没有这项数据」误读成「中性信号」）。
+   （`#ffc107` 1.53:1、`#28a745` 2.93:1），且不随暗色切换。`#94a3b8` / `#666` / `#fff` 这类
+   「无数据 / 纯装饰」的灰白不在此列（套 `--neut` 会把「没有这项数据」误读成「中性信号」）。
+3. **renderer 里的半透明淡染也不写数字通道**（v0.45.371）：一律 `rgba(var(--tint-x),α)`，
+   与 dashboard.css（v0.45.368）同一套 `--tint-*`，改一处两边一起变。
 """
 
 import re
@@ -32,9 +33,26 @@ def test_renderer_has_no_directional_hex():
     assert not hits, f"硬编码涨跌色回来了，改用 var(--bull/--bear/--neut)：{hits}"
 
 
+_NUMERIC_RGBA = re.compile(r"(?:rgba?|hsla?)\(\s*\d")
+
+
+def test_renderer_tints_use_tint_tokens():
+    src = (ROOT / "dashboard_renderer.py").read_text(encoding="utf-8")
+    hits = [f"{src.count(chr(10), 0, m.start()) + 1}:{src[m.start():src.find(')', m.start()) + 1]}"
+            for m in _NUMERIC_RGBA.finditer(src)]
+    assert not hits, f"renderer 里又写了数字通道的淡染，改用 rgba(var(--tint-bull),α)：{hits}"
+    assert src.count("rgba(var(--tint-") >= 15, "一处 --tint 都没扫到——正则或文件多半不对"
+
+
+def test_numeric_rgba_pattern_has_teeth():
+    assert _NUMERIC_RGBA.search('bg = "rgba(34,197,94,.10)"')
+    assert _NUMERIC_RGBA.search("background:rgb( 0 0 0 / .5)")
+    assert not _NUMERIC_RGBA.search('bg = "rgba(var(--tint-bull),.10)"')
+
+
 def test_directional_hex_pattern_has_teeth():
     assert _DIRECTIONAL_HEX.search('color = "#28a745" if pct >= 80')
-    assert not _DIRECTIONAL_HEX.search('background:rgba(34,197,94,.10)')
+    assert not _DIRECTIONAL_HEX.search('background:rgba(var(--tint-bull),.10)')
 
 
 class TestCompanyCardHeader:

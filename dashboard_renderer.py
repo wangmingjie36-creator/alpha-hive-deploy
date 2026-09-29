@@ -1596,7 +1596,7 @@ def _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail) 
         cat = c["nearest_cat"]
         unusual = c["unusual"]
 
-        bg = "rgba(34,197,94,.10)" if is_bull else "rgba(239,68,68,.10)"
+        bg = "rgba(var(--tint-bull),.10)" if is_bull else "rgba(var(--tint-bear),.10)"
         border = "var(--bull)" if is_bull else "var(--bear)"
         dot_cls = "dot-bull" if is_bull else "dot-bear"
         label = "看多" if is_bull else "看空"
@@ -2108,7 +2108,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                     exp_tag = f' <span style="background:transparent;border:0.5px solid var(--border);color:var(--ts);padding:1px 4px;border-radius:4px;font-size:.65em">{w["dom_exp"]}</span>' if w.get("dom_exp") else ""
                     rows.append(
                         f'<div style="display:flex;justify-content:space-between;font-size:.78em;padding:2px 0;'
-                        f'border-bottom:1px dashed rgba(148,163,184,.2)">'
+                        f'border-bottom:1px dashed rgba(var(--tint-slate),.2)">'
                         f'<span style="color:{side_color};font-weight:600">${w["strike"]:.0f}{exp_tag}</span>'
                         f'<span style="color:var(--ts);font-size:.85em">{pct_str}</span>'
                         f'<span style="color:var(--tp);font-weight:500">{oi_str}</span>'
@@ -2428,8 +2428,8 @@ def render_dashboard_html(report: Dict, date_str: str,
                 for _k, _v in sorted(_dqb_wide, key=lambda x: -len(x[1]))[:4]
             ) or f"整体数据真实度 {_dqb_avg:.0f}%"
             dq_banner_html = (
-                '<div class="dq-banner" style="background:rgba(224,160,60,.12);'
-                'border:1px solid rgba(224,160,60,.5);border-radius:4px;'
+                '<div class="dq-banner" style="background:rgba(var(--tint-neut),.12);'
+                'border:1px solid rgba(var(--tint-neut),.5);border-radius:4px;'
                 'padding:10px 16px;margin:12px 0;font-size:.85em;">'
                 f'<strong>数据部分降级</strong>：{_dqb_items}。'
                 '受影响通道已按中性处理，今日结论可靠性下降，建议交叉验证。</div>'
@@ -2766,9 +2766,9 @@ def render_dashboard_html(report: Dict, date_str: str,
 
     # 方向分组 KPI 卡片
     _dir_kpi_cfg = [
-        ("bullish", "看多", "var(--bull)", "rgba(34,197,94,.08)"),
-        ("bearish", "看空", "var(--bear)", "rgba(239,68,68,.08)"),
-        ("neutral", "中性", "var(--neut)", "rgba(148,163,184,.08)"),
+        ("bullish", "看多", "var(--bull)", "rgba(var(--tint-bull),.08)"),
+        ("bearish", "看空", "var(--bear)", "rgba(var(--tint-bear),.08)"),
+        ("neutral", "中性", "var(--neut)", "rgba(var(--tint-slate),.08)"),
     ]
     _acc_dir_kpi_html = ""
     for _dk, _dlabel, _dcol, _dbg in _dir_kpi_cfg:
@@ -3016,19 +3016,19 @@ def render_dashboard_html(report: Dict, date_str: str,
                 _bear_n = sum(1 for d in _sec_data["dirs"] if d == "bearish")
                 # 颜色：基于动量 + 情绪综合
                 if _avg_mom > 1.5 and _avg_sent > 55:
-                    _hm_bg = "rgba(34,197,94,.18)"
-                    _hm_border = "rgba(34,197,94,.35)"
+                    _hm_bg = "rgba(var(--tint-bull),.18)"
+                    _hm_border = "rgba(var(--tint-bull),.35)"
                 elif _avg_mom < -1.5 and _avg_sent < 45:
-                    _hm_bg = "rgba(239,68,68,.14)"
-                    _hm_border = "rgba(239,68,68,.3)"
+                    _hm_bg = "rgba(var(--tint-bear),.14)"
+                    _hm_border = "rgba(var(--tint-bear),.3)"
                 elif _avg_mom > 0.5 or _avg_sent > 52:
-                    _hm_bg = "rgba(34,197,94,.08)"
-                    _hm_border = "rgba(34,197,94,.2)"
+                    _hm_bg = "rgba(var(--tint-bull),.08)"
+                    _hm_border = "rgba(var(--tint-bull),.2)"
                 elif _avg_mom < -0.5 or _avg_sent < 48:
-                    _hm_bg = "rgba(239,68,68,.07)"
-                    _hm_border = "rgba(239,68,68,.18)"
+                    _hm_bg = "rgba(var(--tint-bear),.07)"
+                    _hm_border = "rgba(var(--tint-bear),.18)"
                 else:
-                    _hm_bg = "rgba(100,116,139,.06)"
+                    _hm_bg = "rgba(var(--tint-slate),.06)"
                     _hm_border = "var(--border)"
                 _mom_cls = "hm-up" if _avg_mom > 0 else ("hm-dn" if _avg_mom < 0 else "")
                 _tk_chips = " ".join(f'<span class="hm-tk">{t}</span>' for t in _sec_data["tickers"][:5])
