@@ -53,6 +53,71 @@
 - 研究脚本（optimizer / bootstrap / 因子归因）与 DB 里的 `net_return_t7` 均未动。
 - 按止损距离定仓的平滑分析见本 session 对话，未落代码。
 
+## [0.45.373] — 2026-09-29 — 占位（进行中：二次检查 v0.45.366——世代印记被「部署后补跑早于边界的日期」拉早 ⇒ 假 boundary_too_late 报警）
+
+## [0.45.372] — 2026-09-29 — Fixed（数据）：BRK-B 期权快照 2026-09-23 的 `rv_30d` / `iv_rank` 等派生字段被污染，按正确收盘价重算（**仅此一行**；范围核实后无「缺失」）
+
+v0.45.363 修 Twelve Data 的 BRK-B 404 后，「已落盘的 BRK-B 历史 rv_30d / iv_rank 要不要补」的核实与处理。
+
+### 范围（先纠正上一版的措辞）
+
+v0.45.363 的「未做」写「已存下来的 BRK-B 历史值没有补算」，暗示有缺口——**核实后没有缺口**：
+22 份 BRK-B 快照的 `rv_30d` / `iv_rank` 全部非空（yfinance 主源一直在供，404 的 Twelve Data 只是被兜底链绕开）；
+VRP 账本 BRK-B 的 rv / iv 也全非空。真正有问题的是**值**，不是**有没有**：
+
+- `rv_30d`：用 Twelve Data 日线（与 yfinance 当下日线逐日一致，64 个交易日无 >0.05 的差）按生产口径逐日重算，
+  22 份里 21 份与已存值差 ≤0.07（含 `_backfilled` 补跑文件）；**2026-09-09 差 +2.66 但不是错**——该文件写于 00:09（开盘前），
+  内容是 09-08 那场（15.99 恰为截至 09-08 的窗口、价 505.83 = 09-08 收盘），是已知的「盘前快照归到次日」槽位问题；
+  **唯一真错的是 2026-09-23**：已存 14.52，按收盘重算 12.55（已存值隐含末根收盘 ≈489.9，实际 507.17）。
+- `iv_rank`（hv_proxy，走 yfinance 1y，**不经 Twelve Data**）：用生产同一公式重算，2026-09-11 ~ 09-28 共 10 个可比日期
+  **9 个精确相等**，唯一不等的仍是 09-23（已存 18.26，重算 16.63）。**2026-08-25 ~ 09-10 无法验证**（当下 yfinance 1y 窗口起点
+  晚于当时窗口，min/max 取不到）——标「待验证」，未改。
+
+### 成因（相关，未证因果）
+
+09-23 扫描日志：BRK-B 的 Twelve Data 在 14:17 与 14:55:42 各 404 一次，且 CBOE 判陈旧（last_trade=09-22），
+`iv_raw_observed` 走「盘后实拉 IV 20.51%」路径——这天 BRK-B 没有任何一条可用的第二源。哪个输入产出了 14.52 无法从日志直接还原。
+
+### Fixed
+
+- `~/alpha-hive-data/cache/options_snapshot_BRK-B_2026-09-23.json`（数据，不在仓库）：
+  `rv_30d` 14.52→12.55、`iv_rv_spread` 5.98→7.96（`iv_raw_observed − rv`，信号仍是 `fair`，阈值 >10）、
+  `iv_rank` 18.26→16.63、`iv_percentile` 19.13→14.04、`iv_rv_detail` 内 3 个键含说明文字同步。
+  **`iv_raw_observed` / `iv_current` 没动**（那条 20.51 的可信度另有疑点：同日 CBOE 陈旧、且比前一日 15.9 高出 4.6，未核）。
+- 原值与理由写进文件内 `_rv_recheck`；改前副本 `~/alpha-hive-data/_manual_backups/options_snapshot_BRK-B_2026-09-23.pre_v0.45.372.json`。
+- 复用生产函数（`calculate_iv_rank` / `calculate_iv_percentile`），dry-run 先行；改后与备份逐键 diff，仅上述键有变。
+
+### 影响面（为什么可以改）
+
+读这些字段的：`vrp_signal`（BRK-B 09-23 无账本行，读到 12.55 无影响）、`earnings_vol_signal`（只在财报窗口用，09-23 不在）、
+`iv_history`（只索引 `iv_raw_observed`，没动）。**已存的 predictions / final_score / 信号存档一概没动**——09-23 当天的评分照旧用的是当时的值，
+这次只改快照这份记录。因此不进 IC 重跑世代、不影响共振加成前瞻检验。
+
+### 未做
+
+- 2026-08-25 ~ 09-10 的 `iv_rank` 未验证（见上）；`rv_30d` 已验，无需改。
+- 2026-09-24 / 09-25：**所有标的**都没有快照（09-24/25 数据源整体中断），不是 BRK-B 专属，未补。
+- 其他 29 只标的没有做同样的逐日核对（本轮范围只到 BRK-B）；Twelve Data 对它们不 404，理论上不在这条成因里，但同日 CBOE 陈旧的影响未查。
+- 补丁脚本是一次性的，没入仓库（数据修补，痕迹在文件内 `_rv_recheck` 与备份里）。
+
+## [0.45.371] — 2026-09-29 — renderer 内联 rgba 淡染换 `--tint-*` 令牌
+
+接 v0.45.368 的「未做」第二条。`dashboard_renderer.py` 内联样式里 17 处数字通道淡染 → `rgba(var(--tint-x),α)`，与 dashboard.css 共用同一套通道令牌，改一处两边一起变；透明度一个没动。
+
+### Changed
+- 12 处涨跌（`34,197,94` / `239,68,68`）：今日 Actionable 卡底、方向 KPI 卡底、板块热力图单元格底与边（强/弱两档）。取值与令牌相同，**外观零变化**。
+- 3 处石板灰：热力图中性格底 `100,116,139`（零变化）；方向 KPI「中性」卡底与期权墙行虚线 `148,163,184` 并入 `--tint-slate`（略深一档，同 v0.45.368 `.acc-sig-no` 的处理）。
+- 2 处「数据部分降级」横幅 `224,160,60` → `--tint-neut`（`245,158,11`），色相与站点其余中性 / 警示淡染统一。
+
+### Added
+- `tests/test_dashboard_tokenized_components.py`：renderer 里出现数字通道的 `rgb(a)/hsl(a)(` 即红，另断言 `rgba(var(--tint-` ≥15 处防扫描器空转；正则自证。变异实测：把 Actionable 卡底改回 `rgba(34,197,94,.10)` → 红。模块 docstring 里「rgba 淡染是站点惯例、不在此列」的旧豁免同步删去。
+
+### 验证
+- 离线渲染 09-11 后 `getComputedStyle`：页面里 14 个带内联 `--tint` 的元素（11 个热力图格 + 3 张方向 KPI 卡）底色全部解析为预期 rgba，无一退化成透明；当天数据里不出现的分支（Actionable 卡、降级横幅、热力图强/弱格、期权墙虚线）用源码里的原样 style 串注入探针，8/8 解析正确。
+- `--tint-*` 未定义时这些淡染会**静默变透明**：确认过 renderer 片段唯一的生产出口是 `render_dashboard_html`（经 `report_web_assets`），整页内联 dashboard.css，不存在脱离 `:root` 单独嵌入的路径；`test_dashboard_css_vars_defined` 也会对未定义令牌报红。
+- 全套 7274 passed / 2 xfailed（照例 deselect 两条环境测试）。
+
+
 ## [0.45.370] — 2026-09-29 — 占位（进行中：编排器纳入版本控制·阶段 3——扫描前自动部署编排器；接手原会话）
 
 ## [0.45.369] — 2026-09-29 — 占位（进行中：OracleBee 期权链不可得仍标 real + 置信度 0.7 → 按 OptionsAgent data_quality 判；并入 09-28 世代边界）
@@ -263,7 +328,67 @@ WATCHLIST 30 只里只有 BRK-B 带非字母数字。
 - 已落盘的 BRK-B rv_30d / iv_rank / close_correction 历史值没有补算。
 
 
-## [0.45.362] — 2026-09-28 — 占位（进行中：GEX 第 2 层——每只标的一份全链 GEX 状态（带可得性标记），展示与政体路由共用；不改分数）
+## [0.45.362] — 2026-09-28 — Added/Fixed：GEX 第 2 层——每只标的一份 GEX 状态 `gex_state`（政体路由用的那份，带可得性标记），网站 / 日报 / 深度与 ML 报告 / MCP / 存档只读它；「Gamma 压榨风险」方向反了的展示改正。**不改分数**
+
+用户决定（09-27 根因分析的第 2 层，09-28「第 2 层现在开始做」）。根因：同一份 CBOE payload 切成三个视图各算一个「GEX」——
+① OracleBee 主链（≤4 个到期日）`gamma_exposure`；② 全到期日视图 `DealerGEXAnalyzer` → `RegimeWeightAdjuster`（规则引擎下 GEX
+进评分的唯一通道）；③ 卖权选择器的原始合约视图。截断能翻转净 GEX 符号（K=4 最低 −73.3%，见 `cboe_options`），而网站、日报、
+深度报告一直把 ① 当「GEX」展示 ⇒ 读者看到的数与进分的数不是同一个、还都叫 GEX。普查（只读）另查出：① 的 `gamma_squeeze_risk`
+分档方向与报告文案**相反**（正 GEX ⇒ "high"，文案按「high = 做市商 short gamma」解读）⇒ 公开的 ML 报告把正 gamma 标的写成
+「Gamma 压榨风险 高」；快照模式补跑时 ② 拿到的其实是 ≤4 个到期日的截断主链，却标 `cboe_full_expiries`、计进 `ok`。
+
+### Added
+- `gex_state.py`：`build(dealer_gex)` → `{available, reason, regime, total_gex, gex_flip, largest_call/put_wall, gex_normalized_pct,
+  stock_price, chain_view, n_expiries, score_channel, schema_version}`。不可得 ⇒ 数值一律 None（旧出错 dict 的 `total_gex=0.0`
+  是哨兵，不是零 GEX），`reason` 写明原因（`no_scout_price` / `exception:<类型>` / 出错 dict 的 error / `non_finite_total_gex` /
+  `chain_view:<视图>`）。`build` 不抛（它在步骤 0 的大 try 里，抛了会让权重退回基准）。`of()` / `display_line()` /
+  `display_regime()`（有状态就以它为准，旧记录才退到同一视图的 `dealer_gex`、且用 `build` 同一套可得性规则）/
+  `squeeze_label()`（负 gamma ⇒ high）。`routing_applied`：政体权重调整真跑完才由步骤 0 置 True（`adjust_weights` 抛了 ⇒
+  权重退回基准、这里留 False——状态不替失败的路由作证）。
+- `QueenDistiller.distill` 步骤 0 落盘 `gex_state`。**不改分数**：路由处表达式原样挪进 `gex_state.routing_regime()`，在同一个
+  try 里调用（抛异常走向不变）；状态由同一函数、同一输入另算一份。状态不可得而路由拿到正 / 负 regime 时打 **error**
+  （已知两种：NaN total ⇒ 旧代码判负 gamma；快照模式截断主链）——两者都是真 bug，修了改分数，**另登边界**，本版只让它们可见。
+- `signal_archive`：`gex.available`（有状态 ⇒ 1/0，旧记录 ⇒ 缺，覆盖率本身可观测）、`gex.total_gex`、`gex.negative`（仅可得时有值），
+  登记为叶子。本版上线后才有数据，早于它的边界无从作用。`gex.available` 会进 IC 扫描的 Bonferroni 族（同
+  `options.iv_rank_is_real` / `market.fear_greed_is_cnn` 先例）。
+
+### Changed（展示改读 `gex_state`，缺了显示「不可得」，**不回退** Oracle 主链值）
+- 网站 `dashboard_renderer._detail`（`gsr` 死字段也改用状态分档，免得日后接线接到反向那个）；日报 `report_formatters`
+  （「Gamma Exposure：主链值」→「净 GEX：+x.xxM$ · 正/负 gamma」或「不可得（原因）」；挪出 Oracle details 判断，Oracle 失败时照样印）。
+- 深度报告 `generate_deep_v2.extract`：状态 → 旧记录才读 `dealer_gex` → 不可得；删掉回退 Oracle 主链那一支（它连同方向相反的分档一起
+  漏进来）。`_try_compute_gex`：扫描记录里有状态（哪怕不可得）就不在报告生成时现算顶上。GEX / OI 归一化、vanna 压力、
+  翻转加速度只在状态可得（或旧记录 dealer_gex 可用）时读；GEX Profile 图：状态不可得不画，可得时标题总量 / regime / flip 用状态的
+  （柱形仍是 ML 报告那份 profile）；GEX 卡片按可得性判（可得的真零不再标「采集失败」，不可得写明原因）；CH1 政体徽章在
+  「状态不可得、路由仍按某 regime」时照实加注。
+- ML 报告 `generate_ml_report`：期权段 / 第 3 章 / 第 6 章的「Gamma 压榨风险」一律由状态分档；不可得显示「—」（第 3 章此前把
+  非 high 一律渲染成「可控」）。
+- MCP `alphahive_get_gex`：报告里有状态就以它为准；新增 `source` / `available` / `reason` / `routed_regime`（不可得时路由实际收到的
+  regime——快照截断链 / NaN 两种情形它不是 unknown）。**不可得时 `total_gex` 由 0.0（哨兵）改为 None**；可得的真零不再报「缺失」；
+  旧报告的 `dealer_gex` 按 `build` 同一规则判（v0.45.197 之前没有 `chain_view` 的报告判不可得——那时本就是截断视图）。
+- `collect_data`（手动喂 Claude 的材料）同样改用状态分档；图表标题补认 `positive_gex` / `negative_gex`（旧映射只认无人产出的 `*_gamma`）。
+
+### Fixed
+- 快照模式如实标注：`fetch_cboe_chain_for_gex` 在链上标 `gex_view`（`cboe_full_expiries` / `snapshot_main_chain`），快照模式单独计数
+  `gex_view_stats()["snapshot_main_chain"]`（此前计进 `ok`）；`DealerGEXAnalyzer` 的 `chain_view` 取自链（此前写死）。**返回值不变、
+  路由照旧**。
+
+### 刻意不做
+- 卖权选择器不共用状态：它的路由读 `le_45dte` 视图重定价扫描的 zero gamma，是冻结的预注册规则 v1（改输入即协议变更），且是另一个量。
+- Oracle 主链 `gamma_exposure` / `gamma_squeeze_risk` 照算、照落盘（`options.gamma_exposure` 存档列、LLM 模式 Oracle / Bear 提示词仍读，
+  LLM 那条用户决定不动），只是不再以 GEX 之名展示。
+- ② 自身也非整本书：ATM 带宽 [0.3S, 1.7S] + 每到期日每边 OI 前 40 档。对符号的影响**待验证**；改它的输入就是改分数。
+- ML 报告的 `advanced_analysis.dealer_gex`（GEX 图表 / 旧记录回退）仍是同进程同 payload 另算一次，价格源不同；普查核实符号与传入价无关
+  （仅 BS 兜底 gamma 例外）⇒ regime 与路由那份实际一致，量级可能差。
+
+- 守卫 `tests/test_gex_state.py`；`tests/test_gex_oracle_bear_neutralized.py` 白名单删 `dashboard_renderer::_detail`（网站不再读主链值，
+  自检夹具换成名单内仍在的 `_drop_legacy_gex_signal`）；`test_scan_timing` / `test_gex_full_chain_view` 认新计数键。
+- 世代边界：**无**（不改分数）。
+- 验证：`tests/test_gex_state.py` 62 条；变异 24/24 变红（路由改读状态、不可得不置 None、build 不兜异常、各展示点回退主链或另算、
+  ML 报告三处接线、存档旧记录写 0、快照不标视图 …，驱动核对 collected 数并逐条还原核哈希）。独立审查（只读）拿新旧两棵树跑同一套
+  62 种输入的蒸馏探针（传入 / 现场算 × 各种出错形状 × 价格 100/0/None/"abc"/−5、`adjust_weights` 抛异常），
+  路由收到的 regime、是否调用、`dimension_weights`、`final_score`、方向、权重说明**零差异**；审查的 5 条应修 + 7 条小项已处理
+  （仅 `gex.available` 进 Bonferroni 族一条按先例保留）。
+- 全套：**6555 passed、2 xfailed**，1 失败为已知的经济日历到期测试（`TestCoverageHorizon`，到期变红是设计意图，与本版无关）。
 
 ## [0.45.361] — 2026-09-28 — 图表剩余硬编码色换令牌：涨跌语义色 / 均收益胶囊 / 旧蜂蜜金；恐惧贪婪仪表盘对齐宏观条 3 档
 

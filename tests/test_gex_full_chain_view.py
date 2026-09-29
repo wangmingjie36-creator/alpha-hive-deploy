@@ -176,7 +176,7 @@ def test_unavailable_is_counted(monkeypatch):
     """
     monkeypatch.setattr(C, "fetch_cboe_chain", lambda *a, **k: None)
     assert C.fetch_cboe_chain_for_gex("NVDA") is None
-    assert C.gex_view_stats() == {"ok": 0, "unavailable": 1, "capped_expiries": 0}
+    assert C.gex_view_stats() == {"ok": 0, "unavailable": 1, "capped_expiries": 0, "snapshot_main_chain": 0}
 
     monkeypatch.setattr(C, "fetch_cboe_chain", lambda *a, **k: {"calls": [], "puts": []})
     C.fetch_cboe_chain_for_gex("NVDA")

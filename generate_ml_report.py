@@ -13,6 +13,8 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
+
+import gex_state as _gex_state
 from concurrent.futures import ThreadPoolExecutor
 from advanced_analyzer import AdvancedAnalyzer
 from ml_predictor import (
@@ -1107,7 +1109,8 @@ class MLEnhancedReportGenerator:
             <p style="margin-top:10px;font-size:0.85em;color:var(--ts);"><strong>关键判断：</strong>{ad.get('discovery','')}</p>
         </div>"""
 
-    def _ch3_oracle(self, agent_details: dict, options: dict, current_price: float = 0) -> str:
+    def _ch3_oracle(self, agent_details: dict, options: dict, current_price: float = 0,
+                    squeeze: Optional[str] = None) -> str:
         """第3章 OracleBee — 期权市场预期（v0.27.0：扩展为完整全链/近端/IV结构/Gamma日历视图）"""
         ad = agent_details.get("OracleBeeEcho", {})
         det = ad.get("details", {}) if ad else {}
@@ -1139,7 +1142,11 @@ class MLEnhancedReportGenerator:
         iv_curr = opts.get("iv_current", opts.get("iv_curr"))
         pc = opts.get("put_call_ratio")
         oi = opts.get("total_oi")
-        gex = opts.get("gamma_squeeze_risk") or "—"
+        # v0.45.362：`squeeze` 由 GEX 状态分档（负 gamma ⇒ high，见 gex_state.squeeze_label）。
+        # opts 优先的是 OracleBee details，那里的 gamma_squeeze_risk 是主链分档、方向相反（正 GEX ⇒ high）。
+        gex = squeeze if squeeze is not None else (opts.get("gamma_squeeze_risk") or "—")
+        if gex == "unknown":
+            gex = "—"
         flow = opts.get("flow_direction") or opts.get("options_score") or "—"
         skew = opts.get("iv_skew_ratio", opts.get("iv_skew"))
         # v0.27.1 bug fix: dict.get() 不会用默认值若 key 存在但 value=None；用 `or` 保护
@@ -1470,7 +1477,7 @@ class MLEnhancedReportGenerator:
             </div>
             <table style="margin-bottom:12px;">
                 <tr><th>指标</th><th>数值</th><th>信号</th></tr>
-                <tr><td>Gamma 压榨风险</td><td>{gex}</td><td>{DOT_NEUT + "高" if str(gex).lower() in ("high","很高") else DOT_BULL + "可控"}</td></tr>
+                <tr><td>Gamma 压榨风险</td><td>{gex}</td><td>{DOT_NEUT + "高" if str(gex).lower() in ("high","很高") else ("—" if gex == "—" else DOT_BULL + "可控")}</td></tr>
                 <tr><td>期权流方向</td><td>{flow}</td><td>{DOT_BULL + "看多" if str(flow).lower() in ("bullish","看多") else (DOT_BEAR + "看空" if str(flow).lower() in ("bearish","看空") else "—")}</td></tr>
                 <tr><td>IV 偏斜比</td><td>{_fmt(skew, "{:.2f}")}</td><td>{"—" if skew is None else (DOT_NEUT + "看跌溢价" if skew > 1.2 else DOT_BULL + "正常")}</td></tr>
                 <tr><td>近端总持仓量</td><td>{_fmt(oi, "{:,.0f}")}</td><td>—</td></tr>
@@ -1982,7 +1989,8 @@ class MLEnhancedReportGenerator:
             </p>
         </div>"""
 
-    def _ch6_risk_radar(self, swarm: dict, agent_details: dict, options: dict) -> str:
+    def _ch6_risk_radar(self, swarm: dict, agent_details: dict, options: dict,
+                        squeeze: Optional[str] = None) -> str:
         """第6章：风险雷达"""
         bear_ad = agent_details.get("BearBeeContrarian", {})
         bear_score = bear_ad.get("details", {}).get("bear_score", 0) if bear_ad else 0
@@ -1991,7 +1999,8 @@ class MLEnhancedReportGenerator:
         chronos_ad = agent_details.get("ChronosBeeHorizon", {})
         cats = chronos_ad.get("details", {}).get("catalysts", []) if chronos_ad else []
         imminent = [c for c in cats if isinstance(c, dict) and abs(c.get("days_until", 999)) <= 7]
-        gex = options.get("gamma_squeeze_risk", "low")
+        # v0.45.362：同 _ch3_oracle，`squeeze` 由 GEX 状态分档；"unknown" 在下面渲染成「数据不可用」
+        gex = squeeze if squeeze is not None else options.get("gamma_squeeze_risk", "low")
         iv_rank = options.get("iv_rank", 0)
         conflict_level = swarm.get("conflict_info", {}).get("conflict_level", "low")
 
@@ -2216,6 +2225,13 @@ class MLEnhancedReportGenerator:
         recommendation = analysis.get('recommendation', {})
         prob = analysis.get('probability_analysis', {})
         swarm = enhanced_report.get('swarm_results', {})
+        # v0.45.362：「Gamma 压榨风险」三处（期权段 / 第 3 章 / 第 6 章）一律由 GEX 状态分档：
+        # 扫描记录里有 gex_state 就以它为准，旧记录才退到同一视图的 dealer_gex。不用 OptionsAgent 的
+        # gamma_squeeze_risk——那是主链截断量的分档，而且方向与本报告文案相反（见 gex_state._SQUEEZE）。
+        _gex_squeeze = _gex_state.squeeze_label(
+            _gex_state.display_regime(swarm, analysis.get("dealer_gex")))
+        if options:
+            options = {**options, "gamma_squeeze_risk": _gex_squeeze}
 
         # v0.45.139：评级已撤，刊头徽章改印前瞻命中率；颜色随蜂群方向走
         rating_color = self._dir_color(swarm.get('direction', 'neutral'))
@@ -2263,7 +2279,8 @@ class MLEnhancedReportGenerator:
             or swarm.get("agent_details", {}).get("ScoutBeeNova", {}).get("details", {}).get("current_price")
             or 0
         )
-        ch3_oracle   = self._ch3_oracle(agent_details, options, current_price=float(_curr_price_for_oracle or 0))
+        ch3_oracle   = self._ch3_oracle(agent_details, options, current_price=float(_curr_price_for_oracle or 0),
+                                        squeeze=_gex_squeeze)
         ch3_chronos  = self._ch3_chronos(agent_details)
         ch3_buzz     = self._ch3_buzz(agent_details)
         ch3_rival    = self._ch3_rival(analysis)
@@ -2271,7 +2288,7 @@ class MLEnhancedReportGenerator:
         ch3_bear     = self._ch3_bear(agent_details)
         ch4          = self._ch4_thesis(analysis, agent_details)
         ch5          = self._ch5_scenarios(analysis, swarm)
-        ch6          = self._ch6_risk_radar(swarm, agent_details, options)
+        ch6          = self._ch6_risk_radar(swarm, agent_details, options, squeeze=_gex_squeeze)
         ch7          = self._ch7_tasks(agent_details, options)
 
         # ── 折叠详情区（止损 / 止盈 / 期权 / ML 特征）──────────────

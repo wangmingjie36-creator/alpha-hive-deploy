@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List
 from hive_logger import get_logger
+import gex_state as _gex_state
 
 _log = get_logger("report_formatters")
 
@@ -149,10 +150,14 @@ def _build_market_expectations(sorted_results: list) -> List[str]:
         md.append(f"### {ticker}")
         if discovery:
             md.append(f"- {discovery}")
+        # v0.45.362：GEX 行改读蒸馏结果里的 gex_state（全到期日视图，就是政体路由用的那份）。
+        # 原先这里印 OracleBee `gamma_exposure`（主链 ≤4 个到期日的截断量，可与全书净 GEX 符号相反），
+        # 两个量同叫 GEX。缺状态就写「不可得」，**不回退**主链那个数。放在 Oracle details 判断之外：
+        # GEX 状态不依赖 Oracle，Oracle 失败时它照样可得。
+        md.append(f"- {_gex_state.display_line(_gex_state.of(data))}")
         if isinstance(details, dict) and details:
             iv = details.get("iv_rank")
             pc = details.get("put_call_ratio")
-            gamma = details.get("gamma_exposure")
             if iv is not None:
                 _src = details.get("iv_rank_source")
                 # iv_rank_source 必须同行显示：hv_proxy 与真实 IV 历史算出来的
@@ -161,8 +166,6 @@ def _build_market_expectations(sorted_results: list) -> List[str]:
             if pc is not None:
                 pc_val = pc if isinstance(pc, (int, float)) else pc
                 md.append(f"- Put/Call Ratio：{pc_val}")
-            if gamma is not None:
-                md.append(f"- Gamma Exposure：{gamma}")
             # ── v0.45.52：IV-RV 价差 / RV30 / IV Skew 比值 ──
             # 数据一直都在（8/26 实测 30/30 覆盖），此前从未渲染到日报。
             # 一律「有才写」，缺就整行不出现 —— 不用 0 或 5.0 兜底，

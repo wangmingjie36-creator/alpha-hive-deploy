@@ -502,7 +502,10 @@ _GEX_MAX_EXPIRIES = 24
 # （`options_analyzer.py` 里 `datetime.now()` 的差一天）⇒ 拿到的是构造上就不对的数。
 # 照 v0.45.188 `_calc_max_pain` 的先例：**取不到就返回不可得，不回退旧口径** ——
 # 回退等于把「没数据」悄悄换成「错数据」。代价可见，才谈得上评估。
-_gex_view_stats = {"ok": 0, "unavailable": 0, "capped_expiries": 0}
+# v0.45.362：`snapshot_main_chain` = 快照模式（`--date` 补跑装了快照供给器）下拿到的链。`fetch_cboe_chain` 在快照模式
+# 直接返回快照里那条链，**`expiry_selector` 被忽略** ⇒ 那是默认选择器的 ≤4 个到期日主链（`cloud_snapshot_fetch`
+# 建快照时的调用），不是全到期日视图。此前它计进 `ok`、DealerGEX 照标 `cboe_full_expiries`。
+_gex_view_stats = {"ok": 0, "unavailable": 0, "capped_expiries": 0, "snapshot_main_chain": 0}
 
 
 def gex_view_stats() -> dict:
@@ -560,9 +563,13 @@ def fetch_cboe_chain_for_gex(ticker: str, stock_price: float = 0.0,
     chain = fetch_cboe_chain(ticker, stock_price, timeout=timeout,
                              max_expiries=_GEX_MAX_EXPIRIES,
                              expiry_selector=_select_expiries_for_gex)
+    # v0.45.362：链上标明它是哪个视图（DealerGEX 据此写 `chain_view`，`gex_state` 据此判可得）。
+    # 快照模式下这里拿到的是截断主链（见 `_gex_view_stats` 上方注释）——**只改标签与计数，不改返回**：
+    # 政体路由照旧用它（改成不可得会改补跑日的分数，要另登边界）。
+    view = "snapshot_main_chain" if _SNAPSHOT_PROVIDER is not None else "cboe_full_expiries"
     with _cache_lock:
-        _gex_view_stats["ok" if chain else "unavailable"] += 1
-    return chain
+        _gex_view_stats[("ok" if view == "cboe_full_expiries" else view) if chain else "unavailable"] += 1
+    return {**chain, "gex_view": view} if chain else chain
 
 
 # ── 卖权行权价选择器的原始合约视图（v0.45.333）──────────────────────────
