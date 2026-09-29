@@ -1279,6 +1279,10 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 改按 OptionsAgent 的 data_quality 判 —— 只改 Oracle 的 data_quality 标签与置信度，分与方向不变；
     # 没有归档信号读 confidence / data_quality ⇒ 只动 Queen 层（同 v0.45.314 / 315）
     "v0.45.369": (),
+    # 09-28（v0.45.383，新代码 09-29 上线，等价证据见 ic_rerun_readiness 同版条目）：日线完整性校验 ⇒ 缺口日的 iv_rank
+    # 置空、Oracle 期权分的 iv_signal 走中性 ⇒ Oracle 分变、方向随分数带变（同 v0.45.349 的两条）⇒ `agent.OracleBeeEcho.*`
+    # 点名；BearBee 的 options_bear 读 Oracle 方向 ⇒ `bear.options_bear` 点名（同 349）。只在缺口日×标的上变。
+    "v0.45.383": ("agent.OracleBeeEcho.*", "bear.options_bear"),
 }
 
 

@@ -2331,6 +2331,8 @@ class AlphaHiveDailyReporter:
             _oracle_details["gex_signal_in_score"] = False
             # v0.45.369 世代印记，理由同上（本回退不贴 data_quality 标签、data_real_pct 恒 0，那个 bug 本来就不在这条路上）
             _oracle_details["options_dq_from_agent"] = True
+            # v0.45.383 世代印记，理由同上（本回退不经 OptionsAgent，没有 iv_rank 可校验，但缺键会被读成旧代码）
+            _oracle_details["hv_gap_checked"] = True
             # ── BuzzBee discovery（含 F&G）──
             _buzz_disc = ""
             if _fg_value is not None:

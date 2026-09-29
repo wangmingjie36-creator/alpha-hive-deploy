@@ -72,7 +72,8 @@ class TestCounters:
                      "cboe_chain": None,   # v0.45.190 链构造观测
                      "gex_view": None,     # v0.45.197 GEX 全链视图可得性
                      "cboe_raw": None,     # v0.45.333 卖权账本原始链各出口
-                     "options_snapshot": None}  # v0.45.238 期权快照槽位
+                     "options_snapshot": None,  # v0.45.238 期权快照槽位
+                     "hv_gap": None}  # v0.45.383 日线缺交易日的校验/重取/降级计数
         line = st.summary_line({"phases": {}, "counters": c})
         assert "—" in line and "0次" not in line
 
@@ -184,7 +185,7 @@ class TestWrite:
         assert d["date"] == "2026-09-05"
         assert d["phases"]["prefetch"] == 12.3
         assert set(d["counters"]) == {"yfinance", "twelve_data", "cboe",
-                                      "cboe_chain", "gex_view", "cboe_raw", "options_snapshot"}
+                                      "cboe_chain", "gex_view", "cboe_raw", "options_snapshot", "hv_gap"}
         assert d["extra"] == {"note": "x"}
         assert not (tmp_path / "t.json.tmp").exists(), "临时文件必须被 os.replace 掉"
 

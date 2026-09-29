@@ -832,6 +832,32 @@ _COHORT_HISTORY = [
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段（`final_score` 是 ML 特征，只在断链行变）。"
      "LLM 模式本版未动：`llm_service.interpret_options_flow` 仍在 `result` 非空时调用（样本链结果也会送进去），"
      "那是 LLM 模式的另一件事。"),
+    ("2026-09-28", "v0.45.383",
+     "日线完整性校验（用户 2026-09-29 决定：阶段 1 直接做、缺口降级为「置空」、边界照 v0.45.369 先例登记 09-28 不作废样本）。"
+     "`options_analyzer.fetch_historical_hv` 对 yfinance 的 1y 日线校验交易日连续性（`bars_integrity.find_gaps`，交易日历复用 "
+     "`is_trading_day` + 一张临时休市表）：缺口落在**最后 21 根内** ⇒ 重取一次，仍缺 ⇒ 该标的 `iv_rank` / `iv_percentile` 置 None"
+     "（`iv_rank_source` 仍是 `hv_proxy`——`signal_archive` 把非 hv_proxy 一律当真实 IV，不能新增取值），结果带 `hv_gap`（缺的日期）；"
+     "Oracle 期权分的 `iv_signal` 走既有的「None ⇒ 中性 2.0」分支。缺口序列不写缓存（缓存键 v4→v5）。"
+     "**起因**：2026-09-23 yfinance 的 1y 日线缺了 09-22 一根，当天 8/22 只标的 iv_rank 静默错位（DE 存 43.26、正确 33.45；"
+     "BRK-B 的 rv_30d 14.52、正确 12.55）——旧代码返回的 HV 列表不带日期，少一根让 20 日窗口后移一天，没有任何告警。"
+     "**改变输出的输入**：只有「最后 21 根内缺交易日」的标的；其余逐位不变（真实 yfinance 数据上 BRK-B/XOM/NVDA 与旧公式逐位相等）。"
+     "`iv_signal` 是阶梯函数（<20 → 1.0，<40 → 2.0，40–70 → 3.0，≤85 → 2.0，其余 1.0），置空变 2.0 的幅度取决于原来落哪一档。"
+     "**为什么日期写 09-28 而新代码 09-29 才上线**：09-28 那天新旧代码输出逐项相同的前提是 30 只标的当天都没有缺口。旧代码不记日期，"
+     "归档里没有字段能直接说「当时缺没缺」，所以是**用外部数据重放**证明的（`experiments/hv_gap_equivalence_audit.py`，"
+     "证据冻结在 `experiments/hv_gap_equivalence_20260928.json`）：拿 09-28 归档的 (iv_rank, iv_percentile)，看完整序列能否精确复现"
+     "（容差 0.011），并看「删掉最后 21 根里任一根」能否同样复现。**29/30 只唯一证明为完整序列**；"
+     "**VKTX 一只只能按天推断**——它的 HV 是全年最高（rank=100 / percentile=99.57），删哪根输出都不变，单看这只分辨不出；"
+     "同日 29 只被唯一证明无缺口、0 只不一致，缺口按天发生（09-23 一天 8/22 只），故判其无缺口。"
+     "⚠️ 这一只是**概率推断，不是直接证明**，证据文件里单独标 `day_level_inference`，此处如实记。"
+     "⇒ **作废 0 条** final_score 样本（另登 09-29 会作废 09-28 的 30 条）。判定机制：`_BOUNDARY_EQUIVALENCE[\"v0.45.383\"]` 读该证据文件，"
+     "**逐（日期，标的）**判；证据里没有 ⇒ 不等价（举证责任在放宽一侧），`_equivalence_scan` 为此把日期与标的传给判据。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.383\"]`：Oracle details 带字面量 `hv_gap_checked: True`（成功 / 异常兜底 / 无效 ticker / 日报合成回退都写）。"
+     "预期判定：新代码首跑之前 `no_evidence_yet`（09-28 等价、无印记）；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.383\"]` = `agent.OracleBeeEcho.*` + `bear.options_bear`（同 v0.45.349：Oracle 分与方向、"
+     "Bear 读同伴方向）；`composite.final_score` 是 ALWAYS_SLICED。前瞻检验：维度 IC 协议 H2 会随 final_score 变，但本条早于 "
+     "FORWARD_START 2026-10-12 ⇒ 不截断（同 v0.45.369）。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段"
+     "（`odds_score` / `agent_agreement` / `final_score` 是 ML 特征，只在缺口日变）。"
+     "**不在本条内**：2026-09-23 那 8 只当天分数的重放（改的是已落库的历史 predictions 行，不是口径变更，另行处理）。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1092,6 +1118,50 @@ def _equiv_oracle_chain_available(d: dict) -> bool:
     return not (isinstance(det, dict) and det.get("data_quality") == "unavailable")
 
 
+def _oracle_row_has_hv_gap_marker(d: dict) -> bool:
+    """这行是 v0.45.383 之后的代码写的吗：OracleBee `details.hv_gap_checked` 为字面量 `True`
+    （成功 / 异常兜底 / 无效 ticker / 日报合成回退都写）。只认 `is True`：此前的记录**没有**这个键。
+    **不看**实时 / 补跑——那是日期证据的问题，见 `_marker_oracle_hv_gap_checked`。"""
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("OracleBeeEcho")
+    det = o.get("details") if isinstance(o, dict) else None
+    return isinstance(det, dict) and det.get("hv_gap_checked") is True
+
+
+def _marker_oracle_hv_gap_checked(d: dict) -> bool:
+    """v0.45.383 的**日期**印记：新代码写的、且是**实时行**（补跑行不算日期证据，理由同 v0.45.373 对 369 的处理）。"""
+    return _oracle_row_has_hv_gap_marker(d) and not _is_backfill_row(d)
+
+
+#: v0.45.383 等价证据（冻结文件，由 `experiments/hv_gap_equivalence_audit.py` 生成）。代码随发布 ⇒ 锚 `__file__`，
+#: 不是生产数据（不随 `ALPHA_HIVE_HOME` 走）。
+_HV_GAP_EVIDENCE_PATH = Path(__file__).resolve().parent / "experiments" / "hv_gap_equivalence_20260928.json"
+#: 证据里算「新旧代码输出相同」的状态：唯一证明无缺口 / 按天推断（概率推断，见审计脚本）/ 新代码是空操作（非 hv_proxy 口径）
+_HV_GAP_EQUIV_STATUSES = frozenset({"verified", "day_level_inference", "not_applicable"})
+
+
+def _load_hv_gap_evidence() -> Dict[str, Dict[str, str]]:
+    """{日期: {标的: 状态}}。读不出 / 结构不对 ⇒ 空（**证不出等价就不算等价**）。每次现读——文件很小，且不缓存
+    就不会有「测试改了路径却读到旧缓存」的问题。"""
+    try:
+        with open(_HV_GAP_EVIDENCE_PATH, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return {day: {t: v.get("status") for t, v in (rec.get("tickers") or {}).items()}
+                for day, rec in (doc.get("days") or {}).items()}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _equiv_hv_gap_free(d: dict) -> bool:
+    """v0.45.383 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？= 那天那只标的的日线没有缺口。
+
+    旧代码不记日期，记录本身回答不了 ⇒ 判据读**冻结的外部证据**，按（日期，标的）查；
+    `_equivalence_scan` 把日期与标的放在 `_date` / `_ticker` 里传进来。缺这两个键或证据里没有 ⇒ False。"""
+    day, tk = d.get("_date"), d.get("_ticker")
+    if not day or not tk:
+        return False
+    return _load_hv_gap_evidence().get(day, {}).get(tk) in _HV_GAP_EQUIV_STATUSES
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1113,6 +1183,8 @@ _BOUNDARY_MARKERS = {
                   _marker_guard_macro_as_of_mode),
     "v0.45.369": ("agent_details.OracleBeeEcho.details.options_dq_from_agent is True",
                   _marker_oracle_options_dq_from_agent),
+    "v0.45.383": ("agent_details.OracleBeeEcho.details.hv_gap_checked is True",
+                  _marker_oracle_hv_gap_checked),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1134,6 +1206,9 @@ _BOUNDARY_MARKERS = {
 _BOUNDARY_EQUIVALENCE = {
     "v0.45.369": ("OracleBeeEcho.details.data_quality != \"unavailable\"（期权链取到了 ⇒ 本版改动是空操作）",
                   _equiv_oracle_chain_available, _oracle_row_is_new_code),
+    "v0.45.383": ("冻结证据 experiments/hv_gap_equivalence_20260928.json：该（日期，标的）的日线无缺口"
+                  "（verified / day_level_inference / not_applicable）",
+                  _equiv_hv_gap_free, _oracle_row_has_hv_gap_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
@@ -1302,7 +1377,8 @@ def _equivalence_scan(root: Path, boundary: str, first: Optional[str], is_new, i
             if not isinstance(r, dict):
                 continue
             examined.add((date, _tk))
-            wrapped = {"swarm_results": r}
+            # v0.45.383：判据要按（日期，标的）查冻结证据，故一并传入；其余判据只读 swarm_results，忽略这两个键
+            wrapped = {"swarm_results": r, "_date": date, "_ticker": _tk}
             if is_new(wrapped):
                 continue
             (ok if is_equiv(wrapped) else bad).add(date)
