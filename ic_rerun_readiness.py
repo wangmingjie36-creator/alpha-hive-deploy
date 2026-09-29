@@ -1053,12 +1053,31 @@ def _marker_guard_macro_as_of_mode(d: dict) -> bool:
     return isinstance(vt, dict) and "macro_as_of_mode" in vt and vt["macro_as_of_mode"] != "backfill"
 
 
-def _marker_oracle_options_dq_from_agent(d: dict) -> bool:
-    """v0.45.369：OracleBee `details.options_dq_from_agent` 为字面量 `True`（成功 / 异常兜底 / 无效 ticker /
-    日报合成回退都写）。只认 `is True`：此前的记录**没有**这个键（同 `_marker_oracle_gex_signal_neutralized` 的理由）。"""
+def _oracle_row_is_new_code(d: dict) -> bool:
+    """这行是 v0.45.369 之后的代码写的吗：OracleBee `details.options_dq_from_agent` 为字面量 `True`
+    （成功 / 异常兜底 / 无效 ticker / 日报合成回退都写）。只认 `is True`：此前的记录**没有**这个键
+    （同 `_marker_oracle_gex_signal_neutralized` 的理由）。**不看**实时 / 补跑——那是日期证据的问题，见下一个函数。"""
     o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("OracleBeeEcho")
     det = o.get("details") if isinstance(o, dict) else None
     return isinstance(det, dict) and det.get("options_dq_from_agent") is True
+
+
+def _is_backfill_row(d: dict) -> bool:
+    """这行是补跑（`--date D`）产的吗：Guard 宏观细节 `macro_as_of_mode == "backfill"`（v0.45.366 起两种口径都写）。
+    只认**显式** backfill，缺键照实时算（同 v0.45.373 对 357 时代归档的处理）。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    vt = det.get("vix_term_structure") if isinstance(det, dict) else None
+    return isinstance(vt, dict) and vt.get("macro_as_of_mode") == "backfill"
+
+
+def _marker_oracle_options_dq_from_agent(d: dict) -> bool:
+    """v0.45.369 的**日期**印记：新代码写的、且是**实时行**。
+
+    ⚠️ 补跑行不算日期证据（v0.45.373 二次检查 v0.45.366 揪出的同一形状）：补跑按目标日 D 落盘，D 不代表代码
+    何时上线 —— 部署后补跑一份早于边界的日期会把 `marker_first_seen` 拉到边界之前 ⇒ 假 `boundary_too_late`。
+    等价扫描判「这行是不是新代码」用的是 `_oracle_row_is_new_code`（不排补跑：新代码的补跑行同样不是旧口径）。"""
+    return _oracle_row_is_new_code(d) and not _is_backfill_row(d)
 
 
 def _equiv_oracle_chain_available(d: dict) -> bool:
@@ -1110,9 +1129,11 @@ _BOUNDARY_MARKERS = {
 #: 又恰好碰上改动生效的输入 ⇒ 真混算了）；印记早于边界（boundary_too_late）不受影响。
 #: ⚠️ **不能拿等价判据当印记**：它对历史上绝大多数记录都成立（bug 没触发的日子），当印记用会把全部旧归档
 #: 认成新口径 ⇒ 恒报 boundary_too_late。
+#: 值：（说明, 等价判据, 「这行是新代码写的」判据）。第三项不排补跑行——日期印记排补跑（见
+#: `_marker_oracle_options_dq_from_agent`），但新代码的补跑行同样不是「旧口径样本」，等价扫描里要跳过它。
 _BOUNDARY_EQUIVALENCE = {
     "v0.45.369": ("OracleBeeEcho.details.data_quality != \"unavailable\"（期权链取到了 ⇒ 本版改动是空操作）",
-                  _equiv_oracle_chain_available),
+                  _equiv_oracle_chain_available, _oracle_row_is_new_code),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
@@ -1212,7 +1233,7 @@ def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
     if equiv_entry is not None:
         # v0.45.369：登记了等价判据的边界，窗口 [边界, 印记首见) 内的旧代码记录逐只标的核等价；
         # 只有**不等价**的日子才算「写早了」（见 `_BOUNDARY_EQUIVALENCE`）
-        bad, equivalent_dates, examined = _equivalence_scan(root, boundary, first, is_new, equiv_entry[1])
+        bad, equivalent_dates, examined = _equivalence_scan(root, boundary, first, equiv_entry[2], equiv_entry[1])
         # 旧代码写过 ML 归档、却没在当日可读的 .swarm_results 里被核过的（文件缺 / 空 / 缺这只票）⇒ 证不出等价 ⇒ 不等价。
         # 否则换成等价分支反而丢掉了原分支本来看得见的证据（二次审查 v0.45.369）。
         _missed = {d for d, tk in unmarked_pairs

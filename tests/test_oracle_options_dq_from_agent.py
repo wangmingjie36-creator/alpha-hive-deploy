@@ -163,11 +163,14 @@ def _shift(date, days):
     return (dt.date.fromisoformat(date) + dt.timedelta(days=days)).isoformat()
 
 
-def _rec(*, new: bool, chain_ok: bool = True):
+def _rec(*, new: bool, chain_ok: bool = True, backfill: bool = False):
     det = {"data_quality": "real" if chain_ok else "unavailable", "options_score": 5.0}
     if new:
         det[MARK] = True
-    return {"agent_details": {"OracleBeeEcho": {"score": 5.0, "direction": "neutral", "details": det}}}
+    agents = {"OracleBeeEcho": {"score": 5.0, "direction": "neutral", "details": det}}
+    if backfill:     # v0.45.366 起 Guard 两种口径都写 macro_as_of_mode；补跑行是 "backfill"
+        agents["GuardBeeSentinel"] = {"details": {"vix_term_structure": {"macro_as_of_mode": "backfill"}}}
+    return {"agent_details": agents}
 
 
 def _write_archive(root, date, ticker, rec):
@@ -285,6 +288,30 @@ class TestEquivalenceBoundary:
         ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
         assert ev["verdict"] == "no_evidence_yet" and ev["equivalent_before_marker"] == [b]
         assert "等价旧记录" in rr._boundary_line(ev)
+
+    def test_backfill_before_boundary_does_not_pull_first_seen_early(self, tmp_path):
+        """部署后补跑一份早于边界的日期（按目标日 D 落盘、带新印记）⇒ 不许把首见日拉到边界前、假报 boundary_too_late
+        （v0.45.373 二次检查 v0.45.366 揪出的同一形状）。变红的变异：`_marker_oracle_options_dq_from_agent` 不排补跑行。"""
+        b = _b()
+        early = _shift(b, -3)
+        _write_archive(tmp_path, early, "AAA", _rec(new=True, backfill=True))
+        _write_swarm(tmp_path, b, {"AAA": _rec(new=False)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
+        assert ev["verdict"] == "no_evidence_yet" and ev["marker_first_seen"] is None, ev
+        # 同一份补跑之后再有实时新代码 ⇒ 首见日取实时那天
+        nxt = _shift(b, 1)
+        _write_archive(tmp_path, nxt, "BBB", _rec(new=True))
+        ev2 = rr.cohort_boundary_evidence(tmp_path, version=_V)
+        assert ev2["verdict"] == "matches" and ev2["marker_first_seen"] == nxt, ev2
+
+    def test_new_code_backfill_rows_in_window_are_not_old(self, tmp_path):
+        """窗口里新代码的补跑行（带印记、断链）不是旧口径：日期印记排补跑，但等价扫描照样跳过它。
+        变红的变异：等价扫描改用日期印记判新代码（补跑行被当成不等价旧记录）。"""
+        b, nxt = _b(), _shift(_b(), 1)
+        _write_swarm(tmp_path, b, {"AAA": _rec(new=False), "BF": _rec(new=True, chain_ok=False, backfill=True)})
+        _write_archive(tmp_path, nxt, "AAA", _rec(new=True))
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
+        assert ev["verdict"] == "matches" and ev["equivalent_before_marker"] == [b], ev
 
     def test_outage_before_any_marker_is_too_early(self, tmp_path):
         b = _b()
