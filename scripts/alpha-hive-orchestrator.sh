@@ -419,9 +419,14 @@ log "INFO" "🔁 今日尚无产出且已过 ${CATCHUP_AFTER_HHMM}，执行扫�
 # 做不到快进（工作区改动撞上 / 分叉 / 不在 main / 取不到远端）就沿用现有代码照常扫描，
 # 结局写进 logs/production_sync.json → scan_timing → status.json → Step 6 告警。
 # 走 $PYTHON3 而不是在 bash 里直接 git：bash 对本目录有 TCC 限制（见上方预检）。
+# v0.45.370：同步结局 OK（退出码 0 ⇔ outcome ∈ production_sync.OK_OUTCOMES）才置 1；
+#   下方 _orchestrator_autodeploy 只在它为 1 时部署——此时 HEAD 即 origin/main。
+_PROD_SYNC_OK=0
 if [ -f "$PROJECT_DIR/production_sync.py" ]; then
     if ! "$PYTHON3" "$PROJECT_DIR/production_sync.py" --date "$DATE_STR" >> "$LOGFILE" 2>&1; then
         log "WARN" "⚠️ 生产代码未快进到 origin/main，本轮沿用现有代码（结局见 status.json 的 scan_timing.production_sync）"
+    else
+        _PROD_SYNC_OK=1
     fi
     # 第 80 行在同步之前用旧代码读过 config.WATCHLIST ⇒ 按同步后的代码重读（同一校验）。
     # 读不出来就保留第 80 行的结果（它已兜过底），只打 WARN——新代码连 config 都 import 不了，扫描大概率也会失败。
@@ -452,6 +457,73 @@ fi
 # 初始化步骤结果
 STEPS_RESULT='{}'
 OVERALL_STATUS="success"
+
+# ================================================================
+# 编排器自动部署（v0.45.370，编排器纳入版本控制·阶段 3）
+# ================================================================
+# 把生产 checkout 本轮 HEAD 里的 scripts/alpha-hive-orchestrator.sh 部署到 launchd 执行的位置
+# （deploy_orchestrator.py 默认目标 ~/.claude/scripts/，这里**不传** --dest）。**下一轮扫描才生效**：
+#   本轮 bash 握着旧 inode，os.replace 换新 inode。不 exec 自己（锁 PID 不变 ⇒ 被判另一实例）；
+#   不许 cp / ln 覆盖（原地写会打乱运行中的 bash）。Desktop 下的 git 全由 "$PYTHON3" 读（TCC）。
+# 只在上面 production_sync 结局 OK 时部署（_PROD_SYNC_OK=1 ⇒ HEAD 即 origin/main）：
+#   否则 HEAD 可能旧于部署副本，而工具不比先后 ⇒ 会静默降级；也防旧工具把本版盖回去。
+#   跳过记 skipped（根因告警归 production_sync 自己那条 P1，不重复）。
+# 关卡全在工具里（在 origin/main 历史里 / 形状 / /bin/bash -n / 裸变量 / 漂移拒绝）；**绝不**加 --accept-drift。
+# 不按退出码分支：工具的 1/2/3 与未捕获异常 / argparse / --out 写失败撞码 ⇒ 只认记录里的 outcome。
+# ⚠️ run_step --timeout 必须重定向到文件：放进命令替换或管道会白等满超时（看门狗里的 sleep 握着 stdout）。
+# 任何结局都不升级 OVERALL_STATUS、不中断扫描（同 db_backup 先例）；failed ⇒ alert_manager 既有 P1「步骤失败」。
+# 记录 ${LOGDIR}/orchestrator_deploy.json 先删后写：一致性守卫读它区分「合入后待下一轮」与「该部署没部署」。
+# 位置：必须在 STEPS_RESULT / OVERALL_STATUS 初始化之后（之前写的会被冲掉）。
+# 守卫：tests/test_orchestrator_autodeploy.py（抽出本函数在 /bin/bash 下真跑）。
+_orchestrator_autodeploy() {
+    local _rec="${LOGDIR}/orchestrator_deploy.json"
+    local _t0 _status="failed" _json="" _outcome="" _rc="null" _new="" _dur=0
+    _t0=$(date +%s)
+    rm -f "${_rec}"
+    if [ "${_PROD_SYNC_OK:-0}" != "1" ]; then
+        _status="skipped"
+        _json='{"outcome": "skipped", "reason": "production_sync_not_ok"}'
+        log "WARN" "⏭️ 编排器自动部署跳过：生产代码本轮没快进到 origin/main（见 production_sync），HEAD 可能旧于部署副本"
+    elif [ ! -f "${PROJECT_DIR}/deploy_orchestrator.py" ]; then
+        _json='{"outcome": "tool_missing"}'
+        log "ERROR" "🚨 生产 checkout（= origin/main）里没有 deploy_orchestrator.py——编排器自动部署停摆"
+    else
+        run_step --timeout 30 "${PROJECT_DIR}/deploy_orchestrator.py" --ref HEAD --out "${_rec}" >> "${LOGFILE}" 2>&1
+        _rc=$?
+        _json="$(jq -c 'select(type == "object" and (.outcome | type) == "string")' "${_rec}" 2>/dev/null)"
+        _outcome="$(printf '%s' "${_json}" | jq -r '.outcome' 2>/dev/null)"
+        case "${_outcome}" in
+            deployed)
+                _status="success"
+                log "INFO" "🚀 编排器已部署 $(printf '%s' "${_json}" | jq -r '((.previous_blob // "无") | .[0:8]) + " → " + ((.candidate_blob // "?") | .[0:8])')（下一轮扫描生效，本轮仍是旧版）"
+                ;;
+            already_current)
+                _status="success"
+                log "INFO" "✅ 编排器部署副本已是本轮代码版本（blob $(printf '%s' "${_json}" | jq -r '(.candidate_blob // "?") | .[0:8]')）"
+                ;;
+            "")
+                _json='{"outcome": "no_record"}'
+                log "ERROR" "🚨 编排器自动部署没有结果记录（退出码 ${_rc}，124 = 超时）——部署副本状态未确认；本轮扫描照常"
+                ;;
+            *)
+                log "ERROR" "🚨 编排器自动部署未成功（${_outcome}）：$(printf '%s' "${_json}" | jq -r '((.detail // "") | tostring) + " " + ((.gate_failures // []) | map(tostring) | join("；")) | .[0:300]')——部署副本保持原样；本轮扫描照常"
+                ;;
+        esac
+    fi
+    case "${_outcome}" in
+        deployed|already_current) ;;
+        *) printf '%s\n' "${_json}" > "${_rec}" 2>/dev/null || log "WARN" "⚠️ 编排器部署结局写不进 ${_rec}（一致性守卫会按无记录判红）" ;;
+    esac
+    _dur=$(( $(date +%s) - _t0 ))
+    _new="$(printf '%s' "${STEPS_RESULT}" | jq -c --arg s "${_status}" --argjson d "${_json}" --argjson rc "${_rc}" --argjson dur "${_dur}" \
+        '. + {"orchestrator_deploy": ($d + {"status": $s, "rc": $rc, "duration_seconds": $dur})}' 2>/dev/null)"
+    if [ -n "${_new}" ]; then
+        STEPS_RESULT="${_new}"
+    else
+        log "WARN" "⚠️ 编排器自动部署结局没并进 steps_result（jq 合并失败）：status=${_status}"
+    fi
+}
+_orchestrator_autodeploy
 
 # ================================================================
 # Step 1: 数据采集 (Data Fetcher)

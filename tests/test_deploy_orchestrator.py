@@ -221,3 +221,123 @@ class TestCli:
     def test_ref_is_required(self):
         with pytest.raises(SystemExit):
             dep.main([])
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# v0.45.370（阶段 3）：历史按「每个可达提交」枚举；记录 main_commit；从检出按 --ref HEAD 真跑 CLI
+# ════════════════════════════════════════════════════════════════════════════
+
+def _edit_line(text: str, old: str, new: str) -> str:
+    assert text.count(old) == 1, old
+    return text.replace(old, new)
+
+
+class TestHistoryIncludesMergeResults:
+    """`git log --raw -- path` 的两处盲区（默认历史简化 + 合并提交不出 diff），v0.45.370 起改为逐提交枚举。"""
+
+    def test_tip_blob_created_by_auto_merge_is_on_main(self, repo, dest):
+        """两边改不同行、自动合并 ⇒ 合并提交里的文件是**哪一边都没有过**的新 blob。
+        变红的变异：`main_history_blobs` 退回 `git log --raw`（⇒ 假 refused_gate，阶段 3 每轮一条 P1）。"""
+        base_text = _script("M")
+        base = repo.commit(base_text)
+        repo._g("checkout", "-q", "-b", "side", base)
+        repo.commit(_edit_line(base_text, "# filler 5\n", "# filler 5 side\n"))
+        repo._g("checkout", "-q", "main")
+        repo.commit(_edit_line(base_text, "# filler 400\n", "# filler 400 main\n"))
+        repo._g("merge", "-q", "--no-edit", "side")
+        tip = repo._g("rev-parse", "HEAD")
+        merged = (repo.root / dep.REL_PATH).read_text(encoding="utf-8")
+        assert "filler 5 side" in merged and "filler 400 main" in merged, "前提：确实是自动合并出的新内容"
+        repo.set_main(tip)
+        r = _deploy(repo, dest, "origin/main")
+        assert r["outcome"] == "deployed", r
+
+    def test_main_blob_dropped_by_merge_is_not_drift(self, repo, dest):
+        """main 上 C 已部署；合并时「选边」取 side 的版本 ⇒ 默认历史简化会把 C 从 `log -- path` 里剪掉 ⇒
+        部署副本（= C）被误判成漂移。变红的变异：同上。"""
+        base_text = _script("B")
+        base = repo.commit(base_text)
+        c = repo.commit(_edit_line(base_text, "# filler 7\n", "# filler 7 C\n"))
+        repo.set_main(c)
+        assert _deploy(repo, dest, "origin/main")["outcome"] == "deployed"
+        repo._g("checkout", "-q", "-b", "side", base)
+        repo.commit(_edit_line(base_text, "# filler 9\n", "# filler 9 S\n"))
+        repo._g("checkout", "-q", "main")
+        repo._g("merge", "-q", "--no-ff", "--no-commit", "side")
+        repo._g("checkout", "side", "--", dep.REL_PATH)
+        repo._g("commit", "-q", "-m", "merge side, take side's orchestrator")
+        repo.set_main(repo._g("rev-parse", "HEAD"))
+        r = _deploy(repo, dest, "origin/main")
+        assert r["outcome"] == "deployed" and r["drift"] is False, r
+
+    def test_history_equals_bruteforce(self, repo):
+        """集合 = 对每个可达提交 `rev-parse <c>:path`（文件不存在的提交跳过）——按定义对账。"""
+        base_text = _script("X")
+        base = repo.commit(base_text)
+        repo._g("checkout", "-q", "-b", "side", base)
+        repo.commit(_edit_line(base_text, "# filler 3\n", "# filler 3 s\n"))
+        repo._g("checkout", "-q", "main")
+        repo.commit(_edit_line(base_text, "# filler 300\n", "# filler 300 m\n"))
+        repo._g("merge", "-q", "--no-edit", "side")
+        (repo.root / "other.txt").write_text("x", encoding="utf-8")
+        repo._g("add", "-A")
+        repo._g("commit", "-q", "-m", "unrelated")
+        repo.set_main(repo._g("rev-parse", "HEAD"))
+        brute = set()
+        for c in repo._g("rev-list", "origin/main").split():
+            r = subprocess.run(["git", "-C", str(repo.root), "rev-parse", f"{c}:{dep.REL_PATH}"],
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                brute.add(r.stdout.strip())
+        assert dep.main_history_blobs(repo.root, "origin/main") == brute and len(brute) == 4
+
+
+class TestRecordsMainCommit:
+    def test_main_commit_on_every_outcome(self, repo, dest):
+        """一致性守卫拿 `main_commit` 判「合入后待下一轮」。变红的变异：不记录 / 记成 ref 名。"""
+        repo.set_main(repo.commit(_script("V1")))
+        tip = repo._g("rev-parse", "origin/main")
+        assert _deploy(repo, dest, "origin/main")["main_commit"] == tip          # deployed
+        assert _deploy(repo, dest, "origin/main")["main_commit"] == tip          # already_current
+        side = repo.commit(_script("V2"))                                         # 未合入
+        r = _deploy(repo, dest, side)
+        assert r["outcome"] == "refused_gate" and r["main_commit"] == tip
+
+
+class TestCliFromCheckoutAsPhase3CallsIt:
+    """编排器阶段 3 的真实调用形状：在生产检出里 `deploy_orchestrator.py --ref HEAD --out <记录>`，**不传 --dest**。
+    把工具（未跟踪）拷进临时仓库、子进程真跑 ⇒ `__file__` 解析仓库、默认目标跟 HOME 走都被真执行。"""
+
+    def test_ref_head_default_dest(self, repo, tmp_path):
+        import pwd
+        import shutil
+        import sys
+        # 真实部署副本按账户家目录求，**不经 HOME**：autouse 已把 HOME 指向沙箱，而 `tests._orchestrator` 若在本用例里
+        # 才首次被导入，它的 DEPLOYED_ORCH 会冻在沙箱里（实测踩过）⇒ 下面的「真实副本没被动」就恒真了。
+        DEPLOYED_ORCH = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".claude" / "scripts" / "alpha-hive-orchestrator.sh"
+        assert not DEPLOYED_ORCH.resolve().is_relative_to(tmp_path.resolve())
+        root_code = Path(dep.__file__).resolve().parent
+        for f in ("deploy_orchestrator.py", "orchestrator_lint.py"):
+            shutil.copy(root_code / f, repo.root / f)
+        repo.set_main(repo.commit(_script("P3")))
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        home = Path(env["HOME"]).resolve()
+        assert home.is_relative_to(tmp_path.resolve()), "HOME 没指向沙箱——会写到真实部署副本"
+
+        def _fp():
+            if not DEPLOYED_ORCH.exists():
+                return None
+            st = DEPLOYED_ORCH.stat()
+            import hashlib
+            return hashlib.sha256(DEPLOYED_ORCH.read_bytes()).hexdigest(), st.st_ino
+        before = _fp()
+        out = tmp_path / "logs" / "orchestrator_deploy.json"
+        r = subprocess.run([sys.executable, str(repo.root / "deploy_orchestrator.py"), "--ref", "HEAD", "--out", str(out)],
+                           capture_output=True, text=True, env=env, cwd=str(tmp_path))
+        assert _fp() == before, "真实部署副本被动了"
+        assert r.returncode == 0, r.stdout + r.stderr
+        rec = json.loads(out.read_text(encoding="utf-8"))
+        assert rec["outcome"] == "deployed" and rec["main_commit"] == repo._g("rev-parse", "origin/main")
+        deployed = home / ".claude" / "scripts" / "alpha-hive-orchestrator.sh"
+        assert deployed.read_text(encoding="utf-8") == _script("P3")
+        assert os.stat(deployed).st_mode & 0o777 == 0o755

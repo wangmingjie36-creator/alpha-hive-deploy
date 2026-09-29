@@ -240,7 +240,53 @@ VRP 账本 BRK-B 的 rv / iv 也全非空。真正有问题的是**值**，不�
 - 全套 7274 passed / 2 xfailed（照例 deselect 两条环境测试）。
 
 
-## [0.45.370] — 2026-09-29 — 占位（进行中：编排器纳入版本控制·阶段 3——扫描前自动部署编排器；接手原会话）
+## [0.45.370] — 2026-09-29 — Added：编排器纳入版本控制·阶段 3——扫描前自动部署（合入后下一个扫描日部署、再下一个扫描日生效）；Fixed：部署工具的「main 历史」对合并提交是瞎的
+
+接手原会话（该会话已下线、阶段 3 未开工；用户 09-29「解决 B 还卡在编排器第三阶段的问题」）。设计走了一轮工作流：三路只读摸底
+（编排器流程 / 部署工具 / 测试）→ 两套独立设计（风险优先、可观测优先）→ 对抗评审合成一份规格（评审在临时仓库与 bash 3.2 下实测了下面每一条）。
+
+### Added
+- `scripts/alpha-hive-orchestrator.sh`：
+  - 生产同步结局 OK（`production_sync.py` 退出码 0 ⇔ outcome ∈ OK_OUTCOMES）才置 `_PROD_SYNC_OK=1`。
+  - `_orchestrator_autodeploy`（STEPS_RESULT 初始化之后、Step 1 之前调一次）：同步 OK 才跑
+    `run_step --timeout 30 deploy_orchestrator.py --ref HEAD --out ~/.claude/logs/orchestrator_deploy.json`（不传 `--dest`，
+    绝不加 `--accept-drift`）。**只认记录里的 outcome、不认退出码**（工具的 1/2/3 与未捕获异常 / argparse / `--out` 写失败撞码）。
+    结局进 `steps_result.orchestrator_deploy`（`status` success/failed/skipped + `rc` + `duration_seconds`）；failed ⇒ alert_manager 既有
+    「步骤失败」P1；skipped（同步没成功）不另报（根因归 production_sync 自己那条告警）。**任何结局都不升级 OVERALL_STATUS、不中断扫描。**
+    记录先删后写：非成功结局由 bash 写一份小记录（skipped / tool_missing / no_record）。
+  - 为什么同步不 OK 就不部署：那时 HEAD 可能旧于部署副本，而工具不比先后 ⇒ 会静默降级，也会让旧工具把新编排器盖回去。
+  - ⚠️ `run_step --timeout` 必须重定向到文件：放进 `$(...)` 或管道会白等满超时（看门狗的 sleep 握着 stdout；实测 4s vs 0s）。
+- `tests/test_orchestrator_autodeploy.py`：位置 / 形状（静态）+ 抽出函数与真 `run_step` 在 `/bin/bash`（3.2）+ `set -uo pipefail` 下、
+  C 与 en_US.UTF-8 两种 locale 真跑 13 种情形（deployed / already_current / refused_gate / refused_drift / error / would_deploy /
+  crash / `--out` 写失败 / 记录是垃圾 / 同步 0 / 同步未设 / 工具缺失 / 挂死超时），假 PYTHON3 ⇒ 真工具永不执行。
+
+### Fixed
+- `deploy_orchestrator.main_history_blobs`：`git log --raw -- path` 默认历史简化 + 合并提交不出 diff ⇒ ① 自动合并 / 解冲突新产生的 blob
+  看不见（阶段 3 起会变成每轮一条假 refused_gate P1）；② 被「选边」合并丢掉的 main 旧版看不见（部署副本恰是那版 ⇒ 假 refused_drift）。
+  改为按定义枚举：`rev-list` 全部可达提交 + `cat-file --batch-check` 取 `<提交>:<路径>`。真实仓库上与旧法同为 2 个 blob（今天恰好无影响）。
+  一致性守卫原先抄了同一条命令，现改调同一个函数。
+
+### Changed
+- 部署工具记录 `main_commit`（先把 `--main-ref` 钉成提交再取历史，并发 fetch 不会让记录与判定分家）。
+- 一致性守卫 `tests/test_orchestrator_deployed_matches_repo.py`：「未部署」改为「未部署且不属于待下一轮」——读部署记录，上一轮成功、
+  副本未被换过、那一轮的 main 提交仍在 main 上且当时部署的正是它的版本、记录 ≤ 6 天（`PENDING_MAX`，日历天、保守上界）⇒ 放行；
+  否则按理由红并给处置。`TestPendingVerdictHasTeeth` 每个分支一条（`now` 注入，无时间炸弹）。
+- `tests/_orchestrator.py`：新增 `DEPLOY_RECORD`、共用 `extract_function`（从 step5 测试挪来）；两个生产路径改按**账户家目录**（`pwd`）求值——
+  此前 import 时读 HOME，若本模块在某条把 HOME 指向沙箱的用例里首次被导入就冻在沙箱里（写本版测试时实测踩到）。
+
+### 上线
+- 本版合入后先**手动部署一次**（阶段计划里的「最后一次手改部署副本」，走工具、不 cp）：`deploy_orchestrator.py --ref origin/main --dry-run`，
+  再去掉 `--dry-run` 加 `--out ~/.claude/logs/orchestrator_deploy.json`。**时机：09-29 扫描跑完之后**（不拿当天扫描冒险）；
+  之后每个扫描日自动部署。耦合提醒：合入的编排器改动在「下一个扫描日」被部署、那一轮仍跑旧版，**再下一个扫描日**才执行 ⇒ 与 Python
+  耦合的改动（含 B）要兼容一轮。
+- 首个自动轮核对：`jq .steps_result.orchestrator_deploy ~/.claude/reports/status.json` 应为 `already_current`、`dest` 是
+  `/Users/igg/.claude/scripts/alpha-hive-orchestrator.sh`（同时证实 launchd 下 HOME 已设，此前**待验证**）。
+
+### 验证
+- 编排器相关测试 746 条全绿（本版三个新 / 改测试文件 + scan_catchup / braced_vars / step5 / scan_timing / code_version /
+  orchestrator_steps / data_backup）；`/bin/bash -n` 通过、`find_unbraced` 为空。
+- 变异 12/12 红（去同步判断 / 去先删记录 / run_step 进命令替换 / 加 set_status / 裸变量紧跟全角 / 非成功不写记录 / `=1` 挪出 else /
+  按退出码判成功 / 历史退回 `git log --raw` / 不记 main_commit / pending 恒放行 / PENDING_MAX 无穷），驱动核对 collected 并逐条还原核哈希。
 
 ## [0.45.369] — 2026-09-29 — 占位（进行中：OracleBee 期权链不可得仍标 real + 置信度 0.7 → 按 OptionsAgent data_quality 判；并入 09-28 世代边界）
 

@@ -7,7 +7,8 @@
 v0.45.353 起编排器受版本控制，但 launchd 仍执行 `~/.claude/scripts/` 下的部署副本
 （不用软链接：launchd 下 bash 对 `~/Desktop` 有 TCC 限制，见编排器 production_sync 段注释）。
 部署这一步是**唯一能拦住坏版本的时刻**——软链接没有这个时刻，一保存就生效。
-阶段 2 只提供工具与手动入口；阶段 3 才把它接进扫描前同步之后。
+阶段 2 只提供工具与手动入口；**阶段 3（v0.45.370）已接入**：编排器在扫描前同步（production_sync）**成功之后**
+调 `--ref HEAD --out ~/.claude/logs/orchestrator_deploy.json`（同步没成功就不部署，见编排器 `_orchestrator_autodeploy`）。
 
 部署什么：**永远是 git 里的一个 blob**（`--ref` 指定，必填），从不读工作区文件
 ⇒ 未提交的改动、生产 checkout 里的脏文件，都到不了 launchd。
@@ -38,9 +39,9 @@ v0.45.353 起编排器受版本控制，但 launchd 仍执行 `~/.claude/scripts
 结果：stdout 一行 JSON；`--out` 另写一份（**无默认路径**：调用方显式给，
 免得凭空多一个要登记进 `PATHS` 的产物）。
 
-手动部署（阶段 3 之前，从任一 worktree）：
+手动部署（首次上线 / 急用 / 回滚，从任一处于 origin/main 的 worktree；带 `--out` 留下记录，一致性守卫读它）：
   /usr/local/bin/python3 deploy_orchestrator.py --ref origin/main --dry-run
-  /usr/local/bin/python3 deploy_orchestrator.py --ref origin/main
+  /usr/local/bin/python3 deploy_orchestrator.py --ref origin/main --out ~/.claude/logs/orchestrator_deploy.json
 """
 
 from __future__ import annotations
@@ -59,7 +60,6 @@ from orchestrator_lint import find_unbraced
 REL_PATH = "scripts/alpha-hive-orchestrator.sh"
 DEFAULT_MAIN_REF = "origin/main"
 BASH = "/bin/bash"          # launchd plist 用的就是它（3.2）；关卡要测真执行者
-_NULL_BLOB = "0" * 40
 
 OK_OUTCOMES = frozenset({"deployed", "already_current", "would_deploy"})
 _EXIT = {"deployed": 0, "already_current": 0, "would_deploy": 0,
@@ -95,10 +95,20 @@ def blob_of(repo: Path, data: bytes) -> str:
 
 
 def main_history_blobs(repo: Path, main_ref: str) -> set:
-    raw = _git(repo, "log", "--no-abbrev", "--raw", "--format=", main_ref, "--", REL_PATH).decode()
-    blobs = {ln.split()[3] for ln in raw.splitlines() if ln.startswith(":")}
-    blobs.discard(_NULL_BLOB)
-    return blobs
+    """`main_ref` 可达的**每一个**提交里 REL_PATH 的 blob（v0.45.370）。
+
+    不用 `git log --raw -- path`：默认历史简化 + 合并提交不出 diff ⇒ 两种漏：
+      · 自动合并 / 解冲突**新产生**的 blob 看不见 ⇒ 假 refused_gate（阶段 3 起每轮一条 P1）；
+      · 被「选边」合并丢掉的 main 旧版看不见 ⇒ 部署副本若恰是那版 ⇒ 假 refused_drift。
+    两种都在临时仓库实测过（`tests/test_deploy_orchestrator.py` 的合并用例）。
+    这里按定义直接枚举：`rev-list` 列出全部可达提交，`cat-file --batch-check` 逐个取 `<提交>:<路径>`；
+    某提交里没有这个文件 ⇒ 那行是 `... missing`，第二列不是 `blob`，丢掉。仍只含 main 可达提交里的 blob ⇒
+    「只部署已合入 main 的版本」不变。
+    """
+    shas = _git(repo, "rev-list", main_ref).decode().split()
+    spec = "".join(f"{s}:{REL_PATH}\n" for s in shas).encode()
+    out = _git(repo, "cat-file", "--batch-check=%(objectname) %(objecttype)", stdin=spec).decode()
+    return {p[0] for p in (ln.split() for ln in out.splitlines()) if len(p) == 2 and p[1] == "blob"}
 
 
 def gate_failures(data: bytes, tmp_file: Path) -> List[str]:
@@ -123,7 +133,7 @@ def deploy(ref: str, *, repo: Optional[Path] = None, dest: Optional[Path] = None
            accept_drift: bool = False) -> Dict:
     repo = repo or _repo_root()
     dest = dest or default_dest()
-    res: Dict = {"outcome": None, "ref": ref, "main_ref": main_ref, "dest": str(dest),
+    res: Dict = {"outcome": None, "ref": ref, "main_ref": main_ref, "main_commit": None, "dest": str(dest),
                  "candidate_blob": None, "previous_blob": None, "commit": None,
                  "gate_failures": [], "drift": None, "backup": None,
                  "dry_run": dry_run, "detail": None,
@@ -138,7 +148,10 @@ def deploy(ref: str, *, repo: Optional[Path] = None, dest: Optional[Path] = None
         res["commit"] = _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").decode().strip()
         data = _git(repo, "cat-file", "blob", f"{res['commit']}:{REL_PATH}")
         cand = res["candidate_blob"] = blob_of(repo, data)
-        history = main_history_blobs(repo, main_ref)
+        # v0.45.370：先把 main_ref 钉成一个提交再取历史——并发 fetch 挪动 main_ref 时，记录的提交与判定用的历史
+        # 仍是同一份；一致性守卫拿 `main_commit` 判「合入后待下一轮」还是「该部署没部署」
+        res["main_commit"] = _git(repo, "rev-parse", "--verify", f"{main_ref}^{{commit}}").decode().strip()
+        history = main_history_blobs(repo, res["main_commit"])
         if not history:
             return done("error", f"{main_ref} 的历史里没有 {REL_PATH}——ref 或路径不对，无法判定")
 

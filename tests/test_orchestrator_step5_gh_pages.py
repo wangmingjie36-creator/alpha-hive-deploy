@@ -20,25 +20,16 @@ skip 的测试在 CI 上恒 skip（v0.45.334 的 bug 就是这样藏了一天，
 """
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from tests._orchestrator import repo_orchestrator_text
+from tests._orchestrator import extract_function, repo_orchestrator_text
 
 _ROOT = Path(__file__).resolve().parent.parent
 _FUNC = "_step5_gh_pages_verdict"
-
-
-def extract_function(text: str, name: str) -> str:
-    """抽出 `name() {` 到其后第一行恰为 `}` 的函数体（编排器里函数体都是 4 空格缩进）。"""
-    m = re.search(rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text, re.S | re.M)
-    if not m:
-        raise LookupError(f"编排器里找不到函数 {name}")
-    return m.group(0)
 
 
 def _run(func_src: str, *, project_dir: Path, logs_dir: Path, step2_rc: int,
