@@ -459,8 +459,8 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
         与它在不在，返回 []。此前会照常改写成「其它日期的行 + 空列表」，即把该日已有的行
         （含 settle 过的）整批删掉——cache 目录找错、当日快照缺失时都会触发。
       · 本次重算到的票 ⇒ 替换该票该日的旧行（结算字段照 M4 搬过来）。
-      · 该日已有、但本次**没有重算到**的票 ⇒ 旧行原样保留并打 WARNING。缺快照不是
-        「这条信号作废」的证据，只是这次没有输入；已结算的样本删了就再也补不回来。
+      · 该日已有、但本次**没有重算到**的票（快照缺失 / 读不出 / 计算抛异常）⇒ 旧行原样保留并打 WARNING。
+        这不是「这条信号作废」的证据，只是这次没有输入；已结算的样本删了就再也补不回来。
         要撤掉某条信号，请直接编辑账本，别指望靠删快照重跑。
     返回值只含本次算出的信号（日报把它交给 options_paper_leg 开仓），不含保留的旧行。"""
     return _scan_with_info(as_of, cache_dir, earnings_cache_dir, watcher, stats_fn, upcoming_fn)[0]
@@ -550,7 +550,7 @@ def _scan_with_info(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_
     if kept:
         info["kept"] = [s.get("ticker") for s in kept]
         settled = [s.get("ticker") for s in kept if s.get("settled_on")]
-        _log.warning("财报事件波动率信号 %s：该日已有 %d 行本次没有重算到（无快照），原样保留：%s%s",
+        _log.warning("财报事件波动率信号 %s：该日已有 %d 行本次没有重算到（快照缺失 / 读不出 / 计算失败，原因见上方 WARNING），原样保留：%s%s",
                      as_of, len(kept), ", ".join(str(t) for t in info["kept"]),
                      f"（其中已结算：{', '.join(str(t) for t in settled)}）" if settled else "")
     rest = [s for s in all_rows if not (s.get("as_of") == as_of and s.get("ticker") in new_tickers)]

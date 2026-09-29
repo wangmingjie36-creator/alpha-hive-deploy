@@ -537,6 +537,27 @@ class TestScanNeverDeletesRowsItDidNotRecompute:
         evs.scan(AS_OF, cache_dir=state, stats_fn=lambda tk: _stats(), upcoming_fn=lambda tk: UP)
         assert evs.SIGNALS_FILE.read_bytes() == after_first
 
+    def test_kept_rows_warning_does_not_claim_missing_snapshot_when_it_exists(self, state, monkeypatch, caplog):
+        """快照在、但计算抛异常 / 快照坏 JSON 的票：旧行照留，WARNING 不许说成「无快照」（那是另一种病因）。"""
+        _seed_ledger()
+        _write_snap(state, "ABC", AS_OF, _qs(), rv=20.0)                       # 正常，被重算
+        _write_snap(state, "XYZ", AS_OF, _qs(), rv=20.0)                       # 快照在，compute 会炸
+        (state / f"options_snapshot_DEF_{AS_OF}.json").write_text("{not json")  # 快照坏
+        real = evs.compute_signal
+
+        def boom(tk, *a, **k):
+            if tk == "XYZ":
+                raise RuntimeError("boom")
+            return real(tk, *a, **k)
+        monkeypatch.setattr(evs, "compute_signal", boom)
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            r = evs.scan(AS_OF, cache_dir=state, stats_fn=lambda tk: _stats(), upcoming_fn=lambda tk: UP)
+        assert [s["ticker"] for s in r] == ["ABC"]
+        kept = {s["ticker"]: s for s in evs.load_signals() if s["as_of"] == AS_OF}
+        assert kept["XYZ"]["settled_on"] == "2026-09-25" and set(kept) == {"ABC", "XYZ", "DEF"}
+        msg = _warnings(caplog)
+        assert "（无快照）" not in msg and "计算失败" in msg and "读不出" in msg
+
     def test_warning_names_the_two_wrong_directory_causes(self, state, tmp_path, monkeypatch, caplog):
         _seed_ledger()
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
