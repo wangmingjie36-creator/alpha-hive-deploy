@@ -668,7 +668,7 @@ window.AH.initTradingStats=function(){
       '<b>真实回测口径</b>（max_concurrent='+maxConc+' 并发限制 / '+
       '每笔 = 当前 NAV 的固定比例，按已实现盈亏复利）'+
       '</div>';
-    html+=card((netPct>=0?'+':'')+netPct.toFixed(2)+'%','Net 累计收益',netColor,
+    html+=card((netPct>=0?'+':'')+netPct.toFixed(2)+'%','累计收益',netColor,
       '$'+Math.round(real.final_nav).toLocaleString()+' / 起始 $'+Math.round(initCap).toLocaleString());
     html+=card(spyAvail?((spyPct>=0?'+':'')+spyPct.toFixed(2)+'%'):'—','SPY 同期基准',spyColor,
       spyAvail?((real.spy_period_start&&real.spy_period_end)
@@ -693,7 +693,7 @@ window.AH.initTradingStats=function(){
     // 它以前被并进「持有到 T+7」；单列出来又不给它读者，就成了另一个死字段。
     if(ts.exit_cutoff_count)
       html+=card(ts.exit_cutoff_count,'窗口截断强平','var(--neut)','未到期，按 0 收益结算');
-    html+=card(ts.avg_cost!=null?(ts.avg_cost*100).toFixed(1)+'bp':'—','平均单笔成本','var(--ts)','滑点+佣金+借券');
+    // v0.45.374：门面改零成本口径，「平均单笔成本」卡恒为 0bp，已去掉。
 
     // v0.45.179：曲线与本区块**同源**——都来自 portfolio_backtest 的同一次
     // run_backtest()，曲线就是那次回测的 NAV 路径，终点 == 上面的 final_nav。
@@ -718,7 +718,7 @@ window.AH.initTradingStats=function(){
   box.innerHTML=html;
 };
 
-// ── Equity Curve (3 lines: Gross / Net / SPY, compound) ──
+// ── Equity Curve (2 lines: 策略 / SPY, compound；v0.45.374 起零成本口径) ──
 window.AH.initEquityCurve=function(){
   var eq=__AH__.equity_curve;
   var container=document.getElementById('eqCurveContainer');
@@ -765,9 +765,9 @@ window.AH.initEquityCurve=function(){
   var tc=_tok('--ts');
   var gc=_tokA('--border',.5);
   var labels=eq.map(function(d){return d.date.slice(5);});
-  // 三条曲线：net (绿, 主), gross (锈红虚线, 辅参考), spy (灰, 基准)
+  // 两条曲线：策略 (绿, 主), spy (灰, 基准)。
+  // v0.45.374：回测改零成本口径后 gross == net，Gross 虚线与主线完全重合，已去掉。
   var netData =eq.map(function(d){return d.cum_net_pct!=null?d.cum_net_pct:d.cum;});
-  var grossData=eq.map(function(d){return d.cum_gross_pct!=null?d.cum_gross_pct:d.cum;});
   // null 保持 null（Chart.js 会断开该点），不许变 0 —— 0 读作"大盘当天没动"。
   var spyData =eq.map(function(d){return d.cum_spy_pct!=null?d.cum_spy_pct:null;});
 
@@ -776,12 +776,9 @@ window.AH.initEquityCurve=function(){
     data:{
       labels:labels,
       datasets:[
-        {label:'Net (真实可交易)', data:netData,
+        {label:'策略净值', data:netData,
          borderColor:_tok('--bull'), backgroundColor:_tokA('--bull',.08), fill:true,
          tension:.25, pointRadius:0, borderWidth:2.5, order:1},
-        {label:'Gross (不扣成本)', data:grossData,
-         borderColor:_tok('--acc'), backgroundColor:'transparent', fill:false,
-         tension:.25, pointRadius:0, borderWidth:1.5, borderDash:[4,3], order:2},
         // v0.45.179：这条线现在**真的是**买入持有（首日建仓、持有至各结算日），
         // 与上方卡片「SPY 同期基准」同口径同区间。旧实现是"每笔 7 日 SPY 收益 ×
         // $5K 累加"——会随交易笔数放大，实测 +19.33% vs 买入持有 +15.73%，
@@ -813,16 +810,15 @@ window.AH.initEquityCurve=function(){
     var last=eq[eq.length-1];
     var ts=__AH__.trading_stats||{};
     function pct(v){return v==null?'—':((v>=0?'+':'')+Number(v).toFixed(2)+'%');}
-    var netCum=last.cum_net_pct, grossCum=last.cum_gross_pct, spyCum=last.cum_spy_pct;
+    var netCum=last.cum_net_pct, spyCum=last.cum_spy_pct;
     var netColor=netCum==null?'var(--ts)':(netCum>=0?'var(--bull)':'var(--bear)');
     // Max DD 取 trading_stats（= 回测 NAV 路径口径），与卡片「最大回撤」同一个数。
     // 旧实现这里另算一份、且 ||0 会把"没算出来"渲染成"零回撤"。
     var mdd=ts.max_dd_net_pct;
     statsEl.innerHTML=
-      '<div class="eq-stat"><span class="ev" style="color:'+netColor+'">'+pct(netCum)+'</span><span class="el">Net 累计</span></div>'+
-      '<div class="eq-stat"><span class="ev">'+pct(grossCum)+'</span><span class="el">Gross 累计</span></div>'+
+      '<div class="eq-stat"><span class="ev" style="color:'+netColor+'">'+pct(netCum)+'</span><span class="el">累计收益</span></div>'+
       '<div class="eq-stat"><span class="ev">'+pct(spyCum)+'</span><span class="el">SPY 基准 (买入持有)</span></div>'+
-      '<div class="eq-stat"><span class="ev" style="color:var(--bear)">'+(mdd==null?'—':'-'+Number(mdd).toFixed(2)+'%')+'</span><span class="el">Max DD (Net)</span></div>'+
+      '<div class="eq-stat"><span class="ev" style="color:var(--bear)">'+(mdd==null?'—':'-'+Number(mdd).toFixed(2)+'%')+'</span><span class="el">最大回撤</span></div>'+
       '<div class="eq-stat"><span class="ev">'+eq.length+'</span><span class="el">入场笔数</span></div>';
   }
 };

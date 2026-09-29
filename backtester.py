@@ -838,6 +838,24 @@ def _slice_by_date(df, start, end):
     return df[mask]
 
 
+def stop_loss_pct_for(ticker: str, direction: str, exit_cfg: Optional[Dict] = None) -> float:
+    """该笔在路径依赖出场里实际使用的止损距离（%，如 5.0 = 5%）。
+
+    唯一真相 = `config.TRADING_EXITS_CONFIG`：多空走 `sl_overrides`（缺省 `stop_loss_pct`），
+    中性（及任何未知方向，与 `_compute_path_dependent_exit` 的规范化一致）走 `neutral_sl_pct`。
+    `Backtester` 的出场模拟与 `portfolio_backtest` 的按止损距离定仓（v0.45.375）都经这里取数，
+    两边不会各抄一份后漂移。
+    """
+    if exit_cfg is None:
+        import config as _cfg
+        exit_cfg = getattr(_cfg, "TRADING_EXITS_CONFIG", {}) or {}
+    _dir = (direction or "").strip().lower()
+    if _dir not in ("bullish", "bearish"):
+        return float(exit_cfg.get("neutral_sl_pct", 15.0))
+    _overrides = exit_cfg.get("sl_overrides") or {}
+    return float(_overrides.get(ticker, exit_cfg.get("stop_loss_pct", 5.0)))
+
+
 class Backtester:
     """
     回测引擎 - 自动检验预测准确率
@@ -1395,8 +1413,7 @@ class Backtester:
                 }
 
             # 升级2: per-ticker 自适应止损
-            _sl_overrides = _exit_cfg.get("sl_overrides") or {}
-            sl_pct = float(_sl_overrides.get(ticker, _exit_cfg.get("stop_loss_pct", 5.0)))
+            sl_pct = stop_loss_pct_for(ticker, "bullish", _exit_cfg)  # 多空同一距离
             tp_pct = float(_exit_cfg.get("take_profit_pct", 10.0))
             exit_slip_bps = float(_exit_cfg.get("slippage_on_exit_bps", 5))
 
@@ -1456,7 +1473,7 @@ class Backtester:
                 sl_price = entry_price * (1 + sl_pct / 100.0)   # 标的涨到这即止损
             else:
                 # 中性方向：只有宽松止损保护（防止 CRCL -30% 类灾难），无止盈
-                _neutral_sl = float(_exit_cfg.get("neutral_sl_pct", 15.0))
+                _neutral_sl = stop_loss_pct_for(ticker, "neutral", _exit_cfg)
                 sl_price = entry_price * (1 - _neutral_sl / 100.0)  # 下跌保护
                 tp_price = None  # 中性不设止盈
 

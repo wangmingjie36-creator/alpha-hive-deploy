@@ -5,6 +5,54 @@
 
 ---
 
+## [0.45.377] — 2026-09-28 — CI 红的四条测试按根因修：沙箱 HOME 丢了 git 身份、测试写死 Mac 解释器、变异测试依赖浅克隆里没有的历史
+
+### Fixed
+- `tests/test_data_backup.py::_sandbox_home`：沙箱 HOME 同时隔掉了 `~/.gitconfig`（提交身份）。`git commit` 能否成功于是取决于主机名——Mac 的 `xxx.local` 推得出邮箱，Linux runner 推不出 ⇒ "Author identity unknown" ⇒ `TestPushTimeout` 停在 stage=commit（Mac 绿、CI 红）。夹具里写一份只含测试身份 + `commit.gpgsign=false` 的 `.gitconfig`，此前各测试手抄 `git config user.email` 的做法不再需要人记。
+- `tests/test_ghpages_data_root_migration.py::TestApplyCodeShippedFallbackPreconditionSurvivesOptimization`（3 条）：
+  - 子进程解释器 `/usr/local/bin/python3` → `sys.executable`（runner 上无此路径 ⇒ FileNotFoundError；同 v0.45.117 `test_no_undefined_names.py` 的修法）。
+  - 变异测试不再运行时 `git show 61f21d37:report_deployer.py`（CI 浅克隆里没有该提交 ⇒ 退出 128）：旧 `assert` 守卫原样节选嵌入测试（与历史逐字核对一致），变异体 = 当前源码只替换那一处守卫；找不到当前守卫原文即红，不许变异静默落空。
+- 验证：仿 CI 环境（`git clone --depth 1` + 移除 `/usr/local/bin/python3`）下，原版 4 红、修复版 4 绿（另 1 条同组正向测试两边都绿）。
+
+### Added
+- `tests/test_tests_use_running_interpreter.py`：AST 扫 `tests/`，恰好等于 `/usr/local/bin/python3` 的字符串常量（当 argv[0] 用的形状）即红；说明文字里提到该路径不算。同一形状已出现两次，注释挡不住第三次。含有牙自证（对原版测试文件实测命中 2 处）。
+
+### 未处理
+- `test_economic_calendar::TestCoverageHorizon`：BLS 官方尚未发布后续日程，无数据可补，按用户判断维持现状。
+- `test_gh_pages_unverified_parent::TestRecovery::test_network_returns_mid_retry_and_deploy_really_lands`：本机间歇失败（未改动版本 6 次 1 红），CI 未出现；根因未查，另列任务。
+
+## [0.45.376] — 2026-09-28 — 策略层优势检验：预注册 + 执行器（未就绪盲化、只看世代前 52 周）
+
+### Added
+- `experiments/strategy_edge_prereg.md`：问「网站那套策略在当前世代每笔期望收益是否 > 0」。单位 = 入场 ISO 周的周均收益（零成本 gross）；样本 = 当前世代（`ic_rerun_readiness.cohort_start()`）前 52 个已结清周（周日 + 21 天）；单样本 t、t 分布、单侧 α=0.05；判定后行动（半凯利 / 不加仓）登记时写死。如实披露：起草人只看过旧世代 191 笔；MDE ≈ +1.44%/周均；**若评分逻辑持续登记新世代（登记当天就 4 条），本检验永远不会就绪**。
+- `experiments/strategy_edge_test.py`：`assess()` 就绪闸；未就绪只返回周数 / 笔数（`BLINDED_KEYS` 不出现）；就绪后只取前 52 周 ⇒ 之后再跑答案不变（无需冻结文件）；回测失败 ⇒ `undetermined`（退出码 3），不冒充「未就绪」。
+- `tests/test_strategy_edge_test.py`（12 条）：文档常量块 ↔ `PREREG` 逐项对钉；**网站实际回测实参 == 预注册冻结实参**（网站启用按止损定仓等 ⇒ 红，迫使显式重登记）；盲化 / 前 N 周 / 结清宽限 / 世代与 WINDOW_CUTOFF 排除 / 周均非逐笔 / 单侧判定。变异 4 处（用全部周、未就绪也算、去结清判断、网站改实参）实测变红。
+
+## [0.45.375] — 2026-09-28 — 回测新增「按止损距离定仓」选项（默认关闭）；止损距离收口为单一真相
+
+### Added
+- `portfolio_backtest.BacktestConfig.risk_per_trade_pct`（默认 `None` = 关闭）：开启后仓位占比 = `min(风险预算 / 止损距离, 原方向仓位)`，让每次止损亏的钱大致相等；只缩仓不加仓；`(0,1)` 之外直接 `ValueError`（0 会让每笔 $0 仍「入场」）。CLI `--risk-per-trade 0.004`；结果 `config` 回显。
+- `backtester.stop_loss_pct_for(ticker, direction)`：止损距离唯一真相（`config.TRADING_EXITS_CONFIG`）；`Backtester` 路径依赖出场改经它取数，定仓与出场同源。
+- `tests/test_risk_based_sizing.py`（9 条）：helper 读 config、出场代码不再自读 `sl_overrides`、默认关闭逐笔等同旧仓位、开启后逐笔 = 公式且止损名义亏损 ≤ 预算、非法预算抛错；变异（去掉上限 / 中性走错止损）实测变红。
+
+### 备注
+- 网站**未启用**：等用户在 Mac 生产库上跑 `portfolio_backtest.py --no-costs --risk-per-trade 0.004`（可加 `--reject-neutral`）确认后再决定。
+- 本 session 用网站 191 笔重放（零成本）估算：每笔风险 0.4% ⇒ 最大回撤 −13.2% → −5.4%、累计 +0.1% → +1.5%；加排除中性 ⇒ −4.9% / +1.7%。重放不含「腾出名额补入新单」效应，以真实回测为准。
+
+## [0.45.374] — 2026-09-28 — 网站资金曲线改零成本口径（用户实盘成本≈0）：去掉 Gross 线与「平均单笔成本」卡
+
+### Changed
+- `portfolio_backtest.py`：`BacktestConfig` 新增 `apply_trading_costs`（默认 `True`，研究路径口径不变）；`False` 时按方向调整后的 gross 结算（路径依赖 SL/TP 不变），结果 `config` 回显该字段；CLI 加 `--no-costs`。
+- `dashboard_renderer.py`：门面回测显式传 `apply_trading_costs=False`；标题 / 方法学文案改为「零成本 · 不计交易成本」；资金曲线标题改「策略 vs SPY 基准」。
+- `templates/dashboard.js`：去掉与主线重合的 Gross 虚线、「Gross 累计」统计与「平均单笔成本」卡；图例 / 统计改「策略净值 / 累计收益 / 最大回撤」。
+
+### Added
+- `tests/test_equity_curve_single_source.py::TestDashboardZeroCost`：夹具反向自证（扣成本口径 net≠gross）+ 回测层 net==gross + 渲染层曲线零成本；变异（dashboard 不传开关）实测变红。
+
+### 备注
+- 研究脚本（optimizer / bootstrap / 因子归因）与 DB 里的 `net_return_t7` 均未动。
+- 按止损距离定仓的平滑分析见本 session 对话，未落代码。
+
 ## [0.45.373] — 2026-09-29 — Fixed：世代印记被「部署后补跑早于边界的日期」拉早 ⇒ 假 `boundary_too_late` 报警（v0.45.357 / v0.45.366 两条印记同形）；印记判别器只认实时行。二次检查 v0.45.366，**只动判别器，不改评分**
 
 ### 二次检查（09-29，只读核对 09-28 真实产物）

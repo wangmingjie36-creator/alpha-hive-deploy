@@ -28,6 +28,7 @@
 """
 import os
 import subprocess
+import sys
 import tempfile
 from unittest.mock import MagicMock, patch
 
@@ -1016,7 +1017,7 @@ class TestApplyCodeShippedFallbackPreconditionSurvivesOptimization:
     scorecard.py` 586-591 行有明文理由：`python -O` 会把 assert 剥掉，一个
     会被剥掉的不变式，正是"把失败改写成没发生过"。
 
-    真实执行验证（不是读代码猜）：用 `/usr/local/bin/python3 -O` 子进程
+    真实执行验证（不是读代码猜）：用 `python -O` 子进程
     真跑同一次空 `files` 调用——`assert` 版本在 `-O` 下不抛任何异常、`files`
     照常被回落结果撑满（v0.45.305/v0.45.310 那个"空 data_root 看起来像有
     内容"的 bug 原样复活）；`raise ValueError` 版本与解释器优化开关无关，
@@ -1034,9 +1035,15 @@ class TestApplyCodeShippedFallbackPreconditionSurvivesOptimization:
         "    print('GUARD_FIRED:' + type(e).__name__)\n"
     )
 
+    # 子进程用**正在跑测试的那个解释器**，不写死 `/usr/local/bin/python3`
+    # （CLAUDE.md 的 Mac 硬规则说的是「你手动跑时用哪个」，不是「测试里写死哪个」）。
+    # 在 Mac 上按规矩 `/usr/local/bin/python3 -m pytest` 时两者相同；GitHub runner 上
+    # 那个路径不存在 ⇒ FileNotFoundError。与 test_no_undefined_names.py 的 `PY` 同一修法。
+    _PY = sys.executable
+
     def _run_probe(self, extra_args):
         return subprocess.run(
-            ["/usr/local/bin/python3", *extra_args, "-c", self._PROBE],
+            [self._PY, *extra_args, "-c", self._PROBE],
             cwd=self._REPO_ROOT, capture_output=True, text=True,
         )
 
@@ -1055,28 +1062,41 @@ class TestApplyCodeShippedFallbackPreconditionSurvivesOptimization:
             "python -O 下守卫失效——回到了 v0.45.312 assert 版本的原始 bug："
             f"stdout={r.stdout!r} stderr={r.stderr[-500:]!r}")
 
-    # v0.45.317 修复本身的最后一个 commit 是 c1aebfe7；它的父提交 61f21d37
-    # 是本次修复前的占位提交，report_deployer.py 在那里仍是 v0.45.312 的裸
-    # assert 版本。**必须钉死这个具体 SHA，不能用 `HEAD`**——首版测试写的是
-    # `git show HEAD:report_deployer.py`，这条前提只在修复提交之前（HEAD 还
-    # 指向父提交时）成立；修复一旦提交、成为新 HEAD，这个断言就永远为假，
-    # 测试永久变红（本条注释本身就是被这个 bug 逮到后改的：main 上实测过，
-    # 提交后立刻用 HEAD 重跑就会失败）。钉 SHA 而不是相对引用，才能让这条
-    # 变异测试在任何时候、任何分支上重跑都还原出同一份历史源码。
-    _OLD_ASSERT_SHA = "61f21d37"
+    # v0.45.312 的真实旧守卫，**原样节选**自 `git show 61f21d37:report_deployer.py`
+    # 第 93–98 行（61f21d37 = v0.45.317 修复前的占位提交）。
+    #
+    # 为什么不在运行时 `git show`：CI 的 actions/checkout 是浅克隆（depth=1），
+    # 61f21d37 根本不在本地 ⇒ `git show` 退出码 128，这条变异测试在 CI 上从来没跑成过。
+    # 测试不该依赖「本机恰好有完整历史」—— 同 test_slack_send_whitelist.py 的原样节选做法。
+    # 变异体 = **当前**源码里只把 `raise` 守卫换回这段旧 `assert`，其余不动：
+    # 比整份拷旧文件更精确（只差被检验的那一处），也不会被别处的后续改动带偏。
+    _OLD_ASSERT_GUARD = (
+        '    assert files, (\n'
+        '        "apply_code_shipped_fallback 被调用时 files 是空的——调用方必须先判完"\n'
+        '        "「无文件可部署」的守卫再调用本函数，否则回落几乎总能命中 "\n'
+        '        "CODE_SHIPPED_STATIC_ASSETS，会让一个空 data_root 看起来像有内容可"\n'
+        '        "部署（v0.45.305/v0.45.310 修过的那个 bug 的另一个入口）"\n'
+        '    )\n'
+    )
+
+    @classmethod
+    def _current_raise_guard(cls) -> str:
+        """当前的 `raise ValueError` 守卫原文：与旧 assert 同一段消息，只是缩进 + 语句不同。"""
+        msg = [ln.strip() for ln in cls._OLD_ASSERT_GUARD.splitlines()[1:-1]]
+        return ("    if not files:\n        raise ValueError(\n"
+                + "".join(f"            {m}\n" for m in msg) + "        )\n")
 
     def test_mutation_old_assert_guard_is_silently_stripped_under_dash_O(self):
-        """变异检验：换回 v0.45.312 的真实旧代码（`assert files, (...)`），
-        证明"-O 下守卫消失"不是臆测——用改动前的真实源码真跑确认转红。"""
-        old_source = subprocess.run(
-            ["git", "show", f"{self._OLD_ASSERT_SHA}:report_deployer.py"],
-            cwd=self._REPO_ROOT, capture_output=True, text=True, check=True,
-        ).stdout
-        assert "assert files, (" in old_source, (
-            f"本条变异测试假定 {self._OLD_ASSERT_SHA} 上 report_deployer.py 是 "
-            "v0.45.312 的裸 assert 版本——如果这条断言失败，说明这个钉死的 SHA "
-            "选错了或历史被改写，该重新核实是哪个提交引入的 bug，而不是让这条"
-            "测试悄悄测不出任何东西")
+        """变异检验：把当前守卫换回 v0.45.312 的真实旧写法（`assert files, (...)`），
+        证明"-O 下守卫消失"不是臆测——用旧写法真跑确认转红。"""
+        with open(os.path.join(self._REPO_ROOT, "report_deployer.py"), encoding="utf-8") as f:
+            current = f.read()
+        guard = self._current_raise_guard()
+        assert current.count(guard) == 1, (
+            "当前 report_deployer.py 里找不到（或不止一处）预期的 `raise ValueError` 守卫原文——"
+            "守卫改过措辞 / 缩进就更新 _OLD_ASSERT_GUARD 与本方法，不要让变异静默落空、"
+            "测试「测了个寂寞」")
+        old_source = current.replace(guard, self._OLD_ASSERT_GUARD)
         with tempfile.TemporaryDirectory() as tmp:
             shadow = os.path.join(tmp, "report_deployer.py")
             with open(shadow, "w", encoding="utf-8") as f:
@@ -1090,7 +1110,7 @@ class TestApplyCodeShippedFallbackPreconditionSurvivesOptimization:
                 tmp + os.pathsep + self._REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")
             )
             r = subprocess.run(
-                ["/usr/local/bin/python3", "-O", "-c", self._PROBE],
+                [self._PY, "-O", "-c", self._PROBE],
                 cwd=tmp, capture_output=True, text=True, env=env,
             )
         assert "GUARD_DID_NOT_FIRE:" in r.stdout, (
