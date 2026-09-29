@@ -1005,7 +1005,9 @@ def _marker_guard_vix_feed(d: dict) -> bool:
     g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
     det = g.get("details") if isinstance(g, dict) else None
     vt = det.get("vix_term_structure") if isinstance(det, dict) else None
-    return isinstance(vt, dict) and "vix_feed" in vt
+    # v0.45.373：补跑行不算证据（见 `_marker_guard_macro_as_of_mode`）；缺 `macro_as_of_mode` 键的
+    # v0.45.357 时代归档照旧认（那时补跑与实时同形、也没有这个键）。
+    return isinstance(vt, dict) and "vix_feed" in vt and vt.get("macro_as_of_mode") != "backfill"
 
 
 def _marker_guard_macro_as_of_mode(d: dict) -> bool:
@@ -1014,11 +1016,16 @@ def _marker_guard_macro_as_of_mode(d: dict) -> bool:
     认「键存在」（同 v0.45.340/357）：Guard 在实时（`realtime`）与补跑（`backfill`）两种口径下都写、
     宏观整个取不到时也写；此前的归档一律没有。⚠️ 两种口径都写是刻意的——本条只改补跑，
     只在补跑行写的印记会让每份实时归档都被判「边界之后无印记」（见 `_COHORT_HISTORY` 本条原因）。
+
+    ⚠️ **但只有实时行才算证据（v0.45.373 二次检查补）**：补跑行按目标日 D 落盘，D 的日期不代表代码
+    何时上线。部署后补跑一份早于边界的日期（如 09-25）带着同一个键 ⇒ `marker_first_seen` 被拉到 09-25
+    ⇒ 假 `boundary_too_late` 报警（离线复现；v0.45.357 的 `vix_feed` 印记同形）。
+    v0.45.366 写「两种口径都写……是充分条件」漏了这一头。
     """
     g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
     det = g.get("details") if isinstance(g, dict) else None
     vt = det.get("vix_term_structure") if isinstance(det, dict) else None
-    return isinstance(vt, dict) and "macro_as_of_mode" in vt
+    return isinstance(vt, dict) and "macro_as_of_mode" in vt and vt["macro_as_of_mode"] != "backfill"
 
 
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。

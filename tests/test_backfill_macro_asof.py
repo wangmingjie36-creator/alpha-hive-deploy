@@ -451,15 +451,35 @@ class TestBoundaryMarker:
     def _offline(self, stub_yfinance, stub_vixcentral):
         """真 Guard 实时路径还会取 VIX 期限结构（yfinance 现货 + vixcentral 期货）。"""
 
-    @pytest.mark.parametrize("snap", [None, D], ids=["realtime", "backfill"])
-    def test_real_guard_output_carries_the_marker_in_both_modes(self, snap):
-        """正对照拿**生产类的真输出**。实时口径也必须带：本条只改补跑，只在补跑行写的印记会让每份实时归档
-        都被判「边界之后无印记」⇒ 恒报 boundary_too_early。
-        变红的变异：只在补跑时写 `macro_as_of_mode`；或把 guard_bee.py 里的键改名。"""
+    @pytest.mark.parametrize("snap,is_evidence", [(None, True), (D, False)], ids=["realtime", "backfill"])
+    def test_real_guard_output_marker_is_evidence_only_when_realtime(self, snap, is_evidence):
+        """正对照拿**生产类的真输出**。两种口径都写键（本条只改补跑，只在补跑行写会让每份实时归档被判
+        「边界之后无印记」）；但**只有实时行算证据**（v0.45.373）：补跑行按目标日落盘，日期不代表代码何时上线。
+        变红的变异：只在补跑时写键；把 guard_bee.py 里的键改名；判别器不排除 backfill。"""
         import ic_rerun_readiness as rr
         fm.set_macro_snapshot(snap, MARKET_827 if snap else None)
-        body = _guard_body(_guard_live_macro({"vix": 15.0, "vix_source": "cboe"})["details"])
-        assert rr._marker_guard_macro_as_of_mode(body) is True
+        det = _guard_live_macro({"vix": 15.0, "vix_source": "cboe"})["details"]
+        assert "macro_as_of_mode" in det
+        assert rr._marker_guard_macro_as_of_mode(_guard_body(det)) is is_evidence
+
+    @pytest.mark.parametrize("version", ["v0.45.357", "v0.45.366"])
+    def test_late_backfill_of_an_older_date_does_not_pull_the_marker_earlier(self, tmp_path, version):
+        """部署后补跑 09-25（早于边界 09-28）带着同一印记键 ⇒ 旧判别器报 boundary_too_late（假报警）。
+        变红的变异：两个判别器各自去掉 `!= "backfill"`（参数化各红一条）。"""
+        import json as _json
+        import ic_rerun_readiness as rr
+        (tmp_path / "analysis-AAA-ml-2026-09-28.json").write_text(_json.dumps(
+            _guard_body({"vix_feed": "delayed_quote", "macro_as_of_mode": "realtime"})), encoding="utf-8")
+        (tmp_path / "analysis-BBB-ml-2026-09-25.json").write_text(_json.dumps(
+            _guard_body({"vix_feed": "history_csv_asof", "macro_as_of_mode": "backfill"})), encoding="utf-8")
+        ev = rr.cohort_boundary_evidence(tmp_path, version=version)
+        assert (ev["verdict"], ev["marker_first_seen"]) == ("matches", "2026-09-28"), ev
+
+    def test_357_era_archives_without_the_mode_key_still_count(self):
+        """357 时代的归档没有 `macro_as_of_mode` 键 ⇒ 仍是证据（排除的是「显式 backfill」，不是「缺键」）。
+        变红的变异：改成 `vt.get("macro_as_of_mode") == "realtime"`。"""
+        import ic_rerun_readiness as rr
+        assert rr._marker_guard_vix_feed(_guard_body({"vix_feed": "delayed_quote"})) is True
 
     @pytest.mark.parametrize("d", [
         {}, _guard_body(None),
