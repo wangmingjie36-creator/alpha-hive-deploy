@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.390] — 2026-09-30 — 占位（进行中：Alpha Bot 的 macOS 桌面启动器 Alpha Bot.app）
+
 ## [0.45.389] — 2026-09-30 — Changed：关掉 Vercel 对本仓库的自动部署（`alpha-hive-web` 项目每次推送都构建失败）
 
 `alpha-hive-web` 这个 Vercel 项目的根目录设成了仓库根（`rootDirectory: null`），而仓库根是 Python 工程，
