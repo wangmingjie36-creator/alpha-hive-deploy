@@ -309,7 +309,7 @@ class TestScanTimingSurface:
         line = scan_timing.summary_line({"phases": {}, "counters": {"hv_gap": {
             "checked": 30, "clean": 27, "repaired": 1, "degraded": 2, "minor": 0, "check_errors": 0,
             "tickers": {"DE": {"critical": ["2026-09-22"], "minor": []}}}}})
-        assert "日线缺口 修复1/置空2/校验出错0(DE:2026-09-22)" in line
+        assert "日线缺口 修复1/TD补0/置空2/校验出错0(DE:2026-09-22)" in line
 
     def test_summary_is_silent_when_nothing_happened(self):
         import scan_timing

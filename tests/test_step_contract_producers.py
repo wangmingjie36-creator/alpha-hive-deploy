@@ -10,8 +10,8 @@
     非 ok 路径至少有一条**有代表性的** attention（按 id 点名，不按图标 / 文案反推）；
   · 崩溃（注入坏输入）⇒ 退出码 **3** + `status: "error"` 外壳——改造前 Python 默认的 1
     在这四个工具的约定里是「降级 / 要人动手」，崩溃会被编排器记成正常；
-  · 编排器（仓库外 `/Users/igg/.claude/scripts/alpha-hive-orchestrator.sh`）今天各步骤内联 python
-    读的每一个键都还在（清单见 `ORCH_READS`，逐条从脚本里抄出）。
+  · 消费方读的每一个键都还在（清单见 `ORCH_READS`）。消费方原是编排器各步骤的内联 python；B（v0.45.385）起
+    编排器经 `orchestrator_steps.py` 读——`_cont_summary` / `_cov_summary` / `_calwatch_summary` / `_backup_summary`。
 
 谁会红：把任一工具入口改回 `sys.exit(main())`（崩溃类红）、`--out` 改回写裸 `res`（`validate` 类红）、
 `contract_attention` 漏掉某条判据（按 id 点名的那条红）、`scan_coverage_gate` 写盘时丢掉 `date`
@@ -38,30 +38,31 @@ from tests.test_scan_coverage_gate import FULL, T30, _mk
 
 REPO_ROOT = Path(__file__).resolve().parent.parent   # 指向**代码**，故用 __file__
 
-#: 编排器各步骤内联 python **今天**读的键（2026-09-28 02:03 版 alpha-hive-orchestrator.sh，逐条抄出）。
-#: 注释按 shell 变量名定位、不写行号——同一天 v0.45.351 在 Step 5 插了 30 多行，行号当场就漂了。
+#: 消费方读的键（最初逐条抄自 2026-09-28 02:03 版 alpha-hive-orchestrator.sh 的内联 python；B（v0.45.385）起
+#: 那些内联已删，编排器经 orchestrator_steps.py 的 _cont_summary / _cov_summary / _calwatch_summary /
+#: _backup_summary 读——清单照旧，读者换了）。注释按函数 / 变量名定位、不写行号。
 #: 键路径是元组；`"*"` = 列表的每个元素；`"<new>"` = `new_schedule_tables` 里的每个表名。
 #: ⚠️ 这里只许**加**：编排器新读了一个键就补进来；从这里删一个键之前，先证明编排器与
 #: `~/.claude/scheduled-tasks/*/SKILL.md` 都不再读它（v0.45.355 核对时 SKILL 只跑人读模式，不读 JSON）。
 ORCH_READS = {
-    # Step 10：rc==1 分支里算 CONT_SUMMARY 的内联 python（读 $CONTINUITY_JSON）
+    # Step 10：orchestrator_steps._cont_summary（B 之前是 rc==1 分支里算 CONT_SUMMARY 的内联 python）
     "scan_continuity": [
         ("window", "trading_days"), ("scanned_days",), ("coverage",),
         ("weeks_covered",), ("weeks_total",), ("longest_gap",), ("weeks_missed",),
     ],
-    # Step 12：rc==1 分支里算 COV_SUMMARY 的内联 python（读 $COVERAGE_JSON）
+    # Step 12：orchestrator_steps._cov_summary（B 之前是 rc==1 分支里算 COV_SUMMARY 的内联 python）
     "scan_coverage_gate": [
         ("fields",), ("fields", "*", "degraded"), ("fields", "*", "field"),
         ("fields", "*", "have"), ("fields", "*", "total"), ("likely_network_layer",),
     ],
-    # Step 13：rc==1 分支里算 CALWATCH_SUMMARY 的内联 python（读 $CALWATCH_JSON）
+    # Step 13：orchestrator_steps._calwatch_summary（B 之前是 rc==1 分支里算 CALWATCH_SUMMARY 的内联 python）
     "economic_calendar_watch": [
         ("calendar_health", "status"), ("calendar_health", "binding_table"),
         ("calendar_health", "binding_last_date"), ("calendar_health", "binding_horizon_days"),
         ("new_schedule_tables",), ("upstream", "<new>", "new_items"), ("upstream", "<new>", "source"),
         ("undeterminable_tables",), ("upstream_conclusive",),
     ],
-    # Step 15：rc==1 分支里算 BACKUP_CONT_SUMMARY 的内联 python（读 $BACKUP_CONTINUITY_JSON）
+    # Step 15：orchestrator_steps._backup_summary（B 之前是 rc==1 分支里算 BACKUP_CONT_SUMMARY 的内联 python）
     "backup_continuity": [
         ("window", "trading_days"), ("backed_up_days",), ("coverage",),
         ("longest_gap",), ("weeks_missed",),

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alpha Bot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=Poppins:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/static/alphabot.css">
+<link rel="icon" href="/static/mark.svg" type="image/svg+xml">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#/" aria-label="Alpha Bot 首页">
+    <img src="/static/mark.svg" alt="" width="22" height="22">
+    <span class="brand-name">Alpha Bot</span>
+  </a>
+  <nav class="nav" aria-label="主导航">
+    <a href="#/" data-nav="overview">总览</a>
+    <a href="#/t" data-nav="ticker">标的</a>
+    <a href="#/intraday" data-nav="intraday">盘中</a>
+    <a href="#/ledger" data-nav="ledger">账本</a>
+    <a href="#/results" data-nav="results">结果</a>
+    <a href="#/method" data-nav="method">口径</a>
+  </nav>
+  <form class="search" id="search" role="search" autocomplete="off">
+    <label class="visually-hidden" for="search-input">代码</label>
+    <input id="search-input" list="ticker-list" placeholder="输入代码，如 NVDA" spellcheck="false">
+    <datalist id="ticker-list"></datalist>
+  </form>
+  <div class="session" id="session" aria-live="polite"></div>
+</header>
+<div class="demo-banner" id="demo-banner" hidden>演示模式 · 合成期权链，不是行情；不读账本、不写真实状态目录</div>
+<main id="app" class="app" tabindex="-1"></main>
+<footer class="foot" id="foot"></footer>
+<script src="/static/vendor/echarts.min.js"></script>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

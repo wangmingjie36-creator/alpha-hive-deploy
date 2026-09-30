@@ -51,12 +51,18 @@ _TOTAL_OI_NOOP_WARNED = False
 # 进 `scan_timing.counters.hv_gap` → status.json。只数**真发生了取数**的次数（缓存命中不计）。
 _HV_GAP_LOCK = threading.Lock()
 _HV_GAP_STATS: Dict[str, int] = {"checked": 0, "clean": 0, "repaired": 0, "degraded": 0,
-                                 "minor": 0, "check_errors": 0}
+                                 "minor": 0, "check_errors": 0,
+                                 "filled": 0}          # v0.45.387：缺口用 Twelve Data 补出那一根（复权口径换算）
 _HV_GAP_TICKERS: Dict[str, Dict[str, List[str]]] = {}   # {ticker: {"critical": [...], "minor": [...]}}
 
 
-def _hv_gap_note(ticker: str, outcome: str, gaps: Optional[Dict[str, List[str]]]) -> None:
-    """记一次校验结果。outcome: clean / repaired / degraded。"""
+def _hv_gap_note(ticker: str, outcome: str, gaps: Optional[Dict[str, List[str]]],
+                 fill: Optional[Dict[str, List[str]]] = None) -> None:
+    """记一次校验结果。outcome: clean / repaired / filled / degraded。
+
+    `fill`（仅试过第二源时）= ``{"filled": [日期...], "unfilled": ["日期:原因"...]}``，原样进 `tickers`，
+    让 status.json 里既看得见「补了哪几天」，也看得见「为什么没补成」。值一律是字符串列表——
+    `hv_gap_stats()` 拷贝时按 `list(v)`，dict 会被拷成只剩键。"""
     with _HV_GAP_LOCK:
         _HV_GAP_STATS["checked"] += 1
         _HV_GAP_STATS[outcome] += 1
@@ -65,6 +71,56 @@ def _hv_gap_note(ticker: str, outcome: str, gaps: Optional[Dict[str, List[str]]]
         if gaps and (gaps.get("critical") or gaps.get("minor")):
             _HV_GAP_TICKERS[ticker] = {"critical": list(gaps.get("critical") or []),
                                        "minor": list(gaps.get("minor") or [])}
+            if fill:
+                _HV_GAP_TICKERS[ticker]["filled"] = list(fill.get("filled") or [])
+                _HV_GAP_TICKERS[ticker]["unfilled"] = list(fill.get("unfilled") or [])
+
+
+def _clean_bars(hist) -> Tuple[List[str], List[float]]:
+    """(日期, 收盘) 两个等长列表，**剔除 Close 为 NaN / ≤0 的行**。
+
+    为什么剔：yfinance 偶有「日期在、Close 是 NaN」的行（2026-08-28 实测，Volume 却有值）。
+    `pct_change().dropna()` 会把它连同后一根的收益一起丢掉——和缺一根 bar 同样让 20 日窗口错位，
+    但 `find_gaps` 只看日期，从前看不见。把它当缺失处理，才会进重取 / 第二源修复 / 置空这条链。"""
+    dates: List[str] = []
+    closes: List[float] = []
+    for d, c in zip(hist.index, hist["Close"].tolist()):
+        if c == c and c > 0:
+            dates.append(d.strftime("%Y-%m-%d"))
+            closes.append(float(c))
+    return dates, closes
+
+
+def _fill_gaps_from_second_source(ticker: str, hist, gaps: Dict[str, List[str]]):
+    """重取后仍缺 ⇒ 向 Twelve Data 借缺的那几根（换算回复权口径，见 `bars_integrity.fill_gaps_from_reference`）。
+
+    返回 ``(新收盘 Series | None, {"filled": [...], "unfilled": ["日期:原因"...]})``。
+    **全有或全无**：有任何一根补不出就返回 None——半补的序列仍有缺口，不能拿去算 HV。
+    补完再跑一遍 `find_gaps` 复核；第二源不可用（未配 key / 限流 / 网络）或本函数自身出错，一律退回 None，
+    由调用方走既有的「置空」路径，且原因写进 `unfilled`（谁会红：计数器 + 摘要行点名）。"""
+    crit = list(gaps.get("critical") or [])
+    try:
+        import pandas as pd
+        import twelve_data as _td
+        from bars_integrity import fill_gaps_from_reference, find_gaps
+        rows = _td.fetch_bars(ticker, _td.SHARED_BARS_WINDOW)
+        if not rows and str((_td.bars_cache_stats().get("failed") or {}).get(ticker, "")).startswith("network"):
+            # 瞬时网络错误（2026-09-29 扫描 4/35 次真实请求 RemoteDisconnected/URLError）重试一次；
+            # 限流 / 404 / 接口报错重试没有意义，不重试。失败不入缓存，再调一次就是真重新请求。
+            rows = _td.fetch_bars(ticker, _td.SHARED_BARS_WINDOW)
+        if not rows:
+            return None, {"filled": [], "unfilled": [f"{d}:td_unavailable" for d in crit]}
+        dates, closes = _clean_bars(hist)
+        res = fill_gaps_from_reference(dates, closes, rows, crit)
+        if res["unfilled"]:
+            return None, {"filled": [], "unfilled": [f"{d}:{r}" for d, r in sorted(res["unfilled"].items())]}
+        again = find_gaps(res["dates"])
+        if again["critical"]:
+            return None, {"filled": [], "unfilled": [f"{d}:recheck_failed" for d in again["critical"]]}
+        return pd.Series(res["closes"]), {"filled": list(res["filled"]), "unfilled": []}
+    except Exception as e:  # noqa: BLE001 - 第二源的任何故障都不许拖垮主路径，但要留痕
+        _log.error("[%s] 第二源补日线自身出错（退回置空）: %s: %s", ticker, type(e).__name__, e)
+        return None, {"filled": [], "unfilled": [f"{d}:fill_error:{type(e).__name__}" for d in crit]}
 
 
 def _check_bars_gaps(ticker: str, hist) -> Optional[Dict[str, List[str]]]:
@@ -72,7 +128,7 @@ def _check_bars_gaps(ticker: str, hist) -> Optional[Dict[str, List[str]]]:
     校验器的 bug 不该把全部 iv_rank 置空，但也不能悄悄当作「没缺口」：错误进计数器、日志打 ERROR。"""
     try:
         from bars_integrity import find_gaps
-        return find_gaps([d.strftime("%Y-%m-%d") for d in hist.index])
+        return find_gaps(_clean_bars(hist)[0])
     except Exception as e:  # noqa: BLE001
         with _HV_GAP_LOCK:
             _HV_GAP_STATS["check_errors"] += 1
@@ -109,6 +165,7 @@ class OptionsDataFetcher:
         # 每次分析都 new 一个 OptionsAgent（自带 fetcher），此标志不跨线程共享——
         # 「并发改写」的担心 2026-09-29 已排除（见 CHANGELOG v0.45.383）。
         self.last_hist_hv_gaps: List[str] = []
+        self.last_hist_hv_filled: List[str] = []
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def _get_cache_path(self, ticker: str, data_type: str) -> str:
@@ -445,6 +502,7 @@ class OptionsDataFetcher:
         # IV Rank 是否可信（样本历史区间与真实现价 IV 错配会产生假 0/100 极值）
         self.last_hist_hv_is_sample = False
         self.last_hist_hv_gaps = []
+        self.last_hist_hv_filled = []
 
         # v0.45.383：缓存键 v4 → v5。v5 里只放**通过完整性校验**的序列——缺口序列绝不进缓存，
         # 否则 5 分钟内的后续调用会把错位的 HV 当成好数据直接读走（且读缓存时无从知道它有缺口）。
@@ -484,8 +542,22 @@ class OptionsDataFetcher:
                     _log.warning("[%s] 日线缺交易日 %s（落在最后 21 根内，当前 HV 会错位），重取一次",
                                  ticker, gaps["critical"])
 
+            # v0.45.387 阶段 2：重取后仍缺 ⇒ 先向 Twelve Data 借缺的那几根（换算回复权口径），
+            # 补不齐才走下面的「置空」。全有或全无，见 `_fill_gaps_from_second_source`。
+            close_series = hist["Close"]
+            fill_info = None
+            if gaps is not None and gaps["critical"]:
+                fixed, fill_info = _fill_gaps_from_second_source(ticker, hist, gaps)
+                if fixed is not None:
+                    close_series = fixed
+                    self.last_hist_hv_filled = list(fill_info["filled"])
+                    _hv_gap_note(ticker, "filled", gaps, fill_info)
+                    _log.warning("[%s] 日线缺交易日 %s，已用 Twelve Data 补齐（复权口径换算），HV Rank 照常计算",
+                                 ticker, gaps["critical"])
+                    gaps = {"missing": [], "critical": [], "minor": list(gaps.get("minor") or [])}
+
             # 计算历史已实现波动率（20日滚动）
-            returns = hist["Close"].pct_change().dropna()
+            returns = close_series.pct_change().dropna()
             rolling_vol = returns.rolling(window=20).std() * 100 * (252 ** 0.5)
             hv_values = rolling_vol.dropna().tolist()
 
@@ -501,12 +573,13 @@ class OptionsDataFetcher:
                 # 重取后仍缺：仍返回序列（`min(hist_hv)` 等只需要量级的用法照旧），
                 # 但标记不可信、**不写缓存**；调用方据此把 iv_rank / iv_percentile 置 None（评分走中性）。
                 self.last_hist_hv_gaps = list(gaps["critical"])
-                _hv_gap_note(ticker, "degraded", gaps)
-                _log.warning("[%s] 重取后日线仍缺交易日 %s：HV Rank 将置 None（不用错位的数据冒充）",
-                             ticker, gaps["critical"])
+                _hv_gap_note(ticker, "degraded", gaps, fill_info)
+                _log.warning("[%s] 重取后日线仍缺交易日 %s（第二源也没补成：%s）：HV Rank 将置 None（不用错位的数据冒充）",
+                             ticker, gaps["critical"], (fill_info or {}).get("unfilled"))
                 return hv_list
 
-            _hv_gap_note(ticker, "repaired" if repaired else "clean", gaps)
+            if not self.last_hist_hv_filled:      # 第二源补齐的情形上面已计过 "filled"
+                _hv_gap_note(ticker, "repaired" if repaired else "clean", gaps)
             self._write_cache(ticker, "hist_hv_v5", hv_list)
             return hv_list
 
@@ -2705,6 +2778,9 @@ class OptionsAgent:
             # v0.45.383：因日线缺交易日而把 iv_rank 置空时，缺的是哪几天（否则只看到一个 None，看不出为什么）。
             # 只在 hv_proxy 口径下有意义；真实 IV 历史口径恒为 []。
             "hv_gap": _hv_gap_dates if _iv_rank_source == "hv_proxy" else [],
+            # v0.45.387：缺口被第二源补齐的日期（iv_rank 照常给出，但这几根 bar 是换算出来的）。
+            "hv_gap_filled": (list(getattr(self.fetcher, "last_hist_hv_filled", None) or [])
+                              if _iv_rank_source == "hv_proxy" else []),
             "iv_rank_window_days": _iv_rank_window,  # 真实 IV 样本天数（hv_proxy 时为 None）
             "put_call_ratio": put_call_ratio,
             # v0.17.0: total_oi 双口径 — raw（原始总和）+ stable（排除 DTE<7 近到期）
