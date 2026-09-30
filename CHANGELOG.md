@@ -5,6 +5,84 @@
 
 ---
 
+## [0.45.391] — 2026-09-30 — Fixed：F&G 敞口门前瞻检验的重放每个标的只整段取一次 OHLC（Step 11 在 09-30 被 60s 超时杀掉）；同一份行情下输出逐字节不变
+
+> ⚠️ **未推送，也没有在 main 上占号**：推送要用户批准。391 是写这条时 `origin/main` 顶部（390 占位）之上的下一个号，
+> 合入前按「并发开工必须先占号」重新核一次号。
+
+**根因**：编排器 Step 11 在 60s `run_step` 超时下跑 `ic_rerun_readiness.py --quiet --today <DATE> --out <json>`，
+09-28 用了 37s（6 个快照日）、09-29 用了 47s（7 个）、**09-30 被杀（rc=124，>60s，8 个）**——就绪度 JSON 没写出来，
+排在 F&G 之后的世代边界核对（`boundary_evidence_status`）当天根本没跑。cProfile（手动跑 67s）里 57s 在
+`fg_exposure_gate_forward_status → run → evaluate → _replay_variant ×2 → paper_portfolio.run_replay → run_for_date ×16
+→ _fetch_ohlc ×442 → yfinance history() ×124（约 0.45s/次）`。`run_for_date` 每天对**每个在场仓位**按
+`(ticker, entry_date, as_of+2)` 取一次——键里带 as_of，逐日都是新键，`_PRICE_CACHE` 挡不住；前瞻窗口自
+`FORWARD_START=2026-09-16` 只增不减（约 +15.5 次调用 / 每多一个快照日，终期约 2,300 次 / 天）。
+
+**为什么不直接调 `prefetch_ohlc`**：它没有 v0.45.97 的 NaN 过滤；`_OHLC_FULL` 切片不核对请求区间是否落在预取范围内
+（局部预取 ⇒ 静默截断：TIME 止损那天没 bar 就不平仓）；更宽的二次预取被 `if tk in _OHLC_FULL: continue` 忽略；
+且它是进程级常驻、`portfolio_capacity_replay` 依赖这些语义。所以不复用、也不改它。
+
+### Fixed
+- `paper_portfolio.py`：
+  - 抽出 `_bars_from_history(ticker, hist)`（直连路径原样搬出，行为不变）——直连路径与新窗口路径**共用同一份**逐根 NaN / inf /
+    非数值过滤与丢弃 WARNING。
+  - 新增 `replay_ohlc_window(start, end)`（上下文管理器）与 `replay_ohlc_bounds(dates, held_entry_dates)`。窗口内 `_fetch_ohlc`
+    对每个标的**整段只取一次**（与直连路径逐参数相同的 `yf.Ticker(t).history(start, end, auto_adjust=False)`），之后按
+    `start <= d < end` 切片（保留 as_of 之后的 bar——`_mark_to_market` 缺 as_of 时回退 `max(ohlc)` 的既有前视要原样复现）。
+    **每次请求都核区间**：窗口外 / 空区间 / 非 `YYYY-MM-DD` ⇒ 原直连路径 + WARNING（每标的一次）+ 计数，绝不截断。
+    整段取数抛异常 / 返回空 / 过滤后为空 ⇒ 该标的本次重放**退回原直连路径**（失败不入缓存、空结果入缓存的 v0.45.50 语义原样保留）
+    + 一条 WARNING；空结果不当成「每个子区间都是空」的权威答案。退出 `with`（含异常）恢复进入前的窗口（可嵌套）并释放日线；
+    窗口路径**不读写** `_PRICE_CACHE` / `_OHLC_FULL`；`_OHLC_FULL` 仍排第一（窗口之外的路径逐字不变）。退出时记一行 INFO 汇总。
+  - 三处调用点（`_mark_to_market`、`run_for_date` Step 1 / Step 2）的 `+2` / `+3` 天前视改为 `_EXIT_OHLC_LOOKAHEAD_DAYS=2` /
+    `_ENTRY_OHLC_LOOKAHEAD_DAYS=3`（值不变），窗口右端由它们导出；`_fetch_ohlc` docstring 的 `[start, end]` 更正为 `[start, end)`。
+  - 生产 `run_for_date` / `run_replay` **不开窗口**（守卫见下）；`run_replay` 的 finally 未动。
+- `experiments/fg_exposure_gate_forward_test.py`（**实现层改动，不是事后修订**：窗口、变体、统计量、α、盲化、自证一个字没动）：
+  `evaluate()` 在参数校验之后开**一个**窗口包住 A、B（及样本内的 A_check）——主体原样拆进 `_evaluate_replays`；`rehearse()` 的 A 同样套窗口。
+  窗口 = `[min(种子持仓 entry_date ∪ 回放日), 最后回放日 + 3 天)`；`_seed_held_entry_dates` 绝不抛（解析不了的行跳过 ⇒ 窗口偏窄只会多走直连，不改结果，
+  也不改坏种子时 `evaluate()` 的异常形状）。放在这一层而不是 `run_replay` 里：A、B 是两次 `run_replay`，按次开窗口会让 B 重取一遍、
+  可能读到与 A 不同的日线（改动前 B 靠复用 A 留在 `_PRICE_CACHE` 里的同键结果与 A 一致）；`run_replay` 的其他调用方语义也会被连带改掉。
+
+### Added
+- `experiments/replay_ohlc_window_premise.py`：真 Yahoo 上「窄区间一次取 == 宽区间取了再切片」这条前提的**显式**核对命令
+  （跑一次真实 `run()`，把窗口服务过的每个不同请求在窗口外直连重取、逐请求比对；0 相同 / 1 不同并列出差在哪几天 / 3 无法判定）。
+  不写成默认测试：`network` 标记有只减不增的棘轮，写成 skip 又等于没有。只读，不写任何文件。
+- `tests/test_replay_ohlc_window.py`（25 条，全离线：假 yfinance 从一张主表切片）：夹具自证（SL / TP / TIME 出场、TIME 止损日 NaN 顺延、
+  as_of 缺 bar 的 MTM 前视、快照无 entry_price、极度贪婪日 B 开出 A 没开的标的）/ NaN·inf·非数值与直连同一过滤 / 窗口外四种请求走直连不截断 /
+  整段取数抛与空两条路径都退回直连且结果不变、每标的一条 WARNING / `run()` 后与中途抛异常后窗口已撤、两缓存未碰、嵌套恢复外层 /
+  生产路径不开窗口（非测试代码的使用者白名单）/ 每标的每次检验一次整段取数、零窗口外请求 / 前瞻·样本内·rehearse 三条路径开关窗口逐字节相同 /
+  前提核对脚本 ok·mismatch·无窗口·重取失败四种结局。
+
+### 等价与耗时（真实数据，`ALPHA_HIVE_HOME=/Users/igg/alpha-hive-data`，today=2026-09-30；旧 = 基底 `4bca556d` 的 git archive，新旧背靠背）
+- `run()` 返回值 `json.dumps(sort_keys=True)` **逐字节相同**；状态行相同；A / B 的 equity、closed、open positions、final_nav、config 相同；
+  全部 442 次 `_fetch_ohlc` 的调用序列与逐次结果哈希相同。yfinance 调用 **124 → 20**，`run()` **52.9s → 11.9s**
+  （收尾时用最终代码再背靠背跑一遍：同样逐字节相同，58.4s → 11.5s）。
+- 完整 Step 11 命令（`ic_rerun_readiness.py --quiet --today 2026-09-30 --out …`，进程启动到退出）：旧 **65.8s**（生产会被杀）→ 新 **20.2s**。
+  两份就绪度 JSON 除 `generated_at` 与维度 IC「权重历史无法判定」一条外相同——后者是旧代码从非 git 目录（archive）跑的环境差异。
+- 生产状态：`paper_portfolio_state/` 四个文件与 `pheromone.db` / `-wal` / `-shm` 前后 sha256 相同；只有 `-shm` 的 mtime 变了（`mode=ro` 读者的 WAL 读锁）；
+  屏障回写 0 次；审计钩子拦下的唯一事件是 import 期对**已存在**状态目录的 `mkdir(exist_ok=True)`（新旧代码相同，目录本就存在）。
+- 前提核对脚本真跑：124 个不同请求 / 20 个标的全部相同（exit 0）。
+- 当天 F&G 状态仍是 `cannot_judge`（精确层 12/13、决策层 13/13）：TMO 在 09-30 以 TIME 止损平仓而窗口止于 09-29，`_entry_key` 1 分钱取整差——
+  与 OHLC 无关、改动前后相同，不在本版范围。真实窗口里门没有触发（B ≡ A），B 分叉的路径靠上面的合成测试覆盖。
+
+### 验证
+- 变异（全部在提交 `93425855` 的 git archive 副本上做，不碰工作区；对照组无变异全绿）：窗口路径去掉 NaN 过滤 / 去掉区间核对 / finally 不恢复窗口 /
+  批量化形同虚设 / 调用点前视放宽而常量没跟 / 整段空结果当权威 `{}` / 整段异常吞成 `{}` / A、B 各开各的窗口 / 种子持仓不进窗口左端 /
+  rehearse 不套窗口 / 切片右端含 end / 前提脚本恒不报不同 / 窗口路径写 `_PRICE_CACHE` / `run_for_date` 引用窗口——**14/14 红**。
+- `ruff --select F821,F401` 改动文件全过；定向回归（本文件 + `test_ic_rerun_readiness` / `test_fg_exposure_gate_forward_test` / 纸面组合各测试 /
+  `test_step_contract_ic_rerun` / `test_dim_ic_forward_test` / `test_resonance_boost_forward_test` / `test_paths_not_frozen_at_import` /
+  `test_changelog_entry_integrity` / `test_network_marker_discipline` / `test_orchestrator_steps` 等）1217 passed。
+- 全套 `-m "not integration and not network"`：7804 passed / 1 failed / 2 xfailed（12 分钟）；唯一失败是已知的随日期变红的
+  `test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`，与本版无关。
+
+### 没做 / 另议
+- **没加 `ic_rerun_readiness` 的时间预算**。成本图推荐的是「F&G 放子进程 + 超时 + SIGTERM 转发 + 先写检查点 JSON + 新 attention id / timings 键」，
+  不便宜：要动就绪度的契约面（payload 键、attention 词表、`--quiet` 段序）与 conftest 的进程内隔离（子进程收不到 monkeypatch 与出网闸，
+  每条调 `main()` 的测试都会多起一个导 scipy 的子进程）；协作式 deadline / SIGALRM 则会在 `run_replay` 的 finally（`CONFIG.clear()` 与 `update()` 之间）
+  里抛出，也打断不了 C 层的 curl 卡顿。本版之后健康路径约 20s、且对窗口长度基本持平。**剩余风险**：09-24 那种整段限流时，整段取数失败 ⇒ 退回逐次直连
+  （= 改动前的取数方式）⇒ 仍可能超时；那条路要靠预算 / 检查点另立一版。
+- 顺带记下未修：`boundary_evidence_status` 排在 F&G 之后、`--out` 只在最后写一次 ⇒ F&G 一慢就会饿死世代边界核对；`_base11` 没有 rc=124 分支
+  （超时落进「代码早于 v0.45.334 或 JSON 不可读」的误导文案）；`cohort_boundary_evidence` 同日多条边界时每份归档解析多遍；共振前瞻约 +0.12s / 扫描日。
+
 ## [0.45.390] — 2026-09-30 — 占位（进行中：Alpha Bot 的 macOS 桌面启动器 Alpha Bot.app）
 
 ## [0.45.389] — 2026-09-30 — Changed：关掉 Vercel 对本仓库的自动部署（`alpha-hive-web` 项目每次推送都构建失败）
