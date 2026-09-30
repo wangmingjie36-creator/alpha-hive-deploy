@@ -12,9 +12,11 @@ $50,000 股票现货模拟组合，用于透明展示蜂群方向信号的真实
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import math
+import re
 
 from hive_logger import pdt_today  # v0.28.0: 美股交易日工具
 
@@ -456,13 +458,215 @@ def prefetch_ohlc(tickers: List[str], start: str, end: str) -> None:
             _OHLC_FULL[tk] = {}
 
 
+def _bars_from_history(ticker: str, hist) -> Dict[str, Dict]:
+    """把一份 `yf.Ticker(t).history(...)` 的 DataFrame 转成 `{YYYY-MM-DD: {Open, High, Low, Close}}`。
+
+    v0.45.391 从 `_fetch_ohlc` 直连路径原样抽出，**直连路径与回放窗口路径（`replay_ohlc_window`）
+    共用这一份**——两条路径各写一遍逐根过滤，迟早会有一条漏掉 v0.45.97 的 NaN 过滤
+    （`prefetch_ohlc` 就是现成的反例：它没有这道过滤，所以回放窗口不复用它）。
+    异常一律往上抛，由调用方决定语义（直连：不入缓存下次重试；窗口：该标的退回直连）。
+    """
+    out = {}
+    _dropped = 0
+    for idx, row in hist.iterrows():
+        date_str = idx.strftime("%Y-%m-%d")
+        # ── v0.45.97：**含 NaN 的 bar 一律丢掉，不许流向下游。** ──
+        # 2026-08-28 全站 HTTPS 断掉那天，TMUS 的 Close 是 NaN，
+        # 却照样触发了 TIME 止损：`_check_exit` 返回 ("TIME", NaN, d)
+        # → `gross_pct` NaN → `pnl_usd` NaN → `cash += size_usd + pnl`
+        # → **cash 从此永久 NaN**，此后每天 NAV、每个新仓的 size_usd
+        # 全是 NaN（NaN 会穿过 `size_usd <= 1` 和 `entry_price <= 0`
+        # 两道守卫，因为 NaN 的任何比较都返回 False）。8/28→9/2 四个
+        # 扫描日的净值就是这么烂掉的。
+        # 在这里挡是因为它是唯一的源头：_check_exit / _mark_to_market
+        # 都从这份 dict 取数，堵住出口就不必在每个消费者各补一遍。
+        # 丢掉 bar 的后果是良性的：该日不触发出场，等到有真实价格的
+        # 下一个交易日再触发（TIME 的判据是 `dt >= time_stop`，不会漏）。
+        try:
+            _o, _h, _l, _c = (float(row["Open"]), float(row["High"]),
+                              float(row["Low"]), float(row["Close"]))
+        except (TypeError, ValueError):
+            _dropped += 1
+            continue
+        if not all(math.isfinite(v) for v in (_o, _h, _l, _c)):
+            _dropped += 1
+            continue
+        out[date_str] = {"Open": _o, "High": _h, "Low": _l, "Close": _c}
+    if _dropped:
+        _log.warning("_fetch_ohlc %s：丢弃 %d 根含非有限值的日线（该日不出场，顺延到有真实价格那天）",
+                     ticker, _dropped)
+    return out
+
+
+# ── v0.45.391：回放 OHLC 窗口（只在 `with replay_ohlc_window(...)` 里生效）────────────
+#
+# 为什么需要：F&G 敞口门前瞻检验（`experiments/fg_exposure_gate_forward_test.py`）每次把
+# [FORWARD_START, 今天) 整段重放两遍，而 `run_for_date` 每天对**每个在场仓位**按
+# (ticker, entry_date, as_of+2) 取一次 OHLC——键里带 as_of，逐日都是新键，`_PRICE_CACHE`
+# 挡不住。窗口 8 个快照日时是 124 次 yfinance 调用 × ~0.45s；Step 11 在 09-28/09-29/09-30
+# 分别用了 37s / 47s / >60s（被 run_step 超时杀掉，rc=124，就绪度 JSON 与世代边界核对都没了），
+# 且窗口只增不减，按 30 周终期约 2,300 次调用/天。
+#
+# 做法：窗口 [start, end) 覆盖本次回放会请求的全部区间；每个标的**整段只取一次**
+# （与直连路径完全相同的 `history(start, end, auto_adjust=False)` 调用、同一个
+# `_bars_from_history`），之后每次请求按 `start <= d < end` 切片。
+#
+# 与 `prefetch_ohlc`/`_OHLC_FULL` 的区别（这正是不复用它们的理由）：
+#   ① 逐根 NaN/inf 过滤与直连路径同一份代码（prefetch 没有）；
+#   ② **每次请求都核对区间在窗口内**，窗口外一律走原直连路径（`_OHLC_FULL` 不核对，
+#      局部预取会静默截断——TIME 止损那天没 bar 就不平仓，看起来只是「今天没出场」）；
+#   ③ 整段取数抛异常 / 空结果 ⇒ 该标的本次回放全部退回原直连路径（逐次取、失败不入缓存、
+#      空结果入缓存的 v0.45.50 语义原样保留），并记一条 WARNING——空结果**不**当成
+#      「每个子区间都是空」的权威答案；
+#   ④ 作用域化：退出 `with`（含异常）即恢复进入前的值，不写 `_PRICE_CACHE`/`_OHLC_FULL`，
+#      生产 `run_for_date`（不在任何窗口里）逐字节不受影响。
+#
+# 行为等价的前提（观测到的事实，不是 Yahoo 的契约）：同一标的「窄区间一次取」与「宽区间取了
+# 再切片」逐根相同。v0.45.391 在真实数据上核过（CHANGELOG 同版）；它不成立的那天（Yahoo
+# 某次响应漏一天——v0.45.383/387 记过），直连路径同样会受同一种噪声影响，只是粒度不同。
+
+# 回放里 `_fetch_ohlc` 只有这两种请求形状（`run_for_date` Step 1 / Step 3 与 Step 2）。
+# 窗口的右端由它们导出——改了其中任何一个，窗口跟着变；把某个调用点的前视再放宽而忘了
+# 改这里，`tests/test_replay_ohlc_window.py` 的「零窗口外请求」会红，而不是悄悄变慢。
+_EXIT_OHLC_LOOKAHEAD_DAYS = 2    # 出场检查 + mark-to-market：[entry_date, as_of + 2)
+_ENTRY_OHLC_LOOKAHEAD_DAYS = 3   # 开仓取当日收盘：[as_of, as_of + 3)
+
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
+
+
+class _ReplayOhlcWindow:
+    """一次回放的 OHLC 窗口：`[start, end)`，每个标的至多一次整段取数。
+
+    计数器（`wide_fetches` / `served` / `out_of_window` / `fallback_tickers`）只用于观测与测试，
+    **不进**任何结果字典（前瞻检验的返回键是预注册的白名单）。
+    """
+
+    def __init__(self, start: str, end: str):
+        for name, v in (("start", start), ("end", end)):
+            if not (isinstance(v, str) and _ISO_DATE_RE.match(v)):
+                raise ValueError(f"replay_ohlc_window: {name}={v!r} 不是 YYYY-MM-DD")
+        if not start < end:
+            raise ValueError(f"replay_ohlc_window: 空窗口 [{start}, {end})")
+        self.start = start
+        self.end = end
+        self._bars: Dict[str, Dict[str, Dict]] = {}
+        self.fallback_tickers: Dict[str, str] = {}   # ticker → 整段取数失败的原因
+        self.wide_fetches = 0
+        self.served = 0
+        self.out_of_window = 0
+        self._warned_out_of_window: set = set()
+
+    def serve(self, ticker: str, start: str, end: str) -> Optional[Dict[str, Dict]]:
+        """在窗口内且该标的整段取数成功 ⇒ 返回切片；否则返回 `None`，由调用方走原直连路径。"""
+        if not (isinstance(start, str) and isinstance(end, str)
+                and _ISO_DATE_RE.match(start) and _ISO_DATE_RE.match(end)
+                and self.start <= start < end <= self.end):
+            self.out_of_window += 1
+            if ticker not in self._warned_out_of_window:
+                self._warned_out_of_window.add(ticker)
+                _log.warning("[PaperPortfolio] 回放 OHLC 窗口 [%s, %s) 外的请求 %s [%s, %s)——"
+                             "走原直连路径（结果不变，只是多一次网络调用）。回放调用点的前视若被放宽，"
+                             "请同步 _EXIT/_ENTRY_OHLC_LOOKAHEAD_DAYS。",
+                             self.start, self.end, ticker, start, end)
+            return None
+        if ticker in self.fallback_tickers:
+            return None
+        bars = self._bars.get(ticker)
+        if bars is None:
+            bars = self._fetch_wide(ticker)
+            if bars is None:
+                return None
+        self.served += 1
+        return {d: b for d, b in bars.items() if start <= d < end}
+
+    def _fetch_wide(self, ticker: str) -> Optional[Dict[str, Dict]]:
+        self.wide_fetches += 1
+        bars: Optional[Dict[str, Dict]] = None
+        try:
+            import yfinance as yf
+            # 与直连路径逐参数相同：只换 start/end。不许换成 yf.download（默认参数不同、MultiIndex）
+            # 或加 repair=True（会改值）。
+            hist = yf.Ticker(ticker).history(start=self.start, end=self.end, auto_adjust=False)
+            if hist is None or len(hist) == 0:
+                reason = "空结果"
+            else:
+                bars = _bars_from_history(ticker, hist)
+                if not bars:
+                    reason = "整段没有一根有限值日线"
+                    bars = None
+        except Exception as e:  # noqa: BLE001 —— 退回直连路径并记 WARNING（下一行），不吞
+            reason = f"{type(e).__name__}: {e}"
+            bars = None
+        if bars is None:
+            self.fallback_tickers[ticker] = reason
+            _log.warning("[PaperPortfolio] 回放 OHLC 窗口 %s [%s, %s) 整段取数失败（%s）——"
+                         "该标的本次回放退回逐次直连 _fetch_ohlc（失败语义与改动前相同，只是慢）",
+                         ticker, self.start, self.end, reason)
+            return None
+        self._bars[ticker] = bars
+        return bars
+
+    def summary(self) -> str:
+        return (f"回放 OHLC 窗口 [{self.start}, {self.end})：整段取数 {self.wide_fetches} 次"
+                f"（{len(self._bars)} 个标的成功），切片服务 {self.served} 次，"
+                f"退回直连 {len(self.fallback_tickers)} 个标的，窗口外请求 {self.out_of_window} 次")
+
+
+_REPLAY_OHLC_WINDOW: Optional[_ReplayOhlcWindow] = None
+
+
+def replay_ohlc_bounds(dates: List[str],
+                       held_entry_dates: Optional[List[str]] = None) -> Optional[Tuple[str, str]]:
+    """一次回放要用的窗口 `[start, end)`：覆盖回放期间 `_fetch_ohlc` 会收到的全部请求。
+
+    `dates`：回放日；`held_entry_dates`：回放起点就已在场的仓位的 entry_date（种子持仓）。
+    回放中新开的仓位 entry_date ∈ dates，已被覆盖。`dates` 为空 ⇒ `None`（没有要回放的日子）。
+    只收 YYYY-MM-DD 字符串；不认得的值忽略——窗口因此偏窄时，那几次请求走原直连路径并记 WARNING，
+    结果不变（所以这里绝不抛，免得在重放开始前改变调用方的异常形状）。
+    """
+    ds = [d for d in dates if isinstance(d, str) and _ISO_DATE_RE.match(d)]
+    if not ds:
+        return None
+    starts = ds + [d for d in (held_entry_dates or ()) if isinstance(d, str) and _ISO_DATE_RE.match(d)]
+    look = max(_EXIT_OHLC_LOOKAHEAD_DAYS, _ENTRY_OHLC_LOOKAHEAD_DAYS)
+    end = (datetime.strptime(max(ds), "%Y-%m-%d") + timedelta(days=look)).strftime("%Y-%m-%d")
+    return min(starts), end
+
+
+@contextlib.contextmanager
+def replay_ohlc_window(start: str, end: str):
+    """在 `with` 内，`_fetch_ohlc` 对窗口内请求按标的整段取一次、之后切片（见上方区块注释）。
+
+    退出时（含异常）恢复进入前的窗口（可嵌套）、释放已取的日线；`_PRICE_CACHE` / `_OHLC_FULL`
+    从不被本路径读写。yield 出窗口对象，调用方可读其计数器（只用于日志 / 测试）。
+    """
+    global _REPLAY_OHLC_WINDOW
+    win = _ReplayOhlcWindow(start, end)
+    prev = _REPLAY_OHLC_WINDOW
+    _REPLAY_OHLC_WINDOW = win
+    try:
+        yield win
+    finally:
+        _REPLAY_OHLC_WINDOW = prev
+        _log.info("[PaperPortfolio] %s", win.summary())   # 先记再清：summary 要数成功取到的标的
+        win._bars.clear()
+
+
 def _fetch_ohlc(ticker: str, start: str, end: str) -> Dict[str, Dict]:
-    """拉 [start, end] 区间的每日 OHLC。返回 {date_str: {Open, High, Low, Close}}"""
+    """拉 [start, end) 区间的每日 OHLC（end 排他，同 yfinance）。返回 {date_str: {Open, High, Low, Close}}"""
     # v0.38.2: 优先从全区间存储切片（prefetch_ohlc 预热后零网络调用）
     # 注意 end 排他（与 yfinance history(start,end) 语义一致，保证与直连路径行为完全相同）
     full = _OHLC_FULL.get(ticker)
     if full:
         return {d: bar for d, bar in full.items() if start <= d < end}
+
+    # v0.45.391：回放窗口（只在 `replay_ohlc_window` 作用域内非 None；生产路径恒为 None）。
+    # 返回 None ⇒ 窗口外 / 该标的整段取数失败 ⇒ 落到下面原样的直连路径。
+    win = _REPLAY_OHLC_WINDOW
+    if win is not None:
+        sliced = win.serve(ticker, start, end)
+        if sliced is not None:
+            return sliced
 
     key = (ticker, start, end)
     if key in _PRICE_CACHE:
@@ -475,35 +679,7 @@ def _fetch_ohlc(ticker: str, start: str, end: str) -> Dict[str, Dict]:
         if hist is None or len(hist) == 0:
             _PRICE_CACHE[key] = {}
             return {}
-        out = {}
-        _dropped = 0
-        for idx, row in hist.iterrows():
-            date_str = idx.strftime("%Y-%m-%d")
-            # ── v0.45.97：**含 NaN 的 bar 一律丢掉，不许流向下游。** ──
-            # 2026-08-28 全站 HTTPS 断掉那天，TMUS 的 Close 是 NaN，
-            # 却照样触发了 TIME 止损：`_check_exit` 返回 ("TIME", NaN, d)
-            # → `gross_pct` NaN → `pnl_usd` NaN → `cash += size_usd + pnl`
-            # → **cash 从此永久 NaN**，此后每天 NAV、每个新仓的 size_usd
-            # 全是 NaN（NaN 会穿过 `size_usd <= 1` 和 `entry_price <= 0`
-            # 两道守卫，因为 NaN 的任何比较都返回 False）。8/28→9/2 四个
-            # 扫描日的净值就是这么烂掉的。
-            # 在这里挡是因为它是唯一的源头：_check_exit / _mark_to_market
-            # 都从这份 dict 取数，堵住出口就不必在每个消费者各补一遍。
-            # 丢掉 bar 的后果是良性的：该日不触发出场，等到有真实价格的
-            # 下一个交易日再触发（TIME 的判据是 `dt >= time_stop`，不会漏）。
-            try:
-                _o, _h, _l, _c = (float(row["Open"]), float(row["High"]),
-                                  float(row["Low"]), float(row["Close"]))
-            except (TypeError, ValueError):
-                _dropped += 1
-                continue
-            if not all(math.isfinite(v) for v in (_o, _h, _l, _c)):
-                _dropped += 1
-                continue
-            out[date_str] = {"Open": _o, "High": _h, "Low": _l, "Close": _c}
-        if _dropped:
-            _log.warning("_fetch_ohlc %s：丢弃 %d 根含非有限值的日线（该日不出场，顺延到有真实价格那天）",
-                         ticker, _dropped)
+        out = _bars_from_history(ticker, hist)
         _PRICE_CACHE[key] = out
         return out
     except Exception as _e_ohlc:
@@ -1111,7 +1287,7 @@ def _mark_to_market(positions: List[Position], as_of: str) -> Tuple[float, List[
     details = []
     for pos in positions:
         ohlc = _fetch_ohlc(pos.ticker, pos.entry_date,
-                            (datetime.strptime(as_of, "%Y-%m-%d") + timedelta(days=2)).strftime("%Y-%m-%d"))
+                            (datetime.strptime(as_of, "%Y-%m-%d") + timedelta(days=_EXIT_OHLC_LOOKAHEAD_DAYS)).strftime("%Y-%m-%d"))
         cur_price = pos.entry_price
         if as_of in ohlc:
             cur_price = ohlc[as_of]["Close"]
@@ -1217,7 +1393,7 @@ def run_for_date(as_of: str, verbose: bool = False,
     for pos in positions:
         # 拉包含 as_of 的 OHLC 段
         ohlc = _fetch_ohlc(pos.ticker, pos.entry_date,
-                           (datetime.strptime(as_of, "%Y-%m-%d") + timedelta(days=2)).strftime("%Y-%m-%d"))
+                           (datetime.strptime(as_of, "%Y-%m-%d") + timedelta(days=_EXIT_OHLC_LOOKAHEAD_DAYS)).strftime("%Y-%m-%d"))
         exit_check = _check_exit(pos, as_of, ohlc)
         if exit_check:
             reason, ex_price, ex_date = exit_check
@@ -1263,7 +1439,7 @@ def run_for_date(as_of: str, verbose: bool = False,
 
         ticker = snap["ticker"]
         ohlc = _fetch_ohlc(ticker, as_of,
-                           (datetime.strptime(as_of, "%Y-%m-%d") + timedelta(days=3)).strftime("%Y-%m-%d"))
+                           (datetime.strptime(as_of, "%Y-%m-%d") + timedelta(days=_ENTRY_OHLC_LOOKAHEAD_DAYS)).strftime("%Y-%m-%d"))
         new_pos = _open_position(snap, nav_for_sizing, as_of, ohlc, closed,
                                  market_fear_greed=market_fear_greed)
         if new_pos is None:

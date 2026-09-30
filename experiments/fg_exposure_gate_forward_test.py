@@ -586,6 +586,51 @@ def evaluate(dates: List[str], since: str, before: str, sandbox_root: Path,
         raise ValueError("前瞻模式必须显式传 seed（生产窗口起点状态，见 load_seed）：空沙箱起点会让自证在真实数据上必红")
     if insample and seed:
         raise ValueError("样本内模式从 bootstrap_date 起，生产当时是空状态，不许传 seed")
+    with _replay_ohlc_scope(dates, seed):
+        return _evaluate_replays(dates, since, before, sandbox_root, insample=insample, seed=seed)
+
+
+def _seed_held_entry_dates(seed: Optional[Dict[str, bytes]]) -> List[str]:
+    """种子里在场仓位的 entry_date——只用来定回放 OHLC 窗口的左端（v0.45.391）。
+
+    **绝不抛**：种子合法性由 `load_seed` / `_apply_seed` / 重放本身把关，这里解析不了的行跳过。
+    窗口因此偏窄时，那几次请求走 `_fetch_ohlc` 原直连路径并记 WARNING，结果不变——
+    若在这里抛，会在重放开始前改变 `evaluate()` 对坏种子的异常形状。
+    """
+    blob = (seed or {}).get("positions.jsonl")
+    if not isinstance(blob, (bytes, bytearray)):
+        return []
+    out = []
+    for line in bytes(blob).decode("utf-8", "replace").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and isinstance(row.get("entry_date"), str):
+            out.append(row["entry_date"])
+    return out
+
+
+def _replay_ohlc_scope(dates: List[str], seed: Optional[Dict[str, bytes]]):
+    """v0.45.391（实现层，不是事后修订）：一次检验里的全部重放共用**一个**回放 OHLC 窗口
+    （`paper_portfolio.replay_ohlc_window`）——每个标的整段只向 yfinance 取一次，之后按区间切片。
+
+    改动前每个快照日对每个在场仓位各取一次（键里带 as_of，缓存挡不住），窗口 8 个快照日即
+    124 次调用 / ~45s，Step 11 在 09-30 被 60s 超时杀掉；且窗口只增不减。
+    **不改**窗口、变体、统计量、α、盲化、自证：同一份行情下 `run()` 的输出逐字节相同
+    （CHANGELOG 同版有真实数据对照）。A、B（及样本内的 A_check）在同一个窗口里跑，B 读到的
+    日线与 A 逐根相同——改动前 B 靠复用 A 留在 `_PRICE_CACHE` 里的同键结果做到这一点。
+    """
+    import contextlib
+
+    import paper_portfolio as pp
+    bounds = pp.replay_ohlc_bounds(dates, _seed_held_entry_dates(seed))
+    return pp.replay_ohlc_window(*bounds) if bounds else contextlib.nullcontext()
+
+
+def _evaluate_replays(dates: List[str], since: str, before: str, sandbox_root: Path,
+                      *, insample: bool, seed: Optional[Dict[str, bytes]]) -> Dict:
+    """`evaluate()` 的主体（v0.45.391 为套上回放 OHLC 窗口原样拆出，逻辑未改）。"""
     a_dir, b_dir = sandbox_root / "A_baseline", sandbox_root / "B_treatment"
     a = _replay_variant({}, a_dir, dates, seed=seed)
     b = _replay_variant(FG_GATE_TEST_CONFIG, b_dir, dates, seed=seed)
@@ -712,7 +757,7 @@ def rehearse(since: str, before: str, repo_root: Optional[Path] = None) -> Dict:
     real = _real_recorded_entries(since, before)
     if not real:
         return {**out, "status": "not_ready", "reason": f"窗口 [{since}, {before}) 内生产没有真实开仓记录，无从比对"}
-    with tempfile.TemporaryDirectory(prefix="fg_gate_rehearse_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="fg_gate_rehearse_") as tmp, _replay_ohlc_scope(dates, seed):
         a = _replay_variant({}, Path(tmp) / "A_baseline", dates, seed=seed)
     sp = _selfproof_stats(real, _entries_in_window(a["closed"], a["open_positions"], since, before))
     out["selfproof"] = {"real_entries": sp["total"], "reproduced": sp["exact"], "decision_reproduced": sp["decision"]}
