@@ -81,7 +81,93 @@ Next.js 应用在 `alpha-hive-web/` 子目录——所以每个推送 / PR 的�
   容器 tzdata 导致的 `test_step_contract.py::TestBusinessTodayVsDateStr::test_fact_cited_in_docstring_holds_on_this_tzdata`；
   随日期变化的 `test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`。
 
-## [0.45.387] — 2026-09-30 — 占位（进行中：日线缺口阶段 2——缺口时 Twelve Data 补第二源；阶段 4——盘点其它读 yfinance 日线做窗口统计的模块；BILI/CRM/ABBV 09-23 快照 iv_rank 重算）
+## [0.45.387] — 2026-09-30 — Fixed/Changed：日线缺口阶段 2——缺口时向 Twelve Data 借缺的那一根（换算回复权口径）；`Close` 为 NaN 的行按缺口处理；阶段 4 盘点（只读，未改代码）；BILI / CRM / ABBV 09-23 快照 `iv_rank` 重算
+
+用户 2026-09-30 决定：BILI / CRM / ABBV 一并重算；阶段 2（缺口时用 Twelve Data 补第二源）、阶段 4（盘点其它读 yfinance 日线做窗口统计的模块）要做。承 v0.45.383（阶段 1：缺口 ⇒ 重取一次、仍缺 ⇒ 置空）。
+
+### 一、阶段 2：缺口时向 Twelve Data 借缺的那一根
+
+v0.45.383 遇到重取仍缺的日线只能把 `iv_rank` 置空（分数走中性）。本版在「置空」之前多问一步：**第二源有没有这一根？**
+
+**为什么不整段换成 Twelve Data**：yfinance 给**复权**收盘、Twelve Data 给**未复权**收盘，分红标的的 HV Rank 会差 1~3 点
+（2026-09-30 实测 ABBV：复权 23.42 / 未复权 21.65，yfinance 自己关掉复权得 21.65 与 Twelve Data 精确吻合，差异完全来自分红复权）。
+所以只借**缺的那一根**，并换算回 yfinance 口径：
+
+- 复权因子在两次除息日之间是常数 ⇒ 缺失日复权价 = 第二源收盘 × 前一根的（复权价 / 第二源收盘）；
+- 后一根也存在时，要求它算出的因子与前一根一致（`FILL_RATIO_TOL = 1e-4`）——**不一致说明缺口夹着除息日，换算没有根据 ⇒ 放弃，退回置空**（宁可缺数，不编一根）；
+- 缺口在序列末端（后面没有 bar）：末根复权价 ≡ 未复权价，因子取 1；末端缺多根时因子归属分不清，只在「前一根因子 ≈ 1」时才补；
+- **全有或全无**：有任何一根补不出就整体退回置空；补完再跑一遍 `find_gaps` 复核。
+
+**代码**
+- `bars_integrity.py`：`fill_gaps_from_reference(dates, closes, ref_rows, targets)`（纯函数、不联网）+ `FILL_RATIO_TOL` / `FILL_MAX_NEIGHBOR_DAYS`。
+- `options_analyzer.py`：`_fill_gaps_from_second_source`（用 `twelve_data.fetch_bars(ticker, SHARED_BARS_WINDOW)`——与扫描里已有的三个消费方同一窗口，**通常是缓存命中、不多花一次 7 次/分钟的配额**；
+  瞬时**网络类**失败重试一次——09-29 扫描 Twelve Data 的 35 次真实请求里有 4 次 `RemoteDisconnected`/`URLError`，限流 / 404 / 接口报错不重试；补数自身抛异常 ⇒ ERROR 日志 + 退回置空，不拖垮主路径）。
+  `fetch_historical_hv` 在重取仍缺后先试它；补成则照常缓存并计算，补不成走 v0.45.383 的置空路径。
+- **`Close` 为 NaN / ≤0 的行现在按缺口处理**（`_clean_bars`）：yfinance 偶有「日期在、Close 是 NaN」的行（2026-08-28 实测 Volume 却有值）。`pct_change().dropna()` 会把它连同后一根的收益一起丢掉，
+  与缺一根 bar 同样让 20 日窗口错位，而 `find_gaps` 只看日期，从前看不见。
+- **可观测**：`scan_timing.counters.hv_gap` 新增 `filled`，`tickers[*]` 新增 `filled` / `unfilled`（`"日期:原因"`，原因 = `td_unavailable` / `ratio_mismatch` / `ref_missing` / `recheck_failed` / `fill_error:<异常名>` …）；
+  摘要行 `日线缺口 修复N/TD补N/置空N/校验出错N(TICKER:日期已补 | TICKER:日期[原因])`，只在出事时占位；`analyze()` 结果新增 `hv_gap_filled`（补出的日期，`iv_rank` 照常给出）。
+  ⚠️ `iv_rank_source` **仍是 `hv_proxy`**——`signal_archive` 把非 hv_proxy 一律当真实 IV，不能新增取值。
+
+**留一验证（真实数据，不是拍的容差）**：`experiments/hv_gap_second_source_loo.py`，结果冻结 `experiments/hv_gap_second_source_loo_20260930.json`。
+30 只 × 最后 21 根，逐根删除 → 用 Twelve Data 补回 → 与完整序列比：
+
+| | |
+|---|---|
+| 试验 / 补回 / 拒补 | 630 / **620** / 10 |
+| 补出收盘的相对误差 | 中位 1.2e-8、p95 5.9e-8、最大 9.8e-8（两源收盘几乎逐位一致） |
+| 最终 `iv_rank` 偏差 | 最大 **0.01**（= 四舍五入）；`percentile` 偏差 **0** |
+| 末端补回 | 30/30 |
+| 拒补原因 | 10 次全是 `ratio_mismatch`，**全落在除息日**——**已逐一用 yfinance `dividends` 核对**：被拒的两天恰是除息日及其前一个交易日（NVDA 09-10 / QCOM 09-03 / META 09-21 / CRM 09-17 / TMO 09-15），没有误拒、没有漏拒 |
+| 因子噪声 | 相邻日因子跳变中位数 2.6e-8 ⇒ 容差 1e-4 比噪声宽 3 个数量级，又窄于任何常规分红比例 |
+
+**测试与变异**：`tests/test_hv_gap_second_source.py`（33 条；夹具**自带分红**——因子恒为 1 时乘不乘都一样，证明不了换算对不对，另有一条反证测试确认夹具真在考换算）。
+20 个变异（因子不换算 / 不校验两侧因子 / 末端两条规则 / 邻居距离不设限 / 半补放行 / 不复核 / NaN 不剔除 / 校验不用清洗后日期 / 补完仍用原 Close / 补齐不计数 / 不重置 `filled` / 置空不带原因 / 补齐后重复计数 / 摘要两处 / 结果字段 / 取数窗口 / 补数异常两处）**全部被抓到**，`PYTHONDONTWRITEBYTECODE=1`、逐个还原。
+`tests/test_hv_gap_integrity.py` 仅改摘要行断言（新增 `TD补N` 字段）。
+
+**世代边界：本版不新增。** 依据：① 无缺口日输出逐位不变（同 v0.45.383）；② 缺口日相对 v0.45.383 由「置空」变为「修复值」，而修复值与完整序列一致（上表：`iv_rank` 偏差 ≤0.01、`percentile` 偏差 0），
+即缺口日输出**向无缺口日收敛**，与 09-28 登记的等价口径同向；③ 除息日缺口仍置空，行为同 v0.45.383；④ **两种行为下的缺口日样本目前都是 0 条**（09-29 首次真实扫描 `hv_gap`：checked 30 / clean 30 / 0 修复 / 0 置空），没有任何样本跨越两种行为。
+⚠️ 这是一个**判断**，不是机械结论：严格口径下「改评分输入必须登记边界」。若要按严格口径补登，代价可控（0 样本受影响），照 v0.45.383 的等价证据法即可。
+
+### 二、BILI / CRM / ABBV：09-23 期权快照 `iv_rank` / `iv_percentile` 重算（数据，不在仓库）
+
+沿 v0.45.379 做法（一次性脚本，未入库），仅这两个字段：
+
+| 标的 | iv_rank | iv_percentile |
+|---|---|---|
+| BILI | 44.94 → 45.58 | 35.22 → 37.93 |
+| CRM | 98.87 → 98.82 | 97.83 → 97.41 |
+| ABBV | 23.69 → 23.42 | 5.65 → 4.74 |
+
+- **三重核对才写**：① 按 09-23 收盘的 yfinance 复权 1y 序列走生产 `calculate_iv_rank` / `calculate_iv_percentile`；② 「删掉 09-22 那根」必须复现改前原值（三只 `iv_rank` 均精确复现，`percentile` 差 0.01~0.16，属窗口边缘）；③ 与 Twelve Data 未复权独立算法相差 ≤1.0。
+- **ABBV 是例外，如实记**：与 Twelve Data 差 1.77（> 1.0 阈值）。已验证是分红复权造成——yfinance 不复权 21.65 与 Twelve Data 21.65 精确吻合；生产用复权口径，故写复权值 23.42，并把这条例外与验证过程写进 `_iv_rank_recheck.check`。
+- CRM 的 Twelve Data 第一次请求撞到 SSL EOF（瞬时网络错误，同上文那 4/35 次一类），重试后通过（98.98 vs 98.82）。
+- 原值与理由写进文件内 `_iv_rank_recheck`；改前副本 `~/alpha-hive-data/_manual_backups/options_snapshot_{T}_2026-09-23.pre_v0.45.387.json`；改后与备份逐键 diff，仅 `iv_rank` / `iv_percentile` / `_iv_rank_recheck` 变化。
+- **影响面**同 v0.45.372 / v0.45.379：09-23 整轮扫描失败、无落库分数，已存的 predictions / final_score / 信号存档一概没动；只改快照这份记录；不进 IC 重跑世代。至此 09-23 那 8 只的快照 `iv_rank` 全部核对完毕。
+
+### 三、阶段 4：盘点其它读 yfinance 日线、按「位置」取窗的统计（只读，**未改代码**）
+
+结论：**全仓生产代码里只有 `options_analyzer.fetch_historical_hv` 过了 `bars_integrity`**；同一缺口对其它位置窗统计一样无声。两个只读 agent 并行盘点，我亲自核实了会影响结论的几条（见下），其余量级来自 agent 的合成序列实验，**待用真实数据复核**。
+
+- **已亲核**：`find_gaps` 仅 `options_analyzer` 一个生产调用方；`risk_engine` / `backtest_engine` / `data_fetcher.collect_all_metrics` 无生产调用方（死代码，不修）；
+  `momentum_5d = Close[-1]/Close[-5]-1` 只跨 **4** 个交易日（`data_pipeline.py` 399/450、`swarm_agents/cache.py:216`、`crowding_detector.py:535`），而自攒索引 `price_history` 按 5 日——**同名不同口径**；
+  `rv_30d`（`market_intelligence.calculate_iv_rv_spread`）走**独立**的 `yf.download` + 位置窗，与 iv_rank 同根同日（09-23 BRK-B 14.52 / 12.55），`fetch_historical_hv` 的修复罩不住它。
+- **严重度（agent 合成实验，日 σ≈2%，缺最后 5 根内一根）**：高——`data_pipeline._fetch_history_metrics` 的 momentum_5d（\|Δ\| 均值 1.6pp、p90 3.4pp）/ volatility_20d（+17%），进 Buzz / Bear / Rival ML / `paper_portfolio` 仓位 / signal_archive；
+  中高——Rival 的 RSI/MACD/BB（16.5% 方向翻转）、`rv_30d`、供应链 5 日收益（Scout，信号翻转 21.5%）、`backtester._simulate_trade_path`（缺 T+3 ⇒ exit 变 T+8 而 `holding_days` 仍写 7）；
+  中——政体 MA、板块轮动、GLD `iloc[-2]`；低——PEAD / 诊断 / 展示。完整表见 auto-memory `alpha-hive-position-window-audit.md`。
+- **待验证**：`data_pipeline.py:601` 是否覆盖 `price_index` 标签；`fred_macro` `period="5d"` 缺 bar 的实际返回；`alpha_hive_daily_report.py:2130` 的 `momentum_5d or 0.0`（把 None 伪造成 0.0）。
+- **没做，且需要用户决定**：这些位置里进评分的（Buzz / Rival / Scout / Guard）一改就是改评分输入，须登记世代边界（或走 QUARANTINE，两种先例未查）；建议**先量后改**——先加只计数、不改值的观测点，量出真实缺口频率再定。
+
+### 四、观察（不是改动）
+
+- **09-29 首次真实扫描**：`scan_timing.counters.hv_gap` = checked 30 / clean 30 / repaired 0 / degraded 0 / minor 0 / check_errors 0。新代码没有误报；真缺口尚未遇到过，阶段 2 的补数路径**只在离线测试与留一验证里跑过**，真实扫描里首次触发时要看摘要行。
+- 同一次扫描 Twelve Data `failures: 4`/`fetches: 35`（XOM / AMC / ABBV / DELL，`network:*` 瞬时错误）：`fetch_bars` 本身仍无重试，只有本版补数路径里加了一次。是否给 `_fetch_rows` 通用加重试（会多占限流名额）未做。
+
+### 未做
+
+- 09-23 整轮扫描为什么失败（日志有 CBOE 全天陈旧、Step 2 超时上限的迹象，线索非结论）。
+- 2026-08-27 之前快照里的坏 `rv_30d`（跨标的重复 / >300 的值）及其对 `vrp_signal._prior_history` 的潜在影响。
+- JNJ 有固定 2~3 点偏差，仍未定性；`is_trading_day` 不认识 2025-01-09；覆盖率闸门仍只判非空。
 
 ## [0.45.386] — 2026-09-29 — 占位（进行中：编排器 B2——Step 2/4/5 经步骤解释器 + alert_manager 新规则；B1 干净跑过一天后合入）
 
