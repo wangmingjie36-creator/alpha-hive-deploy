@@ -10,9 +10,10 @@
 from __future__ import annotations
 
 import json
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -39,7 +40,10 @@ def _json(obj, status: int = 200) -> Response:
 
 
 def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[IntradayPoller] = None,
-               port: int = 8765, start_poller: bool = False) -> Starlette:
+               port: int = 8765, start_poller: bool = False,
+               on_shutdown: Optional[Callable[[], None]] = None) -> Starlette:
+    """`on_shutdown`：页面「停止服务」调它（`alphabot.__main__` 传入 uvicorn 的退出开关）；
+    不传 ⇒ `/api/shutdown` 答 400，页面也不显示该按钮。"""
     svc = service or AlphaBotService()
     allowed_hosts = {f"{h}:{port}" for h in LOOPBACK_HOSTS} | set(LOOPBACK_HOSTS)
 
@@ -63,7 +67,19 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
                 "watchlist": svc.watchlist(), "ledger": svc.ledger_dates(),
                 "alphabot_state": str(svc.state_dir()),
                 "poller": dict(poller.status) if poller else {"running": False, "disabled": True},
-                "stats": dict(svc.stats)}
+                "stats": dict(svc.stats), "can_shutdown": on_shutdown is not None}
+
+    @api
+    def ping(request):
+        # 桌面启动器（`alphabot.launcher`）靠它认出「端口上跑的就是 Alpha Bot」——轻量，不碰账本
+        return {"app": "alphabot", "version": __version__, "demo": svc.demo, "pid": os.getpid(),
+                "can_shutdown": on_shutdown is not None}
+
+    def shutdown(request: Request):
+        if on_shutdown is None:
+            return _json({"error": "本进程不支持从页面停止（在启动它的终端里 Ctrl-C）"}, 400)
+        on_shutdown()
+        return _json({"stopping": True})
 
     @api
     def live(request):
@@ -142,6 +158,8 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
     routes = [
         Route("/", index),
         Route("/api/meta", meta),
+        Route("/api/ping", ping),
+        Route("/api/shutdown", shutdown, methods=["POST"]),
         Route("/api/live/{ticker}", live),
         Route("/api/overview", overview),
         Route("/api/ledger/dates", ledger_dates),

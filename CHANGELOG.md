@@ -5,7 +5,24 @@
 
 ---
 
-## [0.45.390] — 2026-09-30 — 占位（进行中：Alpha Bot 的 macOS 桌面启动器 Alpha Bot.app）
+## [0.45.390] — 2026-09-30 — Added：Alpha Bot 的 macOS 桌面程序 `Alpha Bot.app`（双击起服务并开页面；已在跑就只开页面；页面可停止服务）
+
+之前只能在终端 `make alphabot`，终端一关服务就停；GUI 程序又拿不到 shell 里 export 的 `ALPHA_HIVE_HOME`，直接包一层会静默读错目录。
+
+### Added
+- `alphabot/macos_app.py`：生成 `~/Applications/Alpha Bot.app`（`make alphabot-app`）。壳是一段 bash：cd 进仓库后 `exec /usr/local/bin/python3 -m alphabot.launcher`，逻辑不在壳里 ⇒ `git pull` 即生效，仓库挪位置 / 换 Python 才要重新生成。路径全部 `shlex.quote`（仓库在 `~/Desktop/Alpha Hive`，带空格）；Python 不在、仓库进不去（含「桌面」文件夹权限被拒）都弹窗说清楚并写日志。同名 .app 的 bundle id 不是本生成器的 ⇒ 拒绝覆盖；先在临时目录建好再换上去。默认不装进仓库（iCloud 会复制出「Alpha Bot 2.app」），目标在桌面 / 文稿下会提示。当前环境有 `ALPHA_HIVE_HOME`（或给 `--home`）就顺手记进启动器配置。未签名：本机生成没有隔离标记，Gatekeeper 不拦。
+- `alphabot/launcher.py`（.app 实际执行的逻辑）：探测端口 → 已是 Alpha Bot 只开页面（双击两次不会起两份）/ 被别的程序占着就弹窗给 `lsof` 命令；首次启动弹窗选数据根（或本次演示模式，演示不写进配置），存 `~/Library/Application Support/Alpha Bot/launcher.json`；坏配置照实报错，不静默当首次启动。服务以脱离进程组的子进程起，日志 `~/Library/Logs/Alpha Bot/server.log`（>5MB 轮转）；等 `/api/ping` 应答，服务先死了就立即弹窗附日志尾巴，不干等超时。回环探测显式不走代理（用户环境的 `http_proxy` 会把 127.0.0.1 也送去代理）。`--stop` / `--reset`（忘掉数据根），另有 `make alphabot-stop`。弹窗走 osascript，文本全经 argv 传入，不拼进 AppleScript 源码。
+- `alphabot/server.py`：`/api/ping`（轻量，启动器认身份用，不碰账本）、`POST /api/shutdown`（同样要 `X-AlphaBot` 头；`create_app(on_shutdown=...)` 没接开关就 400）；`/api/meta` 带 `can_shutdown`。`alphabot/__main__.py` 改用 `uvicorn.Server`，停止与 Ctrl-C 走同一条退出路径（lifespan 停盘中轮询）。
+- 前端：页脚「停止服务」（确认后停，页面换成「服务已停止」说明）。
+- 图标 `alphabot/macos/AlphaBot.icns`（源 `icon.svg`：纸色圆角底 + 陶土色标记，与页面同一套）。
+- `tests/test_alphabot_launcher.py`（15 条）：.app 结构、**带空格加引号的仓库路径**下脚本真的 cd 对 / exec 对 / PATH 先走 /usr/local/bin、Python 缺失退出 1 且留日志、不覆盖别人的 .app；真起演示服务走完「首次问 → 起 → 开页面 → 再开只开页面 → `--stop` 停掉」；端口被占、服务启动即死、选的数据根原样进服务的 `ALPHA_HIVE_HOME` 并被记住、取消不起服务、坏配置报错、`/api/shutdown` 要头且只在接了开关时可用。变异自证：去掉 `shlex.quote` ⇒ 空格路径那条红；去掉绕代理 ⇒ 端到端那条红（先得清掉 `no_proxy`，否则回环本来就被放行、这条没牙——实测）。
+
+### Changed
+- `Makefile`：`alphabot-app` / `alphabot-stop`。`alphabot/__init__.py` 版本 0.45.390。
+
+### 注意
+- 启动器**不核对**所选目录里有没有卖权账本：账本目录名只许卖权模块提及（`tests/test_sell_strike_integration.py` 火墙，本次实测会红），选错了页面账本 / 结果页会显示账本不存在，`--reset` 后重选。
+- 只在 Linux 容器里验过（bash 壳 + 启动流程 + 浏览器里点停止）；osascript 弹窗与 Finder 双击需要在 Mac 上第一次用时确认。
 
 ## [0.45.389] — 2026-09-30 — Changed：关掉 Vercel 对本仓库的自动部署（`alpha-hive-web` 项目每次推送都构建失败）
 

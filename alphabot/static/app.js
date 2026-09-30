@@ -23,9 +23,23 @@ export async function refreshMeta() {
   document.getElementById("demo-banner").hidden = !state.meta.demo;
   const dl = document.getElementById("ticker-list");
   fill(dl, ...(state.meta.watchlist?.tickers || []).map((t) => h("option", { value: t })));
-  document.getElementById("foot").textContent =
-    `Alpha Bot ${state.meta.version} · 本机运行，只读卖权账本 · 以下为公开信息研究与情景推演，不构成投资建议。`;
+  fill(document.getElementById("foot"),
+    h("span", {}, `Alpha Bot ${state.meta.version} · 本机运行，只读卖权账本 · 以下为公开信息研究与情景推演，不构成投资建议。`),
+    state.meta.can_shutdown ? h("button", { class: "link-btn", type: "button", onclick: stopServer }, "停止服务") : null,
+  );
   return state.meta;
+}
+
+async function stopServer() {
+  if (!confirm("停止 Alpha Bot 本机服务？盘中定时快照也会一起停。")) return;
+  try { await api("/api/shutdown", { method: "POST" }); }
+  catch (e) { alert(`停止失败：${e.message}`); return; }
+  disposeAll();
+  fill(app, h("div", { class: "panel stopped" },
+    h("h2", {}, "服务已停止"),
+    h("p", {}, "可以关掉这个页面。再次使用：双击 Alpha Bot.app，或在终端运行 make alphabot。")));
+  fill(document.getElementById("foot"));
+  fill(document.getElementById("session"));
 }
 
 export function tickers() { return state.meta?.watchlist?.tickers || []; }
