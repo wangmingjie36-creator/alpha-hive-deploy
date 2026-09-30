@@ -66,6 +66,8 @@ MOVE_DIRS = (
     # 则新代码写新根、旧根里已记的行被留下，结算与预注册检验静默少几天。
     # 守卫：tests/test_migrate_data_root.py::test_every_backup_state_dir_is_moved
     "sell_strike_state",
+    # v0.45.387 Alpha Bot 状态（盘中快照不可重取 + 设置）
+    "alphabot_state",
     # 向量库 / 日志 / 备份轮转
     "chroma_db", "logs", "db_backups",
     # 缓存：可重建，但冷缓存会引发 yfinance 限流（头号数据丢失原因）⇒ 一并带走

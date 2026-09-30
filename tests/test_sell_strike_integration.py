@@ -214,7 +214,8 @@ class TestFirewallInward:
 # ═════════════════════════════════════════ 2 · 火墙②：全仓只有两处生产代码 import 卖权模块
 
 #: 允许 import `sell_strike_*` 的生产文件（仓库根相对路径）
-ALLOWED_IMPORTERS = {"alpha_hive_daily_report.py", "alpha_hive_mcp.py"}
+#: v0.45.387 起第三个：Alpha Bot 本机前端的服务层（只读；其余守卫在 tests/test_alphabot.py）
+ALLOWED_IMPORTERS = {"alpha_hive_daily_report.py", "alpha_hive_mcp.py", "alphabot/service.py"}
 #: 离线代码：测试与实验本就要直接用它们
 _SKIP_TOP = {"tests", "experiments"}
 
@@ -270,6 +271,8 @@ class TestFirewallOutward:
         files = {
             "alpha_hive_daily_report.py": "import sell_strike_ledger as _ssl\n",
             "alpha_hive_mcp.py": "def f():\n    import sell_strike_report\n",
+            "alphabot/service.py": "import sell_strike_report as R\n",
+            "alphabot/server.py": "from sell_strike_report import compute_live\n",
             "sell_strike_new_layer.py": "import sell_strike_ledger\n",
             "report_formatters.py": "import sell_strike_report\n",
             "swarm_agents/queen_distiller.py": "from sell_strike_ledger import load_rows\n",
@@ -285,10 +288,11 @@ class TestFirewallOutward:
             p.write_text(src, encoding="utf-8")
         hits, n, how, unparsable = sell_strike_importers(tmp_path)
         bad = sorted(f for f in hits if f not in ALLOWED_IMPORTERS)
-        assert bad == ["gex_regime.py", "report_formatters.py", "swarm_agents/queen_distiller.py"], \
-            (bad, how)
+        # 放行的是 alphabot/service.py 这一个文件，不是整个 alphabot/ 包
+        assert bad == ["alphabot/server.py", "gex_regime.py", "report_formatters.py",
+                       "swarm_agents/queen_distiller.py"], (bad, how)
         assert ALLOWED_IMPORTERS <= set(hits)
-        assert n == 6 and not unparsable
+        assert n == 8 and not unparsable
 
 
 # ═════════════════════════════════════════ 2b · 火墙②补三道：放行的文件≠放行整个文件；不 import 也能读账本

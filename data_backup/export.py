@@ -53,6 +53,8 @@ STATE_DIRS: list[str] = [
     # 忽略、也**不在** report_deployer.REPORT_ARTIFACT_PATHS 里（那是自动提交进代码仓库）——
     # 耐久性只靠这里的私有备份。
     "sell_strike_state",
+    # v0.45.387 Alpha Bot 盘中快照 + 设置：盘中那一刻的水平事后拿不回来（CBOE 只给当下的延迟快照）。
+    "alphabot_state",
 ]
 ROOT_FILE_GLOBS: list[str] = [
     "weight_history.jsonl", "pheromone_fallback.jsonl",

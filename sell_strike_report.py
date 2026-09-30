@@ -456,3 +456,316 @@ def compute_live(ticker: str, *, tenors=("monthly", "weekly"), fetch_fn=None,
                 "caveats": list(CAVEATS), "disclaimer": DISCLAIMER}
     except Exception as exc:  # noqa: BLE001
         return {"data_available": False, "ticker": t, "reason": f"exception:{type(exc).__name__}: {exc}"}
+
+
+# ─────────────────────────────── Alpha Bot（本机前端）只读视图（v0.45.387）
+#
+# 唯一调用方是 `alphabot/service.py`（火墙 ALLOWED_IMPORTERS 显式登记）。本节全部**只读**：
+# 不调 record / settle / write_local_report，assess 一律 freeze=False——冻结的唯一写者仍是日报钩子。
+# 盲期规则与 MCP 同一份：按日期读账本的行视图，结算字段只在**全部** tenor 冻结后返回（`_all_unblinded`）；
+# 历史水平叠其后价格（`env_history`）在那之前整体不给（预注册 §7：历史路由 / 行权价与其后价格不同框）。
+
+#: 展示层逐行权价表只保留现价 ±band 的行权价（远翼对图没有信息，徒增载荷）
+DETAIL_BAND_PCT = 0.20
+#: 到期盈亏曲线的价格网格点数（现价 ±band）
+PAYOFF_GRID_POINTS = 121
+
+
+def _in_band(strike, S: float, band: float) -> bool:
+    k = _num(strike)
+    return k is not None and S > 0 and abs(k / S - 1.0) <= band + 1e-12
+
+
+def _atm_iv(contracts: List[dict], S: float, expiry: Optional[str] = None) -> Optional[float]:
+    """离现价最近的行权价上 call / put IV 的均值（有几个取几个）；该到期日没有 IV ⇒ None。"""
+    best_k, ivs = None, []
+    for c in contracts or []:
+        if not isinstance(c, dict) or (expiry is not None and c.get("expiry") != expiry):
+            continue
+        k, iv = _num(c.get("strike")), _num(c.get("iv"))
+        if k is None or iv is None or iv <= 0:
+            continue
+        if best_k is None or abs(k - S) < abs(best_k - S) - 1e-12:
+            best_k, ivs = k, [iv]
+        elif abs(k - best_k) < 1e-9:
+            ivs.append(iv)
+    return (sum(ivs) / len(ivs)) if ivs else None
+
+
+def _strike_rows(rows: List[dict], S: float, band: float) -> List[dict]:
+    return [r for r in rows or [] if _in_band(r.get("strike"), S, band)]
+
+
+def _detail_view(name: str, contracts: List[dict], level_view: dict, S: float, band: float) -> dict:
+    sub = L.view_contracts(contracts, name)
+    prof = level_view.get("profile") or {}
+    # 成交量口径（GEXBot Classic 的 by-volume）：同一条 strike_profile 公式把 OI 换成当日成交量。
+    # 仅展示——成交量不带方向（买 / 卖看不出），当日来回会重复计数。
+    vol_prof = L.strike_profile([{**c, "oi": c.get("volume")} for c in sub if isinstance(c, dict)], S)
+    zg = level_view.get("zero_gamma") or {}
+    return {
+        "expiries": level_view.get("expiries"), "n_contracts": level_view.get("n_contracts"),
+        "zero_gamma": {k: zg.get(k) for k in ("curve_state", "sign_at_spot", "total_at_spot", "crossings",
+                                              "nearest", "nearest_below", "nearest_above",
+                                              "zg_below_pct", "zg_above_pct", "n_contracts",
+                                              "excluded_no_iv", "excluded_no_oi")},
+        "majors": level_view.get("majors"), "totals": prof.get("totals"), "counts": prof.get("counts"),
+        "strikes": _strike_rows(prof.get("rows"), S, band),
+        "volume_strikes": [{"strike": r["strike"], "net_gex_usd_per_1pct": r["net_gex_usd_per_1pct"],
+                            "call_gex_usd_per_1pct": r["call_gex_usd_per_1pct"],
+                            "put_gex_usd_per_1pct": r["put_gex_usd_per_1pct"]}
+                           for r in _strike_rows(vol_prof.get("rows"), S, band)],
+        "volume_totals": {"net_gex_usd_per_1pct": (vol_prof.get("totals") or {}).get("net_gex_usd_per_1pct")},
+        # 缺省网格 = zero_gamma_sweep 的缺省网格（测试钉住）：图上的曲线就是路由读的那条
+        "curve": L.gex_curve(sub, S),
+    }
+
+
+def _expiry_breakdown(contracts: List[dict], S: float) -> List[dict]:
+    """逐到期日：净 GEX / OI / 成交量 / ATM IV（Research 式期限结构）。"""
+    by: Dict[str, List[dict]] = {}
+    for c in contracts or []:
+        if isinstance(c, dict) and c.get("expiry"):
+            by.setdefault(str(c["expiry"]), []).append(c)
+    out = []
+    for exp in sorted(by):
+        cs = by[exp]
+        dtes = [_num(c.get("dte")) for c in cs if _num(c.get("dte")) is not None]
+        tot = (L.strike_profile(cs, S).get("totals") or {})
+        out.append({"expiry": exp, "dte": int(min(dtes)) if dtes else None, "n_contracts": len(cs),
+                    "net_gex_usd_per_1pct": tot.get("net_gex_usd_per_1pct"),
+                    "call_oi": tot.get("call_oi"), "put_oi": tot.get("put_oi"),
+                    "volume": sum(_num(c.get("volume")) or 0.0 for c in cs),
+                    "atm_iv": _atm_iv(cs, S)})
+    return out
+
+
+def _smile(contracts: List[dict], S: float, expiry: Optional[str], band: float) -> List[dict]:
+    """某到期日逐行权价 call / put IV 与 OI（IV 微笑 / 偏度点）。"""
+    rows: Dict[float, dict] = {}
+    for c in contracts or []:
+        if not isinstance(c, dict) or c.get("expiry") != expiry or not _in_band(c.get("strike"), S, band):
+            continue
+        k = float(c["strike"])
+        side = "call" if c.get("cp") == "C" else ("put" if c.get("cp") == "P" else None)
+        if side is None:
+            continue
+        r = rows.setdefault(k, {"strike": k, "call_iv": None, "put_iv": None, "call_oi": 0.0, "put_oi": 0.0})
+        iv = _num(c.get("iv"))
+        if iv is not None and iv > 0:
+            r[f"{side}_iv"] = iv
+        r[f"{side}_oi"] += _num(c.get("oi")) or 0.0
+    return [rows[k] for k in sorted(rows)]
+
+
+def _payoffs(row: dict, S: float, band: float) -> dict:
+    """六个结构在 route 档与基线档的到期盈亏曲线（每股）——用 `structure_pnl_at_expiry` 算，不在前端另写公式。"""
+    ladder = row.get("ladder")
+    if not isinstance(ladder, dict) or not S:
+        return {}
+    grid = [S * (1.0 - band) + i * (2.0 * band * S) / (PAYOFF_GRID_POINTS - 1) for i in range(PAYOFF_GRID_POINTS)]
+    rr = route_rungs(row)
+    out = {"grid": grid, "route": {}, "base": {}}
+    for label, rungs in (("route", rr), ("base", {s: C.BASE_RUNG for s in LG.SIDES})):
+        for st in C.STRUCTURES:
+            if st in ("short_put", "bull_put_spread"):
+                rung = rungs["put"]
+            elif st in ("short_call", "bear_call_spread"):
+                rung = rungs["call"]
+            else:
+                rung = dict(rungs) if all(v is not None for v in rungs.values()) else None
+            q = C.structure_quote(ladder, st, rung)
+            if not q.get("quotable"):
+                out[label][st] = {"quotable": False, "reason": q.get("reason")}
+                continue
+            out[label][st] = {"quotable": True, "legs": q.get("legs"), "credit": q.get("credit"),
+                              "breakevens": q.get("breakevens"), "max_loss": q.get("max_loss"),
+                              "pnl": [C.structure_pnl_at_expiry(q, p) for p in grid]}
+    return out
+
+
+def _ladder_quotes(row: dict) -> dict:
+    """梯子每档单腿卖权的报价（收益率等）——同本地报告 `_ladder_table` 的算法，前端不另写公式。"""
+    ladder = row.get("ladder")
+    if not isinstance(ladder, dict):
+        return {}
+    out = {}
+    for side in LG.SIDES:
+        out[side] = {}
+        for d in C.LADDER_DELTAS:
+            q = C.structure_quote(ladder, f"short_{side}", d)
+            out[side][f"{d:.2f}"] = {k: q.get(k) for k in ("quotable", "reason", "credit", "collateral",
+                                                          "yield_raw", "yield_annualized", "breakevens")}
+    return out
+
+
+def compute_live_detail(ticker: str, *, fetch_fn=None, upcoming_fn=None, state_dir=None,
+                        band_pct: float = DETAIL_BAND_PCT) -> dict:
+    """Alpha Bot 现算：`compute_live` 的全部内容 + 展示用的明细（逐行权价表、gamma 曲线、成交量口径、
+    逐到期日拆分、IV 微笑、到期盈亏曲线、1σ 期望波动）。
+
+    与 `compute_live` 同一套保证：**不写任何文件**（只调纯函数）、永不抛错、缺省取数先清该票进程内缓存、
+    assess 走 freeze=False；不可得 ⇒ `{"data_available": False, "reason": ...}`。
+    """
+    t = str(ticker or "").upper().strip()
+    try:
+        if not t:
+            return {"data_available": False, "ticker": t, "reason": "empty_ticker"}
+        if fetch_fn is None:
+            _invalidate_cached_payload(t)
+            fetch_fn = LG._default_fetch
+        raw, reason = fetch_fn(t, as_of=None)
+        if raw is None:
+            return {"data_available": False, "ticker": t, "reason": reason or "fetch_returned_none",
+                    "caveats": list(CAVEATS), "disclaimer": DISCLAIMER}
+        contracts = raw.get("contracts") or []
+        S = _num(raw.get("underlying_price"))
+        if S is None or S <= 0:
+            return {"data_available": False, "ticker": t, "reason": "underlying_price_unavailable",
+                    "caveats": list(CAVEATS), "disclaimer": DISCLAIMER}
+        band = float(band_pct)
+        lm = L.level_map(contracts, S)
+        as_of = raw.get("as_of") or raw.get("vintage_date")
+        info = None
+        if upcoming_fn is not None:
+            try:
+                info = upcoming_fn(t)
+            except Exception:  # noqa: BLE001 - 查不到就是 unknown，行上会写明
+                info = None
+        tenors, smile, payoff, em = {}, {}, {}, {}
+        for tenor in LG.TENORS:
+            row = LG.build_tenor_row(raw, lm, tenor, as_of=as_of, earnings_info=info, ticker=t)
+            tenors[tenor] = _row_view(row, blind=False)
+            tenors[tenor]["ladder_quotes"] = _ladder_quotes(row)
+            exp = row.get("expiry")
+            smile[tenor] = _smile(contracts, S, exp, band) if exp else []
+            payoff[tenor] = _payoffs(row, S, band) if row.get("status") == "recorded" else {}
+            iv = _atm_iv(contracts, S, exp) if exp else None
+            move = L.expected_move_1sigma(S, iv, row.get("dte")) if iv is not None else None
+            em[tenor] = {"expiry": exp, "dte": row.get("dte"), "atm_iv": iv, "move_1sigma": move,
+                         "lo": (S - move) if move is not None else None,
+                         "hi": (S + move) if move is not None else None}
+        views = {name: _detail_view(name, contracts, v, S, band)
+                 for name, v in (lm.get("views") or {}).items()}
+        return {"data_available": True, "source": "live", "ticker": t, "as_of": as_of,
+                "vintage_date": raw.get("vintage_date"), "underlying_price": S,
+                "underlying_price_source": raw.get("underlying_price_source"),
+                "payload_last_trade_time": raw.get("payload_last_trade_time"),
+                "session_live": raw.get("session_live"), "iv30": raw.get("iv30"),
+                "fetched_at": raw.get("fetched_at"), "band_pct": band,
+                "units": lm.get("units"), "sign_convention": lm.get("sign_convention"),
+                "route_view": C.ROUTE_VIEW, "views": views, "expiries": _expiry_breakdown(contracts, S),
+                "tenors": tenors, "smile": smile, "payoff": payoff, "expected_move": em,
+                "yield_note": YIELD_NOTE,
+                "assess": {tenor: _assess_brief(_assess_safe(tenor, state_dir, None)) for tenor in LG.TENORS},
+                "caveats": list(CAVEATS), "disclaimer": DISCLAIMER}
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("[%s] Alpha Bot 现算失败：%s: %s", t, type(exc).__name__, exc)
+        return {"data_available": False, "ticker": t, "reason": f"exception:{type(exc).__name__}: {exc}"}
+
+
+def _side_brief(row: dict, side: str, rung) -> Optional[dict]:
+    if rung is None:
+        return None
+    slot = ((row.get("ladder") or {}).get(side) or {}).get(C.rung_key(rung)) or {}
+    leg = slot.get("short")
+    if not isinstance(leg, dict):
+        return {"rung": rung, "strike": None, "reasons": slot.get("reasons")}
+    q = C.structure_quote(row.get("ladder"), f"short_{side}", rung)
+    return {"rung": rung, "strike": leg.get("strike"), "delta": leg.get("delta"),
+            "itm_prob": leg.get("itm_prob"), "bid": leg.get("bid"), "spread_pct": leg.get("spread_pct"),
+            "quotable": q.get("quotable"), "reason": q.get("reason"),
+            "yield_raw": q.get("yield_raw"), "yield_annualized": q.get("yield_annualized")}
+
+
+def row_brief(row: dict, *, blind: bool) -> dict:
+    """总览用的精简行：不带整张梯子，只带路由档 / 基线档的短腿摘要。结算字段按 blind 剔除（同 `_row_view`）。"""
+    keep = ("date", "ticker", "tenor", "status", "unavailable_reason", "underlying_price",
+            "underlying_price_source", "payload_last_trade_time", "session_live", "iv30", "expiry", "dte",
+            "earnings_date", "earnings_status", "env", "route", "settle_status")
+    out = {k: row.get(k) for k in keep}
+    if blind:
+        out["settlement_blinded"] = True
+    else:
+        out.update({k: row.get(k) for k in BLINDED_ROW_FIELDS})
+    if row.get("status") == "recorded":
+        rr = route_rungs(row)
+        out["route_legs"] = {s: _side_brief(row, s, rr.get(s)) for s in LG.SIDES}
+        out["base_legs"] = {s: _side_brief(row, s, C.BASE_RUNG) for s in LG.SIDES}
+    return out
+
+
+def ledger_dates(*, state_dir=None, limit: int = 60) -> List[str]:
+    """账本里有行的日期（降序，最多 `limit` 个；只读最近两个月分片）。缺目录 ⇒ []（出口另判 state_dir_status）。"""
+    dates = set()
+    for tenor in LG.TENORS:
+        for p in LG._shard_paths(tenor, state_dir)[-2:]:
+            rows, _bad = LG._load_shard(p)
+            dates.update(str(r.get("date")) for r in rows if r.get("date"))
+    return sorted(dates, reverse=True)[:max(0, int(limit))]
+
+
+def rows_for_date_view(as_of: str, *, state_dir=None, compact: bool = True) -> dict:
+    """某日全部标的两个 tenor 的行视图（总览 / 账本浏览）。永不抛错、不写文件；
+    **任一** tenor 未冻结 ⇒ 结算字段剔除（`_all_unblinded`，与 `rows_for_ticker` 同一判据）。"""
+    try:
+        LG._check_date(as_of)
+        assessed = {tenor: _assess_safe(tenor, state_dir, None) for tenor in LG.TENORS}
+        blind = not _all_unblinded(assessed)
+        view = row_brief if compact else _row_view
+        tenors = {tenor: [view(r, blind=blind) for r in LG.rows_for_date(as_of, tenor, state_dir)]
+                  for tenor in LG.TENORS}
+        return {"data_available": any(tenors.values()), "as_of": as_of, "tenors": tenors,
+                "settlement_blinded": blind,
+                "assess": {tenor: _assess_brief(assessed[tenor]) for tenor in LG.TENORS},
+                "state_dir": LG.state_dir_status(state_dir), "disclaimer": DISCLAIMER}
+    except Exception as exc:  # noqa: BLE001
+        return {"data_available": False, "as_of": as_of, "reason": f"exception:{type(exc).__name__}: {exc}"}
+
+
+def assess_overview(*, state_dir=None) -> dict:
+    """两个 tenor 的就绪度全貌（只读、freeze=False）：闸门、进度、按档校准（不分 flag，§8）、冻结状态。
+    `test`（判定 / p 值）只在该 tenor 已冻结且适用时由 assess 自己给出——这里不另算任何效应量。"""
+    out = {"tenors": {}, "prereg": {k: (list(v) if isinstance(v, tuple) else v) for k, v in LG.PREREG.items()},
+           "state_dir": LG.state_dir_status(state_dir), "disclaimer": DISCLAIMER}
+    assessed = {}
+    for tenor in LG.TENORS:
+        a = _assess_safe(tenor, state_dir, None)
+        assessed[tenor] = a
+        keep = ("status", "ready", "need", "gates", "progress", "calibration", "frozen", "awaiting_freeze",
+                "error", "note")
+        view = {k: a.get(k) for k in keep}
+        view["summary"] = _assess_line(a)
+        if _unblinded(a) and "test" in a:
+            view["test"] = a["test"]
+        out["tenors"][tenor] = view
+    out["all_unblinded"] = _all_unblinded(assessed)
+    return out
+
+
+def env_history(ticker: str, *, state_dir=None) -> dict:
+    """某票历次记录的水平（ZG / Major / 现价处符号 / 路由）按日期排列——**全部 tenor 冻结后才给**。
+
+    冻结前把历史路由 / 水平与其后的价格放进同一张图，就是预注册 §7 说的「从任何出口重建、按 flag 比较」
+    的捷径；所以这里在盲期整体返回 locked，不是逐字段剔除。"""
+    try:
+        t = str(ticker or "").upper().strip()
+        assessed = {tenor: _assess_safe(tenor, state_dir, None) for tenor in LG.TENORS}
+        if not _all_unblinded(assessed):
+            return {"locked": True, "ticker": t,
+                    "reason": "预注册检验尚未在全部 tenor 冻结：历史水平叠其后价格属于盲期内不提供的视图（预注册 §7）"}
+        series = {}
+        for tenor in LG.TENORS:
+            series[tenor] = [
+                {"date": r.get("date"), "underlying_price": r.get("underlying_price"),
+                 "expiry": r.get("expiry"), "expiry_close": r.get("expiry_close"),
+                 "zg_nearest": (r.get("env") or {}).get("zg_nearest"),
+                 "sign_at_spot": (r.get("env") or {}).get("sign_at_spot"),
+                 "net_major_pos_strike": (r.get("env") or {}).get("net_major_pos_strike"),
+                 "net_major_neg_strike": (r.get("env") or {}).get("net_major_neg_strike"),
+                 "route": {k: (r.get("route") or {}).get(k) for k in ("put", "call", "flag_put", "flag_call")}}
+                for r in LG.load_rows(tenor, state_dir)
+                if str(r.get("ticker")).upper() == t and r.get("status") == "recorded"]
+        return {"locked": False, "ticker": t, "series": series}
+    except Exception as exc:  # noqa: BLE001
+        return {"locked": True, "ticker": ticker, "reason": f"exception:{type(exc).__name__}: {exc}"}

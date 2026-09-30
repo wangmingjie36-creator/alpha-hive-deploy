@@ -1092,6 +1092,7 @@ _GUARDED_PRODUCTION_ARTIFACTS = (
     "options_paper_state",
     "hedge_state",
     "sell_strike_state",
+    "alphabot_state",
 )
 
 
@@ -1184,6 +1185,20 @@ def _isolate_sell_strike_state(_isolate_env, request, tmp_path):
         "路径已由 `PATHS.sell_strike_state` 调用时求值指向 tmp，还能写到真身说明有绕过它的写入路径"
         "（硬编码 / `__file__` 派生 / subprocess 丢了 env）——去把那条路径接到 "
         "`sell_strike_ledger._state_dir()` 上，不要在这里放行。")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_alphabot_state(_isolate_env, tmp_path):
+    """Alpha Bot 状态目录（v0.45.387）防线①：`PATHS.alphabot_state` 此刻是绝对路径且在本测试沙箱里。
+    防线②（真身指纹）由 `_GUARDED_PRODUCTION_ARTIFACTS` 里的 `alphabot_state` 与仓库根默认拒绝总闸兜住。
+    判据同 `_assert_sell_strike_state_in_sandbox`（纯词法，不拿 cwd 补全）。"""
+    import hive_logger
+
+    p = pathlib.Path(hive_logger.PATHS.alphabot_state)
+    assert p.is_absolute(), f"PATHS.alphabot_state 解析成了相对路径 {p}：生产从仓库根跑会写穿仓库根"
+    assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+        f"PATHS.alphabot_state = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？")
+    yield
 
 
 @pytest.fixture

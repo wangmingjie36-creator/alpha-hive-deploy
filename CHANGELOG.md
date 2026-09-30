@@ -5,7 +5,45 @@
 
 ---
 
-## [0.45.387] — 2026-09-30 — 占位（进行中：Alpha Bot——卖权选择器的本机前端，GEX 水平 / 卖权工作台 / 盘中时序 / 账本就绪度）
+## [0.45.387] — 2026-09-30 — Added：Alpha Bot——卖权行权价选择器的本机前端（GEX 水平对标 GEXBot Classic + 卖权工作台 + 盘中快照 + 账本就绪度）；只读账本、只绑回环、盲期按全部 tenor 冻结判
+
+用户选定：只做本机版、30 只观察列表 + 任意代码搜索、做盘中时序、视觉用 Claude 的暖色纸面风格（去掉暗色交易终端风）。
+对标对象 GEXBot 的调研结论：它只有「水平」（Classic 朴素 GEX 梯子 / Zero Gamma / Major±、State / Orderflow 靠逐笔成交分类），
+**没有**卖权选行权价、delta 梯子或价差构造器——Alpha Bot 对标它的水平，卖权工作台是差异化。State / Orderflow / 期货换算 / 平台插件 / Discord 推图不做
+（CBOE 延迟快照没有逐笔成交；Slack 规则禁止额外推送）。
+
+### Added
+- `alphabot/`（新包）：
+  - `service.py`——**全包唯一** import 卖权模块的文件（火墙 `ALLOWED_IMPORTERS` 第三项）。现算按票缓存 60 秒、同票并发合并（CBOE 每只 ~1.5MB、串行 4–7 秒）；
+    失败也缓存 15 秒；总览读账本最新一日的收盘后行，不逐只现拉；设置（自选 / 盘中关注 ≤5 只 / 间隔 / 开关）与盘中快照只写 `PATHS.alphabot_state`。
+    `IntradayPoller`：常规交易时段（`is_trading_day` 日历 + 半日市收盘）按关注列表定时拍照，只存聚合（ZG / Major / 总净 GEX / 现价 ±12% 逐行权价净 GEX（OI 与成交量两口径）/ 路由），
+    payload 未更新不重复记；每轮结果与异常计数进 `/api/meta`、未记录的打 WARNING（「后台默默没拍到」有人看得见）。
+  - `server.py`——Starlette；Host 头白名单（防 DNS rebinding）、写请求必须带 `X-AlphaBot: 1`、不应答 CORS 预检、CSP `script-src 'self'`；纯 ASGI 中间件（Starlette 0.x / 1.x 都能跑）。
+  - `__main__.py`——`python -m alphabot [--port] [--no-poll] [--demo] [--open]`；非回环 `--host` 退出码 2；未设 `ALPHA_HIVE_HOME` 启动即提醒读的是哪个目录。
+  - `synthetic.py`——合成期权链（`--demo` 与测试用，零网络、确定性；不 import 卖权模块）。
+  - `static/`——无构建步骤：原生 ES modules + hash 路由；ECharts 5.5.1 本地托管（sha256 钉在测试里，附 LICENSE）。页面：总览 / 标的（水平·希腊值·期限·卖权·价格）/ 盘中 / 账本 / 结果 / 口径。
+    配色：米白纸面 + 墨色，正 gamma 蓝 `#3f7fc4`、负 gamma 橙 `#d0673f`（发散配色，色盲校验通过），陶土橙只作品牌标记与焦点环；文字对比度 ≥ 4.5。
+- `sell_strike_levels.gex_curve()`（纯新增）：`zero_gamma_sweep` 扫的那条曲线本身（同合约集、网格、公式、过零判据）；`view_contracts()` 从 `term_views` 抽出（输出逐字不变，200 条随机链核对）。
+  **不改 `level_map` 任何输出、常量与 `LEVELS_SCHEMA_VERSION`**——账本行版本戳只认那些，改了会截断预注册样本。
+- `sell_strike_report`：`compute_live_detail`（逐行权价表 / gamma 曲线 / 成交量口径 GEX / 逐到期日拆分 / IV 微笑 / 梯子每档报价 / 六结构到期盈亏曲线 / 1σ 期望波动；
+  报价与盈亏都复用 `structure_quote` / `structure_pnl_at_expiry`，前端不另写公式）、`rows_for_date_view` / `row_brief` / `ledger_dates` / `assess_overview`（全部 freeze=False）、
+  `env_history`（历史水平叠价格：**全部 tenor 冻结前整体 locked**，预注册 §7）。
+- `hive_logger.PATHS.alphabot_state`（调用时求值）；`.gitignore`、`data_backup/export.STATE_DIRS`、`migrate_data_root.MOVE_DIRS` 登记；`requirements.txt` 显式写 starlette / uvicorn（mcp 已传递依赖）；
+  `Makefile` 加 `alphabot` / `alphabot-demo`。
+- 守卫 `tests/test_alphabot.py`（51 条）：曲线与路由同一条 / 盲期不吐结算字段与效应量键（+ 正对照有牙）/ 打遍接口账本指纹不变且不生成冻结文件 / 全包 AST 不出现账本写路径与 freeze /
+  只绑回环、Host 白名单、写头、CSP / 盘中只在时段内、到点、聚合、单日、失败可见 / 前端资产引用存在、无内联脚本、不拼 innerHTML、ECharts 钉哈希、不命中部署白名单。
+  变异实测：`rows_for_date_view` 的 blind 改成 False ⇒ 盲期测试红；service 里加一行 `write_local_report(freeze=True)` ⇒ 写路径测试红。
+  `conftest`：`alphabot_state` 进 `_GUARDED_PRODUCTION_ARTIFACTS`，另加 `_isolate_alphabot_state` setup 核对沙箱。
+
+### Changed
+- `tests/test_sell_strike_integration.py`：`ALLOWED_IMPORTERS` 加 `alphabot/service.py`；种病灶测试加一对「同包别的文件 import 卖权 ⇒ 红」（放行的是一个文件，不是整个包）。
+- `CLAUDE.md` 核心组件指针加 Alpha Bot 一行（含与 Telegram `alpha_hive_bot/` 的区分）。
+
+### 已知局限 / 未做
+- 价格页只走 Twelve Data 共享入口（没配 key 就如实说不可得，不换源——本地价格索引首次读取会写迁移标记）。
+- 指数期权（SPX 等）未实测：CBOE 写法是 `_SPX`，链体量大；ETF（SPY / QQQ）走个股同一路径。
+- 本环境以 root 运行，`tests/test_migrate_data_root.py::test_retire_moves_untracked_only_then_check_old_and_unretire`（断言只读文件不可写）在未改动的 main 上同样失败，与本版无关。
+
 
 ## [0.45.386] — 2026-09-29 — 占位（进行中：编排器 B2——Step 2/4/5 经步骤解释器 + alert_manager 新规则；B1 干净跑过一天后合入）
 

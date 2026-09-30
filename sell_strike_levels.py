@@ -453,6 +453,40 @@ def zero_gamma_sweep(contracts: List[dict], S, *, r: float = RISK_FREE_RATE,
     return out
 
 
+def gex_curve(contracts: List[dict], S, *, r: float = RISK_FREE_RATE,
+              band_pct: float = 0.20, grid_points: int = 81) -> dict:
+    """展示用：`zero_gamma_sweep` 扫的**那条曲线本身**（v0.45.387，Alpha Bot 的 gamma 曲线图）。
+
+    同一合约集合（`_sweep_arrays`）、同一网格、同一公式（`_total_gex_at`）、同一过零点判据（`_crossings`），
+    所以图上画出来的就是路由读的那条——`tests/test_sell_strike_levels.py` 逐视图核对两者的过零点与现价处总量一致。
+    **纯新增**：不改 `level_map` / `zero_gamma_sweep` 的任何输出、常量与 `LEVELS_SCHEMA_VERSION`
+    （账本行的版本戳只认那些；改了会截断预注册样本）。
+
+    返回 `{"grid", "total", "spot", "total_at_spot", "crossings", "n_contracts", "units"}`；
+    S / band / 网格非法 ⇒ grid 为空；无可用合约 ⇒ 有 grid、total 为空（「没有合约」不画成一条 0 线）。
+    """
+    Sv = _pos(S)
+    try:
+        band = float(band_pct)
+        gp = int(grid_points)
+    except (TypeError, ValueError):
+        band, gp = float("nan"), 0
+    arr, _n_no_iv, _n_no_oi, _n_bad = _sweep_arrays(contracts, r)
+    out = {"grid": [], "total": [], "spot": Sv, "total_at_spot": None, "crossings": [],
+           "n_contracts": int(arr[0].size), "units": "USD per 1% move"}
+    if Sv is None or not (math.isfinite(band) and 0 < band < 1) or gp < 2:
+        return out
+    grid = np.linspace((1.0 - band) * Sv, (1.0 + band) * Sv, gp)
+    out["grid"] = grid.tolist()
+    if out["n_contracts"] == 0:
+        return out
+    tot = _total_gex_at(grid, arr, float(r))
+    out["total"] = tot.tolist()
+    out["total_at_spot"] = float(_total_gex_at(np.asarray([Sv]), arr, float(r))[0])
+    out["crossings"] = _crossings(grid, tot)
+    return out
+
+
 # ─────────────────────────────── majors / 分期限视图
 
 def majors(rows: List[dict]) -> dict:
@@ -497,6 +531,37 @@ def _view(contracts: List[dict], S, r: float) -> dict:
             "majors": majors(prof["rows"])}
 
 
+VIEW_NAMES = ("next_expiry", "le_45dte", "full")
+
+
+def _valid_and_dated(contracts: List[dict]) -> Tuple[List[dict], List[dict], List[dict]]:
+    allc = list(contracts or [])
+    valid = [c for c in allc if isinstance(c, dict)
+             and _num(c.get("dte")) is not None and _num(c.get("dte")) >= 0]
+    # 曾经在 valid 上直接取：dte 最小的行缺 expiry 键 ⇒ `min(...)["expiry"]` 抛 KeyError；
+    # expiry=None ⇒ next_exp=None，整个 next_expiry 视图变成「所有没有到期日的行」。
+    dated = [c for c in valid if c.get("expiry")]
+    return allc, valid, dated
+
+
+def view_contracts(contracts: List[dict], view: str) -> List[dict]:
+    """某个期限视图收的合约子集——`term_views` 与展示层（`gex_curve` 按视图重画曲线）共用**这一份**筛法，
+    不各写一份（v0.45.387 从 `term_views` 抽出，输出逐字不变）。未知视图名 ⇒ ValueError。"""
+    if view not in VIEW_NAMES:
+        raise ValueError(f"view 只接受 {VIEW_NAMES}，收到 {view!r}")
+    allc, valid, dated = _valid_and_dated(contracts)
+    if view == "full":
+        # full 收**原始全集**（含 dte 缺失/为负/形状非法的行）：它们在 profile 与扫描里
+        # 各自计进 excluded_bad_contract —— 先在这里滤掉就没有任何地方会数到它们。
+        return allc
+    if view == "le_45dte":
+        return [c for c in valid if _num(c.get("dte")) <= 45]
+    next_exp = None
+    if dated:
+        next_exp = min(dated, key=lambda c: (_num(c.get("dte")), str(c.get("expiry"))))["expiry"]
+    return [c for c in dated if c.get("expiry") == next_exp]
+
+
 def term_views(contracts: List[dict], S, *, r: float = RISK_FREE_RATE) -> dict:
     """三个期限视图：next_expiry（最小 dte 的那个到期日）/ le_45dte（dte ≤ 45）/ full。
 
@@ -505,24 +570,15 @@ def term_views(contracts: List[dict], S, *, r: float = RISK_FREE_RATE) -> dict:
     n_contracts=0 与 insufficient_contracts，不抛。
     next_expiry 只在**有到期日**的行里选（dte 合法但缺 expiry / expiry 为空的行不参选、不进该视图，
     计 next_expiry 视图的 `excluded_no_expiry`）；它们照样进 le_45dte / full（那两个视图按 dte 截，用不到到期日）。
+    各视图的合约子集由 `view_contracts` 给出（展示层同用它）。
     """
-    allc = list(contracts or [])
-    valid = [c for c in allc if isinstance(c, dict)
-             and _num(c.get("dte")) is not None and _num(c.get("dte")) >= 0]
-    # 曾经在 valid 上直接取：dte 最小的行缺 expiry 键 ⇒ `min(...)["expiry"]` 抛 KeyError；
-    # expiry=None ⇒ next_exp=None，整个 next_expiry 视图变成「所有没有到期日的行」。
-    dated = [c for c in valid if c.get("expiry")]
-    next_exp = None
-    if dated:
-        next_exp = min(dated, key=lambda c: (_num(c.get("dte")), str(c.get("expiry"))))["expiry"]
-    nxt = _view([c for c in dated if c.get("expiry") == next_exp], S, r)
+    _allc, valid, dated = _valid_and_dated(contracts)
+    nxt = _view(view_contracts(contracts, "next_expiry"), S, r)
     nxt["excluded_no_expiry"] = len(valid) - len(dated)
     return {
         "next_expiry": nxt,
-        "le_45dte": _view([c for c in valid if _num(c.get("dte")) <= 45], S, r),
-        # full 收**原始全集**（含 dte 缺失/为负/形状非法的行）：它们在 profile 与扫描里
-        # 各自计进 excluded_bad_contract —— 先在这里滤掉就没有任何地方会数到它们。
-        "full": _view(allc, S, r),
+        "le_45dte": _view(view_contracts(contracts, "le_45dte"), S, r),
+        "full": _view(view_contracts(contracts, "full"), S, r),
     }
 
 
