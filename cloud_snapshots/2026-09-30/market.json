@@ -1,0 +1,51 @@
+{
+ "schema_version": 1,
+ "fetched_at_utc": "2026-09-30T21:10:50.153469+00:00",
+ "cboe": {
+  "pcce": {
+   "total_pc_ratio": 1.011,
+   "call_volume": 8211354,
+   "put_volume": 8301105,
+   "date": "2026-09-30",
+   "signal": "fear",
+   "source": "synthetic_cboe_options",
+   "tickers_used": [
+    "SPY",
+    "QQQ",
+    "IWM"
+   ]
+  },
+  "vix_term": {
+   "vix_spot": 16.34,
+   "vix_1m": 17.68,
+   "vix_3m": 18.73,
+   "term_structure": "contango",
+   "contango_pct": 8.2,
+   "source": "vx_futures"
+  },
+  "skew": {
+   "skew_value": 144.58,
+   "signal": "elevated",
+   "date": "2026-09-29",
+   "source": "cboe_cdn"
+  },
+  "vvix": {
+   "vvix_value": 89.71,
+   "signal": "normal",
+   "date": "2026-09-29",
+   "source": "cboe_cdn"
+  },
+  "macro_score": 5.47,
+  "macro_sentiment": "neutral",
+  "timestamp": "2026-09-30T21:10:56.471722"
+ },
+ "fear_greed": {
+  "value": 31,
+  "classification": "Fear",
+  "sentiment_score": 3.1,
+  "is_real_data": true,
+  "source": "cnn",
+  "timestamp": "2026-09-30T21:10:56.700824"
+ },
+ "degraded_sections": {}
+}
