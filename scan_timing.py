@@ -313,11 +313,20 @@ def summary_line(snap: dict) -> str:
     cb_s = "—" if cb is None else f"抓取{cb.get('fetches', '?')}/命中{cb.get('hits', '?')}"
     hg = c.get("hv_gap")
     hg_s = ""
-    if hg and (hg.get("degraded") or hg.get("repaired") or hg.get("check_errors")):
-        # 只在出过事时才占摘要行的位置：缺口已重取修好 / 仍缺而置空 / 校验器自身出错，都点名
-        bad = ",".join(f"{t}:{'+'.join(g.get('critical') or [])}" for t, g in sorted((hg.get("tickers") or {}).items())
+    if hg and (hg.get("degraded") or hg.get("repaired") or hg.get("filled") or hg.get("check_errors")):
+        # 只在出过事时才占摘要行的位置：缺口已重取修好 / 第二源补齐 / 仍缺而置空 / 校验器自身出错，都点名。
+        # v0.45.387：被第二源补齐的标的也带着 `critical`（补之前的缺口），所以名字后要标「已补」，
+        # 否则读起来像是置空了；没补成的把原因也带上（td_unavailable / ratio_mismatch …）。
+        def _tag(g):
+            base = "+".join(g.get("critical") or [])
+            if g.get("filled"):
+                return base + "已补"
+            if g.get("unfilled"):
+                return base + "[" + ";".join(u.split(":", 1)[-1] for u in g["unfilled"][:1]) + "]"
+            return base
+        bad = ",".join(f"{t}:{_tag(g)}" for t, g in sorted((hg.get("tickers") or {}).items())
                        if g.get("critical"))
-        hg_s = (f" | 日线缺口 修复{hg.get('repaired', '?')}/置空{hg.get('degraded', '?')}"
+        hg_s = (f" | 日线缺口 修复{hg.get('repaired', '?')}/TD补{hg.get('filled', 0)}/置空{hg.get('degraded', '?')}"
                 f"/校验出错{hg.get('check_errors', '?')}" + (f"({bad})" if bad else ""))
     os_ = c.get("options_snapshot")
     os_s = "—" if os_ is None else (

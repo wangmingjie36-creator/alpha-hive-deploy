@@ -111,3 +111,90 @@ def find_gaps(dates: Sequence[str], *, today: Optional[dt.date] = None,
     minor = [d for d in missing if d < cut]
     iso = lambda xs: [x.isoformat() for x in xs]  # noqa: E731
     return {"missing": iso(missing), "critical": iso(critical), "minor": iso(minor)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 阶段 2（v0.45.387）：缺口时向第二源借「缺的那一根」
+# ─────────────────────────────────────────────────────────────────────────────
+# 为什么不整段换成 Twelve Data：yfinance 给**复权**收盘、Twelve Data 给**未复权**收盘。
+# 分红标的上 HV Rank 会差 1~3 点（2026-09-30 实测 ABBV：复权 23.42 / 未复权 21.65）。
+# 所以只借缺的那一根，并按**复权因子换算回 yfinance 口径**：
+#   · 复权因子在两次除息日之间是常数 ⇒ 缺失日的复权价 = 第二源收盘 × 前一根的（复权价 / 第二源收盘）；
+#   · 后一根也存在时，要求它算出的因子与前一根一致——不一致说明缺口落在除息日上，
+#     换算没有根据，**放弃修复**（退回置空，宁可缺数也不编一根）；
+#   · 缺口在序列末端（后面没有 bar）：末根复权价 ≡ 未复权价，因子取 1；末端缺多根时因子归属分不清，
+#     只在「前一根因子 ≈ 1（没有待处理的分红调整）」时才补。
+# 两侧因子允许的相对差 = **可接受的补数误差上界**（补出的那根最多偏这么多）。
+# 定值依据（2026-09-30，30 只标的 × 最后 21 根，逐根删除再补回，共 630 次）：两源收盘的因子噪声中位数 2.6e-8、
+# 620 次成功补回的相对误差最大 9.8e-8，最终 iv_rank 偏差最大 0.01（=四舍五入）、percentile 偏差 0；
+# 10 次拒补全部落在除息日（5 只标的各一次除息，每次拒相邻两天）。1e-4 比实测噪声宽 3 个数量级、不会误拒，
+# 又比任何常规分红比例（≥ 数个 1e-4）窄，除息日一定被拒。
+FILL_RATIO_TOL = 1e-4
+FILL_MAX_NEIGHBOR_DAYS = 7     # 借因子的邻居 bar 离缺失日不能超过这么多日历日
+
+
+def fill_gaps_from_reference(dates: Sequence[str], closes: Sequence[float],
+                             ref_rows: Sequence[Dict], targets: Sequence[str], *,
+                             tol: float = FILL_RATIO_TOL) -> Dict:
+    """用第二源 `ref_rows`（``[{date, close, ...}]``，未复权）补 `targets` 里缺的交易日。
+
+    纯函数、不联网。`dates`/`closes` 是主源（复权）序列，升序、等长。
+
+    Returns
+    -------
+    ``{"dates", "closes", "filled": [iso...], "unfilled": {iso: 原因}}``——`dates`/`closes` 是插入
+    补出的 bar 后的新序列（仍升序）；补不出的日期原样留在 `unfilled` 里，**不静默丢掉**。
+    """
+    have = {d: float(c) for d, c in zip(dates, closes)}
+    ref: Dict[str, float] = {}
+    for r in ref_rows or []:
+        try:
+            v = float(r["close"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if v > 0 and v == v:
+            ref[str(r["date"])] = v
+    orig = sorted(have)
+    filled: List[str] = []
+    unfilled: Dict[str, str] = {}
+    tail_targets = [t for t in sorted(set(targets)) if orig and t > orig[-1]]
+    day = dt.date.fromisoformat
+
+    def _near(x: str, d: str) -> bool:
+        return abs((day(d) - day(x)).days) <= FILL_MAX_NEIGHBOR_DAYS
+
+    for d in sorted(set(targets)):
+        if d in have:
+            continue
+        if d not in ref:
+            unfilled[d] = "ref_missing"
+            continue
+        prev = next((x for x in reversed(orig) if x < d and x in ref and _near(x, d)), None)
+        nxt = next((x for x in orig if x > d and x in ref and _near(x, d)), None)
+        has_later_bar = any(x > d for x in orig)
+        if prev is None:
+            unfilled[d] = "no_prev_neighbor"
+            continue
+        ratio_p = have[prev] / ref[prev]
+        if nxt is not None:
+            ratio_n = have[nxt] / ref[nxt]
+            if abs(ratio_n / ratio_p - 1) > tol:
+                unfilled[d] = "ratio_mismatch"      # 缺口夹着除息日（或两源在邻居上不一致）
+                continue
+            factor = ratio_p
+        elif has_later_bar:
+            unfilled[d] = "no_next_neighbor"        # 后面有 bar 但第二源没有它——没法验因子
+            continue
+        else:                                        # 序列末端
+            if len(tail_targets) == 1:
+                factor = 1.0                         # 末根复权价 ≡ 未复权价
+            elif abs(ratio_p - 1) <= tol:
+                factor = 1.0
+            else:
+                unfilled[d] = "tail_ambiguous"
+                continue
+        have[d] = ref[d] * factor
+        filled.append(d)
+    out_dates = sorted(have)
+    return {"dates": out_dates, "closes": [have[x] for x in out_dates],
+            "filled": filled, "unfilled": unfilled}
