@@ -5,6 +5,18 @@
 
 ---
 
+## [0.45.389] — 2026-09-30 — Changed：关掉 Vercel 对本仓库的自动部署（`alpha-hive-web` 项目每次推送都构建失败）
+
+`alpha-hive-web` 这个 Vercel 项目的根目录设成了仓库根（`rootDirectory: null`），而仓库根是 Python 工程，
+Next.js 应用在 `alpha-hive-web/` 子目录——所以每个推送 / PR 的构建都失败，在 PR 上挂一个红的 `Vercel` 状态
+（PR #10、#11 实测；与改动内容无关）。用户要求断掉。
+
+### Changed
+- 新增仓库根 `vercel.json`：`git.deploymentEnabled = false` ⇒ Vercel 不再为任何分支的推送自动建部署（不再有失败状态）。
+  已有的线上部署不受影响（它不删任何东西）。
+- 恢复办法：删掉这个文件；**若要真用**那个 Stripe 落地页，在 Vercel 项目设置里把 Root Directory 改成 `alpha-hive-web` 再恢复。
+  彻底断开（解除 GitHub 集成 / 删 Vercel 项目）只能在 Vercel 控制台做，仓库里做不到。
+
 ## [0.45.388] — 2026-09-30 — Added：Alpha Bot——卖权行权价选择器的本机前端（GEX 水平对标 GEXBot Classic + 卖权工作台 + 盘中快照 + 账本就绪度）；只读账本、只绑回环、盲期按全部 tenor 冻结判
 
 用户选定：只做本机版、30 只观察列表 + 任意代码搜索、做盘中时序、视觉用 Claude 的暖色纸面风格（去掉暗色交易终端风）。
