@@ -50,6 +50,7 @@
   容器 tzdata 导致的 `test_step_contract.py::TestBusinessTodayVsDateStr::test_fact_cited_in_docstring_holds_on_this_tzdata`；
   随日期变化的 `test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`。
 
+## [0.45.387] — 2026-09-30 — 占位（进行中：日线缺口阶段 2——缺口时 Twelve Data 补第二源；阶段 4——盘点其它读 yfinance 日线做窗口统计的模块；BILI/CRM/ABBV 09-23 快照 iv_rank 重算）
 
 ## [0.45.386] — 2026-09-29 — 占位（进行中：编排器 B2——Step 2/4/5 经步骤解释器 + alert_manager 新规则；B1 干净跑过一天后合入）
 
