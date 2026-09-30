@@ -38,11 +38,17 @@
 ### Changed
 - `tests/test_sell_strike_integration.py`：`ALLOWED_IMPORTERS` 加 `alphabot/service.py`；种病灶测试加一对「同包别的文件 import 卖权 ⇒ 红」（放行的是一个文件，不是整个包）。
 - `CLAUDE.md` 核心组件指针加 Alpha Bot 一行（含与 Telegram `alpha_hive_bot/` 的区分）。
+- `tests/test_paths_not_frozen_at_import.py`：`alphabot/server.py:STATIC_DIR` 登记进 `KNOWN` 与 `MUST_STAY_FILE_ANCHORED`（前端资产随代码发布，`__file__` 锚定才对）。
+- `tests/test_root_data_guard.py::test_legacy_list_is_pinned`：旧闸清单精确相等里加 `alphabot_state`。
 
 ### 已知局限 / 未做
 - 价格页只走 Twelve Data 共享入口（没配 key 就如实说不可得，不换源——本地价格索引首次读取会写迁移标记）。
 - 指数期权（SPX 等）未实测：CBOE 写法是 `_SPX`，链体量大；ETF（SPY / QQQ）走个股同一路径。
-- 本环境以 root 运行，`tests/test_migrate_data_root.py::test_retire_moves_untracked_only_then_check_old_and_unretire`（断言只读文件不可写）在未改动的 main 上同样失败，与本版无关。
+- 云端验证环境里有 4 条测试在**未改动的 main** 上同样失败，与本版无关：以 root 运行导致的
+  `test_migrate_data_root.py::test_retire_moves_untracked_only_then_check_old_and_unretire`、
+  `test_orchestrator_step_interp.py::TestFallback::test_unwritable_tmpdir_falls_to_logdir_then_says_why`；
+  容器 tzdata 导致的 `test_step_contract.py::TestBusinessTodayVsDateStr::test_fact_cited_in_docstring_holds_on_this_tzdata`；
+  随日期变化的 `test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`。
 
 
 ## [0.45.386] — 2026-09-29 — 占位（进行中：编排器 B2——Step 2/4/5 经步骤解释器 + alert_manager 新规则；B1 干净跑过一天后合入）
