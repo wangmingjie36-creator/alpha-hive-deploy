@@ -119,7 +119,7 @@ paper_portfolio_state.bak-*/
 # （月度/周度候选与本地 md 报告都在这里），所以忽略、不进自动提交白名单，耐久性只靠
 # data_backup/export.py 的 STATE_DIRS 私有备份。守卫：tests/test_sell_strike_integration.py。
 sell_strike_state/
-# v0.45.387 Alpha Bot（卖权选择器本机前端）自己的状态：设置 + 盘中快照。私有、不上网站；
+# v0.45.388 Alpha Bot（卖权选择器本机前端）自己的状态：设置 + 盘中快照。私有、不上网站；
 # 耐久性靠 data_backup/export.py 的 STATE_DIRS。守卫：tests/test_alphabot.py。
 alphabot_state/
 

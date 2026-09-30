@@ -1189,7 +1189,7 @@ def _isolate_sell_strike_state(_isolate_env, request, tmp_path):
 
 @pytest.fixture(autouse=True)
 def _isolate_alphabot_state(_isolate_env, tmp_path):
-    """Alpha Bot 状态目录（v0.45.387）防线①：`PATHS.alphabot_state` 此刻是绝对路径且在本测试沙箱里。
+    """Alpha Bot 状态目录（v0.45.388）防线①：`PATHS.alphabot_state` 此刻是绝对路径且在本测试沙箱里。
     防线②（真身指纹）由 `_GUARDED_PRODUCTION_ARTIFACTS` 里的 `alphabot_state` 与仓库根默认拒绝总闸兜住。
     判据同 `_assert_sell_strike_state_in_sandbox`（纯词法，不拿 cwd 补全）。"""
     import hive_logger

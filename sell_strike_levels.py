@@ -455,7 +455,7 @@ def zero_gamma_sweep(contracts: List[dict], S, *, r: float = RISK_FREE_RATE,
 
 def gex_curve(contracts: List[dict], S, *, r: float = RISK_FREE_RATE,
               band_pct: float = 0.20, grid_points: int = 81) -> dict:
-    """展示用：`zero_gamma_sweep` 扫的**那条曲线本身**（v0.45.387，Alpha Bot 的 gamma 曲线图）。
+    """展示用：`zero_gamma_sweep` 扫的**那条曲线本身**（v0.45.388，Alpha Bot 的 gamma 曲线图）。
 
     同一合约集合（`_sweep_arrays`）、同一网格、同一公式（`_total_gex_at`）、同一过零点判据（`_crossings`），
     所以图上画出来的就是路由读的那条——`tests/test_sell_strike_levels.py` 逐视图核对两者的过零点与现价处总量一致。
@@ -546,7 +546,7 @@ def _valid_and_dated(contracts: List[dict]) -> Tuple[List[dict], List[dict], Lis
 
 def view_contracts(contracts: List[dict], view: str) -> List[dict]:
     """某个期限视图收的合约子集——`term_views` 与展示层（`gex_curve` 按视图重画曲线）共用**这一份**筛法，
-    不各写一份（v0.45.387 从 `term_views` 抽出，输出逐字不变）。未知视图名 ⇒ ValueError。"""
+    不各写一份（v0.45.388 从 `term_views` 抽出，输出逐字不变）。未知视图名 ⇒ ValueError。"""
     if view not in VIEW_NAMES:
         raise ValueError(f"view 只接受 {VIEW_NAMES}，收到 {view!r}")
     allc, valid, dated = _valid_and_dated(contracts)

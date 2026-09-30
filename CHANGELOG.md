@@ -5,7 +5,7 @@
 
 ---
 
-## [0.45.387] — 2026-09-30 — Added：Alpha Bot——卖权行权价选择器的本机前端（GEX 水平对标 GEXBot Classic + 卖权工作台 + 盘中快照 + 账本就绪度）；只读账本、只绑回环、盲期按全部 tenor 冻结判
+## [0.45.388] — 2026-09-30 — Added：Alpha Bot——卖权行权价选择器的本机前端（GEX 水平对标 GEXBot Classic + 卖权工作台 + 盘中快照 + 账本就绪度）；只读账本、只绑回环、盲期按全部 tenor 冻结判
 
 用户选定：只做本机版、30 只观察列表 + 任意代码搜索、做盘中时序、视觉用 Claude 的暖色纸面风格（去掉暗色交易终端风）。
 对标对象 GEXBot 的调研结论：它只有「水平」（Classic 朴素 GEX 梯子 / Zero Gamma / Major±、State / Orderflow 靠逐笔成交分类），

@@ -43,7 +43,7 @@ clean:
 	rm -f .coverage
 	find . -name "*.pyc" -delete
 
-# ==================== Alpha Bot（卖权选择器本机前端，v0.45.387） ====================
+# ==================== Alpha Bot（卖权选择器本机前端，v0.45.388） ====================
 # 只绑 127.0.0.1。读生产账本需先 export ALPHA_HIVE_HOME=<数据根>（与编排器 / MCP 同一个值）。
 alphabot:
 	/usr/local/bin/python3 -m alphabot --open

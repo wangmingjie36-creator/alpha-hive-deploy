@@ -1,4 +1,4 @@
-"""Alpha Bot 服务层：前端所需的全部数据都从这里出（v0.45.387）。
+"""Alpha Bot 服务层：前端所需的全部数据都从这里出（v0.45.388）。
 
 **全仓第三个、也是本包唯一一个** import 卖权选择器的模块（`tests/test_sell_strike_integration.py`
 的 `ALLOWED_IMPORTERS` 显式登记）。规矩与 MCP 工具相同：

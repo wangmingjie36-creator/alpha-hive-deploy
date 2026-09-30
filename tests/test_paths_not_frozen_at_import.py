@@ -523,7 +523,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         # ── A. 代码同址资源 / 工程根：`__file__` 是**正确**锚点，不该改 ──
         ("dashboard_renderer.py", "_TPL_DIR"),        # templates/，随代码发布
         ("prompt_loader.py", "_PROMPTS_DIR"),         # prompts/，随代码发布
-        ("alphabot/server.py", "STATIC_DIR"),         # alphabot/static/ 前端资产，随代码发布（v0.45.387）
+        ("alphabot/server.py", "STATIC_DIR"),         # alphabot/static/ 前端资产，随代码发布（v0.45.388）
         ("probability_scorecard.py", "ALPHAHIVE_DIR"),  # sys.path.insert
         ("scan_continuity.py", "ALPHAHIVE_DIR"),        # sys.path.insert
         ("ic_rerun_readiness.py", "ALPHAHIVE_DIR"),     # sys.path.insert

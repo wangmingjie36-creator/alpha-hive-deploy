@@ -458,7 +458,7 @@ def compute_live(ticker: str, *, tenors=("monthly", "weekly"), fetch_fn=None,
         return {"data_available": False, "ticker": t, "reason": f"exception:{type(exc).__name__}: {exc}"}
 
 
-# ─────────────────────────────── Alpha Bot（本机前端）只读视图（v0.45.387）
+# ─────────────────────────────── Alpha Bot（本机前端）只读视图（v0.45.388）
 #
 # 唯一调用方是 `alphabot/service.py`（火墙 ALLOWED_IMPORTERS 显式登记）。本节全部**只读**：
 # 不调 record / settle / write_local_report，assess 一律 freeze=False——冻结的唯一写者仍是日报钩子。

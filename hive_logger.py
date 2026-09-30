@@ -181,7 +181,7 @@ class _HivePaths:
 
     @property
     def alphabot_state(self) -> Path:
-        """Alpha Bot（卖权选择器的本机前端）自己的状态目录（v0.45.387）。
+        """Alpha Bot（卖权选择器的本机前端）自己的状态目录（v0.45.388）。
 
         写：`alphabot.service`——`settings.json`（自选 / 盘中关注列表）与
             `intraday/<美东日期>/<TICKER>.jsonl`（盘中快照，只存聚合数值、不存原始链）。

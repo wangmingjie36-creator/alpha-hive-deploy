@@ -214,7 +214,7 @@ class TestFirewallInward:
 # ═════════════════════════════════════════ 2 · 火墙②：全仓只有两处生产代码 import 卖权模块
 
 #: 允许 import `sell_strike_*` 的生产文件（仓库根相对路径）
-#: v0.45.387 起第三个：Alpha Bot 本机前端的服务层（只读；其余守卫在 tests/test_alphabot.py）
+#: v0.45.388 起第三个：Alpha Bot 本机前端的服务层（只读；其余守卫在 tests/test_alphabot.py）
 ALLOWED_IMPORTERS = {"alpha_hive_daily_report.py", "alpha_hive_mcp.py", "alphabot/service.py"}
 #: 离线代码：测试与实验本就要直接用它们
 _SKIP_TOP = {"tests", "experiments"}
