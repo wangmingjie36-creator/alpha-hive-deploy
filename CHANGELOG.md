@@ -586,6 +586,10 @@ VRP 账本 BRK-B 的 rv / iv 也全非空。真正有问题的是**值**，不�
 ### 验证
 - 编排器相关测试 746 条全绿（本版三个新 / 改测试文件 + scan_catchup / braced_vars / step5 / scan_timing / code_version /
   orchestrator_steps / data_backup）；`/bin/bash -n` 通过、`find_unbraced` 为空。
+- 全套（合入前已并 origin/main，`-m "not integration and not network" --maxfail=1000`）：7557 passed / 1 failed / 85 deselected / 2 xfailed（368s）；
+  唯一失败是已知的 `test_economic_calendar.py::TestCoverageHorizon`（BLS 2027 日程未发布，设计内变红）。
+  `deploy_orchestrator.py --ref HEAD --main-ref HEAD --dry-run` 在合并后的提交上 `would_deploy`、`gate_failures` 为空。
+- 09-29 生产（本版合入前的最后一轮，旧编排器）：production_sync `fast_forwarded`，Step 11 七条世代边界全 `matches`——即本版上线前的基线正常。
 - 二次审查（四视角对抗 + 逐条驳斥复核，17 个代理）：新代码块在任何构造出的情形下都不中断 / 不拖慢扫描、不改 OVERALL_STATUS、
   不弄坏 steps_result / status.json。确认并同版修：① 测试里「C locale」那一路其实是 UTF-8（Python 3.7+ 的 PEP 538 往环境塞
   `LC_CTYPE=C.UTF-8`，只 pop `LC_ALL` 不够）⇒ 三个变量全清再显式设，并断言 C 那一路 `locale charmap` 不是 UTF-8；
