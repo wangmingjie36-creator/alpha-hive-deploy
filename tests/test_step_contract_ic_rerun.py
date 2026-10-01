@@ -382,6 +382,44 @@ class TestOkPath:
         assert set(got) == {"ic_rerun.dim_ic.cannot_judge", "ic_rerun.dim_ic.h1_anchor_pending"}, sorted(got)
         assert got["ic_rerun.dim_ic.h1_anchor_pending"]["deadline"] == P.FORWARD_START
 
+    def test_degraded_ohlc_window_reaches_quiet_line_detail_and_out(self, monkeypatch, tmp_path, capsys):
+        """复审 S1 端到端（进程内）：F&G 执行器报「回放行情窗口降级」⇒ 经真的 `fg_exposure_gate_forward_status`
+        （代码锚点指向一个只换掉 `run()` 的垫片，`status_line` 是真的）到达 `--quiet` 那一行、私有 `_detail`
+        与 `--out` 的 attention；`--out` 的公开形状不变（`{status, line}`）。此前三处与健康时逐字节相同。"""
+        canned = {**_NR, "selfproof_rate": 1.0, "mode": "forward", "n_dates": 10, "ohlc_window": _OW_DEGRADED}
+        code = tmp_path / "code"
+        (code / "experiments").mkdir(parents=True)
+        (code / "experiments" / "canned.json").write_text(json.dumps(canned), encoding="utf-8")
+        real = REPO_ROOT / "experiments" / "fg_exposure_gate_forward_test.py"
+        (code / "experiments" / "fg_exposure_gate_forward_test.py").write_text(
+            "import importlib.util, json, pathlib\n"
+            f"_spec = importlib.util.spec_from_file_location('_real_fg_for_shim', {str(real)!r})\n"
+            "_real = importlib.util.module_from_spec(_spec)\n_spec.loader.exec_module(_real)\n"
+            "status_line = _real.status_line\n"
+            "def run(today=None):\n"
+            "    return json.loads((pathlib.Path(__file__).parent / 'canned.json').read_text(encoding='utf-8'))\n",
+            encoding="utf-8")
+        monkeypatch.setattr(rr, "ALPHAHIVE_DIR", code)
+        st = rr.fg_exposure_gate_forward_status(today="2026-10-01")
+        assert st["line"] == _FG.status_line(canned) and st["line"].startswith("⚠️ F&G 敞口门前瞻检验："), st["line"]
+        assert st[rr._DETAIL_KEY]["ohlc_window"] == _OW_DEGRADED
+
+        monkeypatch.setattr(rr, "resonance_forward_status",
+                            lambda *a, **k: {"status": "not_ready", "line": "⏳ 共振加成前瞻检验：桩"})
+        monkeypatch.setattr(rr, "dim_ic_forward_status", lambda *a, **k: {
+            "status": "not_ready", "line": "⏳ 维度 IC 协议：桩", rr._DETAIL_KEY: dict(_DIM_BASE)})
+        db = _make_db(tmp_path / "home", _weekly_rows(2))
+        out = tmp_path / "o.json"
+        monkeypatch.setattr(sys, "argv", [TOOL, "--db", str(db), "--today", "2026-10-01", "--quiet", "--out", str(out)])
+        assert rr.main() == 1
+        segs = _quiet_segments(capsys.readouterr().out)
+        assert segs[2] == _FG.status_line(canned) and "回放行情窗口降级" in segs[2], segs
+        env = json.loads(out.read_text(encoding="utf-8"))
+        assert sc.validate(env) == [] and env["status"] == "attention"
+        assert [a["id"] for a in env["attention"]] == ["ic_rerun.fg_exposure_gate_forward.ohlc_window_degraded"]
+        assert env["fg_exposure_gate_forward_test"]["line"] == segs[2]
+        _assert_payload_intact(env)
+
     def test_missing_anchor_state_is_not_silently_ok(self):
         """执行器若不再给出 `h1_anchor`（形状变了 / 桩没带 `_detail`），锚点截止日会无声消失 ⇒ 单列一条 warn，
         不让「读不到」渲染成「没事」。"""
@@ -452,8 +490,39 @@ def _assert_icon_consistent(line, items, *, silent_ids=()):
         raise AssertionError(f"未知段首图标：{line}")
 
 
+#: v0.45.391 复审 S1：F&G 结果里的回放行情窗口计数（`paper_portfolio._ReplayOhlcWindow.stats()` 的形状）
+_OW_HEALTHY = {"window": ["2026-09-15", "2026-10-02"], "wide_fetches": 20, "served": 300, "out_of_window": 0,
+               "fallback": 0, "fallback_tickers": {}, "direct_requests": 0, "direct_empty": 0, "degraded": False}
+_OW_DEGRADED = dict(_OW_HEALTHY, served=0, fallback=20, direct_requests=144,
+                    fallback_tickers={f"T{i:02d}": "ConnectionError: wide rejected" for i in range(20)}, degraded=True)
+_FG_WINDOW_STATES = [
+    ("not_ready_healthy", {**_NR, "ohlc_window": _OW_HEALTHY}, set()),
+    ("not_ready_degraded", {**_NR, "ohlc_window": _OW_DEGRADED}, {"ohlc_window_degraded"}),
+    ("stale_degraded", {**_NR, "stale": True, "reason": "x", "ohlc_window": _OW_DEGRADED},
+     {"stale", "ohlc_window_degraded"}),
+    ("cannot_judge_degraded", {"status": "cannot_judge", "reason": "r", "ohlc_window": _OW_DEGRADED},
+     {"cannot_judge", "ohlc_window_degraded"}),
+    ("confirmed_degraded", {"status": "confirmed", "look": "中期", "ohlc_window": _OW_DEGRADED},
+     {"checkpoint", "ohlc_window_degraded"}),
+    ("out_of_window_only", {**_NR, "ohlc_window": dict(_OW_HEALTHY, out_of_window=3, direct_requests=3,
+                                                       degraded=True)}, {"ohlc_window_degraded"}),
+]
+
+
 class TestAttentionMatchesRenderedIcons:
     """生产侧**不**从图标反推条目（两者各自从结构化字段来）；这里对照两者没有各说各话。"""
+
+    @pytest.mark.parametrize("label,fres,expect", _FG_WINDOW_STATES, ids=[s[0] for s in _FG_WINDOW_STATES])
+    def test_fg_ohlc_window_states(self, label, fres, expect):
+        """复审 S1：窗口降级 ⇒ 独立 id 的 warn 条目，且 F&G 那一段的段首与之对得上（⏳ 段不许藏 warn）。
+        变异「`_FWD_DETAIL_KEYS` 去掉 ohlc_window」/「attention 不看 degraded」/「status_line 降级时仍打 ⏳」⇒ 红。"""
+        items = rr._forward_test_attention("fg_exposure_gate_forward", rr._detail(fres, rr._FWD_DETAIL_KEYS))
+        assert {a["id"] for a in items} == {f"ic_rerun.fg_exposure_gate_forward.{s}" for s in expect}, label
+        _assert_icon_consistent(_FG.status_line(fres), items)
+        degraded = [a for a in items if a["id"].endswith(".ohlc_window_degraded")]
+        assert all(a["level"] == "warn" for a in degraded)
+        if fres["ohlc_window"]["fallback"] > 5:
+            assert "等 20 个" in degraded[0]["message"], degraded[0]["message"]   # 名单封顶，不把 20 个全列进一行
 
     @pytest.mark.parametrize("key,mod", [("resonance_forward", _RES), ("fg_exposure_gate_forward", _FG)])
     @pytest.mark.parametrize("label,fres,expect", _FWD_STATES, ids=[s[0] for s in _FWD_STATES])

@@ -54,12 +54,22 @@ _NOT_READY_OR_CANNOT_JUDGE_ALLOWED_KEYS = {
     "status", "mode", "n_dates", "seed_last_run_date", "selfproof", "selfproof_rate",
     "selfproof_decision_rate", "weeks_available", "weeks", "next_look_at",
     "looks_passed_without_verdict", "reason", "stale", "mechanism_selfcheck_ok",
+    # v0.45.391 复审 S1：回放行情窗口的取数计数（`paper_portfolio._ReplayOhlcWindow.stats()`）。白名单照样管到它的
+    # **子键**（下面 `_OHLC_WINDOW_KEYS`）——不让它变成一个可以随手塞效应量的口袋。
+    "ohlc_window",
 }
+#: `ohlc_window` 允许的子键：只有窗口区间、取数次数与失败标的（及原因），没有价格 / 净值 / 收益
+_OHLC_WINDOW_KEYS = {"window", "wide_fetches", "served", "out_of_window", "fallback", "fallback_tickers",
+                     "direct_requests", "direct_empty", "degraded"}
 
 
 def _assert_no_unexpected_top_level_keys(res):
     extra = set(res) - _NOT_READY_OR_CANNOT_JUDGE_ALLOWED_KEYS
     assert not extra, f"出现白名单外的顶层键（可能是新换了名字的效应量泄漏）：{extra}"
+    if "ohlc_window" in res:
+        ow = res["ohlc_window"]
+        assert isinstance(ow, dict) and set(ow) <= _OHLC_WINDOW_KEYS, f"ohlc_window 出现白名单外的子键：{set(ow) - _OHLC_WINDOW_KEYS}"
+        assert all(isinstance(v, str) for v in ow["fallback_tickers"].values()), "fallback_tickers 只许是 标的→原因 文本"
 
 
 def _all_keys(obj):
@@ -473,6 +483,44 @@ class TestCarriedByReadiness:
 
 
 class TestStatusLine:
+    _OW = {"window": ["2026-09-15", "2026-10-02"], "wide_fetches": 11, "served": 0, "out_of_window": 0,
+           "fallback": 11, "fallback_tickers": {"NVDA": "ConnectionError: x"}, "direct_requests": 144,
+           "direct_empty": 0, "degraded": True}
+    _NR = {"status": "not_ready", "weeks": 3, "next_look_at": 15, "looks_passed_without_verdict": [],
+           "selfproof_rate": 1.0}
+
+    def test_healthy_window_leaves_the_line_unchanged(self):
+        """复审 S1：健康时（degraded=False）进度行与没有 `ohlc_window` 键时逐字相同——周报 / 编排器读到的不变。"""
+        healthy = dict(self._OW, fallback=0, fallback_tickers={}, served=300, direct_requests=0, degraded=False)
+        assert fwd.status_line({**self._NR, "ohlc_window": healthy}) == fwd.status_line(self._NR)
+        assert fwd.status_line(self._NR) == "⏳ F&G 敞口门前瞻检验：3/15 个合格周，自证 100%"
+
+    def test_degraded_window_is_visible_and_turns_the_icon(self):
+        """复审 S1：整段取数全部退回直连 ⇒ 段首 ⏳ 换 ⚠️、段尾说几个标的、退回了什么；不含 `｜`（--quiet 段分隔符）。
+        变异「status_line 不看 ohlc_window」⇒ 红。"""
+        line = fwd.status_line({**self._NR, "ohlc_window": self._OW})
+        assert line.startswith("⚠️ F&G 敞口门前瞻检验：3/15 个合格周，自证 100%；⚠️ 回放行情窗口降级："), line
+        assert "11/11 个标的整段取数失败" in line and "退回逐次直连" in line and "｜" not in line
+        cj = fwd.status_line({"status": "cannot_judge", "reason": "r", "ohlc_window": self._OW})
+        assert cj.startswith("⚠️ F&G 敞口门前瞻检验无法判定：r；⚠️ 回放行情窗口降级")
+        ck = fwd.status_line({"status": "confirmed", "look": "中期", "ohlc_window": self._OW})
+        assert ck.startswith("🔔 ") and "回放行情窗口降级" in ck
+
+    def test_selfproof_reason_names_an_ohlc_outage(self):
+        """复审 S3：served=0 且直连全空 ⇒ 原因说行情不可得，不再推给评分链 / 配置 / 漏跑；
+        整段被拒但直连照常（S1 的形状）⇒ 原文案不变。"""
+        sp = {"exact": 1, "total": 10, "decision": 3, "rate": 0.1, "decision_rate": 0.3}
+        outage = dict(self._OW, direct_empty=144)
+        r = fwd._selfproof_failure_reason(sp, outage)
+        assert "OHLC 不可得" in r and "11/11 个标的全部失败" in r and "144 次请求也全是空" in r
+        assert "已被改动" not in r
+        assert fwd._selfproof_failure_reason(sp, self._OW) == fwd._selfproof_failure_reason(sp)
+        assert "评分链/入场规则/组合层配置已被改动" in fwd._selfproof_failure_reason(sp, None)
+        # 部分直连拿到了 bar ⇒ 不是全断，不改口
+        assert fwd._selfproof_failure_reason(sp, dict(outage, direct_empty=143)) == fwd._selfproof_failure_reason(sp)
+        # 窗口服务过请求 ⇒ 至少有标的拿到了整段行情，不是全断
+        assert fwd._selfproof_failure_reason(sp, dict(outage, served=5)) == fwd._selfproof_failure_reason(sp)
+
     def test_not_ready_line_has_no_effect_size(self):
         line = fwd.status_line({"status": "not_ready", "weeks": 3, "next_look_at": 15,
                                 "looks_passed_without_verdict": []})

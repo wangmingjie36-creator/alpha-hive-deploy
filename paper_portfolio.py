@@ -539,8 +539,11 @@ _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 class _ReplayOhlcWindow:
     """一次回放的 OHLC 窗口：`[start, end)`，每个标的至多一次整段取数。
 
-    计数器（`wide_fetches` / `served` / `out_of_window` / `fallback_tickers`）只用于观测与测试，
-    **不进**任何结果字典（前瞻检验的返回键是预注册的白名单）。
+    计数器（`wide_fetches` / `served` / `out_of_window` / `fallback_tickers` / `direct_requests` /
+    `direct_empty`）经 `stats()` 交给调用方。v0.45.391 复审（S1）起前瞻检验把它放进 `run()` 结果的
+    `ohlc_window` 键、进度行与就绪度 attention——此前只在 stderr 的 WARNING / INFO 里：整段取数全部
+    退回直连时（如 Yahoo 拒绝宽区间请求），机读输出与健康时逐字节相同，只是 20 → 144 次调用、17s → 56s，
+    离 Step 11 的 60s 超时只差 4s，**没有任何机读字段会红**。只有取数计数，不含任何价格、净值或收益。
     """
 
     def __init__(self, start: str, end: str):
@@ -556,6 +559,11 @@ class _ReplayOhlcWindow:
         self.wide_fetches = 0
         self.served = 0
         self.out_of_window = 0
+        # 窗口内落到原直连路径的请求（窗口外 / 该标的整段取数失败；含 `_PRICE_CACHE` 命中）与其中一根 bar
+        # 都没拿到的次数（抛异常与空结果都算——直连路径对两者都返回 `{}`）。S3：served=0 且直连全空 ⇒
+        # 这次重放一根行情都没拿到，自证失败要归因到数据，不是评分链。
+        self.direct_requests = 0
+        self.direct_empty = 0
         self._warned_out_of_window: set = set()
 
     def serve(self, ticker: str, start: str, end: str) -> Optional[Dict[str, Dict]]:
@@ -608,10 +616,32 @@ class _ReplayOhlcWindow:
         self._bars[ticker] = bars
         return bars
 
+    def note_direct(self, bars: Dict[str, Dict]) -> None:
+        """`_fetch_ohlc` 在窗口作用域内走了原直连路径之后调用：记一次直连请求与它是否一根 bar 都没有。"""
+        self.direct_requests += 1
+        if not bars:
+            self.direct_empty += 1
+
+    def stats(self) -> Dict:
+        """机读计数（JSON 可序列化）。`degraded`：有标的整段取数失败、或有请求落在窗口外 ⇒ 这些请求
+        退回逐次直连（结果同改动前，只是慢）。窗口退出后照样可调（只读计数器，不读已释放的日线）。"""
+        return {
+            "window": [self.start, self.end],
+            "wide_fetches": self.wide_fetches,
+            "served": self.served,
+            "out_of_window": self.out_of_window,
+            "fallback": len(self.fallback_tickers),
+            "fallback_tickers": {t: str(r)[:200] for t, r in sorted(self.fallback_tickers.items())},
+            "direct_requests": self.direct_requests,
+            "direct_empty": self.direct_empty,
+            "degraded": bool(self.fallback_tickers) or self.out_of_window > 0,
+        }
+
     def summary(self) -> str:
         return (f"回放 OHLC 窗口 [{self.start}, {self.end})：整段取数 {self.wide_fetches} 次"
                 f"（{len(self._bars)} 个标的成功），切片服务 {self.served} 次，"
-                f"退回直连 {len(self.fallback_tickers)} 个标的，窗口外请求 {self.out_of_window} 次")
+                f"退回直连 {len(self.fallback_tickers)} 个标的，窗口外请求 {self.out_of_window} 次，"
+                f"直连请求 {self.direct_requests} 次（{self.direct_empty} 次一根 bar 都没有）")
 
 
 _REPLAY_OHLC_WINDOW: Optional[_ReplayOhlcWindow] = None
@@ -663,13 +693,22 @@ def _fetch_ohlc(ticker: str, start: str, end: str) -> Dict[str, Dict]:
         return {d: bar for d, bar in full.items() if start <= d < end}
 
     # v0.45.391：回放窗口（只在 `replay_ohlc_window` 作用域内非 None；生产路径恒为 None）。
-    # 返回 None ⇒ 窗口外 / 该标的整段取数失败 ⇒ 落到下面原样的直连路径。
+    # 返回 None ⇒ 窗口外 / 该标的整段取数失败 ⇒ 原样的直连路径，结果记进窗口计数（复审 S1/S3）。
+    # ⚠️ 判 `is not None` 而不是真值：窗口内的空切片（该子区间确实没有 bar）是权威答案，不许再去打网络。
     win = _REPLAY_OHLC_WINDOW
     if win is not None:
         sliced = win.serve(ticker, start, end)
         if sliced is not None:
             return sliced
+        out = _fetch_ohlc_direct(ticker, start, end)
+        win.note_direct(out)
+        return out
+    return _fetch_ohlc_direct(ticker, start, end)
 
+
+def _fetch_ohlc_direct(ticker: str, start: str, end: str) -> Dict[str, Dict]:
+    """`_fetch_ohlc` 的原直连路径（`_PRICE_CACHE` + 窄区间 `history()`），v0.45.391 复审时原样抽出、
+    逻辑一字未改——为了在回放窗口作用域内能数它的结局，生产路径照旧经 `_fetch_ohlc` 走到这里。"""
     key = (ticker, start, end)
     if key in _PRICE_CACHE:
         return _PRICE_CACHE[key]

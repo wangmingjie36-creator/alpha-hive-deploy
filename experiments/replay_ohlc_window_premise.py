@@ -12,7 +12,8 @@ auto_adjust=False)` + `_bars_from_history`）重取，逐请求比对。
     /usr/local/bin/python3 experiments/replay_ohlc_window_premise.py [--today YYYY-MM-DD] [--json]
 
 退出码：0 全部相同；1 有请求不同（逐条列出差在哪几天）；3 无法判定（`run()` 没打开窗口 / 窗口没服务任何
-请求 / 直连重取失败）。⚠️ 盘中跑会把「今天那根 bar 在两次取数之间变了」报成不同——收盘后跑，
+请求 / 直连重取失败——抛异常或返回空 DataFrame 都算）。整段取数退回直连的标的不参与核对（它们走的本来就是
+改动前的直连路径），人读那一行会写出有几个、是哪些，此时即使 ok 也打 ⚠️ 而不是 ✅。⚠️ 盘中跑会把「今天那根 bar 在两次取数之间变了」报成不同——收盘后跑，
 或看差异日期是不是只有今天。
 
 只读：重放本身在临时沙箱里（`run_replay` 的 `_REPLAY_MODE` 屏蔽屏障回写），本脚本不写任何文件。
@@ -77,6 +78,8 @@ def check(today: Optional[str] = None, fwd_module=None) -> Dict:
             if k[0] not in win.fallback_tickers and win.start <= k[1] < k[2] <= win.end}
     out["n_requests"] = len(todo)
     out["n_tickers"] = len({k[0] for k in todo})
+    # 复审 S2：没核的标的要说出来——「11 个里 10 个整段取数退回了直连、只核了 1 个」不能印成一个干净的 ✅
+    out["n_excluded_tickers"] = len(win.fallback_tickers)
     if not todo:
         return {**out, "status": "cannot_judge", "reason": "窗口没有服务任何请求，无从核对"}
 
@@ -85,10 +88,16 @@ def check(today: Optional[str] = None, fwd_module=None) -> Dict:
     for (ticker, start, end), sliced in sorted(todo.items()):
         try:
             hist = yf.Ticker(ticker).history(start=start, end=end, auto_adjust=False)
-            direct = {} if hist is None or len(hist) == 0 else pp._bars_from_history(ticker, hist)
         except Exception as e:  # noqa: BLE001 —— 进 failures ⇒ cannot_judge，不吞
             failures.append({"ticker": ticker, "start": start, "end": end, "error": f"{type(e).__name__}: {e}"})
             continue
+        if hist is None or len(hist) == 0:
+            # v0.45.391 复审 S2：空 DataFrame 是 yfinance **不抛异常**的失败形状（限流 / 断网时常见），与「该区间
+            # 确实没有 bar」分不开——拿 {} 去比切片会把「取不到」报成「不同」（exit 1）。与抛异常同样算重取失败。
+            failures.append({"ticker": ticker, "start": start, "end": end,
+                             "error": "重取返回空 DataFrame（yfinance 不抛异常的失败形状）"})
+            continue
+        direct = pp._bars_from_history(ticker, hist)
         if direct != sliced:
             days = sorted(d for d in set(direct) | set(sliced) if direct.get(d) != sliced.get(d))
             mismatches.append({"ticker": ticker, "start": start, "end": end, "days": days})
@@ -115,9 +124,12 @@ def main(argv=None) -> int:
         print(json.dumps(res, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         s = res["status"]
-        print(f"{'✅' if s == 'ok' else '⚠️'} 回放 OHLC 窗口前提：{s}"
+        excluded = res.get("n_excluded_tickers") or 0
+        skipped = (f"；另有 {excluded} 个标的整段取数退回了直连、未参与核对"
+                   f"（{'、'.join(sorted(res.get('fallback_tickers') or {}))}）") if excluded else ""
+        print(f"{'✅' if s == 'ok' and not excluded else '⚠️'} 回放 OHLC 窗口前提：{s}"
               f"（{res.get('n_requests', 0)} 个请求 / {res.get('n_tickers', 0)} 个标的，"
-              f"窗口 {res.get('window')}）{('— ' + res['reason']) if res.get('reason') else ''}")
+              f"窗口 {res.get('window')}{skipped}）{('— ' + res['reason']) if res.get('reason') else ''}")
         for m in res.get("mismatches", [])[:20]:
             print(f"   ≠ {m['ticker']} [{m['start']}, {m['end']}) 差在 {m['days']}")
     return _EXIT.get(res["status"], 3)

@@ -1393,8 +1393,10 @@ def _equivalence_scan(root: Path, boundary: str, first: Optional[str], is_new, i
 #: 那两处的 `{status, line}` 形状有测试钉着（`test_*_forward_test.py::TestCarriedByReadiness`）。
 #: 为什么不从 `line` 反推：图标是给人看的渲染，H1 锚点的截止日写在 ⏳ 段里，按图标永远报不出来（v0.45.355）。
 _DETAIL_KEY = "_detail"
-#: 共振 / F&G 两个检验 `run()` 返回值里 `attention` 用得上的键（不含效应量）
-_FWD_DETAIL_KEYS = ("status", "reason", "stale", "look", "weeks", "next_look_at")
+#: 共振 / F&G 两个检验 `run()` 返回值里 `attention` 用得上的键（不含效应量）。
+#: `ohlc_window`（v0.45.391 复审 S1，只有 F&G 有）：回放行情窗口的取数计数——只是取数次数与失败标的，
+#: 不含价格 / 净值 / 收益；降级时另列 `ic_rerun.fg_exposure_gate_forward.ohlc_window_degraded`。
+_FWD_DETAIL_KEYS = ("status", "reason", "stale", "look", "weeks", "next_look_at", "ohlc_window")
 #: 维度 IC 协议执行器 `run()` 返回值里 `attention` 用得上的键——刻意**不含** `verdicts` / `descriptive`
 #: （结论与效应量只在检视点之后出现，本工具只报「到点了、去跑脚本看」，不转述结论）
 _DIM_DETAIL_KEYS = ("status", "reason", "forward_start", "today", "h1_weeks", "next_look_at",
@@ -1632,20 +1634,34 @@ def _forward_test_attention(key: str, d: Dict) -> List[Dict]:
     iid = f"ic_rerun.{key}"
     st = d.get("status")
     item = step_contract.attention_item
+    out: List[Dict] = []
     if st == "cannot_judge":
-        return [item(f"{iid}.cannot_judge", "warn",
-                     f"{name}无法判定：{d.get('reason') or '（执行器未给原因）'}"
-                     " —— 本周这份检验没跑成或不可信（自证率跌破阈值也落在这里），需人看原因")]
-    if st == "not_ready":
+        out.append(item(f"{iid}.cannot_judge", "warn",
+                        f"{name}无法判定：{d.get('reason') or '（执行器未给原因）'}"
+                        " —— 本周这份检验没跑成或不可信（自证率跌破阈值也落在这里），需人看原因"))
+    elif st == "not_ready":
         if d.get("stale"):
-            return [item(f"{iid}.stale", "warn",
-                         f"{name}：{d.get('reason') or '登记后长期无前瞻样本'}")]
-        return []
-    if st in ("confirmed", "not_confirmed"):
-        return [item(f"{iid}.checkpoint", "info",
-                     f"{name}已到{d.get('look') or ''}检视点 —— 手动跑 `/usr/local/bin/python3 {script}` 看结论"
-                     "（需人判断，勿自动改评分 / CONFIG）")]
-    return [item(f"{iid}.unknown_status", "warn", f"{name}状态未知：{st!r}（执行器的状态词表变了？）")]
+            out.append(item(f"{iid}.stale", "warn",
+                            f"{name}：{d.get('reason') or '登记后长期无前瞻样本'}"))
+    elif st in ("confirmed", "not_confirmed"):
+        out.append(item(f"{iid}.checkpoint", "info",
+                        f"{name}已到{d.get('look') or ''}检视点 —— 手动跑 `/usr/local/bin/python3 {script}` 看结论"
+                        "（需人判断，勿自动改评分 / CONFIG）"))
+    else:
+        out.append(item(f"{iid}.unknown_status", "warn", f"{name}状态未知：{st!r}（执行器的状态词表变了？）"))
+    # v0.45.391 复审 S1：回放行情窗口降级（整段取数退回逐次直连 / 窗口外请求）——判定不变，但它是 Step 11
+    # 被 60s 超时杀掉的前兆（实测全部退回时 17s → 56s），而此前只有 stderr 看得见。与状态条目并列、独立 id。
+    ow = d.get("ohlc_window")
+    if isinstance(ow, dict) and ow.get("degraded") is True:
+        fb = ow.get("fallback_tickers") or {}
+        names = "、".join(list(fb)[:5]) + (f" 等 {len(fb)} 个" if len(fb) > 5 else "")
+        out.append(item(f"{iid}.ohlc_window_degraded", "warn",
+                        f"{name}：回放行情窗口降级 —— 整段取数 {ow.get('fallback')}/{ow.get('wide_fetches')} 个标的失败"
+                        f"{'（' + names + '）' if names else ''}、窗口外请求 {ow.get('out_of_window')} 次，"
+                        f"这些请求退回逐次直连（直连 {ow.get('direct_requests')} 次，其中 {ow.get('direct_empty')} 次"
+                        "一根 bar 都没有）。结果与改动前的逐次取数相同，但 Step 11 可能因此超时、世代边界核对随之没跑——"
+                        "需人看行情源（stderr 的「整段取数失败」WARNING 有原因）"))
+    return out
 
 
 def _dim_ic_attention(d: Dict) -> List[Dict]:
