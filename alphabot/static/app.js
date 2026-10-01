@@ -34,6 +34,10 @@ async function stopServer() {
   if (!confirm("停止 Alpha Bot 本机服务？盘中定时快照也会一起停。")) return;
   try { await api("/api/shutdown", { method: "POST" }); }
   catch (e) { alert(`停止失败：${e.message}`); return; }
+  // 服务已停：别再轮询 / 路由，否则之后同端口再起服务时，这个旧页面会把顶栏、页脚又填回来
+  clearInterval(metaTimer);
+  window.removeEventListener("hashchange", route);
+  seq++;
   disposeAll();
   fill(app, h("div", { class: "panel stopped" },
     h("h2", {}, "服务已停止"),
@@ -93,5 +97,5 @@ async function route() {
 }
 
 window.addEventListener("hashchange", route);
-setInterval(() => { refreshMeta().catch(() => {}); }, 60000);
+const metaTimer = setInterval(() => { refreshMeta().catch(() => {}); }, 60000);
 route();

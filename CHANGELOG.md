@@ -20,6 +20,13 @@
 ### Changed
 - `Makefile`：`alphabot-app` / `alphabot-stop`。`alphabot/__init__.py` 版本 0.45.390。
 
+### Fixed（合入前复查，均先复现再修，新增 5 条回归测试在旧代码上全红）
+- `alphabot/launcher.py`：Finder 有时会给 .app 传 `-psn_0_NNN` 参数，argparse 不认就 exit 2，只进日志不弹窗（看着像双击没反应）⇒ 现在忽略这个参数。
+- `alphabot/launcher.py`：端口上是个不说 HTTP 的服务时，`probe` 抛 `BadStatusLine`（它不是 `OSError`），漏到兜底弹出「启动器出错」⇒ 现在按「端口被别的程序占着」报。
+- `alphabot/launcher.py`：`--stop` 的停止请求失败、`--reset` 遇到坏配置时直接甩 traceback ⇒ 现在打印原因并退出码 1；`macos_app --home` 遇到坏配置同样处理。
+- `alphabot/launcher.py`、`alphabot/macos_app.py`：osascript 是后台进程，对话框可能压在别的窗口后面 ⇒ 弹窗前先 `activate`。启动脚本在没有 `LANG` 时（从 Finder / Dock 启动）补上 `en_US.UTF-8`，已有的值不覆盖。
+- `alphabot/static/app.js`：点「停止服务」后，60 秒一次的 meta 轮询和 hash 路由还在跑；同端口再起服务时，旧页面会把「服务已停止」冲掉、页脚重新填回来（Playwright 实测复现）⇒ 停止后清掉定时器、摘掉路由、作废进行中的渲染。
+
 ### 注意
 - 启动器**不核对**所选目录里有没有卖权账本：账本目录名只许卖权模块提及（`tests/test_sell_strike_integration.py` 火墙，本次实测会红），选错了页面账本 / 结果页会显示账本不存在，`--reset` 后重选。
 - 只在 Linux 容器里验过（bash 壳 + 启动流程 + 浏览器里点停止）；osascript 弹窗与 Finder 双击需要在 Mac 上第一次用时确认。

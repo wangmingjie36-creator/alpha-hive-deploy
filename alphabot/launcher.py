@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import subprocess
@@ -116,7 +117,8 @@ def probe(port: int = DEFAULT_PORT, timeout: float = 2.0) -> dict:
         return {"state": "other", "detail": str(reason)}
     except ConnectionRefusedError:
         return {"state": "free"}
-    except (TimeoutError, OSError, ValueError) as exc:
+    except (TimeoutError, OSError, ValueError, http.client.HTTPException) as exc:
+        # HTTPException（如 BadStatusLine）不是 OSError：端口上是个不说 HTTP 的服务时就是它
         return {"state": "other", "detail": f"{type(exc).__name__}: {exc}"}
 
 
@@ -127,7 +129,8 @@ class MacUI:
 
     def _osa(self, lines, *argv) -> Optional[str]:
         cmd = ["/usr/bin/osascript"]
-        for ln in ["on run argv", *lines, "end run"]:
+        # activate：osascript 是后台进程，不先激活的话对话框常压在别的窗口后面，看着像「双击没反应」
+        for ln in ["on run argv", "activate", *lines, "end run"]:
             cmd += ["-e", ln]
         r = subprocess.run(cmd + [str(a) for a in argv], capture_output=True, text=True)
         if r.returncode != 0:          # 用户点了取消（-128）或关掉了对话框
@@ -248,8 +251,11 @@ def stop_running(port: int) -> bool:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     req = urllib.request.Request(f"http://{HOST}:{port}/api/shutdown", data=b"", method="POST",
                                  headers={"X-AlphaBot": "1"})
-    with opener.open(req, timeout=5):
-        pass
+    try:
+        with opener.open(req, timeout=5):
+            pass
+    except (OSError, http.client.HTTPException) as exc:      # HTTPError / URLError 都是 OSError
+        raise LauncherError(f"停止请求失败：{exc}")
     return True
 
 
@@ -288,15 +294,17 @@ def main(argv=None, ui=None) -> int:
     ap.add_argument("--reset", action="store_true", help="忘掉已选的数据根（下次双击重新选）")
     ap.add_argument("--stop", action="store_true", help="停掉本机正在跑的 Alpha Bot")
     ap.add_argument("--port", type=int, default=None)
-    args = ap.parse_args(argv)
+    argv = sys.argv[1:] if argv is None else list(argv)
+    # Finder 某些情况下会给 .app 传 `-psn_0_NNN`（进程序列号）；argparse 不认 ⇒ exit 2 只进日志、不弹窗
+    args = ap.parse_args([a for a in argv if not a.startswith("-psn_")])
     ui = ui or MacUI()
-    if args.reset:
-        cfg = load_config()
-        cfg.pop("alpha_hive_home", None)
-        print(f"已清除数据根：{save_config(cfg)}")
-        return 0
-    if args.stop:
+    if args.reset or args.stop:                 # 终端用法：报错打印到 stderr，不弹窗、不甩 traceback
         try:
+            if args.reset:
+                cfg = load_config()
+                cfg.pop("alpha_hive_home", None)
+                print(f"已清除数据根：{save_config(cfg)}")
+                return 0
             stopped = stop_running(int(args.port or load_config().get("port") or DEFAULT_PORT))
         except LauncherError as exc:
             print(exc, file=sys.stderr)

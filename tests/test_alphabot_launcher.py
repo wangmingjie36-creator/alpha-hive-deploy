@@ -101,6 +101,32 @@ class TestBundle:
         assert args == "-m alphabot.launcher"
         assert path.startswith("/usr/local/bin:")
 
+    def test_gui_launch_without_lang_gets_utf8(self, tmp_path, home):
+        """Finder / Dock 启动的环境没有 LANG：脚本得补一个 UTF-8 的，已有的不能覆盖。"""
+        repo = tmp_path / "repo"
+        (repo / "alphabot").mkdir(parents=True)
+        (repo / "alphabot" / "launcher.py").write_text("", encoding="utf-8")
+        out = tmp_path / "lang.txt"
+        py = _fake_python(tmp_path, f'echo "$LANG" > "{out}"')
+        exe = MA.build_app(tmp_path / "Apps", repo=repo, python=py) / "Contents" / "MacOS" / MA.EXECUTABLE
+        env = {k: v for k, v in os.environ.items() if k not in ("LANG", "LC_ALL", "LC_CTYPE")}
+        subprocess.run([str(exe)], env={**env, "HOME": str(home)}, check=True)
+        assert out.read_text(encoding="utf-8").strip() == "en_US.UTF-8"
+        subprocess.run([str(exe)], env={**env, "HOME": str(home), "LANG": "zh_CN.UTF-8"}, check=True)
+        assert out.read_text(encoding="utf-8").strip() == "zh_CN.UTF-8"
+
+    def test_dialogs_are_activated(self, tmp_path, monkeypatch):
+        """osascript 是后台进程：不先 activate，对话框会压在别的窗口后面，看着像双击没反应。"""
+        assert "-e 'activate'" in MA.launch_script(tmp_path, "/usr/local/bin/python3")
+        seen = []
+        monkeypatch.setattr(LA.subprocess, "run", lambda cmd, **k: seen.append(cmd) or
+                            subprocess.CompletedProcess(cmd, 0, "选择数据目录…\n", ""))
+        ui = LA.MacUI()
+        ui.alert("x")
+        ui.ask("x", [LA.CANCEL, LA.CHOOSE], LA.CHOOSE)
+        ui.choose_folder("x")
+        assert len(seen) == 3 and all(c[c.index("on run argv") + 2] == "activate" for c in seen)
+
     def test_missing_python_fails_loudly(self, tmp_path, home):
         app = MA.build_app(tmp_path / "Apps", python=str(tmp_path / "no-such-python"))
         r = subprocess.run([str(app / "Contents" / "MacOS" / MA.EXECUTABLE)], env={**os.environ, "HOME": str(home)})
@@ -218,6 +244,70 @@ class TestLauncherFlow:
         ui = FakeUI()
         assert LA.main(["--port", str(_free_port())], ui=ui) == 1
         assert ui.kinds() == ["alert"] and "launcher.json" in ui.calls[0][1]
+
+    def test_finder_psn_argument_is_ignored(self, home, monkeypatch):
+        """Finder 有时给 .app 传 `-psn_0_NNN`：不能让 argparse exit 2（只进日志、不弹窗 ⇒ 双击没反应）。"""
+        monkeypatch.setattr(LA, "spawn_server", lambda *a, **k: pytest.fail("取消了还起服务"))
+        ui = FakeUI(answers=[LA.CANCEL])
+        assert LA.main(["-psn_0_1234567", "--port", str(_free_port())], ui=ui) == 0
+        assert ui.kinds() == ["ask"]
+
+    def test_non_http_listener_counts_as_other(self, home):
+        """端口上是个不说 HTTP 的服务（BadStatusLine 不是 OSError）：要报「被别的程序占着」，不是启动器崩溃。"""
+        import threading
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen()
+
+        def junk():
+            while True:
+                try:
+                    c, _ = srv.accept()
+                except OSError:
+                    return
+                with c:
+                    c.recv(1024)
+                    c.sendall(b"SSH-2.0-OpenSSH_9.0\r\n")
+        threading.Thread(target=junk, daemon=True).start()
+        port = srv.getsockname()[1]
+        try:
+            assert LA.probe(port)["state"] == "other"
+            ui = FakeUI()
+            assert LA.main(["--port", str(port)], ui=ui) == 1
+        finally:
+            srv.close()
+        assert ui.kinds() == ["alert"] and "被别的程序占着" in ui.calls[0][1]
+
+    def test_terminal_commands_report_errors_without_traceback(self, home, capsys):
+        """`--stop` 停止请求失败、`--reset` 遇坏配置：打印原因 + 退出码 1，不甩 traceback。"""
+        import http.server
+        import json
+        import threading
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"app": "alphabot", "can_shutdown": True}).encode()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                self.send_response(500)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            assert LA.main(["--stop", "--port", str(srv.server_address[1])]) == 1
+        finally:
+            srv.shutdown()
+        assert "停止请求失败" in capsys.readouterr().err
+        LA.config_path().parent.mkdir(parents=True)
+        LA.config_path().write_text("{not json", encoding="utf-8")
+        assert LA.main(["--reset"]) == 1
+        assert "launcher.json" in capsys.readouterr().err
 
     def test_reset_forgets_root(self, tmp_path, home):
         LA.save_config({"alpha_hive_home": str(tmp_path), "port": 9999})

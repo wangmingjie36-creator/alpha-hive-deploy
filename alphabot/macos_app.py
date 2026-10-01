@@ -68,10 +68,11 @@ def launch_script(repo: Path, python: str) -> str:
 # 别手改：改生成器后重跑 make alphabot-app。逻辑在 alphabot/launcher.py，git pull 即生效。
 REPO={q_repo}
 PY={q_py}
+export LANG="${{LANG:-en_US.UTF-8}}"   # 从 Finder / Dock 启动没有 LANG：中文日志与对话框都按 UTF-8
 LOG_DIR="$HOME/Library/Logs/Alpha Bot"
 mkdir -p "$LOG_DIR"
 alert() {{
-  /usr/bin/osascript -e 'on run argv' -e 'display alert "Alpha Bot 无法启动" message (item 1 of argv) as critical' -e 'end run' "$1" >/dev/null 2>&1
+  /usr/bin/osascript -e 'on run argv' -e 'activate' -e 'display alert "Alpha Bot 无法启动" message (item 1 of argv) as critical' -e 'end run' "$1" >/dev/null 2>&1
   echo "$(date '+%F %T') $1" >>"$LOG_DIR/launcher.log"
 }}
 if [ ! -x "$PY" ]; then
@@ -174,7 +175,11 @@ def main(argv=None) -> int:
         if not hp.is_dir():
             print(f"⚠️ 数据根 {hp} 不存在，没写进配置；首次双击时再选", file=sys.stderr)
         else:
-            cfg = launcher.load_config()
+            try:
+                cfg = launcher.load_config()
+            except launcher.LauncherError as exc:
+                print(f"⚠️ 数据根没写进配置：{exc}", file=sys.stderr)
+                return 1
             cfg["alpha_hive_home"] = str(hp.resolve())
             print(f"数据根 {cfg['alpha_hive_home']} → {launcher.save_config(cfg)}")
     else:
