@@ -78,7 +78,11 @@ h3 { font: 600 13px/1.3 var(--sans); margin: 0 0 8px; color: var(--ink-2); lette
 .muted { color: var(--ink-3); }
 .small { font-size: 13px; }
 .num { font-variant-numeric: tabular-nums; }
-.foot { padding: 18px var(--gutter) 32px; color: var(--ink-3); font-size: 12.5px; border-top: 1px solid var(--line); max-width: 1480px; margin: 0 auto; }
+.foot { padding: 18px var(--gutter) 32px; color: var(--ink-3); font-size: 12.5px; border-top: 1px solid var(--line); max-width: 1480px; margin: 0 auto; display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+.link-btn { background: none; border: 0; padding: 2px 0; font: inherit; color: var(--ink-2); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.link-btn:hover { color: var(--clay-ink); }
+.link-btn:focus-visible { outline: 2px solid var(--clay); outline-offset: 2px; border-radius: 2px; }
+.stopped { max-width: 560px; margin: 48px auto; }
 
 .grid { display: grid; gap: 20px; }
 .grid.two { grid-template-columns: minmax(0, 1.55fr) minmax(300px, 1fr); }

@@ -1,4 +1,4 @@
-.PHONY: test test-cov test-fast lint scan docker-build docker-run clean alphabot alphabot-demo
+.PHONY: test test-cov test-fast lint scan docker-build docker-run clean alphabot alphabot-demo alphabot-app alphabot-stop
 
 # ==================== 测试 ====================
 test:
@@ -50,3 +50,11 @@ alphabot:
 
 alphabot-demo:
 	/usr/local/bin/python3 -m alphabot --demo --open
+
+# 生成 macOS 桌面程序 ~/Applications/Alpha Bot.app（双击启动服务并打开页面；已在跑就只开页面）。
+# 当前环境有 ALPHA_HIVE_HOME 就顺手记下；否则首次双击时选一次。换 Python：make alphabot-app PYTHON=路径
+alphabot-app:
+	/usr/local/bin/python3 -m alphabot.macos_app $(if $(PYTHON),--python "$(PYTHON)",)
+
+alphabot-stop:
+	/usr/local/bin/python3 -m alphabot.launcher --stop
