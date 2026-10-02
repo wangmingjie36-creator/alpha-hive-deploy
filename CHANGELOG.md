@@ -5,7 +5,76 @@
 
 ---
 
-## [0.45.392] — 2026-10-01 — 占位（进行中：ic_rerun_readiness 防御层——F&G 子状态放子进程+时限，先写检查点 --out，SIGTERM 连带子进程）
+## [0.45.392] — 2026-10-02 — Fixed：`ic_rerun_readiness` 防御层——F&G 子状态放子进程 + 时间预算、F&G 之前先写检查点 `--out`、SIGTERM 连带子进程；Step 11 再超时也不丢世代边界核对
+
+> 叠在 v0.45.391（回放 OHLC 窗口，`worktree-wf_67f872bb-cba-3` 至 `05ad0e23`）之上，**两版都未推送**；391 应先合入。
+
+**为什么还要这一层**：391 把 F&G 前瞻检验的健康路径压到约 12s，但整段取数被 Yahoo 拒时退回逐次直连（391 实测约 56s），
+限流日照样会被 Step 11 的 60s `run_step` 看门狗杀掉。而 `--out` 只在最后写一次 ⇒ 一被杀**整份**就绪度 JSON 都没有，
+连与 F&G 无关的世代边界核对（`cohort_boundary_evidence`，v0.45.334）也一起丢——09-30 正是这样。
+**10-02 当场复现了这个场景**（行情源正处于降级态，真实数据、生产数据根、只读）：391 单独跑 **56.0s / 64.1s**（后一次在生产会被杀）；
+叠上本版 **45.2s / 45.2s** 正常退出（rc=1），F&G 段报「超出时间预算」，边界核对 `matches`、IC 摘要、其余各段完整。
+
+### Changed
+- `ic_rerun_readiness.py`（模块 docstring 新增「F&G 子状态的时间预算与检查点」一节）：
+  - **F&G 子状态放进子进程、开跑即起**（`_FgChild`；与 `assess` / 共振 / 维度 IC / 世代边界**并行**——F&G 拿到几乎整份预算，
+    而不是「预算 − 其余各项耗时」）。子进程入口 `ic_rerun_readiness.py --_fg-child`（`__main__` 在 `run_tool` 之前分流），
+    结果 JSON 写原 stdout、fd 1 改指 stderr（依赖库在 C 层写 fd 1 也挡得住）。
+  - **截止时刻** `--budget-seconds`（缺省 `FG_BUDGET_SECONDS_DEFAULT=45`，从 `main()` 开始计；0 = 不限时；负数 / NaN / inf 是用法错）。
+    到点 ⇒ TERM →（宽限 `_FG_KILL_GRACE_SECONDS=2` 后仍在则 KILL，stderr 记一行）。编排器**不传**这个参数（改编排器要隔一个扫描日才部署），
+    所以缺省值就是生产值：45 + 2 + 余量 ≤ `orchestrator_steps.STEP11_TIMEOUT_DEFAULT`（391 已钉在编排器原文上）由测试核对。
+  - **检查点**：其余各项先算完，`--out` 先原子写一次；F&G 段是显式占位 `cannot_judge`「进程在 F&G 重放结束前终止」。
+    之后被杀，编排器（先删文件、按 `--run-start` 核新鲜度）读到的就是它；正常结束时被完整结果原子覆盖。只写 `--out`：`--json` 的 stdout 仍是**一个**文档。
+  - **SIGTERM**：`__main__` 给父进程装 `SIGTERM → SystemExit(143)`——`run_step` 只 TERM 本进程（不是进程组），`main()` 的 `with` 退出时
+    连带终止子进程、删它的临时目录；143 原样作退出码，编排器照旧记超时（124）。父进程被 KILL 时子进程靠看门狗线程自己退
+    （`getppid()` 变了 / 超过「剩余时间 + 5s」⇒ stderr 一行 + `os._exit(75)`，那一行点名可能残留的临时目录）。
+  - **子进程不装信号处理器、临时目录归父进程删**（真实数据实测改的，见下「实测发现」）：子进程拿私有 `TMPDIR`（`ic_rerun_fg_child_*`），
+    父进程收尸**之后**整个删掉；删不掉 stderr 说一句。
+  - **attention 新三条**（都是 warn，`id` 与检验自己的 `ic_rerun.fg_exposure_gate_forward.cannot_judge`——含自证率跌破阈值——分开路由）：
+    `….interrupted`（检查点占位）/ `….budget_exceeded`（超预算）/ `….child_failed`（起不来 / 非 0 退出 / 被信号杀 / stdout 不合约定）。
+    F&G 段的 `line` 都以「⚠️ F&G 敞口门前瞻检验无法判定：」开头——周度任务按段首名字 / 图标认段，照样认得出、照样必须显著标出。
+- `orchestrator_steps.py`：合入 391 复审后，`_base11` rc=124 且没有 JSON 那句的括号「边界核对排在 F&G 前瞻检验之后、--out 只在最后写一次」
+  在本版之后不再成立，改成「连 F&G 之前的检查点都没写出：超时发生在 F&G 之外的部分，或检查点写盘失败——看 stderr」（391 测试钉的前缀未动；
+  status / rc / 级别不变；391 会话同意由本版改）。rc=124 但检查点在场时走 391 的「⏰ Step 11 超时」文案 + 检查点里的边界核对与「需人看」。
+- `tests/conftest.py`：新 autouse `_fg_sub_status_in_process`——进程内调 `main()` 的测试靠 monkeypatch 打桩 / 沙箱化 `SNAPSHOT_DIR` / 出网闸，
+  这些到不了子进程 ⇒ 测试里 F&G 留在本进程算（`_FG_IN_PROCESS=True`，生产恒 False）。删掉这个夹具会红（守卫见下）。
+
+### 不变的东西（契约面）
+- `--json` / `--out` 的键与**键序**同 391（F&G 先放占位、原位替换——对已有键赋值不挪位置）；三个前瞻检验子字典仍是 `{status, line}`；
+  `--quiet` 段序不变；退出码 0/1/3 不变。编排器、部署副本**不用动**：Python 改动随 production_sync 在合入后的第一个扫描日生效。
+
+### 实测发现：从信号处理器抛 `SystemExit` 会被 curl_cffi 的 C 回调吞掉
+初版让子进程也装 `SIGTERM → SystemExit`，好让 `TemporaryDirectory` 自己清理。真实数据 `--budget-seconds 5` 一跑：TERM 到达时子进程主线程正在
+`curl_cffi` 的 `buffer_callback` 里，stderr 出现「Exception ignored from cffi callback … SystemExit: 143」——异常被吞、子进程照跑、宽限 2s 后被 KILL，
+`fg_gate_fwd_*` 留在系统临时目录（总耗时 7.2s = 5 + 2 也印证了）。⇒ 子进程保持系统默认动作（TERM 即死，不管主线程在哪），收尾全归父进程。
+父进程这条路上没有出网、没有 C 回调，`SystemExit` 在那里可靠。系统临时目录里另有 **09-21 / 09-24 两份同名残留**（早于本会话，不是本版造的，**未删**，留给用户）。
+
+### 等价与耗时（真实数据，`ALPHA_HIVE_HOME=/Users/igg/alpha-hive-data`，`--today 2026-10-01`，两边都从 git archive 跑以排除环境差异）
+- 391（`44808fee`）vs 本版：就绪度 JSON 除 `generated_at` 外**逐字节相同**、键序相同、`--quiet` 行相同——不限时（`--budget-seconds 0`）与缺省预算两种都是。
+  （首轮对 391 初版 `bd80c250` 同样逐字节相同。）**最终这一对**——391 终版 `05ad0e23` vs 本版提交，不限时——同样逐字节相同、`--quiet` 行相同；这一轮设了 `ALPHA_HIVE_LOGS_DIR` 指向临时目录，生产日志新增 0 行。
+- 健康时（10-01，对 391 初版 `bd80c250`）：15.4s → 本版 11.4–11.7s（并行起子进程的收益）。降级时（10-02）：见开头，56.0 / 64.1s → 45.2 / 45.2s。
+- 生产状态：`paper_portfolio_state/*`、`pheromone.db`、`-wal` 的 sha256 与 `report_snapshots` 文件数前后相同（每轮都核）。⚠️ **但没隔离日志**：这些核对往生产 `logs/alpha_hive.log` 追加了 9 行回放窗口汇总 INFO / WARNING（10-01 10:11–10:12 四行、10-02 07:50 三行 + 08:36 / 08:38 两行；391 会话发现），未回改；以后真实数据核对一律设 `ALPHA_HIVE_LOGS_DIR` 指向临时目录。
+- 10-02 两轮自然超预算（修正后的代码）：结束后无残留 F&G 子进程，系统临时目录无新的 `ic_rerun_fg_child_*` / `fg_gate_fwd_*`。
+
+### 验证
+- `tests/test_ic_rerun_fg_budget.py`（46 条，三层）：父进程处置（进程内 `_FgChild` / `main()`，子进程换成 `python -c`：起不来 / 超时 / 非 0 / 被信号杀 /
+  七种不合约定的输出 / 不理 TERM ⇒ KILL / 不限时 / `with` 异常退出连带终止 / 检查点先于等待写出且键序 = 最终 = 391 / 子进程先于 `assess` 起 /
+  超预算处处可见且判定不变 / `--json` 仍一个文档 / 用法错）；**真实进程树**（生产两文件原样拷进 tmp + 假执行器：SIGTERM 父进程 ⇒ 143 + 检查点 + 子进程死 + 临时目录删；
+  超预算；SIGKILL 父进程 ⇒ 孤儿自退；执行器往 fd 1 乱写不污染；TERM 落在 ctypes C 回调里照样即死、不走 KILL；391 的 `ohlc_window_degraded` 跨进程照样列出；
+  子进程自身时限）；消费方（`orchestrator_steps.render` 读检查点 rc=124 / 超预算 rc=1；缺省预算放得进 Step 11 超时）。
+  离线是执行的断言：`sitecustomize` 两层闸（Python socket 含回环 + `curl_cffi.Curl.perform`）+ 死端口代理，canary 子进程 + 孙进程、两条路反向自证；
+  系统临时目录每条都圈进 tmp 并断言为空；夹具收尸。
+- 变异（全部在 git archive 副本上，每个变异一份新副本，`PYTHONDONTWRITEBYTECODE=1`、`--maxfail=1000`，基线 46/46）：**23/23 红**，每个都由点名那条性质的测试打红：不写检查点 / 子进程懒启动（不并行）/ `with` 退出不终止子进程 / 父进程不装 SIGTERM 处理器 / **子进程装 SIGTERM→SystemExit（cffi 吞异常的形状，只有 C 回调那条红）** / 子进程不改指 fd 1 / 预算被忽略 / 执行层原因落进通用 cannot_judge / 解析放行多余键 / 忽略子进程非 0 退出 / 不删临时目录 / 不把 TMPDIR 交给子进程 / 不 KILL / 不起看门狗 / 键序变了 / 检查点也打到 `--json` stdout / 缺省预算放不进 60s / 子进程自身时限不触发 / 处理器退出码不是 143 / 预算校验放行负数与 inf / 孤儿检测关掉 / conftest 进程内钩子删掉（只有它的守卫红）/ 出网闸看不见 curl_cffi（只有 canary 红）。首轮 22 个变异跑出两处**测试侧**缺陷，已修后整轮重跑：① 假执行器 `hang` 模式 120s 后掉进无限 C 回调循环，配上 M07 / M14（截止 / 看门狗被关掉）留下 8 个不死进程（已 KILL，均为 tmp 里的假执行器）⇒ 假执行器加上限、夹具收尸；② `TestMainFlow` 没圈临时目录，M03 / M11 往真实系统临时目录漏了 13 个`ic_rerun_fg_child_*`、M12 漏了 2 个 `fg_gate_fwd_*`（都已核内容后删除）⇒ 全部测试圈进 tmp（含 `TMPDIR` 环境变量），重跑 M12 确认不再外漏。
+- `ruff --select F821,F401,F841` 改动文件全过；定向回归（本文件 + `test_ic_rerun_readiness` / `test_step_contract_ic_rerun` / `test_fg_exposure_gate_forward_test` /
+  `test_dim_ic_forward_test` / `test_resonance_boost_forward_test` / `test_orchestrator_steps` / `test_replay_ohlc_window` / `test_changelog_entry_integrity`）全绿。
+- 全套 `-m "not integration and not network"`：7906 passed / 3 failed / 2 xfailed（9 分钟，提交 `2c6c0d88` 树上跑）。3 条全与本版无关：`test_economic_calendar.py::TestCoverageHorizon`（随日期变红的已知项，391 同）；`test_alphabot_launcher.py` 的 `test_missing_python_fails_loudly` / `test_demo_start_reuse_and_stop`——**不含本版代码的 391 终版 `05ad0e23` 上同样两条红**（git archive 副本连跑两次都红；本 worktree 单跑时一条时红时绿），来自 main 的 v0.45.390，未查、未动。
+
+### 没做 / 另议
+- **周度任务**（`~/.claude/scheduled-tasks/alpha-hive-weekly-optimizer/SKILL.md`，只读未改）跑 `ic_rerun_readiness.py --quiet` 不带预算 ⇒ 也吃 45s 缺省。
+  它没有 60s 看门狗，降级的周日会把 F&G 自证率那段换成「超出时间预算」（⚠️ 开头，SKILL 规则照样显著标出，但没有自证率数字）。
+  建议**本版合入 main 之后**把那条命令加上 `--budget-seconds 0`——合入前加会被旧代码当成未知参数（exit 2）。
+- 父进程被 KILL（编排器 TERM 后 10s）时子进程的临时目录无人删——stderr 那一行点名；正常路径（父进程收到 TERM）由父进程删，测试覆盖。
+- 没改编排器（`--budget-seconds` 不传，缺省即生产值）；没加 payload 键（耗时只进超预算那句的 `line` / attention，不进 JSON 结构）。
 
 ## [0.45.391] — 2026-09-30 — Fixed：F&G 敞口门前瞻检验的重放每个标的只整段取一次 OHLC（Step 11 在 09-30 被 60s 超时杀掉）；同一份行情下输出逐字节不变
 

@@ -622,10 +622,12 @@ def _base11(rc: int, d: Optional[dict], ctx: _Ctx, why: str):
     b = _jq_roundtrip(raw)
     if raw is None and d is None and rc != 2:
         # (i) 就绪度 JSON 本轮不可用（没写出 / 不是本轮的 / 读不了）：不再说「代码早于 v0.45.334」——那是读到了
-        # JSON 却没有这个键时才成立的推断。`--out` 只在最后写一次、边界核对排在 F&G 前瞻检验之后，所以超时 =
-        # 本轮根本没核对（09-30 rc=124 实况）。rc=2（脚本不存在）照旧，与 B 之前逐字相同。
+        # JSON 却没有这个键时才成立的推断。09-30 rc=124 实况：那时 `--out` 只在最后写一次、边界核对排在 F&G
+        # 前瞻检验之后，超时 = 本轮根本没核对。v0.45.392 起 F&G 开跑前先写一次检查点（边界核对在里面）、F&G 有
+        # 时间预算 ⇒ rc=124 通常读得到检查点、不走这一支；还走到这里 = 死在检查点写出之前（F&G 之外的部分就超了时，
+        # 或检查点写盘失败，原因在 stderr）。rc=2（脚本不存在）照旧，与 B 之前逐字相同。
         cause = ("ic_rerun_readiness.py 被 run_step 看门狗按超时杀掉，就绪度 JSON 没写出来"
-                 "（边界核对排在 F&G 前瞻检验之后、--out 只在最后写一次）" if rc == 124
+                 "（连 F&G 之前的检查点都没写出：超时发生在 F&G 之外的部分，或检查点写盘失败——看 stderr）" if rc == 124
                  else "就绪度 JSON 本轮不可用")
         parts.append(f"Step 11 世代边界核对：本轮未核对——{cause}{why}")
     elif raw is None:

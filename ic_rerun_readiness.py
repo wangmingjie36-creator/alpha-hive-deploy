@@ -59,6 +59,27 @@ v0.44.1~0.44.3 修了 ML 预期收益的结构性看多偏斜、并把 RivalBee 
       无法判定 / 陈旧 / 已到检视点、维度 IC 协议 H1 锚点的截止日 …），**不从 `--quiet` 那行的图标反推**——
       H1 锚点「须早于 2026-10-12」那种写在 ⏳ 段里的截止日，按图标读永远报不出来。
 `--quiet` 那一行的格式与退出码 0/1/3 **不因外壳改变**。
+
+F&G 子状态的时间预算与检查点（v0.45.392）
+-----------------------------------------
+编排器 Step 11 在 `run_step --timeout 60` 下跑本工具；`--out` 原先只在最后写一次，而 F&G 敞口门前瞻检验
+（`fg_exposure_gate_forward_status`，逐日真实重放、要打 yfinance）在 09-30 拖到 >60s ⇒ 进程被杀、**整份**
+就绪度 JSON 没写出来，连与 F&G 无关的世代边界核对也一起丢了。v0.45.391 把健康路径压到约 12s，但整段取数
+被拒时退回逐次直连（实测约 56s），限流日仍会超时。于是：
+  · F&G 子状态放进**子进程**、开跑时就起（与其余各项并行），带截止时刻 `--budget-seconds`（缺省
+    `FG_BUDGET_SECONDS_DEFAULT`，从 `main()` 开始计；0 = 不限时）。到点 ⇒ TERM → 宽限 → KILL 子进程，
+    F&G 段渲染成 `cannot_judge` + 专属 attention `ic_rerun.fg_exposure_gate_forward.budget_exceeded`；
+    子进程自己崩 / 输出不合约定 / 起不来 ⇒ `….child_failed`。都**看得见**，不吞。
+    为什么不用 SIGALRM / 协作式截止：会在 `paper_portfolio.run_replay` 的 finally（`CONFIG.clear()` 与
+    `update()` 之间）里抛出、把本进程的 CONFIG 弄成空的，也打断不了 C 层的 curl 卡顿；子进程里坏了就坏了。
+  · 其余各项（`assess` / 共振 / 维度 IC / 世代边界）先算完，`--out` **先写一次检查点**——F&G 段是显式占位
+    `cannot_judge`「进程在 F&G 重放结束前终止」（attention `….interrupted`）。进程之后被杀，编排器（先删文件、
+    再按 `--run-start` 核新鲜度）读到的就是这份检查点：边界核对与 IC 摘要照常可用。正常结束时被完整结果原子覆盖。
+  · `__main__` 装 SIGTERM → `SystemExit(143)`：编排器只 TERM 本进程（不是进程组），子进程收不到——由 `main()`
+    的 `with` 退出时连带终止它、再删它的私有临时目录。143 原样保留，编排器照旧把它记成超时（124）。子进程自己
+    **不**装这个处理器（异常会被 curl_cffi 的 C 回调吞掉，实测），TERM 即死。父进程被 KILL 时子进程靠自己的
+    看门狗（父进程没了 / 超过自身时限）退出。
+JSON 形状不变：键与键序同 v0.45.391，F&G 段仍是 `{status, line}`。
 """
 
 from __future__ import annotations
@@ -66,9 +87,16 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
+import shutil
+import signal
 import sqlite3
+import subprocess
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -1457,6 +1485,277 @@ def fg_exposure_gate_forward_status(today: Optional[str] = None) -> Dict:
                 _DETAIL_KEY: {"status": "cannot_judge", "reason": f"{type(e).__name__}: {e}"}}
 
 
+# ── F&G 子状态：子进程 + 截止时刻（v0.45.392，见模块 docstring）────────────────────────────
+
+#: F&G 子状态的缺省时间预算（秒，从 `main()` 开始计）。**缺省值本身就要放得进编排器 Step 11 的超时**：
+#: 编排器不传 `--budget-seconds`（改编排器要隔一个扫描日才部署），所以 60s 的 `run_step --timeout` 减去
+#: 本值，要盖得住到点后的 TERM 宽限（`_FG_KILL_GRACE_SECONDS`）+ 写最终 JSON + 解释器启动（实测 <0.2s）。
+#: 两者的关系由 `tests/test_ic_rerun_fg_budget.py::TestBudgetFitsOrchestratorTimeout` 核对（超时取
+#: `orchestrator_steps.STEP11_TIMEOUT_DEFAULT`，它由 `tests/test_orchestrator_steps.py::TestStep11Timeout` 钉在编排器原文上）。
+FG_BUDGET_SECONDS_DEFAULT = 45.0
+#: 到点后先 TERM 子进程（让它的 finally 清掉临时目录），等这么久仍在 ⇒ KILL
+_FG_KILL_GRACE_SECONDS = 2.0
+#: 子进程看门狗的轮询间隔 / 自身时限比父进程截止多给的余量（父进程在场时总是父进程先动手）
+_FG_CHILD_POLL_SECONDS = 0.5
+_FG_CHILD_SELF_DEADLINE_SLACK = 5.0
+#: 子进程看门狗自行退出时用的退出码（父进程已不在、没人读它，只为日志里分得出来）
+_FG_CHILD_WATCHDOG_RC = 75
+#: 子进程入口：`python ic_rerun_readiness.py --_fg-child …`（`__main__` 在 `run_tool` 之前分流）
+_FG_CHILD_FLAG = "--_fg-child"
+#: **测试钩子**：True ⇒ F&G 子状态在本进程内算（不起子进程、不限时）。生产恒 False。
+#: `tests/conftest.py::_fg_sub_status_in_process` 对每条测试自动置 True——进程内调 `main()` 的测试靠
+#: monkeypatch 打桩 / 沙箱化 `paper_portfolio.SNAPSHOT_DIR` 与出网闸，这些到不了子进程。
+#: 子进程路径由 `tests/test_ic_rerun_fg_budget.py` 显式置回 False 测，真实 CLI 子进程测试（`TestRealCli`）本就不经 conftest。
+_FG_IN_PROCESS = False
+
+#: F&G 段被「执行层」（不是检验本身）判成无法判定的三种原因 → attention 里的说明。
+#: id = `ic_rerun.fg_exposure_gate_forward.<原因>`，与检验自己的 `….cannot_judge`（含自证率跌破阈值）分开路由。
+_FG_RUNNER_TEXT = {
+    "interrupted": ("这份 JSON 是 F&G 开跑前先写出的检查点，进程之后被杀或崩溃、没写出最终结果；"
+                    "其余各项（IC 就绪度 / 世代边界核对 / 共振 / 维度 IC）是本轮真实结果"),
+    "budget_exceeded": ("本轮没有自证率数字，这不是检验的结论；同日手动跑 "
+                        "`/usr/local/bin/python3 ic_rerun_readiness.py --quiet --budget-seconds 0` 看完整结果；"
+                        "连续多天出现 ⇒ 行情源限流或重放变慢，需人看"),
+    "child_failed": "本轮没有自证率数字；子进程的 stderr 在同一份日志里，需人看原因",
+}
+
+
+def _fg_runner_result(kind: str, reason: str) -> Dict:
+    """执行层判定的 F&G 段：与检验自己的 cannot_judge 同形（`{status, line, _detail}`），`_detail.runner` 记原因。"""
+    assert kind in _FG_RUNNER_TEXT, kind
+    return {"status": "cannot_judge",
+            "line": f"⚠️ F&G 敞口门前瞻检验无法判定：{reason}",
+            _DETAIL_KEY: {"status": "cannot_judge", "reason": reason, "runner": kind}}
+
+
+def _fg_checkpoint_placeholder() -> Dict:
+    """检查点里的 F&G 段：显式占位，绝不能是「上一次的结果」或空。"""
+    return _fg_runner_result("interrupted", "进程在 F&G 重放结束前终止")
+
+
+def _fg_child_argv(today: Optional[str], max_seconds: Optional[float]) -> List[str]:
+    """子进程命令行。脚本路径取 `__file__`（指向**代码**：就是本文件自己），调用时求值。"""
+    argv = [sys.executable, str(Path(__file__).resolve()), _FG_CHILD_FLAG, "--parent-pid", str(os.getpid())]
+    if today:
+        argv += ["--today", today]
+    if max_seconds is not None:
+        argv += ["--max-seconds", repr(float(max_seconds))]
+    return argv
+
+
+def _parse_fg_child_output(raw: bytes) -> Dict:
+    """子进程 stdout → F&G 段。不合约定一律抛 `ValueError`（调用方渲染成 child_failed）：
+    多出的键也拒——它们会原样进 `--out`，而 F&G 段的形状 `{status, line}` 有测试钉着。"""
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        head = raw[:120].decode("utf-8", "replace")
+        raise ValueError(f"不是 JSON（{type(e).__name__}；开头 {head!r}）") from e
+    if not isinstance(obj, dict):
+        raise ValueError(f"顶层应为对象，收到 {type(obj).__name__}")
+    if not isinstance(obj.get("status"), str) or not isinstance(obj.get("line"), str):
+        raise ValueError(f"缺字符串键 status / line：{sorted(obj)}")
+    if _DETAIL_KEY in obj and not isinstance(obj[_DETAIL_KEY], dict):
+        raise ValueError(f"{_DETAIL_KEY} 应为对象，收到 {type(obj[_DETAIL_KEY]).__name__}")
+    extra = set(obj) - {"status", "line", _DETAIL_KEY}
+    if extra:
+        raise ValueError(f"多出键 {sorted(extra)}")
+    return obj
+
+
+class _FgInProcess:
+    """测试钩子 `_FG_IN_PROCESS` 用的同接口实现：`result()` 时才在本进程内算（无时限）。"""
+
+    def __init__(self, today: Optional[str]):
+        self.today = today
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def result(self) -> Dict:
+        return fg_exposure_gate_forward_status(today=self.today)
+
+
+class _FgChild:
+    """F&G 子状态的子进程句柄：构造即启动（与 `main()` 其余各项并行），`result()` 等到截止时刻。
+
+    「谁会红」逐条（每条都落成 F&G 段的 `cannot_judge` + 专属 attention，不抛、不吞）：
+      · 起不来（建临时目录或 `Popen` 抛）⇒ child_failed「无法启动」；
+      · 到截止时刻还没结束 ⇒ TERM →（宽限后仍在则 KILL，stderr 记一行）→ budget_exceeded；
+      · 自己退出码非 0（含被别人发信号杀掉）⇒ child_failed「退出码 N / 被信号 N 终止」；
+      · 退出码 0 但 stdout 不合约定 ⇒ child_failed「输出不合约定」。
+    `with` 退出（正常、异常、SIGTERM 转来的 `SystemExit`）时子进程若还活着一律终止——不留孤儿。
+
+    临时目录**由父进程收拾**：子进程拿到一个私有 `TMPDIR`（重放的 `TemporaryDirectory` 都建在里面），父进程在子进程
+    收尸**之后**整个删掉。不靠子进程自己的 finally——实测（v0.45.392，真实数据 + `--budget-seconds 5`）子进程收到 TERM 时
+    主线程正在 curl_cffi 的 C 回调里，`SystemExit` 被 cffi 吞掉（「Exception ignored from cffi callback」），子进程照跑、
+    宽限后被 KILL，`fg_gate_fwd_*` 留在系统临时目录里（09-21 / 09-24 各有一份同样的残留）。所以子进程保持 SIGTERM 的
+    系统默认动作（立刻终止，不管主线程在哪），收尾全归父进程。
+    子进程 stderr 直通本进程 stderr（编排器的日志），stdout 只装结果（子进程里把 fd 1 改指 stderr，见 `_fg_child_main`）。
+    """
+
+    def __init__(self, today: Optional[str], deadline: Optional[float]):
+        self.deadline = deadline                     # time.monotonic() 刻度；None = 不限时
+        self.t_start = time.monotonic()
+        self.proc: Optional[subprocess.Popen] = None
+        self.spawn_error: Optional[str] = None
+        self.tmp_root: Optional[str] = None
+        remaining = None if deadline is None else max(0.0, deadline - self.t_start)
+        try:
+            self.tmp_root = tempfile.mkdtemp(prefix="ic_rerun_fg_child_")
+            self.proc = subprocess.Popen(_fg_child_argv(today, remaining), stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.PIPE, env={**os.environ, "TMPDIR": self.tmp_root})
+        except Exception as e:  # noqa: BLE001 —— 起不来也要落成可见的一段，见 result()
+            self.spawn_error = f"{type(e).__name__}: {e}"
+            self._remove_tmp_root()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.terminate()
+        return False
+
+    def _remove_tmp_root(self) -> None:
+        """删子进程的私有临时目录。删不掉不改判定，但要说出来（残留在系统临时目录里没人会去看）。"""
+        root, self.tmp_root = self.tmp_root, None
+        if root is None:
+            return
+        shutil.rmtree(root, ignore_errors=True)
+        if os.path.exists(root):
+            print(f"⚠️  ic_rerun_readiness：F&G 子进程的临时目录 {root} 删不掉，残留在系统临时目录里", file=sys.stderr)
+
+    def terminate(self) -> None:
+        """TERM → 等 `_FG_KILL_GRACE_SECONDS` → KILL → 收尸 → 删临时目录。
+
+        子进程保持 SIGTERM 默认动作，正常情况下 TERM 即死、宽限用不上；KILL 是给「有人把子进程的 SIGTERM 处置改了」
+        留的后手，真走到这一步 stderr 记一行（那说明子进程的信号处置变了，需要人看）。KILL 与删目录都放在 finally：
+        等待期间被 SystemExit 打断也照样补刀、照样收拾。"""
+        p = self.proc
+        try:
+            if p is not None and p.poll() is None:
+                try:
+                    p.terminate()
+                    p.wait(timeout=_FG_KILL_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass
+                finally:
+                    if p.poll() is None:
+                        print(f"⚠️  ic_rerun_readiness：F&G 子进程 TERM 后 {_FG_KILL_GRACE_SECONDS:g}s 仍未退出，已 KILL",
+                              file=sys.stderr)
+                        p.kill()
+                        p.wait()
+        finally:
+            try:
+                # 不再读剩余输出：孙进程若继承了管道，读到 EOF 可能遥遥无期
+                if p is not None and p.stdout is not None and not p.stdout.closed:
+                    p.stdout.close()
+            finally:
+                if p is None or p.poll() is not None:     # 子进程已收尸才删：删早了它可能还在往里写
+                    self._remove_tmp_root()
+
+    def result(self) -> Dict:
+        if self.proc is None:
+            return _fg_runner_result("child_failed", f"无法启动 F&G 子进程（{self.spawn_error}）")
+        timeout = None if self.deadline is None else max(0.0, self.deadline - time.monotonic())
+        try:
+            raw, _ = self.proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            ran = time.monotonic() - self.t_start
+            self.terminate()
+            return _fg_runner_result("budget_exceeded", f"超出时间预算（F&G 子进程跑了 {ran:.1f}s 仍未结束，已终止；"
+                                                        "预算见 --budget-seconds，从进程开始计）")
+        rc = self.proc.returncode
+        if rc != 0:
+            how = f"被信号 {-rc} 终止" if rc < 0 else f"退出码 {rc}"
+            return _fg_runner_result("child_failed", f"F&G 子进程异常结束（{how}），未给出结果")
+        try:
+            return _parse_fg_child_output(raw or b"")
+        except ValueError as e:
+            return _fg_runner_result("child_failed", f"F&G 子进程输出不合约定：{e}")
+
+
+def _start_fg_sub_status(today: Optional[str], deadline: Optional[float]):
+    """F&G 子状态的句柄：生产 = `_FgChild`（立刻起子进程）；测试钩子 `_FG_IN_PROCESS` ⇒ `_FgInProcess`。"""
+    if _FG_IN_PROCESS:
+        return _FgInProcess(today)
+    return _FgChild(today, deadline)
+
+
+def _sigterm_to_exit(signum, _frame):
+    """SIGTERM → `SystemExit(128+signum)`：让 finally / `with` 照常执行（父进程借此终止 F&G 子进程、删它的临时目录）。
+    只响应第一次：清理中途再来一次 TERM 不打断清理（编排器 10s 后反正会 KILL）。
+    ⚠️ **只装在父进程**：从信号处理器里抛异常，落点若在 C 回调里（cffi / ctypes）会被吞掉——父进程这条路上没有
+    出网、没有 C 回调；子进程（curl_cffi）有，所以子进程保持系统默认动作（见 `_FgChild` docstring）。"""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise SystemExit(128 + signum)
+
+
+def _install_sigterm_exit() -> bool:
+    """装 `_sigterm_to_exit`；不在主线程（`signal.signal` 抛 ValueError）⇒ 返回 False、保持原处置。
+    只在 `__main__` 调——进程内调 `main()` 的测试不该把 pytest 自己的 SIGTERM 处置换掉。"""
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_to_exit)
+        return True
+    except ValueError:
+        return False
+
+
+def _start_fg_child_watchdog(parent_pid: int, max_seconds: Optional[float]) -> None:
+    """子进程看门狗：父进程没了（被 KILL ⇒ 本进程被过继，`getppid()` 变了）或超过自身时限 ⇒ stderr 记一行、
+    `os._exit`（另一个线程里抛异常停不下主线程，`os._exit` 能，不管主线程卡在哪）。父进程在场时它不会先于父进程动手
+    （自身时限 = 父进程给的剩余时间 + `_FG_CHILD_SELF_DEADLINE_SLACK`）。
+    这条路上没有父进程替它删临时目录 ⇒ 那一行把目录名点出来（父进程被 KILL 本身就要人看）。"""
+    t0 = time.monotonic()
+    limit = None if max_seconds is None else max_seconds + _FG_CHILD_SELF_DEADLINE_SLACK
+
+    def _loop():
+        while True:
+            time.sleep(_FG_CHILD_POLL_SECONDS)
+            orphaned = os.getppid() != parent_pid
+            if orphaned or (limit is not None and time.monotonic() - t0 > limit):
+                why = "父进程已不在" if orphaned else f"超过自身时限 {limit:g}s"
+                try:
+                    print(f"ic_rerun_readiness（F&G 子进程）：{why}，自行退出；临时目录 "
+                          f"{os.environ.get('TMPDIR', '?')} 可能残留", file=sys.stderr, flush=True)
+                finally:
+                    os._exit(_FG_CHILD_WATCHDOG_RC)
+
+    threading.Thread(target=_loop, name="fg-child-watchdog", daemon=True).start()
+
+
+def _fg_child_main(argv: List[str]) -> int:
+    """子进程入口：算 F&G 子状态，结果 JSON 写到**原** stdout；其余一切输出改去 stderr。
+
+    fd 级重定向（不是 `sys.stdout = …`）：依赖库在 C 层或直接写 fd 1 的输出也挡得住，stdout 管道里只有结果。
+    结果序列化失败 ⇒ 未捕获异常、退出码 1 ⇒ 父进程渲染成 child_failed（不是悄悄给个空段）。
+    """
+    ap = argparse.ArgumentParser(prog=f"ic_rerun_readiness.py {_FG_CHILD_FLAG}")
+    ap.add_argument("--parent-pid", type=int, required=True)
+    ap.add_argument("--today")
+    ap.add_argument("--max-seconds", type=float)
+    a = ap.parse_args(argv)
+    sys.stdout.flush()
+    result_fd = os.dup(1)
+    os.dup2(2, 1)
+    _start_fg_child_watchdog(a.parent_pid, a.max_seconds)
+    res = fg_exposure_gate_forward_status(today=a.today)
+    data = json.dumps(res, ensure_ascii=False).encode("utf-8")
+    with os.fdopen(result_fd, "wb") as f:
+        f.write(data)
+    return 0
+
+
+def _budget_seconds(s: str) -> float:
+    v = float(s)
+    if not (v >= 0) or v == float("inf"):        # 拒 NaN / 负数 / inf（不限时请写 0）
+        raise argparse.ArgumentTypeError(f"须为 ≥0 的有限秒数（0 = 不限时），收到 {s!r}")
+    return v
+
+
 def dim_ic_forward_status(db: Path, today: Optional[str] = None) -> Dict:
     """顺带承载「维度 IC 证据协议」（v0.45.320 预注册 / v0.45.325 执行器）的进度——同上两条，
     到期条件是数据条件（H1 攒够 26 / 52 个已结算合格周），不另起定时任务。
@@ -1629,11 +1928,19 @@ _DIM_SCRIPT = "experiments/dim_ic_forward_test.py"
 def _forward_test_attention(key: str, d: Dict) -> List[Dict]:
     """共振 / F&G 两个前瞻检验的条目。两者状态词表相同（`status_line` 同构）：
     `cannot_judge`（含自证率跌破阈值）/ `not_ready`（`stale` 时要人看）/ `confirmed`·`not_confirmed`
-    （已到检视点）/ 其他（未知状态——执行器改了词表而这里没跟上，也要有人红）。"""
+    （已到检视点）/ 其他（未知状态——执行器改了词表而这里没跟上，也要有人红）。
+
+    v0.45.392：F&G 段还可能是**执行层**判的无法判定（`_detail.runner`：检查点占位 / 超出时间预算 / 子进程失败，
+    见 `_FG_RUNNER_TEXT`）——各用专属 id，与检验自己的 `.cannot_judge`（含自证率跌破阈值）分开：
+    「检验跑了、结果不可信」与「检验这轮没跑完」是两件事，消费方要能分开路由。"""
     name, script = _FWD_TESTS[key]
     iid = f"ic_rerun.{key}"
     st = d.get("status")
     item = step_contract.attention_item
+    runner = d.get("runner")
+    if runner in _FG_RUNNER_TEXT:
+        return [item(f"{iid}.{runner}", "warn",
+                     f"{name}无法判定：{d.get('reason') or '（未给原因）'} —— {_FG_RUNNER_TEXT[runner]}")]
     out: List[Dict] = []
     if st == "cannot_judge":
         out.append(item(f"{iid}.cannot_judge", "warn",
@@ -1785,18 +2092,25 @@ def contract_envelope(res: Dict, date: str, attention: List[Dict]) -> Dict:
                                   attention=attention, payload=res)
 
 
+def _write_out_only(path: str, env: Dict) -> None:
+    """`--out` 原子写（tmp + replace：被杀在半途也只会留下上一份完整文件，不会是半截 JSON）。
+    写不出去不改变判定（判定在写盘之前就完成了）、只打 stderr——消费方那边是「文件缺失」，照样会红。"""
+    try:
+        step_contract.write_out(path, env)
+    except OSError as e:
+        print(f"⚠️  无法写入 {path}: {e}", file=sys.stderr)
+
+
 def _emit(args, env: Dict) -> None:
     """`--out` 原子写 + `--json` 打印同一份外壳。写不出去不改变判定（判定在写盘之前就完成了）。"""
     if args.out:
-        try:
-            step_contract.write_out(args.out, env)
-        except OSError as e:
-            print(f"⚠️  无法写入 {args.out}: {e}", file=sys.stderr)
+        _write_out_only(args.out, env)
     if args.json:
         print(json.dumps(env, indent=2, ensure_ascii=False))
 
 
 def main() -> int:
+    t0 = time.monotonic()   # F&G 时间预算的起点（模块导入实测 <0.2s，不另算）
     ap = argparse.ArgumentParser(description="IC 重跑就绪度")
     ap.add_argument("--db", default=None, help="pheromone.db 路径（默认走 PATHS.db）")
     ap.add_argument("--target-ic", type=float, default=DEFAULT_TARGET_IC,
@@ -1812,6 +2126,9 @@ def main() -> int:
         "（与 scan_continuity.py 同一理由）"
     ))
     ap.add_argument("--quiet", action="store_true", help="只输出一行摘要")
+    ap.add_argument("--budget-seconds", type=_budget_seconds, default=FG_BUDGET_SECONDS_DEFAULT, help=(
+        f"F&G 敞口门前瞻检验子状态的时间预算，从进程开始计（默认 {FG_BUDGET_SECONDS_DEFAULT:g}，放得进编排器 "
+        "Step 11 的 60s 超时；0 = 不限时）。到点 ⇒ 终止 F&G 子进程，该段报「超出时间预算」，其余各项照常"))
     args = ap.parse_args()
 
     # 外壳的 `date`：这次运行服务的业务日（v0.45.355）。消费方拿它与自己的 DATE_STR 比，
@@ -1831,20 +2148,35 @@ def main() -> int:
                     "ic_rerun.undetermined", "warn", f"IC 重跑就绪度无法判定：找不到 {db}（退出码 3）")]))
         return 3
 
-    res = assess(db_path=db, target_ic=args.target_ic, today=args.today)
-    fwd = resonance_forward_status(db.parent, db, today=args.today)
-    fwd_detail = _take_detail(fwd)      # 取走私有细节后 fwd 只剩 {status, line}，payload 形状不变
-    res["resonance_forward_test"] = fwd
-    fg_fwd = fg_exposure_gate_forward_status(today=args.today)
+    # v0.45.392：F&G 子状态（唯一慢、要出网的一项）放进子进程、**现在就起**，与下面各项并行；
+    # 其余各项先算完并写检查点，最后才在截止时刻前等 F&G（见模块 docstring「时间预算与检查点」）。
+    # `with` 退出——含 SIGTERM 转来的 SystemExit——时子进程若还活着一律终止。
+    deadline = None if args.budget_seconds == 0 else t0 + args.budget_seconds
+    with _start_fg_sub_status(args.today, deadline) as fg_run:
+        res = assess(db_path=db, target_ic=args.target_ic, today=args.today)
+        fwd = resonance_forward_status(db.parent, db, today=args.today)
+        fwd_detail = _take_detail(fwd)      # 取走私有细节后 fwd 只剩 {status, line}，payload 形状不变
+        dim_fwd = dim_ic_forward_status(db, today=args.today)
+        dim_detail = _take_detail(dim_fwd)
+        # 归档与 DB 同处一个安装 ⇒ 用 --db 的所在目录，别用代码目录（见 cohort_boundary_evidence docstring）。
+        # 放在 --out / --json / --quiet 之前：三种输出都要带上它（v0.45.334，见 boundary_evidence_status）
+        bev = boundary_evidence_status(db.parent)
+        # 按 v0.45.391 的键序赋值（共振 → F&G → 维度 IC → 世代边界）：F&G 先放显式占位，之后原位替换——
+        # 对已有键赋值不改变它在 dict 里的位置，所以 `--json` / `--out` 的键序与改动前相同。
+        fg_fwd = _fg_checkpoint_placeholder()
+        fg_detail = _take_detail(fg_fwd)
+        res["resonance_forward_test"] = fwd
+        res["fg_exposure_gate_forward_test"] = fg_fwd
+        res["dim_ic_forward_test"] = dim_fwd
+        res["cohort_boundary_evidence"] = bev
+        if args.out:
+            # 检查点：进程之后被杀，消费方读到的就是这一份（F&G 段是「进程在 F&G 重放结束前终止」，不是空、不是旧文件）。
+            # 只写 --out：--json 打 stdout，打两份会让读 stdout 的人拿到两个 JSON 文档。
+            _write_out_only(args.out, contract_envelope(
+                res, date, build_attention(res, bev, fwd_detail, fg_detail, dim_detail)))
+        fg_fwd = fg_run.result()
     fg_detail = _take_detail(fg_fwd)
     res["fg_exposure_gate_forward_test"] = fg_fwd
-    dim_fwd = dim_ic_forward_status(db, today=args.today)
-    dim_detail = _take_detail(dim_fwd)
-    res["dim_ic_forward_test"] = dim_fwd
-    # 归档与 DB 同处一个安装 ⇒ 用 --db 的所在目录，别用代码目录（见 cohort_boundary_evidence docstring）。
-    # 放在 --out / --json / --quiet 之前：三种输出都要带上它（v0.45.334，见 boundary_evidence_status）
-    bev = boundary_evidence_status(db.parent)
-    res["cohort_boundary_evidence"] = bev
 
     if args.out or args.json:
         # 只在要外壳时才列条目：`--quiet` 单跑（周度任务）的路径与 v0.45.355 之前评分与标签逐项相同
@@ -1908,6 +2240,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == _FG_CHILD_FLAG:
+        # F&G 子进程（由 `_FgChild` 拉起）：不走 run_tool / 外壳——结果是给父进程的 stdout JSON，
+        # 崩了就是退出码非 0，由父进程渲染成 child_failed。**不装** `_install_sigterm_exit`：SIGTERM 保持系统默认
+        # （立刻终止）——抛 SystemExit 会被 curl_cffi 的 C 回调吞掉（实测），临时目录由父进程删（见 `_FgChild`）。
+        sys.exit(_fg_child_main(sys.argv[2:]))
+    # v0.45.392：SIGTERM → SystemExit(143)。编排器 `run_step` 超时只 TERM 本进程（不是进程组）——
+    # 转成 SystemExit 后 `main()` 的 `with` 才能连带终止 F&G 子进程；143 原样作退出码，编排器照旧记超时（124）。
+    _install_sigterm_exit()
     if step_contract is None:
         # 没有 step_contract 就写不出外壳：只打 stderr，退出码 3（「无法判定」），不写 --out
         print(f"ic_rerun_readiness: 无法导入 step_contract（{_STEP_CONTRACT_IMPORT_ERROR}）—— 退出码 3，"

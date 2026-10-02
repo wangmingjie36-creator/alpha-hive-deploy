@@ -777,6 +777,27 @@ def _isolate_feedback_loop_close_t7_db(tmp_path, monkeypatch):
                         tmp_path / "_no_such_pheromone.db", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _fg_sub_status_in_process(monkeypatch):
+    """进程内调 `ic_rerun_readiness.main()` 时，F&G 子状态留在本进程算（v0.45.392）。
+
+    生产里 `main()` 把 F&G 子状态放进**子进程**（带时间预算，见该模块 docstring）。可本仓进程内调 `main()`
+    的测试（`TestCarriedByReadiness` ×2、`TestEtaAndExitCodes`、`TestOkPath` …）全靠进程内的东西：
+    monkeypatch 打桩 `fg_exposure_gate_forward_status`、上面 `_isolate_paper_portfolio_state` 沙箱化的
+    `SNAPSHOT_DIR`、`_offline_transport` 出网闸——**一样都到不了子进程**。不置这个钩子，那些桩会被无声绕过，
+    子进程还可能读真实快照、真去打 yfinance（出网闸管不到它）。
+
+    子进程路径本身由 `tests/test_ic_rerun_fg_budget.py` 显式 `setattr(rr, "_FG_IN_PROCESS", False)` 测
+    （假子进程 + 真子进程两层），真实 CLI 子进程测试（`test_step_contract_ic_rerun.py::TestRealCli`）
+    不经本夹具、走的就是生产路径。
+    """
+    try:
+        import ic_rerun_readiness
+    except Exception:  # pragma: no cover - 模块不可得时无需处理
+        return
+    monkeypatch.setattr(ic_rerun_readiness, "_FG_IN_PROCESS", True)
+
+
 # ==================== Mock 股票数据 ====================
 
 MOCK_STOCK_DATA = {
