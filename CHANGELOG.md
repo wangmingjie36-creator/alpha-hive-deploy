@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.393] — 2026-10-02 — 占位（进行中：check-old 分类表补 alphabot/scripts/vercel.json 三个新代码项）
+
 ## [0.45.392] — 2026-10-02 — Fixed：`ic_rerun_readiness` 防御层——F&G 子状态放子进程 + 时间预算、F&G 之前先写检查点 `--out`、SIGTERM 连带子进程；Step 11 再超时也不丢世代边界核对
 
 > 叠在 v0.45.391（回放 OHLC 窗口，`worktree-wf_67f872bb-cba-3` 至 `05ad0e23`）之上，**两版都未推送**；391 应先合入。
