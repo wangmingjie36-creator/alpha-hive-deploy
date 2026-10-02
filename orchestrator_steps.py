@@ -114,6 +114,11 @@ B 接线须知：日期必须**显式**传给生产方
   (h) 读文件的硬化：只读**普通文件**（FIFO / 字符设备 / 目录一律不打开读，绝不阻塞）、`--out` JSON 大小封顶
       `MAX_JSON_BYTES`、嵌套深度封顶 `MAX_JSON_DEPTH`（真实产出只有个位数层；过深的合法 JSON 会让本模块的递归
       遍历与 `json.dumps` 撞上 RecursionError）——超限一律按「不可解析」记，原因写进片段，从不崩。
+  (i) Step 11 超时与就绪度 JSON 不可用时的**文案**（v0.45.391 复审 S5；`status` / `rc` / `cohort_boundary` / 级别
+      与 B 之前逐字相同，只换 message）：rc=124 说「⏰ 超时（>60s，run_step 看门狗杀掉…）」而不是「⚠️ 异常（exit=124）」；
+      JSON 本轮不可用（rc≠2）时边界那句说「本轮未核对——JSON 没写出来 / 不可用（原因）」，不再推给「代码早于 v0.45.334」
+      （那只在读到 JSON 却缺键时成立；09-30 的 rc=124 被它说成了版本问题）。秒数默认 `STEP11_TIMEOUT_DEFAULT`，
+      与仓库编排器 Step 11 的 `run_step --timeout` 有测试核对。冻结副本对照里 rc=124 那一行的文案按此替换后比对。
 
 **不归本解释器的：Step 5（gh-pages 部署）。** 自 v0.45.351 起由编排器的 `_step5_gh_pages_verdict` 调
 `report_deployer.py --gh-pages-step-status --since $STEP2_START`，按部署日志的**实际结局**判——那是比 Step 2
@@ -588,6 +593,11 @@ def _boundary_listed_in_attention(d: dict) -> bool:
         for a in att)
 
 
+#: Step 11 的 `run_step --timeout`（仓库编排器 Step 11 那一行；编排器不给 Step 11 传 --timeout-seconds）。
+#: `tests/test_orchestrator_steps.py::TestStep11Timeout` 核对它与仓库编排器那一行一致——改了超时而这里没跟，那条红。
+STEP11_TIMEOUT_DEFAULT = 60
+
+
 def _base11(rc: int, d: Optional[dict], ctx: _Ctx, why: str):
     line = _readiness_line(d) if d is not None else why
     if rc == 0:      # STEP11_RC=0
@@ -600,13 +610,27 @@ def _base11(rc: int, d: Optional[dict], ctx: _Ctx, why: str):
         level, parts, frag = "warn", ["⚠️ Step 11：无法判定 IC 重跑就绪度"], {"status": "undetermined"}
     elif rc == 2:    # STEP11_RC=2
         level, parts, frag = "warn", ["⏭️  Step 11 跳过（ic_rerun_readiness.py 不存在）"], {"status": "skipped"}
-    else:            # STEP11_RC 其他（else）——注意：Step 11 没有 124 分支，超时也落在这里
+    elif rc == 124:  # STEP11_RC=124：B 之前没有这一支（超时落进 else）。(i) 只改文案——status/rc/级别与 else 支逐字相同
+        level, parts, frag = ("warn", [f"⏰ Step 11 超时（>{ctx.timeout_text(STEP11_TIMEOUT_DEFAULT)}s，"
+                                       f"run_step 看门狗杀掉了 ic_rerun_readiness.py，exit={rc}），不影响主流程"],
+                              {"status": "error", "rc": rc})
+    else:            # STEP11_RC 其他（else）
         level, parts, frag = ("warn", [f"⚠️ Step 11 异常（exit={rc}），不影响主流程"],
                               {"status": "error", "rc": rc})
     # 世代边界核对（BOUNDARY_JSON 段 + `_S11_NEW` 合并）：片段恒带 cohort_boundary（取不到记 null，不假装正常）
     raw = _boundary_raw(d) if d is not None else None
     b = _jq_roundtrip(raw)
-    if raw is None:
+    if raw is None and d is None and rc != 2:
+        # (i) 就绪度 JSON 本轮不可用（没写出 / 不是本轮的 / 读不了）：不再说「代码早于 v0.45.334」——那是读到了
+        # JSON 却没有这个键时才成立的推断。09-30 rc=124 实况：那时 `--out` 只在最后写一次、边界核对排在 F&G
+        # 前瞻检验之后，超时 = 本轮根本没核对。v0.45.392 起 F&G 开跑前先写一次检查点（边界核对在里面）、F&G 有
+        # 时间预算 ⇒ rc=124 通常读得到检查点、不走这一支；还走到这里 = 死在检查点写出之前（F&G 之外的部分就超了时，
+        # 或检查点写盘失败，原因在 stderr）。rc=2（脚本不存在）照旧，与 B 之前逐字相同。
+        cause = ("ic_rerun_readiness.py 被 run_step 看门狗按超时杀掉，就绪度 JSON 没写出来"
+                 "（连 F&G 之前的检查点都没写出：超时发生在 F&G 之外的部分，或检查点写盘失败——看 stderr）" if rc == 124
+                 else "就绪度 JSON 本轮不可用")
+        parts.append(f"Step 11 世代边界核对：本轮未核对——{cause}{why}")
+    elif raw is None:
         parts.append("Step 11 世代边界核对：就绪度 JSON 里没有 cohort_boundary_evidence"
                      "（代码早于 v0.45.334 或 JSON 不可读），本轮未核对")
     elif b.get("alarm") is True:

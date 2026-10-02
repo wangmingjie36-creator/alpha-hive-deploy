@@ -5,7 +5,258 @@
 
 ---
 
-## [0.45.390] — 2026-09-30 — 占位（进行中：Alpha Bot 的 macOS 桌面启动器 Alpha Bot.app）
+## [0.45.393] — 2026-10-02 — Fixed：`migrate_data_root.py` 分类表补 `alphabot` / `scripts` / `vercel.json`，check-old 不再因新代码项无故报红
+
+### Fixed
+- `data_backup/migrate_data_root.py`：`SKIP_EXACT` 登记三个别的会话新增的被跟踪代码项（Alpha Bot 前端 v0.45.388、受版本控制的编排器 v0.45.353、Vercel 配置 v0.45.389）。此前它们被判 UNKNOWN，check-old `ok:false`（阶段 5 验收 09-29 / 10-02 两次撞上）。纯数据面无变化：`written_outside_git` / `reappeared` 均空。
+
+### Added
+- `tests/test_migrate_data_root.py::test_every_tracked_top_level_entry_is_classified`：枚举 `git ls-files` 的全部顶层条目，任一落入 UNKNOWN 即红。把「新增顶层代码项没人登记」从生产上的 check-old 红灯前移成测试红灯。变异验证：还原本次分类表改动，该测试红并点名 `['alphabot', 'scripts', 'vercel.json']`；恢复后 31/31 绿。
+
+
+## [0.45.392] — 2026-10-02 — Fixed：`ic_rerun_readiness` 防御层——F&G 子状态放子进程 + 时间预算、F&G 之前先写检查点 `--out`、SIGTERM 连带子进程；Step 11 再超时也不丢世代边界核对
+
+> 叠在 v0.45.391（回放 OHLC 窗口，`worktree-wf_67f872bb-cba-3` 至 `05ad0e23`）之上，**两版都未推送**；391 应先合入。
+
+**为什么还要这一层**：391 把 F&G 前瞻检验的健康路径压到约 12s，但整段取数被 Yahoo 拒时退回逐次直连（391 实测约 56s），
+限流日照样会被 Step 11 的 60s `run_step` 看门狗杀掉。而 `--out` 只在最后写一次 ⇒ 一被杀**整份**就绪度 JSON 都没有，
+连与 F&G 无关的世代边界核对（`cohort_boundary_evidence`，v0.45.334）也一起丢——09-30 正是这样。
+**10-02 当场复现了这个场景**（行情源正处于降级态，真实数据、生产数据根、只读）：391 单独跑 **56.0s / 64.1s**（后一次在生产会被杀）；
+叠上本版 **45.2s / 45.2s** 正常退出（rc=1），F&G 段报「超出时间预算」，边界核对 `matches`、IC 摘要、其余各段完整。
+
+### Changed
+- `ic_rerun_readiness.py`（模块 docstring 新增「F&G 子状态的时间预算与检查点」一节）：
+  - **F&G 子状态放进子进程、开跑即起**（`_FgChild`；与 `assess` / 共振 / 维度 IC / 世代边界**并行**——F&G 拿到几乎整份预算，
+    而不是「预算 − 其余各项耗时」）。子进程入口 `ic_rerun_readiness.py --_fg-child`（`__main__` 在 `run_tool` 之前分流），
+    结果 JSON 写原 stdout、fd 1 改指 stderr（依赖库在 C 层写 fd 1 也挡得住）。
+  - **截止时刻** `--budget-seconds`（缺省 `FG_BUDGET_SECONDS_DEFAULT=45`，从 `main()` 开始计；0 = 不限时；负数 / NaN / inf 是用法错）。
+    到点 ⇒ TERM →（宽限 `_FG_KILL_GRACE_SECONDS=2` 后仍在则 KILL，stderr 记一行）。编排器**不传**这个参数（改编排器要隔一个扫描日才部署），
+    所以缺省值就是生产值：45 + 2 + 余量 ≤ `orchestrator_steps.STEP11_TIMEOUT_DEFAULT`（391 已钉在编排器原文上）由测试核对。
+  - **检查点**：其余各项先算完，`--out` 先原子写一次；F&G 段是显式占位 `cannot_judge`「进程在 F&G 重放结束前终止」。
+    之后被杀，编排器（先删文件、按 `--run-start` 核新鲜度）读到的就是它；正常结束时被完整结果原子覆盖。只写 `--out`：`--json` 的 stdout 仍是**一个**文档。
+  - **SIGTERM**：`__main__` 给父进程装 `SIGTERM → SystemExit(143)`——`run_step` 只 TERM 本进程（不是进程组），`main()` 的 `with` 退出时
+    连带终止子进程、删它的临时目录；143 原样作退出码，编排器照旧记超时（124）。父进程被 KILL 时子进程靠看门狗线程自己退
+    （`getppid()` 变了 / 超过「剩余时间 + 5s」⇒ stderr 一行 + `os._exit(75)`，那一行点名可能残留的临时目录）。
+  - **子进程不装信号处理器、临时目录归父进程删**（真实数据实测改的，见下「实测发现」）：子进程拿私有 `TMPDIR`（`ic_rerun_fg_child_*`），
+    父进程收尸**之后**整个删掉；删不掉 stderr 说一句。
+  - **attention 新三条**（都是 warn，`id` 与检验自己的 `ic_rerun.fg_exposure_gate_forward.cannot_judge`——含自证率跌破阈值——分开路由）：
+    `….interrupted`（检查点占位）/ `….budget_exceeded`（超预算）/ `….child_failed`（起不来 / 非 0 退出 / 被信号杀 / stdout 不合约定）。
+    F&G 段的 `line` 都以「⚠️ F&G 敞口门前瞻检验无法判定：」开头——周度任务按段首名字 / 图标认段，照样认得出、照样必须显著标出。
+- `orchestrator_steps.py`：合入 391 复审后，`_base11` rc=124 且没有 JSON 那句的括号「边界核对排在 F&G 前瞻检验之后、--out 只在最后写一次」
+  在本版之后不再成立，改成「连 F&G 之前的检查点都没写出：超时发生在 F&G 之外的部分，或检查点写盘失败——看 stderr」（391 测试钉的前缀未动；
+  status / rc / 级别不变；391 会话同意由本版改）。rc=124 但检查点在场时走 391 的「⏰ Step 11 超时」文案 + 检查点里的边界核对与「需人看」。
+- `tests/conftest.py`：新 autouse `_fg_sub_status_in_process`——进程内调 `main()` 的测试靠 monkeypatch 打桩 / 沙箱化 `SNAPSHOT_DIR` / 出网闸，
+  这些到不了子进程 ⇒ 测试里 F&G 留在本进程算（`_FG_IN_PROCESS=True`，生产恒 False）。删掉这个夹具会红（守卫见下）。
+
+### 不变的东西（契约面）
+- `--json` / `--out` 的键与**键序**同 391（F&G 先放占位、原位替换——对已有键赋值不挪位置）；三个前瞻检验子字典仍是 `{status, line}`；
+  `--quiet` 段序不变；退出码 0/1/3 不变。编排器、部署副本**不用动**：Python 改动随 production_sync 在合入后的第一个扫描日生效。
+
+### 实测发现：从信号处理器抛 `SystemExit` 会被 curl_cffi 的 C 回调吞掉
+初版让子进程也装 `SIGTERM → SystemExit`，好让 `TemporaryDirectory` 自己清理。真实数据 `--budget-seconds 5` 一跑：TERM 到达时子进程主线程正在
+`curl_cffi` 的 `buffer_callback` 里，stderr 出现「Exception ignored from cffi callback … SystemExit: 143」——异常被吞、子进程照跑、宽限 2s 后被 KILL，
+`fg_gate_fwd_*` 留在系统临时目录（总耗时 7.2s = 5 + 2 也印证了）。⇒ 子进程保持系统默认动作（TERM 即死，不管主线程在哪），收尾全归父进程。
+父进程这条路上没有出网、没有 C 回调，`SystemExit` 在那里可靠。系统临时目录里另有 **09-21 / 09-24 两份同名残留**（早于本会话，不是本版造的，**未删**，留给用户）。
+
+### 等价与耗时（真实数据，`ALPHA_HIVE_HOME=/Users/igg/alpha-hive-data`，`--today 2026-10-01`，两边都从 git archive 跑以排除环境差异）
+- 391（`44808fee`）vs 本版：就绪度 JSON 除 `generated_at` 外**逐字节相同**、键序相同、`--quiet` 行相同——不限时（`--budget-seconds 0`）与缺省预算两种都是。
+  （首轮对 391 初版 `bd80c250` 同样逐字节相同。）**最终这一对**——391 终版 `05ad0e23` vs 本版提交，不限时——同样逐字节相同、`--quiet` 行相同；这一轮设了 `ALPHA_HIVE_LOGS_DIR` 指向临时目录，生产日志新增 0 行。
+- 健康时（10-01，对 391 初版 `bd80c250`）：15.4s → 本版 11.4–11.7s（并行起子进程的收益）。降级时（10-02）：见开头，56.0 / 64.1s → 45.2 / 45.2s。
+- 生产状态：`paper_portfolio_state/*`、`pheromone.db`、`-wal` 的 sha256 与 `report_snapshots` 文件数前后相同（每轮都核）。⚠️ **但没隔离日志**：这些核对往生产 `logs/alpha_hive.log` 追加了 9 行回放窗口汇总 INFO / WARNING（10-01 10:11–10:12 四行、10-02 07:50 三行 + 08:36 / 08:38 两行；391 会话发现），未回改；以后真实数据核对一律设 `ALPHA_HIVE_LOGS_DIR` 指向临时目录。
+- 10-02 两轮自然超预算（修正后的代码）：结束后无残留 F&G 子进程，系统临时目录无新的 `ic_rerun_fg_child_*` / `fg_gate_fwd_*`。
+
+### 验证
+- `tests/test_ic_rerun_fg_budget.py`（46 条，三层）：父进程处置（进程内 `_FgChild` / `main()`，子进程换成 `python -c`：起不来 / 超时 / 非 0 / 被信号杀 /
+  七种不合约定的输出 / 不理 TERM ⇒ KILL / 不限时 / `with` 异常退出连带终止 / 检查点先于等待写出且键序 = 最终 = 391 / 子进程先于 `assess` 起 /
+  超预算处处可见且判定不变 / `--json` 仍一个文档 / 用法错）；**真实进程树**（生产两文件原样拷进 tmp + 假执行器：SIGTERM 父进程 ⇒ 143 + 检查点 + 子进程死 + 临时目录删；
+  超预算；SIGKILL 父进程 ⇒ 孤儿自退；执行器往 fd 1 乱写不污染；TERM 落在 ctypes C 回调里照样即死、不走 KILL；391 的 `ohlc_window_degraded` 跨进程照样列出；
+  子进程自身时限）；消费方（`orchestrator_steps.render` 读检查点 rc=124 / 超预算 rc=1；缺省预算放得进 Step 11 超时）。
+  离线是执行的断言：`sitecustomize` 两层闸（Python socket 含回环 + `curl_cffi.Curl.perform`）+ 死端口代理，canary 子进程 + 孙进程、两条路反向自证；
+  系统临时目录每条都圈进 tmp 并断言为空；夹具收尸。
+- 变异（全部在 git archive 副本上，每个变异一份新副本，`PYTHONDONTWRITEBYTECODE=1`、`--maxfail=1000`，基线 46/46）：**23/23 红**，每个都由点名那条性质的测试打红：不写检查点 / 子进程懒启动（不并行）/ `with` 退出不终止子进程 / 父进程不装 SIGTERM 处理器 / **子进程装 SIGTERM→SystemExit（cffi 吞异常的形状，只有 C 回调那条红）** / 子进程不改指 fd 1 / 预算被忽略 / 执行层原因落进通用 cannot_judge / 解析放行多余键 / 忽略子进程非 0 退出 / 不删临时目录 / 不把 TMPDIR 交给子进程 / 不 KILL / 不起看门狗 / 键序变了 / 检查点也打到 `--json` stdout / 缺省预算放不进 60s / 子进程自身时限不触发 / 处理器退出码不是 143 / 预算校验放行负数与 inf / 孤儿检测关掉 / conftest 进程内钩子删掉（只有它的守卫红）/ 出网闸看不见 curl_cffi（只有 canary 红）。首轮 22 个变异跑出两处**测试侧**缺陷，已修后整轮重跑：① 假执行器 `hang` 模式 120s 后掉进无限 C 回调循环，配上 M07 / M14（截止 / 看门狗被关掉）留下 8 个不死进程（已 KILL，均为 tmp 里的假执行器）⇒ 假执行器加上限、夹具收尸；② `TestMainFlow` 没圈临时目录，M03 / M11 往真实系统临时目录漏了 13 个`ic_rerun_fg_child_*`、M12 漏了 2 个 `fg_gate_fwd_*`（都已核内容后删除）⇒ 全部测试圈进 tmp（含 `TMPDIR` 环境变量），重跑 M12 确认不再外漏。
+- `ruff --select F821,F401,F841` 改动文件全过；定向回归（本文件 + `test_ic_rerun_readiness` / `test_step_contract_ic_rerun` / `test_fg_exposure_gate_forward_test` /
+  `test_dim_ic_forward_test` / `test_resonance_boost_forward_test` / `test_orchestrator_steps` / `test_replay_ohlc_window` / `test_changelog_entry_integrity`）全绿。
+- 全套 `-m "not integration and not network"`：7906 passed / 3 failed / 2 xfailed（9 分钟，提交 `2c6c0d88` 树上跑）。3 条全与本版无关：`test_economic_calendar.py::TestCoverageHorizon`（随日期变红的已知项，391 同）；`test_alphabot_launcher.py` 的 `test_missing_python_fails_loudly` / `test_demo_start_reuse_and_stop`——**不含本版代码的 391 终版 `05ad0e23` 上同样两条红**（git archive 副本连跑两次都红；本 worktree 单跑时一条时红时绿），来自 main 的 v0.45.390，未查、未动。
+
+### 没做 / 另议
+- **周度任务**（`~/.claude/scheduled-tasks/alpha-hive-weekly-optimizer/SKILL.md`，只读未改）跑 `ic_rerun_readiness.py --quiet` 不带预算 ⇒ 也吃 45s 缺省。
+  它没有 60s 看门狗，降级的周日会把 F&G 自证率那段换成「超出时间预算」（⚠️ 开头，SKILL 规则照样显著标出，但没有自证率数字）。
+  建议**本版合入 main 之后**把那条命令加上 `--budget-seconds 0`——合入前加会被旧代码当成未知参数（exit 2）。
+- 父进程被 KILL（编排器 TERM 后 10s）时子进程的临时目录无人删——stderr 那一行点名；正常路径（父进程收到 TERM）由父进程删，测试覆盖。
+- 没改编排器（`--budget-seconds` 不传，缺省即生产值）；没加 payload 键（耗时只进超预算那句的 `line` / attention，不进 JSON 结构）。
+
+## [0.45.391] — 2026-09-30 — Fixed：F&G 敞口门前瞻检验的重放每个标的只整段取一次 OHLC（Step 11 在 09-30 被 60s 超时杀掉）；同一份行情下输出逐字节不变
+
+> ⚠️ **未推送，也没有在 main 上占号**：推送要用户批准。391 是写这条时 `origin/main` 顶部（390 占位）之上的下一个号，
+> 合入前按「并发开工必须先占号」重新核一次号。2026-10-02 `git fetch` 复核：`origin/main` 已到 `d758f614`（390 定稿），
+> 顶部仍是 390，391 仍空。本分支基于 `4bca556d`，与新的 `origin/main` 合并时本文件在 390 标题行处会冲突（占位 → 定稿，
+> 与 391 条目末尾相邻）：取 main 的 390 标题、391 原样留在它上面即可。
+> 2026-10-02 已按此合并（`1920df9b`），本分支现可 fast-forward 推上 main。合入顺序与 392 会话约定：**391 先、392 后**（392 已叠在 `44808fee` 之上）。
+
+**根因**：编排器 Step 11 在 60s `run_step` 超时下跑 `ic_rerun_readiness.py --quiet --today <DATE> --out <json>`，
+09-28 用了 37s（6 个快照日）、09-29 用了 47s（7 个）、**09-30 被杀（rc=124，>60s，8 个）**——就绪度 JSON 没写出来，
+排在 F&G 之后的世代边界核对（`boundary_evidence_status`）当天根本没跑。cProfile（手动跑 67s）里 57s 在
+`fg_exposure_gate_forward_status → run → evaluate → _replay_variant ×2 → paper_portfolio.run_replay → run_for_date ×16
+→ _fetch_ohlc ×442 → yfinance history() ×124（约 0.45s/次）`。`run_for_date` 每天对**每个在场仓位**按
+`(ticker, entry_date, as_of+2)` 取一次——键里带 as_of，逐日都是新键，`_PRICE_CACHE` 挡不住；前瞻窗口自
+`FORWARD_START=2026-09-16` 只增不减（约 +15.5 次调用 / 每多一个快照日，终期约 2,300 次 / 天）。
+
+**为什么不直接调 `prefetch_ohlc`**：它没有 v0.45.97 的 NaN 过滤；`_OHLC_FULL` 切片不核对请求区间是否落在预取范围内
+（局部预取 ⇒ 静默截断：TIME 止损那天没 bar 就不平仓）；更宽的二次预取被 `if tk in _OHLC_FULL: continue` 忽略；
+且它是进程级常驻、`portfolio_capacity_replay` 依赖这些语义。所以不复用、也不改它。
+
+### Fixed
+- `paper_portfolio.py`：
+  - 抽出 `_bars_from_history(ticker, hist)`（直连路径原样搬出，行为不变）——直连路径与新窗口路径**共用同一份**逐根 NaN / inf /
+    非数值过滤与丢弃 WARNING。
+  - 新增 `replay_ohlc_window(start, end)`（上下文管理器）与 `replay_ohlc_bounds(dates, held_entry_dates)`。窗口内 `_fetch_ohlc`
+    对每个标的**整段只取一次**（与直连路径逐参数相同的 `yf.Ticker(t).history(start, end, auto_adjust=False)`），之后按
+    `start <= d < end` 切片（保留 as_of 之后的 bar——`_mark_to_market` 缺 as_of 时回退 `max(ohlc)` 的既有前视要原样复现）。
+    **每次请求都核区间**：窗口外 / 空区间 / 非 `YYYY-MM-DD` ⇒ 原直连路径 + WARNING（每标的一次）+ 计数，绝不截断。
+    整段取数抛异常 / 返回空 / 过滤后为空 ⇒ 该标的本次重放**退回原直连路径**（失败不入缓存、空结果入缓存的 v0.45.50 语义原样保留）
+    + 一条 WARNING；空结果不当成「每个子区间都是空」的权威答案。退出 `with`（含异常）恢复进入前的窗口（可嵌套）并释放日线；
+    窗口路径**不读写** `_PRICE_CACHE` / `_OHLC_FULL`；`_OHLC_FULL` 仍排第一（窗口之外的路径逐字不变）。退出时记一行 INFO 汇总。
+  - 三处调用点（`_mark_to_market`、`run_for_date` Step 1 / Step 2）的 `+2` / `+3` 天前视改为 `_EXIT_OHLC_LOOKAHEAD_DAYS=2` /
+    `_ENTRY_OHLC_LOOKAHEAD_DAYS=3`（值不变），窗口右端由它们导出；`_fetch_ohlc` docstring 的 `[start, end]` 更正为 `[start, end)`。
+  - 生产 `run_for_date` / `run_replay` **不开窗口**（守卫见下）；`run_replay` 的 finally 未动。
+- `experiments/fg_exposure_gate_forward_test.py`（**实现层改动，不是事后修订**：窗口、变体、统计量、α、盲化、自证一个字没动）：
+  `evaluate()` 在参数校验之后开**一个**窗口包住 A、B（及样本内的 A_check）——主体原样拆进 `_evaluate_replays`；`rehearse()` 的 A 同样套窗口。
+  窗口 = `[min(种子持仓 entry_date ∪ 回放日), 最后回放日 + 3 天)`；`_seed_held_entry_dates` 绝不抛（解析不了的行跳过 ⇒ 窗口偏窄只会多走直连，不改结果，
+  也不改坏种子时 `evaluate()` 的异常形状）。放在这一层而不是 `run_replay` 里：A、B 是两次 `run_replay`，按次开窗口会让 B 重取一遍、
+  可能读到与 A 不同的日线（改动前 B 靠复用 A 留在 `_PRICE_CACHE` 里的同键结果与 A 一致）；`run_replay` 的其他调用方语义也会被连带改掉。
+
+### Added
+- `experiments/replay_ohlc_window_premise.py`：真 Yahoo 上「窄区间一次取 == 宽区间取了再切片」这条前提的**显式**核对命令
+  （跑一次真实 `run()`，把窗口服务过的每个不同请求在窗口外直连重取、逐请求比对；0 相同 / 1 不同并列出差在哪几天 / 3 无法判定）。
+  不写成默认测试：`network` 标记有只减不增的棘轮，写成 skip 又等于没有。只读，不写任何文件。
+- `tests/test_replay_ohlc_window.py`（25 条，全离线：假 yfinance 从一张主表切片）：夹具自证（SL / TP / TIME 出场、TIME 止损日 NaN 顺延、
+  as_of 缺 bar 的 MTM 前视、快照无 entry_price、极度贪婪日 B 开出 A 没开的标的）/ NaN·inf·非数值与直连同一过滤 / 窗口外四种请求走直连不截断 /
+  整段取数抛与空两条路径都退回直连且结果不变、每标的一条 WARNING / `run()` 后与中途抛异常后窗口已撤、两缓存未碰、嵌套恢复外层 /
+  生产路径不开窗口（非测试代码的使用者白名单）/ 每标的每次检验一次整段取数、零窗口外请求 / 前瞻·样本内·rehearse 三条路径开关窗口逐字节相同 /
+  前提核对脚本 ok·mismatch·无窗口·重取失败四种结局。
+
+### 等价与耗时（真实数据，`ALPHA_HIVE_HOME=/Users/igg/alpha-hive-data`，today=2026-09-30；旧 = 基底 `4bca556d` 的 git archive，新旧背靠背）
+- `run()` 返回值 `json.dumps(sort_keys=True)` **逐字节相同**；状态行相同；A / B 的 equity、closed、open positions、final_nav、config 相同；
+  全部 442 次 `_fetch_ohlc` 的调用序列与逐次结果哈希相同。yfinance 调用 **124 → 20**，`run()` **52.9s → 11.9s**
+  （收尾时用最终代码再背靠背跑一遍：同样逐字节相同，58.4s → 11.5s）。
+- 完整 Step 11 命令（`ic_rerun_readiness.py --quiet --today 2026-09-30 --out …`，进程启动到退出）：旧 **65.8s**（生产会被杀）→ 新 **20.2s**。
+  两份就绪度 JSON 除 `generated_at` 与维度 IC「权重历史无法判定」一条外相同——后者是旧代码从非 git 目录（archive）跑的环境差异。
+- 生产状态：`paper_portfolio_state/` 四个文件与 `pheromone.db` / `-wal` / `-shm` 前后 sha256 相同；只有 `-shm` 的 mtime 变了（`mode=ro` 读者的 WAL 读锁）；
+  屏障回写 0 次；审计钩子拦下的唯一事件是 import 期对**已存在**状态目录的 `mkdir(exist_ok=True)`（新旧代码相同，目录本就存在）。
+- 前提核对脚本真跑：124 个不同请求 / 20 个标的全部相同（exit 0）。
+- 当天 F&G 状态仍是 `cannot_judge`（精确层 12/13、决策层 13/13）：TMO 在 09-30 以 TIME 止损平仓而窗口止于 09-29，`_entry_key` 1 分钱取整差——
+  与 OHLC 无关、改动前后相同，不在本版范围。真实窗口里门没有触发（B ≡ A），B 分叉的路径靠上面的合成测试覆盖。
+
+### 验证
+- 变异（全部在提交 `93425855` 的 git archive 副本上做，不碰工作区；对照组无变异全绿）：窗口路径去掉 NaN 过滤 / 去掉区间核对 / finally 不恢复窗口 /
+  批量化形同虚设 / 调用点前视放宽而常量没跟 / 整段空结果当权威 `{}` / 整段异常吞成 `{}` / A、B 各开各的窗口 / 种子持仓不进窗口左端 /
+  rehearse 不套窗口 / 切片右端含 end / 前提脚本恒不报不同 / 窗口路径写 `_PRICE_CACHE` / `run_for_date` 引用窗口——**14/14 红**。
+- `ruff --select F821,F401` 改动文件全过；定向回归（本文件 + `test_ic_rerun_readiness` / `test_fg_exposure_gate_forward_test` / 纸面组合各测试 /
+  `test_step_contract_ic_rerun` / `test_dim_ic_forward_test` / `test_resonance_boost_forward_test` / `test_paths_not_frozen_at_import` /
+  `test_changelog_entry_integrity` / `test_network_marker_discipline` / `test_orchestrator_steps` 等）1217 passed。
+- 全套 `-m "not integration and not network"`：7804 passed / 1 failed / 2 xfailed（12 分钟）；唯一失败是已知的随日期变红的
+  `test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`，与本版无关。
+
+### 复审跟进（提交 `44808fee`，2026-10-01；真实数据收尾核对 2026-10-02）
+复审意见 S1–S5 / N1–N3 全部落地。**窗口、变体、统计量、α、盲化、自证判据一个字没动**；健康时所有既有输出逐字不变（真实数据见下）。
+- **S1 降级要有机读出口**：`_ReplayOhlcWindow` 新增 `stats()` / `note_direct()` 与计数 `direct_requests` / `direct_empty`（窗口作用域内落到原直连路径的请求数、
+  其中一根 bar 都没拿到的次数）；为此 `_fetch_ohlc` 的直连路径原样抽成 `_fetch_ohlc_direct`（生产路径行为不变）。`evaluate()` / `rehearse()` 结果新增
+  `ohlc_window` 键；降级（有标的整段取数退回直连 / 有窗口外请求）时 `status_line` 末尾追加「；⚠️ 回放行情窗口降级：…」、`not_ready` 段首 ⏳ → ⚠️，
+  人读输出多一行；`ic_rerun_readiness` 的 `_FWD_DETAIL_KEYS` 带上 `ohlc_window`，并另列 attention `ic_rerun.fg_exposure_gate_forward.ohlc_window_degraded`
+  （warn，与状态条目并列、独立 id）。此前整段取数全部退回直连时机读输出与健康时逐字节相同（17s → 56s，离 60s 只差 4s），只有 stderr 看得见。
+- **S2 前提核对脚本**：直连重取返回空 DataFrame（yfinance 不抛异常的失败形状）与抛异常同记 `cannot_judge`（exit 3），不再拿 `{}` 比切片报成「不同」；
+  结果新增 `n_excluded_tickers`，人读行写出整段退回直连、未参与核对的标的，非零时不打 ✅。
+- **S3 行情全断的归因**：自证失败且 `served=0`、直连请求全空 ⇒ 原因说「这次重放没拿到任何行情（OHLC 不可得）」，不再推给评分链 / 配置 / 漏跑
+  （只改文案，状态不变）；整段被拒但直连照常时保留原文案。
+- **S4**：整段非空但逐根过滤后一根不剩（全 NaN）⇒ 退回直连——补测试（`allnan` 参数）。
+- **S5 `orchestrator_steps._base11`**：新增 rc=124 分支，说「⏰ Step 11 超时（>60s，run_step 看门狗杀掉了 ic_rerun_readiness.py，exit=124）」；就绪度 JSON 本轮
+  不可用（rc≠2）时边界句说「本轮未核对——<原因>」，不再推给「代码早于 v0.45.334」（那只在读到 JSON 却缺键时成立）。`status` / `rc` / `cohort_boundary` /
+  级别与 B 之前逐字相同（GOLDEN 照旧逐字核，message 只按登记的刻意改动 (i) 替换 rc=124 那一行；Step 10–15 片段的状态词与键未动）；
+  新常量 `STEP11_TIMEOUT_DEFAULT = 60` 与仓库编排器 Step 11 的 `run_step --timeout` 有测试核对。
+- **N1** 字典序落在窗口内的非 ISO 日期（如 `2026-08-2`）走直连；**N2** 「生产路径不开窗口」改为按 AST 逐个扫生产函数（含 `run_replay`）；
+  **N3** 窗口内空切片是权威答案、不打网络（判 `is not None` 而非真值）。
+- 测试增量（`def test_` 计）：`test_replay_ohlc_window.py` 19 → 26、`test_fg_exposure_gate_forward_test.py` +3、`test_orchestrator_steps.py` +6（`TestStep11Timeout`）、
+  `test_step_contract_ic_rerun.py` +2；S1 / S3 / S5 各有正反两面。
+
+**输出形状增量（只增不改）**：`run()` / `evaluate()` / `rehearse()` 返回值的 `ohlc_window`
+（`{window, wide_fetches, served, out_of_window, fallback, fallback_tickers, direct_requests, direct_empty, degraded}`，只有取数计数与失败原因，不含价格 / 净值 / 收益，
+统计量与判定不读它；不开窗口时不出现）；降级时 `status_line` 的追加段与 ⚠️ 段首、人读多一行；attention id `ic_rerun.fg_exposure_gate_forward.ohlc_window_degraded`（只在降级时）；
+就绪度内部 `_detail` 多带 `ohlc_window`（写 `--out` 前弹出 ⇒ `--out` JSON 的键不变）；前提核对脚本的 `n_excluded_tickers`；窗口退出 INFO 汇总多「直连请求 N 次（M 次一根 bar 都没有）」；
+`orchestrator_steps.STEP11_TIMEOUT_DEFAULT`；Step 11 rc=124 与「JSON 本轮不可用」两句 message。
+
+**真实数据核对**（2026-10-02 盘中，`ALPHA_HIVE_HOME=/Users/igg/alpha-hive-data`，today=2026-10-01；旧 = `4bca556d`、新 = `44808fee` 的 git archive，背靠背；
+审计钩子拦截一切对生产数据根的写入）：
+- F&G `run()`：9 个回放日、496 次 `_fetch_ohlc`，新旧调用序列与逐次结果哈希相同（哈希不含当天未收盘的 10-02 那根，那根两边都读到了）；返回值去掉新增的
+  `ohlc_window` 后 `json.dumps(sort_keys=True)` **逐字节相同**，既有键值 0 处差异；唯一新增键 `ohlc_window` =
+  `{degraded: false, wide_fetches: 21, served: 496, fallback: 0, out_of_window: 0, direct_requests: 0, direct_empty: 0, window: [2026-09-02, 2026-10-03)}`；
+  状态行逐字相同（仍 `cannot_judge`：精确层 14/15、决策层 15/15，与 09-30 同类的仓位金额差，不在本版范围）。yfinance 调用 **138 → 21**，`run()` **84.0s → 16.4s**。
+- 完整 Step 11 命令（`ic_rerun_readiness.py --quiet --today 2026-10-01 --out …`，进程起止）：旧 **93.8s**（生产 60s 必杀）→ 新 **16.0s**。健康时 `--quiet`
+  那一行新旧**逐字节相同**；`--out` JSON 除 `generated_at` 外相同；attention 新旧同为 `fg_exposure_gate_forward.cannot_judge` + `dim_ic.weight_history_unknown`
+  （后者是从非 git 的 archive 目录跑的环境差异，新旧相同）。
+- 生产状态：`paper_portfolio_state/` 四个文件与 `pheromone.db` / `-wal` / `-shm` 在全部核对与全套测试前后 sha256 相同，只有 `-shm` 的 mtime 变（`mode=ro` 读锁）。
+  审计钩子拦下的只有：import 期对已存在目录的 `mkdir(exist_ok)`（新旧相同）、新代码退出窗口时那行 INFO 汇总对 `logs/alpha_hive.log` /
+  `alpha_hive_structured.jsonl` 的追加（生产 Step 11 本来就写这两份日志）。同一时段生产 `logs/` 里另有 3 行 today=10-01 的窗口 INFO（07:50:20 / 38 / 52），
+  不是本核对的进程（那段时间本核对只在跑离线的全套与变异）；按文案（只有 `44808fee` 起的代码打这一行）与日期推断来自并行的检查点 / 时间预算会话
+  （其分支已合入 `44808fee`）——**待验证**，未向该会话核实。
+
+**变异**（`44808fee` 的 git archive 副本，不碰工作区；对照组 731 passed / 1 skipped）：S1 四种藏信号（`degraded` 恒 False / `_FWD_DETAIL_KEYS` 丢 `ohlc_window` /
+`status_line` 不看窗口 / `evaluate` 不带计数）、S2 两种（空重取当「不同」/ 排除数不报）、S3 全断判据恒假、S4 过滤后全空当权威、S5 三种（rc=124 文案还原 /
+边界句还原 / 编排器超时改成 120 而常量没跟）、N1 去掉 ISO 校验、N2 `run_replay` 自己开窗口、N3 切片按真值判——**14/14 红**。
+
+**全套**（工作区，`-m "not integration and not network"`）：7834 passed / 1 failed / 2 xfailed / 85 deselected（8 分 27 秒）；唯一失败仍是已知随日期变红的
+`TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`。跑前跑后 `git status --porcelain --ignored` 相同。`ruff --select F821,F401` 改动文件全过。
+
+**生产证据（10-01 扫描，B1 步骤解释器已上线）**：Step 11 14:47:50 启动 → 14:48:50 被 `run_step` 60s 看门狗杀掉；status.json
+`steps_result.step11_ic_rerun_readiness = {"status": "error", "rc": 124, "cohort_boundary": null}`，**没有 `interp_fallback`**（解释器正常出了片段，
+日志没有「步骤解释器不可用」行）——09-30 之后第二次被杀，日志文案仍是旧 else 支的「⚠️ Step 11 异常（exit=124）……代码早于 v0.45.334 或 JSON 不可读」，正是 S5 改的那句。
+
+### 二次复审（2026-10-02，两视角各一个代理，变异全在 git archive 副本上）
+- 收尾核对：真实数据（today=10-01）新旧逐字节相同（只多 `ohlc_window` 键）；F&G 重放 83.98s → 16.40s，Step 11 全程 93.75s → 16.01s；全套 7834 passed / 1 failed（已知 TestCoverageHorizon）；跑前跑后 `git status --porcelain --ignored` 相同；生产状态 sha256 不变。
+- 应修、已修：
+  - **几乎全断仍归因评分链**：S3 只认 served=0；限流常见形状是「只有一两只取到」⇒ served>0 时整句仍推给评分链 / 配置。新增 `_ohlc_partly_missing`（直连有空结果且不是全断）⇒ 原因照旧写在前、末尾追加「⚠️ 但这次重放有行情缺失…先等行情源恢复后重跑」。不设比例阈值。
+  - 三处没被测试盯住、变异能活下来：降级标志里「窗口外请求」那一半（O2）、演练路径把窗口计数交给归因（O6）、人读输出的降级行（O9）——各补一条；连同「几乎全断」那条，4 个变异在副本上全红（对照 172 passed）。
+- 核为小问题、不改：降级提示文案里个别分句没钉（图标与 attention 都会亮）；N2 的 AST 守卫按函数名清单扫，绕一层 helper 能躲过（行为测试照样红）；周报 SKILL.md 对 F&G ⚠️ 的解读没覆盖「降级」这第三种含义（仓库外，改要用户批准）。
+- 生产日志里有 3 行窗口汇总 INFO（10-02 07:50）不是本会话的进程写的，最可能是 392 会话的真实数据核对（它的分支含 `44808fee`）；状态文件不受影响，**待验证**。
+
+### 没做 / 另议
+- **没加 `ic_rerun_readiness` 的时间预算**。成本图推荐的是「F&G 放子进程 + 超时 + SIGTERM 转发 + 先写检查点 JSON + 新 attention id / timings 键」，
+  不便宜：要动就绪度的契约面（payload 键、attention 词表、`--quiet` 段序）与 conftest 的进程内隔离（子进程收不到 monkeypatch 与出网闸，
+  每条调 `main()` 的测试都会多起一个导 scipy 的子进程）；协作式 deadline / SIGALRM 则会在 `run_replay` 的 finally（`CONFIG.clear()` 与 `update()` 之间）
+  里抛出，也打断不了 C 层的 curl 卡顿。本版之后健康路径约 20s、且对窗口长度基本持平。**剩余风险**：09-24 那种整段限流时，整段取数失败 ⇒ 退回逐次直连
+  （= 改动前的取数方式）⇒ 仍可能超时；那条路要靠预算 / 检查点另立一版。复审 S1 之后这条降级至少有机读出口（`ohlc_window` / attention），
+  但超时被杀时 JSON 根本写不出来，出口也就没了——那时只剩 S5 的超时文案。
+- **检查点 / F&G 时间预算这层防御在另一个会话里做**（任务「Give Step 11 a checkpoint and F&G time budget」；该会话的 WIP 提交以 392 编号、已合入 `44808fee`）。
+  两版**谁后合入，谁 rebase 到先合入的那个之上**。
+- 顺带记下未修：`boundary_evidence_status` 排在 F&G 之后、`--out` 只在最后写一次 ⇒ F&G 一慢就会饿死世代边界核对（检查点那版要治的就是它）；
+  ~~`_base11` 没有 rc=124 分支~~（复审 S5 已补文案）；`cohort_boundary_evidence` 同日多条边界时每份归档解析多遍；共振前瞻约 +0.12s / 扫描日。
+
+## [0.45.390] — 2026-09-30 — Added：Alpha Bot 的 macOS 桌面程序 `Alpha Bot.app`（双击起服务并开页面；已在跑就只开页面；页面可停止服务）
+
+之前只能在终端 `make alphabot`，终端一关服务就停；GUI 程序又拿不到 shell 里 export 的 `ALPHA_HIVE_HOME`，直接包一层会静默读错目录。
+
+### Added
+- `alphabot/macos_app.py`：生成 `~/Applications/Alpha Bot.app`（`make alphabot-app`）。壳是一段 bash：cd 进仓库后 `exec /usr/local/bin/python3 -m alphabot.launcher`，逻辑不在壳里 ⇒ `git pull` 即生效，仓库挪位置 / 换 Python 才要重新生成。路径全部 `shlex.quote`（仓库在 `~/Desktop/Alpha Hive`，带空格）；Python 不在、仓库进不去（含「桌面」文件夹权限被拒）都弹窗说清楚并写日志。同名 .app 的 bundle id 不是本生成器的 ⇒ 拒绝覆盖；先在临时目录建好再换上去。默认不装进仓库（iCloud 会复制出「Alpha Bot 2.app」），目标在桌面 / 文稿下会提示。当前环境有 `ALPHA_HIVE_HOME`（或给 `--home`）就顺手记进启动器配置。未签名：本机生成没有隔离标记，Gatekeeper 不拦。
+- `alphabot/launcher.py`（.app 实际执行的逻辑）：探测端口 → 已是 Alpha Bot 只开页面（双击两次不会起两份）/ 被别的程序占着就弹窗给 `lsof` 命令；首次启动弹窗选数据根（或本次演示模式，演示不写进配置），存 `~/Library/Application Support/Alpha Bot/launcher.json`；坏配置照实报错，不静默当首次启动。服务以脱离进程组的子进程起，日志 `~/Library/Logs/Alpha Bot/server.log`（>5MB 轮转）；等 `/api/ping` 应答，服务先死了就立即弹窗附日志尾巴，不干等超时。回环探测显式不走代理（用户环境的 `http_proxy` 会把 127.0.0.1 也送去代理）。`--stop` / `--reset`（忘掉数据根），另有 `make alphabot-stop`。弹窗走 osascript，文本全经 argv 传入，不拼进 AppleScript 源码。
+- `alphabot/server.py`：`/api/ping`（轻量，启动器认身份用，不碰账本）、`POST /api/shutdown`（同样要 `X-AlphaBot` 头；`create_app(on_shutdown=...)` 没接开关就 400）；`/api/meta` 带 `can_shutdown`。`alphabot/__main__.py` 改用 `uvicorn.Server`，停止与 Ctrl-C 走同一条退出路径（lifespan 停盘中轮询）。
+- 前端：页脚「停止服务」（确认后停，页面换成「服务已停止」说明）。
+- 图标 `alphabot/macos/AlphaBot.icns`（源 `icon.svg`：纸色圆角底 + 陶土色标记，与页面同一套）。
+- `tests/test_alphabot_launcher.py`（15 条）：.app 结构、**带空格加引号的仓库路径**下脚本真的 cd 对 / exec 对 / PATH 先走 /usr/local/bin、Python 缺失退出 1 且留日志、不覆盖别人的 .app；真起演示服务走完「首次问 → 起 → 开页面 → 再开只开页面 → `--stop` 停掉」；端口被占、服务启动即死、选的数据根原样进服务的 `ALPHA_HIVE_HOME` 并被记住、取消不起服务、坏配置报错、`/api/shutdown` 要头且只在接了开关时可用。变异自证：去掉 `shlex.quote` ⇒ 空格路径那条红；去掉绕代理 ⇒ 端到端那条红（先得清掉 `no_proxy`，否则回环本来就被放行、这条没牙——实测）。
+
+### Changed
+- `Makefile`：`alphabot-app` / `alphabot-stop`。`alphabot/__init__.py` 版本 0.45.390。
+
+### Fixed（合入前复查，均先复现再修，新增 5 条回归测试在旧代码上全红）
+- `alphabot/launcher.py`：Finder 有时会给 .app 传 `-psn_0_NNN` 参数，argparse 不认就 exit 2，只进日志不弹窗（看着像双击没反应）⇒ 现在忽略这个参数。
+- `alphabot/launcher.py`：端口上是个不说 HTTP 的服务时，`probe` 抛 `BadStatusLine`（它不是 `OSError`），漏到兜底弹出「启动器出错」⇒ 现在按「端口被别的程序占着」报。
+- `alphabot/launcher.py`：`--stop` 的停止请求失败、`--reset` 遇到坏配置时直接甩 traceback ⇒ 现在打印原因并退出码 1；`macos_app --home` 遇到坏配置同样处理。
+- `alphabot/launcher.py`、`alphabot/macos_app.py`：osascript 是后台进程，对话框可能压在别的窗口后面 ⇒ 弹窗前先 `activate`。启动脚本在没有 `LANG` 时（从 Finder / Dock 启动）补上 `en_US.UTF-8`，已有的值不覆盖。
+- `alphabot/static/app.js`：点「停止服务」后，60 秒一次的 meta 轮询和 hash 路由还在跑；同端口再起服务时，旧页面会把「服务已停止」冲掉、页脚重新填回来（Playwright 实测复现）⇒ 停止后清掉定时器、摘掉路由、作废进行中的渲染。
+- `alphabot/macos_app.py`：启动脚本里两条报错写成 `$PY（…` / `$REPO。`，macOS 自带 bash 3.2 会把全角字符首字节并进变量名，变量被吞成空串、弹窗与日志里路径丢失并出现乱码（`test_missing_python_fails_loudly` 在本机红、Linux CI 不红）⇒ 改成 `${{PY}}` / `${{REPO}}`（f-string 里要双写花括号）。
+- `tests/test_alphabot_launcher.py`：`launch_script` 的入参把 `/usr/local/bin/python3` 写死成字符串，被 `test_tests_use_running_interpreter` 守卫拦下（CI pytest 红）⇒ 改 `sys.executable`。
+
+### 注意
+- 启动器**不核对**所选目录里有没有卖权账本：账本目录名只许卖权模块提及（`tests/test_sell_strike_integration.py` 火墙，本次实测会红），选错了页面账本 / 结果页会显示账本不存在，`--reset` 后重选。
+- 只在 Linux 容器里验过（bash 壳 + 启动流程 + 浏览器里点停止）；osascript 弹窗与 Finder 双击需要在 Mac 上第一次用时确认。
 
 ## [0.45.389] — 2026-09-30 — Changed：关掉 Vercel 对本仓库的自动部署（`alpha-hive-web` 项目每次推送都构建失败）
 

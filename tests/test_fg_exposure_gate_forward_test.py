@@ -54,12 +54,22 @@ _NOT_READY_OR_CANNOT_JUDGE_ALLOWED_KEYS = {
     "status", "mode", "n_dates", "seed_last_run_date", "selfproof", "selfproof_rate",
     "selfproof_decision_rate", "weeks_available", "weeks", "next_look_at",
     "looks_passed_without_verdict", "reason", "stale", "mechanism_selfcheck_ok",
+    # v0.45.391 复审 S1：回放行情窗口的取数计数（`paper_portfolio._ReplayOhlcWindow.stats()`）。白名单照样管到它的
+    # **子键**（下面 `_OHLC_WINDOW_KEYS`）——不让它变成一个可以随手塞效应量的口袋。
+    "ohlc_window",
 }
+#: `ohlc_window` 允许的子键：只有窗口区间、取数次数与失败标的（及原因），没有价格 / 净值 / 收益
+_OHLC_WINDOW_KEYS = {"window", "wide_fetches", "served", "out_of_window", "fallback", "fallback_tickers",
+                     "direct_requests", "direct_empty", "degraded"}
 
 
 def _assert_no_unexpected_top_level_keys(res):
     extra = set(res) - _NOT_READY_OR_CANNOT_JUDGE_ALLOWED_KEYS
     assert not extra, f"出现白名单外的顶层键（可能是新换了名字的效应量泄漏）：{extra}"
+    if "ohlc_window" in res:
+        ow = res["ohlc_window"]
+        assert isinstance(ow, dict) and set(ow) <= _OHLC_WINDOW_KEYS, f"ohlc_window 出现白名单外的子键：{set(ow) - _OHLC_WINDOW_KEYS}"
+        assert all(isinstance(v, str) for v in ow["fallback_tickers"].values()), "fallback_tickers 只许是 标的→原因 文本"
 
 
 def _all_keys(obj):
@@ -473,6 +483,60 @@ class TestCarriedByReadiness:
 
 
 class TestStatusLine:
+    _OW = {"window": ["2026-09-15", "2026-10-02"], "wide_fetches": 11, "served": 0, "out_of_window": 0,
+           "fallback": 11, "fallback_tickers": {"NVDA": "ConnectionError: x"}, "direct_requests": 144,
+           "direct_empty": 0, "degraded": True}
+    _NR = {"status": "not_ready", "weeks": 3, "next_look_at": 15, "looks_passed_without_verdict": [],
+           "selfproof_rate": 1.0}
+
+    def test_healthy_window_leaves_the_line_unchanged(self):
+        """复审 S1：健康时（degraded=False）进度行与没有 `ohlc_window` 键时逐字相同——周报 / 编排器读到的不变。"""
+        healthy = dict(self._OW, fallback=0, fallback_tickers={}, served=300, direct_requests=0, degraded=False)
+        assert fwd.status_line({**self._NR, "ohlc_window": healthy}) == fwd.status_line(self._NR)
+        assert fwd.status_line(self._NR) == "⏳ F&G 敞口门前瞻检验：3/15 个合格周，自证 100%"
+
+    def test_degraded_window_is_visible_and_turns_the_icon(self):
+        """复审 S1：整段取数全部退回直连 ⇒ 段首 ⏳ 换 ⚠️、段尾说几个标的、退回了什么；不含 `｜`（--quiet 段分隔符）。
+        变异「status_line 不看 ohlc_window」⇒ 红。"""
+        line = fwd.status_line({**self._NR, "ohlc_window": self._OW})
+        assert line.startswith("⚠️ F&G 敞口门前瞻检验：3/15 个合格周，自证 100%；⚠️ 回放行情窗口降级："), line
+        assert "11/11 个标的整段取数失败" in line and "退回逐次直连" in line and "｜" not in line
+        cj = fwd.status_line({"status": "cannot_judge", "reason": "r", "ohlc_window": self._OW})
+        assert cj.startswith("⚠️ F&G 敞口门前瞻检验无法判定：r；⚠️ 回放行情窗口降级")
+        ck = fwd.status_line({"status": "confirmed", "look": "中期", "ohlc_window": self._OW})
+        assert ck.startswith("🔔 ") and "回放行情窗口降级" in ck
+
+    def test_selfproof_reason_names_an_ohlc_outage(self):
+        """复审 S3：served=0 且直连全空 ⇒ 原因说行情不可得，不再推给评分链 / 配置 / 漏跑；
+        整段被拒但直连照常（S1 的形状）⇒ 原文案不变。"""
+        sp = {"exact": 1, "total": 10, "decision": 3, "rate": 0.1, "decision_rate": 0.3}
+        outage = dict(self._OW, direct_empty=144)
+        r = fwd._selfproof_failure_reason(sp, outage)
+        assert "OHLC 不可得" in r and "11/11 个标的全部失败" in r and "144 次请求也全是空" in r
+        assert "已被改动" not in r
+        assert fwd._selfproof_failure_reason(sp, self._OW) == fwd._selfproof_failure_reason(sp)
+        assert "评分链/入场规则/组合层配置已被改动" in fwd._selfproof_failure_reason(sp, None)
+        # 二次复审：几乎全断（部分直连拿到了 bar / 窗口服务过少数标的）⇒ 不说「OHLC 不可得」，
+        # 原因照旧写在前面，但末尾必须说出行情缺失——限流的真实形状常是只有一两只取到。
+        # 变异「`_ohlc_partly_missing` 恒 False」⇒ 这两格红。
+        base = fwd._selfproof_failure_reason(sp)
+        for partial in (dict(outage, direct_empty=143), dict(outage, served=5)):
+            r = fwd._selfproof_failure_reason(sp, partial)
+            assert r.startswith(base) and "OHLC 不可得" not in r, r
+            assert "但这次重放有行情缺失" in r and f"里 {partial['direct_empty']} 次一根 bar 都没有" in r, r
+        # 金额层分支同样追加
+        sp_amt = dict(sp, decision=10, decision_rate=1.0)
+        r = fwd._selfproof_failure_reason(sp_amt, dict(outage, served=5))
+        assert "仓位金额" in r and "但这次重放有行情缺失" in r
+
+    def test_human_output_shows_the_degraded_window(self, capsys):
+        """二次复审：演练分支不经 status_line，人读输出是唯一出口。变异「`_print_human` 里 `if False:`」⇒ 红。"""
+        fwd._print_human({"mode": "rehearse", "status": "cannot_judge", "reason": "r", "ohlc_window": self._OW})
+        assert "回放行情窗口降级" in capsys.readouterr().out
+        fwd._print_human({"mode": "rehearse", "status": "cannot_judge", "reason": "r",
+                          "ohlc_window": dict(self._OW, degraded=False)})
+        assert "回放行情窗口降级" not in capsys.readouterr().out
+
     def test_not_ready_line_has_no_effect_size(self):
         line = fwd.status_line({"status": "not_ready", "weeks": 3, "next_look_at": 15,
                                 "looks_passed_without_verdict": []})
@@ -1259,6 +1323,24 @@ class TestRehearse:
         assert res["selfproof_decision_rate"] == 1.0
         assert res["selfproof_rate"] < 1.0
         assert res["status"] == "cannot_judge"
+
+    def test_selfproof_reason_gets_the_window_counters(self, pp, tmp_path, monkeypatch):
+        """二次复审（S3 在演练路径）：rehearse() 必须把窗口计数交给 `_selfproof_failure_reason`——
+        否则行情全断时演练会把原因推给评分链。变异「rehearse 里丢掉 ohlc 参数」⇒ 红。"""
+        _pp = pp[0]
+        seed = _world(pp, tmp_path)
+        repo = self._synthetic_repo(tmp_path, seed)
+        monkeypatch.setitem(_pp.CONFIG, "entry_score_bull", 9.0)
+        seen = []
+        orig = fwd._selfproof_failure_reason
+
+        def spy(sp, ohlc=None):
+            seen.append(ohlc)
+            return orig(sp, ohlc)
+        monkeypatch.setattr(fwd, "_selfproof_failure_reason", spy)
+        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo)
+        assert res["status"] == "cannot_judge" and len(seen) == 1
+        assert isinstance(seen[0], dict) and seen[0] == res["ohlc_window"] and "served" in seen[0]
 
     def test_unobtainable_start_state_is_cannot_judge(self, pp, tmp_path):
         (tmp_path / "plain").mkdir()

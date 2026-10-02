@@ -346,6 +346,13 @@ GOLDEN = [
     ("15", 99, True, "warn", {"status": "error", "rc": 99}),
 ]
 GOLDEN_IDS = [f"STEP{g[0]}_RC={g[1]}" for g in GOLDEN]
+#: 刻意改动 (i)（orchestrator_steps 模块 docstring，v0.45.391 复审 S5）：B 之前 bash 的日志原文 → 解释器现在的文案。
+#: **只换 message**：同一行的片段（status / rc / cohort_boundary）与级别仍由上面的对照逐字核。
+#: Step 11 rc=124 是 `run_step` 看门狗超时（09-30 实况），旧文案「异常」没说出这一点。
+MESSAGE_DELIBERATE: Dict[Tuple[str, int], Dict[str, str]] = {
+    ("11", 124): {"⚠️ Step 11 异常（exit=124），不影响主流程":
+                  "⏰ Step 11 超时（>60s，run_step 看门狗杀掉了 ic_rerun_readiness.py，exit=124），不影响主流程"},
+}
 BASE_LEVEL = {(g[0], g[1]): g[3] for g in GOLDEN}
 BASE_STATUS = {(g[0], g[1]): g[4]["status"] for g in GOLDEN}
 
@@ -368,12 +375,18 @@ class TestGoldenLegacy:
 
     @pytest.mark.parametrize("step,rc,with_json,level,expected", GOLDEN, ids=GOLDEN_IDS)
     def test_row_is_what_the_repo_orchestrator_does(self, tmp_path, step, rc, with_json, level, expected):
-        """上面那张表不是凭记忆写的：把 B 之前的冻结副本里该步的分支链抽出来、同一夹具在 bash 里真跑，逐条相等。"""
+        """上面那张表不是凭记忆写的：把 B 之前的冻结副本里该步的分支链抽出来、同一夹具在 bash 里真跑，逐条相等。
+        片段与级别**无一例外**逐字相等；日志原文只有 `MESSAGE_DELIBERATE` 列出的那几行按刻意改动 (i) 替换后再比。"""
         p = legacy_json(tmp_path, step) if with_json else tmp_path / "absent.json"
         b_level, b_texts, b_frag = run_bash(step, rc, p)
         assert b_frag == _subst(expected, p)
         assert b_level == level
-        assert_message_carries_bash_lines(run(step, rc, p)["message"], b_texts)
+        swap = MESSAGE_DELIBERATE.get((step, rc), {})
+        assert set(swap) <= set(b_texts), f"刻意改动登记的 bash 原文已不在该支里：{set(swap) - set(b_texts)}"
+        message = run(step, rc, p)["message"]
+        assert_message_carries_bash_lines(message, [swap.get(t, t) for t in b_texts])
+        for old in swap:
+            assert old not in message, f"登记为刻意改掉的旧文案仍在 message 里：{old}"
 
     @pytest.mark.parametrize("step", STEPS)
     def test_json_read_branches_match_pre_b_orchestrator(self, step):
@@ -471,6 +484,55 @@ class TestGoldenLegacy:
         assert "（>120s）" in run("10", 124, None)["message"]          # bash 写死的常数（run_step --timeout 120）
         assert "（>60s）" in run("15", 124, None)["message"]           # 同上（--timeout 60）
         assert "（>90s）" in run("15", 124, None, timeout=90)["message"]
+
+
+class TestStep11Timeout:
+    """刻意改动 (i)（v0.45.391 复审 S5）：Step 11 被 `run_step` 看门狗杀掉（rc=124）时，message 说「超时」、
+    边界那句说「JSON 没写出来、本轮没核对」——09-30 实况里旧文案把它说成「异常」+「代码早于 v0.45.334 或 JSON 不可读」。
+    片段（status / rc / cohort_boundary）与级别**一个字不动**：那几个值由 GOLDEN 对冻结副本真跑核着。"""
+
+    def test_rc124_without_json_names_the_timeout_and_the_skipped_boundary_check(self, tmp_path):
+        """09-30 的形状：编排器先删后跑 ⇒ 被杀时 JSON 不存在。
+        变异「把 rc=124 文案改回『异常（exit=124）』」/「边界那句改回『代码早于 v0.45.334』」⇒ 红。"""
+        out = run("11", 124, tmp_path / "absent.json", run_start=RUN_START)
+        assert frag(out, "11") == {"status": "error", "rc": 124, "cohort_boundary": None}
+        assert out["level"] == "warn"
+        msg = out["message"]
+        assert "⏰ Step 11 超时（>60s，run_step 看门狗杀掉了 ic_rerun_readiness.py，exit=124）" in msg, msg
+        assert "异常（exit=124）" not in msg
+        assert "Step 11 世代边界核对：本轮未核对——ic_rerun_readiness.py 被 run_step 看门狗按超时杀掉，就绪度 JSON 没写出来" in msg
+        assert "代码早于 v0.45.334" not in msg
+
+    def test_rc124_seconds_follow_timeout_seconds(self, tmp_path):
+        assert "（>90s，run_step 看门狗" in run("11", 124, tmp_path / "absent.json", timeout=90)["message"]
+
+    def test_default_seconds_match_the_repo_orchestrator(self):
+        """编排器不给 Step 11 传 --timeout-seconds ⇒ 文案里的秒数是 `STEP11_TIMEOUT_DEFAULT`。
+        变异「编排器把 Step 11 改成 --timeout 120 而解释器没跟」⇒ 红（否则日志会把 120s 的超时说成 >60s）。"""
+        from tests._orchestrator import repo_orchestrator_text
+        m = re.findall(r'run_step --timeout (\d+) "\$\{PROJECT_DIR\}/ic_rerun_readiness\.py"', repo_orchestrator_text())
+        assert m == [str(ost.STEP11_TIMEOUT_DEFAULT)], m
+
+    @pytest.mark.parametrize("rc", [0, 1, 3, 99])
+    def test_missing_json_says_not_checked_instead_of_old_code(self, tmp_path, rc):
+        """JSON 本轮不可用（这里：不存在）⇒ 边界那句说「本轮未核对——就绪度 JSON 本轮不可用（原因）」。
+        旧文案「代码早于 v0.45.334」只在读到 JSON 却缺键时成立（下一条）。片段与改动前相同（cohort_boundary=null）。"""
+        out = run("11", rc, tmp_path / "absent.json", run_start=RUN_START)
+        assert frag(out, "11")["cohort_boundary"] is None
+        assert "Step 11 世代边界核对：本轮未核对——就绪度 JSON 本轮不可用（就绪度 JSON 不存在" in out["message"]
+        assert "代码早于 v0.45.334" not in out["message"]
+
+    def test_json_without_boundary_key_keeps_the_old_code_explanation(self, tmp_path):
+        """读到了 JSON、只是没有 cohort_boundary_evidence 键 ⇒ 「代码早于 v0.45.334」正是对的推断，文案不变。"""
+        payload = {k: v for k, v in LEGACY["11"].items() if k != "cohort_boundary_evidence"}
+        out = run("11", 124, legacy_json(tmp_path, "11", payload))
+        assert "代码早于 v0.45.334" in out["message"] and "⏰ Step 11 超时" in out["message"]
+
+    def test_rc2_boundary_text_is_unchanged(self, tmp_path):
+        """rc=2（脚本不存在）：与 B 之前逐字相同（GOLDEN 的 STEP11_RC=2 那行另有 bash 真跑对照）。"""
+        out = run("11", 2, tmp_path / "absent.json")
+        assert ("Step 11 世代边界核对：就绪度 JSON 里没有 cohort_boundary_evidence"
+                "（代码早于 v0.45.334 或 JSON 不可读），本轮未核对") in out["message"]
 
 
 # ═══════════════════════════════ 2. 每步 × 八种 JSON 形态 ═══════════════════════════════

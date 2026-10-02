@@ -476,18 +476,52 @@ def _selfproof_stats(real: set, a_entries: set) -> Dict:
             "decision_rate": decision / total if total else None}
 
 
-def _selfproof_failure_reason(sp: Dict) -> str:
+def _ohlc_unavailable(ohlc: Optional[Dict]) -> bool:
+    """回放 OHLC 窗口的计数（`paper_portfolio._ReplayOhlcWindow.stats()`）说明这次重放**一根行情都没拿到**：
+    窗口没服务过任何请求（served=0 ⇒ 每个试过整段取数的标的都退回了直连），且直连路径的每次请求也都是空。
+    只认这一种全断形状——整段被拒、直连照常（S1 的「宽区间被拒」）时重放拿到的就是改动前那份行情，
+    那时自证失败照旧按原文案归因。"""
+    return (isinstance(ohlc, dict) and ohlc.get("served") == 0
+            and (ohlc.get("direct_requests") or 0) > 0
+            and ohlc.get("direct_empty") == ohlc.get("direct_requests"))
+
+
+def _ohlc_partly_missing(ohlc: Optional[Dict]) -> bool:
+    """有请求退回直连后仍一根 bar 都没拿到（`direct_empty > 0`），但不是 `_ohlc_unavailable` 那种全断。
+    v0.45.391 二次复审：限流的真实形状常是「只有一两只取到了」——served>0 就不算全断，原先这时自证失败会被
+    整句推给评分链 / 配置；现在原因照旧写，但末尾必须说出行情缺失。不设比例阈值：缺一根都可能改出场与仓位。"""
+    return (isinstance(ohlc, dict) and (ohlc.get("direct_empty") or 0) > 0
+            and not _ohlc_unavailable(ohlc))
+
+
+def _selfproof_failure_reason(sp: Dict, ohlc: Optional[Dict] = None) -> str:
     """v0.45.308 独立审查：旧文案只列了「评分链/组合层配置被改动」，但重放读的是**冻结种子**，
-    评分链变动本身影响不到 A 的重放——真正会让这里变红的原因更窄也更具体，两层分别列全。"""
+    评分链变动本身影响不到 A 的重放——真正会让这里变红的原因更窄也更具体，两层分别列全。
+
+    v0.45.391 复审（S3）：行情全断（`_ohlc_unavailable`）时先说数据——没有 bar ⇒ 不出场、仓位基数与
+    持仓数随之偏离，复现率低是这个，不能据此把原因推给评分链 / 配置 / 漏跑。只改文案，状态不变。"""
     head = f"A（baseline）重放复现生产记录仅 {sp['exact']}/{sp['total']}（< {SELFPROOF_MIN_RATE:.0%}）"
+    if _ohlc_unavailable(ohlc):
+        sample = next(iter((ohlc.get("fallback_tickers") or {}).items()), None)
+        eg = f"，例：{sample[0]} {sample[1]}" if sample else ""
+        return (f"{head}——但这次重放**没拿到任何行情（OHLC 不可得）**：回放窗口整段取数 "
+                f"{ohlc.get('fallback')}/{ohlc.get('wide_fetches')} 个标的全部失败{eg}；退回逐次直连的 "
+                f"{ohlc.get('direct_requests')} 次请求也全是空。没有 bar ⇒ 不出场、仓位基数随之偏离，"
+                "复现率低多半由此而来，不能据此判定评分链 / 配置被改或漏跑——等行情源恢复后重跑")
     if sp["decision_rate"] is not None and sp["decision_rate"] >= SELFPROOF_MIN_RATE:
-        return (f"{head}，但决策层（标的/日期/方向）复现 {sp['decision']}/{sp['total']}——开哪只、开哪个方向"
-                "都对得上，对不上的是仓位金额。先查：种子是否对应窗口起点、历史 K 线是否被回溯修订"
-                "（拆股/数据源修订）、波动率来源（pheromone.db 的 signal_archive 是否被回填/覆盖）"
-                "是否与生产一致、成本模型（trading_costs）或组合层仓位/出场参数是否被改动")
-    return (f"{head}，决策层（标的/日期/方向）也仅复现 {sp['decision']}/{sp['total']}——评分链/入场规则/"
-            "组合层配置已被改动、生产某个窗口内日期未被处理（漏跑），或重放机制本身有问题，"
-            "本检验前提不成立")
+        reason = (f"{head}，但决策层（标的/日期/方向）复现 {sp['decision']}/{sp['total']}——开哪只、开哪个方向"
+                  "都对得上，对不上的是仓位金额。先查：种子是否对应窗口起点、历史 K 线是否被回溯修订"
+                  "（拆股/数据源修订）、波动率来源（pheromone.db 的 signal_archive 是否被回填/覆盖）"
+                  "是否与生产一致、成本模型（trading_costs）或组合层仓位/出场参数是否被改动")
+    else:
+        reason = (f"{head}，决策层（标的/日期/方向）也仅复现 {sp['decision']}/{sp['total']}——评分链/入场规则/"
+                  "组合层配置已被改动、生产某个窗口内日期未被处理（漏跑），或重放机制本身有问题，"
+                  "本检验前提不成立")
+    if _ohlc_partly_missing(ohlc):
+        reason += (f"；⚠️ 但这次重放有行情缺失：整段取数 {ohlc.get('fallback')}/{ohlc.get('wide_fetches')} 个标的退回直连，"
+                   f"直连 {ohlc.get('direct_requests')} 次请求里 {ohlc.get('direct_empty')} 次一根 bar 都没有——"
+                   "缺行情本身就会压低复现率，先等行情源恢复后重跑，再按上面的方向查")
+    return reason
 
 
 def _weekly_nav_returns(equity: List[Dict]) -> Dict[Tuple[int, int], float]:
@@ -586,6 +620,62 @@ def evaluate(dates: List[str], since: str, before: str, sandbox_root: Path,
         raise ValueError("前瞻模式必须显式传 seed（生产窗口起点状态，见 load_seed）：空沙箱起点会让自证在真实数据上必红")
     if insample and seed:
         raise ValueError("样本内模式从 bootstrap_date 起，生产当时是空状态，不许传 seed")
+    with _replay_ohlc_scope(dates, seed) as win:
+        res = _evaluate_replays(dates, since, before, sandbox_root, insample=insample, seed=seed, ohlc_window=win)
+    if win is not None:
+        res["ohlc_window"] = win.stats()   # 复审 S1：降级要有机读出口（见 `_replay_ohlc_scope`）
+    return res
+
+
+def _seed_held_entry_dates(seed: Optional[Dict[str, bytes]]) -> List[str]:
+    """种子里在场仓位的 entry_date——只用来定回放 OHLC 窗口的左端（v0.45.391）。
+
+    **绝不抛**：种子合法性由 `load_seed` / `_apply_seed` / 重放本身把关，这里解析不了的行跳过。
+    窗口因此偏窄时，那几次请求走 `_fetch_ohlc` 原直连路径并记 WARNING，结果不变——
+    若在这里抛，会在重放开始前改变 `evaluate()` 对坏种子的异常形状。
+    """
+    blob = (seed or {}).get("positions.jsonl")
+    if not isinstance(blob, (bytes, bytearray)):
+        return []
+    out = []
+    for line in bytes(blob).decode("utf-8", "replace").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and isinstance(row.get("entry_date"), str):
+            out.append(row["entry_date"])
+    return out
+
+
+def _replay_ohlc_scope(dates: List[str], seed: Optional[Dict[str, bytes]]):
+    """v0.45.391（实现层，不是事后修订）：一次检验里的全部重放共用**一个**回放 OHLC 窗口
+    （`paper_portfolio.replay_ohlc_window`）——每个标的整段只向 yfinance 取一次，之后按区间切片。
+
+    改动前每个快照日对每个在场仓位各取一次（键里带 as_of，缓存挡不住），窗口 8 个快照日即
+    124 次调用 / ~45s，Step 11 在 09-30 被 60s 超时杀掉；且窗口只增不减。
+    **不改**窗口、变体、统计量、α、盲化、自证：同一份行情下 `run()` 的输出逐字节相同
+    （CHANGELOG 同版有真实数据对照）。A、B（及样本内的 A_check）在同一个窗口里跑，B 读到的
+    日线与 A 逐根相同——改动前 B 靠复用 A 留在 `_PRICE_CACHE` 里的同键结果做到这一点。
+
+    复审 S1（同版）：窗口的取数计数随结果带出（`evaluate()` / `rehearse()` 返回值的 `ohlc_window` 键，
+    `status_line` 在降级时追加一段、段首换 ⚠️，`ic_rerun_readiness` 另列 attention
+    `ic_rerun.fg_exposure_gate_forward.ohlc_window_degraded`）。此前整段取数全部退回直连时，机读输出与健康时
+    逐字节相同（只有 stderr 的 WARNING），离 Step 11 超时只差几秒也没有任何机读字段会红。它只是取数计数：
+    不含价格、净值、收益，盲化不受影响；统计量与判定不读它。
+    返回的上下文管理器 yield 窗口对象（不开窗口时 yield None）。
+    """
+    import contextlib
+
+    import paper_portfolio as pp
+    bounds = pp.replay_ohlc_bounds(dates, _seed_held_entry_dates(seed))
+    return pp.replay_ohlc_window(*bounds) if bounds else contextlib.nullcontext()
+
+
+def _evaluate_replays(dates: List[str], since: str, before: str, sandbox_root: Path,
+                      *, insample: bool, seed: Optional[Dict[str, bytes]], ohlc_window=None) -> Dict:
+    """`evaluate()` 的主体（v0.45.391 为套上回放 OHLC 窗口原样拆出，逻辑未改）。
+    `ohlc_window`：本次的回放窗口对象（或 None），只给自证失败的文案用（复审 S3）。"""
     a_dir, b_dir = sandbox_root / "A_baseline", sandbox_root / "B_treatment"
     a = _replay_variant({}, a_dir, dates, seed=seed)
     b = _replay_variant(FG_GATE_TEST_CONFIG, b_dir, dates, seed=seed)
@@ -631,7 +721,8 @@ def evaluate(dates: List[str], since: str, before: str, sandbox_root: Path,
                     "looks_passed_without_verdict": [],
                     "reason": f"窗口内生产还没有任何真实开仓记录（{since}~{before}）"}
         if sp["rate"] is None or sp["rate"] < SELFPROOF_MIN_RATE:
-            return {**out, "status": "cannot_judge", "reason": _selfproof_failure_reason(sp)}
+            ohlc = ohlc_window.stats() if ohlc_window is not None else None
+            return {**out, "status": "cannot_judge", "reason": _selfproof_failure_reason(sp, ohlc)}
 
     weeks = weekly_deltas(a["equity"], b["equity"])
     out["weeks_available"] = len(weeks)
@@ -712,34 +803,64 @@ def rehearse(since: str, before: str, repo_root: Optional[Path] = None) -> Dict:
     real = _real_recorded_entries(since, before)
     if not real:
         return {**out, "status": "not_ready", "reason": f"窗口 [{since}, {before}) 内生产没有真实开仓记录，无从比对"}
-    with tempfile.TemporaryDirectory(prefix="fg_gate_rehearse_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="fg_gate_rehearse_") as tmp, _replay_ohlc_scope(dates, seed) as win:
         a = _replay_variant({}, Path(tmp) / "A_baseline", dates, seed=seed)
+    ohlc = win.stats() if win is not None else None
     sp = _selfproof_stats(real, _entries_in_window(a["closed"], a["open_positions"], since, before))
     out["selfproof"] = {"real_entries": sp["total"], "reproduced": sp["exact"], "decision_reproduced": sp["decision"]}
     out["selfproof_rate"] = sp["rate"]
     out["selfproof_decision_rate"] = sp["decision_rate"]
+    if ohlc is not None:
+        out["ohlc_window"] = ohlc   # 复审 S1：同 evaluate()
     if sp["rate"] < SELFPROOF_MIN_RATE:
-        return {**out, "status": "cannot_judge", "reason": _selfproof_failure_reason(sp)}
+        return {**out, "status": "cannot_judge", "reason": _selfproof_failure_reason(sp, ohlc)}
     return {**out, "status": "rehearsal_ok"}
 
 
+def ohlc_window_degraded(res: Dict) -> bool:
+    """回放 OHLC 窗口降级了吗（`ohlc_window.degraded`：有标的整段取数退回直连 / 有请求落在窗口外）。
+    `status_line` 与 `ic_rerun_readiness` 的 attention 都按它判，不各写一份判据。"""
+    ow = res.get("ohlc_window")
+    return isinstance(ow, dict) and ow.get("degraded") is True
+
+
+def _ohlc_window_note(res: Dict) -> str:
+    """降级时追加在进度行末尾的一句（健康时为空串 ⇒ 进度行与复审前逐字相同）。不含 `｜`（`--quiet` 的段分隔符）。"""
+    if not ohlc_window_degraded(res):
+        return ""
+    ow = res["ohlc_window"]
+    bits = []
+    if ow.get("fallback"):
+        bits.append(f"{ow['fallback']}/{ow.get('wide_fetches')} 个标的整段取数失败")
+    if ow.get("out_of_window"):
+        bits.append(f"{ow['out_of_window']} 次请求落在窗口外")
+    empty = (f"，其中直连 {ow.get('direct_empty')}/{ow.get('direct_requests')} 次一根 bar 都没拿到"
+             if ow.get("direct_empty") else "")
+    return (f"；⚠️ 回放行情窗口降级：{'、'.join(bits) or '原因未知'} ⇒ 这些请求退回逐次直连"
+            f"（结果同改动前的逐次取数，只是慢——Step 11 可能超时）{empty}")
+
+
 def status_line(res: Dict) -> str:
-    """一行进度，供 `ic_rerun_readiness` 摘要行引用。不含效应量。"""
+    """一行进度，供 `ic_rerun_readiness` 摘要行引用。不含效应量。
+
+    回放行情窗口降级时（复审 S1）末尾追加一段，`not_ready` 的段首由 ⏳ 换成 ⚠️（与 attention 的 warn 条目
+    对得上，见 `tests/test_step_contract_ic_rerun.py::TestAttentionMatchesRenderedIcons`）；健康时逐字不变。"""
     s = res.get("status")
+    note = _ohlc_window_note(res)
     if s == "cannot_judge":
-        return f"⚠️ F&G 敞口门前瞻检验无法判定：{res.get('reason')}"
+        return f"⚠️ F&G 敞口门前瞻检验无法判定：{res.get('reason')}{note}"
     if s == "not_ready":
         extra = f"（中期未过界，继续攒到 {res['next_look_at']} 周）" if res.get("looks_passed_without_verdict") else ""
         rate = res.get("selfproof_rate")
         proof = f"，自证 {rate:.0%}" if rate is not None else ""
         why = f"（{res['reason']}）" if res.get("reason") else ""
-        icon = "⚠️" if res.get("stale") else "⏳"
-        return f"{icon} F&G 敞口门前瞻检验：{res.get('weeks', 0)}/{res['next_look_at']} 个合格周{extra}{proof}{why}"
+        icon = "⚠️" if res.get("stale") or note else "⏳"
+        return f"{icon} F&G 敞口门前瞻检验：{res.get('weeks', 0)}/{res['next_look_at']} 个合格周{extra}{proof}{why}{note}"
     if s in ("confirmed", "not_confirmed"):
         return (f"🔔 F&G 敞口门前瞻检验已到{res['look']}检视点 —— 跑 "
                 "`/usr/local/bin/python3 experiments/fg_exposure_gate_forward_test.py` 看结论"
-                "（需人判断，勿自动改 CONFIG）")
-    return f"⚠️ F&G 敞口门前瞻检验状态未知：{s}"
+                f"（需人判断，勿自动改 CONFIG）{note}")
+    return f"⚠️ F&G 敞口门前瞻检验状态未知：{s}{note}"
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -786,6 +907,8 @@ def _print_human(res: Dict) -> None:
     print("━" * 72)
     print(f"🐝 F&G 敞口门前瞻检验（{res.get('mode', '?')}）")
     print("━" * 72)
+    if ohlc_window_degraded(res):   # 复审 S1：人读输出同样要看得见（演练分支不经 status_line）
+        print("  " + _ohlc_window_note(res).lstrip("；"))
     if res.get("mode") == "rehearse":
         sp = res.get("selfproof") or {}
         print(f"  演练窗口 [{res.get('since')}, {res.get('before')})｜播种提交 {str(res.get('seed_commit'))[:8]}"

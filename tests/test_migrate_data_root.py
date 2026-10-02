@@ -89,6 +89,25 @@ def test_unknown_entry_blocks_plan_and_copy(roots):
     assert not any(new.iterdir()), "拒绝时一个都不许复制"
 
 
+def test_every_tracked_top_level_entry_is_classified():
+    """仓库里被 git 跟踪的每个顶层条目都必须在分类表里有归属。
+
+    check-old 把 UNKNOWN 算红：别的会话新加一个代码目录（alphabot / scripts / vercel.json）
+    而没人来登记，旧根检查就会无故报红，让人学会无视它。这条把「新增顶层代码项」变成
+    会红的测试，而不是等 check-old 在生产上红。
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True,
+                         env=_clean_git_env(), check=True).stdout.decode().split("\0")
+    tops = {}
+    for f in filter(None, out):
+        head, sep, _ = f.partition("/")
+        tops[head] = tops.get(head, False) or bool(sep)
+    assert tops, "git ls-files 空输出：检查没有跑起来"
+    unknown = sorted(n for n, is_dir in tops.items() if m.classify(n, is_dir)[0] == "UNKNOWN")
+    assert unknown == [], f"被跟踪的顶层条目未登记进 migrate_data_root 分类表：{unknown}"
+
+
 def test_copy_verify_carries_wal_rows_and_skips_code_and_keys(roots):
     old, new = roots
     pl = m.plan(old)
