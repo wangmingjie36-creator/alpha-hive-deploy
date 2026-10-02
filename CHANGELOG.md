@@ -8,7 +8,9 @@
 ## [0.45.391] — 2026-09-30 — Fixed：F&G 敞口门前瞻检验的重放每个标的只整段取一次 OHLC（Step 11 在 09-30 被 60s 超时杀掉）；同一份行情下输出逐字节不变
 
 > ⚠️ **未推送，也没有在 main 上占号**：推送要用户批准。391 是写这条时 `origin/main` 顶部（390 占位）之上的下一个号，
-> 合入前按「并发开工必须先占号」重新核一次号。
+> 合入前按「并发开工必须先占号」重新核一次号。2026-10-02 `git fetch` 复核：`origin/main` 已到 `d758f614`（390 定稿），
+> 顶部仍是 390，391 仍空。本分支基于 `4bca556d`，与新的 `origin/main` 合并时本文件在 390 标题行处会冲突（占位 → 定稿，
+> 与 391 条目末尾相邻）：取 main 的 390 标题、391 原样留在它上面即可。
 
 **根因**：编排器 Step 11 在 60s `run_step` 超时下跑 `ic_rerun_readiness.py --quiet --today <DATE> --out <json>`，
 09-28 用了 37s（6 个快照日）、09-29 用了 47s（7 个）、**09-30 被杀（rc=124，>60s，8 个）**——就绪度 JSON 没写出来，
@@ -74,14 +76,70 @@
 - 全套 `-m "not integration and not network"`：7804 passed / 1 failed / 2 xfailed（12 分钟）；唯一失败是已知的随日期变红的
   `test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`，与本版无关。
 
+### 复审跟进（提交 `44808fee`，2026-10-01；真实数据收尾核对 2026-10-02）
+复审意见 S1–S5 / N1–N3 全部落地。**窗口、变体、统计量、α、盲化、自证判据一个字没动**；健康时所有既有输出逐字不变（真实数据见下）。
+- **S1 降级要有机读出口**：`_ReplayOhlcWindow` 新增 `stats()` / `note_direct()` 与计数 `direct_requests` / `direct_empty`（窗口作用域内落到原直连路径的请求数、
+  其中一根 bar 都没拿到的次数）；为此 `_fetch_ohlc` 的直连路径原样抽成 `_fetch_ohlc_direct`（生产路径行为不变）。`evaluate()` / `rehearse()` 结果新增
+  `ohlc_window` 键；降级（有标的整段取数退回直连 / 有窗口外请求）时 `status_line` 末尾追加「；⚠️ 回放行情窗口降级：…」、`not_ready` 段首 ⏳ → ⚠️，
+  人读输出多一行；`ic_rerun_readiness` 的 `_FWD_DETAIL_KEYS` 带上 `ohlc_window`，并另列 attention `ic_rerun.fg_exposure_gate_forward.ohlc_window_degraded`
+  （warn，与状态条目并列、独立 id）。此前整段取数全部退回直连时机读输出与健康时逐字节相同（17s → 56s，离 60s 只差 4s），只有 stderr 看得见。
+- **S2 前提核对脚本**：直连重取返回空 DataFrame（yfinance 不抛异常的失败形状）与抛异常同记 `cannot_judge`（exit 3），不再拿 `{}` 比切片报成「不同」；
+  结果新增 `n_excluded_tickers`，人读行写出整段退回直连、未参与核对的标的，非零时不打 ✅。
+- **S3 行情全断的归因**：自证失败且 `served=0`、直连请求全空 ⇒ 原因说「这次重放没拿到任何行情（OHLC 不可得）」，不再推给评分链 / 配置 / 漏跑
+  （只改文案，状态不变）；整段被拒但直连照常时保留原文案。
+- **S4**：整段非空但逐根过滤后一根不剩（全 NaN）⇒ 退回直连——补测试（`allnan` 参数）。
+- **S5 `orchestrator_steps._base11`**：新增 rc=124 分支，说「⏰ Step 11 超时（>60s，run_step 看门狗杀掉了 ic_rerun_readiness.py，exit=124）」；就绪度 JSON 本轮
+  不可用（rc≠2）时边界句说「本轮未核对——<原因>」，不再推给「代码早于 v0.45.334」（那只在读到 JSON 却缺键时成立）。`status` / `rc` / `cohort_boundary` /
+  级别与 B 之前逐字相同（GOLDEN 照旧逐字核，message 只按登记的刻意改动 (i) 替换 rc=124 那一行；Step 10–15 片段的状态词与键未动）；
+  新常量 `STEP11_TIMEOUT_DEFAULT = 60` 与仓库编排器 Step 11 的 `run_step --timeout` 有测试核对。
+- **N1** 字典序落在窗口内的非 ISO 日期（如 `2026-08-2`）走直连；**N2** 「生产路径不开窗口」改为按 AST 逐个扫生产函数（含 `run_replay`）；
+  **N3** 窗口内空切片是权威答案、不打网络（判 `is not None` 而非真值）。
+- 测试增量（`def test_` 计）：`test_replay_ohlc_window.py` 19 → 26、`test_fg_exposure_gate_forward_test.py` +3、`test_orchestrator_steps.py` +6（`TestStep11Timeout`）、
+  `test_step_contract_ic_rerun.py` +2；S1 / S3 / S5 各有正反两面。
+
+**输出形状增量（只增不改）**：`run()` / `evaluate()` / `rehearse()` 返回值的 `ohlc_window`
+（`{window, wide_fetches, served, out_of_window, fallback, fallback_tickers, direct_requests, direct_empty, degraded}`，只有取数计数与失败原因，不含价格 / 净值 / 收益，
+统计量与判定不读它；不开窗口时不出现）；降级时 `status_line` 的追加段与 ⚠️ 段首、人读多一行；attention id `ic_rerun.fg_exposure_gate_forward.ohlc_window_degraded`（只在降级时）；
+就绪度内部 `_detail` 多带 `ohlc_window`（写 `--out` 前弹出 ⇒ `--out` JSON 的键不变）；前提核对脚本的 `n_excluded_tickers`；窗口退出 INFO 汇总多「直连请求 N 次（M 次一根 bar 都没有）」；
+`orchestrator_steps.STEP11_TIMEOUT_DEFAULT`；Step 11 rc=124 与「JSON 本轮不可用」两句 message。
+
+**真实数据核对**（2026-10-02 盘中，`ALPHA_HIVE_HOME=/Users/igg/alpha-hive-data`，today=2026-10-01；旧 = `4bca556d`、新 = `44808fee` 的 git archive，背靠背；
+审计钩子拦截一切对生产数据根的写入）：
+- F&G `run()`：9 个回放日、496 次 `_fetch_ohlc`，新旧调用序列与逐次结果哈希相同（哈希不含当天未收盘的 10-02 那根，那根两边都读到了）；返回值去掉新增的
+  `ohlc_window` 后 `json.dumps(sort_keys=True)` **逐字节相同**，既有键值 0 处差异；唯一新增键 `ohlc_window` =
+  `{degraded: false, wide_fetches: 21, served: 496, fallback: 0, out_of_window: 0, direct_requests: 0, direct_empty: 0, window: [2026-09-02, 2026-10-03)}`；
+  状态行逐字相同（仍 `cannot_judge`：精确层 14/15、决策层 15/15，与 09-30 同类的仓位金额差，不在本版范围）。yfinance 调用 **138 → 21**，`run()` **84.0s → 16.4s**。
+- 完整 Step 11 命令（`ic_rerun_readiness.py --quiet --today 2026-10-01 --out …`，进程起止）：旧 **93.8s**（生产 60s 必杀）→ 新 **16.0s**。健康时 `--quiet`
+  那一行新旧**逐字节相同**；`--out` JSON 除 `generated_at` 外相同；attention 新旧同为 `fg_exposure_gate_forward.cannot_judge` + `dim_ic.weight_history_unknown`
+  （后者是从非 git 的 archive 目录跑的环境差异，新旧相同）。
+- 生产状态：`paper_portfolio_state/` 四个文件与 `pheromone.db` / `-wal` / `-shm` 在全部核对与全套测试前后 sha256 相同，只有 `-shm` 的 mtime 变（`mode=ro` 读锁）。
+  审计钩子拦下的只有：import 期对已存在目录的 `mkdir(exist_ok)`（新旧相同）、新代码退出窗口时那行 INFO 汇总对 `logs/alpha_hive.log` /
+  `alpha_hive_structured.jsonl` 的追加（生产 Step 11 本来就写这两份日志）。同一时段生产 `logs/` 里另有 3 行 today=10-01 的窗口 INFO（07:50:20 / 38 / 52），
+  不是本核对的进程（那段时间本核对只在跑离线的全套与变异）；按文案（只有 `44808fee` 起的代码打这一行）与日期推断来自并行的检查点 / 时间预算会话
+  （其分支已合入 `44808fee`）——**待验证**，未向该会话核实。
+
+**变异**（`44808fee` 的 git archive 副本，不碰工作区；对照组 731 passed / 1 skipped）：S1 四种藏信号（`degraded` 恒 False / `_FWD_DETAIL_KEYS` 丢 `ohlc_window` /
+`status_line` 不看窗口 / `evaluate` 不带计数）、S2 两种（空重取当「不同」/ 排除数不报）、S3 全断判据恒假、S4 过滤后全空当权威、S5 三种（rc=124 文案还原 /
+边界句还原 / 编排器超时改成 120 而常量没跟）、N1 去掉 ISO 校验、N2 `run_replay` 自己开窗口、N3 切片按真值判——**14/14 红**。
+
+**全套**（工作区，`-m "not integration and not network"`）：7834 passed / 1 failed / 2 xfailed / 85 deselected（8 分 27 秒）；唯一失败仍是已知随日期变红的
+`TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`。跑前跑后 `git status --porcelain --ignored` 相同。`ruff --select F821,F401` 改动文件全过。
+
+**生产证据（10-01 扫描，B1 步骤解释器已上线）**：Step 11 14:47:50 启动 → 14:48:50 被 `run_step` 60s 看门狗杀掉；status.json
+`steps_result.step11_ic_rerun_readiness = {"status": "error", "rc": 124, "cohort_boundary": null}`，**没有 `interp_fallback`**（解释器正常出了片段，
+日志没有「步骤解释器不可用」行）——09-30 之后第二次被杀，日志文案仍是旧 else 支的「⚠️ Step 11 异常（exit=124）……代码早于 v0.45.334 或 JSON 不可读」，正是 S5 改的那句。
+
 ### 没做 / 另议
 - **没加 `ic_rerun_readiness` 的时间预算**。成本图推荐的是「F&G 放子进程 + 超时 + SIGTERM 转发 + 先写检查点 JSON + 新 attention id / timings 键」，
   不便宜：要动就绪度的契约面（payload 键、attention 词表、`--quiet` 段序）与 conftest 的进程内隔离（子进程收不到 monkeypatch 与出网闸，
   每条调 `main()` 的测试都会多起一个导 scipy 的子进程）；协作式 deadline / SIGALRM 则会在 `run_replay` 的 finally（`CONFIG.clear()` 与 `update()` 之间）
   里抛出，也打断不了 C 层的 curl 卡顿。本版之后健康路径约 20s、且对窗口长度基本持平。**剩余风险**：09-24 那种整段限流时，整段取数失败 ⇒ 退回逐次直连
-  （= 改动前的取数方式）⇒ 仍可能超时；那条路要靠预算 / 检查点另立一版。
-- 顺带记下未修：`boundary_evidence_status` 排在 F&G 之后、`--out` 只在最后写一次 ⇒ F&G 一慢就会饿死世代边界核对；`_base11` 没有 rc=124 分支
-  （超时落进「代码早于 v0.45.334 或 JSON 不可读」的误导文案）；`cohort_boundary_evidence` 同日多条边界时每份归档解析多遍；共振前瞻约 +0.12s / 扫描日。
+  （= 改动前的取数方式）⇒ 仍可能超时；那条路要靠预算 / 检查点另立一版。复审 S1 之后这条降级至少有机读出口（`ohlc_window` / attention），
+  但超时被杀时 JSON 根本写不出来，出口也就没了——那时只剩 S5 的超时文案。
+- **检查点 / F&G 时间预算这层防御在另一个会话里做**（任务「Give Step 11 a checkpoint and F&G time budget」；该会话的 WIP 提交以 392 编号、已合入 `44808fee`）。
+  两版**谁后合入，谁 rebase 到先合入的那个之上**。
+- 顺带记下未修：`boundary_evidence_status` 排在 F&G 之后、`--out` 只在最后写一次 ⇒ F&G 一慢就会饿死世代边界核对（检查点那版要治的就是它）；
+  ~~`_base11` 没有 rc=124 分支~~（复审 S5 已补文案）；`cohort_boundary_evidence` 同日多条边界时每份归档解析多遍；共振前瞻约 +0.12s / 扫描日。
 
 ## [0.45.390] — 2026-09-30 — 占位（进行中：Alpha Bot 的 macOS 桌面启动器 Alpha Bot.app）
 
