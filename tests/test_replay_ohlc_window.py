@@ -390,6 +390,10 @@ class TestOutOfWindowFallsBackNotTruncates:
         assert narrow, "窗口外请求必须真的走直连（窄区间）取数"
         assert win.out_of_window == 1 and win.served == 0
         assert any("窗口" in m and "外的请求" in m for lvl, m in pp_log.records if lvl == "WARNING")
+        # 二次复审：只有窗口外请求、没有标的退回时，降级标志也必须亮（S1 的另一半）。
+        # 变异「stats() 删掉 `or self.out_of_window > 0`」⇒ 红。
+        st = win.stats()
+        assert st["degraded"] is True and st["fallback_tickers"] == {} and st["out_of_window"] == 1
 
     def test_truncation_would_have_been_visible(self, world):
         """正对照：右端超出窗口的那条请求，直连结果确实比窗口切片多出 bar——上一条的「相同」不是巧合。"""

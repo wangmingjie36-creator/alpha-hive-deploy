@@ -486,6 +486,14 @@ def _ohlc_unavailable(ohlc: Optional[Dict]) -> bool:
             and ohlc.get("direct_empty") == ohlc.get("direct_requests"))
 
 
+def _ohlc_partly_missing(ohlc: Optional[Dict]) -> bool:
+    """有请求退回直连后仍一根 bar 都没拿到（`direct_empty > 0`），但不是 `_ohlc_unavailable` 那种全断。
+    v0.45.391 二次复审：限流的真实形状常是「只有一两只取到了」——served>0 就不算全断，原先这时自证失败会被
+    整句推给评分链 / 配置；现在原因照旧写，但末尾必须说出行情缺失。不设比例阈值：缺一根都可能改出场与仓位。"""
+    return (isinstance(ohlc, dict) and (ohlc.get("direct_empty") or 0) > 0
+            and not _ohlc_unavailable(ohlc))
+
+
 def _selfproof_failure_reason(sp: Dict, ohlc: Optional[Dict] = None) -> str:
     """v0.45.308 独立审查：旧文案只列了「评分链/组合层配置被改动」，但重放读的是**冻结种子**，
     评分链变动本身影响不到 A 的重放——真正会让这里变红的原因更窄也更具体，两层分别列全。
@@ -501,13 +509,19 @@ def _selfproof_failure_reason(sp: Dict, ohlc: Optional[Dict] = None) -> str:
                 f"{ohlc.get('direct_requests')} 次请求也全是空。没有 bar ⇒ 不出场、仓位基数随之偏离，"
                 "复现率低多半由此而来，不能据此判定评分链 / 配置被改或漏跑——等行情源恢复后重跑")
     if sp["decision_rate"] is not None and sp["decision_rate"] >= SELFPROOF_MIN_RATE:
-        return (f"{head}，但决策层（标的/日期/方向）复现 {sp['decision']}/{sp['total']}——开哪只、开哪个方向"
-                "都对得上，对不上的是仓位金额。先查：种子是否对应窗口起点、历史 K 线是否被回溯修订"
-                "（拆股/数据源修订）、波动率来源（pheromone.db 的 signal_archive 是否被回填/覆盖）"
-                "是否与生产一致、成本模型（trading_costs）或组合层仓位/出场参数是否被改动")
-    return (f"{head}，决策层（标的/日期/方向）也仅复现 {sp['decision']}/{sp['total']}——评分链/入场规则/"
-            "组合层配置已被改动、生产某个窗口内日期未被处理（漏跑），或重放机制本身有问题，"
-            "本检验前提不成立")
+        reason = (f"{head}，但决策层（标的/日期/方向）复现 {sp['decision']}/{sp['total']}——开哪只、开哪个方向"
+                  "都对得上，对不上的是仓位金额。先查：种子是否对应窗口起点、历史 K 线是否被回溯修订"
+                  "（拆股/数据源修订）、波动率来源（pheromone.db 的 signal_archive 是否被回填/覆盖）"
+                  "是否与生产一致、成本模型（trading_costs）或组合层仓位/出场参数是否被改动")
+    else:
+        reason = (f"{head}，决策层（标的/日期/方向）也仅复现 {sp['decision']}/{sp['total']}——评分链/入场规则/"
+                  "组合层配置已被改动、生产某个窗口内日期未被处理（漏跑），或重放机制本身有问题，"
+                  "本检验前提不成立")
+    if _ohlc_partly_missing(ohlc):
+        reason += (f"；⚠️ 但这次重放有行情缺失：整段取数 {ohlc.get('fallback')}/{ohlc.get('wide_fetches')} 个标的退回直连，"
+                   f"直连 {ohlc.get('direct_requests')} 次请求里 {ohlc.get('direct_empty')} 次一根 bar 都没有——"
+                   "缺行情本身就会压低复现率，先等行情源恢复后重跑，再按上面的方向查")
+    return reason
 
 
 def _weekly_nav_returns(equity: List[Dict]) -> Dict[Tuple[int, int], float]:

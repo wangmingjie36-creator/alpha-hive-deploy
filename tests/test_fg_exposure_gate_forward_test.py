@@ -516,10 +516,26 @@ class TestStatusLine:
         assert "已被改动" not in r
         assert fwd._selfproof_failure_reason(sp, self._OW) == fwd._selfproof_failure_reason(sp)
         assert "评分链/入场规则/组合层配置已被改动" in fwd._selfproof_failure_reason(sp, None)
-        # 部分直连拿到了 bar ⇒ 不是全断，不改口
-        assert fwd._selfproof_failure_reason(sp, dict(outage, direct_empty=143)) == fwd._selfproof_failure_reason(sp)
-        # 窗口服务过请求 ⇒ 至少有标的拿到了整段行情，不是全断
-        assert fwd._selfproof_failure_reason(sp, dict(outage, served=5)) == fwd._selfproof_failure_reason(sp)
+        # 二次复审：几乎全断（部分直连拿到了 bar / 窗口服务过少数标的）⇒ 不说「OHLC 不可得」，
+        # 原因照旧写在前面，但末尾必须说出行情缺失——限流的真实形状常是只有一两只取到。
+        # 变异「`_ohlc_partly_missing` 恒 False」⇒ 这两格红。
+        base = fwd._selfproof_failure_reason(sp)
+        for partial in (dict(outage, direct_empty=143), dict(outage, served=5)):
+            r = fwd._selfproof_failure_reason(sp, partial)
+            assert r.startswith(base) and "OHLC 不可得" not in r, r
+            assert "但这次重放有行情缺失" in r and f"里 {partial['direct_empty']} 次一根 bar 都没有" in r, r
+        # 金额层分支同样追加
+        sp_amt = dict(sp, decision=10, decision_rate=1.0)
+        r = fwd._selfproof_failure_reason(sp_amt, dict(outage, served=5))
+        assert "仓位金额" in r and "但这次重放有行情缺失" in r
+
+    def test_human_output_shows_the_degraded_window(self, capsys):
+        """二次复审：演练分支不经 status_line，人读输出是唯一出口。变异「`_print_human` 里 `if False:`」⇒ 红。"""
+        fwd._print_human({"mode": "rehearse", "status": "cannot_judge", "reason": "r", "ohlc_window": self._OW})
+        assert "回放行情窗口降级" in capsys.readouterr().out
+        fwd._print_human({"mode": "rehearse", "status": "cannot_judge", "reason": "r",
+                          "ohlc_window": dict(self._OW, degraded=False)})
+        assert "回放行情窗口降级" not in capsys.readouterr().out
 
     def test_not_ready_line_has_no_effect_size(self):
         line = fwd.status_line({"status": "not_ready", "weeks": 3, "next_look_at": 15,
@@ -1307,6 +1323,24 @@ class TestRehearse:
         assert res["selfproof_decision_rate"] == 1.0
         assert res["selfproof_rate"] < 1.0
         assert res["status"] == "cannot_judge"
+
+    def test_selfproof_reason_gets_the_window_counters(self, pp, tmp_path, monkeypatch):
+        """二次复审（S3 在演练路径）：rehearse() 必须把窗口计数交给 `_selfproof_failure_reason`——
+        否则行情全断时演练会把原因推给评分链。变异「rehearse 里丢掉 ohlc 参数」⇒ 红。"""
+        _pp = pp[0]
+        seed = _world(pp, tmp_path)
+        repo = self._synthetic_repo(tmp_path, seed)
+        monkeypatch.setitem(_pp.CONFIG, "entry_score_bull", 9.0)
+        seen = []
+        orig = fwd._selfproof_failure_reason
+
+        def spy(sp, ohlc=None):
+            seen.append(ohlc)
+            return orig(sp, ohlc)
+        monkeypatch.setattr(fwd, "_selfproof_failure_reason", spy)
+        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo)
+        assert res["status"] == "cannot_judge" and len(seen) == 1
+        assert isinstance(seen[0], dict) and seen[0] == res["ohlc_window"] and "served" in seen[0]
 
     def test_unobtainable_start_state_is_cannot_judge(self, pp, tmp_path):
         (tmp_path / "plain").mkdir()
