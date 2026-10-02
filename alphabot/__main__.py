@@ -52,12 +52,20 @@ def main(argv=None) -> int:
                   "生产请先 export ALPHA_HIVE_HOME=<数据根>（与编排器 / MCP 同一个值）", file=sys.stderr)
         svc = AlphaBotService()
         poller = None if args.no_poll else IntradayPoller(svc)
-    app = create_app(svc, poller=poller, port=args.port, start_poller=poller is not None)
+    holder = {}
+
+    def _stop():
+        # 与 Ctrl-C 同一条退出路径：uvicorn 收尾 → lifespan 停盘中轮询
+        holder["server"].should_exit = True
+
+    app = create_app(svc, poller=poller, port=args.port, start_poller=poller is not None, on_shutdown=_stop)
     url = f"http://{args.host}:{args.port}/"
     print(f"alphabot: {url}", file=sys.stderr)
     if args.open:
         webbrowser.open(url)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
+    holder["server"] = server
+    server.run()
     return 0
 
 
