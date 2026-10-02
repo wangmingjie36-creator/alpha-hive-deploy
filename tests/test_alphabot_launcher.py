@@ -16,6 +16,7 @@ import os
 import plistlib
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -117,7 +118,7 @@ class TestBundle:
 
     def test_dialogs_are_activated(self, tmp_path, monkeypatch):
         """osascript 是后台进程：不先 activate，对话框会压在别的窗口后面，看着像双击没反应。"""
-        assert "-e 'activate'" in MA.launch_script(tmp_path, "/usr/local/bin/python3")
+        assert "-e 'activate'" in MA.launch_script(tmp_path, sys.executable)
         seen = []
         monkeypatch.setattr(LA.subprocess, "run", lambda cmd, **k: seen.append(cmd) or
                             subprocess.CompletedProcess(cmd, 0, "选择数据目录…\n", ""))

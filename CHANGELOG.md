@@ -26,6 +26,8 @@
 - `alphabot/launcher.py`：`--stop` 的停止请求失败、`--reset` 遇到坏配置时直接甩 traceback ⇒ 现在打印原因并退出码 1；`macos_app --home` 遇到坏配置同样处理。
 - `alphabot/launcher.py`、`alphabot/macos_app.py`：osascript 是后台进程，对话框可能压在别的窗口后面 ⇒ 弹窗前先 `activate`。启动脚本在没有 `LANG` 时（从 Finder / Dock 启动）补上 `en_US.UTF-8`，已有的值不覆盖。
 - `alphabot/static/app.js`：点「停止服务」后，60 秒一次的 meta 轮询和 hash 路由还在跑；同端口再起服务时，旧页面会把「服务已停止」冲掉、页脚重新填回来（Playwright 实测复现）⇒ 停止后清掉定时器、摘掉路由、作废进行中的渲染。
+- `alphabot/macos_app.py`：启动脚本里两条报错写成 `$PY（…` / `$REPO。`，macOS 自带 bash 3.2 会把全角字符首字节并进变量名，变量被吞成空串、弹窗与日志里路径丢失并出现乱码（`test_missing_python_fails_loudly` 在本机红、Linux CI 不红）⇒ 改成 `${{PY}}` / `${{REPO}}`（f-string 里要双写花括号）。
+- `tests/test_alphabot_launcher.py`：`launch_script` 的入参把 `/usr/local/bin/python3` 写死成字符串，被 `test_tests_use_running_interpreter` 守卫拦下（CI pytest 红）⇒ 改 `sys.executable`。
 
 ### 注意
 - 启动器**不核对**所选目录里有没有卖权账本：账本目录名只许卖权模块提及（`tests/test_sell_strike_integration.py` 火墙，本次实测会红），选错了页面账本 / 结果页会显示账本不存在，`--reset` 后重选。

@@ -76,11 +76,11 @@ alert() {{
   echo "$(date '+%F %T') $1" >>"$LOG_DIR/launcher.log"
 }}
 if [ ! -x "$PY" ]; then
-  alert "找不到 $PY（Alpha Hive 用 Homebrew 的 Python 3.11）。换了 Python 的话：make alphabot-app PYTHON=新路径"
+  alert "找不到 ${{PY}}（Alpha Hive 用 Homebrew 的 Python 3.11）。换了 Python 的话：make alphabot-app PYTHON=新路径"
   exit 1
 fi
 if ! cd "$REPO" 2>/dev/null; then
-  alert "进不去代码目录 $REPO。仓库挪过位置就在新位置重跑 make alphabot-app；若是权限问题：系统设置 → 隐私与安全性 → 文件与文件夹 → Alpha Bot → 打开「桌面文件夹」。"
+  alert "进不去代码目录 ${{REPO}}。仓库挪过位置就在新位置重跑 make alphabot-app；若是权限问题：系统设置 → 隐私与安全性 → 文件与文件夹 → Alpha Bot → 打开「桌面文件夹」。"
   exit 1
 fi
 if [ ! -f alphabot/launcher.py ]; then
