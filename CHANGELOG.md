@@ -5,7 +5,14 @@
 
 ---
 
-## [0.45.393] — 2026-10-02 — 占位（进行中：check-old 分类表补 alphabot/scripts/vercel.json 三个新代码项）
+## [0.45.393] — 2026-10-02 — Fixed：`migrate_data_root.py` 分类表补 `alphabot` / `scripts` / `vercel.json`，check-old 不再因新代码项无故报红
+
+### Fixed
+- `data_backup/migrate_data_root.py`：`SKIP_EXACT` 登记三个别的会话新增的被跟踪代码项（Alpha Bot 前端 v0.45.388、受版本控制的编排器 v0.45.353、Vercel 配置 v0.45.389）。此前它们被判 UNKNOWN，check-old `ok:false`（阶段 5 验收 09-29 / 10-02 两次撞上）。纯数据面无变化：`written_outside_git` / `reappeared` 均空。
+
+### Added
+- `tests/test_migrate_data_root.py::test_every_tracked_top_level_entry_is_classified`：枚举 `git ls-files` 的全部顶层条目，任一落入 UNKNOWN 即红。把「新增顶层代码项没人登记」从生产上的 check-old 红灯前移成测试红灯。变异验证：还原本次分类表改动，该测试红并点名 `['alphabot', 'scripts', 'vercel.json']`；恢复后 31/31 绿。
+
 
 ## [0.45.392] — 2026-10-02 — Fixed：`ic_rerun_readiness` 防御层——F&G 子状态放子进程 + 时间预算、F&G 之前先写检查点 `--out`、SIGTERM 连带子进程；Step 11 再超时也不丢世代边界核对
 

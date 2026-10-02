@@ -95,6 +95,8 @@ SKIP_EXACT = {
     # 代码目录
     "tests": "代码", "swarm_agents": "代码", "templates": "代码资源", "prompts": "代码资源",
     "experiments": "代码", "data_backup": "代码", "alpha_hive_bot": "代码", "marketing": "文档",
+    "alphabot": "代码（Alpha Bot 前端，v0.45.388）", "scripts": "代码（受版本控制的编排器，v0.45.353）",
+    "vercel.json": "代码配置（Vercel，v0.45.389）",
     "对比🆚": "文档",
     # 其它项目
     "alpha-hive-web": "独立前端项目", "mcp-servers": "独立 MCP 项目",
