@@ -99,6 +99,9 @@ class TestBundle:
             info = plistlib.load(f)
         assert info["CFBundleIdentifier"] == MA.BUNDLE_ID
         assert info["CFBundleShortVersionString"] == __version__
+        # 没有它，Finder 双击在 Apple 芯片上把脚本按 x86_64 起，arm64 的 numpy 载不了（0.45.399 实测）；
+        # 测试从终端跑是原生 arm64，端到端那条看不出来，只能钉在这里
+        assert info["LSArchitecturePriority"][0] == "arm64"
         exe = c / "MacOS" / info["CFBundleExecutable"]
         assert exe.is_file() and os.access(exe, os.X_OK)
         icon = c / "Resources" / (info["CFBundleIconFile"] + ".icns")

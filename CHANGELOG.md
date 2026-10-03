@@ -5,7 +5,26 @@
 
 ---
 
-## [0.45.399] — 2026-10-03 — 占位（进行中：Alpha Bot.app 双击后被 LaunchServices 以 x86_64/Rosetta 启动，numpy arm64 载入失败）
+## [0.45.399] — 2026-10-03 — Fixed：Alpha Bot.app 在 Apple 芯片上双击被按 x86_64（Rosetta）启动 ⇒ arm64 的 numpy 载入失败、服务起不来；Info.plist 加 `LSArchitecturePriority`
+
+用户第一次双击 0.45.397 生成的 .app：弹窗「Alpha Bot 服务启动失败（退出码 1）」，日志末尾 numpy 报
+`_multiarray_umath…so (mach-o file, but is an incompatible architecture (have 'arm64', need 'x86_64'))`。启动器的「服务先死就立即弹窗附日志」按设计工作了。
+
+**根因**：.app 的主程序是 bash 脚本，LaunchServices 从可执行文件头判断架构，脚本没有 Mach-O 头 ⇒ 在 Apple 芯片上按 x86_64（Rosetta）起；
+子进程继承架构偏好 ⇒ 通用版 `/usr/local/bin/python3`（x86_64 + arm64）也跑成 x86_64 ⇒ 用户 site 里只有 arm64 的 numpy 载不了。
+探针实测（真生成器造的 .app，经 `env -i open -W` 启动）：现状 ⇒ shell / python 都是 x86_64、numpy 失败；加 `LSArchitecturePriority` 或脚本里 `arch -arm64` ⇒ 都是 arm64、numpy 2.4.2 正常。
+
+**0.45.397 的探针为什么漏了**：它只验了 starlette 能 import——纯 Python 包，哪种架构都能载，**证明不了架构**。验「Finder 启动后环境对不对」要载一个**带编译扩展**的包。
+测试从终端跑是原生 arm64，端到端那条同样看不出来。
+
+### Fixed
+- `alphabot/macos_app.py`：`info_plist()` 加 `LSArchitecturePriority = ["arm64", "x86_64"]`。选它而不是脚本里 `exec /usr/bin/arch -arm64`：声明式、Intel 机上自动退回 x86_64（`arch -arm64` 在 Intel 机上直接失败）。
+  修后用真生成器（只改 bundle id 与 python）经 LaunchServices 实测：arm64、numpy 2.4.2。
+- `tests/test_alphabot_launcher.py::TestBundle::test_bundle_is_complete`：钉 `LSArchitecturePriority[0] == "arm64"`。变异实测：删掉这个键 ⇒ `KeyError` 红。
+  只能钉在 plist 上：CI / 终端里跑的进程本来就是原生架构，端到端测不出来。
+
+### 注意
+- 已装的 `~/Applications/Alpha Bot.app` 要重新生成才拿到新 Info.plist（启动逻辑每次从仓库读，但 Info.plist 是生成时写死的）。
 
 ## [0.45.397] — 2026-10-03 — Fixed：Alpha Bot 启动器测试在 Mac 上两红（沙箱 HOME 藏掉子进程的用户 site-packages；真 osascript 模态弹窗卡到超时、被杀后对话框留在屏幕上）——都是测试侧，生产不受影响
 

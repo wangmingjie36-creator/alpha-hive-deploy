@@ -56,6 +56,9 @@ def info_plist() -> dict:
         "CFBundleShortVersionString": __version__,
         "CFBundleVersion": __version__,
         "LSMinimumSystemVersion": "11.0",
+        # 主程序是 bash 脚本，LaunchServices 看不出架构 ⇒ Apple 芯片上按 x86_64（Rosetta）起，子进程随之
+        # 优先 x86_64 ⇒ 通用版 python3 也跑成 x86_64，载不了只有 arm64 的 numpy（用户 site，实测）。Intel 机上自动退回 x86_64
+        "LSArchitecturePriority": ["arm64", "x86_64"],
         "NSHighResolutionCapable": True,
         "LSApplicationCategoryType": "public.app-category.finance",
     }
