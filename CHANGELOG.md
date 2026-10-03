@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.397] — 2026-10-03 — 占位（进行中：Alpha Bot 启动器测试在 Mac 上两红——沙箱 HOME 藏掉用户 site-packages、真 osascript 模态弹窗卡到超时）
+
 ## [0.45.394] — 2026-10-03 — 占位（进行中：阶段 6 ① 「数据被 git 跟踪/提交即红」守卫）
 
 ## [0.45.393] — 2026-10-02 — Fixed：`migrate_data_root.py` 分类表补 `alphabot` / `scripts` / `vercel.json`，check-old 不再因新代码项无故报红
