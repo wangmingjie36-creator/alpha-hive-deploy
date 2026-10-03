@@ -79,6 +79,8 @@ class TestInterpFallback:
     @pytest.mark.parametrize("frag", [
         {"status": "failed", "duration_seconds": 7, "interp_fallback": "解释器超时（>30s）"},
         {"status": "success", "duration_seconds": 7, "interp_fallback": "orchestrator_steps.py 不存在"},
+        # tool-step：生产上到不了这里——Step 6 的分析跑在 Step 10–15 之前（换基后复审）。
+        # 这一格只钉「规则对任何步骤名都通用」，留给将来若加末轮分析时用，不代表 10–15 的兜底今天会出告警。
         {"status": "interpreter_unavailable", "rc": 1, "interp_fallback": "x" * 1000},
     ], ids=["failed", "success", "tool-step"])
     def test_one_medium_naming_the_step(self, tmp_path, frag):

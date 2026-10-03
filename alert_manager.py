@@ -167,7 +167,8 @@ class AlertAnalyzer:
                 ))
             elif step_name == 'step2_hive_analysis' and step_result.get('status') == 'success_with_warning':
                 # v0.45.386（编排器 B2）：rc=1 但主流程确实跑完 ⇒ 解释器记 success_with_warning（此前是 failed，
-                # 且 step4_dashboard 也记 failed，共两条 P1）。这是 ML 常数日（09-24/25）唯一的告警来源，
+                # 且 step4_dashboard 也记 failed，共两条 P1）。这是 rc=1 跑完的日子（09-24 / 09-25；09-25 是 ML 近常数，
+                # 09-24 的 ML 守卫判 ok、退出码 1 的原因待验证）唯一的告警来源，
                 # 不许因为标签更准了就消失；warning 取值 ml_model_constant / rc1_after_completion_unexplained 都报。
                 self.alerts.append(Alert(
                     AlertLevel.HIGH,
@@ -184,7 +185,9 @@ class AlertAnalyzer:
                     ["step_warning", step_name]
                 ))
             if step_result.get('interp_fallback'):
-                # v0.45.386（编排器 B）：步骤解释器不可用、按退出码兜底记——摘要缺失，本身就是要人看的事（谁会红：这条）
+                # v0.45.386（编排器 B）：步骤解释器不可用、按退出码兜底记——摘要缺失，本身就是要人看的事（谁会红：这条）。
+                # ⚠️ 生产上只有 Step 2/4 走得到这里：Step 6（本分析）跑在 Step 10–15 之前，读的 status.json 里还没有它们的片段；
+                # 10–15 的兜底只留编排器日志 ERROR + 最终 status.json 的 interp_fallback，没有告警。
                 self.alerts.append(Alert(
                     AlertLevel.MEDIUM,
                     f"【P2】步骤解释器不可用，{step_name} 按退出码兜底记",
