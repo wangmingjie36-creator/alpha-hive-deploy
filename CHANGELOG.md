@@ -5,6 +5,33 @@
 
 ---
 
+## [0.45.400] — 2026-10-03 — Fixed：Step 11 的 F&G 子进程已按时跑完、只是父进程自己拖过预算时，结果不再被丢弃并误报「超出时间预算、已终止」
+
+> 未在 main 上占号（本会话推送由用户执行），号取自写这条时 origin/main 顶部 399 之上；合入前按「并发开工必须先占号」再核一次。
+
+二次检查（对本轮上线的 362 / 369 / 370 / 385 / 386 / 391 / 392 做独立集成审查，两个代理 + 当前 main 全套）实测出的唯一一个 bug，在 v0.45.392：
+`_FgChild.result()` 用 `communicate(timeout=max(0, deadline − now))` 收子进程结果。CPython 3.11 在 timeout 已到 0 时**不看子进程死活、先判超时就抛**
+`TimeoutExpired` ⇒ 子进程早已正常退出、结果就在管道里，也会被渲染成 `budget_exceeded`「F&G 子进程跑了 Xs 仍未结束，已终止」，attention 还把原因指向
+「行情源限流或重放变慢」。触发条件：父进程自己的部分（assess / resonance / dim IC / 世代边界核对 / 写检查点）跑过预算、而 F&G 子进程已按时跑完。
+实测（真实数据、`--today 2026-09-10`，子进程单独 0.57s）：`--budget-seconds 0` 给出正常进度行，`--budget-seconds 2` 却报超预算；进入 `result()` 时子进程 `poll()=0`。
+**今日生产无影响**：父进程那部分约 5s，预算 45s。
+
+### Fixed
+- `ic_rerun_readiness._FgChild.result()`：子进程已退出（`poll() is not None`）时，超时取 `max(剩余, _FG_KILL_GRACE_SECONDS)`——只给读完管道的宽限，
+  不用 `None`（孙进程若继承管道，读到 EOF 可能遥遥无期，同 `terminate()` 的注释）。子进程还活着时行为不变（照旧 `budget_exceeded` + 终止）。
+
+### Added
+- `tests/test_ic_rerun_fg_budget.py::TestChildOutcomes::test_finished_child_is_kept_when_only_the_parent_overran`：子进程在预算内跑完、父进程睡过预算再收结果 ⇒
+  原样转交。变异「删掉 `poll() is not None` 那段」⇒ 红（在 git archive 副本上做，对照 18 passed / 变异 1 failed）。
+
+### 验证
+- `test_ic_rerun_fg_budget` / `test_ic_rerun_readiness` / `test_step_contract_ic_rerun` 180 passed；ruff F821/F401 全过。
+- 同一轮二次检查其余结论（无缺陷）：当前 main `5b2b632f` 全套 7978 passed / 1 failed（已知 TestCoverageHorizon）；B2 编排器整脚本在 `/bin/bash` 3.2、
+  类 launchd 环境下跑遍 rc 0/1/124/同步失败/解释器缺失或乱码，无 unbound / 语法错，B 删掉的变量零引用；10-05 部署 B2 在副本上 `deployed` 47ff2d75→00d7f74b、
+  关卡全过，周末一致性守卫不会误红；10-02 真实产物上 `gex_state` 的全部读者（日报 / 网站 / ML 报告 / MCP / signal_archive / deep）与状态一致，BILI 显示不可得；
+  Oracle `unavailable` 已在 Queen 的 `PROXY_SOURCES`；391/392 在真实数据上 16s、检查点被最终版覆盖、私有 TMPDIR 清空，父进程 SIGTERM 后无残留子进程。
+- 未修、已知：父进程被 SIGKILL 时 `ic_rerun_fg_child_*/fg_gate_fwd_*` 会留下（392 已登记）；每周任务 SKILL.md 第 81 行仍未加 `--budget-seconds 0`（392 登记的合入后跟进，改仓库外文件要用户批准）。
+
 ## [0.45.399] — 2026-10-03 — Fixed：Alpha Bot.app 在 Apple 芯片上双击被按 x86_64（Rosetta）启动 ⇒ arm64 的 numpy 载入失败、服务起不来；Info.plist 加 `LSArchitecturePriority`
 
 用户第一次双击 0.45.397 生成的 .app：弹窗「Alpha Bot 服务启动失败（退出码 1）」，日志末尾 numpy 报
