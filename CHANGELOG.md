@@ -119,7 +119,29 @@
   全仓普查：其余 6 个改 HOME 的测试文件只起 git / bash / 桩，不起真解释器。
 
 
-## [0.45.394] — 2026-10-03 — 占位（进行中：阶段 6 ① 「数据被 git 跟踪/提交即红」守卫）
+## [0.45.394] — 2026-10-03 — Changed：数据根迁移阶段 6 ①②③——代码仓库不再跟踪生产数据（3125 个文件解除跟踪，历史保留）+ 「数据被跟踪即红」守卫
+
+阶段 6 的 ④（撤日报提交 / 推送链、收窄根总闸）**不在本版**，见文末「未做」。
+
+### Added
+- `tests/test_no_data_tracked_in_git.py`：`git ls-files`（含暂存区）的每个顶层条目过一遍 `migrate_data_root.classify`，MOVE / MOVE_DB 即红——复用迁移工具的分类表，不另抄清单。失败信息按规则归并。反向自证 3 条（合成仓库：纯代码绿 / 暂存数据文件红 / 被 `.gitignore` 挡住的数据不红、`add -f` 硬塞才红）。另有 `test_gitignore_covers_every_move_rule`（漏补忽略行即红）与 `test_gitignore_move_rules_are_anchored_to_repo_root`（不锚定的 `index.html` 会吞掉 `alpha-hive-web/index.html`）。变异：改判据恒不命中 ⇒ 两条合成测试红；去掉一条锚定 ⇒ 锚定测试红；少补 `/rss.xml` ⇒ 覆盖测试红。
+- `tests/test_paper_portfolio_no_import_mkdir.py`（2 条，变异各红）。
+
+### Changed
+- **解除跟踪**（`git rm --cached`，工作区文件不动、历史保留，用户 2026-09-24 定「不清历史」）：MOVE 规则命中的 1596 个顶层条目 / 3107 个文件，另 ③ 的 7 份旧 `pheromone.db.bak*` / `backup_corrupted_20260406` 与 11 个遗留 json / png / html / txt。索引 3712 → 587 个文件。
+- `.gitignore`：数据块由 MOVE 规则**生成**并全部锚定到仓库根（前导 `/`）；删除 v0.45.145 的 `!ml_model_history/*.json` 反向例外（快照整个去数据根，耐久性靠 `data_backup/export.py` 的 STATE_DIRS）。
+- `tests/test_ml_model_guard.py`：「快照必须进 git」两条旧断言改成阶段 6 之后的不变式（整目录忽略且无反向例外；写入方自建目录，真调 `snapshot_model_file` 验证）。
+
+### Fixed
+- `paper_portfolio.py`：删除 import 期 `STATE_DIR.mkdir(exist_ok=True)`，改在 `_atomic_write_text` / `_append_jsonl` 写入时建目录。**解除跟踪后才暴露的潜伏问题**：该目录此前被 git 跟踪、仓库根里本来就有，import 期 mkdir 从未做过事；干净检出里它在 pytest 收集期（早于任何 env 隔离）把空目录建进仓库根，根总闸 teardown 报 `added: paper_portfolio_state`。**只在干净克隆里才红**——worktree 里被解除跟踪的文件还留在磁盘上，会把这类问题全部掩盖，所以本版验证一律在干净克隆里跑全套。
+
+### 验证
+- 干净克隆（`git clone --no-hardlinks`，磁盘上没有任何被解除跟踪的文件）全套：7917 passed；2 failed + 1 error 中，`test_alphabot_launcher`（本机缺 starlette，origin/main 上同样红）与 `TestCoverageHorizon`（日历覆盖不足，设计内周期性变红）与本版无关，error 即上面 `paper_portfolio` 那条，已修。
+- 生产 checkout 快进模拟（临时克隆）：快进会把被解除跟踪的数据从工作区**删掉**（`report_snapshots` 1441 个文件、旧备份库、`NVDA_raw.json`），未跟踪文件不动；被跟踪文件有本地修改时快进**中止**——所以合入前必须先把冻结文件还原、旧备份先归档到 `~/alpha-hive-data/_archive/`。
+
+### 未做（④，下一版）
+- 撤 `report_deployer.auto_commit_and_notify` 的白名单提交 + `production_sync.push_main`、`REPORT_ARTIFACT_PATHS` / `_ARTIFACT_*` 及其 13 个测试文件、`alert_manager` / `scan_timing` / `alpha_hive_daily_report` / `orchestrator_steps`（Step 5 读 `git_push_success`）里的对应字段、收窄根总闸。**此前我断言「②必须与④同版」是错的**：数据被忽略后 `git status` 不再列出它们，日报提交走「工作目录干净」分支，推送报 `nothing_to_push` 成功，不会报错。④ 改动面大（读者遍及告警 / 状态 / 编排器 Step 5），拆开单独做、单独验证。
+
 
 ## [0.45.393] — 2026-10-02 — Fixed：`migrate_data_root.py` 分类表补 `alphabot` / `scripts` / `vercel.json`，check-old 不再因新代码项无故报红
 
