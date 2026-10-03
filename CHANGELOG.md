@@ -34,6 +34,7 @@
 ### Changed
 - `CLAUDE.md`「用户偏好」Python 硬规则：`/usr/local/bin/python3` 的来源由「Homebrew」更正为 python.org 安装包（framework 版；本机 `/usr/local` 下没有 `Cellar` / `Homebrew`，不是 Homebrew 前缀），
   并补一条：包分装两处、部分只在用户 site ⇒ 测试改 HOME 后起真解释器要钉 `PYTHONUSERBASE`。
+- `alphabot/__init__.py`：`__version__` 0.45.390 → 0.45.397（推送后补：.app 的 `CFBundleShortVersionString` 读它，生成出来显示的还是 390）。
 - `alphabot/macos_app.py`：「找不到 Python」弹窗原写「Alpha Hive 用 Homebrew 的 Python 3.11」——事实错，且照做走不通：`brew install python@3.11` 装进
   `/opt/homebrew`，不会恢复 `/usr/local/bin/python3`；本机 Homebrew 现成的 `python3.12` 一个依赖都没有（starlette / uvicorn / numpy / pandas 全缺，实测），
   按「换了 Python 就 `PYTHON=新路径`」做 ⇒ 服务起来即死、换成第二个弹窗。现改为不写厂商名（写了还会过时），只说恢复要什么：装回同一个解释器（扫描 / MCP 也用它）；
