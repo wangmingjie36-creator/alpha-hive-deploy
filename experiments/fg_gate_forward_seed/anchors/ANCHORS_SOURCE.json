@@ -1,0 +1,113 @@
+{
+  "anchors": {
+    "2026-09-16": {
+      "commit": "2bcd81a0c64ffef8cbb1629ba46ae764e41068f6",
+      "files": {
+        "closed_trades.jsonl": {
+          "bytes": 20540,
+          "sha256": "dc9bfcb17a0b309a7a40aecb901e64b05ef176312ce29762512dcf0b15e9e3af"
+        },
+        "meta.json": {
+          "bytes": 1226,
+          "sha256": "fd959ae2ebc7a3b5eae2425e2c09bb4a66be21ebea17994aeccff2a5e5ba296e"
+        },
+        "positions.jsonl": {
+          "bytes": 3550,
+          "sha256": "aea8ed5fa9c85231e7faff4808d79683e93e572a4b71a4a7c0df241829352a00"
+        }
+      }
+    },
+    "2026-09-17": {
+      "commit": "1d36076d86d712d61b65949d8c95e82a378cd096",
+      "files": {
+        "closed_trades.jsonl": {
+          "bytes": 20868,
+          "sha256": "639cbb21e9c35a66cf15667bfd82b54c9a0ec1b64922f5948e4bd2ddd75f9cac"
+        },
+        "meta.json": {
+          "bytes": 1226,
+          "sha256": "fc05fa793bc8ad7bae72b46b304d4cade9cb7f960ef951a287620d3c0678b5b4"
+        },
+        "positions.jsonl": {
+          "bytes": 4007,
+          "sha256": "aa0e3994aa52d30db2390f7ca9aca603b41c0675fa75a4567787aa7d915cc389"
+        }
+      }
+    },
+    "2026-09-18": {
+      "commit": "7c06bafaf59578131783236ffe96e264028694be",
+      "files": {
+        "closed_trades.jsonl": {
+          "bytes": 20868,
+          "sha256": "639cbb21e9c35a66cf15667bfd82b54c9a0ec1b64922f5948e4bd2ddd75f9cac"
+        },
+        "meta.json": {
+          "bytes": 1226,
+          "sha256": "63a2084632fa68e1122cbf0502525c849ed465efe19a251a2f381d9743967e11"
+        },
+        "positions.jsonl": {
+          "bytes": 5085,
+          "sha256": "d2fc3f2378bc7c5f13d4eeee2135105e58444b3591998fe3ffb5d4cc15c1f2dd"
+        }
+      }
+    },
+    "2026-09-22": {
+      "commit": "8c2fb07c379a995100f3ae4e7de7ba8306788669",
+      "files": {
+        "closed_trades.jsonl": {
+          "bytes": 21537,
+          "sha256": "8d4a373f3bc0ef469cc1ed839da2a8bb6d693061b067f92882c867555e32a314"
+        },
+        "meta.json": {
+          "bytes": 1225,
+          "sha256": "c6f3f77ab396c066062d31e6ed41b726cb22749be05543db3125bd03e002bd57"
+        },
+        "positions.jsonl": {
+          "bytes": 5105,
+          "sha256": "935fc6b0681402b891f18238a7ab01539fbed4ec616fefe4000e355e15d78068"
+        }
+      }
+    },
+    "2026-09-24": {
+      "commit": "9984c52592190e3658a0500c956d0e12910f22a6",
+      "files": {
+        "closed_trades.jsonl": {
+          "bytes": 21537,
+          "sha256": "8d4a373f3bc0ef469cc1ed839da2a8bb6d693061b067f92882c867555e32a314"
+        },
+        "meta.json": {
+          "bytes": 1225,
+          "sha256": "ed0ee400cc7c95ce0ad0f77e4f89aeb7817516fc812b8a2d7afef8843afcc3a9"
+        },
+        "positions.jsonl": {
+          "bytes": 5105,
+          "sha256": "935fc6b0681402b891f18238a7ab01539fbed4ec616fefe4000e355e15d78068"
+        }
+      }
+    },
+    "2026-09-25": {
+      "commit": "775965826a579f98a13fb61beb739a58b42a0e65",
+      "files": {
+        "closed_trades.jsonl": {
+          "bytes": 21537,
+          "sha256": "8d4a373f3bc0ef469cc1ed839da2a8bb6d693061b067f92882c867555e32a314"
+        },
+        "meta.json": {
+          "bytes": 1225,
+          "sha256": "0e0ea944012ed1589864ba39dc0b86e5f3f5fe8a8e2e6f50f5e8d5f547ab77a3"
+        },
+        "positions.jsonl": {
+          "bytes": 5105,
+          "sha256": "935fc6b0681402b891f18238a7ab01539fbed4ec616fefe4000e355e15d78068"
+        }
+      }
+    }
+  },
+  "git_path": "paper_portfolio_state",
+  "purpose": "F&G 敞口门前瞻检验（预注册）逐日重锚的冻结锚点（代码仓库时代）；v0.45.401 事后修订引入，见脚本文件头「自证」段",
+  "rule": "每个 last_run_date 取按时间顺序最后一个提交",
+  "schema": 1,
+  "unreadable_commits": 0,
+  "verify": "git show <commit>:paper_portfolio_state/<文件> | shasum -a 256",
+  "window_start": "2026-09-16"
+}
