@@ -1661,6 +1661,11 @@ class _FgChild:
         if self.proc is None:
             return _fg_runner_result("child_failed", f"无法启动 F&G 子进程（{self.spawn_error}）")
         timeout = None if self.deadline is None else max(0.0, self.deadline - time.monotonic())
+        if timeout is not None and self.proc.poll() is not None:
+            # 子进程已经按时跑完、结果就在管道里：父进程自己的部分拖过了预算，不能拿它丢掉 F&G 的结果——
+            # CPython 的 communicate(timeout=0) 不看子进程死活、先判超时就抛（二次检查实测）。
+            # 只给读完管道的宽限，不用 None：孙进程若继承了管道，读到 EOF 可能遥遥无期（同 terminate 的注释）。
+            timeout = max(timeout, _FG_KILL_GRACE_SECONDS)
         try:
             raw, _ = self.proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
