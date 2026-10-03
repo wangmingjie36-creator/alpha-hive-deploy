@@ -239,8 +239,15 @@ def _sandbox_bytes(root):
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
-def _no_window(dates, seed):
+def _no_window(dates, seed, extra_seeds=()):
     return contextlib.nullcontext()
+
+
+def _seed_only_plan(seed, dates, *_a, **_k):
+    """v0.45.401 起 `run()` / `rehearse()` 要从生产状态历史建逐日重锚方案（读数据备份仓库 / 代码仓库）。
+    本文件测的是回放 OHLC 窗口，与锚点无关：给「只有种子一个锚点」的方案（一段到底 = 改动前的连续重放），
+    既不读真实仓库历史，也不改本文件的测试范围。逐日重锚自己的测试在 `test_fg_exposure_gate_forward_test.py` 第 16 节。"""
+    return fwd._anchor_plan(seed, [], dates)
 
 
 def _spy_windows(w):
@@ -437,9 +444,13 @@ class TestScopeIsCleared:
         _write_production_records(world)
         monkeypatch.setattr(pp, "_PRICE_CACHE", {})
         monkeypatch.setattr(fwd, "load_seed", lambda *a, **k: SEED)
+        monkeypatch.setattr(fwd, "_forward_anchor_plan", _seed_only_plan)
         monkeypatch.setattr(fwd, "FORWARD_START", SINCE)
         res = fwd.run(today=BEFORE)
         assert res["mode"] == "forward" and res["n_dates"] == len(DATES)
+        # v0.45.401：先证明窗口真的开过——`run()` 提前返回（如锚点不可用 ⇒ cannot_judge）时下面两句恒真，
+        # 401 接线时这条就这样空绿过一次（`run()` 读不到沙箱里的备份仓库，根本没走到重放）。
+        assert "ohlc_window" in res and res["ohlc_window"]["wide_fetches"] > 0, res.get("reason")
         assert pp._REPLAY_OHLC_WINDOW is None
         assert pp._PRICE_CACHE == {} and pp._OHLC_FULL == {}
 
@@ -561,6 +572,7 @@ class TestDegradedWindowIsMachineReadable:
     def fwd_run(self, world, monkeypatch):
         _write_production_records(world)
         monkeypatch.setattr(fwd, "load_seed", lambda *a, **k: SEED)
+        monkeypatch.setattr(fwd, "_forward_anchor_plan", _seed_only_plan)
         monkeypatch.setattr(fwd, "FORWARD_START", SINCE)
 
         def _run():
@@ -652,6 +664,7 @@ class TestEquivalenceOnSyntheticData:
         _write_production_records(world)
         manifest = {"source": {"commit": "synthetic"}, "seed_last_run_date": "2026-08-11"}
         monkeypatch.setattr(fwd, "build_seed_from_git", lambda since, repo_root=None: (SEED, manifest))
+        monkeypatch.setattr(fwd, "_rehearse_anchor_plan", _seed_only_plan)
         monkeypatch.setattr(pp, "_PRICE_CACHE", {})
         monkeypatch.setattr(fwd, "_replay_ohlc_scope", _no_window)
         base = fwd.rehearse(SINCE, BEFORE)
@@ -683,6 +696,7 @@ class TestPremiseScript:
         _write_production_records(world)
         monkeypatch.setattr(pp, "_PRICE_CACHE", {})
         monkeypatch.setattr(fwd, "load_seed", lambda *a, **k: SEED)
+        monkeypatch.setattr(fwd, "_forward_anchor_plan", _seed_only_plan)
         monkeypatch.setattr(fwd, "FORWARD_START", SINCE)
         mod = _load_premise()
         monkeypatch.setattr(mod, "_load_fwd", lambda: fwd)
