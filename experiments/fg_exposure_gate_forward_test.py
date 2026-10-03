@@ -53,6 +53,26 @@ F&G 挪到它真正适用的层次：组合层的仓位敞口控制——极度�
       它只写不读，播进去会让窗口前的周也进统计量。
       **未动**：窗口、变体 A/B、统计量、检视点（15/30）、α、盲化、SELFPROOF_MIN_RATE、四元组键。
       修订时前瞻样本仅 3 个快照日，且从未计算或查看任何效应量，修订不受结果影响。
+      【事后修订 v0.45.396，2026-10-03 —— 改的是四元组第四元的**取法**，不是判定规则】
+      第四元原文写 `round(size_usd,2)`。`ClosedTrade` 没有 `size_usd`，实现对已平仓取 `shares × entry_price`、
+      对在场仓位读 `size_usd`，假定两者对同一笔相等——不相等：下单时 `shares = round(size_usd/entry_price, 4)`，
+      取整误差 × entry_price 让两者差 1~6 分。同一笔一边已平、一边仍在场时键就错开，而这每天都会发生：
+      Step 11 在生产当天扫描**之后**跑，生产已把当天到期的仓位平掉，A 的重放窗口 [FORWARD_START, today)
+      不含当天。09-30 12/13、10-01 14/15、10-02 13/16 的精确层失败**全部**是这一类——10-02 那 3 笔
+      （ABBV/MU/NVDA 当天 TIME 止损）两边 `shares`、`entry_price` 逐位相同，只是一边读 `size_usd`
+      4062.39/1016.64/1176.80、一边算出 4062.40/1016.61/1176.81；次日 A 重放到那天、两边都已平仓，键又对上
+      （today=10-03 时 19/19）。`--rehearse` 同因：历史窗口的仓位在生产里早已平仓、在演练里仍在场
+      （09-09~16 2/5、09-14~19 5/13、09-16~19 3/8；v0.45.297 当时双方都在场，所以是 5/5、13/13、8/8）。
+      修订 = 两边一律取 `round(shares × entry_price, 2)`：两种记录都有的两个字段、同一个算式，键与仓位是否
+      已平仓无关。分辨率是 max(1 分, entry_price × 1e-4)（$1000 的票约 10 分）——账本里 `shares` 只存 4 位
+      小数，已平仓那一行本来就只有这个精度，原实现对已平仓一直如此，只是在场仓位从 1 分降到同一水平；没有
+      容差参数，两边仍是精确相等。修订后上面三个演练窗口回到 5/5、13/13、8/8，10-02 的前瞻窗口 16/16。
+      同版只增诊断、不进判定：自证另报 `a_only_entries`（A 开了、生产没开的仓位数，决策层三元组）——
+      09-24 生产被 yfinance 限流、当天不出场也不开仓，A 开了 CVX/NFLX/TMUS/VZ 四笔空头；召回式的自证
+      看不见它们，但它们（10-08 前）平仓后会把已实现盈亏带进 A 的仓位基数，金额层届时会**真实地**掉下来。
+      **未动**：窗口、变体、统计量、检视点、α、盲化、SELFPROOF_MIN_RATE、分母（仍只数生产记录）、决策层定义。
+      修订时只重放了 A（诊断脚本与 `--rehearse`），没有跑 B、没有算或看任何周度差 / 效应量；`decide()` 自
+      FORWARD_START 起从未走到出统计量的分支（合格周数远不足 15）。修订不受结果影响。
 统计量 两个变体各自的 `equity_curve.jsonl` 按 ISO 周取"本周首个交易日 NAV"，相邻两个
       取值点间的百分比变化即该周收益率；ΔNAV_pct = B周收益率 − A周收益率。
       非极端 F&G 日两个变体的仓位应逐笔相同 ⇒ 多数周 ΔNAV_pct=0——这是**预期正常**，
@@ -434,11 +454,20 @@ def _replay_variant(config_overrides: Dict, state_dir: Path, dates: List[str],
 
 
 def _entry_key(t: Dict) -> Tuple[str, str, str, float]:
-    """建仓市值：`Position`（仍在场）直接有 `size_usd`；`ClosedTrade`（已平仓）没有这个字段，
-    只能用 `shares × entry_price` 反推——两者对同一笔仓位应给出同一个数（下单时 `shares =
-    size_usd / entry_price` 就是这么算的），敞口门测的正是这个建仓时刻的市值差异。"""
-    size = t["size_usd"] if "size_usd" in t else t["shares"] * t["entry_price"]
-    return (t["ticker"], t["entry_date"], t["direction"], round(float(size), 2))
+    """建仓市值 = `round(shares × entry_price, 2)`，**在场仓位与已平仓一律这么取**（v0.45.396 事后修订）。
+
+    `ClosedTrade` 没有 `size_usd`，只能用 `shares × entry_price`；`Position` 两者都有。原实现对在场仓位读
+    `size_usd`、对已平仓读 `shares × entry_price`，以为同一笔会给出同一个数——不会：下单时
+    `shares = round(size_usd / entry_price, 4)`，取整误差 × entry_price 让两者差 1~6 分（MU 1016.64 vs
+    1016.61）。于是同一笔仓位一边已平、一边仍在场时键错开，而这每天都会发生：Step 11 在生产当天扫描
+    **之后**跑，生产已把当天到期的仓位平掉，A 的重放窗口不含当天（见文件头「事后修订 v0.45.396」）。
+
+    现在键只读两种记录都有的两个字段、用同一个算式 ⇒ 与仓位是否已平仓无关。分辨率是 max(1 分,
+    entry_price × 1e-4)——账本里 `shares` 只存到 4 位小数，已平仓那一行本来就只有这个精度，任何键都不可能
+    比它更细；原实现对已平仓一直就是这个分辨率。**不许读 `size_usd`**（`tests/test_fg_exposure_gate_forward_test.py`
+    的 `TestEntryKeyIgnoresOpenOrClosed` 钉住）。"""
+    size = float(t["shares"]) * float(t["entry_price"])
+    return (t["ticker"], t["entry_date"], t["direction"], round(size, 2))
 
 
 def _entries_in_window(closed: List[Dict], open_positions: List[Dict],
@@ -462,16 +491,22 @@ def _real_recorded_entries(since: str, before: str) -> set:
 
 
 def _selfproof_stats(real: set, a_entries: set) -> Dict:
-    """自证的两层复现：**精确**（四元组含 `size_usd`，判定用）与**决策**（三元组，仅诊断用）。
+    """自证的两层复现：**精确**（四元组含建仓市值，判定用）与**决策**（三元组，仅诊断用）。
 
     两层分开报是为了一眼看出是哪一层对不上：决策层对、精确层错 ⇒ 开哪只/什么方向都复现了，
     错的是仓位金额（起点状态/波动率来源/仓位参数）；决策层也错 ⇒ 评分链或入场规则变了。
     v0.45.297 之前只报精确层，「0/8」把这两种情形混成一个数，文案还把原因指错了方向。
+
+    v0.45.396：另报 `a_only`——A 开了、生产没开的仓位数（决策层三元组）。**只诊断，不进判定**：分母仍只数
+    生产记录（预注册原样）。它非零说明 A 不再是生产的逐笔副本，哪怕两个复现率此刻都是 100%：多开的仓位
+    占着 A 的仓位位与部署额度，平仓后又把它们的已实现盈亏带进 A 的仓位基数——之后的金额层会成片对不上。
+    报出来是为了那时失败原因指得对。实例：09-24 生产被 yfinance 限流、当天没出场也没开仓，A 开了 4 笔。
     """
     total = len(real)
     exact = len(real & a_entries)
-    decision = len({k[:3] for k in real} & {k[:3] for k in a_entries})
-    return {"total": total, "exact": exact, "decision": decision,
+    real_dec, a_dec = {k[:3] for k in real}, {k[:3] for k in a_entries}
+    decision = len(real_dec & a_dec)
+    return {"total": total, "exact": exact, "decision": decision, "a_only": len(a_dec - real_dec),
             "rate": exact / total if total else None,
             "decision_rate": decision / total if total else None}
 
@@ -492,6 +527,16 @@ def _ohlc_partly_missing(ohlc: Optional[Dict]) -> bool:
     整句推给评分链 / 配置；现在原因照旧写，但末尾必须说出行情缺失。不设比例阈值：缺一根都可能改出场与仓位。"""
     return (isinstance(ohlc, dict) and (ohlc.get("direct_empty") or 0) > 0
             and not _ohlc_unavailable(ohlc))
+
+
+def _a_only_note(n: int) -> str:
+    """v0.45.396：A 多开了生产没开的仓位时追加在失败原因末尾的一句。
+
+    不含「评分链」「仓位金额」两个词：测试靠它们分辨失败原因走了哪一支（决策层 / 金额层），附注不能冒充分支。"""
+    return (f"；另：A 还多开了 {n} 笔生产没开的仓位——生产某个快照日没处理完时（09-24 被 yfinance 限流：当天不出场"
+            "也不开仓）A 照常开仓，这些仓位占着 A 的仓位位与部署额度、平仓后把已实现盈亏带进 A 的仓位基数，"
+            "此后新开仓的大小会成片对不上。先查生产那几天日志里的「_fetch_ohlc … 失败」；那几天若正常，"
+            "就是 A 的入场条件比生产当时更宽（入场规则 / 组合层配置被改）")
 
 
 def _selfproof_failure_reason(sp: Dict, ohlc: Optional[Dict] = None) -> str:
@@ -517,6 +562,8 @@ def _selfproof_failure_reason(sp: Dict, ohlc: Optional[Dict] = None) -> str:
         reason = (f"{head}，决策层（标的/日期/方向）也仅复现 {sp['decision']}/{sp['total']}——评分链/入场规则/"
                   "组合层配置已被改动、生产某个窗口内日期未被处理（漏跑），或重放机制本身有问题，"
                   "本检验前提不成立")
+    if sp.get("a_only"):
+        reason += _a_only_note(sp["a_only"])
     if _ohlc_partly_missing(ohlc):
         reason += (f"；⚠️ 但这次重放有行情缺失：整段取数 {ohlc.get('fallback')}/{ohlc.get('wide_fetches')} 个标的退回直连，"
                    f"直连 {ohlc.get('direct_requests')} 次请求里 {ohlc.get('direct_empty')} 次一根 bar 都没有——"
@@ -713,7 +760,7 @@ def _evaluate_replays(dates: List[str], since: str, before: str, sandbox_root: P
         a_entries = _entries_in_window(a["closed"], a["open_positions"], since, before)
         sp = _selfproof_stats(real_entries, a_entries)
         out["selfproof"] = {"real_entries": sp["total"], "reproduced": sp["exact"],
-                            "decision_reproduced": sp["decision"]}
+                            "decision_reproduced": sp["decision"], "a_only_entries": sp["a_only"]}
         out["selfproof_rate"] = sp["rate"]
         out["selfproof_decision_rate"] = sp["decision_rate"]
         if sp["total"] == 0:
@@ -807,7 +854,8 @@ def rehearse(since: str, before: str, repo_root: Optional[Path] = None) -> Dict:
         a = _replay_variant({}, Path(tmp) / "A_baseline", dates, seed=seed)
     ohlc = win.stats() if win is not None else None
     sp = _selfproof_stats(real, _entries_in_window(a["closed"], a["open_positions"], since, before))
-    out["selfproof"] = {"real_entries": sp["total"], "reproduced": sp["exact"], "decision_reproduced": sp["decision"]}
+    out["selfproof"] = {"real_entries": sp["total"], "reproduced": sp["exact"], "decision_reproduced": sp["decision"],
+                        "a_only_entries": sp["a_only"]}
     out["selfproof_rate"] = sp["rate"]
     out["selfproof_decision_rate"] = sp["decision_rate"]
     if ohlc is not None:
@@ -853,6 +901,11 @@ def status_line(res: Dict) -> str:
         extra = f"（中期未过界，继续攒到 {res['next_look_at']} 周）" if res.get("looks_passed_without_verdict") else ""
         rate = res.get("selfproof_rate")
         proof = f"，自证 {rate:.0%}" if rate is not None else ""
+        # v0.45.396：A 多开的仓位此刻不拉低复现率（分母只数生产记录），但它们平仓后金额层会成片对不上——
+        # 在那之前就让每天的进度行带上它，到时候才分得清是什么。图标不变：此刻自证确实是过的。
+        a_only = (res.get("selfproof") or {}).get("a_only_entries")
+        if a_only:
+            proof += f"（A 多开 {a_only} 笔生产没开的仓位）"
         why = f"（{res['reason']}）" if res.get("reason") else ""
         icon = "⚠️" if res.get("stale") or note else "⏳"
         return f"{icon} F&G 敞口门前瞻检验：{res.get('weeks', 0)}/{res['next_look_at']} 个合格周{extra}{proof}{why}{note}"
@@ -915,7 +968,8 @@ def _print_human(res: Dict) -> None:
               f"（last_run_date={res.get('seed_last_run_date')}）｜日期数 {res.get('n_dates')}")
         if sp:
             print(f"  精确复现 {sp['reproduced']}/{sp['real_entries']}｜决策层复现 "
-                  f"{sp['decision_reproduced']}/{sp['real_entries']}（判定只看精确层，阈值 {SELFPROOF_MIN_RATE:.0%}）")
+                  f"{sp['decision_reproduced']}/{sp['real_entries']}（判定只看精确层，阈值 {SELFPROOF_MIN_RATE:.0%}）"
+                  f"｜A 多开 {sp.get('a_only_entries', '?')} 笔（不进判定）")
         print("  结论：" + ("✅ 自证通过 —— A 能逐分复现生产" if res.get("status") == "rehearsal_ok"
                          else f"❌ {res.get('status')}：{res.get('reason')}"))
         return

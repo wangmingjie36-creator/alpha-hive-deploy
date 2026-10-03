@@ -259,10 +259,11 @@ class TestDecide:
 # ── 5. 建仓四元组 key：Position（在场）与 ClosedTrade（已平仓）两种形状都要处理 ──
 
 class TestEntryKey:
-    def test_open_position_uses_size_usd_directly(self):
+    def test_open_position_is_keyed_by_shares_times_entry_price_too(self):
+        """v0.45.396：在场仓位**不**读 `size_usd`，与已平仓同一个算式（原先读 `size_usd` ⇒ 1234.57）。"""
         pos = {"ticker": "NVDA", "entry_date": "2026-09-16", "direction": "bullish",
-              "size_usd": 1234.567}
-        assert fwd._entry_key(pos) == ("NVDA", "2026-09-16", "bullish", 1234.57)
+              "size_usd": 1234.567, "shares": 10.0, "entry_price": 123.456}
+        assert fwd._entry_key(pos) == ("NVDA", "2026-09-16", "bullish", 1234.56)
 
     def test_closed_trade_derives_size_from_shares_times_entry_price(self):
         trade = {"ticker": "NVDA", "entry_date": "2026-09-16", "direction": "bullish",
@@ -275,7 +276,7 @@ class TestEntryKey:
                  {"ticker": "B", "entry_date": "2026-09-01", "direction": "bullish",  # 窗口外
                   "shares": 1.0, "entry_price": 100.0}]
         open_pos = [{"ticker": "C", "entry_date": "2026-09-17", "direction": "bearish",
-                    "size_usd": 500.0}]
+                    "size_usd": 500.0, "shares": 5.0, "entry_price": 100.0}]
         got = fwd._entries_in_window(closed, open_pos, "2026-09-16", "2026-09-20")
         assert got == {("A", "2026-09-16", "bullish", 100.0), ("C", "2026-09-17", "bearish", 500.0)}
 
@@ -874,7 +875,8 @@ class TestSeededReplayReproducesProduction:
     def test_seeded_sandbox_reproduces_production_to_the_cent(self, pp, tmp_path):
         seed = _world(pp, tmp_path)
         res = fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, tmp_path / "sb", insample=False, seed=seed)
-        assert res["selfproof"] == {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2}
+        assert res["selfproof"] == {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2,
+                                    "a_only_entries": 0}
         assert res["selfproof_rate"] == 1.0
         assert res["status"] == "not_ready"  # 自证过了，进入统计阶段（周数不够，如实说继续攒）
         assert res["seed_last_run_date"] == "2026-09-15"
@@ -997,7 +999,7 @@ class TestSelfproofThresholdBoundary:
     def _run(self, pp, tmp_path, monkeypatch, rate):
         monkeypatch.setattr(fwd, "_real_recorded_entries", lambda *a, **k: {("X", "2026-09-16", "bullish", 1.0)})
         monkeypatch.setattr(fwd, "_selfproof_stats",
-                            lambda real, a: {"total": 1, "exact": 1, "decision": 1,
+                            lambda real, a: {"total": 1, "exact": 1, "decision": 1, "a_only": 0,
                                              "rate": rate, "decision_rate": 1.0})
         _write_snapshot(pp[1], "NVDA", "2026-09-16", 7.5, "bullish")
         return fwd.evaluate(["2026-09-16"], "2026-09-16", "2026-09-17", tmp_path / "sb", insample=False, seed={})
@@ -1282,7 +1284,8 @@ class TestRehearse:
         seed = _world(pp, tmp_path)
         res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=self._synthetic_repo(tmp_path, seed))
         assert res["status"] == "rehearsal_ok"
-        assert res["selfproof"] == {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2}
+        assert res["selfproof"] == {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2,
+                                    "a_only_entries": 0}
         assert res["seed_last_run_date"] == "2026-09-15"
 
     def test_never_runs_variant_b_and_leaks_no_effect_size(self, pp, tmp_path, monkeypatch):
@@ -1542,3 +1545,178 @@ class TestBlindingBeforeTheLook:
         res = _eval_gate_world(tmp_path / "sb", insample=True, seed=None)
         assert res["status"] == "insample"
         assert res["adjusted_trades"]["adjusted_closed_trades"] == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 15. 四元组第四元的取法 + A 多开诊断（v0.45.396 事后修订）
+#
+# 真因：在场仓位读 `size_usd`、已平仓算 `shares × entry_price`，`shares` 取 4 位小数 ⇒ 同一笔两种取法差 1~6 分。
+# Step 11 在生产当天扫描**之后**跑，生产当天平掉的仓位在 A（窗口不含当天）里仍在场 ⇒ 键错开。
+# 10-02 实测精确 13/16（决策 16/16），3 笔全是这一类；修订后 16/16。`--rehearse` 历史窗口同因
+# （2/5、5/13、3/8 → 5/5、13/13、8/8）。另：09-24 生产被限流、当天不出场不开仓，A 多开 4 笔——召回式自证看不见。
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 10-02 生产账本里的真实一行（MU，当天 TIME 止损）与 A 重放里同一笔的在场形态：shares / entry_price 逐位相同
+_MU_CLOSED = {"ticker": "MU", "entry_date": "2026-09-18", "direction": "bullish", "shares": 1.0008,
+              "entry_price": 1015.8, "exit_date": "2026-10-02", "exit_reason": "TIME"}
+_MU_OPEN = {"ticker": "MU", "entry_date": "2026-09-18", "direction": "bullish", "shares": 1.0008,
+            "entry_price": 1015.8, "size_usd": 1016.64}
+
+
+class TestEntryKeyIgnoresOpenOrClosed:
+    def test_the_real_mu_pair_has_the_asymmetry(self):
+        """夹具自检：这对真实数据确实分得开新旧两种取法——否则下一条在旧代码上也绿，什么也证明不了。"""
+        assert round(_MU_OPEN["size_usd"], 2) != round(_MU_CLOSED["shares"] * _MU_CLOSED["entry_price"], 2)
+
+    def test_same_position_gets_the_same_key_open_or_closed(self):
+        assert fwd._entry_key(_MU_OPEN) == fwd._entry_key(_MU_CLOSED) == ("MU", "2026-09-18", "bullish", 1016.61)
+
+    def test_size_usd_is_never_read(self):
+        """变异「在场仓位改回读 size_usd」⇒ 红。"""
+        assert fwd._entry_key({**_MU_OPEN, "size_usd": 1e9}) == fwd._entry_key(_MU_OPEN)
+
+    @pytest.mark.parametrize("price", [2.66, 47.32, 263.96, 648.43, 1015.8])
+    def test_size_differences_above_the_ledger_resolution_stay_visible(self, price):
+        """「谁会红？」：建仓市值差 ≥ 2×max(1 分, entry_price×1e-4) 必然换键——这是账本本身的分辨率
+        （`shares` 只存 4 位小数），已平仓那一行一直就是这个精度。变异「第四元取整到角 / 元」⇒ 低价那几格红。"""
+        step = 2 * max(0.01, price * 1e-4)
+
+        def key(size):
+            return fwd._entry_key({"ticker": "X", "entry_date": "d", "direction": "bullish",
+                                   "shares": round(size / price, 4), "entry_price": price})[3]
+        sizes = [300.0 + i * 13.37 for i in range(300)]
+        assert all(key(s) != key(s + step) for s in sizes)
+
+
+def _bars(levels):
+    """`{日期: 价}` → 一个 `_fetch_ohlc` 替身：工作日逐日给 bar，`levels` 里点名的日子 High 用那个价，其余平价。"""
+    def fake(ticker, start, end, *, base):
+        out = {}
+        d, end_d = datetime.date.fromisoformat(start), datetime.date.fromisoformat(end)
+        while d < end_d:
+            if d.weekday() < 5:
+                hi = levels.get(d.isoformat(), base * 1.001)
+                out[d.isoformat()] = {"Open": base, "High": hi, "Low": base * 0.999, "Close": base}
+            d += datetime.timedelta(days=1)
+        return out
+    return fake
+
+
+class TestProductionClosesOnTheScanDay:
+    """Step 11 的真实时序：生产先把当天跑完（含平仓），检验再重放 [FORWARD_START, 当天)。
+    同一笔仓位在生产里已平、在 A 里仍在场——10-02 的 ABBV / MU / NVDA。"""
+    P = 1015.8                      # 高价票：shares 取 4 位小数的误差 × 价格足以挪动分位
+    D1, D2, SCAN_DAY = "2026-09-16", "2026-09-17", "2026-09-18"
+
+    def _world(self, pp_fx, tmp_path, monkeypatch):
+        _pp, snap_dir, _ = pp_fx
+        fake = _bars({self.SCAN_DAY: self.P * 1.3})   # 扫描当天冲过 +15% 止盈
+        monkeypatch.setattr(_pp, "_fetch_ohlc", lambda t, s, e: fake(t, s, e, base=self.P))
+        for d in (self.D1, self.D2, self.SCAN_DAY):
+            (snap_dir / f"MU_{d}.json").write_text(json.dumps({
+                "ticker": "MU", "date": d, "composite_score": 7.5, "direction": "bullish",
+                "agent_votes": {"a": 7.5, "b": 7.5}, "entry_price": self.P}))
+        seed = _make_seed()
+        prod = tmp_path / "prod_run"
+        prod.mkdir()
+        for name, blob in seed.items():        # 「生产」起点直接写盘，不走被测的 _apply_seed（见 `_world`）
+            (prod / name).write_bytes(blob)
+        _pp.run_replay({}, prod, dates=[self.D1, self.D2, self.SCAN_DAY])   # 生产：含扫描当天
+        _pp.CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(prod / "closed_trades.jsonl", _pp.CLOSED_FILE)
+        shutil.copy(prod / "positions.jsonl", _pp.POSITIONS_FILE)
+        return seed
+
+    def test_closed_in_production_open_in_a_is_still_reproduced(self, pp, tmp_path, monkeypatch):
+        _pp = pp[0]
+        seed = self._world(pp, tmp_path, monkeypatch)
+        sb = tmp_path / "sb"
+        res = fwd.evaluate([self.D1, self.D2], self.D1, self.SCAN_DAY, sb, insample=False, seed=seed)
+        # 夹具自检：确实是「生产当天已平、A 仍在场」，且两种旧取法确实差了分——否则这条在旧代码上也绿
+        prod_mu = [t for t in _pp._load_jsonl(_pp.CLOSED_FILE) if t["ticker"] == "MU"]
+        a_mu = [p for p in _pp._load_jsonl(sb / "A_baseline" / "positions.jsonl") if p["ticker"] == "MU"]
+        assert len(prod_mu) == 1 and prod_mu[0]["exit_date"] == self.SCAN_DAY, prod_mu
+        assert len(a_mu) == 1
+        assert round(a_mu[0]["size_usd"], 2) != round(prod_mu[0]["shares"] * prod_mu[0]["entry_price"], 2)
+        # 本体：同一笔，键相同（旧实现这里 0/1 ⇒ cannot_judge）
+        assert res["selfproof"] == {"real_entries": 1, "reproduced": 1, "decision_reproduced": 1, "a_only_entries": 0}
+        assert res["status"] == "not_ready"
+
+    def test_a_one_dollar_drift_in_the_sizing_base_still_turns_it_red(self, pp, tmp_path):
+        """「谁会红？」：修订不许把金额层变迟钝——A 的起点现金只多 $1（成本价 NAV 基数 +$1），精确层照样全红。"""
+        seed = _world(pp, tmp_path)
+        meta = json.loads(seed["meta.json"])
+        meta["cash"] += 1.0
+        drifted = {**seed, "meta.json": json.dumps(meta).encode()}
+        res = fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, tmp_path / "sb", insample=False, seed=drifted)
+        assert res["status"] == "cannot_judge"
+        assert res["selfproof"]["reproduced"] == 0 and res["selfproof"]["decision_reproduced"] == 2
+        assert "仓位金额" in res["reason"]
+
+
+class TestAOnlyIsReportedNotJudged:
+    """09-24 的形状：生产那一轮行情全取不到 ⇒ 不出场、不开仓（快照没有入场价，要靠当日收盘）；
+    A 重放时行情正常 ⇒ 开了生产没开的仓位。分母只数生产记录（预注册），所以它不拉低复现率——
+    但要被报出来：平仓后它会把已实现盈亏带进 A 的仓位基数，金额层之后成片对不上。"""
+
+    def _world_with_outage(self, pp_fx, tmp_path, monkeypatch):
+        _pp, snap_dir, _ = pp_fx
+        d1, d2 = _W_DATES
+        _write_snapshot(snap_dir, "NVDA", d1, 7.5, "bullish")
+        (snap_dir / f"AMD_{d2}.json").write_text(json.dumps({
+            "ticker": "AMD", "date": d2, "composite_score": 7.5, "direction": "bullish",
+            "agent_votes": {"a": 7.5, "b": 7.5}, "entry_price": 0.0}))
+        seed = _make_seed()
+        prod = tmp_path / "prod_run"
+        prod.mkdir()
+        for name, blob in seed.items():
+            (prod / name).write_bytes(blob)
+        _pp.run_replay({}, prod, dates=[d1])                       # 生产 d1：行情正常
+        monkeypatch.setattr(_pp, "_fetch_ohlc", lambda t, s, e: {})
+        _pp.run_replay({}, prod, dates=[d2])                       # 生产 d2：限流，一根 bar 都没有（续跑同一目录）
+        monkeypatch.setattr(_pp, "_fetch_ohlc", _fake_ohlc_flat)   # A 重放：行情又正常了
+        _pp.CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(prod / "closed_trades.jsonl", _pp.CLOSED_FILE)
+        shutil.copy(prod / "positions.jsonl", _pp.POSITIONS_FILE)
+        return seed
+
+    def test_an_outage_day_in_production_shows_up_as_a_only_without_moving_the_rate(self, pp, tmp_path, monkeypatch):
+        seed = self._world_with_outage(pp, tmp_path, monkeypatch)
+        res = fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, tmp_path / "sb", insample=False, seed=seed)
+        # 夹具自检：生产真的没开 AMD（否则 a_only=0 也说得通）
+        assert {p["ticker"] for p in pp[0]._load_jsonl(pp[0].POSITIONS_FILE)} == {"NVDA"}
+        assert res["selfproof"] == {"real_entries": 1, "reproduced": 1, "decision_reproduced": 1, "a_only_entries": 1}
+        assert res["selfproof_rate"] == 1.0          # 变异「分母把 A 多开的也算进去」⇒ 0.5 ⇒ 红
+        assert res["status"] == "not_ready"
+        line = fwd.status_line(res)
+        assert line.startswith("⏳ ") and "（A 多开 1 笔生产没开的仓位）" in line, line
+        _assert_no_unexpected_top_level_keys(res)
+
+    def test_a_only_counts_decisions_not_amounts(self):
+        """同一笔只是金额不同 ⇒ 是金额层的事，不是「多开」。变异「a_only 按四元组算」⇒ 红。"""
+        k = ("NVDA", "2026-09-16", "bullish")
+        assert fwd._selfproof_stats({(*k, 100.0)}, {(*k, 101.0)})["a_only"] == 0
+        sp = fwd._selfproof_stats({(*k, 100.0)}, {(*k, 100.0), ("AMD", "2026-09-16", "bullish", 5.0)})
+        assert (sp["a_only"], sp["rate"]) == (1, 1.0)
+
+    def test_failure_reason_names_the_extra_entries_without_claiming_another_branch(self):
+        sp = {"total": 20, "exact": 10, "decision": 20, "a_only": 4, "rate": 0.5, "decision_rate": 1.0}
+        r = fwd._selfproof_failure_reason(sp)
+        assert "多开了 4 笔" in r and "仓位金额" in r and "评分链" not in r
+        assert "多开" not in fwd._selfproof_failure_reason(dict(sp, a_only=0))
+        # 附注不能让「决策层也错」那一支看起来像「金额层」那一支（测试靠这两个词分辨分支）
+        r_dec = fwd._selfproof_failure_reason(dict(sp, decision=5, decision_rate=0.25))
+        assert "评分链" in r_dec and "仓位金额" not in r_dec and "多开了 4 笔" in r_dec
+
+    def test_status_line_is_unchanged_when_nothing_extra_was_opened(self):
+        base = {"status": "not_ready", "weeks": 3, "next_look_at": 15, "looks_passed_without_verdict": [],
+                "selfproof_rate": 1.0}
+        zero = {**base, "selfproof": {"real_entries": 5, "reproduced": 5, "decision_reproduced": 5, "a_only_entries": 0}}
+        assert fwd.status_line(zero) == fwd.status_line(base) == "⏳ F&G 敞口门前瞻检验：3/15 个合格周，自证 100%"
+
+    def test_rehearse_output_shows_the_extra_entries(self, capsys):
+        fwd._print_human({"mode": "rehearse", "status": "rehearsal_ok", "since": "2026-09-22",
+                          "before": "2026-09-26", "seed_commit": "abcdef1234", "seed_last_run_date": "2026-09-18",
+                          "n_dates": 2, "selfproof": {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2,
+                                                       "a_only_entries": 4}})
+        assert "A 多开 4 笔（不进判定）" in capsys.readouterr().out
