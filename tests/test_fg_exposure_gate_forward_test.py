@@ -2191,3 +2191,30 @@ class TestSegmentOutputs:
         with fwd._replay_ohlc_scope(_S_DATES, _make_seed(), extra_seeds=[anchor]):
             pass
         assert seen and seen[0][0] == "2026-08-20"
+
+
+class TestCountsThatMustNotBeConfused:
+    def test_the_status_line_counts_the_statistics_a_not_the_per_day_events(self):
+        """09-24、09-25 生产连挂两天 ⇒ 逐日口径把同一批 4 笔各算一次（8），统计量那份 A 实际多持 4 笔。
+        进度行要说的是后者。变异「进度行改读 selfproof.a_only_entries」⇒ 红（端到端夹具里两个口径恰好相等，抓不到）。"""
+        res = {"status": "not_ready", "weeks": 2, "next_look_at": 15, "looks_passed_without_verdict": [],
+               "selfproof_rate": 1.0,
+               "selfproof": {"real_entries": 19, "reproduced": 19, "decision_reproduced": 19, "a_only_entries": 8},
+               "selfproof_continuous": {"real_entries": 19, "reproduced": 19, "decision_reproduced": 19,
+                                        "a_only_entries": 4}}
+        assert fwd.status_line(res) == "⏳ F&G 敞口门前瞻检验：2/15 个合格周，自证 100%（统计用的 A 比生产多开 4 笔）"
+
+    def test_rehearse_takes_later_anchors_from_the_backup_repo(self, pp, tmp_path, monkeypatch):
+        """阶段 5 之后的状态只在备份仓库里：代码仓库只到 D1，之后的锚点只能来自备份仓库。演练的日期来自快照，
+        这个世界里 D3 没有快照 ⇒ 要比对的是 D1 / D2 / D4，D4 的锚点（D3 收盘状态）只在备份仓库里。
+        变异「演练不读备份仓库」⇒ D2、D4 并成一段从 D1 连续重放 ⇒ 撞上 D2 那次生产故障 ⇒ 红。"""
+        seed, hist = _outage_world(pp, tmp_path, monkeypatch)
+        as_commit = lambda files: {f"paper_portfolio_state/{n}": b for n, b in files.items()}   # noqa: E731
+        code, _ = _git_repo(tmp_path, [as_commit(seed), as_commit(hist[_S_D1])], name="code_repo")
+        backup, _ = _git_repo(tmp_path, [as_commit(hist[d]) for d in (_S_D1, _S_D2, _S_D3)], name="backup_repo")
+        res = fwd.rehearse(_S_SINCE, _S_BEFORE, repo_root=code, backup_repo=backup)
+        assert res["status"] == "rehearsal_ok", res.get("reason")
+        seg = res["selfproof_segments"]
+        assert seg["multi_day_segments"] == [] and seg["anchor_sources"] == {
+            fwd.SOURCE_SEED: 1, fwd.SOURCE_CODE_REPO: 1, fwd.SOURCE_DATA_BACKUP: 1}
+        assert res["selfproof_continuous"]["reproduced"] == 1        # 对照：连续重放在这个世界里确实是红的
