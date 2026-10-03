@@ -27,6 +27,7 @@ APP_NAME = "Alpha Bot"
 BUNDLE_ID = "local.alphahive.alphabot"
 EXECUTABLE = "AlphaBot"
 DEFAULT_PYTHON = "/usr/local/bin/python3"      # CLAUDE.md 硬规则：禁用裸 python3
+DEFAULT_OSASCRIPT = "/usr/bin/osascript"
 
 
 class BuildError(Exception):
@@ -60,9 +61,13 @@ def info_plist() -> dict:
     }
 
 
-def launch_script(repo: Path, python: str) -> str:
-    """路径一律 `shlex.quote`：仓库就在 `~/Desktop/Alpha Hive`，带空格。"""
-    q_repo, q_py = shlex.quote(str(repo)), shlex.quote(python)
+def launch_script(repo: Path, python: str, osascript: str = DEFAULT_OSASCRIPT) -> str:
+    """路径一律 `shlex.quote`：仓库就在 `~/Desktop/Alpha Hive`，带空格。
+
+    `osascript` 只给测试换：真的那个弹的是模态对话框，测试会卡到 pytest-timeout，
+    被杀的只是 bash，对话框留在屏幕上（Mac 实测）。
+    """
+    q_repo, q_py, q_osa = shlex.quote(str(repo)), shlex.quote(python), shlex.quote(osascript)
     return f"""#!/bin/bash
 # Alpha Bot.app 启动脚本——由 alphabot/macos_app.py 生成（v{__version__}）。
 # 别手改：改生成器后重跑 make alphabot-app。逻辑在 alphabot/launcher.py，git pull 即生效。
@@ -72,11 +77,11 @@ export LANG="${{LANG:-en_US.UTF-8}}"   # 从 Finder / Dock 启动没有 LANG：�
 LOG_DIR="$HOME/Library/Logs/Alpha Bot"
 mkdir -p "$LOG_DIR"
 alert() {{
-  /usr/bin/osascript -e 'on run argv' -e 'activate' -e 'display alert "Alpha Bot 无法启动" message (item 1 of argv) as critical' -e 'end run' "$1" >/dev/null 2>&1
+  {q_osa} -e 'on run argv' -e 'activate' -e 'display alert "Alpha Bot 无法启动" message (item 1 of argv) as critical' -e 'end run' "$1" >/dev/null 2>&1
   echo "$(date '+%F %T') $1" >>"$LOG_DIR/launcher.log"
 }}
 if [ ! -x "$PY" ]; then
-  alert "找不到 ${{PY}}（Alpha Hive 用 Homebrew 的 Python 3.11）。换了 Python 的话：make alphabot-app PYTHON=新路径"
+  alert "找不到 ${{PY}}——Alpha Bot 与每日扫描、MCP 用的是同一个解释器。装回它即可；要换解释器：先用新解释器 -m pip install -r requirements.txt，再 make alphabot-app PYTHON=新路径（没装依赖的解释器起不了服务）"
   exit 1
 fi
 if ! cd "$REPO" 2>/dev/null; then
@@ -100,7 +105,8 @@ def _is_ours(bundle: Path) -> bool:
         return False
 
 
-def build_app(dest_dir: Path, *, repo: Optional[Path] = None, python: str = DEFAULT_PYTHON) -> Path:
+def build_app(dest_dir: Path, *, repo: Optional[Path] = None, python: str = DEFAULT_PYTHON,
+              osascript: str = DEFAULT_OSASCRIPT) -> Path:
     """在 `dest_dir` 下生成 / 替换 `Alpha Bot.app`，返回其路径。
 
     已存在同名 .app 但不是本生成器产出的（bundle id 不同）⇒ 拒绝覆盖，不删别人的东西。
@@ -127,7 +133,7 @@ def build_app(dest_dir: Path, *, repo: Optional[Path] = None, python: str = DEFA
             plistlib.dump(info_plist(), f)
         (new / "Contents" / "PkgInfo").write_text("APPL????", encoding="ascii")
         exe = new / "Contents" / "MacOS" / EXECUTABLE
-        exe.write_text(launch_script(repo, python), encoding="utf-8")
+        exe.write_text(launch_script(repo, python, osascript), encoding="utf-8")
         exe.chmod(0o755)
         shutil.copy2(icon, new / "Contents" / "Resources" / "AlphaBot.icns")
         old = staging / "old.app"

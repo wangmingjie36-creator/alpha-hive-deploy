@@ -5,6 +5,71 @@
 
 ---
 
+## [0.45.397] — 2026-10-03 — Fixed：Alpha Bot 启动器测试在 Mac 上两红（沙箱 HOME 藏掉子进程的用户 site-packages；真 osascript 模态弹窗卡到超时、被杀后对话框留在屏幕上）——都是测试侧，生产不受影响
+
+`tests/test_alphabot_launcher.py` 在用户 Mac 上两条红，未改动的 origin/main `d758f614` 同样红；v0.45.390 只在 Linux 容器里验过，两条在那都绿。**两条原因不同**：
+
+1. `TestLauncherFlow::test_demo_start_reuse_and_stop`：`home` 夹具把 `HOME` 指到 tmp，真起的 `python -m alphabot` 按 `$HOME`
+   推用户 site-packages（`~/Library/Python/3.11/lib/python/site-packages`，本机 starlette 就在那）⇒ 推成 tmp 下的空目录 ⇒
+   `ModuleNotFoundError: No module named 'starlette'`。pytest 自己的进程在启动时已经按真 HOME 算好用户 site，所以只有子进程中招。
+2. `TestBundle::test_missing_python_fails_loudly`：启动脚本的 `alert` 调的是真 `/usr/bin/osascript`，`display alert` 是**模态**的 ⇒
+   测试卡住直到 `--timeout=60` 把它杀掉；被杀的只是 bash，osascript 成了孤儿，「Alpha Bot 无法启动」对话框**留在屏幕上**
+   （实测 `rc=-9`、事后 `pgrep` 抓到孤儿）。Linux 没有 osascript ⇒ CI 上从来不红。
+
+### Fixed
+- `tests/test_alphabot_launcher.py`：`home` 夹具钉 `PYTHONUSERBASE = site.getuserbase()`（本进程启动时按真 HOME 算好的那个）——换 HOME 只隔离启动器的 `~/Library`，子进程 import 面与本进程一致。
+- `tests/test_alphabot_launcher.py`：跑 .app 启动脚本的三条测试改经 `_app_exe`，弹窗换成假 osascript（只记正文、立即返回）。
+  `test_missing_python_fails_loudly` 顺带**加强**：除日志外还断言弹窗正文（双击的人看的是弹窗）；旧写法在「弹窗根本没弹」的变异下照样绿（实测）。
+  `test_script_cds_into_spaced_repo_and_execs_python` 加「正常路径不弹窗」，失败时直接带出弹窗正文。
+- `alphabot/macos_app.py`：`launch_script` / `build_app` 加 `osascript=`（缺省 `/usr/bin/osascript`，同 `repo=` / `python=` 一样只给测试换）。
+  这一项本身不改缺省生成的启动脚本（注入点缺省值即原路径，实测逐字节相同、含带空格路径）；脚本唯一的变化是下面 Changed 里那句弹窗文案。
+
+### Added
+- `test_sandbox_home_keeps_child_user_site`：沙箱 HOME 下子进程推出的用户 site 必须等于本进程的。没有它，漏钉 PYTHONUSERBASE
+  只在「依赖装在用户 site」的机器上红，CI 永远绿；这条在哪都红（沙箱 HOME 下推出的必然是另一个路径）。
+- `test_missing_dependency_names_the_module`：真解释器加 `-S -E`（不加载 site-packages）⇒ 在哪台机器上都是「依赖全缺」；
+  启动器要在 10 秒内弹出带 `ModuleNotFoundError: No module named …` 的窗，不干等 90 秒超时、不开页面。
+  修好夹具后上一条不会再「意外」走这条路，这里改成有意走。
+
+### Changed
+- `CLAUDE.md`「用户偏好」Python 硬规则：`/usr/local/bin/python3` 的来源由「Homebrew」更正为 python.org 安装包（framework 版；本机 `/usr/local` 下没有 `Cellar` / `Homebrew`，不是 Homebrew 前缀），
+  并补一条：包分装两处、部分只在用户 site ⇒ 测试改 HOME 后起真解释器要钉 `PYTHONUSERBASE`。
+- `alphabot/macos_app.py`：「找不到 Python」弹窗原写「Alpha Hive 用 Homebrew 的 Python 3.11」——事实错，且照做走不通：`brew install python@3.11` 装进
+  `/opt/homebrew`，不会恢复 `/usr/local/bin/python3`；本机 Homebrew 现成的 `python3.12` 一个依赖都没有（starlette / uvicorn / numpy / pandas 全缺，实测），
+  按「换了 Python 就 `PYTHON=新路径`」做 ⇒ 服务起来即死、换成第二个弹窗。现改为不写厂商名（写了还会过时），只说恢复要什么：装回同一个解释器（扫描 / MCP 也用它）；
+  要换就先给新解释器 `pip install -r requirements.txt` 再 `make alphabot-app PYTHON=新路径`。`${PY}` 仍带花括号（bash 3.2 全角坑，见 0.45.390），
+  `/bin/bash` 3.2 实跑弹窗路径完整。生成脚本相对 `d758f614` 只差这一行；本机尚未生成 .app ⇒ 不用重新生成（已生成的要 `make alphabot-app` 才拿到新文案）。
+
+### 核实：生产里 .app 看得见用户 site（不是只在测试里成立）
+- 临时探针 .app（真 `MA.build_app` 生成，仓库与 python 换成草稿目录里的记录脚本，bundle id 另起，用完 `lsregister -u` 并删除）经 LaunchServices 启动：
+  `env -i open -W` ⇒ `HOME=/Users/igg`、PATH 是 launchd 的裸默认值（证明拿的是 launchd 环境不是调用方的），`site.USER_SITE` 指真目录，starlette 可 import。
+  ⚠️ 不带 `env -i` 的 `open` 会把**调用方的环境**传给 .app（实测哨兵变量穿透）——那样测出来的不算 Finder 启动。
+- 旁证：每日扫描的 launchd plist 只设 `ALPHA_HIVE_HOME` / `PATH`、不设 HOME，而 numpy 只装在用户 site——扫描天天能跑。
+- **不建议给 .app 单独钉依赖**（打包 venv 等）：.app 有意是薄壳、与扫描用同一个解释器，`git pull` 即生效；另起一套环境要单独维护、会与扫描环境漂移。
+
+### 依赖真缺了，谁会红
+- 用户：启动器 `wait_ready` 见服务进程先死 ⇒ 立即弹窗「Alpha Bot 服务启动失败（退出码 1）」+ 日志尾巴（末行就是 `ModuleNotFoundError: No module named 'starlette'`），并写 `~/Library/Logs/Alpha Bot/launcher.log` / `server.log`。
+- 测试：`test_missing_dependency_names_the_module`（任何机器）；本进程也缺时 `TestShutdownEndpoint` 与 `tests/test_alphabot.py` 在 import 处就红。
+- `test_missing_python_fails_loudly` 管的是另一层：**解释器本身**不在 ⇒ bash 壳弹窗，Python 根本没起来。
+
+### 变异实测（`PYTHONDONTWRITEBYTECODE=1`、每轮清 pyc、`--maxfail=1000`、每轮核 passed+failed = 22、事后查孤儿 osascript：无）
+| 变异 | 红的测试（理由已逐条核对） |
+|---|---|
+| M1 夹具不钉 PYTHONUSERBASE | `test_demo_start_reuse_and_stop`（同原始症状）、`test_sandbox_home_keeps_child_user_site`（`/private/var/… ≠ /Users/igg/Library/…`） |
+| M2 启动脚本不弹窗 | `test_missing_python_fails_loudly`；**旧测试文件在同一变异下绿** |
+| M3 `_tail` 返回空（弹窗丢了日志尾巴） | `test_missing_dependency_names_the_module`、`test_server_dying_at_start_is_reported_with_log` |
+| M4 `cd "$REPO"` 失败（走弹窗分支） | `test_script_cds_…`（立即红、消息即弹窗正文）、`test_gui_launch_…`；旧写法在 Mac 上会弹真窗卡 60 秒 |
+未跑：「`build_app` 忽略 `osascript=`」——在 Mac 上会弹真对话框；推理上 Linux 立即红（`alerts.txt` 不存在）、Mac 卡到超时红。
+
+### 注意
+- 本 worktree 里有 10 个 iCloud 重名副本（`sell_strike_ledger 2.py` 等，git 忽略、09-29 产生，`sell_strike_report 2.py` 与正本**不同**）⇒
+  `test_sell_strike_integration.py::TestFirewallInward` 两条在本地红（火墙按文件系统扫到了副本）。与本版无关：`git archive` 干净树 + 本补丁
+  跑同一批 6 个文件 305 passed / 5 skipped（skip 全是 `git check-ignore` 退出码 128，worktree 里同样那 5 条是绿的）。副本未动（CLAUDE.md「重名副本」一节）。
+- `/usr/local/bin/python3` 是 **python.org 的 framework 版**（软链到 `/Library/Frameworks/Python.framework`），不是 Homebrew；
+  numpy / pytest / jinja2 / starlette / httpx **只**装在用户 site（`python3 -s` 下全不可 import）——任何把 HOME 换掉再起真解释器的测试都会撞上同一件事。
+  全仓普查：其余 6 个改 HOME 的测试文件只起 git / bash / 桩，不起真解释器。
+
+
 ## [0.45.394] — 2026-10-03 — 占位（进行中：阶段 6 ① 「数据被 git 跟踪/提交即红」守卫）
 
 ## [0.45.393] — 2026-10-02 — Fixed：`migrate_data_root.py` 分类表补 `alphabot` / `scripts` / `vercel.json`，check-old 不再因新代码项无故报红
