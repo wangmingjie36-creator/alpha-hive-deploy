@@ -16,7 +16,7 @@
     「Step 2 没跑完……本轮网站不会更新」。
 
 本模块把这些格式知识收成一个**有测试**的解释器，供下一步（B）接进编排器，让 bash 不再持有任何格式知识。
-B（v0.45.385）起编排器经 `_apply_step_interp` 调用（本版接了 Step 10/11/12/13/15；Step 2/4 随 B2 接）；
+B 起编排器经 `_apply_step_interp` 调用（v0.45.385 接了 Step 10/11/12/13/15，v0.45.386 接了 Step 2/4）；
 解释器不可用时 `_step_rc_fallback` 退回按退出码记（Step 2/4 逐字复现 B 之前的 status，10–15 记 interpreter_unavailable），
 片段带 `interp_fallback`、日志多一行 ERROR。
 
@@ -31,7 +31,7 @@ stdout **恰好一行** JSON、退出码**恒为 0**（任何内部错误都渲�
      "steps_fragment": {"<step key>": {...}}}
 
 输出用 `ensure_ascii`（纯 ASCII）：launchd 下 stdout 编码是什么都炸不了；bash 侧 `jq -r .message`
-会把 `\\uXXXX` 还原成中文。连这一行都解析不了时，bash 应退回只按 rc 记（B 的事）。
+会把 `\\uXXXX` 还原成中文。连这一行都解析不了时，bash 退回只按 rc 记（编排器的 `_step_rc_fallback`）。
 
 参数
 ----
@@ -123,8 +123,9 @@ B 接线须知：日期必须**显式**传给生产方
 **不归本解释器的：Step 5（gh-pages 部署）。** 自 v0.45.351 起由编排器的 `_step5_gh_pages_verdict` 调
 `report_deployer.py --gh-pages-step-status --since $STEP2_START`，按部署日志的**实际结局**判——那是比 Step 2
 退出码更直接的证据，判据与测试都在它自己那里，这里不再复制一份（复制就是第二份真相）。它的降级支
-（helper 无有效输出 ⇒ 退回按 `STEP2_RC` 判）仍把 rc=1 记成「本轮网站不会更新」；B 接线时让那一支改用
-`--step 2` 的 `status`（`success_with_warning` ⇒ 与 rc=0 同一支），不要在 bash 里再写一遍判据。
+（helper 无有效输出 ⇒ 退回按 `STEP2_RC` 判）曾把 rc=1 记成「本轮网站不会更新」；B2（v0.45.386）起那一支改读
+Step 2 调用点存下的 `STEP2_STATUS`（即 `--step 2` 的 `status`；`success_with_warning` ⇒ 与 rc=0 同一支），
+判据没有在 bash 里再写一遍。守卫：`tests/test_orchestrator_step5_gh_pages.py`。
 
 片段里新增的键（`contract` / `rc_status` / `attention` / `envelope_status` / `json_problem` / `date_rollover` /
 `problems` / `stale` / `error` / `warning` / `ml_model_guard` / `git_push_success` / `rc1_unverified` / `step2_status`）

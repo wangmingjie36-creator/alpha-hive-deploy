@@ -5,15 +5,18 @@
     真的 cd 进仓库、exec 指定的 Python、PATH 先走 /usr/local/bin；Python 不在 ⇒ 退出码 1 且留日志；
     不覆盖别人的同名 .app；
   · 启动流程（`TestLauncherFlow`）：真起一个演示服务（子进程）——首次问数据根、起服务、开页面；
-    再次打开只开页面不重起；`--stop` 停得掉；端口被别人占 / 服务启动即死 ⇒ 弹窗带原因，不干等；
+    再次打开只开页面不重起；`--stop` 停得掉；端口被别人占 / 服务启动即死 / 依赖缺失 ⇒ 弹窗带原因，不干等；
     选的数据根原样传进服务进程的 `ALPHA_HIVE_HOME`；坏配置报出来，不静默当成首次启动；
   · 服务端（`TestShutdownEndpoint`）：`/api/shutdown` 同样要 `X-AlphaBot` 头，没接开关 ⇒ 400。
-启动器自己的配置 / 日志都在 `$HOME/Library`，这里一律把 HOME 指到 tmp。
+启动器自己的配置 / 日志都在 `$HOME/Library`，这里一律把 HOME 指到 tmp——但钉住 `PYTHONUSERBASE`，
+子进程里真 Python 的 import 面不跟着挪（见 `home` 夹具）。跑 .app 启动脚本的测试一律换假 osascript
+（`_app_exe`）：真的弹模态对话框，会卡到 pytest-timeout 并把对话框留在屏幕上。
 """
 from __future__ import annotations
 
 import os
 import plistlib
+import site
 import socket
 import subprocess
 import sys
@@ -31,6 +34,10 @@ REPO = Path(__file__).resolve().parent.parent
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
+    # 换 HOME 只为隔离启动器的 `~/Library`。可子进程里的真 Python 也按 $HOME 推用户 site-packages
+    # （本机 starlette / numpy / pytest 都装在那）：不钉住 ⇒ 真起的服务 import 即死，红的是夹具不是启动器。
+    # 生产里 .app 由 launchd 给真 HOME（实测），所以钉成本进程启动时算好的那个，子进程与本进程 import 面一致。
+    monkeypatch.setenv("PYTHONUSERBASE", site.getuserbase())
     monkeypatch.setenv("HOME", str(h))
     return h
 
@@ -70,6 +77,18 @@ def _fake_python(tmp_path, body):
     return str(p)
 
 
+def _app_exe(tmp_path, **kw):
+    """生成 .app，返回 (启动脚本, 弹窗记录)。弹窗换成假 osascript：只记正文（argv 最后一项）、立即返回。
+    真的那个是模态的——Mac 上测试卡到 pytest-timeout，被杀的只是 bash，对话框留在屏幕上（实测）；
+    Linux 没有 osascript，CI 上从来不红。"""
+    rec = tmp_path / "alerts.txt"
+    osa = tmp_path / "fake-osascript"
+    osa.write_text(f'#!/bin/sh\nfor a; do last=$a; done\nprintf "%s\\n" "$last" >> "{rec}"\n', encoding="utf-8")
+    osa.chmod(0o755)
+    app = MA.build_app(tmp_path / "Apps", osascript=str(osa), **kw)
+    return app / "Contents" / "MacOS" / MA.EXECUTABLE, rec
+
+
 # ── .app 壳 ────────────────────────────────────────────────────────────────
 
 class TestBundle:
@@ -80,6 +99,9 @@ class TestBundle:
             info = plistlib.load(f)
         assert info["CFBundleIdentifier"] == MA.BUNDLE_ID
         assert info["CFBundleShortVersionString"] == __version__
+        # 没有它，Finder 双击在 Apple 芯片上把脚本按 x86_64 起，arm64 的 numpy 载不了（0.45.399 实测）；
+        # 测试从终端跑是原生 arm64，端到端那条看不出来，只能钉在这里
+        assert info["LSArchitecturePriority"][0] == "arm64"
         exe = c / "MacOS" / info["CFBundleExecutable"]
         assert exe.is_file() and os.access(exe, os.X_OK)
         icon = c / "Resources" / (info["CFBundleIconFile"] + ".icns")
@@ -94,8 +116,9 @@ class TestBundle:
         (repo / "alphabot" / "launcher.py").write_text("", encoding="utf-8")
         out = tmp_path / "rec.txt"
         py = _fake_python(tmp_path, f'{{ pwd; echo "$@"; echo "$PATH"; }} > "{out}"')
-        app = MA.build_app(tmp_path / "Apps", repo=repo, python=py)
-        r = subprocess.run([str(app / "Contents" / "MacOS" / MA.EXECUTABLE)], env={**os.environ, "HOME": str(home)})
+        exe, alerts = _app_exe(tmp_path, repo=repo, python=py)
+        r = subprocess.run([str(exe)], env={**os.environ, "HOME": str(home)})
+        assert not alerts.exists(), alerts.read_text(encoding="utf-8")
         assert r.returncode == 0
         cwd, args, path = out.read_text(encoding="utf-8").splitlines()
         assert Path(cwd).resolve() == repo.resolve()
@@ -109,7 +132,7 @@ class TestBundle:
         (repo / "alphabot" / "launcher.py").write_text("", encoding="utf-8")
         out = tmp_path / "lang.txt"
         py = _fake_python(tmp_path, f'echo "$LANG" > "{out}"')
-        exe = MA.build_app(tmp_path / "Apps", repo=repo, python=py) / "Contents" / "MacOS" / MA.EXECUTABLE
+        exe, _ = _app_exe(tmp_path, repo=repo, python=py)
         env = {k: v for k, v in os.environ.items() if k not in ("LANG", "LC_ALL", "LC_CTYPE")}
         subprocess.run([str(exe)], env={**env, "HOME": str(home)}, check=True)
         assert out.read_text(encoding="utf-8").strip() == "en_US.UTF-8"
@@ -129,9 +152,11 @@ class TestBundle:
         assert len(seen) == 3 and all(c[c.index("on run argv") + 2] == "activate" for c in seen)
 
     def test_missing_python_fails_loudly(self, tmp_path, home):
-        app = MA.build_app(tmp_path / "Apps", python=str(tmp_path / "no-such-python"))
-        r = subprocess.run([str(app / "Contents" / "MacOS" / MA.EXECUTABLE)], env={**os.environ, "HOME": str(home)})
+        exe, alerts = _app_exe(tmp_path, python=str(tmp_path / "no-such-python"))
+        r = subprocess.run([str(exe)], env={**os.environ, "HOME": str(home)})
         assert r.returncode == 1
+        shown = alerts.read_text(encoding="utf-8") if alerts.exists() else "（没弹）"
+        assert "找不到" in shown and "no-such-python" in shown, "双击的人看的是弹窗，不是日志"
         log = (home / "Library" / "Logs" / "Alpha Bot" / "launcher.log").read_text(encoding="utf-8")
         assert "找不到" in log and "no-such-python" in log
 
@@ -184,6 +209,27 @@ class TestLauncherFlow:
         while LA.probe(port)["state"] != "free" and time.monotonic() < deadline:
             time.sleep(0.2)
         assert LA.probe(port)["state"] == "free", "--stop 之后服务还在"
+
+    def test_sandbox_home_keeps_child_user_site(self, home):
+        """`home` 夹具只挪启动器的 `~/Library`，不挪子进程的用户 site-packages。
+        没有这条，漏钉 PYTHONUSERBASE 只在「依赖装在用户 site」的机器上红（上一条红成 starlette 缺失），
+        CI 上永远绿——这条在哪都红：沙箱 HOME 下推出的用户 site 必然是另一个路径。"""
+        child = subprocess.run([sys.executable, "-c", "import site; print(site.getusersitepackages())"],
+                               capture_output=True, text=True, check=True).stdout.strip()
+        assert child == site.getusersitepackages()
+
+    def test_missing_dependency_names_the_module(self, tmp_path, home):
+        """依赖真缺了（starlette / uvicorn 没装）⇒ 服务 import 即死：弹窗要带出缺的是哪个模块，不干等超时。
+        0.45.397 之前 `test_demo_start_reuse_and_stop` 在 Mac 上意外走的就是这条路；这里有意走：
+        真解释器加 `-S -E`（不加载 site-packages、不读 PYTHON* 环境）⇒ 在哪台机器上都是「依赖全缺」。"""
+        py = _fake_python(tmp_path, f'exec "{sys.executable}" -S -E "$@"')
+        ui = FakeUI(answers=[LA.DEMO])
+        t0 = time.monotonic()
+        with pytest.raises(LA.LauncherError) as ei:
+            LA.run(ui, port=_free_port(), python=py)
+        assert time.monotonic() - t0 < 10, "服务已死还在干等超时"
+        assert "ModuleNotFoundError: No module named" in str(ei.value)
+        assert "open" not in ui.kinds()
 
     def test_port_taken_by_something_else(self, home, monkeypatch):
         import http.server

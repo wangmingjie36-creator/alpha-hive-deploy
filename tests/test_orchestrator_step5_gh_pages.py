@@ -24,6 +24,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from typing import Optional
+
 import pytest
 
 from tests._orchestrator import extract_function, repo_orchestrator_text
@@ -33,7 +35,9 @@ _FUNC = "_step5_gh_pages_verdict"
 
 
 def _run(func_src: str, *, project_dir: Path, logs_dir: Path, step2_rc: int,
-         since: float, locale: str) -> dict:
+         since: float, locale: str, step2_status: Optional[str] = None) -> dict:
+    """step2_status=None ⇒ 不设 STEP2_STATUS（B2 之前的调用环境 / set -u 下 `${STEP2_STATUS:-}` 必须扛得住）。"""
+    s2 = "" if step2_status is None else f"STEP2_STATUS={json.dumps(step2_status)}"
     harness = f"""set -uo pipefail
 log() {{ printf 'LOG[%s] %s\\n' "$1" "$2"; }}
 OVERALL_STATUS=success
@@ -43,6 +47,7 @@ PYTHON3={json.dumps(sys.executable)}
 LOGFILE=/dev/null
 STEP2_START={since}
 STEP2_RC={step2_rc}
+{s2}
 STEPS_RESULT='{{"step2_hive_analysis": {{"status": "success"}}}}'
 {func_src}
 {_FUNC}
@@ -127,6 +132,49 @@ class TestRealOrchestratorStep5:
             assert s5.get("unverified") is True and "未核实" in r["log"]
         else:
             assert s5["reason"] == "step2_did_not_complete"
+
+    @pytest.mark.parametrize("rc,step2_status,expect", [
+        (1, "success_with_warning", "skipped_builtin"),   # B2：rc=1 但主流程跑完（部署已做）⇒ 与 rc=0 同一支
+        (1, "failed", "failed"),                          # rc=1 且证明不了跑完 ⇒ 照旧「本轮网站不会更新」
+        (124, "timeout", "failed"),
+        (2, "skipped", "failed"),
+        (0, "success", "skipped_builtin"),
+    ])
+    def test_helper_unavailable_reads_step2_status(self, func, tmp_path, locale, rc, step2_status, expect):
+        """B2（v0.45.386）：降级支读 Step 2 调用点存下的 STEP2_STATUS，不在 bash 里再写一遍判据。
+        变异：把那一行改回只判 `STEP2_RC -eq 0` ⇒ 第一格红（09-24 那种日子又报「网站不会更新」）。"""
+        old_checkout = tmp_path / "old_checkout"
+        old_checkout.mkdir()
+        logs = tmp_path / "home" / "logs"
+        _write_log(logs)
+        r = _run(func, project_dir=old_checkout, logs_dir=logs, step2_rc=rc, since=0, locale=locale,
+                 step2_status=step2_status)
+        s5 = r["steps"]["step5_github_deploy"]
+        assert s5["status"] == expect, r
+        assert r["status"] == "success", "Step 5 降级支两边都不调 set_status（B 之前就如此）"
+        if expect == "skipped_builtin":
+            assert s5 == {"status": "skipped_builtin", "unverified": True} and "未核实" in r["log"]
+            assert "不会更新" not in r["log"]
+        else:
+            assert s5 == {"status": "failed", "reason": "step2_did_not_complete", "step2_rc": rc}
+            assert "不会更新" in r["log"]
+
+
+class TestB2DependsOnB1:
+    """审查跟进（B2，核为 should-fix）：B2 的 Step 2/4 调用点与 `STEP2_STATUS` 用的是 B1 的 helper 与全局 `_SI_STATUS`。
+    单独 revert B1、留着 B2 ⇒ 部署关卡（`bash -n` / 裸变量 / 漂移）全过，扫描却在 Step 2 找不到函数、摘要全丢。
+    B1 自己的测试文件会随它一起被撤掉，指望不上 ⇒ 这条放在 B2 动过的文件里，让那种回滚在 CI 上红。"""
+
+    def test_helpers_and_global_defined_before_first_use(self):
+        text = repo_orchestrator_text()
+        extract_function(text, "_apply_step_interp")        # 抽不到就抛
+        extract_function(text, "_step_rc_fallback")
+        lines = text.splitlines()
+        glob_at = lines.index('_SI_STATUS=""')
+        def_at = next(i for i, ln in enumerate(lines) if ln.startswith("_apply_step_interp() {"))
+        call_at = next(i for i, ln in enumerate(lines) if ln.startswith("_apply_step_interp 2 "))
+        read_at = next(i for i, ln in enumerate(lines) if ln.startswith('STEP2_STATUS="${_SI_STATUS'))
+        assert glob_at < call_at and def_at < call_at < read_at, (glob_at, def_at, call_at, read_at)
 
 
 class TestExtractorHasTeeth:

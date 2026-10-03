@@ -6,4 +6,4 @@ GEX 水平（对标 GEXBot Classic）+ 卖权工作台 + 盘中时序 + 账本�
 ⚠️ 与 `alpha_hive_bot/`（Railway 上的 Telegram 机器人）、Slack 的「Alpha Hive Bot」无关，只是名字像。
 """
 
-__version__ = "0.45.390"
+__version__ = "0.45.397"

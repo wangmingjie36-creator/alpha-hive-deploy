@@ -64,6 +64,92 @@
   同时当两个来源）——补测后 **22/22 红**，每个红的都是该红的那条。补测时我第一次把演练测试的期望写错（D3 无快照、不在演练日期里），
   基线就是红的，那一轮 N22 的「红」作废、改对后重跑。副本里 3 条 skip 均为「不在 git 仓库里 / 无完整历史」，合法。
 
+## [0.45.399] — 2026-10-03 — Fixed：Alpha Bot.app 在 Apple 芯片上双击被按 x86_64（Rosetta）启动 ⇒ arm64 的 numpy 载入失败、服务起不来；Info.plist 加 `LSArchitecturePriority`
+
+用户第一次双击 0.45.397 生成的 .app：弹窗「Alpha Bot 服务启动失败（退出码 1）」，日志末尾 numpy 报
+`_multiarray_umath…so (mach-o file, but is an incompatible architecture (have 'arm64', need 'x86_64'))`。启动器的「服务先死就立即弹窗附日志」按设计工作了。
+
+**根因**：.app 的主程序是 bash 脚本，LaunchServices 从可执行文件头判断架构，脚本没有 Mach-O 头 ⇒ 在 Apple 芯片上按 x86_64（Rosetta）起；
+子进程继承架构偏好 ⇒ 通用版 `/usr/local/bin/python3`（x86_64 + arm64）也跑成 x86_64 ⇒ 用户 site 里只有 arm64 的 numpy 载不了。
+探针实测（真生成器造的 .app，经 `env -i open -W` 启动）：现状 ⇒ shell / python 都是 x86_64、numpy 失败；加 `LSArchitecturePriority` 或脚本里 `arch -arm64` ⇒ 都是 arm64、numpy 2.4.2 正常。
+
+**0.45.397 的探针为什么漏了**：它只验了 starlette 能 import——纯 Python 包，哪种架构都能载，**证明不了架构**。验「Finder 启动后环境对不对」要载一个**带编译扩展**的包。
+测试从终端跑是原生 arm64，端到端那条同样看不出来。
+
+### Fixed
+- `alphabot/macos_app.py`：`info_plist()` 加 `LSArchitecturePriority = ["arm64", "x86_64"]`。选它而不是脚本里 `exec /usr/bin/arch -arm64`：声明式、Intel 机上自动退回 x86_64（`arch -arm64` 在 Intel 机上直接失败）。
+  修后用真生成器（只改 bundle id 与 python）经 LaunchServices 实测：arm64、numpy 2.4.2。
+- `tests/test_alphabot_launcher.py::TestBundle::test_bundle_is_complete`：钉 `LSArchitecturePriority[0] == "arm64"`。变异实测：删掉这个键 ⇒ `KeyError` 红。
+  只能钉在 plist 上：CI / 终端里跑的进程本来就是原生架构，端到端测不出来。
+
+### 注意
+- 已装的 `~/Applications/Alpha Bot.app` 要重新生成才拿到新 Info.plist（启动逻辑每次从仓库读，但 Info.plist 是生成时写死的）。
+
+## [0.45.397] — 2026-10-03 — Fixed：Alpha Bot 启动器测试在 Mac 上两红（沙箱 HOME 藏掉子进程的用户 site-packages；真 osascript 模态弹窗卡到超时、被杀后对话框留在屏幕上）——都是测试侧，生产不受影响
+
+`tests/test_alphabot_launcher.py` 在用户 Mac 上两条红，未改动的 origin/main `d758f614` 同样红；v0.45.390 只在 Linux 容器里验过，两条在那都绿。**两条原因不同**：
+
+1. `TestLauncherFlow::test_demo_start_reuse_and_stop`：`home` 夹具把 `HOME` 指到 tmp，真起的 `python -m alphabot` 按 `$HOME`
+   推用户 site-packages（`~/Library/Python/3.11/lib/python/site-packages`，本机 starlette 就在那）⇒ 推成 tmp 下的空目录 ⇒
+   `ModuleNotFoundError: No module named 'starlette'`。pytest 自己的进程在启动时已经按真 HOME 算好用户 site，所以只有子进程中招。
+2. `TestBundle::test_missing_python_fails_loudly`：启动脚本的 `alert` 调的是真 `/usr/bin/osascript`，`display alert` 是**模态**的 ⇒
+   测试卡住直到 `--timeout=60` 把它杀掉；被杀的只是 bash，osascript 成了孤儿，「Alpha Bot 无法启动」对话框**留在屏幕上**
+   （实测 `rc=-9`、事后 `pgrep` 抓到孤儿）。Linux 没有 osascript ⇒ CI 上从来不红。
+
+### Fixed
+- `tests/test_alphabot_launcher.py`：`home` 夹具钉 `PYTHONUSERBASE = site.getuserbase()`（本进程启动时按真 HOME 算好的那个）——换 HOME 只隔离启动器的 `~/Library`，子进程 import 面与本进程一致。
+- `tests/test_alphabot_launcher.py`：跑 .app 启动脚本的三条测试改经 `_app_exe`，弹窗换成假 osascript（只记正文、立即返回）。
+  `test_missing_python_fails_loudly` 顺带**加强**：除日志外还断言弹窗正文（双击的人看的是弹窗）；旧写法在「弹窗根本没弹」的变异下照样绿（实测）。
+  `test_script_cds_into_spaced_repo_and_execs_python` 加「正常路径不弹窗」，失败时直接带出弹窗正文。
+- `alphabot/macos_app.py`：`launch_script` / `build_app` 加 `osascript=`（缺省 `/usr/bin/osascript`，同 `repo=` / `python=` 一样只给测试换）。
+  这一项本身不改缺省生成的启动脚本（注入点缺省值即原路径，实测逐字节相同、含带空格路径）；脚本唯一的变化是下面 Changed 里那句弹窗文案。
+
+### Added
+- `test_sandbox_home_keeps_child_user_site`：沙箱 HOME 下子进程推出的用户 site 必须等于本进程的。没有它，漏钉 PYTHONUSERBASE
+  只在「依赖装在用户 site」的机器上红，CI 永远绿；这条在哪都红（沙箱 HOME 下推出的必然是另一个路径）。
+- `test_missing_dependency_names_the_module`：真解释器加 `-S -E`（不加载 site-packages）⇒ 在哪台机器上都是「依赖全缺」；
+  启动器要在 10 秒内弹出带 `ModuleNotFoundError: No module named …` 的窗，不干等 90 秒超时、不开页面。
+  修好夹具后上一条不会再「意外」走这条路，这里改成有意走。
+
+### Changed
+- `CLAUDE.md`「用户偏好」Python 硬规则：`/usr/local/bin/python3` 的来源由「Homebrew」更正为 python.org 安装包（framework 版；本机 `/usr/local` 下没有 `Cellar` / `Homebrew`，不是 Homebrew 前缀），
+  并补一条：包分装两处、部分只在用户 site ⇒ 测试改 HOME 后起真解释器要钉 `PYTHONUSERBASE`。
+- `alphabot/__init__.py`：`__version__` 0.45.390 → 0.45.397（推送后补：.app 的 `CFBundleShortVersionString` 读它，生成出来显示的还是 390）。
+- `alphabot/macos_app.py`：「找不到 Python」弹窗原写「Alpha Hive 用 Homebrew 的 Python 3.11」——事实错，且照做走不通：`brew install python@3.11` 装进
+  `/opt/homebrew`，不会恢复 `/usr/local/bin/python3`；本机 Homebrew 现成的 `python3.12` 一个依赖都没有（starlette / uvicorn / numpy / pandas 全缺，实测），
+  按「换了 Python 就 `PYTHON=新路径`」做 ⇒ 服务起来即死、换成第二个弹窗。现改为不写厂商名（写了还会过时），只说恢复要什么：装回同一个解释器（扫描 / MCP 也用它）；
+  要换就先给新解释器 `pip install -r requirements.txt` 再 `make alphabot-app PYTHON=新路径`。`${PY}` 仍带花括号（bash 3.2 全角坑，见 0.45.390），
+  `/bin/bash` 3.2 实跑弹窗路径完整。生成脚本相对 `d758f614` 只差这一行；本机尚未生成 .app ⇒ 不用重新生成（已生成的要 `make alphabot-app` 才拿到新文案）。
+
+### 核实：生产里 .app 看得见用户 site（不是只在测试里成立）
+- 临时探针 .app（真 `MA.build_app` 生成，仓库与 python 换成草稿目录里的记录脚本，bundle id 另起，用完 `lsregister -u` 并删除）经 LaunchServices 启动：
+  `env -i open -W` ⇒ `HOME=/Users/igg`、PATH 是 launchd 的裸默认值（证明拿的是 launchd 环境不是调用方的），`site.USER_SITE` 指真目录，starlette 可 import。
+  ⚠️ 不带 `env -i` 的 `open` 会把**调用方的环境**传给 .app（实测哨兵变量穿透）——那样测出来的不算 Finder 启动。
+- 旁证：每日扫描的 launchd plist 只设 `ALPHA_HIVE_HOME` / `PATH`、不设 HOME，而 numpy 只装在用户 site——扫描天天能跑。
+- **不建议给 .app 单独钉依赖**（打包 venv 等）：.app 有意是薄壳、与扫描用同一个解释器，`git pull` 即生效；另起一套环境要单独维护、会与扫描环境漂移。
+
+### 依赖真缺了，谁会红
+- 用户：启动器 `wait_ready` 见服务进程先死 ⇒ 立即弹窗「Alpha Bot 服务启动失败（退出码 1）」+ 日志尾巴（末行就是 `ModuleNotFoundError: No module named 'starlette'`），并写 `~/Library/Logs/Alpha Bot/launcher.log` / `server.log`。
+- 测试：`test_missing_dependency_names_the_module`（任何机器）；本进程也缺时 `TestShutdownEndpoint` 与 `tests/test_alphabot.py` 在 import 处就红。
+- `test_missing_python_fails_loudly` 管的是另一层：**解释器本身**不在 ⇒ bash 壳弹窗，Python 根本没起来。
+
+### 变异实测（`PYTHONDONTWRITEBYTECODE=1`、每轮清 pyc、`--maxfail=1000`、每轮核 passed+failed = 22、事后查孤儿 osascript：无）
+| 变异 | 红的测试（理由已逐条核对） |
+|---|---|
+| M1 夹具不钉 PYTHONUSERBASE | `test_demo_start_reuse_and_stop`（同原始症状）、`test_sandbox_home_keeps_child_user_site`（`/private/var/… ≠ /Users/igg/Library/…`） |
+| M2 启动脚本不弹窗 | `test_missing_python_fails_loudly`；**旧测试文件在同一变异下绿** |
+| M3 `_tail` 返回空（弹窗丢了日志尾巴） | `test_missing_dependency_names_the_module`、`test_server_dying_at_start_is_reported_with_log` |
+| M4 `cd "$REPO"` 失败（走弹窗分支） | `test_script_cds_…`（立即红、消息即弹窗正文）、`test_gui_launch_…`；旧写法在 Mac 上会弹真窗卡 60 秒 |
+未跑：「`build_app` 忽略 `osascript=`」——在 Mac 上会弹真对话框；推理上 Linux 立即红（`alerts.txt` 不存在）、Mac 卡到超时红。
+
+### 注意
+- 本 worktree 里有 10 个 iCloud 重名副本（`sell_strike_ledger 2.py` 等，git 忽略、09-29 产生，`sell_strike_report 2.py` 与正本**不同**）⇒
+  `test_sell_strike_integration.py::TestFirewallInward` 两条在本地红（火墙按文件系统扫到了副本）。与本版无关：`git archive` 干净树 + 本补丁
+  跑同一批 6 个文件 305 passed / 5 skipped（skip 全是 `git check-ignore` 退出码 128，worktree 里同样那 5 条是绿的）。副本未动（CLAUDE.md「重名副本」一节）。
+- `/usr/local/bin/python3` 是 **python.org 的 framework 版**（软链到 `/Library/Frameworks/Python.framework`），不是 Homebrew；
+  numpy / pytest / jinja2 / starlette / httpx **只**装在用户 site（`python3 -s` 下全不可 import）——任何把 HOME 换掉再起真解释器的测试都会撞上同一件事。
+  全仓普查：其余 6 个改 HOME 的测试文件只起 git / bash / 桩，不起真解释器。
+
 ## [0.45.396] — 2026-10-03 — Fixed（事后修订）：F&G 敞口门前瞻检验的自证——四元组第四元两边一律取 `shares × entry_price`（09-30~10-02 的「精确层失败」全是取法不对称）；另报「A 多开」（09-24 生产被限流）
 
 > 基于 main `6dc806fa`，未推送。只动 `experiments/fg_exposure_gate_forward_test.py` 与它的测试；`paper_portfolio` / 编排器 / 生产数据一行未动。
@@ -127,6 +213,8 @@
 窗口、变体、统计量、检视点（15/30）、α、盲化、`SELFPROOF_MIN_RATE`、分母、决策层定义、种子。修订是在**只重放 A** 的基础上定的
 （诊断脚本与 `--rehearse`）；修订后用 `run()` 核对时输出按盲化只有进度与自证率，没有算或看任何周度差 / 效应量；
 `decide()` 自 `FORWARD_START` 起从未走到出统计量的分支（2/15 个合格周）。
+
+## [0.45.394] — 2026-10-03 — 占位（进行中：阶段 6 ① 「数据被 git 跟踪/提交即红」守卫）
 
 ## [0.45.393] — 2026-10-02 — Fixed：`migrate_data_root.py` 分类表补 `alphabot` / `scripts` / `vercel.json`，check-old 不再因新代码项无故报红
 
@@ -526,7 +614,97 @@ v0.45.383 遇到重取仍缺的日线只能把 `iv_rank` 置空（分数走中�
 - 2026-08-27 之前快照里的坏 `rv_30d`（跨标的重复 / >300 的值）及其对 `vrp_signal._prior_history` 的潜在影响。
 - JNJ 有固定 2~3 点偏差，仍未定性；`is_trading_day` 不认识 2025-01-09；覆盖率闸门仍只判非空。
 
-## [0.45.386] — 2026-09-29 — 占位（进行中：编排器 B2——Step 2/4/5 经步骤解释器 + alert_manager 新规则；B1 干净跑过一天后合入）
+## [0.45.386] — 2026-09-29 — Changed：编排器 Step 2/4 改调步骤解释器 + Step 5 降级支读 STEP2_STATUS + alert_manager 接住新判定（B2）——ML 常数日不再误报「Step 2 没跑完 / 网站不会更新」，告警换成一条专门的 P1
+
+接 v0.45.385（B1：helper + Step 10–15）。按同一份最终规格的第二个 PR：Step 2/4/5 与 alert_manager 必须**同版**上，
+否则 rc=1 跑完的日子会一条步骤告警都没有（旧两条 `failed` P1 变成 `success_with_warning` / `skipped_builtin`，而没有规则接住）。
+
+### Changed
+- `scripts/alpha-hive-orchestrator.sh`：
+  - Step 2：`if [ $STEP2_RC -eq 0 ] … fi` 四支链换成 `_apply_step_interp 2 step2_hive_analysis "${STEP2_RC}" "${STEP2_DURATION}" "" --run-start
+    "${STEP2_START}" --timeout-seconds "${STEP2_TIMEOUT}" --data-dir "${DATA_DIR}"`；紧跟一行 `STEP2_STATUS="${_SI_STATUS:-}"`（**必须立刻取**：
+    Step 4 的调用会覆盖 `_SI_STATUS`），再 `if [ "${STEP2_RC}" -ne 0 ]; then set_status partial; fi`。**OVERALL_STATUS 仍只看退出码**，
+    与 B 之前逐支相同（124 / 2 / 其余含 1 ⇒ partial）；解释器的 status/level 不参与。刻意的改动只有一处：rc=1 且主流程确实跑完
+    （当日 `.swarm_results`、日报 JSON+MD、本轮写的 `logs/scan_timing.json` 带 git_push）⇒ `success_with_warning`（附 `warning` /
+    `ml_model_guard` / `git_push_success`），日志 WARN，不再打「Step 2 失败」。`--data-dir` 必须是 DATA_DIR（证据都在那），传 REPORTDIR 会让每个 rc=1 都判 failed。
+  - Step 4：`if [ $STEP2_RC -eq 0 ] … else … fi` 换成 `_apply_step_interp 4 step4_dashboard "${STEP2_RC}" "" "" --run-start "${STEP2_START}"
+    --data-dir "${DATA_DIR}"`（判据与 Step 2 共用 `_step2_outcome`）；rc=1 跑完 ⇒ `skipped_builtin` + `step2_status`，不再打「Step 4 未生成仪表板！」ERROR。仍不调 `set_status`。
+  - Step 5 `_step5_gh_pages_verdict` 的降级支（`report_deployer.py --gh-pages-step-status` 无有效输出时）一行：
+    `elif [ "${STEP2_RC}" -eq 0 ] || [ "${STEP2_STATUS:-}" = "success_with_warning" ]; then`——rc=1 跑完的日子与 rc=0 同一支（`skipped_builtin` + `unverified`），
+    判据不在 bash 里再写一遍（`:-` 让 set -u 下没设 STEP2_STATUS 的环境照旧能跑）。
+  - Step 2/4 的兜底与允许集合沿用 B1 的 helper：解释器不可用 / 给出 B 之前不存在的判定 ⇒ 按退出码**逐字复现** B 之前的 status + `interp_fallback` + 一行 ERROR。
+- `alert_manager.py`：
+  - P1 步骤循环加固：条目不是对象 ⇒ 记 `checks_skipped` + WARNING 后 `continue`（此前 `.get` 直接 AttributeError、整个 Step 6 崩）。
+  - 新 HIGH：`step2_hive_analysis.status == "success_with_warning"` ⇒「扫描已跑完但退出码 1：…（warning）」，details 带原因 / 推送结果 / 处理建议。
+    这是 ML 常数日（09-24/25）**唯一**的告警来源，标签更准了它不许跟着消失；`ml_model_constant` 与 `rc1_after_completion_unexplained` 都报，warning 缺失写「原因未记」。
+  - 新 MEDIUM：任何条目带 `interp_fallback` ⇒「步骤解释器不可用，<步骤> 按退出码兜底记」（原因截 300 字）。兜底的 `failed` 照旧另有通用 HIGH。
+    ⚠️ **生产上只有 Step 2/4 触发得到**（换基后复审）：Step 6 的告警分析跑在 Step 10–15 之前，读的 status.json 里还没有它们的片段，
+    之后也没有再分析一遍 ⇒ 10–15 的兜底只留编排器日志 ERROR + 最终 status.json 的 `interp_fallback`，**没人自动看**（每周 SKILL.md grep 的提议待用户批准）。
+  - `_swarm_scan_actually_ran` 放宽为 `status in ("success", "success_with_warning")`：后者要求本轮 `scan_timing.json` 带 git_push
+    （`orchestrator_steps._step2_rc1_evidence`），正是 `write_status` 并入的那份，故只会增加真阳性；step2 条目不是对象 ⇒ False（不崩）。
+  - 未改：`'failed'` 通用规则、P0、`main()`；没有 `--steps-only`（规格已否决 Design 2 的最终 pass）。
+- `orchestrator_steps.py`：仅 docstring（CLI / 输出形状不变）——接线说明改为「v0.45.385 接 10–15、v0.45.386 接 2/4」；Step 5 段改为「降级支已读 STEP2_STATUS」；
+  「bash 应退回只按 rc 记（B 的事）」改指 `_step_rc_fallback`。
+
+### Added
+- `tests/test_orchestrator_step_interp.py`（131 → 163 条；审查跟进后 164）：
+  - `TestStep2CallSite`：从仓库编排器抽 Step 2 / Step 4 **调用点原文**（非重写）真跑。`test_overall_status_matrix` = 6 种退出码情形（0 / 1 跑完 / 1 没跑完 /
+    2 / 124 / 99）× 起点 success/partial/failed × 解释器真 / 缺，OVERALL_STATUS 逐格等于**冻结副本**的 Step 2 分支链配真 `set_status` 跑出来的值
+    （且 = max(起点, rc≠0 ? partial : success)）；解释器缺失时两步片段 = B 之前 + `interp_fallback`、各一行 ERROR；rc=1 跑完 ⇒ `success_with_warning` /
+    `skipped_builtin` + `step2_status`。`test_step4_call_site_never_touches_overall`（同 12 格）；`test_step2_status_survives_the_step4_call`（含反证：
+    同一原文把取值挪到 Step 4 之后就读到 `skipped_builtin`，证明断言不是恒真）；`test_allow_list_fallback_at_call_site`（替身回归成 success / 新字符串 /
+    rc=0 说 failed ⇒ 两步都退回、OVERALL 只按退出码）；`test_reportdir_would_lose_the_completion_proof`。harness 故意给 REPORTDIR 一个别的目录，
+    调用点改传它时是行为红而不是 set -u 崩。
+  - `TestLiveWiring` 加 Step 2/4：每个 STEP_KEYS 恰一个调用；2/4 传 `--data-dir "${DATA_DIR}"` / `--run-start "${STEP2_START}"`、不碰 REPORTDIR；
+    `STEP2_STATUS="${_SI_STATUS:-}"` 紧跟 Step 2 调用、随后是按 STEP2_RC 的 `set_status partial`；旧分支链与 jq 内联已删；Step 5 降级支那一行在。
+  - `TestMacBash` 加调用点矩阵（rc=1 跑完 / 没跑完 / 124 × 解释器真 / 缺）在 `env -i`（C locale）与 `LC_ALL=en_US.UTF-8` 下重跑。
+- `tests/test_alert_step_interp.py`（新，17 条）：success_with_warning 两种 warning 各恰一条 HIGH；warning 缺失照报；只认 step2；`failed` 通用 HIGH 逐字不变；
+  success 零告警；`interp_fallback` 恰一条 MEDIUM（failed / success / 工具步骤三形）；非对象条目（str / None / int / list）不崩、记 `checks_skipped`、
+  后面条目照查；B 之前格式的 status.json（rc 0/1/124/2 四形）步骤告警与旧 P1 循环逐字相同（合并当天「旧编排器 + 新 alert_manager」）。
+- `tests/test_scan_timing_missing_alert.py`：判别器加 `success_with_warning` ⇒ True、`timeout` ⇒ False、非对象 ⇒ False；端到端一条（rc=1 跑完 + 缺 scan_timing ⇒ P1）。
+- `tests/test_orchestrator_step5_gh_pages.py`：harness 可注入 `STEP2_STATUS`（不传 = 不设，覆盖 B2 之前的调用环境）；新增 5 格 × 2 locale：
+  rc=1 + success_with_warning ⇒ `skipped_builtin` + `unverified`、不说「不会更新」；rc=1 + failed / 124 + timeout / 2 + skipped ⇒ 照旧 failed；OVERALL 两边都不动。
+
+### 上线（规格 rollout 第 2 节）
+- **只在 B1（v0.45.385）至少一个干净的生产日之后再合入本版**（B1 的 M+1 核对清单全过）。**已满足**：10-02 全过；10-01 除 Step 11 外全过——
+  那天 Step 11 被 60s 超时杀掉（F&G 前瞻重放的取数问题，v0.45.391/392 已修，不是 B1 的错），清单里「step11 有 cohort_boundary」那项没过。
+- 合入日 M2 那轮仍是旧编排器 + 新 alert_manager：新规则对旧格式片段惰性，告警与今天相同（`TestPreBStatusUnchanged` 守；换基后复审拿真实
+  10-02 status.json 回放，main 与本版 alert_manager 的告警逐条相同，且与当日生产 `alerts-2026-10-02.json` 一致）。B1 的 10–15 片段在 Step 6 之后才写，到不了这一轮的分析。M2+1 起执行本版编排器。
+- M2+1 扫描后只读核对：`step2_hive_analysis.status` ∈ {success, success_with_warning, …} 且无 `interp_fallback`；`step4_dashboard.step2_status`
+  恰在 step2 为 success_with_warning 时出现；`~/.claude/logs/alerts-<date>.json` 的新 HIGH 只在 rc=1 跑完的日子出现；顶层 status 恰在 rc≠0 时为 partial。
+  rc=1 路径在解释器上线后还没有真实样本（09-28～10-02 都是 rc=0），第一次触发要人工读一遍。真实 09-25（rc=1、ML 近常数）离线回放：
+  `success_with_warning` / `ml_model_constant`、一条具体 HIGH 替掉两条通用 P1，推送失败与 fetch_failed 的 HIGH 照留。
+- **回滚顺序：先 revert 编排器（本版 `scripts/alpha-hive-orchestrator.sh` 的改动），次日再 revert alert_manager**——反过来会有一轮「B 编排器 + 旧 alert_manager」，
+  rc=1 跑完的日子零步骤 P1。⇒ **不要整版 `git revert` 本版**（一次撤两者 ⇒ 次日正是那一轮）：`git revert --no-commit` 后
+  `git checkout HEAD -- alert_manager.py tests/test_alert_step_interp.py tests/test_scan_timing_missing_alert.py` 保住新 alert_manager 再提交，次日另撤。
+  **也不许在本版之前单独撤 B1**（本版的调用点依赖 B1 的 helper，`TestB2DependsOnB1` 会红）。解释器坏了不需要回滚：helper 自己兜底、按退出码复现 B 之前的 status 并出 MEDIUM。
+
+### 验证
+- 目标测试（step_interp / step5_gh_pages / alert_step_interp / scan_timing_missing_alert 与全部读编排器原文或 step2/step4 键的文件：orchestrator_steps /
+  data_backup / autodeploy / braced_vars / deployed_matches_repo / deploy_orchestrator / scan_catchup / scan_timing / code_version / step_contract* /
+  ic_rerun_readiness / silent_failure_guards / watchlist_single_source / changelog_guard_contract_gate / reads_own_checkout / slack_send_whitelist /
+  gh_pages_unverified_parent / production_sync）1383 passed / 3 deselected。`/bin/bash -n` 通过、`find_unbraced` 为空、`ruff check .` 全过。
+- 全套（`--timeout=300 --maxfail=1000`）：7627 passed / 1 failed / 82 deselected / 2 xfailed（417s）；唯一失败仍是已知的
+  `test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`。跑前跑后 `git status --porcelain --ignored` 逐字相同。
+- 变异（`git archive` 副本 + 本版改动拷入，逐个改、核锚点恰一处、跑 216 条目标测试、复原）13/13 红（每条的红格数）：Step 2 调用点删 `set_status partial`（15）、STEP2_STATUS 挪到 Step 4 调用之后（20）、删 2/4 允许集合（8）、Step 2 改传 REPORTDIR（5）、删 success_with_warning HIGH（3）、`_swarm_scan_actually_ran` 退回只认 success（2）、删 interp_fallback MEDIUM（3）、删非对象守卫（4）、Step 5 降级支退回只判 STEP2_RC（3）、Step 5 读 `${STEP2_STATUS}` 不带 `:-`（3，set -u 下旧调用环境崩）、partial 改按解释器 status 判（只认 failed/timeout，7）、Step 4 调用漏 `--run-start`（3）、success_with_warning 规则去掉步骤名限定（1）。一次过，没有需要返修的变异。
+
+### 审查跟进（与 B1 同一轮对抗审查）
+- ⭐ should-fix：本版读 B1 的全局 `_SI_STATUS` 不带默认值 ⇒ 若只撤 B1、留着本版，`set -u` 下扫描在 Step 2 之后中断，而部署关卡全过。
+  改 `STEP2_STATUS="${_SI_STATUS:-}"`（不中断，但仍丢摘要 ⇒ 回滚顺序才是根治，写进上面「上线」）；新增
+  `test_orchestrator_step5_gh_pages.py::TestB2DependsOnB1`：helper 与全局定义在 Step 2 调用之前，缺一个就红——放在本版动过的文件里，
+  因为 B1 自己的测试文件会随 B1 一起被撤。
+- 核为 nit、**接受现状并钉住**：只有 Step 2 的解释器兜底、Step 4 的照常 ⇒ step2 `{failed, interp_fallback}` 与 step4
+  `{skipped_builtin, step2_status: success_with_warning}` 不一致（Step 4 自己重核跑完证据，不读 Step 2 的判定）。OVERALL 与 B 之前相同，
+  仍有 step2 的 P1 + 兜底 MEDIUM；丢的是 B 之前那条 step4「failed」，它在跑完的日子是误报。审查建议的「Step 4 看 STEP2_STATUS」会把误报请回来，
+  故不改；`test_step2_only_fallback_is_inconsistent_but_accepted`（替身只让 Step 2 出垃圾、Step 4 转真解释器）钉住，要改先改它。
+  无确定性触发：解释器只导入标准库，单次约 0.05s 对 30s 超时。
+- 核为 nit、不改：`TestPreBStatusUnchanged` 对照的是手写的旧 P1 循环模型、且只比三类步骤标签——测试强度缺口，不是现有 bug。
+
+### 换基后复审（2026-10-03）
+- 换基：原提交 ff8acf8b / 3004fd18（基于 B1 合并前的 a91625a9）摘到 origin/main `68aa072f` 上（`6c7e60cf` / `624e0da2`）；只有 CHANGELOG 冲突（386 占位换正文）。除 CHANGELOG 外补丁逐行相同（patch-id 一致），各文件终态 = main + 本版原 hunk；`orchestrator_steps.py` 只差 docstring（AST 去掉 docstring 后与 main 相等），不碰 v0.45.391/392 的 Step 11。冻结副本逐字节未变；部署工具 dry-run（指向临时副本）`would_deploy`、关卡全过。
+- 生产回放（只读、临时副本）：M2 当天（旧编排器 + 本版 alert_manager）真实 10-02 告警与 main 逐条相同；M2+1 模拟 rc=0 ⇒ 片段与 10-02 生产逐字节相同、无新告警；模拟 rc=1 ⇒ `success_with_warning` / `rc1_after_completion_unexplained`、一条具体 HIGH、OVERALL success→partial；同日重跑（证据早于本步开始）⇒ 拒认、记 failed。解释器每次 0.07–0.08s。
+- 验证（换基后）：目标测试 1018 passed（含 v0.45.392 的 `test_ic_rerun_fg_budget.py`）；全套 7977 passed / 3 failed——TestCoverageHorizon 与 `test_alphabot_launcher.py` 两条（假 HOME 遮住用户级 site-packages 里的 starlette，main 上同样失败，另有任务在修）；变异 25 个 24 红，1 个绿的是等价变异；`:-` 默认、`_SI_STATUS=""` 全局、partial 改按 _SI_STATUS 三处只在 B1 被撤时才有行为差异，靠 `TestB2DependsOnB1` 的结构守卫。上面「验证」段的 1383 / 7627 / 216 是换基前的数，留作历史。
+- 文档更正：上面 Changed 段的取值行补上 `:-`；`interp_fallback` MEDIUM 只覆盖 Step 2/4（见上）；alert_manager 注释里「09-24/25 都是 ML 常数日」改为 09-25 是、09-24 的 ML 守卫判 ok（退出码 1 原因待验证）。
 
 ## [0.45.385] — 2026-09-29 — Changed：编排器 Step 10/11/12/13/15 改调步骤解释器（B1）——bash 不再持有这五步的格式知识；先删后跑 + 日期显式传入；解释器不可用时按退出码兜底并留痕
 
