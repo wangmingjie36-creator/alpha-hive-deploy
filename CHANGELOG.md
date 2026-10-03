@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.394] — 2026-10-03 — 占位（进行中：阶段 6 ① 「数据被 git 跟踪/提交即红」守卫）
+
 ## [0.45.393] — 2026-10-02 — Fixed：`migrate_data_root.py` 分类表补 `alphabot` / `scripts` / `vercel.json`，check-old 不再因新代码项无故报红
 
 ### Fixed
