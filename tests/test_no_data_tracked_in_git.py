@@ -97,3 +97,34 @@ def test_guard_ignores_gitignored_data_on_disk(tmp_path):
     assert tracked_data_entries(str(root)) == {}
     _git(root, "add", "-f", "report_snapshots/a.json")
     assert tracked_data_entries(str(root)) == {"report_snapshots": 1}
+
+
+# ── .gitignore 与分类表同步：新增 MOVE 规则忘了补忽略 ⇒ 数据会以未跟踪文件的形式反复出现 ─────────
+def _sample_names():
+    """每条 MOVE 规则造一个样例名：目录规则 → (名字, True)，通配 → 把 * 换成 X，精确名原样。"""
+    for d in m.MOVE_DIRS:
+        yield d, f"{d}/x.json"
+    for g in m.MOVE_GLOBS:
+        yield g, g.replace("*", "X")
+    for e in m.MOVE_EXACT + m.MOVE_DBS:
+        yield e, e
+
+
+def test_gitignore_covers_every_move_rule():
+    missing = []
+    for rule, path in _sample_names():
+        r = subprocess.run(["git", "-C", _ROOT, "check-ignore", "-q", "--no-index", "--", path],
+                           capture_output=True, env=_env())
+        assert r.returncode in (0, 1), f"git check-ignore 异常退出 {r.returncode}：{r.stderr!r}"
+        if r.returncode == 1:
+            missing.append(rule)
+    assert not missing, f"MOVE 规则没有对应的 .gitignore 行（阶段 6）：{missing}"
+
+
+def test_gitignore_move_rules_are_anchored_to_repo_root():
+    """无斜杠的模式匹配任意层级：不锚定的 index.html 会连 alpha-hive-web/index.html 一起忽略。"""
+    for nested in ("alpha-hive-web/index.html", "templates/manifest.json", "tests/reports/a.json",
+                   "experiments/state/a.json", "alpha-hive-web/sw.js"):
+        r = subprocess.run(["git", "-C", _ROOT, "check-ignore", "-q", "--no-index", "--", nested],
+                           capture_output=True, env=_env())
+        assert r.returncode == 1, f"{nested} 被误忽略（MOVE 规则没锚定到仓库根）"

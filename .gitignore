@@ -33,7 +33,8 @@ ml_model*.json
 # 模式匹配任意层级的 basename，实测 `git check-ignore` 命中第 30 行）。
 # 不加这条反向规则，快照就是「每天写、每天不进库」——2026-09-04 那次退化
 # 无法归因，正是因为模型被原地覆盖、没有任何历史版本。
-!ml_model_history/*.json
+# （v0.45.394 起 ml_model_history/ 整个在数据根，原先这里的 `!ml_model_history/*.json` 反向例外已删——
+#   它与下面的 `/ml_model_history/` 打架；快照的耐久性靠 data_backup/export.py 的 STATE_DIRS。）
 
 # 日志（含轮转文件 .log.1, .log.2 等）
 *.log
@@ -145,3 +146,75 @@ alphabot_state/
 * [0-9][0-9].*
 * [0-9]
 * [0-9][0-9]
+
+# ==================== 生产数据不进代码仓库（数据根迁移阶段 6，v0.45.394）====================
+# 生产数据在 $ALPHA_HIVE_HOME（~/alpha-hive-data）。本块由 data_backup/migrate_data_root.py 的
+# MOVE 规则生成，全部**锚定到仓库根**（前导 /）：无斜杠的模式会匹配任意层级，
+# 例如不锚定的 index.html 会连 alpha-hive-web/ 里的同名源码文件一起吞掉。
+# 新增产物：先登记 MOVE 规则，再来这里补一行；守卫 tests/test_no_data_tracked_in_git.py
+# （已跟踪即红）与 ::test_gitignore_covers_every_move_rule（漏补即红）。历史保留，不清（用户 2026-09-24 定）。
+/hedge_state/
+/paper_portfolio_state/
+/paper_portfolio_state_backup/
+/options_paper_state/
+/vrp_state/
+/probability_scorecard_state/
+/ml_model_history/
+/report_snapshots/
+/self_analysis_briefs/
+/db_snapshots/
+/reports/
+/sell_strike_state/
+/alphabot_state/
+/chroma_db/
+/logs/
+/db_backups/
+/cache/
+/data_cache/
+/earnings_cache/
+/finviz_cache/
+/sec_cache/
+/reddit_cache/
+/.factor_cache/
+/.risk_cache/
+/.swarm_results_*.json
+/analysis-*-ml-*.json
+/alpha-hive-*-ml-enhanced-*.html
+/alpha-hive-daily-*.json
+/alpha-hive-daily-*.md
+/alpha-hive-thread-*.txt
+/deep-*.html
+/*_raw.json
+/index.html
+/dashboard-data.json
+/manifest.json
+/sw.js
+/rss.xml
+/weight_history.jsonl
+/pheromone_fallback.jsonl
+/realtime_metrics.json
+/ml_model.json
+/ml_model_cache.json
+/ml_model_extended.json
+/paper_portfolio_card.html
+/param_optimization_results.json
+/param_optimization_report.html
+/watchlist_override.yaml
+/watchlist_override.json
+/pheromone.db
+/metrics.db
+/sentiment_baseline.db
+/hive_predictions.db
+
+# 阶段 6 ③：旧备份库与遗留产物（本机副本已归档到 ~/alpha-hive-data/_archive/，历史保留）
+/pheromone.db.backup_*
+/all_upgraded.json
+/final_optimal.json
+/final_upgraded.json
+/upgraded_50k.json
+/upgraded_v2.json
+/backtest_50k_result.json
+/data-NVDA-2026-03-11.json
+/strategy_backtest_report.txt
+/ML报告_2026-03-10.html
+/chart_*_NVDA_*.png
