@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.399] — 2026-10-03 — 占位（进行中：Alpha Bot.app 双击后被 LaunchServices 以 x86_64/Rosetta 启动，numpy arm64 载入失败）
+
 ## [0.45.397] — 2026-10-03 — Fixed：Alpha Bot 启动器测试在 Mac 上两红（沙箱 HOME 藏掉子进程的用户 site-packages；真 osascript 模态弹窗卡到超时、被杀后对话框留在屏幕上）——都是测试侧，生产不受影响
 
 `tests/test_alphabot_launcher.py` 在用户 Mac 上两条红，未改动的 origin/main `d758f614` 同样红；v0.45.390 只在 Linux 容器里验过，两条在那都绿。**两条原因不同**：
