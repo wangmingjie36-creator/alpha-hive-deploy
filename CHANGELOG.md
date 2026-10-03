@@ -9,7 +9,62 @@
 
 ## [0.45.415] — 2026-10-05 — 占位（进行中：F&G 前瞻检验回放行情库改为时点数据——拆股 / 修订前后的重放日各用当时的价格）
 
-## [0.45.414] — 2026-10-05 — 占位（进行中：数据备份仓位置改走 `PATHS.data_backup_repo`——run_backup / export 缺省调用时求值、编排器 Step 14 不再写死 `_git_backup`；原占 403、411、413 均未及时推送被占用，改号）
+## [0.45.414] — 2026-10-05 — Changed：数据备份仓位置收成一处——`run_backup` / `export` 缺省值改走 `PATHS.data_backup_repo`（调用时求值），编排器 Step 14 不再传 `--backup-dir`；备份仓落在代码仓库里一律拒绝
+
+用的是 v0.45.408 引入的 `PATHS.data_backup_repo`（`home / "_git_backup"`，只读不建目录）；该属性文档串里「编排器与 `run_backup.py` / `export.py` 的缺省值仍写死……统一另立任务」一句即本条，已改写。
+（本条原占 0.45.403 → 0.45.411 → 0.45.413，三次占号都没赶在别人之前上 main（403 GitHubTool 退役、411 Alpha Bot 帮助页、413 GitHubTool 白名单）⇒ 改号 414；414 最终由「在此刻的 main 上重建并立即推送」的脚本占下。）
+
+此前同一个位置写死三份：编排器 Step 14 `--backup-dir "$HOME/alpha-hive-data/_git_backup"`、`run_backup.main` 的 `--backup-dir` 缺省、`export.main` 的 `--out` 缺省，
+都是 `Path.home() / "alpha-hive-data" / "_git_backup"`。成因是历史性的：阶段 3（备份）早于阶段 5（全局迁移），那时 `PATHS.home` 还兜底到代码仓库，备份子系统只能自己指向新数据根
+（`backup_continuity.py` 的注释原文记着这条理由）。阶段 5 后 `ALPHA_HIVE_HOME` 已由编排器与 launchd plist 导出，理由不在了。
+
+**「谁依赖 `Path.home()/alpha-hive-data` 与 `PATHS.home` 的差别」逐个核过**：
+- 编排器：顶部 `export ALPHA_HIVE_HOME="$DATA_DIR"`（`/Users/igg/alpha-hive-data`）；plist `EnvironmentVariables` 同值（10-03 只读核对）⇒ 生产里新旧**同值**。
+- 测试：`_isolate_env` 把 `ALPHA_HIVE_HOME` 指 tmp、`_sandbox_home` 把 `HOME` 指 tmp；原有测试全部显式传 `--backup-dir`，无人吃缺省值。
+- `~/.claude/scripts`（除部署副本与 `.bak`）、`scheduled-tasks`、`skills`、LaunchAgents：无其他调用方。
+- **交互 shell 没设 `ALPHA_HIVE_HOME`（10-03 实测）** ⇒ 手动跑不传路径时，`PATHS.home` 兜底到代码检出，新缺省 = `<检出>/_git_backup`。这是唯一依赖差别的调用方：
+  `export.main` 会 `mkdir` 并把整份生产数据铺进代码检出，下一次 `run_backup` 再在里面 `git init` 出嵌套数据仓库。⇒ 加守卫（下条），不加回退（回退到 `Path.home()` 就是第二份真相）。
+
+### Changed
+- `data_backup/export.py`：新增 `default_backup_repo()`（= `PATHS.data_backup_repo`，函数体内求值；import 失败不吞——这不是 `_code_git_head` 那种只作记录的字段）
+  与 `backup_repo_inside_code_repo(path)`（`resolve()` 后逐级上溯，与 `PATHS.git_repo_root` 比路径**或** (st_dev, st_ino)；不用字符串前缀——`/x/code_backup` 不在 `/x/code` 里）。
+  `main()` 的 `--out` 缺省 `None` ⇒ 解析成 `default_backup_repo()`；目标在代码仓库里 ⇒ stderr 说明、rc=2、什么都不建。
+- `data_backup/run_backup.py`：`--backup-dir` 缺省 `None`，在 `main()` 现有的顶层 `try` 里解析 ⇒ 解析失败落 `crash`/rc=3，**不**以 Python 默认的 1 退出（1 专属 `secret_scan`，Step 14 会报成「密钥扫描命中」）。
+  `run()` 在 `git init` 之前拦「备份仓在代码仓库里」：`stage="init"`、`refused="inside_code_repo"`、rc=2——Step 14 现成的 `init` 分支报「未导出未提交」，正是实情，编排器不用加分支；判定本身抛异常同样中止（判不了就不建库）。显式传参同样拦。
+- `scripts/alpha-hive-orchestrator.sh` Step 14：删掉 `--backup-dir` 一行（位置只在 `PATHS`）；顶部阶段 5 回退说明补一句：回退时要给 Step 14 补回 `--backup-dir`，否则备份仓解析进检出、被拒绝。
+  `bash -n` 通过；裸变量检查（`orchestrator_lint.find_unbraced`，经 `tests/test_orchestrator_braced_vars.py`）0 命中。
+- `run_data_backup.py` 用法说明、`_sandbox_home` 文档串跟着改（`--backup-dir` 不再跟 `$HOME`）。
+
+### 部署节奏（编排器合入后下一个扫描日才部署）
+- 合入后首轮：旧编排器（仍传 `--backup-dir "$HOME/alpha-hive-data/_git_backup"`）+ 新 Python ⇒ 显式值照用（`test_explicit_backup_dir_still_wins` 钉住），守卫放行（不在检出里）。
+- 第二轮起：新编排器不传 ⇒ `$ALPHA_HIVE_HOME/_git_backup`，与旧值逐字相同。
+- revert：新编排器 + 旧 Python ⇒ 旧缺省 `Path.home()/alpha-hive-data/_git_backup`（launchd 下 `HOME` 已坐实）⇒ 同值。三种组合都不换位置。
+
+### Tests
+- `tests/test_data_backup.py::TestBackupRepoFollowsPaths`（12 条；首版报「10 条」是数错，实为 9）：缺省跟 `ALPHA_HIVE_HOME`、两次不同 env 得两个值（未冻结）、不跟 `$HOME`；显式值优先、显式空串不换成缺省；`export.main` 同；
+  代码仓库根本身 / 其下目录都拒绝且零 git / 零导出调用、不建 `.git`；同前缀兄弟目录不误伤；同一目录的大小写 / 固件链接写法也拒绝；**env 全清的 CLI 全链路**（`main` → 缺省 → `run` → 拒绝，rc=2）——git 与导出都换成「一调就炸」的桩，守卫坏了也不会在检出里动手；
+  编排器可执行行（注释除外）不许出现 `_git_backup` / `--backup-dir`，并断言 Step 14 调用本身还在（防空转变绿）。
+- 变异 10/10 被杀，每个都由预期的那几条打红、passed+failed 均为 87（`PYTHONDONTWRITEBYTECODE=1` + 每轮清 pyc、哈希核对还原）：
+  run 守卫关掉（3 红）/ export 守卫关掉（1）/ 两处缺省改回 `Path.home()` 字面量（2、1）/ 编排器写回 `--backup-dir`（1）/ 字符串前缀判包含（1）/ 关掉 inode 比较（2）/
+  缺省冻成 import 期常量（2）/ 两处缺省改回真值判断（各 1）。均在 main 的真属性上跑（换基后，无垫片）。
+
+### 二次检查（10-04，换基到含 408 的 main 后）
+- **守卫按字符串判包含会被同一目录的另一种写法绕过**：`resolve()` 不折叠大小写（APFS 默认不分）也不折叠固件链接，实测 `/users/igg/desktop/alpha hive/…` 与
+  `/System/Volumes/Data/Users/igg/Desktop/Alpha Hive/…` 都与检出同 inode、`is_relative_to` 却为 False ⇒ 往「放行」错。改为路径相等或 inode 相等，逐级上溯。
+- **真值判断选缺省**（`if args.backup_dir`）会把显式 `--backup-dir ""` 悄悄换成缺省值 ⇒ 改 `is None`（`export.main` 同）。显式值的语义与改动前一致。
+- 全链路测试原断言「检出里不存在 `_git_backup`」⇒ 改为前后存在性相同（残留不算守卫的账）。
+- 首版写的「`orchestrator_lint.py` 通过」是**空检查**：它是没有 CLI 的库模块，`python3 orchestrator_lint.py <文件>` 只 import 就 exit 0，对含 `$NUM（` 的文件同样 0。真检查是 `find_unbraced()`（正对照：原 bug 行命中 1 条）。编排器本身一直由 `test_orchestrator_braced_vars.py` 覆盖，结论不变。
+- 已核、不改：`run_step` 是 `"$PYTHON3" "$script" "$@"`、不造 env ⇒ export 的 `ALPHA_HIVE_HOME` 到得了 Step 14；`backup_continuity` 把 `ok:false` 记为不健康日并报阶段
+  ⇒ 拒绝会以 `init` 出现；守卫在 hive_logger 不可 import 时中止（判不了就不建库；data_backup 与 hive_logger 同在仓库根，不存在只导得进一个的入口）。
+
+### 未动（同形，另立）
+- `--status-file` / `--history-file` 缺省、编排器 `BACKUP_STATUS_JSON` / `BACKUP_HISTORY_JSONL`、`backup_continuity._history_file()` 仍是 `$HOME/alpha-hive-data/logs/...`
+  （`_sandbox_home` 与 `test_run_backup_defaults_follow_home` 正靠「跟 `$HOME` 走」隔离；`backup_continuity.py` 注释「阶段 5 尚未执行」已过时）。
+- `--src` 缺省仍是 `/Users/igg/Desktop/Alpha Hive`（阶段 5 后那里是冻结旧数据）。设了 `ALPHA_HIVE_HOME` 却不传 `--src` 手动跑 ⇒ 把冻结数据导进**真实**备份仓并推送。本条之前就存在；
+  env 全清时本条守卫恰好先拦住。
+- 编排器顶部「8 处 `$DATA_DIR`」计数早已不准（现 13 处），未改。
+- 反方向嵌套（备份仓是代码仓库的**祖先**，如 `--backup-dir ~/Desktop`）不拦：`git add -A` 会把整个目录扫进数据仓库。本条之前就存在，只能显式传参触发。
+- 根因在更深处：`ALPHA_HIVE_HOME` 未设时 `PATHS.home` 兜底到代码检出，阶段 5 后对**所有**读 `PATHS` 的手动运行都是读冻结旧数据；本条只护住了备份。是否改兜底 / 给交互 shell 设变量，由用户定。
 
 ## [0.45.413] — 2026-10-05 — Changed：`GitHubTool._ALLOWED_GIT_CMDS` 按生产调用点收窄（18→5）+ `pull` / `fetch` 精确参数运行期约束
 
