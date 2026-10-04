@@ -64,6 +64,57 @@ v0.45.404 在 `bea.gov/news/schedule/full` 查出 2026 年 GDP 表三个过去�
   表头三行，核对注释写在表体内；`git merge-tree` 实测两种合入顺序 `economic_calendar.py` 均自动合并，只有 CHANGELOG 顶部插入冲突。
 - `TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold` 仍按设计红（2027 年 BLS / BEA 日程未发布）。
 
+## [0.45.404] — 2026-10-04 — Changed：经济日历三次核对——BLS / BEA 仍未发布 2027 年 CPI / 非农 / GDP 日程，**一个日期都没加**，`TestCoverageHorizon` 按设计保持红；顺带查出 2026 年 GDP 表三个过去日期与官方不符（本条未改，见下）
+
+### 背景
+
+`tests/test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold` 在 main（5fe26077）上红：
+cpi 只到 2026-12-10（剩 67 天 / 阈值 90）、nfp 只到 2026-12-04（61 / 90）、gdp 只到 2026-10-29（25 / 30）。
+这条测试定期变红是**设计意图**（「去源站看 2027 日程发了没」），修法只有一种：抄官方已发布日期；不调阈值、不 skip、不推算。
+
+### 核对结果（2026-10-04，全部为官方源）
+
+- **先跑仓库自带的监视器** `economic_calendar_watch.py --force`（`--state` 指向临时目录，不碰生产节流状态）：
+  四个源全部 `determinable`，cpi / nfp 上游最新 = 我们的 `verified_through`，gdp 上游最新参考季度 = 2026Q3 = 我们的，退出码 1（本地将见底、上游无新）。
+- **手工二次确认**（监视器的解析器依赖页面结构，所以把它读的两个 BLS 页面与 BEA 页面人工再读一遍，另加 BLS 年度总表与订阅源两条它不读的路）：
+  - `bls.gov/schedule/news_release/cpi.htm`、`empsit.htm`：表格末行分别是 2026-12-10 / 2026-12-04，全页零个「2027」；
+  - `bls.gov/schedule/2027/home.htm`（BLS 年度总表）：**404**；`2026/home.htm` 正常 200，即路径规则没变、是真没发布；
+  - `bls.gov/schedule/news_release/bls.ics`（BLS 官方订阅源）：313 条事件，最晚 2026-12-30，**2027 条目 0**；
+  - `bea.gov/news/schedule` 与 `/full`：带日期的末条都是 2026-12-23（其后仅一条 To Be Announced），全页零个「2027」，最新 GDP 初值仍是「3rd Quarter 2026 — October 29」。
+
+### Changed
+
+- `economic_calendar.py`：CPI / NFP / GDP 三表的「核对时间」注释与 `_TABLE_SPECS[*]["pending"]` 更新为 2026-10-04 的核对结论（沿用 v0.45.286 的做法：上游没发就不改数据、只记核对）。
+  `pending` 会出现在运行期告警与这条测试的失败信息里，旧文案仍写「2026-08-29 核对」，会让人以为五周没人看过。
+  **`verified_through` 与所有日期均未改动。**
+
+### 未改、单独提出：2026 年 GDP 表的三个过去日期与官方不符
+
+`bea.gov/news/schedule/full` 的「Year 2026」区块列出的 GDP 初值为
+**02-20**（4th Quarter and Year 2025，政府停摆后推迟）、**04-30**（1Q26）、**07-30**（2Q26）；
+本表是 `2026-01-29` / `2026-04-29` / `2026-07-29`（表内注释本就标着「未逐条核对」）——又是「按规律推」的指纹，与 v0.45.65 同一形状。
+
+- **影响面实测为零（生产）**：全仓读事件日期的只有 `dashboard_renderer`（`get_next_event()` 不传参 = 真实今天）与 `swarm_agents/guard_bee.py` 两处（`economic_calendar_watch` 只读各表 `verified_through`）。唯一会带过去 `ref_date` 读日历的是 GuardBee 补跑（v0.45.366），它只认 `type == "fomc"`；同处的 `get_calendar_health(ref_date=…)` 落进 details 的只有 `status` / 肇事表 / 其表尾日期——`status` 取决于表尾（10-29，不变）与「是否还有剩余」（参考日 ≤ 10-29 时恒有），挪动过去日期不改变它（`remaining` 条数本身会差 1，如参考日 02-01 时 3 vs 4，但无人读）；
+  错的 04-29 / 07-29 恰好与当天 FOMC 同日，但 `get_upcoming_events` 先扫 FOMC 表、排序稳定，FOMC 赢平局（实测 04-27~29、07-27/29 五个参考日 `get_next_event` 均返回 fomc）。
+- 没在本条顺手改，因为它改的是历史回放的输入、不在「续抄新日期」的范围内，且 2025 年三张表同样未核对（BLS 现页只回溯到 2025-11 参考月，2025 年还有停摆造成的取消 / 推迟发布，需走 BLS「Prior Years」）——应作为一次单独的历史核对来做。
+
+### 验证
+
+- `PYTHONDONTWRITEBYTECODE=1 /usr/local/bin/python3 -m pytest tests/test_economic_calendar.py -q --maxfail=1000 -p no:cacheprovider`：**31 passed, 1 failed**（唯一红的就是 `TestCoverageHorizon`，失败信息已显示新的核对文案）；
+- `tests/test_economic_calendar_watch.py` + `tests/test_gamma_expiry_calendar.py`：33 passed；`ruff check economic_calendar.py`：通过。
+
+### 二次检查（同日）
+
+- **影响面那句的取证方法原本有洞**：第一次列读者用了 `grep … | head -20`，输出恰好 20 行即被截断；排除过滤又按 `./` 前缀写，而 macOS 的 `grep -r .` 不输出该前缀，过滤没生效。不截断重查后读者仍只有上面两处，**结论不变**，但上面那句现在是全量核过的。
+- 措辞校正三处：CPI / NFP 核对注释「2027 年度总表均无 2027」→「年度总表 404」（页面不存在，不是页面里没有）；「另走三条路」与实际列项不符；BEA 末条补注其后的 To Be Announced 条目。
+- 已排除：本次的监视器 / 探针运行没写生产数据根（未设 `ALPHA_HIVE_HOME` 时 `PATHS` 解析到 worktree；监视器 `--state` 指向临时目录）；worktree 里的 `logs/health_*.json` 是 git 跟踪文件、随检出而来，不是本次测试产物。
+
+### 下一步
+
+- 这条测试会一直红到上游发布：BLS 每年秋季刷新下一年日程（据本模块 `_MIN_HORIZON_DAYS` 注释，本次未另行核实）；BEA 的 4Q26 初值要等其滚动日程延伸进 2027 年（何时延伸待验证，不推算）。
+  **2026-10-30 起 gdp 表走完（exhausted）**，告警由 WARNING 升 ERROR——同样是设计内的，不是新 bug。
+- 监视器（编排器 Step 13，每周联网一次）会在上游发布当周以退出码 1 + 「上游新日程」提醒，届时抄写并上移 `verified_through`。
+
 ## [0.45.403] — 2026-10-04 — 占位（进行中：退役 GitHubTool.commit()/status() 及辅助方法——生产零调用）
 
 ## [0.45.402] — 2026-10-04 — Removed：数据根迁移阶段 6 ④——撤日报提交 / 推送链（`auto_commit_and_notify` → `deploy_and_notify` 只部署 gh-pages）
