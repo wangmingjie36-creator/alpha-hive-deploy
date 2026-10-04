@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.404] — 2026-10-04 — 占位（进行中：经济日历 CPI/NFP/GDP 表续抄官方已发布日期，TestCoverageHorizon 变红）
+
 ## [0.45.399] — 2026-10-03 — Fixed：Alpha Bot.app 在 Apple 芯片上双击被按 x86_64（Rosetta）启动 ⇒ arm64 的 numpy 载入失败、服务起不来；Info.plist 加 `LSArchitecturePriority`
 
 用户第一次双击 0.45.397 生成的 .app：弹窗「Alpha Bot 服务启动失败（退出码 1）」，日志末尾 numpy 报
