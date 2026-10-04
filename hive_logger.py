@@ -192,7 +192,7 @@ class _HivePaths:
 
     @property
     def data_backup_repo(self) -> Path:
-        """数据备份仓库的工作区（`data_backup/run_backup.py`，编排器 Step 14 每个扫描日提交一次）（v0.45.401）。
+        """数据备份仓库的工作区（`data_backup/run_backup.py`，编排器 Step 14 每个扫描日提交一次）（v0.45.408）。
 
         读：`experiments/fg_exposure_gate_forward_test.py` 的逐日重锚——生产状态历史在数据根迁移阶段 5 之后
         只提交到这里（代码仓库的 `paper_portfolio_state/` 提交止于 2026-09-25）。**本属性只读**，不建目录。

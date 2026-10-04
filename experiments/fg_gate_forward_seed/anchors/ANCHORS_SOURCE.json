@@ -104,7 +104,7 @@
     }
   },
   "git_path": "paper_portfolio_state",
-  "purpose": "F&G 敞口门前瞻检验（预注册）逐日重锚的冻结锚点（代码仓库时代）；v0.45.401 事后修订引入，见脚本文件头「自证」段",
+  "purpose": "F&G 敞口门前瞻检验（预注册）逐日重锚的冻结锚点（代码仓库时代）；v0.45.408 事后修订引入，见脚本文件头「自证」段",
   "rule": "每个 last_run_date 取按时间顺序最后一个提交",
   "schema": 1,
   "unreadable_commits": 0,

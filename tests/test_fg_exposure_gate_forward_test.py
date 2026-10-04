@@ -58,7 +58,7 @@ _NOT_READY_OR_CANNOT_JUDGE_ALLOWED_KEYS = {
     # v0.45.391 复审 S1：回放行情窗口的取数计数（`paper_portfolio._ReplayOhlcWindow.stats()`）。白名单照样管到它的
     # **子键**（下面 `_OHLC_WINDOW_KEYS`）——不让它变成一个可以随手塞效应量的口袋。
     "ohlc_window",
-    # v0.45.401 逐日重锚：连续 A 的复现计数（诊断）与分段情况——只有 A 的计数 / 日期 / 来源名，没有效应量。
+    # v0.45.408 逐日重锚：连续 A 的复现计数（诊断）与分段情况——只有 A 的计数 / 日期 / 来源名，没有效应量。
     # 子键同样白名单（`_SEGMENT_KEYS` / `_SELFPROOF_KEYS`），不让它们变成可以随手塞效应量的口袋。
     "selfproof_continuous", "selfproof_segments",
 }
@@ -1318,7 +1318,7 @@ class TestBuildSeedFromGit:
 
 class TestRehearse:
     def _synthetic_repo(self, tmp_path, seed, history):
-        """窗口起点前一状态（= 种子）+ 生产逐日收盘状态（v0.45.401 起它们是逐日重锚的锚点，内容必须真实）。"""
+        """窗口起点前一状态（= 种子）+ 生产逐日收盘状态（v0.45.408 起它们是逐日重锚的锚点，内容必须真实）。"""
         commits = [{f"paper_portfolio_state/{n}": b for n, b in seed.items()}]
         commits += [{f"paper_portfolio_state/{n}": b for n, b in history[d].items()} for d in sorted(history)]
         return _git_repo(tmp_path, commits, name="rehearse_repo")[0]
@@ -1770,7 +1770,7 @@ class TestAOnlyIsReportedNotJudged:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 16. 逐日重锚（v0.45.401 事后修订）
+# 16. 逐日重锚（v0.45.408 事后修订）
 #
 # 连续重放的 A 一旦与生产在某天良性分歧就再也追不回来（09-24/25 生产被限流、当天没出场没开仓，A 多开 4 笔；
 # 它们平仓后 A 的仓位基数偏离生产，此后每一笔金额都对不上）。自证改为每个快照日从生产前一日收盘状态起跑；
@@ -1997,7 +1997,7 @@ class TestFrozenAnchors:
     def test_shipped_anchors_are_exactly_the_code_repo_history(self):
         """冻结的就是代码仓库里窗口内的**全部**生产状态（一个不多、一个不少、逐字节相同）。代码仓库的状态提交
         止于 2026-09-25；以后若有人又往代码仓库提交了窗口内的状态，这条会红。导出包 / 浅克隆里没有完整历史，skip 正当
-        ——**只有这两种**（v0.45.401 二次检查收窄：原先任何 SeedError 都 skip，`cat-file` 解析失败之类的真错也会被吞掉）。"""
+        ——**只有这两种**（v0.45.408 二次检查收窄：原先任何 SeedError 都 skip，`cat-file` 解析失败之类的真错也会被吞掉）。"""
         r = subprocess.run(["git", "-C", str(_ROOT), "rev-parse", "--is-shallow-repository"], capture_output=True, text=True)
         if r.returncode == 128:
             pytest.skip("不在 git 仓库里（导出的源码包）")
@@ -2224,7 +2224,7 @@ class TestCountsThatMustNotBeConfused:
 
 
 class TestSecondReviewFixes:
-    """v0.45.401 二次检查补的两处。"""
+    """v0.45.408 二次检查补的两处。"""
 
     def test_a_ledger_only_repair_commit_is_the_state_used(self, tmp_path):
         """只改 `positions.jsonl`、不碰 meta 的人工修复：「同一日期取最后一个状态」要拿到修复后的那份，
@@ -2250,7 +2250,7 @@ class TestSecondReviewFixes:
 
 
 class TestSecondReviewFindings:
-    """v0.45.401 二次检查（两个独立审查 agent，均已实测复现）补的口子。"""
+    """v0.45.408 二次检查（两个独立审查 agent，均已实测复现）补的口子。"""
 
     def _equity(self, pp_fx, dates):
         _pp = pp_fx[0]

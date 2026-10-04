@@ -74,7 +74,7 @@ F&G 挪到它真正适用的层次：组合层的仓位敞口控制——极度�
       修订是在**只重放 A** 的基础上定的（诊断脚本与 `--rehearse`）；修订后用 `run()` 核对时输出按盲化只有进度
       与自证率，没有算或看任何周度差 / 效应量；`decide()` 自 FORWARD_START 起从未走到出统计量的分支（修订时
       2/15 个合格周）。修订不受结果影响。
-      【事后修订 v0.45.401，2026-10-03 —— 改的是自证里 A 的**产生方式**，不是判定规则】
+      【事后修订 v0.45.408，2026-10-03 —— 改的是自证里 A 的**产生方式**，不是判定规则】
       连续重放的 A 一旦与生产在某天良性分歧，就再也追不回来：09-24、09-25 生产 paper_portfolio 被 yfinance
       限流（`_fetch_ohlc` 成批失败），当天不出场也不开仓，A 照常开了 CVX/NFLX/TMUS/VZ 四笔空头。按 10-02 收盘
       盯市 +$239，它们（最迟 10-08）平仓后 A 的仓位基数比生产多出这笔盈亏，此后每一笔偏 $3.6~19（≫ 分辨率
@@ -163,9 +163,9 @@ F&G 挪到它真正适用的层次：组合层的仓位敞口控制——极度�
     /usr/local/bin/python3 experiments/fg_exposure_gate_forward_test.py --insample
     /usr/local/bin/python3 experiments/fg_exposure_gate_forward_test.py --rehearse 2026-09-09 2026-09-16
     /usr/local/bin/python3 experiments/fg_exposure_gate_forward_test.py --build-seed   # 一次性；拒绝覆盖
-    /usr/local/bin/python3 experiments/fg_exposure_gate_forward_test.py --build-anchors   # 一次性（v0.45.401）；拒绝覆盖
+    /usr/local/bin/python3 experiments/fg_exposure_gate_forward_test.py --build-anchors   # 一次性（v0.45.408）；拒绝覆盖
 
-`--rehearse SINCE BEFORE`（v0.45.297；v0.45.401 起同样逐日重锚，锚点 = 代码仓库历史 + 数据备份仓库）：自证演练。对任一窗口，从 git 现取「窗口首日前」的生产状态播种，
+`--rehearse SINCE BEFORE`（v0.45.297；v0.45.408 起同样逐日重锚，锚点 = 代码仓库历史 + 数据备份仓库）：自证演练。对任一窗口，从 git 现取「窗口首日前」的生产状态播种，
 **只重放 A**、报复现率。不跑 B、不算周度差、不出任何统计量，因此没有泄漏效应量的风险。
 任何人改了 `paper_portfolio` 或评分链之后，一条命令即可确认「A 还能不能复现生产」——这正是
 本检验预注册前缺失的那个「先见过绿」的动作。需要完整 git 历史（浅克隆会明确报错，不会给假结果）。
@@ -389,7 +389,7 @@ def _git(repo: Path, *args: str) -> bytes:
 def _state_commits(repo: Path) -> List[str]:
     """按时间顺序列出改动过**任一**状态文件的提交（`--diff-filter=AM`：排除删除提交，阶段 5 会 `git rm --cached`）。
 
-    v0.45.401 二次检查：此前只列改动过 `meta.json` 的提交。生产每次运行都重写 meta（现金 / 日期 / 配置快照），
+    v0.45.408 二次检查：此前只列改动过 `meta.json` 的提交。生产每次运行都重写 meta（现金 / 日期 / 配置快照），
     所以至今两个仓库里「改账本必改 meta」（代码仓库 71/71、备份仓库 10/10）；但一次只改 `positions.jsonl` 的
     人工修复会被漏掉，「同一日期取最后一个状态」就会拿到修复前的那份。"""
     return _git(repo, "log", "--reverse", "--diff-filter=AM", "--format=%H", "--",
@@ -462,7 +462,7 @@ def write_seed_dir(out_dir: Path, files: Dict[str, bytes], manifest: Dict) -> No
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-# ── 逐日重锚（v0.45.401 事后修订，见文件头「自证」段）────────────────────────────────
+# ── 逐日重锚（v0.45.408 事后修订，见文件头「自证」段）────────────────────────────────
 #
 # 自证用的 A 不再从冻结种子连续重放整个窗口：每个快照日从生产在**那天之前**最后留下的状态起跑。
 # 连续重放一旦与生产在某天良性分歧（09-24/25 生产被 yfinance 限流、当天没出场没开仓，A 照常开了 4 笔），
@@ -559,7 +559,7 @@ def _state_history(repo: Path) -> Tuple[Dict[str, Tuple[str, Dict[str, bytes]]],
 
 def _refuse_rollbacks(source: str, regressions: List[Tuple[str, str, str]], seed_lrd: str) -> None:
     """窗口里（回退前的最大日期不早于种子）出现过回退 ⇒ SeedError：逐日锚点会取到生产已弃用的状态，
-    算出来的复现率指向错误原因（v0.45.401 二次检查实测：恢复 09-16 后跑 09-18，锚点却取被弃用的 09-17）。
+    算出来的复现率指向错误原因（v0.45.408 二次检查实测：恢复 09-16 后跑 09-18，锚点却取被弃用的 09-17）。
     要人工核对后决定怎么接续，不在这里猜。"""
     hit = [r for r in regressions if r[2] >= seed_lrd]
     if hit:
@@ -589,7 +589,7 @@ def build_frozen_anchors_from_git(since: str, repo_root: Optional[Path] = None) 
         entries[lrd] = {"commit": h, "files": {n: {"sha256": _sha256(b), "bytes": len(b)} for n, b in files.items()}}
     manifest = {
         "schema": 1,
-        "purpose": "F&G 敞口门前瞻检验（预注册）逐日重锚的冻结锚点（代码仓库时代）；v0.45.401 事后修订引入，见脚本文件头「自证」段",
+        "purpose": "F&G 敞口门前瞻检验（预注册）逐日重锚的冻结锚点（代码仓库时代）；v0.45.408 事后修订引入，见脚本文件头「自证」段",
         "window_start": since,
         "git_path": SEED_GIT_STATE_DIR,
         "rule": "每个 last_run_date 取按时间顺序最后一个提交",
@@ -733,7 +733,7 @@ def _anchor_plan(seed: Optional[Dict[str, bytes]], sources: List[Tuple[str, Dict
         else:
             segments.append((k, [d]))
     # 段首那天的锚点比生产在它之前最后一次运行还旧 ⇒ 那次运行（常是没有快照的日子）的状态没入库，
-    # 段首从更早的状态起跑。多日段已单独报；这里补「单日段但锚点旧」（v0.45.401 二次检查）。
+    # 段首从更早的状态起跑。多日段已单独报；这里补「单日段但锚点旧」（v0.45.408 二次检查）。
     stale: List[List[str]] = []
     if processed is not None:
         for k, seg_dates in segments:
@@ -769,7 +769,7 @@ def _forward_anchor_plan(seed: Dict[str, bytes], dates: List[str]) -> Dict:
     hist, unreadable, regressions = _state_history(PATHS.data_backup_repo)
     _refuse_rollbacks(SOURCE_DATA_BACKUP, regressions, _seed_last_run_date(seed))
     backup = {k: v[1] for k, v in hist.items()}
-    # v0.45.401 二次检查：备份仓库「在、是 git 仓库、不浅」还不够——历史丢了被重建（`run_backup` 会重新 init）
+    # v0.45.408 二次检查：备份仓库「在、是 git 仓库、不浅」还不够——历史丢了被重建（`run_backup` 会重新 init）
     # 时它返回空表，09-25 之后的日子就全部从最后一个冻结锚点连续重放，等于静默退回。与冻结锚点**至少要有一个
     # 重叠日**，且所有重叠日（不限本次窗口）都逐字节相同。
     overlap = sorted(set(frozen) & set(backup))
@@ -929,7 +929,7 @@ def _selfproof_failure_reason(sp: Dict, ohlc: Optional[Dict] = None, segments: O
     持仓数随之偏离，复现率低是这个，不能据此把原因推给评分链 / 配置 / 漏跑。只改文案，状态不变。"""
     head = f"A（baseline）重放复现生产记录仅 {sp['exact']}/{sp['total']}（< {SELFPROOF_MIN_RATE:.0%}）"
     missed = sp.get("missed_by_date") or {}
-    if missed:   # v0.45.401：逐日重锚下没复现的仓位落在哪几天，直接说出来
+    if missed:   # v0.45.408：逐日重锚下没复现的仓位落在哪几天，直接说出来
         head += "（未复现的按入场日：" + "、".join(f"{d}×{n}" for d, n in list(missed.items())[:6]) + \
                 ("…" if len(missed) > 6 else "") + "）"
     if _ohlc_unavailable(ohlc):
@@ -951,7 +951,7 @@ def _selfproof_failure_reason(sp: Dict, ohlc: Optional[Dict] = None, segments: O
     if sp.get("a_only"):
         reason += _a_only_note(sp["a_only"])
     gaps = _anchor_gap_note({"selfproof_segments": segments or {}})
-    if gaps:   # v0.45.401 二次检查：锚点有缺口的那几天是从更早的状态起跑的，原因要说到这一层
+    if gaps:   # v0.45.408 二次检查：锚点有缺口的那几天是从更早的状态起跑的，原因要说到这一层
         reason += (f"；⚠️ 逐日锚点有缺口{gaps}：那几天从更早的状态起跑，生产在缺口里的良性分歧（如限流日多开）会带进来"
                    "——先核对数据备份仓库那几天的提交，再按上面的方向查")
     if _ohlc_partly_missing(ohlc):
@@ -1060,7 +1060,7 @@ def evaluate(dates: List[str], since: str, before: str, sandbox_root: Path,
         raise ValueError("样本内模式从 bootstrap_date 起，生产当时是空状态，不许传 seed")
     if insample and plan:
         raise ValueError("样本内模式没有生产记录可比，不许传逐日重锚方案")
-    # v0.45.401：`plan` = 逐日重锚的分段方案（`_forward_anchor_plan`）。`run()` 必传；不传 = 只有种子一个锚点
+    # v0.45.408：`plan` = 逐日重锚的分段方案（`_forward_anchor_plan`）。`run()` 必传；不传 = 只有种子一个锚点
     # （一段到底，等同连续重放）——**只给合成测试用**，`TestRunSeedWiring::test_the_loaded_seed_is_handed_to_evaluate`
     # 钉住 `run()` 真的传了。
     if not insample and plan is None:
@@ -1114,7 +1114,7 @@ def _replay_ohlc_scope(dates: List[str], seed: Optional[Dict[str, bytes]], extra
     import contextlib
 
     import paper_portfolio as pp
-    # v0.45.401：逐日重锚的每个锚点也会带着仓位起跑——窗口左端要盖住它们全部（否则那几次请求退回直连、变慢）
+    # v0.45.408：逐日重锚的每个锚点也会带着仓位起跑——窗口左端要盖住它们全部（否则那几次请求退回直连、变慢）
     held = _seed_held_entry_dates(seed) + [d for s in extra_seeds for d in _seed_held_entry_dates(s)]
     bounds = pp.replay_ohlc_bounds(dates, held)
     return pp.replay_ohlc_window(*bounds) if bounds else contextlib.nullcontext()
@@ -1126,7 +1126,7 @@ def _evaluate_replays(dates: List[str], since: str, before: str, sandbox_root: P
     """`evaluate()` 的主体（v0.45.391 为套上回放 OHLC 窗口原样拆出，逻辑未改）。
     `ohlc_window`：本次的回放窗口对象（或 None），只给自证失败的文案用（复审 S3）。"""
     a_dir, b_dir = sandbox_root / "A_baseline", sandbox_root / "B_treatment"
-    # 统计量用的 A / B：**从种子连续重放整个窗口**，v0.45.401 起也不变（逐日重锚只用于自证，见文件头）
+    # 统计量用的 A / B：**从种子连续重放整个窗口**，v0.45.408 起也不变（逐日重锚只用于自证，见文件头）
     a = _replay_variant({}, a_dir, dates, seed=seed)
     b = _replay_variant(FG_GATE_TEST_CONFIG, b_dir, dates, seed=seed)
 
@@ -1160,7 +1160,7 @@ def _evaluate_replays(dates: List[str], since: str, before: str, sandbox_root: P
                              "重放机制本身有问题，不是效应"}
     else:
         real_entries = _real_recorded_entries(since, before)
-        # v0.45.401：判定用逐日重锚的 A；连续 A（就是统计量那份）的复现只作诊断
+        # v0.45.408：判定用逐日重锚的 A；连续 A（就是统计量那份）的复现只作诊断
         sp = _selfproof_stats(real_entries, _segmented_entries(plan, sandbox_root))
         sp_cont = _selfproof_stats(real_entries, _entries_in_window(a["closed"], a["open_positions"], since, before))
         out["selfproof"] = {"real_entries": sp["total"], "reproduced": sp["exact"],
@@ -1234,7 +1234,7 @@ def run(insample: bool = False, today: Optional[str] = None) -> Dict:
         try:
             plan = _forward_anchor_plan(seed, dates)
         except SeedError as e:
-            # v0.45.401：同理绝不退回连续重放——那正是逐日重锚要修掉的东西。
+            # v0.45.408：同理绝不退回连续重放——那正是逐日重锚要修掉的东西。
             return {"status": "cannot_judge", "mode": "forward", "n_dates": len(dates),
                     "reason": f"逐日锚点不可用：{e}"}
 
@@ -1253,7 +1253,7 @@ def rehearse(since: str, before: str, repo_root: Optional[Path] = None,
     它红的时候你就分不清是被测对象坏了还是自证自己坏了。
     """
     out: Dict = {"mode": "rehearse", "since": since, "before": before}
-    # v0.45.401 二次检查：代码仓库的状态提交止于 2026-09-25，之后的窗口起点只在数据备份仓库里
+    # v0.45.408 二次检查：代码仓库的状态提交止于 2026-09-25，之后的窗口起点只在数据备份仓库里
     from hive_logger import PATHS
     seed = manifest = None
     errors = []
@@ -1325,7 +1325,7 @@ def _ohlc_window_note(res: Dict) -> str:
 
 
 def _anchor_gap_note(res: Dict) -> str:
-    """v0.45.401：逐日锚点的缺口（并入前一段的多日段 / 坏锚点 / 生产没处理的快照日）。没有缺口时为空串。
+    """v0.45.408：逐日锚点的缺口（并入前一段的多日段 / 坏锚点 / 生产没处理的快照日）。没有缺口时为空串。
     缺口只会让那几天退回连续重放（更严，不会更松），所以不换图标，但要看得见。"""
     seg = res.get("selfproof_segments") or {}
     bits = []
@@ -1422,7 +1422,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 def _print_selfproof_details(res: Dict) -> None:
-    """v0.45.401：逐日重锚的分段情况与连续 A 的复现（诊断）。都只有 A 的计数，没有效应量。"""
+    """v0.45.408：逐日重锚的分段情况与连续 A 的复现（诊断）。都只有 A 的计数，没有效应量。"""
     seg, cont = res.get("selfproof_segments"), res.get("selfproof_continuous")
     if seg:
         print(f"  逐日重锚：{seg.get('segments')} 段｜锚点来源 {seg.get('anchor_sources')}｜跨多天的段 "
