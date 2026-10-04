@@ -56,6 +56,45 @@ cpi 只到 2026-12-10（剩 67 天 / 阈值 90）、nfp 只到 2026-12-04（61 /
   **2026-10-30 起 gdp 表走完（exhausted）**，告警由 WARNING 升 ERROR——同样是设计内的，不是新 bug。
 - 监视器（编排器 Step 13，每周联网一次）会在上游发布当周以退出码 1 + 「上游新日程」提醒，届时抄写并上移 `verified_through`。
 
+## [0.45.402] — 2026-10-04 — 占位（进行中：阶段 6 ④ 撤日报提交 / 推送链 + 收窄根总闸）
+
+## [0.45.401] — 2026-10-04 — Fixed：check-old 把「git 自己删掉的冻结文件」单列为 `removed_by_git`，阶段 6 快进后不再把 3107 个文件判成旁路写入
+
+### Fixed
+- `data_backup/migrate_data_root.py::check_old`：v0.45.394 合入后手动快进生产 checkout（10-04），冻结数据被 git 从旧根工作区删掉，而这些路径又命中新加的 `.gitignore` 规则 ⇒ 旧逻辑「相对 retire 基线变了（含删除）+ 被忽略 ⇒ 写出 git 之外」把 **3107 个文件全判成 `written_outside_git`**，`ok:false`。数据本身没问题（数据根 `report_snapshots` 1441 → 1591，连续性健康，就绪度读数据根正常），是验收工具没跟上阶段 6。
+- 修法：基线里有、现在不在的路径，若 git 历史里有一次删除它的提交（`git log --diff-filter=D`，新增 `_git_deleted_in_history`，分批传路径，3125 条实测约 15 秒）⇒ 单列 `removed_by_git_count` / `removed_by_git_sample`，不红。⚠️ **不是**「消失一概放行」：被忽略、从没进过 git 的文件被删仍判红（可能是旁路写入方在轮转日志，`test_deleted_ignored_file_is_a_write_not_git_sync` 原样保留）；查不到「谁删的」（git 失败）⇒ `git_error` 判红；被删后又被写回同名文件 ⇒ 现在有且指纹变了 ⇒ 仍红。
+
+### Added
+- `tests/test_migrate_data_root.py` 4 条：git 删除不红 / 阶段 6 真实形态（`rm --cached` + 新 `.gitignore` + 快进删文件）不红 / 被删后重建仍红 / 无提交的手动删除仍红。变异：去掉豁免 ⇒ 前两条红；豁免一切消失 ⇒ `deleted_ignored` 与手动删除两条红。35/35 绿。
+
+
+## [0.45.400] — 2026-10-03 — Fixed：Step 11 的 F&G 子进程已按时跑完、只是父进程自己拖过预算时，结果不再被丢弃并误报「超出时间预算、已终止」
+
+> 未在 main 上占号（本会话推送由用户执行），号取自写这条时 origin/main 顶部 399 之上；合入前按「并发开工必须先占号」再核一次。
+
+二次检查（对本轮上线的 362 / 369 / 370 / 385 / 386 / 391 / 392 做独立集成审查，两个代理 + 当前 main 全套）实测出的唯一一个 bug，在 v0.45.392：
+`_FgChild.result()` 用 `communicate(timeout=max(0, deadline − now))` 收子进程结果。CPython 3.11 在 timeout 已到 0 时**不看子进程死活、先判超时就抛**
+`TimeoutExpired` ⇒ 子进程早已正常退出、结果就在管道里，也会被渲染成 `budget_exceeded`「F&G 子进程跑了 Xs 仍未结束，已终止」，attention 还把原因指向
+「行情源限流或重放变慢」。触发条件：父进程自己的部分（assess / resonance / dim IC / 世代边界核对 / 写检查点）跑过预算、而 F&G 子进程已按时跑完。
+实测（真实数据、`--today 2026-09-10`，子进程单独 0.57s）：`--budget-seconds 0` 给出正常进度行，`--budget-seconds 2` 却报超预算；进入 `result()` 时子进程 `poll()=0`。
+**今日生产无影响**：父进程那部分约 5s，预算 45s。
+
+### Fixed
+- `ic_rerun_readiness._FgChild.result()`：子进程已退出（`poll() is not None`）时，超时取 `max(剩余, _FG_KILL_GRACE_SECONDS)`——只给读完管道的宽限，
+  不用 `None`（孙进程若继承管道，读到 EOF 可能遥遥无期，同 `terminate()` 的注释）。子进程还活着时行为不变（照旧 `budget_exceeded` + 终止）。
+
+### Added
+- `tests/test_ic_rerun_fg_budget.py::TestChildOutcomes::test_finished_child_is_kept_when_only_the_parent_overran`：子进程在预算内跑完、父进程睡过预算再收结果 ⇒
+  原样转交。变异「删掉 `poll() is not None` 那段」⇒ 红（在 git archive 副本上做，对照 18 passed / 变异 1 failed）。
+
+### 验证
+- `test_ic_rerun_fg_budget` / `test_ic_rerun_readiness` / `test_step_contract_ic_rerun` 180 passed；ruff F821/F401 全过。
+- 同一轮二次检查其余结论（无缺陷）：当前 main `5b2b632f` 全套 7978 passed / 1 failed（已知 TestCoverageHorizon）；B2 编排器整脚本在 `/bin/bash` 3.2、
+  类 launchd 环境下跑遍 rc 0/1/124/同步失败/解释器缺失或乱码，无 unbound / 语法错，B 删掉的变量零引用；10-05 部署 B2 在副本上 `deployed` 47ff2d75→00d7f74b、
+  关卡全过，周末一致性守卫不会误红；10-02 真实产物上 `gex_state` 的全部读者（日报 / 网站 / ML 报告 / MCP / signal_archive / deep）与状态一致，BILI 显示不可得；
+  Oracle `unavailable` 已在 Queen 的 `PROXY_SOURCES`；391/392 在真实数据上 16s、检查点被最终版覆盖、私有 TMPDIR 清空，父进程 SIGTERM 后无残留子进程。
+- 未修、已知：父进程被 SIGKILL 时 `ic_rerun_fg_child_*/fg_gate_fwd_*` 会留下（392 已登记）；每周任务 SKILL.md 第 81 行仍未加 `--budget-seconds 0`（392 登记的合入后跟进，改仓库外文件要用户批准）。
+
 ## [0.45.399] — 2026-10-03 — Fixed：Alpha Bot.app 在 Apple 芯片上双击被按 x86_64（Rosetta）启动 ⇒ arm64 的 numpy 载入失败、服务起不来；Info.plist 加 `LSArchitecturePriority`
 
 用户第一次双击 0.45.397 生成的 .app：弹窗「Alpha Bot 服务启动失败（退出码 1）」，日志末尾 numpy 报
@@ -143,7 +182,29 @@ cpi 只到 2026-12-10（剩 67 天 / 阈值 90）、nfp 只到 2026-12-04（61 /
   全仓普查：其余 6 个改 HOME 的测试文件只起 git / bash / 桩，不起真解释器。
 
 
-## [0.45.394] — 2026-10-03 — 占位（进行中：阶段 6 ① 「数据被 git 跟踪/提交即红」守卫）
+## [0.45.394] — 2026-10-03 — Changed：数据根迁移阶段 6 ①②③——代码仓库不再跟踪生产数据（3125 个文件解除跟踪，历史保留）+ 「数据被跟踪即红」守卫
+
+阶段 6 的 ④（撤日报提交 / 推送链、收窄根总闸）**不在本版**，见文末「未做」。
+
+### Added
+- `tests/test_no_data_tracked_in_git.py`：`git ls-files`（含暂存区）的每个顶层条目过一遍 `migrate_data_root.classify`，MOVE / MOVE_DB 即红——复用迁移工具的分类表，不另抄清单。失败信息按规则归并。反向自证 3 条（合成仓库：纯代码绿 / 暂存数据文件红 / 被 `.gitignore` 挡住的数据不红、`add -f` 硬塞才红）。另有 `test_gitignore_covers_every_move_rule`（漏补忽略行即红）与 `test_gitignore_move_rules_are_anchored_to_repo_root`（不锚定的 `index.html` 会吞掉 `alpha-hive-web/index.html`）。变异：改判据恒不命中 ⇒ 两条合成测试红；去掉一条锚定 ⇒ 锚定测试红；少补 `/rss.xml` ⇒ 覆盖测试红。
+- `tests/test_paper_portfolio_no_import_mkdir.py`（2 条，变异各红）。
+
+### Changed
+- **解除跟踪**（`git rm --cached`，工作区文件不动、历史保留，用户 2026-09-24 定「不清历史」）：MOVE 规则命中的 1596 个顶层条目 / 3107 个文件，另 ③ 的 7 份旧 `pheromone.db.bak*` / `backup_corrupted_20260406` 与 11 个遗留 json / png / html / txt。索引 3712 → 587 个文件。
+- `.gitignore`：数据块由 MOVE 规则**生成**并全部锚定到仓库根（前导 `/`）；删除 v0.45.145 的 `!ml_model_history/*.json` 反向例外（快照整个去数据根，耐久性靠 `data_backup/export.py` 的 STATE_DIRS）。
+- `tests/test_ml_model_guard.py`：「快照必须进 git」两条旧断言改成阶段 6 之后的不变式（整目录忽略且无反向例外；写入方自建目录，真调 `snapshot_model_file` 验证）。
+
+### Fixed
+- `paper_portfolio.py`：删除 import 期 `STATE_DIR.mkdir(exist_ok=True)`，改在 `_atomic_write_text` / `_append_jsonl` 写入时建目录。**解除跟踪后才暴露的潜伏问题**：该目录此前被 git 跟踪、仓库根里本来就有，import 期 mkdir 从未做过事；干净检出里它在 pytest 收集期（早于任何 env 隔离）把空目录建进仓库根，根总闸 teardown 报 `added: paper_portfolio_state`。**只在干净克隆里才红**——worktree 里被解除跟踪的文件还留在磁盘上，会把这类问题全部掩盖，所以本版验证一律在干净克隆里跑全套。
+
+### 验证
+- 干净克隆（`git clone --no-hardlinks`，磁盘上没有任何被解除跟踪的文件）全套：7917 passed；2 failed + 1 error 中，`test_alphabot_launcher`（本机缺 starlette，origin/main 上同样红）与 `TestCoverageHorizon`（日历覆盖不足，设计内周期性变红）与本版无关，error 即上面 `paper_portfolio` 那条，已修。
+- 生产 checkout 快进模拟（临时克隆）：快进会把被解除跟踪的数据从工作区**删掉**（`report_snapshots` 1441 个文件、旧备份库、`NVDA_raw.json`），未跟踪文件不动；被跟踪文件有本地修改时快进**中止**——所以合入前必须先把冻结文件还原、旧备份先归档到 `~/alpha-hive-data/_archive/`。
+
+### 未做（④，下一版）
+- 撤 `report_deployer.auto_commit_and_notify` 的白名单提交 + `production_sync.push_main`、`REPORT_ARTIFACT_PATHS` / `_ARTIFACT_*` 及其 13 个测试文件、`alert_manager` / `scan_timing` / `alpha_hive_daily_report` / `orchestrator_steps`（Step 5 读 `git_push_success`）里的对应字段、收窄根总闸。**此前我断言「②必须与④同版」是错的**：数据被忽略后 `git status` 不再列出它们，日报提交走「工作目录干净」分支，推送报 `nothing_to_push` 成功，不会报错。④ 改动面大（读者遍及告警 / 状态 / 编排器 Step 5），拆开单独做、单独验证。
+
 
 ## [0.45.393] — 2026-10-02 — Fixed：`migrate_data_root.py` 分类表补 `alphabot` / `scripts` / `vercel.json`，check-old 不再因新代码项无故报红
 
