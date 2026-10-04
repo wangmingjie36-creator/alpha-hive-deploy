@@ -5,7 +5,62 @@
 
 ---
 
-## [0.45.405] — 2026-10-04 — 占位（进行中：经济日历 _CPI/_NFP/_GDP 过去日期按官方源更正）
+## [0.45.405] — 2026-10-04 — Fixed：经济日历 `_CPI` / `_NFP` / `_GDP` 的过去日期按 BLS / BEA **实际发布**归档逐条更正——2025 全年首次核对（含政府停摆推迟 / 取消的发布），连同 v0.45.404 查出的 2026 年 GDP 三个推算错值；10 处改值、2 处删除
+
+### 背景
+
+v0.45.404 在 `bea.gov/news/schedule/full` 查出 2026 年 GDP 表三个过去日期与官方不符（未改、单独提出）；
+三张表的 2025 行注释一直写着「未与官方逐条核对」。本版只抄官方源，不按「CPI 第二周 / 非农第一个周五」推任何日期。
+
+### 取证（全部官方源，零 API 费用）
+
+- **过去日期以实际发布为准，不以日程为准。** 2025 年 10~11 月政府停摆推迟、取消了若干发布；而且 BLS 的
+  `schedule/2025/home.htm` **事后被改写过**（列的是 10-24 / 11-20 / 12-16 / 12-18、取消项已删），从它看不出原定日程。
+- **BLS**：归档 `bls.gov/bls/news-release/cpi.htm`、`empsit.htm` 列出每一次实际发布，取消的写明
+  「Not published because of 2025 lapse in federal government appropriations」。逐条打开发布原文核「embargoed until」行：
+  2025-01 ~ 2026-10 共 41 条（CPI 20 + 就业 21），归档文件名日期 == embargo 日期 **41/41**。
+  ⚠️ empsit 归档页里有**注释掉的未来占位链接**（`<!-- … empsit_12042026 … -->`）——解析前必须先剥 HTML 注释，
+  否则会把还没发生的发布当成「已发布」。
+- **BEA**：GDP 新闻发布归档（`bea.gov/news/archive?field_related_product_target_id=451`）+ 每条原文「EMBARGOED UNTIL」行（7/7）；
+  2026 年另对 `/news/schedule/full`「Year 2026」，复核 v0.45.404 的结论：初值 02-20 / 04-30 / 07-30 / 10-29。
+- **机械核对（双向）**：表中 2025-01-01 至今天的每个日期 == 官方实际发布集合，无多无缺：CPI 20 / NFP 21 / GDP 7。
+  未来日期对现行日程页复核：CPI 10-14 / 11-10 / 12-10、NFP 11-06 / 12-04 与表一致（未改）。
+
+### Fixed
+
+- `economic_calendar.py` `_CPI` 2025：`07-11→07-15`、`09-10→09-11`（**早于停摆**、与停摆无关，旧值不对应任何官方发布 ⇒ 推算指纹）；
+  `10-14→10-24`、`12-10→12-18`（9 月 / 11 月 CPI，停摆推迟）；**删除 `11-12`**（10 月 CPI 官方未发布）。
+- `_NFP` 2025：`10-03→11-20`、`12-05→12-16`（9 月 / 11 月就业报告，停摆推迟）；**删除 `11-07`**（10 月就业报告官方未发布）。
+  取消的发布直接删，不找替身日期。
+- `_GDP` 2025：`10-29→12-23`。3Q25 **没有** Advance Estimate；BEA 2025-12-23 的「Gross Domestic Product, 3rd Quarter 2025
+  (Initial Estimate)」原文写明 *this initial report … replaces the release of the advance estimate originally scheduled for October 30*，
+  即该季度官方首次估计，故收录（本表口径 =「每个参考季度的首次估计」，已写进表注释）。旧值 10-29 连原定的 10-30 都不是。
+- `_GDP` 2026：`01-29→02-20`（4Q25 初值，停摆推迟）、`04-29→04-30`、`07-29→07-30`。
+- 每张表补注释：核了什么、对哪个源、哪天、几条一致；模块 docstring 补「过去日期以实际发布为准」与两个归档 URL。
+  **`verified_through`、`pending`、所有未来日期、各表阈值均未改动。**
+
+### Added
+
+- `tests/test_economic_calendar.py::TestPublishedDates::test_past_dates_are_the_actual_releases`：钉住本版 10 个官方值 / 旧错值对，
+  以及「2025-11 无 CPI、2025-10 无就业报告」。变异实测：换回旧表 ⇒ 本条红（首个断言 `2025-07-15 不在表里`），
+  v0.45.65 那条回归在旧表上照样绿 ⇒ 覆盖是本条新增的。
+
+### 生产影响面（复核，未照抄 v0.45.404 的结论）
+
+- 读者仍只有三个：GuardBee（`ref_date` 补跑，只认 `type == "fomc"` 且 ≤3 天）、dashboard（只用今天）、
+  `economic_calendar_watch`（只读 `verified_through`，未改 ⇒ 不受影响）。
+- 遍历全部 25 个 FOMC × 提前 0~3 天（100 次）：`get_next_event` 修前修后都 **0 次**不是那次 FOMC ⇒ GuardBee 计票零变化。
+- 与 FOMC **同日**的非 FOMC 事件：修前 5 个，其中 **4 个就是这次改掉的错值**（2025-10-29 GDP、2025-12-10 CPI、2026-04-29 GDP、
+  2026-07-29 GDP——推算出来的日期扎堆落在 FOMC 日）；修后只剩 2025-07-30 GDP 一个真平局。FOMC 靠扫描顺序赢平局这个脆弱点因此少了四处。
+
+### 未改、记下
+
+- `economic_calendar_watch._release_date_to_quarter` 的 docstring 说「初值发布月 ∈ 1/4/7/10」是 BEA 节奏的固有性质；
+  02-20（4Q25）与 12-23（3Q25）都是反例。它只读 `verified_through`（2026-10-29 ⇒ 2026Q3），真遇到这种日期会返回 None ⇒
+  退出码 3「无法判定」（会响，不静默），故不在本版改。
+- 与 v0.45.404（`claude/musing-heisenberg-189da6`，尚未合入 main）同改 `economic_calendar.py`：本版**刻意不碰**它改的「核对时间」
+  表头三行，核对注释写在表体内；`git merge-tree` 实测两种合入顺序 `economic_calendar.py` 均自动合并，只有 CHANGELOG 顶部插入冲突。
+- `TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold` 仍按设计红（2027 年 BLS / BEA 日程未发布）。
 
 ## [0.45.399] — 2026-10-03 — Fixed：Alpha Bot.app 在 Apple 芯片上双击被按 x86_64（Rosetta）启动 ⇒ arm64 的 numpy 载入失败、服务起不来；Info.plist 加 `LSArchitecturePriority`
 
