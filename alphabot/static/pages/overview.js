@@ -1,5 +1,5 @@
 // 总览：账本某日（缺省最新一日）全部标的一屏。读的是收盘后记录的行，不逐只现拉（每只 4–7 秒）。
-import { api, h, num, pct, pctPts, signChip, seg, table, panel, downloadCSV, pref, setPref, isNum,
+import { api, h, helpLink, num, pct, pctPts, signChip, seg, table, panel, downloadCSV, pref, setPref, isNum,
   ROUTE_SHORT, EARN_LABEL, SOURCE_LABEL, TENOR_LABEL, CURVE_LABEL, money, fill } from "../lib.js";
 import { go } from "../app.js";
 
@@ -27,7 +27,7 @@ export async function renderOverview(root, alive) {
     const head = h("div", { class: "page-head" },
       h("div", {},
         h("h1", {}, "总览", h("span", { class: "sub" }, d.source === "demo" ? "演示数据" : (date ? `账本 ${date}` : ""))),
-        h("p", { class: "lede" }, "每只标的的 GEX 环境、路由与卖权候选。数据取自每日收盘后记录的账本行；要看实时报价，点进标的页现拉。")),
+        h("p", { class: "lede" }, "每只标的的 GEX 环境、路由与卖权候选。数据取自每日收盘后记录的账本行；要看实时报价，点进标的页现拉。 ", helpLink("overview"))),
       h("div", { class: "controls" },
         (dates.dates || []).length && d.source !== "demo" ? h("select", { class: "sel", "aria-label": "账本日期",
           onchange: (e) => { date = e.target.value; draw(); } },

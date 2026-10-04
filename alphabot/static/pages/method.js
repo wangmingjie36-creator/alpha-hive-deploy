@@ -9,6 +9,7 @@ export async function renderMethod(root, alive) {
   fill(root, h("article", { class: "prose" },
     h("h1", {}, "口径与局限"),
     h("p", {}, m.disclaimer?.replace(/\*\*/g, "") || ""),
+    h("p", {}, "想要逐页的使用说明，见 ", h("a", { href: "#/help" }, "帮助"), "。"),
 
     h("h2", {}, "这些数字是什么"),
     h("ul", {},
