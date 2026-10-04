@@ -35,6 +35,32 @@
 - 变异：R0（v0.45.423 的规则原样）/ R1（`>`）/ R2（删规则 ①）/ R3（过度丢）全部打红；R0 红在 16:38 / 17:42 / 23:59 / 提前收盘 / 实测临时值 / 同晚陈旧 6 条——正是本版要钉的行为。扫描进行中做的变异只把「真失败」算击杀（生产扫描写真实数据根会让 teardown 闸报 error）。
 - 全量套件：见提交说明。
 
+## [0.45.437] — 2026-10-08 — Changed：编排器 Step 11 显式传 `--budget-seconds 45`（F&G 预算改由有看门狗的调用方给；根本修法第 1 步，第 2 步再把工具缺省改成不限时）
+
+> 未在 main 上占号（推送由用户执行），原号 401 已被 main 上另一条占用（check-old removed_by_git），10-08 换基时改用 origin/main 顶部 436 之上的 437；合入前再核一次。
+> **合入时机：10-06（B2 首次执行）核对完之后**——10-08 已核：B2 在 10-06 / 10-07 都干净执行。
+
+用户 10-04 决定：不改每周任务 SKILL.md，走根本修法。
+**根因**：v0.45.392 把 F&G 子状态的 45s 预算写成了 `ic_rerun_readiness` 的**命令行缺省值**——因为编排器当时不传这个参数（改编排器要隔一个扫描日才部署），
+只好让缺省值本身「放得进 Step 11 的 60s 看门狗」。结果这条**只属于编排器**的约束管住了所有调用方：每周任务（SKILL.md 第 81 行）和手动运行都没有看门狗，
+却也被 45s 截断（降级那周的 F&G 段会变成「超出时间预算」）。往 SKILL.md 加 `--budget-seconds 0` 只豁免一个调用方，跨文件的「bash 60 / Python 45」耦合还在。
+
+**两步**（顺序不能反，反了中间会有一天 Step 11 不限时）：
+1. **本版**：编排器显式传 `--budget-seconds 45`。现有 Python 已认这个参数，单独上线即可；合入后下一扫描日部署、再下一扫描日执行。
+2. **下一版**（第 1 步执行过一轮后）：`FG_BUDGET_SECONDS_DEFAULT` 改成 0（不限时），`TestBudgetFitsOrchestratorTimeout` 去掉「没传就用缺省值」的回退，
+   相关文案（如「用 `--budget-seconds 0` 看完整结果」）同步改。那之后每周任务 / 手动运行自动不限时，SKILL.md 一字不改。
+
+### Changed
+- `scripts/alpha-hive-orchestrator.sh` Step 11：`run_step --timeout 60 … ic_rerun_readiness.py --quiet --today "${DATE_STR}" --budget-seconds 45 --out …`，
+  并在注释里写明预算归调用方给。值与现行缺省相同 ⇒ 生产行为不变。
+
+### Added
+- `tests/test_ic_rerun_fg_budget.py::TestBudgetFitsOrchestratorTimeout::test_orchestrator_passes_the_budget_explicitly`：编排器 Step 11 行必须显式带
+  `--budget-seconds <数>`。原有 `test_default_budget_plus_grace_fits` 已会优先读编排器传的值，继续核「预算 + TERM 宽限 + 10s ≤ 60s」。
+
+### 验证
+- `bash -n` 通过；编排器相关 + 预算测试 790 passed（fg_budget / step_interp / orchestrator_steps / braced_vars / deployed_matches_repo / deploy_orchestrator）。
+
 ## [0.45.436] — 2026-10-08 — Changed：阶段 8 收尾——Alpha Bot.app 与周 / 月定时任务改指生产克隆；`make alphabot-app` 缺省指向克隆
 
 处理 v0.45.432「未修」第 1 条（用户批准「两个都做」）。开发检出 `~/Desktop/Alpha Hive` 此前靠扫描前的 production_sync 每日快进；阶段 8 后再没人快进它，跑在那里的三个消费者从 10-09 起会停在旧代码。
@@ -91,7 +117,6 @@
 - 变异 14 个全部打红（N0 = 改动前三个文件；N2「取不到价把陈旧也算进去」首轮存活，补断言后打红）。
 - **生产回放**：21 份审计文件逐份喂新判据 + 真 `AlertAnalyzer`：恰好 09-15/16/17/18/22/24/25 七天红（缺 β BRK-B；09-24/25 另有取不到价 SPY、缺报价 8 张、NAV 缺 hedge_overlay），其余 14 天静默。
 - ruff 干净；相关 901 条通过；全量见提交说明。
-
 
 ## [0.45.434] — 2026-10-08 — Fixed：v0.45.423 二次检查——两处随根因修复过期的文档（只改注释，行为不变）
 
@@ -429,7 +454,6 @@ CI 依赖在系统 site、永远绿 ⇒ 谁都不会红。按文件再钉是把�
 - 顺手看到：`market_intelligence` 的 iv_rv_signal 阈值 Twelve Data 腿 ±10、yfinance 腿 ±5，不一致（未动）。
 - SPY 的 CBOE options payload 5.8 MB / 8 s，每天多一次；`quotes/SPY.json` 525 B 字段同名，嫌慢可换。
 
-
 ## [0.45.422] — 2026-10-07 — Changed：数据根缺省改为 `~/alpha-hive-data`——未设 `ALPHA_HIVE_HOME` 时不再兜底到代码检出（手动运行不再静默读写冻结旧数据）；测试会话在收集之前设会话级沙箱
 
 **问题**：`PATHS.home` 未设 `ALPHA_HIVE_HOME` 时兜底到 `hive_logger.py` 所在目录（代码检出）。阶段 5 之前数据就在那里，这是对的；
@@ -503,7 +527,6 @@ CI 依赖在系统 site、永远绿 ⇒ 谁都不会红。按文件再钉是把�
 - 补数据源（C，改用 CBOE 链）做过离线等价性研究：两来源方向一致率仅 57.6%（25/361 完全相反），对 T+7 收益的 IC 都不显著且互相无显著差异（配对 p=0.27），不建议现在换；B（失败时才用 CBOE）会把两种口径混进同一序列，不做。
 - 本版推送前 Oracle 在生产里**尚未**写这些键：下一次扫描（扫描前快进）起才有，首个有数据的覆盖率判定在那天的 Step 12。
 
-
 ## [0.45.420] — 2026-10-06 — Fixed：阶段 7 二次检查——运行器只读打开改走现成的 `sqlite_readonly`、备份与记录跟 `--db` 走、`signal_archive --apply` 空根不再被拒、编排器 tool_missing 改按文件判
 
 用户要求二次检查 v0.45.419。查出四处缺陷（均已写成先红后绿的守卫，变异自证），另有两条记为已知局限。
@@ -521,7 +544,6 @@ CI 依赖在系统 site、永远绿 ⇒ 谁都不会红。按文件再钉是把�
 ### 已知局限（未改，记在这里）
 - 编排器给迁移步骤 `--timeout 120`：一个跑超时被杀的迁移不会留下记录，次日会重试并再红一次——幂等保证安全，但**长迁移要先改超时**，别指望它自己跑完。
 - 两个运行器并发（编排器 + 手工）没有互斥锁：幂等要求保证结果正确，但会各备份一次、可能各记一行。
-
 
 ## [0.45.419] — 2026-10-06 — Added：阶段 7「单一写入方」——编号幂等的数据迁移运行器 + 三个回填工具缺省 dry-run 先备份 + 13 次历史手工修复补记
 
@@ -553,7 +575,6 @@ CI 依赖在系统 site、永远绿 ⇒ 谁都不会红。按文件再钉是把�
 ### 未做
 - 没有写任何真迁移（`versions/` 为空）——运行器此刻只有合成迁移的证明。第一个真迁移出现时必须带 `build_fixture`，否则 `test_every_real_migration_is_well_formed_and_idempotent` 红。
 - 现网 `signal_archive --backfill --dry-run` 的 `changed: 224` 仍待查（v0.45.417 记录）。
-
 
 ## [0.45.418] — 2026-10-06 — Fixed：`orchestrator_lint.py` 补命令行入口——此前直接跑它是恒 exit 0 的空检查；现在命中 exit 1、文件读不了 exit 2
 
@@ -626,7 +647,6 @@ v0.45.414 那次 session 据这个空操作报过「orchestrator_lint.py 通过�
 ### 验证
 - 恢复演练（真数据）：导出 118 个 `.swarm_results` → `restore_state` 还原到临时根 → 逐文件 sha256 与现网一致（0 不符）；`signal_archive.backfill(dry_run=True)` 在还原根上读到 118 文件、117334 行（空库全为 new），与现网库的 new+changed+same（30+224+117080）一致、71 个信号一致。
 - 附带观察（**待验证**，非本版引入）：现网 dry-run 报 `changed: 224`，即存档库与按当前抽取器重放的值有 224 行不同，来源未查。
-
 
 ## [0.45.416] — 2026-10-05 — Fixed：纸面组合跨拆股——持仓换到复权口径（shares × r、entry / SL / TP ÷ r），不再记假止损 / 假止盈、不再拿复权前入场价对复权后收盘估值；判据看日线、时点安全，判不了当天不碰仓位且看得见
 
@@ -910,7 +930,6 @@ v0.45.402~403 退役日报提交 / 推送链与 `GitHubTool.commit()/status()` �
 ### 生产影响
 下一次扫描前的 `production_sync` 快进会带上本版（今天 10-05 14:00 与 v0.45.402 / 403 同一轮）。若参数约束与现役调用不符，后果是 `sync_before_scan` 回 `error` 类结局并触发 `alert_manager` 的「生产代码 ≠ origin/main」P1（可见，不会静默）；扫描照跑旧代码。
 
-
 ## [0.45.412] — 2026-10-04 — Fixed：Alpha Bot 启动器认「窗口已开着」用的 `ps` 不带 `-ww`——Linux CI 上 ps 管道输出被压窄（procps 按环境里的 `COLUMNS` 截），`TestNativeWindow::test_second_launch_brings_existing_window_forward` 自 v0.45.407 起红；生产（macOS）不受影响
 
 ### 现象
@@ -1110,7 +1129,6 @@ macOS 的 BSD ps 在非终端输出时恒不限宽（实测 `COLUMNS=40` / `80` 
 - 每周只读诊断任务从此也会写这个目录；它的会话若写不了数据根，每个周日会报 ⚠️「行情库写入失败」（看得见，不影响结果）——待验证。
 - 进程被 KILL 时同目录可能留下 `.<TICKER>.*.tmp`；坏文件改名后的 `<TICKER>.json.invalid-*` 也只留在本机。两者都不会被当成库文件读，数据备份按后缀白名单跳过它们、只在 MANIFEST 的 skipped 里记一笔（`export.copy_state_dir`）。
 
-
 ## [0.45.409] — 2026-10-04 — Changed：数据根迁移阶段 6 ⑤——总闸从「仓库根点名清单」换成「真实数据根整根指纹」；修两处恒真的账本自证
 
 阶段 6 的最后一项（①②③ v0.45.394、④ v0.45.402、GitHubTool 退役 v0.45.403 之后）。**只改测试基础设施与测试，不改任何生产代码。**
@@ -1140,7 +1158,6 @@ macOS 的 BSD ps 在非终端输出时恒不限宽（实测 `COLUMNS=40` / `80` 
 
 ### 阶段 6 收尾状态
 ①②③（v0.45.394）数据解除跟踪 + 守卫；④（v0.45.402）撤日报提交 / 推送链；v0.45.403 退役 `GitHubTool.commit/status`；⑤（本版）总闸。**仍未决**：`.swarm_results_*.json` / `analysis-*-ml-*.json` 的异地备份；`GitHubTool._ALLOWED_GIT_CMDS` 是否按调用点收窄。
-
 
 ## [0.45.408] — 2026-10-03 — Changed（事后修订）：F&G 敞口门前瞻检验的自证改为**逐日重锚**；统计量用的 A / B 仍从冻结种子连续重放。Added：`PATHS.data_backup_repo`、冻结锚点
 
@@ -1402,7 +1419,6 @@ v0.45.402 退役日报提交 / 推送链时，把这两个方法留作「已标�
 - `GitHubTool._ALLOWED_GIT_CMDS` 仍含 `commit` / `add` / `status` / `diff` / `log` / `branch` 等当前生产调用点（只有 fetch / pull / merge-base / rev-list / rev-parse）用不到的子命令。按「别按类里还剩哪些方法收窄」的旧结论没动；是否改按**调用点**收窄，是单独的设计决定。
 - 阶段 6 ⑤（收窄根总闸 + 两处恒真自证）仍未做；`.swarm_results` / `analysis` 异地备份仍未决。
 
-
 ## [0.45.402] — 2026-10-04 — Removed：数据根迁移阶段 6 ④——撤日报提交 / 推送链（`auto_commit_and_notify` → `deploy_and_notify` 只部署 gh-pages）
 
 阶段 6 ①②③（v0.45.394：数据解除跟踪 + 守卫）已合入并在生产快进；本版把「每次扫描把日报产物白名单提交并推上公开 main」这条链整体退役。**不含**阶段 6 ⑤（收窄根总闸 + 两处恒真自证），见文末。
@@ -1647,7 +1663,6 @@ v0.45.402 退役日报提交 / 推送链时，把这两个方法留作「已标�
 ### 未做（④，下一版）
 - 撤 `report_deployer.auto_commit_and_notify` 的白名单提交 + `production_sync.push_main`、`REPORT_ARTIFACT_PATHS` / `_ARTIFACT_*` 及其 13 个测试文件、`alert_manager` / `scan_timing` / `alpha_hive_daily_report` / `orchestrator_steps`（Step 5 读 `git_push_success`）里的对应字段、收窄根总闸。**此前我断言「②必须与④同版」是错的**：数据被忽略后 `git status` 不再列出它们，日报提交走「工作目录干净」分支，推送报 `nothing_to_push` 成功，不会报错。④ 改动面大（读者遍及告警 / 状态 / 编排器 Step 5），拆开单独做、单独验证。
 
-
 ## [0.45.393] — 2026-10-02 — Fixed：`migrate_data_root.py` 分类表补 `alphabot` / `scripts` / `vercel.json`，check-old 不再因新代码项无故报红
 
 ### Fixed
@@ -1655,7 +1670,6 @@ v0.45.402 退役日报提交 / 推送链时，把这两个方法留作「已标�
 
 ### Added
 - `tests/test_migrate_data_root.py::test_every_tracked_top_level_entry_is_classified`：枚举 `git ls-files` 的全部顶层条目，任一落入 UNKNOWN 即红。把「新增顶层代码项没人登记」从生产上的 check-old 红灯前移成测试红灯。变异验证：还原本次分类表改动，该测试红并点名 `['alphabot', 'scripts', 'vercel.json']`；恢复后 31/31 绿。
-
 
 ## [0.45.392] — 2026-10-02 — Fixed：`ic_rerun_readiness` 防御层——F&G 子状态放子进程 + 时间预算、F&G 之前先写检查点 `--out`、SIGTERM 连带子进程；Step 11 再超时也不丢世代边界核对
 
@@ -2306,7 +2320,6 @@ Step 2/4/5 的调用点与 alert_manager 新规则是 B2（v0.45.386），本版
 - BILI / CRM / ABBV 三只 09-23 的 `iv_rank`（差 0.64 / 0.05 / 0.27）尚未重算，随重放一并处理。
 - 覆盖率闸门仍只判「非空」：单只标的的缺口降级靠计数与 `hv_gap` 字段可见，未接进告警。
 
-
 ## [0.45.382] — 2026-09-29 — Fixed：卖权账本只读出口（CLI `--assess` / MCP 两条路径 / 本地报告就绪度行）把「状态目录不存在」报成「账本为空」→ 分开说：缺目录写明解析出的路径与病因、仍 undetermined（退出码 3）；不建目录，写路径 / 预注册 / 盲化 / 闸门均未动；同形普查顺手修 `replay_scoring` / `vol_forecast` / `signal_archive --list` 三个缺 `pheromone.db` 的出口（后者读一次就建库）
 
 > 让号记录：本条开工时占 0.45.373，占位提交因推送被自动模式拦下而只在本地；另一 session 的 0.45.373（世代印记）先进了 origin/main ⇒ 让到 0.45.379；推送前 379（09-23 iv_rank 重算）/ 380 / 381 又被别的 session 先占进主干 ⇒ 再让到 0.45.382。按「先进 git 历史者得号」。教训：占位推送被拦时，号等于没占，完工前要重新核对一次。
@@ -2584,7 +2597,6 @@ v0.45.366 的世代原因里写「印记两种口径都写……对只改补跑�
 - **同晚早于 20:30 ET 的补跑**：CSV 还没有 D 行 ⇒ 强制重下仍缺 ⇒ 退回快照 `vix_spot`（`cloud_snapshot_cboe`，Guard 不计票）。这是设计内的退路，但要知道：补跑「当天」与补跑「次日/深夜」的 Guard 票数不同。
 - 补跑走全降级（`not data` 且 CSV / 快照都无 VIX）时 `return base`，`vix_feed_note` 里没有 `asof_row_missing` 原因（只有 WARNING 日志）。
 
-
 ## [0.45.372] — 2026-09-29 — Fixed（数据）：BRK-B 期权快照 2026-09-23 的 `rv_30d` / `iv_rank` 等派生字段被污染，按正确收盘价重算（**仅此一行**；范围核实后无「缺失」）
 
 v0.45.363 修 Twelve Data 的 BRK-B 404 后，「已落盘的 BRK-B 历史 rv_30d / iv_rank 要不要补」的核实与处理。
@@ -2670,7 +2682,6 @@ VRP 账本 BRK-B 的 rv / iv 也全非空。真正有问题的是**值**，不�
 - 离线渲染 09-11 后 `getComputedStyle`：页面里 14 个带内联 `--tint` 的元素（11 个热力图格 + 3 张方向 KPI 卡）底色全部解析为预期 rgba，无一退化成透明；当天数据里不出现的分支（Actionable 卡、降级横幅、热力图强/弱格、期权墙虚线）用源码里的原样 style 串注入探针，8/8 解析正确。
 - `--tint-*` 未定义时这些淡染会**静默变透明**：确认过 renderer 片段唯一的生产出口是 `render_dashboard_html`（经 `report_web_assets`），整页内联 dashboard.css，不存在脱离 `:root` 单独嵌入的路径；`test_dashboard_css_vars_defined` 也会对未定义令牌报红。
 - 全套 7274 passed / 2 xfailed（照例 deselect 两条环境测试）。
-
 
 ## [0.45.370] — 2026-09-29 — Added：编排器纳入版本控制·阶段 3——扫描前自动部署（合入后下一个扫描日部署、再下一个扫描日生效）；Fixed：部署工具的「main 历史」对合并提交是瞎的
 
@@ -2816,7 +2827,6 @@ VRP 账本 BRK-B 的 rv / iv 也全非空。真正有问题的是**值**，不�
 - 暗色 `--bear #ef4444` 压 `--surface2` 上的红淡染只有 3.71–3.84:1（`.pill-red` / `.sdir-bear` 等），这是令牌本身的取值问题、改前即如此；动它会波及全站所有看空色，需单独决定。
 - `dashboard_renderer.py` 内联样式里的 `rgba(...)` 淡染（如板块热力图单元格）仍是字面量——现在可以改写成 `rgba(var(--tint-x),α)`，本版只动 CSS。
 
-
 ## [0.45.367] — 2026-09-28 — 过期数据横幅 / JS 报错浮层换令牌：拆掉整条色块，改中性底 + 语义色左边条
 
 v0.45.361 列为「没必要」的最后两项，用户要求也改。两者原本都是「整条色块 + 固定前景」（琥珀 `#f59e0b` 底黑字、亮红 `#ff4444` 底白字）。
@@ -2920,7 +2930,6 @@ BLS 2027 日程尚未发布，按设计要人去抄新日程，**不是调阈值
 - 快照模式下 CSV 与快照都取不到时 VIX 走 `_asof_history` 的 yfinance 腿，该腿**不核末根是否为 D**（与其余宏观字段同一既有形状），本版未动。
 - 实时 CSV 路径的前一收盘取「CSV 上一行」，节后首日会取到假日行（如 09-08 配 09-07 的 15.30）；只影响展示用的 `vix_change_pct`，本版未动。
 
-
 ## [0.45.365] — 2026-09-28 — 图表坐标轴刻度换 `--ts`、网格线换半透明 `--border`
 
 v0.45.361 分析时列为「没必要」（原写法已按明暗二选一、两套主题都可读），用户要求也改。`templates/dashboard.js` 六个图
@@ -2989,7 +2998,6 @@ WATCHLIST 30 只里只有 BRK-B 带非字母数字。
   `HTTP Error 404` 共 3 行）；`status.json` 的 `scan_timing.counters.twelve_data` = fetches 31 / failures 0 / `failed {}`。
   （同一轮 `scan_timing` 自 09-14 起首次重新并进 `status.json`，所以这个观测点确实能看见。）
 - 已落盘的 BRK-B rv_30d / iv_rank / close_correction 历史值没有补算。
-
 
 ## [0.45.362] — 2026-09-28 — Added/Fixed：GEX 第 2 层——每只标的一份 GEX 状态 `gex_state`（政体路由用的那份，带可得性标记），网站 / 日报 / 深度与 ML 报告 / MCP / 存档只读它；「Gamma 压榨风险」方向反了的展示改正。**不改分数**
 
@@ -3844,7 +3852,6 @@ TCP `:22` / `:443` 成败与耗时（每步硬上限 5s，getaddrinfo 放守护�
 
 ---
 
-
 ## [0.45.349] — 2026-09-27 — Changed：中性化读 OracleBee 主链 `gamma_exposure` 的两条进分通道（`options_analyzer.gex_signal` 恒 1.0、BearBee `gex<0` 看空下限删除），与 v0.45.334 / v0.45.340 同日登记世代边界 2026-09-28
 
 用户决定（2026-09-27「做第 1 层，Oracle 和 Bear 一起中性化」），依据当天只读根因调查（workflow，5 路调查 + 反驳审查）。
@@ -3976,7 +3983,6 @@ bash 3.2 在 UTF-8 locale 下把 `）` 的首字节并进变量名，查 `READIN
 **CHANGELOG 里的数字没有任何东西守着**——写完就要拿产出它的那份 JSON 再数一遍，而不是凭当时屏幕上的印象。
 
 ---
-
 
 ## [0.45.346] — 2026-09-26 — Fixed：`migrate_data_root check-old` 看不见被 `.gitignore` 忽略的文件——旁路写旧 `logs/` 会被归进「git 同步」而不红；iCloud 重名副本单列
 
@@ -5620,7 +5626,6 @@ v0.45.19（08-25）更正了 `ic_diagnostics` 的列，却没去找**别的**读
 
 ---
 
-
 ## [0.45.320] — 2026-09-23 — Added：维度 IC 证据协议预注册（P1）——在当前世代数据被看到之前，写死估计量 / 假设 / 检视点 / 动作表
 
 **本条提交的时间即登记时间。** 协议全文 `experiments/dim_ic_preregistration.md`；
@@ -6808,7 +6813,6 @@ blocked 分支失效 / 审计不记 pool_ok / health_check 不报 fail），这�
 应改为「看 `bootstrap_stable` 与 `pool_ok` 两个字段」——那是你的持久配置，未擅自改；② 退出码仍为 0；③ `health_check` 读 `PATHS.home/weight_history.jsonl`，
 而 `weekly_optimizer` 写 `ALPHAHIVE_DIR/weight_history.jsonl`——数据根迁移完成后两者若分叉，`health_check` 会报「文件不存在」（当前重合，未动）；
 ④ 非退役形状下闸 1 的提议与 CI 不同管线（v0.45.144 起如此）仍未动。
-
 
 ## [0.45.298] — 2026-09-21 — Fixed：v0.45.295 二次检查——闸 1 逐次重采样漏了 `_apply_weight_clamps` 一步（提议与 CI 不同管线）；`--apply` 会抹掉 config 里写在数值旁的归零决策注释；Changed：闸 1 测试改走真实管线
 
@@ -9486,7 +9490,6 @@ size_usd 四元组）**0 差异**，直到 `max_positions=15` 上限（15/15 逐
   1 skipped / 2 xfailed**（318s），唯一红 `TestCoverageHorizon`（日历覆盖率设计内告警，与本版无关）。
 - `ruff check` 改动/新增的 5 个文件：通过。
 
-
 ## [0.45.261] — 2026-09-15 — Fixed：param_optimizer.py 网格搜索收尾用硬编码旧值"恢复" paper_portfolio.CONFIG，改成 deepcopy 快照
 
 评审 paper_portfolio.py F&G 组合层敞口控制设计时顺带发现：`run_grid()`
@@ -9843,7 +9846,6 @@ TestFileDerivedSpeciesDoesNotSpread`）
 ### 未做 / 待定
 
 见上方「未尽事项」1-4 条。
-
 
 
 ## [0.45.259] — 2026-09-15 — 数据根迁移阶段 1 补跑：差集法补齐 52 文件分类组 3/5 缺口，新发现 2 处生产每日活跃的未修 `__file__` bypass
@@ -10499,7 +10501,6 @@ Read in full: `alpha_hive_mcp.py`、`push_report_to_slack.py`、`slack_report_no
 方法与证据来源：本 session 直接执行的沙箱扫描与 grep/读源码核实（任务 1、任务 4、任务 3A）；
 两个独立只读子任务的产出经本 session 交叉核对后转录（任务 2 的 4 组结果、任务 3B 的仓库内普查表）。
 
-
 ## [0.45.255] — 2026-09-15 — scan_timing 整段丢失时告警管线原地失明：区分「早退未写」与「扫描真跑完了却丢数据」，后者升级成 P1
 
 用户要求进一步排查 2026-09-14 14:48「status.json 无 scan_timing」根因（前一轮只读核查发现的异常），
@@ -10859,7 +10860,6 @@ v0.45.238 的观测点按**调用**计。一只标的一轮扫描要调 3~4 次 
 - 全套（`-m "not integration and not network"`，合并 origin/main 之后）：**4598 passed / 1 failed / 1 skipped / 2 xfailed**（302s），唯一红
   `TestCoverageHorizon`（日历剩 81 天低于 90 天阈值；在 origin/main 临时 worktree 上单跑同样红，与本版无关）。
 - `ruff check` 改动的 8 个文件：通过。
-
 
 ## [0.45.246] — 2026-09-14 — 落地 v0.45.239 / v0.45.244：合并后 v0.45.240 的 cwd 守卫抓到 v0.45.239 日志隔离 ① 的真洞——相对落点经 `resolve()` 补全成 cwd，恒「在沙箱里」
 
@@ -13893,7 +13893,6 @@ Changed / Removed：删掉仓库内第二份 `hooks/pre-commit`（钩子正文�
 看到真实分布（6 条全是 cdn.cboe.com）。**解释不了的变异结果不能写进结论。**
 
 
-
 ---
 
 ## [0.45.206] — 2026-09-11 — 全量 `ruff check .` 从未在 CI 跑过：46 个错，其中 7 个是本仓头号故障形状
@@ -14147,7 +14146,6 @@ subprocess 自己炸则返回 `{"success":False,"error":…}`——**没有 `std
 即失败没传导到下游：日志声称回滚完成，实际回滚从未执行。已实测确认。
 本版**不修**——修它要放宽安全边界（往白名单加 `checkout`/`reset`）或改控制流，
 属另一个改动面，不该混进一次死代码清理。已在白名单注释里标出，勿顺手加项。
-
 
 ## [0.45.203] — 2026-09-11 — 一条恒真断言守住的其实是**真实不变式的否定**
 
@@ -14812,7 +14810,6 @@ GEX 只经三值 `regime` 进评分。v0.45.190 已测：翻转一次的 `|Δfin
    已把 ticker 名改成「日期最晚的排最前」，并把这个理由写进 docstring
    （不写下来，下一个人会「顺手」把它改回去）。
 
-
 ---
 
 ---
@@ -14887,7 +14884,6 @@ GEX 只经三值 `regime` 进评分。v0.45.190 已测：翻转一次的 `|Δfin
 
 `tests/conftest.py::_offline_transport` 的 docstring 早已记过这两条 —— 本次是
 在不知情的情况下**原地重踩了一遍**，canary 是唯一拦住它的东西。
-
 
 
 ---
@@ -15376,7 +15372,6 @@ pos→neg 的全部效果是 odds +2.9pp / sentiment −2.1pp / catalyst −0.8p
 缓存，Step 2 约 30–55 分钟 ⇒ 零额外网络调用）。届时需要一条世代边界，但范围只含 GEX 一维。
 ⏰ 成本窗口：当前世代（2026-09-10 / v0.45.176）**已回填样本 0 条、0/25 周**，
 现在改的损失是一个扫描日；09-21（09-10 那批的 T+7）起开始吃真样本，此后每拖一周多赔一周。
-
 
 ---
 
@@ -16522,7 +16517,6 @@ except 吞一切到 debug，写在里面会被静默吃掉；放外面还能同�
   IV 80）后 signal=risk_adj=**0.0000**，五维齐全时 final_score=7.0，
   **ERROR 日志 0 条**（新守卫不误报）。
 
-
 ## [0.45.176] — 2026-09-10 — adapted_weights 通道降级为只读诊断；零权重复活地板与 replay_scoring 池化口径两处修复
 
 ### 背景
@@ -16637,7 +16631,6 @@ config 归零后落库 0.141 / 0.182 —— **config 只拿到两成投票权**�
 - 全链路模拟下次扫描：config → QueenDistiller → 政体调整（最不利分支
   risk_off + negative_gex + IV 80）后 **signal=0.0000 / risk_adj=0.0000**，
   对比 09-09 生产实际的 0.2059 / 0.1982。
-
 
 ## [0.45.175] — 2026-09-10 — ⚠️ 重大发现：config.EVALUATION_WEIGHTS 被 adapted_weights 静默旁路，v0.45.172 决策从未在生产实际生效
 
@@ -17599,7 +17592,6 @@ Guard 53.3% / CodeExec 50.0% / Oracle 33.7%。
   「把聚合值放进蜂群离散度（`_infer_confidence` 的 dim_std）」本身可疑，另案。
 - `finrl_bridge.py:271` 按「出现才 append」建逐蜂特征列表，旧口径下各蜂列表长度
   8~199 不等且与 `returns_t7` **不对齐**；本版让它们等长，属顺带修好，未单独测。
-
 
 ## [0.45.163] — 2026-09-07 — 拿排行榜当普查用：GuardBee 的窗口 100% 装不下蜂群
 
@@ -19589,7 +19581,6 @@ n=12 时比值 ≤0.17 就红，n=30 时要 ≤0.067 才红——**方向是反�
 **判据：换判据的量纲＝换了一个估计量，标定表必须跟着重标**（同 v0.45.144
 「bootstrap 与点估计口径不符 ⇒ 闸门比的是两个不同估计量」）。
 
-
 ### 结论 2：「综合胜率」全部 ≥60 是**算术必然**，不是巧合
 
 ```
@@ -19702,7 +19693,6 @@ v0.45.132 改读 `pheromone.db` 后已有真数，实测当前代码：
 - **「准」与「有信息」各配一个观测点**：零区分度的常数可以校准得很好。
 
 ---
-
 
 ## [0.45.147] — 2026-09-07 — 缺失哨兵选中了众数：`catalyst_quality` 的 `"B"` 与 `direction_encoded` 的 `0.0`
 
@@ -20534,7 +20524,6 @@ weekly_optimizer / self_analyst 里零消费者 ⇒ 不进 `predictions` 表、�
   触发」；改用 AST（Name 节点）后通过。另一次 mutation 脚本误传两个 `-q`（`-qq` 吞掉 collected 行 → −1），
   重跑单 `-q` 后 8 次 collected 均为 105。
 
-
 ## [0.45.140] — 2026-09-06 — 三个「诚实地一直缺」的特征接上蜂群真值；ML 估计量换代登记
 
 ### Fixed
@@ -20738,7 +20727,6 @@ n=438 份能对上 T+7 结果的生产报告：
 ### 顺带发现，未在本版处理
 `_prepare_ml_input` 的 `final_score=_rec.get("score", 5.0)`：recommendation 字典从来没有
 `score` 键，该特征恒为默认 5.0 且每份报告都被记为缺失——同一物种的第三处。已开任务卡。
-
 
 ## [0.45.138] — 2026-09-06 — 描述量与前瞻量分列：「这只票过去赢过几成」不等于「下一笔赢面多大」
 
@@ -20949,7 +20937,6 @@ Mutation check **14/14 全部被抓到**，每轮 `collected 59 items` 一致。
   `data_builder.historical_records`，而 `train_model()` 只在
   `build_training_data_from_db()` 返回空时才读它 ⇒ 该赋值在常规路径上是**死写**。
 
-
 ## [0.45.136] — 2026-09-06 — 还债：10 个模块逐个补显式源桩，`_KNOWN_NETWORK_REACHERS` 清空
 
 v0.45.133 的传输层闸让整套测试**行为上**离线了，但那 10 个模块仍在调用数据源、
@@ -21017,7 +21004,6 @@ options_analyzer / fred_macro / dashboard_renderer / market_intelligence 四个�
 ⚠️ 另记一个自造的坑：批量插 fixture 时用「最后一个匹配 `^(import|from)` 的行」
 定位会插进**跨行 import 的括号里**（`from iv_history import (` … `)`）。
 改用 `ast` 取最后一个 import 节点的 `end_lineno`，并在写回前 `ast.parse` 自证。
-
 
 ## [0.45.135] — 2026-09-06 — `catalyst_quality` 换了个量：服务路径喂的不是催化剂
 
@@ -21150,7 +21136,6 @@ XOM，同 v0.45.131「在测试里 `new` 一个通知器对象＝一次对外动
 volatility / market_sentiment 取数**从未生效**，永远走 fallback。叠加
 `metrics.get("_ticker", "")` 这个键在生产 `realtime_metrics` 里也不存在（生产用
 `"ticker"`）——两个独立缺陷叠在一起。不夹带进本次改动。
-
 
 ## [0.45.134] — 2026-09-06 — 概率与止盈两节去常数化；并给概率装上会红的记分卡（它第一次运行就红了）
 
@@ -21346,7 +21331,6 @@ fixture**，豁免分支里写 `return` 而不是 `yield; return` 会让 pytest 
 `did not yield a value`，**把 24 个 network 标记测试全打死——而 CI 用
 `-m "not network"` 摘掉它们，照样全绿**。这条回归只有本地跑得到。
 
-
 ## [0.45.132] — 2026-09-06 — ML 深度报告第 5 章情景推演改读 pheromone.db 真实 T+7 分布；删 6 条手写「历史库」
 
 零世代边界代价：`historical_analysis` 只进展示层、MCP 与评级文案，不进 `predictions` 表、不进 IC。
@@ -21498,7 +21482,6 @@ M1 的那个 teardown error 顺带**把原事故完整复现了一遍**——拆
   **与本版无关**：`nfp` 只覆盖到 2026-12-04（剩 89 天 < 阈值 90），
   是 v0.45.65 设计好的「日历过期即报警」按期触发，含义＝去 BLS 抄 2027 日程
 
-
 ## [0.45.130] — 2026-09-05 — 二次检查本 session 六版改动：一处计数 bug、两处 CHANGELOG 说多了、零功能缺陷
 
 用户要求对 v0.45.118 / 120 / 122 / 123 / 125 / 128 全部改动做二次检查。三路并行：
@@ -21542,7 +21525,6 @@ M1 的那个 teardown error 顺带**把原事故完整复现了一遍**——拆
   不是注释。
 - `ic_rerun_readiness` CLI 在零样本新世代下正常输出 0/25，不崩。
 - 已知未做：`--samples-only` 早退路径不落 `scan_timing.json`（该路径注释已标死代码兜底）。
-
 
 ## [0.45.129] — 2026-09-05 — 复查 v0.45.127：`pytestmark` 插到了 docstring 之前，类的 `__doc__` 静默变成 None
 
@@ -21687,7 +21669,6 @@ v0.45.122 判「Oracle 的 yfinance 路径活着」（期限结构 29/30 非 unk
 - 新世代从 2026-09-05 起攒样本，`replay_scoring.py` 默认只用新世代；旧世代 IC 结论对本版不适用。
 - 09-08 首轮实测多看两处：Oracle details 里 `term_structure.source` 应为 `cboe`、`deep_skew.source`
   为 `options_agent`；Bear `data_sources.valuation` 应有 ~26/30 为 `yfinance`（此前 30/30 unavailable）。
-
 
 ## [0.45.127] — 2026-09-05 — ml_predictor 七条重 CPU 测试单独放宽 timeout：60s 在负载下不够用
 
@@ -21926,7 +21907,6 @@ Twelve Data 47 → 31 次/扫描（30 只 + SPY），且 31 次全部移出蜂�
 
 至此 v0.45.118 诊断的 A 项（A1/A2/A3）全部落地。09-08 那一轮是第一次能拿到全套实测的扫描。
 
-
 ## [0.45.124] — 2026-09-05 — test_quote_set.py 的「全部离线」是句空话：实测 9 个测试每轮出网 42 次、整文件 221s；顺带清掉误提交的 worktree gitlink
 
 三件事，共一个主题：**一个失败没有传导到依赖它的下一步**。
@@ -21988,7 +21968,6 @@ v0.45.91（`pass` 吞掉 `None`）、v0.45.119（守卫只判 returncode，接�
 v0.45.121（`&&` 链断在前一步）、v0.45.124（`except Exception` 吞掉出网失败）。
 落成两条可执行推论 + 一条「『这个测试文件是离线的』是需要被执行的断言，不是注释」。
 
-
 ## [0.45.123] — 2026-09-05 — CBOE payload 缓存按业务日判新鲜：120s TTL 短于单只流水线，「共享一次下载」从未成立
 
 v0.45.118 诊断的 A2。`cboe_options._payload_cache` 注释写「同一标的的主链与全链共享一次
@@ -22032,7 +22011,6 @@ OptionsAgent、Bear 的 OptionsAgent、全链 OI、quote_set 先后各来取一�
 
 - A3：Twelve Data 蜂群段 `fetch_daily_closes(end_date=None)` 改传业务日，与尾段 `fetch_bars(end_date=as_of)` 同键（17 只重复 × 11s）。
 - `swarm_agents/cache.py` 的 `yfinance_cache_ttl=120`：A1 之后蜂不再自己取，这个 TTL 只剩 `_fetch_stock_data` 回退路径在用，待观察 09-08 计数后决定是否同样改业务日键。
-
 
 ## [0.45.122] — 2026-09-05 — 预取成为一轮扫描的 yfinance 唯一取数点：四只蜂 7 处直连收进预取包，Oracle 三处共用一份期权链
 
@@ -22101,7 +22079,6 @@ v0.45.118 诊断里的 A 项第一步。2026-09-04 蜂群段 2466s（占全程 6
 - A2：CBOE payload 缓存改业务日键（`cboe_options.py:87` TTL 120s 短于单只流水线）。
 - A3：Twelve Data 蜂群段传业务日 `end_date`，与尾段同键。
 - 待决策两条：Oracle 期权链换 CBOE 源（世代边界）；Bear P/E 复活（评分变更）。
-
 
 ## [0.45.121] — 2026-09-05 — 二次复查本 session 全部改动：查出 3 个真 bug，其中 2 个是我自己制造的
 
@@ -22295,7 +22272,6 @@ bar）；失败不入缓存（download 抛错 / 空帧只记 warning，本轮全
 按 09-04 的数推算回测段从 342s 降到 30s 量级，Step 2 余量从 7% 回到 ~15%。
 **待 09-08 扫描的 `status.json.scan_timing.phases.backtest_weights` 实测**，此前不算数。
 
-
 ## [0.45.119] — 2026-09-05 — CI 第一次跑就红了：F821 守卫写死了 Mac 的解释器路径
 
 ### 现象
@@ -22346,7 +22322,6 @@ GitHub runner 上 Python 在 `/opt/hostedtoolcache/Python/3.11.16/x64/bin/python
 
 - **先复现再修**：把路径改成 `/nonexistent/python3`，本地得到与 CI 一致的
   `1 passed, 7 errors`；改回 `sys.executable` 后 8 passed。
-
 
 ## [0.45.118] — 2026-09-05 — 扫描耗时可见化：Step 2 八天涨 4.5×、被杀两次，没有一行日志说离预算还剩多少
 
@@ -22433,7 +22408,6 @@ GitHub runner 上 Python 在 `/opt/hostedtoolcache/Python/3.11.16/x64/bin/python
   注释宣称的作用域（「一次扫描内」）和参数表达的作用域（120s）对不上时，以参数为准。
 - **「算了没人读」的变体**：`yf_gate._stats`、`bars_cache_stats()` 都在数，零读者；性能是
   本项目唯一没有不变式的维度，所以能静默退化 8 天。
-
 
 ## [0.45.117] — 2026-09-05 — 合并 `ci/python-tests`：仓库有了 CI（兑现 v0.45.94 的占号）
 
@@ -23539,7 +23513,6 @@ Twelve Data 是 **7 次/分钟的串行队列**，而 v0.45.89 的教训正是�
 已加两条测试钉住它们留在原路径。缓存无 TTL、无容量上限（一轮扫描就是一个进程），
 docstring 写明长驻进程要自行 `clear_bars_cache()`。
 
-
 ## [0.45.104] — 2026-09-03 — 期权路线图五版的二次复查：41 处修复，其中 3 处会算错钱
 
 **做了什么**：对同一天落地的 v0.45.99~103（期权路线图五步）做对抗式二次复查——
@@ -24149,7 +24122,6 @@ KPI 恢复可算：total_return +2.06% / Sharpe 0.4 / 胜率 52.3% / 44 笔。
 两者不一致但都不是错值 —— 交易本身的日期与价格都正确，
 只是现金效应落在引擎处理它的那天。
 
-
 ## [0.45.96] — 2026-09-03 — 缓存测试写死 8 月日期，跨月自动变红（本次不含生产代码改动）
 
 ### 现象
@@ -24413,7 +24385,6 @@ Step 3 跑到次日 00:04，补出 12 份标着 `2026-09-03` 的报告 ——
 改逐日横截面口径后**无一只蜂通过 Bonferroni**（最高 BuzzBee t=+1.89，需 |t|>2.9），
 BearBee 的 +0.273 因任何单日都凑不够 5 条横截面而**无法计算、应作废**。
 与 MEMORY 既有结论一致：sentiment 是唯一有证据的信号，聚合分 IC≈0。
-
 
 ## [0.45.92] — 2026-09-02 — 实时口径的宏观数据补上日期戳
 
@@ -24760,7 +24731,6 @@ COST −2.25 / RKLB −4.15 两只负 GEX 正确判成 low
 ```
 
 即修复走了低价股回落路径、且**没有波及正常标的**。
-
 
 ## [0.45.88] — 2026-08-31 — 占号未兑现：CBOE 新鲜度分层从未并入 main（工作在 `origin/fix/cboe-*`）
 
@@ -25357,7 +25327,6 @@ CBOE(20)/Finnhub(11)/AV(13) —— 七个互不相干的域名同时挂。
 ⚠️ `DEFAULT_ACQUIRE_TIMEOUT = 120.0` **未改动**，但注释里已标注：单次往返耗时
 **没有当前实测**（原注引的 8~11s 属已撤回的那批单次取样），要调它先自己测。
 
-
 ## [0.45.74] — 2026-08-29 — 移除 CrewAI：一个从未接通、且与本系统测量方式相冲突的集成
 
 v0.45.73 关掉 crewai 的 import 埋点时顺带确认了 `run_crew_scan()` 零调用方。
@@ -25625,7 +25594,6 @@ NaN 形状与云端快照兜底的语义由 `test_cloud_snapshot_price.py` 专�
 三次全部咬住，且爆炸半径各不相同（=不是一条断言在重复报警）。
 `data_pipeline.py` **本次一行未改**——全部改动都在测试侧。
 `data_pipeline` 相关 12 个测试文件：183 passed（改前 179 passed + 4 failed）。
-
 
 ## [0.45.71] — 2026-08-29 — 那条为"崩溃"写的闸，拦不住崩溃：一个联网 flake 掀出的恒真断言
 
@@ -25943,7 +25911,6 @@ MEMORY.md「分布不变式」条早就写过：**新增不变式必配「喂退
 - `tests/test_economic_calendar.py`：+4（32 条）
 - `tests/test_economic_calendar_watch.py`：+5（29 条）
 
-
 ## [0.45.67] — 2026-08-29 — 谁去看上游发了没：日程监视器（v0.45.65 的另一半）
 
 v0.45.65 给硬编码日历加了地平线告警和一条会变红的单测，但那些只会说
@@ -26019,7 +25986,6 @@ v0.45.65 给硬编码日历加了地平线告警和一条会变红的单测，�
 - `~/.claude/scripts/alpha-hive-orchestrator.sh` **Step 13**（⚠️ 该文件不在本仓库，
   备份 `alpha-hive-orchestrator.sh.bak-20260829_calwatch`）
 - `tests/test_economic_calendar_watch.py`：24 条离线测试（`_fetch` 全部 monkeypatch，不打网络）
-
 
 ## [0.45.66] — 2026-08-29 — 定时扫描一直在走另一条网络链路
 
@@ -26286,7 +26252,6 @@ CPI 随后 09-12、GDP 09-30 跟上。**变红时不要调阈值**——调高�
 
 ### Changed
 - 模块 docstring 立两条硬规矩：禁止按规律推算日期；本模块必须自己喊过期
-
 
 ## [0.45.64] — 2026-08-29 — 单测里的定时炸弹：分界线在走，写死的 fixture 日期钉在原地
 
@@ -26578,7 +26543,6 @@ strike 本身，等距时的取舍才是确定的。
   日报只用 `evaluations`，**不**把「🔴 STOP LOSS」搬上页面——阈值未校准之前，
   那种红标会是噪音（COST 的 PCR 条件按现阈值 20% 的日子在响）。
 
-
 ## [0.45.61] — 2026-08-28 — Twelve Data 接管日K：最后一处 yfinance 依赖
 
 v0.45.60 把当日宏观搬离了 yfinance，链上只剩一处非它不可：**逐标的 30 日收盘**
@@ -26706,7 +26670,6 @@ Twelve Data 的免费 key 需要注册（我不能替你注册账号）。拿到
 
 写入即生效，无需改任何代码。未配置时整条链原样退回限流版 yfinance。
 
-
 ## [0.45.60] — 2026-08-28 — 当日宏观脱离 yfinance；顺带发现 2Y 一直是猜的
 
 用户指出 v0.45.59 那份调研的漏洞：「那我当天规则模式的自动任务 FRED 给不出信息啊」。
@@ -26820,7 +26783,6 @@ mutation check：塌成常数 → 红（中位 1.0）；只剩 2 个值 → 红�
    因为那个结构里根本不含 `iv_rank`。真正的产物在快照与 `analysis-*.json` 里
    （实际 30/30）。**下结论前先拿一个已知完好的对照跑一遍**，这次是对照救了我。
 
-
 ## [0.45.59] — 2026-08-28 — 云端快照根治：生产端补上、宏观接上、8-27 补跑
 
 承 v0.45.58 查明的两处断裂，按用户指示三件一起做。
@@ -26889,7 +26851,6 @@ numpy 数组，`arr <= date` 是逐元素比较，list 会抛 TypeError。
 `except Exception` 吞掉 → `data` 空 → 走「yfinance 全灭」分支 →
 测试红在一条与被测逻辑无关的路径上，还给出 `'cboe' == 'cloud_snapshot_cboe'`
 这种看着像真 bug 的错。**替身失真会伪造出被测代码的假故障。**
-
 
 ## [0.45.58] — 2026-08-28 — 云端快照兜底是死的，而它一直宣称自己活着
 
@@ -26981,7 +26942,6 @@ manifest `generated_at_utc` = 2026-08-27T21:05:52Z = 17:05 ET，收盘后。
 两者都建立在「补跑不可能有目标日期权链」这个**我没有核实就写下的前提**上——
 而 `cloud_snapshot_fetch` 的 docstring 第一段就否证了它。卡片已撤回。
 
-
 ## [0.45.57] — 2026-08-28 — 失效条件算了半年，全项目没有一个读者
 
 ### 先更正 v0.45.55 的一句事实错误
@@ -27044,7 +27004,6 @@ manifest `generated_at_utc` = 2026-08-27T21:05:52Z = 17:05 ET，收盘后。
 - 17 只标的在 8/26 无任何失效条件配置（v0.45.50 已补齐到 30 只，但只给了机器条件）。
 - 机器条件的池化分位口径未修——`iv > 105.7` 对低波动标的恒不触发。
   改成逐标的分位需要重算，不在本次范围。
-
 
 ## [0.45.56] — 2026-08-28 — 限流器早就在仓库里，只接了 6 个调用点
 
@@ -27181,7 +27140,6 @@ OI / VIX / P/C / SKEW / VVIX / F&G），理由原文是「股价有历史 API �
    yfinance 冒烟测试，两者抢同一份配额，于是补算第一只标的就 429、
    而我的前台调用却成功 —— 差点据此误判成「`_refresh_price_derived` 有 bug」。
    实际是我在跟自己抢。
-
 
 ## [0.45.55] — 2026-08-28 — 失效条件空转了两天：一条读不懂，另外 119 条陪葬
 
@@ -29824,7 +29782,6 @@ SL/TP 截断。原 docstring「无截断、无并列人为聚集」对 5 月后�
 > 两处必须同时存在才生效：前者管静态部署，后者管 ML 报告同步。
 > 只看到其中一处就以为改全了，是这条容易踩的坑。
 
-
 v0.45.2 修好 ticker 正则后 BRK-B 终于产出 ML 报告，但**从未被部署**——
 `index.html` 照常链接它，线上直接 404。
 连同 v0.45.8（CBOE 对 BRK-B 恒定 403），**同一个类份额连字符问题一天之内
@@ -30529,7 +30486,6 @@ IV-RV，这正是两条独立链路各自失败的指纹。
 
 ---
 
-
 ## [0.45.3] — 2026-08-25 — 「缺数据渲染成安全值」的剩余六处
 
 v0.45.2 只修了 `momentum_5d`。同一形状还散在另外五个字段/模块里，按**当前可达性**
@@ -30632,7 +30588,6 @@ BuzzBeeWhisper failed for NVDA: '>' not supported between instances of 'NoneType
 > | gh-pages 空提交闸 调用侧 | `generate_ml_report.py` | **`25615ff`** |
 >
 > **靠 `git log <file>` 追溯本条时会找错地方**，请以本表为准。
-
 
 来自 `post-fix-verification-2026-08-24` 的跑后核对。三条都不报错、退出码为 0、
 日志正常，**但产出早已是假的**——与 v0.43.23~0.43.26 是同一族缺陷。
