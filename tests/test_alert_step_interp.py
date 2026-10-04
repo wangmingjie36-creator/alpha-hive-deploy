@@ -47,7 +47,8 @@ class TestSuccessWithWarning:
         hit = got[0]
         assert hit.level == am.AlertLevel.HIGH and "退出码 1" in hit.message and warning in hit.message
         assert hit.tags == ["step_warning", "step2_hive_analysis"]
-        assert hit.details["原因"] == warning and hit.details["推送"] is True
+        assert hit.details["原因"] == warning
+        assert "推送" not in hit.details, "已退役的「推送」栏又出现在告警详情里（v0.45.402 起日报不再推 main）"
 
     def test_missing_warning_field_still_alerts(self, tmp_path):
         """warning 键缺了也要报（写「原因未记」），不许因为缺字段就静默。"""
