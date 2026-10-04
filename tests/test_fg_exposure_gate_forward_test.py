@@ -68,8 +68,8 @@ _OHLC_WINDOW_KEYS = {"window", "wide_fetches", "served", "out_of_window", "fallb
 
 
 _SELFPROOF_KEYS = {"real_entries", "reproduced", "decision_reproduced", "a_only_entries"}
-_SEGMENT_KEYS = {"segments", "multi_day_segments", "invalid_anchors", "production_unprocessed_dates",
-                 "anchor_sources", "unreadable_state_commits"}
+_SEGMENT_KEYS = {"segments", "multi_day_segments", "stale_anchor_segments", "invalid_anchors",
+                 "production_unprocessed_dates", "anchor_sources", "unreadable_state_commits", "overlap_days_checked"}
 
 
 def _assert_no_unexpected_top_level_keys(res):
@@ -1383,9 +1383,9 @@ class TestRehearse:
         seen = []
         orig = fwd._selfproof_failure_reason
 
-        def spy(sp, ohlc=None):
+        def spy(sp, ohlc=None, segments=None):
             seen.append(ohlc)
-            return orig(sp, ohlc)
+            return orig(sp, ohlc, segments)
         monkeypatch.setattr(fwd, "_selfproof_failure_reason", spy)
         res = self._rehearse(repo)
         assert res["status"] == "cannot_judge" and len(seen) == 1
@@ -1766,7 +1766,7 @@ class TestAOnlyIsReportedNotJudged:
                           "before": "2026-09-26", "seed_commit": "abcdef1234", "seed_last_run_date": "2026-09-18",
                           "n_dates": 2, "selfproof": {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2,
                                                        "a_only_entries": 4}})
-        assert "A 多开 4 笔（不进判定）" in capsys.readouterr().out
+        assert "逐日多开 4 笔次（不进判定）" in capsys.readouterr().out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1949,7 +1949,7 @@ class TestStateHistory:
         broken = {"paper_portfolio_state/meta.json": b"{not json"}
         repo, shas = _git_repo(tmp_path, [_state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0),
                                           _state_at("2026-09-16", 4100.0), broken])
-        hist, unreadable = fwd._state_history(repo)
+        hist, unreadable, _ = fwd._state_history(repo)
         assert sorted(hist) == ["2026-09-15", "2026-09-16"] and unreadable == 1
         assert hist["2026-09-16"][0] == shas[2] and _cash_of(hist["2026-09-16"][1]) == 4100.0
 
@@ -1996,11 +1996,14 @@ class TestFrozenAnchors:
 
     def test_shipped_anchors_are_exactly_the_code_repo_history(self):
         """冻结的就是代码仓库里窗口内的**全部**生产状态（一个不多、一个不少、逐字节相同）。代码仓库的状态提交
-        止于 2026-09-25；以后若有人又往代码仓库提交了窗口内的状态，这条会红。导出包 / 浅克隆里没有完整历史，skip 正当。"""
-        try:
-            hist, _ = fwd._state_history(_ROOT)
-        except fwd.SeedError as e:
-            pytest.skip(f"这里没有完整的代码仓库历史（{e}）")
+        止于 2026-09-25；以后若有人又往代码仓库提交了窗口内的状态，这条会红。导出包 / 浅克隆里没有完整历史，skip 正当
+        ——**只有这两种**（v0.45.401 二次检查收窄：原先任何 SeedError 都 skip，`cat-file` 解析失败之类的真错也会被吞掉）。"""
+        r = subprocess.run(["git", "-C", str(_ROOT), "rev-parse", "--is-shallow-repository"], capture_output=True, text=True)
+        if r.returncode == 128:
+            pytest.skip("不在 git 仓库里（导出的源码包）")
+        if r.stdout.strip() == "true":
+            pytest.skip("浅克隆：没有完整的代码仓库历史")
+        hist, _, _ = fwd._state_history(_ROOT)
         want = {d: files for d, (_, files) in hist.items() if d >= fwd.FORWARD_START}
         assert fwd.load_frozen_anchors() == want
 
@@ -2218,3 +2221,122 @@ class TestCountsThatMustNotBeConfused:
         assert seg["multi_day_segments"] == [] and seg["anchor_sources"] == {
             fwd.SOURCE_SEED: 1, fwd.SOURCE_CODE_REPO: 1, fwd.SOURCE_DATA_BACKUP: 1}
         assert res["selfproof_continuous"]["reproduced"] == 1        # 对照：连续重放在这个世界里确实是红的
+
+
+class TestSecondReviewFixes:
+    """v0.45.401 二次检查补的两处。"""
+
+    def test_a_ledger_only_repair_commit_is_the_state_used(self, tmp_path):
+        """只改 `positions.jsonl`、不碰 meta 的人工修复：「同一日期取最后一个状态」要拿到修复后的那份，
+        演练的起点种子也一样。变异「状态提交只按 meta.json 列」⇒ 两处都拿到修复前 ⇒ 红。"""
+        before_fix = _state_at("2026-09-15", 3000.0, positions=[_pos_row("OLD", "2026-09-10", 5000.0)])
+        fixed = {"paper_portfolio_state/positions.jsonl": _jsonl([_pos_row("OLD", "2026-09-10", 4000.0)])}
+        repo, shas = _git_repo(tmp_path, [before_fix, fixed, _state_at("2026-09-16", 4000.0)])
+        hist, _, _ = fwd._state_history(repo)
+        assert hist["2026-09-15"][0] == shas[1]
+        assert json.loads(hist["2026-09-15"][1]["positions.jsonl"])["size_usd"] == 4000.0
+        files, manifest = fwd.build_seed_from_git("2026-09-16", repo)
+        assert manifest["source"]["commit"] == shas[1]
+        assert json.loads(files["positions.jsonl"])["size_usd"] == 4000.0
+
+    def test_icloud_duplicate_directories_do_not_break_the_frozen_anchors(self, tmp_path):
+        """本仓在 iCloud 同步的 ~/Desktop 下，会冒出「2026-09-17 2」这类重名副本——不能让检验天天无法判定。
+        日期名的多余目录照样红（`TestFrozenAnchors::test_a_directory_not_in_the_manifest_is_refused`）。
+        变异「目录核对不过滤日期名」⇒ 红。"""
+        d = tmp_path / "seed"
+        shutil.copytree(_SEED_DIR, d)
+        shutil.copytree(d / "anchors" / "2026-09-17", d / "anchors" / "2026-09-17 2")
+        assert fwd.load_frozen_anchors(d) == fwd.load_frozen_anchors()
+
+
+class TestSecondReviewFindings:
+    """v0.45.401 二次检查（两个独立审查 agent，均已实测复现）补的口子。"""
+
+    def _equity(self, pp_fx, dates):
+        _pp = pp_fx[0]
+        _pp.EQUITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _pp._write_jsonl(_pp.EQUITY_FILE, [{"date": d, "nav": 50000.0} for d in dates])
+
+    def _backup(self, tmp_path, states):
+        from hive_logger import PATHS
+        repo, shas = _git_repo(tmp_path, [{f"paper_portfolio_state/{n}": b for n, b in st.items()} for st in states],
+                               name="bk_src2")
+        PATHS.data_backup_repo.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(repo), str(PATHS.data_backup_repo))
+        return shas
+
+    def test_a_rebuilt_backup_with_no_overlap_is_cannot_judge_not_a_silent_continuous_replay(self, pp, tmp_path):
+        """备份仓库在、是 git、不浅，但历史丢了被重建（只剩一个无关提交）⇒ 原先返回空表、09-25 之后全部从最后一个
+        冻结锚点连续重放，等于静默退回。变异「去掉重叠日要求」⇒ 红。"""
+        dates = ["2026-09-16", "2026-09-28", "2026-09-29"]
+        self._equity(pp, dates)
+        self._backup(tmp_path, [_st("2026-10-01", 1.0)])
+        with pytest.raises(fwd.SeedError, match="没有一个重叠日"):
+            fwd._forward_anchor_plan(fwd.load_seed(), dates)
+
+    def test_overlap_days_are_checked_even_outside_this_windows_range(self, pp, tmp_path):
+        """窗口只到 09-17 时 `_anchor_plan` 不看 09-18 之后的状态；但「每次运行都核重叠日」要对所有重叠日成立。"""
+        dates = ["2026-09-16", "2026-09-17"]
+        self._equity(pp, dates)
+        self._backup(tmp_path, [_st("2026-09-18", 1.0)])
+        with pytest.raises(fwd.SeedError, match="不一致"):
+            fwd._forward_anchor_plan(fwd.load_seed(), dates)
+
+    def test_a_rollback_in_the_backup_history_is_cannot_judge(self, pp, tmp_path):
+        """恢复 09-25 之后跑 09-29：「每个日期取最后一个状态」会让 09-29 的锚点取到被弃用的 09-28。
+        变异「不检测回退」⇒ 红。回退发生在种子之前（不影响窗口）则不拦。"""
+        frozen = fwd.load_frozen_anchors()
+        dates = ["2026-09-16", "2026-09-28", "2026-09-29", "2026-09-30"]
+        self._equity(pp, dates)
+        self._backup(tmp_path, [frozen["2026-09-25"], _st("2026-09-28", 1.0), frozen["2026-09-25"],
+                                _st("2026-09-29", 2.0)])
+        with pytest.raises(fwd.SeedError, match="回退"):
+            fwd._forward_anchor_plan(fwd.load_seed(), dates)
+        assert fwd._refuse_rollbacks("x", [("abc", "2026-09-01", "2026-09-05")], "2026-09-15") is None
+
+    def test_processed_dates_reach_the_forward_plan(self, pp, tmp_path):
+        """「生产没跑组合的快照日不重放」只在 `_anchor_plan` 上测过；接线若被改成 `processed=None` 全绿。"""
+        frozen = fwd.load_frozen_anchors()
+        dates = ["2026-09-16", "2026-09-28", "2026-09-29"]
+        self._equity(pp, ["2026-09-16", "2026-09-29"])          # 生产 09-28 没跑组合
+        self._backup(tmp_path, [frozen["2026-09-25"]])
+        plan = fwd._forward_anchor_plan(fwd.load_seed(), dates)
+        assert plan["info"]["production_unprocessed_dates"] == ["2026-09-28"]
+        assert plan["info"]["overlap_days_checked"] == 1
+
+    def test_processed_dates_reach_the_rehearse_plan(self, pp, tmp_path):
+        seed, hist = _world_with_history(pp, tmp_path)
+        repo = TestRehearse._synthetic_repo(None, tmp_path, seed, hist)
+        self._equity(pp, [_W_DATES[1]])
+        plan = fwd._rehearse_anchor_plan(seed, _W_DATES, repo, repo)
+        assert plan["info"]["production_unprocessed_dates"] == [_W_DATES[0]]
+
+    def test_a_stale_anchor_is_reported_even_in_a_single_day_segment(self):
+        """生产在没有快照的 09-17 跑过组合、那天的备份没提交 ⇒ 09-18 从 09-16 的状态起跑。段是单日的，
+        多日段不会报它——要单独报。变异「不报旧锚点」⇒ 红。"""
+        seed = _st("2026-09-15")
+        plan = fwd._anchor_plan(seed, [("h", {"2026-09-16": _st("2026-09-16")})], ["2026-09-16", "2026-09-18"],
+                                processed={"2026-09-16", "2026-09-17", "2026-09-18"})
+        assert plan["info"]["multi_day_segments"] == []
+        assert plan["info"]["stale_anchor_segments"] == [["2026-09-18", "2026-09-16", "2026-09-17"]]
+        assert "1 段锚点比生产前一次运行旧" in fwd._anchor_gap_note({"selfproof_segments": plan["info"]})
+
+    def test_the_failure_reason_names_anchor_gaps(self, pp, tmp_path, monkeypatch):
+        """备份缺了限流日附近的提交 ⇒ 多日段把多开带进后面 ⇒ 红；原因要说到锚点缺口，不能只推给种子 / K 线 / 配置。
+        变异「失败原因不看 segments」⇒ 红。"""
+        seed, hist = _outage_world(pp, tmp_path, monkeypatch)
+        plan = fwd._anchor_plan(seed, [("h", {_S_D1: hist[_S_D1]})], _S_DATES, processed=set(_S_DATES))
+        res = fwd.evaluate(_S_DATES, _S_SINCE, _S_BEFORE, tmp_path / "sb", insample=False, seed=seed, plan=plan)
+        assert res["status"] == "cannot_judge"
+        assert "逐日锚点有缺口（逐日锚点：1 段跨多天（缺锚点））" in res["reason"]
+        assert "单日段里它们不会带进后面的日子" in res["reason"] and "评分链" not in res["reason"]
+
+    def test_rehearse_after_the_code_repo_era_seeds_from_the_backup_repo(self, pp, tmp_path, monkeypatch):
+        """代码仓库的状态提交止于 09-25 ⇒ 之后的窗口起点只在备份仓库里。变异「只从代码仓库取种子」⇒ 红。"""
+        seed, hist = _outage_world(pp, tmp_path, monkeypatch)
+        as_commit = lambda files: {f"paper_portfolio_state/{n}": b for n, b in files.items()}   # noqa: E731
+        code, _ = _git_repo(tmp_path, [as_commit(seed), as_commit(hist[_S_D1])], name="code_only")
+        backup, _ = _git_repo(tmp_path, [as_commit(hist[d]) for d in _S_DATES], name="backup_all")
+        res = fwd.rehearse(_S_D4, _S_BEFORE, repo_root=code, backup_repo=backup)
+        assert res["status"] == "rehearsal_ok", res.get("reason")
+        assert res["seed_source"] == fwd.SOURCE_DATA_BACKUP and res["seed_last_run_date"] == _S_D3
