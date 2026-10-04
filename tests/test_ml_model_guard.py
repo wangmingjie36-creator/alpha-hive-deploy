@@ -765,21 +765,25 @@ class TestArtifactPlumbing:
         assert f"{G.HISTORY_DIRNAME}/" in rd._ARTIFACT_PREFIXES
         assert rd._is_report_artifact(f"{G.HISTORY_DIRNAME}/ml_model-2026-09-07.json")
 
-    def test_gitignore_negation_after_the_broad_rule(self):
-        """`.gitignore` 的 `ml_model*.json` 会连快照一起吞掉（无斜杠模式匹配
-        任意层级的 basename）。反向规则必须存在，且**必须在那条之后**
-        ——gitignore 是后者胜，顺序反了等于没写。
-        """
-        lines = [l.strip() for l in (REPO / ".gitignore").read_text(
-            encoding="utf-8").splitlines()]
-        assert "ml_model*.json" in lines
-        neg = f"!{G.HISTORY_DIRNAME}/*.json"
-        assert neg in lines, f".gitignore 缺 {neg}，快照会每天写、每天不进库"
-        assert lines.index(neg) > lines.index("ml_model*.json")
+    def test_history_dir_is_ignored_wholesale_since_phase6(self):
+        """阶段 6（v0.45.394）：快照目录整个在数据根，不再进公开仓库。
 
-    def test_history_dir_is_tracked(self):
-        """目录本身要有个被跟踪的文件，否则空目录不进 git。"""
-        assert (REPO / G.HISTORY_DIRNAME / "README.md").is_file()
+        v0.45.145 原先的约定是「快照必须进 git」（`ml_model*.json` 会吞掉它，所以要 `!ml_model_history/*.json`
+        反向规则）。数据根迁移后快照写进 `$ALPHA_HIVE_HOME/ml_model_history/`，耐久性靠 data_backup/export.py 的
+        STATE_DIRS 私有备份。反向例外必须**删掉**——它与整目录忽略打架，留着就是把「已退场」读成「仍生效」。
+        真正的「不被跟踪」由 tests/test_no_data_tracked_in_git.py 兜底。
+        """
+        lines = [l.strip() for l in (REPO / ".gitignore").read_text(encoding="utf-8").splitlines()]
+        assert f"/{G.HISTORY_DIRNAME}/" in lines, "快照目录没有整目录忽略"
+        assert f"!{G.HISTORY_DIRNAME}/*.json" not in lines, "反向例外还在：与整目录忽略打架"
+
+    def test_writer_creates_history_dir_itself(self, tmp_path, snapshots_enabled):
+        """目录不再靠被跟踪的 README 占位：干净检出 / 全新数据根里它不存在，写入方得自己建。"""
+        src = tmp_path / "ml_model.json"
+        src.write_text('{"model_type": "x", "is_trained": true}', encoding="utf-8")
+        assert not (tmp_path / G.HISTORY_DIRNAME).exists(), "前提：目录起初不存在"
+        dest = G.snapshot_model_file(src, date_str="2026-09-07")
+        assert dest is not None and dest.is_file() and dest.parent.name == G.HISTORY_DIRNAME
 
 
 # ===================================================================
