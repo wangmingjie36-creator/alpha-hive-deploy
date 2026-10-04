@@ -74,7 +74,7 @@ v0.45.402 退役日报提交 / 推送链时，把这两个方法留作「已标�
 
 ### 验证
 - 变异（先提交再变异，用 `git checkout` 还原——第一次我在**未提交**时这样还原，把自己的修改一并还原掉了，重做）：`commit` 接回 ⇒ 墓碑 + AST 红；生产代码里加 `run_git_cmd("git commit …")` ⇒ AST 红；`run_git_cmd` 自己兜住解码错误 ⇒ 新迁入的测试红。
-- 干净克隆全套结果见下一条验证记录。
+- 干净克隆（`git clone --no-hardlinks`）全套：7905 passed（较上版少 31 条 = 删 31 条死代码测试、加 1 条迁入测试，其余扩展在既有测试里）；唯一失败 `TestCoverageHorizon`（日历覆盖不足，设计内周期性变红，与本版无关）。
 
 ### 未做 / 后续
 - `GitHubTool._ALLOWED_GIT_CMDS` 仍含 `commit` / `add` / `status` / `diff` / `log` / `branch` 等当前生产调用点（只有 fetch / pull / merge-base / rev-list / rev-parse）用不到的子命令。按「别按类里还剩哪些方法收窄」的旧结论没动；是否改按**调用点**收窄，是单独的设计决定。
