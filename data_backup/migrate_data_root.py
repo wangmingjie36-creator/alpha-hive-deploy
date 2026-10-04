@@ -19,7 +19,8 @@
 
 为什么被跟踪的数据不挪
 ----------------------
-`report_deployer.auto_commit_and_notify` 用白名单 pathspec 提交（`git add report_snapshots/` 等）。
+（v0.45.402 前）`report_deployer.auto_commit_and_notify` 用白名单 pathspec 提交（`git add report_snapshots/` 等）；
+该链已随阶段 6 退役，下面这段是阶段 5 当时为什么不挪被跟踪数据的理由。
 把被跟踪的目录挪走，git 看到的是删除，下一次日报提交就会把全部账本的**删除**提交并推上公开 main——
 那是阶段 6（`git rm --cached` + `.gitignore`）该做、且该有意识地做的事。所以阶段 5 让它们原地冻结：
 读写方全走 `PATHS.home`，冻结副本没人读；若有人写，`check-old` 会看到内容变化。

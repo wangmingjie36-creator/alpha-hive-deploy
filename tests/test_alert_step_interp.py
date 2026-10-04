@@ -39,7 +39,7 @@ class TestSuccessWithWarning:
     def test_one_high_naming_the_reason(self, tmp_path, warning):
         a = _analyze(tmp_path, {
             "step2_hive_analysis": {"status": "success_with_warning", "duration_seconds": 2800, "rc": 1,
-                                    "warning": warning, "git_push_success": True},
+                                    "warning": warning},
             "step4_dashboard": {"status": "skipped_builtin", "step2_status": "success_with_warning"},
         })
         got = _step_alerts(a)
@@ -47,7 +47,8 @@ class TestSuccessWithWarning:
         hit = got[0]
         assert hit.level == am.AlertLevel.HIGH and "退出码 1" in hit.message and warning in hit.message
         assert hit.tags == ["step_warning", "step2_hive_analysis"]
-        assert hit.details["原因"] == warning and hit.details["推送"] is True
+        assert hit.details["原因"] == warning
+        assert "推送" not in hit.details, "已退役的「推送」栏又出现在告警详情里（v0.45.402 起日报不再推 main）"
 
     def test_missing_warning_field_still_alerts(self, tmp_path):
         """warning 键缺了也要报（写「原因未记」），不许因为缺字段就静默。"""

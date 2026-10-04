@@ -387,8 +387,18 @@ class TestStaticAssets:
         assert hashlib.sha256(data).hexdigest() == "e84270bd0cd5bdf60fefc26d00c2a391cb2e81f4d26a7a9ee16185a54773a3cf"
         assert (STATIC / "vendor" / "ECHARTS_LICENSE").is_file()
 
-    def test_not_deployable(self):
-        import report_deployer as rd
-        for p in ("alphabot/static/index.html", "alphabot_state/settings.json",
-                  "alphabot_state/intraday/2026-09-30/NVDA.jsonl"):
-            assert not rd._is_report_artifact(p), p
+    def test_state_is_data_and_code_is_not(self):
+        """v0.45.402 前核对「不在日报自动提交白名单」；阶段 6 起改核对分类：状态目录是数据（MOVE，被忽略、不进代码仓库），
+        前端代码目录不是（SKIP，正常被跟踪）。两边各一条断言，避免只防一头。"""
+        import subprocess
+        from pathlib import Path
+        from data_backup import migrate_data_root as m
+        assert m.classify("alphabot_state", True)[0] == "MOVE"
+        assert m.classify("alphabot", True)[0] == "SKIP"
+        repo = Path(__file__).resolve().parent.parent
+        for p, want in (("alphabot_state/settings.json", 0),
+                        ("alphabot_state/intraday/2026-09-30/NVDA.jsonl", 0),
+                        ("alphabot/static/index.html", 1)):
+            r = subprocess.run(["git", "-C", str(repo), "check-ignore", "-q", "--no-index", "--", p],
+                               capture_output=True)
+            assert r.returncode == want, (p, r.returncode)

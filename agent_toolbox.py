@@ -132,8 +132,9 @@ class GitHubTool:
     def status(self) -> Dict[str, Any]:
         """工作区改动清单（`git status --porcelain -z`）
 
-        返回契约 —— 调用方靠 `"modified_files" in r` 区分「失败」与「干净」
-        （`report_deployer._git_modified_files`）：
+        返回契约 —— 调用方靠 `"modified_files" in r` 区分「失败」与「干净」：
+        ⚠️ v0.45.402 起生产代码**零调用**（唯一读者 `report_deployer._git_modified_files` 随日报提交链退役）；
+        保留是因为它有测试钉着契约、`main()` 演示在用，待确认无新读者后可整体退役（连同 `commit()`）。
 
           成功 `{"success": True,  "modified_files": [路径…], "status": …}`，空列表才是「干净」
           失败 `{"success": False, "error": 非空说明}`，**没有** `modified_files` 键
@@ -202,6 +203,9 @@ class GitHubTool:
     def commit(self, message: str,
                paths: Optional[List[str]] = None) -> Dict[str, Any]:
         """创建提交
+
+        ⚠️ v0.45.402 起生产代码**零调用**（唯一调用方 `report_deployer` 的日报白名单提交随阶段 6 退役）。
+        勿把它接回日报部署路径：往公开仓库提交数据正是阶段 6 要终结的事。
 
         Args:
             paths: **白名单** —— 只暂存这些 pathspec（可含 glob）。
