@@ -5,7 +5,40 @@
 
 ---
 
-## [0.45.412] — 2026-10-04 — 占位（进行中：Alpha Bot 启动器 `window_owner` 的 ps 宽度——Linux CI 截到 80 列致 TestNativeWindow 红）
+## [0.45.412] — 2026-10-04 — Fixed：Alpha Bot 启动器认「窗口已开着」用的 `ps` 不带 `-ww`——Linux CI 上管道输出被截到 80 列，`TestNativeWindow::test_second_launch_brings_existing_window_forward` 自 v0.45.407 起红；生产（macOS）不受影响
+
+### 现象
+
+v0.45.407（`593ab53a`，pywebview 原生窗口）推上 main 后，GitHub Actions 多出一条红：
+`assert [('ask', '首次启动：请选择 Alpha Hive 数据根目录…')] == [('activate', 2515)]`——第二次启动没认出开着的窗口，
+直接走到了「首次启动问数据根」。本机 Mac 上该文件 32/32 全绿。
+（main 的 CI 结论自 09-30 起因 `TestCoverageHorizon` 按设计恒红，这条新红**没有改变 run 的结论位**，只在失败清单里看得见。）
+
+### 根因
+
+`alphabot/launcher.py::window_owner()` 用 `/bin/ps -p PID -o command=` 取命令行、找 `alphabot.launcher` 标记。
+procps 的 ps(1) 写明：输出被重定向 / 管道接走时，宽度「undefined（it may be 80, unlimited, …）」，要不限宽得 `-w` 两次。
+CI 解释器是 `/opt/hostedtoolcache/Python/3.11.16/x64/bin/python`，测试里 owner 的命令行共 **99 列、标记从第 83 列起** ⇒ 截到 80 列后标记没了 ⇒ `window_owner()` 返回 None。
+macOS 的 BSD ps 在非终端输出时恒不限宽（实测 `COLUMNS=40` / `80` 都不截），所以 .app 在生产从没踩到，本机测试也永远红不了。
+
+⚠️ **没在 Linux 上本机复现**（本机无容器运行时）：证据链是 CI 断言形状（走到 `ask` 而非 `activate` ⇒ owner 判成了 None）+ procps 文档 + CI 解释器路径的实际长度。
+**推上 main 后那条真 ps 测试在 CI 转绿，才算最终确认**——待验证。
+
+### Fixed
+
+- `alphabot/launcher.py`：`window_owner()` 的 ps 加 `-ww`（procps：不限宽；BSD：同样不限宽，已实测 macOS 上 `-ww -p PID -o command=` 输出与原先逐字一致）。
+- `tests/test_ic_rerun_fg_budget.py::_kill_if_ours`：同一写法同一病——marker 是长临时路径，CI 上被截掉 ⇒ 收尸**静默不杀**、残留进程且没人会红；一并加 `-ww`。
+
+### Added
+
+- `tests/test_alphabot_launcher.py::TestNativeWindow::test_long_command_line_survives_piped_ps_width`：按 procps 文档行事的假 ps（不带 `-ww` 就截 80 列）+ CI 那条命令行的真实形状。
+  带夹具自检（标记确在 80 列之外）与接线自检（假 ps 真被调到）。**旧代码上实测红**（`None == pid`），修后绿——macOS 上真 ps 测不出这类回归，只能这样钉。
+
+### 验证
+
+- `tests/test_alphabot_launcher.py` + `tests/test_alphabot.py` + `tests/test_ic_rerun_fg_budget.py`：131 passed；`ruff check` 三个改动文件通过。
+- `alphabot.__version__` 未动（沿用 0.45.399 / 0.45.407 的做法：.app 显示版本只在专门对齐时改）。
+- 开工前查过无人在修：main 在 `593ab53a` 之后无 alphabot 提交、各 worktree 无相关未提交改动、各分支无相关修复。
 
 ## [0.45.411] — 2026-10-04 — 占位（进行中：Alpha Bot 程序内加「帮助」页——页面导览 / 概念 / 盲期 / 使用建议 / 排错）
 

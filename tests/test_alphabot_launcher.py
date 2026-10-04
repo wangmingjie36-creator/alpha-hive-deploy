@@ -512,6 +512,35 @@ class TestNativeWindow:
         LA._window_pid_path().write_text("garbage", encoding="utf-8")
         assert LA.window_owner() is None
 
+    def test_long_command_line_survives_piped_ps_width(self, home, monkeypatch):
+        """v0.45.412：`ps` 输出被管道接走时，procps 的宽度「未定义（可能 80、不限……）」（ps(1)），
+        GitHub Actions 上恰是 80 ⇒ 长解释器路径把 `alphabot.launcher` 挤出第 80 列，开着的窗口被当成没有、
+        第二次双击去问数据根。macOS 的 BSD ps 管道输出恒不限宽（实测连 COLUMNS 都不理），本机真跑永远红不了
+        ⇒ 用按 procps 文档行事的假 ps 钉住：不带 `-ww` 就截到 80 列。"""
+        ci_cmdline = ("/opt/hostedtoolcache/Python/3.11.16/x64/bin/python "
+                      "-c import time; time.sleep(60) alphabot.launcher")     # 10-04 CI 上 owner 的真实形状
+        assert ci_cmdline.index("alphabot.launcher") >= 80, "夹具自检：标记要真在 80 列之外，否则这条绿不算数"
+        real_run, asked = subprocess.run, []
+
+        def procps_like(cmd, *a, **k):
+            if not str(cmd[0]).endswith("ps"):
+                return real_run(cmd, *a, **k)
+            asked.append(list(cmd))
+            unlimited = "-ww" in cmd or cmd.count("-w") >= 2
+            out = ci_cmdline if unlimited else ci_cmdline[:80]
+            return subprocess.CompletedProcess(cmd, 0, stdout=out + "\n", stderr="")
+
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            LA._window_pid_path().parent.mkdir(parents=True)
+            LA._window_pid_path().write_text(str(owner.pid), encoding="utf-8")
+            monkeypatch.setattr(subprocess, "run", procps_like)
+            assert LA.window_owner() == owner.pid, "ps 输出被截断后认不出开着的窗口——要带 -ww"
+            assert asked, "window_owner 没调 ps：假 ps 没接上，这条绿不算数"
+        finally:
+            owner.kill()
+            owner.wait()
+
     def test_no_native_window_falls_back_to_browser_and_says_why(self, home, monkeypatch, capsys):
         monkeypatch.setattr(LA, "probe", lambda *a, **k: {"state": "alphabot", "info": {"from_app": False}})
         ui = FakeUI()

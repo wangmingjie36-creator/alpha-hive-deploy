@@ -299,7 +299,9 @@ def window_owner() -> Optional[int]:
         return None
     except PermissionError:
         pass
-    r = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+    # -ww：输出被管道接走时 procps 的宽度未定义（Linux CI 上是 80 列，长解释器路径会把标记挤出去）；
+    # macOS 的 BSD ps 此时本就不限宽，加了也一样
+    r = subprocess.run(["/bin/ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
     return pid if "alphabot.launcher" in r.stdout else None
 
 
