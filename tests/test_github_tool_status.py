@@ -1,8 +1,8 @@
 """
 `GitHubTool.status()` 的解析与失败形状（v0.45.211）
 
-它是在产方法：`report_deployer._git_modified_files` 读它，决定当天日报提交与否、
-警告里列出哪些文件被跳过、非生产扫描报告哪些产物残留在工作区。
+它曾是在产方法：`report_deployer._git_modified_files` 读它，决定当天日报提交与否、
+警告里列出哪些文件被跳过（v0.45.402 起日报提交链退役，生产零调用，契约仍有本文件钉着）。
 v0.45.204 实测删掉整个 `def status` **全套零红**——本文件之前没有任何测试碰它。
 
 三组，各堵一个实测复现过的形状（全部在真 git 仓库里造，不打桩）：
@@ -29,7 +29,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import report_deployer as rd  # noqa: E402
+from tests._artifact_whitelist import ARTIFACT_PATHS, is_artifact  # noqa: E402
 from agent_toolbox import GitHubTool  # noqa: E402
 
 
@@ -115,9 +115,9 @@ class TestPathsComeBackVerbatim:
         touched = {artifact_dup, code_dup, "index.html"}
 
         g = GitHubTool(repo_path=str(repo))
-        said_skipped = {f for f in g.status()["modified_files"] if not rd._is_report_artifact(f)}
+        said_skipped = {f for f in g.status()["modified_files"] if not is_artifact(f)}
 
-        assert g.commit("日报测试", paths=rd.REPORT_ARTIFACT_PATHS)["success"]
+        assert g.commit("日报测试", paths=ARTIFACT_PATHS)["success"]
         committed = set(_git(repo, "show", "--name-only", "-z", "--format=", "HEAD",
                              text=True).stdout.split("\0")) - {""}
 

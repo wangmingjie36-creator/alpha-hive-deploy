@@ -53,7 +53,7 @@ class TestScanTimingMissingAfterARealScan:
         hit = [x for x in a.alerts if "缺整段 scan_timing" in x.message]
         assert hit, msgs
         assert hit[0].level == am.AlertLevel.HIGH
-        assert "production_sync" in hit[0].details["影响"] or "git_push" in hit[0].details["影响"]
+        assert "production_sync" in hit[0].details["影响"] and "gh_pages" in hit[0].details["影响"]
         # 原有行为必须保留：checks_skipped 与 WARNING 路径不能被新逻辑顶掉
         assert any("scan_timing" in s for s in a.checks_skipped), a.checks_skipped
 
@@ -95,7 +95,7 @@ class TestSwarmScanActuallyRanPredicate:
     @pytest.mark.parametrize("steps_result,expected", [
         ({"step2_hive_analysis": {"status": "success"}}, True),
         # v0.45.386（编排器 B2）：rc=1 但主流程跑完 ⇒ 解释器记 success_with_warning，而这个判定本身
-        # 要求本轮 scan_timing.json 带 git_push（orchestrator_steps._step2_rc1_evidence）⇒ 必然真跑过。
+        # 要求本轮 scan_timing.json 带 gh_pages（orchestrator_steps._step2_rc1_evidence）⇒ 必然真跑过。
         # 变异：判别器退回只认 "success" ⇒ 这格红（ML 常数日 scan_timing 丢了不报）。
         ({"step2_hive_analysis": {"status": "success_with_warning"}}, True),
         ({"step2_hive_analysis": {"status": "skipped"}}, False),

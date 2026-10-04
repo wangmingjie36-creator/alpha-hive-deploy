@@ -177,23 +177,6 @@ def production_sync_result(date_str: str) -> Optional[dict]:
         return None
 
 
-_GIT_PUSH_KEYS = ("success", "integration", "behind", "merge_commit", "conflicts",
-                  "attempts", "error", "skipped", "fetch_error")
-
-
-def git_push_summary(git_push: Optional[dict]) -> Optional[dict]:
-    """`results["git_push"]` 进 status.json 的精简版（v0.45.214）。
-
-    git 的 `output` 带整段 hint，截到 500 字符；None 原样返回（「没记录」≠「成功」）。
-    """
-    if not isinstance(git_push, dict):
-        return None
-    out = {k: git_push[k] for k in _GIT_PUSH_KEYS if k in git_push}
-    if git_push.get("output"):
-        out["output"] = str(git_push["output"])[:500]
-    return out
-
-
 _GH_PAGES_KEYS = ("success", "action", "attempts", "parent_verified", "tree_unchanged",
                   "n_changed", "skipped", "reason", "cdn_verified")
 
@@ -201,7 +184,7 @@ _GH_PAGES_KEYS = ("success", "action", "attempts", "parent_verified", "tree_unch
 def gh_pages_summary(gh_pages: Optional[dict]) -> Optional[dict]:
     """`results["gh_pages"]` 进 status.json 的精简版（v0.45.351）。
 
-    此前 `auto_commit_and_notify` 根本不返回 gh-pages 结局，status.json / 告警对它全盲
+    此前部署函数根本不返回 gh-pages 结局，status.json / 告警对它全盲
     （2026-09-25 推送失败被重试捷径判成「成功」，网站停两天零告警）。
     None 原样返回（「没记录」≠「成功」，告警侧记为未执行的检查）。
     `transport_probe` 只在推送失败时存在（为「是否切 ssh.github.com:443」攒判据），原样保留。
@@ -216,32 +199,6 @@ def gh_pages_summary(gh_pages: Optional[dict]) -> Optional[dict]:
         out["error"] = str(reason)[:300]
     if gh_pages.get("transport_probe"):
         out["transport_probe"] = gh_pages["transport_probe"]
-    return out
-
-
-def git_commit_summary(git_commit: Optional[dict]) -> Optional[dict]:
-    """`results["git_commit"]` 进 status.json 的精简版（v0.45.223）。
-
-    `pending_artifacts` 是提交前待提交的日报产物数：0 ⇒ 失败只是「没东西可提交」；
-    None（git status 就失败了）⇒ 不知道，按失败看。None 入参原样返回（工作区干净，未尝试提交）。
-
-    v0.45.227：`left_artifacts`（提交后仍没进 git 的日报产物数；None = 提交后那次 git status 失败）
-    与 `left_sample` 有才抄——没有这个键 = 旧代码或没走到提交，告警侧据此区分「没核」与「核不了」。
-    原因优先 `error`，其次 `add_errors`：提交成功但有 add 重试后仍失败时，`message` 只是提交成功的输出。
-    """
-    if not isinstance(git_commit, dict):
-        return None
-    out = {"success": git_commit.get("success"),
-           "pending_artifacts": git_commit.get("pending_artifacts")}
-    for key in ("left_artifacts", "left_sample"):
-        if key in git_commit:
-            out[key] = git_commit[key]
-    add_errors = git_commit.get("add_errors")
-    reason = (git_commit.get("error")
-              or ("git add 失败：" + "；".join(add_errors) if add_errors else None)
-              or git_commit.get("message"))
-    if reason:
-        out["reason"] = str(reason)[:300]
     return out
 
 

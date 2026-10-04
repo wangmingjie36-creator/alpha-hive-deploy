@@ -2010,10 +2010,10 @@ class AlphaHiveDailyReporter:
         from report_formatters import generate_swarm_twitter_threads
         return generate_swarm_twitter_threads(self, *args, **kwargs)
 
-    def auto_commit_and_notify(self, *args, **kwargs):
+    def deploy_and_notify(self, *args, **kwargs):
         """自动提交报告 + 通知（委托 report_deployer）"""
-        from report_deployer import auto_commit_and_notify
-        return auto_commit_and_notify(self, *args, **kwargs)
+        from report_deployer import deploy_and_notify
+        return deploy_and_notify(self, *args, **kwargs)
 
     def check_earnings_updates(self, report_path: str = None, tickers: List[str] = None) -> Dict:
         """
@@ -2841,7 +2841,7 @@ def main():
 
     # v0.23.2 修复 #2：--samples-only 必须在 save_report 之前短路
     # 否则 _save_output_files 会生成 MD/HTML/PWA/X线程/rss.xml 到 repo 根，
-    # 被下次 daily-scan 的 auto_commit_and_notify 误 commit 污染生产网站
+    # 被下次 daily-scan 的 deploy_and_notify 误 commit 污染生产网站
     if args.samples_only:
         # 修复 #7：error dict 不应静默成功退出
         if isinstance(report, dict) and "error" in report:
@@ -2859,13 +2859,13 @@ def main():
             _log.warning("samples-only JSON 保存失败 (但 pheromone.db 已写入): %s", e)
         print(f"\n📦 样本积累模式: 完成 {n_results_early} 标的扫描, pheromone.db 已写入")
         print(f"   - 跳过 save_report (避免生成 HTML/MD/PWA 污染 repo)")
-        print(f"   - 跳过 auto_commit_and_notify (不推 gh-pages / Slack)")
+        print(f"   - 跳过 deploy_and_notify (不推 gh-pages / Slack)")
         return report
 
     # v0.27.2 空扫描护栏：数据源全线失败（如 yfinance 429 限流触发断路器）会产出
     # tickers_analyzed=0 / opportunities=0 的空报告。此时绝不能 save_report + 部署，
     # 否则会用空 dashboard 覆盖 gh-pages 上一份好数据（2026-05-27 事故）。
-    # 跳过 save_report / auto_commit_and_notify，保留线上最近一份有效快照，仅记录日志。
+    # 跳过 save_report / deploy_and_notify，保留线上最近一份有效快照，仅记录日志。
     _n_analyzed = 0
     _n_opps = 0
     if isinstance(report, dict):
@@ -2878,7 +2878,7 @@ def main():
         )
         print("\n🛑 空扫描护栏触发：本次 0 标的分析，0 机会。")
         print("   - 跳过 save_report（不覆盖本地 dashboard）")
-        print("   - 跳过 auto_commit_and_notify（不推 gh-pages，保留线上好数据）")
+        print("   - 跳过 deploy_and_notify（不推 gh-pages，保留线上好数据）")
         print("   - 常见原因：yfinance 429 限流 → 断路器熔断。请稍后重跑。")
         _timing.write(reporter.date_str, extra={"early_exit": "empty_scan_guard"})
         return report
@@ -2899,48 +2899,33 @@ def main():
         print(f"   下次回测 / Bootstrap / FF 归因 会自动读到这批新样本")
         return report
 
-    # 三端同步：GitHub 提交推送 + Hive App + Slack
-    print("\n📡 同步三端：GitHub / Hive App / Slack...")
-    # v0.45.214：推送结果进 scan_timing → status.json → alert_manager。此前只打 WARNING 进日志，
-    # 2026-09-01~11 六次被拒无人发现（告警那条规则读的 deploy_status 从来没人写）。
-    _git_push = None
-    _git_commit = None
+    # 部署：gh-pages（网站）+ Hive App + Slack
+    # v0.45.402（数据根迁移阶段 6）：日报不再提交 / 推送代码仓库 main——数据在数据根，不进公开仓库。
+    print("\n📡 同步：gh-pages / Hive App / Slack...")
+    # v0.45.351：gh-pages 结局进 scan_timing → status.json → alert_manager（此前只打日志）。
+    # `extra.gh_pages` 的键**必须始终写**：编排器用它的存在当「main() 已跑到最后一步」的证据。
     _gh_pages = None
     try:
         with _timing.timed("deploy"):
-            sync_results = reporter.auto_commit_and_notify(report)
-        _git_push = sync_results.get("git_push")
-        _git_commit = sync_results.get("git_commit")
-        _gh_pages = sync_results.get("gh_pages")   # v0.45.351：此前 gh-pages 结局不进 status.json
-        git_ok = sync_results.get("git_push", {}).get("success", False)
+            sync_results = reporter.deploy_and_notify(report)
+        _gh_pages = sync_results.get("gh_pages")
         deploy_env = sync_results.get("deploy_env", "production")
-        remote_label = sync_results.get("git_push", {}).get("remote", "origin")
         if deploy_env == "none":
-            # v0.45.210：非蜂群扫描不再有「测试环境」——那条推送自 2026-03-01 起就是坏的。
-            # v0.45.213：CLI 已只跑蜂群，走到这里说明部署判定没认出这份蜂群报告
-            # （缺 swarm_metadata？）——是回归，不是正常分支，所以要打出来。
-            _left = sync_results.get("uncommitted_report_artifacts") or []
-            print("   GitHub push : ⚠️  部署判定为非生产报告（蜂群报告缺 swarm_metadata？），未提交、未推送")
-            if _left:
-                print(f"   ⚠️  {len(_left)} 个日报产物已写进工作区，下一次生产扫描会把没被覆盖的一并提交："
-                      f"{', '.join(_left[:5])}" + (" …" if len(_left) > 5 else ""))
+            # v0.45.210：非蜂群扫描不再有「测试环境」。v0.45.213：CLI 已只跑蜂群，走到这里说明部署判定没认出
+            # 这份蜂群报告（缺 swarm_metadata？）——是回归，不是正常分支，所以要打出来。
+            print("   gh-pages    : ⚠️  部署判定为非生产报告（蜂群报告缺 swarm_metadata？），未部署")
         else:
-            print(f"   GitHub push : {'✅' if git_ok else '⚠️  失败'} → 🧠 生产环境 https://wangmingjie36-creator.github.io/alpha-hive-deploy/")
             _ghp_ok = isinstance(_gh_pages, dict) and _gh_pages.get("success") is True
-            print(f"   gh-pages    : {'✅' if _ghp_ok else '⚠️  失败（本轮网站未更新）'}")
+            print(f"   gh-pages    : {'✅' if _ghp_ok else '⚠️  失败（本轮网站未更新）'} → https://wangmingjie36-creator.github.io/alpha-hive-deploy/")
         print(f"   Hive App    : ✅ .swarm_results 已落盘，下次启动自动加载")
     except (OSError, ValueError, KeyError, RuntimeError) as e:
-        _log.warning("三端同步部分失败: %s", e)
-        print(f"   ⚠️  三端同步出错：{e}")
-        if _git_push is None:   # 推送之前就抛了：记成失败，不能让「没记录」看起来像「没问题」
-            _git_push = {"success": False, "error": f"三端同步抛异常：{type(e).__name__}: {e}"}
-        if _gh_pages is None:   # 同上：gh-pages 部署没跑到
-            _gh_pages = {"success": False, "error": f"三端同步抛异常（gh-pages 未部署）：{type(e).__name__}: {e}"}
+        _log.warning("同步部分失败: %s", e)
+        print(f"   ⚠️  同步出错：{e}")
+        if _gh_pages is None:   # 部署没跑到：记成失败，不能让「没记录」看起来像「没问题」
+            _gh_pages = {"success": False, "error": f"同步抛异常（gh-pages 未部署）：{type(e).__name__}: {e}"}
 
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
-    _timing.write(reporter.date_str, extra={"git_push": _timing.git_push_summary(_git_push),
-                                            "git_commit": _timing.git_commit_summary(_git_commit),
-                                            "gh_pages": _timing.gh_pages_summary(_gh_pages)})
+    _timing.write(reporter.date_str, extra={"gh_pages": _timing.gh_pages_summary(_gh_pages)})
     return report
 
 

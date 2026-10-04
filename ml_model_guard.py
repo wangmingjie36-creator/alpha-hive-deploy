@@ -106,7 +106,8 @@
 ⚠️ `.gitignore` 有 `ml_model*.json`，会**连快照一起吞掉**（实测
 `git check-ignore` 命中）。本 PR 同时加了 `!ml_model_history/*.json` 反向规则、
 并把 `ml_model_history/` 加进 `REPORT_ARTIFACT_PATHS` 与 `_ARTIFACT_PREFIXES`
-两张表——见 [[alpha-hive-silent-degradation]] 的 v0.45.111 教训：
+两张表（⚠️ 历史记录：阶段 6 / v0.45.402 起快照在数据根，反向规则与这两张表都已退役，耐久性靠
+`data_backup/export.py` 的 STATE_DIRS）——见 [[alpha-hive-silent-degradation]] 的 v0.45.111 教训：
 新产物目录不做齐这几件事，就会每天被改、每天被自动提交跳过、永远挂在工作区。
 """
 

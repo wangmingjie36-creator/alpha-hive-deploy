@@ -691,9 +691,9 @@ class TestSnapshotLandsInTheTrackedDir:
     **于是快照落在哪，从此取决于 `PATHS` 家族的指向** —— 那是本模块之外的值。
 
     若将来有人把 `PATHS.ml_model` 挪进 cache 目录或用户目录，快照会静默落到
-    git 跟踪范围之外：`REPORT_ARTIFACT_PATHS` 白名单、`.gitignore` 的
-    `!ml_model_history/*.json` 反向规则**全部失效**，而症状是
-    「文件确实生成了、但永远不进库」——与 v0.45.111「新账本没进白名单」同形，
+    数据根之外（v0.45.402 前这里写的是「git 跟踪范围之外：`REPORT_ARTIFACT_PATHS` 白名单、`.gitignore`
+    反向规则全部失效」；阶段 6 起快照不进代码仓库，耐久性靠 `data_backup/export.py` 的 STATE_DIRS），
+    症状是「文件确实生成了、但永远没有备份」——与 v0.45.111「新账本没进白名单」同形，
     是本仓最难自己发现的那一类。这一组就是那个耦合的守卫。
     """
 
@@ -759,12 +759,6 @@ class TestSnapshotLandsInTheTrackedDir:
 
 
 class TestArtifactPlumbing:
-    def test_history_dir_in_both_whitelists(self):
-        import report_deployer as rd
-        assert f"{G.HISTORY_DIRNAME}/" in rd.REPORT_ARTIFACT_PATHS
-        assert f"{G.HISTORY_DIRNAME}/" in rd._ARTIFACT_PREFIXES
-        assert rd._is_report_artifact(f"{G.HISTORY_DIRNAME}/ml_model-2026-09-07.json")
-
     def test_history_dir_is_ignored_wholesale_since_phase6(self):
         """阶段 6（v0.45.394）：快照目录整个在数据根，不再进公开仓库。
 

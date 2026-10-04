@@ -50,7 +50,7 @@ STATE_DIRS: list[str] = [
     "report_snapshots", "paper_portfolio_state_backup", "reports",
     # v0.45.333 卖权行权价前向账本（月度/周度 jsonl 分片 + 本地 md 报告）。攒数期数据、丢了无法回溯
     # 重取（当日的 CBOE 双边报价与 OI 事后拿不到），但用户要求**不上公开网站**：它被 .gitignore
-    # 忽略、也**不在** report_deployer.REPORT_ARTIFACT_PATHS 里（那是自动提交进代码仓库）——
+    # 忽略、也从不进代码仓库（v0.45.402 前这里写的是「不在 report_deployer.REPORT_ARTIFACT_PATHS 里」，该白名单随阶段 6 退役）——
     # 耐久性只靠这里的私有备份。
     "sell_strike_state",
     # v0.45.388 Alpha Bot 盘中快照 + 设置：盘中那一刻的水平事后拿不回来（CBOE 只给当下的延迟快照）。

@@ -88,7 +88,42 @@
 - 测试 192 → 202；本轮 13 个变异（每条修复一个）在 `git archive` 副本上 **13/13 红**，每个红的都是该红的那条，基线 199+3 skip、还原后全绿。
   真实数据：前瞻 10-03 19/19（重叠日核 4 个、无缺口）；演练 09-28~10-03 9/9（种子取自备份仓库）、09-16~19 8/8。
 
-## [0.45.402] — 2026-10-04 — 占位（进行中：阶段 6 ④ 撤日报提交 / 推送链 + 收窄根总闸）
+## [0.45.403] — 2026-10-04 — 占位（进行中：退役 GitHubTool.commit()/status() 及辅助方法——生产零调用）
+
+## [0.45.402] — 2026-10-04 — Removed：数据根迁移阶段 6 ④——撤日报提交 / 推送链（`auto_commit_and_notify` → `deploy_and_notify` 只部署 gh-pages）
+
+阶段 6 ①②③（v0.45.394：数据解除跟踪 + 守卫）已合入并在生产快进；本版把「每次扫描把日报产物白名单提交并推上公开 main」这条链整体退役。**不含**阶段 6 ⑤（收窄根总闸 + 两处恒真自证），见文末。
+
+### Removed
+- `report_deployer`：白名单 `REPORT_ARTIFACT_PATHS` / `_ARTIFACT_PREFIXES` / `_ARTIFACT_GLOBS` / `_ARTIFACT_EXACT`、`_is_report_artifact`、`_git_modified_files`，以及 `auto_commit_and_notify` 里的提交 + 推送整段。
+- `production_sync.push_main`（对象层合并后推 main，92 行）与 `_push_fail`；模块 docstring 重写为只讲扫描前快进，并写明阶段 6 快进的两个后果（解除跟踪的文件会被快进删掉；被跟踪且已修改的文件会让快进中止）。
+- `scan_timing.git_push_summary` / `git_commit_summary`；`alert_manager` 里「日报提交失败」「提交报成功但有产物没进 git」「main 推送失败」三条 P1 规则，以及「扫描完成但缺 scan_timing」告警里对 `git_push` / `git_commit` 的措辞；`orchestrator_steps` 的 `git_push_success` 片段字段与 Step 2 摘要里的「推送成功 / 失败」。
+
+### Changed
+- `auto_commit_and_notify` → **`deploy_and_notify`**（`alpha_hive_daily_report` 的 reporter 委托方法同名）：生产扫描只同步 gh-pages，非生产扫描不部署；返回 `{deploy_env, gh_pages, slack_notification}`。旧名带「commit」，留着是说谎。
+- **「主流程已跑到最后一步」的完成标记由 `scan_timing.extra.git_push` 改为 `extra.gh_pages`**（`orchestrator_steps._step2_rc1_evidence`）。`gh_pages` 键在 `main()` 里无论部署成败 / 抛异常 / 非生产都会写，不会丢。`extra` 现在只有 `gh_pages` 一个键。
+- `alpha_hive_daily_report.main` 的部署段输出改为 gh-pages / Hive App 两行；`CLAUDE.md` 对应条目改写并写明「勿重建」。
+- `tests/test_changelog_guard_contract_gate.py`：「数据类文件不触发契约闸」的样例改由迁移分类表 MOVE 规则生成（此前读 `report_deployer` 的白名单常量，那份没了）。
+
+### Added（守卫）
+- `tests/test_git_failures_are_visible.py::TestCommitPushChainStaysRetired`：墓碑（`push_main` / `auto_commit_and_notify` / `REPORT_ARTIFACT_PATHS` / `_is_report_artifact` / `_git_modified_files` / 两个 summary 都不许再出现）+ AST（生产代码不许经 `run_git_cmd` 调 `git push`）。**为什么要 AST**：`GitHubTool._ALLOWED_GIT_CMDS` 仍放行 `push`，白名单测试拦不住有人把推送写回部署路径。
+- `TestDeployNeverTouchesTheCodeRepo`（真 git 沙箱）：生产与否，部署都不许改本地 HEAD、不许推任何远端（含 test remote）、不许动工作区；`gh_pages` 键始终存在（部署函数返回 None / 抛异常也各给一个失败结局）。
+- `tests/test_production_sync.py::test_retired_commit_and_push_records_raise_nothing`：旧快照里的 `git_push` / `git_commit` 既不告警、也不记成「未执行的检查」。
+- `tests/test_orchestrator_steps.py::test_scan_timing_without_gh_pages_key_is_not_proof_of_completion`。
+
+### 测试迁移（不是删测试）
+- 删除 `tests/test_report_deployer_whitelist.py`（白名单一致性）；其中 3 条 `GitHubTool.commit(paths=…)` 的真 git 测试迁入 `test_github_tool_commit.py`，白名单作为**冻结的夹具数据**放进 `tests/_artifact_whitelist.py`。
+- `test_production_sync.py`：删「部署时落后也要推」「合并推送后下一轮快进」两组与全部提交 / 推送告警用例（前提不在了），保留扫描前快进与同步结局的告警通路；`test_git_failures_are_visible.py` 同理重写 3、4 组，保留 `run_git_cmd` 白名单与调用方不许丢返回值两组。
+- `test_sell_strike_integration` / `test_alphabot` / `test_ml_model_guard` 里「不在日报白名单」的断言改成「被 .gitignore 挡住 / 分类为 MOVE」。
+
+### 验证
+- 干净克隆（`git clone --no-hardlinks`）全套：7937 passed；唯一失败 `TestCoverageHorizon`（日历覆盖不足，设计内周期性变红，与本版无关）。另有 2 条 `test_alert_step_interp` 在第一次干净克隆里红（我漏改了它断言的「推送」栏），已修并复验。
+- 变异 4 处各红对应守卫：部署函数又往结果里放 `git_push` ⇒ 沙箱 3 条红；完成标记改回 `git_push` ⇒ 编排器 8 条红；`push_main` 接回 ⇒ 墓碑红；告警规则读 `git_push` 接回 ⇒ 退役记录测试红。
+
+### 未做 / 后续
+- **阶段 6 ⑤**：收窄根总闸（`tests/_root_data_guard.py` + conftest `_GUARDED_PRODUCTION_ARTIFACTS` → 数据根指纹）；修两处恒真自证（`test_ml_catalyst_quality_source.py:67`、`test_ml_swarm_cache_dead_reader.py:106`）。
+- **死代码**：`GitHubTool.commit()` / `status()` 及其 `_staged_names` 等辅助方法自本版起生产零调用（只剩测试与 `main()` 演示）。已在 docstring 标注，未删——它们是通用工具类的方法、各有测试钉着，单独一版再按「先数读者」退役。
+- 生产影响：下一次扫描前的快进会带上本版；该轮日报不再有 `git_commit` / `git_push`，`status.json` 的 `scan_timing.extra` 只剩 `gh_pages`。
 
 ## [0.45.401] — 2026-10-04 — Fixed：check-old 把「git 自己删掉的冻结文件」单列为 `removed_by_git`，阶段 6 快进后不再把 3107 个文件判成旁路写入
 

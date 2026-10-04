@@ -899,19 +899,25 @@ class TestNotPublished:
                         bars_fn=lambda t: [])
         return R.write_local_report(AS_OF)
 
-    def test_auto_commit_whitelist_does_not_match(self):
-        """路径由**真函数**算出（改了文件名 / 目录名这条跟着变）；正对照：日报 md 与期权三本账确实命中。
-        变异：把 `sell_strike_state/` 加进 REPORT_ARTIFACT_PATHS / _ARTIFACT_PREFIXES；
-        报告改名成 `alpha-hive-daily-sell-strike-*.md`。"""
-        import report_deployer as rd
+    def test_state_and_report_are_ignored_by_the_code_repo(self):
+        """路径由**真函数**算出（改了文件名 / 目录名这条跟着变）。v0.45.402 前这条核对「不在日报自动提交白名单里」；
+        阶段 6 起日报不再提交，不进公开仓库改由两层保证：数据根在仓库之外，且 `.gitignore` 忽略 `sell_strike_state/`。
+        正对照：期权三本账之一 `vrp_state/…` 同样被忽略（证明查的是真 .gitignore 而不是恒真）。
+        变异：把 `/sell_strike_state/` 从 .gitignore 删掉。"""
+        import subprocess
         local = self._write_state()
-        rels = [_rel_home(local), _rel_home(LG._shard("monthly", AS_OF)),
-                _rel_home(LG._shard("weekly", AS_OF)), local.name]
-        assert rd._is_report_artifact("alpha-hive-daily-2026-09-23.md")
-        assert rd._is_report_artifact("vrp_state/vrp_signals.jsonl")
-        hit = [p for p in rels if rd._is_report_artifact(p)]
-        assert not hit, f"卖权产物命中了自动提交白名单（会被推进代码仓库）：{hit}"
-        assert not any(e.rstrip("/") == "sell_strike_state" for e in rd.REPORT_ARTIFACT_PATHS)
+        rels = [_rel_home(local), _rel_home(LG._shard("monthly", AS_OF)), _rel_home(LG._shard("weekly", AS_OF))]
+        repo = Path(__file__).resolve().parent.parent
+
+        def ignored(p):
+            r = subprocess.run(["git", "-C", str(repo), "check-ignore", "-q", "--no-index", "--", p],
+                               capture_output=True)
+            assert r.returncode in (0, 1), r.stderr
+            return r.returncode == 0
+
+        assert ignored("vrp_state/vrp_signals.jsonl"), "正对照没立住：期权账本应被忽略"
+        loose = [p for p in rels if not ignored(p)]
+        assert not loose, f"卖权产物没被 .gitignore 挡住（会被当成可提交的数据）：{loose}"
 
     def test_real_ghpages_deploy_does_not_carry_it(self, tmp_path, monkeypatch):
         """真跑 `deploy_static_to_ghpages`（本地裸仓库当 origin）：数据根里放了卖权报告——状态目录里一份、

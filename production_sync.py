@@ -1,59 +1,34 @@
-"""生产 checkout 与 origin/main 的同步（v0.45.214）
+"""生产 checkout 与 origin/main 的同步（v0.45.214；v0.45.402 起只剩扫描前快进）
 
-两个入口，分别在一轮扫描的两头：
-
-  扫描前 `sync_before_scan`（编排器在 Step 1 之前调本文件 CLI）：
-      把生产 checkout 的本地 main **只快进**到 origin/main。
-  部署时 `push_main`（`report_deployer.auto_commit_and_notify` 调）：
-      推日报提交；本地 main 落后时在**对象层**合并后再推——不动工作区、不动本地 ref。
+入口：`sync_before_scan`（编排器在 Step 1 之前调本文件 CLI）——把生产 checkout 的本地 main
+**只快进**到 origin/main。
 
 为什么要有这个文件
 ------------------
-2026-08-14 ~ 09-13 生产推送 12 次，6 次（09-01/03/04/09/10/11）被拒
-`! [rejected] main -> main (non-fast-forward)`。逐次核对 origin/main 的 tracking-ref
-reflog（各 worktree 共享）与生产 main 的 reflog：被拒的 6 次，生产 main 在报告提交时
-都**严格落后**（behind 1~15、ahead 0）；成功的 2 次 behind=0。8/8 对上。
-成因：各 session 从 worktree 直推 origin/main，生产 checkout 从不自动 pull。
+2026-08-14 ~ 09-13 生产推送 12 次，6 次被拒 `non-fast-forward`：各 session 从 worktree 直推
+origin/main，生产 checkout 从不自动 pull。更要紧的是**生产跑哪版代码是随机的**——取决于哪个 session
+最后一次手工快进了它（09-11 当天手工移动 23 次）。世代边界按 `date >= boundary` 过滤，前提是
+「代码落地当天就在跑」；实测反例：v0.45.209 边界日期 2026-09-11，修复 13:37 落地，生产 13:10
+同步过，14:00 的扫描没带上它 ⇒ 世代内全部 30 条样本出自旧代码。
+而没有任何东西会红（旧告警读的 `deploy_status` 全仓零写入者）。
 
-后果分三层，最显眼的那层反而最轻：
-  1. 网站不受影响——gh-pages 走 plumbing + `--force`，六天全部部署成功。
-  2. 日报与账本的异地副本，要靠「碰巧有 session 在生产 checkout 里 rebase/merge 再推」
-     才落到 origin/main：6 次里 3 次是以 rebase 改写后的副本落地；09-11 那次滞留本地两天，
-     而 `hedge_state/` 等账本的 09-11 更新**只**在那个本地提交里。
-  3. **生产跑哪版代码是随机的**：取决于哪个 session 最后一次手工快进了它（09-11 当天
-     手工移动 23 次）。世代边界按 `date >= boundary` 过滤，前提是「代码落地当天就在跑」。
-     实测反例：v0.45.209 边界日期 2026-09-11，修复 13:37 落地，生产 13:10 同步过，
-     14:00 的扫描没带上它 ⇒ 当时世代内全部 30 条样本出自旧代码。
-
-而**没有任何东西会红**：`alert_manager` 那条「GitHub Deployment Failed」读的
-`deploy_status` 全仓零写入者，结构上不可能触发。
-
-两条设计约束（各有一次实测）
-------------------------------
-1. **部署时不许改工作区。** 部署之后编排器还要起约 8 个 Python 步骤（告警、Slack、
-   metrics、recorder…）。部署时 `pull` 会让它们跑比扫描更新的代码 ⇒ 一轮混两个版本，
-   `code_version` 记的也不再是真跑的那版。所以用 `merge-tree --write-tree` +
-   `commit-tree` 在对象层造合并（第一父 = origin/main），推 `<合并>:main`。
-   本地 main 不动 ⇒ 仍是 origin/main 的祖先 ⇒ 下一轮扫描前可以快进。
-2. **报告提交必须在本地做。** 若只在对象层发布、本地 HEAD 不含已发布的内容，工作区相对
-   HEAD 就是脏的，`merge --ff-only` 会以「would be overwritten」拒绝——即使内容与
-   origin/main 逐字节相同（另一 session 用临时仓库实测）⇒ 扫描前快进从此永远卡住。
-   `report_deployer` 照旧先在本地提交，本文件只负责把它送上去。
-
-`merge-base --is-ancestor` 与 `merge-tree --write-tree` 都有**三**个退出码：
-0 / 1 是两种正常答案，其他是真出错。三者诊断方向不同，不许揉成两个
-（同 `git check-ignore` 0/1/128 的教训）。`merge-tree --write-tree` 需要 git ≥ 2.38，
-生产 launchd PATH 下是 /usr/bin/git 2.50.1。
+**v0.45.402 退役了 `push_main`**（部署时把日报提交在对象层合并后推 main）：数据根迁移阶段 6 起
+代码仓库不再跟踪生产数据，日报不再提交 / 推送，那条推送链连同它的两条设计约束（部署时不许改工作区、
+报告提交必须在本地做）一起消失。⚠️ 勿重建。快进本身的约束仍然成立：
 
 ⚠️ 本文件永不下发 reset / checkout / rebase / stash / merge：扫描前只 `pull --ff-only
 --no-rebase`，做不到快进就保持现有代码、把原因写进结果，扫描照跑。
+阶段 6 的提示：解除跟踪的提交快进进来时，git 会把那些文件从工作区**删掉**；工作区里有「被跟踪且已
+修改」的文件则快进**中止**（outcome 非 OK，`alert_manager` 会红）——不要在生产 checkout 里手改被跟踪文件。
+
+`merge-base --is-ancestor` 的退出码有**三**个含义：0 / 1 是两种正常答案，其他是真出错。
+不许揉成两个（同 `git check-ignore` 0/1/128 的教训）。
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shlex
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -96,98 +71,6 @@ def _count(git, rev_range: str) -> Optional[int]:
 
 
 # ─────────────────────────────────────────── 部署时：推 main
-def push_main(git, merge_label: str, max_attempts: int = 3) -> Dict:
-    """把本地 main 推上 origin/main；本地落后时先在对象层合并再推。
-
-    返回 `results["git_push"]` 的形状——v0.45.210 的四个键不变，另加：
-      integration   "fast_forward" | "merged" | "nothing_to_push" | "conflict" | "error" | "unchecked"
-                    （nothing_to_push = 本地 main 已被 origin/main 包含，不推送，算成功）
-      behind        本地 main 落后 origin/main 的提交数（取不到为 None）
-      merge_commit  造出来的合并提交（仅 merged，推送失败也保留，便于排查）
-      conflicts     冲突路径（仅 conflict；此时**不推送**）
-      attempts      第几轮结束。推送被拒后**只有 origin/main 在这期间又动过**才重来——
-                    没动就是别的原因（hook、权限），同样的推送只会同样被拒。
-    """
-    res = {"success": False, "remote": "origin", "output": "", "error": None,
-           "integration": None, "behind": None, "merge_commit": None,
-           "conflicts": None, "attempts": 0}
-    last_origin: Optional[str] = None
-    for attempt in range(1, max_attempts + 1):
-        f = git.run_git_cmd("git fetch origin main")
-        if not f["success"]:
-            if last_origin is not None:
-                break   # 已经推过一轮被拒，现在连 origin 都看不到：报上一轮的拒绝原因
-            # 看不到 origin 就判断不了落没落后：退回 v0.45.210 的直推，由 git 自己拒非快进
-            res["attempts"] = attempt
-            p = git.run_git_cmd("git push origin main")
-            res.update(success=p["success"], integration="unchecked",
-                       output=p.get("stdout", "") or p.get("stderr", ""), error=p.get("error"),
-                       fetch_error=_reason(f))
-            return res
-        # 先把两个 ref 解析成 SHA 再用：origin/main 的 tracking ref 被所有 worktree 共享，
-        # 别的 session 一推它就会动，合并的父提交必须是刚才看过的那个。
-        head, origin = _rev(git, "refs/heads/main"), _rev(git, REMOTE_REF)
-        if head is None or origin is None:
-            return _push_fail(res, "error", "解析不出 refs/heads/main 或 origin/main")
-        if origin == last_origin:
-            break       # 上一轮被拒、origin/main 没动 ⇒ 不是竞态，别重试
-        res["attempts"] = attempt
-        anc = _is_ancestor(git, origin, head)
-        if anc is None:
-            return _push_fail(res, "error",
-                              f"merge-base --is-ancestor 出错（{origin[:7]} → {head[:7]}）")
-        if anc:
-            target, res["integration"], res["behind"] = head, "fast_forward", 0
-        else:
-            res["behind"] = _count(git, f"{head}..{origin}")
-            # 本地没有 origin 缺的提交（这轮没造出日报提交、别人又推过）⇒ 无可推。
-            # 只判上面那一个方向时，这里会造一个树与 origin/main 完全相同的空合并推上去（复核实测）。
-            inside = _is_ancestor(git, head, origin)
-            if inside is None:
-                return _push_fail(res, "error",
-                                  f"merge-base --is-ancestor 出错（{head[:7]} → {origin[:7]}）")
-            if inside:
-                res.update(success=True, integration="nothing_to_push")
-                return res
-            mt = git.run_git_cmd(f"git merge-tree --write-tree --name-only {origin} {head}")
-            rc, lines = mt.get("returncode"), (mt.get("stdout") or "").splitlines()
-            if rc == 1:
-                conflicts = []
-                for ln in lines[1:]:          # 第 1 行是树，其后到空行为止是冲突路径
-                    if not ln.strip():
-                        break
-                    conflicts.append(ln.strip())
-                res["conflicts"] = conflicts
-                return _push_fail(res, "conflict",
-                                  "本地 main 与 origin/main 冲突，未推送（生产 checkout 需人工合并）："
-                                  + (", ".join(conflicts) or "（git 未列出路径）"))
-            if rc != 0 or not lines:
-                return _push_fail(res, "error",
-                                  f"git merge-tree 出错（returncode={rc}）：{_reason(mt)}")
-            msg = (f"Merge origin/main into {merge_label}"
-                   f"（部署时对象层合并：本地 main 落后 {res['behind']} 个提交，v0.45.214）")
-            ct = git.run_git_cmd(
-                f"git commit-tree {lines[0].strip()} -p {origin} -p {head} -m {shlex.quote(msg)}")
-            if not ct["success"] or not ct.get("stdout", "").strip():
-                return _push_fail(res, "error", f"git commit-tree 失败：{_reason(ct)}")
-            target = ct["stdout"].strip()
-            res["integration"], res["merge_commit"] = "merged", target
-
-        p = git.run_git_cmd(f"git push origin {target}:refs/heads/main")
-        res.update(success=p["success"], output=p.get("stdout", "") or p.get("stderr", ""),
-                   error=p.get("error"))
-        if p["success"]:
-            return res
-        last_origin = origin
-    return res
-
-
-def _push_fail(res: Dict, integration: str, error: str) -> Dict:
-    res.update(success=False, integration=integration, error=error)
-    return res
-
-
-# ─────────────────────────────────────────── 扫描前：只快进
 def sync_before_scan(git, today: Optional[str] = None) -> Dict:
     """把生产 checkout 的本地 main 只快进到 origin/main。
 

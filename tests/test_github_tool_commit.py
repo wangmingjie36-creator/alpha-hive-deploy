@@ -32,7 +32,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import agent_toolbox  # noqa: E402
-import report_deployer as rd  # noqa: E402
+from tests._artifact_whitelist import ARTIFACT_PATHS  # noqa: E402
 from agent_toolbox import GitHubTool  # noqa: E402
 
 # 收集期取一次：下面的 autouse 夹具会把它改成 0，默认值要在改之前拿到
@@ -86,7 +86,7 @@ class TestCommitFailureKeepsGitsReason:
         assert miss.returncode != 0 and "index.lock" in miss.stderr, miss
         assert "did not match any files" not in miss.stderr, miss
 
-        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=ARTIFACT_PATHS)
 
         assert r["success"] is False
         assert "index.lock" in r["error"] and "File exists" in r["error"], r
@@ -171,7 +171,7 @@ class TestBriefLockDuringOneAdd:
         seen = hold_lock_during_add(monkeypatch, g, repo, "index.html", times=1)
 
         with caplog.at_level("WARNING"):
-            r = g.commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+            r = g.commit("日报", paths=ARTIFACT_PATHS)
 
         assert seen["adds"] == 2, f"正对照：index.html 应当先被锁挡一次、再重试一次（实际 {seen['adds']} 次）"
         assert r["success"] is True
@@ -186,7 +186,7 @@ class TestBriefLockDuringOneAdd:
         g = GitHubTool(repo_path=str(repo))
         hold_lock_during_add(monkeypatch, g, repo, "index.html", times=2)
 
-        r = g.commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = g.commit("日报", paths=ARTIFACT_PATHS)
 
         assert r["success"] is True and _committed(repo) == {"rss.xml", "dashboard-data.json"}, \
             "正对照：其余产物照常提交（部分失败不该拖垮整次提交）"
@@ -196,7 +196,7 @@ class TestBriefLockDuringOneAdd:
         slept = []
         # 只换 agent_toolbox 手里的 time：全局 time.sleep 会被 subprocess 等子进程时调用
         monkeypatch.setattr(agent_toolbox, "time", SimpleNamespace(sleep=slept.append), raising=False)
-        r = GitHubTool(repo_path=str(three_artifacts)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = GitHubTool(repo_path=str(three_artifacts)).commit("日报", paths=ARTIFACT_PATHS)
         assert r["success"] is True and slept == [], "只有 pathspec 未匹配时不许等（每天都有产物本次没生成）"
 
     def test_retry_waits_long_enough_for_a_git_status_to_finish(self, three_artifacts, monkeypatch):
@@ -210,7 +210,7 @@ class TestBriefLockDuringOneAdd:
         # 两条都撞锁：只挂一条时「每条等一次」与「共用一次」长得一样
         hold_lock_during_add(monkeypatch, g, three_artifacts, "index.html", times=1)
         hold_lock_during_add(monkeypatch, g, three_artifacts, "rss.xml", times=1)
-        r = g.commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = g.commit("日报", paths=ARTIFACT_PATHS)
         assert r["success"] is True and "add_errors" not in r, f"正对照：两条都该被重试接住 {r}"
         assert slept == [_DEFAULT_RETRY_DELAY], "所有失败条目共用一次等待，不是每条等一次"
 
@@ -241,7 +241,7 @@ class TestOnlyTheWhitelistIsCommitted:
     def test_code_another_session_staged_stays_out_of_the_report_commit(self, foreign_staged):
         repo = foreign_staged
         (repo / "index.html").write_text("report-0914")
-        r = GitHubTool(repo_path=str(repo)).commit("Alpha Hive 蜂群日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = GitHubTool(repo_path=str(repo)).commit("Alpha Hive 蜂群日报", paths=ARTIFACT_PATHS)
         assert r["success"] is True
         assert _committed(repo) == {"index.html"}, "别的 session 暂存的代码被卷进了日报提交"
         assert _staged(repo) == {"code.py", "CHANGELOG.md"}, "别人的暂存不许被动：留给它自己提交"
@@ -250,7 +250,7 @@ class TestOnlyTheWhitelistIsCommitted:
         """白名单内没有改动 ⇒ 不许跑裸 `git commit`：旧代码此时把别人暂存的代码提交成「日报」且回 success=True。"""
         repo = foreign_staged
         before = _head(repo)
-        r = GitHubTool(repo_path=str(repo)).commit("Alpha Hive 蜂群日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = GitHubTool(repo_path=str(repo)).commit("Alpha Hive 蜂群日报", paths=ARTIFACT_PATHS)
         assert r["success"] is False and _head(repo) == before, r
         assert _staged(repo) == {"code.py", "CHANGELOG.md"}
 
@@ -268,7 +268,7 @@ class TestOnlyTheWhitelistIsCommitted:
         assert _git(repo, "diff", "--cached", "--name-only", "--", "report_snapshots/").stdout.split() == \
             ["report_snapshots/XOM_2026-09-11.json"]
 
-        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=ARTIFACT_PATHS)
         assert r["success"] is True
         assert _staged(repo) == set(), f"改名的删除一侧没进提交，还留在索引里：{_staged(repo)}"
         assert _git(repo, "status", "--porcelain").stdout == ""
@@ -284,7 +284,7 @@ class TestOnlyTheWhitelistIsCommitted:
         assert _git(repo, "add", "--", "vrp_state/").returncode == 0, "正对照：这条 add 确实回 0"
         (repo / "index.html").write_text("report-0914")
 
-        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=ARTIFACT_PATHS)
         assert r["success"] is True and _committed(repo) == {"index.html"}, r
 
     def test_staged_listing_failure_is_reported_not_committed_around(self, repo, monkeypatch):
@@ -295,7 +295,7 @@ class TestOnlyTheWhitelistIsCommitted:
             {"success": False, "error": "git diff timed out after 30 seconds"}
             if cmd.startswith("git diff --cached") else real(cmd)))
         before = _head(repo)
-        r = g.commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = g.commit("日报", paths=ARTIFACT_PATHS)
         assert r["success"] is False and "timed out" in r.get("error", ""), r
         assert _head(repo) == before, "列不出白名单内暂存了什么，就不许提交（否则只能退回提交整个索引）"
 
@@ -321,7 +321,7 @@ class TestForeignRenamesAcrossTheWhitelistBoundaryAreNotSplit:
         before = _head(repo)
         (repo / "index.html").write_text("report-0914")
 
-        r = GitHubTool(repo_path=str(repo)).commit("Alpha Hive 蜂群日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = GitHubTool(repo_path=str(repo)).commit("Alpha Hive 蜂群日报", paths=ARTIFACT_PATHS)
 
         assert r["success"] is True
         assert _committed(repo) == {"index.html"}, "别人 rename 的删除半边被当成日报提交掉了"
@@ -337,7 +337,7 @@ class TestForeignRenamesAcrossTheWhitelistBoundaryAreNotSplit:
         """排除了 rename 源之后，我们自己确实改了 index.html ⇒ 不该落进「白名单内无改动」的分支。"""
         repo = foreign_rename_out
         (repo / "index.html").write_text("report-0914")
-        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=ARTIFACT_PATHS)
         assert r["success"] is True and _committed(repo) == {"index.html"}
 
     def test_only_the_foreign_rename_staged_commits_nothing(self, foreign_rename_out):
@@ -345,7 +345,7 @@ class TestForeignRenamesAcrossTheWhitelistBoundaryAreNotSplit:
         排除后 names 为空 ⇒ 必须走「nothing to commit」，不许退回裸提交。"""
         repo = foreign_rename_out
         before = _head(repo)
-        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=ARTIFACT_PATHS)
         assert r["success"] is False and _head(repo) == before
         staged = _git(repo, "diff", "--cached", "--name-status").stdout
         assert "R" in staged.split()[0], f"对方的 rename 应当原样留着：{staged!r}"
@@ -358,7 +358,7 @@ class TestForeignRenamesAcrossTheWhitelistBoundaryAreNotSplit:
         _git(repo, "mv", "hedge_state/a.json", "hedge_state/b.json")
         (repo / "index.html").write_text("report-0914")
 
-        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=ARTIFACT_PATHS)
         assert r["success"] is True
         # `git show --name-only`（默认改名检测）把配对完整的 rename 折叠成一行新路径，不是两条
         assert _committed(repo) == {"index.html", "hedge_state/b.json"}
@@ -373,7 +373,7 @@ class TestForeignRenamesAcrossTheWhitelistBoundaryAreNotSplit:
         _git(repo, "mv", "scratch/a.json", "hedge_state/a.json")
         (repo / "index.html").write_text("report-0914")
 
-        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=ARTIFACT_PATHS)
         assert r["success"] is True
         assert _committed(repo) == {"index.html", "hedge_state/a.json"}, "旧路径不该被牵扯进我们的提交"
         staged = _git(repo, "diff", "--cached", "--name-status").stdout
@@ -396,6 +396,68 @@ class TestRenameScanFailureIsReportedNotSwallowed:
 
         monkeypatch.setattr(g, "run_git_cmd", fail_second_diff)
         before = _head(repo)
-        r = g.commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        r = g.commit("日报", paths=ARTIFACT_PATHS)
         assert r["success"] is False and "timed out" in r.get("error", ""), r
         assert _head(repo) == before, "列不出有没有跨界 rename 要排除，就不许提交"
+
+
+class TestPathspecCommitInRealGit:
+    """在真实 git 仓库里验证 pathspec 提交（自 test_report_deployer_whitelist.py 迁入，v0.45.402）：
+    2026-07-30 的 `git add -A` 事故（commit 68aad61 把进行中的代码卷进「日报」提交）是 `commit(paths=…)` 存在的理由"""
+
+    @pytest.fixture
+    def repo(self, tmp_path):
+        def run(*a):
+            subprocess.run(a, cwd=tmp_path, check=True,
+                           capture_output=True, text=True)
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        (tmp_path / "index.html").write_text("base")
+        run("git", "add", "-A")
+        run("git", "commit", "-qm", "init")
+        return tmp_path
+
+    def test_only_artifacts_get_committed(self, repo):
+        (repo / "report_snapshots").mkdir()
+        (repo / "alpha-hive-daily-2026-07-30.json").write_text("{}")
+        (repo / "index.html").write_text("updated")
+        (repo / "report_snapshots" / "NVDA_2026-07-30.json").write_text("{}")
+        # 模拟工作区里进行中的代码
+        (repo / "backtester.py").write_text("# 半成品")
+        (repo / "config.py").write_text("# 改到一半")
+
+        g = GitHubTool(repo_path=str(repo))
+        r = g.commit("日报测试", paths=ARTIFACT_PATHS)
+        assert r["success"], r
+
+        committed = subprocess.run(
+            ["git", "show", "--name-only", "--format=", "HEAD"],
+            cwd=repo, capture_output=True, text=True).stdout.split()
+        assert "alpha-hive-daily-2026-07-30.json" in committed
+        assert "index.html" in committed
+        assert "report_snapshots/NVDA_2026-07-30.json" in committed
+        assert "backtester.py" not in committed, "代码被误提交 —— 事故复现"
+        assert "config.py" not in committed, "代码被误提交 —— 事故复现"
+
+        left = subprocess.run(["git", "status", "--porcelain"],
+                              cwd=repo, capture_output=True, text=True).stdout
+        assert "backtester.py" in left and "config.py" in left, \
+            "代码应完好留在工作区"
+
+    def test_default_still_stages_everything(self, repo):
+        """不传 paths 时保持 `git add -A`（向后兼容，其他调用方不受影响）"""
+        (repo / "anything.py").write_text("x")
+        g = GitHubTool(repo_path=str(repo))
+        assert g.commit("全量")["success"]
+        committed = subprocess.run(
+            ["git", "show", "--name-only", "--format=", "HEAD"],
+            cwd=repo, capture_output=True, text=True).stdout
+        assert "anything.py" in committed
+
+    def test_no_matching_paths_reports_failure(self, repo):
+        """白名单一个都没匹配上时必须显式失败，而非静默创建空提交"""
+        (repo / "only_code.py").write_text("x")
+        g = GitHubTool(repo_path=str(repo))
+        r = g.commit("空", paths=["nonexistent-pattern-*.xyz"])
+        assert not r["success"]
