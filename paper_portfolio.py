@@ -86,7 +86,9 @@ def _pheromone_db_path() -> Path:
 
 SNAPSHOT_DIR = _base_dir() / "report_snapshots"
 STATE_DIR = _base_dir() / "paper_portfolio_state"
-STATE_DIR.mkdir(exist_ok=True)
+# v0.45.394：不再在 import 期 `mkdir`。目录在写入时由 `_atomic_write_text` / `_append_jsonl` 创建。
+# 原先这一行在 pytest 收集期（早于任何 env 隔离）就把空目录建进仓库根；阶段 6 之前它被 git 跟踪、
+# 本来就存在，所以一直没人看见；解除跟踪后干净检出里它第一次现形（根总闸 teardown 报 added）。
 
 POSITIONS_FILE = STATE_DIR / "positions.jsonl"      # 当前持仓
 CLOSED_FILE = STATE_DIR / "closed_trades.jsonl"     # 平仓记录（append-only）
@@ -314,6 +316,7 @@ def _atomic_write_text(path: Path, content: str, mode: int = 0o644) -> None:
     """
     import os as _os
     import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_path = tempfile.mkstemp(
         prefix=path.name + ".tmp.", dir=str(path.parent)
     )
@@ -340,6 +343,7 @@ def _write_jsonl(path: Path, records: List[Dict]) -> None:
 
 def _append_jsonl(path: Path, record: Dict) -> None:
     """追加（用于 closed_trades / equity_curve）— 单行追加对原子性需求低，保留 append"""
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
