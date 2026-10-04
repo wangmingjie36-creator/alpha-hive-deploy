@@ -5,7 +5,15 @@
 
 ---
 
-## [0.45.401] — 2026-10-04 — 占位（进行中：check-old 把「git 自己删掉的冻结文件」单列，阶段 6 快进后不再恒红）
+## [0.45.401] — 2026-10-04 — Fixed：check-old 把「git 自己删掉的冻结文件」单列为 `removed_by_git`，阶段 6 快进后不再把 3107 个文件判成旁路写入
+
+### Fixed
+- `data_backup/migrate_data_root.py::check_old`：v0.45.394 合入后手动快进生产 checkout（10-04），冻结数据被 git 从旧根工作区删掉，而这些路径又命中新加的 `.gitignore` 规则 ⇒ 旧逻辑「相对 retire 基线变了（含删除）+ 被忽略 ⇒ 写出 git 之外」把 **3107 个文件全判成 `written_outside_git`**，`ok:false`。数据本身没问题（数据根 `report_snapshots` 1441 → 1591，连续性健康，就绪度读数据根正常），是验收工具没跟上阶段 6。
+- 修法：基线里有、现在不在的路径，若 git 历史里有一次删除它的提交（`git log --diff-filter=D`，新增 `_git_deleted_in_history`，分批传路径，3125 条实测约 15 秒）⇒ 单列 `removed_by_git_count` / `removed_by_git_sample`，不红。⚠️ **不是**「消失一概放行」：被忽略、从没进过 git 的文件被删仍判红（可能是旁路写入方在轮转日志，`test_deleted_ignored_file_is_a_write_not_git_sync` 原样保留）；查不到「谁删的」（git 失败）⇒ `git_error` 判红；被删后又被写回同名文件 ⇒ 现在有且指纹变了 ⇒ 仍红。
+
+### Added
+- `tests/test_migrate_data_root.py` 4 条：git 删除不红 / 阶段 6 真实形态（`rm --cached` + 新 `.gitignore` + 快进删文件）不红 / 被删后重建仍红 / 无提交的手动删除仍红。变异：去掉豁免 ⇒ 前两条红；豁免一切消失 ⇒ `deleted_ignored` 与手动删除两条红。35/35 绿。
+
 
 ## [0.45.400] — 2026-10-03 — Fixed：Step 11 的 F&G 子进程已按时跑完、只是父进程自己拖过预算时，结果不再被丢弃并误报「超出时间预算、已终止」
 
