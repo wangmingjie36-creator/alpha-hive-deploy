@@ -53,7 +53,8 @@ _FOMC = [
 ]
 
 # ── CPI 数据发布（BLS Consumer Price Index，08:30 ET）──
-# 核对时间：2026-09-18（二次核对，结论不变），逐条对照 bls.gov/schedule/news_release/cpi.htm
+# 核对时间：2026-10-04（三次核对，结论不变；另查 bls.ics 订阅源无 2027 条目、2027 年度总表 404），
+# 逐条对照 bls.gov/schedule/news_release/cpi.htm
 _CPI = [
     # 2025：⚠️ 未与官方逐条核对（BLS 当前页只回溯到 2025-11 参考月）。
     # 全部是过去日期，get_upcoming_events 不会返回，仅留档；
@@ -70,7 +71,8 @@ _CPI = [
 ]
 
 # ── 非农就业 NFP（BLS Employment Situation，08:30 ET）──
-# 核对时间：2026-09-18（二次核对，结论不变），逐条对照 bls.gov/schedule/news_release/empsit.htm
+# 核对时间：2026-10-04（三次核对，结论不变；另查 bls.ics 订阅源无 2027 条目、2027 年度总表 404），
+# 逐条对照 bls.gov/schedule/news_release/empsit.htm
 _NFP = [
     # 2025：⚠️ 同 CPI，未与官方逐条核对，全部为过去日期，仅留档。
     "2025-01-10", "2025-02-07", "2025-03-07", "2025-04-04",
@@ -85,7 +87,8 @@ _NFP = [
 ]
 
 # ── GDP 初值 / Advance Estimate（BEA，08:30 ET）──
-# 核对时间：2026-08-29，对照 bea.gov/news/schedule
+# 核对时间：2026-10-04（二次核对，结论不变：滚动日程末条仍是 2026-12-23，无 2027 初值），
+# 对照 bea.gov/news/schedule
 _GDP = [
     # 2025：⚠️ 未与官方逐条核对，全部为过去日期，仅留档。
     "2025-01-30", "2025-04-30", "2025-07-30", "2025-10-29",
@@ -139,19 +142,21 @@ _TABLE_SPECS: Dict[str, Dict[str, Any]] = {
         "dates": _CPI,
         "source": "https://www.bls.gov/schedule/news_release/cpi.htm",
         "verified_through": "2026-12-10",
-        "pending": "2027 全年日程 BLS 尚未发布（2026-08-29 核对，站点只到 2026-12）→ 待验证",
+        "pending": "2027 全年日程 BLS 尚未发布（2026-10-04 三次核对：cpi.htm 只到 2026-12，"
+                   "2027 年度总表 404，bls.ics 无 2027 条目）→ 待验证",
     },
     "nfp": {
         "dates": _NFP,
         "source": "https://www.bls.gov/schedule/news_release/empsit.htm",
         "verified_through": "2026-12-04",
-        "pending": "2027 全年日程 BLS 尚未发布（2026-08-29 核对，站点只到 2026-12）→ 待验证",
+        "pending": "2027 全年日程 BLS 尚未发布（2026-10-04 三次核对：empsit.htm 只到 2026-12，"
+                   "2027 年度总表 404，bls.ics 无 2027 条目）→ 待验证",
     },
     "gdp": {
         "dates": _GDP,
         "source": "https://www.bea.gov/news/schedule",
         "verified_through": "2026-10-29",
-        "pending": "BEA 滚动日程当前只到 2026-12-23，2027 初值日期未发布 → 待验证",
+        "pending": "BEA 滚动日程当前只到 2026-12-23，2027 初值日期未发布（2026-10-04 再核对）→ 待验证",
     },
 }
 
