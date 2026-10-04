@@ -143,6 +143,17 @@ class TestSettlementRule:
         st = _file(tmp_path)["settled"]
         assert st["end"] == "2026-09-20" and st["bars"]["2026-09-10"] == m["2026-09-10"]
 
+    def test_disagreement_on_the_first_day_settles_nothing(self, tmp_path):
+        """还没有已落定段时，落定段只能从比对区间的第一天起长；第一天两次就不一致 ⇒ 这次什么都不落定（下次再比），
+        不能从第一天起把这次下载的值冻进去。变异「首日不一致也从首日起落定」⇒ 09-01 的未确认值进库 ⇒ 红（二次变异补）。"""
+        m = _master()
+        _fetch(_store(tmp_path, "2026-09-20"), {**m, W[0]: _bar(999.0)})
+        _fetch(_store(tmp_path, "2026-09-21"), m)
+        assert _file(tmp_path)["settled"] is None
+        _fetch(_store(tmp_path, "2026-09-22"), m)
+        st = _file(tmp_path)["settled"]
+        assert (st["start"], st["end"]) == (W[0], "2026-09-20") and st["bars"][W[0]] == m[W[0]]
+
     def test_clock_going_backwards_settles_nothing_and_keeps_the_newer_pending(self, tmp_path):
         m = _master()
         _fetch(_store(tmp_path, "2026-09-21"), m)
