@@ -191,6 +191,17 @@ class _HivePaths:
         return self.home / "alphabot_state"
 
     @property
+    def replay_ohlc_state(self) -> Path:
+        """回放行情库（v0.45.410，`replay_ohlc_store.ReplayOhlcStore`）：已落定的日线只向 Yahoo 取一次。
+
+        写 / 读：F&G 敞口门前瞻检验的 `run()`（编排器 Step 11 与每周只读诊断任务经 `ic_rerun_readiness` 调它）。
+        每个标的一个 `<TICKER>.json`，只有价格。**不是可重建缓存**：首次落定后冻结、之后 Yahoo 的回溯修订不进库，
+        丢了重建出来的值可能不同 ⇒ 进数据备份（`data_backup/export.py` 的 `STATE_DIRS`）。
+        调用时求值（读 `ALPHA_HIVE_HOME`）；不建目录（写入方自己 `mkdir`）。
+        """
+        return self.home / "replay_ohlc_state"
+
+    @property
     def data_backup_repo(self) -> Path:
         """数据备份仓库的工作区（`data_backup/run_backup.py`，编排器 Step 14 每个扫描日提交一次）（v0.45.408）。
 

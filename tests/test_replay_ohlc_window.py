@@ -239,7 +239,7 @@ def _sandbox_bytes(root):
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
-def _no_window(dates, seed, extra_seeds=()):
+def _no_window(dates, seed, extra_seeds=(), store=None):
     return contextlib.nullcontext()
 
 
@@ -256,8 +256,8 @@ def _spy_windows(w):
     orig = pp.replay_ohlc_window
 
     @contextlib.contextmanager
-    def spy(start, end):
-        with orig(start, end) as win:
+    def spy(start, end, **kw):
+        with orig(start, end, **kw) as win:
             seen.append(win)
             yield win
     w.monkeypatch.setattr(pp, "replay_ohlc_window", spy)
@@ -487,8 +487,10 @@ class TestScopeIsCleared:
         users = {str(p.relative_to(_ROOT)) for p in files
                  if "tests" not in p.relative_to(_ROOT).parts
                  and "replay_ohlc_window" in p.read_text(encoding="utf-8", errors="replace")}
+        # v0.45.410：`replay_ohlc_store.py` 是窗口用的行情库（docstring 里讲它怎么接进窗口），自己不开窗口；
+        # 它只被前瞻检验 `run()` 构造——`tests/test_replay_ohlc_store.py::TestOnlyTheForwardRunUsesTheStore` 钉住。
         allowed = {"paper_portfolio.py", "experiments/fg_exposure_gate_forward_test.py",
-                   "experiments/replay_ohlc_window_premise.py"}
+                   "experiments/replay_ohlc_window_premise.py", "replay_ohlc_store.py"}
         assert users - allowed == set(), f"新增了回放窗口的使用者：{users - allowed}"
         assert {"paper_portfolio.py", "experiments/fg_exposure_gate_forward_test.py"} <= users, users
         # 复审 N2：此前只扫 `def run_for_date(` 到 `def bootstrap_from_history(` 那一段字符串——`run_replay` 在它之后，

@@ -550,7 +550,7 @@ class _ReplayOhlcWindow:
     离 Step 11 的 60s 超时只差 4s，**没有任何机读字段会红**。只有取数计数，不含任何价格、净值或收益。
     """
 
-    def __init__(self, start: str, end: str):
+    def __init__(self, start: str, end: str, store=None):
         for name, v in (("start", start), ("end", end)):
             if not (isinstance(v, str) and _ISO_DATE_RE.match(v)):
                 raise ValueError(f"replay_ohlc_window: {name}={v!r} 不是 YYYY-MM-DD")
@@ -558,6 +558,9 @@ class _ReplayOhlcWindow:
             raise ValueError(f"replay_ohlc_window: 空窗口 [{start}, {end})")
         self.start = start
         self.end = end
+        # v0.45.410：回放行情库（`replay_ohlc_store.ReplayOhlcStore`，None = 照旧每次整段下载）。
+        # 只有 F&G 前瞻检验的 `run()` 传它；语义见该模块 docstring。
+        self.store = store
         self._bars: Dict[str, Dict[str, Dict]] = {}
         self.fallback_tickers: Dict[str, str] = {}   # ticker → 整段取数失败的原因
         self.wide_fetches = 0
@@ -584,23 +587,42 @@ class _ReplayOhlcWindow:
                              self.start, self.end, ticker, start, end)
             return None
         if ticker in self.fallback_tickers:
-            return None
+            return self._settled_on_fallback(ticker, start, end)
         bars = self._bars.get(ticker)
         if bars is None:
+            # v0.45.410：请求整个落在行情库已落定段内 ⇒ 库回答、不为它下载。这个标的之后若有请求碰到未落定的
+            # 日子再补尾——只在早几周持有过的标的整次检验都不打网络（库里的值本来就是窗口对它的权威回答）。
+            if self.store is not None:
+                sl = self.store.settled_slice(ticker, start, end)
+                if sl is not None:
+                    return sl
             bars = self._fetch_wide(ticker)
             if bars is None:
-                return None
+                return self._settled_on_fallback(ticker, start, end)
         self.served += 1
         return {d: b for d, b in bars.items() if start <= d < end}
 
+    def _settled_on_fallback(self, ticker: str, start: str, end: str) -> Optional[Dict[str, Dict]]:
+        """v0.45.410：该标的这次下载失败——请求整个落在行情库已落定段内的，照样由库回答（库里的值本来就是
+        本次窗口对它的权威回答）；其余返回 None、走原直连路径。降级时的直连次数因此只与最近几天有关。"""
+        return None if self.store is None else self.store.settled_slice(ticker, start, end, on_fallback=True)
+
     def _fetch_wide(self, ticker: str) -> Optional[Dict[str, Dict]]:
+        store = self.store if self.store is not None and self.store.supports(ticker) else None
+        fstart = self.start
+        if store is not None:
+            fstart = store.fetch_start(ticker, self.start, self.end)
+            if fstart is None:   # 已落定段覆盖整个窗口：不打网络
+                bars = store.merge(ticker, self.start, self.end, None, None)
+                self._bars[ticker] = bars
+                return bars
         self.wide_fetches += 1
         bars: Optional[Dict[str, Dict]] = None
         try:
             import yfinance as yf
             # 与直连路径逐参数相同：只换 start/end。不许换成 yf.download（默认参数不同、MultiIndex）
-            # 或加 repair=True（会改值）。
-            hist = yf.Ticker(ticker).history(start=self.start, end=self.end, auto_adjust=False)
+            # 或加 repair=True（会改值）。v0.45.410：有行情库时 start 可能是已落定段末尾往前 OVERLAP_DAYS 天。
+            hist = yf.Ticker(ticker).history(start=fstart, end=self.end, auto_adjust=False)
             if hist is None or len(hist) == 0:
                 reason = "空结果"
             else:
@@ -615,8 +637,10 @@ class _ReplayOhlcWindow:
             self.fallback_tickers[ticker] = reason
             _log.warning("[PaperPortfolio] 回放 OHLC 窗口 %s [%s, %s) 整段取数失败（%s）——"
                          "该标的本次回放退回逐次直连 _fetch_ohlc（失败语义与改动前相同，只是慢）",
-                         ticker, self.start, self.end, reason)
+                         ticker, fstart, self.end, reason)
             return None
+        if store is not None:
+            bars = store.merge(ticker, self.start, self.end, fstart, bars)
         self._bars[ticker] = bars
         return bars
 
@@ -629,7 +653,7 @@ class _ReplayOhlcWindow:
     def stats(self) -> Dict:
         """机读计数（JSON 可序列化）。`degraded`：有标的整段取数失败、或有请求落在窗口外 ⇒ 这些请求
         退回逐次直连（结果同改动前，只是慢）。窗口退出后照样可调（只读计数器，不读已释放的日线）。"""
-        return {
+        out = {
             "window": [self.start, self.end],
             "wide_fetches": self.wide_fetches,
             "served": self.served,
@@ -640,12 +664,18 @@ class _ReplayOhlcWindow:
             "direct_empty": self.direct_empty,
             "degraded": bool(self.fallback_tickers) or self.out_of_window > 0,
         }
+        if self.store is not None:   # v0.45.410：只有开了行情库才有这个键（其余调用方的形状不变）
+            out["store"] = self.store.stats()
+            # 坏文件 / 写不进去：本次结果不受影响，但下次照样整段下载、慢回去——要有人看见
+            out["degraded"] = out["degraded"] or out["store"]["problem"]
+        return out
 
     def summary(self) -> str:
         return (f"回放 OHLC 窗口 [{self.start}, {self.end})：整段取数 {self.wide_fetches} 次"
                 f"（{len(self._bars)} 个标的成功），切片服务 {self.served} 次，"
                 f"退回直连 {len(self.fallback_tickers)} 个标的，窗口外请求 {self.out_of_window} 次，"
-                f"直连请求 {self.direct_requests} 次（{self.direct_empty} 次一根 bar 都没有）")
+                f"直连请求 {self.direct_requests} 次（{self.direct_empty} 次一根 bar 都没有）"
+                + (f"；{self.store.summary()}" if self.store is not None else ""))
 
 
 _REPLAY_OHLC_WINDOW: Optional[_ReplayOhlcWindow] = None
@@ -670,14 +700,15 @@ def replay_ohlc_bounds(dates: List[str],
 
 
 @contextlib.contextmanager
-def replay_ohlc_window(start: str, end: str):
+def replay_ohlc_window(start: str, end: str, store=None):
     """在 `with` 内，`_fetch_ohlc` 对窗口内请求按标的整段取一次、之后切片（见上方区块注释）。
 
     退出时（含异常）恢复进入前的窗口（可嵌套）、释放已取的日线；`_PRICE_CACHE` / `_OHLC_FULL`
     从不被本路径读写。yield 出窗口对象，调用方可读其计数器（只用于日志 / 测试）。
+    `store`（v0.45.410）：回放行情库，已落定的日线从库里读、只补下最近一段（`replay_ohlc_store`）。
     """
     global _REPLAY_OHLC_WINDOW
-    win = _ReplayOhlcWindow(start, end)
+    win = _ReplayOhlcWindow(start, end, store=store)
     prev = _REPLAY_OHLC_WINDOW
     _REPLAY_OHLC_WINDOW = win
     try:

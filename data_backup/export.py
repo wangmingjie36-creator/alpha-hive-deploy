@@ -55,6 +55,9 @@ STATE_DIRS: list[str] = [
     "sell_strike_state",
     # v0.45.388 Alpha Bot 盘中快照 + 设置：盘中那一刻的水平事后拿不回来（CBOE 只给当下的延迟快照）。
     "alphabot_state",
+    # v0.45.410 回放行情库（F&G 前瞻检验的日线，`replay_ohlc_store`）：首次落定后冻结，丢了重取到的可能是
+    # Yahoo 修订后的值，检验的历史输入会变 ⇒ 不当可重建缓存。每个标的一个小 JSON。
+    "replay_ohlc_state",
 ]
 ROOT_FILE_GLOBS: list[str] = [
     "weight_history.jsonl", "pheromone_fallback.jsonl",

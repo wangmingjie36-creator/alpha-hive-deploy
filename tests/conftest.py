@@ -1114,6 +1114,7 @@ _GUARDED_PRODUCTION_ARTIFACTS = (
     "hedge_state",
     "sell_strike_state",
     "alphabot_state",
+    "replay_ohlc_state",
 )
 
 
@@ -1219,6 +1220,20 @@ def _isolate_alphabot_state(_isolate_env, tmp_path):
     assert p.is_absolute(), f"PATHS.alphabot_state 解析成了相对路径 {p}：生产从仓库根跑会写穿仓库根"
     assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
         f"PATHS.alphabot_state = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？")
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_replay_ohlc_state(_isolate_env, tmp_path):
+    """回放行情库（v0.45.410，`replay_ohlc_store`）防线①：`PATHS.replay_ohlc_state` 此刻是绝对路径且在本测试沙箱里。
+    F&G 前瞻检验的 `run()` 每次都会往这里写——测试里调 `run()` 的地方很多，任何一处把路径冻住都会写进真身。
+    防线②（真身指纹）由 `_GUARDED_PRODUCTION_ARTIFACTS` 里的 `replay_ohlc_state` 与仓库根默认拒绝总闸兜住。"""
+    import hive_logger
+
+    p = pathlib.Path(hive_logger.PATHS.replay_ohlc_state)
+    assert p.is_absolute(), f"PATHS.replay_ohlc_state 解析成了相对路径 {p}：生产从仓库根跑会写穿仓库根"
+    assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+        f"PATHS.replay_ohlc_state = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？")
     yield
 
 

@@ -1967,12 +1967,18 @@ def _forward_test_attention(key: str, d: Dict) -> List[Dict]:
     if isinstance(ow, dict) and ow.get("degraded") is True:
         fb = ow.get("fallback_tickers") or {}
         names = "、".join(list(fb)[:5]) + (f" 等 {len(fb)} 个" if len(fb) > 5 else "")
-        out.append(item(f"{iid}.ohlc_window_degraded", "warn",
-                        f"{name}：回放行情窗口降级 —— 整段取数 {ow.get('fallback')}/{ow.get('wide_fetches')} 个标的失败"
-                        f"{'（' + names + '）' if names else ''}、窗口外请求 {ow.get('out_of_window')} 次，"
-                        f"这些请求退回逐次直连（直连 {ow.get('direct_requests')} 次，其中 {ow.get('direct_empty')} 次"
-                        "一根 bar 都没有）。结果与改动前的逐次取数相同，但 Step 11 可能因此超时、世代边界核对随之没跑——"
-                        "需人看行情源（stderr 的「整段取数失败」WARNING 有原因）"))
+        st = ow.get("store") or {}
+        msg = (f"{name}：回放行情窗口降级 —— 整段取数 {ow.get('fallback')}/{ow.get('wide_fetches')} 个标的失败"
+               f"{'（' + names + '）' if names else ''}、窗口外请求 {ow.get('out_of_window')} 次，"
+               f"这些请求退回逐次直连（直连 {ow.get('direct_requests')} 次，其中 {ow.get('direct_empty')} 次"
+               "一根 bar 都没有）。结果与改动前的逐次取数相同，但 Step 11 可能因此超时、世代边界核对随之没跑——"
+               "需人看行情源（stderr 的「整段取数失败」WARNING 有原因）")
+        # v0.45.410：回放行情库自己的问题（坏文件 / 写不进去）——本次结果不受影响，但下次照样整段下载
+        if st.get("problem"):
+            msg += (f"；回放行情库：{len(st.get('invalid_files') or [])} 个文件读不懂（已改名留证）、"
+                    f"写入失败 {len(st.get('write_errors') or [])} 次 —— 本次结果不受影响，但下次仍要整段下载"
+                    "（stderr 的 ReplayOhlcStore WARNING 有原因；目录 = PATHS.replay_ohlc_state）")
+        out.append(item(f"{iid}.ohlc_window_degraded", "warn", msg))
     return out
 
 

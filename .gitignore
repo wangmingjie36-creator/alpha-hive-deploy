@@ -166,6 +166,7 @@ alphabot_state/
 /reports/
 /sell_strike_state/
 /alphabot_state/
+/replay_ohlc_state/
 /chroma_db/
 /logs/
 /db_backups/
