@@ -16,7 +16,6 @@ CHANGELOG 部分的管道测试在 `tests/test_changelog_guard_hook.py`，本文
 `TestSelection.test_real_repo_selection` 钉着这一条。
 """
 
-import ast
 import hashlib
 import json
 import os
@@ -462,23 +461,18 @@ class TestChangelogMismatchStillRunsTheGate:
 
 # ═════════════════════════════ 触发范围 ═════════════════════════════
 
-def _daily_artifact_samples():
-    """从 `report_deployer` 的白名单常量（AST 读，不 import）造出每一类日报产物的样例路径。"""
-    tree = ast.parse((_ROOT / "report_deployer.py").read_text(encoding="utf-8"))
-    consts = {}
-    for node in tree.body:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for t in targets:
-                if isinstance(t, ast.Name) and t.id in ("_ARTIFACT_PREFIXES", "_ARTIFACT_GLOBS", "_ARTIFACT_EXACT"):
-                    consts[t.id] = ast.literal_eval(node.value)
-    assert set(consts) == {"_ARTIFACT_PREFIXES", "_ARTIFACT_GLOBS", "_ARTIFACT_EXACT"}, (
-        f"report_deployer 的白名单常量改名了（只找到 {sorted(consts)}）——本测试要跟着改，别让它空转")
-    samples = list(consts["_ARTIFACT_EXACT"])
-    samples += [g.replace("*", "2026-09-28") for g in consts["_ARTIFACT_GLOBS"]]
-    for pre in consts["_ARTIFACT_PREFIXES"]:
-        samples += [f"{pre}sample.json", f"{pre}nested/sample.md", f"{pre}sample.html"]
-    assert len(samples) >= 15, samples
+def _data_artifact_samples():
+    """从迁移分类表的 MOVE 规则造出每一类生产数据的样例路径（真相只有一份：`migrate_data_root`）。
+
+    v0.45.402 前这里读 `report_deployer` 的日报白名单常量——日报提交 / 推送链随阶段 6 退役，
+    白名单没了；「数据类文件不触发契约闸」这条性质仍成立，真相来源换成 MOVE 规则。
+    """
+    from data_backup import migrate_data_root as m
+    samples = list(m.MOVE_EXACT) + list(m.MOVE_DBS)
+    samples += [g.replace("*", "2026-09-28") for g in m.MOVE_GLOBS]
+    for d in m.MOVE_DIRS:
+        samples += [f"{d}/sample.json", f"{d}/nested/sample.md", f"{d}/sample.html"]
+    assert len(samples) >= 40, samples
     return samples
 
 
@@ -504,14 +498,15 @@ class TestTrigger:
         commit(["seed.txt"])
         return commit
 
-    def test_daily_report_artifacts_never_trigger_the_gate(self, plain_repo):
-        """无人值守的日报推送若触发契约闸，契约一红网站就停更。变红的变异：往触发集里加 `*.json` / `*.md`。"""
+    def test_data_artifacts_never_trigger_the_gate(self, plain_repo):
+        """数据类文件只动不该触发契约闸（区间没动代码 ⇒ 契约结果与已守过的 base 相同）。
+        变红的变异：往触发集里加 `*.json` / `*.md`。"""
         base = plain_repo(["seed2.txt"])
-        samples = _daily_artifact_samples()
+        samples = _data_artifact_samples()
         head = plain_repo(samples)                 # 一次提交全部样例（逐条提交要 ~5s）
         offenders = subprocess.run(["git", "diff", "--name-only", base, head, "--", *cg.CONTRACT_TRIGGER_PATHSPECS],
                                    capture_output=True, text=True, check=True).stdout.split("\n")
-        assert [o for o in offenders if o] == [], "这些日报产物会触发契约闸"
+        assert [o for o in offenders if o] == [], "这些数据类文件会触发契约闸"
         assert subprocess.run(["git", "diff", "--name-only", base, head], capture_output=True, text=True,
                               check=True).stdout.count("\n") == len(set(samples)), "前提：样例都进了这次提交"
         assert cg._contract_triggered("pre-push", base, head) is False

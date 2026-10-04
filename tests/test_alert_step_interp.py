@@ -39,7 +39,7 @@ class TestSuccessWithWarning:
     def test_one_high_naming_the_reason(self, tmp_path, warning):
         a = _analyze(tmp_path, {
             "step2_hive_analysis": {"status": "success_with_warning", "duration_seconds": 2800, "rc": 1,
-                                    "warning": warning, "git_push_success": True},
+                                    "warning": warning},
             "step4_dashboard": {"status": "skipped_builtin", "step2_status": "success_with_warning"},
         })
         got = _step_alerts(a)

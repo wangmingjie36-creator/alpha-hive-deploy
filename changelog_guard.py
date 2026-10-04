@@ -88,9 +88,10 @@ pre-commit 只是更早报错。
 * **什么时候跑**：被推区间动了 `CONTRACT_TRIGGER_PATHSPECS`（代码 / 测试 / scripts/ / pytest 配置 /
   `.gitattributes`）才跑；算不出区间（远端新建分支、直推 URL）按「动了」处理。
   `.gitattributes` 在内是因为只改它就能改变导出树（见上），而它不是代码。**只动数据的推送不跑** ——
-  每日日报推送（`production_sync.push_main`，无人值守）只含报告产物，它若被拦，网站就停更，
-  而拦下它什么也修不好：区间没动代码 ⇒ 契约测试的结果与已被守过的 base 相同。
-  这条「日报产物永不触发」由测试对着 `report_deployer` 的白名单常量逐条核对，会红。
+  区间没动代码 ⇒ 契约测试的结果与已被守过的 base 相同，拦下它什么也修不好。
+  （v0.45.402 前这条主要保的是每日日报推送 `production_sync.push_main`——它无人值守，被拦网站就停更；
+  该推送已随阶段 6 退役，数据不再进代码仓库。）「数据类文件永不触发」由测试对着迁移分类表
+  （`data_backup/migrate_data_root.py` 的 MOVE 规则）逐条核对，会红。
 * **什么算过**：pytest 退出码 0 **且**结果报告（本闸自带的小插件写）里没有失败、没有
   收集错误、**没有 skip（含整文件的 `pytest.skip(allow_module_level=True)` / `importorskip`——
   它们发生在收集期，pytest 退出码照样是 0）、没有被 `-m` 摘掉的**（契约测试带 `network`/`integration`

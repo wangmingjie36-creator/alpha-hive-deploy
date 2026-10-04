@@ -1011,16 +1011,19 @@ class TestHardening:
         assert f["status"] == "failed"
         assert sum("FIFO" in x for x in f["rc1_unverified"]) == 2, f
 
-    def test_git_push_success_of_odd_shape_is_unknown_not_render_error(self, tmp_path):
+    def test_scan_timing_without_gh_pages_key_is_not_proof_of_completion(self, tmp_path):
+        """完成标记是 `extra.gh_pages`（v0.45.402 起；此前是 `git_push`）。只带已退役的 `git_push` 的 scan_timing
+        （旧代码留下的、或有人把字段又写回去的）不是「主流程跑完」的证据 ⇒ 保守记 failed 并说清缺什么。"""
         d = make_day(tmp_path / "d")
         t = d / "logs" / "scan_timing.json"
         doc = json.loads(t.read_text())
-        doc["extra"]["git_push"]["success"] = [1]
+        assert "gh_pages" in doc["extra"], "正对照：夹具默认带 gh_pages，下面删掉它才有意义"
+        doc["extra"] = {"git_push": {"success": True}, "git_commit": {"success": True}}
         t.write_text(json.dumps(doc))
         out = run("2", 1, data_dir=d, run_start=RUN_START)
         f = out["steps_fragment"][S2]
-        assert f["status"] == "success_with_warning" and f["git_push_success"] is None
-        assert "推送结果未知" in out["message"]
+        assert f["status"] == "failed"
+        assert any("缺 gh_pages" in x for x in f["rc1_unverified"]), f
 
 
 # ═══════════════════════════════ 7. 全组合不变式 ═══════════════════════════════
@@ -1111,7 +1114,7 @@ TICKERS = ["NVDA", "TSLA", "MSFT", "QCOM", "VKTX", "META", "BILI", "AMZN"]
 
 
 def make_day(root: Path, date: str = DATE, *, swarm=True, daily=("json", "md"), timing="complete",
-             ml="near_constant", written_at="2026-09-28T14:46:43", git_push_success=True,
+             ml="near_constant", written_at="2026-09-28T14:46:43",
              report_root=None) -> Path:
     """造一天的 Step 2 产物。ml：near_constant = 09-24 实况（8 份里 6 份同值、共 2 个不同值）。"""
     rep = report_root or root
@@ -1123,7 +1126,7 @@ def make_day(root: Path, date: str = DATE, *, swarm=True, daily=("json", "md"), 
         (rep / f"alpha-hive-daily-{date}.{suffix}").write_text("{}" if suffix == "json" else "# 日报")
     if timing:
         extra = {"early_exit": "empty_scan_guard"} if timing == "early_exit" else {
-            "git_push": {"success": git_push_success}, "git_commit": {"success": True}}
+            "gh_pages": {"success": True, "action": "pushed_new_commit"}}
         (root / "logs").mkdir(exist_ok=True)
         (root / "logs" / "scan_timing.json").write_text(json.dumps(
             {"date": "2026-09-27" if timing == "wrong_date" else date, "written_at": written_at,
@@ -1170,19 +1173,11 @@ class TestStep2:
         out = run("2", 1, data_dir=d, run_start=RUN_START)
         assert out["steps_fragment"] == {S2: {
             "status": "success_with_warning", "duration_seconds": DUR, "rc": 1, "warning": "ml_model_constant",
-            "ml_model_guard": {"verdict": "near_constant", "n_files": 8, "n_numeric": 8, "distinct": 2},
-            "git_push_success": True}}
+            "ml_model_guard": {"verdict": "near_constant", "n_files": 8, "n_numeric": 8, "distinct": 2}}}
         assert out["level"] == "warn"
         assert "ML 概率退化（near_constant：8 份里只有 2 个不同值）" in out["message"]
-        assert "ml_model_guard.py --date 2026-09-28" in out["message"] and "推送成功" in out["message"]
-
-    def test_rc1_constant_and_push_failure_are_both_visible(self, tmp_path):
-        d = make_day(tmp_path / "d", ml="constant", git_push_success=False)
-        out = run("2", 1, data_dir=d, run_start=RUN_START)
-        f = out["steps_fragment"][S2]
-        assert f["ml_model_guard"]["verdict"] == "constant" and f["git_push_success"] is False
-        # 指向 scan_timing.json 本身，不指 status.json（那条 jq 合并 09-14~09-25 没生效过，见 v0.45.351）
-        assert f"推送失败（见 {d / 'logs' / 'scan_timing.json'} 的 extra.git_push）" in out["message"]
+        assert "ml_model_guard.py --date 2026-09-28" in out["message"]
+        assert "git_push" not in json.dumps(out["steps_fragment"]), "已退役的推送字段又出现在 status 片段里"
 
     def test_rc1_completed_but_ml_not_degenerate_says_unexplained(self, tmp_path):
         """主流程跑完 ⇒ 仍是 success_with_warning（部署确已完成），但原因如实写「待查」，不编一个。"""
