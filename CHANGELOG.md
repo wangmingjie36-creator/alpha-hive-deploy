@@ -5,6 +5,134 @@
 
 ---
 
+## [0.45.409] — 2026-10-04 — 占位（进行中：阶段 6 ⑤ 收窄根总闸 + 修两处恒真自证）
+
+## [0.45.408] — 2026-10-03 — Changed（事后修订）：F&G 敞口门前瞻检验的自证改为**逐日重锚**；统计量用的 A / B 仍从冻结种子连续重放。Added：`PATHS.data_backup_repo`、冻结锚点
+
+> 叠在 v0.45.396（同分支 `claude/nifty-franklin-27b11d`）之上。**改号**：原占 0.45.401（本地提交、未推送），推送前另一条线的 0.45.401（check-old `removed_by_git`）已先进 main ⇒ 按「先进 git 历史者保留」让号；403–407 也已被占，取 408。本线提交信息里写的「v0.45.401」即本版。
+> 设计稿先交用户审，三处拍板（冻结锚点进仓库 / `PATHS` 加属性 / 两份历史不一致判无法判定）均按推荐，用户 10-03 决定**立即启用**、不等触发条件。
+
+**为什么**：连续重放的 A 一旦与生产在某天良性分歧就再也追不回来。09-24、09-25 生产 paper_portfolio 被 yfinance 限流
+（结构化日志：两天各约 20 只 `_fetch_ohlc` 失败），当天不出场也不开仓；A 照常开了 CVX / NFLX / TMUS / VZ 四笔空头。
+按 10-02 收盘盯市 +$239，它们（最迟 10-08）平仓后 A 的仓位基数比生产多出这笔盈亏，此后每一笔偏 $3.6~19
+（≫ 键的分辨率 $0.10）⇒ 精确层永久低于 95%，到 12-28 中期检视出不了结论。自 08-27 有日志以来这样的生产故障日已有 2 天。
+
+### Changed — `experiments/fg_exposure_gate_forward_test.py`（文件头「自证」段登记了修订全文）
+- **自证的 A = 逐日重锚**：每个快照日从生产在那天之前最后留下的状态起跑、只跑那一天，各天开仓并起来照原样
+  （四元组 / 95% / 分母只数生产记录）与生产账本比。`selfproof` 键名不变，内容换成逐日结果。
+- **锚点**：冻结种子（第 1 段）+ 冻结锚点（新增 `experiments/fg_gate_forward_seed/anchors/`：代码仓库时代
+  09-16 / 17 / 18 / 22 / 24 / 25 共 6 个生产状态，`--build-anchors` 一次性生成、拒绝覆盖、sha256 清单）+ 数据备份仓库。
+  设计稿只说冻 09-16、09-17（备份仓库缺的两个），实做冻了代码仓库在窗口内的全部 6 个：其余 4 个与备份仓库逐字节相同，
+  这样**前瞻模式每次运行**都在 4 个重叠日上核一遍两份历史，「不一致判无法判定」天天都在执行，而不是只在演练里。
+- **两份历史不一致 ⇒ 无法判定**（不挑其中一份）；备份仓库缺失 / 不是 git 仓库 / 浅克隆 ⇒ 无法判定；**绝不退回连续重放**。
+- **三种缺口照常跑、但报出来**：备份某天没提交 ⇒ 那几天从更早的锚点连续重放（`multi_day_segments`，只会更严）；
+  生产某天根本没跑组合（生产净值曲线里没有那天）⇒ 那天不重放不比对（`production_unprocessed_dates`）；锚点状态坏了
+  （现金 NaN 等，`_validate_seed_state` 不过）⇒ 不当锚点（`invalid_anchors`）。同一日期多次提交取**最后**一个（同日重跑 / 人工修复后接着用的是它）。
+- 读历史用一个 `git cat-file --batch` 进程（逐个 `git show` 实测每个提交 ~0.19s，到终期约 140 个 ≈ 27s）。
+- **统计量不动**：A / B 仍从冻结种子连续重放（逐日把 B 拉回生产状态会每天抹掉门的累积效应 = 换了估计量）。
+  连续 A 的复现降为诊断 `selfproof_continuous`；新增 `selfproof_segments`（段数 / 多日段 / 坏锚点 / 生产没处理的快照日 / 锚点来源）。
+- 进度行：「（统计用的 A 比生产多开 N 笔）」改读**连续 A** 的计数（逐日口径会把同一批多开在生产连挂的每天各算一次：
+  真实数据逐日 8、连续 4）；有锚点缺口时追加「（逐日锚点：…）」。图标不变。失败原因追加「未复现的按入场日：日期×笔数」。
+- `--rehearse` 同样逐日重锚（锚点 = 代码仓库历史 + 数据备份仓库，都必需；新参数 `backup_repo`）。
+- 回放 OHLC 窗口左端盖住每个锚点的在场仓位（`_replay_ohlc_scope(..., extra_seeds=)`）。
+
+### Added — `hive_logger.PATHS.data_backup_repo`（= `PATHS.home / "_git_backup"`，调用时求值、只读）
+编排器 Step 14 与 `data_backup/run_backup.py` / `export.py` 的缺省值仍写死 `~/alpha-hive-data/_git_backup`（生产里同值），统一已另立任务。
+
+### 真实数据核对（生产数据拷进 scratchpad，备份仓库 `git clone --no-hardlinks` 一份；源目录全程只读，`git status` 干净）
+- 前瞻：today=10-02 **16/16**、10-03 **19/19**；每天一段，无缺口；锚点来源 种子 1 / 冻结锚点 6 / 备份仓库 3–4；连续 A 同为全对、多开 4。
+- 演练：09-04~09 3/3、09-09~16 5/5、09-14~19 13/13、09-16~19 8/8、09-22~26 2/2（逐日多开 8 / 连续 4）、09-25~10-03 9/9；
+  **09-03~08（09-03~05 七次组合行为改动）照红**：精确 0/3、决策 2/3，原因点名「2026-09-03×3」。09-01~05 起点状态现金 NaN，被原有种子校验拒掉（无法判定）。
+- 耗时：today=10-02 墙钟 22.4s / 10-03 18.0s（CPU ~1s，大头是行情取数；逐日部分实测每天 ~0.08s）。Step 11 给 F&G 的预算 45s。
+
+### 谁会红
+| 漂移 | 逐日自证（判定） | 连续自证（诊断） |
+|---|---|---|
+| 评分链 / 入场规则 / 仓位上限被改 | 红 | 红 |
+| 仓位参数 / 波动率来源 / 成本模型被改 | 红（当天先平仓后开仓时） | 红 |
+| 生产某日行情全挂（09-24 形状） | **不红**，多开照报 | 多开平仓后永久红 |
+| 同一日期的生产状态被人工修复、且修完已入库备份 | 不红（自动跟上） | 红 |
+| 人工修复落在 Step 14 之后、没立刻备份 | 修复后第一天红（修复后的状态从未入库） | 红 |
+| 状态回退到更早日期（恢复 / 回滚 / 乱序补跑） | 无法判定（需人工核对） | 红 |
+| 备份仓库历史丢了被重建（与冻结锚点零重叠） | 无法判定 | — |
+| 历史混进非生产状态 / 两份历史不一致 | 那天红 / 无法判定 | 不红 |
+
+### 测试（`tests/test_fg_exposure_gate_forward_test.py` 154 → 192）与变异
+- 新增：09-24 形状四天端到端（夹具自检连续重放确实红在金额层；逐日 2/2；改评分 / 改仓位照红并点名日期）、`_anchor_plan` 八条
+  （每日一段 / 缺锚点并段 / 生产没处理的日子不重放 / 坏锚点 / 来源不一致 / 与种子不一致 / 一致重叠只计一次 / 窗口外状态不算）、
+  `_state_history` 与 `cat-file`、冻结锚点（随仓库发布、被 git 跟踪、**与代码仓库窗口内历史一个不多一个不少逐字节相同**、篡改 / 多目录 / 少目录 /
+  窗口起点 / meta 日期 / `--build-anchors` 拒绝覆盖）、`PATHS.data_backup_repo` 调用时求值、前瞻方案拼接三来源、备份与冻结锚点不一致 ⇒ 无法判定、
+  备份缺失 ⇒ 无法判定且不重放、演练缺备份 ⇒ 无法判定、**统计量连续性守卫**（B 只连续重放一次、种子即冻结种子、`weekly_deltas` 吃的就是那两份 equity）、
+  进度行 / 人读输出 / OHLC 窗口、两个口径不许混。盲化白名单加 `selfproof_continuous` / `selfproof_segments` 并管到子键。
+- 变异 22 个，在 `git archive` 副本上跑（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、`--maxfail=1000`、每轮 passed+failed+skipped=192 与基线核对）：
+  首轮 20/22 红；**存活两个都是测试盲区**——N10 进度行改读逐日口径（端到端夹具里两种口径恰好都是 1）、N22 演练不读备份仓库（合成演练把同一仓库
+  同时当两个来源）——补测后 **22/22 红**，每个红的都是该红的那条。补测时我第一次把演练测试的期望写错（D3 无快照、不在演练日期里），
+  基线就是红的，那一轮 N22 的「红」作废、改对后重跑。副本里 3 条 skip 均为「不在 git 仓库里 / 无完整历史」，合法。
+
+### 二次检查（10-04，用户要求推送前复核）：两个独立审查 agent + 自查，修 9 处，均先实测复现
+- **自查**：① 状态提交原先只按 `meta.json` 列，只改 `positions.jsonl` 的人工修复会被漏掉（至今两仓库「改账本必改 meta」：代码仓库 71/71、
+  备份 10/10，属潜在漏洞）⇒ 新 `_state_commits` 按三个文件列，`build_seed_from_git` 同用；② 冻结锚点目录核对把 iCloud 副本
+  「2026-09-16 2」也算进去 ⇒ 生产检出在 iCloud 同步的 ~/Desktop 下，检验会天天无法判定（审查 agent 在 HEAD 上复现）⇒ 只认日期名目录；
+  ③ 注释引用了不存在的测试名。
+- **审查 A**：④ 备份仓库在、是 git、不浅但历史丢了被重建 ⇒ 原先返回空表、09-25 之后全部从冻结锚点连续重放（**静默退回**）⇒ 现在要求与冻结锚点
+  至少一个重叠日，且全部重叠日（不限本次窗口）每次逐字节核，`overlap_days_checked` 报出来；⑤ 状态历史回退后锚点会取到被弃用的状态
+  （复现：恢复 09-16 后跑 09-18，锚点取到弃用的 09-17）⇒ 窗口内出现回退即无法判定；⑥ 失败原因原先不看锚点缺口、多开附注断言「不会带进
+  后面的日子」（多日段里会）⇒ 原因带上缺口、附注改为「单日段里不会」；⑦ `--rehearse` 在代码仓库止于 09-25 之后起点取不到、报「生产尚未运行」
+  （假话）⇒ 代码仓库取不到时从备份仓库取（真实数据 09-28~10-03 演练 9/9，种子 09-25）；演练人读行的逐日多开改称「笔次」。
+- **审查 B**：⑧ 单日段的锚点比生产前一次运行旧（生产在无快照日跑过组合、那天备份没提交）原先不报 ⇒ 新 `stale_anchor_segments`；
+  ⑨ 「生产处理过哪几天」的接线未被测（改成 `processed=None` 全绿）⇒ 前瞻与演练各补一条；代码仓库历史那条测试的 skip 从「任何 SeedError」
+  收窄到「不是 git 仓库 / 浅克隆」。CHANGELOG「谁会红」里「人工修复不红」说过头了 ⇒ 表格已拆成四行（见上）。
+- **审查确认无问题**：盲化（新键全是 A 的计数）、统计量连续性、样本内路径、预注册常量与判定、`ic_rerun_readiness` 契约与图标、launchd 下
+  `ALPHA_HIVE_HOME` / git 可用、Step 11 只需要到 T-2 的锚点、`cat-file` 解析（含 NUL / 内嵌换行 / 空 blob / 缺失路径）、分段不重不漏。
+- **已知未改**：① 时间预算——逐日重放每天约 0.08s，到终期约 +12s，加上连续 A/B 与行情取数随标的数增长，离 45s 预算会变近；超了是
+  `budget_exceeded`（看得见，不静默），届时再优化（大头是 `run_replay` 每次清 σ 缓存后重查 `pheromone.db`）。② `ohlc_window` 的取数计数含 B 的请求
+  （0.45.391 起就如此，不是效应量，本版未动）。
+- 测试 192 → 202；本轮 13 个变异（每条修复一个）在 `git archive` 副本上 **13/13 红**，每个红的都是该红的那条，基线 199+3 skip、还原后全绿。
+  真实数据：前瞻 10-03 19/19（重叠日核 4 个、无缺口）；演练 09-28~10-03 9/9（种子取自备份仓库）、09-16~19 8/8。
+
+## [0.45.407] — 2026-10-04 — Added：Alpha Bot.app 改用原生窗口（pywebview / WKWebView）——双击弹窗口、关窗口（或 ⌘Q）停掉由 .app 起的服务；没有 pywebview 时退回浏览器
+
+用户要求：Alpha Bot 像个程序，不是浏览器里的一个标签页。三个选项（Safari「添加到程序坞」/ pywebview / Electron）里用户选了 pywebview。
+用户批准后安装：`pip install --user pywebview`（pywebview 6.2.1 + pyobjc 12.2.2 的 Cocoa / WebKit / Quartz / Security / UniformTypeIdentifiers + bottle、proxy_tools；pyobjc 是 universal2，与 0.45.399 的 arm64 一致）。
+
+### Added
+- `alphabot/window.py`：`run_window(url, is_alive, on_quit)`。
+  - **进程身份**：.app 的 bash 壳 exec 的 python.org `python3` 会转进框架里的 `Python.app`，窗口一起来就被 LaunchServices 登记成「Python」+ 火箭图标（探针实测）
+    ⇒ NSApplication 初始化**之前**改内存里的 bundle 信息（名称 / bundle id），再设 Dock 图标。实测登记为 `"Alpha Bot"` / `local.alphahive.alphabot` / ARM64。
+  - **服务没了窗口自关**（页面「停止服务」、进程被杀）：后台线程每 1.5s 探一次，**只认端口空了**、连续两次才关——超时 / 忙不算（复查时修，见下）。
+  - **⌘Q**：pywebview 答应退出后 Cocoa 直接 `exit()`，`webview.start()` 永不返回（探针实测）⇒ 收尾挂在 `NSApplicationWillTerminateNotification` 上。
+  - `ALLOW_DOWNLOADS = True`（pywebview 缺省 False，页面里的 `<a download>` 会静默无效；目前 `downloadCSV` 没有调用方，属预防）。
+  - `unavailable_reason()`：import 不了 ⇒ 原因字符串，启动器退回浏览器并写进 launcher.log。
+- `alphabot/launcher.py`：服务就绪后开窗口（`--browser` 可绕开）。
+  - **只开一个窗口**：窗口进程 pid 记在 `~/Library/Application Support/Alpha Bot/window.pid`；再次启动先把它调到前面（`NSRunningApplication.activate`），
+    pid 已死 / 被别的进程复用（`ps` 命令行里没有 `alphabot.launcher`）⇒ 忽略；调不到前面 ⇒ 照常往下走（不许「双击没反应」）。
+    实测 macOS 自己就把第二次双击转成「激活已运行的那个」，连启动器都不起——pid 登记是兜底。
+  - **关窗停服务只停 .app 起的**：`spawn_server` 加 `--from-app`，`/api/ping` 报 `from_app`；终端 `make alphabot` 起的服务关窗不停。
+    收尾（撤 pid 登记 + 停服务）幂等，关窗正常返回与 ⌘Q 回调共用一份。
+  - 窗口运行时起不来（能 import、开不了窗）⇒ 退回浏览器、**不停服务**（否则刚起的服务成了没窗口的孤儿）。
+- `alphabot/server.py` / `__main__.py`：`create_app(from_app=...)`、`--from-app`。
+- `requirements.txt`：`pywebview>=6.2,<7; sys_platform == "darwin"`（Linux CI 不装；那里窗口路径由假 UI 覆盖）。
+
+### 二次检查（用户要求）发现并修掉的问题（均先复现 / 实测再修）
+1. **⌘Q 不停服务**：初版收尾写在 `webview.start()` 之后，⌘Q 时进程直接 exit 走不到（探针：发 `terminate:` 后 start 之后那行没写出、退出码 0）。
+   ⇒ willTerminate 通知；修后真 Cocoa 实测 `on_quit` 被调到。正常关窗路径实测 3.2s 自关、`run_window` 返回、`on_quit` **不**被调（不重复收尾）。
+2. **服务一忙窗口就可能被关**：初版把探测超时也算「服务没了」，连续两次（约 3s）就关窗，关完 `stop_running` 也探不到、停不掉 ⇒ 只认端口空了。
+3. **窗口运行时出错 ⇒ 孤儿服务**：初版落进通用「启动器出错」弹窗，服务留着没窗口 ⇒ 退回浏览器。
+4. **测试往系统临时目录漏 `alphabot-demo-*`**（演示服务 `mkdtemp` 从不清；复查时已有 83 个，0.45.390 起的老测试就在漏）⇒ `home` 夹具把子进程 `TMPDIR` 指到 tmp；修后全套跑完数量不变。
+5. 测试夹具自己的毛病：「关窗停服务」那条的 `finally` 先 `--stop` 再断言 ⇒ 「关窗从不停服务」的变异**跑绿**（实测）⇒ 收尸挪到断言之后、只在服务还在时停。
+
+### 测试
+- `tests/test_alphabot_launcher.py` 22 → 32 条，`TestNativeWindow` 10 条（真起演示服务；窗口用假 UI）：开的是窗口不是浏览器、`--from-app`、pid 登记与清除、关窗停 .app 起的服务、
+  终端起的服务关窗不停（真起一个不带 `--from-app` 的服务）、⌘Q 立即停且只停一次、第二次启动只激活、陈旧 / 被复用的 pid、退回浏览器并写原因、`--browser`、
+  窗口出错退回浏览器不停服务、忙不算没了、看门狗「连续两次才关、关完即停」、pywebview 缺失只报不抛。`TestShutdownEndpoint` 加 `from_app` 缺省 False。
+- 变异 12 个全红且理由逐条核对（`PYTHONDONTWRITEBYTECODE=1`、`--maxfail=1000`）：关窗不停 / 无视 from_app / 起服务不带 --from-app / 不登记 pid / 不核 pid 归属 /
+  单次探不到就关 / --browser 失效 / 调不到前面就退出 / 收尾不幂等 / 超时算没了 / 出错不退回浏览器 / ⌘Q 回调没接。
+- 真窗口端到端（探针 .app 经 LaunchServices）：窗口登记为 Alpha Bot、ARM64、在前台、pid 登记写入；第二次 `open` 没有第二个进程。
+
+### 注意
+- **升级前起的服务不带 `--from-app`**（如用户当前那个），关窗不会停它；`make alphabot-stop` 停一次，之后双击起的就按新规则走。
+- 真 pywebview 窗口只能在 Mac 上人工 / 探针验：CI 是 Linux、没有 WindowServer。
+
 ## [0.45.405] — 2026-10-04 — Fixed：经济日历 `_CPI` / `_NFP` / `_GDP` 的过去日期按 BLS / BEA **实际发布**归档逐条更正——2025 全年首次核对（含政府停摆推迟 / 取消的发布），连同 v0.45.404 查出的 2026 年 GDP 三个推算错值；10 处改值、2 处删除
 
 ### 背景
@@ -115,7 +243,30 @@ cpi 只到 2026-12-10（剩 67 天 / 阈值 90）、nfp 只到 2026-12-04（61 /
   **2026-10-30 起 gdp 表走完（exhausted）**，告警由 WARNING 升 ERROR——同样是设计内的，不是新 bug。
 - 监视器（编排器 Step 13，每周联网一次）会在上游发布当周以退出码 1 + 「上游新日程」提醒，届时抄写并上移 `verified_through`。
 
-## [0.45.403] — 2026-10-04 — 占位（进行中：退役 GitHubTool.commit()/status() 及辅助方法——生产零调用）
+## [0.45.403] — 2026-10-04 — Removed：退役 `GitHubTool.commit()` / `status()` 及全部辅助方法（v0.45.402 起生产零调用）
+
+v0.45.402 退役日报提交 / 推送链时，把这两个方法留作「已标注、未删」，说明要单独一版先数清读者再退役。本版照 `agent_toolbox` 自己 v0.45.204 的做法（静态 + 运行期各带正对照）完成。
+
+### Removed（`agent_toolbox.py` 419 → 161 行）
+- `GitHubTool.commit()`、`status()`，以及只服务于它们的 `_staged_names` / `_rename_sources_pointing_outside` / `_add_pathspec` / `_failure_reason` / `_parse_porcelain_z` / `_ADD_RETRY_DELAY_S`；`AgentHelper.summary()`、文件末尾的 `main()` 演示与 `__main__` 入口（它调 `status()`，全仓零调用者）。
+- 测试：`tests/test_github_tool_commit.py`（22 条）、`tests/test_github_tool_status.py`（9 条）、`tests/_artifact_whitelist.py`（v0.45.402 迁出的冻结夹具）——它们**只**测上面这些死代码。
+
+### 判死的两条证据
+1. **静态**（`git ls-files | xargs grep`，不用 `grep -r`：生产 checkout 的 `.claude/worktrees/` 有嵌套仓库副本会把陈旧代码算成读者）：`.status(` 作为 `GitHubTool` 成员的读者只有 `test_github_tool_status.py` 与本文件演示；`.commit(` 的读者只有 `test_github_tool_commit.py`（其余 `.commit(` 命中全是 sqlite 连接 / 测试夹具的同名方法，逐个核过）；`AgentHelper` 仅 `alpha_hive_daily_report` 构造它（取 `.git.repo_path`）；`agent_toolbox` 在 `~/.claude/scripts/`、`~/.claude/scheduled-tasks/`、LaunchAgents、`mcp-servers/` 零命中。
+2. **运行期**：给 `GitHubTool` 全部方法挂探针，跑部署 + 同步相关 155 条测试（`test_production_sync` / `test_git_failures_are_visible` / `test_gh_pages_unverified_parent` / `test_ghpages_data_root_migration` / `test_pipeline` / `test_non_swarm_scan_retired`）：生产代码实际调到的**只有** `run_git_cmd`（`production_sync.py` 66 次——正对照，证明探针真跑到了产线）；`status` / `commit` 零次。
+
+### Added（守卫）
+- `tests/test_git_failures_are_visible.py::TestCommitPushChainStaysRetired` 扩展：墓碑加上 `GitHubTool.{commit,status,_staged_names,_add_pathspec,_parse_porcelain_z,_failure_reason,_rename_sources_pointing_outside,_ADD_RETRY_DELAY_S}` 与 `AgentHelper.summary`；AST 断言从「不许经 `run_git_cmd` 调 `git push`」扩到 **`push` / `commit` / `add` 都不许**——`GitHubTool._ALLOWED_GIT_CMDS` 仍放行它们，只有这条 AST 能拦「又写回一个 `git commit`」。
+- `TestRunGitCmdFailuresAreLoud::test_non_utf8_output_raises_instead_of_returning_a_failure`：从 `status` 的测试迁来。**已知行为（钉住，不是赞成）**：git 输出含非 UTF-8 字节时 `run_git_cmd` 会**抛** `UnicodeDecodeError`（`text=True` 解码失败不在它 `except (SubprocessError, OSError)` 范围内），而不是返回 `success=False`。此前靠 `status()` 自己兜住；退役后没人兜了。生产上碰不到（`production_sync` 的 fetch/pull/rev-parse 输出里 git 默认 quotepath 会转义文件名），但那是「碰不到」不是「不会抛」。若哪天 `run_git_cmd` 改成自己兜住，该测试先红。
+
+### 验证
+- 变异（先提交再变异，用 `git checkout` 还原——第一次我在**未提交**时这样还原，把自己的修改一并还原掉了，重做）：`commit` 接回 ⇒ 墓碑 + AST 红；生产代码里加 `run_git_cmd("git commit …")` ⇒ AST 红；`run_git_cmd` 自己兜住解码错误 ⇒ 新迁入的测试红。
+- 干净克隆（`git clone --no-hardlinks`）全套：7905 passed（较上版少 31 条 = 删 31 条死代码测试、加 1 条迁入测试，其余扩展在既有测试里）；唯一失败 `TestCoverageHorizon`（日历覆盖不足，设计内周期性变红，与本版无关）。
+
+### 未做 / 后续
+- `GitHubTool._ALLOWED_GIT_CMDS` 仍含 `commit` / `add` / `status` / `diff` / `log` / `branch` 等当前生产调用点（只有 fetch / pull / merge-base / rev-list / rev-parse）用不到的子命令。按「别按类里还剩哪些方法收窄」的旧结论没动；是否改按**调用点**收窄，是单独的设计决定。
+- 阶段 6 ⑤（收窄根总闸 + 两处恒真自证）仍未做；`.swarm_results` / `analysis` 异地备份仍未决。
+
 
 ## [0.45.402] — 2026-10-04 — Removed：数据根迁移阶段 6 ④——撤日报提交 / 推送链（`auto_commit_and_notify` → `deploy_and_notify` 只部署 gh-pages）
 
@@ -152,7 +303,6 @@ cpi 只到 2026-12-10（剩 67 天 / 阈值 90）、nfp 只到 2026-12-04（61 /
 - **死代码**：`GitHubTool.commit()` / `status()` 及其 `_staged_names` 等辅助方法自本版起生产零调用（只剩测试与 `main()` 演示）。已在 docstring 标注，未删——它们是通用工具类的方法、各有测试钉着，单独一版再按「先数读者」退役。
 - 生产影响：下一次扫描前的快进会带上本版；该轮日报不再有 `git_commit` / `git_push`，`status.json` 的 `scan_timing.extra` 只剩 `gh_pages`。
 
-
 ## [0.45.401] — 2026-10-04 — Fixed：check-old 把「git 自己删掉的冻结文件」单列为 `removed_by_git`，阶段 6 快进后不再把 3107 个文件判成旁路写入
 
 ### Fixed
@@ -161,7 +311,6 @@ cpi 只到 2026-12-10（剩 67 天 / 阈值 90）、nfp 只到 2026-12-04（61 /
 
 ### Added
 - `tests/test_migrate_data_root.py` 4 条：git 删除不红 / 阶段 6 真实形态（`rm --cached` + 新 `.gitignore` + 快进删文件）不红 / 被删后重建仍红 / 无提交的手动删除仍红。变异：去掉豁免 ⇒ 前两条红；豁免一切消失 ⇒ `deleted_ignored` 与手动删除两条红。35/35 绿。
-
 
 ## [0.45.400] — 2026-10-03 — Fixed：Step 11 的 F&G 子进程已按时跑完、只是父进程自己拖过预算时，结果不再被丢弃并误报「超出时间预算、已终止」
 
@@ -276,6 +425,69 @@ cpi 只到 2026-12-10（剩 67 天 / 阈值 90）、nfp 只到 2026-12-04（61 /
   numpy / pytest / jinja2 / starlette / httpx **只**装在用户 site（`python3 -s` 下全不可 import）——任何把 HOME 换掉再起真解释器的测试都会撞上同一件事。
   全仓普查：其余 6 个改 HOME 的测试文件只起 git / bash / 桩，不起真解释器。
 
+## [0.45.396] — 2026-10-03 — Fixed（事后修订）：F&G 敞口门前瞻检验的自证——四元组第四元两边一律取 `shares × entry_price`（09-30~10-02 的「精确层失败」全是取法不对称）；另报「A 多开」（09-24 生产被限流）
+
+> 基于 main `6dc806fa`，未推送。只动 `experiments/fg_exposure_gate_forward_test.py` 与它的测试；`paper_portfolio` / 编排器 / 生产数据一行未动。
+> 0.45.394 已被两个未推送的 worktree 各占一次，故本线取 396 避让。
+
+**症状**：Step 11 恢复跑完后（391/392），检验每天报 `cannot_judge`：09-30 精确 12/13、10-01 14/15、10-02 13/16，决策层每天都是全对。
+行情窗口健康（21/21 整段取数、0 退回），不是取数问题。
+
+**根因（真实数据逐笔核对；生产数据先拷进临时目录、`pheromone.db` 用 `sqlite3.backup()` 只读源拷出，全程没碰 `~/alpha-hive-data`）**：
+- `_entry_key` 对在场仓位读 `size_usd`、对已平仓算 `shares × entry_price`（`ClosedTrade` 没有 `size_usd`），假定两者对同一笔相等。
+  不相等：下单时 `shares = round(size_usd/entry_price, 4)`，误差 × entry_price 让两者差 1~6 分。
+- Step 11 在生产**当天扫描之后**跑：生产已经把当天到期的仓位平掉，A 的重放窗口 `[FORWARD_START, today)` 不含当天 ⇒ 同一笔一边已平、一边在场 ⇒ 键错开。
+  10-02 的 3 笔正是当天 TIME 止损的 ABBV / MU / NVDA：两边 `shares`、`entry_price` 逐位相同，只是一边读 `size_usd`
+  4062.39 / **1016.64** / 1176.80、一边算出 4062.40 / **1016.61** / 1176.81（MU 差 3 分，任何「≤1 分容差」都盖不住）。
+  09-30（TMO）与 10-01（RKLB）同形。改动前的代码在同一份拷贝上跑出与生产**逐字相同**的 13/16；`--today 2026-10-03`
+  （A 也重放到 10-02、两边都已平仓）旧代码就是 19/19——每天的红是「今天有没有到期仓位」，不是漂移。
+- `--rehearse` 同因：历史窗口的仓位在生产里早已平仓、在演练里仍在场。09-09~16 **2/5**、09-14~19 **5/13**、09-16~19 **3/8**
+  （v0.45.297 当时双方都在场，所以是 5/5、13/13、8/8）。
+
+### Changed（事后修订，文件头「自证」段已登记）
+- `_entry_key`：两边一律 `round(shares × entry_price, 2)`，**不读 `size_usd`**。两种记录都有的两个字段、同一个算式 ⇒ 与是否已平仓无关；
+  没有容差参数，仍是精确相等。修订后：前瞻 09-30 13/13、10-01 15/15、10-02 **16/16**；演练 09-09~16 **5/5**、09-14~19 **13/13**、09-16~19 **8/8**。
+- **分辨率（不是零代价，如实写）**：第四元能分辨的最小建仓市值差 = max(1 分, entry_price × 1e-4)（实测：$2.66 → 1 分、$263.96 → 2 分、
+  $1015.8 → 10 分）。这正是已平仓那一行本来就有的精度（`shares` 只存 4 位小数），原实现对已平仓一直如此；变化只在「两边都在场」的那几笔
+  从 1 分降到同一水平——而它们平仓后本来就会落到这个精度。账本不存更细的数，任何键都不可能比它更细。
+
+### Added（只诊断，不进判定）
+- `_selfproof_stats` 另报 `a_only`（A 开了、生产没开，决策层三元组）；`evaluate()` / `rehearse()` 的 `selfproof` 带 `a_only_entries`；
+  进度行在非零时追加「（A 多开 N 笔生产没开的仓位）」（**图标不变**，此刻自证确实是过的；为 0 时进度行逐字不变）；失败原因追加一句指向
+  「生产某日没处理完」与「入场条件变宽」两种来源（刻意不含「评分链」「仓位金额」——测试靠这两个词分辨走了哪一支）。**分母仍只数生产记录**（预注册原样）。
+
+### 另一个发现：09-24 生产被限流，A 多开 4 笔——这才是下一次真红的来源（预测，待验证）
+- 生产日志（`alpha_hive_structured.jsonl.1`，2026-09-24 21:40:52 UTC）：那一轮 paper_portfolio 的 `_fetch_ohlc` **全部** `YFRateLimited` ⇒
+  当天不出场（TSLA / VKTX / META 拖到后面才平，出场日期照写 09-23/24，盈亏与 A 相同）、不开仓（四个候选快照 `entry_price=0`，要靠当日收盘价）。
+  A 重放时行情正常 ⇒ 开了 **CVX / NFLX / TMUS / VZ 四笔空头**。CVX/NFLX 的 09-24 快照事后被改写过（mtime 09-29 / 10-01），已对照备份仓库
+  `ff2a5b8` 原件：只动了 `actual_prices` / `cs_rank` / `created_at`，方向、分数、入场价未变——多开**纯属**生产那一轮没处理完。
+- 召回式自证看不见它们（分母只数生产记录），所以修订后此刻 16/16。但：① 10-02 收盘 A 持仓 12 笔 / 部署 58.6%，生产 8 笔 / 33.9%——上限
+  （15 笔 / 80%）先挡 A，某笔生产开了的仓位可能在 A 里开不出来（决策层）；② 它们最迟 **10-08**（T+14 自然日）平仓，平仓后 A 的成本价 NAV
+  = 生产 + 它们的已实现盈亏 ⇒ 此后每一笔新仓的金额都对不上 ⇒ 精确层**真实地**跌破 95%，预计 10-06~10-09 的 Step 11 起持续 `cannot_judge`。
+  这正是 09-23 搁置的「分段重锚」预案描述的情形（生产某日良性分歧、决策层仍对）——**启用与否是用户的决定，本版没有实现**。
+  本版做的只是让那一天的失败原因指得对，而不是又被读成「评分链 / 配置被改」。
+
+### 谁会红（新比较）
+- 金额层：仓位参数 / 仓位基数（实测 A 起点现金只多 **$1** 即 0/2 全红）/ 波动率来源 / 成本模型（经已实现盈亏进基数）的改动；
+  决策层：评分链 / 入场规则 / 仓位上限。两层判据与修订前相同，只是键不再随「是否已平仓」抖动。
+- 不红（与修订前相同）：A 多开（现在会被报出来，但仍不进判定）；低于账本精度的差；纯入场价回溯修订（直到它经盈亏流进基数）。
+- 新增不红：两边都在场、差在 1 分到 2×entry_price×1e-4 之间的那几笔（$1000 的票约 ≤20 分）——平仓后本来就看不见。
+
+### 测试（`tests/test_fg_exposure_gate_forward_test.py` 139 → 154）与变异
+- 新增：真实 MU 一对（夹具自检：两种旧取法确实差分）、不读 `size_usd`、五个价位的分辨率性质测试、「生产扫描当天平仓、A 仍在场」端到端
+  （夹具自检出场日 = 扫描日且旧取法差分）、$1 基数漂移仍红、「生产某日限流、A 多开」端到端（分母不变 / 进度行 / 白名单）、多开按决策层算、
+  失败原因附注不冒充分支、进度行为 0 时逐字不变、演练人读输出。
+- 变异在 `git archive` 副本上跑（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、`--maxfail=1000`，每轮 passed+failed+skipped=154 与基线核对），**14/14 红**：
+  M0 改动前的脚本文件（10 红）/ M1 在场改回读 `size_usd`（4 红，含端到端那条，红因 `reproduced 0≠1`）/ M2 取整到角（7）/ M3 第四元恒 0（14）/
+  M4 多开按四元组算 / M5 多开恒 0 / M6 分母计入多开 / M7 失败原因丢附注 / M8 进度行丢多开 / M9 evaluate 丢字段 / M10 rehearse 丢字段 /
+  M11 人读输出丢多开 / M12 附注写进「评分链」/ M13 多开时换 ⚠️ 图标。还原后全绿。副本里 1 条 skip 是「不在 git 仓库里（导出的源码包）」，合法。
+- 相关文件（`grep -l fg_exposure_gate_forward tests/*.py`，7 个）490 passed；ruff 通过。
+- 全套：7927 passed / 3 failed / 82 deselected / 2 xfailed。3 条在 main `6dc806fa` 的 `git archive` 副本上**同样红**，与本版无关：`test_economic_calendar::TestCoverageHorizon`（BLS/BEA 2027 日程未发布，设计内的到期告警）、`test_alphabot_launcher` 两条（`test_missing_python_fails_loudly` 超时 60s、`test_demo_start_reuse_and_stop` 的 `main` 返回 1）。
+
+### 未动
+窗口、变体、统计量、检视点（15/30）、α、盲化、`SELFPROOF_MIN_RATE`、分母、决策层定义、种子。修订是在**只重放 A** 的基础上定的
+（诊断脚本与 `--rehearse`）；修订后用 `run()` 核对时输出按盲化只有进度与自证率，没有算或看任何周度差 / 效应量；
+`decide()` 自 `FORWARD_START` 起从未走到出统计量的分支（2/15 个合格周）。
 
 ## [0.45.394] — 2026-10-03 — Changed：数据根迁移阶段 6 ①②③——代码仓库不再跟踪生产数据（3125 个文件解除跟踪，历史保留）+ 「数据被跟踪即红」守卫
 

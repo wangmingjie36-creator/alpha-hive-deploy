@@ -50,3 +50,5 @@ pydantic>=2.12.0,<3
 # mcp 已经依赖这两个；显式写出，别让前端靠传递依赖活着
 starlette>=0.27,<2
 uvicorn>=0.23,<1
+# Alpha Bot.app 的原生窗口（v0.45.407）；只在 macOS 装。没有它启动器退回浏览器（原因进 launcher.log）
+pywebview>=6.2,<7; sys_platform == "darwin"

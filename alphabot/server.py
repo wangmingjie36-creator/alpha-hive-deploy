@@ -41,9 +41,11 @@ def _json(obj, status: int = 200) -> Response:
 
 def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[IntradayPoller] = None,
                port: int = 8765, start_poller: bool = False,
-               on_shutdown: Optional[Callable[[], None]] = None) -> Starlette:
+               on_shutdown: Optional[Callable[[], None]] = None, from_app: bool = False) -> Starlette:
     """`on_shutdown`：页面「停止服务」调它（`alphabot.__main__` 传入 uvicorn 的退出开关）；
-    不传 ⇒ `/api/shutdown` 答 400，页面也不显示该按钮。"""
+    不传 ⇒ `/api/shutdown` 答 400，页面也不显示该按钮。
+    `from_app`：由 Alpha Bot.app 起的（`--from-app`）——`/api/ping` 报出来，启动器据此决定关窗时停不停它；
+    终端里起的服务关窗不停。"""
     svc = service or AlphaBotService()
     allowed_hosts = {f"{h}:{port}" for h in LOOPBACK_HOSTS} | set(LOOPBACK_HOSTS)
 
@@ -73,7 +75,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
     def ping(request):
         # 桌面启动器（`alphabot.launcher`）靠它认出「端口上跑的就是 Alpha Bot」——轻量，不碰账本
         return {"app": "alphabot", "version": __version__, "demo": svc.demo, "pid": os.getpid(),
-                "can_shutdown": on_shutdown is not None}
+                "can_shutdown": on_shutdown is not None, "from_app": from_app}
 
     def shutdown(request: Request):
         if on_shutdown is None:

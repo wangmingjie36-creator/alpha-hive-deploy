@@ -29,6 +29,7 @@ def main(argv=None) -> int:
     ap.add_argument("--no-poll", action="store_true", help="不跑盘中定时快照")
     ap.add_argument("--demo", action="store_true", help="演示模式：合成期权链、不读账本、不写真状态目录")
     ap.add_argument("--open", action="store_true", help="启动后打开浏览器")
+    ap.add_argument("--from-app", action="store_true", help="由 Alpha Bot.app 启动（关掉它的窗口时服务随之停止）")
     args = ap.parse_args(argv)
     if not _is_loopback(args.host):
         print(f"alphabot: 拒绝绑定非回环地址 {args.host!r}——Alpha Bot 只在本机运行（账本是私有数据）",
@@ -58,7 +59,8 @@ def main(argv=None) -> int:
         # 与 Ctrl-C 同一条退出路径：uvicorn 收尾 → lifespan 停盘中轮询
         holder["server"].should_exit = True
 
-    app = create_app(svc, poller=poller, port=args.port, start_poller=poller is not None, on_shutdown=_stop)
+    app = create_app(svc, poller=poller, port=args.port, start_poller=poller is not None, on_shutdown=_stop,
+                     from_app=args.from_app)
     url = f"http://{args.host}:{args.port}/"
     print(f"alphabot: {url}", file=sys.stderr)
     if args.open:

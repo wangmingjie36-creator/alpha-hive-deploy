@@ -136,8 +136,8 @@ class TestRunGitCmdCallSitesAreWhitelisted:
         assert ("production_sync.py", "pull") in hits      # `git pull --ff-only --no-rebase`
         assert ("production_sync.py", "merge-base") in hits
         # v0.45.402：`push` / `merge-tree` 随 push_main 退役；不许再出现见 TestCommitPushChainStaysRetired
-        assert ("agent_toolbox.py", "add") in hits         # f"git add -- {…}"
-        assert ("agent_toolbox.py", "commit") in hits      # f"git commit -m {…}"
+        # v0.45.403：agent_toolbox 里的 add / commit / status / diff 调用点随 GitHubTool.commit/status 退役，
+        # 生产代码经 run_git_cmd 下发的子命令现在只剩 production_sync 的快进那几条
 
     def test_scanner_flags_the_shapes_that_broke_the_test_branch(self):
         """有牙：v0.45.210 前 report_deployer 里的原句必须被抓到。"""
@@ -234,13 +234,30 @@ class TestRunGitCmdFailuresAreLoud:
         warns = _records(caplog, "alpha_hive.agent_toolbox", logging.WARNING)
         assert warns and "git push origin main" in warns[0].getMessage()
 
+    def test_non_utf8_output_raises_instead_of_returning_a_failure(self, tmp_path):
+        """已知行为（钉住，不是赞成）：git 输出里有非 UTF-8 字节时，`run_git_cmd` **抛** `UnicodeDecodeError`
+        （`text=True` 解码失败，不在它 `except (SubprocessError, OSError)` 的范围内），不是返回 `success=False`。
+        所以调用方不能假设「它永远返回 dict」。v0.45.403 退役 `GitHubTool.status()` 时这条从它的测试里迁来
+        （原先只被 `status` 的测试顺带钉着；`status` 当时靠自己兜住它，现在没人兜了）。
+        若哪天 `run_git_cmd` 改成自己兜住，本条会先红，让人知道调用方的假设变了。
+        正对照 ×2：输出里真有非 UTF-8 字节；`production_sync` 的 git 命令（fetch/pull/rev-parse…）输出不含文件名
+        字节（git 默认 quotepath 会转义），所以生产上碰不到——但这是「碰不到」，不是「不会抛」。"""
+        def git(*a, **kw):
+            return subprocess.run(["git", *a], cwd=tmp_path, check=True, capture_output=True, **kw)
+        git("init", "-q")
+        blob = git("hash-object", "-w", "--stdin", input=b"x").stdout.strip()
+        # APFS 不许建非 UTF-8 文件名，但索引条目可以（别的系统提交进来的就是这样）
+        git(b"update-index", b"--add", b"--cacheinfo", b"100644," + blob + b",bad\xffname.txt")
+        assert b"\xff" in git("status", "--porcelain", "-z").stdout
+        with pytest.raises(UnicodeDecodeError):
+            GitHubTool(repo_path=str(tmp_path)).run_git_cmd("git status --porcelain -z")
+
 
 # ═════════════════════════════ 3/4. 真 git 沙箱 ═════════════════════════════
 
 NON_PRODUCTION = {"system_status": "✅ 完成", "opportunities": [{"ticker": "NVDA"}]}
 PRODUCTION = {"system_status": "✅ 蜂群协作完成", "swarm_metadata": {"tickers_analyzed": 1}}
 LEFTOVER = "alpha-hive-daily-2026-03-13.json"
-
 
 @pytest.fixture
 def sandbox(tmp_path, monkeypatch):
@@ -361,6 +378,10 @@ class TestCommitPushChainStaysRetired:
     def test_tombstones(self):
         import production_sync
         assert not hasattr(production_sync, "push_main"), "push_main 被接回去了（阶段 6 退役，勿重建）"
+        for name in ("commit", "status", "_staged_names", "_add_pathspec", "_parse_porcelain_z", "_failure_reason",
+                     "_rename_sources_pointing_outside", "_ADD_RETRY_DELAY_S"):
+            assert not hasattr(GitHubTool, name), f"GitHubTool.{name} 被接回去了（v0.45.403 退役，勿重建提交能力）"
+        assert not hasattr(agent_toolbox.AgentHelper, "summary"), "AgentHelper.summary 被接回去了"
         for name in ("auto_commit_and_notify", "REPORT_ARTIFACT_PATHS", "_is_report_artifact", "_git_modified_files"):
             assert not hasattr(rd, name), f"report_deployer.{name} 被接回去了（阶段 6 退役，勿重建）"
         import scan_timing
@@ -369,7 +390,10 @@ class TestCommitPushChainStaysRetired:
 
     def test_no_production_code_pushes_via_run_git_cmd(self):
         subs = {sub for _, src in _production_sources() for _, sub in _run_git_cmd_sites(src)}
-        assert "push" not in subs, "生产代码里出现了 run_git_cmd('git push …')：日报不再推代码仓库 main"
+        # v0.45.403 起 commit / add 也不许有：提交能力随 GitHubTool.commit() 一起退役，
+        # 但白名单 `_ALLOWED_GIT_CMDS` 仍放行它们，只有这条 AST 能拦「又写回一个 git commit」
+        for banned in ("push", "commit", "add"):
+            assert banned not in subs, f"生产代码里出现了 run_git_cmd('git {banned} …')：日报 / 部署不再向代码仓库提交或推送数据"
         # 正对照：扫描器确实读到了别的子命令（空扫描会让上一行恒绿）
         assert {"fetch", "pull"} <= subs
 
