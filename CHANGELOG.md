@@ -88,7 +88,48 @@
 - 测试 192 → 202；本轮 13 个变异（每条修复一个）在 `git archive` 副本上 **13/13 红**，每个红的都是该红的那条，基线 199+3 skip、还原后全绿。
   真实数据：前瞻 10-03 19/19（重叠日核 4 个、无缺口）；演练 09-28~10-03 9/9（种子取自备份仓库）、09-16~19 8/8。
 
-## [0.45.407] — 2026-10-04 — 占位（进行中：Alpha Bot.app 改用 pywebview 原生窗口；原占 402 被先推送者占用）
+## [0.45.407] — 2026-10-04 — Added：Alpha Bot.app 改用原生窗口（pywebview / WKWebView）——双击弹窗口、关窗口（或 ⌘Q）停掉由 .app 起的服务；没有 pywebview 时退回浏览器
+
+用户要求：Alpha Bot 像个程序，不是浏览器里的一个标签页。三个选项（Safari「添加到程序坞」/ pywebview / Electron）里用户选了 pywebview。
+用户批准后安装：`pip install --user pywebview`（pywebview 6.2.1 + pyobjc 12.2.2 的 Cocoa / WebKit / Quartz / Security / UniformTypeIdentifiers + bottle、proxy_tools；pyobjc 是 universal2，与 0.45.399 的 arm64 一致）。
+
+### Added
+- `alphabot/window.py`：`run_window(url, is_alive, on_quit)`。
+  - **进程身份**：.app 的 bash 壳 exec 的 python.org `python3` 会转进框架里的 `Python.app`，窗口一起来就被 LaunchServices 登记成「Python」+ 火箭图标（探针实测）
+    ⇒ NSApplication 初始化**之前**改内存里的 bundle 信息（名称 / bundle id），再设 Dock 图标。实测登记为 `"Alpha Bot"` / `local.alphahive.alphabot` / ARM64。
+  - **服务没了窗口自关**（页面「停止服务」、进程被杀）：后台线程每 1.5s 探一次，**只认端口空了**、连续两次才关——超时 / 忙不算（复查时修，见下）。
+  - **⌘Q**：pywebview 答应退出后 Cocoa 直接 `exit()`，`webview.start()` 永不返回（探针实测）⇒ 收尾挂在 `NSApplicationWillTerminateNotification` 上。
+  - `ALLOW_DOWNLOADS = True`（pywebview 缺省 False，页面里的 `<a download>` 会静默无效；目前 `downloadCSV` 没有调用方，属预防）。
+  - `unavailable_reason()`：import 不了 ⇒ 原因字符串，启动器退回浏览器并写进 launcher.log。
+- `alphabot/launcher.py`：服务就绪后开窗口（`--browser` 可绕开）。
+  - **只开一个窗口**：窗口进程 pid 记在 `~/Library/Application Support/Alpha Bot/window.pid`；再次启动先把它调到前面（`NSRunningApplication.activate`），
+    pid 已死 / 被别的进程复用（`ps` 命令行里没有 `alphabot.launcher`）⇒ 忽略；调不到前面 ⇒ 照常往下走（不许「双击没反应」）。
+    实测 macOS 自己就把第二次双击转成「激活已运行的那个」，连启动器都不起——pid 登记是兜底。
+  - **关窗停服务只停 .app 起的**：`spawn_server` 加 `--from-app`，`/api/ping` 报 `from_app`；终端 `make alphabot` 起的服务关窗不停。
+    收尾（撤 pid 登记 + 停服务）幂等，关窗正常返回与 ⌘Q 回调共用一份。
+  - 窗口运行时起不来（能 import、开不了窗）⇒ 退回浏览器、**不停服务**（否则刚起的服务成了没窗口的孤儿）。
+- `alphabot/server.py` / `__main__.py`：`create_app(from_app=...)`、`--from-app`。
+- `requirements.txt`：`pywebview>=6.2,<7; sys_platform == "darwin"`（Linux CI 不装；那里窗口路径由假 UI 覆盖）。
+
+### 二次检查（用户要求）发现并修掉的问题（均先复现 / 实测再修）
+1. **⌘Q 不停服务**：初版收尾写在 `webview.start()` 之后，⌘Q 时进程直接 exit 走不到（探针：发 `terminate:` 后 start 之后那行没写出、退出码 0）。
+   ⇒ willTerminate 通知；修后真 Cocoa 实测 `on_quit` 被调到。正常关窗路径实测 3.2s 自关、`run_window` 返回、`on_quit` **不**被调（不重复收尾）。
+2. **服务一忙窗口就可能被关**：初版把探测超时也算「服务没了」，连续两次（约 3s）就关窗，关完 `stop_running` 也探不到、停不掉 ⇒ 只认端口空了。
+3. **窗口运行时出错 ⇒ 孤儿服务**：初版落进通用「启动器出错」弹窗，服务留着没窗口 ⇒ 退回浏览器。
+4. **测试往系统临时目录漏 `alphabot-demo-*`**（演示服务 `mkdtemp` 从不清；复查时已有 83 个，0.45.390 起的老测试就在漏）⇒ `home` 夹具把子进程 `TMPDIR` 指到 tmp；修后全套跑完数量不变。
+5. 测试夹具自己的毛病：「关窗停服务」那条的 `finally` 先 `--stop` 再断言 ⇒ 「关窗从不停服务」的变异**跑绿**（实测）⇒ 收尸挪到断言之后、只在服务还在时停。
+
+### 测试
+- `tests/test_alphabot_launcher.py` 22 → 32 条，`TestNativeWindow` 10 条（真起演示服务；窗口用假 UI）：开的是窗口不是浏览器、`--from-app`、pid 登记与清除、关窗停 .app 起的服务、
+  终端起的服务关窗不停（真起一个不带 `--from-app` 的服务）、⌘Q 立即停且只停一次、第二次启动只激活、陈旧 / 被复用的 pid、退回浏览器并写原因、`--browser`、
+  窗口出错退回浏览器不停服务、忙不算没了、看门狗「连续两次才关、关完即停」、pywebview 缺失只报不抛。`TestShutdownEndpoint` 加 `from_app` 缺省 False。
+- 变异 12 个全红且理由逐条核对（`PYTHONDONTWRITEBYTECODE=1`、`--maxfail=1000`）：关窗不停 / 无视 from_app / 起服务不带 --from-app / 不登记 pid / 不核 pid 归属 /
+  单次探不到就关 / --browser 失效 / 调不到前面就退出 / 收尾不幂等 / 超时算没了 / 出错不退回浏览器 / ⌘Q 回调没接。
+- 真窗口端到端（探针 .app 经 LaunchServices）：窗口登记为 Alpha Bot、ARM64、在前台、pid 登记写入；第二次 `open` 没有第二个进程。
+
+### 注意
+- **升级前起的服务不带 `--from-app`**（如用户当前那个），关窗不会停它；`make alphabot-stop` 停一次，之后双击起的就按新规则走。
+- 真 pywebview 窗口只能在 Mac 上人工 / 探针验：CI 是 Linux、没有 WindowServer。
 
 ## [0.45.404] — 2026-10-04 — Changed：经济日历三次核对——BLS / BEA 仍未发布 2027 年 CPI / 非农 / GDP 日程，**一个日期都没加**，`TestCoverageHorizon` 按设计保持红；顺带查出 2026 年 GDP 表三个过去日期与官方不符（本条未改，见下）
 
