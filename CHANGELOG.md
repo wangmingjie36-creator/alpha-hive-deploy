@@ -56,7 +56,30 @@ cpi 只到 2026-12-10（剩 67 天 / 阈值 90）、nfp 只到 2026-12-04（61 /
   **2026-10-30 起 gdp 表走完（exhausted）**，告警由 WARNING 升 ERROR——同样是设计内的，不是新 bug。
 - 监视器（编排器 Step 13，每周联网一次）会在上游发布当周以退出码 1 + 「上游新日程」提醒，届时抄写并上移 `verified_through`。
 
-## [0.45.403] — 2026-10-04 — 占位（进行中：退役 GitHubTool.commit()/status() 及辅助方法——生产零调用）
+## [0.45.403] — 2026-10-04 — Removed：退役 `GitHubTool.commit()` / `status()` 及全部辅助方法（v0.45.402 起生产零调用）
+
+v0.45.402 退役日报提交 / 推送链时，把这两个方法留作「已标注、未删」，说明要单独一版先数清读者再退役。本版照 `agent_toolbox` 自己 v0.45.204 的做法（静态 + 运行期各带正对照）完成。
+
+### Removed（`agent_toolbox.py` 419 → 161 行）
+- `GitHubTool.commit()`、`status()`，以及只服务于它们的 `_staged_names` / `_rename_sources_pointing_outside` / `_add_pathspec` / `_failure_reason` / `_parse_porcelain_z` / `_ADD_RETRY_DELAY_S`；`AgentHelper.summary()`、文件末尾的 `main()` 演示与 `__main__` 入口（它调 `status()`，全仓零调用者）。
+- 测试：`tests/test_github_tool_commit.py`（22 条）、`tests/test_github_tool_status.py`（9 条）、`tests/_artifact_whitelist.py`（v0.45.402 迁出的冻结夹具）——它们**只**测上面这些死代码。
+
+### 判死的两条证据
+1. **静态**（`git ls-files | xargs grep`，不用 `grep -r`：生产 checkout 的 `.claude/worktrees/` 有嵌套仓库副本会把陈旧代码算成读者）：`.status(` 作为 `GitHubTool` 成员的读者只有 `test_github_tool_status.py` 与本文件演示；`.commit(` 的读者只有 `test_github_tool_commit.py`（其余 `.commit(` 命中全是 sqlite 连接 / 测试夹具的同名方法，逐个核过）；`AgentHelper` 仅 `alpha_hive_daily_report` 构造它（取 `.git.repo_path`）；`agent_toolbox` 在 `~/.claude/scripts/`、`~/.claude/scheduled-tasks/`、LaunchAgents、`mcp-servers/` 零命中。
+2. **运行期**：给 `GitHubTool` 全部方法挂探针，跑部署 + 同步相关 155 条测试（`test_production_sync` / `test_git_failures_are_visible` / `test_gh_pages_unverified_parent` / `test_ghpages_data_root_migration` / `test_pipeline` / `test_non_swarm_scan_retired`）：生产代码实际调到的**只有** `run_git_cmd`（`production_sync.py` 66 次——正对照，证明探针真跑到了产线）；`status` / `commit` 零次。
+
+### Added（守卫）
+- `tests/test_git_failures_are_visible.py::TestCommitPushChainStaysRetired` 扩展：墓碑加上 `GitHubTool.{commit,status,_staged_names,_add_pathspec,_parse_porcelain_z,_failure_reason,_rename_sources_pointing_outside,_ADD_RETRY_DELAY_S}` 与 `AgentHelper.summary`；AST 断言从「不许经 `run_git_cmd` 调 `git push`」扩到 **`push` / `commit` / `add` 都不许**——`GitHubTool._ALLOWED_GIT_CMDS` 仍放行它们，只有这条 AST 能拦「又写回一个 `git commit`」。
+- `TestRunGitCmdFailuresAreLoud::test_non_utf8_output_raises_instead_of_returning_a_failure`：从 `status` 的测试迁来。**已知行为（钉住，不是赞成）**：git 输出含非 UTF-8 字节时 `run_git_cmd` 会**抛** `UnicodeDecodeError`（`text=True` 解码失败不在它 `except (SubprocessError, OSError)` 范围内），而不是返回 `success=False`。此前靠 `status()` 自己兜住；退役后没人兜了。生产上碰不到（`production_sync` 的 fetch/pull/rev-parse 输出里 git 默认 quotepath 会转义文件名），但那是「碰不到」不是「不会抛」。若哪天 `run_git_cmd` 改成自己兜住，该测试先红。
+
+### 验证
+- 变异（先提交再变异，用 `git checkout` 还原——第一次我在**未提交**时这样还原，把自己的修改一并还原掉了，重做）：`commit` 接回 ⇒ 墓碑 + AST 红；生产代码里加 `run_git_cmd("git commit …")` ⇒ AST 红；`run_git_cmd` 自己兜住解码错误 ⇒ 新迁入的测试红。
+- 干净克隆全套结果见下一条验证记录。
+
+### 未做 / 后续
+- `GitHubTool._ALLOWED_GIT_CMDS` 仍含 `commit` / `add` / `status` / `diff` / `log` / `branch` 等当前生产调用点（只有 fetch / pull / merge-base / rev-list / rev-parse）用不到的子命令。按「别按类里还剩哪些方法收窄」的旧结论没动；是否改按**调用点**收窄，是单独的设计决定。
+- 阶段 6 ⑤（收窄根总闸 + 两处恒真自证）仍未做；`.swarm_results` / `analysis` 异地备份仍未决。
+
 
 ## [0.45.402] — 2026-10-04 — Removed：数据根迁移阶段 6 ④——撤日报提交 / 推送链（`auto_commit_and_notify` → `deploy_and_notify` 只部署 gh-pages）
 
