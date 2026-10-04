@@ -74,6 +74,14 @@
 - `tests/test_replay_ohlc_window.py` / `tests/test_fg_exposure_gate_forward_test.py`：桩函数跟上新签名；`run()` 接线测试改为同时钉住「传了库、目录是此刻的
   `PATHS.replay_ohlc_state`」与「样本内不传」。
 
+### 验证
+- 变异 28/28 红（git archive 副本，`--maxfail=1000`、清 `__pycache__`、基线先绿、用例数与基线核对）。首轮存活 2 个：M24 是我的变异删错了行（删成了
+  `alphabot_state`，改正后红）；M28「比对首日就不一致也从首日起落定」是真盲区，补测 `test_disagreement_on_the_first_day_settles_nothing` 后红。
+- 全套（合并 main 后，不带 `-x`）：8067 passed / 1 failed——`test_economic_calendar::TestCoverageHorizon`，按 0.45.404 设计保持红（BLS / BEA 未发布 2027 日程），
+  与本版无关；跑完核过生产数据根下没有 `replay_ohlc_state/`。
+- 复查补一处潜在抖动：`tests/test_replay_ohlc_window.py` 的合成世界把行情库的「美东今天」钉成固定日子——同一条测试跑两次 `run()` 若恰好跨过美东午夜
+  （本机 21:00 PDT），第二次会开始落定、改成补尾，断言就会偶发红。
+
 ### 谁会红
 - 库文件坏了 / 写不进去 ⇒ 进度行段首 ⚠️ + attention `ic_rerun.fg_exposure_gate_forward.ohlc_window_degraded`（本次结果不受影响，但下次会慢回去）。
 - Yahoo 改了已落定的日线 ⇒ 进度行一句「行情库：… 共 N 根已落定日线 Yahoo 后来改了，沿用首次落定的值」，只要窗口里有就每次都报。
@@ -82,7 +90,7 @@
 ### 已知未改
 - 正常日仍是每个在场标的一次请求（约 15–20 次、约 10s），省不掉；要再快只能并行下载，会加大突发请求、更容易 429，本版不做。
 - 每次补下载只核对已落定段最后 10 天，更早的修订看不见（设计如此）。
-- 进程被 KILL 时同目录可能留下 `.<TICKER>.*.tmp`（不会被当成库文件读；数据备份会一并拷走，体积可忽略）。
+- 进程被 KILL 时同目录可能留下 `.<TICKER>.*.tmp`；坏文件改名后的 `<TICKER>.json.invalid-*` 也只留在本机。两者都不会被当成库文件读，数据备份按后缀白名单跳过它们、只在 MANIFEST 的 skipped 里记一笔（`export.copy_state_dir`）。
 
 
 ## [0.45.409] — 2026-10-04 — Changed：数据根迁移阶段 6 ⑤——总闸从「仓库根点名清单」换成「真实数据根整根指纹」；修两处恒真的账本自证

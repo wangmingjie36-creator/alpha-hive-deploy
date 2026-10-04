@@ -41,6 +41,7 @@ import pytest
 
 import ic_rerun_readiness as rr   # 只给「降级看得见」那一节核对 attention 条目（复审 S1）
 import paper_portfolio as pp
+import replay_ohlc_store
 
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -220,6 +221,9 @@ def world(monkeypatch, tmp_path):
     monkeypatch.setitem(pp.CONFIG, "max_deployed_pct", 52.0)
     fake = FakeYF(master)
     monkeypatch.setitem(sys.modules, "yfinance", fake.module())
+    # v0.45.410：前瞻 run() 会用回放行情库，落定看「美东今天」。钉成一个固定日子：同一条测试里跑两次 run() 时
+    # 不会因为恰好跨过美东午夜（本机 21:00 PDT）而第二次开始落定、改成补尾下载——合成世界不该依赖墙上时钟。
+    monkeypatch.setattr(replay_ohlc_store, "_et_today", lambda: dt.date(2026, 9, 1))
     return types.SimpleNamespace(master=master, fake=fake, tmp=tmp_path, monkeypatch=monkeypatch)
 
 
