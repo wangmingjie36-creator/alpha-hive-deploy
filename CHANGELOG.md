@@ -11,7 +11,36 @@
 
 ## [0.45.410] — 2026-10-04 — 占位（进行中：F&G 前瞻检验回放行情库——已落定 K 线只下载一次，降级路径不再随快照天数增长）
 
-## [0.45.409] — 2026-10-04 — 占位（进行中：阶段 6 ⑤ 收窄根总闸 + 修两处恒真自证）
+## [0.45.409] — 2026-10-04 — Changed：数据根迁移阶段 6 ⑤——总闸从「仓库根点名清单」换成「真实数据根整根指纹」；修两处恒真的账本自证
+
+阶段 6 的最后一项（①②③ v0.45.394、④ v0.45.402、GitHubTool 退役 v0.45.403 之后）。**只改测试基础设施与测试，不改任何生产代码。**
+
+### 问题
+- **清单式总闸成了恒真闸**：`conftest._guard_production_artifacts` 盯 `_GUARDED_PRODUCTION_ARTIFACTS`（8 个点名产物）在**仓库根**的指纹。数据搬到 `$ALPHA_HIVE_HOME` 后这些路径在仓库根都不存在，只剩「别凭空建出同名产物」这一层，而那层仓库根的默认拒绝闸早已覆盖 ⇒ 冗余。
+- **真正的缺口反过来**：测试逃出隔离、写到**真实数据根**（生产账本 / 样本库 / 模型，不可重取）——没有任何东西会红。
+- **两处自证恒真**：`test_ml_catalyst_quality_source.py` 与 `test_ml_swarm_cache_dead_reader.py` 的 `_real_ledger_size()` 读 `REPO/probability_scorecard_state/published.jsonl`；阶段 6 后那条路径在**每台机器上**都不存在 ⇒ 「前后都是 -1」永远成立，证明不了「`record_published` 桩截住了」（CLAUDE.md「skip 守卫要问 X 在哪些环境存在」同形）。
+
+### Changed
+- `tests/conftest.py`：删除 `_GUARDED_PRODUCTION_ARTIFACTS` 与 v0.45.150 的清单式 session 闸；新增 **`_guard_real_data_root`**（session 级）：整个 session 跑完，真实数据根里的生产数据必须一个字节没变。「之前」取在 `pytest_sessionstart`（早于收集期、早于任何 env 隔离——`_isolate_env` 会把 `ALPHA_HIVE_HOME` 改成沙箱）。保留仓库根的默认拒绝闸。
+- `tests/_root_data_guard.py`：`fingerprint(root, excluded=…)` 参数化；新增 `data_root_excluded_reason`（默认拒绝；仅豁免常驻写入方 `logs/`、`db_backups/` 与 `_` 打头的元目录 `_git_backup/` `_archive/` `_migration/`…，**只在顶层**豁免）与 `real_data_root(environ, home, repo_root)`（`ALPHA_HIVE_HOME` 优先，否则 `~/alpha-hive-data`；不存在或等于仓库根 ⇒ None）。口径同仓库根闸：`(size, mtime_ns)`、`-shm` 只记大小、目录记存在。
+- `pytest_report_header`：显式打印 `real-data-root guard: active on <路径>（N 个受闸条目）` 或 `INACTIVE（…）`——**这台机器上闸有没有生效必须可见**：CI / 干净克隆没有真实数据根，闸在那里什么都不保护，不能把「没保护」渲染成「保护着」。
+- 两处自证：`_real_ledger_size()` → `_ledger_size()`，读账本自己的解析器 `probability_scorecard._ledger_path()`（调用时求值、落在测试沙箱里），并**先断言路径确实在沙箱内**；各加 `test_ledger_probe_sees_a_real_write` 正对照（不打桩真调 `record_published`，尺子必须量得出增长）。
+
+### Added / Removed（测试）
+- `tests/test_root_data_guard.py`：删旧清单两条（`test_legacy_artifact_list_is_subset_of_coverage` / `test_legacy_list_is_pinned`）；新增 数据根判据（受闸 15 种形状 / 豁免 10 种 / 仅顶层豁免 / `real_data_root` 解析 5 种情形）、合成数据根上的指纹比对（7 种写入形状必须红 + 日志 / 备份轮转 / `-shm` 读标记等不红）、子进程接线 3 条（红组：收集期写 + 追加账本 + 新产物 + 新目录；对照组：只读 + 写日志与元目录 + header 说 active；无数据根：header 说 INACTIVE 且不报错）。内层 pytest 默认 `HOME` 指向空目录、不带 `ALPHA_HIVE_HOME`（并设 `PYTHONUSERBASE` 找回用户 site-packages），否则在这台机器上内层会去盯真 `~/alpha-hive-data`。
+
+### 验证
+- 变异（先提交再变异）：数据根闸 teardown 不比对 ⇒ 红组红；「之前」晚到 fixture setup 才取 ⇒ 红组红（收集期写入被吃进基线）；判据放过一切 ⇒ 24 条红；header 不再说 INACTIVE ⇒ 对应测试红。两处自证：去掉 `record_published` 桩让它真落账 ⇒ 3 条红（**旧尺子下这是全绿**，即恒真的证据）；尺子改回仓库根路径 ⇒ 5 条红（路径断言抓住）。
+- 本机真实数据根遍历 0.1 秒（约 2800 个受闸条目），全套耗时不变。
+- 干净克隆全套结果见下一条验证记录。
+
+### 须知
+- ⚠️ **机器上正在跑每日扫描（平日 14:00–15:00）/ 周任务（周日 09:07 前后）时全套会红**：扫描写 `cache/`、`report_snapshots/`、`paper_portfolio_state/` 等，那不是假警报，是「测试与生产写同一批文件的时间窗真实存在」（仓库根闸原来就有同样的说明）。
+- 本版把「真实数据根」限定为测试进程**启动时**的 `ALPHA_HIVE_HOME`，缺省取 `~/alpha-hive-data`；若你的 shell 里把 `ALPHA_HIVE_HOME` 设成别处，闸盯那里。
+
+### 阶段 6 收尾状态
+①②③（v0.45.394）数据解除跟踪 + 守卫；④（v0.45.402）撤日报提交 / 推送链；v0.45.403 退役 `GitHubTool.commit/status`；⑤（本版）总闸。**仍未决**：`.swarm_results_*.json` / `analysis-*-ml-*.json` 的异地备份；`GitHubTool._ALLOWED_GIT_CMDS` 是否按调用点收窄。
+
 
 ## [0.45.408] — 2026-10-03 — Changed（事后修订）：F&G 敞口门前瞻检验的自证改为**逐日重锚**；统计量用的 A / B 仍从冻结种子连续重放。Added：`PATHS.data_backup_repo`、冻结锚点
 
