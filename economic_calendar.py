@@ -8,7 +8,9 @@
 - NFP:  https://www.bls.gov/schedule/news_release/empsit.htm
 - GDP:  https://www.bea.gov/news/schedule
 已过去的日期以**实际发布**为准（v0.45.405 起），不以当初的日程为准——停摆会
-推迟或取消发布，日程页事后还会被改写。实际发布查归档：
+推迟或取消发布，日程页事后还会被改写。判定**按参考期**：该期后来发布了（推迟，
+含改名）⇒ 记实际发布日；该期始终没有发布（取消）⇒ 删，不找替身日期。
+实际发布查归档：
 - CPI / NFP: https://www.bls.gov/bls/news-release/cpi.htm 、…/empsit.htm
   （每条打开原文核「embargoed until」行；取消的发布在归档里写明 Not published）
 - GDP: https://www.bea.gov/news/archive?field_related_product_target_id=451
@@ -113,6 +115,8 @@ _GDP = [
     #   「Gross Domestic Product, 3rd Quarter 2025 (Initial Estimate)」，原文：
     #   "this initial report for the third quarter of 2025 replaces the release of the
     #   advance estimate originally scheduled for October 30" ——即该季度官方首次估计。
+    #   归类为**推迟（含改名）**，与 9 月就业报告 10-03→11-20 同类；不是取消（取消 = 该参考期
+    #   始终没有发布，如 2025-10 的 CPI / 就业报告）。按模块 docstring 的判定规则收录。
     #   旧值 10-29 连原定的 10-30 都不是，且恰与 FOMC 同日（推算指纹）。
     "2025-01-30", "2025-04-30", "2025-07-30", "2025-12-23",
     # 2026：前三条由 v0.45.405 修正（旧值 → 官方实际发布日）：

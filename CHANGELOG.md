@@ -34,7 +34,9 @@ v0.45.404 在 `bea.gov/news/schedule/full` 查出 2026 年 GDP 表三个过去�
   取消的发布直接删，不找替身日期。
 - `_GDP` 2025：`10-29→12-23`。3Q25 **没有** Advance Estimate；BEA 2025-12-23 的「Gross Domestic Product, 3rd Quarter 2025
   (Initial Estimate)」原文写明 *this initial report … replaces the release of the advance estimate originally scheduled for October 30*，
-  即该季度官方首次估计，故收录（本表口径 =「每个参考季度的首次估计」，已写进表注释）。旧值 10-29 连原定的 10-30 都不是。
+  即该季度官方首次估计。归类为**推迟（含改名）**，与 9 月就业报告 10-03→11-20 同类，不是取消，故收录。
+  判定规则写进模块 docstring：**按参考期看**——该期后来发布了（推迟，含改名）⇒ 记实际发布日；该期始终没有发布（取消，
+  如 2025-10 的 CPI / 就业报告）⇒ 删。本表口径 =「每个参考季度的首次估计」。旧值 10-29 连原定的 10-30 都不是。
 - `_GDP` 2026：`01-29→02-20`（4Q25 初值，停摆推迟）、`04-29→04-30`、`07-29→07-30`。
 - 每张表补注释：核了什么、对哪个源、哪天、几条一致；模块 docstring 补「过去日期以实际发布为准」与两个归档 URL。
   **`verified_through`、`pending`、所有未来日期、各表阈值均未改动。**
