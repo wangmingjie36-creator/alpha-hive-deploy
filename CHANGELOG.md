@@ -35,34 +35,36 @@ v0.45.402~403 退役日报提交 / 推送链与 `GitHubTool.commit()/status()` �
 下一次扫描前的 `production_sync` 快进会带上本版（今天 10-05 14:00 与 v0.45.402 / 403 同一轮）。若参数约束与现役调用不符，后果是 `sync_before_scan` 回 `error` 类结局并触发 `alert_manager` 的「生产代码 ≠ origin/main」P1（可见，不会静默）；扫描照跑旧代码。
 
 
-## [0.45.412] — 2026-10-04 — Fixed：Alpha Bot 启动器认「窗口已开着」用的 `ps` 不带 `-ww`——Linux CI 上管道输出被截到 80 列，`TestNativeWindow::test_second_launch_brings_existing_window_forward` 自 v0.45.407 起红；生产（macOS）不受影响
+## [0.45.412] — 2026-10-04 — Fixed：Alpha Bot 启动器认「窗口已开着」用的 `ps` 不带 `-ww`——Linux CI 上 ps 管道输出被压窄（procps 按环境里的 `COLUMNS` 截），`TestNativeWindow::test_second_launch_brings_existing_window_forward` 自 v0.45.407 起红；生产（macOS）不受影响
 
 ### 现象
 
 v0.45.407（`593ab53a`，pywebview 原生窗口）推上 main 后，GitHub Actions 多出一条红：
 `assert [('ask', '首次启动：请选择 Alpha Hive 数据根目录…')] == [('activate', 2515)]`——第二次启动没认出开着的窗口，
 直接走到了「首次启动问数据根」。本机 Mac 上该文件 32/32 全绿。
-（main 的 CI 结论自 09-30 起因 `TestCoverageHorizon` 按设计恒红，这条新红**没有改变 run 的结论位**，只在失败清单里看得见。）
+（main 的 CI 结论自 09-06 起（最后一次绿是 09-05 的 run 33992925038）因 `TestCoverageHorizon` 按设计恒红，这条新红**没有改变 run 的结论位**，只在失败清单里看得见。）
 
 ### 根因
 
 `alphabot/launcher.py::window_owner()` 用 `/bin/ps -p PID -o command=` 取命令行、找 `alphabot.launcher` 标记。
-procps 的 ps(1) 写明：输出被重定向 / 管道接走时，宽度「undefined（it may be 80, unlimited, …）」，要不限宽得 `-w` 两次。
-CI 解释器是 `/opt/hostedtoolcache/Python/3.11.16/x64/bin/python`，测试里 owner 的命令行共 **99 列、标记从第 83 列起** ⇒ 截到 80 列后标记没了 ⇒ `window_owner()` 返回 None。
+procps 源码（`src/ps/global.c::set_screen_size`，CI 镜像 ubuntu-24.04 的 4.0.4 与 master 一致）：stdout 不是终端时宽度取 `OUTBUF_SIZE`（≈不限），
+**只有环境变量 `COLUMNS` 能把它压窄**；`-ww` 再压过 `COLUMNS`（`parser.c`：`w_count>1 ⇒ OUTBUF_SIZE`）。
+CI 解释器是 `/opt/hostedtoolcache/Python/3.11.16/x64/bin/python`，测试里 owner 的命令行共 **99 列、标记从第 83 列起** ⇒ CI 上被截到第 83 列之前 ⇒ 标记没了 ⇒ `window_owner()` 返回 None。
+⚠️ CI 测试进程里的 `COLUMNS` **是谁设的未查明**（仓库、workflow、本机已装包均未设；疑为 runner 环境）——待验证；截到的具体列数同样未直接测得。
 macOS 的 BSD ps 在非终端输出时恒不限宽（实测 `COLUMNS=40` / `80` 都不截），所以 .app 在生产从没踩到，本机测试也永远红不了。
 
-没在 Linux 上本机复现（本机无容器运行时）：证据链是 CI 断言形状（走到 `ask` 而非 `activate` ⇒ owner 判成了 None）+ procps 文档 + CI 解释器路径的实际长度。
+没在 Linux 上本机复现（本机无容器运行时）：证据链是 CI 断言形状（走到 `ask` 而非 `activate` ⇒ owner 判成了 None）+ procps 源码 + CI 解释器路径的实际长度 + 修复前后对照（见下）。
 ✅ **CI 已确认（2026-10-05）**：推上 main 的 `9a2833a2` 那次 run（37342119622，completed）里，真 ps 的 `test_second_launch_brings_existing_window_forward` 与新测试均 **PASSED**；
 全套 1 failed / 8072 passed，唯一的红是按设计的 `TestCoverageHorizon`。
 
 ### Fixed
 
-- `alphabot/launcher.py`：`window_owner()` 的 ps 加 `-ww`（procps：不限宽；BSD：同样不限宽，已实测 macOS 上 `-ww -p PID -o command=` 输出与原先逐字一致）。
-- `tests/test_ic_rerun_fg_budget.py::_kill_if_ours`：同一写法同一病——marker 是长临时路径，CI 上被截掉 ⇒ 收尸**静默不杀**、残留进程且没人会红；一并加 `-ww`。
+- `alphabot/launcher.py`：`window_owner()` 的 ps 加 `-ww`（procps：不限宽、压过 `COLUMNS`；BSD：同样不限宽，已实测 macOS 上 `-ww -p PID -o command=` 输出与原先逐字一致）。
+- `tests/test_ic_rerun_fg_budget.py::_kill_if_ours`：同一写法同一病（推断，未在 CI 上观测）——marker 是测试临时目录下的 `code/` 路径，CI 上约从第 52 列起、长 60+ 列，宽度 <83 时必被截掉 ⇒ 收尸**静默不杀**、且没人会红；只在子进程活过本条测试时才会走到这一步。一并加 `-ww`。
 
 ### Added
 
-- `tests/test_alphabot_launcher.py::TestNativeWindow::test_long_command_line_survives_piped_ps_width`：按 procps 文档行事的假 ps（不带 `-ww` 就截 80 列）+ CI 那条命令行的真实形状。
+- `tests/test_alphabot_launcher.py::TestNativeWindow::test_long_command_line_survives_piped_ps_width`：按 procps 源码行事的假 ps（设了 `COLUMNS` 且不带 `-ww` 就按它截；测试里钉 `COLUMNS=80`）+ CI 那条命令行的真实形状。
   带夹具自检（标记确在 80 列之外）与接线自检（假 ps 真被调到）。**旧代码上实测红**（`None == pid`），修后绿——macOS 上真 ps 测不出这类回归，只能这样钉。
 
 ### 验证
@@ -70,6 +72,14 @@ macOS 的 BSD ps 在非终端输出时恒不限宽（实测 `COLUMNS=40` / `80` 
 - `tests/test_alphabot_launcher.py` + `tests/test_alphabot.py` + `tests/test_ic_rerun_fg_budget.py`：131 passed；`ruff check` 三个改动文件通过。
 - `alphabot.__version__` 未动（沿用 0.45.399 / 0.45.407 的做法：.app 显示版本只在专门对齐时改）。
 - 开工前查过无人在修：main 在 `593ab53a` 之后无 alphabot 提交、各 worktree 无相关未提交改动、各分支无相关修复。
+
+### 二次检查（2026-10-05）
+
+- **因果**：`593ab53a` 以来每个跑完的 CI run 逐个查该测试——不带 `-ww` 的三次（`593ab53a` / `32ea04c4` / 修复合并的直接父提交 `6ecdadef`）全 FAILED，带 `-ww` 的 `9a2833a2` PASSED；无 flaky 迹象。
+- **更正机制**：原写「procps 管道输出宽度未定义、CI 上是 80 列」。查 procps 源码后：管道输出本不限宽，只有 `COLUMNS` 能压窄、`-ww` 压过它——**修法不变、仍正确**，但「80」从来没测得过，CI 上是被 `COLUMNS` 压窄（谁设的待验证）。已同步改 `launcher.py` 注释、两处测试的注释 / docstring。
+- **假 ps 改为按 `COLUMNS` 截**（原先无条件截 80 列），与源码一致；`monkeypatch.setenv("COLUMNS", "80")`。改后重做变异：去掉 `-ww` ⇒ 红（`None == pid`），还原 ⇒ 绿。
+- **更正「自 09-30 起恒红」**：那是 `gh run list --limit 25` 的窗口边界，不是起点。扩大到 1000 条后：最后一次绿是 09-05，09-06 起 360+ 个跑完的 run 全红，09-06 那次的失败清单只有 `TestCoverageHorizon`（与日历记忆里「nfp 09-06 起变红」吻合）。
+- `_kill_if_ours` 那条改写为推断并注明触发条件。
 
 ## [0.45.411] — 2026-10-04 — 占位（进行中：Alpha Bot 程序内加「帮助」页——页面导览 / 概念 / 盲期 / 使用建议 / 排错）
 
