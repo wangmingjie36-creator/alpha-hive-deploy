@@ -34,6 +34,24 @@ F&G 挪到它真正适用的层次：组合层的仓位敞口控制——极度�
       `extreme_greed=75` / `long_size_mult=0.5` / `short_size_mult=0.5`）——测的是"把默认参数
       打开会怎样"，不是另找一组参数调优（调参本身需要更多证据支撑，不在这次范围内）。
       两者都用**真实** `paper_portfolio.run_replay`，各自独立沙盒 state_dir，不碰生产状态。
+      【事后修订 v0.45.410，2026-10-04 —— 改的是重放读到的行情**从哪来**，不是判定规则】
+      重放用的日线原先每次运行都向 Yahoo 现取（v0.45.391 起每个标的整段一次）。行情是本检验唯一每次现取的输入
+      （种子与锚点已冻结），也是唯一慢、会失败的环节：10-03 实测 `run()` 13.7s 里 13.35s 是 22 个标的串行下载，
+      重放本身约 0.2s；Yahoo 拒绝整段请求时退回逐次直连，次数与快照天数成正比（10-03：182 次 / 11 个快照日，
+      终期约 2,500 次）⇒ Step 11 给 F&G 的 45s 预算越往后，任何降级日都越不可能跑完（09-21/24/30、10-01 已被
+      60s 看门狗杀过）。修订 = 前瞻 `run()` 的日线来自回放行情库（`replay_ohlc_store`，`PATHS.replay_ohlc_state`）：
+      某天的日线在两次**不同美东日期**的下载里逐字段相同、且早于较早那次下载的日期 ⇒ 落定，此后从库里读；每次只
+      补下最近一段（与已落定段重叠 10 天）。已落定后 Yahoo 又改了（拆股回溯复权 / 数据修订）⇒ 沿用库里的值、报出
+      次数（用户 10-04 定）；「改了」同样要两次不同美东日期的观察一致才算（同版二次检查补，防单次响应漏一天被永久
+      误报）。下载失败时，完全落在已落定段内的请求照样由库回答，直连只剩最近几天。
+      与改动前唯一的差别：首次落定之后被 Yahoo 改过的日线，现在读首次落定的值、原先读运行当天的值。A 与 B 读同一份，
+      两者之差的定义不变；库里的值是生产跑完约一天内下载的，比几周后重取更接近生产当时的输入（拆股后重取拿到的是
+      全段复权价，生产当时看到的是复权前的）。⚠️ 拆股时还没落定的最近 1~3 天会按复权价落定，在已落定段末端留一个
+      假跳空（不在拆股日、生产没见过）；拆股会以修订出现在进度行里，届时需人看（`replay_ohlc_store` docstring 有细节）。
+      `--rehearse` / `--insample` 照旧现场下载。
+      **未动**：窗口、变体、统计量、检视点、α、盲化、自证（阈值、分母、四元组、逐日重锚）、种子、锚点。修订依据是
+      计时剖析与取数计数（`run()` 的输出只看了进度行与取数计数），没有算或看任何周度差 / 效应量（`decide()` 从未走到
+      出统计量的分支，2/15 个合格周）。
 自证  （前提，不满足即"无法判定" exit 3）A（baseline）重放出的"窗口内新开仓位"集合
       （`(ticker, entry_date, direction, round(size_usd,2))` 四元组）与生产**实际记录**的
       `paper_portfolio_state/`（`closed_trades.jsonl` ∪ 仍在场的 `positions.jsonl`，
@@ -898,9 +916,12 @@ def _ohlc_unavailable(ohlc: Optional[Dict]) -> bool:
     窗口没服务过任何请求（served=0 ⇒ 每个试过整段取数的标的都退回了直连），且直连路径的每次请求也都是空。
     只认这一种全断形状——整段被拒、直连照常（S1 的「宽区间被拒」）时重放拿到的就是改动前那份行情，
     那时自证失败照旧按原文案归因。"""
+    # v0.45.410：行情库的已落定段回答过请求（`store.served_from_store` / `served_on_fallback`）——那不是「一根都没拿到」
+    st = (ohlc.get("store") or {}) if isinstance(ohlc, dict) else {}
     return (isinstance(ohlc, dict) and ohlc.get("served") == 0
             and (ohlc.get("direct_requests") or 0) > 0
-            and ohlc.get("direct_empty") == ohlc.get("direct_requests"))
+            and ohlc.get("direct_empty") == ohlc.get("direct_requests")
+            and not st.get("served_from_store") and not st.get("served_on_fallback"))
 
 
 def _ohlc_partly_missing(ohlc: Optional[Dict]) -> bool:
@@ -1050,7 +1071,7 @@ def _adjusted_trades_summary(a_closed: List[Dict], b_closed: List[Dict],
 
 def evaluate(dates: List[str], since: str, before: str, sandbox_root: Path,
             *, insample: bool = False, seed: Optional[Dict[str, bytes]] = None,
-            plan: Optional[Dict] = None) -> Dict:
+            plan: Optional[Dict] = None, ohlc_store=None) -> Dict:
     """`seed`：生产在窗口起点的状态（见 `load_seed`）。**前瞻模式必传**——没有它就是 v0.45.297 之前的
     设计缺陷（空沙箱起点，自证必红）；`{}` 是显式的「生产当时也是空状态」，只给合成测试用。
     样本内模式从 `bootstrap_date` 起，生产当时本来就是空状态，**不许**传种子。"""
@@ -1060,12 +1081,16 @@ def evaluate(dates: List[str], since: str, before: str, sandbox_root: Path,
         raise ValueError("样本内模式从 bootstrap_date 起，生产当时是空状态，不许传 seed")
     if insample and plan:
         raise ValueError("样本内模式没有生产记录可比，不许传逐日重锚方案")
+    if insample and ohlc_store is not None:
+        raise ValueError("回放行情库只给前瞻 run() 用（v0.45.410）；样本内照旧现场下载")
     # v0.45.408：`plan` = 逐日重锚的分段方案（`_forward_anchor_plan`）。`run()` 必传；不传 = 只有种子一个锚点
     # （一段到底，等同连续重放）——**只给合成测试用**，`TestRunSeedWiring::test_the_loaded_seed_is_handed_to_evaluate`
     # 钉住 `run()` 真的传了。
     if not insample and plan is None:
         plan = _anchor_plan(seed, [], dates)
-    with _replay_ohlc_scope(dates, seed, extra_seeds=(plan["anchors"].values() if plan else ())) as win:
+    # v0.45.410：`ohlc_store` = 回放行情库（已落定的日线从库里读），`run()` 前瞻模式传；None = 照旧每次整段下载
+    with _replay_ohlc_scope(dates, seed, extra_seeds=(plan["anchors"].values() if plan else ()),
+                            store=ohlc_store) as win:
         res = _evaluate_replays(dates, since, before, sandbox_root, insample=insample, seed=seed, ohlc_window=win,
                                 plan=plan)
     if win is not None:
@@ -1094,7 +1119,7 @@ def _seed_held_entry_dates(seed: Optional[Dict[str, bytes]]) -> List[str]:
     return out
 
 
-def _replay_ohlc_scope(dates: List[str], seed: Optional[Dict[str, bytes]], extra_seeds=()):
+def _replay_ohlc_scope(dates: List[str], seed: Optional[Dict[str, bytes]], extra_seeds=(), store=None):
     """v0.45.391（实现层，不是事后修订）：一次检验里的全部重放共用**一个**回放 OHLC 窗口
     （`paper_portfolio.replay_ohlc_window`）——每个标的整段只向 yfinance 取一次，之后按区间切片。
 
@@ -1110,6 +1135,9 @@ def _replay_ohlc_scope(dates: List[str], seed: Optional[Dict[str, bytes]], extra
     逐字节相同（只有 stderr 的 WARNING），离 Step 11 超时只差几秒也没有任何机读字段会红。它只是取数计数：
     不含价格、净值、收益，盲化不受影响；统计量与判定不读它。
     返回的上下文管理器 yield 窗口对象（不开窗口时 yield None）。
+
+    `store`（v0.45.410，事后修订见文件头「变体」段）：回放行情库，已落定的日线从本地读、每次只补下最近一段；
+    None = 照旧整段下载（`--rehearse` / `--insample`）。
     """
     import contextlib
 
@@ -1117,7 +1145,7 @@ def _replay_ohlc_scope(dates: List[str], seed: Optional[Dict[str, bytes]], extra
     # v0.45.408：逐日重锚的每个锚点也会带着仓位起跑——窗口左端要盖住它们全部（否则那几次请求退回直连、变慢）
     held = _seed_held_entry_dates(seed) + [d for s in extra_seeds for d in _seed_held_entry_dates(s)]
     bounds = pp.replay_ohlc_bounds(dates, held)
-    return pp.replay_ohlc_window(*bounds) if bounds else contextlib.nullcontext()
+    return pp.replay_ohlc_window(*bounds, store=store) if bounds else contextlib.nullcontext()
 
 
 def _evaluate_replays(dates: List[str], since: str, before: str, sandbox_root: Path,
@@ -1241,7 +1269,17 @@ def run(insample: bool = False, today: Optional[str] = None) -> Dict:
     with tempfile.TemporaryDirectory(prefix="fg_gate_fwd_") as tmp:
         if insample:
             return evaluate(dates, since, before, Path(tmp), insample=True, seed=None)
-        return evaluate(dates, since, before, Path(tmp), insample=False, seed=seed, plan=plan)
+        return evaluate(dates, since, before, Path(tmp), insample=False, seed=seed, plan=plan,
+                        ohlc_store=_forward_ohlc_store())
+
+
+def _forward_ohlc_store():
+    """前瞻 `run()` 用的回放行情库（v0.45.410）。目录 `PATHS.replay_ohlc_state` 调用时求值——测试里跟着
+    `ALPHA_HIVE_HOME` 进沙箱。`experiments/replay_ohlc_window_premise.py` 把它换成 `lambda: None`：
+    那个脚本核的是「整段切片 ≡ 逐次直连」，行情库会把已落定的日子换成首次落定的值、混淆它要核的东西。"""
+    from hive_logger import PATHS
+    from replay_ohlc_store import ReplayOhlcStore
+    return ReplayOhlcStore(PATHS.replay_ohlc_state)
 
 
 def rehearse(since: str, before: str, repo_root: Optional[Path] = None,
@@ -1313,15 +1351,56 @@ def _ohlc_window_note(res: Dict) -> str:
     if not ohlc_window_degraded(res):
         return ""
     ow = res["ohlc_window"]
+    st = ow.get("store") or {}
     bits = []
     if ow.get("fallback"):
         bits.append(f"{ow['fallback']}/{ow.get('wide_fetches')} 个标的整段取数失败")
     if ow.get("out_of_window"):
         bits.append(f"{ow['out_of_window']} 次请求落在窗口外")
+    slow = bool(bits)
+    # v0.45.410：行情库自己的问题——本次结果不受影响，但下次照样整段下载、慢回去
+    if st.get("invalid_files"):
+        bits.append(f"行情库 {len(st['invalid_files'])} 个文件读不懂（已改名留证、本次重新整段下载）")
+    elif st.get("quarantined"):   # 二次检查：以前改名留证的坏文件还在 ⇒ 一直报，人看过删掉才消
+        bits.append(f"行情库目录里留着 {len(st['quarantined'])} 个改名留证的坏文件（对应标的的冻结历史已按当时的 Yahoo "
+                    "重建；看过后删掉才会消）")
+    if st.get("write_errors"):
+        bits.append(f"行情库写入失败 {len(st['write_errors'])} 次（下次仍要整段下载）")
     empty = (f"，其中直连 {ow.get('direct_empty')}/{ow.get('direct_requests')} 次一根 bar 都没拿到"
              if ow.get("direct_empty") else "")
-    return (f"；⚠️ 回放行情窗口降级：{'、'.join(bits) or '原因未知'} ⇒ 这些请求退回逐次直连"
-            f"（结果同改动前的逐次取数，只是慢——Step 11 可能超时）{empty}")
+    if not slow:
+        tail = ""
+    elif st:
+        tail = (" ⇒ 这些标的碰到未落定日子的请求退回逐次直连（只是慢，Step 11 可能超时；"
+                f"另有 {st.get('served_on_fallback', 0)} 次请求由行情库已落定段回答）")
+    else:
+        tail = " ⇒ 这些请求退回逐次直连（结果同改动前的逐次取数，只是慢——Step 11 可能超时）"
+    return f"；⚠️ 回放行情窗口降级：{'、'.join(bits) or '原因未知'}{tail}{empty}"
+
+
+def _ohlc_store_alarm(res: Dict) -> bool:
+    """二次检查：近 `revision_alarm_days` 天**确认**了修订（多半是拆股回溯复权）⇒ 段首 ⚠️ + attention
+    `….ohlc_store_revised`。两位审查者都实测了：拆股时还没落定的最近几天会按复权价落定、在落定段末端留一个假跳空，
+    A / B 都可能凭空止损——只陈述、不换图标，那句读起来是良性的。过了这几天只陈述（窗口左端固定、修订会一直在窗口里，
+    永久 ⚠️ 会把人训练成无视 ⚠️）。"""
+    st = (res.get("ohlc_window") or {}).get("store") or {}
+    return bool(st.get("revised_recent"))
+
+
+def _ohlc_store_note(res: Dict) -> str:
+    """v0.45.410：行情库里有已落定、之后被 Yahoo 改过的日线（拆股回溯复权 / 数据修订）——沿用首次落定的值。
+    只要窗口里有，就每次都报（不是只报发现那一天）；近几天才确认的另带 ⚠️ 与要人看的理由（`_ohlc_store_alarm`）。"""
+    st = (res.get("ohlc_window") or {}).get("store") or {}
+    n = st.get("revised_bars")
+    if not n:
+        return ""
+    names = "、".join(st.get("revised_tickers", [])[:5])
+    if _ohlc_store_alarm(res):
+        recent = "、".join(st.get("revised_recent_tickers", [])[:5])
+        return (f"；⚠️ 行情库：{recent} 近 {st.get('revision_alarm_days')} 天确认了 {st['revised_recent']} 根已落定日线被 "
+                "Yahoo 改了（多半是拆股回溯复权）——拆股时还没落定的最近几天会按复权价落定、留一个假跳空，跨这几天持仓的 "
+                f"A / B 可能凭空出场，需人看（窗口内共 {n} 根，一律沿用首次落定的值）")
+    return f"（行情库：{names} 共 {n} 根已落定日线 Yahoo 后来改了，沿用首次落定的值）"
 
 
 def _anchor_gap_note(res: Dict) -> str:
@@ -1347,8 +1426,9 @@ def status_line(res: Dict) -> str:
     对得上，见 `tests/test_step_contract_ic_rerun.py::TestAttentionMatchesRenderedIcons`）；健康时逐字不变。"""
     s = res.get("status")
     note = _ohlc_window_note(res)
+    rev = _ohlc_store_note(res)   # v0.45.410：只陈述、不换图标
     if s == "cannot_judge":
-        return f"⚠️ F&G 敞口门前瞻检验无法判定：{res.get('reason')}{note}"
+        return f"⚠️ F&G 敞口门前瞻检验无法判定：{res.get('reason')}{rev}{note}"
     if s == "not_ready":
         extra = f"（中期未过界，继续攒到 {res['next_look_at']} 周）" if res.get("looks_passed_without_verdict") else ""
         rate = res.get("selfproof_rate")
@@ -1358,15 +1438,15 @@ def status_line(res: Dict) -> str:
         a_only = (res.get("selfproof_continuous") or {}).get("a_only_entries")
         if a_only:
             proof += f"（统计用的 A 比生产多开 {a_only} 笔）"
-        proof += _anchor_gap_note(res)
+        proof += _anchor_gap_note(res) + rev
         why = f"（{res['reason']}）" if res.get("reason") else ""
-        icon = "⚠️" if res.get("stale") or note else "⏳"
+        icon = "⚠️" if res.get("stale") or note or _ohlc_store_alarm(res) else "⏳"
         return f"{icon} F&G 敞口门前瞻检验：{res.get('weeks', 0)}/{res['next_look_at']} 个合格周{extra}{proof}{why}{note}"
     if s in ("confirmed", "not_confirmed"):
         return (f"🔔 F&G 敞口门前瞻检验已到{res['look']}检视点 —— 跑 "
                 "`/usr/local/bin/python3 experiments/fg_exposure_gate_forward_test.py` 看结论"
-                f"（需人判断，勿自动改 CONFIG）{note}")
-    return f"⚠️ F&G 敞口门前瞻检验状态未知：{s}{note}"
+                f"（需人判断，勿自动改 CONFIG）{rev}{note}")
+    return f"⚠️ F&G 敞口门前瞻检验状态未知：{s}{rev}{note}"
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -1439,6 +1519,10 @@ def _print_human(res: Dict) -> None:
     print("━" * 72)
     if ohlc_window_degraded(res):   # 复审 S1：人读输出同样要看得见（演练分支不经 status_line）
         print("  " + _ohlc_window_note(res).lstrip("；"))
+    st = (res.get("ohlc_window") or {}).get("store")
+    if st:   # v0.45.410
+        print(f"  回放行情库：整段 {st['full_fetches']}、补尾 {st['tail_fetches']} 个标的，库直接回答 {st['served_from_store']} 次请求"
+              f"｜新落定 {st['settled_days_added']} 天｜已落定后被 Yahoo 改过 {st['revised_bars']} 根（沿用首次落定的值）")
     if res.get("mode") == "rehearse":
         sp = res.get("selfproof") or {}
         print(f"  演练窗口 [{res.get('since')}, {res.get('before')})｜播种提交 {str(res.get('seed_commit'))[:8]}"

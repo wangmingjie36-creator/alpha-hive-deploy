@@ -1088,11 +1088,17 @@ class TestRunSeedWiring:
         plan_sentinel = {"segments": [], "anchors": {}, "info": {}}
         monkeypatch.setattr(fwd, "_forward_anchor_plan", lambda s, d: plan_sentinel if s is sentinel else pytest.fail(s))
 
-        def _fake_eval(dates, since, before, root, *, insample=False, seed=None, plan=None):
-            seen.update(insample=insample, seed=seed, plan=plan)
+        def _fake_eval(dates, since, before, root, *, insample=False, seed=None, plan=None, ohlc_store=None):
+            seen.update(insample=insample, seed=seed, plan=plan, ohlc_store=ohlc_store)
             return {"status": "not_ready"}
         monkeypatch.setattr(fwd, "evaluate", _fake_eval)
         fwd.run(today="2026-09-17")
+        # v0.45.410：前瞻 run() 必须带回放行情库，目录是**此刻**的 `PATHS.replay_ohlc_state`（调用时求值 ⇒ 在沙箱里）
+        # 变异「run() 不传 / 传 None」或「目录冻成模块级常量」⇒ 红。
+        from hive_logger import PATHS
+        from replay_ohlc_store import ReplayOhlcStore
+        store = seen.pop("ohlc_store")
+        assert isinstance(store, ReplayOhlcStore) and store.root == PATHS.replay_ohlc_state, store
         assert seen == {"insample": False, "seed": sentinel, "plan": plan_sentinel}
 
     def test_insample_never_touches_the_seed(self, pp, monkeypatch):
@@ -1101,7 +1107,8 @@ class TestRunSeedWiring:
         monkeypatch.setattr(fwd, "load_seed", lambda *a, **k: pytest.fail("样本内不该加载种子"))
         seen = {}
 
-        def _fake_eval(dates, since, before, root, *, insample=False, seed=None, plan=None):
+        def _fake_eval(dates, since, before, root, *, insample=False, seed=None, plan=None, ohlc_store=None):
+            assert ohlc_store is None, "样本内照旧现场下载，不用回放行情库（v0.45.410）"
             seen.update(insample=insample, seed=seed)
             assert plan is None
             return {"status": "insample"}
@@ -2189,7 +2196,7 @@ class TestSegmentOutputs:
     def test_ohlc_window_covers_every_anchors_positions(self, monkeypatch):
         import paper_portfolio as _pp
         seen = []
-        monkeypatch.setattr(_pp, "replay_ohlc_window", lambda s, e: seen.append((s, e)) or contextlib.nullcontext())
+        monkeypatch.setattr(_pp, "replay_ohlc_window", lambda s, e, **kw: seen.append((s, e)) or contextlib.nullcontext())
         anchor = _make_seed(positions=[_pos_row("OLD", "2026-08-20", 1000.0)], last_run_date="2026-09-17")
         with fwd._replay_ohlc_scope(_S_DATES, _make_seed(), extra_seeds=[anchor]):
             pass
