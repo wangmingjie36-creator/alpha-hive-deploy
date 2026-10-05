@@ -36,6 +36,9 @@
   同一份世界里不用库、或不按重放日取版本，自证都掉——证明 100% 来自时点数据。
 - 真实数据（拷贝，库里是 0.45.410 写的 22 个 schema 1 文件）：继续跑模拟 10-06 / 10-07 与一次全被拒，结果与不用库**逐字节相同**；
   无坏文件、无误报版本或嫌疑。
+- 变异 65/65 红（0.45.410 的 45 个随代码调整重跑 + 时点数据新增 20 个；git archive 副本、`--maxfail=1000`、清 `__pycache__`、基线先绿）。
+  首轮存活 1 个（P18「缺口日新版本不要求两次观察」）是真盲区，补测 `test_a_gap_day_whose_two_post_split_looks_disagree_waits_for_confirmation` 后红。
+- 全套（合并 main 后，不带 `-x`）：8147 passed / 1 failed（经济日历按设计保持红），跑完生产数据根下没有 `replay_ohlc_state/`。
 
 ### Added
 - `tests/test_replay_ohlc_pit.py`：按重放日取版本（多版本、不知道重放日、快路径）；拆股（嫌疑当天整段补下与留 `pre_suspect`、确认后全窗口版本与
