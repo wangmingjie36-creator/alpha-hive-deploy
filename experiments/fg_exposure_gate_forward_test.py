@@ -42,10 +42,13 @@ F&G 挪到它真正适用的层次：组合层的仓位敞口控制——极度�
       60s 看门狗杀过）。修订 = 前瞻 `run()` 的日线来自回放行情库（`replay_ohlc_store`，`PATHS.replay_ohlc_state`）：
       某天的日线在两次**不同美东日期**的下载里逐字段相同、且早于较早那次下载的日期 ⇒ 落定，此后从库里读；每次只
       补下最近一段（与已落定段重叠 10 天）。已落定后 Yahoo 又改了（拆股回溯复权 / 数据修订）⇒ 沿用库里的值、报出
-      次数（用户 10-04 定）。下载失败时，完全落在已落定段内的请求照样由库回答，直连只剩最近几天。
+      次数（用户 10-04 定）；「改了」同样要两次不同美东日期的观察一致才算（同版二次检查补，防单次响应漏一天被永久
+      误报）。下载失败时，完全落在已落定段内的请求照样由库回答，直连只剩最近几天。
       与改动前唯一的差别：首次落定之后被 Yahoo 改过的日线，现在读首次落定的值、原先读运行当天的值。A 与 B 读同一份，
       两者之差的定义不变；库里的值是生产跑完约一天内下载的，比几周后重取更接近生产当时的输入（拆股后重取拿到的是
-      全段复权价，生产当时看到的是复权前的）。`--rehearse` / `--insample` 照旧现场下载。
+      全段复权价，生产当时看到的是复权前的）。⚠️ 拆股时还没落定的最近 1~3 天会按复权价落定，在已落定段末端留一个
+      假跳空（不在拆股日、生产没见过）；拆股会以修订出现在进度行里，届时需人看（`replay_ohlc_store` docstring 有细节）。
+      `--rehearse` / `--insample` 照旧现场下载。
       **未动**：窗口、变体、统计量、检视点、α、盲化、自证（阈值、分母、四元组、逐日重锚）、种子、锚点。修订依据是
       计时剖析与取数计数（`run()` 的输出只看了进度行与取数计数），没有算或看任何周度差 / 效应量（`decide()` 从未走到
       出统计量的分支，2/15 个合格周）。
@@ -1358,6 +1361,9 @@ def _ohlc_window_note(res: Dict) -> str:
     # v0.45.410：行情库自己的问题——本次结果不受影响，但下次照样整段下载、慢回去
     if st.get("invalid_files"):
         bits.append(f"行情库 {len(st['invalid_files'])} 个文件读不懂（已改名留证、本次重新整段下载）")
+    elif st.get("quarantined"):   # 二次检查：以前改名留证的坏文件还在 ⇒ 一直报，人看过删掉才消
+        bits.append(f"行情库目录里留着 {len(st['quarantined'])} 个改名留证的坏文件（对应标的的冻结历史已按当时的 Yahoo "
+                    "重建；看过后删掉才会消）")
     if st.get("write_errors"):
         bits.append(f"行情库写入失败 {len(st['write_errors'])} 次（下次仍要整段下载）")
     empty = (f"，其中直连 {ow.get('direct_empty')}/{ow.get('direct_requests')} 次一根 bar 都没拿到"
@@ -1372,14 +1378,28 @@ def _ohlc_window_note(res: Dict) -> str:
     return f"；⚠️ 回放行情窗口降级：{'、'.join(bits) or '原因未知'}{tail}{empty}"
 
 
+def _ohlc_store_alarm(res: Dict) -> bool:
+    """二次检查：近 `revision_alarm_days` 天**确认**了修订（多半是拆股回溯复权）⇒ 段首 ⚠️ + attention
+    `….ohlc_store_revised`。两位审查者都实测了：拆股时还没落定的最近几天会按复权价落定、在落定段末端留一个假跳空，
+    A / B 都可能凭空止损——只陈述、不换图标，那句读起来是良性的。过了这几天只陈述（窗口左端固定、修订会一直在窗口里，
+    永久 ⚠️ 会把人训练成无视 ⚠️）。"""
+    st = (res.get("ohlc_window") or {}).get("store") or {}
+    return bool(st.get("revised_recent"))
+
+
 def _ohlc_store_note(res: Dict) -> str:
-    """v0.45.410：行情库里有已落定、之后被 Yahoo 改过的日线（拆股回溯复权 / 数据修订）——沿用首次落定的值，
-    A 与 B 读同一份，判定不受影响，所以**不换图标**；但只要窗口里有，就每次都报（不是只报发现那一天）。"""
+    """v0.45.410：行情库里有已落定、之后被 Yahoo 改过的日线（拆股回溯复权 / 数据修订）——沿用首次落定的值。
+    只要窗口里有，就每次都报（不是只报发现那一天）；近几天才确认的另带 ⚠️ 与要人看的理由（`_ohlc_store_alarm`）。"""
     st = (res.get("ohlc_window") or {}).get("store") or {}
     n = st.get("revised_bars")
     if not n:
         return ""
     names = "、".join(st.get("revised_tickers", [])[:5])
+    if _ohlc_store_alarm(res):
+        recent = "、".join(st.get("revised_recent_tickers", [])[:5])
+        return (f"；⚠️ 行情库：{recent} 近 {st.get('revision_alarm_days')} 天确认了 {st['revised_recent']} 根已落定日线被 "
+                "Yahoo 改了（多半是拆股回溯复权）——拆股时还没落定的最近几天会按复权价落定、留一个假跳空，跨这几天持仓的 "
+                f"A / B 可能凭空出场，需人看（窗口内共 {n} 根，一律沿用首次落定的值）")
     return f"（行情库：{names} 共 {n} 根已落定日线 Yahoo 后来改了，沿用首次落定的值）"
 
 
@@ -1420,7 +1440,7 @@ def status_line(res: Dict) -> str:
             proof += f"（统计用的 A 比生产多开 {a_only} 笔）"
         proof += _anchor_gap_note(res) + rev
         why = f"（{res['reason']}）" if res.get("reason") else ""
-        icon = "⚠️" if res.get("stale") or note else "⏳"
+        icon = "⚠️" if res.get("stale") or note or _ohlc_store_alarm(res) else "⏳"
         return f"{icon} F&G 敞口门前瞻检验：{res.get('weeks', 0)}/{res['next_look_at']} 个合格周{extra}{proof}{why}{note}"
     if s in ("confirmed", "not_confirmed"):
         return (f"🔔 F&G 敞口门前瞻检验已到{res['look']}检视点 —— 跑 "

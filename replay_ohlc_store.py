@@ -37,10 +37,22 @@ F&G 敞口门前瞻检验（`experiments/fg_exposure_gate_forward_test.py`）每
 
 已落定之后 Yahoo 又改了（用户 2026-10-04 定）
 ---------------------------------------------
-每次补下载与已落定段重叠 `OVERLAP_DAYS` 天。重叠部分与库里不同 ⇒ **沿用库里的值**，在该标的文件的
-`revisions` 里记下日期与 Yahoo 的新值（首次发现那天），计数随结果报出——不覆盖、也不静默。理由：拆股后
-Yahoo 会回溯复权历史，生产当时看到的是复权前的价格；冻结的库更接近生产当时的输入，A 与 B 读同一份，
+每次补下载与已落定段重叠 `OVERLAP_DAYS` 天。重叠部分与库里不同 ⇒ **沿用库里的值**（回答永远是库里的值）。
+「Yahoo 改了」同落定一样要两次**不同美东日期**的观察给出同一个新值才算（二次检查：单次响应漏一天曾被永久记成
+修订）：第一次只记进 `revision_suspects`，之后看到同一个新值 ⇒ 记进 `revisions`（first_seen = 第一次看到那天）、
+随结果报出，**只要窗口里有就每次都报**；看到库里的值 ⇒ 撤销嫌疑。补尾起点会退回去盖住还没确认的嫌疑。
+理由：拆股后 Yahoo 会回溯复权历史，生产当时看到的是复权前的价格；冻结的库更接近生产当时的输入，A 与 B 读同一份，
 两者之差不受影响。重叠之外更早的修订看不见——那是「首次落定后冻结」的本意。
+
+⚠️ 已知局限（二次检查实测）：拆股时**还没落定**的最近 1~3 天，会在拆股后由两次复权后的下载确认、按复权价落定 ⇒
+库里在「已落定段末端」与这几天之间出现一个假跳空（不在拆股日、生产也没见过），跨这几天持仓的 A / B 都可能因此假止损。
+要彻底避免得按「运行日」存多份视图（时点数据），本版不做。拆股会以修订的形式出现在进度行里——看到就要人看。
+不用库时更糟：重新下载拿到全段复权价，拆股前每一笔仓位的历史都会被改写。
+
+停牌 / 退市
+-----------
+补尾拿到空结果、而已落定段在同一段里本来就没有日线 ⇒ 空是权威答案（照常落定、不降级）；库里那段有日线时
+空结果仍当下载失败（Yahoo 抽风的形状，v0.45.391 起就不把它当权威答案）。
 
 坏文件 / 写不进去
 -----------------
@@ -77,6 +89,11 @@ SCHEMA = 1
 #: 补下载与已落定段重叠的日历天数（顺带核对已落定的日线有没有被 Yahoo 改过）。补下载每个标的只是一次请求，
 #: 多几天几乎不加时间；太短则拆股等回溯修订更容易落在核对范围之外。
 OVERLAP_DAYS = 10
+#: 确认修订后这么多天内进度行段首 ⚠️ + attention（二次检查：两位审查者都实测了拆股会让 A / B 凭空出场，只陈述不够）；
+#: 之后只陈述不换图标——窗口左端固定，修订会一直在窗口里，永久 ⚠️ 会把人训练成无视 ⚠️。7 天保证每周诊断任务至少看到一次。
+REVISION_ALARM_DAYS = 7
+#: 合理日期范围：防 0001-01-01 / 9999-12-31 之类在日期加减时溢出（二次检查）
+_DATE_LO, _DATE_HI = "2000-01-01", "2099-12-31"
 _BAR_KEYS = ("Open", "High", "Low", "Close")
 _ISO = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 #: 文件名安全的标的代码（BRK-B、^VIX 之类都在内）；不符合的标的不进库，照旧整段下载
@@ -118,15 +135,20 @@ def _check_bar(v) -> None:
         raise StoreFileInvalid(f"日线不是 {{{', '.join(_BAR_KEYS)}}}：{v!r:.80}")
     for k in _BAR_KEYS:
         x = v[k]
-        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
-            raise StoreFileInvalid(f"日线字段 {k} 不是有限数：{x!r}")
+        try:
+            finite = not isinstance(x, bool) and isinstance(x, (int, float)) and math.isfinite(x)
+        except OverflowError:   # 400 位的整数（二次检查实测）
+            finite = False
+        if not finite:
+            raise StoreFileInvalid(f"日线字段 {k} 不是有限数：{x!r:.40}")
 
 
 def _check_bars(bars, lo: str, hi_exclusive: str, what: str) -> None:
     if not isinstance(bars, dict):
         raise StoreFileInvalid(f"{what}.bars 不是对象")
     for d, v in bars.items():
-        if not (isinstance(d, str) and _ISO.match(d) and lo <= d < hi_exclusive):
+        _check_date(d, f"{what}.bars 的日期")   # 二次检查：「2026-09-31」能过正则与区间比较，之后在 strptime 里崩
+        if not lo <= d < hi_exclusive:
             raise StoreFileInvalid(f"{what}.bars 的日期 {d!r} 不在 [{lo}, {hi_exclusive}) 内")
         _check_bar(v)
 
@@ -135,6 +157,8 @@ def _check_date(v, what: str) -> str:
     if not (isinstance(v, str) and _ISO.match(v)):
         raise StoreFileInvalid(f"{what} 不是 YYYY-MM-DD：{v!r}")
     _day(v)   # 2026-02-30 之类 ⇒ ValueError ⇒ 由调用方按坏文件处理
+    if not _DATE_LO <= v <= _DATE_HI:
+        raise StoreFileInvalid(f"{what} 超出 [{_DATE_LO}, {_DATE_HI}]：{v}")
     return v
 
 
@@ -142,6 +166,10 @@ def validate_entry(entry, ticker: str) -> Dict:
     """库文件的完整校验（读进来就校验，不信任磁盘）。不合法 ⇒ `StoreFileInvalid` / `ValueError`。"""
     if not isinstance(entry, dict) or entry.get("schema") != SCHEMA or entry.get("ticker") != ticker:
         raise StoreFileInvalid(f"schema / ticker 不对（要 schema={SCHEMA}、ticker={ticker}）")
+    # 二次检查：只用 .get 校验时缺键也能过，之后在 merge 里 KeyError——检验每天崩、文件却从不被改名留证
+    missing = {"settled", "pending"} - set(entry)
+    if missing:
+        raise StoreFileInvalid(f"缺键 {sorted(missing)}")
     s = entry.get("settled")
     if s is not None:
         if not isinstance(s, dict):
@@ -169,6 +197,18 @@ def validate_entry(entry, ticker: str) -> Dict:
         if not isinstance(r, dict):
             raise StoreFileInvalid(f"revisions[{d}] 不是对象")
         _check_date(r.get("first_seen"), f"revisions[{d}].first_seen")
+        if r.get("confirmed_on") is not None:
+            _check_date(r["confirmed_on"], f"revisions[{d}].confirmed_on")
+        if r.get("yahoo") is not None:
+            _check_bar(r["yahoo"])
+    sus = entry.get("revision_suspects", {})
+    if not isinstance(sus, dict):
+        raise StoreFileInvalid("revision_suspects 不是对象")
+    for d, r in sus.items():
+        _check_date(d, "revision_suspects 的日期")
+        if s is None or not (s["start"] <= d <= s["end"]) or not isinstance(r, dict):
+            raise StoreFileInvalid(f"revision_suspects[{d}] 不合法")
+        _check_date(r.get("seen_on"), f"revision_suspects[{d}].seen_on")
         if r.get("yahoo") is not None:
             _check_bar(r["yahoo"])
     return entry
@@ -192,7 +232,6 @@ class ReplayOhlcStore:
         self.served_on_fallback = 0  # 下载失败后仍由已落定段回答的请求数
         self.invalid_files: List[str] = []
         self.write_errors: List[str] = []
-        self._revised_in_window: Dict[str, int] = {}
 
     # ── 读 ─────────────────────────────────────────────────────────────────────
 
@@ -207,23 +246,31 @@ class ReplayOhlcStore:
             return self._entries[ticker]
         path = self._path(ticker)
         entry = None
-        if path.exists():
+        try:
+            # 二次检查：`path.exists()` 对 EACCES 之类会直接抛（只吞 ENOENT 等）——放进 try，读不了就按坏文件处理
+            raw = path.read_text(encoding="utf-8")
+        except (FileNotFoundError, NotADirectoryError):   # 没有这个文件（库目录还没建 / 被一个文件占了名）
+            raw = None
+        except (OSError, ValueError) as e:   # 权限 / 是目录 / UnicodeDecodeError（ValueError 子类）
+            self._quarantine(ticker, path, e)
+            raw = None
+        if raw is not None:
             try:
-                entry = validate_entry(json.loads(path.read_text(encoding="utf-8")), ticker)
-            except (OSError, ValueError) as e:   # StoreFileInvalid / JSONDecodeError 都是 ValueError
+                entry = validate_entry(json.loads(raw), ticker)
+            except Exception as e:  # noqa: BLE001 —— 磁盘上的任何畸形都改名留证、本次整段下载，不许让检验崩（二次检查）
                 self._quarantine(ticker, path, e)
                 entry = None
         self._entries[ticker] = entry
         return entry
 
     def _quarantine(self, ticker: str, path: Path, err: Exception) -> None:
-        n = 0
-        while True:
-            dst = path.with_name(f"{path.name}.invalid-{self.fetch_day}-{n}")
-            if not dst.exists():
-                break
-            n += 1
         try:
+            n = 0
+            while True:   # 库目录没权限时 `exists()` 也会抛——整段放进 try（二次检查实测）
+                dst = path.with_name(f"{path.name}.invalid-{self.fetch_day}-{n}")
+                if not dst.exists():
+                    break
+                n += 1
             os.replace(path, dst)
             self.invalid_files.append(f"{path.name} → {dst.name}（{type(err).__name__}: {str(err)[:120]}）")
         except OSError as e2:
@@ -240,7 +287,18 @@ class ReplayOhlcStore:
             return wstart
         if s["end"] >= _shift(wend, -1):
             return None
-        return max(wstart, _shift(s["end"], -(OVERLAP_DAYS - 1)))
+        lo = _shift(s["end"], -(OVERLAP_DAYS - 1))
+        sus = e.get("revision_suspects") or {}
+        if sus:   # 二次检查：修订要两次观察，补尾得盖住还没确认的那几天
+            lo = min(lo, min(sus))
+        return max(wstart, lo)
+
+    def settled_quiet_from(self, ticker: str, start: str) -> bool:
+        """已落定段在 [start, settled.end] 里一根日线都没有（停牌 / 退市）——这时补尾拿到空结果与库一致，
+        是权威答案而不是下载失败（二次检查：否则这类标的每天降级、直连次数逐日增长，落定段永远不前进）。"""
+        e = self._entry(ticker)
+        s = e.get("settled") if e else None
+        return bool(s) and s["start"] <= start <= s["end"] and not any(start <= d for d in s["bars"])
 
     def settled_slice(self, ticker: str, start: str, end: str, *, on_fallback: bool = False) -> Optional[Dict[str, Dict]]:
         """请求 [start, end) 整个落在已落定段内 ⇒ 由库回答；否则 `None`（调用方走原路径）。
@@ -265,8 +323,9 @@ class ReplayOhlcStore:
         对该标的的权威回答（覆盖 `[wstart, wend)`）。写盘失败只计数，不影响返回值。"""
         old = self._entry(ticker)
         entry = json.loads(json.dumps(old)) if old else {"schema": SCHEMA, "ticker": ticker, "settled": None,
-                                                         "pending": None, "revisions": {}}
+                                                         "pending": None, "revisions": {}, "revision_suspects": {}}
         entry.setdefault("revisions", {})
+        entry.setdefault("revision_suspects", {})
         if fstart is None:
             self.store_only += 1
         else:
@@ -287,20 +346,30 @@ class ReplayOhlcStore:
             for d, b in s["bars"].items():
                 if wstart <= d < wend:
                     out[d] = dict(b)
-            n_rev = sum(1 for d in entry["revisions"] if wstart <= d < wend)
-            if n_rev:
-                self._revised_in_window[ticker] = n_rev
         return out
 
     def _absorb(self, entry: Dict, fstart: str, fend: str, bars: Dict[str, Dict]) -> None:
         today = self.fetch_day
         s = entry["settled"]
-        # ① 与已落定段重叠的部分：不同 ⇒ 记修订、沿用库里的值
+        # ① 与已落定段重叠的部分：与库里不同 ⇒ 沿用库里的值。「Yahoo 改了」同落定一样要两次**不同美东日期**的观察
+        #    给出同一个新值才算（二次检查：单次响应漏一天曾被永久记成修订，进度行整个检验期都在误报）——第一次只记
+        #    嫌疑；之后看到同一个新值 ⇒ 记修订（first_seen = 第一次看到那天）；看到库里的值 ⇒ 撤销嫌疑。
         if s:
+            sus = entry["revision_suspects"]
             for d in _days(max(fstart, s["start"]), min(fend, _shift(s["end"], 1))):
-                if bars.get(d) != s["bars"].get(d) and d not in entry["revisions"]:
-                    entry["revisions"][d] = {"first_seen": today, "yahoo": bars.get(d)}
+                v = bars.get(d)
+                if v == s["bars"].get(d):
+                    sus.pop(d, None)
+                    continue
+                if d in entry["revisions"]:
+                    continue
+                prev = sus.get(d)
+                if prev and prev["yahoo"] == v and prev["seen_on"] < today:
+                    entry["revisions"][d] = {"first_seen": prev["seen_on"], "confirmed_on": today, "yahoo": v}
+                    del sus[d]
                     self.revisions_new += 1
+                elif not (prev and prev["yahoo"] == v):   # 同一天再看到同一个值不算第二次
+                    sus[d] = {"seen_on": today, "yahoo": v}
         # ② 与上一次（不同美东日期的）下载逐日核对，一致的、两次下载时都已收盘的日子并进已落定段
         p = entry["pending"]
         if p and p["fetched_on"] < today:
@@ -357,10 +426,37 @@ class ReplayOhlcStore:
 
     # ── 报告 ───────────────────────────────────────────────────────────────────
 
-    def problem(self) -> bool:
-        return bool(self.invalid_files or self.write_errors)
+    def quarantined(self) -> List[str]:
+        """目录里还留着的改名留证坏文件（含以前各次运行留下的）。二次检查：坏文件原先只在改名那一次报，那次运行若被
+        预算看门狗杀掉就一次都不报，之后该标的的冻结历史按当时的 Yahoo 重建、没人知道——现在留证文件在就一直报，
+        人看过后删掉才消。"""
+        try:
+            return sorted(p.name for p in self.root.glob("*.json.invalid-*"))
+        except OSError:
+            return []
 
-    def stats(self) -> Dict:
+    def problem(self) -> bool:
+        return bool(self.invalid_files or self.write_errors or self.quarantined())
+
+    def revised_in(self, wstart: Optional[str] = None, wend: Optional[str] = None, *,
+                   since: Optional[str] = None) -> Dict[str, int]:
+        """本次运行**碰过**的标的（含只由库回答、没下载的）里，日期落在 [wstart, wend) 的已记修订数。
+        二次检查补：原先只在 `merge()` 里数——标的平仓后请求全落在已落定段内、不再下载，修订就从进度行消失，
+        而重放照旧用着冻结值（「只要窗口里有就每次都报」没做到）。"""
+        out = {}
+        for t, e in self._entries.items():
+            rv = (e or {}).get("revisions") or {}
+            n = sum(1 for d, r in rv.items()
+                    if (wstart is None or wstart <= d) and (wend is None or d < wend)
+                    and (since is None or (r.get("confirmed_on") or "") >= since))
+            if n:
+                out[t] = n
+        return out
+
+    def stats(self, wstart: Optional[str] = None, wend: Optional[str] = None) -> Dict:
+        """`wstart` / `wend`：窗口范围（`_ReplayOhlcWindow.stats()` 传），只数窗口内的修订。"""
+        revised = self.revised_in(wstart, wend)
+        recent = self.revised_in(wstart, wend, since=_shift(self.fetch_day, -REVISION_ALARM_DAYS))
         return {
             "fetch_day": self.fetch_day,
             "store_only": self.store_only,
@@ -370,15 +466,19 @@ class ReplayOhlcStore:
             "served_from_store": self.served_from_store,
             "served_on_fallback": self.served_on_fallback,
             "revisions_new": self.revisions_new,
-            "revised_bars": sum(self._revised_in_window.values()),
-            "revised_tickers": sorted(self._revised_in_window),
+            "revised_bars": sum(revised.values()),
+            "revised_tickers": sorted(revised),
+            "revised_recent": sum(recent.values()),
+            "revised_recent_tickers": sorted(recent),
+            "revision_alarm_days": REVISION_ALARM_DAYS,
+            "quarantined": self.quarantined(),
             "invalid_files": list(self.invalid_files),
             "write_errors": list(self.write_errors),
             "problem": self.problem(),
         }
 
-    def summary(self) -> str:
-        st = self.stats()
+    def summary(self, wstart: Optional[str] = None, wend: Optional[str] = None) -> str:
+        st = self.stats(wstart, wend)
         return (f"行情库：整段 {st['full_fetches']}、补尾 {st['tail_fetches']}、免下载 {st['store_only']} 个标的，"
                 f"新落定 {st['settled_days_added']} 天，库直接回答 {st['served_from_store']} 次、"
                 f"下载失败后由库回答 {st['served_on_fallback']} 次，"

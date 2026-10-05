@@ -633,6 +633,12 @@ class _ReplayOhlcWindow:
         except Exception as e:  # noqa: BLE001 —— 退回直连路径并记 WARNING（下一行），不吞
             reason = f"{type(e).__name__}: {e}"
             bars = None
+        # v0.45.410 二次检查：补尾拿到空结果，而库的已落定段在同一段里本来就没有日线（停牌 / 退市）⇒ 空是权威答案，
+        # 不是下载失败——否则这类标的每天降级、直连次数逐日增长、落定段永远不前进。库里那段**有**日线时照旧当失败
+        # （Yahoo 抽风返回空的形状），整段下载（fstart == 窗口左端）同样照旧。
+        if (bars is None and store is not None and fstart != self.start
+                and reason in ("空结果", "整段没有一根有限值日线") and store.settled_quiet_from(ticker, fstart)):
+            bars = {}
         if bars is None:
             self.fallback_tickers[ticker] = reason
             _log.warning("[PaperPortfolio] 回放 OHLC 窗口 %s [%s, %s) 整段取数失败（%s）——"
@@ -665,7 +671,7 @@ class _ReplayOhlcWindow:
             "degraded": bool(self.fallback_tickers) or self.out_of_window > 0,
         }
         if self.store is not None:   # v0.45.410：只有开了行情库才有这个键（其余调用方的形状不变）
-            out["store"] = self.store.stats()
+            out["store"] = self.store.stats(self.start, self.end)
             # 坏文件 / 写不进去：本次结果不受影响，但下次照样整段下载、慢回去——要有人看见
             out["degraded"] = out["degraded"] or out["store"]["problem"]
         return out
@@ -675,7 +681,7 @@ class _ReplayOhlcWindow:
                 f"（{len(self._bars)} 个标的成功），切片服务 {self.served} 次，"
                 f"退回直连 {len(self.fallback_tickers)} 个标的，窗口外请求 {self.out_of_window} 次，"
                 f"直连请求 {self.direct_requests} 次（{self.direct_empty} 次一根 bar 都没有）"
-                + (f"；{self.store.summary()}" if self.store is not None else ""))
+                + (f"；{self.store.summary(self.start, self.end)}" if self.store is not None else ""))
 
 
 _REPLAY_OHLC_WINDOW: Optional[_ReplayOhlcWindow] = None

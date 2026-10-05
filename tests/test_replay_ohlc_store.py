@@ -207,34 +207,80 @@ class TestFetchRange:
 
 
 class TestRevisions:
-    def test_revised_bar_keeps_the_stored_value_and_is_recorded(self, tmp_path):
-        """Yahoo 在 09-15（重叠段内）改了值 ⇒ 回答仍是库里的、文件里记下首次发现日与新值、计数。
-        变异「用新值覆盖」⇒ 回答变 ⇒ 红；变异「不记 / 不计」⇒ 红。"""
+    """「Yahoo 改了已落定的日线」同落定一样要两次**不同美东日期**的观察给出同一个新值才算（二次检查：单次响应漏一天
+    曾被永久记成修订）。无论确认与否，回答一律是库里的值。"""
+
+    def test_revised_bar_keeps_the_stored_value_and_is_recorded_on_the_second_look(self, tmp_path):
+        """09-22 第一次看到 09-15 的新值：只记嫌疑、不报；09-23 再看到同一个新值：记修订（first_seen = 09-22）、报。
+        变异「用新值覆盖」⇒ 回答变 ⇒ 红；变异「单次即记」⇒ 第一天就报 ⇒ 红；变异「不记 / 不计」⇒ 红。"""
         m = _master()
         _settle_through_0919(tmp_path, m)
         revised = {**m, "2026-09-15": _bar(555.0)}
-        s = _store(tmp_path, "2026-09-22")
-        _, got = _fetch(s, revised)
+        s1 = _store(tmp_path, "2026-09-22")
+        _, got = _fetch(s1, revised)
         assert got["2026-09-15"] == m["2026-09-15"]
-        assert _file(tmp_path)["revisions"] == {"2026-09-15": {"first_seen": "2026-09-22", "yahoo": _bar(555.0)}}
-        assert (s.stats()["revisions_new"], s.stats()["revised_bars"], s.stats()["revised_tickers"]) == (1, 1, ["AAA"])
+        f = _file(tmp_path)
+        assert f["revisions"] == {} and f["revision_suspects"] == {"2026-09-15": {"seen_on": "2026-09-22", "yahoo": _bar(555.0)}}
+        assert (s1.stats()["revisions_new"], s1.stats()["revised_bars"]) == (0, 0)
+        s2 = _store(tmp_path, "2026-09-23")
+        _, got = _fetch(s2, revised)
+        assert got["2026-09-15"] == m["2026-09-15"]
+        f = _file(tmp_path)
+        assert f["revisions"] == {"2026-09-15": {"first_seen": "2026-09-22", "confirmed_on": "2026-09-23",
+                                                 "yahoo": _bar(555.0)}} and f["revision_suspects"] == {}
+        assert (s2.stats()["revised_recent"], s2.stats()["revised_recent_tickers"]) == (1, ["AAA"])
+        assert (s2.stats()["revisions_new"], s2.stats()["revised_bars"], s2.stats()["revised_tickers"]) == (1, 1, ["AAA"])
 
-    def test_known_revision_is_reported_every_time_but_counted_new_once(self, tmp_path):
-        """变异「只在首次发现那天报」⇒ 第二天的 revised_bars 为 0 ⇒ 红（只报一天的警示没人看得见）。"""
+    def test_a_one_off_glitch_is_never_reported(self, tmp_path):
+        """09-22 那次响应漏了 09-15（Yahoo 偶发），09-23 恢复 ⇒ 嫌疑撤销、从不报。变异「单次即记」⇒ 永久误报 ⇒ 红。"""
+        m = _master()
+        _settle_through_0919(tmp_path, m)
+        _fetch(_store(tmp_path, "2026-09-22"), {d: b for d, b in m.items() if d != "2026-09-15"})
+        s = _store(tmp_path, "2026-09-23")
+        _fetch(s, m)
+        f = _file(tmp_path)
+        assert f["revisions"] == {} and f["revision_suspects"] == {} and s.stats()["revised_bars"] == 0
+
+    def test_a_second_look_on_the_same_day_does_not_confirm(self, tmp_path):
+        """变异「不要求不同日期」⇒ 同一天重跑就确认 ⇒ 红。"""
         m = _master()
         _settle_through_0919(tmp_path, m)
         revised = {**m, "2026-09-15": _bar(555.0)}
         _fetch(_store(tmp_path, "2026-09-22"), revised)
-        s = _store(tmp_path, "2026-09-23")
+        _fetch(_store(tmp_path, "2026-09-22"), revised)
+        assert _file(tmp_path)["revisions"] == {}
+
+    def test_known_revision_is_reported_every_time_but_counted_new_once(self, tmp_path):
+        """变异「只在确认那天报」⇒ 第三天的 revised_bars 为 0 ⇒ 红（只报一天的警示没人看得见）。"""
+        m = _master()
+        _settle_through_0919(tmp_path, m)
+        revised = {**m, "2026-09-15": _bar(555.0)}
+        _fetch(_store(tmp_path, "2026-09-22"), revised)
+        _fetch(_store(tmp_path, "2026-09-23"), revised)
+        s = _store(tmp_path, "2026-09-24")
         _fetch(s, revised)
         assert (s.stats()["revisions_new"], s.stats()["revised_bars"]) == (0, 1)
         assert _file(tmp_path)["revisions"]["2026-09-15"]["first_seen"] == "2026-09-22"
+
+    def test_an_unconfirmed_suspect_is_rechecked_even_after_it_leaves_the_overlap(self, tmp_path):
+        """嫌疑在重叠段最左一天（09-10）；第二天已落定段前进、重叠段右移——补尾起点必须退回去盖住它，否则它永远没有第二次观察。
+        变异「补尾起点不看嫌疑」⇒ 09-23 从 09-11 起下载、确认不了 ⇒ 红。"""
+        m = _master()
+        _settle_through_0919(tmp_path, m)
+        revised = {**m, "2026-09-10": _bar(555.0)}
+        _fetch(_store(tmp_path, "2026-09-22"), revised)
+        assert _file(tmp_path)["settled"]["end"] == "2026-09-20"
+        s = _store(tmp_path, "2026-09-23")
+        assert s.fetch_start("AAA", *W) == "2026-09-10"
+        _fetch(s, revised)
+        assert "2026-09-10" in _file(tmp_path)["revisions"]
 
     def test_a_settled_bar_that_disappears_is_a_revision_too(self, tmp_path):
         m = _master()
         _settle_through_0919(tmp_path, m)
         gone = {d: b for d, b in m.items() if d != "2026-09-16"}
-        _, got = _fetch(_store(tmp_path, "2026-09-22"), gone)
+        _fetch(_store(tmp_path, "2026-09-22"), gone)
+        _, got = _fetch(_store(tmp_path, "2026-09-23"), gone)
         assert got["2026-09-16"] == m["2026-09-16"]
         assert _file(tmp_path)["revisions"]["2026-09-16"]["yahoo"] is None
 
@@ -266,7 +312,17 @@ class TestBadFilesAndWrites:
                     "revisions": {"2026-09-02": {"first_seen": "2026-09-03", "yahoo": None}}}).encode(),
         json.dumps({"schema": 1, "ticker": "AAA", "settled": None,
                     "pending": {"fetched_on": "2026-09-31", "start": "2026-09-01", "end": "2026-09-05", "bars": {}}}).encode(),
-    ], ids=["json", "schema", "ticker", "nan", "inverted", "bar-outside", "bool", "revision-unsettled", "bad-date"])
+        b'{"schema": 1, "ticker": "AAA"}',
+        b'{"schema": 1, "ticker": "AAA", "pending": null, "settled": {"start": "2026-09-01", "end": "2026-09-05", '
+        b'"bars": {"2026-09-02": {"Open": 1' + b"0" * 400 + b', "High": 1, "Low": 1, "Close": 1}}}}',
+        json.dumps({"schema": 1, "ticker": "AAA", "pending": None,
+                    "settled": {"start": "2026-09-01", "end": "2026-10-05", "bars": {"2026-09-31": _bar(1.0)}}}).encode(),
+        json.dumps({"schema": 1, "ticker": "AAA", "pending": None, "settled": None,
+                    "revision_suspects": {"2026-09-02": {"seen_on": "2026-09-03", "yahoo": None}}}).encode(),
+        json.dumps({"schema": 1, "ticker": "AAA", "pending": None,
+                    "settled": {"start": "0001-01-01", "end": "2026-09-05", "bars": {}}}).encode(),
+    ], ids=["json", "schema", "ticker", "nan", "inverted", "bar-outside", "bool", "revision-unsettled", "bad-date",
+            "missing-keys", "huge-int", "bar-not-a-date", "suspect-unsettled", "year-1"])
     def test_unreadable_file_is_moved_aside_reported_and_rebuilt(self, tmp_path, blob):
         """变异「坏文件当空库直接覆盖」⇒ 证据没了 ⇒ 红；变异「不计数」⇒ `problem` 为假 ⇒ 红。"""
         (tmp_path / "AAA.json").write_bytes(blob)
@@ -279,6 +335,44 @@ class TestBadFilesAndWrites:
         st = s.stats()
         assert len(st["invalid_files"]) == 1 and st["problem"] is True
         rs.validate_entry(_file(tmp_path), "AAA")
+
+    @pytest.mark.parametrize("kind", ["unreadable-file", "is-a-directory", "unreadable-root"])
+    def test_a_file_that_cannot_be_read_is_handled_not_a_crash(self, tmp_path, kind):
+        """二次检查补：读不了（权限 / 同名目录 / 库目录本身没权限）⇒ 按坏文件处理、本次整段下载、计数——不许让整次检验崩掉。
+        旧写法 `path.exists()` 在库目录没权限时直接抛 PermissionError（它只吞 ENOENT 一类）。"""
+        root = tmp_path / "store"
+        root.mkdir()
+        p = root / "AAA.json"
+        if kind == "is-a-directory":
+            p.mkdir()
+        else:
+            p.write_text("{}")
+            (p if kind == "unreadable-file" else root).chmod(0)
+        try:
+            m = _master()
+            s = _store(root, "2026-09-20")
+            fs, got = _fetch(s, m)
+            assert fs == W[0] and got == _slice(m, *W)
+            assert len(s.stats()["invalid_files"]) == 1 and s.stats()["problem"] is True
+        finally:
+            root.chmod(0o755)
+            if p.is_file():
+                p.chmod(0o644)
+
+    def test_evidence_files_keep_the_problem_visible_until_a_human_deletes_them(self, tmp_path):
+        """二次检查：坏文件原先只在改名那一次报——那次运行若被预算看门狗杀掉就一次都不报，之后冻结历史被悄悄重建。
+        现在留证文件还在就一直 `problem`，删掉才消。变异「problem 只看本次」⇒ 第二次运行为假 ⇒ 红。"""
+        (tmp_path / "AAA.json").write_bytes(b"{bad")
+        m = _master()
+        _fetch(_store(tmp_path, "2026-09-20"), m)
+        s2 = _store(tmp_path, "2026-09-21")
+        _fetch(s2, m)
+        st = s2.stats()
+        assert st["invalid_files"] == [] and st["quarantined"] == ["AAA.json.invalid-2026-09-20-0"] and st["problem"]
+        (tmp_path / "AAA.json.invalid-2026-09-20-0").unlink()
+        s3 = _store(tmp_path, "2026-09-22")
+        _fetch(s3, m)
+        assert s3.stats()["problem"] is False
 
     def test_if_the_bad_file_cannot_be_moved_it_is_never_overwritten(self, tmp_path, monkeypatch):
         (tmp_path / "AAA.json").write_bytes(b"{bad")
@@ -404,6 +498,52 @@ class TestWindowIntegration:
         assert (st["store"]["served_on_fallback"], st["store"]["served_from_store"]) == (2, 0)
         assert st["direct_requests"] == 2 and st["fallback"] == 1 and st["degraded"] is True
 
+    def test_revision_stays_reported_after_the_ticker_stops_downloading(self, tmp_path, fake_yf):
+        """二次检查补：修订是在补尾时发现的；之后这个标的平仓、请求全落在已落定段内 ⇒ 不再下载、不经 `merge()`——
+        重放照旧用着冻结值，修订必须照样报。变异「只在 merge() 里数修订」⇒ 最后一次 revised_bars 为 0 ⇒ 红。"""
+        m, fake = fake_yf
+        for day in ("2026-09-20", "2026-09-21"):
+            _through_window(_store(tmp_path, day), _REQS)
+        o, h, lo, c = fake.master["AAA"]["2026-09-15"]
+        fake.master["AAA"]["2026-09-15"] = (o, h, lo, c + 50.0)
+        _through_window(_store(tmp_path, "2026-09-22"), _REQS)
+        _, win = _through_window(_store(tmp_path, "2026-09-23"), _REQS)
+        assert win.stats()["store"]["revised_bars"] == 1
+        n0 = len(fake.calls)
+        out, win = _through_window(_store(tmp_path, "2026-09-24"), [_REQS[0], ("2026-09-14", "2026-09-17")])
+        assert fake.calls[n0:] == [], "请求全在已落定段内：不下载"
+        assert out[1]["2026-09-15"] == m["2026-09-15"], "回答仍是冻结值"
+        st = win.stats()["store"]
+        assert (st["revised_bars"], st["revised_tickers"], st["revisions_new"]) == (1, ["AAA"], 0)
+
+    def test_halted_ticker_empty_tail_is_an_answer_not_a_failure(self, tmp_path, fake_yf):
+        """二次检查：标的 09-11 之后再无日线（停牌 / 退市），仓位还在重放里每天被请求。补尾区间在库里本来就没有日线 ⇒
+        空结果是权威答案：不降级、不直连、落定段照常前进。变异「补尾空结果一律当失败」⇒ 每天降级、直连逐日增长 ⇒ 红。"""
+        _, fake = fake_yf
+        fake.master["AAA"] = {d: v for d, v in fake.master["AAA"].items() if d <= "2026-09-11"}
+        reqs = [("2026-09-02", "2026-09-10"), ("2026-09-08", "2026-09-30")]
+        for day in ("2026-09-24", "2026-09-25"):
+            _through_window(_store(tmp_path, day), reqs)
+        assert _file(tmp_path)["settled"]["end"] == "2026-09-23"
+        n0 = len(fake.calls)
+        out, win = _through_window(_store(tmp_path, "2026-09-28"), reqs)
+        assert [c[2]["start"] for c in fake.calls[n0:]] == ["2026-09-14"], "补尾那一次下载拿到的是空结果"
+        st = win.stats()
+        assert (st["fallback"], st["direct_requests"], st["degraded"]) == (0, 0, False), st
+        assert out[1] == {d: b for d, b in _master().items() if "2026-09-08" <= d <= "2026-09-11"}
+        assert _file(tmp_path)["settled"]["end"] == "2026-09-24"
+
+    def test_empty_tail_for_an_active_ticker_is_still_a_failure(self, tmp_path, fake_yf):
+        """库里那段**有**日线时，补尾返回空 = Yahoo 抽风（v0.45.391 起就不把它当权威答案）⇒ 照旧降级、退回直连。
+        变异「补尾空结果一律接受」⇒ 未落定的日子被答成没有日线 ⇒ 红。"""
+        m, fake = fake_yf
+        for day in ("2026-09-20", "2026-09-21"):
+            _through_window(_store(tmp_path, day), _REQS)
+        fake.wide_fail = lambda t, s, e: "empty" if e == W[1] else None
+        out, win = _through_window(_store(tmp_path, "2026-09-22"), [_REQS[2]])
+        st = win.stats()
+        assert st["fallback"] == 1 and st["degraded"] is True and out == [_slice(m, *_REQS[2])]
+
     def test_window_without_store_has_no_store_key(self, fake_yf):
         _, win = _through_window(None, _REQS)
         assert "store" not in win.stats()
@@ -422,7 +562,7 @@ class TestWindowIntegration:
 
 # ── 端到端：前瞻 run() / evaluate() 在合成世界里 ───────────────────────────────────────────
 
-D1, D2, D3 = "2026-08-27", "2026-08-28", "2026-08-31"
+D1, D2, D3, D4 = "2026-08-27", "2026-08-28", "2026-08-31", "2026-09-01"
 #: D1、D2 两次整段下载后，已落定段 = [窗口左端, D1 前一天]；D3 补尾从那里往前 OVERLAP_DAYS 天
 TAIL_START = (dt.date(2026, 8, 26) - dt.timedelta(days=OVERLAP_DAYS - 1)).isoformat()
 
@@ -496,25 +636,37 @@ class TestForwardRunWithStore:
         items = rr._forward_test_attention("fg_exposure_gate_forward", rr._detail(res, rr._FWD_DETAIL_KEYS))
         assert [a["id"] for a in items] == ["ic_rerun.fg_exposure_gate_forward.ohlc_window_degraded"]
         assert "回放行情库" in items[0]["message"] and "写入失败 11 次" in items[0]["message"]
+        assert "整段取数" not in items[0]["message"], "只因行情库的问题降级时不许说整段取数失败（二次检查）"
 
-    def test_revised_history_is_frozen_reported_and_does_not_change_the_icon(self, world, fwd_day):
-        """D2 后 Yahoo 改了 NEW2 在重叠段内的一天 ⇒ D3 的结果与改之前相同（冻结），进度行多一句、图标仍 ⏳、
-        没有 attention。对照：不用库的同一次运行结果确实变了——证明这条测试不是在两个相同世界上比。
-        变异「修订覆盖库」⇒ 结果变 ⇒ 红；变异「修订不报」⇒ 进度行没那句 ⇒ 红。"""
+    def test_revised_history_is_frozen_alarmed_for_a_week_then_only_noted(self, world, fwd_day):
+        """D2 后 Yahoo 改了 NEW2 在重叠段内的一天 ⇒ D3 第一次看到（只记嫌疑、不报），D4 再看到（确认）：两天的结果都与
+        改之前相同（冻结）；D4 确认 ⇒ 段首 ⚠️ + attention `ohlc_store_revised`（二次检查：拆股会让 A / B 凭空出场，
+        只陈述不够）；过了告警期 ⇒ 回到 ⏳、只陈述。对照：不用库的同一次运行结果确实变了——证明这条测试不是在两个相同世界上比。
+        变异「修订覆盖库」⇒ 结果变 ⇒ 红；变异「修订不报 / 不告警 / 永久告警」⇒ 红。"""
         before, _ = fwd_day(D1)
         fwd_day(D2)
         day = "2026-08-24"
         assert TAIL_START <= day <= "2026-08-26"
         o, h, lo, c = world.master["NEW2"][day]
         world.master["NEW2"][day] = (o, h + 30.0, lo, c + 20.0)
-        res, _ = fwd_day(D3)
-        changed, _ = fwd_day(D3, store=False)
+        first, _ = fwd_day(D3)
+        assert _core(first) == _core(before) and first["ohlc_window"]["store"]["revised_bars"] == 0
+        assert "行情库：" not in fwd.status_line(first), "第一次看到只是嫌疑，不报"
+        res, _ = fwd_day(D4)
+        changed, _ = fwd_day(D4, store=False)
         assert _core(res) == _core(before)
         assert _core(changed) != _core(before), "夹具没起作用：这次修订本来就不改结果"
         assert res["ohlc_window"]["store"]["revised_bars"] == 1
         line = fwd.status_line(res)
+        assert line.startswith("⚠️ ") and "NEW2 近 7 天确认了 1 根已落定日线被 Yahoo 改了" in line, line
+        items = rr._forward_test_attention("fg_exposure_gate_forward", rr._detail(res, rr._FWD_DETAIL_KEYS))
+        assert [(a["id"], a["level"]) for a in items] == [("ic_rerun.fg_exposure_gate_forward.ohlc_store_revised", "warn")]
+        # 过了告警期：只陈述、段首回到 ⏳、没有 attention（窗口左端固定，永久 ⚠️ 会把人训练成无视 ⚠️）
+        later, _ = fwd_day("2026-09-10")
+        assert _core(later) == _core(before) and later["ohlc_window"]["store"]["revised_recent"] == 0
+        line = fwd.status_line(later)
         assert line.startswith("⏳ ") and "行情库：NEW2 共 1 根已落定日线 Yahoo 后来改了" in line, line
-        assert rr._forward_test_attention("fg_exposure_gate_forward", rr._detail(res, rr._FWD_DETAIL_KEYS)) == []
+        assert rr._forward_test_attention("fg_exposure_gate_forward", rr._detail(later, rr._FWD_DETAIL_KEYS)) == []
 
     def test_total_outage_answered_by_the_store_is_not_called_ohlc_unavailable(self):
         """served=0 且直连全空，但库回答过请求 ⇒ 不是「一根行情都没拿到」。变异「不看 served_on_fallback」⇒ 红。"""
