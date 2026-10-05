@@ -79,32 +79,30 @@ class GitHubTool:
         # 兜底 `__file__`）——代码仓库的位置不随数据搬迁改变。
         self.repo_path = repo_path or str(PATHS.git_repo_root)
 
-    # 允许的 git 子命令白名单。
+    # 允许的 git 子命令白名单——**按生产调用点收窄**（v0.45.413）。
     #
-    # ⚠️ **不要按「本类还剩哪些方法」来收窄它。** 它约束的是 `run_git_cmd` 收到的
-    # **字符串**，而调用方是直接下发整条命令的：`report_deployer` 就自己传
-    # `"git push origin main"` / `"git branch -D …"` / `"git fetch origin"`。
-    # v0.45.204 删掉 `push()`/`diff()` 这两个同名方法时，`push`/`diff` 两项**照旧保留**——
-    # 方法没了不等于子命令没人用了，跟着删会打断现役 gh-pages / main 部署链路。
+    # 现役调用点只有 `production_sync` 的扫描前快进：`rev-parse` / `merge-base` / `rev-list`（只读）、
+    # `fetch origin main`、`pull --ff-only --no-rebase origin main`。白名单与调用点必须**精确相等**：
+    # `tests/test_git_failures_are_visible.py` 用 AST 扫出调用点，双向断言——
+    # 多一项（有人顺手加了 push / commit）红，少一项（现役调用被误删）也红。
+    # 「怕它变大也怕它变小」两条断言各一条；只有子集那一条，白名单会悄悄积累无人使用的写操作。
     #
-    # ⚠️ **不要加 `checkout` / `reset` / `restore` / `clean`。** v0.45.210 处置过一次：
-    # `report_deployer` 旧测试推送分支下发 `checkout` 与 `reset --hard`，自 2026-03-01
-    # 本表引入起就被拒绝（本表漏列了三天前已存在的调用方，不是有意排除）。修法是
-    # **撤掉那条分支**，不是加项——白名单只按子命令判，放行 `reset` 就放行了
-    # `reset --hard`，而这个仓库的工作区里常驻着未提交、丢了无法回溯重取的账本
-    # （`hedge_state/` 等，2026-09-04 就被一次 `reset --hard` 清掉过）。
-    # 守卫：`tests/test_git_failures_are_visible.py`（调用点必须全在表内 + 表内不许出现破坏性子命令）。
+    # 历史：v0.45.210 前白名单里**没有** `checkout` / `reset`，而旧的测试推送分支下发了它们——被静默拒绝了半年
+    # （调用方不看返回值）。修法是撤掉那条分支，**不是**加项；此后拒绝一律 `_log.error` 出声。
+    # v0.45.402~403 退役日报提交 / 推送链与 `GitHubTool.commit()/status()`，白名单里的 `add` / `commit` /
+    # `push` / `stash` / `branch` / `tag` / `remote` / `status` / `log` / `diff` / `show` / `merge-tree` /
+    # `commit-tree` 随之失去调用点，v0.45.413 一并收掉。要加 `git log` 之类做排查：改这里并更新测试——这点摩擦是有意的。
     #
-    # v0.45.214 加了四项，全部**不动工作区、不移动任何 ref**（`production_sync`
-    # 在对象层合并后推送，治生产推送六次 non-fast-forward）：
-    #   `rev-list` / `merge-base` 只读；`merge-tree --write-tree` 与 `commit-tree`
-    #   只往对象库写树与提交对象，引用照旧只由 `push` 改动远端。
-    # ⚠️ `pull` 本来就在表里，而白名单只看子命令 ⇒ `pull --rebase` 也会被放行。
-    # 生产调用点只许 `pull --ff-only`，由守卫的 AST 扫描单独核对。
-    _ALLOWED_GIT_CMDS = {
-        "status", "log", "diff", "branch", "add", "commit", "push",
-        "pull", "fetch", "remote", "show", "tag", "stash", "rev-parse",
-        "rev-list", "merge-base", "merge-tree", "commit-tree",
+    # ⚠️ 白名单只按**子命令**判，而 `fetch` / `pull` 是剩下两个会改本地状态的：`pull --rebase` 会改写历史，
+    # `fetch origin main:main` 会移动本地 main。所以这两个另有**精确参数**约束（`_EXACT_GIT_ARGS`），
+    # 运行期强制，不只靠静态扫描。其余三个（rev-parse / rev-list / merge-base）只读，不限参数。
+    # 守卫：`TestRunGitCmdFailuresAreLoud` / `TestAllowlistMatchesProductionCallSites`。
+    _ALLOWED_GIT_CMDS = {"fetch", "pull", "rev-parse", "rev-list", "merge-base"}
+
+    #: 会改本地状态的两个子命令的**完整参数**（`git <子命令>` 之后的 token，逐个相等）。
+    _EXACT_GIT_ARGS = {
+        "fetch": ("origin", "main"),
+        "pull": ("--ff-only", "--no-rebase", "origin", "main"),
     }
 
     def run_git_cmd(self, cmd: str) -> Dict[str, Any]:
@@ -121,6 +119,14 @@ class GitHubTool:
                 # 旧测试推送分支的 checkout/reset 被拒了半年，日志里一个字都没有。
                 _log.error("run_git_cmd 拒绝白名单外的子命令 %r（命令未执行）：%s", subcmd, cmd)
                 return {"success": False, "error": f"Git subcommand not allowed: {subcmd}"}
+
+            want = self._EXACT_GIT_ARGS.get(subcmd)
+            if want is not None and tuple(parts[2:]) != want:
+                # 同上：调用方传的是写死的字符串 ⇒ 参数不符一定是代码改了，不是运行期偶发。
+                _log.error("run_git_cmd 拒绝 %r 的非约定参数（命令未执行）：%s；只允许 git %s %s",
+                           subcmd, cmd, subcmd, " ".join(want))
+                return {"success": False,
+                        "error": f"Git arguments not allowed for {subcmd}: {' '.join(parts[2:])!r}"}
 
             result = subprocess.run(
                 parts,

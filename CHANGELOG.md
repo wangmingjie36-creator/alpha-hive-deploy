@@ -56,7 +56,33 @@
 - 生产在 14:00 PDT 用的是当天可能还是临时值的日线，重放用的是终值——与拆股无关、早已存在，这次不动。
 
 
-## [0.45.413] — 2026-10-05 — 占位（进行中：GitHubTool 命令白名单按生产调用点收窄 + pull/fetch 运行期参数约束）
+## [0.45.413] — 2026-10-05 — Changed：`GitHubTool._ALLOWED_GIT_CMDS` 按生产调用点收窄（18→5）+ `pull` / `fetch` 精确参数运行期约束
+
+v0.45.402~403 退役日报提交 / 推送链与 `GitHubTool.commit()/status()` 后留下的设计决定：白名单是否按调用点收窄。决定：收窄，并补上「只按子命令判」拦不住的参数层。**只改 `agent_toolbox.py` 与测试。**
+
+### 问题
+- 白名单有 18 个子命令，生产实际下发的只有 5 个（`production_sync` 扫描前快进：`rev-parse` / `merge-base` / `rev-list` 只读，`fetch origin main`，`pull --ff-only --no-rebase origin main`）。其余 13 个无人调用，其中 `add` / `commit` / `push` / `stash` / `branch` / `tag` / `remote` 是写操作。
+- 白名单只按**子命令**判：放行 `pull` 就放行了 `pull --rebase`（改写历史），放行 `fetch` 就放行了 `fetch origin main:main`（移动本地 main）。原来只有一条 AST 单向守卫（调用点 ⊆ 白名单），它**不防白名单变大**。
+
+### Changed
+- `_ALLOWED_GIT_CMDS`：`{"fetch", "pull", "rev-parse", "rev-list", "merge-base"}`。移除 `status` / `log` / `diff` / `branch` / `add` / `commit` / `push` / `remote` / `show` / `tag` / `stash` / `merge-tree` / `commit-tree`。
+- 新增 `_EXACT_GIT_ARGS`：会改本地状态的两个子命令（`fetch` / `pull`）的**完整参数**逐个相等，`run_git_cmd` **运行期**强制，不符 ⇒ `_log.error` 并返回 `Git arguments not allowed`，命令不执行。其余三个只读，不限参数。
+- 没做完整参数模式匹配：只剩 5 个子命令、2 个能改状态，完整匹配的维护成本高于它多出来的那点安全。
+
+### Added（守卫，`tests/test_git_failures_are_visible.py::TestAllowlistMatchesProductionCallSites`，共 +38 条）
+- **白名单 == 生产调用点（AST 扫出）精确相等**：补上超集方向（原来只有子集方向）。「怕它变大也怕它变小」两条断言各一条。
+- 约束值必须就是生产下发的那条字符串（AST 读 `production_sync` 的字面量）——否则收窄把现役调用也拒了，扫描前同步停摆。
+- 10 种 `pull` / `fetch` 的非约定参数（`--rebase`、`origin main:main`、`--prune`、`--force` …）必须被拒且**不执行**（桩住 `subprocess.run` 断言零调用）；6 条生产命令必须仍被执行（正对照，防「什么都拒」的假绿）；19 个其余子命令（含 `checkout` / `reset` / `rebase` / `merge`）必须被拒且不执行。
+- 三条旧测试换成仍在白名单里的命令：`status` → `rev-parse --git-dir`；`git push` → `git fetch origin main`；非 UTF-8 输出那条改用 `rev-parse --abbrev-ref HEAD`，让 HEAD 指向**名字含非 UTF-8 字节**的分支——APFS 不许建这种松散 ref 文件，所以直接写 `packed-refs` 与 `HEAD`（git 照常读）。
+
+### 验证
+- 变异 5 处各红对应守卫：白名单加回 `push` ⇒ 相等测试 + `push` 被拒测试红；删现役 `merge-base` ⇒ 子集 / 相等 / 正对照红；运行期约束整段不执行 ⇒ 10 条参数被拒测试红；约束放松成只看首个参数 ⇒ 6 条红；约束值与生产不一致 ⇒ 4 条红。
+- **真实远端冒烟**：临时浅克隆（读真实 GitHub），把 main 退后 3 个提交，用新代码跑 `production_sync.py`：第一次 `fast_forwarded`（`ac78b75 → b4b908c`，behind=13，真的执行了 `pull --ff-only --no-rebase`），第二次 `up_to_date`。
+- 干净克隆全套（本机，真实数据根闸启用，7585 个受闸条目、整轮未触发）：8126 passed；唯一失败 `TestCoverageHorizon`（日历覆盖不足，设计内周期性变红，与本版无关）。
+
+### 生产影响
+下一次扫描前的 `production_sync` 快进会带上本版（今天 10-05 14:00 与 v0.45.402 / 403 同一轮）。若参数约束与现役调用不符，后果是 `sync_before_scan` 回 `error` 类结局并触发 `alert_manager` 的「生产代码 ≠ origin/main」P1（可见，不会静默）；扫描照跑旧代码。
+
 
 ## [0.45.412] — 2026-10-04 — Fixed：Alpha Bot 启动器认「窗口已开着」用的 `ps` 不带 `-ww`——Linux CI 上管道输出被截到 80 列，`TestNativeWindow::test_second_launch_brings_existing_window_forward` 自 v0.45.407 起红；生产（macOS）不受影响
 
