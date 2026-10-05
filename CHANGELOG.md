@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.413] — 2026-10-05 — 占位（进行中：GitHubTool 命令白名单按生产调用点收窄 + pull/fetch 运行期参数约束）
+
 ## [0.45.412] — 2026-10-04 — Fixed：Alpha Bot 启动器认「窗口已开着」用的 `ps` 不带 `-ww`——Linux CI 上管道输出被截到 80 列，`TestNativeWindow::test_second_launch_brings_existing_window_forward` 自 v0.45.407 起红；生产（macOS）不受影响
 
 ### 现象
