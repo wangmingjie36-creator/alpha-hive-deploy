@@ -23,8 +23,9 @@ procps 的 ps(1) 写明：输出被重定向 / 管道接走时，宽度「undefi
 CI 解释器是 `/opt/hostedtoolcache/Python/3.11.16/x64/bin/python`，测试里 owner 的命令行共 **99 列、标记从第 83 列起** ⇒ 截到 80 列后标记没了 ⇒ `window_owner()` 返回 None。
 macOS 的 BSD ps 在非终端输出时恒不限宽（实测 `COLUMNS=40` / `80` 都不截），所以 .app 在生产从没踩到，本机测试也永远红不了。
 
-⚠️ **没在 Linux 上本机复现**（本机无容器运行时）：证据链是 CI 断言形状（走到 `ask` 而非 `activate` ⇒ owner 判成了 None）+ procps 文档 + CI 解释器路径的实际长度。
-**推上 main 后那条真 ps 测试在 CI 转绿，才算最终确认**——待验证。
+没在 Linux 上本机复现（本机无容器运行时）：证据链是 CI 断言形状（走到 `ask` 而非 `activate` ⇒ owner 判成了 None）+ procps 文档 + CI 解释器路径的实际长度。
+✅ **CI 已确认（2026-10-05）**：推上 main 的 `9a2833a2` 那次 run（37342119622，completed）里，真 ps 的 `test_second_launch_brings_existing_window_forward` 与新测试均 **PASSED**；
+全套 1 failed / 8072 passed，唯一的红是按设计的 `TestCoverageHorizon`。
 
 ### Fixed
 
