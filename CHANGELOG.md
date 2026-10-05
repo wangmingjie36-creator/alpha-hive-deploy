@@ -29,7 +29,7 @@ v0.45.402~403 退役日报提交 / 推送链与 `GitHubTool.commit()/status()` �
 ### 验证
 - 变异 5 处各红对应守卫：白名单加回 `push` ⇒ 相等测试 + `push` 被拒测试红；删现役 `merge-base` ⇒ 子集 / 相等 / 正对照红；运行期约束整段不执行 ⇒ 10 条参数被拒测试红；约束放松成只看首个参数 ⇒ 6 条红；约束值与生产不一致 ⇒ 4 条红。
 - **真实远端冒烟**：临时浅克隆（读真实 GitHub），把 main 退后 3 个提交，用新代码跑 `production_sync.py`：第一次 `fast_forwarded`（`ac78b75 → b4b908c`，behind=13，真的执行了 `pull --ff-only --no-rebase`），第二次 `up_to_date`。
-- 干净克隆全套结果见下一条验证记录。
+- 干净克隆全套（本机，真实数据根闸启用，7585 个受闸条目、整轮未触发）：8126 passed；唯一失败 `TestCoverageHorizon`（日历覆盖不足，设计内周期性变红，与本版无关）。
 
 ### 生产影响
 下一次扫描前的 `production_sync` 快进会带上本版（今天 10-05 14:00 与 v0.45.402 / 403 同一轮）。若参数约束与现役调用不符，后果是 `sync_before_scan` 回 `error` 类结局并触发 `alert_manager` 的「生产代码 ≠ origin/main」P1（可见，不会静默）；扫描照跑旧代码。
