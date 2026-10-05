@@ -8,7 +8,6 @@ report_deployer - 报告部署与通知模块
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from hive_logger import get_logger
-import production_sync
 
 _log = get_logger("report_deployer")
 
@@ -576,7 +575,7 @@ def gh_pages_step_status(since_epoch: float, log_path: Optional[str] = None) -> 
 def deploy_static_to_ghpages(reporter) -> Dict:
     """用 git plumbing 构建仅含静态文件的 gh-pages 提交并推送。
 
-    v0.45.351：返回部署结局 dict（此前返回 None ⇒ `auto_commit_and_notify` 的
+    v0.45.351：返回部署结局 dict（此前返回 None ⇒ `deploy_and_notify`（前身 `auto_commit_and_notify`）的
     `results` 里根本没有 gh-pages 这一项，status.json / 告警对它全盲）。**每条路径**
     都返回 `success` 键、并往 `GH_PAGES_DEPLOY_LOG_NAME` 追加一行——包括两个早退
     （无文件可部署 / 全部 hash-object 失败），它们此前只打日志、不留记录。
@@ -782,135 +781,27 @@ def deploy_static_to_ghpages(reporter) -> Dict:
     return outcome
 
 
-#: 日报自动提交的**白名单**（v0.43.4）
-#
-# 只有这些路径会被定时任务自动提交。代码文件一律交给人工提交。
-#
-# 为什么是白名单而非黑名单：自动化系统的失败模式必须是可发现的。
-# 白名单漏一项 → 该产物不进 git → 下次运行/看网站立刻发现；
-# 黑名单漏一项 → 半成品代码被自动提交并推上生产 → 无人知晓。
-#
-# 清单来源：commit 68aad61（2026-07-30 日报）里的全部非代码文件，
-# 加上 ML 报告与 analysis JSON（那次恰好没生成）。
-REPORT_ARTIFACT_PATHS: List[str] = [
-    # 日报正文与分享版
-    "alpha-hive-daily-*.json",
-    "alpha-hive-daily-*.md",
-    "alpha-hive-thread-*.txt",
-    # ML 增强报告与其数据快照
-    "alpha-hive-*-ml-enhanced-*.html",
-    "analysis-*-ml-*.json",
-    # 站点资产
-    "index.html",
-    "dashboard-data.json",
-    "rss.xml",
-    "sw.js",
-    # 状态与缓存
-    "report_snapshots/",
-    "paper_portfolio_state/",
-    ".factor_cache/",
-    "weight_history.jsonl",
-    # v0.45.115：期权路线图三本账（v0.45.101~103 建，2026-09-04 首次落盘）。
-    # 不加进来的话，扫描每天改它们、白名单每天跳过它们，于是永远挂在工作区
-    # ——2026-09-04 一次 `git reset --hard` 就把这类未提交状态清掉了。
-    # 这三本装的是**攒数期数据，丢了无法回溯重取**：历史 CBOE 双边报价、
-    # 逐日 iv−rv 记账、已开跨式腿的成本价。与 paper_portfolio_state/ 同类。
-    "hedge_state/",
-    "options_paper_state/",
-    "vrp_state/",
-    # v0.45.134：概率记分账本。装的是**当天真正印出去的那个概率**——
-    # 回溯记分能重算估计量，但重算不出「那天实际印的是什么」，
-    # 丢了无法回溯重取。与 paper_portfolio_state/ 同类。
-    "probability_scorecard_state/",
-    # v0.45.145：ML 模型版本快照。装的是**当天真正做出预测的那个模型**——
-    # 2026-09-04 模型退化成常数函数无法事后归因，就是因为 ml_model_cache.json
-    # 原地覆盖、没有任何历史版本可捞出来重放。丢了无法回溯重取。
-    # 与 paper_portfolio_state/ 同类。
-    "ml_model_history/",
-]
+def deploy_and_notify(reporter, report: Dict) -> Dict:
+    """日报部署：同步 gh-pages（= 网站）——**只对生产扫描生效**。
 
-#: 与上表对应的匹配规则（用于"哪些被跳过"的提示）
-#: ⚠️ 必须与 REPORT_ARTIFACT_PATHS 同向——只改一处会让「跳过了哪些」的提示说谎
-#:    （提示说被跳过、实际被提交，或反之）。tests/test_report_deployer_whitelist.py
-#:    有一条断言盯着这两处的一致性。
-_ARTIFACT_PREFIXES = ("report_snapshots/", "paper_portfolio_state/", ".factor_cache/",
-                      "hedge_state/", "options_paper_state/", "vrp_state/",
-                      "probability_scorecard_state/", "ml_model_history/")
-_ARTIFACT_GLOBS = (
-    "alpha-hive-daily-*.json", "alpha-hive-daily-*.md", "alpha-hive-thread-*.txt",
-    "alpha-hive-*-ml-enhanced-*.html", "analysis-*-ml-*.json",
-)
-_ARTIFACT_EXACT = ("index.html", "dashboard-data.json", "rss.xml", "sw.js",
-                   "weight_history.jsonl")
+    生产 = 蜂群扫描，或实际用了 LLM 蒸馏。非生产扫描**不部署**，返回 `deploy_env="none"`。
 
+    **阶段 6（v0.45.402）起不再提交、也不再推送代码仓库的 main。** 本函数前身 `auto_commit_and_notify`
+    每次扫描把日报产物白名单提交并推上公开 main；数据根迁移后这些产物都在 `$ALPHA_HIVE_HOME`
+    （代码仓库不再跟踪它们，见 `tests/test_no_data_tracked_in_git.py`），网站从数据根取内容推 gh-pages
+    （阶段 4），异地副本由编排器 Step 14 的私有数据备份负责。⚠️ **勿重建提交 / 推送链**：往公开仓库提交数据
+    正是阶段 6 要终结的事；要让数据有异地副本，改 `data_backup/export.py`，不是这里。
+    退役时留下的坑（供回看）：此前的提交链有两条已知失败形状——测试推送分支（v0.45.210 撤）与
+    「工作区干净 ⇒ 无需提交」把 git status 失败渲染成无事（v0.45.225）——都随链一并消失。
 
-def _is_report_artifact(path: str) -> bool:
-    """该文件是否属于日报产物（即会被自动提交）"""
-    import fnmatch
-    p = path.strip()
-    if p in _ARTIFACT_EXACT:
-        return True
-    if any(p.startswith(pre) for pre in _ARTIFACT_PREFIXES):
-        return True
-    return any(fnmatch.fnmatch(p, g) for g in _ARTIFACT_GLOBS)
-
-
-def _git_modified_files(git) -> Tuple[Optional[List[str]], Optional[str]]:
-    """`(工作区改动清单, None)`；`git status` 失败时 `(None, 原因)` 并打 warning。
-
-    ⚠️ 必须把「失败」与「干净」分开。v0.45.210 前调用方写的是
-    `if status.get("modified_files"): … else: log("工作目录干净")`，而
-    `GitHubTool.status()` 失败时返回的是 `{"error": …}` —— 于是
-    `git status` 挂了会被报成「无需提交（工作目录干净）」。
-    v0.45.225 起原因一并返回：此前它只进 warning 日志，`results["git_commit"]`
-    （⇒ status.json ⇒「日报提交失败」告警的原因栏）里只有一句 "git status failed"。
+    返回 `{"deploy_env": "production"|"none", "gh_pages": {...}, "slack_notification": {...}}`。
+    `gh_pages` 的键**始终存在**（跳过 / 失败 / 抛异常也各给一个 `success=False` 的结局）：
+    编排器用 `scan_timing.extra.gh_pages` 的存在当「主流程已跑到最后一步」的证据，不许丢。
     """
-    status = git.status()
-    if "modified_files" not in status:
-        reason = status.get("error") or "（无错误输出）"
-        _log.warning("git status 失败，无法判断工作区改动：%s", reason)
-        return None, reason
-    return status["modified_files"], None
+    _log.info("Deploy & Notify 启动")
 
+    results: Dict = {}
 
-def auto_commit_and_notify(reporter, report: Dict) -> Dict:
-    """
-    日报产物提交 + 推送 origin main + 同步 gh-pages —— **只对生产扫描生效**。
-
-    生产 = 蜂群扫描，或实际用了 LLM 蒸馏。非生产扫描（`run_daily_scan`
-    规则引擎路径，即不带 `--swarm` 跑 `alpha_hive_daily_report.py`）
-    **不提交、不推送**，返回 `deploy_env="none"`。
-
-    v0.45.210 撤掉了原先的「测试推送分支」（本地提交 → 临时分支推 test remote →
-    `checkout main` → `reset --hard origin/main`）。取证：
-      - 自 2026-03-01 `GitHubTool` 白名单引入起，`checkout`/`reset` 就被静默拒绝：
-        临时分支建不出来、推送必失败、回滚从未执行，却无条件 log「本地 main 已恢复」。
-        test remote 最后一次收到推送是 2026-03-01T03:47Z，白名单提交前 4.5 小时。
-      - 回滚不执行 ⇒ 测试提交留在本地 main ⇒ 下一次生产推送把它一起送上 origin/main。
-        白名单之后这条分支共触发 7 次（`reasoning_sessions.run_mode='daily_scan'`
-        2026-03-04~03-13），origin/main 上恰好 7 个无 `swarm_metadata` 的日报提交；
-        2026-03-13 的蜂群日报至今仍被规则引擎版本顶着（main 与 gh-pages 都是）。
-      - 03-13 之后零触发（台账同窗口蜂群会话 172 条作正对照）。
-    为什么不是往白名单加 `checkout`/`reset`：原设计的「本地 main 不被污染」
-    **只能靠 `reset --hard` 实现**，而它会连带清掉工作区里未提交的代码与
-    丢了无法回溯重取的账本（见 `REPORT_ARTIFACT_PATHS` 注释）。
-    为什么不是 `git push test HEAD:main`：提交已经落在本地 main 上，不 reset 撤不掉。
-
-    本函数管不到的残留：`save_report` 在本函数**之前**已把产物写进工作区。
-    非生产报告不提交，但那些文件仍在；下一次生产扫描的白名单提交会把其中
-    没被覆盖的一并提交。本函数把它们列进 warning 与
-    `results["uncommitted_report_artifacts"]`，让它可见。
-    **上游已于 v0.45.213 根治**：非蜂群扫描整条退役，`alpha_hive_daily_report.main()`
-    不带 `--swarm` 在构造 reporter 之前就退出（它在扫描中途还会写概率账本，
-    在 save_report 之前短路管不到，见该处注释）。CLI 与 GUI 此后都只递蜂群报告进来，
-    非生产分支留作纵深防御——走到它说明有调用方递了一份不认得的报告，要出声。
-    """
-    _log.info("Auto-commit & Notify 启动")
-
-    results = {}
-    git = reporter.agent_helper.git
-
-    from datetime import datetime as _dt2
     # 生产模式判定（修复 #3）：只看"实际是否使用 LLM"（distill_mode==llm_enhanced）
     # 或是否是蜂群扫描。不再用 `api_key is_available()` 这种"key 存在即生产"反模式
     _is_swarm = bool(report.get("swarm_metadata") or "蜂群" in report.get("system_status", ""))
@@ -924,95 +815,17 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
     _deploy_production = _using_llm or _is_swarm
 
     if not _deploy_production:
-        # 判定必须在提交**之前**：旧实现先提交再分流，非生产数据就此落在本地 main 上。
-        modified, _ = _git_modified_files(git)
-        left = [f for f in (modified or []) if _is_report_artifact(f)]
-        _log.warning(
-            "非生产扫描（非蜂群、未用 LLM）：不提交、不推送。"
-            "save_report 已写入工作区的日报产物 %s 个（不会被回滚，下一次生产扫描会把"
-            "没被覆盖的一并提交）：%s",
-            "未知（git status 失败）" if modified is None else len(left),
-            ", ".join(left[:10]) + (" …" if len(left) > 10 else ""),
-        )
-        results["git_commit"] = {"success": False, "skipped": "non_production"}
-        results["git_push"] = {"success": False, "skipped": "non_production", "remote": None}
+        # v0.45.213 起 CLI 只递蜂群报告进来；走到这里说明有调用方递了一份不认得的报告——要出声。
+        _log.warning("非生产扫描（非蜂群、未用 LLM）：不部署 gh-pages")
         results["gh_pages"] = {"success": False, "skipped": "non_production"}
         results["deploy_env"] = "none"
-        results["uncommitted_report_artifacts"] = left
         results["slack_notification"] = {"skipped": "handled_by_claude_mcp"}
-        _log.info("Auto-commit & Notify 完成（非生产扫描，未部署）")
+        _log.info("Deploy & Notify 完成（非生产扫描，未部署）")
         return results
 
-    # 1. Git 提交报告（始终新 commit，不 amend，避免 GitHub Pages 部署冲突）
-    timestamp = _dt2.now().strftime("%H:%M")
-    today_commit_msg = f"Alpha Hive 蜂群日报 {reporter.date_str} {timestamp}"
-    _log.info("Git commit... (mode: new)")
-    modified, status_error = _git_modified_files(git)
-    if modified is None:
-        results["git_commit"] = {"success": False, "error": f"git status 失败：{status_error}"}
-    elif modified:
-        # v0.43.4：白名单提交。此前走 `git add -A` 全量，会把工作区里
-        # 任何进行中的代码改动一并卷进"日报"提交（2026-07-30 实际发生：
-        # 10 个版本的代码改动混进 commit 68aad61）。详见 AgentHelper.commit 注释。
-        _skipped = [f for f in modified
-                    if not _is_report_artifact(f)]
-        if _skipped:
-            _log.warning(
-                "白名单提交：跳过 %d 个非日报产物（不会被自动提交）：%s",
-                len(_skipped), ", ".join(_skipped[:10]),
-            )
-            print(f"   ℹ️  跳过 {len(_skipped)} 个非日报文件（需手动提交）："
-                  f"{', '.join(_skipped[:5])}"
-                  + (" …" if len(_skipped) > 5 else ""))
-
-        commit_result = git.commit(
-            today_commit_msg, paths=REPORT_ARTIFACT_PATHS)
-        # v0.45.223：提交前工作区里有几个日报产物待提交。`commit()` 对「没东西可提交」也回
-        # success=False，靠它区分「无害」与「产物留在工作区没进 git」（如残留 .git/index.lock
-        # 让 add 全部失败）。后者此前不可见；v0.45.214 起本地落后时推送还会报 nothing_to_push 成功。
-        commit_result["pending_artifacts"] = len(modified) - len(_skipped)
-        # v0.45.227：提交完再看一次工作区。「提交成功」≠「日报产物全进了 git」——别的进程短暂占着
-        # 索引锁时只挂一条 add，提交照样成功（当天 index.html 没进 git、零告警）。判结果而不是列举原因：
-        # 哪种原因漏的都会留在这里。None = 这次 git status 失败，不知道（告警侧记为未执行的检查）。
-        after, _ = _git_modified_files(git)
-        if after is None:
-            commit_result["left_artifacts"] = None
-        else:
-            left = [f for f in after if _is_report_artifact(f)]
-            commit_result["left_artifacts"] = len(left)
-            if left:
-                commit_result["left_sample"] = left[:5]
-                _log.warning("提交后仍有 %d 个日报产物没进 git：%s", len(left), ", ".join(left[:10]))
-        results["git_commit"] = commit_result
-        results["skipped_non_artifacts"] = _skipped
-        if commit_result["success"]:
-            _log.info("Git commit 成功（new，白名单）")
-        else:
-            _log.warning("Git commit 失败：%s", commit_result.get('message'))
-    else:
-        _log.info("无需提交（工作目录干净）")
-
-    # 2. Git 推送 origin main
-    # v0.45.214：本地 main 落后 origin/main（各 session 从 worktree 直推）时，
-    # 在对象层合并后再推，不动工作区——部署之后编排器还要跑别的 Python 步骤。
-    # 此前直推 `git push origin main`，2026-09-01~11 六次 non-fast-forward 被拒。
-    _log.info("Git push → [🧠 生产] (LLM=%s, Swarm=%s)", _using_llm, _is_swarm)
-    push_result = production_sync.push_main(git, merge_label=today_commit_msg)
-    results["git_push"] = push_result
     results["deploy_env"] = "production"
-    if push_result["success"]:
-        _log.info("Git push 成功 → %s（%s%s）", push_result.get("remote"),
-                  push_result.get("integration"),
-                  f"，合并 {push_result['merge_commit'][:7]}，本地 main 落后 {push_result.get('behind')}"
-                  if push_result.get("merge_commit") else "")
-    else:
-        # `error` 与 `output` 对应 run_git_cmd 的两种失败形状，只读一个会把另一种的原因丢成空串
-        _log.warning("Git push 失败（%s）：%s%s", push_result.get("integration"),
-                     push_result.get("error") or push_result.get("output") or "（git 无输出）",
-                     f"\n  （推送前 fetch 也失败：{push_result['fetch_error']}）"
-                     if push_result.get("fetch_error") else "")
+    _log.info("gh-pages 部署 → [🧠 生产] (LLM=%s, Swarm=%s)", _using_llm, _is_swarm)
 
-    # gh-pages 与 main 同步（生产模式 = LLM 或蜂群）
     # v0.45.351：结局进 results["gh_pages"] ⇒ scan_timing.extra.gh_pages ⇒ status.json ⇒
     # alert_manager。此前这里丢掉返回值、异常只打 warning：gh-pages 失败在 status.json 与
     # 告警里完全不存在（09-25 那次还被重试捷径改写成了「成功」）。
@@ -1026,13 +839,12 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
         gh_pages = {"success": False, "error": f"部署抛异常：{type(e).__name__}: {e}"}
     results["gh_pages"] = gh_pages
 
-    # 3. Slack 通知（由 Claude Code MCP 工具推送，不用 webhook bot）
+    # Slack 通知（由 Claude Code MCP 工具推送，不用 webhook bot）
     _log.info("Slack 推送由 Claude Code 负责（用户账号）")
     results["slack_notification"] = {"skipped": "handled_by_claude_mcp"}
 
-    _log.info("Auto-commit & Notify 完成")
+    _log.info("Deploy & Notify 完成")
     return results
-
 
 
 def _main(argv: Optional[List[str]] = None) -> int:

@@ -8,7 +8,8 @@
 ## 用户偏好
 
 - **⚠️ Python 解释器硬规则：扫描/脚本一律用 `/usr/local/bin/python3`（Python 3.11.1），禁用裸 `python3`**
-  - 用户 Mac 有两个 Python：`/usr/bin/python3`=3.9.6（系统自带，**无 sklearn、缺 jinja2、PEP604 `X|None` 注解 import 即崩**）；`/usr/local/bin/python3`=3.11.1（Homebrew，**真实环境**：sklearn/jinja2/yfinance 全装，PEP604 合法）
+  - 用户 Mac 有两个 Python：`/usr/bin/python3`=3.9.6（系统自带，**无 sklearn、缺 jinja2、PEP604 `X|None` 注解 import 即崩**）；`/usr/local/bin/python3`=3.11.1（python.org 安装包，软链到 `/Library/Frameworks/Python.framework`，**不是 Homebrew**；**真实环境**：sklearn/jinja2/yfinance 全装，PEP604 合法）
+  - ⚠️ 它的包分装两处：numpy / pytest / jinja2 / starlette 等**只**在用户 site（`~/Library/Python/3.11`，按 `$HOME` 解析）⇒ 测试把 HOME 指到 tmp 后再起真解释器，子进程会丢这些包——要同时钉 `PYTHONUSERBASE`（v0.45.397；详见 auto-memory `alpha-hive-environment-facts.md`）
   - 编排器顶部已显式 `PYTHON3="/usr/local/bin/python3"`；**手动/Claude 跑扫描必须同样显式用 `/usr/local/bin/python3 alpha_hive_daily_report.py ...`**，并 `export PATH="/usr/local/bin:$PATH"` 保证内部 spawn 的子 python 也走 3.11
   - 裸 `python3` 会解析成 3.9.6 → ML 降级 SimpleMLModel + PEP604 崩 + 缺 jinja2 崩（2026-06-30 事故根因）
   - 运行测试同理：`/usr/local/bin/python3 -m pytest`
@@ -86,7 +87,7 @@
 ## GitHub Pages 部署规则（永久设置）
 
 - **GitHub Pages 从 `gh-pages` 分支部署**，不是 `main`
-- `report_deployer.auto_commit_and_notify`：生产模式（LLM 或蜂群）提交 + 推 main + 同步 gh-pages；非生产扫描**不提交不推送**（v0.45.210 撤掉了坏了半年的 test remote 推送分支，**勿往 `GitHubTool` 白名单加 `checkout`/`reset` 恢复它**，理由在该函数 docstring）
+- `report_deployer.deploy_and_notify`（v0.45.402 前叫 `auto_commit_and_notify`）：生产模式（LLM 或蜂群）只**同步 gh-pages**；**不再提交、不再推代码仓库 main**（数据根迁移阶段 6：生产数据在 `$ALPHA_HIVE_HOME`、代码仓库不跟踪数据；异地副本靠编排器 Step 14 的私有备份）。⚠️ **勿重建日报提交 / 推送链**（`production_sync.push_main`、日报白名单都已删，墓碑测试 `tests/test_git_failures_are_visible.py::TestCommitPushChainStaysRetired`）；`gh_pages` 结局键必须始终写进 `scan_timing.extra`（编排器拿它当「主流程已跑完」的证据）。非生产扫描不部署；v0.45.210 撤掉的 test remote 推送分支同样**勿恢复**（勿往 `GitHubTool` 白名单加 `checkout`/`reset`）
 - **非蜂群扫描已退役（v0.45.213）**：`alpha_hive_daily_report.py` 不带 `--swarm` 直接 exit 2，**勿重建 `run_daily_scan`**——它在扫描中途就写概率账本（先写者占位），在 save_report 前短路管不到；理由在 `main()` 该闸注释，守卫 `tests/test_non_swarm_scan_retired.py`
 - `generate_ml_report.py`：末尾调用 `_sync_ghpages()`，每次生成 ML 报告后自动同步 gh-pages
 - **禁止**只推 main 不推 gh-pages，否则网站不更新

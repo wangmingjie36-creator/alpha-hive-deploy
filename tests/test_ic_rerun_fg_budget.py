@@ -67,7 +67,8 @@ def _kill_if_ours(pid: int, marker: str) -> None:
     """`pid` 还活着且命令行里带 `marker`（本条测试的代码副本路径）⇒ KILL。核命令行防 pid 被复用后误杀别人。"""
     if pid <= 0:
         return
-    r = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+    # -ww：管道输出时 procps 宽度未定义（CI 上 80 列），marker 是长临时路径、会被截掉 ⇒ 静默不收尸
+    r = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
     if marker in r.stdout:
         try:
             os.kill(pid, signal.SIGKILL)
@@ -168,6 +169,18 @@ class TestChildOutcomes:
             res = h.result()
         assert res[rr._DETAIL_KEY]["runner"] == "child_failed"
         assert "无法启动 F&G 子进程" in res["line"]
+
+    def test_finished_child_is_kept_when_only_the_parent_overran(self, monkeypatch):
+        """二次检查实测的 bug：子进程按时跑完，是父进程自己的部分（评估 / 边界核对 / 写检查点）拖过了预算——
+        结果就在管道里，必须原样转交，不能报成「F&G 子进程跑了 Xs 仍未结束，已终止」并归因到行情源。
+        变异「删掉 `poll() is not None` 那段」⇒ 红（CPython communicate(timeout=0) 先判超时就抛）。"""
+        _fake_child(monkeypatch, _print_good())
+        with rr._FgChild("2026-10-01", time.monotonic() + 0.3) as h:
+            h.proc.wait(timeout=10)          # 子进程在预算内跑完
+            time.sleep(0.5)                  # 父进程自己的活拖过了预算
+            assert time.monotonic() > h.deadline
+            res = h.result()
+        assert res == GOOD, res
 
     def test_budget_exceeded_terminates_child(self, monkeypatch):
         t = time.monotonic()

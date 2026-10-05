@@ -5,15 +5,18 @@
     真的 cd 进仓库、exec 指定的 Python、PATH 先走 /usr/local/bin；Python 不在 ⇒ 退出码 1 且留日志；
     不覆盖别人的同名 .app；
   · 启动流程（`TestLauncherFlow`）：真起一个演示服务（子进程）——首次问数据根、起服务、开页面；
-    再次打开只开页面不重起；`--stop` 停得掉；端口被别人占 / 服务启动即死 ⇒ 弹窗带原因，不干等；
+    再次打开只开页面不重起；`--stop` 停得掉；端口被别人占 / 服务启动即死 / 依赖缺失 ⇒ 弹窗带原因，不干等；
     选的数据根原样传进服务进程的 `ALPHA_HIVE_HOME`；坏配置报出来，不静默当成首次启动；
   · 服务端（`TestShutdownEndpoint`）：`/api/shutdown` 同样要 `X-AlphaBot` 头，没接开关 ⇒ 400。
-启动器自己的配置 / 日志都在 `$HOME/Library`，这里一律把 HOME 指到 tmp。
+启动器自己的配置 / 日志都在 `$HOME/Library`，这里一律把 HOME 指到 tmp——但钉住 `PYTHONUSERBASE`，
+子进程里真 Python 的 import 面不跟着挪（见 `home` 夹具）。跑 .app 启动脚本的测试一律换假 osascript
+（`_app_exe`）：真的弹模态对话框，会卡到 pytest-timeout 并把对话框留在屏幕上。
 """
 from __future__ import annotations
 
 import os
 import plistlib
+import site
 import socket
 import subprocess
 import sys
@@ -31,13 +34,38 @@ REPO = Path(__file__).resolve().parent.parent
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
+    # 换 HOME 只为隔离启动器的 `~/Library`。可子进程里的真 Python 也按 $HOME 推用户 site-packages
+    # （本机 starlette / numpy / pytest 都装在那）：不钉住 ⇒ 真起的服务 import 即死，红的是夹具不是启动器。
+    # 生产里 .app 由 launchd 给真 HOME（实测），所以钉成本进程启动时算好的那个，子进程与本进程 import 面一致。
+    monkeypatch.setenv("PYTHONUSERBASE", site.getuserbase())
     monkeypatch.setenv("HOME", str(h))
+    # 真起的演示服务用 mkdtemp 建状态目录、从不清：不圈住就漏进系统临时目录（复查时数到 83 个）
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
     return h
 
 
 class FakeUI:
-    def __init__(self, answers=(), folders=()):
+    """缺省「没有原生窗口」⇒ 走浏览器路径（老测试不变）。`window=True` ⇒ `show_window` 立即返回（＝用户关了窗），
+    返回前先跑 `on_window(url, is_alive)` 让测试在「窗口开着」时取证。"""
+
+    def __init__(self, answers=(), folders=(), window=False, on_window=None, activate_ok=True, window_error=None):
         self.answers, self.folders, self.calls = list(answers), list(folders), []
+        self.window, self.on_window, self.activate_ok = window, on_window, activate_ok
+        self.window_error = window_error
+
+    def window_unavailable(self):
+        return None if self.window else "测试：无原生窗口"
+
+    def show_window(self, url, is_alive, on_quit):
+        self.calls.append(("window", url))
+        if self.window_error:
+            raise self.window_error
+        if self.on_window:
+            self.on_window(url, is_alive, on_quit)
+
+    def activate(self, pid):
+        self.calls.append(("activate", pid))
+        return self.activate_ok
 
     def alert(self, message):
         self.calls.append(("alert", message))
@@ -70,6 +98,18 @@ def _fake_python(tmp_path, body):
     return str(p)
 
 
+def _app_exe(tmp_path, **kw):
+    """生成 .app，返回 (启动脚本, 弹窗记录)。弹窗换成假 osascript：只记正文（argv 最后一项）、立即返回。
+    真的那个是模态的——Mac 上测试卡到 pytest-timeout，被杀的只是 bash，对话框留在屏幕上（实测）；
+    Linux 没有 osascript，CI 上从来不红。"""
+    rec = tmp_path / "alerts.txt"
+    osa = tmp_path / "fake-osascript"
+    osa.write_text(f'#!/bin/sh\nfor a; do last=$a; done\nprintf "%s\\n" "$last" >> "{rec}"\n', encoding="utf-8")
+    osa.chmod(0o755)
+    app = MA.build_app(tmp_path / "Apps", osascript=str(osa), **kw)
+    return app / "Contents" / "MacOS" / MA.EXECUTABLE, rec
+
+
 # ── .app 壳 ────────────────────────────────────────────────────────────────
 
 class TestBundle:
@@ -80,6 +120,9 @@ class TestBundle:
             info = plistlib.load(f)
         assert info["CFBundleIdentifier"] == MA.BUNDLE_ID
         assert info["CFBundleShortVersionString"] == __version__
+        # 没有它，Finder 双击在 Apple 芯片上把脚本按 x86_64 起，arm64 的 numpy 载不了（0.45.399 实测）；
+        # 测试从终端跑是原生 arm64，端到端那条看不出来，只能钉在这里
+        assert info["LSArchitecturePriority"][0] == "arm64"
         exe = c / "MacOS" / info["CFBundleExecutable"]
         assert exe.is_file() and os.access(exe, os.X_OK)
         icon = c / "Resources" / (info["CFBundleIconFile"] + ".icns")
@@ -94,8 +137,9 @@ class TestBundle:
         (repo / "alphabot" / "launcher.py").write_text("", encoding="utf-8")
         out = tmp_path / "rec.txt"
         py = _fake_python(tmp_path, f'{{ pwd; echo "$@"; echo "$PATH"; }} > "{out}"')
-        app = MA.build_app(tmp_path / "Apps", repo=repo, python=py)
-        r = subprocess.run([str(app / "Contents" / "MacOS" / MA.EXECUTABLE)], env={**os.environ, "HOME": str(home)})
+        exe, alerts = _app_exe(tmp_path, repo=repo, python=py)
+        r = subprocess.run([str(exe)], env={**os.environ, "HOME": str(home)})
+        assert not alerts.exists(), alerts.read_text(encoding="utf-8")
         assert r.returncode == 0
         cwd, args, path = out.read_text(encoding="utf-8").splitlines()
         assert Path(cwd).resolve() == repo.resolve()
@@ -109,7 +153,7 @@ class TestBundle:
         (repo / "alphabot" / "launcher.py").write_text("", encoding="utf-8")
         out = tmp_path / "lang.txt"
         py = _fake_python(tmp_path, f'echo "$LANG" > "{out}"')
-        exe = MA.build_app(tmp_path / "Apps", repo=repo, python=py) / "Contents" / "MacOS" / MA.EXECUTABLE
+        exe, _ = _app_exe(tmp_path, repo=repo, python=py)
         env = {k: v for k, v in os.environ.items() if k not in ("LANG", "LC_ALL", "LC_CTYPE")}
         subprocess.run([str(exe)], env={**env, "HOME": str(home)}, check=True)
         assert out.read_text(encoding="utf-8").strip() == "en_US.UTF-8"
@@ -129,9 +173,11 @@ class TestBundle:
         assert len(seen) == 3 and all(c[c.index("on run argv") + 2] == "activate" for c in seen)
 
     def test_missing_python_fails_loudly(self, tmp_path, home):
-        app = MA.build_app(tmp_path / "Apps", python=str(tmp_path / "no-such-python"))
-        r = subprocess.run([str(app / "Contents" / "MacOS" / MA.EXECUTABLE)], env={**os.environ, "HOME": str(home)})
+        exe, alerts = _app_exe(tmp_path, python=str(tmp_path / "no-such-python"))
+        r = subprocess.run([str(exe)], env={**os.environ, "HOME": str(home)})
         assert r.returncode == 1
+        shown = alerts.read_text(encoding="utf-8") if alerts.exists() else "（没弹）"
+        assert "找不到" in shown and "no-such-python" in shown, "双击的人看的是弹窗，不是日志"
         log = (home / "Library" / "Logs" / "Alpha Bot" / "launcher.log").read_text(encoding="utf-8")
         assert "找不到" in log and "no-such-python" in log
 
@@ -184,6 +230,27 @@ class TestLauncherFlow:
         while LA.probe(port)["state"] != "free" and time.monotonic() < deadline:
             time.sleep(0.2)
         assert LA.probe(port)["state"] == "free", "--stop 之后服务还在"
+
+    def test_sandbox_home_keeps_child_user_site(self, home):
+        """`home` 夹具只挪启动器的 `~/Library`，不挪子进程的用户 site-packages。
+        没有这条，漏钉 PYTHONUSERBASE 只在「依赖装在用户 site」的机器上红（上一条红成 starlette 缺失），
+        CI 上永远绿——这条在哪都红：沙箱 HOME 下推出的用户 site 必然是另一个路径。"""
+        child = subprocess.run([sys.executable, "-c", "import site; print(site.getusersitepackages())"],
+                               capture_output=True, text=True, check=True).stdout.strip()
+        assert child == site.getusersitepackages()
+
+    def test_missing_dependency_names_the_module(self, tmp_path, home):
+        """依赖真缺了（starlette / uvicorn 没装）⇒ 服务 import 即死：弹窗要带出缺的是哪个模块，不干等超时。
+        0.45.397 之前 `test_demo_start_reuse_and_stop` 在 Mac 上意外走的就是这条路；这里有意走：
+        真解释器加 `-S -E`（不加载 site-packages、不读 PYTHON* 环境）⇒ 在哪台机器上都是「依赖全缺」。"""
+        py = _fake_python(tmp_path, f'exec "{sys.executable}" -S -E "$@"')
+        ui = FakeUI(answers=[LA.DEMO])
+        t0 = time.monotonic()
+        with pytest.raises(LA.LauncherError) as ei:
+            LA.run(ui, port=_free_port(), python=py)
+        assert time.monotonic() - t0 < 10, "服务已死还在干等超时"
+        assert "ModuleNotFoundError: No module named" in str(ei.value)
+        assert "open" not in ui.kinds()
 
     def test_port_taken_by_something_else(self, home, monkeypatch):
         import http.server
@@ -316,6 +383,191 @@ class TestLauncherFlow:
         assert LA.load_config() == {"port": 9999}
 
 
+# ── 原生窗口（v0.45.407）───────────────────────────────────────────────────
+
+def _wait_state(port, state, timeout=15.0):
+    deadline = time.monotonic() + timeout
+    while LA.probe(port)["state"] != state and time.monotonic() < deadline:
+        time.sleep(0.2)
+    return LA.probe(port)["state"]
+
+
+class TestNativeWindow:
+    """真起演示服务；窗口用 FakeUI（关窗＝`show_window` 返回）。真 pywebview 窗口只能在 Mac 上人工 / 探针验。"""
+
+    def test_window_shows_app_started_server_and_close_stops_it(self, home):
+        port = _free_port()
+        seen = {}
+
+        def while_open(url, is_alive, on_quit):
+            seen["alive"] = is_alive()
+            seen["ping"] = LA.probe(port)["info"]
+            pid = LA._window_pid_path()
+            seen["pidfile"] = pid.read_text(encoding="utf-8") if pid.exists() else None
+
+        ui = FakeUI(answers=[LA.DEMO], window=True, on_window=while_open)
+        try:
+            assert LA.main(["--port", str(port)], ui=ui) == 0
+            assert ui.kinds() == ["ask", "window"], "开的是窗口，不是浏览器"
+            assert seen["alive"] is True and seen["ping"]["from_app"] is True, "服务要带 --from-app 起"
+            assert seen["pidfile"] == str(os.getpid()), "窗口开着时要登记 pid（第二次双击靠它）"
+            assert not LA._window_pid_path().exists(), "关窗后 pid 登记没清"
+            assert _wait_state(port, "free") == "free", "关窗后 .app 起的服务还在"
+        finally:                                   # 收尸放在断言之后：先停了就测不出「关窗不停」
+            if LA.probe(port)["state"] == "alphabot":
+                LA.stop_running(port)
+
+    def test_cmd_q_stops_server_once(self, home, capsys):
+        """⌘Q：Cocoa 直接 exit，`show_window` 不返回——收尾只能靠 on_quit。这里在「窗口开着」时调它，
+        要求那一刻服务就停了；之后正常返回再走一遍收尾也只停一次（幂等）。"""
+        port = _free_port()
+        seen = {}
+
+        def cmd_q(url, is_alive, on_quit):
+            on_quit()
+            seen["after_quit"] = _wait_state(port, "free")
+
+        ui = FakeUI(answers=[LA.DEMO], window=True, on_window=cmd_q)
+        try:
+            assert LA.main(["--port", str(port)], ui=ui) == 0
+            assert seen["after_quit"] == "free", "⌘Q 之后 .app 起的服务还在"
+            out = capsys.readouterr().out
+            assert out.count("窗口已关") == 1, f"收尾走了不止一次：{out}"
+            assert not LA._window_pid_path().exists()
+        finally:
+            if LA.probe(port)["state"] == "alphabot":
+                LA.stop_running(port)
+
+    def test_window_error_falls_back_to_browser_and_keeps_server(self, home, monkeypatch):
+        """pywebview 能 import 但窗口起不来：不能留个没窗口的孤儿服务、也不能弹「启动器出错」了事——退回浏览器。"""
+        monkeypatch.setattr(LA, "probe", lambda *a, **k: {"state": "alphabot", "info": {"from_app": True}})
+        monkeypatch.setattr(LA, "stop_running", lambda *a, **k: pytest.fail("窗口没起来却去停服务"))
+        ui = FakeUI(window=True, window_error=RuntimeError("no WindowServer"))
+        assert LA.main(["--port", str(_free_port())], ui=ui) == 0
+        assert ui.kinds() == ["window", "open"]
+        assert not LA._window_pid_path().exists(), "窗口没起来，pid 登记要撤掉"
+
+    def test_busy_server_is_not_taken_for_gone(self, home, monkeypatch):
+        """探测超时（服务忙）≠ 服务没了：只有端口空了才让窗口自关。"""
+        states = {"s": "other"}
+        monkeypatch.setattr(LA, "probe", lambda *a, **k: {"state": states["s"], "info": {"from_app": False}})
+        seen = []
+
+        def check(url, is_alive, on_quit):
+            seen.append(is_alive())
+            states["s"] = "free"
+            seen.append(is_alive())
+
+        states["s"] = "alphabot"
+        ui = FakeUI(window=True, on_window=lambda u, a, q: (states.update(s="other"), check(u, a, q)))
+        assert LA.main(["--port", str(_free_port())], ui=ui) == 0
+        assert seen == [True, False]
+
+    def test_close_leaves_terminal_started_server_running(self, home):
+        """终端里 `make alphabot` 起的服务（没有 --from-app）：开窗口看它可以，关窗不许把它停了。"""
+        port = _free_port()
+        proc = subprocess.Popen([sys.executable, "-m", "alphabot", "--port", str(port), "--demo", "--no-poll"],
+                                cwd=str(REPO), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            assert _wait_state(port, "alphabot", 30) == "alphabot"
+            assert LA.probe(port)["info"]["from_app"] is False
+            ui = FakeUI(window=True)
+            assert LA.main(["--port", str(port)], ui=ui) == 0
+            assert ui.kinds() == ["window"]
+            time.sleep(0.5)
+            assert LA.probe(port)["state"] == "alphabot", "关窗把终端起的服务停了"
+        finally:
+            LA.stop_running(port)
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    def test_second_launch_brings_existing_window_forward(self, home, monkeypatch):
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "alphabot.launcher"])
+        try:
+            LA._window_pid_path().parent.mkdir(parents=True)
+            LA._window_pid_path().write_text(str(owner.pid), encoding="utf-8")
+            monkeypatch.setattr(LA, "spawn_server", lambda *a, **k: pytest.fail("窗口已开着还去起服务"))
+            ui = FakeUI(window=True)
+            assert LA.run(ui, port=_free_port()) == 0
+            assert ui.calls == [("activate", owner.pid)]
+            # 调不到前面 ⇒ 不能「双击没反应」：照常往下走（这里端口空、用户取消）
+            ui2 = FakeUI(window=True, activate_ok=False, answers=[LA.CANCEL])
+            assert LA.run(ui2, port=_free_port()) == 0
+            assert ui2.kinds() == ["activate", "ask"]
+        finally:
+            owner.kill()
+            owner.wait()
+
+    def test_stale_or_reused_window_pid_is_ignored(self, home, monkeypatch):
+        LA._window_pid_path().parent.mkdir(parents=True)
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        LA._window_pid_path().write_text(str(dead.pid), encoding="utf-8")
+        assert LA.window_owner() is None, "进程已退出"
+        LA._window_pid_path().write_text(str(os.getppid()), encoding="utf-8")
+        assert LA.window_owner() is None, "pid 被别的进程（不是 alphabot.launcher）占着"
+        LA._window_pid_path().write_text("garbage", encoding="utf-8")
+        assert LA.window_owner() is None
+
+    def test_long_command_line_survives_piped_ps_width(self, home, monkeypatch):
+        """v0.45.412：`ps` 输出被管道接走时，procps 的宽度「未定义（可能 80、不限……）」（ps(1)），
+        GitHub Actions 上恰是 80 ⇒ 长解释器路径把 `alphabot.launcher` 挤出第 80 列，开着的窗口被当成没有、
+        第二次双击去问数据根。macOS 的 BSD ps 管道输出恒不限宽（实测连 COLUMNS 都不理），本机真跑永远红不了
+        ⇒ 用按 procps 文档行事的假 ps 钉住：不带 `-ww` 就截到 80 列。"""
+        ci_cmdline = ("/opt/hostedtoolcache/Python/3.11.16/x64/bin/python "
+                      "-c import time; time.sleep(60) alphabot.launcher")     # 10-04 CI 上 owner 的真实形状
+        assert ci_cmdline.index("alphabot.launcher") >= 80, "夹具自检：标记要真在 80 列之外，否则这条绿不算数"
+        real_run, asked = subprocess.run, []
+
+        def procps_like(cmd, *a, **k):
+            if not str(cmd[0]).endswith("ps"):
+                return real_run(cmd, *a, **k)
+            asked.append(list(cmd))
+            unlimited = "-ww" in cmd or cmd.count("-w") >= 2
+            out = ci_cmdline if unlimited else ci_cmdline[:80]
+            return subprocess.CompletedProcess(cmd, 0, stdout=out + "\n", stderr="")
+
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            LA._window_pid_path().parent.mkdir(parents=True)
+            LA._window_pid_path().write_text(str(owner.pid), encoding="utf-8")
+            monkeypatch.setattr(subprocess, "run", procps_like)
+            assert LA.window_owner() == owner.pid, "ps 输出被截断后认不出开着的窗口——要带 -ww"
+            assert asked, "window_owner 没调 ps：假 ps 没接上，这条绿不算数"
+        finally:
+            owner.kill()
+            owner.wait()
+
+    def test_no_native_window_falls_back_to_browser_and_says_why(self, home, monkeypatch, capsys):
+        monkeypatch.setattr(LA, "probe", lambda *a, **k: {"state": "alphabot", "info": {"from_app": False}})
+        ui = FakeUI()
+        assert LA.main(["--port", str(_free_port())], ui=ui) == 0
+        assert ui.kinds() == ["open"]
+        assert "原生窗口不可用（测试：无原生窗口）" in capsys.readouterr().out, "退回浏览器要在日志里说为什么"
+        ui2 = FakeUI(window=True)
+        assert LA.main(["--browser", "--port", str(_free_port())], ui=ui2) == 0
+        assert ui2.kinds() == ["open"], "--browser 要能绕开窗口"
+
+    def test_missing_pywebview_is_reported_not_raised(self, monkeypatch):
+        from alphabot import window
+        monkeypatch.setitem(sys.modules, "webview", None)          # import webview ⇒ ImportError
+        assert "webview" in (window.unavailable_reason() or "")
+
+    def test_window_closes_itself_when_server_goes_away(self):
+        """页面「停止服务」⇒ 服务没了 ⇒ 窗口自己关；一次探测失败不算（连续 2 次）；停表即退出。"""
+        import threading
+        from alphabot import window
+        seq, gone = [True, False, True, False, False, True], []
+        window.watch_server(lambda: seq.pop(0), lambda: gone.append(1), threading.Event(), interval=0.001)
+        assert gone == [1] and seq == [True], "要在第二次连续探不到时关（单次失败不算），关完就停"
+        stop = threading.Event()
+        stop.set()
+        window.watch_server(lambda: False, lambda: pytest.fail("停表后还在关窗"), stop, interval=0.001)
+
+
 # ── 服务端停止开关 ─────────────────────────────────────────────────────────
 
 class TestShutdownEndpoint:
@@ -336,6 +588,7 @@ class TestShutdownEndpoint:
         assert r.status_code == 200 and calls == [1]
         ping = c.get("/api/ping").json()
         assert ping["app"] == "alphabot" and ping["can_shutdown"] is True and ping["pid"] == os.getpid()
+        assert ping["from_app"] is False, "缺省不是 .app 起的（关窗不该停它）"
 
     def test_without_hook_is_refused_and_hidden(self):
         c = self._client(None)

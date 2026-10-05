@@ -55,16 +55,21 @@ def check(today: Optional[str] = None, fwd_module=None) -> Dict:
         return out
 
     @contextlib.contextmanager
-    def recording_window(start, end):
-        with orig_window(start, end) as win:
+    def recording_window(start, end, **kw):
+        with orig_window(start, end, **kw) as win:
             windows.append(win)
             yield win
 
     pp._fetch_ohlc, pp.replay_ohlc_window = recording_fetch, recording_window
+    # v0.45.410：关掉回放行情库——本脚本核的是「整段切片 ≡ 逐次直连」，行情库会把已落定的日子换成首次落定的值
+    # （Yahoo 之后改过的话两边就不同了），混淆要核的东西；也不该让一次只读核对去写数据根。
+    orig_store = fwd._forward_ohlc_store
+    fwd._forward_ohlc_store = lambda: None
     try:
         run_res = fwd.run(today=today)
     finally:
         pp._fetch_ohlc, pp.replay_ohlc_window = orig_fetch, orig_window
+        fwd._forward_ohlc_store = orig_store
 
     out: Dict = {"run_status": run_res.get("status"), "n_windows": len(windows)}
     if not windows:

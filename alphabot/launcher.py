@@ -7,7 +7,10 @@
      GUI 程序拿不到 shell 里 export 的 `ALPHA_HIVE_HOME`，所以这一步不能省——省了就会静默读错目录。
   3. 后台起 `python -m alphabot`（脱离启动器进程组，启动器退出后服务继续跑），日志进 `server.log`；
      等 `/api/ping` 应答（服务进程先死了 ⇒ 弹窗附日志尾巴，不干等到超时）。
-  4. 开浏览器。停止服务：页面底部「停止服务」，或 `--stop`。
+  4. 开原生窗口（pywebview，`alphabot.window`）；pywebview 不可用或给了 `--browser` ⇒ 开浏览器（原因进日志）。
+     窗口只开一个：已有窗口 ⇒ 把它调到前面，不再开第二个。关窗（或 ⌘Q）⇒ 停掉**由 .app 起的**服务；
+     终端里起的服务（没有 `--from-app`）关窗不停。页面「停止服务」⇒ 服务停、窗口随之自动关。
+     停止服务另有 `--stop`。
 
 启动器自己的配置 / 日志在 `~/Library`（按调用时的 `$HOME` 求值），与 Alpha Hive 数据根无关：
 数据根恰恰是它要去选的东西。
@@ -157,6 +160,22 @@ class MacUI:
     def open_url(self, url: str) -> None:
         subprocess.run(["/usr/bin/open", url], check=False)
 
+    def window_unavailable(self) -> Optional[str]:
+        from alphabot import window
+        return window.unavailable_reason()
+
+    def show_window(self, url: str, is_alive, on_quit) -> None:
+        from alphabot import window
+        window.run_window(url, is_alive, on_quit)
+
+    def activate(self, pid: int) -> bool:
+        try:
+            from AppKit import NSApplicationActivateIgnoringOtherApps, NSRunningApplication
+            app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            return bool(app is not None and app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps))
+        except Exception:  # noqa: BLE001 —— 调不到前面就当没有，由调用方另开一个窗口
+            return False
+
 
 # ── 数据根 ──────────────────────────────────────────────────────────────
 
@@ -211,7 +230,8 @@ def _tail(p: Path, n: int = 12) -> str:
 
 
 def spawn_server(mode: dict, port: int, *, python: Optional[str] = None) -> tuple:
-    cmd = [python or sys.executable, "-m", "alphabot", "--port", str(port)] + (["--demo"] if mode["demo"] else [])
+    cmd = ([python or sys.executable, "-m", "alphabot", "--port", str(port), "--from-app"]
+           + (["--demo"] if mode["demo"] else []))
     env = dict(os.environ)
     env["PATH"] = "/usr/local/bin:" + env.get("PATH", "")      # 子进程再 spawn python 也走 3.11（CLAUDE.md）
     env["PYTHONUNBUFFERED"] = "1"
@@ -259,17 +279,101 @@ def stop_running(port: int) -> bool:
     return True
 
 
+# ── 窗口 ────────────────────────────────────────────────────────────────
+
+def _window_pid_path() -> Path:
+    return support_dir() / "window.pid"
+
+
+def window_owner() -> Optional[int]:
+    """正开着 Alpha Bot 窗口的启动器进程 pid；没有 / 已退出 / pid 被别的进程复用 ⇒ None。"""
+    try:
+        pid = int(_window_pid_path().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    if pid == os.getpid():
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass
+    # -ww：输出被管道接走时 procps 的宽度未定义（Linux CI 上是 80 列，长解释器路径会把标记挤出去）；
+    # macOS 的 BSD ps 此时本就不限宽，加了也一样
+    r = subprocess.run(["/bin/ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+    return pid if "alphabot.launcher" in r.stdout else None
+
+
+def _native_window(ui, browser: bool) -> bool:
+    if browser:
+        return False
+    reason = ui.window_unavailable()
+    if reason:
+        _log(f"原生窗口不可用（{reason}）⇒ 用浏览器打开")
+        return False
+    return True
+
+
+def _present(ui, url: str, port: int, *, use_window: bool, stop_on_close: bool) -> int:
+    if not use_window:
+        ui.open_url(url)
+        return 0
+    pid_path = _window_pid_path()
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text(str(os.getpid()), encoding="utf-8")
+    done = []
+
+    def after_close() -> None:
+        """关窗后正常返回、⌘Q（进程随即 exit，只走得到 willTerminate 回调）两条路都到这里；只做一次。"""
+        if done:
+            return
+        done.append(1)
+        try:
+            if pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                pid_path.unlink()
+        except OSError:
+            pass
+        if not stop_on_close:
+            _log("窗口已关；服务不带 --from-app（终端或旧版启动器起的），留着")
+            return
+        _log("窗口已关 ⇒ 停服务" if stop_running(port) else "窗口已关；服务已经不在了")
+
+    # 「服务没了」只认端口空了：超时 / 忙不算——否则服务一忙窗口就被关，关完还停不掉它
+    is_alive = lambda: probe(port, timeout=1.0)["state"] != "free"  # noqa: E731
+    try:
+        ui.show_window(url, is_alive, after_close)
+    except Exception:  # noqa: BLE001 —— 窗口起不来不能让刚起的服务成孤儿：退回浏览器，服务留着
+        _log(f"原生窗口出错，退回浏览器：\n{traceback.format_exc()}")
+        done.append(1)
+        try:
+            pid_path.unlink()
+        except OSError:
+            pass
+        ui.open_url(url)
+        return 0
+    after_close()
+    return 0
+
+
 # ── 入口 ────────────────────────────────────────────────────────────────
 
-def run(ui, *, port: Optional[int] = None, python: Optional[str] = None) -> int:
+def run(ui, *, port: Optional[int] = None, python: Optional[str] = None, browser: bool = False) -> int:
     cfg = load_config()
     port = int(port or cfg.get("port") or DEFAULT_PORT)
     url = f"http://{HOST}:{port}/"
+    use_window = _native_window(ui, browser)
+    if use_window:
+        owner = window_owner()
+        if owner is not None:
+            if ui.activate(owner):
+                _log(f"窗口已开着（pid {owner}）⇒ 调到前面")
+                return 0
+            _log(f"窗口进程 {owner} 在，但调不到前面 ⇒ 另开一个窗口")
     p = probe(port)
     if p["state"] == "alphabot":
-        _log(f"已在运行（{p['info'].get('version')}{'，演示' if p['info'].get('demo') else ''}）⇒ 只开页面")
-        ui.open_url(url)
-        return 0
+        _log(f"已在运行（{p['info'].get('version')}{'，演示' if p['info'].get('demo') else ''}）⇒ 只开窗口 / 页面")
+        return _present(ui, url, port, use_window=use_window, stop_on_close=p["info"].get("from_app") is True)
     if p["state"] == "other":
         raise LauncherError(f"端口 {port} 被别的程序占着（{p.get('detail')}）。\n\n"
                             f"查是谁：终端里 lsof -nP -iTCP:{port} -sTCP:LISTEN\n"
@@ -281,8 +385,7 @@ def run(ui, *, port: Optional[int] = None, python: Optional[str] = None) -> int:
     proc, log_path = spawn_server(mode, port, python=python)
     _log(f"起服务 pid={proc.pid} {'演示模式' if mode['demo'] else 'ALPHA_HIVE_HOME=' + mode['home']}")
     wait_ready(proc, port, log_path)
-    ui.open_url(url)
-    return 0
+    return _present(ui, url, port, use_window=use_window, stop_on_close=True)
 
 
 def _log(msg: str) -> None:
@@ -294,6 +397,7 @@ def main(argv=None, ui=None) -> int:
     ap.add_argument("--reset", action="store_true", help="忘掉已选的数据根（下次双击重新选）")
     ap.add_argument("--stop", action="store_true", help="停掉本机正在跑的 Alpha Bot")
     ap.add_argument("--port", type=int, default=None)
+    ap.add_argument("--browser", action="store_true", help="用浏览器打开，不开原生窗口")
     argv = sys.argv[1:] if argv is None else list(argv)
     # Finder 某些情况下会给 .app 传 `-psn_0_NNN`（进程序列号）；argparse 不认 ⇒ exit 2 只进日志、不弹窗
     args = ap.parse_args([a for a in argv if not a.startswith("-psn_")])
@@ -312,7 +416,7 @@ def main(argv=None, ui=None) -> int:
         print("已停止" if stopped else "没有在跑的 Alpha Bot")
         return 0
     try:
-        return run(ui, port=args.port)
+        return run(ui, port=args.port, browser=args.browser)
     except LauncherError as exc:
         _log(f"失败：{exc}")
         ui.alert(str(exc))

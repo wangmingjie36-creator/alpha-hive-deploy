@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import datetime
 import hashlib
 import importlib.util
@@ -57,15 +58,29 @@ _NOT_READY_OR_CANNOT_JUDGE_ALLOWED_KEYS = {
     # v0.45.391 复审 S1：回放行情窗口的取数计数（`paper_portfolio._ReplayOhlcWindow.stats()`）。白名单照样管到它的
     # **子键**（下面 `_OHLC_WINDOW_KEYS`）——不让它变成一个可以随手塞效应量的口袋。
     "ohlc_window",
+    # v0.45.408 逐日重锚：连续 A 的复现计数（诊断）与分段情况——只有 A 的计数 / 日期 / 来源名，没有效应量。
+    # 子键同样白名单（`_SEGMENT_KEYS` / `_SELFPROOF_KEYS`），不让它们变成可以随手塞效应量的口袋。
+    "selfproof_continuous", "selfproof_segments",
 }
 #: `ohlc_window` 允许的子键：只有窗口区间、取数次数与失败标的（及原因），没有价格 / 净值 / 收益
 _OHLC_WINDOW_KEYS = {"window", "wide_fetches", "served", "out_of_window", "fallback", "fallback_tickers",
                      "direct_requests", "direct_empty", "degraded"}
 
 
+_SELFPROOF_KEYS = {"real_entries", "reproduced", "decision_reproduced", "a_only_entries"}
+_SEGMENT_KEYS = {"segments", "multi_day_segments", "stale_anchor_segments", "invalid_anchors",
+                 "production_unprocessed_dates", "anchor_sources", "unreadable_state_commits", "overlap_days_checked"}
+
+
 def _assert_no_unexpected_top_level_keys(res):
     extra = set(res) - _NOT_READY_OR_CANNOT_JUDGE_ALLOWED_KEYS
     assert not extra, f"出现白名单外的顶层键（可能是新换了名字的效应量泄漏）：{extra}"
+    for k in ("selfproof", "selfproof_continuous"):
+        if k in res:
+            assert set(res[k]) <= _SELFPROOF_KEYS, f"{k} 出现白名单外的子键：{set(res[k]) - _SELFPROOF_KEYS}"
+    if "selfproof_segments" in res:
+        assert set(res["selfproof_segments"]) <= _SEGMENT_KEYS, \
+            f"selfproof_segments 出现白名单外的子键：{set(res['selfproof_segments']) - _SEGMENT_KEYS}"
     if "ohlc_window" in res:
         ow = res["ohlc_window"]
         assert isinstance(ow, dict) and set(ow) <= _OHLC_WINDOW_KEYS, f"ohlc_window 出现白名单外的子键：{set(ow) - _OHLC_WINDOW_KEYS}"
@@ -259,10 +274,11 @@ class TestDecide:
 # ── 5. 建仓四元组 key：Position（在场）与 ClosedTrade（已平仓）两种形状都要处理 ──
 
 class TestEntryKey:
-    def test_open_position_uses_size_usd_directly(self):
+    def test_open_position_is_keyed_by_shares_times_entry_price_too(self):
+        """v0.45.396：在场仓位**不**读 `size_usd`，与已平仓同一个算式（原先读 `size_usd` ⇒ 1234.57）。"""
         pos = {"ticker": "NVDA", "entry_date": "2026-09-16", "direction": "bullish",
-              "size_usd": 1234.567}
-        assert fwd._entry_key(pos) == ("NVDA", "2026-09-16", "bullish", 1234.57)
+              "size_usd": 1234.567, "shares": 10.0, "entry_price": 123.456}
+        assert fwd._entry_key(pos) == ("NVDA", "2026-09-16", "bullish", 1234.56)
 
     def test_closed_trade_derives_size_from_shares_times_entry_price(self):
         trade = {"ticker": "NVDA", "entry_date": "2026-09-16", "direction": "bullish",
@@ -275,7 +291,7 @@ class TestEntryKey:
                  {"ticker": "B", "entry_date": "2026-09-01", "direction": "bullish",  # 窗口外
                   "shares": 1.0, "entry_price": 100.0}]
         open_pos = [{"ticker": "C", "entry_date": "2026-09-17", "direction": "bearish",
-                    "size_usd": 500.0}]
+                    "size_usd": 500.0, "shares": 5.0, "entry_price": 100.0}]
         got = fwd._entries_in_window(closed, open_pos, "2026-09-16", "2026-09-20")
         assert got == {("A", "2026-09-16", "bullish", 100.0), ("C", "2026-09-17", "bearish", 500.0)}
 
@@ -819,15 +835,38 @@ def _world(pp_fx, tmp_path, *, closed=None):
             _write_snapshot(snap_dir, t, d, 7.5, "bullish")
     seed = _make_seed(positions=[_pos_row("OLD", "2026-09-10", 5000.0)],
                       closed=closed if closed is not None else [_closed_row("OLD", -50.0)])
-    prod = tmp_path / "prod_run"
-    prod.mkdir()
-    for name, blob in seed.items():
-        (prod / name).write_bytes(blob)
-    _pp.run_replay({}, prod, dates=_W_DATES)
-    _pp.CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(prod / "closed_trades.jsonl", _pp.CLOSED_FILE)
-    shutil.copy(prod / "positions.jsonl", _pp.POSITIONS_FILE)
+    _run_production(pp_fx, tmp_path, seed, _W_DATES)
     return seed
+
+
+def _run_production(pp_fx, tmp_path, seed, dates, name="prod_run"):
+    """「生产」从 `seed` 起**逐日**跑 `dates`，每天收盘留一份状态（= 真实生产状态历史里那天的提交），
+    最后把账本与净值曲线落到 conftest 隔离出来的生产状态文件。返回 `{last_run_date: 三个文件的字节}`。
+    净值曲线也要落：逐日重锚靠它判断「生产处理过哪几天」（`_production_processed_dates`）。"""
+    _pp = pp_fx[0]
+    prod = tmp_path / name
+    prod.mkdir()
+    for n, blob in seed.items():          # 起点直接写盘，不走被测的 _apply_seed（见 `_world`）
+        (prod / n).write_bytes(blob)
+    history = {}
+    for d in dates:
+        _pp.run_replay({}, prod, dates=[d])   # 对已存在的目录是「续跑」
+        history[d] = {n: (prod / n).read_bytes() for n in fwd.SEED_STATE_FILES}
+    _pp.CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    for n, dst in (("closed_trades.jsonl", _pp.CLOSED_FILE), ("positions.jsonl", _pp.POSITIONS_FILE),
+                   ("equity_curve.jsonl", _pp.EQUITY_FILE)):
+        shutil.copy(prod / n, dst)
+    return history
+
+
+def _world_with_history(pp_fx, tmp_path):
+    """同 `_world`，另返回生产逐日收盘状态（给需要「状态历史」的演练 / 逐日重锚测试）。"""
+    _pp, snap_dir, _fg_db = pp_fx
+    for d in _W_DATES:
+        for t in ("NVDA", "AMD", "OLD"):
+            _write_snapshot(snap_dir, t, d, 7.5, "bullish")
+    seed = _make_seed(positions=[_pos_row("OLD", "2026-09-10", 5000.0)], closed=[_closed_row("OLD", -50.0)])
+    return seed, _run_production(pp_fx, tmp_path, seed, _W_DATES)
 
 
 class TestDefaultGateAssumptionIsChecked:
@@ -874,7 +913,8 @@ class TestSeededReplayReproducesProduction:
     def test_seeded_sandbox_reproduces_production_to_the_cent(self, pp, tmp_path):
         seed = _world(pp, tmp_path)
         res = fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, tmp_path / "sb", insample=False, seed=seed)
-        assert res["selfproof"] == {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2}
+        assert res["selfproof"] == {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2,
+                                    "a_only_entries": 0}
         assert res["selfproof_rate"] == 1.0
         assert res["status"] == "not_ready"  # 自证过了，进入统计阶段（周数不够，如实说继续攒）
         assert res["seed_last_run_date"] == "2026-09-15"
@@ -997,7 +1037,7 @@ class TestSelfproofThresholdBoundary:
     def _run(self, pp, tmp_path, monkeypatch, rate):
         monkeypatch.setattr(fwd, "_real_recorded_entries", lambda *a, **k: {("X", "2026-09-16", "bullish", 1.0)})
         monkeypatch.setattr(fwd, "_selfproof_stats",
-                            lambda real, a: {"total": 1, "exact": 1, "decision": 1,
+                            lambda real, a: {"total": 1, "exact": 1, "decision": 1, "a_only": 0,
                                              "rate": rate, "decision_rate": 1.0})
         _write_snapshot(pp[1], "NVDA", "2026-09-16", 7.5, "bullish")
         return fwd.evaluate(["2026-09-16"], "2026-09-16", "2026-09-17", tmp_path / "sb", insample=False, seed={})
@@ -1045,12 +1085,21 @@ class TestRunSeedWiring:
         seen = {}
         monkeypatch.setattr(fwd, "load_seed", lambda *a, **k: sentinel)
 
-        def _fake_eval(dates, since, before, root, *, insample=False, seed=None):
-            seen.update(insample=insample, seed=seed)
+        plan_sentinel = {"segments": [], "anchors": {}, "info": {}}
+        monkeypatch.setattr(fwd, "_forward_anchor_plan", lambda s, d: plan_sentinel if s is sentinel else pytest.fail(s))
+
+        def _fake_eval(dates, since, before, root, *, insample=False, seed=None, plan=None, ohlc_store=None):
+            seen.update(insample=insample, seed=seed, plan=plan, ohlc_store=ohlc_store)
             return {"status": "not_ready"}
         monkeypatch.setattr(fwd, "evaluate", _fake_eval)
         fwd.run(today="2026-09-17")
-        assert seen == {"insample": False, "seed": sentinel}
+        # v0.45.410：前瞻 run() 必须带回放行情库，目录是**此刻**的 `PATHS.replay_ohlc_state`（调用时求值 ⇒ 在沙箱里）
+        # 变异「run() 不传 / 传 None」或「目录冻成模块级常量」⇒ 红。
+        from hive_logger import PATHS
+        from replay_ohlc_store import ReplayOhlcStore
+        store = seen.pop("ohlc_store")
+        assert isinstance(store, ReplayOhlcStore) and store.root == PATHS.replay_ohlc_state, store
+        assert seen == {"insample": False, "seed": sentinel, "plan": plan_sentinel}
 
     def test_insample_never_touches_the_seed(self, pp, monkeypatch):
         """样本内从 `bootstrap_date` 起，生产当时是空状态——加载种子在这里是错的。"""
@@ -1058,8 +1107,10 @@ class TestRunSeedWiring:
         monkeypatch.setattr(fwd, "load_seed", lambda *a, **k: pytest.fail("样本内不该加载种子"))
         seen = {}
 
-        def _fake_eval(dates, since, before, root, *, insample=False, seed=None):
+        def _fake_eval(dates, since, before, root, *, insample=False, seed=None, plan=None, ohlc_store=None):
+            assert ohlc_store is None, "样本内照旧现场下载，不用回放行情库（v0.45.410）"
             seen.update(insample=insample, seed=seed)
+            assert plan is None
             return {"status": "insample"}
         monkeypatch.setattr(fwd, "evaluate", _fake_eval)
         fwd.run(insample=True, today="2026-09-17")
@@ -1273,22 +1324,27 @@ class TestBuildSeedFromGit:
 # ── 16. `--rehearse`：只重放 A，不出统计量 ────────────────────────────────────────────
 
 class TestRehearse:
-    def _synthetic_repo(self, tmp_path, seed):
-        """窗口起点前一状态（= 种子）+ 一个跨过窗口首日的提交（内容无关，只当定位锚点）。"""
-        before = {f"paper_portfolio_state/{n}": b for n, b in seed.items()}
-        return _git_repo(tmp_path, [before, _state_at("2026-09-16", 1.0)], name="rehearse_repo")[0]
+    def _synthetic_repo(self, tmp_path, seed, history):
+        """窗口起点前一状态（= 种子）+ 生产逐日收盘状态（v0.45.408 起它们是逐日重锚的锚点，内容必须真实）。"""
+        commits = [{f"paper_portfolio_state/{n}": b for n, b in seed.items()}]
+        commits += [{f"paper_portfolio_state/{n}": b for n, b in history[d].items()} for d in sorted(history)]
+        return _git_repo(tmp_path, commits, name="rehearse_repo")[0]
+
+    def _rehearse(self, repo, **kw):
+        return fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo, backup_repo=repo, **kw)
 
     def test_green_when_a_reproduces_production(self, pp, tmp_path):
-        seed = _world(pp, tmp_path)
-        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=self._synthetic_repo(tmp_path, seed))
+        seed, hist = _world_with_history(pp, tmp_path)
+        res = self._rehearse(self._synthetic_repo(tmp_path, seed, hist))
         assert res["status"] == "rehearsal_ok"
-        assert res["selfproof"] == {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2}
+        assert res["selfproof"] == {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2,
+                                    "a_only_entries": 0}
         assert res["seed_last_run_date"] == "2026-09-15"
 
     def test_never_runs_variant_b_and_leaks_no_effect_size(self, pp, tmp_path, monkeypatch):
         """演练只回答「A 还能不能复现生产」——跑了 B 或带出统计量，就等于提前偷看效应。"""
-        seed = _world(pp, tmp_path)
-        repo = self._synthetic_repo(tmp_path, seed)
+        seed, hist = _world_with_history(pp, tmp_path)
+        repo = self._synthetic_repo(tmp_path, seed, hist)
         configs = []
         orig = fwd._replay_variant
 
@@ -1296,16 +1352,16 @@ class TestRehearse:
             configs.append(cfg)
             return orig(cfg, *a, **k)
         monkeypatch.setattr(fwd, "_replay_variant", spy)
-        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo)
-        assert configs == [{}]  # 只有 A（默认配置）
+        res = self._rehearse(repo)
+        assert configs and all(c == {} for c in configs), configs  # 只有 A（默认配置）：连续一次 + 逐日各一次
         assert not (_EFFECT_KEYS & set(_all_keys(res)))
 
     def test_red_when_the_config_drifted(self, pp, tmp_path, monkeypatch):
         _pp = pp[0]
-        seed = _world(pp, tmp_path)
-        repo = self._synthetic_repo(tmp_path, seed)
+        seed, hist = _world_with_history(pp, tmp_path)
+        repo = self._synthetic_repo(tmp_path, seed, hist)
         monkeypatch.setitem(_pp.CONFIG, "entry_score_bull", 9.0)
-        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo)
+        res = self._rehearse(repo)
         assert res["status"] == "cannot_judge" and "评分链" in res["reason"]
 
     def test_judges_by_exact_rate_not_decision_rate(self, pp, tmp_path, monkeypatch):
@@ -1313,13 +1369,13 @@ class TestRehearse:
         `rehearsal_ok`——正是本次真因「0/8」同一种形状，只是从 `evaluate()` 挪到了 `rehearse()`。
         只改仓位大小、不改开哪只/哪个方向，制造「决策层对、精确层错」。"""
         _pp = pp[0]
-        seed = _world(pp, tmp_path)
-        repo = self._synthetic_repo(tmp_path, seed)
+        seed, hist = _world_with_history(pp, tmp_path)
+        repo = self._synthetic_repo(tmp_path, seed, hist)
         # 顶层键 setitem，不是嵌套 setitem——`run_replay` 的 finally 整体替换
         # `CONFIG["size_pct_by_tier"]`，嵌套 setitem 会在 teardown 时改到被换掉的旧对象上，
         # 真正生效的 CONFIG 卡在 4.0 不还原（同 `TestDefaultGateAssumptionIsChecked` 那条注释）。
         monkeypatch.setitem(_pp.CONFIG, "size_pct_by_tier", {**_pp.CONFIG["size_pct_by_tier"], "high": 4.0})
-        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo)
+        res = self._rehearse(repo)
         assert res["selfproof_decision_rate"] == 1.0
         assert res["selfproof_rate"] < 1.0
         assert res["status"] == "cannot_judge"
@@ -1328,17 +1384,17 @@ class TestRehearse:
         """二次复审（S3 在演练路径）：rehearse() 必须把窗口计数交给 `_selfproof_failure_reason`——
         否则行情全断时演练会把原因推给评分链。变异「rehearse 里丢掉 ohlc 参数」⇒ 红。"""
         _pp = pp[0]
-        seed = _world(pp, tmp_path)
-        repo = self._synthetic_repo(tmp_path, seed)
+        seed, hist = _world_with_history(pp, tmp_path)
+        repo = self._synthetic_repo(tmp_path, seed, hist)
         monkeypatch.setitem(_pp.CONFIG, "entry_score_bull", 9.0)
         seen = []
         orig = fwd._selfproof_failure_reason
 
-        def spy(sp, ohlc=None):
+        def spy(sp, ohlc=None, segments=None):
             seen.append(ohlc)
-            return orig(sp, ohlc)
+            return orig(sp, ohlc, segments)
         monkeypatch.setattr(fwd, "_selfproof_failure_reason", spy)
-        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo)
+        res = self._rehearse(repo)
         assert res["status"] == "cannot_judge" and len(seen) == 1
         assert isinstance(seen[0], dict) and seen[0] == res["ohlc_window"] and "served" in seen[0]
 
@@ -1352,7 +1408,7 @@ class TestRehearse:
         repo, _ = _git_repo(tmp_path, [_state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0)],
                             name="empty_win_repo")
         _write_snapshot(pp[1], "NVDA", "2026-09-16", 7.5, "bullish")
-        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo)
+        res = self._rehearse(repo)
         assert res["status"] == "not_ready"
 
 
@@ -1542,3 +1598,752 @@ class TestBlindingBeforeTheLook:
         res = _eval_gate_world(tmp_path / "sb", insample=True, seed=None)
         assert res["status"] == "insample"
         assert res["adjusted_trades"]["adjusted_closed_trades"] == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 15. 四元组第四元的取法 + A 多开诊断（v0.45.396 事后修订）
+#
+# 真因：在场仓位读 `size_usd`、已平仓算 `shares × entry_price`，`shares` 取 4 位小数 ⇒ 同一笔两种取法差 1~6 分。
+# Step 11 在生产当天扫描**之后**跑，生产当天平掉的仓位在 A（窗口不含当天）里仍在场 ⇒ 键错开。
+# 10-02 实测精确 13/16（决策 16/16），3 笔全是这一类；修订后 16/16。`--rehearse` 历史窗口同因
+# （2/5、5/13、3/8 → 5/5、13/13、8/8）。另：09-24 生产被限流、当天不出场不开仓，A 多开 4 笔——召回式自证看不见。
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 10-02 生产账本里的真实一行（MU，当天 TIME 止损）与 A 重放里同一笔的在场形态：shares / entry_price 逐位相同
+_MU_CLOSED = {"ticker": "MU", "entry_date": "2026-09-18", "direction": "bullish", "shares": 1.0008,
+              "entry_price": 1015.8, "exit_date": "2026-10-02", "exit_reason": "TIME"}
+_MU_OPEN = {"ticker": "MU", "entry_date": "2026-09-18", "direction": "bullish", "shares": 1.0008,
+            "entry_price": 1015.8, "size_usd": 1016.64}
+
+
+class TestEntryKeyIgnoresOpenOrClosed:
+    def test_the_real_mu_pair_has_the_asymmetry(self):
+        """夹具自检：这对真实数据确实分得开新旧两种取法——否则下一条在旧代码上也绿，什么也证明不了。"""
+        assert round(_MU_OPEN["size_usd"], 2) != round(_MU_CLOSED["shares"] * _MU_CLOSED["entry_price"], 2)
+
+    def test_same_position_gets_the_same_key_open_or_closed(self):
+        assert fwd._entry_key(_MU_OPEN) == fwd._entry_key(_MU_CLOSED) == ("MU", "2026-09-18", "bullish", 1016.61)
+
+    def test_size_usd_is_never_read(self):
+        """变异「在场仓位改回读 size_usd」⇒ 红。"""
+        assert fwd._entry_key({**_MU_OPEN, "size_usd": 1e9}) == fwd._entry_key(_MU_OPEN)
+
+    @pytest.mark.parametrize("price", [2.66, 47.32, 263.96, 648.43, 1015.8])
+    def test_size_differences_above_the_ledger_resolution_stay_visible(self, price):
+        """「谁会红？」：建仓市值差 ≥ 2×max(1 分, entry_price×1e-4) 必然换键——这是账本本身的分辨率
+        （`shares` 只存 4 位小数），已平仓那一行一直就是这个精度。变异「第四元取整到角 / 元」⇒ 低价那几格红。"""
+        step = 2 * max(0.01, price * 1e-4)
+
+        def key(size):
+            return fwd._entry_key({"ticker": "X", "entry_date": "d", "direction": "bullish",
+                                   "shares": round(size / price, 4), "entry_price": price})[3]
+        sizes = [300.0 + i * 13.37 for i in range(300)]
+        assert all(key(s) != key(s + step) for s in sizes)
+
+
+def _bars(levels):
+    """`{日期: 价}` → 一个 `_fetch_ohlc` 替身：工作日逐日给 bar，`levels` 里点名的日子 High 用那个价，其余平价。"""
+    def fake(ticker, start, end, *, base):
+        out = {}
+        d, end_d = datetime.date.fromisoformat(start), datetime.date.fromisoformat(end)
+        while d < end_d:
+            if d.weekday() < 5:
+                hi = levels.get(d.isoformat(), base * 1.001)
+                out[d.isoformat()] = {"Open": base, "High": hi, "Low": base * 0.999, "Close": base}
+            d += datetime.timedelta(days=1)
+        return out
+    return fake
+
+
+class TestProductionClosesOnTheScanDay:
+    """Step 11 的真实时序：生产先把当天跑完（含平仓），检验再重放 [FORWARD_START, 当天)。
+    同一笔仓位在生产里已平、在 A 里仍在场——10-02 的 ABBV / MU / NVDA。"""
+    P = 1015.8                      # 高价票：shares 取 4 位小数的误差 × 价格足以挪动分位
+    D1, D2, SCAN_DAY = "2026-09-16", "2026-09-17", "2026-09-18"
+
+    def _world(self, pp_fx, tmp_path, monkeypatch):
+        _pp, snap_dir, _ = pp_fx
+        fake = _bars({self.SCAN_DAY: self.P * 1.3})   # 扫描当天冲过 +15% 止盈
+        monkeypatch.setattr(_pp, "_fetch_ohlc", lambda t, s, e: fake(t, s, e, base=self.P))
+        for d in (self.D1, self.D2, self.SCAN_DAY):
+            (snap_dir / f"MU_{d}.json").write_text(json.dumps({
+                "ticker": "MU", "date": d, "composite_score": 7.5, "direction": "bullish",
+                "agent_votes": {"a": 7.5, "b": 7.5}, "entry_price": self.P}))
+        seed = _make_seed()
+        prod = tmp_path / "prod_run"
+        prod.mkdir()
+        for name, blob in seed.items():        # 「生产」起点直接写盘，不走被测的 _apply_seed（见 `_world`）
+            (prod / name).write_bytes(blob)
+        _pp.run_replay({}, prod, dates=[self.D1, self.D2, self.SCAN_DAY])   # 生产：含扫描当天
+        _pp.CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(prod / "closed_trades.jsonl", _pp.CLOSED_FILE)
+        shutil.copy(prod / "positions.jsonl", _pp.POSITIONS_FILE)
+        return seed
+
+    def test_closed_in_production_open_in_a_is_still_reproduced(self, pp, tmp_path, monkeypatch):
+        _pp = pp[0]
+        seed = self._world(pp, tmp_path, monkeypatch)
+        sb = tmp_path / "sb"
+        res = fwd.evaluate([self.D1, self.D2], self.D1, self.SCAN_DAY, sb, insample=False, seed=seed)
+        # 夹具自检：确实是「生产当天已平、A 仍在场」，且两种旧取法确实差了分——否则这条在旧代码上也绿
+        prod_mu = [t for t in _pp._load_jsonl(_pp.CLOSED_FILE) if t["ticker"] == "MU"]
+        a_mu = [p for p in _pp._load_jsonl(sb / "A_baseline" / "positions.jsonl") if p["ticker"] == "MU"]
+        assert len(prod_mu) == 1 and prod_mu[0]["exit_date"] == self.SCAN_DAY, prod_mu
+        assert len(a_mu) == 1
+        assert round(a_mu[0]["size_usd"], 2) != round(prod_mu[0]["shares"] * prod_mu[0]["entry_price"], 2)
+        # 本体：同一笔，键相同（旧实现这里 0/1 ⇒ cannot_judge）
+        assert res["selfproof"] == {"real_entries": 1, "reproduced": 1, "decision_reproduced": 1, "a_only_entries": 0}
+        assert res["status"] == "not_ready"
+
+    def test_a_one_dollar_drift_in_the_sizing_base_still_turns_it_red(self, pp, tmp_path):
+        """「谁会红？」：修订不许把金额层变迟钝——A 的起点现金只多 $1（成本价 NAV 基数 +$1），精确层照样全红。"""
+        seed = _world(pp, tmp_path)
+        meta = json.loads(seed["meta.json"])
+        meta["cash"] += 1.0
+        drifted = {**seed, "meta.json": json.dumps(meta).encode()}
+        res = fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, tmp_path / "sb", insample=False, seed=drifted)
+        assert res["status"] == "cannot_judge"
+        assert res["selfproof"]["reproduced"] == 0 and res["selfproof"]["decision_reproduced"] == 2
+        assert "仓位金额" in res["reason"]
+
+
+class TestAOnlyIsReportedNotJudged:
+    """09-24 的形状：生产那一轮行情全取不到 ⇒ 不出场、不开仓（快照没有入场价，要靠当日收盘）；
+    A 重放时行情正常 ⇒ 开了生产没开的仓位。分母只数生产记录（预注册），所以它不拉低复现率——
+    但要被报出来：平仓后它会把已实现盈亏带进 A 的仓位基数，金额层之后成片对不上。"""
+
+    def _world_with_outage(self, pp_fx, tmp_path, monkeypatch):
+        _pp, snap_dir, _ = pp_fx
+        d1, d2 = _W_DATES
+        _write_snapshot(snap_dir, "NVDA", d1, 7.5, "bullish")
+        (snap_dir / f"AMD_{d2}.json").write_text(json.dumps({
+            "ticker": "AMD", "date": d2, "composite_score": 7.5, "direction": "bullish",
+            "agent_votes": {"a": 7.5, "b": 7.5}, "entry_price": 0.0}))
+        seed = _make_seed()
+        prod = tmp_path / "prod_run"
+        prod.mkdir()
+        for name, blob in seed.items():
+            (prod / name).write_bytes(blob)
+        _pp.run_replay({}, prod, dates=[d1])                       # 生产 d1：行情正常
+        monkeypatch.setattr(_pp, "_fetch_ohlc", lambda t, s, e: {})
+        _pp.run_replay({}, prod, dates=[d2])                       # 生产 d2：限流，一根 bar 都没有（续跑同一目录）
+        monkeypatch.setattr(_pp, "_fetch_ohlc", _fake_ohlc_flat)   # A 重放：行情又正常了
+        _pp.CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(prod / "closed_trades.jsonl", _pp.CLOSED_FILE)
+        shutil.copy(prod / "positions.jsonl", _pp.POSITIONS_FILE)
+        return seed
+
+    def test_an_outage_day_in_production_shows_up_as_a_only_without_moving_the_rate(self, pp, tmp_path, monkeypatch):
+        seed = self._world_with_outage(pp, tmp_path, monkeypatch)
+        res = fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, tmp_path / "sb", insample=False, seed=seed)
+        # 夹具自检：生产真的没开 AMD（否则 a_only=0 也说得通）
+        assert {p["ticker"] for p in pp[0]._load_jsonl(pp[0].POSITIONS_FILE)} == {"NVDA"}
+        assert res["selfproof"] == {"real_entries": 1, "reproduced": 1, "decision_reproduced": 1, "a_only_entries": 1}
+        assert res["selfproof_continuous"]["a_only_entries"] == 1
+        assert res["selfproof_rate"] == 1.0          # 变异「分母把 A 多开的也算进去」⇒ 0.5 ⇒ 红
+        assert res["status"] == "not_ready"
+        line = fwd.status_line(res)
+        assert line.startswith("⏳ ") and "（统计用的 A 比生产多开 1 笔）" in line, line
+        _assert_no_unexpected_top_level_keys(res)
+
+    def test_a_only_counts_decisions_not_amounts(self):
+        """同一笔只是金额不同 ⇒ 是金额层的事，不是「多开」。变异「a_only 按四元组算」⇒ 红。"""
+        k = ("NVDA", "2026-09-16", "bullish")
+        assert fwd._selfproof_stats({(*k, 100.0)}, {(*k, 101.0)})["a_only"] == 0
+        sp = fwd._selfproof_stats({(*k, 100.0)}, {(*k, 100.0), ("AMD", "2026-09-16", "bullish", 5.0)})
+        assert (sp["a_only"], sp["rate"]) == (1, 1.0)
+
+    def test_failure_reason_names_the_extra_entries_without_claiming_another_branch(self):
+        sp = {"total": 20, "exact": 10, "decision": 20, "a_only": 4, "rate": 0.5, "decision_rate": 1.0}
+        r = fwd._selfproof_failure_reason(sp)
+        assert "有 4 笔是 A 开了、生产当天没开" in r and "仓位金额" in r and "评分链" not in r
+        assert "生产当天没开" not in fwd._selfproof_failure_reason(dict(sp, a_only=0))
+        # 附注不能让「决策层也错」那一支看起来像「金额层」那一支（测试靠这两个词分辨分支）
+        r_dec = fwd._selfproof_failure_reason(dict(sp, decision=5, decision_rate=0.25))
+        assert "评分链" in r_dec and "仓位金额" not in r_dec and "有 4 笔是 A 开了" in r_dec
+
+    def test_status_line_is_unchanged_when_nothing_extra_was_opened(self):
+        base = {"status": "not_ready", "weeks": 3, "next_look_at": 15, "looks_passed_without_verdict": [],
+                "selfproof_rate": 1.0}
+        zero = {**base, "selfproof": {"real_entries": 5, "reproduced": 5, "decision_reproduced": 5, "a_only_entries": 0}}
+        assert fwd.status_line(zero) == fwd.status_line(base) == "⏳ F&G 敞口门前瞻检验：3/15 个合格周，自证 100%"
+
+    def test_rehearse_output_shows_the_extra_entries(self, capsys):
+        fwd._print_human({"mode": "rehearse", "status": "rehearsal_ok", "since": "2026-09-22",
+                          "before": "2026-09-26", "seed_commit": "abcdef1234", "seed_last_run_date": "2026-09-18",
+                          "n_dates": 2, "selfproof": {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2,
+                                                       "a_only_entries": 4}})
+        assert "逐日多开 4 笔次（不进判定）" in capsys.readouterr().out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 16. 逐日重锚（v0.45.408 事后修订）
+#
+# 连续重放的 A 一旦与生产在某天良性分歧就再也追不回来（09-24/25 生产被限流、当天没出场没开仓，A 多开 4 笔；
+# 它们平仓后 A 的仓位基数偏离生产，此后每一笔金额都对不上）。自证改为每个快照日从生产前一日收盘状态起跑；
+# **统计量用的 A / B 仍从种子连续重放**（第 16.4 组钉住）。锚点：种子 / 冻结锚点 / 数据备份仓库，重叠日必须逐字节相同。
+# ══════════════════════════════════════════════════════════════════════════════
+
+_S_D1, _S_D2, _S_D3, _S_D4 = "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-21"
+_S_DATES = [_S_D1, _S_D2, _S_D3, _S_D4]
+_S_SINCE, _S_BEFORE = _S_D1, "2026-09-22"
+
+
+def _bars_by_ticker(spikes):
+    """`_fetch_ohlc` 替身：所有标的平价 100；`spikes={(标的, 日期): High}` 那根冲高（触发止盈用）。"""
+    def fake(ticker, start, end):
+        out = {}
+        d, end_d = datetime.date.fromisoformat(start), datetime.date.fromisoformat(end)
+        while d < end_d:
+            if d.weekday() < 5:
+                hi = spikes.get((ticker, d.isoformat()), 100.5)
+                out[d.isoformat()] = {"Open": 100.0, "High": hi, "Low": 99.5, "Close": 100.0}
+            d += datetime.timedelta(days=1)
+        return out
+    return fake
+
+
+def _outage_world(pp_fx, tmp_path, monkeypatch):
+    """09-24 的完整形状压成四天。D1 生产与 A 都开 NVDA；D2 生产被限流（`_fetch_ohlc` 全空 ⇒ 不出场、不开仓；
+    AMD 快照没有入场价，要靠当日收盘），A 照常开 AMD；D3 AMD 冲过止盈 ⇒ **只有 A** 平仓、带回已实现盈亏；
+    D4 生产与 A 都开 MSFT——连续 A 的仓位基数此时比生产多出 AMD 那笔盈亏 ⇒ MSFT 金额对不上；
+    逐日重锚从生产 D3 收盘状态起跑 ⇒ 对得上。返回 (种子, 生产逐日收盘状态)。"""
+    _pp, snap_dir, _ = pp_fx
+    _write_snapshot(snap_dir, "NVDA", _S_D1, 7.5, "bullish")
+    (snap_dir / f"AMD_{_S_D2}.json").write_text(json.dumps({
+        "ticker": "AMD", "date": _S_D2, "composite_score": 7.5, "direction": "bullish",
+        "agent_votes": {"a": 7.5, "b": 7.5}, "entry_price": 0.0}))
+    _write_snapshot(snap_dir, "MSFT", _S_D4, 7.5, "bullish")
+    good = _bars_by_ticker({("AMD", _S_D3): 130.0})
+    seed = _make_seed()
+    prod = tmp_path / "prod_outage"
+    prod.mkdir()
+    for n, b in seed.items():
+        (prod / n).write_bytes(b)
+    history = {}
+    for d in _S_DATES:
+        monkeypatch.setattr(_pp, "_fetch_ohlc", (lambda t, s, e: {}) if d == _S_D2 else good)
+        _pp.run_replay({}, prod, dates=[d])
+        history[d] = {n: (prod / n).read_bytes() for n in fwd.SEED_STATE_FILES}
+    monkeypatch.setattr(_pp, "_fetch_ohlc", good)       # 重放时行情是好的
+    _pp.CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    for n, dst in (("closed_trades.jsonl", _pp.CLOSED_FILE), ("positions.jsonl", _pp.POSITIONS_FILE),
+                   ("equity_curve.jsonl", _pp.EQUITY_FILE)):
+        shutil.copy(prod / n, dst)
+    return seed, history
+
+
+def _outage_plan(seed, history, **kw):
+    return fwd._anchor_plan(seed, [("测试历史", history)], _S_DATES, processed=set(_S_DATES), **kw)
+
+
+# ── 16.1 端到端：病根与修法 ─────────────────────────────────────────────────────
+
+class TestPerDayReanchoringEndToEnd:
+    def test_the_fixture_really_breaks_the_continuous_replay(self, pp, tmp_path, monkeypatch):
+        """夹具自检：连续重放（只有种子一个锚点）在这个世界里确实红在金额层——否则下一条绿得没意义。"""
+        seed, _ = _outage_world(pp, tmp_path, monkeypatch)
+        prod_tickers = {t["ticker"] for t in pp[0]._load_jsonl(pp[0].POSITIONS_FILE)}
+        assert prod_tickers == {"NVDA", "MSFT"}, prod_tickers           # 生产从没开过 AMD
+        res = fwd.evaluate(_S_DATES, _S_SINCE, _S_BEFORE, tmp_path / "sb", insample=False, seed=seed)
+        assert res["selfproof"] == {"real_entries": 2, "reproduced": 1, "decision_reproduced": 2, "a_only_entries": 1}
+        assert res["status"] == "cannot_judge" and "仓位金额" in res["reason"]
+
+    def test_per_day_reanchoring_reproduces_production_through_the_outage(self, pp, tmp_path, monkeypatch):
+        seed, hist = _outage_world(pp, tmp_path, monkeypatch)
+        res = fwd.evaluate(_S_DATES, _S_SINCE, _S_BEFORE, tmp_path / "sb", insample=False, seed=seed,
+                           plan=_outage_plan(seed, hist))
+        assert res["selfproof"] == {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2, "a_only_entries": 1}
+        assert res["selfproof_continuous"] == {"real_entries": 2, "reproduced": 1, "decision_reproduced": 2,
+                                               "a_only_entries": 1}
+        seg = res["selfproof_segments"]
+        assert seg["segments"] == 4 and seg["multi_day_segments"] == [] and seg["invalid_anchors"] == {}
+        assert res["status"] == "not_ready"
+        line = fwd.status_line(res)
+        assert line == "⏳ F&G 敞口门前瞻检验：1/15 个合格周，自证 100%（统计用的 A 比生产多开 1 笔）", line
+        _assert_no_unexpected_top_level_keys(res)
+
+    def test_a_scoring_or_entry_rule_change_still_turns_it_red(self, pp, tmp_path, monkeypatch):
+        """「谁会红？」：逐日重锚不许把自证变成恒绿——每段都用**当前**代码 / 配置跑。"""
+        seed, hist = _outage_world(pp, tmp_path, monkeypatch)
+        monkeypatch.setitem(pp[0].CONFIG, "entry_score_bull", 9.0)
+        res = fwd.evaluate(_S_DATES, _S_SINCE, _S_BEFORE, tmp_path / "sb", insample=False, seed=seed,
+                           plan=_outage_plan(seed, hist))
+        assert res["status"] == "cannot_judge" and res["selfproof"]["decision_reproduced"] == 0
+        assert "评分链" in res["reason"]
+
+    def test_a_sizing_change_still_turns_it_red_and_names_the_days(self, pp, tmp_path, monkeypatch):
+        seed, hist = _outage_world(pp, tmp_path, monkeypatch)
+        monkeypatch.setitem(pp[0].CONFIG, "size_pct_by_tier", {**pp[0].CONFIG["size_pct_by_tier"], "high": 4.0})
+        res = fwd.evaluate(_S_DATES, _S_SINCE, _S_BEFORE, tmp_path / "sb", insample=False, seed=seed,
+                           plan=_outage_plan(seed, hist))
+        assert res["status"] == "cannot_judge"
+        assert (res["selfproof"]["reproduced"], res["selfproof"]["decision_reproduced"]) == (0, 2)
+        assert "仓位金额" in res["reason"] and f"未复现的按入场日：{_S_D1}×1、{_S_D4}×1" in res["reason"]
+
+
+# ── 16.2 分段方案 `_anchor_plan`（纯数据，不重放）────────────────────────────────
+
+def _st(lrd, cash=46000.0):
+    return _make_seed(cash=cash, last_run_date=lrd)
+
+
+class TestAnchorPlan:
+    SEED = None
+
+    def setup_method(self):
+        self.SEED = _st("2026-09-15")
+
+    def _hist(self, *lrds, **overrides):
+        return {d: overrides.get(d, _st(d, 46000.0 + i)) for i, d in enumerate(lrds)}
+
+    def test_one_segment_per_processed_day_and_the_first_anchor_is_the_seed(self):
+        plan = fwd._anchor_plan(self.SEED, [("h", self._hist(_S_D1, _S_D2, _S_D3))], _S_DATES, processed=set(_S_DATES))
+        assert plan["segments"] == [("2026-09-15", [_S_D1]), (_S_D1, [_S_D2]), (_S_D2, [_S_D3]), (_S_D3, [_S_D4])]
+        assert plan["anchors"]["2026-09-15"] is self.SEED
+        assert plan["info"]["anchor_sources"] == {fwd.SOURCE_SEED: 1, "h": 3}
+
+    def test_a_missing_anchor_merges_the_day_into_the_previous_segment(self):
+        """生产处理了 D2、备份那天没提交 ⇒ D2、D3 都从 D1 的状态起跑（局部退回连续），并报出来。"""
+        plan = fwd._anchor_plan(self.SEED, [("h", self._hist(_S_D1, _S_D3))], _S_DATES, processed=set(_S_DATES))
+        assert plan["segments"] == [("2026-09-15", [_S_D1]), (_S_D1, [_S_D2, _S_D3]), (_S_D3, [_S_D4])]
+        assert plan["info"]["multi_day_segments"] == [[_S_D2, _S_D3]]
+
+    def test_a_day_production_never_processed_is_not_replayed(self):
+        """快照有、生产那天没跑组合 ⇒ 那天不重放（生产那天什么都没做），D3 直接从生产真实的前一状态（D1）起跑——
+        不能把 D2 并进 D3 那段，那会替生产做一件它没做过的事。变异「忽略 processed」⇒ 红。"""
+        plan = fwd._anchor_plan(self.SEED, [("h", self._hist(_S_D1, _S_D3))], _S_DATES,
+                                processed={_S_D1, _S_D3, _S_D4})
+        assert plan["segments"] == [("2026-09-15", [_S_D1]), (_S_D1, [_S_D3]), (_S_D3, [_S_D4])]
+        assert plan["info"]["production_unprocessed_dates"] == [_S_D2]
+        assert plan["info"]["multi_day_segments"] == []
+
+    def test_an_invalid_anchor_is_skipped_and_reported(self):
+        bad = _st(_S_D2, cash=float("nan"))
+        plan = fwd._anchor_plan(self.SEED, [("h", self._hist(_S_D1, _S_D2, _S_D3, **{_S_D2: bad}))], _S_DATES,
+                                processed=set(_S_DATES))
+        assert list(plan["info"]["invalid_anchors"]) == [_S_D2] and "非有限" in plan["info"]["invalid_anchors"][_S_D2]
+        assert (_S_D1, [_S_D2, _S_D3]) in plan["segments"] and _S_D2 not in plan["anchors"]
+
+    def test_sources_that_disagree_are_cannot_judge_not_a_silent_pick(self):
+        """用户 10-03 定：不一致本身说明状态被改过，静默挑一份等于把失败改写成「没发生过」。"""
+        a, b = self._hist(_S_D1, _S_D2), self._hist(_S_D1, _S_D2, **{_S_D2: _st(_S_D2, 1.0)})
+        with pytest.raises(fwd.SeedError, match="不一致"):
+            fwd._anchor_plan(self.SEED, [("甲", a), ("乙", b)], _S_DATES, processed=set(_S_DATES))
+
+    def test_a_source_that_disagrees_with_the_seed_is_refused(self):
+        with pytest.raises(fwd.SeedError, match="不一致"):
+            fwd._anchor_plan(self.SEED, [("h", {"2026-09-15": _st("2026-09-15", 1.0)})], _S_DATES)
+
+    def test_identical_overlaps_are_fine_and_counted_once(self):
+        h = self._hist(_S_D1, _S_D2, _S_D3)
+        plan = fwd._anchor_plan(self.SEED, [("甲", h), ("乙", dict(h)), ("丙", {"2026-09-15": dict(self.SEED)})],
+                                _S_DATES, processed=set(_S_DATES))
+        assert plan["info"]["anchor_sources"] == {fwd.SOURCE_SEED: 1, "甲": 3}
+
+    def test_states_outside_the_window_are_ignored(self):
+        """只看 [种子日期, 窗口末日)：更早 / 更晚的状态（哪怕不一致）不是锚点，也不该让检验无法判定。"""
+        plan = fwd._anchor_plan(self.SEED, [("甲", {"2026-09-01": _st("2026-09-01"), _S_D4: _st(_S_D4)}),
+                                            ("乙", {"2026-09-01": _st("2026-09-01", 1.0), _S_D4: _st(_S_D4, 1.0)})],
+                                _S_DATES, processed=set(_S_DATES))
+        assert plan["segments"] == [("2026-09-15", _S_DATES)]
+
+
+# ── 16.3 锚点来源：git 历史 / 冻结锚点 / 数据备份仓库 ───────────────────────────
+
+class TestStateHistory:
+    def test_last_commit_per_date_wins_and_unreadable_commits_are_counted(self, tmp_path):
+        broken = {"paper_portfolio_state/meta.json": b"{not json"}
+        repo, shas = _git_repo(tmp_path, [_state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0),
+                                          _state_at("2026-09-16", 4100.0), broken])
+        hist, unreadable, _ = fwd._state_history(repo)
+        assert sorted(hist) == ["2026-09-15", "2026-09-16"] and unreadable == 1
+        assert hist["2026-09-16"][0] == shas[2] and _cash_of(hist["2026-09-16"][1]) == 4100.0
+
+    def test_cat_batch_reads_blobs_and_reports_missing_paths_as_none(self, tmp_path):
+        repo, shas = _git_repo(tmp_path, [_state_at("2026-09-15", 3000.0)])
+        got = fwd._git_cat_batch(repo, [f"{shas[0]}:paper_portfolio_state/meta.json", f"{shas[0]}:nope.txt"])
+        assert _cash_of({"meta.json": got[f"{shas[0]}:paper_portfolio_state/meta.json"]}) == 3000.0
+        assert got[f"{shas[0]}:nope.txt"] is None
+
+    @pytest.mark.parametrize("kind", ["missing", "not_a_repo", "shallow"])
+    def test_an_unusable_history_is_a_seed_error(self, tmp_path, kind):
+        if kind == "missing":
+            target = tmp_path / "nowhere"
+        elif kind == "not_a_repo":
+            target = tmp_path / "plain"
+            target.mkdir()
+        else:
+            repo, _ = _git_repo(tmp_path, [_state_at("2026-09-15", 1.0), _state_at("2026-09-16", 2.0)])
+            target = tmp_path / "shallow"
+            subprocess.run(["git", "clone", "-q", "--depth", "1", f"file://{repo}", str(target)],
+                           check=True, capture_output=True, env=_synthetic_git_env())
+        with pytest.raises(fwd.SeedError):
+            fwd._state_history(target)
+
+
+_ANCHOR_DIR = _SEED_DIR / "anchors"
+
+
+class TestFrozenAnchors:
+    def test_shipped_anchors_load_and_cover_the_code_repo_era(self):
+        anchors = fwd.load_frozen_anchors()
+        assert sorted(anchors) == ["2026-09-16", "2026-09-17", "2026-09-18", "2026-09-22", "2026-09-24", "2026-09-25"]
+
+    def test_shipped_anchors_are_tracked_by_git(self):
+        """同 `test_seed_files_are_tracked_by_git`：128 = 导出的源码包，skip 正当。"""
+        r = subprocess.run(["git", "-C", str(_ROOT), "ls-files", "--error-unmatch", "--",
+                            f"experiments/{fwd.SEED_DIRNAME}/anchors/{fwd.ANCHORS_MANIFEST_NAME}",
+                            *[f"experiments/{fwd.SEED_DIRNAME}/anchors/{d}/{n}"
+                              for d in fwd.load_frozen_anchors() for n in fwd.SEED_STATE_FILES]],
+                           capture_output=True, text=True)
+        if r.returncode == 128:
+            pytest.skip("不在 git 仓库里（导出的源码包）")
+        assert r.returncode == 0, f"冻结锚点文件未被 git 跟踪：{r.stderr.strip()}"
+
+    def test_shipped_anchors_are_exactly_the_code_repo_history(self):
+        """冻结的就是代码仓库里窗口内的**全部**生产状态（一个不多、一个不少、逐字节相同）。代码仓库的状态提交
+        止于 2026-09-25；以后若有人又往代码仓库提交了窗口内的状态，这条会红。导出包 / 浅克隆里没有完整历史，skip 正当
+        ——**只有这两种**（v0.45.408 二次检查收窄：原先任何 SeedError 都 skip，`cat-file` 解析失败之类的真错也会被吞掉）。"""
+        r = subprocess.run(["git", "-C", str(_ROOT), "rev-parse", "--is-shallow-repository"], capture_output=True, text=True)
+        if r.returncode == 128:
+            pytest.skip("不在 git 仓库里（导出的源码包）")
+        if r.stdout.strip() == "true":
+            pytest.skip("浅克隆：没有完整的代码仓库历史")
+        hist, _, _ = fwd._state_history(_ROOT)
+        want = {d: files for d, (_, files) in hist.items() if d >= fwd.FORWARD_START}
+        assert fwd.load_frozen_anchors() == want
+
+    def _copy(self, tmp_path):
+        d = tmp_path / "seed"
+        shutil.copytree(_SEED_DIR, d)
+        return d
+
+    def _manifest(self, d):
+        return json.loads((d / "anchors" / fwd.ANCHORS_MANIFEST_NAME).read_text(encoding="utf-8"))
+
+    def _write_manifest(self, d, m):
+        (d / "anchors" / fwd.ANCHORS_MANIFEST_NAME).write_text(json.dumps(m), encoding="utf-8")
+
+    def test_a_tampered_file_fails_the_checksum(self, tmp_path):
+        d = self._copy(tmp_path)
+        p = d / "anchors" / "2026-09-17" / "positions.jsonl"
+        p.write_bytes(p.read_bytes() + b"\n")
+        with pytest.raises(fwd.SeedError, match="sha256"):
+            fwd.load_frozen_anchors(d)
+
+    def test_a_directory_not_in_the_manifest_is_refused(self, tmp_path):
+        d = self._copy(tmp_path)
+        shutil.copytree(d / "anchors" / "2026-09-17", d / "anchors" / "2026-09-19")
+        with pytest.raises(fwd.SeedError, match="对不上"):
+            fwd.load_frozen_anchors(d)
+
+    def test_a_manifest_entry_without_its_directory_is_refused(self, tmp_path):
+        d = self._copy(tmp_path)
+        shutil.rmtree(d / "anchors" / "2026-09-17")
+        with pytest.raises(fwd.SeedError, match="对不上"):
+            fwd.load_frozen_anchors(d)
+
+    def test_wrong_window_start_is_refused(self, tmp_path):
+        d = self._copy(tmp_path)
+        m = self._manifest(d)
+        m["window_start"] = "2026-09-17"
+        self._write_manifest(d, m)
+        with pytest.raises(fwd.SeedError, match="窗口起点"):
+            fwd.load_frozen_anchors(d)
+
+    def test_meta_date_must_match_the_directory(self, tmp_path):
+        """目录叫 09-18、里面却是 09-17 的状态（校验和照新内容现算 ⇒ 只考内容那一层）。"""
+        d = self._copy(tmp_path)
+        src = d / "anchors" / "2026-09-17"
+        dst = d / "anchors" / "2026-09-18"
+        m = self._manifest(d)
+        for n in fwd.SEED_STATE_FILES:
+            (dst / n).write_bytes((src / n).read_bytes())
+            m["anchors"]["2026-09-18"]["files"][n]["sha256"] = hashlib.sha256((src / n).read_bytes()).hexdigest()
+        self._write_manifest(d, m)
+        with pytest.raises(fwd.SeedError, match="last_run_date"):
+            fwd.load_frozen_anchors(d)
+
+    def test_build_anchors_writes_once_and_refuses_to_overwrite(self, tmp_path, monkeypatch, capsys):
+        out = tmp_path / "frozen"
+        anchors = {"2026-09-16": _make_seed(last_run_date="2026-09-16")}
+        manifest = {"schema": 1, "window_start": fwd.FORWARD_START, "anchors": {}}
+        monkeypatch.setattr(fwd, "_seed_dir", lambda *a, **k: out)
+        monkeypatch.setattr(fwd, "build_frozen_anchors_from_git", lambda since, *a, **k: (anchors, manifest))
+        assert fwd.main(["--build-anchors"]) == 0
+        p = out / "anchors" / "2026-09-16" / "meta.json"
+        marker = p.read_bytes()
+        monkeypatch.setattr(fwd, "build_frozen_anchors_from_git",
+                            lambda since, *a, **k: ({"2026-09-16": {**anchors["2026-09-16"], "meta.json": b"{}"}}, manifest))
+        assert fwd.main(["--build-anchors"]) == 3
+        assert p.read_bytes() == marker and "拒绝覆盖" in capsys.readouterr().err
+
+
+class TestDataBackupRepoWiring:
+    def test_paths_property_is_call_time_and_under_the_data_root(self, tmp_path, monkeypatch):
+        from hive_logger import PATHS
+        assert PATHS.data_backup_repo == PATHS.home / "_git_backup"
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(tmp_path / "elsewhere"))
+        assert PATHS.data_backup_repo == tmp_path / "elsewhere" / "_git_backup"
+
+    def _forward_world(self, pp_fx, dates):
+        """真冻结种子 + 真冻结锚点；生产净值曲线写上这些日期（「生产处理过」）。"""
+        _pp = pp_fx[0]
+        _pp.EQUITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _pp._write_jsonl(_pp.EQUITY_FILE, [{"date": d, "nav": 50000.0} for d in dates])
+
+    def _backup(self, tmp_path, states):
+        from hive_logger import PATHS
+        repo, _ = _git_repo(tmp_path, [{f"paper_portfolio_state/{n}": b for n, b in s.items()} for s in states],
+                            name="bk_src")
+        target = PATHS.data_backup_repo
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(repo), str(target))
+        return target
+
+    def test_the_forward_plan_stitches_seed_frozen_anchors_and_the_backup_repo(self, pp, tmp_path):
+        dates = ["2026-09-16", "2026-09-17", "2026-09-18", "2026-09-22", "2026-09-24", "2026-09-25",
+                 "2026-09-28", "2026-09-29"]
+        self._forward_world(pp, dates)
+        frozen = fwd.load_frozen_anchors()
+        self._backup(tmp_path, [frozen["2026-09-25"], _st("2026-09-28", 40000.0)])   # 重叠日 09-25 逐字节相同
+        plan = fwd._forward_anchor_plan(fwd.load_seed(), dates)
+        assert plan["info"]["segments"] == 8 and plan["info"]["multi_day_segments"] == []
+        assert plan["info"]["anchor_sources"] == {fwd.SOURCE_SEED: 1, fwd.SOURCE_FROZEN_ANCHORS: 6,
+                                                  fwd.SOURCE_DATA_BACKUP: 1}
+        assert plan["segments"][-1] == ("2026-09-28", ["2026-09-29"])
+
+    def test_a_backup_that_disagrees_with_the_frozen_anchors_is_cannot_judge(self, pp, tmp_path):
+        _write_snapshot(pp[1], "NVDA", "2026-09-22", 7.5, "bullish")
+        self._forward_world(pp, ["2026-09-22"])
+        self._backup(tmp_path, [_st("2026-09-18", 1.0)])
+        res = fwd.run(today="2026-09-23")
+        assert res["status"] == "cannot_judge" and "逐日锚点不可用" in res["reason"] and "不一致" in res["reason"]
+
+    def test_a_missing_backup_repo_is_cannot_judge_and_never_replays(self, pp, monkeypatch):
+        _write_snapshot(pp[1], "NVDA", "2026-09-16", 7.5, "bullish")
+        monkeypatch.setattr(fwd, "evaluate", lambda *a, **k: pytest.fail("锚点不可用时不许退回连续重放"))
+        res = fwd.run(today="2026-09-17")
+        assert res["status"] == "cannot_judge" and "逐日锚点不可用" in res["reason"]
+
+    def test_rehearse_without_a_backup_repo_is_cannot_judge(self, pp, tmp_path):
+        seed, hist = _world_with_history(pp, tmp_path)
+        repo = TestRehearse._synthetic_repo(None, tmp_path, seed, hist)
+        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo)        # 不给 backup_repo ⇒ 读 PATHS（沙箱里没有）
+        assert res["status"] == "cannot_judge" and "逐日锚点不可用" in res["reason"]
+
+
+# ── 16.4 统计量必须仍是连续重放（逐日重锚只许用于自证）──────────────────────────
+
+class TestTheStatisticStaysContinuous:
+    def test_b_is_replayed_once_continuously_from_the_seed_and_feeds_the_statistic(self, pp, tmp_path, monkeypatch):
+        seed, hist = _outage_world(pp, tmp_path, monkeypatch)
+        calls, results = [], []
+        orig = fwd._replay_variant
+
+        def spy(cfg, state_dir, dates, seed=None):
+            r = orig(cfg, state_dir, dates, seed=seed)
+            calls.append((cfg, list(dates), seed))
+            results.append(r)
+            return r
+        monkeypatch.setattr(fwd, "_replay_variant", spy)
+        fed = []
+        orig_wd = fwd.weekly_deltas
+        monkeypatch.setattr(fwd, "weekly_deltas", lambda a, b: fed.append((a, b)) or orig_wd(a, b))
+        fwd.evaluate(_S_DATES, _S_SINCE, _S_BEFORE, tmp_path / "sb", insample=False, seed=seed,
+                     plan=_outage_plan(seed, hist))
+        b_calls = [i for i, c in enumerate(calls) if c[0] == fwd.FG_GATE_TEST_CONFIG]
+        assert len(b_calls) == 1, "B 只许连续重放一次——逐日重锚 B 会每天抹掉门的累积效应"
+        assert calls[b_calls[0]][1] == _S_DATES and calls[b_calls[0]][2] is seed
+        assert all(c[0] == {} for i, c in enumerate(calls) if i not in b_calls)
+        cont_a = [i for i, c in enumerate(calls) if c[0] == {} and c[1] == _S_DATES and c[2] is seed]
+        assert len(cont_a) == 1
+        assert len(fed) == 1 and fed[0][0] is results[cont_a[0]]["equity"] and fed[0][1] is results[b_calls[0]]["equity"]
+        assert len(calls) == 2 + 4    # 连续 A + 连续 B + 4 个单日段
+
+
+# ── 16.5 输出 ───────────────────────────────────────────────────────────────
+
+class TestSegmentOutputs:
+    _NR = {"status": "not_ready", "weeks": 3, "next_look_at": 15, "looks_passed_without_verdict": [],
+           "selfproof_rate": 1.0}
+
+    def test_anchor_gaps_show_up_without_turning_the_icon(self):
+        res = {**self._NR, "selfproof_segments": {"multi_day_segments": [["2026-10-05", "2026-10-06"]],
+                                                  "invalid_anchors": {"2026-10-02": "x"},
+                                                  "production_unprocessed_dates": ["2026-10-07"]}}
+        line = fwd.status_line(res)
+        assert line == ("⏳ F&G 敞口门前瞻检验：3/15 个合格周，自证 100%"
+                        "（逐日锚点：1 段跨多天（缺锚点）、1 个坏锚点、生产没处理 1 个快照日）"), line
+
+    def test_no_gaps_no_note(self):
+        res = {**self._NR, "selfproof_segments": {"segments": 11, "multi_day_segments": [], "invalid_anchors": {},
+                                                  "production_unprocessed_dates": []}}
+        assert fwd.status_line(res) == fwd.status_line(self._NR)
+
+    def test_human_output_shows_segments_and_the_continuous_diagnostic(self, capsys):
+        fwd._print_human({"mode": "forward", "status": "not_ready", "n_dates": 11, "weeks": 2, "next_look_at": 15,
+                          "looks_passed_without_verdict": [], "selfproof_rate": 1.0,
+                          "selfproof": {"real_entries": 19, "reproduced": 19, "decision_reproduced": 19, "a_only_entries": 8},
+                          "selfproof_continuous": {"real_entries": 19, "reproduced": 19, "decision_reproduced": 19,
+                                                   "a_only_entries": 4},
+                          "selfproof_segments": {"segments": 11, "multi_day_segments": [], "invalid_anchors": {},
+                                                 "production_unprocessed_dates": [], "anchor_sources": {"种子": 1}}})
+        out = capsys.readouterr().out
+        assert "逐日重锚：11 段" in out and "连续 A（统计量那份，只作诊断）：精确 19/19" in out and "比生产多开 4 笔" in out
+
+    def test_ohlc_window_covers_every_anchors_positions(self, monkeypatch):
+        import paper_portfolio as _pp
+        seen = []
+        monkeypatch.setattr(_pp, "replay_ohlc_window", lambda s, e, **kw: seen.append((s, e)) or contextlib.nullcontext())
+        anchor = _make_seed(positions=[_pos_row("OLD", "2026-08-20", 1000.0)], last_run_date="2026-09-17")
+        with fwd._replay_ohlc_scope(_S_DATES, _make_seed(), extra_seeds=[anchor]):
+            pass
+        assert seen and seen[0][0] == "2026-08-20"
+
+
+class TestCountsThatMustNotBeConfused:
+    def test_the_status_line_counts_the_statistics_a_not_the_per_day_events(self):
+        """09-24、09-25 生产连挂两天 ⇒ 逐日口径把同一批 4 笔各算一次（8），统计量那份 A 实际多持 4 笔。
+        进度行要说的是后者。变异「进度行改读 selfproof.a_only_entries」⇒ 红（端到端夹具里两个口径恰好相等，抓不到）。"""
+        res = {"status": "not_ready", "weeks": 2, "next_look_at": 15, "looks_passed_without_verdict": [],
+               "selfproof_rate": 1.0,
+               "selfproof": {"real_entries": 19, "reproduced": 19, "decision_reproduced": 19, "a_only_entries": 8},
+               "selfproof_continuous": {"real_entries": 19, "reproduced": 19, "decision_reproduced": 19,
+                                        "a_only_entries": 4}}
+        assert fwd.status_line(res) == "⏳ F&G 敞口门前瞻检验：2/15 个合格周，自证 100%（统计用的 A 比生产多开 4 笔）"
+
+    def test_rehearse_takes_later_anchors_from_the_backup_repo(self, pp, tmp_path, monkeypatch):
+        """阶段 5 之后的状态只在备份仓库里：代码仓库只到 D1，之后的锚点只能来自备份仓库。演练的日期来自快照，
+        这个世界里 D3 没有快照 ⇒ 要比对的是 D1 / D2 / D4，D4 的锚点（D3 收盘状态）只在备份仓库里。
+        变异「演练不读备份仓库」⇒ D2、D4 并成一段从 D1 连续重放 ⇒ 撞上 D2 那次生产故障 ⇒ 红。"""
+        seed, hist = _outage_world(pp, tmp_path, monkeypatch)
+        as_commit = lambda files: {f"paper_portfolio_state/{n}": b for n, b in files.items()}   # noqa: E731
+        code, _ = _git_repo(tmp_path, [as_commit(seed), as_commit(hist[_S_D1])], name="code_repo")
+        backup, _ = _git_repo(tmp_path, [as_commit(hist[d]) for d in (_S_D1, _S_D2, _S_D3)], name="backup_repo")
+        res = fwd.rehearse(_S_SINCE, _S_BEFORE, repo_root=code, backup_repo=backup)
+        assert res["status"] == "rehearsal_ok", res.get("reason")
+        seg = res["selfproof_segments"]
+        assert seg["multi_day_segments"] == [] and seg["anchor_sources"] == {
+            fwd.SOURCE_SEED: 1, fwd.SOURCE_CODE_REPO: 1, fwd.SOURCE_DATA_BACKUP: 1}
+        assert res["selfproof_continuous"]["reproduced"] == 1        # 对照：连续重放在这个世界里确实是红的
+
+
+class TestSecondReviewFixes:
+    """v0.45.408 二次检查补的两处。"""
+
+    def test_a_ledger_only_repair_commit_is_the_state_used(self, tmp_path):
+        """只改 `positions.jsonl`、不碰 meta 的人工修复：「同一日期取最后一个状态」要拿到修复后的那份，
+        演练的起点种子也一样。变异「状态提交只按 meta.json 列」⇒ 两处都拿到修复前 ⇒ 红。"""
+        before_fix = _state_at("2026-09-15", 3000.0, positions=[_pos_row("OLD", "2026-09-10", 5000.0)])
+        fixed = {"paper_portfolio_state/positions.jsonl": _jsonl([_pos_row("OLD", "2026-09-10", 4000.0)])}
+        repo, shas = _git_repo(tmp_path, [before_fix, fixed, _state_at("2026-09-16", 4000.0)])
+        hist, _, _ = fwd._state_history(repo)
+        assert hist["2026-09-15"][0] == shas[1]
+        assert json.loads(hist["2026-09-15"][1]["positions.jsonl"])["size_usd"] == 4000.0
+        files, manifest = fwd.build_seed_from_git("2026-09-16", repo)
+        assert manifest["source"]["commit"] == shas[1]
+        assert json.loads(files["positions.jsonl"])["size_usd"] == 4000.0
+
+    def test_icloud_duplicate_directories_do_not_break_the_frozen_anchors(self, tmp_path):
+        """本仓在 iCloud 同步的 ~/Desktop 下，会冒出「2026-09-17 2」这类重名副本——不能让检验天天无法判定。
+        日期名的多余目录照样红（`TestFrozenAnchors::test_a_directory_not_in_the_manifest_is_refused`）。
+        变异「目录核对不过滤日期名」⇒ 红。"""
+        d = tmp_path / "seed"
+        shutil.copytree(_SEED_DIR, d)
+        shutil.copytree(d / "anchors" / "2026-09-17", d / "anchors" / "2026-09-17 2")
+        assert fwd.load_frozen_anchors(d) == fwd.load_frozen_anchors()
+
+
+class TestSecondReviewFindings:
+    """v0.45.408 二次检查（两个独立审查 agent，均已实测复现）补的口子。"""
+
+    def _equity(self, pp_fx, dates):
+        _pp = pp_fx[0]
+        _pp.EQUITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _pp._write_jsonl(_pp.EQUITY_FILE, [{"date": d, "nav": 50000.0} for d in dates])
+
+    def _backup(self, tmp_path, states):
+        from hive_logger import PATHS
+        repo, shas = _git_repo(tmp_path, [{f"paper_portfolio_state/{n}": b for n, b in st.items()} for st in states],
+                               name="bk_src2")
+        PATHS.data_backup_repo.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(repo), str(PATHS.data_backup_repo))
+        return shas
+
+    def test_a_rebuilt_backup_with_no_overlap_is_cannot_judge_not_a_silent_continuous_replay(self, pp, tmp_path):
+        """备份仓库在、是 git、不浅，但历史丢了被重建（只剩一个无关提交）⇒ 原先返回空表、09-25 之后全部从最后一个
+        冻结锚点连续重放，等于静默退回。变异「去掉重叠日要求」⇒ 红。"""
+        dates = ["2026-09-16", "2026-09-28", "2026-09-29"]
+        self._equity(pp, dates)
+        self._backup(tmp_path, [_st("2026-10-01", 1.0)])
+        with pytest.raises(fwd.SeedError, match="没有一个重叠日"):
+            fwd._forward_anchor_plan(fwd.load_seed(), dates)
+
+    def test_overlap_days_are_checked_even_outside_this_windows_range(self, pp, tmp_path):
+        """窗口只到 09-17 时 `_anchor_plan` 不看 09-18 之后的状态；但「每次运行都核重叠日」要对所有重叠日成立。"""
+        dates = ["2026-09-16", "2026-09-17"]
+        self._equity(pp, dates)
+        self._backup(tmp_path, [_st("2026-09-18", 1.0)])
+        with pytest.raises(fwd.SeedError, match="不一致"):
+            fwd._forward_anchor_plan(fwd.load_seed(), dates)
+
+    def test_a_rollback_in_the_backup_history_is_cannot_judge(self, pp, tmp_path):
+        """恢复 09-25 之后跑 09-29：「每个日期取最后一个状态」会让 09-29 的锚点取到被弃用的 09-28。
+        变异「不检测回退」⇒ 红。回退发生在种子之前（不影响窗口）则不拦。"""
+        frozen = fwd.load_frozen_anchors()
+        dates = ["2026-09-16", "2026-09-28", "2026-09-29", "2026-09-30"]
+        self._equity(pp, dates)
+        self._backup(tmp_path, [frozen["2026-09-25"], _st("2026-09-28", 1.0), frozen["2026-09-25"],
+                                _st("2026-09-29", 2.0)])
+        with pytest.raises(fwd.SeedError, match="回退"):
+            fwd._forward_anchor_plan(fwd.load_seed(), dates)
+        assert fwd._refuse_rollbacks("x", [("abc", "2026-09-01", "2026-09-05")], "2026-09-15") is None
+
+    def test_processed_dates_reach_the_forward_plan(self, pp, tmp_path):
+        """「生产没跑组合的快照日不重放」只在 `_anchor_plan` 上测过；接线若被改成 `processed=None` 全绿。"""
+        frozen = fwd.load_frozen_anchors()
+        dates = ["2026-09-16", "2026-09-28", "2026-09-29"]
+        self._equity(pp, ["2026-09-16", "2026-09-29"])          # 生产 09-28 没跑组合
+        self._backup(tmp_path, [frozen["2026-09-25"]])
+        plan = fwd._forward_anchor_plan(fwd.load_seed(), dates)
+        assert plan["info"]["production_unprocessed_dates"] == ["2026-09-28"]
+        assert plan["info"]["overlap_days_checked"] == 1
+
+    def test_processed_dates_reach_the_rehearse_plan(self, pp, tmp_path):
+        seed, hist = _world_with_history(pp, tmp_path)
+        repo = TestRehearse._synthetic_repo(None, tmp_path, seed, hist)
+        self._equity(pp, [_W_DATES[1]])
+        plan = fwd._rehearse_anchor_plan(seed, _W_DATES, repo, repo)
+        assert plan["info"]["production_unprocessed_dates"] == [_W_DATES[0]]
+
+    def test_a_stale_anchor_is_reported_even_in_a_single_day_segment(self):
+        """生产在没有快照的 09-17 跑过组合、那天的备份没提交 ⇒ 09-18 从 09-16 的状态起跑。段是单日的，
+        多日段不会报它——要单独报。变异「不报旧锚点」⇒ 红。"""
+        seed = _st("2026-09-15")
+        plan = fwd._anchor_plan(seed, [("h", {"2026-09-16": _st("2026-09-16")})], ["2026-09-16", "2026-09-18"],
+                                processed={"2026-09-16", "2026-09-17", "2026-09-18"})
+        assert plan["info"]["multi_day_segments"] == []
+        assert plan["info"]["stale_anchor_segments"] == [["2026-09-18", "2026-09-16", "2026-09-17"]]
+        assert "1 段锚点比生产前一次运行旧" in fwd._anchor_gap_note({"selfproof_segments": plan["info"]})
+
+    def test_the_failure_reason_names_anchor_gaps(self, pp, tmp_path, monkeypatch):
+        """备份缺了限流日附近的提交 ⇒ 多日段把多开带进后面 ⇒ 红；原因要说到锚点缺口，不能只推给种子 / K 线 / 配置。
+        变异「失败原因不看 segments」⇒ 红。"""
+        seed, hist = _outage_world(pp, tmp_path, monkeypatch)
+        plan = fwd._anchor_plan(seed, [("h", {_S_D1: hist[_S_D1]})], _S_DATES, processed=set(_S_DATES))
+        res = fwd.evaluate(_S_DATES, _S_SINCE, _S_BEFORE, tmp_path / "sb", insample=False, seed=seed, plan=plan)
+        assert res["status"] == "cannot_judge"
+        assert "逐日锚点有缺口（逐日锚点：1 段跨多天（缺锚点））" in res["reason"]
+        assert "单日段里它们不会带进后面的日子" in res["reason"] and "评分链" not in res["reason"]
+
+    def test_rehearse_after_the_code_repo_era_seeds_from_the_backup_repo(self, pp, tmp_path, monkeypatch):
+        """代码仓库的状态提交止于 09-25 ⇒ 之后的窗口起点只在备份仓库里。变异「只从代码仓库取种子」⇒ 红。"""
+        seed, hist = _outage_world(pp, tmp_path, monkeypatch)
+        as_commit = lambda files: {f"paper_portfolio_state/{n}": b for n, b in files.items()}   # noqa: E731
+        code, _ = _git_repo(tmp_path, [as_commit(seed), as_commit(hist[_S_D1])], name="code_only")
+        backup, _ = _git_repo(tmp_path, [as_commit(hist[d]) for d in _S_DATES], name="backup_all")
+        res = fwd.rehearse(_S_D4, _S_BEFORE, repo_root=code, backup_repo=backup)
+        assert res["status"] == "rehearsal_ok", res.get("reason")
+        assert res["seed_source"] == fwd.SOURCE_DATA_BACKUP and res["seed_last_run_date"] == _S_D3

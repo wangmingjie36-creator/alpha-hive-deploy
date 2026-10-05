@@ -147,6 +147,13 @@ class AlertAnalyzer:
                          "本次「无告警」不等于「无失败」")
             steps_result = {}
         for step_name, step_result in steps_result.items():
+            if not isinstance(step_result, dict):
+                # v0.45.386：此前 .get 直接 AttributeError、整个 Step 6 崩；编排器 B 的兜底恒写对象，
+                # 这里只是兜底并留痕（「没查成」不渲染成「查过了没事」）
+                self.checks_skipped.append(f"步骤失败检查：{step_name} 不是对象（{type(step_result).__name__}）")
+                _log.warning("steps_result.%s 不是对象（%s）—— 该步的失败检查未执行",
+                             step_name, type(step_result).__name__)
+                continue
             if step_result.get('status') == 'failed':
                 self.alerts.append(Alert(
                     AlertLevel.HIGH,
@@ -157,6 +164,38 @@ class AlertAnalyzer:
                         "状态": "失败"
                     },
                     ["step_failure", step_name]
+                ))
+            elif step_name == 'step2_hive_analysis' and step_result.get('status') == 'success_with_warning':
+                # v0.45.386（编排器 B2）：rc=1 但主流程确实跑完 ⇒ 解释器记 success_with_warning（此前是 failed，
+                # 且 step4_dashboard 也记 failed，共两条 P1）。这是 rc=1 跑完的日子（09-24 / 09-25；09-25 是 ML 近常数，
+                # 09-24 的 ML 守卫判 ok、退出码 1 的原因待验证）唯一的告警来源，
+                # 不许因为标签更准了就消失；warning 取值 ml_model_constant / rc1_after_completion_unexplained 都报。
+                self.alerts.append(Alert(
+                    AlertLevel.HIGH,
+                    f"⚠️ 【P1 高】扫描已跑完但退出码 1：{step_name}（{step_result.get('warning', '原因未记')}）",
+                    {
+                        "步骤": step_name,
+                        "耗时": f"{step_result.get('duration_seconds', 'N/A')}秒",
+                        "状态": "已跑完但退出码 1",
+                        "原因": step_result.get('warning', '原因未记'),
+                        "建议": "ml_model_constant ⇒ /usr/local/bin/python3 ml_model_guard.py --date <当日>；"
+                                "其余 ⇒ 查编排器日志 Step 2 行",
+                    },
+                    ["step_warning", step_name]
+                ))
+            if step_result.get('interp_fallback'):
+                # v0.45.386（编排器 B）：步骤解释器不可用、按退出码兜底记——摘要缺失，本身就是要人看的事（谁会红：这条）。
+                # ⚠️ 生产上只有 Step 2/4 走得到这里：Step 6（本分析）跑在 Step 10–15 之前，读的 status.json 里还没有它们的片段；
+                # 10–15 的兜底只留编排器日志 ERROR + 最终 status.json 的 interp_fallback，没有告警。
+                self.alerts.append(Alert(
+                    AlertLevel.MEDIUM,
+                    f"【P2】步骤解释器不可用，{step_name} 按退出码兜底记",
+                    {
+                        "步骤": step_name,
+                        "状态": step_result.get('status'),
+                        "原因": str(step_result.get('interp_fallback'))[:300],
+                    },
+                    ["step_interp_fallback", step_name]
                 ))
 
         # 3. 检测 P1: 性能异常 (>150% baseline)
@@ -230,7 +269,7 @@ class AlertAnalyzer:
             _log.warning("日报 JSON 解析失败，**低分与数据质量检查未执行**：%s: %s",
                          type(e).__name__, e)
 
-        # 6. 检测 P1: main 推送失败 / 生产代码没同步到 origin/main（v0.45.214）
+        # 6. 检测 P1: gh-pages 部署失败 / 生产代码没同步到 origin/main（v0.45.214；v0.45.402 起不再含 main 推送）
         self._check_deploy_and_code_sync(status)
 
         return self.alerts
@@ -242,17 +281,23 @@ class AlertAnalyzer:
         只看 `step2_hive_analysis` 是否成功——它是 `scan_timing.write()` 所在的那条扫描路径
         唯一的先决条件：空扫描护栏 / `--no-swarm` 早退等路径到不了这一步，`scan_timing` 缺失
         对它们是设计内的正常状态，不该被下面新加的 P1 误伤。
+
+        v0.45.386 起 `success_with_warning`（Step 2 退出 1 但主流程跑完）也算：该判定要求本轮
+        `scan_timing.json` 带 gh_pages（`orchestrator_steps._step2_rc1_evidence`）——正是 write_status
+        并入的那份，故放宽只会增加真阳性。
         """
         step2 = (status.get("steps_result") or {}).get("step2_hive_analysis") or {}
-        return step2.get("status") == "success"
+        if not isinstance(step2, dict):
+            return False
+        return step2.get("status") in ("success", "success_with_warning")
 
     def _check_deploy_and_code_sync(self, status: Dict) -> None:
         """读 `status.scan_timing` 里两个**真有写入者**的字段。
 
         v0.45.214 前这里读 `status['deploy_status']` —— 全仓零写入者，规则结构上不可能触发；
         2026-09-01~11 生产 `git push origin main` 六次 non-fast-forward 被拒，零告警。
-          - `scan_timing.extra.git_push`：`alpha_hive_daily_report.main` 写（部署结果精简版）
-          - `scan_timing.extra.gh_pages`（v0.45.351）：同上，网站部署结局
+          - `scan_timing.extra.gh_pages`（v0.45.351）：`alpha_hive_daily_report.main` 写，网站部署结局
+            （v0.45.402 起日报不再提交 / 推送 main，原 `git_push` / `git_commit` 两个字段与对应告警已随链退役）
           - `scan_timing.production_sync`：编排器 Step 1 前跑 `production_sync.py` 写
         ⚠️ `scan_timing` 进 status.json 靠编排器 `write_status()` 的 jq 合并，而那一步 09-14~09-25
         每个扫描日都没生效（见 v0.45.351 CHANGELOG：疑为 TCC 拦 /usr/bin/jq 读 ~/Desktop，
@@ -267,20 +312,21 @@ class AlertAnalyzer:
         真正触发条件仍不明。**不追那个可能永远抓不住的瞬时原因，把这一类失败本身变成可观测的**：
         真扫描跑完了、`scan_timing` 却整段没进 `status.json`，本身就是「不知道自己不知道」——
         比任何一条已知的推送/提交失败都更危险，因为它连「有没有出事」都看不出来。
-        判别用 `steps_result.step2_hive_analysis.status == "success"`——它是 `scan_timing.write()`
+        判别用 `steps_result.step2_hive_analysis.status` ∈ {"success", "success_with_warning"}（后者 v0.45.386 起，
+        见 `_swarm_scan_actually_ran`）——它是 `scan_timing.write()`
         所在的那条扫描路径唯一的先决条件，早退路径（空扫描护栏等）到不了这一步，不会被误伤。
         """
         st = status.get("scan_timing")
         if not isinstance(st, dict):
-            self.checks_skipped.append("推送/生产代码同步检查（status.json 缺 scan_timing）")
+            self.checks_skipped.append("gh-pages 部署 / 生产代码同步检查（status.json 缺 scan_timing）")
             _log.warning("status.json 无 scan_timing —— **推送与代码同步检查未执行**")
             if self._swarm_scan_actually_ran(status):
                 self.alerts.append(Alert(
                     AlertLevel.HIGH,
-                    "⚠️ 【P1 高】扫描已完成，但 status.json 缺整段 scan_timing——推送/提交/生产同步全部失去可观测性",
+                    "⚠️ 【P1 高】扫描已完成，但 status.json 缺整段 scan_timing——网站部署 / 生产同步全部失去可观测性",
                     {
                         "现象": "本轮 step2 蜂群分析已成功，scan_timing 却整段没进 status.json",
-                        "影响": "本轮 production_sync / git_push / git_commit 是否成功完全未知，"
+                        "影响": "本轮 production_sync / gh_pages 部署是否成功完全未知，"
                                 "不是「检查了没问题」，是「没检查」",
                         "建议": "查 logs/scan_timing.json 是否存在且日期匹配当天；"
                                 "核对编排器日志 write_status() 附近有无异常（2026-09-14 一例未查明根因）",
@@ -288,54 +334,6 @@ class AlertAnalyzer:
                     ["deployment", "observability"]
                 ))
             return
-
-        commit = (st.get("extra") or {}).get("git_commit")
-        # v0.45.223：`pending_artifacts == 0` 的失败只是「没东西可提交」；其余（含 None = git status 就失败）
-        # 都是产物留在工作区没进 git。此时推送照样可能报成功（本地落后时 nothing_to_push）。
-        # v0.45.227：提交**成功**也可能漏产物（别的进程短暂占着索引锁，只挂一条 add）⇒ 另看提交后的
-        # `left_artifacts`。键存在而值为 None = 提交后那次 git status 失败，记为未执行的检查，不渲染成「全进了」。
-        if isinstance(commit, dict):
-            left = commit.get("left_artifacts")
-            commit_failed = commit.get("success") is not True
-            if (commit_failed and commit.get("pending_artifacts") != 0) or left:
-                details = {
-                    "待提交产物数": commit.get("pending_artifacts"),
-                    "原因": commit.get("reason") or "（无输出）",
-                    "建议": "查生产 checkout 是否残留 .git/index.lock、是否有别的进程在里面跑 git；"
-                            "推送结果不代表日报已提交",
-                }
-                if left:
-                    details["提交后仍未进 git"] = (f"{left} 个：" + ", ".join(commit.get("left_sample") or []))
-                self.alerts.append(Alert(
-                    AlertLevel.HIGH,
-                    "⚠️ 【P1 高】日报提交失败（产物留在工作区，未进 git）" if commit_failed
-                    else "⚠️ 【P1 高】日报提交报成功，但有产物没进 git",
-                    details,
-                    ["deployment", "git_commit"]
-                ))
-            elif "left_artifacts" in commit and left is None:
-                self.checks_skipped.append("日报产物是否全部进 git（提交后 git status 失败）")
-
-        push = (st.get("extra") or {}).get("git_push")
-        if push is None:
-            # 空扫描护栏等早退路径不部署，这是正常的；但「没记录」不能渲染成「推送成功」
-            self.checks_skipped.append("main 推送检查（scan_timing 无 git_push 记录）")
-        elif push.get("success") is not True:
-            self.alerts.append(Alert(
-                AlertLevel.HIGH,
-                "⚠️ 【P1 高】main 推送失败（日报与账本未进 origin/main）",
-                {
-                    "方式": push.get("integration") or push.get("skipped") or "未知",
-                    "原因": push.get("error") or push.get("output") or "（无输出）",
-                    "冲突路径": push.get("conflicts"),
-                    "本地落后": push.get("behind"),
-                    # v0.45.351：原文「网站走 gh-pages 不受影响」——是无条件断言，而 09-25 断网时
-                    # main 与 gh-pages 一起失败。网站有没有更新看同一份告警里的 gh-pages 那条。
-                    "建议": "账本的异地副本缺这一天；网站是否更新另见 gh-pages 部署检查（本条不代表网站状态）。"
-                            "冲突需在生产 checkout 人工合并，勿 reset",
-                },
-                ["deployment", "github"]
-            ))
 
         # v0.45.351：gh-pages（= 网站）部署结局。此前 status.json 里根本没有这一项——
         # 2026-09-25 推送失败被重试捷径判成「成功」，网站停在 09-24 两天，零告警。

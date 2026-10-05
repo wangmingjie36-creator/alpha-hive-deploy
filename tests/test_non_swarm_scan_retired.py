@@ -70,8 +70,8 @@ def cli(monkeypatch):
             calls.append("save_report")
             return "alpha-hive-daily-2026-09-14.md"
 
-        def auto_commit_and_notify(self, report):
-            calls.append("auto_commit_and_notify")
+        def deploy_and_notify(self, report):
+            calls.append("deploy_and_notify")
             return state.deploy_result
 
         def __getattr__(self, name):
@@ -130,14 +130,13 @@ class TestCliRejectsNonSwarmScanBeforeScanning:
         cli.state.swarm_report = {"opportunities": [{"ticker": "NVDA"}]}   # 缺 swarm_metadata
         cli.state.deploy_result = {
             "deploy_env": "none",
-            "git_push": {"success": False, "skipped": "non_production", "remote": None},
-            "uncommitted_report_artifacts": ["alpha-hive-daily-2026-09-14.json"],
+            "gh_pages": {"success": False, "skipped": "non_production"},
         }
         cli.run("--swarm", "--force", "--no-llm", "--tickers", "NVDA")
         out = capsys.readouterr().out
-        assert cli.calls == ["__init__", "run_swarm_scan", "save_report", "auto_commit_and_notify"]
+        assert cli.calls == ["__init__", "run_swarm_scan", "save_report", "deploy_and_notify"]
         assert "生产环境" not in out, out
-        assert "未推送" in out and "alpha-hive-daily-2026-09-14.json" in out, out
+        assert "未部署" in out and "非生产报告" in out, out
 
 
 # ═════════════════════════════ 2. 不带方向的账本写入者 ═════════════════════════════

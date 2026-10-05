@@ -495,6 +495,11 @@ _OW_HEALTHY = {"window": ["2026-09-15", "2026-10-02"], "wide_fetches": 20, "serv
                "fallback": 0, "fallback_tickers": {}, "direct_requests": 0, "direct_empty": 0, "degraded": False}
 _OW_DEGRADED = dict(_OW_HEALTHY, served=0, fallback=20, direct_requests=144,
                     fallback_tickers={f"T{i:02d}": "ConnectionError: wide rejected" for i in range(20)}, degraded=True)
+#: v0.45.410：回放行情库计数（`replay_ohlc_store.ReplayOhlcStore.stats()` 的形状）
+_STORE_OK = {"fetch_day": "2026-10-02", "store_only": 0, "tail_fetches": 15, "full_fetches": 0, "settled_days_added": 15,
+             "served_from_store": 200, "served_on_fallback": 0, "revisions_new": 0, "revised_bars": 0,
+             "revised_tickers": [], "revised_recent": 0, "revised_recent_tickers": [], "revision_alarm_days": 7,
+             "quarantined": [], "invalid_files": [], "write_errors": [], "problem": False}
 _FG_WINDOW_STATES = [
     ("not_ready_healthy", {**_NR, "ohlc_window": _OW_HEALTHY}, set()),
     ("not_ready_degraded", {**_NR, "ohlc_window": _OW_DEGRADED}, {"ohlc_window_degraded"}),
@@ -506,6 +511,14 @@ _FG_WINDOW_STATES = [
      {"checkpoint", "ohlc_window_degraded"}),
     ("out_of_window_only", {**_NR, "ohlc_window": dict(_OW_HEALTHY, out_of_window=3, direct_requests=3,
                                                        degraded=True)}, {"ohlc_window_degraded"}),
+    # v0.45.410（回放行情库）：只因库的问题降级 / 近几天确认的修订 ⇒ warn；过了告警期的修订 ⇒ 只陈述
+    ("store_problem_only", {**_NR, "ohlc_window": dict(_OW_HEALTHY, degraded=True, store=dict(
+        _STORE_OK, quarantined=["AAA.json.invalid-2026-10-01-0"], problem=True))}, {"ohlc_window_degraded"}),
+    ("revised_recent", {**_NR, "ohlc_window": dict(_OW_HEALTHY, store=dict(
+        _STORE_OK, revised_bars=6, revised_tickers=["NVDA"], revised_recent=6, revised_recent_tickers=["NVDA"]))},
+     {"ohlc_store_revised"}),
+    ("revised_long_ago", {**_NR, "ohlc_window": dict(_OW_HEALTHY, store=dict(
+        _STORE_OK, revised_bars=6, revised_tickers=["NVDA"]))}, set()),
 ]
 
 

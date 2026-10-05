@@ -895,20 +895,14 @@ run_step --timeout $STEP2_TIMEOUT "$PROJECT_DIR/alpha_hive_daily_report.py" --sw
 STEP2_RC=$?
 STEP2_END=$(date +%s)
 STEP2_DURATION=$((STEP2_END - STEP2_START))
-if [ $STEP2_RC -eq 0 ]; then
-    log "INFO" "✅ Step 2 成功（耗时 ${STEP2_DURATION}s）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step2_hive_analysis\": {\"status\": \"success\", \"duration_seconds\": $STEP2_DURATION}}")
-elif [ $STEP2_RC -eq 124 ]; then
-    log "ERROR" "⏰ Step 2 超时（>${STEP2_TIMEOUT}s），蜂群分析被终止！"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step2_hive_analysis\": {\"status\": \"timeout\", \"duration_seconds\": $STEP2_DURATION}}")
-    set_status partial
-elif [ $STEP2_RC -eq 2 ]; then
-    log "WARN" "⏭️  Step 2 跳过（脚本不存在）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step2_hive_analysis\": {\"status\": \"skipped\"}}")
-    set_status partial
-else
-    log "WARN" "⚠️ Step 2 失败，但继续进行（耗时 ${STEP2_DURATION}s）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step2_hive_analysis\": {\"status\": \"failed\", \"duration_seconds\": $STEP2_DURATION}}")
+# B：日志与 step2_hive_analysis 片段由 orchestrator_steps.py 判（rc=1 且主流程确实跑完 ⇒ success_with_warning）。
+# OVERALL_STATUS 仍只看退出码，与 B 之前逐支相同（124 / 2 / 其余含 1 ⇒ partial）；解释器的 status/level 不参与。
+# --data-dir 必须是 DATA_DIR（日报 / .swarm_results / logs/scan_timing.json 都在那），不是 REPORTDIR。
+_apply_step_interp 2 step2_hive_analysis "${STEP2_RC}" "${STEP2_DURATION}" "" \
+    --run-start "${STEP2_START}" --timeout-seconds "${STEP2_TIMEOUT}" --data-dir "${DATA_DIR}"
+STEP2_STATUS="${_SI_STATUS:-}"   # 立刻取：下一次 _apply_step_interp（Step 4）会覆盖 _SI_STATUS
+                                 # `:-`：B1（helper + _SI_STATUS）被单独撤掉时这里不因 set -u 中断扫描（回滚顺序仍是先撤 B2）
+if [ "${STEP2_RC}" -ne 0 ]; then
     set_status partial
 fi
 # ── v0.45.118 预算余量可见化（只报数，不判定；判定闸是下一版的事）──
@@ -1084,6 +1078,10 @@ fi
 # 与原 rc=2 分支逐字相同（Step 6 告警照旧读它们）；ERROR 日志只去掉了
 # 「xxx.py 不存在」那半句，其余同原文。
 #
+# B2（v0.45.386）：Step 4 改经 _apply_step_interp（判据在 orchestrator_steps.py，允许集合只放行
+#   B 之前的取值 + rc=1 跑完那一处）；Step 5 降级支读 Step 2 调用点存下的 STEP2_STATUS：
+#   success_with_warning（rc=1 但主流程跑完、部署已做）与 rc=0 同一支，不再报「本轮网站不会更新」。
+#
 # v0.45.351：Step 5 改判 gh-pages 部署的**实际结局**，不再只看 Step 2 退出码。
 #   旧逻辑 RC=0 ⇒ skipped_builtin，从不核网站是否真更新了：推送失败（2026-09-25 断网，
 #   还被重试捷径判成「部署成功」）在 RC=0 的日子里恒为零告警。RC≠0 ⇒「本轮网站不会更新」
@@ -1108,7 +1106,7 @@ _step5_gh_pages_verdict() {
             set_status partial
         fi
         STEPS_RESULT=$(echo "$STEPS_RESULT" | jq --argjson s "$_json" '. + {"step5_github_deploy": $s}')
-    elif [ "${STEP2_RC}" -eq 0 ]; then
+    elif [ "${STEP2_RC}" -eq 0 ] || [ "${STEP2_STATUS:-}" = "success_with_warning" ]; then
         log "WARN" "⚠️ Step 5：gh-pages 部署结局不可得（report_deployer.py --gh-pages-step-status 无有效输出，生产代码可能早于 v0.45.351）——记 skipped_builtin，**未核实**网站是否更新"
         STEPS_RESULT=$(echo "$STEPS_RESULT" | jq '. + {"step5_github_deploy": {"status": "skipped_builtin", "unverified": true}}')
     else
@@ -1119,14 +1117,9 @@ _step5_gh_pages_verdict() {
 }
 log "INFO" ""
 log "INFO" "【Step 4/5】仪表板更新 + GitHub 部署（由 Step 2 pipeline 完成）- 确认"
-if [ $STEP2_RC -eq 0 ]; then
-    log "INFO" "⏭️  Step 4 跳过（仪表板已由 Step 2 pipeline 生成）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step4_dashboard\": {\"status\": \"skipped_builtin\"}}")
-else
-    log "ERROR" "🚨 Step 4 未生成仪表板！仪表板由 Step 2 pipeline 生成，"
-    log "ERROR" "   而 Step 2 没跑完（RC=${STEP2_RC}）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step4_dashboard\": {\"status\": \"failed\", \"reason\": \"step2_did_not_complete\", \"step2_rc\": $STEP2_RC}}")
-fi
+# B：判据在 orchestrator_steps.py（与 Step 2 共用 _step2_outcome）；rc=1 且主流程跑完 ⇒ skipped_builtin（附 step2_status）。
+# 不调 set_status（B 之前这一段也不调）。
+_apply_step_interp 4 step4_dashboard "${STEP2_RC}" "" "" --run-start "${STEP2_START}" --data-dir "${DATA_DIR}"
 _step5_gh_pages_verdict
 
 # ================================================================
