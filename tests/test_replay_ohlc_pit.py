@@ -149,6 +149,22 @@ class TestSplitAtStoreLevel:
         assert before == _slice(m, "2026-09-01", "2026-09-24")
         assert after == _slice(post, "2026-09-01", "2026-09-24")
 
+    def test_a_gap_day_whose_two_post_split_looks_disagree_waits_for_confirmation(self, tmp_path):
+        """缺口日 09-23：嫌疑当天那次整段下载里它的复权值是个怪数，确认当天才是正常复权值 ⇒ 两次「改了之后」的观察不一致：
+        按旧值落定、不记版本、记嫌疑（seen_on = 确认当天），下一次再确认；另一个缺口日 09-22 两次一致 ⇒ 当场有版本。
+        变异「缺口日新版本不要求两次观察」⇒ 09-23 直接拿到版本 ⇒ 红（变异 P18 存活后补）。"""
+        m, post = self._before(tmp_path)
+        wobbly = {**post, "2026-09-23": _bar(999.0)}
+        _fetch_like_window(_store(tmp_path, self.X), _upto(wobbly, self.X))
+        _fetch_like_window(_store(tmp_path, "2026-09-25"), _upto(post, "2026-09-25"))
+        f = _file(tmp_path)
+        assert f["settled"]["bars"]["2026-09-23"] == m["2026-09-23"], "基础版本 = 嫌疑出现前那次下载的旧值"
+        assert "2026-09-23" not in f["revisions"] and f["revision_suspects"]["2026-09-23"]["seen_on"] == "2026-09-25"
+        assert f["revisions"]["2026-09-22"][0]["first_seen"] == self.X
+        s = _store(tmp_path, "2026-09-26")
+        _fetch_like_window(s, _upto(post, "2026-09-26"))
+        assert _file(tmp_path)["revisions"]["2026-09-23"][0]["first_seen"] == "2026-09-25"
+
     def test_a_one_off_glitch_leaves_no_version_and_no_pre_suspect(self, tmp_path):
         """09-24 那次响应漏了 09-15，09-25 恢复 ⇒ 嫌疑撤销、pre_suspect 丢掉、缺口日照常落定、没有任何版本。
         变异「嫌疑撤销后不丢 pre_suspect」⇒ 红（之后的重放日还会被它改写）。"""
