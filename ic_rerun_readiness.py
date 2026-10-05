@@ -1990,9 +1990,9 @@ def _forward_test_attention(key: str, d: Dict) -> List[Dict]:
         tick = "、".join((rst.get("revised_recent_tickers") or [])[:5])
         out.append(item(f"{iid}.ohlc_store_revised", "warn",
                         f"{name}：回放行情库近 {rst.get('revision_alarm_days')} 天确认 {rst['revised_recent']} 根已落定日线被 "
-                        f"Yahoo 改了（{tick}）——多半是拆股回溯复权。库一律沿用首次落定的值；但拆股时还没落定的最近几天会按"
-                        "复权价落定、在落定段末端留一个假跳空，跨这几天持仓的 A / B 可能凭空止损 / 止盈。需人看：这几个标的近期"
-                        "有没有拆股、那几天 A 的出场与生产对不对得上（自证掉没掉）"))
+                        f"Yahoo 改了（{tick}）——多半是拆股回溯复权。回放按时点取版本（生效日之前用旧值、之后用新值），A / B "
+                        "如实复现生产当时看到的价格；而生产纸面组合遇拆股会把在场仓位记成假止损 / 假止盈、出场日倒填（生产的 bug，"
+                        "另立任务修）。需人看：这几个标的近期有没有拆股、生产账本里那几天有没有凭空的出场"))
     return out
 
 
