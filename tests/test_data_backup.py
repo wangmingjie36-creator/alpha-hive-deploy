@@ -31,11 +31,13 @@ from data_backup.sqlite_readonly import HotJournalError, db_open_uri
 
 @pytest.fixture
 def _sandbox_home(tmp_path_factory, monkeypatch):
-    """`run_backup.main()` 的 `--backup-dir/--status-file/--history-file` 默认值都是
+    """`run_backup.main()` 的 `--status-file/--history-file` 默认值是
     `Path.home() / "alpha-hive-data" / ...`——真实数据根。`_isolate_env` 只隔离
     `ALPHA_HIVE_*`、不隔离 `$HOME`，所以没显式传路径的测试会把伪造记录写进真实
     `backup_status_history.jsonl`（v0.45.284 给 `run()` 加追加历史后，
     `TestRunBackupStageReporting` 的 7 个老测试没跟着传 `--history-file`）。
+    `--backup-dir` 自 v0.45.414 起不跟 `$HOME`、跟 `PATHS.data_backup_repo`（`ALPHA_HIVE_HOME`），
+    由 `_isolate_env` 隔离——见 `TestBackupRepoFollowsPaths`。
     """
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
@@ -1139,6 +1141,144 @@ class TestHomeSandboxHasTeeth:
         rows = [json.loads(x) for x in (logs / "backup_status_history.jsonl").read_text().splitlines()]
         assert [(r["stage"], r["ok"]) for r in rows] == [("export", False)]
         assert (logs / "backup_status.json").is_file()
+
+
+def _forbid_side_effects(monkeypatch):
+    """守卫若失效，`run()` 会往下走到 git init / 导出——这里一律变成可见的失败而不是真去做，
+    `ALPHA_HIVE_HOME` 未设的用例里那等于在代码检出里动手。返回调用记录供断言「一次都没碰」。"""
+    calls = []
+
+    def no_git(args, cwd, timeout=None):
+        calls.append(("git", args, str(cwd)))
+        raise AssertionError(f"不该跑 git：{args} @ {cwd}")
+
+    def no_export(*a, **k):
+        calls.append(("export", a))
+        raise AssertionError("不该导出")
+
+    monkeypatch.setattr(run_backup, "_run_git", no_git)
+    monkeypatch.setattr(export_mod, "run_export", no_export)
+    return calls
+
+
+class TestBackupRepoFollowsPaths:
+    """v0.45.414：备份仓缺省位置的唯一真相是 `PATHS.data_backup_repo`，调用时求值。
+
+    此前 `run_backup.main` / `export.main` 缺省值与编排器 Step 14 各写死一份
+    `~/alpha-hive-data/_git_backup`。生产里 `ALPHA_HIVE_HOME=~/alpha-hive-data` ⇒ 新旧同值；
+    `ALPHA_HIVE_HOME` 未设时新缺省落进代码检出 ⇒ 由「备份仓不许在代码仓库里」拦下。
+    """
+
+    def _capture_run(self, monkeypatch):
+        seen = []
+
+        def spy(src, backup_dir, *a, **k):
+            seen.append(Path(backup_dir))
+            return {"ok": True, "stage": "done"}
+
+        monkeypatch.setattr(run_backup, "run", spy)
+        return seen
+
+    def test_run_backup_default_follows_alpha_hive_home_at_call_time(self, tmp_path, monkeypatch, _sandbox_home):
+        seen = self._capture_run(monkeypatch)
+        src = tmp_path / "src"
+        src.mkdir()
+        for home in (tmp_path / "data_a", tmp_path / "data_b"):   # 两次不同 env ⇒ 两个值：没被冻住
+            monkeypatch.setenv("ALPHA_HIVE_HOME", str(home))
+            assert run_backup.main(["--src", str(src)]) == 0
+        assert seen == [tmp_path / "data_a" / "_git_backup", tmp_path / "data_b" / "_git_backup"]
+        assert not any(p.is_relative_to(_sandbox_home) for p in seen), "缺省值还在跟 $HOME 走"
+
+    def test_explicit_backup_dir_still_wins(self, tmp_path, monkeypatch):
+        """合入后首个扫描日跑的是旧编排器（仍传 --backup-dir）+ 新 Python——必须照旧用传进来的。"""
+        seen = self._capture_run(monkeypatch)
+        assert run_backup.main(["--src", str(tmp_path), "--backup-dir", str(tmp_path / "explicit")]) == 0
+        assert seen == [tmp_path / "explicit"]
+
+    def test_explicit_empty_path_is_not_swapped_for_default(self, tmp_path, monkeypatch):
+        """二次检查补：用真值判断选缺省，会把显式空串（调用方变量为空）悄悄换成缺省值——
+        调用方的 bug 被改写成「没发生」。显式值一律原样用，与改动前同（`Path("")` 即 cwd，守卫照常判）。"""
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(tmp_path / "data"))
+        monkeypatch.chdir(tmp_path)   # 空串 = cwd：钉在 tmp，不让判定随起跑目录变
+        seen = self._capture_run(monkeypatch)
+        assert run_backup.main(["--src", str(tmp_path), "--backup-dir", ""]) == 0
+        exported = []
+        monkeypatch.setattr(export_mod, "run_export", lambda src, out: exported.append(Path(out)) or {"duration_seconds": 0})
+        monkeypatch.setattr(export_mod, "write_manifest_and_sums", lambda out, m: None)
+        assert export_mod.main(["--src", str(tmp_path), "--out", ""]) == 0
+        assert seen == exported == [Path("")]
+
+    def test_export_main_default_follows_alpha_hive_home(self, tmp_path, monkeypatch):
+        seen = []
+        monkeypatch.setattr(export_mod, "run_export", lambda src, out: seen.append(Path(out)) or {"duration_seconds": 0})
+        monkeypatch.setattr(export_mod, "write_manifest_and_sums", lambda out, m: None)
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(tmp_path / "data"))
+        assert export_mod.main(["--src", str(tmp_path)]) == 0
+        assert seen == [tmp_path / "data" / "_git_backup"]
+
+    @pytest.mark.parametrize("rel", ["_git_backup", "."])
+    def test_run_refuses_backup_repo_inside_code_repo(self, tmp_path, monkeypatch, rel):
+        code = tmp_path / "code"
+        code.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(code))
+        backup_dir = (code / rel)
+        backup_dir.mkdir(exist_ok=True)
+        calls = _forbid_side_effects(monkeypatch)
+        status = run_backup.run(tmp_path / "src", backup_dir, status_file=tmp_path / "s.json",
+                                history_file=tmp_path / "h.jsonl")
+        assert (status["stage"], status["ok"], status.get("refused")) == ("init", False, "inside_code_repo")
+        assert calls == []
+        assert not (backup_dir / ".git").exists()
+        assert json.loads((tmp_path / "s.json").read_text())["refused"] == "inside_code_repo"
+
+    def test_sibling_of_code_repo_is_not_refused(self, tmp_path, monkeypatch):
+        """前缀相同不算「在里面」：`/x/code_backup` 不在 `/x/code` 里（字符串前缀比较会误伤）。"""
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(tmp_path / "code"))
+        assert export_mod.backup_repo_inside_code_repo(tmp_path / "code_backup") is None
+        assert export_mod.backup_repo_inside_code_repo(tmp_path / "code" / "x") == (tmp_path / "code").resolve()
+
+    @pytest.mark.parametrize("alias", ["case", "firmlink"])
+    def test_same_directory_spelled_differently_is_refused(self, tmp_path, monkeypatch, alias):
+        """二次检查补：`resolve()` 不折叠大小写（APFS）与固件链接（`/System/Volumes/Data/…`），
+        字符串判定会放行同一目录的另一种写法。按 inode 判。不 skip：别名在这台机器上不存在
+        （大小写敏感的 FS / 非 macOS）时它就是另一个目录，断言「不拒绝」同样是真断言。"""
+        code = (tmp_path / "code")
+        code.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(code))
+        spelled = Path(str(code).swapcase()) if alias == "case" else Path("/System/Volumes/Data" + str(code.resolve()))
+        same_dir = spelled.exists() and os.path.samefile(spelled, code)
+        got = export_mod.backup_repo_inside_code_repo(spelled / "_git_backup")
+        assert got == (code.resolve() if same_dir else None), (spelled, same_dir, got)
+
+    def test_unset_alpha_hive_home_lands_in_checkout_and_is_refused_end_to_end(self, tmp_path, monkeypatch):
+        """用户交互 shell 没设 `ALPHA_HIVE_HOME`（2026-10-03 实测）——手动跑不传 --backup-dir 时，
+        新缺省解析到 `<代码检出>/_git_backup`。这条钉住：CLI 全链路在那里拒绝，rc=2、stage=init。"""
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        monkeypatch.delenv("ALPHA_HIVE_GIT_REPO", raising=False)
+        default = export_mod.default_backup_repo()
+        assert export_mod.backup_repo_inside_code_repo(default) is not None, default
+        existed_before = default.exists()   # 比前后，不断言「不存在」：检出里若本有残留，不该算守卫的账
+        calls = _forbid_side_effects(monkeypatch)
+        status_file = tmp_path / "s.json"
+        rc = run_backup.main(["--src", str(tmp_path), "--status-file", str(status_file),
+                              "--history-file", str(tmp_path / "h.jsonl")])
+        status = json.loads(status_file.read_text())
+        assert (rc, status["stage"], status.get("refused")) == (2, "init", "inside_code_repo"), status
+        assert calls == []
+        assert default.exists() == existed_before, f"代码检出里被造出了 {default}"
+
+    def test_export_main_refuses_inside_code_repo(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(tmp_path / "code"))
+        calls = _forbid_side_effects(monkeypatch)
+        assert export_mod.main(["--src", str(tmp_path), "--out", str(tmp_path / "code" / "_git_backup")]) == 2
+        assert calls == []
+        assert not (tmp_path / "code").exists()
+
+    def test_orchestrator_does_not_spell_the_backup_repo(self):
+        """位置只在 PATHS：编排器的可执行行里不许再出现 `_git_backup` / `--backup-dir`（注释不算）。"""
+        live = [ln for ln in repo_orchestrator_text().splitlines() if not ln.lstrip().startswith("#")]
+        assert [ln for ln in live if "_git_backup" in ln or "--backup-dir" in ln] == []
+        assert any("run_data_backup.py" in ln for ln in live), "Step 14 的调用不见了——上面那条会空转变绿"
 
 
 from tests._orchestrator import extract_function, repo_orchestrator_text  # 仓库里那份（v0.45.353）

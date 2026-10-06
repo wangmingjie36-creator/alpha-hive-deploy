@@ -10,6 +10,11 @@ v0.45.264 起已接入生产编排器 `alpha-hive-orchestrator.sh` Step 14
   下走——`git diff --cached --quiet` 在非 git 仓库里返回 128（不是"无变化"的
   0），旧代码会把 128 误判成"有变化"进而尝试 commit，commit 失败后把"仓库
   根本没初始化成功"误标成 `stage: "commit"`（v0.45.278 修）。
+- **备份仓落在代码仓库里**（v0.45.414）→ 同样 `stage: "init"`、退出码 2，另记
+  `refused: "inside_code_repo"`；什么都不建、不导出。`--backup-dir` 缺省改走
+  `PATHS.data_backup_repo` 后，`ALPHA_HIVE_HOME` 未设（如交互 shell 手动跑）就会解析到
+  `<代码检出>/_git_backup`——此前缺省写死 `~/alpha-hive-data/_git_backup`，与 `ALPHA_HIVE_HOME`
+  无关，这个差别只在生产 env 下不存在。
 - 导出失败（如并发写检测命中、源库不存在）→ 未提交，`status.json` 记
   `stage: "export"`, `ok: false`, 退出码 2。
 - 密钥扫描命中 → 不提交，`status.json` 记 `stage: "secret_scan"`, `ok: false`，
@@ -120,6 +125,20 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
     t0 = dt.datetime.now()
     status: dict = {"date": t0.strftime("%Y-%m-%d"), "started_at": t0.isoformat(timespec="seconds"),
                      "src": str(src), "backup_dir": str(backup_dir), "remote": remote, "branch": branch}
+
+    # v0.45.414：备份仓不许落在代码仓库里（缺省值改走 PATHS 后，ALPHA_HIVE_HOME 未设就会解析到
+    # 代码检出）。在 init 之前拦，记 stage="init"——编排器 Step 14 现成的分支报「未导出未提交」，正是实情。
+    # 判定本身失败（hive_logger 不可 import）同样中止：判不了就不建库。
+    try:
+        code_repo = export_mod.backup_repo_inside_code_repo(backup_dir)
+    except Exception as e:  # noqa: BLE001
+        status.update(stage="init", ok=False, error=f"无法核对备份仓是否在代码仓库里：{type(e).__name__}: {e}")
+        return _finish(status_file, history_file, status)
+    if code_repo is not None:
+        status.update(stage="init", ok=False, refused="inside_code_repo",
+                      error=f"备份仓 {backup_dir} 在代码仓库 {code_repo} 里，拒绝建库/导出"
+                            "（未传 --backup-dir 时多半是没设 ALPHA_HIVE_HOME）")
+        return _finish(status_file, history_file, status)
 
     if not (backup_dir / ".git").is_dir():
         try:
@@ -285,7 +304,9 @@ def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(description="阶段 3.5 原型：导出→扫描→提交→推送")
     ap.add_argument("--src", default="/Users/igg/Desktop/Alpha Hive")
-    ap.add_argument("--backup-dir", default=str(Path.home() / "alpha-hive-data" / "_git_backup"))
+    # 缺省 None ⇒ 在下方 try 里解析成 PATHS.data_backup_repo（v0.45.414）。放进 try：解析失败落 crash/rc=3，
+    # 不以 Python 默认的 1 退出（1 专属 secret_scan，见下）。status/history 两个仍跟 $HOME（沙箱夹具靠它）。
+    ap.add_argument("--backup-dir", default=None, help="缺省 PATHS.data_backup_repo（调用时求值）")
     ap.add_argument("--remote", default="origin")
     ap.add_argument("--branch", default="main")
     ap.add_argument("--status-file", default=str(Path.home() / "alpha-hive-data" / "logs" / "backup_status.json"))
@@ -295,7 +316,9 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     try:
-        status = run(Path(args.src), Path(args.backup_dir), args.remote, args.branch,
+        # `is None` 不是真值判断：显式 `--backup-dir ""`（多半是调用方变量为空）不许被悄悄换成缺省值。
+        backup_dir = export_mod.default_backup_repo() if args.backup_dir is None else Path(args.backup_dir)
+        status = run(Path(args.src), backup_dir, args.remote, args.branch,
                      Path(args.status_file), args.message, Path(args.history_file))
         print(json.dumps(status, ensure_ascii=False, indent=2))
         return 0 if status.get("ok") else (1 if status.get("stage") == "secret_scan" else 2)

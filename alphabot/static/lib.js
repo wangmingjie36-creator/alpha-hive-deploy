@@ -155,5 +155,8 @@ export function fill(el, ...kids) {
   el.replaceChildren(...kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false));
 }
 
+// 各页的「怎么读这页」入口：id 必须是 pages/help.js SECTIONS 里登记过的（tests/test_alphabot.py 核对）
+export const helpLink = (id) => h("a", { class: "help-link", href: `#/help/${id}` }, "怎么读这页 ?");
+
 // 服务端文案沿用本地 markdown 报告的 **加粗** 记号；前端是纯文本，去掉记号
 export const plain = (s) => String(s ?? "").replace(/\*\*/g, "");
