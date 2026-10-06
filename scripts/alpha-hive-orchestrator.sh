@@ -45,6 +45,8 @@ PROJECT_DIR="/Users/igg/Desktop/Alpha Hive"   # Python 源码目录（代码检�
 # export 给本脚本拉起的每个 Python 步骤——hive_logger.PATHS.home 读它；git 仓库根
 # (PATHS.git_repo_root) 不读它，仍按 __file__ 落在 PROJECT_DIR。回退 = 删掉这两行
 # 并把下面 8 处 $DATA_DIR 改回 $PROJECT_DIR（先跑 migrate_data_root.py unretire）。
+# ⚠️ v0.45.414 起 Step 14 的备份仓也跟 ALPHA_HIVE_HOME 走：回退时给 Step 14 补
+# --backup-dir "$HOME/alpha-hive-data/_git_backup"，否则备份仓解析进代码检出、被 run_backup 拒绝（init 失败）。
 DATA_DIR="/Users/igg/alpha-hive-data"
 export ALPHA_HIVE_HOME="$DATA_DIR"
 LOGDIR="/Users/igg/.claude/logs"
@@ -829,6 +831,54 @@ unset _bk_tmp _bk_rc _bk_out _bk_ok _bk_pruned _bk_kept _bk_prune_fail _bk_reaso
 # <<< DB_BACKUP_END
 
 # ================================================================
+# 数据迁移（v0.45.419，数据根迁移阶段 7「单一写入方」）
+# ================================================================
+# 生产数据的修复 = 编号、幂等的迁移脚本（data_migrations/versions/NNNN_*.py），在**代码同步之后、扫描之前**
+# 执行（本段在 production_sync 与 DB 备份之后、Step 2 之前）。运行器自己再做一次在线备份（有待办才做）、
+# 校验已应用文件未被改、逐个应用并在 $ALPHA_HIVE_HOME/migrations_state/applied.jsonl 追加记录。
+# 结局进 steps_result.data_migrations；任何非 ok ⇒ status=failed ⇒ alert_manager 既有 P1「步骤失败」。
+# 不升级 OVERALL_STATUS、不中断扫描（同 db_backup / orchestrator_deploy 先例）——但红是看得见的。
+# ⚠️ 记录文件先删后写：旧记录不能被当成本轮结果。run_step --timeout 同样要重定向到文件，不放命令替换里。
+# 守卫：tests/test_data_migrations.py（抽出本函数在 /bin/bash 下真跑）。
+_data_migrations_step() {
+    local _rec="${LOGDIR}/data_migrations.json" _rc=0 _json="" _outcome="" _status="failed" _new="" _t0 _dur=0
+    _t0=$(date +%s)
+    rm -f "${_rec}"
+    run_step --timeout 120 "${PROJECT_DIR}/run_data_migrations.py" --out "${_rec}" >> "${LOGFILE}" 2>&1
+    _rc=$?
+    _json="$(jq -c 'select(type == "object" and (.status | type) == "string")' "${_rec}" 2>/dev/null)"
+    _outcome="$(printf '%s' "${_json}" | jq -r '.status' 2>/dev/null)"
+    case "${_outcome}" in
+        ok)
+            _status="success"
+            log "INFO" "✅ 数据迁移：已应用 $(printf '%s' "${_json}" | jq -r '(.applied | length)') 个，待办 $(printf '%s' "${_json}" | jq -r '.n_pending') 个"
+            ;;
+        "")
+            if [ "${_rc}" -eq 2 ]; then
+                _status="skipped"
+                _json='{"status": "tool_missing"}'
+                log "WARN" "⏭️ 数据迁移跳过：生产 checkout 里没有 run_data_migrations.py（本版尚未进生产）"
+            else
+                _json='{"status": "no_record"}'
+                log "ERROR" "🚨 数据迁移没有结果记录（退出码 ${_rc}，124 = 超时）——迁移状态未确认；本轮扫描照常"
+            fi
+            ;;
+        *)
+            log "ERROR" "🚨 数据迁移未成功（${_outcome}）：$(printf '%s' "${_json}" | jq -r '.error // ""') —— 本轮扫描照常，见 ${_rec}"
+            ;;
+    esac
+    _dur=$(( $(date +%s) - _t0 ))
+    _new="$(printf '%s' "${STEPS_RESULT}" | jq -c --arg s "${_status}" --argjson d "${_json}" --argjson dur "${_dur}" \
+        '. + {"data_migrations": ($d + {"status": $s, "outcome": ($d.status // "unknown"), "duration_seconds": $dur})}' 2>/dev/null)"
+    if [ -n "${_new}" ]; then
+        STEPS_RESULT="${_new}"
+    else
+        log "WARN" "⚠️ 数据迁移结局没并进 steps_result（jq 合并失败）：status=${_status}"
+    fi
+}
+_data_migrations_step
+
+# ================================================================
 # Step 2: Alpha Hive 蜂群分析（执行前 Slack 确认 LLM 模式）
 # ================================================================
 log "INFO" ""
@@ -1396,9 +1446,11 @@ log "INFO" "【Step 14】数据备份上线 - 启动"
 
 BACKUP_STATUS_JSON="$HOME/alpha-hive-data/logs/backup_status.json"
 BACKUP_HISTORY_JSONL="$HOME/alpha-hive-data/logs/backup_status_history.jsonl"
+# 备份仓位置不在这里写（v0.45.414）：不传 --backup-dir ⇒ Python 取 PATHS.data_backup_repo
+# （= 上方 export 的 ALPHA_HIVE_HOME 下的 _git_backup）。此前这里写死 "$HOME/alpha-hive-data/_git_backup"，
+# 生产里与之同值。新 Python 也接受显式 --backup-dir ⇒ 合入后首轮（旧编排器 + 新 Python）照常。
 run_step --timeout 300 "$PROJECT_DIR/run_data_backup.py" \
          --src "$DATA_DIR" \
-         --backup-dir "$HOME/alpha-hive-data/_git_backup" \
          --remote origin --branch main \
          --status-file "$BACKUP_STATUS_JSON" \
          --history-file "$BACKUP_HISTORY_JSONL" >> "$LOGFILE" 2>&1
@@ -1456,6 +1508,9 @@ elif [ $STEP14_RC -eq 2 ]; then
             ;;
         push)
             log "WARN" "⚠️ Step 14：已提交但推送失败，下一轮会带着未推送的提交重试——见 $BACKUP_STATUS_JSON"
+            ;;
+        size_budget)
+            log "ERROR" "🚨 Step 14：数据已推送，但备份仓体量超出预算（或量不出来）——见 ${BACKUP_STATUS_JSON}（repo_size_mb / repo_budget_mb）"
             ;;
         stale_or_missing)
             log "WARN" "⚠️ Step 14：退出码 2，但 $BACKUP_STATUS_JSON 缺失或不是今天写的——脚本本轮可能根本没真正执行（如 run_step 判定脚本不存在），不代表已提交，不能当 push_failed 处理"

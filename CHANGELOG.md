@@ -5,6 +5,97 @@
 
 ---
 
+## [0.45.419] — 2026-10-06 — Added：阶段 7「单一写入方」——编号幂等的数据迁移运行器 + 三个回填工具缺省 dry-run 先备份 + 13 次历史手工修复补记
+
+用户 2026-10-06 同意两点：①三个默认写库的回填工具改成缺省 dry-run、真写先备份；②把盘点出的历史手工修复补记进运行记录。
+
+**根因**（2026-10-06 盘点）：生产数据的修复长期靠「临时脚本 + 手工备份 + CHANGELOG 文字」——约 13 次，几次脚本没留下、回滚 SQL 只在 CHANGELOG 里；`signal_archive --backfill` / `backfill_dir_accuracy` / `migrate_ambiguous_backfill` 缺省直接写库（前两个还不备份）；库里查不到「它被动过什么」。
+
+### Added
+- `data_migrations/`（运行器）：迁移 = `versions/NNNN_说明.py`（四位、从 0001 连续；导出 `DESCRIPTION` / 幂等的 `apply(ctx) -> {"rows_affected": int}` / `build_fixture(conn)`）。`run_pending()`：布局核对 → 读记录 → **已应用文件的 sha256 不许变**（变了或文件没了 = `tampered`，什么都不跑）→ 有待办才在线备份库（备份失败 = 什么都不跑）→ 逐个应用并追加记录；失败追加 `failed` 并**停下**（下次重试，所以才要求幂等）；记录写不进去 = `ledger_error`（迁移已跑、靠幂等兜底，但红）。`--dry-run` 不备份、不写库、不写记录。入口 `run_data_migrations.py`（`run_step` 只认脚本路径）。
+- `PATHS.migrations_state` → `<数据根>/migrations_state/applied.jsonl`（只追加；进数据备份 `STATE_DIRS`、`MOVE_DIRS`、`.gitignore`；`data_migrations` 在 `SKIP_EXACT` 记为代码）。
+- `data_migrations/history.py`：13 条历史手工修复（H001–H013）补记为 `kind="historical"`，第一次真跑时按 id 幂等写入。**如实标注**：日期 / 行数取自 CHANGELOG 文字与盘点子任务、未逐条回溯核对；只有备份文件是否还在是当场 `ls` 核过的——H001–H003 的备份只剩 `-wal`/`-shm` 孤儿、主文件已不在（不能用于恢复）。
+- 编排器：`_data_migrations_step`（`production_sync` 与 DB 备份之后、Step 2 之前），结局并进 `steps_result.data_migrations`；任何非 ok ⇒ `status=failed` ⇒ `alert_manager` 既有 P1「步骤失败」；不升级 `OVERALL_STATUS`、不中断扫描。记录文件先删后写（旧记录不当本轮结果）。部署副本下一个扫描日自动更新，新编排器再下一轮起执行。
+
+### Changed
+- `signal_archive.py --backfill`、`backfill_dir_accuracy.py`、`migrate_ambiguous_backfill.py`：缺省 **dry-run**，真写要 `--apply`（`--dry-run` 仍接受、空操作；与 `--apply` 同给 = 参数错误）；`--apply` 先 `backup_before_write`（sqlite 在线备份到 `_manual_backups/`，不被每日轮转清理；备份失败即中止、不写库），写完在 `applied.jsonl` 追加 `manual_tool` 记录。`signal_archive.backfill()` 函数本身的缺省不变（只改命令行）。
+- `backfill_dir_accuracy.py` 顺带修一个「dry-run 不是真的不写」：旧版在 `--dry-run` 判断**之前**就对真库 `ALTER TABLE`；现在 dry-run 在库的内存副本上算，真库一字节不动。
+
+### 守卫（`tests/test_data_migrations.py`，40 条）
+- 运行器：只应用一次 / 备份是迁移之前的库 / 失败停下并可重试 / 返回值契约 / 篡改与删除 / 5 种布局错误 / dry-run 零副作用 / 无备份不迁移 / 记录写失败红 / 坏记录红 / 补记历史幂等。
+- 幂等自检有牙（非幂等迁移、缺 `build_fixture` 都被抓）；真实 `versions/` 的每个迁移必须能过它。
+- 工具：缺省 dry-run 库文件 md5 不变、`--apply` 备份是写入前的库并留记录、备份失败不写库。
+- 编排器段在 `/bin/bash` 下真跑：ok / 6 种非 ok 结局 / 无记录 / 工具缺失 / 陈旧记录不被信 / 位置在 DB 备份与 Step 2 之间。
+- 变异自证（先提交后变异）：去篡改校验 / 跳过备份 / 失败不停 / dry-run 也应用 / 补记历史不幂等 / 布局断号放行 / 记录错误吞掉 / 三个工具缺省改回写库 / 编排器非 ok 记 success——各自让对应守卫变红。
+- `tests/test_paths_not_frozen_at_import.py`：`VERSIONS_DIR` 登记为代码锚点（两侧白名单）。
+
+### 验证
+- 真数据根上 `run_data_migrations.py --dry-run`：ok、零待办、**不创建** `migrations_state/`。首次真跑（补记 13 条历史）在下一个扫描日的编排器里发生。
+
+### 未做
+- 没有写任何真迁移（`versions/` 为空）——运行器此刻只有合成迁移的证明。第一个真迁移出现时必须带 `build_fixture`，否则 `test_every_real_migration_is_well_formed_and_idempotent` 红。
+- 现网 `signal_archive --backfill --dry-run` 的 `changed: 224` 仍待查（v0.45.417 记录）。
+
+
+## [0.45.418] — 2026-10-06 — Fixed：`orchestrator_lint.py` 补命令行入口——此前直接跑它是恒 exit 0 的空检查；现在命中 exit 1、文件读不了 exit 2
+
+原占 0.45.417（`74e2b1d6`，未及时推送，被 `fe7dfbb6` 先推占用），改号 418（`8ab354ae`）。
+
+### 现象
+
+`orchestrator_lint.py` 只是库模块（`find_unbraced()`，部署关卡与 `tests/test_orchestrator_braced_vars.py` 在用），**没有 `__main__` 入口**。
+`/usr/local/bin/python3 orchestrator_lint.py 某脚本.sh` 只把模块 import 一遍就退出，**对任何内容都 rc 0**。
+2026-10-05 实测：含 `git commit -q -m "chore: 占号 $NUM（数据"` 的文件 rc 0，而 `find_unbraced()` 对同一文本 1 处命中。
+v0.45.414 那次 session 据这个空操作报过「orchestrator_lint.py 通过」——结论不携带任何信息。
+（同形状：CLAUDE.md「这个失败，下游怎么知道？」——一个不会失败的检查器，比没有更糟：它产出「通过」。）
+
+### Fixed
+
+- `orchestrator_lint.py`：新增 `main()` + `if __name__ == "__main__"`。用法 `orchestrator_lint.py [FILE ...]`，
+  缺省扫仓库 `scripts/alpha-hive-orchestrator.sh`（**按 `__file__` 锚定**——编排器是代码不是数据；放在函数里、不做模块级常量，
+  不进 `TestFileDerivedSpeciesDoesNotSpread` 的登记面）。
+  - 命中逐条进 stdout：`路径:行号: $VAR 紧跟非 ASCII（改成 ${VAR}）：<该行>`（措辞与部署关卡一致）。
+  - 每个文件「扫了 N 行，M 处命中」进 stderr——扫了空文件 / 错文件时，「0 处命中」旁边的行数会露馅。
+  - 退出码：**0** 无命中 / **1** 有命中 / **2** 有文件读不了（不存在、是目录、无权限、非 UTF-8），**从不把读不了落成 0**；
+    2 优先于 1（同 grep：有文件没扫到，就说不出「命中只有这些」），但其他文件的命中照样打印。argparse 用法错误本身也是 2。
+- 部署关卡 `deploy_orchestrator.gate_failures` 与既有测试继续直接调 `find_unbraced()`，未改。
+
+### Added
+
+- `tests/test_orchestrator_braced_vars.py::TestCli`（8 条，子进程真跑，合成文件，任何机器都跑）：
+  正对照（`echo "$NUM（x"` ⇒ rc 1 且命中行逐字打印）/ 干净文件 rc 0 且报行数 / 读不了三种（不存在、目录、非 UTF-8）⇒ rc 2 /
+  读不了优先于命中且命中仍打印（**两种文件顺序都跑**）/ 缺省目标在别的 cwd 下仍解析到仓库编排器。
+
+### 验证
+
+- 变异 8 个，全部真跑（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、`--maxfail=1000`、每轮 passed+failed=35 核对；还原后 sha256 比对 + 复跑全绿）：
+  M0 **HEAD 原文件（无 CLI）** ⇒ 8 红（正对照在内）；M1 删 `__main__` 块 ⇒ 8 红；M2 丢弃退出码 ⇒ 6 红；M3 读不了不置 2 ⇒ 5 红；
+  M4 后来的命中把 2 覆盖成 1 ⇒ 1 红；M5 缺省跟 cwd 走 ⇒ 1 红；M6 不打印命中 ⇒ 3 红；M7 有命中仍 rc 0 ⇒ 1 红。
+  ⚠️ M4 **首轮存活**：读不了优先级那条只按「先命中、后缺失」一种顺序跑，覆盖写法恒绿；改成两种顺序参数化后才红——举出变异还得真跑。
+- `tests/test_orchestrator_braced_vars.py` + `test_deploy_orchestrator.py` + `test_paths_not_frozen_at_import.py` + `test_orchestrator_deployed_matches_repo.py`：171 passed；`ruff check .` 全过。
+- 全套：（换基到 `fe7dfbb6` 之后、改号之前）`1 failed, 8156 passed, 82 deselected, 2 xfailed`；唯一的红是按设计恒红的 `TestCoverageHorizon`（v0.45.404）。
+  第一次全套（10-05 23:22–23:37）另有 1 个 ERROR：conftest 的 session 级真实数据根守卫在最后一条测试的 teardown 报 `~/alpha-hive-data` 新增 1 / 改动 70 个文件——**是生产编排器那轮扫描在写**，不是测试：扫描进程（主 checkout，PID 54509）23:21:31 起、checkpoint 文件名里的毫秒戳解出 23:21:35.779，改动的全是当天新闻 / 期权 / VIX 缓存；扫描 00:00:06 结束后重跑全套，守卫不再报错。
+- 手工（换基后最终树）：任务里那条复现 `git commit -q -m "chore: 占号 $NUM（数据"` ⇒ rc 1、命中逐字打印；缺省目标（仓库编排器）「扫了 1565 行，0 处命中」rc 0。
+
+## [0.45.417] — 2026-10-06 — Changed：异地备份纳入 `.swarm_results_*.json`；排除理由必须分类（`rebuildable:` / `derived:` / `accepted-loss:<日期 谁定>`）；备份仓 600 MB 预算闸
+
+用户 2026-10-05 的决定：**只纳入 `.swarm_results`**（原样、不改格式、不去重），备份仓体量预算 600 MB，`analysis-*-ml-*.json` 明确记为已接受的损失。
+
+### Changed
+- `data_backup/export.py`：`ROOT_FILE_GLOBS` 加 `.swarm_results_*.json`（逐蜂原始证据，不可重取，`signal_archive.backfill` 与重放实验读它；118 个文件 ≈ 87.9 MB 原始 / ≈19 MB 压缩，约 +0.1 MB/天）。`EXCLUDED_FROM_THIS_PASS` 去掉它；`analysis-*-ml-*.json` 的理由由「用户未定」改写为 `accepted-loss:2026-10-05 用户定`，并写明代价与重叠情况（312/1019 个文件的 `swarm_results` 键与 `.swarm_results` 条目逐字相同，其余 707 个不同、原因未核实）。其余理由补上 `rebuildable:` / `derived:` 前缀；`logs` 记为 `accepted-loss:2026-10-06 沿用 v0.45.342 的排除决定、用户未单独审议`（如实写，不冒称用户定过）。
+- `data_backup/run_backup.py`：推送成功后量备份仓体量（`git count-objects -v` 的 松散 + 包 + 垃圾；本仓从未 gc，只读 size-pack 会把 106 MB 报成 0），写入 `repo_size_mb` / `repo_budget_mb` / `pushed`；超 `BACKUP_REPO_BUDGET_MB = 600` **或量不出来**都记 `stage="size_budget", ok=False`（数据已推送，红的是「该停下来想想了」，不是丢备份）。
+- `scripts/alpha-hive-orchestrator.sh`：Step 14 的 stage 分发加 `size_budget` 分支（部署副本下一个扫描日自动更新；此前走通用「未识别」分支，同样可见）。
+
+### 守卫
+- `tests/test_data_backup.py::TestExportScopeCoversMoveRules`：排除理由必须以分类前缀开头、`accepted-loss` 必须带日期与决定人、含「未定」即红（连同一条正对照证明判据抓得住旧写法）；`.swarm_results` 真被导出、`analysis-*` 真没被导出。
+- `TestBackupRepoSizeBudget`（6 条）：松散对象计入体量、预算内绿并报尺寸、超预算红且 `pushed`、量不出来红而非 0、推送失败不进预算闸。
+- 变异自证（先提交后变异，逐个 `git checkout` 还原）：去掉 swarm glob / analysis 理由改回「用户未定」/ 只读 size-pack / 预算闸恒不红 / 量不出来当 0 / 编排器去掉 `size_budget` 分支——各自让对应守卫变红。
+
+### 验证
+- 恢复演练（真数据）：导出 118 个 `.swarm_results` → `restore_state` 还原到临时根 → 逐文件 sha256 与现网一致（0 不符）；`signal_archive.backfill(dry_run=True)` 在还原根上读到 118 文件、117334 行（空库全为 new），与现网库的 new+changed+same（30+224+117080）一致、71 个信号一致。
+- 附带观察（**待验证**，非本版引入）：现网 dry-run 报 `changed: 224`，即存档库与按当前抽取器重放的值有 224 行不同，来源未查。
+
+
 ## [0.45.416] — 2026-10-05 — 占位（进行中：纸面组合拆股修正——持仓跨拆股除权日时按比例调整 shares/entry/SL/TP，防假 SL/TP 与按调整后价格估值；时点安全）
 
 ## [0.45.415] — 2026-10-05 — Changed（事后修订）：F&G 前瞻检验回放行情库改为**时点数据**——拆股 / 数据更正前后的重放日各用当时 Yahoo 给的价格，A 逐笔复现生产
@@ -96,7 +187,62 @@
 - 回滚到 0.45.410：它只认 schema 1，会把 schema 2 文件全部改名为 `.invalid-…`（不删、进度行一直报）。重新上 415 时删掉 410 重建的
   同名文件、把 `.invalid-…` 改回原名即可恢复版本历史（二次检查 A 小项 / B-F6）。
 
-## [0.45.414] — 2026-10-05 — 占位（进行中：数据备份仓位置改走 `PATHS.data_backup_repo`——run_backup / export 缺省调用时求值、编排器 Step 14 不再写死 `_git_backup`；原占 403、411、413 均未及时推送被占用，改号）
+## [0.45.414] — 2026-10-05 — Changed：数据备份仓位置收成一处——`run_backup` / `export` 缺省值改走 `PATHS.data_backup_repo`（调用时求值），编排器 Step 14 不再传 `--backup-dir`；备份仓落在代码仓库里一律拒绝
+
+用的是 v0.45.408 引入的 `PATHS.data_backup_repo`（`home / "_git_backup"`，只读不建目录）；该属性文档串里「编排器与 `run_backup.py` / `export.py` 的缺省值仍写死……统一另立任务」一句即本条，已改写。
+（本条原占 0.45.403 → 0.45.411 → 0.45.413，三次占号都没赶在别人之前上 main（403 GitHubTool 退役、411 Alpha Bot 帮助页、413 GitHubTool 白名单）⇒ 改号 414；414 最终由「在此刻的 main 上重建并立即推送」的脚本占下。）
+
+此前同一个位置写死三份：编排器 Step 14 `--backup-dir "$HOME/alpha-hive-data/_git_backup"`、`run_backup.main` 的 `--backup-dir` 缺省、`export.main` 的 `--out` 缺省，
+都是 `Path.home() / "alpha-hive-data" / "_git_backup"`。成因是历史性的：阶段 3（备份）早于阶段 5（全局迁移），那时 `PATHS.home` 还兜底到代码仓库，备份子系统只能自己指向新数据根
+（`backup_continuity.py` 的注释原文记着这条理由）。阶段 5 后 `ALPHA_HIVE_HOME` 已由编排器与 launchd plist 导出，理由不在了。
+
+**「谁依赖 `Path.home()/alpha-hive-data` 与 `PATHS.home` 的差别」逐个核过**：
+- 编排器：顶部 `export ALPHA_HIVE_HOME="$DATA_DIR"`（`/Users/igg/alpha-hive-data`）；plist `EnvironmentVariables` 同值（10-03 只读核对）⇒ 生产里新旧**同值**。
+- 测试：`_isolate_env` 把 `ALPHA_HIVE_HOME` 指 tmp、`_sandbox_home` 把 `HOME` 指 tmp；原有测试全部显式传 `--backup-dir`，无人吃缺省值。
+- `~/.claude/scripts`（除部署副本与 `.bak`）、`scheduled-tasks`、`skills`、LaunchAgents：无其他调用方。
+- **交互 shell 没设 `ALPHA_HIVE_HOME`（10-03 实测）** ⇒ 手动跑不传路径时，`PATHS.home` 兜底到代码检出，新缺省 = `<检出>/_git_backup`。这是唯一依赖差别的调用方：
+  `export.main` 会 `mkdir` 并把整份生产数据铺进代码检出，下一次 `run_backup` 再在里面 `git init` 出嵌套数据仓库。⇒ 加守卫（下条），不加回退（回退到 `Path.home()` 就是第二份真相）。
+
+### Changed
+- `data_backup/export.py`：新增 `default_backup_repo()`（= `PATHS.data_backup_repo`，函数体内求值；import 失败不吞——这不是 `_code_git_head` 那种只作记录的字段）
+  与 `backup_repo_inside_code_repo(path)`（`resolve()` 后逐级上溯，与 `PATHS.git_repo_root` 比路径**或** (st_dev, st_ino)；不用字符串前缀——`/x/code_backup` 不在 `/x/code` 里）。
+  `main()` 的 `--out` 缺省 `None` ⇒ 解析成 `default_backup_repo()`；目标在代码仓库里 ⇒ stderr 说明、rc=2、什么都不建。
+- `data_backup/run_backup.py`：`--backup-dir` 缺省 `None`，在 `main()` 现有的顶层 `try` 里解析 ⇒ 解析失败落 `crash`/rc=3，**不**以 Python 默认的 1 退出（1 专属 `secret_scan`，Step 14 会报成「密钥扫描命中」）。
+  `run()` 在 `git init` 之前拦「备份仓在代码仓库里」：`stage="init"`、`refused="inside_code_repo"`、rc=2——Step 14 现成的 `init` 分支报「未导出未提交」，正是实情，编排器不用加分支；判定本身抛异常同样中止（判不了就不建库）。显式传参同样拦。
+- `scripts/alpha-hive-orchestrator.sh` Step 14：删掉 `--backup-dir` 一行（位置只在 `PATHS`）；顶部阶段 5 回退说明补一句：回退时要给 Step 14 补回 `--backup-dir`，否则备份仓解析进检出、被拒绝。
+  `bash -n` 通过；裸变量检查（`orchestrator_lint.find_unbraced`，经 `tests/test_orchestrator_braced_vars.py`）0 命中。
+- `run_data_backup.py` 用法说明、`_sandbox_home` 文档串跟着改（`--backup-dir` 不再跟 `$HOME`）。
+
+### 部署节奏（编排器合入后下一个扫描日才部署）
+- 合入后首轮：旧编排器（仍传 `--backup-dir "$HOME/alpha-hive-data/_git_backup"`）+ 新 Python ⇒ 显式值照用（`test_explicit_backup_dir_still_wins` 钉住），守卫放行（不在检出里）。
+- 第二轮起：新编排器不传 ⇒ `$ALPHA_HIVE_HOME/_git_backup`，与旧值逐字相同。
+- revert：新编排器 + 旧 Python ⇒ 旧缺省 `Path.home()/alpha-hive-data/_git_backup`（launchd 下 `HOME` 已坐实）⇒ 同值。三种组合都不换位置。
+
+### Tests
+- `tests/test_data_backup.py::TestBackupRepoFollowsPaths`（12 条；首版报「10 条」是数错，实为 9）：缺省跟 `ALPHA_HIVE_HOME`、两次不同 env 得两个值（未冻结）、不跟 `$HOME`；显式值优先、显式空串不换成缺省；`export.main` 同；
+  代码仓库根本身 / 其下目录都拒绝且零 git / 零导出调用、不建 `.git`；同前缀兄弟目录不误伤；同一目录的大小写 / 固件链接写法也拒绝；**env 全清的 CLI 全链路**（`main` → 缺省 → `run` → 拒绝，rc=2）——git 与导出都换成「一调就炸」的桩，守卫坏了也不会在检出里动手；
+  编排器可执行行（注释除外）不许出现 `_git_backup` / `--backup-dir`，并断言 Step 14 调用本身还在（防空转变绿）。
+- 变异 10/10 被杀，每个都由预期的那几条打红、passed+failed 均为 87（`PYTHONDONTWRITEBYTECODE=1` + 每轮清 pyc、哈希核对还原）：
+  run 守卫关掉（3 红）/ export 守卫关掉（1）/ 两处缺省改回 `Path.home()` 字面量（2、1）/ 编排器写回 `--backup-dir`（1）/ 字符串前缀判包含（1）/ 关掉 inode 比较（2）/
+  缺省冻成 import 期常量（2）/ 两处缺省改回真值判断（各 1）。均在 main 的真属性上跑（换基后，无垫片）。
+
+### 二次检查（10-04，换基到含 408 的 main 后）
+- **守卫按字符串判包含会被同一目录的另一种写法绕过**：`resolve()` 不折叠大小写（APFS 默认不分）也不折叠固件链接，实测 `/users/igg/desktop/alpha hive/…` 与
+  `/System/Volumes/Data/Users/igg/Desktop/Alpha Hive/…` 都与检出同 inode、`is_relative_to` 却为 False ⇒ 往「放行」错。改为路径相等或 inode 相等，逐级上溯。
+- **真值判断选缺省**（`if args.backup_dir`）会把显式 `--backup-dir ""` 悄悄换成缺省值 ⇒ 改 `is None`（`export.main` 同）。显式值的语义与改动前一致。
+- 全链路测试原断言「检出里不存在 `_git_backup`」⇒ 改为前后存在性相同（残留不算守卫的账）。
+- 首版写的「`orchestrator_lint.py` 通过」是**空检查**：它是没有 CLI 的库模块，`python3 orchestrator_lint.py <文件>` 只 import 就 exit 0，对含 `$NUM（` 的文件同样 0。真检查是 `find_unbraced()`（正对照：原 bug 行命中 1 条）。编排器本身一直由 `test_orchestrator_braced_vars.py` 覆盖，结论不变。
+- 已核、不改：`run_step` 是 `"$PYTHON3" "$script" "$@"`、不造 env ⇒ export 的 `ALPHA_HIVE_HOME` 到得了 Step 14；`backup_continuity` 把 `ok:false` 记为不健康日并报阶段
+  ⇒ 拒绝会以 `init` 出现；守卫在 hive_logger 不可 import 时中止（判不了就不建库；data_backup 与 hive_logger 同在仓库根，不存在只导得进一个的入口）。
+
+### 未动（同形，另立）
+- `--status-file` / `--history-file` 缺省、编排器 `BACKUP_STATUS_JSON` / `BACKUP_HISTORY_JSONL`、`backup_continuity._history_file()` 仍是 `$HOME/alpha-hive-data/logs/...`
+  （`_sandbox_home` 与 `test_run_backup_defaults_follow_home` 正靠「跟 `$HOME` 走」隔离；`backup_continuity.py` 注释「阶段 5 尚未执行」已过时）。
+- `--src` 缺省仍是 `/Users/igg/Desktop/Alpha Hive`（阶段 5 后那里是冻结旧数据）。设了 `ALPHA_HIVE_HOME` 却不传 `--src` 手动跑 ⇒ 把冻结数据导进**真实**备份仓并推送。本条之前就存在；
+  env 全清时本条守卫恰好先拦住。
+- 编排器顶部「8 处 `$DATA_DIR`」计数早已不准（现 13 处），未改。
+- 反方向嵌套（备份仓是代码仓库的**祖先**，如 `--backup-dir ~/Desktop`）不拦：`git add -A` 会把整个目录扫进数据仓库。本条之前就存在，只能显式传参触发。
+- 根因在更深处：`ALPHA_HIVE_HOME` 未设时 `PATHS.home` 兜底到代码检出，阶段 5 后对**所有**读 `PATHS` 的手动运行都是读冻结旧数据；本条只护住了备份。是否改兜底 / 给交互 shell 设变量，由用户定。
 
 ## [0.45.413] — 2026-10-05 — Changed：`GitHubTool._ALLOWED_GIT_CMDS` 按生产调用点收窄（18→5）+ `pull` / `fetch` 精确参数运行期约束
 
@@ -126,34 +272,36 @@ v0.45.402~403 退役日报提交 / 推送链与 `GitHubTool.commit()/status()` �
 下一次扫描前的 `production_sync` 快进会带上本版（今天 10-05 14:00 与 v0.45.402 / 403 同一轮）。若参数约束与现役调用不符，后果是 `sync_before_scan` 回 `error` 类结局并触发 `alert_manager` 的「生产代码 ≠ origin/main」P1（可见，不会静默）；扫描照跑旧代码。
 
 
-## [0.45.412] — 2026-10-04 — Fixed：Alpha Bot 启动器认「窗口已开着」用的 `ps` 不带 `-ww`——Linux CI 上管道输出被截到 80 列，`TestNativeWindow::test_second_launch_brings_existing_window_forward` 自 v0.45.407 起红；生产（macOS）不受影响
+## [0.45.412] — 2026-10-04 — Fixed：Alpha Bot 启动器认「窗口已开着」用的 `ps` 不带 `-ww`——Linux CI 上 ps 管道输出被压窄（procps 按环境里的 `COLUMNS` 截），`TestNativeWindow::test_second_launch_brings_existing_window_forward` 自 v0.45.407 起红；生产（macOS）不受影响
 
 ### 现象
 
 v0.45.407（`593ab53a`，pywebview 原生窗口）推上 main 后，GitHub Actions 多出一条红：
 `assert [('ask', '首次启动：请选择 Alpha Hive 数据根目录…')] == [('activate', 2515)]`——第二次启动没认出开着的窗口，
 直接走到了「首次启动问数据根」。本机 Mac 上该文件 32/32 全绿。
-（main 的 CI 结论自 09-30 起因 `TestCoverageHorizon` 按设计恒红，这条新红**没有改变 run 的结论位**，只在失败清单里看得见。）
+（main 的 CI 结论自 09-06 起（最后一次绿是 09-05 的 run 33992925038）因 `TestCoverageHorizon` 按设计恒红，这条新红**没有改变 run 的结论位**，只在失败清单里看得见。）
 
 ### 根因
 
 `alphabot/launcher.py::window_owner()` 用 `/bin/ps -p PID -o command=` 取命令行、找 `alphabot.launcher` 标记。
-procps 的 ps(1) 写明：输出被重定向 / 管道接走时，宽度「undefined（it may be 80, unlimited, …）」，要不限宽得 `-w` 两次。
-CI 解释器是 `/opt/hostedtoolcache/Python/3.11.16/x64/bin/python`，测试里 owner 的命令行共 **99 列、标记从第 83 列起** ⇒ 截到 80 列后标记没了 ⇒ `window_owner()` 返回 None。
+procps 源码（`src/ps/global.c::set_screen_size`，CI 镜像 ubuntu-24.04 的 4.0.4 与 master 一致）：stdout 不是终端时宽度取 `OUTBUF_SIZE`（≈不限），
+**只有环境变量 `COLUMNS` 能把它压窄**；`-ww` 再压过 `COLUMNS`（`parser.c`：`w_count>1 ⇒ OUTBUF_SIZE`）。
+CI 解释器是 `/opt/hostedtoolcache/Python/3.11.16/x64/bin/python`，测试里 owner 的命令行共 **99 列、标记从第 83 列起** ⇒ CI 上被截到第 83 列之前 ⇒ 标记没了 ⇒ `window_owner()` 返回 None。
+⚠️ CI 测试进程里的 `COLUMNS` **是谁设的未查明**（仓库、workflow、本机已装包均未设；疑为 runner 环境）——待验证；截到的具体列数同样未直接测得。
 macOS 的 BSD ps 在非终端输出时恒不限宽（实测 `COLUMNS=40` / `80` 都不截），所以 .app 在生产从没踩到，本机测试也永远红不了。
 
-没在 Linux 上本机复现（本机无容器运行时）：证据链是 CI 断言形状（走到 `ask` 而非 `activate` ⇒ owner 判成了 None）+ procps 文档 + CI 解释器路径的实际长度。
+没在 Linux 上本机复现（本机无容器运行时）：证据链是 CI 断言形状（走到 `ask` 而非 `activate` ⇒ owner 判成了 None）+ procps 源码 + CI 解释器路径的实际长度 + 修复前后对照（见下）。
 ✅ **CI 已确认（2026-10-05）**：推上 main 的 `9a2833a2` 那次 run（37342119622，completed）里，真 ps 的 `test_second_launch_brings_existing_window_forward` 与新测试均 **PASSED**；
 全套 1 failed / 8072 passed，唯一的红是按设计的 `TestCoverageHorizon`。
 
 ### Fixed
 
-- `alphabot/launcher.py`：`window_owner()` 的 ps 加 `-ww`（procps：不限宽；BSD：同样不限宽，已实测 macOS 上 `-ww -p PID -o command=` 输出与原先逐字一致）。
-- `tests/test_ic_rerun_fg_budget.py::_kill_if_ours`：同一写法同一病——marker 是长临时路径，CI 上被截掉 ⇒ 收尸**静默不杀**、残留进程且没人会红；一并加 `-ww`。
+- `alphabot/launcher.py`：`window_owner()` 的 ps 加 `-ww`（procps：不限宽、压过 `COLUMNS`；BSD：同样不限宽，已实测 macOS 上 `-ww -p PID -o command=` 输出与原先逐字一致）。
+- `tests/test_ic_rerun_fg_budget.py::_kill_if_ours`：同一写法同一病（推断，未在 CI 上观测）——marker 是测试临时目录下的 `code/` 路径，CI 上约从第 52 列起、长 60+ 列，宽度 <83 时必被截掉 ⇒ 收尸**静默不杀**、且没人会红；只在子进程活过本条测试时才会走到这一步。一并加 `-ww`。
 
 ### Added
 
-- `tests/test_alphabot_launcher.py::TestNativeWindow::test_long_command_line_survives_piped_ps_width`：按 procps 文档行事的假 ps（不带 `-ww` 就截 80 列）+ CI 那条命令行的真实形状。
+- `tests/test_alphabot_launcher.py::TestNativeWindow::test_long_command_line_survives_piped_ps_width`：按 procps 源码行事的假 ps（设了 `COLUMNS` 且不带 `-ww` 就按它截；测试里钉 `COLUMNS=80`）+ CI 那条命令行的真实形状。
   带夹具自检（标记确在 80 列之外）与接线自检（假 ps 真被调到）。**旧代码上实测红**（`None == pid`），修后绿——macOS 上真 ps 测不出这类回归，只能这样钉。
 
 ### 验证
@@ -161,6 +309,14 @@ macOS 的 BSD ps 在非终端输出时恒不限宽（实测 `COLUMNS=40` / `80` 
 - `tests/test_alphabot_launcher.py` + `tests/test_alphabot.py` + `tests/test_ic_rerun_fg_budget.py`：131 passed；`ruff check` 三个改动文件通过。
 - `alphabot.__version__` 未动（沿用 0.45.399 / 0.45.407 的做法：.app 显示版本只在专门对齐时改）。
 - 开工前查过无人在修：main 在 `593ab53a` 之后无 alphabot 提交、各 worktree 无相关未提交改动、各分支无相关修复。
+
+### 二次检查（2026-10-05）
+
+- **因果**：`593ab53a` 以来每个跑完的 CI run 逐个查该测试——不带 `-ww` 的三次（`593ab53a` / `32ea04c4` / 修复合并的直接父提交 `6ecdadef`）全 FAILED，带 `-ww` 的 `9a2833a2` PASSED；无 flaky 迹象。
+- **更正机制**：原写「procps 管道输出宽度未定义、CI 上是 80 列」。查 procps 源码后：管道输出本不限宽，只有 `COLUMNS` 能压窄、`-ww` 压过它——**修法不变、仍正确**，但「80」从来没测得过，CI 上是被 `COLUMNS` 压窄（谁设的待验证）。已同步改 `launcher.py` 注释、两处测试的注释 / docstring。
+- **假 ps 改为按 `COLUMNS` 截**（原先无条件截 80 列），与源码一致；`monkeypatch.setenv("COLUMNS", "80")`。改后重做变异：去掉 `-ww` ⇒ 红（`None == pid`），还原 ⇒ 绿。
+- **更正「自 09-30 起恒红」**：那是 `gh run list --limit 25` 的窗口边界，不是起点。扩大到 1000 条后：最后一次绿是 09-05，09-06 起 360+ 个跑完的 run 全红，09-06 那次的失败清单只有 `TestCoverageHorizon`（与日历记忆里「nfp 09-06 起变红」吻合）。
+- `_kill_if_ours` 那条改写为推断并注明触发条件。
 
 ## [0.45.411] — 2026-10-04 — Added：Alpha Bot 程序内「帮助」页（15 章：快速上手 / 逐页导览 / 概念速查 / 环境路由 / 盲期 / 使用建议 / 排错 / 局限）+ 各页「怎么读这页」入口
 
@@ -458,6 +614,65 @@ macOS 的 BSD ps 在非终端输出时恒不限宽（实测 `COLUMNS=40` / `80` 
 ### 注意
 - **升级前起的服务不带 `--from-app`**（如用户当前那个），关窗不会停它；`make alphabot-stop` 停一次，之后双击起的就按新规则走。
 - 真 pywebview 窗口只能在 Mac 上人工 / 探针验：CI 是 Linux、没有 WindowServer。
+
+## [0.45.405] — 2026-10-04 — Fixed：经济日历 `_CPI` / `_NFP` / `_GDP` 的过去日期按 BLS / BEA **实际发布**归档逐条更正——2025 全年首次核对（含政府停摆推迟 / 取消的发布），连同 v0.45.404 查出的 2026 年 GDP 三个推算错值；10 处改值、2 处删除
+
+### 背景
+
+v0.45.404 在 `bea.gov/news/schedule/full` 查出 2026 年 GDP 表三个过去日期与官方不符（未改、单独提出）；
+三张表的 2025 行注释一直写着「未与官方逐条核对」。本版只抄官方源，不按「CPI 第二周 / 非农第一个周五」推任何日期。
+
+### 取证（全部官方源，零 API 费用）
+
+- **过去日期以实际发布为准，不以日程为准。** 2025 年 10~11 月政府停摆推迟、取消了若干发布；而且 BLS 的
+  `schedule/2025/home.htm` **事后被改写过**（列的是 10-24 / 11-20 / 12-16 / 12-18、取消项已删），从它看不出原定日程。
+- **BLS**：归档 `bls.gov/bls/news-release/cpi.htm`、`empsit.htm` 列出每一次实际发布，取消的写明
+  「Not published because of 2025 lapse in federal government appropriations」。逐条打开发布原文核「embargoed until」行：
+  2025-01 ~ 2026-10 共 41 条（CPI 20 + 就业 21），归档文件名日期 == embargo 日期 **41/41**。
+  ⚠️ empsit 归档页里有**注释掉的未来占位链接**（`<!-- … empsit_12042026 … -->`）——解析前必须先剥 HTML 注释，
+  否则会把还没发生的发布当成「已发布」。
+- **BEA**：GDP 新闻发布归档（`bea.gov/news/archive?field_related_product_target_id=451`）+ 每条原文「EMBARGOED UNTIL」行（7/7）；
+  2026 年另对 `/news/schedule/full`「Year 2026」，复核 v0.45.404 的结论：初值 02-20 / 04-30 / 07-30 / 10-29。
+- **机械核对（双向）**：表中 2025-01-01 至今天的每个日期 == 官方实际发布集合，无多无缺：CPI 20 / NFP 21 / GDP 7。
+  未来日期对现行日程页复核：CPI 10-14 / 11-10 / 12-10、NFP 11-06 / 12-04 与表一致（未改）。
+
+### Fixed
+
+- `economic_calendar.py` `_CPI` 2025：`07-11→07-15`、`09-10→09-11`（**早于停摆**、与停摆无关，旧值不对应任何官方发布 ⇒ 推算指纹）；
+  `10-14→10-24`、`12-10→12-18`（9 月 / 11 月 CPI，停摆推迟）；**删除 `11-12`**（10 月 CPI 官方未发布）。
+- `_NFP` 2025：`10-03→11-20`、`12-05→12-16`（9 月 / 11 月就业报告，停摆推迟）；**删除 `11-07`**（10 月就业报告官方未发布）。
+  取消的发布直接删，不找替身日期。
+- `_GDP` 2025：`10-29→12-23`。3Q25 **没有** Advance Estimate；BEA 2025-12-23 的「Gross Domestic Product, 3rd Quarter 2025
+  (Initial Estimate)」原文写明 *this initial report … replaces the release of the advance estimate originally scheduled for October 30*，
+  即该季度官方首次估计。归类为**推迟（含改名）**，与 9 月就业报告 10-03→11-20 同类，不是取消，故收录。
+  判定规则写进模块 docstring：**按参考期看**——该期后来发布了（推迟，含改名）⇒ 记实际发布日；该期始终没有发布（取消，
+  如 2025-10 的 CPI / 就业报告）⇒ 删。本表口径 =「每个参考季度的首次估计」。旧值 10-29 连原定的 10-30 都不是。
+- `_GDP` 2026：`01-29→02-20`（4Q25 初值，停摆推迟）、`04-29→04-30`、`07-29→07-30`。
+- 每张表补注释：核了什么、对哪个源、哪天、几条一致；模块 docstring 补「过去日期以实际发布为准」与两个归档 URL。
+  **`verified_through`、`pending`、所有未来日期、各表阈值均未改动。**
+
+### Added
+
+- `tests/test_economic_calendar.py::TestPublishedDates::test_past_dates_are_the_actual_releases`：钉住本版 10 个官方值 / 旧错值对，
+  以及「2025-11 无 CPI、2025-10 无就业报告」。变异实测：换回旧表 ⇒ 本条红（首个断言 `2025-07-15 不在表里`），
+  v0.45.65 那条回归在旧表上照样绿 ⇒ 覆盖是本条新增的。
+
+### 生产影响面（复核，未照抄 v0.45.404 的结论）
+
+- 读者仍只有三个：GuardBee（`ref_date` 补跑，只认 `type == "fomc"` 且 ≤3 天）、dashboard（只用今天）、
+  `economic_calendar_watch`（只读 `verified_through`，未改 ⇒ 不受影响）。
+- 遍历全部 25 个 FOMC × 提前 0~3 天（100 次）：`get_next_event` 修前修后都 **0 次**不是那次 FOMC ⇒ GuardBee 计票零变化。
+- 与 FOMC **同日**的非 FOMC 事件：修前 5 个，其中 **4 个就是这次改掉的错值**（2025-10-29 GDP、2025-12-10 CPI、2026-04-29 GDP、
+  2026-07-29 GDP——推算出来的日期扎堆落在 FOMC 日）；修后只剩 2025-07-30 GDP 一个真平局。FOMC 靠扫描顺序赢平局这个脆弱点因此少了四处。
+
+### 未改、记下
+
+- `economic_calendar_watch._release_date_to_quarter` 的 docstring 说「初值发布月 ∈ 1/4/7/10」是 BEA 节奏的固有性质；
+  02-20（4Q25）与 12-23（3Q25）都是反例。它只读 `verified_through`（2026-10-29 ⇒ 2026Q3），真遇到这种日期会返回 None ⇒
+  退出码 3「无法判定」（会响，不静默），故不在本版改。
+- 与 v0.45.404（`claude/musing-heisenberg-189da6`，尚未合入 main）同改 `economic_calendar.py`：本版**刻意不碰**它改的「核对时间」
+  表头三行，核对注释写在表体内；`git merge-tree` 实测两种合入顺序 `economic_calendar.py` 均自动合并，只有 CHANGELOG 顶部插入冲突。
+- `TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold` 仍按设计红（2027 年 BLS / BEA 日程未发布）。
 
 ## [0.45.404] — 2026-10-04 — Changed：经济日历三次核对——BLS / BEA 仍未发布 2027 年 CPI / 非农 / GDP 日程，**一个日期都没加**，`TestCoverageHorizon` 按设计保持红；顺带查出 2026 年 GDP 表三个过去日期与官方不符（本条未改，见下）
 

@@ -524,6 +524,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("dashboard_renderer.py", "_TPL_DIR"),        # templates/，随代码发布
         ("prompt_loader.py", "_PROMPTS_DIR"),         # prompts/，随代码发布
         ("alphabot/server.py", "STATIC_DIR"),         # alphabot/static/ 前端资产，随代码发布（v0.45.388）
+        ("data_migrations/runner.py", "VERSIONS_DIR"),  # versions/ 迁移脚本，随代码发布（v0.45.419；记录与库才走 PATHS）
         ("probability_scorecard.py", "ALPHAHIVE_DIR"),  # sys.path.insert
         ("scan_continuity.py", "ALPHAHIVE_DIR"),        # sys.path.insert
         ("ic_rerun_readiness.py", "ALPHAHIVE_DIR"),     # sys.path.insert
@@ -720,6 +721,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("dashboard_renderer.py", "_TPL_DIR"),        # templates/
         ("prompt_loader.py", "_PROMPTS_DIR"),         # prompts/
         ("alphabot/server.py", "STATIC_DIR"),         # alphabot/static/（改成 PATHS.home 后测试 / 数据根下找不到前端）
+        ("data_migrations/runner.py", "VERSIONS_DIR"),  # versions/（改成 PATHS.home 后迁移脚本在数据根下找不到）
         # 工程根 / sys.path / git 仓库：要的是「代码在哪」
         ("probability_scorecard.py", "ALPHAHIVE_DIR"),
         ("scan_continuity.py", "ALPHAHIVE_DIR"),
