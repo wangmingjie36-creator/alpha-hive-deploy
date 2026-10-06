@@ -28,7 +28,7 @@ try:
 except Exception:  # pragma: no cover - 独立运行时退化到标准库
     import logging as _logging
     _log = _logging.getLogger("alpha_hive.paper_portfolio")
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -264,9 +264,13 @@ class Position:
     # "tier_fallback(no_vol)"）。必须带默认值且排最后——旧 positions.jsonl
     # 没有这个字段，Position(**p) 才能继续加载。
     sizing: str = ""
+    # v0.45.416：已换到复权口径的拆股（`_apply_split` 写）：[{"ex_date", "ratio", "applied_as_of"}]。
+    # 同一除权日只换一次（`_reconcile_split_basis` 按 ex_date 排除已换过的）。空表时 `to_dict` 不写这个键——
+    # 没有拆股的仓位落盘逐字节同改动前（旧行没有它，`Position(**p)` 照常加载）。
+    split_adjustments: List[Dict] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
-        return asdict(self)
+        return _drop_empty_split_adjustments(asdict(self))
 
 
 @dataclass
@@ -286,9 +290,18 @@ class ClosedTrade:
     exit_reason: str        # "TP" / "SL" / "TIME"
     confidence: str
     score: float
+    # v0.45.416：持仓期间换过的拆股（照抄 Position.split_adjustments）。非空 ⇒ 本行的 entry_price / shares /
+    # exit_price 都是复权后的口径（entry_price × ratio 才是当时成交的价格）。空表不落盘，理由同 Position。
+    split_adjustments: List[Dict] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
-        return asdict(self)
+        return _drop_empty_split_adjustments(asdict(self))
+
+
+def _drop_empty_split_adjustments(d: Dict) -> Dict:
+    if not d.get("split_adjustments"):
+        d.pop("split_adjustments", None)
+    return d
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -593,19 +606,34 @@ class _ReplayOhlcWindow:
             # v0.45.410：请求整个落在行情库已落定段内 ⇒ 库回答、不为它下载。这个标的之后若有请求碰到未落定的
             # 日子再补尾——只在早几周持有过的标的整次检验都不打网络（库里的值本来就是窗口对它的权威回答）。
             if self.store is not None:
-                sl = self.store.settled_slice(ticker, start, end)
+                sl = self.store.settled_slice(ticker, start, end, as_of=_REPLAY_AS_OF)
                 if sl is not None:
                     return sl
             bars = self._fetch_wide(ticker)
             if bars is None:
                 return self._settled_on_fallback(ticker, start, end)
         self.served += 1
-        return {d: b for d, b in bars.items() if start <= d < end}
+        sliced = {d: b for d, b in bars.items() if start <= d < end}
+        # v0.45.415：时点数据——按当前重放日取每根日线的版本（拆股 / 修订前后的重放日各用当时的价格）
+        return sliced if self.store is None else self.store.pit_slice(ticker, start, end, sliced, _REPLAY_AS_OF)
 
     def _settled_on_fallback(self, ticker: str, start: str, end: str) -> Optional[Dict[str, Dict]]:
         """v0.45.410：该标的这次下载失败——请求整个落在行情库已落定段内的，照样由库回答（库里的值本来就是
         本次窗口对它的权威回答）；其余返回 None、走原直连路径。降级时的直连次数因此只与最近几天有关。"""
-        return None if self.store is None else self.store.settled_slice(ticker, start, end, on_fallback=True)
+        return None if self.store is None else self.store.settled_slice(ticker, start, end, as_of=_REPLAY_AS_OF,
+                                                                         on_fallback=True)
+
+    def overlay_direct(self, ticker: str, start: str, end: str, out: Dict[str, Dict]) -> Dict[str, Dict]:
+        """v0.45.415：退回直连拿到的结果里，已落定的日子换成行情库按重放日的值——否则修订与降级同时出现时，同一次运行里
+        同一天会有两个值。没有行情库 ⇒ 原样返回（同一个对象）。返回新 dict，不改 `_PRICE_CACHE`。
+        二次检查：**只换值、不增日子**——直连失败 / 拿得短时 v0.45.410 返回什么就还是什么（原先库会补进直连没拿到的已落定
+        日子：没有修订时也与 410 不同，且计数说「一根都没拿到」而重放其实用了行情）；直连里有、库说那天没有日线的照库删掉。
+        日期不是 YYYY-MM-DD（窗口外请求）⇒ 原样返回（410 对它们不抛，这里也不许抛）。"""
+        if self.store is None or not (isinstance(start, str) and isinstance(end, str)
+                                      and _ISO_DATE_RE.match(start) and _ISO_DATE_RE.match(end)):
+            return out
+        pit = self.store.pit_slice(ticker, start, end, out, _REPLAY_AS_OF)
+        return {d: b for d, b in pit.items() if d in out}
 
     def _fetch_wide(self, ticker: str) -> Optional[Dict[str, Dict]]:
         store = self.store if self.store is not None and self.store.supports(ticker) else None
@@ -616,8 +644,43 @@ class _ReplayOhlcWindow:
                 bars = store.merge(ticker, self.start, self.end, None, None)
                 self._bars[ticker] = bars
                 return bars
-        self.wide_fetches += 1
+        bars, reason = self._download(ticker, fstart)
+        # v0.45.410 二次检查：补尾拿到空结果，而库的已落定段在同一段里本来就没有日线（停牌 / 退市）⇒ 空是权威答案，
+        # 不是下载失败——否则这类标的每天降级、直连次数逐日增长、落定段永远不前进。库里那段**有**日线时照旧当失败
+        # （Yahoo 抽风返回空的形状），整段下载（fstart == 窗口左端）同样照旧。
+        if (bars is None and store is not None and fstart != self.start
+                and reason in ("空结果", "整段没有一根有限值日线") and store.settled_quiet_from(ticker, fstart)):
+            bars = {}
+        # v0.45.415：补尾里已落定的日子被 Yahoo 改了（多半是拆股回溯复权）⇒ 先整段下载、只把整段并进库，窗口里每个日期的
+        # 「改了之后」第一次观察记在同一天。二次检查：原先先并补尾、整段失败只计数 ⇒ 重叠段与更早的日子生效日差一天，那个
+        # 重放日永久读到一半复权前、一半复权后的序列，且没有任何东西会红。现在整段失败 ⇒ 什么都不并、该标的本次降级（看得见），
+        # 下次补尾再看到、再整段。
+        if bars is not None and store is not None and fstart != self.start and store.revision_in(ticker, fstart, self.end, bars):
+            full, why = self._download(ticker, self.start, count=False)
+            store.note_suspect_refetch(full is not None)
+            if full is None:
+                bars, reason = None, f"补尾发现已落定日线被 Yahoo 改了、整段补下失败（{why}）——本次不并进库，下次再整段"
+            else:
+                fstart, bars = self.start, full
+        if bars is None:
+            self.fallback_tickers[ticker] = reason
+            _log.warning("[PaperPortfolio] 回放 OHLC 窗口 %s [%s, %s) 整段取数失败（%s）——"
+                         "该标的本次回放退回逐次直连 _fetch_ohlc（失败语义与改动前相同，只是慢）",
+                         ticker, fstart, self.end, reason)
+            return None
+        if store is not None:
+            bars = store.merge(ticker, self.start, self.end, fstart, bars)
+        self._bars[ticker] = bars
+        return bars
+
+    def _download(self, ticker: str, fstart: str, *, count: bool = True) -> Tuple[Optional[Dict[str, Dict]], str]:
+        """一次 `history(start=fstart, end=窗口右端)`；返回（日线或 None，失败原因）。
+        `count=False`：修订嫌疑的整段补下（v0.45.415）不计入 `wide_fetches`——它在进度行里读作「N 个标的」，同一个标的
+        补下那一次另由行情库的 `suspect_refetches` 计。"""
+        if count:
+            self.wide_fetches += 1
         bars: Optional[Dict[str, Dict]] = None
+        reason = ""
         try:
             import yfinance as yf
             # 与直连路径逐参数相同：只换 start/end。不许换成 yf.download（默认参数不同、MultiIndex）
@@ -630,25 +693,10 @@ class _ReplayOhlcWindow:
                 if not bars:
                     reason = "整段没有一根有限值日线"
                     bars = None
-        except Exception as e:  # noqa: BLE001 —— 退回直连路径并记 WARNING（下一行），不吞
+        except Exception as e:  # noqa: BLE001 —— 由调用方退回直连路径并记 WARNING，不吞
             reason = f"{type(e).__name__}: {e}"
             bars = None
-        # v0.45.410 二次检查：补尾拿到空结果，而库的已落定段在同一段里本来就没有日线（停牌 / 退市）⇒ 空是权威答案，
-        # 不是下载失败——否则这类标的每天降级、直连次数逐日增长、落定段永远不前进。库里那段**有**日线时照旧当失败
-        # （Yahoo 抽风返回空的形状），整段下载（fstart == 窗口左端）同样照旧。
-        if (bars is None and store is not None and fstart != self.start
-                and reason in ("空结果", "整段没有一根有限值日线") and store.settled_quiet_from(ticker, fstart)):
-            bars = {}
-        if bars is None:
-            self.fallback_tickers[ticker] = reason
-            _log.warning("[PaperPortfolio] 回放 OHLC 窗口 %s [%s, %s) 整段取数失败（%s）——"
-                         "该标的本次回放退回逐次直连 _fetch_ohlc（失败语义与改动前相同，只是慢）",
-                         ticker, fstart, self.end, reason)
-            return None
-        if store is not None:
-            bars = store.merge(ticker, self.start, self.end, fstart, bars)
-        self._bars[ticker] = bars
-        return bars
+        return bars, reason
 
     def note_direct(self, bars: Dict[str, Dict]) -> None:
         """`_fetch_ohlc` 在窗口作用域内走了原直连路径之后调用：记一次直连请求与它是否一根 bar 都没有。"""
@@ -672,8 +720,10 @@ class _ReplayOhlcWindow:
         }
         if self.store is not None:   # v0.45.410：只有开了行情库才有这个键（其余调用方的形状不变）
             out["store"] = self.store.stats(self.start, self.end)
-            # 坏文件 / 写不进去：本次结果不受影响，但下次照样整段下载、慢回去——要有人看见
-            out["degraded"] = out["degraded"] or out["store"]["problem"]
+            # 坏文件 / 写不进去：本次结果不受影响，但下次照样整段下载、慢回去——要有人看见。
+            # v0.45.415 二次检查：不知道重放日却碰到了有版本的日线（有回放没经 run_replay ⇒ 用了最新版本，时点数据在那几次
+            # 请求上失效）——文档说「应恒为 0」，原先只进 stderr 的汇总行，没有任何东西会红
+            out["degraded"] = out["degraded"] or out["store"]["problem"] or out["store"]["as_of_unknown"] > 0
         return out
 
     def summary(self) -> str:
@@ -685,6 +735,9 @@ class _ReplayOhlcWindow:
 
 
 _REPLAY_OHLC_WINDOW: Optional[_ReplayOhlcWindow] = None
+#: v0.45.415：`run_replay` 当前正在重放的日子（时点数据按它取每根日线的版本）。只有 `run_replay` 写它、只有回放窗口读它；
+#: 生产 `run_for_date` 不碰（直接跑 `run_for_date` 时它是 None ⇒ 窗口用最新版本并计数）。
+_REPLAY_AS_OF: Optional[str] = None
 
 
 def replay_ohlc_bounds(dates: List[str],
@@ -743,7 +796,7 @@ def _fetch_ohlc(ticker: str, start: str, end: str) -> Dict[str, Dict]:
             return sliced
         out = _fetch_ohlc_direct(ticker, start, end)
         win.note_direct(out)
-        return out
+        return win.overlay_direct(ticker, start, end, out)
     return _fetch_ohlc_direct(ticker, start, end)
 
 
@@ -1226,6 +1279,164 @@ def _open_position(
     )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 拆股口径（v0.45.416）
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# 事故形状（生产至今没发生过：10-05 核过，08-01 起交易过的 30 个标的零拆股；03-01 起全部 52 个有快照 / 账本的
+# 标的只有 CRWD 07-02 1 拆 4，组合从没持有过它）：Yahoo 在除权日把**全部**历史日线回溯复权
+# （`auto_adjust=False` 照样——它只管股息不管拆股）。仓位的 entry / SL / TP 是开仓当时（复权前）的绝对价位，
+# 而 Step 1 每天把 (entry_date, as_of] 的全部日线重扫一遍：拆股后第一次运行，1 拆 2 的复权价约为入场价一半 ⇒
+# 多头入场次日「触发」止损（−7% 再扣成本）、空头「触发」止盈（+15%），出场日**倒填**到入场后第一天；
+# `_mark_to_market` 也拿复权前的入场价对复权后的收盘。账本里会多一笔从没发生过的交易。
+#
+# 修法：仓位换到复权口径——shares × r、entry / SL / TP ÷ r（r = Yahoo「Stock Splits」列：2.0 = 1 拆 2，
+# 0.1 = 10 并 1；除权日之前的日线被除以它），size_usd 不变；记进 `Position.split_adjustments`，同一除权日只换一次。
+# shares 与 entry_price 不取整：两者之积不变（F&G 前瞻检验的自证键 `round(shares × entry_price, 2)` 跨调整不变）。
+#
+# 「口径变没变」由**这次拿到的日线自己**判：入场价 ÷ 入场日收盘。实测（10-05，账本 91 笔）两者最大只差 0.68%
+# （入场价是收盘后的 CBOE 价，95 分位 0.12%），所以超出 `_SPLIT_BASIS_TOL` 即「这份日线不是入场时的口径」——
+# 只有这时才去问 Yahoo 拆股记录（要的是精确比例与除权日）。理由：
+#   ① 生产与回放结果一致：判据只看喂进来的日线。F&G 前瞻检验的回放行情库（v0.45.415 时点数据）给第 d 个
+#     重放日的就是 Yahoo 第 d 天给生产的日线 ⇒ 两边在同一天、因同一份日线做同一个决定。单看拆股记录不行：
+#     Yahoo 已记拆股、日线还没复权（或反过来）时，记录与日线口径不一致，照记录换会在另一个方向造假交易。
+#   ② 时点安全：只换除权日 ∈ (entry_date, as_of] 的拆股。拆股记录是**查询当天** Yahoo 的全部记录（回放时含
+#     as_of 之后的拆股），过滤在这里；未来拆股只用来给「这份日线是事后复权的」一个诊断名（`future_split`）。
+#   ③ 不多打网络：没有拆股时一次请求都不加（Step 11 给 F&G 的 45s 预算不受影响）；拆股后每个
+#     (标的, 入场日) 每进程每天**成功**至多一次（`_SPLIT_EVENTS_CACHE`）。失败不缓存——回放里取不到会在之后每个
+#     重放日（A / B / 逐日重锚各一遍）再试，且回放判 `lookup_failed` 而生产当天取到了 ⇒ 两边分叉、F&G 自证会掉
+#     （看得见，不静默；拆股跨仓本就罕见）。拆股记录不经回放窗口 / 行情库：它是查询当天的全部记录，时点靠下面的过滤。
+#
+# 判不了 ⇒ **这一天不碰这个仓位**（不查出场、按入场价估值、记 ERROR、run_for_date 返回 `split_unresolved`、
+# 当天净值行带 `split_unresolved`、组合卡片标「口径待核」），下一次运行重判——宁可晚一天出场，不往账本里写
+# 假交易（`_check_exit` 每天重扫全段，推迟的出场在自愈那天按原日期、原价位补记）。几种：拆股记录取不到
+# （`lookup_failed`）、有拆股但比例对不上日线（`ratio_mismatch`）、只有 as_of 之后的拆股对得上（`future_split`：
+# 这份日线不是时点数据——生产不会遇到，非时点回放如 `--rehearse` 会）、入场日那根日线缺失且确有待换的拆股
+# （`no_entry_bar`）、对不上 ≥ `_SPLIT_UNEXPLAINED_TOL` 而 Yahoo 没有能解释它的拆股（`unexplained`：Yahoo 已复权、
+# 记录还没跟上，或入场价坏了——后者**不会自愈**，每天 ERROR 直到有人修入场价）、拆股逻辑本身抛了意外异常
+# （`error`，由 run_for_date 兜住，只影响这一个仓位）。对不上但不到那么多、且 Yahoo 确认没有拆股 ⇒ 不是口径问题，
+# 照常（WARNING）——入场价偶尔是前一日收盘，一天的涨跌不该让仓位永远冻住。
+#
+# ⚠️ 已知不覆盖：同一份日线里一部分复权、一部分没复权（Yahoo 漏复权的形状）——入场日那根仍是旧口径，
+# 判据看不出来。真实日线上没见过；回放行情库在除权当天 Step 11 的确会给出这种混合视图，但只给「重放日 =
+# 除权日」那一天，而 Step 11 的重放窗口是 [FORWARD_START, 今天)，除权日要到次日（行情库已确认修订、
+# 按生效日给复权后的版本）才被重放。
+
+#: 入场价与入场日收盘的容差（相对）。超出才去查拆股；拆股比例与观测比的匹配也用它。
+_SPLIT_BASIS_TOL = 0.03
+_SPLIT_LOG_TOL = math.log1p(_SPLIT_BASIS_TOL)
+#: 对不上这么多、Yahoo 却没有能解释它的拆股 ⇒ 判不了（`unexplained`）。在它与 `_SPLIT_BASIS_TOL` 之间的照常（WARNING）：
+#: 入场价偶尔是前一日收盘（ScoutBee 价缺失时的回落），一天的涨跌不该冻住仓位。
+_SPLIT_UNEXPLAINED_TOL = 0.25
+_SPLIT_UNEXPLAINED_LOG = math.log1p(_SPLIT_UNEXPLAINED_TOL)
+#: (ticker, start, 查询日 PDT) → [(除权日, 比例)]。只放成功结果；键带查询日，长驻进程跨天会重取。
+_SPLIT_EVENTS_CACHE: Dict[Tuple[str, str, str], List[Tuple[str, float]]] = {}
+
+
+def _fetch_split_events(ticker: str, start: str) -> Tuple[Optional[List[Tuple[str, float]]], str]:
+    """Yahoo 记的拆股 `[(除权日, 比例)]`（除权日 ≥ start，到查询当天为止，**不按 as_of 过滤**）。失败 ⇒ `(None, 原因)`。
+
+    用 `history(start=, actions=True)` 的「Stock Splits」列，不用 `Ticker.splits`：后者取数失败时返回空 Series，
+    与「没有拆股」同形；这里空结果 / 缺列算失败，「有日线、列全是 0」才算「没有拆股」。
+    """
+    key = (ticker, start, pdt_today())
+    if key in _SPLIT_EVENTS_CACHE:
+        return _SPLIT_EVENTS_CACHE[key], ""
+    # 解析也在 try 里：响应形状不对（索引不是日期等）同样是「取不到」，不许冲出去打断整个 run_for_date
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(ticker).history(start=start, auto_adjust=False, actions=True)
+        if hist is None or len(hist) == 0:
+            return None, "空结果"
+        if "Stock Splits" not in hist.columns:
+            return None, "响应没有 Stock Splits 列"
+        events: List[Tuple[str, float]] = []
+        for idx, v in hist["Stock Splits"].items():
+            try:
+                r = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(r) and r > 0 and r != 1.0:
+                events.append((idx.strftime("%Y-%m-%d"), r))
+    except Exception as e:  # noqa: BLE001 —— 由调用方记 ERROR / WARNING 并决定动作
+        return None, f"{type(e).__name__}: {e}"
+    events.sort()
+    _SPLIT_EVENTS_CACHE[key] = events
+    return events, ""
+
+
+def _apply_split(pos: Position, ex_date: str, ratio: float, as_of: str) -> None:
+    """把仓位就地换到除权日 `ex_date`、比例 `ratio` 之后的口径。size_usd 不变；shares × entry_price 不变（不取整）。"""
+    pos.shares = pos.shares * ratio
+    pos.entry_price = pos.entry_price / ratio
+    pos.sl_price = round(pos.sl_price / ratio, 4)
+    pos.tp_price = round(pos.tp_price / ratio, 4)
+    pos.split_adjustments.append({"ex_date": ex_date, "ratio": ratio, "applied_as_of": as_of})
+
+
+def _reconcile_split_basis(pos: Position, as_of: str, ohlc: Dict[str, Dict]) -> Dict:
+    """让仓位与这份日线同一口径（见上方区块注释）。返回 `{"status": ...}`：
+
+      · `ok`         ——口径一致（或 Yahoo 确认没有拆股），照常查出场；
+      · `applied`    ——已就地换口径，`events` 为本次换的 `[(除权日, 比例)]`，照常查出场；
+      · `unresolved` ——判不了，`reason` / `detail` 说明，调用方这一天不碰这个仓位。
+    """
+    entry = pos.entry_price
+    if not (isinstance(entry, (int, float)) and math.isfinite(entry) and entry > 0):
+        return {"status": "ok"}
+    ref = ohlc.get(pos.entry_date)
+    ref_close = ref.get("Close") if ref else None
+    if isinstance(ref_close, (int, float)) and math.isfinite(ref_close) and ref_close > 0:
+        obs = entry / ref_close
+        if abs(math.log(obs)) <= _SPLIT_LOG_TOL:
+            return {"status": "ok"}          # 绝大多数日子走这里：不打网络
+    else:
+        obs = None
+        if not ohlc:
+            return {"status": "ok"}          # 一根日线都没有：没有可比的，也没有能触发出场的
+    events, err = _fetch_split_events(pos.ticker, pos.entry_date)
+    if events is None:
+        if obs is None:
+            # 证据弱（只是缺入场日那根）：不能因为一次取数失败就冻住仓位
+            _log.warning("[PaperPortfolio] %s %s 入场日 %s 没有日线、拆股记录也取不到（%s）——按口径未变照常处理",
+                         as_of, pos.ticker, pos.entry_date, err)
+            return {"status": "ok"}
+        return {"status": "unresolved", "reason": "lookup_failed",
+                "detail": f"入场价/入场日收盘={obs:.4f}，拆股记录取不到：{err}"}
+    done = {a.get("ex_date") for a in pos.split_adjustments}
+    pending = [(x, r) for x, r in events if pos.entry_date < x <= as_of and x not in done]
+    future = [(x, r) for x, r in events if x > as_of]
+    if obs is None:
+        if not pending:
+            return {"status": "ok"}
+        return {"status": "unresolved", "reason": "no_entry_bar",
+                "detail": f"有待换的拆股 {pending}，但入场日 {pos.entry_date} 没有日线、判不了这份日线的口径"}
+    r_pending = math.prod(r for _, r in pending)
+
+    def _fits(r: float) -> bool:
+        return abs(math.log(obs) - math.log(r)) <= _SPLIT_LOG_TOL
+
+    if pending and _fits(r_pending):
+        for x, r in pending:
+            _apply_split(pos, x, r, as_of)
+        return {"status": "applied", "events": pending}
+    if future and _fits(r_pending * math.prod(r for _, r in future)):
+        return {"status": "unresolved", "reason": "future_split",
+                "detail": f"入场价/入场日收盘={obs:.4f} 只对得上 as_of 之后的拆股 {future}——这份日线是事后复权的，"
+                          "不是时点数据；只换除权日 ≤ as_of 的拆股"}
+    if pending:
+        return {"status": "unresolved", "reason": "ratio_mismatch",
+                "detail": f"入场价/入场日收盘={obs:.4f}，待换拆股 {pending} 的比例积 {r_pending:g} 对不上"}
+    if abs(math.log(obs)) >= _SPLIT_UNEXPLAINED_LOG:
+        return {"status": "unresolved", "reason": "unexplained",
+                "detail": f"入场价/入场日收盘={obs:.4f}，Yahoo 在 ({pos.entry_date}, {as_of}] 没有能解释它的拆股"
+                          "——要么 Yahoo 已复权、拆股记录还没跟上，要么入场价本身坏了"}
+    _log.warning("[PaperPortfolio] %s %s 入场价 %.4f 与入场日 %s 收盘 %.4f 差 %.1f%%，但 Yahoo 在 (%s, %s] 没有拆股"
+                 "——不是口径问题，照常处理（入场价可能是陈旧报价）",
+                 as_of, pos.ticker, entry, pos.entry_date, ref_close, (obs - 1) * 100, pos.entry_date, as_of)
+    return {"status": "ok"}
+
+
 def _check_exit(pos: Position, as_of: str, ohlc: Dict[str, Dict]) -> Optional[Tuple[str, float, str]]:
     """
     扫描 (entry_date, as_of] 区间的每日 OHLC，检查 SL/TP/TIME 触发。
@@ -1306,6 +1517,7 @@ def _close_position(pos: Position, exit_reason: str, exit_price: float, exit_dat
         exit_reason=exit_reason,
         confidence=pos.confidence,
         score=pos.score,
+        split_adjustments=[dict(a) for a in pos.split_adjustments],
     )
     # v0.40.0 (D): 三重屏障标签回流——SL/TP/TIME 出场结果写入 pheromone.db，
     # 为未来 meta-labeling（用屏障结果训练"该不该信/该下多大"）攒数据。
@@ -1363,13 +1575,21 @@ def _record_barrier_outcome(trade: "ClosedTrade") -> None:
         con.close()
 
 
-def _mark_to_market(positions: List[Position], as_of: str) -> Tuple[float, List[Dict]]:
-    """计算当前持仓 mark-to-market 未实现损益"""
+def _mark_to_market(positions: List[Position], as_of: str,
+                    split_unresolved: Optional[Dict[Tuple[str, str], str]] = None) -> Tuple[float, List[Dict]]:
+    """计算当前持仓 mark-to-market 未实现损益
+
+    `split_unresolved`（v0.45.416）：`{(ticker, entry_date): reason}`——拆股口径判不了的仓位按入场价估值（未实现
+    盈亏记 0、明细带 `split_unresolved`），不拿可能是另一口径的收盘去比入场价（1 拆 2 会凭空 −50%）。
+    """
+    split_unresolved = split_unresolved or {}
     unrealized = 0.0
     details = []
     for pos in positions:
-        ohlc = _fetch_ohlc(pos.ticker, pos.entry_date,
-                            (datetime.strptime(as_of, "%Y-%m-%d") + timedelta(days=_EXIT_OHLC_LOOKAHEAD_DAYS)).strftime("%Y-%m-%d"))
+        _unresolved = split_unresolved.get((pos.ticker, pos.entry_date))
+        ohlc = {} if _unresolved else _fetch_ohlc(
+            pos.ticker, pos.entry_date,
+            (datetime.strptime(as_of, "%Y-%m-%d") + timedelta(days=_EXIT_OHLC_LOOKAHEAD_DAYS)).strftime("%Y-%m-%d"))
         cur_price = pos.entry_price
         if as_of in ohlc:
             cur_price = ohlc[as_of]["Close"]
@@ -1384,7 +1604,7 @@ def _mark_to_market(positions: List[Position], as_of: str) -> Tuple[float, List[
             u_pct = (pos.entry_price - cur_price) / pos.entry_price * 100.0
         u_usd = pos.size_usd * (u_pct / 100.0)
         unrealized += u_usd
-        details.append({
+        row = {
             "ticker": pos.ticker,
             "direction": pos.direction,
             "entry_price": pos.entry_price,
@@ -1394,7 +1614,10 @@ def _mark_to_market(positions: List[Position], as_of: str) -> Tuple[float, List[
             "sl_price": pos.sl_price,
             "tp_price": pos.tp_price,
             "size_usd": pos.size_usd,
-        })
+        }
+        if _unresolved:
+            row["split_unresolved"] = _unresolved
+        details.append(row)
     return unrealized, details
 
 
@@ -1472,10 +1695,33 @@ def run_for_date(as_of: str, verbose: bool = False,
     # ── Step 1: 检查现有仓位是否触发出场 ──
     remaining = []
     pnl_today = 0.0
+    split_adjusted: List[Dict] = []
+    split_unresolved: List[Dict] = []
     for pos in positions:
         # 拉包含 as_of 的 OHLC 段
         ohlc = _fetch_ohlc(pos.ticker, pos.entry_date,
                            (datetime.strptime(as_of, "%Y-%m-%d") + timedelta(days=_EXIT_OHLC_LOOKAHEAD_DAYS)).strftime("%Y-%m-%d"))
+        # v0.45.416：先让仓位与这份日线同一口径（拆股），再按绝对价位查出场——见「拆股口径」区块注释。
+        # 意外异常只让**这个仓位**今天判不了（照样 ERROR + split_unresolved），不许打断整个 run_for_date：
+        # 那会让当天所有仓位都不出场、不开仓、不记净值，而日报钩子只记一条 WARNING。
+        try:
+            basis = _reconcile_split_basis(pos, as_of, ohlc)
+        except Exception as _e_split:  # noqa: BLE001 —— 下一行起照「判不了」处理，四处看得见
+            basis = {"status": "unresolved", "reason": "error",
+                     "detail": f"{type(_e_split).__name__}: {_e_split}"}
+        if basis["status"] == "applied":
+            for x, r in basis["events"]:
+                split_adjusted.append({"ticker": pos.ticker, "entry_date": pos.entry_date, "ex_date": x, "ratio": r})
+                _log.warning("[PaperPortfolio] %s %s 拆股（除权日 %s，比例 %g）——仓位换到复权口径：shares ×%g，"
+                             "entry/SL/TP ÷%g（现 entry=%.4f SL=%.4f TP=%.4f），size_usd 不变",
+                             as_of, pos.ticker, x, r, r, r, pos.entry_price, pos.sl_price, pos.tp_price)
+        elif basis["status"] == "unresolved":
+            split_unresolved.append({"ticker": pos.ticker, "entry_date": pos.entry_date,
+                                     "reason": basis["reason"], "detail": basis["detail"]})
+            _log.error("[PaperPortfolio] %s %s（入场 %s）拆股口径判不了（%s）：%s——今天不查出场、按入场价估值，"
+                       "下次运行重判", as_of, pos.ticker, pos.entry_date, basis["reason"], basis["detail"])
+            remaining.append(pos)
+            continue
         exit_check = _check_exit(pos, as_of, ohlc)
         if exit_check:
             reason, ex_price, ex_date = exit_check
@@ -1536,7 +1782,8 @@ def run_for_date(as_of: str, verbose: bool = False,
             print(f"  → 开仓 {ticker} {new_pos.direction}  ${new_pos.entry_price:.2f}  size=${new_pos.size_usd:.0f} ({new_pos.confidence})")
 
     # ── Step 3: mark-to-market + 快照 ──
-    unreal_usd, pos_details = _mark_to_market(positions, as_of)
+    unreal_usd, pos_details = _mark_to_market(
+        positions, as_of, {(u["ticker"], u["entry_date"]): u["reason"] for u in split_unresolved})
     deployed_usd = sum(p.size_usd for p in positions)
     nav = cash + deployed_usd + unreal_usd
 
@@ -1550,6 +1797,10 @@ def run_for_date(as_of: str, verbose: bool = False,
         "trades_closed_today": sum(1 for t in closed if t.get("exit_date") == as_of),
         "realized_pnl_today": round(pnl_today, 2),
     }
+    # v0.45.416：这天有仓位拆股口径判不了 ⇒ 净值里它们按入场价估值。落进净值行，组合卡片据此标「口径待核」；
+    # 没有时不写这个键（净值行逐字节同改动前）。
+    if split_unresolved:
+        equity_snapshot["split_unresolved"] = sorted(u["ticker"] for u in split_unresolved)
 
     # 去重：同一天多次运行时只保留最新快照
     existing_equity = _load_jsonl(EQUITY_FILE)
@@ -1578,6 +1829,9 @@ def run_for_date(as_of: str, verbose: bool = False,
         "opened_today": opened_count,
         "realized_pnl_today": pnl_today,
         "equity_snapshot": equity_snapshot,
+        # v0.45.416：今天换了口径的拆股 / 判不了口径的仓位（各 [] 表示没有）
+        "split_adjusted": split_adjusted,
+        "split_unresolved": split_unresolved,
     }
 
 
@@ -1621,7 +1875,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
     Returns:
         {"equity": [...], "closed": [...], "final_nav": float, "config": dict}
     """
-    global POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE, _REPLAY_MODE
+    global POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE, _REPLAY_MODE, _REPLAY_AS_OF
 
     if dates is None:
         dates = [d for d in _all_snapshot_dates() if d >= CONFIG["bootstrap_date"]]
@@ -1630,6 +1884,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
     state_dir.mkdir(parents=True, exist_ok=True)
 
     _orig_paths = (POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE)
+    _orig_as_of = _REPLAY_AS_OF
     # v0.45.100：vol_target.conf_multiplier 是二层嵌套，一层 dict(v) 拷贝挡不住
     # 就地改内层的覆盖泄漏到生产 CONFIG——用 deepcopy 封死。
     _orig_config = copy.deepcopy(CONFIG)
@@ -1656,6 +1911,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
         CONFIG["ticker_whitelist"] = config_overrides.get("ticker_whitelist", [])
 
         for d in dates:
+            _REPLAY_AS_OF = d   # v0.45.415：回放窗口按它取日线版本（时点数据）；不开窗口时没人读
             run_for_date(d, verbose=False)
 
         equity = _load_jsonl(EQUITY_FILE)
@@ -1668,6 +1924,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
         }
     finally:
         POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE = _orig_paths
+        _REPLAY_AS_OF = _orig_as_of
         CONFIG.clear()
         CONFIG.update(_orig_config)
         _VOL_ANN_CACHE.clear()   # 沙盒里攒的 σ 不得漏进生产 run_for_date
@@ -1839,6 +2096,11 @@ def render_portfolio_card() -> str:
                 if str(p.get("sizing", "")).startswith("tier_fallback"))
     _fallback_txt = (f'⚠️ 今日 {_n_fb}/{len(positions)} 仓退回分档（无可用 σ₂₀，'
                      f'按置信档位定仓）<br>' if _n_fb else '')
+    # v0.45.416：最近一次运行里拆股口径判不了的仓位（run_for_date 写进净值行）。这些行的现价 / 浮盈不按日线算——
+    # 日线可能是另一口径（1 拆 2 会凭空显示 −50%）；与净值里的处理一致（按入场价估值）。
+    _split_unresolved = set(max(eq, key=lambda x: x["date"]).get("split_unresolved") or [])
+    _fallback_txt += (f'⚠️ {"、".join(sorted(_split_unresolved))} 拆股口径待核（今天未查出场、按入场价估值，'
+                      f'原因见日志 / run_for_date 返回的 split_unresolved）<br>' if _split_unresolved else '')
 
     # 持仓表格
     pos_rows = ""
@@ -1846,6 +2108,9 @@ def render_portfolio_card() -> str:
         pos_details = []
         for p in positions:
             p_obj = Position(**p)
+            if p_obj.ticker in _split_unresolved:
+                pos_details.append((p_obj, None, None, None))
+                continue
             ohlc = _fetch_ohlc(p_obj.ticker, p_obj.entry_date,
                                 (datetime.strptime(kpi["latest_date"], "%Y-%m-%d") + timedelta(days=2)).strftime("%Y-%m-%d"))
             cur = p_obj.entry_price
@@ -1861,16 +2126,22 @@ def render_portfolio_card() -> str:
             pos_details.append((p_obj, cur, u_pct, u_usd))
 
         for p_obj, cur, u_pct, u_usd in pos_details:
-            pnl_col = "#10b981" if u_usd >= 0 else "#ef4444"
             dir_icon = "🟢" if p_obj.direction == "bullish" else "🔴"
+            if cur is None:   # v0.45.416：拆股口径待核
+                cur_cell = '⚠️ 口径待核'
+                pnl_cell = '<td style="padding:4px 8px;text-align:right;color:var(--text3);">—</td>'
+            else:
+                pnl_col = "#10b981" if u_usd >= 0 else "#ef4444"
+                cur_cell = f'${cur:.2f}'
+                pnl_cell = (f'<td style="padding:4px 8px;text-align:right;color:{pnl_col};font-weight:600;">'
+                            f'${u_usd:+.2f} ({u_pct:+.1f}%)</td>')
             pos_rows += (
                 f'<tr>'
                 f'<td style="padding:4px 8px;font-weight:600;">{p_obj.ticker}</td>'
                 f'<td style="padding:4px 8px;">{dir_icon} {"Long" if p_obj.direction == "bullish" else "Short"}</td>'
                 f'<td style="padding:4px 8px;text-align:right;">${p_obj.entry_price:.2f}</td>'
-                f'<td style="padding:4px 8px;text-align:right;">${cur:.2f}</td>'
-                f'<td style="padding:4px 8px;text-align:right;color:{pnl_col};font-weight:600;">'
-                f'${u_usd:+.2f} ({u_pct:+.1f}%)</td>'
+                f'<td style="padding:4px 8px;text-align:right;">{cur_cell}</td>'
+                f'{pnl_cell}'
                 f'<td style="padding:4px 8px;text-align:right;font-size:11px;color:var(--text3);">'
                 f'${p_obj.sl_price:.2f} / ${p_obj.tp_price:.2f}</td>'
                 f'<td style="padding:4px 8px;text-align:right;font-size:11px;color:var(--text3);">'

@@ -1,5 +1,5 @@
 // 盘中：关注列表定时快照 → 水平走势、GEX 热力图、回看、路由变动。只看单日（跨日拼接 = 历史路由叠其后价格）。
-import { api, h, num, usdShort, seg, table, panel, isNum, pref, setPref, ROUTE_SHORT, fill } from "../lib.js";
+import { api, h, helpLink, num, usdShort, seg, table, panel, isNum, pref, setPref, ROUTE_SHORT, fill } from "../lib.js";
 import { lines, heatmap, strikeBars, C } from "../charts.js";
 import { state, refreshMeta } from "../app.js";
 import { sidebar } from "./ticker.js";
@@ -20,7 +20,7 @@ export async function renderIntraday(root, t, alive) {
     const snaps = d.snapshots || [];
     const head = h("div", { class: "page-head" },
       h("div", {}, h("h1", {}, `${t} 盘中`, h("span", { class: "sub" }, `${d.date} · ${snaps.length} 张快照`)),
-        h("p", { class: "lede" }, "关注列表里的标的在交易时段内定时拍照（只存聚合数值，不存原始链）。OI 在盘中不变，水平的移动来自现价与 IV 的变化；成交量口径随成交累积。")),
+        h("p", { class: "lede" }, "关注列表里的标的在交易时段内定时拍照（只存聚合数值，不存原始链）。OI 在盘中不变，水平的移动来自现价与 IV 的变化；成交量口径随成交累积。 ", helpLink("intraday"))),
       h("div", { class: "controls" },
         (dates.dates || []).length > 1 ? h("select", { class: "sel", "aria-label": "日期", onchange: (e) => { date = e.target.value; draw(); } },
           dates.dates.map((x) => h("option", { value: x, selected: x === date }, x))) : null,

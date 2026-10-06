@@ -743,6 +743,9 @@ def _isolate_paper_portfolio_state(tmp_path, monkeypatch, _real_paper_portfolio_
     monkeypatch.setattr(_pp, "CLOSED_FILE", sandbox / "closed_trades.jsonl")
     monkeypatch.setattr(_pp, "EQUITY_FILE", sandbox / "equity_curve.jsonl")
     monkeypatch.setattr(_pp, "META_FILE", sandbox / "meta.json")
+    # v0.45.416：拆股记录缓存的键是 (ticker, entry_date, **真实**今天)——同一次 pytest 里两个测试用同一个
+    # (标的, 入场日) 喂不同的假世界（GAPX / 08-10 就有两份），前一个查到的拆股会原样漏给后一个，结果取决于执行顺序。
+    monkeypatch.setattr(_pp, "_SPLIT_EVENTS_CACHE", {}, raising=False)
 
     yield
 

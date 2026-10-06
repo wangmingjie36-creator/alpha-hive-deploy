@@ -9,6 +9,7 @@
 用法（与 `python3 -m data_backup.run_backup` 完全一致）：
     /usr/local/bin/python3 run_data_backup.py --src "..." --backup-dir "..." \
         --remote origin --branch main --status-file "..."
+`--backup-dir` 省略 ⇒ `PATHS.data_backup_repo`（读 `ALPHA_HIVE_HOME`；编排器 Step 14 自 v0.45.414 起就靠它）。
 """
 import sys
 

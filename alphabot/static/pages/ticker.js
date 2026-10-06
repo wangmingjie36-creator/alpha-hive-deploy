@@ -1,11 +1,12 @@
 // 标的页：水平 / 希腊值 / 期限 / 卖权 / 价格。一次现算（服务端 60 秒缓存）喂全部子页。
-import { api, h, num, money, pct, pctPts, usdShort, signedPct, distPct, signChip, seg, table, panel, isNum,
+import { api, h, helpLink, num, money, pct, pctPts, usdShort, signedPct, distPct, signChip, seg, table, panel, isNum,
   downloadCSV, pref, setPref, timeAgo, SIGN_LABEL, CURVE_LABEL, ROUTE_LABEL, STRUCT_LABEL, TENOR_LABEL,
   EARN_LABEL, SOURCE_LABEL, fill, plain } from "../lib.js";
 import { strikeBars, gammaCurve, lines, columns, payoff, C } from "../charts.js";
 import { state, tickers, refreshMeta } from "../app.js";
 
 const TABS = [["levels", "水平"], ["greeks", "希腊值"], ["term", "期限"], ["sell", "卖权"], ["price", "价格"]];
+const TAB_HELP = { levels: "levels", greeks: "greeks", term: "greeks", sell: "sell", price: "price" };
 const VIEWS = [["next_expiry", "下一到期"], ["le_45dte", "≤45 天（路由用）"], ["full", "全部到期"]];
 
 export async function renderTicker(root, t, tab, alive, force = false) {
@@ -45,7 +46,7 @@ export async function renderTicker(root, t, tab, alive, force = false) {
         h("span", {}, "IV30 ", h("b", { class: "num" }, isNum(d.iv30) ? `${num(d.iv30, 1)}%` : "—")),
         h("span", {}, "OI 为前一交易日"),
         h("span", {}, `取于 ${timeAgo(d.cache_age_sec)}`))),
-    h("div", { class: "controls" }, favBtn, refresh));
+    h("div", { class: "controls" }, helpLink(TAB_HELP[tab] || "levels"), favBtn, refresh));
 
   const tabs = h("nav", { class: "tabs", "aria-label": "标的子页" },
     TABS.map(([k, label]) => h("a", { href: `#/t/${t}/${k}`, "aria-current": k === tab ? "page" : null }, label)));
@@ -106,9 +107,9 @@ function levels(body, d) {
           right: h("button", { class: "btn", type: "button", onclick: () => downloadCSV(`alphabot-${d.ticker}-gex-${view}.csv`, csvCols, v.strikes || []) }, "导出 CSV"),
         }, controls, h("div", { style: { height: "10px" } }), rows.length ? ladderEl : h("div", { class: "empty" }, "这个视图没有可用合约。"),
         h("p", { class: "note" }, "正值（蓝）= 做市商被假设为净多 gamma，价格波动时倾向反向对冲、压低波动；负值（橙）相反。符号用朴素 OI 口径：call 记正、put 记负——个股上 put 侧可能整个反了，所以只作环境参考。")),
-        panel("水平", { sub: `${VIEWS.find((x) => x[0] === view)[1]} · ${v.n_contracts ?? "—"} 张合约` }, levelCards(d, v, S))),
+        panel("水平", { sub: `${VIEWS.find((x) => x[0] === view)[1]} · ${v.n_contracts ?? "—"} 个合约（行权价 × call/put）` }, levelCards(d, v, S))),
       h("div", { style: { height: "20px" } }),
-      panel("Gamma 曲线", { sub: "每张合约固定自身 IV，在现价 ±20% 的假想价格上重算总 GEX；过零点就是 Zero Gamma（路由读的正是 ≤45 天视图的这条线）" },
+      panel("Gamma 曲线", { sub: "每个合约固定自身 IV，在现价 ±20% 的假想价格上重算总 GEX；过零点就是 Zero Gamma（路由读的正是 ≤45 天视图的这条线）" },
         (v.curve?.total || []).length ? curveEl : h("div", { class: "empty" }, "没有可用于扫描的合约（需要 IV 与 OI）。")));
     if (rows.length) strikeBars(ladderEl, { rows, series, spot: S, levels: lv });
     if ((v.curve?.total || []).length) gammaCurve(curveEl, v.curve, S);
@@ -213,7 +214,7 @@ function term(body, d) {
     panel("三个期限视图", { sub: "GEX 是带符号求和，截断到期日集合可能翻号——三个视图并列给出，路由固定读 ≤45 天" },
       flips ? h("p", { class: "callout warn" }, "三个视图在现价处的 gamma 符号不一致：环境判断对到期日范围敏感，读路由时要打折。") : null,
       table([{ label: "视图", render: (s) => s.label }, { label: "现价处", render: (s) => signChip(s.sign) },
-        { label: "总净 GEX / 1%", cls: "r", render: (s) => usdShort(s.tot) }, { label: "合约数", cls: "r", render: (s) => num(s.n, 0) }], signs)),
+        { label: "总净 GEX / 1%", cls: "r", render: (s) => usdShort(s.tot) }, { label: "合约个数", cls: "r", render: (s) => num(s.n, 0) }], signs)),
     h("div", { style: { height: "20px" } }),
     h("div", { class: "grid halves" },
       panel("逐到期日净 GEX", { sub: "美元 / 现价每变动 1%" }, ex.length ? gexEl : h("div", { class: "empty" }, "—")),

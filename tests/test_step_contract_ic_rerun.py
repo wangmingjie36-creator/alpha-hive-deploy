@@ -519,7 +519,19 @@ _FG_WINDOW_STATES = [
      {"ohlc_store_revised"}),
     ("revised_long_ago", {**_NR, "ohlc_window": dict(_OW_HEALTHY, store=dict(
         _STORE_OK, revised_bars=6, revised_tickers=["NVDA"]))}, set()),
+    # v0.45.415 二次检查：不知道重放日（应恒为 0）⇒ 窗口降级
+    ("as_of_unknown_only", {**_NR, "ohlc_window": dict(_OW_HEALTHY, degraded=True, store=dict(
+        _STORE_OK, as_of_unknown=3))}, {"ohlc_window_degraded"}),
 ]
+
+
+def test_as_of_unknown_only_says_what_happened_not_a_download_failure():
+    """只因「不知道重放日」降级时，attention 说它（时点数据失效），不说「整段取数 0/20 失败、退回直连」（那不是事实）。
+    变异「parts 条件不看 as_of_unknown」/「不加那一段」⇒ 红。"""
+    fres = next(
+        s[1] for s in _FG_WINDOW_STATES if s[0] == "as_of_unknown_only")
+    (a,) = rr._forward_test_attention("fg_exposure_gate_forward", rr._detail(fres, rr._FWD_DETAIL_KEYS))
+    assert "不知道重放日" in a["message"] and "整段取数" not in a["message"], a["message"]
 
 
 class TestAttentionMatchesRenderedIcons:

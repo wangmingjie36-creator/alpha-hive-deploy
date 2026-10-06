@@ -202,13 +202,26 @@ class _HivePaths:
         return self.home / "replay_ohlc_state"
 
     @property
+    def migrations_state(self) -> Path:
+        """数据迁移运行器的运行记录目录（v0.45.419，阶段 7，`data_migrations.runner`）。
+
+        写：运行器——`applied.jsonl`（只追加：每条迁移 / 手工修复工具的「谁、何时、改了多少行、备份在哪」，
+        含补记的历史手工修复）。**不是可重建缓存**：它是「这个库被动过什么」的唯一机器可读记录，丢了就只剩
+        CHANGELOG 文字与散落的备份文件 ⇒ 进数据备份（`data_backup/export.py` 的 `STATE_DIRS`）。
+        调用时求值（读 `ALPHA_HIVE_HOME`）；只读路径不建目录（写入方自己 `mkdir`）。
+        """
+        return self.home / "migrations_state"
+
+    @property
     def data_backup_repo(self) -> Path:
         """数据备份仓库的工作区（`data_backup/run_backup.py`，编排器 Step 14 每个扫描日提交一次）（v0.45.408）。
 
         读：`experiments/fg_exposure_gate_forward_test.py` 的逐日重锚——生产状态历史在数据根迁移阶段 5 之后
         只提交到这里（代码仓库的 `paper_portfolio_state/` 提交止于 2026-09-25）。**本属性只读**，不建目录。
-        调用时求值（读 `ALPHA_HIVE_HOME`）。⚠️ 编排器与 `run_backup.py` / `export.py` 的缺省值仍写死
-        `~/alpha-hive-data/_git_backup`（生产里与本值相同），统一另立任务。
+        调用时求值（读 `ALPHA_HIVE_HOME`）。
+        v0.45.414 起它也是 `run_backup` / `export` 的缺省位置（经 `export.default_backup_repo()`），编排器 Step 14
+        不再自己写路径。⚠️ `ALPHA_HIVE_HOME` 未设时 `home` 兜底到代码检出 ⇒ 本值落进代码仓库；
+        备份 / 导出由 `export.backup_repo_inside_code_repo` 拒绝，只读的调用方自己留意。
         """
         return self.home / "_git_backup"
 

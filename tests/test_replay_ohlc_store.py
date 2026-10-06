@@ -208,26 +208,31 @@ class TestFetchRange:
 
 class TestRevisions:
     """「Yahoo 改了已落定的日线」同落定一样要两次**不同美东日期**的观察给出同一个新值才算（二次检查：单次响应漏一天
-    曾被永久记成修订）。无论确认与否，回答一律是库里的值。"""
+    曾被永久记成修订）。确认后成为一个**版本**（v0.45.415 时点数据）：重放日早于生效日用旧值、之后用新值。
+    `merge()` 返回最新版本；按重放日取版本是 `pit_slice()` 的事（`TestPointInTime` 有完整的一组）。"""
 
-    def test_revised_bar_keeps_the_stored_value_and_is_recorded_on_the_second_look(self, tmp_path):
-        """09-22 第一次看到 09-15 的新值：只记嫌疑、不报；09-23 再看到同一个新值：记修订（first_seen = 09-22）、报。
-        变异「用新值覆盖」⇒ 回答变 ⇒ 红；变异「单次即记」⇒ 第一天就报 ⇒ 红；变异「不记 / 不计」⇒ 红。"""
+    def test_revised_bar_becomes_a_version_on_the_second_look(self, tmp_path):
+        """09-22 第一次看到 09-15 的新值：只记嫌疑、不报、回答仍是旧值；09-23 再看到同一个新值：成为生效日 09-22 的版本、报。
+        变异「单次即记」⇒ 第一天就报 ⇒ 红；变异「不记 / 不计」⇒ 红；变异「不按重放日取版本」⇒ 09-21 拿到新值 ⇒ 红。"""
         m = _master()
         _settle_through_0919(tmp_path, m)
         revised = {**m, "2026-09-15": _bar(555.0)}
         s1 = _store(tmp_path, "2026-09-22")
         _, got = _fetch(s1, revised)
-        assert got["2026-09-15"] == m["2026-09-15"]
+        assert got["2026-09-15"] == m["2026-09-15"], "只是嫌疑：最新版本仍是旧值"
         f = _file(tmp_path)
-        assert f["revisions"] == {} and f["revision_suspects"] == {"2026-09-15": {"seen_on": "2026-09-22", "yahoo": _bar(555.0)}}
+        assert f["revisions"] == {} and f["revision_suspects"] == {"2026-09-15": {"seen_on": "2026-09-22", "yahoo": _bar(555.0),
+                                                                             "earlier": []}}
         assert (s1.stats()["revisions_new"], s1.stats()["revised_bars"]) == (0, 0)
         s2 = _store(tmp_path, "2026-09-23")
         _, got = _fetch(s2, revised)
-        assert got["2026-09-15"] == m["2026-09-15"]
+        assert got["2026-09-15"] == _bar(555.0), "确认后最新版本是新值"
+        assert s2.pit_slice("AAA", "2026-09-14", "2026-09-17", {}, "2026-09-21")["2026-09-15"] == m["2026-09-15"]
+        assert s2.pit_slice("AAA", "2026-09-14", "2026-09-17", {}, "2026-09-22")["2026-09-15"] == _bar(555.0)
         f = _file(tmp_path)
-        assert f["revisions"] == {"2026-09-15": {"first_seen": "2026-09-22", "confirmed_on": "2026-09-23",
-                                                 "yahoo": _bar(555.0)}} and f["revision_suspects"] == {}
+        assert f["schema"] == 2 and f["revisions"] == {"2026-09-15": [
+            {"first_seen": "2026-09-22", "confirmed_on": "2026-09-23", "yahoo": _bar(555.0)}]}
+        assert f["revision_suspects"] == {}
         assert (s2.stats()["revised_recent"], s2.stats()["revised_recent_tickers"]) == (1, ["AAA"])
         assert (s2.stats()["revisions_new"], s2.stats()["revised_bars"], s2.stats()["revised_tickers"]) == (1, 1, ["AAA"])
 
@@ -260,29 +265,32 @@ class TestRevisions:
         s = _store(tmp_path, "2026-09-24")
         _fetch(s, revised)
         assert (s.stats()["revisions_new"], s.stats()["revised_bars"]) == (0, 1)
-        assert _file(tmp_path)["revisions"]["2026-09-15"]["first_seen"] == "2026-09-22"
+        assert _file(tmp_path)["revisions"]["2026-09-15"][0]["first_seen"] == "2026-09-22"
 
-    def test_an_unconfirmed_suspect_is_rechecked_even_after_it_leaves_the_overlap(self, tmp_path):
-        """嫌疑在重叠段最左一天（09-10）；第二天已落定段前进、重叠段右移——补尾起点必须退回去盖住它，否则它永远没有第二次观察。
-        变异「补尾起点不看嫌疑」⇒ 09-23 从 09-11 起下载、确认不了 ⇒ 红。"""
+    def test_while_a_suspect_is_open_the_whole_window_is_downloaded(self, tmp_path):
+        """v0.45.415：有嫌疑 ⇒ 之后每次整段下载，直到确认或撤销（拆股改的是全段历史，窗口里每个日期都要第二次观察）。
+        嫌疑在重叠段最左一天（09-10）也一样被再看一次。变异「有嫌疑仍只补尾」⇒ 09-23 从 09-11 起下载 ⇒ 红。"""
         m = _master()
         _settle_through_0919(tmp_path, m)
         revised = {**m, "2026-09-10": _bar(555.0)}
         _fetch(_store(tmp_path, "2026-09-22"), revised)
-        assert _file(tmp_path)["settled"]["end"] == "2026-09-20"
         s = _store(tmp_path, "2026-09-23")
-        assert s.fetch_start("AAA", *W) == "2026-09-10"
+        assert s.fetch_start("AAA", *W) == W[0]
         _fetch(s, revised)
         assert "2026-09-10" in _file(tmp_path)["revisions"]
+        assert _store(tmp_path, "2026-09-24").fetch_start("AAA", *W) != W[0], "确认后嫌疑清空 ⇒ 回到补尾"
 
     def test_a_settled_bar_that_disappears_is_a_revision_too(self, tmp_path):
+        """「这天没有日线了」也是一个版本：生效日之后的重放日看不到它，之前的照旧看得到。"""
         m = _master()
         _settle_through_0919(tmp_path, m)
         gone = {d: b for d, b in m.items() if d != "2026-09-16"}
         _fetch(_store(tmp_path, "2026-09-22"), gone)
-        _, got = _fetch(_store(tmp_path, "2026-09-23"), gone)
-        assert got["2026-09-16"] == m["2026-09-16"]
-        assert _file(tmp_path)["revisions"]["2026-09-16"]["yahoo"] is None
+        s = _store(tmp_path, "2026-09-23")
+        _, got = _fetch(s, gone)
+        assert "2026-09-16" not in got
+        assert s.pit_slice("AAA", "2026-09-15", "2026-09-18", {}, "2026-09-21")["2026-09-16"] == m["2026-09-16"]
+        assert _file(tmp_path)["revisions"]["2026-09-16"][0]["yahoo"] is None
 
     def test_revision_before_the_overlap_is_frozen_silently(self, tmp_path):
         """重叠段之外更早的修订看不见——这是「首次落定后冻结」的本意，回答照旧是库里的值。"""
@@ -510,9 +518,13 @@ class TestWindowIntegration:
         _, win = _through_window(_store(tmp_path, "2026-09-23"), _REQS)
         assert win.stats()["store"]["revised_bars"] == 1
         n0 = len(fake.calls)
-        out, win = _through_window(_store(tmp_path, "2026-09-24"), [_REQS[0], ("2026-09-14", "2026-09-17")])
+        pp._REPLAY_AS_OF = "2026-09-21"   # 重放日早于生效日 09-22 ⇒ 时点上是旧值
+        try:
+            out, win = _through_window(_store(tmp_path, "2026-09-24"), [_REQS[0], ("2026-09-14", "2026-09-17")])
+        finally:
+            pp._REPLAY_AS_OF = None
         assert fake.calls[n0:] == [], "请求全在已落定段内：不下载"
-        assert out[1]["2026-09-15"] == m["2026-09-15"], "回答仍是冻结值"
+        assert out[1]["2026-09-15"] == m["2026-09-15"], "重放日早于生效日：旧值"
         st = win.stats()["store"]
         assert (st["revised_bars"], st["revised_tickers"], st["revisions_new"]) == (1, ["AAA"], 0)
 

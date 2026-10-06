@@ -35,10 +35,12 @@
 
 用法
 ----
-    /usr/local/bin/python3 backfill_dir_accuracy.py --dry-run   # 只看不写
-    /usr/local/bin/python3 backfill_dir_accuracy.py             # 实写
+    /usr/local/bin/python3 backfill_dir_accuracy.py           # 缺省 = dry-run（在库的内存副本上算，真库一字节不动）
+    /usr/local/bin/python3 backfill_dir_accuracy.py --apply   # 实写（先在线备份到 _manual_backups/，备份失败即中止）
 
-⚠️ 写库前请自行备份（惯例：`db_backups/pheromone_pre_*.db`）。
+v0.45.419（数据根迁移阶段 7）：缺省由「直接写库」改为 dry-run。旧版 dry-run 还会先对真库 `ALTER TABLE`
+（写在 `--dry-run` 判断之前），所以「只看不写」并不真的不写。`--dry-run` 仍接受（空操作，兼容旧用法）；
+与 `--apply` 同时给 = 参数错误。实写成功后在 `PATHS.migrations_state/applied.jsonl` 追加一行记录。
 """
 from __future__ import annotations
 
@@ -178,11 +180,14 @@ def _close_at_or_before(series, target_date):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true", help="只统计不写库")
+    ap.add_argument("--dry-run", action="store_true", help="（缺省行为，保留兼容）只统计不写库")
+    ap.add_argument("--apply", action="store_true", help="真写库（先在线备份；缺省是 dry-run）")
     ap.add_argument("--all", action="store_true", help="重算全部（默认只补空缺）")
     # v0.45.160：argparse 的 default 在 import 期求值，不能塞冻结值
     ap.add_argument("--db", default=None)
     args = ap.parse_args()
+    if args.apply and args.dry_run:
+        ap.error("--apply 与 --dry-run 互斥")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     import pandas as pd
@@ -194,7 +199,24 @@ def main() -> int:
 
     # v0.45.160：argparse 的 default 是 None（不能塞 import 期冻结值），此处解析
     args.db = args.db or _db_path()
-    conn = sqlite3.connect(args.db)
+    backup_path = None
+    if args.apply:
+        from data_migrations.runner import backup_before_write
+        try:
+            backup_path = backup_before_write(Path(args.db), "dir-accuracy")
+        except Exception as e:  # noqa: BLE001 —— 没有备份就不写
+            _log.error("写库前备份失败（%s: %s），已中止未写库。", type(e).__name__, e)
+            return 2
+        _log.info("已备份 → %s", backup_path)
+        conn = sqlite3.connect(args.db)
+    else:
+        # dry-run 在内存副本上算：下面的 ALTER TABLE 也只落在副本里，真库不动
+        src = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+        conn = sqlite3.connect(":memory:")
+        try:
+            src.backup(conn)
+        finally:
+            src.close()
     # 确保新列存在（幂等；正常由 backtester 的迁移建好）
     for col, typ in (("close_t7", "REAL"), ("dir_correct_t7", "INTEGER"),
                      ("dir_ambiguous_t7", "INTEGER")):
@@ -273,14 +295,17 @@ def main() -> int:
             return 2
     _log.info("可回填 %d 条，取价失败 %d 条", len(updates), misses)
 
-    if args.dry_run:
-        _log.info("--dry-run：未写库")
+    if not args.apply:
+        _log.info("dry-run（缺省）：未写库；确认无误后加 --apply")
         return 0
     conn.executemany("""UPDATE predictions
                         SET close_t7 = ?, dir_correct_t7 = ?, dir_ambiguous_t7 = ?
                         WHERE id = ?""", updates)
     conn.commit()
     _log.info("已写入 %d 条", len(updates))
+    from data_migrations.runner import record_tool_run
+    record_tool_run("backfill_dir_accuracy", rows_affected=len(updates), backup=str(backup_path),
+                    args="--all" if args.all else "", db_path=Path(args.db))
     return 0
 
 

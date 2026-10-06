@@ -513,10 +513,11 @@ class TestNativeWindow:
         assert LA.window_owner() is None
 
     def test_long_command_line_survives_piped_ps_width(self, home, monkeypatch):
-        """v0.45.412：`ps` 输出被管道接走时，procps 的宽度「未定义（可能 80、不限……）」（ps(1)），
-        GitHub Actions 上恰是 80 ⇒ 长解释器路径把 `alphabot.launcher` 挤出第 80 列，开着的窗口被当成没有、
-        第二次双击去问数据根。macOS 的 BSD ps 管道输出恒不限宽（实测连 COLUMNS 都不理），本机真跑永远红不了
-        ⇒ 用按 procps 文档行事的假 ps 钉住：不带 `-ww` 就截到 80 列。"""
+        """v0.45.412：procps 的 ps 管道输出本不限宽，但环境里设了 COLUMNS 就按它截（src/ps/global.c），
+        `-ww` 压过 COLUMNS（parser.c）。CI 上确实被截了（owner 命令行 99 列、标记从第 83 列起；不带 `-ww` 三次
+        全红、带了转绿；COLUMNS 是谁设的未查明）⇒ 开着的窗口被当成没有、第二次双击去问数据根。
+        macOS 的 BSD ps 管道输出恒不限宽（实测连 COLUMNS 都不理），本机真跑永远红不了
+        ⇒ 用按 procps 源码行事的假 ps + `COLUMNS=80` 钉住。"""
         ci_cmdline = ("/opt/hostedtoolcache/Python/3.11.16/x64/bin/python "
                       "-c import time; time.sleep(60) alphabot.launcher")     # 10-04 CI 上 owner 的真实形状
         assert ci_cmdline.index("alphabot.launcher") >= 80, "夹具自检：标记要真在 80 列之外，否则这条绿不算数"
@@ -526,9 +527,12 @@ class TestNativeWindow:
             if not str(cmd[0]).endswith("ps"):
                 return real_run(cmd, *a, **k)
             asked.append(list(cmd))
-            unlimited = "-ww" in cmd or cmd.count("-w") >= 2
-            out = ci_cmdline if unlimited else ci_cmdline[:80]
+            cols = (k.get("env") or os.environ).get("COLUMNS")
+            unlimited = "-ww" in cmd or cmd.count("-w") >= 2 or not cols
+            out = ci_cmdline if unlimited else ci_cmdline[:int(cols)]
             return subprocess.CompletedProcess(cmd, 0, stdout=out + "\n", stderr="")
+
+        monkeypatch.setenv("COLUMNS", "80")
 
         owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:

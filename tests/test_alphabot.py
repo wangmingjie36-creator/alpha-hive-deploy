@@ -402,3 +402,87 @@ class TestStaticAssets:
             r = subprocess.run(["git", "-C", str(repo), "check-ignore", "-q", "--no-index", "--", p],
                                capture_output=True)
             assert r.returncode == want, (p, r.returncode)
+
+
+class TestHelpPage:
+    """程序内「帮助」页（v0.45.411）：说明写在前端里，最容易出的两种事故是——
+    ① 页面里的「怎么读这页」链接指向一个已被改名 / 删掉的章节（点了落到「快速上手」，看着像正常）；
+    ② 帮助页自己抄了一份会变的规则常量（路由缓冲、档位、检验门槛），常量改了说明还是旧的。
+    两条各堵一次；导航 / 路由接线与接口可达也各核一条。"""
+
+    HELP = STATIC / "pages" / "help.js"
+
+    @classmethod
+    def _section_ids(cls):
+        return re.findall(r'^  \["([a-z]+)", "', cls.HELP.read_text(encoding="utf-8"), re.M)
+
+    @classmethod
+    def _refs(cls):
+        """全部静态 js 里指向帮助章节的引用：#/help/<id>、helpLink("<id>")、ticker 的 TAB_HELP 取值。"""
+        refs = []
+        for js in sorted(STATIC.rglob("*.js")):
+            if "vendor" in js.parts:
+                continue
+            txt = js.read_text(encoding="utf-8")
+            refs += [(js.name, i) for i in re.findall(r"#/help/([a-z]+)", txt)]
+            refs += [(js.name, i) for i in re.findall(r'helpLink\("([a-z]+)"\)', txt)]
+            m = re.search(r"TAB_HELP\s*=\s*\{([^}]*)\}", txt)
+            if m:
+                refs += [(js.name, i) for i in re.findall(r':\s*"([a-z]+)"', m.group(1))]
+        return refs
+
+    def test_sections_are_registered_and_unique(self):
+        ids = self._section_ids()
+        assert len(ids) >= 12 and len(ids) == len(set(ids)), ids
+        assert ids[0] == "start"          # 缺省 / 未知 id 都落到第一节
+
+    def test_every_help_link_points_at_a_registered_section(self):
+        ids, refs = set(self._section_ids()), self._refs()
+        assert len(refs) >= 8, "找到的引用太少——解析规则坏了，这条测试在空转"
+        bad = [(f, i) for f, i in refs if i not in ids]
+        assert not bad, f"指向不存在的帮助章节：{bad}"
+
+    def test_ticker_pages_all_have_a_help_target(self):
+        """五个子页各有去处：新增子页忘了登记 TAB_HELP，会退回「水平」说明而没人发现。"""
+        txt = (STATIC / "pages" / "ticker.js").read_text(encoding="utf-8")
+        tabs = re.search(r"const TABS = \[(.*?)\];", txt, re.S).group(1)
+        keys = set(re.findall(r'\["([a-z]+)",', tabs))
+        mapped = set(re.findall(r"(\w+):\s*\"", re.search(r"TAB_HELP\s*=\s*\{([^}]*)\}", txt).group(1)))
+        assert keys and keys <= mapped, (keys, mapped)
+
+    def test_nav_and_route_are_wired(self):
+        assert 'href="#/help" data-nav="help"' in (STATIC / "index.html").read_text(encoding="utf-8")
+        app = (STATIC / "app.js").read_text(encoding="utf-8")
+        assert 'from "./pages/help.js"' in app and 'page === "help"' in app
+
+    def test_rule_constants_come_from_the_server_not_a_copy(self):
+        """帮助页读 /api/method，且路由 / 梯子 / 检验门槛都经 m.* 取，不写字面量。"""
+        txt = self.HELP.read_text(encoding="utf-8")
+        assert 'api("/api/method")' in txt
+        for key in ("flip_buffer_pct", "base_rung", "far_rung", "min_sweep_contracts", "delta_tol", "max_spread_pct",
+                    "wing_width_sigma", "min_independent_per_tenor", "min_distinct_expiries", "min_per_group",
+                    "alpha_each", "n_perm"):
+            assert key in txt, f"帮助页没有引用 {key}"
+        # 这几个数不许以「≤ 3.0%」「60 个」之类字面量混进说明（0.20 / 0.10 档名作为术语出现，不在此列）
+        assert not re.search(r"≤\s*\d+(\.\d+)?\s*%", txt), "路由缓冲写成了字面量"
+        assert not re.search(r"至少\s*\d+\s*个", txt), "检验门槛写成了字面量"
+
+    def test_help_assets_are_served_and_method_has_every_key_used(self):
+        c = _client(_demo_service())
+        assert c.get("/static/pages/help.js").status_code == 200
+        m = c.get("/api/method").json()
+        for k in ("flip_buffer_pct", "base_rung", "far_rung", "min_sweep_contracts", "rule_version"):
+            assert k in m["route"], k
+        for k in ("deltas", "delta_tol", "max_spread_pct", "wing_width_sigma"):
+            assert k in m["ladder"], k
+        for k in ("min_independent_per_tenor", "min_distinct_expiries", "min_per_group", "alpha_each", "n_perm",
+                  "eligible_earnings_status", "excluded_underlying_price_sources"):
+            assert k in m["prereg"], k
+
+    def test_contract_count_is_never_labelled_as_zhang(self):
+        """「N 张合约」会被读成持仓 / 成交张数（券商 App 里 NVDA 单个到期日就有 10 万张）；页面数的是合约系列个数，
+        单位只许写「个」。v0.45.411：用户拿 1276 对照券商 App 的持仓数，以为少了几个数量级。"""
+        hits = [(js.name, n + 1) for js in sorted(STATIC.rglob("*.js")) if "vendor" not in js.parts
+                for n, line in enumerate(js.read_text(encoding="utf-8").splitlines()) if "张合约" in line]
+        assert not hits, f"「张合约」会让人把合约个数当成张数：{hits}"
+        assert "个合约（行权价 × call/put）" in (STATIC / "pages" / "ticker.js").read_text(encoding="utf-8")

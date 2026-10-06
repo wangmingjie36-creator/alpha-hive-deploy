@@ -1,5 +1,5 @@
 // 账本：预注册检验的就绪度（只看样本量与标签计数，不看结果）+ 按档校准 + 按日期浏览账本行（盲期版）。
-import { api, h, num, pct, seg, table, panel, isNum, ROUTE_SHORT, EARN_LABEL, TENOR_LABEL, fill } from "../lib.js";
+import { api, h, helpLink, num, pct, seg, table, panel, isNum, ROUTE_SHORT, EARN_LABEL, TENOR_LABEL, fill } from "../lib.js";
 import { lines, C } from "../charts.js";
 
 const STATUS = { undetermined: "无法判定", accruing: "攒样本中", ready: "已就绪", error: "判定失败" };
@@ -9,7 +9,7 @@ export async function renderLedger(root, alive) {
   if (!alive()) return;
   const head = h("div", { class: "page-head" }, h("div", {},
     h("h1", {}, "账本与检验"),
-    h("p", { class: "lede" }, "每个扫描日收盘后，日报钩子给每只标的记一行（月度、周度分开记），到期后补上到期收盘。「GEX 环境路由挑不挑得出更差的卖权环境」要等样本够了才检验一次，检验只跑一次、由日报钩子冻结。")));
+    h("p", { class: "lede" }, "每个扫描日收盘后，日报钩子给每只标的记一行（月度、周度分开记），到期后补上到期收盘。「GEX 环境路由挑不挑得出更差的卖权环境」要等样本够了才检验一次，检验只跑一次、由日报钩子冻结。 ", helpLink("ledger"))));
   const sd = a.state_dir || {};
   const blocks = [head];
   if (sd.exists === false) blocks.push(h("p", { class: "callout warn" }, `没找到账本目录 ${sd.path}：${sd.hint || ""}`));

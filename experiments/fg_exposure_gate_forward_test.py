@@ -52,6 +52,18 @@ F&G 挪到它真正适用的层次：组合层的仓位敞口控制——极度�
       **未动**：窗口、变体、统计量、检视点、α、盲化、自证（阈值、分母、四元组、逐日重锚）、种子、锚点。修订依据是
       计时剖析与取数计数（`run()` 的输出只看了进度行与取数计数），没有算或看任何周度差 / 效应量（`decide()` 从未走到
       出统计量的分支，2/15 个合格周）。
+      【事后修订 v0.45.415，2026-10-05 —— 改的是重放读到**哪一天版本**的行情，不是判定规则】
+      v0.45.410 把首次落定的日线冻结；二次检查实测拆股时它与生产、与现取都对不上：生产 `_check_exit` 每天重扫入场以来的
+      全部日线、对比复权前的止损止盈价，拆股后第一天把多头记成假止损（−7%）、空头记成假止盈（+15%），出场日倒填到入场后
+      第一天（生产自己的 bug，另立任务修）；冻结的库在落定段末端留一个假跳空、提前几天假出场；现取把拆股前每一笔都按复权价
+      重放。修订 = **时点数据**：每根已落定的日线带版本，生效日 = 第一次下载到新值的美东日期（用户 10-05 定，拆股与数据
+      更正通用）；重放第 d 天用生效日 ≤ d 的最新版本，没有就用首次落定的值（`run_replay` 逐日把 d 告诉回放窗口）。「改了」
+      仍要两次不同美东日期的观察；有嫌疑当天整段补下、之后整段直到确认，窗口里每个日期都得到新版本；拆股时还没落定的缺口日，
+      旧版本取嫌疑出现前最后一次下载（只有一次观察，用户 10-05 接受——不可能再有第二次复权前的观察）。效果：A 逐笔复现生产
+      （包括生产那笔假交易），B 在生产当时的数据下做反事实。没有任何修订时与 v0.45.410 逐字节相同；08-01 起 30 个标的
+      没有拆股（10-05 查），已有历史不受影响。
+      **未动**：窗口、变体、统计量、检视点、α、盲化、自证、种子、锚点。修订依据是读代码与合成世界的拆股模拟（自证率与取数
+      计数），没有算或看任何周度差 / 效应量。
 自证  （前提，不满足即"无法判定" exit 3）A（baseline）重放出的"窗口内新开仓位"集合
       （`(ticker, entry_date, direction, round(size_usd,2))` 四元组）与生产**实际记录**的
       `paper_portfolio_state/`（`closed_trades.jsonl` ∪ 仍在场的 `positions.jsonl`，
@@ -1366,7 +1378,10 @@ def _ohlc_window_note(res: Dict) -> str:
                     "重建；看过后删掉才会消）")
     if st.get("write_errors"):
         bits.append(f"行情库写入失败 {len(st['write_errors'])} 次（下次仍要整段下载）")
-    empty = (f"，其中直连 {ow.get('direct_empty')}/{ow.get('direct_requests')} 次一根 bar 都没拿到"
+    if st.get("as_of_unknown"):   # v0.45.415 二次检查：应恒为 0
+        bits.append(f"行情库 {st['as_of_unknown']} 次请求不知道重放日、用了最新版本（有回放没经 run_replay，时点数据在这些"
+                    "请求上失效）")
+    empty =(f"，其中直连 {ow.get('direct_empty')}/{ow.get('direct_requests')} 次一根 bar 都没拿到"
              if ow.get("direct_empty") else "")
     if not slow:
         tail = ""
@@ -1379,17 +1394,17 @@ def _ohlc_window_note(res: Dict) -> str:
 
 
 def _ohlc_store_alarm(res: Dict) -> bool:
-    """二次检查：近 `revision_alarm_days` 天**确认**了修订（多半是拆股回溯复权）⇒ 段首 ⚠️ + attention
-    `….ohlc_store_revised`。两位审查者都实测了：拆股时还没落定的最近几天会按复权价落定、在落定段末端留一个假跳空，
-    A / B 都可能凭空止损——只陈述、不换图标，那句读起来是良性的。过了这几天只陈述（窗口左端固定、修订会一直在窗口里，
-    永久 ⚠️ 会把人训练成无视 ⚠️）。"""
+    """近 `revision_alarm_days` 天**确认**了修订（多半是拆股回溯复权）⇒ 段首 ⚠️ + attention `….ohlc_store_revised`。
+    v0.45.415 起回放按时点取版本，A / B 如实复现生产当时看到的价格。v0.45.416 起生产遇拆股按日线把在场仓位换到复权口径
+    （判不了就当天不碰、记 `split_unresolved`）——这条路径极少走到，且回放里拆股记录取不到而生产取到了会让 A 分叉，需人看。
+    过了这几天只陈述（窗口左端固定、修订会一直在窗口里，永久 ⚠️ 会把人训练成无视 ⚠️）。"""
     st = (res.get("ohlc_window") or {}).get("store") or {}
     return bool(st.get("revised_recent"))
 
 
 def _ohlc_store_note(res: Dict) -> str:
-    """v0.45.410：行情库里有已落定、之后被 Yahoo 改过的日线（拆股回溯复权 / 数据修订）——沿用首次落定的值。
-    只要窗口里有，就每次都报（不是只报发现那一天）；近几天才确认的另带 ⚠️ 与要人看的理由（`_ohlc_store_alarm`）。"""
+    """v0.45.410 / 415：行情库里有已落定、之后被 Yahoo 改过的日线（拆股回溯复权 / 数据修订）——按时点重放：生效日之前的
+    重放日用旧值、之后用新值。只要窗口里有，就每次都报；近几天才确认的另带 ⚠️ 与要人看的理由（`_ohlc_store_alarm`）。"""
     st = (res.get("ohlc_window") or {}).get("store") or {}
     n = st.get("revised_bars")
     if not n:
@@ -1398,9 +1413,21 @@ def _ohlc_store_note(res: Dict) -> str:
     if _ohlc_store_alarm(res):
         recent = "、".join(st.get("revised_recent_tickers", [])[:5])
         return (f"；⚠️ 行情库：{recent} 近 {st.get('revision_alarm_days')} 天确认了 {st['revised_recent']} 根已落定日线被 "
-                "Yahoo 改了（多半是拆股回溯复权）——拆股时还没落定的最近几天会按复权价落定、留一个假跳空，跨这几天持仓的 "
-                f"A / B 可能凭空出场，需人看（窗口内共 {n} 根，一律沿用首次落定的值）")
-    return f"（行情库：{names} 共 {n} 根已落定日线 Yahoo 后来改了，沿用首次落定的值）"
+                "Yahoo 改了（多半是拆股回溯复权）——生产纸面组合遇拆股按 v0.45.416 把在场仓位换到复权口径（判不了则当天不碰、"
+                f"记 split_unresolved），A / B 按时点数据如实复现；需人看（窗口内共 {n} 根，按时点：生效日之前用旧值、之后用新值）")
+    return f"（行情库：{names} 共 {n} 根已落定日线 Yahoo 后来改了，按时点重放：生效日之前用旧值、之后用新值）"
+
+
+def _ohlc_gap_unobserved_note(res: Dict) -> str:
+    """v0.45.415 二次检查：确认修订时有缺口日没有「改之前」的观察（没留住拆股前那次下载、或它没覆盖到——如拆股前一天恰好
+    漏数据），只能按新值落定：那几个重放日 A / B 可能与生产不同（自证会报出来）。只要窗口里有就每次都报，不换图标。"""
+    st = (res.get("ohlc_window") or {}).get("store") or {}
+    n = st.get("unobserved_gap_days")
+    if not n:
+        return ""
+    names = "、".join(st.get("unobserved_gap_tickers", [])[:5])
+    return (f"（行情库：{names} 有 {n} 个缺口日没有拆股 / 修订之前的观察，只能按新值——那几个重放日可能与生产不同，"
+            "自证会报出来）")
 
 
 def _anchor_gap_note(res: Dict) -> str:
@@ -1426,7 +1453,7 @@ def status_line(res: Dict) -> str:
     对得上，见 `tests/test_step_contract_ic_rerun.py::TestAttentionMatchesRenderedIcons`）；健康时逐字不变。"""
     s = res.get("status")
     note = _ohlc_window_note(res)
-    rev = _ohlc_store_note(res)   # v0.45.410：只陈述、不换图标
+    rev = _ohlc_store_note(res) + _ohlc_gap_unobserved_note(res)   # v0.45.410：只陈述、不换图标
     if s == "cannot_judge":
         return f"⚠️ F&G 敞口门前瞻检验无法判定：{res.get('reason')}{rev}{note}"
     if s == "not_ready":

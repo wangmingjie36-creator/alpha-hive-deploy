@@ -71,6 +71,8 @@ MOVE_DIRS = (
     "alphabot_state",
     # v0.45.410 回放行情库（F&G 前瞻检验；首次落定后冻结，重取的值可能已被 Yahoo 修订 ⇒ 按不可重取对待）
     "replay_ohlc_state",
+    # v0.45.419 数据迁移运行记录（阶段 7；「库被动过什么」的唯一机器可读记录，不可重取）
+    "migrations_state",
     # 向量库 / 日志 / 备份轮转
     "chroma_db", "logs", "db_backups",
     # 缓存：可重建，但冷缓存会引发 yfinance 限流（头号数据丢失原因）⇒ 一并带走
@@ -97,7 +99,7 @@ SKIP_EXACT = {
     ".DS_Store": "Finder 元数据", RETIRE_DIRNAME: "阶段 5 自己的旧数据暂存区",
     # 代码目录
     "tests": "代码", "swarm_agents": "代码", "templates": "代码资源", "prompts": "代码资源",
-    "experiments": "代码", "data_backup": "代码", "alpha_hive_bot": "代码", "marketing": "文档",
+    "experiments": "代码", "data_backup": "代码", "data_migrations": "代码（阶段 7 迁移运行器，v0.45.419）", "alpha_hive_bot": "代码", "marketing": "文档",
     "alphabot": "代码（Alpha Bot 前端，v0.45.388）", "scripts": "代码（受版本控制的编排器，v0.45.353）",
     "vercel.json": "代码配置（Vercel，v0.45.389）",
     "对比🆚": "文档",
