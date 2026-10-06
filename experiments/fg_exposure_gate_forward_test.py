@@ -1378,7 +1378,10 @@ def _ohlc_window_note(res: Dict) -> str:
                     "重建；看过后删掉才会消）")
     if st.get("write_errors"):
         bits.append(f"行情库写入失败 {len(st['write_errors'])} 次（下次仍要整段下载）")
-    empty = (f"，其中直连 {ow.get('direct_empty')}/{ow.get('direct_requests')} 次一根 bar 都没拿到"
+    if st.get("as_of_unknown"):   # v0.45.415 二次检查：应恒为 0
+        bits.append(f"行情库 {st['as_of_unknown']} 次请求不知道重放日、用了最新版本（有回放没经 run_replay，时点数据在这些"
+                    "请求上失效）")
+    empty =(f"，其中直连 {ow.get('direct_empty')}/{ow.get('direct_requests')} 次一根 bar 都没拿到"
              if ow.get("direct_empty") else "")
     if not slow:
         tail = ""

@@ -51,12 +51,15 @@ F&G 敞口门前瞻检验（`experiments/fg_exposure_gate_forward_test.py`）每
 「改了」仍要两次**不同美东日期**的观察给出同一个新值才算（一次漏数据不许变成版本）：第一次记 `revision_suspects`，
 之后看到同一个新值 ⇒ 追加一个版本（生效日 = 第一次看到那天）；看到当前最新版本的值 ⇒ 撤销嫌疑。
   · 有嫌疑 ⇒ 当场再整段下载一次、之后每次都整段，直到确认或撤销——拆股改的是全段历史，重叠段只有 10 天，而拆股
-    那天仍在场的仓位可能更早入场：窗口里每个日期都要两次「改了之后」的观察，确认后才有它们的新版本。
+    那天仍在场的仓位可能更早入场：窗口里每个日期都要两次「改了之后」的观察，确认后才有它们的新版本。补尾看到改动时
+    （`revision_in`）只把整段并进库；整段失败 ⇒ 这次什么都不并、该标的本次降级，下次补尾再看到、再整段（生效日因此晚
+    一天，但全段同一天切换——不会出现一半复权前、一半复权后的重放日）。
   · **缺口日**（嫌疑出现时还没落定的最近 1~3 天）：旧版本只能来自嫌疑出现前最后一次下载（`pre_suspect`，前一天
     收盘后下的，就是生产当时看到的）——只有一次观察，是两次规则唯一的例外（不可能再有第二次复权前的观察；用户 10-05
     接受）。确认时把它们按旧值落定、新值记成版本；嫌疑撤销（偶发抽风）⇒ 丢掉 `pre_suspect`、照常落定。确认之前，重放日
     早于嫌疑出现日的请求，缺口日也用 `pre_suspect` 的值。
-  · 下载失败退回直连时，已落定的日子同样按时点由库回答（直连只补未落定的）——同一次运行里同一天不会有两个值。
+  · 下载失败退回直连时，直连拿到的日子里已落定的那些换成库按时点的值——同一次运行里同一天不会有两个值。只换值、
+    不增减日子（二次检查：直连失败 / 拿得短时 v0.45.410 返回什么就还是什么，没有修订时逐字节相同、计数与所用行情一致）。
 重叠段之外更早的修订看不见（没有嫌疑就不会整段下载）——那些日子照旧用基础版本。
 确认修订后 `REVISION_ALARM_DAYS` 天内进度行 ⚠️ + attention（生产那天记了假交易，需人看），之后只陈述。
 
@@ -354,11 +357,18 @@ class ReplayOhlcStore:
             return None
         return max(wstart, _shift(s["end"], -(OVERLAP_DAYS - 1)))
 
-    def wants_full(self, ticker: str, wstart: str, wend: str, fstart: Optional[str]) -> bool:
-        """这次是补尾、合并后出现了修订嫌疑 ⇒ 窗口当场再整段下载一次（v0.45.415）：拆股改的是全段历史，重叠段只有
-        10 天——窗口里每个日期都要有「改了之后」的第一次观察，下一次（整段）才能确认它们的新版本。"""
-        e = self._entries.get(ticker)
-        return fstart is not None and fstart != wstart and self._suspects_in(e, wstart, wend)
+    def revision_in(self, ticker: str, fstart: str, wend: str, bars: Optional[Dict[str, Dict]]) -> bool:
+        """这次下载（`[fstart, wend)` 的 `bars`）里有已落定的日子与库的最新版本不同（= 并进去就会记嫌疑；只读，不改库）。
+        v0.45.415 二次检查：补尾看到它 ⇒ 窗口先整段下载、**只把整段并进库**——拆股改的是全段历史，窗口里每个日期的「改了
+        之后」第一次观察必须记在同一天。先并补尾、整段再失败 ⇒ 重叠段的生效日比更早的日子早一天，那个重放日读到一半复权前、
+        一半复权后的序列，而且永久写进版本里（审查者实测）。"""
+        e = self._entry(ticker)
+        s = e.get("settled") if e else None
+        if not s:
+            return False
+        bars = bars or {}
+        return any(bars.get(d) != _latest(e, d)
+                   for d in _days(max(fstart, s["start"]), min(wend, _shift(s["end"], 1))))
 
     def note_suspect_refetch(self, ok: bool) -> None:
         if ok:

@@ -1970,11 +1970,16 @@ def _forward_test_attention(key: str, d: Dict) -> List[Dict]:
         st = ow.get("store") or {}
         parts = []
         # v0.45.410 二次检查：只因行情库自己的问题而降级时，不再说「整段取数 0/N 失败、退回逐次直连」（那不是事实）
-        if ow.get("fallback") or ow.get("out_of_window") or not st.get("problem"):
+        # v0.45.415 二次检查：只因「不知道重放日」而降级时同理
+        if ow.get("fallback") or ow.get("out_of_window") or not (st.get("problem") or st.get("as_of_unknown")):
+            # v0.45.415 二次检查：有行情库时，已落定的日子由库按时点回答（直连拿到的已落定日子也换成库的值）——
+            # 有修订时与改动前的逐次取数（Yahoo 现在的值）不同，那句「结果相同」只在没有库时成立
+            same = ("已落定的日子由行情库按时点回答、其余与改动前的逐次取数相同" if st
+                    else "结果与改动前的逐次取数相同")
             parts.append(f"整段取数 {ow.get('fallback')}/{ow.get('wide_fetches')} 个标的失败"
                          f"{'（' + names + '）' if names else ''}、窗口外请求 {ow.get('out_of_window')} 次，"
                          f"这些请求退回逐次直连（直连 {ow.get('direct_requests')} 次，其中 {ow.get('direct_empty')} 次"
-                         "一根 bar 都没有）。结果与改动前的逐次取数相同，但 Step 11 可能因此超时、世代边界核对随之没跑——"
+                         f"一根 bar 都没有）。{same}，但 Step 11 可能因此超时、世代边界核对随之没跑——"
                          "需人看行情源（stderr 的「整段取数失败」WARNING 有原因）")
         # v0.45.410：回放行情库自己的问题（坏文件 / 写不进去）——本次结果不受影响，但下次照样整段下载
         if st.get("problem"):
@@ -1983,6 +1988,9 @@ def _forward_test_attention(key: str, d: Dict) -> List[Dict]:
                          "改名留证的坏文件 —— 本次结果不受影响，但读不懂的标的冻结历史已按当时的 Yahoo 重建、写不进去的下次"
                          "仍要整段下载（stderr 的 ReplayOhlcStore WARNING 有原因；目录 = PATHS.replay_ohlc_state；"
                          "留证文件看过后删掉这条才会消）")
+        if st.get("as_of_unknown"):   # v0.45.415 二次检查：应恒为 0
+            parts.append(f"回放行情库：{st['as_of_unknown']} 次请求不知道重放日、用了最新版本——有回放没经 run_replay，"
+                         "时点数据在这些请求上失效（拆股 / 修订前的重放日读到了改后的价格）。需人查是哪条调用路径")
         out.append(item(f"{iid}.ohlc_window_degraded", "warn", f"{name}：回放行情窗口降级 —— " + "；".join(parts)))
     # v0.45.410 二次检查：近几天**确认**的修订（多半是拆股回溯复权）——与降级分开的独立 id；过了告警期只在进度行陈述
     rst = (ow.get("store") or {}) if isinstance(ow, dict) else {}

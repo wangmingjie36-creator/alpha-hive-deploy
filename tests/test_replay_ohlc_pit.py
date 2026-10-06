@@ -11,7 +11,8 @@
      值落定、确认之前也按它回答；偶发抽风 ⇒ 撤销、不留版本；
   3. v0.45.410 写下的 schema 1 文件（`revisions[d]` 是单个对象）读得进、按时点回答、写回成 schema 2；
   4. `run_replay` 逐日把重放日告诉窗口、结束（含抛异常）后恢复；生产 `run_for_date` 不碰它；
-  5. 退回直连的结果里已落定的日子也按时点由库回答；没有库时原样返回同一个对象；
+  5. 退回直连的结果里已落定的日子也按时点由库回答，只换值、不增日子（直连失败 ⇒ 仍是 {}）；下载失败后由库回答的请求也按时点；
+     没有库时原样返回同一个对象；嫌疑当天整段补下失败 ⇒ 什么都不并、该标的降级；不知道重放日 ⇒ 窗口降级；
   6. 端到端：合成世界里 GAPX 在 08-19 拆股（Yahoo 从那天起回溯复权），生产逐日真跑、在 08-19 记下倒填到 08-11 的假止损；
      Step 11 逐日真跑——每一天自证都是 100%；同一份世界里不用库、或不按重放日取版本，自证都掉（证明夹具非空）。
 全部离线（假 yfinance）。每条测试的 docstring 写明「哪个变异会让它红」。
@@ -41,15 +42,17 @@ world = _rw.world
 fwd = _rw.fwd
 
 
-def _fetch_like_window(store, yahoo, ticker="AAA", w=W):
-    """照窗口的做法取一次：问起点 → 下载 → 合并 → 若出现嫌疑且这次是补尾 ⇒ 当场整段再下一次。返回最新版本回答。"""
+def _fetch_like_window(store, yahoo, ticker="AAA", w=W, refetch_ok=True):
+    """照窗口的做法取一次：问起点 → 下载 → 补尾里已落定的日子被改了 ⇒ 整段再下一次、只并整段（整段失败 ⇒ 什么都不并，
+    返回 None）→ 合并。返回最新版本回答。"""
     fs = store.fetch_start(ticker, *w)
     bars = None if fs is None else {d: dict(b) for d, b in yahoo.items() if fs <= d < w[1]}
-    got = store.merge(ticker, w[0], w[1], fs, bars)
-    if store.wants_full(ticker, w[0], w[1], fs):
-        store.note_suspect_refetch(True)
-        got = store.merge(ticker, w[0], w[1], w[0], {d: dict(b) for d, b in yahoo.items() if w[0] <= d < w[1]})
-    return got
+    if fs is not None and fs != w[0] and store.revision_in(ticker, fs, w[1], bars):
+        store.note_suspect_refetch(refetch_ok)
+        if not refetch_ok:
+            return None
+        fs, bars = w[0], {d: dict(b) for d, b in yahoo.items() if w[0] <= d < w[1]}
+    return store.merge(ticker, w[0], w[1], fs, bars)
 
 
 def _split(master, x, ratio=2.0):
@@ -165,6 +168,47 @@ class TestSplitAtStoreLevel:
         _fetch_like_window(s, _upto(post, "2026-09-26"))
         assert _file(tmp_path)["revisions"]["2026-09-23"][0]["first_seen"] == "2026-09-25"
 
+    def test_failed_whole_refetch_merges_nothing_so_the_whole_series_switches_on_one_day(self, tmp_path):
+        """二次检查（审查者实测）：嫌疑当天补尾成功、整段补下失败。原先先并补尾 ⇒ 重叠段生效日 09-24、更早的日子 09-25 ⇒
+        重放日 09-24 永久读到一半复权前、一半复权后的序列。现在整段失败 ⇒ 什么都不并（库文件一字不变），下次补尾再看到、
+        再整段 ⇒ 全段生效日同一天（晚一天，已知局限）。变异「先并补尾再整段」⇒ 生效日两个值 ⇒ 红。"""
+        m, post = self._before(tmp_path)
+        before = _file(tmp_path)
+        s = _store(tmp_path, self.X)
+        assert _fetch_like_window(s, _upto(post, self.X), refetch_ok=False) is None
+        assert _file(tmp_path) == before and s.stats()["suspect_refetch_failed"] == 1
+        for day in ("2026-09-25", "2026-09-26"):
+            _fetch_like_window(_store(tmp_path, day), _upto(post, day))
+        f = _file(tmp_path)
+        assert {v[0]["first_seen"] for v in f["revisions"].values()} == {"2026-09-25"}
+        s = _store(tmp_path, "2026-09-27")
+        assert s.pit_slice("AAA", "2026-09-01", "2026-09-24", {}, self.X) == _slice(m, "2026-09-01", "2026-09-24")
+        assert s.pit_slice("AAA", "2026-09-01", "2026-09-24", {}, "2026-09-25") == _slice(post, "2026-09-01", "2026-09-24")
+
+    def test_window_refetch_failure_degrades_the_ticker_visibly(self, tmp_path, monkeypatch):
+        """窗口层：整段补下失败 ⇒ 该标的本次降级（`fallback_tickers` 有它、`degraded` 为真——谁会红：进度行 ⚠️ + attention），
+        库文件不动；成功时整段补下不计入 `wide_fetches`（进度行读作「N 个标的」），另由 `suspect_refetches` 计。
+        变异「失败只计数」⇒ degraded 为假 ⇒ 红。"""
+        m, post = self._before(tmp_path)
+        before = _file(tmp_path)
+        rows = {d: (b["Open"], b["High"], b["Low"], b["Close"]) for d, b in _upto(post, self.X).items()}
+        monkeypatch.setattr(pp, "_PRICE_CACHE", {})
+        monkeypatch.setattr(pp, "_REPLAY_AS_OF", "2026-09-23")
+        fake = _rw.FakeYF({"AAA": rows}, wide_fail=lambda t, st, e: "raise" if st == W[0] and e == W[1] else None)
+        monkeypatch.setitem(sys.modules, "yfinance", fake.module())
+        with pp.replay_ohlc_window(*W, store=_store(tmp_path, self.X)) as win:
+            pp._fetch_ohlc("AAA", "2026-09-14", "2026-09-25")
+        st = win.stats()
+        assert "AAA" in st["fallback_tickers"] and "整段补下失败" in st["fallback_tickers"]["AAA"] and st["degraded"]
+        assert st["store"]["suspect_refetch_failed"] == 1 and _file(tmp_path) == before
+        fake = _rw.FakeYF({"AAA": rows})
+        monkeypatch.setitem(sys.modules, "yfinance", fake.module())
+        with pp.replay_ohlc_window(*W, store=_store(tmp_path, self.X)) as win:
+            pp._fetch_ohlc("AAA", "2026-09-14", "2026-09-25")
+        st = win.stats()
+        assert (st["wide_fetches"], st["store"]["suspect_refetches"], len(fake.calls)) == (1, 1, 2)
+        assert not st["degraded"] and "2026-09-02" in _file(tmp_path)["revision_suspects"]
+
     def test_a_one_off_glitch_leaves_no_version_and_no_pre_suspect(self, tmp_path):
         """09-24 那次响应漏了 09-15，09-25 恢复 ⇒ 嫌疑撤销、pre_suspect 丢掉、缺口日照常落定、没有任何版本。
         变异「嫌疑撤销后不丢 pre_suspect」⇒ 红（之后的重放日还会被它改写）。"""
@@ -237,6 +281,23 @@ class TestReplayDayPlumbing:
         finally:
             pp._REPLAY_AS_OF = None
 
+    def test_unknown_replay_day_on_a_versioned_bar_degrades_the_window(self, tmp_path, monkeypatch):
+        """`as_of_unknown` 应恒为 0；不为 0 ⇒ 时点数据在那几次请求上失效。二次检查：原先只进 stderr 汇总行——现在让窗口
+        `degraded` 为真、进度行写出原因（谁会红）。变异「degraded 不看 as_of_unknown」⇒ 红。"""
+        m = _master()
+        for day in ("2026-09-20", "2026-09-21"):
+            _fetch_like_window(_store(tmp_path, day), _upto(m, day))
+        revised = {**m, "2026-09-15": _bar(555.0)}
+        for day in ("2026-09-22", "2026-09-23"):
+            _fetch_like_window(_store(tmp_path, day), _upto(revised, day))
+        monkeypatch.setattr(pp, "_REPLAY_AS_OF", None)
+        with pp.replay_ohlc_window(*W, store=_store(tmp_path, "2026-09-24")) as win:
+            pp._fetch_ohlc("AAA", "2026-09-14", "2026-09-17")
+        st = win.stats()
+        assert st["store"]["as_of_unknown"] == 1 and st["degraded"] is True and st["fallback"] == 0
+        note = fwd._ohlc_window_note({"ohlc_window": st})
+        assert "不知道重放日" in note and "整段取数失败" not in note, note
+
     def test_only_run_replay_writes_it_and_production_run_for_date_never_reads_it(self):
         """重放日只由 `run_replay` 写；生产 `run_for_date` 及其调用的生产函数不碰它（时点数据只活在回放里）。"""
         src = (_ROOT / "paper_portfolio.py").read_text(encoding="utf-8")
@@ -272,6 +333,59 @@ class TestDirectFallbackIsPointInTime:
         assert win.stats()["direct_requests"] == 1
         assert got["2026-09-15"] == m["2026-09-15"], "重放日 09-21 早于生效日 09-22：旧值"
         assert got["2026-09-24"] == revised["2026-09-24"], "未落定的日子照用直连"
+
+    def _settled_and_revised(self, root):
+        m = _master()
+        for day in ("2026-09-20", "2026-09-21"):
+            _fetch_like_window(_store(root, day), _upto(m, day))
+        revised = {**m, "2026-09-15": _bar(555.0)}
+        for day in ("2026-09-22", "2026-09-23"):
+            _fetch_like_window(_store(root, day), _upto(revised, day))
+        return m, revised
+
+    @pytest.mark.parametrize("how", ["direct-fails", "direct-short"])
+    def test_overlay_never_adds_days_the_direct_answer_did_not_have(self, tmp_path, monkeypatch, how):
+        """二次检查（审查者实测）：直连失败 / 拿得短时，原先库会把直连没拿到的已落定日子补进来——没有修订时也与 v0.45.410
+        不同（410 返回 {} ⇒ 仓位不出场、按入场价估值），且计数说「一根都没拿到」而重放其实用了行情。现在只换值、不增日子。
+        变异「overlay 返回 pit_slice 全部」⇒ 红。"""
+        m = _master()
+        for day in ("2026-09-20", "2026-09-21"):
+            _fetch_like_window(_store(tmp_path, day), _upto(m, day))
+        rows = {d: (b["Open"], b["High"], b["Low"], b["Close"]) for d, b in m.items()
+                if how == "direct-short" and not "2026-09-14" <= d <= "2026-09-16"}
+        fake = _rw.FakeYF({"AAA": rows}, wide_fail=lambda t, st, e: "raise" if how == "direct-fails" or e == W[1] else None)
+        monkeypatch.setitem(sys.modules, "yfinance", fake.module())
+        monkeypatch.setattr(pp, "_PRICE_CACHE", {})
+        monkeypatch.setattr(pp, "_REPLAY_AS_OF", "2026-09-21")
+        with pp.replay_ohlc_window(*W, store=_store(tmp_path, "2026-09-22")) as win:
+            got = pp._fetch_ohlc("AAA", "2026-09-14", "2026-09-25")
+        want = {} if how == "direct-fails" else _slice({d: _bar(rows[d][3]) for d in rows}, "2026-09-14", "2026-09-25")
+        assert got == want
+        assert (win.stats()["direct_requests"], win.stats()["direct_empty"]) == (1, 1 if how == "direct-fails" else 0)
+
+    def test_settled_request_after_a_failed_download_is_point_in_time(self, tmp_path, monkeypatch):
+        """下载失败后、整个落在已落定段内的请求由库回答——也要按重放日取版本（`_settled_on_fallback` 传 as_of）。
+        变异「那里传 as_of=None」⇒ 拿到 555 ⇒ 红（审查者实测原先四个测试文件都不红）。"""
+        m, revised = self._settled_and_revised(tmp_path)
+        fake = _rw.FakeYF({"AAA": {}}, wide_fail=lambda t, st, e: "raise")
+        monkeypatch.setitem(sys.modules, "yfinance", fake.module())
+        monkeypatch.setattr(pp, "_PRICE_CACHE", {})
+        monkeypatch.setattr(pp, "_REPLAY_AS_OF", "2026-09-21")
+        with pp.replay_ohlc_window(*W, store=_store(tmp_path, "2026-09-24")) as win:
+            pp._fetch_ohlc("AAA", "2026-09-14", "2026-09-25")          # 碰到未落定日子 ⇒ 下载 ⇒ 失败 ⇒ 该标的降级
+            got = pp._fetch_ohlc("AAA", "2026-09-14", "2026-09-17")    # 整个落在已落定段内 ⇒ 库回答
+        assert "AAA" in win.stats()["fallback_tickers"] and win.stats()["store"]["served_on_fallback"] == 1
+        assert got["2026-09-15"] == m["2026-09-15"], "重放日 09-21 早于生效日 09-22：旧值"
+
+    def test_non_iso_request_with_a_store_does_not_raise(self, tmp_path, monkeypatch):
+        """窗口外 / 非 YYYY-MM-DD 的请求走原直连路径，410 对它们不抛；overlay 也不许抛（`_shift` 解析不了 '2026-09-9'）。"""
+        m, revised = self._settled_and_revised(tmp_path)
+        fake = _rw.FakeYF({"AAA": {d: (b["Open"], b["High"], b["Low"], b["Close"]) for d, b in revised.items()}})
+        monkeypatch.setitem(sys.modules, "yfinance", fake.module())
+        monkeypatch.setattr(pp, "_PRICE_CACHE", {})
+        with pp.replay_ohlc_window(*W, store=_store(tmp_path, "2026-09-24")) as win:
+            got = pp._fetch_ohlc("AAA", "2026-09-02", "2026-09-9")
+        assert win.stats()["out_of_window"] == 1 and "2026-09-08" in got
 
     def test_without_a_store_the_direct_answer_is_the_same_object(self):
         win = pp._ReplayOhlcWindow(*W)
@@ -375,6 +489,28 @@ class TestSplitEndToEnd:
         assert line.startswith("⚠️ ") and "GAPX 近 7 天确认了" in line and "假止损" in line, line
         line = fwd.status_line(split_world.step11("2026-08-28"))
         assert line.startswith("⏳ ") and "按时点重放" in line, line
+
+    def test_a_books_the_same_gapx_trade_as_production(self, split_world, monkeypatch):
+        """自证只比入场四元组——出场日 / 出场价错了也是 100%（审查者实测：把生效日比较改成 `<`，A 记成 08-19 出场，自证照样
+        每天 11/11）。这里直接比：A 自己（不含种子 / 锚点里带进来的）记下的每一笔 GAPX 平仓，与生产那一笔逐字段相同。
+        变异「生效日比较用 <」⇒ 红。"""
+        (prod_t,) = _gapx_closed(split_world.prod)
+        orig, mine = fwd._replay_variant, []
+
+        def spy(overrides, state_dir, dates, seed=None):
+            r = orig(overrides, state_dir, dates, seed=seed)
+            f = Path(state_dir) / "closed_trades.jsonl"
+            if overrides == {} and f.exists():
+                seeded = set((seed or {}).get("closed_trades.jsonl", b"").decode("utf-8").splitlines())
+                mine.extend(json.loads(x) for x in f.read_text(encoding="utf-8").splitlines()
+                            if '"GAPX"' in x and x not in seeded)
+            return r
+        monkeypatch.setattr(fwd, "_replay_variant", spy)
+        for day in _rw.DATES[1:] + ["2026-08-28"]:
+            split_world.step11(day)
+        key = ("entry_date", "exit_date", "exit_reason", "exit_price")
+        assert mine, "A 从没自己记下 GAPX 那笔——夹具没碰到拆股"
+        assert {tuple(t[k] for k in key) for t in mine} == {tuple(prod_t[k] for k in key)}
 
     @pytest.mark.parametrize("how", ["no-store", "no-replay-day"])
     def test_without_point_in_time_the_same_world_fails_the_self_proof(self, split_world, how, monkeypatch):

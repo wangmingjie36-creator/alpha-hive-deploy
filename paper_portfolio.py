@@ -611,9 +611,16 @@ class _ReplayOhlcWindow:
                                                                          on_fallback=True)
 
     def overlay_direct(self, ticker: str, start: str, end: str, out: Dict[str, Dict]) -> Dict[str, Dict]:
-        """v0.45.415：退回直连拿到的结果里，已落定的日子换成行情库按重放日的值（直连只补未落定的）——否则修订与降级
-        同时出现时，同一次运行里同一天会有两个值。没有行情库 ⇒ 原样返回（同一个对象）。返回新 dict，不改 `_PRICE_CACHE`。"""
-        return out if self.store is None else self.store.pit_slice(ticker, start, end, out, _REPLAY_AS_OF)
+        """v0.45.415：退回直连拿到的结果里，已落定的日子换成行情库按重放日的值——否则修订与降级同时出现时，同一次运行里
+        同一天会有两个值。没有行情库 ⇒ 原样返回（同一个对象）。返回新 dict，不改 `_PRICE_CACHE`。
+        二次检查：**只换值、不增日子**——直连失败 / 拿得短时 v0.45.410 返回什么就还是什么（原先库会补进直连没拿到的已落定
+        日子：没有修订时也与 410 不同，且计数说「一根都没拿到」而重放其实用了行情）；直连里有、库说那天没有日线的照库删掉。
+        日期不是 YYYY-MM-DD（窗口外请求）⇒ 原样返回（410 对它们不抛，这里也不许抛）。"""
+        if self.store is None or not (isinstance(start, str) and isinstance(end, str)
+                                      and _ISO_DATE_RE.match(start) and _ISO_DATE_RE.match(end)):
+            return out
+        pit = self.store.pit_slice(ticker, start, end, out, _REPLAY_AS_OF)
+        return {d: b for d, b in pit.items() if d in out}
 
     def _fetch_wide(self, ticker: str) -> Optional[Dict[str, Dict]]:
         store = self.store if self.store is not None and self.store.supports(ticker) else None
@@ -631,6 +638,17 @@ class _ReplayOhlcWindow:
         if (bars is None and store is not None and fstart != self.start
                 and reason in ("空结果", "整段没有一根有限值日线") and store.settled_quiet_from(ticker, fstart)):
             bars = {}
+        # v0.45.415：补尾里已落定的日子被 Yahoo 改了（多半是拆股回溯复权）⇒ 先整段下载、只把整段并进库，窗口里每个日期的
+        # 「改了之后」第一次观察记在同一天。二次检查：原先先并补尾、整段失败只计数 ⇒ 重叠段与更早的日子生效日差一天，那个
+        # 重放日永久读到一半复权前、一半复权后的序列，且没有任何东西会红。现在整段失败 ⇒ 什么都不并、该标的本次降级（看得见），
+        # 下次补尾再看到、再整段。
+        if bars is not None and store is not None and fstart != self.start and store.revision_in(ticker, fstart, self.end, bars):
+            full, why = self._download(ticker, self.start, count=False)
+            store.note_suspect_refetch(full is not None)
+            if full is None:
+                bars, reason = None, f"补尾发现已落定日线被 Yahoo 改了、整段补下失败（{why}）——本次不并进库，下次再整段"
+            else:
+                fstart, bars = self.start, full
         if bars is None:
             self.fallback_tickers[ticker] = reason
             _log.warning("[PaperPortfolio] 回放 OHLC 窗口 %s [%s, %s) 整段取数失败（%s）——"
@@ -639,22 +657,15 @@ class _ReplayOhlcWindow:
             return None
         if store is not None:
             bars = store.merge(ticker, self.start, self.end, fstart, bars)
-            # v0.45.415：补尾后出现了修订嫌疑（多半是拆股回溯复权）⇒ 当场再整段下载一次，窗口里每个日期都有「改了之后」
-            # 的第一次观察；失败只计数（下次运行有嫌疑本来就会整段下载），本次照用补尾的结果。
-            if store.wants_full(ticker, self.start, self.end, fstart):
-                full, why = self._download(ticker, self.start)
-                store.note_suspect_refetch(full is not None)
-                if full is not None:
-                    bars = store.merge(ticker, self.start, self.end, self.start, full)
-                else:
-                    _log.warning("[PaperPortfolio] 回放 OHLC 窗口 %s 出现修订嫌疑后整段补下失败（%s）——下次运行再整段下载",
-                                 ticker, why)
         self._bars[ticker] = bars
         return bars
 
-    def _download(self, ticker: str, fstart: str) -> Tuple[Optional[Dict[str, Dict]], str]:
-        """一次 `history(start=fstart, end=窗口右端)`；返回（日线或 None，失败原因）。"""
-        self.wide_fetches += 1
+    def _download(self, ticker: str, fstart: str, *, count: bool = True) -> Tuple[Optional[Dict[str, Dict]], str]:
+        """一次 `history(start=fstart, end=窗口右端)`；返回（日线或 None，失败原因）。
+        `count=False`：修订嫌疑的整段补下（v0.45.415）不计入 `wide_fetches`——它在进度行里读作「N 个标的」，同一个标的
+        补下那一次另由行情库的 `suspect_refetches` 计。"""
+        if count:
+            self.wide_fetches += 1
         bars: Optional[Dict[str, Dict]] = None
         reason = ""
         try:
@@ -696,8 +707,10 @@ class _ReplayOhlcWindow:
         }
         if self.store is not None:   # v0.45.410：只有开了行情库才有这个键（其余调用方的形状不变）
             out["store"] = self.store.stats(self.start, self.end)
-            # 坏文件 / 写不进去：本次结果不受影响，但下次照样整段下载、慢回去——要有人看见
-            out["degraded"] = out["degraded"] or out["store"]["problem"]
+            # 坏文件 / 写不进去：本次结果不受影响，但下次照样整段下载、慢回去——要有人看见。
+            # v0.45.415 二次检查：不知道重放日却碰到了有版本的日线（有回放没经 run_replay ⇒ 用了最新版本，时点数据在那几次
+            # 请求上失效）——文档说「应恒为 0」，原先只进 stderr 的汇总行，没有任何东西会红
+            out["degraded"] = out["degraded"] or out["store"]["problem"] or out["store"]["as_of_unknown"] > 0
         return out
 
     def summary(self) -> str:
