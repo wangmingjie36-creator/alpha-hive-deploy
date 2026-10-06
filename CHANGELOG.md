@@ -5,7 +5,37 @@
 
 ---
 
-## [0.45.419] — 2026-10-06 — 占位（进行中：阶段 7 单一写入方——编号幂等的数据迁移运行器 + 三个回填脚本缺省改 dry-run 先备份 + 历史手工修复补记）
+## [0.45.419] — 2026-10-06 — Added：阶段 7「单一写入方」——编号幂等的数据迁移运行器 + 三个回填工具缺省 dry-run 先备份 + 13 次历史手工修复补记
+
+用户 2026-10-06 同意两点：①三个默认写库的回填工具改成缺省 dry-run、真写先备份；②把盘点出的历史手工修复补记进运行记录。
+
+**根因**（2026-10-06 盘点）：生产数据的修复长期靠「临时脚本 + 手工备份 + CHANGELOG 文字」——约 13 次，几次脚本没留下、回滚 SQL 只在 CHANGELOG 里；`signal_archive --backfill` / `backfill_dir_accuracy` / `migrate_ambiguous_backfill` 缺省直接写库（前两个还不备份）；库里查不到「它被动过什么」。
+
+### Added
+- `data_migrations/`（运行器）：迁移 = `versions/NNNN_说明.py`（四位、从 0001 连续；导出 `DESCRIPTION` / 幂等的 `apply(ctx) -> {"rows_affected": int}` / `build_fixture(conn)`）。`run_pending()`：布局核对 → 读记录 → **已应用文件的 sha256 不许变**（变了或文件没了 = `tampered`，什么都不跑）→ 有待办才在线备份库（备份失败 = 什么都不跑）→ 逐个应用并追加记录；失败追加 `failed` 并**停下**（下次重试，所以才要求幂等）；记录写不进去 = `ledger_error`（迁移已跑、靠幂等兜底，但红）。`--dry-run` 不备份、不写库、不写记录。入口 `run_data_migrations.py`（`run_step` 只认脚本路径）。
+- `PATHS.migrations_state` → `<数据根>/migrations_state/applied.jsonl`（只追加；进数据备份 `STATE_DIRS`、`MOVE_DIRS`、`.gitignore`；`data_migrations` 在 `SKIP_EXACT` 记为代码）。
+- `data_migrations/history.py`：13 条历史手工修复（H001–H013）补记为 `kind="historical"`，第一次真跑时按 id 幂等写入。**如实标注**：日期 / 行数取自 CHANGELOG 文字与盘点子任务、未逐条回溯核对；只有备份文件是否还在是当场 `ls` 核过的——H001–H003 的备份只剩 `-wal`/`-shm` 孤儿、主文件已不在（不能用于恢复）。
+- 编排器：`_data_migrations_step`（`production_sync` 与 DB 备份之后、Step 2 之前），结局并进 `steps_result.data_migrations`；任何非 ok ⇒ `status=failed` ⇒ `alert_manager` 既有 P1「步骤失败」；不升级 `OVERALL_STATUS`、不中断扫描。记录文件先删后写（旧记录不当本轮结果）。部署副本下一个扫描日自动更新，新编排器再下一轮起执行。
+
+### Changed
+- `signal_archive.py --backfill`、`backfill_dir_accuracy.py`、`migrate_ambiguous_backfill.py`：缺省 **dry-run**，真写要 `--apply`（`--dry-run` 仍接受、空操作；与 `--apply` 同给 = 参数错误）；`--apply` 先 `backup_before_write`（sqlite 在线备份到 `_manual_backups/`，不被每日轮转清理；备份失败即中止、不写库），写完在 `applied.jsonl` 追加 `manual_tool` 记录。`signal_archive.backfill()` 函数本身的缺省不变（只改命令行）。
+- `backfill_dir_accuracy.py` 顺带修一个「dry-run 不是真的不写」：旧版在 `--dry-run` 判断**之前**就对真库 `ALTER TABLE`；现在 dry-run 在库的内存副本上算，真库一字节不动。
+
+### 守卫（`tests/test_data_migrations.py`，40 条）
+- 运行器：只应用一次 / 备份是迁移之前的库 / 失败停下并可重试 / 返回值契约 / 篡改与删除 / 5 种布局错误 / dry-run 零副作用 / 无备份不迁移 / 记录写失败红 / 坏记录红 / 补记历史幂等。
+- 幂等自检有牙（非幂等迁移、缺 `build_fixture` 都被抓）；真实 `versions/` 的每个迁移必须能过它。
+- 工具：缺省 dry-run 库文件 md5 不变、`--apply` 备份是写入前的库并留记录、备份失败不写库。
+- 编排器段在 `/bin/bash` 下真跑：ok / 6 种非 ok 结局 / 无记录 / 工具缺失 / 陈旧记录不被信 / 位置在 DB 备份与 Step 2 之间。
+- 变异自证（先提交后变异）：去篡改校验 / 跳过备份 / 失败不停 / dry-run 也应用 / 补记历史不幂等 / 布局断号放行 / 记录错误吞掉 / 三个工具缺省改回写库 / 编排器非 ok 记 success——各自让对应守卫变红。
+- `tests/test_paths_not_frozen_at_import.py`：`VERSIONS_DIR` 登记为代码锚点（两侧白名单）。
+
+### 验证
+- 真数据根上 `run_data_migrations.py --dry-run`：ok、零待办、**不创建** `migrations_state/`。首次真跑（补记 13 条历史）在下一个扫描日的编排器里发生。
+
+### 未做
+- 没有写任何真迁移（`versions/` 为空）——运行器此刻只有合成迁移的证明。第一个真迁移出现时必须带 `build_fixture`，否则 `test_every_real_migration_is_well_formed_and_idempotent` 红。
+- 现网 `signal_archive --backfill --dry-run` 的 `changed: 224` 仍待查（v0.45.417 记录）。
+
 
 ## [0.45.418] — 2026-10-06 — Fixed：`orchestrator_lint.py` 补命令行入口——此前直接跑它是恒 exit 0 的空检查；现在命中 exit 1、文件读不了 exit 2
 
