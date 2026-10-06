@@ -7,7 +7,45 @@
 
 ## [0.45.419] — 2026-10-06 — 占位（进行中：阶段 7 单一写入方——编号幂等的数据迁移运行器 + 三个回填脚本缺省改 dry-run 先备份 + 历史手工修复补记）
 
-## [0.45.418] — 2026-10-06 — 占位（进行中：`orchestrator_lint.py` 补命令行入口——命中 exit 1、文件读不到 exit 2，此前直接跑是恒 exit 0 的空检查；原占 417 未及时推送被占用，改号）
+## [0.45.418] — 2026-10-06 — Fixed：`orchestrator_lint.py` 补命令行入口——此前直接跑它是恒 exit 0 的空检查；现在命中 exit 1、文件读不了 exit 2
+
+原占 0.45.417（`74e2b1d6`，未及时推送，被 `fe7dfbb6` 先推占用），改号 418（`8ab354ae`）。
+
+### 现象
+
+`orchestrator_lint.py` 只是库模块（`find_unbraced()`，部署关卡与 `tests/test_orchestrator_braced_vars.py` 在用），**没有 `__main__` 入口**。
+`/usr/local/bin/python3 orchestrator_lint.py 某脚本.sh` 只把模块 import 一遍就退出，**对任何内容都 rc 0**。
+2026-10-05 实测：含 `git commit -q -m "chore: 占号 $NUM（数据"` 的文件 rc 0，而 `find_unbraced()` 对同一文本 1 处命中。
+v0.45.414 那次 session 据这个空操作报过「orchestrator_lint.py 通过」——结论不携带任何信息。
+（同形状：CLAUDE.md「这个失败，下游怎么知道？」——一个不会失败的检查器，比没有更糟：它产出「通过」。）
+
+### Fixed
+
+- `orchestrator_lint.py`：新增 `main()` + `if __name__ == "__main__"`。用法 `orchestrator_lint.py [FILE ...]`，
+  缺省扫仓库 `scripts/alpha-hive-orchestrator.sh`（**按 `__file__` 锚定**——编排器是代码不是数据；放在函数里、不做模块级常量，
+  不进 `TestFileDerivedSpeciesDoesNotSpread` 的登记面）。
+  - 命中逐条进 stdout：`路径:行号: $VAR 紧跟非 ASCII（改成 ${VAR}）：<该行>`（措辞与部署关卡一致）。
+  - 每个文件「扫了 N 行，M 处命中」进 stderr——扫了空文件 / 错文件时，「0 处命中」旁边的行数会露馅。
+  - 退出码：**0** 无命中 / **1** 有命中 / **2** 有文件读不了（不存在、是目录、无权限、非 UTF-8），**从不把读不了落成 0**；
+    2 优先于 1（同 grep：有文件没扫到，就说不出「命中只有这些」），但其他文件的命中照样打印。argparse 用法错误本身也是 2。
+- 部署关卡 `deploy_orchestrator.gate_failures` 与既有测试继续直接调 `find_unbraced()`，未改。
+
+### Added
+
+- `tests/test_orchestrator_braced_vars.py::TestCli`（8 条，子进程真跑，合成文件，任何机器都跑）：
+  正对照（`echo "$NUM（x"` ⇒ rc 1 且命中行逐字打印）/ 干净文件 rc 0 且报行数 / 读不了三种（不存在、目录、非 UTF-8）⇒ rc 2 /
+  读不了优先于命中且命中仍打印（**两种文件顺序都跑**）/ 缺省目标在别的 cwd 下仍解析到仓库编排器。
+
+### 验证
+
+- 变异 8 个，全部真跑（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、`--maxfail=1000`、每轮 passed+failed=35 核对；还原后 sha256 比对 + 复跑全绿）：
+  M0 **HEAD 原文件（无 CLI）** ⇒ 8 红（正对照在内）；M1 删 `__main__` 块 ⇒ 8 红；M2 丢弃退出码 ⇒ 6 红；M3 读不了不置 2 ⇒ 5 红；
+  M4 后来的命中把 2 覆盖成 1 ⇒ 1 红；M5 缺省跟 cwd 走 ⇒ 1 红；M6 不打印命中 ⇒ 3 红；M7 有命中仍 rc 0 ⇒ 1 红。
+  ⚠️ M4 **首轮存活**：读不了优先级那条只按「先命中、后缺失」一种顺序跑，覆盖写法恒绿；改成两种顺序参数化后才红——举出变异还得真跑。
+- `tests/test_orchestrator_braced_vars.py` + `test_deploy_orchestrator.py` + `test_paths_not_frozen_at_import.py` + `test_orchestrator_deployed_matches_repo.py`：171 passed；`ruff check .` 全过。
+- 全套：（换基到 `fe7dfbb6` 之后、改号之前）`1 failed, 8156 passed, 82 deselected, 2 xfailed`；唯一的红是按设计恒红的 `TestCoverageHorizon`（v0.45.404）。
+  第一次全套（10-05 23:22–23:37）另有 1 个 ERROR：conftest 的 session 级真实数据根守卫在最后一条测试的 teardown 报 `~/alpha-hive-data` 新增 1 / 改动 70 个文件——**是生产编排器那轮扫描在写**，不是测试：扫描进程（主 checkout，PID 54509）23:21:31 起、checkpoint 文件名里的毫秒戳解出 23:21:35.779，改动的全是当天新闻 / 期权 / VIX 缓存；扫描 00:00:06 结束后重跑全套，守卫不再报错。
+- 手工（换基后最终树）：任务里那条复现 `git commit -q -m "chore: 占号 $NUM（数据"` ⇒ rc 1、命中逐字打印；缺省目标（仓库编排器）「扫了 1565 行，0 处命中」rc 0。
 
 ## [0.45.417] — 2026-10-06 — Changed：异地备份纳入 `.swarm_results_*.json`；排除理由必须分类（`rebuildable:` / `derived:` / `accepted-loss:<日期 谁定>`）；备份仓 600 MB 预算闸
 
