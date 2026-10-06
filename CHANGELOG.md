@@ -7,7 +7,24 @@
 
 ## [0.45.421] — 2026-10-07 — 占位（进行中：Oracle 异常期权流取数失败可见化——区分「取数失败」与「无异常」、降级比例进 Step 12 覆盖率闸；不改评分）
 
-## [0.45.420] — 2026-10-06 — 占位（进行中：阶段 7 二次检查——运行器改用现成的 sqlite_readonly 只读打开策略、备份 / 记录跟着 --db 走、signal_archive 空根可 --apply、编排器 tool_missing 改按文件存在判）
+## [0.45.420] — 2026-10-06 — Fixed：阶段 7 二次检查——运行器只读打开改走现成的 `sqlite_readonly`、备份与记录跟 `--db` 走、`signal_archive --apply` 空根不再被拒、编排器 tool_missing 改按文件判
+
+用户要求二次检查 v0.45.419。查出四处缺陷（均已写成先红后绿的守卫，变异自证），另有两条记为已知局限。
+
+### Fixed
+1. **没用现成的只读打开策略**（违反「先用装好的工具」）：首版 `online_backup` / `db_fingerprint` / `backfill_dir_accuracy` 的 dry-run 副本都自己写 `mode=ro`。`data_backup/sqlite_readonly.py`（阶段 0 实测）早就写明：WAL 且没有 `-wal` 的库光 `mode=ro` 会在**源目录新建 `-wal`/`-shm` 且关闭后删不掉**；hot journal 也应拒绝。本次复现：已 checkpoint 的 WAL 库被打开后多出两个 sidecar。现在三处都走 `read_only_connect`（hot journal ⇒ `backup_failed`，不迁移）。
+2. **备份与记录落在 `PATHS.home` 而不跟 `--db` 走**：对 /tmp 里的库副本 `--apply`，备份会堆进生产 `_manual_backups/`、生产 `applied.jsonl` 多一行描述别的库的记录。现在 `beside(db)`：备份与记录都放在被改的那个库所在目录；缺省（不给库）仍是 `PATHS`。
+3. **`signal_archive --backfill --apply` 在没有库时被当成备份失败中止**：空数据根里用 swarm 文件从零建库是恢复演练的真用法，没有库就没有东西可备份。现在打印「无库可备份」继续；**库在而备不了**仍然中止（新测试用一个坏文件钉住）。
+4. **编排器 tool_missing 按退出码 2 判**：与 `run_step` 的哨兵、argparse 错误撞码（同类的自动部署段明写「不按退出码分支」）。现在按 `[ -f run_data_migrations.py ]` 判；文件在而没有记录 ⇒ `no_record` ⇒ 红。
+
+### 守卫（`tests/test_data_migrations.py`，+8 条，共 48）
+- 各 sidecar 用例（备份 / 指纹 / 运行器 apply / dir_accuracy dry-run）、hot journal 拒绝、`--db` 在别处时生产根零污染、空根 `--apply` 不被拒且 `backup=None`、文件在 + rc 2 = failed。
+- 变异（先提交后变异）：备份 / 指纹 / dir_accuracy 改回裸 `mode=ro`、备份目录或记录目录改回忽略 db、空根拒绝复位、orchestrator 改回 rc==2——7 个全红。
+
+### 已知局限（未改，记在这里）
+- 编排器给迁移步骤 `--timeout 120`：一个跑超时被杀的迁移不会留下记录，次日会重试并再红一次——幂等保证安全，但**长迁移要先改超时**，别指望它自己跑完。
+- 两个运行器并发（编排器 + 手工）没有互斥锁：幂等要求保证结果正确，但会各备份一次、可能各记一行。
+
 
 ## [0.45.419] — 2026-10-06 — Added：阶段 7「单一写入方」——编号幂等的数据迁移运行器 + 三个回填工具缺省 dry-run 先备份 + 13 次历史手工修复补记
 
