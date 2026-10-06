@@ -299,7 +299,9 @@ def window_owner() -> Optional[int]:
         return None
     except PermissionError:
         pass
-    r = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+    # -ww：procps 的管道输出本不限宽，但环境里设了 COLUMNS 就按它截（CI 上确实被截，长解释器路径会把
+    # 标记挤出去）；-ww 压过 COLUMNS。macOS 的 BSD ps 此时本就不限宽，加了也一样
+    r = subprocess.run(["/bin/ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
     return pid if "alphabot.launcher" in r.stdout else None
 
 

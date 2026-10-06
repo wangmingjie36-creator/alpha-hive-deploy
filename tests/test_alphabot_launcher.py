@@ -512,6 +512,39 @@ class TestNativeWindow:
         LA._window_pid_path().write_text("garbage", encoding="utf-8")
         assert LA.window_owner() is None
 
+    def test_long_command_line_survives_piped_ps_width(self, home, monkeypatch):
+        """v0.45.412：procps 的 ps 管道输出本不限宽，但环境里设了 COLUMNS 就按它截（src/ps/global.c），
+        `-ww` 压过 COLUMNS（parser.c）。CI 上确实被截了（owner 命令行 99 列、标记从第 83 列起；不带 `-ww` 三次
+        全红、带了转绿；COLUMNS 是谁设的未查明）⇒ 开着的窗口被当成没有、第二次双击去问数据根。
+        macOS 的 BSD ps 管道输出恒不限宽（实测连 COLUMNS 都不理），本机真跑永远红不了
+        ⇒ 用按 procps 源码行事的假 ps + `COLUMNS=80` 钉住。"""
+        ci_cmdline = ("/opt/hostedtoolcache/Python/3.11.16/x64/bin/python "
+                      "-c import time; time.sleep(60) alphabot.launcher")     # 10-04 CI 上 owner 的真实形状
+        assert ci_cmdline.index("alphabot.launcher") >= 80, "夹具自检：标记要真在 80 列之外，否则这条绿不算数"
+        real_run, asked = subprocess.run, []
+
+        def procps_like(cmd, *a, **k):
+            if not str(cmd[0]).endswith("ps"):
+                return real_run(cmd, *a, **k)
+            asked.append(list(cmd))
+            cols = (k.get("env") or os.environ).get("COLUMNS")
+            unlimited = "-ww" in cmd or cmd.count("-w") >= 2 or not cols
+            out = ci_cmdline if unlimited else ci_cmdline[:int(cols)]
+            return subprocess.CompletedProcess(cmd, 0, stdout=out + "\n", stderr="")
+
+        monkeypatch.setenv("COLUMNS", "80")
+
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            LA._window_pid_path().parent.mkdir(parents=True)
+            LA._window_pid_path().write_text(str(owner.pid), encoding="utf-8")
+            monkeypatch.setattr(subprocess, "run", procps_like)
+            assert LA.window_owner() == owner.pid, "ps 输出被截断后认不出开着的窗口——要带 -ww"
+            assert asked, "window_owner 没调 ps：假 ps 没接上，这条绿不算数"
+        finally:
+            owner.kill()
+            owner.wait()
+
     def test_no_native_window_falls_back_to_browser_and_says_why(self, home, monkeypatch, capsys):
         monkeypatch.setattr(LA, "probe", lambda *a, **k: {"state": "alphabot", "info": {"from_app": False}})
         ui = FakeUI()

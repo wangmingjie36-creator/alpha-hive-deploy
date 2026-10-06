@@ -1102,21 +1102,6 @@ def _isolate_ml_model_file(request, tmp_path, monkeypatch):
 #    在这里是需求。
 _REPO_ROOT_FOR_GUARD = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 只盯「生产数据」级别的产物：样本库、向量库、三本期权账本。
-# 缓存目录（cache/ data_cache/ reddit_cache/ …）与 ml_model*.json 暂不入闸——
-# 前者危害是脏缓存、后者归 v0.45.149，另见 CHANGELOG v0.45.150 的分级表。
-_GUARDED_PRODUCTION_ARTIFACTS = (
-    "pheromone.db",
-    "metrics.db",
-    "chroma_db",
-    "vrp_state",
-    "options_paper_state",
-    "hedge_state",
-    "sell_strike_state",
-    "alphabot_state",
-)
-
-
 def _artifact_signature(path):
     """(存在性, 大小, mtime_ns) 摘要；目录则递归汇总。
 
@@ -1211,7 +1196,7 @@ def _isolate_sell_strike_state(_isolate_env, request, tmp_path):
 @pytest.fixture(autouse=True)
 def _isolate_alphabot_state(_isolate_env, tmp_path):
     """Alpha Bot 状态目录（v0.45.388）防线①：`PATHS.alphabot_state` 此刻是绝对路径且在本测试沙箱里。
-    防线②（真身指纹）由 `_GUARDED_PRODUCTION_ARTIFACTS` 里的 `alphabot_state` 与仓库根默认拒绝总闸兜住。
+    防线②（真身指纹）由仓库根默认拒绝总闸与真实数据根总闸（`_guard_real_data_root`）兜住。
     判据同 `_assert_sell_strike_state_in_sandbox`（纯词法，不拿 cwd 补全）。"""
     import hive_logger
 
@@ -1219,6 +1204,20 @@ def _isolate_alphabot_state(_isolate_env, tmp_path):
     assert p.is_absolute(), f"PATHS.alphabot_state 解析成了相对路径 {p}：生产从仓库根跑会写穿仓库根"
     assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
         f"PATHS.alphabot_state = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？")
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_replay_ohlc_state(_isolate_env, tmp_path):
+    """回放行情库（v0.45.410，`replay_ohlc_store`）防线①：`PATHS.replay_ohlc_state` 此刻是绝对路径且在本测试沙箱里。
+    F&G 前瞻检验的 `run()` 每次都会往这里写——测试里调 `run()` 的地方很多，任何一处把路径冻住都会写进真身。
+    防线②（真身指纹）由仓库根默认拒绝总闸与真实数据根总闸（`_guard_real_data_root`，v0.45.409）兜住。"""
+    import hive_logger
+
+    p = pathlib.Path(hive_logger.PATHS.replay_ohlc_state)
+    assert p.is_absolute(), f"PATHS.replay_ohlc_state 解析成了相对路径 {p}：生产从仓库根跑会写穿仓库根"
+    assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+        f"PATHS.replay_ohlc_state = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？")
     yield
 
 
@@ -1245,58 +1244,13 @@ def default_path_sandbox_check():
     return _assert_default_path_in_sandbox
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _guard_production_artifacts():
-    """第二道防线：整个 session 跑完，生产产物指纹必须没变。
-
-    第一道防线是「路径调用时求值」——`PATHS.*` 全是 property，配上
-    `_isolate_env` 的 `monkeypatch.setenv` 本该够了。它失效过：把 `PATHS.x`
-    求值成模块级常量或类属性，值就冻在 import 那一刻，而 pytest 在**收集期**
-    就 import 生产模块，那时本文件的 fixture 一次都没跑过（实测收集结束时
-    `ALPHA_HIVE_HOME` 确为 `<UNSET>`）⇒ 冻成 checkout 根目录，隔离形同不存在。
-
-    v0.45.150 之前的实测后果：跑一次全套测试，`PredictionStore.__init__` →
-    `_init_table()` 会以读写模式打开**生产** `pheromone.db`（37 MB，喂 IC 闸 /
-    权重优化 / 概率记分卡的样本库），执行 `CREATE TABLE IF NOT EXISTS`、进入
-    WAL 模式、留下 `-wal`/`-shm`；`MemoryStore()` 还会在其上跑 `schema_migrate`。
-
-    为什么需要这一道而不是只修路径（照 `_isolate_paper_portfolio_state` 的理由）：
-    逐模块打补丁是打地鼠——本仓库已经为 `weekly_optimizer` / `feedback_loop` /
-    `paper_portfolio` 各写过一个专属 fixture，每次都是**事后**补的。本闸不认
-    模块、只认盘上的产物，因此对将来新增的写入路径同样有效。
-
-    ⚠️ 它是 session 级的，红在整轮末尾，不会指出是哪条测试写的。定位办法：
-    patch `sqlite3.connect` / `builtins.open` / `os.makedirs` 记 `nodeid` 与调用栈
-    （v0.45.150 就是这么把 `pheromone.db` 归因到 `backtester.py:99` 的）。
-    ⚠️ 若此时机器上正好在跑每日扫描，本闸也会红——那不是假警报，是提示你
-    「测试与生产写同一批文件的时间窗真实存在」。
-    """
-    real = {name: os.path.join(_REPO_ROOT_FOR_GUARD, name)
-            for name in _GUARDED_PRODUCTION_ARTIFACTS}
-    before = {n: _artifact_signature(p) for n, p in real.items()}
-
-    yield
-
-    touched = sorted(n for n, p in real.items()
-                     if _artifact_signature(p) != before[n])
-    assert not touched, (
-        f"测试写到了**生产**产物：{touched}\n"
-        f"（checkout 根目录 = {_REPO_ROOT_FOR_GUARD}）\n\n"
-        "十有八九是某处把 `PATHS.*` 派生的路径求值成了模块级常量、类属性，"
-        "或者写成了默认参数 `def f(db_path=DB_PATH)`——三者都冻在 import 期，"
-        "而 pytest 收集期 import ⇒ `_isolate_env` 的 setenv 追不上它。\n"
-        "改法：改成 property / 函数（调用时求值）；默认参数写 `= None` "
-        "再在函数体里解析。结构守卫见 "
-        "`tests/test_paths_not_frozen_at_import.py::TestSpeciesDoesNotSpread`。")
-
-
 # ==================== 仓库根「默认拒绝」总闸（v0.45.233） ====================
 #
-# 上面那道只盯 6 个点名的产物；本闸盯仓库根下**除代码以外的一切**，不维护清单。
-# 两道都留：上面那道是纵深防御，且 `_GUARDED_PRODUCTION_ARTIFACTS` 必须是本闸
-# 覆盖面的子集——`tests/test_root_data_guard.py` 断言这一点，谁把其中一项划进
-# 「代码」谁红。「代码」怎么界定、为什么这么界定，全在 `tests/_root_data_guard.py`
-# 的 docstring，这里不抄（抄一份就是快照）。
+# 本闸盯仓库根下**除代码以外的一切**，不维护清单（新产物默认就被盯住）。
+# 「代码」怎么界定、为什么这么界定，全在 `tests/_root_data_guard.py` 的 docstring，这里不抄（抄一份就是快照）。
+# v0.45.409（阶段 6 ⑤）：原先还有一道「点名 8 个产物」的清单式总闸（`_GUARDED_PRODUCTION_ARTIFACTS`）；
+# 数据搬到 `$ALPHA_HIVE_HOME` 后它盯的仓库根路径都不存在，被本闸完全覆盖，已删；
+# 对应的真缺口——测试写到**真实数据根**——由下面的 `_guard_real_data_root` 补上。
 #
 # 为什么「之前」的指纹取在 `pytest_sessionstart` 而不是 session fixture 的 setup：
 # fixture 最早也要等**收集结束**才跑，而冻结路径那一族正是在收集期 import 时
@@ -1311,8 +1265,23 @@ import _root_data_guard  # noqa: E402
 _ROOT_FP_BEFORE = pytest.StashKey[dict]()
 
 
+_DATA_ROOT_BEFORE = pytest.StashKey[tuple]()
+
+
 def pytest_sessionstart(session):
     session.config.stash[_ROOT_FP_BEFORE] = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)
+    # 真实数据根：必须在任何 env 隔离之前取（`_isolate_env` 会把 ALPHA_HIVE_HOME 改成沙箱）。
+    root = _root_data_guard.real_data_root(os.environ, os.path.expanduser("~"), _REPO_ROOT_FOR_GUARD)
+    session.config.stash[_DATA_ROOT_BEFORE] = (
+        root, _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason) if root else None)
+
+
+def pytest_report_header(config):
+    """让「这台机器上真实数据根闸有没有生效」可见：不在时它什么都不保护，不能让这件事静默。"""
+    root, fp = config.stash.get(_DATA_ROOT_BEFORE, (None, None))
+    if root is None:
+        return "real-data-root guard: INACTIVE（此机器上没有真实数据根；CI / 干净克隆都是这样，牙只靠合成测试证明）"
+    return f"real-data-root guard: active on {root}（{len(fp)} 个受闸条目）"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -1342,6 +1311,39 @@ def _guard_repo_root_default_deny(request):
         "cwd 相对路径，或把 `PATHS.*` 求值成了模块级常量 / 类属性 / 默认参数。"
         "改成调用时读 `PATHS.*`。\n"
         "**不要**往 `tests/_root_data_guard.py` 的豁免里加数据路径——那里只放人写的代码。")
+
+@pytest.fixture(scope="session", autouse=True)
+def _guard_real_data_root(request):
+    """整个 session（含收集期）跑完，**真实数据根**里的生产数据必须一个字节都没变（v0.45.409，阶段 6 ⑤）。
+
+    阶段 5 之后生产数据在 `$ALPHA_HIVE_HOME`（~/alpha-hive-data）。`_isolate_env` 逐条把它改成沙箱，
+    但任何绕过隔离的写入（`__file__` 派生 / 模块级常量冻结 / subprocess 丢了 env / 硬编码 `~/alpha-hive-data`）
+    都会写到真实数据根——生产账本、样本库、模型，**不可重取**。此前没有任何东西会为此变红。
+    口径同仓库根闸：默认拒绝（除 `logs/`、`db_backups/` 与 `_` 打头的元目录外一切受闸）、`(size, mtime_ns)`、
+    `-shm` 只记大小。「之前」取在 `pytest_sessionstart`（收集期之前），理由见仓库根闸一节。
+
+    ⚠️ 与仓库根闸同样是 session 级：红在整轮末尾，不指出是哪条测试写的（定位法见仓库根闸）。
+    ⚠️ **机器上正在跑每日扫描 / 周任务时它会红**（扫描写 `cache/`、`report_snapshots/`、`paper_portfolio_state/`…）——
+    那不是假警报，是「测试与生产写同一批文件的时间窗真实存在」；平日 14:00–15:00 与周日 09:07 前后别跑全套。
+    ⚠️ 没有真实数据根的机器上（CI / 干净克隆）本闸不做任何事（`pytest_report_header` 会说明）；它的牙由
+    `tests/test_root_data_guard.py` 的合成数据根测试证明，不能靠「这轮绿」证明。
+    """
+    root, before = request.config.stash.get(_DATA_ROOT_BEFORE, (None, None))
+
+    yield
+
+    if root is None:
+        return
+    changes = _root_data_guard.diff(
+        before, _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason))
+    assert not changes, (
+        f"测试写到了**真实数据根**（{root}）里的生产数据：\n"
+        f"{_root_data_guard.format_diff(changes)}\n\n"
+        "被测代码绕过了 `ALPHA_HIVE_HOME` 隔离：多半是 `Path(__file__).parent / 数据名`、模块级常量冻结、"
+        "subprocess 丢了 env，或硬编码了 `~/alpha-hive-data`。改成调用时读 `PATHS.*`。\n"
+        "若这是每日扫描 / 周任务恰好在写（不是测试）：等它结束再跑。\n"
+        "**不要**往 `tests/_root_data_guard.py` 的豁免里加数据路径。")
+
 
 # ==================== hive_logger 文件日志隔离（v0.45.239） ====================
 #

@@ -69,6 +69,8 @@ MOVE_DIRS = (
     "sell_strike_state",
     # v0.45.388 Alpha Bot 状态（盘中快照不可重取 + 设置）
     "alphabot_state",
+    # v0.45.410 回放行情库（F&G 前瞻检验；首次落定后冻结，重取的值可能已被 Yahoo 修订 ⇒ 按不可重取对待）
+    "replay_ohlc_state",
     # 向量库 / 日志 / 备份轮转
     "chroma_db", "logs", "db_backups",
     # 缓存：可重建，但冷缓存会引发 yfinance 限流（头号数据丢失原因）⇒ 一并带走

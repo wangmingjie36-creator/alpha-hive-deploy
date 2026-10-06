@@ -191,13 +191,26 @@ class _HivePaths:
         return self.home / "alphabot_state"
 
     @property
+    def replay_ohlc_state(self) -> Path:
+        """回放行情库（v0.45.410，`replay_ohlc_store.ReplayOhlcStore`）：已落定的日线只向 Yahoo 取一次。
+
+        写 / 读：F&G 敞口门前瞻检验的 `run()`（编排器 Step 11 与每周只读诊断任务经 `ic_rerun_readiness` 调它）。
+        每个标的一个 `<TICKER>.json`，只有价格。**不是可重建缓存**：首次落定后冻结、之后 Yahoo 的回溯修订不进库，
+        丢了重建出来的值可能不同 ⇒ 进数据备份（`data_backup/export.py` 的 `STATE_DIRS`）。
+        调用时求值（读 `ALPHA_HIVE_HOME`）；不建目录（写入方自己 `mkdir`）。
+        """
+        return self.home / "replay_ohlc_state"
+
+    @property
     def data_backup_repo(self) -> Path:
         """数据备份仓库的工作区（`data_backup/run_backup.py`，编排器 Step 14 每个扫描日提交一次）（v0.45.408）。
 
         读：`experiments/fg_exposure_gate_forward_test.py` 的逐日重锚——生产状态历史在数据根迁移阶段 5 之后
         只提交到这里（代码仓库的 `paper_portfolio_state/` 提交止于 2026-09-25）。**本属性只读**，不建目录。
-        调用时求值（读 `ALPHA_HIVE_HOME`）。⚠️ 编排器与 `run_backup.py` / `export.py` 的缺省值仍写死
-        `~/alpha-hive-data/_git_backup`（生产里与本值相同），统一另立任务。
+        调用时求值（读 `ALPHA_HIVE_HOME`）。
+        v0.45.414 起它也是 `run_backup` / `export` 的缺省位置（经 `export.default_backup_repo()`），编排器 Step 14
+        不再自己写路径。⚠️ `ALPHA_HIVE_HOME` 未设时 `home` 兜底到代码检出 ⇒ 本值落进代码仓库；
+        备份 / 导出由 `export.backup_repo_inside_code_repo` 拒绝，只读的调用方自己留意。
         """
         return self.home / "_git_backup"
 

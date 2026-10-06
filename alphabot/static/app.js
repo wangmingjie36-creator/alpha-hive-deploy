@@ -7,6 +7,7 @@ import { renderIntraday } from "./pages/intraday.js";
 import { renderLedger } from "./pages/ledger.js";
 import { renderResults } from "./pages/results.js";
 import { renderMethod } from "./pages/method.js";
+import { renderHelp } from "./pages/help.js";
 
 export const state = { meta: null };
 const app = document.getElementById("app");
@@ -88,6 +89,7 @@ async function route() {
     } else if (page === "ledger") await renderLedger(app, alive);
     else if (page === "results") await renderResults(app, a, alive);
     else if (page === "method") await renderMethod(app, alive);
+    else if (page === "help") await renderHelp(app, a, alive);
     else fill(app, h("div", { class: "empty" }, "没有这个页面。"), h("p", { class: "c" }, h("a", { href: "#/" }, "回总览")));
   } catch (e) {
     console.error(e);

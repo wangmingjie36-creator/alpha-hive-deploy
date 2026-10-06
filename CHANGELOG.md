@@ -5,9 +5,315 @@
 
 ---
 
-## [0.45.410] — 2026-10-04 — 占位（进行中：F&G 前瞻检验回放行情库——已落定 K 线只下载一次，降级路径不再随快照天数增长）
+## [0.45.418] — 2026-10-06 — 占位（进行中：`orchestrator_lint.py` 补命令行入口——命中 exit 1、文件读不到 exit 2，此前直接跑是恒 exit 0 的空检查；原占 417 未及时推送被占用，改号）
 
-## [0.45.409] — 2026-10-04 — 占位（进行中：阶段 6 ⑤ 收窄根总闸 + 修两处恒真自证）
+## [0.45.417] — 2026-10-06 — 占位（进行中：异地备份纳入 .swarm_results_*.json；analysis-*-ml-* 写成 accepted-loss；排除理由分类守卫；备份仓 600MB 预算闸；恢复演练）
+
+## [0.45.416] — 2026-10-05 — 占位（进行中：纸面组合拆股修正——持仓跨拆股除权日时按比例调整 shares/entry/SL/TP，防假 SL/TP 与按调整后价格估值；时点安全）
+
+## [0.45.415] — 2026-10-05 — 占位（进行中：F&G 前瞻检验回放行情库改为时点数据——拆股 / 修订前后的重放日各用当时的价格）
+
+## [0.45.414] — 2026-10-05 — Changed：数据备份仓位置收成一处——`run_backup` / `export` 缺省值改走 `PATHS.data_backup_repo`（调用时求值），编排器 Step 14 不再传 `--backup-dir`；备份仓落在代码仓库里一律拒绝
+
+用的是 v0.45.408 引入的 `PATHS.data_backup_repo`（`home / "_git_backup"`，只读不建目录）；该属性文档串里「编排器与 `run_backup.py` / `export.py` 的缺省值仍写死……统一另立任务」一句即本条，已改写。
+（本条原占 0.45.403 → 0.45.411 → 0.45.413，三次占号都没赶在别人之前上 main（403 GitHubTool 退役、411 Alpha Bot 帮助页、413 GitHubTool 白名单）⇒ 改号 414；414 最终由「在此刻的 main 上重建并立即推送」的脚本占下。）
+
+此前同一个位置写死三份：编排器 Step 14 `--backup-dir "$HOME/alpha-hive-data/_git_backup"`、`run_backup.main` 的 `--backup-dir` 缺省、`export.main` 的 `--out` 缺省，
+都是 `Path.home() / "alpha-hive-data" / "_git_backup"`。成因是历史性的：阶段 3（备份）早于阶段 5（全局迁移），那时 `PATHS.home` 还兜底到代码仓库，备份子系统只能自己指向新数据根
+（`backup_continuity.py` 的注释原文记着这条理由）。阶段 5 后 `ALPHA_HIVE_HOME` 已由编排器与 launchd plist 导出，理由不在了。
+
+**「谁依赖 `Path.home()/alpha-hive-data` 与 `PATHS.home` 的差别」逐个核过**：
+- 编排器：顶部 `export ALPHA_HIVE_HOME="$DATA_DIR"`（`/Users/igg/alpha-hive-data`）；plist `EnvironmentVariables` 同值（10-03 只读核对）⇒ 生产里新旧**同值**。
+- 测试：`_isolate_env` 把 `ALPHA_HIVE_HOME` 指 tmp、`_sandbox_home` 把 `HOME` 指 tmp；原有测试全部显式传 `--backup-dir`，无人吃缺省值。
+- `~/.claude/scripts`（除部署副本与 `.bak`）、`scheduled-tasks`、`skills`、LaunchAgents：无其他调用方。
+- **交互 shell 没设 `ALPHA_HIVE_HOME`（10-03 实测）** ⇒ 手动跑不传路径时，`PATHS.home` 兜底到代码检出，新缺省 = `<检出>/_git_backup`。这是唯一依赖差别的调用方：
+  `export.main` 会 `mkdir` 并把整份生产数据铺进代码检出，下一次 `run_backup` 再在里面 `git init` 出嵌套数据仓库。⇒ 加守卫（下条），不加回退（回退到 `Path.home()` 就是第二份真相）。
+
+### Changed
+- `data_backup/export.py`：新增 `default_backup_repo()`（= `PATHS.data_backup_repo`，函数体内求值；import 失败不吞——这不是 `_code_git_head` 那种只作记录的字段）
+  与 `backup_repo_inside_code_repo(path)`（`resolve()` 后逐级上溯，与 `PATHS.git_repo_root` 比路径**或** (st_dev, st_ino)；不用字符串前缀——`/x/code_backup` 不在 `/x/code` 里）。
+  `main()` 的 `--out` 缺省 `None` ⇒ 解析成 `default_backup_repo()`；目标在代码仓库里 ⇒ stderr 说明、rc=2、什么都不建。
+- `data_backup/run_backup.py`：`--backup-dir` 缺省 `None`，在 `main()` 现有的顶层 `try` 里解析 ⇒ 解析失败落 `crash`/rc=3，**不**以 Python 默认的 1 退出（1 专属 `secret_scan`，Step 14 会报成「密钥扫描命中」）。
+  `run()` 在 `git init` 之前拦「备份仓在代码仓库里」：`stage="init"`、`refused="inside_code_repo"`、rc=2——Step 14 现成的 `init` 分支报「未导出未提交」，正是实情，编排器不用加分支；判定本身抛异常同样中止（判不了就不建库）。显式传参同样拦。
+- `scripts/alpha-hive-orchestrator.sh` Step 14：删掉 `--backup-dir` 一行（位置只在 `PATHS`）；顶部阶段 5 回退说明补一句：回退时要给 Step 14 补回 `--backup-dir`，否则备份仓解析进检出、被拒绝。
+  `bash -n` 通过；裸变量检查（`orchestrator_lint.find_unbraced`，经 `tests/test_orchestrator_braced_vars.py`）0 命中。
+- `run_data_backup.py` 用法说明、`_sandbox_home` 文档串跟着改（`--backup-dir` 不再跟 `$HOME`）。
+
+### 部署节奏（编排器合入后下一个扫描日才部署）
+- 合入后首轮：旧编排器（仍传 `--backup-dir "$HOME/alpha-hive-data/_git_backup"`）+ 新 Python ⇒ 显式值照用（`test_explicit_backup_dir_still_wins` 钉住），守卫放行（不在检出里）。
+- 第二轮起：新编排器不传 ⇒ `$ALPHA_HIVE_HOME/_git_backup`，与旧值逐字相同。
+- revert：新编排器 + 旧 Python ⇒ 旧缺省 `Path.home()/alpha-hive-data/_git_backup`（launchd 下 `HOME` 已坐实）⇒ 同值。三种组合都不换位置。
+
+### Tests
+- `tests/test_data_backup.py::TestBackupRepoFollowsPaths`（12 条；首版报「10 条」是数错，实为 9）：缺省跟 `ALPHA_HIVE_HOME`、两次不同 env 得两个值（未冻结）、不跟 `$HOME`；显式值优先、显式空串不换成缺省；`export.main` 同；
+  代码仓库根本身 / 其下目录都拒绝且零 git / 零导出调用、不建 `.git`；同前缀兄弟目录不误伤；同一目录的大小写 / 固件链接写法也拒绝；**env 全清的 CLI 全链路**（`main` → 缺省 → `run` → 拒绝，rc=2）——git 与导出都换成「一调就炸」的桩，守卫坏了也不会在检出里动手；
+  编排器可执行行（注释除外）不许出现 `_git_backup` / `--backup-dir`，并断言 Step 14 调用本身还在（防空转变绿）。
+- 变异 10/10 被杀，每个都由预期的那几条打红、passed+failed 均为 87（`PYTHONDONTWRITEBYTECODE=1` + 每轮清 pyc、哈希核对还原）：
+  run 守卫关掉（3 红）/ export 守卫关掉（1）/ 两处缺省改回 `Path.home()` 字面量（2、1）/ 编排器写回 `--backup-dir`（1）/ 字符串前缀判包含（1）/ 关掉 inode 比较（2）/
+  缺省冻成 import 期常量（2）/ 两处缺省改回真值判断（各 1）。均在 main 的真属性上跑（换基后，无垫片）。
+
+### 二次检查（10-04，换基到含 408 的 main 后）
+- **守卫按字符串判包含会被同一目录的另一种写法绕过**：`resolve()` 不折叠大小写（APFS 默认不分）也不折叠固件链接，实测 `/users/igg/desktop/alpha hive/…` 与
+  `/System/Volumes/Data/Users/igg/Desktop/Alpha Hive/…` 都与检出同 inode、`is_relative_to` 却为 False ⇒ 往「放行」错。改为路径相等或 inode 相等，逐级上溯。
+- **真值判断选缺省**（`if args.backup_dir`）会把显式 `--backup-dir ""` 悄悄换成缺省值 ⇒ 改 `is None`（`export.main` 同）。显式值的语义与改动前一致。
+- 全链路测试原断言「检出里不存在 `_git_backup`」⇒ 改为前后存在性相同（残留不算守卫的账）。
+- 首版写的「`orchestrator_lint.py` 通过」是**空检查**：它是没有 CLI 的库模块，`python3 orchestrator_lint.py <文件>` 只 import 就 exit 0，对含 `$NUM（` 的文件同样 0。真检查是 `find_unbraced()`（正对照：原 bug 行命中 1 条）。编排器本身一直由 `test_orchestrator_braced_vars.py` 覆盖，结论不变。
+- 已核、不改：`run_step` 是 `"$PYTHON3" "$script" "$@"`、不造 env ⇒ export 的 `ALPHA_HIVE_HOME` 到得了 Step 14；`backup_continuity` 把 `ok:false` 记为不健康日并报阶段
+  ⇒ 拒绝会以 `init` 出现；守卫在 hive_logger 不可 import 时中止（判不了就不建库；data_backup 与 hive_logger 同在仓库根，不存在只导得进一个的入口）。
+
+### 未动（同形，另立）
+- `--status-file` / `--history-file` 缺省、编排器 `BACKUP_STATUS_JSON` / `BACKUP_HISTORY_JSONL`、`backup_continuity._history_file()` 仍是 `$HOME/alpha-hive-data/logs/...`
+  （`_sandbox_home` 与 `test_run_backup_defaults_follow_home` 正靠「跟 `$HOME` 走」隔离；`backup_continuity.py` 注释「阶段 5 尚未执行」已过时）。
+- `--src` 缺省仍是 `/Users/igg/Desktop/Alpha Hive`（阶段 5 后那里是冻结旧数据）。设了 `ALPHA_HIVE_HOME` 却不传 `--src` 手动跑 ⇒ 把冻结数据导进**真实**备份仓并推送。本条之前就存在；
+  env 全清时本条守卫恰好先拦住。
+- 编排器顶部「8 处 `$DATA_DIR`」计数早已不准（现 13 处），未改。
+- 反方向嵌套（备份仓是代码仓库的**祖先**，如 `--backup-dir ~/Desktop`）不拦：`git add -A` 会把整个目录扫进数据仓库。本条之前就存在，只能显式传参触发。
+- 根因在更深处：`ALPHA_HIVE_HOME` 未设时 `PATHS.home` 兜底到代码检出，阶段 5 后对**所有**读 `PATHS` 的手动运行都是读冻结旧数据；本条只护住了备份。是否改兜底 / 给交互 shell 设变量，由用户定。
+
+## [0.45.413] — 2026-10-05 — Changed：`GitHubTool._ALLOWED_GIT_CMDS` 按生产调用点收窄（18→5）+ `pull` / `fetch` 精确参数运行期约束
+
+v0.45.402~403 退役日报提交 / 推送链与 `GitHubTool.commit()/status()` 后留下的设计决定：白名单是否按调用点收窄。决定：收窄，并补上「只按子命令判」拦不住的参数层。**只改 `agent_toolbox.py` 与测试。**
+
+### 问题
+- 白名单有 18 个子命令，生产实际下发的只有 5 个（`production_sync` 扫描前快进：`rev-parse` / `merge-base` / `rev-list` 只读，`fetch origin main`，`pull --ff-only --no-rebase origin main`）。其余 13 个无人调用，其中 `add` / `commit` / `push` / `stash` / `branch` / `tag` / `remote` 是写操作。
+- 白名单只按**子命令**判：放行 `pull` 就放行了 `pull --rebase`（改写历史），放行 `fetch` 就放行了 `fetch origin main:main`（移动本地 main）。原来只有一条 AST 单向守卫（调用点 ⊆ 白名单），它**不防白名单变大**。
+
+### Changed
+- `_ALLOWED_GIT_CMDS`：`{"fetch", "pull", "rev-parse", "rev-list", "merge-base"}`。移除 `status` / `log` / `diff` / `branch` / `add` / `commit` / `push` / `remote` / `show` / `tag` / `stash` / `merge-tree` / `commit-tree`。
+- 新增 `_EXACT_GIT_ARGS`：会改本地状态的两个子命令（`fetch` / `pull`）的**完整参数**逐个相等，`run_git_cmd` **运行期**强制，不符 ⇒ `_log.error` 并返回 `Git arguments not allowed`，命令不执行。其余三个只读，不限参数。
+- 没做完整参数模式匹配：只剩 5 个子命令、2 个能改状态，完整匹配的维护成本高于它多出来的那点安全。
+
+### Added（守卫，`tests/test_git_failures_are_visible.py::TestAllowlistMatchesProductionCallSites`，共 +38 条）
+- **白名单 == 生产调用点（AST 扫出）精确相等**：补上超集方向（原来只有子集方向）。「怕它变大也怕它变小」两条断言各一条。
+- 约束值必须就是生产下发的那条字符串（AST 读 `production_sync` 的字面量）——否则收窄把现役调用也拒了，扫描前同步停摆。
+- 10 种 `pull` / `fetch` 的非约定参数（`--rebase`、`origin main:main`、`--prune`、`--force` …）必须被拒且**不执行**（桩住 `subprocess.run` 断言零调用）；6 条生产命令必须仍被执行（正对照，防「什么都拒」的假绿）；19 个其余子命令（含 `checkout` / `reset` / `rebase` / `merge`）必须被拒且不执行。
+- 三条旧测试换成仍在白名单里的命令：`status` → `rev-parse --git-dir`；`git push` → `git fetch origin main`；非 UTF-8 输出那条改用 `rev-parse --abbrev-ref HEAD`，让 HEAD 指向**名字含非 UTF-8 字节**的分支——APFS 不许建这种松散 ref 文件，所以直接写 `packed-refs` 与 `HEAD`（git 照常读）。
+
+### 验证
+- 变异 5 处各红对应守卫：白名单加回 `push` ⇒ 相等测试 + `push` 被拒测试红；删现役 `merge-base` ⇒ 子集 / 相等 / 正对照红；运行期约束整段不执行 ⇒ 10 条参数被拒测试红；约束放松成只看首个参数 ⇒ 6 条红；约束值与生产不一致 ⇒ 4 条红。
+- **真实远端冒烟**：临时浅克隆（读真实 GitHub），把 main 退后 3 个提交，用新代码跑 `production_sync.py`：第一次 `fast_forwarded`（`ac78b75 → b4b908c`，behind=13，真的执行了 `pull --ff-only --no-rebase`），第二次 `up_to_date`。
+- 干净克隆全套（本机，真实数据根闸启用，7585 个受闸条目、整轮未触发）：8126 passed；唯一失败 `TestCoverageHorizon`（日历覆盖不足，设计内周期性变红，与本版无关）。
+
+### 生产影响
+下一次扫描前的 `production_sync` 快进会带上本版（今天 10-05 14:00 与 v0.45.402 / 403 同一轮）。若参数约束与现役调用不符，后果是 `sync_before_scan` 回 `error` 类结局并触发 `alert_manager` 的「生产代码 ≠ origin/main」P1（可见，不会静默）；扫描照跑旧代码。
+
+
+## [0.45.412] — 2026-10-04 — Fixed：Alpha Bot 启动器认「窗口已开着」用的 `ps` 不带 `-ww`——Linux CI 上 ps 管道输出被压窄（procps 按环境里的 `COLUMNS` 截），`TestNativeWindow::test_second_launch_brings_existing_window_forward` 自 v0.45.407 起红；生产（macOS）不受影响
+
+### 现象
+
+v0.45.407（`593ab53a`，pywebview 原生窗口）推上 main 后，GitHub Actions 多出一条红：
+`assert [('ask', '首次启动：请选择 Alpha Hive 数据根目录…')] == [('activate', 2515)]`——第二次启动没认出开着的窗口，
+直接走到了「首次启动问数据根」。本机 Mac 上该文件 32/32 全绿。
+（main 的 CI 结论自 09-06 起（最后一次绿是 09-05 的 run 33992925038）因 `TestCoverageHorizon` 按设计恒红，这条新红**没有改变 run 的结论位**，只在失败清单里看得见。）
+
+### 根因
+
+`alphabot/launcher.py::window_owner()` 用 `/bin/ps -p PID -o command=` 取命令行、找 `alphabot.launcher` 标记。
+procps 源码（`src/ps/global.c::set_screen_size`，CI 镜像 ubuntu-24.04 的 4.0.4 与 master 一致）：stdout 不是终端时宽度取 `OUTBUF_SIZE`（≈不限），
+**只有环境变量 `COLUMNS` 能把它压窄**；`-ww` 再压过 `COLUMNS`（`parser.c`：`w_count>1 ⇒ OUTBUF_SIZE`）。
+CI 解释器是 `/opt/hostedtoolcache/Python/3.11.16/x64/bin/python`，测试里 owner 的命令行共 **99 列、标记从第 83 列起** ⇒ CI 上被截到第 83 列之前 ⇒ 标记没了 ⇒ `window_owner()` 返回 None。
+⚠️ CI 测试进程里的 `COLUMNS` **是谁设的未查明**（仓库、workflow、本机已装包均未设；疑为 runner 环境）——待验证；截到的具体列数同样未直接测得。
+macOS 的 BSD ps 在非终端输出时恒不限宽（实测 `COLUMNS=40` / `80` 都不截），所以 .app 在生产从没踩到，本机测试也永远红不了。
+
+没在 Linux 上本机复现（本机无容器运行时）：证据链是 CI 断言形状（走到 `ask` 而非 `activate` ⇒ owner 判成了 None）+ procps 源码 + CI 解释器路径的实际长度 + 修复前后对照（见下）。
+✅ **CI 已确认（2026-10-05）**：推上 main 的 `9a2833a2` 那次 run（37342119622，completed）里，真 ps 的 `test_second_launch_brings_existing_window_forward` 与新测试均 **PASSED**；
+全套 1 failed / 8072 passed，唯一的红是按设计的 `TestCoverageHorizon`。
+
+### Fixed
+
+- `alphabot/launcher.py`：`window_owner()` 的 ps 加 `-ww`（procps：不限宽、压过 `COLUMNS`；BSD：同样不限宽，已实测 macOS 上 `-ww -p PID -o command=` 输出与原先逐字一致）。
+- `tests/test_ic_rerun_fg_budget.py::_kill_if_ours`：同一写法同一病（推断，未在 CI 上观测）——marker 是测试临时目录下的 `code/` 路径，CI 上约从第 52 列起、长 60+ 列，宽度 <83 时必被截掉 ⇒ 收尸**静默不杀**、且没人会红；只在子进程活过本条测试时才会走到这一步。一并加 `-ww`。
+
+### Added
+
+- `tests/test_alphabot_launcher.py::TestNativeWindow::test_long_command_line_survives_piped_ps_width`：按 procps 源码行事的假 ps（设了 `COLUMNS` 且不带 `-ww` 就按它截；测试里钉 `COLUMNS=80`）+ CI 那条命令行的真实形状。
+  带夹具自检（标记确在 80 列之外）与接线自检（假 ps 真被调到）。**旧代码上实测红**（`None == pid`），修后绿——macOS 上真 ps 测不出这类回归，只能这样钉。
+
+### 验证
+
+- `tests/test_alphabot_launcher.py` + `tests/test_alphabot.py` + `tests/test_ic_rerun_fg_budget.py`：131 passed；`ruff check` 三个改动文件通过。
+- `alphabot.__version__` 未动（沿用 0.45.399 / 0.45.407 的做法：.app 显示版本只在专门对齐时改）。
+- 开工前查过无人在修：main 在 `593ab53a` 之后无 alphabot 提交、各 worktree 无相关未提交改动、各分支无相关修复。
+
+### 二次检查（2026-10-05）
+
+- **因果**：`593ab53a` 以来每个跑完的 CI run 逐个查该测试——不带 `-ww` 的三次（`593ab53a` / `32ea04c4` / 修复合并的直接父提交 `6ecdadef`）全 FAILED，带 `-ww` 的 `9a2833a2` PASSED；无 flaky 迹象。
+- **更正机制**：原写「procps 管道输出宽度未定义、CI 上是 80 列」。查 procps 源码后：管道输出本不限宽，只有 `COLUMNS` 能压窄、`-ww` 压过它——**修法不变、仍正确**，但「80」从来没测得过，CI 上是被 `COLUMNS` 压窄（谁设的待验证）。已同步改 `launcher.py` 注释、两处测试的注释 / docstring。
+- **假 ps 改为按 `COLUMNS` 截**（原先无条件截 80 列），与源码一致；`monkeypatch.setenv("COLUMNS", "80")`。改后重做变异：去掉 `-ww` ⇒ 红（`None == pid`），还原 ⇒ 绿。
+- **更正「自 09-30 起恒红」**：那是 `gh run list --limit 25` 的窗口边界，不是起点。扩大到 1000 条后：最后一次绿是 09-05，09-06 起 360+ 个跑完的 run 全红，09-06 那次的失败清单只有 `TestCoverageHorizon`（与日历记忆里「nfp 09-06 起变红」吻合）。
+- `_kill_if_ours` 那条改写为推断并注明触发条件。
+
+## [0.45.411] — 2026-10-04 — Added：Alpha Bot 程序内「帮助」页（15 章：快速上手 / 逐页导览 / 概念速查 / 环境路由 / 盲期 / 使用建议 / 排错 / 局限）+ 各页「怎么读这页」入口
+
+用户要求把使用说明做进程序里（此前只有仓库根的 `ALPHA_BOT_GUIDE.md`，随程序走不到用户手边）。
+
+### Added
+- `alphabot/static/pages/help.js`：`#/help/<id>` 单页多章，左侧目录 + 正文 + 上一章 / 下一章；未知 id 与裸 `#/help` 落到「快速上手」。
+  内容逐页对着前端源码写（控件名、列名、芯片文案、原始理由代码如 `positive_gamma_at_spot:crosses` / `short_spread_too_wide:put` 都是页面实际显示的）。
+  **会变的规则常量一律取自 `/api/method`**（路由缓冲、档位、容差、点差上限、保护腿宽度、检验门槛 60/12/10、α、置换次数、合格财报状态、排除的报价来源），同「口径」页，不在前端另抄一份；局限与免责逐字同步 `R.CAVEATS` / `R.DISCLAIMER`。
+- 顶栏「帮助」；总览 / 标的各子页 / 盘中 / 账本 / 结果页头加「怎么读这页 ?」直达对应章节（`helpLink`，标的的「期限」「希腊值」共用一章）；「口径」页补一行指向帮助。
+- `alphabot.css`：`.prose h3` / `.help-pager` / `.help-link`。
+
+### Changed
+- `alphabot/__init__.py`：`__version__` 0.45.397 → 0.45.411（页脚与 .app 的 `CFBundleShortVersionString` 读它；0.45.407 没跟着升，页脚一直显示 0.45.397）。已装的 .app 要 `make alphabot-app` 才拿到新 Info.plist 版本号；页面内容 `git pull` 即生效。
+- `ALPHA_BOT_GUIDE.md`：补「程序内帮助」一节；原文保留作仓库内速览。
+
+### 守卫
+- `tests/test_alphabot.py::TestHelpPage`（6 条）：① 全部静态 js 里指向帮助的引用（`#/help/<id>` / `helpLink("<id>")` / ticker 的 `TAB_HELP`）都落在 `SECTIONS` 登记过的 id 上（并断言找到 ≥8 条引用，防解析规则坏了空转）；② 标的五个子页各有 `TAB_HELP`；③ 导航与路由接线；④ 帮助页读 `/api/method` 且引用全部规则常量键，不得出现「≤ 3.0%」「至少 60 个」之类字面量；⑤ `/api/method` 确实带这些键。
+  变异自证：把 `helpLink("ledger")` 改成 `"ledgr"` ⇒ ① 红并点名 `('ledger.js','ledgr')`；在帮助页加一处「≤ 3.0%」字面量 ⇒ ④ 红「路由缓冲写成了字面量」；还原后全绿。
+
+### 验证
+- 演示模式真起服务，浏览器里逐章打开 15 章：无控制台报错、无 `undefined` / `NaN`、目录高亮正确；动态数字（缓冲 3.0%、档位 0.10…0.30、门槛 60/12/10、α 0.0125、5000 次）与服务端一致；10 个页面的帮助入口都在且指向对的章节。
+- 核对代码后改掉了初稿里的三处不实：卖 put 最大亏损是 `K − 权利金`（不是 `K·100 − …`）；页头路由「理由」显示的是原始代码而非中文句子；「拒绝 H0」不等于「路由有用」。
+
+### 注意
+- 帮助页的操作性说明（如「关窗停服务」「`--reset`」）描述的是 v0.45.407 的行为；那些行为再变，帮助页要同步（它们不是从代码取的常量，守卫管不到）。
+
+## [0.45.410] — 2026-10-04 — Fixed（事后修订）：F&G 前瞻检验的时间预算从根上修——回放行情库：已落定的日线只下载一次，降级日的直连次数不再随快照天数增长
+
+**根因**（10-03 真实数据拷贝上剖析）：`run()` 13.7s 里 13.35s 是 22 个标的串行向 Yahoo 整段下载，连续 A + 连续 B + 11 段逐日重放 +
+读锚点合计约 0.2s。真正的风险在降级路径：Yahoo 拒绝整段请求时退回逐次直连，次数与快照天数成正比——10-03 是 182 次 / 11 个快照日
+（每天约 16.5 次），终期约 150 个快照日 ≈ 2,500 次、15–20 分钟。Step 11 已在 09-21 / 09-24 / 09-30 / 10-01 被 60s 看门狗杀过（09-24 正是生产
+自己也被限流那天）。也就是：**每次运行都把不会再变的历史重新下载一遍**，检验的耗时与成败取决于 Yahoo 当天的状态；加大预算、并行下载、
+快速失败都只是推迟或掩盖它，把重放结果存下来接着跑则会冻结旧代码的输出、自证测不出代码漂移（这几条都在分析里否掉了）。
+
+**修法**：前瞻 `run()` 的日线来自回放行情库（新模块 `replay_ohlc_store.py`，目录 `PATHS.replay_ohlc_state`）。用户 10-04 定的三条：
+1. **落定规则**：某天的日线（含「这天没有日线」）在两次**不同美东日期**的下载里逐字段相同、且早于较早那次下载的日期 ⇒ 落定，此后从库里读。
+   编排器 14:00 PDT 跑、当天日线可能还是临时值；Yahoo 偶尔一次响应漏一天——「满 N 天就落定」会把那次响应永久冻进库，两次一致两种都挡住。
+2. **已落定后 Yahoo 又改了**（拆股回溯复权 / 数据修订）⇒ 沿用库里的值，文件里记下首次发现日与新值，进度行每次都报。
+   每次补下载与已落定段重叠 10 天用来发现修订；更早的修订看不见，那是「首次落定后冻结」的本意。
+   （10-05 二次检查改：「改了」同样要两次不同美东日期的观察一致才算；确认后 7 天内段首 ⚠️ + attention，之后只陈述——见下「二次检查」。）
+3. **写入者** = 前瞻 `run()`（编排器 Step 11 与每周只读诊断任务都经 `ic_rerun_readiness` 调它，所以后者从此会写这一个目录）；
+   `--rehearse` / `--insample` / 前提核对脚本 `replay_ohlc_window_premise.py` 照旧现场下载。
+
+运行时：请求整个落在已落定段内 ⇒ 库直接回答、不触发下载；碰到未落定日子 ⇒ 该标的只补下 `[已落定末尾 − 9 天, 窗口右端)`；库覆盖不到窗口左端 ⇒
+整段（同 0.45.391）。下载失败后，已落定段内的请求照样由库回答，只有碰到未落定日子的才直连。每个标的一个 `<TICKER>.json`，下载完立即原子写
+（Step 11 到点被杀也不丢已写的）；首次运行与第二次运行都是整段下载（第二次时开始落定），第三次起补尾。
+
+**这是事后修订**（文件头「变体」段）：与改动前唯一的差别是「首次落定之后被 Yahoo 改过的日线」现在读首次落定的值。A 与 B 读同一份，两者之差的定义
+不变；库里的值是生产跑完约一天内下载的，比几周后重取更接近生产当时的输入（拆股后重取拿到的是全段复权价）。修订依据是计时剖析与取数计数，输出
+只看了进度行与取数计数，没有算或看任何周度差 / 效应量（2/15 个合格周）。**未动**：窗口、变体、统计量、检视点、α、盲化、自证、种子、锚点。
+
+**真实数据实测**（scratchpad 拷贝，生产数据根未写；模拟美东日期，`today=2026-10-03`；结果 JSON 与不用库的运行**逐字节相同**，每一次都是）：
+
+| 运行 | 下载 | 直连 | 耗时 |
+|---|---|---|---|
+| 不用库（同条件交错跑两次） | 22 | 0 | 15.1s / 12.8s |
+| 第 1、2 天（库里还没有已落定段） | 22（整段） | 0 | 14.6s / 15.4s |
+| 第 3 天（已落定到最新快照日前一天，同生产节奏；交错跑两次） | 17（补尾） | 0 | 9.4s / 10.5s |
+| 第 3 天，补尾全部被拒 | 17（失败） | **32** | 15.9s |
+| 对照：不用库、整段全部被拒（离线计数） | 22（失败） | **182** | 391 实测 56s |
+
+正常日只少了 5 次请求（每个在场仓位每天都要最新一根，这部分省不掉），但**不再随窗口增长**（不用库到终期约 30 个标的）；降级日 182 → 32 次直连，
+且 32 只与最近几天的持仓有关，终期不变。经子进程的 `ic_rerun_readiness --quiet` 13.3s，F&G 段与改动前逐字相同。单次请求延迟当天波动很大
+（同一组 17 次请求 9.4s~17.5s），表里的秒数只作量级参考，次数才是这次改的东西。
+
+**更正 0.45.408**：那条「已知未改」写的「逐日重放每天约 0.08s，到终期约 +12s」是原型时期的错误外推——实测逐日重放 11 段合计 0.04s，终期零点几秒。
+已在 0.45.408 原文划掉并指向本条。
+
+### Added
+- `replay_ohlc_store.py`：`ReplayOhlcStore`（落定 / 补尾 / 修订 / 坏文件改名留证 / 原子写 / 计数）。模块 docstring 写全理由与三条规则。
+- `hive_logger.PATHS.replay_ohlc_state`（调用时求值，不建目录）。
+- `tests/test_replay_ohlc_store.py`（50 条）：落定规则每条腿（同一天不落定、只落定早于较早下载日的日子、临时值 / 漏一天不冻进库、休市日落定后由库回答 `{}`、
+  时钟倒退）；补尾起点与「库覆盖不到左端 ⇒ 整段」「全落定 ⇒ 不打网络」；修订冻结 + 记录 + 每次都报；9 种坏文件改名留证、移不开就不写、写不进去计数；
+  美东日期（两个时刻分别抓「用本机日期」「用 UTC 日期」）；窗口集成（只碰已落定段的标的整次不打网络、下载失败后已落定段照样回答）；端到端（合成世界
+  连跑三天与不用库逐字节相同、第三天只补尾；降级日直连少一半以上且结果不变；写不进去 ⇒ 进度行 ⚠️ + attention；修订冻结且结果对照证明夹具非空）；
+  只有 `_forward_ohlc_store` 构造它、只有 `run` 调它（AST）；前提核对脚本关掉库并恢复；路径调用时求值；进备份 / 迁移规则 / `.gitignore`。
+
+### Changed
+- `paper_portfolio.py`：`replay_ohlc_window(start, end, store=None)` / `_ReplayOhlcWindow(store=)`——请求整个在已落定段内由库回答；`_fetch_wide` 按库定
+  下载起点、下载后并进库；下载失败后已落定段照样回答；`stats()` 有库时多一个 `store` 键，库有坏文件 / 写入失败时 `degraded` 为真。生产 `run_for_date`
+  不经窗口，逐字节不变（`TestScopeIsCleared::test_production_path_never_opens_a_window` 照旧钉住）。
+- `experiments/fg_exposure_gate_forward_test.py`：文件头「变体」段加事后修订 v0.45.410；`run()` 前瞻传 `ohlc_store=_forward_ohlc_store()`；`evaluate(...,
+  ohlc_store=)`（样本内传库 ⇒ ValueError）；`_replay_ohlc_scope(..., store=)`；`_ohlc_unavailable` 认库回答过的请求（不是「一根都没拿到」）；
+  进度行：库的坏文件 / 写入失败进降级那一段（⚠️），修订另起一句（不换图标）；人读输出多一行行情库计数。
+- `ic_rerun_readiness.py`：`ohlc_window_degraded` attention 带上行情库的坏文件 / 写入失败。
+- `experiments/replay_ohlc_window_premise.py`：核对期间把 `_forward_ohlc_store` 换成 `lambda: None`（它核「整段切片 ≡ 逐次直连」，开着库会混淆，也不该写数据根）。
+- `data_backup/export.py` `STATE_DIRS`、`data_backup/migrate_data_root.py` `MOVE_DIRS`、`.gitignore`：登记 `replay_ohlc_state`（首次落定后冻结、
+  丢了重取到的可能是修订后的值 ⇒ 不当可重建缓存）。
+- `tests/conftest.py`：`_isolate_replay_ohlc_state`（防线①：路径在沙箱内）；防线②（真身指纹）由 0.45.409 的仓库根默认拒绝总闸与真实数据根整根指纹（`_guard_real_data_root`）兜住——本版原先加进的清单 `_GUARDED_PRODUCTION_ARTIFACTS` 已随 0.45.409 删除（合并 main 时解决）。
+- `tests/test_replay_ohlc_window.py` / `tests/test_fg_exposure_gate_forward_test.py`：桩函数跟上新签名；`run()` 接线测试改为同时钉住「传了库、目录是此刻的
+  `PATHS.replay_ohlc_state`」与「样本内不传」。
+
+### 验证
+- 变异 28/28 红（git archive 副本，`--maxfail=1000`、清 `__pycache__`、基线先绿、用例数与基线核对）。首轮存活 2 个：M24 是我的变异删错了行（删成了
+  `alphabot_state`，改正后红）；M28「比对首日就不一致也从首日起落定」是真盲区，补测 `test_disagreement_on_the_first_day_settles_nothing` 后红。
+- 全套（合并 main 后，不带 `-x`）：8067 passed / 1 failed——`test_economic_calendar::TestCoverageHorizon`，按 0.45.404 设计保持红（BLS / BEA 未发布 2027 日程），
+  与本版无关；跑完核过生产数据根下没有 `replay_ohlc_state/`。
+- **二次检查后**：变异 47/47 红（原 28 个随代码调整后重跑 + 新增 20 个，覆盖上面 8 处修复的每一条腿；首轮 S08 是我的变异把一行注释切成半截、
+  语法错误被记成「红」，按整行替换重跑后真红）。真实数据（拷贝，模拟美东 10-02~10-05）重跑：四次结果与不用库**逐字节相同**；第 3 天补尾
+  17 次、8.3s；补尾全部被拒的那天直连 18 次（不用库 182 次）；三次真实下载后 22 个库文件里零修订、零嫌疑（没有误报）。全套（不带 `-x`）：8086 passed / 1 failed（同上，经济日历按设计保持红），跑完生产数据根下仍没有 `replay_ohlc_state/`。
+- 复查补一处潜在抖动：`tests/test_replay_ohlc_window.py` 的合成世界把行情库的「美东今天」钉成固定日子——同一条测试跑两次 `run()` 若恰好跨过美东午夜
+  （本机 21:00 PDT），第二次会开始落定、改成补尾，断言就会偶发红。
+
+### 二次检查（10-05，两个独立审查 agent + 自查；每条都先复现再修、补测试）
+1. **修订从进度行消失**：修订只在 `merge()` 里数，而后来加的「已落定的请求不触发下载」那条路不经 `merge()`——标的平仓后修订就不报了，
+   重放照旧用冻结值。改为 `revised_in()` 数本次碰过的所有标的（`test_revision_stays_reported_after_the_ticker_stops_downloading`）。
+2. **库目录 / 文件读不了 ⇒ 整次检验崩**：`path.exists()` 遇 EACCES 直接抛（Python 3.11 只吞 ENOENT 一类），改名留证时 `dst.exists()` 同样；
+   改为读文件本身放进 try、读不了按坏文件处理；库目录被一个文件占名（`NotADirectoryError`）= 没有这个文件、走「写入失败」。
+3. **校验漏洞让坏文件逃过改名、之后天天崩**：缺 `settled` / `pending` 键、400 位整数（`math.isfinite` 抛 `OverflowError`）、日线日期键
+   「2026-09-31」（过了正则与区间比较，之后在 `strptime` 里崩）、0001-01-01（日期加减溢出）。全部补进校验；校验阶段的任何异常都按坏文件处理。
+4. **一次漏数据被永久记成「Yahoo 改了」**：修订原先凭单次响应记、从不撤销——整个检验期都在误报，还会冲淡真修订的信号。改为同落定一样
+   要两次不同美东日期的观察给出同一个新值（第一次记 `revision_suspects`；看到库里的值就撤销）；补尾起点退回去盖住还没确认的嫌疑。
+5. **拆股让 A / B 凭空出场，而唯一的信号读起来是良性的**（两位审查者独立实测：2:1 拆股，库里落定段末端出现假跳空，10-05 按 100 开的多仓
+   在 10-08 被判止损，不用库与生产都不会）。机制：拆股时还没落定的最近 1~3 天，在拆股后由两次复权后的下载确认、按复权价落定。彻底修要按
+   运行日存时点数据，本版不做；改为**确认修订后 7 天内**段首 ⚠️ + 新 attention `ic_rerun.fg_exposure_gate_forward.ohlc_store_revised`
+   （写明要查什么），之后只陈述——窗口左端固定、修订会一直在窗口里，永久 ⚠️ 会把人训练成无视 ⚠️；7 天保证每周诊断任务至少看到一次。
+   文件头修订段与模块 docstring 写明这个局限（原文「与改动前唯一的差别」那句不完整）。
+6. **停牌 / 退市的标的每天降级**：补尾区间一根日线都没有 ⇒ 当成下载失败 ⇒ 每天 ⚠️、直连逐日增长、落定段永不前进（改动前整段下载拿得到历史、
+   不降级——是回归）。改为：已落定段在同一段里本来就没有日线时，空结果是权威答案；库里那段有日线时照旧当失败（Yahoo 抽风的形状）。
+7. **坏文件只报一次**：那次运行若被预算看门狗杀掉就一次都不报，之后该标的冻结历史按当时的 Yahoo 重建、没人知道。改为改名留证的文件还在
+   就一直 `problem`（⚠️ + attention），人看过删掉才消。
+8. **attention 文案**：只因库的问题降级时不再说「整段取数 0/N 失败、退回逐次直连」。
+
+### 谁会红
+- 库文件坏了 / 写不进去 / 目录里留着改名留证的坏文件 ⇒ 进度行段首 ⚠️ + attention `ic_rerun.fg_exposure_gate_forward.ohlc_window_degraded`
+  （本次结果不受影响；读不懂的标的冻结历史已按当时的 Yahoo 重建、写不进去的下次会慢回去）。
+- Yahoo 改了已落定的日线（两次观察确认）⇒ 确认后 7 天内段首 ⚠️ + attention `ic_rerun.fg_exposure_gate_forward.ohlc_store_revised`；
+  之后进度行一句「行情库：… 共 N 根已落定日线 Yahoo 后来改了，沿用首次落定的值」，只要窗口里有就每次都报。
+- 库里的值错了（bug / 被改）⇒ A 与生产对不上 ⇒ 自证红（B 独有的标的不在自证范围内，这一点与改动前相同）。
+
+### 已知未改
+- 正常日仍是每个在场标的一次请求（约 15–20 次、约 10s），省不掉；要再快只能并行下载，会加大突发请求、更容易 429，本版不做。
+- 每次补下载只核对已落定段最后 10 天，更早的修订看不见（设计如此）。
+- 拆股时还没落定的最近 1~3 天按复权价落定、留一个假跳空（见「二次检查」第 5 条；靠 7 天告警请人看，没有修掉）。
+- 同一次运行若既有修订、又有该标的下载失败：完全落在已落定段内的请求拿冻结值，跨段的请求走直连拿 Yahoo 新值——同一天可能两个值
+  （修订与降级同时出现才会，按推理）。
+- 每周只读诊断任务从此也会写这个目录；它的会话若写不了数据根，每个周日会报 ⚠️「行情库写入失败」（看得见，不影响结果）——待验证。
+- 进程被 KILL 时同目录可能留下 `.<TICKER>.*.tmp`；坏文件改名后的 `<TICKER>.json.invalid-*` 也只留在本机。两者都不会被当成库文件读，数据备份按后缀白名单跳过它们、只在 MANIFEST 的 skipped 里记一笔（`export.copy_state_dir`）。
+
+
+## [0.45.409] — 2026-10-04 — Changed：数据根迁移阶段 6 ⑤——总闸从「仓库根点名清单」换成「真实数据根整根指纹」；修两处恒真的账本自证
+
+阶段 6 的最后一项（①②③ v0.45.394、④ v0.45.402、GitHubTool 退役 v0.45.403 之后）。**只改测试基础设施与测试，不改任何生产代码。**
+
+### 问题
+- **清单式总闸成了恒真闸**：`conftest._guard_production_artifacts` 盯 `_GUARDED_PRODUCTION_ARTIFACTS`（8 个点名产物）在**仓库根**的指纹。数据搬到 `$ALPHA_HIVE_HOME` 后这些路径在仓库根都不存在，只剩「别凭空建出同名产物」这一层，而那层仓库根的默认拒绝闸早已覆盖 ⇒ 冗余。
+- **真正的缺口反过来**：测试逃出隔离、写到**真实数据根**（生产账本 / 样本库 / 模型，不可重取）——没有任何东西会红。
+- **两处自证恒真**：`test_ml_catalyst_quality_source.py` 与 `test_ml_swarm_cache_dead_reader.py` 的 `_real_ledger_size()` 读 `REPO/probability_scorecard_state/published.jsonl`；阶段 6 后那条路径在**每台机器上**都不存在 ⇒ 「前后都是 -1」永远成立，证明不了「`record_published` 桩截住了」（CLAUDE.md「skip 守卫要问 X 在哪些环境存在」同形）。
+
+### Changed
+- `tests/conftest.py`：删除 `_GUARDED_PRODUCTION_ARTIFACTS` 与 v0.45.150 的清单式 session 闸；新增 **`_guard_real_data_root`**（session 级）：整个 session 跑完，真实数据根里的生产数据必须一个字节没变。「之前」取在 `pytest_sessionstart`（早于收集期、早于任何 env 隔离——`_isolate_env` 会把 `ALPHA_HIVE_HOME` 改成沙箱）。保留仓库根的默认拒绝闸。
+- `tests/_root_data_guard.py`：`fingerprint(root, excluded=…)` 参数化；新增 `data_root_excluded_reason`（默认拒绝；仅豁免常驻写入方 `logs/`、`db_backups/` 与 `_` 打头的元目录 `_git_backup/` `_archive/` `_migration/`…，**只在顶层**豁免）与 `real_data_root(environ, home, repo_root)`（`ALPHA_HIVE_HOME` 优先，否则 `~/alpha-hive-data`；不存在或等于仓库根 ⇒ None）。口径同仓库根闸：`(size, mtime_ns)`、`-shm` 只记大小、目录记存在。
+- `pytest_report_header`：显式打印 `real-data-root guard: active on <路径>（N 个受闸条目）` 或 `INACTIVE（…）`——**这台机器上闸有没有生效必须可见**：CI / 干净克隆没有真实数据根，闸在那里什么都不保护，不能把「没保护」渲染成「保护着」。
+- 两处自证：`_real_ledger_size()` → `_ledger_size()`，读账本自己的解析器 `probability_scorecard._ledger_path()`（调用时求值、落在测试沙箱里），并**先断言路径确实在沙箱内**；各加 `test_ledger_probe_sees_a_real_write` 正对照（不打桩真调 `record_published`，尺子必须量得出增长）。
+
+### Added / Removed（测试）
+- `tests/test_root_data_guard.py`：删旧清单两条（`test_legacy_artifact_list_is_subset_of_coverage` / `test_legacy_list_is_pinned`）；新增 数据根判据（受闸 15 种形状 / 豁免 10 种 / 仅顶层豁免 / `real_data_root` 解析 5 种情形）、合成数据根上的指纹比对（7 种写入形状必须红 + 日志 / 备份轮转 / `-shm` 读标记等不红）、子进程接线 3 条（红组：收集期写 + 追加账本 + 新产物 + 新目录；对照组：只读 + 写日志与元目录 + header 说 active；无数据根：header 说 INACTIVE 且不报错）。内层 pytest 默认 `HOME` 指向空目录、不带 `ALPHA_HIVE_HOME`（并设 `PYTHONUSERBASE` 找回用户 site-packages），否则在这台机器上内层会去盯真 `~/alpha-hive-data`。
+
+### 验证
+- 变异（先提交再变异）：数据根闸 teardown 不比对 ⇒ 红组红；「之前」晚到 fixture setup 才取 ⇒ 红组红（收集期写入被吃进基线）；判据放过一切 ⇒ 24 条红；header 不再说 INACTIVE ⇒ 对应测试红。两处自证：去掉 `record_published` 桩让它真落账 ⇒ 3 条红（**旧尺子下这是全绿**，即恒真的证据）；尺子改回仓库根路径 ⇒ 5 条红（路径断言抓住）。
+- 本机真实数据根遍历 0.1 秒（约 2800 个受闸条目），全套耗时不变。
+- **干净克隆全套（本机，真实数据根闸真实启用）**：8015 passed；header 为 `real-data-root guard: active on /Users/igg/alpha-hive-data（7585 个受闸条目）`，整轮测试未碰真实数据根（闸 teardown 无报错）；唯一失败 `TestCoverageHorizon`（日历覆盖不足，设计内周期性变红，与本版无关）。这是新闸第一次在真数据上跑。
+
+### 须知
+- ⚠️ **机器上正在跑每日扫描（平日 14:00–15:00）/ 周任务（周日 09:07 前后）时全套会红**：扫描写 `cache/`、`report_snapshots/`、`paper_portfolio_state/` 等，那不是假警报，是「测试与生产写同一批文件的时间窗真实存在」（仓库根闸原来就有同样的说明）。
+- 本版把「真实数据根」限定为测试进程**启动时**的 `ALPHA_HIVE_HOME`，缺省取 `~/alpha-hive-data`；若你的 shell 里把 `ALPHA_HIVE_HOME` 设成别处，闸盯那里。
+
+### 阶段 6 收尾状态
+①②③（v0.45.394）数据解除跟踪 + 守卫；④（v0.45.402）撤日报提交 / 推送链；v0.45.403 退役 `GitHubTool.commit/status`；⑤（本版）总闸。**仍未决**：`.swarm_results_*.json` / `analysis-*-ml-*.json` 的异地备份；`GitHubTool._ALLOWED_GIT_CMDS` 是否按调用点收窄。
+
 
 ## [0.45.408] — 2026-10-03 — Changed（事后修订）：F&G 敞口门前瞻检验的自证改为**逐日重锚**；统计量用的 A / B 仍从冻结种子连续重放。Added：`PATHS.data_backup_repo`、冻结锚点
 
@@ -86,7 +392,7 @@
   收窄到「不是 git 仓库 / 浅克隆」。CHANGELOG「谁会红」里「人工修复不红」说过头了 ⇒ 表格已拆成四行（见上）。
 - **审查确认无问题**：盲化（新键全是 A 的计数）、统计量连续性、样本内路径、预注册常量与判定、`ic_rerun_readiness` 契约与图标、launchd 下
   `ALPHA_HIVE_HOME` / git 可用、Step 11 只需要到 T-2 的锚点、`cat-file` 解析（含 NUL / 内嵌换行 / 空 blob / 缺失路径）、分段不重不漏。
-- **已知未改**：① 时间预算——逐日重放每天约 0.08s，到终期约 +12s，加上连续 A/B 与行情取数随标的数增长，离 45s 预算会变近；超了是
+- **已知未改**：① 时间预算——~~逐日重放每天约 0.08s，到终期约 +12s~~（**0.45.410 实测更正**：逐日重放 11 段合计 0.04s，到终期零点几秒；`run()` 的 97% 是行情下载，见 0.45.410），加上连续 A/B 与行情取数随标的数增长，离 45s 预算会变近；超了是
   `budget_exceeded`（看得见，不静默），届时再优化（大头是 `run_replay` 每次清 σ 缓存后重查 `pheromone.db`）。② `ohlc_window` 的取数计数含 B 的请求
   （0.45.391 起就如此，不是效应量，本版未动）。
 - 测试 192 → 202；本轮 13 个变异（每条修复一个）在 `git archive` 副本上 **13/13 红**，每个红的都是该红的那条，基线 199+3 skip、还原后全绿。

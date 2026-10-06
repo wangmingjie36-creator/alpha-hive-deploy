@@ -41,6 +41,7 @@ import pytest
 
 import ic_rerun_readiness as rr   # 只给「降级看得见」那一节核对 attention 条目（复审 S1）
 import paper_portfolio as pp
+import replay_ohlc_store
 
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -220,6 +221,9 @@ def world(monkeypatch, tmp_path):
     monkeypatch.setitem(pp.CONFIG, "max_deployed_pct", 52.0)
     fake = FakeYF(master)
     monkeypatch.setitem(sys.modules, "yfinance", fake.module())
+    # v0.45.410：前瞻 run() 会用回放行情库，落定看「美东今天」。钉成一个固定日子：同一条测试里跑两次 run() 时
+    # 不会因为恰好跨过美东午夜（本机 21:00 PDT）而第二次开始落定、改成补尾下载——合成世界不该依赖墙上时钟。
+    monkeypatch.setattr(replay_ohlc_store, "_et_today", lambda: dt.date(2026, 9, 1))
     return types.SimpleNamespace(master=master, fake=fake, tmp=tmp_path, monkeypatch=monkeypatch)
 
 
@@ -239,7 +243,7 @@ def _sandbox_bytes(root):
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
-def _no_window(dates, seed, extra_seeds=()):
+def _no_window(dates, seed, extra_seeds=(), store=None):
     return contextlib.nullcontext()
 
 
@@ -256,8 +260,8 @@ def _spy_windows(w):
     orig = pp.replay_ohlc_window
 
     @contextlib.contextmanager
-    def spy(start, end):
-        with orig(start, end) as win:
+    def spy(start, end, **kw):
+        with orig(start, end, **kw) as win:
             seen.append(win)
             yield win
     w.monkeypatch.setattr(pp, "replay_ohlc_window", spy)
@@ -487,8 +491,10 @@ class TestScopeIsCleared:
         users = {str(p.relative_to(_ROOT)) for p in files
                  if "tests" not in p.relative_to(_ROOT).parts
                  and "replay_ohlc_window" in p.read_text(encoding="utf-8", errors="replace")}
+        # v0.45.410：`replay_ohlc_store.py` 是窗口用的行情库（docstring 里讲它怎么接进窗口），自己不开窗口；
+        # 它只被前瞻检验 `run()` 构造——`tests/test_replay_ohlc_store.py::TestOnlyTheForwardRunUsesTheStore` 钉住。
         allowed = {"paper_portfolio.py", "experiments/fg_exposure_gate_forward_test.py",
-                   "experiments/replay_ohlc_window_premise.py"}
+                   "experiments/replay_ohlc_window_premise.py", "replay_ohlc_store.py"}
         assert users - allowed == set(), f"新增了回放窗口的使用者：{users - allowed}"
         assert {"paper_portfolio.py", "experiments/fg_exposure_gate_forward_test.py"} <= users, users
         # 复审 N2：此前只扫 `def run_for_date(` 到 `def bootstrap_from_history(` 那一段字符串——`run_replay` 在它之后，

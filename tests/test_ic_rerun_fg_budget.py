@@ -67,7 +67,8 @@ def _kill_if_ours(pid: int, marker: str) -> None:
     """`pid` 还活着且命令行里带 `marker`（本条测试的代码副本路径）⇒ KILL。核命令行防 pid 被复用后误杀别人。"""
     if pid <= 0:
         return
-    r = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+    # -ww：环境里有 COLUMNS 时 procps 按它截管道输出（CI 上会截），marker 是长临时路径 ⇒ 可能被截掉、静默不收尸
+    r = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
     if marker in r.stdout:
         try:
             os.kill(pid, signal.SIGKILL)

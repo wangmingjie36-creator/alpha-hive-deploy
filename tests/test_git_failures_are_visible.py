@@ -25,6 +25,7 @@ origin/main 上恰好 7 个无 `swarm_metadata` 的日报提交（取证全文�
 
 import ast
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -217,22 +218,22 @@ class TestRunGitCmdFailuresAreLoud:
         """正对照：不是「什么都打 error」。"""
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
         with caplog.at_level(logging.DEBUG):
-            r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd("git status --porcelain")
+            r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd("git rev-parse --git-dir")
         assert r["success"] is True
         assert not _records(caplog, "alpha_hive.agent_toolbox", logging.WARNING)
 
     def test_subprocess_failure_logs_warning(self, tmp_path, monkeypatch, caplog):
         """第二种失败形状（抛异常 ⇒ 只有 error 键）同样要出声。"""
         def boom(*a, **k):
-            raise subprocess.TimeoutExpired(cmd="git push", timeout=30)
+            raise subprocess.TimeoutExpired(cmd="git fetch", timeout=30)
         # 替换模块内引用，不碰全局 subprocess.run
         monkeypatch.setattr(agent_toolbox, "subprocess", SimpleNamespace(
             run=boom, SubprocessError=subprocess.SubprocessError))
         with caplog.at_level(logging.WARNING):
-            r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd("git push origin main")
+            r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd("git fetch origin main")
         assert r["success"] is False and "timed out" in r["error"]
         warns = _records(caplog, "alpha_hive.agent_toolbox", logging.WARNING)
-        assert warns and "git push origin main" in warns[0].getMessage()
+        assert warns and "git fetch origin main" in warns[0].getMessage()
 
     def test_non_utf8_output_raises_instead_of_returning_a_failure(self, tmp_path):
         """已知行为（钉住，不是赞成）：git 输出里有非 UTF-8 字节时，`run_git_cmd` **抛** `UnicodeDecodeError`
@@ -240,17 +241,26 @@ class TestRunGitCmdFailuresAreLoud:
         所以调用方不能假设「它永远返回 dict」。v0.45.403 退役 `GitHubTool.status()` 时这条从它的测试里迁来
         （原先只被 `status` 的测试顺带钉着；`status` 当时靠自己兜住它，现在没人兜了）。
         若哪天 `run_git_cmd` 改成自己兜住，本条会先红，让人知道调用方的假设变了。
-        正对照 ×2：输出里真有非 UTF-8 字节；`production_sync` 的 git 命令（fetch/pull/rev-parse…）输出不含文件名
-        字节（git 默认 quotepath 会转义），所以生产上碰不到——但这是「碰不到」，不是「不会抛」。"""
+        v0.45.413：白名单收窄后 `status` 不再被允许，改用 `rev-parse --abbrev-ref HEAD`——让 HEAD 指向一个**名字含
+        非 UTF-8 字节**的分支。APFS 不许建这种松散 ref 文件，所以直接写 `packed-refs` 与 `HEAD`（git 照常读）。
+        生产上碰不到：`production_sync` 的命令输出里分支名是 `main`，git 对路径默认 quotepath——但这是「碰不到」，
+        不是「不会抛」。"""
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+            env.pop(var, None)
+
         def git(*a, **kw):
-            return subprocess.run(["git", *a], cwd=tmp_path, check=True, capture_output=True, **kw)
-        git("init", "-q")
-        blob = git("hash-object", "-w", "--stdin", input=b"x").stdout.strip()
-        # APFS 不许建非 UTF-8 文件名，但索引条目可以（别的系统提交进来的就是这样）
-        git(b"update-index", b"--add", b"--cacheinfo", b"100644," + blob + b",bad\xffname.txt")
-        assert b"\xff" in git("status", "--porcelain", "-z").stdout
+            return subprocess.run(["git", *a], cwd=tmp_path, check=True, capture_output=True, env=env, **kw)
+        git("init", "-q", ".")
+        sha = git("commit-tree", git("mktree", input=b"").stdout.strip().decode(), "-m", "x").stdout.strip().decode()
+        (tmp_path / ".git" / "packed-refs").write_bytes(
+            b"# pack-refs with: peeled fully-peeled sorted \n" + sha.encode() + b" refs/heads/bad\xffbr\n")
+        (tmp_path / ".git" / "HEAD").write_bytes(b"ref: refs/heads/bad\xffbr\n")
+        # 正对照：输出里真有非 UTF-8 字节
+        assert b"\xff" in git("rev-parse", "--abbrev-ref", "HEAD").stdout
         with pytest.raises(UnicodeDecodeError):
-            GitHubTool(repo_path=str(tmp_path)).run_git_cmd("git status --porcelain -z")
+            GitHubTool(repo_path=str(tmp_path)).run_git_cmd("git rev-parse --abbrev-ref HEAD")
 
 
 # ═════════════════════════════ 3/4. 真 git 沙箱 ═════════════════════════════
@@ -366,6 +376,84 @@ class TestDeployNeverTouchesTheCodeRepo:
         monkeypatch.setattr(rd, "deploy_static_to_ghpages", boom)
         res = rd.deploy_and_notify(sandbox.reporter, PRODUCTION)
         assert res["gh_pages"]["success"] is False and "disk gone" in res["gh_pages"]["error"]
+
+
+class TestAllowlistMatchesProductionCallSites:
+    """`GitHubTool._ALLOWED_GIT_CMDS` 与生产调用点**精确相等**，且会改本地状态的两个子命令有运行期参数约束（v0.45.413）。
+
+    「怕它变大也怕它变小」两条断言各一条：上面的 `test_every_production_call_site_is_allowed` 是子集方向
+    （调用点必须在白名单里——删了现役子命令会红）；这里补**超集方向**（白名单不许有无人调用的项——
+    有人顺手加 push / commit 会红）。只有子集那条时，白名单会悄悄积累无人使用的写操作，
+    v0.45.402~403 前它就攒了 13 个。
+    """
+
+    def test_allowlist_equals_the_subcommands_production_actually_uses(self):
+        used = {sub for _, src in _production_sources() for _, sub in _run_git_cmd_sites(src)}
+        assert used, "扫描器没读到任何调用点——下面的相等断言会空转"
+        assert GitHubTool._ALLOWED_GIT_CMDS == used, (
+            f"白名单与生产调用点不一致：只在白名单里（无人调用，删掉）{sorted(GitHubTool._ALLOWED_GIT_CMDS - used)}；"
+            f"只在调用点里（会被拒绝）{sorted(used - GitHubTool._ALLOWED_GIT_CMDS)}")
+
+    def test_exact_args_cover_exactly_the_state_changing_subcommands(self):
+        """会改本地状态的子命令（fetch 更新远端跟踪 ref，pull 改工作区 / 历史）必须都有精确参数约束；
+        约束只能落在白名单内的子命令上。"""
+        assert set(GitHubTool._EXACT_GIT_ARGS) == {"fetch", "pull"}
+        assert set(GitHubTool._EXACT_GIT_ARGS) <= GitHubTool._ALLOWED_GIT_CMDS
+
+    def test_exact_args_match_what_production_sends(self):
+        """约束值必须就是生产下发的那条字符串——否则收窄把现役调用也拒了，扫描前同步会停摆。"""
+        sent = {}
+        for _, src in _production_sources():
+            for node in ast.walk(ast.parse(src)):
+                if isinstance(node, ast.Call) and _callee_name(node) == "run_git_cmd" and node.args:
+                    a = node.args[0]
+                    if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                        parts = a.value.split()
+                        if len(parts) > 1 and parts[1] in GitHubTool._EXACT_GIT_ARGS:
+                            sent[parts[1]] = tuple(parts[2:])
+        assert sent == GitHubTool._EXACT_GIT_ARGS, sent
+
+    @pytest.mark.parametrize("cmd", [
+        "git pull --rebase origin main", "git pull origin main", "git pull --ff-only origin main",
+        "git pull --ff-only --no-rebase origin main --force", "git pull --ff-only --no-rebase origin dev",
+        "git fetch origin main:main", "git fetch --prune origin main", "git fetch origin", "git fetch --all",
+        "git fetch origin main --force",
+    ])
+    def test_state_changing_commands_with_other_args_are_refused_and_not_run(self, cmd, tmp_path, monkeypatch, caplog):
+        calls = []
+        monkeypatch.setattr(agent_toolbox, "subprocess", SimpleNamespace(
+            run=lambda *a, **k: calls.append(a), SubprocessError=subprocess.SubprocessError))
+        with caplog.at_level(logging.WARNING):
+            r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd(cmd)
+        assert r["success"] is False and "not allowed" in r["error"], r
+        assert calls == [], f"被拒绝的命令仍被执行了：{calls}"
+        assert _records(caplog, "alpha_hive.agent_toolbox", logging.ERROR), "参数被拒没出声（调用方不看返回值时等于没发生）"
+
+    @pytest.mark.parametrize("cmd", [
+        "git fetch origin main", "git pull --ff-only --no-rebase origin main",
+        "git rev-parse --verify HEAD", "git rev-parse --abbrev-ref HEAD",
+        "git merge-base --is-ancestor HEAD HEAD", "git rev-list --count HEAD",
+    ])
+    def test_production_commands_are_still_executed(self, cmd, tmp_path, monkeypatch):
+        """正对照：收窄没有把现役命令一并拒了（上一条是拒，这条是放；缺了它，上一条的绿可能只是「什么都拒」）。"""
+        calls = []
+        monkeypatch.setattr(agent_toolbox, "subprocess", SimpleNamespace(
+            run=lambda *a, **k: calls.append(a[0]) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SubprocessError=subprocess.SubprocessError))
+        r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd(cmd)
+        assert r["success"] is True and calls == [cmd.split()], (r, calls)
+
+    @pytest.mark.parametrize("sub", [
+        "push", "commit", "add", "stash", "branch", "tag", "remote", "status", "log", "diff", "show",
+        "merge-tree", "commit-tree", "checkout", "reset", "clean", "restore", "rebase", "merge",
+    ])
+    def test_every_other_subcommand_is_refused_and_not_run(self, sub, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(agent_toolbox, "subprocess", SimpleNamespace(
+            run=lambda *a, **k: calls.append(a), SubprocessError=subprocess.SubprocessError))
+        r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd(f"git {sub} x")
+        assert r == {"success": False, "error": f"Git subcommand not allowed: {sub}"}
+        assert calls == []
 
 
 class TestCommitPushChainStaysRetired:

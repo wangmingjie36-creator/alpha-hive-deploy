@@ -1,11 +1,12 @@
 // 标的页：水平 / 希腊值 / 期限 / 卖权 / 价格。一次现算（服务端 60 秒缓存）喂全部子页。
-import { api, h, num, money, pct, pctPts, usdShort, signedPct, distPct, signChip, seg, table, panel, isNum,
+import { api, h, helpLink, num, money, pct, pctPts, usdShort, signedPct, distPct, signChip, seg, table, panel, isNum,
   downloadCSV, pref, setPref, timeAgo, SIGN_LABEL, CURVE_LABEL, ROUTE_LABEL, STRUCT_LABEL, TENOR_LABEL,
   EARN_LABEL, SOURCE_LABEL, fill, plain } from "../lib.js";
 import { strikeBars, gammaCurve, lines, columns, payoff, C } from "../charts.js";
 import { state, tickers, refreshMeta } from "../app.js";
 
 const TABS = [["levels", "水平"], ["greeks", "希腊值"], ["term", "期限"], ["sell", "卖权"], ["price", "价格"]];
+const TAB_HELP = { levels: "levels", greeks: "greeks", term: "greeks", sell: "sell", price: "price" };
 const VIEWS = [["next_expiry", "下一到期"], ["le_45dte", "≤45 天（路由用）"], ["full", "全部到期"]];
 
 export async function renderTicker(root, t, tab, alive, force = false) {
@@ -45,7 +46,7 @@ export async function renderTicker(root, t, tab, alive, force = false) {
         h("span", {}, "IV30 ", h("b", { class: "num" }, isNum(d.iv30) ? `${num(d.iv30, 1)}%` : "—")),
         h("span", {}, "OI 为前一交易日"),
         h("span", {}, `取于 ${timeAgo(d.cache_age_sec)}`))),
-    h("div", { class: "controls" }, favBtn, refresh));
+    h("div", { class: "controls" }, helpLink(TAB_HELP[tab] || "levels"), favBtn, refresh));
 
   const tabs = h("nav", { class: "tabs", "aria-label": "标的子页" },
     TABS.map(([k, label]) => h("a", { href: `#/t/${t}/${k}`, "aria-current": k === tab ? "page" : null }, label)));

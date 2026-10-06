@@ -110,8 +110,59 @@ def excluded_reason(relpath: str) -> str | None:
     return None
 
 
-def fingerprint(root: str) -> dict[str, str]:
-    """仓库根下全部受闸条目 → 指纹。目录记 `dir`，文件记 `size:mtime_ns`，`*-shm` 记 `shm:size`。"""
+# ───────────────────────── 真实数据根（阶段 6 ⑤，v0.45.409） ─────────────────────────
+#
+# 阶段 5 之后生产数据在 `$ALPHA_HIVE_HOME`（~/alpha-hive-data），不在仓库根。此前那道「点名 8 个产物」的
+# 总闸（`_GUARDED_PRODUCTION_ARTIFACTS`）盯的是**仓库根里同名路径**——数据搬走后那些路径不存在，
+# 闸只剩「别在仓库根凭空建出同名产物」这一层，而这一层仓库根的默认拒绝早已覆盖：它成了冗余的恒真闸。
+# 真正的缺口是反过来的：测试逃出隔离、写到**真实数据根**（生产数据，不可重取）没有任何东西会红。
+# 这里补上，口径与仓库根闸一致（默认拒绝、`(size, mtime_ns)`、`-shm` 只记大小、目录记存在）。
+
+#: 数据根里**常驻有写入方、且不是测试能碰到的**东西：日志（MCP / 定时任务 / 每日扫描一直在写）、备份轮转。
+#: 以及 `_` 打头的元目录（`_git_backup` 每日备份、`_archive` / `_migration` / `_manual_backups` 迁移与人工留档）。
+#: 新增豁免前先问：它是谁写的？「测试可能写到」的东西不许豁免。
+DATA_ROOT_VOLATILE = frozenset({"logs", "db_backups"})
+
+
+def data_root_excluded_reason(relpath: str) -> str | None:
+    parts = [p for p in relpath.replace(os.sep, "/").split("/") if p]
+    if not parts:
+        return "root"
+    top = parts[0]
+    if top in DATA_ROOT_VOLATILE:
+        return f"volatile:{top}"
+    if top.startswith("_"):
+        return f"meta-dir:{top}"
+    for p in parts:
+        if p in SKIP_DIR_NAMES:
+            return f"skip-dir:{p}"
+    name = parts[-1]
+    if name in NOISE_FILE_NAMES or name.startswith(NOISE_FILE_PREFIXES):
+        return "fs-noise"
+    return None
+
+
+def real_data_root(environ, home: str, repo_root: str) -> str | None:
+    """测试进程**启动时**的真实数据根；没有就返回 None（本机之外的机器上它不存在）。
+
+    必须在任何 env 隔离之前取（`_isolate_env` 会把 `ALPHA_HIVE_HOME` 改成沙箱）：`ALPHA_HIVE_HOME`
+    若在调用环境里设了就用它，否则取生产默认位置 `~/alpha-hive-data`。与仓库根相同的不算（那由仓库根闸管）。
+    ⚠️ 返回 None ⇒ 本闸在这台机器上**没有任何作用**——CI / 干净克隆都是这样，所以它的牙只能靠
+    `tests/test_root_data_guard.py` 里合成数据根的测试证明，不能靠「这轮全套绿」证明。
+    """
+    cand = environ.get("ALPHA_HIVE_HOME") or os.path.join(home, "alpha-hive-data")
+    cand = os.path.abspath(os.path.expanduser(cand))
+    if not os.path.isdir(cand) or cand == os.path.abspath(repo_root):
+        return None
+    return cand
+
+
+def fingerprint(root: str, excluded=None) -> dict[str, str]:
+    """`root` 下全部受闸条目 → 指纹。目录记 `dir`，文件记 `size:mtime_ns`，`*-shm` 记 `shm:size`。
+
+    `excluded`：`relpath -> 不受闸原因 | None`，默认 `excluded_reason`（仓库根的「代码」判据）；
+    数据根用 `data_root_excluded_reason`。同一份遍历与口径，只换「什么不看」。"""
+    excluded = excluded or excluded_reason
     out: dict[str, str] = {}
     root = os.path.abspath(root)
     for dirpath, dirnames, filenames in os.walk(root, topdown=True):
@@ -120,13 +171,13 @@ def fingerprint(root: str) -> dict[str, str]:
         keep = []
         for d in dirnames:
             rel = f"{rel_dir}/{d}" if rel_dir else d
-            if excluded_reason(rel) is None:
+            if excluded(rel) is None:
                 keep.append(d)
                 out[rel] = "dir"
         dirnames[:] = sorted(keep)
         for fn in filenames:
             rel = f"{rel_dir}/{fn}" if rel_dir else fn
-            if excluded_reason(rel) is not None:
+            if excluded(rel) is not None:
                 continue
             try:
                 st = os.lstat(os.path.join(dirpath, fn))

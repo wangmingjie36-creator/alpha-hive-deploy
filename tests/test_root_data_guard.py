@@ -2,19 +2,23 @@
 
 三层，缺一层就证明不了闸有牙：
 
-1. **判据**：哪些算代码、哪些算数据——用真实仓库里出现过的路径形状逐条钉死，
-   含旧清单 `_GUARDED_PRODUCTION_ARTIFACTS` 必须是覆盖面子集（谁把其中一项划进「代码」谁红）。
+1. **判据**：哪些算代码、哪些算数据——用真实仓库里出现过的路径形状逐条钉死。
+   （v0.45.409 起旧清单 `_GUARDED_PRODUCTION_ARTIFACTS` 已删：数据搬到数据根后它盯的仓库根路径都不存在。）
 2. **指纹比对**：合成目录树上逐种写入形状（写一字节 / 新建空目录 / -shm 读标记 / 改代码）。
 3. **接线**：子进程里真跑一轮 pytest，用的是**原样拷贝的 conftest**——
    只测 helper 证明不了 conftest 真的调用了它、也证明不了「之前」取在收集期之前
    （MEMORY `alpha-hive-test-writes-production`：测 helper ≠ 测接线）。
    红组必须红、对照组必须绿；对照组不绿，红组的红就说明不了任何事。
+
+v0.45.409（阶段 6 ⑤）追加**真实数据根闸**的同三层：判据（`data_root_excluded_reason` / `real_data_root`）、
+合成数据根上的指纹比对、子进程接线（含「没有数据根 ⇒ header 明说 INACTIVE」——它在 CI / 干净克隆上什么都不保护，
+所以牙只能靠这里的合成测试证明）。
 """
 from __future__ import annotations
 
-import ast
 import os
 import shutil
+import site
 import subprocess
 import sys
 import textwrap
@@ -27,16 +31,6 @@ _TESTS = Path(__file__).resolve().parent
 _ROOT = _TESTS.parent
 sys.path.insert(0, str(_TESTS))
 import _root_data_guard as g  # noqa: E402
-
-
-def _legacy_guarded_names() -> tuple[str, ...]:
-    """从 conftest 源码里读出旧清单（conftest 不可 import）。改成非字面量会在这里红——那也该红。"""
-    tree = ast.parse((_TESTS / "conftest.py").read_text(encoding="utf-8"))
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id == "_GUARDED_PRODUCTION_ARTIFACTS" for t in node.targets):
-            return tuple(ast.literal_eval(node.value))
-    raise AssertionError("conftest 里找不到 _GUARDED_PRODUCTION_ARTIFACTS")
 
 
 # ─────────────────────────────── 1. 判据 ───────────────────────────────
@@ -94,27 +88,55 @@ def test_code_dirs_only_apply_at_top_level():
     assert g.excluded_reason("report_snapshots/templates/x.json") is None
 
 
-@pytest.mark.parametrize("name", _legacy_guarded_names())
-def test_legacy_artifact_list_is_subset_of_coverage(name, tmp_path):
-    """旧 6 项必须既过判据、又真出现在指纹里（目录形态的给它一个子文件）。"""
-    assert g.excluded_reason(name) is None
-    p = tmp_path / name
-    if "." in name:            # pheromone.db / metrics.db
-        p.write_bytes(b"x")
-    else:                      # chroma_db / *_state
-        p.mkdir()
-        (p / "f.jsonl").write_bytes(b"x")
-    fp = g.fingerprint(str(tmp_path))
-    assert name in fp
+# ───────────────── 1b. 真实数据根：判据（v0.45.409，阶段 6 ⑤） ─────────────────
+
+DATA_ROOT_GUARDED = [
+    "pheromone.db", "pheromone.db-wal", "metrics.db", "chroma_db/chroma.sqlite3",
+    "report_snapshots/NVDA_2026-09-11.json", "paper_portfolio_state/meta.json",
+    "ml_model_history/manifest.jsonl", "cache/options_snapshot_NVDA_2026-09-11.json",
+    "index.html", "alpha-hive-daily-2026-09-11.md", "weight_history.jsonl",
+    "sell_strike_state/monthly/2026-09.jsonl", "alphabot_state/settings.json",
+    "self_analysis_briefs/self_analysis_2026-10.md", "brand_new_dir/f.bin",   # 默认拒绝：新产物也盯
+]
+DATA_ROOT_EXCLUDED = [
+    "logs/scan_timing.json", "logs/alpha_hive.log", "db_backups/pheromone_2026-09-28.db",   # 常驻写入方
+    "_git_backup/pheromone/manifest.json", "_archive/pheromone_bak/a.db", "_migration/r.json",
+    "_manual_backups/x", ".DS_Store", "__pycache__/x.pyc", "sub/.DS_Store",
+]
 
 
-def test_legacy_list_is_pinned():
-    """纵深防御的旧闸别被顺手删掉（任务要求保留）。原 6 项 + v0.45.333 追加的 `sell_strike_state`
-    + v0.45.388 追加的 `alphabot_state`（Alpha Bot 盘中快照 / 设置）。
-    写成精确相等而不是子集：加一项也得来这里改一行——增删都是有意的动作，不是顺手。"""
-    assert _legacy_guarded_names() == (
-        "pheromone.db", "metrics.db", "chroma_db", "vrp_state", "options_paper_state", "hedge_state",
-        "sell_strike_state", "alphabot_state")
+@pytest.mark.parametrize("rel", DATA_ROOT_GUARDED)
+def test_data_root_shapes_are_guarded(rel):
+    assert g.data_root_excluded_reason(rel) is None, rel
+
+
+@pytest.mark.parametrize("rel", DATA_ROOT_EXCLUDED)
+def test_data_root_volatile_and_meta_are_excluded(rel):
+    assert g.data_root_excluded_reason(rel) is not None, rel
+
+
+def test_data_root_exclusions_only_apply_at_top_level():
+    """`logs` / `_x` 只在数据根顶层豁免；嵌套的同名目录里的产物仍受闸（否则 report_snapshots/logs/ 成了盲区）。"""
+    assert g.data_root_excluded_reason("report_snapshots/logs/x.json") is None
+    assert g.data_root_excluded_reason("cache/_tmp/x.json") is None
+
+
+def test_real_data_root_resolution(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    (home / "alpha-hive-data").mkdir(parents=True)
+    explicit = tmp_path / "elsewhere"
+    explicit.mkdir()
+    # 环境变量优先
+    assert g.real_data_root({"ALPHA_HIVE_HOME": str(explicit)}, str(home), str(repo)) == str(explicit)
+    # 没设 ⇒ 生产默认位置
+    assert g.real_data_root({}, str(home), str(repo)) == str(home / "alpha-hive-data")
+    # 目录不存在 ⇒ None（CI / 干净克隆）
+    assert g.real_data_root({}, str(tmp_path / "nohome"), str(repo)) is None
+    assert g.real_data_root({"ALPHA_HIVE_HOME": str(tmp_path / "gone")}, str(home), str(repo)) is None
+    # 与仓库根相同 ⇒ None（那由仓库根闸管，不重复盯）
+    assert g.real_data_root({"ALPHA_HIVE_HOME": str(repo)}, str(home), str(repo)) is None
 
 
 # ─────────────────────────────── 2. 指纹比对 ───────────────────────────────
@@ -204,6 +226,56 @@ def test_code_edits_and_tool_caches_are_not_writes(tree):
     assert g.diff(before, g.fingerprint(str(tree))) == {}
 
 
+# ───────────────── 2b. 真实数据根：指纹比对（合成数据根） ─────────────────
+
+@pytest.fixture
+def data_root(tmp_path):
+    r = tmp_path / "alpha-hive-data"
+    for rel, data in {
+        "pheromone.db": b"db", "pheromone.db-wal": b"wal", "pheromone.db-shm": b"shm",
+        "report_snapshots/a.json": b"{}", "paper_portfolio_state/meta.json": b"{}",
+        "logs/alpha_hive.log": b"line\n", "db_backups/pheromone_2026-09-27.db": b"old",
+        "_git_backup/x": b"1", "_archive/pheromone_bak/a.db": b"a",
+    }.items():
+        (r / rel).parent.mkdir(parents=True, exist_ok=True)
+        (r / rel).write_bytes(data)
+    return r
+
+
+def _dfp(root):
+    return g.fingerprint(str(root), g.data_root_excluded_reason)
+
+
+@pytest.mark.parametrize("mutate,kind,path", [
+    (lambda r: (r / "pheromone.db").write_bytes(b"dbX"), "changed", "pheromone.db"),                # 账本多一字节
+    (lambda r: (r / "paper_portfolio_state/meta.json").write_bytes(b"{1}"), "changed", "paper_portfolio_state/meta.json"),
+    (lambda r: (r / "report_snapshots/b.json").write_bytes(b"{}"), "added", "report_snapshots/b.json"),
+    (lambda r: (r / "brand_new.json").write_bytes(b"x"), "added", "brand_new.json"),                 # 默认拒绝
+    (lambda r: (r / "new_dir").mkdir(), "added", "new_dir"),                                         # 只建空目录也算写
+    (lambda r: (r / "report_snapshots/a.json").unlink(), "removed", "report_snapshots/a.json"),
+    (lambda r: (r / "pheromone.db-wal").unlink(), "removed", "pheromone.db-wal"),
+], ids=["append-ledger", "rewrite-state", "new-snapshot", "new-top-level", "empty-dir", "delete", "wal-vanishes"])
+def test_data_root_write_shapes_are_caught(data_root, mutate, kind, path):
+    before = _dfp(data_root)
+    time.sleep(0.01)
+    mutate(data_root)
+    assert path in g.diff(before, _dfp(data_root)).get(kind, []), g.diff(before, _dfp(data_root))
+
+
+def test_data_root_benign_activity_is_not_a_write(data_root):
+    """正对照：日志轮转、备份轮转、每日备份、迁移留档、读者往 -shm 写标记——都不是测试写穿。"""
+    before = _dfp(data_root)
+    time.sleep(0.01)
+    (data_root / "logs/alpha_hive.log").write_bytes(b"line\nmore\n")
+    (data_root / "logs/new.log").write_bytes(b"x")
+    (data_root / "db_backups/pheromone_2026-09-28.db").write_bytes(b"new")
+    (data_root / "_git_backup/x").write_bytes(b"2")
+    (data_root / "_archive/pheromone_bak/b.db").write_bytes(b"b")
+    (data_root / "pheromone.db-shm").write_bytes(b"SHM")          # 同大小：读者标记
+    (data_root / ".DS_Store").write_bytes(b"finder")
+    assert g.diff(before, _dfp(data_root)) == {}
+
+
 # ─────────────────────────────── 3. 接线（真跑 pytest） ───────────────────────────────
 
 def _make_fake_checkout(root: Path, test_body: str) -> Path:
@@ -221,8 +293,16 @@ def _make_fake_checkout(root: Path, test_body: str) -> Path:
     return root
 
 
-def _run_inner_pytest(root: Path) -> subprocess.CompletedProcess:
+def _run_inner_pytest(root: Path, extra_env: dict | None = None, header: bool = False) -> subprocess.CompletedProcess:
     env = dict(os.environ)
+    # 默认让内层 pytest **看不到**真实数据根：HOME 指向空目录、不带 ALPHA_HIVE_HOME。
+    # 否则在这台机器上，内层的真实数据根闸会去盯 ~/alpha-hive-data（生产数据，可能正被扫描写着）——
+    # 既会让这些仓库根用例随生产状态忽红忽绿，也等于让测试去碰真数据。
+    env.pop("ALPHA_HIVE_HOME", None)
+    env["PYTHONUSERBASE"] = site.getuserbase()       # 换了 HOME 之后用户级 site-packages（pytest 在那）要靠它找回
+    env["HOME"] = str(root.parent / "empty_home")
+    (root.parent / "empty_home").mkdir(exist_ok=True)
+    env.update(extra_env or {})
     # 生产模块从真仓库 import（conftest 的 autouse fixture 要 import llm_service 等）；
     # 被守的根目录却是这个假 checkout——conftest 按自己的 __file__ 定根。
     env["PYTHONPATH"] = str(_ROOT) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
@@ -230,8 +310,8 @@ def _run_inner_pytest(root: Path) -> subprocess.CompletedProcess:
     # 源码里就有报错文案与路径字样 ⇒ 下面的子串断言会被源码满足、证明不了运行时真报了什么。
     # native 只打语句首行，剩下的文字只可能来自运行时消息。
     return subprocess.run(
-        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", "--no-header", "--tb=native",
-         "tests/test_inner.py"],
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", *(["-v"] if header else ["-q", "--no-header"]),
+         "--tb=native", "tests/test_inner.py"],
         cwd=root, env=env, capture_output=True, text=True, timeout=45)
 
 
@@ -286,3 +366,74 @@ def test_session_gate_is_green_on_benign_run(tmp_path):
     assert r.returncode == 0, out
     assert "1 passed" in out, out
     assert time.time() - t0 < 45
+
+
+# ───────────────── 3b. 真实数据根：接线（真跑 pytest，原样拷贝的 conftest） ─────────────────
+
+def _make_data_root(path: Path) -> Path:
+    for rel, data in {"pheromone.db": b"db", "report_snapshots/a.json": b"{}",
+                      "paper_portfolio_state/meta.json": b"{}", "logs/alpha_hive.log": b"l\n",
+                      "_archive/a": b"a"}.items():
+        (path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (path / rel).write_bytes(data)
+    return path
+
+
+def test_real_data_root_gate_is_red_on_escaping_writes(tmp_path):
+    """红组：测试绕过隔离、写到真实数据根（追加账本 + 新建产物 + 新建目录）；收集期还写一个文件。
+    数据根路径经 `INNER_DATA_ROOT` 传入（内层 `_isolate_env` 会把 ALPHA_HIVE_HOME 改成沙箱，读不到它）。"""
+    data_root = _make_data_root(tmp_path / "alpha-hive-data")
+    root = _make_fake_checkout(tmp_path / "checkout", """
+        import os, pathlib
+        DR = pathlib.Path(os.environ["INNER_DATA_ROOT"])
+        (DR / "written_at_collection.json").write_text("x")      # 收集期落盘
+
+        def test_escapes_the_sandbox():
+            with open(DR / "pheromone.db", "ab") as f:
+                f.write(b"x")
+            (DR / "report_snapshots/b.json").write_text("{}")
+            (DR / "new_dir").mkdir()
+    """)
+    r = _run_inner_pytest(root, {"ALPHA_HIVE_HOME": str(data_root), "INNER_DATA_ROOT": str(data_root)})
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, out
+    assert "1 passed, 1 error" in out, f"应是测试本身通过、总闸在 teardown 报错：\n{out}"
+    assert "测试写到了**真实数据根**" in out, out
+    expected = "\n".join(["added（3）：", "new_dir", "report_snapshots/b.json", "written_at_collection.json",
+                          "changed（1）：", "pheromone.db"])
+    normalized = "\n".join(line.strip() for line in out.splitlines())
+    assert expected in normalized, f"总闸报出的 diff 与预期不符：\n{out}"
+
+
+def test_real_data_root_gate_is_green_on_benign_run(tmp_path):
+    """对照组：只写 tmp_path、写日志与元目录、读真实数据根——必须绿；且 header 明说闸在生效。
+    不绿则红组的红说明不了任何事。"""
+    data_root = _make_data_root(tmp_path / "alpha-hive-data")
+    root = _make_fake_checkout(tmp_path / "checkout", """
+        import os, pathlib
+        DR = pathlib.Path(os.environ["INNER_DATA_ROOT"])
+
+        def test_benign(tmp_path):
+            (tmp_path / "sandboxed.json").write_text("fine")
+            assert (DR / "pheromone.db").read_bytes() == b"db"            # 只读
+            with open(DR / "logs/alpha_hive.log", "a") as f:               # 常驻写入方的地盘
+                f.write("more\\n")
+            (DR / "_archive/b").write_bytes(b"b")
+    """)
+    r = _run_inner_pytest(root, {"ALPHA_HIVE_HOME": str(data_root), "INNER_DATA_ROOT": str(data_root)}, header=True)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "1 passed" in out, out
+    assert f"real-data-root guard: active on {data_root}" in out, f"header 没说闸在生效：\n{out}"
+
+
+def test_real_data_root_gate_says_inactive_when_there_is_no_data_root(tmp_path):
+    """没有真实数据根（CI / 干净克隆）：不报错，但 header 必须明说 INACTIVE——不许把「没保护」渲染成「保护着」。"""
+    root = _make_fake_checkout(tmp_path / "checkout", """
+        def test_nothing_to_guard():
+            assert True
+    """)
+    r = _run_inner_pytest(root, header=True)        # 默认 HOME 是空目录、无 ALPHA_HIVE_HOME
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "real-data-root guard: INACTIVE" in out, out
