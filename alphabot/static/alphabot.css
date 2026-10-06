@@ -176,6 +176,15 @@ tr.sel td { background: var(--tint-strong); }
 .prose li { margin: 4px 0; }
 .prose table { font-family: var(--data); font-size: 13.5px; margin: 10px 0 4px; }
 
+.prose h3 { margin: 22px 0 6px; font: 600 16px/1.4 var(--sans); color: var(--ink); }
+.prose .lede { font-size: 16.5px; color: var(--ink-3); margin: -4px 0 18px; }
+.prose p, .prose ul, .prose ol { margin: 8px 0; }
+.prose .table-wrap { margin: 8px 0 14px; }
+.prose .callout { margin: 12px 0; }
+.help-pager { display: flex; justify-content: space-between; gap: 12px; margin-top: 34px; padding-top: 14px; border-top: 1px solid var(--line); font: 500 14px/1.4 var(--sans); }
+.help-link { font: 500 13px/1.4 var(--sans); color: var(--ink-3); white-space: nowrap; }
+.help-link:hover { color: var(--ink); }
+
 .focus-list { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .focus-list .chip button { border: 0; background: none; cursor: pointer; padding: 0 0 0 2px; color: var(--ink-3); }
 

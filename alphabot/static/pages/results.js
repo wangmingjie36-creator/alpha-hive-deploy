@@ -1,5 +1,5 @@
 // 结果：预注册检验冻结后才有内容。冻结前只说「为什么锁着、还差多少」。
-import { api, h, num, panel, table, TENOR_LABEL, fill } from "../lib.js";
+import { api, h, helpLink, num, panel, table, TENOR_LABEL, fill } from "../lib.js";
 import { lines, C } from "../charts.js";
 import { tickers } from "../app.js";
 
@@ -9,7 +9,7 @@ export async function renderResults(root, ticker, alive) {
   const a = await api("/api/assess");
   if (!alive()) return;
   const head = h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "检验结果"),
-    h("p", { class: "lede" }, "问题只有一个：被 GEX 环境路由标记（flag）的日子里，同样的 0.20Δ 卖权到期结果是不是更差。单侧、按记录日分块置换、四个检验 Bonferroni 校正，每个 α = 0.0125。")));
+    h("p", { class: "lede" }, "问题只有一个：被 GEX 环境路由标记（flag）的日子里，同样的 0.20Δ 卖权到期结果是不是更差。单侧、按记录日分块置换、四个检验 Bonferroni 校正，每个 α = 0.0125。 ", helpLink("results"))));
   const blocks = [head];
   for (const tenor of ["monthly", "weekly"]) {
     const t = a.tenors?.[tenor] || {};
