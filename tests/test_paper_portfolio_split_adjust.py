@@ -9,7 +9,7 @@
      换完之后**真的**止损 / 止盈 / 时间止损照常、盈亏按复权口径算对；反向拆股同理；
   2. 拆股早于（或等于）入场日：不换、一次拆股查询都不打；
   3. 时点：除权日晚于 as_of 不换——时点日线下根本不去查；非时点日线（事后复权）下判不了、不换、看得见；
-  4. 判不了（查询失败 / 比例对不上 / 缺入场日日线）看得见：ERROR、返回值、净值行、卡片，且当天不碰仓位、
+  4. 判不了（查询失败 / 比例对不上 / 缺入场日日线 / 大幅对不上却没有拆股记录）看得见：ERROR、返回值、净值行、卡片，且当天不碰仓位、
      按入场价估值，之后能自愈；日线对不上而 Yahoo 确认无拆股 ⇒ 照常（不冻仓）；
   5. `run_replay`（每个重放日看到 Yahoo 当天给的日线、拆股查询发生在重放时刻、能看到之后的拆股）
      与生产逐日 `run_for_date` 跨拆股**逐字节**相同；
@@ -86,6 +86,7 @@ class SplitYF:
         self.values, self.splits = values, splits
         self.bars_day = self.now_day = FINAL
         self.fail = {}
+        self.unlisted = set()     # 这些标的：日线照常复权，但「Stock Splits」列里没有这次拆股（Yahoo 记录没跟上）
         self.calls = []
 
     @property
@@ -117,7 +118,7 @@ class SplitYF:
                 for d, v in sorted(fake.values.get(t, {}).items()):
                     if start <= d < end and d <= view:
                         c = v / math.prod(r for _, r in sp)
-                        s = next((r for x, r in sp if x == d), 0.0)
+                        s = 0.0 if t in fake.unlisted else next((r for x, r in sp if x == d), 0.0)
                         rows.append((d, [c, c * 1.003, c * 0.997, c, 0.0, s]))
                 if not rows:
                     return pd.DataFrame()
@@ -333,10 +334,11 @@ class TestSplitBeforeEntry:
         assert world.fake.lookups == []
 
     def test_ex_date_equal_to_entry_is_not_pending(self, monkeypatch):
-        """单元：即便查询被触发，除权日 = 入场日的拆股也不在 (entry_date, as_of] 里。"""
+        """单元：即便查询被触发（入场价与入场日收盘差 6%），除权日 = 入场日的拆股也不在 (entry_date, as_of] 里 ⇒
+        不换、照常。变异「`entry_date < x` 改 `<=`」⇒ 它成了待换拆股、比例对不上 ⇒ 判不了 ⇒ 红。"""
         monkeypatch.setattr(pp, "_fetch_split_events", lambda t, s: ([(ENTRY, 2.0)], ""))
         p = pp.Position(**_pos("X", ENTRY, 100.0))
-        out = pp._reconcile_split_basis(p, "2026-08-14", {ENTRY: {"Close": 50.0}, "2026-08-13": {"Close": 50.0}})
+        out = pp._reconcile_split_basis(p, "2026-08-14", {ENTRY: {"Close": 94.0}, "2026-08-13": {"Close": 94.0}})
         assert out["status"] == "ok" and p.entry_price == 100.0 and p.split_adjustments == []
 
 
@@ -464,6 +466,32 @@ class TestDetectionFailureIsVisible:
         assert out == {"status": "ok"} and p.entry_price == 100.0
         assert any("不是口径问题" in r.getMessage() for r in caplog.records)
 
+    @pytest.mark.parametrize("close,status", [(80.5, "ok"), (79.9, "unresolved"), (124.0, "ok"),
+                                              (125.1, "unresolved"), (50.0, "unresolved"), (1000.0, "unresolved")])
+    def test_large_mismatch_without_any_split_is_unexplained(self, monkeypatch, close, status):
+        """对不上 ≥ 25%、Yahoo 没有能解释它的拆股 ⇒ `unexplained`（判不了）；不到 25% ⇒ 照常。两侧对称（对数）。
+        变异「删 unexplained 分支」⇒ 1 拆 2 那组照常 ⇒ 红。"""
+        monkeypatch.setattr(pp, "_fetch_split_events", lambda t, s: ([], ""))
+        p = pp.Position(**_pos("X", ENTRY, 100.0))
+        out = pp._reconcile_split_basis(p, "2026-08-14", {ENTRY: {"Close": close}})
+        assert out["status"] == status and p.entry_price == 100.0
+        if status == "unresolved":
+            assert out["reason"] == "unexplained"
+
+    def test_bars_adjusted_but_split_not_listed_holds_instead_of_faking(self, world):
+        """端到端：Yahoo 已为除权日复权日线、拆股记录却还没有这次拆股 ⇒ 改动前（以及「对不上就照常」）是假止损；
+        现在当天不碰、`unexplained` 看得见；记录跟上那天换口径，出场与从没出过岔子逐笔相同。"""
+        world.fake.unlisted.add("LONGX")
+
+        def catch_up(d):
+            if d >= "2026-08-21":
+                world.fake.unlisted.discard("LONGX")
+        res = _live(world, days=_bdays("2026-08-13", "2026-08-25"), on_day=catch_up)
+        assert [u["reason"] for u in res[EX]["split_unresolved"] if u["ticker"] == "LONGX"] == ["unexplained"]
+        assert "LONGX" not in _by_ticker(_rows(pp.CLOSED_FILE))
+        pos = _by_ticker(_rows(pp.POSITIONS_FILE))["LONGX"]
+        assert pos["split_adjustments"] == [{"ex_date": EX, "ratio": 2.0, "applied_as_of": "2026-08-21"}]
+
     def test_small_noise_inside_tolerance_never_looks_up(self, monkeypatch):
         def boom(t, s):
             raise AssertionError("容差内不该查拆股")
@@ -473,12 +501,14 @@ class TestDetectionFailureIsVisible:
             assert pp._reconcile_split_basis(p, "2026-08-14", {ENTRY: {"Close": c}}) == {"status": "ok"}
 
     def test_already_applied_ex_date_is_not_applied_again(self, monkeypatch):
-        """同一除权日只换一次：即便之后日线又和入场价对不上（再来一次 2 倍），已换过的拆股不再计入。"""
+        """同一除权日只换一次：即便之后日线又和入场价对不上（再来一次 2 倍），已换过的拆股不再计入——
+        没有别的拆股能解释 ⇒ `unexplained`，而不是把同一次拆股再换一遍。"""
         monkeypatch.setattr(pp, "_fetch_split_events", lambda t, s: ([("2026-08-13", 2.0)], ""))
         p = pp.Position(**_pos("X", ENTRY, 100.0))
         assert pp._reconcile_split_basis(p, "2026-08-13", {ENTRY: {"Close": 50.0}})["status"] == "applied"
         out = pp._reconcile_split_basis(p, "2026-08-14", {ENTRY: {"Close": 25.0}})
-        assert out["status"] == "ok" and len(p.split_adjustments) == 1 and p.entry_price == 50.0
+        assert (out["status"], out["reason"]) == ("unresolved", "unexplained")
+        assert len(p.split_adjustments) == 1 and p.entry_price == 50.0
 
     def test_two_pending_splits_are_applied_together(self, monkeypatch):
         monkeypatch.setattr(pp, "_fetch_split_events", lambda t, s: ([("2026-08-13", 2.0), ("2026-08-14", 3.0)], ""))

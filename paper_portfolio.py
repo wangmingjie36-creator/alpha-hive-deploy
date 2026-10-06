@@ -1267,10 +1267,12 @@ def _open_position(
 #
 # 判不了 ⇒ **这一天不碰这个仓位**（不查出场、按入场价估值、记 ERROR、run_for_date 返回 `split_unresolved`、
 # 当天净值行带 `split_unresolved`、组合卡片标「口径待核」），下一次运行重判——宁可晚一天出场，不往账本里写
-# 假交易。三种：拆股记录取不到（`lookup_failed`）、有拆股但比例对不上日线（`ratio_mismatch`）、只有 as_of 之后
-# 的拆股对得上（`future_split`：这份日线不是时点数据——生产不会遇到，非时点回放如 `--rehearse` 会）。
-# 入场日那根日线缺失且确有待换的拆股（`no_entry_bar`）同样判不了。
-# 日线与入场价对不上、而 Yahoo 确认没有拆股 ⇒ 不是口径问题，照常（WARNING），否则一个陈旧的入场价会让仓位永远冻住。
+# 假交易（`_check_exit` 每天重扫全段，推迟的出场在自愈那天按原日期、原价位补记）。几种：拆股记录取不到
+# （`lookup_failed`）、有拆股但比例对不上日线（`ratio_mismatch`）、只有 as_of 之后的拆股对得上（`future_split`：
+# 这份日线不是时点数据——生产不会遇到，非时点回放如 `--rehearse` 会）、入场日那根日线缺失且确有待换的拆股
+# （`no_entry_bar`）、对不上 ≥ `_SPLIT_UNEXPLAINED_TOL` 而 Yahoo 没有能解释它的拆股（`unexplained`：Yahoo 已复权、
+# 记录还没跟上，或入场价坏了）。对不上但不到那么多、且 Yahoo 确认没有拆股 ⇒ 不是口径问题，照常（WARNING）——
+# 入场价偶尔是前一日收盘，一天的涨跌不该让仓位永远冻住。
 #
 # ⚠️ 已知不覆盖：同一份日线里一部分复权、一部分没复权（Yahoo 漏复权的形状）——入场日那根仍是旧口径，
 # 判据看不出来。真实日线上没见过；回放行情库在除权当天 Step 11 的确会给出这种混合视图，但只给「重放日 =
@@ -1280,6 +1282,10 @@ def _open_position(
 #: 入场价与入场日收盘的容差（相对）。超出才去查拆股；拆股比例与观测比的匹配也用它。
 _SPLIT_BASIS_TOL = 0.03
 _SPLIT_LOG_TOL = math.log1p(_SPLIT_BASIS_TOL)
+#: 对不上这么多、Yahoo 却没有能解释它的拆股 ⇒ 判不了（`unexplained`）。在它与 `_SPLIT_BASIS_TOL` 之间的照常（WARNING）：
+#: 入场价偶尔是前一日收盘（ScoutBee 价缺失时的回落），一天的涨跌不该冻住仓位。
+_SPLIT_UNEXPLAINED_TOL = 0.25
+_SPLIT_UNEXPLAINED_LOG = math.log1p(_SPLIT_UNEXPLAINED_TOL)
 #: (ticker, start, 查询日 PDT) → [(除权日, 比例)]。只放成功结果；键带查询日，长驻进程跨天会重取。
 _SPLIT_EVENTS_CACHE: Dict[Tuple[str, str, str], List[Tuple[str, float]]] = {}
 
@@ -1377,6 +1383,10 @@ def _reconcile_split_basis(pos: Position, as_of: str, ohlc: Dict[str, Dict]) -> 
     if pending:
         return {"status": "unresolved", "reason": "ratio_mismatch",
                 "detail": f"入场价/入场日收盘={obs:.4f}，待换拆股 {pending} 的比例积 {r_pending:g} 对不上"}
+    if abs(math.log(obs)) >= _SPLIT_UNEXPLAINED_LOG:
+        return {"status": "unresolved", "reason": "unexplained",
+                "detail": f"入场价/入场日收盘={obs:.4f}，Yahoo 在 ({pos.entry_date}, {as_of}] 没有能解释它的拆股"
+                          "——要么 Yahoo 已复权、拆股记录还没跟上，要么入场价本身坏了"}
     _log.warning("[PaperPortfolio] %s %s 入场价 %.4f 与入场日 %s 收盘 %.4f 差 %.1f%%，但 Yahoo 在 (%s, %s] 没有拆股"
                  "——不是口径问题，照常处理（入场价可能是陈旧报价）",
                  as_of, pos.ticker, entry, pos.entry_date, ref_close, (obs - 1) * 100, pos.entry_date, as_of)
