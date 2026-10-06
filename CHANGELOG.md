@@ -7,7 +7,24 @@
 
 ## [0.45.418] — 2026-10-06 — 占位（进行中：`orchestrator_lint.py` 补命令行入口——命中 exit 1、文件读不到 exit 2，此前直接跑是恒 exit 0 的空检查；原占 417 未及时推送被占用，改号）
 
-## [0.45.417] — 2026-10-06 — 占位（进行中：异地备份纳入 .swarm_results_*.json；analysis-*-ml-* 写成 accepted-loss；排除理由分类守卫；备份仓 600MB 预算闸；恢复演练）
+## [0.45.417] — 2026-10-06 — Changed：异地备份纳入 `.swarm_results_*.json`；排除理由必须分类（`rebuildable:` / `derived:` / `accepted-loss:<日期 谁定>`）；备份仓 600 MB 预算闸
+
+用户 2026-10-05 的决定：**只纳入 `.swarm_results`**（原样、不改格式、不去重），备份仓体量预算 600 MB，`analysis-*-ml-*.json` 明确记为已接受的损失。
+
+### Changed
+- `data_backup/export.py`：`ROOT_FILE_GLOBS` 加 `.swarm_results_*.json`（逐蜂原始证据，不可重取，`signal_archive.backfill` 与重放实验读它；118 个文件 ≈ 87.9 MB 原始 / ≈19 MB 压缩，约 +0.1 MB/天）。`EXCLUDED_FROM_THIS_PASS` 去掉它；`analysis-*-ml-*.json` 的理由由「用户未定」改写为 `accepted-loss:2026-10-05 用户定`，并写明代价与重叠情况（312/1019 个文件的 `swarm_results` 键与 `.swarm_results` 条目逐字相同，其余 707 个不同、原因未核实）。其余理由补上 `rebuildable:` / `derived:` 前缀；`logs` 记为 `accepted-loss:2026-10-06 沿用 v0.45.342 的排除决定、用户未单独审议`（如实写，不冒称用户定过）。
+- `data_backup/run_backup.py`：推送成功后量备份仓体量（`git count-objects -v` 的 松散 + 包 + 垃圾；本仓从未 gc，只读 size-pack 会把 106 MB 报成 0），写入 `repo_size_mb` / `repo_budget_mb` / `pushed`；超 `BACKUP_REPO_BUDGET_MB = 600` **或量不出来**都记 `stage="size_budget", ok=False`（数据已推送，红的是「该停下来想想了」，不是丢备份）。
+- `scripts/alpha-hive-orchestrator.sh`：Step 14 的 stage 分发加 `size_budget` 分支（部署副本下一个扫描日自动更新；此前走通用「未识别」分支，同样可见）。
+
+### 守卫
+- `tests/test_data_backup.py::TestExportScopeCoversMoveRules`：排除理由必须以分类前缀开头、`accepted-loss` 必须带日期与决定人、含「未定」即红（连同一条正对照证明判据抓得住旧写法）；`.swarm_results` 真被导出、`analysis-*` 真没被导出。
+- `TestBackupRepoSizeBudget`（6 条）：松散对象计入体量、预算内绿并报尺寸、超预算红且 `pushed`、量不出来红而非 0、推送失败不进预算闸。
+- 变异自证（先提交后变异，逐个 `git checkout` 还原）：去掉 swarm glob / analysis 理由改回「用户未定」/ 只读 size-pack / 预算闸恒不红 / 量不出来当 0 / 编排器去掉 `size_budget` 分支——各自让对应守卫变红。
+
+### 验证
+- 恢复演练（真数据）：导出 118 个 `.swarm_results` → `restore_state` 还原到临时根 → 逐文件 sha256 与现网一致（0 不符）；`signal_archive.backfill(dry_run=True)` 在还原根上读到 118 文件、117334 行（空库全为 new），与现网库的 new+changed+same（30+224+117080）一致、71 个信号一致。
+- 附带观察（**待验证**，非本版引入）：现网 dry-run 报 `changed: 224`，即存档库与按当前抽取器重放的值有 224 行不同，来源未查。
+
 
 ## [0.45.416] — 2026-10-05 — 占位（进行中：纸面组合拆股修正——持仓跨拆股除权日时按比例调整 shares/entry/SL/TP，防假 SL/TP 与按调整后价格估值；时点安全）
 
