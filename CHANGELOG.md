@@ -333,6 +333,20 @@ macOS 的 BSD ps 在非终端输出时恒不限宽（实测 `COLUMNS=40` / `80` 
 - `alphabot/__init__.py`：`__version__` 0.45.397 → 0.45.411（页脚与 .app 的 `CFBundleShortVersionString` 读它；0.45.407 没跟着升，页脚一直显示 0.45.397）。已装的 .app 要 `make alphabot-app` 才拿到新 Info.plist 版本号；页面内容 `git pull` 即生效。
 - `ALPHA_BOT_GUIDE.md`：补「程序内帮助」一节；原文保留作仓库内速览。
 
+### Changed（同版追加：量词「张合约」→「个合约」）
+用户拿标的页「水平」卡片的「1276 张合约」对照券商 App 里 NVDA 单个到期日就有 10 万张的持仓，以为我们少了几个数量级。
+核对：1276 数的是**合约系列的个数**（到期日 × 行权价 × call/put；NVDA ≤45 天 10 个到期日、call 638 + put 638），券商 App 的「未平仓合约数 / 成交量」是**张数**。
+用户截图 8 行（10-07 到期 call，行权价 220–237.5）的 OI / 成交量 / 最新价与 CBOE 数据逐行一致——同一份数据，只是单位不同。「张」在期权里通常指持仓或成交数量，用在个数上会误导。
+- `alphabot/static/pages/ticker.js`：水平卡片副标题「N 张合约」→「N 个合约（行权价 × call/put）」；期限表表头「合约数」→「合约个数」；「每张合约固定自身 IV」→「每个合约」。
+- `alphabot/static/pages/method.js`、`help.js`：同样把「每张合约」「少于 20 张」改成「个」；帮助页「概念速查」新增「合约（个）」与「张（持仓 / 成交）」两条区分，「排错」新增「合约个数和券商 App 的持仓 / 成交张数对不上」。示例数字标明日期（2026-10-05 的 NVDA），避免日后变成过期快照。
+- `ALPHA_BOT_GUIDE.md`：同步，并补「合约（个）vs 张」一行。
+- 守卫：`TestHelpPage::test_contract_count_is_never_labelled_as_zhang`——全部静态 js 里出现「张合约」即红，并核对水平卡片确实用了新写法。变异自证：把 ticker.js 第 110 行改回「张合约」⇒ 红并点名 `('ticker.js', 110)`；还原后 58 条全绿。
+- 未改：`synthetic.py` 的 docstring（非用户可见）；后端字段名 `n_contracts`（接口不动，只改显示单位）。
+
+### 同日核对（未改代码）
+- NVDA 10-19（周一）到期的 60 张合约 `open_interest` 字段存在且为 0.0；`prev_day_close>0` 的合约 0/60、10-05 之前无任何成交记录，其他到期日几乎全是 100%——符合「10-05 新挂牌、尚无隔夜持仓」。次日 OI 更新后应变为正数（待核）。
+- 隐患（本次未触发、未改）：`cboe_options.fetch_cboe_raw_contracts` 把缺失的 `open_interest` 也写成 `0.0`（`oi if oi is not None else 0.0`），「没有这个字段」与「持仓为 0」下游分不开；NVDA 全部到期日缺键 / None 均为 0，所以这次的 0 是真的 0。
+
 ### 守卫
 - `tests/test_alphabot.py::TestHelpPage`（6 条）：① 全部静态 js 里指向帮助的引用（`#/help/<id>` / `helpLink("<id>")` / ticker 的 `TAB_HELP`）都落在 `SECTIONS` 登记过的 id 上（并断言找到 ≥8 条引用，防解析规则坏了空转）；② 标的五个子页各有 `TAB_HELP`；③ 导航与路由接线；④ 帮助页读 `/api/method` 且引用全部规则常量键，不得出现「≤ 3.0%」「至少 60 个」之类字面量；⑤ `/api/method` 确实带这些键。
   变异自证：把 `helpLink("ledger")` 改成 `"ledgr"` ⇒ ① 红并点名 `('ledger.js','ledgr')`；在帮助页加一处「≤ 3.0%」字面量 ⇒ ④ 红「路由缓冲写成了字面量」；还原后全绿。

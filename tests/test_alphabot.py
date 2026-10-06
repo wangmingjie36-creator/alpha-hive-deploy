@@ -478,3 +478,11 @@ class TestHelpPage:
         for k in ("min_independent_per_tenor", "min_distinct_expiries", "min_per_group", "alpha_each", "n_perm",
                   "eligible_earnings_status", "excluded_underlying_price_sources"):
             assert k in m["prereg"], k
+
+    def test_contract_count_is_never_labelled_as_zhang(self):
+        """「N 张合约」会被读成持仓 / 成交张数（券商 App 里 NVDA 单个到期日就有 10 万张）；页面数的是合约系列个数，
+        单位只许写「个」。v0.45.411：用户拿 1276 对照券商 App 的持仓数，以为少了几个数量级。"""
+        hits = [(js.name, n + 1) for js in sorted(STATIC.rglob("*.js")) if "vendor" not in js.parts
+                for n, line in enumerate(js.read_text(encoding="utf-8").splitlines()) if "张合约" in line]
+        assert not hits, f"「张合约」会让人把合约个数当成张数：{hits}"
+        assert "个合约（行权价 × call/put）" in (STATIC / "pages" / "ticker.js").read_text(encoding="utf-8")
