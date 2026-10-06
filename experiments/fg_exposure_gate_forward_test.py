@@ -1395,9 +1395,9 @@ def _ohlc_window_note(res: Dict) -> str:
 
 def _ohlc_store_alarm(res: Dict) -> bool:
     """近 `revision_alarm_days` 天**确认**了修订（多半是拆股回溯复权）⇒ 段首 ⚠️ + attention `….ohlc_store_revised`。
-    v0.45.415 起回放按时点取版本，A / B 如实复现生产当时看到的价格——而生产 `_check_exit` 遇拆股会把在场仓位记成假止损 /
-    假止盈（出场日倒填，另立任务修）：生产账本里多了一笔没发生过的交易，需人看。过了这几天只陈述（窗口左端固定、修订会一直
-    在窗口里，永久 ⚠️ 会把人训练成无视 ⚠️）。"""
+    v0.45.415 起回放按时点取版本，A / B 如实复现生产当时看到的价格。v0.45.416 起生产遇拆股按日线把在场仓位换到复权口径
+    （判不了就当天不碰、记 `split_unresolved`）——这条路径极少走到，且回放里拆股记录取不到而生产取到了会让 A 分叉，需人看。
+    过了这几天只陈述（窗口左端固定、修订会一直在窗口里，永久 ⚠️ 会把人训练成无视 ⚠️）。"""
     st = (res.get("ohlc_window") or {}).get("store") or {}
     return bool(st.get("revised_recent"))
 
@@ -1413,8 +1413,8 @@ def _ohlc_store_note(res: Dict) -> str:
     if _ohlc_store_alarm(res):
         recent = "、".join(st.get("revised_recent_tickers", [])[:5])
         return (f"；⚠️ 行情库：{recent} 近 {st.get('revision_alarm_days')} 天确认了 {st['revised_recent']} 根已落定日线被 "
-                "Yahoo 改了（多半是拆股回溯复权）——生产纸面组合遇拆股会把在场仓位记成假止损 / 假止盈、出场日倒填（生产的 bug，"
-                f"另立任务修），A / B 按时点数据如实复现；需人看（窗口内共 {n} 根，按时点：生效日之前用旧值、之后用新值）")
+                "Yahoo 改了（多半是拆股回溯复权）——生产纸面组合遇拆股按 v0.45.416 把在场仓位换到复权口径（判不了则当天不碰、"
+                f"记 split_unresolved），A / B 按时点数据如实复现；需人看（窗口内共 {n} 根，按时点：生效日之前用旧值、之后用新值）")
     return f"（行情库：{names} 共 {n} 根已落定日线 Yahoo 后来改了，按时点重放：生效日之前用旧值、之后用新值）"
 
 

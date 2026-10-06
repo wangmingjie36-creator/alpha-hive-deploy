@@ -1,8 +1,8 @@
 """回放行情库的时点数据（v0.45.415，`replay_ohlc_store` + `paper_portfolio._REPLAY_AS_OF`）的守卫。
 
 为什么：重放第 d 天要看到生产在第 d 天运行时 Yahoo 给它的价格。拆股（Yahoo 回溯复权全段历史）后，生产
-`_check_exit` 重扫入场以来的全部日线、对比复权前的止损价 ⇒ 多头被记成假止损、出场日倒填（生产自己的 bug，另立任务修）。
-只有时点数据能让 A 逐笔复现生产（包括这笔假交易）：v0.45.410 冻结首次落定值会在落定段末端留假跳空、提前假出场；
+`_check_exit` 重扫入场以来的全部日线、对比复权前的止损价 ⇒ 多头被记成假止损、出场日倒填（生产自己的 bug，v0.45.416 已修：
+生产按日线判口径、把仓位换到复权口径）。只有时点数据能让 A 逐笔复现生产当时看到的价格：v0.45.410 冻结首次落定值会在落定段末端留假跳空、提前假出场；
 现取会把拆股前每一笔都按复权价重放。用户 10-05 定：生效日 = 第一次下载到新值的美东日期；缺口日的旧版本只有一次观察，接受。
 
 这里守的是：
@@ -13,8 +13,10 @@
   4. `run_replay` 逐日把重放日告诉窗口、结束（含抛异常）后恢复；生产 `run_for_date` 不碰它；
   5. 退回直连的结果里已落定的日子也按时点由库回答，只换值、不增日子（直连失败 ⇒ 仍是 {}）；下载失败后由库回答的请求也按时点；
      没有库时原样返回同一个对象；嫌疑当天整段补下失败 ⇒ 什么都不并、该标的降级；不知道重放日 ⇒ 窗口降级；
-  6. 端到端：合成世界里 GAPX 在 08-19 拆股（Yahoo 从那天起回溯复权），生产逐日真跑、在 08-19 记下倒填到 08-11 的假止损；
-     Step 11 逐日真跑——每一天自证都是 100%；同一份世界里不用库、或不按重放日取版本，自证都掉（证明夹具非空）。
+  6. 端到端：合成世界里 GAPX 在 08-19 拆股（Yahoo 从那天起回溯复权），生产逐日真跑、在 08-19 把 GAPX 换到复权口径
+     （v0.45.416；关掉 416 则记下倒填到 08-11 的假止损——夹具自证）；Step 11 逐日真跑——每一天自证都是 100%、A 记下与生产
+     同一笔 GAPX 平仓；关掉 416 时不用库、或不按重放日取版本，自证都掉（时点数据对「口径敏感的下游」必要）；开着 416 时
+     即便日线不是时点的，拆股也不再让 A 分叉。
 全部离线（假 yfinance）。每条测试的 docstring 写明「哪个变异会让它红」。
 """
 from __future__ import annotations
@@ -516,7 +518,10 @@ SPLIT_DAY = "2026-08-19"   # GAPX 2:1 拆股的除权日（Yahoo 从这天起回
 
 
 class _TimeYF:
-    """随「现在」变化的 Yahoo：只给日期 ≤ now 的日线；GAPX 在 now ≥ SPLIT_DAY 时全段 /2（回溯复权 + 拆股后真实价）。"""
+    """随「现在」变化的 Yahoo：只给日期 ≤ now 的日线；GAPX 在 now ≥ SPLIT_DAY 时全段 /2（回溯复权 + 拆股后真实价）。
+
+    v0.45.416：同真 yfinance，响应带「Stock Splits」列（GAPX 在 now ≥ SPLIT_DAY 时除权日那行是 2.0）；不带 `end` 的请求
+    （`paper_portfolio._fetch_split_events` 查拆股记录）给到「现在」为止。"""
 
     def __init__(self, master):
         self.master = master
@@ -534,13 +539,16 @@ class _TimeYF:
             def history(self, *args, **kw):
                 import pandas as pd
                 fake.calls.append((t, args, dict(kw)))
-                lo, hi = (pd.Timestamp(x).strftime("%Y-%m-%d") for x in (kw["start"], kw["end"]))
-                r = 2.0 if (t == "GAPX" and fake.now >= SPLIT_DAY) else 1.0
+                lo = pd.Timestamp(kw["start"]).strftime("%Y-%m-%d")
+                hi = pd.Timestamp(kw["end"]).strftime("%Y-%m-%d") if kw.get("end") is not None else "9999-12-31"
+                split_on = t == "GAPX" and fake.now >= SPLIT_DAY
+                r = 2.0 if split_on else 1.0
                 rows = sorted((d, v) for d, v in fake.master.get(t, {}).items() if lo <= d < hi and d <= fake.now)
-                rows = [(d, tuple(x / r if isinstance(x, float) else x for x in v)) for d, v in rows]
+                rows = [(d, [x / r if isinstance(x, float) else x for x in v] + [r if split_on and d == SPLIT_DAY else 0.0])
+                        for d, v in rows]
                 if not rows:
                     return pd.DataFrame()
-                return pd.DataFrame([list(v) for _, v in rows], columns=["Open", "High", "Low", "Close"],
+                return pd.DataFrame([v for _, v in rows], columns=["Open", "High", "Low", "Close", "Stock Splits"],
                                     index=pd.to_datetime([d for d, _ in rows]))
         return _T()
 
@@ -550,17 +558,7 @@ def split_world(world, monkeypatch):
     """生产逐日真跑（每天看那天的 Yahoo）→ 生产记录；之后由测试逐日跑 Step 11。"""
     yf = _TimeYF(world.master)
     monkeypatch.setitem(sys.modules, "yfinance", yf.module())
-    prod = world.tmp / "prod_run"
-    prod.mkdir()
-    for name, blob in _rw.SEED.items():
-        (prod / name).write_bytes(blob)
-    for d in _rw.DATES:
-        yf.now = d
-        monkeypatch.setattr(pp, "_PRICE_CACHE", {})
-        pp.run_replay({}, prod, dates=[d])   # 没有窗口：每天就是生产那天的样子
-    pp.CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(prod / "closed_trades.jsonl", pp.CLOSED_FILE)
-    shutil.copy(prod / "positions.jsonl", pp.POSITIONS_FILE)
+    prod = _run_production(yf, world.tmp / "prod_run", monkeypatch)
     monkeypatch.setattr(fwd, "load_seed", lambda *a, **k: _rw.SEED)
     monkeypatch.setattr(fwd, "_forward_anchor_plan", _rw._seed_only_plan)
     monkeypatch.setattr(fwd, "FORWARD_START", _rw.SINCE)
@@ -568,6 +566,7 @@ def split_world(world, monkeypatch):
     def step11(day, *, store=True):
         yf.now = day
         monkeypatch.setattr(pp, "_PRICE_CACHE", {})
+        monkeypatch.setattr(pp, "_SPLIT_EVENTS_CACHE", {})
         monkeypatch.setattr(rs, "_et_today", lambda: dt.date.fromisoformat(day))
         monkeypatch.setattr(fwd, "_forward_ohlc_store", _REAL_FORWARD_STORE if store else (lambda: None))
         return fwd.run(today=day)
@@ -577,15 +576,47 @@ def split_world(world, monkeypatch):
 _REAL_FORWARD_STORE = fwd._forward_ohlc_store
 
 
+def _run_production(yf, prod, monkeypatch):
+    """生产逐日真跑（每天看那天的 Yahoo、每天一个新进程），记录装成「生产实际记录」。返回状态目录。"""
+    prod.mkdir()
+    for name, blob in _rw.SEED.items():
+        (prod / name).write_bytes(blob)
+    for d in _rw.DATES:
+        yf.now = d
+        monkeypatch.setattr(pp, "_PRICE_CACHE", {})
+        monkeypatch.setattr(pp, "_SPLIT_EVENTS_CACHE", {})
+        pp.run_replay({}, prod, dates=[d])   # 没有窗口：每天就是生产那天的样子
+    pp.CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(prod / "closed_trades.jsonl", pp.CLOSED_FILE)
+    shutil.copy(prod / "positions.jsonl", pp.POSITIONS_FILE)
+    return prod
+
+
+def _without_416(monkeypatch):
+    """关掉 v0.45.416 的拆股口径（= 416 之前的 paper_portfolio：日线怎么给就怎么对绝对价位）——对照用。"""
+    monkeypatch.setattr(pp, "_reconcile_split_basis", lambda *a, **k: {"status": "ok"})
+
+
 def _gapx_closed(prod):
     return [json.loads(x) for x in (prod / "closed_trades.jsonl").read_text().splitlines() if '"GAPX"' in x]
 
 
 class TestSplitEndToEnd:
-    def test_production_itself_books_a_backdated_fake_stop_on_split_day(self, split_world):
-        """夹具自证：生产在 08-19 看到复权后日线，把 08-10 入场、止损 93 的 GAPX 多头记成 08-11 出场的止损（倒填）。
-        没有这一条，下面的「自证 100%」可能只是因为拆股根本没碰到任何仓位。"""
+    def test_production_rescales_gapx_on_split_day_instead_of_faking_a_stop(self, split_world):
+        """夹具自证（v0.45.416 起）：生产在 08-19 看到复权后日线，把 08-10 入场的 GAPX 多头换到复权口径（入场价 100 → 50），
+        之后按复权口径走到时间止损——不再记倒填到 08-11 的假止损。没有这一条，下面的「自证 100%」可能只是因为拆股根本没碰到
+        任何仓位。变异「桩不给 Stock Splits 列」⇒ 拆股记录查不到、GAPX 判不了 ⇒ 红。"""
         (t,) = _gapx_closed(split_world.prod)
+        assert t["split_adjustments"] == [{"ex_date": SPLIT_DAY, "ratio": 2.0, "applied_as_of": SPLIT_DAY}]
+        assert t["entry_price"] == pytest.approx(50.0)
+        assert t["exit_reason"] == "TIME" and t["exit_date"] > SPLIT_DAY
+
+    def test_without_416_production_books_the_backdated_fake_stop(self, split_world, monkeypatch):
+        """对照：关掉 416，同一份世界里生产在 08-19 把 GAPX 记成 08-11 出场的止损（倒填，v0.45.415 时的夹具自证原样）——
+        证明上一条的「没有假单」来自 416，且拆股确实碰到了在场仓位。"""
+        _without_416(monkeypatch)
+        prod = _run_production(split_world.yf, split_world.prod.parent / "prod_without_416", monkeypatch)
+        (t,) = _gapx_closed(prod)
         assert (t["exit_reason"], t["exit_date"], t["exit_price"]) == ("SL", "2026-08-11", 93.0)
 
     def test_self_proof_stays_100_percent_through_the_split_every_day(self, split_world):
@@ -601,9 +632,10 @@ class TestSplitEndToEnd:
         assert stats["2026-08-20"]["revised_tickers"] == ["GAPX"] and stats["2026-08-20"]["gap_days_settled"] >= 1
         assert all(st["as_of_unknown"] == 0 for st in stats.values()), "所有回放都经 run_replay，重放日恒已知"
         assert stats["2026-08-28"]["served_older_version"] > 0
-        # 确认后 7 天内告警（生产记了假交易，需人看）；之后只陈述、回到 ⏳
+        # 确认后 7 天内告警（生产按 416 换了口径或判不了，需人看）；之后只陈述、回到 ⏳。v0.45.416 起告警不再说生产记了假单。
         line = fwd.status_line(split_world.step11("2026-08-24"))
-        assert line.startswith("⚠️ ") and "GAPX 近 7 天确认了" in line and "假止损" in line, line
+        assert line.startswith("⚠️ ") and "GAPX 近 7 天确认了" in line and "复权口径" in line, line
+        assert "假止损" not in line and "另立任务" not in line, line
         line = fwd.status_line(split_world.step11("2026-08-28"))
         assert line.startswith("⏳ ") and "按时点重放" in line, line
 
@@ -631,8 +663,10 @@ class TestSplitEndToEnd:
 
     @pytest.mark.parametrize("how", ["no-store", "no-replay-day"])
     def test_without_point_in_time_the_same_world_fails_the_self_proof(self, split_world, how, monkeypatch):
-        """对照：同一份世界里，不用库（现取：拆股前也按复权价重放 ⇒ 08-12 就假止损）、或库不按重放日取版本（一律最新版本），
-        A 都与生产对不上。证明上一条的 100% 来自时点数据，不是夹具空转。"""
+        """对照：关掉 416（下游对口径敏感——416 之前的 paper_portfolio），同一份世界里不用库（现取：拆股前也按复权价重放 ⇒
+        08-12 就假止损）、或库不按重放日取版本（一律最新版本），A 都与生产对不上。证明 100% 来自时点数据，不是夹具空转。"""
+        _without_416(monkeypatch)
+        _run_production(split_world.yf, split_world.prod.parent / "prod_without_416", monkeypatch)
         for day in _rw.DATES[1:]:
             split_world.step11(day)
         if how == "no-replay-day":
@@ -641,3 +675,16 @@ class TestSplitEndToEnd:
                                 lambda self, t, s, e, cur, as_of: orig(self, t, s, e, cur, None))
         res = split_world.step11("2026-08-28", store=(how != "no-store"))
         assert res.get("selfproof_rate", 1.0) < 1.0 or res.get("status") == "cannot_judge", res.get("selfproof")
+
+
+class TestSplitWith416NeedsNoPointInTime:
+    """v0.45.416 之后：拆股本身不再要求日线是时点的——事后复权的日线在除权日之前判 `future_split`（当天不碰仓位、
+    按入场价估值，不影响入场四元组），除权日那个重放日换口径，出场与生产同一笔。时点数据对数据更正等其他修订仍是必需的。"""
+
+    def test_non_pit_replay_reproduces_production_through_the_split(self, split_world):
+        """不用库（现取，全段复权）：A 逐笔复现生产。变异「416 不排除除权日 > as_of 的拆股」⇒ 拆股前就换口径、仍复现入场，
+        但 GAPX 早换口径是时点泄漏——由 `test_paper_portfolio_split_adjust.TestPointInTime` 守；本条守「不再分叉」。"""
+        for day in _rw.DATES[1:]:
+            split_world.step11(day)
+        res = split_world.step11("2026-08-28", store=False)
+        assert res.get("selfproof_rate") == 1.0, (res.get("status"), res.get("reason"), res.get("selfproof"))

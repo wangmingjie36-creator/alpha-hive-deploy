@@ -1999,8 +1999,9 @@ def _forward_test_attention(key: str, d: Dict) -> List[Dict]:
         out.append(item(f"{iid}.ohlc_store_revised", "warn",
                         f"{name}：回放行情库近 {rst.get('revision_alarm_days')} 天确认 {rst['revised_recent']} 根已落定日线被 "
                         f"Yahoo 改了（{tick}）——多半是拆股回溯复权。回放按时点取版本（生效日之前用旧值、之后用新值），A / B "
-                        "如实复现生产当时看到的价格；而生产纸面组合遇拆股会把在场仓位记成假止损 / 假止盈、出场日倒填（生产的 bug，"
-                        "另立任务修）。需人看：这几个标的近期有没有拆股、生产账本里那几天有没有凭空的出场"))
+                        "如实复现生产当时看到的价格；生产纸面组合遇拆股按 v0.45.416 把在场仓位换到复权口径（判不了则当天不碰、"
+                        "净值行记 split_unresolved）。需人看：这几个标的近期有没有拆股、生产账本里那几天的 split_adjustments / "
+                        "split_unresolved、自证是否仍 100%（回放里拆股记录取不到而生产取到了会让 A 分叉）"))
     return out
 
 
