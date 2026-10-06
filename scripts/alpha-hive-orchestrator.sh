@@ -844,8 +844,14 @@ _data_migrations_step() {
     local _rec="${LOGDIR}/data_migrations.json" _rc=0 _json="" _outcome="" _status="failed" _new="" _t0 _dur=0
     _t0=$(date +%s)
     rm -f "${_rec}"
-    run_step --timeout 120 "${PROJECT_DIR}/run_data_migrations.py" --out "${_rec}" >> "${LOGFILE}" 2>&1
-    _rc=$?
+    # 「脚本在不在」按文件判，不按退出码：run_step 的哨兵 2 与 argparse 错误 / 工具自己的 2 撞码
+    # （同 _orchestrator_autodeploy 的纪律）。文件在而没有记录 ⇒ no_record ⇒ 红。
+    if [ ! -f "${PROJECT_DIR}/run_data_migrations.py" ]; then
+        _rc=2
+    else
+        run_step --timeout 120 "${PROJECT_DIR}/run_data_migrations.py" --out "${_rec}" >> "${LOGFILE}" 2>&1
+        _rc=$?
+    fi
     _json="$(jq -c 'select(type == "object" and (.status | type) == "string")' "${_rec}" 2>/dev/null)"
     _outcome="$(printf '%s' "${_json}" | jq -r '.status' 2>/dev/null)"
     case "${_outcome}" in
@@ -854,7 +860,7 @@ _data_migrations_step() {
             log "INFO" "✅ 数据迁移：已应用 $(printf '%s' "${_json}" | jq -r '(.applied | length)') 个，待办 $(printf '%s' "${_json}" | jq -r '.n_pending') 个"
             ;;
         "")
-            if [ "${_rc}" -eq 2 ]; then
+            if [ ! -f "${PROJECT_DIR}/run_data_migrations.py" ]; then
                 _status="skipped"
                 _json='{"status": "tool_missing"}'
                 log "WARN" "⏭️ 数据迁移跳过：生产 checkout 里没有 run_data_migrations.py（本版尚未进生产）"

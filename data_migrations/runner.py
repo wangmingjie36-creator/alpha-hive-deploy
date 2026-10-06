@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from data_backup.sqlite_readonly import read_only_connect   # 现成的只读打开策略（hot journal 拒绝 / WAL 无 -wal 用 immutable）
+
 LEDGER_NAME = "applied.jsonl"
 NAME_RE = re.compile(r"^(\d{4})_[a-z0-9_]+\.py$")
 VERSIONS_DIR = Path(__file__).resolve().parent / "versions"   # 代码，随代码发布 ⇒ __file__ 锚点才对
@@ -77,9 +79,10 @@ def default_db_path() -> Path:
     return Path(PATHS.db)
 
 
-def default_backup_dir() -> Path:
-    from hive_logger import PATHS
-    return Path(PATHS.home) / "_manual_backups"
+def beside(db_path: Path, name: str) -> Path:
+    """备份与记录跟着**这个库**走（它所在的根），不跟环境走：对 /tmp 里的库副本 `--apply`，
+    不许把备份堆进生产 `_manual_backups/`、也不许给生产 `applied.jsonl` 加一行描述别的库的记录。"""
+    return Path(db_path).resolve().parent / name
 
 
 # ── 记录 ──────────────────────────────────────────────────────────────────
@@ -138,7 +141,9 @@ def record_tool_run(tool: str, *, rows_affected: Optional[int], backup: Optional
     不回滚、不改工具退出码——但不许静默）。"""
     import sys
     try:
-        append_record(Path(ledger_dir) if ledger_dir else default_ledger_dir(),
+        if ledger_dir is None:
+            ledger_dir = beside(db_path, "migrations_state") if db_path else default_ledger_dir()
+        append_record(Path(ledger_dir),
                       {"id": f"T-{tool}-{dt.datetime.now().strftime('%Y%m%dT%H%M%S')}", "kind": "manual_tool",
                        "status": "applied", "at": _now(), "tool": tool, "args": args,
                        "rows_affected": rows_affected, "backup": backup, "db": str(db_path) if db_path else None})
@@ -158,7 +163,7 @@ def online_backup(db_path: Path, dest: Path) -> Path:
     part = dest.with_name(dest.name + ".partial")
     if part.exists():
         part.unlink()
-    src = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    src = read_only_connect(db_path)    # HotJournalError 照抛：run_pending 记成 backup_failed
     dst = sqlite3.connect(str(part))
     try:
         src.backup(dst)
@@ -175,7 +180,7 @@ def online_backup(db_path: Path, dest: Path) -> Path:
 
 def backup_before_write(db_path: Path, tag: str, backup_dir: Optional[Path] = None) -> Path:
     """给回填 / 修复工具用：真写之前的在线备份，落 `_manual_backups/`（不被每日轮转清理）。失败抛 ⇒ 调用方必须中止。"""
-    d = Path(backup_dir) if backup_dir else default_backup_dir()
+    d = Path(backup_dir) if backup_dir else beside(db_path, "_manual_backups")
     return online_backup(db_path, d / f"pheromone.db.bak-{tag}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}")
 
 
@@ -213,7 +218,7 @@ def _load(m: Migration):
 
 def db_fingerprint(db_path: Path) -> str:
     """库内容指纹（iterdump 的 sha256）：幂等自检与前后对比用。"""
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con = read_only_connect(db_path)
     try:
         h = hashlib.sha256()
         for line in con.iterdump():
@@ -253,8 +258,12 @@ def run_pending(*, db_path: Optional[Path] = None, versions_dir: Optional[Path] 
     rep: dict = {"status": "ok", "dry_run": not apply, "applied": [], "failed": None, "backup": None,
                  "n_discovered": 0, "n_pending": 0, "error": None}
     try:
-        ledger_dir = Path(ledger_dir) if ledger_dir else default_ledger_dir()
-        db_path = Path(db_path) if db_path else default_db_path()
+        if db_path is None:     # 缺省：生产路径（PATHS，调用时求值）
+            db_path = default_db_path()
+            ledger_dir = Path(ledger_dir) if ledger_dir else default_ledger_dir()
+        else:                   # 显式给了库：记录与备份跟着它
+            db_path = Path(db_path)
+            ledger_dir = Path(ledger_dir) if ledger_dir else beside(db_path, "migrations_state")
         mig = discover(versions_dir)
     except MigrationLayoutError as e:
         rep.update(status="layout_error", error=str(e))
@@ -294,7 +303,7 @@ def run_pending(*, db_path: Optional[Path] = None, versions_dir: Optional[Path] 
         return rep
 
     try:
-        bk = online_backup(db_path, (Path(backup_dir) if backup_dir else default_backup_dir())
+        bk = online_backup(db_path, (Path(backup_dir) if backup_dir else beside(db_path, "_manual_backups"))
                            / f"pheromone.db.bak-migrate-{pending[0].id}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}")
     except Exception as e:  # noqa: BLE001 —— 没有备份就不动库
         rep.update(status="backup_failed", error=f"{type(e).__name__}: {e}；未执行任何迁移")

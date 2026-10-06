@@ -211,7 +211,8 @@ def main() -> int:
         conn = sqlite3.connect(args.db)
     else:
         # dry-run 在内存副本上算：下面的 ALTER TABLE 也只落在副本里，真库不动
-        src = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+        from data_backup.sqlite_readonly import read_only_connect   # 不在源目录留 -wal/-shm
+        src = read_only_connect(Path(args.db))
         conn = sqlite3.connect(":memory:")
         try:
             src.backup(conn)
