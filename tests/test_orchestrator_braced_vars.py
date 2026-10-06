@@ -165,7 +165,7 @@ class TestCli:
     def test_default_target_is_repo_orchestrator_resolved_via_file_not_cwd(self, tmp_path):
         r = self._run(cwd=tmp_path)                       # cwd 里没有 scripts/：跟着 cwd 走就会 rc 2
         expected_rc = 1 if find_unbraced(repo_orchestrator_text()) else 0
-        assert r.returncode == expected_rc and r.stderr.startswith(f"{ORCH.resolve()}: 扫了 "), r
+        assert r.returncode == expected_rc and f"{ORCH}: 扫了 " in r.stderr, r
 
 
 @pytest.mark.skipif(

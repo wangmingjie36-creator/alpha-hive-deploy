@@ -94,9 +94,23 @@ v0.45.414 那次 session 据这个空操作报过「orchestrator_lint.py 通过�
   M4 后来的命中把 2 覆盖成 1 ⇒ 1 红；M5 缺省跟 cwd 走 ⇒ 1 红；M6 不打印命中 ⇒ 3 红；M7 有命中仍 rc 0 ⇒ 1 红。
   ⚠️ M4 **首轮存活**：读不了优先级那条只按「先命中、后缺失」一种顺序跑，覆盖写法恒绿；改成两种顺序参数化后才红——举出变异还得真跑。
 - `tests/test_orchestrator_braced_vars.py` + `test_deploy_orchestrator.py` + `test_paths_not_frozen_at_import.py` + `test_orchestrator_deployed_matches_repo.py`：171 passed；`ruff check .` 全过。
-- 全套：（换基到 `fe7dfbb6` 之后、改号之前）`1 failed, 8156 passed, 82 deselected, 2 xfailed`；唯一的红是按设计恒红的 `TestCoverageHorizon`（v0.45.404）。
+- 全套（以 `5575b702` / v0.45.414 为基，10-06 00:05–00:22；~~原写「换基到 `fe7dfbb6` 之后」，错~~——`fe7dfbb6` 00:06 才提交，00:22 才换基到它）：`1 failed, 8156 passed, 82 deselected, 2 xfailed`；唯一的红是按设计恒红的 `TestCoverageHorizon`（v0.45.404）。
   第一次全套（10-05 23:22–23:37）另有 1 个 ERROR：conftest 的 session 级真实数据根守卫在最后一条测试的 teardown 报 `~/alpha-hive-data` 新增 1 / 改动 70 个文件——**是生产编排器那轮扫描在写**，不是测试：扫描进程（主 checkout，PID 54509）23:21:31 起、checkpoint 文件名里的毫秒戳解出 23:21:35.779，改动的全是当天新闻 / 期权 / VIX 缓存；扫描 00:00:06 结束后重跑全套，守卫不再报错。
-- 手工（换基后最终树）：任务里那条复现 `git commit -q -m "chore: 占号 $NUM（数据"` ⇒ rc 1、命中逐字打印；缺省目标（仓库编排器）「扫了 1565 行，0 处命中」rc 0。
+  另：扫描结束后约 00:01 跑的 4 文件小套（改动 + 邻近）出过 1 个 ERROR（落在末条 teardown，原文当时用 `tail -3` 截掉、**未取证**）；其后连跑两次 172 passed。该窗口里数据根 `pheromone.db` / `-wal` 00:00:55 被改，同时有 8 个 `alpha_hive_mcp.py` 在跑——疑为外部读者触发 WAL checkpoint，**待验证**。
+- 手工（以 `8ab354ae` 为基；最终上 main 的树编排器为 1568 行，同样 0 命中）：任务里那条复现 `git commit -q -m "chore: 占号 $NUM（数据"` ⇒ rc 1、命中逐字打印；缺省目标（仓库编排器）「扫了 1565 行，0 处命中」rc 0。
+
+### 二次检查（10-06）
+
+- **已知、按决定不修：本模块在 Python 3.9 下 import 即崩。** `main(argv: list[str] | None = None)` 是 PEP 604 注解且无
+  `from __future__ import annotations` ⇒ `/usr/bin/python3`（3.9.6）`import orchestrator_lint` 即 `TypeError`，连带 `deploy_orchestrator.py`
+  （import 本模块）`--help` 都起不来；改动前 3.9 下两者都正常（实测前后对照）。**生产不受影响**：编排器 `run_step` 以 `"$PYTHON3"`
+  （= `/usr/local/bin/python3`，3.11）执行，脚本无 shebang；CI 也是 3.11。失败形状是 import 期报错退出、不会静默。
+  **用户 10-06 决定本仓只支持 3.11**，故不加 future import、不加守卫；全仓同形的 `ml_predictor.py` 同理不处理。
+  （曾实现 future import + AST 守卫并变异验证过，按该决定撤回。）
+- `test_default_target_…`：stderr 判定由 `startswith(ORCH.resolve())` 改为含 `ORCH`——与 CLI 缺省路径同为「只解析到目录」，且不怕 stderr 前面多出无关行。
+- 更正上方「验证」里两处事实错（换基基点、行数所属的树），并补记未取证的那次 ERROR。
+- 已知且不改：未捕获异常（如 `PYTHONIOENCODING=ascii` 下打印命中行）退出码是 Python 默认的 1，与「有命中」同码——方向是红，不会落成 0。
+- 全套（最终树 = `f4a04ed2` + 本节两处改动，10-06 01:33–01:41，无扫描在跑）：`1 failed, 8169 passed, 82 deselected, 2 xfailed`，0 ERROR；唯一的红是按设计恒红的 `TestCoverageHorizon`。
 
 ## [0.45.417] — 2026-10-06 — Changed：异地备份纳入 `.swarm_results_*.json`；排除理由必须分类（`rebuildable:` / `derived:` / `accepted-loss:<日期 谁定>`）；备份仓 600 MB 预算闸
 
