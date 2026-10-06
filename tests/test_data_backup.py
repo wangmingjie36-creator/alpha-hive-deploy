@@ -1332,6 +1332,7 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
         ("git_error", "ERROR", "git 调用异常", "git_error_failed"),
         ("commit", "ERROR", "git commit 失败", "commit_failed"),
         ("push", "WARN", "已提交但推送失败", "push_failed"),
+        ("size_budget", "ERROR", "备份仓体量超出预算", "size_budget_failed"),
     ])
     def test_known_fresh_stage_dispatches_correct_message(
         self, tmp_path, stage, expect_level, expect_log_substr, expect_status
@@ -1620,6 +1621,44 @@ class TestExportScopeCoversMoveRules:
     def test_every_exclusion_has_a_reason(self):
         assert all(isinstance(v, str) and v.strip() for v in export_mod.EXCLUDED_FROM_THIS_PASS.values())
 
+    def test_every_exclusion_reason_is_classified(self):
+        """v0.45.417：理由必须以 rebuildable: / derived: / accepted-loss: 开头，且 accepted-loss 要有
+        「日期 + 谁决定」。曾经两个不可重取的文件族挂着「用户未定」，没有任何东西让它过期。"""
+        import re
+        bad = {k: v for k, v in export_mod.EXCLUDED_FROM_THIS_PASS.items()
+               if not v.startswith(export_mod.EXCLUSION_REASON_PREFIXES)}
+        assert not bad, f"排除理由没有分类前缀（{export_mod.EXCLUSION_REASON_PREFIXES}）：{sorted(bad)}"
+        for k, v in export_mod.EXCLUDED_FROM_THIS_PASS.items():
+            if v.startswith("accepted-loss:"):
+                assert re.match(r"accepted-loss:\d{4}-\d{2}-\d{2} \S", v), f"{k}: accepted-loss 缺日期 / 决定人：{v!r}"
+            assert "未定" not in v.replace("用户未单独审议", ""), f"{k}: 「未定」不是一个决定：{v!r}"
+
+    def test_classifier_has_teeth(self):
+        """正对照：旧写法（「用户未定」、无前缀、accepted-loss 无日期）喂给同一判据必须被抓。"""
+        import re
+        pre = export_mod.EXCLUSION_REASON_PREFIXES
+        assert not "体量大，是否进数据仓库**用户未定**".startswith(pre)
+        assert not "可重建缓存".startswith(pre)
+        assert not re.match(r"accepted-loss:\d{4}-\d{2}-\d{2} \S", "accepted-loss: 用户定")
+
+    def test_swarm_results_are_backed_up_and_analysis_is_a_recorded_loss(self):
+        assert ".swarm_results_*.json" in export_mod.ROOT_FILE_GLOBS
+        assert ".swarm_results_*.json" not in export_mod.EXCLUDED_FROM_THIS_PASS
+        assert export_mod.EXCLUDED_FROM_THIS_PASS["analysis-*-ml-*.json"].startswith("accepted-loss:2026-10-05")
+
+    def test_swarm_results_actually_exported_and_analysis_is_not(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        (src / ".swarm_results_2026-10-05.json").write_text('{"AAA": {"score": 1}}')
+        (src / "analysis-AAA-ml-2026-10-05.json").write_text('{"x": 1}')
+        out = tmp_path / "out"
+        manifest = export_mod.run_export(src, out, code_repo=tmp_path)
+        assert (out / ".swarm_results_2026-10-05.json").read_text() == '{"AAA": {"score": 1}}'
+        assert not (out / "analysis-AAA-ml-2026-10-05.json").exists()
+        assert ".swarm_results_2026-10-05.json" in {r["rel"] for r in manifest["root_files"]}
+
     def test_report_snapshots_and_reports_are_actually_exported(self, tmp_path):
         """正面走一遍 run_export：v0.45.342 新纳入的两类真的进了产物，而不只是出现在常量里。"""
         src = tmp_path / "src"
@@ -1670,3 +1709,85 @@ class TestPushTimeout:
         pushes = [t for a, t in seen if a == "push"]
         assert pushes == [run_backup.GIT_PUSH_TIMEOUT_S], seen
         assert all(t == run_backup.GIT_TIMEOUT_S for a, t in seen if a != "push")
+
+
+class TestBackupRepoSizeBudget:
+    """v0.45.417：备份仓体量预算闸（600 MB）。数据已推送，超预算 / 量不出来把这一轮标红。"""
+
+    @staticmethod
+    def _src(tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        (tmp_path / "bk").mkdir()
+        return src
+
+    @staticmethod
+    def _fake_push(monkeypatch):
+        real = run_backup._run_git
+
+        def spy(args, cwd, timeout=run_backup.GIT_TIMEOUT_S):
+            if args[0] == "push":
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return real(args, cwd, timeout=timeout)
+        monkeypatch.setattr(run_backup, "_run_git", spy)
+
+    def test_budget_is_600(self):
+        assert run_backup.BACKUP_REPO_BUDGET_MB == 600
+
+    def test_size_counts_loose_objects_not_only_the_pack(self, tmp_path):
+        """本仓从未 gc——只读 size-pack 会把松散对象的体量报成 0。"""
+        repo = tmp_path / "r"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+        (repo / "f.bin").write_bytes(os.urandom(300_000))
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"],
+                       cwd=str(repo), check=True, capture_output=True)
+        packs = subprocess.run(["git", "count-objects", "-v"], cwd=str(repo), capture_output=True, text=True).stdout
+        assert "size-pack: 0" in packs, "夹具前提：对象应是松散的"
+        assert run_backup.repo_size_mb(repo) >= 0.25
+
+    def test_within_budget_is_green_and_reports_size(self, tmp_path, monkeypatch):
+        _bypass_secret_scan(monkeypatch)
+        self._fake_push(monkeypatch)
+        st = run_backup.run(self._src(tmp_path), tmp_path / "bk", status_file=tmp_path / "s.json",
+                            history_file=tmp_path / "h.jsonl")
+        assert st["stage"] == "done" and st["ok"] is True, st
+        assert st["repo_size_mb"] > 0 and st["repo_budget_mb"] == 600 and st["pushed"] is True
+
+    def test_over_budget_is_red_but_data_is_pushed(self, tmp_path, monkeypatch):
+        _bypass_secret_scan(monkeypatch)
+        self._fake_push(monkeypatch)
+        monkeypatch.setattr(run_backup, "BACKUP_REPO_BUDGET_MB", 0)
+        st = run_backup.run(self._src(tmp_path), tmp_path / "bk", status_file=tmp_path / "s.json",
+                            history_file=tmp_path / "h.jsonl")
+        assert st["ok"] is False and st["stage"] == "size_budget", st
+        assert st["pushed"] is True and "超出预算" in st["error"]
+        assert json.loads((tmp_path / "s.json").read_text())["stage"] == "size_budget"
+
+    def test_unmeasurable_size_is_red_not_zero(self, tmp_path, monkeypatch):
+        _bypass_secret_scan(monkeypatch)
+        self._fake_push(monkeypatch)
+
+        def boom(_):
+            raise RuntimeError("count-objects 坏了")
+        monkeypatch.setattr(run_backup, "repo_size_mb", boom)
+        st = run_backup.run(self._src(tmp_path), tmp_path / "bk", status_file=tmp_path / "s.json",
+                            history_file=tmp_path / "h.jsonl")
+        assert st["ok"] is False and st["stage"] == "size_budget" and "量不出来" in st["error"], st
+        assert "repo_size_mb" not in st
+
+    def test_failed_push_never_reaches_the_budget_gate(self, tmp_path, monkeypatch):
+        _bypass_secret_scan(monkeypatch)
+        real = run_backup._run_git
+
+        def spy(args, cwd, timeout=run_backup.GIT_TIMEOUT_S):
+            if args[0] == "push":
+                return subprocess.CompletedProcess(args, 1, "", "denied")
+            return real(args, cwd, timeout=timeout)
+        monkeypatch.setattr(run_backup, "_run_git", spy)
+        st = run_backup.run(self._src(tmp_path), tmp_path / "bk", status_file=tmp_path / "s.json",
+                            history_file=tmp_path / "h.jsonl")
+        assert st["stage"] == "push" and "pushed" not in st

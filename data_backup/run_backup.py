@@ -111,6 +111,30 @@ GIT_TIMEOUT_S = 60
 #: 09-26 手工补推同一批两天的提交实测 43s——离 60s 太近。仓库从未 gc（全是松散对象，每次推送现场打包），
 #: 网速一慢就会再超。上限留在编排器 Step 14 的 `run_step --timeout 300` 之内（导出 + add/commit 十几秒）。
 GIT_PUSH_TIMEOUT_S = 240
+#: 备份仓体量预算（v0.45.417，用户 2026-10-05 定 600 MB）。远端是 GitHub 私有仓库，体量只增不减
+#: （历史不重写）；预算是「该停下来想想了」的红线，不是自动清理的触发器——超了就把这一轮标红，
+#: 数据本身已推送成功（`status["pushed"]`），不会因此丢备份。
+BACKUP_REPO_BUDGET_MB = 600
+
+
+def repo_size_mb(backup_dir: Path) -> float:
+    """备份仓本地体量（MB）= 松散对象 + 包 + 垃圾，取自 `git count-objects -v`（KiB）。
+
+    本仓从未 gc，对象大多是松散的（size，而非 size-pack）——只读 size-pack 会把 108 MB 报成 0。
+    读不到就抛：调用方把「量不出来」也记成红，不许把它当 0。
+    """
+    out = _run_git(["count-objects", "-v"], backup_dir)
+    if out.returncode != 0:
+        raise RuntimeError(f"git count-objects 失败（rc={out.returncode}）：{out.stderr[-500:]}")
+    kib = {}
+    for line in out.stdout.splitlines():
+        k, _, v = line.partition(":")
+        kib[k.strip()] = v.strip()
+    try:
+        total = sum(int(kib[k]) for k in ("size", "size-pack", "size-garbage"))
+    except (KeyError, ValueError) as e:
+        raise RuntimeError(f"git count-objects 输出缺字段：{out.stdout[:300]!r}") from e
+    return round(total / 1024, 1)
 
 
 def _run_git(args: list[str], cwd: Path, timeout: int = GIT_TIMEOUT_S) -> subprocess.CompletedProcess:
@@ -248,8 +272,23 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
         status.update(stage="push", ok=False, error=push.stderr[-2000:])
         return _finish(status_file, history_file, status)
 
-    status.update(stage="done", ok=True,
-                   duration_seconds=round((dt.datetime.now() - t0).total_seconds(), 1))
+    status["pushed"] = True
+    status["duration_seconds"] = round((dt.datetime.now() - t0).total_seconds(), 1)
+
+    # ── 5. 体量预算闸（推送之后；数据已安全，红的是「该停下来想想了」）──────
+    try:
+        size_mb = repo_size_mb(backup_dir)
+    except Exception as e:  # noqa: BLE001 —— 量不出来也是红：不许当 0
+        status.update(stage="size_budget", ok=False, error=f"备份仓体量量不出来：{e}（数据已推送）")
+        return _finish(status_file, history_file, status)
+    status["repo_size_mb"] = size_mb
+    status["repo_budget_mb"] = BACKUP_REPO_BUDGET_MB
+    if size_mb > BACKUP_REPO_BUDGET_MB:
+        status.update(stage="size_budget", ok=False,
+                      error=f"备份仓 {size_mb} MB 超出预算 {BACKUP_REPO_BUDGET_MB} MB（数据已推送）")
+        return _finish(status_file, history_file, status)
+
+    status.update(stage="done", ok=True)
     return _finish(status_file, history_file, status)
 
 

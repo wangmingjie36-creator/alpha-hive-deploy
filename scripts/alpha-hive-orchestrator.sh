@@ -1461,6 +1461,9 @@ elif [ $STEP14_RC -eq 2 ]; then
         push)
             log "WARN" "⚠️ Step 14：已提交但推送失败，下一轮会带着未推送的提交重试——见 $BACKUP_STATUS_JSON"
             ;;
+        size_budget)
+            log "ERROR" "🚨 Step 14：数据已推送，但备份仓体量超出预算（或量不出来）——见 ${BACKUP_STATUS_JSON}（repo_size_mb / repo_budget_mb）"
+            ;;
         stale_or_missing)
             log "WARN" "⚠️ Step 14：退出码 2，但 $BACKUP_STATUS_JSON 缺失或不是今天写的——脚本本轮可能根本没真正执行（如 run_step 判定脚本不存在），不代表已提交，不能当 push_failed 处理"
             ;;
