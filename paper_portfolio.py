@@ -1263,7 +1263,9 @@ def _open_position(
 #   ② 时点安全：只换除权日 ∈ (entry_date, as_of] 的拆股。拆股记录是**查询当天** Yahoo 的全部记录（回放时含
 #     as_of 之后的拆股），过滤在这里；未来拆股只用来给「这份日线是事后复权的」一个诊断名（`future_split`）。
 #   ③ 不多打网络：没有拆股时一次请求都不加（Step 11 给 F&G 的 45s 预算不受影响）；拆股后每个
-#     (标的, 入场日) 每天至多一次（`_SPLIT_EVENTS_CACHE`，只缓存成功）。
+#     (标的, 入场日) 每进程每天**成功**至多一次（`_SPLIT_EVENTS_CACHE`）。失败不缓存——回放里取不到会在之后每个
+#     重放日（A / B / 逐日重锚各一遍）再试，且回放判 `lookup_failed` 而生产当天取到了 ⇒ 两边分叉、F&G 自证会掉
+#     （看得见，不静默；拆股跨仓本就罕见）。拆股记录不经回放窗口 / 行情库：它是查询当天的全部记录，时点靠下面的过滤。
 #
 # 判不了 ⇒ **这一天不碰这个仓位**（不查出场、按入场价估值、记 ERROR、run_for_date 返回 `split_unresolved`、
 # 当天净值行带 `split_unresolved`、组合卡片标「口径待核」），下一次运行重判——宁可晚一天出场，不往账本里写
@@ -1271,8 +1273,9 @@ def _open_position(
 # （`lookup_failed`）、有拆股但比例对不上日线（`ratio_mismatch`）、只有 as_of 之后的拆股对得上（`future_split`：
 # 这份日线不是时点数据——生产不会遇到，非时点回放如 `--rehearse` 会）、入场日那根日线缺失且确有待换的拆股
 # （`no_entry_bar`）、对不上 ≥ `_SPLIT_UNEXPLAINED_TOL` 而 Yahoo 没有能解释它的拆股（`unexplained`：Yahoo 已复权、
-# 记录还没跟上，或入场价坏了）。对不上但不到那么多、且 Yahoo 确认没有拆股 ⇒ 不是口径问题，照常（WARNING）——
-# 入场价偶尔是前一日收盘，一天的涨跌不该让仓位永远冻住。
+# 记录还没跟上，或入场价坏了——后者**不会自愈**，每天 ERROR 直到有人修入场价）、拆股逻辑本身抛了意外异常
+# （`error`，由 run_for_date 兜住，只影响这一个仓位）。对不上但不到那么多、且 Yahoo 确认没有拆股 ⇒ 不是口径问题，
+# 照常（WARNING）——入场价偶尔是前一日收盘，一天的涨跌不该让仓位永远冻住。
 #
 # ⚠️ 已知不覆盖：同一份日线里一部分复权、一部分没复权（Yahoo 漏复权的形状）——入场日那根仍是旧口径，
 # 判据看不出来。真实日线上没见过；回放行情库在除权当天 Step 11 的确会给出这种混合视图，但只给「重放日 =
@@ -1299,23 +1302,24 @@ def _fetch_split_events(ticker: str, start: str) -> Tuple[Optional[List[Tuple[st
     key = (ticker, start, pdt_today())
     if key in _SPLIT_EVENTS_CACHE:
         return _SPLIT_EVENTS_CACHE[key], ""
+    # 解析也在 try 里：响应形状不对（索引不是日期等）同样是「取不到」，不许冲出去打断整个 run_for_date
     try:
         import yfinance as yf
         hist = yf.Ticker(ticker).history(start=start, auto_adjust=False, actions=True)
+        if hist is None or len(hist) == 0:
+            return None, "空结果"
+        if "Stock Splits" not in hist.columns:
+            return None, "响应没有 Stock Splits 列"
+        events: List[Tuple[str, float]] = []
+        for idx, v in hist["Stock Splits"].items():
+            try:
+                r = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(r) and r > 0 and r != 1.0:
+                events.append((idx.strftime("%Y-%m-%d"), r))
     except Exception as e:  # noqa: BLE001 —— 由调用方记 ERROR / WARNING 并决定动作
         return None, f"{type(e).__name__}: {e}"
-    if hist is None or len(hist) == 0:
-        return None, "空结果"
-    if "Stock Splits" not in hist.columns:
-        return None, "响应没有 Stock Splits 列"
-    events: List[Tuple[str, float]] = []
-    for idx, v in hist["Stock Splits"].items():
-        try:
-            r = float(v)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(r) and r > 0 and r != 1.0:
-            events.append((idx.strftime("%Y-%m-%d"), r))
     events.sort()
     _SPLIT_EVENTS_CACHE[key] = events
     return events, ""
@@ -1657,8 +1661,14 @@ def run_for_date(as_of: str, verbose: bool = False,
         # 拉包含 as_of 的 OHLC 段
         ohlc = _fetch_ohlc(pos.ticker, pos.entry_date,
                            (datetime.strptime(as_of, "%Y-%m-%d") + timedelta(days=_EXIT_OHLC_LOOKAHEAD_DAYS)).strftime("%Y-%m-%d"))
-        # v0.45.416：先让仓位与这份日线同一口径（拆股），再按绝对价位查出场——见「拆股口径」区块注释
-        basis = _reconcile_split_basis(pos, as_of, ohlc)
+        # v0.45.416：先让仓位与这份日线同一口径（拆股），再按绝对价位查出场——见「拆股口径」区块注释。
+        # 意外异常只让**这个仓位**今天判不了（照样 ERROR + split_unresolved），不许打断整个 run_for_date：
+        # 那会让当天所有仓位都不出场、不开仓、不记净值，而日报钩子只记一条 WARNING。
+        try:
+            basis = _reconcile_split_basis(pos, as_of, ohlc)
+        except Exception as _e_split:  # noqa: BLE001 —— 下一行起照「判不了」处理，四处看得见
+            basis = {"status": "unresolved", "reason": "error",
+                     "detail": f"{type(_e_split).__name__}: {_e_split}"}
         if basis["status"] == "applied":
             for x, r in basis["events"]:
                 split_adjusted.append({"ticker": pos.ticker, "entry_date": pos.entry_date, "ex_date": x, "ratio": r})

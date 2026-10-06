@@ -533,6 +533,49 @@ class TestLookupCache:
     def test_no_splits_is_an_empty_list_not_a_failure(self, world):
         assert pp._fetch_split_events("PLAIN", ENTRY) == ([], "")
 
+    def test_malformed_response_is_a_failure_not_an_exception(self, monkeypatch):
+        """响应形状不对（索引不是日期 ⇒ strftime 抛 AttributeError）：返回失败，不冲出去打断 run_for_date。
+        变异「解析挪回 try 外面」⇒ 抛出、红。"""
+        import pandas as pd
+
+        class _T:
+            def history(self, **kw):
+                return pd.DataFrame({"Close": [1.0], "Stock Splits": [2.0]}, index=["not-a-date"])
+        monkeypatch.setitem(sys.modules, "yfinance", types.SimpleNamespace(Ticker=lambda t: _T()))
+        events, err = pp._fetch_split_events("X", ENTRY)
+        assert events is None and "AttributeError" in err
+
+    def test_cache_is_populated_here(self):
+        """与下一条成对：这里往缓存里塞一条，下一条断言它没漏过去（conftest 每个测试换新缓存）。"""
+        pp._SPLIT_EVENTS_CACHE[("LEAK", ENTRY, pp.pdt_today())] = [(EX, 2.0)]
+
+    def test_cache_does_not_leak_between_tests(self):
+        """缓存键带**真实**今天 ⇒ 同一次 pytest 里不同假世界共用 (标的, 入场日) 会串味。
+        变异「conftest 不重置 `_SPLIT_EVENTS_CACHE`」⇒ 按文件顺序跑时这里红。"""
+        assert ("LEAK", ENTRY, pp.pdt_today()) not in pp._SPLIT_EVENTS_CACHE
+
+
+class TestUnexpectedErrorIsContained:
+    def test_an_exception_in_the_split_path_holds_only_that_position(self, world, caplog):
+        """拆股逻辑意外抛异常：只让这一个仓位今天判不了（ERROR + split_unresolved + 净值行），其余仓位照常
+        换口径 / 出场、当天照常开仓与记净值。变异「去掉 run_for_date 里的 try」⇒ 整天抛出、红。"""
+        orig = pp._reconcile_split_basis
+
+        def boom(pos, as_of, ohlc):
+            if pos.ticker == "LONGX":
+                raise RuntimeError("synthetic bug")
+            return orig(pos, as_of, ohlc)
+        world.monkeypatch.setattr(pp, "_reconcile_split_basis", boom)
+        with caplog.at_level(logging.ERROR, logger="alpha_hive.paper_portfolio"):
+            res = _live(world, days=_bdays("2026-08-13", "2026-08-21"))
+        u = [x for x in res[EX]["split_unresolved"] if x["ticker"] == "LONGX"]
+        assert u and u[0]["reason"] == "error" and "RuntimeError" in u[0]["detail"]
+        assert {x["ticker"] for x in res[EX]["split_adjusted"]} == {"SHORTX", "REVX", "TPX"}
+        assert _rows(pp.EQUITY_FILE)[-1]["date"] == "2026-08-20"
+        assert "NEWB" in _by_ticker(_rows(pp.POSITIONS_FILE))          # 08-20 照常开仓
+        assert "LONGX" not in _by_ticker(_rows(pp.CLOSED_FILE))        # 没有假单
+        assert any(r.levelno == logging.ERROR and "synthetic bug" in r.getMessage() for r in caplog.records)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. run_replay ≡ 生产逐日 run_for_date（跨拆股，时点日线）
