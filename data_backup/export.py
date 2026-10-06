@@ -58,6 +58,8 @@ STATE_DIRS: list[str] = [
     # v0.45.410 回放行情库（F&G 前瞻检验的日线，`replay_ohlc_store`）：首次落定后冻结，丢了重取到的可能是
     # Yahoo 修订后的值，检验的历史输入会变 ⇒ 不当可重建缓存。每个标的一个小 JSON。
     "replay_ohlc_state",
+    # v0.45.419 数据迁移运行记录（阶段 7）：「库被动过什么」的唯一机器可读记录，丢了只剩 CHANGELOG 文字。
+    "migrations_state",
 ]
 ROOT_FILE_GLOBS: list[str] = [
     "weight_history.jsonl", "pheromone_fallback.jsonl",

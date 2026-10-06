@@ -831,6 +831,54 @@ unset _bk_tmp _bk_rc _bk_out _bk_ok _bk_pruned _bk_kept _bk_prune_fail _bk_reaso
 # <<< DB_BACKUP_END
 
 # ================================================================
+# 数据迁移（v0.45.419，数据根迁移阶段 7「单一写入方」）
+# ================================================================
+# 生产数据的修复 = 编号、幂等的迁移脚本（data_migrations/versions/NNNN_*.py），在**代码同步之后、扫描之前**
+# 执行（本段在 production_sync 与 DB 备份之后、Step 2 之前）。运行器自己再做一次在线备份（有待办才做）、
+# 校验已应用文件未被改、逐个应用并在 $ALPHA_HIVE_HOME/migrations_state/applied.jsonl 追加记录。
+# 结局进 steps_result.data_migrations；任何非 ok ⇒ status=failed ⇒ alert_manager 既有 P1「步骤失败」。
+# 不升级 OVERALL_STATUS、不中断扫描（同 db_backup / orchestrator_deploy 先例）——但红是看得见的。
+# ⚠️ 记录文件先删后写：旧记录不能被当成本轮结果。run_step --timeout 同样要重定向到文件，不放命令替换里。
+# 守卫：tests/test_data_migrations.py（抽出本函数在 /bin/bash 下真跑）。
+_data_migrations_step() {
+    local _rec="${LOGDIR}/data_migrations.json" _rc=0 _json="" _outcome="" _status="failed" _new="" _t0 _dur=0
+    _t0=$(date +%s)
+    rm -f "${_rec}"
+    run_step --timeout 120 "${PROJECT_DIR}/run_data_migrations.py" --out "${_rec}" >> "${LOGFILE}" 2>&1
+    _rc=$?
+    _json="$(jq -c 'select(type == "object" and (.status | type) == "string")' "${_rec}" 2>/dev/null)"
+    _outcome="$(printf '%s' "${_json}" | jq -r '.status' 2>/dev/null)"
+    case "${_outcome}" in
+        ok)
+            _status="success"
+            log "INFO" "✅ 数据迁移：已应用 $(printf '%s' "${_json}" | jq -r '(.applied | length)') 个，待办 $(printf '%s' "${_json}" | jq -r '.n_pending') 个"
+            ;;
+        "")
+            if [ "${_rc}" -eq 2 ]; then
+                _status="skipped"
+                _json='{"status": "tool_missing"}'
+                log "WARN" "⏭️ 数据迁移跳过：生产 checkout 里没有 run_data_migrations.py（本版尚未进生产）"
+            else
+                _json='{"status": "no_record"}'
+                log "ERROR" "🚨 数据迁移没有结果记录（退出码 ${_rc}，124 = 超时）——迁移状态未确认；本轮扫描照常"
+            fi
+            ;;
+        *)
+            log "ERROR" "🚨 数据迁移未成功（${_outcome}）：$(printf '%s' "${_json}" | jq -r '.error // ""') —— 本轮扫描照常，见 ${_rec}"
+            ;;
+    esac
+    _dur=$(( $(date +%s) - _t0 ))
+    _new="$(printf '%s' "${STEPS_RESULT}" | jq -c --arg s "${_status}" --argjson d "${_json}" --argjson dur "${_dur}" \
+        '. + {"data_migrations": ($d + {"status": $s, "outcome": ($d.status // "unknown"), "duration_seconds": $dur})}' 2>/dev/null)"
+    if [ -n "${_new}" ]; then
+        STEPS_RESULT="${_new}"
+    else
+        log "WARN" "⚠️ 数据迁移结局没并进 steps_result（jq 合并失败）：status=${_status}"
+    fi
+}
+_data_migrations_step
+
+# ================================================================
 # Step 2: Alpha Hive 蜂群分析（执行前 Slack 确认 LLM 模式）
 # ================================================================
 log "INFO" ""

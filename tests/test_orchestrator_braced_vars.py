@@ -26,6 +26,7 @@ macOS `/bin/bash`（3.2.57）在 UTF-8 的 LC_CTYPE 下，把 UTF-8 **首字节*
 - `tests/test_scan_catchup.py::TestGateBranchesLive::test_gate_branch_under_utf8_locale`：
   **动态**、端到端，真跑编排器（沙箱）走幂等闸的 `exit 0`；但只覆盖闸前那一条路径。
 - 本文件：**静态**扫全文，覆盖沙箱走不到的位置（Step 2 之后、收尾段）。
+  `TestCli` 另管命令行入口（v0.45.418）：此前 `python3 orchestrator_lint.py <文件>` 对任何内容都 exit 0。
 
 守卫自己也要有牙（CLAUDE.md：检测器两个方向都要自证）
 ------------------------------------------------------
@@ -39,9 +40,11 @@ v0.45.334 引入的 `$READINESS_JSON）` 因此隔了一天、靠别人碰巧跑
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
+import orchestrator_lint
 from orchestrator_lint import find_unbraced  # 唯一实现（v0.45.356 抽出，部署关卡共用）
 from tests._orchestrator import REPO_ORCH as ORCH, repo_orchestrator_text
 
@@ -112,6 +115,57 @@ class TestLiveOrchestrator:
             "`set -u` 让整个 shell 退出（launchd 是 C locale 碰不到，手工跑/PEP 538 会中招）。\n"
             "修法：`$NAME` → `${NAME}`。\n"
             + "\n".join(f"  第 {no} 行 ${{{name}}}: {line.strip()[:100]}" for no, name, line in hits))
+
+
+class TestCli:
+    """`orchestrator_lint.py [FILE ...]` 子进程真跑（v0.45.418）。合成文件，任何机器都跑。
+
+    此前模块没有 `__main__` 入口：`python3 orchestrator_lint.py 含-$NUM（-的文件` 只 import 一遍、恒 exit 0，
+    而 `find_unbraced()` 对同一文本有 1 处命中——v0.45.414 据这个空操作报过「lint 通过」。
+    所以正对照（该红的文件 ⇒ rc 1 且命中被打印）是本类的头一条；读不了的文件必须 rc 2，不许落成 0。
+    """
+
+    LINT = Path(orchestrator_lint.__file__).resolve()
+
+    def _run(self, *args, cwd):
+        return subprocess.run([sys.executable, str(self.LINT), *map(str, args)],
+                              capture_output=True, text=True, cwd=cwd, timeout=60)
+
+    def test_positive_control_bare_var_exits_1_and_prints_hit(self, tmp_path):
+        f = tmp_path / "bad.sh"
+        f.write_text('echo "$NUM（x"\n', encoding="utf-8")
+        r = self._run(f, cwd=tmp_path)
+        assert (r.returncode, r.stdout.splitlines()) == (1, [f'{f}:1: $NUM 紧跟非 ASCII（改成 ${{NUM}}）：echo "$NUM（x"']), r
+
+    def test_clean_file_exits_0_and_reports_lines_scanned(self, tmp_path):
+        f = tmp_path / "good.sh"
+        f.write_text('echo "${NUM}（x"\necho "$NUM x"\n', encoding="utf-8")
+        r = self._run(f, cwd=tmp_path)
+        assert (r.returncode, r.stdout) == (0, ""), r
+        assert f"{f}: 扫了 2 行，0 处命中" in r.stderr     # 行数露在外面：扫了空文件 / 错文件看得出来
+
+    @pytest.mark.parametrize("make", [
+        lambda d: d / "missing.sh",                                                        # 不存在
+        lambda d: (d / "adir").mkdir() or d / "adir",                                      # 是目录
+        lambda d: (d / "latin1.sh").write_bytes(b'echo "$NUM\xa1"\n') and d / "latin1.sh",  # 非 UTF-8
+    ], ids=["missing", "directory", "not-utf8"])
+    def test_unreadable_file_exits_2_never_0(self, tmp_path, make):
+        f = make(tmp_path)
+        r = self._run(f, cwd=tmp_path)
+        assert r.returncode == 2 and f"{f}: 读不了，未检查" in r.stderr, r
+
+    @pytest.mark.parametrize("missing_first", [True, False], ids=["missing-then-hit", "hit-then-missing"])
+    def test_unreadable_outranks_hits_but_hits_are_still_printed(self, tmp_path, missing_first):
+        # 两种顺序都要跑：只跑「先命中后缺失」时，「后来的命中把 2 覆盖成 1」那种写法恒绿（变异实测）
+        bad, missing = tmp_path / "bad.sh", tmp_path / "missing.sh"
+        bad.write_text('echo "$NUM（x"\n', encoding="utf-8")
+        r = self._run(*((missing, bad) if missing_first else (bad, missing)), cwd=tmp_path)
+        assert r.returncode == 2 and f"{bad}:1: $NUM" in r.stdout, r
+
+    def test_default_target_is_repo_orchestrator_resolved_via_file_not_cwd(self, tmp_path):
+        r = self._run(cwd=tmp_path)                       # cwd 里没有 scripts/：跟着 cwd 走就会 rc 2
+        expected_rc = 1 if find_unbraced(repo_orchestrator_text()) else 0
+        assert r.returncode == expected_rc and r.stderr.startswith(f"{ORCH.resolve()}: 扫了 "), r
 
 
 @pytest.mark.skipif(

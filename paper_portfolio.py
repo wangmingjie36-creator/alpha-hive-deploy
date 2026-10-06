@@ -606,19 +606,34 @@ class _ReplayOhlcWindow:
             # v0.45.410：请求整个落在行情库已落定段内 ⇒ 库回答、不为它下载。这个标的之后若有请求碰到未落定的
             # 日子再补尾——只在早几周持有过的标的整次检验都不打网络（库里的值本来就是窗口对它的权威回答）。
             if self.store is not None:
-                sl = self.store.settled_slice(ticker, start, end)
+                sl = self.store.settled_slice(ticker, start, end, as_of=_REPLAY_AS_OF)
                 if sl is not None:
                     return sl
             bars = self._fetch_wide(ticker)
             if bars is None:
                 return self._settled_on_fallback(ticker, start, end)
         self.served += 1
-        return {d: b for d, b in bars.items() if start <= d < end}
+        sliced = {d: b for d, b in bars.items() if start <= d < end}
+        # v0.45.415：时点数据——按当前重放日取每根日线的版本（拆股 / 修订前后的重放日各用当时的价格）
+        return sliced if self.store is None else self.store.pit_slice(ticker, start, end, sliced, _REPLAY_AS_OF)
 
     def _settled_on_fallback(self, ticker: str, start: str, end: str) -> Optional[Dict[str, Dict]]:
         """v0.45.410：该标的这次下载失败——请求整个落在行情库已落定段内的，照样由库回答（库里的值本来就是
         本次窗口对它的权威回答）；其余返回 None、走原直连路径。降级时的直连次数因此只与最近几天有关。"""
-        return None if self.store is None else self.store.settled_slice(ticker, start, end, on_fallback=True)
+        return None if self.store is None else self.store.settled_slice(ticker, start, end, as_of=_REPLAY_AS_OF,
+                                                                         on_fallback=True)
+
+    def overlay_direct(self, ticker: str, start: str, end: str, out: Dict[str, Dict]) -> Dict[str, Dict]:
+        """v0.45.415：退回直连拿到的结果里，已落定的日子换成行情库按重放日的值——否则修订与降级同时出现时，同一次运行里
+        同一天会有两个值。没有行情库 ⇒ 原样返回（同一个对象）。返回新 dict，不改 `_PRICE_CACHE`。
+        二次检查：**只换值、不增日子**——直连失败 / 拿得短时 v0.45.410 返回什么就还是什么（原先库会补进直连没拿到的已落定
+        日子：没有修订时也与 410 不同，且计数说「一根都没拿到」而重放其实用了行情）；直连里有、库说那天没有日线的照库删掉。
+        日期不是 YYYY-MM-DD（窗口外请求）⇒ 原样返回（410 对它们不抛，这里也不许抛）。"""
+        if self.store is None or not (isinstance(start, str) and isinstance(end, str)
+                                      and _ISO_DATE_RE.match(start) and _ISO_DATE_RE.match(end)):
+            return out
+        pit = self.store.pit_slice(ticker, start, end, out, _REPLAY_AS_OF)
+        return {d: b for d, b in pit.items() if d in out}
 
     def _fetch_wide(self, ticker: str) -> Optional[Dict[str, Dict]]:
         store = self.store if self.store is not None and self.store.supports(ticker) else None
@@ -629,8 +644,43 @@ class _ReplayOhlcWindow:
                 bars = store.merge(ticker, self.start, self.end, None, None)
                 self._bars[ticker] = bars
                 return bars
-        self.wide_fetches += 1
+        bars, reason = self._download(ticker, fstart)
+        # v0.45.410 二次检查：补尾拿到空结果，而库的已落定段在同一段里本来就没有日线（停牌 / 退市）⇒ 空是权威答案，
+        # 不是下载失败——否则这类标的每天降级、直连次数逐日增长、落定段永远不前进。库里那段**有**日线时照旧当失败
+        # （Yahoo 抽风返回空的形状），整段下载（fstart == 窗口左端）同样照旧。
+        if (bars is None and store is not None and fstart != self.start
+                and reason in ("空结果", "整段没有一根有限值日线") and store.settled_quiet_from(ticker, fstart)):
+            bars = {}
+        # v0.45.415：补尾里已落定的日子被 Yahoo 改了（多半是拆股回溯复权）⇒ 先整段下载、只把整段并进库，窗口里每个日期的
+        # 「改了之后」第一次观察记在同一天。二次检查：原先先并补尾、整段失败只计数 ⇒ 重叠段与更早的日子生效日差一天，那个
+        # 重放日永久读到一半复权前、一半复权后的序列，且没有任何东西会红。现在整段失败 ⇒ 什么都不并、该标的本次降级（看得见），
+        # 下次补尾再看到、再整段。
+        if bars is not None and store is not None and fstart != self.start and store.revision_in(ticker, fstart, self.end, bars):
+            full, why = self._download(ticker, self.start, count=False)
+            store.note_suspect_refetch(full is not None)
+            if full is None:
+                bars, reason = None, f"补尾发现已落定日线被 Yahoo 改了、整段补下失败（{why}）——本次不并进库，下次再整段"
+            else:
+                fstart, bars = self.start, full
+        if bars is None:
+            self.fallback_tickers[ticker] = reason
+            _log.warning("[PaperPortfolio] 回放 OHLC 窗口 %s [%s, %s) 整段取数失败（%s）——"
+                         "该标的本次回放退回逐次直连 _fetch_ohlc（失败语义与改动前相同，只是慢）",
+                         ticker, fstart, self.end, reason)
+            return None
+        if store is not None:
+            bars = store.merge(ticker, self.start, self.end, fstart, bars)
+        self._bars[ticker] = bars
+        return bars
+
+    def _download(self, ticker: str, fstart: str, *, count: bool = True) -> Tuple[Optional[Dict[str, Dict]], str]:
+        """一次 `history(start=fstart, end=窗口右端)`；返回（日线或 None，失败原因）。
+        `count=False`：修订嫌疑的整段补下（v0.45.415）不计入 `wide_fetches`——它在进度行里读作「N 个标的」，同一个标的
+        补下那一次另由行情库的 `suspect_refetches` 计。"""
+        if count:
+            self.wide_fetches += 1
         bars: Optional[Dict[str, Dict]] = None
+        reason = ""
         try:
             import yfinance as yf
             # 与直连路径逐参数相同：只换 start/end。不许换成 yf.download（默认参数不同、MultiIndex）
@@ -643,25 +693,10 @@ class _ReplayOhlcWindow:
                 if not bars:
                     reason = "整段没有一根有限值日线"
                     bars = None
-        except Exception as e:  # noqa: BLE001 —— 退回直连路径并记 WARNING（下一行），不吞
+        except Exception as e:  # noqa: BLE001 —— 由调用方退回直连路径并记 WARNING，不吞
             reason = f"{type(e).__name__}: {e}"
             bars = None
-        # v0.45.410 二次检查：补尾拿到空结果，而库的已落定段在同一段里本来就没有日线（停牌 / 退市）⇒ 空是权威答案，
-        # 不是下载失败——否则这类标的每天降级、直连次数逐日增长、落定段永远不前进。库里那段**有**日线时照旧当失败
-        # （Yahoo 抽风返回空的形状），整段下载（fstart == 窗口左端）同样照旧。
-        if (bars is None and store is not None and fstart != self.start
-                and reason in ("空结果", "整段没有一根有限值日线") and store.settled_quiet_from(ticker, fstart)):
-            bars = {}
-        if bars is None:
-            self.fallback_tickers[ticker] = reason
-            _log.warning("[PaperPortfolio] 回放 OHLC 窗口 %s [%s, %s) 整段取数失败（%s）——"
-                         "该标的本次回放退回逐次直连 _fetch_ohlc（失败语义与改动前相同，只是慢）",
-                         ticker, fstart, self.end, reason)
-            return None
-        if store is not None:
-            bars = store.merge(ticker, self.start, self.end, fstart, bars)
-        self._bars[ticker] = bars
-        return bars
+        return bars, reason
 
     def note_direct(self, bars: Dict[str, Dict]) -> None:
         """`_fetch_ohlc` 在窗口作用域内走了原直连路径之后调用：记一次直连请求与它是否一根 bar 都没有。"""
@@ -685,8 +720,10 @@ class _ReplayOhlcWindow:
         }
         if self.store is not None:   # v0.45.410：只有开了行情库才有这个键（其余调用方的形状不变）
             out["store"] = self.store.stats(self.start, self.end)
-            # 坏文件 / 写不进去：本次结果不受影响，但下次照样整段下载、慢回去——要有人看见
-            out["degraded"] = out["degraded"] or out["store"]["problem"]
+            # 坏文件 / 写不进去：本次结果不受影响，但下次照样整段下载、慢回去——要有人看见。
+            # v0.45.415 二次检查：不知道重放日却碰到了有版本的日线（有回放没经 run_replay ⇒ 用了最新版本，时点数据在那几次
+            # 请求上失效）——文档说「应恒为 0」，原先只进 stderr 的汇总行，没有任何东西会红
+            out["degraded"] = out["degraded"] or out["store"]["problem"] or out["store"]["as_of_unknown"] > 0
         return out
 
     def summary(self) -> str:
@@ -698,6 +735,9 @@ class _ReplayOhlcWindow:
 
 
 _REPLAY_OHLC_WINDOW: Optional[_ReplayOhlcWindow] = None
+#: v0.45.415：`run_replay` 当前正在重放的日子（时点数据按它取每根日线的版本）。只有 `run_replay` 写它、只有回放窗口读它；
+#: 生产 `run_for_date` 不碰（直接跑 `run_for_date` 时它是 None ⇒ 窗口用最新版本并计数）。
+_REPLAY_AS_OF: Optional[str] = None
 
 
 def replay_ohlc_bounds(dates: List[str],
@@ -756,7 +796,7 @@ def _fetch_ohlc(ticker: str, start: str, end: str) -> Dict[str, Dict]:
             return sliced
         out = _fetch_ohlc_direct(ticker, start, end)
         win.note_direct(out)
-        return out
+        return win.overlay_direct(ticker, start, end, out)
     return _fetch_ohlc_direct(ticker, start, end)
 
 
@@ -1835,7 +1875,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
     Returns:
         {"equity": [...], "closed": [...], "final_nav": float, "config": dict}
     """
-    global POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE, _REPLAY_MODE
+    global POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE, _REPLAY_MODE, _REPLAY_AS_OF
 
     if dates is None:
         dates = [d for d in _all_snapshot_dates() if d >= CONFIG["bootstrap_date"]]
@@ -1844,6 +1884,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
     state_dir.mkdir(parents=True, exist_ok=True)
 
     _orig_paths = (POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE)
+    _orig_as_of = _REPLAY_AS_OF
     # v0.45.100：vol_target.conf_multiplier 是二层嵌套，一层 dict(v) 拷贝挡不住
     # 就地改内层的覆盖泄漏到生产 CONFIG——用 deepcopy 封死。
     _orig_config = copy.deepcopy(CONFIG)
@@ -1870,6 +1911,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
         CONFIG["ticker_whitelist"] = config_overrides.get("ticker_whitelist", [])
 
         for d in dates:
+            _REPLAY_AS_OF = d   # v0.45.415：回放窗口按它取日线版本（时点数据）；不开窗口时没人读
             run_for_date(d, verbose=False)
 
         equity = _load_jsonl(EQUITY_FILE)
@@ -1882,6 +1924,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
         }
     finally:
         POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE = _orig_paths
+        _REPLAY_AS_OF = _orig_as_of
         CONFIG.clear()
         CONFIG.update(_orig_config)
         _VOL_ANN_CACHE.clear()   # 沙盒里攒的 σ 不得漏进生产 run_for_date

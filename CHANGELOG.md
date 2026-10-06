@@ -5,9 +5,77 @@
 
 ---
 
-## [0.45.419] — 2026-10-06 — 占位（进行中：阶段 7 单一写入方——编号幂等的数据迁移运行器 + 三个回填脚本缺省改 dry-run 先备份 + 历史手工修复补记）
+## [0.45.419] — 2026-10-06 — Added：阶段 7「单一写入方」——编号幂等的数据迁移运行器 + 三个回填工具缺省 dry-run 先备份 + 13 次历史手工修复补记
 
-## [0.45.418] — 2026-10-06 — 占位（进行中：`orchestrator_lint.py` 补命令行入口——命中 exit 1、文件读不到 exit 2，此前直接跑是恒 exit 0 的空检查；原占 417 未及时推送被占用，改号）
+用户 2026-10-06 同意两点：①三个默认写库的回填工具改成缺省 dry-run、真写先备份；②把盘点出的历史手工修复补记进运行记录。
+
+**根因**（2026-10-06 盘点）：生产数据的修复长期靠「临时脚本 + 手工备份 + CHANGELOG 文字」——约 13 次，几次脚本没留下、回滚 SQL 只在 CHANGELOG 里；`signal_archive --backfill` / `backfill_dir_accuracy` / `migrate_ambiguous_backfill` 缺省直接写库（前两个还不备份）；库里查不到「它被动过什么」。
+
+### Added
+- `data_migrations/`（运行器）：迁移 = `versions/NNNN_说明.py`（四位、从 0001 连续；导出 `DESCRIPTION` / 幂等的 `apply(ctx) -> {"rows_affected": int}` / `build_fixture(conn)`）。`run_pending()`：布局核对 → 读记录 → **已应用文件的 sha256 不许变**（变了或文件没了 = `tampered`，什么都不跑）→ 有待办才在线备份库（备份失败 = 什么都不跑）→ 逐个应用并追加记录；失败追加 `failed` 并**停下**（下次重试，所以才要求幂等）；记录写不进去 = `ledger_error`（迁移已跑、靠幂等兜底，但红）。`--dry-run` 不备份、不写库、不写记录。入口 `run_data_migrations.py`（`run_step` 只认脚本路径）。
+- `PATHS.migrations_state` → `<数据根>/migrations_state/applied.jsonl`（只追加；进数据备份 `STATE_DIRS`、`MOVE_DIRS`、`.gitignore`；`data_migrations` 在 `SKIP_EXACT` 记为代码）。
+- `data_migrations/history.py`：13 条历史手工修复（H001–H013）补记为 `kind="historical"`，第一次真跑时按 id 幂等写入。**如实标注**：日期 / 行数取自 CHANGELOG 文字与盘点子任务、未逐条回溯核对；只有备份文件是否还在是当场 `ls` 核过的——H001–H003 的备份只剩 `-wal`/`-shm` 孤儿、主文件已不在（不能用于恢复）。
+- 编排器：`_data_migrations_step`（`production_sync` 与 DB 备份之后、Step 2 之前），结局并进 `steps_result.data_migrations`；任何非 ok ⇒ `status=failed` ⇒ `alert_manager` 既有 P1「步骤失败」；不升级 `OVERALL_STATUS`、不中断扫描。记录文件先删后写（旧记录不当本轮结果）。部署副本下一个扫描日自动更新，新编排器再下一轮起执行。
+
+### Changed
+- `signal_archive.py --backfill`、`backfill_dir_accuracy.py`、`migrate_ambiguous_backfill.py`：缺省 **dry-run**，真写要 `--apply`（`--dry-run` 仍接受、空操作；与 `--apply` 同给 = 参数错误）；`--apply` 先 `backup_before_write`（sqlite 在线备份到 `_manual_backups/`，不被每日轮转清理；备份失败即中止、不写库），写完在 `applied.jsonl` 追加 `manual_tool` 记录。`signal_archive.backfill()` 函数本身的缺省不变（只改命令行）。
+- `backfill_dir_accuracy.py` 顺带修一个「dry-run 不是真的不写」：旧版在 `--dry-run` 判断**之前**就对真库 `ALTER TABLE`；现在 dry-run 在库的内存副本上算，真库一字节不动。
+
+### 守卫（`tests/test_data_migrations.py`，40 条）
+- 运行器：只应用一次 / 备份是迁移之前的库 / 失败停下并可重试 / 返回值契约 / 篡改与删除 / 5 种布局错误 / dry-run 零副作用 / 无备份不迁移 / 记录写失败红 / 坏记录红 / 补记历史幂等。
+- 幂等自检有牙（非幂等迁移、缺 `build_fixture` 都被抓）；真实 `versions/` 的每个迁移必须能过它。
+- 工具：缺省 dry-run 库文件 md5 不变、`--apply` 备份是写入前的库并留记录、备份失败不写库。
+- 编排器段在 `/bin/bash` 下真跑：ok / 6 种非 ok 结局 / 无记录 / 工具缺失 / 陈旧记录不被信 / 位置在 DB 备份与 Step 2 之间。
+- 变异自证（先提交后变异）：去篡改校验 / 跳过备份 / 失败不停 / dry-run 也应用 / 补记历史不幂等 / 布局断号放行 / 记录错误吞掉 / 三个工具缺省改回写库 / 编排器非 ok 记 success——各自让对应守卫变红。
+- `tests/test_paths_not_frozen_at_import.py`：`VERSIONS_DIR` 登记为代码锚点（两侧白名单）。
+
+### 验证
+- 真数据根上 `run_data_migrations.py --dry-run`：ok、零待办、**不创建** `migrations_state/`。首次真跑（补记 13 条历史）在下一个扫描日的编排器里发生。
+
+### 未做
+- 没有写任何真迁移（`versions/` 为空）——运行器此刻只有合成迁移的证明。第一个真迁移出现时必须带 `build_fixture`，否则 `test_every_real_migration_is_well_formed_and_idempotent` 红。
+- 现网 `signal_archive --backfill --dry-run` 的 `changed: 224` 仍待查（v0.45.417 记录）。
+
+
+## [0.45.418] — 2026-10-06 — Fixed：`orchestrator_lint.py` 补命令行入口——此前直接跑它是恒 exit 0 的空检查；现在命中 exit 1、文件读不了 exit 2
+
+原占 0.45.417（`74e2b1d6`，未及时推送，被 `fe7dfbb6` 先推占用），改号 418（`8ab354ae`）。
+
+### 现象
+
+`orchestrator_lint.py` 只是库模块（`find_unbraced()`，部署关卡与 `tests/test_orchestrator_braced_vars.py` 在用），**没有 `__main__` 入口**。
+`/usr/local/bin/python3 orchestrator_lint.py 某脚本.sh` 只把模块 import 一遍就退出，**对任何内容都 rc 0**。
+2026-10-05 实测：含 `git commit -q -m "chore: 占号 $NUM（数据"` 的文件 rc 0，而 `find_unbraced()` 对同一文本 1 处命中。
+v0.45.414 那次 session 据这个空操作报过「orchestrator_lint.py 通过」——结论不携带任何信息。
+（同形状：CLAUDE.md「这个失败，下游怎么知道？」——一个不会失败的检查器，比没有更糟：它产出「通过」。）
+
+### Fixed
+
+- `orchestrator_lint.py`：新增 `main()` + `if __name__ == "__main__"`。用法 `orchestrator_lint.py [FILE ...]`，
+  缺省扫仓库 `scripts/alpha-hive-orchestrator.sh`（**按 `__file__` 锚定**——编排器是代码不是数据；放在函数里、不做模块级常量，
+  不进 `TestFileDerivedSpeciesDoesNotSpread` 的登记面）。
+  - 命中逐条进 stdout：`路径:行号: $VAR 紧跟非 ASCII（改成 ${VAR}）：<该行>`（措辞与部署关卡一致）。
+  - 每个文件「扫了 N 行，M 处命中」进 stderr——扫了空文件 / 错文件时，「0 处命中」旁边的行数会露馅。
+  - 退出码：**0** 无命中 / **1** 有命中 / **2** 有文件读不了（不存在、是目录、无权限、非 UTF-8），**从不把读不了落成 0**；
+    2 优先于 1（同 grep：有文件没扫到，就说不出「命中只有这些」），但其他文件的命中照样打印。argparse 用法错误本身也是 2。
+- 部署关卡 `deploy_orchestrator.gate_failures` 与既有测试继续直接调 `find_unbraced()`，未改。
+
+### Added
+
+- `tests/test_orchestrator_braced_vars.py::TestCli`（8 条，子进程真跑，合成文件，任何机器都跑）：
+  正对照（`echo "$NUM（x"` ⇒ rc 1 且命中行逐字打印）/ 干净文件 rc 0 且报行数 / 读不了三种（不存在、目录、非 UTF-8）⇒ rc 2 /
+  读不了优先于命中且命中仍打印（**两种文件顺序都跑**）/ 缺省目标在别的 cwd 下仍解析到仓库编排器。
+
+### 验证
+
+- 变异 8 个，全部真跑（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、`--maxfail=1000`、每轮 passed+failed=35 核对；还原后 sha256 比对 + 复跑全绿）：
+  M0 **HEAD 原文件（无 CLI）** ⇒ 8 红（正对照在内）；M1 删 `__main__` 块 ⇒ 8 红；M2 丢弃退出码 ⇒ 6 红；M3 读不了不置 2 ⇒ 5 红；
+  M4 后来的命中把 2 覆盖成 1 ⇒ 1 红；M5 缺省跟 cwd 走 ⇒ 1 红；M6 不打印命中 ⇒ 3 红；M7 有命中仍 rc 0 ⇒ 1 红。
+  ⚠️ M4 **首轮存活**：读不了优先级那条只按「先命中、后缺失」一种顺序跑，覆盖写法恒绿；改成两种顺序参数化后才红——举出变异还得真跑。
+- `tests/test_orchestrator_braced_vars.py` + `test_deploy_orchestrator.py` + `test_paths_not_frozen_at_import.py` + `test_orchestrator_deployed_matches_repo.py`：171 passed；`ruff check .` 全过。
+- 全套：（换基到 `fe7dfbb6` 之后、改号之前）`1 failed, 8156 passed, 82 deselected, 2 xfailed`；唯一的红是按设计恒红的 `TestCoverageHorizon`（v0.45.404）。
+  第一次全套（10-05 23:22–23:37）另有 1 个 ERROR：conftest 的 session 级真实数据根守卫在最后一条测试的 teardown 报 `~/alpha-hive-data` 新增 1 / 改动 70 个文件——**是生产编排器那轮扫描在写**，不是测试：扫描进程（主 checkout，PID 54509）23:21:31 起、checkpoint 文件名里的毫秒戳解出 23:21:35.779，改动的全是当天新闻 / 期权 / VIX 缓存；扫描 00:00:06 结束后重跑全套，守卫不再报错。
+- 手工（换基后最终树）：任务里那条复现 `git commit -q -m "chore: 占号 $NUM（数据"` ⇒ rc 1、命中逐字打印；缺省目标（仓库编排器）「扫了 1565 行，0 处命中」rc 0。
 
 ## [0.45.417] — 2026-10-06 — Changed：异地备份纳入 `.swarm_results_*.json`；排除理由必须分类（`rebuildable:` / `derived:` / `accepted-loss:<日期 谁定>`）；备份仓 600 MB 预算闸
 
@@ -119,7 +187,94 @@
   （比例 4.0，entry 131.9425、shares 37.8952，自证键 4999.99 不变）；as_of = 06-30（今天下载的事后复权日线）⇒ `future_split`、不换。
 - 全套（不带 `-x`，合并 origin/main 后的干净克隆——worktree 里有 iCloud 造的 `* 2.py` 副本会被 pytest 收集，故不在 worktree 跑）：8175 passed / 2 failed：`TestCoverageHorizon`（经济日历覆盖，按设计周期性变红）、`TestDeployedMatchesRepo::test_latest_main_version_is_deployed_or_pending`（读本机部署记录：10-05 14:00 那轮 `production_sync` 不 OK ⇒ 编排器自动部署 skipped，与本版无关）。跑完生产数据根的文件列表与纸面组合状态 md5 不变。
 
-## [0.45.415] — 2026-10-05 — 占位（进行中：F&G 前瞻检验回放行情库改为时点数据——拆股 / 修订前后的重放日各用当时的价格）
+## [0.45.415] — 2026-10-05 — Changed（事后修订）：F&G 前瞻检验回放行情库改为**时点数据**——拆股 / 数据更正前后的重放日各用当时 Yahoo 给的价格，A 逐笔复现生产
+
+**问题**（0.45.410 二次检查两位审查者独立实测）：0.45.410 把首次落定的日线冻结。拆股（Yahoo 回溯复权全段历史）时：
+- **生产自己**：`_check_exit` 每天重扫 (entry_date, as_of] 的全部日线、对比复权前的止损止盈价 ⇒ 拆股后第一天多头被记成假止损（−7%）、
+  空头被记成假止盈（+15%），**出场日倒填**到入场后第一天。这是生产的 bug，已另立任务修（用户 10-05 定）。
+- **冻结的库**：拆股时还没落定的最近 1~3 天按复权价落定 ⇒ 落定段末端出现假跳空，A / B 提前几天假出场——与生产对不上。
+- **现取（0.45.410 之前）**：拆股前每一笔都按复权价重放 ⇒ 该标的整段历史的出场都变——更糟。
+
+只有时点数据能让 A 复现生产（包括生产那笔假交易）、B 在生产当时的数据下做反事实。
+
+**修法**（用户 10-05 定三条：生效日 = 第一次下载到新值的美东日期；缺口日只有一次观察可接受；生产 bug 另立任务）：
+- 每根已落定日线带**版本**：基础版本（首次落定的值）+ 之后确认的修订，各带生效日 `first_seen`。重放第 d 天用生效日 ≤ d 的最新版本。
+  重放日由 `paper_portfolio.run_replay` 逐日写进 `_REPLAY_AS_OF`（只有它写；生产 `run_for_date` 不碰），回放窗口按它取版本；
+  不知道重放日 ⇒ 最新版本并计 `as_of_unknown`（F&G 的回放全经 `run_replay`，应恒为 0）。
+- 「改了」仍要两次不同美东日期的观察（0.45.410 二次检查的规则）。**有嫌疑当天整段补下一次、之后每次整段直到确认或撤销**——
+  拆股改的是全段历史，重叠段只有 10 天，拆股那天仍在场的仓位可能更早入场；这样窗口里每个日期都得到新版本（多 1~2 次请求 / 拆股 / 标的）。
+- **缺口日**（嫌疑出现时还没落定的日子）：嫌疑出现时留住前一次下载（`pre_suspect`，前一天收盘后下的，就是生产当时看到的）；确认时按它的值
+  落定、新值记成版本；确认之前，早于嫌疑日的重放日在缺口日上也用它。偶发抽风（嫌疑撤销）⇒ 丢掉 `pre_suspect`、照常落定。
+- 退回直连时，结果里已落定的日子同样换成库按重放日的值（0.45.410「同一天两个值」的已知局限一并消失）。
+- 0.45.410 写下的 schema 1 文件（`revisions[d]` 是单个对象；10-05 生产首次运行就会写）照读、按时点回答，下次写盘升成 schema 2。
+- 告警文案：确认修订后 7 天内仍 ⚠️ + attention `ohlc_store_revised`，理由改成「生产账本里多了一笔拆股造成的假交易，A / B 如实复现，需人看」。
+
+**这是事后修订**（文件头「变体」段）：只改重放读到**哪一天版本**的行情；没有任何修订时与 0.45.410 逐字节相同。08-01 起 30 个标的没有拆股
+（10-05 用 yfinance 查），已有历史不受影响。依据是读代码与合成世界的拆股模拟（自证率与取数计数），没有算或看任何周度差 / 效应量。
+
+### 验证
+- **合成世界的拆股端到端**（`tests/test_replay_ohlc_pit.py::TestSplitEndToEnd`）：GAPX 在 08-19 拆股，Yahoo 从那天起回溯复权；生产逐日真跑，
+  在 08-19 记下倒填到 08-11 的假止损（夹具自证）。Step 11 逐日真跑（08-13 起，含拆股当天的嫌疑、次日的确认）：**每一天自证都是 100%**；
+  同一份世界里不用库、或不按重放日取版本，自证都掉——证明 100% 来自时点数据。
+- 真实数据（拷贝，库里是 0.45.410 写的 22 个 schema 1 文件）：继续跑模拟 10-06 / 10-07 与一次全被拒，结果与不用库**逐字节相同**；
+  无坏文件、无误报版本或嫌疑。
+- 变异 65/65 红（0.45.410 的 45 个随代码调整重跑 + 时点数据新增 20 个；git archive 副本、`--maxfail=1000`、清 `__pycache__`、基线先绿）。
+  首轮存活 1 个（P18「缺口日新版本不要求两次观察」）是真盲区，补测 `test_a_gap_day_whose_two_post_split_looks_disagree_waits_for_confirmation` 后红。
+- 全套（合并 main 后，不带 `-x`）：8147 passed / 1 failed（经济日历按设计保持红），跑完生产数据根下没有 `replay_ohlc_state/`。
+
+### Added
+- `tests/test_replay_ohlc_pit.py`：按重放日取版本（多版本、不知道重放日、快路径）；拆股（嫌疑当天整段补下与留 `pre_suspect`、确认后全窗口版本与
+  缺口日旧值、偶发抽风不留痕）；schema 1 文件；`run_replay` 写重放日并恢复（含抛异常）、只有它写、生产函数不读（AST）；直连结果按时点；端到端拆股。
+
+### Changed
+- `replay_ohlc_store.py`：schema 2（读 1 / 2）；版本列表 + `pre_suspect`；`pit_slice()`（按重放日回答）、`revision_in()`（二次检查起取代 `wants_full()`）、`note_suspect_refetch()`；
+  `merge()` 返回最新版本；`settled_slice(..., as_of=)`；有嫌疑 ⇒ 整段；`_settle_gap()`；计数 `served_older_version` / `as_of_unknown` /
+  `gap_days_settled` / `suspect_refetches`（`_failed`）。模块 docstring「时点数据」一节取代 0.45.410 的「已知局限」。
+- `paper_portfolio.py`：`_REPLAY_AS_OF`（`run_replay` 逐日写、结束恢复）；回放窗口按它取版本、补尾后有嫌疑当场整段补下（`_download()` 抽出）、
+  `overlay_direct()`（直连结果按时点）。生产 `run_for_date` 逐字节不变。
+- `experiments/fg_exposure_gate_forward_test.py`：文件头事后修订 v0.45.415；告警 / 陈述文案改为时点口径。`ic_rerun_readiness.py`：`ohlc_store_revised` 文案同步。
+- `tests/test_replay_ohlc_store.py`：修订相关的几条改为时点语义（确认后最新版本是新值、重放日早于生效日拿旧值；有嫌疑 ⇒ 整段）。
+
+### 二次检查（10-06，两位审查者独立、各自在 git archive 副本里复现后报）
+回放窗口一侧（审查者 B，6 条）与行情库一侧（审查者 A，6 条 + 3 条小项），修了 11 处、各配一条会红的测试：
+- **整段补下失败留下半复权的重放日**（B-F2 / A-3a）：原先先并补尾、整段失败只计数 ⇒ 重叠段生效日比更早的日子早一天，那个
+  重放日**永久**读到一半复权前、一半复权后的序列，没有任何东西会红。现在补尾看到改动（`revision_in`）⇒ 先整段、只并整段；
+  整段失败 ⇒ 什么都不并、该标的本次降级（`fallback_tickers`，进度行 ⚠️），下次再整段。整段补下不再计入 `wide_fetches`。
+- **直连失败时库补进了日子**（B-F1）：原先 `overlay_direct` 会把直连没拿到的已落定日子补进来——没有修订时也与 0.45.410 不同，
+  且计数说「一根都没拿到」而重放其实用了行情。现在只换值、不增日子；非 YYYY-MM-DD 的请求原样返回、不抛（B-F5）。
+- **「改之前」的观察取错 / 没取到**（A-1）：原先只认「更早美东日期」的上一次下载。夜里补跑与次日例行 Step 11 同属一个美东日
+  （10-05 就发生了），拆股夹在中间时缺口日拿不到旧值；反过来嫌疑早已在时又会把改后的观察当旧值。现在按内容判：上一次下载与
+  已落定段最新版本逐日一致才算。
+- **未决嫌疑时缺口日先按新值落定**（A-2）：现在有未决嫌疑就暂停落定，确认 / 撤销后再落定（缺口日由 `_settle_gap` 按旧值）。
+- **中间夹一次漏数据让生效日后挪**（A-3b）：嫌疑现在记住出现过的值（`earlier`，至多 5 个），同一个新值在另一个美东日期再出现即
+  确认，生效日 = 第一次出现那天；嫌疑出现日（缺口日用旧值的界线）同样按最早一次算。
+- **时钟倒退写出乱序版本**（A-4）：原先下次读库会把整个文件当坏文件改名。现在生效日不晚于已有版本 ⇒ 先不确认。
+- **版本 / 嫌疑缺 `yahoo` 键**（A-5）：原先过校验后每次 KeyError、从不改名留证；现在当坏文件。`earlier`、`unobserved_gap_days` 一并校验。
+- **没有「改之前」观察的缺口日**（A-1 的拆股前一天恰好漏数据、或旧文件已带嫌疑却没有 `pre_suspect`）：结构上分不出漏数据与拆股，
+  不猜——记进 `unobserved_gap_days`，只要在窗口里就在进度行陈述（那几个重放日可能与生产不同，自证会报出来）。
+- **不知道重放日**（B-F2 观测点）：`as_of_unknown` 应恒为 0，原先只进 stderr；现在 > 0 ⇒ 窗口 `degraded`，进度行与 attention 写明。
+- **测试缺口**：下载失败后由库回答的请求也按时点（B-F3）；端到端直接比 A 与生产的 GAPX 那一笔（B-F4——自证只比入场，把生效日
+  比较改成 `<` 时出场日错了自证照样 100%）。就绪度降级文案在有行情库时不再说「结果与改动前的逐次取数相同」。
+- 设计内、未改（A-6）：嫌疑未决期间（偶发漏数据那一两天），早于嫌疑日的重放日在缺口日上用嫌疑出现前那次下载的值，与 0.45.410
+  略有不同。上文「没有任何修订时逐字节相同」的准确说法是「没有修订、也没有未决嫌疑时」。
+
+二次检查的验证：
+- 变异（git archive 副本、清 `__pycache__`、`--maxfail=1000`、基线先绿）：回放窗口一侧 11/11 红；行情库一侧 12 个里 11 红 + 1 个等价
+  （去掉「缺 yahoo」显式检查后紧接的 `r["yahoo"]` 照样抛、照样改名留证）。首轮存活的 N13（「改之前」判断恒真）是测试没走到那一步——
+  补「已带嫌疑、同日再跑」后红。
+- 真实数据拷贝（10-06 凌晨从生产只读复制；库里是生产 10-05 夜里用 0.45.410 写的 22 个 schema 1 文件）：照读、无坏文件；`run()` 用库 /
+  不用库 / 模拟次日落定（新落定 748 天）三者结果**逐字节相同**，无嫌疑、无版本。
+- 与 0.45.416 的衔接：416 会话已在合并树上验证（7 个文件 481 passed），由后合并的 416 落地（它的修法让「生产记假止损」的夹具自证
+  与文案不再成立，那几处由它改）。
+- 全套（合并 origin/main 后）：8174 passed / 1 failed（经济日历按设计保持红）；生产扫描没在跑时「真实数据根总闸」未报——测试没写生产数据根。
+
+### 已知未改
+- 生效日取「我们第一次下载到新值」那天：Step 11 紧跟生产之后跑，通常就是生产第一次看到新值那天；若 Yahoo 恰在两者之间切换、或那天 Step 11
+  没跑到这个标的，会差一天（自证会把那天报出来）。
+- 生产在 14:00 PDT 用的是当天可能还是临时值的日线，重放用的是终值——与拆股无关、早已存在，这次不动。
+- 库刚建立的头两天（某标的还没有已落定段）里发生的拆股看不出来，按现取处理（二次检查 A 小项）。10-06 起各标的陆续有已落定段。
+- 回滚到 0.45.410：它只认 schema 1，会把 schema 2 文件全部改名为 `.invalid-…`（不删、进度行一直报）。重新上 415 时删掉 410 重建的
+  同名文件、把 `.invalid-…` 改回原名即可恢复版本历史（二次检查 A 小项 / B-F6）。
 
 ## [0.45.414] — 2026-10-05 — Changed：数据备份仓位置收成一处——`run_backup` / `export` 缺省值改走 `PATHS.data_backup_repo`（调用时求值），编排器 Step 14 不再传 `--backup-dir`；备份仓落在代码仓库里一律拒绝
 

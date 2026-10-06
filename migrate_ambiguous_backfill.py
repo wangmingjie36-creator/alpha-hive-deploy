@@ -11,8 +11,8 @@ P0 迁移脚本 (v0.45.9, 2026-08-25) —— 容差语义修正 + 全表回填
 新语义（双边模糊带）  ：|return| <= 1.0 → ambiguous，剔除出统计
 
 用法：
-    /usr/local/bin/python3 migrate_ambiguous_backfill.py --dry-run   # 只看影响
-    /usr/local/bin/python3 migrate_ambiguous_backfill.py             # 实际写入
+    /usr/local/bin/python3 migrate_ambiguous_backfill.py           # 缺省 = dry-run，只看影响（v0.45.419 起）
+    /usr/local/bin/python3 migrate_ambiguous_backfill.py --apply   # 实际写入（`--dry-run` 仍接受，空操作）
 
 ⚠️ 写入前请先备份 pheromone.db（脚本会自动备份到 db_backups/）。
 """
@@ -22,6 +22,7 @@ import sys
 import shutil
 import sqlite3
 import argparse
+from pathlib import Path
 from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -128,9 +129,13 @@ def backfill(conn, dry_run=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=None)
-    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--dry-run", action="store_true", help="（缺省行为，保留兼容）只看影响")
+    ap.add_argument("--apply", action="store_true", help="真写库（缺省是 dry-run，v0.45.419）")
     ap.add_argument("--no-backup", action="store_true")
     args = ap.parse_args()
+    if args.apply and args.dry_run:
+        ap.error("--apply 与 --dry-run 互斥")
+    args.dry_run = not args.apply   # 缺省 dry-run：下面全部沿用 args.dry_run 的既有分支
 
     db = _resolve_db(args.db)
     print("DB: %s" % db)
@@ -167,7 +172,12 @@ def main():
             p.upper(), s["rows"], s["dir_rows"], s["ambiguous"], s["flipped"],
             s["old_acc_dir"], s["new_acc_dir"], s["new_n_dir"]))
 
-    print("\n%s" % ("[DRY RUN] 未写入任何数据" if args.dry_run else "✅ 回填完成"))
+    print("\n%s" % ("[DRY RUN] 未写入任何数据（确认无误后加 --apply）" if args.dry_run else "✅ 回填完成"))
+    if not args.dry_run:
+        from data_migrations.runner import record_tool_run
+        record_tool_run("migrate_ambiguous_backfill", rows_affected=sum(stats[p]["rows"] for p in PERIODS),
+                        backup=None if args.no_backup else "db_backups/pheromone_pre_P0_tolerance_fix_*.db",
+                        db_path=Path(db))
 
 
 if __name__ == "__main__":
