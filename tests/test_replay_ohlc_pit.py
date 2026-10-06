@@ -271,6 +271,9 @@ class TestSplitAtStoreLevel:
         f = _file(tmp_path)
         f["pre_suspect"] = None
         (tmp_path / "AAA.json").write_text(json.dumps(f), encoding="utf-8")
+        # 同一天再跑一次：嫌疑未决、上一次下载已是复权后的——不许把它当「改之前」留住（变异「一致性判断恒真」⇒ 红）
+        _fetch_like_window(_store(tmp_path, self.X), _upto(post, self.X))
+        assert _file(tmp_path)["pre_suspect"] is None
         s = _store(tmp_path, "2026-09-25")
         _fetch_like_window(s, _upto(post, "2026-09-25"))
         f = _file(tmp_path)
