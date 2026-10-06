@@ -77,7 +77,7 @@
   四个状态文件逐字节相同、拆股查询 0 次；生产状态 md5 前后一致。
 - 真 Yahoo：CRWD 07-02 1 拆 4。5 月快照记录的真实入场价 527.77 / Yahoo 现在给的入场日复权收盘 131.94 = 4.0001；as_of = 07-02 / 07-06 ⇒ 换口径
   （比例 4.0，entry 131.9425、shares 37.8952，自证键 4999.99 不变）；as_of = 06-30（今天下载的事后复权日线）⇒ `future_split`、不换。
-- 全套（不带 `-x`）：见下方补记。
+- 全套（不带 `-x`，合并 origin/main 后的干净克隆——worktree 里有 iCloud 造的 `* 2.py` 副本会被 pytest 收集，故不在 worktree 跑）：8175 passed / 2 failed：`TestCoverageHorizon`（经济日历覆盖，按设计周期性变红）、`TestDeployedMatchesRepo::test_latest_main_version_is_deployed_or_pending`（读本机部署记录：10-05 14:00 那轮 `production_sync` 不 OK ⇒ 编排器自动部署 skipped，与本版无关）。跑完生产数据根的文件列表与纸面组合状态 md5 不变。
 
 ## [0.45.415] — 2026-10-05 — 占位（进行中：F&G 前瞻检验回放行情库改为时点数据——拆股 / 修订前后的重放日各用当时的价格）
 
