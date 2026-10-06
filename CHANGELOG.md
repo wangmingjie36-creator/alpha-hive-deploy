@@ -139,8 +139,8 @@ v0.45.414 那次 session 据这个空操作报过「orchestrator_lint.py 通过�
 ### F&G 前瞻检验
 - 本版改的是检验重放的对象。只在拆股事件上生效；前瞻窗口（09-16 起）里交易过的标的零拆股 ⇒ 生产与重放同步切换，**零分歧**。没有拆股时落盘
   逐字节同改动前（`split_adjustments` / `split_unresolved` 空时不写键；真实数据 old / new 两份状态文件 `cmp` 相同）。
-- 没动检验文件头：判定规则、窗口、自证都没变，机制上也不需要说明。⚠️ v0.45.415（另一 session 进行中）的告警文案写「生产账本里多了一笔拆股造成的
-  假交易，A / B 如实复现」——本版合入后生产不再记那笔假单，两版谁后合入谁顺手改那句。
+- 没动检验文件头：判定规则、窗口、自证都没变，机制上也不需要说明。v0.45.415 的告警文案原写「生产账本里多了一笔拆股造成的
+  假交易，A / B 如实复现」——415 先上 main、本版后合，由本版改（见下「与 0.45.415 集成」）。
 
 ### 二次检查（10-06）
 - **修：拆股路径的意外异常会打断整个 `run_for_date`。** 原来 `_fetch_split_events` 只有 `history()` 在 try 里、Step 1 调
@@ -158,6 +158,24 @@ v0.45.414 那次 session 据这个空操作报过「orchestrator_lint.py 通过�
 - 验证途中撞见生产编排器在跑（10-05 23:11 PDT 起的 NVDA 扫描），真实数据根闸报「被写」——文件 mtime 与测试同秒、编排器进程在场，
   是生产自己的写入，不是测试；编排器跑完后重跑全绿。
 - 全套（不带 `-x`，二次检查后的干净克隆）：8180 passed / 1 failed（`TestCoverageHorizon`，按设计周期性变红）。
+
+### 与 0.45.415 集成（10-06：415 先上 main，本版后合）
+- 文本合并无冲突，但 415 的 `tests/test_replay_ohlc_pit.py` 合并后有 4 条红：3 条断言「生产会记倒填的假止损」（正是本版修掉的行为），
+  1 条是它的 yfinance 桩 `_TimeYF` 不支持本版的拆股记录查询（`history(start=…, actions=True)`，不带 `end`）。本版改：
+  - `_TimeYF.history` 支持不带 `end`（取到「现在」）、恒带 `Stock Splits` 列（GAPX 自 SPLIT_DAY 起记 2.0）；
+  - 夹具自证从「生产记假止损」改成「生产在 SPLIT_DAY 换口径」（`split_adjustments` 一条、entry 50、之后按时间止损出场）；旧形状留作
+    关掉 416 的对照 `test_without_416_production_books_the_backdated_fake_stop`；
+  - 「不用时点数据自证会掉」那条改为在关掉 416 时测，原意不变；新增 `TestSplitWith416NeedsNoPointInTime`：开着 416 时 A 即使不用
+    时点数据也能逐笔复现生产（生产不再出那笔假单）；
+  - 告警文案不再说「生产记假单」：`fg_exposure_gate_forward_test._ohlc_store_alarm` docstring、`_ohlc_store_note`、
+    `ic_rerun_readiness` 的 `ohlc_store_revised`、`replay_ohlc_store` 模块 docstring 两句（第二句是预演时 grep 出来的补漏）。
+    F&G 文件头「事后修订 v0.45.415」那段是当时的记录，照 415 的意思没动。
+- 415 二次检查改的 `_ReplayOhlcWindow`（`overlay_direct` / `_download` / 按 `_REPLAY_AS_OF` 取版本）只决定喂进来哪一版日线；本版的判据
+  只读喂进来的日线、拆股记录另查，两者不交叉。
+- 本版没把 415 的毛病盖住：集成后的树上把 `replay_ohlc_store` 的生效日比较 `<=` 改成 `<`，红 9 条，含
+  `test_a_books_the_same_gapx_trade_as_production` 与端到端自证。
+- 先在一次性 worktree 里以 415 待推的 HEAD `8a4c4ad6` 预演，main 落地（恰为 `8a4c4ad6`）后正式合并，两棵树哈希相同。
+  相关 7 个文件 491 passed；全套（干净 worktree、不带 `-x`）：8304 passed / 1 failed（`TestCoverageHorizon`，按设计周期性变红）。
 
 ### 已知不覆盖
 - 同一份日线里一部分复权、一部分没复权（Yahoo 漏复权的形状）：入场日那根仍是旧口径，判据看不出来。真实日线上没见过。
