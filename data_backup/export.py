@@ -68,21 +68,33 @@ ROOT_FILE_GLOBS: list[str] = [
     "index.html", "dashboard-data.json", "manifest.json", "sw.js", "rss.xml",
     "paper_portfolio_card.html", "param_optimization_results.json", "param_optimization_report.html",
     "watchlist_override.yaml", "watchlist_override.json",
+    # v0.45.417 每日蜂群原始结果（逐蜂原始证据）：不可重取，`signal_archive.backfill` 与重放实验读它。
+    # 用户 2026-10-05 决定纳入（原样、不改格式、不去重）；117 个文件 ≈ 86 MB 原始 / 19 MB 压缩，约 +0.1 MB/天。
+    ".swarm_results_*.json",
 ]
+#: 排除理由的前缀分类（v0.45.417，`tests/test_data_backup.py` 守卫）：理由必须以其中之一开头——
+#: 「用户未定」不是一类。曾经 `.swarm_results_*` 与 `analysis-*-ml-*` 的理由写着「用户未定」，
+#: 没有任何东西会让这句话过期，两个不可重取的文件族就这样长期零异地副本。
+#:   rebuildable:<怎么重建>              可从别处重新生成，丢了不损失信息
+#:   derived:<已备份的来源>              由已备份的数据派生，来源在则它在
+#:   accepted-loss:<日期 + 谁决定>       明知不可重取仍不备份——必须有人、有日期
+EXCLUSION_REASON_PREFIXES = ("rebuildable:", "derived:", "accepted-loss:")
 #: 数据根里有、但**刻意不进**数据仓库的项，键 = `migrate_data_root` 的 MOVE 规则原文，值 = 理由。
 #: 不变式（`tests/test_data_backup.py::TestExportScopeCoversMoveRules`）：MOVE 规则的每一项
 #: 要么被 DBS / STATE_DIRS / ROOT_FILE_GLOBS 覆盖，要么在这里写明理由——新增数据产物时
 #: 两份表不许各自漂移（v0.45.342 前正是漂移：「已被代码仓库跟踪」这条排除理由被阶段 5 悄悄作废）。
 EXCLUDED_FROM_THIS_PASS: dict[str, str] = {
-    "chroma_db": "向量索引，可从 agent_memory 重建；BLOB 转十六进制文本会显著放大体积",
-    ".swarm_results_*.json": "体量大（~70 MB），不可重取，是否进数据仓库**用户未定**（需先定压缩方案）",
-    "analysis-*-ml-*.json": "体量大（~100 MB），不可重取，是否进数据仓库**用户未定**（需先定压缩方案）",
-    "logs": "日志；被跟踪的只有 4~5 月旧健康快照，历史已在 main",
-    "db_backups": "本机每日轮转备份；数据仓库本身就是它的异地版本",
-    "realtime_metrics.json": "每轮扫描覆盖的中间产物",
-    "cache": "可重建缓存", "data_cache": "可重建缓存", "earnings_cache": "可重建缓存",
-    "finviz_cache": "可重建缓存", "sec_cache": "可重建缓存", "reddit_cache": "可重建缓存",
-    ".factor_cache": "可重建缓存（Ken French 因子 parquet，二进制）", ".risk_cache": "可重建缓存（beta）",
+    "chroma_db": "rebuildable: 向量索引，可从 agent_memory 重建；BLOB 转十六进制文本会显著放大体积",
+    "analysis-*-ml-*.json": (
+        "accepted-loss:2026-10-05 用户定。1019 个文件 ≈ 118 MB 原始 / 20 MB 压缩；其 swarm_results 键与"
+        " .swarm_results 条目在 312/1019 个文件里逐字相同（其余 707 个不同，原因未核实），另含 advanced_analysis /"
+        " ml_prediction；ML 增强报告 HTML 已进备份。不纳入的代价：这两块只存在于这个文件里的内容丢了拿不回"),
+    "logs": "accepted-loss:2026-10-06 沿用 v0.45.342 的排除决定（日志，非数据；被跟踪的 4~5 月旧健康快照已在 main），用户未单独审议",
+    "db_backups": "derived:数据仓库 — 本机每日轮转备份；数据仓库本身就是它的异地版本",
+    "realtime_metrics.json": "rebuildable: 每轮扫描覆盖的中间产物",
+    "cache": "rebuildable: 可重建缓存", "data_cache": "rebuildable: 可重建缓存", "earnings_cache": "rebuildable: 可重建缓存",
+    "finviz_cache": "rebuildable: 可重建缓存", "sec_cache": "rebuildable: 可重建缓存", "reddit_cache": "rebuildable: 可重建缓存",
+    ".factor_cache": "rebuildable: Ken French 因子 parquet，二进制", ".risk_cache": "rebuildable: beta 缓存",
 }
 
 
@@ -294,6 +306,56 @@ def _code_git_head(code_repo: Path | None) -> str:
     return head
 
 
+def default_backup_repo() -> Path:
+    """备份仓库工作区的缺省位置 = `PATHS.data_backup_repo`，**调用时求值**（v0.45.414）。
+
+    此前 `run_backup.main` / 本文件 `main` 的缺省值与编排器 Step 14 各写死一份
+    `~/alpha-hive-data/_git_backup`——阶段 3 早于全局迁移，备份子系统只能自己指向新数据根。
+    阶段 5 后 `ALPHA_HIVE_HOME` 已由编排器与 launchd plist 导出，三处收成这一处。
+    ⚠️ 与旧值只在 `ALPHA_HIVE_HOME` 是生产值时相同：未设时 `PATHS.home` 兜底到**代码检出**，
+    缺省会落进代码仓库——由 `backup_repo_inside_code_repo` 拦下，不会在那里建库。
+    不吞 import 失败：这不是只作记录的字段（对照 `_code_git_head`），解析不出就不该往下跑。
+    """
+    from hive_logger import PATHS
+    return PATHS.data_backup_repo
+
+
+def backup_repo_inside_code_repo(path: Path) -> Path | None:
+    """`path` 落在代码仓库里（含就是仓库根）⇒ 返回代码仓库根；否则 None（v0.45.414）。
+
+    代码仓库 = `PATHS.git_repo_root`（不读 `ALPHA_HIVE_HOME`）。拦的是 `ALPHA_HIVE_HOME` 未设时
+    `default_backup_repo()` 解析到 `<检出>/_git_backup`：导出会把整份生产数据铺进代码检出，
+    之后 `run()` 再在里面 `git init` 出一个嵌套数据仓库。显式传参同样拦——备份仓没有理由在代码仓库里。
+
+    判「同一目录」比 (st_dev, st_ino)，不只比字符串（二次检查补）：`resolve()` 不折叠大小写（APFS 默认不分）
+    也不折叠固件链接（`/System/Volumes/Data/Users/…`），10-03 实测这两种写法都与检出同 inode、字符串前缀却不同
+    ⇒ 纯字符串判定往「放行」那边错。逐级上溯；还不存在的末段 stat 失败就跳过往上比。
+    """
+    from hive_logger import PATHS
+    code_repo = PATHS.git_repo_root.resolve()
+    try:
+        code_id = _dir_identity(code_repo)
+    except OSError:
+        code_id = None
+    target = Path(path).resolve()
+    for anc in (target, *target.parents):
+        if anc == code_repo:
+            return code_repo
+        if code_id is None:
+            continue
+        try:
+            if _dir_identity(anc) == code_id:
+                return code_repo
+        except OSError:
+            continue
+    return None
+
+
+def _dir_identity(p: Path) -> tuple[int, int]:
+    st = p.stat()
+    return st.st_dev, st.st_ino
+
+
 def run_export(src_root: Path, out_dir: Path, code_repo: Path | None = None) -> dict:
     """跑一整轮导出，返回 manifest dict（调用方负责写文件/扫描/提交）。
 
@@ -354,11 +416,17 @@ def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(description="阶段 3.2 数据导出（按表 SQL + 文本状态）")
     ap.add_argument("--src", default="/Users/igg/Desktop/Alpha Hive")
-    ap.add_argument("--out", default=str(Path.home() / "alpha-hive-data" / "_git_backup"))
+    ap.add_argument("--out", default=None, help="缺省 PATHS.data_backup_repo（调用时求值）")
     args = ap.parse_args(argv)
-    manifest = run_export(Path(args.src), Path(args.out))
-    write_manifest_and_sums(Path(args.out), manifest)
-    print(f"\n导出完成：{args.out}，耗时 {manifest['duration_seconds']}s")
+    out = default_backup_repo() if args.out is None else Path(args.out)   # 同 run_backup.main：显式空串不换成缺省
+    code_repo = backup_repo_inside_code_repo(out)
+    if code_repo is not None:
+        print(f"拒绝导出：目标 {out} 在代码仓库 {code_repo} 里"
+              "（未传 --out 时多半是没设 ALPHA_HIVE_HOME）", file=sys.stderr)
+        return 2
+    manifest = run_export(Path(args.src), out)
+    write_manifest_and_sums(out, manifest)
+    print(f"\n导出完成：{out}，耗时 {manifest['duration_seconds']}s")
     return 0
 
 

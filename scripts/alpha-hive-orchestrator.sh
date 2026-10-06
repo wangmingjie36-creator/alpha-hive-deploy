@@ -45,6 +45,8 @@ PROJECT_DIR="/Users/igg/Desktop/Alpha Hive"   # Python 源码目录（代码检�
 # export 给本脚本拉起的每个 Python 步骤——hive_logger.PATHS.home 读它；git 仓库根
 # (PATHS.git_repo_root) 不读它，仍按 __file__ 落在 PROJECT_DIR。回退 = 删掉这两行
 # 并把下面 8 处 $DATA_DIR 改回 $PROJECT_DIR（先跑 migrate_data_root.py unretire）。
+# ⚠️ v0.45.414 起 Step 14 的备份仓也跟 ALPHA_HIVE_HOME 走：回退时给 Step 14 补
+# --backup-dir "$HOME/alpha-hive-data/_git_backup"，否则备份仓解析进代码检出、被 run_backup 拒绝（init 失败）。
 DATA_DIR="/Users/igg/alpha-hive-data"
 export ALPHA_HIVE_HOME="$DATA_DIR"
 LOGDIR="/Users/igg/.claude/logs"
@@ -1396,9 +1398,11 @@ log "INFO" "【Step 14】数据备份上线 - 启动"
 
 BACKUP_STATUS_JSON="$HOME/alpha-hive-data/logs/backup_status.json"
 BACKUP_HISTORY_JSONL="$HOME/alpha-hive-data/logs/backup_status_history.jsonl"
+# 备份仓位置不在这里写（v0.45.414）：不传 --backup-dir ⇒ Python 取 PATHS.data_backup_repo
+# （= 上方 export 的 ALPHA_HIVE_HOME 下的 _git_backup）。此前这里写死 "$HOME/alpha-hive-data/_git_backup"，
+# 生产里与之同值。新 Python 也接受显式 --backup-dir ⇒ 合入后首轮（旧编排器 + 新 Python）照常。
 run_step --timeout 300 "$PROJECT_DIR/run_data_backup.py" \
          --src "$DATA_DIR" \
-         --backup-dir "$HOME/alpha-hive-data/_git_backup" \
          --remote origin --branch main \
          --status-file "$BACKUP_STATUS_JSON" \
          --history-file "$BACKUP_HISTORY_JSONL" >> "$LOGFILE" 2>&1
@@ -1456,6 +1460,9 @@ elif [ $STEP14_RC -eq 2 ]; then
             ;;
         push)
             log "WARN" "⚠️ Step 14：已提交但推送失败，下一轮会带着未推送的提交重试——见 $BACKUP_STATUS_JSON"
+            ;;
+        size_budget)
+            log "ERROR" "🚨 Step 14：数据已推送，但备份仓体量超出预算（或量不出来）——见 ${BACKUP_STATUS_JSON}（repo_size_mb / repo_budget_mb）"
             ;;
         stale_or_missing)
             log "WARN" "⚠️ Step 14：退出码 2，但 $BACKUP_STATUS_JSON 缺失或不是今天写的——脚本本轮可能根本没真正执行（如 run_step 判定脚本不存在），不代表已提交，不能当 push_failed 处理"
