@@ -1418,6 +1418,18 @@ def _ohlc_store_note(res: Dict) -> str:
     return f"（行情库：{names} 共 {n} 根已落定日线 Yahoo 后来改了，按时点重放：生效日之前用旧值、之后用新值）"
 
 
+def _ohlc_gap_unobserved_note(res: Dict) -> str:
+    """v0.45.415 二次检查：确认修订时有缺口日没有「改之前」的观察（没留住拆股前那次下载、或它没覆盖到——如拆股前一天恰好
+    漏数据），只能按新值落定：那几个重放日 A / B 可能与生产不同（自证会报出来）。只要窗口里有就每次都报，不换图标。"""
+    st = (res.get("ohlc_window") or {}).get("store") or {}
+    n = st.get("unobserved_gap_days")
+    if not n:
+        return ""
+    names = "、".join(st.get("unobserved_gap_tickers", [])[:5])
+    return (f"（行情库：{names} 有 {n} 个缺口日没有拆股 / 修订之前的观察，只能按新值——那几个重放日可能与生产不同，"
+            "自证会报出来）")
+
+
 def _anchor_gap_note(res: Dict) -> str:
     """v0.45.408：逐日锚点的缺口（并入前一段的多日段 / 坏锚点 / 生产没处理的快照日）。没有缺口时为空串。
     缺口只会让那几天退回连续重放（更严，不会更松），所以不换图标，但要看得见。"""
@@ -1441,7 +1453,7 @@ def status_line(res: Dict) -> str:
     对得上，见 `tests/test_step_contract_ic_rerun.py::TestAttentionMatchesRenderedIcons`）；健康时逐字不变。"""
     s = res.get("status")
     note = _ohlc_window_note(res)
-    rev = _ohlc_store_note(res)   # v0.45.410：只陈述、不换图标
+    rev = _ohlc_store_note(res) + _ohlc_gap_unobserved_note(res)   # v0.45.410：只陈述、不换图标
     if s == "cannot_judge":
         return f"⚠️ F&G 敞口门前瞻检验无法判定：{res.get('reason')}{rev}{note}"
     if s == "not_ready":

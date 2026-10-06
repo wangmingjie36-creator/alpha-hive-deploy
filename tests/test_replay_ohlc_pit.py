@@ -99,6 +99,24 @@ class TestVersionsByReplayDay:
         assert s.pit_slice("AAA", "2026-09-15", "2026-09-16", {}, None)["2026-09-15"]["Close"] == 777.0
         assert s.stats()["as_of_unknown"] == 1
 
+    def test_a_clock_that_goes_back_never_writes_versions_out_of_order(self, tmp_path):
+        """二次检查（审查者实测）：已有生效日 09-22 的版本后时钟倒退到 09-20 / 09-21、看到另一个新值 ⇒ 原先照样追加生效日 09-20 的版本，
+        列表不再升序，下次读库自己把整个文件当坏文件改名（已落定历史全丢）。现在先不确认。变异「不查顺序」⇒ 红。"""
+        m = _master()
+        for day in ("2026-09-20", "2026-09-21"):
+            _fetch_like_window(_store(tmp_path, day), _upto(m, day))
+        v1 = {**m, "2026-09-15": _bar(555.0)}
+        for day in ("2026-09-22", "2026-09-23"):
+            _fetch_like_window(_store(tmp_path, day), _upto(v1, day))
+        v2 = {**m, "2026-09-15": _bar(777.0)}
+        for day in ("2026-09-20", "2026-09-21"):   # 时钟倒退
+            _fetch_like_window(_store(tmp_path, day), _upto(v2, "2026-09-23"))
+        s = _store(tmp_path, "2026-09-24")
+        s.fetch_start("AAA", *W)
+        assert s.stats()["invalid_files"] == []
+        firsts = [v["first_seen"] for v in _file(tmp_path)["revisions"]["2026-09-15"]]
+        assert firsts == sorted(set(firsts)), firsts
+
     def test_no_revision_in_range_takes_the_fast_path(self, tmp_path):
         """这段没有任何修订 ⇒ 回答就是基础版本，不计 as_of_unknown、不计旧版本（没有修订时与 v0.45.410 逐根相同）。"""
         self._two_versions(tmp_path)
@@ -209,6 +227,91 @@ class TestSplitAtStoreLevel:
         assert (st["wide_fetches"], st["store"]["suspect_refetches"], len(fake.calls)) == (1, 1, 2)
         assert not st["degraded"] and "2026-09-02" in _file(tmp_path)["revision_suspects"]
 
+    def test_same_et_day_rerun_before_and_after_the_split_keeps_the_pre_split_download(self, tmp_path):
+        """二次检查（审查者实测）：同一美东日先跑一次（拆股前）、再跑一次（拆股后）——夜里补跑与次日例行 Step 11 正是同一美东日
+        （10-05 实测）。原先只认「更早美东日期」的上一次下载 ⇒ 缺口日拿不到旧值、按复权价落定。现在认「与已落定段一致」的那次。
+        变异「pre_suspect 仍要求 fetched_on < today」⇒ 红。"""
+        m, post = self._before(tmp_path)
+        _fetch_like_window(_store(tmp_path, self.X), _upto(m, "2026-09-23"))   # 同一美东日、开盘前：还没复权
+        _fetch_like_window(_store(tmp_path, self.X), _upto(post, self.X))      # 同一美东日、收盘后：已复权
+        f = _file(tmp_path)
+        assert f["pre_suspect"]["fetched_on"] == self.X and f["pre_suspect"]["bars"]["2026-09-23"] == m["2026-09-23"]
+        s = _store(tmp_path, "2026-09-25")
+        _fetch_like_window(s, _upto(post, "2026-09-25"))
+        assert s.stats()["gap_days_settled"] >= 1 and s.stats()["gap_days_unobserved"] == 0
+        assert s.pit_slice("AAA", "2026-09-01", "2026-09-24", {}, "2026-09-23") == _slice(m, "2026-09-01", "2026-09-24")
+        assert s.pit_slice("AAA", "2026-09-01", "2026-09-24", {}, self.X) == _slice(post, "2026-09-01", "2026-09-24")
+
+    def test_gap_day_without_a_pre_change_observation_is_recorded_and_reported(self, tmp_path):
+        """拆股前一天恰好漏了一根已落定日线：嫌疑（漏数据）那天留住的是再前一天的下载，覆盖不到拆股前最后一天 ⇒ 那天只能按新值。
+        结构上分不出「漏数据」与「拆股」，所以不猜：记进 `unobserved_gap_days`、只要在窗口里就报（进度行陈述）。
+        变异「不记」⇒ 红。"""
+        m = _master()
+        for day in ("2026-09-20", "2026-09-21", "2026-09-22"):
+            _fetch_like_window(_store(tmp_path, day), _upto(m, day))
+        glitch = {d: b for d, b in m.items() if d != "2026-09-15"}
+        _fetch_like_window(_store(tmp_path, "2026-09-23"), _upto(glitch, "2026-09-23"))
+        post = _split(m, self.X)
+        _fetch_like_window(_store(tmp_path, self.X), _upto(post, self.X))
+        s = _store(tmp_path, "2026-09-25")
+        _fetch_like_window(s, _upto(post, "2026-09-25"))
+        assert _file(tmp_path)["unobserved_gap_days"] == ["2026-09-23"] and s.stats()["gap_days_unobserved"] == 1
+        st = _store(tmp_path, "2026-09-26")
+        st.fetch_start("AAA", *W)
+        stats = st.stats(*W)
+        assert (stats["unobserved_gap_days"], stats["unobserved_gap_tickers"]) == (1, ["AAA"])
+        assert "缺口日没有拆股" in fwd._ohlc_gap_unobserved_note({"ohlc_window": {"store": stats}})
+        assert s.pit_slice("AAA", "2026-09-21", "2026-09-23", {}, "2026-09-22") == _slice(m, "2026-09-21", "2026-09-23")
+
+    def test_no_pre_change_download_at_all_records_every_gap_day(self, tmp_path):
+        """嫌疑早已在、却没有 `pre_suspect`（如 0.45.410 写下、已带嫌疑的 schema 1 文件）：上一次下载已是改之后的，不能当旧值；
+        确认时缺口日全记进 `unobserved_gap_days`。变异「ps 为 None 时照旧要它」⇒ 崩 / 不记 ⇒ 红。"""
+        m, post = self._before(tmp_path)
+        _fetch_like_window(_store(tmp_path, self.X), _upto(post, self.X))
+        f = _file(tmp_path)
+        f["pre_suspect"] = None
+        (tmp_path / "AAA.json").write_text(json.dumps(f), encoding="utf-8")
+        s = _store(tmp_path, "2026-09-25")
+        _fetch_like_window(s, _upto(post, "2026-09-25"))
+        f = _file(tmp_path)
+        assert f["unobserved_gap_days"] == ["2026-09-22", "2026-09-23"] and s.stats()["gap_days_unobserved"] == 2
+        assert f["pre_suspect"] is None and f["revision_suspects"] == {}
+
+    def test_open_suspect_pauses_settlement_so_gap_days_wait_for_their_old_value(self, tmp_path):
+        """二次检查（审查者实测）：拆股后第二天什么都没确认（老日子与昨天差一点），而缺口日两次复权后的观察一致 ⇒ 原先 ② 照常
+        按复权价落定缺口日、pre_suspect 随即作废。现在有未决嫌疑就暂停落定；第三天同一个复权值再出现 ⇒ 确认，生效日仍是第一次
+        出现那天，缺口日按旧值。变异「② 不看嫌疑」⇒ 红；变异「嫌疑不记之前的值」⇒ 生效日变成 09-25 ⇒ 红。"""
+        m, post = self._before(tmp_path)
+        _fetch_like_window(_store(tmp_path, self.X), _upto(post, self.X))
+        jitter = {d: ({k: v + 0.01 for k, v in b.items()} if d <= "2026-09-21" else b) for d, b in post.items()}
+        _fetch_like_window(_store(tmp_path, "2026-09-25"), _upto(jitter, "2026-09-25"))
+        f = _file(tmp_path)
+        assert f["settled"]["end"] == "2026-09-21" and f["revisions"] == {} and f["pre_suspect"]
+        # 嫌疑出现日按第一次看到改动那天（09-24）算，不是当前嫌疑值那天（09-25）：重放日 09-24 的缺口日已是复权后
+        gap_now = _slice(post, "2026-09-22", "2026-09-24")
+        s25 = _store(tmp_path, "2026-09-25")
+        assert s25.pit_slice("AAA", "2026-09-22", "2026-09-24", gap_now, self.X) == gap_now
+        assert s25.pit_slice("AAA", "2026-09-22", "2026-09-24", gap_now, "2026-09-23") == _slice(m, "2026-09-22", "2026-09-24")
+        s = _store(tmp_path, "2026-09-26")
+        _fetch_like_window(s, _upto(post, "2026-09-26"))
+        f = _file(tmp_path)
+        assert {v[0]["first_seen"] for v in f["revisions"].values()} == {self.X}
+        assert s.pit_slice("AAA", "2026-09-01", "2026-09-24", {}, "2026-09-23") == _slice(m, "2026-09-01", "2026-09-24")
+        assert s.pit_slice("AAA", "2026-09-01", "2026-09-24", {}, self.X) == _slice(post, "2026-09-01", "2026-09-24")
+
+    def test_a_dropped_bar_on_confirmation_day_does_not_move_that_dates_effective_day(self, tmp_path):
+        """二次检查（审查者实测）：确认当天恰好漏了 09-10 ⇒ 原先嫌疑被换成「没有日线」、生效日后挪两天，版本永久错位（重放日 09-24
+        看到一根拆股前的价夹在复权价里）。现在嫌疑记住之前的值，复权值再出现即确认、生效日 = 第一次出现那天。变异 ⇒ 红。"""
+        m, post = self._before(tmp_path)
+        _fetch_like_window(_store(tmp_path, self.X), _upto(post, self.X))
+        dropped = {d: b for d, b in post.items() if d != "2026-09-10"}
+        _fetch_like_window(_store(tmp_path, "2026-09-25"), _upto(dropped, "2026-09-25"))
+        assert "2026-09-10" not in _file(tmp_path)["revisions"]
+        s = _store(tmp_path, "2026-09-26")
+        _fetch_like_window(s, _upto(post, "2026-09-26"))
+        assert _file(tmp_path)["revisions"]["2026-09-10"][0]["first_seen"] == self.X
+        assert s.pit_slice("AAA", "2026-09-01", "2026-09-24", {}, self.X) == _slice(post, "2026-09-01", "2026-09-24")
+
     def test_a_one_off_glitch_leaves_no_version_and_no_pre_suspect(self, tmp_path):
         """09-24 那次响应漏了 09-15，09-25 恢复 ⇒ 嫌疑撤销、pre_suspect 丢掉、缺口日照常落定、没有任何版本。
         变异「嫌疑撤销后不丢 pre_suspect」⇒ 红（之后的重放日还会被它改写）。"""
@@ -241,7 +344,9 @@ class TestSchema1Files:
         f = _file(tmp_path)
         assert f["schema"] == 2 and isinstance(f["revisions"]["2026-09-15"], list) and "pre_suspect" in f
 
-    @pytest.mark.parametrize("mutate", ["versions-not-ascending", "empty-version-list", "bad-pre-suspect"])
+    @pytest.mark.parametrize("mutate", ["versions-not-ascending", "empty-version-list", "bad-pre-suspect",
+                                        "version-without-yahoo", "suspect-without-yahoo", "earlier-too-long",
+                                        "gaps-not-a-list"])
     def test_malformed_versions_are_quarantined(self, tmp_path, mutate):
         m = _master()
         entry = {"schema": 2, "ticker": "AAA", "pending": None, "revision_suspects": {}, "pre_suspect": None,
@@ -252,6 +357,15 @@ class TestSchema1Files:
                                                 {"first_seen": "2026-09-17", "yahoo": None}]
         elif mutate == "empty-version-list":
             entry["revisions"]["2026-09-15"] = []
+        elif mutate == "version-without-yahoo":   # 二次检查：原先能过校验、之后 KeyError（每次运行都崩、从不改名留证）
+            entry["revisions"]["2026-09-15"] = [{"first_seen": "2026-09-17", "confirmed_on": "2026-09-18"}]
+        elif mutate == "suspect-without-yahoo":
+            entry["revision_suspects"]["2026-09-15"] = {"seen_on": "2026-09-18"}
+        elif mutate == "earlier-too-long":
+            entry["revision_suspects"]["2026-09-15"] = {"seen_on": "2026-09-18", "yahoo": None,
+                                                        "earlier": [{"seen_on": "2026-09-17", "yahoo": None}] * 9}
+        elif mutate == "gaps-not-a-list":
+            entry["unobserved_gap_days"] = "2026-09-18"
         else:
             entry["pre_suspect"] = {"fetched_on": "2026-09-18", "start": "2026-09-20", "end": "2026-09-10", "bars": {}}
         tmp_path.joinpath("AAA.json").write_text(json.dumps(entry), encoding="utf-8")

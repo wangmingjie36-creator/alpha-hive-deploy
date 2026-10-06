@@ -221,7 +221,8 @@ class TestRevisions:
         _, got = _fetch(s1, revised)
         assert got["2026-09-15"] == m["2026-09-15"], "只是嫌疑：最新版本仍是旧值"
         f = _file(tmp_path)
-        assert f["revisions"] == {} and f["revision_suspects"] == {"2026-09-15": {"seen_on": "2026-09-22", "yahoo": _bar(555.0)}}
+        assert f["revisions"] == {} and f["revision_suspects"] == {"2026-09-15": {"seen_on": "2026-09-22", "yahoo": _bar(555.0),
+                                                                             "earlier": []}}
         assert (s1.stats()["revisions_new"], s1.stats()["revised_bars"]) == (0, 0)
         s2 = _store(tmp_path, "2026-09-23")
         _, got = _fetch(s2, revised)
