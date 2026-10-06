@@ -202,6 +202,17 @@ class _HivePaths:
         return self.home / "replay_ohlc_state"
 
     @property
+    def migrations_state(self) -> Path:
+        """数据迁移运行器的运行记录目录（v0.45.419，阶段 7，`data_migrations.runner`）。
+
+        写：运行器——`applied.jsonl`（只追加：每条迁移 / 手工修复工具的「谁、何时、改了多少行、备份在哪」，
+        含补记的历史手工修复）。**不是可重建缓存**：它是「这个库被动过什么」的唯一机器可读记录，丢了就只剩
+        CHANGELOG 文字与散落的备份文件 ⇒ 进数据备份（`data_backup/export.py` 的 `STATE_DIRS`）。
+        调用时求值（读 `ALPHA_HIVE_HOME`）；只读路径不建目录（写入方自己 `mkdir`）。
+        """
+        return self.home / "migrations_state"
+
+    @property
     def data_backup_repo(self) -> Path:
         """数据备份仓库的工作区（`data_backup/run_backup.py`，编排器 Step 14 每个扫描日提交一次）（v0.45.408）。
 

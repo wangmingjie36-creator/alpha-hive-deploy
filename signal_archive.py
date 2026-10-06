@@ -1667,7 +1667,9 @@ def main() -> int:
                     help="仅回填这些信号（逗号分隔）。⚠️ 不带时用当前抽取器重写全部信号，"
                          "没按口径取值的抽取器会把旧口径写回来——先 --dry-run，见 backfill() docstring")
     ap.add_argument("--dry-run", action="store_true",
-                    help="与 --backfill 连用：只报新增/改值/不变行数，不写库")
+                    help="（--backfill 的缺省行为，保留兼容）只报新增/改值/不变行数，不写库")
+    ap.add_argument("--apply", action="store_true",
+                    help="与 --backfill 连用：真写库（先在线备份到 _manual_backups/；缺省是 dry-run，v0.45.419）")
     ap.add_argument("--analyze", action="store_true", help="分析每个信号的 IC")
     ap.add_argument("--list", action="store_true", help="列出已归档信号与覆盖度")
     ap.add_argument("--horizon", choices=["t7", "t30"], default="t7")
@@ -1689,14 +1691,28 @@ def main() -> int:
 
     if args.dry_run and not args.backfill:
         ap.error("--dry-run 只能与 --backfill 连用")
+    if args.apply and not args.backfill:
+        ap.error("--apply 只能与 --backfill 连用")
+    if args.apply and args.dry_run:
+        ap.error("--apply 与 --dry-run 互斥")
     if args.only and not args.backfill:
         ap.error("--only 只能与 --backfill 连用")
     if args.pool_generations and not args.analyze:
         ap.error("--pool-generations 只能与 --analyze 连用")
     if args.backfill:
         only = [s.strip() for s in args.only.split(",") if s.strip()] if args.only else None
-        st = backfill(db_path=db, only=only, dry_run=args.dry_run)
-        if args.dry_run:
+        dry = not args.apply   # v0.45.419：回填缺省 dry-run（旧缺省直接写库且不备份）
+        bk = None
+        if not dry:
+            from data_migrations.runner import backup_before_write
+            try:
+                bk = backup_before_write(db, "signal-archive-backfill")
+            except Exception as e:  # noqa: BLE001 —— 没有备份就不写
+                print(f"❌ 写库前备份失败（{type(e).__name__}: {e}），已中止未写库。", file=sys.stderr)
+                return 2
+            print(f"已备份 → {bk}")
+        st = backfill(db_path=db, only=only, dry_run=dry)
+        if dry:
             print(f"🔍 dry-run（未写库）：{st['files']} 个文件（跳过 {st['skipped']}）"
                   f" → 新增 {st['new']} / 改值 {st['changed']} / 不变 {st['same']}")
             for s, c in sorted(st["by_signal"].items()):
@@ -1704,6 +1720,9 @@ def main() -> int:
         else:
             print(f"✅ 回填完成：{st['files']} 个文件 → {st['rows']} 行"
                   f"（跳过 {st['skipped']}）")
+            from data_migrations.runner import record_tool_run
+            record_tool_run("signal_archive.backfill", rows_affected=st["rows"], backup=str(bk),
+                            args=f"--only {args.only}" if args.only else "", db_path=db)
 
     if args.list:
         if not db.exists():
