@@ -13,10 +13,10 @@ export async function renderMethod(root, alive) {
 
     h("h2", {}, "这些数字是什么"),
     h("ul", {},
-      h("li", {}, h("b", {}, "GEX"), "：每张合约 sign·γ·OI·100·S²·0.01，单位是「现价每变动 1% 对应的美元」。call 记正、put 记负——即假设做市商多 call、空 put（朴素 OI 口径，GEXBot 的 Classic 也是这个口径，它自己称之为 naive）。"),
+      h("li", {}, h("b", {}, "GEX"), "：每个合约 sign·γ·OI·100·S²·0.01，单位是「现价每变动 1% 对应的美元」。call 记正、put 记负——即假设做市商多 call、空 put（朴素 OI 口径，GEXBot 的 Classic 也是这个口径，它自己称之为 naive）。"),
       h("li", {}, h("b", {}, "DEX"), "：Δ·OI·100·S，", h("b", {}, "持有者口径"), "（call 为正、put 为负），与 GEX 的做市商符号相反，不能加在一起。"),
       h("li", {}, h("b", {}, "Vanna / Charm"), "：做市商符号；vanna 是每 1 个波动率点的美元 delta，charm 是每个日历日的美元 delta。"),
-      h("li", {}, h("b", {}, "Zero Gamma"), "：每张合约固定自身 IV，在现价 ±20% 的 81 个假想价格上重算总 GEX，找曲线过零点。不是「相邻行权价净 GEX 变号」——后者几乎总落在现价旁边。"),
+      h("li", {}, h("b", {}, "Zero Gamma"), "：每个合约固定自身 IV，在现价 ±20% 的 81 个假想价格上重算总 GEX，找曲线过零点。不是「相邻行权价净 GEX 变号」——后者几乎总落在现价旁边。"),
       h("li", {}, h("b", {}, "净 Major+ / Major−"), "：净 GEX 最大为正 / 最小为负的行权价。旧「call wall / put wall」是单边极值，另列为「单边极值」，两者不是一个量。"),
       h("li", {}, h("b", {}, "P(ITM)"), "：到期 ITM 的风险中性概率 N(d2)，不是 |Δ|。")),
 
@@ -30,7 +30,7 @@ export async function renderMethod(root, alive) {
 
     h("h2", {}, "环境路由（冻结规则 v", String(r.rule_version ?? "—"), "）"),
     h("ol", {},
-      h("li", {}, "读 ", code(r.view || "le_45dte"), " 视图；扫描用到的合约少于 ", String(r.min_sweep_contracts ?? "—"), " 张 ⇒ 两侧不可用。"),
+      h("li", {}, "读 ", code(r.view || "le_45dte"), " 视图；扫描用到的合约少于 ", String(r.min_sweep_contracts ?? "—"), " 个 ⇒ 两侧不可用。"),
       h("li", {}, "现价处净 gamma 为负 ⇒ put、call 都退到远档 ", num(r.far_rung, 2), "Δ。"),
       h("li", {}, "为正时：下方最近零点距现价 ≤ ", num(r.flip_buffer_pct, 1), "% ⇒ put 退到远档，否则基线档 ", num(r.base_rung, 2), "Δ；call 一律基线档。")),
     h("p", {}, "路由只决定「取梯子的哪一档」，不产出任何加减分，也不进 Alpha Hive 的评分。梯子各档：",
