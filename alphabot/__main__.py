@@ -48,9 +48,11 @@ def main(argv=None) -> int:
         poller = None
         print(f"alphabot: 演示模式（合成数据；状态写临时目录 {tmp}）", file=sys.stderr)
     else:
-        if os.environ.get("ALPHA_HIVE_HOME") is None:
-            print("alphabot: ⚠️ 未设 ALPHA_HIVE_HOME ⇒ 读的是代码目录下的账本，不是生产数据根；"
-                  "生产请先 export ALPHA_HIVE_HOME=<数据根>（与编排器 / MCP 同一个值）", file=sys.stderr)
+        if not os.environ.get("ALPHA_HIVE_HOME"):
+            from hive_logger import PATHS
+            # v0.45.422 起未设时取缺省数据根 ~/alpha-hive-data（与编排器同址）；此前这里警告「读的是代码目录」
+            print(f"alphabot: 未设 ALPHA_HIVE_HOME ⇒ 用缺省数据根 {PATHS.home}"
+                  "（与编排器同址；数据根在别处请 export ALPHA_HIVE_HOME=<数据根>）", file=sys.stderr)
         svc = AlphaBotService()
         poller = None if args.no_poll else IntradayPoller(svc)
     holder = {}

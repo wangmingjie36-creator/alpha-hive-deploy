@@ -1145,7 +1145,7 @@ class TestHomeSandboxHasTeeth:
 
 def _forbid_side_effects(monkeypatch):
     """守卫若失效，`run()` 会往下走到 git init / 导出——这里一律变成可见的失败而不是真去做，
-    `ALPHA_HIVE_HOME` 未设的用例里那等于在代码检出里动手。返回调用记录供断言「一次都没碰」。"""
+    `ALPHA_HIVE_HOME` 指到检出的用例里那等于在代码检出里动手。返回调用记录供断言「一次都没碰」。"""
     calls = []
 
     def no_git(args, cwd, timeout=None):
@@ -1166,7 +1166,8 @@ class TestBackupRepoFollowsPaths:
 
     此前 `run_backup.main` / `export.main` 缺省值与编排器 Step 14 各写死一份
     `~/alpha-hive-data/_git_backup`。生产里 `ALPHA_HIVE_HOME=~/alpha-hive-data` ⇒ 新旧同值；
-    `ALPHA_HIVE_HOME` 未设时新缺省落进代码检出 ⇒ 由「备份仓不许在代码仓库里」拦下。
+    `ALPHA_HIVE_HOME` 未设时 v0.45.422 起取 `$HOME/alpha-hive-data/_git_backup`（之前落进代码检出）；
+    被显式设成代码检出（阶段 5 回退）⇒ 由「备份仓不许在代码仓库里」拦下。
     """
 
     def _capture_run(self, monkeypatch):
@@ -1250,11 +1251,22 @@ class TestBackupRepoFollowsPaths:
         got = export_mod.backup_repo_inside_code_repo(spelled / "_git_backup")
         assert got == (code.resolve() if same_dir else None), (spelled, same_dir, got)
 
-    def test_unset_alpha_hive_home_lands_in_checkout_and_is_refused_end_to_end(self, tmp_path, monkeypatch):
-        """用户交互 shell 没设 `ALPHA_HIVE_HOME`（2026-10-03 实测）——手动跑不传 --backup-dir 时，
-        新缺省解析到 `<代码检出>/_git_backup`。这条钉住：CLI 全链路在那里拒绝，rc=2、stage=init。"""
+    def test_unset_alpha_hive_home_defaults_to_home_data_root(self, tmp_path, monkeypatch, _sandbox_home):
+        """用户交互 shell 没设 `ALPHA_HIVE_HOME`（2026-10-03 实测）：v0.45.422 起缺省 = `$HOME/alpha-hive-data/_git_backup`，
+        与编排器 export 的生产值同址（本文件 HOME 已是沙箱）。此前这里解析到 `<代码检出>/_git_backup`。"""
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
-        monkeypatch.delenv("ALPHA_HIVE_GIT_REPO", raising=False)
+        seen = self._capture_run(monkeypatch)
+        assert run_backup.main(["--src", str(tmp_path)]) == 0
+        assert seen == [_sandbox_home / "alpha-hive-data" / "_git_backup"]
+        assert export_mod.backup_repo_inside_code_repo(seen[0]) is None
+
+    def test_alpha_hive_home_pointing_at_checkout_is_refused_end_to_end(self, tmp_path, monkeypatch):
+        """阶段 5 回退的配置（`ALPHA_HIVE_HOME` 设成代码检出、不传 --backup-dir）：缺省解析进检出 ⇒
+        CLI 全链路拒绝，rc=2、stage=init。检出用 tmp 替身（`ALPHA_HIVE_GIT_REPO`），git / 导出都是「一调就炸」的桩。"""
+        code = tmp_path / "code"
+        code.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(code))
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(code))
         default = export_mod.default_backup_repo()
         assert export_mod.backup_repo_inside_code_repo(default) is not None, default
         existed_before = default.exists()   # 比前后，不断言「不存在」：检出里若本有残留，不该算守卫的账

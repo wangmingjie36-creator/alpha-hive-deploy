@@ -168,19 +168,20 @@ def state_dir_status(state_dir=None) -> dict:
     """只读出口的前置判定：账本状态目录在不在（**不建目录**）。`{"path", "exists", "hint"}`，
     exists=False 时 hint 写明可能病因。
 
-    为什么要单独判（2026-09-28 实测）：不带 `ALPHA_HIVE_HOME` 手动跑 `--assess`，`PATHS.home` 回落到
+    为什么要单独判（2026-09-28 实测）：不带 `ALPHA_HIVE_HOME` 手动跑 `--assess`，`PATHS.home` 当时回落到
     代码目录，`<仓库>/sell_strike_state/` 根本不存在——`_shard_paths` 对缺目录返回 `[]`，于是 CLI 印出
     「账本里还没有任何行」，而生产账本（真数据根下）每档 29 行 pending。「找错了地方」被说成了「账本是空的」。
-    读路径照旧不建目录；这里只把「目录不在」作为事实交给出口去说。"""
+    读路径照旧不建目录；这里只把「目录不在」作为事实交给出口去说。
+    v0.45.422 起未设时取缺省数据根 `~/alpha-hive-data`（与生产同址），本判定仍有用：别的机器上那里没有账本。"""
     p = _state_dir(state_dir)
     if p.is_dir():
         return {"path": str(p), "exists": True, "hint": None}
     env = os.environ.get("ALPHA_HIVE_HOME")
     if state_dir:
         hint = "显式传入的 --state-dir / state_dir 不存在（路径写错了？）"
-    elif env is None:
-        hint = ("未设置 ALPHA_HIVE_HOME ⇒ PATHS.home 回落到代码目录，读的不是生产数据根；"
-                "生产由编排器 export（scripts/alpha-hive-orchestrator.sh），手动 / 诊断跑请先 export 同一个值")
+    elif not env:   # 空串按未设（同 hive_logger.resolve_data_root）
+        hint = (f"未设置 ALPHA_HIVE_HOME ⇒ 用缺省数据根 {PATHS.home}，那里没有卖权账本目录："
+                "这台机器不是生产机？还是首次扫描之前？（生产数据根由编排器 export，缺省值与之同址）")
     else:
         hint = f"ALPHA_HIVE_HOME={env!r} 下没有卖权账本目录：首次扫描之前？还是指错了数据根？"
     return {"path": str(p), "exists": False, "hint": hint}
@@ -1592,8 +1593,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     3 无法判定（一行都没记上，或两档都无数据——含状态目录不存在：摘要行写明路径与病因，不说「账本为空」）。
     ⚠️ 3 而非 2：编排器 `run_step()` 把 2 保留给「脚本不存在」（同 vrp_signal）。多个动作取最大码。
     `--assess` 只读、**不冻结**（冻结的唯一写者是日报钩子）：就绪但未冻结时显示「已就绪，等待日报冻结」。
-    未设 `ALPHA_HIVE_HOME` 且没给 `--state-dir` ⇒ stderr 先提醒一句读写的是哪个目录（目录碰巧存在时，
-    摘要行不会报缺目录，这是唯一能看出「找错了数据根」的地方）。只打印，不改任何读写行为。"""
+    未设 `ALPHA_HIVE_HOME` 且没给 `--state-dir` ⇒ stderr 先说一句读写的是哪个目录（目录碰巧存在时，
+    摘要行不会报缺目录，这是唯一能看出「找错了数据根」的地方）。只打印，不改任何读写行为。
+    v0.45.422 起未设时取缺省数据根 `~/alpha-hive-data`（此前回落到代码目录，这里曾是 ⚠️ 警告）。"""
     ap = argparse.ArgumentParser(description="卖权行权价账本：记录 / 结算 / 就绪度")
     ap.add_argument("--date", default=None, help="业务日 YYYY-MM-DD（默认 PDT 今天）")
     ap.add_argument("--run", action="store_true", help="run_for_date：取链、记录两档、结算")
@@ -1603,9 +1605,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--state-dir", default=None, help="账本目录（缺省 PATHS.sell_strike_state）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
-    if not args.state_dir and os.environ.get("ALPHA_HIVE_HOME") is None:
-        print(f"⚠️ 未设置 ALPHA_HIVE_HOME：PATHS.home 回落到代码目录，本次读写的是 {_state_dir()}"
-              "（生产数据根由编排器 export；手动 / 诊断跑请先 export 同一个值，或传 --state-dir）",
+    if not args.state_dir and not os.environ.get("ALPHA_HIVE_HOME"):
+        print(f"ℹ️ 未设置 ALPHA_HIVE_HOME：按缺省数据根读写 {_state_dir()}"
+              "（生产编排器 export 的也是 ~/alpha-hive-data；要读别处请传 --state-dir 或 export）",
               file=sys.stderr)
     try:
         # 未来日期一律拒绝（不止写路径）：CLI 的 --date 是人手敲的，年份写错最常见

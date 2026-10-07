@@ -524,7 +524,7 @@ class TestPaths:
 
 class TestMissingStateDirIsNotEmpty:
     """缺目录 ≠ 空账本（v0.45.382）。2026-09-28 实测：不带 `ALPHA_HIVE_HOME` 手动跑 `--assess`，
-    `PATHS.home` 回落到代码目录、`<仓库>/sell_strike_state/` 不存在，CLI 却印「账本里还没有任何行」——
+    `PATHS.home` 当时回落到代码目录（v0.45.422 起缺省 `~/alpha-hive-data`）、`<仓库>/sell_strike_state/` 不存在，CLI 却印「账本里还没有任何行」——
     生产账本每档 29 行 pending。每个只读出口都要把两种情形分开说，且读路径**不建目录**。"""
 
     def test_assess_and_summary_distinguish_missing_from_empty(self, tmp_path):
@@ -551,16 +551,16 @@ class TestMissingStateDirIsNotEmpty:
         assert not missing.exists(), "只读出口不许为了看一眼造出目录"
 
     def test_hint_names_the_likely_cause(self, tmp_path, monkeypatch):
-        """三种病因各给各的提示；目录在 ⇒ 无提示。`PATHS.home` 的回落目标换成 tmp 替身
-        （同 `TestConftestDefensesWired`），不依赖真仓库里碰巧有没有 `sell_strike_state/`。
+        """三种病因各给各的提示；目录在 ⇒ 无提示。未设 env 时的缺省数据根（v0.45.422 起 `$HOME/alpha-hive-data`）
+        经假 HOME 换成 tmp 替身，不依赖、也不碰真家目录下碰巧有没有 `sell_strike_state/`。
         变异：不区分 env 未设 / 显式路径 / env 已设。"""
-        import hive_logger
-        fake_code = tmp_path / "checkout"
-        monkeypatch.setattr(hive_logger, "__file__", str(fake_code / "hive_logger.py"))
+        fake_home = tmp_path / "fake_home"
+        monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        default_root = fake_home / "alpha-hive-data"
         st = LG.state_dir_status()
-        assert st["path"] == str(fake_code / "sell_strike_state") and st["exists"] is False
-        assert "未设置 ALPHA_HIVE_HOME" in st["hint"]
+        assert st["path"] == str(default_root / "sell_strike_state") and st["exists"] is False
+        assert "未设置 ALPHA_HIVE_HOME" in st["hint"] and str(default_root) in st["hint"]
 
         data = tmp_path / "data"
         monkeypatch.setenv("ALPHA_HIVE_HOME", str(data))
@@ -570,7 +570,7 @@ class TestMissingStateDirIsNotEmpty:
 
         (data / "sell_strike_state").mkdir(parents=True)
         assert LG.state_dir_status() == {"path": str(data / "sell_strike_state"), "exists": True, "hint": None}
-        assert not fake_code.exists()
+        assert not fake_home.exists(), "只读判定不许建出缺省数据根"
 
     def test_cli_assess_says_missing_not_empty(self, tmp_path, monkeypatch, capsys):
         """CLI 就是事故现场：缺目录 ⇒ 退出码 3（无法判定）+ 摘要写明路径与病因；目录在但无行 ⇒ 老话。
@@ -588,15 +588,15 @@ class TestMissingStateDirIsNotEmpty:
         assert LG.main(["--assess", "--date", AS_OF, "--state-dir", str(empty)]) == 3
         assert capsys.readouterr().out.count("账本里还没有任何行") == len(LG.TENORS)
 
-        import hive_logger
-        fake_code = tmp_path / "checkout"
-        monkeypatch.setattr(hive_logger, "__file__", str(fake_code / "hive_logger.py"))
+        fake_home = tmp_path / "fake_home"
+        monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
         assert LG.main(["--assess", "--date", AS_OF]) == 3
         cap = capsys.readouterr()
-        assert "未设置 ALPHA_HIVE_HOME" in cap.err and str(fake_code / "sell_strike_state") in cap.err
+        default_state = fake_home / "alpha-hive-data" / "sell_strike_state"
+        assert "未设置 ALPHA_HIVE_HOME" in cap.err and str(default_state) in cap.err
         assert "账本里还没有任何行" not in cap.out and "未设置 ALPHA_HIVE_HOME" in cap.out
-        assert not fake_code.exists()
+        assert not fake_home.exists(), "只读的 --assess 不许建出缺省数据根"
 
     def test_mcp_exits_distinguish_missing_from_empty(self, tmp_path):
         """MCP 两条路径（给日期读账本 / 现算）：缺目录 ⇒ reason `ledger_state_dir_missing` + 路径，

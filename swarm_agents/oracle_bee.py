@@ -48,6 +48,23 @@ OPTIONS_DQ_MARKER = "options_dq_from_agent"
 HV_GAP_MARKER = "hv_gap_checked"
 
 
+def _unusual_flow_status(flow) -> dict:
+    """异常期权流取数状态的紧凑记录（v0.45.421，只记录、不进评分）。
+
+    `detect_unusual_flow` 没跑到（import 失败 / 抛异常被上层吞）⇒ flow 为空 ⇒ status="not_run"。"""
+    f = flow or {}
+    return {"status": f.get("fetch_status") or ("not_run" if not f else "unknown"),
+            "data_source": f.get("data_source"),
+            "chains_total": f.get("chains_total"), "chains_failed": f.get("chains_failed"),
+            "retries": f.get("retries"),
+            "reason": f.get("failure_reason") or None}
+
+
+def _unusual_flow_ok(flow):
+    """取到了数据 ⇒ True；否则 None（不是 False：覆盖率闸把 False 当「有值」，见 scan_coverage_gate._present）。"""
+    return True if _unusual_flow_status(flow)["status"] in ("ok", "partial") else None
+
+
 def _options_data_usable(result) -> bool:
     """OptionsAgent 的结果算不算「取到了期权数据」。v0.45.369。
 
@@ -490,7 +507,12 @@ class OracleBeeEcho(BeeAgent):
                          # v0.45.369：同理，世代印记（见 OPTIONS_DQ_MARKER）
                          OPTIONS_DQ_MARKER: True,
                          # v0.45.383：同理（见 HV_GAP_MARKER）；放在展开之后，不依赖 OptionsAgent 结果里有没有 hv_gap
-                         HV_GAP_MARKER: True},
+                         HV_GAP_MARKER: True,
+                         # v0.45.421：异常期权流（yfinance 链）取数状态，**只记录、不进评分**。`unusual_flow_ok` 为 True 表示
+                         # 取到了数据（"ok" / "partial"），取不到是 None——`scan_coverage_gate` 按「有值 = 取到」数覆盖率；
+                         # 键本身在 ⇒ 新代码产出（旧结果没有这个键，闸据此判「未记录」而不是「全降级」）。
+                         "unusual_flow_ok": _unusual_flow_ok(unusual_flow),
+                         "unusual_flow_status": _unusual_flow_status(unusual_flow)},
             ).to_dict()
 
         except AGENT_ERRORS as e:

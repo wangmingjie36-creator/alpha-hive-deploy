@@ -11,10 +11,9 @@ v0.45.264 起已接入生产编排器 `alpha-hive-orchestrator.sh` Step 14
   0），旧代码会把 128 误判成"有变化"进而尝试 commit，commit 失败后把"仓库
   根本没初始化成功"误标成 `stage: "commit"`（v0.45.278 修）。
 - **备份仓落在代码仓库里**（v0.45.414）→ 同样 `stage: "init"`、退出码 2，另记
-  `refused: "inside_code_repo"`；什么都不建、不导出。`--backup-dir` 缺省改走
-  `PATHS.data_backup_repo` 后，`ALPHA_HIVE_HOME` 未设（如交互 shell 手动跑）就会解析到
-  `<代码检出>/_git_backup`——此前缺省写死 `~/alpha-hive-data/_git_backup`，与 `ALPHA_HIVE_HOME`
-  无关，这个差别只在生产 env 下不存在。
+  `refused: "inside_code_repo"`；什么都不建、不导出。`--backup-dir` 缺省走 `PATHS.data_backup_repo`：
+  `ALPHA_HIVE_HOME` 被设成代码检出（阶段 5 回退）就会解析进检出；v0.45.422 前它**未设**时也会
+  （那时 `PATHS.home` 兜底到检出，现在取 `~/alpha-hive-data`）。
 - 导出失败（如并发写检测命中、源库不存在）→ 未提交，`status.json` 记
   `stage: "export"`, `ok: false`, 退出码 2。
 - 密钥扫描命中 → 不提交，`status.json` 记 `stage: "secret_scan"`, `ok: false`，
@@ -150,8 +149,8 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
     status: dict = {"date": t0.strftime("%Y-%m-%d"), "started_at": t0.isoformat(timespec="seconds"),
                      "src": str(src), "backup_dir": str(backup_dir), "remote": remote, "branch": branch}
 
-    # v0.45.414：备份仓不许落在代码仓库里（缺省值改走 PATHS 后，ALPHA_HIVE_HOME 未设就会解析到
-    # 代码检出）。在 init 之前拦，记 stage="init"——编排器 Step 14 现成的分支报「未导出未提交」，正是实情。
+    # v0.45.414：备份仓不许落在代码仓库里（显式传参，或 ALPHA_HIVE_HOME 指到检出时缺省就解析进去）。
+    # 在 init 之前拦，记 stage="init"——编排器 Step 14 现成的分支报「未导出未提交」，正是实情。
     # 判定本身失败（hive_logger 不可 import）同样中止：判不了就不建库。
     try:
         code_repo = export_mod.backup_repo_inside_code_repo(backup_dir)

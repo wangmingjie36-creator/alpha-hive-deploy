@@ -314,8 +314,9 @@ def default_backup_repo() -> Path:
     此前 `run_backup.main` / 本文件 `main` 的缺省值与编排器 Step 14 各写死一份
     `~/alpha-hive-data/_git_backup`——阶段 3 早于全局迁移，备份子系统只能自己指向新数据根。
     阶段 5 后 `ALPHA_HIVE_HOME` 已由编排器与 launchd plist 导出，三处收成这一处。
-    ⚠️ 与旧值只在 `ALPHA_HIVE_HOME` 是生产值时相同：未设时 `PATHS.home` 兜底到**代码检出**，
-    缺省会落进代码仓库——由 `backup_repo_inside_code_repo` 拦下，不会在那里建库。
+    `ALPHA_HIVE_HOME` 未设时 `PATHS.home` 取缺省数据根 `~/alpha-hive-data`（v0.45.422；之前兜底到代码检出，
+    那时缺省会落进代码仓库）。显式把 `ALPHA_HIVE_HOME` 指到检出（阶段 5 回退的配置）仍由
+    `backup_repo_inside_code_repo` 拦下，不会在那里建库。
     不吞 import 失败：这不是只作记录的字段（对照 `_code_git_head`），解析不出就不该往下跑。
     """
     from hive_logger import PATHS
@@ -325,9 +326,9 @@ def default_backup_repo() -> Path:
 def backup_repo_inside_code_repo(path: Path) -> Path | None:
     """`path` 落在代码仓库里（含就是仓库根）⇒ 返回代码仓库根；否则 None（v0.45.414）。
 
-    代码仓库 = `PATHS.git_repo_root`（不读 `ALPHA_HIVE_HOME`）。拦的是 `ALPHA_HIVE_HOME` 未设时
-    `default_backup_repo()` 解析到 `<检出>/_git_backup`：导出会把整份生产数据铺进代码检出，
-    之后 `run()` 再在里面 `git init` 出一个嵌套数据仓库。显式传参同样拦——备份仓没有理由在代码仓库里。
+    代码仓库 = `PATHS.git_repo_root`（不读 `ALPHA_HIVE_HOME`）。拦的是备份仓解析进代码检出：导出会把整份
+    生产数据铺进检出，之后 `run()` 再在里面 `git init` 出一个嵌套数据仓库。触发方式：显式 `--backup-dir`、
+    或 `ALPHA_HIVE_HOME` 被设成检出（阶段 5 回退）；v0.45.422 前 `ALPHA_HIVE_HOME` **未设**也会（那时兜底到检出）。
 
     判「同一目录」比 (st_dev, st_ino)，不只比字符串（二次检查补）：`resolve()` 不折叠大小写（APFS 默认不分）
     也不折叠固件链接（`/System/Volumes/Data/Users/…`），10-03 实测这两种写法都与检出同 inode、字符串前缀却不同

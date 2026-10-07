@@ -5,6 +5,25 @@
 
 ---
 
+## [0.45.425] — 2026-10-07 — Added：异常期权流取数重试与退避——只重试「令牌等待超时」与瞬时网络错误，429 / 冷却 / 其它不重试；不改评分
+
+接 v0.45.421（让失败可见）：这版减少失败本身。2026-10-05 重跑 28/30 只丢了异常流，日志里能对上的失败有两类：yf_gate 共享令牌桶（0.5 req/s）排队超过 60s ⇒ `YFRateLimited("等待 yfinance 限流令牌超过 60s（Ticker.options）")`（14:28~14:29 的 `options_analyzer` / `unusual_options` 各有一条），以及 `curl: (35) TLS connect error`（重跑日志里 VZ、DE）。两者都是「错开即恢复」型：前者是自己人抢同一个桶，后者是瞬时握手。
+
+### Added
+- `unusual_options`：`.options` 与每个 `option_chain` 取数套上重试。**只重试** `token_wait`（令牌等待超时）与 `transient`（`ConnectionError` / `TimeoutError` / `OSError`）；`cooldown`（yf_gate 冷却中）、`rate_limited`（识别出的 429）、`other` 一律**不重试**——与 yf_gate 的设计一致（「一次 429 的含义是现在就停，不是再试试」）。
+- 预算：每只标的共用 2 次（退避 10s、20s，`RETRY_BACKOFF_S`）；进程内累计 `RETRY_CIRCUIT_TRIP`（5）只标的把预算用光后**不再重试**——持续饥饿时继续等只会拖长整轮扫描、并加重对共享桶的占用；断路只停重试、不停取数。
+- 失败原因带类别：`failure_reason` 里 `[token_wait]` / `[cooldown]` / `[rate_limited]` / `[transient]` / `[other]`；返回加 `retries`，Oracle 的 `unusual_flow_status` 带上它——下一次降级发生时，能直接看出是哪一类。
+- 重试每次打 WARNING（标的、动作、类别、退避、第几次）。
+
+### 守卫（`tests/test_unusual_options_retry.py`，16 条；`test_oracle_unusual_flow_visibility.py` 加不真睡的 autouse 夹具）
+- 令牌超时两次后成功（睡 10s、20s）/ 单个到期日 TLS 抖动一次后成功 / 成功路径不睡 / 预算共享并耗尽（第二个到期日直接失败不再睡）/ 冷却、429、其它异常各自不重试 / 断路器 / 类别判定表（含「令牌超时是 `ConnectionError` 子类 `YFRateLimited`，必须先认成可重试而不是 429」）。
+- 变异 8 个（先提交后变异）：全部类别都重试 / 断路器不触发 / 冷却不识别 / 429 判定顺序对调 / transient 不重试 / `retries` 不记录 / 类别标记丢失 / 退避置 0——全红。
+- 真网络冒烟（交易时段，yf_gate 已装）：AMZN、VZ 各 `ok`、0 次重试、约 14s/只。
+
+### 注意
+- **不改评分，也不保证消灭降级**：持续饥饿（比如整轮令牌桶一直被占满）时，两次重试用完照样失败——那时 421 的可见化会如实报出，`failure_reason` 的类别指明是令牌饥饿。真正的根治是降低对共享桶的需求（每只标的 `.options` + 最多 4 个 `option_chain` = 5 个令牌，30 只合计 150 个、占 0.5 req/s 的桶 300 秒），这属于另外一件事：是否给 Oracle 的这一路单独限速 / 排序，**待用户定**。
+- 流程说明：本版代码与占位被我同一次 `git push HEAD:main` 一起推上去了（代码先于干净克隆全套），事后补跑——干净克隆全套 8359 通过，只有已知的日历覆盖失败（`TestCoverageHorizon`）。
+
 ## [0.45.424] — 2026-10-07 — Added：Alpha Bot「跨式账本」页（持仓 / 平仓 / 净值 / 逐仓风险 + 盘中参考报价）；财报跨式信号的 GEX 影子记录与预注册检验（不改开单）
 
 用户要两件事：① 财报跨式账本做成可视化，不用每天问；② 用 Alpha Bot 的 gamma 数据让跨式策略更完善。
@@ -49,9 +68,79 @@
 
 ## [0.45.423] — 2026-10-07 — 占位（进行中：`portfolio_greeks` 标的现价可能是前一交易日的收盘——改取与 CBOE 期权报价同一时刻的价，陈旧价不再静默进 $Delta / SPY 对冲）
 
-## [0.45.422] — 2026-10-07 — 占位（进行中：`PATHS.home` 未设 `ALPHA_HIVE_HOME` 时不再兜底到代码检出——手动运行不再静默读写冻结的旧数据）
+## [0.45.422] — 2026-10-07 — Changed：数据根缺省改为 `~/alpha-hive-data`——未设 `ALPHA_HIVE_HOME` 时不再兜底到代码检出（手动运行不再静默读写冻结旧数据）；测试会话在收集之前设会话级沙箱
 
-## [0.45.421] — 2026-10-07 — 占位（进行中：Oracle 异常期权流取数失败可见化——区分「取数失败」与「无异常」、降级比例进 Step 12 覆盖率闸；不改评分）
+**问题**：`PATHS.home` 未设 `ALPHA_HIVE_HOME` 时兜底到 `hive_logger.py` 所在目录（代码检出）。阶段 5 之前数据就在那里，这是对的；
+阶段 5 把生产数据搬到 `~/alpha-hive-data` 后，检出里只剩搬家那天冻结的旧数据。交互 shell 不设该变量（10-03 实测）⇒ 手动跑的工具
+**静默**读写旧数据：不报错、结果看着正常；写入类工具把新东西写进检出，生产看不到。此前只在几个出口加了「未设 ⇒ 读的是代码目录」的提醒，
+备份加了守卫（v0.45.414），其余工具都没有。用户选方案 A（缺省取生产位置），不选「未设即报错」。
+
+**生产不受影响**：编排器 `export ALPHA_HIVE_HOME`、launchd plist、MCP（`~/.claude.json` 的 `mcpServers.alpha_hive.env`）都显式设着
+（10-07 只读核对）；Alpha Bot.app 的启动器自己传用户选的数据根。
+
+### Changed
+- `hive_logger.py`：新增 `resolve_data_root(environ=None)`（唯一规则：`ALPHA_HIVE_HOME` 非空就用它，否则 `$HOME/alpha-hive-data`；
+  空串按未设，与 `tests/_root_data_guard.real_data_root` 同口径；纯函数不建目录）与 `DEFAULT_DATA_ROOT_NAME`；`PATHS.home` 改调它。
+  `environ` 参数给测试框架用「调用 pytest 时」的环境求真实数据根。
+- `tests/conftest.py`：
+  - `pytest_configure` 先记下调用时的 `ALPHA_HIVE_HOME` / `HOME`，再设**会话级** `ALPHA_HIVE_HOME` 沙箱——必须早于收集：收集期 import
+    就冻住的 PATHS 派生常量（`config.py` 的 *_CONFIG、若干 `BASE_DIR`…）在缺省改成生产位置后，否则会指向本机真实生产数据。
+  - `pytest_sessionstart` 的真实数据根闸、`_real_paper_portfolio_state_dir` 的真身都改按调用时环境求（读 os.environ 会把会话沙箱当成
+    「生产」——v0.45.303 那种守卫盯着自己的失明）；真身夹具的防漂移自检改为在收集期环境下比同一推导。
+  - 顺带修正：交互 shell 不设变量时，paper_portfolio 真身此前其实落在**代码检出里的冻结副本**上——守卫一直盯着旧数据，不是生产。
+  - 新夹具 `data_root_session_facts`（conftest 不可 import，照 `artifact_signature` 的惯例暴露）。
+- 提示语改写（不再说「回落到代码目录」）：`sell_strike_ledger`（缺目录 hint 写明缺省数据根路径；CLI 未设时 stderr 由 ⚠️ 改 ℹ️ 并写明读写目录）、
+  `alphabot/__main__`（启动提示）、`replay_scoring` / `signal_archive` / `vol_forecast`（缺库提示）。
+- 文档串 / 注释：`hive_logger`（`sell_strike_state`、`data_backup_repo`）、`data_backup/export.py`、`run_backup.py`（v0.45.414 守卫仍拦
+  「`ALPHA_HIVE_HOME` 被设成检出」与显式路径）、`backup_continuity.py`、`alphabot/launcher.py`；编排器头注释的阶段 5 回退步骤改为
+  「`DATA_DIR="$PROJECT_DIR"`、export 保留」（删掉 export 已回不到检出）——**仅注释**，`bash -n` / `orchestrator_lint` 0 命中。
+- `CLAUDE.md`：Alpha Bot 一行；「路径指向代码还是数据」一节前加数据根规则。
+
+### Tests
+- 新增 `tests/test_data_root_default.py`（10 条）：未设 / 空串 / 显式值 / 调用时求值 / 不随 `hive_logger.__file__` 变 / 传映射时不看 os.environ /
+  与 `real_data_root` 同规则；会话接线三条：收集期 `ALPHA_HIVE_HOME` 就是会话沙箱（模块级变量在收集时取值）、真实数据根闸按调用时环境、
+  paper_portfolio 真身按调用时环境且不在会话沙箱里。
+- 改写钉旧行为的测试：`test_paper_portfolio_guard_identity`（收集期一格的前提改为「冻住的 STATE_DIR 在会话沙箱里、绝不在真身下」）、
+  `test_hive_logger_not_frozen`（未设时日志落 `$HOME/alpha-hive-data/logs`，HOME 钉假目录）、`test_data_backup`（未设 ⇒ `$HOME/alpha-hive-data/_git_backup`；
+  另加「`ALPHA_HIVE_HOME` 设成检出 ⇒ 全链路拒绝」）、`test_sell_strike_ledger` 两条（假 HOME 代替假 `hive_logger.__file__`）。
+- 变异 7/7 被杀，passed+failed 均为 334：兜底改回 `__file__`（10 红）/ 空串不当未设（2）/ 忽略传入映射（5）/ 不设会话沙箱（3）/
+  闸改读 os.environ（4）/ 真身按当前环境求（3）/ 调用时环境快照取晚（8）。整轮在**假 HOME**（含空的 `alpha-hive-data` 让闸生效）下跑——
+  「不设会话沙箱」那个变异否则会让收集期常量指向本机真实生产数据。
+- 全套（换基到 main `f7ca8359` 后）：8325 passed / 1 failed（经济日历 `TestCoverageHorizon`，设计内到期）；闸 active 于真实数据根。换基前（`e726fa09`）一轮另有 1 error = 盘中 Alpha Bot 采样撞闸（5 个 `alphabot_state/intraday/2026-10-07/*.jsonl` 各多一行、`ts` 12:53 ET 落在测试窗口内——已知形状，见 memory）。两轮前后生产 `logs/alpha_hive.log` 与 `alpha_hive_structured.jsonl` 行数均不变（logs 被闸豁免，单独核对）。剥掉 `ALPHA_HIVE_*` 起子进程的测试逐个核过：
+  都显式设了 `ALPHA_HIVE_HOME` 或把 HOME 指到空目录；`env -i` 那组实测不写生产日志。
+
+### 注意
+- 交互 shell 里手动跑**会写数据的工具**，现在是真写进生产数据——与设了变量再跑完全一样，本就是正确行为，但要知道。
+- 别的机器（CI / 干净克隆）未设时缺省位置多半不存在：只读出口照旧把「目录 / 库不存在」与「空」分开说（v0.45.382 的判定）。
+- Cowork VM 若还在用、且依赖「未设 ⇒ 挂载的仓库目录」读数据：现在要显式设 `ALPHA_HIVE_HOME`（是否还在用：待验证）。
+- 测试侧 paper_portfolio 守卫现在盯真实生产：每日扫描写状态的时段跑测试会误报（与真实数据根闸同类，等扫描结束再跑）。
+
+### 未动（另立）
+- `run_backup` 的 `--status-file` / `--history-file`、`backup_continuity._history_file()` 仍写死 `Path.home()/alpha-hive-data/logs/...`（现与 `PATHS` 缺省同址）。
+- `run_backup` / `export` 的 `--src` 缺省仍是旧检出路径；`gui/app.py` 的 `_PROJECT_ROOT` 兼作数据根、不走 `PATHS`。
+- 反方向嵌套（备份仓是代码仓库的祖先）仍不拦。
+
+## [0.45.421] — 2026-10-07 — Added：Oracle 异常期权流取数失败可见化——区分「取数失败」与「无异常」、降级比例进 Step 12 覆盖率闸；**不改评分**
+
+起因：2026-10-05 首跑与重跑 9/30 只方向翻转。查下来 Oracle 的原始期权输入（`pc_ratio` / `iv_rank` / `gex` / skew / term / max_pain）两次**逐项相同**，变的是异常期权流：首跑 28/30 只的 Oracle 结论带「异常流」一段，重跑只剩 2/30，丢了它的 26 只里 9 只 bullish→neutral（Oracle bullish 18→9）。机制：`unusual_options.detect_unusual_flow` 用 yfinance 期权链，**每个到期日都取失败也返回「无异常期权流信号 / neutral / 5.0 / data_source=yfinance_chain」**（还缓存 300 秒），单个到期日失败只写 debug、`t.options` 为空（yfinance 默认吞异常）不打日志——重跑日志里只有 2 条 warning，对不上 26 只。同样降级过的日子（agent_memory 里带异常流的比例）：09-02 5/30、09-08 0/4、09-24 0/28、09-25 0/30、10-05 重跑 2/30；09-24/25 正是 F&G 前瞻检验那两个限流日。
+
+### Added
+- `unusual_options.detect_unusual_flow`：返回加 `fetch_status`（`ok` 全部到期日取到 / `partial` 部分取到 / `failed` 一个都没取到）、`failure_reason`、`chains_total`、`chains_failed`。**全部到期日取失败 ⇒ 返回 fallback 形状（`data_source="fallback"`，5.0 / neutral / 无信号，评分相关字段与旧「无异常」逐位相同）、打 WARNING、不缓存**；部分失败打 WARNING；无到期日列表 / 现价不可得 / 异常各自写 `failure_reason`（`t.options` 为空时如实写「取数失败，或该标的无期权——yfinance 无法区分」）。
+- `OracleBeeEcho` details 加 `unusual_flow_ok`（取到数据 = `True`，否则 **`None`**——覆盖率闸把 `False` 当有值）与 `unusual_flow_status`（status / data_source / chains / reason；检测器根本没跑到 = `not_run`）。**只记录、不进评分。**
+- `scan_coverage_gate.FIELDS` 加 `unusual_flow`（闸 70%，同其余字段）：10-05 重跑那种 2/30 会判降级，进 Step 12 的 `degraded` 与 attention。`recorded_key`：旧代码产出的结果没有这个键 ⇒ 渲染「未记录」、不判降级；键在而值全 `None`（全部取数失败）⇒ 照常判降级。
+
+### 守卫（`tests/test_oracle_unusual_flow_visibility.py`，17 条）
+- 取数状态 ok / partial / failed 各一条（含 WARNING 断言）、全败不缓存而成功仍缓存、无到期日 / 异常各记原因、**失败形状的评分字段与旧「无异常」相同**。
+- Oracle 层：**同一桩下旧「无异常」与新失败形状的 score / direction 逐位相同**（只加可见性的证明）；失败记 `None`、成功记 `True`、partial 算取到、检测器没跑到记 `not_run`。
+- 覆盖率闸：健康日绿、10-05 重跑形状（2/30）红且进 attention、全败（键在）红而非「未记录」、旧结果（无键）不红、阈值 70%。
+- 变异（先提交后变异，逐个还原）9 个：全败退回静默中性 / partial 不警告 / 失败被缓存 / 失败记 `False` / partial 算失败 / 闸里「未记录」判降级 / 阈值置 0 / **偷偷改评分（fallback 不混入）** / details 键被删——各自让对应守卫变红。
+
+### 注意（诚实边界）
+- **不改评分**：降级日 Oracle 仍按 5.0 中性混入（旧行为），所以降级日与正常日的 Oracle 分数仍不是同一口径。「fallback 时不混入 5.0」（A2）会改降级日分数，按项目规矩要先登记世代边界，**待用户定**。
+- 降级在 Step 12 里是 `degraded` / warn 级（与 `rv_30d` 等其它字段同通路），**不是 P1**——`alert_manager` 只对 `status == "failed"` 的步骤发 P1。要升级成 P1 需另加判据。
+- 补数据源（C，改用 CBOE 链）做过离线等价性研究：两来源方向一致率仅 57.6%（25/361 完全相反），对 T+7 收益的 IC 都不显著且互相无显著差异（配对 p=0.27），不建议现在换；B（失败时才用 CBOE）会把两种口径混进同一序列，不做。
+- 本版推送前 Oracle 在生产里**尚未**写这些键：下一次扫描（扫描前快进）起才有，首个有数据的覆盖率判定在那天的 Step 12。
+
 
 ## [0.45.420] — 2026-10-06 — Fixed：阶段 7 二次检查——运行器只读打开改走现成的 `sqlite_readonly`、备份与记录跟 `--db` 走、`signal_archive --apply` 空根不再被拒、编排器 tool_missing 改按文件判
 
