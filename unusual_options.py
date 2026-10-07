@@ -58,6 +58,11 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
         "signals": [],
         "summary": "期权流数据不可用",
         "data_source": "fallback",
+        # v0.45.421：取数状态与「无异常」分开。此前 yfinance 把所有到期日的期权链都取失败，也返回
+        # 「无异常期权流信号 / neutral / 5.0 / data_source=yfinance_chain」——与真的没有异动不可区分，
+        # 且被缓存 300 秒（2026-10-05 重跑 28/30 只丢了这一路，日志里只有 2 条 warning）。
+        #   fetch_status: "ok" 全部到期日取到 / "partial" 部分取到 / "failed" 一个都没取到或根本没进循环
+        "fetch_status": "failed", "failure_reason": "", "chains_total": 0, "chains_failed": 0,
     }
 
     try:
@@ -68,6 +73,8 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
         expirations = t.options
         if not expirations:
             result["summary"] = "无期权链数据"
+            # yfinance 默认 hide_exceptions=True：取数失败与「该标的没有期权」在返回值里无法区分
+            result["failure_reason"] = "无到期日列表（取数失败，或该标的无期权——yfinance 无法区分）"
             return result
 
         if not stock_price or stock_price <= 0:
@@ -86,6 +93,7 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
                     stock_price = 0.0
             if not stock_price or stock_price <= 0:
                 result["summary"] = "现价不可得，跳过异动检测"
+                result["failure_reason"] = "现价不可得"
                 return result
 
         unusual_calls = []
@@ -108,10 +116,15 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
         if not near_expirations:
             near_expirations = [(expirations[0], 30)]
 
+        chains_total = chains_failed = 0
+        last_chain_error = ""
         for exp, days_to_exp in near_expirations[:4]:
+            chains_total += 1
             try:
                 chain = t.option_chain(exp)
             except Exception as e:
+                chains_failed += 1
+                last_chain_error = f"{type(e).__name__}: {str(e)[:80]}"
                 _log.debug("期权链获取失败 %s %s: %s", ticker, exp, e)
                 continue
 
@@ -246,6 +259,18 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
                     except (TypeError, ValueError, ZeroDivisionError):
                         continue
 
+        # --- 取数状态（v0.45.421）：每个到期日都失败 ⇒ 这不是「无异常」，是没数据 ---
+        if chains_total and chains_failed == chains_total:
+            _log.warning("unusual_options 全部 %d 个到期日期权链取数失败 %s：%s",
+                         chains_total, ticker, last_chain_error)
+            result["summary"] = "期权链全部取数失败"
+            result["failure_reason"] = f"全部 {chains_total} 个到期日取数失败：{last_chain_error}"
+            result["chains_total"], result["chains_failed"] = chains_total, chains_failed
+            return result      # fallback 形状（5.0 / neutral / 无信号），**不缓存**
+        if chains_failed:
+            _log.warning("unusual_options 部分期权链取数失败 %s：%d/%d（%s）——结果只覆盖取到的到期日",
+                         ticker, chains_failed, chains_total, last_chain_error)
+
         # --- 综合评分 ---
         all_unusual = unusual_calls + unusual_puts
 
@@ -295,6 +320,9 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
             "put_premium_total": round(total_put_premium),
             "summary": summary,
             "data_source": "yfinance_chain",
+            "fetch_status": "partial" if chains_failed else "ok",
+            "failure_reason": f"{chains_failed}/{chains_total} 个到期日取数失败：{last_chain_error}" if chains_failed else "",
+            "chains_total": chains_total, "chains_failed": chains_failed,
         }
 
         with _cache_lock:
@@ -309,4 +337,5 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
     except Exception as e:
         _log.warning("unusual_options 检测失败 %s: %s", ticker, e)
         result["summary"] = f"检测失败: {str(e)[:50]}"
+        result["failure_reason"] = f"{type(e).__name__}: {str(e)[:80]}"
         return result
