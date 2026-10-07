@@ -1290,7 +1290,8 @@ class AlphaHiveDailyReporter:
             import earnings_vol_signal as _evs
             import options_paper_leg as _opl
             _ev_signals = _evs.scan(self.date_str,
-                                    upcoming_fn=self._earnings_date_from_swarm(swarm_results))
+                                    upcoming_fn=self._earnings_date_from_swarm(swarm_results),
+                                    gex_fn=self._gex_state_from_swarm(swarm_results))
             _ev_settled = _evs.settle_signals(self.date_str)
             _opl_result = _opl.run_for_date(self.date_str, signals=_ev_signals)
             _log.info("期权纸面腿已更新: %s (信号 %d / 合格 %d / 回填 %d / nav=%s)",
@@ -1965,6 +1966,27 @@ class AlphaHiveDailyReporter:
                             "earnings_time_assumed": True,
                             "source": "chronos_bee_catalyst"}
             return {"earnings_date": None, "source": "chronos_bee_no_earnings"}
+        return _fn
+
+    @staticmethod
+    def _gex_state_from_swarm(swarm_results: Dict):
+        """v0.45.424：跨式信号的 GEX 影子记录取本轮蒸馏结果里的 `gex_state`（全到期日视图，政体路由用的那份）。
+
+        **只记录、不进任何判断**：`earnings_vol_signal.compute_signal` 与 `options_paper_leg` 都不读它
+        （tests/test_straddle_gex_shadow.py 用 AST 与开 / 关对照钉住）。没有状态 ⇒ 返回 None，信号行记成
+        「不可得」，**不**回退到 OracleBee 主链 `gamma_exposure`（另一个量，见 gex_state 模块 docstring）。
+        检验协议：experiments/straddle_gex_prereg.md。
+
+        它与跨式账本的日更在同一个 try 里：影子记录取不到**不能连坐账本**——import 失败就记成不可得
+        （原因 `no_gex_state`）并打 warning，账本照常开平仓。"""
+        try:
+            import gex_state as _gs
+        except Exception as exc:  # noqa: BLE001 - 见 docstring
+            _log.warning("gex_state 不可用，本轮跨式 GEX 影子记录记为不可得: %s", exc)
+            return lambda ticker: None
+
+        def _fn(ticker: str):
+            return _gs.of((swarm_results or {}).get(ticker))
         return _fn
 
     def _options_paper_leg_markdown(self) -> str:

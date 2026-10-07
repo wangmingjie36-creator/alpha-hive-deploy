@@ -297,6 +297,11 @@ def compute_signal(ticker: str, as_of: str, quote_set: Optional[dict],
         "hist_mean_abs_move_pct": _num((stats or {}).get("mean_abs_move_pct")) if isinstance(stats, dict) else None,
         "hist_source": (stats or {}).get("source") if isinstance(stats, dict) else None,
         "ratio": None, "max_leg_spread_pct": None,
+        # v0.45.424：两腿 delta 之和（买入一份跨式、每股口径；卖跨式取反）。入场时 ≈ 0，之后随价格漂移——
+        # 账本不做 delta 对冲，这个字段让「入场那一刻离中性多远」可查。只记录，不进任何判断。
+        "straddle_net_delta": (_r(call["delta"] + put["delta"])
+                               if (call and put and call.get("delta") is not None and put.get("delta") is not None)
+                               else None),
         "quote": {"call": call, "put": put},
         "quote_fetched_at": qs.get("fetched_at"), "market_open": qs.get("market_open"),
         # settle_signals 回填（realized_move_pct 以前只在 settle 里出现，未初始化 = schema 漂移）
@@ -408,14 +413,58 @@ def _iter_snapshots(cache_dir: Path, as_of: str):
         yield m.group(1).upper(), snap
 
 
+#: 影子记录 `gex_ctx` 的结构版本（v0.45.424）。改字段 = 改检验输入，须同时在 experiments/straddle_gex_prereg.md 记修订
+GEX_CTX_SCHEMA = 1
+_GEX_CTX_FIELDS = ("regime", "total_gex", "gex_normalized_pct", "gex_flip", "largest_call_wall",
+                   "largest_put_wall", "stock_price", "chain_view", "n_expiries")
+
+
+def _today_pdt() -> str:
+    from hive_logger import pdt_today
+    return pdt_today()
+
+
+def gex_ctx(gex_fn: Optional[Callable[[str], Optional[dict]]], ticker: str, as_of: str,
+            captured_on: Optional[str] = None) -> dict:
+    """GEX 影子记录（v0.45.424，跨式检验协议 experiments/straddle_gex_prereg.md 的输入）。
+
+    取本轮蒸馏结果里的 `gex_state`（全到期日视图、政体路由用的那份），原样抄下可得性与数值。
+    **只记录**：本模块的合格 / 标签 / 可交易判断与 options_paper_leg 的开平仓都不读它
+    （tests/test_straddle_gex_shadow.py：AST 读者白名单 + 开 / 关 gex_fn 两次跑出的信号与开单逐项相同）。
+    `captured_on` 是**记录时的** PDT 日期：检验只认 `captured_on == as_of` 的记录（补跑旧日期时拿到的是
+    另一天的链，不能冒充那天的环境）。取不到 ⇒ `available=False` + 原因，数值一律 None，不填 0。"""
+    base = {"schema_version": GEX_CTX_SCHEMA, "source": "gex_state", "as_of": as_of,
+            "captured_on": captured_on or _today_pdt()}
+    if gex_fn is None:
+        return {**base, "available": False, "reason": "gex_fn_not_provided"}
+    try:
+        st = gex_fn(ticker)
+    except Exception as exc:  # noqa: BLE001 - 影子记录失败只记原因，不能拖垮信号
+        return {**base, "available": False, "reason": f"exception:{type(exc).__name__}"}
+    if not isinstance(st, dict):
+        return {**base, "available": False, "reason": "no_gex_state"}
+    ok = st.get("available") is True
+    return {**base, "available": ok, "reason": None if ok else (st.get("reason") or "state_unavailable"),
+            "state_schema_version": st.get("schema_version"),
+            **{k: (st.get(k) if ok else None) for k in _GEX_CTX_FIELDS}}
+
+
+def _same_day_capture(ctx, as_of: str) -> bool:
+    return isinstance(ctx, dict) and ctx.get("available") is True and ctx.get("captured_on") == as_of
+
+
 def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
          watcher=None, stats_fn: Optional[Callable[[str], Optional[dict]]] = None,
-         upcoming_fn: Optional[Callable[[str], Optional[dict]]] = None) -> List[dict]:
+         upcoming_fn: Optional[Callable[[str], Optional[dict]]] = None,
+         gex_fn: Optional[Callable[[str], Optional[dict]]] = None) -> List[dict]:
     """当日全部常规快照 → 信号列表，并幂等落盘（先删该日旧行再追加）。
 
     `upcoming_fn(ticker) -> {"earnings_date": ..., "earnings_time": ...} | None` 可注入：
     调用方（日报）手里已经有财报日时直接给过来，不必再造一个 EarningsWatcher。
-    缺省为 None 时行为与以前完全一致（延迟构造 EarningsWatcher）。"""
+    缺省为 None 时行为与以前完全一致（延迟构造 EarningsWatcher）。
+
+    `gex_fn(ticker) -> gex_state | None`（v0.45.424）：每行加一个 `gex_ctx` 影子记录（见 `gex_ctx`），
+    不参与任何判断。同一天重跑时，**当天第一次拿到的可得记录**保留（`_same_day_capture`）。"""
     cdir = _resolve_dir(cache_dir, "cache")
     ecdir = _resolve_dir(earnings_cache_dir, "earnings_cache")
 
@@ -437,6 +486,7 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
 
     stats_fn = stats_fn or _default_stats
     upcoming_fn = upcoming_fn or _upcoming
+    captured_on = _today_pdt()
     signals: List[dict] = []
     for ticker, snap in _iter_snapshots(cdir, as_of):
         qs = snap.get("quote_set")
@@ -453,9 +503,13 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
                     _log.warning("[%s] 财报历史统计失败: %s", ticker, exc)
                     stats = None
         try:
-            signals.append(compute_signal(ticker, as_of, qs, upcoming, stats, rv))
+            sig = compute_signal(ticker, as_of, qs, upcoming, stats, rv)
         except Exception as exc:  # noqa: BLE001 - 单票失败不拖死整轮
             _log.warning("[%s] 信号计算失败: %s", ticker, exc, exc_info=True)
+            continue
+        # 判断全部做完之后才挂影子记录：它在 compute_signal 之外，结构上就进不了任何判断
+        sig["gex_ctx"] = gex_ctx(gex_fn, ticker, as_of, captured_on)
+        signals.append(sig)
 
     # M4（v0.45.104）：重写该日的行之前，把 settle_signals 已经填好的实际波动搬过来。
     # 正常日更不会触发（一行不可能在自己的 as_of 当天就结算），但 `--date` 回补
@@ -469,6 +523,9 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
         for k in ("realized_abs_move_pct", "realized_move_pct", "realized_ratio", "settled_on"):
             if old.get(k) is not None:
                 sig[k] = old[k]
+        # 影子记录：当天第一次拿到的可得记录为准（重跑不覆盖；补跑旧日期拿到的是别一天的链，本就不算数）
+        if _same_day_capture(old.get("gex_ctx"), as_of):
+            sig["gex_ctx"] = old["gex_ctx"]
     existing = [s for s in all_rows if s.get("as_of") != as_of]
     _write_jsonl(SIGNALS_FILE, existing + signals)
     n_el = sum(1 for s in signals if s.get("eligible"))

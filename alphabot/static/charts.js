@@ -168,6 +168,37 @@ export function lines(el, { x, series, xType = "category", yFmt = (v) => num(v),
   });
 }
 
+// 散点（跨式校准图）：两根数值轴、一个系列；参考线（阈值 / y=1）。身份不靠颜色：实心 = 开过仓、空心 = 只有信号，
+// 点旁直接标代码。坐标范围把参考线也包进来，免得阈值线落在画布外被裁掉。
+export function scatter(el, { points, xName, yName, vlines = [], hlines = [], xFmt = (v) => num(v, 2), yFmt = (v) => num(v, 2), tip }) {
+  const c = C();
+  const span = (vals) => {
+    const lo = Math.min(...vals), hi = Math.max(...vals), pad = Math.max((hi - lo) * 0.12, 0.05);
+    return [Math.floor((lo - pad) * 10) / 10, Math.ceil((hi + pad) * 10) / 10];
+  };
+  const [x0, x1] = span([...points.map((p) => p.x), ...vlines.map((m) => m.value)].filter(isNum));
+  const [y0, y1] = span([...points.map((p) => p.y), ...hlines.map((m) => m.value)].filter(isNum));
+  // 竖线标签横排放在线顶上方（ECharts 缺省的 insideEndTop 在竖线上是旋转的，会压住点旁的代码）
+  const marks = [...vlines.map((m) => ({ xAxis: m.value, lineStyle: { color: m.color || c.ink3, type: "dashed", width: 1 },
+    label: { formatter: m.label, position: "end", color: m.color || c.ink3, fontSize: 11 } })),
+  ...hlines.map((m) => hline(m.value, m.label, m.color || c.ink3, "dashed"))];
+  return mount(el, {
+    grid: { left: 64, right: 32, top: 26, bottom: 52 },
+    tooltip: { trigger: "item", formatter: (p) => (tip ? tip(p.data.raw) : String(p.data.raw.label || "")) },
+    xAxis: { type: "value", name: xName, nameLocation: "middle", nameGap: 30, min: x0, max: x1, axisLabel: { formatter: xFmt } },
+    yAxis: { type: "value", name: yName, nameLocation: "middle", nameGap: 46, min: y0, max: y1, axisLabel: { formatter: yFmt } },
+    series: [{
+      type: "scatter", symbolSize: 11,
+      data: points.map((p) => ({
+        value: [p.x, p.y], raw: p,
+        itemStyle: p.filled ? { color: c.ink2, borderColor: c.surface, borderWidth: 2 } : { color: c.surface, borderColor: c.ink2, borderWidth: 2 },
+        label: { show: true, formatter: p.label, position: "right", color: c.ink3, fontSize: 11 },
+      })),
+      markLine: marks.length ? { symbol: "none", silent: true, animation: false, data: marks } : undefined,
+    }],
+  });
+}
+
 export function columns(el, { x, values, fmt = usdShort, diverging = true, color }) {
   const c = C();
   return mount(el, {

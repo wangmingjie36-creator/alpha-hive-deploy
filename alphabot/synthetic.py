@@ -116,6 +116,140 @@ def demo_fetch(ticker: str, *, as_of: Optional[str] = None):
     return demo_payload(ticker, as_of), None
 
 
+def _vega_theta(S: float, K: float, T: float, iv: float, cp: str) -> Tuple[float, float]:
+    """(每 1 个波动率点的 vega, 每日历日的 theta)——与 CBOE 报价的单位相同（portfolio_greeks 模块头）。"""
+    vt = iv * math.sqrt(T)
+    d1 = (math.log(S / K) + (_R + 0.5 * iv * iv) * T) / vt
+    d2 = d1 - vt
+    decay = -S * _npdf(d1) * iv / (2.0 * math.sqrt(T))
+    carry = _R * K * math.exp(-_R * T) * (_ncdf(d2) if cp == "C" else -_ncdf(-d2))
+    return S * _npdf(d1) * math.sqrt(T) / 100.0, (decay - carry) / 365.0
+
+
+def _held(chain: dict, symbols: List[str]) -> Dict[str, Optional[dict]]:
+    """合成链里按符号挑合约，整理成 `cboe_options._qs_contract` 的形状（vega / theta 用 BS 补上）。"""
+    S = chain["underlying_price"]
+    by = {c["symbol"]: c for c in chain["contracts"]}
+    out: Dict[str, Optional[dict]] = {}
+    for s in symbols:
+        c = by.get(s)
+        if c is None:
+            out[s] = None
+            continue
+        ok = c["bid"] > 0 and c["ask"] >= c["bid"]
+        mid = round((c["bid"] + c["ask"]) / 2.0, 4) if ok else None
+        vega, theta = _vega_theta(S, c["strike"], max(c["dte"], 0.5) / 365.0, c["iv"], c["cp"])
+        out[s] = {"symbol": s, "type": c["cp"], "role": "held", "strike": c["strike"], "expiry": c["expiry"],
+                  "dte": c["dte"], "bid": c["bid"], "ask": c["ask"], "mid": mid,
+                  "spread_pct": round((c["ask"] - c["bid"]) / mid, 4) if mid else None, "iv": c["iv"],
+                  "delta": c["delta"], "gamma": c["gamma"], "vega": vega, "theta": theta, "oi": c["oi"],
+                  "volume": c["volume"], "quote_ok": ok}
+    return out
+
+
+def demo_quote_held(ticker: str, symbols: List[str], as_of: Optional[str] = None) -> dict:
+    """`cboe_options.quote_held` 的形状（演示用，零网络）。"""
+    chain = demo_payload(ticker, as_of)
+    return {"available": True, "reason": None, "underlying_price": chain["underlying_price"],
+            "underlying_price_source": "demo", "session_live": False, "vintage_date": chain["vintage_date"],
+            "payload_last_trade_time": chain["payload_last_trade_time"], "quotes": _held(chain, symbols)}
+
+
+#: (代码, 方向, 当前 mark 相对入场权利金的倍数)：两笔赚、两笔亏
+_DEMO_BOOK = (("NVDA", "short", 0.86), ("JNJ", "short", 1.09), ("TSLA", "long", 0.82), ("AMZN", "long", 1.12))
+_DEMO_CLOSED = (("COST", "short", 1.34, 3.47, 2.00, 0.46), ("MU", "long", 0.70, 4.40, 3.03, -0.31),
+                ("META", "short", 1.52, 4.20, 4.90, -0.18))
+_DEMO_EVENTS = (("XOM", 1.05, 2.40, 1.70), ("CRM", 1.41, 6.10, 7.30), ("ORCL", 0.72, 5.20, 8.40))
+
+
+def demo_straddle_ledger(as_of: Optional[str] = None) -> dict:
+    """合成的财报跨式账本，形状同 `alphabot.straddle.load_ledger` 的返回（演示与测试用，零网络、确定性）。"""
+    d0 = date.fromisoformat(as_of) if as_of else date.today()
+    iso = d0.isoformat
+    start, risk = 100_000.0, 6_000.0
+    positions, signals, greeks_rows = [], [], []
+    for i, (t, side, drift) in enumerate(_DEMO_BOOK):
+        chain = demo_payload(t, iso())
+        S = chain["underlying_price"]
+        exp = (d0 + timedelta(days=24)).isoformat()
+        strikes = sorted({c["strike"] for c in chain["contracts"] if c["expiry"] == exp})
+        K = min(strikes, key=lambda k: abs(k - S * (1.0 + 0.012 * (i - 1.5))))
+        cs = next(c["symbol"] for c in chain["contracts"] if c["expiry"] == exp and c["strike"] == K and c["cp"] == "C")
+        ps = next(c["symbol"] for c in chain["contracts"] if c["expiry"] == exp and c["strike"] == K and c["cp"] == "P")
+        q = _held(chain, [cs, ps])
+        mark = round(q[cs]["mid"] + q[ps]["mid"], 4)
+        entry = round(mark / drift, 2)
+        n = max(1, int(risk // (entry * 100.0)))
+        label, ratio = ("rich", 1.38 + 0.1 * i) if side == "short" else ("cheap", 0.64 + 0.04 * i)
+        entry_date = (d0 - timedelta(days=9 + i)).isoformat()
+        ed = (d0 + timedelta(days=19)).isoformat()
+        positions.append({"ticker": t, "side": side, "entry_date": entry_date, "expiry": exp, "strike": K,
+                          "call_symbol": cs, "put_symbol": ps, "contracts": n,
+                          "entry_call": round(entry * 0.5, 2), "entry_put": round(entry * 0.5, 2),
+                          "entry_premium": entry, "entry_underlying": round(S * (1 - 0.01 * (i - 1.5)), 2),
+                          "earnings_date": ed, "signal_ratio": ratio, "label": label, "size_usd": round(entry * 100 * n, 2),
+                          "last_mark": mark, "last_mark_date": iso(), "mark_source": "cboe_mid", "stale_days": 0,
+                          "rationale": f"演示：{label} ratio={ratio}"})
+        implied = round(4.0 * ratio, 4)
+        for day in (entry_date, iso()):
+            signals.append({"ticker": t, "as_of": day, "eligible": True, "label": label, "raw_label": label,
+                            "tradeable": True, "earnings_date": ed, "selected_expiry": exp, "ratio": ratio,
+                            "implied_event_move_pct": implied, "hist_median_abs_move_pct": 4.0, "hist_n": 8,
+                            "max_leg_spread_pct": 0.04, "event_move_basis": "straddle_minus_diffusion_plus_window",
+                            "underlying_price": S, "quote_fetched_at": f"{day}T17:20:00-04:00", "market_open": False,
+                            "realized_abs_move_pct": None, "realized_ratio": None})
+        for sym, cp in ((cs, "call"), (ps, "put")):
+            leg = q[sym]
+            greeks_rows.append({"kind": "option", "ticker": t, "symbol": sym, "cp": cp, "side": side,
+                                "delta": leg["delta"], "gamma": leg["gamma"], "vega": leg["vega"],
+                                "theta": leg["theta"], "iv": leg["iv"], "mid": leg["mid"], "quote_missing": False})
+    closed = []
+    for j, (t, side, ratio, implied, realized, ret) in enumerate(_DEMO_CLOSED):
+        entry_date = (d0 - timedelta(days=40 - 9 * j)).isoformat()
+        ed = (d0 - timedelta(days=22 - 8 * j)).isoformat()
+        size = 4_800.0 + 500.0 * j
+        closed.append({"ticker": t, "side": side, "label": "rich" if side == "short" else "cheap",
+                       "entry_date": entry_date, "exit_date": (d0 - timedelta(days=21 - 8 * j)).isoformat(),
+                       "expiry": (d0 - timedelta(days=17 - 8 * j)).isoformat(), "strike": 100.0 + 50 * j,
+                       "contracts": 2, "entry_premium": round(size / 200.0, 2),
+                       "exit_premium": round(size / 200.0 * (1 - ret if side == "short" else 1 + ret), 2),
+                       "earnings_date": ed, "signal_ratio": ratio, "size_usd": size,
+                       "pnl_usd": round(size * ret, 2), "pnl_pct": round(ret * 100.0, 4), "exit_reason": "post_event",
+                       "mark_source": "cboe_mid", "holding_days": 18, "rationale": "演示"})
+        signals.append({"ticker": t, "as_of": entry_date, "eligible": True, "label": closed[-1]["label"],
+                        "raw_label": closed[-1]["label"], "tradeable": True, "earnings_date": ed, "ratio": ratio,
+                        "implied_event_move_pct": implied, "realized_abs_move_pct": realized,
+                        "realized_ratio": round(realized / implied, 4)})
+    for k, (t, ratio, implied, realized) in enumerate(_DEMO_EVENTS):
+        signals.append({"ticker": t, "as_of": (d0 - timedelta(days=35 - 6 * k)).isoformat(), "eligible": True,
+                        "label": "fair", "raw_label": "rich" if ratio >= 1.3 else ("cheap" if ratio <= 0.75 else "fair"),
+                        "tradeable": False, "earnings_date": (d0 - timedelta(days=20 - 6 * k)).isoformat(),
+                        "ratio": ratio, "implied_event_move_pct": implied, "realized_abs_move_pct": realized,
+                        "realized_ratio": round(realized / implied, 4)})
+    signals.append({"ticker": "WMT", "as_of": iso(), "eligible": False, "reason": "no upcoming earnings date"})
+    realized_total = sum(c["pnl_usd"] for c in closed)
+    unreal = sum((p["last_mark"] - p["entry_premium"]) * 100 * p["contracts"] * (1 if p["side"] == "long" else -1)
+                 for p in positions)
+    equity, n_days = [], 24
+    for k in range(n_days):
+        d = (d0 - timedelta(days=n_days - 1 - k)).isoformat()
+        real = sum(c["pnl_usd"] for c in closed if c["exit_date"] <= d)
+        u = unreal * (k / (n_days - 1)) + 300.0 * math.sin(k / 3.0) * (1 - k / (n_days - 1))
+        equity.append({"date": d, "nav": round(start + real + u, 2), "unrealized": round(u, 2),
+                       "open_premium_at_risk": round(sum(p["size_usd"] for p in positions), 2),
+                       "positions": len(positions), "stale_positions": 0})
+    mark_value = sum(p["last_mark"] * 100 * p["contracts"] * (1 if p["side"] == "long" else -1) for p in positions)
+    nav = round(start + realized_total + unreal, 2)
+    equity[-1].update({"nav": nav, "unrealized": round(unreal, 2), "cash": round(nav - mark_value, 2)})
+    meta = {"version": "demo", "starting_capital": start, "starting_date": equity[0]["date"],
+            "cash": round(nav - mark_value, 2), "last_run_date": iso(),
+            "config_snapshot": {"starting_capital": start, "risk_per_trade_pct": 6.0, "max_open": 6},
+            "skipped_entries": []}
+    return {"ledger_dir": None, "exists": True, "source": "demo", "meta": meta, "meta_error": None,
+            "positions": positions, "closed": closed, "equity": equity, "signals": signals, "bad_lines": {},
+            "greeks": {"as_of": iso(), "rows": greeks_rows}, "greeks_error": None}
+
+
 def demo_bars(ticker: str, as_of: Optional[str] = None, days: int = 120) -> List[Dict[str, float]]:
     """合成日线（只到 as_of 当日，收盘价随机游走收敛到合成现价）。"""
     t = str(ticker).upper()

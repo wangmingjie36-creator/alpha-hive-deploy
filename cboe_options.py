@@ -1703,6 +1703,12 @@ def quote_contracts(ticker: str, symbols: List[str], *, timeout: int = 15) -> Di
     data = _fetch_cboe_payload(ticker, timeout)
     if not data:
         return out
+    return _held_quotes(data, symbols)
+
+
+def _held_quotes(data: dict, symbols: List[str]) -> Dict[str, Optional[dict]]:
+    """一份 payload 里按 OCC 符号挑出已持有的合约（`quote_contracts` 与 `quote_held` 共用，v0.45.424 抽出）。"""
+    out: Dict[str, Optional[dict]] = {s: None for s in symbols}
     want = set(symbols)
     today = _pdt_now().date()
     found: Dict[str, List[dict]] = {}
@@ -1720,6 +1726,53 @@ def quote_contracts(ticker: str, symbols: List[str], *, timeout: int = 15) -> Di
             continue
         out[sym] = _qs_contract(_qs_pick_row(rows), role="held", cp=cp, strike=strike,
                                 expiry=expiry, dte=dte)
+    return out
+
+
+def quote_held(ticker: str, symbols: List[str], *, timeout: int = 15,
+               now_et: Optional[datetime] = None) -> dict:
+    """已持有合约的报价 **加上同一份 payload 的标的现价**（v0.45.424，Alpha Bot 跨式账本页的盘中参考价）。
+
+    `quote_contracts` 只给合约、不给标的价；调用方再从别处取一个现价拼上去，两者就可能不是同一刻
+    （portfolio_greeks 的标的价曾比期权报价晚一天，见 v0.45.423）。这里两样出自**同一份** payload：
+      · 合约：与 `quote_contracts` 逐字段相同（共用 `_held_quotes`）；
+      · 现价：与 `fetch_cboe_raw_contracts` 同一判据——payload 那一场还在进行（`_raw_session_live`）⇒
+        `official_price(data, now)`（盘中取 current_price）；否则按 payload 那天 17:05 ET 取 close
+        （收盘后不拿盘后价）。
+
+    返回 `{available, reason, underlying_price, underlying_price_source, session_live, vintage_date,
+    payload_last_trade_time, quotes}`。取不到 ⇒ `available=False` + `reason`，quotes 全 None——
+    调用方**不得**拿账本里的旧 mark 顶上。payload 在、现价不在 ⇒ 报价照给，`reason="price_unavailable"`。
+    快照模式（补跑历史日）一律不可得：那天的真实报价谁也拿不到。只读，不写任何文件；
+    走 `_fetch_cboe_payload` 的进程缓存（同票刚拉过时零额外网络）。
+    """
+    base = {"available": False, "reason": None, "underlying_price": None, "underlying_price_source": None,
+            "session_live": None, "vintage_date": None, "payload_last_trade_time": None,
+            "quotes": {s: None for s in symbols}}
+    if _SNAPSHOT_PROVIDER is not None:
+        return {**base, "reason": "snapshot_mode"}
+    if not symbols:
+        return {**base, "reason": "no_symbols"}
+    try:
+        data = _fetch_cboe_payload(ticker, timeout, on_stale="raise")
+    except CboeStaleVintageError:
+        return {**base, "reason": "stale_vintage"}
+    if not data or not data.get("options"):
+        return {**base, "reason": "payload_unavailable"}
+    vintage = _payload_vintage_date(data)
+    now = now_et if now_et is not None else _et_now()
+    if now.tzinfo is not None:
+        now = now.astimezone(_ET_TZ)
+    live = bool(vintage) and _raw_session_live(vintage, now)
+    clock = now if (live or not vintage) else datetime.combine(
+        date.fromisoformat(vintage), _RAW_SESSION_CLOSED_CLOCK, tzinfo=_ET_TZ)
+    S, src = official_price(data, clock)
+    out = {**base, "available": True, "session_live": live, "vintage_date": vintage,
+           "payload_last_trade_time": data.get("last_trade_time"), "quotes": _held_quotes(data, symbols)}
+    if S and S > 0:
+        out.update({"underlying_price": S, "underlying_price_source": src})
+    else:
+        out["reason"] = "price_unavailable"
     return out
 
 

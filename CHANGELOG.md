@@ -5,7 +5,47 @@
 
 ---
 
-## [0.45.424] — 2026-10-07 — 占位（进行中：Alpha Bot「跨式账本」页——持仓 / 平仓 / 净值 / 逐仓 Greeks + 盘中参考报价；财报跨式信号影子记录 GEX，不改开单）
+## [0.45.424] — 2026-10-07 — Added：Alpha Bot「跨式账本」页（持仓 / 平仓 / 净值 / 逐仓风险 + 盘中参考报价）；财报跨式信号的 GEX 影子记录与预注册检验（不改开单）
+
+用户要两件事：① 财报跨式账本做成可视化，不用每天问；② 用 Alpha Bot 的 gamma 数据让跨式策略更完善。
+② 的方案（用户选定）是「看风险 → 记下来 → 事后检验」，**不**直接拿 GEX 过滤开单：平仓才 1 笔、GEX 对财报跳空没人测过，
+而卖权选择器的预注册把跨财报的单位整段排除，那本账攒多久都不会产出关于财报跨式的证据。
+
+### Added
+1. **Alpha Bot `#/straddle`「跨式」页**（`alphabot/straddle.py` 数据层 + `static/pages/straddle.js`；接口 `/api/straddle`、`/api/straddle/live/{ticker}`）：
+   账户（NAV 必须等于「起始 + 已实现 + 浮动」，对不上出黄条）、每笔持仓一张卡片（账本浮动盈亏、入场 → 财报 → 到期时间轴、
+   到期盈亏平衡带与现价位置、逐仓 $Delta / Γ / θ / vega、「已明显带方向」提示、入场理由）、累计盈亏曲线、已平仓表（含隐含 vs 实际事件波动）、
+   信号校准散点、今日信号与不合格原因、GEX 影子记录进度。**全部只读**；路径调用时取 `PATHS.home`（不复用 options_paper_leg 冻结在 import 时的路径）。
+   - 逐仓 Greeks 口径与 `portfolio_greeks.option_exposures` 逐项相同，但 **S 用与账本 mark 同一份 CBOE 快照的现价**（信号行），不用 greeks 文件里的 `price`（0.45.423 在修它晚一天）。
+     实测 10-06：JNJ 卖跨式入场名义 $4,560，现在净 $Delta ≈ +$5.7 万（每份跨式 Δ 0.74，相当于 +223 股），现价 254.78 在盈亏带下沿外 0.01%。
+   - 第二期「盘中参考报价」：按持仓逐只现拉（服务端 60 秒缓存），给 mid 盯市盈亏、**按可成交价立即平仓**的盈亏、当下 Greeks、当天 GEX 水平；
+     报价拿不到就写不可得，**不拿账本 mark 顶上**；可开「盘中每分钟自动刷新」。不写账本。
+   - 演示模式有合成跨式账本（`synthetic.demo_straddle_ledger` / `demo_quote_held`，合约代码取自合成链）。帮助页加「跨式账本」一节，规则常量取自 `/api/method` 的 `straddle`。
+2. **`cboe_options.quote_held`**：已持有合约报价 + **同一份 payload** 的标的现价（判据同 `fetch_cboe_raw_contracts`：场次进行中取 current_price，收盘后按 17:05 ET 取 close）。
+   `quote_contracts` 的逐合约逻辑抽成 `_held_quotes` 两处共用，行为逐字节不变（原测试全绿 + 新增「两者逐字段相同」）。
+3. **GEX 影子记录**：`earnings_vol_signal.scan(..., gex_fn=)` 给每条信号挂 `gex_ctx`（当天蒸馏结果里的 `gex_state`，全到期日视图、政体路由那份），
+   带 `captured_on`（检验只认当天记录）；同日重跑以第一次可得记录为准。日报钩子传入 `_gex_state_from_swarm`。另加 `straddle_net_delta`（入场时两腿 Δ 之和）。
+   **在全部判断做完之后才挂上**，`compute_signal` 与 `options_paper_leg` 都不读它。
+4. **预注册检验** `straddle_gex_prereg.py` + `experiments/straddle_gex_prereg.md`（v1，登记时 gex_ctx 还一行都没有 ⇒ 不可能看过「政体 × 结果」）：
+   单位 = (标的, 财报日)，代表行 = 最早的隐含事件波动 > 0 的合格行（先定行、再看 GEX，不往后找可用的顶上）；度量 ln(实际 ÷ 隐含)；
+   H1 正 gamma 更小；按财报 ISO 周分块置换 5000 次；单侧 α 0.05；就绪闸 60 单位 / 每政体 20 / 8 个信息块。`progress()` 只给计数，`run_once()` 未就绪拒跑、就绪后只冻结一次。
+
+### 守卫（+45 条）
+- `tests/test_alphabot_straddle.py`（23）：两接口前后合成账本指纹不变；包内不出现任何账本写者；Greeks 对照 portfolio_greeks、KPI 对照 compute_kpis、浮动盈亏对照 `_unrealized`；
+  账目恒等式有牙；盲期（输入有 gex_ctx、输出一个都没有，正对照在内）；报价不可得不顶替、异常有原因、立即平仓不优于 mid、无持仓 400、缓存与强制；缺目录 / 陈旧 / 缺 greeks 文件如实报；帮助页与接线。
+- `tests/test_straddle_gex_shadow.py`（18）：影子记录如实（不可得数值不填 0）；开 / 关 gex_fn 信号与开单逐项相同；全仓只有登记的三个文件提到 gex_ctx、
+  earnings_vol_signal 里只在三个记录函数里出现（种病灶自证）；同日首次记录保留、补跑记录不进检验；代表行规则；进度只给计数；拒跑与只冻结一次；分块置换有牙（政体只与坏周相关时全局 p < 0.01、分块 p > 0.1）。
+- `tests/test_options_paper_leg.py::TestQuoteHeld`（4）+ 已有 `quote_contracts` 测试不变。
+- 变异（未提交的源码上原地改、跑、复原）：ENTRY_FIELDS 带上 gex_ctx、Γ 丢 ½、报价不可得拿账本 mark 顶上、恒等式恒真、去掉同日首次记录保留、不可得照抄数值——6 个全红。
+
+### 验证
+- 真实数据根只读起一份 Alpha Bot（另一端口）：页面数字与账本一致（NAV $100,964、已实现 +$2,470、浮动 −$1,506、6/6），盘中报价 6/6 可得；
+  打开页面并拉报价前后 `options_paper_state` / `hedge_state` / `sell_strike_state` 共 44 个文件 size+mtime 零变化。
+
+### 已知局限
+- 静态资源无版本号：已开着的 Alpha Bot 升级后第一次加载可能用旧 CSS（重开或强制刷新即可），与既有页面同样。
+- 盘中报价与当天水平通常出自同一份 payload（先现算水平再报价、共用进程缓存）；不同时 `same_payload=False`，页面照实标出。
+- 「为什么没开单」只有最近一次扫描的跳过原因（`meta.skipped_entries` 每天覆盖），历史跳过原因没有落盘。
 
 ## [0.45.423] — 2026-10-07 — 占位（进行中：`portfolio_greeks` 标的现价可能是前一交易日的收盘——改取与 CBOE 期权报价同一时刻的价，陈旧价不再静默进 $Delta / SPY 对冲）
 
