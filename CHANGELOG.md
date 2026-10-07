@@ -5,7 +5,25 @@
 
 ---
 
-## [0.45.425] — 2026-10-07 — 占位（进行中：异常期权流取数重试与退避——令牌等待超时 / 瞬时网络错误；429 冷却不重试）
+## [0.45.425] — 2026-10-07 — Added：异常期权流取数重试与退避——只重试「令牌等待超时」与瞬时网络错误，429 / 冷却 / 其它不重试；不改评分
+
+接 v0.45.421（让失败可见）：这版减少失败本身。2026-10-05 重跑 28/30 只丢了异常流，日志里能对上的失败有两类：yf_gate 共享令牌桶（0.5 req/s）排队超过 60s ⇒ `YFRateLimited("等待 yfinance 限流令牌超过 60s（Ticker.options）")`（14:28~14:29 的 `options_analyzer` / `unusual_options` 各有一条），以及 `curl: (35) TLS connect error`（重跑日志里 VZ、DE）。两者都是「错开即恢复」型：前者是自己人抢同一个桶，后者是瞬时握手。
+
+### Added
+- `unusual_options`：`.options` 与每个 `option_chain` 取数套上重试。**只重试** `token_wait`（令牌等待超时）与 `transient`（`ConnectionError` / `TimeoutError` / `OSError`）；`cooldown`（yf_gate 冷却中）、`rate_limited`（识别出的 429）、`other` 一律**不重试**——与 yf_gate 的设计一致（「一次 429 的含义是现在就停，不是再试试」）。
+- 预算：每只标的共用 2 次（退避 10s、20s，`RETRY_BACKOFF_S`）；进程内累计 `RETRY_CIRCUIT_TRIP`（5）只标的把预算用光后**不再重试**——持续饥饿时继续等只会拖长整轮扫描、并加重对共享桶的占用；断路只停重试、不停取数。
+- 失败原因带类别：`failure_reason` 里 `[token_wait]` / `[cooldown]` / `[rate_limited]` / `[transient]` / `[other]`；返回加 `retries`，Oracle 的 `unusual_flow_status` 带上它——下一次降级发生时，能直接看出是哪一类。
+- 重试每次打 WARNING（标的、动作、类别、退避、第几次）。
+
+### 守卫（`tests/test_unusual_options_retry.py`，16 条；`test_oracle_unusual_flow_visibility.py` 加不真睡的 autouse 夹具）
+- 令牌超时两次后成功（睡 10s、20s）/ 单个到期日 TLS 抖动一次后成功 / 成功路径不睡 / 预算共享并耗尽（第二个到期日直接失败不再睡）/ 冷却、429、其它异常各自不重试 / 断路器 / 类别判定表（含「令牌超时是 `ConnectionError` 子类 `YFRateLimited`，必须先认成可重试而不是 429」）。
+- 变异 8 个（先提交后变异）：全部类别都重试 / 断路器不触发 / 冷却不识别 / 429 判定顺序对调 / transient 不重试 / `retries` 不记录 / 类别标记丢失 / 退避置 0——全红。
+- 真网络冒烟（交易时段，yf_gate 已装）：AMZN、VZ 各 `ok`、0 次重试、约 14s/只。
+
+### 注意
+- **不改评分，也不保证消灭降级**：持续饥饿（比如整轮令牌桶一直被占满）时，两次重试用完照样失败——那时 421 的可见化会如实报出，`failure_reason` 的类别指明是令牌饥饿。真正的根治是降低对共享桶的需求（每只标的 `.options` + 最多 4 个 `option_chain` = 5 个令牌，30 只合计 150 个、占 0.5 req/s 的桶 300 秒），这属于另外一件事：是否给 Oracle 的这一路单独限速 / 排序，**待用户定**。
+- 流程说明：本版代码与占位被我同一次 `git push HEAD:main` 一起推上去了（代码先于干净克隆全套），事后补跑；见下方验证。
+
 
 ## [0.45.424] — 2026-10-07 — 占位（进行中：Alpha Bot「跨式账本」页——持仓 / 平仓 / 净值 / 逐仓 Greeks + 盘中参考报价；财报跨式信号影子记录 GEX，不改开单）
 
