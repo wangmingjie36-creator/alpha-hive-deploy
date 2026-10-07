@@ -93,10 +93,11 @@ print(json.dumps(out))
 
 
 class TestFreshInterpreter:
-    def _run(self, tmp_path):
+    def _run(self, tmp_path, **extra_env):
         home, a, b = (tmp_path / n for n in ("home", "A", "B"))
         env = {k: v for k, v in os.environ.items() if not k.startswith("ALPHA_HIVE_")}
         env["ALPHA_HIVE_HOME"] = str(home)
+        env.update(extra_env)
         cwd = tmp_path / "cwd"
         cwd.mkdir()
         r = subprocess.run(
@@ -121,10 +122,13 @@ class TestFreshInterpreter:
         out, *_ = self._run(tmp_path)
         assert out["home_logs_after_import"] is False
 
-    def test_production_default_is_this_checkouts_logs_dir(self, tmp_path):
-        """生产不设 env：落点必须仍是 hive_logger 所在 checkout 的 `logs/`（人工排查读这里）。"""
-        out, *_ = self._run(tmp_path)
-        logs = REPO_ROOT / "logs"
+    def test_unset_env_default_is_data_root_logs_dir(self, tmp_path):
+        """不设 env：落点是缺省数据根 `$HOME/alpha-hive-data/logs/`（v0.45.422；此前是代码检出的 `logs/`）。
+
+        与编排器 export 的生产值同址，人工排查读这里。HOME 钉成假目录：只算落点、不碰真家目录。"""
+        fake_home = tmp_path / "fake_home"
+        out, *_ = self._run(tmp_path, HOME=str(fake_home))
+        logs = fake_home / "alpha-hive-data" / "logs"
         assert out["production_targets"] == sorted(
             [str(logs / "alpha_hive.log"), str(logs / "alpha_hive_structured.jsonl")]), out
 

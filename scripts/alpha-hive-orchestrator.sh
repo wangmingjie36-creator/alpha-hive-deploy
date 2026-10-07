@@ -43,8 +43,9 @@ SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="/Users/igg/Desktop/Alpha Hive"   # Python 源码目录（代码检出，git 仓库）
 # 数据根迁移阶段 5（v0.45.322 起）：生产数据在 DATA_DIR，不在代码检出里。
 # export 给本脚本拉起的每个 Python 步骤——hive_logger.PATHS.home 读它；git 仓库根
-# (PATHS.git_repo_root) 不读它，仍按 __file__ 落在 PROJECT_DIR。回退 = 删掉这两行
-# 并把下面 8 处 $DATA_DIR 改回 $PROJECT_DIR（先跑 migrate_data_root.py unretire）。
+# (PATHS.git_repo_root) 不读它，仍按 __file__ 落在 PROJECT_DIR。回退 = 把下面这行改成
+# DATA_DIR="$PROJECT_DIR"（export 保留：v0.45.422 起不设 ALPHA_HIVE_HOME 时缺省就是 ~/alpha-hive-data，
+# 删掉 export 回不到检出），并把下面 8 处 $DATA_DIR 改回 $PROJECT_DIR（先跑 migrate_data_root.py unretire）。
 # ⚠️ v0.45.414 起 Step 14 的备份仓也跟 ALPHA_HIVE_HOME 走：回退时给 Step 14 补
 # --backup-dir "$HOME/alpha-hive-data/_git_backup"，否则备份仓解析进代码检出、被 run_backup 拒绝（init 失败）。
 DATA_DIR="/Users/igg/alpha-hive-data"
@@ -844,8 +845,14 @@ _data_migrations_step() {
     local _rec="${LOGDIR}/data_migrations.json" _rc=0 _json="" _outcome="" _status="failed" _new="" _t0 _dur=0
     _t0=$(date +%s)
     rm -f "${_rec}"
-    run_step --timeout 120 "${PROJECT_DIR}/run_data_migrations.py" --out "${_rec}" >> "${LOGFILE}" 2>&1
-    _rc=$?
+    # 「脚本在不在」按文件判，不按退出码：run_step 的哨兵 2 与 argparse 错误 / 工具自己的 2 撞码
+    # （同 _orchestrator_autodeploy 的纪律）。文件在而没有记录 ⇒ no_record ⇒ 红。
+    if [ ! -f "${PROJECT_DIR}/run_data_migrations.py" ]; then
+        _rc=2
+    else
+        run_step --timeout 120 "${PROJECT_DIR}/run_data_migrations.py" --out "${_rec}" >> "${LOGFILE}" 2>&1
+        _rc=$?
+    fi
     _json="$(jq -c 'select(type == "object" and (.status | type) == "string")' "${_rec}" 2>/dev/null)"
     _outcome="$(printf '%s' "${_json}" | jq -r '.status' 2>/dev/null)"
     case "${_outcome}" in
@@ -854,7 +861,7 @@ _data_migrations_step() {
             log "INFO" "✅ 数据迁移：已应用 $(printf '%s' "${_json}" | jq -r '(.applied | length)') 个，待办 $(printf '%s' "${_json}" | jq -r '.n_pending') 个"
             ;;
         "")
-            if [ "${_rc}" -eq 2 ]; then
+            if [ ! -f "${PROJECT_DIR}/run_data_migrations.py" ]; then
                 _status="skipped"
                 _json='{"status": "tool_missing"}'
                 log "WARN" "⏭️ 数据迁移跳过：生产 checkout 里没有 run_data_migrations.py（本版尚未进生产）"

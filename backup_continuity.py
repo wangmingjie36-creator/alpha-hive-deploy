@@ -107,10 +107,12 @@ _STATUS_BY_RC = {0: "ok", 1: "attention", 3: "undetermined"}
 
 # 默认历史日志位置。刻意写死绝对路径（同 `data_backup/run_backup.py::main()`
 # 的 `--status-file`/`--history-file` 默认值同一约定），**不走** `hive_logger.
-# PATHS.home`——阶段 5（`ALPHA_HIVE_HOME=~/alpha-hive-data`）尚未执行，
-# `PATHS.home` 今天兜底到代码仓库根，与 Step 14 实际写入的 `~/alpha-hive-data`
+# PATHS.home`——写这段时阶段 5（`ALPHA_HIVE_HOME=~/alpha-hive-data`）尚未执行，
+# `PATHS.home` 当时兜底到代码仓库根，与 Step 14 实际写入的 `~/alpha-hive-data`
 # 是两个不同目录；备份子系统从阶段 3 起就有意早于全局迁移直接指向新数据根，
-# 这里跟随的是 Step 14 的既有约定，不是 `PATHS`。
+# 这里跟随的是 Step 14 的既有约定，不是 `PATHS`。（阶段 5 已完成，v0.45.422 起 `PATHS.home`
+# 未设时也取 `~/alpha-hive-data`——两者在生产与交互 shell 下都同址了；改走 `PATHS.logs_dir`
+# 要连同 `run_backup` 的 status/history 缺省与 Step 14 一起改，另立。）
 HISTORY_FILE = None
 
 

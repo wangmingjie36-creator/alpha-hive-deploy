@@ -4,7 +4,8 @@
   1. 探测端口：已经是 Alpha Bot ⇒ 直接开浏览器，不重复起服务；被别的程序占着 ⇒ 弹窗，退出。
   2. 定数据根：读 `~/Library/Application Support/Alpha Bot/launcher.json` 的 `alpha_hive_home`；
      没有（首次启动）或目录不存在 ⇒ 弹窗让用户选一次目录（或本次用演示模式），选了才写回配置。
-     GUI 程序拿不到 shell 里 export 的 `ALPHA_HIVE_HOME`，所以这一步不能省——省了就会静默读错目录。
+     GUI 程序拿不到 shell 里 export 的 `ALPHA_HIVE_HOME`，所以这一步不能省——省了就退回缺省数据根
+     `~/alpha-hive-data`（v0.45.422；之前是代码目录），用户的数据根若不在那里就会静默读错目录。
   3. 后台起 `python -m alphabot`（脱离启动器进程组，启动器退出后服务继续跑），日志进 `server.log`；
      等 `/api/ping` 应答（服务进程先死了 ⇒ 弹窗附日志尾巴，不干等到超时）。
   4. 开原生窗口（pywebview，`alphabot.window`）；pywebview 不可用或给了 `--browser` ⇒ 开浏览器（原因进日志）。

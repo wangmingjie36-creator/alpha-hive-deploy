@@ -1705,12 +1705,16 @@ def main() -> int:
         bk = None
         if not dry:
             from data_migrations.runner import backup_before_write
-            try:
-                bk = backup_before_write(db, "signal-archive-backfill")
-            except Exception as e:  # noqa: BLE001 —— 没有备份就不写
-                print(f"❌ 写库前备份失败（{type(e).__name__}: {e}），已中止未写库。", file=sys.stderr)
-                return 2
-            print(f"已备份 → {bk}")
+            if not db.exists():
+                # 空数据根里从 swarm 文件从零建库（恢复演练的真用法）：没有库就没有东西可备份
+                print("无库可备份（库尚不存在，将由回填新建）")
+            else:
+                try:
+                    bk = backup_before_write(db, "signal-archive-backfill")
+                except Exception as e:  # noqa: BLE001 —— 库在却备不了就不写
+                    print(f"❌ 写库前备份失败（{type(e).__name__}: {e}），已中止未写库。", file=sys.stderr)
+                    return 2
+                print(f"已备份 → {bk}")
         st = backfill(db_path=db, only=only, dry_run=dry)
         if dry:
             print(f"🔍 dry-run（未写库）：{st['files']} 个文件（跳过 {st['skipped']}）"
@@ -1721,7 +1725,7 @@ def main() -> int:
             print(f"✅ 回填完成：{st['files']} 个文件 → {st['rows']} 行"
                   f"（跳过 {st['skipped']}）")
             from data_migrations.runner import record_tool_run
-            record_tool_run("signal_archive.backfill", rows_affected=st["rows"], backup=str(bk),
+            record_tool_run("signal_archive.backfill", rows_affected=st["rows"], backup=str(bk) if bk else None,
                             args=f"--only {args.only}" if args.only else "", db_path=db)
 
     if args.list:
@@ -1730,7 +1734,8 @@ def main() -> int:
             # CREATE TABLE ⇒ 数据根找错时凭空造出一个 pheromone.db，此后别的模块「库不存在」的
             # 判定全部失效（变成「表不存在 / 没数据」）。表缺失的旧库照旧由 ensure_schema 补表。
             print(f"❓ 无法判定：样本库不存在：{db}（--list 只读、不建库；"
-                  "未设 ALPHA_HIVE_HOME / ALPHA_HIVE_DB_PATH 时 PATHS.db 回落到代码目录）", file=sys.stderr)
+                  "未设 ALPHA_HIVE_HOME / ALPHA_HIVE_DB_PATH 时 PATHS.db 取缺省数据根 ~/alpha-hive-data 下的库）",
+                  file=sys.stderr)
             return 3
         ensure_schema(db)
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)

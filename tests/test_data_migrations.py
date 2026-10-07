@@ -283,10 +283,12 @@ class TestRepairToolsDefaultToDryRun:
 
     def test_signal_archive_apply_without_backup_writes_nothing(self, tmp_path):
         """备份失败（库不存在）⇒ 中止，不建库、不写记录。"""
-        db = tmp_path / "nope.db"
+        db = tmp_path / "pheromone.db"
+        db.write_bytes(b"this is not a sqlite file" * 10)    # 库在、却备不了
+        before = _md5(db)
         r = _tool(["signal_archive.py", "--backfill", "--apply", "--db", str(db)], tmp_path)
-        assert r.returncode == 2 and "备份失败" in r.stderr
-        assert not db.exists() and not (tmp_path / "migrations_state").exists()
+        assert r.returncode == 2 and "备份失败" in r.stderr, r.stdout + r.stderr
+        assert _md5(db) == before and not (tmp_path / "migrations_state").exists()
 
     @staticmethod
     def _run_dir_accuracy(monkeypatch, tmp_path, argv):
@@ -356,12 +358,16 @@ def _extract_step():
 
 
 class TestOrchestratorStep:
-    def _run(self, tmp_path, *, record, rc):
+    def _run(self, tmp_path, *, record, rc, script_present=True):
         body = _extract_step()
         rec_json = "" if record is None else json.dumps(record)
+        proj = tmp_path / "proj"
+        proj.mkdir(exist_ok=True)
+        if script_present:
+            (proj / "run_data_migrations.py").write_text("")
         script = f'''
 set -uo pipefail
-LOGDIR={shlex.quote(str(tmp_path))}; LOGFILE=/dev/null; PROJECT_DIR=/nonexistent
+LOGDIR={shlex.quote(str(tmp_path))}; LOGFILE=/dev/null; PROJECT_DIR={shlex.quote(str(proj))}
 log() {{ printf 'LOG\\t%s\\t%s\\n' "$1" "$2"; }}
 run_step() {{
   shift 2; shift   # --timeout N script
@@ -396,7 +402,7 @@ printf 'STEPS\\t%s\\n' "$(printf '%s' "$STEPS_RESULT" | jq -c .)"
         assert d["status"] == "failed" and d["outcome"] == "no_record"
 
     def test_tool_missing_is_skipped_and_visible(self, tmp_path):
-        d, logs = self._run(tmp_path, record=None, rc=2)
+        d, logs = self._run(tmp_path, record=None, rc=0, script_present=False)
         assert d["status"] == "skipped" and d["outcome"] == "tool_missing"
         assert any(lvl == "WARN" for lvl, _ in logs)
 
@@ -421,3 +427,119 @@ class TestRegistrations:
         assert "migrations_state" in export.STATE_DIRS and "migrations_state" in mig.MOVE_DIRS
         assert "/migrations_state/" in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
         assert mig.SKIP_EXACT.get("data_migrations", "").startswith("代码")
+
+
+# ── 二次检查（v0.45.420）：首版的四处缺陷，各一条先红后绿的守卫 ─────────────────
+def _wal_db_without_sidecars(path):
+    c = sqlite3.connect(path)
+    c.execute("pragma journal_mode=wal")
+    c.execute("create table t(k text primary key, v int)")
+    c.execute("insert into t values ('seed', 1)")
+    c.commit()
+    c.close()
+    assert not Path(str(path) + "-wal").exists(), "夹具前提：已 checkpoint，没有 -wal"
+
+
+def _sidecars(path):
+    return sorted(p.name for p in Path(path).parent.glob(Path(path).name + "-*"))
+
+
+class TestReadOnlyOpenFollowsTheExistingStrategy:
+    """首版自己写了 `mode=ro` 打开，没用现成的 `data_backup/sqlite_readonly.py`：
+    WAL 且没有 -wal 的库被光 `mode=ro` 打开，会在**生产目录新建** -wal/-shm 且关闭后删不掉
+    （阶段 0 实测、该模块 docstring 第 2 条）；hot journal 也不会拒绝。"""
+
+    def test_backup_of_checkpointed_wal_db_creates_no_sidecars(self, tmp_path):
+        db = tmp_path / "w.db"
+        _wal_db_without_sidecars(db)
+        R.online_backup(db, tmp_path / "bk" / "copy.db")
+        assert _sidecars(db) == [], "备份读源库不许在源目录留下 -wal/-shm"
+        assert _rows(tmp_path / "bk" / "copy.db") == [("seed",)]
+
+    def test_fingerprint_creates_no_sidecars(self, tmp_path):
+        db = tmp_path / "w.db"
+        _wal_db_without_sidecars(db)
+        R.db_fingerprint(db)
+        assert _sidecars(db) == []
+
+    def test_run_pending_apply_leaves_no_sidecars_from_its_own_backup(self, tmp_path):
+        vd, _ = _mk(tmp_path, specs=())
+        db = tmp_path / "pheromone.db"
+        db.unlink(missing_ok=True)
+        _wal_db_without_sidecars(db)
+        (vd / "0001_a.py").write_text(OK_MIG.format(desc="a", key="a"))
+        r = _run(tmp_path, vd, db)
+        assert r["status"] == "ok", r
+        # 迁移自己用普通连接写库，WAL 会在它关闭时清掉；这里只核**备份**没造出孤儿
+        assert not [n for n in _sidecars(db) if n.endswith("-journal")]
+
+    def test_hot_journal_refuses_backup_and_runs_nothing(self, tmp_path):
+        vd, db = _mk(tmp_path)
+        Path(str(db) + "-journal").write_bytes(b"hot")
+        r = _run(tmp_path, vd, db)
+        assert r["status"] == "backup_failed" and "hot journal" in r["error"], r
+        assert not (tmp_path / "ran_a").exists()
+
+    def test_dir_accuracy_dry_run_creates_no_sidecars_on_a_wal_db(self, monkeypatch, tmp_path):
+        db = tmp_path / "pheromone.db"
+        _pred_db(db)
+        c = sqlite3.connect(db)
+        c.execute("pragma journal_mode=wal")
+        c.close()
+        assert _sidecars(db) == []
+        assert TestRepairToolsDefaultToDryRun._run_dir_accuracy(monkeypatch, tmp_path, ["--db", str(db)]) == 0
+        assert _sidecars(db) == []
+
+
+class TestBackupAndLedgerFollowTheDbNotTheEnvironment:
+    """首版的备份与记录落在 `PATHS.home` 下，不管 `--db` 指哪：对 /tmp 里的库副本 `--apply`，
+    备份会堆进生产 `_manual_backups/`、生产 `applied.jsonl` 里多一行描述别的库的记录。"""
+
+    def test_apply_on_a_db_elsewhere_writes_beside_that_db_only(self, tmp_path):
+        home, other = tmp_path / "home", tmp_path / "copy"
+        home.mkdir()
+        other.mkdir()
+        db = other / "pheromone.db"
+        _pred_db(db)
+        (other / ".swarm_results_2026-08-03.json").write_text("{}")
+        r = _tool(["signal_archive.py", "--backfill", "--apply", "--db", str(db)], home)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert list((other / "_manual_backups").glob("pheromone.db.bak-signal-archive-backfill-*"))
+        assert R.read_ledger(other / "migrations_state")[-1]["tool"] == "signal_archive.backfill"
+        assert not (home / "_manual_backups").exists() and not (home / "migrations_state").exists(), \
+            "生产根不许被一个别处的库污染"
+
+
+class TestSignalArchiveApplyOnEmptyRoot:
+    def test_apply_with_no_db_yet_is_not_refused_and_takes_no_backup(self, tmp_path):
+        """空数据根里用 swarm 文件从零建 signal_archive（恢复演练的真用法）：没有库就没有东西可备份，
+        不该因此拒绝写入；首版把它当备份失败中止了。"""
+        (tmp_path / ".swarm_results_2026-08-03.json").write_text("{}")
+        db = tmp_path / "pheromone.db"
+        r = _tool(["signal_archive.py", "--backfill", "--apply", "--db", str(db)], tmp_path)
+        assert r.returncode == 0 and "无库可备份" in r.stdout, r.stdout + r.stderr
+        rec = R.read_ledger(tmp_path / "migrations_state")[-1]
+        assert rec["backup"] is None
+
+
+class TestOrchestratorToolMissingIsDecidedByTheFile:
+    def test_rc2_with_the_script_present_is_failed_not_skipped(self, tmp_path):
+        """首版按退出码 2 判「脚本不存在」——但 argparse 错误 / run_step 的哨兵也是 2；
+        同类的编排器自动部署段明说「不按退出码分支」。现在按文件在不在判。"""
+        body = _extract_step()
+        script_dir = tmp_path / "proj"
+        script_dir.mkdir()
+        (script_dir / "run_data_migrations.py").write_text("")
+        script = f'''
+set -uo pipefail
+LOGDIR={shlex.quote(str(tmp_path))}; LOGFILE=/dev/null; PROJECT_DIR={shlex.quote(str(script_dir))}
+log() {{ printf 'LOG\\t%s\\t%s\\n' "$1" "$2"; }}
+run_step() {{ return 2; }}
+STEPS_RESULT='{{}}'
+{body}
+_data_migrations_step
+printf 'STEPS\\t%s\\n' "$(printf '%s' "$STEPS_RESULT" | jq -c .)"
+'''
+        r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=30)
+        steps = json.loads(next(l for l in r.stdout.splitlines() if l.startswith("STEPS\t")).split("\t", 1)[1])
+        assert steps["data_migrations"]["status"] == "failed", steps

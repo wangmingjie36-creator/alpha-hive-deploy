@@ -643,7 +643,7 @@ def _pp_state_digest(path):
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _real_paper_portfolio_state_dir():
+def _real_paper_portfolio_state_dir(pytestconfig):
     """生产 `paper_portfolio_state/` 的真身——在**任何 function 级隔离动手之前**求值一次（v0.45.303）。
 
     事故：`_isolate_paper_portfolio_state` 原先用 `_pp.STATE_DIR` 当「真身」，可 `STATE_DIR` 是
@@ -665,19 +665,25 @@ def _real_paper_portfolio_state_dir():
     `PATHS.home` 是纯读（不建目录），此处不会给生产目录增加任何写入。
 
     **一致性自检**：若收集期已有人导入了 `paper_portfolio`（此刻没有任何测试动过它，
-    `STATE_DIR` 还是收集期真环境下的 import 期值），它必须与这里求得的一致——否则「本夹具对真身的推导」
+    `STATE_DIR` 还是收集期环境下的 import 期值），它必须与「同一推导在收集期环境下的值」一致——否则「本夹具对真身的推导」
     与「`paper_portfolio` 自己的推导」漂移了（例如有人把状态目录改名/迁走），守卫在盯过期路径。
     漂移就在这里红，而不是让守卫悄悄失明。未被收集期导入时无从比较（不假装比较过），
     该情形由 `tests/test_paper_portfolio_guard_identity.py` 在子进程里正面核对。
+
+    v0.45.422：收集期环境不再是「真环境」——`pytest_configure` 先把 `ALPHA_HIVE_HOME` 换成会话沙箱
+    （数据根缺省改成 `~/alpha-hive-data` 后，收集期冻住的常量否则会指向生产）。所以真身改按**调用 pytest 时**的
+    环境、用生产同一条规则 `resolve_data_root` 求；自检比的是 `PATHS.home`（此刻 = 收集期的会话沙箱）下的同一推导。
+    顺带：此前交互 shell 不设该变量，真身其实落在代码检出里的冻结副本上——守卫一直盯着旧数据，不是生产。
     """
-    from hive_logger import PATHS
-    real = pathlib.Path(PATHS.home) / "paper_portfolio_state"
+    from hive_logger import PATHS, resolve_data_root
+    real = resolve_data_root(pytestconfig._alpha_hive_invocation_env) / "paper_portfolio_state"
     imported = sys.modules.get("paper_portfolio")
     if imported is not None:
-        assert imported.STATE_DIR == real, (
+        frozen_expected = pathlib.Path(PATHS.home) / "paper_portfolio_state"
+        assert imported.STATE_DIR == frozen_expected, (
             f"守卫对「生产状态目录」的推导与 paper_portfolio 自己的推导不一致：\n"
-            f"  本夹具（PATHS.home / 'paper_portfolio_state'）= {real}\n"
-            f"  paper_portfolio.STATE_DIR（收集期 import 期值）  = {imported.STATE_DIR}\n"
+            f"  本夹具的推导（PATHS.home / 'paper_portfolio_state'，收集期环境）= {frozen_expected}\n"
+            f"  paper_portfolio.STATE_DIR（收集期 import 期值）              = {imported.STATE_DIR}\n"
             "守卫盯的是过期路径 ⇒ 真写穿生产它也看不见。改 `_real_paper_portfolio_state_dir` "
             "使之与 `paper_portfolio.STATE_DIR` 的定义同步（或反之），不要在这里放行。")
     return real
@@ -1247,6 +1253,18 @@ def default_path_sandbox_check():
     return _assert_default_path_in_sandbox
 
 
+@pytest.fixture
+def data_root_session_facts(pytestconfig):
+    """会话级数据根接线的事实，给 `tests/test_data_root_default.py` 自证（同上：`conftest` 不可直接 import）。
+
+    `invocation_env`：调用 pytest 时的 ALPHA_HIVE_HOME / HOME；`session_home`：`pytest_configure` 设的会话沙箱；
+    `guard_root`：真实数据根闸在 `pytest_sessionstart` 认定的根（None = 本机没有真实数据根，闸不生效）。"""
+    root, _fp = pytestconfig.stash.get(_DATA_ROOT_BEFORE, (None, None))
+    return {"invocation_env": dict(pytestconfig._alpha_hive_invocation_env),
+            "session_home": pytestconfig._alpha_hive_session_home,
+            "guard_root": root}
+
+
 # ==================== 仓库根「默认拒绝」总闸（v0.45.233） ====================
 #
 # 本闸盯仓库根下**除代码以外的一切**，不维护清单（新产物默认就被盯住）。
@@ -1273,8 +1291,11 @@ _DATA_ROOT_BEFORE = pytest.StashKey[tuple]()
 
 def pytest_sessionstart(session):
     session.config.stash[_ROOT_FP_BEFORE] = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)
-    # 真实数据根：必须在任何 env 隔离之前取（`_isolate_env` 会把 ALPHA_HIVE_HOME 改成沙箱）。
-    root = _root_data_guard.real_data_root(os.environ, os.path.expanduser("~"), _REPO_ROOT_FOR_GUARD)
+    # 真实数据根：按**调用 pytest 时**的环境取——`pytest_configure` 已把 ALPHA_HIVE_HOME 换成会话沙箱
+    # （v0.45.422），`_isolate_env` 之后还会逐条换。读 os.environ 就会把沙箱当成「真实数据根」，闸当场失明。
+    invoked = session.config._alpha_hive_invocation_env
+    root = _root_data_guard.real_data_root(
+        invoked, invoked.get("HOME") or os.path.expanduser("~"), _REPO_ROOT_FOR_GUARD)
     session.config.stash[_DATA_ROOT_BEFORE] = (
         root, _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason) if root else None)
 
@@ -1398,6 +1419,16 @@ def pytest_configure(config):
     config._alpha_hive_logs_before_collection = {p: _artifact_signature(p) for p in watched}
     d = config._tmp_path_factory.mktemp("hive_logs_outside_tests", numbered=False)
     os.environ["ALPHA_HIVE_LOGS_DIR"] = str(d)
+    # 会话级 `ALPHA_HIVE_HOME` 沙箱（v0.45.422）：数据根缺省改成 `~/alpha-hive-data` 之后，收集期 import 就冻住的
+    # PATHS 派生常量（`config.py` 的 *_CONFIG、若干 `BASE_DIR` …，清单见 test_paths_not_frozen_at_import::KNOWN）
+    # 若在未设该变量时求值，会指向**本机真实生产数据**。必须早于收集，所以在这里、不在 session 夹具里设。
+    # 先记下调用 pytest 时的环境：真实数据根闸（`pytest_sessionstart`）与 paper_portfolio 真身夹具
+    # 要的是「生产在哪」，不是这个沙箱——拿沙箱推真身正是 v0.45.303 那种守卫盯着自己的失明。
+    config._alpha_hive_invocation_env = {
+        k: os.environ[k] for k in ("ALPHA_HIVE_HOME", "HOME") if k in os.environ}
+    h = config._tmp_path_factory.mktemp("hive_home_outside_tests", numbered=False)
+    config._alpha_hive_session_home = str(h)
+    os.environ["ALPHA_HIVE_HOME"] = str(h)
 
 
 def _hive_log_handler_escapes(sandbox, handlers=None):
