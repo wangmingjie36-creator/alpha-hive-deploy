@@ -46,6 +46,13 @@ class _FakeTicker:
         return _Chain(_df([[100.0, 1000, 100, 5.0, 0.3]]), _df([]))
 
 
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    """取数重试会退避睡 10s/20s——本文件不测重试（见 test_unusual_options_retry.py），一律不真睡。"""
+    monkeypatch.setattr(UO, "_sleep", lambda s: None)
+    monkeypatch.setattr(UO, "_retry_exhausted", 0)
+
+
 @pytest.fixture
 def fake_yf(monkeypatch):
     UO._CACHE.clear()
