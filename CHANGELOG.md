@@ -61,7 +61,27 @@
 - `run_backup` / `export` 的 `--src` 缺省仍是旧检出路径；`gui/app.py` 的 `_PROJECT_ROOT` 兼作数据根、不走 `PATHS`。
 - 反方向嵌套（备份仓是代码仓库的祖先）仍不拦。
 
-## [0.45.421] — 2026-10-07 — 占位（进行中：Oracle 异常期权流取数失败可见化——区分「取数失败」与「无异常」、降级比例进 Step 12 覆盖率闸；不改评分）
+## [0.45.421] — 2026-10-07 — Added：Oracle 异常期权流取数失败可见化——区分「取数失败」与「无异常」、降级比例进 Step 12 覆盖率闸；**不改评分**
+
+起因：2026-10-05 首跑与重跑 9/30 只方向翻转。查下来 Oracle 的原始期权输入（`pc_ratio` / `iv_rank` / `gex` / skew / term / max_pain）两次**逐项相同**，变的是异常期权流：首跑 28/30 只的 Oracle 结论带「异常流」一段，重跑只剩 2/30，丢了它的 26 只里 9 只 bullish→neutral（Oracle bullish 18→9）。机制：`unusual_options.detect_unusual_flow` 用 yfinance 期权链，**每个到期日都取失败也返回「无异常期权流信号 / neutral / 5.0 / data_source=yfinance_chain」**（还缓存 300 秒），单个到期日失败只写 debug、`t.options` 为空（yfinance 默认吞异常）不打日志——重跑日志里只有 2 条 warning，对不上 26 只。同样降级过的日子（agent_memory 里带异常流的比例）：09-02 5/30、09-08 0/4、09-24 0/28、09-25 0/30、10-05 重跑 2/30；09-24/25 正是 F&G 前瞻检验那两个限流日。
+
+### Added
+- `unusual_options.detect_unusual_flow`：返回加 `fetch_status`（`ok` 全部到期日取到 / `partial` 部分取到 / `failed` 一个都没取到）、`failure_reason`、`chains_total`、`chains_failed`。**全部到期日取失败 ⇒ 返回 fallback 形状（`data_source="fallback"`，5.0 / neutral / 无信号，评分相关字段与旧「无异常」逐位相同）、打 WARNING、不缓存**；部分失败打 WARNING；无到期日列表 / 现价不可得 / 异常各自写 `failure_reason`（`t.options` 为空时如实写「取数失败，或该标的无期权——yfinance 无法区分」）。
+- `OracleBeeEcho` details 加 `unusual_flow_ok`（取到数据 = `True`，否则 **`None`**——覆盖率闸把 `False` 当有值）与 `unusual_flow_status`（status / data_source / chains / reason；检测器根本没跑到 = `not_run`）。**只记录、不进评分。**
+- `scan_coverage_gate.FIELDS` 加 `unusual_flow`（闸 70%，同其余字段）：10-05 重跑那种 2/30 会判降级，进 Step 12 的 `degraded` 与 attention。`recorded_key`：旧代码产出的结果没有这个键 ⇒ 渲染「未记录」、不判降级；键在而值全 `None`（全部取数失败）⇒ 照常判降级。
+
+### 守卫（`tests/test_oracle_unusual_flow_visibility.py`，17 条）
+- 取数状态 ok / partial / failed 各一条（含 WARNING 断言）、全败不缓存而成功仍缓存、无到期日 / 异常各记原因、**失败形状的评分字段与旧「无异常」相同**。
+- Oracle 层：**同一桩下旧「无异常」与新失败形状的 score / direction 逐位相同**（只加可见性的证明）；失败记 `None`、成功记 `True`、partial 算取到、检测器没跑到记 `not_run`。
+- 覆盖率闸：健康日绿、10-05 重跑形状（2/30）红且进 attention、全败（键在）红而非「未记录」、旧结果（无键）不红、阈值 70%。
+- 变异（先提交后变异，逐个还原）9 个：全败退回静默中性 / partial 不警告 / 失败被缓存 / 失败记 `False` / partial 算失败 / 闸里「未记录」判降级 / 阈值置 0 / **偷偷改评分（fallback 不混入）** / details 键被删——各自让对应守卫变红。
+
+### 注意（诚实边界）
+- **不改评分**：降级日 Oracle 仍按 5.0 中性混入（旧行为），所以降级日与正常日的 Oracle 分数仍不是同一口径。「fallback 时不混入 5.0」（A2）会改降级日分数，按项目规矩要先登记世代边界，**待用户定**。
+- 降级在 Step 12 里是 `degraded` / warn 级（与 `rv_30d` 等其它字段同通路），**不是 P1**——`alert_manager` 只对 `status == "failed"` 的步骤发 P1。要升级成 P1 需另加判据。
+- 补数据源（C，改用 CBOE 链）做过离线等价性研究：两来源方向一致率仅 57.6%（25/361 完全相反），对 T+7 收益的 IC 都不显著且互相无显著差异（配对 p=0.27），不建议现在换；B（失败时才用 CBOE）会把两种口径混进同一序列，不做。
+- 本版推送前 Oracle 在生产里**尚未**写这些键：下一次扫描（扫描前快进）起才有，首个有数据的覆盖率判定在那天的 Step 12。
+
 
 ## [0.45.420] — 2026-10-06 — Fixed：阶段 7 二次检查——运行器只读打开改走现成的 `sqlite_readonly`、备份与记录跟 `--db` 走、`signal_archive --apply` 空根不再被拒、编排器 tool_missing 改按文件判
 
