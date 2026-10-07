@@ -9,7 +9,57 @@
 
 ## [0.45.423] — 2026-10-07 — 占位（进行中：`portfolio_greeks` 标的现价可能是前一交易日的收盘——改取与 CBOE 期权报价同一时刻的价，陈旧价不再静默进 $Delta / SPY 对冲）
 
-## [0.45.422] — 2026-10-07 — 占位（进行中：`PATHS.home` 未设 `ALPHA_HIVE_HOME` 时不再兜底到代码检出——手动运行不再静默读写冻结的旧数据）
+## [0.45.422] — 2026-10-07 — Changed：数据根缺省改为 `~/alpha-hive-data`——未设 `ALPHA_HIVE_HOME` 时不再兜底到代码检出（手动运行不再静默读写冻结旧数据）；测试会话在收集之前设会话级沙箱
+
+**问题**：`PATHS.home` 未设 `ALPHA_HIVE_HOME` 时兜底到 `hive_logger.py` 所在目录（代码检出）。阶段 5 之前数据就在那里，这是对的；
+阶段 5 把生产数据搬到 `~/alpha-hive-data` 后，检出里只剩搬家那天冻结的旧数据。交互 shell 不设该变量（10-03 实测）⇒ 手动跑的工具
+**静默**读写旧数据：不报错、结果看着正常；写入类工具把新东西写进检出，生产看不到。此前只在几个出口加了「未设 ⇒ 读的是代码目录」的提醒，
+备份加了守卫（v0.45.414），其余工具都没有。用户选方案 A（缺省取生产位置），不选「未设即报错」。
+
+**生产不受影响**：编排器 `export ALPHA_HIVE_HOME`、launchd plist、MCP（`~/.claude.json` 的 `mcpServers.alpha_hive.env`）都显式设着
+（10-07 只读核对）；Alpha Bot.app 的启动器自己传用户选的数据根。
+
+### Changed
+- `hive_logger.py`：新增 `resolve_data_root(environ=None)`（唯一规则：`ALPHA_HIVE_HOME` 非空就用它，否则 `$HOME/alpha-hive-data`；
+  空串按未设，与 `tests/_root_data_guard.real_data_root` 同口径；纯函数不建目录）与 `DEFAULT_DATA_ROOT_NAME`；`PATHS.home` 改调它。
+  `environ` 参数给测试框架用「调用 pytest 时」的环境求真实数据根。
+- `tests/conftest.py`：
+  - `pytest_configure` 先记下调用时的 `ALPHA_HIVE_HOME` / `HOME`，再设**会话级** `ALPHA_HIVE_HOME` 沙箱——必须早于收集：收集期 import
+    就冻住的 PATHS 派生常量（`config.py` 的 *_CONFIG、若干 `BASE_DIR`…）在缺省改成生产位置后，否则会指向本机真实生产数据。
+  - `pytest_sessionstart` 的真实数据根闸、`_real_paper_portfolio_state_dir` 的真身都改按调用时环境求（读 os.environ 会把会话沙箱当成
+    「生产」——v0.45.303 那种守卫盯着自己的失明）；真身夹具的防漂移自检改为在收集期环境下比同一推导。
+  - 顺带修正：交互 shell 不设变量时，paper_portfolio 真身此前其实落在**代码检出里的冻结副本**上——守卫一直盯着旧数据，不是生产。
+  - 新夹具 `data_root_session_facts`（conftest 不可 import，照 `artifact_signature` 的惯例暴露）。
+- 提示语改写（不再说「回落到代码目录」）：`sell_strike_ledger`（缺目录 hint 写明缺省数据根路径；CLI 未设时 stderr 由 ⚠️ 改 ℹ️ 并写明读写目录）、
+  `alphabot/__main__`（启动提示）、`replay_scoring` / `signal_archive` / `vol_forecast`（缺库提示）。
+- 文档串 / 注释：`hive_logger`（`sell_strike_state`、`data_backup_repo`）、`data_backup/export.py`、`run_backup.py`（v0.45.414 守卫仍拦
+  「`ALPHA_HIVE_HOME` 被设成检出」与显式路径）、`backup_continuity.py`、`alphabot/launcher.py`；编排器头注释的阶段 5 回退步骤改为
+  「`DATA_DIR="$PROJECT_DIR"`、export 保留」（删掉 export 已回不到检出）——**仅注释**，`bash -n` / `orchestrator_lint` 0 命中。
+- `CLAUDE.md`：Alpha Bot 一行；「路径指向代码还是数据」一节前加数据根规则。
+
+### Tests
+- 新增 `tests/test_data_root_default.py`（10 条）：未设 / 空串 / 显式值 / 调用时求值 / 不随 `hive_logger.__file__` 变 / 传映射时不看 os.environ /
+  与 `real_data_root` 同规则；会话接线三条：收集期 `ALPHA_HIVE_HOME` 就是会话沙箱（模块级变量在收集时取值）、真实数据根闸按调用时环境、
+  paper_portfolio 真身按调用时环境且不在会话沙箱里。
+- 改写钉旧行为的测试：`test_paper_portfolio_guard_identity`（收集期一格的前提改为「冻住的 STATE_DIR 在会话沙箱里、绝不在真身下」）、
+  `test_hive_logger_not_frozen`（未设时日志落 `$HOME/alpha-hive-data/logs`，HOME 钉假目录）、`test_data_backup`（未设 ⇒ `$HOME/alpha-hive-data/_git_backup`；
+  另加「`ALPHA_HIVE_HOME` 设成检出 ⇒ 全链路拒绝」）、`test_sell_strike_ledger` 两条（假 HOME 代替假 `hive_logger.__file__`）。
+- 变异 7/7 被杀，passed+failed 均为 334：兜底改回 `__file__`（10 红）/ 空串不当未设（2）/ 忽略传入映射（5）/ 不设会话沙箱（3）/
+  闸改读 os.environ（4）/ 真身按当前环境求（3）/ 调用时环境快照取晚（8）。整轮在**假 HOME**（含空的 `alpha-hive-data` 让闸生效）下跑——
+  「不设会话沙箱」那个变异否则会让收集期常量指向本机真实生产数据。
+- 全套（换基到 main `f7ca8359` 后）：8325 passed / 1 failed（经济日历 `TestCoverageHorizon`，设计内到期）；闸 active 于真实数据根。换基前（`e726fa09`）一轮另有 1 error = 盘中 Alpha Bot 采样撞闸（5 个 `alphabot_state/intraday/2026-10-07/*.jsonl` 各多一行、`ts` 12:53 ET 落在测试窗口内——已知形状，见 memory）。两轮前后生产 `logs/alpha_hive.log` 与 `alpha_hive_structured.jsonl` 行数均不变（logs 被闸豁免，单独核对）。剥掉 `ALPHA_HIVE_*` 起子进程的测试逐个核过：
+  都显式设了 `ALPHA_HIVE_HOME` 或把 HOME 指到空目录；`env -i` 那组实测不写生产日志。
+
+### 注意
+- 交互 shell 里手动跑**会写数据的工具**，现在是真写进生产数据——与设了变量再跑完全一样，本就是正确行为，但要知道。
+- 别的机器（CI / 干净克隆）未设时缺省位置多半不存在：只读出口照旧把「目录 / 库不存在」与「空」分开说（v0.45.382 的判定）。
+- Cowork VM 若还在用、且依赖「未设 ⇒ 挂载的仓库目录」读数据：现在要显式设 `ALPHA_HIVE_HOME`（是否还在用：待验证）。
+- 测试侧 paper_portfolio 守卫现在盯真实生产：每日扫描写状态的时段跑测试会误报（与真实数据根闸同类，等扫描结束再跑）。
+
+### 未动（另立）
+- `run_backup` 的 `--status-file` / `--history-file`、`backup_continuity._history_file()` 仍写死 `Path.home()/alpha-hive-data/logs/...`（现与 `PATHS` 缺省同址）。
+- `run_backup` / `export` 的 `--src` 缺省仍是旧检出路径；`gui/app.py` 的 `_PROJECT_ROOT` 兼作数据根、不走 `PATHS`。
+- 反方向嵌套（备份仓是代码仓库的祖先）仍不拦。
 
 ## [0.45.421] — 2026-10-07 — 占位（进行中：Oracle 异常期权流取数失败可见化——区分「取数失败」与「无异常」、降级比例进 Step 12 覆盖率闸；不改评分）
 

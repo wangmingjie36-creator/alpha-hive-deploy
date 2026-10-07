@@ -48,12 +48,35 @@ def reset_correlation_id():
 
 # ==================== 路径管理 ====================
 
+#: 生产数据根在家目录下的名字（数据根迁移阶段 5 起；编排器 `DATA_DIR`、launchd plist 指的都是它）。
+DEFAULT_DATA_ROOT_NAME = "alpha-hive-data"
+
+
+def resolve_data_root(environ=None) -> Path:
+    """数据根的**唯一**解析规则（v0.45.422）：`ALPHA_HIVE_HOME` 非空就用它，否则 `$HOME/alpha-hive-data`。
+
+    此前未设时兜底到**本文件所在目录**（代码检出）——阶段 5 之前数据就在那里，那时是对的；阶段 5 把生产
+    数据搬到 `~/alpha-hive-data` 后，检出里只剩搬家那天冻结的旧数据，交互 shell（不设这个变量）里手动跑的
+    工具便**静默**读写旧数据：不报错、结果看着正常。生产（编排器 export + plist）一直设着，不受影响。
+    空串按未设处理（与 `tests/_root_data_guard.real_data_root` 同口径）。
+
+    `environ` 缺省读当前 `os.environ`（调用时求值，测试逐条 setenv 生效）；测试框架传**调用 pytest 时**
+    的环境快照来求「真实」数据根——会话期间 `ALPHA_HIVE_HOME` 已被换成沙箱（见 `tests/conftest.py`
+    的 `pytest_configure`）。纯函数：不建目录、不碰文件系统。
+    """
+    env = os.environ if environ is None else environ
+    explicit = env.get("ALPHA_HIVE_HOME")
+    if explicit:
+        return Path(explicit)
+    return Path(env.get("HOME") or os.path.expanduser("~")) / DEFAULT_DATA_ROOT_NAME
+
+
 class _HivePaths:
     """集中管理所有路径，从环境变量读取，带默认值"""
 
     @property
     def home(self) -> Path:
-        return Path(os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__))))
+        return resolve_data_root()
 
     @property
     def git_repo_root(self) -> Path:
@@ -174,7 +197,7 @@ class _HivePaths:
         四个老账本（vrp_state 等）的 `BASE_DIR = PATHS.home` 写法已在
         `tests/test_paths_not_frozen_at_import.py::KNOWN` 登记为存量违规，别再添一个。
         不建目录：写入方自己 `mkdir`，只读的调用方（assess / MCP）不该为了「看一眼」造出空目录。
-        反过来，目录不存在也**不许**被只读出口说成「账本为空」（未设 env 时这里就是代码目录）：
+        反过来，目录不存在也**不许**被只读出口说成「账本为空」（如别的机器上没有 `~/alpha-hive-data`）：
         判定走 `sell_strike_ledger.state_dir_status`（v0.45.382）。
         """
         return self.home / "sell_strike_state"
@@ -220,8 +243,8 @@ class _HivePaths:
         只提交到这里（代码仓库的 `paper_portfolio_state/` 提交止于 2026-09-25）。**本属性只读**，不建目录。
         调用时求值（读 `ALPHA_HIVE_HOME`）。
         v0.45.414 起它也是 `run_backup` / `export` 的缺省位置（经 `export.default_backup_repo()`），编排器 Step 14
-        不再自己写路径。⚠️ `ALPHA_HIVE_HOME` 未设时 `home` 兜底到代码检出 ⇒ 本值落进代码仓库；
-        备份 / 导出由 `export.backup_repo_inside_code_repo` 拒绝，只读的调用方自己留意。
+        不再自己写路径。`ALPHA_HIVE_HOME` 未设时随 `home` 取 `~/alpha-hive-data/_git_backup`（v0.45.422 前
+        兜底到代码检出）；显式指到代码仓库里的仍由 `export.backup_repo_inside_code_repo` 拒绝。
         """
         return self.home / "_git_backup"
 
