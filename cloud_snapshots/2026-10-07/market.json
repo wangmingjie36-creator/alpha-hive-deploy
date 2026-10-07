@@ -1,6 +1,6 @@
 {
  "schema_version": 1,
- "fetched_at_utc": "2026-10-07T21:11:30.428026+00:00",
+ "fetched_at_utc": "2026-10-07T21:14:45.141652+00:00",
  "cboe": {
   "pcce": {
    "total_pc_ratio": 1.087,
@@ -37,9 +37,15 @@
   },
   "macro_score": 5.47,
   "macro_sentiment": "neutral",
-  "timestamp": "2026-10-07T21:11:34.951436"
+  "timestamp": "2026-10-07T21:14:45.894582"
  },
- "fear_greed": null,
- "fear_greed_error": "ModuleNotFoundError: No module named 'requests'",
+ "fear_greed": {
+  "value": 45,
+  "classification": "Fear",
+  "sentiment_score": 4.5,
+  "is_real_data": true,
+  "source": "cnn",
+  "timestamp": "2026-10-07T21:14:46.345363"
+ },
  "degraded_sections": {}
 }

@@ -1,8 +1,8 @@
 {
  "schema_version": 1,
  "date": "2026-10-07",
- "generated_at_utc": "2026-10-07T21:11:34.953811+00:00",
- "elapsed_sec": 35.5,
+ "generated_at_utc": "2026-10-07T21:14:46.348429+00:00",
+ "elapsed_sec": 32.4,
  "tickers_requested": 30,
  "tickers_ok": 30,
  "ok": [
@@ -40,7 +40,7 @@
  "failed": {},
  "market_cboe_ok": true,
  "market_degraded_sections": [],
- "fear_greed_ok": false,
+ "fear_greed_ok": true,
  "vintage_ok": 30,
  "vintage_unverifiable": [],
  "vintage_stale": [],
