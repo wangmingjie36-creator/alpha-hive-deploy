@@ -33,7 +33,63 @@
 
 ## [0.45.428] — 2026-10-08 — 占位（进行中：v0.45.424 二次检查——Alpha Bot 跨式页 / quote_held / GEX 影子记录 / 跨式预注册模块）
 
-## [0.45.427] — 2026-10-08 — 占位（进行中：测试夹具污染生产备份仓库的根治——数据根闸不再整个豁免 `_git_backup` + PATHS 元守卫；备份拒收外来条目 / 嵌套仓库；测试 helper 写前核对沙箱）
+## [0.45.427] — 2026-10-08 — Fixed：测试夹具污染生产备份仓库的根治——数据根闸不再整个豁免 `_git_backup` 并加 PATHS 元守卫；备份拒收外来条目 / 嵌套仓库；测试 helper 写前核对沙箱
+
+**事故**：2026-10-03 08:45，另一 session 的变异检验（变异 N20：`PATHS.data_backup_repo` 写死成 `~/alpha-hive-data/_git_backup`）在
+conftest 隔离下跑 `tests/test_fg_exposure_gate_forward_test.py`——conftest 只隔离 `ALPHA_HIVE_HOME` 不隔离 HOME，测试 helper `_backup()`
+**经被测属性**取目标、`shutil.move` 过去，目标已存在 ⇒ 夹具仓库 `bk_src`（带 `.git`）被**搬进**生产备份仓库。10-05 14:46 的每日备份
+`git add -A` 把它静默封成 gitlink（mode 160000）提交进备份历史（`b43a5de`），此后每次备份都带着。**四天没有任何东西红**：
+变异脚本把 N20 记成「✅红（变异被杀）」——那是对的红，盖住了副作用；会话级真实数据根闸（v0.45.409）按「`_` 元目录 = 测试碰不到」
+整个豁免 `_git_backup`——而 v0.45.408 加 `PATHS.data_backup_repo` 那天这个前提就不成立了，注释不会执行；备份流程来者不拒。
+取证：该 session 本机会话记录里的变异脚本原文；假 HOME 下用 origin/main `82e8416b` + N20 原样复现（`bk_src` / `bk_src2` 都进了假备份仓库、闸一声没吭）。
+
+### Fixed
+- `tests/_root_data_guard.py`：新增 `DATA_ROOT_WATCHED_META = {"_git_backup"}`——`_` 元目录照旧豁免，**测试碰得到的**这个例外照样受闸
+  （它的 `.git/` 仍按 `SKIP_DIR_NAMES` 跳过）；新增 `exempt_reachable_paths()`。conftest `_guard_real_data_root` docstring 同步。
+- `data_backup/run_backup.py`：导出之后、密钥扫描之前加 `foreign_entries()` 检查——工作区里**未跟踪且不在本轮 `SHA256SUMS` 里**的条目，
+  或**任何嵌套仓库**（未跟踪的 / 已成 gitlink 的），一律拒绝提交：`stage: "foreign_entries"`、`foreign_entries`（前 50）/ `foreign_count`、退出码 2；
+  判不了（git 出错、SHA256SUMS 读不了）同样不提交。**已跟踪的陈旧文件不算**（导出不删数据根里已消失的根文件，它们早已进了历史）——
+  否则就是让生产备份天天失败。生产只读核对（`GIT_OPTIONAL_LOCKS=0`，索引 mtime 前后不变）：当前备份仓只命中 `嵌套仓库:bk_src/` 一项。
+- `scripts/alpha-hive-orchestrator.sh` Step 14：加 `foreign_entries` 分支（ERROR）。部署滞后一轮期间旧编排器落进「未识别 stage」WARN 分支、
+  照样带出 stage 名并记进 `steps_result`——兼容。
+- `tests/test_fg_exposure_gate_forward_test.py`：两份重复的 `_backup()` 收成 `_install_backup_repo()`——目标由测试按沙箱自己算、**不经被测属性写**；
+  先断言 `PATHS.data_backup_repo` 指向沙箱（算错 ⇒ 当场红、一字节不写），目标已存在也红，`rename` 代替会把夹具嵌进去的 `shutil.move`。
+
+### Added
+- `tests/test_root_data_guard.py`：
+  - `test_paths_reaching_exempt_areas_are_exactly_the_known_ones`：「测试碰不到」写成断言——枚举 `PATHS` 每个属性在沙箱数据根缺省布局下解析到哪，
+    落在闸豁免区的必须**恰好**是 `PATHS_IN_EXEMPT_AREAS_OK`（`logs_dir` / `production_sync`，写明由谁负责隔离）。等式：多了 = 新盲区，少了 = 白名单过期。
+    有它的话 v0.45.408 那天就会红。`test_exempt_reachable_check_has_teeth` 为对照。
+  - `test_real_data_root_gate_is_red_on_fixture_repo_moved_into_backup`：10-03 原形端到端（原样拷贝的 conftest 真跑内层 pytest）。
+  - 判据表 / 写入形状加 `_git_backup` 各项；良性对照删掉「改写 `_git_backup/x`」（那正是事故形状），改为备份仓 `.git` 簿记。
+- `tests/test_data_backup.py::TestForeignEntriesRefused`（6 条：对照「首次备份全是未跟踪产物」「已跟踪陈旧文件」不拦；红组未跟踪外来文件 /
+  夹具仓库搬入 / 已封 gitlink / 判不了）；Step 14 分支对照表加 `foreign_entries` 一行。
+
+### 变异实测（各在工作树独立副本、`PYTHONDONTWRITEBYTECODE=1`、`--maxfail=1000`；事后核对生产备份仓无新条目）
+| 变异 | 红的测试 |
+|---|---|
+| M1 闸重新整个豁免 `_git_backup` | 8：判据 ×3、写入形状 ×2（事故原形 / 改写备份文件）、元守卫、元守卫对照、端到端接线 |
+| M2 外来检查恒返回空 | 3：未跟踪外来 / 夹具搬入 / 已封 gitlink |
+| M3 不看已封 gitlink | 1：已封 gitlink |
+| M4b 严判（已跟踪陈旧文件也算外来） | 1：陈旧文件对照（首轮写的 M4 只改了 `git status` 解析、存活——已跟踪未改动的文件根本不进 status，变异没模拟到严判；重写后才红） |
+| M5 判不了就放行 | 1：判不了 |
+| M7 编排器删 `foreign_entries` 分支 | 1：分支对照表该行 |
+| M8 **10-03 原样重演**（N20 + 旧写法 helper，假 HOME） | 会话闸 teardown 报错、点名 `_git_backup/bk_src`（此前同条件一声不吭） |
+另：修好 helper 后单独施加 N20（假 HOME）⇒ 8 红（6 条是写前断言「没指向沙箱」），假备份仓干净。
+
+### 生产清理（未做，留给用户）
+`~/alpha-hive-data/_git_backup/bk_src` 与 HEAD 里的 gitlink 尚在。本 session 的清理命令被权限审查拦下（修改共享资源），未绕过。
+**新代码合入并经生产同步后，未清理前的每日备份会按设计拒绝提交（Step 14 ERROR）**——那是正确的报警，清掉即恢复。
+备份历史不改写：`b43a5de` 起几个提交里只是一个 gitlink 指针，夹具内容不在备份对象库里。
+
+### 全套（426 + 427 一起；与 origin/main `0533996c` 同环境对比——两边都是不带 `.git` 的源码副本）
+- 失败集合**逐条相同**（11 条）。其中 10 条是副本没有 `.git`（`test_code_version` ×2、`test_migrate_data_root`、`test_orchestrator_deployed_matches_repo` ×2、
+  `test_no_data_tracked_in_git` ×3、`test_sell_strike_integration` 与 `test_alphabot` 各 1）——**在真 worktree 里逐条重跑均过**；
+  剩 `test_economic_calendar::TestCoverageHorizon`，设计内的到期提醒，与本批无关。
+- passed 8387 → 8407（+20），逐文件收集数核对：本批新增 **18**（426 一条；427 十六条；`test_pytestmark_placement` 按测试类参数化、因新类多 1）
+  + **2** 来自 worktree 里的 iCloud 重名副本 `tests/test_child_user_site_pin 2.py`（被 `.gitignore` 的 `* [0-9].*` 忽略、但 pytest 照收；
+  `git hash-object` 与 `7fe61553` 里那份一致、无独有内容，已移入废纸篓）。
+- 两轮全量期间真实数据根**零写入**。
 
 ## [0.45.426] — 2026-10-08 — Changed：`PYTHONUSERBASE` 改在 conftest 全会话钉一次（唯一出处）——测试换 HOME 不再挪子进程的用户 site；删 alphabot 夹具那行，守卫挪到中心并配对照组（只动测试，生产不变）
 

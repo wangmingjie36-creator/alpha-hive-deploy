@@ -200,6 +200,11 @@ v0.45.165 普查全仓（20 条，5 个文件）后补三条：
 测试会话在 `tests/conftest.py::pytest_configure` **收集之前**设会话级 `ALPHA_HIVE_HOME` 沙箱，并记下调用时环境给
 「生产在哪」的守卫用——别把这个沙箱挪进 session 夹具（太晚，收集期冻住的常量会指向生产）。
 
+**真实数据根闸的豁免只认断言、不认注释（v0.45.427）**：`PATHS` 落在闸豁免区（`logs/`、`db_backups/`、`_` 元目录）的属性必须恰好是
+`tests/test_root_data_guard.py::PATHS_IN_EXEMPT_AREAS_OK` 里写明「谁负责隔离」的几个——新增属性落进 `_` 目录会红，让它受闸
+（`DATA_ROOT_WATCHED_META`），别往白名单加。测试写夹具**别经被测的路径属性写**（目标自己按沙箱算、写前断言属性指向它）：
+10-03 一个变异体经 `PATHS.data_backup_repo` 把夹具写进了生产备份仓库，被每日备份封进历史，四天没人红（auto-memory `alpha-hive-test-writes-production.md`）。
+
 改任何 `Path(__file__).parent / …` 之前先回答一句：**它指向代码还是数据？**
 
 | 指向 | 正确锚点 | 典型 |

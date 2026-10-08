@@ -1507,6 +1507,10 @@ elif [ $STEP14_RC -eq 2 ]; then
         export)
             log "ERROR" "🚨 Step 14：数据导出失败，未提交——见 $BACKUP_STATUS_JSON"
             ;;
+        foreign_entries)
+            # v0.45.427：备份仓里出现本轮导出之外的条目（外来文件 / 嵌套仓库）⇒ 拒绝提交，免得被 git add -A 封进永久备份历史
+            log "ERROR" "🚨 Step 14：备份仓里有导出之外的条目（外来文件 / 嵌套仓库），已拒绝提交——见 ${BACKUP_STATUS_JSON}（foreign_entries）"
+            ;;
         git_error)
             log "ERROR" "🚨 Step 14：git 调用异常（如超时），未确认是否已提交/推送——见 $BACKUP_STATUS_JSON"
             ;;

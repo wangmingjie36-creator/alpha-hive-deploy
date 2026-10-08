@@ -97,11 +97,14 @@ DATA_ROOT_GUARDED = [
     "index.html", "alpha-hive-daily-2026-09-11.md", "weight_history.jsonl",
     "sell_strike_state/monthly/2026-09.jsonl", "alphabot_state/settings.json",
     "self_analysis_briefs/self_analysis_2026-10.md", "brand_new_dir/f.bin",   # 默认拒绝：新产物也盯
+    # v0.45.427：`_git_backup` 是 `_` 元目录里唯一测试碰得到的（`PATHS.data_backup_repo`）——10-03 夹具写进的就是它
+    "_git_backup/pheromone/manifest.json", "_git_backup/bk_src", "_git_backup/bk_src/paper_portfolio_state/meta.json",
 ]
 DATA_ROOT_EXCLUDED = [
     "logs/scan_timing.json", "logs/alpha_hive.log", "db_backups/pheromone_2026-09-28.db",   # 常驻写入方
-    "_git_backup/pheromone/manifest.json", "_archive/pheromone_bak/a.db", "_migration/r.json",
+    "_archive/pheromone_bak/a.db", "_migration/r.json",
     "_manual_backups/x", ".DS_Store", "__pycache__/x.pyc", "sub/.DS_Store",
+    "_git_backup/.git/index", "_git_backup/bk_src/.git/HEAD",   # git 自己的簿记（SKIP_DIR_NAMES，任意深度）
 ]
 
 
@@ -226,6 +229,57 @@ def test_code_edits_and_tool_caches_are_not_writes(tree):
     assert g.diff(before, g.fingerprint(str(tree))) == {}
 
 
+
+# ───────────────── 1c. 「测试碰不到」写成断言（v0.45.427） ─────────────────
+#
+# 闸对 `_` 元目录的豁免，理由曾只是一句注释「不是测试能碰到的」。v0.45.408 加 `PATHS.data_backup_repo` 那天它就不成立了
+# （指向 `_git_backup`），注释不会执行、没人红；10-03 夹具就是经它写进了生产备份仓库。这里把前提变成断言：
+# 枚举 `PATHS` 每个属性在沙箱数据根下解析到哪，落在豁免区的必须**恰好**是下面这几个（等式：多了 = 新的盲区，少了 = 白名单过期）。
+
+#: PATHS 属性落在数据根豁免区、但隔离另有人负责：属性名 → 谁负责。往这里加之前先问：它真的不能受闸吗？
+PATHS_IN_EXEMPT_AREAS_OK = {
+    "logs_dir": "日志常驻有写入方（MCP / 扫描），无法指纹；测试隔离靠 `_isolate_env` 的 ALPHA_HIVE_LOGS_DIR + v0.45.239 日志隔离守卫",
+    "production_sync": "落在 logs/ 下，同上",
+}
+
+#: 会把 PATHS 属性挪出缺省布局的覆盖变量（conftest 逐条设成沙箱）——看缺省布局要先清掉。
+_PATHS_OVERRIDE_VARS = ("ALPHA_HIVE_LOGS_DIR", "ALPHA_HIVE_CACHE_DIR", "ALPHA_HIVE_DB_PATH", "ALPHA_HIVE_CHROMA_PATH")
+
+
+def _paths_relpaths_under(root: str) -> dict:
+    from hive_logger import PATHS
+    out = {}
+    for name, attr in vars(type(PATHS)).items():
+        if not isinstance(attr, property):
+            continue
+        v = os.path.realpath(str(getattr(PATHS, name)))
+        if v == root or v.startswith(root + os.sep):
+            out[name] = os.path.relpath(v, root)
+    return out
+
+
+def test_paths_reaching_exempt_areas_are_exactly_the_known_ones(tmp_path, monkeypatch):
+    root = tmp_path / "dr"
+    root.mkdir()
+    monkeypatch.setenv("ALPHA_HIVE_HOME", str(root))
+    for k in _PATHS_OVERRIDE_VARS:
+        monkeypatch.delenv(k, raising=False)
+    rel = _paths_relpaths_under(os.path.realpath(root))
+    assert {"db", "data_backup_repo", "logs_dir"} <= set(rel), f"枚举没接上 PATHS：{rel}"
+    exempt = g.exempt_reachable_paths(rel)
+    assert set(exempt) == set(PATHS_IN_EXEMPT_AREAS_OK), (
+        f"PATHS 落在闸豁免区的属性 = {exempt}，白名单 = {sorted(PATHS_IN_EXEMPT_AREAS_OK)}。\n"
+        "多出来的：测试经它写进真实数据根，闸看不见——让它受闸（见 `DATA_ROOT_WATCHED_META`），别往白名单加；"
+        "少了的：白名单过期，删掉那一项。")
+
+
+def test_exempt_reachable_check_has_teeth():
+    """对照组：判据真分得开「受闸」与「豁免」，上一条的等式才说明得了什么。"""
+    assert g.exempt_reachable_paths({
+        "a": "_archive/x", "b": "_git_backup", "c": "cache/y", "d": ".", "e": "logs/z", "f": "_git_backup/.git",
+    }) == {"a": "meta-dir:_archive", "e": "volatile:logs", "f": "skip-dir:.git"}
+
+
 # ───────────────── 2b. 真实数据根：指纹比对（合成数据根） ─────────────────
 
 @pytest.fixture
@@ -235,7 +289,7 @@ def data_root(tmp_path):
         "pheromone.db": b"db", "pheromone.db-wal": b"wal", "pheromone.db-shm": b"shm",
         "report_snapshots/a.json": b"{}", "paper_portfolio_state/meta.json": b"{}",
         "logs/alpha_hive.log": b"line\n", "db_backups/pheromone_2026-09-27.db": b"old",
-        "_git_backup/x": b"1", "_archive/pheromone_bak/a.db": b"a",
+        "_git_backup/x": b"1", "_git_backup/.git/HEAD": b"ref: refs/heads/main\n", "_archive/pheromone_bak/a.db": b"a",
     }.items():
         (r / rel).parent.mkdir(parents=True, exist_ok=True)
         (r / rel).write_bytes(data)
@@ -246,6 +300,17 @@ def _dfp(root):
     return g.fingerprint(str(root), g.data_root_excluded_reason)
 
 
+def _move_fixture_repo_into_backup(r):
+    """10-03 的原形：带 `.git` 的夹具仓库被 `shutil.move` 到一个**已存在**的 `_git_backup` ⇒ 被搬**进去**成了子目录。"""
+    src = r.parent / "bk_src"
+    (src / ".git").mkdir(parents=True)
+    (src / ".git/HEAD").write_bytes(b"ref: refs/heads/main\n")
+    (src / "paper_portfolio_state").mkdir()
+    (src / "paper_portfolio_state/meta.json").write_bytes(b'{"version": "test"}')
+    shutil.move(str(src), str(r / "_git_backup"))
+    assert (r / "_git_backup/bk_src/.git").is_dir(), "前提：shutil.move 进已存在目录 ⇒ 嵌进去"
+
+
 @pytest.mark.parametrize("mutate,kind,path", [
     (lambda r: (r / "pheromone.db").write_bytes(b"dbX"), "changed", "pheromone.db"),                # 账本多一字节
     (lambda r: (r / "paper_portfolio_state/meta.json").write_bytes(b"{1}"), "changed", "paper_portfolio_state/meta.json"),
@@ -254,7 +319,10 @@ def _dfp(root):
     (lambda r: (r / "new_dir").mkdir(), "added", "new_dir"),                                         # 只建空目录也算写
     (lambda r: (r / "report_snapshots/a.json").unlink(), "removed", "report_snapshots/a.json"),
     (lambda r: (r / "pheromone.db-wal").unlink(), "removed", "pheromone.db-wal"),
-], ids=["append-ledger", "rewrite-state", "new-snapshot", "new-top-level", "empty-dir", "delete", "wal-vanishes"])
+    (_move_fixture_repo_into_backup, "added", "_git_backup/bk_src"),                                 # 10-03 事故原形
+    (lambda r: (r / "_git_backup/x").write_bytes(b"2"), "changed", "_git_backup/x"),
+], ids=["append-ledger", "rewrite-state", "new-snapshot", "new-top-level", "empty-dir", "delete", "wal-vanishes",
+        "fixture-repo-into-backup", "rewrite-backup-file"])
 def test_data_root_write_shapes_are_caught(data_root, mutate, kind, path):
     before = _dfp(data_root)
     time.sleep(0.01)
@@ -263,13 +331,14 @@ def test_data_root_write_shapes_are_caught(data_root, mutate, kind, path):
 
 
 def test_data_root_benign_activity_is_not_a_write(data_root):
-    """正对照：日志轮转、备份轮转、每日备份、迁移留档、读者往 -shm 写标记——都不是测试写穿。"""
+    """正对照：日志轮转、备份轮转、备份仓的 git 簿记、迁移留档、读者往 -shm 写标记——都不是测试写穿。
+    （v0.45.427 前这里把「`_git_backup/x` 被改写」也当良性——那正是 10-03 夹具写进生产备份仓库的形状。）"""
     before = _dfp(data_root)
     time.sleep(0.01)
     (data_root / "logs/alpha_hive.log").write_bytes(b"line\nmore\n")
     (data_root / "logs/new.log").write_bytes(b"x")
     (data_root / "db_backups/pheromone_2026-09-28.db").write_bytes(b"new")
-    (data_root / "_git_backup/x").write_bytes(b"2")
+    (data_root / "_git_backup/.git/index").write_bytes(b"idx")    # git 簿记：备份仓的 .git 不看
     (data_root / "_archive/pheromone_bak/b.db").write_bytes(b"b")
     (data_root / "pheromone.db-shm").write_bytes(b"SHM")          # 同大小：读者标记
     (data_root / ".DS_Store").write_bytes(b"finder")
@@ -403,6 +472,33 @@ def test_real_data_root_gate_is_red_on_escaping_writes(tmp_path):
                           "changed（1）：", "pheromone.db"])
     normalized = "\n".join(line.strip() for line in out.splitlines())
     assert expected in normalized, f"总闸报出的 diff 与预期不符：\n{out}"
+
+
+def test_real_data_root_gate_is_red_on_fixture_repo_moved_into_backup(tmp_path):
+    """10-03 事故原形端到端（v0.45.427）：测试把带 `.git` 的夹具仓库 `shutil.move` 到**已存在**的 `_git_backup`
+    ⇒ 被搬进去成了子目录。v0.45.427 前闸整个豁免 `_git_backup`，这一轮是绿的（夹具随后被每日备份提交进备份历史）。"""
+    data_root = _make_data_root(tmp_path / "alpha-hive-data")
+    (data_root / "_git_backup/.git").mkdir(parents=True)
+    (data_root / "_git_backup/MANIFEST.json").write_bytes(b"{}")
+    root = _make_fake_checkout(tmp_path / "checkout", """
+        import os, pathlib, shutil
+        DR = pathlib.Path(os.environ["INNER_DATA_ROOT"])
+
+        def test_moves_a_fixture_repo_into_the_backup(tmp_path):
+            src = tmp_path / "bk_src"
+            (src / ".git").mkdir(parents=True)
+            (src / "paper_portfolio_state").mkdir()
+            (src / "paper_portfolio_state/meta.json").write_text('{"version": "test"}')
+            shutil.move(str(src), str(DR / "_git_backup"))
+    """)
+    r = _run_inner_pytest(root, {"ALPHA_HIVE_HOME": str(data_root), "INNER_DATA_ROOT": str(data_root)})
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, out
+    assert "1 passed, 1 error" in out, f"应是测试本身通过、总闸在 teardown 报错：\n{out}"
+    expected = "\n".join(["added（3）：", "_git_backup/bk_src", "_git_backup/bk_src/paper_portfolio_state",
+                          "_git_backup/bk_src/paper_portfolio_state/meta.json"])
+    normalized = "\n".join(line.strip() for line in out.splitlines())
+    assert expected in normalized, f"总闸报出的 diff 与预期不符（夹具的 .git 应被跳过）：\n{out}"
 
 
 def test_real_data_root_gate_is_green_on_benign_run(tmp_path):

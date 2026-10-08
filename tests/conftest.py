@@ -1372,7 +1372,8 @@ def _guard_real_data_root(request):
     阶段 5 之后生产数据在 `$ALPHA_HIVE_HOME`（~/alpha-hive-data）。`_isolate_env` 逐条把它改成沙箱，
     但任何绕过隔离的写入（`__file__` 派生 / 模块级常量冻结 / subprocess 丢了 env / 硬编码 `~/alpha-hive-data`）
     都会写到真实数据根——生产账本、样本库、模型，**不可重取**。此前没有任何东西会为此变红。
-    口径同仓库根闸：默认拒绝（除 `logs/`、`db_backups/` 与 `_` 打头的元目录外一切受闸）、`(size, mtime_ns)`、
+    口径同仓库根闸：默认拒绝（除 `logs/`、`db_backups/` 与 `_` 打头的元目录外一切受闸；`_git_backup/` 例外照样受闸，
+    v0.45.427——`PATHS.data_backup_repo` 让测试碰得到它，10-03 夹具就是写进了这里）、`(size, mtime_ns)`、
     `-shm` 只记大小。「之前」取在 `pytest_sessionstart`（收集期之前），理由见仓库根闸一节。
 
     ⚠️ 与仓库根闸同样是 session 级：红在整轮末尾，不指出是哪条测试写的（定位法见仓库根闸）。
