@@ -56,7 +56,7 @@ def _unusual_flow_status(flow) -> dict:
     return {"status": f.get("fetch_status") or ("not_run" if not f else "unknown"),
             "data_source": f.get("data_source"),
             "chains_total": f.get("chains_total"), "chains_failed": f.get("chains_failed"),
-            "retries": f.get("retries"),
+            "retries": f.get("retries"), "pace_wait_s": f.get("pace_wait_s"),
             "reason": f.get("failure_reason") or None}
 
 
