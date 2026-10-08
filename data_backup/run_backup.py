@@ -60,6 +60,10 @@ v0.45.264 起已接入生产编排器 `alpha-hive-orchestrator.sh` Step 14
   而非悄悄放行——这是防御 `add` 返回码本身骗人的最后一道闸（例如 `add`
   返回 0 但因为其它原因没有真正暂存所有改动）。⚠️ 刻意不自动删
   `index.lock`——可能有另一个 git 进程真的在用它，删掉会造成更难排查的损坏。
+- **`SHA256SUMS` 列的路径索引里没有（精确拼写）**（v0.45.430）→ `add -A` 之后、提交之前查，
+  `stage: "git_error"`，`sums_not_tracked`（前 50 项）与 `sums_not_tracked_count`，退出码 2，不提交。
+  旧名元数据 `MANIFEST.json` 从索引退役失败（导出之前）同样记 `git_error`、不导出。
+  缘由见 `sums_paths_not_tracked` / `retire_legacy_manifest_from_index` 的 docstring。
 - 推送失败（返回码非 0，不是异常；网络/权限/远端不可写）→ 已经提交到本地工作区
   （数据没丢），但 `status.json` 记 `stage: "push"`, `ok: false`, 退出码 2；
   下一轮跑仍会带着未推送的提交重试。
@@ -98,6 +102,7 @@ import datetime as dt
 import json
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 from . import export as export_mod
@@ -140,6 +145,46 @@ def _run_git(args: list[str], cwd: Path, timeout: int = GIT_TIMEOUT_S) -> subpro
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
 
 
+def _tracked_paths(backup_dir: Path) -> list[str]:
+    ls = _run_git(["ls-files", "-z"], backup_dir)
+    if ls.returncode != 0:
+        raise RuntimeError(f"git ls-files 失败（returncode={ls.returncode}）：{ls.stderr[-500:]}")
+    return [p for p in ls.stdout.split("\0") if p]
+
+
+def retire_legacy_manifest_from_index(backup_dir: Path) -> bool:
+    """索引里**精确拼写**为 `MANIFEST.json` 的条目摘掉（只动索引，磁盘那份由 `run_export` 删），返回摘没摘（v0.45.430）。
+
+    光让导出改名不够：`core.ignorecase=true`（macOS 上 `git init` 的缺省，生产备份仓就是）时，磁盘上重新出现的
+    `manifest.json` 会被 `git add -A` 认成索引里已有的 `MANIFEST.json` ⇒ 网站 manifest 以大写名进备份，
+    到大小写敏感的盘上 clone 出来照样找不到。先摘掉旧条目，`add -A` 才按磁盘拼写记新文件。
+    `-f`：它只是上一轮的元数据（已在历史里、本轮重写成新名字），索引与磁盘不一致也照摘。
+    只有升级后第一轮真的摘；git 失败 ⇒ 抛 RuntimeError。
+    """
+    if export_mod.LEGACY_MANIFEST_NAME not in _tracked_paths(backup_dir):
+        return False
+    rm = _run_git(["rm", "--cached", "-f", "-q", "--", export_mod.LEGACY_MANIFEST_NAME], backup_dir)
+    if rm.returncode != 0:
+        raise RuntimeError(f"git rm --cached {export_mod.LEGACY_MANIFEST_NAME} 失败"
+                           f"（returncode={rm.returncode}）：{rm.stderr[-500:]}")
+    return True
+
+
+def sums_paths_not_tracked(backup_dir: Path) -> list[str]:
+    """本轮 `SHA256SUMS` 列的路径（连同元数据文件自己）里，索引中**没有这个精确拼写**的，排好序（v0.45.430）。
+
+    在 `git add -A` 之后跑；空 ⇒ 备份仓真的持有清单声称它持有的东西。09-24 起 `SHA256SUMS` 天天列
+    `manifest.json`，索引里却只有 `MANIFEST.json`（另一份内容）——这道检查当时就会红。
+    也接住大小写之外的同类漏洞（备份仓的忽略规则吞掉了一个导出文件）。git 失败 ⇒ 抛 RuntimeError。
+    """
+    listed = set(export_mod.META_FILES)
+    for line in (Path(backup_dir) / export_mod.SUMS_NAME).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            listed.add(line.split("  ", 1)[1])
+    tracked = {unicodedata.normalize("NFC", p) for p in _tracked_paths(backup_dir)}
+    return sorted(p for p in listed if unicodedata.normalize("NFC", p) not in tracked)
+
+
 def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main",
         status_file: Path | None = None, commit_message: str | None = None,
         history_file: Path | None = None) -> dict:
@@ -173,6 +218,14 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
         if init.returncode != 0:
             status.update(stage="init", ok=False, error=init.stderr[-2000:])
             return _finish(status_file, history_file, status)
+
+    # ── 0. 旧名元数据退役（v0.45.430，只有升级后第一轮真的动）：必须在导出之前 ──
+    try:
+        if retire_legacy_manifest_from_index(backup_dir):
+            status["legacy_manifest_retired"] = True
+    except Exception as e:  # noqa: BLE001 —— 摘不掉就别导出：导出会把 manifest.json 写回大写名的索引条目
+        status.update(stage="git_error", ok=False, error=f"旧名元数据 MANIFEST.json 退役失败：{e}")
+        return _finish(status_file, history_file, status)
 
     # ── 1. 导出 ──────────────────────────────────────────────────────
     try:
@@ -230,6 +283,15 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
             # diff/commit（同 init 失败必须立刻中止的道理）。
             status.update(stage="git_error", ok=False,
                            error=f"git add -A 失败（returncode={add.returncode}）：{add.stderr[-2000:]}")
+            return _finish(status_file, history_file, status)
+
+        # v0.45.430：清单说备份了什么，索引里就得有什么（精确拼写）——不然提交的就是一份作假的 SHA256SUMS
+        untracked = sums_paths_not_tracked(backup_dir)
+        if untracked:
+            status.update(stage="git_error", ok=False, sums_not_tracked=untracked[:50],
+                          sums_not_tracked_count=len(untracked),
+                          error=f"{export_mod.SUMS_NAME} 列了、索引里却没有这个精确拼写的路径 {len(untracked)} 个，"
+                                f"拒绝提交（多半是大小写不敏感的盘上撞名，或备份仓忽略规则吞了文件）：{untracked[:5]}")
             return _finish(status_file, history_file, status)
 
         diff = _run_git(["diff", "--cached", "--quiet"], backup_dir)

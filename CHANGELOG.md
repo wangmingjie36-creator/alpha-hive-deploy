@@ -5,7 +5,31 @@
 
 ---
 
-## [0.45.430] — 2026-10-08 — 占位（进行中：异地备份 `manifest.json`（网站 PWA）与备份元数据 `MANIFEST.json` 在大小写不敏感的 APFS 上互相覆盖——网站 manifest 从未备份、SHA256SUMS 作假；改名 + 大小写碰撞守卫）
+## [0.45.430] — 2026-10-08 — Fixed：异地备份里网站 `manifest.json` 被备份元数据 `MANIFEST.json` 覆盖（APFS 大小写不敏感）——元数据改名 `BACKUP_MANIFEST.json`，旧索引条目首轮退役；撞名 / 清单与索引不符一律不提交；恢复按哈希核对
+
+v0.45.342（09-24）把网站 PWA 的 `manifest.json` 纳入 `ROOT_FILE_GLOBS` 后，`write_manifest_and_sums` 随后写的元数据 `MANIFEST.json` 在 APFS（缺省大小写不敏感）上是**同一个目录项**，把它覆盖掉。10-08 只读核实生产备份仓 `~/alpha-hive-data/_git_backup`：磁盘上只有 `MANIFEST.json`；`SHA256SUMS` 列着 `manifest.json` 的真实哈希 267f16ab…，磁盘上那份是 ac91df4d…（备份元数据）；`git ls-files` 只有 `MANIFEST.json`；23 个提交里自 `ff2a5b8`（09-24）起每一个都这样。没有任何东西红过。
+
+**实际损失很小，作假与恢复错误才是要害**：网站 manifest 是 `report_web_assets` 每轮重新生成的确定性静态文件，gh-pages 上也有一份——丢的不是不可重取的数据。要害是 ① `SHA256SUMS` 天天替它作假；② 旧 `restore.py` 在 macOS 上按 `manifest.json` 打开的就是元数据，会把**备份清单「恢复」成网站 manifest**；大小写敏感的盘上则 `if src.exists()` 静默跳过。
+
+### Fixed
+- `data_backup/export.py`：元数据清单改名 `BACKUP_MANIFEST.json`；名字收成常量 `SUMS_NAME` / `MANIFEST_NAME` / `META_FILES`（别处引用这里，不另抄）/ `LEGACY_MANIFEST_NAME`。`run_export` 在拷根文件**之前**删掉磁盘上**精确拼写**为 `MANIFEST.json` 的旧目录项（`os.listdir` 判，不用 `.exists()`——后者对小写的网站 manifest 也返回 True），否则 `manifest.json` 会被拷进大写名的旧目录项。
+- `data_backup/run_backup.py`：导出之前 `retire_legacy_manifest_from_index`——索引里精确拼写的 `MANIFEST.json` 用 `git rm --cached -f` 摘掉，只有升级后第一轮真的动（status 记 `legacy_manifest_retired: true`）。**光改名不够**：生产备份仓 `core.ignorecase=true`（macOS 上 `git init` 的缺省），磁盘上重新出现的 `manifest.json` 会被 `git add -A` 认成索引里已有的 `MANIFEST.json`，网站 manifest 以大写名进备份，到大小写敏感的盘上 clone 出来照样找不到（变异实测，见守卫）。摘失败 ⇒ `stage="git_error"`、不导出。
+- `data_backup/restore.py`：`find_manifest` 先认 `BACKUP_MANIFEST.json`，旧提交退回 `MANIFEST.json`——只按精确拼写认、且须长得像备份清单（有 `root_files`）。根文件先按清单记的 `sha256` 核对再拷；对不上 / 不存在的进 `mismatched` / `missing`、不拷，`main` 退出码 1（此前恒 0），旧布局的 `manifest.json` 附一行说明这批备份从未含有它、去哪取。`restore_state` 返回值改为 `{"restored", "mismatched", "missing"}`（全仓无其他调用方）。
+
+### Added（让同一形状下次会红）
+- `export.case_collisions`：大小写 / 规范化不敏感的盘上会落进同一目录项的拼写组，**逐级比前缀**（`Reports/a` 与 `reports/b` 也算）；一字不差的重复不算。`write_manifest_and_sums` 写任何东西**之前**查（导出路径 + 元数据文件），撞了就抛、什么都不写 ⇒ `run_backup` 记 `stage="export"`、不提交。
+- `run_backup.sums_paths_not_tracked`：`git add -A` 之后、提交之前查 `SHA256SUMS` 列的路径（连同元数据文件）在索引里是否以**精确拼写**存在；不符 ⇒ `stage="git_error"`、`sums_not_tracked` / `sums_not_tracked_count`、不提交。09-24 那天它就会红；也接住「备份仓忽略规则吞了导出文件」。复用 `git_error`（与现有「提交后工作树不干净」同类），编排器 Step 14 不用改。
+
+### 守卫（`tests/test_data_backup.py`，+15 条，114 通过）
+- `TestNoCaseCollisionsInBackup`：`case_collisions` 判文件 / 目录分量 / NFC-NFD；**声明的导出范围**（`db_exports/` + `STATE_DIRS` + `ROOT_FILE_GLOBS` 字面名与通配模式 + 元数据）无撞名，正对照喂旧名必红；全范围端到端导出后每条 `SHA256SUMS` 都以精确拼写存在且哈希相符；撞名时一个元数据文件都不写；磁盘旧目录项退役而网站 manifest 保留。
+- `TestRestoreAcrossManifestRename`：新布局往返；照生产手搭旧布局 ⇒ 不把元数据当网站 manifest 恢复、报出来、rc=1；旧名只按精确拼写认。
+- `TestLegacyManifestMigrationInRun`：从旧布局仓（`core.ignorecase=true`）升级一轮 ⇒ 索引有 `manifest.json`（内容正确）+ `BACKUP_MANIFEST.json`、无 `MANIFEST.json`，第二轮不再退役，**从远端 clone 出来恢复** rc=0 且 manifest 原样；去掉索引退役 ⇒ APFS 上清单 / 索引检查红、不提交（大小写敏感的盘上 skip，生产 Mac 正是 APFS）；忽略规则吞文件 ⇒ 同一检查红（平台无关）；退役失败 ⇒ `git_error` 且未导出。
+- 变异（`PYTHONDONTWRITEBYTECODE=1`，跑完逐字节还原核对）：元数据名改回旧名 7 红；**旧代码路径**（旧名 + 不查撞名）8 红，端到端那条报的正是生产症状 `SHA256SUMS 声称持有…：['manifest.json']`；索引退役改成空操作 / 恢复不核哈希各至少 1 红。
+
+### 注意
+- **备份仓布局变化（历史不重写）**：升级后第一个提交 = 删 `MANIFEST.json` + 加 `BACKUP_MANIFEST.json` + 加 `manifest.json`（git 可能显示成一次改名）。此前的提交只有 `MANIFEST.json`，恢复照旧能读，但那批提交里没有网站 manifest。
+- ⚠️ **与 v0.45.427（备份拒收外来条目）合并时必改一处**：它在 `run_backup.py` 新增 `EXPORT_META_FILES = frozenset({"SHA256SUMS", "MANIFEST.json"})`，后合入的一方要改成 `frozenset(export_mod.META_FILES)`——否则 `BACKUP_MANIFEST.json` 被当成外来条目，**每一轮都拒绝提交**。不会有文本冲突（不同 hunk）；现有的「全流程成功 ⇒ stage=done」测试会在合并后变红，可据此确认。
+- 同目录其他测试文件里 4 个失败与本版无关：`data_migrations/__init__ 2.py`、`sell_strike_* 2.py`、`alphabot/service 2.py` 等 iCloud 重名副本被枚举文件的守卫扫到（断言信息里点名）；另有盘中 Alpha Bot 写 `alphabot_state/intraday/` 触发数据根闸的 teardown error。
 
 ## [0.45.429] — 2026-10-08 — 占位（进行中：Oracle 异常期权流对共享 yfinance 令牌桶限速——全局间隔预约，让出一半配额给其它取数；不改评分）
 
