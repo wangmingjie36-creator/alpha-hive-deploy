@@ -40,7 +40,11 @@ trap '_cleanup_lock' EXIT
 # 配置
 # ================================================================
 SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="/Users/igg/Desktop/Alpha Hive"   # Python 源码目录（代码检出，git 仓库）
+# 数据根迁移阶段 8（v0.45.431）：生产代码是**独立克隆** ~/alpha-hive-prod，不再是开发检出 ~/Desktop/Alpha Hive
+# （开发会话在那里直接提交 main ⇒ production_sync 永久 diverged，10-04 / 10-06 / 10-08 三次）。克隆只由下方
+# production_sync 快进；它的钩子拒绝一切让 main 偏离 origin/main 的写入，见 production_clone.py。
+# 回退 = 在 main 上 revert 本版（PROJECT_DIR 回开发检出，同时去掉 production_sync 的 ALPHA_HIVE_PRODUCTION_CLONE=1）。
+PROJECT_DIR="/Users/igg/alpha-hive-prod"   # Python 源码目录（生产独立克隆，git 仓库）
 # 数据根迁移阶段 5（v0.45.322 起）：生产数据在 DATA_DIR，不在代码检出里。
 # export 给本脚本拉起的每个 Python 步骤——hive_logger.PATHS.home 读它；git 仓库根
 # (PATHS.git_repo_root) 不读它，仍按 __file__ 落在 PROJECT_DIR。回退 = 把下面这行改成
@@ -421,6 +425,10 @@ if [ ! -f "$PROJECT_DIR/alpha_hive_daily_report.py" ]; then
     exit 1
 fi
 log "INFO" "✅ 项目目录验证通过"
+# 阶段 8（v0.45.431）：run_step 不 cd ⇒ 每个 Python 步骤继承本脚本的 cwd；launchd plist 的 WorkingDirectory
+# 仍是开发检出 ⇒ 不切的话，任何按 cwd 解析的相对路径都会读到开发检出里的东西。在这里切进生产克隆，
+# 不依赖仓库外、不受版本控制的 plist。
+cd "$PROJECT_DIR" || { log "ERROR" "❌ 无法进入项目目录：${PROJECT_DIR}"; exit 1; }
 log "INFO" "🐍 Python: $PYTHON3 ($($PYTHON3 --version 2>&1))"
 
 # ── TCC 预检：验证 python3 能访问 Desktop 项目文件 ──
@@ -543,9 +551,12 @@ log "INFO" "🔁 今日尚无产出且已过 ${CATCHUP_AFTER_HHMM}，执行扫�
 # 走 $PYTHON3 而不是在 bash 里直接 git：bash 对本目录有 TCC 限制（见上方预检）。
 # v0.45.370：同步结局 OK（退出码 0 ⇔ outcome ∈ production_sync.OK_OUTCOMES）才置 1；
 #   下方 _orchestrator_autodeploy 只在它为 1 时部署——此时 HEAD 即 origin/main。
+# 阶段 8（v0.45.431）：ALPHA_HIVE_PRODUCTION_CLONE=1 声明「这里应是生产独立克隆」⇒ production_sync 快进前补齐 / 核对
+#   守卫钩子，结局进 production_sync.json 的 clone_guard ⇒ status.json ⇒ alert_manager P1。只给这一个子进程设，不 export。
+#   用环境变量不用 CLI 参数：克隆若停在不认识它的旧代码上，旧 production_sync 会忽略它、照常快进，不会 argparse 退出互锁。
 _PROD_SYNC_OK=0
 if [ -f "$PROJECT_DIR/production_sync.py" ]; then
-    if ! "$PYTHON3" "$PROJECT_DIR/production_sync.py" --date "$DATE_STR" >> "$LOGFILE" 2>&1; then
+    if ! ALPHA_HIVE_PRODUCTION_CLONE=1 "$PYTHON3" "$PROJECT_DIR/production_sync.py" --date "$DATE_STR" >> "$LOGFILE" 2>&1; then
         log "WARN" "⚠️ 生产代码未快进到 origin/main，本轮沿用现有代码（结局见 status.json 的 scan_timing.production_sync）"
     else
         _PROD_SYNC_OK=1

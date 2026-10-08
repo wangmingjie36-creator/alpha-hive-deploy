@@ -5,7 +5,35 @@
 
 ---
 
-## [0.45.431] — 2026-10-08 — 占位（进行中：数据根迁移阶段 8——生产代码独立克隆到 `~/alpha-hive-prod`，根治在生产检出里直接提交导致 production_sync 永久 diverged）
+## [0.45.431] — 2026-10-08 — Added：数据根迁移阶段 8——生产代码换成独立克隆 `~/alpha-hive-prod`，钩子拒绝一切让 main 偏离 origin/main 的写入；编排器切过去并 `cd` 进克隆
+
+生产检出 `~/Desktop/Alpha Hive` 同时是开发主检出（worktree 全挂在它的 `.git` 下、会话默认在这里启动），会话**直接在生产 main 上提交**、不推送：10-04 `fb0bb88d`、10-06 `68efa970`、**10-08 02:22 `53df066c`**（本版开工时正在发生：ahead 1 / behind 1）。v0.45.402 退役 `push_main` 后分叉不会自愈，`production_sync` 每轮只记 `diverged`、照跑旧代码；P1 只进本地 alerts 文件，无人看见。本版让「生产代码」与「开发检出」物理上不是同一个仓库。
+
+### Added
+- `production_clone.py`：独立克隆的守卫与工具。
+  - 钩子（只装进克隆自己的 `.git/hooks`）：**`reference-transaction`** 只许 `refs/heads/main` 指向 `refs/remotes/origin/main` 的祖先（含相等），git 在每次 ref 写入的 prepared 阶段调用、非零即中止——`commit --no-verify` / `merge` / `rebase` / `reset` / `update-ref` 都绕不过；`pre-commit` / `pre-merge-commit` / `pre-rebase` 早一步说人话地拒绝；`pre-push` 只许推 `refs/heads/gh-pages`（网站部署）、不许删它。
+  - 实测前提（scratch 仓库探针，git 2.50.1）：`pull --ff-only` 先在**单独事务**里更新 origin/main、再移动 main ⇒ 快进放行；`update-ref` 不带旧值时钩子收到的旧值是全零 ⇒ 只看新值。
+  - `inspect`（只读）：独立仓库（`.git` 是目录且没挂 linked worktree）/ origin 是 GitHub `alpha-hive-deploy` / 没有 `core.hooksPath` 改道 / 五个钩子都是当前版本 / 被跟踪文件无未提交改动。`ensure_guard`：补 missing、刷新 stale；**不是独立仓库就一个字节不写**（装进开发仓库会拦住所有 worktree 的提交）；foreign 钩子不覆盖、报红；**从不抛**。
+  - CLI：`production_clone.py setup [--dest] [--origin]`（完整克隆，不加 `--single-branch`：gh-pages 部署要 `origin/gh-pages`）/ `check [--repo]`；退出码 0 ok / 1 不合格 / 2 克隆失败。
+- `production_sync`：环境变量 `ALPHA_HIVE_PRODUCTION_CLONE=1` 时快进**之前** `ensure_guard`，结局写进结果的 `clone_guard`。用环境变量不用 CLI 参数：克隆停在不认识它的旧代码上时，旧 `production_sync` 忽略它照常快进，不会因 argparse 报错卡死在旧提交上。未设时行为与此前完全相同。守卫结局与快进结局互不影响，退出码仍只看快进。
+- `alert_manager`：`scan_timing.production_sync.clone_guard.ok` 不为 True ⇒ P1「生产克隆不合格」；没有该键（编排器没声明）不报。
+
+### Changed
+- 编排器：`PROJECT_DIR="/Users/igg/alpha-hive-prod"`；`production_sync` 调用前缀 `ALPHA_HIVE_PRODUCTION_CLONE=1`（只给这一个子进程，不 export）；目录校验后 `cd "$PROJECT_DIR"`——`run_step` 不 cd、launchd plist 的 `WorkingDirectory` 仍是开发检出，不切的话所有 Python 步骤的 cwd 都在开发检出里。
+- `CLAUDE.md`：核心组件指针加「生产代码 = 独立克隆」一条（判「下一轮生产跑哪版」要 `git -C ~/alpha-hive-prod`，refs 不再与开发仓库共享）。
+
+### 守卫
+- `tests/test_production_clone.py`（37 条，真 git 沙箱：bare origin + 独立克隆 + 另一个会话的克隆，不打桩 git）：九种直接改 main 的方式都被拒且 main 原地不动；**正对照**：`production_sync` 快进照常、`report_deployer.commit_and_push_gh_pages` 真实推送路径照常、回滚到 origin 历史里的旧提交放行；worktree / 挂着 worktree 的仓库不写钩子；foreign 不覆盖；体检看得见 origin / hooksPath / 手改钩子 / 不可执行 / 工作区改动（含 `-z` 改名条目解析）；经 `production_sync.main` → `scan_timing.snapshot` → `AlertAnalyzer` 的端到端告警通路（合格不报 / 不合格报 / 开发仓库误声明报且不写钩子 / 守卫抛异常不拖垮同步）；钩子正文过 `orchestrator_lint.find_unbraced` 并带正对照。
+- `tests/test_orchestrator_runs_production_clone.py`（3 条）：`PROJECT_DIR` 是唯一一处纯字面赋值且不在 `/Desktop/` 下、末段等于 `production_clone.default_dest()`；`production_sync` 调用恰好一处且带声明、不 export；`cd "$PROJECT_DIR"` 在目录校验之后、同步与 Step 1 之前。
+- 变异 9 处（先提交后变异，逐个还原）：引用守卫看错分支名 / ref 事务恒放行 / foreign 被覆盖 / 无视工作区 / 不判 origin / 同步无条件装钩子 / 告警规则删掉 / pre-push 放行一切——各红 1~6 条；「不判独立仓库」单删 `ensure_guard` 那层不红（`inspect` 那层兜着），两层一起删红 3 条。
+- **首跑抓到的真 bug**：钩子里 `$new：` 在部分 locale 下被 `/bin/sh` 读成变量 `new\xEF`，展开为空、半个全角冒号漏进 stderr（与 v0.45.284 编排器 Step 15 同一个坑）——全部改成 `${var}` 并加 lint 守卫。
+- 相关套件（production_sync / git 白名单 / 路径冻结 / scan_timing / 编排器自动部署 / scan_catchup 含 `-m integration` 3 条沙箱真跑）全绿。期间两次 teardown ERROR 均为 Alpha Bot 盘中采样写 `alphabot_state/intraday/`（真实数据根闸，已知的第三个合法写入者），与本版无关。
+
+### 切换（cutover）——生产动作，逐项经用户批准，见下方「执行记录」
+1. `production_clone.py setup` 建 `~/alpha-hive-prod`（GitHub 完整克隆 + 守卫），`check` 为 ok。**必须早于合入**：合入后的下一个扫描日，旧编排器会自动部署新编排器，再下一轮就从克隆跑——克隆不存在 ⇒「项目目录不存在」exit 1。
+2. 合入 origin/main。下一个扫描日（同步 OK 时）自动部署新编排器；**再下一个**扫描日首次从克隆跑。
+3. 可选、不阻塞：`~/.claude.json` 的 `alpha_hive` MCP、Alpha Bot.app（在克隆里 `make alphabot-app`）、两个定时任务 SKILL.md 改指克隆；plist `WorkingDirectory` 改指克隆（需 launchctl 重载，RunAtLoad 会立刻起一轮）。不改的后果：它们继续跑开发检出里的代码（与现状相同），不影响扫描。
+- 回退：在 main 上 revert 本版（PROJECT_DIR 与声明同一提交，一起回去）；克隆目录留着无害。
 
 ## [0.45.430] — 2026-10-08 — 占位（进行中：异地备份 `manifest.json`（网站 PWA）与备份元数据 `MANIFEST.json` 在大小写不敏感的 APFS 上互相覆盖——网站 manifest 从未备份、SHA256SUMS 作假；改名 + 大小写碰撞守卫）
 

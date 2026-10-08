@@ -83,6 +83,7 @@
   - **「跨式」页（v0.45.424）** `alphabot/straddle.py`：财报跨式纸面账本的持仓 / 平仓 / 逐仓 Greeks / 盘中参考报价（`cboe_options.quote_held`）。**只读**，不写账本、不拿账本 mark 顶替拿不到的报价；**不显示任何一笔的 `gex_ctx`**（跨式 GEX 预注册的盲期，协议 `experiments/straddle_gex_prereg.md`，冻结只经 `straddle_gex_prereg.py --run-once`）。信号行的 `gex_ctx` 只记录、不进开单（守卫 `tests/test_straddle_gex_shadow.py`、`tests/test_alphabot_straddle.py`）
 - **月度自诊断** `self_analyst.py`（Track B）：输出 `self_analysis_briefs/YYYY-MM.md`，含每蜂维度 rank-IC 小节（v0.40.0）
 - **IBKR 桥接** `ibkr_sync.py`：手动流程（export actions → 用户 TWS 下单 → import CSV → reconcile），状态在 `paper_account/`
+- **生产代码 = 独立克隆 `~/alpha-hive-prod`（阶段 8，v0.45.431）**，不是 `~/Desktop/Alpha Hive`（那里是**开发检出**，worktree 都挂在它下面）。克隆只由扫描前 `production_sync` 快进；它的 `.git/hooks` 拒绝一切让 main 偏离 origin/main 的写入（`production_clone.py`，守卫每轮自动补齐、不合格进 P1）。⚠️ **不要在生产克隆里开会话、改文件、提交**；改代码 = 开发检出开 worktree → 推 origin/main → 下一个扫描日自动进生产。判「下一轮生产跑哪版」：`git -C ~/alpha-hive-prod fetch -q origin && git -C ~/alpha-hive-prod rev-list --left-right --count main...origin/main`（**refs 不再与开发仓库共享**，在开发 worktree 里查到的 main 不是生产的）。体检：`/usr/local/bin/python3 production_clone.py check`。守卫 `tests/test_production_clone.py`、`tests/test_orchestrator_runs_production_clone.py`
 - **编排器（v0.45.353 起受版本控制）**：唯一真相 = 仓库 `scripts/alpha-hive-orchestrator.sh`；launchd 跑的是**部署副本** `~/.claude/scripts/alpha-hive-orchestrator.sh`（路径不变：Desktop 有 TCC 限制）。⚠️ **不许直接改部署副本**——改仓库那份 → 合入 origin/main → **下一个扫描日自动部署**（v0.45.370 阶段 3：production_sync 结局 OK 后调 `deploy_orchestrator.py --ref HEAD`；关卡 / 漂移拒绝 / 原子替换在工具里；同步没成功那轮 skipped；结局在 status.json `steps_result.orchestrator_deploy`，记录 `~/.claude/logs/orchestrator_deploy.json`）。⚠️ 部署那轮仍跑旧编排器——新编排器从合入后**第二个**扫描日起执行，与 Python 耦合的改动要兼容一轮。首次上线 / 急用才手动：`/usr/local/bin/python3 deploy_orchestrator.py --ref origin/main --dry-run`，再去掉 `--dry-run` 加 `--out ~/.claude/logs/orchestrator_deploy.json`。**回滚 = 在 main 上 revert 那次合入**（下一扫描日自动部署）；手动部署旧提交只管一轮、下一轮会被自动部署盖回 main 最新版。⚠️ 坏编排器若在部署块**之前**就崩（如同步前的裸变量），它部署不了自己的修复 ⇒ 手动部署修好的 main。一致性守卫（漂移 / 该部署没部署；合入后待下一轮且 ≤6 天不算红）= `tests/test_orchestrator_deployed_matches_repo.py`；读编排器原文的测试一律经 `tests/_orchestrator.py`，CI 上也跑
 
 ## GitHub Pages 部署规则（永久设置）
@@ -230,6 +231,7 @@ v0.45.168 实测：只有子集守卫时，把 5 处「应保留」的错改成 
 
 ## 环境：`~/Desktop` 在 iCloud 同步下会造「重名副本」（2026-09-07 起）
 
+（阶段 8 起这只影响**开发检出**；生产代码在 `~/alpha-hive-prod`、数据在 `~/alpha-hive-data`，都不在 iCloud 同步里。）
 本项目位于 `~/Desktop/Alpha Hive`，而 macOS「桌面与文稿同步 iCloud」会**持续**
 产出形如 `xxx 2.py` / `settings.local 2.json` 的副本（名字里带**空格 + 数字**，
 2026-09-07 一次扫出 53 个、最早可回溯 2026-03-16，不是偶发）。
