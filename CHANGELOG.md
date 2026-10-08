@@ -5,7 +5,42 @@
 
 ---
 
-## [0.45.436] — 2026-10-08 — 占位（进行中：阶段 8 收尾——Alpha Bot.app 与周 / 月定时任务改指生产克隆，make alphabot-app 缺省指向克隆）
+## [0.45.436] — 2026-10-08 — Changed：阶段 8 收尾——Alpha Bot.app 与周 / 月定时任务改指生产克隆；`make alphabot-app` 缺省指向克隆
+
+处理 v0.45.432「未修」第 1 条（用户批准「两个都做」）。开发检出 `~/Desktop/Alpha Hive` 此前靠扫描前的 production_sync 每日快进；阶段 8 后再没人快进它，跑在那里的三个消费者从 10-09 起会停在旧代码。
+
+### Changed（本机配置，不在仓库里；均先备份）
+- **两个定时任务**（`alpha-hive-weekly-optimizer` / `alpha-hive-monthly-self-analysis`）的 `SKILL.md`：四条命令改为 `cd /Users/igg/alpha-hive-prod && ALPHA_HIVE_HOME=… /usr/local/bin/python3 …`，加一段「代码目录」说明：克隆不在 ⇒ 停下报告、不许退回开发检出跑；克隆只读。**会话工作目录不动**，仍是开发检出：项目记忆目录与 CLAUDE.md 都按它找，CLAUDE.md 也写着不在克隆里开会话。备份 `SKILL.md.bak-pre-phase8`。
+  - 核对：与备份的 diff 只有这几行；两个任务仍 enabled、`nextRunAt` 未变（10-11 / 11-01）；四个脚本在克隆里 `--help`（沙箱数据根）全部 rc=0、沙箱零写入；之后克隆 `production_clone.py check` 仍 ok。
+  - 为什么不只改 Alpha Bot：周任务的 `ic_rerun_readiness` 把世代边界、检视截止日期写在代码里，冻结版本会漏掉新登记的边界，与每日扫描 Step 11（跑克隆）给出两个答案；两个任务都会写东西（`weight_history.jsonl` 审计、月度简报 + Slack）。
+- **`~/Applications/Alpha Bot.app`**：从克隆重新生成，启动脚本 `REPO=/Users/igg/alpha-hive-prod`（原 `'/Users/igg/Desktop/Alpha Hive'`；旧脚本备份 `~/Library/Application Support/Alpha Bot/AlphaBot.launch-script.bak-pre-phase8`）；`launcher.json` 数据根未动。
+  - **正在跑的实例（10-08 06:41 起，cwd 开发检出）没有重启**：下次打开 .app 才跑克隆。
+  - 核对：在克隆里另起演示服务（另一端口、沙箱数据根），`GET /` 200、`/api/meta` 正常；真实 8765 实例照常应答。
+
+### Changed（仓库）
+- `alphabot/macos_app.py`：新增 `default_repo()`，.app 缺省 cd 进 `production_clone.default_dest()`；克隆不在才退回本检出，并在 stderr 说明「不会被自动更新」。新增 `--repo` 覆盖，输出带「代码目录」。
+  - 此前缺省是生成器所在检出 ⇒ 在开发检出 / worktree 里 `make alphabot-app`，会把 .app 无声指回一份冻结（或随时被删）的代码。
+- 同文件：没给 `--home`、但启动器配置已有数据根时，输出「沿用启动器配置里的数据根 …」，不再说「首次双击时会让你选一次」（本次生成时实测误导）。
+- 文档同步：`alphabot/static/pages/help.js`「程序类」原写「git pull 更新代码不需要重新生成」，改为「克隆每个扫描日自动更新、重启 Alpha Bot 即用上」；`Makefile` 注释、模块 docstring、CLAUDE.md Alpha Bot 条同步。
+
+### 守卫
+- `tests/test_alphabot_launcher.py::TestDefaultRepoIsProductionClone`：
+  - 缺省指向克隆（正对照：≠ 生成器所在检出）；
+  - 克隆不在 ⇒ 退回本检出且 stderr 点名；
+  - `--repo` 优先于克隆。
+- 另加 `TestBundle::test_main_reports_kept_data_root_instead_of_promising_a_prompt`。
+- 变异 4 处（先提交后变异，每轮清 pyc），各红：
+  - 缺省回到生成器所在检出；
+  - 克隆不在时静默退回；
+  - 忽略 `--repo`；
+  - 已有数据根仍说「首次双击会问」。
+- 结果：`test_alphabot_launcher.py` + `test_alphabot.py` 94 passed；ruff 全绿。
+
+### 顺带发现（未改，需用户定）
+- **周 / 月定时任务并不是无人值守**：会话是 `default` 权限模式，命令不在允许清单里就停在权限提示上。
+  - 10-04 那轮周任务 16:09Z 发出三条命令，结果 10-06 06:14Z 才回来（等了约 38 小时，有人批准后才跑）；`weight_history.jsonl` 那条时间戳是 10-05 23:14。
+  - 改指克隆不改变这一点：命令不在允许清单里，照样停在提示上。
+  - 要真无人值守，得往权限允许清单加规则。那是用户的安全设置，本次没动。
 
 ## [0.45.435] — 2026-10-08 — 占位（进行中：组合 Greeks 两源都取不到价时也要红——计数 / ERROR / status.json / P2）
 
@@ -46,7 +81,7 @@
 - 受影响套件（production_clone / 编排器接线 / scan_catchup / production_sync / autodeploy / step_interp / deploy_orchestrator / braced_vars）全绿；一次 teardown ERROR 为盘中 Alpha Bot 写 `alphabot_state/intraday/`（真实数据根闸，已知），单跑对应文件全绿。
 
 ### 未修（需用户定方向 / 本次未点名）
-- **开发检出不再被快进**：Alpha Bot.app、weekly-optimizer、monthly-self-analysis 仍在 `~/Desktop/Alpha Hive` 跑，10-08 那轮之后跑的是冻结代码（v0.45.431 条目「与现状相同」已在原处更正）。方向待定：改指克隆，或扫描后顺带快进开发检出。
+- **开发检出不再被快进**：Alpha Bot.app、weekly-optimizer、monthly-self-analysis 仍在 `~/Desktop/Alpha Hive` 跑，10-08 那轮之后跑的是冻结代码（v0.45.431 条目「与现状相同」已在原处更正）。方向待定：改指克隆，或扫描后顺带快进开发检出。**（v0.45.436 已处理：三者都改指克隆，`make alphabot-app` 缺省也指向克隆，见该条。）**
 - **`origin/cloud-snapshots` 在克隆里不刷新**：补跑（`--date D` 快照模式、`data_pipeline` 历史收盘兜底）读这个远端跟踪 ref，全仓没有代码 fetch 它；开发检出里靠开发会话顺带刷新，克隆里停在 10-08 07:16。拟让 `production_sync` 多 fetch 该分支——要放宽 `GitHubTool._EXACT_GIT_ARGS` 的 `fetch origin main` 限制，待用户批准。
 - 新克隆没有本地 `gh-pages` 分支：`resolve_gh_pages_parent` 在 fetch 与 ls-remote 都失败时的最后兜底拿不到父提交；首次推送成功后 `update-ref` 会建出它。
 
