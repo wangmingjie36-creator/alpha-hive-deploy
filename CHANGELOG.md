@@ -11,7 +11,7 @@
 
 ### Added
 - `production_clone.py`：独立克隆的守卫与工具。
-  - 钩子（只装进克隆自己的 `.git/hooks`）：**`reference-transaction`** 只许 `refs/heads/main` 指向 `refs/remotes/origin/main` 的祖先（含相等），git 在每次 ref 写入的 prepared 阶段调用、非零即中止——`commit --no-verify` / `merge` / `rebase` / `reset` / `update-ref` 都绕不过；`pre-commit` / `pre-merge-commit` / `pre-rebase` 早一步说人话地拒绝；`pre-push` 只许推 `refs/heads/gh-pages`（网站部署）、不许删它。
+  - 钩子（只装进克隆自己的 `.git/hooks`）：**`reference-transaction`** 只许 `refs/heads/main` 指向 `refs/remotes/origin/main` 的祖先（含相等），git 在每次 ref 写入的 prepared 阶段调用、非零即中止——`commit --no-verify` / `merge` / `rebase` / `reset` / `update-ref` 都绕不过；`pre-commit` / `pre-merge-commit` / `pre-rebase` 早一步说人话地拒绝；`pre-push` 只许推 `refs/heads/gh-pages`（网站部署）、不许删它。**删除 main（新值全零）放行**：`pack-refs` / `gc` 先写 packed-refs 再删 loose ref，钩子看到的正是「main → 全零」——首版拒绝它 ⇒ `gc` 实测 rc=128、永远失败；不变式是「main 永不指向 origin/main 以外的提交」，删除不违反，真删了 main ⇒ HEAD 悬空 ⇒ 下一轮 `production_sync` 报 error 红。
   - 实测前提（scratch 仓库探针，git 2.50.1）：`pull --ff-only` 先在**单独事务**里更新 origin/main、再移动 main ⇒ 快进放行；`update-ref` 不带旧值时钩子收到的旧值是全零 ⇒ 只看新值。
   - `inspect`（只读）：独立仓库（`.git` 是目录且没挂 linked worktree）/ origin 是 GitHub `alpha-hive-deploy` / 没有 `core.hooksPath` 改道 / 五个钩子都是当前版本 / 被跟踪文件无未提交改动。`ensure_guard`：补 missing、刷新 stale；**不是独立仓库就一个字节不写**（装进开发仓库会拦住所有 worktree 的提交）；foreign 钩子不覆盖、报红；**从不抛**。
   - CLI：`production_clone.py setup [--dest] [--origin]`（完整克隆，不加 `--single-branch`：gh-pages 部署要 `origin/gh-pages`）/ `check [--repo]`；退出码 0 ok / 1 不合格 / 2 克隆失败。
@@ -23,9 +23,10 @@
 - `CLAUDE.md`：核心组件指针加「生产代码 = 独立克隆」一条（判「下一轮生产跑哪版」要 `git -C ~/alpha-hive-prod`，refs 不再与开发仓库共享）。
 
 ### 守卫
-- `tests/test_production_clone.py`（37 条，真 git 沙箱：bare origin + 独立克隆 + 另一个会话的克隆，不打桩 git）：九种直接改 main 的方式都被拒且 main 原地不动；**正对照**：`production_sync` 快进照常、`report_deployer.commit_and_push_gh_pages` 真实推送路径照常、回滚到 origin 历史里的旧提交放行；worktree / 挂着 worktree 的仓库不写钩子；foreign 不覆盖；体检看得见 origin / hooksPath / 手改钩子 / 不可执行 / 工作区改动（含 `-z` 改名条目解析）；经 `production_sync.main` → `scan_timing.snapshot` → `AlertAnalyzer` 的端到端告警通路（合格不报 / 不合格报 / 开发仓库误声明报且不写钩子 / 守卫抛异常不拖垮同步）；钩子正文过 `orchestrator_lint.find_unbraced` 并带正对照。
+- `tests/test_production_clone.py`（38 条，真 git 沙箱：bare origin + 独立克隆 + 另一个会话的克隆，不打桩 git）：八种直接改 main 的方式都被拒且 main 原地不动，删除 main 不拦但下一轮同步红；`pack-refs` / `gc` 之后照常快进；**正对照**：`production_sync` 快进照常、`report_deployer.commit_and_push_gh_pages` 真实推送路径照常、回滚到 origin 历史里的旧提交放行；worktree / 挂着 worktree 的仓库不写钩子；foreign 不覆盖；体检看得见 origin / hooksPath / 手改钩子 / 不可执行 / 工作区改动（含 `-z` 改名条目解析）；经 `production_sync.main` → `scan_timing.snapshot` → `AlertAnalyzer` 的端到端告警通路（合格不报 / 不合格报 / 开发仓库误声明报且不写钩子 / 守卫抛异常不拖垮同步）；钩子正文过 `orchestrator_lint.find_unbraced` 并带正对照。
 - `tests/test_orchestrator_runs_production_clone.py`（3 条）：`PROJECT_DIR` 是唯一一处纯字面赋值且不在 `/Desktop/` 下、末段等于 `production_clone.default_dest()`；`production_sync` 调用恰好一处且带声明、不 export；`cd "$PROJECT_DIR"` 在目录校验之后、同步与 Step 1 之前。
 - 变异 9 处（先提交后变异，逐个还原）：引用守卫看错分支名 / ref 事务恒放行 / foreign 被覆盖 / 无视工作区 / 不判 origin / 同步无条件装钩子 / 告警规则删掉 / pre-push 放行一切——各红 1~6 条；「不判独立仓库」单删 `ensure_guard` 那层不红（`inspect` 那层兜着），两层一起删红 3 条。
+- **二次检查抓到的真 bug**：首版钩子拒绝「main → 全零」⇒ `pack-refs` / `gc` 在克隆里永远失败（scratch 探针 rc=128，「fatal: failed to run pack-refs」）；生产里表现为首次 auto-gc 之后每次 fetch 都带 gc 警告、松散对象只增不减。已放行删除并加回归测试。
 - **首跑抓到的真 bug**：钩子里 `$new：` 在部分 locale 下被 `/bin/sh` 读成变量 `new\xEF`，展开为空、半个全角冒号漏进 stderr（与 v0.45.284 编排器 Step 15 同一个坑）——全部改成 `${var}` 并加 lint 守卫。
 - 相关套件（production_sync / git 白名单 / 路径冻结 / scan_timing / 编排器自动部署 / scan_catchup 含 `-m integration` 3 条沙箱真跑）全绿。期间两次 teardown ERROR 均为 Alpha Bot 盘中采样写 `alphabot_state/intraday/`（真实数据根闸，已知的第三个合法写入者），与本版无关。
 

@@ -124,8 +124,11 @@ exit ${rc}
     "reference-transaction": _header("reference-transaction") + """\
 # $1 = prepared / committed / aborted；只有 prepared 阶段的退出码会中止事务。
 # stdin 每行：<旧值> <新值> <ref>。旧值不可信（update-ref 不带旧值时是全零，实测），只看新值。
-# 新值必须是 origin/main 的祖先（含相等）。merge-base 退出码三态：0 是 / 1 否 / 其他出错——后两种都拒绝（失败即关）：
-# 删除 main（新值全零）、指向符号引用（ref:...）都会让 merge-base 出错，同样拒绝。
+# 新值必须是 origin/main 的祖先（含相等）。merge-base 退出码三态：0 是 / 1 否 / 其他出错——后两种都拒绝（失败即关），
+# 指向符号引用（ref:...）会让 merge-base 出错，同样拒绝。
+# 例外：新值全零（删除）放行。pack-refs / gc 先写 packed-refs 再删 loose ref，钩子看到的就是「main → 全零」
+# （实测：不放行则 gc 永远失败）。不变式是「main 永不指向 origin/main 以外的提交」，删除不违反它；
+# 真把 main 删了 ⇒ HEAD 悬空 ⇒ 下一轮 production_sync 报 error ⇒ P1。
 if [ "$1" != "prepared" ]; then
     cat >/dev/null
     exit 0
@@ -133,6 +136,10 @@ fi
 rc=0
 while read -r old new ref; do
     [ "${ref}" = "refs/heads/main" ] || continue
+    case "${new}" in
+        *[!0]*) ;;
+        *) continue ;;
+    esac
     if git merge-base --is-ancestor "${new}" refs/remotes/origin/main 2>/dev/null; then
         continue
     fi

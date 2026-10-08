@@ -124,12 +124,25 @@ class TestDirectChangesToMainAreRefused:
         assert r.returncode != 0
         assert w.head("refs/heads/main") == before
 
-    def test_deleting_main_is_refused(self, guarded):
+    def test_deleting_main_is_not_blocked_but_the_next_sync_is_red(self, guarded):
+        """删除放行（pack-refs 的形状，见下一条）；真删了 main，下一轮同步必须红，不能静默跑工作区。"""
         w = guarded
-        w.git("checkout", "-q", "--detach")
         r = w.git("update-ref", "-d", "refs/heads/main", check=False)
-        assert r.returncode != 0
-        assert w.git("rev-parse", "--verify", "refs/heads/main", check=False).returncode == 0
+        assert r.returncode == 0, r.stderr
+        res = ps.sync_before_scan(GitHubTool(repo_path=str(w.prod)), today="2026-10-08")
+        assert res["outcome"] not in ps.OK_OUTCOMES, res
+
+    def test_pack_refs_and_gc_still_work(self, guarded):
+        """gc 先写 packed-refs 再删 loose ref ⇒ 钩子看到「main → 全零」。首版钩子拒绝它 ⇒ gc 永远失败（实测 rc=128）。"""
+        w = guarded
+        before = w.head()
+        for cmd in (("pack-refs", "--all"), ("gc", "-q")):
+            r = w.git(*cmd, check=False)
+            assert r.returncode == 0, (cmd, r.stderr)
+        assert w.head("refs/heads/main") == before
+        new = w.session_push("code.py", "v2\n", "session: v2")
+        res = ps.sync_before_scan(GitHubTool(repo_path=str(w.prod)), today="2026-10-08")
+        assert res["outcome"] == "fast_forwarded" and w.head() == new, res
 
     def test_merge_commit_is_refused_even_with_no_verify(self, guarded):
         w = guarded
