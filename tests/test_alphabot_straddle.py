@@ -192,6 +192,29 @@ class TestLive:
         assert c.get("/api/straddle/live/ZZZZ").status_code == 400
         assert c.get("/api/straddle/live/bad$").status_code == 400
 
+    def test_live_reads_only_positions(self, root, monkeypatch):
+        """v0.45.428：盘中接口只要两个合约代码，不许每次重读整本账本（信号文件每天长 30 行）。"""
+        svc = _svc(root)
+        t = svc.straddle()["positions"][0]["ticker"]
+        monkeypatch.setattr(SD, "load_ledger", lambda *a, **k: pytest.fail("盘中接口重读了整本账本"))
+        assert svc.straddle_live(t)["available"] is True
+
+    def test_auto_refresh_forces_and_matches_its_label(self):
+        """v0.45.428：自动刷新不 force 就只拿到服务端 60 秒缓存（实际每 2 拍才新一次）；间隔与文案要对得上。"""
+        import re
+        js = (STATIC / "pages" / "straddle.js").read_text(encoding="utf-8")
+        interval = re.search(r"setInterval\(\(\) => \{(.*?)\}, (\w+)\)", js, re.S)
+        assert interval and "pullAll(true)" in interval.group(1), "自动刷新没有 force"
+        ms = int(re.search(r"const AUTO_MS = (\d+);", js).group(1))
+        assert interval.group(2) == "AUTO_MS" and ms >= 2 * 60_000 and "约每 2 分钟" in js
+        # 只查代码、不查注释：注释里「每分钟强刷会……」是在讨论它，不是在对用户承诺它（本仓「文本探针」老坑）。
+        # 用正则抠字符串字面量会跨两段模板字符串把注释框进去（首版就这样假红），按行去掉 // 注释更稳
+        for name in ("straddle.js", "help.js"):
+            code = "\n".join(ln for ln in (STATIC / "pages" / name).read_text(encoding="utf-8").splitlines()
+                             if not ln.lstrip().startswith("//"))
+            assert "每分钟" not in code, f"{name} 还在对用户说「每分钟」"
+        assert "每分钟" in js, "正对照：注释里确实提到了它，上面的「不在代码里」才有意义"
+
     def test_cache_and_force(self, root):
         calls = []
 
@@ -205,6 +228,17 @@ class TestLive:
         assert calls == [t]
         svc.straddle_live(t, force=True)
         assert calls == [t, t]
+
+
+class TestDemoDates:
+    def test_demo_today_is_the_eastern_date(self, monkeypatch):
+        """v0.45.428：演示链缺省日期按美东（跨式演示账本与报价都按美东造）；按本机（太平洋）日期时，
+        每晚 21:00–24:00 PT 水平链与持仓合约的到期日差一天。"""
+        from datetime import date
+        monkeypatch.setattr(syn, "_today_et", lambda: date(2026, 10, 7))
+        assert syn.demo_payload("NVDA")["as_of"] == "2026-10-07"
+        assert syn.demo_bars("NVDA")[-1]["date"] <= "2026-10-07"
+        assert syn.demo_straddle_ledger()["meta"]["last_run_date"] == "2026-10-07"
 
 
 class TestHonestStates:

@@ -332,8 +332,11 @@ class AlphaBotService:
         进程缓存，于是两者通常出自同一份 payload——不同时 `same_payload=False`，页面照实标出。"""
         t = norm_ticker(ticker)
         now = self.now_fn()
-        pos = next((p for p in self._straddle_ledger(now).get("positions") or []
-                    if str(p.get("ticker") or "").upper() == t), None)
+        if self.demo:
+            positions = self._straddle_ledger(now).get("positions") or []
+        else:
+            positions = SD.load_positions(self.straddle_root)     # 只读持仓文件，不重读整本账本
+        pos = next((p for p in positions if str(p.get("ticker") or "").upper() == t), None)
         if pos is None:
             raise BadRequest(f"{t} 在跨式账本里没有持仓")
         key = f"{t}|{pos.get('call_symbol')}|{pos.get('put_symbol')}"

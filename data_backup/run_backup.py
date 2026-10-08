@@ -16,6 +16,9 @@ v0.45.264 起已接入生产编排器 `alpha-hive-orchestrator.sh` Step 14
   （那时 `PATHS.home` 兜底到检出，现在取 `~/alpha-hive-data`）。
 - 导出失败（如并发写检测命中、源库不存在）→ 未提交，`status.json` 记
   `stage: "export"`, `ok: false`, 退出码 2。
+- **备份仓里有导出之外的条目**（v0.45.427）→ 未提交，`status.json` 记 `stage: "foreign_entries"`, `ok: false`,
+  `foreign_entries`（前 50 项）与 `foreign_count`，退出码 2。外来 = 未跟踪且不在本轮 `SHA256SUMS` 里，或任何嵌套仓库
+  （未跟踪的 / 已成 gitlink 的）。判定本身失败（git 出错）同样记这个 stage、不提交。缘由见 `foreign_entries` docstring。
 - 密钥扫描命中 → 不提交，`status.json` 记 `stage: "secret_scan"`, `ok: false`，
   命中文件数与凭据来源文件名（不含值），退出码 1。
 - **密钥扫描守卫未通过**（v0.45.307 补，二次检查发现）→ 同样 `stage: "secret_scan"`,
@@ -185,6 +188,49 @@ def sums_paths_not_tracked(backup_dir: Path) -> list[str]:
     return sorted(p for p in listed if unicodedata.normalize("NFC", p) not in tracked)
 
 
+#: 导出自己写的元数据文件（`SHA256SUMS` 不列它们自己）。唯一真相在 `export.META_FILES`（v0.45.430 起清单叫
+#: `BACKUP_MANIFEST.json`；这里若仍写死旧名 `MANIFEST.json`，新清单会被当成外来条目、每轮拒绝提交）。
+EXPORT_META_FILES = frozenset(export_mod.META_FILES)
+
+
+def foreign_entries(backup_dir: Path) -> list[str]:
+    """备份工作区里**不是本轮导出产物**的条目，排好序；空 ⇒ 可以提交（v0.45.427）。
+
+    本轮产物 = `SHA256SUMS` 列出的路径 + `EXPORT_META_FILES`（刚由 `write_manifest_and_sums` 写出——唯一真相，不另抄清单）。
+    只看**未跟踪**的：已跟踪但本轮没导出的是正常陈旧文件（导出不删数据根里已消失的根文件），早已进了备份历史。
+    嵌套仓库一律算外来（记作 `嵌套仓库:<目录>/`）：未跟踪的（`git status` 把它报成以 `/` 结尾的一项、不往里看），
+    与已被提交成 gitlink 的（索引 mode 160000）——`git add -A` 会把前者**静默**封成后者：2026-10-03 测试夹具 `bk_src`
+    被搬进生产备份仓库，10-05 的备份（`b43a5de`）就这样把它提交进了备份历史，没有任何东西红。
+    git 命令失败 ⇒ 抛 `RuntimeError`（判不了就不提交，由调用方记 stage）。
+    """
+    produced = set(EXPORT_META_FILES)
+    for line in (Path(backup_dir) / export_mod.SUMS_NAME).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            produced.add(line.split("  ", 1)[1])
+    produced = {unicodedata.normalize("NFC", p) for p in produced}
+
+    out = set()
+    st = _run_git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], backup_dir)
+    if st.returncode != 0:
+        raise RuntimeError(f"git status 失败（returncode={st.returncode}）：{st.stderr[-500:]}")
+    for rec in st.stdout.split("\0"):
+        if not rec.startswith("?? "):
+            continue
+        path = unicodedata.normalize("NFC", rec[3:])
+        if path.endswith("/"):
+            out.add(f"嵌套仓库:{path}")
+        elif path not in produced:
+            out.add(path)
+    ls = _run_git(["ls-files", "-s", "-z"], backup_dir)
+    if ls.returncode != 0:
+        raise RuntimeError(f"git ls-files 失败（returncode={ls.returncode}）：{ls.stderr[-500:]}")
+    for rec in ls.stdout.split("\0"):
+        if rec.startswith("160000 "):
+            path = rec.split("\t", 1)[1]
+            out.add(f"嵌套仓库:{unicodedata.normalize('NFC', path)}/")
+    return sorted(out)
+
+
 def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main",
         status_file: Path | None = None, commit_message: str | None = None,
         history_file: Path | None = None) -> dict:
@@ -238,6 +284,20 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
         db: {"tables": len(info["tables"]), "rows": sum(info["row_counts"].values())}
         for db, info in manifest["databases"].items()
     }
+
+    # ── 1b. 外来条目（v0.45.427）：备份仓里只许有本轮导出的东西 ─────────
+    # `git add -A` 来者不拒：任何东西出现在工作区（测试夹具、手放的文件、嵌套仓库）都会被静默封进永久备份历史。
+    # 判不了（git 失败、SHA256SUMS 读不了）同样不提交——同 v0.45.414「判定本身失败就中止」。
+    try:
+        foreign = foreign_entries(backup_dir)
+    except Exception as e:  # noqa: BLE001
+        status.update(stage="foreign_entries", ok=False, error=f"无法核对备份仓里有没有导出之外的条目：{type(e).__name__}: {e}")
+        return _finish(status_file, history_file, status)
+    if foreign:
+        status.update(stage="foreign_entries", ok=False, foreign_count=len(foreign), foreign_entries=foreign[:50],
+                      error=f"备份仓里有 {len(foreign)} 处不是本轮导出的条目（外来文件 / 嵌套仓库），拒绝提交：{foreign[:5]}"
+                            "——数据根本身没动，清掉这些条目后下一轮照常备份")
+        return _finish(status_file, history_file, status)
 
     # ── 2. 密钥扫描（提交前拦截，不是推送前）─────────────────────────
     secrets, secret_diag = load_known_secrets_with_diagnostics()

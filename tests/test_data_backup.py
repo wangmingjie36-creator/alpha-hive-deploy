@@ -12,6 +12,7 @@ import os
 import pwd
 import re
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -899,6 +900,110 @@ class TestRunBackupStageReporting:
             "如果远端头变了说明又发生了「假装成功」")
 
 
+class TestForeignEntriesRefused:
+    """备份仓里只许有本轮导出的东西（v0.45.427）。
+
+    2026-10-03 测试夹具 `bk_src`（带 `.git` 的嵌套仓库）被搬进生产备份仓库，10-05 的备份 `git add -A` 把它**静默**封成
+    gitlink 提交进了永久备份历史（`b43a5de`），四天没人红。红组照搬那两种形状（未跟踪的嵌套仓库 / 已成 gitlink），
+    对照组钉住「首次备份全是未跟踪产物」「已跟踪的陈旧文件」不被误拦——误拦等于让生产备份天天失败。
+    """
+    _h = TestRunBackupStageReporting
+
+    def _run(self, tmp_path, backup_dir):
+        status_file = tmp_path / "status.json"
+        src = tmp_path / "src"
+        if not src.exists():                       # 同一条测试里备份两轮：数据源只建一次
+            src = self._h._synthetic_src(None, tmp_path)
+        rc = run_backup.main(["--src", str(src),
+                              "--backup-dir", str(backup_dir), "--status-file", str(status_file)])
+        return rc, json.loads(status_file.read_text())
+
+    @staticmethod
+    def _commits(backup_dir):
+        r = subprocess.run(["git", "rev-list", "--all", "--count"], cwd=str(backup_dir), capture_output=True, text=True)
+        return int(r.stdout.strip() or 0) if r.returncode == 0 else 0
+
+    @staticmethod
+    def _nested_repo(path):
+        path.mkdir(parents=True)
+        (path / "paper_portfolio_state").mkdir()
+        (path / "paper_portfolio_state/meta.json").write_text('{"version": "test"}')
+        g = ["git", "-c", "user.name=t", "-c", "user.email=t@t.invalid", "-c", "commit.gpgsign=false"]
+        subprocess.run(["git", "init", "-q"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run([*g, "add", "-A"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run([*g, "commit", "-qm", "c0"], cwd=str(path), check=True, capture_output=True)
+
+    def test_first_backup_with_only_exported_files_is_not_refused(self, tmp_path, monkeypatch):
+        """对照：首次备份时工作区全是未跟踪的导出产物——不能被当成外来。"""
+        _bypass_secret_scan(monkeypatch)
+        backup_dir = tmp_path / "backup"
+        self._h._init_backup_git_repo(None, backup_dir)
+        rc, st = self._run(tmp_path, backup_dir)
+        assert st["stage"] == "push" and st["commit"]["made"] is True, st      # 没配远端 ⇒ 停在 push，提交已成
+        assert "foreign_entries" not in st
+
+    def test_stale_tracked_file_not_in_this_export_is_not_refused(self, tmp_path, monkeypatch):
+        """对照：已跟踪、本轮没导出的陈旧文件（导出不删数据根里已消失的根文件）早已进了备份历史，不算外来。"""
+        _bypass_secret_scan(monkeypatch)
+        backup_dir = tmp_path / "backup"
+        self._h._init_backup_git_repo(None, backup_dir)
+        self._run(tmp_path, backup_dir)
+        (backup_dir / "alpha-hive-daily-2026-01-01.md").write_text("old report")
+        subprocess.run(["git", "add", "-A"], cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "old"], cwd=str(backup_dir), check=True, capture_output=True)
+        rc, st = self._run(tmp_path, backup_dir)
+        assert st["stage"] == "push", st
+
+    def test_untracked_foreign_file_is_refused_and_nothing_committed(self, tmp_path, monkeypatch):
+        _bypass_secret_scan(monkeypatch)
+        backup_dir = tmp_path / "backup"
+        self._h._init_backup_git_repo(None, backup_dir)
+        (backup_dir / "notes_from_someone.txt").write_text("x")
+        rc, st = self._run(tmp_path, backup_dir)
+        assert rc == 2 and st["stage"] == "foreign_entries" and st["ok"] is False, st
+        assert st["foreign_entries"] == ["notes_from_someone.txt"] and st["foreign_count"] == 1, st
+        assert self._commits(backup_dir) == 0, "拒绝了还提交了"
+
+    def test_fixture_repo_moved_into_backup_is_refused(self, tmp_path, monkeypatch):
+        """10-03 原形：带 `.git` 的夹具仓库被搬进备份仓（未跟踪的嵌套仓库）。"""
+        _bypass_secret_scan(monkeypatch)
+        backup_dir = tmp_path / "backup"
+        self._h._init_backup_git_repo(None, backup_dir)
+        self._nested_repo(tmp_path / "bk_src")
+        shutil.move(str(tmp_path / "bk_src"), str(backup_dir))
+        rc, st = self._run(tmp_path, backup_dir)
+        assert st["stage"] == "foreign_entries" and "嵌套仓库:bk_src/" in st["foreign_entries"], st
+        assert self._commits(backup_dir) == 0
+
+    def test_already_sealed_gitlink_is_refused(self, tmp_path, monkeypatch):
+        """10-05 之后生产备份仓的现状：嵌套仓库已被 `git add -A` 封成 gitlink（mode 160000）。后续每轮都要红，不能因为「已跟踪」就放过。"""
+        _bypass_secret_scan(monkeypatch)
+        backup_dir = tmp_path / "backup"
+        self._h._init_backup_git_repo(None, backup_dir)
+        self._nested_repo(backup_dir / "bk_src")
+        subprocess.run(["git", "add", "-A"], cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "sealed"], cwd=str(backup_dir), check=True, capture_output=True)
+        ls = subprocess.run(["git", "ls-files", "-s", "bk_src"], cwd=str(backup_dir), capture_output=True, text=True).stdout
+        assert ls.startswith("160000 "), f"前提：git add -A 把嵌套仓库封成 gitlink：{ls!r}"
+        rc, st = self._run(tmp_path, backup_dir)
+        assert st["stage"] == "foreign_entries" and st["foreign_entries"] == ["嵌套仓库:bk_src/"], st
+        assert self._commits(backup_dir) == 1, "只该有夹具那一个提交"
+
+    def test_judgment_failure_is_refused_not_waved_through(self, tmp_path, monkeypatch):
+        """判不了（git 出错 / SHA256SUMS 读不了）⇒ 同样不提交，不能当「没有外来条目」放行。"""
+        _bypass_secret_scan(monkeypatch)
+
+        def boom(_d):
+            raise RuntimeError("git status 失败（模拟）")
+
+        monkeypatch.setattr(run_backup, "foreign_entries", boom)
+        backup_dir = tmp_path / "backup"
+        self._h._init_backup_git_repo(None, backup_dir)
+        rc, st = self._run(tmp_path, backup_dir)
+        assert rc == 2 and st["stage"] == "foreign_entries" and "无法核对" in st["error"], st
+        assert self._commits(backup_dir) == 0
+
+
 class TestRunBackupHistoryAppend:
     """`run()` 每条退出路径都要追加一行到 `history_file`（v0.45.284）——
     这是 `backup_continuity.py` 判"连续 N 天未识别/陈旧"唯一能读到的历史，
@@ -1343,6 +1448,7 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
     @pytest.mark.parametrize("stage, expect_level, expect_log_substr, expect_status", [
         ("init", "ERROR", "git 仓库初始化失败", "init_failed"),
         ("export", "ERROR", "数据导出失败", "export_failed"),
+        ("foreign_entries", "ERROR", "备份仓里有导出之外的条目", "foreign_entries_failed"),
         ("git_error", "ERROR", "git 调用异常", "git_error_failed"),
         ("commit", "ERROR", "git commit 失败", "commit_failed"),
         ("push", "WARN", "已提交但推送失败", "push_failed"),

@@ -18,6 +18,14 @@ _R = 0.045
 DEMO_DTES = (3, 10, 17, 24, 31, 38, 59, 94)
 
 
+def _today_et() -> date:
+    """演示数据的「今天」= 美东日期（v0.45.428）。服务层的跨式账本与报价都按美东日期造；这里若用本机日期
+    （太平洋时间），每晚 21:00–24:00 PT 两边差一天 ⇒ 水平链与持仓合约的到期日对不上。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/New_York")).date()
+
+
 def _seed(ticker: str) -> int:
     return int(hashlib.sha256(ticker.encode("utf-8")).hexdigest()[:8], 16)
 
@@ -68,7 +76,7 @@ def demo_payload(ticker: str, as_of: Optional[str] = None, *, spot: Optional[flo
     """某票的合成链。`intraday_shift`（现价的相对偏移）给盘中快照演示用。"""
     t = str(ticker).upper()
     seed = _seed(t)
-    d0 = date.fromisoformat(as_of) if as_of else date.today()
+    d0 = date.fromisoformat(as_of) if as_of else _today_et()
     S = (spot if spot is not None else spot_for(t)) * (1.0 + intraday_shift)
     base_iv = 0.22 + 0.45 * _rand(seed, 2)
     step = _step(S)
@@ -164,7 +172,7 @@ _DEMO_EVENTS = (("XOM", 1.05, 2.40, 1.70), ("CRM", 1.41, 6.10, 7.30), ("ORCL", 0
 
 def demo_straddle_ledger(as_of: Optional[str] = None) -> dict:
     """合成的财报跨式账本，形状同 `alphabot.straddle.load_ledger` 的返回（演示与测试用，零网络、确定性）。"""
-    d0 = date.fromisoformat(as_of) if as_of else date.today()
+    d0 = date.fromisoformat(as_of) if as_of else _today_et()
     iso = d0.isoformat
     start, risk = 100_000.0, 6_000.0
     positions, signals, greeks_rows = [], [], []
@@ -254,7 +262,7 @@ def demo_bars(ticker: str, as_of: Optional[str] = None, days: int = 120) -> List
     """合成日线（只到 as_of 当日，收盘价随机游走收敛到合成现价）。"""
     t = str(ticker).upper()
     seed = _seed(t)
-    d_end = date.fromisoformat(as_of) if as_of else date.today()
+    d_end = date.fromisoformat(as_of) if as_of else _today_et()
     closes, px = [], spot_for(t)
     for i in range(days):
         closes.append(px)

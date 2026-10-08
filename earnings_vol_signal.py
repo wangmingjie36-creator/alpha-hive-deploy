@@ -413,8 +413,9 @@ def _iter_snapshots(cache_dir: Path, as_of: str):
         yield m.group(1).upper(), snap
 
 
-#: 影子记录 `gex_ctx` 的结构版本（v0.45.424）。改字段 = 改检验输入，须同时在 experiments/straddle_gex_prereg.md 记修订
-GEX_CTX_SCHEMA = 1
+#: 影子记录 `gex_ctx` 的结构版本。改字段 = 改检验输入，须同时在 experiments/straddle_gex_prereg.md 记修订。
+#: v1（v0.45.424）→ v2（v0.45.428 二次检查）：加 `captured_at` / `session_live`——v1 分不出盘中手动跑与收盘后扫描
+GEX_CTX_SCHEMA = 2
 _GEX_CTX_FIELDS = ("regime", "total_gex", "gex_normalized_pct", "gex_flip", "largest_call_wall",
                    "largest_put_wall", "stock_price", "chain_view", "n_expiries")
 
@@ -424,17 +425,41 @@ def _today_pdt() -> str:
     return pdt_today()
 
 
+def _now_et() -> datetime:
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/New_York"))
+
+
+def session_live_at(now_et: datetime) -> Optional[bool]:
+    """美东此刻是否在常规交易时段（交易日且 09:30 ≤ now < 当天收盘，提前收盘日按日历）。
+    日历不可用 ⇒ None（判不了），检验按「不可用」处理，不猜。"""
+    from datetime import time as _t
+    try:
+        import is_trading_day as itd
+        d = now_et.date()
+        if not itd.is_trading_day(d)[0]:
+            return False
+        close_t = itd.session_close_et(d) or _t(16, 0)
+    except Exception:  # noqa: BLE001 - 判不了如实记 None
+        return None
+    return _t(9, 30) <= now_et.time() < close_t
+
+
 def gex_ctx(gex_fn: Optional[Callable[[str], Optional[dict]]], ticker: str, as_of: str,
-            captured_on: Optional[str] = None) -> dict:
+            captured_on: Optional[str] = None, captured_at: Optional[datetime] = None) -> dict:
     """GEX 影子记录（v0.45.424，跨式检验协议 experiments/straddle_gex_prereg.md 的输入）。
 
     取本轮蒸馏结果里的 `gex_state`（全到期日视图、政体路由用的那份），原样抄下可得性与数值。
     **只记录**：本模块的合格 / 标签 / 可交易判断与 options_paper_leg 的开平仓都不读它
     （tests/test_straddle_gex_shadow.py：AST 读者白名单 + 开 / 关 gex_fn 两次跑出的信号与开单逐项相同）。
     `captured_on` 是**记录时的** PDT 日期：检验只认 `captured_on == as_of` 的记录（补跑旧日期时拿到的是
-    另一天的链，不能冒充那天的环境）。取不到 ⇒ `available=False` + 原因，数值一律 None，不填 0。"""
+    另一天的链，不能冒充那天的环境）。`captured_at` / `session_live`（v0.45.428）：记录时刻（美东）与当时是否在
+    交易时段——协议的政体定义是「信号日**收盘后**」，盘中手动跑日报拿到的是盘中状态，检验不收。
+    取不到 ⇒ `available=False` + 原因，数值一律 None，不填 0。"""
+    now = captured_at or _now_et()
     base = {"schema_version": GEX_CTX_SCHEMA, "source": "gex_state", "as_of": as_of,
-            "captured_on": captured_on or _today_pdt()}
+            "captured_on": captured_on or _today_pdt(), "captured_at": now.isoformat(timespec="seconds"),
+            "session_live": session_live_at(now)}
     if gex_fn is None:
         return {**base, "available": False, "reason": "gex_fn_not_provided"}
     try:
@@ -449,8 +474,28 @@ def gex_ctx(gex_fn: Optional[Callable[[str], Optional[dict]]], ticker: str, as_o
             **{k: (st.get(k) if ok else None) for k in _GEX_CTX_FIELDS}}
 
 
-def _same_day_capture(ctx, as_of: str) -> bool:
-    return isinstance(ctx, dict) and ctx.get("available") is True and ctx.get("captured_on") == as_of
+def shadow_summary(signals: List[dict], as_of: str) -> dict:
+    """本轮影子记录的可得情况（日报日志用，v0.45.428）：行数、可用行数（`_usable_capture`）、不可用原因计数。
+    只数个数，不碰任何结果字段。"""
+    usable, reasons = 0, {}
+    for s in signals or []:
+        ctx = s.get("gex_ctx")
+        if _usable_capture(ctx, as_of):
+            usable += 1
+            continue
+        c = ctx if isinstance(ctx, dict) else {}
+        why = c.get("reason") or ("intraday_capture" if c.get("session_live") else
+                                  "no_gex_ctx" if not c else "not_usable")
+        reasons[why] = reasons.get(why, 0) + 1
+    return {"n": len(signals or []), "usable": usable, "reasons": reasons}
+
+
+def _usable_capture(ctx, as_of: str) -> bool:
+    """检验要的那种记录：当天（`captured_on == as_of`）、**收盘后**（`session_live is False`）、可得、结构版本对。
+    判据与 `straddle_gex_prereg._ctx_problem` 相同（测试钉住），两处必须一起改。"""
+    return (isinstance(ctx, dict) and ctx.get("schema_version") == GEX_CTX_SCHEMA and ctx.get("available") is True
+            and ctx.get("regime") in ("positive_gex", "negative_gex")
+            and ctx.get("captured_on") == as_of and ctx.get("session_live") is False)
 
 
 def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
@@ -464,7 +509,8 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
     缺省为 None 时行为与以前完全一致（延迟构造 EarningsWatcher）。
 
     `gex_fn(ticker) -> gex_state | None`（v0.45.424）：每行加一个 `gex_ctx` 影子记录（见 `gex_ctx`），
-    不参与任何判断。同一天重跑时，**当天第一次拿到的可得记录**保留（`_same_day_capture`）。"""
+    不参与任何判断。同一天重跑时，**当天第一次收盘后拿到的可得记录**保留（`_usable_capture`）；
+    旧记录是盘中拿的（盘中手动跑日报）⇒ 被收盘后的新记录替换（v0.45.428）。"""
     cdir = _resolve_dir(cache_dir, "cache")
     ecdir = _resolve_dir(earnings_cache_dir, "earnings_cache")
 
@@ -486,7 +532,7 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
 
     stats_fn = stats_fn or _default_stats
     upcoming_fn = upcoming_fn or _upcoming
-    captured_on = _today_pdt()
+    captured_on, captured_at = _today_pdt(), _now_et()
     signals: List[dict] = []
     for ticker, snap in _iter_snapshots(cdir, as_of):
         qs = snap.get("quote_set")
@@ -508,7 +554,7 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
             _log.warning("[%s] 信号计算失败: %s", ticker, exc, exc_info=True)
             continue
         # 判断全部做完之后才挂影子记录：它在 compute_signal 之外，结构上就进不了任何判断
-        sig["gex_ctx"] = gex_ctx(gex_fn, ticker, as_of, captured_on)
+        sig["gex_ctx"] = gex_ctx(gex_fn, ticker, as_of, captured_on, captured_at)
         signals.append(sig)
 
     # M4（v0.45.104）：重写该日的行之前，把 settle_signals 已经填好的实际波动搬过来。
@@ -523,8 +569,9 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
         for k in ("realized_abs_move_pct", "realized_move_pct", "realized_ratio", "settled_on"):
             if old.get(k) is not None:
                 sig[k] = old[k]
-        # 影子记录：当天第一次拿到的可得记录为准（重跑不覆盖；补跑旧日期拿到的是别一天的链，本就不算数）
-        if _same_day_capture(old.get("gex_ctx"), as_of):
+        # 影子记录：当天第一次**收盘后**拿到的可得记录为准（重跑不覆盖它；盘中的旧记录让位给收盘后的新记录；
+        # 补跑旧日期拿到的是别一天的链，本就不算数）
+        if _usable_capture(old.get("gex_ctx"), as_of):
             sig["gex_ctx"] = old["gex_ctx"]
     existing = [s for s in all_rows if s.get("as_of") != as_of]
     _write_jsonl(SIGNALS_FILE, existing + signals)

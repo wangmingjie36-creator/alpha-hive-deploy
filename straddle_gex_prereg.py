@@ -31,12 +31,12 @@ from hive_logger import PATHS, get_logger
 _log = get_logger("straddle_gex_prereg")
 
 PREREG = {
-    "version": 1,
+    "version": 2,                      # 修订 1（v0.45.428，登记后、尚无任何记录）：GEX 须是收盘后记录的
     "registered": "2026-10-07",
     "doc": "experiments/straddle_gex_prereg.md",
     "unit": "ticker+earnings_date",
     "regimes": ("positive_gex", "negative_gex"),
-    "gex_ctx_schema": 1,
+    "gex_ctx_schema": 2,
     "realized_floor_pct": 0.01,        # ln 的下限：实际波动 0.00% 时按 0.01% 算（只防 ln(0)，不改排序）
     "block": "earnings_iso_week",
     "min_units": 60,                   # 有效单位（带可用 GEX 且已结算）总数
@@ -66,11 +66,26 @@ def _num(v) -> Optional[float]:
     return f if math.isfinite(f) else None
 
 
+def _ctx_problem(ctx) -> Optional[str]:
+    """影子记录为什么不能用；能用返回 None。逐条判、各报各的原因（v0.45.428：此前一律报成 captured_on≠as_of）。
+    「当天 + 收盘后 + 可得 + 结构版本对」与 `earnings_vol_signal._usable_capture` 同一判据（测试钉住），两处一起改。"""
+    if not isinstance(ctx, dict):
+        return "no_gex_ctx"
+    if ctx.get("schema_version") != PREREG["gex_ctx_schema"]:
+        return f"schema:{ctx.get('schema_version')}"
+    if ctx.get("available") is not True:
+        return f"unavailable:{ctx.get('reason') or '—'}"
+    if ctx.get("regime") not in PREREG["regimes"]:
+        return f"regime:{ctx.get('regime')}"
+    if not ctx.get("captured_on") or ctx.get("captured_on") != ctx.get("as_of"):
+        return "captured_on≠as_of"
+    if ctx.get("session_live") is not False:
+        return "intraday_capture" if ctx.get("session_live") else "session_unknown"
+    return None
+
+
 def _ctx_ok(ctx) -> bool:
-    """影子记录可用：结构版本对、当天记录（captured_on == as_of）、状态可得、政体是两者之一。"""
-    return (isinstance(ctx, dict) and ctx.get("schema_version") == PREREG["gex_ctx_schema"]
-            and ctx.get("available") is True and ctx.get("regime") in PREREG["regimes"]
-            and bool(ctx.get("captured_on")) and ctx.get("captured_on") == ctx.get("as_of"))
+    return _ctx_problem(ctx) is None
 
 
 def _block(earnings_date: str) -> Optional[str]:
@@ -97,14 +112,11 @@ def units(rows: List[dict]) -> List[dict]:
             out.append({"ticker": tk, "earnings_date": ed, "status": "no_usable_signal"})
             continue
         ctx = rep.get("gex_ctx")
+        problem = _ctx_problem(ctx)
         u = {"ticker": tk, "earnings_date": ed, "as_of": rep.get("as_of"), "block": _block(ed),
-             "regime": ctx.get("regime") if _ctx_ok(ctx) else None}
-        if not isinstance(ctx, dict):
-            u["status"] = "no_gex_ctx"                     # v0.45.424 之前的行 / 未接线
-        elif not _ctx_ok(ctx):
-            u["status"] = f"gex_unusable:{ctx.get('reason') or ('captured_on≠as_of' if ctx.get('available') else 'unavailable')}"
-        else:
-            u["status"] = "ok"
+             "regime": ctx.get("regime") if problem is None else None,
+             # no_gex_ctx：v0.45.424 之前的行 / 未接线；其余写清是哪一条不满足
+             "status": "ok" if problem is None else (problem if problem == "no_gex_ctx" else f"gex_unusable:{problem}")}
         realized = None
         for r in rs:                                       # settle 把同一事件的所有合格行都回填成同一个实际波动
             realized = _num(r.get("realized_abs_move_pct"))
@@ -186,8 +198,10 @@ def blocked_permutation_test(us: List[dict], *, n_perm: int, seed: int) -> dict:
 
 
 def _result_path(root=None) -> Path:
-    home = Path(root) if root is not None else PATHS.home
-    return home / "options_paper_state" / RESULT_NAME
+    """缺省 = `PATHS.straddle_prereg_result`（调用时求值）；`root` 只给测试 / 指定数据根用。"""
+    if root is None:
+        return PATHS.straddle_prereg_result
+    return Path(root) / "options_paper_state" / RESULT_NAME
 
 
 def read_result(root=None) -> Optional[dict]:

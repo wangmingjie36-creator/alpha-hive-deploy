@@ -139,6 +139,15 @@ def load_ledger(root=None) -> dict:
     return out
 
 
+def load_positions(root=None) -> List[dict]:
+    """只读持仓文件（盘中参考报价只需要持仓的两个合约代码，不必每次重读整本账本，v0.45.428）。"""
+    home = Path(root) if root is not None else PATHS.home
+    rows, bad = read_jsonl(home / LEDGER_DIRNAME / "positions.jsonl")
+    if bad:
+        _log.warning("跨式账本 positions.jsonl 有 %d 行解析失败", bad)
+    return rows
+
+
 def ledger_as_of(led: dict) -> Optional[str]:
     meta = led.get("meta") or {}
     if meta.get("last_run_date"):
@@ -249,15 +258,10 @@ def unrealized(side: str, entry_premium, mark, contracts) -> Optional[float]:
 # ─────────────────────────────── 汇总（纯函数：吃 load_ledger 的结果）
 
 def _kpi_block(trades: List[dict]) -> dict:
-    """与 `options_paper_leg._kpi_block` 同口径（测试对照）。"""
-    n = len(trades)
-    if n == 0:
-        return {"n": 0, "win_rate": None, "avg_pnl_pct": None, "total_pnl_usd": 0.0}
-    wins = sum(1 for t in trades if (_num(t.get("pnl_usd")) or 0.0) > 0)
-    pcts = [p for p in (_num(t.get("pnl_pct")) for t in trades) if p is not None]
-    return {"n": n, "win_rate": round(wins / n * 100.0, 2),
-            "avg_pnl_pct": round(sum(pcts) / len(pcts), 4) if pcts else None,
-            "total_pnl_usd": round(sum(_num(t.get("pnl_usd")) or 0.0 for t in trades), 2)}
+    """直接用账本自己的 `options_paper_leg._kpi_block`——同一口径只维护一份（v0.45.428 二次检查）。
+    那个模块 import 时只求值数据根（0.45.422 起缺省 ~/alpha-hive-data，不会抛）；本页不读它的模块级路径。"""
+    import options_paper_leg as opl
+    return opl._kpi_block(trades)
 
 
 def kpis(closed: List[dict]) -> dict:

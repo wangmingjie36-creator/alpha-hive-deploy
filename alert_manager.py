@@ -385,6 +385,26 @@ class AlertAnalyzer:
                 ["code_sync"]
             ))
 
+        # 阶段 8（v0.45.431）：编排器声明本轮跑在生产独立克隆里（ALPHA_HIVE_PRODUCTION_CLONE=1）时，
+        # production_sync 写 `clone_guard`。没有这个键 = 编排器没声明（切换前 / 回退后），不是「检查过没问题」，
+        # 但也不是故障，不报。有键而 ok 不是 True ⇒ 守卫缺 / 被改道 / 克隆里有人改了代码 / origin 不对。
+        guard = (sync or {}).get("clone_guard")
+        if guard is not None and guard.get("ok") is not True:
+            self.alerts.append(Alert(
+                AlertLevel.HIGH,
+                "⚠️ 【P1 高】生产克隆不合格（守卫缺失 / 被绕过，或克隆里有未提交改动）",
+                {
+                    "问题": "；".join(guard.get("problems") or []) or "（无问题清单——核对本身失败）",
+                    "钩子": guard.get("hooks"),
+                    "本轮补装": guard.get("actions"),
+                    "影响": "生产代码可能被直接提交 / 手改而不经 origin/main（本轮扫描照常跑）",
+                    "建议": "/usr/local/bin/python3 production_clone.py check --repo <生产克隆> 看详情；"
+                            "工作区改动先搬进开发 worktree 再在克隆里 git restore；"
+                            "foreign 钩子确认来源后删掉，下一轮自动补装",
+                },
+                ["code_sync"]
+            ))
+
     def get_critical_alerts(self) -> List[Alert]:
         """获取 P0 级别告警"""
         return [a for a in self.alerts if a.level == AlertLevel.CRITICAL]
