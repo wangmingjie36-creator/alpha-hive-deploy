@@ -281,7 +281,50 @@ CI 依赖在系统 site、永远绿 ⇒ 谁都不会红。按文件再钉是把�
 - 盘中报价与当天水平通常出自同一份 payload（先现算水平再报价、共用进程缓存）；不同时 `same_payload=False`，页面照实标出。
 - 「为什么没开单」只有最近一次扫描的跳过原因（`meta.skipped_entries` 每天覆盖），历史跳过原因没有落盘。
 
-## [0.45.423] — 2026-10-07 — 占位（进行中：`portfolio_greeks` 标的现价可能是前一交易日的收盘——改取与 CBOE 期权报价同一时刻的价，陈旧价不再静默进 $Delta / SPY 对冲）
+## [0.45.423] — 2026-10-08 — Fixed：Twelve Data「当日那根」收盘后也被当成正在形成而丢掉（根因）⇒ 组合 Greeks 的标的价 / SPY 对冲成交价天天晚一个交易日；期权行 S 改取同一份 CBOE payload，陈旧价判红不用，SPY 只按 as_of 官方收盘成交；世代边界登 09-28、作废 0 条
+
+### 事故（2026-10-07 只读取证）
+- **根因**：`twelve_data._drop_forming_bar` 规则 ① 只比**日期**（docstring 写「收盘前必然未完成」，代码没查收盘）。生产扫描在收盘后取数（17:10 ET 起），同一个美东日里**已经收完**的当日那根天天被丢：10-06 那轮 14:15 PDT（收盘后 75 分钟）丢了 31 根「日期 2026-10-06 是美东当日」。所有「截至今天」的 Twelve Data 窗口都止于前一交易日。
+- `portfolio_greeks._default_close` 取「≤ as_of、5 个日历日内最后一根」，把前一交易日的收盘当 as_of 的价照单全收，配**当天**的 CBOE 期权报价算 $Delta。生产 `hedge_state/greeks_*.json` 20 份（09-04~10-06）对 yfinance 日线逐价核：**190/267 个价晚一个交易日**，正常时刻运行的 SPY **全部**晚一天；只有过了美东午夜才跑的 09-08、10-05（重跑于 10-06 02:56 ET）是对的——「偶发」其实是常态。另一条路：Twelve Data 取不到时退到本地价格索引（BRK-B 404 那几天 lag 0、09-24/25 停更期 lag 2~3），同一张表混着几个场次。
+- 自洽性反证：10-06 JNJ S=252.93（10-05 收盘）配 261016 P270 mid 15.95 —— 低于内在价值 17.07，美式认沽不可能；用 10-06 的 254.78 自洽。
+- 影响（用本模块自己的 `aggregate` / `hedge_recommendation` 按真实 as_of 收盘重放 20 天）：带状方向**一天都没翻**；5 笔 SPY 成交 4 笔按前一交易日收盘「收盘成交」，3 笔股数不同（09-04 −13 应 −12、09-28 +12 应 +10、10-01 +30 应 +29）；覆盖账本净值曲线整体晚一天盯市（10-06 记 561.71，按真实收盘约 784）。**历史 `hedge_state/` 未改写**（待用户决定）。
+- 同根的兄弟路径（只读审计）：`options_paper_leg` 到期内在价值结算（`settle_date` = 今天时拿前一日收盘，静默）；`vrp_signal` 结算白白推迟一天；`earnings_vol_signal` 结算推迟一天；`options_analyzer` 日线缺口第二源补不上「下一根是当日」的缺口；扫描路径 rv_30d / volume_ratio 的 Twelve Data 腿比 yfinance 腿（`data_pipeline._drop_forming_bar` 15:59 ET 起就收当日那根）少一根——本版一并由根因修复覆盖。
+
+### Fixed（根因，`twelve_data.py`）
+- 规则 ① 改按交易所收盘判：末根是美东当日且该场**还没收完**（`is_trading_day.session_close_et`，提前收盘日 13:00）+ 30 分钟定稿余量（`_SETTLE_MARGIN_MINUTES`）才丢；末根日期晚于美东当日一律丢；规则 ②（成交量 < 中位 30%）照旧，收完的当日那根也要过它。新钟钩子 `_et_now`；与 `_et_today` 读数不一致（只有测试造得出）按「没收完」处理。相关 docstring（`fetch_daily_closes` / `_api_end_date` / `fetch_bars` 缓存语义）同步改写：D-1 从来不是口径约定。
+- ⚠️ 收盘后多久 Twelve Data 的当日 close 才等于官方收盘：**待验证**（午夜后重跑的两次逐分相等，收盘后 70 分钟那一刻没有直接取证）。`portfolio_greeks` 首选 CBOE（last_trade 校验），Twelve Data 只是兜底。
+
+### Fixed（`portfolio_greeks.py` / `cboe_options.py`）
+- 标的价只认 as_of 那一场（`_default_mark` 取代 `_default_close`，`_resolve_mark` 判场次）：① CBOE `fetch_underlying_mark`（与期权报价同源；收盘后要 last_trade 贴收盘才算官方收盘，盘中给实时价）→ ② Twelve Data 上日期**恰为**该场、且交易所钟上已收盘的那根（本地价格索引不算）→ ③ 都不是 ⇒ **陈旧**。周末 / 假日的 as_of 用上一交易日那一场（`_expected_session`）。
+- 期权行 S 取自与报价**同一份** payload（新 `cboe_options.quote_contracts_with_underlying`，`quote_contracts` 输出逐字不变；`underlying_mark` 按 `close_verdict` 判，半日市 13:00 后取 `close` 不取盘后价）。payload 属于别的场次（次日开盘后补跑）⇒ 报价也不是 as_of 的：`quote_missing` + `quote_stale`，Greeks 不进汇总。
+- SPY 只在拿到 as_of 的**官方收盘**时成交（`fill: close` 名副其实）；盘中跑只算不成交（`execution_blocked`）。一次运行内同一 (标的, 日) 只取一次价（`_memo_marks`）：建议 / 净值 / 成交 / 盯市 / 交易后聚合用同一个 SPY 价，CBOE 取不到时不每处各重试。
+- β 口径不变：日线照旧先取（`_default_beta` 靠 `_bars_in_memory` 判重算；取晚了会端出 4 个交易日前的缓存 β）。`_VERSION` → 0.45.423（审计文件 / meta 的口径世代）。
+
+### Added（观测：「这个失败，下游怎么知道？」）
+- 行级 `price_stale` / `stale_price` / `price_session` / `price_source`（陈旧行同时 `price_missing` ⇒ partial ⇒ unknown ⇒ 不对冲）；`coverage.n_price_stale`；hold 理由写 `N price missing (M stale …)`；压力网格剔除标签分「no price / stale price」。
+- ERROR 日志点名（标的、看到的价、所属场次、来源）；日报小节「⚠️ 价不属于 D 这一场」行 + SPY 价的来源与场次；审计文件 `price_check`；`scan_timing.counters()["portfolio_greeks"]`（`price_check_stats()`）→ status.json，摘要行只在出事时占位；`alert_manager` P2「组合 Greeks：标的价不属于 D 这一场」（计数缺失记 `checks_skipped`，不当「查过了没事」）。
+
+### 世代边界（用户 2026-10-08 决定：边界 + 逐标的等价举证、照 v0.45.369 / 383 先例登 09-28 不作废样本、10-08 扫描前上线）
+- **正常日一个分都不变**（只读追踪：rv_30d / iv_rv_* 每天换量但不进分、不进 ML 特征、不入档；进分的只有两条 Twelve Data **兜底**路径：yfinance 日线抛错时的成交量回落、日线缺口第二源）。
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-09-28", "v0.45.423", …)`；等价判据 `_equiv_td_session_bar`：BuzzBee `volatility_20d` 是有限数（四处赋值都在 yfinance `hist` 同一块、与 volume_ratio 同源 ⇒ 没走成交量回落）且 Oracle `hv_gap ⊆ hv_gap_filled`（383 首跑前读 383 冻结证据；387 之前没有第二源、`hv_gap` 为空才算）。**生产实测 09-28~10-07 共 240 对全部等价 ⇒ 作废 0 条**；判别器现报 `no_evidence_yet`，10-08 首跑后应为 `matches`。
+- 印记：Oracle details 字面量 `td_session_aware: True`（`_mark_gex_out_of_score` / 成功路径 / 日报合成回退都写）。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.423"]` = `agent.BuzzBeeWhisper.*` + `crowding.score` + `bear.score` + `agent.OracleBeeEcho.*` + `bear.options_bear`（原始观测 volume_ratio / volume_signal / google_trends / iv_rank 不点名，`NEVER_SLICED_TODAY` 守卫）；`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段（标签改名、归属不变）。
+- **账本口径（不在 IC 世代表里，在此登记）**：自 2026-10-08 起 `vrp_state/vrp_signals.jsonl` 与 `options_paper_state/earnings_signals.jsonl` 的 `rv_30d` 窗口止于当日收盘（此前多数止于前一交易日；Twelve Data 失败走 yfinance 的那几天本来就止于当日）——两本账校准 / 评估时按此分段；`vrp ts_pct` 的历史序列在此有一根的断点。
+
+### 验证
+- 新测试 `tests/test_portfolio_greeks_price_session.py`（事故复现走改动前就有的入口、桩只打在数据边界、twelve_data 的闸用真的）、`tests/test_td_session_boundary.py`；改 `test_portfolio_greeks.py`（钩子改名）、`test_scan_timing.py`（计数器键）、`test_probability_scorecard.py`（合并标签）。
+- 变异（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、核 passed+failed == collected、按字节还原核 sha256）：**M0（改动前的 twelve_data + portfolio_greeks）红的理由就是事故本身**——`{'AMZN': 251.4, 'TSLA': 378.73}`、`774.83 == 779.09`、「按 774.83 成交」、「P270 mid 15.95 < 内在价值 17.07（S=252.93）」、「盘中半根被当成 10-06 的收盘用了」；正对照（午夜后重跑、周末 as_of）在改动前的文件上**绿**。M0p / M0t 分别只回退一层也各自被抓。其余变异（场次校验、日期恰为该场、同一 payload 配对、只按官方收盘成交、收盘后取盘后价、报价错场、周末映射、核交易所收盘、陈旧计缺价、SPY 记忆、日报点名、告警、规则 ① 退回、定稿余量、提前收盘、钟钩子不一致、等价两轴、387 前放行、印记三条路径、等价登记）全部打红。M10 首轮**存活**：根因修好后 Twelve Data 第一次就给出 SPY 10-06，记忆与否都只取一次——测试前提改成「SPY 真的取不到」后打红。
+- 变异共 27 个（含 M0 / M0p / M0t / M0b），全部打红；每轮 passed+failed == collected（192），还原后 sha256 全对、192 全绿。
+- 全量套件（rebase 前，worktree）：8398 passed / 1 failed / 1 error —— failed 是 `test_economic_calendar.py::TestCoverageHorizon`（BLS / BEA 2027 日程未发布，日期驱动、设计内定期红、阈值不许调），error 是 `test_zero_weight_invariant` 收尾时真实数据根守卫看到盘中 Alpha Bot（`python -m alphabot --port 8765`）在写 `alphabot_state/intraday/2026-10-08/*.jsonl`（套件结束后 mtime 仍在前进），均与本版无关。
+- ruff：仓库配置全绿；`--isolated --select F401,F841,F821` 3 条均为 HEAD 既有（oracle_bee 两处、test_portfolio_greeks 一处）。
+- 生产只读：`cohort_boundary_evidence(~/alpha-hive-data, "v0.45.423")` = `no_evidence_yet`、8 天全部列为等价、`unmarked_after_boundary` 为空。
+
+### 不做 / 待用户决定
+- 历史 `hedge_state/`（trades / equity_curve / greeks_*）未改写。
+- `options_paper_leg._default_close` 的 5 日容差：根因修复后常见路径已对；Twelve Data 滞后时仍静默取旧收盘 ⇒ 另开任务。
+- 顺手看到：`market_intelligence` 的 iv_rv_signal 阈值 Twelve Data 腿 ±10、yfinance 腿 ±5，不一致（未动）。
+- SPY 的 CBOE options payload 5.8 MB / 8 s，每天多一次；`quotes/SPY.json` 525 B 字段同名，嫌慢可换。
+
 
 ## [0.45.422] — 2026-10-07 — Changed：数据根缺省改为 `~/alpha-hive-data`——未设 `ALPHA_HIVE_HOME` 时不再兜底到代码检出（手动运行不再静默读写冻结旧数据）；测试会话在收集之前设会话级沙箱
 

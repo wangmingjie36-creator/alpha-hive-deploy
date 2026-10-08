@@ -87,6 +87,10 @@ def counters() -> Dict[str, Optional[dict]]:
     改动唯一的代价，必须可数而不是可估。两者放在这里是因为编排器已把本文件并进
     status.json，挂上即随每轮扫描落盘，无需改编排器（同 `code_version` 的走法）。
 
+    `portfolio_greeks`（v0.45.423）：组合 Greeks 当天的标的价场次核对（`price_check_stats`）——
+    多少行的价不属于 as_of 那一场（陈旧，不进 $Delta）、SPY 价是哪一场的、有没有因此拒绝成交。
+    此前同日跑恒用前一交易日的收盘、一个计数都没有；alert_manager 读它报 P2。
+
     `cboe_raw`（v0.45.333）：卖权行权价账本取原始链（`fetch_cboe_raw_contracts`）各出口的次数——
     ok / snapshot_mode / stale_vintage / payload_unavailable / vintage_mismatch / vintage_unverifiable /
     price_unavailable / no_parseable_contracts 分开数，不折叠。此前这组计数只有 cboe_options 自己和
@@ -95,7 +99,8 @@ def counters() -> Dict[str, Optional[dict]]:
     out: Dict[str, Optional[dict]] = {"yfinance": None, "twelve_data": None,
                                       "cboe": None, "cboe_chain": None,
                                       "gex_view": None, "cboe_raw": None,
-                                      "options_snapshot": None, "hv_gap": None}
+                                      "options_snapshot": None, "hv_gap": None,
+                                      "portfolio_greeks": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -127,6 +132,11 @@ def counters() -> Dict[str, Optional[dict]]:
         out["options_snapshot"] = options_analyzer.snapshot_slot_stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("options_snapshot stats 不可得: %s", e)
+    try:
+        import portfolio_greeks
+        out["portfolio_greeks"] = portfolio_greeks.price_check_stats()   # 本进程没跑过 ⇒ None
+    except Exception as e:  # noqa: BLE001
+        _log.debug("portfolio_greeks price_check 不可得: %s", e)
     return out
 
 
@@ -289,5 +299,16 @@ def summary_line(snap: dict) -> str:
     os_s = "—" if os_ is None else (
         f"写入{os_.get('writes', '?')}/命中{os_.get('hits', '?')}"
         f"/会话不符弃用{os_.get('session_mismatch', '?')}份/盘中快照命中{os_.get('hits_before_close', '?')}份")
+    pg = c.get("portfolio_greeks")
+    pg_s = ""
+    if pg and (pg.get("n_stale") or pg.get("n_quote_stale") or (pg.get("spy") or {}).get("stale")
+               or pg.get("execution_blocked")):
+        # v0.45.423：同 hv_gap，只在出过事时占位——组合 Greeks 有价不属于当天那一场（不进 $Delta、不对冲）
+        names = ",".join(dict.fromkeys(f"{x.get('ticker')}@{x.get('session')}" for x in pg.get("stale") or []))
+        spy = pg.get("spy") or {}
+        pg_s = (f" | Greeks 陈旧价 {pg.get('n_stale', '?')} 行" + (f"({names})" if names else "")
+                + (f"/SPY@{spy.get('session')}" if spy.get("stale") else "")
+                + (f"/报价错场 {pg['n_quote_stale']}" if pg.get("n_quote_stale") else "")
+                + ("/拒绝成交" if pg.get("execution_blocked") else ""))
     return ("耗时 " + " | ".join(parts) +
-            f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s)
+            f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s + pg_s)

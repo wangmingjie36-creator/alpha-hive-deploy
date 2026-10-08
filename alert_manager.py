@@ -289,6 +289,9 @@ class AlertAnalyzer:
         # 6. 检测 P1: gh-pages 部署失败 / 生产代码没同步到 origin/main（v0.45.214；v0.45.402 起不再含 main 推送）
         self._check_deploy_and_code_sync(status)
 
+        # 7. 检测 P2: 组合 Greeks 用到了不属于当天那一场的标的价 / 因此拒绝成交（v0.45.423）
+        self._check_portfolio_greeks_prices(status)
+
         return self.alerts
 
     @staticmethod
@@ -436,6 +439,49 @@ class AlertAnalyzer:
                 },
                 ["code_sync"]
             ))
+
+
+    def _check_portfolio_greeks_prices(self, status: Dict) -> None:
+        """组合 Greeks 的标的价场次核对（v0.45.423；`portfolio_greeks.price_check_stats` 经 scan_timing 进来）。
+
+        v0.45.103~422 同日跑恒拿前一交易日的收盘算 $Delta、SPY 按昨收「收盘成交」，零告警——那个失败被
+        「5 个日历日内最后一根」的容差改写成了正常值。现在陈旧价不进计算（当日不对冲），这里让它有人看见：
+        有行判陈旧 / SPY 价不是当天那一场 / 有合约报价属于别的场次 / 因 SPY 不是官方收盘而拒绝成交 ⇒ P2。
+        `scan_timing` 整段缺失已由 `_check_deploy_and_code_sync` 报过，这里不重复；
+        `counters.portfolio_greeks` 不是对象 ＝ 本轮没跑到组合 Greeks（钩子异常 / 早退 / 旧版扫描）⇒ checks_skipped。
+        """
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        pg = (st.get("counters") or {}).get("portfolio_greeks")
+        if not isinstance(pg, dict):
+            self.checks_skipped.append("组合 Greeks 标的价场次检查（scan_timing 无 portfolio_greeks 计数）")
+            return
+        spy = pg.get("spy") or {}
+        n_stale = int(pg.get("n_stale") or 0)
+        n_quote_stale = int(pg.get("n_quote_stale") or 0)
+        blocked = pg.get("execution_blocked")
+        if not (n_stale or n_quote_stale or spy.get("stale") or blocked):
+            return
+        names = "，".join(dict.fromkeys(f"{x.get('ticker')} {x.get('seen_price')}@{x.get('session')}"
+                                        for x in pg.get("stale") or []))
+        spy_px = spy.get("seen_price") if spy.get("stale") else spy.get("price")
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】组合 Greeks：标的价不属于 {pg.get('expected_session') or pg.get('as_of')} 这一场"
+            f"（陈旧 {n_stale} 行" + ("，SPY 也是" if spy.get("stale") else "")
+            + ("，且拒绝成交" if blocked else "") + "），当日不对冲",
+            {
+                "陈旧行": names or "—",
+                "SPY": f"{spy_px} @ {spy.get('session')}（{spy.get('source')}）",
+                "报价错场": n_quote_stale,
+                "拒绝成交": blocked or "—",
+                "影响": "这些行不进 $Delta / 净值 / 成交，β·Δ 判 unknown，当日不对冲",
+                "建议": "看 hedge_state/greeks_<日期>.json 的 price_check；CBOE 盘中陈旧文件 / 整源停更 / "
+                        "过了次日开盘才补跑时会出现",
+            },
+            ["portfolio_greeks", "data_quality"]
+        ))
 
     def get_critical_alerts(self) -> List[Alert]:
         """获取 P0 级别告警"""

@@ -188,6 +188,37 @@ def _et_today() -> Optional[str]:
         return None
 
 
+# 当日那根「收完」要等到交易所收盘之后再过这么久（v0.45.423）：留给收盘竞价成交入账与数据商定稿。
+# 生产扫描 17:10 ET 起取数，离这个点还有 40 分钟。交易所收盘时刻按 `is_trading_day.session_close_et`
+#（提前收盘日 13:00）。⚠️ 收盘后多久 Twelve Data 的当日 close 才等于官方收盘，**待验证**——过了美东午夜的
+# 历史重跑里它与官方收盘逐分相等（2026-09-08 / 10-05 两次，30 只），收盘后 70 分钟那一刻没有直接取证。
+_SETTLE_MARGIN_MINUTES = 30
+
+
+def _et_now():
+    """美东此刻（带时区）。与 `_et_today` 分开是测试的钟钩子；生产上两者读同一个挂钟。"""
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+    return _dt.datetime.now(ZoneInfo("America/New_York"))
+
+
+def _session_settled(day: str) -> bool:
+    """`day`（美东日期）那一场此刻是否已收完：此刻**就在那一天**且过了收盘 + `_SETTLE_MARGIN_MINUTES`。
+    此刻不在那一天（两个钟钩子读数不一致，只有测试能造出来）或日历不可用 → False：当它没收完，照旧丢。"""
+    try:
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+        from is_trading_day import session_close_et
+        now = _et_now().astimezone(ZoneInfo("America/New_York"))
+        d = _dt.date.fromisoformat(day)
+        if now.date() != d:
+            return False
+        settle = _dt.datetime.combine(d, session_close_et(d)) + _dt.timedelta(minutes=_SETTLE_MARGIN_MINUTES)
+        return now.replace(tzinfo=None) >= settle
+    except Exception:  # noqa: BLE001 - 判不了就按「没收完」处理：多丢一根的代价远小于收进半根
+        return False
+
+
 def _drop_forming_bar(rows: List[dict], ticker: str = "") -> List[dict]:
     """去掉「当日盘中正在形成」的末根日线。
 
@@ -199,11 +230,20 @@ def _drop_forming_bar(rows: List[dict], ticker: str = "") -> List[dict]:
     判断交易所时间 —— 那正是本模块要绕开的东西。这里改用返回体自带的两个信号，
     不额外发请求：
 
-      ① **日期**：末根日期 == 美东当日 → 今天的 bar，收盘前必然未完成
-      ② **成交量**：末根 < 窗口中位数的 30% → 几乎只可能是半根
+      ① **日期 + 收盘**：末根日期 == 美东当日、且那一场**还没收完**（`_session_settled`：收盘 + 30 分钟）
+         → 今天正在形成的 bar；末根日期晚于美东当日（钟错）一律丢
+      ② **成交量**：末根 < 窗口中位数的 30% → 几乎只可能是半根（收完之后的当日那根也要过这一道）
 
     两道各自独立、任一命中即丢。误丢的代价极小（30 根里少一根），
     漏丢的代价是波动率失真 —— 不对称，所以宁可宽。
+
+    ⚠️ v0.45.423 之前 ① 只比**日期**，不看收没收盘（docstring 写着「收盘前必然未完成」，代码没查收盘）。
+    生产扫描在收盘后（17:10 ET）取数，于是同一个美东日里**已经收完**的当日那根天天被丢：10-06 那轮
+    14:15 PDT 丢了 31 根「日期 2026-10-06 是美东当日」。所有「截至今天」的窗口都止于前一交易日——
+    `portfolio_greeks` 的标的价 / SPY 成交价天天晚一个交易日（20 份审计文件 190/267 个价），
+    `options_paper_leg` 的到期内在价值拿前一日收盘、`vrp_signal` 结算白白推迟一天、日线缺口第二源补不上
+    当日那根；扫描路径上 rv_30d / volume_ratio 的 Twelve Data 腿比 yfinance 腿（`data_pipeline._drop_forming_bar`
+    15:59 ET 起就收当日那根）少一根。修后两条腿对齐：收完的那一场照收。
     """
     if len(rows) < 5:
         return rows
@@ -211,8 +251,10 @@ def _drop_forming_bar(rows: List[dict], ticker: str = "") -> List[dict]:
     reason = ""
 
     today_et = _et_today()
-    if today_et and last["date"] >= today_et:
-        reason = f"日期 {last['date']} 是美东当日"
+    if today_et and last["date"] > today_et:
+        reason = f"日期 {last['date']} 晚于美东当日 {today_et}"
+    elif today_et and last["date"] == today_et and not _session_settled(today_et):
+        reason = f"日期 {last['date']} 是美东当日、该场还没收完"
     else:
         vols = sorted(r["vol"] for r in rows[:-1] if r["vol"] > 0)
         if vols:
@@ -234,8 +276,8 @@ def fetch_daily_closes(ticker: str, days: int = 60,
     ----------
     days : 要多少根。`rv_30d` 需要 ≥31 根才能算 30 个收益率。
     end_date : "YYYY-MM-DD"。给定时取**截至该日（含）**的窗口，用于补跑；
-        `None` = 最新（末根是最近一个已收完的交易日，当日那根由
-        `_drop_forming_bar` 丢掉）。
+        `None` = 最新（末根是最近一个已收完的交易日：当日那根收完之前——收盘 + 30 分钟——
+        由 `_drop_forming_bar` 丢掉，收完之后照收；v0.45.423 前不看收没收盘、当日一律丢）。
         「含」是本函数的承诺，不是接口的行为 —— Twelve Data 的 `end_date`
         是**不含**的，差值在 `_api_end_date` 里补掉（v0.45.90）。
 
@@ -283,15 +325,15 @@ def _api_end_date(end_date: str) -> str:
     不会多带一根（实测 `end_date=2026-08-29` 周六 → 末根仍是 2026-08-28）。
 
     ⚠️ 这**不能**由「让 `_drop_forming_bar` 去掉当日」代劳 —— 两者管的不是
-    一件事。那道闸判的是「这根还没走完」（`date >= 美东当日`），是运行时的
+    一件事。那道闸判的是「这根还没走完」（美东当日、且该场还没收完），是运行时的
     数据质量护栏；`end_date` 说的是「窗口画到哪」。补跑 D 时 D 那根早已收完，
     根本没有半根可言。反过来，+1 之后若目标日恰好是今天，当日那根会被拉进来，
     那道闸照旧拦得住（实测 `end_date=2026-09-02` → 末根仍是 2026-08-31）。
 
-    ⚠️ 也**不要**据此去对齐「实时扫描当天拿到的窗口末端是 D-1」：那不是口径
-    约定，只是 `_drop_forming_bar` 在跑的当下无法确认 D 那根收没收完。同一
-    函数里的 yfinance 兜底腿（`yf.download(period=...)`）压根没有这道闸、
-    当天那根照收 —— 两条腿本来就差一根，没有「D-1 口径」可言。
+    ⚠️ 也**不要**据此去对齐「实时扫描当天拿到的窗口末端是 D-1」：那从来不是口径
+    约定。v0.45.423 前 `_drop_forming_bar` 只看日期、收盘后也丢当日那根，才造出了
+    那个 D-1；现在它按交易所收盘判（收盘 + 30 分钟后照收），收盘后的扫描窗口末端就是 D，
+    与同一函数里的 yfinance 兜底腿（当天那根照收）对齐。
 
     解析不了就原样透传：Twelve Data 也收 `YYYY-MM-DD hh:mm:ss`，那种写法自带
     时刻语义，不该被本函数按「日」平移。
@@ -421,8 +463,8 @@ def fetch_bars(ticker: str, days: int = SHARED_BARS_WINDOW,
     --------
     · **键 = `(ticker, end_date)`，其中 `None` 归一为美东当日**（v0.45.125，
       见 `_bars_key`）。为什么现在可以合并：`_fetch_rows` 对显式 `end_date` 也过
-      `_drop_forming_bar`，所以同一个美东日里 `None`（最新，丢当日半根）与
-      `end_date=今天`（接口 +1 天拉进当日那根，再被同一道闸丢掉）返回**逐行相同**
+      `_drop_forming_bar`，所以同一个美东日里 `None`（最新，当日半根被丢）与
+      `end_date=今天`（接口 +1 天拉进当日那根，过同一道闸）返回**逐行相同**
       ——2026-09-04 实测蜂群段 30 只与尾段 17 只取的就是同一份数据、各发一次。
       显式的**过去**日期仍是独立键，与 `None` 不同（补跑窗口末端不是今天）。
       `_et_today()` 取不到时退回 `None` 键，不猜。
@@ -450,7 +492,8 @@ def fetch_bars(ticker: str, days: int = SHARED_BARS_WINDOW,
     **进程内、一次运行内不设上限**，也不设 TTL。一次扫描就是一个进程：
     30 只票 + SPY × 各自几个窗口 ≈ 几十条 × 120 行，量级完全无所谓。
     但正因为没有 TTL，**长驻进程别用它**（会一直端着当天第一次取到的数）；
-    真需要重取就调 `clear_bars_cache()`。
+    真需要重取就调 `clear_bars_cache()`。v0.45.423 起还多一条理由：缓存住的是**取数那一刻**
+    对当日那根的判定——收盘前取的（当日那根被丢）收盘后不会自己补上。扫描 17:10 ET 起取数，不受影响。
 
     Parameters
     ----------

@@ -87,6 +87,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import os
 import re
 import shutil
@@ -889,6 +890,24 @@ _COHORT_HISTORY = [
      "09-23 整轮扫描失败（status=failed，无扫描产出），`predictions` 无该日行、无 `.swarm_results`，8 只标的当天**没有落库的分数**；"
      "只留下 12 只 ML 归档，8 只里仅 BILI（iv_rank 存 44.94、正确 45.58，未跨任何档位）与 CVX（当天期权链 TLS 失败走样本早退，归档里 iv_rank 本就是 None）在其中。"
      "错的 iv_rank 没有进入任何落库的评分，故无需重放；详见 CHANGELOG v0.45.383「更正」。"),
+    ("2026-09-28", "v0.45.423",
+     "twelve_data 当日那根改按交易所收盘判（用户 2026-10-08 决定：从根因修、登边界 + 逐标的等价举证、照 v0.45.369 / 383 先例"
+     "登记 09-28 不作废样本；10-08 扫描前上线）。`twelve_data._drop_forming_bar` 规则 ① 此前只比日期——收盘后同一个美东日里"
+     "已经收完的当日那根照丢，生产扫描（17:10 ET 起）所有「截至今天」的 Twelve Data 窗口止于前一交易日。现在收盘 + 30 分钟后照收。"
+     "**正常日一个分都不变**：rv_30d / iv_rv_* 天天换量但不进分（展示 + VRP / 财报跨式账本）；进分的只有两条 Twelve Data **兜底**路径——"
+     "① yfinance 日线抛错时 `data_pipeline._fill_volume_from_twelvedata` 补 volume_ratio（Buzz volume_signal、拥挤度代理、Bear "
+     "momentum_bear；Rival 的 crowding 特征）；② `options_analyzer._fill_gaps_from_second_source`（下一根恰是当日那根的缺口从补不上"
+     "变成补得上 ⇒ iv_rank）。两条在兜底那几天都是从「比 yfinance 主路径少一根」对齐成一样，口径不变。"
+     "等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.423\"]`（`_equiv_td_session_bar`）：BuzzBee `details.volatility_20d` 是有限数"
+     "（四处赋值都在 yfinance `hist` 同一块、与 volume_ratio 同源 ⇒ 没走成交量回落）且 Oracle `hv_gap` ⊆ `hv_gap_filled`"
+     "（383 首跑前的记录读 383 冻结证据）。2026-10-08 生产实测：09-28~10-07 共 8 天 × 30 只 = 240 对**全部等价** ⇒ **作废 0 条**。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.423\"]`：Oracle details 字面量 `td_session_aware: True`（成功 / 异常兜底 / 无效 ticker / "
+     "日报合成回退都写）。预期判定：新代码首跑（10-08）之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.423\"]` = `agent.BuzzBeeWhisper.*` + `crowding.score` + `bear.score` + "
+     "`agent.OracleBeeEcho.*` + `bear.options_bear`（原始观测 volume_ratio / volume_signal / google_trends / iv_rank 不点名，"
+     "同 383，理由见该条注释）；"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段。前瞻检验：本条登记日早于维度 IC 协议 FORWARD_START "
+     "2026-10-12、上线日（10-08）也早于它 ⇒ 不截断。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1193,6 +1212,56 @@ def _equiv_hv_gap_free(d: dict) -> bool:
     return _load_hv_gap_evidence().get(day, {}).get(tk) in _HV_GAP_EQUIV_STATUSES
 
 
+def _oracle_row_has_td_session_marker(d: dict) -> bool:
+    """这行是 v0.45.423 之后的代码写的吗：OracleBee `details.td_session_aware` 为字面量 `True`
+    （每条返回路径都写，同 `hv_gap_checked`）。只认 `is True`：此前的记录没有这个键。不看实时 / 补跑。"""
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("OracleBeeEcho")
+    det = o.get("details") if isinstance(o, dict) else None
+    return isinstance(det, dict) and det.get("td_session_aware") is True
+
+
+def _marker_oracle_td_session_aware(d: dict) -> bool:
+    """v0.45.423 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383）。"""
+    return _oracle_row_has_td_session_marker(d) and not _is_backfill_row(d)
+
+
+def _finite_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _equiv_td_session_bar(d: dict) -> bool:
+    """v0.45.423 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？
+
+    本版把 `twelve_data._drop_forming_bar` 改成按交易所收盘判当日那根（收完照收；此前收盘后也丢）。
+    进评分的只有两条 Twelve Data 兜底路径，两条都要证明没走到（或走到了也不会变）：
+      ① 成交量回落（`data_pipeline._fill_volume_from_twelvedata`）只在 yfinance 日线**抛错**时走；那条路不算
+         `volatility_20d`。四处给 `volatility_20d` 赋值的地方都在 yfinance `hist` 同一块里、与 `volume_ratio` 同源
+         ⇒ BuzzBee `details.volatility_20d` 是有限数 ⇒ 这只票的 volume_ratio 来自 yfinance ⇒ 本版不改它。
+      ② 日线缺口第二源（`options_analyzer._fill_gaps_from_second_source`）：本版只让「下一根正好是当日那根」
+         的缺口变得补得上。Oracle `details.hv_gap` 为空，或其中每个缺口都已在 `hv_gap_filled` 里 ⇒ 不变。
+         `hv_gap_checked` 之前的记录（v0.45.383 首跑前）没有这两个字段 ⇒ 读 383 的冻结证据（该日该票日线无缺口）；
+         有 `hv_gap` 没有 `hv_gap_filled`（387 之前，生产上是 09-29）⇒ 那版还没有第二源补缺口，`hv_gap` 为空才算等价。
+    证不出就不算等价（举证责任在放宽一侧）。2026-10-08 实测：09-28~10-07 共 240 对（日期，标的）全部等价。"""
+    sr = d.get("swarm_results") or {}
+    det = sr.get("agent_details") or {}
+    buzz = (det.get("BuzzBeeWhisper") or {}).get("details") if isinstance(det.get("BuzzBeeWhisper"), dict) else None
+    if not (isinstance(buzz, dict) and _finite_number(buzz.get("volatility_20d"))):
+        return False
+    o = det.get("OracleBeeEcho")
+    ora = o.get("details") if isinstance(o, dict) else None
+    if isinstance(ora, dict) and ora.get("hv_gap_checked") is True:
+        gaps = ora.get("hv_gap")
+        if not isinstance(gaps, list):
+            return False
+        if "hv_gap_filled" not in ora:
+            # v0.45.383 ~ v0.45.386 的代码（生产上只有 09-29）：Twelve Data 第二源补缺口与 `hv_gap_filled` 是同一个提交
+            #（4bca556d / v0.45.387）加的，那时还没有这条路 ⇒ 只有「没有缺口」才证得出本版改动碰不到它
+            return not gaps
+        filled = ora.get("hv_gap_filled")
+        return isinstance(filled, list) and all(g in filled for g in gaps)
+    return _equiv_hv_gap_free(d)
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1216,6 +1285,8 @@ _BOUNDARY_MARKERS = {
                   _marker_oracle_options_dq_from_agent),
     "v0.45.383": ("agent_details.OracleBeeEcho.details.hv_gap_checked is True",
                   _marker_oracle_hv_gap_checked),
+    "v0.45.423": ("agent_details.OracleBeeEcho.details.td_session_aware is True",
+                  _marker_oracle_td_session_aware),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1240,6 +1311,9 @@ _BOUNDARY_EQUIVALENCE = {
     "v0.45.383": ("冻结证据 experiments/hv_gap_equivalence_20260928.json：该（日期，标的）的日线无缺口"
                   "（verified / day_level_inference / not_applicable）",
                   _equiv_hv_gap_free, _oracle_row_has_hv_gap_marker),
+    "v0.45.423": ("BuzzBee details.volatility_20d 是有限数（volume_ratio 来自 yfinance、没走 Twelve Data 兜底）且日线缺口"
+                  "全补上（Oracle hv_gap ⊆ hv_gap_filled；383 首跑前读其冻结证据）",
+                  _equiv_td_session_bar, _oracle_row_has_td_session_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
