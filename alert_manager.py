@@ -5,6 +5,7 @@
 """
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict
@@ -22,6 +23,22 @@ _SYNC_MEANING = {
 }
 
 _log = get_logger("alerts")
+
+
+def _ran_from_production_clone(scan_timing: Dict) -> bool:
+    """本轮扫描的代码目录（扫描启动时 `code_version.repo_dir`）是不是生产独立克隆（v0.45.432）。
+
+    取不到 / 解析不了 ⇒ False（不据此报警：判不了不等于该报）。比较走 `os.path.realpath`，
+    不认符号链接 / `..` 的写法差异。
+    """
+    repo_dir = (scan_timing.get("code_version") or {}).get("repo_dir")
+    if not repo_dir:
+        return False
+    try:
+        import production_clone
+        return os.path.realpath(repo_dir) == os.path.realpath(production_clone.default_dest())
+    except Exception:  # noqa: BLE001 —— 判不了就不报，见 docstring
+        return False
 
 
 class AlertLevel(Enum):
@@ -272,6 +289,9 @@ class AlertAnalyzer:
         # 6. 检测 P1: gh-pages 部署失败 / 生产代码没同步到 origin/main（v0.45.214；v0.45.402 起不再含 main 推送）
         self._check_deploy_and_code_sync(status)
 
+        # 7. 检测 P2: 组合 Greeks 用到了不属于当天那一场的标的价 / 因此拒绝成交（v0.45.423）
+        self._check_portfolio_greeks_prices(status)
+
         return self.alerts
 
     @staticmethod
@@ -384,6 +404,105 @@ class AlertAnalyzer:
                 },
                 ["code_sync"]
             ))
+
+        # 阶段 8（v0.45.431）：编排器声明本轮跑在生产独立克隆里（ALPHA_HIVE_PRODUCTION_CLONE=1）时，
+        # production_sync 写 `clone_guard`。没有这个键 = 编排器没声明（切换前 / 回退后），不是「检查过没问题」，
+        # 但也不是故障，不报。有键而 ok 不是 True ⇒ 守卫缺 / 被改道 / 克隆里有人改了代码 / origin 不对。
+        guard = (sync or {}).get("clone_guard")
+        # v0.45.432：「没声明」与「声明了但没核」要分开。本轮代码就是从生产克隆跑的（code_version.repo_dir），
+        # 却没有 clone_guard ⇒ 编排器丢了声明，或克隆里的 production_sync 太旧不认它——守卫从未被核对。
+        # sync 整个缺失时上面已报 P2，这里不重复。
+        if sync is not None and guard is None and _ran_from_production_clone(st):
+            self.alerts.append(Alert(
+                AlertLevel.HIGH,
+                "⚠️ 【P1 高】扫描从生产克隆跑，但本轮没有核对克隆守卫（clone_guard 缺失）",
+                {
+                    "代码目录": (st.get("code_version") or {}).get("repo_dir"),
+                    "含义": "编排器没给 production_sync 设 ALPHA_HIVE_PRODUCTION_CLONE=1，或克隆里的 production_sync "
+                            "早于 v0.45.431、不认这个声明——钩子没有被补齐，克隆是否被改过本轮没人看",
+                    "建议": "核对部署副本里 production_sync 那一行；/usr/local/bin/python3 production_clone.py check",
+                },
+                ["code_sync"]
+            ))
+        if guard is not None and guard.get("ok") is not True:
+            self.alerts.append(Alert(
+                AlertLevel.HIGH,
+                "⚠️ 【P1 高】生产克隆不合格（守卫缺失 / 被绕过，或克隆里有未提交改动）",
+                {
+                    "问题": "；".join(guard.get("problems") or []) or "（无问题清单——核对本身失败）",
+                    "钩子": guard.get("hooks"),
+                    "本轮补装": guard.get("actions"),
+                    "影响": "生产代码可能被直接提交 / 手改而不经 origin/main（本轮扫描照常跑）",
+                    "建议": "/usr/local/bin/python3 production_clone.py check --repo <生产克隆> 看详情；"
+                            "工作区改动先搬进开发 worktree 再在克隆里 git restore；"
+                            "foreign 钩子确认来源后删掉，下一轮自动补装",
+                },
+                ["code_sync"]
+            ))
+
+
+    def _check_portfolio_greeks_prices(self, status: Dict) -> None:
+        """组合 Greeks 的标的价场次核对（v0.45.423；`portfolio_greeks.price_check_stats` 经 scan_timing 进来）。
+
+        v0.45.103~422 同日跑恒拿前一交易日的收盘算 $Delta、SPY 按昨收「收盘成交」，零告警——那个失败被
+        「5 个日历日内最后一根」的容差改写成了正常值。现在陈旧价不进计算（当日不对冲），这里让它有人看见：
+        有行判陈旧 / SPY 价不是当天那一场 / 有合约报价属于别的场次 / 因 SPY 不是官方收盘而拒绝成交 ⇒ P2。
+        v0.45.435：都不是、但对冲决定做不出来（`hedge_undecided`：两源取不到价 / 缺报价 / 缺 β / 缺 NAV）⇒ 另一条 P2
+        （「数据不全」）；陈旧那条也把这些缺口挂进「另缺」。旧版扫描的计数没有这个键 ⇒ 不报（不猜）。
+        `scan_timing` 整段缺失已由 `_check_deploy_and_code_sync` 报过，这里不重复；
+        `counters.portfolio_greeks` 不是对象 ＝ 本轮没跑到组合 Greeks（钩子异常 / 早退 / 旧版扫描）⇒ checks_skipped。
+        """
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        pg = (st.get("counters") or {}).get("portfolio_greeks")
+        if not isinstance(pg, dict):
+            self.checks_skipped.append("组合 Greeks 标的价场次检查（scan_timing 无 portfolio_greeks 计数）")
+            return
+        spy = pg.get("spy") or {}
+        n_stale = int(pg.get("n_stale") or 0)
+        n_quote_stale = int(pg.get("n_quote_stale") or 0)
+        blocked = pg.get("execution_blocked")
+        undecided = pg.get("hedge_undecided")         # v0.45.435：不是陈旧、是缺 ⇒ 对冲决定做不出来
+        gaps = "；".join(str(g) for g in pg.get("gaps") or []) or "—"
+        if not (n_stale or n_quote_stale or spy.get("stale") or blocked):
+            if undecided:
+                # 2026-09-15~25 连续 7 天 unknown（BRK-B β 取不到、SPY 价与期权报价取不到），只陈旧会红 ⇒ 零告警
+                self.alerts.append(Alert(
+                    AlertLevel.MEDIUM,
+                    f"📊 【P2 中】组合 Greeks：数据不全，{pg.get('expected_session') or pg.get('as_of')} "
+                    f"的对冲决定做不出来（{gaps}），当日不对冲",
+                    {
+                        "缺口": gaps,
+                        "决定": undecided,
+                        "SPY": f"{spy.get('price')} @ {spy.get('session')}（{spy.get('source')}）",
+                        "影响": "覆盖层今天不动；连续几天都这样 = 对冲整段停摆",
+                        "建议": "看 hedge_state/greeks_<日期>.json 的 price_check 与 rows；取不到价 = CBOE 与 "
+                                "Twelve Data 都没给，缺 β = 日线不够 60 个共同收益（常见于代码映射 / 新票）",
+                    },
+                    ["portfolio_greeks", "data_quality"]
+                ))
+            return
+        names = "，".join(dict.fromkeys(f"{x.get('ticker')} {x.get('seen_price')}@{x.get('session')}"
+                                        for x in pg.get("stale") or []))
+        spy_px = spy.get("seen_price") if spy.get("stale") else spy.get("price")
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】组合 Greeks：标的价不属于 {pg.get('expected_session') or pg.get('as_of')} 这一场"
+            f"（陈旧 {n_stale} 行" + ("，SPY 也是" if spy.get("stale") else "")
+            + ("，且拒绝成交" if blocked else "") + "），当日不对冲",
+            {
+                "陈旧行": names or "—",
+                "SPY": f"{spy_px} @ {spy.get('session')}（{spy.get('source')}）",
+                "报价错场": n_quote_stale,
+                "拒绝成交": blocked or "—",
+                "另缺": gaps,
+                "影响": "这些行不进 $Delta / 净值 / 成交，β·Δ 判 unknown，当日不对冲",
+                "建议": "看 hedge_state/greeks_<日期>.json 的 price_check；CBOE 盘中陈旧文件 / 整源停更 / "
+                        "过了次日开盘才补跑时会出现",
+            },
+            ["portfolio_greeks", "data_quality"]
+        ))
 
     def get_critical_alerts(self) -> List[Alert]:
         """获取 P0 级别告警"""

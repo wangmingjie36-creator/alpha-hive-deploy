@@ -36,6 +36,7 @@ def _mark_gex_out_of_score(out: Dict) -> Dict:
     det["gex_signal_in_score"] = False
     det[OPTIONS_DQ_MARKER] = True
     det[HV_GAP_MARKER] = True
+    det[TD_SESSION_MARKER] = True
     return out
 
 
@@ -47,6 +48,11 @@ OPTIONS_DQ_MARKER = "options_dq_from_agent"
 #: 每条返回路径都写字面量 True（同上两个印记；`_mark_gex_out_of_score` 覆盖异常 / 无效 ticker / 兜底路径）。
 HV_GAP_MARKER = "hv_gap_checked"
 
+#: v0.45.423 世代印记：本结果生成时 `twelve_data._drop_forming_bar` 已按交易所收盘判当日那根（收完照收），
+#: 此前只比日期、收盘后也丢。只在 yfinance 失败、Twelve Data 兜底的那几天改分（成交量回落 / 日线缺口第二源），
+#: 等价判据见 `ic_rerun_readiness._equiv_td_session_bar`。每条返回路径都写字面量 True（同上三个印记）。
+TD_SESSION_MARKER = "td_session_aware"
+
 
 def _unusual_flow_status(flow) -> dict:
     """异常期权流取数状态的紧凑记录（v0.45.421，只记录、不进评分）。
@@ -56,7 +62,7 @@ def _unusual_flow_status(flow) -> dict:
     return {"status": f.get("fetch_status") or ("not_run" if not f else "unknown"),
             "data_source": f.get("data_source"),
             "chains_total": f.get("chains_total"), "chains_failed": f.get("chains_failed"),
-            "retries": f.get("retries"),
+            "retries": f.get("retries"), "pace_wait_s": f.get("pace_wait_s"),
             "reason": f.get("failure_reason") or None}
 
 
@@ -512,7 +518,9 @@ class OracleBeeEcho(BeeAgent):
                          # 取到了数据（"ok" / "partial"），取不到是 None——`scan_coverage_gate` 按「有值 = 取到」数覆盖率；
                          # 键本身在 ⇒ 新代码产出（旧结果没有这个键，闸据此判「未记录」而不是「全降级」）。
                          "unusual_flow_ok": _unusual_flow_ok(unusual_flow),
-                         "unusual_flow_status": _unusual_flow_status(unusual_flow)},
+                         "unusual_flow_status": _unusual_flow_status(unusual_flow),
+                         # v0.45.423 世代印记：同 HV_GAP_MARKER，字面量放在展开之后（见 TD_SESSION_MARKER）
+                         TD_SESSION_MARKER: True},
             ).to_dict()
 
         except AGENT_ERRORS as e:

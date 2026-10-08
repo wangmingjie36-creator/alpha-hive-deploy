@@ -5,6 +5,7 @@ Alpha Hive 测试 fixtures - 共享 mock 数据 + 隔离数据库
 import sys
 import os
 import pathlib
+import site
 import weakref
 import pytest
 
@@ -81,6 +82,34 @@ def _isolate_env(tmp_path, monkeypatch):
     # 在自动提交白名单里的 ⇒ 夹具模型会被当成生产模型提交推送。
     # ml_model_guard 自己也在 pytest 下默认关闭（两层），这里再显式关一次。
     monkeypatch.setenv("ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE", "1")
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _pin_child_user_site():
+    """测试换 HOME 不挪子进程的用户 site-packages：全会话钉一次 `PYTHONUSERBASE`（v0.45.426）。
+
+    子进程里的真 Python 启动时按 `$HOME` 推用户 site；本机 numpy / pytest / jinja2 / starlette / httpx /
+    anyio **只**装在用户 site。测试为隔离按 HOME 求的默认位置（`~/Library`、`~/.claude/scripts`、
+    `~/.alpha_hive_*`）把 HOME 指到 tmp——各文件各自在换（v0.45.426 时 13 个，且还在涨）⇒ 起的真解释器丢掉这半边依赖、
+    import 即死，红的是夹具不是被测代码；且只在 Mac 红，CI（依赖在系统 site）永远绿。
+    v0.45.397 在 alphabot 的 `home` 夹具里钉过一次；「换 HOME 时记得顺手钉」写在注释里不会被执行，
+    下一个换 HOME 的文件照样会忘 ⇒ 收到这里，唯一出处。
+
+    取值在会话开始时（任何测试 / 夹具换 HOME 之前），且 `site.getuserbase()` 返回本进程缓存的值、
+    不随当前 HOME 变 ⇒ 与谁先换 HOME 无关。不换 HOME 的测试拿到的是同一个值，等于没钉。
+    不掩盖生产问题：生产代码从不给子进程改 HOME（只改 `ALPHA_HIVE_HOME`），launchd / .app 拿的是真 HOME。
+
+    管不到：从零构造 env、不继承 `os.environ` 的子进程——那类测试要的就是「只有这几个变量」。
+    v0.45.426 时带沙箱 HOME 的只有 `test_scan_catchup`（照 launchd 现造环境），那里的 python 是不执行的桩。
+    守卫：`tests/test_child_user_site_pin.py`（删掉本夹具在任何机器上都红，含 CI）。
+    """
+    prev = os.environ.get("PYTHONUSERBASE")
+    os.environ["PYTHONUSERBASE"] = site.getuserbase()
+    yield
+    if prev is None:
+        os.environ.pop("PYTHONUSERBASE", None)
+    else:
+        os.environ["PYTHONUSERBASE"] = prev
 
 
 # ==================== 禁止测试调用真实 Anthropic API ====================
@@ -1230,6 +1259,20 @@ def _isolate_replay_ohlc_state(_isolate_env, tmp_path):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_straddle_prereg_result(_isolate_env, tmp_path):
+    """跨式 × GEX 预注册的冻结结果（v0.45.428，`straddle_gex_prereg.run_once`）防线①：`PATHS.straddle_prereg_result`
+    此刻是绝对路径且在本测试沙箱里。这个文件**只写一次、永不覆盖**——误写进真身就把协议永久冻住，比别的产物更不能漏。
+    防线②（真身指纹）由仓库根默认拒绝总闸与真实数据根总闸（`_guard_real_data_root`）兜住。"""
+    import hive_logger
+
+    p = pathlib.Path(hive_logger.PATHS.straddle_prereg_result)
+    assert p.is_absolute(), f"PATHS.straddle_prereg_result 解析成了相对路径 {p}：生产从仓库根跑会写穿仓库根"
+    assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+        f"PATHS.straddle_prereg_result = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？")
+    yield
+
+
 @pytest.fixture
 def sell_strike_state_sandbox_check():
     """把 `_assert_sell_strike_state_in_sandbox` 暴露给它的有牙自证（同 `default_path_sandbox_check`）。"""
@@ -1343,7 +1386,8 @@ def _guard_real_data_root(request):
     阶段 5 之后生产数据在 `$ALPHA_HIVE_HOME`（~/alpha-hive-data）。`_isolate_env` 逐条把它改成沙箱，
     但任何绕过隔离的写入（`__file__` 派生 / 模块级常量冻结 / subprocess 丢了 env / 硬编码 `~/alpha-hive-data`）
     都会写到真实数据根——生产账本、样本库、模型，**不可重取**。此前没有任何东西会为此变红。
-    口径同仓库根闸：默认拒绝（除 `logs/`、`db_backups/` 与 `_` 打头的元目录外一切受闸）、`(size, mtime_ns)`、
+    口径同仓库根闸：默认拒绝（除 `logs/`、`db_backups/` 与 `_` 打头的元目录外一切受闸；`_git_backup/` 例外照样受闸，
+    v0.45.427——`PATHS.data_backup_repo` 让测试碰得到它，10-03 夹具就是写进了这里）、`(size, mtime_ns)`、
     `-shm` 只记大小。「之前」取在 `pytest_sessionstart`（收集期之前），理由见仓库根闸一节。
 
     ⚠️ 与仓库根闸同样是 session 级：红在整轮末尾，不指出是哪条测试写的（定位法见仓库根闸）。

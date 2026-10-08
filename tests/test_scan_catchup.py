@@ -20,38 +20,16 @@ import types
 
 import pytest
 
+from tests._orchestrator import ASSIGN_PREFIX as _ASSIGN_PREFIX
 from tests._orchestrator import REPO_ORCH, repo_orchestrator_text
+from tests._orchestrator import orch_literal as _orch_literal
 
 ORCH = str(REPO_ORCH)  # 仓库里那份（v0.45.353 起受版本控制）
 PLIST = os.path.expanduser("~/Library/LaunchAgents/com.alpha.hive.daily.plist")
 
-# 行首的 bash 赋值：可缩进、可带 export / readonly / local
-_ASSIGN_PREFIX = r"^[ \t]*(?:export[ \t]+|readonly[ \t]+|local[ \t]+)?"
 # 闸之前的非注释行里出现这些前缀 ⇒ 有一处「写到哪」由字面绝对路径决定，改绑管不到。
 # `~` / `$HOME` 不在此列：沙箱跑时子进程 HOME 指向沙箱，运行时兜住。
 _LITERAL_ABS_PATH = re.compile(r"/(?:Users|tmp|private|Volumes)/")
-
-
-def _orch_literal(orch_text, name):
-    """编排器里 `NAME="..."` 的纯字面值；赋值不止一处、或不是纯字面 ⇒ None。
-
-    这些值**归编排器说了算**，测试不另抄一份（v0.45.219 起 marker 目录如此，
-    v0.45.221 推广到闸前全部路径）：抄的那份在项目搬家后会继续指旧目录。
-    也**不能**锚到 `__file__`：worktree 里的路径编排器根本不看。
-
-    要数**所有**写入（缩进 / `then NAME=` / export / `NAME+=` / `${NAME:=...}`），
-    不只认顶格那一行：闸之前再冒出一句 `LOGDIR=...`，改绑了顶格那处也会被它改回去。
-    只跳过整行注释；其余一切像写入的都算 —— 多数到了（比如字符串里的 `NAME=`）
-    只会返回 None 让守卫红，是安全的方向。`for NAME in` / `read NAME` 数不到。
-    只认纯字面 —— 改成 `$HOME/...` 之类要展开的写法时返回 None 让守卫红，不去猜。
-    计数规则由 `TestOrchLiteral` 在任何机器上钉住（真编排器里恰好一处覆盖都没有，
-    只拿它测，退回「只数顶格」照样全绿）。
-    """
-    code = "\n".join(ln for ln in orch_text.splitlines() if not ln.lstrip().startswith("#"))
-    if len(re.findall(rf"\b{name}\+?=|\$\{{{name}:?=", code)) != 1:
-        return None
-    m = re.search(rf'{_ASSIGN_PREFIX}{name}="([^"$`\\]+)"[ \t]*(?:#.*)?$', code, flags=re.M)
-    return m.group(1) if m else None
 
 
 def _sandbox_orchestrator(orch_text, sandbox):
@@ -291,7 +269,7 @@ class TestGateBranchesLive:
     - 看门狗没收掉 ⇒ `_reap_group` 超时；进程组没建起来 ⇒ `lingered` 为假
     """
 
-    def _gate_run(self, orch_text, tmp_path, *, with_marker, lc_ctype=None):
+    def _gate_run(self, orch_text, tmp_path, *, with_marker, lc_ctype=None, project="stub"):
         """沙箱里跑一次编排器。
 
         ⚠️ 不能用 capture_output=True：看门狗继承 stdout/stderr，管道要等**所有**
@@ -308,11 +286,15 @@ class TestGateBranchesLive:
         """
         script, prod = _sandbox_orchestrator(orch_text, tmp_path)
         (tmp_path / "orch.sh").write_text(script, encoding="utf-8")
-        project = tmp_path / "project"
-        project.mkdir()
-        # 编排器闸前只 open 它（存在性 + TCC 预检），从不执行
-        (project / "alpha_hive_daily_report.py").write_text(
-            'raise SystemExit("沙箱桩：不该被执行")\n', encoding="utf-8")
+        # project：stub = 正常（有核心脚本桩）/ missing = 代码目录不存在 / empty = 目录在、核心脚本不在
+        # （后两种 v0.45.432：阶段 8 起生产代码在独立克隆里，克隆被删 / 半截时必须落 status.json）
+        proj_dir = tmp_path / "project"
+        if project != "missing":
+            proj_dir.mkdir()
+        if project == "stub":
+            # 编排器闸前只 open 它（存在性 + TCC 预检），从不执行
+            (proj_dir / "alpha_hive_daily_report.py").write_text(
+                'raise SystemExit("沙箱桩：不该被执行")\n', encoding="utf-8")
         (tmp_path / "home").mkdir()
         today = datetime.date.today().isoformat()
         (tmp_path / "data").mkdir()
@@ -369,6 +351,19 @@ class TestGateBranchesLive:
         assert "已有扫描产出" not in r.out, "没放 marker 却走了幂等分支 —— 闸读的不是沙箱"
         assert r.status == "skipped_before_close", f"{r.status}\n{r.out[-2000:]}"
         assert r.rc == 0
+        self._assert_stayed_in_sandbox(r, tmp_path)
+
+    @pytest.mark.timeout(300)
+    @pytest.mark.parametrize("project,status", [
+        ("missing", "failed_project_dir_missing"),   # 生产克隆被删 / 挪走
+        ("empty", "failed_core_script_missing"),     # 克隆半截（目录在、核心脚本不在）
+    ])
+    def test_missing_code_dir_is_written_to_status(self, orch_text, tmp_path, project, status):
+        """v0.45.432：代码目录出问题时编排器在闸前就 exit 1——此前不写 status.json（停在上一次成功）、
+        alert_manager 也跑不起来（它就在那个目录里）⇒ 整天静默。阶段 8 起生产代码是独立克隆，删掉它即触发。"""
+        r = self._gate_run(orch_text, tmp_path, with_marker=False, project=project)
+        assert r.rc == 1, r.out[-1500:]
+        assert r.status == status, f"{r.status}\n{r.out[-1500:]}"
         self._assert_stayed_in_sandbox(r, tmp_path)
 
     @pytest.mark.timeout(300)

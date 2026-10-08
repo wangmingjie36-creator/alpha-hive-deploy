@@ -37,6 +37,7 @@ def env(monkeypatch):
     UO._CACHE.clear()
     UO._CACHE_TS.clear()
     monkeypatch.setattr(UO, "_retry_exhausted", 0)
+    monkeypatch.setattr(UO, "PACE_BUCKET_SHARE", 0.0)      # 限速另有专文（test_unusual_options_pacing.py）
     sleeps = []
     monkeypatch.setattr(UO, "_sleep", lambda s: sleeps.append(s))
     st = types.SimpleNamespace(opt_script=[], chain_script=[], sleeps=sleeps, opt_calls=0, chain_calls=0)

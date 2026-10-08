@@ -72,12 +72,14 @@ class _RetryBudget:
     def __init__(self):
         self.used = 0
         self.kinds = []
+        self.paced_s = 0.0          # 本次检测在限速队列里排了多久（v0.45.429）
         self._counted = False
 
     def call(self, fn, ticker: str, what: str):
         global _retry_exhausted
         while True:
             try:
+                self.paced_s += _pace()      # 重试那一次也排队：别在饥饿时由本模块反过来加压
                 return fn()
             except Exception as e:  # noqa: BLE001
                 kind = _failure_kind(e)
@@ -96,6 +98,51 @@ class _RetryBudget:
                 _log.warning("unusual_options %s %s 取数失败（%s），%.0fs 后重试（%d/%d）：%s",
                              ticker, what, kind, delay, self.used, len(RETRY_BACKOFF_S), str(e)[:80])
                 _sleep(delay)
+
+
+# ── 对共享令牌桶限速（v0.45.429）────────────────────────────────────────────────
+# yf_gate 的令牌桶（`resilience.yfinance_limiter`，0.5 req/s）全进程只有一个。10-07 一轮扫描闸门放行 802 次，
+# 其中本模块每只标的最多 5 次（`.options` + 前 4 个到期日的 `option_chain`）≈ 150 次（约五分之一）；整轮对桶的占用
+# 接近满载，而桶是**轮询抢**的（`RateLimiter.acquire` 每 2s 醒来抢一次、非 FIFO）：排队的线程越多，其它取数
+# 在 60s 超时内抢到令牌的概率越低（2026-10-05 重跑时 options_analyzer 与本模块各有一次「等待令牌超过 60s」）。
+# 这里不减请求（到期日个数 / 取数内容都是评分口径，**不动**），只把本模块的请求排成一条队：
+# 全进程两次请求之间至少隔 `1 / (桶速率 × PACE_BUCKET_SHARE)` 秒，即**最多占桶的一半**，另一半留给其它取数。
+# 预约式（只在算槽位时持锁、睡眠时不持锁）：多线程各领一个递增的发送时刻，FIFO、不互相抢。
+# ⚠️ 这是「让路」不是「省量」：总需求没变，只是本模块排在别人后面。整轮是否更慢看 `scan_timing.phases.parallel`。
+PACE_BUCKET_SHARE = 0.5      # ≤ 0 关闭限速（测试用）
+PACE_MAX_WAIT_S = 60.0       # 单次排队上限：积压超过它就不再往后排（保护进程别被无限期挂住），照常放行
+_pace_lock = _threading.Lock()
+_pace_next = 0.0
+_pace_clock = _time.monotonic
+_pace_sleep = _time.sleep    # 测试可替换，避免真睡
+
+
+def _pace_interval() -> float:
+    """两次请求的最小间隔（秒）。取桶速率现值，不另存一个会与桶不一致的数字（同 yf_gate 的做法）。"""
+    if PACE_BUCKET_SHARE <= 0:
+        return 0.0
+    try:
+        from resilience import yfinance_limiter
+        rate = float(yfinance_limiter._rate)
+    except Exception:  # noqa: BLE001  桶不可得 ⇒ 退回当前设计值 0.5 req/s，不因此放开限速
+        rate = 0.5
+    return 1.0 / (rate * PACE_BUCKET_SHARE) if rate > 0 else 0.0
+
+
+def _pace() -> float:
+    """预约下一个发送时刻并睡到那一刻；返回实际睡了多久。"""
+    global _pace_next
+    interval = _pace_interval()
+    if interval <= 0:
+        return 0.0
+    with _pace_lock:
+        now = _pace_clock()
+        slot = min(max(now, _pace_next), now + PACE_MAX_WAIT_S)
+        _pace_next = slot + interval
+    wait = slot - now
+    if wait > 0:
+        _pace_sleep(wait)
+    return max(wait, 0.0)
 
 
 def _is_cached(ticker: str) -> bool:
@@ -131,13 +178,13 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
         # 且被缓存 300 秒（2026-10-05 重跑 28/30 只丢了这一路，日志里只有 2 条 warning）。
         #   fetch_status: "ok" 全部到期日取到 / "partial" 部分取到 / "failed" 一个都没取到或根本没进循环
         "fetch_status": "failed", "failure_reason": "", "chains_total": 0, "chains_failed": 0,
-        "retries": 0,
+        "retries": 0, "pace_wait_s": 0.0,
     }
 
+    retry = _RetryBudget()      # try 之外建：异常路径也要报 retries / pace_wait_s
     try:
         import yfinance as yf
         t = yf.Ticker(ticker)
-        retry = _RetryBudget()
 
         # 获取所有到期日的期权链
         expirations = retry.call(lambda: t.options, ticker, "options")
@@ -145,6 +192,7 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
             result["summary"] = "无期权链数据"
             # yfinance 默认 hide_exceptions=True：取数失败与「该标的没有期权」在返回值里无法区分
             result["failure_reason"] = "无到期日列表（取数失败，或该标的无期权——yfinance 无法区分）"
+            result["retries"], result["pace_wait_s"] = retry.used, round(retry.paced_s, 1)
             return result
 
         if not stock_price or stock_price <= 0:
@@ -164,6 +212,7 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
             if not stock_price or stock_price <= 0:
                 result["summary"] = "现价不可得，跳过异动检测"
                 result["failure_reason"] = "现价不可得"
+                result["retries"], result["pace_wait_s"] = retry.used, round(retry.paced_s, 1)
                 return result
 
         unusual_calls = []
@@ -336,7 +385,7 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
             result["summary"] = "期权链全部取数失败"
             result["failure_reason"] = f"全部 {chains_total} 个到期日取数失败：{last_chain_error}"
             result["chains_total"], result["chains_failed"] = chains_total, chains_failed
-            result["retries"] = retry.used
+            result["retries"], result["pace_wait_s"] = retry.used, round(retry.paced_s, 1)
             return result      # fallback 形状（5.0 / neutral / 无信号），**不缓存**
         if chains_failed:
             _log.warning("unusual_options 部分期权链取数失败 %s：%d/%d（%s）——结果只覆盖取到的到期日",
@@ -394,7 +443,7 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
             "fetch_status": "partial" if chains_failed else "ok",
             "failure_reason": f"{chains_failed}/{chains_total} 个到期日取数失败：{last_chain_error}" if chains_failed else "",
             "chains_total": chains_total, "chains_failed": chains_failed,
-            "retries": retry.used,
+            "retries": retry.used, "pace_wait_s": round(retry.paced_s, 1),
         }
 
         with _cache_lock:
@@ -410,4 +459,5 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
         _log.warning("unusual_options 检测失败 %s: %s", ticker, e)
         result["summary"] = f"检测失败: {str(e)[:50]}"
         result["failure_reason"] = f"{type(e).__name__}: {str(e)[:80]}"
+        result["retries"], result["pace_wait_s"] = retry.used, round(retry.paced_s, 1)
         return result

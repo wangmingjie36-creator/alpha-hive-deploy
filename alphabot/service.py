@@ -27,6 +27,7 @@ from typing import Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import sell_strike_report as R
+from alphabot import straddle as SD
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("alphabot")
@@ -144,7 +145,8 @@ class AlphaBotService:
 
     def __init__(self, *, fetch_fn=None, bars_fn: Optional[Callable[[str], dict]] = None,
                  clock: Callable[[], float] = time.monotonic, demo: bool = False,
-                 ledger_dir=None, live_ttl: float = LIVE_TTL_SEC, state_dir=None):
+                 ledger_dir=None, live_ttl: float = LIVE_TTL_SEC, state_dir=None,
+                 straddle_root=None, straddle_quote_fn=None, now_fn: Optional[Callable[[], datetime]] = None):
         self.fetch_fn = fetch_fn
         self.bars_fn = bars_fn or _default_bars
         self.clock = clock
@@ -152,6 +154,11 @@ class AlphaBotService:
         self.ledger_dir = ledger_dir          # None ⇒ 账本自己解析（生产数据根）；只读
         self.live_ttl = float(live_ttl)
         self._state_override = Path(state_dir) if state_dir else None   # --demo 用临时目录，不碰真状态
+        # 跨式账本页（v0.45.424）：数据根 None ⇒ PATHS.home（调用时求值）；报价函数 None ⇒ cboe_options.quote_held
+        self.straddle_root = straddle_root
+        self.straddle_quote_fn = straddle_quote_fn
+        self.now_fn = now_fn or now_et
+        self._straddle_cache: Dict[str, tuple] = {}
         self._cache: Dict[str, tuple] = {}
         self._bars_cache: Dict[tuple, dict] = {}
         self._locks: Dict[str, threading.Lock] = {}
@@ -259,7 +266,97 @@ class AlphaBotService:
                        "max_spread_pct": C.MAX_SPREAD_PCT, "wing_width_sigma": C.WING_WIDTH_SIGMA,
                        "tenors": C.TENORS, "structures": list(C.STRUCTURES)},
             "prereg": {k: (list(v) if isinstance(v, tuple) else v) for k, v in R.LG.PREREG.items()},
+            "straddle": self.straddle_rules(),
         })
+
+    # ── 财报跨式账本（v0.45.424，只读）
+    def straddle_rules(self) -> dict:
+        """跨式账本页与帮助页用的规则常量——取代码里那一份，不在前端另抄。
+        懒 import + 兜底：这两个模块 import 时就求值数据根，环境没设好时不能连坐整个 Alpha Bot；取不到就写明原因。"""
+        out = {"directional_delta_warn": SD.DIRECTIONAL_DELTA_WARN,
+               "ledger_ready_et": SD.LEDGER_READY_ET.isoformat(timespec="minutes")}
+        try:
+            import earnings_vol_signal as evs
+            out.update({k: evs.CONFIG.get(k) for k in ("rich_ratio", "cheap_ratio", "max_spread_pct",
+                                                       "min_events", "history_n")})
+        except Exception as exc:  # noqa: BLE001
+            out["signal_rules_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            import options_paper_leg as opl
+            out.update({k: opl.CONFIG.get(k) for k in ("starting_capital", "risk_per_trade_pct", "max_open",
+                                                       "expiry_buffer_days", "fallback_stale_max_days")})
+        except Exception as exc:  # noqa: BLE001
+            out["ledger_rules_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            import straddle_gex_prereg as SP
+            out["prereg"] = SP.public_constants()
+        except Exception as exc:  # noqa: BLE001
+            out["prereg_error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    def _straddle_ledger(self, now: datetime) -> dict:
+        if self.demo:
+            from alphabot import synthetic as syn
+            return syn.demo_straddle_ledger(now.date().isoformat())
+        return SD.load_ledger(self.straddle_root)
+
+    def _straddle_shadow(self, signals: list) -> dict:
+        """GEX 影子记录的进度（**只有计数**，见 straddle_gex_prereg 的盲期规则）。"""
+        if self.demo:
+            return {"available": False, "reason": "演示模式没有影子记录"}
+        try:
+            import straddle_gex_prereg as SP
+            return SP.progress(signals, root=self.straddle_root)
+        except Exception as exc:  # noqa: BLE001 - 进度算不出来如实说，不当成「0 个事件」
+            _log.warning("跨式 GEX 影子记录进度不可得：%s: %s", type(exc).__name__, exc)
+            return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    def straddle(self) -> dict:
+        now = self.now_fn()
+        led = self._straddle_ledger(now)
+        return clean_json(SD.build_overview(led, now_et=now, rules=self.straddle_rules(),
+                                            shadow=self._straddle_shadow(led.get("signals") or [])))
+
+    def _straddle_quote(self, t: str, symbols: List[str]) -> dict:
+        if self.straddle_quote_fn is not None:
+            return self.straddle_quote_fn(t, symbols)
+        if self.demo:
+            from alphabot import synthetic as syn
+            return syn.demo_quote_held(t, symbols, self.now_fn().date().isoformat())
+        import cboe_options
+        return cboe_options.quote_held(t, symbols)
+
+    def straddle_live(self, ticker, *, force: bool = False) -> dict:
+        """一笔持仓的盘中参考报价 + 当天水平。**只读、不写账本**。
+        先走 `live()`（现算当天水平；生产路径会清该票进程缓存再拉一份新 payload），再报价：`quote_held` 读同一个
+        进程缓存，于是两者通常出自同一份 payload——不同时 `same_payload=False`，页面照实标出。"""
+        t = norm_ticker(ticker)
+        now = self.now_fn()
+        if self.demo:
+            positions = self._straddle_ledger(now).get("positions") or []
+        else:
+            positions = SD.load_positions(self.straddle_root)     # 只读持仓文件，不重读整本账本
+        pos = next((p for p in positions if str(p.get("ticker") or "").upper() == t), None)
+        if pos is None:
+            raise BadRequest(f"{t} 在跨式账本里没有持仓")
+        key = f"{t}|{pos.get('call_symbol')}|{pos.get('put_symbol')}"
+        with self._lock_for("straddle:" + t):
+            ent = self._straddle_cache.get(key)
+            if ent is not None and not force and (self.clock() - ent[0]) < self.live_ttl:
+                return {**ent[1], "cache_age_sec": round(self.clock() - ent[0], 1)}
+            detail = self.live(t, force=force)
+            syms = [str(pos.get("call_symbol")), str(pos.get("put_symbol"))]
+            try:
+                q = self._straddle_quote(t, syms)
+            except Exception as exc:  # noqa: BLE001 - 报价失败如实返回，不拿账本 mark 顶上
+                _log.warning("[%s] 跨式盘中报价失败：%s: %s", t, type(exc).__name__, exc)
+                q = {"available": False, "reason": f"exception:{type(exc).__name__}", "quotes": {}}
+            res = clean_json(SD.live_view(pos, q, SD.levels_brief(detail), now_et=now))
+            res["demo"] = self.demo
+            if not res.get("available"):
+                _log.warning("[%s] 跨式盘中报价不可得：%s", t, res.get("reason"))
+            self._straddle_cache[key] = (self.clock(), res)
+            return {**res, "cache_age_sec": 0.0}
 
     # ── 价格
     def bars(self, ticker) -> dict:

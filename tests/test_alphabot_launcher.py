@@ -8,15 +8,15 @@
     再次打开只开页面不重起；`--stop` 停得掉；端口被别人占 / 服务启动即死 / 依赖缺失 ⇒ 弹窗带原因，不干等；
     选的数据根原样传进服务进程的 `ALPHA_HIVE_HOME`；坏配置报出来，不静默当成首次启动；
   · 服务端（`TestShutdownEndpoint`）：`/api/shutdown` 同样要 `X-AlphaBot` 头，没接开关 ⇒ 400。
-启动器自己的配置 / 日志都在 `$HOME/Library`，这里一律把 HOME 指到 tmp——但钉住 `PYTHONUSERBASE`，
-子进程里真 Python 的 import 面不跟着挪（见 `home` 夹具）。跑 .app 启动脚本的测试一律换假 osascript
+启动器自己的配置 / 日志都在 `$HOME/Library`，这里一律把 HOME 指到 tmp；子进程里真 Python 的 import 面不跟着挪——
+conftest 的 `_pin_child_user_site` 全会话钉住 `PYTHONUSERBASE`（v0.45.426；守卫在 `test_child_user_site_pin.py`）。跑 .app 启动脚本的测试一律换假 osascript
 （`_app_exe`）：真的弹模态对话框，会卡到 pytest-timeout 并把对话框留在屏幕上。
 """
 from __future__ import annotations
 
 import os
 import plistlib
-import site
+import shlex
 import socket
 import subprocess
 import sys
@@ -34,10 +34,7 @@ REPO = Path(__file__).resolve().parent.parent
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
-    # 换 HOME 只为隔离启动器的 `~/Library`。可子进程里的真 Python 也按 $HOME 推用户 site-packages
-    # （本机 starlette / numpy / pytest 都装在那）：不钉住 ⇒ 真起的服务 import 即死，红的是夹具不是启动器。
-    # 生产里 .app 由 launchd 给真 HOME（实测），所以钉成本进程启动时算好的那个，子进程与本进程 import 面一致。
-    monkeypatch.setenv("PYTHONUSERBASE", site.getuserbase())
+    # 换 HOME 只为隔离启动器的 `~/Library`；子进程的用户 site 不跟着挪，由 conftest `_pin_child_user_site` 统一钉（v0.45.426）。
     monkeypatch.setenv("HOME", str(h))
     # 真起的演示服务用 mkdtemp 建状态目录、从不清：不圈住就漏进系统临时目录（复查时数到 83 个）
     monkeypatch.setenv("TMPDIR", str(tmp_path))
@@ -201,6 +198,59 @@ class TestBundle:
         assert LA.load_config()["alpha_hive_home"] == str(data.resolve())
         assert LA.config_path().is_relative_to(home), "启动器配置没跟着 $HOME 走（被冻在 import 期了？）"
 
+    def test_main_reports_kept_data_root_instead_of_promising_a_prompt(self, tmp_path, home, monkeypatch, capsys):
+        """没给 --home 但配置里已有数据根 ⇒ 双击不会再问；输出不许说「首次双击时会让你选」（v0.45.436 实测误导）。"""
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        data = tmp_path / "data"
+        data.mkdir()
+        LA.save_config({"alpha_hive_home": str(data)})
+        assert MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(REPO)]) == 0
+        out = capsys.readouterr().out
+        assert f"沿用启动器配置里的数据根 {data}" in out and "首次双击" not in out, out
+
+
+class TestDefaultRepoIsProductionClone:
+    """v0.45.436（数据根迁移阶段 8 收尾）：`.app` 缺省 cd 进生产克隆。此前缺省 = 生成器所在检出 ⇒ 在开发检出 /
+    worktree 里 `make alphabot-app` 会把 .app 无声指回一份再没人快进（或随时被删）的代码。"""
+
+    @staticmethod
+    def _repo_in_script(apps: Path) -> Path:
+        exe = apps / f"{MA.APP_NAME}.app" / "Contents" / "MacOS" / MA.EXECUTABLE
+        line = next(ln for ln in exe.read_text(encoding="utf-8").splitlines() if ln.startswith("REPO="))
+        return Path(shlex.split(line[len("REPO="):])[0])
+
+    @staticmethod
+    def _clone_at(path: Path, monkeypatch, *, valid: bool = True) -> Path:
+        import production_clone
+        if valid:
+            (path / "alphabot").mkdir(parents=True)
+            (path / "alphabot" / "launcher.py").write_text("", encoding="utf-8")
+        monkeypatch.setattr(production_clone, "default_dest", lambda: path)
+        return path
+
+    def test_default_points_at_the_clone(self, tmp_path, home, monkeypatch, capsys):
+        clone = self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 0
+        got = self._repo_in_script(tmp_path / "Apps")
+        assert got == clone.resolve() and got != REPO, got        # 正对照：确实不是生成器所在检出
+        assert f"代码目录 {clone.resolve()}" in capsys.readouterr().out
+
+    def test_missing_clone_falls_back_loudly(self, tmp_path, home, monkeypatch, capsys):
+        gone = self._clone_at(tmp_path / "no-such-clone", monkeypatch, valid=False)
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 0
+        assert self._repo_in_script(tmp_path / "Apps") == REPO
+        err = capsys.readouterr().err
+        assert str(gone) in err and "不会被自动更新" in err, "退回本检出必须说出来，否则又是一份无声冻结的代码"
+
+    def test_explicit_repo_wins_over_the_clone(self, tmp_path, home, monkeypatch, capsys):
+        self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(REPO)]) == 0
+        assert self._repo_in_script(tmp_path / "Apps") == REPO
+        assert "生产克隆" not in capsys.readouterr().err
+
 
 # ── 启动流程 ───────────────────────────────────────────────────────────────
 
@@ -230,14 +280,6 @@ class TestLauncherFlow:
         while LA.probe(port)["state"] != "free" and time.monotonic() < deadline:
             time.sleep(0.2)
         assert LA.probe(port)["state"] == "free", "--stop 之后服务还在"
-
-    def test_sandbox_home_keeps_child_user_site(self, home):
-        """`home` 夹具只挪启动器的 `~/Library`，不挪子进程的用户 site-packages。
-        没有这条，漏钉 PYTHONUSERBASE 只在「依赖装在用户 site」的机器上红（上一条红成 starlette 缺失），
-        CI 上永远绿——这条在哪都红：沙箱 HOME 下推出的用户 site 必然是另一个路径。"""
-        child = subprocess.run([sys.executable, "-c", "import site; print(site.getusersitepackages())"],
-                               capture_output=True, text=True, check=True).stdout.strip()
-        assert child == site.getusersitepackages()
 
     def test_missing_dependency_names_the_module(self, tmp_path, home):
         """依赖真缺了（starlette / uvicorn 没装）⇒ 服务 import 即死：弹窗要带出缺的是哪个模块，不干等超时。

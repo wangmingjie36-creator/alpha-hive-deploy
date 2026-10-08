@@ -5,6 +5,7 @@ import { renderOverview } from "./pages/overview.js";
 import { renderTicker } from "./pages/ticker.js";
 import { renderIntraday } from "./pages/intraday.js";
 import { renderLedger } from "./pages/ledger.js";
+import { renderStraddle } from "./pages/straddle.js";
 import { renderResults } from "./pages/results.js";
 import { renderMethod } from "./pages/method.js";
 import { renderHelp } from "./pages/help.js";
@@ -25,7 +26,7 @@ export async function refreshMeta() {
   const dl = document.getElementById("ticker-list");
   fill(dl, ...(state.meta.watchlist?.tickers || []).map((t) => h("option", { value: t })));
   fill(document.getElementById("foot"),
-    h("span", {}, `Alpha Bot ${state.meta.version} · 本机运行，只读卖权账本 · 以下为公开信息研究与情景推演，不构成投资建议。`),
+    h("span", {}, `Alpha Bot ${state.meta.version} · 本机运行，只读卖权账本与财报跨式账本 · 以下为公开信息研究与情景推演，不构成投资建议。`),
     state.meta.can_shutdown ? h("button", { class: "link-btn", type: "button", onclick: stopServer }, "停止服务") : null,
   );
   return state.meta;
@@ -87,6 +88,7 @@ async function route() {
       if (!a) { go(`#/intraday/${t}`); return; }
       await renderIntraday(app, t, alive);
     } else if (page === "ledger") await renderLedger(app, alive);
+    else if (page === "straddle") await renderStraddle(app, alive);
     else if (page === "results") await renderResults(app, a, alive);
     else if (page === "method") await renderMethod(app, alive);
     else if (page === "help") await renderHelp(app, a, alive);

@@ -51,6 +51,7 @@ def _no_real_sleep(monkeypatch):
     """取数重试会退避睡 10s/20s——本文件不测重试（见 test_unusual_options_retry.py），一律不真睡。"""
     monkeypatch.setattr(UO, "_sleep", lambda s: None)
     monkeypatch.setattr(UO, "_retry_exhausted", 0)
+    monkeypatch.setattr(UO, "PACE_BUCKET_SHARE", 0.0)      # 限速另有专文（test_unusual_options_pacing.py）
 
 
 @pytest.fixture

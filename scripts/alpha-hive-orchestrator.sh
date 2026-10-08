@@ -40,7 +40,11 @@ trap '_cleanup_lock' EXIT
 # 配置
 # ================================================================
 SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="/Users/igg/Desktop/Alpha Hive"   # Python 源码目录（代码检出，git 仓库）
+# 数据根迁移阶段 8（v0.45.431）：生产代码是**独立克隆** ~/alpha-hive-prod，不再是开发检出 ~/Desktop/Alpha Hive
+# （开发会话在那里直接提交 main ⇒ production_sync 永久 diverged，10-04 / 10-06 / 10-08 三次）。克隆只由下方
+# production_sync 快进；它的钩子拒绝一切让 main 偏离 origin/main 的写入，见 production_clone.py。
+# 回退 = 在 main 上 revert 本版（PROJECT_DIR 回开发检出，同时去掉 production_sync 的 ALPHA_HIVE_PRODUCTION_CLONE=1）。
+PROJECT_DIR="/Users/igg/alpha-hive-prod"   # Python 源码目录（生产独立克隆，git 仓库）
 # 数据根迁移阶段 5（v0.45.322 起）：生产数据在 DATA_DIR，不在代码检出里。
 # export 给本脚本拉起的每个 Python 步骤——hive_logger.PATHS.home 读它；git 仓库根
 # (PATHS.git_repo_root) 不读它，仍按 __file__ 落在 PROJECT_DIR。回退 = 把下面这行改成
@@ -409,40 +413,60 @@ else
 fi
 unset _proxy_ok
 
+# v0.45.432：闸前就退出的失败也要落 status.json（同下方 TCC 分支）。不写的话 status.json 停在上一次成功，
+# alert_manager 本身在 PROJECT_DIR 里、跑不起来 ⇒ 整天静默丢失。阶段 8 起生产依赖新目录 ~/alpha-hive-prod，
+# 被当成多余副本删掉 / 挪走就会走到这里。$2 只放本脚本写死的文案与路径（无引号 / 反斜杠），heredoc 直出即合法 JSON。
+# JSON 行刻意缩进（JSON 允许前导空白）：顶格的 `}` 会被 tests/_orchestrator.extract_function 当成函数结尾。
+_early_fail_status() {
+    mkdir -p "$REPORTDIR"
+    cat > "$REPORTDIR/status.json" << EOFJ
+    {
+      "last_run": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+      "status": "$1",
+      "error": "$2",
+      "logfile": "$LOGFILE"
+    }
+EOFJ
+}
+
 # 验证项目目录存在
 if [ ! -d "$PROJECT_DIR" ]; then
     log "ERROR" "❌ 项目目录不存在：$PROJECT_DIR"
+    log "ERROR" "   生产代码是独立克隆（阶段 8）：/usr/local/bin/python3 production_clone.py setup --dest ${PROJECT_DIR}（在任一开发 worktree 里跑）"
+    _early_fail_status "failed_project_dir_missing" "PROJECT_DIR ${PROJECT_DIR} does not exist; recreate it with production_clone.py setup"
     exit 1
 fi
 
 # 验证核心脚本（Step 2 是必须的）
 if [ ! -f "$PROJECT_DIR/alpha_hive_daily_report.py" ]; then
     log "ERROR" "❌ 核心脚本不存在：$PROJECT_DIR/alpha_hive_daily_report.py"
+    _early_fail_status "failed_core_script_missing" "${PROJECT_DIR}/alpha_hive_daily_report.py is missing (empty or interrupted clone?)"
     exit 1
 fi
 log "INFO" "✅ 项目目录验证通过"
+# 阶段 8（v0.45.431）：run_step 不 cd ⇒ 每个 Python 步骤继承本脚本的 cwd；launchd plist 的 WorkingDirectory
+# 仍是开发检出 ⇒ 不切的话，任何按 cwd 解析的相对路径都会读到开发检出里的东西。在这里切进生产克隆，
+# 不依赖仓库外、不受版本控制的 plist。
+if ! cd "$PROJECT_DIR"; then
+    log "ERROR" "❌ 无法进入项目目录：${PROJECT_DIR}"
+    _early_fail_status "failed_project_dir_unreadable" "cannot cd into PROJECT_DIR ${PROJECT_DIR}"
+    exit 1
+fi
 log "INFO" "🐍 Python: $PYTHON3 ($($PYTHON3 --version 2>&1))"
 
-# ── TCC 预检：验证 python3 能访问 Desktop 项目文件 ──
+# ── 读权限预检：验证 python3 能打开项目目录里的文件 ──
+# 历史：阶段 8 之前 PROJECT_DIR 在 ~/Desktop 下，这里拦的是 macOS TCC。生产克隆 ~/alpha-hive-prod 不在 TCC 保护范围，
+# 再失败多半是文件权限；PROJECT_DIR 若被改回 ~/Desktop 下，TCC 那条修法仍适用。status 值沿用旧名，不改消费方口径。
 if ! "$PYTHON3" -c "open('$PROJECT_DIR/alpha_hive_daily_report.py').close()" 2>/dev/null; then
     log "ERROR" "══════════════════════════════════════════════════════"
-    log "ERROR" "❌ macOS 安全限制：python3 无法访问 Desktop 文件夹！"
+    log "ERROR" "❌ python3 无法读取项目目录里的文件：${PROJECT_DIR}"
     log "ERROR" ""
-    log "ERROR" "修复方法（任选其一）："
-    log "ERROR" "  方法 1：系统设置 → 隐私与安全性 → 完全磁盘访问权限"
-    log "ERROR" "          → 添加 /usr/sbin/cron"
-    log "ERROR" "  方法 2：将项目从 Desktop 移到 ~/alpha-hive-project"
+    log "ERROR" "排查："
+    log "ERROR" "  1. ls -l ${PROJECT_DIR}/alpha_hive_daily_report.py —— 文件在不在、权限对不对"
+    log "ERROR" "  2. 若 PROJECT_DIR 在 ~/Desktop 下（macOS TCC）：系统设置 → 隐私与安全性 → 完全磁盘访问权限"
+    log "ERROR" "     → 添加 /bin/bash 与 ${PYTHON3}"
     log "ERROR" "══════════════════════════════════════════════════════"
-    # 写入 status.json 标记失败
-    mkdir -p "$REPORTDIR"
-    cat > "$REPORTDIR/status.json" << EOFJ
-{
-  "last_run": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "status": "failed_tcc_permission",
-  "error": "macOS TCC blocked python3 from accessing Desktop. Grant Full Disk Access to /usr/sbin/cron",
-  "logfile": "$LOGFILE"
-}
-EOFJ
+    _early_fail_status "failed_tcc_permission" "python3 cannot open files under ${PROJECT_DIR} (file permissions, or macOS TCC if it is under ~/Desktop)"
     exit 1
 fi
 # v0.45.95：上面那条只证明了「$PYTHON3 能 open 一个已知文件名」。
@@ -451,10 +475,10 @@ fi
 # glob 全线失效的情况下照样打勾。补一条如实的探测，只告警不拦截
 # （现已无消费者依赖 glob；留此告警是为了下次有人写 glob 时能看见）。
 if [ "$(ls "$PROJECT_DIR"/*.py 2>/dev/null | wc -l | xargs)" -eq 0 ]; then
-    log "WARN" "⚠️ bash 无法枚举 ${PROJECT_DIR}（TCC readdir 被拒）——"
+    log "WARN" "⚠️ bash 无法枚举 ${PROJECT_DIR}（readdir 被拒；目录在 ~/Desktop 下时多半是 TCC）——"
     log "WARN" "   本脚本中任何 glob 都会静默返回空，请一律用 [ -f 精确路径 ]"
 else
-    log "INFO" "✅ Desktop 文件访问权限正常（stat + readdir 均可）"
+    log "INFO" "✅ 项目目录访问正常（stat + readdir 均可）：${PROJECT_DIR}"
 fi
 
 # ── 交易日检测：跳过周末和美股假日 ──
@@ -540,12 +564,16 @@ log "INFO" "🔁 今日尚无产出且已过 ${CATCHUP_AFTER_HHMM}，执行扫�
 # 世代边界按日期划分，默认「代码落地当天就在跑」，不同步就会把旧代码的样本记进新世代。
 # 做不到快进（工作区改动撞上 / 分叉 / 不在 main / 取不到远端）就沿用现有代码照常扫描，
 # 结局写进 logs/production_sync.json → scan_timing → status.json → Step 6 告警。
-# 走 $PYTHON3 而不是在 bash 里直接 git：bash 对本目录有 TCC 限制（见上方预检）。
+# 走 $PYTHON3 而不是在 bash 里直接 git：当初 PROJECT_DIR 在 ~/Desktop 下，bash 对它有 TCC 限制（阶段 8 起生产克隆
+# 不受 TCC 限制，仍走 $PYTHON3：git 白名单 / 结局落盘都在 production_sync 里）。
 # v0.45.370：同步结局 OK（退出码 0 ⇔ outcome ∈ production_sync.OK_OUTCOMES）才置 1；
 #   下方 _orchestrator_autodeploy 只在它为 1 时部署——此时 HEAD 即 origin/main。
+# 阶段 8（v0.45.431）：ALPHA_HIVE_PRODUCTION_CLONE=1 声明「这里应是生产独立克隆」⇒ production_sync 快进前补齐 / 核对
+#   守卫钩子，结局进 production_sync.json 的 clone_guard ⇒ status.json ⇒ alert_manager P1。只给这一个子进程设，不 export。
+#   用环境变量不用 CLI 参数：克隆若停在不认识它的旧代码上，旧 production_sync 会忽略它、照常快进，不会 argparse 退出互锁。
 _PROD_SYNC_OK=0
 if [ -f "$PROJECT_DIR/production_sync.py" ]; then
-    if ! "$PYTHON3" "$PROJECT_DIR/production_sync.py" --date "$DATE_STR" >> "$LOGFILE" 2>&1; then
+    if ! ALPHA_HIVE_PRODUCTION_CLONE=1 "$PYTHON3" "$PROJECT_DIR/production_sync.py" --date "$DATE_STR" >> "$LOGFILE" 2>&1; then
         log "WARN" "⚠️ 生产代码未快进到 origin/main，本轮沿用现有代码（结局见 status.json 的 scan_timing.production_sync）"
     else
         _PROD_SYNC_OK=1
@@ -1506,6 +1534,10 @@ elif [ $STEP14_RC -eq 2 ]; then
             ;;
         export)
             log "ERROR" "🚨 Step 14：数据导出失败，未提交——见 $BACKUP_STATUS_JSON"
+            ;;
+        foreign_entries)
+            # v0.45.427：备份仓里出现本轮导出之外的条目（外来文件 / 嵌套仓库）⇒ 拒绝提交，免得被 git add -A 封进永久备份历史
+            log "ERROR" "🚨 Step 14：备份仓里有导出之外的条目（外来文件 / 嵌套仓库），已拒绝提交——见 ${BACKUP_STATUS_JSON}（foreign_entries）"
             ;;
         git_error)
             log "ERROR" "🚨 Step 14：git 调用异常（如超时），未确认是否已提交/推送——见 $BACKUP_STATUS_JSON"

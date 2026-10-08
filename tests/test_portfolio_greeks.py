@@ -508,7 +508,7 @@ class TestReportAndCli:
 
     def test_cli_dry_run_json_returns_zero_and_writes_nothing(self, state, monkeypatch, capsys):
         closes, betas, _ = _book_above(state)
-        monkeypatch.setattr(pg, "_default_close", closes)
+        monkeypatch.setattr(pg, "_default_mark", closes)        # v0.45.423：默认取价钩子改名（返回 mark）
         monkeypatch.setattr(pg, "_default_beta", betas)
         monkeypatch.setattr(pg, "_default_quotes", _quotes({}))
         rc = pg.main(["--date", AS_OF, "--dry-run", "--json"])
@@ -697,16 +697,22 @@ class TestSharedBarsAccessor:
     """daily_bars：本模块对外的取 K 线入口，同一 (ticker, as_of) 只取一次。"""
 
     def test_daily_bars_fetches_once_for_all_consumers(self, state, monkeypatch):
+        import cboe_options
         calls = []
 
         def fake(t, d):
             calls.append((t, d))
-            return [{"date": d, "close": 12.5}]
+            return [{"date": d, "close": 12.5, "src": "twelve_data"}]
 
         monkeypatch.setattr(pg, "_fetch_bars_uncached", fake)
-        assert pg.daily_bars("AAA", AS_OF) == [{"date": AS_OF, "close": 12.5}]
+        # v0.45.423：取价先问 CBOE；这里让它拿不到，走 Twelve Data 那根（日期恰为 as_of、该场已收盘）
+        monkeypatch.setattr(cboe_options, "fetch_underlying_mark",
+                            lambda t, **k: {"price": None, "source": "unavailable", "session": None,
+                                            "at_close": False, "live": False})
+        assert pg.daily_bars("AAA", AS_OF) == [{"date": AS_OF, "close": 12.5, "src": "twelve_data"}]
         assert pg.daily_bars("AAA", AS_OF) is pg._BARS_CACHE[("AAA", AS_OF)]
-        assert pg._default_close("AAA", AS_OF) == 12.5          # 收盘价走的是同一份缓存
+        m = pg._default_mark("AAA", AS_OF)                      # 收盘价走的是同一份缓存
+        assert m["price"] == 12.5 and m["session"] == AS_OF and m["source"] == "twelve_data_bar"
         assert calls == [("AAA", AS_OF)]                        # 一次取数供所有消费者
 
 
