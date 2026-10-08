@@ -34,8 +34,8 @@
 1. 单位 = `(ticker, earnings_date)`，只看 `eligible` 行。
 2. 代表行 = 该单位里**按信号日期最早**、`implied_event_move_pct > 0` 的行。被压成 0 的行（`event_move_floor_hit`）没有隐含事件波动，跳过（例：MU 2026-09-04~11）。
 3. **先定代表行、再看它的 GEX**：代表行的 `gex_ctx` 不可用 ⇒ 整个单位不进检验，**不**往后找一条可用的顶上。可用 =
-   `schema_version == 1`、`available is True`、`regime ∈ {positive_gex, negative_gex}`、`captured_on == as_of`
-   （补跑旧日期时拿到的是另一天的链，不能冒充那天的环境）。
+   `schema_version == 2`、`available is True`、`regime ∈ {positive_gex, negative_gex}`、`captured_on == as_of`
+   （补跑旧日期时拿到的是另一天的链，不能冒充那天的环境）、`session_live is False`（收盘后记录，修订 1）。
 4. 结果：同一事件任一合格行已回填实际波动即为已结算（`settle_signals` 对同一事件的所有合格行回填同一个值）。
 5. 政体来源：`gex_ctx.regime`，即当天蒸馏结果里的 `gex_state`（全到期日视图，政体路由用的那份）。
    **不用** Alpha Bot 卖权选择器的 ≤45 天重定价零点：那是另一个冻结协议的输入，且那份协议把财报窗口整段排除。
@@ -87,8 +87,19 @@
 - OI 是 t−1 的，个股 OI 符号可能整个反了（§1）；
 - 只有 30 只标的，同一周内的事件彼此相关（分块只处理了「周」这一层）。
 
+## 修订 1（2026-10-08，v0.45.428，`PREREG["version"]` 1 → 2，`GEX_CTX_SCHEMA` 1 → 2）
+
+- **理由（二次检查发现的 bug，实现与 §9 不符）**：§9 写明政体是「信号日收盘后的状态」，但 v1 的影子记录不记时刻，
+  同日重跑又是「当天第一次可得记录为准」——有人盘中手动跑日报（卖权预注册 §3 记过这种情况确实发生）就会把**盘中**
+  的 GEX 锁成当天政体，收盘后的生产扫描替换不掉；检验也分不出来。
+- **改动**：`gex_ctx` 加 `captured_at`（美东时刻）与 `session_live`（记录时是否在常规交易时段，按交易日历与提前收盘日判）；
+  §3 第 3 条的「可用」加一条：`session_live is False`（盘中记录 → `gex_unusable:intraday_capture`，判不了 → `session_unknown`）；
+  同日重跑改为「当天第一次**收盘后**的可得记录为准」，盘中的旧记录让位给收盘后的新记录。
+- **改动前是否看过结果**：没有——修订时 `gex_ctx` 还一行都没有记录（第一轮记录是 2026-10-08 14:00 PT 的扫描）。
+- **截断**：`schema_version` 不是 2 的记录一律不进检验（若 v0.45.424 的代码赶在本修订部署前跑过一轮，那一轮的记录在此被截掉）。
+
 ## 10. 运行
 
-- 每日扫描：`alpha_hive_daily_report._post_scan_enrichment` 调 `earnings_vol_signal.scan(..., gex_fn=...)` 记录影子字段；
+- 每日扫描：`alpha_hive_daily_report._post_scan_notify` 调 `earnings_vol_signal.scan(..., gex_fn=...)` 记录影子字段；
   `settle_signals` 回填实际波动。都不读 `gex_ctx` 做判断（`tests/test_straddle_gex_shadow.py`）。
 - 就绪度：`/usr/local/bin/python3 straddle_gex_prereg.py`（只读）；Alpha Bot「跨式账本」页底部同一份计数。

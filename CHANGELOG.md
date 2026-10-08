@@ -5,7 +5,44 @@
 
 ---
 
-## [0.45.428] — 2026-10-08 — 占位（进行中：v0.45.424 二次检查——Alpha Bot 跨式页 / quote_held / GEX 影子记录 / 跨式预注册模块）
+## [0.45.428] — 2026-10-08 — Fixed：v0.45.424 二次检查——GEX 影子记录分不出盘中 / 收盘后（预注册修订 1）、接线断了没人红、「每分钟」自动刷新实际每 2 分钟，另 6 处
+
+用户要求二次检查 v0.45.424。按「先用装好的工具」跑了已装的 code-review 技能（high，8 个角度），报 9 条，全部处理；
+修的过程中又抓到自己新写的一条假守卫（见文末）。部署时机：v0.45.424 于 10-08 01:43 PDT 推上 main，**第一轮记录影子字段的扫描是 10-08 14:00 PT**，
+本版若在那之前合入，就一行旧结构的记录都不会有。
+
+### Fixed
+1. **GEX 影子记录分不出盘中手动跑与收盘后扫描**（预注册修订 1：协议 v1 → v2，`gex_ctx` 结构 1 → 2）。协议 §9 写的是「信号日**收盘后**的政体」，
+   但记录不带时刻、同日重跑又是「第一次可得记录为准」——有人盘中手动跑日报，就会把盘中 GEX 锁成当天政体，收盘后的生产扫描替换不掉，检验也分不出。
+   现在记 `captured_at`（美东时刻）与 `session_live`（按交易日历与提前收盘日判，判不了记 None）；同日改为「第一次**收盘后**的可得记录为准」，
+   盘中旧记录让位；检验侧 `session_live is not False` ⇒ 不收。扫描侧 `_usable_capture` 与检验侧 `_ctx_problem` 用同一判据，测试逐个变体对齐。
+   修订时 `gex_ctx` 一行都没有（`experiments/straddle_gex_prereg.md`「修订 1」，截断：结构版本不是 2 的不进检验）。
+2. **接线断了没人红**（CLAUDE.md「这个失败，下游怎么知道？」）：日报钩子的日志加「GEX 影子记录可用 n/N」（`earnings_vol_signal.shadow_summary`，只数个数）；
+   有信号而 0 条可用 ⇒ warning 并列原因（接线断了 / gex_state 没了 / 盘中手动跑）。另加接线守卫：钩子必须给 `scan` 传 `gex_fn`、必须调 `shadow_summary`。
+3. **「自动刷新：开（盘中每分钟）」实际每 2 分钟才新一次**：页面每 60 秒拉、不 force，服务端两层缓存也都是 60 秒，6 只串行拉完后下一拍全部命中缓存。
+   改为每 2 分钟 **force** 重拉，按钮与帮助页同步写「约每 2 分钟」。不做每分钟：6 只 × 每只约 1.5MB、串行 4–7 秒，会把 CBOE 取数占掉一半时间、挡住标的页现拉。
+4. **冻结结果文件不在 `hive_logger.PATHS`**（CLAUDE.md「文件名唯一真相在 PATHS」）：新增 `PATHS.straddle_prereg_result`，`straddle_gex_prereg` 缺省走它；
+   conftest 加防线① `_isolate_straddle_prereg_result`（这个文件只写一次、永不覆盖，误写进真身会把协议永久冻住）。
+5. **检验侧「不可用」原因报错**：可得但版本不对 / 政体不对的记录一律报成 `captured_on≠as_of`。现在逐条报：`schema:1` / `unavailable:<原因>` / `regime:…` /
+   `captured_on≠as_of` / `intraday_capture` / `session_unknown`。
+6. **盘中接口每次重读整本账本**（信号文件每天长 30 行）：改为只读 `positions.jsonl`（`alphabot.straddle.load_positions`）。
+7. **KPI 口径维护了两份**：页面的 `_kpi_block` 改为直接用 `options_paper_leg._kpi_block`（v0.45.422 起导入该模块不会再因数据根抛错）。
+8. **`cboe_options.quote_held` 收下了日期判不了的报价**：同 `fetch_cboe_raw_contracts`，`vintage_unverifiable` ⇒ 不可得。
+9. **演示模式每晚 21:00–24:00 PT 水平链与持仓差一天**：合成链的缺省「今天」从本机日期改为美东日期（`synthetic._today_et`）。
+
+### 顺带更正
+- CLAUDE.md 纸面组合「挂载点 = `_post_scan_enrichment`」不对，实际在 `_post_scan_notify`（第 1278 行；跨式那段也在这里），协议文档 §10 同样更正。
+
+### 二次检查自己抓到的
+- 新写的接线守卫首版去 `_post_scan_enrichment` 里找 `scan` 调用——那里根本没有，于是它的「有牙自证」在**原文上也是空集**、恒绿。现在自证先过正对照（原文必须看得见 `gex_fn`）。
+- 文案守卫首版用正则抠 JS 字符串字面量，跨两段模板字符串把注释（「每分钟强刷会……」）框了进去，假红；改为按行去掉 `//` 注释，并加正对照（注释里确实提到）。
+
+### 守卫（+22 条）
+- `tests/test_straddle_gex_shadow.py`（18 → 36）：交易时段判定（盘中 / 收盘后 / 开盘前 / 劳动节 / 感恩节次日提前收盘 / 日历坏了记 None）；盘中记录让位给收盘后、之后第一条收盘后为准；
+  两侧判据逐变体对齐；不可用原因逐条；日报接线（含正对照的有牙自证）；`shadow_summary` 计数；冻结文件走 PATHS 且在沙箱里。
+- `tests/test_alphabot_straddle.py`（23 → 26）：盘中接口不重读整本账本；自动刷新必须 force、间隔 ≥ 2 分钟、代码里不再对用户说「每分钟」；演示「今天」是美东日期。
+- `tests/test_options_paper_leg.py::TestQuoteHeld`（4 → 5）：日期判不了 ⇒ 不可得。
+- 变异（未提交的源码上原地改、跑、复原）：盘中记录也算可用、日报不传 gex_fn、自动刷新不 force、日期判不了照给、盘中接口重读整本账本、检验侧不查盘中、演示回到本机日期——7 个全红。
 
 ## [0.45.427] — 2026-10-08 — 占位（进行中：测试夹具污染生产备份仓库的根治——数据根闸不再整个豁免 `_git_backup` + PATHS 元守卫；备份拒收外来条目 / 嵌套仓库；测试 helper 写前核对沙箱）
 

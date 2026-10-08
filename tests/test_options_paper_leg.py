@@ -573,6 +573,15 @@ class TestQuoteHeld:
         assert held["session_live"] is True
         assert held["underlying_price"] == pytest.approx(104.0) and held["underlying_price_source"] == "cboe_intraday"
 
+    def test_unverifiable_vintage_is_refused(self, co, monkeypatch):
+        """v0.45.428：同 `fetch_cboe_raw_contracts`——报价是哪一天的都判不了，就不当「此刻的参考价」给出去。"""
+        from datetime import datetime
+        p = self._payload()
+        p["last_trade_time"] = "garbled"
+        monkeypatch.setattr(co, "_fetch_cboe_payload", lambda tk, timeout, **kw: p)
+        held = co.quote_held("XYZ", [CALL], now_et=datetime(2026, 9, 3, 18, 0, tzinfo=co._ET_TZ))
+        assert held["available"] is False and held["reason"] == "vintage_unverifiable" and held["quotes"] == {CALL: None}
+
     def test_stale_snapshot_and_failure_are_unavailable(self, co, monkeypatch):
         def stale(tk, timeout, **kw):
             raise co.CboeStaleVintageError("XYZ", "2026-09-02", "2026-09-03")

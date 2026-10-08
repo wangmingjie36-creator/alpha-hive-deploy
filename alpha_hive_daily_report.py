@@ -1294,10 +1294,16 @@ class AlphaHiveDailyReporter:
                                     gex_fn=self._gex_state_from_swarm(swarm_results))
             _ev_settled = _evs.settle_signals(self.date_str)
             _opl_result = _opl.run_for_date(self.date_str, signals=_ev_signals)
-            _log.info("期权纸面腿已更新: %s (信号 %d / 合格 %d / 回填 %d / nav=%s)",
+            _gx = _evs.shadow_summary(_ev_signals, self.date_str)
+            _log.info("期权纸面腿已更新: %s (信号 %d / 合格 %d / 回填 %d / nav=%s / GEX 影子记录可用 %d/%d)",
                       self.date_str, len(_ev_signals),
                       sum(1 for _s in _ev_signals if _s.get("eligible")), _ev_settled,
-                      (_opl_result or {}).get("nav", "?"))
+                      (_opl_result or {}).get("nav", "?"), _gx["usable"], _gx["n"])
+            # v0.45.428：有信号而一条可用的影子记录都没有 ⇒ warning。不然接线断了 / gex_state 没了，
+            # 只会在几个月后表现成「检验一直攒不够」（CLAUDE.md「这个失败，下游怎么知道？」）
+            if _gx["n"] and not _gx["usable"]:
+                _log.warning("跨式 GEX 影子记录本轮 0/%d 可用（原因 %s）——接线断了、gex_state 没了，"
+                             "或这是盘中手动跑（盘中记录按协议不收）", _gx["n"], _gx["reasons"])
         except Exception as e:
             _log.warning("期权纸面腿更新失败(非致命): %s", e)
 

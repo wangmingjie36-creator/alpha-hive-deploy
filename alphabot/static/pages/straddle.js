@@ -196,9 +196,12 @@ export async function renderStraddle(root, alive) {
     busy = false; pullBtn.disabled = false;
   }
   const pullBtn = h("button", { class: "btn primary", type: "button", onclick: () => pullAll(true) }, "拉一次盘中报价");
+  // 自动刷新必须 force：服务端两层缓存都是 60 秒，不 force 的话每隔一拍都只拿到缓存（v0.45.428 二次检查）。
+  // 间隔 2 分钟：6 只 × 每只约 1.5MB、串行 4–7 秒，每分钟强刷会把 CBOE 取数占掉一半时间、挡住标的页现拉。
+  const AUTO_MS = 120000;
   const autoBtn = h("button", { class: "btn", type: "button", "aria-pressed": "false",
-    onclick: () => { auto = !auto; autoBtn.setAttribute("aria-pressed", String(auto)); fill(autoBtn, auto ? "自动刷新：开（盘中每分钟）" : "自动刷新：关"); if (auto) pullAll(false); } }, "自动刷新：关");
-  const timer = setInterval(() => { if (!alive()) { clearInterval(timer); return; } if (auto && sessionLive()) pullAll(false); }, 60000);
+    onclick: () => { auto = !auto; autoBtn.setAttribute("aria-pressed", String(auto)); fill(autoBtn, auto ? "自动刷新：开（盘中约每 2 分钟）" : "自动刷新：关"); if (auto) pullAll(false); } }, "自动刷新：关");
+  const timer = setInterval(() => { if (!alive()) { clearInterval(timer); return; } if (auto && sessionLive()) pullAll(true); }, AUTO_MS);
 
   const cards = h("div", { class: "sd-cards" }, (d.positions || []).map((p) => positionCard(p, d, liveEls)));
   const eqEl = h("div", { class: "chart short" });

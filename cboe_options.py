@@ -1760,12 +1760,14 @@ def quote_held(ticker: str, symbols: List[str], *, timeout: int = 15,
     if not data or not data.get("options"):
         return {**base, "reason": "payload_unavailable"}
     vintage = _payload_vintage_date(data)
+    if vintage is None:
+        # 同 `fetch_cboe_raw_contracts`：报价是哪一天的都判不了，就不能当「此刻的参考价」给出去（v0.45.428）
+        return {**base, "reason": "vintage_unverifiable"}
     now = now_et if now_et is not None else _et_now()
     if now.tzinfo is not None:
         now = now.astimezone(_ET_TZ)
-    live = bool(vintage) and _raw_session_live(vintage, now)
-    clock = now if (live or not vintage) else datetime.combine(
-        date.fromisoformat(vintage), _RAW_SESSION_CLOSED_CLOCK, tzinfo=_ET_TZ)
+    live = _raw_session_live(vintage, now)
+    clock = now if live else datetime.combine(date.fromisoformat(vintage), _RAW_SESSION_CLOSED_CLOCK, tzinfo=_ET_TZ)
     S, src = official_price(data, clock)
     out = {**base, "available": True, "session_live": live, "vintage_date": vintage,
            "payload_last_trade_time": data.get("last_trade_time"), "quotes": _held_quotes(data, symbols)}

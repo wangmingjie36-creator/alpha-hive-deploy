@@ -1230,6 +1230,20 @@ def _isolate_replay_ohlc_state(_isolate_env, tmp_path):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_straddle_prereg_result(_isolate_env, tmp_path):
+    """跨式 × GEX 预注册的冻结结果（v0.45.428，`straddle_gex_prereg.run_once`）防线①：`PATHS.straddle_prereg_result`
+    此刻是绝对路径且在本测试沙箱里。这个文件**只写一次、永不覆盖**——误写进真身就把协议永久冻住，比别的产物更不能漏。
+    防线②（真身指纹）由仓库根默认拒绝总闸与真实数据根总闸（`_guard_real_data_root`）兜住。"""
+    import hive_logger
+
+    p = pathlib.Path(hive_logger.PATHS.straddle_prereg_result)
+    assert p.is_absolute(), f"PATHS.straddle_prereg_result 解析成了相对路径 {p}：生产从仓库根跑会写穿仓库根"
+    assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+        f"PATHS.straddle_prereg_result = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？")
+    yield
+
+
 @pytest.fixture
 def sell_strike_state_sandbox_check():
     """把 `_assert_sell_strike_state_in_sandbox` 暴露给它的有牙自证（同 `default_path_sandbox_check`）。"""

@@ -13,7 +13,9 @@ import ast
 import json
 import math
 import random
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -23,6 +25,9 @@ from tests._repo_files import own_python_files
 from tests.test_earnings_vol_signal import AS_OF, EARN, _qs, _stats, _write_snap
 
 REPO = Path(__file__).resolve().parent.parent
+ET = ZoneInfo("America/New_York")
+POST_CLOSE = datetime(2026, 9, 3, 18, 0, tzinfo=ET)      # 2026-09-03 周四，收盘后（生产扫描的时刻）
+INTRADAY = datetime(2026, 9, 3, 11, 0, tzinfo=ET)        # 同一天盘中（有人手动跑日报）
 POS_STATE = {"schema_version": 1, "available": True, "reason": None, "regime": "positive_gex", "total_gex": 12.5,
              "gex_flip": 95.0, "largest_call_wall": 110.0, "largest_put_wall": 90.0, "gex_normalized_pct": 0.8,
              "stock_price": 100.0, "chain_view": "cboe_full_expiries", "n_expiries": 9, "routing_applied": True}
@@ -34,6 +39,7 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setattr(evs, "STATE_DIR", sd)
     monkeypatch.setattr(evs, "SIGNALS_FILE", sd / "earnings_signals.jsonl")
     monkeypatch.setattr(evs, "_today_pdt", lambda: AS_OF)
+    monkeypatch.setattr(evs, "_now_et", lambda: POST_CLOSE)     # 钉死记录时刻：结果不能随跑测试的时钟变
     cache = tmp_path / "cache"
     cache.mkdir()
     return cache
@@ -46,10 +52,23 @@ def _scan(cache, gex_fn):
 
 class TestGexCtx:
     def test_available_state_is_copied(self):
-        c = evs.gex_ctx(lambda t: POS_STATE, "XYZ", AS_OF, captured_on=AS_OF)
+        c = evs.gex_ctx(lambda t: POS_STATE, "XYZ", AS_OF, captured_on=AS_OF, captured_at=POST_CLOSE)
         assert c["available"] is True and c["reason"] is None and c["regime"] == "positive_gex"
         assert c["total_gex"] == 12.5 and c["captured_on"] == AS_OF and c["as_of"] == AS_OF
-        assert c["schema_version"] == evs.GEX_CTX_SCHEMA and "routing_applied" not in c
+        assert c["schema_version"] == evs.GEX_CTX_SCHEMA == 2 and "routing_applied" not in c
+        assert c["captured_at"] == "2026-09-03T18:00:00-04:00" and c["session_live"] is False
+
+    @pytest.mark.parametrize("when,live", [(INTRADAY, True), (POST_CLOSE, False),
+                                           (datetime(2026, 9, 3, 9, 0, tzinfo=ET), False),          # 开盘前
+                                           (datetime(2026, 9, 7, 11, 0, tzinfo=ET), False),         # 劳动节休市
+                                           (datetime(2026, 11, 27, 13, 30, tzinfo=ET), False)])     # 感恩节次日 13:00 提前收盘
+    def test_session_live_follows_the_calendar(self, when, live):
+        assert evs.session_live_at(when) is live
+
+    def test_session_unknown_when_calendar_breaks(self, monkeypatch):
+        import is_trading_day as itd
+        monkeypatch.setattr(itd, "is_trading_day", lambda d: (_ for _ in ()).throw(RuntimeError("cal")))
+        assert evs.session_live_at(POST_CLOSE) is None
 
     @pytest.mark.parametrize("fn,why", [(None, "gex_fn_not_provided"), (lambda t: None, "no_gex_state"),
                                         (lambda t: (_ for _ in ()).throw(ValueError("x")), "exception:ValueError")])
@@ -102,7 +121,7 @@ class TestShadowChangesNothing:
 
 class TestReaders:
     ALLOWED = {"earnings_vol_signal.py", "straddle_gex_prereg.py", "alphabot/straddle.py"}
-    WRITERS = {"gex_ctx", "_same_day_capture", "scan"}
+    WRITERS = {"gex_ctx", "_usable_capture", "scan", "shadow_summary"}     # 记录 / 同日取舍 / 只数个数
 
     @staticmethod
     def _mentions(root):
@@ -144,6 +163,48 @@ class TestReaders:
         assert "compute_signal" in self._funcs_reading(planted)
 
 
+class TestWiringIsVisible:
+    """v0.45.428：接线断了要有人红。日报钩子必须把 gex_fn 传给 scan、并把可得数打进日志；结果文件走 PATHS。"""
+
+    @staticmethod
+    def _hook_calls(src: str):
+        tree = ast.parse(src)
+        # 跨式账本那一段在 `_post_scan_notify` 里（不是 `_post_scan_enrichment`——v0.45.428 首版写错，
+        # 而且下面的「有牙自证」当时在原文上也是空集、恒绿：自证必须先过正对照）
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_post_scan_notify")
+        scan_kw, summary = set(), False
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+                if n.func.attr == "scan":
+                    scan_kw |= {k.arg for k in n.keywords}
+                summary |= n.func.attr == "shadow_summary"
+        return scan_kw, summary
+
+    def test_daily_hook_passes_gex_fn_and_logs_the_count(self):
+        scan_kw, summary = self._hook_calls((REPO / "alpha_hive_daily_report.py").read_text(encoding="utf-8"))
+        assert "gex_fn" in scan_kw and "upcoming_fn" in scan_kw, scan_kw
+        assert summary, "日报钩子没有把影子记录的可得数打进日志"
+
+    def test_wiring_guard_has_teeth(self):
+        src = (REPO / "alpha_hive_daily_report.py").read_text(encoding="utf-8")
+        assert "gex_fn" in self._hook_calls(src)[0], "正对照：原文上必须先看得见 gex_fn，否则下面的「看不见」恒真"
+        cut = src.replace(",\n                                    gex_fn=self._gex_state_from_swarm(swarm_results))", ")", 1)
+        assert cut != src and "gex_fn" not in self._hook_calls(cut)[0]
+        assert self._hook_calls(src.replace("_evs.shadow_summary(", "_evs.not_summary(", 1))[1] is False
+
+    def test_shadow_summary_counts_and_reasons(self):
+        ok = {"gex_ctx": evs.gex_ctx(lambda t: POS_STATE, "A", AS_OF, captured_on=AS_OF, captured_at=POST_CLOSE)}
+        live = {"gex_ctx": evs.gex_ctx(lambda t: POS_STATE, "B", AS_OF, captured_on=AS_OF, captured_at=INTRADAY)}
+        none = {"gex_ctx": evs.gex_ctx(None, "C", AS_OF, captured_on=AS_OF, captured_at=POST_CLOSE)}
+        s = evs.shadow_summary([ok, live, none, {}], AS_OF)
+        assert s == {"n": 4, "usable": 1, "reasons": {"intraday_capture": 1, "gex_fn_not_provided": 1, "no_gex_ctx": 1}}
+
+    def test_result_path_is_the_paths_property(self, tmp_path):
+        from hive_logger import PATHS
+        assert SP._result_path() == PATHS.straddle_prereg_result
+        assert SP._result_path().is_relative_to(tmp_path), "冻结结果的缺省位置逃出了测试沙箱"
+
+
 class TestSameDayCapture:
     def test_first_available_capture_wins(self, state):
         _write_snap(state, "XYZ", AS_OF, _qs(), rv=20.0)
@@ -151,6 +212,27 @@ class TestSameDayCapture:
         neg = {**POS_STATE, "regime": "negative_gex"}
         _scan(state, lambda t: neg)
         assert evs.load_signals()[0]["gex_ctx"]["regime"] == "positive_gex"
+
+    def test_intraday_capture_gives_way_to_post_close(self, state, monkeypatch):
+        """修订 1：盘中手动跑先记了一条，收盘后的生产扫描必须能替换它；之后再重跑，以第一条收盘后记录为准。"""
+        _write_snap(state, "XYZ", AS_OF, _qs(), rv=20.0)
+        neg = {**POS_STATE, "regime": "negative_gex"}
+        monkeypatch.setattr(evs, "_now_et", lambda: INTRADAY)
+        first = _scan(state, lambda t: POS_STATE)[0]["gex_ctx"]
+        assert first["session_live"] is True and SP._ctx_problem(first) == "intraday_capture"
+        monkeypatch.setattr(evs, "_now_et", lambda: POST_CLOSE)
+        _scan(state, lambda t: neg)
+        assert evs.load_signals()[0]["gex_ctx"]["regime"] == "negative_gex", "盘中记录锁住了当天政体"
+        _scan(state, lambda t: POS_STATE)
+        assert evs.load_signals()[0]["gex_ctx"]["regime"] == "negative_gex"
+
+    def test_scan_side_and_prereg_side_agree(self):
+        """`_usable_capture`（扫描侧取舍）与 `_ctx_problem`（检验侧判据）是同一条规则的两份实现——逐个变体对齐。"""
+        base = evs.gex_ctx(lambda t: POS_STATE, "XYZ", AS_OF, captured_on=AS_OF, captured_at=POST_CLOSE)
+        variants = [base, {**base, "schema_version": 1}, {**base, "available": False}, {**base, "captured_on": "2026-09-04"},
+                    {**base, "session_live": True}, {**base, "session_live": None}, {**base, "regime": "unknown"}, None, {}]
+        for v in variants:
+            assert evs._usable_capture(v, AS_OF) is (SP._ctx_problem(v) is None), v
 
     def test_backfill_capture_does_not_count(self, state, monkeypatch):
         monkeypatch.setattr(evs, "_today_pdt", lambda: "2026-09-20")      # 补跑：记录日 ≠ 信号日
@@ -160,9 +242,9 @@ class TestSameDayCapture:
         assert SP.units([row])[0]["status"].startswith("gex_unusable")
 
 
-def _row(tk, as_of, ed, *, implied=4.0, regime="positive_gex", realized=None, ok=True, captured=None):
-    ctx = {"schema_version": 1, "available": ok, "regime": regime if ok else None, "as_of": as_of,
-           "captured_on": captured or as_of, "reason": None if ok else "state_unavailable"}
+def _row(tk, as_of, ed, *, implied=4.0, regime="positive_gex", realized=None, ok=True, captured=None, live=False):
+    ctx = {"schema_version": 2, "available": ok, "regime": regime if ok else None, "as_of": as_of,
+           "captured_on": captured or as_of, "session_live": live, "reason": None if ok else "state_unavailable"}
     return {"ticker": tk, "as_of": as_of, "earnings_date": ed, "eligible": True, "implied_event_move_pct": implied,
             "ratio": 1.0, "realized_abs_move_pct": realized, "gex_ctx": ctx}
 
@@ -174,6 +256,20 @@ class TestPrereg:
         u = SP.units(rows)[0]
         assert u["as_of"] == "2026-09-14" and u["regime"] == "positive_gex" and u["status"] == "ok"
         assert u["y"] == pytest.approx(math.log(3.03 / 5.79))
+
+    @pytest.mark.parametrize("change,want", [
+        ({"schema_version": 1}, "gex_unusable:schema:1"),
+        ({"session_live": True}, "gex_unusable:intraday_capture"),
+        ({"session_live": None}, "gex_unusable:session_unknown"),
+        ({"captured_on": "2026-09-20"}, "gex_unusable:captured_on≠as_of"),
+        ({"regime": "unknown"}, "gex_unusable:regime:unknown"),
+        ({"available": False, "reason": "non_finite_total_gex"}, "gex_unusable:unavailable:non_finite_total_gex"),
+    ])
+    def test_status_names_the_actual_reason(self, change, want):
+        """v0.45.428：此前可得但不合格的记录一律报成 captured_on≠as_of——排查的人会去查一个不存在的日期问题。"""
+        r = _row("A", "2026-09-01", "2026-09-10")
+        r["gex_ctx"].update(change)
+        assert SP.units([r])[0]["status"] == want
 
     def test_gex_is_checked_after_picking_the_row(self):
         rows = [_row("T", "2026-09-29", "2026-10-21", ok=False), _row("T", "2026-09-30", "2026-10-21")]
