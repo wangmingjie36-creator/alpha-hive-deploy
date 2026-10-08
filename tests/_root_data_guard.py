@@ -119,9 +119,18 @@ def excluded_reason(relpath: str) -> str | None:
 # 这里补上，口径与仓库根闸一致（默认拒绝、`(size, mtime_ns)`、`-shm` 只记大小、目录记存在）。
 
 #: 数据根里**常驻有写入方、且不是测试能碰到的**东西：日志（MCP / 定时任务 / 每日扫描一直在写）、备份轮转。
-#: 以及 `_` 打头的元目录（`_git_backup` 每日备份、`_archive` / `_migration` / `_manual_backups` 迁移与人工留档）。
+#: 以及 `_` 打头的元目录（`_archive` / `_migration` / `_manual_backups` 迁移与人工留档）。
 #: 新增豁免前先问：它是谁写的？「测试可能写到」的东西不许豁免。
+#: 「测试碰不到」不再只靠这句注释：`tests/test_root_data_guard.py::test_paths_reaching_exempt_areas_are_exactly_the_known_ones`
+#: 枚举 `PATHS` 的每个属性，落在豁免区的必须恰好是那里白名单上写明「谁负责隔离」的几个。
 DATA_ROOT_VOLATILE = frozenset({"logs", "db_backups"})
+
+#: `_` 打头、但**测试碰得到**、所以照样受闸的元目录（v0.45.427）。
+#: `_git_backup`：v0.45.408 起 `PATHS.data_backup_repo` 指向它，测试经 PATHS 就能写进去。2026-10-03 变异 N20 把该属性写死成
+#: `~/alpha-hive-data/_git_backup`，测试夹具 `bk_src`（嵌套 git 仓库）被 `shutil.move` 搬进了生产备份仓库，
+#: 10-05 每日备份把它当嵌套仓库提交进了备份历史——当时本闸按「`_` 元目录 = 测试碰不到」整个豁免它，四天没人红。
+#: 它的 `.git/` 仍按 `SKIP_DIR_NAMES` 跳过（git 自己的簿记）；每日备份 Step 14 在扫描时段里写它，与闸对扫描时段的既有提醒同一回事。
+DATA_ROOT_WATCHED_META = frozenset({"_git_backup"})
 
 
 def data_root_excluded_reason(relpath: str) -> str | None:
@@ -131,7 +140,7 @@ def data_root_excluded_reason(relpath: str) -> str | None:
     top = parts[0]
     if top in DATA_ROOT_VOLATILE:
         return f"volatile:{top}"
-    if top.startswith("_"):
+    if top.startswith("_") and top not in DATA_ROOT_WATCHED_META:
         return f"meta-dir:{top}"
     for p in parts:
         if p in SKIP_DIR_NAMES:
@@ -140,6 +149,22 @@ def data_root_excluded_reason(relpath: str) -> str | None:
     if name in NOISE_FILE_NAMES or name.startswith(NOISE_FILE_PREFIXES):
         return "fs-noise"
     return None
+
+
+def exempt_reachable_paths(relpaths: dict[str, str]) -> dict[str, str]:
+    """`{名字: 数据根相对路径}` 中被本闸豁免的那些 → `{名字: 豁免原因}`（v0.45.427）。
+
+    用法：喂 `PATHS` 各属性在沙箱数据根下解析出的相对路径——落在豁免区的就是「测试碰得到、闸却不看」的位置。
+    数据根本身（`.`）不算。"""
+    out = {}
+    for name, rel in relpaths.items():
+        rel = rel.replace(os.sep, "/").strip("/")
+        if rel in ("", "."):
+            continue
+        reason = data_root_excluded_reason(rel)
+        if reason is not None:
+            out[name] = reason
+    return out
 
 
 def real_data_root(environ, home: str, repo_root: str) -> str | None:

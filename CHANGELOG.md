@@ -5,6 +5,32 @@
 
 ---
 
+## [0.45.431] — 2026-10-08 — 占位（进行中：数据根迁移阶段 8——生产代码独立克隆到 `~/alpha-hive-prod`，根治在生产检出里直接提交导致 production_sync 永久 diverged）
+
+## [0.45.430] — 2026-10-08 — 占位（进行中：异地备份 `manifest.json`（网站 PWA）与备份元数据 `MANIFEST.json` 在大小写不敏感的 APFS 上互相覆盖——网站 manifest 从未备份、SHA256SUMS 作假；改名 + 大小写碰撞守卫）
+
+## [0.45.429] — 2026-10-08 — Added：Oracle 异常期权流对共享 yfinance 令牌桶限速——全进程请求间隔预约、最多占桶一半；不减请求、不改评分
+
+接 v0.45.425（重试）：这版处理「需求」一侧。yf_gate 的令牌桶（`resilience.yfinance_limiter`，0.5 req/s）全进程只有一个，且 `RateLimiter.acquire` 是**每 2s 醒来抢一次、非 FIFO**：排队线程越多，别的取数在 60s 超时内抢到令牌的概率越低。10-07 一轮扫描闸门放行 802 次（`scan_timing.counters.yfinance.calls`；0 次 429、0 次冷却），本模块每只标的最多 5 个令牌（`.options` + 前 4 个到期日的 `option_chain`）≈ 150 个，约占五分之一；整轮对桶的占用接近满载（按整轮约 1840s 的蜂群窗口算容量约 920 个令牌），没有余量时，任何一处多占都是别人的饥饿。
+
+### Added
+- `unusual_options._pace()`：预约式限速。全进程内本模块两次 yfinance 请求至少隔 `1 / (桶速率 × PACE_BUCKET_SHARE)` 秒（`PACE_BUCKET_SHARE=0.5`、桶 0.5 req/s ⇒ 4s ⇒ 最多占桶一半，另一半留给其它取数）。只在算槽位时持锁、睡眠不持锁：多线程各领一个递增的发送时刻（FIFO、不互相抢）。间隔取桶速率**现值**（不另存一个会与桶不一致的数字，同 yf_gate 的做法）；`PACE_MAX_WAIT_S=60` 封顶，积压超过就不再往后排。
+- 每个网络请求（`.options`、各 `option_chain`、**含重试那一次**）前排队；缓存命中不排队、不打网。
+- `pace_wait_s`：本次检测在队列里排了多久，进返回值与 Oracle 的 `unusual_flow_status`——下一轮扫描能直接看出限速让每只标的多等了多少。
+
+### Fixed
+- v0.45.425 的小漏：`.options` 饥饿到预算耗尽（抛出走 `检测失败` 路径）与「无到期日 / 现价不可得」两条早退路径返回的 `retries` 恒为 0，与实际重试次数不符。现在三条路径都报。
+
+### 守卫（`tests/test_unusual_options_pacing.py`，14 条；另两个既有测试文件的夹具关掉限速）
+- 间隔 = 4s（0.5 req/s × 一半）且**跟随桶速率现值** / 首个请求免排队其后各隔一个间隔 / 空闲超过间隔不收费 / 积压封顶 / 4 线程并发各领不同槽位 / 每个网络请求都排队 / 缓存命中不排队 / 重试也排队 / **开关限速得到同一份信号、分数、方向（不改评分）** / 早退路径仍报 `retries` 与 `pace_wait_s` / 关闭限速时请求不排队（反向自证，证明上面那些断言真在量限速）。
+- 变异（先提交后变异）：去掉 `_RetryBudget.call` 里的 `_pace()` ⇒ 「每个网络请求都排队」红；还原后全绿。
+- ⚠️ 测试会话把桶速率调高过（实测间隔算出 0.0002s），新测试在夹具里钉回 0.5——否则「4s」的断言在测试里量的是另一个数。
+
+### 注意
+- **这是「让路」不是「省量」**：请求个数一个没减（到期日个数、取数内容都是评分口径，不动），总需求不变，只是本模块排在别人后面，且排队时不再多线程抢令牌。要真正降总需求得换源（C 的等价性研究结论：不值得换）或砍其它模块的取数。
+- **代价待实测**：4 路并行标的 × 每只 4~5 个请求，一只标的的 Oracle 异常流排队约 60~80s。单标的 180s 的 `future.result` 超时在 `as_completed` 之后调用、不会触发；整轮是否变慢看下一轮 `scan_timing.phases.parallel`（10-07 基线 1562s、prefetch 278s）。
+- 未覆盖：`fast_info`（现价缺失时才走）与 `fetch_stock_data` 回落不排队。
+
 ## [0.45.428] — 2026-10-08 — Fixed：v0.45.424 二次检查——GEX 影子记录分不出盘中 / 收盘后（预注册修订 1）、接线断了没人红、「每分钟」自动刷新实际每 2 分钟，另 6 处
 
 用户要求二次检查 v0.45.424。按「先用装好的工具」跑了已装的 code-review 技能（high，8 个角度），报 9 条，全部处理；
@@ -44,9 +70,90 @@
 - `tests/test_options_paper_leg.py::TestQuoteHeld`（4 → 5）：日期判不了 ⇒ 不可得。
 - 变异（未提交的源码上原地改、跑、复原）：盘中记录也算可用、日报不传 gex_fn、自动刷新不 force、日期判不了照给、盘中接口重读整本账本、检验侧不查盘中、演示回到本机日期——7 个全红。
 
-## [0.45.427] — 2026-10-08 — 占位（进行中：测试夹具污染生产备份仓库的根治——数据根闸不再整个豁免 `_git_backup` + PATHS 元守卫；备份拒收外来条目 / 嵌套仓库；测试 helper 写前核对沙箱）
+## [0.45.427] — 2026-10-08 — Fixed：测试夹具污染生产备份仓库的根治——数据根闸不再整个豁免 `_git_backup` 并加 PATHS 元守卫；备份拒收外来条目 / 嵌套仓库；测试 helper 写前核对沙箱
 
-## [0.45.426] — 2026-10-08 — 占位（进行中：conftest 统一钉 PYTHONUSERBASE（原 0.45.400 未合入、号被占，换号重做））
+**事故**：2026-10-03 08:45，另一 session 的变异检验（变异 N20：`PATHS.data_backup_repo` 写死成 `~/alpha-hive-data/_git_backup`）在
+conftest 隔离下跑 `tests/test_fg_exposure_gate_forward_test.py`——conftest 只隔离 `ALPHA_HIVE_HOME` 不隔离 HOME，测试 helper `_backup()`
+**经被测属性**取目标、`shutil.move` 过去，目标已存在 ⇒ 夹具仓库 `bk_src`（带 `.git`）被**搬进**生产备份仓库。10-05 14:46 的每日备份
+`git add -A` 把它静默封成 gitlink（mode 160000）提交进备份历史（`b43a5de`），此后每次备份都带着。**四天没有任何东西红**：
+变异脚本把 N20 记成「✅红（变异被杀）」——那是对的红，盖住了副作用；会话级真实数据根闸（v0.45.409）按「`_` 元目录 = 测试碰不到」
+整个豁免 `_git_backup`——而 v0.45.408 加 `PATHS.data_backup_repo` 那天这个前提就不成立了，注释不会执行；备份流程来者不拒。
+取证：该 session 本机会话记录里的变异脚本原文；假 HOME 下用 origin/main `82e8416b` + N20 原样复现（`bk_src` / `bk_src2` 都进了假备份仓库、闸一声没吭）。
+
+### Fixed
+- `tests/_root_data_guard.py`：新增 `DATA_ROOT_WATCHED_META = {"_git_backup"}`——`_` 元目录照旧豁免，**测试碰得到的**这个例外照样受闸
+  （它的 `.git/` 仍按 `SKIP_DIR_NAMES` 跳过）；新增 `exempt_reachable_paths()`。conftest `_guard_real_data_root` docstring 同步。
+- `data_backup/run_backup.py`：导出之后、密钥扫描之前加 `foreign_entries()` 检查——工作区里**未跟踪且不在本轮 `SHA256SUMS` 里**的条目，
+  或**任何嵌套仓库**（未跟踪的 / 已成 gitlink 的），一律拒绝提交：`stage: "foreign_entries"`、`foreign_entries`（前 50）/ `foreign_count`、退出码 2；
+  判不了（git 出错、SHA256SUMS 读不了）同样不提交。**已跟踪的陈旧文件不算**（导出不删数据根里已消失的根文件，它们早已进了历史）——
+  否则就是让生产备份天天失败。生产只读核对（`GIT_OPTIONAL_LOCKS=0`，索引 mtime 前后不变）：当前备份仓只命中 `嵌套仓库:bk_src/` 一项。
+- `scripts/alpha-hive-orchestrator.sh` Step 14：加 `foreign_entries` 分支（ERROR）。部署滞后一轮期间旧编排器落进「未识别 stage」WARN 分支、
+  照样带出 stage 名并记进 `steps_result`——兼容。
+- `tests/test_fg_exposure_gate_forward_test.py`：两份重复的 `_backup()` 收成 `_install_backup_repo()`——目标由测试按沙箱自己算、**不经被测属性写**；
+  先断言 `PATHS.data_backup_repo` 指向沙箱（算错 ⇒ 当场红、一字节不写），目标已存在也红，`rename` 代替会把夹具嵌进去的 `shutil.move`。
+
+### Added
+- `tests/test_root_data_guard.py`：
+  - `test_paths_reaching_exempt_areas_are_exactly_the_known_ones`：「测试碰不到」写成断言——枚举 `PATHS` 每个属性在沙箱数据根缺省布局下解析到哪，
+    落在闸豁免区的必须**恰好**是 `PATHS_IN_EXEMPT_AREAS_OK`（`logs_dir` / `production_sync`，写明由谁负责隔离）。等式：多了 = 新盲区，少了 = 白名单过期。
+    有它的话 v0.45.408 那天就会红。`test_exempt_reachable_check_has_teeth` 为对照。
+  - `test_real_data_root_gate_is_red_on_fixture_repo_moved_into_backup`：10-03 原形端到端（原样拷贝的 conftest 真跑内层 pytest）。
+  - 判据表 / 写入形状加 `_git_backup` 各项；良性对照删掉「改写 `_git_backup/x`」（那正是事故形状），改为备份仓 `.git` 簿记。
+- `tests/test_data_backup.py::TestForeignEntriesRefused`（6 条：对照「首次备份全是未跟踪产物」「已跟踪陈旧文件」不拦；红组未跟踪外来文件 /
+  夹具仓库搬入 / 已封 gitlink / 判不了）；Step 14 分支对照表加 `foreign_entries` 一行。
+
+### 变异实测（各在工作树独立副本、`PYTHONDONTWRITEBYTECODE=1`、`--maxfail=1000`；事后核对生产备份仓无新条目）
+| 变异 | 红的测试 |
+|---|---|
+| M1 闸重新整个豁免 `_git_backup` | 8：判据 ×3、写入形状 ×2（事故原形 / 改写备份文件）、元守卫、元守卫对照、端到端接线 |
+| M2 外来检查恒返回空 | 3：未跟踪外来 / 夹具搬入 / 已封 gitlink |
+| M3 不看已封 gitlink | 1：已封 gitlink |
+| M4b 严判（已跟踪陈旧文件也算外来） | 1：陈旧文件对照（首轮写的 M4 只改了 `git status` 解析、存活——已跟踪未改动的文件根本不进 status，变异没模拟到严判；重写后才红） |
+| M5 判不了就放行 | 1：判不了 |
+| M7 编排器删 `foreign_entries` 分支 | 1：分支对照表该行 |
+| M8 **10-03 原样重演**（N20 + 旧写法 helper，假 HOME） | 会话闸 teardown 报错、点名 `_git_backup/bk_src`（此前同条件一声不吭） |
+另：修好 helper 后单独施加 N20（假 HOME）⇒ 8 红（6 条是写前断言「没指向沙箱」），假备份仓干净。
+
+### 生产清理（未做，留给用户）
+`~/alpha-hive-data/_git_backup/bk_src` 与 HEAD 里的 gitlink 尚在。本 session 的清理命令被权限审查拦下（修改共享资源），未绕过。
+**新代码合入并经生产同步后，未清理前的每日备份会按设计拒绝提交（Step 14 ERROR）**——那是正确的报警，清掉即恢复。
+备份历史不改写：`b43a5de` 起几个提交里只是一个 gitlink 指针，夹具内容不在备份对象库里。
+
+### 全套（426 + 427 一起；与 origin/main `0533996c` 同环境对比——两边都是不带 `.git` 的源码副本）
+- 失败集合**逐条相同**（11 条）。其中 10 条是副本没有 `.git`（`test_code_version` ×2、`test_migrate_data_root`、`test_orchestrator_deployed_matches_repo` ×2、
+  `test_no_data_tracked_in_git` ×3、`test_sell_strike_integration` 与 `test_alphabot` 各 1）——**在真 worktree 里逐条重跑均过**；
+  剩 `test_economic_calendar::TestCoverageHorizon`，设计内的到期提醒，与本批无关。
+- passed 8387 → 8407（+20），逐文件收集数核对：本批新增 **18**（426 一条；427 十六条；`test_pytestmark_placement` 按测试类参数化、因新类多 1）
+  + **2** 来自 worktree 里的 iCloud 重名副本 `tests/test_child_user_site_pin 2.py`（被 `.gitignore` 的 `* [0-9].*` 忽略、但 pytest 照收；
+  `git hash-object` 与 `7fe61553` 里那份一致、无独有内容，已移入废纸篓）。
+- 两轮全量期间真实数据根**零写入**。
+
+## [0.45.426] — 2026-10-08 — Changed：`PYTHONUSERBASE` 改在 conftest 全会话钉一次（唯一出处）——测试换 HOME 不再挪子进程的用户 site；删 alphabot 夹具那行，守卫挪到中心并配对照组（只动测试，生产不变）
+
+原做于 2026-10-03、占号 0.45.400（`7fe61553`），占号提交未及时推送，400 被 F&G 子进程修复先推占用 ⇒ 未合入；本条在 main `0533996c` 上重做（cherry-pick 代码部分，CHANGELOG 重写）。
+
+0.45.397 在 alphabot 的 `home` 夹具里钉了 `PYTHONUSERBASE`，修好了那一个文件。可换 HOME 的测试文件各自在换（10-03 时 10 个，**10-08 已 13 个**）、只有那 1 个钉过：
+「换 HOME 时记得顺手钉」只写在注释 / memory 里，不会被执行；忘了只在 Mac 红（本机 numpy / pytest / jinja2 / starlette / httpx / anyio 只装在用户 site），
+CI 依赖在系统 site、永远绿 ⇒ 谁都不会红。按文件再钉是把补丁抄几份，下一个换 HOME 的文件照样会忘 ⇒ 收到 conftest。
+
+### Changed
+- `tests/conftest.py`：新增 session 级 autouse `_pin_child_user_site`——会话开始时（任何测试 / 夹具换 HOME 之前）`PYTHONUSERBASE = site.getuserbase()`，会话结束还原。
+  `site.getuserbase()` 返回本进程缓存的值、不随当前 HOME 变 ⇒ 与谁先换 HOME 无关；不换 HOME 的测试拿到同一个值，等于没钉。
+  session 级而非塞进函数级 `_isolate_env`：module / session 级夹具里起的子进程也要管到。
+- `tests/test_alphabot_launcher.py`：`home` 夹具删掉那行钉（改一行注释指向 conftest）；守卫挪走（见 Added）；`import site` 随之删。
+- `CLAUDE.md`「用户偏好」Python 硬规则：「要同时钉」改为「conftest 已全会话钉，新测试换 HOME 不用再自己钉；只有从零构造 env 的子进程要自己带」。
+
+### Added
+- `tests/test_child_user_site_pin.py`：`test_sandbox_home_keeps_child_user_site`（自 alphabot 文件挪来、不依赖任何文件的夹具；删 conftest 夹具 ⇒ 任何机器红，含 CI）
+  + `test_sandbox_home_really_moves_user_site_without_pin`（对照组：子进程 env 去掉 `PYTHONUSERBASE` 时沙箱 HOME 确实把用户 site 挪进 tmp，防尺子恒真）。
+
+### 不掩盖生产问题 / 管不到什么
+- 生产代码从不给子进程改 HOME（只改 `ALPHA_HIVE_HOME`）；launchd / .app 拿真 HOME ⇒ 全会话钉只消掉测试独有的偏差。
+- 管不到**从零构造 env**（不继承 `os.environ`）的子进程：10-08 时带沙箱 HOME 的只有 `test_scan_catchup`（照 launchd 现造环境），那里的 python 是不执行的桩。
+
+### 变异实测（工作树独立副本、`PYTHONDONTWRITEBYTECODE=1`、清 pyc、`--maxfail=1000`；事后查孤儿 osascript / 残留服务：无）
+- 删 conftest 那行钉 ⇒ 5 红：守卫、`test_demo_start_reuse_and_stop`、10-03 之后新增的 `TestNativeWindow` ×3（理由均 `No module named 'starlette'`）——新测试同样依赖这层，按文件钉早已不够。
+- 对照组不剔除 `PYTHONUSERBASE` ⇒ 只红对照组（10-03 实测，本次未改该文件）。
 
 ## [0.45.425] — 2026-10-07 — Added：异常期权流取数重试与退避——只重试「令牌等待超时」与瞬时网络错误，429 / 冷却 / 其它不重试；不改评分
 

@@ -1173,6 +1173,27 @@ def _git_repo(tmp_path, commits, name="repo"):
     return repo, shas
 
 
+def _install_backup_repo(tmp_path, states, name):
+    """把夹具 git 仓库装成「数据备份仓库」，返回 (目标, [各提交 sha])（v0.45.427）。
+
+    目标由**测试自己**按沙箱算（`_isolate_env` 把 `ALPHA_HIVE_HOME` 设成 `tmp_path`），**不经** `PATHS.data_backup_repo` 写：
+    被测的正是那个属性——它一旦算错，经它写就是写进生产备份仓库。10-03 实测：变异 N20 把它写死成
+    `~/alpha-hive-data/_git_backup`，`shutil.move` 碰上已存在的目录把夹具**搬了进去**，`bk_src` 随后被每日备份
+    当嵌套仓库提交进了备份历史（`b43a5de`），四天没人红。
+    所以：先断言属性指向沙箱里的这个位置（算错 ⇒ 在这里红、一个字节都不写），再按测试自己的路径落盘；
+    目标已存在也红（`rename` 不会把夹具嵌进去）。
+    """
+    from hive_logger import PATHS
+    repo, shas = _git_repo(tmp_path, [{f"paper_portfolio_state/{n}": b for n, b in st.items()} for st in states],
+                           name=name)
+    target = tmp_path / "_git_backup"
+    assert PATHS.data_backup_repo == target, (
+        f"PATHS.data_backup_repo 没指向沙箱（{PATHS.data_backup_repo} ≠ {target}）——拒绝落盘")
+    assert not target.exists(), f"{target} 已存在——拒绝把夹具嵌进去"
+    repo.rename(target)
+    return target, shas
+
+
 def _cash_of(files):
     return json.loads(files["meta.json"])["cash"]
 
@@ -2094,13 +2115,7 @@ class TestDataBackupRepoWiring:
         _pp._write_jsonl(_pp.EQUITY_FILE, [{"date": d, "nav": 50000.0} for d in dates])
 
     def _backup(self, tmp_path, states):
-        from hive_logger import PATHS
-        repo, _ = _git_repo(tmp_path, [{f"paper_portfolio_state/{n}": b for n, b in s.items()} for s in states],
-                            name="bk_src")
-        target = PATHS.data_backup_repo
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(repo), str(target))
-        return target
+        return _install_backup_repo(tmp_path, states, "bk_src")[0]
 
     def test_the_forward_plan_stitches_seed_frozen_anchors_and_the_backup_repo(self, pp, tmp_path):
         dates = ["2026-09-16", "2026-09-17", "2026-09-18", "2026-09-22", "2026-09-24", "2026-09-25",
@@ -2265,12 +2280,7 @@ class TestSecondReviewFindings:
         _pp._write_jsonl(_pp.EQUITY_FILE, [{"date": d, "nav": 50000.0} for d in dates])
 
     def _backup(self, tmp_path, states):
-        from hive_logger import PATHS
-        repo, shas = _git_repo(tmp_path, [{f"paper_portfolio_state/{n}": b for n, b in st.items()} for st in states],
-                               name="bk_src2")
-        PATHS.data_backup_repo.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(repo), str(PATHS.data_backup_repo))
-        return shas
+        return _install_backup_repo(tmp_path, states, "bk_src2")[1]
 
     def test_a_rebuilt_backup_with_no_overlap_is_cannot_judge_not_a_silent_continuous_replay(self, pp, tmp_path):
         """备份仓库在、是 git、不浅，但历史丢了被重建（只剩一个无关提交）⇒ 原先返回空表、09-25 之后全部从最后一个

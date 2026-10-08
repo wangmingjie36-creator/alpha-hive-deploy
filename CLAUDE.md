@@ -9,7 +9,7 @@
 
 - **⚠️ Python 解释器硬规则：扫描/脚本一律用 `/usr/local/bin/python3`（Python 3.11.1），禁用裸 `python3`**
   - 用户 Mac 有两个 Python：`/usr/bin/python3`=3.9.6（系统自带，**无 sklearn、缺 jinja2、PEP604 `X|None` 注解 import 即崩**）；`/usr/local/bin/python3`=3.11.1（python.org 安装包，软链到 `/Library/Frameworks/Python.framework`，**不是 Homebrew**；**真实环境**：sklearn/jinja2/yfinance 全装，PEP604 合法）
-  - ⚠️ 它的包分装两处：numpy / pytest / jinja2 / starlette 等**只**在用户 site（`~/Library/Python/3.11`，按 `$HOME` 解析）⇒ 测试把 HOME 指到 tmp 后再起真解释器，子进程会丢这些包——要同时钉 `PYTHONUSERBASE`（v0.45.397；详见 auto-memory `alpha-hive-environment-facts.md`）
+  - ⚠️ 它的包分装两处：numpy / pytest / jinja2 / starlette 等**只**在用户 site（`~/Library/Python/3.11`，按 `$HOME` 解析）⇒ 测试把 HOME 指到 tmp 后再起真解释器，子进程会丢这些包。`tests/conftest.py` 的 `_pin_child_user_site` 已全会话钉住 `PYTHONUSERBASE`（v0.45.426），新测试换 HOME **不用再自己钉**；只有从零构造 env（不继承 `os.environ`）的子进程要自己带上（详见 auto-memory `alpha-hive-environment-facts.md`）
   - 编排器顶部已显式 `PYTHON3="/usr/local/bin/python3"`；**手动/Claude 跑扫描必须同样显式用 `/usr/local/bin/python3 alpha_hive_daily_report.py ...`**，并 `export PATH="/usr/local/bin:$PATH"` 保证内部 spawn 的子 python 也走 3.11
   - 裸 `python3` 会解析成 3.9.6 → ML 降级 SimpleMLModel + PEP604 崩 + 缺 jinja2 崩（2026-06-30 事故根因）
   - 运行测试同理：`/usr/local/bin/python3 -m pytest`
@@ -199,6 +199,11 @@ v0.45.165 普查全仓（20 条，5 个文件）后补三条：
 `$HOME/alpha-hive-data`（**不再**兜底到代码检出：阶段 5 后那里只剩冻结旧数据，交互 shell 手动跑会静默读旧数据）。
 测试会话在 `tests/conftest.py::pytest_configure` **收集之前**设会话级 `ALPHA_HIVE_HOME` 沙箱，并记下调用时环境给
 「生产在哪」的守卫用——别把这个沙箱挪进 session 夹具（太晚，收集期冻住的常量会指向生产）。
+
+**真实数据根闸的豁免只认断言、不认注释（v0.45.427）**：`PATHS` 落在闸豁免区（`logs/`、`db_backups/`、`_` 元目录）的属性必须恰好是
+`tests/test_root_data_guard.py::PATHS_IN_EXEMPT_AREAS_OK` 里写明「谁负责隔离」的几个——新增属性落进 `_` 目录会红，让它受闸
+（`DATA_ROOT_WATCHED_META`），别往白名单加。测试写夹具**别经被测的路径属性写**（目标自己按沙箱算、写前断言属性指向它）：
+10-03 一个变异体经 `PATHS.data_backup_repo` 把夹具写进了生产备份仓库，被每日备份封进历史，四天没人红（auto-memory `alpha-hive-test-writes-production.md`）。
 
 改任何 `Path(__file__).parent / …` 之前先回答一句：**它指向代码还是数据？**
 

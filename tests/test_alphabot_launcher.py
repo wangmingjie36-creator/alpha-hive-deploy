@@ -8,15 +8,14 @@
     再次打开只开页面不重起；`--stop` 停得掉；端口被别人占 / 服务启动即死 / 依赖缺失 ⇒ 弹窗带原因，不干等；
     选的数据根原样传进服务进程的 `ALPHA_HIVE_HOME`；坏配置报出来，不静默当成首次启动；
   · 服务端（`TestShutdownEndpoint`）：`/api/shutdown` 同样要 `X-AlphaBot` 头，没接开关 ⇒ 400。
-启动器自己的配置 / 日志都在 `$HOME/Library`，这里一律把 HOME 指到 tmp——但钉住 `PYTHONUSERBASE`，
-子进程里真 Python 的 import 面不跟着挪（见 `home` 夹具）。跑 .app 启动脚本的测试一律换假 osascript
+启动器自己的配置 / 日志都在 `$HOME/Library`，这里一律把 HOME 指到 tmp；子进程里真 Python 的 import 面不跟着挪——
+conftest 的 `_pin_child_user_site` 全会话钉住 `PYTHONUSERBASE`（v0.45.426；守卫在 `test_child_user_site_pin.py`）。跑 .app 启动脚本的测试一律换假 osascript
 （`_app_exe`）：真的弹模态对话框，会卡到 pytest-timeout 并把对话框留在屏幕上。
 """
 from __future__ import annotations
 
 import os
 import plistlib
-import site
 import socket
 import subprocess
 import sys
@@ -34,10 +33,7 @@ REPO = Path(__file__).resolve().parent.parent
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
-    # 换 HOME 只为隔离启动器的 `~/Library`。可子进程里的真 Python 也按 $HOME 推用户 site-packages
-    # （本机 starlette / numpy / pytest 都装在那）：不钉住 ⇒ 真起的服务 import 即死，红的是夹具不是启动器。
-    # 生产里 .app 由 launchd 给真 HOME（实测），所以钉成本进程启动时算好的那个，子进程与本进程 import 面一致。
-    monkeypatch.setenv("PYTHONUSERBASE", site.getuserbase())
+    # 换 HOME 只为隔离启动器的 `~/Library`；子进程的用户 site 不跟着挪，由 conftest `_pin_child_user_site` 统一钉（v0.45.426）。
     monkeypatch.setenv("HOME", str(h))
     # 真起的演示服务用 mkdtemp 建状态目录、从不清：不圈住就漏进系统临时目录（复查时数到 83 个）
     monkeypatch.setenv("TMPDIR", str(tmp_path))
@@ -230,14 +226,6 @@ class TestLauncherFlow:
         while LA.probe(port)["state"] != "free" and time.monotonic() < deadline:
             time.sleep(0.2)
         assert LA.probe(port)["state"] == "free", "--stop 之后服务还在"
-
-    def test_sandbox_home_keeps_child_user_site(self, home):
-        """`home` 夹具只挪启动器的 `~/Library`，不挪子进程的用户 site-packages。
-        没有这条，漏钉 PYTHONUSERBASE 只在「依赖装在用户 site」的机器上红（上一条红成 starlette 缺失），
-        CI 上永远绿——这条在哪都红：沙箱 HOME 下推出的用户 site 必然是另一个路径。"""
-        child = subprocess.run([sys.executable, "-c", "import site; print(site.getusersitepackages())"],
-                               capture_output=True, text=True, check=True).stdout.strip()
-        assert child == site.getusersitepackages()
 
     def test_missing_dependency_names_the_module(self, tmp_path, home):
         """依赖真缺了（starlette / uvicorn 没装）⇒ 服务 import 即死：弹窗要带出缺的是哪个模块，不干等超时。
