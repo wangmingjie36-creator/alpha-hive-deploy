@@ -2208,3 +2208,55 @@ class TestLegacyManifestMigrationInRun:
         assert st["stage"] == "git_error" and "退役失败" in st["error"], st
         assert "manifest_summary" not in st
         assert export_mod.SUMS_NAME not in os.listdir(bk)
+
+
+class TestManifestSecondReview:
+    """v0.45.430 二次检查补：清单坏了要响亮、不许退回旧清单；SHA256SUMS 只按 "\\n" 切。"""
+
+    @staticmethod
+    def _export_with_legacy(tmp_path) -> Path:
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "rss.xml").write_text("<rss/>")
+        (out / "MANIFEST.json").write_text(json.dumps({"databases": {}, "state_dirs": {}, "root_files": [
+            {"rel": "rss.xml", "sha256": sha256_file(out / "rss.xml")}]}))
+        return out
+
+    def test_corrupt_new_manifest_is_loud_and_never_falls_back_to_legacy(self, tmp_path, capsys):
+        """旧写法：新清单解析失败 ⇒ `continue` ⇒ 退回陈旧的 MANIFEST.json，照它还原、rc=0。"""
+        out = self._export_with_legacy(tmp_path)
+        (out / export_mod.MANIFEST_NAME).write_text('{"root_files": [')   # 截断
+        with pytest.raises(ValueError, match="不是合法 JSON"):
+            restore_mod.find_manifest(out)
+        dest = tmp_path / "dest"
+        assert restore_mod.main(["--export-dir", str(out), "--dest-root", str(dest), "--dbs"]) == 1
+        assert not (dest / "rss.xml").exists(), "不许照旧清单还原"
+        assert "不退回其他清单" in capsys.readouterr().err
+
+    def test_named_file_that_is_not_a_manifest_raises(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / export_mod.MANIFEST_NAME).write_text(_PWA_MANIFEST)
+        with pytest.raises(ValueError, match="不是备份清单"):
+            restore_mod.find_manifest(out)
+
+    def test_no_manifest_is_rc1_unless_state_restore_was_skipped(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        assert restore_mod.main(["--export-dir", str(out), "--dest-root", str(tmp_path / "d1"), "--dbs"]) == 1
+        assert restore_mod.main(["--export-dir", str(out), "--dest-root", str(tmp_path / "d2"), "--dbs",
+                                 "--skip-state"]) == 0
+
+    def test_sums_parsing_survives_unicode_line_separators_in_file_names(self, tmp_path):
+        """`str.splitlines()` 会在 U+2028 处断行 ⇒ 半行没有「两个空格」⇒ IndexError。文件名里它是合法字符。"""
+        bk = tmp_path / "bk"
+        bk.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(bk), check=True, capture_output=True)
+        odd = "a b.json"
+        (bk / odd).write_text("{}")
+        (bk / export_mod.MANIFEST_NAME).write_text('{"root_files": []}')
+        (bk / export_mod.SUMS_NAME).write_text(f"{sha256_file(bk / odd)}  {odd}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(bk), check=True, capture_output=True)
+        assert odd in "".join(run_backup._tracked_paths(bk)), "夹具前提：怪名文件确实进了索引"
+        assert run_backup.sums_paths_not_tracked(bk) == []
+        assert run_backup.foreign_entries(bk) == []

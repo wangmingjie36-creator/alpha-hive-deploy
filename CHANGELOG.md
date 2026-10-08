@@ -60,11 +60,19 @@ v0.45.342（09-24）把网站 PWA 的 `manifest.json` 纳入 `ROOT_FILE_GLOBS` �
 - `export.case_collisions`：大小写 / 规范化不敏感的盘上会落进同一目录项的拼写组，**逐级比前缀**（`Reports/a` 与 `reports/b` 也算）；一字不差的重复不算。`write_manifest_and_sums` 写任何东西**之前**查（导出路径 + 元数据文件），撞了就抛、什么都不写 ⇒ `run_backup` 记 `stage="export"`、不提交。
 - `run_backup.sums_paths_not_tracked`：`git add -A` 之后、提交之前查 `SHA256SUMS` 列的路径（连同元数据文件）在索引里是否以**精确拼写**存在；不符 ⇒ `stage="git_error"`、`sums_not_tracked` / `sums_not_tracked_count`、不提交。09-24 那天它就会红；也接住「备份仓忽略规则吞了导出文件」。复用 `git_error`（与现有「提交后工作树不干净」同类），编排器 Step 14 不用改。
 
-### 守卫（`tests/test_data_backup.py`，+15 条，114 通过）
+### 守卫（`tests/test_data_backup.py`，+19 条；合并 v0.45.427 后全文件 125 通过）
 - `TestNoCaseCollisionsInBackup`：`case_collisions` 判文件 / 目录分量 / NFC-NFD；**声明的导出范围**（`db_exports/` + `STATE_DIRS` + `ROOT_FILE_GLOBS` 字面名与通配模式 + 元数据）无撞名，正对照喂旧名必红；全范围端到端导出后每条 `SHA256SUMS` 都以精确拼写存在且哈希相符；撞名时一个元数据文件都不写；磁盘旧目录项退役而网站 manifest 保留。
 - `TestRestoreAcrossManifestRename`：新布局往返；照生产手搭旧布局 ⇒ 不把元数据当网站 manifest 恢复、报出来、rc=1；旧名只按精确拼写认。
 - `TestLegacyManifestMigrationInRun`：从旧布局仓（`core.ignorecase=true`）升级一轮 ⇒ 索引有 `manifest.json`（内容正确）+ `BACKUP_MANIFEST.json`、无 `MANIFEST.json`，第二轮不再退役，**从远端 clone 出来恢复** rc=0 且 manifest 原样；去掉索引退役 ⇒ APFS 上清单 / 索引检查红、不提交（大小写敏感的盘上 skip，生产 Mac 正是 APFS）；忽略规则吞文件 ⇒ 同一检查红（平台无关）；退役失败 ⇒ `git_error` 且未导出。
 - 变异（`PYTHONDONTWRITEBYTECODE=1`，跑完逐字节还原核对）：元数据名改回旧名 7 红；**旧代码路径**（旧名 + 不查撞名）8 红，端到端那条报的正是生产症状 `SHA256SUMS 声称持有…：['manifest.json']`；索引退役改成空操作 / 恢复不核哈希各至少 1 红。
+
+### 二次检查（同日，独立审查代理 + 生产只读核对 + 上线彩排）
+- **修 1（我引入的退化）**：`restore.find_manifest` 曾把「按名字认出来的清单读不了 / 不是备份清单」当成「没有」，`continue` 去找旧名 ⇒ 新清单损坏时**静默拿陈旧的 `MANIFEST.json` 还原**、rc=0；旧代码遇到坏清单是直接崩的。现在抛 `ValueError`、不往下找，`main` 报 🚨、rc=1；要还原状态却找不到任何清单也改 rc=1（此前 0，`--skip-state` 仍 0）。
+- **修 2**：读 `SHA256SUMS` 改 `split("\n")`（`sums_paths_not_tracked` 与 427 的 `foreign_entries` 同改）——`splitlines()` 会在 U+2028 / `\x0b` / `\x1c` 等（文件名里合法）处断行 ⇒ IndexError。生产路径全 ASCII，未触发过。
+- 守卫 +4（`TestManifestSecondReview`）；变异三处各自改回 ⇒ 对应测试红（1 / 2 / 1）。
+- **生产只读核对**（`--no-optional-locks`）：拿新检查模拟生产 HEAD `5b85363` 的 3679 条清单 ⇒ 不在索引的只有 `manifest.json`（与上线那轮才生成的 `BACKUP_MANIFEST.json`），无其他误报；全局 / `info/exclude` / `.gitignore` 忽略规则都没有；无非 ASCII 路径；索引无 gitlink（427 的外来条目检查不会挡上线那轮）；`case_collisions` 新名干净、旧名正好抓到这一对；自 `ff2a5b8` 起 14/14 个提交都列着 `manifest.json`。仓库外（`~/.claude/scripts` / scheduled-tasks / skills / LaunchAgents）无 `MANIFEST.json` / `SHA256SUMS` 读者。
+- **上线彩排**：生产备份仓 `--no-hardlinks` 完整复制到 scratchpad、删掉指向生产的 `origin`、推到临时空远端，数据根只读导出 ⇒ `stage=done`、`legacy_manifest_retired: true`、真实密钥扫描 0 命中、20.3 s、154.5 MB。提交形状 `R099 MANIFEST.json → BACKUP_MANIFEST.json` + `A manifest.json`，`HEAD:manifest.json` 哈希 267f16ab… = 数据根；第二轮 `done` 且不再退役；新布局从远端 clone 恢复 rc=0、`manifest.json` 原样；生产 HEAD（旧布局）恢复 rc=1、报 `manifest.json` 哈希不符、不拷。彩排目录已删，生产备份仓仍 `5b85363`、工作树干净。
+- 审查的其余观察不改：不存在的 `--export-dir` 现在抛 FileNotFoundError（比旧的只警告更响）；单独手跑 `export.main` 不做索引退役（只有手动 `git add` 才会重现漂移，生产路径不经过它）；撞名中止后工作树留着未提交的导出（不提交、下一轮重导）。
 
 ### 注意
 - **备份仓布局变化（历史不重写）**：升级后第一个提交 = 删 `MANIFEST.json` + 加 `BACKUP_MANIFEST.json` + 加 `manifest.json`（git 可能显示成一次改名）。此前的提交只有 `MANIFEST.json`，恢复照旧能读，但那批提交里没有网站 manifest。

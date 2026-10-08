@@ -22,18 +22,22 @@ def find_manifest(export_dir: Path) -> Path | None:
 
     旧名只按**精确拼写**认（`os.listdir`，不用 `.exists()`）：大小写不敏感的盘上 `export_dir / "MANIFEST.json"`
     也能打开网站的 `manifest.json`，新布局的产物缺了新清单时会把 PWA manifest 当成备份清单读。
-    认出来还要长得像备份清单（有 `root_files`），否则同样当没有。
+    按名字认出来的文件读不了、或不是备份清单（没有 `root_files`）⇒ 抛 `ValueError`，**不往下找**
+    （二次检查补）：新清单坏了却退回旧名，会拿一份陈旧清单冒充这次备份的内容；旧代码遇到坏清单是直接崩的。
     """
     export_dir = Path(export_dir)
+    names = os.listdir(export_dir)
     for name in (MANIFEST_NAME, LEGACY_MANIFEST_NAME):
-        if name in os.listdir(export_dir):
-            fp = export_dir / name
-            try:
-                data = json.loads(fp.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if isinstance(data, dict) and "root_files" in data:
-                return fp
+        if name not in names:
+            continue
+        fp = export_dir / name
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise ValueError(f"{fp} 读不了或不是合法 JSON：{e}") from e
+        if not (isinstance(data, dict) and "root_files" in data):
+            raise ValueError(f"{fp} 不是备份清单（没有 root_files）")
+        return fp
     return None
 
 
@@ -120,7 +124,8 @@ def restore_state(export_dir: Path, dest_root: Path, state_dirs: list[str], root
 
 
 def main(argv=None) -> int:
-    """退出码：0 = 全部还原；1 = 有根文件对不上清单哈希或缺失（v0.45.430，此前恒 0）。"""
+    """退出码：0 = 全部还原；1 = 有根文件对不上清单哈希或缺失，或要还原状态却拿不到可用的清单
+    （v0.45.430，此前恒 0）。"""
     import argparse
     ap = argparse.ArgumentParser(description="阶段 3.4 恢复演练：从导出产物重建库 + 还原状态文件")
     ap.add_argument("--export-dir", required=True, help="导出产物目录（如 git clone 出来的 _git_backup）")
@@ -150,7 +155,10 @@ def main(argv=None) -> int:
         # 状态目录/根文件清单读元数据清单（导出那次实际记录了什么），
         # 不读 `export.py` 现在的 STATE_DIRS 常量——恢复的是"那次备份实际包含的东西"，
         # 不是"当前代码认为该包含的东西"，两者在代码演进后可能不同。
-        manifest_fp = find_manifest(export_dir)
+        try:
+            manifest_fp, bad_manifest = find_manifest(export_dir), None
+        except ValueError as e:
+            manifest_fp, bad_manifest = None, str(e)
         if manifest_fp is not None:
             manifest = json.loads(manifest_fp.read_text(encoding="utf-8"))
             state_dirs = list(manifest.get("state_dirs", {}).keys())
@@ -172,8 +180,12 @@ def main(argv=None) -> int:
                       "这批备份从未含有网站 manifest。它由 report_web_assets 每轮重新生成，gh-pages 上也有一份。",
                       file=sys.stderr)
         else:
-            print(f"⚠️ 没有 {MANIFEST_NAME}（或旧名 {LEGACY_MANIFEST_NAME}），跳过状态文件还原（只重建了库）",
-                  file=sys.stderr)
+            rc = 1   # 要还原状态却拿不到清单 = 没还原，不是成功（v0.45.430 二次检查；此前 rc=0）
+            if bad_manifest:
+                print(f"🚨 清单不可用，不退回其他清单，状态文件未还原：{bad_manifest}", file=sys.stderr)
+            else:
+                print(f"⚠️ 没有 {MANIFEST_NAME}（或旧名 {LEGACY_MANIFEST_NAME}），跳过状态文件还原（只重建了库）",
+                      file=sys.stderr)
 
     print(json.dumps(results, ensure_ascii=False, indent=2))
     return rc

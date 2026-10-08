@@ -181,7 +181,8 @@ def sums_paths_not_tracked(backup_dir: Path) -> list[str]:
     也接住大小写之外的同类漏洞（备份仓的忽略规则吞掉了一个导出文件）。git 失败 ⇒ 抛 RuntimeError。
     """
     listed = set(export_mod.META_FILES)
-    for line in (Path(backup_dir) / export_mod.SUMS_NAME).read_text(encoding="utf-8").splitlines():
+    # 只按 "\n" 切：splitlines() 还会在 U+2028 / \x0b / \x1c 等字符处断行（文件名里合法）⇒ IndexError
+    for line in (Path(backup_dir) / export_mod.SUMS_NAME).read_text(encoding="utf-8").split("\n"):
         if line.strip():
             listed.add(line.split("  ", 1)[1])
     tracked = {unicodedata.normalize("NFC", p) for p in _tracked_paths(backup_dir)}
@@ -204,7 +205,8 @@ def foreign_entries(backup_dir: Path) -> list[str]:
     git 命令失败 ⇒ 抛 `RuntimeError`（判不了就不提交，由调用方记 stage）。
     """
     produced = set(EXPORT_META_FILES)
-    for line in (Path(backup_dir) / export_mod.SUMS_NAME).read_text(encoding="utf-8").splitlines():
+    # 只按 "\n" 切：splitlines() 还会在 U+2028 / \x0b / \x1c 等字符处断行（文件名里合法）⇒ IndexError
+    for line in (Path(backup_dir) / export_mod.SUMS_NAME).read_text(encoding="utf-8").split("\n"):
         if line.strip():
             produced.add(line.split("  ", 1)[1])
     produced = {unicodedata.normalize("NFC", p) for p in produced}
