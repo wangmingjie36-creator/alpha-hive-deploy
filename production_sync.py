@@ -21,6 +21,10 @@ origin/main，生产 checkout 从不自动 pull。更要紧的是**生产跑哪�
 阶段 6 的提示：解除跟踪的提交快进进来时，git 会把那些文件从工作区**删掉**；工作区里有「被跟踪且已
 修改」的文件则快进**中止**（outcome 非 OK，`alert_manager` 会红）——不要在生产 checkout 里手改被跟踪文件。
 
+数据根迁移阶段 8（v0.45.431）：生产代码换成独立克隆 `~/alpha-hive-prod`。编排器设 `ALPHA_HIVE_PRODUCTION_CLONE=1`
+时，`main()` 在快进**之前**调 `production_clone.ensure_guard`（钩子拒绝一切让 main 偏离 origin/main 的写入），
+结局写进结果的 `clone_guard`。没设就与此前完全相同（切换前 / 回退后）。设计与两条拒绝见 `production_clone` docstring。
+
 `merge-base --is-ancestor` 的退出码有**三**个含义：0 / 1 是两种正常答案，其他是真出错。
 不许揉成两个（同 `git check-ignore` 0/1/128 的教训）。
 """
@@ -177,11 +181,25 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     from agent_toolbox import GitHubTool   # 与 report_deployer 推送用的是同一个仓库路径解析
-    res = sync_before_scan(GitHubTool(), today=args.date)
+    git = GitHubTool()
+    # 阶段 8（v0.45.431）：编排器声明「这里应是生产克隆」⇒ 快进**之前**补齐 / 核对守卫（钩子先于本轮 pull 生效，
+    # pull 本身就是对 reference-transaction 钩子的一次正对照：钩子误拦快进 ⇒ ff_refused ⇒ 既有 P1）。
+    # 用环境变量不用 CLI 参数：不认识它的旧代码会忽略、照常快进，不会因 argparse 报错卡在旧提交上互锁。
+    # ensure_guard 从不抛；结局与快进互不影响（守卫不合格也照常同步、照常扫描），各自红各自的。
+    guard = None
+    import production_clone
+    if os.environ.get(production_clone.PRODUCTION_CLONE_ENV) == "1":
+        guard = production_clone.ensure_guard(git.repo_path)
+    res = sync_before_scan(git, today=args.date)
+    if guard is not None:
+        res["clone_guard"] = guard
     written = write_result(res)
     print(f"production_sync: {res['outcome']} | before={(res['before'] or '')[:7]} "
           f"after={(res['after'] or '')[:7]} origin={(res['origin'] or '')[:7]} "
           f"behind={res['behind']} ahead={res['ahead']} | {res['detail'] or ''} | → {written}")
+    if guard is not None:
+        print(f"production_clone: {'ok' if guard.get('ok') else 'NOT OK'} | actions={guard.get('actions') or {}} | "
+              f"{'；'.join(guard.get('problems') or []) or '—'}")
     return 0 if res["outcome"] in OK_OUTCOMES else 1
 
 
