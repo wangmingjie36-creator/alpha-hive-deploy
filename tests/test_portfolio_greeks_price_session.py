@@ -291,6 +291,7 @@ class TestNoAsOfPriceIsStaleNotSilent:
         assert "1 stale" in r["recommendation"]["reason"]
         chk = r["price_check"]
         assert chk["n_stale"] == 1 and chk["stale"][0]["ticker"] == "AMZN" and chk["stale"][0]["session"] == PREV
+        assert chk["n_unpriced"] == 0, "陈旧 ≠ 取不到价：看到了旧价的行不能再算一遍「取不到」（v0.45.435）"
         assert pg.price_check_stats()["n_stale"] == 1               # → scan_timing → status.json
 
     def test_error_log_names_ticker_and_session(self, world, caplog):
@@ -404,6 +405,7 @@ class TestLateAndBackfillRuns:
         opt = _rows(res, "option")
         assert all(r["quote_missing"] and r.get("quote_stale") and r["vega_dollar_per_pt"] is None for r in opt)
         assert res["price_check"]["n_quote_stale"] == 2 and res["aggregate"]["band_status"] == "unknown"
+        assert res["price_check"]["n_quote_missing"] == 0, "报价错场不能再算一遍「缺报价」（v0.45.435）"
 
     def test_weekend_as_of_uses_the_last_session(self, world):
         """as_of 是周六：那天没有行情，周五的收盘就是对的价，不能判陈旧。"""
@@ -560,7 +562,8 @@ class TestScanTimingCarriesThePriceCheck:
         chk = _stale_check(world)
         line = stt.summary_line({"phases": {}, "counters": {"portfolio_greeks": chk}})
         assert "Greeks 陈旧价 1 行" in line and f"AMZN@{PREV}" in line
-        clean = dict(chk, n_stale=0, stale=[], n_quote_stale=0, spy={"stale": False}, execution_blocked=None)
+        clean = dict(chk, n_stale=0, stale=[], n_quote_stale=0, spy={"stale": False}, execution_blocked=None,
+                     hedge_undecided=None, gaps=[])
         assert "Greeks" not in stt.summary_line({"phases": {}, "counters": {"portfolio_greeks": clean}})
 
 
@@ -594,6 +597,112 @@ class TestAlertManagerSeesStalePrices:
     def test_missing_counter_is_a_skipped_check_not_a_clean_one(self, tmp_path):
         a, hits = self._analyze(tmp_path, {"portfolio_greeks": None})
         assert hits == [] and any("组合 Greeks" in s for s in a.checks_skipped), a.checks_skipped
+
+
+# ── v0.45.435：不是陈旧、是缺——对冲决定做不出来也要红 ───────────────────────────
+# 生产 2026-09-15~25 连续 7 天 band unknown、零告警：09-15~22 BRK-B 的 β 取不到（Twelve Data 代码映射），
+# 09-24/25 SPY 价与全部 8 张期权报价取不到。v0.45.423 只让「陈旧」会红，这几种「缺」照旧静默。
+
+def _td_down_for(monkeypatch, *tickers):
+    """Twelve Data 对这几只什么都不给；其余照旧（CBOE 由 world.payloads 决定给不给）。"""
+    orig, down = td._fetch_rows, {t.upper() for t in tickers}
+    monkeypatch.setattr(td, "_fetch_rows", lambda ticker, days, end_date=None:
+                        None if ticker.upper() in down else orig(ticker, days, end_date))
+
+
+def _outage_like_09_24(world, monkeypatch):
+    """CBOE 整源取不到 + Twelve Data 取不到 SPY；覆盖账本持有 SPY（09-24 的形状）。"""
+    _td_down_for(monkeypatch, "SPY")
+    world.book()
+    _jsonl(pg.POSITIONS_FILE, [{"ticker": "SPY", "shares": -10, "avg_price": 770.0}])
+    pg.META_FILE.write_text(json.dumps({"cash": 7700.0}), encoding="utf-8")
+    return pg.compute_day(AS_OF, beta_fn=_beta1)
+
+
+def _beta_missing_for(*tickers):
+    return lambda tk, as_of: (None, None) if tk in tickers else (1.0, "ols60")
+
+
+class TestIncompleteDataIsNotSilent:
+
+    def test_total_outage_is_counted_as_missing_not_stale(self, world, monkeypatch):
+        res = _outage_like_09_24(world, monkeypatch)
+        chk = res["price_check"]
+        assert res["aggregate"]["band_status"] == "unknown"
+        assert chk["n_stale"] == 0 and chk["n_quote_stale"] == 0, chk           # 没看到价 ≠ 看到旧价
+        assert [u["ticker"] for u in chk["unpriced"]] == ["SPY"] and chk["n_unpriced"] == 1, chk
+        assert sorted(chk["quote_missing"]) == sorted([JNJ_CALL, JNJ_PUT]), chk
+        assert chk["nav_missing"] == ["hedge_overlay"], chk
+        assert "partial data" in (chk["hedge_undecided"] or ""), chk
+
+    def test_total_outage_logs_an_error_naming_the_gaps(self, world, monkeypatch, caplog):
+        with caplog.at_level(logging.INFO):
+            _outage_like_09_24(world, monkeypatch)
+        msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any("数据不全" in m and "取不到价 1 行（SPY）" in m and "缺报价 2 张" in m for m in msgs), msgs
+
+    def test_missing_beta_alone_is_named(self, world):
+        """BRK-B 那 5 天：价、报价都在，只有一只的 β 取不到——整本账不对冲。"""
+        world.closed()
+        world.book()
+        chk = pg.compute_day(AS_OF, beta_fn=_beta_missing_for("TSLA"))["price_check"]
+        assert chk["beta_missing"] == ["TSLA"] and chk["n_beta_missing"] == 1, chk
+        assert chk["n_unpriced"] == 0 and chk["n_stale"] == 0, chk
+        assert "1 beta missing" in (chk["hedge_undecided"] or ""), chk
+        assert any("缺 β 1 行（TSLA）" in g for g in chk["gaps"]), chk["gaps"]
+
+    def test_out_of_band_without_a_spy_price_is_undecided(self, world, monkeypatch):
+        """覆盖账本没仓（NAV 照样算得出）、组合出带，SPY 两源都取不到 ⇒ 判出了带外却下不了单。"""
+        _td_down_for(monkeypatch, "SPY")
+        world.closed(tickers=("AMZN", "TSLA", "JNJ"))
+        world.book()
+        res = pg.compute_day(AS_OF, beta_fn=_beta1)
+        assert res["aggregate"]["band_status"] == "above", res["aggregate"]["band_status"]
+        assert res["recommendation"]["action"] == "hold"
+        assert "SPY price unavailable" in (res["price_check"]["hedge_undecided"] or ""), res["price_check"]
+
+    def test_a_decided_day_is_not_undecided(self, world):
+        world.closed()
+        world.book()
+        chk = pg.compute_day(AS_OF, beta_fn=_beta1)["price_check"]
+        assert chk["hedge_undecided"] is None and chk["gaps"] == [], chk
+        assert (chk["n_unpriced"], chk["n_quote_missing"], chk["n_beta_missing"], chk["nav_missing"]) == (0, 0, 0, [])
+
+    def test_alert_manager_raises_p2_for_missing_data(self, world, monkeypatch, tmp_path):
+        import alert_manager as am
+        _outage_like_09_24(world, monkeypatch)
+        a, hits = TestAlertManagerSeesStalePrices._analyze(tmp_path, {"portfolio_greeks": pg.price_check_stats()})
+        assert len(hits) == 1 and hits[0].level == am.AlertLevel.MEDIUM, [x.message for x in a.alerts]
+        assert "数据不全" in hits[0].message and "取不到价 1 行（SPY）" in hits[0].details["缺口"], hits[0].message
+
+    def test_alert_manager_names_the_missing_beta(self, world, tmp_path):
+        world.closed()
+        world.book()
+        pg.compute_day(AS_OF, beta_fn=_beta_missing_for("TSLA"))
+        _, hits = TestAlertManagerSeesStalePrices._analyze(tmp_path, {"portfolio_greeks": pg.price_check_stats()})
+        assert len(hits) == 1 and "缺 β 1 行（TSLA）" in hits[0].details["缺口"], [h.message for h in hits]
+
+    def test_stale_alert_also_carries_the_other_gaps(self, world, tmp_path):
+        """陈旧 + 缺 β 同一天：一条告警（不重复报），缺口挂在「另缺」里。"""
+        world.bars_end = PREV
+        world.closed(tickers=("TSLA", "JNJ", "SPY"))
+        world.book()
+        pg.compute_day(AS_OF, beta_fn=_beta_missing_for("TSLA"))
+        _, hits = TestAlertManagerSeesStalePrices._analyze(tmp_path, {"portfolio_greeks": pg.price_check_stats()})
+        assert len(hits) == 1 and "陈旧" in hits[0].message, [h.message for h in hits]
+        assert "缺 β 1 行（TSLA）" in hits[0].details["另缺"], hits[0].details
+
+    def test_old_scan_counters_without_the_key_stay_quiet(self, tmp_path):
+        """v0.45.423~434 的计数没有 hedge_undecided：不猜、不报。"""
+        old = {"as_of": AS_OF, "n_stale": 0, "n_quote_stale": 0, "spy": {"stale": False}, "execution_blocked": None}
+        _, hits = TestAlertManagerSeesStalePrices._analyze(tmp_path, {"portfolio_greeks": old})
+        assert hits == []
+
+    def test_summary_line_says_no_hedge_for_missing_data(self, world, monkeypatch):
+        import scan_timing as stt
+        _outage_like_09_24(world, monkeypatch)
+        line = stt.summary_line({"phases": {}, "counters": {"portfolio_greeks": pg.price_check_stats()}})
+        assert "Greeks 数据不全不对冲" in line and "取不到价 1 行（SPY）" in line, line
 
 
 class TestFormingBarNeverPassesAsAClose:

@@ -447,6 +447,8 @@ class AlertAnalyzer:
         v0.45.103~422 同日跑恒拿前一交易日的收盘算 $Delta、SPY 按昨收「收盘成交」，零告警——那个失败被
         「5 个日历日内最后一根」的容差改写成了正常值。现在陈旧价不进计算（当日不对冲），这里让它有人看见：
         有行判陈旧 / SPY 价不是当天那一场 / 有合约报价属于别的场次 / 因 SPY 不是官方收盘而拒绝成交 ⇒ P2。
+        v0.45.435：都不是、但对冲决定做不出来（`hedge_undecided`：两源取不到价 / 缺报价 / 缺 β / 缺 NAV）⇒ 另一条 P2
+        （「数据不全」）；陈旧那条也把这些缺口挂进「另缺」。旧版扫描的计数没有这个键 ⇒ 不报（不猜）。
         `scan_timing` 整段缺失已由 `_check_deploy_and_code_sync` 报过，这里不重复；
         `counters.portfolio_greeks` 不是对象 ＝ 本轮没跑到组合 Greeks（钩子异常 / 早退 / 旧版扫描）⇒ checks_skipped。
         """
@@ -461,7 +463,25 @@ class AlertAnalyzer:
         n_stale = int(pg.get("n_stale") or 0)
         n_quote_stale = int(pg.get("n_quote_stale") or 0)
         blocked = pg.get("execution_blocked")
+        undecided = pg.get("hedge_undecided")         # v0.45.435：不是陈旧、是缺 ⇒ 对冲决定做不出来
+        gaps = "；".join(str(g) for g in pg.get("gaps") or []) or "—"
         if not (n_stale or n_quote_stale or spy.get("stale") or blocked):
+            if undecided:
+                # 2026-09-15~25 连续 7 天 unknown（BRK-B β 取不到、SPY 价与期权报价取不到），只陈旧会红 ⇒ 零告警
+                self.alerts.append(Alert(
+                    AlertLevel.MEDIUM,
+                    f"📊 【P2 中】组合 Greeks：数据不全，{pg.get('expected_session') or pg.get('as_of')} "
+                    f"的对冲决定做不出来（{gaps}），当日不对冲",
+                    {
+                        "缺口": gaps,
+                        "决定": undecided,
+                        "SPY": f"{spy.get('price')} @ {spy.get('session')}（{spy.get('source')}）",
+                        "影响": "覆盖层今天不动；连续几天都这样 = 对冲整段停摆",
+                        "建议": "看 hedge_state/greeks_<日期>.json 的 price_check 与 rows；取不到价 = CBOE 与 "
+                                "Twelve Data 都没给，缺 β = 日线不够 60 个共同收益（常见于代码映射 / 新票）",
+                    },
+                    ["portfolio_greeks", "data_quality"]
+                ))
             return
         names = "，".join(dict.fromkeys(f"{x.get('ticker')} {x.get('seen_price')}@{x.get('session')}"
                                         for x in pg.get("stale") or []))
@@ -476,6 +496,7 @@ class AlertAnalyzer:
                 "SPY": f"{spy_px} @ {spy.get('session')}（{spy.get('source')}）",
                 "报价错场": n_quote_stale,
                 "拒绝成交": blocked or "—",
+                "另缺": gaps,
                 "影响": "这些行不进 $Delta / 净值 / 成交，β·Δ 判 unknown，当日不对冲",
                 "建议": "看 hedge_state/greeks_<日期>.json 的 price_check；CBOE 盘中陈旧文件 / 整源停更 / "
                         "过了次日开盘才补跑时会出现",

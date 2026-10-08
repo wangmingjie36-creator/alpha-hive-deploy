@@ -67,6 +67,9 @@ v0.45.103~422 用 Twelve Data 日线「≤ as_of、5 个日历日内最后一根
   `scan_timing.counters()["portfolio_greeks"]` → status.json → alert_manager 都会响。
 - SPY 只有拿到 as_of 的**官方收盘**才成交（`fill: close` 名副其实）；盘中跑只算不成交。
 - 周末 / 假日的 as_of 用之前最近一个交易日那一场（那天没有行情），见 `_expected_session`。
+- 「陈旧」之外的「缺」（v0.45.435）：两源都取不到价、缺报价、缺 β、缺 NAV ⇒ 对冲决定做不出来
+  （`price_check.hedge_undecided`），同一条观测链（ERROR / status.json / alert_manager P2）也会响。
+  此前只有陈旧会红：2026-09-15~25 连续 7 天 unknown、覆盖层停摆，零告警。
 
 没做的事（已知局限）
 --------------------
@@ -1107,25 +1110,76 @@ _PRICE_CHECK_LIST_MAX = 20      # 进 status.json 的明细条数上限（计数
 
 def price_check_stats() -> Optional[Dict]:
     """本进程最近一次 compute_day / run_for_date 的标的价场次核对（v0.45.423）。
-    `scan_timing.counters()["portfolio_greeks"]` 读它 → status.json → alert_manager（陈旧价 / 拒绝成交 → P2）。
+    `scan_timing.counters()["portfolio_greeks"]` 读它 → status.json → alert_manager（陈旧价 / 拒绝成交 /
+    数据不全致对冲决定做不出来 → P2；后者 v0.45.435）。
     本进程没跑过 → None：None 是「没测到」，{} 会被读成「测过为零」。"""
     return dict(_LAST_PRICE_CHECK) if _LAST_PRICE_CHECK is not None else None
 
 
-def _price_check(as_of: str, rows: List[Dict], spy_mark: Dict) -> Dict:
-    """这一天的每个价是不是 as_of 那一场的。审计文件、日报、status.json、alert_manager 读的都是这一份。"""
+def _hedge_undecided(rec: Optional[Dict]) -> Optional[str]:
+    """今天的对冲决定**做不出来**（不是「决定不对冲」）⇒ 原因；做得出来 ⇒ None。
+
+    两种：带状判 unknown（缺价 / 缺报价 / 缺 β / 缺 NAV，任一行算不出 β·$Delta）；判出带外却缺 NAV / SPY 价
+    下不了单。inside（不用对冲）/ empty（没仓）是决定，不算。v0.45.435：此前只有「价陈旧」会红——
+    2026-09-15~25 生产连续 7 天 unknown（BRK-B 的 β 取不到 5 天、09-24/25 SPY 价与全部期权报价取不到），
+    零告警，覆盖层整段停摆没人知道。"""
+    rec = rec or {}
+    status = rec.get("band_status")
+    if status == "unknown" or (status in ("above", "below") and rec.get("action") == "hold"):
+        return str(rec.get("reason") or status)
+    return None
+
+
+def _price_check(as_of: str, rows: List[Dict], spy_mark: Dict, rec: Optional[Dict] = None,
+                 nav_missing: Optional[List[str]] = None) -> Dict:
+    """这一天的每个价是不是 as_of 那一场的，以及对冲决定做没做得出来。
+    审计文件、日报、status.json、alert_manager 读的都是这一份。
+
+    `unpriced`（v0.45.435）= 两源都没给出价（不是陈旧：根本没看到价）、或持仓记录不完整的行；
+    `quote_missing` 不含报价错场（那是 `quote_stale`）。`hedge_undecided` 见 `_hedge_undecided`。"""
+    def _ids(pred) -> List[str]:
+        return list(dict.fromkeys(str(r.get("symbol") or r.get("ticker")) for r in rows if pred(r)))
     stale = [{"ticker": r.get("ticker"), "kind": r.get("kind"), "symbol": r.get("symbol"),
               "seen_price": r.get("stale_price"), "session": r.get("price_session"),
               "source": r.get("price_source")}
              for r in rows if r.get("price_stale")]
+    unpriced = [{"ticker": r.get("ticker"), "kind": r.get("kind"), "symbol": r.get("symbol"),
+                 "source": r.get("price_source")}
+                for r in rows if r.get("price_missing") and not r.get("price_stale")]
     quote_stale = sorted({str(r.get("symbol") or r.get("ticker")) for r in rows if r.get("quote_stale")})
-    return {"as_of": as_of, "expected_session": _expected_session(as_of), "version": _VERSION,
+    quote_missing = _ids(lambda r: r.get("quote_missing") and not r.get("quote_stale"))
+    beta_missing = list(dict.fromkeys(str(r.get("ticker")) for r in rows if r.get("beta_missing")))
+    chk = {"as_of": as_of, "expected_session": _expected_session(as_of), "version": _VERSION,
             "n_rows": len(rows), "n_priced": sum(1 for r in rows if _pos(r.get("price")) is not None),
             "n_stale": len(stale), "stale": stale[:_PRICE_CHECK_LIST_MAX],
             "n_quote_stale": len(quote_stale), "quote_stale": quote_stale[:_PRICE_CHECK_LIST_MAX],
+            "n_unpriced": len(unpriced), "unpriced": unpriced[:_PRICE_CHECK_LIST_MAX],
+            "n_quote_missing": len(quote_missing), "quote_missing": quote_missing[:_PRICE_CHECK_LIST_MAX],
+            "n_beta_missing": sum(1 for r in rows if r.get("beta_missing")),
+            "beta_missing": beta_missing[:_PRICE_CHECK_LIST_MAX],
+            "nav_missing": list(nav_missing or []),
+            "hedge_undecided": _hedge_undecided(rec),
             "spy": {k: spy_mark.get(k) for k in ("price", "seen_price", "stale", "source", "session",
                                                    "at_close", "live")},
             "execution_blocked": None}
+    chk["gaps"] = _data_gaps(chk)      # 人话版只在这里生成一次：status.json 带着走，告警 / 摘要行不各写一份
+    return chk
+
+
+def _data_gaps(chk: Dict) -> List[str]:
+    """`price_check` 里「不是陈旧、是缺」的那几类，逐条写成人话（ERROR 日志 / 告警 / 摘要行读 `gaps`）。"""
+    out = []
+    if chk.get("n_unpriced"):
+        out.append(f"取不到价 {chk['n_unpriced']} 行（"
+                   + ",".join(dict.fromkeys(str(u.get("symbol") or u.get("ticker")) for u in chk.get("unpriced") or []))
+                   + "）")
+    if chk.get("n_quote_missing"):
+        out.append(f"缺报价 {chk['n_quote_missing']} 张")
+    if chk.get("n_beta_missing"):
+        out.append(f"缺 β {chk['n_beta_missing']} 行（" + ",".join(chk.get("beta_missing") or []) + "）")
+    if chk.get("nav_missing"):
+        out.append("NAV 缺 " + ",".join(chk["nav_missing"]))
+    return out
 
 
 def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dict:
@@ -1150,7 +1204,8 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     agg = aggregate(rows, nav_d["nav"])
     rec = hedge_recommendation(agg, spy_price, nav_d["nav"])
     stress = stress_table(rows, spy_price)
-    chk = _price_check(as_of, rows, spy_mark)
+    chk = _price_check(as_of, rows, spy_mark, rec, nav_d.get("missing"))
+    gaps = chk["gaps"]
     if chk["n_stale"] or chk["n_quote_stale"] or spy_mark["stale"]:
         bits = []
         if spy_mark["stale"]:
@@ -1161,7 +1216,11 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
         if chk["n_quote_stale"]:
             bits.append(f"{chk['n_quote_stale']} 张合约的报价属于别的场次")
         _log.error("[PortfolioGreeks] %s：标的价不属于 %s 这一场——%s。这些行不进 $Delta / 净值 / 成交，"
-                   "今日不据此对冲", as_of, chk["expected_session"], "；".join(bits))
+                   "今日不据此对冲%s", as_of, chk["expected_session"], "；".join(bits),
+                   ("；另缺：" + "；".join(gaps)) if gaps else "")
+    elif chk["hedge_undecided"]:
+        _log.error("[PortfolioGreeks] %s：数据不全，今日对冲决定做不出来（%s）——%s", as_of,
+                   chk["hedge_undecided"], "；".join(gaps) or "见 recommendation.reason")
     _LAST_PRICE_CHECK = chk
     return {"as_of": as_of, "version": _VERSION, "spy_price": spy_price, "spy_mark": spy_mark,
             "nav": nav_d, "rows": rows, "aggregate": agg, "recommendation": rec, "stress": stress,

@@ -42,7 +42,26 @@
   - 改指克隆不改变这一点：命令不在允许清单里，照样停在提示上。
   - 要真无人值守，得往权限允许清单加规则。那是用户的安全设置，本次没动。
 
-## [0.45.435] — 2026-10-08 — 占位（进行中：组合 Greeks 两源都取不到价时也要红——计数 / ERROR / status.json / P2）
+## [0.45.435] — 2026-10-08 — Fixed：组合 Greeks「缺数据 ⇒ 对冲决定做不出来」也要红——此前只有「价陈旧」会红，生产 09-15~25 连续 7 天 band unknown、覆盖层停摆、零告警
+
+### 事故（v0.45.423 二次检查时独立审阅提出、生产审计文件坐实）
+- v0.45.423 的观测链只认「陈旧」（看到了价、但不是 as_of 那一场）。「缺」——两源都取不到价、缺报价、缺 β、缺 NAV——照旧只在 `recommendation.reason` 里写一句 `partial data — no hedge`，ERROR / status.json / 告警全无。
+- 生产 21 份审计文件里 7 天 band unknown：09-15~22 BRK-B 的 β 取不到（Twelve Data 代码映射，后已修）共 5 个扫描日；09-24/25 SPY 价两源都取不到 + 全部 8 张期权报价取不到 + 覆盖账本 NAV 缺。**一条带外判定就能整本账不对冲，连续 9 个日历日没人知道。**
+- 另一条同形状的路：判出带外（above / below）却因 SPY 价 / NAV 缺下不了单（`band above but SPY price unavailable`），同样静默。
+
+### Fixed（`portfolio_greeks.py` / `alert_manager.py` / `scan_timing.py`）
+- `price_check` 新增：`n_unpriced` / `unpriced`（两源都没给出价、或持仓记录不完整；**不含**陈旧行）、`n_quote_missing` / `quote_missing`（**不含**报价错场）、`n_beta_missing` / `beta_missing`、`nav_missing`、`gaps`（人话版只生成一次，status.json 带着走）、`hedge_undecided`（`_hedge_undecided`：band unknown，或带外却 hold ⇒ 原因；inside / empty 是决定，不算）。
+- `compute_day`：做不出决定 ⇒ ERROR 点名缺口；陈旧那条 ERROR 也挂「另缺」。
+- `alert_manager`：不陈旧但 `hedge_undecided` ⇒ P2「数据不全，对冲决定做不出来」；陈旧告警的详情加「另缺」（同一天只一条，不重复报）。旧版扫描的计数没有这个键 ⇒ 不报（不猜）。
+- `scan_timing.summary_line`：「Greeks 数据不全不对冲(…)」，陈旧那段也挂「另缺」。
+- `_VERSION` 不变（估值口径没动，只加观测）。
+
+### 验证
+- 新测试 `TestIncompleteDataIsNotSilent`（10 条：09-24 形状的整源中断、BRK-B 形状的缺 β、带外缺 SPY 价、做出决定的那天不报、告警 / 摘要行 / ERROR、陈旧 + 缺同日只一条、旧计数不猜）+ 既有两条补断言（陈旧行不算取不到、报价错场不算缺报价）。
+- 变异 14 个全部打红（N0 = 改动前三个文件；N2「取不到价把陈旧也算进去」首轮存活，补断言后打红）。
+- **生产回放**：21 份审计文件逐份喂新判据 + 真 `AlertAnalyzer`：恰好 09-15/16/17/18/22/24/25 七天红（缺 β BRK-B；09-24/25 另有取不到价 SPY、缺报价 8 张、NAV 缺 hedge_overlay），其余 14 天静默。
+- ruff 干净；相关 901 条通过；全量见提交说明。
+
 
 ## [0.45.434] — 2026-10-08 — Fixed：v0.45.423 二次检查——两处随根因修复过期的文档（只改注释，行为不变）
 
