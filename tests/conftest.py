@@ -5,6 +5,7 @@ Alpha Hive 测试 fixtures - 共享 mock 数据 + 隔离数据库
 import sys
 import os
 import pathlib
+import site
 import weakref
 import pytest
 
@@ -81,6 +82,34 @@ def _isolate_env(tmp_path, monkeypatch):
     # 在自动提交白名单里的 ⇒ 夹具模型会被当成生产模型提交推送。
     # ml_model_guard 自己也在 pytest 下默认关闭（两层），这里再显式关一次。
     monkeypatch.setenv("ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE", "1")
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _pin_child_user_site():
+    """测试换 HOME 不挪子进程的用户 site-packages：全会话钉一次 `PYTHONUSERBASE`（v0.45.426）。
+
+    子进程里的真 Python 启动时按 `$HOME` 推用户 site；本机 numpy / pytest / jinja2 / starlette / httpx /
+    anyio **只**装在用户 site。测试为隔离按 HOME 求的默认位置（`~/Library`、`~/.claude/scripts`、
+    `~/.alpha_hive_*`）把 HOME 指到 tmp——各文件各自在换（v0.45.426 时 13 个，且还在涨）⇒ 起的真解释器丢掉这半边依赖、
+    import 即死，红的是夹具不是被测代码；且只在 Mac 红，CI（依赖在系统 site）永远绿。
+    v0.45.397 在 alphabot 的 `home` 夹具里钉过一次；「换 HOME 时记得顺手钉」写在注释里不会被执行，
+    下一个换 HOME 的文件照样会忘 ⇒ 收到这里，唯一出处。
+
+    取值在会话开始时（任何测试 / 夹具换 HOME 之前），且 `site.getuserbase()` 返回本进程缓存的值、
+    不随当前 HOME 变 ⇒ 与谁先换 HOME 无关。不换 HOME 的测试拿到的是同一个值，等于没钉。
+    不掩盖生产问题：生产代码从不给子进程改 HOME（只改 `ALPHA_HIVE_HOME`），launchd / .app 拿的是真 HOME。
+
+    管不到：从零构造 env、不继承 `os.environ` 的子进程——那类测试要的就是「只有这几个变量」。
+    v0.45.426 时带沙箱 HOME 的只有 `test_scan_catchup`（照 launchd 现造环境），那里的 python 是不执行的桩。
+    守卫：`tests/test_child_user_site_pin.py`（删掉本夹具在任何机器上都红，含 CI）。
+    """
+    prev = os.environ.get("PYTHONUSERBASE")
+    os.environ["PYTHONUSERBASE"] = site.getuserbase()
+    yield
+    if prev is None:
+        os.environ.pop("PYTHONUSERBASE", None)
+    else:
+        os.environ["PYTHONUSERBASE"] = prev
 
 
 # ==================== 禁止测试调用真实 Anthropic API ====================

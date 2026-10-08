@@ -35,7 +35,32 @@
 
 ## [0.45.427] — 2026-10-08 — 占位（进行中：测试夹具污染生产备份仓库的根治——数据根闸不再整个豁免 `_git_backup` + PATHS 元守卫；备份拒收外来条目 / 嵌套仓库；测试 helper 写前核对沙箱）
 
-## [0.45.426] — 2026-10-08 — 占位（进行中：conftest 统一钉 PYTHONUSERBASE（原 0.45.400 未合入、号被占，换号重做））
+## [0.45.426] — 2026-10-08 — Changed：`PYTHONUSERBASE` 改在 conftest 全会话钉一次（唯一出处）——测试换 HOME 不再挪子进程的用户 site；删 alphabot 夹具那行，守卫挪到中心并配对照组（只动测试，生产不变）
+
+原做于 2026-10-03、占号 0.45.400（`7fe61553`），占号提交未及时推送，400 被 F&G 子进程修复先推占用 ⇒ 未合入；本条在 main `0533996c` 上重做（cherry-pick 代码部分，CHANGELOG 重写）。
+
+0.45.397 在 alphabot 的 `home` 夹具里钉了 `PYTHONUSERBASE`，修好了那一个文件。可换 HOME 的测试文件各自在换（10-03 时 10 个，**10-08 已 13 个**）、只有那 1 个钉过：
+「换 HOME 时记得顺手钉」只写在注释 / memory 里，不会被执行；忘了只在 Mac 红（本机 numpy / pytest / jinja2 / starlette / httpx / anyio 只装在用户 site），
+CI 依赖在系统 site、永远绿 ⇒ 谁都不会红。按文件再钉是把补丁抄几份，下一个换 HOME 的文件照样会忘 ⇒ 收到 conftest。
+
+### Changed
+- `tests/conftest.py`：新增 session 级 autouse `_pin_child_user_site`——会话开始时（任何测试 / 夹具换 HOME 之前）`PYTHONUSERBASE = site.getuserbase()`，会话结束还原。
+  `site.getuserbase()` 返回本进程缓存的值、不随当前 HOME 变 ⇒ 与谁先换 HOME 无关；不换 HOME 的测试拿到同一个值，等于没钉。
+  session 级而非塞进函数级 `_isolate_env`：module / session 级夹具里起的子进程也要管到。
+- `tests/test_alphabot_launcher.py`：`home` 夹具删掉那行钉（改一行注释指向 conftest）；守卫挪走（见 Added）；`import site` 随之删。
+- `CLAUDE.md`「用户偏好」Python 硬规则：「要同时钉」改为「conftest 已全会话钉，新测试换 HOME 不用再自己钉；只有从零构造 env 的子进程要自己带」。
+
+### Added
+- `tests/test_child_user_site_pin.py`：`test_sandbox_home_keeps_child_user_site`（自 alphabot 文件挪来、不依赖任何文件的夹具；删 conftest 夹具 ⇒ 任何机器红，含 CI）
+  + `test_sandbox_home_really_moves_user_site_without_pin`（对照组：子进程 env 去掉 `PYTHONUSERBASE` 时沙箱 HOME 确实把用户 site 挪进 tmp，防尺子恒真）。
+
+### 不掩盖生产问题 / 管不到什么
+- 生产代码从不给子进程改 HOME（只改 `ALPHA_HIVE_HOME`）；launchd / .app 拿真 HOME ⇒ 全会话钉只消掉测试独有的偏差。
+- 管不到**从零构造 env**（不继承 `os.environ`）的子进程：10-08 时带沙箱 HOME 的只有 `test_scan_catchup`（照 launchd 现造环境），那里的 python 是不执行的桩。
+
+### 变异实测（工作树独立副本、`PYTHONDONTWRITEBYTECODE=1`、清 pyc、`--maxfail=1000`；事后查孤儿 osascript / 残留服务：无）
+- 删 conftest 那行钉 ⇒ 5 红：守卫、`test_demo_start_reuse_and_stop`、10-03 之后新增的 `TestNativeWindow` ×3（理由均 `No module named 'starlette'`）——新测试同样依赖这层，按文件钉早已不够。
+- 对照组不剔除 `PYTHONUSERBASE` ⇒ 只红对照组（10-03 实测，本次未改该文件）。
 
 ## [0.45.425] — 2026-10-07 — Added：异常期权流取数重试与退避——只重试「令牌等待超时」与瞬时网络错误，429 / 冷却 / 其它不重试；不改评分
 
