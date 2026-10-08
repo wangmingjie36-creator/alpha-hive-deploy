@@ -36,6 +36,15 @@
 3. 可选、不阻塞：`~/.claude.json` 的 `alpha_hive` MCP、Alpha Bot.app（在克隆里 `make alphabot-app`）、两个定时任务 SKILL.md 改指克隆；plist `WorkingDirectory` 改指克隆（需 launchctl 重载，RunAtLoad 会立刻起一轮）。不改的后果：它们继续跑开发检出里的代码（与现状相同），不影响扫描。
 - 回退：在 main 上 revert 本版（PROJECT_DIR 与声明同一提交，一起回去）；克隆目录留着无害。
 
+### 执行记录（2026-10-08，用户在对话里批准：先建克隆、再合入、编排器走自动部署；外围只改 MCP）
+- 07:16 `production_clone.py setup`：GitHub 完整克隆到 `/Users/igg/alpha-hive-prod`（当时 origin/main `2e56e8d8`），5 个钩子装上，`check` ok。真克隆上冒烟：`commit --allow-empty --no-verify` 被 reference-transaction 拒（「ref updates aborted by hook」），HEAD 不动、工作区干净；`origin/gh-pages` 在。
+- 07:18 `~/.claude.json` `mcpServers.alpha_hive.args` → `/Users/igg/alpha-hive-prod/alpha_hive_mcp.py`（只动这一字段，原子替换；备份 `~/.claude.json.bak-pre-phase8`）；从克隆起 server 做 JSON-RPC `initialize` 冒烟通过。已在跑的 8 个旧 MCP 进程要**重启 Claude 应用**后才换。
+- 07:24 二次检查修 gc（见上）后重跑 `setup`：只刷新了 `reference-transaction` 一个钩子（stale → refreshed），其余不动。
+- 干净克隆全套（`49cf6ed3`）：8447 passed；1 failed = `TestCoverageHorizon`（按设计定期红）；1 error = 真实数据根闸抓到 Alpha Bot 盘中写 `alphabot_state/intraday/2026-10-08/*.jsonl`（已知第三个合法写入者）。gc 修复只动 `production_clone.py` 与其测试，另跑 41 条全绿；换基后受影响套件 196 passed、`ruff` / `bash -n` 干净。
+- 推 main `2e56e8d8..683be480`（pre-push 契约 677 passed）；随后在克隆里 `pull --ff-only` 到 `683be480`（真钩子下快进放行 = 正对照），克隆自带的 `production_clone.py check` ok，`deploy_orchestrator.py --ref HEAD --dry-run` = `would_deploy`（未部署）。开发检出 main 0 / 7 ⇒ 当天 14:00 扫描会快进并自动部署新编排器。
+- **未做**：Alpha Bot.app、两个定时任务、plist `WorkingDirectory`（用户本次未选）。
+- **待核（10-09 14:00 首次从克隆跑之后）**：`status.json` `scan_timing.production_sync.outcome` ∈ OK 且 `clone_guard.ok == true`；`code_version.repo_dir == /Users/igg/alpha-hive-prod`；gh-pages 已部署（首次从克隆推）；Step 14 ok；无新 P1。10-08 那轮的 `steps_result.orchestrator_deploy` 应为 deployed。
+
 ## [0.45.430] — 2026-10-08 — 占位（进行中：异地备份 `manifest.json`（网站 PWA）与备份元数据 `MANIFEST.json` 在大小写不敏感的 APFS 上互相覆盖——网站 manifest 从未备份、SHA256SUMS 作假；改名 + 大小写碰撞守卫）
 
 ## [0.45.429] — 2026-10-08 — Added：Oracle 异常期权流对共享 yfinance 令牌桶限速——全进程请求间隔预约、最多占桶一半；不减请求、不改评分
