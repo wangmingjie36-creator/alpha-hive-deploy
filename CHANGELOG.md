@@ -5,7 +5,32 @@
 
 ---
 
-## [0.45.432] — 2026-10-08 — 占位（进行中：v0.45.431 二次检查——空仓库被判合格 / 克隆目录缺失静默退出 / origin 不对仍装钩子 / clone_guard 应有而缺不报 / Desktop 过时文案 / 测试 helper 归位）
+## [0.45.432] — 2026-10-08 — Fixed：v0.45.431 二次检查——空仓库被判合格、克隆目录缺失时整天静默、origin 不对仍装钩子、clone_guard「应有而缺」不报、Desktop/TCC 过时文案、测试 helper 归位
+
+`/code-review high` 审 v0.45.431 的 4 个提交，报 9 条。本版修其中 6 条（用户点名）；另 3 条见文末「未修」。
+
+### Fixed
+- **空仓库 / 半截克隆被判 ok**（`production_clone.inspect`）：此前不核 HEAD，没有提交、没有文件的仓库 `ok=True`（实测）。`setup` 的 `git clone` 超时走 SIGKILL，git 来不及清理 ⇒ 留下 `.git` 已建、HEAD 未诞生的目录；重跑 `setup` 把它当已有克隆、报 ok；次日编排器在「核心脚本不存在」处 exit 1。现在：HEAD 必须解析成提交（`no_head` 进 problems）；`setup` 克隆失败时删掉**本次新建**的目标目录（已存在的目录一个字节不动），删不掉也写进 detail。
+- **克隆目录缺失时整天静默**（编排器）：「项目目录不存在」「核心脚本不存在」「cd 进不去」三处闸前 `exit 1` 此前都不写 status.json——status.json 停在上一次成功，alert_manager 就在那个目录里、跑不起来。新增 `_early_fail_status`，三处各落 `failed_project_dir_missing` / `failed_core_script_missing` / `failed_project_dir_unreadable`（同下方 TCC 分支的形状；TCC 分支改用它，status 值沿用 `failed_tcc_permission`）。缺目录时日志给出重建命令。
+- **origin 不对仍装钩子**（`production_clone.ensure_guard`）：此前只看「独立仓库」。`setup --dest` 指错到别的独立仓库（如数据备份仓 `~/alpha-hive-data/_git_backup`）会装上「main 只许指向 origin/main 祖先」的钩子 ⇒ 那个仓库自己的提交从此全被拒、Step 14 备份停摆。现在 origin 不是 `alpha-hive-deploy` 一个钩子都不写（模块 docstring「两条拒绝」→「三条拒绝」）。
+- **`clone_guard` 应有而缺不报**（`alert_manager`）：此前键缺失一律当「编排器没声明」放过，分不出「切换前」与「编排器丢了声明 / 克隆里的 production_sync 太旧不认它」。现在本轮 `scan_timing.code_version.repo_dir`（realpath）就是 `production_clone.default_dest()` 却没有 `clone_guard` ⇒ P1「扫描从生产克隆跑，但本轮没有核对克隆守卫」。取不到 repo_dir 不报（判不了不等于该报）；sync 整个缺失时已有 P2，不重复。
+
+### Changed
+- 编排器读权限预检的注释 / 日志 / status.json 的 error 文案不再写死「Desktop / TCC」：阶段 8 起 PROJECT_DIR 不在 ~/Desktop，失败多半是文件权限；改回 ~/Desktop 时 TCC 修法仍列出（方法改为给 `/bin/bash` 与 `$PYTHON3` 完全磁盘访问权限，原文的 `/usr/sbin/cron` 早已不是执行者）。readdir 探测的 WARN / INFO 同改。`production_sync` 段「bash 对本目录有 TCC 限制」的注释注明是历史原因。
+- `_ASSIGN_PREFIX` / `_orch_literal` 从 `tests/test_scan_catchup.py` 挪进 `tests/_orchestrator.py`（`ASSIGN_PREFIX` / `orch_literal`），与 `test_orchestrator_runs_production_clone.py` 共用；原文件按别名导入，其余不动。
+- `_early_fail_status` 的 JSON 行刻意缩进：顶格的 `}` 会被共享的 `extract_function` 当成函数结尾（首版测试实测截断成 `syntax error: unexpected end of file`）。
+
+### 守卫
+- `tests/test_production_clone.py`：空仓库判 `no_head`；origin 不对一个钩子不写；克隆被「杀在半路」（桩：建好 `.git` 后抛 `TimeoutExpired`）后目标目录被删、detail 说明；已存在目录绝不删；告警侧「从克隆跑却缺 clone_guard」报、负对照三种（从开发检出跑 / 守卫已核且合格 / 无 code_version）不报、经符号链接的路径仍算克隆。
+- `tests/test_orchestrator_runs_production_clone.py`：三个闸前失败分支各自在 `exit 1` 之前**行首**调用 `_early_fail_status "<status>"`；抽出函数用 `/bin/bash` 真跑、读回合法 JSON；所有调用的文案不含 `"` / `\` / `$(` / 反引号。`cd` 检查改为精确匹配顶层 `if ! cd "$PROJECT_DIR"`（第 93 行子 shell 里的 cd 不算）。
+- `tests/test_scan_catchup.py::TestGateBranchesLive`（integration）：`_gate_run` 加 `project=stub|missing|empty`，新增两条沙箱真跑——删掉 / 掏空代码目录 ⇒ rc=1、status.json 分别为 `failed_project_dir_missing` / `failed_core_script_missing`、写入不出沙箱。`pytest -m integration tests/test_scan_catchup.py` 5 passed。
+- 变异 6 处（先提交后变异）：去掉 HEAD 检查 / origin 不对照写 / 半截目录不删 / 告警规则关掉 / 路径按字符串比 / 目录缺失分支不落盘——各红。最后一处首轮**没红**：静态检查只按子串找调用，`: _early_fail_status …`（空命令前缀）照样过；改成行首锚定后默认套件红，integration 真跑本来就红。
+- 受影响套件（production_clone / 编排器接线 / scan_catchup / production_sync / autodeploy / step_interp / deploy_orchestrator / braced_vars）全绿；一次 teardown ERROR 为盘中 Alpha Bot 写 `alphabot_state/intraday/`（真实数据根闸，已知），单跑对应文件全绿。
+
+### 未修（需用户定方向 / 本次未点名）
+- **开发检出不再被快进**：Alpha Bot.app、weekly-optimizer、monthly-self-analysis 仍在 `~/Desktop/Alpha Hive` 跑，10-08 那轮之后跑的是冻结代码（v0.45.431 条目「与现状相同」已在原处更正）。方向待定：改指克隆，或扫描后顺带快进开发检出。
+- **`origin/cloud-snapshots` 在克隆里不刷新**：补跑（`--date D` 快照模式、`data_pipeline` 历史收盘兜底）读这个远端跟踪 ref，全仓没有代码 fetch 它；开发检出里靠开发会话顺带刷新，克隆里停在 10-08 07:16。拟让 `production_sync` 多 fetch 该分支——要放宽 `GitHubTool._EXACT_GIT_ARGS` 的 `fetch origin main` 限制，待用户批准。
+- 新克隆没有本地 `gh-pages` 分支：`resolve_gh_pages_parent` 在 fetch 与 ls-remote 都失败时的最后兜底拿不到父提交；首次推送成功后 `update-ref` 会建出它。
 
 ## [0.45.431] — 2026-10-08 — Added：数据根迁移阶段 8——生产代码换成独立克隆 `~/alpha-hive-prod`，钩子拒绝一切让 main 偏离 origin/main 的写入；编排器切过去并 `cd` 进克隆
 
@@ -35,7 +60,7 @@
 ### 切换（cutover）——生产动作，逐项经用户批准，见下方「执行记录」
 1. `production_clone.py setup` 建 `~/alpha-hive-prod`（GitHub 完整克隆 + 守卫），`check` 为 ok。**必须早于合入**：合入后的下一个扫描日，旧编排器会自动部署新编排器，再下一轮就从克隆跑——克隆不存在 ⇒「项目目录不存在」exit 1。
 2. 合入 origin/main。下一个扫描日（同步 OK 时）自动部署新编排器；**再下一个**扫描日首次从克隆跑。
-3. 可选、不阻塞：`~/.claude.json` 的 `alpha_hive` MCP、Alpha Bot.app（在克隆里 `make alphabot-app`）、两个定时任务 SKILL.md 改指克隆；plist `WorkingDirectory` 改指克隆（需 launchctl 重载，RunAtLoad 会立刻起一轮）。不改的后果：它们继续跑开发检出里的代码（与现状相同），不影响扫描。
+3. 可选、不阻塞：`~/.claude.json` 的 `alpha_hive` MCP、Alpha Bot.app（在克隆里 `make alphabot-app`）、两个定时任务 SKILL.md 改指克隆；plist `WorkingDirectory` 改指克隆（需 launchctl 重载，RunAtLoad 会立刻起一轮）。不改的后果：它们继续跑开发检出里的代码（与现状相同），不影响扫描。**（⚠️ v0.45.432 更正：不是「与现状相同」——开发检出此前靠扫描前的 production_sync 每日快进，切换后再没人快进它，这几样从 10-09 起跑的是冻结的代码。）**
 - 回退：在 main 上 revert 本版（PROJECT_DIR 与声明同一提交，一起回去）；克隆目录留着无害。
 
 ### 执行记录（2026-10-08，用户在对话里批准：先建克隆、再合入、编排器走自动部署；外围只改 MCP）

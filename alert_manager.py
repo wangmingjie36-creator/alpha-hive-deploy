@@ -5,6 +5,7 @@
 """
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict
@@ -22,6 +23,22 @@ _SYNC_MEANING = {
 }
 
 _log = get_logger("alerts")
+
+
+def _ran_from_production_clone(scan_timing: Dict) -> bool:
+    """本轮扫描的代码目录（扫描启动时 `code_version.repo_dir`）是不是生产独立克隆（v0.45.432）。
+
+    取不到 / 解析不了 ⇒ False（不据此报警：判不了不等于该报）。比较走 `os.path.realpath`，
+    不认符号链接 / `..` 的写法差异。
+    """
+    repo_dir = (scan_timing.get("code_version") or {}).get("repo_dir")
+    if not repo_dir:
+        return False
+    try:
+        import production_clone
+        return os.path.realpath(repo_dir) == os.path.realpath(production_clone.default_dest())
+    except Exception:  # noqa: BLE001 —— 判不了就不报，见 docstring
+        return False
 
 
 class AlertLevel(Enum):
@@ -389,6 +406,21 @@ class AlertAnalyzer:
         # production_sync 写 `clone_guard`。没有这个键 = 编排器没声明（切换前 / 回退后），不是「检查过没问题」，
         # 但也不是故障，不报。有键而 ok 不是 True ⇒ 守卫缺 / 被改道 / 克隆里有人改了代码 / origin 不对。
         guard = (sync or {}).get("clone_guard")
+        # v0.45.432：「没声明」与「声明了但没核」要分开。本轮代码就是从生产克隆跑的（code_version.repo_dir），
+        # 却没有 clone_guard ⇒ 编排器丢了声明，或克隆里的 production_sync 太旧不认它——守卫从未被核对。
+        # sync 整个缺失时上面已报 P2，这里不重复。
+        if sync is not None and guard is None and _ran_from_production_clone(st):
+            self.alerts.append(Alert(
+                AlertLevel.HIGH,
+                "⚠️ 【P1 高】扫描从生产克隆跑，但本轮没有核对克隆守卫（clone_guard 缺失）",
+                {
+                    "代码目录": (st.get("code_version") or {}).get("repo_dir"),
+                    "含义": "编排器没给 production_sync 设 ALPHA_HIVE_PRODUCTION_CLONE=1，或克隆里的 production_sync "
+                            "早于 v0.45.431、不认这个声明——钩子没有被补齐，克隆是否被改过本轮没人看",
+                    "建议": "核对部署副本里 production_sync 那一行；/usr/local/bin/python3 production_clone.py check",
+                },
+                ["code_sync"]
+            ))
         if guard is not None and guard.get("ok") is not True:
             self.alerts.append(Alert(
                 AlertLevel.HIGH,
