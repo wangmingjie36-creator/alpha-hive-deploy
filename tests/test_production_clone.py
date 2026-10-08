@@ -320,6 +320,21 @@ class TestInspectionSeesProblems:
         r = pc.inspect(guarded.prod)
         assert r["dirty_tracked"] == ["renamed.md"], r
 
+    def test_empty_repo_is_not_ok(self, world, tmp_path, monkeypatch):
+        """v0.45.432：没有提交、没有文件的仓库（克隆被 SIGKILL 中断留下的半截）此前判 ok=True（实测）。"""
+        empty = tmp_path / "empty"
+        _run("init", "-q", "-b", "main", str(empty), cwd=tmp_path)
+        _run("remote", "add", "origin", str(world.origin), cwd=empty)
+        g = pc.ensure_guard(empty)
+        assert g["ok"] is False and any(p.startswith("no_head") for p in g["problems"]), g
+
+    def test_wrong_origin_gets_no_hooks(self, world, monkeypatch):
+        """v0.45.432：origin 不是 alpha-hive-deploy ⇒ 不是我们的克隆，一个钩子都不写（如指错到数据备份仓）。"""
+        monkeypatch.setattr(pc, "DEFAULT_ORIGIN", "git@github.com:someone/else.git")
+        g = pc.ensure_guard(world.prod)
+        assert g["ok"] is False and g["origin_ok"] is False and g["actions"] == {}, g
+        assert not any((world.prod / ".git" / "hooks" / n).exists() for n in pc.HOOKS)
+
     def test_not_a_repo(self, tmp_path):
         r = pc.inspect(tmp_path)
         assert r["ok"] is False and r["problems"][0].startswith("not_a_repo"), r
@@ -364,6 +379,29 @@ class TestSetup:
         (dest / "keep.txt").write_text("x")
         res = pc.setup(dest, str(world.origin))
         assert res["outcome"] == "refused" and (dest / "keep.txt").read_text() == "x", res
+
+    def test_interrupted_clone_leaves_no_partial_dir(self, world, monkeypatch):
+        """超时走 SIGKILL，git 来不及清理 ⇒ 半截目录。不删的话重跑 setup 会把它当已有克隆（v0.45.432）。"""
+        dest = world.tmp / "half"
+        real_run = subprocess.run
+
+        def killed_mid_clone(cmd, *a, **k):
+            if cmd[:2] == ["git", "clone"]:
+                (Path(cmd[-1]) / ".git").mkdir(parents=True)   # git 已经建好 .git，然后被杀
+                raise subprocess.TimeoutExpired(cmd, k.get("timeout"))
+            return real_run(cmd, *a, **k)
+        monkeypatch.setattr(pc.subprocess, "run", killed_mid_clone)
+        res = pc.setup(dest, str(world.origin))
+        assert res["outcome"] == "clone_failed" and "已删除残留" in res["detail"], res
+        assert not dest.exists()
+
+    def test_existing_dir_is_never_discarded(self, world):
+        """只删**本次新建**的目录：已存在的目录（哪怕不合格）一个字节不动。"""
+        dest = world.tmp / "occupied2"
+        dest.mkdir()
+        (dest / "keep.txt").write_text("x")
+        assert pc.setup(dest, str(world.origin))["outcome"] == "refused"
+        assert (dest / "keep.txt").read_text() == "x"
 
     def test_clone_failure_is_reported(self, world):
         res = pc.setup(world.tmp / "nope", str(world.tmp / "missing.git"))
@@ -455,3 +493,38 @@ class TestProductionSyncIntegration:
         res = ps.load_for_date("2026-10-08")
         assert res["outcome"] == "up_to_date"
         assert res["clone_guard"]["ok"] is False and "OSError" in res["clone_guard"]["problems"][0], res
+
+    # ── v0.45.432：「没声明」与「声明了但没核」分开 ──
+    @staticmethod
+    def _snap(repo_dir, guard="absent"):
+        sync = {"date": "2026-10-09", "outcome": "up_to_date", "behind": 0, "ahead": 0}
+        if guard != "absent":
+            sync["clone_guard"] = guard
+        return {"production_sync": sync, "code_version": {"sha": "abc1234", "repo_dir": repo_dir},
+                "extra": {"gh_pages": {"success": True}}}
+
+    def test_running_from_the_clone_without_guard_is_red(self, tmp_path, monkeypatch):
+        """编排器丢了声明，或克隆里的 production_sync 太旧不认它 ⇒ 守卫从未被核对，却没人红（二次检查第 7 条）。"""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        msgs = self._alerts(tmp_path, self._snap(str(pc.default_dest())))
+        assert any("clone_guard 缺失" in m for m in msgs), msgs
+
+    @pytest.mark.parametrize("case", ["dev_checkout", "guard_ok", "no_code_version"])
+    def test_no_false_alarm(self, tmp_path, monkeypatch, case):
+        """负对照：切换前（从开发检出跑）/ 守卫已核且合格 / 判不了代码目录 ⇒ 都不报。"""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        clone = str(pc.default_dest())
+        snap = {"dev_checkout": self._snap(str(tmp_path / "Desktop" / "Alpha Hive")),
+                "guard_ok": self._snap(clone, guard={"ok": True, "problems": []}),
+                "no_code_version": {**self._snap(clone), "code_version": None}}[case]
+        msgs = self._alerts(tmp_path, snap)
+        assert not any("clone_guard 缺失" in m or "生产克隆不合格" in m for m in msgs), msgs
+
+    def test_symlinked_path_to_the_clone_still_counts(self, tmp_path, monkeypatch):
+        """比较走 realpath：经符号链接到克隆的路径也算从克隆跑。"""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        pc.default_dest().mkdir(parents=True)
+        link = tmp_path / "link-to-prod"
+        link.symlink_to(pc.default_dest())
+        msgs = self._alerts(tmp_path, self._snap(str(link)))
+        assert any("clone_guard 缺失" in m for m in msgs), msgs

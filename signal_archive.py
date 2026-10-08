@@ -1283,6 +1283,19 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 置空、Oracle 期权分的 iv_signal 走中性 ⇒ Oracle 分变、方向随分数带变（同 v0.45.349 的两条）⇒ `agent.OracleBeeEcho.*`
     # 点名；BearBee 的 options_bear 读 Oracle 方向 ⇒ `bear.options_bear` 点名（同 349）。只在缺口日×标的上变。
     "v0.45.383": ("agent.OracleBeeEcho.*", "bear.options_bear"),
+    # 09-28（v0.45.423，新代码 10-08 上线，等价证据见 ic_rerun_readiness 同版条目：09-28~10-07 共 240 对全部等价）：
+    # twelve_data 当日那根改按交易所收盘判（收完照收）。进分的只有两条 Twelve Data **兜底**路径，正常日一个分都不变：
+    # ① yfinance 日线抛错时的成交量回落 ⇒ volume_ratio 的三个读者：Buzz volume_signal（分与方向 ⇒ `agent.BuzzBeeWhisper.*`）、
+    #   拥挤度的 Google Trends 代理（`real_data_sources` 由 volume_ratio 映射；它本身是原始观测、不切，见
+    #   `test_raw_observations_are_not_sliced` ⇒ 点名读它的第一个系统输出 `crowding.score`，下游 crowding.* → Scout / Guard /
+    #   Rival 由 _scope_closure 带出）、Bear 的 momentum_bear（不单独入档，直接进 `bear.score`）；
+    # ② 日线缺口第二源 ⇒ iv_rank ⇒ 同 v0.45.383 的两条（`agent.OracleBeeEcho.*`、`bear.options_bear`）。
+    # 叶子 `price.volume_ratio` / `buzz.comp.volume_signal` / `crowding.comp.google_trends` / `options.iv_rank` 不点名
+    #（同 383 不点名 iv_rank；前三个里两个在 `NEVER_SLICED_TODAY` 守卫名单上）：
+    # 它们的口径（yfinance 主路径）没变，只是兜底那几天从「比 yfinance 少一根」对齐成一样；点名会白白切掉
+    # 6 周以上口径一致的历史。
+    "v0.45.423": ("agent.BuzzBeeWhisper.*", "crowding.score", "bear.score",
+                  "agent.OracleBeeEcho.*", "bear.options_bear"),
 }
 
 

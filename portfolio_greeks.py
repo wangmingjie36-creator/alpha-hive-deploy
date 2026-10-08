@@ -52,12 +52,30 @@ CBOE Greeks 单位（2026-09-03 用 NVDA 实盘报价对 greeks_engine 校核，
 - 「从未启动」必须由净值文件与持仓文件**双双为空**证明；有持仓没净值行 = 数据缺失 → None。
 - 账本里 shares 为 null/NaN 的行标成残行、不丢弃——丢掉之后 band_status 会报 "empty"。
 
+标的价口径（v0.45.423）：只认 as_of 那一场的价，每个价都说得出自己属于哪一场
+--------------------------------------------------------------------------------
+v0.45.103~422 用 Twelve Data 日线「≤ as_of、5 个日历日内最后一根」当标的价。`twelve_data._drop_forming_bar`
+按美东**日期**丢掉当日那根（不看收没收盘），17:00 ET 的生产扫描于是天天拿到**前一交易日**的收盘，
+配当天的 CBOE 期权报价算 $Delta，SPY 对冲按昨收「收盘成交」——2026-09-04~10-06 的 20 份审计文件
+190/267 个价晚一个交易日，只有过了美东午夜才跑的那几天是对的。5 天容差把它当正常值放了过去。
+根因在 twelve_data（同版修：收完的当日那根照收，见 `twelve_data._drop_forming_bar`）；本模块这边：
+- **期权行**的 S 取自与该合约报价**同一份** CBOE payload（`cboe_options.quote_contracts_with_underlying`）。
+- **股票行 / SPY** 取 `_default_mark`：CBOE 官方收盘（last_trade 贴收盘）或盘中实时价；不行再要
+  Twelve Data 上日期**恰为** as_of 的那根（已收完才算）；都不行就是**陈旧**。
+- 陈旧价不进 $Delta / 净值 / 成交：行标 `price_stale`（看到的价留在 `stale_price` 供审计）、计入
+  `coverage.n_price_stale` → partial → band unknown → 不对冲；ERROR 日志、日报小节、审计文件 `price_check`、
+  `scan_timing.counters()["portfolio_greeks"]` → status.json → alert_manager 都会响。
+- SPY 只有拿到 as_of 的**官方收盘**才成交（`fill: close` 名副其实）；盘中跑只算不成交。
+- 周末 / 假日的 as_of 用之前最近一个交易日那一场（那天没有行情），见 `_expected_session`。
+
 没做的事（已知局限）
 --------------------
 - 没有 SPY 点差/冲击成本模型（~1 bp，明说不建模）；没有融资利息（做空 SPY 的现金记正）。
 - 对冲工具只有 SPY 股票；不做指数认沽、不做逐票 delta 对冲、不对冲 vega/gamma（只告警）。
 - 期权重定价用 BS 平价面（每张合约各用自己的 IV 平移），不建模 skew 变化、不建模股息。
-- 股票价用 Twelve Data 收盘（与 paper_portfolio 的 yfinance 收盘可能差几分钱，口径不同）。
+- 股票价用 CBOE 官方收盘（与 paper_portfolio 的 yfinance 收盘应逐分相等；CBOE 文件盘中陈旧那几天
+  该行判陈旧、当天不对冲，不退到 yfinance——本模块不碰 yfinance 限流）。
+- β 的 60 日 OLS 仍用 Twelve Data 日线：同日跑窗口止于前一交易日（少最后一个收益，对 β 无实质影响）。
 - 压力网格里期权的 (0,0) 格不是 0：BS 价 − 市场 mid 的模型基差按合约单列在 `bs_vs_mid_gap`，
   不强行归零——那是模型诊断，不是 P&L。
 """
@@ -97,7 +115,7 @@ EQUITY_FILE = STATE_DIR / "equity_curve.jsonl"
 META_FILE = STATE_DIR / "meta.json"
 BETA_CACHE_FILE = STATE_DIR / "beta_cache.json"
 
-_VERSION = "0.45.103"
+_VERSION = "0.45.423"     # 口径世代：此前的审计文件 / 成交用的是前一交易日的标的价（见模块头）
 _GREEK_KEYS = ("dollar_delta", "beta_dollar_delta", "gamma_dollar_per_1pct",
                "vega_dollar_per_pt", "theta_dollar_per_day")
 
@@ -241,6 +259,7 @@ def _fetch_bars_uncached(ticker: str, as_of: str) -> Optional[List[dict]]:
     单独拆出来，是为了让「同一 (ticker, as_of) 只取一次」这件事能被测试直接数到——
     否则缓存命中与否只能靠计时猜，而本项目的教训是「看着成功其实早废了」。"""
     rows: Optional[List[dict]] = None
+    src = "twelve_data"
     try:
         import twelve_data
         if twelve_data.is_configured():
@@ -257,6 +276,7 @@ def _fetch_bars_uncached(ticker: str, as_of: str) -> Optional[List[dict]]:
             hist = load_price_history(ticker, str(PATHS.cache_dir))
             if hist:
                 rows = [{"date": d, "close": c} for d, c in hist]
+                src = "local_index"
                 _log.info("[%s] 用本地价格索引代替 Twelve Data 日线（%d 根）", ticker, len(rows))
         except Exception as exc:  # noqa: BLE001
             _log.warning("[%s] 本地价格索引读取失败: %s", ticker, exc)
@@ -265,7 +285,9 @@ def _fetch_bars_uncached(ticker: str, as_of: str) -> Optional[List[dict]]:
         d = str(b.get("date") or "")[:10]
         c = _pos(b.get("close"))
         if d and c is not None and d <= as_of:
-            clean.append({"date": d, "close": c})
+            # v0.45.423：带上来源。β 两种都能用；标的价只认 Twelve Data 那根（见 `_default_mark` ②）——
+            # 本地索引是快照价 / price_at_predict，分不清那一刻是盘中还是收盘。
+            clean.append({"date": d, "close": c, "src": src})
     clean.sort(key=lambda b: b["date"])
     return clean or None
 
@@ -305,16 +327,155 @@ def _bars_in_memory(ticker: str, as_of: str) -> bool:
     return bool(_BARS_CACHE.get((ticker, as_of))) and bool(_BARS_CACHE.get((CONFIG["hedge_instrument"], as_of)))
 
 
-def _default_close(ticker: str, as_of: str) -> Optional[float]:
-    """as_of 当日（或 5 个日历日内最后一根）收盘；取不到 None。"""
-    bars = _default_bars(ticker, as_of)
-    if not bars:
-        return None
-    last = bars[-1]
-    gap = _days_between(last["date"], as_of)
-    if gap is None or gap > 5:
-        return None
-    return last["close"]
+# ── 标的价：只认 as_of 那一场（v0.45.423，取代「5 个日历日内最后一根」的 `_default_close`）──────────
+#
+# mark = {"price", "source", "session", "at_close", "live"}：价 + 它属于哪一场 + 是不是那场的官方收盘 /
+# 此刻的实时价。`closes_fn` 的默认实现是 `_default_mark`（返回 mark）；测试 / 旧调用方注入的裸数字由
+# `_resolve_mark` 当作「调用方担保这就是 as_of 的收盘」。
+
+_ET_TZ_NAME = "America/New_York"
+
+
+def _et_now() -> datetime:
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo(_ET_TZ_NAME))
+
+
+def _expected_session(as_of: str) -> str:
+    """as_of 该用哪一场的价：交易日 = 当天；周末 / 假日 = 之前最近一个交易日（那天没有行情可等）。
+    日历不可用 → 原样返回 as_of：宁可把价判成陈旧，也不猜场次。"""
+    try:
+        from is_trading_day import is_trading_day
+        d = datetime.strptime(as_of, "%Y-%m-%d").date()
+        for _ in range(10):                       # 长假最多跨约 5 天
+            if is_trading_day(d)[0]:
+                return d.isoformat()
+            d -= timedelta(days=1)
+    except Exception:  # noqa: BLE001
+        _log.debug("交易日历不可用，按 as_of 原样判场次", exc_info=True)
+    return as_of
+
+
+def _session_closed(day: str, now_et: Optional[datetime] = None) -> bool:
+    """`day` 那一场此刻是否已收盘（交易所收盘时刻，提前收盘日 13:00）。判不了 → False：不当它收完。"""
+    try:
+        from zoneinfo import ZoneInfo
+        from is_trading_day import session_close_et
+        d = datetime.strptime(day, "%Y-%m-%d").date()
+        now = now_et or _et_now()
+        if now.tzinfo is not None:
+            now = now.astimezone(ZoneInfo(_ET_TZ_NAME)).replace(tzinfo=None)
+        return now >= datetime.combine(d, session_close_et(d))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _default_mark(ticker: str, as_of: str) -> Dict:
+    """标的在 as_of 那一场的价，**自报场次**。默认的 `closes_fn`。
+
+    旧实现（`_default_close`）取 Twelve Data「≤ as_of、5 个日历日内最后一根」，而 twelve_data 按美东
+    **日期**丢当日那根、不看收没收盘：17:00 ET 的生产扫描天天拿到前一交易日的收盘，5 天容差照单全收。
+    「10-05 价是对的」恰恰是例外——那次重跑在 02:56 ET（次日），美东日期已翻页，那根才没被丢。
+
+    按顺序取，每一步都说得出价属于哪一场：
+      ① CBOE（`cboe_options.fetch_underlying_mark`）——与期权报价同源。收盘后要 last_trade 贴着收盘
+         才算官方收盘，盘中给实时价；盘中生成的陈旧文件、判不了的文件都不算。
+      ② Twelve Data 上日期**恰为**该场的那根，且交易所钟表上那一场已收盘（不只靠 twelve_data 那道闸
+         丢没丢它来保证收完）。v0.45.423 同版修了 twelve_data（收盘 + 30 分钟后当日那根照收），所以收盘后
+         同日跑也走得到②：CBOE 拿不到 / 文件是盘中陈旧的那几只由它兜底；补跑历史日时 CBOE 场次已翻页
+         也靠它。本地价格索引不算（`src` 不是 twelve_data：快照价 / price_at_predict 分不清盘中还是收盘）。
+      ③ 都不是 → 返回看到的最好那个，带它**真实的**场次，由 `_resolve_mark` 判陈旧、标红。
+
+    日线**照旧先取**，哪怕①用不上它：`_default_beta` 靠 `_bars_in_memory` 判「重算 β 要不要网络」，
+    日线不在内存就端出磁盘里至多 4 个交易日前的缓存 β。旧 `_default_close` 恒先取日线，所以生产上
+    β 恒重算——这里改了取价，不能顺手把 β 的口径也改了。
+    """
+    want = _expected_session(as_of)
+    bars = _default_bars(ticker, as_of) or []
+    cboe: Optional[Dict] = None
+    try:
+        from cboe_options import fetch_underlying_mark
+        cboe = fetch_underlying_mark(ticker)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("[%s] CBOE 标的价获取失败: %s", ticker, exc)
+    if (cboe and _pos(cboe.get("price")) is not None and cboe.get("session") == want
+            and (cboe.get("at_close") or cboe.get("live"))):
+        return cboe
+    bar = next((b for b in reversed(bars) if b.get("date") == want), None)
+    if bar is not None and bar.get("src") == "twelve_data" and _session_closed(want):
+        return {"price": bar["close"], "source": "twelve_data_bar", "session": want,
+                "at_close": True, "live": False}
+    if cboe and _pos(cboe.get("price")) is not None:
+        return cboe                                    # 场次不对 / 不是收盘：原样交出去判陈旧
+    if bars:
+        last = bars[-1]
+        return {"price": last["close"], "source": f"{last.get('src') or 'bars'}_bar", "session": last["date"],
+                "at_close": bool(last.get("src") == "twelve_data" and _session_closed(last["date"])),
+                "live": False}
+    return {"price": None, "source": "unavailable", "session": None, "at_close": False, "live": False}
+
+
+def _resolve_mark(raw, as_of: str, *, paired_with_quote: bool = False) -> Dict:
+    """`closes_fn` 的返回（或报价里附带的 "underlying"）→ 规整后的 mark，并判它能不能当 as_of 的价用。
+
+    能用 ⇔ 场次 == `_expected_session(as_of)` 且（官方收盘 或 盘中实时价）。
+    `paired_with_quote=True`（期权行：S 与报价出自同一份 payload）时只要求场次对——盘中生成的陈旧文件
+    里，标的价与同一份文件里的期权报价是**同一时刻**的，配对算 $Delta 要的正是它。
+    裸数字（测试注入 / 旧调用方）= 调用方担保「这就是 as_of 的收盘」。生产默认 `_default_mark`
+    **只返回 dict**（守卫 `TestDefaultMarkContract`），裸数字到不了生产路径。
+
+    返回 {"price": 可用价 | None, "stale", "seen_price", "source", "session", "at_close", "live"}。
+    stale=True ⇒ price=None：看到的价只留在 seen_price 给人看，**绝不进 $Delta / 净值 / 成交**。
+    """
+    if isinstance(raw, dict):
+        seen = _pos(raw.get("price"))
+        session, src = raw.get("session"), raw.get("source")
+        at_close, live = bool(raw.get("at_close")), bool(raw.get("live"))
+    else:
+        seen = _pos(raw)
+        session, src = (as_of, "injected") if seen is not None else (None, None)
+        at_close, live = seen is not None, False
+    usable = (seen is not None and session == _expected_session(as_of)
+              and (at_close or live or paired_with_quote))
+    return {"price": seen if usable else None, "stale": seen is not None and not usable,
+            "seen_price": seen, "source": src, "session": session,
+            "at_close": usable and at_close, "live": usable and live}
+
+
+def _mark_from(closes_fn, ticker: str, as_of: str) -> Dict:
+    try:
+        raw = closes_fn(ticker, as_of)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("[%s] 标的价获取失败: %s", ticker, exc)
+        raw = None
+    return _resolve_mark(raw, as_of)
+
+
+def _memo_marks(closes_fn):
+    """一次运行内同一 (ticker, as_of) 只取一次：SPY 的价在建议 / 净值 / 成交 / 盯市 / 交易后聚合里
+    必须是**同一个**数（同一时刻），且 CBOE 取不到时别每处各重试一遍。"""
+    seen: Dict[Tuple[str, str], object] = {}
+
+    def fn(ticker: str, as_of: str):
+        key = (ticker, as_of)
+        if key not in seen:
+            seen[key] = closes_fn(ticker, as_of)
+        return seen[key]
+    fn._memoized = True
+    return fn
+
+
+def _apply_mark(row: Dict, m: Dict) -> Optional[float]:
+    """把 mark 落到行上。陈旧行同时标 price_missing（as_of 没有可用价）——沿用缺价的整套「partial →
+    unknown → 不对冲」，`price_stale` 只补「为什么」。"""
+    row["price"] = m["price"]
+    row["price_missing"] = m["price"] is None
+    row["price_stale"] = bool(m["stale"])
+    row["price_session"] = m["session"]
+    row["price_source"] = m["source"]
+    if m["stale"]:
+        row["stale_price"] = m["seen_price"]
+    return m["price"]
 
 
 def _ols_beta(stock: List[dict], bench: List[dict], as_of: str, window: int) -> Optional[Tuple[float, int]]:
@@ -369,7 +530,7 @@ def _default_beta(ticker: str, as_of: str) -> Tuple[Optional[float], Optional[st
     算不出 → (None, None)。
 
     磁盘缓存只在**日线拿不到时**兜底，不再抢在重算前面（二次复查修正）：走到这里时
-    _default_close 早已把同一 (ticker, as_of) 的日线放进 _BARS_CACHE，OLS 不过是 60 次
+    _default_mark 早已把同一 (ticker, as_of) 的日线放进 _BARS_CACHE，OLS 不过是 60 次
     乘加——用缓存**一次网络调用都省不下**，却可能端上 4 个交易日前的 β。省错东西了。
     所以：日线已在内存 → 一律重算；日线取不到（限流/断网）→ 才退回缓存并标 source="cache"。"""
     if ticker == CONFIG["hedge_instrument"]:
@@ -401,8 +562,11 @@ def _default_beta(ticker: str, as_of: str) -> Tuple[Optional[float], Optional[st
 
 
 def _default_quotes(ticker: str, symbols: List[str]) -> Dict[str, Optional[dict]]:
-    from cboe_options import quote_contracts
-    return quote_contracts(ticker, symbols)
+    """CBOE 重新报价；每张报价附上**同一份 payload** 的标的 mark（键 "underlying"）——
+    option_exposures 拿它当 S，不再另取一个别的时刻、别的来源的价（v0.45.423）。"""
+    from cboe_options import quote_contracts_with_underlying
+    quotes, und = quote_contracts_with_underlying(ticker, symbols)
+    return {s: ({**q, "underlying": und} if isinstance(q, dict) else q) for s, q in quotes.items()}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -413,7 +577,8 @@ def _blank_row(ticker: str, kind: str) -> Dict:
     return {"ticker": ticker, "kind": kind, "qty": None, "price": None,
             "dollar_delta": None, "beta": None, "beta_source": None, "beta_dollar_delta": None,
             "gamma_dollar_per_1pct": None, "vega_dollar_per_pt": None, "theta_dollar_per_day": None,
-            "price_missing": False, "quote_missing": False, "beta_missing": False}
+            "price_missing": False, "quote_missing": False, "beta_missing": False,
+            "price_stale": False, "price_session": None, "price_source": None}
 
 
 def _apply_beta(row: Dict, beta_fn, as_of: str) -> None:
@@ -434,8 +599,9 @@ def stock_exposures(as_of: str, positions: Optional[List[Dict]] = None,
                     beta_fn: Optional[Callable[[str, str], Tuple[Optional[float], Optional[str]]]] = None
                     ) -> List[Dict]:
     """股票纸面组合每条持仓一行：qty = +shares（bullish）/ −shares（bearish）。
-    股票没有 gamma/vega/theta，那三项是真实的 0.0 而不是「未知」。"""
-    closes_fn = closes_fn or _default_close
+    股票没有 gamma/vega/theta，那三项是真实的 0.0 而不是「未知」。
+    价只认 as_of 那一场（`_resolve_mark`）；陈旧价不进 $Delta。"""
+    closes_fn = closes_fn or _default_mark
     beta_fn = beta_fn or _default_beta
     if positions is None:
         import paper_portfolio as pp
@@ -455,13 +621,7 @@ def stock_exposures(as_of: str, positions: Optional[List[Dict]] = None,
             continue
         sign = -1.0 if str(p.get("direction")) == "bearish" else 1.0
         row["qty"] = round(sign * shares, 6)
-        try:
-            px = _pos(closes_fn(tk, as_of))
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("[%s] 收盘价获取失败: %s", tk, exc)
-            px = None
-        row["price"] = px
-        row["price_missing"] = px is None
+        px = _apply_mark(row, _mark_from(closes_fn, tk, as_of))
         row["dollar_delta"] = round(row["qty"] * px, 2) if px is not None else None
         _apply_beta(row, beta_fn, as_of)
         rows.append(row)
@@ -479,13 +639,16 @@ def option_exposures(as_of: str, positions: Optional[List[Dict]] = None,
         $Vega/pt    = qty × vega                          —— CBOE vega 已是每 vol 点
         $Theta/日   = qty × theta                         —— CBOE theta 每日历日、多头为负
     报价缺失 → 该行 quote_missing、Greeks None（不沿用 last_mark 的任何东西）。
-    S 用 closes_fn 的标的收盘（quote_contracts 不带标的价）；缺 S → price_missing。"""
+    S（v0.45.423）取自与报价**同一份** CBOE payload（`_default_quotes` 附在报价里的 "underlying"），
+    与期权报价同一时刻；报价里没有它（注入的 quotes_fn）才退回 closes_fn。payload 属于别的场次
+    （补跑历史日时拉到的是今天的链）⇒ 报价本身也不是 as_of 的：quote_missing + quote_stale，Greeks 不进汇总。"""
     quotes_fn = quotes_fn or _default_quotes
-    closes_fn = closes_fn or _default_close
+    closes_fn = closes_fn or _default_mark
     beta_fn = beta_fn or _default_beta
     if positions is None:
         import options_paper_leg as opl
         positions = _load_jsonl(opl.POSITIONS_FILE)
+    want = _expected_session(as_of)
     rows: List[Dict] = []
     for p in positions or []:
         tk = str(p.get("ticker") or "")
@@ -497,18 +660,25 @@ def option_exposures(as_of: str, positions: Optional[List[Dict]] = None,
         except Exception as exc:  # noqa: BLE001
             _log.warning("[%s] 持仓重新报价失败: %s", tk, exc)
             quotes = {}
-        try:
-            S = _pos(closes_fn(tk, as_of))
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("[%s] 标的收盘获取失败: %s", tk, exc)
-            S = None
+        und = next((q["underlying"] for q in quotes.values()
+                    if isinstance(q, dict) and isinstance(q.get("underlying"), dict)), None)
+        # closes_fn 照旧每只票调一次：默认实现顺带把 β 要的日线取进缓存（见 `_default_mark` 末段），
+        # 注入的 quotes_fn 不带 "underlying" 时它就是 S。
+        fallback = _mark_from(closes_fn, tk, as_of)
+        if und is not None and _pos(und.get("price")) is not None:
+            m = _resolve_mark(und, as_of, paired_with_quote=True)
+            # 只凭**正面证据**判报价错场（场次已知且不是这一场）；判不了场次（无 last_trade_time）时
+            # 报价照用（同 CBOE 那一栈的 fail-open），但 S 判陈旧 ⇒ $Delta 缺 ⇒ unknown，照样不对冲、照样报。
+            quote_stale = und.get("session") is not None and und.get("session") != want
+        else:
+            m, quote_stale = fallback, False
         sign = 1.0 if side == "long" else -1.0
         for cp, sym in legs:
             row = _blank_row(tk, "option")
             row.update({"symbol": sym, "cp": cp, "side": side, "strike": _num(p.get("strike")),
                         "expiry": p.get("expiry"), "dte": _days_between(as_of, str(p.get("expiry") or "")),
                         "mid": None, "iv": None, "delta": None, "gamma": None, "vega": None, "theta": None})
-            row["price"], row["price_missing"] = S, S is None
+            S = _apply_mark(row, m)
             if n is None or n <= 0 or not sym:
                 row["quote_missing"] = True
                 _apply_beta(row, beta_fn, as_of)
@@ -516,6 +686,10 @@ def option_exposures(as_of: str, positions: Optional[List[Dict]] = None,
                 continue
             row["qty"] = sign * n * 100.0
             q = quotes.get(sym)
+            if quote_stale and isinstance(q, dict):
+                row["quote_stale"] = True
+                row["quote_session"] = und.get("session")
+                q = None                    # 别的场次的报价：不进 Greeks 汇总（同缺报价）
             ok = isinstance(q, dict) and bool(q.get("quote_ok"))
             g = {k: _num(q.get(k)) for k in ("mid", "iv", "delta", "gamma", "vega", "theta")} if ok else {}
             if not ok or any(g.get(k) is None for k in ("mid", "delta", "gamma", "vega", "theta")):
@@ -540,11 +714,15 @@ def _hedge_positions() -> List[Dict]:
 
 
 def hedge_exposures(as_of: str, closes_fn: Optional[Callable[[str, str], Optional[float]]] = None,
-                    positions: Optional[List[Dict]] = None, spy_price: Optional[float] = None) -> List[Dict]:
-    """SPY 覆盖账本的持仓行。β=1.0 是定义（对冲工具就是基准），source="benchmark"。"""
-    closes_fn = closes_fn or _default_close
+                    positions: Optional[List[Dict]] = None, spy_price: Optional[float] = None,
+                    spy_mark: Optional[Dict] = None) -> List[Dict]:
+    """SPY 覆盖账本的持仓行。β=1.0 是定义（对冲工具就是基准），source="benchmark"。
+    价：`spy_mark`（compute_day 已判过场次的那一个）> `spy_price`（调用方担保是 as_of 的价）> closes_fn。"""
+    closes_fn = closes_fn or _default_mark
     if positions is None:
         positions = _hedge_positions()
+    if spy_mark is None and _pos(spy_price) is not None:
+        spy_mark = _resolve_mark(spy_price, as_of)
     rows: List[Dict] = []
     for p in positions or []:
         tk = str(p.get("ticker") or CONFIG["hedge_instrument"])
@@ -569,14 +747,7 @@ def hedge_exposures(as_of: str, closes_fn: Optional[Callable[[str, str], Optiona
         if shares == 0:
             continue                      # 真实的 0 股（平仓留痕）：跳过是对的，它确实没有暴露
         row["qty"] = shares
-        px = _pos(spy_price)
-        if px is None:
-            try:
-                px = _pos(closes_fn(tk, as_of))
-            except Exception as exc:  # noqa: BLE001
-                _log.warning("[%s] 对冲工具收盘获取失败: %s", tk, exc)
-                px = None
-        row["price"], row["price_missing"] = px, px is None
+        px = _apply_mark(row, spy_mark if spy_mark is not None else _mark_from(closes_fn, tk, as_of))
         if px is not None:
             row["dollar_delta"] = round(shares * px, 2)
             row["beta_dollar_delta"] = row["dollar_delta"]
@@ -591,10 +762,11 @@ def hedge_exposures(as_of: str, closes_fn: Optional[Callable[[str, str], Optiona
 def aggregate(rows: List[Dict], nav: Optional[float]) -> Dict:
     """求和 + 折 % NAV + 覆盖率 + β·Delta 带状判定。
     band_status："unknown" 只要有任何一行的 β·$Delta 算不出来（缺价/缺报价/缺 β）——
-    缺的那部分可能大到翻转结论，所以宁可说不知道。"""
+    缺的那部分可能大到翻转结论，所以宁可说不知道。
+    `n_price_stale`（v0.45.423）⊆ `n_price_missing`：价看到了，但不是 as_of 那一场的。"""
     nav = _pos(nav)
     sums = {k: 0.0 for k in _GREEK_KEYS}
-    n_price = n_quote = n_beta = n_incomplete_bdd = 0
+    n_price = n_stale = n_quote = n_beta = n_incomplete_bdd = 0
     n_with_beta = 0
     for r in rows:
         for k in _GREEK_KEYS:
@@ -602,13 +774,15 @@ def aggregate(rows: List[Dict], nav: Optional[float]) -> Dict:
             if v is not None:
                 sums[k] += v
         n_price += bool(r.get("price_missing"))
+        n_stale += bool(r.get("price_stale"))
         n_quote += bool(r.get("quote_missing"))
         n_beta += bool(r.get("beta_missing"))
         n_with_beta += _num(r.get("beta")) is not None
         n_incomplete_bdd += _num(r.get("beta_dollar_delta")) is None
     n_rows = len(rows)
     pct = {k: (round(sums[k] / nav * 100.0, 4) if nav else None) for k in _GREEK_KEYS}
-    coverage = {"n_rows": n_rows, "n_price_missing": n_price, "n_quote_missing": n_quote,
+    coverage = {"n_rows": n_rows, "n_price_missing": n_price, "n_price_stale": n_stale,
+                "n_quote_missing": n_quote,
                 "n_beta_missing": n_beta, "n_beta_dd_incomplete": n_incomplete_bdd,
                 "beta_coverage": (round(n_with_beta / n_rows, 4) if n_rows else None)}
     partial = bool(n_price or n_quote or n_beta)
@@ -684,7 +858,7 @@ def combined_nav_detail(as_of: str, closes_fn: Optional[Callable[[str, str], Opt
     跨式腿的 10 万起始资本是名义的（测量账本），合并进来只为让百分比有一个分母。"""
     import paper_portfolio as pp
     import options_paper_leg as opl
-    closes_fn = closes_fn or _default_close
+    closes_fn = closes_fn or _default_mark
     comps: Dict[str, Optional[float]] = {
         "stock_book": _latest_nav(pp.EQUITY_FILE, as_of),
         "straddle_leg": _latest_nav(opl.EQUITY_FILE, as_of),
@@ -701,11 +875,8 @@ def combined_nav_detail(as_of: str, closes_fn: Optional[Callable[[str, str], Opt
         comps["straddle_leg"] = 0.0
         not_started.append("straddle_leg")
     if spy_price is None:
-        try:
-            spy_price = _pos(closes_fn(CONFIG["hedge_instrument"], as_of))
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("[SPY] 收盘获取失败: %s", exc)
-            spy_price = None
+        # 陈旧的 SPY 价 → None → 有仓时覆盖账本净值不可得（不拿昨收给今天的账估值）
+        spy_price = _mark_from(closes_fn, CONFIG["hedge_instrument"], as_of)["price"]
     comps["hedge_overlay"] = hedge_overlay_value(as_of, spy_price)
     missing = [k for k, v in comps.items() if v is None]
     nav = None if missing else sum(comps.values())  # type: ignore[arg-type]
@@ -738,7 +909,9 @@ def hedge_recommendation(agg: Dict, spy_price: Optional[float], nav: Optional[fl
         if nav is None:
             why.append("nav unavailable")
         if cov.get("n_price_missing"):
-            why.append(f"{cov['n_price_missing']} price missing")
+            stale = cov.get("n_price_stale") or 0
+            why.append(f"{cov['n_price_missing']} price missing"
+                       + (f" ({stale} stale: not the as_of session's price)" if stale else ""))
         if cov.get("n_quote_missing"):
             why.append(f"{cov['n_quote_missing']} quote missing")
         if cov.get("n_beta_missing"):
@@ -777,6 +950,11 @@ def hedge_recommendation(agg: Dict, spy_price: Optional[float], nav: Optional[fl
 # ══════════════════════════════════════════════════════════════════════════════
 # 压力测试：现货 × IV 联合网格
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _no_price_label(row: Dict) -> str:
+    """剔除标签里说清「没价」还是「价不是 as_of 那一场的」——两者的排查方向完全不同。"""
+    return "stale price" if row.get("price_stale") else "no price"
+
 
 def stress_table(rows: List[Dict], spy_price: Optional[float] = None) -> Dict:
     """网格 stress_spot_pct × stress_iv_pts → 组合 P&L。
@@ -817,13 +995,13 @@ def stress_table(rows: List[Dict], spy_price: Optional[float] = None) -> Dict:
             if dd is None:
                 dd = (_num(row.get("qty")) or 0.0) * (_pos(spy_price) or 0.0) if _pos(spy_price) else None
             if dd is None:
-                _exclude(row, f"{row.get('ticker')}(hedge:no price)")
+                _exclude(row, f"{row.get('ticker')}(hedge:{_no_price_label(row)})")
                 continue
             usable.append(("hedge", {"dd": dd}))
         elif kind == "stock":
             dd, beta = _num(row.get("dollar_delta")), _num(row.get("beta"))
             if dd is None or beta is None:
-                _exclude(row, f"{row.get('ticker')}(stock:{'no price' if dd is None else 'no beta'})")
+                _exclude(row, f"{row.get('ticker')}(stock:{_no_price_label(row) if dd is None else 'no beta'})")
                 continue
             usable.append(("stock", {"dd": dd, "beta": beta}))
         elif kind == "option":
@@ -897,7 +1075,8 @@ def stress_table(rows: List[Dict], spy_price: Optional[float] = None) -> Dict:
 # 计算一天（纯读）→ 执行（写账本）
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _hedge_rows_before_today(as_of: str, closes_fn, spy_price: Optional[float]) -> Tuple[List[Dict], Optional[Dict]]:
+def _hedge_rows_before_today(as_of: str, closes_fn, spy_price: Optional[float],
+                             spy_mark: Optional[Dict] = None) -> Tuple[List[Dict], Optional[Dict]]:
     """今天已经成交过的话，把那笔从持仓里减掉，重建「交易前」视角——同日重跑才能算出
     与第一次一模一样的建议与审计文件（幂等）。返回 (rows_before, today_trade | None)。"""
     trades = [t for t in _load_jsonl(TRADES_FILE) if t.get("date") == as_of]
@@ -917,22 +1096,52 @@ def _hedge_rows_before_today(as_of: str, closes_fn, spy_price: Optional[float]) 
         if not found:
             adj.append({"ticker": tk, "shares": -traded, "avg_price": _num(today.get("price"))})
         positions = adj
-    return hedge_exposures(as_of, closes_fn, positions=positions, spy_price=spy_price), today
+    return hedge_exposures(as_of, closes_fn, positions=positions, spy_price=spy_price,
+                           spy_mark=spy_mark), today
+
+
+_LAST_PRICE_CHECK: Optional[Dict] = None
+_PRICE_CHECK_LIST_MAX = 20      # 进 status.json 的明细条数上限（计数不截）
+
+
+def price_check_stats() -> Optional[Dict]:
+    """本进程最近一次 compute_day / run_for_date 的标的价场次核对（v0.45.423）。
+    `scan_timing.counters()["portfolio_greeks"]` 读它 → status.json → alert_manager（陈旧价 / 拒绝成交 → P2）。
+    本进程没跑过 → None：None 是「没测到」，{} 会被读成「测过为零」。"""
+    return dict(_LAST_PRICE_CHECK) if _LAST_PRICE_CHECK is not None else None
+
+
+def _price_check(as_of: str, rows: List[Dict], spy_mark: Dict) -> Dict:
+    """这一天的每个价是不是 as_of 那一场的。审计文件、日报、status.json、alert_manager 读的都是这一份。"""
+    stale = [{"ticker": r.get("ticker"), "kind": r.get("kind"), "symbol": r.get("symbol"),
+              "seen_price": r.get("stale_price"), "session": r.get("price_session"),
+              "source": r.get("price_source")}
+             for r in rows if r.get("price_stale")]
+    quote_stale = sorted({str(r.get("symbol") or r.get("ticker")) for r in rows if r.get("quote_stale")})
+    return {"as_of": as_of, "expected_session": _expected_session(as_of), "version": _VERSION,
+            "n_rows": len(rows), "n_priced": sum(1 for r in rows if _pos(r.get("price")) is not None),
+            "n_stale": len(stale), "stale": stale[:_PRICE_CHECK_LIST_MAX],
+            "n_quote_stale": len(quote_stale), "quote_stale": quote_stale[:_PRICE_CHECK_LIST_MAX],
+            "spy": {k: spy_mark.get(k) for k in ("price", "seen_price", "stale", "source", "session",
+                                                   "at_close", "live")},
+            "execution_blocked": None}
 
 
 def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dict:
-    """只读：暴露行 + 聚合 + 建议 + 压力表。不写任何账本文件（β 缓存除外——那是缓存）。"""
-    closes_fn = closes_fn or _default_close
+    """只读：暴露行 + 聚合 + 建议 + 压力表。不写任何账本文件（β 缓存除外——那是缓存）。
+    v0.45.423：每个标的价都要是 as_of 那一场的（`_resolve_mark`）；不是的行判陈旧、不进 $Delta，
+    结果带 `price_check`，有陈旧就打 ERROR——不再让 5 天容差把「昨天的价」改写成「正常」。"""
+    global _LAST_PRICE_CHECK
+    closes_fn = closes_fn or _default_mark
+    if not getattr(closes_fn, "_memoized", False):
+        closes_fn = _memo_marks(closes_fn)
     quotes_fn = quotes_fn or _default_quotes
     beta_fn = beta_fn or _default_beta
-    try:
-        spy_price = _pos(closes_fn(CONFIG["hedge_instrument"], as_of))
-    except Exception as exc:  # noqa: BLE001
-        _log.warning("[SPY] 收盘获取失败: %s", exc)
-        spy_price = None
+    spy_mark = _mark_from(closes_fn, CONFIG["hedge_instrument"], as_of)
+    spy_price = spy_mark["price"]
     stock_rows = stock_exposures(as_of, closes_fn=closes_fn, beta_fn=beta_fn)
     option_rows = option_exposures(as_of, quotes_fn=quotes_fn, beta_fn=beta_fn, closes_fn=closes_fn)
-    hedge_rows, today_trade = _hedge_rows_before_today(as_of, closes_fn, spy_price)
+    hedge_rows, today_trade = _hedge_rows_before_today(as_of, closes_fn, spy_price, spy_mark=spy_mark)
     rows = stock_rows + option_rows + hedge_rows
     nav_d = combined_nav_detail(as_of, closes_fn, spy_price=spy_price)
     # NAV 不分「交易前/后」：成交价=收盘价，−shares×px 的现金腿与 +shares×px 的市值腿
@@ -940,9 +1149,22 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     agg = aggregate(rows, nav_d["nav"])
     rec = hedge_recommendation(agg, spy_price, nav_d["nav"])
     stress = stress_table(rows, spy_price)
-    return {"as_of": as_of, "version": _VERSION, "spy_price": spy_price, "nav": nav_d,
-            "rows": rows, "aggregate": agg, "recommendation": rec, "stress": stress,
-            "today_trade": today_trade}
+    chk = _price_check(as_of, rows, spy_mark)
+    if chk["n_stale"] or chk["n_quote_stale"] or spy_mark["stale"]:
+        bits = []
+        if spy_mark["stale"]:
+            bits.append(f"SPY 看到 {spy_mark['seen_price']} @ {spy_mark['session']}［{spy_mark['source']}］")
+        for s in dict.fromkeys((s["ticker"], s["kind"], s["seen_price"], s["session"], s["source"])
+                               for s in chk["stale"]):
+            bits.append(f"{s[0]}({s[1]}) 看到 {s[2]} @ {s[3]}［{s[4]}］")
+        if chk["n_quote_stale"]:
+            bits.append(f"{chk['n_quote_stale']} 张合约的报价属于别的场次")
+        _log.error("[PortfolioGreeks] %s：标的价不属于 %s 这一场——%s。这些行不进 $Delta / 净值 / 成交，"
+                   "今日不据此对冲", as_of, chk["expected_session"], "；".join(bits))
+    _LAST_PRICE_CHECK = chk
+    return {"as_of": as_of, "version": _VERSION, "spy_price": spy_price, "spy_mark": spy_mark,
+            "nav": nav_d, "rows": rows, "aggregate": agg, "recommendation": rec, "stress": stress,
+            "today_trade": today_trade, "price_check": chk}
 
 
 def _execute_trade(as_of: str, rec: Dict, agg: Dict, nav: Optional[float]) -> Optional[Dict]:
@@ -997,18 +1219,31 @@ def _execute_trade(as_of: str, rec: Dict, agg: Dict, nav: Optional[float]) -> Op
 def run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, execute: bool = True) -> Dict:
     """算暴露 → 聚合 → 建议 →（execute 且带外且今天还没交易过）成交 → 覆盖账本盯市 →
     净值快照（按日期去重）→ 审计文件 hedge_state/greeks_{as_of}.json。同日重跑幂等。
-    execute=False：只算，不写任何账本文件（β 缓存除外）。"""
+    execute=False：只算，不写任何账本文件（β 缓存除外）。
+    v0.45.423：SPY 只在拿到 as_of 的**官方收盘**时成交（`fill: close` 名副其实）；盘中实时价只算不成交，
+    原因进 `execution_blocked`（审计文件 / price_check → status.json → alert_manager）。"""
+    closes_fn = _memo_marks(closes_fn or _default_mark)   # 本次运行内 SPY 只有一个价：建议 / 成交 / 盯市 / 交易后
     res = compute_day(as_of, closes_fn=closes_fn, quotes_fn=quotes_fn, beta_fn=beta_fn)
     rec = res["recommendation"]
     nav = res["nav"]["nav"]
+    spy_mark = res["spy_mark"]
     executed = res.get("today_trade")
+    res["execution_blocked"] = None
     if not execute:
         res["executed_trade"] = executed
         res["executed"] = False
         res["aggregate_after"] = None
         return res
     if executed is None and rec.get("action") in ("sell_spy", "buy_spy"):
-        executed = _execute_trade(as_of, rec, res["aggregate"], nav)
+        if spy_mark.get("price") is not None and spy_mark.get("at_close"):
+            executed = _execute_trade(as_of, rec, res["aggregate"], nav)
+        else:
+            blocked = (f"SPY 价不是 {_expected_session(as_of)} 的官方收盘（{spy_mark.get('source')} @ "
+                       f"{spy_mark.get('session')}{'，盘中实时价' if spy_mark.get('live') else ''}）"
+                       "——成交按收盘记账，拒绝成交")
+            res["execution_blocked"] = res["price_check"]["execution_blocked"] = blocked
+            _log.warning("[PortfolioGreeks] %s %s %+d SPY 未执行：%s", as_of, rec.get("action"),
+                         int(rec.get("spy_shares") or 0), blocked)
     elif executed is not None and rec.get("action") in ("sell_spy", "buy_spy"):
         _log.info("[PortfolioGreeks] %s 今天已成交过（%+d SPY），重跑不再交易", as_of, int(executed.get("shares") or 0))
     res["executed_trade"] = executed
@@ -1031,7 +1266,9 @@ def run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, execu
     cash = _num(meta.get("cash"))
     mv = (shares * spy_price) if (spy_price is not None) else (None if shares else 0.0)
     overlay_nav = (cash + mv) if (cash is not None and mv is not None) else None
-    snapshot = {"date": as_of, "spy_shares": shares, "spy_price": spy_price, "cash": _r(cash),
+    snapshot = {"date": as_of, "spy_shares": shares, "spy_price": spy_price,
+                "spy_price_source": spy_mark.get("source"), "spy_price_session": spy_mark.get("session"),
+                "cash": _r(cash),
                 "market_value": _r(mv), "nav": _r(overlay_nav),
                 "trades_today": sum(1 for t in _load_jsonl(TRADES_FILE) if t.get("date") == as_of),
                 "band_status": res["aggregate"]["band_status"]}
@@ -1048,8 +1285,8 @@ def run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, execu
     _save_meta(meta)
 
     # ── 交易后的聚合（含 SPY 覆盖现状）──
-    hedge_rows_after = hedge_exposures(as_of, closes_fn or _default_close, positions=_hedge_positions(),
-                                       spy_price=spy_price)
+    hedge_rows_after = hedge_exposures(as_of, closes_fn, positions=_hedge_positions(),
+                                       spy_price=spy_price, spy_mark=spy_mark)
     rows_after = [r for r in res["rows"] if r.get("kind") != "hedge"] + hedge_rows_after
     res["aggregate_after"] = aggregate(rows_after, nav)
     res["equity_snapshot"] = snapshot
@@ -1085,6 +1322,35 @@ def _load_audit(as_of: str) -> Optional[Dict]:
         return None
 
 
+def _spy_price_note(res: Dict) -> str:
+    px = _num(res.get("spy_price"))
+    m = res.get("spy_mark") or {}
+    if px is not None:
+        return f"；SPY ${px:.2f}（{m.get('source') or '?'} @ {m.get('session') or '?'}）" if m else f"；SPY ${px:.2f}"
+    if m.get("stale"):
+        return f"；SPY 价不可得（看到的 {m.get('seen_price')} 属于 {m.get('session')}，不是这一场）"
+    return "；SPY 价不可得"
+
+
+def _stale_price_line(res: Dict) -> str:
+    """v0.45.423：陈旧价点名——读者带走的是「哪只票、看到的是哪天的价」，不是一个计数。"""
+    chk = res.get("price_check") or {}
+    bits = list(dict.fromkeys(f"{s.get('ticker')} {s.get('seen_price')} @ {s.get('session')}"
+                              for s in chk.get("stale") or []))
+    if chk.get("n_quote_stale"):
+        bits.append(f"{chk['n_quote_stale']} 张合约的报价属于别的场次")
+    blocked = chk.get("execution_blocked") or res.get("execution_blocked")
+    if not bits and not blocked:
+        return ""
+    out = ""
+    if bits:
+        out = (f"⚠️ **价不属于 {chk.get('expected_session') or res.get('as_of')} 这一场**："
+               + "；".join(bits[:8]) + "——这些行不进 $Delta / 净值 / 成交")
+    if blocked:
+        out += ("　" if out else "⚠️ ") + f"**未成交**：{blocked}"
+    return out
+
+
 def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
     """日报小节。优先读当日审计文件（run_for_date 已跑过）；否则只读计算、不落盘。
     三本账都没有任何持仓 → 空串。"""
@@ -1112,7 +1378,7 @@ def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
     L.append(f"截至 {as_of}：股票仓 {kinds.get('stock', 0)} 行 / 跨式腿合约 {kinds.get('option', 0)} 行 / "
              f"SPY 覆盖 {hedge_sh:+,.0f} 股（交易前）；合并 NAV "
              + (f"${nav:,.0f}" if nav is not None else f"不可得（缺：{', '.join(nav_d.get('missing') or ['?'])}）")
-             + (f"；SPY ${_num(res.get('spy_price')):.2f}" if _num(res.get("spy_price")) is not None else "；SPY 价不可得")
+             + _spy_price_note(res)
              + "。")
     L += ["", "| 指标 | 数值 | % NAV | 备注 |", "|------|------|-------|------|"]
     s, p = agg.get("sums") or {}, agg.get("pct_nav") or {}
@@ -1126,12 +1392,17 @@ def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
              f"{'⚠️ 超 ' + str(CONFIG['vega_alert_pct']) + '%' if agg.get('vega_alert') else 'IV 每变 1 点'} |")
     L.append(f"| $Theta / 日 | {_fmt_usd(s.get('theta_dollar_per_day'))} | {_fmt_pct(p.get('theta_dollar_per_day'), 3)} | 日历日 |")
     cov = agg.get("coverage") or {}
-    cov_line = (f"覆盖：{cov.get('n_rows', 0)} 行，缺价 {cov.get('n_price_missing', 0)} / 缺报价 {cov.get('n_quote_missing', 0)} / "
+    cov_line = (f"覆盖：{cov.get('n_rows', 0)} 行，缺价 {cov.get('n_price_missing', 0)}"
+                + (f"（其中陈旧 {cov['n_price_stale']}）" if cov.get("n_price_stale") else "")
+                + f" / 缺报价 {cov.get('n_quote_missing', 0)} / "
                 f"缺 β {cov.get('n_beta_missing', 0)}，β 覆盖率 "
                 + (f"{(cov.get('beta_coverage') or 0) * 100:.0f}%" if cov.get("beta_coverage") is not None else "—"))
     if agg.get("partial"):
         cov_line += " —— **部分数据，结论不完整，不据此对冲**"
     L += ["", cov_line]
+    stale_line = _stale_price_line(res)
+    if stale_line:
+        L.append(stale_line)
     L.append(f"**今日建议**：`{rec.get('action')}` {int(rec.get('spy_shares') or 0):+d} SPY —— {rec.get('reason')}")
     if trade:
         L.append(f"**已执行**（纸面）：{int(trade.get('shares') or 0):+d} SPY @ ${_num(trade.get('price')) or 0:.2f}，"

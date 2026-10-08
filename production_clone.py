@@ -35,12 +35,15 @@ v0.45.402 退役 `push_main` 之后分叉**不会自愈**：`production_sync` �
 `clone_guard` ⇒ `scan_timing` ⇒ status.json ⇒ `alert_manager` P1。环境变量用不认识它的旧代码会忽略
 （不像新增 CLI 参数会让旧 argparse 退出）⇒ 克隆停在旧提交上也能先快进、下一轮再上守卫，不会互锁。
 
-`ok` 要同时满足：独立仓库、origin 是 GitHub 上的 `alpha-hive-deploy`、没有 `core.hooksPath` 改道、
-五个钩子都是本文件当前版本、被跟踪文件没有未提交改动。任何一条不满足都**不拦扫描**（扫描照跑），只红。
+`ok` 要同时满足：HEAD 解析得出提交（v0.45.432）、独立仓库、origin 是 GitHub 上的 `alpha-hive-deploy`、
+没有 `core.hooksPath` 改道、五个钩子都是本文件当前版本、被跟踪文件没有未提交改动。任何一条不满足都
+**不拦扫描**（扫描照跑），只红。
 
-两条拒绝：
+三条拒绝：
 * 不是独立仓库（`.git` 是文件 = worktree；或挂着 linked worktree = 开发仓库）⇒ **不写钩子**。
   装进开发仓库会拦住所有 worktree 的提交——有人手动跑 production_sync 时也不能造成这个后果。
+* origin 不是 `alpha-hive-deploy`（v0.45.432）⇒ **不写钩子**：那不是我们的克隆（如 `setup --dest` 指错到数据备份仓，
+  装上之后备份仓自己的提交全被拒）。
 * 同名钩子不是本文件生成的（没有标记行）⇒ 不覆盖、报 `foreign`（不删别人的东西，但要红）。
 
 手动入口（cutover 与排查）：
@@ -57,6 +60,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -218,6 +222,12 @@ def inspect(repo, expected_origin: Optional[str] = None) -> Dict:
         if linked:
             r["problems"].append(f"has_linked_worktrees：挂着 {len(linked)} 个 worktree（这是开发仓库，不是生产克隆）")
     try:
+        # v0.45.432：HEAD 必须解析成提交。空仓库 / 克隆被 SIGKILL 中断（setup 超时）留下的半截目录：
+        # 没有提交、没有被跟踪文件 ⇒ 下面的工作区检查恒为空 ⇒ 此前判 ok=True（实测），次日编排器在
+        # 「核心脚本不存在」处 exit 1。索引没写完的半截克隆则会在工作区检查里显成大批删除，同样红。
+        h = _git(repo, "rev-parse", "--verify", "-q", "HEAD^{commit}")
+        if h.returncode != 0:
+            r["problems"].append("no_head：HEAD 解析不出提交（空仓库，或克隆中途被打断）")
         r["origin"] = _config_get(repo, "remote.origin.url")
         r["origin_ok"] = r["origin"] == want_origin
         if not r["origin_ok"]:
@@ -265,13 +275,15 @@ def _write_hook(path: Path, text: str) -> None:
 def ensure_guard(repo, expected_origin: Optional[str] = None) -> Dict:
     """补齐 / 刷新守卫钩子，返回装完之后的 `inspect` 结果 + `actions`。
 
-    不是独立仓库 ⇒ 一个字节都不写（见模块 docstring「两条拒绝」）；foreign 钩子不覆盖。
+    不是独立仓库、或 origin 不是 alpha-hive-deploy ⇒ 一个字节都不写（见模块 docstring「三条拒绝」）；foreign 钩子不覆盖。
     **从不抛**：任何异常都折成 `ok: False` + `problems`——调用方（扫描前同步）不能被它拖垮，但必须红。
     """
     try:
         before = inspect(repo, expected_origin)
         actions: Dict[str, str] = {}
-        if before["standalone"]:
+        # v0.45.432：origin 不对也不写。此前只看 standalone ⇒ `setup --dest` 指错到别的独立仓库（如数据备份仓
+        # `~/alpha-hive-data/_git_backup`）会装上「main 只许指向 origin/main 祖先」的钩子，那个仓库自己的提交从此全被拒。
+        if before["standalone"] and before["origin_ok"]:
             hooks_dir = Path(repo) / ".git" / "hooks"
             for name, text in HOOKS.items():
                 st = before["hooks"].get(name)
@@ -291,6 +303,21 @@ def ensure_guard(repo, expected_origin: Optional[str] = None) -> Dict:
 
 
 # ─────────────────────────────────────────── cutover：建克隆
+def _discard_partial(dest: Path) -> str:
+    """克隆失败后删掉**本次新建**的目标目录（调用方只在 dest 原本不存在时调）。
+
+    超时走 SIGKILL，git 来不及清理 ⇒ 留下 .git 已建、HEAD 未诞生的半截目录；不删的话重跑 setup 会把它当
+    已有克隆。返回拼进 detail 的说明（删不掉也要说出来，不吞）。
+    """
+    if not dest.exists():
+        return ""
+    try:
+        shutil.rmtree(dest)
+        return f"（已删除残留的半截目录 {dest}）"
+    except OSError as e:
+        return f"（⚠️ 残留的半截目录 {dest} 删不掉：{e}——重跑前手动删除）"
+
+
 def setup(dest=None, origin: Optional[str] = None) -> Dict:
     """克隆到 `dest`（缺省 `~/alpha-hive-prod`）并装守卫。已存在 ⇒ 不重新克隆，只补守卫并体检。
 
@@ -309,10 +336,11 @@ def setup(dest=None, origin: Optional[str] = None) -> Dict:
             r = subprocess.run(["git", "clone", "--origin", "origin", "--", url, str(dest)],
                                capture_output=True, text=True, timeout=_CLONE_TIMEOUT)
         except (OSError, subprocess.SubprocessError) as e:
-            res.update(outcome="clone_failed", detail=f"{type(e).__name__}: {e}")
+            res.update(outcome="clone_failed", detail=f"{type(e).__name__}: {e}{_discard_partial(dest)}")
             return res
         if r.returncode != 0:
-            res.update(outcome="clone_failed", detail=r.stderr.strip() or f"returncode={r.returncode}")
+            res.update(outcome="clone_failed",
+                       detail=(r.stderr.strip() or f"returncode={r.returncode}") + _discard_partial(dest))
             return res
         res["cloned"] = True
     res["guard"] = ensure_guard(dest, url)
