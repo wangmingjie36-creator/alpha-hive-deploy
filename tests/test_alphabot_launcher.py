@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+import shlex
 import socket
 import subprocess
 import sys
@@ -196,6 +197,59 @@ class TestBundle:
         assert MA.main(["--dest", str(tmp_path / "Apps"), "--home", str(data)]) == 0
         assert LA.load_config()["alpha_hive_home"] == str(data.resolve())
         assert LA.config_path().is_relative_to(home), "启动器配置没跟着 $HOME 走（被冻在 import 期了？）"
+
+    def test_main_reports_kept_data_root_instead_of_promising_a_prompt(self, tmp_path, home, monkeypatch, capsys):
+        """没给 --home 但配置里已有数据根 ⇒ 双击不会再问；输出不许说「首次双击时会让你选」（v0.45.436 实测误导）。"""
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        data = tmp_path / "data"
+        data.mkdir()
+        LA.save_config({"alpha_hive_home": str(data)})
+        assert MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(REPO)]) == 0
+        out = capsys.readouterr().out
+        assert f"沿用启动器配置里的数据根 {data}" in out and "首次双击" not in out, out
+
+
+class TestDefaultRepoIsProductionClone:
+    """v0.45.436（数据根迁移阶段 8 收尾）：`.app` 缺省 cd 进生产克隆。此前缺省 = 生成器所在检出 ⇒ 在开发检出 /
+    worktree 里 `make alphabot-app` 会把 .app 无声指回一份再没人快进（或随时被删）的代码。"""
+
+    @staticmethod
+    def _repo_in_script(apps: Path) -> Path:
+        exe = apps / f"{MA.APP_NAME}.app" / "Contents" / "MacOS" / MA.EXECUTABLE
+        line = next(ln for ln in exe.read_text(encoding="utf-8").splitlines() if ln.startswith("REPO="))
+        return Path(shlex.split(line[len("REPO="):])[0])
+
+    @staticmethod
+    def _clone_at(path: Path, monkeypatch, *, valid: bool = True) -> Path:
+        import production_clone
+        if valid:
+            (path / "alphabot").mkdir(parents=True)
+            (path / "alphabot" / "launcher.py").write_text("", encoding="utf-8")
+        monkeypatch.setattr(production_clone, "default_dest", lambda: path)
+        return path
+
+    def test_default_points_at_the_clone(self, tmp_path, home, monkeypatch, capsys):
+        clone = self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 0
+        got = self._repo_in_script(tmp_path / "Apps")
+        assert got == clone.resolve() and got != REPO, got        # 正对照：确实不是生成器所在检出
+        assert f"代码目录 {clone.resolve()}" in capsys.readouterr().out
+
+    def test_missing_clone_falls_back_loudly(self, tmp_path, home, monkeypatch, capsys):
+        gone = self._clone_at(tmp_path / "no-such-clone", monkeypatch, valid=False)
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 0
+        assert self._repo_in_script(tmp_path / "Apps") == REPO
+        err = capsys.readouterr().err
+        assert str(gone) in err and "不会被自动更新" in err, "退回本检出必须说出来，否则又是一份无声冻结的代码"
+
+    def test_explicit_repo_wins_over_the_clone(self, tmp_path, home, monkeypatch, capsys):
+        self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(REPO)]) == 0
+        assert self._repo_in_script(tmp_path / "Apps") == REPO
+        assert "生产克隆" not in capsys.readouterr().err
 
 
 # ── 启动流程 ───────────────────────────────────────────────────────────────

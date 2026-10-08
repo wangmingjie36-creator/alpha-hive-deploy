@@ -53,6 +53,7 @@ alphabot-demo:
 
 # 生成 macOS 桌面程序 ~/Applications/Alpha Bot.app（双击启动服务并打开页面；已在跑就只开页面）。
 # 当前环境有 ALPHA_HIVE_HOME 就顺手记下；否则首次双击时选一次。换 Python：make alphabot-app PYTHON=路径
+# .app 跑的代码缺省是生产克隆 ~/alpha-hive-prod（阶段 8），从哪个检出 make 都一样；测自己的检出才直接跑 -m alphabot.macos_app --repo .
 alphabot-app:
 	/usr/local/bin/python3 -m alphabot.macos_app $(if $(PYTHON),--python "$(PYTHON)",)
 

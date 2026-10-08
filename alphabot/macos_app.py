@@ -1,13 +1,16 @@
-"""生成 macOS 的 `Alpha Bot.app`：`/usr/local/bin/python3 -m alphabot.macos_app [--dest DIR] [--home 数据根]`
+"""生成 macOS 的 `Alpha Bot.app`：`/usr/local/bin/python3 -m alphabot.macos_app [--dest DIR] [--home 数据根] [--repo 代码目录]`
 （或 `make alphabot-app`）。
 
-.app 只是个壳：`Contents/MacOS/AlphaBot` 是一段 bash，`cd` 到本仓库后
+.app 只是个壳：`Contents/MacOS/AlphaBot` 是一段 bash，`cd` 到代码目录后
 `exec /usr/local/bin/python3 -m alphabot.launcher`——逻辑全在 `alphabot/launcher.py`，
-所以 `git pull` 之后 .app 自动用上新代码，**不必重新生成**；只有仓库挪了位置、或换了 Python 才要重跑。
+所以代码目录更新之后，下次启动 .app 自动用上新代码，**不必重新生成**；只有代码目录换了、或换了 Python 才要重跑。
 
-默认装到 `~/Applications`，不装进仓库：仓库在 iCloud 同步的「桌面」下，.app 放那里会被复制出
+代码目录缺省是**生产克隆** `~/alpha-hive-prod`（数据根迁移阶段 8，v0.45.436；见 `default_repo`）：它由扫描前的
+`production_sync` 快进，从哪个检出跑本生成器都指向它。克隆不在才退回本检出，并在 stderr 说出来。
+
+默认装到 `~/Applications`，不装进仓库：开发检出在 iCloud 同步的「桌面」下，.app 放那里会被复制出
 `Alpha Bot 2.app` 这类副本（CLAUDE.md「重名副本」一节）。未签名：本机生成的文件没有隔离标记，
-Gatekeeper 不拦；第一次运行时 macOS 会问一次是否允许访问「桌面」文件夹（仓库在那里），选允许。
+Gatekeeper 不拦；代码目录若在「桌面」下（`--repo` 指过去），第一次运行时 macOS 会问一次是否允许访问「桌面」文件夹，选允许。
 """
 from __future__ import annotations
 
@@ -19,7 +22,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from alphabot import __version__
 
@@ -37,6 +40,22 @@ class BuildError(Exception):
 def _repo_root() -> Path:
     # 代码锚点：.app 要 cd 进去的就是「代码在哪」
     return Path(__file__).resolve().parent.parent
+
+
+def default_repo() -> Tuple[Path, Optional[str]]:
+    """`.app` 缺省 cd 进哪份代码 ⇒ (目录, 退回本检出时给人看的提示)。
+
+    阶段 8（v0.45.431）起生产代码是独立克隆 `production_clone.default_dest()`，只由扫描前 `production_sync` 快进；
+    开发检出再没人快进，worktree 随时会被删。此前缺省是「本文件所在的检出」⇒ 在开发检出 / worktree 里
+    `make alphabot-app` 会把 .app 无声指回一份会冻结（或会消失）的代码。克隆不在（CI、没做阶段 8 的机器）才退回。
+    """
+    import production_clone              # 同在仓库根（`-m` 从仓库根跑）；调用时求值：测试换 HOME
+    clone = production_clone.default_dest()
+    if (clone / "alphabot" / "launcher.py").is_file():
+        return clone, None
+    here = _repo_root()
+    return here, (f"⚠️ 生产克隆 {clone} 不在（或缺 alphabot/launcher.py）⇒ .app 指向本检出 {here}，"
+                  "它不会被自动更新。建好克隆（production_clone.py setup）后重跑")
 
 
 def _icon_path() -> Path:
@@ -164,22 +183,28 @@ def main(argv=None) -> int:
     ap.add_argument("--python", default=DEFAULT_PYTHON, help=f"缺省 {DEFAULT_PYTHON}")
     ap.add_argument("--home", default=None,
                     help="顺手记下数据根（写启动器配置）；缺省取当前环境的 ALPHA_HIVE_HOME，都没有就首次双击时再选")
+    ap.add_argument("--repo", default=None,
+                    help="`.app` cd 进哪份代码；缺省生产克隆 ~/alpha-hive-prod（不在才用本检出）。只在测自己的检出时给")
     args = ap.parse_args(argv)
 
     dest = Path(args.dest).expanduser()
     if _icloud_risk(dest):
         print(f"⚠️ {dest} 在 iCloud 同步范围内，可能被复制出「Alpha Bot 2.app」；建议用缺省的 ~/Applications",
               file=sys.stderr)
+    repo, note = (Path(args.repo), None) if args.repo else default_repo()
+    repo = repo.expanduser().resolve()
+    if note:
+        print(note, file=sys.stderr)
     try:
-        bundle = build_app(dest, python=args.python)
+        bundle = build_app(dest, repo=repo, python=args.python)
     except BuildError as exc:
         print(f"alphabot.macos_app: {exc}", file=sys.stderr)
         return 1
-    print(f"已生成 {bundle}")
+    print(f"已生成 {bundle}（代码目录 {repo}）")
 
+    from alphabot import launcher
     home = args.home or os.environ.get("ALPHA_HIVE_HOME")
     if home:
-        from alphabot import launcher
         hp = Path(home).expanduser()
         if not hp.is_dir():
             print(f"⚠️ 数据根 {hp} 不存在，没写进配置；首次双击时再选", file=sys.stderr)
@@ -192,7 +217,12 @@ def main(argv=None) -> int:
             cfg["alpha_hive_home"] = str(hp.resolve())
             print(f"数据根 {cfg['alpha_hive_home']} → {launcher.save_config(cfg)}")
     else:
-        print("没给数据根（--home / ALPHA_HIVE_HOME）：首次双击时会让你选一次")
+        try:
+            kept = launcher.load_config().get("alpha_hive_home")
+        except launcher.LauncherError:
+            kept = None                  # 坏配置由启动器在双击时报出来（它不静默当成首次启动）
+        print(f"沿用启动器配置里的数据根 {kept}" if kept
+              else "没给数据根（--home / ALPHA_HIVE_HOME）：首次双击时会让你选一次")
     if sys.platform != "darwin":
         print("（当前不是 macOS：.app 生成了，但只能在 Mac 上双击运行）", file=sys.stderr)
     print("用法：双击打开；拖到 Dock 常驻。停止服务：页面底部「停止服务」。换数据根："
