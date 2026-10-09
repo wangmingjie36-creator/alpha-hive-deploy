@@ -97,6 +97,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1142,7 +1143,10 @@ def _hedge_undecided(rec: Optional[Dict]) -> Optional[str]:
     零告警，覆盖层整段停摆没人知道。"""
     rec = rec or {}
     status = rec.get("band_status")
-    if status == "unknown" or (status in ("above", "below") and rec.get("action") == "hold"):
+    # 带外却 hold：只有「缺 NAV / SPY 价算不出目标」（target_usd 为 None）才算做不出来；center 模式股数四舍五入成 0
+    # 是算出来了、只是不用动（v0.45.442 二次检查：原条件把它也报成「数据不全」）
+    if status == "unknown" or (status in ("above", "below") and rec.get("action") == "hold"
+                               and rec.get("target_usd") is None):
         return str(rec.get("reason") or status)
     return None
 
@@ -1299,6 +1303,20 @@ def _execute_trade(as_of: str, rec: Dict, agg: Dict, nav: Optional[float],
 
 
 def run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, execute: bool = True) -> Dict:
+    """见 `_run_for_date`。v0.45.442：任何异常先记进 `price_check_stats()`（`error` 键）再原样抛出——
+    日报把它当「非致命」吞成一行 WARNING，`_LAST_PRICE_CHECK` 又只在 compute_day 末尾才赋值 ⇒ 此前
+    status.json 里这一项是 None，alert_manager 只记 checks_skipped，**覆盖层整轮没跑也不红**。"""
+    global _LAST_PRICE_CHECK
+    try:
+        return _run_for_date(as_of, closes_fn=closes_fn, quotes_fn=quotes_fn, beta_fn=beta_fn, execute=execute)
+    except Exception as exc:  # noqa: BLE001 - 记下来、原样抛：调用方的处理不变
+        prev = _LAST_PRICE_CHECK if (_LAST_PRICE_CHECK or {}).get("as_of") == as_of else None
+        _LAST_PRICE_CHECK = dict(prev or {"as_of": as_of, "version": _VERSION},
+                                 error=f"{type(exc).__name__}: {exc}"[:300])
+        raise
+
+
+def _run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, execute: bool = True) -> Dict:
     """算暴露 → 聚合 → 建议 →（execute 且带外且今天还没交易过）成交 → 覆盖账本盯市 →
     净值快照（按日期去重）→ 审计文件 hedge_state/greeks_{as_of}.json。同日重跑幂等。
     execute=False：只算，不写任何账本文件（β 缓存除外）。
@@ -1391,6 +1409,37 @@ def run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, execu
 #: v0.45.423~439 的净值行没有 `spy_price_at_close` 字段：这两个来源只在收盘后产生（cboe_close = last_trade
 #: 贴收盘的官方收盘；twelve_data_bar = 日期恰为该场、交易所钟上已收盘的那根），据此补判。
 _CLOSE_SOURCES = ("cboe_close", "twelve_data_bar")
+#: 盘中跑（交易所还没收盘）时 CBOE 给的实时价来源。这样的记录不是「该场的收盘」，不论持不持 SPY（v0.45.442）。
+_LIVE_SOURCES = ("cboe_intraday",)
+
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _read_history_lines(path: Path) -> List[Tuple[Optional[Dict], str]]:
+    """逐行读成 (记录 | None, 预判)：坏 JSON ⇒ unreadable、不是对象 ⇒ not_an_object、没有合法日期 ⇒ no_date。
+    v0.45.442：此前借 `_load_jsonl`——它把坏行**静默跳过**（闸要的是「排除并计数」），且照收非对象行，
+    `load_history` 对一行 `"str"` / `[1, 2]` 直接 AttributeError。"""
+    out: List[Tuple[Optional[Dict], str]] = []
+    if not path.exists():
+        return out
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                out.append((None, "unreadable"))
+                continue
+            if not isinstance(rec, dict):
+                out.append((None, "not_an_object"))
+            elif not _DATE_RE.match(str(rec.get("date") or "")):
+                out.append((rec, "no_date"))
+            else:
+                out.append((rec, ""))
+    return out
 
 
 def _verdict_trade(t: Dict) -> str:
@@ -1406,6 +1455,8 @@ def _verdict_equity(e: Dict) -> str:
         return "no_provenance"
     if _num(e.get("nav")) is None:
         return "unpriced"
+    if e.get("spy_price_source") in _LIVE_SOURCES:
+        return "intraday_run"
     if not (_num(e.get("spy_shares")) or 0.0):
         return "ok"                                   # 没持 SPY：净值 = 现金，与 SPY 价无关
     at_close = (e["spy_price_at_close"] if "spy_price_at_close" in e
@@ -1419,7 +1470,13 @@ def _verdict_audit(a: Dict, day: str) -> str:
     chk = a.get("price_check") if isinstance(a, dict) else None
     if not isinstance(chk, dict):
         return "no_provenance"
-    return "ok" if chk.get("as_of") == day == a.get("as_of") else "date_mismatch"
+    if not (chk.get("as_of") == day == a.get("as_of")):
+        return "date_mismatch"
+    # 盘中跑的审计：SPY 是实时价，或任何一行的价来自盘中实时价 ⇒ 不是「该场收盘」的快照（v0.45.442）
+    if (chk.get("spy") or {}).get("live") or any(
+            isinstance(r, dict) and r.get("price_source") in _LIVE_SOURCES for r in a.get("rows") or []):
+        return "intraday_run"
+    return "ok"
 
 
 def load_history(state_dir: Optional[Path] = None) -> Dict:
@@ -1430,7 +1487,8 @@ def load_history(state_dir: Optional[Path] = None) -> Dict:
           "first_verified": {种类: 最早放行日期 | None}, "measurement_start": MEASUREMENT_START,
           "regressions": [(种类, 日期)], "before_measurement_start": [(种类, 日期)]}。
     原因：no_provenance（v0.45.423 之前的格式，证不出）/ not_its_session_close（证明说价不是该场收盘）/
-    unpriced（净值行没有净值）/ date_mismatch / unreadable（审计文件坏 JSON）。
+    unpriced（净值行没有净值）/ date_mismatch / unreadable（坏 JSON）/ not_an_object / no_date（v0.45.442 起计数，此前坏行
+    被静默跳过、非对象行直接抛错）/ intraday_run（盘中跑的记录：价是实时价，不是收盘；v0.45.442）。
     `regressions` = 某种记录已出现过放行的之后又出现无证明的——写入方退化了，打 ERROR。
     `before_measurement_start` = 早于 `MEASUREMENT_START` 却带了证明——有人往旧记录上补了字段，打 WARNING。"""
     d = Path(state_dir) if state_dir is not None else None
@@ -1444,20 +1502,23 @@ def load_history(state_dir: Optional[Path] = None) -> Dict:
     verdicts: Dict[str, List[Tuple[str, str]]] = {"trades": [], "equity": [], "audits": []}
 
     for kind, path, judge in (("trades", trades_f, _verdict_trade), ("equity", equity_f, _verdict_equity)):
-        for rec in _load_jsonl(path):
-            day = str(rec.get("date") or "")
-            v = judge(rec)
-            verdicts[kind].append((day, v))
+        for rec, pre in _read_history_lines(path):
+            day = str(rec.get("date") or "") if isinstance(rec, dict) else ""
+            v = pre or judge(rec)
+            if day and _DATE_RE.match(day):
+                verdicts[kind].append((day, v))          # 没日期的行不参与起点 / 退化的日期推断
             if v == "ok":
                 kept[kind].append(rec)
             else:
                 excluded[kind][v] = excluded[kind].get(v, 0) + 1
-                excluded_dates[kind].append(day)
+                excluded_dates[kind].append(day or "?")
     for f in sorted(audit_dir.glob("greeks_*.json")) if audit_dir.is_dir() else []:
         day = f.stem[len("greeks_"):]
+        if not _DATE_RE.match(day):
+            continue                                    # 不是 greeks_<日期>.json（别的同前缀文件）
         try:
             a = json.loads(f.read_text(encoding="utf-8"))
-            v = _verdict_audit(a, day)
+            v = _verdict_audit(a, day) if isinstance(a, dict) else "not_an_object"
         except (OSError, ValueError):
             a, v = None, "unreadable"
         verdicts["audits"].append((day, v))

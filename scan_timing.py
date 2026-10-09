@@ -303,7 +303,9 @@ def summary_line(snap: dict) -> str:
         f"/会话不符弃用{os_.get('session_mismatch', '?')}份/盘中快照命中{os_.get('hits_before_close', '?')}份")
     pg = c.get("portfolio_greeks")
     pg_s = ""
-    if pg and pg.get("hedge_undecided") and not (pg.get("n_stale") or pg.get("n_quote_stale")
+    if pg and pg.get("error"):
+        pg_s = f" | Greeks 异常中断({str(pg['error'])[:80]})"          # v0.45.442
+    elif pg and pg.get("hedge_undecided") and not (pg.get("n_stale") or pg.get("n_quote_stale")
                                                   or (pg.get("spy") or {}).get("stale")
                                                   or pg.get("execution_blocked")):
         # v0.45.435：不是陈旧、是缺——对冲决定做不出来（两源取不到价 / 缺报价 / 缺 β / 缺 NAV）

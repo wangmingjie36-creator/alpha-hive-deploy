@@ -459,6 +459,19 @@ class AlertAnalyzer:
         if not isinstance(pg, dict):
             self.checks_skipped.append("组合 Greeks 标的价场次检查（scan_timing 无 portfolio_greeks 计数）")
             return
+        if pg.get("error"):
+            # v0.45.442：`run_for_date` 抛了（日报当非致命吞掉）——此前这里是 None ⇒ 只进 checks_skipped，覆盖层整轮没跑不红
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】组合 Greeks：{pg.get('as_of')} 这一轮异常中断，对冲决定 / 成交 / 净值快照可能都没落盘",
+                {
+                    "异常": str(pg["error"]),
+                    "影响": "覆盖层这一天没有（完整的）决定；连续几天都这样 = 对冲整段停摆",
+                    "建议": "看 alpha_hive.log 里「组合 Greeks 更新失败」那一行与 hedge_state/ 当日文件是否齐全",
+                },
+                ["portfolio_greeks", "data_quality"]
+            ))
+            return
         spy = pg.get("spy") or {}
         n_stale = int(pg.get("n_stale") or 0)
         n_quote_stale = int(pg.get("n_quote_stale") or 0)

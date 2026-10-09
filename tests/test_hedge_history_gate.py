@@ -13,12 +13,16 @@
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _repo_files import own_python_files  # noqa: E402
+#: v0.45.442 补 `_load_audit`（按日期读 greeks_<日期>.json，绕过放行判定；独立审阅指出）。
 HISTORY_NAMES = frozenset({"STATE_DIR", "TRADES_FILE", "EQUITY_FILE", "POSITIONS_FILE", "META_FILE",
-                           "_load_jsonl"})
-SKIP_DIRS = frozenset({"tests", "__pycache__", "node_modules"})
+                           "_load_jsonl", "_load_audit"})
 
 #: 文件（相对仓库根）→ 为什么可以直接碰 `hedge_state/`。新增前先问：能不能走 `load_history()`？
 ALLOWED = {
@@ -67,9 +71,13 @@ def scan_source(src: str) -> list:
 
 
 def _py_files():
-    for p in ROOT.rglob("*.py"):
+    """本仓自己的 .py——**共享清单** `tests/_repo_files.own_python_files`（git ls-files 优先），测试目录除外。
+    v0.45.442：此前手写裸 rglob，会扫进未跟踪文件——iCloud 在 ~/Desktop 下持续造的「portfolio_greeks 2.py」
+    这类重名副本含 `hedge_state` ⇒ 不在白名单 ⇒ 假红，且只在有副本的那台机器上红（`_repo_files` 文档里 v0.45.176 同款）。"""
+    files, _how = own_python_files(ROOT)
+    for p in files:
         rel = p.relative_to(ROOT)
-        if any(part.startswith(".") or part in SKIP_DIRS for part in rel.parts[:-1]):
+        if rel.parts and rel.parts[0] == "tests":
             continue
         yield rel.as_posix(), p
 
@@ -116,6 +124,7 @@ class TestScannerHasTeeth:
         assert scan_source("import json\nrows = open('hedge_state/trades.jsonl').read()\n")
         assert scan_source("import portfolio_greeks as pg\nx = pg._load_jsonl(pg.EQUITY_FILE)\n")
         assert scan_source("from portfolio_greeks import TRADES_FILE\n")
+        assert scan_source("import portfolio_greeks as pg\na = pg._load_audit('2026-10-08')\n")
         assert scan_source("p = home / f'hedge_state/greeks_{d}.json'\n")
 
     def test_ignores_docstrings_and_the_gate_itself(self):
@@ -128,6 +137,19 @@ class TestScannerHasTeeth:
         assert unallowed({"portfolio_greeks.py": [(1, "x")]}, ALLOWED) == {}
         assert stale({"portfolio_greeks.py": [(1, "x")]}, ALLOWED) == sorted(set(ALLOWED) - {"portfolio_greeks.py"})
         assert stale({f: [(1, "x")] for f in ALLOWED}, ALLOWED) == []
+
+    def test_untracked_icloud_duplicate_is_not_scanned(self, tmp_path, monkeypatch):
+        """v0.45.442：清单走 `git ls-files`——iCloud 造的未跟踪「portfolio_greeks 2.py」含 hedge_state，不能让守卫假红。"""
+        import shutil
+        import subprocess
+        assert shutil.which("git"), "本守卫的清单靠 git ls-files（开发检出 / worktree / CI 都有 git）"
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        (tmp_path / "alpha.py").write_text("x = 'hedge_state/trades.jsonl'\n", encoding="utf-8")
+        subprocess.run(["git", "add", "alpha.py"], cwd=tmp_path, check=True)
+        (tmp_path / "portfolio_greeks 2.py").write_text("x = 'hedge_state'\n", encoding="utf-8")
+        monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+        assert {rel for rel, _ in _py_files()} == {"alpha.py"}
+        assert set(_scan_repo()) == {"alpha.py"}
 
     def test_real_repo_scan_sees_the_known_readers(self):
         found = _scan_repo()

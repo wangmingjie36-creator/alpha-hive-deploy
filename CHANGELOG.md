@@ -24,7 +24,28 @@
 - 变异 5 个（先提交后变异，全红、已还原）：条目改名 / 阈值放到 0.50 / 路径写错键 / Chronos 无现价不再清空 / Chronos 均价 0 也填。
 - 夹具：`test_scan_coverage_gate.py`（FULL + 一处内联）与 `test_oracle_unusual_flow_visibility.py` 的基线结果补 `analyst_targets`（新字段进 FIELDS 后「健康」基线必须带它，否则恒红）。
 
-## [0.45.442] — 2026-10-09 — 占位（进行中：v0.45.435/438/440 二次检查修复——历史闸读坏行不崩并计数、守卫改用共享文件清单 …）
+## [0.45.442] — 2026-10-09 — Fixed：v0.45.435 / 438 / 440 二次检查——历史闸读坏行崩溃且静默丢行、守卫扫进未跟踪副本、盘中记录被当收盘放行、组合 Greeks 整轮异常不红，另 3 处
+
+二次检查 = 自查（实跑探针）+ 独立审阅。v0.45.438（twelve_data 撤回 / 世代更正条目）未发现 bug。
+
+### Fixed
+1. **守卫扫进未跟踪文件**（440，`tests/test_hedge_history_gate.py`）：手写裸 `rglob`，会扫到 iCloud 在 `~/Desktop` 下持续造的「portfolio_greeks 2.py」这类重名副本（含 `hedge_state`、不在白名单）⇒ 只在有副本的机器上假红。改用共享清单 `tests/_repo_files.own_python_files`（`git ls-files` 优先，与其余全仓守卫同口径——其文档里 v0.45.176 同款事故）。我手写了一份仓里已有的东西，违反「先用装好的工具」。
+2. **`load_history` 读到非对象行就崩、坏 JSON 静默跳过**（440）：借 `_load_jsonl`——它照收 `"str"` / `[1, 2]`（随后 `.get` 抛 AttributeError），坏行被无声丢掉（闸的本意是「排除并计数」）。改为闸自己逐行读：`unreadable` / `not_an_object` / `no_date` 各自计数；审计文件非对象同样计数；非 `greeks_<日期>.json` 的同前缀文件跳过。
+3. **没日期的记录能放行**（440）：`_expected_session("")` 回 `""`，与空场次「相等」，还会把 `first_verified` 推成 `""`。现判 `no_date`、不参与起点 / 退化推断。
+4. **盘中跑的记录被当「该场收盘」放行**（440，审阅指出）：审计文件只核日期；不持 SPY 的净值行不看价的来源。现 SPY 是实时价或任一行价来自 `cboe_intraday` ⇒ `intraday_run` 排除；同日收盘后再跑会覆盖它并放行。
+5. **组合 Greeks 整轮异常不红**（435 的观测链覆盖不到，审阅指出）：`run_for_date` 抛异常时日报只记一行 WARNING（非致命），`_LAST_PRICE_CHECK` 又只在 compute_day 末尾才赋值 ⇒ status.json 里是 None ⇒ alert_manager 只进 checks_skipped。现 `run_for_date` 把异常记进 `price_check_stats()["error"]`（已算出的核对保留）再原样抛出；alert_manager P2「这一轮异常中断」，摘要行「Greeks 异常中断(…)」。实例：账本里一行非对象 JSON 就会让 `_hedge_rows_before_today` 抛。
+6. **`_hedge_undecided` 条件偏宽**（435）：带外 + hold 一律算「做不出决定」；center 模式股数四舍五入成 0 是「算出来了、不用动」，会被报成「数据不全」。现在只认目标算不出（`target_usd` 为 None）。现行 edge 模式下不可达（审阅核过），属潜在误报。
+7. **守卫漏 `_load_audit`**（440，审阅指出）：按日期读审计文件、绕过放行判定的助手没进 `HISTORY_NAMES`。
+
+### 未做（如实记录）
+- `portfolio_greeks._load_jsonl` 对**坏 JSON** 仍静默跳过（v0.45.103 起既有行为，生产读持仓 / 成交 / 净值都走它）：持仓文件坏一行会少一个仓位、照样对冲。非对象行现在会让整轮抛错 ⇒ 第 5 条 P2；坏 JSON 那半未改（改读取语义影响三本账，另议）。
+
+### 验证
+- 实跑探针：恶意行文件（非对象 / 坏 JSON / 无日期）此前 AttributeError，现在按原因计数；生产 `load_history` 结果不变（净值 / 审计 first_verified 10-08，排除 5 / 21 / 21，无退化）。
+- 新测试：`TestHistoryGateSurvivesBadLines`（2）、`TestRunFailureIsRed`（2）、`TestIntradayRecordsAreNotCloses`（2）、`TestUndecidedMeansCouldNotCompute`（2）、守卫 `test_untracked_icloud_duplicate_is_not_scanned` + `_load_audit` 自证；1 条既有断言按新分类（`intraday_run`）改期望。
+- 变异 13 个全部打红：H1–H5（裸 rglob / 坏 JSON 静默 / 非对象照收 / 不核日期 / 审计非对象）、J1–J8（失败不记录 / 覆盖已算核对 / 告警与摘要不看 error / undecided 不看 target / 审计与净值不排盘中 / 守卫不认 `_load_audit`）。
+- 全量套件：见提交说明。
+
 
 ## [0.45.441] — 2026-10-09 — Fixed：Scout 拥挤度去掉 `consensus_strength`（看多同伴数）——并行蜂读不到同伴的输出，27/30 恒为 0；世代边界 2026-10-09
 

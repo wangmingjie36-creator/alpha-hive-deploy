@@ -802,7 +802,9 @@ class TestHistoryGate:
                                                  _eq("2026-10-12", nav=None)])
         h = pg.load_history(tmp_path)
         assert h["trades"] == [] and h["excluded"]["trades"] == {"not_its_session_close": 1}
-        assert h["equity"] == [] and h["excluded"]["equity"] == {"not_its_session_close": 2, "unpriced": 1}
+        # 盘中实时价那行自 v0.45.442 起单列 intraday_run（更具体），不再混在 not_its_session_close 里
+        assert h["equity"] == [] and h["excluded"]["equity"] == {"not_its_session_close": 1, "intraday_run": 1,
+                                                                 "unpriced": 1}
 
     def test_weekend_row_proves_the_last_session(self, tmp_path):
         """周六的 as_of：那天没有行情，周五的收盘就是对的（`_expected_session`），不能因 session ≠ date 拒掉。"""
@@ -848,3 +850,95 @@ class TestHistoryGate:
     def test_measurement_start_is_the_first_day_v0_45_423_ran(self):
         """记载值与 CHANGELOG / 生产核对一致（10-08 首跑；`load_history` 对生产推出的 first_verified 也是它）。"""
         assert pg.MEASUREMENT_START == "2026-10-08"
+
+
+class TestHistoryGateSurvivesBadLines:
+    """v0.45.442 二次检查：闸读到坏行要「排除并计数」，不能崩、也不能静默跳过（此前 `"str"` / `[1, 2]` 一行就
+    AttributeError；坏 JSON 被 `_load_jsonl` 无声丢掉）；没日期的记录不能放行（`_expected_session("")` 回 ""，
+    会与空场次「相等」，并把 first_verified 推成 ""）。"""
+
+    def test_malformed_lines_are_counted_by_reason(self, tmp_path):
+        (tmp_path / "equity_curve.jsonl").write_text(
+            "\n".join([json.dumps(_eq("2026-10-08")), "[1, 2]", "42", "{坏", json.dumps({"spy_price_session": "x"})]) + "\n",
+            encoding="utf-8")
+        (tmp_path / "trades.jsonl").write_text('"str"\n', encoding="utf-8")
+        (tmp_path / "greeks_2026-10-08.json").write_text("[]", encoding="utf-8")
+        h = pg.load_history(tmp_path)
+        assert [e["date"] for e in h["equity"]] == ["2026-10-08"]
+        assert h["excluded"]["equity"] == {"not_an_object": 2, "unreadable": 1, "no_date": 1}
+        assert h["excluded"]["trades"] == {"not_an_object": 1} and h["excluded"]["audits"] == {"not_an_object": 1}
+
+    def test_dateless_record_cannot_pass_or_move_the_start(self, tmp_path):
+        _jsonl(tmp_path / "trades.jsonl", [{"price_session": "", "price_source": "cboe_close", "price_at_close": True},
+                                           dict(_OLD_TRADE, date="2026-10-09", price_session="2026-10-09",
+                                                price_source="cboe_close", price_at_close=True)])
+        h = pg.load_history(tmp_path)
+        assert [t["date"] for t in h["trades"]] == ["2026-10-09"] and h["excluded"]["trades"] == {"no_date": 1}
+        assert h["first_verified"]["trades"] == "2026-10-09"
+
+
+class TestRunFailureIsRed:
+    """v0.45.442（独立审阅）：`run_for_date` 抛异常时日报只记一行 WARNING（非致命），`_LAST_PRICE_CHECK` 又只在
+    compute_day 末尾赋值 ⇒ status.json 这一项是 None ⇒ alert_manager 只进 checks_skipped——覆盖层整轮没跑也不红。"""
+
+    def test_corrupt_ledger_line_makes_the_run_fail_loudly(self, world, tmp_path):
+        import alert_manager as am
+        import scan_timing as stt
+        world.closed()
+        world.book()
+        pg.TRADES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        pg.TRADES_FILE.write_text('"不是对象"\n', encoding="utf-8")
+        with pytest.raises(AttributeError):
+            pg.run_for_date(AS_OF, beta_fn=_beta1)
+        chk = pg.price_check_stats()
+        assert chk["as_of"] == AS_OF and "AttributeError" in chk["error"], chk
+        _, hits = TestAlertManagerSeesStalePrices._analyze(tmp_path, {"portfolio_greeks": chk})
+        assert len(hits) == 1 and hits[0].level == am.AlertLevel.MEDIUM and "异常中断" in hits[0].message
+        assert "Greeks 异常中断" in stt.summary_line({"phases": {}, "counters": {"portfolio_greeks": chk}})
+
+    def test_failure_after_compute_keeps_the_price_check(self, world, monkeypatch):
+        world.closed()
+        world.book()
+        monkeypatch.setattr(pg, "_execute_trade", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+        with pytest.raises(OSError):
+            pg.run_for_date(AS_OF, beta_fn=_beta1)
+        chk = pg.price_check_stats()
+        assert chk["error"] == "OSError: disk full" and chk["n_stale"] == 0 and chk["n_rows"] > 0, chk
+
+
+class TestIntradayRecordsAreNotCloses:
+    """v0.45.442（独立审阅）：盘中手动跑写下的审计文件 / 不持 SPY 的净值行曾被闸当成「该场收盘」放行。"""
+
+    def test_intraday_run_is_excluded_from_history(self, world):
+        world.intraday()
+        world.book()
+        world.at(datetime(2026, 10, 6, 12, 0, tzinfo=ET))
+        pg.run_for_date(AS_OF, beta_fn=_beta1)
+        h = pg.load_history()
+        assert h["equity"] == [] and h["audits"] == {}, (h["equity"], sorted(h["audits"]))
+        assert h["excluded"]["equity"] == {"intraday_run": 1} and h["excluded"]["audits"] == {"intraday_run": 1}
+
+    def test_after_close_run_on_the_same_day_replaces_it_and_passes(self, world):
+        world.intraday()
+        world.book()
+        world.at(datetime(2026, 10, 6, 12, 0, tzinfo=ET))
+        pg.run_for_date(AS_OF, beta_fn=_beta1, execute=False)
+        world.closed()
+        world.at(AFTER_CLOSE)
+        pg.run_for_date(AS_OF, beta_fn=_beta1)
+        h = pg.load_history()
+        assert [e["date"] for e in h["equity"]] == [AS_OF] and sorted(h["audits"]) == [AS_OF]
+
+
+class TestUndecidedMeansCouldNotCompute:
+
+    def test_center_mode_rounding_to_zero_shares_is_a_decision(self):
+        """band 出带、center 模式股数四舍五入成 0：目标算出来了，只是不用动——不是「数据不全」（v0.45.442）。"""
+        rec = {"band_status": "above", "action": "hold", "spy_shares": 0, "target_usd": 0.0,
+               "reason": "β·Δ +15.10% NAV above band → rebalance to center (+0% = $0); excess $10 / SPY $773.93 = +0 sh"}
+        assert pg._hedge_undecided(rec) is None
+
+    def test_out_of_band_without_a_target_is_undecided(self):
+        rec = {"band_status": "below", "action": "hold", "target_usd": None,
+               "reason": "band below but SPY price unavailable"}
+        assert pg._hedge_undecided(rec) == "band below but SPY price unavailable"
