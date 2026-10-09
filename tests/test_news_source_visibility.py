@@ -67,6 +67,13 @@ def _resp(data, ok=True, status_code=200):
                                  raise_for_status=lambda: None)
 
 
+def _resp_unparseable(status_code):
+    """响应体不是 JSON（网关 / 限流层直接回文本）：`resp.json()` 抛 ValueError。"""
+    def _boom():
+        raise ValueError("not json")
+    return types.SimpleNamespace(ok=False, status_code=status_code, json=_boom, raise_for_status=lambda: None)
+
+
 def _primary(monkeypatch, name):
     import newsapi_client as nc
     monkeypatch.setattr(nc, "_news_cfg", lambda: {**nc._NEWS_CFG_DEFAULT, "primary": name})
@@ -161,6 +168,22 @@ class TestMassivePrimary:
         assert r["source"] == "yahoo_finance"
         assert r["primary_attempt"] == {"source": "massive", "status": "server_refused",
                                         "message": "You've exceeded the maximum requests per minute"}
+
+    def test_429_alone_is_refusal_even_without_a_parseable_body(self, monkeypatch):
+        """上一条的响应体自带 `status: ERROR`，被第二个条件顶替——删掉 `== 429` 它照样绿（变异检验 2026-10-09 幸存）。
+        这条的体不可解析、也没有错误状态，只有状态码 429 能把它判成「服务端拒绝」而不是泛泛的 http_error。"""
+        import newsapi_client as nc
+        _route(monkeypatch, massive=_resp_unparseable(429))
+        r = nc.get_ticker_news("NVDA")
+        assert r["source"] == "yahoo_finance"
+        assert r["primary_attempt"] == {"source": "massive", "status": "server_refused", "message": "HTTP 429"}
+
+    def test_non_429_error_without_body_stays_http_error(self, monkeypatch):
+        """对照：同样不可解析的体，状态码是 500 ⇒ http_error（两种出口不能混成一种）。"""
+        import newsapi_client as nc
+        _route(monkeypatch, massive=_resp_unparseable(500))
+        r = nc.get_ticker_news("NVDA")
+        assert r["primary_attempt"]["status"] == "http_error"
 
     def test_not_authorized_status_is_refusal(self, monkeypatch):
         import newsapi_client as nc
@@ -397,6 +420,26 @@ class TestBuzzRecordsSourceOnly:
         assert rr._BOUNDARY_MARKERS["v0.45.445"][1] is rr._marker_buzz_news_primary_massive
         old = {"swarm_results": {"agent_details": {"BuzzBeeWhisper": {"details": {"news_source": "alpha_vantage"}}}}}
         assert rr._marker_buzz_news_primary_massive(old) is False
+
+    def test_marker_counts_only_massive(self):
+        """回滚到 AV 的配置写 `news_primary="alpha_vantage"`——那是另一回事、要另登边界，不能当本版新代码的证据
+        （放宽到 AV 也算，回滚后的记录会冒充「445 已上线」，把「边界日有归档、无新印记」的报警按掉；变异检验幸存）。"""
+        import ic_rerun_readiness as rr
+
+        def rec(v):
+            return {"swarm_results": {"agent_details": {"BuzzBeeWhisper": {"details": {"news_primary": v}}}}}
+        assert rr._marker_buzz_news_primary_massive(rec("massive")) is True
+        for other in ("alpha_vantage", "unknown", "", None):
+            assert rr._marker_buzz_news_primary_massive(rec(other)) is False, other
+
+    def test_ml_estimator_generation_registered_same_day(self):
+        """换主源改的是 sentiment 维分 ⇒ `final_score` / `agent_agreement` 两个 ML 特征的上游变了，
+        `_prepare_ml_input` 一行没动、没有别的测试会红——漏登只有这里盯着（v0.45.441 初版犯过同一个形状；变异检验幸存）。
+        同日多批合并为一代、标签用 `+` 连接（同 09-06 / 09-07 / 09-28 先例）。"""
+        import probability_scorecard as ps
+        assert any(d == "2026-10-09" and "v0.45.445" in v.split("+") for d, v, _t in ps._ML_ESTIMATOR_GENERATIONS)
+        assert "v0.45.445" in ps.ml_estimator_generation("2026-10-09").split("+")
+        assert "v0.45.445" not in ps.ml_estimator_generation("2026-10-08").split("+")
 
     def test_boundary_is_registered_before_the_dim_ic_window(self):
         """换主源 = 换 news 通道：必须登世代边界，且日期早于维度 IC 协议窗口（否则终止 H1）。"""
