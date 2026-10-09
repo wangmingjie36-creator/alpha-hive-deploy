@@ -117,7 +117,10 @@ CLOSED_FILE = STATE_DIR / "closed_trades.jsonl"
 EQUITY_FILE = STATE_DIR / "equity_curve.jsonl"
 META_FILE = STATE_DIR / "meta.json"
 
-_VERSION = "0.45.433"     # 口径世代：此前内在价值结算可取 5 个日历日内的旧收盘（生产上从未走到过，见 CHANGELOG）
+# 口径世代（**手写常量**，只在账本口径变时改）：此前内在价值结算可取 5 个日历日内的旧收盘。
+# ⚠️ 它不是「哪版代码写的」——v0.45.104/105 改过逻辑它仍是 0.45.101。那件事看 meta.code_version /
+# 净值行的 code（v0.45.450，取自 `scan_timing.code_version()`）。
+_VERSION = "0.45.433"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -151,6 +154,17 @@ def _scrub(obj, _path: str = ""):
     if isinstance(obj, list):
         return [_scrub(v, f"{_path}[{i}]") for i, v in enumerate(obj)]
     return obj
+
+
+def _iso_day(v) -> Optional[str]:
+    """严格的 `YYYY-MM-DD` → 原样返回；其它（None / 带时刻 / 解析不了）→ None。"""
+    if not isinstance(v, str) or len(v) != 10:
+        return None
+    try:
+        datetime.strptime(v, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return v
 
 
 def _days_between(d1: str, d2: str) -> Optional[int]:
@@ -304,6 +318,20 @@ def _load_meta() -> Dict:
         "config_snapshot": dict(CONFIG),
         "skipped_entries": [],
     }
+
+
+def _code_tag() -> Optional[Dict]:
+    """这一轮跑的是哪一版代码（v0.45.450）：扫描内取启动时记下的那份，单跑现解析（`scan_timing.code_version`）。
+    取不到 ⇒ None，不写占位值。只留能回答「这版代码跑过这本账没有」的三个字段。"""
+    try:
+        import scan_timing
+        cv = scan_timing.code_version()
+    except Exception as exc:  # noqa: BLE001 - 观测代码不得影响记账
+        _log.warning("[OptionsPaperLeg] 代码版本不可得（meta.code_version 记 None）: %s", exc)
+        return None
+    if not isinstance(cv, dict):
+        return None
+    return {k: cv.get(k) for k in ("sha", "changelog_version", "resolved_at")}
 
 
 def _save_meta(meta: Dict) -> None:
@@ -523,6 +551,10 @@ def _open_from_signal(sig: Dict, nav: float, as_of: str) -> Tuple[Optional[Strad
     expiry = (call or {}).get("expiry") or sig.get("selected_expiry")
     if strike is None or not expiry or not (call or {}).get("symbol") or not (put or {}).get("symbol"):
         return None, "contract identity incomplete"
+    if _iso_day(expiry) is None:
+        # v0.45.450：到期日是「判到期 / 算核销期限 / 选结算场次」三件事的唯一锚；解析不了的仓位一旦进账，
+        # 报价取不到时既不会结算也不会核销，只能永远挂着——在入口拒掉，而不是事后兜底。
+        return None, f"expiry unparseable: {expiry!r}"
     mid_c, mid_p = _pos(call.get("mid")), _pos(put.get("mid"))
     mark = (mid_c + mid_p) if (mid_c is not None and mid_p is not None) else premium
     ratio = _num(sig.get("ratio"))
@@ -613,6 +645,7 @@ def run_for_date(as_of: str,
     remaining: List[StraddlePosition] = []
     closed_today: List[Dict] = []
     deferred: List[Dict] = []
+    invalid_expiry: List[Dict] = []
     for pos in positions:
         # 延期字段只反映本次运行：先取出上一段的起始日再清空，本次真延期才写回（同日重跑 since 不变）
         deferred_since = pos.settle_deferred_since
@@ -646,6 +679,12 @@ def run_for_date(as_of: str,
 
         post_event = bool(CONFIG["exit_after_event"] and pos.earnings_date and as_of > pos.earnings_date)
         to_expiry = _days_between(as_of, pos.expiry)
+        if _iso_day(pos.expiry) is None:
+            # v0.45.450：入口已拒（`_open_from_signal`），这里只会是存量 / 手改的坏记录。判不了到期、
+            # 算不出核销期限 ⇒ 报价取不到时永远不会自动了结：每轮 ERROR + 返回值 + 日报点名，不静默挂着。
+            _log.error("[OptionsPaperLeg] ⚠️ %s %s 的到期日 %r 无法解析：判不了到期、算不出核销期限，"
+                       "报价取不到时不会自动了结——需人工核对该持仓记录", pos.ticker, pos.side, pos.expiry)
+            invalid_expiry.append({"ticker": pos.ticker, "side": pos.side, "expiry": pos.expiry})
         near_expiry = to_expiry is not None and to_expiry <= CONFIG["expiry_buffer_days"]
         if not (post_event or near_expiry):
             remaining.append(pos)
@@ -803,6 +842,10 @@ def run_for_date(as_of: str,
                                         if c.get("exit_date") == as_of), 2),
         "opened_today": sum(1 for p in positions if p.entry_date == as_of),
     }
+    code = _code_tag()
+    # 每天哪版代码写的（v0.45.450）：meta 只记最后一轮，历史靠这一列。同日重跑以最后一轮为准。
+    snapshot["code"] = (f"{code.get('changelog_version') or '—'}@{code.get('sha') or '—'}"
+                        if code else None)
     equity = [e for e in _load_jsonl(EQUITY_FILE) if e.get("date") != as_of]
     equity.append(snapshot)
     equity.sort(key=lambda e: e["date"])
@@ -813,6 +856,7 @@ def run_for_date(as_of: str,
     meta["last_run_date"] = as_of
     meta["config_snapshot"] = dict(CONFIG)
     meta["version"] = _VERSION
+    meta["code_version"] = code
     meta["skipped_entries"] = [{"date": as_of, **s} for s in skipped]
     _save_meta(meta)
 
@@ -822,6 +866,7 @@ def run_for_date(as_of: str,
         "opened_today": opened, "closed_today": closed_today,
         "skipped": skipped, "equity_snapshot": snapshot,
         "settle_deferred": deferred,
+        "invalid_expiry": invalid_expiry,
     }
 
 
@@ -914,6 +959,8 @@ def render_markdown(as_of: str) -> str:
                    if p.mark_source != "cboe_mid" else p.mark_source)
             if p.settle_deferred_since:
                 src += f"；⏳ 结算延期（自 {p.settle_deferred_since}）"
+            if _iso_day(p.expiry) is None:
+                src += "；⚠️ 到期日无效"
             lines.append(f"| {p.ticker} | {p.side} | {p.contracts} | {_fmt(p.entry_premium)} | "
                          f"{_fmt(p.last_mark)} | ${_unrealized(p):+,.0f} | {src} | "
                          f"{p.earnings_date} | {p.expiry} |")
@@ -921,6 +968,11 @@ def render_markdown(as_of: str) -> str:
         if n_frozen:
             lines += ["", f"> ⚠️ 其中 {n_frozen} 个持仓用的是**冻结 mark**（上次拿到活报价那天的价格），"
                           "不是今天的市价；这部分 NAV 只是账面占位，不可当成可成交的估值。"]
+        bad = [p for p in positions if _iso_day(p.expiry) is None]
+        if bad:
+            lines += ["", f"> ⚠️ {len(bad)} 个持仓的到期日无法解析（"
+                          + "、".join(f"{p.ticker} {p.expiry!r}" for p in bad)
+                          + "）：判不了到期、算不出核销期限，报价取不到时不会自动了结——**需人工核对持仓记录**。"]
         held = [p for p in positions if p.settle_deferred_since]
         if held:
             lines += ["", f"> ⏳ {len(held)} 个持仓该按内在价值结算，但拿不到结算那一场的 Twelve Data 收盘——"

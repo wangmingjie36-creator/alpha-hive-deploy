@@ -301,3 +301,66 @@ def test_defer_text_never_prints_none():
     assert "None" not in txt and "收盘无效" in txt
     txt = opl._defer_text({"reason": "lagging", "seen_session": PREV, "seen_price": 103.0}, EXPIRY)
     assert f"{PREV} 收 103.0" in txt
+
+
+# ── v0.45.450：到期日解析不了 / 账本记下真实代码版本 ─────────────────────────
+
+def _signal(expiry):
+    leg = {"strike": 100.0, "expiry": expiry, "bid": 0.9, "ask": 1.1, "mid": 1.0, "quote_ok": True}
+    return {"ticker": TK, "label": "cheap", "earnings_date": EARN, "selected_expiry": expiry, "ratio": 0.5,
+            "underlying_price": 100.0,
+            "quote": {"call": {**leg, "symbol": CALL}, "put": {**leg, "symbol": PUT}}}
+
+
+class TestUnparseableExpiry:
+
+    @pytest.mark.parametrize("expiry", ["10/16/2026", "2026-10-16T00:00:00", "2026-13-01"])
+    def test_entry_rejects_an_expiry_it_cannot_parse(self, expiry):
+        pos, why = opl._open_from_signal(_signal(expiry), 20_000.0, "2026-09-14")
+        assert pos is None and why == f"expiry unparseable: {expiry!r}"
+
+    def test_valid_expiry_still_opens(self):
+        pos, why = opl._open_from_signal(_signal(EXPIRY), 20_000.0, "2026-09-14")
+        assert why is None and pos.expiry == EXPIRY
+
+    def test_existing_bad_record_is_loud_not_silent(self, world, caplog):
+        """存量坏记录：报价取不到时永远不会自动了结（判不了到期、算不出核销期限）——每轮 ERROR、返回值、日报点名。"""
+        world.book(expiry="10/16/2026")
+        with caplog.at_level(logging.INFO):
+            r = world.run("2026-11-30")                     # 按真实到期日早已过了核销期限
+        assert r["closed_today"] == [] and len(r["positions"]) == 1
+        assert r["invalid_expiry"] == [{"ticker": TK, "side": "long", "expiry": "10/16/2026"}]
+        errs = [x.getMessage() for x in _opl_records(caplog, logging.ERROR)]
+        assert any(TK in m and "10/16/2026" in m and "无法解析" in m for m in errs), errs
+        md = opl.render_markdown("2026-11-30")
+        assert "⚠️ 到期日无效" in md and "需人工核对持仓记录" in md
+
+    def test_good_records_are_not_flagged(self, world):
+        world.book()
+        r = world.run("2026-10-19")
+        assert r["invalid_expiry"] == [] and "到期日无效" not in opl.render_markdown("2026-10-19")
+
+
+class TestLedgerRecordsTheCodeThatWroteIt:
+    """`meta.version` 是手写口径常量（v0.45.104/105 改过逻辑仍是 0.45.101），回答不了「这版代码跑过这本账没有」。"""
+
+    def test_meta_and_equity_row_carry_the_scan_start_version(self, world, monkeypatch):
+        import scan_timing
+        monkeypatch.setattr(scan_timing, "_code_version_at_start",
+                            {"sha": "abc1234", "changelog_version": "0.45.450", "repo_dir": "/x"})
+        world.book()
+        world.run("2026-10-19")
+        meta = json.loads(opl.META_FILE.read_text())
+        assert meta["code_version"] == {"sha": "abc1234", "changelog_version": "0.45.450", "resolved_at": "scan_start"}
+        assert json.loads(opl.EQUITY_FILE.read_text().splitlines()[-1])["code"] == "0.45.450@abc1234"
+
+    def test_unavailable_version_is_none_and_never_blocks_the_ledger(self, world, monkeypatch):
+        import scan_timing
+
+        def boom():
+            raise RuntimeError("git gone")
+        monkeypatch.setattr(scan_timing, "code_version", boom)
+        world.book()
+        r = world.run("2026-10-19")
+        assert r["equity_snapshot"]["code"] is None
+        assert json.loads(opl.META_FILE.read_text())["code_version"] is None
