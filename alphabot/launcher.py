@@ -29,7 +29,7 @@ import traceback
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 APP_NAME = "Alpha Bot"
 DEFAULT_PORT = 8765
@@ -62,6 +62,10 @@ def _repo_root() -> Path:
 
 
 # ── 配置 ────────────────────────────────────────────────────────────────
+
+#: 决定「双击用哪份数据」的键（见 `config_state`）：`--reset`、生成器 `--home` 改写数据根时一起处理，漏一个就重置不干净
+RESET_KEYS = ("alpha_hive_home", "demo")
+
 
 def load_config() -> dict:
     p = config_path()
@@ -183,14 +187,32 @@ class MacUI:
 CHOOSE, DEMO, CANCEL = "选择数据目录…", "演示模式", "取消"
 
 
-def resolve_mode(cfg: dict, ui) -> Optional[dict]:
-    """→ `{"demo": True}` / `{"demo": False, "home": 路径}`；用户取消 ⇒ None。选了新目录会写回配置。"""
+def config_state(cfg: dict) -> Tuple[str, Optional[str]]:
+    """双击时启动器会怎么对待这份配置 ⇒ (状态, 数据根)。**唯一一份判断**：`resolve_mode` 与 .app 生成器的
+    提示（`macos_app.main`）都读它——v0.45.436 生成器自己只看 `alpha_hive_home`，与这里「demo 优先、目录得在」
+    对不上，提示说「沿用 X」双击却要重选（v0.45.439）。
+
+    `demo`：直接演示模式（配置里 `demo: true`，只有手改会出现）/ `home`：直接用该数据根 /
+    `stale`：配置了但目录不在，会问 / `first`：没配置，会问。
+    """
     if cfg.get("demo") is True:
-        return {"demo": True}
+        return "demo", None
     home = cfg.get("alpha_hive_home")
     if home and Path(home).is_dir():
-        return {"demo": False, "home": str(Path(home))}
+        return "home", str(Path(home))
     if home:
+        return "stale", str(home)
+    return "first", None
+
+
+def resolve_mode(cfg: dict, ui) -> Optional[dict]:
+    """→ `{"demo": True}` / `{"demo": False, "home": 路径}`；用户取消 ⇒ None。选了新目录会写回配置。"""
+    state, home = config_state(cfg)
+    if state == "demo":
+        return {"demo": True}
+    if state == "home":
+        return {"demo": False, "home": home}
+    if state == "stale":
         msg = (f"配置里的 Alpha Hive 数据根不存在了：\n{home}\n\n"
                "重新选择数据目录（与编排器 / MCP 用的 ALPHA_HIVE_HOME 同一个），或本次用演示模式。")
     else:
@@ -407,7 +429,8 @@ def main(argv=None, ui=None) -> int:
         try:
             if args.reset:
                 cfg = load_config()
-                cfg.pop("alpha_hive_home", None)
+                for k in RESET_KEYS:             # `demo` 也要清：它优先于数据根（config_state），只清数据根等于没重置
+                    cfg.pop(k, None)
                 print(f"已清除数据根：{save_config(cfg)}")
                 return 0
             stopped = stop_running(int(args.port or load_config().get("port") or DEFAULT_PORT))
