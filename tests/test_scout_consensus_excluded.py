@@ -290,6 +290,15 @@ class TestRegistryWiring:
         assert {"agent.ScoutBeeNova.score", "agent.ScoutBeeNova.direction",
                 "crowding.score", "crowding.comp.consensus_strength"} <= hit
 
+    def test_ml_estimator_generation_registered_same_day(self):
+        """ML 特征 `crowding_score`（= signal 维分 × 10 = Scout 分）与 `agent_agreement`（各蜂方向）的上游随本版变 ⇒
+        `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 必须同日追加（v0.45.441 初版漏登，二次检查补；
+        `_prepare_ml_input` 没动、测试也不会红，只有这里盯着）。"""
+        import probability_scorecard as ps
+        assert any(d == "2026-10-09" and v == _V for d, v, _t in ps._ML_ESTIMATOR_GENERATIONS)
+        assert ps.ml_estimator_generation("2026-10-09") == _V
+        assert ps.ml_estimator_generation("2026-10-08") != _V
+
     def test_old_upstream_edge_is_kept_for_history(self):
         """旧世代数据里 consensus_strength 确实读 Phase-1 方向——边保留，删了会让早先边界的闭包悄悄缩小。"""
         assert "crowding.comp.consensus_strength" in sa.SIGNAL_UPSTREAM

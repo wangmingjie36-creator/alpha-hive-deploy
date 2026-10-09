@@ -239,6 +239,14 @@ _ML_ESTIMATOR_GENERATIONS = [
      "（Buzz 分 ⇒ sentiment 维、拥挤度 ⇒ Rival 的 crowding 特征）与日线缺口第二源（iv_rank ⇒ odds_score，同 v0.45.383）；"
      "`final_score` / `agent_agreement` 随之变。**只在兜底的标的×日期上变**；09-28~10-07 共 240 对逐项证明没走兜底"
      "（`ic_rerun_readiness._equiv_td_session_bar`），新旧逐项相同。同样**没有重放 Δprobability**。"),
+    ("2026-10-09", "v0.45.441",
+     "Scout 拥挤度去掉 `consensus_strength`（看多同伴数；Scout 与同伴并行、读板时同伴没发布 ⇒ 27/30 恒为 0）。"
+     "**两个 ML 特征的上游变了，`_prepare_ml_input` 本身一行没动**：① `crowding_score` 的唯一来源是蜂群 **signal 维度分 × 10**"
+     "（v0.45.146，不是 Scout 的真拥挤度），而 signal 维度就是 Scout 的分——Scout 分平均 −0.34（最大 1.14），特征随之平均 −3.4（最大 −11.4）；"
+     "② `agent_agreement` 取自各蜂方向，Scout 方向翻了一部分（规则层 17/270）。另 `final_score` 随方向票变（Queen 重放 111 份：最终方向翻 3、"
+     "final_score 变 2 行、最大 0.94）。**非等价、每个标的×日期都变**（crowding_score 平均 +5.67 ⇒ Scout 分变），不像 v0.45.423 那样只在兜底日变。"
+     "**没有重放 Δprobability**（同 v0.45.349 / 383 / 423）。此日之前的 `ml_probability` 与之后不可比；"
+     "世代边界另见 `ic_rerun_readiness._COHORT_HISTORY` 同版条目（2026-10-09，上线前 0 份报告）。"),
 ]
 
 

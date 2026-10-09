@@ -38,6 +38,10 @@ Scout 与 Oracle / Buzz / Chronos / CodeExecutor 在 Phase-1 **并行**，算拥
 - `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.441"]` = `crowding.comp.consensus_strength` + `agent.ScoutBeeNova.*`（闭包带出 crowding.* / ml.* / Rival / Guard / bear.*；Rival / Guard 自己数的拥挤度没变，依赖边按「同一个 CrowdingDetector 公式」代表换代，宁多切不少切）。`SIGNAL_UPSTREAM` 里 `consensus_strength ← Phase-1 同伴方向` 那条边**保留**——它描述旧世代数据的真实依赖，删了会让早先边界的闭包悄悄缩小。
 - 前瞻检验：维度 IC 协议 FORWARD_START 2026-10-12——本条上线日 10-09 早于它 ⇒ H1 / H2 不截断（这也是必须赶在 10-09 14:00 PT 扫描前上线的原因：错过则下一个扫描日是 10-12，之后任何边界都会截断）。共振加成前瞻检验：重放读记录自己的 Scout 输出，自证不受影响。
 
+### 二次检查补登（同日，上线前）
+- **漏登 `probability_scorecard._ML_ESTIMATOR_GENERATIONS`**：ML 特征 `crowding_score` 的唯一来源是蜂群 signal 维分 × 10（v0.45.146）——signal 维就是 Scout 的分，Scout 分平均 −0.34 ⇒ 特征平均 −3.4（最大约 −11.4）；`agent_agreement` 取自各蜂方向，Scout 方向翻了一部分。初版只登了 `_COHORT_HISTORY` 与 `signal_archive`，ML 概率记分卡会把 10-09 前后的 `ml_probability` 无声池化成同一代。已追加 `("2026-10-09", "v0.45.441", …)`（上线前 0 份报告，不改任何已有样本的归属），并在 `test_scout_consensus_excluded.py` 加登记守卫。`_prepare_ml_input` 没动、此前没有任何测试会为此变红。
+- 核过、不是问题：`CrowdingDetector.generate_html_section` 对 `components[...]` 为 None 会在 `_get_metric_interpretation` 里比较 None，但它**零生产调用方**（只有测试）；其余 `components` / `consensus_census` / `data_quality["bullish_agents"]` 读者全仓只有测试与实验脚本；`experiments/replay_swarm_sequence_20260917.py` 的 `get_real_crowding_metrics` 桩是 `lambda *a, **k`，吃得下新关键字。
+
 ### Fixed（顺带：边界表末尾追加后，三处夹具前提失效）
 - `tests/test_oracle_options_dq_from_agent.py::test_same_day_status_lists_369…` 与 `tests/test_step_contract_ic_rerun.py::test_boundary_alarm_one_item_per_alarming_version`：都隐含「表里最后一天 = 09-28 那一组同日边界」，而 `boundary_evidence_status` 只核**与末条同日**的各条——v0.45.441 追加 10-09 单条之后末日不再含 369 / 334 / 340 …… 前者把表截到 09-28（monkeypatch）、后者给 `_run` 加 `history_through`（在真实脚本文本的入口前插一行原地截断再原样 exec；`prelude` 够不到 runpy 另起的 `__main__` 全局）。**观察点后果**：Step 11 的边界核对此后只看 v0.45.441 一条，09-28 那组（349 / 369 / 383 / 423 ……）不再逐日复核——它们此前都已 `matches`，且判别逻辑本身有测试；这是 `boundary_evidence_status` 一贯的「同末日」语义，本版未改。
 - `tests/test_ic_rerun_readiness.py::TestPoolDriftBreaksCohort::test_pool_swap_is_flagged_and_blocks_ready`：第二段起点写死 2027-02-01，世代起始日每往后挪第一段就多延伸几天，挪到 10-09 时两段在日期上重叠 ⇒ 池换没换看不出来、无声变红。改成从世代起始日推。
