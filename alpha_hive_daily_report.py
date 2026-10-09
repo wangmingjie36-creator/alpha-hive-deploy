@@ -2368,7 +2368,9 @@ class AlphaHiveDailyReporter:
             if _fg_value is not None:
                 _buzz_disc = f"F&G {_fg_value} ({_fg_class})"
             # ── 价格数据 ──
-            _scout_details = {}
+            # v0.45.441 世代印记（Scout 拥挤度不含 consensus_strength）：合成回退里的 Scout 分不是 Scout 算的，
+            # 但缺键会被判别器读成旧代码 ⇒ 某天走到这条回退就误报 boundary_too_early。无条件写（不在 try / if 里）。
+            _scout_details = {"consensus_in_score": False}
             try:
                 import yfinance as _yf_sr
                 from data_pipeline import _drop_forming_bar as _dfb

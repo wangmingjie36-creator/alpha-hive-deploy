@@ -328,78 +328,9 @@ class TestRivalConsumptionSemanticsChanged:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 二次检查（2026-09-22）补的测试缺口 ②：`ScoutBeeNova.details.consensus_census`
-# 的接线此前零测试——静态契约测试（test_bee_details_contract.py）只能证明
-# `AgentResult(details={...})` 字面量里有这个键名，证明不了值取的是
-# `metrics.get("consensus_census")` 而不是别的东西（例如打错键名、被别的
-# 值覆盖）。真发生过：变异「读错键名」在改前全绿，是本次审计才发现的缺口。
+# （v0.45.441）此处原有 `TestScoutWiresConsensusCensusIntoDetails`：验证 Scout 把读板那一刻的普查原样写进
+# `details.consensus_census`。Scout 自 v0.45.441 起不读板、不要这一项（并行蜂读不到同伴的输出，27/30 恒为 0），
+# 该键与整套接线已删——新语义的测试在 `tests/test_scout_consensus_excluded.py`。
+# 本文件其余测试仍有效：`get_bullish_agents_detail` / `get_real_crowding_metrics(peer_census=True)` 是
+# Guard 与 Rival（Phase-1 之后顺序执行、读得到完整普查）的读法。
 # ══════════════════════════════════════════════════════════════════════════
-
-from swarm_agents.scout_bee import ScoutBeeNova  # noqa: E402
-
-
-def _fake_crowding_metrics(consensus_census):
-    """`get_real_crowding_metrics` 的最小合法返回形状——够 `CrowdingDetector.
-    calculate_crowding_score` 跑完，不触发任何 None 分量。"""
-    return {
-        "social_messages_per_day": 100.0, "google_trends_percentile": 50.0,
-        "bullish_agents": 1, "consensus_census": consensus_census,
-        "seeking_alpha_page_views": 1000.0, "short_float_ratio": 0.05,
-        "price_momentum_5d": 1.0,
-        "data_quality": {"social_buzz": "real", "google_trends": "proxy_volume",
-                          "bullish_agents": "real", "seeking_alpha": "proxy_social",
-                          "short_interest": "real", "momentum": "real"},
-    }
-
-
-class TestScoutWiresConsensusCensusIntoDetails:
-    """离线跑真实 `ScoutBeeNova.analyze()`，只钉住重量级外部依赖（SEC/国会/供应链/
-    板块相对强弱），验证 `metrics.get("consensus_census")` 原样传到了
-    `AgentResult.details["consensus_census"]`——而不是只验证键名存在。"""
-
-    @pytest.fixture(autouse=True)
-    def _offline_sources(self, monkeypatch):
-        import sec_edgar
-        import edgar_rss
-        import congress_trades_scraper
-        import market_intelligence
-
-        class _StubSEC:
-            _cik_map: dict = {}
-
-        monkeypatch.setattr(sec_edgar, "get_insider_trades", lambda ticker, days=90: None)
-        monkeypatch.setattr(sec_edgar, "SECEdgarClient", _StubSEC)
-        monkeypatch.setattr(edgar_rss, "get_today_form4_alerts",
-                            lambda ticker, cik=None: {"has_fresh_filings": False})
-        monkeypatch.setattr(congress_trades_scraper, "get_congress_trades_for_ticker",
-                            lambda ticker, days_back=90: {})
-        monkeypatch.setattr(market_intelligence, "get_supply_chain_signals", lambda ticker: {})
-
-    def _bee(self, monkeypatch, metrics):
-        bee = ScoutBeeNova(PheromoneBoard())
-        monkeypatch.setattr(bee, "_validate_ticker", lambda t: None)
-        monkeypatch.setattr(bee, "_get_history_context", lambda t: "")
-        monkeypatch.setattr(bee, "_get_stock_data", lambda t: {
-            "price": 100.0, "momentum_5d": 1.0, "volume_ratio": 1.0, "volatility_20d": 20.0})
-        monkeypatch.setattr(bee, "_assess_sector_relative_strength", lambda t: {"rs_signal": "unknown"})
-        monkeypatch.setattr(bee, "_publish", lambda *a, **k: None)
-        monkeypatch.setattr("real_data_sources.get_real_crowding_metrics",
-                            lambda ticker, stock, board: metrics)
-        return bee
-
-    def test_consensus_census_reaches_details_unchanged(self, monkeypatch):
-        sentinel = {"peers_live": ["OracleBeeEcho"], "peers_bullish": ["OracleBeeEcho"],
-                    "_sentinel": "not-a-real-shape"}
-        bee = self._bee(monkeypatch, _fake_crowding_metrics(sentinel))
-        result = bee.analyze("TEST")
-        assert result["details"]["consensus_census"] == sentinel, (
-            "details.consensus_census 应原样等于 get_real_crowding_metrics 返回的值——"
-            "不是键名恰好存在就算数")
-
-    def test_none_census_reaches_details_as_none_not_dropped(self, monkeypatch):
-        """成对：board 缺失/读取异常时 `consensus_census` 是 None——键必须还在，
-        不是被悄悄丢掉（那会让 None 和"从未接线"混成同一种「读不到」）。"""
-        bee = self._bee(monkeypatch, _fake_crowding_metrics(None))
-        result = bee.analyze("TEST")
-        assert "consensus_census" in result["details"]
-        assert result["details"]["consensus_census"] is None

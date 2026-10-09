@@ -920,6 +920,23 @@ _COHORT_HISTORY = [
      "边界与印记沿用（`_CORRECTS[\"v0.45.438\"] = \"v0.45.423\"`）：印记 `td_session_aware: True` 的字面量名是历史名，"
      "现在只表示「v0.45.423 及之后这一代代码」，**不**表示 Twelve Data 按收盘判。`signal_archive.COHORT_SIGNAL_SCOPE` 照抄 423 的范围。"
      "不进评分的账本另记（CHANGELOG v0.45.438）：VRP 10-08 结算的 27 行（基准日 09-09、窗口止于 10-08）用的是临时收盘。"),
+    ("2026-10-09", "v0.45.441",
+     "Scout 拥挤度去掉 `consensus_strength`（看多同伴数）这一项（用户 2026-10-09 决定：从根因去掉、不推迟读板；10-09 14:00 PT 扫描前上线）。"
+     "根因：Scout 与同伴蜂 Phase-1 **并行**，读板那一刻同伴多半还没发布——2026-10-08 实测 Oracle / Chronos 读到 0/30，Buzz 23/30，"
+     "CodeExecutor 30/30 但只是 `code_executor_agent.py:75` 那条 5.0/中性占位（最终看多 16 只、读板时看多只有 3 只）⇒ 该项 27/30 恒为 0；"
+     "09-28~10-08 共 270 行：0.0 占 235、16.7 占 31、33.3 占 4。完整普查（等四只同伴都发完再数）10-08 的看多同伴数分布是 0/1/2/3 个 = 4/13/12/1 只。"
+     "v0.45.279 / 304 修的是淘汰偏差与身份过滤，没碰这个时机问题。现在：缺失分量由 `calculate_crowding_score` 在其余四项间重归一化"
+     "（权重 0.7059）；`data_quality` 不再带 `bullish_agents` 键（没有被测量，不是降级）；Scout 的 `details.consensus_census` 删除，"
+     "换成世代印记 `consensus_in_score: False`。完整普查仍在 GuardBee（自己数）与 RivalBee（Phase-1.4，读 Phase-1 之后的板）。"
+     "**非等价**：crowding_score 对每一行都变（270 行平均 +5.67、最大 +18.92）；Scout 分平均 −0.34（最大 1.14）；confidence −0.02"
+     "（`real` 标签少一个）。重放（`.swarm_results` 09-28~10-08 共 270 行 / ml 报告 111 份，B0 自证 111/111）：规则层 Scout 方向翻 17/270"
+     "（neutral→bearish 14、bullish→neutral 3）；Queen 重放最终方向翻 3/111、final_score 变 2 行（最大 0.94）。"
+     "判别：`_BOUNDARY_MARKERS[\"v0.45.441\"]` = Scout details 字面量 `consensus_in_score: False`（成功 / 无效 ticker / 异常兜底都经 `analyze` 外壳写，"
+     "日报合成回退另写）。无等价判据（每行都变）⇒ 09-28~10-08 的样本在本条口径下全部归旧世代。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.441\"]` = `crowding.comp.consensus_strength` + `agent.ScoutBeeNova.*`（经 SIGNAL_UPSTREAM 闭包带出 "
+     "crowding.* / ml.* / Rival / Guard / bear.*——Rival / Guard 自己数的拥挤度没变，是依赖边按「同一个 CrowdingDetector 公式」代表换代，宁多切不少切）；"
+     "`composite.final_score` 是 ALWAYS_SLICED。前瞻检验：维度 IC 协议 FORWARD_START 2026-10-12——本条上线日 10-09 早于它 ⇒ H1 / H2 均不截断；"
+     "共振加成前瞻检验：重放读记录自己的 Scout 输出、自证不受影响，检验期内边界条数 +1（附带项）。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1274,6 +1291,19 @@ def _equiv_td_session_bar(d: dict) -> bool:
     return _equiv_hv_gap_free(d)
 
 
+def _scout_row_has_consensus_marker(d: dict) -> bool:
+    """这行是 v0.45.441 之后的代码写的吗：ScoutBeeNova `details.consensus_in_score` 为字面量 `False`
+    （`ScoutBeeNova.analyze` 外壳对每条返回路径都写；日报合成回退另写）。只认 `is False`：此前的记录没有这个键。"""
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("ScoutBeeNova")
+    det = o.get("details") if isinstance(o, dict) else None
+    return isinstance(det, dict) and det.get("consensus_in_score") is False
+
+
+def _marker_scout_consensus_excluded(d: dict) -> bool:
+    """v0.45.441 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383 / 423）。"""
+    return _scout_row_has_consensus_marker(d) and not _is_backfill_row(d)
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1299,6 +1329,8 @@ _BOUNDARY_MARKERS = {
                   _marker_oracle_hv_gap_checked),
     "v0.45.423": ("agent_details.OracleBeeEcho.details.td_session_aware is True",
                   _marker_oracle_td_session_aware),
+    "v0.45.441": ("agent_details.ScoutBeeNova.details.consensus_in_score is False",
+                  _marker_scout_consensus_excluded),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，

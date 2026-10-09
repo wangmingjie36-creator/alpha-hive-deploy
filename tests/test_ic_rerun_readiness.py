@@ -370,11 +370,15 @@ class TestPoolDriftBreaksCohort:
         assert res["pool_drift"] == pytest.approx(0.0)
 
     def test_pool_swap_is_flagged_and_blocks_ready(self, db):
+        import datetime as dt
         need = rr._WEEKS_REQUIRED[rr.DEFAULT_TARGET_IC]
+        # 第二段紧接第一段、起点**从世代起始日推**：此前写死 2027-02-01，世代起始日每往后挪（v0.45.441：09-28 → 10-09）
+        # 第一段就多延伸几天，到某天与第二段在日期上重叠 ⇒ 同一周里两个池并存、池换没换看不出来 ⇒ 无声变红。
+        late = (dt.date.fromisoformat(_COHORT_START) + dt.timedelta(weeks=need - 3)).isoformat()
+        today = (dt.date.fromisoformat(late) + dt.timedelta(weeks=4)).isoformat()
         rows = (_weekly_rows(need - 3, tickers=("AAA", "BBB"))
-                + _weekly_rows(3, start="2027-02-01",
-                               tickers=("XXX", "YYY", "ZZZ")))
-        res = rr.assess(db_path=db(rows), today="2027-03-01")
+                + _weekly_rows(3, start=late, tickers=("XXX", "YYY", "ZZZ")))
+        res = rr.assess(db_path=db(rows), today=today)
         assert res["pool_note"] is not None
         assert res["ready"] is False, "池被换掉仍判就绪 —— 样本已不可比"
         assert "世代" in rr.summary_line(res)

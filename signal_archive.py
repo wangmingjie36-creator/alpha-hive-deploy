@@ -1299,6 +1299,14 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # v0.45.438：更正 v0.45.423 条目（同日、日期不动），照表头「更正条目」规则抄被更正那条的范围
     "v0.45.438": ("agent.BuzzBeeWhisper.*", "crowding.score", "bear.score",
                   "agent.OracleBeeEcho.*", "bear.options_bear"),
+    # 10-09（v0.45.441）：Scout 拥挤度去掉 consensus_strength（Scout 与同伴并行、读板时同伴没发布 ⇒ 27/30 恒为 0）。
+    # 该分量本身从此恒为 None（点名它）；其余经 SIGNAL_UPSTREAM 带出：crowding.score → crowding.* → agent.ScoutBeeNova.*
+    # （分平均 −0.34、confidence −0.02、方向有翻）→ ml.* / Rival / Guard / bear.*。
+    # ⚠️ 过切：Rival / Guard 自己数的拥挤度（Phase-1 之后读完整普查）没变，但依赖边把它们挂在 crowding.score 上
+    # 「代表同一个 CrowdingDetector 公式换代」——宁多切不少切（同 v0.45.423 的 crowding.score）。
+    # 那条 SIGNAL_UPSTREAM 边（consensus_strength ← Phase-1 同伴方向）**保留**：它描述的是旧世代数据的真实依赖，
+    # 删了会让早先边界（如 v0.45.349 经 Oracle 方向）对历史行的闭包悄悄缩小。
+    "v0.45.441": ("crowding.comp.consensus_strength", "agent.ScoutBeeNova.*"),
 }
 
 
