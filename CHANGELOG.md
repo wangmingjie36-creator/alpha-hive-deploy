@@ -5,7 +5,177 @@
 
 ---
 
-## [0.45.441] — 2026-10-09 — 占位（进行中：Scout 去掉 consensus_strength 分量——并行蜂读不到同伴的输出，27/30 恒为 0；缺失重归一化，GuardBee 仍读完整普查；世代边界 + signal_archive 影响面）
+## [0.45.446] — 2026-10-09 — 占位（进行中：ic_rerun_readiness F&G 预算缺省改不限时——根本修法第 2 步；原占 440 / 443 / 444 撞号让出）
+
+## [0.45.445] — 2026-10-09 — Changed：新闻主源 Alpha Vantage → Massive（原 Polygon.io）；降级仍去 Yahoo；登世代边界 2026-10-09（与 v0.45.441 同日、早于维度 IC 窗口 10-12，不截断 H1）
+
+**为什么**：用户 2026-10-08 决定「替换掉一直失败的 AV」。AV 免费 25 次/天 < 30 只，固定 5 只（TMUS/ENPH/NFLX/NEE/SNOW）每天走 Yahoo；
+10-05 重跑之后连续三轮服务端全拒（10-06、10-07：0/30 走 AV），news 通道整片换成 Yahoo 量纲（未登记的数据降级）。
+Massive 免费 Stocks Basic：5 次/分钟、无日上限，ticker news 每篇带 `insights`（逐票 positive/negative/neutral + 理由）。
+
+**校准**（2026-10-08 08:00 PDT，30 只同一时刻，只读、生产库副本）：Massive 29/30 可用（NFLX 一次直连 SSLError）；
+Massive 同票对 09-28~10-02 的 AV 均值 平均 +1.5 / 中位 −1.0（13 低 12 高），Yahoo 同票 −27.1（23/24 更低），同时刻 Massive − Yahoo +28.8（25/28）
+⇒ Massive 与 AV 量纲相当、Yahoo 系统性偏低。⚠️ 横截面排序没有证据（秩相关 −0.41，今天的快照对两周前的均值，n=25），不据此说两源等价。
+
+**改了什么**
+- `newsapi_client.py`：新增 `_fetch_massive_news`（`GET api.massive.com/v2/reference/news`，key 走 `Authorization: Bearer` 不进 URL；
+  BRK-B → BRK.B；insights 按本票取，没有本票 insight 的文章记 neutral 并计 `massive_no_insight`；`published_at` 与 AV / Yahoo 同键，三源走同一个 `_build_result`）。
+  `_SlidingWindowLimiter`（5 次 / 60 秒滑动窗口）：等不到名额**立即**降级（`limiter_timeout`），上限 40s < Phase-1 等 Buzz 的 60s（测试钉住两者关系）。
+  主源按 `config.NEWS_SOURCE_CONFIG["primary"]` 路由（`alpha_vantage` 仍可回滚）；v0.45.444 的 AV 专名改为主源通用（`primary_attempt` / `get_primary_run_stats` /
+  `_primary_fail`；444 未部署，无兼容负担）。
+- `config.py`：`_SECRET_REGISTRY["MASSIVE_API_KEY"] = ~/.alpha_hive_massive_key`（用户已存，0600）；`NEWS_SOURCE_CONFIG`。
+- `swarm_agents/buzz_bee.py`：details 改记 `news_primary_status`，新增 `news_primary`（配置的主源名，降级时也写 ⇒ 兼作边界印记）。通道算式、data_quality 不变。
+- `alert_manager.py`：P1 阈值 `NEWS_NON_PRIMARY_P1_SHARE = 0.20`（Massive 常态应≈0；AV 时代的「常态」8/30 在新口径下就该报）。
+- 世代边界：`ic_rerun_readiness._COHORT_HISTORY` 追加 ("2026-10-09", "v0.45.445")（与 441 同日 ⇒ 切点不变，边际作废 0 条；单独登记时是 240 条、其中 30 条已到期，被 441 的同日切换吸收）；
+  `_BOUNDARY_MARKERS["v0.45.445"]`（Buzz `news_primary == "massive"`）；`signal_archive.COHORT_SIGNAL_SCOPE["v0.45.445"]` = `buzz.comp.news_signal` + `agent.BuzzBeeWhisper.*`
+  （协议 §6 按层声明）；`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登一代（final_score 是 ML 特征）。
+  ⚠️ **边界日期按「首个跑新代码的扫描日」写**：写 10-09，即 10-09 14:00 PT 那轮必须已跑上新代码（扫描前 `production_sync` 快进克隆）；赶不上就把日期改 10-10 或更晚，但必须早于 10-12，否则终止 H1。
+
+**测试**：`tests/test_news_source_visibility.py` 重写（43 条：Massive 主源 10 条、限速器与配置守卫 3 条、AV 回滚 7 条、记录不改通道 + 印记 + 边界登记 6 条、汇总 4 条、告警 10 条、端到端 2 条、main 接线 1 条）；
+`tests/test_newsapi_client.py` 钉主源为 AV（它测的就是 AV + Yahoo 两条路）；`tests/test_production_sync.py` 夹具改新字段。
+**因新边界 / 合并暴露的既有测试问题**（都不是 Massive 逻辑的错）：
+- `test_ic_rerun_readiness::TestPoolDriftBreaksCohort`：写死日期，世代起点一后移，另两条**空转着照绿**（样本落在世代外）；改为由世代起点推导并补「样本确在世代内」前提断言（同 v0.45.128）。
+  「池被换」那条 main 的 `5b33a780` 已修，取 main 的。`test_step_contract_ic_rerun` 同理已被 `5b33a780` 用 `history_through` 修对，本版**不动**（初版曾放宽它的断言，合并时发现 main 的修法更严，还原）。
+- 同日边界登记的约定：`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日多批**合并为一代、标签用 `+` 连接**（09-06 / 09-07 / 09-28 先例），所以 441 + 445 登成 `v0.45.441+v0.45.445`；
+  `test_scout_consensus_excluded` 两条守卫原写「441 恰好是表尾 / 标签恰好等于 441」，放宽为「441 在最新日期组里 / 标签按 `+` 拆开含 441」（仍断言日期、早于 FORWARD_START、10-08 不含 441）。
+- `test_production_sync::TestResultReachesAlerts::test_healthy_round_raises_no_sync_or_deploy_alert`：**origin/main 上本来就是红的**（v0.45.423 起 alert_manager 对「本轮没跑到组合 Greeks」记 `checks_skipped`，
+  这条自拼 snapshot 的「健康一轮」夹具没带 `counters.portfolio_greeks`，`not a.checks_skipped` 断言因此失败）；夹具补一份「干净」的价核对计数，断言不动。
+
+**验证**（接手后实测，2026-10-09 PT 清晨）：
+- 全套（`pytest` 默认排除 integration）8726 passed / 2 failed——**两条都不是本版引起**：`test_economic_calendar::TestCoverageHorizon`（GDP 表只到 10-29，设计内的抄录提醒，origin/main 同样红）；
+  `test_tests_use_running_interpreter`（`test_alphabot_launcher.py` 写死解释器，origin/main 的 `b48f8072` 已修，rebase 到它之后该条绿）。全套跑在最后一次 rebase 之前。
+- 最后一次 rebase（落在 origin/main `b48f8072` 之上）后重跑受影响的 33 个测试文件：802 passed。
+- 真实链路冒烟（只读、免费档、一次请求，沙箱数据根）：`newsapi_client.get_ticker_news("NVDA")` ⇒ `source=massive`、`primary_attempt.status=ok`、10 篇、`sentiment_score=6.4`，key 不进输出。
+- 边界代价实测：见上「世代边界」——`assess()` 在最新一组（441 + 445）下 `n_all_samples=0`，同日切点不变。
+- ⚠️ **未重做**：前一个会话报告的「9 处变异全部被测试抓到」是它在 10-08 对更早基线做的；本次接手只做了解冲突与改号，没有重跑变异。
+
+## [0.45.444] — 2026-10-09 — Added：新闻通道降级可见化——记 Alpha Vantage 拒绝原文与逐票实际来源，非 AV 比例 > 40% 时 Step 6 报 P1；**不改任何通道值**
+
+**为什么**：10-06 AV 服务端日额度耗尽（10-05 重跑把同一配额窗口剩下的 1 次用掉后，次日 25 次全拒），30 只的新闻全部降级到 Yahoo。
+降级本身不报错，Buzz 的 `data_quality.news` 两种源都写 `keyword`；而 Yahoo 是关键词集合打标、AV 是逐文章模型分（±0.15），
+同一只票的 `news_signal` 比它自己 09-28~10-02 的 AV 均值平均低 21.3 分（25 只里 21 只更低；10-05 重跑对首跑同票同日 −15.9）。
+下游 Buzz 18/30 看空、Scout `consensus_strength` 28/30 为 0。原来没有一层会红，拒绝原文也被丢掉（只记键名 `['Information']`），
+分不清撞的是每日 25 次还是每分钟 5 次。
+
+**改了什么**
+- `newsapi_client.py`：`_fetch_av_news` 每个没拿到数据的出口带结局（`breaker_open` / `local_quota` / `limiter_timeout` / `http_error` /
+  `server_refused` / `empty_feed` / `network_error`），拒绝原文去 key、截 300 字；`get_ticker_news` 把结局作为 `av_attempt` 随结果带出，
+  并计入进程级 `get_av_run_stats()`（缓存命中不重复计）。新增 `summarize_news_sources(swarm_results)`。
+  顺带：`Error Message`（AV 报错键）原先落进空 feed 分支，现记为 `server_refused`；debug 日志里的异常文本去 key。
+- `swarm_agents/buzz_bee.py`：`details` 新增 `news_source` / `news_av_status`（只读、不进合成）。`data_quality.news` **不改**——新 DQ 取值要进 Queen 登记表。
+- `alpha_hive_daily_report.main`：读本轮 `.swarm_results_<date>.json` 汇总进 `scan_timing.extra.news_sources`（`report` 里没有 swarm_results）；
+  算不出也写一条带原因的记录。
+- `alert_manager.py`：`_check_news_sources`——扫描真跑完时，非 AV 占比 > `NEWS_NON_AV_P1_SHARE`(0.40) ⇒ P1（附拒绝原文）；
+  观测点缺失 / 已知来源 < 10 只 ⇒ P2；扫描没跑完不判。常态 0.20–0.27（5 只是 30>25 的结构性本地配额、固定是 TMUS/ENPH/NFLX/NEE/SNOW，余下是开跑第一秒的每分钟限速拒绝）。
+
+**没改什么**：去向（每个出口照旧降级 Yahoo）、news 取值、Buzz 合成与 data_quality、限速器、本地配额。维度 IC 协议「改 Buzz 通道 = 终止 H1」（10-12 开窗）——
+本版不碰通道值，测试逐项钉住。被拒后停用 AV 留到能看到拒绝原文之后再定（常态日开局那 1 次是每分钟限速，若也停用会让剩下的票改走 Yahoo，反而改了通道值）。
+
+**测试契约更新**：`tests/test_production_sync.py::TestResultReachesAlerts` 两条钉 `scan_timing.extra` 的形状——健康一轮的夹具补上 `news_sources`
+（`not a.checks_skipped` 照旧断言）；`set(extra)` 从 `{"gh_pages"}` 改为 `{"gh_pages", "news_sources"}`（退役字段照旧会红），桩补 `report_dir`
+与一份真 `.swarm_results`，顺带覆盖 `main()` 读文件 → 汇总这条接线。
+
+**验证**：`tests/test_news_source_visibility.py` 26 条（含真实 BuzzBee → 汇总 → 告警端到端两条、`main()` 读不到文件时写带原因的记录一条）；
+12 个变异（不去 key / Yahoo 路径不带结局 / unknown 进分母 / 不计数 / 阈值 `>=` / 不调检查 / 缺失不报 / Buzz 不记来源 / DQ 写来源 /
+通道值随来源变 / extra 不写 news_sources / 不读本轮文件）全部被抓、文件逐字节复原；ruff F821/F401 通过。
+全套（`-m "not integration"`）首跑 8337 passed / 4 failed：3 条是上面的契约更新（已改），1 条 `test_economic_calendar::TestCoverageHorizon`
+在未改动的 origin/main 上同样红（GDP 表只到 10-29、剩余 < 30 天，设计内的抄录提醒，与本版无关）。
+改号后在 10-08 最新 origin/main 上重跑全套：8489 passed / 1 failed（同上日历）/ 1 error——session 级真实数据根闸报 `alphabot_state/intraday/2026-10-08/` 五个文件变了：是盘中正在运行的 Alpha Bot（`python -m alphabot`）每分钟写快照，不是测试写的。
+
+## [0.45.443] — 2026-10-09 — Added：Step 12 覆盖率闸加 `analyst_targets` 字段——分析师目标价 08-04 起 8/38 个扫描日 0/30，此前没有任何会红的观测点；只观测，不改评分
+
+用户 2026-10-09 问「真正的分析师目标价那一路」是否也归零、再问「加进 Step 12 有没有必要」。实测（`.swarm_results_*.json` 的 `ChronosBeeHorizon.details.analyst_targets`）：10-05~10-08 每天 30/30、`target_mean>0`；但 **08-04 起共 38 个扫描日里 8 天 0/30**（08-04 / 08-06 / 08-11 / 08-12 / 08-14 / 09-17 / 09-24 / 09-25），另有 5 天部分缺失（08-10 21/30、08-13 22、08-24 22、08-25 18、08-26 16）。09-17 排查过一次（v0.45.270：yfinance `analyst_price_targets` 失败时按库默认 `hide_exceptions` 返回空 `{}`，与「该票没有分析师覆盖」不可区分、没有第二数据源可回落），之后 09-24、09-25 又连坏两天，没有任何东西红。
+
+### Added
+- `scan_coverage_gate.FIELDS` 加 `analyst_targets`（路径 `ChronosBeeHorizon.analyst_targets`、`min_coverage` 0.70、来源「yfinance 分析师目标价」）。判据 = 非空：Chronos 只在 `target_mean > 0` **且有可信现价**时才填它，否则 `{}`（1b 段）——所以「缺」= 取数失败或无可信现价，卡片没出就是缺。基线 30/30、没有合法缺失的标的；不需要 `recorded_key`（Chronos 一直写这个键，旧结果照常判）。
+- 缺它的后果（为什么值得红）：Chronos `confidence` 少 0.1（`build_confidence` 的 `(bool(_analyst_info), 0.1)`，进 Queen 方向投票的票权）、网站 / ML 报告 / 深度报告的目标价卡片空白、discovery 少一句。数据质量标签 `analyst_targets: unavailable` 早就有，但只是几十个标签之一，`data_real_pct` 动不到 1pp，看不出来。
+- 红在 Step 12 的告警级别（与 `unusual_flow` 同），不升 P1。
+
+### 不做什么
+- **不修取数、不改评分、不进世代边界**（观测字段，`signal_archive` / `_COHORT_HISTORY` 都不动）。
+- 取数根因没解：yfinance 失败仍与「无覆盖」分不开、仍无第二源。本版只保证下次坏的时候有人知道。
+
+### 守卫（`tests/test_scan_coverage_analyst_targets.py`，14 条）
+- 健康日 / 历史坏日形状（0、16、18/30）降级 + 退出码 1 + attention 点名 / 历史部分缺失但可接受的日子（22、21/30）不误报（0.70 不过敏）/ 阈值与其余 yfinance 字段一致 / 渲染文本点名。
+- **与生产者对得上（真跑 `ChronosBeeHorizon.analyze`）**：yfinance 返回 None / `{}` / 均价 0 / 缺均价 ⇒ 产出 `{}` ⇒ 闸判缺；有效目标价 ⇒ 闸判有；有目标价却无可信现价 ⇒ 生产者清空、闸同样判缺。
+- 变异 5 个（先提交后变异，全红、已还原）：条目改名 / 阈值放到 0.50 / 路径写错键 / Chronos 无现价不再清空 / Chronos 均价 0 也填。
+- 夹具：`test_scan_coverage_gate.py`（FULL + 一处内联）与 `test_oracle_unusual_flow_visibility.py` 的基线结果补 `analyst_targets`（新字段进 FIELDS 后「健康」基线必须带它，否则恒红）。
+
+## [0.45.442] — 2026-10-09 — Fixed：v0.45.435 / 438 / 440 二次检查——历史闸读坏行崩溃且静默丢行、守卫扫进未跟踪副本、盘中记录被当收盘放行、组合 Greeks 整轮异常不红，另 3 处
+
+二次检查 = 自查（实跑探针）+ 独立审阅。v0.45.438（twelve_data 撤回 / 世代更正条目）未发现 bug。
+
+### Fixed
+1. **守卫扫进未跟踪文件**（440，`tests/test_hedge_history_gate.py`）：手写裸 `rglob`，会扫到 iCloud 在 `~/Desktop` 下持续造的「portfolio_greeks 2.py」这类重名副本（含 `hedge_state`、不在白名单）⇒ 只在有副本的机器上假红。改用共享清单 `tests/_repo_files.own_python_files`（`git ls-files` 优先，与其余全仓守卫同口径——其文档里 v0.45.176 同款事故）。我手写了一份仓里已有的东西，违反「先用装好的工具」。
+2. **`load_history` 读到非对象行就崩、坏 JSON 静默跳过**（440）：借 `_load_jsonl`——它照收 `"str"` / `[1, 2]`（随后 `.get` 抛 AttributeError），坏行被无声丢掉（闸的本意是「排除并计数」）。改为闸自己逐行读：`unreadable` / `not_an_object` / `no_date` 各自计数；审计文件非对象同样计数；非 `greeks_<日期>.json` 的同前缀文件跳过。
+3. **没日期的记录能放行**（440）：`_expected_session("")` 回 `""`，与空场次「相等」，还会把 `first_verified` 推成 `""`。现判 `no_date`、不参与起点 / 退化推断。
+4. **盘中跑的记录被当「该场收盘」放行**（440，审阅指出）：审计文件只核日期；不持 SPY 的净值行不看价的来源。现 SPY 是实时价或任一行价来自 `cboe_intraday` ⇒ `intraday_run` 排除；同日收盘后再跑会覆盖它并放行。
+5. **组合 Greeks 整轮异常不红**（435 的观测链覆盖不到，审阅指出）：`run_for_date` 抛异常时日报只记一行 WARNING（非致命），`_LAST_PRICE_CHECK` 又只在 compute_day 末尾才赋值 ⇒ status.json 里是 None ⇒ alert_manager 只进 checks_skipped。现 `run_for_date` 把异常记进 `price_check_stats()["error"]`（已算出的核对保留）再原样抛出；alert_manager P2「这一轮异常中断」，摘要行「Greeks 异常中断(…)」。实例：账本里一行非对象 JSON 就会让 `_hedge_rows_before_today` 抛。
+6. **`_hedge_undecided` 条件偏宽**（435）：带外 + hold 一律算「做不出决定」；center 模式股数四舍五入成 0 是「算出来了、不用动」，会被报成「数据不全」。现在只认目标算不出（`target_usd` 为 None）。现行 edge 模式下不可达（审阅核过），属潜在误报。
+7. **守卫漏 `_load_audit`**（440，审阅指出）：按日期读审计文件、绕过放行判定的助手没进 `HISTORY_NAMES`。
+
+### 未做（如实记录）
+- `portfolio_greeks._load_jsonl` 对**坏 JSON** 仍静默跳过（v0.45.103 起既有行为，生产读持仓 / 成交 / 净值都走它）：持仓文件坏一行会少一个仓位、照样对冲。非对象行现在会让整轮抛错 ⇒ 第 5 条 P2；坏 JSON 那半未改（改读取语义影响三本账，另议）。
+
+### 验证
+- 实跑探针：恶意行文件（非对象 / 坏 JSON / 无日期）此前 AttributeError，现在按原因计数；生产 `load_history` 结果不变（净值 / 审计 first_verified 10-08，排除 5 / 21 / 21，无退化）。
+- 新测试：`TestHistoryGateSurvivesBadLines`（2）、`TestRunFailureIsRed`（2）、`TestIntradayRecordsAreNotCloses`（2）、`TestUndecidedMeansCouldNotCompute`（2）、守卫 `test_untracked_icloud_duplicate_is_not_scanned` + `_load_audit` 自证；1 条既有断言按新分类（`intraday_run`）改期望。
+- 变异 13 个全部打红：H1–H5（裸 rglob / 坏 JSON 静默 / 非对象照收 / 不核日期 / 审计非对象）、J1–J8（失败不记录 / 覆盖已算核对 / 告警与摘要不看 error / undecided 不看 target / 审计与净值不排盘中 / 守卫不认 `_load_audit`）。
+- 全量套件：见提交说明。
+
+
+
+## [0.45.441] — 2026-10-09 — Fixed：Scout 拥挤度去掉 `consensus_strength`（看多同伴数）——并行蜂读不到同伴的输出，27/30 恒为 0；世代边界 2026-10-09
+
+用户 2026-10-09 问「10-08 有 27/30 只的 consensus_strength 是 0，怎么从根因解决」，并记得「之前修过」。查实：v0.45.279 / 304 修的是**另一个缺陷**（读板用排行榜口径被淘汰偏差污染、没按身份过滤、读不到板时硬编码返回 3），两版 CHANGELOG 与 docstring 都写明「读板时机依赖竞态、口径未变」；时机问题一直没动。
+
+### 根因（2026-10-08 实测，`.swarm_results_2026-10-08.json` 的 Scout `consensus_census`）
+Scout 与 Oracle / Buzz / Chronos / CodeExecutor 在 Phase-1 **并行**，算拥挤度要读板上同伴的方向，读板那一刻同伴多半还没发布：
+
+| 同伴 | Scout 读板时可见 | 最终实际方向 |
+|---|---|---|
+| OracleBeeEcho | 0/30 | 看多 17 |
+| ChronosBeeHorizon | 0/30 | 看多 7 |
+| BuzzBeeWhisper | 23/30 | 看多 0 |
+| CodeExecutorAgent | 30/30，但读到的多是 `code_executor_agent.py:75` 的 5.0/中性占位 | 看多 16；读板时看多只有 3 |
+
+⇒ 09-28~10-08 共 270 行：0.0 占 235、16.7 占 31、33.3 占 4。等四只同伴都发完再数（Guard / Rival 的读法），10-08 的看多同伴数分布是 0/1/2/3 个 = 4/13/12/1 只，不是全 0。该项是「谁碰巧先发布」的噪声，不是同伴的看法。
+
+### Changed
+- `real_data_sources.get_real_crowding_metrics(..., *, peer_census=True)`：`False` ⇒ 不读板，`bullish_agents` / `consensus_census` 为 None，且 `data_quality` **不带** `bullish_agents` 键（没被测量 ≠ 降级：留 `"unavailable"` 会按 0.7 分计入 Queen 的 data_real_pct，留 `"real"` 是谎）。默认 True，Guard / Rival 不变。
+- `swarm_agents/scout_bee.py`：传 `peer_census=False`；缺失分量由 `CrowdingDetector.calculate_crowding_score` 在其余四项间重归一化（权重 0.7059，既有通路，v0.45.30 起）。`details.consensus_census` 删除（零读者的死字段）。`analyze` 变成外壳，对**每条返回路径**（成功 / 无效 ticker / 异常兜底）写世代印记 `details.consensus_in_score: False`；日报合成回退（`_generate_synthetic_swarm_results`）另写。
+- 完整普查仍在 GuardBee（自己数）与 RivalBee（Phase-1.4，读 Phase-1 之后的板）。
+
+### 影响面（非等价：每一行的 crowding_score 都变）
+- crowding_score：09-28~10-08 共 270 行平均 **+5.67**（最大 +18.92）；重算与记录 270/270 一致。Scout 分平均 **−0.34**（最大 1.14）；confidence **−0.02**（`real` 标签少一个，`min(0.1, 0.02×n)` 那一项）。
+- 方向：规则层 Scout 方向翻 17/270（neutral→bearish 14、bullish→neutral 3）——规则只复现 171/270 的记录方向（末端 LLM / 2e 复核另有调整），所以这是下限估计。
+- Queen 重放（`experiments/resonance_boost_forward_test.replay`，ml 报告 111 份，B0 自证 **111/111**；仅改规则能复现的行）：Scout 方向改 5/111；**最终方向翻 3/111**（bullish→bearish、neutral→bullish、neutral→bearish 各 1）、final_score 变 2 行（最大 0.94）。
+- data_real_pct：Scout 少一个 `real` 标签，显示值微降；10-08 全 30 只 96.9~97.9、远高于 80 的质量压缩门槛 ⇒ quality_factor 不动。
+- 样本代价（`ic_rerun_readiness.assess(today=2026-10-09)`）：IC 重跑就绪度的世代从 09-28 挪到 10-09，**270 行 / 60 行已到期 / 1 个已累积周 → 0**（需 25 周）。这是已知并经用户同意的代价。
+
+### 世代边界与登记
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-10-09", "v0.45.441", …)`；`_BOUNDARY_MARKERS["v0.45.441"]` = Scout `consensus_in_score is False`（只认字面量、排补跑行）；**无等价判据**（每行都变）。新代码首跑（10-09）前判 `no_evidence_yet`，首跑后应为 `matches`。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.441"]` = `crowding.comp.consensus_strength` + `agent.ScoutBeeNova.*`（闭包带出 crowding.* / ml.* / Rival / Guard / bear.*；Rival / Guard 自己数的拥挤度没变，依赖边按「同一个 CrowdingDetector 公式」代表换代，宁多切不少切）。`SIGNAL_UPSTREAM` 里 `consensus_strength ← Phase-1 同伴方向` 那条边**保留**——它描述旧世代数据的真实依赖，删了会让早先边界的闭包悄悄缩小。
+- 前瞻检验：维度 IC 协议 FORWARD_START 2026-10-12——本条上线日 10-09 早于它 ⇒ H1 / H2 不截断（这也是必须赶在 10-09 14:00 PT 扫描前上线的原因：错过则下一个扫描日是 10-12，之后任何边界都会截断）。共振加成前瞻检验：重放读记录自己的 Scout 输出，自证不受影响。
+
+### 二次检查补登（同日，上线前）
+- **漏登 `probability_scorecard._ML_ESTIMATOR_GENERATIONS`**：ML 特征 `crowding_score` 的唯一来源是蜂群 signal 维分 × 10（v0.45.146）——signal 维就是 Scout 的分，Scout 分平均 −0.34 ⇒ 特征平均 −3.4（最大约 −11.4）；`agent_agreement` 取自各蜂方向，Scout 方向翻了一部分。初版只登了 `_COHORT_HISTORY` 与 `signal_archive`，ML 概率记分卡会把 10-09 前后的 `ml_probability` 无声池化成同一代。已追加 `("2026-10-09", "v0.45.441", …)`（上线前 0 份报告，不改任何已有样本的归属），并在 `test_scout_consensus_excluded.py` 加登记守卫。`_prepare_ml_input` 没动、此前没有任何测试会为此变红。
+- 核过、不是问题：`CrowdingDetector.generate_html_section` 对 `components[...]` 为 None 会在 `_get_metric_interpretation` 里比较 None，但它**零生产调用方**（只有测试）；其余 `components` / `consensus_census` / `data_quality["bullish_agents"]` 读者全仓只有测试与实验脚本；`experiments/replay_swarm_sequence_20260917.py` 的 `get_real_crowding_metrics` 桩是 `lambda *a, **k`，吃得下新关键字。
+
+### Fixed（顺带：边界表末尾追加后，三处夹具前提失效）
+- `tests/test_oracle_options_dq_from_agent.py::test_same_day_status_lists_369…` 与 `tests/test_step_contract_ic_rerun.py::test_boundary_alarm_one_item_per_alarming_version`：都隐含「表里最后一天 = 09-28 那一组同日边界」，而 `boundary_evidence_status` 只核**与末条同日**的各条——v0.45.441 追加 10-09 单条之后末日不再含 369 / 334 / 340 …… 前者把表截到 09-28（monkeypatch）、后者给 `_run` 加 `history_through`（在真实脚本文本的入口前插一行原地截断再原样 exec；`prelude` 够不到 runpy 另起的 `__main__` 全局）。**观察点后果**：Step 11 的边界核对此后只看 v0.45.441 一条，09-28 那组（349 / 369 / 383 / 423 ……）不再逐日复核——它们此前都已 `matches`，且判别逻辑本身有测试；这是 `boundary_evidence_status` 一贯的「同末日」语义，本版未改。
+- `tests/test_ic_rerun_readiness.py::TestPoolDriftBreaksCohort::test_pool_swap_is_flagged_and_blocks_ready`：第二段起点写死 2027-02-01，世代起始日每往后挪第一段就多延伸几天，挪到 10-09 时两段在日期上重叠 ⇒ 池换没换看不出来、无声变红。改成从世代起始日推。
+
+### 守卫（`tests/test_scout_consensus_excluded.py`，26 条；`test_bullish_agents_census_eviction.py` 删掉旧的 `TestScoutWiresConsensusCensusIntoDetails`）
+- `peer_census=False` 不读板（板读取会抛也照常返回）/ 默认仍数同伴 / 其余指标不变；**真跑 `ScoutBeeNova.analyze`：满板看多与空板的拥挤度 / 分 / 方向 / confidence / data_quality 逐字相同**；缺失分量按其余四项重归一化（独立重算）；Scout 的每个 data_quality 值都已登记（无新标签）。
+- 印记每条路径都在（成功 / 无效 ticker / 异常兜底 / 日报合成回退无条件写）、经 Queen 进归档形状后判别器认得出；只认字面量 False；补跑行不算。
+- AST：全仓只有 `scout_bee.py` 传 `peer_census=False`；登记表接线（边界日早于 FORWARD_START、印记已登记且无等价判据、信号范围闭包到 Scout 与 crowding）。
+- 变异 6 个（先提交后变异，全红、已还原）：Scout 去掉 `peer_census=False` / 外壳不盖印记 / Guard 也关普查 / 判别器认缺键 / metrics 仍留 `unavailable` 标签 / 合成回退不写印记。
+
+### 注意
+- **没有测过 consensus_strength 有无预测力**（原来多数为 0，无从测）；本版不是「改准了」，是「从时机决定的噪声变成没有这一项」。
+- 真正的分析师目标价（`ChronosBeeHorizon.analyst_targets`）是另一条路，与本项无关：10-05~10-08 每天 30/30 有值、`target_mean>0`。
+- 流程：10-09 04:23 PDT 占号并推送；代码经干净克隆全套后推。
 
 ## [0.45.440] — 2026-10-09 — Added：对冲账本历史只经一道闸读——记录自带定价场次证明、证不出的不放行并计数、别的模块直读历史即红；历史原样保留不重算
 
@@ -87,6 +257,7 @@
   - M7 `--home` 不清 demo / M8 `--reset` 不清 demo；
   - M9 TCC 提示不看位置 / M10 委托不禁 pyc。
 - 结果：`test_alphabot_launcher.py` + `test_alphabot.py` 111 passed；ruff 全绿。
+- ⚠️ 追补（同日）：`TestLaunchScriptHints` 两处把 `/usr/local/bin/python3` 写成 `launch_script` 实参，撞了 `tests/test_tests_use_running_interpreter.py`（CI 上没有该解释器）。本条只跑了受影响套件、没跑全量，所以没看到；另一会话在 main 全量里发现并告知，改为 `sys.executable`。
 
 ### 待办（时间点决定，不是没做）
 - 已装的 `~/Applications/Alpha Bot.app` 由克隆 6f2bbbb0 的生成器生成，壳里仍是旧的 cd 失败文案（本条修的是生成器）。今天 14:00 扫描把克隆快进到含本版的 main 后，重跑一次 `make alphabot-app` 即换成新文案，任何检出里跑都一样。

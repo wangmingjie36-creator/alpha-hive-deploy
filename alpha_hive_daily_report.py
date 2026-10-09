@@ -2369,7 +2369,9 @@ class AlphaHiveDailyReporter:
             if _fg_value is not None:
                 _buzz_disc = f"F&G {_fg_value} ({_fg_class})"
             # ── 价格数据 ──
-            _scout_details = {}
+            # v0.45.441 世代印记（Scout 拥挤度不含 consensus_strength）：合成回退里的 Scout 分不是 Scout 算的，
+            # 但缺键会被判别器读成旧代码 ⇒ 某天走到这条回退就误报 boundary_too_early。无条件写（不在 try / if 里）。
+            _scout_details = {"consensus_in_score": False}
             try:
                 import yfinance as _yf_sr
                 from data_pipeline import _drop_forming_bar as _dfb
@@ -2955,8 +2957,20 @@ def main():
         if _gh_pages is None:   # 部署没跑到：记成失败，不能让「没记录」看起来像「没问题」
             _gh_pages = {"success": False, "error": f"同步抛异常（gh-pages 未部署）：{type(e).__name__}: {e}"}
 
+    # v0.45.444：新闻通道实际来源分布 → status.json → alert_manager（非 AV 比例过高报 P1）。
+    # 算不出来也要写一条带原因的记录：「没记录」不能看起来像「没问题」。
+    # ⚠️ `report` 里没有 swarm_results（`_build_swarm_report` 不带它）——读本轮已落盘的 `.swarm_results_<date>.json`。
+    try:
+        from newsapi_client import summarize_news_sources
+        with open(reporter.report_dir / f".swarm_results_{reporter.date_str}.json", encoding="utf-8") as _f_sr:
+            _news_sources = summarize_news_sources(json.load(_f_sr))
+    except Exception as _e_ns:  # noqa: BLE001 —— 观测点自身失败只记原因，不拖垮扫描
+        _log.warning("新闻来源统计失败（不影响扫描）: %s", _e_ns)
+        _news_sources = {"available": False, "reason": f"{type(_e_ns).__name__}: {_e_ns}"}
+
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
-    _timing.write(reporter.date_str, extra={"gh_pages": _timing.gh_pages_summary(_gh_pages)})
+    _timing.write(reporter.date_str, extra={"gh_pages": _timing.gh_pages_summary(_gh_pages),
+                                            "news_sources": _news_sources})
     return report
 
 

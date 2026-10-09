@@ -190,7 +190,8 @@ def _results(n, ok, key=True):
         if key:
             det["unusual_flow_ok"] = True if i < ok else None
         out[f"T{i}"] = {"agent_details": {"OracleBeeEcho": {"details": det},
-                                          "ChronosBeeHorizon": {"details": {"catalysts": [1]}}}}
+                                          "ChronosBeeHorizon": {"details": {"catalysts": [1],
+                                                                           "analyst_targets": {"target_mean": 1.0}}}}}
     return out
 
 

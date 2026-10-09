@@ -122,6 +122,17 @@ FIELDS: List[Dict[str, Any]] = [
     {"key": "unusual_flow", "path": "OracleBeeEcho.unusual_flow_ok", "recorded_key": "unusual_flow_ok",
      "min_coverage": 0.70, "source": "yfinance 期权链(异常流)",
      "note": "Oracle 丢了异常流 ⇒ 方向与加分都变（本字段缺 = 取数失败，不是「无异常」）；只记录、评分仍按 5.0 中性混入"},
+    # v0.45.443：分析师目标价。08-04 起 38 个扫描日里 8 天 0/30（08-04/06/11/12/14、09-17/24/25）、5 天部分缺失（16~22/30），
+    # 此前没有任何会红的观测点：yfinance `analyst_price_targets` 在取数失败时按库默认（hide_exceptions）返回空 `{}`，
+    # 与「该票没有分析师覆盖」在返回值里不可区分（v0.45.270 已记），数据质量标签 `unavailable` 又只占几十个标签之一
+    # （`data_real_pct` 动不到 1pp）。缺它的代价：Chronos confidence 少 0.1（`build_confidence` 里 `(bool(_analyst_info), 0.1)`，
+    # 进 Queen 方向投票的票权）、网站 / ML 报告的目标价卡片空白、discovery 少一句。**不改评分、不修取数**——只让它红。
+    # 判据 = `analyst_targets` 非空：Chronos 只在 `target_mean > 0` 且有可信现价时才填它，否则 `{}`（见 chronos_bee 1b 段）。
+    # 阈值 0.70 同其余项；基线（取到的日子）30/30，没有「合法缺失」的标的。
+    {"key": "analyst_targets", "path": "ChronosBeeHorizon.analyst_targets",
+     "min_coverage": 0.70, "source": "yfinance 分析师目标价",
+     "note": "缺 = 取数失败或无可信现价（yfinance 空 `{}` 与「无分析师覆盖」不可区分）；"
+             "Chronos confidence −0.1、目标价卡片空白；无第二数据源可回落"},
     {"key": "catalysts", "path": "ChronosBeeHorizon.catalysts",
      "min_coverage": 0.40, "source": "yfinance 财报日历",
      "note": "阈值低于其余项：并非每只标的在任意时点都有已知催化剂，"
