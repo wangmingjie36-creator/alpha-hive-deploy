@@ -9,7 +9,65 @@
 
 ## [0.45.440] — 2026-10-09 — 占位（进行中：对冲账本历史只经一道闸读——记录自带定价场次证明、无证明的不放行、其他模块直读历史即红）
 
-## [0.45.439] — 2026-10-09 — 占位（进行中：v0.45.436 二次检查——Alpha Bot.app 生成器与被执行代码同版、数据根提示与启动器同源、环境变量不再改写数据根、克隆缺失不再静默退回、定时任务以克隆为唯一真相）
+## [0.45.439] — 2026-10-09 — Fixed：v0.45.436 二次检查——Alpha Bot.app 由目标代码自己的生成器出壳、克隆缺失不再静默退回、数据根提示与启动器同源、环境变量不改写已配数据根、cd 失败提示按位置给；定时任务以克隆为唯一真相
+
+`/code-review high` 审 v0.45.436（`bd49c964..65248325`）报 6 条，用户要求全部从根因修。
+
+### Fixed（仓库）
+- **生成器与被执行代码两版错开**（`alphabot/macos_app.py`）：436 只把 `REPO=` 指向克隆，启动脚本、Info.plist（含版本号）、图标仍出自运行 `make` 的那份检出。
+  - 后果：改过壳的 worktree 一生成，.app 就拿新壳去 exec 克隆里的旧 launcher；版本号也显示 worktree 的。
+  - 根因修法：新增 `build_app_from(repo, dest)`。目标不是本检出 ⇒ 在目标目录起子进程跑**目标自己的** `build_app`。
+  - 委托只依赖 `build_app(dest, python=…)`：v0.45.390 起每版都有这个签名，所以还没快进到新版的克隆也能用。
+  - 子进程带 `PYTHONDONTWRITEBYTECODE=1`，不往克隆写 `__pycache__`。
+  - 生成后读回启动脚本的 `REPO=` 核对：若子进程 import 到了别处的 alphabot，在这里红。
+  - 真克隆实证（其生成器仍是 6f2bbbb0 旧版）：产物 `REPO=/Users/igg/alpha-hive-prod`，壳正文是克隆的旧版文案（而非本检出的新文案）；克隆 `__pycache__` 数不变，`launcher.json` 不变，`check` ok。
+- **克隆不在时静默退回本检出**：436 退回生成器所在检出，只在 stderr 留一行，是同一个「无声冻结」形状。现在 `default_repo()` 报错（exit 1、不生成），给出 `production_clone.py setup` 与 `--repo` 两条路。
+- **数据根提示与启动器判断不同源**：436 的提示只看 `alpha_hive_home`。目录没了也说「沿用」；配置 `demo: true` 时说「会让你选」。两种情况双击的结果都与提示相反。
+  - 新增 `launcher.config_state(cfg)`，返回 `demo` / `home` / `stale` / `first` 四种状态；`resolve_mode` 与生成器提示共用这一份判断。
+  - 同根顺带修：`--reset` 此前只清 `alpha_hive_home`、留着 `demo` ⇒ 下次双击仍直接进演示，「重新选」不会发生。现在按 `launcher.RESET_KEYS` 一起清；生成器的 `--home` 改写数据根时也一起清。
+- **环境变量改写已配数据根**：此前无条件把当前 shell 的 `ALPHA_HIVE_HOME` 写进启动器配置。开发 shell 常把它指向沙箱 ⇒ 在开发检出里重新生成一次，生产 Alpha Bot 就改读沙箱。
+  - 现在只有 `--home` 改写已有配置；环境变量只在配置还没有数据根时顺手记下。
+  - 两者不同时在 stderr 说明，并提示改用 `--home`。
+- **启动脚本 cd 失败提示写死「桌面 TCC」**：处理办法改由代码目录位置决定（`_cd_failure_hint`）。
+  - 总给「生产克隆用 `production_clone.py setup` 重建 / 换位置用 `--repo` 重跑」两条路。
+  - 只有在「桌面」「文稿」下才加 TCC 权限提示；判定与 iCloud 风险提示共用 `_under_desktop_or_documents`（原 `_icloud_risk`）。
+  - 生成脚本头注释「git pull 即生效」改为「代码目录更新后下次启动即生效」。
+
+### Fixed（本机配置，不在仓库里；先备份 `SKILL.md.bak-pre-v439`）
+- **两个定时任务读到的 CLAUDE.md / 文档是冻结的开发检出版**：
+  - 根因：任务会话的工作目录是开发检出。app 给每个任务存了 `cwd`，定时任务工具改不了它；把它改成克隆，又与「不在生产克隆里开会话」相悖。
+  - 修法：提示词把**唯一真相 = 克隆**写成显式规则——代码 / 文档一律读 `/Users/igg/alpha-hive-prod/` 下的绝对路径；项目规则以克隆的 CLAUDE.md 为准，与自动加载的那份冲突时以克隆为准。
+  - 周任务里原有 7 处相对引用全部改为绝对路径：docstring、`experiments/ic_power_report.md` ×2、`scan_continuity.py`、`ic_rerun_readiness.py` ×2、`fg_exposure_gate_forward_test.py`；auto-memory 引用也写全路径。
+  - 新增可观测核对：`weekly_optimizer.py` 输出的 `config:` 行必须是 `/Users/igg/alpha-hive-prod/config.py`，否则停下报告。实测从克隆 import 得到的正是这个路径。
+  - 核对结果：9 个绝对路径全部存在；剩下的相对写法只是行文里的脚本名 / 输出名；两个任务仍 enabled，`nextRunAt` 未变（10-11 / 11-01）。
+
+### 守卫
+- `tests/test_alphabot_launcher.py`：
+  - `TestDefaultRepoIsProductionClone`：
+    - 默认指向克隆，且 Info.plist 版本是假克隆的 `0.0.0+clone`，证明委托确实发生；克隆里无 `__pycache__`；
+    - 克隆不在 ⇒ rc=1、不生成、报出 setup 与 `--repo`；
+    - `--repo` 优先于克隆；
+    - 目标生成器抛错时原因报出来；
+    - 产物 `REPO` 指向别处 ⇒ 拒绝。
+  - `TestDataRootFollowsLauncher`：
+    - 四种配置状态各自的提示；
+    - 环境变量不改写已有配置、只填首次；
+    - `--home` 连 `demo` 一起换。
+  - `test_reset_also_forgets_demo`；`test_config_state_matches_what_resolve_mode_does`：四种状态下 `config_state` 与 `resolve_mode` 结论一致，以是否发问判定。
+  - `TestLaunchScriptHints`：
+    - 克隆（不在桌面）有重建提示、无 TCC 提示；
+    - 桌面下保留 TCC 提示；
+    - 提示里没有 `" $ \` 和反引号；
+    - 真跑一次 cd 失败，弹窗里有重建办法。
+- 变异 10 处（先提交后变异，每轮清 pyc，不设 `PYTHONDONTWRITEBYTECODE`），全部变红：
+  - M1 不委托 / M2 不核对 REPO / M3 静默退回；
+  - M4 环境变量改写 / M5 不认 demo 优先 / M6 目录不在也算沿用；
+  - M7 `--home` 不清 demo / M8 `--reset` 不清 demo；
+  - M9 TCC 提示不看位置 / M10 委托不禁 pyc。
+- 结果：`test_alphabot_launcher.py` + `test_alphabot.py` 111 passed；ruff 全绿。
+
+### 待办（时间点决定，不是没做）
+- 已装的 `~/Applications/Alpha Bot.app` 由克隆 6f2bbbb0 的生成器生成，壳里仍是旧的 cd 失败文案（本条修的是生成器）。今天 14:00 扫描把克隆快进到含本版的 main 后，重跑一次 `make alphabot-app` 即换成新文案，任何检出里跑都一样。
 
 ## [0.45.438] — 2026-10-09 — Fixed：twelve_data 规则①恢复「美东当日那根一律丢」——实测当日那根收盘后仍是临时值，v0.45.423 的「根因修复」前提不成立；更正 v0.45.423 / 434 的口径说明，世代边界追加更正条目（日期不动、作废 0 条）
 
