@@ -223,7 +223,27 @@
 - status.json 计数在组合 Greeks 之后写（`_post_scan_notify` 先于 `main()` 的 `_timing.write`），告警链真能接到。
 - 相关 30 个测试文件 1204 passed。
 
-## [0.45.433] — 2026-10-08 — 占位（进行中：期权纸面腿内在价值结算只认 settle_date 当日 Twelve Data 收盘，取不到就延期并计数，不再静默用旧收盘）
+## [0.45.433] — 2026-10-09 — Fixed：期权纸面腿内在价值结算只认结算那一场的 Twelve Data 收盘——取不到就延期（WARNING / 计数 / 仓位字段 / 日报可见），不再静默用 5 个日历日内的旧收盘或本地价格索引
+
+`options_paper_leg._default_close` 取「≤ 结算日、5 个日历日内最后一根」，Twelve Data 没给再退本地价格索引（期权快照价，分不清盘中还是收盘）。v0.45.438 确认本源当晚不给当日那根 ⇒ 到期当晚（或事件后报价 stale 的当晚）跑，**一定**按前一交易日收盘结算，且什么都不留。同形于 `portfolio_greeks` v0.45.423 修掉的 5 日容差（auto-memory `alpha-hive-failure-propagation`：把失败改写成正常值）。
+
+### Fixed
+- `_default_close(ticker, settle_date, *, as_of=None)` 改为**自报场次**的 dict（`price / session / source / reason / latest`）：只认日期**恰为**结算场次的那根；结算日是周末 / 假日 ⇒ 之前最近一个交易日（`_settle_session` 直接调 `portfolio_greeks._expected_session`，不抄第五份）。没命中给原因：`lagging`（本源还没给出那一场的定稿收盘——结算日当晚恒如此）/ `bar_missing` / `bars_unavailable` / `twelve_data_unconfigured` / `bad_close`；之前最近那根只作 seen 给 WARNING 点名。**不再退本地价格索引。**
+- `_resolve_close(raw, session)`：场次相符才可结算；裸数字 = 调用方担保（同 `portfolio_greeks._resolve_mark`，既有注入 closes_fn 的测试语义不变）。
+- 取数窗口截至 **as_of**（`run_for_date` 的缺省 closes_fn）而非结算日：与 vrp_signal / portfolio_greeks 共用缓存键（每票仍只取一次）；结算那根不在窗口末尾，规则 ②（末根量 < 中位 30% 即丢）不会把低量的到期日那根（提前收盘日）永远丢掉。
+- 延期：仓位照旧挂着（stale）、WARNING 点名缺哪一场 / 为什么 / 被拒的是哪一根 / 距核销还剩几天；`run_for_date` 返回 `settle_deferred` 列表；仓位新增 `settle_deferred_since` / `settle_deferred_reason`（只反映最近一次运行，同日重跑逐字节不变）；日报小节在持仓行标「⏳ 结算延期（自 …）」并列出原因；日报钩子日志行带「结算延期 N」。
+- 与核销同一条时间线：延期到 `write_off_days_after_expiry` 仍无那一场收盘才核销，核销 note 改为 `no close for session … (<原因>, deferred since …)`；有收盘时核销永远排在内在价值之后（不变）。
+- `_close` 的「平仓日晚于到期日」日志：内在价值结算（按到期那一场的收盘、只是入账晚）降为 WARNING——v0.45.438 后到期当晚该结的仓位次日才结是设计内，ERROR 会天天误报；核销仍 ERROR。`settled_late_days` 照记。
+- `_VERSION` → 0.45.433（meta.json 口径世代）；`sell_strike_ledger` 模块头对 `options_paper_leg._default_close` 的引用随之更正（只改注释）。
+
+### 影响面（生产只读核对，2026-10-09）
+- 生产账本 `options_paper_state/`：6 个持仓全部 `cboe_mid` 新鲜 mark、已平 1 笔（`cboe_mid`）——**从未发生过内在价值结算**，没有任何一笔按旧收盘结过 ⇒ **无需改写历史账本**、世代作废 0 条。跨式 GEX 预注册读的是 `earnings_signals.jsonl` 的实际波动，不读本账本平仓价，不受影响。
+
+### 守卫
+- 新增 `tests/test_options_paper_leg_settle_close.py`（21 条）：本源只到结算日前一天 ⇒ 延期（用户点名的场景）/ 事件后同晚 / 缺口 / Twelve Data 断或未配时本地索引有价也不用；到期当晚经**真的**规则 ① 延期、次日按定稿那根结算且无 ERROR；低量到期日那根照样结；一轮只取一次；正对照（恰有那一场 / 周六与感恩节映射到前一交易日）；延期 → 30 天仍等 → 31 天核销；同日重跑逐字节；不再该结即清字段；日报可见；`_resolve_close` 表。只走改动前就有的入口、不依赖 v0.45.438 删掉的 `_et_now` / `_session_settled`。
+- `tests/test_twelve_data.py::TestOneFetchPerTickerPerScan` 断言随返回形状改为 `price` + `session`。
+- 变异（草稿目录副本、`PYTHONDONTWRITEBYTECODE=1`、每轮清 pyc、`--maxfail=1000`、passed+failed == collected 116、每轮核真实数据根指纹不变）：**M0 = 改动前文件 `db4621ff:options_paper_leg.py`** 红 21——行为测试全部红在「按 103.0（前一交易日）/ 150.0（本地索引）结了」，四条正对照在旧文件上**绿**（`_resolve_close` 表 / 一次取数形状两组红在新接口，不计为证据）；M1 解析不比场次 红 10、M2 场次不映射 红 2（正对照）、M3 窗口截至结算日 红 3、M4 不清字段 红 1、M5 剩余天数差一 红 2、M6 迟结记 ERROR 红 1、M7 旧那根冒名本场 红 8、M8 since 每天重置 红 1；还原后 116 passed。
+
 
 ## [0.45.432] — 2026-10-08 — Fixed：v0.45.431 二次检查——空仓库被判合格、克隆目录缺失时整天静默、origin 不对仍装钩子、clone_guard「应有而缺」不报、Desktop/TCC 过时文案、测试 helper 归位
 

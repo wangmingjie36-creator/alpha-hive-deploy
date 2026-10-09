@@ -1295,10 +1295,11 @@ class AlphaHiveDailyReporter:
             _ev_settled = _evs.settle_signals(self.date_str)
             _opl_result = _opl.run_for_date(self.date_str, signals=_ev_signals)
             _gx = _evs.shadow_summary(_ev_signals, self.date_str)
-            _log.info("期权纸面腿已更新: %s (信号 %d / 合格 %d / 回填 %d / nav=%s / GEX 影子记录可用 %d/%d)",
+            _log.info("期权纸面腿已更新: %s (信号 %d / 合格 %d / 回填 %d / nav=%s / 结算延期 %d / GEX 影子记录可用 %d/%d)",
                       self.date_str, len(_ev_signals),
                       sum(1 for _s in _ev_signals if _s.get("eligible")), _ev_settled,
-                      (_opl_result or {}).get("nav", "?"), _gx["usable"], _gx["n"])
+                      (_opl_result or {}).get("nav", "?"),
+                      len((_opl_result or {}).get("settle_deferred") or []), _gx["usable"], _gx["n"])
             # v0.45.428：有信号而一条可用的影子记录都没有 ⇒ warning。不然接线断了 / gex_state 没了，
             # 只会在几个月后表现成「检验一直攒不够」（CLAUDE.md「这个失败，下游怎么知道？」）
             if _gx["n"] and not _gx["usable"]:
