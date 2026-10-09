@@ -18,6 +18,7 @@ import json
 import math
 import re
 
+import ledger_io
 from hive_logger import pdt_today  # v0.28.0: 美股交易日工具
 
 # v0.45.50：本模块此前无 logger —— 所有降级（OHLC 取数失败、SPY 基准缺失）
@@ -308,57 +309,29 @@ def _drop_empty_split_adjustments(d: Dict) -> Dict:
 # JSONL 读写工具
 # ══════════════════════════════════════════════════════════════════════════════
 
+# v0.45.448：账本读写一律经 `ledger_io`（加锁 + 原子替换 + 严格序列化 + 写后回读）。此前 `_append_jsonl` 的注释是
+# 「单行追加对原子性需求低，保留 append」——写到一半崩溃 / 断电 / 磁盘满就是半行，下一次追加把两条粘成坏行；
+# `_write_jsonl` 不拒 NaN（`json.dumps` 缺省写出非法的 `NaN` 字面量）；`_load_jsonl` 照收非对象行。
+# 现在写不出坏行；读到坏行 ⇒ `LedgerCorrupt`（外部损坏）⇒ `run_for_date` 记进 run_stats() ⇒ status.json ⇒ P2。
+
 def _load_jsonl(path: Path) -> List[Dict]:
-    if not path.exists():
-        return []
-    out = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                out.append(json.loads(line))
-    return out
+    return ledger_io.load_jsonl(path)
 
 
 def _atomic_write_text(path: Path, content: str, mode: int = 0o644) -> None:
-    """修复 Bug #20：tmp + fsync + os.replace 原子写，防止崩溃/断电损坏
-
-    v0.23.7：增加 mode 参数。tempfile.mkstemp 默认 0o600（仅 owner 读写），
-    会让 paper_portfolio_state/meta.json 等文件无法被其他工具/用户读取。
-    显式设为 0o644 与正常文件权限一致。
-    """
-    import os as _os
-    import tempfile
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        prefix=path.name + ".tmp.", dir=str(path.parent)
-    )
-    try:
-        with _os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            f.write(content)
-            f.flush()
-            _os.fsync(f.fileno())
-        _os.chmod(tmp_path, mode)  # 修正 mkstemp 默认 0o600
-        _os.replace(tmp_path, path)
-    except Exception:
-        try:
-            _os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    """tmp + fsync + os.replace 原子写（修复 Bug #20；v0.23.7 起 mode 0o644——mkstemp 缺省 0o600 会让 meta.json
+    别的工具读不了）。v0.45.448 起实现统一在 `ledger_io.atomic_write_text`（另加 fsync 目录与写后回读）。"""
+    ledger_io.atomic_write_text(path, content, mode)
 
 
 def _write_jsonl(path: Path, records: List[Dict]) -> None:
-    """完整重写（用于 positions 这种会删减的）— 原子写"""
-    content = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
-    _atomic_write_text(path, content)
+    """完整重写（positions / equity_curve）——原子、严格（非对象 / NaN ⇒ LedgerWriteError，文件不动）。"""
+    ledger_io.write_jsonl(path, records)
 
 
 def _append_jsonl(path: Path, record: Dict) -> None:
-    """追加（用于 closed_trades / equity_curve）— 单行追加对原子性需求低，保留 append"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    """追加一条（closed_trades）——持目录锁、原字节 + 新行整文件原子替换（旧行逐字节不变）。"""
+    ledger_io.append_jsonl(path, record)
 
 
 def _load_meta() -> Dict:
@@ -1646,8 +1619,35 @@ def _all_snapshot_dates() -> List[str]:
     return sorted(dates)
 
 
+_LAST_RUN: Optional[Dict] = None
+
+
+def run_stats() -> Optional[Dict]:
+    """本进程最近一次 `run_for_date` 的结局（v0.45.448）：{"as_of", "ok", "error"}。
+    `scan_timing.counters()["paper_portfolio"]` 读它 → status.json → alert_manager（error ⇒ P2）。
+    本进程没跑过 ⇒ None：None 是「没测到」，不是「跑过没事」。"""
+    return dict(_LAST_RUN) if _LAST_RUN is not None else None
+
+
 def run_for_date(as_of: str, verbose: bool = False,
                  market_fear_greed: Optional[Dict] = None) -> Dict:
+    """见 `_run_for_date`。v0.45.448：
+    - 整轮读-改-写持 `paper_portfolio_state/` 目录锁（`ledger_io.locked`）——手动补跑与定时扫描撞上时，后到者等前者
+      写完再读持仓 / 现金，不会拿旧快照开平仓、再把对方的记录覆盖掉；
+    - 结局记进 `run_stats()`：此前日报把这里的任何异常当「非致命」吞成一行 WARNING，**组合整轮没跑也不红**。"""
+    global _LAST_RUN
+    try:
+        with ledger_io.locked(POSITIONS_FILE.parent):
+            res = _run_for_date(as_of, verbose=verbose, market_fear_greed=market_fear_greed)
+    except Exception as exc:  # noqa: BLE001 - 记下来、原样抛：调用方的处理不变
+        _LAST_RUN = {"as_of": as_of, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+        raise
+    _LAST_RUN = {"as_of": as_of, "ok": True, "error": None}
+    return res
+
+
+def _run_for_date(as_of: str, verbose: bool = False,
+                  market_fear_greed: Optional[Dict] = None) -> Dict:
     """
     执行指定日期的 paper portfolio 操作：
     1. 扫描现有仓位 → 检查 SL/TP/TIME 触发 → 平仓

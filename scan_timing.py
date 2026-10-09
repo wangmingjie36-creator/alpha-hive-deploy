@@ -102,7 +102,7 @@ def counters() -> Dict[str, Optional[dict]]:
                                       "cboe": None, "cboe_chain": None,
                                       "gex_view": None, "cboe_raw": None,
                                       "options_snapshot": None, "hv_gap": None,
-                                      "portfolio_greeks": None}
+                                      "portfolio_greeks": None, "paper_portfolio": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -139,6 +139,11 @@ def counters() -> Dict[str, Optional[dict]]:
         out["portfolio_greeks"] = portfolio_greeks.price_check_stats()   # 本进程没跑过 ⇒ None
     except Exception as e:  # noqa: BLE001
         _log.debug("portfolio_greeks price_check 不可得: %s", e)
+    try:
+        import paper_portfolio
+        out["paper_portfolio"] = paper_portfolio.run_stats()   # v0.45.448；本进程没跑过 ⇒ None
+    except Exception as e:  # noqa: BLE001
+        _log.debug("paper_portfolio run_stats 不可得: %s", e)
     return out
 
 
@@ -303,7 +308,9 @@ def summary_line(snap: dict) -> str:
         f"/会话不符弃用{os_.get('session_mismatch', '?')}份/盘中快照命中{os_.get('hits_before_close', '?')}份")
     pg = c.get("portfolio_greeks")
     pg_s = ""
-    if pg and pg.get("hedge_undecided") and not (pg.get("n_stale") or pg.get("n_quote_stale")
+    if pg and pg.get("error"):
+        pg_s = f" | Greeks 异常中断({str(pg['error'])[:80]})"          # v0.45.442
+    elif pg and pg.get("hedge_undecided") and not (pg.get("n_stale") or pg.get("n_quote_stale")
                                                   or (pg.get("spy") or {}).get("stale")
                                                   or pg.get("execution_blocked")):
         # v0.45.435：不是陈旧、是缺——对冲决定做不出来（两源取不到价 / 缺报价 / 缺 β / 缺 NAV）
@@ -318,5 +325,8 @@ def summary_line(snap: dict) -> str:
                 + (f"/报价错场 {pg['n_quote_stale']}" if pg.get("n_quote_stale") else "")
                 + ("/拒绝成交" if pg.get("execution_blocked") else "")
                 + (("/另缺 " + "；".join(pg["gaps"])) if pg.get("gaps") else ""))
+    pp = c.get("paper_portfolio")
+    if pp and pp.get("error"):
+        pg_s += f" | 纸面组合异常中断({str(pp['error'])[:80]})"        # v0.45.448
     return ("耗时 " + " | ".join(parts) +
             f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s + pg_s)

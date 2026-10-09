@@ -111,6 +111,9 @@ _SECRET_REGISTRY = {
     # 远在额度内，是唯一量级够覆盖整个 WATCHLIST 的免费源。
     # 未配置时 TwelveDataSource 直接返回 None，降级链退回 yfinance（限流版）。
     "TWELVEDATA_API_KEY": "~/.alpha_hive_twelvedata_key",
+    # v0.45.445：新闻主源（原 Polygon.io，2025-10 更名 Massive）。免费 Stocks Basic：5 次/分钟、无日上限，
+    # ticker news 带逐票 insights（positive/negative/neutral）——2026-10-08 用户注册、实测可用。
+    "MASSIVE_API_KEY": "~/.alpha_hive_massive_key",
 }
 
 
@@ -1262,6 +1265,19 @@ NEWS_FILTER_CONFIG = {
     "dedup_jaccard_threshold": 0.5,     # 标题 Jaccard 相似度 ≥ 0.5 视为重复
     "recency_half_life_hours": 24.0,    # 时效衰减半衰期（小时）
     "min_articles_for_recency": 3,      # 文章数 < 3 时不做时效衰减（样本太少）
+}
+
+# ==================== 新闻主源（v0.45.445） ====================
+# 主源取不到就降级 Yahoo（关键词打标）。⚠️ 换主源 = 换 Buzz news 通道的量纲：必须追加世代边界
+# （`ic_rerun_readiness._COHORT_HISTORY` + `signal_archive.COHORT_SIGNAL_SCOPE` 点名 `buzz.comp.news_signal`
+# 与 `agent.BuzzBeeWhisper.*`）；维度 IC 协议窗口（2026-10-12）开始后再换 = 终止 H1。
+# 2026-10-08 校准（30 只、同一时刻）：Massive 同票对 09-28~10-02 的 AV 均值 平均 +1.5 / 中位 −1.0（13 低 12 高），
+# Yahoo 同票 −27.1（23/24 更低）——Massive 与 AV 量纲相当，Yahoo 系统性偏低。
+NEWS_SOURCE_CONFIG = {
+    "primary": "massive",               # "massive" | "alpha_vantage"（回滚用；AV 免费 25 次/天、10-05 起连续全拒）
+    "massive_calls_per_minute": 5,      # 免费 Stocks Basic 的上限（定价页）
+    "massive_acquire_timeout_s": 40.0,  # 等限速令牌的上限——须小于 Phase-1 等 Buzz 的 60s（alpha_hive_daily_report）
+    "massive_request_timeout_s": 10.0,
 }
 
 # ==================== 情绪动量配置 ====================

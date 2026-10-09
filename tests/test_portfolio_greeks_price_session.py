@@ -169,27 +169,40 @@ def _rows(res, kind):
 
 # ── 事故复现：收盘后同日跑（10-06 17:42 ET）──────────────────────────────────
 
-class TestTwelveDataKeepsTheClosedSessionBar:
-    """根因：`_drop_forming_bar` 规则 ① 曾只比日期——17:42 ET 时 10-06 那根早已收完，照样被丢，
-    「截至今天」的窗口全止于前一交易日。修后按交易所收盘判（收盘 + 30 分钟定稿余量）。"""
+class TestTwelveDataDropsTheSameDayBar:
+    """v0.45.438：Twelve Data 的当日那根**当晚是临时值**——2026-10-08 收盘 38 分钟后 SPY 773.86（官方 773.93，
+    CBOE 与 yfinance 一致）、成交量只有窗口中位数的 3.4%。v0.45.423 曾以为「收完的当日那根被误丢」、把规则 ①
+    改成收盘 + 30 分钟后照收，前提不成立，已恢复按美东日期丢。
+    夹具里当日那根的成交量是**满的**（与中位数相同）：规则 ② 拦不住它，只剩 ① ——钉的就是 ①。"""
 
-    def test_closed_session_bar_is_kept_after_the_close(self, world):
-        rows = td.fetch_bars("JNJ", 120, end_date=AS_OF)
-        assert (rows[-1]["date"], rows[-1]["close"]) == (AS_OF, CLOSE["JNJ"][1]), rows[-1]
-
-    @pytest.mark.parametrize("hh,mm", [(11, 0), (15, 59), (16, 20)])
-    def test_bar_is_dropped_until_the_session_has_settled(self, world, hh, mm):
+    @pytest.mark.parametrize("hh,mm", [(11, 0), (15, 59), (16, 38), (17, 42), (23, 59)])
+    def test_same_day_bar_is_dropped_all_evening(self, world, hh, mm):
         world.at(datetime(2026, 10, 6, hh, mm, tzinfo=ET))
         assert td.fetch_bars("JNJ", 120, end_date=AS_OF)[-1]["date"] == PREV
 
-    def test_early_close_day_settles_at_1330(self, world):
-        """感恩节次日 13:00 收盘 ⇒ 13:30 起收（按 `session_close_et`，不按平日 16:00）。"""
+    def test_after_midnight_et_the_bar_is_kept(self, world):
+        """美东日期翻页之后那根才是定稿值（09-08 / 10-05 两次午夜后重跑与官方收盘逐分相等）。"""
+        world.at(datetime(2026, 10, 7, 0, 30, tzinfo=ET))
+        rows = td.fetch_bars("JNJ", 120, end_date=AS_OF)
+        assert (rows[-1]["date"], rows[-1]["close"]) == (AS_OF, CLOSE["JNJ"][1]), rows[-1]
+
+    def test_early_close_day_is_dropped_all_evening_too(self, world):
+        """感恩节次日 13:00 收盘：当晚同样是临时值，与平日一样按日期丢（不按 `session_close_et` 放行）。"""
         world.bars_end = "2026-11-27"
-        world.at(datetime(2026, 11, 27, 13, 31, tzinfo=ET))
-        assert td.fetch_bars("JNJ", 120, end_date="2026-11-27")[-1]["date"] == "2026-11-27"
-        td.clear_bars_cache()
-        world.at(datetime(2026, 11, 27, 13, 20, tzinfo=ET))
+        world.at(datetime(2026, 11, 27, 16, 0, tzinfo=ET))
         assert td.fetch_bars("JNJ", 120, end_date="2026-11-27")[-1]["date"] == "2026-11-25"
+
+    def test_the_measured_provisional_bar_is_dropped_even_at_full_volume(self, monkeypatch):
+        """末根收盘 = 10-08 16:38 ET 实测的临时值 773.86；成交量换成满的（实测是 1,517,497），成交量闸拦不住，
+        只有日期规则拦——v0.45.423 的规则在这里会把它当 10-08 的收盘收下。前五根合成。"""
+        monkeypatch.setattr(td, "_et_today", lambda: "2026-10-08")
+        # v0.45.423 的规则还读分钟钟 `_et_now`：钉在实测时刻之后（17:42 ET），否则它在别的日子按「此刻不在那一天」
+        # 照样丢，这条对旧规则就不红了（钩子现已不存在，raising=False）
+        monkeypatch.setattr(td, "_et_now", lambda: datetime(2026, 10, 8, 17, 42, tzinfo=ET), raising=False)
+        rows = [{"date": d, "close": 770.0 + i, "vol": 40e6}
+                for i, d in enumerate(("2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06", "2026-10-07"))]
+        rows.append({"date": "2026-10-08", "close": 773.86, "vol": 40e6})
+        assert td._drop_forming_bar(rows, "SPY")[-1]["date"] == "2026-10-07"
 
 
 class TestSameDayRunUsesTheAsOfSession:
@@ -320,19 +333,21 @@ class TestCboeStaleIntradayFile:
         world.payloads["JNJ"] = _payload("JNJ", 254.10, f"{AS_OF}T12:10:05", options=_jnj_options())
         world.book()
 
-    def test_stock_row_takes_the_closed_bar_not_the_midday_price(self, world):
-        self._setup(world)
-        res = pg.compute_day(AS_OF, beta_fn=_beta1)
-        amzn = next(x for x in _rows(res, "stock") if x["ticker"] == "AMZN")
-        assert amzn["price"] == CLOSE["AMZN"][1] and amzn["price_source"] == "twelve_data_bar"
-
-    def test_stock_row_is_stale_when_no_closed_bar_either(self, world):
-        world.bars_end = PREV
+    def test_stock_row_is_stale_the_same_evening(self, world):
+        """收盘后同日跑：CBOE 是中午的价、Twelve Data 当晚只有临时值（按日期丢）⇒ as_of 的官方收盘无处可取 ⇒
+        陈旧、标红、不对冲。v0.45.423 曾在这里收下 Twelve Data 的当日那根（当晚是临时值，v0.45.438 撤回）。"""
         self._setup(world)
         res = pg.compute_day(AS_OF, beta_fn=_beta1)
         amzn = next(x for x in _rows(res, "stock") if x["ticker"] == "AMZN")
         assert amzn["price"] is None and amzn["price_stale"] is True
         assert amzn["stale_price"] == 254.00 and amzn["price_source"] == "cboe_stale_intraday"
+
+    def test_after_midnight_the_settled_bar_prices_it_not_the_midday_price(self, world):
+        self._setup(world)
+        world.at(datetime(2026, 10, 7, 0, 30, tzinfo=ET))
+        res = pg.compute_day(AS_OF, beta_fn=_beta1)
+        amzn = next(x for x in _rows(res, "stock") if x["ticker"] == "AMZN")
+        assert amzn["price"] == CLOSE["AMZN"][1] and amzn["price_source"] == "twelve_data_bar"
 
     def test_option_spot_pairs_with_its_own_payload(self, world):
         """同一份陈旧文件里的标的价与期权报价是同一时刻的——配对算 $Delta 要的正是它（标签照记）。"""
@@ -611,8 +626,11 @@ def _td_down_for(monkeypatch, *tickers):
 
 
 def _outage_like_09_24(world, monkeypatch):
-    """CBOE 整源取不到 + Twelve Data 取不到 SPY；覆盖账本持有 SPY（09-24 的形状）。"""
+    """09-24 的形状：期权报价一张都取不到、SPY 两源都取不到，覆盖账本持有 SPY。股票 / JNJ 的标的价给 CBOE 收盘
+    （09-24 那天股票价来自本地价格索引，按现在的口径会判陈旧——这里单测「缺」那条路，不混进陈旧）。"""
     _td_down_for(monkeypatch, "SPY")
+    world.closed(tickers=("AMZN", "TSLA", "JNJ"))
+    world.payloads["JNJ"]["options"] = []                    # 链里没有持仓合约 ⇒ 报价缺（不是错场）
     world.book()
     _jsonl(pg.POSITIONS_FILE, [{"ticker": "SPY", "shares": -10, "avg_price": 770.0}])
     pg.META_FILE.write_text(json.dumps({"cash": 7700.0}), encoding="utf-8")
@@ -720,3 +738,209 @@ class TestFormingBarNeverPassesAsAClose:
         res = pg.compute_day(AS_OF, beta_fn=_beta1)
         amzn = next(r for r in _rows(res, "stock") if r["ticker"] == "AMZN")
         assert amzn["price"] is None, f"盘中半根被当成 {AS_OF} 的收盘用了：{amzn['price']}"
+
+
+# ── v0.45.440：账本历史只经一道闸读——记录自带定价场次证明，证不出的不放行 ──────────────
+# 2026-09-04~10-07 的记录（标的价 / SPY 成交价晚一个交易日）原样保留、不重算（用户决定）；它们自己不说这件事，
+# 按日期切要靠读者记得一个约定。`load_history()` 按每条记录自带的证明放行（直读的守卫见 test_hedge_history_gate.py）。
+
+_OLD_TRADE = {"date": "2026-10-01", "ticker": "SPY", "shares": 30, "price": 762.63, "action": "buy_spy",
+              "fill": "close", "nav": 152932.15, "shares_after": 48.0}               # 生产 v0.45.423 之前的格式
+_OLD_EQUITY = {"date": "2026-10-07", "spy_shares": 48.0, "spy_price": 779.09, "cash": -36630.13,
+               "market_value": 37396.32, "nav": 766.19, "trades_today": 0, "band_status": "inside"}
+
+
+def _eq(day, *, session=None, at_close=True, shares=48.0, source="cboe_close", nav=518.51, legacy=False):
+    e = {"date": day, "spy_shares": shares, "spy_price": 773.93, "spy_price_source": source,
+         "spy_price_session": day if session is None else session, "cash": -36630.13, "nav": nav}
+    if not legacy:
+        e["spy_price_at_close"] = at_close
+    return e
+
+
+class TestRecordsCarryTheirPricingProof:
+
+    def test_trade_and_equity_rows_say_which_close_they_used(self, world):
+        world.closed()
+        world.book()
+        t = pg.run_for_date(AS_OF, beta_fn=_beta1)["executed_trade"]
+        assert (t["price_session"], t["price_source"], t["price_at_close"]) == (AS_OF, "cboe_close", True), t
+        eq = pg._load_jsonl(pg.EQUITY_FILE)[-1]
+        assert (eq["spy_price_session"], eq["spy_price_at_close"]) == (AS_OF, True), eq
+
+    def test_intraday_mark_is_recorded_as_not_a_close(self, world):
+        world.intraday()
+        world.book()
+        _jsonl(pg.POSITIONS_FILE, [{"ticker": "SPY", "shares": -10, "avg_price": 770.0}])
+        pg.META_FILE.write_text(json.dumps({"cash": 7700.0}), encoding="utf-8")
+        world.at(datetime(2026, 10, 6, 12, 0, tzinfo=ET))
+        pg.run_for_date(AS_OF, beta_fn=_beta1)
+        eq = pg._load_jsonl(pg.EQUITY_FILE)[-1]
+        assert eq["spy_price_at_close"] is False and eq["spy_price_source"] == "cboe_intraday", eq
+
+
+class TestHistoryGate:
+
+    def test_end_to_end_keeps_this_run_and_drops_the_old_format(self, world):
+        _jsonl(pg.TRADES_FILE, [_OLD_TRADE])
+        _jsonl(pg.EQUITY_FILE, [dict(_OLD_EQUITY, date="2026-10-05")])
+        world.closed()
+        world.book()
+        pg.run_for_date(AS_OF, beta_fn=_beta1)
+        h = pg.load_history()
+        assert [t["date"] for t in h["trades"]] == [AS_OF] and [e["date"] for e in h["equity"]] == [AS_OF], h
+        assert sorted(h["audits"]) == [AS_OF]
+        assert h["excluded"]["trades"] == {"no_provenance": 1} and h["excluded"]["equity"] == {"no_provenance": 1}
+        assert h["first_verified"] == {"trades": AS_OF, "equity": AS_OF, "audits": AS_OF}
+        assert h["regressions"] == []
+
+    def test_proof_that_says_wrong_session_or_not_close_is_excluded(self, tmp_path):
+        _jsonl(tmp_path / "trades.jsonl", [dict(_OLD_TRADE, date="2026-10-08", price_session="2026-10-07",
+                                                price_source="twelve_data_bar", price_at_close=True)])
+        _jsonl(tmp_path / "equity_curve.jsonl", [_eq("2026-10-08", session="2026-10-07"),
+                                                 _eq("2026-10-09", at_close=False, source="cboe_intraday"),
+                                                 _eq("2026-10-12", nav=None)])
+        h = pg.load_history(tmp_path)
+        assert h["trades"] == [] and h["excluded"]["trades"] == {"not_its_session_close": 1}
+        # 盘中实时价那行自 v0.45.442 起单列 intraday_run（更具体），不再混在 not_its_session_close 里
+        assert h["equity"] == [] and h["excluded"]["equity"] == {"not_its_session_close": 1, "intraday_run": 1,
+                                                                 "unpriced": 1}
+
+    def test_weekend_row_proves_the_last_session(self, tmp_path):
+        """周六的 as_of：那天没有行情，周五的收盘就是对的（`_expected_session`），不能因 session ≠ date 拒掉。"""
+        _jsonl(tmp_path / "equity_curve.jsonl", [_eq("2026-10-10", session="2026-10-09")])
+        assert [e["date"] for e in pg.load_history(tmp_path)["equity"]] == ["2026-10-10"]
+
+    def test_no_spy_held_needs_no_spy_close(self, tmp_path):
+        _jsonl(tmp_path / "equity_curve.jsonl", [_eq("2026-10-09", shares=0.0, at_close=False, source="unavailable",
+                                                     session=None, nav=12.5)])
+        assert len(pg.load_history(tmp_path)["equity"]) == 1
+
+    def test_423_rows_without_the_at_close_field_judge_by_source(self, tmp_path):
+        _jsonl(tmp_path / "equity_curve.jsonl", [_eq("2026-10-08", legacy=True),
+                                                 _eq("2026-10-09", legacy=True, source="cboe_intraday")])
+        h = pg.load_history(tmp_path)
+        assert [e["date"] for e in h["equity"]] == ["2026-10-08"], h["excluded"]
+
+    def test_unproven_record_after_proof_began_is_a_regression(self, tmp_path, caplog):
+        _jsonl(tmp_path / "equity_curve.jsonl", [_eq("2026-10-08"), dict(_OLD_EQUITY, date="2026-10-09")])
+        with caplog.at_level(logging.INFO):
+            h = pg.load_history(tmp_path)
+        assert h["regressions"] == [("equity", "2026-10-09")]
+        assert any(r.levelno >= logging.ERROR and "无定价证明的新记录" in r.getMessage() for r in caplog.records)
+
+    def test_proof_before_measurement_start_is_flagged(self, tmp_path, caplog):
+        _jsonl(tmp_path / "equity_curve.jsonl", [_eq("2026-09-30")])
+        with caplog.at_level(logging.INFO):
+            h = pg.load_history(tmp_path)
+        assert h["before_measurement_start"] == [("equity", "2026-09-30")]
+        assert any(r.levelno == logging.WARNING and "MEASUREMENT_START" in r.getMessage() for r in caplog.records)
+
+    def test_audit_files_without_price_check_or_unreadable_are_excluded(self, tmp_path):
+        (tmp_path / "greeks_2026-10-07.json").write_text(json.dumps({"as_of": "2026-10-07"}), encoding="utf-8")
+        (tmp_path / "greeks_2026-10-08.json").write_text("{坏", encoding="utf-8")
+        (tmp_path / "greeks_2026-10-09.json").write_text(
+            json.dumps({"as_of": "2026-10-09", "price_check": {"as_of": "2026-10-08"}}), encoding="utf-8")
+        (tmp_path / "greeks_2026-10-12.json").write_text(
+            json.dumps({"as_of": "2026-10-12", "price_check": {"as_of": "2026-10-12"}}), encoding="utf-8")
+        h = pg.load_history(tmp_path)
+        assert sorted(h["audits"]) == ["2026-10-12"]
+        assert h["excluded"]["audits"] == {"no_provenance": 1, "unreadable": 1, "date_mismatch": 1}
+
+    def test_measurement_start_is_the_first_day_v0_45_423_ran(self):
+        """记载值与 CHANGELOG / 生产核对一致（10-08 首跑；`load_history` 对生产推出的 first_verified 也是它）。"""
+        assert pg.MEASUREMENT_START == "2026-10-08"
+
+
+class TestHistoryGateSurvivesBadLines:
+    """v0.45.442 二次检查：闸读到坏行要「排除并计数」，不能崩、也不能静默跳过（此前 `"str"` / `[1, 2]` 一行就
+    AttributeError；坏 JSON 被 `_load_jsonl` 无声丢掉）；没日期的记录不能放行（`_expected_session("")` 回 ""，
+    会与空场次「相等」，并把 first_verified 推成 ""）。"""
+
+    def test_malformed_lines_are_counted_by_reason(self, tmp_path):
+        (tmp_path / "equity_curve.jsonl").write_text(
+            "\n".join([json.dumps(_eq("2026-10-08")), "[1, 2]", "42", "{坏", json.dumps({"spy_price_session": "x"})]) + "\n",
+            encoding="utf-8")
+        (tmp_path / "trades.jsonl").write_text('"str"\n', encoding="utf-8")
+        (tmp_path / "greeks_2026-10-08.json").write_text("[]", encoding="utf-8")
+        h = pg.load_history(tmp_path)
+        assert [e["date"] for e in h["equity"]] == ["2026-10-08"]
+        assert h["excluded"]["equity"] == {"not_an_object": 2, "unreadable": 1, "no_date": 1}
+        assert h["excluded"]["trades"] == {"not_an_object": 1} and h["excluded"]["audits"] == {"not_an_object": 1}
+
+    def test_dateless_record_cannot_pass_or_move_the_start(self, tmp_path):
+        _jsonl(tmp_path / "trades.jsonl", [{"price_session": "", "price_source": "cboe_close", "price_at_close": True},
+                                           dict(_OLD_TRADE, date="2026-10-09", price_session="2026-10-09",
+                                                price_source="cboe_close", price_at_close=True)])
+        h = pg.load_history(tmp_path)
+        assert [t["date"] for t in h["trades"]] == ["2026-10-09"] and h["excluded"]["trades"] == {"no_date": 1}
+        assert h["first_verified"]["trades"] == "2026-10-09"
+
+
+class TestRunFailureIsRed:
+    """v0.45.442（独立审阅）：`run_for_date` 抛异常时日报只记一行 WARNING（非致命），`_LAST_PRICE_CHECK` 又只在
+    compute_day 末尾赋值 ⇒ status.json 这一项是 None ⇒ alert_manager 只进 checks_skipped——覆盖层整轮没跑也不红。"""
+
+    def test_corrupt_ledger_line_makes_the_run_fail_loudly(self, world, tmp_path):
+        import alert_manager as am
+        import scan_timing as stt
+        world.closed()
+        world.book()
+        pg.TRADES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        pg.TRADES_FILE.write_text('"不是对象"\n', encoding="utf-8")
+        import ledger_io
+        # v0.45.448 起读取严格：坏行在读的那一刻就抛 LedgerCorrupt（带文件与行号），不再等到下游 `.get` 炸 AttributeError
+        with pytest.raises(ledger_io.LedgerCorrupt, match="trades.jsonl 第 1 行不是对象"):
+            pg.run_for_date(AS_OF, beta_fn=_beta1)
+        chk = pg.price_check_stats()
+        assert chk["as_of"] == AS_OF and "LedgerCorrupt" in chk["error"], chk
+        _, hits = TestAlertManagerSeesStalePrices._analyze(tmp_path, {"portfolio_greeks": chk})
+        assert len(hits) == 1 and hits[0].level == am.AlertLevel.MEDIUM and "异常中断" in hits[0].message
+        assert "Greeks 异常中断" in stt.summary_line({"phases": {}, "counters": {"portfolio_greeks": chk}})
+
+    def test_failure_after_compute_keeps_the_price_check(self, world, monkeypatch):
+        world.closed()
+        world.book()
+        monkeypatch.setattr(pg, "_execute_trade", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+        with pytest.raises(OSError):
+            pg.run_for_date(AS_OF, beta_fn=_beta1)
+        chk = pg.price_check_stats()
+        assert chk["error"] == "OSError: disk full" and chk["n_stale"] == 0 and chk["n_rows"] > 0, chk
+
+
+class TestIntradayRecordsAreNotCloses:
+    """v0.45.442（独立审阅）：盘中手动跑写下的审计文件 / 不持 SPY 的净值行曾被闸当成「该场收盘」放行。"""
+
+    def test_intraday_run_is_excluded_from_history(self, world):
+        world.intraday()
+        world.book()
+        world.at(datetime(2026, 10, 6, 12, 0, tzinfo=ET))
+        pg.run_for_date(AS_OF, beta_fn=_beta1)
+        h = pg.load_history()
+        assert h["equity"] == [] and h["audits"] == {}, (h["equity"], sorted(h["audits"]))
+        assert h["excluded"]["equity"] == {"intraday_run": 1} and h["excluded"]["audits"] == {"intraday_run": 1}
+
+    def test_after_close_run_on_the_same_day_replaces_it_and_passes(self, world):
+        world.intraday()
+        world.book()
+        world.at(datetime(2026, 10, 6, 12, 0, tzinfo=ET))
+        pg.run_for_date(AS_OF, beta_fn=_beta1, execute=False)
+        world.closed()
+        world.at(AFTER_CLOSE)
+        pg.run_for_date(AS_OF, beta_fn=_beta1)
+        h = pg.load_history()
+        assert [e["date"] for e in h["equity"]] == [AS_OF] and sorted(h["audits"]) == [AS_OF]
+
+
+class TestUndecidedMeansCouldNotCompute:
+
+    def test_center_mode_rounding_to_zero_shares_is_a_decision(self):
+        """band 出带、center 模式股数四舍五入成 0：目标算出来了，只是不用动——不是「数据不全」（v0.45.442）。"""
+        rec = {"band_status": "above", "action": "hold", "spy_shares": 0, "target_usd": 0.0,
+               "reason": "β·Δ +15.10% NAV above band → rebalance to center (+0% = $0); excess $10 / SPY $773.93 = +0 sh"}
+        assert pg._hedge_undecided(rec) is None
+
+    def test_out_of_band_without_a_target_is_undecided(self):
+        rec = {"band_status": "below", "action": "hold", "target_usd": None,
+               "reason": "band below but SPY price unavailable"}
+        assert pg._hedge_undecided(rec) == "band below but SPY price unavailable"

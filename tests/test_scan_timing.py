@@ -62,7 +62,8 @@ class TestCounters:
         real_import = builtins.__import__
 
         def _imp(name, *a, **k):
-            if name in ("yf_gate", "twelve_data", "cboe_options", "options_analyzer", "portfolio_greeks"):
+            if name in ("yf_gate", "twelve_data", "cboe_options", "options_analyzer", "portfolio_greeks",
+                        "paper_portfolio"):
                 raise ImportError(name)
             return real_import(name, *a, **k)
 
@@ -74,7 +75,8 @@ class TestCounters:
                      "cboe_raw": None,     # v0.45.333 卖权账本原始链各出口
                      "options_snapshot": None,  # v0.45.238 期权快照槽位
                      "hv_gap": None,  # v0.45.383 日线缺交易日的校验/重取/降级计数
-                     "portfolio_greeks": None}  # v0.45.423 组合 Greeks 标的价场次核对
+                     "portfolio_greeks": None,  # v0.45.423 组合 Greeks 标的价场次核对
+                     "paper_portfolio": None}   # v0.45.448 纸面组合这一轮的结局
         line = st.summary_line({"phases": {}, "counters": c})
         assert "—" in line and "0次" not in line
 
@@ -187,7 +189,7 @@ class TestWrite:
         assert d["phases"]["prefetch"] == 12.3
         assert set(d["counters"]) == {"yfinance", "twelve_data", "cboe",
                                       "cboe_chain", "gex_view", "cboe_raw", "options_snapshot", "hv_gap",
-                                      "portfolio_greeks"}
+                                      "portfolio_greeks", "paper_portfolio"}
         assert d["extra"] == {"note": "x"}
         assert not (tmp_path / "t.json.tmp").exists(), "临时文件必须被 os.replace 掉"
 

@@ -219,13 +219,22 @@ class TestResultReachesAlerts:
         w = world
         w.session_push("code.py", "v2", "session: 改代码")
         ps.write_result(ps.sync_before_scan(w.tool, today="2026-09-14"))
-        snap = st.snapshot("2026-09-14", extra={"gh_pages": {"success": True}})
+        # v0.45.444：健康的一轮也带 news_sources（main() 每轮都写）；缺了它 alert_manager 会把新闻来源检查记进 checks_skipped
+        healthy_news = {"available": True, "n_known": 30, "n_unknown": 0,
+                        "primary_source": "massive", "by_source": {"massive": 30}, "primary_status": {"ok": 30},
+                        "non_primary_share": 0.0, "refusal_messages": []}
+        snap = st.snapshot("2026-09-14", extra={"gh_pages": {"success": True}, "news_sources": healthy_news})
+        # 同理组合 Greeks（v0.45.423 起 alert_manager 对「本轮没跑到组合 Greeks」记 checks_skipped）：
+        # 健康一轮带一份「干净」的价核对计数；本测试自己拼 snapshot，不会经过真的 compute_day
+        snap["counters"]["portfolio_greeks"] = {
+            "n_stale": 0, "stale": [], "n_quote_stale": 0, "spy": {"stale": False},
+            "execution_blocked": None, "hedge_undecided": None, "gaps": []}
         a, msgs = self._alerts(tmp_path, snap)
         assert not any("origin/main（" in m or "同步未执行" in m or "gh-pages 部署失败" in m for m in msgs), msgs
         assert not a.checks_skipped, a.checks_skipped
 
     @pytest.mark.parametrize("deploy", ["returns", "raises"])
-    def test_main_writes_the_gh_pages_result_into_the_timing_snapshot(self, monkeypatch, deploy):
+    def test_main_writes_the_gh_pages_result_into_the_timing_snapshot(self, monkeypatch, deploy, tmp_path):
         """上面几条自己拼 snapshot；这条走**真 `main()` 的蜂群路径**，核对 `_timing.write` 真收到了 gh-pages 结局。
 
         `alpha_hive_daily_report.main` 里捕获 `_gh_pages` 的几行一旦被改坏，只有这条会红。
@@ -235,8 +244,13 @@ class TestResultReachesAlerts:
 
         failed = {"success": False, "error": "x" * 800, "attempts": 3}
 
+        # v0.45.444：main() 读本轮 `.swarm_results_<date>.json` 汇总新闻来源 ⇒ 桩带一个真目录与一份真文件
+        (tmp_path / ".swarm_results_2026-09-14.json").write_text(json.dumps({"NVDA": {"agent_details": {
+            "BuzzBeeWhisper": {"details": {"news_source": "yahoo_finance", "news_primary_status": "server_refused"}}}}}))
+
         class SwarmReporter:
             date_str = "2026-09-14"
+            report_dir = tmp_path
 
             def __init__(self, date_override=None):
                 pass
@@ -262,7 +276,9 @@ class TestResultReachesAlerts:
 
         assert len(written) == 1, written
         extra = written[0][1]
-        assert set(extra) == {"gh_pages"}, f"extra 里出现了已退役的字段：{sorted(extra)}"
+        assert set(extra) == {"gh_pages", "news_sources"}, f"extra 里出现了已退役的字段：{sorted(extra)}"
+        ns = extra["news_sources"]
+        assert ns["available"] is True and ns["by_source"] == {"yahoo_finance": 1}, ns
         ghp = extra["gh_pages"]
         assert ghp["success"] is False
         if deploy == "returns":

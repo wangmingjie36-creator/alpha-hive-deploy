@@ -253,19 +253,30 @@ class TestExits:
         r = opl.run_for_date("2026-09-21", quotes_fn=_quotes_fn({CALL: _q(0.4, 0.6), PUT: _q(0.4, 0.6)}), signals=[])
         assert r["closed_today"][0]["pnl_usd"] == pytest.approx((1.8 - 1.2) * 100 * 2)
 
-    def test_intrinsic_fallback_after_stale_window(self):
+    def test_pre_expiry_stale_waits_instead_of_intrinsic(self):
+        """v0.45.449：未到期报价取不到 ⇒ 等（报价恢复按报价平、否则到期按到期收盘结），**不**按内在价值提前平——
+        到期前的内在价值把剩余时间价值算成 0（v0.45.101~448 曾在事件后 stale 超 3 天就这么平）。"""
         opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])   # K=100
-        closes = {"2026-09-24": 112.0}
-        for d in ("2026-09-21", "2026-09-22", "2026-09-23"):
+        closes = {d: 112.0 for d in ("2026-09-21", "2026-09-24", "2026-09-30", EXPIRY)}
+        for d in ("2026-09-21", "2026-09-24", "2026-09-30"):     # 事件后、stale 远超 3 天、未到期，有收盘也不平
             r = opl.run_for_date(d, quotes_fn=_none_quotes, signals=[], closes_fn=lambda tk, dd: closes.get(dd))
-            assert len(r["positions"]) == 1, d                # stale 1..3 ≤ 3：等
-        r = opl.run_for_date("2026-09-24", quotes_fn=_none_quotes, signals=[], closes_fn=lambda tk, dd: closes.get(dd))
-        assert r["positions"] == []
-        t = r["closed_today"][0]
+            assert len(r["positions"]) == 1 and r["closed_today"] == [], d
+            assert r["settle_deferred"] == [] and r["positions"][0]["settle_deferred_since"] is None, d
+        r = opl.run_for_date(EXPIRY, quotes_fn=_none_quotes, signals=[], closes_fn=lambda tk, dd: closes.get(dd))
+        t = r["closed_today"][0]                                    # 到期：按到期那一场的收盘结算
         assert t["mark_source"] == "intrinsic" and t["exit_reason"] == "post_event"
         assert t["exit_premium"] == pytest.approx(12.0) and t["exit_underlying"] == 112.0
         assert t["exit_call"] is None and "INTRINSIC" in t["rationale"]
         assert t["pnl_usd"] == pytest.approx((12.0 - 2.2) * 100)
+
+    def test_pre_expiry_stale_closes_at_quotes_once_they_return(self):
+        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])
+        r = opl.run_for_date("2026-09-24", quotes_fn=_none_quotes, signals=[], closes_fn=lambda tk, d: 112.0)
+        assert r["closed_today"] == []
+        r = opl.run_for_date("2026-09-25", quotes_fn=_quotes_fn({CALL: _q(5.9, 6.1), PUT: _q(5.9, 6.1)}),
+                             signals=[], closes_fn=lambda tk, d: 112.0)
+        t = r["closed_today"][0]
+        assert t["mark_source"] == "cboe_mid" and t["exit_premium"] == pytest.approx(11.8)
 
     def test_intrinsic_needs_a_close_otherwise_hold(self):
         opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])

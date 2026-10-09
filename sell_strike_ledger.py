@@ -20,11 +20,12 @@
 且每天整表原子重写。月度 / 周度两档**分目录**记（用户要求账本分开记）。
 
 ─── 结算：只认到期日那根 K 线 ────────────────────────────────────────────
-收盘价必须是**日期 == expiry** 的那根日线，缺口 0。**不用** `options_paper_leg._default_close`
-的「5 个日历日内最后一根」：到期当天 14:00 PT 扫描时当日 K 线还没有（v0.45.423 前 `twelve_data._drop_forming_bar`
-收盘后也丢当日那根），容差会悄悄用前一日收盘结算。所以 `expiry < as_of` 才结算（到期次日起）。
-v0.45.423 起收盘 + 30 分钟后当日那根照收，但**仍到期次日才结算**：收盘后约 70 分钟那一刻 Twelve Data
-的当日 close 是否已定稿**待验证**，而结算字段一经写入就不再改（`_SETTLEMENT_FIELDS` 原样搬运）——等一天换定稿数据。
+收盘价必须是**日期 == expiry** 的那根日线，缺口 0。**不用**「5 个日历日内最后一根」这种容差
+（`options_paper_leg._default_close` v0.45.433 前就是它，现在也只认结算那一场）：到期当天 14:00 PT 扫描时当日 K 线还没有
+（`twelve_data._drop_forming_bar` 按美东日期丢当日那根），容差会悄悄用前一日收盘结算。所以 `expiry < as_of` 才结算（到期次日起）。
+丢当日那根是对的：Twelve Data 的当日那根当晚是临时值（2026-10-08 收盘 38 分钟后 SPY 773.86 vs 官方 773.93、
+成交量只有中位数的 3.4%；v0.45.438 实测），而结算字段一经写入就不再改（`_SETTLEMENT_FIELDS` 原样搬运）——
+**勿把结算提前到到期当天**，等一天换的是定稿数据。
 
 ─── 盲化：代码只保证「不算、不显示」（2026-09-24 最终评审如实改写）──────────
 `assess()` 在 status != "ready" 时，返回值里**没有**任何效应量 / p 值键——不是「算了不显示」，
@@ -740,7 +741,7 @@ def _settle(as_of: str, tenor: str, *, bars_fn=None, state_dir=None) -> dict:
                 plan[p][_row_key(r)] = (exp, ("give_up", "no_expiry"))
                 continue
             if not exp < as_of:
-                # 到期当天不结算：v0.45.423 起收盘 + 30 分钟后已有当日那根，但是否定稿待验证、结算写入后不再改（见模块 docstring）
+                # 到期当天不结算：当日那根当晚是 Twelve Data 的临时值，结算写入后不再改（见模块 docstring）
                 stats["not_yet_expired"] += 1
                 continue
             if _weekdays_after(exp, as_of) > window:

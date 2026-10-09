@@ -5,6 +5,8 @@
 密钥文件手动跑的一次性验收（见 CHANGELOG），不适合写进常跑的测试文件
 （那样等于把「密钥去哪扫」的清单和一次真实凭据样本焊进了 git 历史）。
 """
+import fnmatch
+import glob
 import json
 import os
 import pwd
@@ -27,7 +29,7 @@ from data_backup.scan_secrets import (
     load_known_secrets_with_diagnostics,
     scan_directory,
 )
-from data_backup.sqlite_readonly import HotJournalError, db_open_uri
+from data_backup.sqlite_readonly import HotJournalError, db_open_uri, sha256_file
 
 
 @pytest.fixture
@@ -1909,3 +1911,352 @@ class TestBackupRepoSizeBudget:
         st = run_backup.run(self._src(tmp_path), tmp_path / "bk", status_file=tmp_path / "s.json",
                             history_file=tmp_path / "h.jsonl")
         assert st["stage"] == "push" and "pushed" not in st
+
+
+# ── v0.45.430：网站 PWA `manifest.json` 与备份元数据 `MANIFEST.json` 在 APFS 上是同一个目录项 ─────────
+# 09-24（v0.45.342 把 `manifest.json` 纳入备份）起：先拷进来的网站 manifest 被随后写的元数据覆盖，
+# `SHA256SUMS` 照列网站 manifest 的真实哈希，索引里只有 `MANIFEST.json`。没有任何东西红过。
+
+_PWA_MANIFEST = '{"name": "Alpha Hive 投资仪表板", "short_name": "Alpha Hive", "icons": []}\n'
+
+
+def _fs_is_case_insensitive(d: Path) -> bool:
+    probe = d / "_case_probe_a"
+    probe.write_text("")
+    try:
+        return "_case_probe_a" in os.listdir(d) and (d / "_CASE_PROBE_A").exists()
+    finally:
+        probe.unlink()
+
+
+def _exact_exists(root: Path, rel: str) -> bool:
+    """逐级按**精确拼写**找目录项——大小写不敏感的盘上 `Path.exists()` 对另一种拼写也返回 True。"""
+    cur = root
+    for part in Path(rel).parts:
+        if part not in os.listdir(cur):
+            return False
+        cur = cur / part
+    return True
+
+
+def _src_with_full_scope(tmp_path: Path) -> Path:
+    """数据根：每个库、每个状态目录各一个文件、每条根文件模式各实例化一个（内容互不相同）。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    for db_name in export_mod.DBS.values():
+        _make_synthetic_db(src / db_name)
+    for d in export_mod.STATE_DIRS:
+        (src / d).mkdir()
+        (src / d / "s.json").write_text(json.dumps({"dir": d}))
+    for pat in export_mod.ROOT_FILE_GLOBS:
+        name = pat.replace("*", "2026-10-08")
+        (src / name).write_text(_PWA_MANIFEST if name == "manifest.json" else f"content of {name}\n")
+    return src
+
+
+class TestNoCaseCollisionsInBackup:
+    """导出产物里任何两个路径（含元数据文件）在大小写 / 规范化不敏感的盘上都不许落进同一个目录项。"""
+
+    def test_case_collisions_finds_files_directories_and_normalization_variants(self):
+        cc = export_mod.case_collisions
+        assert cc(["manifest.json", "MANIFEST.json"]) == [["MANIFEST.json", "manifest.json"]]
+        assert cc(["Reports/a.html", "reports/b.html"]) == [["Reports", "reports"]], "目录分量也要比"
+        nfc, nfd = "café.json", "café.json"
+        assert cc([nfc, nfd]) == [sorted([nfc, nfd])]
+        assert cc(["a.json", "a.json", "b/a.json"]) == [], "一字不差的重复（两条 glob 命中同一文件）不算碰撞"
+
+    @staticmethod
+    def _scope_collisions(meta_files) -> list:
+        """声明的导出范围里会撞的组合。导出自己生成的名字（`db_exports/` + 元数据）与从数据根拷来的名字
+        连一字不差也不许相同（那是覆盖）；拷来的名字之间只算拼写不同的（一字不差 = 同一个源文件）。"""
+        fold = export_mod._fold
+        generated = ["db_exports", *meta_files]
+        copied = [*export_mod.STATE_DIRS, *(p for p in export_mod.ROOT_FILE_GLOBS if not glob.has_magic(p))]
+        patterns = [p for p in export_mod.ROOT_FILE_GLOBS if glob.has_magic(p)]
+        bad = export_mod.case_collisions(generated + copied)
+        bad += [[g, c] for g in generated for c in copied if g == c]
+        bad += [[g, p] for g in generated for p in patterns if fnmatch.fnmatchcase(fold(g), fold(p))]
+        bad += [[c, p] for c in copied for p in patterns
+                if fnmatch.fnmatchcase(fold(c), fold(p)) and not fnmatch.fnmatchcase(c, p)]
+        return bad
+
+    def test_declared_scope_has_no_case_collisions(self):
+        assert self._scope_collisions(export_mod.META_FILES) == []
+
+    def test_scope_check_has_teeth(self):
+        """正对照：v0.45.430 前的元数据名喂给同一判据必须红——正是 09-24 起每天发生的那次覆盖。"""
+        old = (export_mod.SUMS_NAME, export_mod.LEGACY_MANIFEST_NAME)
+        assert ["MANIFEST.json", "manifest.json"] in self._scope_collisions(old)
+        assert self._scope_collisions((export_mod.SUMS_NAME, "Report_RAW.json")), "被带通配符的根文件模式命中也要红"
+        assert self._scope_collisions((export_mod.SUMS_NAME, "Reports")), "与状态目录同名（不同大小写）也要红"
+
+    def test_full_scope_export_sums_are_true_on_disk(self, tmp_path):
+        """端到端：每条 SHA256SUMS 都以精确拼写存在、且哈希相符。修复前在 APFS 上 `manifest.json`
+        这一条两样都不成立（另一种拼写、另一份内容）；大小写敏感的盘上由上面的静态检查兜底。"""
+        src = _src_with_full_scope(tmp_path)
+        out = tmp_path / "out"
+        manifest = export_mod.run_export(src, out, code_repo=tmp_path)
+        export_mod.write_manifest_and_sums(out, manifest)
+
+        lies = []
+        for line in (out / export_mod.SUMS_NAME).read_text(encoding="utf-8").splitlines():
+            h, rel = line.split("  ", 1)
+            if not _exact_exists(out, rel) or sha256_file(out / rel) != h:
+                lies.append(rel)
+        assert lies == [], f"SHA256SUMS 声称持有、磁盘上却不是那个拼写 / 那份内容：{lies}"
+        assert (out / "manifest.json").read_text(encoding="utf-8") == _PWA_MANIFEST
+        assert all(_exact_exists(out, m) for m in export_mod.META_FILES)
+        assert json.loads((out / export_mod.MANIFEST_NAME).read_text(encoding="utf-8"))["root_files"]
+
+    def test_write_refuses_and_writes_nothing_on_collision(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        m = {"databases": {}, "state_dirs": {},
+             "root_files": [{"rel": "Foo.json", "sha256": "a"}, {"rel": "foo.json", "sha256": "b"}]}
+        with pytest.raises(RuntimeError, match="互相覆盖"):
+            export_mod.write_manifest_and_sums(out, m)
+        assert os.listdir(out) == [], "撞名时一个元数据文件都不许写"
+
+    def test_runtime_check_catches_the_original_bug(self, tmp_path, monkeypatch):
+        """变异：元数据名改回旧名 ⇒ 写清单前就抛（生产里落 stage="export"、不提交），而不是静默覆盖。"""
+        monkeypatch.setattr(export_mod, "META_FILES", (export_mod.SUMS_NAME, export_mod.LEGACY_MANIFEST_NAME))
+        out = tmp_path / "out"
+        out.mkdir()
+        m = {"databases": {}, "state_dirs": {}, "root_files": [{"rel": "manifest.json", "sha256": "x"}]}
+        with pytest.raises(RuntimeError, match="MANIFEST.json"):
+            export_mod.write_manifest_and_sums(out, m)
+
+    def test_export_retires_legacy_file_but_keeps_website_manifest(self, tmp_path):
+        """磁盘上旧的大写目录项删掉，网站 manifest 以小写拼写拷进来；不删同名小写文件。"""
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        (src / "manifest.json").write_text(_PWA_MANIFEST)
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "MANIFEST.json").write_text('{"legacy": true, "root_files": []}')
+        manifest = export_mod.run_export(src, out, code_repo=tmp_path)
+        export_mod.write_manifest_and_sums(out, manifest)
+        names = os.listdir(out)
+        assert "manifest.json" in names and "MANIFEST.json" not in names
+        assert (out / "manifest.json").read_text(encoding="utf-8") == _PWA_MANIFEST
+        # 第二轮：小写那份不是旧元数据，不许被当成旧目录项删掉
+        assert export_mod._retire_legacy_manifest_file(out) is False
+        assert "manifest.json" in os.listdir(out)
+
+
+class TestRestoreAcrossManifestRename:
+    """恢复读新名 `BACKUP_MANIFEST.json`，旧提交只有 `MANIFEST.json`；根文件按清单哈希核对后才拷。"""
+
+    def test_new_layout_round_trip_restores_website_manifest(self, tmp_path):
+        src = _src_with_full_scope(tmp_path)
+        out = tmp_path / "out"
+        export_mod.write_manifest_and_sums(out, export_mod.run_export(src, out, code_repo=tmp_path))
+        dest = tmp_path / "dest"
+        assert restore_mod.main(["--export-dir", str(out), "--dest-root", str(dest), "--dbs"]) == 0
+        assert (dest / "manifest.json").read_text(encoding="utf-8") == _PWA_MANIFEST
+        assert _exact_exists(dest, "manifest.json")
+
+    def _legacy_export_dir(self, tmp_path) -> Path:
+        """照生产 09-24~10-07 的提交布局手搭：只有元数据 `MANIFEST.json`，它的 root_files 列着网站
+        `manifest.json`（真实哈希），磁盘上却没有这个拼写的文件。"""
+        out = tmp_path / "legacy"
+        out.mkdir()
+        (out / "rss.xml").write_text("<rss/>")
+        legacy = {"databases": {}, "state_dirs": {}, "root_files": [
+            {"rel": "manifest.json", "sha256": "267f16ab" + "0" * 56, "size": 1},
+            {"rel": "rss.xml", "sha256": sha256_file(out / "rss.xml"), "size": 6},
+        ]}
+        (out / "MANIFEST.json").write_text(json.dumps(legacy))
+        return out
+
+    def test_legacy_layout_reports_overwritten_manifest_instead_of_restoring_it(self, tmp_path, capsys):
+        """旧代码：APFS 上按 `manifest.json` 打开的是元数据，照拷不误 ⇒ 把备份清单「恢复」成网站 manifest；
+        大小写敏感的盘上静默跳过。现在两种都不拷、都报出来、退出码 1。"""
+        out = self._legacy_export_dir(tmp_path)
+        assert restore_mod.find_manifest(out) == out / "MANIFEST.json"
+        dest = tmp_path / "dest"
+        rc = restore_mod.main(["--export-dir", str(out), "--dest-root", str(dest), "--dbs"])
+        assert rc == 1
+        assert "manifest.json" not in os.listdir(dest), "不许把备份元数据当网站 manifest 恢复出来"
+        assert (dest / "rss.xml").read_text() == "<rss/>"
+        err = capsys.readouterr().err
+        assert "manifest.json" in err and "v0.45.430 前" in err
+
+    def test_restore_state_sorts_records_into_restored_mismatched_missing(self, tmp_path):
+        out = self._legacy_export_dir(tmp_path)
+        recs = json.loads((out / "MANIFEST.json").read_text())["root_files"]
+        recs.append({"rel": "gone.json", "sha256": "0" * 64})
+        got = restore_mod.restore_state(out, tmp_path / "dest", [], recs)
+        assert [r["rel"] for r in got["restored"]] == ["rss.xml"]
+        bad = {r["rel"] for r in got["mismatched"] + got["missing"]}
+        assert bad == {"manifest.json", "gone.json"}
+        assert {r["rel"] for r in got["missing"]} >= {"gone.json"}
+
+    def test_legacy_name_is_recognised_only_by_exact_spelling(self, tmp_path):
+        """新布局缺了新清单：大小写不敏感的盘上 `MANIFEST.json` 能打开网站 manifest，不许拿它当备份清单。"""
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "manifest.json").write_text(_PWA_MANIFEST)
+        assert restore_mod.find_manifest(out) is None
+
+
+class TestLegacyManifestMigrationInRun:
+    """升级后第一轮：旧条目从索引摘掉，网站 manifest 以小写拼写进备份；索引对不上清单就不提交。"""
+
+    @staticmethod
+    def _repo_with_remote(tmp_path) -> tuple[Path, Path]:
+        bare = tmp_path / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)], check=True, capture_output=True)
+        bk = tmp_path / "bk"
+        bk.mkdir()
+        for args in (["init", "-b", "main"], ["config", "commit.gpgsign", "false"],
+                     ["config", "core.hooksPath", os.devnull],
+                     # 与生产备份仓一致（macOS 上 git init 的缺省）；大小写敏感的盘上显式设，走同一条 git 代码路径
+                     ["config", "core.ignorecase", "true"],
+                     ["remote", "add", "origin", str(bare)]):
+            subprocess.run(["git", *args], cwd=str(bk), check=True, capture_output=True)
+        return bk, bare
+
+    @staticmethod
+    def _legacy_commit(bk: Path) -> None:
+        """照生产：索引里只有旧名元数据 `MANIFEST.json`。"""
+        (bk / "MANIFEST.json").write_text('{"created_at": "2026-10-07", "root_files": []}')
+        (bk / "SHA256SUMS").write_text("")
+        subprocess.run(["git", "add", "-A"], cwd=str(bk), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "legacy"], cwd=str(bk), check=True, capture_output=True)
+
+    @staticmethod
+    def _src(tmp_path) -> Path:
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        (src / "manifest.json").write_text(_PWA_MANIFEST)
+        (src / "rss.xml").write_text("<rss/>")
+        return src
+
+    @staticmethod
+    def _ls(bk: Path) -> set[str]:
+        return set(subprocess.run(["git", "ls-files"], cwd=str(bk), check=True,
+                                  capture_output=True, text=True).stdout.split())
+
+    def _run(self, src, bk, tmp_path):
+        return run_backup.run(src, bk, status_file=tmp_path / "s.json", history_file=tmp_path / "h.jsonl")
+
+    def test_upgrade_from_legacy_layout_tracks_both_files_and_restores_from_clone(self, tmp_path, monkeypatch):
+        _bypass_secret_scan(monkeypatch)
+        bk, bare = self._repo_with_remote(tmp_path)
+        self._legacy_commit(bk)
+        src = self._src(tmp_path)
+
+        st = self._run(src, bk, tmp_path)
+        assert st["stage"] == "done", st
+        assert st["legacy_manifest_retired"] is True
+        tracked = self._ls(bk)
+        assert {"manifest.json", export_mod.MANIFEST_NAME, export_mod.SUMS_NAME} <= tracked
+        assert "MANIFEST.json" not in tracked
+        head_pwa = subprocess.run(["git", "show", "HEAD:manifest.json"], cwd=str(bk), check=True,
+                                  capture_output=True, text=True).stdout
+        assert head_pwa == _PWA_MANIFEST
+
+        st2 = self._run(src, bk, tmp_path)
+        assert st2["stage"] == "done" and "legacy_manifest_retired" not in st2, st2
+
+        # 异地恢复：从远端 clone 出来的副本还原，网站 manifest 原样回来
+        clone = tmp_path / "clone"
+        subprocess.run(["git", "clone", "-q", str(bare), str(clone)], check=True, capture_output=True)
+        dest = tmp_path / "dest"
+        assert restore_mod.main(["--export-dir", str(clone), "--dest-root", str(dest), "--dbs"]) == 0
+        assert (dest / "manifest.json").read_text(encoding="utf-8") == _PWA_MANIFEST
+
+    def test_without_index_retirement_the_case_drift_is_caught(self, tmp_path, monkeypatch):
+        """变异：不摘旧索引条目 ⇒ APFS 上 `git add -A` 把磁盘上的 `manifest.json` 记成 `MANIFEST.json`
+        （`core.ignorecase`）。检查必须红、不提交。只在大小写不敏感的盘上能复现——生产 Mac 正是这种盘。"""
+        if not _fs_is_case_insensitive(tmp_path):
+            pytest.skip("大小写敏感的盘上不会发生同名合并；本机（APFS 缺省）与生产都会跑到这条")
+        _bypass_secret_scan(monkeypatch)
+        monkeypatch.setattr(run_backup, "retire_legacy_manifest_from_index", lambda d: False)
+        bk, _ = self._repo_with_remote(tmp_path)
+        self._legacy_commit(bk)
+        head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(bk), capture_output=True,
+                                     text=True).stdout
+        st = self._run(self._src(tmp_path), bk, tmp_path)
+        assert st["stage"] == "git_error" and st["ok"] is False, st
+        assert "manifest.json" in st["sums_not_tracked"]
+        assert "commit" not in st
+        assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(bk), capture_output=True,
+                              text=True).stdout == head_before
+
+    def test_sums_path_swallowed_by_ignore_rules_blocks_commit(self, tmp_path, monkeypatch):
+        """与平台无关的正对照：备份仓的忽略规则吞掉一个导出文件，同一道检查红。"""
+        _bypass_secret_scan(monkeypatch)
+        bk, _ = self._repo_with_remote(tmp_path)
+        (bk / ".git" / "info").mkdir(exist_ok=True)
+        (bk / ".git" / "info" / "exclude").write_text("rss.xml\n")
+        st = self._run(self._src(tmp_path), bk, tmp_path)
+        assert st["stage"] == "git_error" and st["sums_not_tracked"] == ["rss.xml"], st
+        assert st["sums_not_tracked_count"] == 1 and "commit" not in st
+
+    def test_retirement_failure_is_git_error_and_nothing_is_exported(self, tmp_path, monkeypatch):
+        def boom(d):
+            raise RuntimeError("git rm 失败")
+        monkeypatch.setattr(run_backup, "retire_legacy_manifest_from_index", boom)
+        bk, _ = self._repo_with_remote(tmp_path)
+        st = self._run(self._src(tmp_path), bk, tmp_path)
+        assert st["stage"] == "git_error" and "退役失败" in st["error"], st
+        assert "manifest_summary" not in st
+        assert export_mod.SUMS_NAME not in os.listdir(bk)
+
+
+class TestManifestSecondReview:
+    """v0.45.430 二次检查补：清单坏了要响亮、不许退回旧清单；SHA256SUMS 只按 "\\n" 切。"""
+
+    @staticmethod
+    def _export_with_legacy(tmp_path) -> Path:
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "rss.xml").write_text("<rss/>")
+        (out / "MANIFEST.json").write_text(json.dumps({"databases": {}, "state_dirs": {}, "root_files": [
+            {"rel": "rss.xml", "sha256": sha256_file(out / "rss.xml")}]}))
+        return out
+
+    def test_corrupt_new_manifest_is_loud_and_never_falls_back_to_legacy(self, tmp_path, capsys):
+        """旧写法：新清单解析失败 ⇒ `continue` ⇒ 退回陈旧的 MANIFEST.json，照它还原、rc=0。"""
+        out = self._export_with_legacy(tmp_path)
+        (out / export_mod.MANIFEST_NAME).write_text('{"root_files": [')   # 截断
+        with pytest.raises(ValueError, match="不是合法 JSON"):
+            restore_mod.find_manifest(out)
+        dest = tmp_path / "dest"
+        assert restore_mod.main(["--export-dir", str(out), "--dest-root", str(dest), "--dbs"]) == 1
+        assert not (dest / "rss.xml").exists(), "不许照旧清单还原"
+        assert "不退回其他清单" in capsys.readouterr().err
+
+    def test_named_file_that_is_not_a_manifest_raises(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / export_mod.MANIFEST_NAME).write_text(_PWA_MANIFEST)
+        with pytest.raises(ValueError, match="不是备份清单"):
+            restore_mod.find_manifest(out)
+
+    def test_no_manifest_is_rc1_unless_state_restore_was_skipped(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        assert restore_mod.main(["--export-dir", str(out), "--dest-root", str(tmp_path / "d1"), "--dbs"]) == 1
+        assert restore_mod.main(["--export-dir", str(out), "--dest-root", str(tmp_path / "d2"), "--dbs",
+                                 "--skip-state"]) == 0
+
+    def test_sums_parsing_survives_unicode_line_separators_in_file_names(self, tmp_path):
+        """`str.splitlines()` 会在 U+2028 处断行 ⇒ 半行没有「两个空格」⇒ IndexError。文件名里它是合法字符。"""
+        bk = tmp_path / "bk"
+        bk.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(bk), check=True, capture_output=True)
+        odd = "a b.json"
+        (bk / odd).write_text("{}")
+        (bk / export_mod.MANIFEST_NAME).write_text('{"root_files": []}')
+        (bk / export_mod.SUMS_NAME).write_text(f"{sha256_file(bk / odd)}  {odd}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(bk), check=True, capture_output=True)
+        assert odd in "".join(run_backup._tracked_paths(bk)), "夹具前提：怪名文件确实进了索引"
+        assert run_backup.sums_paths_not_tracked(bk) == []
+        assert run_backup.foreign_entries(bk) == []

@@ -25,13 +25,28 @@ from __future__ import annotations
 import datetime as dt
 import glob
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
 import sys
-from pathlib import Path
+import unicodedata
+from pathlib import Path, PurePosixPath
 
 from .sqlite_readonly import db_open_uri, sha256_file
+
+# ── 导出自己写的元数据文件（v0.45.430）────────────────────────────────────
+SUMS_NAME = "SHA256SUMS"
+MANIFEST_NAME = "BACKUP_MANIFEST.json"
+#: 本轮导出写的元数据文件全集（`SHA256SUMS` 不列它们自己）。别处要认「哪些是导出元数据」引用这里，不另抄。
+META_FILES: tuple[str, ...] = (SUMS_NAME, MANIFEST_NAME)
+#: v0.45.430 前元数据清单的名字。APFS 缺省大小写不敏感：它与 ROOT_FILE_GLOBS 里网站 PWA 的 `manifest.json`
+#: 是**同一个目录项**——先拷进来的 `manifest.json` 被随后写的 `MANIFEST.json` 覆盖。v0.45.342（09-24）把
+#: `manifest.json` 纳入备份起，网站 manifest 一次都没进过备份，`SHA256SUMS` 却每天照列它的真实哈希；
+#: 索引里只有 `MANIFEST.json`（`core.ignorecase=true` 时 `git add -A` 认它为同一个文件）。
+#: 旧提交里只有这个名字：`restore.py` 按**精确拼写**认它；升级后第一轮由 `run_export`（磁盘）与
+#: `run_backup`（索引）把它摘掉。
+LEGACY_MANIFEST_NAME = "MANIFEST.json"
 
 # ── 导出范围清单（唯一真相在这里，CHANGELOG/memory 只引用不复制数字）──────
 DBS: dict[str, str] = {
@@ -282,6 +297,40 @@ def copy_root_files(src_root: Path, patterns: list[str], out_dir: Path) -> list[
     return records
 
 
+def _fold(name: str) -> str:
+    """大小写不敏感、规范化不敏感的盘（APFS 缺省 / HFS+ / Windows）眼里「同一个名字」的键。"""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", name).casefold())
+
+
+def case_collisions(rel_paths) -> list[list[str]]:
+    """在大小写不敏感的盘上会落进**同一个目录项**的拼写组（每组 ≥2 种拼写），排好序；空 ⇒ 无碰撞（v0.45.430）。
+
+    逐级比前缀而不只比全路径：`Reports/a.html` 与 `reports/b.html` 文件名不撞，两个目录却会合成一个，
+    git 只记得其中一种大小写 ⇒ `SHA256SUMS` 里另一种拼写成了假话。拼写一字不差的重复不算碰撞
+    （同一个文件被两条 glob 命中，内容相同）。
+    """
+    spellings: dict[str, set[str]] = {}
+    for rel in rel_paths:
+        parts = PurePosixPath(rel).parts
+        for i in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:i])
+            spellings.setdefault(_fold(prefix), set()).add(prefix)
+    return sorted(sorted(s) for s in spellings.values() if len(s) > 1)
+
+
+def _retire_legacy_manifest_file(out_dir: Path) -> bool:
+    """磁盘上**精确拼写**为 `MANIFEST.json` 的目录项删掉，返回删没删（v0.45.430）。
+
+    不能用 `.exists()` 判：大小写不敏感的盘上它对网站的 `manifest.json` 也返回 True。旧目录项留着，
+    随后拷的 `manifest.json` 会写进这个大写名的目录项里——内容对了，名字仍是 `MANIFEST.json`，
+    在大小写敏感的盘上恢复时就找不到它。里面只是上一轮的元数据（已在备份历史里，本轮重写成新名字）。
+    """
+    if LEGACY_MANIFEST_NAME in os.listdir(out_dir):
+        (out_dir / LEGACY_MANIFEST_NAME).unlink()
+        return True
+    return False
+
+
 def _code_git_head(code_repo: Path | None) -> str:
     """产出这份数据的**代码**版本（`git rev-parse HEAD`），拿不到时返回 `unavailable: <原因>`。
 
@@ -388,9 +437,12 @@ def run_export(src_root: Path, out_dir: Path, code_repo: Path | None = None) -> 
         recs, skipped = copy_state_dir(src_root, d, out_dir)
         manifest["state_dirs"][d] = recs
         manifest["state_dirs_skipped"][d] = skipped
-        skip_note = f"（跳过 {len(skipped)} 个非文本文件，见 MANIFEST.json state_dirs_skipped.{d}）" if skipped else ""
+        skip_note = f"（跳过 {len(skipped)} 个非文本文件，见 {MANIFEST_NAME} state_dirs_skipped.{d}）" if skipped else ""
         print(f"DIR {d}: {len(recs)} 文件{skip_note}")
 
+    # 必须在拷根文件之前：否则 `manifest.json` 会被拷进旧的大写目录项（见 `_retire_legacy_manifest_file`）
+    if _retire_legacy_manifest_file(out_dir):
+        print(f"已删除旧名元数据 {LEGACY_MANIFEST_NAME}（v0.45.430 起写 {MANIFEST_NAME}）")
     manifest["root_files"] = copy_root_files(src_root, ROOT_FILE_GLOBS, out_dir)
     print(f"根文件: {len(manifest['root_files'])} 个")
 
@@ -399,20 +451,30 @@ def run_export(src_root: Path, out_dir: Path, code_repo: Path | None = None) -> 
 
 
 def write_manifest_and_sums(out_dir: Path, manifest: dict) -> None:
+    """写 `SHA256SUMS` 与 `BACKUP_MANIFEST.json`；导出路径之间、或与这两个文件在大小写不敏感的盘上撞名 ⇒ 抛，什么都不写。
+
+    撞名检查必须在写元数据**之前**（v0.45.430）：旧名 `MANIFEST.json` 正是在这一步覆盖了刚拷进来的
+    `manifest.json`，而 `SHA256SUMS` 列的是覆盖前的哈希——没有任何东西会红。抛出由 `run_backup` 记
+    `stage="export"`、不提交。
+    """
     out_dir = Path(out_dir)
-    sums = []
-    for db_key, info in manifest["databases"].items():
+    entries: list[tuple[str, str]] = []  # (sha256, rel)
+    for db_key in manifest["databases"]:
         db_dir = out_dir / "db_exports" / db_key
         for fp in sorted(db_dir.glob("*")):
             if fp.is_file():
-                sums.append(f"{sha256_file(fp)}  {fp.relative_to(out_dir)}")
-    for _d, recs in manifest["state_dirs"].items():
-        for r in recs:
-            sums.append(f"{r['sha256']}  {r['rel']}")
-    for r in manifest["root_files"]:
-        sums.append(f"{r['sha256']}  {r['rel']}")
-    (out_dir / "SHA256SUMS").write_text("\n".join(sorted(sums)) + "\n", encoding="utf-8")
-    (out_dir / "MANIFEST.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+                entries.append((sha256_file(fp), str(fp.relative_to(out_dir))))
+    for recs in manifest["state_dirs"].values():
+        entries += [(r["sha256"], r["rel"]) for r in recs]
+    entries += [(r["sha256"], r["rel"]) for r in manifest["root_files"]]
+
+    collisions = case_collisions([rel for _, rel in entries] + list(META_FILES))
+    if collisions:
+        raise RuntimeError(f"导出路径在大小写不敏感的盘上会互相覆盖（{len(collisions)} 组，"
+                           f"{SUMS_NAME} 会替被覆盖的那份作假），拒绝写清单：{collisions[:5]}")
+    sums = sorted(f"{h}  {rel}" for h, rel in entries)
+    (out_dir / SUMS_NAME).write_text("\n".join(sums) + "\n", encoding="utf-8")
+    (out_dir / MANIFEST_NAME).write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main(argv=None) -> int:

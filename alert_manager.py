@@ -24,6 +24,14 @@ _SYNC_MEANING = {
 
 _log = get_logger("alerts")
 
+#: v0.45.444：新闻通道「没走配置的主源」的标的占比，超过即 P1（v0.45.445 起主源 Massive）。
+#: AV 时代常态是 0.20–0.27（30>25 的结构性本地配额 + 开跑第一秒的每分钟限速），所以 444 定的是 0.40；
+#: Massive 无日上限、5 次/分钟远高于扫描节奏（≈1.2 只/分钟）⇒ 常态应接近 0，降到 0.20（30 只里 ≥7 只降级才报）。
+#: 降级去的 Yahoo 是另一套分类器，同票系统性低约 27 分（2026-10-08 校准）——比例一高，横截面就是两种量纲混算。
+NEWS_NON_PRIMARY_P1_SHARE = 0.20
+#: 已知来源的标的少于这个数就不判（Buzz 大面积报错时比例没有意义），改报 P2「无法判定」。
+NEWS_MIN_KNOWN = 10
+
 
 def _ran_from_production_clone(scan_timing: Dict) -> bool:
     """本轮扫描的代码目录（扫描启动时 `code_version.repo_dir`）是不是生产独立克隆（v0.45.432）。
@@ -291,6 +299,10 @@ class AlertAnalyzer:
 
         # 7. 检测 P2: 组合 Greeks 用到了不属于当天那一场的标的价 / 因此拒绝成交（v0.45.423）
         self._check_portfolio_greeks_prices(status)
+        self._check_paper_portfolio_run(status)
+
+        # 8. 检测 P1: 新闻通道降级（v0.45.444）
+        self._check_news_sources(status)
 
         return self.alerts
 
@@ -459,6 +471,19 @@ class AlertAnalyzer:
         if not isinstance(pg, dict):
             self.checks_skipped.append("组合 Greeks 标的价场次检查（scan_timing 无 portfolio_greeks 计数）")
             return
+        if pg.get("error"):
+            # v0.45.442：`run_for_date` 抛了（日报当非致命吞掉）——此前这里是 None ⇒ 只进 checks_skipped，覆盖层整轮没跑不红
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】组合 Greeks：{pg.get('as_of')} 这一轮异常中断，对冲决定 / 成交 / 净值快照可能都没落盘",
+                {
+                    "异常": str(pg["error"]),
+                    "影响": "覆盖层这一天没有（完整的）决定；连续几天都这样 = 对冲整段停摆",
+                    "建议": "看 alpha_hive.log 里「组合 Greeks 更新失败」那一行与 hedge_state/ 当日文件是否齐全",
+                },
+                ["portfolio_greeks", "data_quality"]
+            ))
+            return
         spy = pg.get("spy") or {}
         n_stale = int(pg.get("n_stale") or 0)
         n_quote_stale = int(pg.get("n_quote_stale") or 0)
@@ -502,6 +527,94 @@ class AlertAnalyzer:
                         "过了次日开盘才补跑时会出现",
             },
             ["portfolio_greeks", "data_quality"]
+        ))
+
+    def _check_news_sources(self, status: Dict) -> None:
+        """新闻通道的实际来源（v0.45.444，`scan_timing.extra.news_sources`，写入者 `alpha_hive_daily_report.main`）。
+
+        降级到 Yahoo 不报错、Buzz 的 data_quality.news 两种源都写 `keyword`，所以原来没人会红；
+        但 Yahoo 关键词打标与主源（v0.45.445 起 Massive，此前 AV）的逐文章模型标签是两个分类器——2026-10-06 全 30 只
+        降级到 Yahoo，同票 news_signal 比各自 AV 日均值平均低 21 分（21/25 更低），Buzz 偏空、Scout consensus_strength 28/30 为 0；
+        10-08 同一时刻校准：Yahoo 比 Massive 同票低 28.8 分（25/28）。
+
+        只在扫描真跑完时判（同 `_check_deploy_and_code_sync`）；`scan_timing` 整段缺失那条 P1 已在上一步报过。
+        """
+        if not self._swarm_scan_actually_ran(status):
+            return
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        ns = (st.get("extra") or {}).get("news_sources")
+        if not isinstance(ns, dict) or not ns.get("available"):
+            reason = (ns or {}).get("reason") if isinstance(ns, dict) else None
+            self.checks_skipped.append("新闻通道来源检查（scan_timing 无可用 news_sources）")
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】新闻通道来源统计缺失——本轮新闻是否降级到 Yahoo 未知",
+                {
+                    "原因": reason or ("scan_timing.extra 无 news_sources" if ns is None
+                                     else "news_sources 无已知来源的标的"),
+                    "影响": "不是「检查了没降级」，是「没检查」",
+                },
+                ["data_quality", "news", "observability"]
+            ))
+            return
+        n_known = ns.get("n_known") or 0
+        share = ns.get("non_primary_share")
+        if share is None or n_known < NEWS_MIN_KNOWN:
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】新闻通道来源无法判定（已知来源仅 {n_known} 只）",
+                {"来源分布": ns.get("by_source"), "未知": ns.get("n_unknown")},
+                ["data_quality", "news"]
+            ))
+            return
+        if share > NEWS_NON_PRIMARY_P1_SHARE:
+            by_source = ns.get("by_source") or {}
+            primary = ns.get("primary_source") or "?"
+            n_non = n_known - by_source.get(primary, 0)
+            msgs = ns.get("refusal_messages") or []
+            self.alerts.append(Alert(
+                AlertLevel.HIGH,
+                f"⚠️ 【P1 高】新闻通道降级：{n_non}/{n_known} 只没走主源 {primary}（阈值 {NEWS_NON_PRIMARY_P1_SHARE:.0%}）",
+                {
+                    "来源分布": by_source,
+                    "主源结局": ns.get("primary_status"),
+                    "主源拒绝原文": [f"{m.get('count')}× {m.get('text')}" for m in msgs[:2]] or "（无）",
+                    "影响": "降级的标的 news_signal 改用 Yahoo 关键词打标，同票系统性偏低约 20–29 分（10-06 / 10-08 实测）——"
+                            "不是缺数据，是换了分类器；今天的 Buzz / 情绪类分数不要与主源日直接比较",
+                    "建议": "看主源结局与拒绝原文：limiter_timeout ⇒ 本进程排队太久（同进程别的调用方在抢名额）；"
+                            "server_refused ⇒ 看原文（Massive 免费档 5 次/分钟，AV 是每日 25 次 + 每分钟 5 次）；"
+                            "network_error ⇒ 出站网络 / 代理",
+                },
+                ["data_quality", "news"]
+            ))
+
+    def _check_paper_portfolio_run(self, status: Dict) -> None:
+        """纸面组合这一轮跑没跑完（v0.45.448；`paper_portfolio.run_stats` 经 scan_timing 进来）。
+
+        日报把 `paper_portfolio.run_for_date` 的任何异常当「非致命」吞成一行 WARNING——账本读到坏行
+        （`ledger_io.LedgerCorrupt`）、写锁超时、写入被拒（NaN / 非对象）都在这条路上，此前**整轮没跑也不红**。
+        error ⇒ P2；计数缺失（钩子没跑到 / 旧版扫描）⇒ checks_skipped，不当「查过了没事」。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        pp = (st.get("counters") or {}).get("paper_portfolio")
+        if not isinstance(pp, dict):
+            self.checks_skipped.append("纸面组合运行结局检查（scan_timing 无 paper_portfolio 计数）")
+            return
+        if not pp.get("error"):
+            return
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】纸面组合：{pp.get('as_of')} 这一轮异常中断，开平仓 / 净值快照可能都没落盘",
+            {
+                "异常": str(pp["error"]),
+                "影响": "纸面组合这一天没有（完整的）记录；账本读到坏行时不会再静默跳过，修好之前每轮都会停在这里",
+                "建议": "LedgerCorrupt ⇒ 按报错的文件与行号核对，从每日异地备份恢复该文件；LedgerLockTimeout ⇒ 查是否有"
+                        "别的写者卡住；其他 ⇒ 看 alpha_hive.log 里「纸面组合更新失败」那一行",
+            },
+            ["paper_portfolio", "data_quality"]
         ))
 
     def get_critical_alerts(self) -> List[Alert]:

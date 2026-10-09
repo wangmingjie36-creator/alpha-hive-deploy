@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import plistlib
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -194,24 +195,82 @@ class TestBundle:
     def test_main_records_data_root(self, tmp_path, home):
         data = tmp_path / "data"
         data.mkdir()
-        assert MA.main(["--dest", str(tmp_path / "Apps"), "--home", str(data)]) == 0
+        assert MA.main(["--dest", str(tmp_path / "Apps"), "--home", str(data), "--repo", str(REPO)]) == 0
         assert LA.load_config()["alpha_hive_home"] == str(data.resolve())
         assert LA.config_path().is_relative_to(home), "启动器配置没跟着 $HOME 走（被冻在 import 期了？）"
 
-    def test_main_reports_kept_data_root_instead_of_promising_a_prompt(self, tmp_path, home, monkeypatch, capsys):
-        """没给 --home 但配置里已有数据根 ⇒ 双击不会再问；输出不许说「首次双击时会让你选」（v0.45.436 实测误导）。"""
+
+class TestDataRootFollowsLauncher:
+    """v0.45.439：生成器说的「双击时会怎样」与启动器同源（`LA.config_state`），环境变量不改写已有配置。
+
+    v0.45.436 的提示只看 `alpha_hive_home`：目录没了也说「沿用」、`demo: true` 时说「会让你选」，双击结果都相反；
+    且无条件把当前 shell 的 `ALPHA_HIVE_HOME` 写进配置——开发 shell 常指向沙箱，重新生成一次生产 Alpha Bot 就改读沙箱。
+    """
+
+    @staticmethod
+    def _main(tmp_path, *extra):
+        return MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(REPO), *extra])
+
+    @pytest.fixture
+    def data(self, tmp_path):
+        d = tmp_path / "data"
+        d.mkdir()
+        return d
+
+    def test_kept_data_root_is_reported_not_a_promised_prompt(self, tmp_path, home, monkeypatch, capsys, data):
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
-        data = tmp_path / "data"
-        data.mkdir()
         LA.save_config({"alpha_hive_home": str(data)})
-        assert MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(REPO)]) == 0
+        assert self._main(tmp_path) == 0
         out = capsys.readouterr().out
         assert f"沿用启动器配置里的数据根 {data}" in out and "首次双击" not in out, out
 
+    def test_stale_data_root_says_it_will_ask(self, tmp_path, home, monkeypatch, capsys):
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        gone = tmp_path / "moved-away"
+        LA.save_config({"alpha_hive_home": str(gone)})
+        assert self._main(tmp_path) == 0
+        out = capsys.readouterr().out
+        assert "不存在了" in out and str(gone) in out and "沿用" not in out, out
+        assert LA.config_state(LA.load_config()) == ("stale", str(gone))          # 与启动器的判断一致
+
+    def test_demo_config_says_demo(self, tmp_path, home, monkeypatch, capsys, data):
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        LA.save_config({"demo": True, "alpha_hive_home": str(data)})            # demo 优先：双击直接进演示
+        assert self._main(tmp_path) == 0
+        out = capsys.readouterr().out
+        assert "演示模式" in out and "沿用" not in out and "首次双击" not in out, out
+
+    def test_env_never_overwrites_an_existing_data_root(self, tmp_path, home, monkeypatch, capsys, data):
+        sandbox = tmp_path / "sandbox"
+        sandbox.mkdir()
+        LA.save_config({"alpha_hive_home": str(data)})
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(sandbox))
+        assert self._main(tmp_path) == 0
+        assert LA.load_config() == {"alpha_hive_home": str(data)}, "开发 shell 的沙箱改写了生产 Alpha Bot 的数据根"
+        err = capsys.readouterr().err
+        assert str(sandbox) in err and "--home" in err, "不同就要说出来，并告诉人真要换怎么换"
+
+    def test_env_fills_only_a_first_run_config(self, tmp_path, home, monkeypatch, data):
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data))
+        assert self._main(tmp_path) == 0
+        assert LA.load_config()["alpha_hive_home"] == str(data.resolve())
+
+    def test_explicit_home_replaces_demo_too(self, tmp_path, home, monkeypatch, data):
+        """只写数据根、留着 `demo: true` ⇒ 双击仍是演示（demo 优先），等于没换。"""
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        LA.save_config({"demo": True, "port": 8799})
+        assert self._main(tmp_path, "--home", str(data)) == 0
+        cfg = LA.load_config()
+        assert LA.config_state(cfg) == ("home", str(data.resolve())) and cfg["port"] == 8799, cfg
+
 
 class TestDefaultRepoIsProductionClone:
-    """v0.45.436（数据根迁移阶段 8 收尾）：`.app` 缺省 cd 进生产克隆。此前缺省 = 生成器所在检出 ⇒ 在开发检出 /
-    worktree 里 `make alphabot-app` 会把 .app 无声指回一份再没人快进（或随时被删）的代码。"""
+    """`.app` 缺省 cd 进生产克隆（v0.45.436），且由克隆**自己的**生成器出壳（v0.45.439）。
+
+    436 之前缺省 = 生成器所在检出 ⇒ 在开发检出 / worktree 里 `make alphabot-app` 会把 .app 无声指回一份再没人快进
+    （或随时被删）的代码。436 只改了 REPO：壳与 Info.plist 仍出自生成器所在检出，与克隆的代码两版错开；克隆不在时
+    还退回本检出、只在 stderr 留一行。
+    """
 
     @staticmethod
     def _repo_in_script(apps: Path) -> Path:
@@ -220,36 +279,102 @@ class TestDefaultRepoIsProductionClone:
         return Path(shlex.split(line[len("REPO="):])[0])
 
     @staticmethod
-    def _clone_at(path: Path, monkeypatch, *, valid: bool = True) -> Path:
+    def _version_in_plist(apps: Path) -> str:
+        with open(apps / f"{MA.APP_NAME}.app" / "Contents" / "Info.plist", "rb") as f:
+            return plistlib.load(f)["CFBundleShortVersionString"]
+
+    @staticmethod
+    def _clone_at(path: Path, monkeypatch, *, version: str = "0.0.0+clone", macos_app: str = None) -> Path:
+        """真能跑的假克隆：拷本检出的生成器进去，只改版本号——委托若没发生，Info.plist 版本就是本检出的。"""
         import production_clone
-        if valid:
-            (path / "alphabot").mkdir(parents=True)
-            (path / "alphabot" / "launcher.py").write_text("", encoding="utf-8")
+        pkg = path / "alphabot"
+        (pkg / "macos").mkdir(parents=True)
+        for rel in ("macos_app.py", "launcher.py", "macos/AlphaBot.icns"):
+            shutil.copy2(REPO / "alphabot" / rel, pkg / rel)
+        (pkg / "__init__.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+        if macos_app is not None:
+            (pkg / "macos_app.py").write_text(macos_app, encoding="utf-8")
         monkeypatch.setattr(production_clone, "default_dest", lambda: path)
         return path
 
-    def test_default_points_at_the_clone(self, tmp_path, home, monkeypatch, capsys):
+    def test_default_points_at_the_clone_built_by_the_clone(self, tmp_path, home, monkeypatch, capsys):
         clone = self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
-        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 0
+        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 0, capsys.readouterr().err
         got = self._repo_in_script(tmp_path / "Apps")
         assert got == clone.resolve() and got != REPO, got        # 正对照：确实不是生成器所在检出
+        assert self._version_in_plist(tmp_path / "Apps") == "0.0.0+clone", "壳出自生成器所在检出，不是克隆"
+        assert __version__ != "0.0.0+clone"
         assert f"代码目录 {clone.resolve()}" in capsys.readouterr().out
+        assert not list(clone.rglob("__pycache__")), "委托生成往克隆里写了 __pycache__"
 
-    def test_missing_clone_falls_back_loudly(self, tmp_path, home, monkeypatch, capsys):
-        gone = self._clone_at(tmp_path / "no-such-clone", monkeypatch, valid=False)
+    def test_missing_clone_refuses_instead_of_falling_back(self, tmp_path, home, monkeypatch, capsys):
+        import production_clone
+        gone = tmp_path / "no-such-clone"
+        monkeypatch.setattr(production_clone, "default_dest", lambda: gone)
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
-        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 0
-        assert self._repo_in_script(tmp_path / "Apps") == REPO
+        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 1
+        assert not (tmp_path / "Apps").exists(), "克隆不在还是生成了 .app"
         err = capsys.readouterr().err
-        assert str(gone) in err and "不会被自动更新" in err, "退回本检出必须说出来，否则又是一份无声冻结的代码"
+        assert str(gone) in err and "production_clone.py setup" in err and "--repo" in err, err
 
     def test_explicit_repo_wins_over_the_clone(self, tmp_path, home, monkeypatch, capsys):
         self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
         assert MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(REPO)]) == 0
         assert self._repo_in_script(tmp_path / "Apps") == REPO
-        assert "生产克隆" not in capsys.readouterr().err
+        assert self._version_in_plist(tmp_path / "Apps") == __version__
+
+    def test_target_generator_failure_is_reported(self, tmp_path, home, monkeypatch, capsys):
+        broken = "def build_app(dest, **kw):\n    raise RuntimeError('target generator exploded')\n"
+        self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch, macos_app=broken)
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 1
+        assert "target generator exploded" in capsys.readouterr().err
+
+    def test_bundle_pointing_elsewhere_is_rejected(self, tmp_path, home, monkeypatch, capsys):
+        """委托子进程 import 到了别处的代码（REPO 不是目标）⇒ 必须红，不能把错的 .app 当成功。"""
+        elsewhere = tmp_path / "elsewhere"
+        liar = ("from pathlib import Path\n"
+                "def build_app(dest, **kw):\n"
+                "    b = Path(dest) / 'Alpha Bot.app' / 'Contents' / 'MacOS'\n"
+                "    b.mkdir(parents=True, exist_ok=True)\n"
+                f"    (b / 'AlphaBot').write_text('REPO={elsewhere}\\n')\n"
+                "    return Path(dest) / 'Alpha Bot.app'\n")
+        self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch, macos_app=liar)
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 1
+        err = capsys.readouterr().err
+        assert str(elsewhere) in err and "不是目标的代码" in err, err
+
+
+class TestLaunchScriptHints:
+    """v0.45.439：进不去代码目录时的处理办法按代码目录在哪给。436 起缺省是生产克隆（不在「桌面」下），
+    弹窗却只教人开「桌面文件夹」权限、重跑 make（克隆丢了时那只会报错）。"""
+
+    def test_clone_outside_desktop_gets_rebuild_hint_not_tcc(self, tmp_path, home):
+        script = MA.launch_script(home / "alpha-hive-prod", sys.executable)
+        assert "production_clone.py setup" in script and "桌面文件夹" not in script
+
+    def test_repo_under_desktop_keeps_tcc_hint(self, tmp_path, home):
+        assert "桌面文件夹" in MA.launch_script(home / "Desktop" / "Alpha Hive", sys.executable)
+
+    @pytest.mark.parametrize("where", ["alpha-hive-prod", "Desktop/Alpha Hive"])
+    def test_hint_is_safe_inside_the_double_quoted_alert(self, home, where):
+        hint = MA._cd_failure_hint(home / where)
+        assert not any(c in hint for c in '"$`\\'), hint
+
+    def test_cd_failure_shows_the_hint(self, tmp_path, home):
+        missing = home / "alpha-hive-prod"                    # 克隆被删：真跑一次壳，弹窗里得有重建办法
+        missing.mkdir()
+        (missing / "alphabot").mkdir()
+        (missing / "alphabot" / "launcher.py").write_text("", encoding="utf-8")
+        exe, alerts = _app_exe(tmp_path, repo=missing, python=sys.executable)
+        shutil.rmtree(missing)
+        r = subprocess.run([str(exe)], env={**os.environ, "HOME": str(home)})
+        assert r.returncode == 1
+        shown = alerts.read_text(encoding="utf-8")
+        assert "进不去代码目录" in shown and "production_clone.py setup" in shown, shown
 
 
 # ── 启动流程 ───────────────────────────────────────────────────────────────
@@ -423,6 +548,32 @@ class TestLauncherFlow:
         LA.save_config({"alpha_hive_home": str(tmp_path), "port": 9999})
         assert LA.main(["--reset"]) == 0
         assert LA.load_config() == {"port": 9999}
+
+    def test_reset_also_forgets_demo(self, tmp_path, home):
+        """demo 优先于数据根（`config_state`）：只清数据根，下次双击仍直接进演示，「重新选」不会发生（v0.45.439）。"""
+        LA.save_config({"demo": True, "alpha_hive_home": str(tmp_path), "port": 9999})
+        assert LA.main(["--reset"]) == 0
+        assert LA.config_state(LA.load_config()) == ("first", None)
+
+    @pytest.mark.parametrize("cfg,state", [
+        ({}, "first"),
+        ({"demo": True, "alpha_hive_home": "<tmp>"}, "demo"),
+        ({"alpha_hive_home": "<tmp>"}, "home"),
+        ({"alpha_hive_home": "<missing>"}, "stale"),
+    ])
+    def test_config_state_matches_what_resolve_mode_does(self, tmp_path, home, cfg, state):
+        """生成器的提示读 `config_state`，双击读 `resolve_mode`：两者必须同一个结论。"""
+        sub = {"<tmp>": str(tmp_path), "<missing>": str(tmp_path / "missing")}
+        cfg = {k: sub.get(v, v) if isinstance(v, str) else v for k, v in cfg.items()}
+        assert LA.config_state(cfg)[0] == state
+        ui = FakeUI(answers=[])                       # 会问 ⇒ ask 拿到 None ⇒ 取消
+        got = LA.resolve_mode(cfg, ui)
+        asked = "ask" in ui.kinds()
+        assert asked == (state in ("first", "stale")), (state, ui.calls)
+        if state == "demo":
+            assert got == {"demo": True}
+        if state == "home":
+            assert got == {"demo": False, "home": str(tmp_path)}
 
 
 # ── 原生窗口（v0.45.407）───────────────────────────────────────────────────
