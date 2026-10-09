@@ -72,6 +72,11 @@ v0.45.103~422 用 Twelve Data 日线「≤ as_of、5 个日历日内最后一根
 - 「陈旧」之外的「缺」（v0.45.435）：两源都取不到价、缺报价、缺 β、缺 NAV ⇒ 对冲决定做不出来
   （`price_check.hedge_undecided`），同一条观测链（ERROR / status.json / alert_manager P2）也会响。
   此前只有陈旧会红：2026-09-15~25 连续 7 天 unknown、覆盖层停摆，零告警。
+- **读账本历史一律走 `load_history()`**（v0.45.440）：每条记录自带定价场次证明（成交 `price_session` /
+  `price_source` / `price_at_close`，净值行 `spy_price_session` / `spy_price_at_close`，审计文件 `price_check`），
+  证不出的不放行并计数。2026-09-04~10-07 的旧记录原样保留、不重算（用户决定），它们证不出 ⇒ 不放行；
+  起点从数据里推（生产 = `MEASUREMENT_START` 2026-10-08）。别的模块直读 `hedge_state/` 历史会红
+  （`tests/test_hedge_history_gate.py`）。
 
 没做的事（已知局限）
 --------------------
@@ -124,6 +129,13 @@ META_FILE = STATE_DIR / "meta.json"
 BETA_CACHE_FILE = STATE_DIR / "beta_cache.json"
 
 _VERSION = "0.45.423"     # 口径世代：此前的审计文件 / 成交用的是前一交易日的标的价（见模块头）
+
+#: 本账本「能自证定价场次」的记录从这天起才有（v0.45.423 首次在生产跑）。**只作文档与对账**：读历史一律走
+#: `load_history()`，它按每条记录**自带**的场次证明放行，不按这个日期切——日期是从数据里推出来的结论
+#: （`first_verified`），这里写下来只为让 `load_history()` 能报「推出来的起点与记载不符」。
+#: 此前（2026-09-04 起）的记录：标的价 / SPY 成交价晚一个交易日（20 份审计 190/267 个价），净值曲线晚一天盯市，
+#: 10-07→10-08 那一步含两天的 SPY 变动 ⇒ 第一个干净的**日收益**是 10-09。历史文件按用户决定原样保留、不重算。
+MEASUREMENT_START = "2026-10-08"
 _GREEK_KEYS = ("dollar_delta", "beta_dollar_delta", "gamma_dollar_per_1pct",
                "vega_dollar_per_pt", "theta_dollar_per_day")
 
@@ -1232,8 +1244,11 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
             "today_trade": today_trade, "price_check": chk}
 
 
-def _execute_trade(as_of: str, rec: Dict, agg: Dict, nav: Optional[float]) -> Optional[Dict]:
-    """按当日收盘成交 SPY（无点差模型：SPY 点差 ~1 bp，明说不建模）。返回成交记录。"""
+def _execute_trade(as_of: str, rec: Dict, agg: Dict, nav: Optional[float],
+                   spy_mark: Optional[Dict] = None) -> Optional[Dict]:
+    """按当日收盘成交 SPY（无点差模型：SPY 点差 ~1 bp，明说不建模）。返回成交记录。
+    v0.45.440：成交记录自带成交价的场次证明（`price_session` / `price_source` / `price_at_close`，取自
+    `run_for_date` 放行成交的那个 SPY mark）——`load_history()` 只认带证明且场次对的成交。"""
     shares = int(rec.get("spy_shares") or 0)
     px = _pos(rec.get("spy_price"))
     if shares == 0 or px is None:
@@ -1271,7 +1286,9 @@ def _execute_trade(as_of: str, rec: Dict, agg: Dict, nav: Optional[float]) -> Op
              "fill": "close", "spread_model": "none (SPY ~1bp, not modelled)",
              "excess_usd": rec.get("excess_usd"), "target_usd": rec.get("target_usd"),
              "beta_dd_usd_before": rec.get("beta_dd_usd"), "beta_dd_pct_before": rec.get("beta_dd_pct"),
-             "nav": nav, "shares_after": new, "reason": rec.get("reason")}
+             "nav": nav, "shares_after": new, "reason": rec.get("reason"),
+             "price_session": (spy_mark or {}).get("session"), "price_source": (spy_mark or {}).get("source"),
+             "price_at_close": bool((spy_mark or {}).get("at_close"))}
     _append_jsonl(TRADES_FILE, trade)
     if not meta.get("starting_date"):
         meta["starting_date"] = as_of
@@ -1301,7 +1318,7 @@ def run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, execu
         return res
     if executed is None and rec.get("action") in ("sell_spy", "buy_spy"):
         if spy_mark.get("price") is not None and spy_mark.get("at_close"):
-            executed = _execute_trade(as_of, rec, res["aggregate"], nav)
+            executed = _execute_trade(as_of, rec, res["aggregate"], nav, spy_mark=spy_mark)
         else:
             blocked = (f"SPY 价不是 {_expected_session(as_of)} 的官方收盘（{spy_mark.get('source')} @ "
                        f"{spy_mark.get('session')}{'，盘中实时价' if spy_mark.get('live') else ''}）"
@@ -1333,6 +1350,7 @@ def run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, execu
     overlay_nav = (cash + mv) if (cash is not None and mv is not None) else None
     snapshot = {"date": as_of, "spy_shares": shares, "spy_price": spy_price,
                 "spy_price_source": spy_mark.get("source"), "spy_price_session": spy_mark.get("session"),
+                "spy_price_at_close": bool(spy_mark.get("at_close")),        # v0.45.440：盘中实时价不是收盘盯市
                 "cash": _r(cash),
                 "market_value": _r(mv), "nav": _r(overlay_nav),
                 "trades_today": sum(1 for t in _load_jsonl(TRADES_FILE) if t.get("date") == as_of),
@@ -1361,6 +1379,110 @@ def run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, execu
     _atomic_write_text(STATE_DIR / f"greeks_{as_of}.json",
                        json.dumps(_scrub(audit), ensure_ascii=False, indent=1, sort_keys=True))
     return res
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 历史：唯一的读取口（v0.45.440）
+# ══════════════════════════════════════════════════════════════════════════════
+# 账本历史里混着两种记录：v0.45.423 之前的（标的价 / SPY 成交价晚一个交易日，且**自己不说**）与之后的
+#（每条自带「价属于哪一场、是不是收盘」）。按日期切要靠读者记得一个约定；这里按记录**自带的证明**放行，
+# 证不出的不放行、计数并说清原因。其他模块不许绕过它直读历史（守卫 tests/test_hedge_history_gate.py）。
+
+#: v0.45.423~439 的净值行没有 `spy_price_at_close` 字段：这两个来源只在收盘后产生（cboe_close = last_trade
+#: 贴收盘的官方收盘；twelve_data_bar = 日期恰为该场、交易所钟上已收盘的那根），据此补判。
+_CLOSE_SOURCES = ("cboe_close", "twelve_data_bar")
+
+
+def _verdict_trade(t: Dict) -> str:
+    if "price_session" not in t:
+        return "no_provenance"
+    if t.get("price_session") != _expected_session(str(t.get("date") or "")) or not t.get("price_at_close"):
+        return "not_its_session_close"
+    return "ok"
+
+
+def _verdict_equity(e: Dict) -> str:
+    if "spy_price_session" not in e:
+        return "no_provenance"
+    if _num(e.get("nav")) is None:
+        return "unpriced"
+    if not (_num(e.get("spy_shares")) or 0.0):
+        return "ok"                                   # 没持 SPY：净值 = 现金，与 SPY 价无关
+    at_close = (e["spy_price_at_close"] if "spy_price_at_close" in e
+                else e.get("spy_price_source") in _CLOSE_SOURCES)
+    if e.get("spy_price_session") != _expected_session(str(e.get("date") or "")) or not at_close:
+        return "not_its_session_close"
+    return "ok"
+
+
+def _verdict_audit(a: Dict, day: str) -> str:
+    chk = a.get("price_check") if isinstance(a, dict) else None
+    if not isinstance(chk, dict):
+        return "no_provenance"
+    return "ok" if chk.get("as_of") == day == a.get("as_of") else "date_mismatch"
+
+
+def load_history(state_dir: Optional[Path] = None) -> Dict:
+    """对冲账本历史的**唯一**读取口：只放行能自证「价属于自己那一场的收盘」的记录。
+
+    返回 {"trades", "equity": 放行的记录（按日期升序）, "audits": {日期: 审计文件},
+          "excluded": {种类: {原因: 条数}}, "excluded_dates": {种类: [日期]},
+          "first_verified": {种类: 最早放行日期 | None}, "measurement_start": MEASUREMENT_START,
+          "regressions": [(种类, 日期)], "before_measurement_start": [(种类, 日期)]}。
+    原因：no_provenance（v0.45.423 之前的格式，证不出）/ not_its_session_close（证明说价不是该场收盘）/
+    unpriced（净值行没有净值）/ date_mismatch / unreadable（审计文件坏 JSON）。
+    `regressions` = 某种记录已出现过放行的之后又出现无证明的——写入方退化了，打 ERROR。
+    `before_measurement_start` = 早于 `MEASUREMENT_START` 却带了证明——有人往旧记录上补了字段，打 WARNING。"""
+    d = Path(state_dir) if state_dir is not None else None
+    trades_f = d / "trades.jsonl" if d is not None else TRADES_FILE
+    equity_f = d / "equity_curve.jsonl" if d is not None else EQUITY_FILE
+    audit_dir = d if d is not None else STATE_DIR
+    kept: Dict[str, List] = {"trades": [], "equity": []}
+    audits: Dict[str, Dict] = {}
+    excluded: Dict[str, Dict[str, int]] = {"trades": {}, "equity": {}, "audits": {}}
+    excluded_dates: Dict[str, List[str]] = {"trades": [], "equity": [], "audits": []}
+    verdicts: Dict[str, List[Tuple[str, str]]] = {"trades": [], "equity": [], "audits": []}
+
+    for kind, path, judge in (("trades", trades_f, _verdict_trade), ("equity", equity_f, _verdict_equity)):
+        for rec in _load_jsonl(path):
+            day = str(rec.get("date") or "")
+            v = judge(rec)
+            verdicts[kind].append((day, v))
+            if v == "ok":
+                kept[kind].append(rec)
+            else:
+                excluded[kind][v] = excluded[kind].get(v, 0) + 1
+                excluded_dates[kind].append(day)
+    for f in sorted(audit_dir.glob("greeks_*.json")) if audit_dir.is_dir() else []:
+        day = f.stem[len("greeks_"):]
+        try:
+            a = json.loads(f.read_text(encoding="utf-8"))
+            v = _verdict_audit(a, day)
+        except (OSError, ValueError):
+            a, v = None, "unreadable"
+        verdicts["audits"].append((day, v))
+        if v == "ok":
+            audits[day] = a
+        else:
+            excluded["audits"][v] = excluded["audits"].get(v, 0) + 1
+            excluded_dates["audits"].append(day)
+
+    first = {k: min((day for day, v in vs if v == "ok"), default=None) for k, vs in verdicts.items()}
+    regressions = sorted((k, day) for k, vs in verdicts.items() for day, v in vs
+                         if v == "no_provenance" and first[k] is not None and day >= first[k])
+    early = sorted((k, day) for k, vs in verdicts.items() for day, v in vs
+                   if v == "ok" and day < MEASUREMENT_START)
+    if regressions:
+        _log.error("[PortfolioGreeks] 对冲账本出现**无定价证明的新记录**（写入方退化）：%s", regressions)
+    if early:
+        _log.warning("[PortfolioGreeks] 早于 MEASUREMENT_START %s 的记录带了定价证明（旧记录被补过字段？）：%s",
+                     MEASUREMENT_START, early)
+    for k in ("trades", "equity"):
+        kept[k].sort(key=lambda r: str(r.get("date") or ""))
+    return {"trades": kept["trades"], "equity": kept["equity"], "audits": audits,
+            "excluded": excluded, "excluded_dates": excluded_dates, "first_verified": first,
+            "measurement_start": MEASUREMENT_START, "regressions": regressions,
+            "before_measurement_start": early}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

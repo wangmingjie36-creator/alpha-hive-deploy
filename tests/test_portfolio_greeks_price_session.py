@@ -738,3 +738,113 @@ class TestFormingBarNeverPassesAsAClose:
         res = pg.compute_day(AS_OF, beta_fn=_beta1)
         amzn = next(r for r in _rows(res, "stock") if r["ticker"] == "AMZN")
         assert amzn["price"] is None, f"盘中半根被当成 {AS_OF} 的收盘用了：{amzn['price']}"
+
+
+# ── v0.45.440：账本历史只经一道闸读——记录自带定价场次证明，证不出的不放行 ──────────────
+# 2026-09-04~10-07 的记录（标的价 / SPY 成交价晚一个交易日）原样保留、不重算（用户决定）；它们自己不说这件事，
+# 按日期切要靠读者记得一个约定。`load_history()` 按每条记录自带的证明放行（直读的守卫见 test_hedge_history_gate.py）。
+
+_OLD_TRADE = {"date": "2026-10-01", "ticker": "SPY", "shares": 30, "price": 762.63, "action": "buy_spy",
+              "fill": "close", "nav": 152932.15, "shares_after": 48.0}               # 生产 v0.45.423 之前的格式
+_OLD_EQUITY = {"date": "2026-10-07", "spy_shares": 48.0, "spy_price": 779.09, "cash": -36630.13,
+               "market_value": 37396.32, "nav": 766.19, "trades_today": 0, "band_status": "inside"}
+
+
+def _eq(day, *, session=None, at_close=True, shares=48.0, source="cboe_close", nav=518.51, legacy=False):
+    e = {"date": day, "spy_shares": shares, "spy_price": 773.93, "spy_price_source": source,
+         "spy_price_session": day if session is None else session, "cash": -36630.13, "nav": nav}
+    if not legacy:
+        e["spy_price_at_close"] = at_close
+    return e
+
+
+class TestRecordsCarryTheirPricingProof:
+
+    def test_trade_and_equity_rows_say_which_close_they_used(self, world):
+        world.closed()
+        world.book()
+        t = pg.run_for_date(AS_OF, beta_fn=_beta1)["executed_trade"]
+        assert (t["price_session"], t["price_source"], t["price_at_close"]) == (AS_OF, "cboe_close", True), t
+        eq = pg._load_jsonl(pg.EQUITY_FILE)[-1]
+        assert (eq["spy_price_session"], eq["spy_price_at_close"]) == (AS_OF, True), eq
+
+    def test_intraday_mark_is_recorded_as_not_a_close(self, world):
+        world.intraday()
+        world.book()
+        _jsonl(pg.POSITIONS_FILE, [{"ticker": "SPY", "shares": -10, "avg_price": 770.0}])
+        pg.META_FILE.write_text(json.dumps({"cash": 7700.0}), encoding="utf-8")
+        world.at(datetime(2026, 10, 6, 12, 0, tzinfo=ET))
+        pg.run_for_date(AS_OF, beta_fn=_beta1)
+        eq = pg._load_jsonl(pg.EQUITY_FILE)[-1]
+        assert eq["spy_price_at_close"] is False and eq["spy_price_source"] == "cboe_intraday", eq
+
+
+class TestHistoryGate:
+
+    def test_end_to_end_keeps_this_run_and_drops_the_old_format(self, world):
+        _jsonl(pg.TRADES_FILE, [_OLD_TRADE])
+        _jsonl(pg.EQUITY_FILE, [dict(_OLD_EQUITY, date="2026-10-05")])
+        world.closed()
+        world.book()
+        pg.run_for_date(AS_OF, beta_fn=_beta1)
+        h = pg.load_history()
+        assert [t["date"] for t in h["trades"]] == [AS_OF] and [e["date"] for e in h["equity"]] == [AS_OF], h
+        assert sorted(h["audits"]) == [AS_OF]
+        assert h["excluded"]["trades"] == {"no_provenance": 1} and h["excluded"]["equity"] == {"no_provenance": 1}
+        assert h["first_verified"] == {"trades": AS_OF, "equity": AS_OF, "audits": AS_OF}
+        assert h["regressions"] == []
+
+    def test_proof_that_says_wrong_session_or_not_close_is_excluded(self, tmp_path):
+        _jsonl(tmp_path / "trades.jsonl", [dict(_OLD_TRADE, date="2026-10-08", price_session="2026-10-07",
+                                                price_source="twelve_data_bar", price_at_close=True)])
+        _jsonl(tmp_path / "equity_curve.jsonl", [_eq("2026-10-08", session="2026-10-07"),
+                                                 _eq("2026-10-09", at_close=False, source="cboe_intraday"),
+                                                 _eq("2026-10-12", nav=None)])
+        h = pg.load_history(tmp_path)
+        assert h["trades"] == [] and h["excluded"]["trades"] == {"not_its_session_close": 1}
+        assert h["equity"] == [] and h["excluded"]["equity"] == {"not_its_session_close": 2, "unpriced": 1}
+
+    def test_weekend_row_proves_the_last_session(self, tmp_path):
+        """周六的 as_of：那天没有行情，周五的收盘就是对的（`_expected_session`），不能因 session ≠ date 拒掉。"""
+        _jsonl(tmp_path / "equity_curve.jsonl", [_eq("2026-10-10", session="2026-10-09")])
+        assert [e["date"] for e in pg.load_history(tmp_path)["equity"]] == ["2026-10-10"]
+
+    def test_no_spy_held_needs_no_spy_close(self, tmp_path):
+        _jsonl(tmp_path / "equity_curve.jsonl", [_eq("2026-10-09", shares=0.0, at_close=False, source="unavailable",
+                                                     session=None, nav=12.5)])
+        assert len(pg.load_history(tmp_path)["equity"]) == 1
+
+    def test_423_rows_without_the_at_close_field_judge_by_source(self, tmp_path):
+        _jsonl(tmp_path / "equity_curve.jsonl", [_eq("2026-10-08", legacy=True),
+                                                 _eq("2026-10-09", legacy=True, source="cboe_intraday")])
+        h = pg.load_history(tmp_path)
+        assert [e["date"] for e in h["equity"]] == ["2026-10-08"], h["excluded"]
+
+    def test_unproven_record_after_proof_began_is_a_regression(self, tmp_path, caplog):
+        _jsonl(tmp_path / "equity_curve.jsonl", [_eq("2026-10-08"), dict(_OLD_EQUITY, date="2026-10-09")])
+        with caplog.at_level(logging.INFO):
+            h = pg.load_history(tmp_path)
+        assert h["regressions"] == [("equity", "2026-10-09")]
+        assert any(r.levelno >= logging.ERROR and "无定价证明的新记录" in r.getMessage() for r in caplog.records)
+
+    def test_proof_before_measurement_start_is_flagged(self, tmp_path, caplog):
+        _jsonl(tmp_path / "equity_curve.jsonl", [_eq("2026-09-30")])
+        with caplog.at_level(logging.INFO):
+            h = pg.load_history(tmp_path)
+        assert h["before_measurement_start"] == [("equity", "2026-09-30")]
+        assert any(r.levelno == logging.WARNING and "MEASUREMENT_START" in r.getMessage() for r in caplog.records)
+
+    def test_audit_files_without_price_check_or_unreadable_are_excluded(self, tmp_path):
+        (tmp_path / "greeks_2026-10-07.json").write_text(json.dumps({"as_of": "2026-10-07"}), encoding="utf-8")
+        (tmp_path / "greeks_2026-10-08.json").write_text("{坏", encoding="utf-8")
+        (tmp_path / "greeks_2026-10-09.json").write_text(
+            json.dumps({"as_of": "2026-10-09", "price_check": {"as_of": "2026-10-08"}}), encoding="utf-8")
+        (tmp_path / "greeks_2026-10-12.json").write_text(
+            json.dumps({"as_of": "2026-10-12", "price_check": {"as_of": "2026-10-12"}}), encoding="utf-8")
+        h = pg.load_history(tmp_path)
+        assert sorted(h["audits"]) == ["2026-10-12"]
+        assert h["excluded"]["audits"] == {"no_provenance": 1, "unreadable": 1, "date_mismatch": 1}
+
+    def test_measurement_start_is_the_first_day_v0_45_423_ran(self):
+        """记载值与 CHANGELOG / 生产核对一致（10-08 首跑；`load_history` 对生产推出的 first_verified 也是它）。"""
+        assert pg.MEASUREMENT_START == "2026-10-08"

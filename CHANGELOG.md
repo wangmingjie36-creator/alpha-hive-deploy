@@ -7,7 +7,29 @@
 
 ## [0.45.441] — 2026-10-09 — 占位（进行中：Scout 去掉 consensus_strength 分量——并行蜂读不到同伴的输出，27/30 恒为 0；缺失重归一化，GuardBee 仍读完整普查；世代边界 + signal_archive 影响面）
 
-## [0.45.440] — 2026-10-09 — 占位（进行中：对冲账本历史只经一道闸读——记录自带定价场次证明、无证明的不放行、其他模块直读历史即红）
+## [0.45.440] — 2026-10-09 — Added：对冲账本历史只经一道闸读——记录自带定价场次证明、证不出的不放行并计数、别的模块直读历史即红；历史原样保留不重算
+
+### 背景（用户 2026-10-09 决定：hedge_state 历史不重算、保持原样；要求按根因做而不是只加一个日期常量）
+- 2026-09-04~10-07 的 `hedge_state/` 记录：标的价 / SPY 成交价晚一个交易日（20 份审计 190/267 个价、5 笔成交 4 笔按前一日收盘、净值曲线晚一天盯市），**且记录自己不说**。不重算是对的：账本按实际持仓往前走，带状逻辑每天按现有股数重判，股数差几股会在下次调仓被吸收，现金差是常数，不影响 10-08 起的日收益。
+- 但「保持原样」本身留了坑：本账本在攒数期，「等攒够天数再看对冲带该不该改」的分析会读全部历史、把脏记录与干净记录静默混算。只加一个 `MEASUREMENT_START` 常量是**约定**，读者不读它也不会有任何东西红——根因是记录不自证、读取没有闸。
+
+### Added（`portfolio_greeks.py`）
+- 记录自带证明：成交记录加 `price_session` / `price_source` / `price_at_close`（v0.45.423 之后的成交也没有——放行成交的那个 SPY mark 原本没记下来）；净值行加 `spy_price_at_close`（盘中实时价不是收盘盯市）；审计文件已有 `price_check`。
+- `load_history(state_dir=None)`：唯一读取口。成交 / 净值行按「场次 == `_expected_session(日期)` 且是收盘」放行（周末 as_of 认上一交易日；不持 SPY 的净值行与 SPY 价无关；v0.45.423~439 的净值行没有 at_close 字段，按来源 `cboe_close` / `twelve_data_bar` 补判）；审计文件按 `price_check.as_of` 放行。排除按原因计数（no_provenance / not_its_session_close / unpriced / date_mismatch / unreadable），**起点从数据里推**（`first_verified`）。已出现放行记录后又出现无证明的 ⇒ `regressions` + ERROR（写入方退化）；早于 `MEASUREMENT_START` 却带证明 ⇒ WARNING（旧记录被补过字段）。
+- `MEASUREMENT_START = "2026-10-08"`：只作文档与对账（放行不靠它）；第一个干净的日收益是 10-09（10-07→10-08 那一步含两天的 SPY 变动）。
+
+### Added（守卫 `tests/test_hedge_history_gate.py`）
+- AST 扫全仓非测试 .py：字符串常量含 `hedge_state`（docstring 除外）或经 `portfolio_greeks` 碰 `STATE_DIR` / `TRADES_FILE` / `EQUITY_FILE` / `POSITIONS_FILE` / `META_FILE` / `_load_jsonl` ⇒ 必须在 `ALLOWED` 里且写明理由（属主、两个整目录搬运的备份 / 迁移工具、告警正文、Alpha Bot 跨式页读**单日**审计文件）。两头都守：新读者绕闸红、白名单过期条目也红；比对函数在合成输入上自证会红。
+
+### 生产核对（只读）
+- `load_history(~/alpha-hive-data/hedge_state)`：净值行 / 审计文件 `first_verified` = **2026-10-08**（= `MEASUREMENT_START`）；排除 no_provenance 成交 5 / 净值行 21 / 审计 21；10-08 以来无成交（成交的 first_verified 暂为 None）；`regressions` 与 `before_measurement_start` 为空。
+- 未改写任何 `hedge_state/` 文件；此后新写的成交 / 净值行多出上述字段。
+
+### 验证
+- 新测试：`TestRecordsCarryTheirPricingProof`（2）、`TestHistoryGate`（9）、`test_hedge_history_gate.py`（6）。
+- 变异 16 个全部打红：成交不写证明 / 净值不写 at_close / 无证明放行 / 按 date 比场次 / 不看 at_close / 旧行一律当收盘 / 不报退化 / 退化不打 ERROR / 不持 SPY 也要 SPY 收盘 / 审计不核日期 / 不报早于起点 / 排除不计数 / 扫描器不认别名 / 扫描器把 docstring 也算 / 新读者检查关掉 / 过期条目检查关掉（G15 首轮存活——真仓库上检查恒空，改成比对函数在合成输入上自证后打红）。
+- 全量套件：见提交说明。
+
 
 ## [0.45.439] — 2026-10-09 — Fixed：v0.45.436 二次检查——Alpha Bot.app 由目标代码自己的生成器出壳、克隆缺失不再静默退回、数据根提示与启动器同源、环境变量不改写已配数据根、cd 失败提示按位置给；定时任务以克隆为唯一真相
 
