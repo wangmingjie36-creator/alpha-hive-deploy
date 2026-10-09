@@ -38,9 +38,12 @@ budget，不需要额外的循环）。short 侧用权利金当上限只是因�
     as_of > earnings_date（exit_after_event） → post_event
     expiry − as_of ≤ expiry_buffer_days       → expiry_buffer
     到期后 write_off_days_after_expiry 天仍拿不到任何价格 → written_off（核销）
-出场价：报价 ok → 镜像成交价；报价连续 stale 超过 fallback_stale_max_days（或已到期）
-→ 用 **min(as_of, expiry) 那天**的标的收盘算内在价值 |S − K|，mark_source="intrinsic"。
-必须取到期日（或更早）的收盘：合约到期后标的还在走，拿今天的收盘算等于让一张早就
+出场价：报价 ok → 镜像成交价；**已到期**且报价取不到 → 用**到期那一场**的标的收盘算内在价值
+|S − K|，mark_source="intrinsic"（到期时内在价值就是合约的真实价值）。**未到期**报价取不到 → 等：
+报价恢复那天按报价平，一直没恢复就等到期这样结（v0.45.449 撤掉「事件后 stale 超过 3 天按内在价值平」：
+到期前内在价值把剩余时间价值算成 0，long 跨式系统性少算、short 多算，污染的正是这本账要测的样本；
+且结算日 = as_of 时本源当晚恒无定稿收盘，那条兜底在生产上天天延期、从来执行不了）。
+必须取到期日（而不是今天）的收盘：合约到期后标的还在走，拿今天的收盘算等于让一张早就
 作废的合约继续跟涨（K=100、到期日 S=101 的真实结算是 $1，两个半月后按 S=160 会算成 $60）。
 
 结算收盘只认**那一场**（v0.45.433）：Twelve Data 上日期**恰为**结算场次的那根——结算日是周末 / 假日时
@@ -100,7 +103,8 @@ CONFIG = {
     "trade_cheap": True,              # cheap → 买跨式
     "exit_after_event": True,         # 财报过后第一个有报价的日子平仓
     "expiry_buffer_days": 2,          # 到期前 2 天强平（避开到期日 gamma 与指派）
-    "fallback_stale_max_days": 3,     # 事件后报价连续 stale 超过 3 天 → 内在价值平仓
+    # v0.45.449 删 "fallback_stale_max_days"（事件后 stale 超 3 天按内在价值平）：到期前的内在价值低估
+    # 时间价值、且当晚恒无定稿收盘；未到期取不到报价一律等（见模块头「出场价」）。
     # 到期这么多天后仍拿不到任何价格（报价没了、到期日收盘也取不到）→ 按最后已知
     # mark 核销。30 天足够覆盖一次长假 + 数据源短期故障；再长就是幽灵仓了。
     "write_off_days_after_expiry": 30,
@@ -353,17 +357,31 @@ def _default_close(ticker: str, settle_date: str, *, as_of: Optional[str] = None
     **不退本地价格索引**：那是期权快照价，分不清盘中还是收盘（同 `portfolio_greeks._default_mark`）。"""
     want = _settle_session(settle_date)
     out = {"price": None, "session": None, "source": "twelve_data", "reason": None, "latest": None}
-    rows = None
     try:
         import twelve_data
         if not twelve_data.is_configured():
             return {**out, "source": "unavailable", "reason": "twelve_data_unconfigured"}
-        rows = twelve_data.fetch_bars(ticker, twelve_data.SHARED_BARS_WINDOW, end_date=as_of or settle_date)
     except Exception as exc:  # noqa: BLE001
-        _log.warning("[%s] Twelve Data 收盘获取失败: %s", ticker, exc)
-    bars = sorted(((str(r.get("date") or "")[:10], r.get("close")) for r in rows or [] if isinstance(r, dict)),
-                  key=lambda b: b[0])
-    bars = [b for b in bars if len(b[0]) == 10]
+        _log.warning("[%s] Twelve Data 模块不可用: %s", ticker, exc)
+        return {**out, "reason": "bars_unavailable"}
+
+    def _bars(end: str) -> List[Tuple[str, object]]:
+        try:
+            rows = twelve_data.fetch_bars(ticker, twelve_data.SHARED_BARS_WINDOW, end_date=end)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("[%s] Twelve Data 收盘获取失败: %s", ticker, exc)
+            rows = None
+        got = sorted(((str(r.get("date") or "")[:10], r.get("close")) for r in rows or [] if isinstance(r, dict)),
+                     key=lambda b: b[0])
+        return [b for b in got if len(b[0]) == 10]
+
+    bars = _bars(as_of or settle_date)
+    if bars and bars[0][0] > want:
+        # v0.45.449：窗口（SHARED_BARS_WINDOW 根、截至 as_of）第一根已晚于结算场次——长时间没跑之后才到这里。
+        # 按结算场次截止补取一次；否则会误报 bar_missing 并直接核销一个本来结得了的仓位。
+        # 补取窗口里结算那根是末根，可能被规则 ②（低量）丢掉，那就照常延期 / 核销，原因如实。
+        _log.info("[%s] 截至 %s 的窗口够不着结算场次 %s，按结算场次截止补取", ticker, as_of or settle_date, want)
+        bars = _bars(want)
     if not bars:
         return {**out, "reason": "bars_unavailable"}
     out["latest"] = bars[-1][0]
@@ -403,8 +421,11 @@ def _resolve_close(raw, session: str) -> Dict:
 
 def _defer_text(close: Dict, session: str) -> str:
     """延期原因的一句人话（WARNING / 仓位字段 / 日报共用一份）。"""
-    seen = (f"；Twelve Data 在它之前最近一根 {close['seen_session']} 收 {close['seen_price']}（不拿它顶替）"
-            if close.get("seen_session") and close.get("seen_session") != session else "")
+    seen = ""
+    if close.get("seen_session") and close.get("seen_session") != session:
+        px = close.get("seen_price")
+        seen = (f"；Twelve Data 在它之前最近一根 {close['seen_session']} "
+                f"{'收 ' + str(px) if px is not None else '收盘无效'}（不拿它顶替）")
     return f"缺 {session} 那一场的收盘（{close.get('reason')}）{seen}"
 
 
@@ -638,12 +659,13 @@ def run_for_date(as_of: str,
                 rec, delta = _close(pos, xc, xp, xc + xp, as_of, reason, "cboe_mid", None)
         if rec is None:
             expired = to_expiry is not None and to_expiry <= 0
-            if pos.stale_days > CONFIG["fallback_stale_max_days"] or expired:
-                # H2（v0.45.104）：内在价值必须用**到期日（或更早的 as_of）**那天的收盘。
+            if expired:
+                # 只有**已到期**才按内在价值结算（v0.45.449：到期前的内在价值低估时间价值，未到期一律等报价）。
+                # H2（v0.45.104）：内在价值必须用**到期日**的收盘，不是 as_of 的。
                 # 以前直接用 as_of 的收盘，等于让一张早就作废的合约继续跟着标的涨：
                 # K=100、2026-10-02 到期、到期日 S=101（真实结算 $1.00/股），
                 # 12-20 才结算时 S=160 → 记成 $60.00/股，一笔 $220 的仓位凭空 +$5,780。
-                settle_date = min(as_of, pos.expiry) if pos.expiry else as_of
+                settle_date = pos.expiry
                 # v0.45.433：只认结算那一场的收盘（见模块头「结算收盘只认那一场」）
                 session = _settle_session(settle_date)
                 try:
@@ -658,8 +680,7 @@ def run_for_date(as_of: str,
                 past_expiry = _days_between(pos.expiry, as_of) if pos.expiry else None
                 since_note = f", deferred since {deferred_since}" if deferred_since else ""
                 if iv is not None:
-                    note = (f"INTRINSIC fallback: quotes stale {pos.stale_days}d"
-                            f"{' / expired' if expired else ''}, settle_date={settle_date}, "
+                    note = (f"INTRINSIC at expiry: quotes stale {pos.stale_days}d, settle_date={settle_date}, "
                             f"session={session} ({close['source']}), |S−K|=|{S}−{pos.strike}|{since_note}")
                     rec, delta = _close(pos, None, None, iv, as_of, reason, "intrinsic", S, note)
                 elif past_expiry is not None and past_expiry > CONFIG["write_off_days_after_expiry"]:
@@ -677,13 +698,13 @@ def run_for_date(as_of: str,
                     rec, delta = _close(pos, None, None, pos.last_mark, as_of, "written_off",
                                         "written_off", None, note)
                 else:
-                    # 延期：照旧挂着（stale），**不**拿更早的收盘顶替。到期仓位最迟核销期限一到按上一支平账。
+                    # 延期：照旧挂着（stale），**不**拿更早的收盘顶替；核销期限一到按上一支平账。
                     why = _defer_text(close, session)
                     pos.settle_deferred_since = deferred_since or as_of
                     pos.settle_deferred_reason = why
                     # 核销条件是 past_expiry > 期限（严格大于）⇒ 最早在 past_expiry == 期限 + 1 那天
                     left = (CONFIG["write_off_days_after_expiry"] + 1 - past_expiry
-                            if expired and past_expiry is not None else None)
+                            if past_expiry is not None else None)
                     _log.warning("[OptionsPaperLeg] %s %s 该按内在价值平仓（%s，结算日 %s）但%s——延期（自 %s）%s",
                                  pos.ticker, pos.side, reason, settle_date, why, pos.settle_deferred_since,
                                  f"，再 {left} 天仍无则核销" if left is not None else "")
@@ -692,8 +713,9 @@ def run_for_date(as_of: str,
                                      "seen_session": close["seen_session"], "seen_price": close["seen_price"],
                                      "since": pos.settle_deferred_since, "write_off_in_days": left})
             else:
-                _log.info("[OptionsPaperLeg] %s 该平仓（%s）但报价不可用，等待（stale %d/%d）",
-                          pos.ticker, reason, pos.stale_days, CONFIG["fallback_stale_max_days"])
+                # 未到期：等报价恢复（按报价平）或等到期（按到期那一场的收盘结算），不按内在价值提前平
+                _log.info("[OptionsPaperLeg] %s 该平仓（%s）但报价不可用，等待报价或到期（stale %d 天，到期 %s）",
+                          pos.ticker, reason, pos.stale_days, pos.expiry)
         if rec is None:
             remaining.append(pos)
             continue

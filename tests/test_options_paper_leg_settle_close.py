@@ -59,7 +59,7 @@ def world(tmp_path, monkeypatch):
 
     def series():
         rows = []
-        for i, d in enumerate(_trading_days("2026-05-01", "2026-12-31")):
+        for i, d in enumerate(_trading_days("2026-05-01", "2027-07-30")):
             if d > w.published or d in w.skip:
                 continue
             c = w.provisional.get(d, w.close.get(d, FINAL.get(d, round(90.0 + 0.01 * i, 2))))
@@ -129,15 +129,19 @@ class TestNoOlderCloseSubstitutes:
         warns = [x.getMessage() for x in _opl_records(caplog, logging.WARNING)]
         assert any(TK in m and EXPIRY in m and "延期" in m for m in warns), warns
 
-    def test_pre_expiry_stale_fallback_defers_on_the_same_evening(self, world):
-        """事件后报价 stale 超过 3 天、未到期：结算日 = as_of。as_of 当晚本源没有那一根 ⇒ 延期；
-        旧代码拿前一交易日收盘按 as_of 平仓。"""
+    def test_pre_expiry_stale_is_neither_settled_nor_deferred(self, world):
+        """v0.45.449：未到期报价取不到 ⇒ 只等报价 / 等到期，不按内在价值平。v0.45.433 在这里结算日 = as_of，
+        生产当晚恒无那一根 ⇒ 天天延期；午夜后补跑恰有那一根 ⇒ 按内在价值（低估时间价值）平了。"""
         world.book(expiry="2026-10-23")
-        world.published = PREV
-        r = world.run("2026-10-16")
-        assert r["closed_today"] == [], f"按旧收盘结了：{r['closed_today']}"
-        assert r["settle_deferred"][0]["session"] == "2026-10-16"
-        assert r["settle_deferred"][0]["write_off_in_days"] is None   # 未到期：还没有核销期限
+        for as_of, published in (("2026-10-16", PREV), ("2026-10-19", "2026-10-19"), ("2026-10-20", "2026-10-20")):
+            world.published = published
+            r = world.run(as_of)
+            assert r["closed_today"] == [], f"{as_of} 未到期按内在价值平了：{r['closed_today']}"
+            assert r["settle_deferred"] == [] and r["positions"][0]["settle_deferred_since"] is None, as_of
+        world.published = "2026-10-26"
+        r = world.run("2026-10-26")                                 # 到期后：按 10-23 那一场结算
+        assert r["closed_today"][0]["exit_underlying"] != FINAL[EXPIRY]
+        assert "session=2026-10-23 (twelve_data)" in r["closed_today"][0]["rationale"]
 
     def test_hole_in_the_series_defers(self, world):
         """该场之后的日线都有了，偏偏缺这一根 ⇒ bar_missing，不拿前一根。"""
@@ -194,6 +198,15 @@ class TestExpiryEveningThenNextDay:
         r = world.run("2026-10-19")
         assert r["closed_today"] and r["closed_today"][0]["exit_underlying"] == FINAL[EXPIRY]
 
+    def test_long_gap_window_still_reaches_the_expiry_session(self, world):
+        """长时间没跑：截至 as_of 的 120 根窗口第一根已晚于到期日 ⇒ 按结算场次补取；否则误报 bar_missing、直接核销。"""
+        world.book()
+        world.published = "2027-06-01"
+        r = world.run("2027-06-01")
+        t = r["closed_today"][0]
+        assert t["mark_source"] == "intrinsic" and t["exit_underlying"] == FINAL[EXPIRY], t
+        assert world.fetches == [(TK, "2027-06-01"), (TK, EXPIRY)]
+
     def test_one_fetch_shared_with_the_other_consumers(self, world):
         world.book()
         world.published = "2026-10-19"
@@ -212,11 +225,13 @@ class TestControls:
         r = world.run("2026-10-19")
         assert r["closed_today"][0]["exit_underlying"] == FINAL[EXPIRY]
 
-    @pytest.mark.parametrize("as_of,session", [("2026-10-17", "2026-10-16"), ("2026-11-26", "2026-11-25")])
-    def test_non_trading_settle_date_uses_the_previous_session(self, world, as_of, session):
-        assert not is_trading_day(date.fromisoformat(as_of))[0]
-        world.book(expiry="2026-12-18")
-        world.published, world.close = session, {session: 104.0}
+    @pytest.mark.parametrize("expiry,session,as_of", [("2026-10-17", "2026-10-16", "2026-10-19"),
+                                                      ("2026-11-26", "2026-11-25", "2026-11-27")])
+    def test_non_trading_expiry_uses_the_previous_session(self, world, expiry, session, as_of):
+        """到期日落在周六（老式 OCC 到期日）/ 感恩节：按之前最近一个交易日那一场结算。"""
+        assert not is_trading_day(date.fromisoformat(expiry))[0]
+        world.book(expiry=expiry)
+        world.published, world.close = as_of, {session: 104.0}
         r = world.run(as_of)
         t = r["closed_today"][0]
         assert t["exit_underlying"] == 104.0 and t["exit_date"] == as_of
@@ -248,15 +263,14 @@ class TestDeferralLifecycle:
         world.run("2026-10-19")
         assert (opl.POSITIONS_FILE.read_text(), opl.EQUITY_FILE.read_text()) == snap
 
-    def test_flags_clear_once_no_longer_due(self, world, monkeypatch):
-        world.book(expiry="2026-10-30")
-        r = world.run("2026-10-16")
-        assert r["closed_today"] == [] and r["positions"][0]["settle_deferred_since"] == "2026-10-16"
-        monkeypatch.setitem(opl.CONFIG, "exit_after_event", False)    # 不再该平
+    def test_deferral_ends_when_the_close_arrives(self, world):
+        world.book()
         r = world.run("2026-10-19")
-        p = r["positions"][0]
-        assert p["settle_deferred_since"] is None and p["settle_deferred_reason"] is None
-        assert r["settle_deferred"] == []
+        assert r["settle_deferred"][0]["since"] == "2026-10-19"
+        world.published = "2026-10-20"
+        r = world.run("2026-10-20")
+        assert r["closed_today"][0]["exit_underlying"] == FINAL[EXPIRY] and r["settle_deferred"] == []
+        assert "deferred since 2026-10-19" in r["closed_today"][0]["rationale"]
 
     def test_markdown_shows_the_deferral(self, world):
         world.book()
@@ -280,3 +294,10 @@ class TestResolveClose:
     def test_only_the_settlement_session_is_usable(self, raw, price, reason):
         out = opl._resolve_close(raw, EXPIRY)
         assert (out["price"], out["reason"]) == (price, reason)
+
+
+def test_defer_text_never_prints_none():
+    txt = opl._defer_text({"reason": "lagging", "seen_session": PREV, "seen_price": None}, EXPIRY)
+    assert "None" not in txt and "收盘无效" in txt
+    txt = opl._defer_text({"reason": "lagging", "seen_session": PREV, "seen_price": 103.0}, EXPIRY)
+    assert f"{PREV} 收 103.0" in txt
