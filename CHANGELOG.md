@@ -5,6 +5,48 @@
 
 ---
 
+## [0.45.445] — 2026-10-09 — Changed：新闻主源 Alpha Vantage → Massive（原 Polygon.io）；降级仍去 Yahoo；登世代边界 2026-10-09（与 v0.45.441 同日、早于维度 IC 窗口 10-12，不截断 H1）
+
+**为什么**：用户 2026-10-08 决定「替换掉一直失败的 AV」。AV 免费 25 次/天 < 30 只，固定 5 只（TMUS/ENPH/NFLX/NEE/SNOW）每天走 Yahoo；
+10-05 重跑之后连续三轮服务端全拒（10-06、10-07：0/30 走 AV），news 通道整片换成 Yahoo 量纲（未登记的数据降级）。
+Massive 免费 Stocks Basic：5 次/分钟、无日上限，ticker news 每篇带 `insights`（逐票 positive/negative/neutral + 理由）。
+
+**校准**（2026-10-08 08:00 PDT，30 只同一时刻，只读、生产库副本）：Massive 29/30 可用（NFLX 一次直连 SSLError）；
+Massive 同票对 09-28~10-02 的 AV 均值 平均 +1.5 / 中位 −1.0（13 低 12 高），Yahoo 同票 −27.1（23/24 更低），同时刻 Massive − Yahoo +28.8（25/28）
+⇒ Massive 与 AV 量纲相当、Yahoo 系统性偏低。⚠️ 横截面排序没有证据（秩相关 −0.41，今天的快照对两周前的均值，n=25），不据此说两源等价。
+
+**改了什么**
+- `newsapi_client.py`：新增 `_fetch_massive_news`（`GET api.massive.com/v2/reference/news`，key 走 `Authorization: Bearer` 不进 URL；
+  BRK-B → BRK.B；insights 按本票取，没有本票 insight 的文章记 neutral 并计 `massive_no_insight`；`published_at` 与 AV / Yahoo 同键，三源走同一个 `_build_result`）。
+  `_SlidingWindowLimiter`（5 次 / 60 秒滑动窗口）：等不到名额**立即**降级（`limiter_timeout`），上限 40s < Phase-1 等 Buzz 的 60s（测试钉住两者关系）。
+  主源按 `config.NEWS_SOURCE_CONFIG["primary"]` 路由（`alpha_vantage` 仍可回滚）；v0.45.444 的 AV 专名改为主源通用（`primary_attempt` / `get_primary_run_stats` /
+  `_primary_fail`；444 未部署，无兼容负担）。
+- `config.py`：`_SECRET_REGISTRY["MASSIVE_API_KEY"] = ~/.alpha_hive_massive_key`（用户已存，0600）；`NEWS_SOURCE_CONFIG`。
+- `swarm_agents/buzz_bee.py`：details 改记 `news_primary_status`，新增 `news_primary`（配置的主源名，降级时也写 ⇒ 兼作边界印记）。通道算式、data_quality 不变。
+- `alert_manager.py`：P1 阈值 `NEWS_NON_PRIMARY_P1_SHARE = 0.20`（Massive 常态应≈0；AV 时代的「常态」8/30 在新口径下就该报）。
+- 世代边界：`ic_rerun_readiness._COHORT_HISTORY` 追加 ("2026-10-09", "v0.45.445")（与 441 同日 ⇒ 切点不变，边际作废 0 条；单独登记时是 240 条、其中 30 条已到期，被 441 的同日切换吸收）；
+  `_BOUNDARY_MARKERS["v0.45.445"]`（Buzz `news_primary == "massive"`）；`signal_archive.COHORT_SIGNAL_SCOPE["v0.45.445"]` = `buzz.comp.news_signal` + `agent.BuzzBeeWhisper.*`
+  （协议 §6 按层声明）；`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登一代（final_score 是 ML 特征）。
+  ⚠️ **边界日期按「首个跑新代码的扫描日」写**：写 10-09，即 10-09 14:00 PT 那轮必须已跑上新代码（扫描前 `production_sync` 快进克隆）；赶不上就把日期改 10-10 或更晚，但必须早于 10-12，否则终止 H1。
+
+**测试**：`tests/test_news_source_visibility.py` 重写（43 条：Massive 主源 10 条、限速器与配置守卫 3 条、AV 回滚 7 条、记录不改通道 + 印记 + 边界登记 6 条、汇总 4 条、告警 10 条、端到端 2 条、main 接线 1 条）；
+`tests/test_newsapi_client.py` 钉主源为 AV（它测的就是 AV + Yahoo 两条路）；`tests/test_production_sync.py` 夹具改新字段。
+**因新边界 / 合并暴露的既有测试问题**（都不是 Massive 逻辑的错）：
+- `test_ic_rerun_readiness::TestPoolDriftBreaksCohort`：写死日期，世代起点一后移，另两条**空转着照绿**（样本落在世代外）；改为由世代起点推导并补「样本确在世代内」前提断言（同 v0.45.128）。
+  「池被换」那条 main 的 `5b33a780` 已修，取 main 的。`test_step_contract_ic_rerun` 同理已被 `5b33a780` 用 `history_through` 修对，本版**不动**（初版曾放宽它的断言，合并时发现 main 的修法更严，还原）。
+- 同日边界登记的约定：`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日多批**合并为一代、标签用 `+` 连接**（09-06 / 09-07 / 09-28 先例），所以 441 + 445 登成 `v0.45.441+v0.45.445`；
+  `test_scout_consensus_excluded` 两条守卫原写「441 恰好是表尾 / 标签恰好等于 441」，放宽为「441 在最新日期组里 / 标签按 `+` 拆开含 441」（仍断言日期、早于 FORWARD_START、10-08 不含 441）。
+- `test_production_sync::TestResultReachesAlerts::test_healthy_round_raises_no_sync_or_deploy_alert`：**origin/main 上本来就是红的**（v0.45.423 起 alert_manager 对「本轮没跑到组合 Greeks」记 `checks_skipped`，
+  这条自拼 snapshot 的「健康一轮」夹具没带 `counters.portfolio_greeks`，`not a.checks_skipped` 断言因此失败）；夹具补一份「干净」的价核对计数，断言不动。
+
+**验证**（接手后实测，2026-10-09 PT 清晨）：
+- 全套（`pytest` 默认排除 integration）8726 passed / 2 failed——**两条都不是本版引起**：`test_economic_calendar::TestCoverageHorizon`（GDP 表只到 10-29，设计内的抄录提醒，origin/main 同样红）；
+  `test_tests_use_running_interpreter`（`test_alphabot_launcher.py` 写死解释器，origin/main 的 `b48f8072` 已修，rebase 到它之后该条绿）。全套跑在最后一次 rebase 之前。
+- 最后一次 rebase（落在 origin/main `b48f8072` 之上）后重跑受影响的 33 个测试文件：802 passed。
+- 真实链路冒烟（只读、免费档、一次请求，沙箱数据根）：`newsapi_client.get_ticker_news("NVDA")` ⇒ `source=massive`、`primary_attempt.status=ok`、10 篇、`sentiment_score=6.4`，key 不进输出。
+- 边界代价实测：见上「世代边界」——`assess()` 在最新一组（441 + 445）下 `n_all_samples=0`，同日切点不变。
+- ⚠️ **未重做**：前一个会话报告的「9 处变异全部被测试抓到」是它在 10-08 对更早基线做的；本次接手只做了解冲突与改号，没有重跑变异。
+
 ## [0.45.444] — 2026-10-09 — Added：新闻通道降级可见化——记 Alpha Vantage 拒绝原文与逐票实际来源，非 AV 比例 > 40% 时 Step 6 报 P1；**不改任何通道值**
 
 **为什么**：10-06 AV 服务端日额度耗尽（10-05 重跑把同一配额窗口剩下的 1 次用掉后，次日 25 次全拒），30 只的新闻全部降级到 Yahoo。

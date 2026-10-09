@@ -273,8 +273,11 @@ class TestOnlyScoutExcludes:
 
 class TestRegistryWiring:
     def test_cohort_entry_is_last_and_dated_before_forward_start(self):
-        date, ver, reason = rr._COHORT_HISTORY[-1]
-        assert ver == _V and date == "2026-10-09"
+        # 同日可以再登别的边界（v0.45.445 同在 10-09）：要求 441 在**最新日期组**里，不要求它恰好是表尾
+        last_day = rr._COHORT_HISTORY[-1][0]
+        group = [(d, v, r) for d, v, r in rr._COHORT_HISTORY if d == last_day]
+        assert last_day == "2026-10-09" and any(v == _V for _, v, _ in group), [(d, v) for d, v, _ in group]
+        date, ver, reason = next(e for e in group if e[1] == _V)
         assert date < "2026-10-12", "须早于维度 IC 协议 FORWARD_START，否则 H1 / H2 被截断"
         assert "consensus_in_score" in reason and "非等价" in reason
 
@@ -295,9 +298,10 @@ class TestRegistryWiring:
         `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 必须同日追加（v0.45.441 初版漏登，二次检查补；
         `_prepare_ml_input` 没动、测试也不会红，只有这里盯着）。"""
         import probability_scorecard as ps
-        assert any(d == "2026-10-09" and v == _V for d, v, _t in ps._ML_ESTIMATOR_GENERATIONS)
-        assert ps.ml_estimator_generation("2026-10-09") == _V
-        assert ps.ml_estimator_generation("2026-10-08") != _V
+        # 同日落地的多批改动合并为一代、标签用 `+` 连接（同 09-06 / 09-07 / 09-28 的先例）
+        assert any(d == "2026-10-09" and _V in v.split("+") for d, v, _t in ps._ML_ESTIMATOR_GENERATIONS)
+        assert _V in ps.ml_estimator_generation("2026-10-09").split("+")
+        assert _V not in ps.ml_estimator_generation("2026-10-08").split("+")
 
     def test_old_upstream_edge_is_kept_for_history(self):
         """旧世代数据里 consensus_strength 确实读 Phase-1 方向——边保留，删了会让早先边界的闭包悄悄缩小。"""

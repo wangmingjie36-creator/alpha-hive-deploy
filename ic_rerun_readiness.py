@@ -937,6 +937,30 @@ _COHORT_HISTORY = [
      "crowding.* / ml.* / Rival / Guard / bear.*——Rival / Guard 自己数的拥挤度没变，是依赖边按「同一个 CrowdingDetector 公式」代表换代，宁多切不少切）；"
      "`composite.final_score` 是 ALWAYS_SLICED。前瞻检验：维度 IC 协议 FORWARD_START 2026-10-12——本条上线日 10-09 早于它 ⇒ H1 / H2 均不截断；"
      "共振加成前瞻检验：重放读记录自己的 Scout 输出、自证不受影响，检验期内边界条数 +1（附带项）。"),
+    ("2026-10-09", "v0.45.445",
+     "新闻主源 Alpha Vantage → Massive（原 Polygon.io；用户 2026-10-08 决定「替换掉一直失败的 AV」）。"
+     "BuzzBee news 通道 = `sentiment_score × 10`，`sentiment_score = 1 + 9 × 看多文章占比`；本版只换**逐文章标签从哪来**："
+     "AV 是逐文章模型分 ±0.15、Massive 是 `insights` 逐票 positive/negative/neutral，降级仍去 Yahoo（关键词打标）。"
+     "**为什么必须登记**：换分类器 = 换 news_signal 量纲 ⇒ sentiment 维（权重 0.325）⇒ final_score。"
+     "**起因**：AV 免费 25 次/天 < 30 只，固定 5 只（TMUS/ENPH/NFLX/NEE/SNOW）每天走 Yahoo；10-05 重跑之后连续三轮服务端全拒"
+     "（10-06、10-07：0/30 走 AV），news 通道整片换成 Yahoo 量纲——那是**未登记的数据降级**，不是代码边界。"
+     "**校准**（2026-10-08 08:00 PDT，30 只同一时刻，只读）：Massive 29/30 可用（NFLX 一次 SSLError）；"
+     "Massive 同票对 09-28~10-02 的 AV 均值 平均 +1.5 / 中位 −1.0（13 低 12 高），Yahoo 同票 −27.1（23/24 更低），"
+     "同时刻 Massive − Yahoo +28.8（25/28 更高）⇒ Massive 的水平与 AV 相当、Yahoo 系统性偏低。"
+     "⚠️ 横截面排序没有证据（今天的快照对两周前的均值，秩相关 −0.41，n=25，新闻本身会变），不据此说「两源等价」。"
+     "**边界代价**：与 v0.45.441 同日（2026-10-09）⇒ `assess()` 切点不变——世代起点只取最新一组边界的日期，同日两条登记切点相同；"
+     "10-09 之前的样本在 441 登记时已全部归旧世代，本条**边际作废 0 条**（2026-10-09 清晨（PT）对生产库备份副本只读实测最新一组 "
+     "441 + 445：`n_all_samples=0`、`n_ripe_samples=0`，生产库 predictions 最新 10-08，此刻无 10-09 行）。"
+     "若单独在 10-08 登记，当时同法实测当前世代（09-28 / v0.45.383 起）`n_all_samples=240`、`n_ripe_samples=30`、已攒 1 个不重叠周，"
+     "即会作废 240 条（其中 30 条已到期）——这个代价被 441 的同日切换吸收了，不是本条凭空免掉的。不等价、不登 `_BOUNDARY_EQUIVALENCE`："
+     "旧代码记录没有 Massive 标签可重放。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.445\"]`：Buzz details 带 `news_primary == \"massive\"`（新代码每次都写，主源失败降级时也写）。"
+     "预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.445\"]` = `buzz.comp.news_signal` + `agent.BuzzBeeWhisper.*`（协议 §6 按层声明：改通道"
+     "必连带点名分）；`composite.final_score` 是 ALWAYS_SLICED。"
+     "前瞻检验：维度 IC 协议 H1（buzz_v1，通道是输入层）与 H2 都会随之变，但本条早于 FORWARD_START 2026-10-12 ⇒ 不截断；"
+     "窗口开始后再换主源 = 终止 H1。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登一代（`final_score` 是 ML 特征）。"
+     "⚠️ 10-05 重跑 / 10-06 / 10-07 三轮的 news 是 Yahoo 量纲（数据降级，不在任何代码边界内），已在本世代之前，不另隔离。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1112,6 +1136,17 @@ def _marker_buzz_momentum_as_of(d: dict) -> bool:
     b = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("BuzzBeeWhisper")
     sm = ((b or {}).get("details") or {}).get("sentiment_momentum") if isinstance(b, dict) else None
     return isinstance(sm, dict) and "as_of_source" in sm
+
+
+def _marker_buzz_news_primary_massive(d: dict) -> bool:
+    """v0.45.445：Buzz details 带 `news_primary == "massive"`。
+
+    新代码每次都写（主源失败降级到 Yahoo 时照写——与 `news_source` 不同，后者记的是实际来源）；
+    此前的 details 没有这个键。只认取值 "massive"：回滚到 AV 的配置写的是 "alpha_vantage"，那是另一回事、要另登边界。
+    """
+    b = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("BuzzBeeWhisper")
+    det = (b or {}).get("details") if isinstance(b, dict) else None
+    return isinstance(det, dict) and det.get("news_primary") == "massive"
 
 
 def _marker_oracle_gex_signal_neutralized(d: dict) -> bool:
@@ -1331,6 +1366,8 @@ _BOUNDARY_MARKERS = {
                   _marker_oracle_td_session_aware),
     "v0.45.441": ("agent_details.ScoutBeeNova.details.consensus_in_score is False",
                   _marker_scout_consensus_excluded),
+    "v0.45.445": ("agent_details.BuzzBeeWhisper.details.news_primary == \"massive\"",
+                  _marker_buzz_news_primary_massive),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，

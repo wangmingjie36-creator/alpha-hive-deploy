@@ -24,10 +24,11 @@ _SYNC_MEANING = {
 
 _log = get_logger("alerts")
 
-#: v0.45.444：新闻通道「不走 Alpha Vantage」的标的占比，超过即 P1。
-#: 常态 0.20–0.27（2026-09-28~10-02：30 只里 6–8 只——5 只是 30>25 的结构性本地配额，余下是开跑第一秒的
-#: 每分钟限速拒绝）；AV 服务端日额度耗尽的日子（10-05 重跑、10-06）接近 1.0。0.40 留出常态的余量。
-NEWS_NON_AV_P1_SHARE = 0.40
+#: v0.45.444：新闻通道「没走配置的主源」的标的占比，超过即 P1（v0.45.445 起主源 Massive）。
+#: AV 时代常态是 0.20–0.27（30>25 的结构性本地配额 + 开跑第一秒的每分钟限速），所以 444 定的是 0.40；
+#: Massive 无日上限、5 次/分钟远高于扫描节奏（≈1.2 只/分钟）⇒ 常态应接近 0，降到 0.20（30 只里 ≥7 只降级才报）。
+#: 降级去的 Yahoo 是另一套分类器，同票系统性低约 27 分（2026-10-08 校准）——比例一高，横截面就是两种量纲混算。
+NEWS_NON_PRIMARY_P1_SHARE = 0.20
 #: 已知来源的标的少于这个数就不判（Buzz 大面积报错时比例没有意义），改报 P2「无法判定」。
 NEWS_MIN_KNOWN = 10
 
@@ -531,8 +532,9 @@ class AlertAnalyzer:
         """新闻通道的实际来源（v0.45.444，`scan_timing.extra.news_sources`，写入者 `alpha_hive_daily_report.main`）。
 
         降级到 Yahoo 不报错、Buzz 的 data_quality.news 两种源都写 `keyword`，所以原来没人会红；
-        但 Yahoo 关键词打标与 AV 逐文章模型分是两个分类器——2026-10-06 全 30 只降级，同票 news_signal
-        比各自 AV 日均值平均低 21 分（21/25 更低），Buzz 偏空、Scout consensus_strength 28/30 为 0。
+        但 Yahoo 关键词打标与主源（v0.45.445 起 Massive，此前 AV）的逐文章模型标签是两个分类器——2026-10-06 全 30 只
+        降级到 Yahoo，同票 news_signal 比各自 AV 日均值平均低 21 分（21/25 更低），Buzz 偏空、Scout consensus_strength 28/30 为 0；
+        10-08 同一时刻校准：Yahoo 比 Massive 同票低 28.8 分（25/28）。
 
         只在扫描真跑完时判（同 `_check_deploy_and_code_sync`）；`scan_timing` 整段缺失那条 P1 已在上一步报过。
         """
@@ -557,7 +559,7 @@ class AlertAnalyzer:
             ))
             return
         n_known = ns.get("n_known") or 0
-        share = ns.get("non_av_share")
+        share = ns.get("non_primary_share")
         if share is None or n_known < NEWS_MIN_KNOWN:
             self.alerts.append(Alert(
                 AlertLevel.MEDIUM,
@@ -566,21 +568,23 @@ class AlertAnalyzer:
                 ["data_quality", "news"]
             ))
             return
-        if share > NEWS_NON_AV_P1_SHARE:
+        if share > NEWS_NON_PRIMARY_P1_SHARE:
             by_source = ns.get("by_source") or {}
-            n_non_av = n_known - by_source.get("alpha_vantage", 0)
+            primary = ns.get("primary_source") or "?"
+            n_non = n_known - by_source.get(primary, 0)
             msgs = ns.get("refusal_messages") or []
             self.alerts.append(Alert(
                 AlertLevel.HIGH,
-                f"⚠️ 【P1 高】新闻通道降级：{n_non_av}/{n_known} 只没走 Alpha Vantage（阈值 {NEWS_NON_AV_P1_SHARE:.0%}）",
+                f"⚠️ 【P1 高】新闻通道降级：{n_non}/{n_known} 只没走主源 {primary}（阈值 {NEWS_NON_PRIMARY_P1_SHARE:.0%}）",
                 {
                     "来源分布": by_source,
-                    "AV 结局": ns.get("av_status"),
-                    "AV 拒绝原文": [f"{m.get('count')}× {m.get('text')}" for m in msgs[:2]] or "（无）",
-                    "影响": "Buzz news_signal 改用 Yahoo 关键词打标，同票系统性偏低约 20 分（10-06 实测）——"
-                            "不是缺数据，是换了分类器；今天的 Buzz / 情绪类分数不要与 AV 日直接比较",
-                    "建议": "看拒绝原文分辨是每日额度（25 次）还是每分钟限速（5 次）；"
-                            "同一配额窗口里不要重跑扫描（10-05 重跑把剩余额度用尽）",
+                    "主源结局": ns.get("primary_status"),
+                    "主源拒绝原文": [f"{m.get('count')}× {m.get('text')}" for m in msgs[:2]] or "（无）",
+                    "影响": "降级的标的 news_signal 改用 Yahoo 关键词打标，同票系统性偏低约 20–29 分（10-06 / 10-08 实测）——"
+                            "不是缺数据，是换了分类器；今天的 Buzz / 情绪类分数不要与主源日直接比较",
+                    "建议": "看主源结局与拒绝原文：limiter_timeout ⇒ 本进程排队太久（同进程别的调用方在抢名额）；"
+                            "server_refused ⇒ 看原文（Massive 免费档 5 次/分钟，AV 是每日 25 次 + 每分钟 5 次）；"
+                            "network_error ⇒ 出站网络 / 代理",
                 },
                 ["data_quality", "news"]
             ))

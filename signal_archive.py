@@ -1307,6 +1307,10 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 那条 SIGNAL_UPSTREAM 边（consensus_strength ← Phase-1 同伴方向）**保留**：它描述的是旧世代数据的真实依赖，
     # 删了会让早先边界（如 v0.45.349 经 Oracle 方向）对历史行的闭包悄悄缩小。
     "v0.45.441": ("crowding.comp.consensus_strength", "agent.ScoutBeeNova.*"),
+    # 10-09（v0.45.445）：新闻主源 AV → Massive（降级仍去 Yahoo）。改的是**通道**（news 的逐文章标签换了分类器），
+    # 按维度 IC 协议 §6「按层声明」：点名 `buzz.comp.news_signal` **和** `agent.BuzzBeeWhisper.*`（通道值变 ⇒ 分跟着变）。
+    # 下游（Guard 读 Buzz 分、Scout consensus_strength 读 Buzz 方向、swarm_agreement、ml.* 等）由 _scope_closure 带出。
+    "v0.45.445": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*"),
 }
 
 

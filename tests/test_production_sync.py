@@ -221,9 +221,14 @@ class TestResultReachesAlerts:
         ps.write_result(ps.sync_before_scan(w.tool, today="2026-09-14"))
         # v0.45.444：健康的一轮也带 news_sources（main() 每轮都写）；缺了它 alert_manager 会把新闻来源检查记进 checks_skipped
         healthy_news = {"available": True, "n_known": 30, "n_unknown": 0,
-                        "by_source": {"alpha_vantage": 24, "yahoo_finance": 6}, "av_status": {},
-                        "non_av_share": 0.2, "refusal_messages": []}
+                        "primary_source": "massive", "by_source": {"massive": 30}, "primary_status": {"ok": 30},
+                        "non_primary_share": 0.0, "refusal_messages": []}
         snap = st.snapshot("2026-09-14", extra={"gh_pages": {"success": True}, "news_sources": healthy_news})
+        # 同理组合 Greeks（v0.45.423 起 alert_manager 对「本轮没跑到组合 Greeks」记 checks_skipped）：
+        # 健康一轮带一份「干净」的价核对计数；本测试自己拼 snapshot，不会经过真的 compute_day
+        snap["counters"]["portfolio_greeks"] = {
+            "n_stale": 0, "stale": [], "n_quote_stale": 0, "spy": {"stale": False},
+            "execution_blocked": None, "hedge_undecided": None, "gaps": []}
         a, msgs = self._alerts(tmp_path, snap)
         assert not any("origin/main（" in m or "同步未执行" in m or "gh-pages 部署失败" in m for m in msgs), msgs
         assert not a.checks_skipped, a.checks_skipped
@@ -241,7 +246,7 @@ class TestResultReachesAlerts:
 
         # v0.45.444：main() 读本轮 `.swarm_results_<date>.json` 汇总新闻来源 ⇒ 桩带一个真目录与一份真文件
         (tmp_path / ".swarm_results_2026-09-14.json").write_text(json.dumps({"NVDA": {"agent_details": {
-            "BuzzBeeWhisper": {"details": {"news_source": "yahoo_finance", "news_av_status": "server_refused"}}}}}))
+            "BuzzBeeWhisper": {"details": {"news_source": "yahoo_finance", "news_primary_status": "server_refused"}}}}}))
 
         class SwarmReporter:
             date_str = "2026-09-14"
