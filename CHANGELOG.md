@@ -5,7 +5,24 @@
 
 ---
 
-## [0.45.443] — 2026-10-09 — 占位（进行中：Step 12 覆盖率闸加 `analyst_targets` 字段——目标价 08-04 起 8/38 个扫描日 0/30、此前无任何会红的观测点；只观测，不改评分）
+## [0.45.443] — 2026-10-09 — Added：Step 12 覆盖率闸加 `analyst_targets` 字段——分析师目标价 08-04 起 8/38 个扫描日 0/30，此前没有任何会红的观测点；只观测，不改评分
+
+用户 2026-10-09 问「真正的分析师目标价那一路」是否也归零、再问「加进 Step 12 有没有必要」。实测（`.swarm_results_*.json` 的 `ChronosBeeHorizon.details.analyst_targets`）：10-05~10-08 每天 30/30、`target_mean>0`；但 **08-04 起共 38 个扫描日里 8 天 0/30**（08-04 / 08-06 / 08-11 / 08-12 / 08-14 / 09-17 / 09-24 / 09-25），另有 5 天部分缺失（08-10 21/30、08-13 22、08-24 22、08-25 18、08-26 16）。09-17 排查过一次（v0.45.270：yfinance `analyst_price_targets` 失败时按库默认 `hide_exceptions` 返回空 `{}`，与「该票没有分析师覆盖」不可区分、没有第二数据源可回落），之后 09-24、09-25 又连坏两天，没有任何东西红。
+
+### Added
+- `scan_coverage_gate.FIELDS` 加 `analyst_targets`（路径 `ChronosBeeHorizon.analyst_targets`、`min_coverage` 0.70、来源「yfinance 分析师目标价」）。判据 = 非空：Chronos 只在 `target_mean > 0` **且有可信现价**时才填它，否则 `{}`（1b 段）——所以「缺」= 取数失败或无可信现价，卡片没出就是缺。基线 30/30、没有合法缺失的标的；不需要 `recorded_key`（Chronos 一直写这个键，旧结果照常判）。
+- 缺它的后果（为什么值得红）：Chronos `confidence` 少 0.1（`build_confidence` 的 `(bool(_analyst_info), 0.1)`，进 Queen 方向投票的票权）、网站 / ML 报告 / 深度报告的目标价卡片空白、discovery 少一句。数据质量标签 `analyst_targets: unavailable` 早就有，但只是几十个标签之一，`data_real_pct` 动不到 1pp，看不出来。
+- 红在 Step 12 的告警级别（与 `unusual_flow` 同），不升 P1。
+
+### 不做什么
+- **不修取数、不改评分、不进世代边界**（观测字段，`signal_archive` / `_COHORT_HISTORY` 都不动）。
+- 取数根因没解：yfinance 失败仍与「无覆盖」分不开、仍无第二源。本版只保证下次坏的时候有人知道。
+
+### 守卫（`tests/test_scan_coverage_analyst_targets.py`，14 条）
+- 健康日 / 历史坏日形状（0、16、18/30）降级 + 退出码 1 + attention 点名 / 历史部分缺失但可接受的日子（22、21/30）不误报（0.70 不过敏）/ 阈值与其余 yfinance 字段一致 / 渲染文本点名。
+- **与生产者对得上（真跑 `ChronosBeeHorizon.analyze`）**：yfinance 返回 None / `{}` / 均价 0 / 缺均价 ⇒ 产出 `{}` ⇒ 闸判缺；有效目标价 ⇒ 闸判有；有目标价却无可信现价 ⇒ 生产者清空、闸同样判缺。
+- 变异 5 个（先提交后变异，全红、已还原）：条目改名 / 阈值放到 0.50 / 路径写错键 / Chronos 无现价不再清空 / Chronos 均价 0 也填。
+- 夹具：`test_scan_coverage_gate.py`（FULL + 一处内联）与 `test_oracle_unusual_flow_visibility.py` 的基线结果补 `analyst_targets`（新字段进 FIELDS 后「健康」基线必须带它，否则恒红）。
 
 ## [0.45.442] — 2026-10-09 — 占位（进行中：v0.45.435/438/440 二次检查修复——历史闸读坏行不崩并计数、守卫改用共享文件清单 …）
 
