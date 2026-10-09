@@ -5,6 +5,39 @@
 
 ---
 
+## [0.45.444] — 2026-10-09 — Added：新闻通道降级可见化——记 Alpha Vantage 拒绝原文与逐票实际来源，非 AV 比例 > 40% 时 Step 6 报 P1；**不改任何通道值**
+
+**为什么**：10-06 AV 服务端日额度耗尽（10-05 重跑把同一配额窗口剩下的 1 次用掉后，次日 25 次全拒），30 只的新闻全部降级到 Yahoo。
+降级本身不报错，Buzz 的 `data_quality.news` 两种源都写 `keyword`；而 Yahoo 是关键词集合打标、AV 是逐文章模型分（±0.15），
+同一只票的 `news_signal` 比它自己 09-28~10-02 的 AV 均值平均低 21.3 分（25 只里 21 只更低；10-05 重跑对首跑同票同日 −15.9）。
+下游 Buzz 18/30 看空、Scout `consensus_strength` 28/30 为 0。原来没有一层会红，拒绝原文也被丢掉（只记键名 `['Information']`），
+分不清撞的是每日 25 次还是每分钟 5 次。
+
+**改了什么**
+- `newsapi_client.py`：`_fetch_av_news` 每个没拿到数据的出口带结局（`breaker_open` / `local_quota` / `limiter_timeout` / `http_error` /
+  `server_refused` / `empty_feed` / `network_error`），拒绝原文去 key、截 300 字；`get_ticker_news` 把结局作为 `av_attempt` 随结果带出，
+  并计入进程级 `get_av_run_stats()`（缓存命中不重复计）。新增 `summarize_news_sources(swarm_results)`。
+  顺带：`Error Message`（AV 报错键）原先落进空 feed 分支，现记为 `server_refused`；debug 日志里的异常文本去 key。
+- `swarm_agents/buzz_bee.py`：`details` 新增 `news_source` / `news_av_status`（只读、不进合成）。`data_quality.news` **不改**——新 DQ 取值要进 Queen 登记表。
+- `alpha_hive_daily_report.main`：读本轮 `.swarm_results_<date>.json` 汇总进 `scan_timing.extra.news_sources`（`report` 里没有 swarm_results）；
+  算不出也写一条带原因的记录。
+- `alert_manager.py`：`_check_news_sources`——扫描真跑完时，非 AV 占比 > `NEWS_NON_AV_P1_SHARE`(0.40) ⇒ P1（附拒绝原文）；
+  观测点缺失 / 已知来源 < 10 只 ⇒ P2；扫描没跑完不判。常态 0.20–0.27（5 只是 30>25 的结构性本地配额、固定是 TMUS/ENPH/NFLX/NEE/SNOW，余下是开跑第一秒的每分钟限速拒绝）。
+
+**没改什么**：去向（每个出口照旧降级 Yahoo）、news 取值、Buzz 合成与 data_quality、限速器、本地配额。维度 IC 协议「改 Buzz 通道 = 终止 H1」（10-12 开窗）——
+本版不碰通道值，测试逐项钉住。被拒后停用 AV 留到能看到拒绝原文之后再定（常态日开局那 1 次是每分钟限速，若也停用会让剩下的票改走 Yahoo，反而改了通道值）。
+
+**测试契约更新**：`tests/test_production_sync.py::TestResultReachesAlerts` 两条钉 `scan_timing.extra` 的形状——健康一轮的夹具补上 `news_sources`
+（`not a.checks_skipped` 照旧断言）；`set(extra)` 从 `{"gh_pages"}` 改为 `{"gh_pages", "news_sources"}`（退役字段照旧会红），桩补 `report_dir`
+与一份真 `.swarm_results`，顺带覆盖 `main()` 读文件 → 汇总这条接线。
+
+**验证**：`tests/test_news_source_visibility.py` 26 条（含真实 BuzzBee → 汇总 → 告警端到端两条、`main()` 读不到文件时写带原因的记录一条）；
+12 个变异（不去 key / Yahoo 路径不带结局 / unknown 进分母 / 不计数 / 阈值 `>=` / 不调检查 / 缺失不报 / Buzz 不记来源 / DQ 写来源 /
+通道值随来源变 / extra 不写 news_sources / 不读本轮文件）全部被抓、文件逐字节复原；ruff F821/F401 通过。
+全套（`-m "not integration"`）首跑 8337 passed / 4 failed：3 条是上面的契约更新（已改），1 条 `test_economic_calendar::TestCoverageHorizon`
+在未改动的 origin/main 上同样红（GDP 表只到 10-29、剩余 < 30 天，设计内的抄录提醒，与本版无关）。
+改号后在 10-08 最新 origin/main 上重跑全套：8489 passed / 1 failed（同上日历）/ 1 error——session 级真实数据根闸报 `alphabot_state/intraday/2026-10-08/` 五个文件变了：是盘中正在运行的 Alpha Bot（`python -m alphabot`）每分钟写快照，不是测试写的。
+
 ## [0.45.443] — 2026-10-09 — Added：Step 12 覆盖率闸加 `analyst_targets` 字段——分析师目标价 08-04 起 8/38 个扫描日 0/30，此前没有任何会红的观测点；只观测，不改评分
 
 用户 2026-10-09 问「真正的分析师目标价那一路」是否也归零、再问「加进 Step 12 有没有必要」。实测（`.swarm_results_*.json` 的 `ChronosBeeHorizon.details.analyst_targets`）：10-05~10-08 每天 30/30、`target_mean>0`；但 **08-04 起共 38 个扫描日里 8 天 0/30**（08-04 / 08-06 / 08-11 / 08-12 / 08-14 / 09-17 / 09-24 / 09-25），另有 5 天部分缺失（08-10 21/30、08-13 22、08-24 22、08-25 18、08-26 16）。09-17 排查过一次（v0.45.270：yfinance `analyst_price_targets` 失败时按库默认 `hide_exceptions` 返回空 `{}`，与「该票没有分析师覆盖」不可区分、没有第二数据源可回落），之后 09-24、09-25 又连坏两天，没有任何东西红。
@@ -45,6 +78,7 @@
 - 新测试：`TestHistoryGateSurvivesBadLines`（2）、`TestRunFailureIsRed`（2）、`TestIntradayRecordsAreNotCloses`（2）、`TestUndecidedMeansCouldNotCompute`（2）、守卫 `test_untracked_icloud_duplicate_is_not_scanned` + `_load_audit` 自证；1 条既有断言按新分类（`intraday_run`）改期望。
 - 变异 13 个全部打红：H1–H5（裸 rglob / 坏 JSON 静默 / 非对象照收 / 不核日期 / 审计非对象）、J1–J8（失败不记录 / 覆盖已算核对 / 告警与摘要不看 error / undecided 不看 target / 审计与净值不排盘中 / 守卫不认 `_load_audit`）。
 - 全量套件：见提交说明。
+
 
 
 ## [0.45.441] — 2026-10-09 — Fixed：Scout 拥挤度去掉 `consensus_strength`（看多同伴数）——并行蜂读不到同伴的输出，27/30 恒为 0；世代边界 2026-10-09

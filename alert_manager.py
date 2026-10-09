@@ -24,6 +24,13 @@ _SYNC_MEANING = {
 
 _log = get_logger("alerts")
 
+#: v0.45.444：新闻通道「不走 Alpha Vantage」的标的占比，超过即 P1。
+#: 常态 0.20–0.27（2026-09-28~10-02：30 只里 6–8 只——5 只是 30>25 的结构性本地配额，余下是开跑第一秒的
+#: 每分钟限速拒绝）；AV 服务端日额度耗尽的日子（10-05 重跑、10-06）接近 1.0。0.40 留出常态的余量。
+NEWS_NON_AV_P1_SHARE = 0.40
+#: 已知来源的标的少于这个数就不判（Buzz 大面积报错时比例没有意义），改报 P2「无法判定」。
+NEWS_MIN_KNOWN = 10
+
 
 def _ran_from_production_clone(scan_timing: Dict) -> bool:
     """本轮扫描的代码目录（扫描启动时 `code_version.repo_dir`）是不是生产独立克隆（v0.45.432）。
@@ -292,6 +299,9 @@ class AlertAnalyzer:
         # 7. 检测 P2: 组合 Greeks 用到了不属于当天那一场的标的价 / 因此拒绝成交（v0.45.423）
         self._check_portfolio_greeks_prices(status)
 
+        # 8. 检测 P1: 新闻通道降级（v0.45.444）
+        self._check_news_sources(status)
+
         return self.alerts
 
     @staticmethod
@@ -516,6 +526,64 @@ class AlertAnalyzer:
             },
             ["portfolio_greeks", "data_quality"]
         ))
+
+    def _check_news_sources(self, status: Dict) -> None:
+        """新闻通道的实际来源（v0.45.444，`scan_timing.extra.news_sources`，写入者 `alpha_hive_daily_report.main`）。
+
+        降级到 Yahoo 不报错、Buzz 的 data_quality.news 两种源都写 `keyword`，所以原来没人会红；
+        但 Yahoo 关键词打标与 AV 逐文章模型分是两个分类器——2026-10-06 全 30 只降级，同票 news_signal
+        比各自 AV 日均值平均低 21 分（21/25 更低），Buzz 偏空、Scout consensus_strength 28/30 为 0。
+
+        只在扫描真跑完时判（同 `_check_deploy_and_code_sync`）；`scan_timing` 整段缺失那条 P1 已在上一步报过。
+        """
+        if not self._swarm_scan_actually_ran(status):
+            return
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        ns = (st.get("extra") or {}).get("news_sources")
+        if not isinstance(ns, dict) or not ns.get("available"):
+            reason = (ns or {}).get("reason") if isinstance(ns, dict) else None
+            self.checks_skipped.append("新闻通道来源检查（scan_timing 无可用 news_sources）")
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】新闻通道来源统计缺失——本轮新闻是否降级到 Yahoo 未知",
+                {
+                    "原因": reason or ("scan_timing.extra 无 news_sources" if ns is None
+                                     else "news_sources 无已知来源的标的"),
+                    "影响": "不是「检查了没降级」，是「没检查」",
+                },
+                ["data_quality", "news", "observability"]
+            ))
+            return
+        n_known = ns.get("n_known") or 0
+        share = ns.get("non_av_share")
+        if share is None or n_known < NEWS_MIN_KNOWN:
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】新闻通道来源无法判定（已知来源仅 {n_known} 只）",
+                {"来源分布": ns.get("by_source"), "未知": ns.get("n_unknown")},
+                ["data_quality", "news"]
+            ))
+            return
+        if share > NEWS_NON_AV_P1_SHARE:
+            by_source = ns.get("by_source") or {}
+            n_non_av = n_known - by_source.get("alpha_vantage", 0)
+            msgs = ns.get("refusal_messages") or []
+            self.alerts.append(Alert(
+                AlertLevel.HIGH,
+                f"⚠️ 【P1 高】新闻通道降级：{n_non_av}/{n_known} 只没走 Alpha Vantage（阈值 {NEWS_NON_AV_P1_SHARE:.0%}）",
+                {
+                    "来源分布": by_source,
+                    "AV 结局": ns.get("av_status"),
+                    "AV 拒绝原文": [f"{m.get('count')}× {m.get('text')}" for m in msgs[:2]] or "（无）",
+                    "影响": "Buzz news_signal 改用 Yahoo 关键词打标，同票系统性偏低约 20 分（10-06 实测）——"
+                            "不是缺数据，是换了分类器；今天的 Buzz / 情绪类分数不要与 AV 日直接比较",
+                    "建议": "看拒绝原文分辨是每日额度（25 次）还是每分钟限速（5 次）；"
+                            "同一配额窗口里不要重跑扫描（10-05 重跑把剩余额度用尽）",
+                },
+                ["data_quality", "news"]
+            ))
 
     def get_critical_alerts(self) -> List[Alert]:
         """获取 P0 级别告警"""

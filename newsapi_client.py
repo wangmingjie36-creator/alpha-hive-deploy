@@ -78,6 +78,61 @@ def _av_quota_ok() -> bool:
         _av_daily["count"] += 1
         return True
 
+
+# v0.45.444：本进程每次真去取（不含缓存命中）时 AV 这一步的结局计数 + 拒绝原文。
+# 降级到 Yahoo 本身不报错，但 Yahoo 关键词打标与 AV 逐文章模型分是两个分类器，同一只票的
+# news_signal 系统性低约 20 分（2026-10-06 全 30 只降级实测）——「谁会红？」靠这里经
+# `summarize_news_sources` → `scan_timing.extra.news_sources` → `alert_manager` P1。
+_av_run_stats: Dict = {"status": {}, "messages": {}}
+_av_run_stats_lock = threading.Lock()
+_AV_MESSAGE_MAX = 300
+
+
+def _record_av_attempt(status: str, message: Optional[str] = None) -> None:
+    with _av_run_stats_lock:
+        counts = _av_run_stats["status"]
+        counts[status] = counts.get(status, 0) + 1
+        if message:
+            msgs = _av_run_stats["messages"]
+            msgs[message] = msgs.get(message, 0) + 1
+
+
+def get_av_run_stats() -> Dict:
+    """本进程 AV 这一步的结局（副本）：`status` 计数 + `messages`（拒绝原文，按出现次数降序）。"""
+    with _av_run_stats_lock:
+        return {
+            "status": dict(_av_run_stats["status"]),
+            "messages": [{"text": t, "count": c}
+                         for t, c in sorted(_av_run_stats["messages"].items(), key=lambda kv: -kv[1])],
+        }
+
+
+def _redact(text: str, api_key: Optional[str]) -> str:
+    text = str(text)
+    if api_key:
+        text = text.replace(api_key, "***")
+    return text.strip()[:_AV_MESSAGE_MAX]
+
+
+def _av_refusal_text(data: Dict, api_key: Optional[str]) -> str:
+    """AV 限速 / 错误响应的原文（`Information` / `Note` / `Error Message`），去 key、截断。
+
+    原文是分辨撞的是哪种限额（每日 25 次 vs 每分钟 5 次）的唯一依据；v0.45.444 前只记键名。
+    """
+    for k in ("Information", "Note", "Error Message", "Error"):
+        if data.get(k):
+            return _redact(data[k], api_key)
+    return ""
+
+
+def _av_fail(ticker: str, status: str, message: Optional[str] = None) -> Dict:
+    """AV 这一步没拿到数据：结构同 `_fallback`，外加 `av_status` / `av_message`（由 `get_ticker_news` 取走）。"""
+    r = _fallback(ticker)
+    r["av_status"] = status
+    if message:
+        r["av_message"] = message
+    return r
+
 _YF_NEWS_URL = "https://query2.finance.yahoo.com/v1/finance/search"
 _AV_NEWS_URL = "https://www.alphavantage.co/query"
 _YF_HEADERS = {
@@ -241,15 +296,35 @@ def get_ticker_news(ticker: str, max_articles: int = 10) -> Dict:
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     # 1. 优先 Alpha Vantage（有 Key 时质量最高，含逐文章情绪分）
+    # v0.45.444：AV 这一步的结局随结果带出（`av_attempt`，同时计入 `get_av_run_stats`）。
+    # 只多一个键，去向与 news 取值不变；缓存命中不重复计数（那次取数早已记过）。
     av_key = _load_av_key()
-    if av_key and _req is not None:
+    if not av_key:
+        av_attempt: Dict = {"status": "no_key"}
+    elif _req is None:
+        av_attempt = {"status": "no_requests"}
+    else:
         result = _fetch_av_news(ticker, av_key, max_articles)
+        status = result.pop("av_status", None)
+        message = result.pop("av_message", None)
         if result.get("is_real_data"):
+            av_attempt = {"status": "ok"}
+        else:
+            # AV 回了文章但清洗后一篇不剩：`_build_result` 判 is_real_data=False，没有出口状态
+            av_attempt = {"status": status or "no_usable_articles"}
+            if message:
+                av_attempt["message"] = message
+        _record_av_attempt(av_attempt["status"], av_attempt.get("message"))
+        if result.get("is_real_data"):
+            result["av_attempt"] = av_attempt
             _safe_cache(cache_path, result)
             return result
+    if av_attempt["status"] in ("no_key", "no_requests"):
+        _record_av_attempt(av_attempt["status"])
 
     # 2. Yahoo Finance 免费备用
     result = _fetch_yf_news(ticker, max_articles)
+    result["av_attempt"] = av_attempt
     _safe_cache(cache_path, result)
     return result
 
@@ -259,6 +334,44 @@ def _safe_cache(path: Path, data: Dict):
         atomic_json_write(path, data)
     except (OSError, TypeError):
         pass
+
+
+def summarize_news_sources(swarm_results: Dict) -> Dict:
+    """本轮扫描新闻通道的实际来源分布（v0.45.444），写进 `scan_timing.extra.news_sources`。
+
+    逐票来源读 BuzzBee `details.news_source` / `details.news_av_status`；没有这两个键的标的
+    （Buzz 报错、或缓存是旧版写的）记 `unknown`，**不算进** `non_av_share` 的分子分母——
+    否则 Buzz 整片失败会被误报成「新闻降级」。拒绝原文来自本进程 `get_av_run_stats()`。
+
+    常态（2026-09-28~10-02）：30 只里 6–8 只不走 AV ⇒ non_av_share 0.20–0.27
+    （5 只是 30>25 的结构性本地配额、固定是处理顺序最后那 5 只，另有开跑第一秒的每分钟限速拒绝）。
+    10-05 重跑 / 10-06：AV 服务端日额度耗尽 ⇒ 接近 1.0。
+    """
+    by_source: Dict[str, int] = {}
+    by_av: Dict[str, int] = {}
+    n_unknown = 0
+    for r in (swarm_results or {}).values():
+        det = (((r or {}).get("agent_details") or {}).get("BuzzBeeWhisper") or {}).get("details") or {}
+        src = det.get("news_source")
+        if not src:
+            n_unknown += 1
+            continue
+        by_source[src] = by_source.get(src, 0) + 1
+        st = det.get("news_av_status") or "unknown"
+        by_av[st] = by_av.get(st, 0) + 1
+    n_known = sum(by_source.values())
+    n_av = by_source.get("alpha_vantage", 0)
+    run = get_av_run_stats()
+    return {
+        "available": n_known > 0,
+        "n_known": n_known,
+        "n_unknown": n_unknown,
+        "by_source": by_source,
+        "av_status": by_av,
+        "non_av_share": round((n_known - n_av) / n_known, 4) if n_known else None,
+        "av_run_status": run["status"],
+        "refusal_messages": run["messages"][:5],
+    }
 
 
 # ==================== Yahoo Finance ====================
@@ -327,20 +440,22 @@ def _fetch_yf_news(ticker: str, max_articles: int = 10) -> Dict:
 def _fetch_av_news(ticker: str, api_key: str, max_articles: int = 10) -> Dict:
     """通过 Alpha Vantage NEWS_SENTIMENT API 获取新闻（含预处理情绪分）"""
     # 熔断检查
+    # v0.45.444：每个没拿到数据的出口都带上 `av_status`（原先一律 `_fallback`，事后分不清是哪一种）。
+    # 只改记录，不改去向——每个出口照旧降级 Yahoo，news 通道取值与改动前逐字节相同。
     if _news_breaker and not _news_breaker.allow_request():
         _log.warning("newsapi 熔断中，跳过 AV 请求 (%s)", ticker)
-        return _fallback(ticker)
+        return _av_fail(ticker, "breaker_open")
 
-    # 每日配额检查
+    # 每日配额检查（本地计数，见 `_av_quota_ok`；与 AV 服务端的额度窗口不是一回事）
     if not _av_quota_ok():
         _log.warning("AV 每日配额已耗尽 (%d/%d)，降级到 Yahoo Finance (%s)",
                      _av_daily["count"], _AV_DAILY_LIMIT, ticker)
-        return _fallback(ticker)
+        return _av_fail(ticker, "local_quota")
 
     try:
         if _news_limiter and not _news_limiter.acquire(timeout=10):
             _log.warning("newsapi 限流超时，跳过 AV 请求 (%s)", ticker)
-            return _fallback(ticker)
+            return _av_fail(ticker, "limiter_timeout")
         params = {
             "function": "NEWS_SENTIMENT",
             "tickers": ticker,
@@ -353,18 +468,21 @@ def _fetch_av_news(ticker: str, api_key: str, max_articles: int = 10) -> Dict:
         if not resp.ok:
             if _news_breaker:
                 _news_breaker.record_failure()
-            return _fallback(ticker)
+            return _av_fail(ticker, "http_error", f"HTTP {resp.status_code}")
 
         data = resp.json()
-        # AV 限速/错误响应检测
-        if "Information" in data or "Note" in data or "Error" in data:
-            _log.warning("AV API rate-limited or error for %s: %s",
-                         ticker, list(data.keys()))
-            return _fallback(ticker)
+        # AV 限速/错误响应检测（v0.45.444 补 "Error Message"：AV 报错用的是这个键，原先落到下面的空 feed 分支，
+        # 去向同样是降级，只是记成了 empty_feed）
+        if "Information" in data or "Note" in data or "Error" in data or "Error Message" in data:
+            _msg = _av_refusal_text(data, api_key)
+            # ⚠️ 前缀保持原样：排查文档 / 历史日志都按「AV API rate-limited or error for」grep
+            _log.warning("AV API rate-limited or error for %s: %s | %s",
+                         ticker, list(data.keys()), _msg or "（无原文）")
+            return _av_fail(ticker, "server_refused", _msg)
 
         feed = data.get("feed", [])
         if not feed:
-            return _fallback(ticker)
+            return _av_fail(ticker, "empty_feed")
 
         raw_articles = []
         for item in feed[:max_articles]:
@@ -404,10 +522,11 @@ def _fetch_av_news(ticker: str, api_key: str, max_articles: int = 10) -> Dict:
         return _build_result(ticker, raw_articles, source="alpha_vantage")
 
     except NETWORK_ERRORS as e:
-        _log.debug("AV news fetch failed for %s: %s", ticker, e)
+        _log.debug("AV news fetch failed for %s: %s", ticker, _redact(e, api_key))
         if _news_breaker:
             _news_breaker.record_failure()
-        return _fallback(ticker)
+        # 异常文本里可能带完整 URL（含 apikey 参数）⇒ 去 key 后才落进记录
+        return _av_fail(ticker, "network_error", _redact(f"{type(e).__name__}: {e}", api_key))
 
 
 # ==================== 情绪标注 ====================

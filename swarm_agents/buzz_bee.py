@@ -108,9 +108,16 @@ class BuzzBeeWhisper(BeeAgent):
             news_reasoning = ""
             news_mode = "fallback"  # 拉到真实文章前视为不可用
             headlines: list = []
+            # v0.45.444：新闻实际来自哪个源 + AV 那一步的结局。**只记录**：`news_mode` / data_quality.news
+            # 两种源都写 keyword（不改——新 DQ 取值要进 Queen 登记表），而 Yahoo 关键词打标与 AV 逐文章模型分
+            # 刻度不同（同票系统性低约 20 分），不记来源就看不出这一天换了分类器。
+            news_source = None
+            news_av_status = None
             try:
                 from newsapi_client import get_ticker_news
                 news_ext = get_ticker_news(ticker, max_articles=10)
+                news_source = news_ext.get("source")
+                news_av_status = (news_ext.get("av_attempt") or {}).get("status")
                 if news_ext.get("is_real_data") and news_ext.get("total_articles", 0) >= 3:
                     news_signal = _safe_score(
                         news_ext.get("sentiment_score"), default=5.0,
@@ -127,6 +134,7 @@ class BuzzBeeWhisper(BeeAgent):
             except LLM_ERRORS as e:
                 _log.warning("BuzzBeeWhisper news unavailable for %s: %s", ticker, e)
                 news_desc = "新闻不可用（抓取失败）"
+                news_source = "error"
 
             # 5b. LLM 语义增强（有 API Key 时自动启用；默认 Cowork 本地不走）
             if headlines:
@@ -321,6 +329,10 @@ class BuzzBeeWhisper(BeeAgent):
                     },
                     "sentiment_momentum": sent_momentum,
                     "sentiment_divergence": sent_divergence,
+                    # v0.45.444：news 通道的实际来源（alpha_vantage / yahoo_finance / fallback / error）
+                    # 与 AV 那一步的结局；读者 = newsapi_client.summarize_news_sources → alert_manager
+                    "news_source": news_source,
+                    "news_av_status": news_av_status,
                 },
                 extras={"sentinel_spike": _spike_msg},
             ).to_dict()
