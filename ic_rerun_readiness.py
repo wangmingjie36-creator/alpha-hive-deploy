@@ -908,6 +908,18 @@ _COHORT_HISTORY = [
      "同 383，理由见该条注释）；"
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段。前瞻检验：本条登记日早于维度 IC 协议 FORWARD_START "
      "2026-10-12、上线日（10-08）也早于它 ⇒ 不截断。"),
+    ("2026-09-28", "v0.45.438",
+     "更正 v0.45.423 条目（⚠️ 边界日期不动、作废仍 0 条；原条目不改写）。v0.45.423 的前提「收盘后的当日那根已经收完、被误丢」"
+     "**不成立**：2026-10-08 16:38 ET（收盘 38 分钟后）实测 Twelve Data 当日那根是临时值——SPY close 773.86、成交量只有窗口中位数的 "
+     "3.4%（官方 773.93 / 3,710 万，CBOE last_trade 校验与 yfinance 一致；AAPL、JNJ 同形）；17:15 ET 生产扫描取数时成交量已涨过 30%"
+     "（量闸只拦下 VKTX / RKLB / ENPH 三只），收盘价仍不是官方值。v0.45.438 把规则 ① 恢复为按美东日期丢（与 v0.45.423 之前相同），"
+     "所以原条目里「现在收盘 + 30 分钟后照收」「两条兜底路径从少一根对齐成一样」**都不再成立**：两条兜底路径回到 v0.45.423 之前的口径。"
+     "生产上跑过 v0.45.423 规则的只有 2026-10-08 一轮扫描；该日 30 只用 `_equiv_td_session_bar` 逐只核：**全部等价**"
+     "（Buzz `volatility_20d` 全为有限数 = 成交量全来自 yfinance；Oracle `hv_gap_filled` 全空 = 没有缺口用第二源补；"
+     "`close_correction` 当日未走 Twelve Data 兜底）⇒ 进评分的量与「按日期丢」逐字相同，本代样本无需切分。"
+     "边界与印记沿用（`_CORRECTS[\"v0.45.438\"] = \"v0.45.423\"`）：印记 `td_session_aware: True` 的字面量名是历史名，"
+     "现在只表示「v0.45.423 及之后这一代代码」，**不**表示 Twelve Data 按收盘判。`signal_archive.COHORT_SIGNAL_SCOPE` 照抄 423 的范围。"
+     "不进评分的账本另记（CHANGELOG v0.45.438）：VRP 10-08 结算的 27 行（基准日 09-09、窗口止于 10-08）用的是临时收盘。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1318,8 +1330,8 @@ _BOUNDARY_EQUIVALENCE = {
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
 #: 判别器取印记时先查自己、查不到再查被更正的那条 —— 更正不是新改动，印记是同一个。
-#: 当前为空：09-28 的六条边界（v0.45.334 / 340 / 349 / 357 / 366 / 369）尚无更正。
-_CORRECTS: Dict[str, str] = {}
+#: v0.45.438 起有第一条：它更正 v0.45.423 的**口径说明**（日期不动），印记与等价判据沿用 423 的。
+_CORRECTS: Dict[str, str] = {"v0.45.438": "v0.45.423"}
 
 
 def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:

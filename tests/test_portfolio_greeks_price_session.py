@@ -169,27 +169,40 @@ def _rows(res, kind):
 
 # ── 事故复现：收盘后同日跑（10-06 17:42 ET）──────────────────────────────────
 
-class TestTwelveDataKeepsTheClosedSessionBar:
-    """根因：`_drop_forming_bar` 规则 ① 曾只比日期——17:42 ET 时 10-06 那根早已收完，照样被丢，
-    「截至今天」的窗口全止于前一交易日。修后按交易所收盘判（收盘 + 30 分钟定稿余量）。"""
+class TestTwelveDataDropsTheSameDayBar:
+    """v0.45.438：Twelve Data 的当日那根**当晚是临时值**——2026-10-08 收盘 38 分钟后 SPY 773.86（官方 773.93，
+    CBOE 与 yfinance 一致）、成交量只有窗口中位数的 3.4%。v0.45.423 曾以为「收完的当日那根被误丢」、把规则 ①
+    改成收盘 + 30 分钟后照收，前提不成立，已恢复按美东日期丢。
+    夹具里当日那根的成交量是**满的**（与中位数相同）：规则 ② 拦不住它，只剩 ① ——钉的就是 ①。"""
 
-    def test_closed_session_bar_is_kept_after_the_close(self, world):
-        rows = td.fetch_bars("JNJ", 120, end_date=AS_OF)
-        assert (rows[-1]["date"], rows[-1]["close"]) == (AS_OF, CLOSE["JNJ"][1]), rows[-1]
-
-    @pytest.mark.parametrize("hh,mm", [(11, 0), (15, 59), (16, 20)])
-    def test_bar_is_dropped_until_the_session_has_settled(self, world, hh, mm):
+    @pytest.mark.parametrize("hh,mm", [(11, 0), (15, 59), (16, 38), (17, 42), (23, 59)])
+    def test_same_day_bar_is_dropped_all_evening(self, world, hh, mm):
         world.at(datetime(2026, 10, 6, hh, mm, tzinfo=ET))
         assert td.fetch_bars("JNJ", 120, end_date=AS_OF)[-1]["date"] == PREV
 
-    def test_early_close_day_settles_at_1330(self, world):
-        """感恩节次日 13:00 收盘 ⇒ 13:30 起收（按 `session_close_et`，不按平日 16:00）。"""
+    def test_after_midnight_et_the_bar_is_kept(self, world):
+        """美东日期翻页之后那根才是定稿值（09-08 / 10-05 两次午夜后重跑与官方收盘逐分相等）。"""
+        world.at(datetime(2026, 10, 7, 0, 30, tzinfo=ET))
+        rows = td.fetch_bars("JNJ", 120, end_date=AS_OF)
+        assert (rows[-1]["date"], rows[-1]["close"]) == (AS_OF, CLOSE["JNJ"][1]), rows[-1]
+
+    def test_early_close_day_is_dropped_all_evening_too(self, world):
+        """感恩节次日 13:00 收盘：当晚同样是临时值，与平日一样按日期丢（不按 `session_close_et` 放行）。"""
         world.bars_end = "2026-11-27"
-        world.at(datetime(2026, 11, 27, 13, 31, tzinfo=ET))
-        assert td.fetch_bars("JNJ", 120, end_date="2026-11-27")[-1]["date"] == "2026-11-27"
-        td.clear_bars_cache()
-        world.at(datetime(2026, 11, 27, 13, 20, tzinfo=ET))
+        world.at(datetime(2026, 11, 27, 16, 0, tzinfo=ET))
         assert td.fetch_bars("JNJ", 120, end_date="2026-11-27")[-1]["date"] == "2026-11-25"
+
+    def test_the_measured_provisional_bar_is_dropped_even_at_full_volume(self, monkeypatch):
+        """末根收盘 = 10-08 16:38 ET 实测的临时值 773.86；成交量换成满的（实测是 1,517,497），成交量闸拦不住，
+        只有日期规则拦——v0.45.423 的规则在这里会把它当 10-08 的收盘收下。前五根合成。"""
+        monkeypatch.setattr(td, "_et_today", lambda: "2026-10-08")
+        # v0.45.423 的规则还读分钟钟 `_et_now`：钉在实测时刻之后（17:42 ET），否则它在别的日子按「此刻不在那一天」
+        # 照样丢，这条对旧规则就不红了（钩子现已不存在，raising=False）
+        monkeypatch.setattr(td, "_et_now", lambda: datetime(2026, 10, 8, 17, 42, tzinfo=ET), raising=False)
+        rows = [{"date": d, "close": 770.0 + i, "vol": 40e6}
+                for i, d in enumerate(("2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06", "2026-10-07"))]
+        rows.append({"date": "2026-10-08", "close": 773.86, "vol": 40e6})
+        assert td._drop_forming_bar(rows, "SPY")[-1]["date"] == "2026-10-07"
 
 
 class TestSameDayRunUsesTheAsOfSession:
@@ -320,19 +333,21 @@ class TestCboeStaleIntradayFile:
         world.payloads["JNJ"] = _payload("JNJ", 254.10, f"{AS_OF}T12:10:05", options=_jnj_options())
         world.book()
 
-    def test_stock_row_takes_the_closed_bar_not_the_midday_price(self, world):
-        self._setup(world)
-        res = pg.compute_day(AS_OF, beta_fn=_beta1)
-        amzn = next(x for x in _rows(res, "stock") if x["ticker"] == "AMZN")
-        assert amzn["price"] == CLOSE["AMZN"][1] and amzn["price_source"] == "twelve_data_bar"
-
-    def test_stock_row_is_stale_when_no_closed_bar_either(self, world):
-        world.bars_end = PREV
+    def test_stock_row_is_stale_the_same_evening(self, world):
+        """收盘后同日跑：CBOE 是中午的价、Twelve Data 当晚只有临时值（按日期丢）⇒ as_of 的官方收盘无处可取 ⇒
+        陈旧、标红、不对冲。v0.45.423 曾在这里收下 Twelve Data 的当日那根（当晚是临时值，v0.45.438 撤回）。"""
         self._setup(world)
         res = pg.compute_day(AS_OF, beta_fn=_beta1)
         amzn = next(x for x in _rows(res, "stock") if x["ticker"] == "AMZN")
         assert amzn["price"] is None and amzn["price_stale"] is True
         assert amzn["stale_price"] == 254.00 and amzn["price_source"] == "cboe_stale_intraday"
+
+    def test_after_midnight_the_settled_bar_prices_it_not_the_midday_price(self, world):
+        self._setup(world)
+        world.at(datetime(2026, 10, 7, 0, 30, tzinfo=ET))
+        res = pg.compute_day(AS_OF, beta_fn=_beta1)
+        amzn = next(x for x in _rows(res, "stock") if x["ticker"] == "AMZN")
+        assert amzn["price"] == CLOSE["AMZN"][1] and amzn["price_source"] == "twelve_data_bar"
 
     def test_option_spot_pairs_with_its_own_payload(self, world):
         """同一份陈旧文件里的标的价与期权报价是同一时刻的——配对算 $Delta 要的正是它（标签照记）。"""
@@ -611,8 +626,11 @@ def _td_down_for(monkeypatch, *tickers):
 
 
 def _outage_like_09_24(world, monkeypatch):
-    """CBOE 整源取不到 + Twelve Data 取不到 SPY；覆盖账本持有 SPY（09-24 的形状）。"""
+    """09-24 的形状：期权报价一张都取不到、SPY 两源都取不到，覆盖账本持有 SPY。股票 / JNJ 的标的价给 CBOE 收盘
+    （09-24 那天股票价来自本地价格索引，按现在的口径会判陈旧——这里单测「缺」那条路，不混进陈旧）。"""
     _td_down_for(monkeypatch, "SPY")
+    world.closed(tickers=("AMZN", "TSLA", "JNJ"))
+    world.payloads["JNJ"]["options"] = []                    # 链里没有持仓合约 ⇒ 报价缺（不是错场）
     world.book()
     _jsonl(pg.POSITIONS_FILE, [{"ticker": "SPY", "shares": -10, "avg_price": 770.0}])
     pg.META_FILE.write_text(json.dumps({"cash": 7700.0}), encoding="utf-8")

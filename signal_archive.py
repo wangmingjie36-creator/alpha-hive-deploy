@@ -1296,6 +1296,9 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 6 周以上口径一致的历史。
     "v0.45.423": ("agent.BuzzBeeWhisper.*", "crowding.score", "bear.score",
                   "agent.OracleBeeEcho.*", "bear.options_bear"),
+    # v0.45.438：更正 v0.45.423 条目（同日、日期不动），照表头「更正条目」规则抄被更正那条的范围
+    "v0.45.438": ("agent.BuzzBeeWhisper.*", "crowding.score", "bear.score",
+                  "agent.OracleBeeEcho.*", "bear.options_bear"),
 }
 
 
