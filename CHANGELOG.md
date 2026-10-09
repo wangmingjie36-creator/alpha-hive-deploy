@@ -5,7 +5,53 @@
 
 ---
 
-## [0.45.441] — 2026-10-09 — 占位（进行中：Scout 去掉 consensus_strength 分量——并行蜂读不到同伴的输出，27/30 恒为 0；缺失重归一化，GuardBee 仍读完整普查；世代边界 + signal_archive 影响面）
+## [0.45.441] — 2026-10-09 — Fixed：Scout 拥挤度去掉 `consensus_strength`（看多同伴数）——并行蜂读不到同伴的输出，27/30 恒为 0；世代边界 2026-10-09
+
+用户 2026-10-09 问「10-08 有 27/30 只的 consensus_strength 是 0，怎么从根因解决」，并记得「之前修过」。查实：v0.45.279 / 304 修的是**另一个缺陷**（读板用排行榜口径被淘汰偏差污染、没按身份过滤、读不到板时硬编码返回 3），两版 CHANGELOG 与 docstring 都写明「读板时机依赖竞态、口径未变」；时机问题一直没动。
+
+### 根因（2026-10-08 实测，`.swarm_results_2026-10-08.json` 的 Scout `consensus_census`）
+Scout 与 Oracle / Buzz / Chronos / CodeExecutor 在 Phase-1 **并行**，算拥挤度要读板上同伴的方向，读板那一刻同伴多半还没发布：
+
+| 同伴 | Scout 读板时可见 | 最终实际方向 |
+|---|---|---|
+| OracleBeeEcho | 0/30 | 看多 17 |
+| ChronosBeeHorizon | 0/30 | 看多 7 |
+| BuzzBeeWhisper | 23/30 | 看多 0 |
+| CodeExecutorAgent | 30/30，但读到的多是 `code_executor_agent.py:75` 的 5.0/中性占位 | 看多 16；读板时看多只有 3 |
+
+⇒ 09-28~10-08 共 270 行：0.0 占 235、16.7 占 31、33.3 占 4。等四只同伴都发完再数（Guard / Rival 的读法），10-08 的看多同伴数分布是 0/1/2/3 个 = 4/13/12/1 只，不是全 0。该项是「谁碰巧先发布」的噪声，不是同伴的看法。
+
+### Changed
+- `real_data_sources.get_real_crowding_metrics(..., *, peer_census=True)`：`False` ⇒ 不读板，`bullish_agents` / `consensus_census` 为 None，且 `data_quality` **不带** `bullish_agents` 键（没被测量 ≠ 降级：留 `"unavailable"` 会按 0.7 分计入 Queen 的 data_real_pct，留 `"real"` 是谎）。默认 True，Guard / Rival 不变。
+- `swarm_agents/scout_bee.py`：传 `peer_census=False`；缺失分量由 `CrowdingDetector.calculate_crowding_score` 在其余四项间重归一化（权重 0.7059，既有通路，v0.45.30 起）。`details.consensus_census` 删除（零读者的死字段）。`analyze` 变成外壳，对**每条返回路径**（成功 / 无效 ticker / 异常兜底）写世代印记 `details.consensus_in_score: False`；日报合成回退（`_generate_synthetic_swarm_results`）另写。
+- 完整普查仍在 GuardBee（自己数）与 RivalBee（Phase-1.4，读 Phase-1 之后的板）。
+
+### 影响面（非等价：每一行的 crowding_score 都变）
+- crowding_score：09-28~10-08 共 270 行平均 **+5.67**（最大 +18.92）；重算与记录 270/270 一致。Scout 分平均 **−0.34**（最大 1.14）；confidence **−0.02**（`real` 标签少一个，`min(0.1, 0.02×n)` 那一项）。
+- 方向：规则层 Scout 方向翻 17/270（neutral→bearish 14、bullish→neutral 3）——规则只复现 171/270 的记录方向（末端 LLM / 2e 复核另有调整），所以这是下限估计。
+- Queen 重放（`experiments/resonance_boost_forward_test.replay`，ml 报告 111 份，B0 自证 **111/111**；仅改规则能复现的行）：Scout 方向改 5/111；**最终方向翻 3/111**（bullish→bearish、neutral→bullish、neutral→bearish 各 1）、final_score 变 2 行（最大 0.94）。
+- data_real_pct：Scout 少一个 `real` 标签，显示值微降；10-08 全 30 只 96.9~97.9、远高于 80 的质量压缩门槛 ⇒ quality_factor 不动。
+- 样本代价（`ic_rerun_readiness.assess(today=2026-10-09)`）：IC 重跑就绪度的世代从 09-28 挪到 10-09，**270 行 / 60 行已到期 / 1 个已累积周 → 0**（需 25 周）。这是已知并经用户同意的代价。
+
+### 世代边界与登记
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-10-09", "v0.45.441", …)`；`_BOUNDARY_MARKERS["v0.45.441"]` = Scout `consensus_in_score is False`（只认字面量、排补跑行）；**无等价判据**（每行都变）。新代码首跑（10-09）前判 `no_evidence_yet`，首跑后应为 `matches`。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.441"]` = `crowding.comp.consensus_strength` + `agent.ScoutBeeNova.*`（闭包带出 crowding.* / ml.* / Rival / Guard / bear.*；Rival / Guard 自己数的拥挤度没变，依赖边按「同一个 CrowdingDetector 公式」代表换代，宁多切不少切）。`SIGNAL_UPSTREAM` 里 `consensus_strength ← Phase-1 同伴方向` 那条边**保留**——它描述旧世代数据的真实依赖，删了会让早先边界的闭包悄悄缩小。
+- 前瞻检验：维度 IC 协议 FORWARD_START 2026-10-12——本条上线日 10-09 早于它 ⇒ H1 / H2 不截断（这也是必须赶在 10-09 14:00 PT 扫描前上线的原因：错过则下一个扫描日是 10-12，之后任何边界都会截断）。共振加成前瞻检验：重放读记录自己的 Scout 输出，自证不受影响。
+
+### Fixed（顺带：边界表末尾追加后，三处夹具前提失效）
+- `tests/test_oracle_options_dq_from_agent.py::test_same_day_status_lists_369…` 与 `tests/test_step_contract_ic_rerun.py::test_boundary_alarm_one_item_per_alarming_version`：都隐含「表里最后一天 = 09-28 那一组同日边界」，而 `boundary_evidence_status` 只核**与末条同日**的各条——v0.45.441 追加 10-09 单条之后末日不再含 369 / 334 / 340 …… 前者把表截到 09-28（monkeypatch）、后者给 `_run` 加 `history_through`（在真实脚本文本的入口前插一行原地截断再原样 exec；`prelude` 够不到 runpy 另起的 `__main__` 全局）。**观察点后果**：Step 11 的边界核对此后只看 v0.45.441 一条，09-28 那组（349 / 369 / 383 / 423 ……）不再逐日复核——它们此前都已 `matches`，且判别逻辑本身有测试；这是 `boundary_evidence_status` 一贯的「同末日」语义，本版未改。
+- `tests/test_ic_rerun_readiness.py::TestPoolDriftBreaksCohort::test_pool_swap_is_flagged_and_blocks_ready`：第二段起点写死 2027-02-01，世代起始日每往后挪第一段就多延伸几天，挪到 10-09 时两段在日期上重叠 ⇒ 池换没换看不出来、无声变红。改成从世代起始日推。
+
+### 守卫（`tests/test_scout_consensus_excluded.py`，26 条；`test_bullish_agents_census_eviction.py` 删掉旧的 `TestScoutWiresConsensusCensusIntoDetails`）
+- `peer_census=False` 不读板（板读取会抛也照常返回）/ 默认仍数同伴 / 其余指标不变；**真跑 `ScoutBeeNova.analyze`：满板看多与空板的拥挤度 / 分 / 方向 / confidence / data_quality 逐字相同**；缺失分量按其余四项重归一化（独立重算）；Scout 的每个 data_quality 值都已登记（无新标签）。
+- 印记每条路径都在（成功 / 无效 ticker / 异常兜底 / 日报合成回退无条件写）、经 Queen 进归档形状后判别器认得出；只认字面量 False；补跑行不算。
+- AST：全仓只有 `scout_bee.py` 传 `peer_census=False`；登记表接线（边界日早于 FORWARD_START、印记已登记且无等价判据、信号范围闭包到 Scout 与 crowding）。
+- 变异 6 个（先提交后变异，全红、已还原）：Scout 去掉 `peer_census=False` / 外壳不盖印记 / Guard 也关普查 / 判别器认缺键 / metrics 仍留 `unavailable` 标签 / 合成回退不写印记。
+
+### 注意
+- **没有测过 consensus_strength 有无预测力**（原来多数为 0，无从测）；本版不是「改准了」，是「从时机决定的噪声变成没有这一项」。
+- 真正的分析师目标价（`ChronosBeeHorizon.analyst_targets`）是另一条路，与本项无关：10-05~10-08 每天 30/30 有值、`target_mean>0`。
+- 流程：10-09 04:23 PDT 占号并推送；代码经干净克隆全套后推。
 
 ## [0.45.440] — 2026-10-09 — Added：对冲账本历史只经一道闸读——记录自带定价场次证明、证不出的不放行并计数、别的模块直读历史即红；历史原样保留不重算
 
