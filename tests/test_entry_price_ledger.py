@@ -26,7 +26,8 @@ D = "2026-09-24"
 FULL = {"OracleBeeEcho": {"details": {
             "rv_30d": 30.0, "iv_rank": 45.0, "iv_current": 50.0,
             "iv_skew_ratio": 1.0, "put_call_ratio": 0.9, "iv_rv_spread": 20.0}},
-        "ChronosBeeHorizon": {"details": {"catalysts": [{"e": 1}]}}}
+        "ChronosBeeHorizon": {"details": {"catalysts": [{"e": 1}],
+                                         "analyst_targets": {"target_mean": 1.0}}}}
 
 
 def _results(tmp_path, tickers, date=D):
