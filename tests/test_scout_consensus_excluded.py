@@ -22,7 +22,6 @@ import pytest
 import ic_rerun_readiness as rr
 import real_data_sources as rds
 import signal_archive as sa
-from crowding_detector import CrowdingDetector
 from pheromone_board import PheromoneBoard
 from swarm_agents.scout_bee import CONSENSUS_MARKER, ScoutBeeNova
 

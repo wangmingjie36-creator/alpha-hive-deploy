@@ -349,8 +349,13 @@ class TestEquivalenceBoundary:
         assert ev["verdict"] == "boundary_too_early", ev
         assert "equivalent_before_marker" not in ev
 
-    def test_same_day_status_lists_369_without_alarm_before_deploy(self, tmp_path):
-        """编排器 Step 11 读的 `boundary_evidence_status`：同日各条都核，369 在首跑前不报警。"""
+    def test_same_day_status_lists_369_without_alarm_before_deploy(self, tmp_path, monkeypatch):
+        """编排器 Step 11 读的 `boundary_evidence_status`：同日各条都核，369 在首跑前不报警。
+
+        前提是「表里最后一天 = 09-28 那一组」。v0.45.441 追加了 10-09 的单条边界之后，真表的末日不再含 369
+        （`boundary_evidence_status` 只核与末条同日的各条）⇒ 这里把表截到 09-28 为止，复现当年的末日——
+        不是改判据，是让夹具别依赖「今天表的末尾是谁」（同 test_ic_rerun_readiness 写死 2027-02-01 那处）。"""
+        monkeypatch.setattr(rr, "_COHORT_HISTORY", [e for e in rr._COHORT_HISTORY if e[0] <= "2026-09-28"])
         b = _b()
         _write_archive(tmp_path, b, "AAA", _rec(new=False))
         _write_swarm(tmp_path, b, {"AAA": _rec(new=False)})
