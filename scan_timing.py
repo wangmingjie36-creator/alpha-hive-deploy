@@ -90,6 +90,8 @@ def counters() -> Dict[str, Optional[dict]]:
     `portfolio_greeks`（v0.45.423）：组合 Greeks 当天的标的价场次核对（`price_check_stats`）——
     多少行的价不属于 as_of 那一场（陈旧，不进 $Delta）、SPY 价是哪一场的、有没有因此拒绝成交。
     此前同日跑恒用前一交易日的收盘、一个计数都没有；alert_manager 读它报 P2。
+    v0.45.435 起还带「缺」（`n_unpriced` / `n_quote_missing` / `n_beta_missing` / `nav_missing` / `gaps`）与
+    `hedge_undecided`（对冲决定做不出来的原因）——09-15~25 连续 7 天 unknown 曾零告警。
 
     `cboe_raw`（v0.45.333）：卖权行权价账本取原始链（`fetch_cboe_raw_contracts`）各出口的次数——
     ok / snapshot_mode / stale_vintage / payload_unavailable / vintage_mismatch / vintage_unverifiable /
@@ -301,14 +303,22 @@ def summary_line(snap: dict) -> str:
         f"/会话不符弃用{os_.get('session_mismatch', '?')}份/盘中快照命中{os_.get('hits_before_close', '?')}份")
     pg = c.get("portfolio_greeks")
     pg_s = ""
-    if pg and (pg.get("n_stale") or pg.get("n_quote_stale") or (pg.get("spy") or {}).get("stale")
-               or pg.get("execution_blocked")):
+    if pg and pg.get("error"):
+        pg_s = f" | Greeks 异常中断({str(pg['error'])[:80]})"          # v0.45.442
+    elif pg and pg.get("hedge_undecided") and not (pg.get("n_stale") or pg.get("n_quote_stale")
+                                                  or (pg.get("spy") or {}).get("stale")
+                                                  or pg.get("execution_blocked")):
+        # v0.45.435：不是陈旧、是缺——对冲决定做不出来（两源取不到价 / 缺报价 / 缺 β / 缺 NAV）
+        pg_s = " | Greeks 数据不全不对冲(" + ("；".join(pg.get("gaps") or []) or str(pg["hedge_undecided"])) + ")"
+    elif pg and (pg.get("n_stale") or pg.get("n_quote_stale") or (pg.get("spy") or {}).get("stale")
+                 or pg.get("execution_blocked")):
         # v0.45.423：同 hv_gap，只在出过事时占位——组合 Greeks 有价不属于当天那一场（不进 $Delta、不对冲）
         names = ",".join(dict.fromkeys(f"{x.get('ticker')}@{x.get('session')}" for x in pg.get("stale") or []))
         spy = pg.get("spy") or {}
         pg_s = (f" | Greeks 陈旧价 {pg.get('n_stale', '?')} 行" + (f"({names})" if names else "")
                 + (f"/SPY@{spy.get('session')}" if spy.get("stale") else "")
                 + (f"/报价错场 {pg['n_quote_stale']}" if pg.get("n_quote_stale") else "")
-                + ("/拒绝成交" if pg.get("execution_blocked") else ""))
+                + ("/拒绝成交" if pg.get("execution_blocked") else "")
+                + (("/另缺 " + "；".join(pg["gaps"])) if pg.get("gaps") else ""))
     return ("耗时 " + " | ".join(parts) +
             f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s + pg_s)

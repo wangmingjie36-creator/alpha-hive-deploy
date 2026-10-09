@@ -38,7 +38,7 @@ import pytest
 
 import ic_rerun_readiness as rr
 import step_contract as sc
-from tests.test_ic_rerun_readiness import _COHORT_START, _weekly_rows, _write_two_marker_archive
+from tests.test_ic_rerun_readiness import _weekly_rows, _write_two_marker_archive
 
 REPO_ROOT = Path(__file__).resolve().parent.parent   # 指向**代码**，故用 __file__
 TOOL = "ic_rerun_readiness"
@@ -120,7 +120,7 @@ def _env(home: Path) -> dict:
     return env
 
 
-def _run(tmp_path: Path, db: Path, *args, prelude: str = ""):
+def _run(tmp_path: Path, db: Path, *args, prelude: str = "", history_through: str = ""):
     """真起 CLI 子进程，返回 (rc, 外壳 | None, stdout, stderr)。
 
     `prelude` 为空 ⇒ 直接 `python ic_rerun_readiness.py …`；非空 ⇒ `python -c`：先执行 prelude（只准改被测
@@ -129,7 +129,20 @@ def _run(tmp_path: Path, db: Path, *args, prelude: str = ""):
     """
     out = tmp_path / "out.json"
     argv = ["--db", str(db), *map(str, args), "--out", str(out)]
-    if prelude:
+    if history_through:
+        # 把被测脚本**自己的** `_COHORT_HISTORY` 截到某一天为止（`prelude` 够不到：runpy 另起一份 `__main__` 全局，
+        # 只能改被它 import 的模块）。做法：在真实脚本文本的 `if __name__ == "__main__":` 前插一行原地截断，再原样 exec。
+        # 用途：边界表末尾追加新条目后，「末日有多条同日边界」这类夹具前提靠截到旧末日复现，不靠今天的表尾恰好如此。
+        _trunc = f"_COHORT_HISTORY[:] = [e for e in _COHORT_HISTORY if e[0] <= {history_through!r}]\n"
+        code = (f"import sys\nsys.path.insert(0, {str(REPO_ROOT)!r})\n"
+                f"_src = open({str(SCRIPT)!r}, encoding='utf-8').read()\n"
+                f"_hook = 'if __name__ == \"__main__\":'\n"
+                f"assert _src.count(_hook) == 1, '脚本入口形状变了，截断钩子要跟着改'\n"
+                f"_src = _src.replace(_hook, {_trunc!r} + _hook)\n"
+                f"sys.argv = [{str(SCRIPT)!r}] + {argv!r}\n"
+                f"exec(compile(_src, {str(SCRIPT)!r}, 'exec'), {{'__name__': '__main__', '__file__': {str(SCRIPT)!r}}})\n")
+        cmd = [sys.executable, "-c", code]
+    elif prelude:
         code = (f"import sys, runpy\nsys.path.insert(0, {str(REPO_ROOT)!r})\n{prelude}\n"
                 f"sys.argv = [{str(SCRIPT)!r}] + {argv!r}\n"
                 f"runpy.run_path({str(SCRIPT)!r}, run_name='__main__')\n")
@@ -235,8 +248,10 @@ class TestRealCli:
         v0.45.334 之后 ⇒ 按 id 保留首条的消费方恰好丢掉带截止日的那条。变红的变异：id 去掉版本后缀。"""
         home = tmp_path / "home"
         db = _make_db(home, [])
-        _write_two_marker_archive(home, _COHORT_START, gex_new=False, buzz_new=False, oracle_new=False)
-        rc, env, out, err = _run(tmp_path, db, "--today", self.TODAY, "--quiet")
+        # 表截到 09-28 为止：该日是 v0.45.334 / 340 / 349 …… 一组同日边界（本测试的前提——至少两条报警、锚点不是第一条）；
+        # v0.45.441 起真表的末日是 10-09 的单条边界，不再具备这个形状（见 `_run(history_through=…)`）。
+        _write_two_marker_archive(home, "2026-09-28", gex_new=False, buzz_new=False, oracle_new=False)
+        rc, env, out, err = _run(tmp_path, db, "--today", self.TODAY, "--quiet", history_through="2026-09-28")
         ids = _check(rc, env, err, expect_rc=1, expect_date=self.TODAY, expect_status="attention")
         alarmed = [e for e in env["cohort_boundary_evidence"]["per_version"] if e["alarm"]]
         assert len(alarmed) >= 2 and P.H1_ANCHOR_VERSION in [e["version"] for e in alarmed][1:], (

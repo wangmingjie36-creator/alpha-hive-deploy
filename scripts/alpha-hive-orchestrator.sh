@@ -1395,9 +1395,12 @@ STEP11_START=$(date +%s)
 READINESS_JSON="${LOGDIR}/ic_rerun_readiness-${DATE_STR}.json"
 # 与 Step 10 同一模式：用 --out 写 JSON，**不用** `> FILE` 捕获 stdout
 # （本文件的 log() 走 tee 会污染 stdout）。B：先删后跑 + --today 显式传 DATE_STR（同 Step 10）。
+# --budget-seconds 45：F&G 子状态的时间预算由**有看门狗的调用方**给——这里的 60s run_step 超时减去它，
+# 要盖得住到点后的 TERM 宽限 + 写最终 JSON（守卫 tests/test_ic_rerun_fg_budget.py::TestBudgetFitsOrchestratorTimeout）。
+# 工具自己的缺省值随后改成不限时（每周任务 / 手动运行没有看门狗，不该被截断）。
 rm -f "${READINESS_JSON}"
 run_step --timeout 60 "${PROJECT_DIR}/ic_rerun_readiness.py" \
-         --quiet --today "${DATE_STR}" --out "${READINESS_JSON}" >> "${LOGFILE}" 2>&1
+         --quiet --today "${DATE_STR}" --budget-seconds 45 --out "${READINESS_JSON}" >> "${LOGFILE}" 2>&1
 STEP11_RC=$?
 # B：就绪度一行 + 世代边界核对（v0.45.334；cohort_boundary 恒在，取不到记 null、不假装正常；alarm ⇒ WARN）
 # 都由解释器给；与就绪度同理不改 OVERALL_STATUS。无 --duration：Step 11 的片段历来不带 duration_seconds。

@@ -364,17 +364,25 @@ class TestPoolDriftBreaksCohort:
     `weekly_optimizer.check_ticker_pool_consistency` 同一思路。
     """
 
+    # v0.45.445：三条的日期改由世代起点推导（同 v0.45.128 那次）。此前写死 2026-09-28 / 2027-02-01 / 2026-10-12，
+    # 世代起点一后移，样本就落到起点之前被 `assess()` 过滤掉——「池被换」那条直接红，另两条**空转着照绿**
+    # （NEW 那两周整个在世代外、根本没进比较）。偏移量取自原写法对当时起点 09-28 的相对位置。
     def test_stable_pool_has_no_note(self, db):
-        res = rr.assess(db_path=db(_weekly_rows(6)), today="2026-09-28")
+        res = rr.assess(db_path=db(_weekly_rows(6)), today=_after_cohort(6))
+        assert res["n_all_samples"] > 0, "前提：样本落在世代内（否则「没提示」是空转）"
         assert res["pool_note"] is None
         assert res["pool_drift"] == pytest.approx(0.0)
 
     def test_pool_swap_is_flagged_and_blocks_ready(self, db):
+        import datetime as dt
         need = rr._WEEKS_REQUIRED[rr.DEFAULT_TARGET_IC]
+        # 第二段紧接第一段、起点**从世代起始日推**：此前写死 2027-02-01，世代起始日每往后挪（v0.45.441：09-28 → 10-09）
+        # 第一段就多延伸几天，到某天与第二段在日期上重叠 ⇒ 同一周里两个池并存、池换没换看不出来 ⇒ 无声变红。
+        late = (dt.date.fromisoformat(_COHORT_START) + dt.timedelta(weeks=need - 3)).isoformat()
+        today = (dt.date.fromisoformat(late) + dt.timedelta(weeks=4)).isoformat()
         rows = (_weekly_rows(need - 3, tickers=("AAA", "BBB"))
-                + _weekly_rows(3, start="2027-02-01",
-                               tickers=("XXX", "YYY", "ZZZ")))
-        res = rr.assess(db_path=db(rows), today="2027-03-01")
+                + _weekly_rows(3, start=late, tickers=("XXX", "YYY", "ZZZ")))
+        res = rr.assess(db_path=db(rows), today=today)
         assert res["pool_note"] is not None
         assert res["ready"] is False, "池被换掉仍判就绪 —— 样本已不可比"
         assert "世代" in rr.summary_line(res)
@@ -383,8 +391,9 @@ class TestPoolDriftBreaksCohort:
         """加 1 只到 10 只池（<20% 门槛）不该打断 —— 闸不能过敏。"""
         ten = tuple(f"T{i}" for i in range(10))
         rows = (_weekly_rows(6, tickers=ten)
-                + _weekly_rows(2, start="2026-09-28", tickers=ten + ("NEW",)))
-        res = rr.assess(db_path=db(rows), today="2026-10-12")
+                + _weekly_rows(2, start=_after_cohort(4), tickers=ten + ("NEW",)))
+        res = rr.assess(db_path=db(rows), today=_after_cohort(7))
+        assert res["n_all_samples"] >= 6 * 10 + 2 * 11, "前提：NEW 那两周落在世代内（否则测的是空集）"
         assert res["pool_note"] is None
 
 

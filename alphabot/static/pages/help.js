@@ -388,7 +388,8 @@ export const SECTIONS = [
       ["提示端口被占", "8765 上是别的程序，弹窗会给 lsof 命令。"],
       ["关窗后服务还在", "升级前起的服务不带 --from-app，关窗不会停它：终端执行一次 make alphabot-stop，之后按新规则走。"],
       ["想换数据根", "终端执行 /usr/local/bin/python3 -m alphabot.launcher --reset，再双击 .app 重新选。"],
-      ["改了仓库位置或换了 Python", "重新 make alphabot-app；git pull 更新代码不需要重新生成。"]], "现象", "处理"),
+      ["怎么拿到新版本", ".app 跑的是生产克隆 ~/alpha-hive-prod，每个扫描日扫描前自动更新；关掉 Alpha Bot 再打开即用上，不需要重新生成。"],
+      ["换了 Python 或代码目录", "重新 make alphabot-app（缺省指向生产克隆，从哪个检出跑都一样）。"]], "现象", "处理"),
   ]],
 
   ["limits", "局限与免责", "读数字之前必须知道的", (m) => [

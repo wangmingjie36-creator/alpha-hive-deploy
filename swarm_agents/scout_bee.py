@@ -10,6 +10,11 @@ from swarm_agents.utils import (
     make_error_result, AGENT_ERRORS, LLM_ERRORS,
 )
 
+#: v0.45.441 世代印记：本结果的拥挤度**不含**「看多同伴数」（`consensus_strength`）这一项。
+#: 每条返回路径（成功 / 无效 ticker / 异常兜底）都经 `analyze` 外壳写字面量 False；日报合成回退另写。
+#: 判别器：`ic_rerun_readiness._marker_scout_consensus_excluded`。旧代码的记录没有这个键。
+CONSENSUS_MARKER = "consensus_in_score"
+
 
 class ScoutBeeNova(BeeAgent):
     """聪明钱侦察蜂 - SEC Form4/13F 内幕交易 + 拥挤度分析
@@ -27,6 +32,16 @@ class ScoutBeeNova(BeeAgent):
     """
 
     def analyze(self, ticker: str) -> Dict:
+        """外壳：每条返回路径（含无效 ticker / 异常兜底）都盖世代印记，不靠各路径自己记得写。"""
+        out = self._analyze(ticker)
+        if isinstance(out, dict):
+            det = out.get("details")
+            if not isinstance(det, dict):
+                det = out["details"] = {}
+            det[CONSENSUS_MARKER] = False
+        return out
+
+    def _analyze(self, ticker: str) -> Dict:
         _err = self._validate_ticker(ticker)
         if _err:
             return _err
@@ -74,7 +89,10 @@ class ScoutBeeNova(BeeAgent):
             detector = CrowdingDetector(ticker)
 
             from real_data_sources import get_real_crowding_metrics
-            metrics = get_real_crowding_metrics(ticker, stock, self.board)
+            # v0.45.441：不读板、不要「看多同伴数」。Scout 与同伴并行跑，读板那一刻同伴多半还没发布 ⇒ 该项
+            # 27/30 恒为 0（2026-10-08 实测；v0.45.279 / 304 修的是淘汰偏差与身份过滤，没碰这个时机问题）。
+            # 缺失分量由 `calculate_crowding_score` 在其余四项间重归一化；完整普查在 Guard / Rival（Phase-1 之后）。
+            metrics = get_real_crowding_metrics(ticker, stock, self.board, peer_census=False)
 
             crowding_score, component_scores = detector.calculate_crowding_score(metrics)
             # v0.45.50：拥挤度全分量不可得时返回 None。
@@ -312,11 +330,6 @@ class ScoutBeeNova(BeeAgent):
                     "crowding_signal": round(crowding_signal, 2),
                     "components": component_scores,
                     "adjustment_factor": adj_factor,
-                    # v0.45.279：口径标记——读板那一刻实际数到的 Phase-1 同伴
-                    # （不只是 consensus_strength 那个百分比数字）。不是为了替代
-                    # signal_archive.SIGNAL_UPSTREAM 里那条依赖边，是让以后重估
-                    # 这条边的成本收益时有真实观测可查，不用翻代码猜。
-                    "consensus_census": metrics.get("consensus_census"),
                     # v0.43.25: 原为 `float(stock["momentum_5d"] or 0.0)`。
                     # BuzzBee 拿同一份 stock 却诚实写 None，Scout 这里用 or 0.0
                     # 伪造"持平"——0.0 永远够不到 sentiment.py 的背离阈值，

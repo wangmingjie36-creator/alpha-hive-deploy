@@ -908,6 +908,59 @@ _COHORT_HISTORY = [
      "同 383，理由见该条注释）；"
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段。前瞻检验：本条登记日早于维度 IC 协议 FORWARD_START "
      "2026-10-12、上线日（10-08）也早于它 ⇒ 不截断。"),
+    ("2026-09-28", "v0.45.438",
+     "更正 v0.45.423 条目（⚠️ 边界日期不动、作废仍 0 条；原条目不改写）。v0.45.423 的前提「收盘后的当日那根已经收完、被误丢」"
+     "**不成立**：2026-10-08 16:38 ET（收盘 38 分钟后）实测 Twelve Data 当日那根是临时值——SPY close 773.86、成交量只有窗口中位数的 "
+     "3.4%（官方 773.93 / 3,710 万，CBOE last_trade 校验与 yfinance 一致；AAPL、JNJ 同形）；17:15 ET 生产扫描取数时成交量已涨过 30%"
+     "（量闸只拦下 VKTX / RKLB / ENPH 三只），收盘价仍不是官方值。v0.45.438 把规则 ① 恢复为按美东日期丢（与 v0.45.423 之前相同），"
+     "所以原条目里「现在收盘 + 30 分钟后照收」「两条兜底路径从少一根对齐成一样」**都不再成立**：两条兜底路径回到 v0.45.423 之前的口径。"
+     "生产上跑过 v0.45.423 规则的只有 2026-10-08 一轮扫描；该日 30 只用 `_equiv_td_session_bar` 逐只核：**全部等价**"
+     "（Buzz `volatility_20d` 全为有限数 = 成交量全来自 yfinance；Oracle `hv_gap_filled` 全空 = 没有缺口用第二源补；"
+     "`close_correction` 当日未走 Twelve Data 兜底）⇒ 进评分的量与「按日期丢」逐字相同，本代样本无需切分。"
+     "边界与印记沿用（`_CORRECTS[\"v0.45.438\"] = \"v0.45.423\"`）：印记 `td_session_aware: True` 的字面量名是历史名，"
+     "现在只表示「v0.45.423 及之后这一代代码」，**不**表示 Twelve Data 按收盘判。`signal_archive.COHORT_SIGNAL_SCOPE` 照抄 423 的范围。"
+     "不进评分的账本另记（CHANGELOG v0.45.438）：VRP 10-08 结算的 27 行（基准日 09-09、窗口止于 10-08）用的是临时收盘。"),
+    ("2026-10-09", "v0.45.441",
+     "Scout 拥挤度去掉 `consensus_strength`（看多同伴数）这一项（用户 2026-10-09 决定：从根因去掉、不推迟读板；10-09 14:00 PT 扫描前上线）。"
+     "根因：Scout 与同伴蜂 Phase-1 **并行**，读板那一刻同伴多半还没发布——2026-10-08 实测 Oracle / Chronos 读到 0/30，Buzz 23/30，"
+     "CodeExecutor 30/30 但只是 `code_executor_agent.py:75` 那条 5.0/中性占位（最终看多 16 只、读板时看多只有 3 只）⇒ 该项 27/30 恒为 0；"
+     "09-28~10-08 共 270 行：0.0 占 235、16.7 占 31、33.3 占 4。完整普查（等四只同伴都发完再数）10-08 的看多同伴数分布是 0/1/2/3 个 = 4/13/12/1 只。"
+     "v0.45.279 / 304 修的是淘汰偏差与身份过滤，没碰这个时机问题。现在：缺失分量由 `calculate_crowding_score` 在其余四项间重归一化"
+     "（权重 0.7059）；`data_quality` 不再带 `bullish_agents` 键（没有被测量，不是降级）；Scout 的 `details.consensus_census` 删除，"
+     "换成世代印记 `consensus_in_score: False`。完整普查仍在 GuardBee（自己数）与 RivalBee（Phase-1.4，读 Phase-1 之后的板）。"
+     "**非等价**：crowding_score 对每一行都变（270 行平均 +5.67、最大 +18.92）；Scout 分平均 −0.34（最大 1.14）；confidence −0.02"
+     "（`real` 标签少一个）。重放（`.swarm_results` 09-28~10-08 共 270 行 / ml 报告 111 份，B0 自证 111/111）：规则层 Scout 方向翻 17/270"
+     "（neutral→bearish 14、bullish→neutral 3）；Queen 重放最终方向翻 3/111、final_score 变 2 行（最大 0.94）。"
+     "判别：`_BOUNDARY_MARKERS[\"v0.45.441\"]` = Scout details 字面量 `consensus_in_score: False`（成功 / 无效 ticker / 异常兜底都经 `analyze` 外壳写，"
+     "日报合成回退另写）。无等价判据（每行都变）⇒ 09-28~10-08 的样本在本条口径下全部归旧世代。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.441\"]` = `crowding.comp.consensus_strength` + `agent.ScoutBeeNova.*`（经 SIGNAL_UPSTREAM 闭包带出 "
+     "crowding.* / ml.* / Rival / Guard / bear.*——Rival / Guard 自己数的拥挤度没变，是依赖边按「同一个 CrowdingDetector 公式」代表换代，宁多切不少切）；"
+     "`composite.final_score` 是 ALWAYS_SLICED。前瞻检验：维度 IC 协议 FORWARD_START 2026-10-12——本条上线日 10-09 早于它 ⇒ H1 / H2 均不截断；"
+     "共振加成前瞻检验：重放读记录自己的 Scout 输出、自证不受影响，检验期内边界条数 +1（附带项）。"),
+    ("2026-10-09", "v0.45.445",
+     "新闻主源 Alpha Vantage → Massive（原 Polygon.io；用户 2026-10-08 决定「替换掉一直失败的 AV」）。"
+     "BuzzBee news 通道 = `sentiment_score × 10`，`sentiment_score = 1 + 9 × 看多文章占比`；本版只换**逐文章标签从哪来**："
+     "AV 是逐文章模型分 ±0.15、Massive 是 `insights` 逐票 positive/negative/neutral，降级仍去 Yahoo（关键词打标）。"
+     "**为什么必须登记**：换分类器 = 换 news_signal 量纲 ⇒ sentiment 维（权重 0.325）⇒ final_score。"
+     "**起因**：AV 免费 25 次/天 < 30 只，固定 5 只（TMUS/ENPH/NFLX/NEE/SNOW）每天走 Yahoo；10-05 重跑之后连续三轮服务端全拒"
+     "（10-06、10-07：0/30 走 AV），news 通道整片换成 Yahoo 量纲——那是**未登记的数据降级**，不是代码边界。"
+     "**校准**（2026-10-08 08:00 PDT，30 只同一时刻，只读）：Massive 29/30 可用（NFLX 一次 SSLError）；"
+     "Massive 同票对 09-28~10-02 的 AV 均值 平均 +1.5 / 中位 −1.0（13 低 12 高），Yahoo 同票 −27.1（23/24 更低），"
+     "同时刻 Massive − Yahoo +28.8（25/28 更高）⇒ Massive 的水平与 AV 相当、Yahoo 系统性偏低。"
+     "⚠️ 横截面排序没有证据（今天的快照对两周前的均值，秩相关 −0.41，n=25，新闻本身会变），不据此说「两源等价」。"
+     "**边界代价**：与 v0.45.441 同日（2026-10-09）⇒ `assess()` 切点不变——世代起点只取最新一组边界的日期，同日两条登记切点相同；"
+     "10-09 之前的样本在 441 登记时已全部归旧世代，本条**边际作废 0 条**（2026-10-09 清晨（PT）对生产库备份副本只读实测最新一组 "
+     "441 + 445：`n_all_samples=0`、`n_ripe_samples=0`，生产库 predictions 最新 10-08，此刻无 10-09 行）。"
+     "若单独在 10-08 登记，当时同法实测当前世代（09-28 / v0.45.383 起）`n_all_samples=240`、`n_ripe_samples=30`、已攒 1 个不重叠周，"
+     "即会作废 240 条（其中 30 条已到期）——这个代价被 441 的同日切换吸收了，不是本条凭空免掉的。不等价、不登 `_BOUNDARY_EQUIVALENCE`："
+     "旧代码记录没有 Massive 标签可重放。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.445\"]`：Buzz details 带 `news_primary == \"massive\"`（新代码每次都写，主源失败降级时也写）。"
+     "预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.445\"]` = `buzz.comp.news_signal` + `agent.BuzzBeeWhisper.*`（协议 §6 按层声明：改通道"
+     "必连带点名分）；`composite.final_score` 是 ALWAYS_SLICED。"
+     "前瞻检验：维度 IC 协议 H1（buzz_v1，通道是输入层）与 H2 都会随之变，但本条早于 FORWARD_START 2026-10-12 ⇒ 不截断；"
+     "窗口开始后再换主源 = 终止 H1。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登一代（`final_score` 是 ML 特征）。"
+     "⚠️ 10-05 重跑 / 10-06 / 10-07 三轮的 news 是 Yahoo 量纲（数据降级，不在任何代码边界内），已在本世代之前，不另隔离。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1083,6 +1136,17 @@ def _marker_buzz_momentum_as_of(d: dict) -> bool:
     b = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("BuzzBeeWhisper")
     sm = ((b or {}).get("details") or {}).get("sentiment_momentum") if isinstance(b, dict) else None
     return isinstance(sm, dict) and "as_of_source" in sm
+
+
+def _marker_buzz_news_primary_massive(d: dict) -> bool:
+    """v0.45.445：Buzz details 带 `news_primary == "massive"`。
+
+    新代码每次都写（主源失败降级到 Yahoo 时照写——与 `news_source` 不同，后者记的是实际来源）；
+    此前的 details 没有这个键。只认取值 "massive"：回滚到 AV 的配置写的是 "alpha_vantage"，那是另一回事、要另登边界。
+    """
+    b = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("BuzzBeeWhisper")
+    det = (b or {}).get("details") if isinstance(b, dict) else None
+    return isinstance(det, dict) and det.get("news_primary") == "massive"
 
 
 def _marker_oracle_gex_signal_neutralized(d: dict) -> bool:
@@ -1262,6 +1326,19 @@ def _equiv_td_session_bar(d: dict) -> bool:
     return _equiv_hv_gap_free(d)
 
 
+def _scout_row_has_consensus_marker(d: dict) -> bool:
+    """这行是 v0.45.441 之后的代码写的吗：ScoutBeeNova `details.consensus_in_score` 为字面量 `False`
+    （`ScoutBeeNova.analyze` 外壳对每条返回路径都写；日报合成回退另写）。只认 `is False`：此前的记录没有这个键。"""
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("ScoutBeeNova")
+    det = o.get("details") if isinstance(o, dict) else None
+    return isinstance(det, dict) and det.get("consensus_in_score") is False
+
+
+def _marker_scout_consensus_excluded(d: dict) -> bool:
+    """v0.45.441 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383 / 423）。"""
+    return _scout_row_has_consensus_marker(d) and not _is_backfill_row(d)
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1287,6 +1364,10 @@ _BOUNDARY_MARKERS = {
                   _marker_oracle_hv_gap_checked),
     "v0.45.423": ("agent_details.OracleBeeEcho.details.td_session_aware is True",
                   _marker_oracle_td_session_aware),
+    "v0.45.441": ("agent_details.ScoutBeeNova.details.consensus_in_score is False",
+                  _marker_scout_consensus_excluded),
+    "v0.45.445": ("agent_details.BuzzBeeWhisper.details.news_primary == \"massive\"",
+                  _marker_buzz_news_primary_massive),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1318,8 +1399,8 @@ _BOUNDARY_EQUIVALENCE = {
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
 #: 判别器取印记时先查自己、查不到再查被更正的那条 —— 更正不是新改动，印记是同一个。
-#: 当前为空：09-28 的六条边界（v0.45.334 / 340 / 349 / 357 / 366 / 369）尚无更正。
-_CORRECTS: Dict[str, str] = {}
+#: v0.45.438 起有第一条：它更正 v0.45.423 的**口径说明**（日期不动），印记与等价判据沿用 423 的。
+_CORRECTS: Dict[str, str] = {"v0.45.438": "v0.45.423"}
 
 
 def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:

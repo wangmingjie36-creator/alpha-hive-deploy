@@ -284,7 +284,7 @@ class AlphaBotService:
         try:
             import options_paper_leg as opl
             out.update({k: opl.CONFIG.get(k) for k in ("starting_capital", "risk_per_trade_pct", "max_open",
-                                                       "expiry_buffer_days", "fallback_stale_max_days")})
+                                                       "expiry_buffer_days")})
         except Exception as exc:  # noqa: BLE001
             out["ledger_rules_error"] = f"{type(exc).__name__}: {exc}"
         try:

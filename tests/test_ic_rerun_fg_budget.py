@@ -763,3 +763,13 @@ class TestBudgetFitsOrchestratorTimeout:
         timeout = osteps.STEP11_TIMEOUT_DEFAULT
         assert budget > 0, "生产不许不限时：0 = 不限时，会重新把 Step 11 推回超时"
         assert budget + rr._FG_KILL_GRACE_SECONDS + 10 <= timeout, (budget, timeout)
+
+    def test_orchestrator_passes_the_budget_explicitly(self):
+        """预算由有看门狗的调用方给（v0.45.437 起）：编排器必须**显式**传 `--budget-seconds`，不许靠工具的缺省值——
+        下一步缺省值会改成不限时（每周任务 / 手动运行没有看门狗），那时没传就等于 Step 11 不限时。
+        变异「删掉编排器 Step 11 行里的 --budget-seconds」⇒ 红。"""
+        import re
+        text = repo_orchestrator_text()
+        m = re.search(r'run_step\s+--timeout\s+\d+\s+"\$\{PROJECT_DIR\}/ic_rerun_readiness\.py"([^\n]*\n[^\n]*)', text)
+        assert m, "编排器里找不到 Step 11 的 run_step 行"
+        assert re.search(r"--budget-seconds\s+\d+(\.\d+)?\b", m.group(1)), m.group(1)
