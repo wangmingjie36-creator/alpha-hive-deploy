@@ -41,7 +41,37 @@
 - `tests/test_options_paper_leg_settle_close.py`：未到期连跑三天（含午夜后恰有那一根）既不平也不延期、到期后按到期那一场结；长间隔补取（`fetches == [(as_of), (到期日)]`）；延期在收盘到来后结束；文案不印 None；正对照改为非交易日到期。
 - 变异（草稿副本、`PYTHONDONTWRITEBYTECODE=1`、每轮清 pyc、`--maxfail=1000`、passed+failed == collected 177、每轮数据根指纹不变）：**M0 = v0.45.433 文件（`5a601932`）**红恰好 5 条，全是本次修的三处（未到期 ×3、补取 ×1、文案 ×1）；M00 = 改动前原文件（`db4621ff`）红 25；正对照在两个旧文件上都绿。N1 恢复未到期兜底 红 3、N2 不补取 红 1、N3 无条件补取 红 3、N4 印 None 红 1；433 那批 M1/M2/M3/M5/M6/M7/M8 仍各自被杀。另有 1 条在每轮都红的是副本环境（`test_alphabot::TestStaticAssets` 要 `git -C`，副本没有 `.git`，返回 128），不计。M4（不清延期字段）现为**等价变异**：已到期仓位每次运行要么结、要么重写延期字段，未到期不再延期，只剩「平仓算出非有限值、拒绝入账」那条路可见，清字段的代码作为防御保留、不计入击杀。
 
-## [0.45.448] — 2026-10-09 — 占位（进行中：账本写入统一走 ledger_io——加锁 / 原子写 / 严格序列化 / 回读校验 + 守卫禁止新增手写写入；第一版迁 hedge_state 与 paper_portfolio）
+## [0.45.448] — 2026-10-09 — Added：账本读写统一走 `ledger_io`——代码写不出坏行（加锁 / 原子替换 / 严格序列化 / 写后回读），读到坏行停下并报警，守卫禁止新增手写写入；第一版迁 hedge_state 与 paper_portfolio
+
+### 为什么（用户 2026-10-09：「怎么能不出现坏行，单纯告警没有解决问题」——要求按根因做）
+- 生产 11 个账本文件当前**全部干净**（逐行严格解析、无非对象、无 NaN 字面量、都以换行结尾）——这是没发生过的隐患，不是正在发生的损坏。
+- 坏行的代码来源有三，且**每个模块各写一份读写助手、各漏各的口子**（7 个生产模块自带 `_write_jsonl` / `_append_jsonl` / `_atomic_write_text`，另有 15 个模块直接 `open(..., "a")`）：
+  ① 追加是裸 `open("a")`、不 fsync——写到一半崩溃 / 断电 / 磁盘满就是半行，下一次追加把两条粘成一行（`paper_portfolio._append_jsonl` 的注释原文是「单行追加对原子性需求低，保留 append」）；
+  ② 读-改-写不加锁——手动补跑与定时扫描撞上 ⇒ 后写者用旧快照覆盖先写者（`sell_strike_ledger` 2026-09-26 探针实测过、自己加了目录锁，别处没有）；
+  ③ 有的模块写前不拒 NaN（`json.dumps` 缺省写出非法的 `NaN` 字面量）。
+  只修两个文件是修实例；根因是「没有统一实现」，所以要一个实现 + 一个不许再造的守卫。
+- 第 ④ 类（手改、磁盘损坏、坏备份）任何代码都防不住：代码写不出坏行之后，读到坏行 = 外部损坏 ⇒ 停下、报警、从每日异地备份恢复——这是对这一类的正确处理，不是治标。
+
+### Added
+- **`ledger_io.py`**（唯一实现）：`locked(dir)`（目录 fd `fcntl.flock` 排他锁，照 `sell_strike_ledger._tenor_lock`；**同进程可重入**、跨线程 / 跨进程互斥；超时抛 `LedgerLockTimeout`，不退回无锁写）、`write_jsonl`（逐条 `allow_nan=False` + 必须是对象，任何一条不合法 ⇒ `LedgerWriteError`、文件一个字节不动 → 同目录临时文件 → fsync → `os.replace` → fsync 目录 → 读回逐字节比对）、`append_jsonl`（持锁、逐行严格校验现有内容、**原字节** + 新行整文件原子替换——旧行逐字节不变；坏文件上不续写；末行缺换行补上不粘行）、`load_jsonl`（严格：坏 JSON / 非对象 / NaN 字面量 / 非 UTF-8 ⇒ `LedgerCorrupt` 带文件与行号）、`atomic_write_text`。
+- **守卫 `tests/test_ledger_writes_go_through_ledger_io.py`**：AST 扫全仓（共享清单 `own_python_files`）——裸追加（`open(x, "a")` / `x.open("a")` / `mode=` 各写法）与不经 `ledger_io` 的 `*_jsonl` 读写助手，按「文件::函数」记。现存 21 处逐条登记在 `DEBT` 并写明是什么：18 处「待迁移（数据，会被读回）」（期权纸面腿、财报波动、VRP、概率记分卡、IBKR 真实成交、IV / 价格索引、权重审计、模型 manifest、迁移账本、信息素板兜底、Alpha Bot 盘中快照、备份历史、gh-pages 部署日志）、3 处「保留」（Alpha Bot 服务器日志、代码执行沙箱审计日志、Alpha Bot 跨式页只读展示——坏行计数显示在页面上）。两头都守：新增命中红、登记了却不再命中也红；迁完的两个模块零命中有单独断言；比对函数在合成输入上自证会红。
+- **纸面组合失败看得见**：`paper_portfolio.run_for_date` 结局记进 `run_stats()`（`{"as_of", "ok", "error"}`）→ `scan_timing.counters()["paper_portfolio"]` → status.json → `alert_manager._check_paper_portfolio_run` P2「这一轮异常中断」（计数缺失 ⇒ checks_skipped），摘要行「纸面组合异常中断(…)」。此前日报把它的任何异常当「非致命」吞成一行 WARNING——账本坏行、写锁超时、写入被拒都会是**整轮没跑也不红**。
+
+### Changed
+- **`portfolio_greeks`**：`_load_jsonl` / `_write_jsonl` / `_append_jsonl` / `_atomic_write_text` 委托 `ledger_io`（`_scrub` 先把 NaN 变 null 的口径不变）；`run_for_date(execute=True)` 整轮持 `hedge_state/` 目录锁（只算不写时不占锁）。读到坏行 ⇒ `LedgerCorrupt` ⇒ v0.45.442 的 `price_check_stats()["error"]` ⇒ P2（此前非对象行在下游 `.get` 炸 AttributeError，坏 JSON 被静默跳过）。
+- **`paper_portfolio`**：四个助手同样委托（写入不再允许 NaN：写出非法 JSON 前就抛）；`run_for_date` 整轮持 `paper_portfolio_state/` 目录锁。⚠️ 外部读者（`ibkr_sync`、`param_optimizer`、F&G 前瞻检验实验）经 `pp._load_jsonl` 读——数据干净时结果逐字相同，坏行时从「跳过 / 照收非对象」变为抛 `LedgerCorrupt`。
+- `CLAUDE.md` 核心组件指针加一行 `ledger_io`。
+
+### 验证
+- 生产只读：`ledger_io.load_jsonl` 严格读 11 个生产账本文件全部通过（迁移后今天的扫描不会因严格读取停下）。
+- 新测试：`tests/test_ledger_io.py`（22：拒坏记录且文件不动、替换前崩溃旧文件完好无残留、读回不一致即抛、权限 0644、旧行逐字节保留、坏文件不续写、缺换行不粘行、严格读带行号、锁同线程可重入 / 跨线程 / 跨进程互斥、**4 进程各追加 25 条 ⇒ 100 条不丢不粘**）、`tests/test_ledger_wiring.py`（11：真 `run_for_date` 读半行持仓文件即停且记录、P2 与摘要行、成功静默、计数缺失记 skipped、整轮持锁、组合 Greeks 只在写账本时持锁、迁移后的助手严格）、守卫 7 条；改 2 条既有测试（坏行期望从 AttributeError 改为更早更准的 `LedgerCorrupt`、计数器键集合加 `paper_portfolio`）。
+- 变异 23 个全部打红：K1–K13（追加退回裸 open / 允许 NaN / 不核对象 / 读时跳过坏行 / 读收 NaN / 不读回校验 / 锁不可重入 / 只有线程锁 / 没有线程锁 / 追加不校验现有行 / 缺换行粘行 / 追加不加锁 / 失败不清临时文件）、W1–W10（两模块不加锁 / 读回宽松 / 失败不记录 / 告警与摘要与计数不接 / 组合 Greeks 追加退回裸 open / 守卫漏 `Path.open('a')` / 守卫比对关掉）。⚠️ K12 靠多进程并发测试打红，依赖竞争实际发生——这次红了，不保证每次。
+- 全量套件：见提交说明。
+
+### 下一版起（`DEBT` 里逐条迁）
+- `options_paper_leg`（v0.45.433 已合入，可以动了）、`vrp_signal`、`earnings_vol_signal` 先迁；其余按 `DEBT` 顺序。
+- 本版未覆盖：各模块 `meta.json` 仍用各自的 `json.dumps`（经 `ledger_io.atomic_write_text` 原子写，但没拒 NaN）；手写 `os.replace` 的原子写（24 个文件）未进守卫——它们本身是原子的，危险低一级，按需再收。
+
 
 ## [0.45.447] — 2026-10-09 — Added：变异检验补三条缺口——v0.45.445 的测试在 18 个变异里漏掉 3 个（429 单靠状态码判拒绝 / 印记只认 massive / ML 世代登记 445）；只加测试，不改任何生产行为
 

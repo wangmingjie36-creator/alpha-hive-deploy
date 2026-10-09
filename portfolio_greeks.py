@@ -103,6 +103,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+import ledger_io
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("portfolio_greeks")
@@ -202,49 +203,24 @@ def _weekdays_between(d0: str, d1: str) -> Optional[int]:
     return n
 
 
+# 账本读写一律经 `ledger_io`（v0.45.448）：加锁 + 原子替换 + 严格序列化 + 写后回读——代码写不出坏行；
+# 读到坏行 ⇒ `LedgerCorrupt`（外部损坏），由 `run_for_date` 记进 price_check_stats()["error"] ⇒ P2，不再静默跳过。
+# 此前追加是裸 `open("a")`（写到一半崩溃 = 半行），读时坏行被无声丢掉（持仓文件坏一行 = 少一个仓位照样对冲）。
+
 def _load_jsonl(path: Path) -> List[Dict]:
-    if not path.exists():
-        return []
-    out = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    out.append(json.loads(line))
-                except ValueError:
-                    continue
-    return out
+    return ledger_io.load_jsonl(path)
 
 
 def _atomic_write_text(path: Path, content: str, mode: int = 0o644) -> None:
-    import os
-    import tempfile
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    ledger_io.atomic_write_text(path, content, mode)
 
 
 def _write_jsonl(path: Path, records: List[Dict]) -> None:
-    _atomic_write_text(path, "".join(json.dumps(_scrub(r), ensure_ascii=False) + "\n" for r in records))
+    ledger_io.write_jsonl(path, [_scrub(r) for r in records])
 
 
 def _append_jsonl(path: Path, record: Dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(_scrub(record), ensure_ascii=False) + "\n")
+    ledger_io.append_jsonl(path, _scrub(record))
 
 
 def _load_meta() -> Dict:
@@ -1308,7 +1284,12 @@ def run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, execu
     status.json 里这一项是 None，alert_manager 只记 checks_skipped，**覆盖层整轮没跑也不红**。"""
     global _LAST_PRICE_CHECK
     try:
-        return _run_for_date(as_of, closes_fn=closes_fn, quotes_fn=quotes_fn, beta_fn=beta_fn, execute=execute)
+        if not execute:                                   # 只算、不写账本：不必占锁
+            return _run_for_date(as_of, closes_fn=closes_fn, quotes_fn=quotes_fn, beta_fn=beta_fn, execute=False)
+        # v0.45.448：整轮读-改-写持 hedge_state 目录锁——手动补跑与定时扫描撞上时，后到者等前者写完再读持仓 / 现金，
+        # 不会拿旧快照做决定、再把对方的成交与净值覆盖掉（锁内的追加 / 重写经 ledger_io 可重入）
+        with ledger_io.locked(STATE_DIR):
+            return _run_for_date(as_of, closes_fn=closes_fn, quotes_fn=quotes_fn, beta_fn=beta_fn, execute=True)
     except Exception as exc:  # noqa: BLE001 - 记下来、原样抛：调用方的处理不变
         prev = _LAST_PRICE_CHECK if (_LAST_PRICE_CHECK or {}).get("as_of") == as_of else None
         _LAST_PRICE_CHECK = dict(prev or {"as_of": as_of, "version": _VERSION},

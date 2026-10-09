@@ -102,7 +102,7 @@ def counters() -> Dict[str, Optional[dict]]:
                                       "cboe": None, "cboe_chain": None,
                                       "gex_view": None, "cboe_raw": None,
                                       "options_snapshot": None, "hv_gap": None,
-                                      "portfolio_greeks": None}
+                                      "portfolio_greeks": None, "paper_portfolio": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -139,6 +139,11 @@ def counters() -> Dict[str, Optional[dict]]:
         out["portfolio_greeks"] = portfolio_greeks.price_check_stats()   # 本进程没跑过 ⇒ None
     except Exception as e:  # noqa: BLE001
         _log.debug("portfolio_greeks price_check 不可得: %s", e)
+    try:
+        import paper_portfolio
+        out["paper_portfolio"] = paper_portfolio.run_stats()   # v0.45.448；本进程没跑过 ⇒ None
+    except Exception as e:  # noqa: BLE001
+        _log.debug("paper_portfolio run_stats 不可得: %s", e)
     return out
 
 
@@ -320,5 +325,8 @@ def summary_line(snap: dict) -> str:
                 + (f"/报价错场 {pg['n_quote_stale']}" if pg.get("n_quote_stale") else "")
                 + ("/拒绝成交" if pg.get("execution_blocked") else "")
                 + (("/另缺 " + "；".join(pg["gaps"])) if pg.get("gaps") else ""))
+    pp = c.get("paper_portfolio")
+    if pp and pp.get("error"):
+        pg_s += f" | 纸面组合异常中断({str(pp['error'])[:80]})"        # v0.45.448
     return ("耗时 " + " | ".join(parts) +
             f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s + pg_s)

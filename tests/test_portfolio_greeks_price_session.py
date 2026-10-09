@@ -888,10 +888,12 @@ class TestRunFailureIsRed:
         world.book()
         pg.TRADES_FILE.parent.mkdir(parents=True, exist_ok=True)
         pg.TRADES_FILE.write_text('"不是对象"\n', encoding="utf-8")
-        with pytest.raises(AttributeError):
+        import ledger_io
+        # v0.45.448 起读取严格：坏行在读的那一刻就抛 LedgerCorrupt（带文件与行号），不再等到下游 `.get` 炸 AttributeError
+        with pytest.raises(ledger_io.LedgerCorrupt, match="trades.jsonl 第 1 行不是对象"):
             pg.run_for_date(AS_OF, beta_fn=_beta1)
         chk = pg.price_check_stats()
-        assert chk["as_of"] == AS_OF and "AttributeError" in chk["error"], chk
+        assert chk["as_of"] == AS_OF and "LedgerCorrupt" in chk["error"], chk
         _, hits = TestAlertManagerSeesStalePrices._analyze(tmp_path, {"portfolio_greeks": chk})
         assert len(hits) == 1 and hits[0].level == am.AlertLevel.MEDIUM and "异常中断" in hits[0].message
         assert "Greeks 异常中断" in stt.summary_line({"phases": {}, "counters": {"portfolio_greeks": chk}})

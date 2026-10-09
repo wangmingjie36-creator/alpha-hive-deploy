@@ -299,6 +299,7 @@ class AlertAnalyzer:
 
         # 7. 检测 P2: 组合 Greeks 用到了不属于当天那一场的标的价 / 因此拒绝成交（v0.45.423）
         self._check_portfolio_greeks_prices(status)
+        self._check_paper_portfolio_run(status)
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
         self._check_news_sources(status)
@@ -588,6 +589,33 @@ class AlertAnalyzer:
                 },
                 ["data_quality", "news"]
             ))
+
+    def _check_paper_portfolio_run(self, status: Dict) -> None:
+        """纸面组合这一轮跑没跑完（v0.45.448；`paper_portfolio.run_stats` 经 scan_timing 进来）。
+
+        日报把 `paper_portfolio.run_for_date` 的任何异常当「非致命」吞成一行 WARNING——账本读到坏行
+        （`ledger_io.LedgerCorrupt`）、写锁超时、写入被拒（NaN / 非对象）都在这条路上，此前**整轮没跑也不红**。
+        error ⇒ P2；计数缺失（钩子没跑到 / 旧版扫描）⇒ checks_skipped，不当「查过了没事」。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        pp = (st.get("counters") or {}).get("paper_portfolio")
+        if not isinstance(pp, dict):
+            self.checks_skipped.append("纸面组合运行结局检查（scan_timing 无 paper_portfolio 计数）")
+            return
+        if not pp.get("error"):
+            return
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】纸面组合：{pp.get('as_of')} 这一轮异常中断，开平仓 / 净值快照可能都没落盘",
+            {
+                "异常": str(pp["error"]),
+                "影响": "纸面组合这一天没有（完整的）记录；账本读到坏行时不会再静默跳过，修好之前每轮都会停在这里",
+                "建议": "LedgerCorrupt ⇒ 按报错的文件与行号核对，从每日异地备份恢复该文件；LedgerLockTimeout ⇒ 查是否有"
+                        "别的写者卡住；其他 ⇒ 看 alpha_hive.log 里「纸面组合更新失败」那一行",
+            },
+            ["paper_portfolio", "data_quality"]
+        ))
 
     def get_critical_alerts(self) -> List[Alert]:
         """获取 P0 级别告警"""
