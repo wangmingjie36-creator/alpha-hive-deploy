@@ -179,6 +179,7 @@ Scout 与 Oracle / Buzz / Chronos / CodeExecutor 在 Phase-1 **并行**，算拥
   - M7 `--home` 不清 demo / M8 `--reset` 不清 demo；
   - M9 TCC 提示不看位置 / M10 委托不禁 pyc。
 - 结果：`test_alphabot_launcher.py` + `test_alphabot.py` 111 passed；ruff 全绿。
+- ⚠️ 追补（同日）：`TestLaunchScriptHints` 两处把 `/usr/local/bin/python3` 写成 `launch_script` 实参，撞了 `tests/test_tests_use_running_interpreter.py`（CI 上没有该解释器）。本条只跑了受影响套件、没跑全量，所以没看到；另一会话在 main 全量里发现并告知，改为 `sys.executable`。
 
 ### 待办（时间点决定，不是没做）
 - 已装的 `~/Applications/Alpha Bot.app` 由克隆 6f2bbbb0 的生成器生成，壳里仍是旧的 cd 失败文案（本条修的是生成器）。今天 14:00 扫描把克隆快进到含本版的 main 后，重跑一次 `make alphabot-app` 即换成新文案，任何检出里跑都一样。

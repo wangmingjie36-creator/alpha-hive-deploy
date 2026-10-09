@@ -353,11 +353,11 @@ class TestLaunchScriptHints:
     弹窗却只教人开「桌面文件夹」权限、重跑 make（克隆丢了时那只会报错）。"""
 
     def test_clone_outside_desktop_gets_rebuild_hint_not_tcc(self, tmp_path, home):
-        script = MA.launch_script(home / "alpha-hive-prod", "/usr/local/bin/python3")
+        script = MA.launch_script(home / "alpha-hive-prod", sys.executable)
         assert "production_clone.py setup" in script and "桌面文件夹" not in script
 
     def test_repo_under_desktop_keeps_tcc_hint(self, tmp_path, home):
-        assert "桌面文件夹" in MA.launch_script(home / "Desktop" / "Alpha Hive", "/usr/local/bin/python3")
+        assert "桌面文件夹" in MA.launch_script(home / "Desktop" / "Alpha Hive", sys.executable)
 
     @pytest.mark.parametrize("where", ["alpha-hive-prod", "Desktop/Alpha Hive"])
     def test_hint_is_safe_inside_the_double_quoted_alert(self, home, where):
