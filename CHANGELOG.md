@@ -57,7 +57,22 @@
   - M4 委托方替目标填缺省 / M5 委托方先按自己那版判配置 / M6 委托方把持久值按自己 cwd 绝对化。
 - `test_alphabot_launcher.py` 70 passed；ruff 全绿；**全量** 8923 passed、1 failed（`TestCoverageHorizon`：已知的、按设计定期变红的经济日历覆盖期告警，与本版无关）。
 
-## [0.45.455] — 2026-10-10 — 占位（进行中：仓库根闸 / 真实数据根闸报红时逐文件标出「写入时刻在跑哪条测试」——session 级闸不再只挂在最后一条测试名下；叠加在 453 之上，并补 453 分类器的 demo 来源缺口）
+## [0.45.455] — 2026-10-10 — Changed：两道 session 级总闸报红时逐文件标出「写入时刻在跑哪条测试」——不再只挂在最后一条测试名下；补 453 分类器的 demo 来源缺口
+
+10-09 全量连续三轮红在同一条 `test_zero_weight_invariant.py::…::test_reads_live_config_when_not_injected` 上，被当成「确定性的跨测试泄漏」开了一个 session 去查——实际那条只是收集序最后一条（session 级 fixture 的失败 pytest 一律记在最后一条测试名下），写入者是 Alpha Bot 盘中采样（只读探针正对照原样复现）。根因：指纹里本来就记了每个文件的 mtime，报错只打路径、把它扔了；开头那句「测试写到了…」又断言了一个闸观测不到的因果。
+
+### Changed
+- `tests/conftest.py`：`pytest_runtest_logreport` 逐条逐阶段记 `(start, stop, nodeid, when)`（pytest 自留墙钟，测试 mock `time` 改不到）；`pytest_sessionstart` 先记开始时刻再取指纹。仓库根闸 / 真实数据根闸报红时（453 的三种措辞都）附一节：开场说明「这是 session 级闸、测试名与原因无关」+ 逐项「路径 @时刻 → 当时在跑什么」+ 读法。开头改成观测事实（「本轮期间…被改动了」），原「被测代码绕过隔离」降为「若是测试写的：…」。
+- `tests/_root_data_guard.py`：新增 `change_mtime` / `locate` / `format_timeline` / `timeline_section`。位置分：收集期 / `<nodeid>` 的 setup·call·teardown 阶段 / 两段之间 / 最后一段之后（= 最后一条的 teardown，含 session·module 级 fixture 收尾）/ 早于本轮开始（写入者保留旧 mtime）/ 已删除（无 mtime）。**只说时间重合，不说是谁写的**——并发写入者的写入照样落在无关测试期间。
+- `tests/_root_data_guard.py::_why_not_alphabot_append`：来源为 `demo` 的快照行不归因于 Alpha Bot。Alpha Bot 的测试都跑演示服务，`IntradayPoller.tick()` 不传 `now`、走真时钟 ⇒ 这类测试一旦写穿，键集合对、`ts` 在窗口内，453 会报成「已核实，不是测试写的」。真采样来源是 CBOE 现算的 `px_src`（动态，列不成白名单），所以只拒认已知测试来源；测试驱动**真** CBOE 链写穿此条拦不住（要联网）。
+
+### 守卫
+- `tests/test_root_data_guard.py`：`TestTimelineLocate`（七个位置 + 无时间线 + mtime 取法）；端到端两条（原样拷贝的 conftest）：仓库根——收集期写 / 测试写 / 保留旧 mtime / 删除 / session fixture 收尾时写 各归其位，且最后一条什么都没写的测试**不**被标成写入时刻所在；真实数据根——线程模拟的并发写入者在无关测试期间写，标出那条测试的阶段、措辞是「时间重合」。`TestAlphabotAppendClassifier` 的「看起来像」加 `demo_source`。旧文案断言随措辞更新。
+- 变异 6 处，各至少 1 红：不记时间线 / 阶段区间判错 / 不识别保留旧 mtime / 不拒认 demo 来源（同时是 453 缺口的正对照）/ 数据根闸不带时间线 / 删除项不列。全量 9018 passed（rebase 到含 453 二次检查的 main 后、10-12 美股开盘前跑，无撞窗）。
+
+### 注意
+- **判定一字未改**：有变化就红；没有加任何豁免。
+- 时间线只能把「去查是谁」从二分跑全量缩到看一眼报错；真泄漏与 Alpha Bot 撞在同一窗口时两者都会列出——有意多列、不替人排除。
 
 ## [0.45.454] — 2026-10-10 — Fixed + Added：财报跨式「隐含事件波动 = 0」——算不出写 `None` 不写 0；新增「远期 IV 法」影子字段 `shadow_event`（只记录，旧 rv 法仍决定标签与开仓）
 

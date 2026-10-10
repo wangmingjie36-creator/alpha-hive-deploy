@@ -405,7 +405,7 @@ def test_session_gate_is_red_on_real_writes(tmp_path):
     out = r.stdout + r.stderr
     assert r.returncode != 0, out
     assert "1 passed, 1 error" in out, f"应是测试本身通过、总闸在 teardown 报错：\n{out}"
-    assert "测试往**仓库根**写了非代码内容" in out, out
+    assert "本轮期间**仓库根**的非代码内容被改动了" in out, out
     # 逐行核对运行时 diff（顺序 + 内容），而不只是「路径字样出现过」。
     # 去掉行首尾空白再比：native traceback 会给消息续行多缩进两格。
     expected = "\n".join(["added（3）：", "brand_new_dir", "brand_new_dir/f.bin", "written_at_collection.json",
@@ -469,7 +469,7 @@ def test_real_data_root_gate_is_red_on_escaping_writes(tmp_path):
     out = r.stdout + r.stderr
     assert r.returncode != 0, out
     assert "1 passed, 1 error" in out, f"应是测试本身通过、总闸在 teardown 报错：\n{out}"
-    assert "测试写到了**真实数据根**" in out, out
+    assert "本轮期间**真实数据根**" in out and "若是测试写的" in out, out
     expected = "\n".join(["added（3）：", "new_dir", "report_snapshots/b.json", "written_at_collection.json",
                           "changed（1）：", "pheromone.db"])
     normalized = "\n".join(line.strip() for line in out.splitlines())
@@ -601,7 +601,8 @@ class TestAlphabotAppendClassifier:
         assert v["explained"] == sorted([day, rel]) and v["unexplained"] == {}
 
     @pytest.mark.parametrize("case", ["rewrite_prefix", "ts_outside_window", "extra_key", "not_json",
-                                      "partial_line", "no_baseline", "outside_intraday", "removed", "truncated"])
+                                      "partial_line", "no_baseline", "outside_intraday", "removed", "truncated",
+                                      "demo_source"])
     def test_lookalikes_are_not_explained(self, tmp_path, case):
         root, rel, before, baseline, started, now = self._setup(tmp_path)
         p = root / rel
@@ -631,6 +632,9 @@ class TestAlphabotAppendClassifier:
             p.unlink()
         elif case == "truncated":
             p.write_bytes(b"")
+        elif case == "demo_source":       # v0.45.455：演示服务 + 真时钟（IntradayPoller.tick 不传 now）写出的那种行
+            with open(p, "ab") as f:
+                f.write(_line(_snap(now, underlying_price_source=g.ALPHABOT_DEMO_SOURCE)))
         _changes, v = self._explain(root, before, baseline, started)
         assert v["explained"] == [], f"{case}：被错误归因成 Alpha Bot"
         assert any(target in items for items in v["unexplained"].values()), v
@@ -746,7 +750,8 @@ def test_real_data_root_gate_names_alphabot_but_stays_red(tmp_path):
     assert "1 passed, 1 error" in out, out
     assert "**全部**是 Alpha Bot 盘中采样的追加" in out and "1 张快照" in out, out
     assert "不要** `git push --no-verify`" in out, out
-    assert "测试写到了**真实数据根**" not in out, f"已核实是 Alpha Bot，却仍说成测试写穿\n{out}"
+    assert "若是测试写的" not in out and "本轮期间**真实数据根**" not in out, \
+        f"已核实是 Alpha Bot，却仍用怀疑测试写穿的措辞\n{out}"
     # 真 conftest → 真报告插件 → 真判定函数：pre-push 会据此改提示（不劝 --no-verify）
     import changelog_guard as cg
     rep = json.loads(report.read_text(encoding="utf-8"))
@@ -769,9 +774,122 @@ def test_real_data_root_gate_keeps_blaming_tests_when_anything_else_changed(tmp_
                                  "INNER_ALPHABOT_REL": rel, **gate_env})
     out = r.stdout + r.stderr
     assert r.returncode != 0, out
-    assert "测试写到了**真实数据根**" in out, out
+    assert "本轮期间**真实数据根**" in out and "若是测试写的" in out, out
     rep = json.loads(report.read_text(encoding="utf-8"))
     assert rep["real_data_root_verdict"]["all_alphabot_appends"] is False, rep
     assert "**全部**是 Alpha Bot" not in out, out
     normalized = "\n".join(line.strip() for line in out.splitlines())
     assert "其余这些不能归因于它，问题在这里**：\nchanged（1）：\npheromone.db" in normalized, out
+
+
+# ───────────── 5. session 级闸逐文件标出「写入时刻在跑哪条测试」（v0.45.455） ─────────────
+#
+# 10-09：连续三轮红在同一条测试上，被当成确定性泄漏去查——那只是收集序最后一条，写入者是 Alpha Bot。
+# 指纹里本来有 mtime；这里证明它被对到了时间线上，且措辞只说「时间重合」不说「是它写的」。
+
+class TestTimelineLocate:
+    TL = [(10.0, 11.0, "t.py::a", "setup"), (11.0, 12.0, "t.py::a", "call"),
+          (12.0, 13.0, "t.py::a", "teardown"), (14.0, 15.0, "t.py::b", "call")]
+
+    @pytest.mark.parametrize("t, expected", [
+        (None, "定位不了"),
+        (4.0, "早于本轮开始"),
+        (7.0, "收集期"),
+        (11.5, "t.py::a 的 call 阶段"),
+        (13.5, "两段之间（紧接 t.py::a 的 teardown 之后）"),
+        (14.5, "t.py::b 的 call 阶段"),
+        (16.0, "最后一段记录之后——即 t.py::b 的 teardown 阶段"),
+    ])
+    def test_positions(self, t, expected):
+        assert expected in g.locate(t, self.TL, session_start=5.0)
+
+    def test_no_timeline_means_collection(self):
+        assert "收集期" in g.locate(7.0, [], session_start=5.0)
+
+    def test_change_mtime_reads_file_signature_and_stats_dirs(self, tmp_path):
+        (tmp_path / "d").mkdir()
+        assert g.change_mtime(str(tmp_path), "f", "3:1500000000000000000") == 1.5e9
+        assert g.change_mtime(str(tmp_path), "d", "dir") == os.lstat(tmp_path / "d").st_mtime_ns / 1e9
+        assert g.change_mtime(str(tmp_path), "gone", None) is None
+
+
+def _labels(out: str) -> dict[str, str]:
+    """报错里「逐项写入时刻」那几行 → {路径: 位置}。"""
+    res = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if "  @" in line and "  → " in line:
+            path, rest = line.split("  @", 1)
+            res[path] = rest.split("  → ", 1)[1]
+    return res
+
+
+def test_repo_root_gate_places_each_write_on_the_timeline(tmp_path):
+    """收集期写 / 第一条测试写 / 最后一条什么都不写 / session fixture 收尾时写 / 保留旧 mtime / 删除——各归其位，
+    最后一条测试**不**被当成写入时刻所在（它就是 pytest 记这条 error 的那个名字）。"""
+    root = _make_fake_checkout(tmp_path / "checkout", """
+        import os, pathlib, pytest
+        ROOT = pathlib.Path(__file__).resolve().parents[1]
+        (ROOT / "at_collection.json").write_text("x")
+
+        @pytest.fixture(scope="session")
+        def writes_at_session_end():
+            yield
+            (ROOT / "at_session_teardown.json").write_text("x")
+
+        def test_a_writes(writes_at_session_end):
+            with open(ROOT / "report_snapshots/a.json", "ab") as f:
+                f.write(b"x")
+            (ROOT / "old_mtime.json").write_text("x")
+            os.utime(ROOT / "old_mtime.json", (1_000_000_000, 1_000_000_000))   # copy2 / 解包那种
+            (ROOT / "probability_scorecard_state/published.jsonl").unlink()
+
+        def test_z_last_does_nothing():
+            pass
+    """)
+    r = _run_inner_pytest(root)
+    out = r.stdout + r.stderr
+    assert r.returncode != 0 and "2 passed, 1 error" in out, out
+    assert "pytest 把它记在**收集序最后一条测试**名下" in out, out
+    assert "只说明时间重合，不等于是它写的" in out, out
+    lab = _labels(out)
+    assert "收集期" in lab["at_collection.json"], lab
+    assert "test_a_writes 的 call 阶段" in lab["report_snapshots/a.json"], lab
+    assert "早于本轮开始" in lab["old_mtime.json"], lab
+    assert "定位不了" in lab["probability_scorecard_state/published.jsonl"], lab
+    assert "最后一段记录之后" in lab["at_session_teardown.json"], lab
+    assert not any("test_z_last_does_nothing 的 call" in v for v in lab.values()), \
+        f"最后一条什么都没写，却被标成写入时刻所在：\n{lab}"
+
+
+def test_real_data_root_gate_names_the_test_running_when_a_concurrent_writer_wrote(tmp_path):
+    """并发写入者（这里用线程模拟）在一条无关测试期间写：标出那条测试的阶段，措辞仍是「时间重合」。
+    测试自己的写入归到它自己。"""
+    data_root = _make_data_root(tmp_path / "alpha-hive-data")
+    root = _make_fake_checkout(tmp_path / "checkout", """
+        import os, pathlib, threading
+        DR = pathlib.Path(os.environ["INNER_DATA_ROOT"])
+        GO = threading.Event()
+
+        def _writer():
+            GO.wait(20)
+            (DR / "report_snapshots/by_writer.json").write_text("{}")
+
+        T = threading.Thread(target=_writer, daemon=True)
+
+        def test_a_escapes():
+            T.start()
+            with open(DR / "pheromone.db", "ab") as f:
+                f.write(b"x")
+
+        def test_b_unrelated():
+            GO.set()
+            T.join(20)
+    """)
+    r = _run_inner_pytest(root, {"ALPHA_HIVE_HOME": str(data_root), "INNER_DATA_ROOT": str(data_root)})
+    out = r.stdout + r.stderr
+    assert r.returncode != 0 and "2 passed, 1 error" in out, out
+    lab = _labels(out)
+    assert "test_a_escapes 的 call 阶段" in lab["pheromone.db"], lab
+    assert "test_b_unrelated 的 call 阶段" in lab["report_snapshots/by_writer.json"], lab
+    assert "只说明时间重合，不等于是它写的" in out and "并发写入者" in out, out

@@ -3,6 +3,7 @@ Alpha Hive 测试 fixtures - 共享 mock 数据 + 隔离数据库
 """
 
 import datetime
+import time
 import sys
 import os
 import pathlib
@@ -1332,9 +1333,16 @@ _ROOT_FP_BEFORE = pytest.StashKey[dict]()
 
 _DATA_ROOT_BEFORE = pytest.StashKey[tuple]()
 _DATA_ROOT_ALPHABOT = pytest.StashKey[tuple]()
+# v0.45.455：两道 session 级总闸报红时，逐文件标出「写入时刻在跑哪条测试」要用的本轮开始时刻与时间线。
+_SESSION_START_WALL = pytest.StashKey[float]()
+_TIMELINE = pytest.StashKey[list]()
 
 
 def pytest_sessionstart(session):
+    # 先记开始时刻再取指纹：取指纹期间被写的文件，mtime 也不会早于这个时刻（否则会被误标成「保留了旧 mtime」）
+    session.config.stash[_SESSION_START_WALL] = time.time()
+    _GATE_TIMELINE.clear()
+    session.config.stash[_TIMELINE] = _GATE_TIMELINE
     session.config.stash[_ROOT_FP_BEFORE] = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)
     # 真实数据根：按**调用 pytest 时**的环境取——`pytest_configure` 已把 ALPHA_HIVE_HOME 换成会话沙箱
     # （v0.45.422），`_isolate_env` 之后还会逐条换。读 os.environ 就会把沙箱当成「真实数据根」，闸当场失明。
@@ -1350,6 +1358,20 @@ def pytest_sessionstart(session):
         _root_data_guard.alphabot_baseline(root, _fp, datetime.date.today()) if root else {})
 
 
+#: 本轮时间线（与 stash 里 `_TIMELINE` 是同一个对象）：`pytest_runtest_logreport` 拿不到 config，只能经模块级引用写。
+_GATE_TIMELINE: list = []
+
+
+def pytest_runtest_logreport(report):
+    """逐条测试逐阶段记 (开始, 结束, nodeid, 阶段)——只给两道总闸报红时定位用（v0.45.455）。
+    `report.start/stop` 是 pytest 自留的墙钟，测试 mock `time` 改不到；与文件 mtime 可直接比。"""
+    _GATE_TIMELINE.append((report.start, report.stop, report.nodeid, report.when))
+
+
+def _gate_timeline(config) -> tuple:
+    return config.stash.get(_SESSION_START_WALL, None), config.stash.get(_TIMELINE, [])
+
+
 def pytest_report_header(config):
     """让「这台机器上真实数据根闸有没有生效」可见：不在时它什么都不保护，不能让这件事静默。"""
     root, fp = config.stash.get(_DATA_ROOT_BEFORE, (None, None))
@@ -1362,8 +1384,9 @@ def pytest_report_header(config):
 def _guard_repo_root_default_deny(request):
     """整个 session（含收集期）跑完，仓库根下的非代码内容必须一个字节都没变。
 
-    ⚠️ 与上面那道一样是 session 级的：红在整轮末尾，不指出是哪条测试写的。
-    定位：对红出来的路径 patch `builtins.open` / `os.makedirs` / `sqlite3.connect`
+    ⚠️ 与上面那道一样是 session 级的：红在整轮末尾，pytest 把它记在收集序最后一条测试名下（与原因无关）。
+    v0.45.455 起报错逐文件给出「mtime 落在哪条测试的哪个阶段」——只是时间重合，并发写入者照样会落在
+    无关测试期间。要确认是谁写的：对红出来的路径 patch `builtins.open` / `os.makedirs` / `sqlite3.connect`
     记 `nodeid` 与调用栈；或二分跑测试文件。
     ⚠️ 在**生产 checkout** 里跑时，每日扫描、别的 session 往生产目录写的东西都会让它红——
     那是真实存在的「测试与生产写同一批文件」的时间窗，不是假警报（数据根迁移阶段 5 之后才会消失）。
@@ -1375,13 +1398,18 @@ def _guard_repo_root_default_deny(request):
 
     yield
 
-    changes = _root_data_guard.diff(before, _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD))
+    after = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)
+    changes = _root_data_guard.diff(before, after)
+    if not changes:
+        return
+    started, timeline = _gate_timeline(request.config)
     assert not changes, (
-        f"测试往**仓库根**写了非代码内容（checkout 根目录 = {_REPO_ROOT_FOR_GUARD}）：\n"
+        f"本轮期间**仓库根**的非代码内容被改动了（checkout 根目录 = {_REPO_ROOT_FOR_GUARD}）：\n"
         f"{_root_data_guard.format_diff(changes)}\n\n"
         + ("⚠️ 基线取自 session fixture setup（sessionstart 未生效），收集期写入不在本次比对范围内。\n"
            if late else "")
-        + "被测代码的写入路径绕过了 `ALPHA_HIVE_HOME` 隔离：多半是 `Path(__file__).parent / 数据名`、"
+        + f"{_root_data_guard.timeline_section(_REPO_ROOT_FOR_GUARD, changes, after, timeline, started)}\n\n"
+        "若是测试写的：被测代码的写入路径绕过了 `ALPHA_HIVE_HOME` 隔离——多半是 `Path(__file__).parent / 数据名`、"
         "cwd 相对路径，或把 `PATHS.*` 求值成了模块级常量 / 类属性 / 默认参数。"
         "改成调用时读 `PATHS.*`。\n"
         "**不要**往 `tests/_root_data_guard.py` 的豁免里加数据路径——那里只放人写的代码。")
@@ -1397,7 +1425,8 @@ def _guard_real_data_root(request):
     v0.45.427——`PATHS.data_backup_repo` 让测试碰得到它，10-03 夹具就是写进了这里）、`(size, mtime_ns)`、
     `-shm` 只记大小。「之前」取在 `pytest_sessionstart`（收集期之前），理由见仓库根闸一节。
 
-    ⚠️ 与仓库根闸同样是 session 级：红在整轮末尾，不指出是哪条测试写的（定位法见仓库根闸）。
+    ⚠️ 与仓库根闸同样是 session 级：红在整轮末尾、记在最后一条测试名下；逐文件写入时刻落在哪条测试期间
+    见报错（v0.45.455，只是时间重合），确认法见仓库根闸。
     ⚠️ **机器上正在跑每日扫描 / 周任务时它会红**（扫描写 `cache/`、`report_snapshots/`、`paper_portfolio_state/`…）——
     那不是假警报，是「测试与生产写同一批文件的时间窗真实存在」；平日 14:00–15:00 与周日 09:07 前后别跑全套。
     ⚠️ 没有真实数据根的机器上（CI / 干净克隆）本闸不做任何事（`pytest_report_header` 会说明）；它的牙由
@@ -1409,8 +1438,8 @@ def _guard_real_data_root(request):
 
     if root is None:
         return
-    changes = _root_data_guard.diff(
-        before, _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason))
+    after = _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason)
+    changes = _root_data_guard.diff(before, after)
     if not changes:
         return
     started, baseline = request.config.stash.get(_DATA_ROOT_ALPHABOT, (None, {}))
@@ -1421,11 +1450,14 @@ def _guard_real_data_root(request):
         "all_alphabot_appends": not v["unexplained"], "alphabot_files": sum(
             1 for p in v["explained"] if p.endswith(".jsonl")),
         "alphabot_records": v["records"], "unexplained": sum(len(x) for x in v["unexplained"].values())})
-    assert not changes, _real_data_root_message(root, changes, v)
+    started_wall, timeline = _gate_timeline(request.config)
+    assert not changes, _real_data_root_message(root, changes, v) + "\n\n" + _root_data_guard.timeline_section(
+        root, changes, after, timeline, started_wall)
 
 
 def _real_data_root_message(root, changes: dict, v: dict) -> str:
-    """真实数据根闸的报错文案（v0.45.453 起按 `explain_alphabot_appends` 分三种；判定不受影响，照样红）。"""
+    """真实数据根闸的报错文案（v0.45.453 起按 `explain_alphabot_appends` 分三种；判定不受影响，照样红）。
+    v0.45.455 起调用方在其后接 `timeline_section`（逐文件写入时刻落在哪条测试期间），三种措辞都带。"""
     if v["explained"] and not v["unexplained"]:
         n_files = sum(1 for p in v["explained"] if p.endswith(".jsonl"))
         return (
@@ -1439,9 +1471,9 @@ def _real_data_root_message(root, changes: dict, v: dict) -> str:
             "⚠️ 收盘后、或 Alpha Bot 根本没在跑时仍出现这条，就**不是**它——按测试写穿查："
             "测试若绕过隔离、用 Alpha Bot 自己的代码往真实数据根写快照，长得和它一模一样。")
     msg = (
-        f"测试写到了**真实数据根**（{root}）里的生产数据：\n"
+        f"本轮期间**真实数据根**（{root}）里的生产数据被改动了：\n"
         f"{_root_data_guard.format_diff(changes)}\n\n"
-        "被测代码绕过了 `ALPHA_HIVE_HOME` 隔离：多半是 `Path(__file__).parent / 数据名`、模块级常量冻结、"
+        "若是测试写的：被测代码绕过了 `ALPHA_HIVE_HOME` 隔离——多半是 `Path(__file__).parent / 数据名`、模块级常量冻结、"
         "subprocess 丢了 env，或硬编码了 `~/alpha-hive-data`。改成调用时读 `PATHS.*`。\n"
         "若这是每日扫描 / 周任务恰好在写（不是测试）：等它结束再跑。\n"
         "**不要**往 `tests/_root_data_guard.py` 的豁免里加数据路径。")

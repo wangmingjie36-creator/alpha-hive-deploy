@@ -257,6 +257,11 @@ _ALPHABOT_FILE_RE = re.compile(r"^alphabot_state/intraday/(\d{4}-\d{2}-\d{2})/[^
 #: （`tests/test_root_data_guard.py::TestAlphabotAppendClassifier::test_keys_match_the_writer` 守它不漂移）。
 ALPHABOT_SNAPSHOT_KEYS = frozenset({"ts", "payload_last_trade_time", "underlying_price", "underlying_price_source",
                                     "session_live", "iv30", "views", "route"})
+#: 合成数据（`alphabot/synthetic.py`）快照的来源标记。v0.45.455：Alpha Bot 的测试都跑演示服务，其中
+#: `IntradayPoller.tick()` 不传 `now`、走真时钟 ⇒ 这类测试一旦写穿到真实数据根，写出的行键集合对、`ts` 也在
+#: 本轮窗口内，453 的判据会把它报成「已核实，不是测试写的」。真采样的来源是 CBOE 现算的 `px_src`（取值动态，
+#: 列不成白名单），所以这里只拒认已知的测试来源；测试若驱动**真** CBOE 链写穿，此条拦不住（要联网，离线测试碰不到）。
+ALPHABOT_DEMO_SOURCE = "demo"
 #: `take_snapshot` 先取时间戳、再现拉数据、最后落盘 ⇒ 会话开始之后才落盘的那一张，ts 可能早于会话开始。
 ALPHABOT_TS_SLACK_BEFORE_S = 300
 ALPHABOT_TS_SLACK_AFTER_S = 60
@@ -350,6 +355,8 @@ def _why_not_alphabot_append(root: str, rel: str, before_sig: str | None, baseli
             return f"快照时间 {rec['ts']} 不在本轮测试期间", 0
         if ts.date().isoformat() != m.group(1):
             return f"快照日期与目录日期 {m.group(1)} 不一致", 0
+        if rec.get("underlying_price_source") == ALPHABOT_DEMO_SOURCE:
+            return "快照来自合成数据（来源 demo）——那是测试 / 演示模式写的，不是盘中采样", 0
     return None, len(lines)
 
 
@@ -398,3 +405,78 @@ def explain_alphabot_appends(root: str, changes: dict[str, list[str]], before: d
         unexplained["removed"] = list(changes["removed"])
     return {"explained": sorted(explained), "records": records,
             "unexplained": {k: sorted(v) for k, v in unexplained.items() if v}, "why": why}
+
+
+# ═══════════════ session 级闸报红时逐文件标出「写入时刻在跑哪条测试」（v0.45.455）═══════════════
+#
+# 两道总闸都是 session 级 fixture：红在整轮末尾，pytest 把它记在**收集序最后一条测试**名下——
+# 10-09 连续三轮都红在同一条上，被当成「确定性的跨测试泄漏」去查，实际是 Alpha Bot 撞窗。
+# 指纹里本来就有每个文件的 mtime，以前只打路径、把它扔了；这里把 mtime 对到逐条测试的时间线上。
+# **只说明时间重合，不判定是谁写的**：并发写入者（Alpha Bot、每日扫描）的写入同样会落在某条无关测试期间。
+# 判定照旧，有变化就红。
+
+# 时间线：按发生顺序的 `(开始, 结束, nodeid, 阶段)`。时刻是 pytest 报告的 `start` / `stop`——pytest 内部自留的
+# `time.time()`，测试 mock 时间改不到它；与文件 mtime 同为墙钟。
+
+
+def change_mtime(root: str, rel: str, after_sig: str | None) -> float | None:
+    """`rel` 变化后的 mtime（秒）；删了 / 读不到就 None。文件取指纹里记的那个（就是被比对的那次），
+    目录与 `-shm`（指纹不记 mtime）当场 lstat。"""
+    if after_sig:
+        size, sep, mt = after_sig.partition(":")
+        if sep and size.isdigit() and mt.isdigit():
+            return int(mt) / 1e9
+    try:
+        return os.lstat(os.path.join(root, rel)).st_mtime_ns / 1e9
+    except OSError:
+        return None
+
+
+def locate(t: float | None, timeline: list, session_start: float | None) -> str:
+    """把一个写入时刻放到时间线上，返回人读的位置。只说「那时在跑什么」，不说「是谁写的」。"""
+    if t is None:
+        return "已删除 / 读不到，没有 mtime——定位不了（二分跑测试文件）"
+    if session_start is not None and t < session_start:
+        return "早于本轮开始——写入者保留了旧 mtime（如 copy2 / utime / 解包），按时间定位不了"
+    if not timeline or t < timeline[0][0]:
+        return "收集期（第一条测试开始之前：模块 import / 收集钩子）"
+    prev = None
+    for start, stop, nodeid, when in timeline:
+        if t < start:
+            return f"两段之间（紧接 {prev[2]} 的 {prev[3]} 之后）"
+        if t <= stop:
+            return f"{nodeid} 的 {when} 阶段"
+        prev = (start, stop, nodeid, when)
+    return (f"最后一段记录之后——即 {prev[2]} 的 teardown 阶段：最后一条测试的 teardown 也包含 "
+            "session / module 级 fixture 的收尾（本闸自己也在其中）")
+
+
+def format_timeline(root: str, changes: dict[str, list[str]], after: dict[str, str], timeline: list,
+                    session_start: float | None, limit: int = 25) -> str:
+    """逐项列出写入时刻与当时的时间线位置（`diff` 的同一批路径、同样的上限）。"""
+    import time as _time
+    lines = []
+    for kind in ("added", "changed", "removed"):
+        for rel in changes.get(kind, [])[:limit]:
+            t = None if kind == "removed" else change_mtime(root, rel, after.get(rel))
+            stamp = (_time.strftime("%H:%M:%S", _time.localtime(t)) + f".{int(t * 1000) % 1000:03d}"
+                     if t is not None else "—")
+            lines.append(f"    {rel}  @{stamp}  → {locate(t, timeline, session_start)}")
+    return "\n".join(lines)
+
+
+SESSION_GATE_PREAMBLE = (
+    "⚠️ 这是 session 级闸：pytest 把它记在**收集序最后一条测试**名下，那条测试名与原因无关；"
+    "同一条测试名连续出现也不代表是确定性的泄漏。")
+
+
+def timeline_section(root: str, changes: dict[str, list[str]], after: dict[str, str], timeline: list,
+                     session_start: float | None) -> str:
+    """两道总闸报错共用的一节：开场说明 + 逐项写入时刻。"""
+    when = (_dt.datetime.fromtimestamp(session_start).strftime("%H:%M:%S") if session_start else "?")
+    return (f"{SESSION_GATE_PREAMBLE}\n\n"
+            f"逐项写入时刻（mtime；本轮 {when} 开始，{len(timeline)} 段时间线）与当时在跑什么——"
+            "**只说明时间重合，不等于是它写的**：\n"
+            f"{format_timeline(root, changes, after, timeline, session_start)}\n"
+            "读法：落在一条会碰这片数据的测试里 ⇒ 按泄漏查那条；散落在互不相关的测试里、几个文件几秒内成批写 ⇒ "
+            "多半是并发写入者（Alpha Bot 盘中采样 / 手动快照、每日扫描、周任务），对时刻核实后避开再跑。")
