@@ -168,9 +168,9 @@ class TestDiffusionMath:
 
     def test_floor_when_diffusion_exceeds_straddle(self):
         s = evs.compute_signal("XYZ", AS_OF, _qs(), UP, _stats(), rv_30d=60.0)   # diffusion 16.3 > 10
-        assert s["implied_event_move_pct"] == 0.0 and s["event_move_floor_hit"] is True
-        # 被压到 0 的事件波动是退化数字：raw 仍算 cheap，但不得进账本
-        assert s["raw_label"] == "cheap"
+        # v0.45.454：算不出写 None，不写 0.0——0.0 会被读成「比值 0.00 / 标 cheap」这个合法的数
+        assert s["implied_event_move_pct"] is None and s["event_move_floor_hit"] is True
+        assert s["ratio"] is None and s["raw_label"] is None
         assert s["label"] == "untradeable" and s["tradeable"] is False
         assert "floored" in s["untradeable_reason"]
         _no_nan(s)

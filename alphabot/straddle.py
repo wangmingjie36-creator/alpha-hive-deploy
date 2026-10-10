@@ -413,7 +413,7 @@ def signals_today(signals: List[dict], as_of: Optional[str], open_tickers: set, 
         out.append({**{k: s.get(k) for k in ("ticker", "label", "raw_label", "ratio", "implied_event_move_pct",
                                              "hist_median_abs_move_pct", "hist_n", "max_leg_spread_pct",
                                              "earnings_date", "selected_expiry", "tradeable", "untradeable_reason",
-                                             "event_move_basis")}, "status": status})
+                                             "event_move_basis", "event_move_floor_hit")}, "status": status})
     reasons: Dict[str, int] = {}
     for s in rows:
         if not s.get("eligible"):

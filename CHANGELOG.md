@@ -5,7 +5,30 @@
 
 ---
 
-## [0.45.454] — 2026-10-10 — 占位（进行中：财报跨式隐含事件波动——算不出时写 None 不写 0；加「远期 IV 法」影子字段，旧 rv 法仍决定开仓）
+## [0.45.454] — 2026-10-10 — Fixed + Added：财报跨式「隐含事件波动 = 0」——算不出写 `None` 不写 0；新增「远期 IV 法」影子字段 `shadow_event`（只记录，旧 rv 法仍决定标签与开仓）
+
+### 为什么（用户 2026-10-10 在 Alpha Bot「跨式」页看到 CRCL / META / VKTX 比值与隐含波动都是 0.00，要求根因方案 → 回溯试算 → 「改成影子并行」）
+- **0 不是缺数据**：三只的历史财报样本都在（`earnings_cache/*_moves.json`：n=5 / 8 / 8），`rv_30d` 与独立 yfinance 复算对得上（89.65 / 47.26 / 108.36 vs 89.52 / 47.12 / 108.80）。真因是**扩散项估计量**：`rv_30d` 是向后看、含**财报之外**大跳空的总波动（近 30 日 VKTX +30.5%、CRCL +15.2%、META +10.7% 的单日跳空），拿它去扣「未来 28 天没有财报的普通日波动」，扣得比整个跨式价还多 ⇒ 事件² ≤ 0 ⇒ `max(·, 0)` 把「算不出」写成了 `0.0` ⇒ 页面读成「比值 0.00」、`raw_label` 写成 `cheap`。这是本项目「把失败改写成没发生过」的老形状。
+- **回溯试算（37 天 192 行 / 24 个事件，只读）推翻了我先前的推断**：旧方法并不是系统性偏 cheap——两种方法都算得出的 21 个事件里，新方法的隐含事件波动 17 个更低（中位 −0.82pp，比值 ×0.83），因为远期 IV 通常比 rv 高 ≈3 个点（期权风险溢价；旧方法把溢价留在了「事件波动」里）。**切换会让一批 rich 降成 fair**（事件层面 11 个 rich 里 5 个、可交易的 8 个里 1 个）。已结算事件只有 2 个，判不了谁更准 ⇒ 不直接切换，**影子并行**，攒够已结算事件后用实际波动比较两者的预测误差。
+- 触底在事件层面 3 → 0、行层面 22 → 7（新方法下）。
+
+### Fixed
+- **`earnings_vol_signal.compute_signal`**：事件² ≤ 0（舍入后为 0 也算）时 `implied_event_move_pct` / `ratio` / `raw_label` 写 **`None`**（以前 `0.0` / `0.0` / `"cheap"`）；`event_move_floor_hit=True` + `untradeable_reason` + `label="untradeable"` 不变，**照旧不可交易、不进账本**。已落盘的旧行不回改（仍是 `0.0`），两种写法并存。
+- **`settle_signals`**：不再要求 `implied_event_move_pct` 非 None 才回填——触底行的实际波动正是校准研究要的样本，不能因为这次改成 None 就漏结算（`realized_ratio` 对 implied 缺失给 None，同前）。
+- **Alpha Bot「跨式」页**：信号表里触底行的「比值」「隐含 vs 历史中位」显示 `—` 并注明「扣掉扩散后 ≤ 0，算不出」；判据是 `event_move_floor_hit`（**不是**值是不是 0——旧行存的是 0.0）。`alphabot/straddle.py::signals_today` 的透传白名单补上该键（不补则页面那段是死代码）。
+
+### Added
+- **`shadow_event`（`earnings_vol_signal.event_shadow`，`EVENT_SHADOW_SCHEMA=1`，`method="fwd_iv_v1"`）**：同一个公式，扩散项换成快照 `iv_term_structure` 里**两个都在财报之后**（到期日 ≥ 财报日 +2 日历日）的到期日之间的远期波动 `σ_fwd²=(T₂σ₂²−T₁σ₁²)/(T₂−T₁)`（天数用 as_of 自己算，不信期限结构里的 `dte`——它与 `selected_dte` 差过一天）；分母（历史中位）、阈值 1.30 / 0.75、其余公式不动。算不出 ⇒ `available=False` + `reason`、数值 None，从不填 0；计算抛异常 ⇒ `available=False, reason="error: …"` + WARNING，**不拖死主信号**。在 `scan` 里于 `compute_signal` 返回**之后**挂上（同 `gex_ctx` 的结构：函数里碰不到判断）。**只记录：不进标签、不进开单、不上页面、不是预注册检验的输入**。
+- 新测试 `tests/test_earnings_event_shadow.py`（32）：触底行 None 不是 0 且仍结算、手算值逐项对上（σ_fwd=29.6005 → 事件 7.7393 → 比值 1.5479）、财报前 / 边界到期日排除、9 种「算不出」各给原因、**有 / 没有期限结构两次 scan 除影子外逐项相同**、影子炸了主信号不变且 WARNING 可见、AST：全仓只有 earnings_vol_signal 提 `shadow_event` 且没有任何函数**读**它（含种病灶自证）、预注册 `units()` 对 `None` 与旧 `0.0` 一视同仁、Alpha Bot 透传。
+- 更新 `tests/test_earnings_vol_signal.py::test_floor_when_diffusion_exceeds_straddle`：原来断言的正是「写 0.0 / 标 cheap」。
+
+### 变异自证（种病灶 → 必红）
+触底写回 0.0 / 影子包含财报前到期日 / 影子反过来改主标签 / settle 重新要求 implied 非 None / 影子吞异常不记日志——各一个，全部被抓到。
+
+### 没做、以及下一步
+- **没切换**：旧 rv 法仍决定标签与开仓。`event_move_basis` 仍是 `straddle_minus_diffusion_plus_window`；影子的方法名是比较时分组的键（改口径要新增方法名，不要原地改 v1）。
+- **待办**：攒够已结算事件（现 2 个）后，用 `realized_abs_move_pct` 对比两种方法的 `implied_event_move_pct` 预测误差（按事件去重、按方法分组）；够了再决定要不要切换。历史中位当分母（biotech 如 VKTX 中位 3.29% 而最大一次 18%）偏低，是**另一个**独立问题，本版未碰。
+- `experiments/straddle_gex_prereg.md` §9 记了这次改动不改检验单位定义；`shadow_event` 若要进检验就是协议变更（§8）。
 
 ## [0.45.453] — 2026-10-10 — 占位（进行中：真实数据根闸报红时分辨「全部是 Alpha Bot 盘中采样的追加」——判定不变照样红，只把原因说清楚、不再引人 `--no-verify`）
 
