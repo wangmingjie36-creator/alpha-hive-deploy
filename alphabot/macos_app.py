@@ -64,6 +64,7 @@ def default_repo() -> Path:
 #: 本模块的 `main` 能被别的检出整段委托（v0.45.451）：接受 `--repo 自己` 并在自己里一次跑完出壳 + 数据根。
 #: 委托方见到目标低于这个号就拒绝，不去猜旧版的参数——别删，也别在不兼容地改 `main` 参数时忘了加一。
 DELEGATE_PROTOCOL = 1
+_DELEGATED_ENV = "ALPHABOT_APP_DELEGATED_FROM"   # 被委托的那次进程里有它 ⇒ 不许再委托
 
 #: 在目标代码里跑它自己的 `main`。**不换 cwd**：调用者给的相对路径保持原意（v0.45.439 换 cwd，`--dest ./Apps`
 #: 被建进了生产克隆）；import 靠显式把目标放到 `sys.path` 最前，再核对 import 到的确实是目标（不读产物文本）。
@@ -90,8 +91,12 @@ def run_target_generator(repo: Path, argv: list) -> int:
     的报错（stdout 一有输出就盖住真正的错误行）、生成后读壳里的 `REPO=` 文本核对（把委托方绑在目标的壳格式上）。
     根因是只交出去一半——现在整段交出去：子进程的输出原样透传、退出码原样返回，委托方不再插手（v0.45.451）。
     `argv` 里的路径必须已是绝对路径（`main` 在入口统一做）。
+
+    子进程带 `_DELEGATED_ENV`：被委托的那次**绝不再委托**（`main` 见到它就拒）。没有这道闸时，目标若因任何原因
+    认为自己不是 `--repo`（变异实测：拿掉 import 来源核对 + 包被重定向），就一层层委托下去直到被杀。
     """
-    return subprocess.run([sys.executable, "-c", _DELEGATE, str(repo), *argv]).returncode
+    env = {**os.environ, _DELEGATED_ENV: str(repo)}
+    return subprocess.run([sys.executable, "-c", _DELEGATE, str(repo), *argv], env=env).returncode
 
 
 def _icon_path() -> Path:
@@ -331,6 +336,10 @@ def main(argv=None) -> int:
         return 1
 
     if repo != _repo_root():
+        if os.environ.get(_DELEGATED_ENV):
+            print(f"alphabot.macos_app: 已是被委托的那次（来自 {os.environ[_DELEGATED_ENV]}），却又要委托给 {repo}"
+                  f"（本检出 {_repo_root()}）——停下，不一层层委托下去", file=sys.stderr)
+            return 1
         print(f"代码目录 {repo} 不是本检出（{_repo_root()}）⇒ 整次生成交给它自己的生成器", file=sys.stderr)
         forward = ["--repo", str(repo), "--dest", str(dest), "--python", python]
         return run_target_generator(repo, forward + (["--home", str(home)] if home else []))

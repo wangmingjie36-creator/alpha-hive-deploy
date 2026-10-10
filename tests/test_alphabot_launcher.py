@@ -389,8 +389,22 @@ class TestDefaultRepoIsProductionClone:
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
         assert MA.main(["--dest", str(tmp_path / "Apps")]) != 0
         err = capfd.readouterr().err
-        assert str(other.resolve()) in err and str(clone.resolve()) in err, err
+        # 认的是 import 来源核对那句（再委托闸也会挡住，但那是另一道防线——各自要有牙）
+        assert "委托 import 到的生成器在" in err and str(other.resolve()) in err and str(clone.resolve()) in err, err
         assert not (tmp_path / "Apps").exists(), "import 到别处的生成器还是生成了 .app"
+
+    def test_delegated_run_never_delegates_again(self, tmp_path, home, monkeypatch, capfd):
+        """目标若认定自己不是 `--repo`（这里把它的 `_repo_root` 改错），没有这道闸就一层层委托到被杀（变异实测 61 s 超时）。"""
+        clone = self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch, mark=False)
+        src = (clone / "alphabot" / "macos_app.py").read_text(encoding="utf-8")
+        body = "    return Path(__file__).resolve().parent.parent\n"
+        assert src.count(body) == 1
+        (clone / "alphabot" / "macos_app.py").write_text(
+            src.replace(body, f"    return Path({str(tmp_path / 'confused')!r})\n"), encoding="utf-8")
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 1
+        err = capfd.readouterr().err
+        assert "已是被委托的那次" in err and not (tmp_path / "Apps").exists(), err
 
     def test_relative_dest_lands_in_the_callers_cwd(self, tmp_path, home, monkeypatch):
         """v0.45.439 委托时换了 cwd：`--dest ./Apps` 被建进了克隆。"""
