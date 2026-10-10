@@ -280,6 +280,23 @@ class TestDataRootFollowsLauncher:
         assert str(typo) in capsys.readouterr().err
 
 
+    def test_relative_explicit_home_is_refused(self, tmp_path, home, monkeypatch, capsys, data):
+        """数据根写进配置、双击时在别的目录下解析 ⇒ `--home` 必须绝对；拒绝时什么都不改（v0.45.456）。"""
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        monkeypatch.chdir(tmp_path)
+        assert self._main(tmp_path, "--home", "data") == 1
+        assert not (tmp_path / "Apps").exists() and LA.config_state(LA.load_config())[0] == "first"
+        assert "绝对路径" in capsys.readouterr().err
+
+    def test_relative_env_home_is_not_recorded(self, tmp_path, home, monkeypatch, capsys, data):
+        """顺手记的环境变量同理：相对就不记、说明为什么，但不算失败（不是人明确要求的事）。"""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("ALPHA_HIVE_HOME", "data")
+        assert self._main(tmp_path) == 0
+        assert LA.config_state(LA.load_config())[0] == "first"
+        assert "相对路径" in capsys.readouterr().err
+
+
 class TestDefaultRepoIsProductionClone:
     """`.app` 缺省 cd 进生产克隆（v0.45.436）；整次生成交给克隆**自己的** `main`（v0.45.451）。
 
@@ -428,32 +445,98 @@ class TestDefaultRepoIsProductionClone:
                                                        "--python", sys.executable])
         assert rc == 0 and (work / "Apps" / f"{MA.APP_NAME}.app").is_dir() and not (clone / "Apps").exists()
 
-    def test_main_hands_over_absolute_paths_only(self, tmp_path, home, monkeypatch):
-        """另一道：交出去的路径参数一律绝对（目标哪一版、在哪个 cwd 解析都不变义）。"""
+    def test_handoff_forwards_only_what_was_given(self, tmp_path, home, monkeypatch):
+        """委托方只转发人明确给了的参数：缺省由目标定；要持久写下的值原样转发、由目标按它的规则核对（v0.45.456）。"""
         clone = self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
-        (tmp_path / "data").mkdir()
         monkeypatch.chdir(tmp_path)
-        seen = {}
-        monkeypatch.setattr(MA, "run_target_generator", lambda repo, argv: seen.update(repo=repo, argv=argv) or 0)
+        seen = []
+        monkeypatch.setattr(MA, "run_target_generator", lambda repo, argv: seen.append((repo, argv)) or 0)
+        assert MA.main([]) == 0
+        assert seen[-1] == (clone.resolve(), ["--repo", str(clone.resolve())]), "没给的参数也被委托方填了缺省"
         assert MA.main(["--dest", "Apps", "--python", "venv/bin/python3", "--home", "data"]) == 0
-        argv = seen["argv"]
+        argv = seen[-1][1]
         vals = {argv[i]: argv[i + 1] for i in range(0, len(argv), 2)}
-        assert set(vals) == {"--repo", "--dest", "--python", "--home"} and seen["repo"] == clone.resolve(), argv
-        assert all(Path(v).is_absolute() for v in vals.values()), argv
+        assert vals["--dest"] == str(tmp_path / "Apps"), argv            # 当场用：按本进程 cwd 定死
+        assert vals["--python"] == "venv/bin/python3" and vals["--home"] == "data", argv   # 持久值：原样，目标判
 
-    def test_relative_python_is_written_absolute(self, tmp_path, home, monkeypatch):
-        """壳在双击时才解析 `PY`，那时 cwd 早已不是敲命令的地方 ⇒ 入口就定成绝对路径。"""
+    def test_handoff_does_not_judge_launcher_config(self, tmp_path, home, monkeypatch, capfd):
+        """配置读不读得了是 launcher 的语义，归目标那一版：委托方那版读不了，不许在委托前就替目标拒绝（v0.45.456）。"""
+        clone = self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
+        with open(clone / "alphabot" / "launcher.py", "a", encoding="utf-8") as f:
+            f.write("\n\ndef load_config():          # 目标这一版认得任何配置\n    return {}\n")
+        LA.config_path().parent.mkdir(parents=True, exist_ok=True)
+        LA.config_path().write_text("{本版读不了", encoding="utf-8")
+        with pytest.raises(LA.LauncherError):
+            LA.load_config()                                          # 正对照：委托方这一版确实读不了
+        data = tmp_path / "data"
+        data.mkdir()
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        rc = MA.main(["--dest", str(tmp_path / "Apps"), "--home", str(data)])
+        assert rc == 0, capfd.readouterr().err
+        assert (tmp_path / "Apps" / f"{MA.APP_NAME}.app").is_dir()
+
+    @pytest.mark.parametrize("bad", ["venv/bin/python3", "python3"])
+    def test_relative_or_bare_python_is_refused(self, tmp_path, home, monkeypatch, capsys, bad):
+        """`PY=` 双击时才解析，那时 cwd / PATH 都不同；裸 `python3` 还可能是系统 3.9（CLAUDE.md）⇒ 拒绝，不猜。"""
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
         monkeypatch.chdir(tmp_path)
-        assert MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(REPO), "--python", "venv/bin/python3"]) == 0
-        assert self._script_var(tmp_path / "Apps", "PY") == str(tmp_path / "venv" / "bin" / "python3")
-
-    def test_bare_python_not_on_path_is_refused(self, tmp_path, home, monkeypatch, capsys):
-        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
-        rc = MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(REPO), "--python", "no-such-python-xyz"])
+        rc = MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(REPO), "--python", bad])
         assert rc == 1 and not (tmp_path / "Apps").exists()
-        assert "no-such-python-xyz" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "绝对路径" in err and bad in err, err
+
+    def test_python_rule_is_enforced_by_the_target_too(self, tmp_path, home, monkeypatch, capfd):
+        """委托时相对 `--python` 原样转发 ⇒ 由目标按它的规则拒（委托方不预判，也不放过）。"""
+        self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert MA.main(["--dest", str(tmp_path / "Apps"), "--python", "venv/bin/python3"]) == 1
+        assert "绝对路径" in capfd.readouterr().err and not (tmp_path / "Apps").exists()
+
+    @pytest.mark.parametrize("kind", ["missing", "not-a-repo"])
+    def test_repo_typo_is_reported_plainly(self, tmp_path, home, monkeypatch, capfd, kind):
+        """v0.45.451 删预检后，`--repo` 拼错被报成「import 被重定向 / PYTHONPATH？」（误诊）或甩 traceback。"""
+        target = tmp_path / "alpha-hive-prd"
+        if kind == "not-a-repo":
+            target.mkdir()
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        monkeypatch.chdir(REPO)                       # 最坏情形：调用者 cwd 正好是一份检出（import 会落到它）
+        assert MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(target)]) == 1
+        err = capfd.readouterr().err
+        assert ("不存在" if kind == "missing" else "不是 Alpha Hive 代码目录") in err, err
+        assert "import" not in err and "Traceback" not in err, err
+
+
+class TestCanonicalMakeEntry:
+    """真跑推荐入口 `make -C <仓库> alphabot-app`（v0.45.456）：此前只测 `MA.main`，Makefile 目标、`-m` 从仓库根
+    import、`default_repo()==_repo_root()` 的本地分支、make 变量传参都从没被执行过。
+
+    不造假克隆：把临时 HOME 下的 `alpha-hive-prod` 软链到本仓库，`production_clone.default_dest()` 就指向它；
+    跑生成器的解释器经 `ALPHABOT_GEN_PY` 换成当前解释器（CI 上没有 /usr/local/bin/python3）。
+    """
+
+    @staticmethod
+    def _make(home, *make_vars):
+        (home / "alpha-hive-prod").symlink_to(REPO, target_is_directory=True)
+        env = {k: v for k, v in os.environ.items() if k != "ALPHA_HIVE_HOME"}
+        env["HOME"] = str(home)
+        return subprocess.run(["make", "-s", "-C", str(REPO), "alphabot-app", f"ALPHABOT_GEN_PY={sys.executable}",
+                               *make_vars], env=env, capture_output=True, text=True, timeout=120)
+
+    def test_entry_builds_from_the_clone_itself(self, home):
+        r = self._make(home, f"PYTHON={sys.executable}")
+        assert r.returncode == 0, r.stderr
+        app = home / "Applications" / f"{MA.APP_NAME}.app"
+        exe = (app / "Contents" / "MacOS" / MA.EXECUTABLE).read_text(encoding="utf-8")
+        repo_line = next(ln for ln in exe.splitlines() if ln.startswith("REPO="))
+        assert Path(shlex.split(repo_line[len("REPO="):])[0]).resolve() == REPO
+        assert "整次生成交给" not in r.stderr, "推荐入口就在克隆里，不该再委托"
+
+    def test_entry_rejects_relative_python(self, home):
+        """`make -C` 先切了目录：相对 PYTHON 若照解析，会被当成克隆下的路径（v0.45.451 的形状换了入口）。"""
+        r = self._make(home, "PYTHON=./venv/bin/python3")
+        assert r.returncode != 0 and "绝对路径" in r.stderr, r.stderr
+        assert not (home / "Applications").exists()
 
 
 class TestLaunchScriptHints:

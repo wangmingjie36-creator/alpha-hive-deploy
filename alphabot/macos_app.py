@@ -233,29 +233,41 @@ def _under_desktop_or_documents(path: Path) -> bool:
     return rel.parts[:1] in (("Desktop",), ("Documents",))
 
 
-def _absolute_interpreter(python: str) -> str:
-    """`--python` 写进壳里、到双击时才在另一个 cwd 下解析 ⇒ 入口就定成绝对路径（v0.45.451）。
+def _must_be_absolute(value: str, what: str) -> str:
+    """要**持久写下、以后在别处才解析**的路径（壳里的 `PY=`、启动器配置的数据根）：入口就必须是绝对路径（v0.45.456）。
 
-    带目录的相对路径按调用者 cwd 绝对化；裸名字按 PATH 找，找不到就报错（壳里的 `[ -x "$PY" ]` 认不了裸名字）。
-    不核对存在与否：壳在双击时会核对并弹窗，而缺省解释器在 CI 上本来就不存在。
+    **不猜「相对于哪」**：`make -C 克隆` 先切了目录，程序看不到人是在哪敲的命令；裸名字 `python3` 取决于当时的
+    PATH（CLAUDE.md：裸 `python3` 可能是系统 3.9）。v0.45.451 按当下 cwd / PATH 解析，换了入口就解析到别处。
+    `~` 可以展开（它不依赖 cwd）。不核对存在与否：壳在双击时会核对并弹窗，缺省解释器在 CI 上本来就不存在。
     """
-    if os.sep in python or python.startswith("~"):
-        return os.path.abspath(os.path.expanduser(python))
-    found = shutil.which(python)
-    if not found:
-        raise BuildError(f"--python {python} 在 PATH 里找不到；给绝对路径")
-    return os.path.abspath(found)
+    p = os.path.expanduser(value)
+    if not os.path.isabs(p):
+        raise BuildError(f"{what} 会写进 .app / 启动器配置、以后在别的目录下才用，必须是绝对路径（收到 {value!r}）")
+    return os.path.normpath(p)
+
+
+def _check_generator_dir(repo: Path) -> None:
+    """委托之前委托方唯一该核对的：目标**是不是一份生成器代码**——与版本无关的文件系统事实（v0.45.456）。
+
+    v0.45.451 删 `build_app_from` 时连这条一起删了：`--repo` 拼错，子进程 import 落到调用者 cwd 里的那份 alphabot，
+    报成「import 被重定向 / PYTHONPATH？」（误诊），cwd 不是检出时则甩 ModuleNotFoundError 整段 traceback。
+    """
+    if not repo.is_dir():
+        raise BuildError(f"--repo {repo} 不存在")
+    if not (repo / "alphabot" / "macos_app.py").is_file():
+        raise BuildError(f"{repo} 不是 Alpha Hive 代码目录（没有 alphabot/macos_app.py）")
 
 
 def _validate_home(home_arg: Optional[str]) -> Optional[Path]:
-    """显式 `--home`：**生成之前**就核对，失败即退出、什么都不改（v0.45.451）。
+    """显式 `--home`：**生成之前**就核对，失败即退出、什么都不改（v0.45.451）。只在目标代码自己的 `main` 里跑
+    （委托方不判配置语义，v0.45.456）。
 
     v0.45.439 先换掉 .app、再处理数据根，`--home` 打错时只在 stderr 留一行、返回 0——人明确要求的事没做成，
     命令却算成功。顺手记环境变量那种不在这里：它失败只是没顺手做成，不算错。
     """
     if not home_arg:
         return None
-    hp = Path(home_arg).expanduser().resolve()
+    hp = Path(_must_be_absolute(home_arg, "--home")).resolve()
     if not hp.is_dir():
         raise BuildError(f"--home {hp} 不存在：没生成 .app、没改启动器配置")
     from alphabot import launcher
@@ -286,6 +298,9 @@ def _record_data_root(explicit_home: Optional[Path]) -> int:
     want, why = None, ""
     if explicit_home:
         want, why = explicit_home, "--home"
+    elif env_home and state == "first" and not os.path.isabs(os.path.expanduser(env_home)):
+        print(f"环境里的 ALPHA_HIVE_HOME={env_home} 是相对路径：会写进启动器配置、双击时在别的目录下解析，没记"
+              "（用 --home 给绝对路径）", file=sys.stderr)
     elif env_home and state == "first":
         want, why = env_home, "环境 ALPHA_HIVE_HOME（配置里还没有数据根）"
     elif env_home and (home is None or Path(env_home).expanduser().resolve() != Path(home).expanduser().resolve()):
@@ -308,41 +323,56 @@ def _record_data_root(explicit_home: Optional[Path]) -> int:
         "home": f"沿用启动器配置里的数据根 {home}",
         "demo": f"启动器配置是演示模式（demo: true）：双击直接进演示；换真实数据先 {DEFAULT_PYTHON} -m alphabot.launcher --reset",
         "stale": f"⚠️ 启动器配置里的数据根 {home} 不存在了：双击时会要你重选（或用 --home 指定）",
-        "first": "还没有数据根（--home / ALPHA_HIVE_HOME 都没给）：首次双击时会让你选一次",
+        "first": "启动器配置里还没有数据根：首次双击时会让你选一次（或用 --home 给绝对路径）",
     }[state])
     return 0
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="alphabot.macos_app", description="生成 macOS 的 Alpha Bot.app")
-    ap.add_argument("--dest", default="~/Applications", help="装到哪个目录（缺省 ~/Applications）")
-    ap.add_argument("--python", default=DEFAULT_PYTHON, help=f"缺省 {DEFAULT_PYTHON}")
+    # 缺省值都是 None、在「本检出就是目标」那支里才填：委托时只转发人**明确给了**的参数，缺省由目标代码自己定（v0.45.456）
+    ap.add_argument("--dest", default=None, help="装到哪个目录（缺省 ~/Applications；相对路径按当前目录，当场就用）")
+    ap.add_argument("--python", default=None,
+                    help=f"写进 .app 的解释器，必须是绝对路径（缺省 {DEFAULT_PYTHON}）：双击时才用，那时 cwd / PATH 早已不同")
     ap.add_argument("--home", default=None,
-                    help="改写启动器配置里的数据根。不给时：配置还没有数据根才顺手记下当前环境的 ALPHA_HIVE_HOME，"
-                         "已有的绝不改写；都没有就首次双击时再选")
+                    help="改写启动器配置里的数据根，必须是绝对路径。不给时：配置还没有数据根才顺手记下当前环境的 "
+                         "ALPHA_HIVE_HOME（须绝对），已有的绝不改写；都没有就首次双击时再选")
     ap.add_argument("--repo", default=None,
                     help="`.app` cd 进哪份代码（整次生成都交给那份代码自己的生成器）；缺省生产克隆 ~/alpha-hive-prod，"
                          "不在就报错。只在测自己的检出时给")
     args = ap.parse_args(argv)
 
     try:
-        # 入口统一绝对化：这些路径要跨进程（委托）、跨时间（壳在双击时才解析）使用，相对路径的含义会变（v0.45.451）
-        dest = Path(args.dest).expanduser().resolve()
-        python = _absolute_interpreter(args.python)
-        home = _validate_home(args.home)                 # 显式输入先核对，后动手
         repo = Path(args.repo).expanduser().resolve() if args.repo else default_repo().resolve()
+        if repo != _repo_root():
+            _check_generator_dir(repo)
     except BuildError as exc:
         print(f"alphabot.macos_app: {exc}", file=sys.stderr)
         return 1
 
     if repo != _repo_root():
+        # 委托方只做与版本无关的事：选目标、认目标、转发。参数语义（绝对路径规则、--home、配置可读）全归目标（v0.45.456）
         if os.environ.get(_DELEGATED_ENV):
             print(f"alphabot.macos_app: 已是被委托的那次（来自 {os.environ[_DELEGATED_ENV]}），却又要委托给 {repo}"
                   f"（本检出 {_repo_root()}）——停下，不一层层委托下去", file=sys.stderr)
             return 1
         print(f"代码目录 {repo} 不是本检出（{_repo_root()}）⇒ 整次生成交给它自己的生成器", file=sys.stderr)
-        forward = ["--repo", str(repo), "--dest", str(dest), "--python", python]
-        return run_target_generator(repo, forward + (["--home", str(home)] if home else []))
+        forward = ["--repo", str(repo)]
+        if args.dest is not None:            # 当场用的路径：按本进程 cwd 定死（委托不换 cwd，定死只为让 argv 自带含义）
+            forward += ["--dest", str(Path(args.dest).expanduser().resolve())]
+        for flag, val in (("--python", args.python), ("--home", args.home)):
+            if val is not None:              # 原样转发：要持久写下的值由目标按它的规则核对，委托方不预判
+                forward += [flag, val]
+        return run_target_generator(repo, forward)
+
+    try:
+        # 本检出就是目标：所有校验与缺省都在这里——先核对显式输入，后动手
+        dest = Path(args.dest or "~/Applications").expanduser().resolve()
+        python = _must_be_absolute(args.python or DEFAULT_PYTHON, "--python")
+        home = _validate_home(args.home)
+    except BuildError as exc:
+        print(f"alphabot.macos_app: {exc}", file=sys.stderr)
+        return 1
 
     if _under_desktop_or_documents(dest):
         print(f"⚠️ {dest} 在 iCloud 同步范围内，可能被复制出「Alpha Bot 2.app」；建议用缺省的 ~/Applications",
