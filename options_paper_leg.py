@@ -88,6 +88,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+import ledger_io
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("options_paper_leg")
@@ -258,57 +259,28 @@ class ClosedStraddle:
 # 状态文件（与 paper_portfolio 同形，路径为模块全局，测试可重定向）
 # ══════════════════════════════════════════════════════════════════════════════
 
+# 读写全经 `ledger_io`（v0.45.452）：严格读（坏行 ⇒ LedgerCorrupt，不跳过）、原子写 + 回读、追加持目录锁。
+# `_scrub` 仍在落盘前把非有限值改 None 并 error 日志（本模块的既定降级，见模块文档「诚实降级」）；
+# ledger_io 再兜一层 allow_nan=False——两道之间漏过去的只会是异常，不会是一行 NaN。
+
 def _load_jsonl(path: Path) -> List[Dict]:
-    if not path.exists():
-        return []
-    out = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    out.append(json.loads(line))
-                except ValueError:
-                    continue
-    return out
-
-
-def _atomic_write_text(path: Path, content: str, mode: int = 0o644) -> None:
-    import os
-    import tempfile
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    return ledger_io.load_jsonl(path)
 
 
 def _write_jsonl(path: Path, records: List[Dict]) -> None:
-    _atomic_write_text(path, "".join(json.dumps(_scrub(r), ensure_ascii=False) + "\n" for r in records))
+    ledger_io.write_jsonl(path, [_scrub(r) for r in records])
 
 
 def _append_jsonl(path: Path, record: Dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(_scrub(record), ensure_ascii=False) + "\n")
+    ledger_io.append_jsonl(path, _scrub(record))
 
 
 def _load_meta() -> Dict:
-    if META_FILE.exists():
-        try:
-            return json.loads(META_FILE.read_text(encoding="utf-8"))
-        except ValueError:
-            _log.error("[OptionsPaperLeg] meta.json 损坏，按新账本处理")
+    # v0.45.452：meta.json 坏了**抛 LedgerCorrupt**，不再「按新账本处理」——那会把 cash 重置成起始资金、
+    # 本轮结束时写回，真实现金从此丢失且无人知晓（meta 里存的是现金，不是装饰）。坏了 ⇒ 停下、从备份恢复。
+    meta = ledger_io.load_json(META_FILE, default=None)
+    if meta is not None:
+        return meta
     return {
         "version": _VERSION,
         "starting_capital": CONFIG["starting_capital"],
@@ -335,7 +307,7 @@ def _code_tag() -> Optional[Dict]:
 
 
 def _save_meta(meta: Dict) -> None:
-    _atomic_write_text(META_FILE, json.dumps(_scrub(meta), ensure_ascii=False, indent=2))
+    ledger_io.write_json(META_FILE, _scrub(meta))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -628,7 +600,15 @@ def run_for_date(as_of: str,
 
     `closes_fn(ticker, settle_date)` 返回该场收盘：自报场次的 dict（缺省 `_default_close`，窗口截至 as_of）
     或裸数字（= 调用方担保就是那一场）。返回值里 `settle_deferred` = 本次该按内在价值结算、却拿不到结算那一场
-    收盘而延期的仓位（v0.45.433）。"""
+    收盘而延期的仓位（v0.45.433）。
+
+    整轮持账本目录锁（v0.45.452，照 paper_portfolio）：读 meta / 持仓 → 改 → 写回是一次读-改-写，手动补跑与定时
+    扫描撞上时后写者会用旧快照覆盖先写者。锁超时 ⇒ LedgerLockTimeout，不退回无锁写。"""
+    with ledger_io.locked(POSITIONS_FILE.parent):
+        return _run_for_date(as_of, quotes_fn, signals, closes_fn)
+
+
+def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
     quotes_fn = quotes_fn or _default_quotes
     closes_fn = closes_fn or (lambda t, d: _default_close(t, d, as_of=as_of))
     meta = _load_meta()

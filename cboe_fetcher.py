@@ -58,18 +58,9 @@ try:
 except ImportError:
     NETWORK_ERRORS = (ConnectionError, TimeoutError, OSError)
 
-try:
-    from hive_logger import get_logger, atomic_json_write
-except ImportError:
-    def get_logger(name):
-        import logging
-        return logging.getLogger(name)
-
-    def atomic_json_write(path: str, data: Dict[str, Any]) -> None:
-        """简单原子写入（备选）"""
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+# v0.45.452：删掉 ImportError 兜底的非原子 `atomic_json_write` 副本（写到一半崩 = 半截缓存）。
+# hive_logger 是本仓基础模块，import 不了说明环境坏了，该当场红，不该换一份更弱的写法接着跑。
+from hive_logger import get_logger, atomic_json_write
 
 logger = get_logger(__name__)
 

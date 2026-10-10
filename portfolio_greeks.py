@@ -211,10 +211,6 @@ def _load_jsonl(path: Path) -> List[Dict]:
     return ledger_io.load_jsonl(path)
 
 
-def _atomic_write_text(path: Path, content: str, mode: int = 0o644) -> None:
-    ledger_io.atomic_write_text(path, content, mode)
-
-
 def _write_jsonl(path: Path, records: List[Dict]) -> None:
     ledger_io.write_jsonl(path, [_scrub(r) for r in records])
 
@@ -224,17 +220,17 @@ def _append_jsonl(path: Path, record: Dict) -> None:
 
 
 def _load_meta() -> Dict:
-    if META_FILE.exists():
-        try:
-            return json.loads(META_FILE.read_text(encoding="utf-8"))
-        except ValueError:
-            _log.error("[PortfolioGreeks] meta.json 损坏，按新账本处理")
+    # v0.45.452：meta 坏了抛 LedgerCorrupt（run_for_date 记进 price_check_stats()["error"] ⇒ P2），不再「按新账本
+    # 处理」——那会把对冲腿 cash 重置成 0 并在本轮末写回，真实现金就此丢失。
+    meta = ledger_io.load_json(META_FILE, default=None)
+    if meta is not None:
+        return meta
     return {"version": _VERSION, "starting_date": None, "cash": 0.0,
             "last_run_date": None, "config_snapshot": dict(CONFIG)}
 
 
 def _save_meta(meta: Dict) -> None:
-    _atomic_write_text(META_FILE, json.dumps(_scrub(meta), ensure_ascii=False, indent=2))
+    ledger_io.write_json(META_FILE, _scrub(meta))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -553,8 +549,8 @@ def _default_beta(ticker: str, as_of: str) -> Tuple[Optional[float], Optional[st
     cache = _read_beta_cache()          # 写回时才读盘：缓存的用途已只剩「日线断供时的兜底」
     cache[ticker] = {"as_of": as_of, "beta": beta, "n": n, "computed_at": as_of}
     try:
-        _atomic_write_text(BETA_CACHE_FILE, json.dumps(_scrub(cache), ensure_ascii=False, indent=1))
-    except OSError as exc:
+        ledger_io.write_json(BETA_CACHE_FILE, _scrub(cache), indent=1)
+    except (OSError, ledger_io.LedgerError) as exc:   # 失败已在 ledger_io 源头登记（⇒ P2），这里只保本次结果
         _log.warning("β 缓存写入失败（不影响本次结果）: %s", exc)
     return beta, f"ols{CONFIG['beta_window']}"
 
@@ -1375,8 +1371,7 @@ def _run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, exec
 
     audit = {k: v for k, v in res.items() if k != "rows"}
     audit["rows"] = res["rows"]
-    _atomic_write_text(STATE_DIR / f"greeks_{as_of}.json",
-                       json.dumps(_scrub(audit), ensure_ascii=False, indent=1, sort_keys=True))
+    ledger_io.write_json(STATE_DIR / f"greeks_{as_of}.json", _scrub(audit), indent=1, sort_keys=True)
     return res
 
 

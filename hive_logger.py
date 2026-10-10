@@ -391,9 +391,18 @@ def get_logger(name: str) -> logging.Logger:
 
 
 class SafeJSONEncoder(json.JSONEncoder):
-    """JSON 编码器：安全处理 NaN / Inf / datetime / set / bytes / numpy / pandas / Decimal / Enum 等"""
+    """JSON 编码器：安全处理 NaN / Inf / datetime / set / bytes / numpy / pandas / Decimal / Enum 等
+
+    ⚠️ v0.45.452 前清洗只挂在 `encode()` 上——那只有 `json.dumps` 走；**`json.dump(obj, f, cls=SafeJSONEncoder)`
+    走 `iterencode()`，清洗从没生效**，照样写出 `NaN` / `Infinity` 字面量（不是合法 JSON，浏览器 `JSON.parse`
+    整份拒收）。实测：`.swarm_results_2026-08-28.json` 里 62 个 NaN、`atomic_json_write` 写出 `{"cash": NaN}`。
+    现在清洗挂在 `iterencode()`（dump / dumps 都经过它），`default()` 转出来的容器（DataFrame.to_dict 等）也再清洗一遍。
+    守卫：`tests/test_ledger_io_v2.py::TestSafeEncoderCoversDump`。"""
 
     def default(self, o):
+        return self._sanitize(self._default_raw(o))
+
+    def _default_raw(self, o):
         # ── 时间类 ──
         if isinstance(o, datetime):
             return o.isoformat()
@@ -506,8 +515,8 @@ class SafeJSONEncoder(json.JSONEncoder):
                 pass
             return str(o)
 
-    def encode(self, o):
-        return super().encode(self._sanitize(o))
+    def iterencode(self, o, _one_shot=False):
+        return super().iterencode(self._sanitize(o), _one_shot)
 
     def _sanitize(self, obj):
         """递归清洗数据：NaN → None, Inf → 'Inf'，numpy/pandas → 原生类型"""
@@ -577,31 +586,19 @@ def safe_json_dumps(data, **kwargs) -> str:
 
 
 def atomic_json_write(path, data, **kwargs):
-    """Atomically write JSON to *path* (write-to-tmp + os.replace).
-    自动使用 SafeJSONEncoder 防止 NaN/Inf 序列化错误。
+    """**可再生缓存**的原子写（v0.45.452 起物理写入走 `ledger_io.atomic_write_text`：临时文件任何异常都清掉、
+    fsync 目录、缺目录自动建、文件 0644）。
+
+    语义与账本不同、是有意的：缓存可从源头重取，所以 NaN / Inf 按 `SafeJSONEncoder` 的约定**改写**成 null / "Inf"
+    （而 `ledger_io.write_json` 是**拒绝**）；清洗后仍残留的非有限数 ⇒ `allow_nan=False` 抛 ValueError、文件不动。
+    不做写后回读（缓存不持锁，并发蜂同时写同一缓存时后写者赢是对的）。**账本 / 状态文件别用它**——用 `ledger_io`。
+    （v0.45.452 前这里直接 `json.dump(cls=SafeJSONEncoder)`，清洗从没生效，见 `SafeJSONEncoder` docstring。）
     """
-    import tempfile
-    path = Path(path)
+    import ledger_io
     kwargs.setdefault("ensure_ascii", False)
     kwargs.setdefault("cls", SafeJSONEncoder)
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", dir=str(path.parent), suffix=".tmp", delete=False
-        ) as tmp:
-            tmp_path = tmp.name
-            json.dump(data, tmp, **kwargs)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-        os.replace(tmp_path, str(path))
-    except OSError:
-        # Clean up temp file on failure
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-        raise
+    kwargs.setdefault("allow_nan", False)
+    ledger_io.atomic_write_text(path, json.dumps(data, **kwargs), verify=False)
 
 
 def read_json_cache(path, ttl: int = 300):

@@ -7,7 +7,42 @@
 
 ## [0.45.453] — 2026-10-10 — 占位（进行中：真实数据根闸报红时分辨「全部是 Alpha Bot 盘中采样的追加」——判定不变照样红，只把原因说清楚、不再引人 `--no-verify`）
 
-## [0.45.452] — 2026-10-10 — 占位（进行中：ledger_io 第二版——迁 options_paper_leg / vrp_signal / earnings_vol_signal，meta.json 拒 NaN，手写 os.replace 原子写收口）
+## [0.45.452] — 2026-10-10 — Fixed：ledger_io 第二版（按根因）——`SafeJSONEncoder` 的 NaN 清洗对 `json.dump` 从没生效（`atomic_json_write` 照写 `{"cash": NaN}`），一处修好约 20 个调用方；`meta.json` 当账本处理（严格读写，坏了停下而不是「按新账本」重置现金）；失败在 `ledger_io` 源头登记 ⇒ P2（调用方吞异常也照红）；守卫从「认名字」改成「认写入落点」，全仓 84 处写入逐条分类登记；迁入 options_paper_leg / vrp_signal / earnings_vol_signal
+
+### 为什么（用户 2026-10-10：三件剩余事项「先分析怎么从根因解决问题再动手」）
+三件事表面不同，根因是同一个：**持久化写入没有唯一实现，守卫按名字长相认人**。
+- **「meta.json 没拒 NaN」不是漏了一个文件**：448 的 `ledger_io` 只有 JSONL 接口，整文件 JSON 文档没有入口，于是各模块自己 `json.dumps` 再原子替换。而 `meta.json` 不是装饰——**纸面组合的现金就存在里面**：v0.45.97 `"cash": NaN` 落盘、被 `json.loads` 照单全收，净值烂了四天（生产备份 `_pre_migration_snapshots/…/paper_portfolio_state.bak-nanfix-20260903/meta.json` 第 5 行原样还在）。读端更糟：**跨式腿与组合 Greeks 读到坏 meta 时「按新账本处理」⇒ 现金重置成起始资金 / 0，并在本轮末写回**——真实现金就此丢失，日志里只有一行 error。
+- **「24 个手写 `os.replace` 不在守卫里」不是清单漏了，是判据漏了**：448 的守卫只认 `open(x, "a")` 与「名字以 `_jsonl` 结尾的函数」，`_save_meta` 里 `json.dumps` → `os.replace` 这种写法对它完全不可见。普查（AST 认落点：`json.dump` / `write(json.dumps)` / `write_text(json.dumps)` / `os.replace` / `Path.replace` / 隔变量的 dumps→写文件）实际是 **84 处、59 个文件**，其中 22 处账本 / 状态 / 产物是 `open("w")` **非原子**直写（比 448 担心的「原子但没拒 NaN」危险一级：写到一半崩溃 = 半截文件）。
+- **普查中挖出的真病灶**：`hive_logger.SafeJSONEncoder` 把 NaN→null 的清洗挂在 `encode()` 上——那只有 `json.dumps` 走；**`json.dump(obj, f, cls=SafeJSONEncoder)` 走 `iterencode()`，清洗从来没生效**。实测 `atomic_json_write({"cash": nan})` 写出 `{"cash": NaN}`（docstring 却写着「自动防止 NaN/Inf」），日报主 JSON / 蜂群结果 / ML 报告 / 数据采集等 6 处 `json.dump(cls=SafeJSONEncoder)` 同病；生产 `.swarm_results_2026-08-28.json` 里 62 个 NaN 字面量（浏览器 `JSON.parse` 整份拒收）就是它。
+- **严格读写本身还不够**：日报把这几本账的步骤都包在「非致命」except 里，严格读写抛出的异常会被吞成一行 WARNING——等于没修。必须在源头登记。
+
+### Added
+- **`ledger_io` 整文件 JSON 文档**：`write_json(path, obj, indent, sort_keys)`（顶层必须是对象、`allow_nan=False`，不合法 ⇒ `LedgerWriteError` 文件一字节不动；原子替换 + 回读）、`load_json(path, default)`（缺文件 ⇒ default；坏 JSON / NaN·Infinity 字面量 / 顶层非对象 / 空文件 ⇒ `LedgerCorrupt`，**不**退回缺省值）、`dumps_document`。
+- **失败在源头登记**：`ledger_io` 的每个公开读写入口与加锁都经 `_observed`，`LedgerError` / `OSError` 记进进程级 `failures()`（次数 + 前 20 条 op / 文件 / 类型 / 原因；嵌套调用同一异常只记一次）→ `scan_timing.counters()["ledger_io"]` → status.json → `alert_manager._check_ledger_io_failures` P2「账本 / 状态文件读写失败 N 次」（计数缺失 ⇒ checks_skipped），摘要行「账本读写失败 N 次(文件名)」。**谁吞了异常都不影响这一路会红**，以后迁进来的账本自动覆盖。
+- **`ledger_io.locked_by(dir_fn)`** 装饰器：整个读-改-写入口持目录锁，目录**调用时**求值（测试重定向的模块全局才锁得对）。
+- 新测试 `tests/test_ledger_io_v2.py`（41）。
+
+### Fixed
+- **`SafeJSONEncoder`**：清洗改挂 `iterencode()`（`dump` / `dumps` 都经过），`default()` 转出的容器（`DataFrame.to_dict` 等）再清洗一遍。⚠️ 生产影响：从下一轮扫描起，日报 JSON / 蜂群结果 / ML 报告里原本会写成 `NaN` / `Infinity` 的值改写成 `null` / `"Inf"`（这正是该编码器文档写明的约定；`dumps` 路径一直是这样）。读这些文件的 Python 代码此前拿到 float NaN、此后拿到 None。
+- **`hive_logger.atomic_json_write`**（约 15 个缓存调用方）：物理写入改走 `ledger_io.atomic_write_text(verify=False)`——任何异常都清临时文件（此前只清 `OSError`，序列化抛 TypeError 会留下 `.tmp`）、fsync 目录、缺目录自动建（此前抛 FileNotFoundError 被调用方吞成缓存静默失效，`earnings_watcher` 为此专门补过 `_ensure_cache_dir`）、文件 0644（此前 0600）；`allow_nan=False` 兜底。语义按**可再生缓存**有意区别于账本：NaN 改写成 null 而不是拒绝；不做回读比对（缓存不持锁，并发蜂同写一个缓存时后写者赢是对的，回读只会报假警）。
+- **`meta.json` 当账本**：`paper_portfolio._load_meta`（此前 `json.loads` 照收 NaN）/ `options_paper_leg._load_meta` / `portfolio_greeks._load_meta`（此前坏了「按新账本处理」）改 `ledger_io.load_json`，坏了抛 `LedgerCorrupt`；三处 `_save_meta` 改 `write_json`（纸面组合 cash=NaN ⇒ 拒写、本轮失败进 P2；跨式腿 / Greeks 保持各自既定的 `_scrub` 口径 NaN→null 后再严格写）。Greeks 的 β 缓存与每日审计 `greeks_*.json` 也改 `write_json`。
+- 删掉 `cboe_fetcher` / `options_backtester` 里 `except ImportError` 兜底的非原子 `atomic_json_write` 副本（后者还带相对路径 `PATHS.cache_dir = "cache"`，且本模块其实没用到）：`hive_logger` 是基础模块，import 不了该当场红。
+
+### Changed
+- **迁入 `ledger_io`**：`options_paper_leg`（三个 JSONL 助手 + meta；`run_for_date` 整轮持 `options_paper_state/` 目录锁，照 paper_portfolio）、`vrp_signal`（`record_day` / `settle` 持 `vrp_state/` 锁）、`earnings_vol_signal`（`scan` / `settle_signals` 持锁——它的账本与跨式腿同在 `options_paper_state/`，同一把锁）。三者读时坏行此前**静默跳过**（少一条样本、闸门照算），现在抛 `LedgerCorrupt`；写入此前不拒 NaN（vrp / 财报波动）、无锁。
+- **守卫 `tests/test_ledger_writes_go_through_ledger_io.py` 改认写入落点**（六种：`raw_append` / `jsonl_helper` / `json_dump` / `dumps_write` / `file_replace` / `json_to_file`，与函数名无关；`experiments/` 不扫）。`DEBT` 换成 `WRITERS`：84 处逐条登记**类别 + 写的是什么 / 谁读回**（读者逐条核过）——账本·待迁移 22、状态·待迁移 12、产物·待迁移 12、缓存 7、只给人看 21、代码与部署 10；非原子直写在理由里标「⚠️非原子」（22 处，迁移优先级最高）。账本 / 状态 / 产物 / 缓存四类有**上限**（等号比较）：迁走一条要把上限减一，新写入方不许登记成债务。迁完的 8 个模块除「只给人看 / 代码」外零命中。
+- 更正 448 `DEBT` 一处未核实的描述：`ml_model_guard` 的 `manifest.jsonl`「守卫读回」不对——仓内没有代码读它，归「只给人看」。
+- `tests/test_scan_timing.py` 计数键集合加 `ledger_io`；`tests/test_paper_portfolio_no_import_mkdir.py` 改经 `_save_meta` 写（`paper_portfolio._atomic_write_text` 已无调用方、删除）。`CLAUDE.md` 的 `ledger_io` 指针补「整文件文档 / 源头登记」。
+
+### 验证
+- 生产只读：新的严格读取读 39 个生产文件（hedge_state / options_paper_state / paper_portfolio_state / vrp_state 全部 JSONL、5 个 `meta.json`、23 份 `greeks_*.json`）**全部通过**——今天的扫描不会因严格读取停下。全数据根 9499 个 JSON 文件里带 NaN 字面量的 23 个全是 06-09 / 06-15 / 08-28 的历史日报 / 蜂群结果 / 备份副本（`migrations_state/applied.jsonl` 那一处是字符串里的「NaN 修复」字样，严格读通过）。
+- 变异 24 个全部打红（`scratchpad/mutate452.py`，每个只改一处、跑相关测试、按 sha256 还原）：编码器只挂 encode / default 不清洗 / 坏文档退回缺省 / 放行 NaN / 不登记 / 嵌套重复登记（**初版幸存**：NaN 在外层就被拒、没进内层，补「最里层 os.replace 失败只记一次」后打红）/ 线程锁超时不登记 / vrp·财报波动·跨式腿不持锁 / 跨式腿·Greeks 坏 meta 按新账本 / 纸面组合 meta 用 json.loads / vrp 读跳坏行 / 财报波动写不拒 NaN / 计数·告警·skipped·摘要行不接 / 守卫不认 os.replace·隔变量写·json.dump / atomic_json_write 退回 json.dump 直写 / 跨式腿追加绕过 ledger_io。
+- 全量套件：见提交说明。
+
+### 还没做（下一版起，按 `WRITERS` 里的「⚠️非原子」先迁）
+- **最高优先**：`options_analyzer` 四处原地重写每日期权快照（过了那一场再也取不回，vrp / 财报波动 / IV·价格索引都读它）、`backtest_engine` 原地回填 `report_snapshots/*.json`、`cloud_snapshot_fetch` 的 market / manifest、日报主 JSON 与蜂群结果。⚠️ 这几处现在写的数据里可能有 NaN（日报 / 蜂群结果有实测），迁到严格 `write_json` 前要先决定「拒绝」还是「按缓存约定改 null」，不能一刀切。
+- 多文件提交不是原子的：跨式腿 / 纸面组合一轮里先追加 closed_trades、最后才写 positions / meta——两者之间崩溃，重跑会把同一笔再平一次（锁防并发，防不了崩溃）。未实测发生过，单独立项。
+- 其余裸追加账本（概率记分卡、IBKR 真实成交、IV / 价格索引、权重审计、迁移账本等）逐版迁。
 
 ## [0.45.451] — 2026-10-10 — Fixed：v0.45.439 二次检查（从根因修）——整次生成交给目标代码自己的 `main`、路径参数入口即绝对化、显式 `--home` 先校验后动手、被委托的那次绝不再委托；删掉「不写 `__pycache__`」这条假约束
 
