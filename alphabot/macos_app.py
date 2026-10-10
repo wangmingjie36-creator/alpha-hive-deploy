@@ -6,8 +6,9 @@
 所以代码目录更新之后，下次启动 .app 自动用上新代码，**不必重新生成**；只有代码目录换了、或换了 Python 才要重跑。
 
 代码目录缺省是**生产克隆** `~/alpha-hive-prod`（数据根迁移阶段 8，v0.45.436；见 `default_repo`）：它由扫描前的
-`production_sync` 快进。克隆不在就报错、不退回本检出（v0.45.439）。代码目录不是本检出时，.app 由**那份代码自己的
-生成器**生成（`build_app_from`）：壳、Info.plist 版本号与将执行的代码同版，从哪个检出跑本命令结果都一样。
+`production_sync` 快进。克隆不在就报错、不退回本检出（v0.45.439）。代码目录不是本检出时，**整次生成**交给那份代码
+自己的 `main`（`run_target_generator`，v0.45.451）：壳、Info.plist 版本号、数据根处理、提示都与将执行的代码同版。
+统一入口：`make -C ~/alpha-hive-prod alphabot-app`（克隆自己的 Makefile + 克隆自己的代码，与在哪个检出敲命令无关）。
 
 默认装到 `~/Applications`，不装进仓库：开发检出在 iCloud 同步的「桌面」下，.app 放那里会被复制出
 `Alpha Bot 2.app` 这类副本（CLAUDE.md「重名副本」一节）。未签名：本机生成的文件没有隔离标记，
@@ -60,56 +61,37 @@ def default_repo() -> Path:
     return clone
 
 
-#: 委托给目标代码目录自己的生成器。**只依赖 `build_app(dest, python=…)`**：v0.45.390 起每一版都有这个签名，
-#: 且 repo 缺省就是它自己所在的检出。别往这里加新参数——目标常是还没快进到新版的生产克隆。
-_DELEGATE = ("import sys; from pathlib import Path; from alphabot import macos_app as m; "
-             "print(m.build_app(Path(sys.argv[1]), python=sys.argv[2]))")
+#: 本模块的 `main` 能被别的检出整段委托（v0.45.451）：接受 `--repo 自己` 并在自己里一次跑完出壳 + 数据根。
+#: 委托方见到目标低于这个号就拒绝，不去猜旧版的参数——别删，也别在不兼容地改 `main` 参数时忘了加一。
+DELEGATE_PROTOCOL = 1
+
+#: 在目标代码里跑它自己的 `main`。**不换 cwd**：调用者给的相对路径保持原意（v0.45.439 换 cwd，`--dest ./Apps`
+#: 被建进了生产克隆）；import 靠显式把目标放到 `sys.path` 最前，再核对 import 到的确实是目标（不读产物文本）。
+_DELEGATE = "\n".join([
+    "import sys",
+    "from pathlib import Path",
+    "target = Path(sys.argv[1]).resolve()",
+    "sys.path.insert(0, str(target))",
+    "from alphabot import macos_app as m",
+    "got = Path(m.__file__).resolve().parent.parent",
+    "if got != target:",
+    "    sys.exit(f'alphabot.macos_app: 委托 import 到的生成器在 {got}，不是 {target}（PYTHONPATH / 包重定向？）')",
+    "if getattr(m, 'DELEGATE_PROTOCOL', 0) < 1:",
+    "    sys.exit(f'alphabot.macos_app: {target} 的生成器太旧，不能被委托。在那份代码里直接跑：'",
+    "             f'make -C {target} alphabot-app；或等它更新到 v0.45.451 之后')",
+    "sys.exit(m.main(sys.argv[2:]))",
+])
 
 
-def _bundle_repo(bundle: Path) -> Optional[Path]:
-    """读回 .app 启动脚本里写死的 `REPO=`；读不到 ⇒ None。"""
-    try:
-        text = (bundle / "Contents" / "MacOS" / EXECUTABLE).read_text(encoding="utf-8")
-    except OSError:
-        return None
-    for line in text.splitlines():
-        if line.startswith("REPO="):
-            parts = shlex.split(line[len("REPO="):])
-            return Path(parts[0]) if parts else None
-    return None
+def run_target_generator(repo: Path, argv: list) -> int:
+    """把整次生成交给 `repo` **自己的** `main`：壳、Info.plist、数据根处理、给人看的提示，全出自将要执行的那份代码。
 
-
-def build_app_from(repo: Path, dest_dir: Path, *, python: str = DEFAULT_PYTHON, timeout: float = 120.0) -> Path:
-    """用 `repo` **自己的**生成器生成 .app ⇒ 启动脚本、Info.plist（含版本号）、图标与 .app 将执行的代码同版。
-
-    v0.45.436 在开发检出 / worktree 里生成、只把 REPO 指向克隆：壳出自生成器所在检出、代码出自克隆，两版错开——
-    改了壳（比如给 launcher 加参数）的 worktree 一生成，.app 就拿新壳去 exec 克隆里的旧 launcher，双击即失败；
-    版本号也显示 worktree 的（v0.45.439 二次检查）。目标就是本检出时直接建，不起子进程。
-
-    生成完读回启动脚本的 `REPO=` 核对：委托子进程若 import 到了别处的 alphabot（如 PYTHONPATH 抢先），这里红。
+    v0.45.439 只委托了「出壳」：数据根仍按委托方自己那版 launcher 判断（跨版本又是两份规则）、委托方去概括子进程
+    的报错（stdout 一有输出就盖住真正的错误行）、生成后读壳里的 `REPO=` 文本核对（把委托方绑在目标的壳格式上）。
+    根因是只交出去一半——现在整段交出去：子进程的输出原样透传、退出码原样返回，委托方不再插手（v0.45.451）。
+    `argv` 里的路径必须已是绝对路径（`main` 在入口统一做）。
     """
-    repo = Path(repo).expanduser().resolve()
-    if repo == _repo_root():
-        return build_app(dest_dir, python=python)
-    if not (repo / "alphabot" / "macos_app.py").is_file():
-        raise BuildError(f"{repo} 没有 alphabot/macos_app.py（不是 Alpha Hive 仓库，或分支太旧）")
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}       # 目标常是生产克隆：不往里写 __pycache__
-    try:
-        r = subprocess.run([sys.executable, "-c", _DELEGATE, str(Path(dest_dir).expanduser()), python],
-                           cwd=str(repo), env=env, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise BuildError(f"{repo} 自己的生成器 {timeout:.0f} 秒没跑完") from None
-    if r.returncode != 0:
-        tail = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()[-1:] or ["（无输出）"]
-        raise BuildError(f"{repo} 自己的生成器失败（rc={r.returncode}）：{tail[0]}")
-    out = r.stdout.strip().splitlines()
-    bundle = Path(out[-1]) if out else None
-    if bundle is None or not bundle.is_dir():
-        raise BuildError(f"{repo} 自己的生成器没报出 .app 路径：{r.stdout.strip()[-200:] or '（无输出）'}")
-    got = _bundle_repo(bundle)
-    if got is None or got.resolve() != repo:
-        raise BuildError(f"{bundle} 的启动脚本指向 {got}，不是 {repo}：委托生成用的不是目标的代码")
-    return bundle
+    return subprocess.run([sys.executable, "-c", _DELEGATE, str(repo), *argv]).returncode
 
 
 def _icon_path() -> Path:
@@ -246,12 +228,46 @@ def _under_desktop_or_documents(path: Path) -> bool:
     return rel.parts[:1] in (("Desktop",), ("Documents",))
 
 
-def _record_data_root(explicit_home: Optional[str]) -> int:
+def _absolute_interpreter(python: str) -> str:
+    """`--python` 写进壳里、到双击时才在另一个 cwd 下解析 ⇒ 入口就定成绝对路径（v0.45.451）。
+
+    带目录的相对路径按调用者 cwd 绝对化；裸名字按 PATH 找，找不到就报错（壳里的 `[ -x "$PY" ]` 认不了裸名字）。
+    不核对存在与否：壳在双击时会核对并弹窗，而缺省解释器在 CI 上本来就不存在。
+    """
+    if os.sep in python or python.startswith("~"):
+        return os.path.abspath(os.path.expanduser(python))
+    found = shutil.which(python)
+    if not found:
+        raise BuildError(f"--python {python} 在 PATH 里找不到；给绝对路径")
+    return os.path.abspath(found)
+
+
+def _validate_home(home_arg: Optional[str]) -> Optional[Path]:
+    """显式 `--home`：**生成之前**就核对，失败即退出、什么都不改（v0.45.451）。
+
+    v0.45.439 先换掉 .app、再处理数据根，`--home` 打错时只在 stderr 留一行、返回 0——人明确要求的事没做成，
+    命令却算成功。顺手记环境变量那种不在这里：它失败只是没顺手做成，不算错。
+    """
+    if not home_arg:
+        return None
+    hp = Path(home_arg).expanduser().resolve()
+    if not hp.is_dir():
+        raise BuildError(f"--home {hp} 不存在：没生成 .app、没改启动器配置")
+    from alphabot import launcher
+    try:
+        launcher.load_config()
+    except launcher.LauncherError as exc:
+        raise BuildError(f"--home 要写启动器配置，但它读不了：{exc}") from None
+    return hp
+
+
+def _record_data_root(explicit_home: Optional[Path]) -> int:
     """处理启动器配置里的数据根，并说清楚**双击时**会发生什么（判断与启动器同源：`launcher.config_state`）。
 
     只有 `--home` 改写已有配置。环境里的 `ALPHA_HIVE_HOME` 只在配置还没有数据根时顺手记下：开发 shell 常把它
     指向沙箱，v0.45.436 前无条件写入 ⇒ 在开发检出里重新生成一次，生产 Alpha Bot 就改读沙箱（v0.45.439 二次检查）。
-    配置文件坏了：照实报，不改写（双击时启动器会弹同一个错）。
+    配置文件坏了：照实报，不改写（双击时启动器会弹同一个错）。`--home` 已在生成前核对过（`_validate_home`）；
+    这里仍失败（期间被删 / 改坏）就返回 1——显式要求没做成不能算成功。
     """
     from alphabot import launcher
     try:
@@ -274,6 +290,8 @@ def _record_data_root(explicit_home: Optional[str]) -> int:
         hp = Path(want).expanduser()
         if not hp.is_dir():
             print(f"⚠️ 数据根 {hp}（来自 {why}）不存在，没写进配置", file=sys.stderr)
+            if explicit_home:
+                return 1
         else:
             for k in launcher.RESET_KEYS:        # 连同 demo 一起换掉：demo 优先于数据根，只写数据根等于没换
                 cfg.pop(k, None)
@@ -298,23 +316,36 @@ def main(argv=None) -> int:
                     help="改写启动器配置里的数据根。不给时：配置还没有数据根才顺手记下当前环境的 ALPHA_HIVE_HOME，"
                          "已有的绝不改写；都没有就首次双击时再选")
     ap.add_argument("--repo", default=None,
-                    help="`.app` cd 进哪份代码（由那份代码自己的生成器出壳）；缺省生产克隆 ~/alpha-hive-prod，"
+                    help="`.app` cd 进哪份代码（整次生成都交给那份代码自己的生成器）；缺省生产克隆 ~/alpha-hive-prod，"
                          "不在就报错。只在测自己的检出时给")
     args = ap.parse_args(argv)
 
-    dest = Path(args.dest).expanduser()
+    try:
+        # 入口统一绝对化：这些路径要跨进程（委托）、跨时间（壳在双击时才解析）使用，相对路径的含义会变（v0.45.451）
+        dest = Path(args.dest).expanduser().resolve()
+        python = _absolute_interpreter(args.python)
+        home = _validate_home(args.home)                 # 显式输入先核对，后动手
+        repo = Path(args.repo).expanduser().resolve() if args.repo else default_repo().resolve()
+    except BuildError as exc:
+        print(f"alphabot.macos_app: {exc}", file=sys.stderr)
+        return 1
+
+    if repo != _repo_root():
+        print(f"代码目录 {repo} 不是本检出（{_repo_root()}）⇒ 整次生成交给它自己的生成器", file=sys.stderr)
+        forward = ["--repo", str(repo), "--dest", str(dest), "--python", python]
+        return run_target_generator(repo, forward + (["--home", str(home)] if home else []))
+
     if _under_desktop_or_documents(dest):
         print(f"⚠️ {dest} 在 iCloud 同步范围内，可能被复制出「Alpha Bot 2.app」；建议用缺省的 ~/Applications",
               file=sys.stderr)
     try:
-        repo = Path(args.repo).expanduser().resolve() if args.repo else default_repo().resolve()
-        bundle = build_app_from(repo, dest, python=args.python)
+        bundle = build_app(dest, repo=repo, python=python)
     except BuildError as exc:
         print(f"alphabot.macos_app: {exc}", file=sys.stderr)
         return 1
-    print(f"已生成 {bundle}（代码目录 {repo}，壳与 Info.plist 出自同一份代码）")
+    print(f"已生成 {bundle}（代码目录 {repo}）")
 
-    rc = _record_data_root(args.home)
+    rc = _record_data_root(home)
     if sys.platform != "darwin":
         print("（当前不是 macOS：.app 生成了，但只能在 Mac 上双击运行）", file=sys.stderr)
     print("用法：双击打开；拖到 Dock 常驻。停止服务：页面底部「停止服务」。换数据根："

@@ -264,19 +264,30 @@ class TestDataRootFollowsLauncher:
         assert LA.config_state(cfg) == ("home", str(data.resolve())) and cfg["port"] == 8799, cfg
 
 
+    def test_bad_explicit_home_fails_before_touching_anything(self, tmp_path, home, monkeypatch, capsys, data):
+        """`--home` 打错：生成前就退出、返回 1；.app 不生成、配置不动（v0.45.439 先换 .app 再警告、返回 0）。"""
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        LA.save_config({"alpha_hive_home": str(data)})
+        typo = tmp_path / "typo"
+        assert self._main(tmp_path, "--home", str(typo)) == 1
+        assert not (tmp_path / "Apps").exists() and LA.load_config() == {"alpha_hive_home": str(data)}
+        assert str(typo) in capsys.readouterr().err
+
+
 class TestDefaultRepoIsProductionClone:
-    """`.app` 缺省 cd 进生产克隆（v0.45.436），且由克隆**自己的**生成器出壳（v0.45.439）。
+    """`.app` 缺省 cd 进生产克隆（v0.45.436）；整次生成交给克隆**自己的** `main`（v0.45.451）。
 
     436 之前缺省 = 生成器所在检出 ⇒ 在开发检出 / worktree 里 `make alphabot-app` 会把 .app 无声指回一份再没人快进
-    （或随时被删）的代码。436 只改了 REPO：壳与 Info.plist 仍出自生成器所在检出，与克隆的代码两版错开；克隆不在时
-    还退回本检出、只在 stderr 留一行。
+    （或随时被删）的代码。436 只改了 REPO；439 只委托了出壳——数据根仍按委托方那版判断、委托方去概括子进程报错、
+    读壳文本核对，且子进程换了 cwd（相对 `--dest` 被建进克隆）。451 把整段交出去、不换 cwd、只核对 import 来源。
+    子进程直接写 fd ⇒ 本类看输出用 `capfd`。
     """
 
     @staticmethod
-    def _repo_in_script(apps: Path) -> Path:
+    def _script_var(apps: Path, var: str) -> str:
         exe = apps / f"{MA.APP_NAME}.app" / "Contents" / "MacOS" / MA.EXECUTABLE
-        line = next(ln for ln in exe.read_text(encoding="utf-8").splitlines() if ln.startswith("REPO="))
-        return Path(shlex.split(line[len("REPO="):])[0])
+        line = next(ln for ln in exe.read_text(encoding="utf-8").splitlines() if ln.startswith(f"{var}="))
+        return shlex.split(line[len(var) + 1:])[0]
 
     @staticmethod
     def _version_in_plist(apps: Path) -> str:
@@ -284,68 +295,120 @@ class TestDefaultRepoIsProductionClone:
             return plistlib.load(f)["CFBundleShortVersionString"]
 
     @staticmethod
-    def _clone_at(path: Path, monkeypatch, *, version: str = "0.0.0+clone", macos_app: str = None) -> Path:
-        """真能跑的假克隆：拷本检出的生成器进去，只改版本号——委托若没发生，Info.plist 版本就是本检出的。"""
-        import production_clone
-        pkg = path / "alphabot"
+    def _copy_generator(root: Path, version: str) -> Path:
+        pkg = root / "alphabot"
         (pkg / "macos").mkdir(parents=True)
         for rel in ("macos_app.py", "launcher.py", "macos/AlphaBot.icns"):
             shutil.copy2(REPO / "alphabot" / rel, pkg / rel)
         (pkg / "__init__.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+        return pkg
+
+    def _clone_at(self, path: Path, monkeypatch, *, macos_app: str = None, mark: bool = True) -> Path:
+        """真能跑的假克隆：拷本检出的生成器进去，改版本号，并给它的数据根提示打上「【克隆】」——
+        委托若没发生（或只交出去一半），版本号 / 提示就会是本检出的。"""
+        import production_clone
+        pkg = self._copy_generator(path, "0.0.0+clone")
+        if mark:
+            src = (pkg / "macos_app.py").read_text(encoding="utf-8")
+            assert src.count('f"沿用启动器配置里的数据根 {home}"') == 1
+            (pkg / "macos_app.py").write_text(
+                src.replace('f"沿用启动器配置里的数据根 {home}"', 'f"【克隆】沿用启动器配置里的数据根 {home}"'), encoding="utf-8")
         if macos_app is not None:
             (pkg / "macos_app.py").write_text(macos_app, encoding="utf-8")
         monkeypatch.setattr(production_clone, "default_dest", lambda: path)
         return path
 
-    def test_default_points_at_the_clone_built_by_the_clone(self, tmp_path, home, monkeypatch, capsys):
+    def test_default_hands_the_whole_run_to_the_clone(self, tmp_path, home, monkeypatch, capfd):
         clone = self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
-        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 0, capsys.readouterr().err
-        got = self._repo_in_script(tmp_path / "Apps")
+        data = tmp_path / "data"
+        data.mkdir()
+        LA.save_config({"alpha_hive_home": str(data)})
+        rc = MA.main(["--dest", str(tmp_path / "Apps")])
+        out = capfd.readouterr().out
+        assert rc == 0, out
+        got = Path(self._script_var(tmp_path / "Apps", "REPO"))
         assert got == clone.resolve() and got != REPO, got        # 正对照：确实不是生成器所在检出
-        assert self._version_in_plist(tmp_path / "Apps") == "0.0.0+clone", "壳出自生成器所在检出，不是克隆"
-        assert __version__ != "0.0.0+clone"
-        assert f"代码目录 {clone.resolve()}" in capsys.readouterr().out
-        assert not list(clone.rglob("__pycache__")), "委托生成往克隆里写了 __pycache__"
+        assert self._version_in_plist(tmp_path / "Apps") == "0.0.0+clone" != __version__, "壳出自委托方，不是克隆"
+        assert f"【克隆】沿用启动器配置里的数据根 {data}" in out, "数据根仍由委托方那版处理（只交出去一半）"
+        assert out.count("沿用启动器配置里的数据根") == 1, out
 
-    def test_missing_clone_refuses_instead_of_falling_back(self, tmp_path, home, monkeypatch, capsys):
+    def test_missing_clone_refuses_instead_of_falling_back(self, tmp_path, home, monkeypatch, capfd):
         import production_clone
         gone = tmp_path / "no-such-clone"
         monkeypatch.setattr(production_clone, "default_dest", lambda: gone)
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
         assert MA.main(["--dest", str(tmp_path / "Apps")]) == 1
         assert not (tmp_path / "Apps").exists(), "克隆不在还是生成了 .app"
-        err = capsys.readouterr().err
+        err = capfd.readouterr().err
         assert str(gone) in err and "production_clone.py setup" in err and "--repo" in err, err
 
-    def test_explicit_repo_wins_over_the_clone(self, tmp_path, home, monkeypatch, capsys):
+    def test_explicit_repo_wins_over_the_clone(self, tmp_path, home, monkeypatch):
         self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
         assert MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(REPO)]) == 0
-        assert self._repo_in_script(tmp_path / "Apps") == REPO
+        assert Path(self._script_var(tmp_path / "Apps", "REPO")) == REPO
         assert self._version_in_plist(tmp_path / "Apps") == __version__
 
-    def test_target_generator_failure_is_reported(self, tmp_path, home, monkeypatch, capsys):
-        broken = "def build_app(dest, **kw):\n    raise RuntimeError('target generator exploded')\n"
-        self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch, macos_app=broken)
+    def test_target_output_and_exit_code_pass_through(self, tmp_path, home, monkeypatch, capfd):
+        """委托方不再概括子进程的报错：stdout 有输出时，stderr 里真正的错误行照样原样到人眼前。"""
+        target = ("import sys\nDELEGATE_PROTOCOL = 1\n"
+                  "def main(argv):\n"
+                  "    print('stdout noise from target')\n"
+                  "    print('target-side error: the real reason', file=sys.stderr)\n"
+                  "    return 3\n")
+        self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch, macos_app=target, mark=False)
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
-        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 1
-        assert "target generator exploded" in capsys.readouterr().err
+        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 3
+        cap = capfd.readouterr()
+        assert "target-side error: the real reason" in cap.err and "stdout noise from target" in cap.out, cap
 
-    def test_bundle_pointing_elsewhere_is_rejected(self, tmp_path, home, monkeypatch, capsys):
-        """委托子进程 import 到了别处的代码（REPO 不是目标）⇒ 必须红，不能把错的 .app 当成功。"""
-        elsewhere = tmp_path / "elsewhere"
-        liar = ("from pathlib import Path\n"
-                "def build_app(dest, **kw):\n"
-                "    b = Path(dest) / 'Alpha Bot.app' / 'Contents' / 'MacOS'\n"
-                "    b.mkdir(parents=True, exist_ok=True)\n"
-                f"    (b / 'AlphaBot').write_text('REPO={elsewhere}\\n')\n"
-                "    return Path(dest) / 'Alpha Bot.app'\n")
-        self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch, macos_app=liar)
+    def test_old_target_is_refused_not_guessed(self, tmp_path, home, monkeypatch, capfd):
+        """目标还不支持整段委托（v0.45.451 之前）⇒ 明说并给出在那份代码里直接跑的命令，不去猜它的参数。"""
+        old = "def build_app(dest, **kw):\n    raise SystemExit('old generator must not be called')\n"
+        clone = self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch, macos_app=old, mark=False)
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
-        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 1
-        err = capsys.readouterr().err
-        assert str(elsewhere) in err and "不是目标的代码" in err, err
+        assert MA.main(["--dest", str(tmp_path / "Apps")]) != 0
+        err = capfd.readouterr().err
+        assert "太旧" in err and f"make -C {clone.resolve()} alphabot-app" in err, err
+        assert "must not be called" not in err and not (tmp_path / "Apps").exists()
+
+    def test_import_redirected_away_from_the_target_is_caught(self, tmp_path, home, monkeypatch, capfd):
+        """核对的是 import 来源（真正的风险），不读产物文本：目标的包把 `__path__` 指去别处 ⇒ 必须红。"""
+        clone = self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch, mark=False)
+        other = tmp_path / "elsewhere"
+        self._copy_generator(other, "0.0.0+elsewhere")
+        (clone / "alphabot" / "__init__.py").write_text(
+            f'__version__ = "0.0.0+clone"\n__path__[:] = [{str(other / "alphabot")!r}]\n', encoding="utf-8")
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert MA.main(["--dest", str(tmp_path / "Apps")]) != 0
+        err = capfd.readouterr().err
+        assert str(other.resolve()) in err and str(clone.resolve()) in err, err
+        assert not (tmp_path / "Apps").exists(), "import 到别处的生成器还是生成了 .app"
+
+    def test_relative_dest_lands_in_the_callers_cwd(self, tmp_path, home, monkeypatch):
+        """v0.45.439 委托时换了 cwd：`--dest ./Apps` 被建进了克隆。"""
+        clone = self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        assert MA.main(["--dest", "Apps"]) == 0
+        assert (work / "Apps" / f"{MA.APP_NAME}.app").is_dir()
+        assert not (clone / "Apps").exists(), "相对 --dest 被建进了克隆"
+
+    def test_relative_python_is_written_absolute(self, tmp_path, home, monkeypatch):
+        """壳在双击时才解析 `PY`，那时 cwd 早已不是敲命令的地方 ⇒ 入口就定成绝对路径。"""
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        monkeypatch.chdir(tmp_path)
+        assert MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(REPO), "--python", "venv/bin/python3"]) == 0
+        assert self._script_var(tmp_path / "Apps", "PY") == str(tmp_path / "venv" / "bin" / "python3")
+
+    def test_bare_python_not_on_path_is_refused(self, tmp_path, home, monkeypatch, capsys):
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        rc = MA.main(["--dest", str(tmp_path / "Apps"), "--repo", str(REPO), "--python", "no-such-python-xyz"])
+        assert rc == 1 and not (tmp_path / "Apps").exists()
+        assert "no-such-python-xyz" in capsys.readouterr().err
 
 
 class TestLaunchScriptHints:
