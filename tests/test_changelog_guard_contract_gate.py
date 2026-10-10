@@ -554,3 +554,66 @@ class TestTimeoutAndShim:
             "pre-push": "ba6b3942f418c5c84f92a4fa7a1ea6091074c65921318ad0db44103c4be86664",
         }
         assert '"$SCRIPT" --pre-push "$@"' in cg.HOOKS["pre-push"]
+
+
+# ═════════════════ 盘中撞上 Alpha Bot：照样拦，但不劝 --no-verify（v0.45.453） ═════════════════
+
+sys.path.insert(0, str(_ROOT / "tests"))
+import _root_data_guard as rdg  # noqa: E402
+
+_ALL_AB = {"all_alphabot_appends": True, "alphabot_files": 1, "alphabot_records": 3, "unexplained": 0}
+_TD = "tests/test_step_contract.py::test_app_keys（teardown）"
+
+
+class TestAlphabotOnlyRedPredicate:
+    def test_only_the_data_root_teardown_with_a_full_verdict(self):
+        rep = {"failed": [_TD], "real_data_root_verdict": _ALL_AB}
+        assert cg._alphabot_only_red(rep, [f"失败：{_TD}"]) == _ALL_AB
+
+    @pytest.mark.parametrize("rep,problems", [
+        ({"failed": [_TD], "real_data_root_verdict": {**_ALL_AB, "all_alphabot_appends": False}}, [f"失败：{_TD}"]),
+        ({"failed": [_TD], "real_data_root_verdict": None}, [f"失败：{_TD}"]),
+        ({"failed": [_TD, "t::x（teardown）"], "real_data_root_verdict": _ALL_AB},
+         [f"失败：{_TD}", "失败：t::x（teardown）"]),                              # 另一道闸也红了
+        ({"failed": ["t::x（call）"], "real_data_root_verdict": _ALL_AB}, ["失败：t::x（call）"]),
+        ({"failed": [_TD], "real_data_root_verdict": _ALL_AB}, [f"失败：{_TD}", "被跳过（没跑 ≠ 没问题）：t::y"]),
+        (None, ["结果报告读不到"]),
+    ])
+    def test_anything_else_keeps_the_usual_hint(self, rep, problems):
+        assert cg._alphabot_only_red(rep, problems) is None
+
+    def test_plugin_reads_the_attribute_conftest_sets(self):
+        assert f'"{rdg.VERDICT_CONFIG_ATTR}"' in cg._REPORT_PLUGIN
+
+
+def _fake_guard_conftest(verdict: dict) -> str:
+    """模拟 tests/conftest.py 的真实数据根闸：session 级 teardown 挂上归因再红。"""
+    return ("import pytest\n\n\n@pytest.fixture(scope='session', autouse=True)\n"
+            "def _fake_real_data_root_guard(request):\n    yield\n"
+            f"    setattr(request.config, {rdg.VERDICT_CONFIG_ATTR!r}, {verdict!r})\n"
+            "    raise AssertionError('FAKE-DATA-ROOT-RED')\n")
+
+
+class TestAlphabotOnlyRedThroughTheHook:
+    def test_alphabot_only_red_blocks_but_says_wait_instead_of_no_verify(self, repo):
+        before = repo.origin_main()
+        repo.commit({"tests/conftest.py": _fake_guard_conftest(_ALL_AB)}, "盘中撞上 Alpha Bot")
+        r = _push(repo)
+        assert r.returncode != 0, "判定被改了：唯一的红是 Alpha Bot 也必须拦"
+        assert repo.origin_main() == before
+        assert "FAKE-DATA-ROOT-RED" in r.stderr, r.stderr
+        assert "全部**是 Alpha Bot" in r.stderr and "3 张快照" in r.stderr and "隔一两分钟" in r.stderr, r.stderr
+        assert cg._BYPASS_NOTE not in r.stderr, "已核实只是 Alpha Bot，却仍在劝 --no-verify"
+
+    def test_a_real_failure_alongside_keeps_the_usual_hint(self, repo):
+        repo.commit({"tests/conftest.py": _fake_guard_conftest(_ALL_AB), "app.py": BROKEN_APP}, "真坏 + Alpha Bot")
+        r = _push(repo)
+        assert r.returncode != 0
+        assert "CONTRACT-BROKEN" in r.stderr and cg._BYPASS_NOTE in r.stderr, r.stderr
+        assert "隔一两分钟" not in r.stderr, r.stderr
+
+    def test_not_all_alphabot_keeps_the_usual_hint(self, repo):
+        repo.commit({"tests/conftest.py": _fake_guard_conftest({**_ALL_AB, "all_alphabot_appends": False})}, "混合")
+        r = _push(repo)
+        assert r.returncode != 0
+        assert cg._BYPASS_NOTE in r.stderr and "隔一两分钟" not in r.stderr, r.stderr

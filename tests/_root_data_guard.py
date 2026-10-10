@@ -66,7 +66,11 @@ conftest 的 session 总闸与 `tests/test_root_data_guard.py` 共用这一份
 """
 from __future__ import annotations
 
+import datetime as _dt
+import hashlib
+import json
 import os
+import re
 
 SKIP_DIR_NAMES = frozenset({
     ".git", ".claude",
@@ -234,3 +238,152 @@ def format_diff(d: dict[str, list[str]], limit: int = 25) -> str:
         if len(items) > limit:
             lines.append(f"    …另 {len(items) - limit} 项")
     return "\n".join(lines)
+
+
+# ═══════════════ Alpha Bot 盘中采样：报红时说清楚是谁写的（v0.45.453）═══════════════
+#
+# 只影响**报错措辞**，判定照旧：有变化就红。理由：闸不认「看起来像合法写入」，只认「没有变化」——
+# 一旦按路径放行，测试写穿到同一个目录就再也没人会红（「不要往豁免里加路径」）。
+# 要治的是另一件事：盘中 Alpha Bot 每隔几分钟整批追加一次，跑测试 / 推 main 偶尔撞上，
+# 旧报错一律说「测试写穿了生产数据」，再由 pre-push 建议 `--no-verify`——人要么被误导去查测试，
+# 要么养成绕过的习惯（连 CHANGELOG 检查一起跳过）。10-09 实测还出过反方向的错判：
+# 把同一批里相隔几秒的 mtime 当成「每几秒写一次」。所以归因必须逐项核实，不靠路径、不靠猜。
+
+#: Alpha Bot 盘中快照的落盘位置：`alphabot/service.py` 的 `_intraday_dir` + `take_snapshot`
+#: （`alphabot_state/intraday/<美东日期>/<标的>.jsonl`，只追加、一次写一整行）。
+_ALPHABOT_DAY_RE = re.compile(r"^alphabot_state/intraday/(\d{4}-\d{2}-\d{2})$")
+_ALPHABOT_FILE_RE = re.compile(r"^alphabot_state/intraday/(\d{4}-\d{2}-\d{2})/[^/]+\.jsonl$")
+#: 一张快照的键 = `AlphaBotService.snapshot_from` 的产出，一个不多一个不少
+#: （`tests/test_root_data_guard.py::TestAlphabotAppendClassifier::test_keys_match_the_writer` 守它不漂移）。
+ALPHABOT_SNAPSHOT_KEYS = frozenset({"ts", "payload_last_trade_time", "underlying_price", "underlying_price_source",
+                                    "session_live", "iv30", "views", "route"})
+#: `take_snapshot` 先取时间戳、再现拉数据、最后落盘 ⇒ 会话开始之后才落盘的那一张，ts 可能早于会话开始。
+ALPHABOT_TS_SLACK_BEFORE_S = 300
+ALPHABOT_TS_SLACK_AFTER_S = 60
+#: 归因结果挂在 pytest `config` 上的属性名：`changelog_guard._REPORT_PLUGIN` 读它，决定 pre-push 怎么提示
+#: （`tests/test_changelog_guard_contract_gate.py` 守两处同名）。
+VERDICT_CONFIG_ATTR = "_alpha_hive_real_data_root_verdict"
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def alphabot_baseline(root: str, fp: dict[str, str], today: _dt.date) -> dict[str, str]:
+    """会话开始时，近两天 Alpha Bot 盘中文件的 sha256——之后用来证明它们「只在末尾追加、原有内容没动」。
+
+    只算日期 ≥ `today` − 1 的目录：Alpha Bot 只往当天（美东）的目录追加，美东日期不早于本机日期；
+    全量算会随历史目录一天天变多、拖慢每一轮会话启动。读不了的文件不记——之后它若有变化，
+    就因为「没有起点哈希」归到「其余」，照原样报成测试写的（往保守那边错）。"""
+    cutoff = (today - _dt.timedelta(days=1)).isoformat()
+    out: dict[str, str] = {}
+    for rel, sig in fp.items():
+        m = _ALPHABOT_FILE_RE.match(rel)
+        if not m or m.group(1) < cutoff or sig == "dir":
+            continue
+        try:
+            with open(os.path.join(root, rel), "rb") as f:
+                out[rel] = _sha256_bytes(f.read())
+        except OSError:
+            continue
+    return out
+
+
+def _old_size(sig: str | None) -> int | None:
+    if sig is None:
+        return 0                                   # 新文件：原有内容为空
+    size, sep, _mtime = sig.partition(":")
+    return int(size) if sep and size.isdigit() else None
+
+
+def _why_not_alphabot_append(root: str, rel: str, before_sig: str | None, baseline: dict[str, str],
+                             lo: _dt.datetime, hi: _dt.datetime) -> tuple[str | None, int]:
+    """`rel` 的变化能否归因于 Alpha Bot 追加：返回 (不能的原因 | None, 新增快照张数)。"""
+    m = _ALPHABOT_FILE_RE.match(rel)
+    if not m:
+        return "不是 Alpha Bot 盘中文件的路径", 0
+    old = _old_size(before_sig)
+    if old is None:
+        return f"变化前的指纹认不出大小（{before_sig}）", 0
+    try:
+        with open(os.path.join(root, rel), "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return f"读不了（{e.strerror}）", 0
+    if len(data) <= old:
+        return "没有变长（不是追加）", 0
+    if old and (rel not in baseline or _sha256_bytes(data[:old]) != baseline[rel]):
+        return ("没有会话开始时的哈希，证明不了原有内容没动" if rel not in baseline
+                else "原有内容被改写（不只是在末尾追加）"), 0
+    added = data[old:]
+    if not added.endswith(b"\n"):
+        return "新增部分不是完整的行", 0
+    try:
+        lines = added.decode("utf-8").split("\n")[:-1]
+    except UnicodeDecodeError:
+        return "新增部分不是 UTF-8", 0
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            return "新增行不是 JSON", 0
+        if not isinstance(rec, dict) or set(rec) != ALPHABOT_SNAPSHOT_KEYS:
+            return "新增行不是 Alpha Bot 快照（键对不上）", 0
+        try:
+            ts = _dt.datetime.fromisoformat(rec["ts"])
+        except (TypeError, ValueError):
+            return "快照的 ts 不是 ISO 时间", 0
+        if ts.tzinfo is None:
+            return "快照的 ts 没有时区", 0
+        if not lo <= ts <= hi:
+            return f"快照时间 {rec['ts']} 不在本轮测试期间", 0
+        if ts.date().isoformat() != m.group(1):
+            return f"快照日期与目录日期 {m.group(1)} 不一致", 0
+    return None, len(lines)
+
+
+def explain_alphabot_appends(root: str, changes: dict[str, list[str]], before: dict[str, str],
+                             baseline: dict[str, str], started: _dt.datetime | None,
+                             ended: _dt.datetime) -> dict:
+    """把 `diff()` 的结果分成「已核实是 Alpha Bot 盘中追加」与「其余」。**只决定报错措辞，不决定红绿。**
+
+    一个文件归因于 Alpha Bot，必须同时满足（任何一条不满足都归「其余」，宁可报成测试写的）：
+      1. 路径是 `alphabot_state/intraday/<日期>/<标的>.jsonl`；
+      2. 原有内容逐字节未变：变化前那个大小之内，sha256 等于会话开始时记下的（新文件则原有为空）；
+      3. 新增部分是完整的行，每行都是一张快照：键集合恰为 `ALPHABOT_SNAPSHOT_KEYS`，`ts` 带时区、
+         落在 [会话开始 − 300 s, 会话结束 + 60 s]，且 `ts` 的日期就是目录日期。
+    新增的日期目录只有在它里面至少有一个文件被归因时才算。删除一律归「其余」。
+    返回 `{"explained": [...], "records": n, "unexplained": {类别: [...]}, "why": {Alpha Bot 路径: 不能归因的原因}}`。
+    """
+    explained: list[str] = []
+    unexplained: dict[str, list[str]] = {}
+    why: dict[str, str] = {}
+    records = 0
+    if started is None:                          # 没有会话开始时间：一律不归因
+        return {"explained": [], "records": 0, "unexplained": dict(changes), "why": {}}
+    lo = started - _dt.timedelta(seconds=ALPHABOT_TS_SLACK_BEFORE_S)
+    hi = ended + _dt.timedelta(seconds=ALPHABOT_TS_SLACK_AFTER_S)
+    day_dirs = []
+    for kind in ("added", "changed"):
+        for rel in changes.get(kind, []):
+            if kind == "added" and _ALPHABOT_DAY_RE.match(rel):
+                day_dirs.append(rel)
+                continue
+            reason, n = _why_not_alphabot_append(root, rel, before.get(rel), baseline, lo, hi)
+            if reason is None:
+                explained.append(rel)
+                records += n
+            else:
+                unexplained.setdefault(kind, []).append(rel)
+                if rel.startswith("alphabot_state/"):
+                    why[rel] = reason
+    for rel in day_dirs:
+        if any(e.startswith(rel + "/") for e in explained):
+            explained.append(rel)
+        else:
+            unexplained.setdefault("added", []).append(rel)
+            why[rel] = "新建的日期目录里没有任何一项被归因"
+    if changes.get("removed"):
+        unexplained["removed"] = list(changes["removed"])
+    return {"explained": sorted(explained), "records": records,
+            "unexplained": {k: sorted(v) for k, v in unexplained.items() if v}, "why": why}

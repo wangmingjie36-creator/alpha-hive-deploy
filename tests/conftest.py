@@ -2,6 +2,7 @@
 Alpha Hive 测试 fixtures - 共享 mock 数据 + 隔离数据库
 """
 
+import datetime
 import sys
 import os
 import pathlib
@@ -1330,6 +1331,7 @@ _ROOT_FP_BEFORE = pytest.StashKey[dict]()
 
 
 _DATA_ROOT_BEFORE = pytest.StashKey[tuple]()
+_DATA_ROOT_ALPHABOT = pytest.StashKey[tuple]()
 
 
 def pytest_sessionstart(session):
@@ -1341,6 +1343,11 @@ def pytest_sessionstart(session):
         invoked, invoked.get("HOME") or os.path.expanduser("~"), _REPO_ROOT_FOR_GUARD)
     session.config.stash[_DATA_ROOT_BEFORE] = (
         root, _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason) if root else None)
+    # v0.45.453：报红时分辨「全部是 Alpha Bot 盘中追加」要用的起点（会话开始时刻 + 近两天盘中文件的哈希）。只影响措辞。
+    _fp = session.config.stash[_DATA_ROOT_BEFORE][1]
+    session.config.stash[_DATA_ROOT_ALPHABOT] = (
+        datetime.datetime.now(datetime.timezone.utc),
+        _root_data_guard.alphabot_baseline(root, _fp, datetime.date.today()) if root else {})
 
 
 def pytest_report_header(config):
@@ -1404,13 +1411,46 @@ def _guard_real_data_root(request):
         return
     changes = _root_data_guard.diff(
         before, _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason))
-    assert not changes, (
+    if not changes:
+        return
+    started, baseline = request.config.stash.get(_DATA_ROOT_ALPHABOT, (None, {}))
+    v = _root_data_guard.explain_alphabot_appends(
+        root, changes, before, baseline, started, datetime.datetime.now(datetime.timezone.utc))
+    # 给 pre-push 契约闸的报告插件读（`changelog_guard._REPORT_PLUGIN`）：只有这里能逐项核实，钩子不抠输出文本
+    setattr(request.config, _root_data_guard.VERDICT_CONFIG_ATTR, {
+        "all_alphabot_appends": not v["unexplained"], "alphabot_files": sum(
+            1 for p in v["explained"] if p.endswith(".jsonl")),
+        "alphabot_records": v["records"], "unexplained": sum(len(x) for x in v["unexplained"].values())})
+    assert not changes, _real_data_root_message(root, changes, v)
+
+
+def _real_data_root_message(root, changes: dict, v: dict) -> str:
+    """真实数据根闸的报错文案（v0.45.453 起按 `explain_alphabot_appends` 分三种；判定不受影响，照样红）。"""
+    if v["explained"] and not v["unexplained"]:
+        n_files = sum(1 for p in v["explained"] if p.endswith(".jsonl"))
+        return (
+            f"真实数据根（{root}）有变化，但**全部**是 Alpha Bot 盘中采样的追加——已逐项核实，不是测试写的：\n"
+            f"{_root_data_guard.format_diff(changes)}\n"
+            f"  {n_files} 个文件只在末尾新增了 {v['records']} 张快照：原有内容逐字节未变，快照时间都落在本轮测试期间。\n\n"
+            "判定照样是红（闸只认「没有变化」，不认「看起来像合法写入」）。处置：Alpha Bot 盘中按设定间隔整批写、"
+            "每批几十秒，等这一批写完重跑 / 重推即可。\n"
+            "**不要** `git push --no-verify`（会连 CHANGELOG 检查一起跳过），也**不要**往 `tests/_root_data_guard.py` "
+            "的豁免里加路径。")
+    msg = (
         f"测试写到了**真实数据根**（{root}）里的生产数据：\n"
         f"{_root_data_guard.format_diff(changes)}\n\n"
         "被测代码绕过了 `ALPHA_HIVE_HOME` 隔离：多半是 `Path(__file__).parent / 数据名`、模块级常量冻结、"
         "subprocess 丢了 env，或硬编码了 `~/alpha-hive-data`。改成调用时读 `PATHS.*`。\n"
         "若这是每日扫描 / 周任务恰好在写（不是测试）：等它结束再跑。\n"
         "**不要**往 `tests/_root_data_guard.py` 的豁免里加数据路径。")
+    if v["explained"]:
+        msg += (f"\n\n其中 {len(v['explained'])} 项已核实是 Alpha Bot 盘中追加（{v['records']} 张快照）；"
+                "**其余这些不能归因于它，问题在这里**：\n"
+                f"{_root_data_guard.format_diff(v['unexplained'])}")
+    if v["why"]:
+        msg += "\n\nAlpha Bot 目录下没能归因的项及原因：\n" + "\n".join(
+            f"    {p}：{r}" for p, r in sorted(v["why"].items()))
+    return msg
 
 
 # ==================== hive_logger 文件日志隔离（v0.45.239） ====================

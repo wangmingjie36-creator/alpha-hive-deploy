@@ -5,7 +5,24 @@
 
 ---
 
-## [0.45.453] — 2026-10-10 — 占位（进行中：真实数据根闸报红时分辨「全部是 Alpha Bot 盘中采样的追加」——判定不变照样红，只把原因说清楚、不再引人 `--no-verify`）
+## [0.45.453] — 2026-10-10 — Changed：真实数据根闸报红时分辨「全部是 Alpha Bot 盘中采样的追加」——判定不变照样红，只把原因说清；pre-push 此时提示「隔一两分钟重推」、不再劝 `--no-verify`
+
+盘中 Alpha Bot 按设定间隔整批往 `alphabot_state/intraday/<美东日期>/<标的>.jsonl` 追加快照（10-09 实测：每 ~10.3 分钟一批、5 只标的、每批 ~24 s、最长 40 s）。真实数据根闸是会话级「大小:mtime」比对，测试期间撞上一批就红，旧报错一律说「测试写到了真实数据根」，pre-push 契约闸最后一行再建议 `--no-verify`。代价不在麻烦（pre-push ~13 s，盘中每次推送约 6% 撞上，隔一分钟重推即过），而在两种习惯：用 `--no-verify` 绕过（连 CHANGELOG 检查一起跳过），或把这条红当成「又是 Alpha Bot」直接忽略——真写穿时也会被一起忽略。10-09 还出过反方向的错判（把同一批里相隔几秒的 mtime 当成「每几秒写一次」）。用户 10-10 选的方案 B：**不放行、只说清**。
+
+### Changed
+- `tests/_root_data_guard.py`：新增 `explain_alphabot_appends`（+ `alphabot_baseline`）。一项变化归因于 Alpha Bot 必须同时满足：路径是 `alphabot_state/intraday/<日期>/<标的>.jsonl`；原有内容逐字节未变（会话开始时记下近两天盘中文件的 sha256，变化前大小之内的哈希必须一致）；新增部分是完整的行、每行都是一张快照——键集合恰为 `ALPHABOT_SNAPSHOT_KEYS`（= `AlphaBotService.snapshot_from` 的产出）、`ts` 带时区且落在 [会话开始 − 300 s, 会话结束 + 60 s]、`ts` 的日期就是目录日期。新建的日期目录只有里面有被归因的文件才算；删除一律不算。任何一条不满足都归「其余」——宁可照旧报成测试写的。**只决定措辞，不决定红绿**。
+- `tests/conftest.py::_guard_real_data_root`：会话开始时多记开始时刻与起点哈希；报红分三种措辞——全部是 Alpha Bot（说明已逐项核实、等这一批写完重跑 / 重推、不要 `--no-verify`、不要加豁免）/ 部分是（原措辞 + 「其余这些不能归因于它，问题在这里」单列）/ 完全不是（原措辞一字不改）。Alpha Bot 目录下没能归因的项附原因。归因结果挂到 `config._alpha_hive_real_data_root_verdict`。
+- `changelog_guard.py`：契约闸的报告插件多记 `real_data_root_verdict`；新增 `_alphabot_only_red`——只有一条失败、出在 teardown、报告里没有别的问题、归因写明全部是 Alpha Bot 时，提示改为「隔一两分钟重推，不要 `--no-verify`」，**照样拦**（返回 1）。不抠输出文本，走结构化报告（同该插件既有原则）。
+
+### 守卫
+- `tests/test_root_data_guard.py`：`TestAlphabotAppendClassifier`（追加被归因 / 开盘第一批新建目录被归因 / 九种「看起来像」都不归因：改写前缀、时间在窗外、多一个键、非 JSON、半行、没有起点哈希、不在盘中目录、删除、变短 / 快照日期与目录不一致 / 混合时点名其余 / 没有会话开始时间 / 键集合与 Alpha Bot 写入方一致）；两条端到端（原样拷贝的 conftest 真跑内层 pytest，**并加载契约闸原样的报告插件**）：只有 Alpha Bot 追加 ⇒ 仍红、新措辞、不再说「测试写穿」、报告里归因全为 Alpha Bot 且 `_alphabot_only_red` 认它；混入写穿 ⇒ 原措辞 + 单列 `pheromone.db`。
+- `tests/test_changelog_guard_contract_gate.py`：`_alphabot_only_red` 的判定表（6 种不该认的情况）、插件读的属性名与 conftest 写的同名；真装钩子推送三例——只有 Alpha Bot ⇒ 拦、提示等一下、不出现 `--no-verify` 提示；同时有真失败 ⇒ 原提示；归因不是全部 ⇒ 原提示。
+- 变异 6 处，逐个改回各至少 1 红：不核前缀（2 红）/ 不核时间窗（1）/ 不核键集合（1）/ 混合也用 Alpha Bot 措辞（端到端 1）/ 钩子判定不看失败条数（4）/ 插件不写归因（钩子 2 + 端到端 1）。
+
+### 注意
+- **没有加任何豁免**：判定仍是「真实数据根有变化就红」。想让盘中全量测试 / 推送直接通过（方案 C：Alpha Bot 记录写入方进程号、闸凭证据放行）是放宽安全闸，用户未选。
+- 起点哈希只算日期 ≥ 本机今天 − 1 的盘中目录（Alpha Bot 只往当天美东目录追加），每轮会话启动多读约 1 MB；读不了的文件不记，之后它若变化就归「其余」（往保守那边错）。
+- 键集合与 Alpha Bot 写入方漂移时，归因恒失败、退回原措辞——不会误放，`test_keys_match_the_writer` 会红。
 
 ## [0.45.452] — 2026-10-10 — 占位（进行中：ledger_io 第二版——迁 options_paper_leg / vrp_signal / earnings_vol_signal，meta.json 拒 NaN，手写 os.replace 原子写收口）
 

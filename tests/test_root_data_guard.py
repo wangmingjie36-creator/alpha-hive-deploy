@@ -16,6 +16,8 @@ v0.45.409（阶段 6 ⑤）追加**真实数据根闸**的同三层：判据（`
 """
 from __future__ import annotations
 
+import datetime as dt
+import json
 import os
 import shutil
 import site
@@ -533,3 +535,212 @@ def test_real_data_root_gate_says_inactive_when_there_is_no_data_root(tmp_path):
     out = r.stdout + r.stderr
     assert r.returncode == 0, out
     assert "real-data-root guard: INACTIVE" in out, out
+
+
+# ───────────────── 4. Alpha Bot 盘中追加：只改措辞、不改红绿（v0.45.453） ─────────────────
+
+_ET = dt.timezone(dt.timedelta(hours=-4))
+
+
+def _snap(ts: dt.datetime, **extra) -> dict:
+    rec = {"ts": ts.isoformat(timespec="seconds"), "payload_last_trade_time": "2026-10-09T15:50:00",
+           "underlying_price": 100.0, "underlying_price_source": "cboe_intraday", "session_live": True,
+           "iv30": 0.3, "views": {}, "route": {}}
+    rec.update(extra)
+    return rec
+
+
+def _line(rec) -> bytes:
+    return (json.dumps(rec) + "\n").encode()
+
+
+class TestAlphabotAppendClassifier:
+    """归因要逐项核实：九种「看起来像、其实不是」都必须落进「其余」（宁可报成测试写的）。"""
+
+    @staticmethod
+    def _setup(tmp_path, *, with_file=True, tz=_ET):
+        root = tmp_path / "dr"
+        now = dt.datetime.now(tz)
+        rel = f"alphabot_state/intraday/{now.date().isoformat()}/NVDA.jsonl"
+        (root / "alphabot_state/intraday").mkdir(parents=True)    # 生产里早就有（每天的日期目录建在它下面）
+        (root / "pheromone.db").write_bytes(b"db")
+        if with_file:
+            (root / rel).parent.mkdir(parents=True)
+            (root / rel).write_bytes(_line(_snap(now - dt.timedelta(hours=1))))
+        before = g.fingerprint(str(root), g.data_root_excluded_reason)
+        baseline = g.alphabot_baseline(str(root), before, dt.date.today())
+        started = dt.datetime.now(dt.timezone.utc)
+        return root, rel, before, baseline, started
+
+    @staticmethod
+    def _explain(root, before, baseline, started):
+        time.sleep(0.01)    # mtime_ns 要能分辨
+        changes = g.diff(before, g.fingerprint(str(root), g.data_root_excluded_reason))
+        return changes, g.explain_alphabot_appends(str(root), changes, before, baseline, started,
+                                                   dt.datetime.now(dt.timezone.utc))
+
+    def test_append_by_alphabot_is_explained(self, tmp_path):
+        root, rel, before, baseline, started = self._setup(tmp_path)
+        assert rel in baseline, "夹具前提：起点哈希记下了当天的盘中文件"
+        with open(root / rel, "ab") as f:
+            f.write(_line(_snap(dt.datetime.now(_ET))) + _line(_snap(dt.datetime.now(_ET))))
+        changes, v = self._explain(root, before, baseline, started)
+        assert changes == {"changed": [rel]}
+        assert v["explained"] == [rel] and v["records"] == 2 and v["unexplained"] == {} and v["why"] == {}
+
+    def test_first_batch_of_a_new_day_is_explained(self, tmp_path):
+        """开盘第一批：日期目录与文件都是新建的。"""
+        root, rel, before, baseline, started = self._setup(tmp_path, with_file=False)
+        (root / rel).parent.mkdir(parents=True)
+        (root / rel).write_bytes(_line(_snap(dt.datetime.now(_ET))))
+        changes, v = self._explain(root, before, baseline, started)
+        day = str(Path(rel).parent)
+        assert changes == {"added": sorted([day, rel])}
+        assert v["explained"] == sorted([day, rel]) and v["unexplained"] == {}
+
+    @pytest.mark.parametrize("case", ["rewrite_prefix", "ts_outside_window", "extra_key", "not_json",
+                                      "partial_line", "no_baseline", "outside_intraday", "removed", "truncated"])
+    def test_lookalikes_are_not_explained(self, tmp_path, case):
+        root, rel, before, baseline, started = self._setup(tmp_path)
+        p, now = root / rel, dt.datetime.now(_ET)
+        target = rel
+        if case == "rewrite_prefix":
+            p.write_bytes(_line(_snap(now - dt.timedelta(hours=2))) + _line(_snap(now)))
+        elif case == "ts_outside_window":
+            with open(p, "ab") as f:
+                f.write(_line(_snap(now - dt.timedelta(minutes=30))))
+        elif case == "extra_key":
+            with open(p, "ab") as f:
+                f.write(_line(_snap(now, written_by="a test")))
+        elif case == "not_json":
+            with open(p, "ab") as f:
+                f.write(b"hello\n")
+        elif case == "partial_line":
+            with open(p, "ab") as f:
+                f.write(json.dumps(_snap(now)).encode())
+        elif case == "no_baseline":
+            baseline = {}
+            with open(p, "ab") as f:
+                f.write(_line(_snap(now)))
+        elif case == "outside_intraday":
+            target = "alphabot_state/settings.json"
+            (root / target).write_text("{}")
+        elif case == "removed":
+            p.unlink()
+        elif case == "truncated":
+            p.write_bytes(b"")
+        _changes, v = self._explain(root, before, baseline, started)
+        assert v["explained"] == [], f"{case}：被错误归因成 Alpha Bot"
+        assert any(target in items for items in v["unexplained"].values()), v
+        if case not in ("removed",):
+            assert target in v["why"], f"{case}：Alpha Bot 目录下没能归因的项要给出原因"
+
+    def test_snapshot_date_must_match_the_directory(self, tmp_path):
+        """时刻在窗口内、但按记录自己的时区落在另一天（-12 与 +14 相差 26 小时，日期必不同）。"""
+        root, rel, before, baseline, started = self._setup(tmp_path, tz=dt.timezone(dt.timedelta(hours=-12)))
+        with open(root / rel, "ab") as f:
+            f.write(_line(_snap(dt.datetime.now(dt.timezone(dt.timedelta(hours=14))))))
+        _changes, v = self._explain(root, before, baseline, started)
+        assert v["explained"] == [] and "目录日期" in v["why"][rel], v
+
+    def test_mixed_changes_name_the_rest(self, tmp_path):
+        root, rel, before, baseline, started = self._setup(tmp_path)
+        with open(root / rel, "ab") as f:
+            f.write(_line(_snap(dt.datetime.now(_ET))))
+        with open(root / "pheromone.db", "ab") as f:
+            f.write(b"x")
+        _changes, v = self._explain(root, before, baseline, started)
+        assert v["explained"] == [rel] and v["unexplained"] == {"changed": ["pheromone.db"]}
+
+    def test_without_a_session_start_nothing_is_explained(self, tmp_path):
+        root, rel, before, baseline, _started = self._setup(tmp_path)
+        with open(root / rel, "ab") as f:
+            f.write(_line(_snap(dt.datetime.now(_ET))))
+        _changes, v = self._explain(root, before, baseline, None)
+        assert v["explained"] == [] and v["unexplained"] == {"changed": [rel]}
+
+    def test_keys_match_the_writer(self):
+        """键集合必须就是 Alpha Bot 写的那一份——它改了字段而这里没跟，归因就会恒失败（退回原措辞，不会误放）。"""
+        from alphabot.service import AlphaBotService
+        assert set(AlphaBotService.snapshot_from({}, "2026-10-09T15:50:35-04:00")) == g.ALPHABOT_SNAPSHOT_KEYS
+
+
+def _make_data_root_with_alphabot(path: Path) -> tuple[Path, str]:
+    data_root = _make_data_root(path)
+    now = dt.datetime.now(_ET)
+    rel = f"alphabot_state/intraday/{now.date().isoformat()}/NVDA.jsonl"
+    (data_root / rel).parent.mkdir(parents=True)
+    (data_root / rel).write_bytes(_line(_snap(now - dt.timedelta(hours=1))))
+    return data_root, rel
+
+
+_INNER_ALPHABOT_APPEND = """
+    import datetime as dt, json, os, pathlib
+    DR = pathlib.Path(os.environ["INNER_DATA_ROOT"])
+    REL = os.environ["INNER_ALPHABOT_REL"]
+
+    def _append_like_alphabot():
+        now = dt.datetime.now(dt.timezone(dt.timedelta(hours=-4)))
+        rec = {"ts": now.isoformat(timespec="seconds"), "payload_last_trade_time": "t", "underlying_price": 1.0,
+               "underlying_price_source": "cboe_intraday", "session_live": True, "iv30": 0.3, "views": {}, "route": {}}
+        with open(DR / REL, "a", encoding="utf-8") as f:     # 模拟测试期间 Alpha Bot 落盘的一批
+            f.write(json.dumps(rec) + "\\n")
+"""
+
+
+def _gate_plugin_env(tmp_path: Path) -> tuple[dict, Path]:
+    """让内层 pytest 加载 pre-push 契约闸**原样**的报告插件——真 conftest 挂的归因要能被真插件读到。"""
+    sys.path.insert(0, str(_ROOT))
+    import changelog_guard as cg
+    plug = tmp_path / "gate_plugin"
+    plug.mkdir()
+    (plug / "_alpha_hive_contract_gate_report.py").write_text(cg._REPORT_PLUGIN, encoding="utf-8")
+    report = tmp_path / "gate_report.json"
+    return ({"PYTHONPATH": str(plug), "PYTEST_ADDOPTS": "-p _alpha_hive_contract_gate_report",
+             "ALPHA_HIVE_CONTRACT_GATE_REPORT": str(report)}, report)
+
+
+def test_real_data_root_gate_names_alphabot_but_stays_red(tmp_path):
+    """端到端：变化只有 Alpha Bot 式追加 ⇒ 照样红，但说清是 Alpha Bot、劝别 --no-verify，且不再说「测试写穿」。"""
+    data_root, rel = _make_data_root_with_alphabot(tmp_path / "alpha-hive-data")
+    root = _make_fake_checkout(tmp_path / "checkout", _INNER_ALPHABOT_APPEND + """
+    def test_alphabot_writes_meanwhile():
+        _append_like_alphabot()
+    """)
+    gate_env, report = _gate_plugin_env(tmp_path)
+    r = _run_inner_pytest(root, {"ALPHA_HIVE_HOME": str(data_root), "INNER_DATA_ROOT": str(data_root),
+                                 "INNER_ALPHABOT_REL": rel, **gate_env})
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, f"判定被改了：只有 Alpha Bot 追加也必须红\n{out}"
+    assert "1 passed, 1 error" in out, out
+    assert "**全部**是 Alpha Bot 盘中采样的追加" in out and "1 张快照" in out, out
+    assert "不要** `git push --no-verify`" in out, out
+    assert "测试写到了**真实数据根**" not in out, f"已核实是 Alpha Bot，却仍说成测试写穿\n{out}"
+    # 真 conftest → 真报告插件 → 真判定函数：pre-push 会据此改提示（不劝 --no-verify）
+    import changelog_guard as cg
+    rep = json.loads(report.read_text(encoding="utf-8"))
+    assert rep["real_data_root_verdict"] == {"all_alphabot_appends": True, "alphabot_files": 1,
+                                             "alphabot_records": 1, "unexplained": 0}, rep
+    assert cg._alphabot_only_red(rep, [f"失败：{n}" for n in rep["failed"]]) is not None, rep
+
+
+def test_real_data_root_gate_keeps_blaming_tests_when_anything_else_changed(tmp_path):
+    """端到端：Alpha Bot 追加 + 测试写穿另一个文件 ⇒ 原措辞，且把「不能归因」的那项单独点名。"""
+    data_root, rel = _make_data_root_with_alphabot(tmp_path / "alpha-hive-data")
+    root = _make_fake_checkout(tmp_path / "checkout", _INNER_ALPHABOT_APPEND + """
+    def test_alphabot_writes_and_a_test_escapes():
+        _append_like_alphabot()
+        with open(DR / "pheromone.db", "ab") as f:
+            f.write(b"x")
+    """)
+    gate_env, report = _gate_plugin_env(tmp_path)
+    r = _run_inner_pytest(root, {"ALPHA_HIVE_HOME": str(data_root), "INNER_DATA_ROOT": str(data_root),
+                                 "INNER_ALPHABOT_REL": rel, **gate_env})
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, out
+    assert "测试写到了**真实数据根**" in out, out
+    rep = json.loads(report.read_text(encoding="utf-8"))
+    assert rep["real_data_root_verdict"]["all_alphabot_appends"] is False, rep
+    assert "**全部**是 Alpha Bot" not in out, out
+    normalized = "\n".join(line.strip() for line in out.splitlines())
+    assert "其余这些不能归因于它，问题在这里**：\nchanged（1）：\npheromone.db" in normalized, out
