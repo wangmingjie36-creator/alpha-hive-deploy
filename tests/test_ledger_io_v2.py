@@ -342,3 +342,48 @@ class TestMigratedLedgers:
                             lambda *a, **k: seen.append(L.is_locked_here(tmp_path / "s")) or {})
         opl.run_for_date("2026-10-09")
         assert seen == [True] and not L.is_locked_here(tmp_path / "s")
+
+
+# ─────────────────────────────── 二次检查：NaN → null 之后的读者
+
+class TestSnapshotNullEntryPrice:
+    """`atomic_json_write` 起把 NaN 写成 null；`ReportSnapshot` 的读者都按 `entry_price > 0` 过滤，None 会 TypeError。"""
+
+    @pytest.mark.parametrize("stored, expect", [("null", 0.0), ('"abc"', 0.0), ("true", 0.0), ("123.5", 123.5)])
+    def test_loader_reads_null_as_no_price(self, tmp_path, stored, expect):
+        from feedback_loop import ReportSnapshot
+        p = tmp_path / "snap.json"
+        p.write_text('{"ticker": "RKLB", "date": "2026-06-26", "entry_price": %s}' % stored, encoding="utf-8")
+        snap = ReportSnapshot.load_from_json(str(p))
+        assert snap.entry_price == expect and not (snap.entry_price > 0 and expect == 0.0)
+
+    def test_old_nan_file_keeps_old_behaviour(self, tmp_path):
+        from feedback_loop import ReportSnapshot
+        p = tmp_path / "snap.json"
+        p.write_text('{"ticker": "RKLB", "date": "2026-06-26", "entry_price": NaN}', encoding="utf-8")
+        snap = ReportSnapshot.load_from_json(str(p))
+        assert math.isnan(snap.entry_price) and not snap.entry_price > 0
+
+    def test_nan_snapshot_roundtrip_does_not_break_the_weight_filter(self, tmp_path):
+        """端到端：NaN 入场价存盘（现在是 null）再读回，`> 0` 过滤不能抛。"""
+        from feedback_loop import ReportSnapshot
+        s = ReportSnapshot("RKLB", "2026-06-26")
+        s.entry_price = NAN
+        f = s.save_to_json(str(tmp_path / "snaps"))
+        back = ReportSnapshot.load_from_json(f)
+        assert back.entry_price == 0.0 and not back.entry_price > 0
+
+
+class TestScanProducerRejectsNonFiniteEntryPrice:
+    def test_source_guards_nan_before_the_fallback(self):
+        """生产端：NaN 是 truthy，`if not entry_price` 的兜底挡不住它——非有限判断必须排在兜底之前。"""
+        from pathlib import Path
+        src = (Path(__file__).resolve().parent.parent / "alpha_hive_daily_report.py").read_text(encoding="utf-8")
+        i = src.index("if not math.isfinite(_snap.entry_price):")
+        j = src.index("if not _snap.entry_price:", i)
+        assert 0 < j - i < 200
+
+    def test_main_ml_json_writer_uses_the_safe_encoder(self):
+        from pathlib import Path
+        src = (Path(__file__).resolve().parent.parent / "alpha_hive_daily_report.py").read_text(encoding="utf-8")
+        assert "json.dump(enhanced, f, ensure_ascii=False, indent=2, default=str, cls=SafeJSONEncoder)" in src

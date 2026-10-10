@@ -294,7 +294,10 @@ class ReportSnapshot:
         snapshot.direction = data.get("direction", "Neutral")
         snapshot.price_target = data.get("price_target", 0.0)
         snapshot.stop_loss = data.get("stop_loss", 0.0)
-        snapshot.entry_price = data.get("entry_price", 0.0)
+        # v0.45.452 二次检查：`atomic_json_write` 起把 NaN 写成 null ⇒ 这里会读到 None；所有读者都按「≤0 = 没有价」排除，
+        # 而 `None > 0` 是 TypeError（weekly_optimizer 整段 WLS 会因此中止）。null / 缺键 / 非数 一律 0.0；旧文件里的 NaN 原样保留（nan > 0 为 False，行为不变）。
+        _ep = data.get("entry_price")
+        snapshot.entry_price = float(_ep) if isinstance(_ep, (int, float)) and not isinstance(_ep, bool) else 0.0
         snapshot.agent_votes = data.get("agent_votes", {})
         # 缺键 = v0.45.164 之前的板截断口径（见 __init__ 注释），不兜成 "agent_details"
         snapshot.agent_votes_source = data.get("agent_votes_source", "")

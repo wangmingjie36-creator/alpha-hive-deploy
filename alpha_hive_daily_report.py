@@ -1249,6 +1249,10 @@ class AlphaHiveDailyReporter:
                         )
                     except (TypeError, ValueError):
                         _snap.entry_price = 0.0
+                    # v0.45.452 二次检查：NaN 是 truthy，`x or 0.0` 挡不住——侦察蜂价是 NaN 时下面的 yfinance 兜底被跳过、
+                    # NaN 落进快照（06-26 RKLB / META 两份实例）。非有限一律当「没有价」，走兜底。
+                    if not math.isfinite(_snap.entry_price):
+                        _snap.entry_price = 0.0
                     if not _snap.entry_price:
                         try:
                             from data_pipeline import _drop_forming_bar as _dfb
@@ -2203,7 +2207,9 @@ class AlphaHiveDailyReporter:
                 try:
                     json_path = self.report_dir / f"analysis-{ticker}-ml-{self.date_str}.json"
                     with open(json_path, "w", encoding="utf-8") as f:
-                        json.dump(enhanced, f, ensure_ascii=False, indent=2, default=str)
+                        # v0.45.452 二次检查：补 SafeJSONEncoder（NaN → null，与 Step 3 重跑的 generate_ml_report 同一口径；
+                        # 此前这里不经编码器，同一个文件内容取决于最后是谁写的）。default=str 照旧兜未知类型。
+                        json.dump(enhanced, f, ensure_ascii=False, indent=2, default=str, cls=SafeJSONEncoder)
                 except (OSError, TypeError) as _je:
                     _log.warning("analysis-%s-ml-%s.json 写入失败: %s", ticker, self.date_str, _je)
 

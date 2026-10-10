@@ -178,13 +178,6 @@ def _is_json_attr(call: ast.AST, attr: str) -> bool:
             and isinstance(call.func.value, ast.Name) and call.func.value.id.endswith("json"))
 
 
-def _uses_ledger_io(fn: ast.AST) -> bool:
-    for n in ast.walk(fn):
-        if isinstance(n, ast.Name) and n.id == "ledger_io":
-            return True
-    return False
-
-
 def _call_kinds(call: ast.Call) -> set:
     kinds = set()
     f = call.func
@@ -204,12 +197,13 @@ def _call_kinds(call: ast.Call) -> set:
     return kinds
 
 
-def _own_calls(fn: ast.AST):
-    """函数体里属于**它自己**的调用（不进嵌套 def / class——那些单独算）。"""
-    stack = list(ast.iter_child_nodes(fn))
+def _own_calls(scope: ast.AST):
+    """作用域里属于**它自己**的调用：不进嵌套 def / class（那些单独算），**进** lambda（lambda 没有自己的名字，
+    记在外层作用域——v0.45.452 二次检查：初版跳过 lambda，`lambda: open(p, "a")` 整个看不见）。"""
+    stack = list(ast.iter_child_nodes(scope))
     while stack:
         n = stack.pop()
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
         if isinstance(n, ast.Call):
             yield n
@@ -229,27 +223,41 @@ def _scope_kinds(scope: ast.AST) -> set:
     return kinds
 
 
+#: 经 ledger_io 的函数**只**豁免两个按形状猜的类别（名字像 JSONL 助手 / dumps 与写文件同在一个函数）；
+#: 真实的写入落点（裸追加 / json.dump / dumps 直写 / 手写替换）照样算——v0.45.452 二次检查：初版整函数豁免，
+#: 于是 `with ledger_io.locked(d): open(p, "a")` 这种「拿了锁再裸写」完全看不见（448 版是看得见的）。
+_HEURISTIC_KINDS = {"jsonl_helper", "json_to_file"}
+
+
 def scan_source(src: str) -> dict:
-    """一段源码里的命中：{"函数限定名": {kind, …}}；模块级命中记在 "<module>"。经 ledger_io 的函数不算。"""
+    """一段源码里的命中：{"限定名": {kind, …}}；模块级记在 "<module>"，类体里的记在类名下。"""
     tree = ast.parse(src)
     hits: dict = {}
+
+    def record(qual, scope, is_fn_named=None):
+        kinds = _scope_kinds(scope)
+        if is_fn_named is not None and is_fn_named.endswith("_jsonl"):
+            kinds.add("jsonl_helper")
+        if _uses_ledger_io_directly(scope):
+            kinds -= _HEURISTIC_KINDS
+        if kinds:
+            hits[qual] = kinds
 
     def visit(node, qual):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 q = f"{qual}.{child.name}" if qual != "<module>" else child.name
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and not _uses_ledger_io(child):
-                    kinds = _scope_kinds(child)
-                    if child.name.endswith("_jsonl"):
-                        kinds.add("jsonl_helper")
-                    if kinds:
-                        hits[q] = kinds
+                fn_name = child.name if not isinstance(child, ast.ClassDef) else None
+                record(q, child, fn_name)
                 visit(child, q)
+    record("<module>", tree)
     visit(tree, "<module>")
-    mod = _scope_kinds(tree)
-    if mod:
-        hits["<module>"] = mod
     return hits
+
+
+def _uses_ledger_io_directly(scope: ast.AST) -> bool:
+    return any(isinstance(c.func, ast.Attribute) and isinstance(c.func.value, ast.Name)
+               and c.func.value.id == "ledger_io" for c in _own_calls(scope))
 
 
 def _scan_repo() -> dict:
@@ -355,6 +363,19 @@ class TestScannerHasTeeth:
         assert scan_source("import json\ndef f(m):\n    print(json.dumps(m))\n") == {}
         assert scan_source("import ledger_io\ndef _write_jsonl(p, r):\n    ledger_io.write_jsonl(p, r)\n") == {}
         assert scan_source("import json, ledger_io\ndef _save_meta(p, m):\n    ledger_io.write_json(p, m)\n") == {}
+
+    def test_using_ledger_io_does_not_excuse_a_raw_write_next_to_it(self):
+        """v0.45.452 二次检查：初版对「函数里出现过 ledger_io」整体豁免——拿了锁再裸追加完全看不见。"""
+        src = "import ledger_io\ndef f(p):\n    with ledger_io.locked(p.parent):\n        open(p, 'a').write('x')\n"
+        assert scan_source(src) == {"f": {"raw_append"}}
+        src = "import json, ledger_io\ndef _x_jsonl(p, r):\n    ledger_io.write_jsonl(p, r)\n    print(json.dumps(r))\n"
+        assert scan_source(src) == {}, "委托 ledger_io 的 *_jsonl 助手只豁免按名字 / 形状猜的那两类"
+
+    def test_lambdas_and_class_bodies_are_scanned(self):
+        """v0.45.452 二次检查：初版跳过 lambda、不看类体（448 版两处都看得见）。"""
+        assert scan_source("def f(p):\n    g = lambda: open(p, 'a')\n    return g\n") == {"f": {"raw_append"}}
+        assert scan_source("w = lambda p: open(p, 'a')\n") == {"<module>": {"raw_append"}}
+        assert scan_source("class C:\n    fh = open('x.log', 'a')\n") == {"C": {"raw_append"}}
 
     def test_flags_hand_rolled_jsonl_helpers(self):
         assert scan_source("import json\ndef _load_jsonl(p):\n    return [json.loads(l) for l in open(p)]\n") \
