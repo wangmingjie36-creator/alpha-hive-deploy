@@ -264,6 +264,12 @@ class TestDataRootFollowsLauncher:
         assert LA.config_state(cfg) == ("home", str(data.resolve())) and cfg["port"] == 8799, cfg
 
 
+    def test_explicit_home_vanishing_after_validation_is_still_a_failure(self, tmp_path, home, monkeypatch, data):
+        """生成前核对过、写配置时目录却没了（被删 / 挪走）：显式要求没做成，返回 1，不当警告。"""
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert MA._record_data_root(tmp_path / "gone-in-between") == 1
+        assert MA._record_data_root(data) == 0 and LA.load_config()["alpha_hive_home"] == str(data.resolve())
+
     def test_bad_explicit_home_fails_before_touching_anything(self, tmp_path, home, monkeypatch, capsys, data):
         """`--home` 打错：生成前就退出、返回 1；.app 不生成、配置不动（v0.45.439 先换 .app 再警告、返回 0）。"""
         monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
@@ -396,6 +402,31 @@ class TestDefaultRepoIsProductionClone:
         assert MA.main(["--dest", "Apps"]) == 0
         assert (work / "Apps" / f"{MA.APP_NAME}.app").is_dir()
         assert not (clone / "Apps").exists(), "相对 --dest 被建进了克隆"
+
+    def test_handoff_itself_keeps_the_callers_cwd(self, tmp_path, home, monkeypatch):
+        """两道防线各自要有牙：绕过 main 的绝对化，直接交给目标一个相对 `--dest`，也得落在调用者 cwd 下。"""
+        clone = self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        rc = MA.run_target_generator(clone.resolve(), ["--repo", str(clone.resolve()), "--dest", "Apps",
+                                                       "--python", sys.executable])
+        assert rc == 0 and (work / "Apps" / f"{MA.APP_NAME}.app").is_dir() and not (clone / "Apps").exists()
+
+    def test_main_hands_over_absolute_paths_only(self, tmp_path, home, monkeypatch):
+        """另一道：交出去的路径参数一律绝对（目标哪一版、在哪个 cwd 解析都不变义）。"""
+        clone = self._clone_at(tmp_path / "alpha-hive-prod", monkeypatch)
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        (tmp_path / "data").mkdir()
+        monkeypatch.chdir(tmp_path)
+        seen = {}
+        monkeypatch.setattr(MA, "run_target_generator", lambda repo, argv: seen.update(repo=repo, argv=argv) or 0)
+        assert MA.main(["--dest", "Apps", "--python", "venv/bin/python3", "--home", "data"]) == 0
+        argv = seen["argv"]
+        vals = {argv[i]: argv[i + 1] for i in range(0, len(argv), 2)}
+        assert set(vals) == {"--repo", "--dest", "--python", "--home"} and seen["repo"] == clone.resolve(), argv
+        assert all(Path(v).is_absolute() for v in vals.values()), argv
 
     def test_relative_python_is_written_absolute(self, tmp_path, home, monkeypatch):
         """壳在双击时才解析 `PY`，那时 cwd 早已不是敲命令的地方 ⇒ 入口就定成绝对路径。"""
