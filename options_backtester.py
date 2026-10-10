@@ -25,17 +25,9 @@ from typing import Dict, List, Optional, Tuple, Any
 from enum import Enum
 from statistics import mean, stdev
 
-try:
-    from hive_logger import PATHS, get_logger, atomic_json_write
-except ImportError:
-    def get_logger(name):
-        return logging.getLogger(name)
-    def atomic_json_write(path, data, **kwargs):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
-            json.dump(data, f, **kwargs)
-    class PATHS:
-        cache_dir = "cache"
+# v0.45.452：删掉 ImportError 兜底（非原子 `atomic_json_write` 副本 + 相对路径 `PATHS.cache_dir = "cache"`，
+# 后者正是「默认路径不许跟着 cwd 走」那条硬检查项；两者本模块其实都没用到）。hive_logger import 不了 ⇒ 当场红。
+from hive_logger import get_logger
 
 try:
     from greeks_engine import bs_price, calculate_single

@@ -82,6 +82,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+import ledger_io
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("earnings_vol_signal")
@@ -153,43 +154,19 @@ def _minus_days(d, n: int) -> Optional[str]:
 
 
 # ---------------------------------------------------------------- 状态文件
+# 读写全经 `ledger_io`（v0.45.452）：严格读、原子写 + 回读、拒 NaN（此前不拒：`json.dumps` 缺省写出 NaN 字面量）。
+# 账本与跨式腿同在 options_paper_state/ ⇒ 同一把目录锁；读-改-写入口（scan / settle_signals）整段持锁。
+
 def _load_jsonl(path: Path) -> List[Dict]:
-    if not path.exists():
-        return []
-    out = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    out.append(json.loads(line))
-                except ValueError:
-                    continue
-    return out
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    import os
-    import tempfile
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    return ledger_io.load_jsonl(path)
 
 
 def _write_jsonl(path: Path, records: List[Dict]) -> None:
-    _atomic_write_text(path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
+    ledger_io.write_jsonl(path, records)
+
+
+def _signals_dir() -> Path:
+    return SIGNALS_FILE.parent
 
 
 def load_signals() -> List[Dict]:
@@ -498,6 +475,7 @@ def _usable_capture(ctx, as_of: str) -> bool:
             and ctx.get("captured_on") == as_of and ctx.get("session_live") is False)
 
 
+@ledger_io.locked_by(_signals_dir)
 def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
          watcher=None, stats_fn: Optional[Callable[[str], Optional[dict]]] = None,
          upcoming_fn: Optional[Callable[[str], Optional[dict]]] = None,
@@ -588,6 +566,7 @@ def _default_bars(ticker: str) -> Optional[List[dict]]:
     return bars
 
 
+@ledger_io.locked_by(_signals_dir)
 def settle_signals(as_of: str, bars_fn: Optional[Callable[[str], Optional[List[dict]]]] = None) -> int:
     """财报已过（`earnings_date < as_of`）且未回填的信号：用同一两日窗口填实际波动。
     post 根还没出来的留到下次。返回本次回填条数。"""

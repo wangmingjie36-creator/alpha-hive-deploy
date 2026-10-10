@@ -41,7 +41,7 @@ def test_writers_create_missing_state_dir_themselves(tmp_path):
         "p._append_jsonl(p.EQUITY_FILE, {'a': 1})\n"
         "assert p.EQUITY_FILE.is_file()\n"
         "import shutil; shutil.rmtree(p.STATE_DIR)\n"
-        "p._atomic_write_text(p.META_FILE, '{}')\n"
+        "p._save_meta({})\n"
         "assert p.META_FILE.is_file()\n"
         "print(p.STATE_DIR)\n"
     )

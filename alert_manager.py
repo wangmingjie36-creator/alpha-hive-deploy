@@ -300,6 +300,7 @@ class AlertAnalyzer:
         # 7. 检测 P2: 组合 Greeks 用到了不属于当天那一场的标的价 / 因此拒绝成交（v0.45.423）
         self._check_portfolio_greeks_prices(status)
         self._check_paper_portfolio_run(status)
+        self._check_ledger_io_failures(status)
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
         self._check_news_sources(status)
@@ -615,6 +616,35 @@ class AlertAnalyzer:
                         "别的写者卡住；其他 ⇒ 看 alpha_hive.log 里「纸面组合更新失败」那一行",
             },
             ["paper_portfolio", "data_quality"]
+        ))
+
+    def _check_ledger_io_failures(self, status: Dict) -> None:
+        """账本 / 状态文件读写失败（v0.45.452；`ledger_io.failures()` 经 scan_timing 进来）。
+
+        失败在 `ledger_io` **源头**登记：坏行 / 坏文档（LedgerCorrupt）、写入被拒（NaN / 非对象，LedgerWriteError）、
+        写锁超时、磁盘错误。调用方大多把这些包在「非致命」的 except 里吞成一行 WARNING——所以不能指望每个调用方
+        各自上报，这里一处兜住全部。n>0 ⇒ P2；计数缺失 ⇒ checks_skipped。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        lf = (st.get("counters") or {}).get("ledger_io")
+        if not isinstance(lf, dict):
+            self.checks_skipped.append("账本读写失败检查（scan_timing 无 ledger_io 计数）")
+            return
+        if not lf.get("n"):
+            return
+        items = lf.get("items") or []
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】账本 / 状态文件读写失败 {lf['n']} 次：本轮有记录没有落盘，或读到了损坏的文件",
+            {
+                "明细": "；".join(f"{i.get('op')} {i.get('path')}：{i.get('kind')} {i.get('error')}" for i in items[:5])
+                        + (f"（另 {lf['n'] - 5} 次略）" if lf["n"] > 5 else ""),
+                "影响": "涉及的账本这一轮没更新（写入被拒时文件一个字节都没动）；读到坏文件的模块停在这里，修好之前每轮都会红",
+                "建议": "LedgerCorrupt ⇒ 按报错的文件与行号核对，从每日异地备份恢复；LedgerWriteError ⇒ 找出算出 NaN / 非对象"
+                        "的上游（不要在写入端把它改成 null 了事）；LedgerLockTimeout ⇒ 查是否有别的写者卡住",
+            },
+            ["ledger_io", "data_quality"]
         ))
 
     def get_critical_alerts(self) -> List[Alert]:

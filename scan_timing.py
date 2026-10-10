@@ -102,7 +102,8 @@ def counters() -> Dict[str, Optional[dict]]:
                                       "cboe": None, "cboe_chain": None,
                                       "gex_view": None, "cboe_raw": None,
                                       "options_snapshot": None, "hv_gap": None,
-                                      "portfolio_greeks": None, "paper_portfolio": None}
+                                      "portfolio_greeks": None, "paper_portfolio": None,
+                                      "ledger_io": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -144,6 +145,12 @@ def counters() -> Dict[str, Optional[dict]]:
         out["paper_portfolio"] = paper_portfolio.run_stats()   # v0.45.448；本进程没跑过 ⇒ None
     except Exception as e:  # noqa: BLE001
         _log.debug("paper_portfolio run_stats 不可得: %s", e)
+    try:
+        import ledger_io
+        # v0.45.452：账本 / 状态文件读写失败在源头登记（调用方把异常吞成 warning 也不影响这里）；n>0 ⇒ P2
+        out["ledger_io"] = ledger_io.failures()
+    except Exception as e:  # noqa: BLE001
+        _log.debug("ledger_io failures 不可得: %s", e)
     return out
 
 
@@ -328,5 +335,9 @@ def summary_line(snap: dict) -> str:
     pp = c.get("paper_portfolio")
     if pp and pp.get("error"):
         pg_s += f" | 纸面组合异常中断({str(pp['error'])[:80]})"        # v0.45.448
+    lf = c.get("ledger_io")
+    if lf and lf.get("n"):                                              # v0.45.452
+        where = ",".join(dict.fromkeys(Path(str(i.get("path"))).name for i in lf.get("items") or []))
+        pg_s += f" | 账本读写失败 {lf['n']} 次({where})"
     return ("耗时 " + " | ".join(parts) +
             f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s + pg_s)
