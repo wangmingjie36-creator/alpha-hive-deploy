@@ -54,8 +54,8 @@ alphabot-demo:
 # 生成 macOS 桌面程序 ~/Applications/Alpha Bot.app（双击启动服务并打开页面；已在跑就只开页面）。
 # 数据根：启动器还没配过时顺手记下当前环境的 ALPHA_HIVE_HOME（已配过的不改写，要换用 --home）；都没有就首次双击时选。
 # 换 Python：make alphabot-app PYTHON=路径
-# .app 跑的代码缺省是生产克隆 ~/alpha-hive-prod（阶段 8），壳由克隆自己的生成器出，从哪个检出 make 都一样；克隆不在就报错。
-# 测自己的检出才直接跑 -m alphabot.macos_app --repo .
+# .app 跑的代码缺省是生产克隆 ~/alpha-hive-prod（阶段 8）。统一入口：make -C ~/alpha-hive-prod alphabot-app（克隆自己的代码生成）；
+# 在别的检出里 make 也会把整次生成交给克隆自己的生成器（v0.45.451 起）；克隆不在就报错。测自己的检出才直接跑 -m alphabot.macos_app --repo .
 alphabot-app:
 	/usr/local/bin/python3 -m alphabot.macos_app $(if $(PYTHON),--python "$(PYTHON)",)
 

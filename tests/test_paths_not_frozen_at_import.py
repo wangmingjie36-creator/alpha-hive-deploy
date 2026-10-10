@@ -514,7 +514,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
     与 `TestSpeciesDoesNotSpread` 一样是**子集**语义：清掉存量不会变红，新增必红。
     """
 
-    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**；v0.45.230 +1 `weekly_optimizer._CODE_DIR`；v0.45.289 +1 `backup_continuity.ALPHAHIVE_DIR`；v0.45.383 +1 `ic_rerun_readiness._HV_GAP_EVIDENCE_PATH`）。清掉一处就从这里删一行。
+    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**；v0.45.230 +1 `weekly_optimizer._CODE_DIR`；v0.45.289 +1 `backup_continuity.ALPHAHIVE_DIR`；v0.45.383 +1 `ic_rerun_readiness._HV_GAP_EVIDENCE_PATH`；v0.45.451 +1 `alphabot/macos_app._DELEGATE`）。清掉一处就从这里删一行。
     # ⚠️ 子集语义的副作用：**清干净了也不会变红**，过期项会悄悄留下。
     #    定期对账：`KNOWN - _scan(marker="__file__")` 非空即是过期项
     #    （本版就这么揪出 2 条已清却还挂着的）。
@@ -533,6 +533,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("health_check.py", "PROJECT"),               # git -C <仓库>
         ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
         ("collect_data.py", "_SCRIPT_DIR"),           # 运行环境探测
+        ("alphabot/macos_app.py", "_DELEGATE"),       # 不是路径：委托子进程的源码文本，其中 `m.__file__` 在子进程里核对 import 到的生成器确实在目标代码目录下（「代码在哪」，v0.45.451）
         # ── B. 仓库内随代码发布的**只读**配置/文档 ──
         ("thesis_breaks.py", "_CONFIG_JSON_PATH"),    # thesis_breaks_config.json，生产只读
         ("market_intelligence.py", "_BASE"),          # 同上
