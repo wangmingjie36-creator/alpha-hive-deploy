@@ -568,9 +568,11 @@ class TestAlphabotAppendClassifier:
             (root / rel).parent.mkdir(parents=True)
             (root / rel).write_bytes(_line(_snap(now - dt.timedelta(hours=1))))
         before = g.fingerprint(str(root), g.data_root_excluded_reason)
-        baseline = g.alphabot_baseline(str(root), before, dt.date.today())
+        # 截止日按目录那天算（不用本机日期）：UTC+13/+14 的机器上，本机「今天 − 1」会晚于 UTC−12 目录的日期
+        baseline = g.alphabot_baseline(str(root), before, now.date())
         started = dt.datetime.now(dt.timezone.utc)
-        return root, rel, before, baseline, started
+        # 用例追加的快照一律用这个 now：再取一次「现在」，跨美东午夜时日期就和目录对不上（偶发红）
+        return root, rel, before, baseline, started, now
 
     @staticmethod
     def _explain(root, before, baseline, started):
@@ -580,19 +582,19 @@ class TestAlphabotAppendClassifier:
                                                    dt.datetime.now(dt.timezone.utc))
 
     def test_append_by_alphabot_is_explained(self, tmp_path):
-        root, rel, before, baseline, started = self._setup(tmp_path)
+        root, rel, before, baseline, started, now = self._setup(tmp_path)
         assert rel in baseline, "夹具前提：起点哈希记下了当天的盘中文件"
         with open(root / rel, "ab") as f:
-            f.write(_line(_snap(dt.datetime.now(_ET))) + _line(_snap(dt.datetime.now(_ET))))
+            f.write(_line(_snap(now)) + _line(_snap(now)))
         changes, v = self._explain(root, before, baseline, started)
         assert changes == {"changed": [rel]}
         assert v["explained"] == [rel] and v["records"] == 2 and v["unexplained"] == {} and v["why"] == {}
 
     def test_first_batch_of_a_new_day_is_explained(self, tmp_path):
         """开盘第一批：日期目录与文件都是新建的。"""
-        root, rel, before, baseline, started = self._setup(tmp_path, with_file=False)
+        root, rel, before, baseline, started, now = self._setup(tmp_path, with_file=False)
         (root / rel).parent.mkdir(parents=True)
-        (root / rel).write_bytes(_line(_snap(dt.datetime.now(_ET))))
+        (root / rel).write_bytes(_line(_snap(now)))
         changes, v = self._explain(root, before, baseline, started)
         day = str(Path(rel).parent)
         assert changes == {"added": sorted([day, rel])}
@@ -601,8 +603,8 @@ class TestAlphabotAppendClassifier:
     @pytest.mark.parametrize("case", ["rewrite_prefix", "ts_outside_window", "extra_key", "not_json",
                                       "partial_line", "no_baseline", "outside_intraday", "removed", "truncated"])
     def test_lookalikes_are_not_explained(self, tmp_path, case):
-        root, rel, before, baseline, started = self._setup(tmp_path)
-        p, now = root / rel, dt.datetime.now(_ET)
+        root, rel, before, baseline, started, now = self._setup(tmp_path)
+        p = root / rel
         target = rel
         if case == "rewrite_prefix":
             p.write_bytes(_line(_snap(now - dt.timedelta(hours=2))) + _line(_snap(now)))
@@ -637,27 +639,52 @@ class TestAlphabotAppendClassifier:
 
     def test_snapshot_date_must_match_the_directory(self, tmp_path):
         """时刻在窗口内、但按记录自己的时区落在另一天（-12 与 +14 相差 26 小时，日期必不同）。"""
-        root, rel, before, baseline, started = self._setup(tmp_path, tz=dt.timezone(dt.timedelta(hours=-12)))
+        root, rel, before, baseline, started, now = self._setup(tmp_path, tz=dt.timezone(dt.timedelta(hours=-12)))
         with open(root / rel, "ab") as f:
             f.write(_line(_snap(dt.datetime.now(dt.timezone(dt.timedelta(hours=14))))))
         _changes, v = self._explain(root, before, baseline, started)
         assert v["explained"] == [] and "目录日期" in v["why"][rel], v
 
     def test_mixed_changes_name_the_rest(self, tmp_path):
-        root, rel, before, baseline, started = self._setup(tmp_path)
+        root, rel, before, baseline, started, now = self._setup(tmp_path)
         with open(root / rel, "ab") as f:
-            f.write(_line(_snap(dt.datetime.now(_ET))))
+            f.write(_line(_snap(now)))
         with open(root / "pheromone.db", "ab") as f:
             f.write(b"x")
         _changes, v = self._explain(root, before, baseline, started)
         assert v["explained"] == [rel] and v["unexplained"] == {"changed": ["pheromone.db"]}
 
     def test_without_a_session_start_nothing_is_explained(self, tmp_path):
-        root, rel, before, baseline, _started = self._setup(tmp_path)
+        root, rel, before, baseline, _started, now = self._setup(tmp_path)
         with open(root / rel, "ab") as f:
-            f.write(_line(_snap(dt.datetime.now(_ET))))
+            f.write(_line(_snap(now)))
         _changes, v = self._explain(root, before, baseline, None)
         assert v["explained"] == [] and v["unexplained"] == {"changed": [rel]}
+
+    def test_append_landing_between_fingerprint_and_baseline_is_still_explained(self, tmp_path):
+        """二次检查发现的竞态：会话开始时先拍指纹、后算起点哈希，Alpha Bot 恰在两者之间追加一行。
+        旧实现按指纹里的旧大小比前缀 ⇒ 哈希必不符 ⇒ 一次真的 Alpha Bot 写入被说成「原有内容被改写」。"""
+        root = tmp_path / "dr"
+        now = dt.datetime.now(_ET)
+        rel = f"alphabot_state/intraday/{now.date().isoformat()}/NVDA.jsonl"
+        (root / rel).parent.mkdir(parents=True)
+        (root / rel).write_bytes(_line(_snap(now - dt.timedelta(hours=1))))
+        before = g.fingerprint(str(root), g.data_root_excluded_reason)        # ① 指纹
+        with open(root / rel, "ab") as f:                                      # Alpha Bot 恰在 ①② 之间写
+            f.write(_line(_snap(now)))
+        baseline = g.alphabot_baseline(str(root), before, now.date())          # ② 起点哈希
+        started = dt.datetime.now(dt.timezone.utc)
+        with open(root / rel, "ab") as f:                                      # 会话期间再一批
+            f.write(_line(_snap(now)))
+        _changes, v = self._explain(root, before, baseline, started)
+        assert v["explained"] == [rel] and v["records"] == 2 and v["why"] == {}, v
+
+    def test_deeply_nested_line_is_unexplained_not_a_crash(self, tmp_path):
+        root, rel, before, baseline, started, now = self._setup(tmp_path)
+        with open(root / rel, "ab") as f:
+            f.write(b"[" * 100_000 + b"\n")                                 # json.loads 抛 RecursionError
+        _changes, v = self._explain(root, before, baseline, started)
+        assert v["explained"] == [] and v["why"][rel] == "新增行不是 JSON", v
 
     def test_keys_match_the_writer(self):
         """键集合必须就是 Alpha Bot 写的那一份——它改了字段而这里没跟，归因就会恒失败（退回原措辞，不会误放）。"""
@@ -680,7 +707,11 @@ _INNER_ALPHABOT_APPEND = """
     REL = os.environ["INNER_ALPHABOT_REL"]
 
     def _append_like_alphabot():
-        now = dt.datetime.now(dt.timezone(dt.timedelta(hours=-4)))
+        et = dt.timezone(dt.timedelta(hours=-4))
+        now = dt.datetime.now(et)
+        day = REL.split("/")[2]
+        if now.date().isoformat() != day:            # 外层建目录后跨过了美东午夜：贴着目录那天的末尾记
+            now = dt.datetime.combine(dt.date.fromisoformat(day), dt.time(23, 59, 59), tzinfo=et)
         rec = {"ts": now.isoformat(timespec="seconds"), "payload_last_trade_time": "t", "underlying_price": 1.0,
                "underlying_price_source": "cboe_intraday", "session_live": True, "iv30": 0.3, "views": {}, "route": {}}
         with open(DR / REL, "a", encoding="utf-8") as f:     # 模拟测试期间 Alpha Bot 落盘的一批

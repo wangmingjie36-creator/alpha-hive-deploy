@@ -182,7 +182,12 @@ _REPORT_PLUGIN = '''\
 import json, os
 _OUT = os.environ["ALPHA_HIVE_CONTRACT_GATE_REPORT"]
 _S = {"selected": [], "item_files": {}, "deselected": [], "passed": [], "failed": [], "skipped": [],
-      "collect_errors": [], "collect_skipped": [], "exitstatus": None, "real_data_root_verdict": None}
+      "collect_errors": [], "collect_skipped": [], "exitstatus": None, "real_data_root_verdict": None,
+      "teardown_exc_counts": {}}
+try:
+    _EG = BaseExceptionGroup
+except NameError:
+    _EG = ()
 def _rel(path):
     return os.path.relpath(os.path.realpath(str(path)), os.path.realpath(os.getcwd())).replace(os.sep, "/")
 def pytest_deselected(items):
@@ -196,6 +201,12 @@ def pytest_collectreport(report):
     elif report.skipped:
         why = report.longrepr[2] if isinstance(report.longrepr, tuple) else str(report.longrepr)
         _S["collect_skipped"].append(f"{report.nodeid or '<collection>'}（{why}）")
+def pytest_runtest_makereport(item, call):
+    # 会话级 fixture 都在最后一条测试的 teardown 里收尾，几道一起红时 pytest 合成**一个** ExceptionGroup、
+    # 只出一份报告（failed 里只有一条）——数清里面几个异常，`_alphabot_only_red` 才不会把「几道闸都红」认成「只有一道」
+    if call.when == "teardown" and call.excinfo is not None:
+        ev = call.excinfo.value
+        _S["teardown_exc_counts"][item.nodeid] = len(ev.exceptions) if isinstance(ev, _EG) else 1
 def pytest_runtest_logreport(report):
     if report.failed:
         _S["failed"].append(f"{report.nodeid}（{report.when}）")
@@ -411,15 +422,18 @@ def _alphabot_only_red(rep: dict | None, problems: list) -> dict | None:
     """唯一的红是真实数据根闸、且它已逐项核实变化**全部**是 Alpha Bot 盘中追加 ⇒ 返回那份归因；否则 None（v0.45.453）。
 
     条件刻意窄：只有一条失败、它出在 teardown（数据根闸是 session 级 fixture，红在最后一条测试的 teardown）、
-    报告里没有任何别的问题、归因由 conftest 写明 `all_alphabot_appends`。多一条失败（哪怕另一条也在 teardown，
-    比如仓库根闸同时红）就走原来的提示。归因本身怎么核实见 `tests/_root_data_guard.explain_alphabot_appends`。
+    那次 teardown 里**恰好一个**异常、报告里没有任何别的问题、归因由 conftest 写明 `all_alphabot_appends`。
+    ⚠️ 「只有一条失败」不等于「只有一道闸红」（二次检查实测）：会话级 fixture 一起收尾，仓库根闸等同时红时
+    pytest 合成一个 ExceptionGroup、只出一份报告——所以还要看插件记的 `teardown_exc_counts`；记录缺失按不满足处理。
+    归因本身怎么核实见 `tests/_root_data_guard.explain_alphabot_appends`。
     """
     if not rep:
         return None
     verdict = rep.get("real_data_root_verdict") or {}
     failed = rep.get("failed") or []
     if (verdict.get("all_alphabot_appends") is True and len(failed) == 1 and failed[0].endswith("（teardown）")
-            and problems == [f"失败：{failed[0]}"]):
+            and problems == [f"失败：{failed[0]}"]
+            and (rep.get("teardown_exc_counts") or {}).get(failed[0][:-len("（teardown）")]) == 1):
         return verdict
     return None
 
@@ -506,6 +520,7 @@ def _run_contract_gate(hook: str, sha: str) -> int:
             _say(hook, "契约测试本身全部通过；唯一的红是真实数据根闸，且那些变化已核实**全部**是 Alpha Bot "
                        f"盘中采样的追加（{verdict.get('alphabot_records')} 张快照）——不是被推代码的问题。")
             _say(hook, "隔一两分钟（等 Alpha Bot 这一批写完）重推即可。**不要** `--no-verify`：它会连 CHANGELOG 检查一起跳过。")
+            _say(hook, "⚠️ 收盘后 / Alpha Bot 没在跑时仍这样报，就不是它——按测试写穿真实数据根查（见上面的报错）。")
             return 1
         _say(hook, f"修好再推（本地复现：/usr/local/bin/python3 -m pytest -p no:cacheprovider {' '.join(files)}）。")
         _say(hook, _BYPASS_NOTE)

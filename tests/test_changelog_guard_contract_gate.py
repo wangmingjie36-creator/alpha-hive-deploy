@@ -563,20 +563,27 @@ import _root_data_guard as rdg  # noqa: E402
 
 _ALL_AB = {"all_alphabot_appends": True, "alphabot_files": 1, "alphabot_records": 3, "unexplained": 0}
 _TD = "tests/test_step_contract.py::test_app_keys（teardown）"
+_ONE = {"tests/test_step_contract.py::test_app_keys": 1}       # 那次 teardown 里恰好一个异常
 
 
 class TestAlphabotOnlyRedPredicate:
     def test_only_the_data_root_teardown_with_a_full_verdict(self):
-        rep = {"failed": [_TD], "real_data_root_verdict": _ALL_AB}
+        rep = {"failed": [_TD], "real_data_root_verdict": _ALL_AB, "teardown_exc_counts": _ONE}
         assert cg._alphabot_only_red(rep, [f"失败：{_TD}"]) == _ALL_AB
 
     @pytest.mark.parametrize("rep,problems", [
-        ({"failed": [_TD], "real_data_root_verdict": {**_ALL_AB, "all_alphabot_appends": False}}, [f"失败：{_TD}"]),
-        ({"failed": [_TD], "real_data_root_verdict": None}, [f"失败：{_TD}"]),
-        ({"failed": [_TD, "t::x（teardown）"], "real_data_root_verdict": _ALL_AB},
-         [f"失败：{_TD}", "失败：t::x（teardown）"]),                              # 另一道闸也红了
+        ({"failed": [_TD], "real_data_root_verdict": {**_ALL_AB, "all_alphabot_appends": False},
+          "teardown_exc_counts": _ONE}, [f"失败：{_TD}"]),
+        ({"failed": [_TD], "real_data_root_verdict": None, "teardown_exc_counts": _ONE}, [f"失败：{_TD}"]),
+        # 会话级闸一起红：只有一份 teardown 报告，但里面是 2 个异常（二次检查实测的真实形状）
+        ({"failed": [_TD], "real_data_root_verdict": _ALL_AB,
+          "teardown_exc_counts": {"tests/test_step_contract.py::test_app_keys": 2}}, [f"失败：{_TD}"]),
+        ({"failed": [_TD], "real_data_root_verdict": _ALL_AB}, [f"失败：{_TD}"]),     # 旧插件没记异常数
+        ({"failed": [_TD, "t::x（teardown）"], "real_data_root_verdict": _ALL_AB, "teardown_exc_counts": _ONE},
+         [f"失败：{_TD}", "失败：t::x（teardown）"]),
         ({"failed": ["t::x（call）"], "real_data_root_verdict": _ALL_AB}, ["失败：t::x（call）"]),
-        ({"failed": [_TD], "real_data_root_verdict": _ALL_AB}, [f"失败：{_TD}", "被跳过（没跑 ≠ 没问题）：t::y"]),
+        ({"failed": [_TD], "real_data_root_verdict": _ALL_AB, "teardown_exc_counts": _ONE},
+         [f"失败：{_TD}", "被跳过（没跑 ≠ 没问题）：t::y"]),
         (None, ["结果报告读不到"]),
     ])
     def test_anything_else_keeps_the_usual_hint(self, rep, problems):
@@ -611,6 +618,18 @@ class TestAlphabotOnlyRedThroughTheHook:
         assert r.returncode != 0
         assert "CONTRACT-BROKEN" in r.stderr and cg._BYPASS_NOTE in r.stderr, r.stderr
         assert "隔一两分钟" not in r.stderr, r.stderr
+
+    def test_another_session_guard_red_in_the_same_teardown_keeps_the_usual_hint(self, repo):
+        """二次检查实测：会话级 fixture 一起收尾，两道闸同时红只出**一份** teardown 报告（ExceptionGroup）。
+        旧判定只数报告条数 ⇒ 说「唯一的红是 Alpha Bot、等一下重推」，而重推会一直红。"""
+        conf = _fake_guard_conftest(_ALL_AB) + (
+            "\n\n@pytest.fixture(scope='session', autouse=True)\n"
+            "def _another_session_guard():\n    yield\n    raise AssertionError('REPO-ROOT-RED')\n")
+        repo.commit({"tests/conftest.py": conf}, "两道会话级闸一起红")
+        r = _push(repo)
+        assert r.returncode != 0
+        assert "REPO-ROOT-RED" in r.stderr, r.stderr
+        assert cg._BYPASS_NOTE in r.stderr and "隔一两分钟" not in r.stderr, r.stderr
 
     def test_not_all_alphabot_keeps_the_usual_hint(self, repo):
         repo.commit({"tests/conftest.py": _fake_guard_conftest({**_ALL_AB, "all_alphabot_appends": False})}, "混合")

@@ -269,23 +269,28 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def alphabot_baseline(root: str, fp: dict[str, str], today: _dt.date) -> dict[str, str]:
-    """会话开始时，近两天 Alpha Bot 盘中文件的 sha256——之后用来证明它们「只在末尾追加、原有内容没动」。
+def alphabot_baseline(root: str, fp: dict[str, str], today: _dt.date) -> dict[str, tuple[int, str]]:
+    """会话开始时，近两天 Alpha Bot 盘中文件的 `(大小, sha256)`——之后用来证明它们「只在末尾追加、原有内容没动」。
+
+    记大小而不只记哈希（二次检查补）：本函数在 `fingerprint` **之后**才读文件，Alpha Bot 若恰在两者之间追加一行，
+    哈希对应的是追加后的内容、指纹里却是追加前的大小——按指纹大小去比前缀必然对不上，一次真的 Alpha Bot 写入
+    就被判成「原有内容被改写」。比前缀要用这里读到的大小。
 
     只算日期 ≥ `today` − 1 的目录：Alpha Bot 只往当天（美东）的目录追加，美东日期不早于本机日期；
     全量算会随历史目录一天天变多、拖慢每一轮会话启动。读不了的文件不记——之后它若有变化，
     就因为「没有起点哈希」归到「其余」，照原样报成测试写的（往保守那边错）。"""
     cutoff = (today - _dt.timedelta(days=1)).isoformat()
-    out: dict[str, str] = {}
+    out: dict[str, tuple[int, str]] = {}
     for rel, sig in fp.items():
         m = _ALPHABOT_FILE_RE.match(rel)
         if not m or m.group(1) < cutoff or sig == "dir":
             continue
         try:
             with open(os.path.join(root, rel), "rb") as f:
-                out[rel] = _sha256_bytes(f.read())
+                data = f.read()
         except OSError:
             continue
+        out[rel] = (len(data), _sha256_bytes(data))
     return out
 
 
@@ -296,7 +301,7 @@ def _old_size(sig: str | None) -> int | None:
     return int(size) if sep and size.isdigit() else None
 
 
-def _why_not_alphabot_append(root: str, rel: str, before_sig: str | None, baseline: dict[str, str],
+def _why_not_alphabot_append(root: str, rel: str, before_sig: str | None, baseline: dict[str, tuple[int, str]],
                              lo: _dt.datetime, hi: _dt.datetime) -> tuple[str | None, int]:
     """`rel` 的变化能否归因于 Alpha Bot 追加：返回 (不能的原因 | None, 新增快照张数)。"""
     m = _ALPHABOT_FILE_RE.match(rel)
@@ -312,9 +317,15 @@ def _why_not_alphabot_append(root: str, rel: str, before_sig: str | None, baseli
         return f"读不了（{e.strerror}）", 0
     if len(data) <= old:
         return "没有变长（不是追加）", 0
-    if old and (rel not in baseline or _sha256_bytes(data[:old]) != baseline[rel]):
-        return ("没有会话开始时的哈希，证明不了原有内容没动" if rel not in baseline
-                else "原有内容被改写（不只是在末尾追加）"), 0
+    base = baseline.get(rel)
+    if old and base is None:
+        return "没有会话开始时的哈希，证明不了原有内容没动", 0
+    if base is not None:
+        # 前缀按起点哈希读到的大小比（它 ≥ 指纹里的大小：两者之间 Alpha Bot 可能又追加过）；
+        # 指纹之后的全部新增（含那段）下面照样逐行核对
+        bsize, bhash = base
+        if bsize < old or bsize > len(data) or _sha256_bytes(data[:bsize]) != bhash:
+            return "原有内容被改写（不只是在末尾追加）", 0
     added = data[old:]
     if not added.endswith(b"\n"):
         return "新增部分不是完整的行", 0
@@ -325,7 +336,7 @@ def _why_not_alphabot_append(root: str, rel: str, before_sig: str | None, baseli
     for line in lines:
         try:
             rec = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):      # 嵌套极深的行抛 RecursionError：照样归「其余」，别让报错变成原始栈
             return "新增行不是 JSON", 0
         if not isinstance(rec, dict) or set(rec) != ALPHABOT_SNAPSHOT_KEYS:
             return "新增行不是 Alpha Bot 快照（键对不上）", 0
@@ -343,13 +354,13 @@ def _why_not_alphabot_append(root: str, rel: str, before_sig: str | None, baseli
 
 
 def explain_alphabot_appends(root: str, changes: dict[str, list[str]], before: dict[str, str],
-                             baseline: dict[str, str], started: _dt.datetime | None,
+                             baseline: dict[str, tuple[int, str]], started: _dt.datetime | None,
                              ended: _dt.datetime) -> dict:
     """把 `diff()` 的结果分成「已核实是 Alpha Bot 盘中追加」与「其余」。**只决定报错措辞，不决定红绿。**
 
     一个文件归因于 Alpha Bot，必须同时满足（任何一条不满足都归「其余」，宁可报成测试写的）：
       1. 路径是 `alphabot_state/intraday/<日期>/<标的>.jsonl`；
-      2. 原有内容逐字节未变：变化前那个大小之内，sha256 等于会话开始时记下的（新文件则原有为空）；
+      2. 原有内容逐字节未变：会话开始时记下的那个大小之内，sha256 一致（新文件则原有为空）；
       3. 新增部分是完整的行，每行都是一张快照：键集合恰为 `ALPHABOT_SNAPSHOT_KEYS`，`ts` 带时区、
          落在 [会话开始 − 300 s, 会话结束 + 60 s]，且 `ts` 的日期就是目录日期。
     新增的日期目录只有在它里面至少有一个文件被归因时才算。删除一律归「其余」。

@@ -1435,7 +1435,9 @@ def _real_data_root_message(root, changes: dict, v: dict) -> str:
             "判定照样是红（闸只认「没有变化」，不认「看起来像合法写入」）。处置：Alpha Bot 盘中按设定间隔整批写、"
             "每批几十秒，等这一批写完重跑 / 重推即可。\n"
             "**不要** `git push --no-verify`（会连 CHANGELOG 检查一起跳过），也**不要**往 `tests/_root_data_guard.py` "
-            "的豁免里加路径。")
+            "的豁免里加路径。\n"
+            "⚠️ 收盘后、或 Alpha Bot 根本没在跑时仍出现这条，就**不是**它——按测试写穿查："
+            "测试若绕过隔离、用 Alpha Bot 自己的代码往真实数据根写快照，长得和它一模一样。")
     msg = (
         f"测试写到了**真实数据根**（{root}）里的生产数据：\n"
         f"{_root_data_guard.format_diff(changes)}\n\n"
