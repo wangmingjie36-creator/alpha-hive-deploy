@@ -7,7 +7,43 @@
 
 ## [0.45.470] — 2026-10-12 — 占位（进行中：v0.45.463 二次检查）
 
-## [0.45.469] — 2026-10-12 — 占位（进行中：momentum_5d 自攒索引回落锚点对齐主路径的 4 个交易日）
+## [0.45.469] — 2026-10-12 — Fixed：`momentum_5d` 自攒索引回落的窗口对齐主路径——全仓「5 日动量」实为 **4 个交易日**收益（yfinance `Close.iloc[-1] / iloc[-5]`，7 处），回落此前按 ≥5 个交易日挑锚点；`MOMENTUM_LOOKBACK` 5 → 4，`MOMENTUM_MAX_GAP` = LOOKBACK + 2（7 → 6，漏扫宽容仍是 2 天）
+
+### 为什么
+- v0.45.465「未处理」项：同名不同窗。主路径 `data_pipeline`（`_fetch_history_metrics` / `YFinanceSource.fetch` / `_fetch_historical_stock_data`，含 `5d_snapshot_spliced` 的 `_cl.iloc[-4]`）、`swarm_agents/cache.py`、`risk_engine`、`crowding_detector` 全是 5 个点 4 个间隔；只有 `price_history.momentum_5d` 数的是 5 个交易日间隔。
+- 三个选项（回落对齐到 4 / 主路径改成真 5 日 / 只记录）由用户 10-12 选**回落对齐**。主路径改真 5 日 = 每天 30 只全部换口径，要追加世代边界，且 `price.momentum_5d` 在 `dim_ic_protocol.H1_INPUT_SIGNALS` 里 ⇒ 会在 H1 前瞻窗口第 0 天（10-12）截断 H1。
+- `MOMENTUM_MAX_GAP` 取 6（保留原设计的 2 天漏扫宽容）也是用户 10-12 选定的，备选 5 / 4 见下方回放数字。
+
+### Fixed
+- `price_history.py`：`MOMENTUM_LOOKBACK = 4`，`MOMENTUM_MAX_GAP = MOMENTUM_LOOKBACK + 2`；常量注释与 `momentum_5d` docstring 写明窗口与主路径同口径、为什么不在这里单方面改成真 5 日。`MIN_DAYS_FOR_MOMENTUM` 随之 6 → 5（只有本模块 `__main__` 覆盖率打印读它）。
+- `data_pipeline.StockData` docstring：`momentum_5d` 名为 5 日、实为 4 个交易日。
+- 其他 `price_history` 读者（`vrp_signal` / `sell_strike_ledger` / `earnings_history` / `portfolio_greeks`）只调 `load_price_history`，不读这几个常量，不受影响。
+
+### Added
+- `tests/test_momentum_window_alignment.py`（12）：同一串收盘价分别喂**真的** `_fetch_history_metrics`（yfinance 打桩）与**真的** `price_history.momentum_5d`，要求逐位相等（5/6/8/10 个交易日；夹具自证 4 日与 5 日窗口符号相反）；历史只有 4 天时两边都给 None；漏扫 2 天仍给值、3 天给 None；源码扫描钉住全仓主路径公式与快照拼接都与 `MOMENTUM_LOOKBACK` 对应（扫描器至少命中 6 处，防扫描器自己死掉）。
+
+### Changed
+- `tests/test_price_history.py::test_computes_from_real_closes` 原夹具编码的是 5 日锚点，改成能区分 4 / 5 日的价格（错取 5 日得 +22.2%）；`test_anchor_uses_trading_day_distance_not_row_count` 只改注释。`tests/test_price_history_default_paths.py` 测的是路径不是窗口，夹具改成 8/7 与 8/10 同价（两种窗口都得 +10%）。
+
+### 回放（生产库只读副本，09-28 ~ 10-09，DB `price_at_predict` 当序列、真函数 `momentum_5d`，对存档 `price.momentum_5d`，268/300 对算得出）
+| 锚点距离（交易日） | 对数 | 平均 \|Δ\| | 符号一致 |
+|---|---|---|---|
+| 4（精确锚点在） | 209 | **0.00pp** | **100%** |
+| 5（漏扫 1 天） | 29 | 1.33pp | 86% |
+| 6（漏扫 2 天） | 30 | 2.87pp | 70% |
+- 合计：LOOKBACK 4 ⇒ 0.47pp / 95%；LOOKBACK 5 ⇒ 1.91pp / 83%。剩下的全部是 09-19、09-23 ~ 09-26 没扫描 ⇒ 09-28 ~ 09-30 没有精确锚点、宽容窗口给近似值；精确锚点在的 209 对里只有 DE 两对差 0.24pp（DB 价与 yfinance 收盘的小差）。
+
+### 评分 / 世代边界
+- **只在 yfinance 取不到 momentum 的扫描日起作用**；09-28 ~ 10-09 一次都没发生（存档 30/30 有数，见 v0.45.463）⇒ 存档零变化。发生时新值与主路径同窗口（精确锚点在时逐位一致）。
+- **没有追加 IC 世代边界**：理由同 v0.45.463 / 465——存档零变化，故障日的新值更贴近主路径。主路径一行没改，H1 输入层的生产值不变。
+
+### 与 v0.45.465 的交互
+- 465 在本条推送前几分钟合入，重写了同一个函数（`momentum_5d` 成为 `momentum_5d_detail` 的包装、加 `latest_close`）。rebase 时保留 465 的结构，只把窗口说明并进 `momentum_5d_detail` docstring；`StockData` docstring 保留 465 的 `momentum_source` / `momentum_as_of` 两行。
+- `tests/test_momentum_fallback_session_close.py` 的夹具按 5 日锚点写死，改成 4 日：把 41.0 那段价格的起点从 10-02 挪到 10-05，锚点断言 10-01 → 10-02、10-02 → 10-05；`LAGGED` / `SAME_DAY` 数值（+0.80% / −11.61%，符号相反）不变，所以这组测试要证明的东西没变。
+
+### 验证
+- 变异 7 个全部打红（rebase 到 465 之后重跑一遍，仍全红；`PYTHONDONTWRITEBYTECODE=1` + 每次清 `__pycache__`，还原后核 sha256）：LOOKBACK 回退 5、MAX_GAP 留 7、MAX_GAP 收成 +1、锚点判据 `>=` 改 `>`、单改 `risk_engine` 主路径公式、单改 `_fetch_history_metrics`、单改快照拼接基准。LOOKBACK 回退 5 时新文件单独跑 8 条红（契约 4 条 + 宽容 2 条 + 源码扫描 2 条）。
+- `ruff check` 改动文件全绿。
 
 ## [0.45.468] — 2026-10-12 — 占位（进行中：v0.45.462 / 464 二次检查）
 

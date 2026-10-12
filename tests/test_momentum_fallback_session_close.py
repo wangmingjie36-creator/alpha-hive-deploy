@@ -31,10 +31,10 @@ from hive_logger import PATHS
 # 09-28(一) … 10-08(四) 九个交易日；D = 10-09(五)
 _DATES = ["2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02",
           "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"]
-_CLOSES = [40.0, 40.0, 40.0, 40.0, 41.0, 41.0, 41.0, 41.0, 40.32]
+_CLOSES = [40.0, 40.0, 40.0, 40.0, 40.0, 41.0, 41.0, 41.0, 40.32]
 D = "2026-10-09"
 D_CLOSE = 36.24
-# 滞后窗口：10-08 / 10-01 = +0.80%；正确窗口：10-09 / 10-02 = −11.61%
+# 窗口 4 个交易日（与主路径同口径，v0.45.469）。滞后窗口：10-08 / 10-02 = +0.80%；正确窗口：10-09 / 10-05 = −11.61%
 LAGGED = round((40.32 / 40.0 - 1) * 100, 4)
 SAME_DAY = round((D_CLOSE / 41.0 - 1) * 100, 4)
 SCAN_ET = datetime(2026, 10, 9, 17, 30)        # 生产扫描时刻（14:30 PDT）
@@ -70,11 +70,11 @@ class TestLatestCloseInPriceHistory:
     def test_without_it_window_ends_previous_scan_day(self, db):
         """记录现状：不传就是滞后一个扫描日（这条是回落要补的那个缺口的定义）。"""
         r = ph.momentum_5d_detail("VZ")
-        assert r == {"momentum_5d": LAGGED, "as_of": "2026-10-08", "anchor": "2026-10-01"}
+        assert r == {"momentum_5d": LAGGED, "as_of": "2026-10-08", "anchor": "2026-10-02"}
 
     def test_session_close_becomes_window_end(self, db):
         r = ph.momentum_5d_detail("VZ", latest_close=(D, D_CLOSE))
-        assert r == {"momentum_5d": SAME_DAY, "as_of": D, "anchor": "2026-10-02"}
+        assert r == {"momentum_5d": SAME_DAY, "as_of": D, "anchor": "2026-10-05"}
         assert (SAME_DAY < 0) != (LAGGED < 0), "夹具失效：两个窗口必须符号相反"
 
     def test_float_wrapper_passes_it_through(self, db):

@@ -111,6 +111,8 @@ class StockData:
     P0-2 (v0.38.0): momentum_5d 可为 None（真实 5 日动量不可得时），
     不再用当日涨跌幅冒充——下游背离检测/情绪映射按 5 日语义消费，
     1 日近似会触发错误的 bull trap / 空头阈值判定。
+    ⚠️ 名字叫 5 日，全仓口径实为 **4 个交易日**收益（`iloc[-1] / iloc[-5]`；
+    自攒索引回落 `price_history.MOMENTUM_LOOKBACK` 对齐此口径，v0.45.469）。
     momentum_source: "5d_real"（yfinance 历史K线计算）| "price_index"（自攒索引回落）| "unavailable"
     momentum_as_of: 自攒索引回落时窗口末端那一天（v0.45.465）；其余来源不填
     """

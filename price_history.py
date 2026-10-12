@@ -46,12 +46,17 @@ except ImportError:  # pragma: no cover - 独立运行兜底
     import logging
     _log = logging.getLogger("alpha_hive.price_history")
 
-# 5 日动量需要 6 个交易日（今天 + 5 天前）
-MOMENTUM_LOOKBACK = 5
+# ⚠️「5 日动量」的全仓口径是 **4 个交易日**的收益：主路径（yfinance）一律
+# `Close.iloc[-1] / Close.iloc[-5]`——5 个点、4 个间隔（`data_pipeline` 4 处、
+# `swarm_agents/cache.py`、`risk_engine`、`crowding_detector`），这里是它缺数时的回落，
+# 必须量同一个窗口（v0.45.469；此前按 ≥5 个交易日挑锚点，生产库回放见该版 CHANGELOG）。
+# 守卫 `tests/test_momentum_window_alignment.py`。改成真 5 日要改主路径并追加世代边界，
+# 且 `price.momentum_5d` 在维度 IC 协议 H1 输入层里——不在这里单方面改。
+MOMENTUM_LOOKBACK = 4
 MIN_DAYS_FOR_MOMENTUM = MOMENTUM_LOOKBACK + 1
-# 锚点最多允许落在 7 个交易日前：扫描偶尔漏一两天可接受，
-# 再远就不该继续叫"5 日动量"了
-MOMENTUM_MAX_GAP = 7
+# 锚点最多允许比 LOOKBACK 远 2 个交易日：扫描偶尔漏一两天可接受，
+# 再远就名不副实了
+MOMENTUM_MAX_GAP = MOMENTUM_LOOKBACK + 2
 # 孤立尖峰阈值：期权快照价有已知污染（dashboard_renderer:1883 记录 NVDA 2026-06-15
 # 显示 $145、真实 $212，偏差 32%）。真实跳空（财报）不会次日原路返回，
 # 而污染点的签名正是"相对前后两点都大幅偏离、且方向相反"。
@@ -377,8 +382,11 @@ def momentum_5d_detail(
     cache_dir: Optional[str] = None,
     latest_close: Optional[Tuple[str, float]] = None,
 ) -> Optional[Dict]:
-    """自攒收盘价算 5 日动量（%）→ `{"momentum_5d", "as_of", "anchor"}`。
+    """自攒收盘价算「5 日动量」（%）→ `{"momentum_5d", "as_of", "anchor"}`。
     算不出就返回 None——**绝不返回 0.0**。
+
+    窗口 = **4 个交易日**（`MOMENTUM_LOOKBACK`，v0.45.469），与主路径 yfinance
+    `Close.iloc[-1] / Close.iloc[-5]` 同口径——它是主路径缺数时的回落，必须量同一个量。
 
     `as_of` = 窗口末端那一天（序列最新一点），`anchor` = 起点。
 
@@ -416,7 +424,7 @@ def momentum_5d_detail(
                 return None  # 数据太稀，名不副实
             return {"momentum_5d": round((latest / px - 1) * 100, 4),
                     "as_of": latest_date, "anchor": date}
-    return None  # 历史不够 5 个交易日
+    return None  # 历史不够 MOMENTUM_LOOKBACK 个交易日
 
 
 def coverage_report(cache_dir: Optional[str] = None) -> Dict[str, int]:
