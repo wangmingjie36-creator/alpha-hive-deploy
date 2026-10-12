@@ -211,10 +211,6 @@ def _load_jsonl(path: Path) -> List[Dict]:
     return ledger_io.load_jsonl(path)
 
 
-def _atomic_write_text(path: Path, content: str, mode: int = 0o644) -> None:
-    ledger_io.atomic_write_text(path, content, mode)
-
-
 def _write_jsonl(path: Path, records: List[Dict]) -> None:
     ledger_io.write_jsonl(path, [_scrub(r) for r in records])
 
@@ -224,17 +220,17 @@ def _append_jsonl(path: Path, record: Dict) -> None:
 
 
 def _load_meta() -> Dict:
-    if META_FILE.exists():
-        try:
-            return json.loads(META_FILE.read_text(encoding="utf-8"))
-        except ValueError:
-            _log.error("[PortfolioGreeks] meta.json 损坏，按新账本处理")
+    # v0.45.452：meta 坏了抛 LedgerCorrupt（run_for_date 记进 price_check_stats()["error"] ⇒ P2），不再「按新账本
+    # 处理」——那会把对冲腿 cash 重置成 0 并在本轮末写回，真实现金就此丢失。
+    meta = ledger_io.load_json(META_FILE, default=None)
+    if meta is not None:
+        return meta
     return {"version": _VERSION, "starting_date": None, "cash": 0.0,
             "last_run_date": None, "config_snapshot": dict(CONFIG)}
 
 
 def _save_meta(meta: Dict) -> None:
-    _atomic_write_text(META_FILE, json.dumps(_scrub(meta), ensure_ascii=False, indent=2))
+    ledger_io.write_json(META_FILE, _scrub(meta))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -553,8 +549,8 @@ def _default_beta(ticker: str, as_of: str) -> Tuple[Optional[float], Optional[st
     cache = _read_beta_cache()          # 写回时才读盘：缓存的用途已只剩「日线断供时的兜底」
     cache[ticker] = {"as_of": as_of, "beta": beta, "n": n, "computed_at": as_of}
     try:
-        _atomic_write_text(BETA_CACHE_FILE, json.dumps(_scrub(cache), ensure_ascii=False, indent=1))
-    except OSError as exc:
+        ledger_io.write_json(BETA_CACHE_FILE, _scrub(cache), indent=1)
+    except (OSError, ledger_io.LedgerError) as exc:   # 失败已在 ledger_io 源头登记（⇒ P2），这里只保本次结果
         _log.warning("β 缓存写入失败（不影响本次结果）: %s", exc)
     return beta, f"ols{CONFIG['beta_window']}"
 
@@ -1375,8 +1371,7 @@ def _run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, exec
 
     audit = {k: v for k, v in res.items() if k != "rows"}
     audit["rows"] = res["rows"]
-    _atomic_write_text(STATE_DIR / f"greeks_{as_of}.json",
-                       json.dumps(_scrub(audit), ensure_ascii=False, indent=1, sort_keys=True))
+    ledger_io.write_json(STATE_DIR / f"greeks_{as_of}.json", _scrub(audit), indent=1, sort_keys=True)
     return res
 
 
@@ -1539,6 +1534,49 @@ def _fmt_usd(v) -> str:
 def _fmt_pct(v, nd=2) -> str:
     f = _num(v)
     return f"{f:+.{nd}f}%" if f is not None else "—"
+
+
+#: 对外展示的规则常量（Alpha Bot 对冲页 / 帮助页取这一份，不在前端另抄）
+PUBLIC_RULE_KEYS = ("beta_delta_band_pct", "beta_delta_target_pct", "rebalance_to", "hedge_instrument",
+                    "vega_alert_pct", "gamma_alert_pct", "beta_window")
+
+
+def ledger_view(root=None) -> Dict:
+    """对冲账本的只读视图（v0.45.459，Alpha Bot「对冲」页）。账本之外的读者一律经这里，不碰文件名。
+
+    `root` = 数据根；None ⇒ **调用时**的 `PATHS.home`（不用 import 期冻住的 `STATE_DIR`：Alpha Bot 是常驻进程，
+    数据根可经 `--home` 指定）。
+      · 历史（成交 / 净值 / 每日审计）只经 `load_history()`——放行能自证定价场次的记录，被拦下的给计数与日期；
+      · 当前持仓与现金是「现在」不是历史：`ledger_io` 严格读，读不了写进 `errors`、**不抛**（页面要能如实显示
+        「读不了」，而不是整页出错，更不能把读不了当成「空仓」）。
+    不写任何文件。"""
+    d = Path(root if root is not None else PATHS.home) / "hedge_state"
+    out: Dict = {"state_dir": str(d), "exists": d.is_dir(), "opened": False, "positions": None, "meta": None, "errors": {},
+                 "history": None, "rules": {k: CONFIG.get(k) for k in PUBLIC_RULE_KEYS},
+                 "measurement_start": MEASUREMENT_START}
+    if not out["exists"]:
+        return out
+    # 「开过账」= meta.json 在（第一次执行就写它）。开过账却没有持仓文件 ⇒ 被删了 / 数据根不对，是错不是空仓——
+    # 空仓时持仓文件照样在（写成空文件）。没开过账 ⇒ 持仓为 None、不报错，页面说「还没有记录」（v0.45.459 二次检查）。
+    out["opened"] = (d / "meta.json").exists()
+    pos_f = d / "positions.jsonl"
+    if not pos_f.exists():
+        if out["opened"]:
+            out["errors"]["positions"] = f"{pos_f} 不存在（meta.json 在：持仓文件被删了，或数据根不对）"
+    else:
+        try:
+            out["positions"] = ledger_io.load_jsonl(pos_f)
+        except (ledger_io.LedgerError, OSError) as exc:
+            out["errors"]["positions"] = f"{type(exc).__name__}: {exc}"
+    try:
+        out["meta"] = ledger_io.load_json(d / "meta.json", default=None)
+    except (ledger_io.LedgerError, OSError) as exc:
+        out["errors"]["meta"] = f"{type(exc).__name__}: {exc}"
+    try:
+        out["history"] = load_history(d)
+    except Exception as exc:  # noqa: BLE001 - 历史读不出来如实说，不当成「没有历史」
+        out["errors"]["history"] = f"{type(exc).__name__}: {exc}"
+    return out
 
 
 def _load_audit(as_of: str) -> Optional[Dict]:

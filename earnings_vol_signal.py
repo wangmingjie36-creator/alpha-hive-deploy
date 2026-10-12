@@ -35,6 +35,24 @@ ATM 跨式中价 / S 是到期前**全部**波动的价格：财报跳空 + 到�
 ⚠️ 窗口那一项用**交易日/252**（窗口就是 2 个交易日），与 dte 用日历日/365 各自成立，
 不是又一次混用：2/252 恒等于 2×(365/252)/365。
 
+⚠️ 事件波动被扣到 ≤ 0 时（v0.45.454）：`implied_event_move_pct` / `ratio` / `raw_label` 写 **None**，不写 0。
+以前写 0.0，下游读到的是一个合法的数（比值 0.00、标 cheap），实际含义是「这一步算不出」——
+rv_30d 含了财报之外的大跳空（2026-10-09：CRCL / META / VKTX 近 30 日有 30.5% / 15.2% / 10.7% 的单日跳空），
+把扩散项撑得比整个跨式价还大。`event_move_floor_hit=True` + `untradeable_reason` 才是这种行的真实状态。
+这类行仍然会被 `settle_signals` 回填实际波动（它是校准研究的样本），但 `realized_ratio` 为 None。
+
+影子字段 `shadow_event`（v0.45.454，**只记录、不进任何判断**）
+-----------------------------------------------------------
+同一个公式，扩散项换一个估计量：不用向后看、含跳空的 `rv_30d`，改用快照里 `iv_term_structure`
+**两个都在财报之后**的到期日之间的远期波动（这一段不含财报，是市场自己对「普通日」的定价）：
+    σ_fwd² = (T₂·σ₂² − T₁·σ₁²) / (T₂ − T₁)        T 为 (到期日 − as_of) 的日历日
+再用 σ_fwd 代替 rv 套进 `implied_event_move_pct` 的公式，分母（历史中位）不动。
+为什么只记录：2026-10-10 对 37 天 24 个事件的回溯试算显示，两种方法并不只是「修几个异常值」——
+远期 IV 通常比 rv 高 ≈3 个点（期权风险溢价），新方法的隐含事件波动整体低 ≈0.8pp（比值 ×0.83），
+会让一批 rich 降成 fair。哪个更准现在判不了（已结算事件只有 2 个）。所以旧方法继续决定标签、开仓；
+攒够已结算事件后再用实际波动比较两者的预测误差（`shadow_event.method` 是比较时分组的键）。
+`shadow_event` 在 `scan` 里于 `compute_signal` 返回**之后**挂上（同 `gex_ctx` 的结构：函数里碰不到判断）。
+
 合格条件（缺一个就 `eligible=False` 并给 `reason`）
 --------------------------------------------------
 1. `quote_set.data_available` 且 ATM call/put 两腿 `quote_ok`（bid>0、ask≥bid、有限）
@@ -82,6 +100,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+import ledger_io
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("earnings_vol_signal")
@@ -104,6 +123,14 @@ CONFIG = {
     # 长度的扩散才可比。改这个数必须同时改 earnings_history 的窗口，否则两边又错开。
     "realized_window_trading_days": 2,
 }
+
+#: `shadow_event` 的结构版本与方法名。改字段 / 改口径 = 改比较的输入：加一个新方法名（不要原地改 v1），
+#: 否则「方法 → 预测误差」的分组会把两种口径的行混在一起。
+EVENT_SHADOW_SCHEMA = 1
+EVENT_SHADOW_METHOD = "fwd_iv_v1"
+#: 远期波动区间的起点到期日至少比财报日晚几个日历日：财报可能是盘后（事件在 D+1），
+#: 到期日 ≥ D+2 才保证 (T₁, T₂] 这一段里没有事件。（周五盘后这种罕见情形，事件在下周一，不在此保证内。）
+_SHADOW_POST_EVENT_GAP_DAYS = 2
 
 BASE_DIR = PATHS.home
 STATE_DIR = BASE_DIR / "options_paper_state"
@@ -153,43 +180,19 @@ def _minus_days(d, n: int) -> Optional[str]:
 
 
 # ---------------------------------------------------------------- 状态文件
+# 读写全经 `ledger_io`（v0.45.452）：严格读、原子写 + 回读、拒 NaN（此前不拒：`json.dumps` 缺省写出 NaN 字面量）。
+# 账本与跨式腿同在 options_paper_state/ ⇒ 同一把目录锁；读-改-写入口（scan / settle_signals）整段持锁。
+
 def _load_jsonl(path: Path) -> List[Dict]:
-    if not path.exists():
-        return []
-    out = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    out.append(json.loads(line))
-                except ValueError:
-                    continue
-    return out
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    import os
-    import tempfile
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    return ledger_io.load_jsonl(path)
 
 
 def _write_jsonl(path: Path, records: List[Dict]) -> None:
-    _atomic_write_text(path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
+    ledger_io.write_jsonl(path, records)
+
+
+def _signals_dir() -> Path:
+    return SIGNALS_FILE.parent
 
 
 def load_signals() -> List[Dict]:
@@ -261,6 +264,86 @@ def _precheck(as_of: str, quote_set: Optional[dict], upcoming: Optional[dict]) -
     return None
 
 
+def _raw_label(ratio: float) -> str:
+    if ratio >= CONFIG["rich_ratio"]:
+        return "rich"
+    if ratio <= CONFIG["cheap_ratio"]:
+        return "cheap"
+    return "fair"
+
+
+def _iso_date(v):
+    try:
+        return datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def event_shadow(sig: dict, term_structure) -> Optional[dict]:
+    """远期 IV 法的影子隐含事件波动（模块头「影子字段」）。**只读 sig、不改 sig**；返回要挂的 dict。
+
+    不合格（`sig["eligible"]` 不为真）→ None。合格但算不出 → `available=False` + `reason`，数值字段 None，
+    从不填 0（本项目「失败改写成没发生过」的老病）。任何异常都落成 `available=False, reason="error: ..."` 并记
+    WARNING——影子挂了不许拖死主信号，但必须看得见。"""
+    if not (isinstance(sig, dict) and sig.get("eligible")):
+        return None
+    out = {"schema_version": EVENT_SHADOW_SCHEMA, "method": EVENT_SHADOW_METHOD, "available": False,
+           "reason": None, "fwd_iv_pct": None, "fwd_pair": None, "diffusion_move_pct": None,
+           "diffusion_window_move_pct": None, "implied_event_move_pct": None,
+           "event_move_floor_hit": False, "ratio": None, "raw_label": None}
+    try:
+        as_of_d, ed_d = _iso_date(sig.get("as_of")), _iso_date(sig.get("earnings_date"))
+        straddle, dte, median = (_num(sig.get("straddle_move_pct")), _num(sig.get("dte")),
+                                 _num(sig.get("hist_median_abs_move_pct")))
+        if None in (as_of_d, ed_d, straddle, dte, median) or dte <= 0 or median <= 0:
+            out["reason"] = "inputs incomplete"
+            return out
+        ts = term_structure.get("term_structure") if isinstance(term_structure, dict) else None
+        if not isinstance(ts, list) or not ts:
+            out["reason"] = "term structure unavailable"
+            return out
+        cut = ed_d + timedelta(days=_SHADOW_POST_EVENT_GAP_DAYS)
+        pts = []
+        for x in ts:
+            if not isinstance(x, dict):
+                continue
+            d, iv = _iso_date(x.get("expiry")), _num(x.get("atm_iv"))
+            if d is not None and iv is not None and iv > 0 and d >= cut:
+                pts.append((d, iv))
+        pts.sort()
+        if len(pts) < 2:
+            out["reason"] = "fewer than 2 post-event expiries"
+            return out
+        (d1, iv1), (d2, iv2) = pts[0], pts[1]
+        # 天数用 as_of 自己算，不信期限结构里的 `dte`（它与 quote_set 的 selected_dte 差过一天，时钟不同）
+        t1, t2 = (d1 - as_of_d).days, (d2 - as_of_d).days
+        if t1 <= 0 or t2 <= t1:
+            out["reason"] = "expiry days not increasing"
+            return out
+        fwd2 = (t2 * iv2 * iv2 - t1 * iv1 * iv1) / (t2 - t1)
+        if not fwd2 > 0:
+            out["reason"] = "forward variance non-positive"
+            return out
+        fwd = math.sqrt(fwd2)
+        diffusion = CONFIG["diffusion_k"] * (fwd / 100.0) * math.sqrt(dte / 365.0) * 100.0
+        win = CONFIG["diffusion_k"] * (fwd / 100.0) * math.sqrt(float(CONFIG["realized_window_trading_days"]) / 252.0) * 100.0
+        event2 = straddle * straddle - diffusion * diffusion + win * win
+        out.update(available=True, fwd_iv_pct=_r(fwd), fwd_pair=[d1.isoformat(), d2.isoformat()],
+                   diffusion_move_pct=_r(diffusion), diffusion_window_move_pct=_r(win))
+        implied = _r(math.sqrt(event2)) if event2 > 0 else None
+        if implied is None or implied <= 0:
+            out["event_move_floor_hit"] = True
+            return out
+        out["implied_event_move_pct"] = implied
+        out["ratio"] = _r(implied / median)
+        out["raw_label"] = _raw_label(implied / median)
+        return out
+    except Exception as exc:  # noqa: BLE001 - 影子不许拖死主信号，但要看得见
+        _log.warning("[%s] 影子事件波动计算失败: %s", sig.get("ticker"), exc, exc_info=True)
+        out.update(available=False, reason=f"error: {exc!r}")
+        return out
+
+
 def compute_signal(ticker: str, as_of: str, quote_set: Optional[dict],
                    upcoming: Optional[dict], stats: Optional[dict],
                    rv_30d) -> dict:
@@ -292,6 +375,7 @@ def compute_signal(ticker: str, as_of: str, quote_set: Optional[dict],
         "diffusion_move_pct": None, "diffusion_window_move_pct": None,
         "implied_event_move_pct": None,
         "event_move_basis": None, "event_move_floor_hit": False,
+        "shadow_event": None,   # v0.45.454：scan 在判断做完之后挂（`event_shadow`），见模块头
         "hist_n": int(stats.get("n") or 0) if isinstance(stats, dict) else 0,
         "hist_median_abs_move_pct": _num((stats or {}).get("median_abs_move_pct")) if isinstance(stats, dict) else None,
         "hist_mean_abs_move_pct": _num((stats or {}).get("mean_abs_move_pct")) if isinstance(stats, dict) else None,
@@ -350,24 +434,23 @@ def compute_signal(ticker: str, as_of: str, quote_set: Optional[dict],
         event2 = straddle * straddle - diffusion * diffusion + diffusion_win * diffusion_win
         sig["diffusion_move_pct"] = _r(diffusion)
         sig["diffusion_window_move_pct"] = _r(diffusion_win)
-        sig["event_move_floor_hit"] = event2 <= 0
-        sig["implied_event_move_pct"] = _r(math.sqrt(max(event2, 0.0)))
+        implied = _r(math.sqrt(event2)) if event2 > 0 else None
+        # v0.45.454：算不出就是 None，不是 0.0（见模块头）。舍入后恰为 0 的也算触底。
+        sig["event_move_floor_hit"] = implied is None or implied <= 0
+        sig["implied_event_move_pct"] = None if sig["event_move_floor_hit"] else implied
         sig["event_move_basis"] = "straddle_minus_diffusion_plus_window"
     else:
         sig["implied_event_move_pct"] = _r(straddle)
         sig["event_move_basis"] = "raw_straddle"   # 含扩散，高估事件波动
 
-    ratio = sig["implied_event_move_pct"] / median
-    if not math.isfinite(ratio):
-        sig["reason"] = "ratio not finite"
-        return sig
-    sig["ratio"] = _r(ratio)
-    if ratio >= CONFIG["rich_ratio"]:
-        raw = "rich"
-    elif ratio <= CONFIG["cheap_ratio"]:
-        raw = "cheap"
-    else:
-        raw = "fair"
+    raw = None
+    if sig["implied_event_move_pct"] is not None:
+        ratio = sig["implied_event_move_pct"] / median
+        if not math.isfinite(ratio):
+            sig["reason"] = "ratio not finite"
+            return sig
+        sig["ratio"] = _r(ratio)
+        raw = _raw_label(ratio)
     sig["raw_label"] = raw
 
     # 只取 ATM 两腿：账本成交的就是这两条腿，25Δ（contracts["c25"]/["p25"]）不进闸门。
@@ -377,8 +460,8 @@ def compute_signal(ticker: str, as_of: str, quote_set: Optional[dict],
     max_spread = max(spreads) if spreads else None
     sig["max_leg_spread_pct"] = _r(max_spread)
     if sig["event_move_floor_hit"]:
-        # 跨式价低于纯扩散估计 ⇒ 事件波动被压成 0，ratio 必然 "cheap"。这不是便宜，
-        # 是 rv_30d 含了别的跳空把扩散项撑大了——退化数字不能下注，留给校准研究看。
+        # 跨式价低于纯扩散估计 ⇒ 事件波动算不出（v0.45.454 起写 None；以前写 0.0 并标 cheap）。
+        # 这不是便宜，是 rv_30d 含了别的跳空把扩散项撑大了——退化数字不能下注，留给校准研究看。
         sig["tradeable"] = False
         sig["untradeable_reason"] = "event move floored (diffusion >= straddle)"
     elif max_spread is None:
@@ -498,6 +581,7 @@ def _usable_capture(ctx, as_of: str) -> bool:
             and ctx.get("captured_on") == as_of and ctx.get("session_live") is False)
 
 
+@ledger_io.locked_by(_signals_dir)
 def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
          watcher=None, stats_fn: Optional[Callable[[str], Optional[dict]]] = None,
          upcoming_fn: Optional[Callable[[str], Optional[dict]]] = None,
@@ -555,6 +639,7 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
             continue
         # 判断全部做完之后才挂影子记录：它在 compute_signal 之外，结构上就进不了任何判断
         sig["gex_ctx"] = gex_ctx(gex_fn, ticker, as_of, captured_on, captured_at)
+        sig["shadow_event"] = event_shadow(sig, snap.get("iv_term_structure"))
         signals.append(sig)
 
     # M4（v0.45.104）：重写该日的行之前，把 settle_signals 已经填好的实际波动搬过来。
@@ -588,6 +673,7 @@ def _default_bars(ticker: str) -> Optional[List[dict]]:
     return bars
 
 
+@ledger_io.locked_by(_signals_dir)
 def settle_signals(as_of: str, bars_fn: Optional[Callable[[str], Optional[List[dict]]]] = None) -> int:
     """财报已过（`earnings_date < as_of`）且未回填的信号：用同一两日窗口填实际波动。
     post 根还没出来的留到下次。返回本次回填条数。"""
@@ -597,8 +683,9 @@ def settle_signals(as_of: str, bars_fn: Optional[Callable[[str], Optional[List[d
     pending = defaultdict(list)
     for s in rows:
         ed = s.get("earnings_date")
-        if (s.get("eligible") and ed and ed < as_of and s.get("realized_abs_move_pct") is None
-                and _num(s.get("implied_event_move_pct")) is not None):
+        # v0.45.454：不再要求 implied_event_move_pct 非 None——事件波动触底的行 implied 现在是 None，
+        # 但它们的实际波动正是校准研究要的样本（realized_ratio 在下面对 implied 缺失给 None）。
+        if (s.get("eligible") and ed and ed < as_of and s.get("realized_abs_move_pct") is None):
             pending[s["ticker"]].append(s)
     if not pending:
         return 0

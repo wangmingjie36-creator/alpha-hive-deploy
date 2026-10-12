@@ -107,6 +107,9 @@ pre-commit 只是更早报错。
   省一轮「修一个、推、再被另一个拦」。
 * 绕过：同上，`git push --no-verify`（会连 CHANGELOG 检查一起跳过）。只在确认契约无误、
   是本闸自身出了问题时用，并把问题记下来。
+* **盘中撞上 Alpha Bot（v0.45.453）**：契约测试全过、唯一的红是真实数据根闸、且 conftest 已逐项核实变化全部是
+  Alpha Bot 盘中追加 ⇒ 照样拦，但提示「隔一两分钟重推」而**不**提示 `--no-verify`（`_alphabot_only_red`）。
+  不放行：放行就要信「看起来像 Alpha Bot」，而这正是数据根闸拒绝的东西。
 
 ⚠️ 薄调用（`_SHIM`）**没有变**：已装的 pre-push 钩子就是 `exec python changelog_guard.py --pre-push`，
 读的是当前 checkout 里的本文件 ⇒ 契约闸随本文件合入即生效，**不需要重装钩子**。
@@ -179,7 +182,12 @@ _REPORT_PLUGIN = '''\
 import json, os
 _OUT = os.environ["ALPHA_HIVE_CONTRACT_GATE_REPORT"]
 _S = {"selected": [], "item_files": {}, "deselected": [], "passed": [], "failed": [], "skipped": [],
-      "collect_errors": [], "collect_skipped": [], "exitstatus": None}
+      "collect_errors": [], "collect_skipped": [], "exitstatus": None, "real_data_root_verdict": None,
+      "teardown_exc_counts": {}}
+try:
+    _EG = BaseExceptionGroup
+except NameError:
+    _EG = ()
 def _rel(path):
     return os.path.relpath(os.path.realpath(str(path)), os.path.realpath(os.getcwd())).replace(os.sep, "/")
 def pytest_deselected(items):
@@ -193,6 +201,12 @@ def pytest_collectreport(report):
     elif report.skipped:
         why = report.longrepr[2] if isinstance(report.longrepr, tuple) else str(report.longrepr)
         _S["collect_skipped"].append(f"{report.nodeid or '<collection>'}（{why}）")
+def pytest_runtest_makereport(item, call):
+    # 会话级 fixture 都在最后一条测试的 teardown 里收尾，几道一起红时 pytest 合成**一个** ExceptionGroup、
+    # 只出一份报告（failed 里只有一条）——数清里面几个异常，`_alphabot_only_red` 才不会把「几道闸都红」认成「只有一道」
+    if call.when == "teardown" and call.excinfo is not None:
+        ev = call.excinfo.value
+        _S["teardown_exc_counts"][item.nodeid] = len(ev.exceptions) if isinstance(ev, _EG) else 1
 def pytest_runtest_logreport(report):
     if report.failed:
         _S["failed"].append(f"{report.nodeid}（{report.when}）")
@@ -202,6 +216,8 @@ def pytest_runtest_logreport(report):
         _S["passed"].append(report.nodeid)
 def pytest_sessionfinish(session, exitstatus):
     _S["exitstatus"] = int(exitstatus)
+    # 真实数据根闸的归因（tests/conftest.py 在报红前挂上；名字 = tests/_root_data_guard.VERDICT_CONFIG_ATTR）
+    _S["real_data_root_verdict"] = getattr(session.config, "_alpha_hive_real_data_root_verdict", None)
     with open(_OUT, "w", encoding="utf-8") as f:
         json.dump(_S, f, ensure_ascii=False)
 '''
@@ -402,6 +418,26 @@ def _contract_env(plugin_dir: Path, report_path: Path) -> dict:
     return env
 
 
+def _alphabot_only_red(rep: dict | None, problems: list) -> dict | None:
+    """唯一的红是真实数据根闸、且它已逐项核实变化**全部**是 Alpha Bot 盘中追加 ⇒ 返回那份归因；否则 None（v0.45.453）。
+
+    条件刻意窄：只有一条失败、它出在 teardown（数据根闸是 session 级 fixture，红在最后一条测试的 teardown）、
+    那次 teardown 里**恰好一个**异常、报告里没有任何别的问题、归因由 conftest 写明 `all_alphabot_appends`。
+    ⚠️ 「只有一条失败」不等于「只有一道闸红」（二次检查实测）：会话级 fixture 一起收尾，仓库根闸等同时红时
+    pytest 合成一个 ExceptionGroup、只出一份报告——所以还要看插件记的 `teardown_exc_counts`；记录缺失按不满足处理。
+    归因本身怎么核实见 `tests/_root_data_guard.explain_alphabot_appends`。
+    """
+    if not rep:
+        return None
+    verdict = rep.get("real_data_root_verdict") or {}
+    failed = rep.get("failed") or []
+    if (verdict.get("all_alphabot_appends") is True and len(failed) == 1 and failed[0].endswith("（teardown）")
+            and problems == [f"失败：{failed[0]}"]
+            and (rep.get("teardown_exc_counts") or {}).get(failed[0][:-len("（teardown）")]) == 1):
+        return verdict
+    return None
+
+
 def _run_contract_gate(hook: str, sha: str) -> int:
     """在被推提交 `sha` 的导出树里跑契约测试。0 = 放行，1 = 拦（原因已出声）。"""
     started = time.monotonic()
@@ -478,6 +514,14 @@ def _run_contract_gate(hook: str, sha: str) -> int:
         _say(hook, f"❌ 契约测试未通过（被推提交 {sha[:10]}，pytest 退出码 {p.returncode}，用时 {elapsed:.1f}s）：")
         for problem in problems or ["pytest 退出码非 0，但结果报告里没有失败条目——看上面的输出"]:
             _say(hook, f"    · {problem}")
+        verdict = _alphabot_only_red(rep, problems)
+        if verdict is not None:
+            # 照样拦（判定不变），但不建议 --no-verify：那会把 CHANGELOG 检查一起跳过，这里只需要等一下
+            _say(hook, "契约测试本身全部通过；唯一的红是真实数据根闸，且那些变化已核实**全部**是 Alpha Bot "
+                       f"盘中采样的追加（{verdict.get('alphabot_records')} 张快照）——不是被推代码的问题。")
+            _say(hook, "隔一两分钟（等 Alpha Bot 这一批写完）重推即可。**不要** `--no-verify`：它会连 CHANGELOG 检查一起跳过。")
+            _say(hook, "⚠️ 收盘后 / Alpha Bot 没在跑时仍这样报，就不是它——按测试写穿真实数据根查（见上面的报错）。")
+            return 1
         _say(hook, f"修好再推（本地复现：/usr/local/bin/python3 -m pytest -p no:cacheprovider {' '.join(files)}）。")
         _say(hook, _BYPASS_NOTE)
         return 1

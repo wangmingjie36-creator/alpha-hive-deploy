@@ -2,10 +2,13 @@
 Alpha Hive 测试 fixtures - 共享 mock 数据 + 隔离数据库
 """
 
+import datetime
+import time
 import sys
 import os
 import pathlib
 import site
+import threading
 import weakref
 import pytest
 
@@ -359,6 +362,61 @@ def _block_git_transport_probe(request, monkeypatch):
     monkeypatch.setattr(_gtp, "_tcp_connect", _deny_connect)
     request.node._git_probe_calls = calls
     yield
+
+
+#: 当前测试的快照出网闸状态：`calls` 记被拦的调用（供闸自身的测试核对），`allow_real` 只给 network 标记的用例
+_SNAPSHOT_FETCH_GATE = {"calls": [], "allow_real": False}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cloud_snapshot_fetch_gate():
+    """`cloud_snapshot_loader._git_fetch`（v0.45.466）在 **git 子进程**里出网——上面两道（库级 API / 裸 socket）
+    都挡不住。补跑入口 `_snapshot_ctx`、每日观测 `lag_summary`、入场价回填都会走到它，而缺省仓库就是本检出
+    （origin = GitHub）。
+
+    **session 级装、整个会话不撤**（v0.45.466 二次检查）：每日观测跑在后台线程里，线程可能活过起它的那条测试——
+    函数级 monkeypatch 在 teardown 撤掉闸之后它再拉，就真出网了（test_production_sync 的 main 用例实测会这样）。
+    只放行 origin 是**本地路径**的仓库（测试自己建的裸仓库：fetch 不出网，测试要真跑它）；其余抛 `_OfflineInTests`
+    （与真断网同一条降级路径）并记账。`network` 标记的用例经 `_SNAPSHOT_FETCH_GATE["allow_real"]` 放行。
+    """
+    import subprocess
+    import cloud_snapshot_loader as _csl
+    real = _csl._git_fetch
+
+    def _gated(repo, timeout):
+        url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=repo,
+                             capture_output=True, text=True).stdout.strip()
+        if _SNAPSHOT_FETCH_GATE["allow_real"] or (url and (os.path.isabs(url) or url.startswith("file://"))):
+            return real(repo, timeout)
+        _SNAPSHOT_FETCH_GATE["calls"].append((repo, url))
+        raise _OfflineInTests(f"测试默认离线：cloud_snapshot_loader 要从 {url or '（无 origin）'} "
+                              "拉 cloud-snapshots（tests/conftest.py）")
+
+    _csl._git_fetch = _gated
+    yield
+    _csl._git_fetch = real
+
+
+@pytest.fixture(autouse=True)
+def _cloud_snapshot_per_test_state(request, monkeypatch):
+    """每条测试清空本进程的刷新 / 告警记录（免得上一条刷新过，下一条的「本地陈旧还是云端没有」跟着变），
+    并在收尾时**等本条测试起的每日观测线程做完**：活过测试的线程会把刷新记录写进下一条测试的表里。"""
+    import cloud_snapshot_loader as _csl
+    monkeypatch.setattr(_csl, "_REFRESHED", {})
+    monkeypatch.setattr(_csl, "_WARNED", set())
+    calls: list = []
+    monkeypatch.setitem(_SNAPSHOT_FETCH_GATE, "calls", calls)
+    monkeypatch.setitem(_SNAPSHOT_FETCH_GATE, "allow_real", bool(request.node.get_closest_marker("network")))
+    request.node._snapshot_fetch_calls = calls
+    yield
+    adr = sys.modules.get("alpha_hive_daily_report")
+    if adr is None:
+        return                      # 没导入过日报 ⇒ 不可能起过观测线程
+    name = adr._CloudSnapshotObservation.THREAD_NAME
+    for t in threading.enumerate():
+        if t.name == name:
+            t.join(15)
+            assert not t.is_alive(), f"每日观测线程 {name} 活过了起它的测试（15 秒没做完）——它会污染后面的测试"
 
 
 # ==================== 可复用的显式源桩（各模块 opt-in）====================
@@ -1330,9 +1388,15 @@ _ROOT_FP_BEFORE = pytest.StashKey[dict]()
 
 
 _DATA_ROOT_BEFORE = pytest.StashKey[tuple]()
+_DATA_ROOT_ALPHABOT = pytest.StashKey[tuple]()
+# v0.45.455：两道 session 级总闸报红时，逐文件标出「写入时刻在跑哪条测试」要用的本轮开始时刻与时间线。
+_SESSION_START_WALL = pytest.StashKey[float]()
 
 
 def pytest_sessionstart(session):
+    # 先记开始时刻再取指纹：取指纹期间被写的文件，mtime 也不会早于这个时刻（否则会被误标成「保留了旧 mtime」）
+    session.config.stash[_SESSION_START_WALL] = time.time()
+    _GATE_TIMELINE.clear()
     session.config.stash[_ROOT_FP_BEFORE] = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)
     # 真实数据根：按**调用 pytest 时**的环境取——`pytest_configure` 已把 ALPHA_HIVE_HOME 换成会话沙箱
     # （v0.45.422），`_isolate_env` 之后还会逐条换。读 os.environ 就会把沙箱当成「真实数据根」，闸当场失明。
@@ -1341,6 +1405,28 @@ def pytest_sessionstart(session):
         invoked, invoked.get("HOME") or os.path.expanduser("~"), _REPO_ROOT_FOR_GUARD)
     session.config.stash[_DATA_ROOT_BEFORE] = (
         root, _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason) if root else None)
+    # v0.45.453：报红时分辨「全部是 Alpha Bot 盘中追加」要用的起点（会话开始时刻 + 近两天盘中文件的哈希）。只影响措辞。
+    _fp = session.config.stash[_DATA_ROOT_BEFORE][1]
+    session.config.stash[_DATA_ROOT_ALPHABOT] = (
+        datetime.datetime.now(datetime.timezone.utc),
+        _root_data_guard.alphabot_baseline(root, _fp, datetime.date.today()) if root else {})
+
+
+#: 本轮时间线：`pytest_runtest_logreport` 拿不到 config，只能经模块级引用写（`pytest_sessionstart` 清空）。
+_GATE_TIMELINE: list = []
+
+
+def pytest_runtest_logreport(report):
+    """逐条测试逐阶段记 (开始, 结束, nodeid, 阶段)——只给两道总闸报红时定位用（v0.45.455）。
+    `report.start/stop` 是 pytest 自留的墙钟，测试 mock `time` 改不到；与文件 mtime 可直接比。"""
+    _GATE_TIMELINE.append((report.start, report.stop, report.nodeid, report.when))
+
+
+def _gate_timeline(config) -> tuple:
+    """(本轮开始时刻 | None, 时间线)。时间线直接读模块级那份——v0.45.460：曾从 stash 取、取不到给 `[]`，
+    sessionstart 没调到本 conftest 时会把**已记下**的时间线扔掉、全标成「收集期」（实际调用里几乎走不到：
+    pytest 把参数下 `test*` 子目录的 conftest 也当 initial 加载）。开始时刻取不到就是 None，`locate` 会照实说。"""
+    return config.stash.get(_SESSION_START_WALL, None), _GATE_TIMELINE
 
 
 def pytest_report_header(config):
@@ -1355,8 +1441,9 @@ def pytest_report_header(config):
 def _guard_repo_root_default_deny(request):
     """整个 session（含收集期）跑完，仓库根下的非代码内容必须一个字节都没变。
 
-    ⚠️ 与上面那道一样是 session 级的：红在整轮末尾，不指出是哪条测试写的。
-    定位：对红出来的路径 patch `builtins.open` / `os.makedirs` / `sqlite3.connect`
+    ⚠️ 与上面那道一样是 session 级的：红在整轮末尾，pytest 把它记在收集序最后一条测试名下（与原因无关）。
+    v0.45.455 起报错逐文件给出「mtime 落在哪条测试的哪个阶段」——只是时间重合，并发写入者照样会落在
+    无关测试期间。要确认是谁写的：对红出来的路径 patch `builtins.open` / `os.makedirs` / `sqlite3.connect`
     记 `nodeid` 与调用栈；或二分跑测试文件。
     ⚠️ 在**生产 checkout** 里跑时，每日扫描、别的 session 往生产目录写的东西都会让它红——
     那是真实存在的「测试与生产写同一批文件」的时间窗，不是假警报（数据根迁移阶段 5 之后才会消失）。
@@ -1368,13 +1455,18 @@ def _guard_repo_root_default_deny(request):
 
     yield
 
-    changes = _root_data_guard.diff(before, _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD))
+    after = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)
+    changes = _root_data_guard.diff(before, after)
+    if not changes:
+        return
+    started, timeline = _gate_timeline(request.config)
     assert not changes, (
-        f"测试往**仓库根**写了非代码内容（checkout 根目录 = {_REPO_ROOT_FOR_GUARD}）：\n"
+        f"本轮期间**仓库根**的非代码内容被改动了（checkout 根目录 = {_REPO_ROOT_FOR_GUARD}）：\n"
         f"{_root_data_guard.format_diff(changes)}\n\n"
         + ("⚠️ 基线取自 session fixture setup（sessionstart 未生效），收集期写入不在本次比对范围内。\n"
            if late else "")
-        + "被测代码的写入路径绕过了 `ALPHA_HIVE_HOME` 隔离：多半是 `Path(__file__).parent / 数据名`、"
+        + f"{_root_data_guard.timeline_section(_REPO_ROOT_FOR_GUARD, changes, after, timeline, started)}\n\n"
+        "若是测试写的：被测代码的写入路径绕过了 `ALPHA_HIVE_HOME` 隔离——多半是 `Path(__file__).parent / 数据名`、"
         "cwd 相对路径，或把 `PATHS.*` 求值成了模块级常量 / 类属性 / 默认参数。"
         "改成调用时读 `PATHS.*`。\n"
         "**不要**往 `tests/_root_data_guard.py` 的豁免里加数据路径——那里只放人写的代码。")
@@ -1390,7 +1482,8 @@ def _guard_real_data_root(request):
     v0.45.427——`PATHS.data_backup_repo` 让测试碰得到它，10-03 夹具就是写进了这里）、`(size, mtime_ns)`、
     `-shm` 只记大小。「之前」取在 `pytest_sessionstart`（收集期之前），理由见仓库根闸一节。
 
-    ⚠️ 与仓库根闸同样是 session 级：红在整轮末尾，不指出是哪条测试写的（定位法见仓库根闸）。
+    ⚠️ 与仓库根闸同样是 session 级：红在整轮末尾、记在最后一条测试名下；逐文件写入时刻落在哪条测试期间
+    见报错（v0.45.455，只是时间重合），确认法见仓库根闸。
     ⚠️ **机器上正在跑每日扫描 / 周任务时它会红**（扫描写 `cache/`、`report_snapshots/`、`paper_portfolio_state/`…）——
     那不是假警报，是「测试与生产写同一批文件的时间窗真实存在」；平日 14:00–15:00 与周日 09:07 前后别跑全套。
     ⚠️ 没有真实数据根的机器上（CI / 干净克隆）本闸不做任何事（`pytest_report_header` 会说明）；它的牙由
@@ -1402,15 +1495,53 @@ def _guard_real_data_root(request):
 
     if root is None:
         return
-    changes = _root_data_guard.diff(
-        before, _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason))
-    assert not changes, (
-        f"测试写到了**真实数据根**（{root}）里的生产数据：\n"
+    after = _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason)
+    changes = _root_data_guard.diff(before, after)
+    if not changes:
+        return
+    started, baseline = request.config.stash.get(_DATA_ROOT_ALPHABOT, (None, {}))
+    v = _root_data_guard.explain_alphabot_appends(
+        root, changes, before, baseline, started, datetime.datetime.now(datetime.timezone.utc))
+    # 给 pre-push 契约闸的报告插件读（`changelog_guard._REPORT_PLUGIN`）：只有这里能逐项核实，钩子不抠输出文本
+    setattr(request.config, _root_data_guard.VERDICT_CONFIG_ATTR, {
+        "all_alphabot_appends": not v["unexplained"], "alphabot_files": sum(
+            1 for p in v["explained"] if p.endswith(".jsonl")),
+        "alphabot_records": v["records"], "unexplained": sum(len(x) for x in v["unexplained"].values())})
+    started_wall, timeline = _gate_timeline(request.config)
+    assert not changes, _real_data_root_message(root, changes, v) + "\n\n" + _root_data_guard.timeline_section(
+        root, changes, after, timeline, started_wall)
+
+
+def _real_data_root_message(root, changes: dict, v: dict) -> str:
+    """真实数据根闸的报错文案（v0.45.453 起按 `explain_alphabot_appends` 分三种；判定不受影响，照样红）。
+    v0.45.455 起调用方在其后接 `timeline_section`（逐文件写入时刻落在哪条测试期间），三种措辞都带。"""
+    if v["explained"] and not v["unexplained"]:
+        n_files = sum(1 for p in v["explained"] if p.endswith(".jsonl"))
+        return (
+            f"真实数据根（{root}）有变化，但**全部**是 Alpha Bot 盘中采样的追加——已逐项核实，不是测试写的：\n"
+            f"{_root_data_guard.format_diff(changes)}\n"
+            f"  {n_files} 个文件只在末尾新增了 {v['records']} 张快照：原有内容逐字节未变，快照时间都落在本轮测试期间。\n\n"
+            "判定照样是红（闸只认「没有变化」，不认「看起来像合法写入」）。处置：Alpha Bot 盘中按设定间隔整批写、"
+            "每批几十秒，等这一批写完重跑 / 重推即可。\n"
+            "**不要** `git push --no-verify`（会连 CHANGELOG 检查一起跳过），也**不要**往 `tests/_root_data_guard.py` "
+            "的豁免里加路径。\n"
+            "⚠️ 收盘后、或 Alpha Bot 根本没在跑时仍出现这条，就**不是**它——按测试写穿查："
+            "测试若绕过隔离、用 Alpha Bot 自己的代码往真实数据根写快照，长得和它一模一样。")
+    msg = (
+        f"本轮期间**真实数据根**（{root}）里的生产数据被改动了：\n"
         f"{_root_data_guard.format_diff(changes)}\n\n"
-        "被测代码绕过了 `ALPHA_HIVE_HOME` 隔离：多半是 `Path(__file__).parent / 数据名`、模块级常量冻结、"
+        "若是测试写的：被测代码绕过了 `ALPHA_HIVE_HOME` 隔离——多半是 `Path(__file__).parent / 数据名`、模块级常量冻结、"
         "subprocess 丢了 env，或硬编码了 `~/alpha-hive-data`。改成调用时读 `PATHS.*`。\n"
         "若这是每日扫描 / 周任务恰好在写（不是测试）：等它结束再跑。\n"
         "**不要**往 `tests/_root_data_guard.py` 的豁免里加数据路径。")
+    if v["explained"]:
+        msg += (f"\n\n其中 {len(v['explained'])} 项已核实是 Alpha Bot 盘中追加（{v['records']} 张快照）；"
+                "**其余这些不能归因于它，问题在这里**：\n"
+                f"{_root_data_guard.format_diff(v['unexplained'])}")
+    if v["why"]:
+        msg += "\n\nAlpha Bot 目录下没能归因的项及原因：\n" + "\n".join(
+            f"    {p}：{r}" for p, r in sorted(v["why"].items()))
+    return msg
 
 
 # ==================== hive_logger 文件日志隔离（v0.45.239） ====================

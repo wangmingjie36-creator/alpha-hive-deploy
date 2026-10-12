@@ -27,6 +27,7 @@ from typing import Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import sell_strike_report as R
+from alphabot import hedge as HG
 from alphabot import straddle as SD
 from hive_logger import PATHS, get_logger
 
@@ -267,6 +268,7 @@ class AlphaBotService:
                        "tenors": C.TENORS, "structures": list(C.STRUCTURES)},
             "prereg": {k: (list(v) if isinstance(v, tuple) else v) for k, v in R.LG.PREREG.items()},
             "straddle": self.straddle_rules(),
+            "hedge": self.hedge_rules(),
         })
 
     # ── 财报跨式账本（v0.45.424，只读）
@@ -316,6 +318,33 @@ class AlphaBotService:
         led = self._straddle_ledger(now)
         return clean_json(SD.build_overview(led, now_et=now, rules=self.straddle_rules(),
                                             shadow=self._straddle_shadow(led.get("signals") or [])))
+
+    # ── 对冲账本（v0.45.459，只读）：组合 Greeks 的纸面 SPY 覆盖
+    def _hedge_view(self, now: datetime) -> dict:
+        """数据只经账本属主的只读视图 `portfolio_greeks.ledger_view`（历史走 `load_history` 的放行闸）。
+        数据根与跨式页同一个（`straddle_root`；None ⇒ 调用时的 PATHS.home）。懒 import：它 import 时就求值数据根，
+        环境没设好时不能连坐整个 Alpha Bot；取不到就写明原因。"""
+        if self.demo:
+            from alphabot import synthetic as syn
+            return syn.demo_hedge_view(now.date().isoformat())
+        try:
+            import portfolio_greeks as pg
+            return pg.ledger_view(self.straddle_root)
+        except Exception as exc:  # noqa: BLE001 - 如实说读不了，不当成空账本
+            _log.warning("对冲账本视图不可得：%s: %s", type(exc).__name__, exc)
+            return {"exists": False, "state_dir": None, "errors": {"view": f"{type(exc).__name__}: {exc}"}}
+
+    def hedge_rules(self) -> dict:
+        """对冲页与帮助页用的规则常量——取 `portfolio_greeks.CONFIG` 那一份，不在前端另抄。"""
+        try:
+            import portfolio_greeks as pg
+            return {k: pg.CONFIG.get(k) for k in pg.PUBLIC_RULE_KEYS} | {"measurement_start": pg.MEASUREMENT_START}
+        except Exception as exc:  # noqa: BLE001
+            return {"rules_error": f"{type(exc).__name__}: {exc}"}
+
+    def hedge(self) -> dict:
+        now = self.now_fn()
+        return clean_json(HG.build_overview(self._hedge_view(now), now_et=now))
 
     def _straddle_quote(self, t: str, symbols: List[str]) -> dict:
         if self.straddle_quote_fn is not None:

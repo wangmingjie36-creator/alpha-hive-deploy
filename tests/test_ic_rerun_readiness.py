@@ -209,6 +209,8 @@ class TestCohortReasonsAreNotRewrittenInPlace:
 
     #: version → (日期, sha256(reason))。
     FROZEN = {
+        # v0.45.472 补登（插在表头、日期早于全部既有条目）：摘要取自本版提交的原文（进 main 后即 origin/main 的原文）。
+        "v0.34.0": ("2026-06-30", "5d65425849645c7e5b723b33138e7e815c48e2f176fcda77850931577dbbacea"),
         "v0.43.24": ("2026-08-15", "70d4460cb9de121956fddee2464a22eec06710f83da9b5ac6938edc3193103aa"),
         "v0.43.25": ("2026-08-15", "7c1be5d0a8ca600963acc9d599444e621cdbeda64b3e3d9982a72a2d0d1811a1"),
         "v0.44.1~0.44.3": ("2026-08-17", "5d9ee95680b587493bc3e83b77cac777ae66c5ec2be72360d27e04f178009fdc"),

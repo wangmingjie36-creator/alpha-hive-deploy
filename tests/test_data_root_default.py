@@ -12,8 +12,10 @@
 import os
 from pathlib import Path
 
+import pytest
+
 import hive_logger
-from hive_logger import DEFAULT_DATA_ROOT_NAME, PATHS, resolve_data_root
+from hive_logger import DEFAULT_DATA_ROOT_NAME, PATHS, explicit_data_root, resolve_data_root
 from tests import _root_data_guard
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # 与 conftest._REPO_ROOT_FOR_GUARD 同式
@@ -36,6 +38,16 @@ class TestResolveDataRoot:
         monkeypatch.setenv("HOME", str(tmp_path / "h"))
         monkeypatch.setenv("ALPHA_HIVE_HOME", "")
         assert PATHS.home == tmp_path / "h" / "alpha-hive-data"
+
+    @pytest.mark.parametrize("raw, want", [(None, None), ("", None), ("~/x", "~/x"), ("rel/x", "rel/x"), ("/abs/x", "/abs/x")])
+    def test_explicit_part_is_taken_verbatim(self, tmp_path, raw, want):
+        """`explicit_data_root` 是 `resolve_data_root` 的前一半：原样、不展开 `~`、不按 cwd 解析（v0.45.461：.app
+        生成器此前自己 expanduser，字面 `~/x` 与扫描读到的不是一个目录）。给了就与 `resolve_data_root` 完全相同。"""
+        env = {"HOME": str(tmp_path / "h")} if raw is None else {"HOME": str(tmp_path / "h"), "ALPHA_HIVE_HOME": raw}
+        got = explicit_data_root(env)
+        assert got == (None if want is None else Path(want))
+        if got is not None:
+            assert resolve_data_root(env) == got
 
     def test_explicit_value_wins(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path / "h"))

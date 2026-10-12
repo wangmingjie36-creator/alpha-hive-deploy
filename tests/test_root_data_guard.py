@@ -16,6 +16,8 @@ v0.45.409（阶段 6 ⑤）追加**真实数据根闸**的同三层：判据（`
 """
 from __future__ import annotations
 
+import datetime as dt
+import json
 import os
 import shutil
 import site
@@ -403,7 +405,7 @@ def test_session_gate_is_red_on_real_writes(tmp_path):
     out = r.stdout + r.stderr
     assert r.returncode != 0, out
     assert "1 passed, 1 error" in out, f"应是测试本身通过、总闸在 teardown 报错：\n{out}"
-    assert "测试往**仓库根**写了非代码内容" in out, out
+    assert "本轮期间**仓库根**的非代码内容被改动了" in out, out
     # 逐行核对运行时 diff（顺序 + 内容），而不只是「路径字样出现过」。
     # 去掉行首尾空白再比：native traceback 会给消息续行多缩进两格。
     expected = "\n".join(["added（3）：", "brand_new_dir", "brand_new_dir/f.bin", "written_at_collection.json",
@@ -467,7 +469,7 @@ def test_real_data_root_gate_is_red_on_escaping_writes(tmp_path):
     out = r.stdout + r.stderr
     assert r.returncode != 0, out
     assert "1 passed, 1 error" in out, f"应是测试本身通过、总闸在 teardown 报错：\n{out}"
-    assert "测试写到了**真实数据根**" in out, out
+    assert "本轮期间**真实数据根**" in out and "若是测试写的" in out, out
     expected = "\n".join(["added（3）：", "new_dir", "report_snapshots/b.json", "written_at_collection.json",
                           "changed（1）：", "pheromone.db"])
     normalized = "\n".join(line.strip() for line in out.splitlines())
@@ -533,3 +535,380 @@ def test_real_data_root_gate_says_inactive_when_there_is_no_data_root(tmp_path):
     out = r.stdout + r.stderr
     assert r.returncode == 0, out
     assert "real-data-root guard: INACTIVE" in out, out
+
+
+# ───────────────── 4. Alpha Bot 盘中追加：只改措辞、不改红绿（v0.45.453） ─────────────────
+
+_ET = dt.timezone(dt.timedelta(hours=-4))
+
+
+def _snap(ts: dt.datetime, **extra) -> dict:
+    rec = {"ts": ts.isoformat(timespec="seconds"), "payload_last_trade_time": "2026-10-09T15:50:00",
+           "underlying_price": 100.0, "underlying_price_source": "cboe_intraday", "session_live": True,
+           "iv30": 0.3, "views": {}, "route": {}}
+    rec.update(extra)
+    return rec
+
+
+def _line(rec) -> bytes:
+    return (json.dumps(rec) + "\n").encode()
+
+
+class TestAlphabotAppendClassifier:
+    """归因要逐项核实：九种「看起来像、其实不是」都必须落进「其余」（宁可报成测试写的）。"""
+
+    @staticmethod
+    def _setup(tmp_path, *, with_file=True, tz=_ET):
+        root = tmp_path / "dr"
+        now = dt.datetime.now(tz)
+        rel = f"alphabot_state/intraday/{now.date().isoformat()}/NVDA.jsonl"
+        (root / "alphabot_state/intraday").mkdir(parents=True)    # 生产里早就有（每天的日期目录建在它下面）
+        (root / "pheromone.db").write_bytes(b"db")
+        if with_file:
+            (root / rel).parent.mkdir(parents=True)
+            (root / rel).write_bytes(_line(_snap(now - dt.timedelta(hours=1))))
+        before = g.fingerprint(str(root), g.data_root_excluded_reason)
+        # 截止日按目录那天算（不用本机日期）：UTC+13/+14 的机器上，本机「今天 − 1」会晚于 UTC−12 目录的日期
+        baseline = g.alphabot_baseline(str(root), before, now.date())
+        started = dt.datetime.now(dt.timezone.utc)
+        # 用例追加的快照一律用这个 now：再取一次「现在」，跨美东午夜时日期就和目录对不上（偶发红）
+        return root, rel, before, baseline, started, now
+
+    @staticmethod
+    def _explain(root, before, baseline, started):
+        time.sleep(0.01)    # mtime_ns 要能分辨
+        changes = g.diff(before, g.fingerprint(str(root), g.data_root_excluded_reason))
+        return changes, g.explain_alphabot_appends(str(root), changes, before, baseline, started,
+                                                   dt.datetime.now(dt.timezone.utc))
+
+    def test_append_by_alphabot_is_explained(self, tmp_path):
+        root, rel, before, baseline, started, now = self._setup(tmp_path)
+        assert rel in baseline, "夹具前提：起点哈希记下了当天的盘中文件"
+        with open(root / rel, "ab") as f:
+            f.write(_line(_snap(now)) + _line(_snap(now)))
+        changes, v = self._explain(root, before, baseline, started)
+        assert changes == {"changed": [rel]}
+        assert v["explained"] == [rel] and v["records"] == 2 and v["unexplained"] == {} and v["why"] == {}
+
+    def test_first_batch_of_a_new_day_is_explained(self, tmp_path):
+        """开盘第一批：日期目录与文件都是新建的。"""
+        root, rel, before, baseline, started, now = self._setup(tmp_path, with_file=False)
+        (root / rel).parent.mkdir(parents=True)
+        (root / rel).write_bytes(_line(_snap(now)))
+        changes, v = self._explain(root, before, baseline, started)
+        day = str(Path(rel).parent)
+        assert changes == {"added": sorted([day, rel])}
+        assert v["explained"] == sorted([day, rel]) and v["unexplained"] == {}
+
+    @pytest.mark.parametrize("case", ["rewrite_prefix", "ts_outside_window", "extra_key", "not_json",
+                                      "partial_line", "no_baseline", "outside_intraday", "removed", "truncated",
+                                      "demo_source"])
+    def test_lookalikes_are_not_explained(self, tmp_path, case):
+        root, rel, before, baseline, started, now = self._setup(tmp_path)
+        p = root / rel
+        target = rel
+        if case == "rewrite_prefix":
+            p.write_bytes(_line(_snap(now - dt.timedelta(hours=2))) + _line(_snap(now)))
+        elif case == "ts_outside_window":
+            with open(p, "ab") as f:
+                f.write(_line(_snap(now - dt.timedelta(minutes=30))))
+        elif case == "extra_key":
+            with open(p, "ab") as f:
+                f.write(_line(_snap(now, written_by="a test")))
+        elif case == "not_json":
+            with open(p, "ab") as f:
+                f.write(b"hello\n")
+        elif case == "partial_line":
+            with open(p, "ab") as f:
+                f.write(json.dumps(_snap(now)).encode())
+        elif case == "no_baseline":
+            baseline = {}
+            with open(p, "ab") as f:
+                f.write(_line(_snap(now)))
+        elif case == "outside_intraday":
+            target = "alphabot_state/settings.json"
+            (root / target).write_text("{}")
+        elif case == "removed":
+            p.unlink()
+        elif case == "truncated":
+            p.write_bytes(b"")
+        elif case == "demo_source":
+            # v0.45.455/460：用演示服务**真写**一行（与 test_alphabot 的 IntradayPoller 用例同一条路径：真时钟、
+            # 合成数据），而不是手写——手写的行证明不了真写出来的长这样。写进 tmp 的 state_dir，再接到夹具文件后面。
+            from alphabot.service import AlphaBotService
+            import alphabot.synthetic as syn
+            svc = AlphaBotService(fetch_fn=syn.demo_fetch, state_dir=tmp_path / "ab_state")
+            assert svc.state_dir() == tmp_path / "ab_state", "夹具前提：写进 tmp，不经 PATHS"
+            assert svc.take_snapshot("NVDA", now=now)["recorded"] is True
+            written = (tmp_path / "ab_state/intraday" / now.date().isoformat() / "NVDA.jsonl").read_bytes()
+            rec = json.loads(written)
+            assert set(rec) == g.ALPHABOT_SNAPSHOT_KEYS and rec["underlying_price_source"] == g.ALPHABOT_DEMO_SOURCE, \
+                f"夹具前提：演示服务真写出的行键集合对得上、来源是 demo——否则这条测的不是那个缺口：{rec}"
+            with open(p, "ab") as f:
+                f.write(written)
+        _changes, v = self._explain(root, before, baseline, started)
+        assert v["explained"] == [], f"{case}：被错误归因成 Alpha Bot"
+        assert any(target in items for items in v["unexplained"].values()), v
+        if case not in ("removed",):
+            assert target in v["why"], f"{case}：Alpha Bot 目录下没能归因的项要给出原因"
+
+    def test_snapshot_date_must_match_the_directory(self, tmp_path):
+        """时刻在窗口内、但按记录自己的时区落在另一天（-12 与 +14 相差 26 小时，日期必不同）。"""
+        root, rel, before, baseline, started, now = self._setup(tmp_path, tz=dt.timezone(dt.timedelta(hours=-12)))
+        with open(root / rel, "ab") as f:
+            f.write(_line(_snap(dt.datetime.now(dt.timezone(dt.timedelta(hours=14))))))
+        _changes, v = self._explain(root, before, baseline, started)
+        assert v["explained"] == [] and "目录日期" in v["why"][rel], v
+
+    def test_mixed_changes_name_the_rest(self, tmp_path):
+        root, rel, before, baseline, started, now = self._setup(tmp_path)
+        with open(root / rel, "ab") as f:
+            f.write(_line(_snap(now)))
+        with open(root / "pheromone.db", "ab") as f:
+            f.write(b"x")
+        _changes, v = self._explain(root, before, baseline, started)
+        assert v["explained"] == [rel] and v["unexplained"] == {"changed": ["pheromone.db"]}
+
+    def test_without_a_session_start_nothing_is_explained(self, tmp_path):
+        root, rel, before, baseline, _started, now = self._setup(tmp_path)
+        with open(root / rel, "ab") as f:
+            f.write(_line(_snap(now)))
+        _changes, v = self._explain(root, before, baseline, None)
+        assert v["explained"] == [] and v["unexplained"] == {"changed": [rel]}
+
+    def test_append_landing_between_fingerprint_and_baseline_is_still_explained(self, tmp_path):
+        """二次检查发现的竞态：会话开始时先拍指纹、后算起点哈希，Alpha Bot 恰在两者之间追加一行。
+        旧实现按指纹里的旧大小比前缀 ⇒ 哈希必不符 ⇒ 一次真的 Alpha Bot 写入被说成「原有内容被改写」。"""
+        root = tmp_path / "dr"
+        now = dt.datetime.now(_ET)
+        rel = f"alphabot_state/intraday/{now.date().isoformat()}/NVDA.jsonl"
+        (root / rel).parent.mkdir(parents=True)
+        (root / rel).write_bytes(_line(_snap(now - dt.timedelta(hours=1))))
+        before = g.fingerprint(str(root), g.data_root_excluded_reason)        # ① 指纹
+        with open(root / rel, "ab") as f:                                      # Alpha Bot 恰在 ①② 之间写
+            f.write(_line(_snap(now)))
+        baseline = g.alphabot_baseline(str(root), before, now.date())          # ② 起点哈希
+        started = dt.datetime.now(dt.timezone.utc)
+        with open(root / rel, "ab") as f:                                      # 会话期间再一批
+            f.write(_line(_snap(now)))
+        _changes, v = self._explain(root, before, baseline, started)
+        assert v["explained"] == [rel] and v["records"] == 2 and v["why"] == {}, v
+
+    def test_deeply_nested_line_is_unexplained_not_a_crash(self, tmp_path):
+        root, rel, before, baseline, started, now = self._setup(tmp_path)
+        with open(root / rel, "ab") as f:
+            f.write(b"[" * 100_000 + b"\n")                                 # json.loads 抛 RecursionError
+        _changes, v = self._explain(root, before, baseline, started)
+        assert v["explained"] == [] and v["why"][rel] == "新增行不是 JSON", v
+
+    def test_keys_match_the_writer(self):
+        """键集合必须就是 Alpha Bot 写的那一份——它改了字段而这里没跟，归因就会恒失败（退回原措辞，不会误放）。"""
+        from alphabot.service import AlphaBotService
+        assert set(AlphaBotService.snapshot_from({}, "2026-10-09T15:50:35-04:00")) == g.ALPHABOT_SNAPSHOT_KEYS
+
+
+def _make_data_root_with_alphabot(path: Path) -> tuple[Path, str]:
+    data_root = _make_data_root(path)
+    now = dt.datetime.now(_ET)
+    rel = f"alphabot_state/intraday/{now.date().isoformat()}/NVDA.jsonl"
+    (data_root / rel).parent.mkdir(parents=True)
+    (data_root / rel).write_bytes(_line(_snap(now - dt.timedelta(hours=1))))
+    return data_root, rel
+
+
+_INNER_ALPHABOT_APPEND = """
+    import datetime as dt, json, os, pathlib
+    DR = pathlib.Path(os.environ["INNER_DATA_ROOT"])
+    REL = os.environ["INNER_ALPHABOT_REL"]
+
+    def _append_like_alphabot():
+        et = dt.timezone(dt.timedelta(hours=-4))
+        now = dt.datetime.now(et)
+        day = REL.split("/")[2]
+        if now.date().isoformat() != day:            # 外层建目录后跨过了美东午夜：贴着目录那天的末尾记
+            now = dt.datetime.combine(dt.date.fromisoformat(day), dt.time(23, 59, 59), tzinfo=et)
+        rec = {"ts": now.isoformat(timespec="seconds"), "payload_last_trade_time": "t", "underlying_price": 1.0,
+               "underlying_price_source": "cboe_intraday", "session_live": True, "iv30": 0.3, "views": {}, "route": {}}
+        with open(DR / REL, "a", encoding="utf-8") as f:     # 模拟测试期间 Alpha Bot 落盘的一批
+            f.write(json.dumps(rec) + "\\n")
+"""
+
+
+def _gate_plugin_env(tmp_path: Path) -> tuple[dict, Path]:
+    """让内层 pytest 加载 pre-push 契约闸**原样**的报告插件——真 conftest 挂的归因要能被真插件读到。"""
+    sys.path.insert(0, str(_ROOT))
+    import changelog_guard as cg
+    plug = tmp_path / "gate_plugin"
+    plug.mkdir()
+    (plug / "_alpha_hive_contract_gate_report.py").write_text(cg._REPORT_PLUGIN, encoding="utf-8")
+    report = tmp_path / "gate_report.json"
+    return ({"PYTHONPATH": str(plug), "PYTEST_ADDOPTS": "-p _alpha_hive_contract_gate_report",
+             "ALPHA_HIVE_CONTRACT_GATE_REPORT": str(report)}, report)
+
+
+def test_real_data_root_gate_names_alphabot_but_stays_red(tmp_path):
+    """端到端：变化只有 Alpha Bot 式追加 ⇒ 照样红，但说清是 Alpha Bot、劝别 --no-verify，且不再说「测试写穿」。"""
+    data_root, rel = _make_data_root_with_alphabot(tmp_path / "alpha-hive-data")
+    root = _make_fake_checkout(tmp_path / "checkout", _INNER_ALPHABOT_APPEND + """
+    def test_alphabot_writes_meanwhile():
+        _append_like_alphabot()
+    """)
+    gate_env, report = _gate_plugin_env(tmp_path)
+    r = _run_inner_pytest(root, {"ALPHA_HIVE_HOME": str(data_root), "INNER_DATA_ROOT": str(data_root),
+                                 "INNER_ALPHABOT_REL": rel, **gate_env})
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, f"判定被改了：只有 Alpha Bot 追加也必须红\n{out}"
+    assert "1 passed, 1 error" in out, out
+    assert "**全部**是 Alpha Bot 盘中采样的追加" in out and "1 张快照" in out, out
+    assert "不要** `git push --no-verify`" in out, out
+    assert "若是测试写的" not in out and "本轮期间**真实数据根**" not in out, \
+        f"已核实是 Alpha Bot，却仍用怀疑测试写穿的措辞\n{out}"
+    # 真 conftest → 真报告插件 → 真判定函数：pre-push 会据此改提示（不劝 --no-verify）
+    import changelog_guard as cg
+    rep = json.loads(report.read_text(encoding="utf-8"))
+    assert rep["real_data_root_verdict"] == {"all_alphabot_appends": True, "alphabot_files": 1,
+                                             "alphabot_records": 1, "unexplained": 0}, rep
+    assert cg._alphabot_only_red(rep, [f"失败：{n}" for n in rep["failed"]]) is not None, rep
+
+
+def test_real_data_root_gate_keeps_blaming_tests_when_anything_else_changed(tmp_path):
+    """端到端：Alpha Bot 追加 + 测试写穿另一个文件 ⇒ 原措辞，且把「不能归因」的那项单独点名。"""
+    data_root, rel = _make_data_root_with_alphabot(tmp_path / "alpha-hive-data")
+    root = _make_fake_checkout(tmp_path / "checkout", _INNER_ALPHABOT_APPEND + """
+    def test_alphabot_writes_and_a_test_escapes():
+        _append_like_alphabot()
+        with open(DR / "pheromone.db", "ab") as f:
+            f.write(b"x")
+    """)
+    gate_env, report = _gate_plugin_env(tmp_path)
+    r = _run_inner_pytest(root, {"ALPHA_HIVE_HOME": str(data_root), "INNER_DATA_ROOT": str(data_root),
+                                 "INNER_ALPHABOT_REL": rel, **gate_env})
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, out
+    assert "本轮期间**真实数据根**" in out and "若是测试写的" in out, out
+    rep = json.loads(report.read_text(encoding="utf-8"))
+    assert rep["real_data_root_verdict"]["all_alphabot_appends"] is False, rep
+    assert "**全部**是 Alpha Bot" not in out, out
+    normalized = "\n".join(line.strip() for line in out.splitlines())
+    assert "其余这些不能归因于它，问题在这里**：\nchanged（1）：\npheromone.db" in normalized, out
+
+
+# ───────────── 5. session 级闸逐文件标出「写入时刻在跑哪条测试」（v0.45.455） ─────────────
+#
+# 10-09：连续三轮红在同一条测试上，被当成确定性泄漏去查——那只是收集序最后一条，写入者是 Alpha Bot。
+# 指纹里本来有 mtime；这里证明它被对到了时间线上，且措辞只说「时间重合」不说「是它写的」。
+
+class TestTimelineLocate:
+    TL = [(10.0, 11.0, "t.py::a", "setup"), (11.0, 12.0, "t.py::a", "call"),
+          (12.0, 13.0, "t.py::a", "teardown"), (14.0, 15.0, "t.py::b", "call")]
+
+    @pytest.mark.parametrize("t, expected", [
+        (None, "定位不了"),
+        (4.0, "早于本轮开始"),
+        (7.0, "收集期"),
+        (11.5, "t.py::a 的 call 阶段"),
+        (13.5, "两段之间（紧接 t.py::a 的 teardown 之后）"),
+        (14.5, "t.py::b 的 call 阶段"),
+        (16.0, "最后一段记录之后——即 t.py::b 的 teardown 阶段"),
+    ])
+    def test_positions(self, t, expected):
+        assert expected in g.locate(t, self.TL, session_start=5.0)
+
+    def test_no_timeline(self):
+        assert "收集期或会话收尾" in g.locate(7.0, [], session_start=5.0)
+        assert "定位不了" in g.locate(7.0, [], session_start=None)
+
+    def test_unknown_session_start_does_not_claim_collection(self):
+        """v0.45.460：开始时刻未知时，第一条测试之前的写入不许断言是「收集期」（分不出）。"""
+        label = g.locate(7.0, self.TL, session_start=None)
+        assert "收集期" not in label and "开始时刻未知" in label
+        assert "t.py::a 的 call 阶段" in g.locate(11.5, self.TL, session_start=None)
+
+    def test_change_mtime_reads_file_signature_and_stats_dirs(self, tmp_path):
+        (tmp_path / "d").mkdir()
+        assert g.change_mtime(str(tmp_path), "f", "3:1500000000000000000") == 1.5e9
+        assert g.change_mtime(str(tmp_path), "d", "dir") == os.lstat(tmp_path / "d").st_mtime_ns / 1e9
+        assert g.change_mtime(str(tmp_path), "gone", None) is None
+
+
+def _labels(out: str) -> dict[str, str]:
+    """报错里「逐项写入时刻」那几行 → {路径: 位置}。"""
+    res = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if "  @" in line and "  → " in line:
+            path, rest = line.split("  @", 1)
+            res[path] = rest.split("  → ", 1)[1]
+    return res
+
+
+def test_repo_root_gate_places_each_write_on_the_timeline(tmp_path):
+    """收集期写 / 第一条测试写 / 最后一条什么都不写 / session fixture 收尾时写 / 保留旧 mtime / 删除——各归其位，
+    最后一条测试**不**被当成写入时刻所在（它就是 pytest 记这条 error 的那个名字）。"""
+    root = _make_fake_checkout(tmp_path / "checkout", """
+        import os, pathlib, pytest
+        ROOT = pathlib.Path(__file__).resolve().parents[1]
+        (ROOT / "at_collection.json").write_text("x")
+
+        @pytest.fixture(scope="session")
+        def writes_at_session_end():
+            yield
+            (ROOT / "at_session_teardown.json").write_text("x")
+
+        def test_a_writes(writes_at_session_end):
+            with open(ROOT / "report_snapshots/a.json", "ab") as f:
+                f.write(b"x")
+            (ROOT / "old_mtime.json").write_text("x")
+            os.utime(ROOT / "old_mtime.json", (1_000_000_000, 1_000_000_000))   # copy2 / 解包那种
+            (ROOT / "probability_scorecard_state/published.jsonl").unlink()
+
+        def test_z_last_does_nothing():
+            pass
+    """)
+    r = _run_inner_pytest(root)
+    out = r.stdout + r.stderr
+    assert r.returncode != 0 and "2 passed, 1 error" in out, out
+    assert "pytest 把它记在**收集序最后一条测试**名下" in out, out
+    assert "只说明时间重合，不等于是它写的" in out, out
+    assert "同一文件被写多次只看得到最后一次" in out, "mtime 是最后一次修改——不说清会让人以为没有更早的写入者"
+    lab = _labels(out)
+    assert "收集期" in lab["at_collection.json"], lab
+    assert "test_a_writes 的 call 阶段" in lab["report_snapshots/a.json"], lab
+    assert "早于本轮开始" in lab["old_mtime.json"], lab
+    assert "定位不了" in lab["probability_scorecard_state/published.jsonl"], lab
+    assert "最后一段记录之后" in lab["at_session_teardown.json"], lab
+    assert not any("test_z_last_does_nothing 的 call" in v for v in lab.values()), \
+        f"最后一条什么都没写，却被标成写入时刻所在：\n{lab}"
+
+
+def test_real_data_root_gate_names_the_test_running_when_a_concurrent_writer_wrote(tmp_path):
+    """并发写入者（这里用线程模拟）在一条无关测试期间写：标出那条测试的阶段，措辞仍是「时间重合」。
+    测试自己的写入归到它自己。"""
+    data_root = _make_data_root(tmp_path / "alpha-hive-data")
+    root = _make_fake_checkout(tmp_path / "checkout", """
+        import os, pathlib, threading
+        DR = pathlib.Path(os.environ["INNER_DATA_ROOT"])
+        GO = threading.Event()
+
+        def _writer():
+            GO.wait(20)
+            (DR / "report_snapshots/by_writer.json").write_text("{}")
+
+        T = threading.Thread(target=_writer, daemon=True)
+
+        def test_a_escapes():
+            T.start()
+            with open(DR / "pheromone.db", "ab") as f:
+                f.write(b"x")
+
+        def test_b_unrelated():
+            GO.set()
+            T.join(20)
+    """)
+    r = _run_inner_pytest(root, {"ALPHA_HIVE_HOME": str(data_root), "INNER_DATA_ROOT": str(data_root)})
+    out = r.stdout + r.stderr
+    assert r.returncode != 0 and "2 passed, 1 error" in out, out
+    lab = _labels(out)
+    assert "test_a_escapes 的 call 阶段" in lab["pheromone.db"], lab
+    assert "test_b_unrelated 的 call 阶段" in lab["report_snapshots/by_writer.json"], lab
+    assert "只说明时间重合，不等于是它写的" in out and "并发写入者" in out, out

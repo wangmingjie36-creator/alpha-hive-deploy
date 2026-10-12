@@ -153,6 +153,19 @@ _COHORT_HISTORY = [
     # 且按本表判据（哨兵语义/来源/算法改变）本就该记的两条边界找出来、按实际
     # 部署日期插入。两条都只影响各自单一信号，未在任何下游依赖边里出现，
     # 插入不改变任何已注册边界的 `cohort_start()`（取列表最后一条不变）。
+    # v0.45.472（补登，早于表的第一条，按实际部署日期插入，理由同上方 v0.45.275 那段）：
+    # ⚠️ v0.45.479 二次检查：下面 reason 里「06-29 当天的快照已由更早的扫描写下、首个完整 CBOE 日是 06-30」不对——
+    #   06-29 的 11 份快照都写于 c738c567 进 main 之后，归档那次运行（.swarm_results_2026-06-29.json）10 只里 9 只是 CBOE
+    #   （唯一的 AMZN 是 Yahoo 空链、已隔离）。严格说边界该是 06-29。没有改：本表必须按日期升序，而判据取「列表里最后一条」，
+    #   往**前**挪日期的更正条目放不进去（历来的更正都是往后顺延）；代价是 06-29 那 9 行 CBOE 口径的 GEX 落在旧世代。
+    #   reason 原文有摘要钉（只追加不改写），故更正写在这里与 CHANGELOG v0.45.479。另：「只影响这一个信号」严格说 v0.45.349
+    #   之前 GEX 还经 gex_signal / Bear gex<0 下限进过 Oracle 分与 bear.options_bear——那两个已在更晚的边界换代，结果不变。
+    ("2026-06-30", "v0.34.0",
+     "期权链主源由 yfinance 翻成 CBOE（c738c567，06-29 12:28 PDT 进 main；06-29 当天的快照已由更早的扫描写下，"
+     "首个完整 CBOE 日是 06-30）。`options.gamma_exposure` 因此换了量：yfinance 主源时代（BS gamma 自 03-16 起注入）"
+     "gamma 用 Black-Scholes 补、S 取「OI>50 的看涨行权价中位数」（analyze 调 fetch_options_chain 从不传价，"
+     "v0.45.468 才改用真实价）；CBOE 时代 gamma 来自 CBOE 本身（缺失才按真实价补）。两段不可混算。"
+     "只影响这一个信号（P/C、总 OI、IV 不依赖 gamma 的 S）；CBOE 时代里退到 yfinance 备用链的已知日子另走 QUARANTINE。"),
     ("2026-08-15", "v0.43.24",
      "GuardBeeSentinel 的 VIX 取数改走 CBOE 优先（脱离 yfinance 限流）。Step 1"
      "（同版更早提交）把「宏观数据整体降级」时的 vix/yield_curve/gold_trend 一律"

@@ -202,6 +202,7 @@ def plan(rows: List[dict], *,
         td_closes = cc._twelve_data_closes  # noqa: SLF001
     if cboe is None:
         import cloud_snapshot_loader as csl
+        csl.refresh()                        # v0.45.466：真实来源先把本地 cloud-snapshots 拉到最新（失败只告警）
         _later = csl.available_dates()
         cboe = lambda d, t: cboe_snapshot_candidates(d, t, later_dates=_later)  # noqa: E731
 

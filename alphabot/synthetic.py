@@ -275,3 +275,95 @@ def demo_bars(ticker: str, as_of: Optional[str] = None, days: int = 120) -> List
             i -= 1
         d -= timedelta(days=1)
     return list(reversed(out))
+
+
+def demo_hedge_view(as_of: Optional[str] = None, days: int = 12) -> dict:
+    """合成的对冲账本视图，形状同 `portfolio_greeks.ledger_view()`（演示与测试用，零网络、确定性）。
+
+    每个工作日一份审计：组合 β·Delta（% NAV）走一条固定路径（两次出带：一次上穿、一次下穿），出 ±15% 带就按
+    「拉回带边」用 SPY 成交，现金 / 股数 / 净值跟着记账——与真账本同一套恒等式（净值 = 现金 + 股数 × 收盘价），
+    所以页面的账目核对在演示里也成立。另造 3 条「无定价证明」被拦下的旧记录，演示历史闸的计数显示。"""
+    d_end = date.fromisoformat(as_of) if as_of else _today_et()
+    cal: List[date] = []
+    d = d_end
+    while len(cal) < days:
+        if d.weekday() < 5:
+            cal.append(d)
+        d -= timedelta(days=1)
+    cal.reverse()
+    seed = _seed("HEDGE")
+    band, port_nav = 15.0, 150_000.0
+    path = (8.0, 11.0, 14.2, 16.9, 12.5, 9.8, 4.1, -6.0, -16.4, -11.0, -3.5, 2.6)
+    px, shares, cash, avg, entry_date = spot_for("SPY"), 30.0, -30.0 * spot_for("SPY"), spot_for("SPY"), None
+    equity, trades, audits = [], [], {}
+    for i, day in enumerate(cal):
+        iso = day.isoformat()
+        px = round(px * (1.0 + 0.009 * (_rand(seed, i) - 0.5) * 2.0), 2)
+        pct = round(path[i % len(path)] + 0.6 * (_rand(seed, 500 + i) - 0.5), 4)
+        status = "above" if pct > band else ("below" if pct < -band else "inside")
+        executed, after, trade = False, pct, None
+        if status != "inside":
+            edge = band if status == "above" else -band
+            excess = (pct - edge) / 100.0 * port_nav
+            qty = -round(excess / px)
+            if qty:
+                if shares == 0 or (shares > 0) == (qty > 0):          # 同向加仓：加权均价
+                    avg = (avg * shares + px * qty) / (shares + qty) if shares else px
+                elif abs(qty) > abs(shares):                            # 穿过 0：剩余部分按新价
+                    avg = px
+                shares += qty                                           # 同向减仓：均价不变
+                cash -= qty * px
+                after = round(pct + qty * px / port_nav * 100.0, 4)
+                executed = True
+                trade = {"date": iso, "ticker": "SPY", "shares": qty, "price": px,
+                         "action": "sell_spy" if qty < 0 else "buy_spy", "fill": "close",
+                         "excess_usd": round(excess, 2), "target_usd": round(edge / 100.0 * port_nav, 2),
+                         "beta_dd_usd_before": round(pct / 100.0 * port_nav, 2), "beta_dd_pct_before": pct,
+                         "nav": port_nav, "shares_after": float(shares),
+                         "reason": f"β·Δ {pct:+.2f}% NAV {status} band → rebalance to edge ({edge:+.0f}%)",
+                         "price_session": iso, "price_source": "demo", "price_at_close": True}
+                trades.append(trade)
+        entry_date = entry_date or iso
+        mv = shares * px
+        equity.append({"date": iso, "spy_shares": float(shares), "spy_price": px, "spy_price_source": "demo",
+                       "spy_price_session": iso, "spy_price_at_close": True, "cash": round(cash, 2),
+                       "market_value": round(mv, 2), "nav": round(cash + mv, 2),
+                       "trades_today": 1 if executed else 0, "band_status": status})
+        b = {"band_pct": band, "lower_pct": -band, "target_pct": 0.0, "upper_pct": band}
+        pn = {"beta_dollar_delta": pct, "dollar_delta": round(pct * 6.5, 4), "gamma_dollar_per_1pct": -0.05,
+              "vega_dollar_per_pt": -0.12, "theta_dollar_per_day": 0.07}
+        audits[iso] = {
+            "as_of": iso, "version": "demo", "nav": port_nav, "spy_price": px,
+            "spy_mark": {"source": "demo", "session": iso, "price": px},
+            "aggregate": {"band": b, "band_status": status, "pct_nav": pn,
+                          "sums": {k: round(v / 100.0 * port_nav, 2) for k, v in pn.items()},
+                          "coverage": {"n_rows": 24, "n_price_missing": 0, "n_quote_missing": 0, "n_beta_missing": 0,
+                                       "beta_coverage": 1.0},
+                          "partial": False, "vega_alert": False, "gamma_alert": False, "nav": port_nav},
+            "aggregate_after": {"band": b, "pct_nav": {**pn, "beta_dollar_delta": after},
+                                "band_status": "inside" if executed else status},
+            "recommendation": {"action": trade["action"] if trade else "hold", "spy_shares": trade["shares"] if trade else 0,
+                               "reason": trade["reason"] if trade else f"β·Δ {pct:+.2f}% NAV inside band → hold"},
+            "executed": executed, "executed_trade": trade, "execution_blocked": None,
+            "price_check": {"n_stale": 0, "gaps": [], "error": None, "hedge_undecided": None},
+        }
+    old = [(cal[0] - timedelta(days=k)).isoformat() for k in (7, 6, 5)]
+    return {
+        "source": "demo", "state_dir": "(演示数据)", "exists": True, "opened": True, "errors": {},
+        "positions": ([{"ticker": "SPY", "shares": float(shares), "avg_price": round(avg, 4) if avg else None,
+                        "entry_date": entry_date, "last_price": px, "last_mark_date": cal[-1].isoformat()}]
+                      if shares else []),
+        "meta": {"version": "demo", "starting_date": cal[0].isoformat(), "cash": round(cash, 4),
+                 "last_run_date": cal[-1].isoformat()},
+        "rules": {"beta_delta_band_pct": band, "beta_delta_target_pct": 0.0, "rebalance_to": "edge",
+                  "hedge_instrument": "SPY", "vega_alert_pct": 1.0, "gamma_alert_pct": 0.5, "beta_window": 60},
+        "measurement_start": cal[0].isoformat(),
+        "history": {
+            "trades": trades, "equity": equity, "audits": audits,
+            "excluded": {"trades": {"no_provenance": 1}, "equity": {"no_provenance": 3}, "audits": {"no_provenance": 3}},
+            "excluded_dates": {"trades": old[:1], "equity": old, "audits": old},
+            "first_verified": {"trades": trades[0]["date"] if trades else None, "equity": cal[0].isoformat(),
+                               "audits": cal[0].isoformat()},
+            "measurement_start": cal[0].isoformat(), "regressions": [], "before_measurement_start": [],
+        },
+    }

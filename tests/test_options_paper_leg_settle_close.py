@@ -352,7 +352,21 @@ class TestLedgerRecordsTheCodeThatWroteIt:
         world.run("2026-10-19")
         meta = json.loads(opl.META_FILE.read_text())
         assert meta["code_version"] == {"sha": "abc1234", "changelog_version": "0.45.450", "resolved_at": "scan_start"}
-        assert json.loads(opl.EQUITY_FILE.read_text().splitlines()[-1])["code"] == "0.45.450@abc1234"
+        assert json.loads(opl.EQUITY_FILE.read_text().splitlines()[-1])["code"] == meta["code_version"]
+
+    @pytest.mark.parametrize("cv", [{"sha": None, "changelog_version": None, "resolved_at": "snapshot"},
+                                    {"sha": None, "changelog_version": "0.45.457", "resolved_at": "snapshot"},
+                                    {"sha": "abc1234", "changelog_version": None, "resolved_at": "snapshot"}])
+    def test_missing_fields_stay_none_never_a_placeholder(self, world, monkeypatch, cv):
+        """v0.45.457：字段没测到 ⇒ 该字段 None。450 在写入时拼成 "版本@哈希"，缺字段时写出 "—@—" / "0.45.457@—"。"""
+        import scan_timing
+        monkeypatch.setattr(scan_timing, "code_version", lambda: dict(cv))
+        world.book()
+        r = world.run("2026-10-19")
+        row = json.loads(opl.EQUITY_FILE.read_text().splitlines()[-1])["code"]
+        assert row == {"sha": cv["sha"], "changelog_version": cv["changelog_version"], "resolved_at": "snapshot"}, row
+        assert r["equity_snapshot"]["code"] == row
+        assert "—" not in json.dumps(row, ensure_ascii=False)
 
     def test_unavailable_version_is_none_and_never_blocks_the_ledger(self, world, monkeypatch):
         import scan_timing

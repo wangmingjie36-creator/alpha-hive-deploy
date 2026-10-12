@@ -367,6 +367,9 @@ def _snapshot(ticker: str):
 
 def _bs_gamma(S: float, K: float, T: float, sigma: float) -> float:
     """Black-Scholes gamma — CBOE gamma 为 0（深 ITM/低流动）时兜底，与 options_analyzer 同公式"""
+    # v0.45.462：NaN 的比较恒 False，下面那行挡不住 NaN 的 iv / 价 ⇒ 先判有限
+    if not all(math.isfinite(x) for x in (S, K, T, sigma)):
+        return 0.0
     if S <= 0 or K <= 0 or T <= 1e-6 or sigma < 0.01:
         return 0.0
     try:
@@ -1126,7 +1129,8 @@ def fetch_cboe_chain(
     options = data["options"]
 
     # 现价：优先入参 → 按交易时段选 CBOE 字段（见 official_price 的长注释）
-    S = float(stock_price or 0.0) or official_price(data)[0]
+    _payload_px, _payload_px_src = official_price(data)
+    S = float(stock_price or 0.0) or _payload_px
 
     # ── 解析全部合约，按到期日分组 ─────────────────────────────
     # CBOE 每合约 iv 已是小数（实测 ATM ~0.18-0.34，与 yfinance impliedVolatility 同尺度），
@@ -1187,7 +1191,8 @@ def fetch_cboe_chain(
             r["dte"] = dte
             # gamma：优先 CBOE，缺失（0）时 BS 兜底
             g = r.pop("_cboe_gamma", 0.0)
-            if not g:
+            # v0.45.462：非有限的 gamma 与 0 同义（CBOE 用 0 表示缺），走同一个 BS 兜底，不让 NaN 进 GEX 求和
+            if not g or not math.isfinite(g):
                 T = max(dte, 0.5) / 365.0
                 g = _bs_gamma(S, r["strike"], T, r["impliedVolatility"])
             r["gamma"] = g
@@ -1240,6 +1245,11 @@ def fetch_cboe_chain(
         "expirations": expirations,
         "near_expiry_set": near_expiry_set,
         "_source": "cboe",  # 数据来源标记，供下游/调试识别
+        # v0.45.462：同一份 payload 的标的价（与上面的报价同一时刻），**不管调用方给没给价**都如实带出。
+        # options_analyzer.analyze 调用方取不到现价时用它，不再拿行权价中位数 / 145.0 冒充现价
+        # （那两个假价被写进快照、又被价格索引当成「自己的观测」读走）。取不到 ⇒ None，不猜。
+        "underlying_price": _payload_px or None,
+        "underlying_price_source": _payload_px_src,
     }
 
 

@@ -87,7 +87,7 @@ def _pheromone_db_path() -> Path:
 
 SNAPSHOT_DIR = _base_dir() / "report_snapshots"
 STATE_DIR = _base_dir() / "paper_portfolio_state"
-# v0.45.394：不再在 import 期 `mkdir`。目录在写入时由 `_atomic_write_text` / `_append_jsonl` 创建。
+# v0.45.394：不再在 import 期 `mkdir`。目录在写入时由 `ledger_io`（`_save_meta` / `_append_jsonl` 等）创建。
 # 原先这一行在 pytest 收集期（早于任何 env 隔离）就把空目录建进仓库根；阶段 6 之前它被 git 跟踪、
 # 本来就存在，所以一直没人看见；解除跟踪后干净检出里它第一次现形（根总闸 teardown 报 added）。
 
@@ -318,12 +318,6 @@ def _load_jsonl(path: Path) -> List[Dict]:
     return ledger_io.load_jsonl(path)
 
 
-def _atomic_write_text(path: Path, content: str, mode: int = 0o644) -> None:
-    """tmp + fsync + os.replace 原子写（修复 Bug #20；v0.23.7 起 mode 0o644——mkstemp 缺省 0o600 会让 meta.json
-    别的工具读不了）。v0.45.448 起实现统一在 `ledger_io.atomic_write_text`（另加 fsync 目录与写后回读）。"""
-    ledger_io.atomic_write_text(path, content, mode)
-
-
 def _write_jsonl(path: Path, records: List[Dict]) -> None:
     """完整重写（positions / equity_curve）——原子、严格（非对象 / NaN ⇒ LedgerWriteError，文件不动）。"""
     ledger_io.write_jsonl(path, records)
@@ -335,8 +329,11 @@ def _append_jsonl(path: Path, record: Dict) -> None:
 
 
 def _load_meta() -> Dict:
-    if META_FILE.exists():
-        return json.loads(META_FILE.read_text(encoding="utf-8"))
+    """严格读（v0.45.452）：`"cash": NaN` 这类非法 JSON / 顶层非对象 ⇒ LedgerCorrupt。此前 `json.loads` 照收 NaN——
+    v0.45.97 那次 cash=NaN 就是这样被读进来、净值烂了四天的。缺文件仍按新账本起步。"""
+    meta = ledger_io.load_json(META_FILE, default=None)
+    if meta is not None:
+        return meta
     return {
         "version": "0.19.0",
         "starting_capital": CONFIG["starting_capital"],
@@ -348,8 +345,9 @@ def _load_meta() -> Dict:
 
 
 def _save_meta(meta: Dict) -> None:
-    # 修复 Bug #20：原子写
-    _atomic_write_text(META_FILE, json.dumps(meta, ensure_ascii=False, indent=2))
+    """原子写 + 拒 NaN（v0.45.452）：cash 算成 NaN ⇒ LedgerWriteError、meta.json 一个字节都不动、本轮失败进 P2，
+    而不是把 NaN 现金落盘让下一轮接着用。"""
+    ledger_io.write_json(META_FILE, meta)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

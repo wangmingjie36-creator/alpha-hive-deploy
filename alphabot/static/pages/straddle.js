@@ -220,8 +220,12 @@ export async function renderStraddle(root, alive) {
   const sigCols = [
     { label: "代码", render: (r) => h("b", {}, r.ticker) },
     { label: "标签", render: (r) => LABEL[r.label] || r.label || "—" },
-    { label: "比值", cls: "r", render: (r) => num(r.ratio, 2) },
-    { label: "隐含 vs 历史中位", cls: "r", render: (r) => `${pctPts(r.implied_event_move_pct, 2)} vs ${pctPts(r.hist_median_abs_move_pct, 2)}（${r.hist_n ?? "—"}）` },
+    // v0.45.454：事件波动触底（扣完扩散 ≤ 0）= 算不出，不是「0」。新行存的是 null；已落盘的旧行存的是 0.0，
+    // 所以这里认 event_move_floor_hit，不靠值本身是不是 0。
+    { label: "比值", cls: "r", render: (r) => (r.event_move_floor_hit ? "—" : num(r.ratio, 2)) },
+    { label: "隐含 vs 历史中位", cls: "r", render: (r) => (r.event_move_floor_hit
+      ? h("span", {}, `— vs ${pctPts(r.hist_median_abs_move_pct, 2)}（${r.hist_n ?? "—"}）`, h("span", { class: "sub" }, "扣掉扩散后 ≤ 0，算不出"))
+      : `${pctPts(r.implied_event_move_pct, 2)} vs ${pctPts(r.hist_median_abs_move_pct, 2)}（${r.hist_n ?? "—"}）`) },
     { label: "最大腿点差", cls: "r", render: (r) => (isNum(r.max_leg_spread_pct) ? pctPts(r.max_leg_spread_pct * 100, 1) : "—") },
     { label: "财报", render: (r) => r.earnings_date || "—" },
     { label: "状态", render: (r) => h("span", { class: "small" }, r.status, r.untradeable_reason ? h("span", { class: "sub" }, r.untradeable_reason) : null) },
