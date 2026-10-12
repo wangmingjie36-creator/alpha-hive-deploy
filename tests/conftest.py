@@ -1335,14 +1335,12 @@ _DATA_ROOT_BEFORE = pytest.StashKey[tuple]()
 _DATA_ROOT_ALPHABOT = pytest.StashKey[tuple]()
 # v0.45.455：两道 session 级总闸报红时，逐文件标出「写入时刻在跑哪条测试」要用的本轮开始时刻与时间线。
 _SESSION_START_WALL = pytest.StashKey[float]()
-_TIMELINE = pytest.StashKey[list]()
 
 
 def pytest_sessionstart(session):
     # 先记开始时刻再取指纹：取指纹期间被写的文件，mtime 也不会早于这个时刻（否则会被误标成「保留了旧 mtime」）
     session.config.stash[_SESSION_START_WALL] = time.time()
     _GATE_TIMELINE.clear()
-    session.config.stash[_TIMELINE] = _GATE_TIMELINE
     session.config.stash[_ROOT_FP_BEFORE] = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)
     # 真实数据根：按**调用 pytest 时**的环境取——`pytest_configure` 已把 ALPHA_HIVE_HOME 换成会话沙箱
     # （v0.45.422），`_isolate_env` 之后还会逐条换。读 os.environ 就会把沙箱当成「真实数据根」，闸当场失明。
@@ -1358,7 +1356,7 @@ def pytest_sessionstart(session):
         _root_data_guard.alphabot_baseline(root, _fp, datetime.date.today()) if root else {})
 
 
-#: 本轮时间线（与 stash 里 `_TIMELINE` 是同一个对象）：`pytest_runtest_logreport` 拿不到 config，只能经模块级引用写。
+#: 本轮时间线：`pytest_runtest_logreport` 拿不到 config，只能经模块级引用写（`pytest_sessionstart` 清空）。
 _GATE_TIMELINE: list = []
 
 
@@ -1369,7 +1367,10 @@ def pytest_runtest_logreport(report):
 
 
 def _gate_timeline(config) -> tuple:
-    return config.stash.get(_SESSION_START_WALL, None), config.stash.get(_TIMELINE, [])
+    """(本轮开始时刻 | None, 时间线)。时间线直接读模块级那份——v0.45.460：曾从 stash 取、取不到给 `[]`，
+    sessionstart 没调到本 conftest 时会把**已记下**的时间线扔掉、全标成「收集期」（实际调用里几乎走不到：
+    pytest 把参数下 `test*` 子目录的 conftest 也当 initial 加载）。开始时刻取不到就是 None，`locate` 会照实说。"""
+    return config.stash.get(_SESSION_START_WALL, None), _GATE_TIMELINE
 
 
 def pytest_report_header(config):

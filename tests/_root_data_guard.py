@@ -421,7 +421,10 @@ def explain_alphabot_appends(root: str, changes: dict[str, list[str]], before: d
 
 def change_mtime(root: str, rel: str, after_sig: str | None) -> float | None:
     """`rel` 变化后的 mtime（秒）；删了 / 读不到就 None。文件取指纹里记的那个（就是被比对的那次），
-    目录与 `-shm`（指纹不记 mtime）当场 lstat。"""
+    目录与 `-shm`（指纹不记 mtime）当场 lstat。
+
+    ⚠️ mtime 是**最后一次**修改的时刻（v0.45.460 补述）：同一文件本轮被写多次（如测试写一次、Alpha Bot 又追加一批），
+    只看得到最后那次；目录的 mtime 是其下最后一次增删条目的时刻。所以「落在 X 期间」不排除更早还有别人写过。"""
     if after_sig:
         size, sep, mt = after_sig.partition(":")
         if sep and size.isdigit() and mt.isdigit():
@@ -438,7 +441,13 @@ def locate(t: float | None, timeline: list, session_start: float | None) -> str:
         return "已删除 / 读不到，没有 mtime——定位不了（二分跑测试文件）"
     if session_start is not None and t < session_start:
         return "早于本轮开始——写入者保留了旧 mtime（如 copy2 / utime / 解包），按时间定位不了"
-    if not timeline or t < timeline[0][0]:
+    if not timeline:
+        if session_start is None:
+            return "没有时间线、本轮开始时刻也未知——定位不了"
+        return "本轮没有任何测试报告：只可能在收集期或会话收尾"
+    if t < timeline[0][0]:
+        if session_start is None:     # 不知道本轮何时开始：分不出收集期还是更早
+            return "第一条测试开始之前（本轮开始时刻未知）"
         return "收集期（第一条测试开始之前：模块 import / 收集钩子）"
     prev = None
     for start, stop, nodeid, when in timeline:
@@ -475,8 +484,8 @@ def timeline_section(root: str, changes: dict[str, list[str]], after: dict[str, 
     """两道总闸报错共用的一节：开场说明 + 逐项写入时刻。"""
     when = (_dt.datetime.fromtimestamp(session_start).strftime("%H:%M:%S") if session_start else "?")
     return (f"{SESSION_GATE_PREAMBLE}\n\n"
-            f"逐项写入时刻（mtime；本轮 {when} 开始，{len(timeline)} 段时间线）与当时在跑什么——"
-            "**只说明时间重合，不等于是它写的**：\n"
+            f"逐项**最后一次**修改时刻（mtime；本轮 {when} 开始，{len(timeline)} 段时间线）与当时在跑什么——"
+            "**只说明时间重合，不等于是它写的**；同一文件被写多次只看得到最后一次，目录是其下最后一次增删：\n"
             f"{format_timeline(root, changes, after, timeline, session_start)}\n"
             "读法：落在一条会碰这片数据的测试里 ⇒ 按泄漏查那条；散落在互不相关的测试里、几个文件几秒内成批写 ⇒ "
             "多半是并发写入者（Alpha Bot 盘中采样 / 手动快照、每日扫描、周任务），对时刻核实后避开再跑。")

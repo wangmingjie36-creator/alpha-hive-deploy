@@ -632,9 +632,20 @@ class TestAlphabotAppendClassifier:
             p.unlink()
         elif case == "truncated":
             p.write_bytes(b"")
-        elif case == "demo_source":       # v0.45.455：演示服务 + 真时钟（IntradayPoller.tick 不传 now）写出的那种行
+        elif case == "demo_source":
+            # v0.45.455/460：用演示服务**真写**一行（与 test_alphabot 的 IntradayPoller 用例同一条路径：真时钟、
+            # 合成数据），而不是手写——手写的行证明不了真写出来的长这样。写进 tmp 的 state_dir，再接到夹具文件后面。
+            from alphabot.service import AlphaBotService
+            import alphabot.synthetic as syn
+            svc = AlphaBotService(fetch_fn=syn.demo_fetch, state_dir=tmp_path / "ab_state")
+            assert svc.state_dir() == tmp_path / "ab_state", "夹具前提：写进 tmp，不经 PATHS"
+            assert svc.take_snapshot("NVDA", now=now)["recorded"] is True
+            written = (tmp_path / "ab_state/intraday" / now.date().isoformat() / "NVDA.jsonl").read_bytes()
+            rec = json.loads(written)
+            assert set(rec) == g.ALPHABOT_SNAPSHOT_KEYS and rec["underlying_price_source"] == g.ALPHABOT_DEMO_SOURCE, \
+                f"夹具前提：演示服务真写出的行键集合对得上、来源是 demo——否则这条测的不是那个缺口：{rec}"
             with open(p, "ab") as f:
-                f.write(_line(_snap(now, underlying_price_source=g.ALPHABOT_DEMO_SOURCE)))
+                f.write(written)
         _changes, v = self._explain(root, before, baseline, started)
         assert v["explained"] == [], f"{case}：被错误归因成 Alpha Bot"
         assert any(target in items for items in v["unexplained"].values()), v
@@ -803,8 +814,15 @@ class TestTimelineLocate:
     def test_positions(self, t, expected):
         assert expected in g.locate(t, self.TL, session_start=5.0)
 
-    def test_no_timeline_means_collection(self):
-        assert "收集期" in g.locate(7.0, [], session_start=5.0)
+    def test_no_timeline(self):
+        assert "收集期或会话收尾" in g.locate(7.0, [], session_start=5.0)
+        assert "定位不了" in g.locate(7.0, [], session_start=None)
+
+    def test_unknown_session_start_does_not_claim_collection(self):
+        """v0.45.460：开始时刻未知时，第一条测试之前的写入不许断言是「收集期」（分不出）。"""
+        label = g.locate(7.0, self.TL, session_start=None)
+        assert "收集期" not in label and "开始时刻未知" in label
+        assert "t.py::a 的 call 阶段" in g.locate(11.5, self.TL, session_start=None)
 
     def test_change_mtime_reads_file_signature_and_stats_dirs(self, tmp_path):
         (tmp_path / "d").mkdir()
@@ -852,6 +870,7 @@ def test_repo_root_gate_places_each_write_on_the_timeline(tmp_path):
     assert r.returncode != 0 and "2 passed, 1 error" in out, out
     assert "pytest 把它记在**收集序最后一条测试**名下" in out, out
     assert "只说明时间重合，不等于是它写的" in out, out
+    assert "同一文件被写多次只看得到最后一次" in out, "mtime 是最后一次修改——不说清会让人以为没有更早的写入者"
     lab = _labels(out)
     assert "收集期" in lab["at_collection.json"], lab
     assert "test_a_writes 的 call 阶段" in lab["report_snapshots/a.json"], lab
