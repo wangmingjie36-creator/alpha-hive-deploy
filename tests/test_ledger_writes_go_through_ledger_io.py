@@ -45,17 +45,13 @@ CATEGORIES = {LEDGER, STATE, ARTIFACT, CACHE, HUMAN, CODE}
 DEBT_CATEGORIES = (LEDGER, STATE, ARTIFACT)
 
 #: 「待迁移」三类的条数上限（等号比较）。迁走一条 ⇒ 删条目并把这里减一；**不许为了登记新写入方而加一**。
-CEILING = {LEDGER: 22, STATE: 12, ARTIFACT: 12, CACHE: 7}
+CEILING = {LEDGER: 18, STATE: 12, ARTIFACT: 12, CACHE: 7}
 
 _NA = "⚠️非原子"   # 理由里带这个标记 = 现在就是 open("w") 直写，写到一半崩溃 = 半截文件（迁移优先级最高）
 
 #: 「文件::函数」→ (类别, 写的是什么 / 谁读回)。v0.45.452 全仓普查（逐条核过读者），迁一条删一条。
 WRITERS: dict = {
     # ── 账本·待迁移（按风险排：非原子的整文件重写最先）
-    "options_analyzer.py::OptionsAgent.analyze": (LEDGER, _NA + " 每日期权快照 options_snapshot_*（过了那一场就再也取不回；vrp / 财报波动 / IV·价格索引读回）"),
-    "options_analyzer.py::OptionsAgent._refresh_price_derived": (LEDGER, _NA + " 期权快照重算价格派生字段后原地回写"),
-    "options_analyzer.py::OptionsAgent._refill_empty_quote_set": (LEDGER, _NA + " 期权快照回填 quote_set 后原地回写"),
-    "options_analyzer.py::OptionsAgent._drop_legacy_gex_signal": (LEDGER, _NA + " 期权快照去掉旧 GEX 加分后原地回写"),
     "backtest_engine.py::BacktestEngine.backfill_prices.save_callback": (LEDGER, _NA + " report_snapshots/*.json 原地回填实际价格（backtest / weekly_optimizer / self_analyst 读回）"),
     "cloud_snapshot_fetch.py::main": (LEDGER, "云端当日期权链快照（逐票原子；market.json / manifest.json " + _NA + "）"),
     "cboe_vix.py::_write_ledger": (LEDGER, "VIX 报价收盘核对账本（原子，不拒 NaN、无锁；读坏 ⇒ 空账本）"),

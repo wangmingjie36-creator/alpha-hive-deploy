@@ -14,6 +14,7 @@ import statistics
 import threading
 
 from hive_logger import PATHS, get_logger, atomic_json_write
+import ledger_io
 
 _log = get_logger("options")
 
@@ -404,11 +405,15 @@ class OptionsDataFetcher:
                 except (ValueError, ZeroDivisionError):
                     return 0.0
 
-            # 估算股价：先用传入参数，无则从最大 OI 行权价中值推断
-            _S = stock_price or 0.0
-            if _S <= 0 and calls_df is not None and not calls_df.empty:
-                _atm_candidates = calls_df[calls_df["openInterest"] > 50]["strike"].tolist() if "openInterest" in calls_df.columns else []
-                _S = float(statistics.median(_atm_candidates)) if _atm_candidates else 0.0
+            # 现价只用传入参数。v0.45.462 前没给价就拿「OI>50 的看涨行权价中位数」当 S 算 BS gamma——
+            # 与 analyze() 的假现价同一形状（那是行权价，不是股价）。没有现价 ⇒ 不补 gamma（下方 `_S <= 0`
+            # 跳过）⇒ GEX 求和为 0 ⇒ 「算不出」(None)，不拿错位的 gamma 算出一个像样的数。
+            try:
+                _S = float(stock_price or 0.0)
+            except (TypeError, ValueError):
+                _S = 0.0
+            if not _math.isfinite(_S):
+                _S = 0.0
             for df in [calls_df, puts_df]:
                 if df is None or df.empty or _S <= 0:
                     continue
@@ -876,6 +881,11 @@ class OptionsAnalyzer:
         # 正数 = net long gamma（压制波动），负数 = net short gamma（放大波动）
         # 除以 1e6 转为百万美元
         total = call_gamma + put_gamma
+        # v0.45.462：某个合约的 gamma / OI 是 NaN ⇒ 整个和是 NaN，而 `NaN <= 0` 为 False，
+        # 下面那道 `total <= 0` 挡不住 ⇒ 返回 NaN ⇒ 出口消毒。一条坏合约让总量不可信，按「算不出」处理。
+        if not _math.isfinite(total):
+            _log.warning("GEX 求和出现非有限数（某合约 gamma / OI 非有限），按不可得处理")
+            return None
         # v0.45.63：同上——total==0 表示整条链没有任何 gamma×OI（退化链），
         # 那是「算不出」不是「净 gamma 为零」。只修了上面两处而留下这处，
         # 就是 v0.45.49 `_get_metric_display` 那种「五个字段只修了一个」。
@@ -1343,7 +1353,9 @@ class OptionsAnalyzer:
         5. 大额溢价: dollar_premium >= $500K
         """
         unusual = []
-        _sp = stock_price if stock_price > 0 else 0
+        # v0.45.462：现价不可得时 analyze 传 None（不再传行权价中位数冒充）⇒ OTM 类条件不判
+        _sp = (stock_price if (isinstance(stock_price, (int, float)) and _math.isfinite(stock_price)
+                               and stock_price > 0) else 0)
 
         def _scan(contracts: List[Dict], is_call: bool):
             for c in contracts:
@@ -1624,12 +1636,15 @@ _snap_stats_lock = threading.Lock()
 #   writes_before_close      收盘前写入的快照数（写入本身不重复，按次即按份）
 #   gex_signal_corrected     命中了几份**旧代码写的**快照、其 options_score 含已撤销的负 GEX +1.0，
 #                            被就地减掉（v0.45.349，按份计；见 `_drop_legacy_gex_signal`）
+#   stock_price_unavailable  analyze() 现价不可得（调用方没给、期权链也没带）的次数（v0.45.462，见 `_resolve_stock_price`）
+#   nan_sanitized            出口消毒遇到的非有限数个数（v0.45.462：改写成 None，不再是 0.0；见 `_sanitize_result`）
 #
 # 为什么要去重：一只标的一轮扫描要调 3~4 次 analyze()（OracleBee / BearBee / advanced_analyzer /
 # 日报收尾），v0.45.238 按调用计时，一份盘中快照会被报 3~4 遍、一天可达上百条 WARNING，
 # 计数也读不出「几份快照有问题」。去重键带冻结时间戳：同一路径被重写成新快照后再出事，照样会报。
 _SNAP_STATS_KEYS = ("hits", "writes", "session_mismatch", "hits_before_close",
-                    "writes_before_close", "calendar_fallback", "gex_signal_corrected")
+                    "writes_before_close", "calendar_fallback", "gex_signal_corrected",
+                    "stock_price_unavailable", "nan_sanitized")
 
 # v0.45.349：OptionsAgent 每条返回路径都带这个键、值恒为 False ——「本结果的 options_score
 # 不含 GEX 分量」。旧代码写的快照没有这个键 ⇒ 命中时据此判定要不要减掉旧的 +1.0。
@@ -1751,19 +1766,76 @@ def _qs_unavailable(error: str, *, source: str = "cboe") -> Dict:
                 "contracts": {r: None for r in ("atm_call", "atm_put", "c25", "p25")}}
 
 
-def _sanitize_result(result: Dict) -> None:
-    """方案21: 遍历结果 dict，将 NaN/Inf float 替换为 0.0（就地修改）"""
+def _resolve_stock_price(caller_price, options_chain: Dict) -> Tuple[Optional[float], str]:
+    """analyze() 用的现价：**唯一出处**（v0.45.462）。返回 `(price | None, source)`。
+
+    1. 调用方给的价（有限、> 0）⇒ `"caller"`——与旧行为一致，调用方给了价的日子一个数都不变。
+    2. 否则期权链自带的标的价（CBOE payload 的 `official_price`，与链上报价同一时刻）⇒ 链标注的出处。
+    3. 都没有 ⇒ `(None, "unavailable")`。**不猜**：
+
+    旧实现在两处各自兜底成「OI>100 的看涨行权价中位数」，再没有就是常数 145.0。那是行权价，不是股价；
+    它被写进快照的 `_snapshot_stock_price`，又被 price_history 当「我们自己的观测」收进价格索引。
+    NaN 也在这里挡：`if not x` 拦不住 NaN（NaN 为真值），旧代码的第二处兜底因此会把 NaN 原样写进快照。
+    """
+    def _pos(v) -> Optional[float]:
+        if isinstance(v, bool):
+            return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if (_math.isfinite(f) and f > 0) else None
+
+    px = _pos(caller_price)
+    if px is not None:
+        return px, "caller"
+    chain = options_chain if isinstance(options_chain, dict) else {}
+    px = _pos(chain.get("underlying_price"))
+    if px is not None:
+        return px, str(chain.get("underlying_price_source") or "chain")
+    return None, "unavailable"
+
+
+def _sanitize_result(result: Dict, _path: str = "") -> List[str]:
+    """出口消毒：NaN / ±Inf → **None**（就地修改），返回被改写的键路径。
+
+    v0.45.462 前是 → 0.0：把「算不出」写成一个合法读数（P/C=0 读作极度看多、GEX=0 读作 gamma 中性、
+    iv_rank=0 读作历史最低），signal_archive 再把它当真观测归档进 IC。None 是本模块对「不可得」的既有口径
+    （样本早退分支、GEX / 偏斜的不可得返回都是 None），下游读者已按 None 处理。
+    实测这条路径在现行代码下触发不到（1901 份快照零 NaN；`options_score` 在消毒之前就算好了，消毒改不到它）
+    ——所以触发即异常：计数进 `snapshot_slot_stats()["nan_sanitized"]`（status.json），并由调用方打 WARNING。
+    """
+    hits: List[str] = []
+
+    def _bad(v) -> bool:
+        return isinstance(v, float) and not _math.isfinite(v)
+
     for key, val in result.items():
-        if isinstance(val, float) and (_math.isnan(val) or _math.isinf(val)):
-            result[key] = 0.0
+        here = f"{_path}.{key}" if _path else str(key)
+        if _bad(val):
+            result[key] = None
+            hits.append(here)
         elif isinstance(val, dict):
-            _sanitize_result(val)  # 递归处理嵌套 dict（如 iv_skew_detail）
+            hits.extend(_sanitize_result(val, here))  # 递归处理嵌套 dict（如 iv_skew_detail）
         elif isinstance(val, list):
             for i, item in enumerate(val):
-                if isinstance(item, float) and (_math.isnan(item) or _math.isinf(item)):
-                    val[i] = 0.0
+                if _bad(item):
+                    val[i] = None
+                    hits.append(f"{here}[{i}]")
                 elif isinstance(item, dict):
-                    _sanitize_result(item)  # 递归处理 list 内嵌套 dict（如 unusual_activity）
+                    hits.extend(_sanitize_result(item, f"{here}[{i}]"))  # list 内嵌套 dict（如 unusual_activity）
+    return hits
+
+
+def _write_snapshot(path, obj: Dict, indent: Optional[int] = None) -> None:
+    """期权快照落盘的唯一写法（v0.45.462）：原子替换 + 严格序列化（拒 NaN / 不可序列化）。
+
+    快照不是缓存：期权链只有实时接口，过了那一场就再也取不回，而 vrp / 财报波动 / IV·价格索引都读回它。
+    旧写法 `open(path, "w") + json.dump(default=str)`：① 先截断再写，写到一半中断 ⇒ 下次读坏 ⇒
+    「读取失败，重新计算」⇒ 用此刻的链覆盖那一场的冻结数据；② `default=str` 把不可序列化的值
+    悄悄写成字符串。失败抛 `ledger_io.LedgerError` / `OSError`，并由 ledger_io 在源头登记（status.json ⇒ P2）。
+    """
+    ledger_io.write_json(path, obj, indent=indent)
 
 
 class OptionsAgent:
@@ -2073,8 +2145,7 @@ class OptionsAgent:
         if snap_path:
             try:
                 cached["_price_derived_refreshed_at"] = datetime.now().isoformat()
-                with open(snap_path, "w") as _f:
-                    json.dump(cached, _f, ensure_ascii=False, default=str)
+                _write_snapshot(snap_path, cached)
             except Exception as _e:  # noqa: BLE001 - 回写失败不影响本次返回值
                 _log.warning("[%s] 快照回写失败（本次结果仍已修复）: %s", ticker, _e)
         return True
@@ -2118,8 +2189,7 @@ class OptionsAgent:
         _log.info("[%s] 快照 quote_set 已回填（原快照抓取时 CBOE 不可用）", ticker)
         if snap_path:
             try:
-                with open(snap_path, "w") as _f:
-                    json.dump(cached, _f, ensure_ascii=False, default=str)
+                _write_snapshot(snap_path, cached)
             except Exception as _e:  # noqa: BLE001 - 回写失败不影响本次返回值
                 _log.warning("[%s] 快照回写失败（本次结果仍已回填）: %s", ticker, _e)
         return True
@@ -2205,8 +2275,7 @@ class OptionsAgent:
                  "%.2f → %.2f（v0.45.349）", ticker, _gex, _old, cached["options_score"])
         if snap_path:
             try:
-                with open(snap_path, "w") as _f:
-                    json.dump(cached, _f, ensure_ascii=False, default=str)
+                _write_snapshot(snap_path, cached)
             except Exception as _e:  # noqa: BLE001 - 回写失败不影响本次返回值
                 _log.warning("[%s] 快照回写失败（本次结果仍已修正）: %s", ticker, _e)
         return True
@@ -2403,16 +2472,21 @@ class OptionsAgent:
         # 1. 只用 ATM 附近（±20%）的期权
         # 2. 过滤 <7 天到期的期权（临近到期 IV 被 Theta 衰减人为放大）
         # 3. 用中位数代替均值，抗极端值
+        # v0.45.462：现价**只在这里定一次**，下游（ATM IV 窗口 / GEX / 异动 / 偏斜 / 期限结构 /
+        # 快照的 `_snapshot_stock_price`）全用这一个值。见 `_resolve_stock_price`。
+        # 此前两处各自兜底：调用方没给价 ⇒ 「OI>100 的看涨行权价中位数」，再没有 ⇒ 常数 145.0。
+        # 假价被当成现价写进快照，又被 price_history 当成「我们自己的真实观测」读进价格索引：
+        # 实测 47 份快照现价 = 145.0（6–7 月）、09-17 全源中断那天 30/30 份是行权价中位数
+        # （NVDA 232.5 vs 真价 219.34）。CBOE payload 本来就带着同一时刻的真实标的价，只是被丢了。
+        stock_price, stock_price_source = _resolve_stock_price(stock_price, options_chain)
+        if stock_price is None:
+            _snap_count("stock_price_unavailable")
+            _log.warning("[%s] 现价不可得（调用方没给、期权链也没带）——ATM IV / GEX / 异动 / 偏斜 / "
+                         "期限结构按「不可得」处理，快照现价记 None，不拿行权价中位数或常数冒充", ticker)
         atm_price = stock_price
-        # v0.45.69：`if not atm_price` 拦不住 NaN（NaN 是 truthy），于是
-        # atm_lower/upper 全成 NaN，`NaN <= strike <= NaN` 恒 False，
-        # raw_ivs 必然为空 → data_quality 判成 degraded → iv_current 回落
-        # last_valid_iv 缓存。2026-08-28 补跑 9/9 只标的全中此坑。
-        if not atm_price or not _math.isfinite(atm_price):
-            all_strikes = [c.get("strike", 0) for c in calls_df if c.get("openInterest", 0) > 100]
-            atm_price = statistics.median(all_strikes) if all_strikes else 145.0
-        atm_lower = atm_price * 0.80
-        atm_upper = atm_price * 1.20
+        if atm_price is not None:
+            atm_lower = atm_price * 0.80
+            atm_upper = atm_price * 1.20
 
         # 判断到期日是否 >= 7 天
         min_expiry_days = 7
@@ -2432,7 +2506,8 @@ class OptionsAgent:
         # 必须在计算 median 之前剔除，否则均值严重偏高
         _IV_UPPER_RAW = 2.0   # 盘后 raw 过滤上限（小数，= 200%），去除极端噪声
         raw_ivs = []
-        for c in calls_df:
+        # 现价不可得 ⇒ ATM 窗口定不了位 ⇒ 没有当日原始 IV（走下方既有的「原始 IV 无效」降级）
+        for c in (calls_df if atm_price is not None else []):
             iv = c.get("impliedVolatility")
             strike = c.get("strike", 0)
             expiry = c.get("expiry", "")
@@ -2440,7 +2515,7 @@ class OptionsAgent:
                 raw_ivs.append(iv)
 
         # 如果过滤后无数据，放宽到包含短期到期（保留上限过滤）
-        if not raw_ivs:
+        if not raw_ivs and atm_price is not None:
             for c in calls_df:
                 iv = c.get("impliedVolatility")
                 strike = c.get("strike", 0)
@@ -2617,10 +2692,6 @@ class OptionsAgent:
             iv_rank = None
             iv_percentile = None
         put_call_ratio = self.analyzer.calculate_put_call_ratio(calls_df, puts_df)
-        # 估算股价（如果未提供，从期权链 ATM strike 推测）
-        if not stock_price:
-            all_strikes = [c.get("strike", 0) for c in calls_df if c.get("openInterest", 0) > 100]
-            stock_price = statistics.median(all_strikes) if all_strikes else 145.0
         gex = self.analyzer.calculate_gamma_exposure(
             calls_df, puts_df, stock_price
         )
@@ -2661,7 +2732,7 @@ class OptionsAgent:
             _gc_calls, _gc_puts = calls_df, puts_df
             try:
                 from cboe_options import fetch_cboe_chain_for_gex
-                _gc_full = fetch_cboe_chain_for_gex(ticker, stock_price or atm_price)
+                _gc_full = fetch_cboe_chain_for_gex(ticker, stock_price)
                 if _gc_full and (_gc_full.get("calls") or _gc_full.get("puts")):
                     _gc_calls = _gc_full.get("calls", [])
                     _gc_puts = _gc_full.get("puts", [])
@@ -2669,7 +2740,7 @@ class OptionsAgent:
                 _log.debug("[%s] Gamma 日历全到期日视图获取失败，退回近月截断链: %s",
                            ticker, _e_gcfull)
             gamma_calendar = calculate_gamma_expiry_calendar(
-                _gc_calls, _gc_puts, stock_price or atm_price
+                _gc_calls, _gc_puts, stock_price
             )
         except Exception as _e_gc:
             _log.debug("Gamma 到期日历计算失败 %s: %s", ticker, _e_gc)
@@ -2677,7 +2748,7 @@ class OptionsAgent:
         # v0.25.3: 全链 OI 采集（所有到期日汇总 OI 墙 + Max Pain）
         full_chain_oi: Dict = {}
         try:
-            full_chain_oi = self._fetch_full_chain_oi(ticker, stock_price or atm_price)
+            full_chain_oi = self._fetch_full_chain_oi(ticker, stock_price)
             if full_chain_oi:
                 _log.info("[%s] 全链OI采集完成：%d到期日，总OI %s，Max Pain $%.0f，全链P/C %.3f",
                           ticker,
@@ -2745,9 +2816,10 @@ class OptionsAgent:
         if options_chain.get("_source") == "cboe":
             try:
                 from cboe_options import fetch_cboe_quote_set
-                # v0.45.104：**不再**拿 atm_price 当兜底价。stock_price 缺失/NaN 时
-                # 上面已把 atm_price 换成 `median(all_strikes)`（甚至字面量 145.0）——
-                # 那是**行权价中位数，不是股价**。把这个正数传进去会让
+                # v0.45.104：**不再**拿 atm_price 当兜底价。（当时 stock_price 缺失/NaN 时
+                # 上面会把 atm_price 换成 `median(all_strikes)`（甚至字面量 145.0）——
+                # 那是**行权价中位数，不是股价**。v0.45.104 只在这一个读者处绕开了它，
+                # 快照 / GEX / 异动仍吃假价；v0.45.462 在源头删掉兜底，见 `_resolve_stock_price`。）把这个正数传进去会让
                 # fetch_cboe_quote_set 里的 `_qs_num(stock_price)` 直接成立，从而
                 # **绕过它自己的 official_price 诚实取价路径**，并把
                 # underlying_price_source 标成 "caller"。实测（$145 链、行权价 120-180）：
@@ -2823,8 +2895,13 @@ class OptionsAgent:
             "quote_set": quote_set,
         }
 
-        # 方案21: 出口消毒 — 遍历结果 dict，NaN/Inf → 安全默认值
-        _sanitize_result(result)
+        # 方案21: 出口消毒 — NaN/Inf → None（v0.45.462 前是 0.0，见 `_sanitize_result`）
+        _nan_paths = _sanitize_result(result)
+        if _nan_paths:
+            with _snap_stats_lock:
+                _snap_stats["nan_sanitized"] += len(_nan_paths)
+            _log.warning("[%s] 期权结果里有 %d 个非有限数，已记为 None（不可得）：%s",
+                         ticker, len(_nan_paths), ", ".join(_nan_paths[:8]))
 
         # ===== Snapshot cache 出口：写入 per-ticker-per-date 冻结快照 =====
         if not _snap_disabled:
@@ -2832,6 +2909,9 @@ class OptionsAgent:
                 result["_snapshot_timestamp"] = datetime.now().isoformat()
                 result["_snapshot_ticker"] = ticker
                 result["_snapshot_stock_price"] = stock_price
+                # v0.45.462：现价出处（caller / cboe_close / cboe_intraday / … / unavailable）。
+                # 旧快照没有这个键，那时的现价可能是行权价中位数或 145.0，读者不能当真观测
+                result["_snapshot_stock_price_source"] = stock_price_source
                 # v0.45.238：数据所属会话 + 取数时该会话是否已收盘（命中校验与观测点读这两个）
                 _complete_at_fetch = _snap_now >= _session_close(_snap_session)
                 result["_snapshot_session"] = _snap_session
@@ -2842,13 +2922,13 @@ class OptionsAgent:
                     result["_options_as_of_mismatch"] = True
                     result["_options_target_date"] = _snap_target
                     result["_options_fetched_on"] = _snap_session
-                with open(_snap_path, "w") as _f:
-                    json.dump(result, _f, default=str, indent=2)
+                _write_snapshot(_snap_path, result, indent=2)
                 _snap_count("writes")
                 if not _complete_at_fetch:
                     _snap_count("writes_before_close")
                 _log.info("[%s] 期权快照写入: %s", ticker, os.path.basename(_snap_path))
-            except OSError as _e:
+            except (OSError, ledger_io.LedgerError) as _e:
+                # 失败已由 ledger_io 在源头登记（status.json ⇒ P2）；本次结果照常返回，只是没冻结
                 _log.warning("[%s] 期权快照写入失败: %s", ticker, _e)
 
         return result

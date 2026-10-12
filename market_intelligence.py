@@ -436,7 +436,8 @@ def calculate_gamma_expiry_calendar(
             charm_dir = "neutral"
             charm_note = f"到期日 {pin_expiry} 多空 Gamma 接近均衡，Charm 方向中性。"
 
-        if pin_strike:
+        # v0.45.462：现价不可得（None）时只略去「距当前 x%」这句，不让整份日历因 TypeError 丢掉
+        if pin_strike and isinstance(stock_price, (int, float)) and stock_price > 0:
             charm_note += f" Pin 目标价 ${pin_strike:.0f}（OI最高行权价），距当前 ${stock_price:.0f} 约 {abs(pin_strike-stock_price)/stock_price*100:.1f}%。"
 
         # 清理内部字段

@@ -56,6 +56,10 @@ _SPIKE_MAX_NEIGHBOR_GAP_DAYS = 5
 FULL_WINDOW = 252
 
 _SNAP_RE = re.compile(r"options_snapshot_(.+)_(\d{4}-\d{2}-\d{2})\.json$")
+# v0.45.462：快照现价出处里算「收盘价」的（见 options_analyzer._resolve_stock_price）。
+# caller = 蜂群当天用的价（与 DB price_at_predict 同源）；cboe_close = 已核实的官方收盘。
+# 盘中价 / 盘中生成的陈旧文件 / 判不了 / 不可得 / 没有出处（旧快照）一律不收。
+_SNAPSHOT_CLOSE_SOURCES = frozenset({"caller", "cboe_close"})
 _MIN_VALID_PRICE = 0.01
 _MAX_VALID_PRICE = 1_000_000.0
 
@@ -162,6 +166,13 @@ def _scan_snapshots(ticker: str, cache_dir: str) -> Dict[str, float]:
             with open(path, "r", encoding="utf-8") as f:
                 snap = json.load(f)
         except (OSError, json.JSONDecodeError):
+            continue
+        # v0.45.462：只收**能自证出处**的快照价。v0.45.462 前 analyze() 取不到现价时会写
+        # 行权价中位数或常数 145.0，且快照不带出处——这些旧值与真价同形、分不开（索引里实测
+        # 40 行 145.0、29 行 100.0；09-17 全源中断那天 30/30 份是行权价中位数）。现有索引是
+        # 08-15/16 一次性迁移建的（没有任何调用方往里追加），这条只管**以后**的迁移
+        # （新标的 / 标记丢失重迁）不把旧假价再收进来；旧快照的真价由读时合并的 DB 权威价覆盖。
+        if snap.get("_snapshot_stock_price_source") not in _SNAPSHOT_CLOSE_SOURCES:
             continue
         px = _valid(snap.get("_snapshot_stock_price"))
         if px is not None and _is_trading_date(m.group(2)):

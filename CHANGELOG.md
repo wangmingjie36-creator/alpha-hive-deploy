@@ -5,7 +5,35 @@
 
 ---
 
-## [0.45.462] — 2026-10-12 — 占位（进行中：期权快照股价兜底 145/中位行权价 + NaN 消毒改 None + 快照原子严格写）
+## [0.45.462] — 2026-10-12 — Fixed：期权分析取不到现价时不再拿「行权价中位数 / 145.0」冒充（09-17 全源中断那天 30/30 份快照现价是行权价中位数）——改用同一份 CBOE payload 的真实标的价，再没有就记 None；出口消毒 NaN → None 并计数；期权快照改走 `ledger_io` 原子严格写
+
+### 为什么
+用户要求先只读调查「快照里的 0 / 假值从哪来、谁读、改了评分会不会变」，再从根因修。调查结论：
+- **NaN → 0.0 的出口消毒在现行代码下触发不到**（1901 份快照零 NaN、零被 `default=str` 字符串化的数；`options_score` 在消毒之前就算好了）——不是评分问题，但触发即是「把算不出写成一个合法读数」。
+- **真正的假值在现价。** `OptionsAgent.analyze` 调用方没给现价时，两处各自兜底成「OI>100 的看涨行权价中位数」，再没有就是常数 **145.0**；yfinance 备用链为补 BS gamma 还有第三处同形（OI>50 的中位数）。这个数被当现价算 ATM IV 窗口 / GEX / 异动 / 关键位 / 偏斜 / 期限结构，写进快照 `_snapshot_stock_price`。
+  - 实测：47 份快照现价 = 145.0（2026-06 ~ 07）；**2026-09-17**（全源约 2 分钟中断，OracleBee `_get_stock_data` 得 price=0.0）**30/30 份**是行权价中位数（NVDA 232.5 vs 真价 219.34、COST 987.5 vs 893.93），进了当天 `signal_archive` 的 `options.gamma_exposure` / `iv_current` 与 OracleBee 分、`predictions` 的 odds 维与 final_score，当天纸面组合开了 CRM / RKLB 两笔（假价改没改变这两笔：待验证）。
+  - **CBOE payload 本来就带着与链同一时刻的真实标的价**：`fetch_cboe_chain` 用 `official_price` 算出来过滤行权价，然后丢掉了。v0.45.104 已经发现过这个假价，但只在 quote_set 一个读者处绕开（「五个字段只修了一个」同形）。
+- 价格索引（`price_history`）的影响面（只读审计）：索引全部 782 行来自 08-15/16 的一次性快照迁移（`append_observation` 从无生产调用方），其中 40 行 145.0、29 行 100.0 等假价；**五个读者（5 日动量、财报历史波动、组合 Greeks、卖权账本、VRP）逐一核过，没有任何一个把它们用进落盘结果或决策**（日期 / 窗口 / 取数优先级在结构上够不到；日志与账本核对一致）。09-17 的假价**没有**进索引（迁移早于它）。
+
+### Fixed
+- **`options_analyzer._resolve_stock_price`（新）——现价唯一出处**：调用方给的有效价（有限、> 0）⇒ `caller`（与旧行为一致，**调用方给了价的日子一个数都不变**）；否则期权链自带的标的价 ⇒ 链标注的出处（`cboe_close` / `cboe_intraday` / `cboe_stale_intraday` …）；都没有 ⇒ `(None, "unavailable")`。NaN / inf / bool 一并挡（旧 `if not stock_price` 拦不住 NaN）。
+  - `analyze` 删掉两处兜底；现价 None 时 ATM IV 窗口不定位（走既有的「当日原始 IV 无效」降级）、GEX / 偏斜 / 期限结构按不可得、异动不判 OTM 类条件、Gamma 日历只略去「距当前 x%」一句（`market_intelligence.calculate_gamma_expiry_calendar` 此前遇 None/0 价会 TypeError/ZeroDivision ⇒ 整份日历被吞掉）。
+  - 快照新增 `_snapshot_stock_price_source`；现价不可得计入 `snapshot_slot_stats()["stock_price_unavailable"]`（status.json，扫描摘要行出过事才占位）+ WARNING。
+  - yfinance 备用链补 BS gamma 不再拿中位行权价当 S：没价 ⇒ 不补 gamma ⇒ GEX「算不出」。（这份 GEX 自 v0.45.349 起不进评分。）
+- **`cboe_options.fetch_cboe_chain` 返回 `underlying_price` / `underlying_price_source`**（同一份 payload 的 `official_price`，不管调用方给没给价都如实带出；取不到 ⇒ None）。CBOE 给的非有限 gamma 与 0 同义走 BS 兜底；`_bs_gamma` 先判有限（NaN 的 iv 会穿过 `sigma < 0.01`）。
+- **出口消毒 `_sanitize_result`：NaN / ±Inf → None（原 0.0）**，返回被改写的键路径；`analyze` 计入 `nan_sanitized` 并 WARNING。None 是本模块对「不可得」的既有口径（样本早退、GEX / 偏斜的不可得返回都是 None）。`calculate_gamma_exposure` 求和非有限 ⇒ None（`NaN <= 0` 为 False，原守卫挡不住）。
+- **期权快照四个写入方（首写 + 三个原地回写）改走 `_write_snapshot` ⇒ `ledger_io.write_json`**：原子替换 + 严格序列化 + 失败在源头登记（status.json ⇒ P2）。旧写法 `open("w") + json.dump(default=str)` 先截断再写，写到一半中断 ⇒ 下次读坏 ⇒「读取失败，重新计算」⇒ 用此刻的链覆盖那一场的冻结数据。写入守卫 `WRITERS` 删 4 条，`CEILING[LEDGER]` 22 → 18。
+- **`price_history._scan_snapshots` 只收能自证出处的快照价**（`caller` / `cboe_close`）：现有索引不受影响（迁移标记全在），这条只管以后的迁移（新标的 / 标记丢失重迁）不把无出处的旧假价、盘中价再收进来；旧快照的真价由读时合并的 DB 权威价覆盖。
+- **下游格式化**：消毒后嵌套字段可能是 None —— `generate_ml_report` 期权章两处视图（异动 / 支撑阻力 / 综合分 / 期限结构「标了可用但值是 None」）与 `collect_data` 的关键位 `iv_pct` 改为渲染「—」/ 给 None，不在格式化里 TypeError（关键位行权价显示由 `$280.0` 变 `$280`）。
+
+### 评分 / 世代边界
+- **没有追加 IC 世代边界**：正常日子（调用方给了价）现价、所有指标、`options_score` 逐位不变；变的只有「调用方取不到价」那一类故障日，且是从错价改成同一时刻的真价（或不可得）。NaN → None 在实际数据里触发不到。是否为故障日的口径变化单独记边界，留给用户决定。
+- **09-17 那天的存档 / 分数没有改**（改生产历史数据需用户明确同意）。
+
+### 验证
+- 新测试 `tests/test_options_snapshot_price_honesty.py`（31）：现价解析（调用方 / 链价 / NaN·0·None·bool / 都没有）、CBOE 链带出标的价、`analyze` 端到端（沙箱里真写快照：09-17 形状记 None + 计数、链价接替、NaN 不进快照、正常日行为不变、源码不再有中位数 / 145 兜底）、消毒 NaN → None + 路径 + 计数、GEX / BS gamma / CBOE NaN gamma、快照严格写拒 NaN 且旧文件不动、四个写入方都走 helper、价格索引迁移只收带出处的价、ML 报告与 Gamma 日历遇 None 不崩。
+- 变异 15 个全部打红（每次用新的 `PYTHONPYCACHEPREFIX`，排除陈旧 pyc）。
+- 相关既有测试（77 个文件，2388 passed）、ruff 照绿；全量见提交说明。
 
 ## [0.45.461] — 2026-10-12 — Fixed：v0.45.458 二次检查（从根因修）——解释器判据收成一条（目录不算可执行）且 exec 失败也弹窗；「怎么重新生成」只从一处出；环境数据根走 `hive_logger` 唯一规则（`~` 不展开）；`build_app` 自己执行输入规则；生成器目录判据覆盖它 import 的仓库模块
 
