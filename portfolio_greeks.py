@@ -1536,6 +1536,41 @@ def _fmt_pct(v, nd=2) -> str:
     return f"{f:+.{nd}f}%" if f is not None else "—"
 
 
+#: 对外展示的规则常量（Alpha Bot 对冲页 / 帮助页取这一份，不在前端另抄）
+PUBLIC_RULE_KEYS = ("beta_delta_band_pct", "beta_delta_target_pct", "rebalance_to", "hedge_instrument",
+                    "vega_alert_pct", "gamma_alert_pct", "beta_window")
+
+
+def ledger_view(root=None) -> Dict:
+    """对冲账本的只读视图（v0.45.459，Alpha Bot「对冲」页）。账本之外的读者一律经这里，不碰文件名。
+
+    `root` = 数据根；None ⇒ **调用时**的 `PATHS.home`（不用 import 期冻住的 `STATE_DIR`：Alpha Bot 是常驻进程，
+    数据根可经 `--home` 指定）。
+      · 历史（成交 / 净值 / 每日审计）只经 `load_history()`——放行能自证定价场次的记录，被拦下的给计数与日期；
+      · 当前持仓与现金是「现在」不是历史：`ledger_io` 严格读，读不了写进 `errors`、**不抛**（页面要能如实显示
+        「读不了」，而不是整页出错，更不能把读不了当成「空仓」）。
+    不写任何文件。"""
+    d = Path(root if root is not None else PATHS.home) / "hedge_state"
+    out: Dict = {"state_dir": str(d), "exists": d.is_dir(), "positions": None, "meta": None, "errors": {},
+                 "history": None, "rules": {k: CONFIG.get(k) for k in PUBLIC_RULE_KEYS},
+                 "measurement_start": MEASUREMENT_START}
+    if not out["exists"]:
+        return out
+    try:
+        out["positions"] = ledger_io.load_jsonl(d / "positions.jsonl")
+    except (ledger_io.LedgerError, OSError) as exc:
+        out["errors"]["positions"] = f"{type(exc).__name__}: {exc}"
+    try:
+        out["meta"] = ledger_io.load_json(d / "meta.json", default=None)
+    except (ledger_io.LedgerError, OSError) as exc:
+        out["errors"]["meta"] = f"{type(exc).__name__}: {exc}"
+    try:
+        out["history"] = load_history(d)
+    except Exception as exc:  # noqa: BLE001 - 历史读不出来如实说，不当成「没有历史」
+        out["errors"]["history"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
 def _load_audit(as_of: str) -> Optional[Dict]:
     p = STATE_DIR / f"greeks_{as_of}.json"
     if not p.exists():
