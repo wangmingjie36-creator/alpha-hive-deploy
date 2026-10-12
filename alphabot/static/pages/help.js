@@ -389,7 +389,7 @@ export const SECTIONS = [
       ["关窗后服务还在", "升级前起的服务不带 --from-app，关窗不会停它：终端执行一次 make alphabot-stop，之后按新规则走。"],
       ["想换数据根", "终端执行 /usr/local/bin/python3 -m alphabot.launcher --reset，再双击 .app 重新选。"],
       ["怎么拿到新版本", ".app 跑的是生产克隆 ~/alpha-hive-prod，每个扫描日扫描前自动更新；关掉 Alpha Bot 再打开即用上，不需要重新生成。"],
-      ["换了 Python 或要重新生成 .app", "终端执行 make -C ~/alpha-hive-prod alphabot-app（用生产克隆自己的代码生成；换 Python 加 PYTHON=路径）。"]], "现象", "处理"),
+      ["换了 Python 或要重新生成 .app", "终端执行 make -C ~/alpha-hive-prod alphabot-app（用生产克隆自己的代码生成；换 Python 加 PYTHON=/绝对路径，相对路径或只写名字会被拒）。"]], "现象", "处理"),
   ]],
 
   ["limits", "局限与免责", "读数字之前必须知道的", (m) => [
