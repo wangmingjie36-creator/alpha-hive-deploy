@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/python3 \"$CLAUDE_PROJECT_DIR/scripts/dev_checkout_sync.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
