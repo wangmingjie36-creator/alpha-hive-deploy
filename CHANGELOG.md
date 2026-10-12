@@ -9,7 +9,43 @@
 
 ## [0.45.472] — 2026-10-12 — 占位（进行中：假现价日子的期权信号隔离 + 价格索引错日 / 盘中行清理 + 生产 cache 里 TEST 测试残留移出）
 
-## [0.45.471] — 2026-10-12 — 占位（进行中：期权 IV 无效且无缓存时 iv_current 不再兜底成常数 25.0）
+## [0.45.471] — 2026-10-12 — Fixed：期权当日 ATM IV 无效（<5% / >150% / 无 ATM 合约）且无可用 `last_valid_iv` 缓存时，`iv_current` 记 **None**、`data_quality` 判 degraded——此前兜底成常数 **25.0**，可照判 `"real"`；计数 `snapshot_slot_stats()["iv_unavailable"]`；读者全部容忍 None（报告显示「—」）
+
+### 为什么
+- 与 v0.45.462 的常数现价 145.0 同一形状：25.0 是一个具体到小数点的「当前隐含波动率」，下游分不出是兜底。它进 `signal_archive` 的 `options.iv_current`、`iv_rv_spread`（25 − RV，以及 cheap / fair / expensive 信号）、论点失效检查的 `iv`、深度报告 / ML 报告 / 图表、OracleBee 的 LLM 提示词、`vol_forecast`（只观测）。
+- `data_quality` 撒谎：raw_ivs 非空、中位数落在 (150%, 200%)（原始过滤上限 200%）或 (0.5%, 5%) 时 `_has_real_iv` 为真，25.0 又 ≥ 5% ⇒ 判 `"real"`（`scan_coverage_gate` 的标签诚实检查也就看不见）。
+- 实测（数据根，只读）：21 份快照 `iv_current == 25.0`（2026-04 ~ 09-17；`data_quality` real 6 / degraded 6 / unavailable 9）；`signal_archive` 18 行 `options.iv_current = 25.0`（04-26 ~ 09-17，最近一次是 VKTX 09-15 / 16 / 17）；10-01 起 0 次。
+- 潜伏的进分通道：真实 IV 历史够数（`IV_RANK_MIN_DAYS` = 63）之后，`_numer = _iv_raw_observed or current_iv` 会把 25.0 当 IV Rank 分子 ⇒ `options_score`。目前没有任何标的够数（09–10 月 716/716 份快照 `iv_rank_source = hv_proxy`），所以历史上没触发过。
+
+### Fixed
+- `options_analyzer.py`（`OptionsAgent.analyze`）：
+  - 实拉值无效且缓存不可用（缺失或可疑）⇒ `current_iv = None`，WARNING 改为「IV 不可得（记 None，不拿常数冒充）」，`_snap_count("iv_unavailable")`。
+  - `data_quality`：`current_iv is None` ⇒ `"degraded"`（OracleBee 的 `_options_data_usable` 只排除 `"unavailable"`，degraded 照算可用 ⇒ 置信度 / `options` DQ 标签不变）。
+  - IV Rank 分子为 None ⇒ `iv_rank_from_history` 返回 (None, None) ⇒ 走 HV 代理（如实标 `hv_proxy`）；两处 `round(current_iv, 2)` 改为 None 安全。
+  - 开市分支判据补上界：此前开市时只挡 `< 5%`，>150% 的当日值照用并**写进缓存**（与 `_iv_raw_observed` 的 5%~150% 有效口径不一致）。生产扫描在收盘后跑，不走这条。
+  - 新增出口字段 `iv_current_source`：`observed` | `last_valid_cache` | `unavailable`（样本链早退分支同样带上）。旧快照没有这个键——那时的 25.0 可能是兜底。
+  - `_SNAP_STATS_KEYS` 加 `iv_unavailable`。
+- `market_intelligence.calculate_iv_rv_spread`：`iv_current_pct` 可为 None——RV 照给（日 K 派生、与 IV 无关），`iv_rv_spread` None、`iv_rv_signal` `"unknown"`、`data_available` False（新 helper `_iv_rv_without_iv`，Twelve Data / yfinance 两条路径都接）。否则 None 会在 TD 路径 TypeError 后多打一次 yfinance、再 TypeError，连 `rv_30d` 一起丢（VRP / 财报跨式读 `rv_30d`）。`check_thesis_breaks` 的 `iv_current` 注解改为 `Optional[float]`（行为不变：None ⇒ 该条件「未评估」）。
+- `generate_deep_v2.py`：ctx 的 `iv_current` 保留 None（此前 `.get(k, 0)` 拿到 None 本身）；五处 `{…iv_current…:.1f}`（LLM 提示词 4 处 + 期权叙事 1 处）改经新 helper `_iv_txt`（None ⇒「—」）——此前 None 会 TypeError，`_local_fallback` 预先构建全部叙事 ⇒ 整份深度报告崩。IV-RV 段落要求 IV 可得（否则 ctx 把 None 价差兜成 0.0，写出「IV-RV 价差 +0.0%，期权定价合理」）。`check_thesis_breaks` 传 None 而不是 `float(x or 0.0)`（此前显示「实际 0.0、未触发」）。
+- `chart_engine.py`：期权水位图标题与侧栏「IV Current」不可得显示「—」（此前 `float(x or 0)` ⇒「0.0%」）。
+- `scan_timing.summary_line`：期权快照段出过事才占位 `/IV不可得N次`（同 `stock_price_unavailable`）。
+
+### 读者盘点（不需要改的）
+- `generate_options_score(iv_rank, put_call_ratio, gex, unusual)` 不读 `iv_current`；`swarm_agents/` 里没有任何蜂读 `iv_current` / `iv_rv_*` / `rv_30d` 进分（只有 OracleBee 的 LLM 提示词经 `json.dumps(result)` 看到，生产 `--no-llm` 不走）。`ml_predictor*` / `regime_analyzer` 只读 `iv_rank`。
+- 已经容忍 None：`dashboard_renderer`、`generate_ml_report`、`report_formatters`、`collect_data`、`signal_archive`（None 不归档）、`vol_forecast`（当天该标的退出排名，只观测、不进仓位）、`check_thesis_breaks`（None ⇒ 未评估）、`_refresh_price_derived`（`if _iv:` 跳过 RV 重算）。
+- `scan_coverage_gate`：`iv_current` 缺失计入覆盖率；`data_quality` 已改 degraded ⇒ 「期权链标 real，iv_current 却为空」矛盾检查不会误报。
+
+### 评分 / 世代边界
+- **现行世代（2026-10-09 / v0.45.441·445 起）任何标的、任何一天的评分输入都不变**：① 唯一进分的通道是真实 IV Rank 的分子，目前没有标的够 63 天；② `data_quality` real → degraded 不改 OracleBee 置信度与 DQ 标签；③ 10-01 起没出现过 25.0。
+- **没有追加 IC 世代边界**。`signal_archive` 影响面：以后遇到这种情况，`options.iv_current` 该行**不写**（此前写 25.0）；`options.iv_rank` 不受影响（现在走 HV 代理，那条路本来就不读 `current_iv`）。
+- 历史 25.0（21 份快照 / 18 行归档）**未清理**——等用户决定，见本次会话报告。
+
+### Added
+- `tests/test_options_iv_unavailable.py`（16）：生产者端到端（钉死时钟：收盘后 / 盘中两种）——中位数 180% 与 3% 两种「raw 非空但无效」都给 None 且不判 real、计数 +1、快照落 None、不拿常数算 IV − RV；现价不可得（09-17 形状）同样 None；缓存可用照用并标 `last_valid_cache`；有效观测不变（正对照）；有真实 IV 历史时不拿常数当 IV Rank 分子；盘中 >150% 不用、不写缓存；样本链早退带 `iv_current_source`；摘要行；`calculate_iv_rv_spread` 两条路径无 IV 时保 RV、丢价差（+ 有 IV 时逐位不变的正对照）；深度报告叙事渲染「—」且不写 IV-RV 段落；源码扫描钉住 `generate_deep_v2` 里不再有对 `iv_current` 直接带格式说明符的取值。
+
+### 验证
+- 变异 10 个全部打红（`python -B` + 每次清 `__pycache__`，跑完原样写回）：恢复 `current_iv = 25.0`、删 `_snap_count("iv_unavailable")`、`data_quality` 判据不认 None、开市判据回退 `< 5%`、删 TD / yfinance 两处 None 守卫、叙事写回 `{iv:.1f}`、IV-RV 段落去掉 `iv is not None`、提示词写回 `{ctx.get('iv_current',0):.1f}`、删摘要行片段。TD 守卫变异起初经 yfinance 伸手出网（被会话网络守卫拦下、红在 teardown），已给这两条测试加 `stub_yfinance`，现在是干净的断言失败。
+- `ruff check` 改动文件全绿。
 
 ## [0.45.470] — 2026-10-12 — Fixed：v0.45.463 二次检查——「库在但读不了」与回落里的异常也改为 warning（463 只堵了「库不存在」那一半）；结构守卫改走共享文件枚举、放宽词表（存量 6 → 17 处，逐条核过生产调用方）、正对照改为真跑扫描器；更正 463 条目两处事实
 

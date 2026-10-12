@@ -315,7 +315,9 @@ def summary_line(snap: dict) -> str:
         f"/会话不符弃用{os_.get('session_mismatch', '?')}份/盘中快照命中{os_.get('hits_before_close', '?')}份"
         # v0.45.462：只在出过事时占位——现价不可得（不再拿行权价中位数 / 145 冒充）、出口遇到非有限数
         + (f"/现价不可得{os_['stock_price_unavailable']}次" if os_.get("stock_price_unavailable") else "")
-        + (f"/非有限数记None {os_['nan_sanitized']}个" if os_.get("nan_sanitized") else ""))
+        + (f"/非有限数记None {os_['nan_sanitized']}个" if os_.get("nan_sanitized") else "")
+        # v0.45.471：当日 ATM IV 无效且无缓存 ⇒ iv_current 记 None（不再兜底成 25.0）
+        + (f"/IV不可得{os_['iv_unavailable']}次" if os_.get("iv_unavailable") else ""))
     pg = c.get("portfolio_greeks")
     pg_s = ""
     if pg and pg.get("error"):

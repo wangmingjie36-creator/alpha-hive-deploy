@@ -1653,13 +1653,15 @@ _snap_stats_lock = threading.Lock()
 #                            被就地减掉（v0.45.349，按份计；见 `_drop_legacy_gex_signal`）
 #   stock_price_unavailable  analyze() 现价不可得（调用方没给、期权链也没带）的次数（v0.45.462，见 `_resolve_stock_price`）
 #   nan_sanitized            出口消毒遇到的非有限数个数（v0.45.462：改写成 None，不再是 0.0；见 `_sanitize_result`）
+#   iv_unavailable           analyze() 当日 ATM IV 无效（<5% / >150% / 没有可用合约）且无可用缓存、`iv_current` 记 None
+#                            的次数（v0.45.471：此前兜底成常数 25.0，见 analyze 内「IV 不可得」注释）
 #
 # 为什么要去重：一只标的一轮扫描要调 3~4 次 analyze()（OracleBee / BearBee / advanced_analyzer /
 # 日报收尾），v0.45.238 按调用计时，一份盘中快照会被报 3~4 遍、一天可达上百条 WARNING，
 # 计数也读不出「几份快照有问题」。去重键带冻结时间戳：同一路径被重写成新快照后再出事，照样会报。
 _SNAP_STATS_KEYS = ("hits", "writes", "session_mismatch", "hits_before_close",
                     "writes_before_close", "calendar_fallback", "gex_signal_corrected",
-                    "stock_price_unavailable", "nan_sanitized")
+                    "stock_price_unavailable", "nan_sanitized", "iv_unavailable")
 
 # v0.45.349：OptionsAgent 每条返回路径都带这个键、值恒为 False ——「本结果的 options_score
 # 不含 GEX 分量」。旧代码写的快照没有这个键 ⇒ 命中时据此判定要不要减掉旧的 +1.0。
@@ -2438,6 +2440,7 @@ class OptionsAgent:
                 "iv_rank": None,
                 "iv_percentile": None,
                 "iv_current": None,
+                "iv_current_source": "unavailable",   # v0.45.471 schema 一致性
                 "iv_raw_observed": None,      # v0.43.18 schema 一致性
                 "iv_rank_source": None,
                 "iv_rank_window_days": None,
@@ -2589,7 +2592,10 @@ class OptionsAgent:
         #   B. 盘后 raw IV 在合理区间 (5%~150%) → 作为"次优缓存"保存并使用，
         #      避免直接使用极端 stale 值或硬编码 25.0
         #   C. 缓存 TTL 从 48h 延长到 120h（覆盖 3 天长周末 + 缓冲）
-        if not _market_open or current_iv < _MIN_VALID_IV:
+        # v0.45.471：开市分支的判据补上上界。此前开市时只挡 `< 5%`，>150% 的当日值照用并写进缓存
+        # ——与上面 `_iv_raw_observed` 的「有效」口径（5%~150%）不一致。
+        _iv_source = "observed"
+        if not _market_open or not (_MIN_VALID_IV <= current_iv <= _MAX_VALID_IV):
             _raw_iv = current_iv  # 保留原始值用于对比
             # ── v0.45.26：优先级倒置修复 ──
             # 旧逻辑：只要缓存存在就用缓存，**且命中时不刷新缓存**。
@@ -2628,19 +2634,31 @@ class OptionsAgent:
                         "已关闭" if not _market_open else "异常数据",
                     )
                     current_iv = last_valid
+                    _iv_source = "last_valid_cache"
                 else:
+                    # ── v0.45.471：IV 不可得就是 None，不再兜底成常数 25.0 ──
+                    # 25.0 是一个具体到小数点的「当前隐含波动率」，下游分不出它是兜底：
+                    # 进 signal_archive `options.iv_current`（进 IC）、iv_rv_spread（25 − RV）、
+                    # 论点失效检查的 `iv`、报告与 LLM 提示词；有真实 IV 历史时还会当 IV Rank 的分子
+                    # （⇒ options_score）。更糟的是 data_quality 照判 "real"：raw_ivs 非空但中位数
+                    # 落在 (150%, 200%) 或 (0.5%, 5%) 时 `_has_real_iv` 为真、25.0 又 ≥ 5。
+                    # 实测数据根 21 份快照 iv_current == 25.0（2026-04 ~ 09），其中 6 份标 real。
+                    # 谁会红：计数进 `snapshot_slot_stats()["iv_unavailable"]`（status.json 摘要行），
+                    # data_quality 判 degraded，`iv_current_source` 写 "unavailable"。
                     if _cache_suspicious:
                         _log.warning(
                             "%s 缓存 IV %.2f%% 低于历史最低 %.2f%% × 70%% → 丢弃坏缓存；"
-                            "raw_iv=%.2f%% 同样异常，使用兜底 25.0%%",
+                            "raw_iv=%.2f%% 同样异常 ⇒ IV 不可得（记 None，不拿常数冒充）",
                             ticker, last_valid, min(hist_hv) if hist_hv else 0.0, _raw_iv,
                         )
                     else:
                         _log.warning(
-                            "%s raw_iv=%.2f%% 无效且无可用缓存，使用兜底 25.0%%",
+                            "%s raw_iv=%.2f%% 无效且无可用缓存 ⇒ IV 不可得（记 None，不拿常数冒充）",
                             ticker, _raw_iv,
                         )
-                    current_iv = 25.0
+                    current_iv = None
+                    _iv_source = "unavailable"
+                    _snap_count("iv_unavailable")
         else:
             # 开市且 IV 有效 → 保存供收市后使用
             self.fetcher._save_last_valid_iv(ticker, current_iv)
@@ -2665,11 +2683,13 @@ class OptionsAgent:
                 # 降级块可能已被 last_valid_iv（TTL 120h，最长 5 天前）替换，
                 # 拿陈旧值比对新鲜分布 = 口径错配，与 v0.43.19 修掉的
                 # "拿真实 IV 比 HV 分布"是同一类错误。
+                # v0.45.471：current_iv 不可得时是 None ⇒ iv_rank_from_history 返回 (None, None)
+                # ⇒ 走下方 HV 代理（此前分子是常数 25.0，算出一个看似正常的 rank 进 options_score）。
                 _numer = _iv_raw_observed if _iv_raw_observed is not None else current_iv
                 _r, _p = iv_rank_from_history(_numer, _real_hist)
                 if _r is not None:
                     iv_rank, iv_percentile = _r, _p
-                    iv_current = round(current_iv, 2)
+                    iv_current = round(current_iv, 2) if current_iv is not None else None
                     _iv_rank_source = f"real_iv_{_real_days}d"
                     _iv_rank_window = _real_days
                     _log.info(
@@ -2689,7 +2709,8 @@ class OptionsAgent:
             if _current_hv is not None:
                 iv_rank, _ = self.analyzer.calculate_iv_rank(_current_hv, hist_hv)
                 iv_percentile = self.analyzer.calculate_iv_percentile(_current_hv, hist_hv)
-            iv_current = round(current_iv, 2)  # 展示值仍是真实 IV，不受 rank 口径影响
+            # 展示值仍是真实 IV，不受 rank 口径影响；不可得 ⇒ None（v0.45.471）
+            iv_current = round(current_iv, 2) if current_iv is not None else None
         # P0-1 (v0.38.0): 历史 IV 为样本数据时，IV Rank 不可信（样本区间与真实
         # 现价 IV 错配 → 假 0/100 极值），置 None 并在评分中走中性
         # v0.45.383：「不可信」= 样本数据 **或** 当前 HV 受缺失交易日影响（`hist_hv_untrusted`）。
@@ -2819,7 +2840,8 @@ class OptionsAgent:
         _has_real_iv = bool(raw_ivs)
         if _is_sample:
             data_quality = "unavailable"
-        elif not _has_real_iv or current_iv < _MIN_VALID_IV:
+        elif not _has_real_iv or current_iv is None or current_iv < _MIN_VALID_IV:
+            # v0.45.471：current_iv 不可得（None）⇒ degraded。此前它是常数 25.0、照判 real。
             data_quality = "degraded"
         else:
             data_quality = "real"
@@ -2858,7 +2880,10 @@ class OptionsAgent:
             "data_quality": data_quality,  # "real" | "degraded" | "unavailable"
             "iv_rank": iv_rank,  # 0-100
             "iv_percentile": iv_percentile,  # 0-100
-            "iv_current": iv_current,  # 当前 IV（可能来自 last_valid 缓存，见降级逻辑）
+            "iv_current": iv_current,  # 当前 IV（可能来自 last_valid 缓存，见降级逻辑）；不可得 ⇒ None
+            # v0.45.471：iv_current 出处 "observed"（当日实拉）| "last_valid_cache"（≤120h 前）| "unavailable"。
+            # 旧快照没有这个键——那时 iv_current == 25.0 可能是兜底常数，读者不能当真观测。
+            "iv_current_source": _iv_source,
             # v0.43.18 自攒 IV 历史原料：当日真实观测 IV（降级前），只记账不进评分
             "iv_raw_observed": _iv_raw_observed,
             "iv_rank_source": _iv_rank_source,      # "real_iv_{N}d" | "hv_proxy"

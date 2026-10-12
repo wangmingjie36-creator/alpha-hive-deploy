@@ -763,7 +763,8 @@ def extract(data: dict) -> dict:
         "iv_skew_signal": iv_skew_signal,
         "otm_put_iv": otm_put_iv,
         "otm_call_iv": otm_call_iv,
-        "iv_current": odet.get("iv_current", 0),
+        # v0.45.471：IV 不可得时上游给 None（不再是常数 25.0）。保留 None，展示一律经 `_iv_txt`
+        "iv_current": odet.get("iv_current"),
         "iv_rank": odet.get("iv_rank", 0),
         "iv_percentile": iv_percentile,
         # IV 期限结构（S15）
@@ -1015,7 +1016,7 @@ Scout:{fmt_score(ctx['scout'].get('score'))} Rival:{fmt_score(ctx['rival'].get('
 完成结构化预分析（严格按格式，无HTML）：""",
 
         "options": f"""分析 {ticker} 期权市场结构：
-P/C={ctx['put_call_ratio']} | 总OI={ctx['total_oi']:,.0f} | IV Skew={ctx['iv_skew']}({ctx['iv_skew_signal']}) | IV={ctx['iv_current']:.1f}%
+P/C={ctx['put_call_ratio']} | 总OI={ctx['total_oi']:,.0f} | IV Skew={ctx['iv_skew']}({ctx['iv_skew_signal']}) | IV={_iv_txt(ctx['iv_current'])}
 IV-RV价差:{_ivrv_txt} | HV30={_hv30_txt}
 流向:{ctx['flow_direction']} | 关键阻力:{json.dumps(ctx['key_levels'].get('resistance',[])[:2],ensure_ascii=False)}
 关键支撑:{json.dumps(ctx['key_levels'].get('support',[])[:2],ensure_ascii=False)}
@@ -1091,7 +1092,7 @@ PEAD历史财报漂移: {ctx.get('pead_summary','暂无历史数据')}（偏向:
 - P/C 比: {ctx['put_call_ratio']}（{'>1 偏空' if pc_float > 1 else '<1 偏多'}）
 - 总OI: {ctx['total_oi']:,.0f}
 - IV Skew: {ctx['iv_skew']} ({ctx['iv_skew_signal']})
-- IV 当前: {ctx['iv_current']:.1f}% | HV30（已实现波动率）: {(ctx.get('rv_30d') or 0):.1f}%
+- IV 当前: {_iv_txt(ctx['iv_current'])} | HV30（已实现波动率）: {(ctx.get('rv_30d') or 0):.1f}%
 - IV-RV 价差: {(ctx.get('iv_rv_spread') or 0):+.1f}%（正值=期权相对HV偏贵，卖方有优势；负值=期权便宜，方向性买入占优），信号: {ctx.get('iv_rv_signal','')}
 - 流向: {ctx['flow_direction']}
 - 关键支撑: {json.dumps(ctx['key_levels'].get('support',[])[:3], ensure_ascii=False)}
@@ -1126,7 +1127,7 @@ PEAD历史财报漂移: {ctx.get('pead_summary','暂无历史数据')}（偏向:
 - 最大阻力: ${ctx['key_levels'].get('resistance',[{}])[0].get('strike','N/A') if ctx['key_levels'].get('resistance') else 'N/A'}
 - 最大支撑: ${ctx['key_levels'].get('support',[{}])[0].get('strike','N/A') if ctx['key_levels'].get('support') else 'N/A'}
 - 最近催化剂: {(ctx['catalysts'][0].get('event','无') + '（' + str(ctx['catalysts'][0].get('days_until','?')) + '天后）') if ctx['catalysts'] else '无'}
-- IV当前: {ctx['iv_current']:.1f}% | F&G: {ctx['fg_score'] if ctx['fg_score'] else '未知'} | 期权流: {ctx['flow_direction']}
+- IV当前: {_iv_txt(ctx['iv_current'])} | F&G: {ctx['fg_score'] if ctx['fg_score'] else '未知'} | 期权流: {ctx['flow_direction']}
 - 全部风险信号: {', '.join(ctx['bear_signals']) or '无'}{_master_block}{_delta_block}
 
 只输出两段 HTML <p> 标签，不得包含任何 table/ol/ul/li 标签：
@@ -1235,7 +1236,7 @@ def llm_cross_context(ctx: dict, api_key: str) -> str:
 数据摘要：
 - 蜂群评分：{score}/10，方向：{ctx['direction_zh']}，ML 7d：{ctx['ml_7d']:+.1f}%，30d：{ctx['ml_30d']:+.1f}%
 - 七蜂：{agents_str}
-- 期权：P/C={ctx['put_call_ratio']} | IV={ctx.get('iv_current',0):.1f}% | Skew={ctx['iv_skew']} | 流向={ctx['flow_direction']}
+- 期权：P/C={ctx['put_call_ratio']} | IV={_iv_txt(ctx.get('iv_current'))} | Skew={ctx['iv_skew']} | 流向={ctx['flow_direction']}
 - GEX 结构：{gex_str}
 - 最近催化剂：{cat_str}
 - 逆向信号：{', '.join(ctx['bear_signals']) or '无'}
@@ -1990,6 +1991,11 @@ def _build_catalyst_narrative(ctx: dict) -> str:
             + pead_para)
 
 
+def _iv_txt(v) -> str:
+    """当前 IV 的展示串。不可得（None，v0.45.471 起上游不再兜底成 25.0）⇒ 「—」。"""
+    return f"{float(v):.1f}%" if isinstance(v, (int, float)) and not isinstance(v, bool) else "—"
+
+
 def _build_options_narrative(ctx: dict) -> str:
     # ── 基础字段 ──
     score = float(ctx.get("final_score", 5.0) or 5.0)
@@ -2060,7 +2066,7 @@ def _build_options_narrative(ctx: dict) -> str:
 
     p1 = (
         f'<p><strong>期权市场结构：近端P/C={pcr}（{"Call偏多，买方主导，看多氛围浓" if pcr_f<0.9 else "Put偏多，下行对冲需求强" if pcr_f>1.1 else "多空均衡"}），'
-        f'总OI {oi:,.0f}，IV Current {iv:.1f}%，IV Rank {iv_rank:.0f}%（{iv_interp}），'
+        f'总OI {oi:,.0f}，IV Current {_iv_txt(iv)}，IV Rank {iv_rank:.0f}%（{iv_interp}），'
         f'IV Skew {skew}（{"Put溢价偏高，尾部风险定价显著" if skew_f>1.2 else "Skew中性，定价均衡" if skew_f>0.8 else "Call溢价偏高，上行投机情绪浓"}）。</strong>'
         f'{"期权综合评分 " + f"{options_score:.1f}/10，{iv_skew_signal}；" if options_score else ""}'
         f'当前市场{"处于 " + overall_rg + " 政体，" if overall_rg else ""}'
@@ -2080,7 +2086,9 @@ def _build_options_narrative(ctx: dict) -> str:
     )
 
     # ── P2: IV-RV 价差与波动率深度分析 ──
-    if iv_rv != 0 or rv_30d != 0:
+    # v0.45.471：IV 不可得时不写这段——上游 RV 照给、价差 None 被 ctx 兜成 0.0，
+    # 进来就会写出「IV-RV 价差 +0.0%，期权定价合理」这种编出来的结论。
+    if iv is not None and (iv_rv != 0 or rv_30d != 0):
         iv_rv_interp = ('期权相对历史波动率显著偏贵，做市商定价中包含较高风险溢价，卖方策略（如 short strangle、iron condor）统计优势明显'
                         if iv_rv > 5 else
                         '期权相对历史波动率偏贵，隐含波动率高于实际波动，卖方有一定统计优势'
@@ -7565,7 +7573,8 @@ def main():
         _tb_result = check_thesis_breaks(
             ticker=ticker,
             current_price=float(ctx.get("price") or 0.0),
-            iv_current=float(ctx.get("iv_current") or 0.0),
+            # v0.45.471：不可得就传 None（check_thesis_breaks 把它记成「未评估」），不兜成 0.0
+            iv_current=(float(ctx["iv_current"]) if ctx.get("iv_current") is not None else None),
             put_call_ratio=_tb_pcr,
             bear_signals=ctx.get("bear_signals", []),
             swarm_score=float(ctx.get("final_score") or 5.0),
