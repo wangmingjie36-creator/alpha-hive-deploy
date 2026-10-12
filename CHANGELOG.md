@@ -361,9 +361,102 @@ data_cache 那两份是 09-05 / 09-07 写的——当时数据还在开发检出
 - `tests/test_options_snapshot_price_honesty.py` 36 条（新增 5：yfinance 链 fast_info 价进 gamma 且带出 / NaN lastPrice 退 previousClose / 都没价不补 gamma / 调用方给价时整份结果不受链价影响 / 收盘前快照的 caller 价不收）；变异 6/6 打红（每次新 `PYTHONPYCACHEPREFIX`）。
 - 全量 9138 passed；红的只有两条已知项：`TestCoverageHorizon`（等 2027 BLS/BEA 日程公布）与 session 级真实数据根闸（Alpha Bot pid 7322 盘中采样追加，单跑该文件全绿）；另一条 `test_experiments_script_bootstrap` 即上面修的那条，修后 29 passed。
 
-## [0.45.467] — 2026-10-12 — 占位（进行中：开发检出会话启动前自动快进 main，SessionStart 钩子）
+## [0.45.467] — 2026-10-12 — Added：开发检出会话启动时自动快进 main（SessionStart 钩子 `scripts/dev_checkout_sync.py`）——只在干净且只落后时快进，并把 CLAUDE.md 的变化交给会话
 
-## [0.45.466] — 2026-10-12 — 占位（进行中：cloud-snapshots 由读者自己刷新 + 陈旧可见 + 每日滞后观测）
+用户批准的方案（推荐项：钩子配置进仓库、干净时自动快进）。与 v0.45.466 同一个根因形状：**读者依赖的东西没人负责刷新**——它原先是别人的副作用，副作用搬走后依赖就没人管了、陈旧时也没人红。
+
+### 根因
+- 从 `~/Desktop/Alpha Hive` 根启动的会话读**这份工作区**的 CLAUDE.md / `.claude/` 设置；周 / 月定时任务也是（会话 cwd 就是这里，定时任务工具改不了）。
+- 阶段 8 之前生产 = 这份检出，production_sync 每个扫描日前顺带把它快进；阶段 8 后它只在某个会话碰巧 pull / 提交时前进（reflog：最近最长空档 10-10 09:26 → 10-12 04:12）。
+  - 实例：10-11（周日）周任务那轮，这里停在 10-10 09:26，按提交时间估约落后 5 个提交，含 v0.45.456 的一处 CLAUDE.md 改动。
+- 不让生产顺带快进它：v0.45.436 用户否决（这里脏了 / 分叉了会拖累生产步骤，把阶段 8 拆开的耦合接回去）。
+
+### 修法
+- `.claude/settings.json`（新增，跟踪；`.claude/worktrees/` 仍忽略）：SessionStart（`startup|resume`）钩子 `/usr/local/bin/python3 "$CLAUDE_PROJECT_DIR/scripts/dev_checkout_sync.py"`，超时 30 秒。
+- `scripts/dev_checkout_sync.py` 只在**开发检出根**（独立仓库的主工作区、在 main）动手：
+
+| 情形 | 动作 |
+|---|---|
+| 落后、工作区干净、无未推送提交 | `fetch` + `merge --ff-only`；输出 CLAUDE.md 的 diff（≤200 行，多了截断并给完整命令） |
+| 有未提交改动 / 未推送提交 / 不在 main | 不碰，只说落后几个、为什么没快进 |
+| fetch 失败 | 说出来；iCloud 重名 ref 造成的给出诊断命令 |
+| linked worktree / 不是 git 仓库 | 静默 |
+| 生产克隆（按 `production_clone.default_dest()` 认） | 不碰，提醒一句「不要在这里开会话」 |
+
+- 输出 diff 而不是只说「已快进」：CLAUDE.md 在钩子之前还是之后载入**没有核实**，直接给变化，两种顺序会话都看得到。
+- 退出码恒为 0：钩子不许挡住会话启动（意外异常也只说出来）。
+
+### 守卫
+- `tests/test_dev_checkout_sync.py`（14 条，全用真 git：本地裸仓库扮演 GitHub、另一个克隆扮演别的会话往 main 推）：
+  - 快进并给出 CLAUDE.md diff；CLAUDE.md 没变不给 diff 段；已是最新不出声；长 diff 截断并给完整命令。
+  - 未提交改动（且文件名完整：porcelain 首行的前导空格不能被 strip 掉——写测试时抓到的自身 bug）/ 未推送提交 / 其他分支 / linked worktree / 生产克隆 / 非 git 目录：一律不动 HEAD。
+  - fetch 失败与意外异常都退出 0 并说出来。
+  - 配置：`startup` 匹配、超时大于 fetch 超时且不超过 60 秒、解释器是绝对路径（CLAUDE.md 禁裸 `python3`）、路径加引号；再把配置里的命令原样交给 bash 真跑一次（解释器换成测试自己的）。
+- 变异 12 处（先提交后变异，每轮清 pyc），全部变红：不认 worktree / 不看工作区脏 / 不看未推送 / 不看分支 / 不认生产克隆 / 不给 CLAUDE.md 变化 / porcelain 被 strip / 意外异常不兜 / fetch 失败沉默 / 配置不含 startup / 配置路径不加引号 / 长 diff 不截断。
+
+### 二次检查追补（同版，推送前；用户要求先判有没有必要、有就按根因修）
+`/code-review high` 合审 466 / 467 共 7 条；467 的 3 条都判为必要：
+- **钩子超时比它自己的 git 调用短**：钩子配 30 秒，脚本却给 merge 60 秒、fetch 20 秒。
+  - 根因两层：各调用各给超时、没有总预算；写工作区的 merge 会被杀（宿主超时、自己的超时都会），杀在半路留下 index.lock，之后这份检出里的 git 全报错。
+  - 修法：单一预算 `TOTAL_BUDGET`（20 秒，测试钉「钩子 timeout ≥ 预算 + 5」）。merge 走 `_merge_detached`：自己的进程组（宿主杀钩子波及不到）、输出进临时文件（本脚本先走了也不会被 SIGPIPE 杀在半路）、**从不被杀**——预算内没做完就让它在后台做完，diff 照样给（只依赖两端提交）。读命令 `--no-optional-locks`（`status` 不回写索引），超时先 SIGTERM（git 会删掉自己的锁文件）、3 秒后才 SIGKILL。
+- **断网时每次会话启动最多等 20 秒**（与上同根）：fetch 只拿预算里的 10 秒份额。
+- **只报根 CLAUDE.md**：会话启动时载入的还有 `.claude/`（设置 / 钩子 / skills）与子目录 CLAUDE.md。现在各级 CLAUDE.md 给 diff，`.claude/` 下的列文件并说明「本会话仍按旧的跑，下次会话才生效」。
+- 守卫（`tests/test_dev_checkout_sync.py` 增至 20 条）：后台快进照报且真做完、不留 index.lock；预算用完拒绝再调；挂住的读命令（以 `sleep` 冒充 ssh，不出网）按份额结束；读命令不拿可选锁；merge 只在 `_merge_detached` 里、自己的进程组、输出不进管道（AST）；`.claude/` 与子目录 CLAUDE.md 都报。
+- 变异 8 处全部变红：merge 超时就杀 / 不另开进程组 / 输出进管道 / 预算用完照跑 / 读命令拿可选锁 / 超时不结束子进程 / 只报根 CLAUDE.md / 钩子超时不大于预算。
+
+### 生效
+- 开发检出的 main 里有了这两个文件之后的**下一次会话启动**。第一次要有人在开发检出里 `git pull --ff-only`（或等下一个碰巧 pull 的会话）；Claude 应用第一次可能要求确认信任项目钩子。
+- worktree 里的会话也会跑它，只是认出是 worktree 后静默退出。
+
+## [0.45.466] — 2026-10-12 — Fixed：cloud-snapshots 由读者自己刷新——补跑 / 入场价回填先 `refresh()`；读不到时分清「本地没拉到」与「云端没有」；每日扫描观测落后几个交易日（超出 ⇒ P2）
+
+用户批准的方案（推荐项：落后报 P2）。
+
+### 根因
+- 读者：`--date` 补跑的期权 / IV（`snapshot_mode`）、历史收盘兜底（`data_pipeline` → `load_official_close`）、`entry_price_backfill`。它们读远端跟踪 ref `origin/cloud-snapshots`，只有 `git fetch` 会动它，而全仓没有代码 fetch 这条分支。
+- 阶段 8 之前读者跑在开发检出里，开发会话顺手 fetch 让它碰巧是新的；生产搬进独立克隆后，克隆里只有 production_sync 的 `fetch origin main`。
+  - 克隆里该 ref 最后更新于 10-09 09:59，reflog 是一次完整的 `fetch -q origin`（多半是会话跑 CLAUDE.md 那条「下一轮生产跑哪版」命令时顺带的）。
+- 陈旧的后果：补跑那天看到「无可用云端快照」，与 routine 真没产出分不开，期权 / IV 降级成当天的数据。routine 自己也三次静默停过（auto-memory `alpha-hive-cloud-snapshot-dead`），同样要等到补跑才显形。
+- 不选「production_sync 顺带 fetch」：routine 与扫描同在 PDT 14:00，次日早上补跑前一天时，那次 fetch 还没有它；GitHubTool 的精确参数白名单也是刻意的安全约束（有守卫）。
+
+### 修法
+- `cloud_snapshot_loader.refresh()`：唯一刷新入口（显式 refspec，只动这一个远端跟踪 ref；`_git_fetch` 是本模块唯一出网处）。不抛，结果记在本进程里。
+- 入口先刷新：`_snapshot_ctx`（`--date` 补跑；`--no-snapshot` 也刷：收盘价兜底同样读它）、`entry_price_backfill.plan` 的真实来源。读函数本身不出网。
+- `why_missing`：日期落在已有历史之内 ⇒ 云端确实没有（分支只追加）；之后的日子 ⇒ 看本进程刷新过没有、成功没有。`snapshot_mode` 的报错与 `load_official_close` 的判决（新增 `snapshot_ref_stale`，每天只告警一次）都说清是哪一种。
+- 每日观测 `lag_summary`：扫描末尾刷新，按交易日（`scan_continuity.trading_days_between`，真算假日）数落后 → `scan_timing.extra.cloud_snapshots` → `alert_manager._check_cloud_snapshots`。
+  - 刷新失败 / 落后超过 `MAX_LAG_SESSIONS`（1，含当天：扫描时当天那份通常还没到）/ 没观测 ⇒ P2。
+  - 补跑（`--date`）不观测：落后量是相对今天的。
+- 测试默认离线：conftest `_block_cloud_snapshot_fetch` 钉住 `_git_fetch`（git 子进程出网，库级闸与 socket 闸都挡不住），只放行 origin 是本地路径的仓库；每条测试清空本进程的刷新记录。
+
+### 守卫
+- `tests/test_cloud_snapshot_freshness.py`（24 条，本地裸仓库扮演 GitHub、本地停在 D1、云端已有 D2）：
+  - 刷新前进；失败不抛；测试里拉真远端被拦并记账。
+  - `why_missing` 四种；官方收盘 / `snapshot_mode` 说清是哪一种。
+  - 补跑入口刷新后**真用上** D2 的快照；`--no-snapshot` 也刷新；入场价回填的真实来源刷新后取到 D2 收盘。
+  - 落后按交易日（周末、感恩节不算）；告警四种；`main` 把它写进 scan_timing（AST）。
+- 改了 3 条既有测试：
+  - `test_stale_intraday_consumers::test_no_snapshot_at_all`：一天都没有且本进程没刷新 ⇒ 现在是 `ref_stale`，刷新成功后才是 `no_snapshot`（两面都钉）。
+  - `test_production_sync::TestResultReachesAlerts` 两条：`main` 每轮多写 `cloud_snapshots`。
+  - 顺带：`test_healthy_round_raises_no_sync_or_deploy_alert` **单独跑一直是红的**——纸面组合计数是进程级状态，只在全套里靠排在前面的测试留下。健康一轮现在显式带上，不靠执行顺序。
+- 变异 12 处全部变红：补跑入口不刷新 / `--no-snapshot` 不刷新 / 入场价回填不刷新 / `why_missing` 不看刷新记录 / 历史内的日子也算陈旧 / 官方收盘不分陈旧 / 落后按日历日算 / 刷新失败不报 / 阈值写成 `>=` / 没观测就沉默 / conftest 闸拦了不记账 / 日报不写观测。
+- 全量（二次检查追补后）：9188 passed、1 failed、1 error。failed 是已知的 `TestCoverageHorizon`（经济日历覆盖期告警）；error 是真实数据根闸挂在最后一条测试名下，闸已逐项核实为 Alpha Bot 盘中快照的末尾追加（已知误报）。
+
+### 二次检查追补（同版，推送前；用户要求先判有没有必要、有就按根因修）
+`/code-review high` 合审 466 / 467 共 7 条；466 相关 4 条，3 条修、1 条判为不必修：
+- **每日观测挡在关键写入前面**（必要）：`lag_summary` 要出网（最长 60 秒），初版放在扫描末尾、`_timing.write` 之前——那次写入里的 `extra.gh_pages` 是编排器判「main 已跑到最后一步」的证据。今天 Step 2 用了 2097 / 3600 秒（余 41%），平时碰不到；但限流的慢日余量会缩，那一分钟能让跑完的扫描被杀、整轮记成失败。
+  - 修法：观测不许挤占关键路径 ⇒ `_CloudSnapshotObservation` 在扫描开始时于后台线程起跑，末尾**不等**；没跑完就如实记「没观测到」（告警侧照报 P2「未观测」）。
+- **分支名写了两处**（必要，低）：`SNAPSHOT_BRANCH` 成为唯一一处，读的 ref 与 `refresh` 的 refspec 都由它推出（不由测试会打桩的 `SNAPSHOT_REF` 推）。
+  - 变异时发现：把 refspec 的目标 ref 改成别的，测试仍绿——显式 refspec 的 fetch 照样按 remote 配置顺带更新 `origin/cloud-snapshots`，那个变异体不构成风险。真正的风险是分支名分叉，测试改为「云端改名 + 常量改名 ⇒ `refresh` 跟着走」。
+- **测试只核了键名**（必要）：AST 那条换成真跑 `main()` 的行为测试——每日扫描在扫描期间观测并写进 scan_timing；观测卡住（网络挂起）不挡写入、如实记未完成；补跑（`--date`）不观测。此前把 `if args.date` 写反也全绿。
+- **刷新记录只在进程内**（判为不必修）：补跑路径里读快照的（`snapshot_mode`、收盘价兜底）都在主进程里（全仓没有 multiprocessing），另一个跨进程读者 `entry_price_backfill` 自己会刷新——「父进程刷新了、子进程说没刷新过」在现有代码里没有路径；以后新入口忘了调 `refresh()` 时，「本进程没刷新过」正是该给的提示。
+- **修第 1 条时暴露的测试隔离漏洞**：观测进后台线程后，`test_production_sync` 的 main 用例起的线程能活过测试。函数级闸在 teardown 撤掉后它再拉就**真出网**，还会把刷新记录写进下一条测试的表。
+  - 修法：出网闸改 session 级（整个测试会话不撤，`network` 用例经开关放行）；每条测试收尾等本条起的观测线程做完（做不完就红）；该用例打桩观测。
+- 守卫（`tests/test_cloud_snapshot_freshness.py` 增至 30 条）：上述行为测试 + 分支改名 + 闸是 session 级 + 前一条测试留下的慢线程到下一条时已做完。
+- 变异 6 处全部变红：观测回到末尾同步等待 / 每日扫描不观测 / 补跑也观测 / refspec 手写分支名 / 收尾不等观测线程 / 闸没装。
+- 运行期间真实数据根闸报过两次（`cache/*TEST*` 被移走、`pheromone.db` 被改），逐项核过都不是测试写的：同时段另一会话 v0.45.472 在做「TEST 残留移出」与「假现价隔离」（`_manual_backups/2026-10-12_test_ticker_residue_v0.45.472` 11:51、`…_quarantine_evidence_v0.45.472` 11:57，与两次改动时刻对上）；单独重跑当时挂名的测试，`pheromone.db` 的 mtime 不动。
+
+### 生效
+- 不动编排器：今天 14:00 扫描前克隆快进后即生效，首个观测今天就进 status.json。
 
 ## [0.45.465] — 2026-10-12 — Fixed：`momentum_5d` 自攒索引回落（yfinance 失败时）窗口末端补上扫描日当场的**已核实**官方收盘——此前末端恒为上一个扫描日，比 yfinance 滞后一个扫描日；回落值不再被标成 `5d_real`；新增 `momentum_as_of`
 
