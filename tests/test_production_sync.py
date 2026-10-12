@@ -223,12 +223,19 @@ class TestResultReachesAlerts:
         healthy_news = {"available": True, "n_known": 30, "n_unknown": 0,
                         "primary_source": "massive", "by_source": {"massive": 30}, "primary_status": {"ok": 30},
                         "non_primary_share": 0.0, "refusal_messages": []}
-        snap = st.snapshot("2026-09-14", extra={"gh_pages": {"success": True}, "news_sources": healthy_news})
+        # v0.45.466：同理云端快照新鲜度（main() 每轮都写），健康 = 刷新成功、落后在允许内
+        healthy_cs = {"available": True, "refresh_ok": True, "refresh_error": None, "refreshed_at": "t",
+                      "newest_date": "2026-09-11", "max_lag": 1, "lag": 1, "missing_sessions": ["2026-09-14"]}
+        snap = st.snapshot("2026-09-14", extra={"gh_pages": {"success": True}, "news_sources": healthy_news,
+                                                "cloud_snapshots": healthy_cs})
         # 同理组合 Greeks（v0.45.423 起 alert_manager 对「本轮没跑到组合 Greeks」记 checks_skipped）：
         # 健康一轮带一份「干净」的价核对计数；本测试自己拼 snapshot，不会经过真的 compute_day
         snap["counters"]["portfolio_greeks"] = {
             "n_stale": 0, "stale": [], "n_quote_stale": 0, "spy": {"stale": False},
             "execution_blocked": None, "hedge_undecided": None, "gaps": []}
+        # 纸面组合同理（v0.45.448）。此前本条只在全套里绿：计数是进程级状态，靠排在前面的测试跑过组合留下来
+        # ——单独跑这条一直是红的（v0.45.466 加检查时发现）。健康一轮显式带上，不靠执行顺序
+        snap["counters"]["paper_portfolio"] = {"as_of": "2026-09-14", "ok": True, "error": None}
         a, msgs = self._alerts(tmp_path, snap)
         assert not any("origin/main（" in m or "同步未执行" in m or "gh-pages 部署失败" in m for m in msgs), msgs
         assert not a.checks_skipped, a.checks_skipped
@@ -276,7 +283,9 @@ class TestResultReachesAlerts:
 
         assert len(written) == 1, written
         extra = written[0][1]
-        assert set(extra) == {"gh_pages", "news_sources"}, f"extra 里出现了已退役的字段：{sorted(extra)}"
+        assert set(extra) == {"gh_pages", "news_sources", "cloud_snapshots"}, f"extra 里出现了已退役的字段：{sorted(extra)}"
+        cs = extra["cloud_snapshots"]          # v0.45.466：测试里 conftest 钉住了出网 ⇒ 刷新失败如实记下
+        assert cs["refresh_ok"] is False and "测试默认离线" in cs["refresh_error"], cs
         ns = extra["news_sources"]
         assert ns["available"] is True and ns["by_source"] == {"yahoo_finance": 1}, ns
         ghp = extra["gh_pages"]

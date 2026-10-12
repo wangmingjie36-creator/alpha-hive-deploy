@@ -306,6 +306,9 @@ class AlertAnalyzer:
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
         self._check_news_sources(status)
 
+        # 9. 检测 P2: 云端快照没刷新上 / 落后（v0.45.466）
+        self._check_cloud_snapshots(status)
+
         return self.alerts
 
     @staticmethod
@@ -590,6 +593,54 @@ class AlertAnalyzer:
                             "network_error ⇒ 出站网络 / 代理",
                 },
                 ["data_quality", "news"]
+            ))
+
+    def _check_cloud_snapshots(self, status: Dict) -> None:
+        """云端快照新鲜度（v0.45.466，`scan_timing.extra.cloud_snapshots`，写入者 `alpha_hive_daily_report.main`）。
+
+        补跑过去某天时期权 / IV / 官方收盘取自 `origin/cloud-snapshots`。阶段 8 后生产克隆里没人刷新它，
+        routine 自己也三次静默停过——两种情况此前都要等到补跑那天才显形，且那时补跑已降级成用当天数据。
+        每天看一眼：刷新失败、或落后超过 `max_lag` 个交易日 ⇒ P2（不影响当天扫描，只影响补跑可信度）。
+        """
+        if not self._swarm_scan_actually_ran(status):
+            return
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        cs = (st.get("extra") or {}).get("cloud_snapshots")
+        if not isinstance(cs, dict) or not cs.get("available"):
+            self.checks_skipped.append("云端快照新鲜度检查（scan_timing 无可用 cloud_snapshots）")
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】云端快照新鲜度未观测——补跑时能不能用上快照未知",
+                {"原因": (cs or {}).get("reason") if isinstance(cs, dict) else "scan_timing.extra 无 cloud_snapshots",
+                 "影响": "不是「检查了没落后」，是「没检查」"},
+                ["cloud_snapshots", "observability"]
+            ))
+            return
+        newest, lag, max_lag = cs.get("newest_date"), cs.get("lag"), cs.get("max_lag")
+        if not cs.get("refresh_ok"):
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】cloud-snapshots 刷新失败——本地最新只到 {newest}",
+                {"错误": cs.get("refresh_error"),
+                 "影响": "此后补跑读到的是本地旧 ref：缺的日子会被当成「没快照」、期权 / IV 改用当天数据",
+                 "建议": "在生产克隆里 git fetch origin cloud-snapshots 看报错（网络 / 凭据 / iCloud 重名 ref）"},
+                ["cloud_snapshots", "data_quality"]
+            ))
+            return                          # 本地 ref 没刷新上，落后量量的是本地，不另报
+        if not isinstance(lag, int) or not isinstance(max_lag, int):
+            self.checks_skipped.append("云端快照落后量检查（cloud_snapshots 缺 lag / max_lag）")
+            return
+        if lag > max_lag:
+            missing = cs.get("missing_sessions") or []
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】云端快照落后 {lag} 个交易日（最新 {newest}，允许 {max_lag}）——routine 可能停了",
+                {"缺的交易日": ", ".join(missing[:10]) + (" …" if len(missing) > 10 else ""),
+                 "影响": "这些日子若要补跑，期权 / IV / 官方收盘拿不到快照，只能用当天数据",
+                 "建议": "看 claude.ai routine `alpha-hive-cloud-snapshot` 的最近运行与回复里的代码版本"},
+                ["cloud_snapshots", "data_quality"]
             ))
 
     def _check_paper_portfolio_run(self, status: Dict) -> None:

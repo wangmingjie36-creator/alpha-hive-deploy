@@ -363,6 +363,39 @@ def _block_git_transport_probe(request, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _block_cloud_snapshot_fetch(request, monkeypatch):
+    """`cloud_snapshot_loader._git_fetch`（v0.45.466）在 **git 子进程**里出网——上面两道（库级 API / 裸 socket）
+    都挡不住。补跑入口 `_snapshot_ctx`、每日观测 `lag_summary`、入场价回填都会走到它，而缺省仓库就是本检出
+    （origin = GitHub）。
+
+    只放行 origin 是**本地路径**的仓库（测试自己建的裸仓库：fetch 不出网，测试要真跑它）；其余钉成抛
+    `_OfflineInTests`（与真断网同一条降级路径）并记账。顺带每条测试清空本进程的刷新 / 告警记录，
+    免得上一条测试刷新过，下一条的「本地陈旧还是云端没有」判断跟着变。`network` 标记的用例不钉。
+    """
+    import subprocess
+    import cloud_snapshot_loader as _csl
+    monkeypatch.setattr(_csl, "_REFRESHED", {})
+    monkeypatch.setattr(_csl, "_WARNED", set())
+    if request.node.get_closest_marker("network"):
+        yield
+        return
+    real, calls = _csl._git_fetch, []
+
+    def _guarded(repo, timeout):
+        url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=repo,
+                             capture_output=True, text=True).stdout.strip()
+        if url and (os.path.isabs(url) or url.startswith("file://")):
+            return real(repo, timeout)
+        calls.append((repo, url))
+        raise _OfflineInTests(f"测试默认离线：cloud_snapshot_loader 要从 {url or '（无 origin）'} "
+                              "拉 cloud-snapshots（tests/conftest.py）")
+
+    monkeypatch.setattr(_csl, "_git_fetch", _guarded)
+    request.node._snapshot_fetch_calls = calls
+    yield
+
+
 # ==================== 可复用的显式源桩（各模块 opt-in）====================
 #
 # `_offline_transport` 是**兜底**：它让取数失败、行为与真离线一致，但生产代码

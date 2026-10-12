@@ -2598,6 +2598,25 @@ def _resolve_focus_tickers(args) -> List[str]:
     return tickers
 
 
+def _refresh_cloud_snapshots() -> None:
+    """补跑前把本地 `origin/cloud-snapshots` 拉到最新，并说出结果（v0.45.466）。
+
+    阶段 8 后生产克隆里没人刷新它：补跑前一天的快照（PDT 14:00 才推）本地没有，补跑就把「本地没拉到」当成
+    「那天没快照」、改用当天的期权数据。刷新失败不中止补跑——读不到时 `why_missing` 会说清是哪一种。
+    """
+    try:
+        import cloud_snapshot_loader as csl
+        rec = csl.refresh()
+    except Exception as e:  # noqa: BLE001 —— 刷新是兜底的前置，自身出错只说出来、不拖垮补跑
+        print(f"⚠️ cloud-snapshots 刷新出错（{type(e).__name__}: {e}）——缺的日子可能只是本地没拉到")
+        return
+    if rec["ok"]:
+        print(f"🔄 cloud-snapshots 已刷新：最新快照 {rec['newest_date'] or '无'}")
+    else:
+        print(f"⚠️ cloud-snapshots 刷新失败（{rec['error']}）：本地最新只到 {rec['newest_date'] or '无'}"
+              "——之后的日子可能只是本地没拉到")
+
+
 @contextlib.contextmanager
 def _snapshot_ctx(args):
     """补跑时把期权/IV 取数切到当日云端快照；用不上就**明说**，绝不闷着。
@@ -2609,7 +2628,11 @@ def _snapshot_ctx(args):
     为什么拿不到快照时**不**中止：补跑还有价格/情绪/催化剂等维度是可信的
     （价格有历史 API，与期权链不同）。中止会把「期权维度缺失」升级成
     「整天没有」，损失更大。所以继续跑，但把降级说清楚。
+
+    补跑先刷新本地 `origin/cloud-snapshots`（v0.45.466），`--no-snapshot` 也刷：收盘价兜底同样读它。
     """
+    if args.date:
+        _refresh_cloud_snapshots()
     if not args.date or getattr(args, "no_snapshot", False):
         if args.date:
             print("⚠️ --no-snapshot：期权/IV 将来自**今天**的实时数据，"
@@ -2974,9 +2997,23 @@ def main():
         _log.warning("新闻来源统计失败（不影响扫描）: %s", _e_ns)
         _news_sources = {"available": False, "reason": f"{type(_e_ns).__name__}: {_e_ns}"}
 
+    # v0.45.466：云端快照新鲜度（刷新 + 落后几个交易日）→ status.json → alert_manager P2。
+    # 补跑（--date）不观测：落后量是相对今天的，与补跑日无关；补跑自己在 _snapshot_ctx 里刷新过。
+    if args.date:
+        _cloud_snapshots = {"available": False, "reason": "补跑（--date）不观测"}
+    else:
+        try:
+            import cloud_snapshot_loader as _csl
+            from datetime import date as _cs_date
+            _cloud_snapshots = _csl.lag_summary(_cs_date.fromisoformat(reporter.date_str))
+        except Exception as _e_cs:  # noqa: BLE001 —— 观测点自身失败只记原因，不拖垮扫描
+            _log.warning("云端快照新鲜度观测失败（不影响扫描）: %s", _e_cs)
+            _cloud_snapshots = {"available": False, "reason": f"{type(_e_cs).__name__}: {_e_cs}"}
+
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
     _timing.write(reporter.date_str, extra={"gh_pages": _timing.gh_pages_summary(_gh_pages),
-                                            "news_sources": _news_sources})
+                                            "news_sources": _news_sources,
+                                            "cloud_snapshots": _cloud_snapshots})
     return report
 
 

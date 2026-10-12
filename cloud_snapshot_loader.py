@@ -95,6 +95,103 @@ def available_dates(ref: Optional[str] = None, repo: Optional[str] = None) -> Li
     return sorted(x.strip("/") for x in r.stdout.split() if x.strip("/"))
 
 
+# ══════════════════════════════════════════════════════════════════
+# 新鲜度：本地 ref 由**读者自己**刷新（v0.45.466）
+# ══════════════════════════════════════════════════════════════════
+# `SNAPSHOT_REF` 是远端跟踪 ref，只有 `git fetch` 会动它。阶段 8 之前读者跑在开发检出里，开发会话顺手的
+# `git fetch` 让它碰巧是新的；生产搬进独立克隆后，克隆里只有 production_sync 的 `fetch origin main`——没人负责它。
+# 陈旧时补跑看到的是「那天没有快照」，与 routine 真没产出分不开，于是**降级用当天的期权数据**。
+# 所以：读者入口先 `refresh()`（补跑 `--date`、入场价回填），读不到时 `why_missing` 说清是哪一种；
+# 每日扫描再用 `lag_summary` 看一眼（routine 自己也三次静默停过）。读函数本身不出网，测试照旧用本地仓库。
+
+#: 只刷新 SNAPSHOT_REF 背后那一个远端跟踪 ref（显式 refspec：不碰 main，不用 GitHubTool 的白名单通道）
+_SNAPSHOT_REFSPEC = "+refs/heads/cloud-snapshots:refs/remotes/origin/cloud-snapshots"
+
+#: 本进程的刷新记录：仓库目录（realpath）→ `refresh` 的结果。没有这一项 = 本进程没刷新过
+_REFRESHED: Dict[str, dict] = {}
+
+#: 每日观测允许的落后（交易日，含当天）：扫描与 routine 同在 PDT 14:00，扫描时当天那份通常还没到 ⇒ 正常是 1
+MAX_LAG_SESSIONS = 1
+
+
+def _repo_key(repo: Optional[str]) -> str:
+    return os.path.realpath(repo or REPO_DIR)
+
+
+def _git_fetch(repo: str, timeout: float) -> Optional[str]:
+    """拉 cloud-snapshots ⇒ 失败原因；成功 ⇒ None。本模块**唯一**出网的地方（测试里 conftest 默认钉住它）。"""
+    try:
+        r = subprocess.run(["git", "fetch", "-q", "origin", _SNAPSHOT_REFSPEC], cwd=repo,
+                           capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"{type(e).__name__}: {e}"
+    if r.returncode == 0:
+        return None
+    return r.stderr.strip()[-400:] or f"git fetch rc={r.returncode}"
+
+
+def refresh(*, repo: Optional[str] = None, timeout: float = 60) -> dict:
+    """把本地 `SNAPSHOT_REF` 拉到云端最新 ⇒ `{ok, error, at, newest_date}`；**不抛**。
+
+    刷新它的**唯一**入口（v0.45.466）。失败照样返回（补跑还要继续），但记在本进程里，之后读不到某天时
+    `why_missing` 会说「可能只是本地没拉到」，而不是「那天没有快照」。
+    """
+    from datetime import datetime, timezone
+    key = _repo_key(repo)
+    try:
+        err = _git_fetch(key, timeout)
+    except OSError as e:                     # 含测试里钉住时抛的「默认离线」
+        err = f"{type(e).__name__}: {e}"
+    dates = available_dates(repo=repo)
+    rec = {"ok": err is None, "error": err, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "newest_date": dates[-1] if dates else None}
+    _REFRESHED[key] = rec
+    if err:
+        _log.warning("cloud-snapshots 刷新失败（本地最新只到 %s）：%s", rec["newest_date"], err)
+    return dict(rec)
+
+
+def why_missing(date: str, *, ref: Optional[str] = None, repo: Optional[str] = None,
+                dates: Optional[List[str]] = None) -> Tuple[str, str]:
+    """`date` 不在 ref 上 ⇒ `(类别, 说明)`：`ref_stale`（可能只是本地没拉到）/ `absent`（云端确实没有）。
+
+    日期落在已有历史之内 ⇒ absent（分支只追加）；之后的日子要看本进程刷新过没有、刷新成功没有。
+    显式给了别的 ref（实验脚本、测试）不判新鲜度，照报 absent。
+    """
+    if dates is None:
+        dates = available_dates(ref, repo)
+    newest = dates[-1] if dates else None
+    if ref not in (None, SNAPSHOT_REF):
+        return "absent", f"{ref} 上没有 {date}（最新 {newest or '无'}）"
+    if newest is not None and date <= newest:
+        return "absent", f"云端快照历史里没有 {date}（已有到 {newest}）：那天 routine 没产出"
+    rec = _REFRESHED.get(_repo_key(repo))
+    if rec is None:
+        return "ref_stale", (f"本地 {SNAPSHOT_REF} 最新只到 {newest or '无'}，本进程没刷新过它——可能只是本地没拉到"
+                             "（读快照的入口要先调 cloud_snapshot_loader.refresh()）")
+    if not rec["ok"]:
+        return "ref_stale", (f"本地 {SNAPSHOT_REF} 最新只到 {newest or '无'}，刷新失败（{rec['error']}）"
+                             "——可能只是本地没拉到")
+    return "absent", f"已刷新（{rec['at']}），云端确实没有 {date}（最新 {newest or '无'}）"
+
+
+def lag_summary(today, *, repo: Optional[str] = None) -> dict:
+    """每日扫描的观测点（v0.45.466）：刷新后，最新快照落后到今天（含）几个交易日。
+
+    → `scan_timing.extra.cloud_snapshots` → status.json → `alert_manager` 刷新失败 / 落后超过
+    `MAX_LAG_SESSIONS` 报 P2（不影响当天扫描，只影响补跑能不能用上快照）。交易日按 `scan_continuity` 真算假日。
+    """
+    from datetime import date as _date, timedelta
+    from scan_continuity import trading_days_between
+    rec = refresh(repo=repo)
+    out = {"refresh_ok": rec["ok"], "refresh_error": rec["error"], "refreshed_at": rec["at"],
+           "newest_date": rec["newest_date"], "max_lag": MAX_LAG_SESSIONS}
+    if rec["newest_date"] is None:
+        return {**out, "available": False, "reason": f"{SNAPSHOT_REF} 上没有任何快照日期"}
+    missing = trading_days_between(_date.fromisoformat(rec["newest_date"]) + timedelta(days=1), today)
+    return {**out, "available": True, "lag": len(missing), "missing_sessions": [d.isoformat() for d in missing]}
+
+
 def _restore_numeric_keys(oi: Optional[dict]) -> Optional[dict]:
     """把 full_chain_oi 里以行权价为键的段从 str 还原成 float。
 
@@ -194,6 +291,7 @@ def load_official_close(date: str, ticker: str, *, ref: Optional[str] = None,
          `price_at_fetch`（SNAP_CLOSE）。最新一天必走这里。
       3. 都不行 → `(None, "snapshot_<判决>")`，判决说明当日快照卡在哪一步
          （no_snapshot / stale_intraday / session_open / unverifiable / …）——调用方据此标不可用。
+         `ref_stale`（v0.45.466）= 这天在本地 ref 之后、且本进程没刷新成功：可能只是本地没拉到，不是云端没有。
 
     为什么对调：第 2 步的「last_trade 离收盘 ≤60s ⇒ 是官方收盘」是**代理**判据——官方收盘是
     收盘竞价那一笔，文件若在竞价价写入前生成，离收盘 1 分钟内的最后一笔连续成交照样不是它。
@@ -213,7 +311,8 @@ def load_official_close(date: str, ticker: str, *, ref: Optional[str] = None,
 
     # 1. 其后第一份快照的 prev_day_close（归属自证）
     next_px = None
-    later = [d for d in available_dates(ref, repo) if d > date]
+    dates = available_dates(ref, repo)
+    later = [d for d in dates if d > date]
     if later:
         nxt = load_ticker(later[0], ticker, ref=ref, repo=repo)
         if nxt:
@@ -248,7 +347,23 @@ def load_official_close(date: str, ticker: str, *, ref: Optional[str] = None,
         return next_px, SNAP_NEXT_PREV_CLOSE
     if same_px is not None:
         return same_px, SNAP_CLOSE
+    if verdict == "no_snapshot" and date not in dates:
+        # v0.45.466：「云端没有」与「本地 ref 没拉到」分开报——后者不是兜底坏了，是没人刷新
+        kind, why = why_missing(date, ref=ref, repo=repo, dates=dates)
+        if kind == "ref_stale":
+            _warn_once(("ref_stale", _repo_key(repo), date), "%s 官方收盘：%s", date, why)
+            verdict = "ref_stale"
     return None, f"snapshot_{verdict}"
+
+
+_WARNED: set = set()
+
+
+def _warn_once(key, msg: str, *args) -> None:
+    """同一原因每天只说一次（官方收盘逐标的调用，30 只各说一遍会把真正的告警淹掉）。"""
+    if key not in _WARNED:
+        _WARNED.add(key)
+        _log.warning(msg, *args)
 
 
 def load_market(date: str, *, ref: Optional[str] = None,
@@ -300,8 +415,10 @@ def snapshot_mode(date: str, *, ref: Optional[str] = None, repo: Optional[str] =
 
     _man = load_manifest(date, ref=ref, repo=repo)
     if _man is None:
+        _dates = available_dates(ref, repo)
+        _, _why = why_missing(date, ref=ref, repo=repo, dates=_dates)   # v0.45.466：陈旧还是真没有
         raise SnapshotUnavailable(
-            f"{ref} 上没有 {date} 的快照（已有：{', '.join(available_dates(ref, repo)) or '无'}）")
+            f"{ref or SNAPSHOT_REF} 上没有 {date} 的快照——{_why}（已有：{', '.join(_dates) or '无'}）")
 
     # v0.45.58：manifest 在不等于标的能载入。
     #
