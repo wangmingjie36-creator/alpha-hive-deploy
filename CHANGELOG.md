@@ -64,7 +64,32 @@ v0.45.430 二次检查记下的措辞偏差：同一个 `stage="git_error"` 底�
 ### 评分 / 世代边界
 - 6 行都在 2026-10-09 之前的世代；当前世代（`cohort_start()` 10-09）IC 样本不受影响。不追加世代边界。
 
-## [0.45.477] — 2026-10-12 — 占位（进行中：v0.45.473 二次检查）
+## [0.45.477] — 2026-10-12 — Fixed：v0.45.473 二次检查——`YFinanceSource` 把**判不了是否已收盘**的末根日线当「核实过的收盘」交给自攒索引窗口末端（违反 465 契约）；`history_fill_stats` docstring 说过期缓存出口会计数（实际不会）；更正 473 条目的取证（8 条「Finnhub 胜出」是测试日志噪声，生产 0 次）
+
+### 为什么
+1. **473 引入的契约违反**：`YFinanceSource` 新挂的 `session_close` 直接取末根日线。但 `_drop_forming_bar` 为不影响主流程，**判不了时原样返回**——交易所时钟（`_exchange_now`，SPY 分钟线）取不到、或不足 3 根时不丢末根 ⇒ 盘中跑时末根是正在形成的那根、Close 是盘中价。473 把它当「核实过的当场收盘」交给 `momentum_5d_detail(latest_close=)` 当窗口末端，正是 465 明令禁止的（盘中价 / 判不了归属的价不许进窗口）。触发面窄（只在 yfinance 胜出且不足 5 根时才用到它），但是 473 自己造的。
+2. 另一个同类入口：`_exchange_now` **整进程缓存**——长驻进程跨日后时钟停在前一天，`_drop_forming_bar` 认不出今天那根（日期不等 ⇒ 不丢）。末根日期比时钟新 ⇒ 判不了。（核过：Alpha Bot、MCP 服务都不 import `data_pipeline`，日报是一天一进程 ⇒ 生产不触发，守卫照样钉住。）
+3. **docstring 与行为不符**：`history_fill_stats` 说出口名含 `cache_expired`。生产里缓存对象都已过出口（`history_checked`），缓存出口不重跑、不计 ⇒ status.json 里永远不会出现它，读的人会以为「没用过过期缓存」。
+4. **473 取证两处错**（结论不变）：
+   - 「Finnhub 胜出 8 次、ABBV、两轮手动早跑」——8 条全部前后 40 行内有测试桩 `_Boom` / `_Empty` 与夹具式「CBOE ABBV 数据陈旧：last_trade=2026-08-26，应为 2026-08-27」⇒ 是测试跑进生产日志（数据根隔离之前），**生产 0 次**；且来源是 `alpha_hive.log` 轮转文件，不是结构化日志。
+   - 09-24/25 的归因原先引的是结构化日志计数，那份计数混有测试（09-21 周日也有 37 次）。改从生产扫描段核实，见下。
+
+### Fixed
+- `data_pipeline._completed_bar_close(hist)`：末根**能证明已收盘**才给 `(日期, 收盘)`——交易所时钟可得、末根不晚于时钟日期、且不是「当日 + 15:59 美东之前」（与 `_drop_forming_bar` 同一判据；`_exchange_now` 收盘后恒为 15:59 那根分钟线，写 16:00 会让收盘后也永远判不了）；其余一律 None。`YFinanceSource` 改用它。
+- `history_fill_stats` docstring：缓存出口不计，过期缓存次数看 `fetch_stats["stale"]` / 日志。
+
+### Added
+- `tests/test_fetcher_single_exit.py::TestYFinanceSourceBranches` +4：时钟不可得不给、不足 3 根的盘中末根不给、末根比（缓存的）时钟新不给、盘中跑而末根是上一场照给；原「不足 5 根」那条改为显式给收盘后时钟（15:59）。
+
+### 存档 / 世代边界（重新取证，结论不变：不追加）
+- 473 只在「旧代码给 None」处补值，唯一会**改动已有值**的是 `YFinanceSource` 均量 NaN（旧兜底 avg=1 ⇒ volume_ratio = 当日成交量本身）：`signal_archive` 全部 1752 行 `price.volume_ratio` 最大 10.0 ⇒ 从未发生。
+- 08-30（Twelve Data 量比回落上线）以来，存档里 momentum / volume 不满的日子只有 4 天，均与 473 改动的出口无关：08-31 CRCL/QCOM（蜂崩溃）；09-17（全源失败，270 已覆盖）；09-24、09-25 量比 0/30——生产扫描段核实为每天 42 次全源失败 + 42 次自攒索引补上 + Twelve Data 请求失败 91 / 87 次（同一出口 473 前后行为相同）。
+- 「均量不可得」（NaN 分支）在四个轮转文件里 0 次。
+
+### 验证
+- 新判据变异 4 个全红（无条件取末根 3 红、截止写成 16:00 1 红、时钟不可得照给 1 红、去掉「末根比时钟新」1 红——最后这个在补 `test_bar_newer_than_cached_clock_is_not_a_close` 前是**绿**的）；逐字节还原核 sha256、清 `__pycache__`。
+- `tests/test_fetcher_single_exit.py` 38 passed；ruff 改动文件全绿。
+- 全量：9255 passed、2 xfailed、85 deselected（含到点的 `TestCoverageHorizon`）；1 error = 会话级真实数据根闸（Alpha Bot 盘中采样 5 个 intraday 文件 + `pheromone.db` 12:50:48，落在不相关的测试里；当时本机另有 3 个 pytest 进程）。单独复跑 `test_data_backup` / `test_pipeline` / `test_zero_weight_invariant` / 本文件前后核 `pheromone.db` mtime 不变 ⇒ 并发写入者，与本版无关。
 
 ## [0.45.476] — 2026-10-12 — Fixed（数据）：v0.45.472 / 475 二次检查——撤回 6 对误判的隔离（CRWD 四个周日快照对照的是拆股调整后收盘；VKTX 08-12、MU 08-26 不在行权价网格中点上，不可能是行权价中位数），25 行从备份原样放回；更正 475 两处措辞
 
@@ -160,6 +185,7 @@ v0.45.472 因此漏认。06-30 ~ 09-03 的 548 份快照全部可分（零份缺
 
 ### 生产里实际触发过几次（先量再修）
 - 结构化日志（08-26 → 10-12）：Finnhub 胜出 8 次，**全是 ABBV**、全在 08-26 23:48 / 08-27 06:35 两轮手动早跑——不是写存档的那轮（ABBV 两天存档 momentum / volume 都在）。CBOE 推迟退用（`退用 … 非官方收盘`）**0 次**；`[DataPipeline] … 使用过期缓存` **0 次**（唯一一条「使用过期缓存」是 VIX 加载器）。
+  - ⚠️ **v0.45.477 更正**：① 这些计数出自 `alpha_hive.log` 四个轮转文件（08-26 17:24 起），不是结构化日志；② 那 8 条 Finnhub 胜出**全是测试跑进生产日志的噪声**（每条前后 40 行内都有测试桩 `_Boom` / `_Empty`，以及夹具式的「CBOE ABBV 数据陈旧：last_trade=2026-08-26，应为 2026-08-27」），不是生产扫描 ⇒ **生产里 Finnhub 胜出 0 次**；③ 09-24/25 那条改由生产扫描段（「蜂群协作启动 2026-09-24/25」起止）核实：各 42 次全源失败 + 42 次自攒索引补上 + Twelve Data 请求失败 91/87 次（结构化日志里同名计数混有测试，09-21 是周日）。结论（存档零变化、不加世代边界）不变，论据见 0.45.477。
 - `signal_archive` 08-01 起缺行的日子都另有原因：08-31 CRCL/QCOM（蜂崩溃 `int - NoneType`，另一个 bug）、09-17（全源失败，v0.45.270）、09-24/25 量比 0/30（全源失败那支，Twelve Data 也没给）、8 月初 BRK-B 与 v0.45.81 前的 volume 缺口。
 - ⇒ 观测窗口内存档值**零变化**；照 463 / 465 / 469 先例**不追加世代边界**（`price.momentum_5d` / `price.volume_ratio` 在 H1 输入里，未动 `_COHORT_HISTORY`）。往后的变化：这些出口触发的日子，两项从缺失变为有值（带 `price_index` / `twelvedata` 标签）。
 

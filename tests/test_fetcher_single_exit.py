@@ -89,6 +89,10 @@ def _degraded(name, price=100.0, **kw):
                         momentum_source="unavailable", fetch_timestamp=time.time(), **kw)
 
 
+def _et(*ymdhm):
+    return pd.Timestamp(datetime(*ymdhm)).tz_localize("America/New_York")
+
+
 def _yf_frame(closes, volumes=None, start="2026-10-05"):
     idx = pd.bdate_range(start, periods=len(closes))
     return pd.DataFrame({"Close": closes, "Volume": volumes or [1_000_000.0] * len(closes)}, index=idx)
@@ -248,13 +252,50 @@ class TestCboeInternalBranches:
 
 class TestYFinanceSourceBranches:
     def test_short_history_passes_its_own_last_close(self, monkeypatch, yf_history):
-        """yfinance 胜出但不足 5 根：末根已收盘日线就是一场官方收盘，交给出口回落当窗口末端。"""
+        """yfinance 胜出但不足 5 根：末根**确知已收盘**（交易所时钟在收盘后）⇒ 交给出口回落当窗口末端。"""
         fills = _Fills(monkeypatch)
         yf_history["frame"] = _yf_frame([40.0, 41.0, 36.24])   # 10-05 / 06 / 07
+        # 收盘后 `_exchange_now` = SPY 最后一根分钟线 = 15:59（不是 16:00）
+        monkeypatch.setattr(dp, "_exchange_now", lambda: _et(2026, 10, 7, 15, 59))
         out = _fetcher([dp.YFinanceSource()]).fetch("VZ")
         assert out["source_name"] == "yfinance" and out["momentum_5d"] == -2.5
         assert fills.mom_calls == [("VZ", ("2026-10-07", 36.24))]
         assert out["volume_source"] == "yfinance" and fills.vol_calls == []
+
+    def test_unverifiable_last_bar_is_not_passed_as_close(self, monkeypatch, yf_history):
+        """v0.45.477：交易所时钟取不到时 `_drop_forming_bar` 原样返回，末根可能是盘中那根——
+        判不了就不当收盘交出去（v0.45.465 契约：盘中价 / 判不了归属的价不许进索引窗口）。"""
+        fills = _Fills(monkeypatch)
+        yf_history["frame"] = _yf_frame([40.0, 41.0, 36.24])   # yf_history 把时钟桩成 None
+        _fetcher([dp.YFinanceSource()]).fetch("VZ")
+        assert fills.mom_calls == [("VZ", None)]
+
+    def test_forming_bar_not_dropped_is_not_passed_as_close(self, monkeypatch, yf_history):
+        """不足 3 根时 `_drop_forming_bar` 不丢末根：盘中跑时末根是正在形成的那根，Close 是盘中价。"""
+        fills = _Fills(monkeypatch)
+        yf_history["frame"] = _yf_frame([41.0, 36.5], start="2026-10-06")   # 10-06 / 10-07
+        monkeypatch.setattr(dp, "_exchange_now", lambda: _et(2026, 10, 7, 11, 30))
+        out = _fetcher([dp.YFinanceSource()]).fetch("VZ")
+        assert out["price"] == 36.5, "前提：末根（盘中那根）确实没被丢"
+        assert fills.mom_calls == [("VZ", None)]
+
+    def test_bar_newer_than_cached_clock_is_not_a_close(self, monkeypatch, yf_history):
+        """`_exchange_now` 整进程缓存：长驻进程（如 Alpha Bot）跨日后时钟停在前一天，
+        `_drop_forming_bar` 认不出今天那根（日期不等）——末根比时钟新就是判不了，不给。"""
+        fills = _Fills(monkeypatch)
+        yf_history["frame"] = _yf_frame([40.0, 41.0, 36.5], start="2026-10-06")   # 末根 10-08
+        monkeypatch.setattr(dp, "_exchange_now", lambda: _et(2026, 10, 7, 15, 59))
+        out = _fetcher([dp.YFinanceSource()]).fetch("VZ")
+        assert out["price"] == 36.5, "前提：时钟过期时 `_drop_forming_bar` 确实没丢末根"
+        assert fills.mom_calls == [("VZ", None)]
+
+    def test_previous_session_bar_is_a_close_even_intraday(self, monkeypatch, yf_history):
+        """盘中跑、末根是**上一场**（当日那根已被丢或还没出）：那一场收了，照给。"""
+        fills = _Fills(monkeypatch)
+        yf_history["frame"] = _yf_frame([40.0, 41.0, 36.24])   # 末根 10-07
+        monkeypatch.setattr(dp, "_exchange_now", lambda: _et(2026, 10, 8, 11, 30))
+        _fetcher([dp.YFinanceSource()]).fetch("VZ")
+        assert fills.mom_calls == [("VZ", ("2026-10-07", 36.24))]
 
     def test_nan_average_volume_is_none_not_one_share(self, monkeypatch, yf_history):
         """此前兜底 avg_vol=1.0 ⇒ avg_volume=1 股、volume_ratio=当日成交量本身。"""

@@ -93,6 +93,34 @@ def _drop_forming_bar(hist):
     return hist
 
 
+def _completed_bar_close(hist) -> Optional[Tuple[str, float]]:
+    """日线末根**确知已收盘** → `(场次 ISO 日期, 收盘)`；判不了一律 None（v0.45.477）。
+
+    `_drop_forming_bar` 为不影响主流程，判不了（交易所时钟取不到 / 不足 3 根）时**原样返回**——
+    末根可能正是盘中在形成的那根，它的 Close 是盘中价。拿它当价格是 yfinance 源一贯的取舍；
+    但当「核实过的收盘」交给自攒索引当窗口末端（`StockData.session_close`）就违反 v0.45.465 的契约
+    （盘中价 / 判不了归属的价不许进窗口）。所以这里反过来：**能证明收了才给**。
+
+    判据与 `_drop_forming_bar` 同一份：交易所时钟可得，且末根不是「交易所当日 + 15:59 美东之前」。
+    （`_exchange_now` 是 SPY 最后一根分钟线的时间戳——收盘后恒为 15:59，故不能写 16:00。）
+    """
+    try:
+        if hist is None or len(hist) < 1:
+            return None
+        xnow = _exchange_now()
+        if xnow is None:
+            return None
+        d = hist.index[-1].date()
+        if d > xnow.date() or (d == xnow.date() and xnow.time() < _dt_time(15, 59)):
+            return None
+        px = float(hist["Close"].iloc[-1])
+        if not (math.isfinite(px) and px > 0):
+            return None
+        return d.isoformat(), px
+    except Exception:  # noqa: BLE001 —— 判不了就不给，不阻断取数
+        return None
+
+
 # ==================== 数据质量标记 ====================
 
 class DataQuality:
@@ -723,11 +751,9 @@ class YFinanceSource:
             )
             data.price = float(hist["Close"].iloc[-1])
             data.price_source = "yfinance_daily_close"
-            # v0.45.473：末根已收盘日线就是一场官方收盘——不足 5 根时出口的 momentum 回落拿它当窗口末端
-            try:
-                data.session_close = (hist.index[-1].date().isoformat(), data.price)
-            except (AttributeError, TypeError, ValueError):
-                data.session_close = None
+            # v0.45.473：末根**确知已收盘**时就是一场官方收盘——不足 5 根时出口的 momentum 回落拿它当窗口末端。
+            # v0.45.477：判不了就不给（见 `_completed_bar_close`），盘中价不许进索引窗口。
+            data.session_close = _completed_bar_close(hist)
 
             if len(hist) >= 5:
                 data.momentum_5d = (hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100
@@ -911,8 +937,10 @@ def history_fill_stats() -> Optional[Dict]:
     """本进程出口回落计数（v0.45.473）→ `scan_timing.counters()["history_fill"]` ⇒ status.json。
 
     - `by_path[出口]`：`n` 次解析；每个字段 `needed`（出口时缺）/ `filled`（回落补上）/ `errors`（回落抛错）。
-      出口名：`source:<源名>` / `deferred:cboe` / `cache_expired` / `all_sources_failed`
-      （新鲜缓存命中不重跑回落，不计）。
+      出口名：`source:<源名>` / `deferred:cboe` / `all_sources_failed`。
+      缓存出口（新鲜 / 过期）带的是**存入时**那次出口的结果，不重跑回落、不计——生产里缓存对象都已
+      过出口，所以 `cache_expired` 只会在有人绕过 `_emit` 写缓存时出现（v0.45.477 更正：473 写成会计）。
+      「这一轮用了几次过期缓存」看 `[DataPipeline] … 使用过期缓存` 日志与 `get_all_metrics()["fetch_stats"]["stale"]`。
     - `window_behind_session`：回落给了 momentum，但窗口末端早于该源核实的那一场收盘（值滞后）。
     - `still_missing`：各字段在**最近一次**出口后仍为 None 的标的 ⇒ alert_manager P2。
     本进程没解析过任何标的 ⇒ None。
