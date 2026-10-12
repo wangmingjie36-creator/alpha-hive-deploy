@@ -294,7 +294,8 @@ def _load_meta() -> Dict:
 
 def _code_tag() -> Optional[Dict]:
     """这一轮跑的是哪一版代码（v0.45.450）：扫描内取启动时记下的那份，单跑现解析（`scan_timing.code_version`）。
-    取不到 ⇒ None，不写占位值。只留能回答「这版代码跑过这本账没有」的三个字段。"""
+    整份取不到 ⇒ None；某个字段没测到 ⇒ 该字段 None（同 `code_version.resolve` 的约定），绝不写占位值。
+    只留能回答「这版代码跑过这本账没有」的三个字段；meta.code_version 与净值行 `code` 存的都是这一份结构。"""
     try:
         import scan_timing
         cv = scan_timing.code_version()
@@ -824,8 +825,10 @@ def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
     }
     code = _code_tag()
     # 每天哪版代码写的（v0.45.450）：meta 只记最后一轮，历史靠这一列。同日重跑以最后一轮为准。
-    snapshot["code"] = (f"{code.get('changelog_version') or '—'}@{code.get('sha') or '—'}"
-                        if code else None)
+    # v0.45.457：存**结构**、与 meta.code_version 同一份——缺哪个字段那个字段就是 None，整份取不到才是 None。
+    # 450 曾在写入时拼成 "版本@哈希" 字符串，字段缺失时只能塞 "—" ⇒ 写出 "—@—" 这种占位值，
+    # 违反 `code_version` 的约定（缺失一律 None，不写占位串）。展示要拼字符串，在读的那一侧拼。
+    snapshot["code"] = dict(code) if code else None
     equity = [e for e in _load_jsonl(EQUITY_FILE) if e.get("date") != as_of]
     equity.append(snapshot)
     equity.sort(key=lambda e: e["date"])
