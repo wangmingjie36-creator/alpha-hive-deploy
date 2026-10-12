@@ -15,7 +15,35 @@
 
 ## [0.45.466] — 2026-10-12 — 占位（进行中：cloud-snapshots 由读者自己刷新 + 陈旧可见 + 每日滞后观测）
 
-## [0.45.465] — 2026-10-12 — 占位（进行中：momentum_5d 自攒索引回落补上扫描日当天收盘，不再滞后一个扫描日）
+## [0.45.465] — 2026-10-12 — Fixed：`momentum_5d` 自攒索引回落（yfinance 失败时）窗口末端补上扫描日当场的**已核实**官方收盘——此前末端恒为上一个扫描日，比 yfinance 滞后一个扫描日；回落值不再被标成 `5d_real`；新增 `momentum_as_of`
+
+### 为什么
+- 回落序列 = 冻在 08-14 的价格索引（`price_history.append_observation` 从无生产调用方，只有 `iv_history` 的接上了）+ `pheromone.db` 的 `price_at_predict`。扫描日当天那一行要到取数**之后**才写 ⇒ 取数时序列最新一点是上一个扫描日；yfinance 收盘后的日线含当天那根。同名「5 日动量」，窗口差一天，且回落时没有任何标记。`merge_snapshots_into_index` 的 docstring 还写着「调用方会先 append 当日观测再读历史」——从来没有调用方这么做。
+- 回放（生产库副本，09-28 ~ 10-09，两种都算得出的 238 对；新路径真函数 `momentum_5d_detail`，当场收盘用 DB 当天 `price_at_predict` 代 CBOE 收盘）：回落 vs 存档 yfinance 平均 |Δ| **3.75pp → 1.95pp**，符号一致 **66% → 83%**。VZ 10-09：yfinance −9.16%，旧回落 +0.80%，新回落 −9.30%。（v0.45.463 记的 300 对 3.79 / 1.91 是另一口径的同一组日子。）
+
+### Fixed
+- `data_pipeline._cboe_session_close(payload)`（新）：只认 `cboe_options.close_verdict` 判 `official` 的 `close` ⇒ `(场次日期, close)`；盘中、盘中生成的陈旧文件、缺 `last_trade_time` 判不了归属的一律 None。场次日期取 `last_trade_time` 那一场（周末 / 盘前补跑拿到的是上一场）。读的是 `payload["close"]` 而**不是**扫描采用的 `official_price`——后者按本机钟选字段，半日市 13:00 收盘后、16:00 前会给 `current_price`（盘后价）。
+- `CBOESource.fetch` → `_fetch_history_metrics(ticker, session_close=…)` → `_fill_momentum_from_index(ticker, out, session_close)`：正常返回分支（yfinance 有应答但不足 5 根）与异常分支都转交。
+- `price_history.load_price_history(latest_close=)` / `momentum_5d(latest_close=)`：核过的当场收盘**只在内存里**并进序列，不写索引（不新增写入者；当天 DB 行以后会盖住它）；同日覆盖 DB（DB 当日行可能出自盘中陈旧价）；值无效 / 非交易日照常被拦。
+- `CBOESource.fetch`：`metrics` 来自回落时 `momentum_source` 此前一律写 `"5d_real"`（yfinance 实算的标签），现写 `"price_index"`。该字段仓库内零读者，只影响诊断。
+
+### Added
+- `price_history.momentum_5d_detail` ⇒ `{"momentum_5d", "as_of", "anchor"}`；`momentum_5d` 成为它的数值包装（签名向后兼容）。
+- `StockData.momentum_as_of`（进 `to_dict`）：回落时窗口末端日期；全源失败的末端回落也带上。传了当场收盘却没进窗口 ⇒ WARNING（那天的值是滞后的）。
+- `tests/test_momentum_fallback_session_close.py`（29）：夹具照 VZ 10-09 的形状造（滞后窗口与正确窗口**符号相反**），覆盖 `latest_close` 语义 / 不落盘、`_cboe_session_close` 的六种判决（含半日市读 close 不读盘后价、周末补跑归上一场、缺 `last_trade_time` 时 `official_price` 放行而这里拒）、`CBOESource.fetch` 端到端（收盘后 / 盘中 / yfinance 不足 5 根 / yfinance 成功不受影响）、拒收会 warning、全源失败带 `momentum_as_of`。`tests/test_cboe_stale_intraday_price.py` 两处 `_fetch_history_metrics` 桩补上新关键字。
+
+### 未处理（另发现）
+- **口径不一致**：yfinance 主路径 `iloc[-1] / iloc[-5]` 实际是 **4** 个交易日的收益（`_fetch_historical_stock_data` 的 `5d_snapshot_spliced` 同为 4），自攒索引回落按 ≥5 个交易日挑锚点。上面回放里锚点取 4 个交易日 ⇒ 与存档 **0.00pp / 100%**（210 对），取 5 ⇒ 1.32pp / 88%（180 对）。本版剩下的 1.95pp 全部来自这里。改哪一边、要不要改都待用户定（改主路径 = 每天全部 30 只的 `momentum_5d` 换口径）。
+- CBOE 盘中陈旧（`defer`）而 yfinance 也挂、Finnhub 接住时，`momentum_5d` 恒 None——那条路径不经任何回落（`prev_close_session` 能给出前一场官方收盘，未接）。
+
+### 评分 / 世代边界
+- **只在 yfinance 取不到 momentum 的扫描日起作用**（09-28 ~ 10-09 一次都没发生：存档 30/30 有数，见 v0.45.463）。发生时 `momentum_5d`（ScoutBee / BuzzBee / BearBee 读，`signal_archive` 的 `price.momentum_5d`）从「滞后一个扫描日的 5 日窗口」变为「当天的 5 日窗口」。
+- **没有追加 IC 世代边界**（用户 10-12 确认）：存档零变化；故障日的新值比旧值更贴近主路径（符号一致 66% → 83%），与 v0.45.463 同理。
+- 「4 日 vs 5 日」口径不一致按用户 10-12 决定**本版不动**，另开任务。
+
+### 验证
+- 全量 9162 passed；1 failed = `test_economic_calendar::TestCoverageHorizon`（日历覆盖期到点，设计内定期红，与本版无关）；1 error = 会话级真实数据根闸：5 项是 Alpha Bot 盘中追加（闸自己核实），其余 31 项全是 `2026-09-17` 的 `.swarm_results` / `options_snapshot`，11:03:14 一百毫秒内成批写入，与并行的 v0.45.464「09-17 重算」吻合；重叠的那条测试（`test_pipeline.py`）连同本版测试单独重跑，生产文件 mtime 不变 ⇒ 不是测试写穿。本版代码不新增任何写入。
+- 变异 13 个全部打红（`PYTHONDONTWRITEBYTECODE=1` + 每次清 `__pycache__`，改完逐字节还原核 sha256）：CBOE 不传当场收盘、按 `official_price` 取价（半日市）、不看判决按扫描日收、`price_history` 忽略 `latest_close`、不校验收盘值、DB 压过当场收盘、标签退回 `5d_real`、去掉 warning、末端回落丢 `as_of`、CBOE 不带 `as_of`、异常分支不传、正常分支不传、`as_of` 报锚点。
 
 ## [0.45.464] — 2026-10-12 — Fixed（数据）：09-17 假现价那天整链重算并写回全部存档（final_score 均 |Δ| 0.125、最大 0.48、方向 0 翻转）；价格索引 90 行假价清理；结论：不需要追加世代边界
 

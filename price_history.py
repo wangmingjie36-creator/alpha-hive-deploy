@@ -21,6 +21,12 @@ Too Many Requests），于是 `_fetch_history_metrics` 返回 None。
 `cache/price_history_{TICKER}.jsonl`，sentinel 控制的一次性快照迁移，
 日常热路径不解析任何快照。
 
+⚠️ 实际上索引自 08-15/16 那次一次性迁移后再没长过：`append_observation` 从来没有
+生产调用方。新鲜度全靠读时合并的 DB 权威价（`predictions.price_at_predict`），
+而**扫描日当天**那一行要到取数之后才写 ⇒ 取数时序列最新一点是上一个扫描日。
+当天收盘由调用方在内存里经 `latest_close` 补上（v0.45.465，见 `momentum_5d_detail`），
+不落盘。
+
 **拿不到就返回 None，绝不返回 0.0。** 0.0 不是"没有动量"，是"持平"——
 这两者在背离检测里是完全不同的输入。
 """
@@ -243,8 +249,10 @@ def _load_db_prices(ticker: str, db_path: Optional[str] = None) -> Dict[str, flo
 def merge_snapshots_into_index(ticker: str, cache_dir: str) -> int:
     """把快照里的收盘价**合并**进索引（冲突时索引优先）。返回索引总条数。
 
-    必须是"合并"而非"覆盖"：调用方会先 append 当日观测再读历史，
-    覆盖会抹掉刚写入的当日记录（此坑 iv_history 初版踩过）。
+    必须是"合并"而非"覆盖"：覆盖会抹掉索引里已有的记录（此坑 iv_history 初版踩过）。
+    ⚠️ 此前这里写「调用方会先 append 当日观测再读历史」——从来没有调用方这么做
+    （`append_observation` 无生产调用方），当天收盘走的是 `load_price_history(latest_close=)`
+    的内存合并（v0.45.465）。
     """
     by_date = _scan_snapshots(ticker, cache_dir)
     by_date.update(_read_index(ticker, cache_dir))
@@ -269,10 +277,16 @@ def load_price_history(
     ticker: str,
     cache_dir: Optional[str] = None,
     max_days: int = FULL_WINDOW,
+    latest_close: Optional[Tuple[str, float]] = None,
 ) -> List[Tuple[str, float]]:
     """返回 [(ISO 日期, 收盘)] 升序。索引优先；首次调用做一次性快照迁移。
 
     `cache_dir=None` ⇒ `PATHS.cache_dir`（调用时求值）。
+
+    `latest_close=(ISO 日期, 收盘)`（v0.45.465）：调用方**已核实**的某一场官方收盘，
+    只在内存里并进序列、**不写索引**；同日覆盖 DB 与索引（DB 的当日行可能出自盘中陈旧价，
+    这一份是按 `last_trade_time` 核过的）。值无效 / 非交易日照常被下面的过滤拦掉——
+    调用方要自己核对它有没有进序列（`momentum_5d_detail` 的 `as_of`）。
     """
     if cache_dir is None:
         cache_dir = _default_cache_dir()
@@ -288,6 +302,11 @@ def load_price_history(
 
     by_date = _read_index(ticker, cache_dir)
     by_date.update(_load_db_prices(ticker))  # DB 是权威，覆盖同日快照值
+    if latest_close is not None:
+        _d, _px = latest_close
+        _px = _valid(_px)
+        if _d and _px is not None:
+            by_date[str(_d)] = _px
     if not by_date:
         return []
     # 顺序要紧：先用**全部**观测去尖峰（非交易日快照是旁证），再筛交易日
@@ -343,8 +362,32 @@ def _trading_days_between(d1: str, d2: str) -> int:
     return n
 
 
-def momentum_5d(ticker: str, cache_dir: Optional[str] = None) -> Optional[float]:
-    """自攒收盘价算 5 日动量（%）。算不出就返回 None——**绝不返回 0.0**。
+def momentum_5d(
+    ticker: str,
+    cache_dir: Optional[str] = None,
+    latest_close: Optional[Tuple[str, float]] = None,
+) -> Optional[float]:
+    """`momentum_5d_detail` 的数值部分；算不出返回 None。参数见那里。"""
+    r = momentum_5d_detail(ticker, cache_dir, latest_close)
+    return None if r is None else r["momentum_5d"]
+
+
+def momentum_5d_detail(
+    ticker: str,
+    cache_dir: Optional[str] = None,
+    latest_close: Optional[Tuple[str, float]] = None,
+) -> Optional[Dict]:
+    """自攒收盘价算 5 日动量（%）→ `{"momentum_5d", "as_of", "anchor"}`。
+    算不出就返回 None——**绝不返回 0.0**。
+
+    `as_of` = 窗口末端那一天（序列最新一点），`anchor` = 起点。
+
+    ⚠️ 窗口末端（v0.45.465）：不传 `latest_close` 时末端是**库里最新的一天**——扫描日
+    取数时那是上一个扫描日（当天 DB 行在取数之后才写）。yfinance 收盘后的日线含当天那根，
+    两者差一个扫描日：09-28~10-09 回放 300 对，平均 |Δ| 3.79pp、符号一致 66%；补上当天
+    收盘后 1.91pp / 83%（VZ 10-09 当天跌约 10%：yfinance −9.16%，滞后的回落 +0.80%）。
+    所以扫描路径要把**已核实**的当场官方收盘经 `latest_close` 传进来；调用方拿 `as_of`
+    与自己的场次日期对账，不一致就是那一份没进窗口。
 
     0.0 的含义是"持平"，会让 sentiment.py 的背离检测永远不触发
     （实测 395/395 次 severity=0）。缺数据必须是 None。
@@ -356,7 +399,7 @@ def momentum_5d(ticker: str, cache_dir: Optional[str] = None) -> Optional[float]
 
     `cache_dir=None` ⇒ `PATHS.cache_dir`（调用时求值）。
     """
-    hist = load_price_history(ticker, cache_dir, max_days=40)
+    hist = load_price_history(ticker, cache_dir, max_days=40, latest_close=latest_close)
     if len(hist) < 2:
         return None
     latest_date, latest = hist[-1]
@@ -371,7 +414,8 @@ def momentum_5d(ticker: str, cache_dir: Optional[str] = None) -> Optional[float]
         if gap >= MOMENTUM_LOOKBACK:
             if gap > MOMENTUM_MAX_GAP or px <= 0:
                 return None  # 数据太稀，名不副实
-            return round((latest / px - 1) * 100, 4)
+            return {"momentum_5d": round((latest / px - 1) * 100, 4),
+                    "as_of": latest_date, "anchor": date}
     return None  # 历史不够 5 个交易日
 
 

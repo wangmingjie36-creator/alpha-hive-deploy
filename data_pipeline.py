@@ -28,7 +28,7 @@ import math
 import logging
 import threading
 import weakref
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 from collections import deque
 
 
@@ -111,7 +111,8 @@ class StockData:
     P0-2 (v0.38.0): momentum_5d 可为 None（真实 5 日动量不可得时），
     不再用当日涨跌幅冒充——下游背离检测/情绪映射按 5 日语义消费，
     1 日近似会触发错误的 bull trap / 空头阈值判定。
-    momentum_source: "5d_real"（yfinance 历史K线计算）| "unavailable"
+    momentum_source: "5d_real"（yfinance 历史K线计算）| "price_index"（自攒索引回落）| "unavailable"
+    momentum_as_of: 自攒索引回落时窗口末端那一天（v0.45.465）；其余来源不填
     """
     price: float = 0.0
     # v0.45.3: 类型早已是 Optional，默认值却还是 0.0 / 1.0——构造 StockData 时
@@ -131,6 +132,9 @@ class StockData:
     data_source: str = DataQuality.FALLBACK
     source_name: str = "none"
     momentum_source: str = "none"
+    # v0.45.465：自攒索引回落的窗口末端日期。拿到当场官方收盘时 = 场次日期；
+    # 拿不到时是库里最新一天（上一个扫描日），比 yfinance 收盘后的窗口滞后一个扫描日。
+    momentum_as_of: Optional[str] = None
     fetch_timestamp: float = 0.0
     is_market_hours: bool = False
     # v0.45.234：price 取的是哪个字段（目前只有 CBOE 源填，见 cboe_options.official_price）。
@@ -150,6 +154,7 @@ class StockData:
             "data_source": self.data_source,
             "source_name": self.source_name,
             "momentum_source": self.momentum_source,
+            "momentum_as_of": self.momentum_as_of,
             "fetch_timestamp": self.fetch_timestamp,
             "is_market_hours": self.is_market_hours,
             "price_source": self.price_source,
@@ -428,12 +433,16 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
         return fallback
 
 
-def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
+def _fetch_history_metrics(ticker: str,
+                           session_close: Optional[Tuple[str, float]] = None) -> Optional[Dict]:
     """P0-2 (v0.38.0): 从 yfinance 历史K线独立计算 momentum_5d / volume_ratio /
     avg_volume / volatility_20d（含 forming-bar 护栏）。
 
     供 CBOESource（无历史K线）与 YFinanceSource 共用。失败返回 None——
     调用方必须把 momentum_5d 置 None（诚实缺数据），禁止用 1 日涨跌幅冒充。
+
+    `session_close`：调用方已核实的当场官方收盘 `(ISO 日期, 价)`，只转给
+    momentum 的自攒索引回落（见 `_fill_momentum_from_index`）。
     """
     try:
         import yfinance as yf
@@ -473,14 +482,15 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
 
         out["_price_from_hist"] = float(hist["Close"].iloc[-1])
         out["momentum_source"] = "yfinance"
-        return _fill_momentum_from_index(ticker, out)
+        return _fill_momentum_from_index(ticker, out, session_close)
     except Exception as e:
         _log.debug("_fetch_history_metrics %s failed: %s", ticker, e)
-        out = _fill_momentum_from_index(ticker, None)
+        out = _fill_momentum_from_index(ticker, None, session_close)
         return _fill_volume_from_twelvedata(ticker, out)
 
 
-def _fill_momentum_from_index(ticker: str, out: Optional[Dict]) -> Optional[Dict]:
+def _fill_momentum_from_index(ticker: str, out: Optional[Dict],
+                              session_close: Optional[Tuple[str, float]] = None) -> Optional[Dict]:
     """yfinance 拿不到 momentum_5d 时，回落自攒收盘价索引（v0.43.25）。
 
     索引来源是 pheromone.db 的权威价 + 期权快照，**完全不经外部接口**，
@@ -494,22 +504,57 @@ def _fill_momentum_from_index(ticker: str, out: Optional[Dict]) -> Optional[Dict
     缓存目录与权威价库都由 `price_history` 在调用时经 `PATHS` 解析（v0.45.463）。
     此前这里传 `os.environ.get("ALPHA_HIVE_CACHE_DIR", "cache")`：生产不设该变量，
     cwd 又是代码克隆（09-26 数据根迁移 / 10-09 生产克隆之后），回落恒读空。
+
+    `session_close=(ISO 日期, 价)`（v0.45.465）：**已核实**的当场官方收盘（来源见
+    `_cboe_session_close`）。扫描日当天的 DB 行要到取数之后才写，索引自 08-15/16 起
+    不再增长 ⇒ 不传它时窗口末端是上一个扫描日，比 yfinance（收盘后含当天那根）
+    滞后一个扫描日。只在内存里并进序列，不写索引。结果带 `momentum_as_of`
+    （窗口末端）；传了却没进窗口（值被拒 / 非交易日）打 warning——那一天的值是滞后的。
+    盘中价 / 盘中陈旧文件 / 判不了归属的价**不许**从这里进：它们不是收盘。
     """
     if out is not None and out.get("momentum_5d") is not None:
         return out
     try:
-        from price_history import momentum_5d as _idx_momentum
-        m = _idx_momentum(ticker)
+        from price_history import momentum_5d_detail as _idx_momentum
+        r = _idx_momentum(ticker, latest_close=session_close)
     except Exception as e:  # noqa: BLE001
         _log.debug("[%s] 自攒动量索引不可用: %s", ticker, e)
         return out
-    if m is None:
+    if r is None:
         return out  # 索引也没有 → 保持 None，诚实缺数据
+    m, as_of = r["momentum_5d"], r["as_of"]
     out = dict(out) if out else {}
     out["momentum_5d"] = m
     out["momentum_source"] = "price_index"
-    _log.info("[%s] momentum_5d 由自攒索引补上: %+.2f%%（yfinance 不可用）", ticker, m)
+    out["momentum_as_of"] = as_of
+    if session_close is not None and as_of != session_close[0]:
+        _log.warning("[%s] 当场收盘 %s@%s 没进自攒索引窗口（末端 %s）—— momentum_5d 滞后",
+                     ticker, session_close[1], session_close[0], as_of)
+    _log.info("[%s] momentum_5d 由自攒索引补上: %+.2f%%（截至 %s；yfinance 不可用）",
+              ticker, m, as_of)
     return out
+
+
+def _cboe_session_close(payload: dict) -> Optional[Tuple[str, float]]:
+    """CBOE payload 的 `close` 若是**已核实**的官方收盘 → `(场次 ISO 日期, 价)`，否则 None（v0.45.465）。
+
+    判据只用 `cboe_options.close_verdict`（「这个 close 是不是官方收盘、属于哪一场」的唯一实现），
+    不另起规则：盘中（那一场还没收）、盘中生成的陈旧文件、缺 `last_trade_time` 判不了归属，
+    一律不收。场次日期取 `last_trade_time` 那一场——周末 / 盘前补跑拿到的是上一场，不是今天。
+
+    读的是 `payload["close"]`，**不是**扫描采用的 `official_price`：后者按本机钟选字段，
+    半日市收盘后、16:00 前会给 `current_price`（盘后价）；`close_verdict` 判的正是 `close`。
+    """
+    try:
+        from cboe_options import close_verdict, CLOSE_OFFICIAL
+        verdict, session = close_verdict(payload)
+        px = float((payload or {}).get("close"))
+    except Exception as e:  # noqa: BLE001 —— 判不了就不收，不阻断取数
+        _log.debug("CBOE 当场收盘判不了: %s", e)
+        return None
+    if verdict != CLOSE_OFFICIAL or session is None or not (math.isfinite(px) and px > 0):
+        return None
+    return session.isoformat(), px
 
 
 def _fill_volume_from_twelvedata(ticker: str, out: Optional[Dict]) -> Optional[Dict]:
@@ -597,7 +642,9 @@ class CBOESource:
                 fetch_timestamp=time.time(),
             )
             # P0-2: 历史指标独立获取；失败时 momentum 置 None（不再 1 日近似）
-            metrics = _fetch_history_metrics(ticker)
+            # v0.45.465：已核实的当场官方收盘交给 momentum 的自攒索引回落当窗口末端。
+            metrics = _fetch_history_metrics(
+                ticker, session_close=_cboe_session_close(payload))
             if metrics and "momentum_5d" in metrics:
                 data.momentum_5d = metrics["momentum_5d"]
                 # v0.45.54：`.get(k, default)` 挡不住「键存在但值为 None」——
@@ -606,7 +653,10 @@ class CBOESource:
                 data.avg_volume = metrics.get("avg_volume")
                 data.volume_ratio = metrics.get("volume_ratio")
                 data.volatility_20d = metrics.get("volatility_20d")   # v0.45.3: 不再补 0.0
-                data.momentum_source = "5d_real"
+                # v0.45.465：此前一律写 "5d_real"，把自攒索引回落也标成了 yfinance 实算
+                data.momentum_source = ("price_index" if metrics.get("momentum_source") == "price_index"
+                                        else "5d_real")
+                data.momentum_as_of = metrics.get("momentum_as_of")
             else:
                 data.momentum_5d = None
                 data.volume_ratio = None
@@ -927,6 +977,7 @@ class MultiSourceFetcher:
         if _hf:
             fallback["momentum_5d"] = _hf.get("momentum_5d")
             fallback["momentum_source"] = _hf.get("momentum_source", fallback["momentum_source"])
+            fallback["momentum_as_of"] = _hf.get("momentum_as_of")
             fallback["volume_ratio"] = _hf.get("volume_ratio")
             fallback["avg_volume"] = _hf.get("avg_volume")
             fallback["volume_source"] = _hf.get("volume_source")
