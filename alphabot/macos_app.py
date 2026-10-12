@@ -209,7 +209,8 @@ def build_app(dest_dir: Path, *, repo: Optional[Path] = None, python: str = DEFA
     先在同目录临时位置建好，再换上去：中途失败不会留下半个 .app。
     """
     dest_dir = Path(dest_dir).expanduser()
-    repo = Path(repo).resolve() if repo else _repo_root()
+    # 「给没给」只认 None（v0.45.458）：此前 `if repo` 让 `repo=""` 悄悄变成本检出、`Path("")` 却是当前目录——同值两义
+    repo = _repo_root() if repo is None else Path(repo).resolve()
     problem = generator_dir_problem(repo)
     if problem:
         raise BuildError(f"{repo} {problem}")
@@ -339,12 +340,13 @@ def _record_data_root(explicit_home: Optional[Path]) -> int:
         cfg = launcher.load_config()
     except launcher.LauncherError as exc:
         print(f"⚠️ {exc}", file=sys.stderr)
-        return 1 if explicit_home else 0
-    env_home = _env_home_absolute()
+        return 1 if explicit_home is not None else 0
+    # 给了 --home 时环境变量根本不参与 ⇒ 不去定类、不打它的提示（v0.45.458：此前照样提示「要设数据根用 --home」，与刚用的 --home 自相矛盾）
+    env_home = _env_home_absolute() if explicit_home is None else None
     state, home = launcher.config_state(cfg)
 
     want, why = None, ""
-    if explicit_home:
+    if explicit_home is not None:
         want, why = explicit_home, "--home"
     elif env_home and state == "first":
         want, why = env_home, "环境 ALPHA_HIVE_HOME（配置里还没有数据根）"
@@ -355,7 +357,7 @@ def _record_data_root(explicit_home: Optional[Path]) -> int:
         hp = Path(want).expanduser()
         if not hp.is_dir():
             print(f"⚠️ 数据根 {hp}（来自 {why}）不存在，没写进配置", file=sys.stderr)
-            if explicit_home:
+            if explicit_home is not None:
                 return 1
         else:
             for k in launcher.RESET_KEYS:        # 连同 demo 一起换掉：demo 优先于数据根，只写数据根等于没换
@@ -429,6 +431,11 @@ def main(argv=None) -> int:
         print(f"alphabot.macos_app: {exc}", file=sys.stderr)
         return 1
     print(f"已生成 {bundle}（代码目录 {repo}）")
+    # 写进 .app 的解释器当场说出来、当场核对（v0.45.458）：此前要到双击才暴露（如旧生成器把裸名字原样写进壳）。
+    # 只警告不拒：缺省解释器在 CI 上本来就不存在，人也可能之后才装；双击时壳仍会核对并弹窗
+    print(f"写进 .app 的解释器：{python}")
+    if not os.access(python, os.X_OK):
+        print(f"⚠️ {python} 现在不存在或不可执行：双击 .app 时会弹窗「找不到」，装好它或用 --python 换一个", file=sys.stderr)
 
     rc = _record_data_root(home)
     if sys.platform != "darwin":

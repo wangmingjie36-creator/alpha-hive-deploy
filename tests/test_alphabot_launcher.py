@@ -316,6 +316,24 @@ class TestDataRootFollowsLauncher:
         assert not (tmp_path / "Apps").exists() and LA.load_config() == {"alpha_hive_home": str(data)}
         assert f"{flag} 给了空值" in capsys.readouterr().err
 
+    def test_generation_states_the_interpreter_written(self, tmp_path, home, monkeypatch, capsys):
+        """写进 .app 的解释器当场说出来；现在不存在 / 不可执行就当场警告，不等到双击（v0.45.458）。"""
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        ghost = tmp_path / "no" / "python3"
+        assert self._main(tmp_path, "--python", str(ghost)) == 0
+        cap = capsys.readouterr()
+        assert f"写进 .app 的解释器：{ghost}" in cap.out and "现在不存在或不可执行" in cap.err, cap
+        assert self._main(tmp_path, "--python", sys.executable) == 0
+        cap = capsys.readouterr()
+        assert f"写进 .app 的解释器：{sys.executable}" in cap.out and "不可执行" not in cap.err, cap
+
+    def test_explicit_home_silences_the_env_note(self, tmp_path, home, monkeypatch, capsys, data):
+        """给了 --home，环境变量根本不参与：不许再提示「环境变量是相对路径、要设数据根用 --home」（自相矛盾）。"""
+        monkeypatch.setenv("ALPHA_HIVE_HOME", "relative/dir")
+        assert self._main(tmp_path, "--home", str(data)) == 0
+        assert "ALPHA_HIVE_HOME" not in capsys.readouterr().err
+        assert LA.config_state(LA.load_config()) == ("home", str(data.resolve()))
+
     def test_relative_env_home_is_never_compared(self, tmp_path, home, monkeypatch, capsys, data):
         """相对的 ALPHA_HIVE_HOME 整个不参与：v0.45.456 在「与配置比较」那支仍按当前 cwd 解析，
         `make -C 克隆` 下就误报「与启动器配置不同」。"""
@@ -549,6 +567,13 @@ class TestDefaultRepoIsProductionClone:
         assert missing in err and "production_clone.py setup" in err and "Traceback" not in err, err
         assert not (tmp_path / "Apps").exists()
 
+    def test_build_app_empty_repo_is_a_path_not_absent(self, tmp_path, monkeypatch):
+        """`build_app(repo="")` 此前因真假值被当「没给」、悄悄生成指向本检出的 .app；现在空串就是一个路径（当前目录），照判据核对。"""
+        monkeypatch.chdir(tmp_path)                    # 当前目录不是代码目录
+        with pytest.raises(MA.BuildError, match="不是 Alpha Hive 代码目录"):
+            MA.build_app(tmp_path / "Apps", repo="")
+        assert not (tmp_path / "Apps").exists()
+
     def test_one_criterion_for_all_three_callers(self, tmp_path):
         """缺省克隆、`--repo`、`build_app` 对同一个半截目录给同一结论（判据只在一处）。"""
         half = tmp_path / "half"
@@ -575,6 +600,10 @@ class TestDefaultRepoIsProductionClone:
         assert "import" not in err and "Traceback" not in err, err
 
 
+#: 真跑 make 时子进程只继承这些（PYTHONUSERBASE：conftest 钉的用户 site，换 HOME 后靠它找 numpy 等）
+_MAKE_ENV_KEEP = ("PATH", "PYTHONUSERBASE", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR")
+
+
 class TestCanonicalMakeEntry:
     """真跑推荐入口 `make -C <仓库> alphabot-app`（v0.45.456）：此前只测 `MA.main`，Makefile 目标、`-m` 从仓库根
     import、`default_repo()==_repo_root()` 的本地分支、make 变量传参都从没被执行过。
@@ -586,8 +615,9 @@ class TestCanonicalMakeEntry:
     @staticmethod
     def _make(home, *make_vars, env_extra=None):
         (home / "alpha-hive-prod").symlink_to(REPO, target_is_directory=True)
-        # 环境里的 PYTHON 也去掉：开发机若 export 过它，结果就随机器变（本类专门有一条测它）
-        env = {k: v for k, v in os.environ.items() if k not in ("ALPHA_HIVE_HOME", "PYTHON")}
+        # 白名单：只带 make 与生成器真正要的（v0.45.458）。此前从 os.environ 减掉 ALPHA_HIVE_HOME / PYTHON（黑名单），
+        # 外层 make 的命令行变量经 MAKEFLAGS 照样漏进子 make（`make test PYTHON=…` 时 origin 成了 command line）
+        env = {k: os.environ[k] for k in _MAKE_ENV_KEEP if k in os.environ}
         env["HOME"] = str(home)
         env.update(env_extra or {})
         return subprocess.run(["make", "-s", "-C", str(REPO), "alphabot-app", f"ALPHABOT_GEN_PY={sys.executable}",
@@ -605,6 +635,13 @@ class TestCanonicalMakeEntry:
         assert r.returncode == 0, r.stderr
         assert self._py_in_app(home) == MA.DEFAULT_PYTHON, "环境里的 PYTHON 被当成了 --python"
         assert "忽略环境变量 PYTHON=python3" in r.stdout + r.stderr, "忽略要说出来"
+
+    def test_outer_make_flags_do_not_leak_in(self, home, monkeypatch):
+        """外层 make 的命令行变量经 MAKEFLAGS 传给子 make、origin 成 command line；测试环境不许把它带进来。"""
+        monkeypatch.setenv("MAKEFLAGS", " -- PYTHON=python3")
+        r = self._make(home)
+        assert r.returncode == 0, r.stderr
+        assert self._py_in_app(home) == MA.DEFAULT_PYTHON
 
     def test_command_line_python_wins_over_environment(self, home):
         r = self._make(home, f"PYTHON={sys.executable}", env_extra={"PYTHON": "python3"})
