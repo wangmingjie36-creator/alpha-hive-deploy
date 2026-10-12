@@ -208,6 +208,14 @@ class TestAnalyzeNeverInventsAPrice:
         monkeypatch.setattr(agent.fetcher, "fetch_options_chain", lambda t: _chain())
         assert agent.analyze("NVDA", stock_price=301.0)["chain_source"] == "unknown"
 
+    def test_sample_chain_records_chain_source_sample(self, agent, monkeypatch, tmp_path):
+        """样本链早退那条返回路径也记 `chain_source: "sample"`（v0.45.479 补测试）。
+
+        变红的变异：删掉样本早退结果里的 `chain_source`。
+        """
+        monkeypatch.setattr(agent.fetcher, "fetch_options_chain", lambda t: {**_chain(), "source": "sample"})
+        assert agent.analyze("NVDA", stock_price=301.0)["chain_source"] == "sample"
+
     def test_caller_price_unchanged_behaviour(self, agent, monkeypatch, tmp_path):
         """调用方给了价 ⇒ 用它，出处 caller（正常日子行为不变的正对照）。"""
         monkeypatch.setattr(agent.fetcher, "fetch_options_chain",

@@ -179,7 +179,8 @@ def test_backfill_does_not_resurrect(db, tmp_path, monkeypatch):
 class TestFakeSnapshotQuarantineV0_45_472:
     """v0.45.472：期权快照现价 / 整条链不是当天观测的 (日期, 标的)，以及 CBOE 时代退到 yfinance 备用链的 GEX。
 
-    变红的变异：删掉任一条 v0.45.472 条目；或把 yfinance 那批的 signals 扩成五类（误伤当天真实的 IV / P/C / OI）。
+    变红的变异：删掉下面点名的几条 v0.45.472 条目（只抽查 3 条，不是全部 49 条——v0.45.479 更正原写法「任一条」）；
+    或把 yfinance 那批的 signals 扩成五类（误伤当天真实的 IV / P/C / OI）。
     """
 
     def test_sample_chain_day_is_quarantined_whole(self):
@@ -223,7 +224,8 @@ def test_iv_constant_25_rows_quarantined_only_for_iv_current():
         assert sa.is_quarantined(d, t, "options.iv_current"), (d, t)
         assert not sa.is_quarantined(d, t, "options.iv_rank"), (d, t)
     assert not sa.is_quarantined("2026-09-15", "NVDA", "options.iv_current")
-    assert not sa.is_quarantined("2026-06-09", "NVDA", "options.iv_current")
+    # v0.45.479：原对照用的 06-09 NVDA 其实是坏的（归档那次运行现价 63、OI 251、P/C 0.0，已整份隔离），换成归档运行核过是真值的一对
+    assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_current")
 
 
 def test_v0_45_476_false_positives_stay_unquarantined():
@@ -237,3 +239,26 @@ def test_v0_45_476_false_positives_stay_unquarantined():
         for sig in ("options.iv_current", "options.gamma_exposure", "options.put_call_ratio"):
             assert not sa.is_quarantined(d, t, sig), (d, t, sig)
     assert sa.is_quarantined("2026-04-26", "AAPL", "options.gamma_exposure"), "同日其余标的照样隔离"
+
+
+
+class TestSwarmBasedReclassificationV0_45_479:
+    """v0.45.479：按 swarm_results（归档的真实来源）重判后的隔离面。
+
+    变红的变异：删掉任一 v0.45.479 条目；或把 06-23 TSLA / 06-26 BILI 加回去；或把 06-23 NVDA 整份隔离。
+    """
+
+    def test_archived_run_fakes_are_quarantined(self):
+        for d, t in (("2026-06-09", "VKTX"), ("2026-06-09", "NVDA"), ("2026-06-15", "BILI"),
+                     ("2026-06-17", "META"), ("2026-06-29", "BILI"), ("2026-03-31", "AMZN")):
+            assert sa.is_quarantined(d, t, "options.put_call_ratio"), (d, t)
+
+    def test_missed_yfinance_day_quarantines_gex_only(self):
+        assert sa.is_quarantined("2026-08-31", "TMO", "options.gamma_exposure")
+        assert not sa.is_quarantined("2026-08-31", "TMO", "options.put_call_ratio")
+
+    def test_archived_run_real_data_is_released(self):
+        for d, t in (("2026-06-23", "TSLA"), ("2026-06-26", "BILI")):
+            assert not sa.is_quarantined(d, t, "options.gamma_exposure"), (d, t)
+        assert not sa.is_quarantined("2026-06-23", "NVDA", "options.total_oi")
+        assert sa.is_quarantined("2026-06-23", "NVDA", "options.iv_current"), "IV 12.5 是垃圾常数，只挡这一项"

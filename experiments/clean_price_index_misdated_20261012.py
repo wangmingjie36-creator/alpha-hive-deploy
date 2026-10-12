@@ -32,7 +32,9 @@ EXACT_PCT = 0.0005
 def plan_for(rows, bars):
     """返回 (新行列表, 动作清单)。纯函数。"""
     dates = sorted(bars)
-    have = {r["date"] for r in rows}
+    # v0.45.479：「目标日已有行」只算**清理后还留着**的行——原写法用清理前的日期集合，目标日那行若自己也要被删，
+    # 挪过去就被拒、两行一起没了（审阅实测丢了 7 个真收盘：BILI 07-23 / 08-13，META / QCOM / TSLA / VKTX 07-23，NVDA 07-22）。
+    have = {r["date"] for r in rows if r["date"] not in bars or abs(float(r["close"]) / bars[r["date"]] - 1) <= SAME_PCT}
     keep, moved_in, actions = [], {}, []
     for r in rows:
         d, px = r["date"], float(r["close"])

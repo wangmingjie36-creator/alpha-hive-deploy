@@ -34,7 +34,54 @@ v0.45.430 二次检查记下的措辞偏差：同一个 `stage="git_error"` 底�
 ### 未验证
 - 全量套件在盘中跑：1 failed 是 iCloud 重名副本 `__init__ 2.py`（已知）；1 error 落在最后一个测试的收尾，跑测试那几分钟真实数据根里只有 Alpha Bot 的 5 个盘中快照被追加过（12:26:25–12:26:59 PDT），按此判断是数据根闸撞上 Alpha Bot，没有截下闸的原文、也没重跑全量。
 
-## [0.45.479] — 2026-10-12 — 占位（进行中：期权观测隔离改按 swarm_results（归档真实来源）重判 + GEX 世代边界更正到 06-29 + 价格索引补回 7 行真收盘 + 清库 / 恢复脚本按审阅修）
+## [0.45.479] — 2026-10-12 — Fixed（数据）：v0.45.476 二次检查审阅——期权观测隔离改按 **swarm_results（归档的真实来源）** 重判：补隔离 128 行、放回 14 行；拆股判定改为「同一标的反复出现同一整数比」；价格索引补回 7 个被误删的真收盘；清库 / 恢复脚本备份时点与 integrity 顺序修正；GEX 世代边界该是 06-29（表结构放不下往前挪的更正，如实记录）
+
+### 为什么
+v0.45.476 的独立审阅指出：`signal_archive` 的期权值抽自 `.swarm_results_<日期>.json` 的 OracleBee details——实测 **5343 个值逐位相同、0 个不同**；
+v0.45.472 却按 `cache/options_snapshot_*.json` 判，那常是同一天的另一次运行（之后重跑、测试改写过快照）。于是有坏行没挡住、也有好行被删。
+
+### 重判（`experiments/reclassify_option_quarantine_from_swarm_20261012.py`，新，只读）
+逐（日期, 标的）读归档那次运行的 Oracle details；判据：样本链（OI 85200 / P/C 0.54）、**空链（OI 0，Yahoo 限流垃圾链——472 没有这条）**、
+测试夹具、假现价（常数 145 / 100、偏离 > 20%、落在行权价网格上的行权价中位数；豁免：偏离 ≤ 20% 且等于蜂群当天用的价、
+或拆股调整差），06-29 起另加 yfinance 备用链的 IV 指纹（只隔离 GEX）。重判过程中又修了两处判据：
+- **拆股不能按单日比值认**：06-09 VKTX 的假价 145 / 真收盘 29.23 = 4.96，曾被「比值 ≈ 整数 ±1%」当成 5:1 拆股放过。
+  改为同一标的 ≥ 3 条记录落在同一整数比上（±0.5%）才认——全库只有 CRWD（4 条都是 4.000）。
+- 「等于蜂群当天用的价 ⇒ 真价」只在偏离 ≤ 20% 时作数。
+结果：整份假 90 对、只隔离 GEX 26 对。与现行隔离对账：
+- **补隔离**（`signal_archive.QUARANTINE` 新增 v0.45.479 条目，10 个日期 + TMO 08-31 GEX + 06-23 NVDA 仅 iv_current）：129 个三元组，库里 128 行——
+  03-31 / 04-02 / 04-06 AMZN 样本链；06-09 九只（现价 145 / 63 / 190、OI 0–278，没有 06-09 快照所以 472 看不见）；06-15 BILI / META、06-17 AMZN / META、
+  06-18 NVDA / VKTX、06-23 AMZN / BILI、06-26 CRCL 样本链或空链（快照是另一次运行的真链）；06-29 AMZN / BILI / CRCL / RKLB；
+  **TMO 08-31**（yfinance 链，没有快照文件，475 漏掉）。
+- **放回**（472 按快照误判，归档运行是真数据）：06-23 TSLA、06-26 BILI 各 5 行；06-23 NVDA 除 iv_current 外 4 行（那次运行价 / OI / P/C 是真的，iv_current 是垃圾常数 12.5，保留隔离）。
+- **不动**：归档文件已不存在的日期（05-24、06-24、06-25、06-27、06-30、07-01、09-23，共 65 个三元组）——没有可核的归档运行，按快照证据保守保留；
+  归档运行里没有该标的的（04-26 COST、05-10 ASML、06-29 AMD）同样保留。09-23 当天根本没入档（signal_archive / predictions 零行）。
+- 清库 / 放回：放回 14 行（`restore_signal_rows_from_backup.py --skip-quarantined`，源 = 472 清库前备份）、`purge_quarantined_signal_rows.py --only-tag v0.45.479 --expect 128`：
+  `signal_archive` 129,933 → 129,947 → **129,819**；复核命中 0 行、integrity ok。备份 `db_backups/pheromone_pre_v0.45.479_{restore,purge}.db`。
+
+### GEX 世代边界（不改，如实记录）
+v0.34.0 条目写「06-29 的快照已由更早的扫描写下、首个完整 CBOE 日是 06-30」——不对：06-29 的 11 份快照都写于 c738c567 进 main 之后，
+归档运行 10 只里 9 只是 CBOE（AMZN 是 Yahoo 空链、已隔离），边界严格说该是 06-29。**没有改**：`_COHORT_HISTORY` 必须按日期升序、判据取列表最后一条，
+往前挪的更正条目放不进去（试过，排序守卫红）；代价是 06-29 那 9 行 CBOE 口径的 GEX 落在旧世代。reason 原文有摘要钉，更正写在该条目上方注释与这里。
+同条「只影响这一个信号」严格说：v0.45.349 之前 GEX 还经 gex_signal / Bear gex<0 下限进过 Oracle 分与 bear.options_bear——那两个已在更晚边界换代，结果不变。
+
+### 价格索引（v0.45.472 的错日清理丢了 7 个真收盘）
+`clean_price_index_misdated_20261012.py` 判「目标日已有行」用的是清理**前**的日期集合——目标日那行若自己也要删，挪过去被拒、两行一起没了。
+改为只算清理后还留着的行；在 472 清理前的原文件上重放：挪 19 行（原 12）、删 72 行，与线上只差这 7 行 ⇒ 补回 BILI 07-23 / 08-13、META / QCOM / TSLA / VKTX 07-23、NVDA 07-22
+（值都与 Twelve Data 当天收盘逐位吻合）。备份 `_manual_backups/2026-10-12_price_index_restore7_v0.45.479/`。现 620 行，全部与当天收盘 ≤ 1%。
+
+### 脚本
+- `purge_quarantined_signal_rows.py` / `restore_signal_rows_from_backup.py`：备份改在 `BEGIN IMMEDIATE` **之后**（另开只读连接），中间不会漏掉并发写；
+  `integrity_check` 改在 COMMIT **之前**、用 raise（原来在 COMMIT 之后且是 `-O` 下会被剥掉的 assert——与 docstring / CHANGELOG 所述不符）。
+- `restore_signal_rows_from_backup.py` 加 `--skip-quarantined`（部分撤回用）。
+
+### 更正（原地加注）
+472「787 行保留」→ 清库后 722；475「三个例外…NVDA 06-23 / 07-08」→ 核对集里的例外只有两个；`TestFakeSnapshotQuarantineV0_45_472` 文档「删任一条目会红」→ 只抽查 3 条；
+v0.45.478 测试的对照 06-09 NVDA 其实是坏的，换成归档核过的 06-23 TSLA（已告知该 session）。另：12.5 / 6.25 这两个 iv_current 垃圾常数（与 25.0 同族，归档 20 处）转交 iv 常数那一路。
+
+### 验证
+- 新增 `tests/test_reclassify_option_quarantine.py`（6 条：单日整数比不算拆股 / 反复同比才算 / 网格外的整数价是真价 / 蜂群价豁免只在小偏离 / 空链与样本链 / 指纹只从 06-29 起）、
+  `TestSwarmBasedReclassificationV0_45_479`（3 条）、`chain_source: "sample"` 测试。
+- 全量 9264 passed；红的只有已知 `TestCoverageHorizon`（等 2027 BLS/BEA 日程）。
 
 ## [0.45.478] — 2026-10-12 — Fixed（数据，用户批准）：`signal_archive` 剩余 6 行 `options.iv_current = 25.0`（v0.45.471 普查出的兜底常数）入隔离名单并清库；`purge_quarantined_signal_rows.py` 新增 `--only-tag`
 
@@ -122,7 +169,7 @@ v0.45.472 按 `quote_set.error == "chain source is not cboe"` 认 yfinance 备�
 ### 怎么认出来的：期权链数据本身的厂商指纹
 快照 `key_levels` 里存着原始合约的 IV：**CBOE 给 4 位小数（0.2851），Yahoo 是二进制长浮点（0.8906260937499999）**。
 在**已知来源**的快照上核：CBOE（09-04 起有 quote_set 且无 error）581/582、yfinance（quote_set.error）44/44、06-30 前 yfinance 主源时代 541/542 分对；
-三个例外里两个是同一份测试夹具（NVDA 06-23 / 07-08：IV 0.38/0.40/0.32、OI 600/400/200、GEX 0.3335 两天逐位相同，早已隔离），
+三个例外里两个是同一份测试夹具（NVDA 06-23 / 07-08：IV 0.38/0.40/0.32、OI 600/400/200、GEX 0.3335 两天逐位相同，早已隔离）〔v0.45.479 更正：三个核对集里的例外只有两个——06-23 NVDA（yfinance 时代那份）与 10-05 BILI；07-08 NVDA 在 06-30 ~ 09-03 那段、不在核对集里〕，
 一个是 **10-05 BILI**：IV 是 Yahoo 指纹，quote_set 却没有 error——当晚 23:33 `_refill_empty_quote_set` 用 CBOE 把空的 quote_set 回填了，原来的 error 被抹掉，
 v0.45.472 因此漏认。06-30 ~ 09-03 的 548 份快照全部可分（零份缺 key_levels），**只有 09-01 BILI 是 yfinance**。〔v0.45.476 更正：548 份里样本链 8（已隔离）、测试夹具 1（07-08 NVDA，已隔离），按指纹分出的是其余 539 份：CBOE 538、yfinance 1〕
 
@@ -238,7 +285,7 @@ v0.45.472 因此漏认。06-30 ~ 09-03 的 548 份快照全部可分（零份缺
 
 ### 1'. `options.gamma_exposure` 补登世代边界 2026-06-30 / v0.34.0
 CBOE 主源切换（c738c567）前，主链 GEX 的 gamma 由 BS 补、S 取行权价中位数（analyze 从不给 fetch_options_chain 传价）；之后 gamma 来自 CBOE。
-这是**产生该值的函数变了**（按 `signal_archive` 判据换代，不是隔离），03-10 ~ 06-29 的 787 行保留、分析时与之后分开。
+这是**产生该值的函数变了**（按 `signal_archive` 判据换代，不是隔离），03-10 ~ 06-29 的 787 行保留、分析时与之后分开〔v0.45.479 更正：787 是清库前的数，本版隔离清库后剩 722；世代边界日期严格说该是 06-29，见 v0.45.479〕。
 `ic_rerun_readiness._COHORT_HISTORY` 按部署日期插在表头（末条不变 ⇒ `cohort_start()` 仍是 10-09，当前 IC 样本不受影响）；`COHORT_SIGNAL_SCOPE["v0.34.0"] = ("options.gamma_exposure",)`；
 测试：从 `NEVER_SLICED_TODAY` 移到 `DOCUMENTED_REDEFINITIONS`（该名单要求的做法），`FROZEN` 钉新条目原文摘要。
 

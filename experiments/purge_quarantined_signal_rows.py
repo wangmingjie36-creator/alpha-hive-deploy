@@ -12,7 +12,7 @@
 
 安全：`--apply` 先用 sqlite 在线备份 API 整库备份；再在单个 `BEGIN IMMEDIATE` 事务里**现读现判**
 （`is_quarantined()`，不依赖任何早先的快照结果），命中数必须恰好等于 `--expect` 才删，删后核对这些 id
-零残留、`integrity_check` 为 ok，全部通过才 COMMIT。
+零残留、`integrity_check` 为 ok，全部通过才 COMMIT（v0.45.479：备份改在持写锁之后、integrity_check 改在 COMMIT 之前且用 raise）。
 """
 import argparse
 import sqlite3
@@ -60,13 +60,18 @@ def main():
     if bk.exists():
         raise SystemExit(f"{bk} 已存在，不覆盖")
     src = sqlite3.connect(db)
-    dst = sqlite3.connect(bk)
-    src.backup(dst)
-    dst.close()
-    assert sqlite3.connect(bk).execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     src.isolation_level = None
     src.execute("BEGIN IMMEDIATE")
     try:
+        # v0.45.479：持写锁**之后**再备份——此刻起别人提交不了，备份就是即将被改的那个状态
+        # （v0.45.472 版先备份后加锁，中间若有并发写，备份里就少了它）。备份走另一条只读连接。
+        rd = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        dst = sqlite3.connect(bk)
+        rd.backup(dst)
+        rd.close()
+        if dst.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RuntimeError("备份库 integrity_check 未通过")
+        dst.close()
         ids = hits(src)
         if len(ids) != a.expect:
             raise RuntimeError(f"事务内命中 {len(ids)} ≠ 预期 {a.expect}")
@@ -75,11 +80,13 @@ def main():
         after = src.execute(f"SELECT COUNT(*) FROM {sa.TABLE}").fetchone()[0]
         if before - after != len(ids) or hits(src):
             raise RuntimeError(f"删除核对失败：{before}→{after}，目标 {len(ids)}")
+        # v0.45.479：integrity_check 在 COMMIT **之前**、用 raise（不是 -O 下会被剥掉的 assert）
+        if src.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RuntimeError("integrity_check 未通过")
         src.execute("COMMIT")
     except BaseException:
         src.execute("ROLLBACK")
         raise
-    assert src.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     print(f"已删 {len(ids)} 行（{before} → {after}）；备份 {bk}")
 
 

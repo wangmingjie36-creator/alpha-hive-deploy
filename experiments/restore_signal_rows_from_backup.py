@@ -21,6 +21,8 @@ def main():
     ap.add_argument("--db", default=None, help="缺省 PATHS.db")
     ap.add_argument("--pair", action="append", required=True, help="日期:标的，可多次")
     ap.add_argument("--expect", type=int, required=True)
+    ap.add_argument("--skip-quarantined", action="store_true",
+                    help="仍在隔离名单里的行跳过（部分撤回时用，如只放回同一对的其余信号）；缺省遇到就停")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--backup", default=None)
     a = ap.parse_args()
@@ -34,6 +36,10 @@ def main():
             f"SELECT id, date, ticker, signal, value, created_at FROM {sa.TABLE} "
             f"WHERE date=? AND ticker=? AND signal IN ({','.join('?' * len(sigs))})", (d, t, *sigs))]
     still = [r for r in rows if sa.is_quarantined(r[1], r[2], r[3])]
+    if still and a.skip_quarantined:
+        print(f"跳过仍在隔离名单里的 {len(still)} 行")
+        rows = [r for r in rows if r not in still]
+        still = []
     if still:
         raise SystemExit(f"这些行仍在隔离名单里，先改名单：{still[:5]}")
     print(f"备份里找到 {len(rows)} 行（预期 {a.expect}）")
@@ -45,12 +51,17 @@ def main():
     if not a.backup or Path(a.backup).exists():
         raise SystemExit("--apply 必须给一个还不存在的 --backup")
     con = sqlite3.connect(db)
-    dst = sqlite3.connect(a.backup)
-    con.backup(dst)
-    dst.close()
     con.isolation_level = None
     con.execute("BEGIN IMMEDIATE")
     try:
+        # 持写锁之后再备份（同 purge 脚本 v0.45.479）
+        rd = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        dst = sqlite3.connect(a.backup)
+        rd.backup(dst)
+        rd.close()
+        if dst.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RuntimeError("备份库 integrity_check 未通过")
+        dst.close()
         for r in rows:
             if con.execute(f"SELECT 1 FROM {sa.TABLE} WHERE id=? OR (date=? AND ticker=? AND signal=?)",
                            (r[0], r[1], r[2], r[3])).fetchone():
@@ -59,11 +70,12 @@ def main():
         n = sum(1 for r in rows if con.execute(f"SELECT value FROM {sa.TABLE} WHERE id=?", (r[0],)).fetchone() == (r[4],))
         if n != len(rows):
             raise RuntimeError(f"写后核对 {n} ≠ {len(rows)}")
+        if con.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RuntimeError("integrity_check 未通过")
         con.execute("COMMIT")
     except BaseException:
         con.execute("ROLLBACK")
         raise
-    assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     print(f"已放回 {len(rows)} 行；写前备份 {a.backup}")
 
 
