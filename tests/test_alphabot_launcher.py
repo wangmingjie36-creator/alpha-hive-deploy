@@ -96,6 +96,14 @@ def _fake_python(tmp_path, body):
     return str(p)
 
 
+def _fake_code_dir(repo):
+    """一份「可用的代码目录」：文件清单只取 `MA.GENERATOR_FILES`（判据唯一真相，v0.45.458），测试里不另抄一份。"""
+    for rel in MA.GENERATOR_FILES:
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("", encoding="utf-8")
+    return repo
+
+
 def _app_exe(tmp_path, **kw):
     """生成 .app，返回 (启动脚本, 弹窗记录)。弹窗换成假 osascript：只记正文（argv 最后一项）、立即返回。
     真的那个是模态的——Mac 上测试卡到 pytest-timeout，被杀的只是 bash，对话框留在屏幕上（实测）；
@@ -131,8 +139,7 @@ class TestBundle:
     def test_script_cds_into_spaced_repo_and_execs_python(self, tmp_path, home):
         """仓库就在 `~/Desktop/Alpha Hive`：路径带空格（再加个引号）也得 cd 对、exec 对。"""
         repo = tmp_path / "Alpha Hive 'q'"
-        (repo / "alphabot").mkdir(parents=True)
-        (repo / "alphabot" / "launcher.py").write_text("", encoding="utf-8")
+        _fake_code_dir(repo)
         out = tmp_path / "rec.txt"
         py = _fake_python(tmp_path, f'{{ pwd; echo "$@"; echo "$PATH"; }} > "{out}"')
         exe, alerts = _app_exe(tmp_path, repo=repo, python=py)
@@ -147,8 +154,7 @@ class TestBundle:
     def test_gui_launch_without_lang_gets_utf8(self, tmp_path, home):
         """Finder / Dock 启动的环境没有 LANG：脚本得补一个 UTF-8 的，已有的不能覆盖。"""
         repo = tmp_path / "repo"
-        (repo / "alphabot").mkdir(parents=True)
-        (repo / "alphabot" / "launcher.py").write_text("", encoding="utf-8")
+        _fake_code_dir(repo)
         out = tmp_path / "lang.txt"
         py = _fake_python(tmp_path, f'echo "$LANG" > "{out}"')
         exe, _ = _app_exe(tmp_path, repo=repo, python=py)
@@ -295,6 +301,40 @@ class TestDataRootFollowsLauncher:
         assert self._main(tmp_path) == 0
         assert LA.config_state(LA.load_config())[0] == "first"
         assert "相对路径" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("flag", ["--dest", "--python", "--home", "--repo"])
+    def test_empty_value_is_rejected_not_defaulted(self, tmp_path, home, monkeypatch, capsys, data, flag):
+        """显式给空值（脚本里 `--python "$PY"` 而 PY 为空）是无效输入，不是「没给」（v0.45.456 曾悄悄换成缺省）。"""
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        LA.save_config({"alpha_hive_home": str(data)})
+        argv = ["--dest", str(tmp_path / "Apps"), "--repo", str(REPO)]
+        if flag in argv:
+            argv[argv.index(flag) + 1] = ""
+        else:
+            argv += [flag, ""]
+        assert MA.main(argv) == 1
+        assert not (tmp_path / "Apps").exists() and LA.load_config() == {"alpha_hive_home": str(data)}
+        assert f"{flag} 给了空值" in capsys.readouterr().err
+
+    def test_relative_env_home_is_never_compared(self, tmp_path, home, monkeypatch, capsys, data):
+        """相对的 ALPHA_HIVE_HOME 整个不参与：v0.45.456 在「与配置比较」那支仍按当前 cwd 解析，
+        `make -C 克隆` 下就误报「与启动器配置不同」。"""
+        LA.save_config({"alpha_hive_home": str(data)})
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)                  # 在这里解析 "data" 会得到另一个目录
+        monkeypatch.setenv("ALPHA_HIVE_HOME", "data")
+        assert self._main(tmp_path) == 0
+        err = capsys.readouterr().err
+        assert "相对路径" in err and "与启动器配置不同" not in err, err
+        assert LA.load_config() == {"alpha_hive_home": str(data)}
+
+    def test_empty_env_home_counts_as_unset(self, tmp_path, home, monkeypatch, capsys):
+        """空串按未设（与 hive_logger.resolve_data_root 同口径），不报相对路径、也不记。"""
+        monkeypatch.setenv("ALPHA_HIVE_HOME", "")
+        assert self._main(tmp_path) == 0
+        assert "ALPHA_HIVE_HOME" not in capsys.readouterr().err
+        assert LA.config_state(LA.load_config())[0] == "first"
 
 
 class TestDefaultRepoIsProductionClone:
@@ -493,6 +533,34 @@ class TestDefaultRepoIsProductionClone:
         assert MA.main(["--dest", str(tmp_path / "Apps"), "--python", "venv/bin/python3"]) == 1
         assert "绝对路径" in capfd.readouterr().err and not (tmp_path / "Apps").exists()
 
+    @pytest.mark.parametrize("keep", ["alphabot/launcher.py", "alphabot/macos_app.py"])
+    def test_half_clone_on_the_default_path_is_reported_plainly(self, tmp_path, home, monkeypatch, capfd, keep):
+        """缺省路径与 `--repo` 共用同一判据（`MA.generator_dir_problem`）：半截克隆在缺省路径下也直白拒绝，
+        不再「判可用 ⇒ 委托 ⇒ 子进程 import 失败甩 traceback」（v0.45.458）。"""
+        import production_clone
+        half = tmp_path / "alpha-hive-prod"
+        (half / keep).parent.mkdir(parents=True)
+        (half / keep).write_text("", encoding="utf-8")
+        monkeypatch.setattr(production_clone, "default_dest", lambda: half)
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        assert MA.main(["--dest", str(tmp_path / "Apps")]) == 1
+        err = capfd.readouterr().err
+        missing = next(f for f in MA.GENERATOR_FILES if f != keep)
+        assert missing in err and "production_clone.py setup" in err and "Traceback" not in err, err
+        assert not (tmp_path / "Apps").exists()
+
+    def test_one_criterion_for_all_three_callers(self, tmp_path):
+        """缺省克隆、`--repo`、`build_app` 对同一个半截目录给同一结论（判据只在一处）。"""
+        half = tmp_path / "half"
+        (half / "alphabot").mkdir(parents=True)
+        (half / "alphabot" / "launcher.py").write_text("", encoding="utf-8")
+        problem = MA.generator_dir_problem(half)
+        assert problem and "alphabot/macos_app.py" in problem
+        with pytest.raises(MA.BuildError, match="macos_app.py"):
+            MA._check_generator_dir(half)
+        with pytest.raises(MA.BuildError, match="macos_app.py"):
+            MA.build_app(tmp_path / "Apps", repo=half)
+
     @pytest.mark.parametrize("kind", ["missing", "not-a-repo"])
     def test_repo_typo_is_reported_plainly(self, tmp_path, home, monkeypatch, capfd, kind):
         """v0.45.451 删预检后，`--repo` 拼错被报成「import 被重定向 / PYTHONPATH？」（误诊）或甩 traceback。"""
@@ -516,12 +584,32 @@ class TestCanonicalMakeEntry:
     """
 
     @staticmethod
-    def _make(home, *make_vars):
+    def _make(home, *make_vars, env_extra=None):
         (home / "alpha-hive-prod").symlink_to(REPO, target_is_directory=True)
-        env = {k: v for k, v in os.environ.items() if k != "ALPHA_HIVE_HOME"}
+        # 环境里的 PYTHON 也去掉：开发机若 export 过它，结果就随机器变（本类专门有一条测它）
+        env = {k: v for k, v in os.environ.items() if k not in ("ALPHA_HIVE_HOME", "PYTHON")}
         env["HOME"] = str(home)
+        env.update(env_extra or {})
         return subprocess.run(["make", "-s", "-C", str(REPO), "alphabot-app", f"ALPHABOT_GEN_PY={sys.executable}",
                                *make_vars], env=env, capture_output=True, text=True, timeout=120)
+
+    @staticmethod
+    def _py_in_app(home):
+        exe = (home / "Applications" / f"{MA.APP_NAME}.app" / "Contents" / "MacOS" / MA.EXECUTABLE)
+        line = next(ln for ln in exe.read_text(encoding="utf-8").splitlines() if ln.startswith("PY="))
+        return shlex.split(line[len("PY="):])[0]
+
+    def test_environment_python_is_ignored(self, home):
+        """make 把同名环境变量导入成 make 变量；`export PYTHON=python3`（node-gyp 等要求）不许让推荐入口失败（v0.45.458）。"""
+        r = self._make(home, env_extra={"PYTHON": "python3"})
+        assert r.returncode == 0, r.stderr
+        assert self._py_in_app(home) == MA.DEFAULT_PYTHON, "环境里的 PYTHON 被当成了 --python"
+        assert "忽略环境变量 PYTHON=python3" in r.stdout + r.stderr, "忽略要说出来"
+
+    def test_command_line_python_wins_over_environment(self, home):
+        r = self._make(home, f"PYTHON={sys.executable}", env_extra={"PYTHON": "python3"})
+        assert r.returncode == 0, r.stderr
+        assert self._py_in_app(home) == sys.executable
 
     def test_entry_builds_from_the_clone_itself(self, home):
         r = self._make(home, f"PYTHON={sys.executable}")
@@ -557,9 +645,7 @@ class TestLaunchScriptHints:
 
     def test_cd_failure_shows_the_hint(self, tmp_path, home):
         missing = home / "alpha-hive-prod"                    # 克隆被删：真跑一次壳，弹窗里得有重建办法
-        missing.mkdir()
-        (missing / "alphabot").mkdir()
-        (missing / "alphabot" / "launcher.py").write_text("", encoding="utf-8")
+        _fake_code_dir(missing)
         exe, alerts = _app_exe(tmp_path, repo=missing, python=sys.executable)
         shutil.rmtree(missing)
         r = subprocess.run([str(exe)], env={**os.environ, "HOME": str(home)})

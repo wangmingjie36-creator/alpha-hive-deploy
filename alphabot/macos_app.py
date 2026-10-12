@@ -55,10 +55,29 @@ def default_repo() -> Path:
     """
     import production_clone              # 同在仓库根（`-m` 从仓库根跑）；调用时求值：测试换 HOME
     clone = production_clone.default_dest()
-    if not (clone / "alphabot" / "launcher.py").is_file():
-        raise BuildError(f"生产克隆 {clone} 不在（或缺 alphabot/launcher.py）。先在开发检出里跑 "
+    problem = generator_dir_problem(clone)
+    if problem:
+        raise BuildError(f"生产克隆 {clone} {problem}。先在开发检出里跑 "
                          f"{DEFAULT_PYTHON} production_clone.py setup 建好它；确实要让 .app 跑别的检出，显式给 --repo")
     return clone
+
+
+#: 一份「能生成 .app、也能被 .app 执行」的 Alpha Hive 代码必须有的文件：生成器本身（委托要跑它）+ 壳要 exec 的 launcher
+GENERATOR_FILES = ("alphabot/macos_app.py", "alphabot/launcher.py")
+
+
+def generator_dir_problem(repo: Path) -> Optional[str]:
+    """「这是不是一份可用的 Alpha Hive 代码目录」的**唯一**判据 ⇒ 问题描述，没问题 ⇒ None（v0.45.458）。
+
+    v0.45.456 前三处各写一份：缺省克隆查 launcher.py、显式 `--repo` 查 macos_app.py、`build_app` 又查 launcher.py。
+    半截克隆（有其一缺其二）在缺省路径下被判可用，委托后子进程 import 失败甩 traceback——正是 `--repo` 那条预检
+    要消灭的误诊形状；显式给同一个目录却被直白拒绝。缺省克隆、`--repo`、`build_app` 一律读这里。
+    """
+    repo = Path(repo)
+    if not repo.is_dir():
+        return "目录不存在"
+    missing = [rel for rel in GENERATOR_FILES if not (repo / rel).is_file()]
+    return f"不是 Alpha Hive 代码目录（缺 {'、'.join(missing)}）" if missing else None
 
 
 #: 本模块的 `main` 能被别的检出整段委托（v0.45.451）：接受 `--repo 自己` 并在自己里一次跑完出壳 + 数据根。
@@ -191,8 +210,9 @@ def build_app(dest_dir: Path, *, repo: Optional[Path] = None, python: str = DEFA
     """
     dest_dir = Path(dest_dir).expanduser()
     repo = Path(repo).resolve() if repo else _repo_root()
-    if not (repo / "alphabot" / "launcher.py").is_file():
-        raise BuildError(f"{repo} 不是 Alpha Hive 仓库（缺 alphabot/launcher.py）")
+    problem = generator_dir_problem(repo)
+    if problem:
+        raise BuildError(f"{repo} {problem}")
     icon = _icon_path()
     if not icon.is_file():
         raise BuildError(f"缺图标 {icon}")
@@ -252,10 +272,9 @@ def _check_generator_dir(repo: Path) -> None:
     v0.45.451 删 `build_app_from` 时连这条一起删了：`--repo` 拼错，子进程 import 落到调用者 cwd 里的那份 alphabot，
     报成「import 被重定向 / PYTHONPATH？」（误诊），cwd 不是检出时则甩 ModuleNotFoundError 整段 traceback。
     """
-    if not repo.is_dir():
-        raise BuildError(f"--repo {repo} 不存在")
-    if not (repo / "alphabot" / "macos_app.py").is_file():
-        raise BuildError(f"{repo} 不是 Alpha Hive 代码目录（没有 alphabot/macos_app.py）")
+    problem = generator_dir_problem(repo)
+    if problem:
+        raise BuildError(f"--repo {repo} {problem}")
 
 
 def _validate_home(home_arg: Optional[str]) -> Optional[Path]:
@@ -265,7 +284,7 @@ def _validate_home(home_arg: Optional[str]) -> Optional[Path]:
     v0.45.439 先换掉 .app、再处理数据根，`--home` 打错时只在 stderr 留一行、返回 0——人明确要求的事没做成，
     命令却算成功。顺手记环境变量那种不在这里：它失败只是没顺手做成，不算错。
     """
-    if not home_arg:
+    if home_arg is None:                 # 没给；给了空串由 _reject_empty 在入口拒（不当「没给」）
         return None
     hp = Path(_must_be_absolute(home_arg, "--home")).resolve()
     if not hp.is_dir():
@@ -276,6 +295,35 @@ def _validate_home(home_arg: Optional[str]) -> Optional[Path]:
     except launcher.LauncherError as exc:
         raise BuildError(f"--home 要写启动器配置，但它读不了：{exc}") from None
     return hp
+
+
+def _reject_empty(args) -> None:
+    """显式给了空值（`--python ""`、脚本里 `--dest "$X"` 而 X 为空）是无效输入，不是「没给」（v0.45.458）。
+
+    v0.45.456 本地分支用 `x or 缺省`、`if not x` 判「给没给」：空串被悄悄换成缺省解释器 / 缺省目录 / 不改数据根，
+    委托分支却用 `is not None` 原样转发——同一输入两支语义不同，显式输入被吞。现在「没给」只认 `None`，空值入口即拒。
+    """
+    for flag in ("dest", "python", "home", "repo"):
+        val = getattr(args, flag)
+        if val is not None and not val.strip():
+            raise BuildError(f"--{flag} 给了空值（{val!r}）：不当成「没给」去用缺省；要缺省就别传这个参数")
+
+
+def _env_home_absolute() -> Optional[str]:
+    """环境 `ALPHA_HIVE_HOME` 能不能参与（记下 / 与配置比较）——**入口一次定类**（v0.45.458）。
+
+    空串按未设（与 `hive_logger.resolve_data_root` 同口径）。相对路径**整个不参与**：不记、也不拿去比较——v0.45.456
+    只在「首次记」那支拒，却在「与配置比较」那支照样按当前 cwd 解析，`make -C 克隆` 下就会误报「与启动器配置不同」。
+    """
+    raw = os.environ.get("ALPHA_HIVE_HOME") or None
+    if raw is None:
+        return None
+    p = os.path.expanduser(raw)
+    if not os.path.isabs(p):
+        print(f"环境里的 ALPHA_HIVE_HOME={raw} 是相对路径：不记进启动器配置、也不拿它和配置比较"
+              "（双击时在别的目录下解析，含义会变；要设数据根用 --home 给绝对路径）", file=sys.stderr)
+        return None
+    return os.path.normpath(p)
 
 
 def _record_data_root(explicit_home: Optional[Path]) -> int:
@@ -292,18 +340,15 @@ def _record_data_root(explicit_home: Optional[Path]) -> int:
     except launcher.LauncherError as exc:
         print(f"⚠️ {exc}", file=sys.stderr)
         return 1 if explicit_home else 0
-    env_home = os.environ.get("ALPHA_HIVE_HOME")
+    env_home = _env_home_absolute()
     state, home = launcher.config_state(cfg)
 
     want, why = None, ""
     if explicit_home:
         want, why = explicit_home, "--home"
-    elif env_home and state == "first" and not os.path.isabs(os.path.expanduser(env_home)):
-        print(f"环境里的 ALPHA_HIVE_HOME={env_home} 是相对路径：会写进启动器配置、双击时在别的目录下解析，没记"
-              "（用 --home 给绝对路径）", file=sys.stderr)
     elif env_home and state == "first":
         want, why = env_home, "环境 ALPHA_HIVE_HOME（配置里还没有数据根）"
-    elif env_home and (home is None or Path(env_home).expanduser().resolve() != Path(home).expanduser().resolve()):
+    elif env_home and (home is None or Path(env_home).resolve() != Path(home).expanduser().resolve()):
         print(f"环境里的 ALPHA_HIVE_HOME={env_home} 与启动器配置不同，没有改写配置；真要换用 --home", file=sys.stderr)
 
     if want:
@@ -343,7 +388,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     try:
-        repo = Path(args.repo).expanduser().resolve() if args.repo else default_repo().resolve()
+        _reject_empty(args)
+        repo = Path(args.repo).expanduser().resolve() if args.repo is not None else default_repo().resolve()
         if repo != _repo_root():
             _check_generator_dir(repo)
     except BuildError as exc:
@@ -367,8 +413,8 @@ def main(argv=None) -> int:
 
     try:
         # 本检出就是目标：所有校验与缺省都在这里——先核对显式输入，后动手
-        dest = Path(args.dest or "~/Applications").expanduser().resolve()
-        python = _must_be_absolute(args.python or DEFAULT_PYTHON, "--python")
+        dest = Path("~/Applications" if args.dest is None else args.dest).expanduser().resolve()
+        python = _must_be_absolute(DEFAULT_PYTHON if args.python is None else args.python, "--python")
         home = _validate_home(args.home)
     except BuildError as exc:
         print(f"alphabot.macos_app: {exc}", file=sys.stderr)
