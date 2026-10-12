@@ -11,9 +11,36 @@
 
 ## [0.45.465] — 2026-10-12 — 占位（进行中：momentum_5d 自攒索引回落补上扫描日当天收盘，不再滞后一个扫描日）
 
-## [0.45.464] — 2026-10-12 — 进行中：价格索引假价已清理（90 行，有备份）；09-17 重算待定方法；世代边界评估
+## [0.45.464] — 2026-10-12 — Fixed（数据）：09-17 假现价那天整链重算并写回全部存档（final_score 均 |Δ| 0.125、最大 0.48、方向 0 翻转）；价格索引 90 行假价清理；结论：不需要追加世代边界
 
-### 已完成：价格索引 `cache/price_history_*.jsonl` 清理（用户批准「要清理」）
+### 09-17 重算（用户批准：「云端链整体重算」+「全部数据 + 重生成 09-17 日报」+「纸面持仓保留成交」）
+**为什么。** 09-17 全源中断，OracleBee 的现价是 0.0，`analyze()`（v0.45.462 前）把现价兜底成行权价中位数，
+30/30 份快照的 GEX / 异动 / 25Δ 偏斜 / 期限结构 / ATM IV 都按假价算，进了 Oracle 分（odds 维）、Bear 的期权子分、final_score。
+v0.45.271 那次 09-17 重放复用了存档 Oracle 输出，假价还在。
+
+**方法。**（`experiments/replay_0917_oracle_price_v0464.py`、`patch_0917_oracle_price_v0464.py`）
+- **当天的代码**：生产 09-17 跑的是 `2bcd81a0`（21:00:14Z production_sync up_to_date；与当晚日报提交 1d36076d 无 .py 差异；与 271 重放所用代码只差 scout_bee.py）。在该提交的独立检出里跑，数据根指向沙箱、快照写入关闭、钟钉在 09-17 14:20:26 PDT（`analyze` 用 `now()` 判 DTE，不钉则 09-17 的到期日今天全算已过期）。
+- **云端链**：生产 21:35Z 那份 CBOE 链取不回（收盘后 payload 持续漂移，AMC 总 OI 21:36→21:53 从 794k 掉到 697k）；用 `origin/cloud-snapshots` 21:03Z 的同场链（price_at_fetch = 官方收盘）+ 真实收盘价。代价（用户知情选择）：也带进了链的时点差——control 里 7 只的 options_score 本来就与存档不同（异动按成交量判，两份链成交量不同）。
+- **钉成存档值的输入**：iv_rank / percentile（当天 hv_proxy，与价无关）、RV30、quote_set、OracleBee 的异常期权流（yfinance 现拉、未存档：方向取自存档摘要，unusual_score 由存档 Oracle 分反解，融合式线性、两位小数网格逐位核）、历史上下文、Guard 的宏观 / 周期 / 政体 / 拥挤（同 271）、Queen 的 ML 信任系数（当天 `ml_model_cache` OOS 46.3% ⇒ 0；不放进沙箱 control 就整体高 0.06~0.09）。
+- **control（不过就不信 corrected）**：Oracle 分 / 方向 30/30 逐位（discovery 只差 MaxPain 行权价——全链 OI 来自快照，只是展示）；Bear 期权子分 30/30；整链 final_score / direction / dimension_weights / Guard 30/30 逐位；Bear 在「复刻 271 把催化剂 / ML 子项当 0」模式下 30/30 逐位。
+
+**顺带查清并修正 v0.45.271 的「未定位残差」。** 存档 Bear details 不存 `chronos_bear` / `ml_bear`，271 按 0 算；当天代码其实会算（META / QCOM 有「催化剂 N 天内到来」）。
+本次用真 `_assess_catalyst_risk` / `_assess_ml_prediction` 在重建的板上重算——META / QCOM Bear 2.71 → 2.54（final 不变）。
+
+**结果（30 只）。** final_score 均 |Δ| 0.125、最大 0.48（ENPH 5.06 → 5.54），**direction 0 翻转**；Oracle 分 15 只变（JNJ 3.42 → 4.46、ENPH 7.08 → 8.61、NEE 8.36 → 7.69 …；假价把偏斜压低、白拿「call 投机过热」加分的 8 只回落），Oracle 方向 1 只变（WMT neutral → bullish）；
+Bear 4 只变（BRK-B 2.94 → 2.53、COST 2.48 → 2.31：真价下偏斜 > 1.15 多一条看跌信号；META / QCOM 见上）。
+纸面组合：CRM 7.13 / RKLB 7.05 重算后不变，照样会开；没有标的新跨进多头闸（XOM / META 6.48）；JNJ 4.84 → 5.17 跨出空头闸，但当天本就没开。**纸面账本未动。**
+
+**写回范围**（写前逐项核对写前值，备份 `~/alpha-hive-data/_manual_backups/2026-10-12_0917_recompute_v0.45.464/`：91 个文件原件 + 整库备份 + plan）：
+`.swarm_results_2026-09-17.json`（30 只整条，含 cs_rank、thesis_break 求值明细、`_recomputed_v0_45_464` 出处）；
+`alpha-hive-daily-2026-09-17.md` / `.json`（真实生成函数重出，「📌 关注事项」段换回原文；按多重集比对，除重排外只有重算的数在变，没有日期污染——**下次扫描同步 gh-pages 时网站上的 09-17 日报会更新**）；
+`predictions` 30 行（final_score / direction / dimension_scores / agent_directions，pheromone_compact 里 Oracle / Bear 条目的 s / d / x）；
+`signal_archive` 304 个值（只改当天已有的行，新信号 `price.volume_ratio` 30 个不补）——⚠️ **这张表此前还是 271 之前的原始值**（271 没改它），所以这次也把 271 的 Buzz 修正带了进来（buzz / sentiment / guard 部分）；
+`report_snapshots/{T}_2026-09-17.json` 30 份（同样此前是 271 之前的值）；30 份期权快照（真现价 + `cboe_close` 出处）；IV 索引 27 个文件的 09-17 行；VRP 账本 09-17 的 30 行（均未结算；之后各行还没有 ts_pct，标签不受影响）。
+不动：12 份 ML 深度报告（叙事体裁，同 271）、今天的 index.html。
+
+### 价格索引 `cache/price_history_*.jsonl` 清理（用户批准「要清理」）
+
 - 新工具 `experiments/clean_price_index_fake_rows_20261012.py`（默认 dry-run；`--apply` 先逐字节备份再经 `ledger_io.write_jsonl` 原子重写，写清单）。
 - **核对源：Twelve Data 日线收盘**（31 次调用，免费档 800/天），逐行对照当天与前后一个交易日：当天吻合 601、
   错一天的真收盘 76、1–5% 灰区 15（盘中 / 盘后价）——这些**保留**、只报告；删 **90 行**：
@@ -22,6 +49,14 @@
 - 备份与清单：`~/alpha-hive-data/_manual_backups/2026-10-12_price_index_cleanup_v0.45.464/`（原文件 + 核对用收盘价 + manifest）。
 - 读者影响：五个读者此前都没把这些行用进落盘结果（v0.45.462 审计），清理只防以后。
 - 另发现（未处理）：76 行是真收盘但日期错一天；6 月测试把 `analyze("NVDA", stock_price=145.0)` 等快照写进过生产 cache（`options_snapshot_TEST_*` 至今还在），部分 145.0 来自测试而非兜底。
+
+### 世代边界：不追加（用户要求分析）
+世代边界防的是「当前世代（10-09 起）的样本与之后的样本由不同评分机制产生、被混算」。逐项核对：
+- v0.45.462 代码修复：调用方给了价的日子逐位不变；09-04（有 quote_set 起）以来假现价只出现在 09-17 一天，**当前世代 0 次**；NaN 路径实际触发不到。
+- 价格索引清理：五个读者此前都没读到这些行。
+- IV 索引 09-17 行修正：IV Rank 仍走 HV 代理（真 IV 历史要 63 天、现有 40 天），该行从未进过任何分，在首次被用之前改正。
+- 09-17 重算：在已关闭的旧世代（09-14 ~ 09-18），不在当前 IC 样本里。
+⇒ 没有任何当前世代样本的生成口径改变。（另一路 v0.45.463 动量回落修复会让限流日重新有动量输入，那条是否要边界由它自己判断。）
 
 ## [0.45.463] — 2026-10-12 — Fixed：`momentum_5d` 自攒索引回落与 `price_history._load_db_prices` 的缺省路径改为调用时经 `PATHS` 解析——此前 cwd 相对（`"cache"` / `"pheromone.db"`），数据根迁移 / 生产克隆之后在生产 cwd 里恒读空；库缺失改为 warning；新增全仓「cwd 相对数据字面量缺省」守卫
 
