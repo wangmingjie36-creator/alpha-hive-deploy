@@ -303,12 +303,21 @@ class OptionsDataFetcher:
             _near_expiry_set = {e for e, d in _expiry_with_dte if d < 7}
 
             # 获取当前股价，用于 ATM 过滤（避免深度遗留低价合约污染 key levels）
-            _current_price = 0.0
+            # v0.45.468：同时记下出处，并作为本链的 `underlying_price` 带出、给下面的 BS gamma 用
+            # （与 CBOE 分支对齐）。逐个取有限正数——旧写法 `lastPrice or previousClose` 遇 NaN
+            # lastPrice 会取 NaN（NaN 为真值），ATM 过滤随之整段失效。
+            _current_price, _current_price_src = 0.0, "unavailable"
             try:
                 _fi = stock.fast_info
-                _current_price = float(
-                    _fi.get("lastPrice") or _fi.get("previousClose") or 0
-                )
+                for _k, _src in (("lastPrice", "yfinance_last_price"),
+                                 ("previousClose", "yfinance_previous_close")):
+                    try:
+                        _v = float(_fi.get(_k))
+                    except (TypeError, ValueError):
+                        continue
+                    if _math.isfinite(_v) and _v > 0:
+                        _current_price, _current_price_src = _v, _src
+                        break
             except (AttributeError, TypeError, KeyError, RuntimeError):
                 pass
 
@@ -405,15 +414,18 @@ class OptionsDataFetcher:
                 except (ValueError, ZeroDivisionError):
                     return 0.0
 
-            # 现价只用传入参数。v0.45.462 前没给价就拿「OI>50 的看涨行权价中位数」当 S 算 BS gamma——
-            # 与 analyze() 的假现价同一形状（那是行权价，不是股价）。没有现价 ⇒ 不补 gamma（下方 `_S <= 0`
-            # 跳过）⇒ GEX 求和为 0 ⇒ 「算不出」(None)，不拿错位的 gamma 算出一个像样的数。
+            # BS gamma 的 S：调用方给的有效价 ⇒ 上面 fast_info 取到的价 ⇒ 都没有就不补 gamma
+            # （下方 `_S <= 0` 跳过 ⇒ GEX「算不出」）。
+            # v0.45.462 前没给价就拿「OI>50 的看涨行权价中位数」当 S——那是行权价，不是股价；而 analyze()
+            # 调本函数从不传价，所以 yfinance 链的 GEX **每天**都按中位行权价算（BILI 几乎天天走这条）。
+            # v0.45.462 删了中位数却没接上这里本就取到的 fast_info 价 ⇒ yfinance 链的 GEX 恒 None（v0.45.468 二次检查）。
             try:
                 _S = float(stock_price or 0.0)
             except (TypeError, ValueError):
                 _S = 0.0
-            if not _math.isfinite(_S):
-                _S = 0.0
+            _S_src = "caller"
+            if not (_math.isfinite(_S) and _S > 0):
+                _S, _S_src = _current_price, _current_price_src
             for df in [calls_df, puts_df]:
                 if df is None or df.empty or _S <= 0:
                     continue
@@ -445,6 +457,9 @@ class OptionsDataFetcher:
                 "expirations": expirations,
                 # v0.17.0: 近期到期集合，供下游 total_oi 计算做权重衰减
                 "near_expiry_set": list(_near_expiry_set),
+                # v0.45.468：与 CBOE 分支同形——本链取数时的标的价与出处，analyze() 调用方没给价时用它
+                "underlying_price": _S if _S > 0 else None,
+                "underlying_price_source": _S_src if _S > 0 else "unavailable",
             }
 
             # CBOE 已作主源优先尝试过；走到这里说明 CBOE 不可用、改用 yfinance。

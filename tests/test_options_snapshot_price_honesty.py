@@ -178,6 +178,23 @@ class TestAnalyzeNeverInventsAPrice:
         snap = _snapshot(tmp_path)
         assert snap["_snapshot_stock_price"] is None
 
+    def test_caller_price_wins_for_every_output(self, agent, monkeypatch, tmp_path):
+        """调用方给了价 ⇒ 链自带的价**哪里都不用**：整份结果（除出处标签外）与链不带价时逐字段相同。
+        只核快照现价挡不住「某个下游悄悄改用链价」（v0.45.462 那条只核了现价，yfinance 分支的漏洞就此漏过）。
+
+        变红的变异：`_resolve_stock_price` 让链价优先；或任一下游改读 `options_chain["underlying_price"]`。
+        """
+        monkeypatch.setenv("OPTIONS_SNAPSHOT_DISABLE", "1")
+        monkeypatch.setattr(agent.fetcher, "fetch_options_chain", lambda t: _chain())
+        a = agent.analyze("NVDA", stock_price=301.0)
+        monkeypatch.setattr(agent.fetcher, "fetch_options_chain",
+                            lambda t: _chain(underlying=280.0, src="cboe_close"))
+        b = agent.analyze("NVDA", stock_price=301.0)
+        for r in (a, b):
+            r.pop("timestamp", None)
+        assert a == b
+        assert a["gamma_exposure"] is not None
+
     def test_caller_price_unchanged_behaviour(self, agent, monkeypatch, tmp_path):
         """调用方给了价 ⇒ 用它，出处 caller（正常日子行为不变的正对照）。"""
         monkeypatch.setattr(agent.fetcher, "fetch_options_chain",
@@ -267,6 +284,78 @@ class TestGexNonFinite:
         assert gammas and all(math.isfinite(g) and g > 0 for g in gammas)
 
 
+# ═══════════════════════════════════════════════════════════════ yfinance 备用链
+
+class TestYfinanceChainPrice:
+    """yfinance 备用链：BS gamma 的 S 取调用方价 ⇒ fast_info 价；链带出 underlying_price（v0.45.468 二次检查）。
+
+    背景：analyze() 调 fetch_options_chain 从不传价。v0.45.462 前 S 兜底成中位行权价（每天都错），
+    v0.45.462 删了兜底却没接上本分支本就取到的 fast_info 价 ⇒ yfinance 链 GEX 恒 None（BILI 几乎天天走这条）。
+    """
+
+    def _fetcher(self, monkeypatch, fast_info):
+        import types
+        import pandas as pd
+
+        def _mk():
+            return pd.DataFrame({"strike": [14.0, 15.0, 16.0, 17.0], "openInterest": [500, 800, 700, 300],
+                                 "volume": [100, 200, 150, 50], "impliedVolatility": [0.5, 0.45, 0.48, 0.52],
+                                 "lastPrice": [1.0, 0.6, 0.3, 0.1]})
+
+        class _Chain:
+            def __init__(self, e):
+                self.calls, self.puts = _mk(), _mk()
+
+        class _Ticker:
+            options = ("2026-11-20", "2026-12-18")
+
+            def __init__(self, t):
+                self.fast_info = fast_info
+
+            def option_chain(self, e):
+                return _Chain(e)
+
+        monkeypatch.setattr(oa, "yf", types.SimpleNamespace(Ticker=_Ticker))
+        monkeypatch.setattr(oa, "_opt_cb", None)
+        f = oa.OptionsDataFetcher()
+        monkeypatch.setattr(f, "_try_cboe", lambda t, p=0.0: None)
+        monkeypatch.setattr(f, "_read_cache", lambda *a, **k: None)
+        monkeypatch.setattr(f, "_write_cache", lambda *a, **k: None)
+        return f
+
+    def test_fast_info_price_feeds_gamma_and_is_carried_out(self, monkeypatch):
+        """没给价 ⇒ 用 fast_info lastPrice 算 gamma，并作为 underlying_price（出处 yfinance_last_price）带出。
+
+        变红的变异：S 只看入参（gamma 全空、GEX None）；或删掉结果里的 underlying_price。
+        """
+        ch = self._fetcher(monkeypatch, {"lastPrice": 15.49}).fetch_options_chain("BILI")
+        gammas = [c.get("gamma") for c in ch["calls"]]
+        assert gammas and all(isinstance(g, float) and g > 0 for g in gammas)
+        assert (ch["underlying_price"], ch["underlying_price_source"]) == (15.49, "yfinance_last_price")
+        S = 15.49
+        expect = [C._bs_gamma(S, k, max(c["dte"], 0.5) / 365.0, c["impliedVolatility"])
+                  for k, c in zip([14.0, 15.0, 16.0, 17.0], ch["calls"][:4])]
+        assert gammas[:4] == pytest.approx(expect, rel=1e-9), "gamma 必须按 fast_info 价算，不是中位行权价"
+
+    def test_nan_last_price_falls_to_previous_close(self, monkeypatch):
+        """lastPrice 是 NaN ⇒ 用 previousClose（旧写法 `lastPrice or previousClose` 会取到 NaN）。
+
+        变红的变异：去掉逐个判有限。
+        """
+        ch = self._fetcher(monkeypatch, {"lastPrice": NAN, "previousClose": 15.2}).fetch_options_chain("BILI")
+        assert (ch["underlying_price"], ch["underlying_price_source"]) == (15.2, "yfinance_previous_close")
+
+    def test_no_price_anywhere_means_no_gamma(self, monkeypatch):
+        """fast_info 也没价 ⇒ 不补 gamma、underlying_price None——不回到中位行权价。
+
+        变红的变异：恢复中位行权价兜底。
+        """
+        ch = self._fetcher(monkeypatch, {}).fetch_options_chain("BILI")
+        assert all(not c.get("gamma") for c in ch["calls"])
+        assert (ch["underlying_price"], ch["underlying_price_source"]) == (None, "unavailable")
+        assert OptionsAnalyzer().calculate_gamma_exposure(ch["calls"], ch["puts"], 15.0) is None
+
+
 # ═══════════════════════════════════════════════════════════════ 快照落盘
 
 class TestSnapshotWriteIsAtomicAndStrict:
@@ -303,8 +392,8 @@ class TestSnapshotWriteIsAtomicAndStrict:
 
 class TestPriceIndexMigrationOnlyTakesLabelledPrices:
 
-    def _snap(self, tmp_path, date, px, src):
-        d = {"_snapshot_stock_price": px}
+    def _snap(self, tmp_path, date, px, src, complete=True):
+        d = {"_snapshot_stock_price": px, "_snapshot_session_complete": complete}
         if src is not None:
             d["_snapshot_stock_price_source"] = src
         (tmp_path / f"options_snapshot_NVDA_{date}.json").write_text(json.dumps(d))
@@ -324,6 +413,16 @@ class TestPriceIndexMigrationOnlyTakesLabelledPrices:
         self._snap(tmp_path, "2026-10-09", 219.34, "caller")
         self._snap(tmp_path, "2026-10-12", 220.10, "cboe_close")
         assert ph._scan_snapshots("NVDA", str(tmp_path)) == {"2026-10-09": 219.34, "2026-10-12": 220.10}
+
+    def test_caller_price_from_pre_close_snapshot_is_skipped(self, tmp_path, monkeypatch):
+        """收盘前写下的快照里，`caller` 价是盘中价，不是收盘（v0.45.468 二次检查）。
+
+        变红的变异：删掉 `_snapshot_session_complete is not True` 那道判断。
+        """
+        monkeypatch.setattr(ph, "_is_trading_date", lambda d: True)
+        self._snap(tmp_path, "2026-10-09", 219.34, "caller", complete=False)
+        self._snap(tmp_path, "2026-10-12", 220.10, "caller", complete=True)
+        assert ph._scan_snapshots("NVDA", str(tmp_path)) == {"2026-10-12": 220.10}
 
 
 # ═══════════════════════════════════════════════════════════════ 下游格式化不崩

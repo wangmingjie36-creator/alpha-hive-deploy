@@ -27,6 +27,11 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
+
+# 模块层注入仓库根（experiments 脚本约定，守卫 tests/test_experiments_script_bootstrap.py）。
+# compute 模式随后把当天代码检出插到 sys.path[0]、排在它前面，所以 compute 里 import 到的仍是当天代码。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 AS_OF = "2026-09-17"
 DB_REL = "pheromone.db"
@@ -71,7 +76,8 @@ def compute(old, replay_path, prod, plan_path):
         new = {**base, **dist}
         od_old = S[tk]["agent_details"]["OracleBeeEcho"]["details"]
         od = new["agent_details"]["OracleBeeEcho"]["details"]
-        for k in ("_snapshot_timestamp", "_snapshot_session", "_snapshot_session_complete", "_snapshot_ticker"):
+        # timestamp 也取原值（v0.45.468 二次检查）：重放钉的钟只为 DTE 判定，写进记录就是编出来的时刻
+        for k in ("timestamp", "_snapshot_timestamp", "_snapshot_session", "_snapshot_session_complete", "_snapshot_ticker"):
             if k in od_old:
                 od[k] = od_old[k]
         od["_snapshot_stock_price"] = R[tk]["real_price"]
@@ -221,7 +227,7 @@ def compute(old, replay_path, prod, plan_path):
         res = copy.deepcopy(R[tk]["options_corrected"])
         sp_ = os.path.join(cache, f"options_snapshot_{tk}_{AS_OF}.json")
         old_snap = json.load(open(sp_))
-        for k in ("_snapshot_timestamp", "_snapshot_ticker", "_snapshot_session", "_snapshot_session_complete"):
+        for k in ("timestamp", "_snapshot_timestamp", "_snapshot_ticker", "_snapshot_session", "_snapshot_session_complete"):
             if k in old_snap:
                 res[k] = old_snap[k]
         res["_snapshot_stock_price"] = R[tk]["real_price"]
@@ -277,8 +283,6 @@ def compute(old, replay_path, prod, plan_path):
 # ═══════════════════════════════════════════════════════════════ apply（现行代码）
 
 def apply(plan_path, prod, backup_dir, dry_run):
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    sys.path.insert(0, here)
     import shutil
     import sqlite3
     import ledger_io

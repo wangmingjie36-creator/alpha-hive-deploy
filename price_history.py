@@ -209,6 +209,10 @@ def _scan_snapshots(ticker: str, cache_dir: str) -> Dict[str, float]:
         # （新标的 / 标记丢失重迁）不把旧假价再收进来；旧快照的真价由读时合并的 DB 权威价覆盖。
         if snap.get("_snapshot_stock_price_source") not in _SNAPSHOT_CLOSE_SOURCES:
             continue
+        # v0.45.468：`caller` 价是调用方当时手上的价，快照若在收盘前写下，它就是盘中价，不是收盘
+        # （`_snapshot_session_complete` 是写快照时该场是否已收盘，v0.45.238 起每份都带）。
+        if snap.get("_snapshot_session_complete") is not True:
+            continue
         px = _valid(snap.get("_snapshot_stock_price"))
         if px is not None and _is_trading_date(m.group(2)):
             by_date[m.group(2)] = px
