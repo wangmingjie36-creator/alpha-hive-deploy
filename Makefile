@@ -1,4 +1,4 @@
-.PHONY: test test-cov test-fast lint scan docker-build docker-run clean
+.PHONY: test test-cov test-fast lint scan docker-build docker-run clean alphabot alphabot-demo alphabot-app alphabot-stop
 
 # ==================== 测试 ====================
 test:
@@ -42,3 +42,29 @@ clean:
 	rm -rf htmlcov .pytest_cache __pycache__ tests/__pycache__
 	rm -f .coverage
 	find . -name "*.pyc" -delete
+
+# ==================== Alpha Bot（卖权选择器本机前端，v0.45.388） ====================
+# 只绑 127.0.0.1。读生产账本需先 export ALPHA_HIVE_HOME=<数据根>（与编排器 / MCP 同一个值）。
+alphabot:
+	/usr/local/bin/python3 -m alphabot --open
+
+alphabot-demo:
+	/usr/local/bin/python3 -m alphabot --demo --open
+
+# 生成 macOS 桌面程序 ~/Applications/Alpha Bot.app（双击启动服务并打开页面；已在跑就只开页面）。
+# 数据根：启动器还没配过时顺手记下当前环境的 ALPHA_HIVE_HOME（已配过的不改写，要换用 --home）；都没有就首次双击时选。
+# 换 .app 用的 Python：make alphabot-app PYTHON=/绝对路径（相对路径 / 裸名字会被拒：make -C 先切了目录，双击时 cwd / PATH 也不同）
+# .app 跑的代码缺省是生产克隆 ~/alpha-hive-prod（阶段 8）。统一入口：make -C ~/alpha-hive-prod alphabot-app（克隆自己的代码生成）；
+# 在别的检出里 make 也会把整次生成交给克隆自己的生成器（v0.45.451 起）；克隆不在就报错。测自己的检出才直接跑 -m alphabot.macos_app --repo .
+# ALPHABOT_GEN_PY = 跑生成器本身的解释器（不是写进 .app 的那个）；只有测试换它（tests/test_alphabot_launcher.py 真跑本目标）
+# PYTHON 只认**命令行上**给的（$(origin) = command line）：make 会把同名环境变量导入成 make 变量，而 PYTHON 是常见
+# 环境变量（node-gyp 等要求 export PYTHON=python3）——v0.45.456 起它会因「须绝对路径」让推荐入口无故失败（v0.45.458）。
+# 「命令行」含外层 make 的命令行：在 `make X PYTHON=…` 的配方里再调本目标，PYTHON 经 MAKEFLAGS 传下来、origin 也是
+# command line（make 3.81 实测）——那同样是人写的值，照收照核（裸名字照样拒），不当环境变量忽略（v0.45.461）
+ALPHABOT_GEN_PY ?= /usr/local/bin/python3
+alphabot-app:
+	$(if $(filter environment%,$(origin PYTHON)),$(info 忽略环境变量 PYTHON=$(PYTHON)：.app 用的解释器只认这条命令行上的 PYTHON=/绝对路径))
+	$(ALPHABOT_GEN_PY) -m alphabot.macos_app $(if $(filter command line,$(origin PYTHON)),--python "$(PYTHON)",)
+
+alphabot-stop:
+	/usr/local/bin/python3 -m alphabot.launcher --stop

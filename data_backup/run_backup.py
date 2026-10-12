@@ -10,8 +10,15 @@ v0.45.264 起已接入生产编排器 `alpha-hive-orchestrator.sh` Step 14
   下走——`git diff --cached --quiet` 在非 git 仓库里返回 128（不是"无变化"的
   0），旧代码会把 128 误判成"有变化"进而尝试 commit，commit 失败后把"仓库
   根本没初始化成功"误标成 `stage: "commit"`（v0.45.278 修）。
+- **备份仓落在代码仓库里**（v0.45.414）→ 同样 `stage: "init"`、退出码 2，另记
+  `refused: "inside_code_repo"`；什么都不建、不导出。`--backup-dir` 缺省走 `PATHS.data_backup_repo`：
+  `ALPHA_HIVE_HOME` 被设成代码检出（阶段 5 回退）就会解析进检出；v0.45.422 前它**未设**时也会
+  （那时 `PATHS.home` 兜底到检出，现在取 `~/alpha-hive-data`）。
 - 导出失败（如并发写检测命中、源库不存在）→ 未提交，`status.json` 记
   `stage: "export"`, `ok: false`, 退出码 2。
+- **备份仓里有导出之外的条目**（v0.45.427）→ 未提交，`status.json` 记 `stage: "foreign_entries"`, `ok: false`,
+  `foreign_entries`（前 50 项）与 `foreign_count`，退出码 2。外来 = 未跟踪且不在本轮 `SHA256SUMS` 里，或任何嵌套仓库
+  （未跟踪的 / 已成 gitlink 的）。判定本身失败（git 出错）同样记这个 stage、不提交。缘由见 `foreign_entries` docstring。
 - 密钥扫描命中 → 不提交，`status.json` 记 `stage: "secret_scan"`, `ok: false`，
   命中文件数与凭据来源文件名（不含值），退出码 1。
 - **密钥扫描守卫未通过**（v0.45.307 补，二次检查发现）→ 同样 `stage: "secret_scan"`,
@@ -56,6 +63,10 @@ v0.45.264 起已接入生产编排器 `alpha-hive-orchestrator.sh` Step 14
   而非悄悄放行——这是防御 `add` 返回码本身骗人的最后一道闸（例如 `add`
   返回 0 但因为其它原因没有真正暂存所有改动）。⚠️ 刻意不自动删
   `index.lock`——可能有另一个 git 进程真的在用它，删掉会造成更难排查的损坏。
+- **`SHA256SUMS` 列的路径索引里没有（精确拼写）**（v0.45.430）→ `add -A` 之后、提交之前查，
+  `stage: "git_error"`，`sums_not_tracked`（前 50 项）与 `sums_not_tracked_count`，退出码 2，不提交。
+  旧名元数据 `MANIFEST.json` 从索引退役失败（导出之前）同样记 `git_error`、不导出。
+  缘由见 `sums_paths_not_tracked` / `retire_legacy_manifest_from_index` 的 docstring。
 - 推送失败（返回码非 0，不是异常；网络/权限/远端不可写）→ 已经提交到本地工作区
   （数据没丢），但 `status.json` 记 `stage: "push"`, `ok: false`, 退出码 2；
   下一轮跑仍会带着未推送的提交重试。
@@ -94,6 +105,7 @@ import datetime as dt
 import json
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 from . import export as export_mod
@@ -106,10 +118,119 @@ GIT_TIMEOUT_S = 60
 #: 09-26 手工补推同一批两天的提交实测 43s——离 60s 太近。仓库从未 gc（全是松散对象，每次推送现场打包），
 #: 网速一慢就会再超。上限留在编排器 Step 14 的 `run_step --timeout 300` 之内（导出 + add/commit 十几秒）。
 GIT_PUSH_TIMEOUT_S = 240
+#: 备份仓体量预算（v0.45.417，用户 2026-10-05 定 600 MB）。远端是 GitHub 私有仓库，体量只增不减
+#: （历史不重写）；预算是「该停下来想想了」的红线，不是自动清理的触发器——超了就把这一轮标红，
+#: 数据本身已推送成功（`status["pushed"]`），不会因此丢备份。
+BACKUP_REPO_BUDGET_MB = 600
+
+
+def repo_size_mb(backup_dir: Path) -> float:
+    """备份仓本地体量（MB）= 松散对象 + 包 + 垃圾，取自 `git count-objects -v`（KiB）。
+
+    本仓从未 gc，对象大多是松散的（size，而非 size-pack）——只读 size-pack 会把 108 MB 报成 0。
+    读不到就抛：调用方把「量不出来」也记成红，不许把它当 0。
+    """
+    out = _run_git(["count-objects", "-v"], backup_dir)
+    if out.returncode != 0:
+        raise RuntimeError(f"git count-objects 失败（rc={out.returncode}）：{out.stderr[-500:]}")
+    kib = {}
+    for line in out.stdout.splitlines():
+        k, _, v = line.partition(":")
+        kib[k.strip()] = v.strip()
+    try:
+        total = sum(int(kib[k]) for k in ("size", "size-pack", "size-garbage"))
+    except (KeyError, ValueError) as e:
+        raise RuntimeError(f"git count-objects 输出缺字段：{out.stdout[:300]!r}") from e
+    return round(total / 1024, 1)
 
 
 def _run_git(args: list[str], cwd: Path, timeout: int = GIT_TIMEOUT_S) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+
+
+def _tracked_paths(backup_dir: Path) -> list[str]:
+    ls = _run_git(["ls-files", "-z"], backup_dir)
+    if ls.returncode != 0:
+        raise RuntimeError(f"git ls-files 失败（returncode={ls.returncode}）：{ls.stderr[-500:]}")
+    return [p for p in ls.stdout.split("\0") if p]
+
+
+def retire_legacy_manifest_from_index(backup_dir: Path) -> bool:
+    """索引里**精确拼写**为 `MANIFEST.json` 的条目摘掉（只动索引，磁盘那份由 `run_export` 删），返回摘没摘（v0.45.430）。
+
+    光让导出改名不够：`core.ignorecase=true`（macOS 上 `git init` 的缺省，生产备份仓就是）时，磁盘上重新出现的
+    `manifest.json` 会被 `git add -A` 认成索引里已有的 `MANIFEST.json` ⇒ 网站 manifest 以大写名进备份，
+    到大小写敏感的盘上 clone 出来照样找不到。先摘掉旧条目，`add -A` 才按磁盘拼写记新文件。
+    `-f`：它只是上一轮的元数据（已在历史里、本轮重写成新名字），索引与磁盘不一致也照摘。
+    只有升级后第一轮真的摘；git 失败 ⇒ 抛 RuntimeError。
+    """
+    if export_mod.LEGACY_MANIFEST_NAME not in _tracked_paths(backup_dir):
+        return False
+    rm = _run_git(["rm", "--cached", "-f", "-q", "--", export_mod.LEGACY_MANIFEST_NAME], backup_dir)
+    if rm.returncode != 0:
+        raise RuntimeError(f"git rm --cached {export_mod.LEGACY_MANIFEST_NAME} 失败"
+                           f"（returncode={rm.returncode}）：{rm.stderr[-500:]}")
+    return True
+
+
+def sums_paths_not_tracked(backup_dir: Path) -> list[str]:
+    """本轮 `SHA256SUMS` 列的路径（连同元数据文件自己）里，索引中**没有这个精确拼写**的，排好序（v0.45.430）。
+
+    在 `git add -A` 之后跑；空 ⇒ 备份仓真的持有清单声称它持有的东西。09-24 起 `SHA256SUMS` 天天列
+    `manifest.json`，索引里却只有 `MANIFEST.json`（另一份内容）——这道检查当时就会红。
+    也接住大小写之外的同类漏洞（备份仓的忽略规则吞掉了一个导出文件）。git 失败 ⇒ 抛 RuntimeError。
+    """
+    listed = set(export_mod.META_FILES)
+    # 只按 "\n" 切：splitlines() 还会在 U+2028 / \x0b / \x1c 等字符处断行（文件名里合法）⇒ IndexError
+    for line in (Path(backup_dir) / export_mod.SUMS_NAME).read_text(encoding="utf-8").split("\n"):
+        if line.strip():
+            listed.add(line.split("  ", 1)[1])
+    tracked = {unicodedata.normalize("NFC", p) for p in _tracked_paths(backup_dir)}
+    return sorted(p for p in listed if unicodedata.normalize("NFC", p) not in tracked)
+
+
+#: 导出自己写的元数据文件（`SHA256SUMS` 不列它们自己）。唯一真相在 `export.META_FILES`（v0.45.430 起清单叫
+#: `BACKUP_MANIFEST.json`；这里若仍写死旧名 `MANIFEST.json`，新清单会被当成外来条目、每轮拒绝提交）。
+EXPORT_META_FILES = frozenset(export_mod.META_FILES)
+
+
+def foreign_entries(backup_dir: Path) -> list[str]:
+    """备份工作区里**不是本轮导出产物**的条目，排好序；空 ⇒ 可以提交（v0.45.427）。
+
+    本轮产物 = `SHA256SUMS` 列出的路径 + `EXPORT_META_FILES`（刚由 `write_manifest_and_sums` 写出——唯一真相，不另抄清单）。
+    只看**未跟踪**的：已跟踪但本轮没导出的是正常陈旧文件（导出不删数据根里已消失的根文件），早已进了备份历史。
+    嵌套仓库一律算外来（记作 `嵌套仓库:<目录>/`）：未跟踪的（`git status` 把它报成以 `/` 结尾的一项、不往里看），
+    与已被提交成 gitlink 的（索引 mode 160000）——`git add -A` 会把前者**静默**封成后者：2026-10-03 测试夹具 `bk_src`
+    被搬进生产备份仓库，10-05 的备份（`b43a5de`）就这样把它提交进了备份历史，没有任何东西红。
+    git 命令失败 ⇒ 抛 `RuntimeError`（判不了就不提交，由调用方记 stage）。
+    """
+    produced = set(EXPORT_META_FILES)
+    # 只按 "\n" 切：splitlines() 还会在 U+2028 / \x0b / \x1c 等字符处断行（文件名里合法）⇒ IndexError
+    for line in (Path(backup_dir) / export_mod.SUMS_NAME).read_text(encoding="utf-8").split("\n"):
+        if line.strip():
+            produced.add(line.split("  ", 1)[1])
+    produced = {unicodedata.normalize("NFC", p) for p in produced}
+
+    out = set()
+    st = _run_git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], backup_dir)
+    if st.returncode != 0:
+        raise RuntimeError(f"git status 失败（returncode={st.returncode}）：{st.stderr[-500:]}")
+    for rec in st.stdout.split("\0"):
+        if not rec.startswith("?? "):
+            continue
+        path = unicodedata.normalize("NFC", rec[3:])
+        if path.endswith("/"):
+            out.add(f"嵌套仓库:{path}")
+        elif path not in produced:
+            out.add(path)
+    ls = _run_git(["ls-files", "-s", "-z"], backup_dir)
+    if ls.returncode != 0:
+        raise RuntimeError(f"git ls-files 失败（returncode={ls.returncode}）：{ls.stderr[-500:]}")
+    for rec in ls.stdout.split("\0"):
+        if rec.startswith("160000 "):
+            path = rec.split("\t", 1)[1]
+            out.add(f"嵌套仓库:{unicodedata.normalize('NFC', path)}/")
+    return sorted(out)
 
 
 def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main",
@@ -120,6 +241,20 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
     t0 = dt.datetime.now()
     status: dict = {"date": t0.strftime("%Y-%m-%d"), "started_at": t0.isoformat(timespec="seconds"),
                      "src": str(src), "backup_dir": str(backup_dir), "remote": remote, "branch": branch}
+
+    # v0.45.414：备份仓不许落在代码仓库里（显式传参，或 ALPHA_HIVE_HOME 指到检出时缺省就解析进去）。
+    # 在 init 之前拦，记 stage="init"——编排器 Step 14 现成的分支报「未导出未提交」，正是实情。
+    # 判定本身失败（hive_logger 不可 import）同样中止：判不了就不建库。
+    try:
+        code_repo = export_mod.backup_repo_inside_code_repo(backup_dir)
+    except Exception as e:  # noqa: BLE001
+        status.update(stage="init", ok=False, error=f"无法核对备份仓是否在代码仓库里：{type(e).__name__}: {e}")
+        return _finish(status_file, history_file, status)
+    if code_repo is not None:
+        status.update(stage="init", ok=False, refused="inside_code_repo",
+                      error=f"备份仓 {backup_dir} 在代码仓库 {code_repo} 里，拒绝建库/导出"
+                            "（未传 --backup-dir 时多半是没设 ALPHA_HIVE_HOME）")
+        return _finish(status_file, history_file, status)
 
     if not (backup_dir / ".git").is_dir():
         try:
@@ -132,6 +267,14 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
             status.update(stage="init", ok=False, error=init.stderr[-2000:])
             return _finish(status_file, history_file, status)
 
+    # ── 0. 旧名元数据退役（v0.45.430，只有升级后第一轮真的动）：必须在导出之前 ──
+    try:
+        if retire_legacy_manifest_from_index(backup_dir):
+            status["legacy_manifest_retired"] = True
+    except Exception as e:  # noqa: BLE001 —— 摘不掉就别导出：导出会把 manifest.json 写回大写名的索引条目
+        status.update(stage="git_error", ok=False, error=f"旧名元数据 MANIFEST.json 退役失败：{e}")
+        return _finish(status_file, history_file, status)
+
     # ── 1. 导出 ──────────────────────────────────────────────────────
     try:
         manifest = export_mod.run_export(src, backup_dir)
@@ -143,6 +286,20 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
         db: {"tables": len(info["tables"]), "rows": sum(info["row_counts"].values())}
         for db, info in manifest["databases"].items()
     }
+
+    # ── 1b. 外来条目（v0.45.427）：备份仓里只许有本轮导出的东西 ─────────
+    # `git add -A` 来者不拒：任何东西出现在工作区（测试夹具、手放的文件、嵌套仓库）都会被静默封进永久备份历史。
+    # 判不了（git 失败、SHA256SUMS 读不了）同样不提交——同 v0.45.414「判定本身失败就中止」。
+    try:
+        foreign = foreign_entries(backup_dir)
+    except Exception as e:  # noqa: BLE001
+        status.update(stage="foreign_entries", ok=False, error=f"无法核对备份仓里有没有导出之外的条目：{type(e).__name__}: {e}")
+        return _finish(status_file, history_file, status)
+    if foreign:
+        status.update(stage="foreign_entries", ok=False, foreign_count=len(foreign), foreign_entries=foreign[:50],
+                      error=f"备份仓里有 {len(foreign)} 处不是本轮导出的条目（外来文件 / 嵌套仓库），拒绝提交：{foreign[:5]}"
+                            "——数据根本身没动，清掉这些条目后下一轮照常备份")
+        return _finish(status_file, history_file, status)
 
     # ── 2. 密钥扫描（提交前拦截，不是推送前）─────────────────────────
     secrets, secret_diag = load_known_secrets_with_diagnostics()
@@ -190,6 +347,15 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
                            error=f"git add -A 失败（returncode={add.returncode}）：{add.stderr[-2000:]}")
             return _finish(status_file, history_file, status)
 
+        # v0.45.430：清单说备份了什么，索引里就得有什么（精确拼写）——不然提交的就是一份作假的 SHA256SUMS
+        untracked = sums_paths_not_tracked(backup_dir)
+        if untracked:
+            status.update(stage="git_error", ok=False, sums_not_tracked=untracked[:50],
+                          sums_not_tracked_count=len(untracked),
+                          error=f"{export_mod.SUMS_NAME} 列了、索引里却没有这个精确拼写的路径 {len(untracked)} 个，"
+                                f"拒绝提交（多半是大小写不敏感的盘上撞名，或备份仓忽略规则吞了文件）：{untracked[:5]}")
+            return _finish(status_file, history_file, status)
+
         diff = _run_git(["diff", "--cached", "--quiet"], backup_dir)
         if diff.returncode == 0:
             status["commit"] = {"made": False, "reason": "无变化"}
@@ -229,8 +395,23 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
         status.update(stage="push", ok=False, error=push.stderr[-2000:])
         return _finish(status_file, history_file, status)
 
-    status.update(stage="done", ok=True,
-                   duration_seconds=round((dt.datetime.now() - t0).total_seconds(), 1))
+    status["pushed"] = True
+    status["duration_seconds"] = round((dt.datetime.now() - t0).total_seconds(), 1)
+
+    # ── 5. 体量预算闸（推送之后；数据已安全，红的是「该停下来想想了」）──────
+    try:
+        size_mb = repo_size_mb(backup_dir)
+    except Exception as e:  # noqa: BLE001 —— 量不出来也是红：不许当 0
+        status.update(stage="size_budget", ok=False, error=f"备份仓体量量不出来：{e}（数据已推送）")
+        return _finish(status_file, history_file, status)
+    status["repo_size_mb"] = size_mb
+    status["repo_budget_mb"] = BACKUP_REPO_BUDGET_MB
+    if size_mb > BACKUP_REPO_BUDGET_MB:
+        status.update(stage="size_budget", ok=False,
+                      error=f"备份仓 {size_mb} MB 超出预算 {BACKUP_REPO_BUDGET_MB} MB（数据已推送）")
+        return _finish(status_file, history_file, status)
+
+    status.update(stage="done", ok=True)
     return _finish(status_file, history_file, status)
 
 
@@ -285,7 +466,9 @@ def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(description="阶段 3.5 原型：导出→扫描→提交→推送")
     ap.add_argument("--src", default="/Users/igg/Desktop/Alpha Hive")
-    ap.add_argument("--backup-dir", default=str(Path.home() / "alpha-hive-data" / "_git_backup"))
+    # 缺省 None ⇒ 在下方 try 里解析成 PATHS.data_backup_repo（v0.45.414）。放进 try：解析失败落 crash/rc=3，
+    # 不以 Python 默认的 1 退出（1 专属 secret_scan，见下）。status/history 两个仍跟 $HOME（沙箱夹具靠它）。
+    ap.add_argument("--backup-dir", default=None, help="缺省 PATHS.data_backup_repo（调用时求值）")
     ap.add_argument("--remote", default="origin")
     ap.add_argument("--branch", default="main")
     ap.add_argument("--status-file", default=str(Path.home() / "alpha-hive-data" / "logs" / "backup_status.json"))
@@ -295,7 +478,9 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     try:
-        status = run(Path(args.src), Path(args.backup_dir), args.remote, args.branch,
+        # `is None` 不是真值判断：显式 `--backup-dir ""`（多半是调用方变量为空）不许被悄悄换成缺省值。
+        backup_dir = export_mod.default_backup_repo() if args.backup_dir is None else Path(args.backup_dir)
+        status = run(Path(args.src), backup_dir, args.remote, args.branch,
                      Path(args.status_file), args.message, Path(args.history_file))
         print(json.dumps(status, ensure_ascii=False, indent=2))
         return 0 if status.get("ok") else (1 if status.get("stage") == "secret_scan" else 2)

@@ -328,6 +328,16 @@ def _warnings(caplog):
                      if r.name == _LOGGER and r.levelno >= logging.WARNING)
 
 
+def _record_warning(caplog):
+    """只取 record_day 自己那一条零快照 WARNING。`_iter_snapshots` 的「快照读取失败」也是 WARNING，
+    打不开时 OSError 文本里带快照的**完整路径**——拿全部告警拼起来断言「点名了目录」，
+    会让那条替这条代答（v0.45.384 二次检查变异 M4 在 unopenable 夹具上幸存实测）。"""
+    lines = [r.getMessage() for r in caplog.records if r.name == _LOGGER and r.levelno >= logging.WARNING
+             and r.getMessage().startswith("VRP 记录")]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
 class TestRecordNeverDeletesRowsItDidNotRewrite:
     """2026-09-29 v0.45.380 同形普查发现：`record_day` 零快照时照样把账本改写成「其它日期的行 + 空列表」，
     数据根找错（未设 ALPHA_HIVE_HOME ⇒ PATHS.home 回落到代码目录，而那里的 vrp_state/ 被 git 跟踪）
@@ -336,7 +346,8 @@ class TestRecordNeverDeletesRowsItDidNotRewrite:
     （当时该日无行，没删到东西）。"""
 
     @pytest.mark.parametrize("layout", ["missing_dir", "empty_dir", "other_day_only",
-                                        "unreadable_same_day", "non_object_same_day", "backfilled_only"])
+                                        "unreadable_same_day", "unopenable_same_day", "non_object_same_day",
+                                        "backfilled_only"])
     def test_zero_snapshots_leave_ledger_byte_identical(self, state, tmp_path, caplog, layout):
         _seed_ledger_compact()
         before, ino = vrp.SIGNALS_FILE.read_bytes(), vrp.SIGNALS_FILE.stat().st_ino
@@ -345,6 +356,8 @@ class TestRecordNeverDeletesRowsItDidNotRewrite:
             _snap(state, "AAA", _day(1))
         elif layout == "unreadable_same_day":
             (state / f"options_snapshot_AAA_{AS_OF}.json").write_text("{not json")
+        elif layout == "unopenable_same_day":             # 同名目录：open() 抛 IsADirectoryError（OSError）
+            (state / f"options_snapshot_AAA_{AS_OF}.json").mkdir()
         elif layout == "non_object_same_day":             # 合法 JSON 但不是对象：_iter_snapshots 静默跳过
             (state / f"options_snapshot_AAA_{AS_OF}.json").write_text("[]")
         elif layout == "backfilled_only":
@@ -357,13 +370,14 @@ class TestRecordNeverDeletesRowsItDidNotRewrite:
         assert r == []
         assert vrp.SIGNALS_FILE.read_bytes() == before, "零快照改写了账本"
         assert vrp.SIGNALS_FILE.stat().st_ino == ino, "零快照做了一次原子替换（内容恰好没变也不许写）"
-        msg = _warnings(caplog)
+        msg = _record_warning(caplog)
         assert str(cdir) in msg, f"WARNING 没点名读的是哪个目录：{msg!r}"
         assert "账本未改写" in msg and "3 行原样保留" in msg
         diag = {"missing_dir": "目录不存在",
                 "empty_dir": "里面没有任何常规 options_snapshot",
                 "other_day_only": f"最新 {_day(1)}",
-                "unreadable_same_day": "1 份该日快照文件，但都读不出（坏 JSON",
+                "unreadable_same_day": "1 份该日快照文件，但都读不出（坏 JSON / 打不开",
+                "unopenable_same_day": "1 份该日快照文件，但都读不出（坏 JSON / 打不开",
                 "non_object_same_day": "或内容不是 JSON 对象（静默跳过）",
                 "backfilled_only": "1 份该业务日的补跑快照"}[layout]
         assert diag in msg, msg
@@ -408,14 +422,34 @@ class TestRecordNeverDeletesRowsItDidNotRewrite:
 
     def test_warning_names_the_two_wrong_directory_causes(self, state, tmp_path, monkeypatch, caplog):
         _seed_ledger_compact()
-        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        stale = tmp_path / "stale_checkout"                       # 显式、且不是缺省数据根
+        monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))   # 缺省根 = <fakehome>/alpha-hive-data，别碰真家目录
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(stale))
         monkeypatch.setenv("ALPHA_HIVE_CACHE_DIR", str(tmp_path / "writer_cache"))
         with caplog.at_level(logging.WARNING, logger=_LOGGER):
             vrp.record_day(AS_OF, cache_dir=tmp_path / "reader_cache")
         msg = _warnings(caplog)
-        assert "未设 ALPHA_HIVE_HOME" in msg
+        assert f"ALPHA_HIVE_HOME 显式指向 {stale}" in msg
+        assert str(tmp_path / "fakehome" / "alpha-hive-data") in msg
         assert str(tmp_path / "writer_cache") in msg and "与本次读取目录不同" in msg
         assert not (tmp_path / "writer_cache").exists() and not (tmp_path / "reader_cache").exists()
+
+    @pytest.mark.parametrize("home_env", ["unset", "empty", "equals_default"])
+    def test_default_data_root_is_not_reported_as_wrong(self, state, tmp_path, monkeypatch, caplog, home_env):
+        """v0.45.422 起未设 / 空串 ⇒ 缺省数据根 `~/alpha-hive-data`，那**就是**生产（编排器与 plist 也设成它）。
+        v0.45.384 初版在未设时报「数据根回落到代码目录」——v0.45.422 之后这句是假话，会把人引去查错地方。"""
+        _seed_ledger_compact()
+        fakehome = tmp_path / "fakehome"
+        monkeypatch.setenv("HOME", str(fakehome))
+        if home_env == "unset":
+            monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        else:
+            monkeypatch.setenv("ALPHA_HIVE_HOME", "" if home_env == "empty" else str(fakehome / "alpha-hive-data"))
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            vrp.record_day(AS_OF, cache_dir=state)
+        msg = _warnings(caplog)
+        assert "账本未改写" in msg                                 # 零快照告警确实发出了（不是因为没告警才没提示）
+        assert "ALPHA_HIVE_HOME" not in msg and "代码目录" not in msg, msg
 
     def test_default_cache_dir_is_not_created(self, state, tmp_path, monkeypatch, caplog):
         """缺省目录从前走会 mkdir 的 `PATHS.cache_dir`：不带 ALPHA_HIVE_HOME 手动跑一次，
@@ -854,6 +888,20 @@ class TestCliAndMarkdown:
                          "--cache-dir", str(state), "--date", AS_OF])
         j = json.loads(out.read_text())
         assert code == 1 and j["recorded"] == 3 and j["warnings"] == []
+
+    def test_cli_record_writes_under_the_ledger_lock(self, state, monkeypatch):
+        """CLI `--record` 直接调 `_record_day_with_info`、不经 `record_day`：v0.45.452 只给 `record_day` 挂了
+        目录锁，合并时若本体不另挂，CLI 这条读-改-写就是无锁的（v0.45.384 二次检查发现）。"""
+        import ledger_io
+        _snap(state, "AAA", AS_OF)
+        seen = []
+        real = vrp._write_jsonl
+        monkeypatch.setattr(vrp, "_write_jsonl",
+                            lambda path, rows: seen.append(ledger_io.is_locked_here(vrp.SIGNALS_FILE.parent))
+                            or real(path, rows))
+        vrp.main(["--record", "--cache-dir", str(state), "--date", AS_OF])
+        assert seen == [True], seen
+        assert not ledger_io.is_locked_here(vrp.SIGNALS_FILE.parent)
 
     def test_cli_subprocess_zero_snapshots_exits_3_and_creates_nothing(self, state, tmp_path):
         """真跑 `__main__`：`_isolate_env` 已把 ALPHA_HIVE_HOME 指向 tmp_path，子进程继承它 ⇒

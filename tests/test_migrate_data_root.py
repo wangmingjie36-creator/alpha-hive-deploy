@@ -89,6 +89,25 @@ def test_unknown_entry_blocks_plan_and_copy(roots):
     assert not any(new.iterdir()), "拒绝时一个都不许复制"
 
 
+def test_every_tracked_top_level_entry_is_classified():
+    """仓库里被 git 跟踪的每个顶层条目都必须在分类表里有归属。
+
+    check-old 把 UNKNOWN 算红：别的会话新加一个代码目录（alphabot / scripts / vercel.json）
+    而没人来登记，旧根检查就会无故报红，让人学会无视它。这条把「新增顶层代码项」变成
+    会红的测试，而不是等 check-old 在生产上红。
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True,
+                         env=_clean_git_env(), check=True).stdout.decode().split("\0")
+    tops = {}
+    for f in filter(None, out):
+        head, sep, _ = f.partition("/")
+        tops[head] = tops.get(head, False) or bool(sep)
+    assert tops, "git ls-files 空输出：检查没有跑起来"
+    unknown = sorted(n for n, is_dir in tops.items() if m.classify(n, is_dir)[0] == "UNKNOWN")
+    assert unknown == [], f"被跟踪的顶层条目未登记进 migrate_data_root 分类表：{unknown}"
+
+
 def test_copy_verify_carries_wal_rows_and_skips_code_and_keys(roots):
     old, new = roots
     pl = m.plan(old)
@@ -389,3 +408,49 @@ def test_icloud_duplicate_is_reported_not_red(roots_with_logs):
     assert r["ok"], r
     assert r["icloud_duplicates"] == ["logs/alpha_hive_structured.jsonl.5 2"]
     assert r["written_outside_git"] == [] and r["synced_by_git"] == []
+
+
+# ── 阶段 6 之后：冻结数据被 git 删掉（生产同步快进）≠ 旁路写入（v0.45.401）──────────────────
+def test_check_old_file_deleted_by_a_git_commit_is_not_a_write(roots):
+    old, _ = _retired(roots)
+    _git(old, "rm", "-q", "index.html")
+    _git(old, "commit", "-q", "-m", "stop tracking index.html (等价于快进进来的删除提交)")
+    r = m.check_old(old)
+    assert r["ok"], r
+    assert r["removed_by_git_count"] == 1 and r["removed_by_git_sample"] == ["index.html"]
+    assert r["written_outside_git"] == []
+
+
+def test_check_old_phase6_untrack_then_ff_deletes_working_copy(roots):
+    """阶段 6 的真实形态：提交里 `git rm --cached` + `.gitignore` 加规则，快进随后把工作区文件删掉。
+    此时该路径命中新的 .gitignore（旧实现因此把它判成「被忽略 ⇒ 写出 git 之外」，全部红）。"""
+    old, _ = _retired(roots)
+    _git(old, "rm", "-q", "--cached", "index.html")
+    (old / ".gitignore").write_text("/index.html\n")
+    _git(old, "add", ".gitignore")
+    _git(old, "commit", "-q", "-m", "phase 6: untrack + ignore")
+    (old / "index.html").unlink()
+    r = m.check_old(old)
+    assert r["ok"], r
+    assert r["removed_by_git_count"] == 1
+
+
+def test_check_old_file_recreated_after_git_removal_is_a_write(roots):
+    """被 git 删掉之后又有人往旧位置写回同名文件 ⇒ 这才是旁路写入，必须红。"""
+    old, _ = _retired(roots)
+    _git(old, "rm", "-q", "index.html")
+    _git(old, "commit", "-q", "-m", "remove")
+    (old / "index.html").write_text("<html>written by a bypass writer</html>")
+    r = m.check_old(old)
+    assert not r["ok"]
+    assert "index.html" in r["written_outside_git"]
+
+
+def test_check_old_manual_delete_without_a_git_commit_is_still_red(roots):
+    """没有任何提交删它（工作区里被人手删）⇒ git 解释不了 ⇒ 仍红；放行的是「git 删的」不是「不在了」。"""
+    old, _ = _retired(roots)
+    (old / "index.html").unlink()
+    r = m.check_old(old)
+    assert not r["ok"]
+    assert r["written_outside_git"] == ["index.html"]
+    assert r["removed_by_git_count"] == 0

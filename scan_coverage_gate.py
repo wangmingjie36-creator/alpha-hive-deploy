@@ -53,7 +53,7 @@
 `--out` 的父目录不存在 ⇒ 与改造前一样是未捕获异常（`write_out` 不建目录），现在按崩溃记退出码 3，
 崩溃路径同样写不出外壳、只打 stderr。
 ⚠️ 非规范的 `--date`（如 `2026-8-26`）过不了外壳的日期校验 ⇒ 按崩溃记（退出码 3，
-改造前同一输入也是 3：结果文件名对不上 ⇒ 无法判定）。编排器不传 `--date`。
+改造前同一输入也是 3：结果文件名对不上 ⇒ 无法判定）。编排器 v0.45.385 起传 `--date "${DATE_STR}"`（`date +%Y-%m-%d` 出的规范形式，过得了校验）。
 """
 
 from __future__ import annotations
@@ -114,6 +114,25 @@ FIELDS: List[Dict[str, Any]] = [
      "min_coverage": 0.70, "source": "CBOE 期权链"},
     {"key": "iv_rv_spread", "path": "OracleBeeEcho.iv_rv_spread",
      "min_coverage": 0.70, "source": "yfinance 日K（派生自 rv_30d）"},
+    # v0.45.421：Oracle 的异常期权流（yfinance 链）取数状态。2026-10-05 重跑时 28/30 只丢了这一路，Oracle bullish 18→9，
+    # 而取数失败与「无异常」在输出里不可区分、日志只有 2 条 warning——什么都没红。09-02 / 09-08 / 09-24 / 09-25 同样降级过。
+    # `unusual_flow_ok` 为 True = 取到了数据，None = 没取到（见 oracle_bee._unusual_flow_ok）。
+    # `recorded_key`：新代码才写这个键；键根本不在（旧代码产出的结果）⇒「未记录」，不判降级——
+    # 但键在而值全 None（全部取数失败）⇒ 照常判降级。基线（取到的日子）27~30/30。
+    {"key": "unusual_flow", "path": "OracleBeeEcho.unusual_flow_ok", "recorded_key": "unusual_flow_ok",
+     "min_coverage": 0.70, "source": "yfinance 期权链(异常流)",
+     "note": "Oracle 丢了异常流 ⇒ 方向与加分都变（本字段缺 = 取数失败，不是「无异常」）；只记录、评分仍按 5.0 中性混入"},
+    # v0.45.443：分析师目标价。08-04 起 38 个扫描日里 8 天 0/30（08-04/06/11/12/14、09-17/24/25）、5 天部分缺失（16~22/30），
+    # 此前没有任何会红的观测点：yfinance `analyst_price_targets` 在取数失败时按库默认（hide_exceptions）返回空 `{}`，
+    # 与「该票没有分析师覆盖」在返回值里不可区分（v0.45.270 已记），数据质量标签 `unavailable` 又只占几十个标签之一
+    # （`data_real_pct` 动不到 1pp）。缺它的代价：Chronos confidence 少 0.1（`build_confidence` 里 `(bool(_analyst_info), 0.1)`，
+    # 进 Queen 方向投票的票权）、网站 / ML 报告的目标价卡片空白、discovery 少一句。**不改评分、不修取数**——只让它红。
+    # 判据 = `analyst_targets` 非空：Chronos 只在 `target_mean > 0` 且有可信现价时才填它，否则 `{}`（见 chronos_bee 1b 段）。
+    # 阈值 0.70 同其余项；基线（取到的日子）30/30，没有「合法缺失」的标的。
+    {"key": "analyst_targets", "path": "ChronosBeeHorizon.analyst_targets",
+     "min_coverage": 0.70, "source": "yfinance 分析师目标价",
+     "note": "缺 = 取数失败或无可信现价（yfinance 空 `{}` 与「无分析师覆盖」不可区分）；"
+             "Chronos confidence −0.1、目标价卡片空白；无第二数据源可回落"},
     {"key": "catalysts", "path": "ChronosBeeHorizon.catalysts",
      "min_coverage": 0.40, "source": "yfinance 财报日历",
      "note": "阈值低于其余项：并非每只标的在任意时点都有已知催化剂，"
@@ -157,6 +176,14 @@ def check(date: str, results_path: Optional[Path] = None) -> Dict[str, Any]:
         have = sum(1 for tr in results.values()
                    if isinstance(tr, dict) and _present(_dig(tr, spec["path"])))
         cov = have / n if n else 0.0
+        rk = spec.get("recorded_key")
+        if rk and not any(rk in (((tr.get("agent_details") or {}).get(spec["path"].split(".", 1)[0]) or {})
+                                 .get("details") or {})
+                          for tr in results.values() if isinstance(tr, dict)):
+            rows.append({"field": spec["key"], "source": spec["source"], "have": 0, "total": n,
+                         "coverage": None, "min_coverage": spec["min_coverage"], "degraded": False,
+                         "not_recorded": True, "note": spec.get("note", "")})
+            continue
         rows.append({
             "field": spec["key"], "source": spec["source"],
             "have": have, "total": n, "coverage": round(cov, 4),
@@ -475,6 +502,9 @@ def _render(res: Dict[str, Any]) -> str:
         return f"⚠️  无法判定 {res['date']}：{res['reason']}"
     out = [f"扫描字段覆盖率 · {res['date']} · {res['tickers']} 只标的"]
     for r in res["fields"]:
+        if r.get("not_recorded"):
+            out.append(f"  ➖ {r['field']:16} 未记录（旧代码产出的结果没有这个键，不判降级）  ← {r['source']}")
+            continue
         mark = "❌" if r["degraded"] else "✅"
         out.append(f"  {mark} {r['field']:16} {r['have']:2}/{r['total']:2} "
                    f"({r['coverage']*100:5.1f}%  闸 {r['min_coverage']*100:.0f}%)  ← {r['source']}")

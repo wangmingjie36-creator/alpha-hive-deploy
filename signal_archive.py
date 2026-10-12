@@ -669,6 +669,392 @@ QUARANTINE: List[Dict] = [
         ),
         "evidence": ("logs/2026-09-09.log", "CHANGELOG.md#v0.45.238", "CHANGELOG.md#v0.45.266"),
     },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.472（用户批准）：期权快照的「现价 / 整条链」不是当天真实观测的 (日期, 标的)。
+    # 判据：快照 `_snapshot_stock_price` 对照 Twelve Data 日线收盘（当天与前后一个交易日）+ 快照内容，
+    # 逐份分类（明细见 CHANGELOG v0.45.472）。只隔离市场观测五类（同上方条目），不动 Agent 分。
+    # 盘后价（财报日收盘后 current_price，已由 official_price 修掉的另一类）不在此列：AMZN 07-30 / CRM 08-26 /
+    # MSFT 07-29 / RKLB 07-22 / TSLA 07-23。
+    {
+        "date": "2026-04-09",
+        "tickers": ('CRCL', 'RKLB'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：CRCL, RKLB。",
+        "evidence": ("cache/options_snapshot_{T}_2026-04-09.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-04-14",
+        "tickers": ('AMZN',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AMZN。",
+        "evidence": ("cache/options_snapshot_{T}_2026-04-14.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-04-15",
+        "tickers": ('AMZN',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AMZN。",
+        "evidence": ("cache/options_snapshot_{T}_2026-04-15.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-04-26",
+        "tickers": ('AAPL', 'COST', 'CRWD', 'DELL', 'HPE', 'RKLB'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AAPL, COST, DELL, HPE, RKLB；现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：CRWD。",
+        "evidence": ("cache/options_snapshot_{T}_2026-04-26.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-04-28",
+        "tickers": ('CRCL',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：CRCL。",
+        "evidence": ("cache/options_snapshot_{T}_2026-04-28.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-04-29",
+        "tickers": ('META', 'VKTX'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：META, VKTX。",
+        "evidence": ("cache/options_snapshot_{T}_2026-04-29.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-05-03",
+        "tickers": ('AAPL', 'CRWD', 'META', 'SQ'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AAPL, META, SQ；现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：CRWD。",
+        "evidence": ("cache/options_snapshot_{T}_2026-05-03.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-05-06",
+        "tickers": ('BILI',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：BILI。",
+        "evidence": ("cache/options_snapshot_{T}_2026-05-06.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-05-07",
+        "tickers": ('BILI',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：BILI。",
+        "evidence": ("cache/options_snapshot_{T}_2026-05-07.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-05-10",
+        "tickers": ('ASML', 'CRWD', 'UPST'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：ASML, UPST；现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：CRWD。",
+        "evidence": ("cache/options_snapshot_{T}_2026-05-10.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-05-15",
+        "tickers": ('AMZN',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AMZN。",
+        "evidence": ("cache/options_snapshot_{T}_2026-05-15.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-05-17",
+        "tickers": ('BILI', 'CRCL', 'CRM', 'CRWD', 'ICLN', 'SQ'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：BILI, CRCL, CRM, ICLN, SQ；现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：CRWD。",
+        "evidence": ("cache/options_snapshot_{T}_2026-05-17.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-05-18",
+        "tickers": ('CRCL',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：CRCL。",
+        "evidence": ("cache/options_snapshot_{T}_2026-05-18.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-05-24",
+        "tickers": ('MSFT', 'NVDA', 'QCOM', 'TSLA', 'VKTX'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：MSFT, NVDA, QCOM, TSLA, VKTX。",
+        "evidence": ("cache/options_snapshot_{T}_2026-05-24.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-06-08",
+        "tickers": ('VKTX',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：VKTX。",
+        "evidence": ("cache/options_snapshot_{T}_2026-06-08.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-06-10",
+        "tickers": ('AMZN', 'BILI', 'CRCL', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'TSLA', 'VKTX'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：现价是常数 145.0 / 100.0（analyze 兜底常数或测试传入价）：AMZN, BILI, CRCL, MSFT, QCOM, RKLB, TSLA, VKTX；现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：META, NVDA。",
+        "evidence": ("cache/options_snapshot_{T}_2026-06-10.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-06-15",
+        "tickers": ('AMZN', 'CRCL', 'MSFT', 'NVDA', 'QCOM', 'TSLA'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：NVDA；现价是常数 145.0 / 100.0（analyze 兜底常数或测试传入价）：AMZN, CRCL, MSFT, QCOM, TSLA。",
+        "evidence": ("cache/options_snapshot_{T}_2026-06-15.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-06-17",
+        "tickers": ('MSFT', 'NVDA', 'QCOM', 'TSLA'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：MSFT, NVDA, QCOM, TSLA。",
+        "evidence": ("cache/options_snapshot_{T}_2026-06-17.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-06-22",
+        "tickers": ('AMZN', 'BILI', 'CRCL', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'TSLA', 'VKTX'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AMZN, BILI, CRCL, META, MSFT, NVDA, QCOM, RKLB, TSLA, VKTX。",
+        "evidence": ("cache/options_snapshot_{T}_2026-06-22.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-06-23",
+        "tickers": ('NVDA', 'TSLA'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：现价是常数 145.0 / 100.0（analyze 兜底常数或测试传入价）：NVDA；现价是 0.5 整数倍、偏离收盘 > 1%（行权价中位数兜底；形状判，≈2% 概率是恰好整数的真价）：TSLA。",
+        "evidence": ("cache/options_snapshot_{T}_2026-06-23.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-06-24",
+        "tickers": ('MSFT', 'NVDA', 'QCOM', 'TSLA'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：MSFT, NVDA, QCOM, TSLA。",
+        "evidence": ("cache/options_snapshot_{T}_2026-06-24.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-06-25",
+        "tickers": ('AMZN', 'BILI', 'CRCL', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'TSLA', 'VKTX'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AMZN, BILI, CRCL, META, MSFT, NVDA, QCOM, RKLB, TSLA, VKTX。",
+        "evidence": ("cache/options_snapshot_{T}_2026-06-25.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-06-26",
+        "tickers": ('AMZN', 'BILI', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'TSLA', 'VKTX'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AMZN, BILI, META, MSFT, NVDA, QCOM, RKLB, TSLA, VKTX。",
+        "evidence": ("cache/options_snapshot_{T}_2026-06-26.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-06-27",
+        "tickers": ('AMZN', 'BILI', 'CRCL', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'TSLA', 'VKTX'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AMZN, BILI, CRCL, META, MSFT, NVDA, QCOM, RKLB, TSLA, VKTX。",
+        "evidence": ("cache/options_snapshot_{T}_2026-06-27.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-06-29",
+        "tickers": ('AMD', 'META', 'MSFT', 'NVDA', 'QCOM', 'TSLA', 'VKTX'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：现价是 0.5 整数倍、偏离收盘 > 1%（行权价中位数兜底；形状判，≈2% 概率是恰好整数的真价）：AMD, META, MSFT, NVDA, QCOM, TSLA, VKTX。",
+        "evidence": ("cache/options_snapshot_{T}_2026-06-29.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-06-30",
+        "tickers": ('AMZN', 'BILI', 'CRCL', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'TSLA', 'VKTX'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：现价是常数 145.0 / 100.0（analyze 兜底常数或测试传入价）：META, MSFT, NVDA, QCOM, TSLA, VKTX；现价是 0.5 整数倍、偏离收盘 > 1%（行权价中位数兜底；形状判，≈2% 概率是恰好整数的真价）：AMZN, BILI, CRCL, RKLB。",
+        "evidence": ("cache/options_snapshot_{T}_2026-06-30.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-07-01",
+        "tickers": ('MSFT', 'NVDA', 'QCOM', 'TSLA'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：MSFT, NVDA, QCOM, TSLA。",
+        "evidence": ("cache/options_snapshot_{T}_2026-07-01.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-07-02",
+        "tickers": ('MSFT', 'NVDA', 'QCOM', 'TSLA'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：MSFT, NVDA, QCOM, TSLA。",
+        "evidence": ("cache/options_snapshot_{T}_2026-07-02.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-07-08",
+        "tickers": ('NVDA',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：现价是常数 145.0 / 100.0（analyze 兜底常数或测试传入价）：NVDA。",
+        "evidence": ("cache/options_snapshot_{T}_2026-07-08.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-07-15",
+        "tickers": ('NVDA', 'TSLA', 'VKTX'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：NVDA, TSLA, VKTX。",
+        "evidence": ("cache/options_snapshot_{T}_2026-07-15.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-08-12",
+        "tickers": ('VKTX',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：现价是 0.5 整数倍、偏离收盘 > 1%（行权价中位数兜底；形状判，≈2% 概率是恰好整数的真价）：VKTX。",
+        "evidence": ("cache/options_snapshot_{T}_2026-08-12.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-08-14",
+        "tickers": ('QCOM',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：现价是 0.5 整数倍、偏离收盘 > 1%（行权价中位数兜底；形状判，≈2% 概率是恰好整数的真价）：QCOM。",
+        "evidence": ("cache/options_snapshot_{T}_2026-08-14.json", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-08-26",
+        "tickers": ('MU',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.472：现价是 0.5 整数倍、偏离收盘 > 1%（行权价中位数兜底；形状判，≈2% 概率是恰好整数的真价）：MU。",
+        "evidence": ("cache/options_snapshot_{T}_2026-08-26.json", "CHANGELOG.md#v0.45.472"),
+    },
+    # v0.45.472：CBOE 主源时代（06-30 起）里退到 yfinance 备用链的日子——v0.45.468 前 yfinance 链补 BS gamma
+    # 用「OI>50 的看涨行权价中位数」当 S（analyze 调 fetch_options_chain 从不传价），GEX 与 CBOE 链不是同一个量。
+    # 判据：快照 quote_set.error == "chain source is not cboe"（quote_set 09-04 起才有；06-30 ~ 09-03 的同类日子认不出，待验证）。
+    # 只隔离 GEX：analyze 那天拿到的是调用方真价，IV / P/C / OI 不受影响。
+    {
+        "date": "2026-09-04",
+        "tickers": ('TMUS',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-09-04.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-09-10",
+        "tickers": ('BILI',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-09-10.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-09-11",
+        "tickers": ('BILI', 'DE', 'TMO'),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-09-11.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-09-14",
+        "tickers": ('BILI', 'DE', 'TMO'),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-09-14.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-09-15",
+        "tickers": ('BILI',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-09-15.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-09-16",
+        "tickers": ('BILI', 'DE', 'TMO'),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-09-16.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-09-22",
+        "tickers": ('BILI', 'TMO'),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-09-22.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-09-23",
+        "tickers": ('ABBV', 'AMC', 'AMZN', 'BILI', 'BRK-B', 'COST', 'CRCL', 'CRM', 'CVX', 'DE', 'DELL', 'JNJ', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'T', 'TSLA', 'VKTX', 'VZ', 'XOM'),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-09-23.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-09-28",
+        "tickers": ('BILI',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-09-28.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-09-29",
+        "tickers": ('BILI',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-09-29.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-09-30",
+        "tickers": ('BILI',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-09-30.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-10-01",
+        "tickers": ('BILI',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-10-01.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-10-02",
+        "tickers": ('BILI',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-10-02.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-10-06",
+        "tickers": ('BILI',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-10-06.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-10-08",
+        "tickers": ('BILI',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-10-08.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
+    {
+        "date": "2026-10-09",
+        "tickers": ('BILI',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
+        "evidence": ("cache/options_snapshot_{T}_2026-10-09.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
+    },
 ]
 
 
@@ -1173,6 +1559,8 @@ SIGNAL_LEAVES = frozenset({
 #: 追加边界时必须同步在这里声明（空元组＝只动了 final_score）—— 漏了测试红，
 #: 运行时则按「影响全部信号」处理并在报告里点名。
 COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
+    # v0.45.472（补登）06-30：期权链主源 yfinance → CBOE，主链 GEX 的 gamma 来源与 S 都换了（见 _COHORT_HISTORY）。
+    "v0.34.0": ("options.gamma_exposure",),
     # v0.45.275（P1 补登，两条真实早于表的第一条 08-17，按实际部署日期插入）：
     # 08-15 Step2：GuardBee VIX 改走 CBOE，宏观整体降级但 CBOE 仍供得上真实 VIX 的
     # 日子里，VIX 从「跟着一起丢弃」变成「参与 regime_votes」⇒ macro_adj 改口径。
@@ -1279,6 +1667,38 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 改按 OptionsAgent 的 data_quality 判 —— 只改 Oracle 的 data_quality 标签与置信度，分与方向不变；
     # 没有归档信号读 confidence / data_quality ⇒ 只动 Queen 层（同 v0.45.314 / 315）
     "v0.45.369": (),
+    # 09-28（v0.45.383，新代码 09-29 上线，等价证据见 ic_rerun_readiness 同版条目）：日线完整性校验 ⇒ 缺口日的 iv_rank
+    # 置空、Oracle 期权分的 iv_signal 走中性 ⇒ Oracle 分变、方向随分数带变（同 v0.45.349 的两条）⇒ `agent.OracleBeeEcho.*`
+    # 点名；BearBee 的 options_bear 读 Oracle 方向 ⇒ `bear.options_bear` 点名（同 349）。只在缺口日×标的上变。
+    "v0.45.383": ("agent.OracleBeeEcho.*", "bear.options_bear"),
+    # 09-28（v0.45.423，新代码 10-08 上线，等价证据见 ic_rerun_readiness 同版条目：09-28~10-07 共 240 对全部等价）：
+    # twelve_data 当日那根改按交易所收盘判（收完照收）。进分的只有两条 Twelve Data **兜底**路径，正常日一个分都不变：
+    # ① yfinance 日线抛错时的成交量回落 ⇒ volume_ratio 的三个读者：Buzz volume_signal（分与方向 ⇒ `agent.BuzzBeeWhisper.*`）、
+    #   拥挤度的 Google Trends 代理（`real_data_sources` 由 volume_ratio 映射；它本身是原始观测、不切，见
+    #   `test_raw_observations_are_not_sliced` ⇒ 点名读它的第一个系统输出 `crowding.score`，下游 crowding.* → Scout / Guard /
+    #   Rival 由 _scope_closure 带出）、Bear 的 momentum_bear（不单独入档，直接进 `bear.score`）；
+    # ② 日线缺口第二源 ⇒ iv_rank ⇒ 同 v0.45.383 的两条（`agent.OracleBeeEcho.*`、`bear.options_bear`）。
+    # 叶子 `price.volume_ratio` / `buzz.comp.volume_signal` / `crowding.comp.google_trends` / `options.iv_rank` 不点名
+    #（同 383 不点名 iv_rank；前三个里两个在 `NEVER_SLICED_TODAY` 守卫名单上）：
+    # 它们的口径（yfinance 主路径）没变，只是兜底那几天从「比 yfinance 少一根」对齐成一样；点名会白白切掉
+    # 6 周以上口径一致的历史。
+    "v0.45.423": ("agent.BuzzBeeWhisper.*", "crowding.score", "bear.score",
+                  "agent.OracleBeeEcho.*", "bear.options_bear"),
+    # v0.45.438：更正 v0.45.423 条目（同日、日期不动），照表头「更正条目」规则抄被更正那条的范围
+    "v0.45.438": ("agent.BuzzBeeWhisper.*", "crowding.score", "bear.score",
+                  "agent.OracleBeeEcho.*", "bear.options_bear"),
+    # 10-09（v0.45.441）：Scout 拥挤度去掉 consensus_strength（Scout 与同伴并行、读板时同伴没发布 ⇒ 27/30 恒为 0）。
+    # 该分量本身从此恒为 None（点名它）；其余经 SIGNAL_UPSTREAM 带出：crowding.score → crowding.* → agent.ScoutBeeNova.*
+    # （分平均 −0.34、confidence −0.02、方向有翻）→ ml.* / Rival / Guard / bear.*。
+    # ⚠️ 过切：Rival / Guard 自己数的拥挤度（Phase-1 之后读完整普查）没变，但依赖边把它们挂在 crowding.score 上
+    # 「代表同一个 CrowdingDetector 公式换代」——宁多切不少切（同 v0.45.423 的 crowding.score）。
+    # 那条 SIGNAL_UPSTREAM 边（consensus_strength ← Phase-1 同伴方向）**保留**：它描述的是旧世代数据的真实依赖，
+    # 删了会让早先边界（如 v0.45.349 经 Oracle 方向）对历史行的闭包悄悄缩小。
+    "v0.45.441": ("crowding.comp.consensus_strength", "agent.ScoutBeeNova.*"),
+    # 10-09（v0.45.445）：新闻主源 AV → Massive（降级仍去 Yahoo）。改的是**通道**（news 的逐文章标签换了分类器），
+    # 按维度 IC 协议 §6「按层声明」：点名 `buzz.comp.news_signal` **和** `agent.BuzzBeeWhisper.*`（通道值变 ⇒ 分跟着变）。
+    # 下游（Guard 读 Buzz 分、Scout consensus_strength 读 Buzz 方向、swarm_agreement、ml.* 等）由 _scope_closure 带出。
+    "v0.45.445": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*"),
 }
 
 
@@ -1663,7 +2083,9 @@ def main() -> int:
                     help="仅回填这些信号（逗号分隔）。⚠️ 不带时用当前抽取器重写全部信号，"
                          "没按口径取值的抽取器会把旧口径写回来——先 --dry-run，见 backfill() docstring")
     ap.add_argument("--dry-run", action="store_true",
-                    help="与 --backfill 连用：只报新增/改值/不变行数，不写库")
+                    help="（--backfill 的缺省行为，保留兼容）只报新增/改值/不变行数，不写库")
+    ap.add_argument("--apply", action="store_true",
+                    help="与 --backfill 连用：真写库（先在线备份到 _manual_backups/；缺省是 dry-run，v0.45.419）")
     ap.add_argument("--analyze", action="store_true", help="分析每个信号的 IC")
     ap.add_argument("--list", action="store_true", help="列出已归档信号与覆盖度")
     ap.add_argument("--horizon", choices=["t7", "t30"], default="t7")
@@ -1685,14 +2107,32 @@ def main() -> int:
 
     if args.dry_run and not args.backfill:
         ap.error("--dry-run 只能与 --backfill 连用")
+    if args.apply and not args.backfill:
+        ap.error("--apply 只能与 --backfill 连用")
+    if args.apply and args.dry_run:
+        ap.error("--apply 与 --dry-run 互斥")
     if args.only and not args.backfill:
         ap.error("--only 只能与 --backfill 连用")
     if args.pool_generations and not args.analyze:
         ap.error("--pool-generations 只能与 --analyze 连用")
     if args.backfill:
         only = [s.strip() for s in args.only.split(",") if s.strip()] if args.only else None
-        st = backfill(db_path=db, only=only, dry_run=args.dry_run)
-        if args.dry_run:
+        dry = not args.apply   # v0.45.419：回填缺省 dry-run（旧缺省直接写库且不备份）
+        bk = None
+        if not dry:
+            from data_migrations.runner import backup_before_write
+            if not db.exists():
+                # 空数据根里从 swarm 文件从零建库（恢复演练的真用法）：没有库就没有东西可备份
+                print("无库可备份（库尚不存在，将由回填新建）")
+            else:
+                try:
+                    bk = backup_before_write(db, "signal-archive-backfill")
+                except Exception as e:  # noqa: BLE001 —— 库在却备不了就不写
+                    print(f"❌ 写库前备份失败（{type(e).__name__}: {e}），已中止未写库。", file=sys.stderr)
+                    return 2
+                print(f"已备份 → {bk}")
+        st = backfill(db_path=db, only=only, dry_run=dry)
+        if dry:
             print(f"🔍 dry-run（未写库）：{st['files']} 个文件（跳过 {st['skipped']}）"
                   f" → 新增 {st['new']} / 改值 {st['changed']} / 不变 {st['same']}")
             for s, c in sorted(st["by_signal"].items()):
@@ -1700,6 +2140,9 @@ def main() -> int:
         else:
             print(f"✅ 回填完成：{st['files']} 个文件 → {st['rows']} 行"
                   f"（跳过 {st['skipped']}）")
+            from data_migrations.runner import record_tool_run
+            record_tool_run("signal_archive.backfill", rows_affected=st["rows"], backup=str(bk) if bk else None,
+                            args=f"--only {args.only}" if args.only else "", db_path=db)
 
     if args.list:
         if not db.exists():
@@ -1707,7 +2150,8 @@ def main() -> int:
             # CREATE TABLE ⇒ 数据根找错时凭空造出一个 pheromone.db，此后别的模块「库不存在」的
             # 判定全部失效（变成「表不存在 / 没数据」）。表缺失的旧库照旧由 ensure_schema 补表。
             print(f"❓ 无法判定：样本库不存在：{db}（--list 只读、不建库；"
-                  "未设 ALPHA_HIVE_HOME / ALPHA_HIVE_DB_PATH 时 PATHS.db 回落到代码目录）", file=sys.stderr)
+                  "未设 ALPHA_HIVE_HOME / ALPHA_HIVE_DB_PATH 时 PATHS.db 取缺省数据根 ~/alpha-hive-data 下的库）",
+                  file=sys.stderr)
             return 3
         ensure_schema(db)
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)

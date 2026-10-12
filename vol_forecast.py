@@ -228,7 +228,8 @@ def main() -> int:
         # 缺库 ≠ 当日无归档（v0.45.382）：原先两者同一句「先跑 --backfill」——库找错了地方时
         # 照做会在错的数据根下新建一个库，把「找错地方」固化下来
         print(f"❓ {args.date} 无法判定：样本库不存在：{db}（这不是「无归档信号」；"
-              "未设 ALPHA_HIVE_HOME / ALPHA_HIVE_DB_PATH 时 PATHS.db 回落到代码目录——先核对数据根，别急着 --backfill）",
+              "未设 ALPHA_HIVE_HOME / ALPHA_HIVE_DB_PATH 时 PATHS.db 取缺省数据根 ~/alpha-hive-data 下的库"
+              "——先核对数据根，别急着 --backfill）",
               file=sys.stderr)
         return 3
     rows = load_day(args.date, db)

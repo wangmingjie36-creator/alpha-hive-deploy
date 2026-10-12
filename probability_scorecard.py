@@ -187,7 +187,7 @@ _ML_ESTIMATOR_GENERATIONS = [
      "降级模型 `SimpleMLModel` 上同一改动 Δ=+0.041，重训后的 HGB 也可能不同。"
      "**估计量的定义变了就登记，不以当日输出恰好相同为免登记的理由。**"
      "以上两项与前一代不可比"),
-    ("2026-09-28", "v0.45.334+v0.45.340+v0.45.349+v0.45.357+v0.45.366+v0.45.369",
+    ("2026-09-28", "v0.45.334+v0.45.340+v0.45.349+v0.45.357+v0.45.366+v0.45.369+v0.45.383+v0.45.423",
      "三个版本的边界同在 09-28，合并为一代（照 v0.45.146+v0.45.147 的先例：本表要求日期唯一，"
      "09-28 起适用的这条标签必须把同日改动列全）。标签由「v0.45.334」改为合并标签时 09-28 尚未到来、"
      "该代 0 份报告，改名不改任何已有样本的归属。"
@@ -228,7 +228,29 @@ _ML_ESTIMATOR_GENERATIONS = [
      "【v0.45.369】（同日零代价；**改名时 09-28 已有 1 天报告**，归属不变——仍是同一代，只换标签）：OracleBee 期权数据"
      "「可用」改按 OptionsAgent 的 data_quality 判 ⇒ 断链那几天 Queen 的 data_real_pct 与 Oracle 投票权重变 ⇒ "
      "`final_score` 特征只在断链行换定义（09-28 30/30 取到链，新旧逐字节相同，见 `ic_rerun_readiness` 同版条目）。"
-     "同样**没有重放 Δprobability**。"),
+     "同样**没有重放 Δprobability**。"
+     "【v0.45.383】（同日零代价；**改名时 09-28 已有 1 天报告**，归属不变——仍是同一代，只换标签）：日线完整性校验 ⇒ "
+     "缺口日的 `iv_rank` 置空、Oracle 期权分的 `iv_signal` 走中性 ⇒ Oracle 分即 odds 维分变，`odds_score` 特征直接换定义；"
+     "Oracle 方向随分数带变 ⇒ `agent_agreement` 与 `final_score` 两个特征跟着变。**只在「最后 21 根内缺交易日」的标的×日期上变**；"
+     "09-28 30/30 无缺口（29 只唯一证明 + VKTX 按天推断，证据冻结在 `experiments/hv_gap_equivalence_20260928.json`，"
+     "见 `ic_rerun_readiness` 同版条目），新旧逐项相同。同样**没有重放 Δprobability**。"
+     "【v0.45.423】（同日零代价；**改名时 09-28 已有 8 天报告**（09-28~10-07），归属不变——仍是同一代，只换标签）："
+     "twelve_data 当日那根改按交易所收盘判 ⇒ 只有两条 Twelve Data **兜底**路径换量：yfinance 日线抛错时的成交量回落"
+     "（Buzz 分 ⇒ sentiment 维、拥挤度 ⇒ Rival 的 crowding 特征）与日线缺口第二源（iv_rank ⇒ odds_score，同 v0.45.383）；"
+     "`final_score` / `agent_agreement` 随之变。**只在兜底的标的×日期上变**；09-28~10-07 共 240 对逐项证明没走兜底"
+     "（`ic_rerun_readiness._equiv_td_session_bar`），新旧逐项相同。同样**没有重放 Δprobability**。"),
+    ("2026-10-09", "v0.45.441+v0.45.445",
+     "Scout 拥挤度去掉 `consensus_strength`（看多同伴数；Scout 与同伴并行、读板时同伴没发布 ⇒ 27/30 恒为 0）。"
+     "**两个 ML 特征的上游变了，`_prepare_ml_input` 本身一行没动**：① `crowding_score` 的唯一来源是蜂群 **signal 维度分 × 10**"
+     "（v0.45.146，不是 Scout 的真拥挤度），而 signal 维度就是 Scout 的分——Scout 分平均 −0.34（最大 1.14），特征随之平均 −3.4（最大 −11.4）；"
+     "② `agent_agreement` 取自各蜂方向，Scout 方向翻了一部分（规则层 17/270）。另 `final_score` 随方向票变（Queen 重放 111 份：最终方向翻 3、"
+     "final_score 变 2 行、最大 0.94）。**非等价、每个标的×日期都变**（crowding_score 平均 +5.67 ⇒ Scout 分变），不像 v0.45.423 那样只在兜底日变。"
+     "**没有重放 Δprobability**（同 v0.45.349 / 383 / 423）。此日之前的 `ml_probability` 与之后不可比；"
+     "世代边界另见 `ic_rerun_readiness._COHORT_HISTORY` 同版条目（2026-10-09，上线前 0 份报告）。"
+     "同日落地的第二批【v0.45.445】（两批合并为一代，同 09-06 / 09-07 的先例；`ic_rerun_readiness._COHORT_HISTORY` 里仍是两条同日边界）："
+     "新闻主源 AV → Massive：BuzzBee news 通道换了逐文章标签的分类器 ⇒ sentiment 维分 ⇒ `final_score` 特征的上游定义变"
+     "（`_prepare_ml_input` 一行没动）；Buzz 方向随之变 ⇒ `agent_agreement` 跟着变。幅度与校准见 `ic_rerun_readiness` 同版条目"
+     "（Massive 同票对 AV 时代均值 +1.5 / 中位 −1.0，Yahoo −27.1）。按 v0.45.334 条「估计量的定义变了就登记」登记，**没有重放 Δprobability**。"),
 ]
 
 

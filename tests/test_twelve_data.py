@@ -687,7 +687,9 @@ class TestOneFetchPerTickerPerScan:
             f"顺序 {order} 下同一只票的日线被取了 {http.n} 遍（应为 1）："
             f"{[u.split('outputsize=')[1][:6] for u in http.calls]}")
         # 三方都真的拿到了东西 —— 「只发一次请求」若靠的是谁没拿到数，那不叫省
-        assert out["options_paper_leg"] == 100.0 + 129
+        # （v0.45.433 起 `_default_close` 返回自报场次的 dict：价 + 它属于哪一场）
+        assert out["options_paper_leg"]["price"] == 100.0 + 129
+        assert out["options_paper_leg"]["session"] == _BARS_AS_OF
         assert out["vrp_signal"] and len(out["vrp_signal"]) == 120
         assert out["portfolio_greeks"] and len(out["portfolio_greeks"]) == 120
 

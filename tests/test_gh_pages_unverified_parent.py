@@ -423,32 +423,24 @@ class TestResultReachesStatusAndAlerts:
             "success": False, "attempts": 4, "parent_verified": False, "commit": "316ba1dd" * 5,
             "last_error": "ssh: connect to host github.com port 22: Undefined error: 0",
             "transport_probe": {"verdict": "dns_failed", "meaning": gtp.VERDICT_MEANING["dns_failed"]}})
-        a, alerts = self._alerts(tmp_path, {"git_push": {"success": True}, "gh_pages": ghp})
+        a, alerts = self._alerts(tmp_path, {"gh_pages": ghp})
         hit = [x for x in alerts if "gh-pages 部署失败" in x.message]
         assert hit and hit[0].level.name == "HIGH", [x.message for x in alerts]
         assert "port 22" in hit[0].details["原因"] and "dns_failed" in hit[0].details["传输探测"]
 
     def test_missing_gh_pages_is_a_skipped_check_not_a_pass(self, tmp_path):
-        a, alerts = self._alerts(tmp_path, {"git_push": {"success": True}})
+        a, alerts = self._alerts(tmp_path, {})
         assert not any("gh-pages" in x.message for x in alerts)
         assert any("gh-pages" in s for s in a.checks_skipped), a.checks_skipped
 
     def test_successful_gh_pages_is_quiet(self, tmp_path):
-        a, alerts = self._alerts(tmp_path, {"git_push": {"success": True},
-                                            "gh_pages": {"success": True, "action": "pushed_new_commit"}})
+        a, alerts = self._alerts(tmp_path, {"gh_pages": {"success": True, "action": "pushed_new_commit"}})
         assert not any("gh-pages" in x.message for x in alerts)
         assert not any("gh-pages" in s for s in a.checks_skipped)
 
-    def test_main_push_alert_no_longer_vouches_for_the_website(self, tmp_path):
-        a, alerts = self._alerts(tmp_path, {"git_push": {"success": False, "output": "ssh: ..."},
-                                            "gh_pages": {"success": True}})
-        hit = [x for x in alerts if "main 推送失败" in x.message]
-        assert hit and "不受影响" not in hit[0].details["建议"], hit[0].details
-
     @pytest.mark.parametrize("behaviour", ["returns_failure", "raises", "returns_none"])
-    def test_auto_commit_and_notify_records_gh_pages(self, tmp_path, monkeypatch, behaviour):
+    def test_deploy_and_notify_records_gh_pages(self, tmp_path, monkeypatch, behaviour):
         """部署结局必须出现在 `results["gh_pages"]`，三种形状（返回失败 / 抛 / 返回 None）都不许丢。"""
-        import production_sync
 
         def _deploy(reporter):
             if behaviour == "raises":
@@ -458,12 +450,8 @@ class TestResultReachesStatusAndAlerts:
             return {"success": False, "last_error": "ssh: port 22"}
 
         monkeypatch.setattr(rd, "deploy_static_to_ghpages", _deploy)
-        monkeypatch.setattr(production_sync, "push_main",
-                            lambda git, merge_label=None: {"success": True, "integration": "fast_forward"})
-        git = MagicMock()
-        git.status.return_value = {"modified_files": []}
-        reporter = SimpleNamespace(agent_helper=SimpleNamespace(git=git), date_str="2026-09-25")
-        res = rd.auto_commit_and_notify(reporter, {"swarm_metadata": {"x": 1}})
+        reporter = SimpleNamespace(agent_helper=SimpleNamespace(git=MagicMock()), date_str="2026-09-25")
+        res = rd.deploy_and_notify(reporter, {"swarm_metadata": {"x": 1}})
         assert res["gh_pages"]["success"] is False, res
         if behaviour == "raises":
             assert "Too many open files" in res["gh_pages"]["error"]
@@ -488,10 +476,10 @@ class TestResultReachesStatusAndAlerts:
             def save_report(self, report):
                 return "/dev/null"
 
-            def auto_commit_and_notify(self, report):
+            def deploy_and_notify(self, report):
                 if deploy == "raises":
                     raise OSError("Too many open files")
-                return {"git_push": {"success": True}, "deploy_env": "production",
+                return {"deploy_env": "production",
                         "gh_pages": {"success": False, "attempts": 4, "last_error": "port 22"}}
 
         written = []

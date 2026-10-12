@@ -348,6 +348,29 @@ class TestPublishedDates:
                 assert official in table, f"官方日期 {official} 不在表里"
                 assert stale not in table, f"推算错值 {stale} 又回来了"
 
+    def test_past_dates_are_the_actual_releases(self):
+        """🔴 回归：v0.45.405 按 BLS / BEA 归档（实际发布 + 原文 embargo 行）修正的过去日期。
+
+        两类错：推算指纹（07-11、09-10、04-29、07-29……早于停摆或与停摆无关）与
+        停摆推迟。被取消的发布（2025 年 10 月的 CPI 与就业报告）是**删掉**，
+        不许按「本该在那个月」再补一个日期回来。"""
+        from economic_calendar import _CPI, _NFP, _GDP
+        # 官方实际发布日 → 曾经的错值
+        for table, fixes in (
+            (_CPI, {"2025-07-15": "2025-07-11", "2025-09-11": "2025-09-10",
+                    "2025-10-24": "2025-10-14", "2025-12-18": "2025-12-10"}),
+            (_NFP, {"2025-11-20": "2025-10-03", "2025-12-16": "2025-12-05"}),
+            (_GDP, {"2025-12-23": "2025-10-29", "2026-02-20": "2026-01-29",
+                    "2026-04-30": "2026-04-29", "2026-07-30": "2026-07-29"}),
+        ):
+            for official, stale in fixes.items():
+                assert official in table, f"官方日期 {official} 不在表里"
+                assert stale not in table, f"错值 {stale} 又回来了"
+        # 官方未发布（归档原文 Not published because of 2025 lapse in appropriations）
+        assert "2025-11-12" not in _CPI and "2025-11-07" not in _NFP
+        assert [d for d in _CPI if d.startswith("2025-11")] == []
+        assert [d for d in _NFP if d.startswith("2025-10")] == []
+
     def test_bls_tables_have_no_unpublished_2027_entries(self):
         """BLS/BEA 2027 日程未发布时，表里不许出现 2027 —— 空着，等官方"""
         from economic_calendar import _TABLE_SPECS

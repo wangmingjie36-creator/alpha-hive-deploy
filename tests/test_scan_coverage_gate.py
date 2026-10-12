@@ -30,7 +30,8 @@ FULL = {
     "OracleBeeEcho": {"rv_30d": 30.0, "iv_rank": 45.0, "iv_current": 50.0,
                       "iv_skew_ratio": 1.02, "put_call_ratio": 0.9,
                       "iv_rv_spread": 20.0},
-    "ChronosBeeHorizon": {"catalysts": [{"event": "Earnings"}]},
+    "ChronosBeeHorizon": {"catalysts": [{"event": "Earnings"}],
+                          "analyst_targets": {"target_mean": 100.0}},
 }
 T30 = [f"T{i:02d}" for i in range(30)]
 
@@ -329,7 +330,8 @@ class TestOutFileCompleteness:
                 "rv_30d": 30.0, "iv_rank": 45.0, "iv_current": 50.0,
                 "iv_skew_ratio": 1.0, "put_call_ratio": 0.9, "iv_rv_spread": 20.0,
                 "iv_rank_source": "yfinance", "data_quality": "real"}},
-            "ChronosBeeHorizon": {"details": {"catalysts": [{"e": 1}]}}}
+            "ChronosBeeHorizon": {"details": {"catalysts": [{"e": 1}],
+                                                     "analyst_targets": {"target_mean": 1.0}}}}
 
     def _mk(self, mut=None):
         r = {f"T{i}": {"agent_details": json.loads(json.dumps(self.FULL))}

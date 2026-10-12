@@ -30,7 +30,7 @@ def _idx(tmp_path, ticker, rows):
 @pytest.fixture(autouse=True)
 def _no_db(monkeypatch):
     """隔离生产 pheromone.db，测试只看索引"""
-    monkeypatch.setattr(ph, "_load_db_prices", lambda t, db_path="pheromone.db": {})
+    monkeypatch.setattr(ph, "_load_db_prices", lambda t, db_path=None: {})
 
 
 class TestMomentumHonesty:
@@ -44,9 +44,10 @@ class TestMomentumHonesty:
         assert ph.momentum_5d("NOPE", str(tmp_path)) is None
 
     def test_computes_from_real_closes(self, tmp_path):
-        # 8/7(五) 8/10 8/11 8/12 8/13 8/14 —— 8/14 距 8/7 恰好 5 个交易日
+        # 8/7(五) 8/10 8/11 8/12 8/13 8/14 —— 窗口 = 4 个交易日（与主路径 iloc[-1]/iloc[-5]
+        # 同口径，v0.45.469）⇒ 锚点 8/10；若错取 5 个交易日（8/7）会得 +22.2%
         _idx(tmp_path, "NVDA", [
-            ("2026-08-07", 100.0), ("2026-08-10", 101.0), ("2026-08-11", 102.0),
+            ("2026-08-07", 90.0), ("2026-08-10", 100.0), ("2026-08-11", 102.0),
             ("2026-08-12", 103.0), ("2026-08-13", 104.0), ("2026-08-14", 110.0),
         ])
         assert ph.momentum_5d("NVDA", str(tmp_path)) == pytest.approx(10.0, abs=0.01)
@@ -58,7 +59,7 @@ class TestTradingDayAnchoring:
         那样算出来的数字挂着"5 日动量"的名字却名不副实"""
         _idx(tmp_path, "NVDA", [
             ("2026-06-01", 50.0),   # 很久以前
-            ("2026-08-07", 100.0),  # 距 8/14 恰好 5 个交易日 → 应选这个
+            ("2026-08-07", 100.0),  # 8/10、8/11 漏扫 ⇒ 第一个 ≥4 个交易日的锚点（距 5）→ 应选这个
             ("2026-08-12", 103.0),
             ("2026-08-13", 104.0),
             ("2026-08-14", 110.0),
@@ -113,7 +114,7 @@ class TestDBAuthority:
         """QCOM 2026-08-14：期权快照 185.0，DB 权威价 165.94。DB 必须赢。"""
         _idx(tmp_path, "QCOM", [("2026-08-13", 164.47), ("2026-08-14", 185.0)])
         monkeypatch.setattr(ph, "_load_db_prices",
-                            lambda t, db_path="pheromone.db": {"2026-08-14": 165.94})
+                            lambda t, db_path=None: {"2026-08-14": 165.94})
         assert dict(ph.load_price_history("QCOM", str(tmp_path)))["2026-08-14"] == 165.94
 
 

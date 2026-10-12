@@ -174,3 +174,28 @@ def test_backfill_does_not_resurrect(db, tmp_path, monkeypatch):
         "SELECT COUNT(*) FROM signal_archive WHERE date=? AND signal='options.iv_current'",
         (q["date"],)).fetchone()[0]
     assert n == 0, "backfill 让被隔离的污染复活了"
+
+
+class TestFakeSnapshotQuarantineV0_45_472:
+    """v0.45.472：期权快照现价 / 整条链不是当天观测的 (日期, 标的)，以及 CBOE 时代退到 yfinance 备用链的 GEX。
+
+    变红的变异：删掉任一条 v0.45.472 条目；或把 yfinance 那批的 signals 扩成五类（误伤当天真实的 IV / P/C / OI）。
+    """
+
+    def test_sample_chain_day_is_quarantined_whole(self):
+        for sig in ("options.iv_current", "options.put_call_ratio", "options.gamma_exposure",
+                    "options.total_oi", "bear.options_bear"):
+            assert sa.is_quarantined("2026-06-22", "AMZN", sig), sig
+
+    def test_strike_shaped_price_day_is_quarantined(self):
+        assert sa.is_quarantined("2026-08-14", "QCOM", "options.gamma_exposure")
+
+    def test_yfinance_fallback_quarantines_gex_only(self):
+        assert sa.is_quarantined("2026-09-10", "BILI", "options.gamma_exposure")
+        assert not sa.is_quarantined("2026-09-10", "BILI", "options.iv_current")
+        assert not sa.is_quarantined("2026-09-10", "BILI", "options.put_call_ratio")
+
+    def test_after_hours_price_days_are_not_quarantined(self):
+        """财报日盘后价是真实价（另一类、已修），不是假现价，不隔离。"""
+        assert not sa.is_quarantined("2026-08-26", "CRM", "options.gamma_exposure")
+        assert not sa.is_quarantined("2026-07-29", "MSFT", "options.iv_current")

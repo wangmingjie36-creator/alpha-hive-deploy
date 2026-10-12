@@ -5,13 +5,18 @@
 密钥文件手动跑的一次性验收（见 CHANGELOG），不适合写进常跑的测试文件
 （那样等于把「密钥去哪扫」的清单和一次真实凭据样本焊进了 git 历史）。
 """
+import fnmatch
+import glob
 import json
 import os
 import pwd
+import re
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -24,16 +29,18 @@ from data_backup.scan_secrets import (
     load_known_secrets_with_diagnostics,
     scan_directory,
 )
-from data_backup.sqlite_readonly import HotJournalError, db_open_uri
+from data_backup.sqlite_readonly import HotJournalError, db_open_uri, sha256_file
 
 
 @pytest.fixture
 def _sandbox_home(tmp_path_factory, monkeypatch):
-    """`run_backup.main()` 的 `--backup-dir/--status-file/--history-file` 默认值都是
+    """`run_backup.main()` 的 `--status-file/--history-file` 默认值是
     `Path.home() / "alpha-hive-data" / ...`——真实数据根。`_isolate_env` 只隔离
     `ALPHA_HIVE_*`、不隔离 `$HOME`，所以没显式传路径的测试会把伪造记录写进真实
     `backup_status_history.jsonl`（v0.45.284 给 `run()` 加追加历史后，
     `TestRunBackupStageReporting` 的 7 个老测试没跟着传 `--history-file`）。
+    `--backup-dir` 自 v0.45.414 起不跟 `$HOME`、跟 `PATHS.data_backup_repo`（`ALPHA_HIVE_HOME`），
+    由 `_isolate_env` 隔离——见 `TestBackupRepoFollowsPaths`。
     """
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
@@ -893,6 +900,110 @@ class TestRunBackupStageReporting:
             "如果远端头变了说明又发生了「假装成功」")
 
 
+class TestForeignEntriesRefused:
+    """备份仓里只许有本轮导出的东西（v0.45.427）。
+
+    2026-10-03 测试夹具 `bk_src`（带 `.git` 的嵌套仓库）被搬进生产备份仓库，10-05 的备份 `git add -A` 把它**静默**封成
+    gitlink 提交进了永久备份历史（`b43a5de`），四天没人红。红组照搬那两种形状（未跟踪的嵌套仓库 / 已成 gitlink），
+    对照组钉住「首次备份全是未跟踪产物」「已跟踪的陈旧文件」不被误拦——误拦等于让生产备份天天失败。
+    """
+    _h = TestRunBackupStageReporting
+
+    def _run(self, tmp_path, backup_dir):
+        status_file = tmp_path / "status.json"
+        src = tmp_path / "src"
+        if not src.exists():                       # 同一条测试里备份两轮：数据源只建一次
+            src = self._h._synthetic_src(None, tmp_path)
+        rc = run_backup.main(["--src", str(src),
+                              "--backup-dir", str(backup_dir), "--status-file", str(status_file)])
+        return rc, json.loads(status_file.read_text())
+
+    @staticmethod
+    def _commits(backup_dir):
+        r = subprocess.run(["git", "rev-list", "--all", "--count"], cwd=str(backup_dir), capture_output=True, text=True)
+        return int(r.stdout.strip() or 0) if r.returncode == 0 else 0
+
+    @staticmethod
+    def _nested_repo(path):
+        path.mkdir(parents=True)
+        (path / "paper_portfolio_state").mkdir()
+        (path / "paper_portfolio_state/meta.json").write_text('{"version": "test"}')
+        g = ["git", "-c", "user.name=t", "-c", "user.email=t@t.invalid", "-c", "commit.gpgsign=false"]
+        subprocess.run(["git", "init", "-q"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run([*g, "add", "-A"], cwd=str(path), check=True, capture_output=True)
+        subprocess.run([*g, "commit", "-qm", "c0"], cwd=str(path), check=True, capture_output=True)
+
+    def test_first_backup_with_only_exported_files_is_not_refused(self, tmp_path, monkeypatch):
+        """对照：首次备份时工作区全是未跟踪的导出产物——不能被当成外来。"""
+        _bypass_secret_scan(monkeypatch)
+        backup_dir = tmp_path / "backup"
+        self._h._init_backup_git_repo(None, backup_dir)
+        rc, st = self._run(tmp_path, backup_dir)
+        assert st["stage"] == "push" and st["commit"]["made"] is True, st      # 没配远端 ⇒ 停在 push，提交已成
+        assert "foreign_entries" not in st
+
+    def test_stale_tracked_file_not_in_this_export_is_not_refused(self, tmp_path, monkeypatch):
+        """对照：已跟踪、本轮没导出的陈旧文件（导出不删数据根里已消失的根文件）早已进了备份历史，不算外来。"""
+        _bypass_secret_scan(monkeypatch)
+        backup_dir = tmp_path / "backup"
+        self._h._init_backup_git_repo(None, backup_dir)
+        self._run(tmp_path, backup_dir)
+        (backup_dir / "alpha-hive-daily-2026-01-01.md").write_text("old report")
+        subprocess.run(["git", "add", "-A"], cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "old"], cwd=str(backup_dir), check=True, capture_output=True)
+        rc, st = self._run(tmp_path, backup_dir)
+        assert st["stage"] == "push", st
+
+    def test_untracked_foreign_file_is_refused_and_nothing_committed(self, tmp_path, monkeypatch):
+        _bypass_secret_scan(monkeypatch)
+        backup_dir = tmp_path / "backup"
+        self._h._init_backup_git_repo(None, backup_dir)
+        (backup_dir / "notes_from_someone.txt").write_text("x")
+        rc, st = self._run(tmp_path, backup_dir)
+        assert rc == 2 and st["stage"] == "foreign_entries" and st["ok"] is False, st
+        assert st["foreign_entries"] == ["notes_from_someone.txt"] and st["foreign_count"] == 1, st
+        assert self._commits(backup_dir) == 0, "拒绝了还提交了"
+
+    def test_fixture_repo_moved_into_backup_is_refused(self, tmp_path, monkeypatch):
+        """10-03 原形：带 `.git` 的夹具仓库被搬进备份仓（未跟踪的嵌套仓库）。"""
+        _bypass_secret_scan(monkeypatch)
+        backup_dir = tmp_path / "backup"
+        self._h._init_backup_git_repo(None, backup_dir)
+        self._nested_repo(tmp_path / "bk_src")
+        shutil.move(str(tmp_path / "bk_src"), str(backup_dir))
+        rc, st = self._run(tmp_path, backup_dir)
+        assert st["stage"] == "foreign_entries" and "嵌套仓库:bk_src/" in st["foreign_entries"], st
+        assert self._commits(backup_dir) == 0
+
+    def test_already_sealed_gitlink_is_refused(self, tmp_path, monkeypatch):
+        """10-05 之后生产备份仓的现状：嵌套仓库已被 `git add -A` 封成 gitlink（mode 160000）。后续每轮都要红，不能因为「已跟踪」就放过。"""
+        _bypass_secret_scan(monkeypatch)
+        backup_dir = tmp_path / "backup"
+        self._h._init_backup_git_repo(None, backup_dir)
+        self._nested_repo(backup_dir / "bk_src")
+        subprocess.run(["git", "add", "-A"], cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "sealed"], cwd=str(backup_dir), check=True, capture_output=True)
+        ls = subprocess.run(["git", "ls-files", "-s", "bk_src"], cwd=str(backup_dir), capture_output=True, text=True).stdout
+        assert ls.startswith("160000 "), f"前提：git add -A 把嵌套仓库封成 gitlink：{ls!r}"
+        rc, st = self._run(tmp_path, backup_dir)
+        assert st["stage"] == "foreign_entries" and st["foreign_entries"] == ["嵌套仓库:bk_src/"], st
+        assert self._commits(backup_dir) == 1, "只该有夹具那一个提交"
+
+    def test_judgment_failure_is_refused_not_waved_through(self, tmp_path, monkeypatch):
+        """判不了（git 出错 / SHA256SUMS 读不了）⇒ 同样不提交，不能当「没有外来条目」放行。"""
+        _bypass_secret_scan(monkeypatch)
+
+        def boom(_d):
+            raise RuntimeError("git status 失败（模拟）")
+
+        monkeypatch.setattr(run_backup, "foreign_entries", boom)
+        backup_dir = tmp_path / "backup"
+        self._h._init_backup_git_repo(None, backup_dir)
+        rc, st = self._run(tmp_path, backup_dir)
+        assert rc == 2 and st["stage"] == "foreign_entries" and "无法核对" in st["error"], st
+        assert self._commits(backup_dir) == 0
+
+
 class TestRunBackupHistoryAppend:
     """`run()` 每条退出路径都要追加一行到 `history_file`（v0.45.284）——
     这是 `backup_continuity.py` 判"连续 N 天未识别/陈旧"唯一能读到的历史，
@@ -1139,7 +1250,157 @@ class TestHomeSandboxHasTeeth:
         assert (logs / "backup_status.json").is_file()
 
 
-from tests._orchestrator import repo_orchestrator_text  # 仓库里那份（v0.45.353）
+def _forbid_side_effects(monkeypatch):
+    """守卫若失效，`run()` 会往下走到 git init / 导出——这里一律变成可见的失败而不是真去做，
+    `ALPHA_HIVE_HOME` 指到检出的用例里那等于在代码检出里动手。返回调用记录供断言「一次都没碰」。"""
+    calls = []
+
+    def no_git(args, cwd, timeout=None):
+        calls.append(("git", args, str(cwd)))
+        raise AssertionError(f"不该跑 git：{args} @ {cwd}")
+
+    def no_export(*a, **k):
+        calls.append(("export", a))
+        raise AssertionError("不该导出")
+
+    monkeypatch.setattr(run_backup, "_run_git", no_git)
+    monkeypatch.setattr(export_mod, "run_export", no_export)
+    return calls
+
+
+class TestBackupRepoFollowsPaths:
+    """v0.45.414：备份仓缺省位置的唯一真相是 `PATHS.data_backup_repo`，调用时求值。
+
+    此前 `run_backup.main` / `export.main` 缺省值与编排器 Step 14 各写死一份
+    `~/alpha-hive-data/_git_backup`。生产里 `ALPHA_HIVE_HOME=~/alpha-hive-data` ⇒ 新旧同值；
+    `ALPHA_HIVE_HOME` 未设时 v0.45.422 起取 `$HOME/alpha-hive-data/_git_backup`（之前落进代码检出）；
+    被显式设成代码检出（阶段 5 回退）⇒ 由「备份仓不许在代码仓库里」拦下。
+    """
+
+    def _capture_run(self, monkeypatch):
+        seen = []
+
+        def spy(src, backup_dir, *a, **k):
+            seen.append(Path(backup_dir))
+            return {"ok": True, "stage": "done"}
+
+        monkeypatch.setattr(run_backup, "run", spy)
+        return seen
+
+    def test_run_backup_default_follows_alpha_hive_home_at_call_time(self, tmp_path, monkeypatch, _sandbox_home):
+        seen = self._capture_run(monkeypatch)
+        src = tmp_path / "src"
+        src.mkdir()
+        for home in (tmp_path / "data_a", tmp_path / "data_b"):   # 两次不同 env ⇒ 两个值：没被冻住
+            monkeypatch.setenv("ALPHA_HIVE_HOME", str(home))
+            assert run_backup.main(["--src", str(src)]) == 0
+        assert seen == [tmp_path / "data_a" / "_git_backup", tmp_path / "data_b" / "_git_backup"]
+        assert not any(p.is_relative_to(_sandbox_home) for p in seen), "缺省值还在跟 $HOME 走"
+
+    def test_explicit_backup_dir_still_wins(self, tmp_path, monkeypatch):
+        """合入后首个扫描日跑的是旧编排器（仍传 --backup-dir）+ 新 Python——必须照旧用传进来的。"""
+        seen = self._capture_run(monkeypatch)
+        assert run_backup.main(["--src", str(tmp_path), "--backup-dir", str(tmp_path / "explicit")]) == 0
+        assert seen == [tmp_path / "explicit"]
+
+    def test_explicit_empty_path_is_not_swapped_for_default(self, tmp_path, monkeypatch):
+        """二次检查补：用真值判断选缺省，会把显式空串（调用方变量为空）悄悄换成缺省值——
+        调用方的 bug 被改写成「没发生」。显式值一律原样用，与改动前同（`Path("")` 即 cwd，守卫照常判）。"""
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(tmp_path / "data"))
+        monkeypatch.chdir(tmp_path)   # 空串 = cwd：钉在 tmp，不让判定随起跑目录变
+        seen = self._capture_run(monkeypatch)
+        assert run_backup.main(["--src", str(tmp_path), "--backup-dir", ""]) == 0
+        exported = []
+        monkeypatch.setattr(export_mod, "run_export", lambda src, out: exported.append(Path(out)) or {"duration_seconds": 0})
+        monkeypatch.setattr(export_mod, "write_manifest_and_sums", lambda out, m: None)
+        assert export_mod.main(["--src", str(tmp_path), "--out", ""]) == 0
+        assert seen == exported == [Path("")]
+
+    def test_export_main_default_follows_alpha_hive_home(self, tmp_path, monkeypatch):
+        seen = []
+        monkeypatch.setattr(export_mod, "run_export", lambda src, out: seen.append(Path(out)) or {"duration_seconds": 0})
+        monkeypatch.setattr(export_mod, "write_manifest_and_sums", lambda out, m: None)
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(tmp_path / "data"))
+        assert export_mod.main(["--src", str(tmp_path)]) == 0
+        assert seen == [tmp_path / "data" / "_git_backup"]
+
+    @pytest.mark.parametrize("rel", ["_git_backup", "."])
+    def test_run_refuses_backup_repo_inside_code_repo(self, tmp_path, monkeypatch, rel):
+        code = tmp_path / "code"
+        code.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(code))
+        backup_dir = (code / rel)
+        backup_dir.mkdir(exist_ok=True)
+        calls = _forbid_side_effects(monkeypatch)
+        status = run_backup.run(tmp_path / "src", backup_dir, status_file=tmp_path / "s.json",
+                                history_file=tmp_path / "h.jsonl")
+        assert (status["stage"], status["ok"], status.get("refused")) == ("init", False, "inside_code_repo")
+        assert calls == []
+        assert not (backup_dir / ".git").exists()
+        assert json.loads((tmp_path / "s.json").read_text())["refused"] == "inside_code_repo"
+
+    def test_sibling_of_code_repo_is_not_refused(self, tmp_path, monkeypatch):
+        """前缀相同不算「在里面」：`/x/code_backup` 不在 `/x/code` 里（字符串前缀比较会误伤）。"""
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(tmp_path / "code"))
+        assert export_mod.backup_repo_inside_code_repo(tmp_path / "code_backup") is None
+        assert export_mod.backup_repo_inside_code_repo(tmp_path / "code" / "x") == (tmp_path / "code").resolve()
+
+    @pytest.mark.parametrize("alias", ["case", "firmlink"])
+    def test_same_directory_spelled_differently_is_refused(self, tmp_path, monkeypatch, alias):
+        """二次检查补：`resolve()` 不折叠大小写（APFS）与固件链接（`/System/Volumes/Data/…`），
+        字符串判定会放行同一目录的另一种写法。按 inode 判。不 skip：别名在这台机器上不存在
+        （大小写敏感的 FS / 非 macOS）时它就是另一个目录，断言「不拒绝」同样是真断言。"""
+        code = (tmp_path / "code")
+        code.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(code))
+        spelled = Path(str(code).swapcase()) if alias == "case" else Path("/System/Volumes/Data" + str(code.resolve()))
+        same_dir = spelled.exists() and os.path.samefile(spelled, code)
+        got = export_mod.backup_repo_inside_code_repo(spelled / "_git_backup")
+        assert got == (code.resolve() if same_dir else None), (spelled, same_dir, got)
+
+    def test_unset_alpha_hive_home_defaults_to_home_data_root(self, tmp_path, monkeypatch, _sandbox_home):
+        """用户交互 shell 没设 `ALPHA_HIVE_HOME`（2026-10-03 实测）：v0.45.422 起缺省 = `$HOME/alpha-hive-data/_git_backup`，
+        与编排器 export 的生产值同址（本文件 HOME 已是沙箱）。此前这里解析到 `<代码检出>/_git_backup`。"""
+        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        seen = self._capture_run(monkeypatch)
+        assert run_backup.main(["--src", str(tmp_path)]) == 0
+        assert seen == [_sandbox_home / "alpha-hive-data" / "_git_backup"]
+        assert export_mod.backup_repo_inside_code_repo(seen[0]) is None
+
+    def test_alpha_hive_home_pointing_at_checkout_is_refused_end_to_end(self, tmp_path, monkeypatch):
+        """阶段 5 回退的配置（`ALPHA_HIVE_HOME` 设成代码检出、不传 --backup-dir）：缺省解析进检出 ⇒
+        CLI 全链路拒绝，rc=2、stage=init。检出用 tmp 替身（`ALPHA_HIVE_GIT_REPO`），git / 导出都是「一调就炸」的桩。"""
+        code = tmp_path / "code"
+        code.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(code))
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(code))
+        default = export_mod.default_backup_repo()
+        assert export_mod.backup_repo_inside_code_repo(default) is not None, default
+        existed_before = default.exists()   # 比前后，不断言「不存在」：检出里若本有残留，不该算守卫的账
+        calls = _forbid_side_effects(monkeypatch)
+        status_file = tmp_path / "s.json"
+        rc = run_backup.main(["--src", str(tmp_path), "--status-file", str(status_file),
+                              "--history-file", str(tmp_path / "h.jsonl")])
+        status = json.loads(status_file.read_text())
+        assert (rc, status["stage"], status.get("refused")) == (2, "init", "inside_code_repo"), status
+        assert calls == []
+        assert default.exists() == existed_before, f"代码检出里被造出了 {default}"
+
+    def test_export_main_refuses_inside_code_repo(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(tmp_path / "code"))
+        calls = _forbid_side_effects(monkeypatch)
+        assert export_mod.main(["--src", str(tmp_path), "--out", str(tmp_path / "code" / "_git_backup")]) == 2
+        assert calls == []
+        assert not (tmp_path / "code").exists()
+
+    def test_orchestrator_does_not_spell_the_backup_repo(self):
+        """位置只在 PATHS：编排器的可执行行里不许再出现 `_git_backup` / `--backup-dir`（注释不算）。"""
+        live = [ln for ln in repo_orchestrator_text().splitlines() if not ln.lstrip().startswith("#")]
+        assert [ln for ln in live if "_git_backup" in ln or "--backup-dir" in ln] == []
+        assert any("run_data_backup.py" in ln for ln in live), "Step 14 的调用不见了——上面那条会空转变绿"
+
+
+from tests._orchestrator import extract_function, repo_orchestrator_text  # 仓库里那份（v0.45.353）
 _STEP14_RC2_START = "elif [ $STEP14_RC -eq 2 ]; then"
 _STEP14_RC2_END = "elif [ $STEP14_RC -eq 124 ]; then"
 
@@ -1187,9 +1448,11 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
     @pytest.mark.parametrize("stage, expect_level, expect_log_substr, expect_status", [
         ("init", "ERROR", "git 仓库初始化失败", "init_failed"),
         ("export", "ERROR", "数据导出失败", "export_failed"),
+        ("foreign_entries", "ERROR", "备份仓里有导出之外的条目", "foreign_entries_failed"),
         ("git_error", "ERROR", "git 调用异常", "git_error_failed"),
         ("commit", "ERROR", "git commit 失败", "commit_failed"),
         ("push", "WARN", "已提交但推送失败", "push_failed"),
+        ("size_budget", "ERROR", "备份仓体量超出预算", "size_budget_failed"),
     ])
     def test_known_fresh_stage_dispatches_correct_message(
         self, tmp_path, stage, expect_level, expect_log_substr, expect_status
@@ -1311,49 +1574,85 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
         assert steps_result["step14_data_backup"]["status"] == "rc1_unverified_failed"
 
 
-_STEP15_START = "if [ $STEP15_RC -eq 0 ]; then"
+_STEP15_START = 'log "INFO" "【Step 15】'
 _STEP15_END = 'log "INFO" "【Final】写入系统状态"'
 
 
 class TestOrchestratorStep15Dispatch:
-    """编排器 Step 15（数据备份连续性体检，v0.45.284）的 rc 分发同样不受版本
-    控制、pytest import 不到——同 `TestOrchestratorStep14StageDispatch` 的做法，
-    抽出真实脚本片段接进最小 bash 沙箱跑，锁定 exit code → 日志级别/文案 →
-    `STEPS_RESULT` 状态字符串的映射，不然这条新加的分发逻辑可能被静默改坏
-    而没有测试报红。
+    """编排器 Step 15（数据备份连续性体检，v0.45.284）的 rc 分发——抽出真实脚本片段接进最小 bash 沙箱跑，
+    锁定 exit code → 日志级别/文案 → `STEPS_RESULT` 状态字符串的映射。
+
+    B（v0.45.385）起这段不再是内联分支链：`run_step` 之后一行 `_apply_step_interp`，判定在
+    `orchestrator_steps.py`（`_base15`）。所以这里贴上原文的两个 helper 与全局量，`run_step` 换成替身：
+    跑 `orchestrator_steps.py` 时转给真解释器；跑 `backup_continuity.py` 时记下参数、把夹具拷到 `--out`
+    （拷贝发生在段内 `STEP15_START` 之后 ⇒ mtime 是本轮的）、返回 `FAKE_RC`。
+    日期按运行时的今天算（不写死）。
     """
 
     def _extract_block(self):
         text = repo_orchestrator_text()
         start = text.index(_STEP15_START)
         end = text.index(_STEP15_END, start)
-        return text[start:end]
+        return text, text[start:end]
 
-    def _run(self, tmp_path, *, step15_rc, continuity_json=None):
-        block = self._extract_block()
-        json_file = tmp_path / "backup_continuity.json"
+    def _run(self, tmp_path, *, step15_rc, continuity_json=None, leftover=None):
+        text, block = self._extract_block()
+        helpers = "\n".join([extract_function(text, "_step_rc_fallback"), extract_function(text, "_apply_step_interp"),
+                             *re.findall(r'^(?:STEP_INTERP_TIMEOUT=\d+|_SI_STATUS="")$', text, re.M)])
+        fixture = tmp_path / "fixture.json"
         if continuity_json is not None:
-            json_file.write_text(json.dumps(continuity_json), encoding="utf-8")
+            fixture.write_text(json.dumps(continuity_json), encoding="utf-8")
+        logdir = tmp_path / "logs"
+        logdir.mkdir()
+        today = date.today().isoformat()
+        out_json = logdir / f"backup_continuity-{today}.json"
+        if leftover is not None:                       # 上一次（同一 DATE_STR）留下的文件
+            out_json.write_text(leftover, encoding="utf-8")
+        args_file = tmp_path / "tool_args.txt"
+        repo_root = Path(__file__).resolve().parent.parent      # 指向代码（真解释器），故用 __file__
         script = f'''
 set -uo pipefail
 log() {{ printf 'LOG\\t%s\\t%s\\n' "$1" "$2"; }}
 PYTHON3={shlex.quote(sys.executable)}
-BACKUP_CONTINUITY_JSON={shlex.quote(str(json_file))}
-STEP15_RC={step15_rc}
-STEP15_DURATION=1
+PROJECT_DIR={shlex.quote(str(repo_root))}
+DATE_STR={shlex.quote(today)}
+LOGDIR={shlex.quote(str(logdir))}
+LOGFILE={shlex.quote(str(logdir / "orchestrator.log"))}
+BACKUP_HISTORY_JSONL={shlex.quote(str(tmp_path / "history.jsonl"))}
+FAKE_RC={step15_rc}
+FAKE_JSON={shlex.quote(str(fixture) if continuity_json is not None else "")}
+ARGS_FILE={shlex.quote(str(args_file))}
 STEPS_RESULT='{{}}'
+{helpers}
+run_step() {{
+    if [ "$1" = "--timeout" ]; then shift 2; fi
+    local script="$1" prev="" out="" a
+    shift
+    if [ "$(basename "$script")" = "orchestrator_steps.py" ]; then "$PYTHON3" "$script" "$@"; return $?; fi
+    printf '%s\\n' "$@" > "$ARGS_FILE"
+    for a in "$@"; do [ "$prev" = "--out" ] && out="$a"; prev="$a"; done
+    if [ -n "$FAKE_JSON" ] && [ -n "$out" ]; then cp "$FAKE_JSON" "$out"; fi
+    return "$FAKE_RC"
+}}
 {block}
 printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
 '''
-        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60, env=env,
+                                cwd=str(tmp_path))
         assert result.returncode == 0, f"bash 片段本身跑挂了：{result.stderr}"
         logs = [tuple(ln.split("\t", 2)[1:]) for ln in result.stdout.splitlines() if ln.startswith("LOG\t")]
         steps_line = next(ln for ln in result.stdout.splitlines() if ln.startswith("STEPS_RESULT_JSON\t"))
         steps_result = json.loads(steps_line.split("\t", 1)[1])
+        self.tool_args = args_file.read_text(encoding="utf-8").splitlines() if args_file.exists() else None
+        self.out_json, self.today = out_json, today
         return logs, steps_result
 
+    _HEALTHY = {"window": {"trading_days": 30}, "backed_up_days": 30, "coverage": 1.0, "longest_gap": 0,
+                "weeks_missed": [], "healthy": True}
+
     def test_healthy_rc0_dispatches_info(self, tmp_path):
-        logs, steps_result = self._run(tmp_path, step15_rc=0)
+        logs, steps_result = self._run(tmp_path, step15_rc=0, continuity_json=self._HEALTHY)
         assert any(lvl == "INFO" and "连续性健康" in msg for lvl, msg in logs), logs
         assert steps_result["step15_backup_continuity"]["status"] == "healthy"
 
@@ -1362,7 +1661,7 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
             "window": {"trading_days": 10}, "backed_up_days": 6, "coverage": 0.6,
             "longest_gap": 4, "weeks_missed": ["2026-W10"],
         })
-        assert any(lvl == "WARN" and "连续性降级" in msg for lvl, msg in logs), logs
+        assert any(lvl == "WARN" and "连续性降级" in msg and "只成功了 6 次" in msg for lvl, msg in logs), logs
         assert steps_result["step15_backup_continuity"]["status"] == "degraded"
 
     def test_undetermined_rc3_dispatches_warn(self, tmp_path):
@@ -1377,7 +1676,7 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
 
     def test_timeout_rc124_dispatches_error(self, tmp_path):
         logs, steps_result = self._run(tmp_path, step15_rc=124)
-        assert any(lvl == "ERROR" and "超时" in msg for lvl, msg in logs), logs
+        assert any(lvl == "ERROR" and "超时（>60s）" in msg for lvl, msg in logs), logs
         assert steps_result["step15_backup_continuity"]["status"] == "timeout"
 
     def test_unexpected_rc_dispatches_warn_error_status(self, tmp_path):
@@ -1387,10 +1686,29 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
         assert steps_result["step15_backup_continuity"]["rc"] == 99
 
     def test_degraded_summary_survives_unparseable_json(self, tmp_path):
-        """连 continuity JSON 都读不出来（比如脚本半途被杀）不能让整段 Step 15
-        崩掉——python 摘要脚本要能优雅报"无法解析"而不是让 bash 片段整体失败。"""
+        """退出码 1 却没有 JSON（比如脚本半途被杀 / 崩在写盘前）：整段不许崩。B 起这是**刻意的改动**
+        （orchestrator_steps docstring (f)）：旧代码的未捕获异常退出码也是 1，「降级」与「崩了」分不开，
+        不再按正常的 degraded 记，而是 missing_json（原判定进 rc_status）+ 一行 ERROR。"""
         logs, steps_result = self._run(tmp_path, step15_rc=1, continuity_json=None)
-        assert steps_result["step15_backup_continuity"]["status"] == "degraded"
+        f = steps_result["step15_backup_continuity"]
+        assert f["status"] == "missing_json" and f["rc_status"] == "degraded", f
+        assert any(lvl == "ERROR" for lvl, _ in logs), logs
+
+    def test_tool_gets_date_history_and_out(self, tmp_path):
+        """B：日期显式传 DATE_STR（跨午夜时工具按时钟取的日期会与本轮错开）。
+        变异：删 `--end "${DATE_STR}"` ⇒ 红。"""
+        self._run(tmp_path, step15_rc=0, continuity_json=self._HEALTHY)
+        a = self.tool_args
+        assert a is not None and a[a.index("--end") + 1] == self.today, a
+        assert a[a.index("--history") + 1] == str(tmp_path / "history.jsonl"), a
+        assert a[a.index("--out") + 1] == str(self.out_json), a
+
+    def test_leftover_json_from_an_earlier_run_is_removed_first(self, tmp_path):
+        """同一 DATE_STR 重跑、工具这次没写出 JSON：上一次留下的文件不许冒充本轮。
+        变异：删 `rm -f "${BACKUP_CONTINUITY_JSON}"` ⇒ 读到遗留文件、状态不再是 missing_json 红。"""
+        logs, steps_result = self._run(tmp_path, step15_rc=1, leftover=json.dumps(self._HEALTHY))
+        assert not self.out_json.exists()
+        assert steps_result["step15_backup_continuity"]["status"] == "missing_json"
 
 
 class TestExportScopeCoversMoveRules:
@@ -1422,6 +1740,44 @@ class TestExportScopeCoversMoveRules:
 
     def test_every_exclusion_has_a_reason(self):
         assert all(isinstance(v, str) and v.strip() for v in export_mod.EXCLUDED_FROM_THIS_PASS.values())
+
+    def test_every_exclusion_reason_is_classified(self):
+        """v0.45.417：理由必须以 rebuildable: / derived: / accepted-loss: 开头，且 accepted-loss 要有
+        「日期 + 谁决定」。曾经两个不可重取的文件族挂着「用户未定」，没有任何东西让它过期。"""
+        import re
+        bad = {k: v for k, v in export_mod.EXCLUDED_FROM_THIS_PASS.items()
+               if not v.startswith(export_mod.EXCLUSION_REASON_PREFIXES)}
+        assert not bad, f"排除理由没有分类前缀（{export_mod.EXCLUSION_REASON_PREFIXES}）：{sorted(bad)}"
+        for k, v in export_mod.EXCLUDED_FROM_THIS_PASS.items():
+            if v.startswith("accepted-loss:"):
+                assert re.match(r"accepted-loss:\d{4}-\d{2}-\d{2} \S", v), f"{k}: accepted-loss 缺日期 / 决定人：{v!r}"
+            assert "未定" not in v.replace("用户未单独审议", ""), f"{k}: 「未定」不是一个决定：{v!r}"
+
+    def test_classifier_has_teeth(self):
+        """正对照：旧写法（「用户未定」、无前缀、accepted-loss 无日期）喂给同一判据必须被抓。"""
+        import re
+        pre = export_mod.EXCLUSION_REASON_PREFIXES
+        assert not "体量大，是否进数据仓库**用户未定**".startswith(pre)
+        assert not "可重建缓存".startswith(pre)
+        assert not re.match(r"accepted-loss:\d{4}-\d{2}-\d{2} \S", "accepted-loss: 用户定")
+
+    def test_swarm_results_are_backed_up_and_analysis_is_a_recorded_loss(self):
+        assert ".swarm_results_*.json" in export_mod.ROOT_FILE_GLOBS
+        assert ".swarm_results_*.json" not in export_mod.EXCLUDED_FROM_THIS_PASS
+        assert export_mod.EXCLUDED_FROM_THIS_PASS["analysis-*-ml-*.json"].startswith("accepted-loss:2026-10-05")
+
+    def test_swarm_results_actually_exported_and_analysis_is_not(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        (src / ".swarm_results_2026-10-05.json").write_text('{"AAA": {"score": 1}}')
+        (src / "analysis-AAA-ml-2026-10-05.json").write_text('{"x": 1}')
+        out = tmp_path / "out"
+        manifest = export_mod.run_export(src, out, code_repo=tmp_path)
+        assert (out / ".swarm_results_2026-10-05.json").read_text() == '{"AAA": {"score": 1}}'
+        assert not (out / "analysis-AAA-ml-2026-10-05.json").exists()
+        assert ".swarm_results_2026-10-05.json" in {r["rel"] for r in manifest["root_files"]}
 
     def test_report_snapshots_and_reports_are_actually_exported(self, tmp_path):
         """正面走一遍 run_export：v0.45.342 新纳入的两类真的进了产物，而不只是出现在常量里。"""
@@ -1473,3 +1829,434 @@ class TestPushTimeout:
         pushes = [t for a, t in seen if a == "push"]
         assert pushes == [run_backup.GIT_PUSH_TIMEOUT_S], seen
         assert all(t == run_backup.GIT_TIMEOUT_S for a, t in seen if a != "push")
+
+
+class TestBackupRepoSizeBudget:
+    """v0.45.417：备份仓体量预算闸（600 MB）。数据已推送，超预算 / 量不出来把这一轮标红。"""
+
+    @staticmethod
+    def _src(tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        (tmp_path / "bk").mkdir()
+        return src
+
+    @staticmethod
+    def _fake_push(monkeypatch):
+        real = run_backup._run_git
+
+        def spy(args, cwd, timeout=run_backup.GIT_TIMEOUT_S):
+            if args[0] == "push":
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return real(args, cwd, timeout=timeout)
+        monkeypatch.setattr(run_backup, "_run_git", spy)
+
+    def test_budget_is_600(self):
+        assert run_backup.BACKUP_REPO_BUDGET_MB == 600
+
+    def test_size_counts_loose_objects_not_only_the_pack(self, tmp_path):
+        """本仓从未 gc——只读 size-pack 会把松散对象的体量报成 0。"""
+        repo = tmp_path / "r"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+        (repo / "f.bin").write_bytes(os.urandom(300_000))
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"],
+                       cwd=str(repo), check=True, capture_output=True)
+        packs = subprocess.run(["git", "count-objects", "-v"], cwd=str(repo), capture_output=True, text=True).stdout
+        assert "size-pack: 0" in packs, "夹具前提：对象应是松散的"
+        assert run_backup.repo_size_mb(repo) >= 0.25
+
+    def test_within_budget_is_green_and_reports_size(self, tmp_path, monkeypatch):
+        _bypass_secret_scan(monkeypatch)
+        self._fake_push(monkeypatch)
+        st = run_backup.run(self._src(tmp_path), tmp_path / "bk", status_file=tmp_path / "s.json",
+                            history_file=tmp_path / "h.jsonl")
+        assert st["stage"] == "done" and st["ok"] is True, st
+        assert st["repo_size_mb"] > 0 and st["repo_budget_mb"] == 600 and st["pushed"] is True
+
+    def test_over_budget_is_red_but_data_is_pushed(self, tmp_path, monkeypatch):
+        _bypass_secret_scan(monkeypatch)
+        self._fake_push(monkeypatch)
+        monkeypatch.setattr(run_backup, "BACKUP_REPO_BUDGET_MB", 0)
+        st = run_backup.run(self._src(tmp_path), tmp_path / "bk", status_file=tmp_path / "s.json",
+                            history_file=tmp_path / "h.jsonl")
+        assert st["ok"] is False and st["stage"] == "size_budget", st
+        assert st["pushed"] is True and "超出预算" in st["error"]
+        assert json.loads((tmp_path / "s.json").read_text())["stage"] == "size_budget"
+
+    def test_unmeasurable_size_is_red_not_zero(self, tmp_path, monkeypatch):
+        _bypass_secret_scan(monkeypatch)
+        self._fake_push(monkeypatch)
+
+        def boom(_):
+            raise RuntimeError("count-objects 坏了")
+        monkeypatch.setattr(run_backup, "repo_size_mb", boom)
+        st = run_backup.run(self._src(tmp_path), tmp_path / "bk", status_file=tmp_path / "s.json",
+                            history_file=tmp_path / "h.jsonl")
+        assert st["ok"] is False and st["stage"] == "size_budget" and "量不出来" in st["error"], st
+        assert "repo_size_mb" not in st
+
+    def test_failed_push_never_reaches_the_budget_gate(self, tmp_path, monkeypatch):
+        _bypass_secret_scan(monkeypatch)
+        real = run_backup._run_git
+
+        def spy(args, cwd, timeout=run_backup.GIT_TIMEOUT_S):
+            if args[0] == "push":
+                return subprocess.CompletedProcess(args, 1, "", "denied")
+            return real(args, cwd, timeout=timeout)
+        monkeypatch.setattr(run_backup, "_run_git", spy)
+        st = run_backup.run(self._src(tmp_path), tmp_path / "bk", status_file=tmp_path / "s.json",
+                            history_file=tmp_path / "h.jsonl")
+        assert st["stage"] == "push" and "pushed" not in st
+
+
+# ── v0.45.430：网站 PWA `manifest.json` 与备份元数据 `MANIFEST.json` 在 APFS 上是同一个目录项 ─────────
+# 09-24（v0.45.342 把 `manifest.json` 纳入备份）起：先拷进来的网站 manifest 被随后写的元数据覆盖，
+# `SHA256SUMS` 照列网站 manifest 的真实哈希，索引里只有 `MANIFEST.json`。没有任何东西红过。
+
+_PWA_MANIFEST = '{"name": "Alpha Hive 投资仪表板", "short_name": "Alpha Hive", "icons": []}\n'
+
+
+def _fs_is_case_insensitive(d: Path) -> bool:
+    probe = d / "_case_probe_a"
+    probe.write_text("")
+    try:
+        return "_case_probe_a" in os.listdir(d) and (d / "_CASE_PROBE_A").exists()
+    finally:
+        probe.unlink()
+
+
+def _exact_exists(root: Path, rel: str) -> bool:
+    """逐级按**精确拼写**找目录项——大小写不敏感的盘上 `Path.exists()` 对另一种拼写也返回 True。"""
+    cur = root
+    for part in Path(rel).parts:
+        if part not in os.listdir(cur):
+            return False
+        cur = cur / part
+    return True
+
+
+def _src_with_full_scope(tmp_path: Path) -> Path:
+    """数据根：每个库、每个状态目录各一个文件、每条根文件模式各实例化一个（内容互不相同）。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    for db_name in export_mod.DBS.values():
+        _make_synthetic_db(src / db_name)
+    for d in export_mod.STATE_DIRS:
+        (src / d).mkdir()
+        (src / d / "s.json").write_text(json.dumps({"dir": d}))
+    for pat in export_mod.ROOT_FILE_GLOBS:
+        name = pat.replace("*", "2026-10-08")
+        (src / name).write_text(_PWA_MANIFEST if name == "manifest.json" else f"content of {name}\n")
+    return src
+
+
+class TestNoCaseCollisionsInBackup:
+    """导出产物里任何两个路径（含元数据文件）在大小写 / 规范化不敏感的盘上都不许落进同一个目录项。"""
+
+    def test_case_collisions_finds_files_directories_and_normalization_variants(self):
+        cc = export_mod.case_collisions
+        assert cc(["manifest.json", "MANIFEST.json"]) == [["MANIFEST.json", "manifest.json"]]
+        assert cc(["Reports/a.html", "reports/b.html"]) == [["Reports", "reports"]], "目录分量也要比"
+        nfc, nfd = "café.json", "café.json"
+        assert cc([nfc, nfd]) == [sorted([nfc, nfd])]
+        assert cc(["a.json", "a.json", "b/a.json"]) == [], "一字不差的重复（两条 glob 命中同一文件）不算碰撞"
+
+    @staticmethod
+    def _scope_collisions(meta_files) -> list:
+        """声明的导出范围里会撞的组合。导出自己生成的名字（`db_exports/` + 元数据）与从数据根拷来的名字
+        连一字不差也不许相同（那是覆盖）；拷来的名字之间只算拼写不同的（一字不差 = 同一个源文件）。"""
+        fold = export_mod._fold
+        generated = ["db_exports", *meta_files]
+        copied = [*export_mod.STATE_DIRS, *(p for p in export_mod.ROOT_FILE_GLOBS if not glob.has_magic(p))]
+        patterns = [p for p in export_mod.ROOT_FILE_GLOBS if glob.has_magic(p)]
+        bad = export_mod.case_collisions(generated + copied)
+        bad += [[g, c] for g in generated for c in copied if g == c]
+        bad += [[g, p] for g in generated for p in patterns if fnmatch.fnmatchcase(fold(g), fold(p))]
+        bad += [[c, p] for c in copied for p in patterns
+                if fnmatch.fnmatchcase(fold(c), fold(p)) and not fnmatch.fnmatchcase(c, p)]
+        return bad
+
+    def test_declared_scope_has_no_case_collisions(self):
+        assert self._scope_collisions(export_mod.META_FILES) == []
+
+    def test_scope_check_has_teeth(self):
+        """正对照：v0.45.430 前的元数据名喂给同一判据必须红——正是 09-24 起每天发生的那次覆盖。"""
+        old = (export_mod.SUMS_NAME, export_mod.LEGACY_MANIFEST_NAME)
+        assert ["MANIFEST.json", "manifest.json"] in self._scope_collisions(old)
+        assert self._scope_collisions((export_mod.SUMS_NAME, "Report_RAW.json")), "被带通配符的根文件模式命中也要红"
+        assert self._scope_collisions((export_mod.SUMS_NAME, "Reports")), "与状态目录同名（不同大小写）也要红"
+
+    def test_full_scope_export_sums_are_true_on_disk(self, tmp_path):
+        """端到端：每条 SHA256SUMS 都以精确拼写存在、且哈希相符。修复前在 APFS 上 `manifest.json`
+        这一条两样都不成立（另一种拼写、另一份内容）；大小写敏感的盘上由上面的静态检查兜底。"""
+        src = _src_with_full_scope(tmp_path)
+        out = tmp_path / "out"
+        manifest = export_mod.run_export(src, out, code_repo=tmp_path)
+        export_mod.write_manifest_and_sums(out, manifest)
+
+        lies = []
+        for line in (out / export_mod.SUMS_NAME).read_text(encoding="utf-8").splitlines():
+            h, rel = line.split("  ", 1)
+            if not _exact_exists(out, rel) or sha256_file(out / rel) != h:
+                lies.append(rel)
+        assert lies == [], f"SHA256SUMS 声称持有、磁盘上却不是那个拼写 / 那份内容：{lies}"
+        assert (out / "manifest.json").read_text(encoding="utf-8") == _PWA_MANIFEST
+        assert all(_exact_exists(out, m) for m in export_mod.META_FILES)
+        assert json.loads((out / export_mod.MANIFEST_NAME).read_text(encoding="utf-8"))["root_files"]
+
+    def test_write_refuses_and_writes_nothing_on_collision(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        m = {"databases": {}, "state_dirs": {},
+             "root_files": [{"rel": "Foo.json", "sha256": "a"}, {"rel": "foo.json", "sha256": "b"}]}
+        with pytest.raises(RuntimeError, match="互相覆盖"):
+            export_mod.write_manifest_and_sums(out, m)
+        assert os.listdir(out) == [], "撞名时一个元数据文件都不许写"
+
+    def test_runtime_check_catches_the_original_bug(self, tmp_path, monkeypatch):
+        """变异：元数据名改回旧名 ⇒ 写清单前就抛（生产里落 stage="export"、不提交），而不是静默覆盖。"""
+        monkeypatch.setattr(export_mod, "META_FILES", (export_mod.SUMS_NAME, export_mod.LEGACY_MANIFEST_NAME))
+        out = tmp_path / "out"
+        out.mkdir()
+        m = {"databases": {}, "state_dirs": {}, "root_files": [{"rel": "manifest.json", "sha256": "x"}]}
+        with pytest.raises(RuntimeError, match="MANIFEST.json"):
+            export_mod.write_manifest_and_sums(out, m)
+
+    def test_export_retires_legacy_file_but_keeps_website_manifest(self, tmp_path):
+        """磁盘上旧的大写目录项删掉，网站 manifest 以小写拼写拷进来；不删同名小写文件。"""
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        (src / "manifest.json").write_text(_PWA_MANIFEST)
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "MANIFEST.json").write_text('{"legacy": true, "root_files": []}')
+        manifest = export_mod.run_export(src, out, code_repo=tmp_path)
+        export_mod.write_manifest_and_sums(out, manifest)
+        names = os.listdir(out)
+        assert "manifest.json" in names and "MANIFEST.json" not in names
+        assert (out / "manifest.json").read_text(encoding="utf-8") == _PWA_MANIFEST
+        # 第二轮：小写那份不是旧元数据，不许被当成旧目录项删掉
+        assert export_mod._retire_legacy_manifest_file(out) is False
+        assert "manifest.json" in os.listdir(out)
+
+
+class TestRestoreAcrossManifestRename:
+    """恢复读新名 `BACKUP_MANIFEST.json`，旧提交只有 `MANIFEST.json`；根文件按清单哈希核对后才拷。"""
+
+    def test_new_layout_round_trip_restores_website_manifest(self, tmp_path):
+        src = _src_with_full_scope(tmp_path)
+        out = tmp_path / "out"
+        export_mod.write_manifest_and_sums(out, export_mod.run_export(src, out, code_repo=tmp_path))
+        dest = tmp_path / "dest"
+        assert restore_mod.main(["--export-dir", str(out), "--dest-root", str(dest), "--dbs"]) == 0
+        assert (dest / "manifest.json").read_text(encoding="utf-8") == _PWA_MANIFEST
+        assert _exact_exists(dest, "manifest.json")
+
+    def _legacy_export_dir(self, tmp_path) -> Path:
+        """照生产 09-24~10-07 的提交布局手搭：只有元数据 `MANIFEST.json`，它的 root_files 列着网站
+        `manifest.json`（真实哈希），磁盘上却没有这个拼写的文件。"""
+        out = tmp_path / "legacy"
+        out.mkdir()
+        (out / "rss.xml").write_text("<rss/>")
+        legacy = {"databases": {}, "state_dirs": {}, "root_files": [
+            {"rel": "manifest.json", "sha256": "267f16ab" + "0" * 56, "size": 1},
+            {"rel": "rss.xml", "sha256": sha256_file(out / "rss.xml"), "size": 6},
+        ]}
+        (out / "MANIFEST.json").write_text(json.dumps(legacy))
+        return out
+
+    def test_legacy_layout_reports_overwritten_manifest_instead_of_restoring_it(self, tmp_path, capsys):
+        """旧代码：APFS 上按 `manifest.json` 打开的是元数据，照拷不误 ⇒ 把备份清单「恢复」成网站 manifest；
+        大小写敏感的盘上静默跳过。现在两种都不拷、都报出来、退出码 1。"""
+        out = self._legacy_export_dir(tmp_path)
+        assert restore_mod.find_manifest(out) == out / "MANIFEST.json"
+        dest = tmp_path / "dest"
+        rc = restore_mod.main(["--export-dir", str(out), "--dest-root", str(dest), "--dbs"])
+        assert rc == 1
+        assert "manifest.json" not in os.listdir(dest), "不许把备份元数据当网站 manifest 恢复出来"
+        assert (dest / "rss.xml").read_text() == "<rss/>"
+        err = capsys.readouterr().err
+        assert "manifest.json" in err and "v0.45.430 前" in err
+
+    def test_restore_state_sorts_records_into_restored_mismatched_missing(self, tmp_path):
+        out = self._legacy_export_dir(tmp_path)
+        recs = json.loads((out / "MANIFEST.json").read_text())["root_files"]
+        recs.append({"rel": "gone.json", "sha256": "0" * 64})
+        got = restore_mod.restore_state(out, tmp_path / "dest", [], recs)
+        assert [r["rel"] for r in got["restored"]] == ["rss.xml"]
+        bad = {r["rel"] for r in got["mismatched"] + got["missing"]}
+        assert bad == {"manifest.json", "gone.json"}
+        assert {r["rel"] for r in got["missing"]} >= {"gone.json"}
+
+    def test_legacy_name_is_recognised_only_by_exact_spelling(self, tmp_path):
+        """新布局缺了新清单：大小写不敏感的盘上 `MANIFEST.json` 能打开网站 manifest，不许拿它当备份清单。"""
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "manifest.json").write_text(_PWA_MANIFEST)
+        assert restore_mod.find_manifest(out) is None
+
+
+class TestLegacyManifestMigrationInRun:
+    """升级后第一轮：旧条目从索引摘掉，网站 manifest 以小写拼写进备份；索引对不上清单就不提交。"""
+
+    @staticmethod
+    def _repo_with_remote(tmp_path) -> tuple[Path, Path]:
+        bare = tmp_path / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)], check=True, capture_output=True)
+        bk = tmp_path / "bk"
+        bk.mkdir()
+        for args in (["init", "-b", "main"], ["config", "commit.gpgsign", "false"],
+                     ["config", "core.hooksPath", os.devnull],
+                     # 与生产备份仓一致（macOS 上 git init 的缺省）；大小写敏感的盘上显式设，走同一条 git 代码路径
+                     ["config", "core.ignorecase", "true"],
+                     ["remote", "add", "origin", str(bare)]):
+            subprocess.run(["git", *args], cwd=str(bk), check=True, capture_output=True)
+        return bk, bare
+
+    @staticmethod
+    def _legacy_commit(bk: Path) -> None:
+        """照生产：索引里只有旧名元数据 `MANIFEST.json`。"""
+        (bk / "MANIFEST.json").write_text('{"created_at": "2026-10-07", "root_files": []}')
+        (bk / "SHA256SUMS").write_text("")
+        subprocess.run(["git", "add", "-A"], cwd=str(bk), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "legacy"], cwd=str(bk), check=True, capture_output=True)
+
+    @staticmethod
+    def _src(tmp_path) -> Path:
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        (src / "manifest.json").write_text(_PWA_MANIFEST)
+        (src / "rss.xml").write_text("<rss/>")
+        return src
+
+    @staticmethod
+    def _ls(bk: Path) -> set[str]:
+        return set(subprocess.run(["git", "ls-files"], cwd=str(bk), check=True,
+                                  capture_output=True, text=True).stdout.split())
+
+    def _run(self, src, bk, tmp_path):
+        return run_backup.run(src, bk, status_file=tmp_path / "s.json", history_file=tmp_path / "h.jsonl")
+
+    def test_upgrade_from_legacy_layout_tracks_both_files_and_restores_from_clone(self, tmp_path, monkeypatch):
+        _bypass_secret_scan(monkeypatch)
+        bk, bare = self._repo_with_remote(tmp_path)
+        self._legacy_commit(bk)
+        src = self._src(tmp_path)
+
+        st = self._run(src, bk, tmp_path)
+        assert st["stage"] == "done", st
+        assert st["legacy_manifest_retired"] is True
+        tracked = self._ls(bk)
+        assert {"manifest.json", export_mod.MANIFEST_NAME, export_mod.SUMS_NAME} <= tracked
+        assert "MANIFEST.json" not in tracked
+        head_pwa = subprocess.run(["git", "show", "HEAD:manifest.json"], cwd=str(bk), check=True,
+                                  capture_output=True, text=True).stdout
+        assert head_pwa == _PWA_MANIFEST
+
+        st2 = self._run(src, bk, tmp_path)
+        assert st2["stage"] == "done" and "legacy_manifest_retired" not in st2, st2
+
+        # 异地恢复：从远端 clone 出来的副本还原，网站 manifest 原样回来
+        clone = tmp_path / "clone"
+        subprocess.run(["git", "clone", "-q", str(bare), str(clone)], check=True, capture_output=True)
+        dest = tmp_path / "dest"
+        assert restore_mod.main(["--export-dir", str(clone), "--dest-root", str(dest), "--dbs"]) == 0
+        assert (dest / "manifest.json").read_text(encoding="utf-8") == _PWA_MANIFEST
+
+    def test_without_index_retirement_the_case_drift_is_caught(self, tmp_path, monkeypatch):
+        """变异：不摘旧索引条目 ⇒ APFS 上 `git add -A` 把磁盘上的 `manifest.json` 记成 `MANIFEST.json`
+        （`core.ignorecase`）。检查必须红、不提交。只在大小写不敏感的盘上能复现——生产 Mac 正是这种盘。"""
+        if not _fs_is_case_insensitive(tmp_path):
+            pytest.skip("大小写敏感的盘上不会发生同名合并；本机（APFS 缺省）与生产都会跑到这条")
+        _bypass_secret_scan(monkeypatch)
+        monkeypatch.setattr(run_backup, "retire_legacy_manifest_from_index", lambda d: False)
+        bk, _ = self._repo_with_remote(tmp_path)
+        self._legacy_commit(bk)
+        head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(bk), capture_output=True,
+                                     text=True).stdout
+        st = self._run(self._src(tmp_path), bk, tmp_path)
+        assert st["stage"] == "git_error" and st["ok"] is False, st
+        assert "manifest.json" in st["sums_not_tracked"]
+        assert "commit" not in st
+        assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(bk), capture_output=True,
+                              text=True).stdout == head_before
+
+    def test_sums_path_swallowed_by_ignore_rules_blocks_commit(self, tmp_path, monkeypatch):
+        """与平台无关的正对照：备份仓的忽略规则吞掉一个导出文件，同一道检查红。"""
+        _bypass_secret_scan(monkeypatch)
+        bk, _ = self._repo_with_remote(tmp_path)
+        (bk / ".git" / "info").mkdir(exist_ok=True)
+        (bk / ".git" / "info" / "exclude").write_text("rss.xml\n")
+        st = self._run(self._src(tmp_path), bk, tmp_path)
+        assert st["stage"] == "git_error" and st["sums_not_tracked"] == ["rss.xml"], st
+        assert st["sums_not_tracked_count"] == 1 and "commit" not in st
+
+    def test_retirement_failure_is_git_error_and_nothing_is_exported(self, tmp_path, monkeypatch):
+        def boom(d):
+            raise RuntimeError("git rm 失败")
+        monkeypatch.setattr(run_backup, "retire_legacy_manifest_from_index", boom)
+        bk, _ = self._repo_with_remote(tmp_path)
+        st = self._run(self._src(tmp_path), bk, tmp_path)
+        assert st["stage"] == "git_error" and "退役失败" in st["error"], st
+        assert "manifest_summary" not in st
+        assert export_mod.SUMS_NAME not in os.listdir(bk)
+
+
+class TestManifestSecondReview:
+    """v0.45.430 二次检查补：清单坏了要响亮、不许退回旧清单；SHA256SUMS 只按 "\\n" 切。"""
+
+    @staticmethod
+    def _export_with_legacy(tmp_path) -> Path:
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "rss.xml").write_text("<rss/>")
+        (out / "MANIFEST.json").write_text(json.dumps({"databases": {}, "state_dirs": {}, "root_files": [
+            {"rel": "rss.xml", "sha256": sha256_file(out / "rss.xml")}]}))
+        return out
+
+    def test_corrupt_new_manifest_is_loud_and_never_falls_back_to_legacy(self, tmp_path, capsys):
+        """旧写法：新清单解析失败 ⇒ `continue` ⇒ 退回陈旧的 MANIFEST.json，照它还原、rc=0。"""
+        out = self._export_with_legacy(tmp_path)
+        (out / export_mod.MANIFEST_NAME).write_text('{"root_files": [')   # 截断
+        with pytest.raises(ValueError, match="不是合法 JSON"):
+            restore_mod.find_manifest(out)
+        dest = tmp_path / "dest"
+        assert restore_mod.main(["--export-dir", str(out), "--dest-root", str(dest), "--dbs"]) == 1
+        assert not (dest / "rss.xml").exists(), "不许照旧清单还原"
+        assert "不退回其他清单" in capsys.readouterr().err
+
+    def test_named_file_that_is_not_a_manifest_raises(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / export_mod.MANIFEST_NAME).write_text(_PWA_MANIFEST)
+        with pytest.raises(ValueError, match="不是备份清单"):
+            restore_mod.find_manifest(out)
+
+    def test_no_manifest_is_rc1_unless_state_restore_was_skipped(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        assert restore_mod.main(["--export-dir", str(out), "--dest-root", str(tmp_path / "d1"), "--dbs"]) == 1
+        assert restore_mod.main(["--export-dir", str(out), "--dest-root", str(tmp_path / "d2"), "--dbs",
+                                 "--skip-state"]) == 0
+
+    def test_sums_parsing_survives_unicode_line_separators_in_file_names(self, tmp_path):
+        """`str.splitlines()` 会在 U+2028 处断行 ⇒ 半行没有「两个空格」⇒ IndexError。文件名里它是合法字符。"""
+        bk = tmp_path / "bk"
+        bk.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(bk), check=True, capture_output=True)
+        odd = "a b.json"
+        (bk / odd).write_text("{}")
+        (bk / export_mod.MANIFEST_NAME).write_text('{"root_files": []}')
+        (bk / export_mod.SUMS_NAME).write_text(f"{sha256_file(bk / odd)}  {odd}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(bk), check=True, capture_output=True)
+        assert odd in "".join(run_backup._tracked_paths(bk)), "夹具前提：怪名文件确实进了索引"
+        assert run_backup.sums_paths_not_tracked(bk) == []
+        assert run_backup.foreign_entries(bk) == []

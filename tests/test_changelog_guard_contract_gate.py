@@ -16,7 +16,6 @@ CHANGELOG 部分的管道测试在 `tests/test_changelog_guard_hook.py`，本文
 `TestSelection.test_real_repo_selection` 钉着这一条。
 """
 
-import ast
 import hashlib
 import json
 import os
@@ -462,23 +461,18 @@ class TestChangelogMismatchStillRunsTheGate:
 
 # ═════════════════════════════ 触发范围 ═════════════════════════════
 
-def _daily_artifact_samples():
-    """从 `report_deployer` 的白名单常量（AST 读，不 import）造出每一类日报产物的样例路径。"""
-    tree = ast.parse((_ROOT / "report_deployer.py").read_text(encoding="utf-8"))
-    consts = {}
-    for node in tree.body:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for t in targets:
-                if isinstance(t, ast.Name) and t.id in ("_ARTIFACT_PREFIXES", "_ARTIFACT_GLOBS", "_ARTIFACT_EXACT"):
-                    consts[t.id] = ast.literal_eval(node.value)
-    assert set(consts) == {"_ARTIFACT_PREFIXES", "_ARTIFACT_GLOBS", "_ARTIFACT_EXACT"}, (
-        f"report_deployer 的白名单常量改名了（只找到 {sorted(consts)}）——本测试要跟着改，别让它空转")
-    samples = list(consts["_ARTIFACT_EXACT"])
-    samples += [g.replace("*", "2026-09-28") for g in consts["_ARTIFACT_GLOBS"]]
-    for pre in consts["_ARTIFACT_PREFIXES"]:
-        samples += [f"{pre}sample.json", f"{pre}nested/sample.md", f"{pre}sample.html"]
-    assert len(samples) >= 15, samples
+def _data_artifact_samples():
+    """从迁移分类表的 MOVE 规则造出每一类生产数据的样例路径（真相只有一份：`migrate_data_root`）。
+
+    v0.45.402 前这里读 `report_deployer` 的日报白名单常量——日报提交 / 推送链随阶段 6 退役，
+    白名单没了；「数据类文件不触发契约闸」这条性质仍成立，真相来源换成 MOVE 规则。
+    """
+    from data_backup import migrate_data_root as m
+    samples = list(m.MOVE_EXACT) + list(m.MOVE_DBS)
+    samples += [g.replace("*", "2026-09-28") for g in m.MOVE_GLOBS]
+    for d in m.MOVE_DIRS:
+        samples += [f"{d}/sample.json", f"{d}/nested/sample.md", f"{d}/sample.html"]
+    assert len(samples) >= 40, samples
     return samples
 
 
@@ -504,14 +498,15 @@ class TestTrigger:
         commit(["seed.txt"])
         return commit
 
-    def test_daily_report_artifacts_never_trigger_the_gate(self, plain_repo):
-        """无人值守的日报推送若触发契约闸，契约一红网站就停更。变红的变异：往触发集里加 `*.json` / `*.md`。"""
+    def test_data_artifacts_never_trigger_the_gate(self, plain_repo):
+        """数据类文件只动不该触发契约闸（区间没动代码 ⇒ 契约结果与已守过的 base 相同）。
+        变红的变异：往触发集里加 `*.json` / `*.md`。"""
         base = plain_repo(["seed2.txt"])
-        samples = _daily_artifact_samples()
+        samples = _data_artifact_samples()
         head = plain_repo(samples)                 # 一次提交全部样例（逐条提交要 ~5s）
         offenders = subprocess.run(["git", "diff", "--name-only", base, head, "--", *cg.CONTRACT_TRIGGER_PATHSPECS],
                                    capture_output=True, text=True, check=True).stdout.split("\n")
-        assert [o for o in offenders if o] == [], "这些日报产物会触发契约闸"
+        assert [o for o in offenders if o] == [], "这些数据类文件会触发契约闸"
         assert subprocess.run(["git", "diff", "--name-only", base, head], capture_output=True, text=True,
                               check=True).stdout.count("\n") == len(set(samples)), "前提：样例都进了这次提交"
         assert cg._contract_triggered("pre-push", base, head) is False
@@ -559,3 +554,85 @@ class TestTimeoutAndShim:
             "pre-push": "ba6b3942f418c5c84f92a4fa7a1ea6091074c65921318ad0db44103c4be86664",
         }
         assert '"$SCRIPT" --pre-push "$@"' in cg.HOOKS["pre-push"]
+
+
+# ═════════════════ 盘中撞上 Alpha Bot：照样拦，但不劝 --no-verify（v0.45.453） ═════════════════
+
+sys.path.insert(0, str(_ROOT / "tests"))
+import _root_data_guard as rdg  # noqa: E402
+
+_ALL_AB = {"all_alphabot_appends": True, "alphabot_files": 1, "alphabot_records": 3, "unexplained": 0}
+_TD = "tests/test_step_contract.py::test_app_keys（teardown）"
+_ONE = {"tests/test_step_contract.py::test_app_keys": 1}       # 那次 teardown 里恰好一个异常
+
+
+class TestAlphabotOnlyRedPredicate:
+    def test_only_the_data_root_teardown_with_a_full_verdict(self):
+        rep = {"failed": [_TD], "real_data_root_verdict": _ALL_AB, "teardown_exc_counts": _ONE}
+        assert cg._alphabot_only_red(rep, [f"失败：{_TD}"]) == _ALL_AB
+
+    @pytest.mark.parametrize("rep,problems", [
+        ({"failed": [_TD], "real_data_root_verdict": {**_ALL_AB, "all_alphabot_appends": False},
+          "teardown_exc_counts": _ONE}, [f"失败：{_TD}"]),
+        ({"failed": [_TD], "real_data_root_verdict": None, "teardown_exc_counts": _ONE}, [f"失败：{_TD}"]),
+        # 会话级闸一起红：只有一份 teardown 报告，但里面是 2 个异常（二次检查实测的真实形状）
+        ({"failed": [_TD], "real_data_root_verdict": _ALL_AB,
+          "teardown_exc_counts": {"tests/test_step_contract.py::test_app_keys": 2}}, [f"失败：{_TD}"]),
+        ({"failed": [_TD], "real_data_root_verdict": _ALL_AB}, [f"失败：{_TD}"]),     # 旧插件没记异常数
+        ({"failed": [_TD, "t::x（teardown）"], "real_data_root_verdict": _ALL_AB, "teardown_exc_counts": _ONE},
+         [f"失败：{_TD}", "失败：t::x（teardown）"]),
+        ({"failed": ["t::x（call）"], "real_data_root_verdict": _ALL_AB}, ["失败：t::x（call）"]),
+        ({"failed": [_TD], "real_data_root_verdict": _ALL_AB, "teardown_exc_counts": _ONE},
+         [f"失败：{_TD}", "被跳过（没跑 ≠ 没问题）：t::y"]),
+        (None, ["结果报告读不到"]),
+    ])
+    def test_anything_else_keeps_the_usual_hint(self, rep, problems):
+        assert cg._alphabot_only_red(rep, problems) is None
+
+    def test_plugin_reads_the_attribute_conftest_sets(self):
+        assert f'"{rdg.VERDICT_CONFIG_ATTR}"' in cg._REPORT_PLUGIN
+
+
+def _fake_guard_conftest(verdict: dict) -> str:
+    """模拟 tests/conftest.py 的真实数据根闸：session 级 teardown 挂上归因再红。"""
+    return ("import pytest\n\n\n@pytest.fixture(scope='session', autouse=True)\n"
+            "def _fake_real_data_root_guard(request):\n    yield\n"
+            f"    setattr(request.config, {rdg.VERDICT_CONFIG_ATTR!r}, {verdict!r})\n"
+            "    raise AssertionError('FAKE-DATA-ROOT-RED')\n")
+
+
+class TestAlphabotOnlyRedThroughTheHook:
+    def test_alphabot_only_red_blocks_but_says_wait_instead_of_no_verify(self, repo):
+        before = repo.origin_main()
+        repo.commit({"tests/conftest.py": _fake_guard_conftest(_ALL_AB)}, "盘中撞上 Alpha Bot")
+        r = _push(repo)
+        assert r.returncode != 0, "判定被改了：唯一的红是 Alpha Bot 也必须拦"
+        assert repo.origin_main() == before
+        assert "FAKE-DATA-ROOT-RED" in r.stderr, r.stderr
+        assert "全部**是 Alpha Bot" in r.stderr and "3 张快照" in r.stderr and "隔一两分钟" in r.stderr, r.stderr
+        assert cg._BYPASS_NOTE not in r.stderr, "已核实只是 Alpha Bot，却仍在劝 --no-verify"
+
+    def test_a_real_failure_alongside_keeps_the_usual_hint(self, repo):
+        repo.commit({"tests/conftest.py": _fake_guard_conftest(_ALL_AB), "app.py": BROKEN_APP}, "真坏 + Alpha Bot")
+        r = _push(repo)
+        assert r.returncode != 0
+        assert "CONTRACT-BROKEN" in r.stderr and cg._BYPASS_NOTE in r.stderr, r.stderr
+        assert "隔一两分钟" not in r.stderr, r.stderr
+
+    def test_another_session_guard_red_in_the_same_teardown_keeps_the_usual_hint(self, repo):
+        """二次检查实测：会话级 fixture 一起收尾，两道闸同时红只出**一份** teardown 报告（ExceptionGroup）。
+        旧判定只数报告条数 ⇒ 说「唯一的红是 Alpha Bot、等一下重推」，而重推会一直红。"""
+        conf = _fake_guard_conftest(_ALL_AB) + (
+            "\n\n@pytest.fixture(scope='session', autouse=True)\n"
+            "def _another_session_guard():\n    yield\n    raise AssertionError('REPO-ROOT-RED')\n")
+        repo.commit({"tests/conftest.py": conf}, "两道会话级闸一起红")
+        r = _push(repo)
+        assert r.returncode != 0
+        assert "REPO-ROOT-RED" in r.stderr, r.stderr
+        assert cg._BYPASS_NOTE in r.stderr and "隔一两分钟" not in r.stderr, r.stderr
+
+    def test_not_all_alphabot_keeps_the_usual_hint(self, repo):
+        repo.commit({"tests/conftest.py": _fake_guard_conftest({**_ALL_AB, "all_alphabot_appends": False})}, "混合")
+        r = _push(repo)
+        assert r.returncode != 0
+        assert cg._BYPASS_NOTE in r.stderr and "隔一两分钟" not in r.stderr, r.stderr

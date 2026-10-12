@@ -93,6 +93,11 @@ def _isolate_newsapi(tmp_path, monkeypatch):
 
     # Mock _load_av_key to return None by default (prevent real AV calls)
     monkeypatch.setattr(newsapi_client, "_load_av_key", lambda: None)
+    # v0.45.445：生产主源改成 Massive；本文件测的是 AV + Yahoo 两条路，钉主源为 AV，并确保不会去碰 Massive
+    # （Massive 主源的测试在 tests/test_news_source_visibility.py）
+    monkeypatch.setattr(newsapi_client, "_news_cfg",
+                        lambda: {**newsapi_client._NEWS_CFG_DEFAULT, "primary": "alpha_vantage"})
+    monkeypatch.setattr(newsapi_client, "_load_massive_key", lambda: None)
 
     yield
 

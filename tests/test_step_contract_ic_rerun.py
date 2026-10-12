@@ -38,7 +38,7 @@ import pytest
 
 import ic_rerun_readiness as rr
 import step_contract as sc
-from tests.test_ic_rerun_readiness import _COHORT_START, _weekly_rows, _write_two_marker_archive
+from tests.test_ic_rerun_readiness import _weekly_rows, _write_two_marker_archive
 
 REPO_ROOT = Path(__file__).resolve().parent.parent   # 指向**代码**，故用 __file__
 TOOL = "ic_rerun_readiness"
@@ -54,8 +54,8 @@ def _load(name, rel):
 
 P = _load("dim_ic_protocol", "experiments/dim_ic_protocol.py")
 
-#: 编排器 Step 11 **今天**读的键（2026-09-28 版 `~/.claude/scripts/alpha-hive-orchestrator.sh` 的
-#: `READINESS_LINE=` 与 `BOUNDARY_JSON=` 两段内联 python，逐条抄出；不记行号——那个文件在仓库外、行号会漂）。
+#: 编排器 Step 11 读的键（最初逐条抄自 2026-09-28 版编排器的 `READINESS_LINE=` 与 `BOUNDARY_JSON=` 两段内联 python；
+#: B（v0.45.385）起那两段已删，编排器经 orchestrator_steps.py 的 `_readiness_line` / `_BOUNDARY_KEEP` 读——清单照旧）。
 #: READINESS_LINE 段读 `cohort.date/version`、`weeks_accrued`、`weeks_required`、`n_ripe_samples`、
 #: `eta_date`、`pool_note`；BOUNDARY_JSON 段读 `cohort_boundary_evidence` 的 keep 元组。
 #: 那边一律 `d.get(...)`，缺键不崩、只会印 '?' —— 正因为不崩，缺了没人会红，所以钉在这里。
@@ -120,7 +120,7 @@ def _env(home: Path) -> dict:
     return env
 
 
-def _run(tmp_path: Path, db: Path, *args, prelude: str = ""):
+def _run(tmp_path: Path, db: Path, *args, prelude: str = "", history_through: str = ""):
     """真起 CLI 子进程，返回 (rc, 外壳 | None, stdout, stderr)。
 
     `prelude` 为空 ⇒ 直接 `python ic_rerun_readiness.py …`；非空 ⇒ `python -c`：先执行 prelude（只准改被测
@@ -129,7 +129,20 @@ def _run(tmp_path: Path, db: Path, *args, prelude: str = ""):
     """
     out = tmp_path / "out.json"
     argv = ["--db", str(db), *map(str, args), "--out", str(out)]
-    if prelude:
+    if history_through:
+        # 把被测脚本**自己的** `_COHORT_HISTORY` 截到某一天为止（`prelude` 够不到：runpy 另起一份 `__main__` 全局，
+        # 只能改被它 import 的模块）。做法：在真实脚本文本的 `if __name__ == "__main__":` 前插一行原地截断，再原样 exec。
+        # 用途：边界表末尾追加新条目后，「末日有多条同日边界」这类夹具前提靠截到旧末日复现，不靠今天的表尾恰好如此。
+        _trunc = f"_COHORT_HISTORY[:] = [e for e in _COHORT_HISTORY if e[0] <= {history_through!r}]\n"
+        code = (f"import sys\nsys.path.insert(0, {str(REPO_ROOT)!r})\n"
+                f"_src = open({str(SCRIPT)!r}, encoding='utf-8').read()\n"
+                f"_hook = 'if __name__ == \"__main__\":'\n"
+                f"assert _src.count(_hook) == 1, '脚本入口形状变了，截断钩子要跟着改'\n"
+                f"_src = _src.replace(_hook, {_trunc!r} + _hook)\n"
+                f"sys.argv = [{str(SCRIPT)!r}] + {argv!r}\n"
+                f"exec(compile(_src, {str(SCRIPT)!r}, 'exec'), {{'__name__': '__main__', '__file__': {str(SCRIPT)!r}}})\n")
+        cmd = [sys.executable, "-c", code]
+    elif prelude:
         code = (f"import sys, runpy\nsys.path.insert(0, {str(REPO_ROOT)!r})\n{prelude}\n"
                 f"sys.argv = [{str(SCRIPT)!r}] + {argv!r}\n"
                 f"runpy.run_path({str(SCRIPT)!r}, run_name='__main__')\n")
@@ -235,8 +248,10 @@ class TestRealCli:
         v0.45.334 之后 ⇒ 按 id 保留首条的消费方恰好丢掉带截止日的那条。变红的变异：id 去掉版本后缀。"""
         home = tmp_path / "home"
         db = _make_db(home, [])
-        _write_two_marker_archive(home, _COHORT_START, gex_new=False, buzz_new=False, oracle_new=False)
-        rc, env, out, err = _run(tmp_path, db, "--today", self.TODAY, "--quiet")
+        # 表截到 09-28 为止：该日是 v0.45.334 / 340 / 349 …… 一组同日边界（本测试的前提——至少两条报警、锚点不是第一条）；
+        # v0.45.441 起真表的末日是 10-09 的单条边界，不再具备这个形状（见 `_run(history_through=…)`）。
+        _write_two_marker_archive(home, "2026-09-28", gex_new=False, buzz_new=False, oracle_new=False)
+        rc, env, out, err = _run(tmp_path, db, "--today", self.TODAY, "--quiet", history_through="2026-09-28")
         ids = _check(rc, env, err, expect_rc=1, expect_date=self.TODAY, expect_status="attention")
         alarmed = [e for e in env["cohort_boundary_evidence"]["per_version"] if e["alarm"]]
         assert len(alarmed) >= 2 and P.H1_ANCHOR_VERSION in [e["version"] for e in alarmed][1:], (
@@ -382,6 +397,44 @@ class TestOkPath:
         assert set(got) == {"ic_rerun.dim_ic.cannot_judge", "ic_rerun.dim_ic.h1_anchor_pending"}, sorted(got)
         assert got["ic_rerun.dim_ic.h1_anchor_pending"]["deadline"] == P.FORWARD_START
 
+    def test_degraded_ohlc_window_reaches_quiet_line_detail_and_out(self, monkeypatch, tmp_path, capsys):
+        """复审 S1 端到端（进程内）：F&G 执行器报「回放行情窗口降级」⇒ 经真的 `fg_exposure_gate_forward_status`
+        （代码锚点指向一个只换掉 `run()` 的垫片，`status_line` 是真的）到达 `--quiet` 那一行、私有 `_detail`
+        与 `--out` 的 attention；`--out` 的公开形状不变（`{status, line}`）。此前三处与健康时逐字节相同。"""
+        canned = {**_NR, "selfproof_rate": 1.0, "mode": "forward", "n_dates": 10, "ohlc_window": _OW_DEGRADED}
+        code = tmp_path / "code"
+        (code / "experiments").mkdir(parents=True)
+        (code / "experiments" / "canned.json").write_text(json.dumps(canned), encoding="utf-8")
+        real = REPO_ROOT / "experiments" / "fg_exposure_gate_forward_test.py"
+        (code / "experiments" / "fg_exposure_gate_forward_test.py").write_text(
+            "import importlib.util, json, pathlib\n"
+            f"_spec = importlib.util.spec_from_file_location('_real_fg_for_shim', {str(real)!r})\n"
+            "_real = importlib.util.module_from_spec(_spec)\n_spec.loader.exec_module(_real)\n"
+            "status_line = _real.status_line\n"
+            "def run(today=None):\n"
+            "    return json.loads((pathlib.Path(__file__).parent / 'canned.json').read_text(encoding='utf-8'))\n",
+            encoding="utf-8")
+        monkeypatch.setattr(rr, "ALPHAHIVE_DIR", code)
+        st = rr.fg_exposure_gate_forward_status(today="2026-10-01")
+        assert st["line"] == _FG.status_line(canned) and st["line"].startswith("⚠️ F&G 敞口门前瞻检验："), st["line"]
+        assert st[rr._DETAIL_KEY]["ohlc_window"] == _OW_DEGRADED
+
+        monkeypatch.setattr(rr, "resonance_forward_status",
+                            lambda *a, **k: {"status": "not_ready", "line": "⏳ 共振加成前瞻检验：桩"})
+        monkeypatch.setattr(rr, "dim_ic_forward_status", lambda *a, **k: {
+            "status": "not_ready", "line": "⏳ 维度 IC 协议：桩", rr._DETAIL_KEY: dict(_DIM_BASE)})
+        db = _make_db(tmp_path / "home", _weekly_rows(2))
+        out = tmp_path / "o.json"
+        monkeypatch.setattr(sys, "argv", [TOOL, "--db", str(db), "--today", "2026-10-01", "--quiet", "--out", str(out)])
+        assert rr.main() == 1
+        segs = _quiet_segments(capsys.readouterr().out)
+        assert segs[2] == _FG.status_line(canned) and "回放行情窗口降级" in segs[2], segs
+        env = json.loads(out.read_text(encoding="utf-8"))
+        assert sc.validate(env) == [] and env["status"] == "attention"
+        assert [a["id"] for a in env["attention"]] == ["ic_rerun.fg_exposure_gate_forward.ohlc_window_degraded"]
+        assert env["fg_exposure_gate_forward_test"]["line"] == segs[2]
+        _assert_payload_intact(env)
+
     def test_missing_anchor_state_is_not_silently_ok(self):
         """执行器若不再给出 `h1_anchor`（形状变了 / 桩没带 `_detail`），锚点截止日会无声消失 ⇒ 单列一条 warn，
         不让「读不到」渲染成「没事」。"""
@@ -452,8 +505,64 @@ def _assert_icon_consistent(line, items, *, silent_ids=()):
         raise AssertionError(f"未知段首图标：{line}")
 
 
+#: v0.45.391 复审 S1：F&G 结果里的回放行情窗口计数（`paper_portfolio._ReplayOhlcWindow.stats()` 的形状）
+_OW_HEALTHY = {"window": ["2026-09-15", "2026-10-02"], "wide_fetches": 20, "served": 300, "out_of_window": 0,
+               "fallback": 0, "fallback_tickers": {}, "direct_requests": 0, "direct_empty": 0, "degraded": False}
+_OW_DEGRADED = dict(_OW_HEALTHY, served=0, fallback=20, direct_requests=144,
+                    fallback_tickers={f"T{i:02d}": "ConnectionError: wide rejected" for i in range(20)}, degraded=True)
+#: v0.45.410：回放行情库计数（`replay_ohlc_store.ReplayOhlcStore.stats()` 的形状）
+_STORE_OK = {"fetch_day": "2026-10-02", "store_only": 0, "tail_fetches": 15, "full_fetches": 0, "settled_days_added": 15,
+             "served_from_store": 200, "served_on_fallback": 0, "revisions_new": 0, "revised_bars": 0,
+             "revised_tickers": [], "revised_recent": 0, "revised_recent_tickers": [], "revision_alarm_days": 7,
+             "quarantined": [], "invalid_files": [], "write_errors": [], "problem": False}
+_FG_WINDOW_STATES = [
+    ("not_ready_healthy", {**_NR, "ohlc_window": _OW_HEALTHY}, set()),
+    ("not_ready_degraded", {**_NR, "ohlc_window": _OW_DEGRADED}, {"ohlc_window_degraded"}),
+    ("stale_degraded", {**_NR, "stale": True, "reason": "x", "ohlc_window": _OW_DEGRADED},
+     {"stale", "ohlc_window_degraded"}),
+    ("cannot_judge_degraded", {"status": "cannot_judge", "reason": "r", "ohlc_window": _OW_DEGRADED},
+     {"cannot_judge", "ohlc_window_degraded"}),
+    ("confirmed_degraded", {"status": "confirmed", "look": "中期", "ohlc_window": _OW_DEGRADED},
+     {"checkpoint", "ohlc_window_degraded"}),
+    ("out_of_window_only", {**_NR, "ohlc_window": dict(_OW_HEALTHY, out_of_window=3, direct_requests=3,
+                                                       degraded=True)}, {"ohlc_window_degraded"}),
+    # v0.45.410（回放行情库）：只因库的问题降级 / 近几天确认的修订 ⇒ warn；过了告警期的修订 ⇒ 只陈述
+    ("store_problem_only", {**_NR, "ohlc_window": dict(_OW_HEALTHY, degraded=True, store=dict(
+        _STORE_OK, quarantined=["AAA.json.invalid-2026-10-01-0"], problem=True))}, {"ohlc_window_degraded"}),
+    ("revised_recent", {**_NR, "ohlc_window": dict(_OW_HEALTHY, store=dict(
+        _STORE_OK, revised_bars=6, revised_tickers=["NVDA"], revised_recent=6, revised_recent_tickers=["NVDA"]))},
+     {"ohlc_store_revised"}),
+    ("revised_long_ago", {**_NR, "ohlc_window": dict(_OW_HEALTHY, store=dict(
+        _STORE_OK, revised_bars=6, revised_tickers=["NVDA"]))}, set()),
+    # v0.45.415 二次检查：不知道重放日（应恒为 0）⇒ 窗口降级
+    ("as_of_unknown_only", {**_NR, "ohlc_window": dict(_OW_HEALTHY, degraded=True, store=dict(
+        _STORE_OK, as_of_unknown=3))}, {"ohlc_window_degraded"}),
+]
+
+
+def test_as_of_unknown_only_says_what_happened_not_a_download_failure():
+    """只因「不知道重放日」降级时，attention 说它（时点数据失效），不说「整段取数 0/20 失败、退回直连」（那不是事实）。
+    变异「parts 条件不看 as_of_unknown」/「不加那一段」⇒ 红。"""
+    fres = next(
+        s[1] for s in _FG_WINDOW_STATES if s[0] == "as_of_unknown_only")
+    (a,) = rr._forward_test_attention("fg_exposure_gate_forward", rr._detail(fres, rr._FWD_DETAIL_KEYS))
+    assert "不知道重放日" in a["message"] and "整段取数" not in a["message"], a["message"]
+
+
 class TestAttentionMatchesRenderedIcons:
     """生产侧**不**从图标反推条目（两者各自从结构化字段来）；这里对照两者没有各说各话。"""
+
+    @pytest.mark.parametrize("label,fres,expect", _FG_WINDOW_STATES, ids=[s[0] for s in _FG_WINDOW_STATES])
+    def test_fg_ohlc_window_states(self, label, fres, expect):
+        """复审 S1：窗口降级 ⇒ 独立 id 的 warn 条目，且 F&G 那一段的段首与之对得上（⏳ 段不许藏 warn）。
+        变异「`_FWD_DETAIL_KEYS` 去掉 ohlc_window」/「attention 不看 degraded」/「status_line 降级时仍打 ⏳」⇒ 红。"""
+        items = rr._forward_test_attention("fg_exposure_gate_forward", rr._detail(fres, rr._FWD_DETAIL_KEYS))
+        assert {a["id"] for a in items} == {f"ic_rerun.fg_exposure_gate_forward.{s}" for s in expect}, label
+        _assert_icon_consistent(_FG.status_line(fres), items)
+        degraded = [a for a in items if a["id"].endswith(".ohlc_window_degraded")]
+        assert all(a["level"] == "warn" for a in degraded)
+        if fres["ohlc_window"]["fallback"] > 5:
+            assert "等 20 个" in degraded[0]["message"], degraded[0]["message"]   # 名单封顶，不把 20 个全列进一行
 
     @pytest.mark.parametrize("key,mod", [("resonance_forward", _RES), ("fg_exposure_gate_forward", _FG)])
     @pytest.mark.parametrize("label,fres,expect", _FWD_STATES, ids=[s[0] for s in _FWD_STATES])

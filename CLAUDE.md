@@ -8,8 +8,9 @@
 ## 用户偏好
 
 - **⚠️ Python 解释器硬规则：扫描/脚本一律用 `/usr/local/bin/python3`（Python 3.11.1），禁用裸 `python3`**
-  - 用户 Mac 有两个 Python：`/usr/bin/python3`=3.9.6（系统自带，**无 sklearn、缺 jinja2、PEP604 `X|None` 注解 import 即崩**）；`/usr/local/bin/python3`=3.11.1（Homebrew，**真实环境**：sklearn/jinja2/yfinance 全装，PEP604 合法）
-  - 编排器 `~/.claude/scripts/alpha-hive-orchestrator.sh:54` 已显式 `PYTHON3="/usr/local/bin/python3"`；**手动/Claude 跑扫描必须同样显式用 `/usr/local/bin/python3 alpha_hive_daily_report.py ...`**，并 `export PATH="/usr/local/bin:$PATH"` 保证内部 spawn 的子 python 也走 3.11
+  - 用户 Mac 有两个 Python：`/usr/bin/python3`=3.9.6（系统自带，**无 sklearn、缺 jinja2、PEP604 `X|None` 注解 import 即崩**）；`/usr/local/bin/python3`=3.11.1（python.org 安装包，软链到 `/Library/Frameworks/Python.framework`，**不是 Homebrew**；**真实环境**：sklearn/jinja2/yfinance 全装，PEP604 合法）
+  - ⚠️ 它的包分装两处：numpy / pytest / jinja2 / starlette 等**只**在用户 site（`~/Library/Python/3.11`，按 `$HOME` 解析）⇒ 测试把 HOME 指到 tmp 后再起真解释器，子进程会丢这些包。`tests/conftest.py` 的 `_pin_child_user_site` 已全会话钉住 `PYTHONUSERBASE`（v0.45.426），新测试换 HOME **不用再自己钉**；只有从零构造 env（不继承 `os.environ`）的子进程要自己带上（详见 auto-memory `alpha-hive-environment-facts.md`）
+  - 编排器顶部已显式 `PYTHON3="/usr/local/bin/python3"`；**手动/Claude 跑扫描必须同样显式用 `/usr/local/bin/python3 alpha_hive_daily_report.py ...`**，并 `export PATH="/usr/local/bin:$PATH"` 保证内部 spawn 的子 python 也走 3.11
   - 裸 `python3` 会解析成 3.9.6 → ML 降级 SimpleMLModel + PEP604 崩 + 缺 jinja2 崩（2026-06-30 事故根因）
   - 运行测试同理：`/usr/local/bin/python3 -m pytest`
 
@@ -73,19 +74,24 @@
 
 ## 核心组件指针（只记"在哪、归谁管"，不记参数值）
 
-- **纸面组合** `paper_portfolio.py`：参数唯一真相 = 模块内 `CONFIG`（v0.39.0 起为回放拐点配置，历史变更查 CHANGELOG）；挂载点 = 日报主流程 `alpha_hive_daily_report._post_scan_enrichment`（v0.38.0 起，**不再**依赖 generate_deep_v2）；状态文件 `paper_portfolio_state/`（meta.json 的 config_snapshot 自 v0.40.2 每次运行刷新）；KPI 看 `compute_kpis()`
+- **纸面组合** `paper_portfolio.py`：参数唯一真相 = 模块内 `CONFIG`（v0.39.0 起为回放拐点配置，历史变更查 CHANGELOG）；挂载点 = 日报主流程 `alpha_hive_daily_report._post_scan_notify`（v0.38.0 起，**不再**依赖 generate_deep_v2；v0.45.428 更正：此前这里写的 `_post_scan_enrichment` 不对）；状态文件 `paper_portfolio_state/`（meta.json 的 config_snapshot 自 v0.40.2 每次运行刷新）；KPI 看 `compute_kpis()`
 - **权重优化** `weekly_optimizer.py`（Track A）：T+7 回测 → clamp ±10pp → 原子写 config.py，审计日志 `weight_history.jsonl`
 - **第三条权重通道，v0.45.176 已断开** `Backtester.adapt_weights()`：曾经每日扫描内调用后经 `QueenDistiller(adapted_weights=...)` 短路掉 `config.EVALUATION_WEIGHTS`（`0.2×config + 0.8×学习值`，即 config 只有两成投票权）。**现降级为只读诊断**，照 v0.44.0 处置 `weekly_optimizer` 的先例：继续算、继续写 `adapted_weights` 表留审计轨迹，**不再进评分**。⚠️ **不要接回去**——它学的是「谁更爱说中性」而非准头（零技能置换检验：5 只蜂 4 只技能 Δ 在 ±2.2pp 内且 CI 全跨 0），且 `max(0.05, acc**2)` 的形式结构上表达不了零权重。理由全文见 `Backtester.adapt_weights` 的 docstring；守卫 `tests/test_zero_weight_invariant.py`（AST 枚举全仓，谁传 `adapted_weights=` 谁红）。详见 auto-memory `alpha-hive-adapted-weights-bypass.md`
 - **GEX 直接加减分，v0.45.334 已断开** `gex_regime.GexRegimeModifier`：曾经在 `queen_distiller` 步骤 4.5 直接给 `rule_score` ±0.8（驱动它的 flip 是逐行权价变号，54% 贴在现价 2% 内 ⇒ 系统性扣分；vanna 差 S√T 倍）。**现仅诊断**：照算、落盘 `gex_regime_mod`（`applied: False`），**不进分**。另两条读 OracleBee 主链 `gamma_exposure` 的通道 **v0.45.349 已中性化**：`options_analyzer` 的 `gex_signal` 恒 1.0、BearBee 的 `gex<0` 看空下限已删（该量是截断链上 call−put gamma×OI，实测只携带标的身份、不携带时点信息）。⇒ **规则引擎（生产 `--no-llm`）下 GEX 进评分只剩 `RegimeWeightAdjuster` 全链政体路由**（`confidence_modifier` 只缩放展示用 band_width；LLM 模式下 Oracle / Bear 的 LLM 提示仍带 GEX，未动）。守卫 `tests/test_gex_oracle_bear_neutralized.py`（含 `gamma_exposure`/`gex` 读者白名单 AST）。⚠️ **都不要接回去**；守卫 `tests/test_gex_modifier_disconnected.py`（行为 + AST）。共振加成检验的 replay 按记录的 `applied` 复现（修订 1）。**展示 / 存档读的 GEX（v0.45.362 起）只有一份**：`gex_state`（蒸馏结果 `swarm_results[tk]["gex_state"]`，就是政体路由收到的那份，带 `available`/`reason`）；网站、日报、深度 / ML 报告、MCP、`signal_archive` 的 `gex.*` 都读它，**缺了显示不可得，不回退** Oracle 主链 `gamma_exposure`（另一个量，可与之符号相反）。⚠️ Oracle 的 `gamma_squeeze_risk` 分档方向与展示分档**相反**（正 GEX ⇒ high），只剩 LLM 提示词在读；卖权选择器不共用（冻结预注册读 ≤45 天重定价视图）。理由见 `gex_state` 模块 docstring，守卫 `tests/test_gex_state.py`
 - **卖权行权价选择器（对标 GEXBot）** `sell_strike_levels / _candidates / _ledger / _report`（v0.45.333）：CBOE 原始链 → 重定价扫描 zero gamma / 净 GEX majors / DEX / vanna·charm → delta 梯子与六种结构 → 月度 / 周度前向账本（`PATHS.sell_strike_state`）。**不进评分、不上网站**（本地报告 + MCP `alphahive_get_sell_strike_candidates`）；双向 AST 火墙在 `tests/test_sell_strike_integration.py`。检验协议冻结在 `experiments/sell_strike_routing_prereg.md`（首次就绪只跑一次）
+- **Alpha Bot（卖权选择器的本机前端，v0.45.388）** `alphabot/`：`/usr/local/bin/python3 -m alphabot`（或 `make alphabot`；`--demo` 合成数据）→ `http://127.0.0.1:8765`，未设 `ALPHA_HIVE_HOME` 时读缺省数据根 `~/alpha-hive-data`（v0.45.422；数据根在别处才要设）。桌面程序：`make alphabot-app` 生成 `~/Applications/Alpha Bot.app`（v0.45.390，壳只 exec `alphabot.launcher`，数据根存 `~/Library/Application Support/Alpha Bot/launcher.json`；壳 cd 进的代码目录缺省是**生产克隆** `~/alpha-hive-prod`（v0.45.436），整次生成（壳、Info.plist、数据根处理）交给克隆**自己的** `main`（v0.45.451；统一入口 `make -C ~/alpha-hive-prod alphabot-app`）、克隆不在就报错不退回（v0.45.439）⇒ 扫描日克隆快进后**重启 Alpha Bot** 才用上新代码；环境里的 `ALPHA_HIVE_HOME` 不改写已配的数据根，要换用 `--home`；要写进 .app / 配置的 `PYTHON` / `--home` / 首次记下的 `ALPHA_HIVE_HOME` 必须是绝对路径，相对或裸名字直接拒（v0.45.456）；make 的 `PYTHON` 只认命令行上给的、环境变量里的忽略，显式空值一律拒，生成时打印写进 .app 的解释器（v0.45.458；推荐入口跑的是**克隆**的 Makefile 与生成器，这些规则在克隆快进到含 458 的版本后才生效）；写进 .app 的解释器须是可执行**文件**（目录不算；生成时与双击时同一判据 `interpreter_problem` / `SHELL_PY_USABLE`），exec 本身失败也弹窗；弹窗里「怎么重新生成」只出自 `macos_app.regen_hint` / `canonical_entry`（帮助页抄后者，守卫 `TestRegenHints`）；环境 `ALPHA_HIVE_HOME` 经 `hive_logger.explicit_data_root` 原样取、`~` 不展开（v0.45.461））。GEX 水平（对标 GEXBot Classic）/ 卖权工作台 / 盘中快照 / 账本就绪度 / 程序内「帮助」页（`static/pages/help.js`，v0.45.411；规则常量取自 `/api/method`，守卫 `TestHelpPage`）。⚠️ 与 `alpha_hive_bot/`（Telegram）、Slack「Alpha Hive Bot」无关。不变式：**只绑回环、不上网站**；**只有 `alphabot/service.py` 可 import 卖权模块**（`ALLOWED_IMPORTERS`），对账本只读、从不冻结；盲期按 `sell_strike_report._all_unblinded` 判，历史水平叠其后价格在全部 tenor 冻结前整体锁住；自己的状态只写 `PATHS.alphabot_state`；**不改 levels / candidates 既有输出与版本号**（改了会截断预注册样本，展示用只做纯新增如 `gex_curve`）。守卫 `tests/test_alphabot.py`
+  - **「对冲」页（v0.45.459）** `alphabot/hedge.py`：组合 Greeks 的纸面 SPY 覆盖账本（持仓 / 现金 / 成交 / 净值 / 每日带位）。**只读**，数据只经 `portfolio_greeks.ledger_view()`（历史走 `load_history` 放行闸，被拦记录只给计数；本模块不读文件，AST 测试钉住）。守卫 `tests/test_alphabot_hedge.py`
+  - **「跨式」页（v0.45.424）** `alphabot/straddle.py`：财报跨式纸面账本的持仓 / 平仓 / 逐仓 Greeks / 盘中参考报价（`cboe_options.quote_held`）。**只读**，不写账本、不拿账本 mark 顶替拿不到的报价；**不显示任何一笔的 `gex_ctx`**（跨式 GEX 预注册的盲期，协议 `experiments/straddle_gex_prereg.md`，冻结只经 `straddle_gex_prereg.py --run-once`）。信号行的 `gex_ctx` 只记录、不进开单（守卫 `tests/test_straddle_gex_shadow.py`、`tests/test_alphabot_straddle.py`）
+- **账本读写** `ledger_io.py`（v0.45.448；v0.45.452 加整文件文档 `write_json` / `load_json`）：加锁（目录 flock，同进程可重入）+ 原子替换 + 严格序列化（拒 NaN / 非对象）+ 写后回读；读到坏行 / 坏文档抛 `LedgerCorrupt`（外部损坏 ⇒ 停下、从备份恢复，**不跳过、不当新账本**——`meta.json` 里存着现金）。失败在它**源头**登记（`failures()` ⇒ status.json ⇒ P2），调用方吞异常也照红。⚠️ 新账本 / 状态写入**一律走它**，可再生缓存走 `hive_logger.atomic_json_write`；守卫 `tests/test_ledger_writes_go_through_ledger_io.py` 按**写入落点**认（不看函数名），存量 84 处逐条按类别登记在 `WRITERS`，「待迁移」类有上限、只许减
 - **月度自诊断** `self_analyst.py`（Track B）：输出 `self_analysis_briefs/YYYY-MM.md`，含每蜂维度 rank-IC 小节（v0.40.0）
 - **IBKR 桥接** `ibkr_sync.py`：手动流程（export actions → 用户 TWS 下单 → import CSV → reconcile），状态在 `paper_account/`
-- **编排器（v0.45.353 起受版本控制）**：唯一真相 = 仓库 `scripts/alpha-hive-orchestrator.sh`；launchd 跑的是**部署副本** `~/.claude/scripts/alpha-hive-orchestrator.sh`（路径不变：Desktop 有 TCC 限制）。⚠️ **不许直接改部署副本**——改仓库那份 → 合入 origin/main → 部署（阶段 3 前手动：`/usr/local/bin/python3 deploy_orchestrator.py --ref origin/main`，带 `bash -n`/裸变量/漂移关卡、原子替换；阶段 3 起改由扫描前自动部署）。一致性守卫（漂移 / 未部署）即该文件；读编排器原文的测试一律经 `tests/_orchestrator.py`，CI 上也跑
+- **生产代码 = 独立克隆 `~/alpha-hive-prod`（阶段 8，v0.45.431）**，不是 `~/Desktop/Alpha Hive`（那里是**开发检出**，worktree 都挂在它下面）。克隆只由扫描前 `production_sync` 快进；它的 `.git/hooks` 拒绝一切让 main 偏离 origin/main 的写入（`production_clone.py`，守卫每轮自动补齐、不合格进 P1）。⚠️ **不要在生产克隆里开会话、改文件、提交**；改代码 = 开发检出开 worktree → 推 origin/main → 下一个扫描日自动进生产。判「下一轮生产跑哪版」：`git -C ~/alpha-hive-prod fetch -q origin && git -C ~/alpha-hive-prod rev-list --left-right --count main...origin/main`（**refs 不再与开发仓库共享**，在开发 worktree 里查到的 main 不是生产的）。体检：`/usr/local/bin/python3 production_clone.py check`。守卫 `tests/test_production_clone.py`、`tests/test_orchestrator_runs_production_clone.py`
+- **编排器（v0.45.353 起受版本控制）**：唯一真相 = 仓库 `scripts/alpha-hive-orchestrator.sh`；launchd 跑的是**部署副本** `~/.claude/scripts/alpha-hive-orchestrator.sh`（路径不变：Desktop 有 TCC 限制）。⚠️ **不许直接改部署副本**——改仓库那份 → 合入 origin/main → **下一个扫描日自动部署**（v0.45.370 阶段 3：production_sync 结局 OK 后调 `deploy_orchestrator.py --ref HEAD`；关卡 / 漂移拒绝 / 原子替换在工具里；同步没成功那轮 skipped；结局在 status.json `steps_result.orchestrator_deploy`，记录 `~/.claude/logs/orchestrator_deploy.json`）。⚠️ 部署那轮仍跑旧编排器——新编排器从合入后**第二个**扫描日起执行，与 Python 耦合的改动要兼容一轮。首次上线 / 急用才手动：`/usr/local/bin/python3 deploy_orchestrator.py --ref origin/main --dry-run`，再去掉 `--dry-run` 加 `--out ~/.claude/logs/orchestrator_deploy.json`。**回滚 = 在 main 上 revert 那次合入**（下一扫描日自动部署）；手动部署旧提交只管一轮、下一轮会被自动部署盖回 main 最新版。⚠️ 坏编排器若在部署块**之前**就崩（如同步前的裸变量），它部署不了自己的修复 ⇒ 手动部署修好的 main。一致性守卫（漂移 / 该部署没部署；合入后待下一轮且 ≤6 天不算红）= `tests/test_orchestrator_deployed_matches_repo.py`；读编排器原文的测试一律经 `tests/_orchestrator.py`，CI 上也跑
 
 ## GitHub Pages 部署规则（永久设置）
 
 - **GitHub Pages 从 `gh-pages` 分支部署**，不是 `main`
-- `report_deployer.auto_commit_and_notify`：生产模式（LLM 或蜂群）提交 + 推 main + 同步 gh-pages；非生产扫描**不提交不推送**（v0.45.210 撤掉了坏了半年的 test remote 推送分支，**勿往 `GitHubTool` 白名单加 `checkout`/`reset` 恢复它**，理由在该函数 docstring）
+- `report_deployer.deploy_and_notify`（v0.45.402 前叫 `auto_commit_and_notify`）：生产模式（LLM 或蜂群）只**同步 gh-pages**；**不再提交、不再推代码仓库 main**（数据根迁移阶段 6：生产数据在 `$ALPHA_HIVE_HOME`、代码仓库不跟踪数据；异地副本靠编排器 Step 14 的私有备份）。⚠️ **勿重建日报提交 / 推送链**（`production_sync.push_main`、日报白名单都已删，墓碑测试 `tests/test_git_failures_are_visible.py::TestCommitPushChainStaysRetired`）；`gh_pages` 结局键必须始终写进 `scan_timing.extra`（编排器拿它当「主流程已跑完」的证据）。非生产扫描不部署；v0.45.210 撤掉的 test remote 推送分支同样**勿恢复**（勿往 `GitHubTool` 白名单加 `checkout`/`reset`）
 - **非蜂群扫描已退役（v0.45.213）**：`alpha_hive_daily_report.py` 不带 `--swarm` 直接 exit 2，**勿重建 `run_daily_scan`**——它在扫描中途就写概率账本（先写者占位），在 save_report 前短路管不到；理由在 `main()` 该闸注释，守卫 `tests/test_non_swarm_scan_retired.py`
 - `generate_ml_report.py`：末尾调用 `_sync_ghpages()`，每次生成 ML 报告后自动同步 gh-pages
 - **禁止**只推 main 不推 gh-pages，否则网站不更新
@@ -190,7 +196,19 @@ v0.45.165 普查全仓（20 条，5 个文件）后补三条：
 与上一节同源：把路径冻成模块级常量，等于把「隔离失效」改写成了「隔离生效」，同样答不出「谁会红？」。
 全套判据、事故取证（v0.45.149/150/160，含 `__file__` 派生一族）见 auto-memory `alpha-hive-test-writes-production.md`。
 
+**裸字面量缺省是另一族（v0.45.463）**：`db_path="pheromone.db"` / `os.environ.get(X, "cache")` 不含 `PATHS` / `__file__`，上面两条物种守卫都看不见；生产 cwd 是代码克隆，它们在那里恒读空且不报错。守卫 `tests/test_price_history_default_paths.py::TestNoNewCwdRelativeDataDefaults`（存量只许减）。
+
 ## 硬检查项：这个路径指向「代码」还是「数据」？（2026-09-08 起）
+
+**数据根规则（v0.45.422）**：唯一实现 `hive_logger.resolve_data_root`——`ALPHA_HIVE_HOME` 非空就用它，否则
+`$HOME/alpha-hive-data`（**不再**兜底到代码检出：阶段 5 后那里只剩冻结旧数据，交互 shell 手动跑会静默读旧数据）。
+测试会话在 `tests/conftest.py::pytest_configure` **收集之前**设会话级 `ALPHA_HIVE_HOME` 沙箱，并记下调用时环境给
+「生产在哪」的守卫用——别把这个沙箱挪进 session 夹具（太晚，收集期冻住的常量会指向生产）。
+
+**真实数据根闸的豁免只认断言、不认注释（v0.45.427）**：`PATHS` 落在闸豁免区（`logs/`、`db_backups/`、`_` 元目录）的属性必须恰好是
+`tests/test_root_data_guard.py::PATHS_IN_EXEMPT_AREAS_OK` 里写明「谁负责隔离」的几个——新增属性落进 `_` 目录会红，让它受闸
+（`DATA_ROOT_WATCHED_META`），别往白名单加。测试写夹具**别经被测的路径属性写**（目标自己按沙箱算、写前断言属性指向它）：
+10-03 一个变异体经 `PATHS.data_backup_repo` 把夹具写进了生产备份仓库，被每日备份封进历史，四天没人红（auto-memory `alpha-hive-test-writes-production.md`）。
 
 改任何 `Path(__file__).parent / …` 之前先回答一句：**它指向代码还是数据？**
 
@@ -217,6 +235,7 @@ v0.45.168 实测：只有子集守卫时，把 5 处「应保留」的错改成 
 
 ## 环境：`~/Desktop` 在 iCloud 同步下会造「重名副本」（2026-09-07 起）
 
+（阶段 8 起这只影响**开发检出**；生产代码在 `~/alpha-hive-prod`、数据在 `~/alpha-hive-data`，都不在 iCloud 同步里。）
 本项目位于 `~/Desktop/Alpha Hive`，而 macOS「桌面与文稿同步 iCloud」会**持续**
 产出形如 `xxx 2.py` / `settings.local 2.json` 的副本（名字里带**空格 + 数字**，
 2026-09-07 一次扫出 53 个、最早可回溯 2026-03-16，不是偶发）。

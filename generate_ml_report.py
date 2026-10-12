@@ -749,7 +749,7 @@ class MLEnhancedReportGenerator:
                 activity_type = activity.get("type", "unknown")
                 strike = activity.get("strike", "N/A")
                 volume = activity.get("volume", 0)
-                unusual_html += f"<li>{activity_type} @ ${strike} (成交量: {volume:,})</li>"
+                unusual_html += f"<li>{activity_type} @ ${_m(strike, '{:g}')} (成交量: {_m(volume, '{:,.0f}')})</li>"
             unusual_html += "</ul></div>"
 
         # 生成关键位置 HTML
@@ -759,17 +759,17 @@ class MLEnhancedReportGenerator:
         if key_levels.get("support"):
             support_html = "<div style='margin-top: 15px;'><strong>支撑位：</strong><ul style='margin: 10px 0; padding-left: 20px;'>"
             for level in key_levels.get("support", []):
-                strike = level.get("strike", "N/A")
-                oi = level.get("oi", 0)
-                support_html += f"<li>${strike} (OI: {oi:,})</li>"
+                strike = level.get("strike")
+                oi = level.get("oi")
+                support_html += f"<li>${_m(strike, '{:g}')} (OI: {_m(oi, '{:,.0f}')})</li>"
             support_html += "</ul></div>"
 
         if key_levels.get("resistance"):
             resistance_html = "<div style='margin-top: 15px;'><strong>阻力位：</strong><ul style='margin: 10px 0; padding-left: 20px;'>"
             for level in key_levels.get("resistance", []):
-                strike = level.get("strike", "N/A")
-                oi = level.get("oi", 0)
-                resistance_html += f"<li>${strike} (OI: {oi:,})</li>"
+                strike = level.get("strike")
+                oi = level.get("oi")
+                resistance_html += f"<li>${_m(strike, '{:g}')} (OI: {_m(oi, '{:,.0f}')})</li>"
             resistance_html += "</ul></div>"
 
         return f"""
@@ -817,7 +817,7 @@ class MLEnhancedReportGenerator:
 
                     <div style="text-align: center; padding: 20px; background:none; border:1px solid var(--border); border-radius:2px;">
                         <div style="font-size: 3.5em; font-weight: bold; color: var(--tp); margin-bottom: 10px;">
-                            {options_score:.1f}
+                            {_m(options_score)}
                         </div>
                         <div style="font-size: 1.2em; color: var(--tp); margin-bottom: 10px;">/ 10.0</div>
                         <div style="color: var(--ts); font-size: 0.95em;">{signal_summary}</div>
@@ -1157,12 +1157,13 @@ class MLEnhancedReportGenerator:
         pc_color = ("var(--neut)" if pc is None else
                     "var(--bull)" if pc < 0.8 else ("var(--bear)" if pc > 1.2 else "var(--neut)"))
         unusual_rows = ""
+        # v0.45.462：期权结果的非有限数现在记 None（不再是 0.0）⇒ 嵌套字段也走 _fmt，不在格式化里崩
         for u in unusual[:5]:
             bullish = u.get("bullish", True)
             emo = ('<span style="color:var(--bull)">▲</span>' if bullish else '<span style="color:var(--bear)">▼</span>')
-            unusual_rows += f"<li>{emo} {u.get('type','').replace('_',' ')} Strike ${u.get('strike',0):.0f} × {u.get('volume',0):,.0f}</li>"
-        support_txt = " | ".join(f"${s.get('strike',0):.0f}(OI:{s.get('oi',0):,})" for s in support[:3])
-        resist_txt = " | ".join(f"${r.get('strike',0):.0f}(OI:{r.get('oi',0):,})" for r in resist[:3])
+            unusual_rows += f"<li>{emo} {u.get('type','').replace('_',' ')} Strike ${_fmt(u.get('strike'), '{:.0f}')} × {_fmt(u.get('volume'), '{:,.0f}')}</li>"
+        support_txt = " | ".join(f"${_fmt(s.get('strike'), '{:.0f}')}(OI:{_fmt(s.get('oi'), '{:,.0f}')})" for s in support[:3])
+        resist_txt = " | ".join(f"${_fmt(r.get('strike'), '{:.0f}')}(OI:{_fmt(r.get('oi'), '{:,.0f}')})" for r in resist[:3])
 
         # ── v0.27.0：近端 Max Pain（来自 oracle.max_pain，OracleBee 基于近端 3-4 个到期日聚合）──
         # 数据格式：dict `{"max_pain": 225.0, "distance_pct": -1.2, "summary": "..."}`
@@ -1378,8 +1379,10 @@ class MLEnhancedReportGenerator:
             # 兼容旧快照 JSON（v0.45.4 之前没有这个键）。
             _ts_front = (_iv_term or {}).get("front_iv")
             _ts_back = (_iv_term or {}).get("back_iv")
-            _ts_ok = bool((_iv_term or {}).get("data_available",
-                                               _ts_front is not None and _ts_back is not None))
+            _ts_ok = (bool((_iv_term or {}).get("data_available",
+                                                _ts_front is not None and _ts_back is not None))
+                      # v0.45.462：标了可用但值是 None（非有限数被消毒成 None）⇒ 按不可用渲染，不在格式化里崩
+                      and isinstance(_ts_front, (int, float)) and isinstance(_ts_back, (int, float)))
             _shape = (_iv_term or {}).get("shape") or (_iv_term or {}).get("term_shape") or "unknown"
             _ts_err = str((_iv_term or {}).get("error") or "")
             _ts_src = str((_iv_term or {}).get("source") or "")

@@ -62,10 +62,35 @@ def _gen():
     return MLEnhancedReportGenerator.__new__(MLEnhancedReportGenerator)
 
 
-def _real_ledger_size():
-    """真实概率账本的字节数；不存在记 -1。用于自证测试没碰生产状态。"""
-    led = REPO / "probability_scorecard_state" / "published.jsonl"
+def _ledger_size():
+    """本测试沙箱里概率账本的字节数；不存在记 -1。用于自证 `record_published` 桩确实截住了、没有真落账。
+
+    v0.45.409（阶段 6 ⑤）：此前读 `REPO/probability_scorecard_state/published.jsonl`（仓库根）。
+    数据搬到数据根后那条路径在**每台机器上**都不存在 ⇒ 「前后都是 -1」恒真，什么也证明不了
+    （CLAUDE.md「skip 守卫要问 X 在哪些环境存在」同形）。现在读账本自己的解析器 `_ledger_path()`
+    ——调用时求值、落在 `_isolate_env` 给的沙箱里——并先断言它**确实在沙箱里**：
+    尺子指错地方时，这里红，而不是静默量一个永远不变的东西。
+    真实数据根里的账本由 conftest 的 `_guard_real_data_root` 兜住。
+    """
+    import os
+
+    import probability_scorecard as _ps
+    led = pathlib.Path(_ps._ledger_path())
+    sandbox = os.environ["ALPHA_HIVE_HOME"]
+    assert os.path.abspath(sandbox) != str(REPO), "沙箱根不该是仓库根（隔离没生效）"
+    assert str(led).startswith(sandbox), f"账本路径 {led} 不在测试沙箱 {sandbox} 内——自证的尺子指错了地方"
     return led.stat().st_size if led.exists() else -1
+
+
+def test_ledger_probe_sees_a_real_write():
+    """正对照：不打桩、真调 `record_published`，这把尺子必须量得出账本增长。
+    没有这条，下面各条「桩截住了、账本一字节没长」的绿灯，分不清是桩有效还是尺子是瞎的。"""
+    import probability_scorecard as _ps
+    before = _ledger_size()
+    assert before == -1, "沙箱起初就该没有账本"
+    assert _ps.record_published(report_date="2026-09-06", ticker="XOM", direction="bullish",
+                                hit_rate_pct=55.0, basis="probe", sample_size=10) is True
+    assert _ledger_size() > before
 
 
 def _metrics():
@@ -195,7 +220,7 @@ class TestParamThreadsThrough:
         return gen
 
     def test_dimension_scores_reach_the_model_input(self, monkeypatch):
-        before = _real_ledger_size()
+        before = _ledger_size()
         captured = []
         gen = self._wire(monkeypatch, captured)
         gen.generate_ml_enhanced_report(
@@ -204,9 +229,9 @@ class TestParamThreadsThrough:
         assert captured, "predict_for_opportunity 未被调用"
         assert captured[0].catalyst_quality == "A+", (
             f"催化剂分 8.6 应穿透成 A+，实得 {captured[0].catalyst_quality}")
-        # 隔离自证：桩确实截住了，真账本一个字节没长
+        # 隔离自证：桩确实截住了，沙箱账本一个字节没长（尺子的有效性由 test_ledger_probe_sees_a_real_write 证明）
         assert self._ledger, "record_published 未被调用——桩没打中，隔离结论不成立"
-        assert _real_ledger_size() == before, "测试写进了真实的 published.jsonl"
+        assert _ledger_size() == before, "桩没截住：测试往概率账本落账了"
 
     def test_omitting_the_param_degrades_honestly(self, monkeypatch):
         """不传时不得崩，且必须标为缺失（旧调用方式仍可用）。"""

@@ -103,12 +103,12 @@ import math
 import os
 import re
 import sys
-import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from hive_logger import PATHS, get_logger
+import ledger_io
+from hive_logger import PATHS, explicit_data_root, get_logger, resolve_data_root
 
 _log = get_logger("vrp_signal")
 
@@ -161,49 +161,27 @@ def _r(v, nd=4) -> Optional[float]:
 def _cache_dir(cache_dir) -> Path:
     """缓存目录（快照 / IV 索引所在）。本模块对它**只读**，所以缺省走不建目录的
     `PATHS.cache_dir_unmade()`（v0.45.384）：从前走会 mkdir 的 `PATHS.cache_dir`，
-    不带 `ALPHA_HIVE_HOME` 手动跑一次就在代码 checkout 里建出空 `cache/`，
-    「数据根找错了」从此看起来像「目录在、只是没快照」。"""
+    数据根指错时跑一次就在错的根下建出空 `cache/`，「数据根找错了」从此看起来像
+    「目录在、只是没快照」。"""
     if cache_dir is None:
         return PATHS.cache_dir_unmade()
     p = Path(cache_dir)
     return p if p.is_absolute() else BASE_DIR / p
 
 
+# 读写全经 `ledger_io`（v0.45.452）：严格读（坏行 ⇒ LedgerCorrupt，不再静默跳过——跳过一行 = 少一条样本、
+# 闸门照样算）、原子写 + 回读、拒 NaN。读-改-写的入口（record_day / settle）整段持目录锁。
+
 def _load_jsonl(path: Path) -> List[Dict]:
-    if not path.exists():
-        return []
-    out: List[Dict] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(rec, dict):
-                out.append(rec)
-    return out
+    return ledger_io.load_jsonl(path)
 
 
 def _write_jsonl(path: Path, records: List[Dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            for r in records:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    ledger_io.write_jsonl(path, records)
+
+
+def _signals_dir() -> Path:
+    return SIGNALS_FILE.parent
 
 
 def load_rows() -> List[Dict]:
@@ -364,7 +342,7 @@ def _snapshot_dir_diagnosis(cdir: Path, as_of: str) -> str:
         return "路径存在但不是目录"
     same_day = [p for p in cdir.glob(f"options_snapshot_*_{as_of}.json") if _SNAP_RE.match(p.name)]
     if same_day:
-        return (f"目录存在，有 {len(same_day)} 份该日快照文件，但都读不出（坏 JSON，见上方 WARNING）"
+        return (f"目录存在，有 {len(same_day)} 份该日快照文件，但都读不出（坏 JSON / 打不开，见上方 WARNING）"
                 f"或内容不是 JSON 对象（静默跳过）")
     dates = sorted({m.group(2) for m in (_SNAP_RE.match(p.name) for p in cdir.glob("options_snapshot_*.json")) if m})
     out = (f"目录存在，但没有 {as_of} 的快照（共 {len(dates)} 个日期，最新 {dates[-1]}）" if dates
@@ -378,8 +356,13 @@ def _snapshot_dir_diagnosis(cdir: Path, as_of: str) -> str:
 def _cache_dir_hint(cdir: Path) -> str:
     """两种「读错目录」的常见来路，命中才说；都不命中返回空串。"""
     hints = []
-    if "ALPHA_HIVE_HOME" not in os.environ:
-        hints.append("未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录（生产由编排器 export）")
+    # v0.45.422 起未设 / 空串 ⇒ 缺省数据根 `~/alpha-hive-data`（就是生产），不再兜底到代码目录；
+    # 读错根的来路因此反过来：**显式**设了别的根（shell 里残留的旧值、指回检出的回退配置）。
+    # 生产编排器与 plist 都设成缺省根本身 ⇒ 不会误报。判据走 hive_logger 的唯一解析，别另写一份。
+    explicit = explicit_data_root()
+    default = resolve_data_root({k: v for k, v in os.environ.items() if k != "ALPHA_HIVE_HOME"})
+    if explicit is not None and explicit != default:
+        hints.append(f"ALPHA_HIVE_HOME 显式指向 {explicit}，不是缺省数据根 {default}（shell 里残留的旧值？）")
     # 快照的写者 options_analyzer 用 PATHS.cache_dir；显式传了别的 cache_dir 就会分叉。
     # 用不建目录的同一解析：诊断不该有副作用。
     writer = PATHS.cache_dir_unmade()
@@ -388,6 +371,7 @@ def _cache_dir_hint(cdir: Path) -> str:
     return "；".join(hints)
 
 
+@ledger_io.locked_by(_signals_dir)
 def record_day(as_of: str, cache_dir=None) -> List[Dict]:
     """为 `as_of` 的每份常规快照写一行 VRP 记录，按 (ticker, date) upsert 落盘。返回本次写入的行。
 
@@ -400,8 +384,8 @@ def record_day(as_of: str, cache_dir=None) -> List[Dict]:
     落盘语义（v0.45.384，与 `earnings_vol_signal.scan` v0.45.380 / `sell_strike_ledger._record_rows` 同）：
       · 零快照 ⇒ **账本一个字节都不改**（连原子替换都不做），WARNING 写明读的目录与它在不在，
         返回 []。此前照常改写成「其它日期的行 + 空列表」，即把该日已有的行（含 settle 过的）
-        整批删掉——数据根找错（不带 `ALPHA_HIVE_HOME` 手动跑 ⇒ 读写的是代码目录里被 git
-        跟踪的 `vrp_state/`）、当日快照缺失时都会触发；v0.45.104 的搬运只救得了本次重新产出的票。
+        整批删掉——数据根 / 缓存目录指错、当日快照缺失时都会触发（v0.45.422 起不带 `ALPHA_HIVE_HOME`
+        手动跑读写的就是生产数据根，删的是生产行）；v0.45.104 的搬运只救得了本次重新产出的票。
       · 本次有快照的票 ⇒ 替换该票该日的旧行（结算字段照 v0.45.104 搬过来）。
       · 该日已有、但本次**没有可用快照**的票（缺文件 / 坏 JSON / 不是对象）⇒ 旧行原样保留并打 WARNING。缺快照不是「这行作废」
         的证据，只是这次没有输入；已结算的样本删了就再也补不回来。要撤掉某行请直接编辑账本。
@@ -410,8 +394,13 @@ def record_day(as_of: str, cache_dir=None) -> List[Dict]:
     return _record_day_with_info(as_of, cache_dir)[0]
 
 
+@ledger_io.locked_by(_signals_dir)
 def _record_day_with_info(as_of: str, cache_dir=None) -> Tuple[List[Dict], Dict]:
-    """`record_day` 的本体，另返回诊断信息给 CLI 决定退出码（`record_day` 的返回类型不能变：日报在用）。"""
+    """`record_day` 的本体，另返回诊断信息给 CLI 决定退出码（`record_day` 的返回类型不能变：日报在用）。
+
+    ⚠️ 本体自己也持目录锁：CLI `--record` 直接调这里、不经 `record_day`。锁只挂在 `record_day` 上的话，
+    CLI 这条读-改-写就是无锁的（v0.45.384 合并 v0.45.452 时的二次检查发现）。`ledger_io` 的锁同线程可重入，
+    经 `record_day` 进来时两层不会自锁。"""
     cdir = _cache_dir(cache_dir)
     existing = load_rows()
     # 其它日期的行，只喂 `_prior_history`。它本来就只看**严格早于** as_of 的日期，
@@ -560,6 +549,7 @@ def _give_up(row: Dict, as_of: str, reason: str) -> None:
     _log.info("[%s] %s 的 VRP 行放弃结算：%s", row.get("ticker"), row.get("date"), reason)
 
 
+@ledger_io.locked_by(_signals_dir)
 def settle(as_of: str, bars_fn: Optional[Callable[[str], Optional[List[dict]]]] = None) -> int:
     """给已到期的行填 `rv_forward` / `vrp_realized`。每票最多取一次 K 线；没有可结算行的票不取。
 

@@ -1249,6 +1249,10 @@ class AlphaHiveDailyReporter:
                         )
                     except (TypeError, ValueError):
                         _snap.entry_price = 0.0
+                    # v0.45.452 二次检查：NaN 是 truthy，`x or 0.0` 挡不住——侦察蜂价是 NaN 时下面的 yfinance 兜底被跳过、
+                    # NaN 落进快照（06-26 RKLB / META 两份实例）。非有限一律当「没有价」，走兜底。
+                    if not math.isfinite(_snap.entry_price):
+                        _snap.entry_price = 0.0
                     if not _snap.entry_price:
                         try:
                             from data_pipeline import _drop_forming_bar as _dfb
@@ -1290,13 +1294,21 @@ class AlphaHiveDailyReporter:
             import earnings_vol_signal as _evs
             import options_paper_leg as _opl
             _ev_signals = _evs.scan(self.date_str,
-                                    upcoming_fn=self._earnings_date_from_swarm(swarm_results))
+                                    upcoming_fn=self._earnings_date_from_swarm(swarm_results),
+                                    gex_fn=self._gex_state_from_swarm(swarm_results))
             _ev_settled = _evs.settle_signals(self.date_str)
             _opl_result = _opl.run_for_date(self.date_str, signals=_ev_signals)
-            _log.info("期权纸面腿已更新: %s (信号 %d / 合格 %d / 回填 %d / nav=%s)",
+            _gx = _evs.shadow_summary(_ev_signals, self.date_str)
+            _log.info("期权纸面腿已更新: %s (信号 %d / 合格 %d / 回填 %d / nav=%s / 结算延期 %d / GEX 影子记录可用 %d/%d)",
                       self.date_str, len(_ev_signals),
                       sum(1 for _s in _ev_signals if _s.get("eligible")), _ev_settled,
-                      (_opl_result or {}).get("nav", "?"))
+                      (_opl_result or {}).get("nav", "?"),
+                      len((_opl_result or {}).get("settle_deferred") or []), _gx["usable"], _gx["n"])
+            # v0.45.428：有信号而一条可用的影子记录都没有 ⇒ warning。不然接线断了 / gex_state 没了，
+            # 只会在几个月后表现成「检验一直攒不够」（CLAUDE.md「这个失败，下游怎么知道？」）
+            if _gx["n"] and not _gx["usable"]:
+                _log.warning("跨式 GEX 影子记录本轮 0/%d 可用（原因 %s）——接线断了、gex_state 没了，"
+                             "或这是盘中手动跑（盘中记录按协议不收）", _gx["n"], _gx["reasons"])
         except Exception as e:
             _log.warning("期权纸面腿更新失败(非致命): %s", e)
 
@@ -1967,6 +1979,27 @@ class AlphaHiveDailyReporter:
             return {"earnings_date": None, "source": "chronos_bee_no_earnings"}
         return _fn
 
+    @staticmethod
+    def _gex_state_from_swarm(swarm_results: Dict):
+        """v0.45.424：跨式信号的 GEX 影子记录取本轮蒸馏结果里的 `gex_state`（全到期日视图，政体路由用的那份）。
+
+        **只记录、不进任何判断**：`earnings_vol_signal.compute_signal` 与 `options_paper_leg` 都不读它
+        （tests/test_straddle_gex_shadow.py 用 AST 与开 / 关对照钉住）。没有状态 ⇒ 返回 None，信号行记成
+        「不可得」，**不**回退到 OracleBee 主链 `gamma_exposure`（另一个量，见 gex_state 模块 docstring）。
+        检验协议：experiments/straddle_gex_prereg.md。
+
+        它与跨式账本的日更在同一个 try 里：影子记录取不到**不能连坐账本**——import 失败就记成不可得
+        （原因 `no_gex_state`）并打 warning，账本照常开平仓。"""
+        try:
+            import gex_state as _gs
+        except Exception as exc:  # noqa: BLE001 - 见 docstring
+            _log.warning("gex_state 不可用，本轮跨式 GEX 影子记录记为不可得: %s", exc)
+            return lambda ticker: None
+
+        def _fn(ticker: str):
+            return _gs.of((swarm_results or {}).get(ticker))
+        return _fn
+
     def _options_paper_leg_markdown(self) -> str:
         """v0.45.101 期权纸面腿小节；任何失败返回空串，不影响日报。"""
         try:
@@ -2010,10 +2043,10 @@ class AlphaHiveDailyReporter:
         from report_formatters import generate_swarm_twitter_threads
         return generate_swarm_twitter_threads(self, *args, **kwargs)
 
-    def auto_commit_and_notify(self, *args, **kwargs):
+    def deploy_and_notify(self, *args, **kwargs):
         """自动提交报告 + 通知（委托 report_deployer）"""
-        from report_deployer import auto_commit_and_notify
-        return auto_commit_and_notify(self, *args, **kwargs)
+        from report_deployer import deploy_and_notify
+        return deploy_and_notify(self, *args, **kwargs)
 
     def check_earnings_updates(self, report_path: str = None, tickers: List[str] = None) -> Dict:
         """
@@ -2174,7 +2207,9 @@ class AlphaHiveDailyReporter:
                 try:
                     json_path = self.report_dir / f"analysis-{ticker}-ml-{self.date_str}.json"
                     with open(json_path, "w", encoding="utf-8") as f:
-                        json.dump(enhanced, f, ensure_ascii=False, indent=2, default=str)
+                        # v0.45.452 二次检查：补 SafeJSONEncoder（NaN → null，与 Step 3 重跑的 generate_ml_report 同一口径；
+                        # 此前这里不经编码器，同一个文件内容取决于最后是谁写的）。default=str 照旧兜未知类型。
+                        json.dump(enhanced, f, ensure_ascii=False, indent=2, default=str, cls=SafeJSONEncoder)
                 except (OSError, TypeError) as _je:
                     _log.warning("analysis-%s-ml-%s.json 写入失败: %s", ticker, self.date_str, _je)
 
@@ -2331,12 +2366,18 @@ class AlphaHiveDailyReporter:
             _oracle_details["gex_signal_in_score"] = False
             # v0.45.369 世代印记，理由同上（本回退不贴 data_quality 标签、data_real_pct 恒 0，那个 bug 本来就不在这条路上）
             _oracle_details["options_dq_from_agent"] = True
+            # v0.45.383 世代印记，理由同上（本回退不经 OptionsAgent，没有 iv_rank 可校验，但缺键会被读成旧代码）
+            _oracle_details["hv_gap_checked"] = True
+            # v0.45.423 世代印记，理由同上（twelve_data 当日那根按收盘判；缺键会被读成旧代码）
+            _oracle_details["td_session_aware"] = True
             # ── BuzzBee discovery（含 F&G）──
             _buzz_disc = ""
             if _fg_value is not None:
                 _buzz_disc = f"F&G {_fg_value} ({_fg_class})"
             # ── 价格数据 ──
-            _scout_details = {}
+            # v0.45.441 世代印记（Scout 拥挤度不含 consensus_strength）：合成回退里的 Scout 分不是 Scout 算的，
+            # 但缺键会被判别器读成旧代码 ⇒ 某天走到这条回退就误报 boundary_too_early。无条件写（不在 try / if 里）。
+            _scout_details = {"consensus_in_score": False}
             try:
                 import yfinance as _yf_sr
                 from data_pipeline import _drop_forming_bar as _dfb
@@ -2839,7 +2880,7 @@ def main():
 
     # v0.23.2 修复 #2：--samples-only 必须在 save_report 之前短路
     # 否则 _save_output_files 会生成 MD/HTML/PWA/X线程/rss.xml 到 repo 根，
-    # 被下次 daily-scan 的 auto_commit_and_notify 误 commit 污染生产网站
+    # 被下次 daily-scan 的 deploy_and_notify 误 commit 污染生产网站
     if args.samples_only:
         # 修复 #7：error dict 不应静默成功退出
         if isinstance(report, dict) and "error" in report:
@@ -2857,13 +2898,13 @@ def main():
             _log.warning("samples-only JSON 保存失败 (但 pheromone.db 已写入): %s", e)
         print(f"\n📦 样本积累模式: 完成 {n_results_early} 标的扫描, pheromone.db 已写入")
         print(f"   - 跳过 save_report (避免生成 HTML/MD/PWA 污染 repo)")
-        print(f"   - 跳过 auto_commit_and_notify (不推 gh-pages / Slack)")
+        print(f"   - 跳过 deploy_and_notify (不推 gh-pages / Slack)")
         return report
 
     # v0.27.2 空扫描护栏：数据源全线失败（如 yfinance 429 限流触发断路器）会产出
     # tickers_analyzed=0 / opportunities=0 的空报告。此时绝不能 save_report + 部署，
     # 否则会用空 dashboard 覆盖 gh-pages 上一份好数据（2026-05-27 事故）。
-    # 跳过 save_report / auto_commit_and_notify，保留线上最近一份有效快照，仅记录日志。
+    # 跳过 save_report / deploy_and_notify，保留线上最近一份有效快照，仅记录日志。
     _n_analyzed = 0
     _n_opps = 0
     if isinstance(report, dict):
@@ -2876,7 +2917,7 @@ def main():
         )
         print("\n🛑 空扫描护栏触发：本次 0 标的分析，0 机会。")
         print("   - 跳过 save_report（不覆盖本地 dashboard）")
-        print("   - 跳过 auto_commit_and_notify（不推 gh-pages，保留线上好数据）")
+        print("   - 跳过 deploy_and_notify（不推 gh-pages，保留线上好数据）")
         print("   - 常见原因：yfinance 429 限流 → 断路器熔断。请稍后重跑。")
         _timing.write(reporter.date_str, extra={"early_exit": "empty_scan_guard"})
         return report
@@ -2897,48 +2938,45 @@ def main():
         print(f"   下次回测 / Bootstrap / FF 归因 会自动读到这批新样本")
         return report
 
-    # 三端同步：GitHub 提交推送 + Hive App + Slack
-    print("\n📡 同步三端：GitHub / Hive App / Slack...")
-    # v0.45.214：推送结果进 scan_timing → status.json → alert_manager。此前只打 WARNING 进日志，
-    # 2026-09-01~11 六次被拒无人发现（告警那条规则读的 deploy_status 从来没人写）。
-    _git_push = None
-    _git_commit = None
+    # 部署：gh-pages（网站）+ Hive App + Slack
+    # v0.45.402（数据根迁移阶段 6）：日报不再提交 / 推送代码仓库 main——数据在数据根，不进公开仓库。
+    print("\n📡 同步：gh-pages / Hive App / Slack...")
+    # v0.45.351：gh-pages 结局进 scan_timing → status.json → alert_manager（此前只打日志）。
+    # `extra.gh_pages` 的键**必须始终写**：编排器用它的存在当「main() 已跑到最后一步」的证据。
     _gh_pages = None
     try:
         with _timing.timed("deploy"):
-            sync_results = reporter.auto_commit_and_notify(report)
-        _git_push = sync_results.get("git_push")
-        _git_commit = sync_results.get("git_commit")
-        _gh_pages = sync_results.get("gh_pages")   # v0.45.351：此前 gh-pages 结局不进 status.json
-        git_ok = sync_results.get("git_push", {}).get("success", False)
+            sync_results = reporter.deploy_and_notify(report)
+        _gh_pages = sync_results.get("gh_pages")
         deploy_env = sync_results.get("deploy_env", "production")
-        remote_label = sync_results.get("git_push", {}).get("remote", "origin")
         if deploy_env == "none":
-            # v0.45.210：非蜂群扫描不再有「测试环境」——那条推送自 2026-03-01 起就是坏的。
-            # v0.45.213：CLI 已只跑蜂群，走到这里说明部署判定没认出这份蜂群报告
-            # （缺 swarm_metadata？）——是回归，不是正常分支，所以要打出来。
-            _left = sync_results.get("uncommitted_report_artifacts") or []
-            print("   GitHub push : ⚠️  部署判定为非生产报告（蜂群报告缺 swarm_metadata？），未提交、未推送")
-            if _left:
-                print(f"   ⚠️  {len(_left)} 个日报产物已写进工作区，下一次生产扫描会把没被覆盖的一并提交："
-                      f"{', '.join(_left[:5])}" + (" …" if len(_left) > 5 else ""))
+            # v0.45.210：非蜂群扫描不再有「测试环境」。v0.45.213：CLI 已只跑蜂群，走到这里说明部署判定没认出
+            # 这份蜂群报告（缺 swarm_metadata？）——是回归，不是正常分支，所以要打出来。
+            print("   gh-pages    : ⚠️  部署判定为非生产报告（蜂群报告缺 swarm_metadata？），未部署")
         else:
-            print(f"   GitHub push : {'✅' if git_ok else '⚠️  失败'} → 🧠 生产环境 https://wangmingjie36-creator.github.io/alpha-hive-deploy/")
             _ghp_ok = isinstance(_gh_pages, dict) and _gh_pages.get("success") is True
-            print(f"   gh-pages    : {'✅' if _ghp_ok else '⚠️  失败（本轮网站未更新）'}")
+            print(f"   gh-pages    : {'✅' if _ghp_ok else '⚠️  失败（本轮网站未更新）'} → https://wangmingjie36-creator.github.io/alpha-hive-deploy/")
         print(f"   Hive App    : ✅ .swarm_results 已落盘，下次启动自动加载")
     except (OSError, ValueError, KeyError, RuntimeError) as e:
-        _log.warning("三端同步部分失败: %s", e)
-        print(f"   ⚠️  三端同步出错：{e}")
-        if _git_push is None:   # 推送之前就抛了：记成失败，不能让「没记录」看起来像「没问题」
-            _git_push = {"success": False, "error": f"三端同步抛异常：{type(e).__name__}: {e}"}
-        if _gh_pages is None:   # 同上：gh-pages 部署没跑到
-            _gh_pages = {"success": False, "error": f"三端同步抛异常（gh-pages 未部署）：{type(e).__name__}: {e}"}
+        _log.warning("同步部分失败: %s", e)
+        print(f"   ⚠️  同步出错：{e}")
+        if _gh_pages is None:   # 部署没跑到：记成失败，不能让「没记录」看起来像「没问题」
+            _gh_pages = {"success": False, "error": f"同步抛异常（gh-pages 未部署）：{type(e).__name__}: {e}"}
+
+    # v0.45.444：新闻通道实际来源分布 → status.json → alert_manager（非 AV 比例过高报 P1）。
+    # 算不出来也要写一条带原因的记录：「没记录」不能看起来像「没问题」。
+    # ⚠️ `report` 里没有 swarm_results（`_build_swarm_report` 不带它）——读本轮已落盘的 `.swarm_results_<date>.json`。
+    try:
+        from newsapi_client import summarize_news_sources
+        with open(reporter.report_dir / f".swarm_results_{reporter.date_str}.json", encoding="utf-8") as _f_sr:
+            _news_sources = summarize_news_sources(json.load(_f_sr))
+    except Exception as _e_ns:  # noqa: BLE001 —— 观测点自身失败只记原因，不拖垮扫描
+        _log.warning("新闻来源统计失败（不影响扫描）: %s", _e_ns)
+        _news_sources = {"available": False, "reason": f"{type(_e_ns).__name__}: {_e_ns}"}
 
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
-    _timing.write(reporter.date_str, extra={"git_push": _timing.git_push_summary(_git_push),
-                                            "git_commit": _timing.git_commit_summary(_git_commit),
-                                            "gh_pages": _timing.gh_pages_summary(_gh_pages)})
+    _timing.write(reporter.date_str, extra={"gh_pages": _timing.gh_pages_summary(_gh_pages),
+                                            "news_sources": _news_sources})
     return report
 
 
