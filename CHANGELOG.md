@@ -74,7 +74,60 @@ SPY 对冲行被过滤；用生产数据生成跨式页全部内容，搜不到 
 ### 注意
 - 生产 Alpha Bot 跑的是生产克隆 `~/alpha-hive-prod` 的代码：下一个扫描日克隆快进后**重启 Alpha Bot** 才看得到这一页。
 
-## [0.45.458] — 2026-10-12 — 占位（进行中：v0.45.456 二次检查——make 只认命令行 PYTHON、空值显式拒绝不当缺省、生成器目录判据收成一份、相对 ALPHA_HIVE_HOME 不参与比较）
+## [0.45.458] — 2026-10-12 — Fixed：v0.45.456 二次检查（从根因修）——make 只认命令行上的 `PYTHON`、显式空值拒绝不当缺省、生成器目录判据收成一份、相对 `ALPHA_HIVE_HOME` 入口定类不参与比较
+
+`/code-review high` 审 v0.45.456（`5aa476b5..c2ddbc8f`）报 4 条，用户要求全部从根因修。4 条各有一个根因，都是同一类「把不是人明确给的东西当成了输入」或「同一问题判两遍」：
+
+### 根因与修法
+- **make 把环境变量当成人的明确输入（第 1 条）**：GNU make 会把同名环境变量导入成 make 变量，而 `PYTHON` 是常见环境变量（node-gyp 等要求 `export PYTHON=python3`）。
+  - 后果：456 起裸名字被拒，推荐入口 `make -C ~/alpha-hive-prod alphabot-app` 会无故失败；人根本没在命令行写 PYTHON。
+  - 与 436 那条「环境 `ALPHA_HIVE_HOME` 改写配置」同一形状。
+  - 修法：`$(origin PYTHON)` 为 `command line` 才转发 `--python`；来自环境的值忽略，并用 `$(info …)` 说出来（不经 shell，值里有什么都不会坏）。
+- **用真假值判「给没给」（第 2 条）**：本地分支用 `x or 缺省`、`if not x`，委托分支却用 `is not None`，同一输入两支语义不同。
+  - 后果：显式空值（脚本里 `--python "$PY"` 而 PY 为空）在本地被悄悄换成缺省解释器 / 缺省目录 / 不改数据根。
+  - 修法：「没给」只认 `None`，全部改成 `is None`；`_reject_empty` 在入口把显式空值当无效输入拒绝（两种角色都先过它）。
+- **「可用的代码目录」判了三遍（第 3 条）**：缺省克隆查 `launcher.py`，`--repo` 查 `macos_app.py`，`build_app` 又查 `launcher.py`。
+  - 后果：半截克隆在缺省路径下被判可用，委托后子进程 import 失败、甩 traceback。
+  - 修法：唯一判据 `generator_dir_problem` + `GENERATOR_FILES`，生成器本身与壳要 exec 的 launcher 都得在，三处共用；测试的假代码目录也从 `MA.GENERATOR_FILES` 取文件清单（`_fake_code_dir`），不另抄。
+- **相对的环境 `ALPHA_HIVE_HOME` 仍在被猜（第 4 条）**：456 只在「首次记」那支拒相对路径，「与配置比较」那支照样按当前 cwd 解析。
+  - 后果：`make -C 克隆` 下误报「与启动器配置不同」。
+  - 修法：`_env_home_absolute` 在入口一次定类——相对 ⇒ 整个不参与（不记、不比，说明一次）；空串按未设（与 `hive_logger.resolve_data_root` 同口径）。
+
+### 守卫
+- `tests/test_alphabot_launcher.py`：
+  - `TestCanonicalMakeEntry`：环境 `PYTHON=python3` 被忽略，`.app` 用缺省解释器且打印说明；命令行 PYTHON 优先于环境。`_make` 默认剥掉环境里的 PYTHON，免得结果随开发机变。
+  - 四个参数各给空值 ⇒ rc=1，不生成、不改配置。
+  - 半截克隆（只缺 launcher.py 或只缺 macos_app.py）在缺省路径下直白报缺哪个，无 traceback；同一半截目录对缺省克隆、`--repo`、`build_app` 结论一致。
+  - 相对环境变量不参与比较（cwd 故意放在会解析到别处的目录）；空串环境变量按未设。
+- 变异 7 处（先提交后变异，每轮清 pyc），全部变红：
+  - M1 make 照收环境 PYTHON / M2 忽略不说出来；
+  - M3 空值不拒 / M4 缺省克隆用自己那份判据 / M5 `build_app` 用自己那份判据；
+  - M6 相对环境变量照样比较 / M7 空串当相对路径。
+- `test_alphabot_launcher.py` 81 passed；ruff 全绿；全量 8981 passed、1 failed（`TestCoverageHorizon`：已知的经济日历覆盖期告警，与本版无关）。
+
+### 二次检查追补（同版，推送前；用户要求从根因修）
+`/code-review high` 审本版首个提交又报 4 条：
+- **生成时看不见实际写进 .app 的是什么**：写进壳的解释器要到双击时才暴露。推荐入口跑的是**克隆**的 Makefile 与生成器，克隆快进前仍是旧规则（会把环境里的裸 `python3` 原样写进壳、生成成功），文档却没写生效时点。
+  - 修法：生成时打印「写进 .app 的解释器」；它现在不存在或不可执行就当场警告（只警告不拒：CI 上缺省解释器本就不存在）。
+  - CLAUDE.md 注明这些规则在克隆快进到含 458 的版本后才生效。
+- **测试按黑名单构造子进程环境**：从 `os.environ` 减掉 ALPHA_HIVE_HOME / PYTHON，漏掉的照样进来。
+  - 实测 GNU make 3.81 把外层命令行变量放进 `MAKEFLAGS=s -- PYTHON=python3`，子 make 的 `$(origin PYTHON)` 成 `command line` ⇒ `make test PYTHON=…` 跑测试时结论随调用方式变。
+  - 修法：`_make` 改白名单 `_MAKE_ENV_KEEP`（PATH、PYTHONUSERBASE、语言、TMPDIR），只带 make 与生成器真正要的。
+- **`build_app` 仍用真假值判 repo**：`repo=""` 被当「没给」、悄悄指向本检出（`Path("")` 却是当前目录）。改 `is None`；`_record_data_root` 里 `explicit_home` 的三处判断同改。
+- **给了 `--home` 仍提示「环境变量是相对路径、要设数据根用 --home」**：会出提示的定类无论用不用得上都跑了。改为只在环境变量会参与时（没给 `--home`）才定类。
+- 守卫：
+  - `TestCanonicalMakeEntry::test_outer_make_flags_do_not_leak_in`（设 `MAKEFLAGS= -- PYTHON=python3`）；
+  - 生成时说出解释器、不可执行即警告；
+  - 给了 `--home` 不提环境变量；
+  - `build_app(repo="")` 按当前目录核对、不悄悄换成本检出。
+- 变异 5 处全部变红：测试环境回黑名单 / `build_app` 回真假值 / 给了 `--home` 仍定类 / 不可执行不警告 / 不说出解释器。
+- `test_alphabot_launcher.py` 85 passed；ruff 全绿。
+- **全量**（追补后再跑）：8985 passed、1 failed、1 error。
+  - failed 是已知的 `TestCoverageHorizon`（经济日历覆盖期告警）。
+  - error 是真实数据根闸挂在最后一条测试名下的 teardown 报错：`alphabot_state/intraday/2026-10-12/` 5 个文件在 07:07:51–07:08:28 被改。
+    - 实为盘中正在运行的 Alpha Bot（06:57 起，cwd 已是 `/Users/igg/alpha-hive-prod`）追加的真实快照行；测试一律在临时 HOME 下，不碰这里。
+    - 即 auto-memory 记的「全量末尾 teardown error＝盘中 Alpha Bot 在写」。
+- 顺带实证：用户 10-12 用 `make -C ~/alpha-hive-prod alphabot-app` 重新生成并打开的 Alpha Bot，进程 cwd 确为生产克隆（阶段 8 的 .app 改指在生产上生效）。
 
 ## [0.45.457] — 2026-10-12 — Fixed：跨式账本净值行 `code` 取不到版本字段时写出 `—@—` 占位串（v0.45.450 引入）——改存与 `meta.code_version` 同一份结构，缺哪个字段那个字段是 None
 
