@@ -5,7 +5,28 @@
 
 ---
 
-## [0.45.481] — 2026-10-12 — 占位（进行中：08-14 前 iv_current = 25.0 日子的 options.iv_rank / iv_percentile 30 行入隔离并清库，用户批准；等 v0.45.479 推送后动 signal_archive）
+## [0.45.481] — 2026-10-12 — Fixed（数据，用户批准）：08-14 前 `iv_current = 25.0`（兜底常数）那 15 对的 `options.iv_rank` / `options.iv_percentile`（30 行）是常数的函数，入隔离并清库
+
+### 为什么（核实过程）
+- v0.43.19（08-14）之前 `OptionsAgent.analyze` 紧接着 25.0 兜底就算 `calculate_iv_rank(current_iv, hist_iv)` / `calculate_iv_percentile(current_iv, hist_iv)`，`hist_iv` = 20 日 HV 序列 × premium k（clamp [1.05, 2.0]，取不到期权链时缺省 1.25）。核过 04-14（`5412475e`）、04-27、05-15、05-18、06-10（`96d0e3bf`）五个版本，同一写法。
+- 数值核对（公开日线重建当时 `period="1y"` 的 HV 序列，一个未知数 k、两条存档量）：META 06-15 由 rank 8.74 反解 k = **1.2499**，预测百分位 33/231 = **14.29** 与存档逐位相等；BILI 06-15 k = **1.2500**、1/231 = **0.43** 相等；CRCL 06-09 HV 最低 53.67，任意合法 k 下 25.0 都给 0 / 0，与存档一致。反解出的 k 恰是代码缺省 1.25——取不到期权链的那天，IV 兜底与 premium 兜底同源。
+- 日志：三只都没有「超出合理上限」告警 ⇒ 走的是「raw IV < 5% ⇒ 25.0」那条**不打日志**的分支；当时这个 rank 还驱动了政体权重（`scan_2026-06-15.log`：META「低IV(9):加权情绪/降期权」）与 `options_score` 的 IV 项。
+- 15 对逐对核对 `.swarm_results_{date}.json`：OracleBee `iv_current == 25.0`、rank / pct 与归档逐位相等、无 `iv_rank_source`（旧代码）——15/15。
+- VKTX 09-15 ~ 17 不在此列：那时 `iv_rank_source = hv_proxy`（当前 HV 对 HV 分布），不读 `current_iv`。
+
+### Fixed
+- `signal_archive.QUARANTINE` 追加 6 条（reason 带标记 `v0.45.481`），`signals = ("options.iv_rank", "options.iv_percentile")`、带 `tickers`：04-26 AAPL / HPE / DELL；05-03 AAPL；05-10 UPST；05-17 ICLN；06-09 CRCL；06-15 QCOM / TSLA / NVDA / MSFT / BILI / AMZN / META / CRCL。
+- 清库（生产 `pheromone.db`，等 v0.45.479 合入后执行，用户要求）：`purge_quarantined_signal_rows.py --only-tag v0.45.481 --expect 30 --apply`；dry-run 时加不加 `--only-tag` 都恰好 30 行（库里没有别的待清批次）。备份 `db_backups/pheromone_pre_v0.45.481_iv_rank_from_constant.db`；`signal_archive` 129,819 → 129,789。事后独立核对：30 行库里 0、备份里 30；两边 `integrity_check` ok；库里命中隔离名单的行 0；VKTX 09-15 的 iv_rank（31.78）还在。
+
+### Changed（测试）
+- `tests/test_signal_quarantine.py`：新增 `test_iv_rank_from_constant_25_quarantined`（15 对 × 两类都挡；VKTX 9 月三天、NVDA 04-26、TSLA 06-23 不挡）；变异 3 个全红（删一个日期的条目、06-15 少了 iv_percentile、04-26 去掉 tickers）。
+- v0.45.478 的 `test_iv_constant_25_rows_quarantined_only_for_iv_current` 原断言 6 对的 iv_rank 都不挡——那是 478 时「待验证」状态的编码；本版核实后只对 VKTX 三天保留该断言。
+
+### 评分 / 世代边界
+- 30 行都在当前世代（10-09）之前，当前 IC 样本不受影响。不追加世代边界。
+
+### 未处理（发现，待用户决定）
+- v0.45.479 会话报告 `iv_current` 还有同族垃圾常数 **12.5 / 6.25**，归档运行里约 20 处（其中 06-23 NVDA 已由 479 隔离）。本版未动。
 
 ## [0.45.480] — 2026-10-12 — Fixed：编排器 Step 14 对备份 `git_error` 一律报「未确认是否已提交/推送」——`run_backup` 在 status.json 写 `git_outcome`，编排器按它说清这一轮提交了没有、推送了没有
 

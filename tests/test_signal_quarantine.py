@@ -215,14 +215,17 @@ def test_fingerprinted_yfinance_days_quarantine_gex_only():
 def test_iv_constant_25_rows_quarantined_only_for_iv_current():
     """v0.45.478（用户批准）：iv_current 兜底常数 25.0 剩下的 6 行——只挡 `options.iv_current`。
 
-    变红的变异：删掉任一条目；或把 signals 扩到同日其他期权观测（iv_rank 等不由这个常数产生）；
+    变红的变异：删掉任一条目；或把 VKTX 09-15 ~ 17 的 signals 扩到 iv_rank（那时 hv_proxy，不读 current_iv）；
     或去掉 tickers（会把同日其他标的的真实 IV 一起挡掉）。
+    v0.45.481：CRCL 06-09、BILI / META 06-15 的 iv_rank 已核实由 25.0 算出、另条隔离——本条只对 VKTX 断言 iv_rank 不挡，
+    另三对的 iv_rank 归 `test_iv_rank_from_constant_25_quarantined` 管。
     """
     pairs = [("2026-06-09", "CRCL"), ("2026-06-15", "BILI"), ("2026-06-15", "META"),
              ("2026-09-15", "VKTX"), ("2026-09-16", "VKTX"), ("2026-09-17", "VKTX")]
     for d, t in pairs:
         assert sa.is_quarantined(d, t, "options.iv_current"), (d, t)
-        assert not sa.is_quarantined(d, t, "options.iv_rank"), (d, t)
+        if t == "VKTX":
+            assert not sa.is_quarantined(d, t, "options.iv_rank"), (d, t)
     assert not sa.is_quarantined("2026-09-15", "NVDA", "options.iv_current")
     # v0.45.479：原对照用的 06-09 NVDA 其实是坏的（归档那次运行现价 63、OI 251、P/C 0.0，已整份隔离），换成归档运行核过是真值的一对
     assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_current")
@@ -262,3 +265,22 @@ class TestSwarmBasedReclassificationV0_45_479:
             assert not sa.is_quarantined(d, t, "options.gamma_exposure"), (d, t)
         assert not sa.is_quarantined("2026-06-23", "NVDA", "options.total_oi")
         assert sa.is_quarantined("2026-06-23", "NVDA", "options.iv_current"), "IV 12.5 是垃圾常数，只挡这一项"
+
+
+def test_iv_rank_from_constant_25_quarantined():
+    """v0.45.481（用户批准）：08-14 前 iv_current == 25.0 的 15 对，iv_rank / iv_percentile 是常数的函数——两类都挡。
+
+    变红的变异：删任一日期条目；signals 少了 iv_percentile；去掉 tickers（同日真实标的会被一起挡掉）；
+    把 VKTX 09-15 ~ 17（hv_proxy 时代，rank 不读 current_iv）也加进来。
+    """
+    pairs = [("2026-04-26", "AAPL"), ("2026-04-26", "HPE"), ("2026-04-26", "DELL"), ("2026-05-03", "AAPL"),
+             ("2026-05-10", "UPST"), ("2026-05-17", "ICLN"), ("2026-06-09", "CRCL"),
+             ("2026-06-15", "QCOM"), ("2026-06-15", "TSLA"), ("2026-06-15", "NVDA"), ("2026-06-15", "MSFT"),
+             ("2026-06-15", "BILI"), ("2026-06-15", "AMZN"), ("2026-06-15", "META"), ("2026-06-15", "CRCL")]
+    for d, t in pairs:
+        for s in ("options.iv_rank", "options.iv_percentile"):
+            assert sa.is_quarantined(d, t, s), (d, t, s)
+    for d in ("2026-09-15", "2026-09-16", "2026-09-17"):
+        assert not sa.is_quarantined(d, "VKTX", "options.iv_rank"), d
+    assert not sa.is_quarantined("2026-04-26", "NVDA", "options.iv_rank")
+    assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_rank")

@@ -1194,6 +1194,59 @@ QUARANTINE: List[Dict] = [
         "reason": "v0.45.479：归档那次运行的价、OI、P/C 都是真的（v0.45.472 按快照误判为常数 145，已撤回），但 iv_current 是垃圾常数 12.5——只挡这一项。",
         "evidence": (".swarm_results_2026-06-23.json（OracleBeeEcho.details.iv_current）", "CHANGELOG.md#v0.45.479"),
     },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.481（用户批准）：iv_current == 25.0（兜底常数）那些日子的 options.iv_rank / options.iv_percentile。
+    # 08-14 前的代码拿 current_iv 直接算这两个值（`calculate_iv_rank(current_iv, hist_iv)`），常数进 ⇒ 常数函数出。
+    # 15 对逐对核对过：.swarm_results 里 iv_current == 25.0、rank / pct 与归档逐位相等、无 iv_rank_source（旧代码）。
+    # VKTX 09-15 ~ 17 不在此列：那时 iv_rank 走 hv_proxy（当前 HV 对 HV 分布），不读 current_iv。
+    {
+        "date": "2026-04-26",
+        "tickers": ('AAPL', 'HPE', 'DELL'),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.481（用户 2026-10-12 批准）：v0.43.19（08-14）之前 IV Rank / IV Percentile = 当前 IV 对「HV×premium」历史分布排名，当日 ATM IV 无效且无缓存时当前 IV 被兜底成常数 25.0 ⇒ 这两个值是常数的函数，不是观测。META / BILI 06-15 用公开日线重建 HV、由 rank 反解 premium k=1.25（代码缺省）后百分位独立吻合到小数点（CRCL 06-09 任意合法 k 都给 0，同吻合）。",
+        "evidence": (".swarm_results_2026-04-26.json（OracleBeeEcho.details.iv_current = 25.0 / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.481"),
+    },
+    {
+        "date": "2026-05-03",
+        "tickers": ('AAPL',),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.481（用户 2026-10-12 批准）：v0.43.19（08-14）之前 IV Rank / IV Percentile = 当前 IV 对「HV×premium」历史分布排名，当日 ATM IV 无效且无缓存时当前 IV 被兜底成常数 25.0 ⇒ 这两个值是常数的函数，不是观测。META / BILI 06-15 用公开日线重建 HV、由 rank 反解 premium k=1.25（代码缺省）后百分位独立吻合到小数点（CRCL 06-09 任意合法 k 都给 0，同吻合）。",
+        "evidence": (".swarm_results_2026-05-03.json（OracleBeeEcho.details.iv_current = 25.0 / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.481"),
+    },
+    {
+        "date": "2026-05-10",
+        "tickers": ('UPST',),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.481（用户 2026-10-12 批准）：v0.43.19（08-14）之前 IV Rank / IV Percentile = 当前 IV 对「HV×premium」历史分布排名，当日 ATM IV 无效且无缓存时当前 IV 被兜底成常数 25.0 ⇒ 这两个值是常数的函数，不是观测。META / BILI 06-15 用公开日线重建 HV、由 rank 反解 premium k=1.25（代码缺省）后百分位独立吻合到小数点（CRCL 06-09 任意合法 k 都给 0，同吻合）。",
+        "evidence": (".swarm_results_2026-05-10.json（OracleBeeEcho.details.iv_current = 25.0 / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.481"),
+    },
+    {
+        "date": "2026-05-17",
+        "tickers": ('ICLN',),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.481（用户 2026-10-12 批准）：v0.43.19（08-14）之前 IV Rank / IV Percentile = 当前 IV 对「HV×premium」历史分布排名，当日 ATM IV 无效且无缓存时当前 IV 被兜底成常数 25.0 ⇒ 这两个值是常数的函数，不是观测。META / BILI 06-15 用公开日线重建 HV、由 rank 反解 premium k=1.25（代码缺省）后百分位独立吻合到小数点（CRCL 06-09 任意合法 k 都给 0，同吻合）。",
+        "evidence": (".swarm_results_2026-05-17.json（OracleBeeEcho.details.iv_current = 25.0 / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.481"),
+    },
+    {
+        "date": "2026-06-09",
+        "tickers": ('CRCL',),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.481（用户 2026-10-12 批准）：v0.43.19（08-14）之前 IV Rank / IV Percentile = 当前 IV 对「HV×premium」历史分布排名，当日 ATM IV 无效且无缓存时当前 IV 被兜底成常数 25.0 ⇒ 这两个值是常数的函数，不是观测。META / BILI 06-15 用公开日线重建 HV、由 rank 反解 premium k=1.25（代码缺省）后百分位独立吻合到小数点（CRCL 06-09 任意合法 k 都给 0，同吻合）。",
+        "evidence": (".swarm_results_2026-06-09.json（OracleBeeEcho.details.iv_current = 25.0 / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.481"),
+    },
+    {
+        "date": "2026-06-15",
+        "tickers": ('QCOM', 'TSLA', 'NVDA', 'MSFT', 'BILI', 'AMZN', 'META', 'CRCL'),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.481（用户 2026-10-12 批准）：v0.43.19（08-14）之前 IV Rank / IV Percentile = 当前 IV 对「HV×premium」历史分布排名，当日 ATM IV 无效且无缓存时当前 IV 被兜底成常数 25.0 ⇒ 这两个值是常数的函数，不是观测。META / BILI 06-15 用公开日线重建 HV、由 rank 反解 premium k=1.25（代码缺省）后百分位独立吻合到小数点（CRCL 06-09 任意合法 k 都给 0，同吻合）。",
+        "evidence": (".swarm_results_2026-06-15.json（OracleBeeEcho.details.iv_current = 25.0 / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.481"),
+    },
 ]
 
 
