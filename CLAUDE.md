@@ -196,6 +196,8 @@ v0.45.165 普查全仓（20 条，5 个文件）后补三条：
 与上一节同源：把路径冻成模块级常量，等于把「隔离失效」改写成了「隔离生效」，同样答不出「谁会红？」。
 全套判据、事故取证（v0.45.149/150/160，含 `__file__` 派生一族）见 auto-memory `alpha-hive-test-writes-production.md`。
 
+**裸字面量缺省是另一族（v0.45.463）**：`db_path="pheromone.db"` / `os.environ.get(X, "cache")` 不含 `PATHS` / `__file__`，上面两条物种守卫都看不见；生产 cwd 是代码克隆，它们在那里恒读空且不报错。守卫 `tests/test_price_history_default_paths.py::TestNoNewCwdRelativeDataDefaults`（存量只许减）。
+
 ## 硬检查项：这个路径指向「代码」还是「数据」？（2026-09-08 起）
 
 **数据根规则（v0.45.422）**：唯一实现 `hive_logger.resolve_data_root`——`ALPHA_HIVE_HOME` 非空就用它，否则

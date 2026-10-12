@@ -490,13 +490,16 @@ def _fill_momentum_from_index(ticker: str, out: Optional[Dict]) -> Optional[Dict
     volume_ratio 不由本函数回落：自攒序列只有收盘价、没有成交量，硬造一个
     比值等于编数据。它的回落见下面 `_fill_volume_from_twelvedata`——
     独立数据源，不是拿这份收盘价索引硬凑。
+
+    缓存目录与权威价库都由 `price_history` 在调用时经 `PATHS` 解析（v0.45.463）。
+    此前这里传 `os.environ.get("ALPHA_HIVE_CACHE_DIR", "cache")`：生产不设该变量，
+    cwd 又是代码克隆（09-26 数据根迁移 / 10-09 生产克隆之后），回落恒读空。
     """
     if out is not None and out.get("momentum_5d") is not None:
         return out
     try:
         from price_history import momentum_5d as _idx_momentum
-        _cache = os.environ.get("ALPHA_HIVE_CACHE_DIR", "cache")
-        m = _idx_momentum(ticker, _cache)
+        m = _idx_momentum(ticker)
     except Exception as e:  # noqa: BLE001
         _log.debug("[%s] 自攒动量索引不可用: %s", ticker, e)
         return out

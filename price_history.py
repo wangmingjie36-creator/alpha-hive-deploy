@@ -64,6 +64,30 @@ _MIN_VALID_PRICE = 0.01
 _MAX_VALID_PRICE = 1_000_000.0
 
 
+def _default_cache_dir() -> str:
+    """缓存目录缺省 = `PATHS.cache_dir`，**调用时**求值（v0.45.463）。
+
+    此前 `data_pipeline` 传 `os.environ.get("ALPHA_HIVE_CACHE_DIR", "cache")`、
+    `coverage_report` / CLI 缺省 `"cache"`——都是 cwd 相对。数据根迁移（09-26）与
+    生产克隆（10-09）之后扫描的 cwd 是代码克隆，那里没有 `cache/`：回落读空、
+    首次调用还会在代码克隆里建 `cache/` + 迁移标记。`PATHS.cache_dir` 照读
+    `ALPHA_HIVE_CACHE_DIR`，覆盖语义不变。
+    """
+    from hive_logger import PATHS
+    return str(PATHS.cache_dir)
+
+
+def _default_db_path() -> str:
+    """权威价库缺省 = `PATHS.db`，**调用时**求值（v0.45.463）。理由同 `_default_cache_dir`。"""
+    from hive_logger import PATHS
+    return str(PATHS.db)
+
+
+# 库文件不存在是「回落静默失效」的原形（v0.45.463 之前 cwd 相对的默认值让它
+# 在生产上恒不存在，而 `return {}` 与「这只票库里没记录」长得一样）——每个路径报一次 warning。
+_MISSING_DB_WARNED: set = set()
+
+
 def _index_path(ticker: str, cache_dir: str) -> str:
     return os.path.join(cache_dir, f"price_history_{ticker}.jsonl")
 
@@ -180,18 +204,26 @@ def _scan_snapshots(ticker: str, cache_dir: str) -> Dict[str, float]:
     return by_date
 
 
-def _load_db_prices(ticker: str, db_path: str = "pheromone.db") -> Dict[str, float]:
+def _load_db_prices(ticker: str, db_path: Optional[str] = None) -> Dict[str, float]:
     """从 pheromone.db 的 predictions.price_at_predict 取权威收盘价。
 
     这是蜂群当天实际使用的价格（v0.43.15 起复用 CBOE 快照价），比期权快照的
     `_snapshot_stock_price` 干净得多——后者有已知污染（QCOM 2026-08-14 快照
     185.0，DB 实为 165.94；dashboard_renderer:1883 另记 NVDA 2026-06-15 案例）。
     代价是只覆盖扫描日、较稀疏，所以两者合并、**DB 优先**。
+
+    `db_path=None` ⇒ `PATHS.db`（调用时求值，v0.45.463；此前缺省 cwd 相对的
+    `"pheromone.db"`，生产 cwd 里没有它 ⇒ 恒返回 {}）。
     """
     out: Dict[str, float] = {}
     try:
         import sqlite3
+        if db_path is None:
+            db_path = _default_db_path()
         if not os.path.exists(db_path):
+            if db_path not in _MISSING_DB_WARNED:
+                _MISSING_DB_WARNED.add(db_path)
+                _log.warning("权威价库不存在：%s —— 价格索引只剩期权快照部分", db_path)
             return {}
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
@@ -235,10 +267,15 @@ def merge_snapshots_into_index(ticker: str, cache_dir: str) -> int:
 
 def load_price_history(
     ticker: str,
-    cache_dir: str,
+    cache_dir: Optional[str] = None,
     max_days: int = FULL_WINDOW,
 ) -> List[Tuple[str, float]]:
-    """返回 [(ISO 日期, 收盘)] 升序。索引优先；首次调用做一次性快照迁移。"""
+    """返回 [(ISO 日期, 收盘)] 升序。索引优先；首次调用做一次性快照迁移。
+
+    `cache_dir=None` ⇒ `PATHS.cache_dir`（调用时求值）。
+    """
+    if cache_dir is None:
+        cache_dir = _default_cache_dir()
     marker = _migration_marker(ticker, cache_dir)
     if not os.path.exists(marker):
         merge_snapshots_into_index(ticker, cache_dir)
@@ -306,7 +343,7 @@ def _trading_days_between(d1: str, d2: str) -> int:
     return n
 
 
-def momentum_5d(ticker: str, cache_dir: str) -> Optional[float]:
+def momentum_5d(ticker: str, cache_dir: Optional[str] = None) -> Optional[float]:
     """自攒收盘价算 5 日动量（%）。算不出就返回 None——**绝不返回 0.0**。
 
     0.0 的含义是"持平"，会让 sentiment.py 的背离检测永远不触发
@@ -316,6 +353,8 @@ def momentum_5d(ticker: str, cache_dir: str) -> Optional[float]:
     所以**不能简单往回数 5 条**——NVDA 实测往回 5 条跨越的是 9 个交易日，
     算出来的数字挂着"5 日动量"的名字，实际是 9 日动量。这里按真实交易日
     距离挑锚点，偏离过大宁可返回 None，也不出一个名不副实的数。
+
+    `cache_dir=None` ⇒ `PATHS.cache_dir`（调用时求值）。
     """
     hist = load_price_history(ticker, cache_dir, max_days=40)
     if len(hist) < 2:
@@ -336,8 +375,10 @@ def momentum_5d(ticker: str, cache_dir: str) -> Optional[float]:
     return None  # 历史不够 5 个交易日
 
 
-def coverage_report(cache_dir: str = "cache") -> Dict[str, int]:
-    """各标的已攒天数，按天数降序。索引与快照取并集。"""
+def coverage_report(cache_dir: Optional[str] = None) -> Dict[str, int]:
+    """各标的已攒天数，按天数降序。索引与快照取并集。`cache_dir=None` ⇒ `PATHS.cache_dir`。"""
+    if cache_dir is None:
+        cache_dir = _default_cache_dir()
     tickers: Dict[str, None] = {}
     for path in glob.glob(os.path.join(cache_dir, "price_history_*.jsonl")):
         name = os.path.basename(path)
@@ -352,7 +393,7 @@ def coverage_report(cache_dir: str = "cache") -> Dict[str, int]:
 
 if __name__ == "__main__":  # pragma: no cover
     import sys
-    cd = sys.argv[1] if len(sys.argv) > 1 else "cache"
+    cd = sys.argv[1] if len(sys.argv) > 1 else _default_cache_dir()
     rep = coverage_report(cd)
     ready = sum(1 for n in rep.values() if n >= MIN_DAYS_FOR_MOMENTUM)
     print(f"标的 {len(rep)} 只，其中 {ready} 只已够算 5 日动量（≥{MIN_DAYS_FOR_MOMENTUM} 天）")

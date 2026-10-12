@@ -17,7 +17,31 @@
 - 读者影响：五个读者此前都没把这些行用进落盘结果（v0.45.462 审计），清理只防以后。
 - 另发现（未处理）：76 行是真收盘但日期错一天；6 月测试把 `analyze("NVDA", stock_price=145.0)` 等快照写进过生产 cache（`options_snapshot_TEST_*` 至今还在），部分 145.0 来自测试而非兜底。
 
-## [0.45.463] — 2026-10-12 — 占位（进行中：momentum_5d 回落 / _load_db_prices 默认路径改为调用时经 PATHS 解析，不再跟 cwd 走）
+## [0.45.463] — 2026-10-12 — Fixed：`momentum_5d` 自攒索引回落与 `price_history._load_db_prices` 的缺省路径改为调用时经 `PATHS` 解析——此前 cwd 相对（`"cache"` / `"pheromone.db"`），数据根迁移 / 生产克隆之后在生产 cwd 里恒读空；库缺失改为 warning；新增全仓「cwd 相对数据字面量缺省」守卫
+
+### 为什么
+- `data_pipeline._fill_momentum_from_index` 传 `os.environ.get("ALPHA_HIVE_CACHE_DIR", "cache")`（生产不设该变量），`price_history._load_db_prices` 缺省 `db_path="pheromone.db"`。09-26 数据根迁移、10-09 生产克隆之后扫描 cwd = `~/alpha-hive-prod`，两样都没有（10-12 实测）⇒ yfinance 失败那天回落恒为 None；首次调用还会在代码克隆里建 `cache/` + 迁移标记。失败形状与「这只票没数据」一模一样（`return {}` / `None`），没人红。
+- 另外四个 `load_price_history` 调用方（`vrp_signal` / `sell_strike_ledger` / `earnings_history` / `portfolio_greeks`）缓存目录本就传 `PATHS.cache_dir`，但同样吃 `_load_db_prices` 的 cwd 缺省 ⇒ 走到本地索引时只剩冻在 08-14 的快照部分（`append_observation` 无生产调用方，DB 是唯一新鲜来源）。vrp / 卖权账本在 Twelve Data 已配置时根本不走索引。
+
+### Fixed
+- `price_history`：`_load_db_prices(db_path=None)` ⇒ `PATHS.db`；`load_price_history` / `momentum_5d` / `coverage_report` 的 `cache_dir=None` ⇒ `PATHS.cache_dir`（照读 `ALPHA_HIVE_CACHE_DIR`，覆盖语义不变）；CLI 缺省同。全部**调用时**求值。显式传路径照旧优先。
+- `price_history._load_db_prices`：库文件不存在时每个路径 WARNING 一次（原来静默 `return {}`）。
+- `data_pipeline._fill_momentum_from_index`：不再自己拼缓存目录，交给 `price_history` 缺省。
+
+### Added
+- `tests/test_price_history_default_paths.py`（12）：生产环境形状（只设 `ALPHA_HIVE_HOME`、撤掉 conftest 的 `ALPHA_HIVE_CACHE_DIR` / `ALPHA_HIVE_DB_PATH`——留着它们旧实现在测试里恰好读对）+ cwd 里放同名诱饵（价格不同）：`_load_db_prices` / `momentum_5d` / `data_pipeline` 回落端到端读沙箱不读诱饵、cwd 不多出任何东西、空 cwd 保持空、环境覆盖照旧生效、库缺失会 warning、显式路径优先。
+- 同文件 `TestNoNewCwdRelativeDataDefaults`：AST 扫全仓（git 跟踪、除 tests/experiments）函数缺省参数与 `os.environ.get(X, "<相对数据路径>")`，**子集**语义 + 过期对账 + 正对照。存量 6 处登记在 `KNOWN_CWD_RELATIVE_DEFAULTS`（均不在扫描路径上：`iv_history._observed_accrual_rate`、`catalyst_exit_planner`、`ml_predictor*.save_to_file`、`alpha_hive_bot/config.py`；`earnings_vol_signal.scan` 的 `"cache"` 拼到 `BASE_DIR=PATHS.home` 不跟 cwd）。`test_paths_not_frozen_at_import` 的两个 `KNOWN` 不用动——本次没有新增也没有修掉 import 期冻结 / `__file__` 派生的点，那两条守卫本就看不见裸字面量。
+- `CLAUDE.md`「新产物的默认路径不许是相对路径」节加一行指针。
+
+### 评分 / 世代边界
+- **存档分数一个都没变**：`signal_archive` 的 `price.momentum_5d` 不存 null，09-28 ~ 10-09 每个扫描日都是 30/30 有数 ⇒ 回落迁移后**一次都没被调用**（yfinance 都成功）。「09-25 后没有『自攒索引补上』日志」本身不是证据：`alpha_hive.data_pipeline` 正常日一行都不打。
+- 修好后只在 yfinance 失败的日子起作用：`momentum_5d` 从 None 回到索引值（= 09-26 之前的既有行为，09-21/24/25 共 109 次）⇒ ScoutBee / BuzzBee 的输入变化，`price.momentum_5d` 叶子信号会多出原本缺失的行。
+- ⚠️ 回落本身滞后一个扫描日（当日 DB 行在取数之后写，索引从未接上当日观测）。回放 09-28 ~ 10-09 300 对（生产数据副本，真引擎）：回落 vs yfinance 平均 |Δ| 3.79pp、符号一致 66%；含当日价则 1.91pp / 83%。这是既有设计，本版未动。
+- **没有追加 IC 世代边界**（用户 10-12 确认）：存档零变化，且恢复的是现行世代（09-10 起）本就包含的行为。
+
+### 验证
+- 全量 9133 passed；1 failed = `test_economic_calendar::TestCoverageHorizon`（日历覆盖期到点，设计内定期红，与本版无关）；1 error = 会话级真实数据根闸，闸自己核实是 Alpha Bot 盘中采样追加的 5 个 intraday 文件（并发写入者，非测试写穿）。
+- 变异 6 个全部打红（`PYTHONDONTWRITEBYTECODE=1` + 每次清 `__pycache__`，改完逐字节还原核 sha256）：DB 缺省回 cwd（8 红）、缓存缺省回 cwd（5）、`data_pipeline` 恢复旧行（3：索引单走端到端 / 空 cwd / 结构守卫）、去掉 warning（1）、`load_price_history` 忽略 None（5）、`coverage_report` 缺省回 `"cache"`（1，结构守卫）。初版端到端测试对「恢复旧行」是瞎的（沙箱库按日期盖住了诱饵索引），已补索引单走的那条。
 
 ## [0.45.462] — 2026-10-12 — Fixed：期权分析取不到现价时不再拿「行权价中位数 / 145.0」冒充（09-17 全源中断那天 30/30 份快照现价是行权价中位数）——改用同一份 CBOE payload 的真实标的价，再没有就记 None；出口消毒 NaN → None 并计数；期权快照改走 `ledger_io` 原子严格写
 

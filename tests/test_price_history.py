@@ -30,7 +30,7 @@ def _idx(tmp_path, ticker, rows):
 @pytest.fixture(autouse=True)
 def _no_db(monkeypatch):
     """隔离生产 pheromone.db，测试只看索引"""
-    monkeypatch.setattr(ph, "_load_db_prices", lambda t, db_path="pheromone.db": {})
+    monkeypatch.setattr(ph, "_load_db_prices", lambda t, db_path=None: {})
 
 
 class TestMomentumHonesty:
@@ -113,7 +113,7 @@ class TestDBAuthority:
         """QCOM 2026-08-14：期权快照 185.0，DB 权威价 165.94。DB 必须赢。"""
         _idx(tmp_path, "QCOM", [("2026-08-13", 164.47), ("2026-08-14", 185.0)])
         monkeypatch.setattr(ph, "_load_db_prices",
-                            lambda t, db_path="pheromone.db": {"2026-08-14": 165.94})
+                            lambda t, db_path=None: {"2026-08-14": 165.94})
         assert dict(ph.load_price_history("QCOM", str(tmp_path)))["2026-08-14"] == 165.94
 
 
