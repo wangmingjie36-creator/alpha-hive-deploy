@@ -7,7 +7,40 @@
 
 ## [0.45.475] — 2026-10-12 — 占位（进行中：期权快照记录期权链来源 + 06-30~09-03 备用链日子按数据指纹认出并隔离 GEX）
 
-## [0.45.474] — 2026-10-12 — 占位（进行中：v0.45.471 二次检查）
+## [0.45.474] — 2026-10-12 — Fixed：v0.45.471 二次检查——快照命中时 IV 不可得就连 RV 也不补（471 造成的回归）；深度报告 ctx 把 `iv_rv_spread` / `rv_30d` 兜成 0.0，v0.45.54 的「不可得」分支从来走不到，情景推演策略段照写「IV-RV=+0.0%」；471 的「IV Rank 分子」测试是空的（样本天数低于阈值）；更正 471 条目三处
+
+### 为什么
+- 471 的变异校验只看了「整个文件红没红」：`pyproject.toml` 的 addopts 带 `-x`，每个变异只报第一条失败，**没有核对每条测试的 docstring 声称是不是真由它自己兑现**。这次用 `--maxfail=1000` 按测试拆开重跑，揪出一条空测试；另读 `_refresh_price_derived` 与深度报告的 ctx 读者各揪出一处。
+
+### Fixed
+- `options_analyzer._refresh_price_derived`：快照命中补算 RV 不再以 `if _iv:` 为前提，IV 为 None 照样补（`calculate_iv_rv_spread(None)` 给 RV、价差 None）。**这是 471 造成的回归**：471 之前不可得被兜成 25.0、这个守卫恒为真；471 改 None 后，抓取时 RV 失败、IV 又不可得的快照，命中时 `rv_30d` 就一直空着。
+- `generate_deep_v2.py`：
+  - ctx 的 `iv_rv_spread` / `rv_30d` **保留 None**（此前 `odet.get(k) or 0.0`）。0.0 让 v0.45.54 写进 Step 1 提示词的 `_ivrv_txt` / `_hv30_txt`「不可得」分支永远走不到（存量问题，早于 471；471 之后多出「IV 不可得、RV 照给」这一种）。其余读者原本就 `float(x or 0)` 后按「皆 0 ⇒ 不写」跳过，或 `x and x > 5`，None 安全；ctx 不出本模块。
+  - 「options」深度提示词的 HV30 / IV-RV 两项改用 `_hv30_txt` / `_ivrv_txt`（此前 `(ctx.get(k) or 0)` 写成 `HV30 0.0%` / `+0.0%`）。
+  - `_build_scenario_narrative` 的策略匹配段（`_local_fallback` 生产路径）：价差不可得写「IV-RV=不可得」，不是 `+0.0%`；删掉同函数里没人读的 `iv_curr`。策略选择按 IV Rank，不读价差，所以只改展示。
+- `market_intelligence._iv_rv_without_iv`：`error` 写人话「IV 不可得（当日 ATM IV 无效且无缓存）」——`generate_ml_report` 原样渲染「数据不可用：<error>」，471 写的是内部 token `iv_unavailable`；机器判别改用新键 `iv_unavailable: True`。
+
+### Changed（测试）
+- `tests/test_options_iv_unavailable.py`（16 → 20）：
+  - `test_constant_never_becomes_iv_rank_numerator` 原给 40 天真实 IV 历史，低于 `IV_RANK_MIN_DAYS`（63）⇒ 真实 IV 历史分支根本不进；变异恢复 25.0 时它照样红，但红在重复第一条测试的 `iv_current is None` 上，自己守的 `iv_rank_source` 在变异下也是 `hv_proxy`（实测：40 天 ⇒ hv_proxy，70 天 ⇒ real_iv_70d、rank 0.0）。改为 `IV_RANK_MIN_DAYS + 7` 天，rank 断言放前面；新增正对照 `test_real_history_stub_is_actually_reached`（当日 IV 有效 ⇒ 确实走 `real_iv_70d`）。
+  - `tests/test_backfill_snapshot_isolation.py::test_today_run_still_reads_today_slot` 加 `stub_yfinance`：它的最小快照没有 `rv_30d`，474 起命中时会补算 RV（IV 缺失也补）⇒ 去 yfinance 取日K，被会话离线闸抓到（全套首跑即红）。本条测「命中」不测补算，钉成离线。生产上的对应行为（快照缺 RV ⇒ 命中时补一次）是本版要的。
+  - 新增 `test_snapshot_hit_repairs_rv_even_without_iv`、`test_ctx_keeps_none_for_iv_rv_and_rv30`（源码扫描 ctx 构造与提示词）、`test_scenario_strategy_line_says_unavailable`；`test_no_raw_iv_current_format_spec_left` 的正则补认双引号。
+
+### 更正 v0.45.471 条目（原条目不改写）
+- 「读者盘点」把 `_refresh_price_derived`（`if _iv:` 跳过 RV 重算）列为「已经容忍 None」——**不对**，那正是回归，见上。
+- 「Added」说测试覆盖「有真实 IV 历史时不拿常数当 IV Rank 分子」——当时那条测试是空的，见上；本版才真正覆盖。
+- 「验证」说「变异 10 个全部打红」——属实，但在 `-x` 下只看到每个变异的第一条失败，不能据此说每条 docstring 的声称都兑现了；按测试拆开后 M1 那一行的归因不成立。
+
+### 历史 25.0 的现状（只读核对）
+- v0.45.472（另一会话，12:10 合入）按「假现价 / 假链日子」隔离清库时已删掉 18 行 `options.iv_current = 25.0` 中的 **12 行**；`signal_archive` 现剩 **6 行**：CRCL 06-09、BILI / META 06-15、VKTX 09-15 / 16 / 17。快照文件仍是 21 份。是否清理仍等用户决定。
+
+### 评分 / 世代边界
+- 不变。三处都是展示 / 快照补算；`iv_rank` 分子那条只改测试。不追加世代边界。
+
+### 验证
+- 变异 17 个按测试拆开（`--maxfail=1000`，`python -B` + 每次清 `__pycache__`，跑完核 sha256 原样）：每个变异都红在它 docstring 点名的那条测试上。新增 7 个：只在分子处兜常数（`iv_current` 仍 None，只有 rank 测试红）、恢复 `if _iv:`、ctx 写回 `or 0.0`、提示词写回 `or 0`、策略段写回 `+0.0%`、`error` 写回内部 token、把测试天数降到阈值下（只有正对照红）。
+- 471 当时 M5 一次额外报红 `test_no_raw_iv_current_format_spec_left`，之后 4 次重跑都没复现，原因未查明。
+- `ruff check` 改动文件全绿。
 
 ## [0.45.473] — 2026-10-12 — 占位（进行中：MultiSourceFetcher 历史字段回落收口到单一出口——Finnhub/AV 胜出、过期缓存、CBOE 推迟价三条路径 momentum_5d / volume_ratio 不再无回落直出）
 

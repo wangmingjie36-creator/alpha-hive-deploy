@@ -2121,20 +2121,22 @@ class OptionsAgent:
         _fixed = []
 
         # ① IV-RV / RV30 —— 纯 yfinance 日K，随时可重拉
+        # v0.45.474：IV 不可得（None）照样重算——RV 是日K 派生、与 IV 无关，价差由
+        # calculate_iv_rv_spread 自己给 None。此前 `if _iv:` 在 v0.45.471 之前恒为真（不可得被兜成 25.0），
+        # 471 改 None 后变成「IV 缺 ⇒ 连 RV 也不补」，同一份快照里本可修复的 rv_30d 就一直空着。
         if cached.get("rv_30d") is None:
             _iv = cached.get("iv_current")
-            if _iv:
-                try:
-                    from market_intelligence import calculate_iv_rv_spread
-                    _d = calculate_iv_rv_spread(ticker, float(_iv))
-                    if _d.get("rv_30d") is not None:
-                        cached["rv_30d"] = _d.get("rv_30d")
-                        cached["iv_rv_spread"] = _d.get("iv_rv_spread")
-                        cached["iv_rv_signal"] = _d.get("iv_rv_signal") or "unknown"
-                        cached["iv_rv_detail"] = _d
-                        _fixed.append("rv_30d")
-                except Exception as _e:  # noqa: BLE001 - 重算失败保持原样
-                    _log.debug("[%s] 快照 RV 重算失败: %s", ticker, _e)
+            try:
+                from market_intelligence import calculate_iv_rv_spread
+                _d = calculate_iv_rv_spread(ticker, float(_iv) if _iv is not None else None)
+                if _d.get("rv_30d") is not None:
+                    cached["rv_30d"] = _d.get("rv_30d")
+                    cached["iv_rv_spread"] = _d.get("iv_rv_spread")
+                    cached["iv_rv_signal"] = _d.get("iv_rv_signal") or "unknown"
+                    cached["iv_rv_detail"] = _d
+                    _fixed.append("rv_30d")
+            except Exception as _e:  # noqa: BLE001 - 重算失败保持原样
+                _log.debug("[%s] 快照 RV 重算失败: %s", ticker, _e)
 
         # ② IV Rank —— **仅** hv_proxy 口径可重算（它由 HV 历史派生）。
         # 真实 IV 历史口径（real_iv_*）来自自攒的 IV 观测库，不是日K 派生，

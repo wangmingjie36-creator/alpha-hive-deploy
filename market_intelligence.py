@@ -859,7 +859,9 @@ def _iv_rv_without_iv(rv_annual: float, source: str) -> Dict[str, Any]:
         "iv_rv_signal": "unknown",
         "iv_rv_note": f"IV 不可得，无法与 RV30 {rv_annual:.1f}% 比较",
         "data_available": False,
-        "error": "iv_unavailable",
+        # 读者会原样渲染这一串（generate_ml_report「数据不可用：<error>」），所以写人话，不写内部 token
+        "error": "IV 不可得（当日 ATM IV 无效且无缓存）",
+        "iv_unavailable": True,
         "source": source,
     }
 

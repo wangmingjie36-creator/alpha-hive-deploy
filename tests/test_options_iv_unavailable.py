@@ -14,7 +14,9 @@
 """
 
 import json
+import re
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -144,18 +146,51 @@ class TestNoConstantIV:
         assert saved == [pytest.approx(34.0)]
         assert oa.snapshot_slot_stats()["iv_unavailable"] == 0
 
+    # v0.45.474：样本天数必须 ≥ IV_RANK_MIN_DAYS，否则真实 IV 历史分支根本不进，下面这条测试就是空的
+    # （v0.45.471 原版给 40 天 < 63：变异恢复 25.0 时它照样红，但红在重复第一条测试的
+    # `iv_current is None` 上，它自己声称要守的 iv_rank_source 在变异下也是 hv_proxy）。
+    _REAL_DAYS = iv_history.IV_RANK_MIN_DAYS + 7
+
+    def _stub_real_history(self, monkeypatch):
+        n = self._REAL_DAYS
+        monkeypatch.setattr(iv_history, "load_iv_history",
+                            lambda t, d: ([30.0 + i for i in range(n)], n))
+
+    def test_real_history_stub_is_actually_reached(self, agent, monkeypatch):
+        """正对照：当日 IV 有效时，同一份历史桩确实把 IV Rank 带进真实 IV 历史分支。
+        没有这条，下一条的 `hv_proxy` 可能只是「桩没接上 / 天数不够」造成的。
+
+        变红的变异：样本天数降到阈值以下；或 load_iv_history 的桩没接上。
+        """
+        self._stub_real_history(monkeypatch)
+        monkeypatch.setattr(agent.fetcher, "fetch_options_chain", lambda t: _chain(0.34))
+        r = agent.analyze("NVDA", stock_price=300.0)
+        assert r["iv_rank_source"] == f"real_iv_{self._REAL_DAYS}d"
+
     def test_constant_never_becomes_iv_rank_numerator(self, agent, monkeypatch):
         """有真实 IV 历史时，旧代码把 25.0 当 IV Rank 分子 ⇒ 算出一个看似正常的 real_iv rank ⇒ options_score。
         现在分子是 None ⇒ `iv_rank_from_history` 返回 None ⇒ 走 HV 代理（如实标 hv_proxy）。
 
-        变红的变异：恢复 25.0（iv_rank_source 变 real_iv_40d、iv_rank 由 25 相对 [30, 69] 算成 0.0）。
+        变红的变异：恢复 25.0（iv_rank_source 变 real_iv_70d、iv_rank 由 25 相对 [30, 99] 算成 0.0）；
+        或只在分子处兜一个常数（iv_current 仍是 None——所以 rank 断言放在前面，红在它自己身上）。
         """
-        monkeypatch.setattr(iv_history, "load_iv_history",
-                            lambda t, d: ([30.0 + i for i in range(40)], 40))
+        self._stub_real_history(monkeypatch)
         monkeypatch.setattr(agent.fetcher, "fetch_options_chain", lambda t: _chain(1.80))
         r = agent.analyze("NVDA", stock_price=300.0)
+        assert r["iv_rank_source"] == "hv_proxy", "不可得的 IV 不能当 IV Rank 分子"
         assert r["iv_current"] is None
-        assert r["iv_rank_source"] == "hv_proxy"
+
+    def test_snapshot_hit_repairs_rv_even_without_iv(self, agent, monkeypatch):
+        """快照命中时补算 RV（`_refresh_price_derived`）：IV 不可得照样补——RV 是日K 派生、与 IV 无关。
+
+        471 改 None 后，`if _iv:` 让「IV 缺 ⇒ RV 也不补」（此前 25.0 恒为真、照补）。
+        变红的变异：恢复 `if _iv:` 守卫。
+        """
+        cached = {"iv_current": None, "rv_30d": None, "iv_rv_spread": None,
+                  "iv_rank": 12.0, "iv_rank_source": "hv_proxy"}
+        assert agent._refresh_price_derived(cached, "NVDA") is True
+        assert cached["rv_30d"] == pytest.approx(30.0)
+        assert cached["iv_rv_spread"] is None and cached["iv_rv_signal"] == "unknown"
 
     def test_market_open_over_150_is_not_used_or_cached(self, agent, monkeypatch, saved):
         """盘中当日中位数 180%：旧代码开市分支只挡 `< 5%`，>150% 照用并写进缓存
@@ -217,6 +252,8 @@ class TestIvRvSpreadWithoutIV:
         assert d["iv_rv_spread"] is None
         assert d["iv_rv_signal"] == "unknown"
         assert d["data_available"] is False
+        # generate_ml_report 原样渲染「数据不可用：<error>」——写人话，不写内部 token（v0.45.474）
+        assert "IV 不可得" in d["error"] and d["iv_unavailable"] is True
 
     def test_twelve_data_path_with_iv_unchanged(self, monkeypatch, stub_yfinance):
         """正对照：有 IV 时与旧行为逐位一致。"""
@@ -277,10 +314,34 @@ class TestDeepReportReaders:
     def test_no_raw_iv_current_format_spec_left(self):
         """LLM 提示词里的 `{ctx['iv_current']:.1f}` 一类写法遇 None 即 TypeError——全部经 `_iv_txt`。
 
-        变红的变异：任一处写回带格式说明符的直接取值。
+        变红的变异：任一处写回带格式说明符的直接取值（单 / 双引号都认）。
         """
-        import re
-        from pathlib import Path
-        src = (Path(__file__).resolve().parent.parent / "generate_deep_v2.py").read_text(encoding="utf-8")
-        bad = re.findall(r"\{ctx(?:\['iv_current'\]|\.get\('iv_current'[^)]*\)):[^}]*\}", src)
+        bad = re.findall(r"""\{ctx(?:\[['"]iv_current['"]\]|\.get\(['"]iv_current['"][^)]*\)):[^}]*\}""",
+                         _deep_src())
         assert bad == [], bad
+
+    def test_ctx_keeps_none_for_iv_rv_and_rv30(self):
+        """ctx 构造处不能把 `iv_rv_spread` / `rv_30d` 兜成 0.0——否则 v0.45.54 Step 1 提示词的
+        「不可得」分支永远走不到，报告照写「IV-RV +0.0%」「HV30 0.0%」（v0.45.474）。
+
+        变红的变异：写回 `odet.get("iv_rv_spread") or 0.0` / `odet.get("rv_30d") or 0.0`；
+        或提示词写回 `(ctx.get('iv_rv_spread') or 0):+.1f` / `(ctx.get('rv_30d') or 0):.1f`。
+        """
+        src = _deep_src()
+        assert not re.search(r"""["'](?:iv_rv_spread|rv_30d)["']\s*:\s*odet\.get\([^)]*\)\s*or\s*0""", src)
+        assert not re.search(r"""\(ctx\.get\(['"](?:iv_rv_spread|rv_30d)['"][^)]*\)\s*or\s*0\)\s*:""", src)
+
+    def test_scenario_strategy_line_says_unavailable(self):
+        """情景推演的策略匹配段（`_local_fallback` 生产路径）：价差不可得 ⇒「IV-RV=不可得」，不是 +0.0%。
+
+        变红的变异：写回 `{iv_rv:+.1f}%` + `float(... or 0)`。
+        """
+        import generate_deep_v2 as g
+        ctx = {"iv_rv_spread": None, "rv_30d": 31.2, "iv_current": None, "iv_skew": 1.0, "iv_rank": 40,
+               "final_score": 6.0, "key_levels": {}, "direction_zh": "中性", "direction": "neutral"}
+        assert "IV-RV=不可得" in g._build_scenario_narrative(ctx)
+        assert "IV-RV=+7.3%" in g._build_scenario_narrative({**ctx, "iv_rv_spread": 7.3})
+
+
+def _deep_src():
+    return (Path(__file__).resolve().parent.parent / "generate_deep_v2.py").read_text(encoding="utf-8")
