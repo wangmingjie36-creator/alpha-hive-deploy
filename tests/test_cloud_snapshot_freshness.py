@@ -73,6 +73,16 @@ class TestRefresh:
         assert rec["ok"] and rec["error"] is None and rec["newest_date"] == D2, rec
         assert csl.available_dates(repo=remote.path) == [D1, D2]
 
+    def test_refresh_follows_the_branch_constant(self, remote, monkeypatch):
+        """分支名只写一处（`SNAPSHOT_BRANCH`）：读的 ref 由它推出，`refresh` 拉的也是它。v0.45.466 二次检查：初版
+        refspec 手写一份分支名——分支改名只改一处时，读者读新 ref、`refresh` 却去拉旧分支，新 ref 永远是陈旧的。"""
+        assert csl.SNAPSHOT_REF == f"origin/{csl.SNAPSHOT_BRANCH}"
+        _git(remote.work, "push", "-q", "origin", "cloud-snapshots:snaps-v2")      # 云端改名后的分支（含 D2）
+        monkeypatch.setattr(csl, "SNAPSHOT_BRANCH", "snaps-v2")
+        monkeypatch.setattr(csl, "SNAPSHOT_REF", "origin/snaps-v2")
+        rec = csl.refresh(repo=remote.path)
+        assert rec["ok"] and rec["newest_date"] == D2, rec
+
     def test_failure_is_returned_not_raised(self, remote):
         _git(remote.path, "remote", "set-url", "origin", "/nonexistent/origin.git")
         rec = csl.refresh(repo=remote.path)
