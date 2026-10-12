@@ -42,7 +42,49 @@
 - 471 当时 M5 一次额外报红 `test_no_raw_iv_current_format_spec_left`，之后 4 次重跑都没复现，原因未查明。
 - `ruff check` 改动文件全绿。
 
-## [0.45.473] — 2026-10-12 — 占位（进行中：MultiSourceFetcher 历史字段回落收口到单一出口——Finnhub/AV 胜出、过期缓存、CBOE 推迟价三条路径 momentum_5d / volume_ratio 不再无回落直出）
+## [0.45.473] — 2026-10-12 — Fixed：`MultiSourceFetcher` 的 momentum_5d / volume_ratio 回落收口到**唯一出口**——此前只挂在 CBOE 源内部与「全源失败」一支，Finnhub / AV 胜出、过期缓存、CBOE 盘中陈旧价退用三个出口（以及 CBOE 内部 yfinance 空历史 / 均量 NaN 两条分支）原样交出 None；出口回落计数进 status.json、仍缺 ⇒ P2
+
+### 为什么
+- **根因是结构，不是某条分支**：两条独立回落（自攒价格索引 `_fill_momentum_from_index` / Twelve Data `_fill_volume_from_twelvedata`）挂在**具体的源和分支**上，而不是取数器输出的属性。`fetch` 有五个出口（新鲜缓存 / 源胜出 / 过期缓存 / CBOE 推迟价 / 全源失败），回落只在其中两处。前三次修补（v0.45.270 全源失败、463 路径跟 cwd、465 窗口末端）都是给某一支补一次——同一形状第四次（auto-memory `alpha-hive-fallback-not-reached.md`）。
+- 够不着的出口：
+  - **降级源胜出**：`FinnhubSource` / `AlphaVantageSource` 硬写 `momentum_5d=None, volume_ratio=None`，循环直接返回。CBOE 失败 / 推迟且 yfinance 挂的日子，Finnhub 接住价、动量恒 None。
+  - **CBOE 盘中陈旧价退用**（`defer`，v0.45.234）、**过期缓存**：原样返回。
+  - **CBOE 内部**：`_fetch_history_metrics` 只在 yfinance **抛异常**时回落；yfinance 限流常**返回空表**（不抛）⇒ 直接 None、一次没回落；均量 NaN ⇒ volume 置 None 但不试 Twelve Data；不足 5 根 ⇒ 连已算出的 volume_ratio 也被丢掉。
+- 下游：BuzzBee 动量 / 量能通道（None ⇒ 中性 50）、ScoutBee 背离、BearBee、RivalBee ML 特征、`signal_archive` 的 `price.momentum_5d` / `price.volume_ratio`。
+
+### 生产里实际触发过几次（先量再修）
+- 结构化日志（08-26 → 10-12）：Finnhub 胜出 8 次，**全是 ABBV**、全在 08-26 23:48 / 08-27 06:35 两轮手动早跑——不是写存档的那轮（ABBV 两天存档 momentum / volume 都在）。CBOE 推迟退用（`退用 … 非官方收盘`）**0 次**；`[DataPipeline] … 使用过期缓存` **0 次**（唯一一条「使用过期缓存」是 VIX 加载器）。
+- `signal_archive` 08-01 起缺行的日子都另有原因：08-31 CRCL/QCOM（蜂崩溃 `int - NoneType`，另一个 bug）、09-17（全源失败，v0.45.270）、09-24/25 量比 0/30（全源失败那支，Twelve Data 也没给）、8 月初 BRK-B 与 v0.45.81 前的 volume 缺口。
+- ⇒ 观测窗口内存档值**零变化**；照 463 / 465 / 469 先例**不追加世代边界**（`price.momentum_5d` / `price.volume_ratio` 在 H1 输入里，未动 `_COHORT_HISTORY`）。往后的变化：这些出口触发的日子，两项从缺失变为有值（带 `price_index` / `twelvedata` 标签）。
+
+### Changed（`data_pipeline.py`）
+- `MultiSourceFetcher.fetch` 只剩一个 return：`self._emit(ticker, *self._resolve(ticker))`。`_resolve` 承载全部分支、**只返回** `(StockData, 出口名, 是否入缓存)`（全源失败也是 StockData）；`_emit` = `_fill_history_fields` → 入缓存 → `to_dict`（FALLBACK 加 `_data_unavailable`）。
+- 新增模块级 `_fill_history_fields(ticker, data, path)`：两个回落函数在生产代码里的**唯一**调用点。缺 momentum ⇒ 自攒索引（`data.session_close` 当窗口末端）、标 `price_index` + `momentum_as_of`；缺 volume ⇒ Twelve Data、标 `volume_source="twelvedata"`；补不上 ⇒ `momentum_source="unavailable"`。两条各自 try（此前 270 的一个 try 包两条：momentum 抛错连带跳过 volume），出错 WARNING 并计数。
+- 缓存存**补过的**对象（`history_checked`），新鲜 / 过期缓存命中不重跑回落（Twelve Data 日配额）。
+- 源只报自己取到的：`_fetch_history_metrics` 去掉内部两处回落（纯 yfinance，失败 None）；`CBOESource` 逐项收 yfinance 值（不足 5 根不再丢 volume_ratio），把 `_cboe_session_close(payload)` 挂在新字段 `StockData.session_close`（不进 `to_dict`）——465 的当场收盘照样进窗口，现在由出口用；`YFinanceSource` 把末根已收盘日线挂成 `session_close`（不足 5 根时回落窗口末端与 yfinance 同一天）。
+- `YFinanceSource` 均量 NaN：原兜底 `avg_vol=1.0`（avg_volume = 1 股、volume_ratio = 当日成交量本身）⇒ 置 None 交出口回落（v0.45.54 早已在 `_fetch_history_metrics` 改掉，这里漏着）。
+- `StockData.volume_source` 进 `to_dict`（"yfinance" / "twelvedata" / None）：此前 CBOE 路径补上的 Twelve Data 值把标签丢了。
+- **没接** `cboe_options.prev_close_session`（用户 10-12 定）：只在推迟那支可得，给的是 D−1 收盘，库里 D−1 有扫描时已在；不消除推迟日窗口末端 = D−1 的滞后（`momentum_as_of` 如实可见）。
+
+### Added
+- `data_pipeline.history_fill_stats()` / `reset_history_fill_stats()`：按出口（`source:<源>` / `deferred:cboe` / `cache_expired` / `all_sources_failed`）数 `n`、各字段 `needed` / `filled` / `errors`，`window_behind_session`（补上的动量窗口末端早于该源核实的那一场），`still_missing`（最近一次出口后仍缺的标的）；本进程没解析过 ⇒ None。
+- `scan_timing.counters()["history_fill"]` ⇒ status.json；`summary_line` 有缺时加「回落后仍缺 动量 N 只/量比 M 只」。
+- `alert_manager._check_history_fill`：`still_missing` 非空 ⇒ P2；计数缺失 ⇒ checks_skipped（`--date` 补跑走历史取数，不经 fetcher）。
+- `tests/test_fetcher_single_exit.py`（34）：每个出口经真 `fetch`（真 Finnhub / AV 源只桩 HTTP、真 CBOE 源推迟价、过期缓存两种、新鲜缓存不重跑、全源失败、CBOE 内部 yfinance 抛 / 空表 / 均量 NaN、YFinance 不足 5 根 / 均量 NaN）；Finnhub 胜出用真索引 + 沙箱库端到端；标签；计数 → scan_timing → P2；AST 结构守卫（`fetch` 恰一个 return 且经 `self._emit`、`_resolve` 不调 `.to_dict()` 且每个 return 是三元组、两个回落函数在生产代码里只被 `_fill_history_fields` 引用——按最内层函数归属，文件枚举走 `own_python_files`，正面核对唯一调用点确实在），结构守卫各带对真源码变异的正对照。
+
+### Tests changed
+- `tests/test_momentum_fallback_session_close.py::TestCboeSourceEndToEnd`：契约从「CBOESource 自己补动量」移到「取数器出口补」⇒ 经真 `MultiSourceFetcher`（只挂 CBOE）取；新增 `test_source_itself_only_carries_the_close`（源只带当场收盘、不补）；不足 5 根那条加断言 volume_ratio 保住且标 `yfinance`。
+- `tests/test_multi_source_fallback_momentum.py`：momentum 桩加 `session_close` 参数；回落抛错那条给 volume 也打桩（两条独立后 volume 会照跑，不许出网）。
+- `tests/test_scan_timing.py`：计数键加 `history_fill`。
+
+### 评分 / 世代边界
+- 观测窗口内存档零变化（见上），不追加世代边界。
+
+### 验证
+- 17 个生产代码变异全红（逐个真改源文件、`PYTHONDONTWRITEBYTECODE=1` + 清 `__pycache__`、跑后逐字节还原并核 sha256）：`_emit` 不调回落 / 单跳过 Finnhub 出口 / 单跳过推迟出口 / 单跳过过期缓存出口 / 去掉 `history_checked` 跳过 / CBOE 不带 `session_close` / YFinance 不带 `session_close` / YFinance 均量退回 1.0 兜底 / 回落值标成 `5d_real` / 补不上不标 `unavailable` / 不计 `window_behind_session` / momentum 出错连带跳过 volume / scan_timing 丢计数键 / alert 没接 / `fetch` 多一个 return / Finnhub 源里自挂回落（**行为测试全绿、只有结构守卫红**——这正是守卫要防的形状）/ `_fill_history_fields` 删掉回落调用。
+- 中途发现一处测试夹具问题：桩源每次返回**同一个** StockData，出口就地打 `history_checked` 后第二只标的跳过回落——真源每次构造新对象，桩改为每次 `copy.copy`（已写进 auto-memory）。
+- 改动相关 10 个文件 238 passed。全量：9224 passed、2 xfailed、85 deselected（其中 1 条是 `TestCoverageHorizon`：日历覆盖期到点、设计内定期红，前一轮未 deselect 时它红；其余 84 是 addopts 默认排除）；1 error = 会话级真实数据根闸：Alpha Bot 盘中采样 5 个 intraday 文件 + `pheromone.db` 12:18:33 变更，落在不相关的测试里（gh-pages 重试 / 编排器步骤解释）；当时本机另有多个会话在跑 pytest 与变异脚本。单独复跑本版相关文件前后核 `pheromone.db` mtime 不变、闸不红 ⇒ 并发写入者，与本版无关。
+- ruff 改动文件全绿。
 
 ## [0.45.472] — 2026-10-12 — Fixed（数据）：假现价 / 假链日子的期权观测隔离并清库（382 行）；`options.gamma_exposure` 补登 06-30 世代边界（yfinance 主源时代 GEX 是另一个量）；价格索引剩余 91 行错日 / 盘中价清理（12 行挪到正确日期）；生产 cache 的 TEST 测试残留移出
 

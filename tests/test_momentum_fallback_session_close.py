@@ -165,30 +165,46 @@ def yf_down(monkeypatch):
     monkeypatch.setattr(dp, "_fill_volume_from_twelvedata", lambda t, out: out)
 
 
+def _fetch_via_cboe(ticker):
+    """v0.45.473：回落在 MultiSourceFetcher 的唯一出口，不在 CBOESource 里 ⇒ 经真 fetcher（只挂 CBOE）取。"""
+    f = dp.MultiSourceFetcher()
+    f._sources = [dp.CBOESource()]
+    return f.fetch(ticker)
+
+
 class TestCboeSourceEndToEnd:
     def test_scan_after_close_uses_same_day_window(self, db, yf_down, monkeypatch):
         monkeypatch.setattr(co, "_fetch_cboe_payload",
                             lambda t, timeout=15: _payload(D_CLOSE, "2026-10-09T15:59:58", current=36.9))
         monkeypatch.setattr(co, "_et_now", lambda: SCAN_ET)
+        d = _fetch_via_cboe("VZ")
+        assert d["price"] == D_CLOSE and d["price_source"] == "cboe_close"
+        assert d["momentum_5d"] == SAME_DAY, f"窗口滞后了一个扫描日（滞后值 {LAGGED}）"
+        assert d["momentum_source"] == "price_index", "回落值不许标成 yfinance 实算的 5d_real"
+        assert d["momentum_as_of"] == D
+
+    def test_source_itself_only_carries_the_close(self, db, yf_down, monkeypatch):
+        """v0.45.473：CBOESource 只报自己取到的——momentum 留 None，核实过的当场收盘随数据带出去。"""
+        monkeypatch.setattr(co, "_fetch_cboe_payload",
+                            lambda t, timeout=15: _payload(D_CLOSE, "2026-10-09T15:59:58", current=36.9))
+        monkeypatch.setattr(co, "_et_now", lambda: SCAN_ET)
         d = dp.CBOESource().fetch("VZ")
-        assert d.price == D_CLOSE and d.price_source == "cboe_close"
-        assert d.momentum_5d == SAME_DAY, f"窗口滞后了一个扫描日（滞后值 {LAGGED}）"
-        assert d.momentum_source == "price_index", "回落值不许标成 yfinance 实算的 5d_real"
-        assert d.momentum_as_of == D
-        assert d.to_dict()["momentum_as_of"] == D
+        assert d.momentum_5d is None and d.momentum_source == "unavailable"
+        assert d.session_close == (D, D_CLOSE)
+        assert "session_close" not in d.to_dict(), "内部调度字段不进下游字典"
 
     def test_intraday_scan_keeps_previous_close_window(self, db, yf_down, monkeypatch):
         """盘中跑：当天没收盘，盘中价不许进；窗口末端是上一场（与 yfinance 丢掉成形中那根同口径）。"""
         monkeypatch.setattr(co, "_fetch_cboe_payload",
                             lambda t, timeout=15: _payload(36.5, "2026-10-09T11:44:00"))
         monkeypatch.setattr(co, "_et_now", lambda: datetime(2026, 10, 9, 12, 0))
-        d = dp.CBOESource().fetch("VZ")
-        assert d.price_source == "cboe_intraday"
-        assert d.momentum_5d == LAGGED and d.momentum_as_of == "2026-10-08"
+        d = _fetch_via_cboe("VZ")
+        assert d["price_source"] == "cboe_intraday"
+        assert d["momentum_5d"] == LAGGED and d["momentum_as_of"] == "2026-10-08"
 
     def test_yfinance_short_history_branch_also_gets_session_close(self, db, monkeypatch):
-        """yfinance 应答了但不足 5 根（没算出动量）：走的是 `_fetch_history_metrics` 的正常返回分支，
-        不是异常分支——当场收盘同样要传到。"""
+        """yfinance 应答了但不足 5 根（没算出动量）：当场收盘同样要传到出口的回落，
+        且 yfinance 算出的 volume_ratio 不许被一并丢掉（v0.45.473 前会丢）。"""
         import pandas as pd
         import yfinance
 
@@ -201,12 +217,14 @@ class TestCboeSourceEndToEnd:
                 return pd.DataFrame({"Close": [41.0, 40.32, D_CLOSE], "Volume": [1e6, 1e6, 3e6]}, index=idx)
         monkeypatch.setattr(yfinance, "Ticker", _T)
         monkeypatch.setattr(dp, "_exchange_now", lambda: None)
+        monkeypatch.setattr(dp, "_fill_volume_from_twelvedata", lambda t, out: out)
         monkeypatch.setattr(co, "_fetch_cboe_payload",
                             lambda t, timeout=15: _payload(D_CLOSE, "2026-10-09T15:59:58"))
         monkeypatch.setattr(co, "_et_now", lambda: SCAN_ET)
-        d = dp.CBOESource().fetch("VZ")
-        assert (d.momentum_5d, d.momentum_as_of, d.momentum_source) == (SAME_DAY, D, "price_index")
-        assert d.volume_ratio is not None, "前提：确实走的是 yfinance 有应答的分支"
+        d = _fetch_via_cboe("VZ")
+        assert (d["momentum_5d"], d["momentum_as_of"], d["momentum_source"]) == (SAME_DAY, D, "price_index")
+        assert d["volume_ratio"] is not None and d["volume_source"] == "yfinance", \
+            "前提：确实走的是 yfinance 有应答的分支，且它算出的量比保住了"
 
     def test_yfinance_success_untouched(self, db, monkeypatch):
         """yfinance 有值时回落不跑：标签仍是 5d_real、没有 as_of。"""
@@ -214,10 +232,10 @@ class TestCboeSourceEndToEnd:
                             lambda t, timeout=15: _payload(D_CLOSE, "2026-10-09T15:59:58"))
         monkeypatch.setattr(co, "_et_now", lambda: SCAN_ET)
         monkeypatch.setattr(dp, "_fetch_history_metrics",
-                            lambda t, session_close=None: {"momentum_5d": -9.16, "momentum_source": "yfinance",
-                                                           "volume_ratio": 1.0, "avg_volume": 10})
-        d = dp.CBOESource().fetch("VZ")
-        assert (d.momentum_5d, d.momentum_source, d.momentum_as_of) == (-9.16, "5d_real", None)
+                            lambda t: {"momentum_5d": -9.16, "momentum_source": "yfinance",
+                                       "volume_ratio": 1.0, "avg_volume": 10})
+        d = _fetch_via_cboe("VZ")
+        assert (d["momentum_5d"], d["momentum_source"], d["momentum_as_of"]) == (-9.16, "5d_real", None)
 
 
 class TestRejectedSessionCloseIsLoud:

@@ -301,6 +301,7 @@ class AlertAnalyzer:
         self._check_portfolio_greeks_prices(status)
         self._check_paper_portfolio_run(status)
         self._check_ledger_io_failures(status)
+        self._check_history_fill(status)
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
         self._check_news_sources(status)
@@ -645,6 +646,49 @@ class AlertAnalyzer:
                         "的上游（不要在写入端把它改成 null 了事）；LedgerLockTimeout ⇒ 查是否有别的写者卡住",
             },
             ["ledger_io", "data_quality"]
+        ))
+
+    def _check_history_fill(self, status: Dict) -> None:
+        """momentum_5d / volume_ratio 过了取数出口的回落仍缺（v0.45.473；`data_pipeline.history_fill_stats`
+        经 scan_timing 进来）。
+
+        这两项是 BuzzBee 动量 / 量能通道、ScoutBee 背离、BearBee、RivalBee ML 特征的输入，也是
+        `signal_archive` 的 `price.momentum_5d` / `price.volume_ratio`（维度 IC 协议 H1 输入）。缺了下游
+        各自按中性 / 不可用处理、不报错——所以在这里红。`still_missing` 非空 ⇒ P2；计数缺失 ⇒ checks_skipped
+        （`--date` 补跑走历史取数、不经 fetcher，本就没有这项）。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        hf = (st.get("counters") or {}).get("history_fill")
+        if not isinstance(hf, dict):
+            self.checks_skipped.append("历史字段回落检查（scan_timing 无 history_fill 计数）")
+            return
+        missing = hf.get("still_missing") or {}
+        mom, vol = list(missing.get("momentum") or []), list(missing.get("volume") or [])
+        if not (mom or vol):
+            return
+
+        def _names(ts):
+            return "、".join(ts[:10]) + (f" 等 {len(ts)} 只" if len(ts) > 10 else "")
+        paths = "；".join(
+            f"{p}：{v.get('n', 0)} 次"
+            + "".join(f"，{f} 缺 {v[f]['needed']} 补上 {v[f]['filled']}"
+                      + (f" 出错 {v[f]['errors']}" if v[f].get("errors") else "")
+                      for f in ("momentum", "volume")
+                      if isinstance(v.get(f), dict) and v[f].get("needed"))
+            for p, v in sorted((hf.get("by_path") or {}).items()))
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】历史字段回落后仍缺：momentum_5d {len(mom)} 只、volume_ratio {len(vol)} 只",
+            {
+                "momentum_5d": _names(mom) if mom else "无",
+                "volume_ratio": _names(vol) if vol else "无",
+                "各出口": paths or "无",
+                "影响": "这些标的的动量 / 量能通道按中性处理，signal_archive 当天缺 price.momentum_5d / price.volume_ratio 行",
+                "建议": "出错 > 0 ⇒ 看 alpha_hive.log「出口回落出错」；momentum 缺 ⇒ 查自攒价格索引覆盖"
+                        "（price_history.coverage_report）；volume 缺 ⇒ 查 Twelve Data key / 配额",
+            },
+            ["history_fill", "data_quality"]
         ))
 
     def get_critical_alerts(self) -> List[Alert]:

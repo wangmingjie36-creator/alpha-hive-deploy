@@ -115,6 +115,10 @@ class StockData:
     自攒索引回落 `price_history.MOMENTUM_LOOKBACK` 对齐此口径，v0.45.469）。
     momentum_source: "5d_real"（yfinance 历史K线计算）| "price_index"（自攒索引回落）| "unavailable"
     momentum_as_of: 自攒索引回落时窗口末端那一天（v0.45.465）；其余来源不填
+    volume_source: "yfinance" | "twelvedata"（回落）| None（没有值）（v0.45.473）
+
+    数据源只填**自己取到的**历史字段；缺的那几项由 `MultiSourceFetcher` 唯一出口
+    `_fill_history_fields` 统一回落（v0.45.473），不归哪个源管。
     """
     price: float = 0.0
     # v0.45.3: 类型早已是 Optional，默认值却还是 0.0 / 1.0——构造 StockData 时
@@ -137,6 +141,7 @@ class StockData:
     # v0.45.465：自攒索引回落的窗口末端日期。拿到当场官方收盘时 = 场次日期；
     # 拿不到时是库里最新一天（上一个扫描日），比 yfinance 收盘后的窗口滞后一个扫描日。
     momentum_as_of: Optional[str] = None
+    volume_source: Optional[str] = None
     fetch_timestamp: float = 0.0
     is_market_hours: bool = False
     # v0.45.234：price 取的是哪个字段（目前只有 CBOE 源填，见 cboe_options.official_price）。
@@ -145,6 +150,11 @@ class StockData:
     # v0.45.234：此源拿到了数，但**不该优先采用**（CBOE 盘中陈旧价）。
     # MultiSourceFetcher 先试后面的源，全失败才退回用它。不进 to_dict（内部调度用）。
     defer: bool = False
+    # v0.45.473：此源核实过的某一场官方收盘 `(ISO 日期, 价)`，给出口的 momentum 回落当窗口末端
+    # （CBOE 取自 `_cboe_session_close`、yfinance 取自末根已收盘日线）。不进 to_dict。
+    session_close: Optional[Tuple[str, float]] = None
+    # v0.45.473：已过出口回落（`_fill_history_fields`）。缓存存的是回落后的对象，命中时不重跑。不进 to_dict。
+    history_checked: bool = False
 
     def to_dict(self) -> Dict:
         return {
@@ -157,6 +167,7 @@ class StockData:
             "source_name": self.source_name,
             "momentum_source": self.momentum_source,
             "momentum_as_of": self.momentum_as_of,
+            "volume_source": self.volume_source,
             "fetch_timestamp": self.fetch_timestamp,
             "is_market_hours": self.is_market_hours,
             "price_source": self.price_source,
@@ -435,16 +446,16 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
         return fallback
 
 
-def _fetch_history_metrics(ticker: str,
-                           session_close: Optional[Tuple[str, float]] = None) -> Optional[Dict]:
+def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
     """P0-2 (v0.38.0): 从 yfinance 历史K线独立计算 momentum_5d / volume_ratio /
     avg_volume / volatility_20d（含 forming-bar 护栏）。
 
-    供 CBOESource（无历史K线）与 YFinanceSource 共用。失败返回 None——
-    调用方必须把 momentum_5d 置 None（诚实缺数据），禁止用 1 日涨跌幅冒充。
+    供 CBOESource（无历史K线）用。失败返回 None——调用方必须把 momentum_5d 置 None
+    （诚实缺数据），禁止用 1 日涨跌幅冒充。
 
-    `session_close`：调用方已核实的当场官方收盘 `(ISO 日期, 价)`，只转给
-    momentum 的自攒索引回落（见 `_fill_momentum_from_index`）。
+    **只算 yfinance**（v0.45.473）：此前这里在成功 / 异常两条分支各自挂了一次自攒索引 /
+    Twelve Data 回落，空历史、均量 NaN 两条分支却一条都没挂；且只有 CBOE 胜出时才走得到。
+    回落现在只在 `MultiSourceFetcher` 的唯一出口 `_fill_history_fields` 里做。
     """
     try:
         import yfinance as yf
@@ -484,11 +495,10 @@ def _fetch_history_metrics(ticker: str,
 
         out["_price_from_hist"] = float(hist["Close"].iloc[-1])
         out["momentum_source"] = "yfinance"
-        return _fill_momentum_from_index(ticker, out, session_close)
+        return out
     except Exception as e:
         _log.debug("_fetch_history_metrics %s failed: %s", ticker, e)
-        out = _fill_momentum_from_index(ticker, None, session_close)
-        return _fill_volume_from_twelvedata(ticker, out)
+        return None
 
 
 def _fill_momentum_from_index(ticker: str, out: Optional[Dict],
@@ -513,6 +523,9 @@ def _fill_momentum_from_index(ticker: str, out: Optional[Dict],
     滞后一个扫描日。只在内存里并进序列，不写索引。结果带 `momentum_as_of`
     （窗口末端）；传了却没进窗口（值被拒 / 非交易日）打 warning——那一天的值是滞后的。
     盘中价 / 盘中陈旧文件 / 判不了归属的价**不许**从这里进：它们不是收盘。
+
+    生产唯一调用点：`_fill_history_fields`（v0.45.473；AST 守卫
+    `tests/test_fetcher_single_exit.py`）——别再挂到某个源或某条分支里。
     """
     if out is not None and out.get("momentum_5d") is not None:
         return out
@@ -570,6 +583,8 @@ def _fill_volume_from_twelvedata(ticker: str, out: Optional[Dict]) -> Optional[D
 
     不去动 momentum_5d：那条已经有自己的回落路径（自攒价格索引），
     这里只补 volume_ratio 这一项缺口。
+
+    生产唯一调用点：`_fill_history_fields`（v0.45.473），同上。
     """
     if out is not None and out.get("volume_ratio") is not None:
         return out
@@ -595,7 +610,7 @@ class CBOESource:
 
     价格来自 CBOE；momentum_5d/volume_ratio 从 yfinance 历史K线独立获取
     （P0-2：CBOE 只有当日涨跌幅，1 日近似冒充 5 日动量会污染背离检测，
-    历史K线不可得时诚实置 None）。
+    历史K线不可得时诚实置 None；自攒索引 / Twelve Data 回落在 MultiSourceFetcher 出口，v0.45.473）。
     """
 
     def __init__(self):
@@ -636,6 +651,8 @@ class CBOESource:
                     momentum_source="unavailable",
                     fetch_timestamp=time.time(),
                     defer=True,
+                    # 盘中陈旧文件的 close 不是官方收盘 ⇒ 这里恒为 None；照同一规则取，不另写判据
+                    session_close=_cboe_session_close(payload),
                 )
 
             data = StockData(
@@ -644,28 +661,27 @@ class CBOESource:
                 source_name=self.name,
                 price_source=_px_src,
                 fetch_timestamp=time.time(),
+                # v0.45.465 / 473：已核实的当场官方收盘，随数据带出去，由出口的
+                # momentum 回落当窗口末端（不在本源里回落）。
+                session_close=_cboe_session_close(payload),
             )
-            # P0-2: 历史指标独立获取；失败时 momentum 置 None（不再 1 日近似）
-            # v0.45.465：已核实的当场官方收盘交给 momentum 的自攒索引回落当窗口末端。
-            metrics = _fetch_history_metrics(
-                ticker, session_close=_cboe_session_close(payload))
-            if metrics and "momentum_5d" in metrics:
-                data.momentum_5d = metrics["momentum_5d"]
+            # P0-2: 历史指标独立获取；取不到的项留 None（不再 1 日近似），
+            # 由 MultiSourceFetcher 出口统一回落（v0.45.473）。
+            metrics = _fetch_history_metrics(ticker)
+            if metrics:
+                # v0.45.473：逐项取。此前要求 "momentum_5d" 在才收，yfinance 不足 5 根时
+                # 连算出来的 volume_ratio 也一并丢掉。
                 # v0.45.54：`.get(k, default)` 挡不住「键存在但值为 None」——
-                # _fetch_history_metrics 现在会把不可得的均量置 None，
-                # 旧写法会把 None 原样赋给声明为 int 的字段。
+                # _fetch_history_metrics 会把不可得的均量置 None。
+                data.momentum_5d = metrics.get("momentum_5d")
+                data.momentum_source = "5d_real" if data.momentum_5d is not None else "unavailable"
                 data.avg_volume = metrics.get("avg_volume")
                 data.volume_ratio = metrics.get("volume_ratio")
+                data.volume_source = "yfinance" if data.volume_ratio is not None else None
                 data.volatility_20d = metrics.get("volatility_20d")   # v0.45.3: 不再补 0.0
-                # v0.45.465：此前一律写 "5d_real"，把自攒索引回落也标成了 yfinance 实算
-                data.momentum_source = ("price_index" if metrics.get("momentum_source") == "price_index"
-                                        else "5d_real")
-                data.momentum_as_of = metrics.get("momentum_as_of")
             else:
-                data.momentum_5d = None
-                data.volume_ratio = None
                 data.momentum_source = "unavailable"
-                _log.warning("[CBOE] %s 历史K线不可得，momentum_5d/volume_ratio 置 None", ticker)
+                _log.warning("[CBOE] %s 历史K线不可得，momentum_5d/volume_ratio 待出口回落", ticker)
             self.breaker.record_success()
             return data
 
@@ -707,17 +723,26 @@ class YFinanceSource:
             )
             data.price = float(hist["Close"].iloc[-1])
             data.price_source = "yfinance_daily_close"
+            # v0.45.473：末根已收盘日线就是一场官方收盘——不足 5 根时出口的 momentum 回落拿它当窗口末端
+            try:
+                data.session_close = (hist.index[-1].date().isoformat(), data.price)
+            except (AttributeError, TypeError, ValueError):
+                data.session_close = None
 
             if len(hist) >= 5:
                 data.momentum_5d = (hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100
                 data.momentum_source = "5d_real"
+            else:
+                data.momentum_source = "unavailable"
 
             recent_vol = float(hist["Volume"].iloc[-1])
             avg_vol = float(hist["Volume"].iloc[-20:].mean()) if len(hist) >= 20 else float(hist["Volume"].mean())
-            if math.isnan(avg_vol) or avg_vol <= 0:
-                avg_vol = 1.0
-            data.avg_volume = int(avg_vol)
-            data.volume_ratio = recent_vol / avg_vol if avg_vol > 0 else 1.0
+            # v0.45.473：原兜底 avg_vol=1.0 ⇒ avg_volume=1 股、volume_ratio=当日成交量本身（千万量级）——
+            # `_fetch_history_metrics` 在 v0.45.54 已改成 None，这里一直漏着。置 None，交给出口回落。
+            if not (math.isnan(avg_vol) or avg_vol <= 0):
+                data.avg_volume = int(avg_vol)
+                data.volume_ratio = recent_vol / avg_vol
+                data.volume_source = "yfinance"
 
             if len(hist) >= 20:
                 returns = hist["Close"].pct_change().dropna()
@@ -843,6 +868,129 @@ class FinnhubSource:
             return None
 
 
+# ==================== 历史字段出口回落（v0.45.473）====================
+#
+# momentum_5d / volume_ratio 各有一条独立于主价源的回落（自攒价格索引 / Twelve Data）。
+# 回落是**出口的属性**，不是某个源的：不管哪个源胜出、走哪个出口，缺的项都在这里补一次。
+# 此前挂在 CBOESource 内部 + 「全源失败」一支（v0.45.270）——Finnhub / AV 胜出、过期缓存、
+# CBOE 盘中陈旧价三个出口，以及 CBOE 内部「yfinance 空历史 / 均量 NaN」两条分支都够不着
+# （auto-memory `alpha-hive-fallback-not-reached.md` 的第四次）。
+
+_HISTORY_FIELDS = ("momentum", "volume")
+_history_lock = threading.Lock()
+# 本进程还没解析过任何标的 ⇒ None（scan_timing 约定：None 是「没跑」，不是「零次」）
+_history_stats: Optional[Dict] = None
+_history_last: Dict[str, Dict[str, bool]] = {}   # ticker → {字段: 最近一次出口后仍缺}
+
+
+def _record_history_fill(ticker: str, path: str, outcome: Dict[str, str],
+                         window_behind: bool) -> None:
+    global _history_stats
+    with _history_lock:
+        if _history_stats is None:
+            _history_stats = {"resolutions": 0, "by_path": {}, "window_behind_session": 0}
+        _history_stats["resolutions"] += 1
+        p = _history_stats["by_path"].setdefault(
+            path, {"n": 0, **{f: {"needed": 0, "filled": 0, "errors": 0} for f in _HISTORY_FIELDS}})
+        p["n"] += 1
+        for f in _HISTORY_FIELDS:
+            o = outcome.get(f, "present")
+            if o == "present":
+                continue
+            p[f]["needed"] += 1
+            if o == "filled":
+                p[f]["filled"] += 1
+            elif o == "error":
+                p[f]["errors"] += 1
+        if window_behind:
+            _history_stats["window_behind_session"] += 1
+        _history_last[ticker] = {f: outcome.get(f) in ("missing", "error") for f in _HISTORY_FIELDS}
+
+
+def history_fill_stats() -> Optional[Dict]:
+    """本进程出口回落计数（v0.45.473）→ `scan_timing.counters()["history_fill"]` ⇒ status.json。
+
+    - `by_path[出口]`：`n` 次解析；每个字段 `needed`（出口时缺）/ `filled`（回落补上）/ `errors`（回落抛错）。
+      出口名：`source:<源名>` / `deferred:cboe` / `cache_expired` / `all_sources_failed`
+      （新鲜缓存命中不重跑回落，不计）。
+    - `window_behind_session`：回落给了 momentum，但窗口末端早于该源核实的那一场收盘（值滞后）。
+    - `still_missing`：各字段在**最近一次**出口后仍为 None 的标的 ⇒ alert_manager P2。
+    本进程没解析过任何标的 ⇒ None。
+    """
+    with _history_lock:
+        if _history_stats is None:
+            return None
+        out = {
+            "resolutions": _history_stats["resolutions"],
+            "window_behind_session": _history_stats["window_behind_session"],
+            "by_path": {k: {kk: (dict(vv) if isinstance(vv, dict) else vv) for kk, vv in v.items()}
+                        for k, v in _history_stats["by_path"].items()},
+        }
+        out["still_missing"] = {f: sorted(t for t, m in _history_last.items() if m.get(f))
+                                for f in _HISTORY_FIELDS}
+        return out
+
+
+def reset_history_fill_stats() -> None:
+    global _history_stats
+    with _history_lock:
+        _history_stats = None
+        _history_last.clear()
+
+
+def _fill_history_fields(ticker: str, data: StockData, path: str) -> None:
+    """出口唯一的历史字段回落（v0.45.473）：`data` 缺 momentum_5d / volume_ratio 就各补一次，就地改。
+
+    标签与值同一处定：源自己算的值由源标（`5d_real` / `yfinance`），这里补上的标
+    `price_index`（+ `momentum_as_of`）/ `twelvedata`；补不上的标 `unavailable`。
+    `data.session_close`（源核实过的某一场官方收盘）交给 momentum 回落当窗口末端（v0.45.465）。
+    已补过（`history_checked`，缓存命中）不重跑——Twelve Data 有日配额。
+    """
+    if data.history_checked:
+        return
+    outcome: Dict[str, str] = {}
+    window_behind = False
+
+    if data.momentum_5d is None:
+        try:
+            r = _fill_momentum_from_index(ticker, None, data.session_close)
+        except Exception as e:  # noqa: BLE001 —— 回落自身出错不得拖垮取数，但要看得见（计 errors）
+            _log.warning("[%s] momentum_5d 出口回落出错（%s）: %s: %s",
+                         ticker, path, type(e).__name__, e)
+            outcome["momentum"] = "error"
+        else:
+            if r and r.get("momentum_5d") is not None:
+                data.momentum_5d = r["momentum_5d"]
+                data.momentum_source = "price_index"
+                data.momentum_as_of = r.get("momentum_as_of")
+                outcome["momentum"] = "filled"
+                window_behind = (data.session_close is not None
+                                 and data.momentum_as_of != data.session_close[0])
+            else:
+                outcome["momentum"] = "missing"
+        if data.momentum_5d is None:
+            data.momentum_source = "unavailable"
+
+    if data.volume_ratio is None:
+        try:
+            r = _fill_volume_from_twelvedata(ticker, None)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("[%s] volume_ratio 出口回落出错（%s）: %s: %s",
+                         ticker, path, type(e).__name__, e)
+            outcome["volume"] = "error"
+        else:
+            if r and r.get("volume_ratio") is not None:
+                data.volume_ratio = r["volume_ratio"]
+                data.avg_volume = r.get("avg_volume")
+                data.volume_source = "twelvedata"
+                outcome["volume"] = "filled"
+            else:
+                outcome["volume"] = "missing"
+
+    data.history_checked = True
+    _record_history_fill(ticker, path, outcome, window_behind)
+
+
 # ==================== 多源聚合器 ====================
 
 class MultiSourceFetcher:
@@ -887,7 +1035,30 @@ class MultiSourceFetcher:
         """
         获取股票数据（自动降级链 + 缓存）
         返回字典格式，兼容现有 _fetch_stock_data 接口
+
+        v0.45.473：**唯一出口**。分支全在 `_resolve`（只返回 StockData，不出字典），
+        这里只有一个 return，经 `_emit` → `_fill_history_fields` 统一补历史字段。
+        此前回落只挂在 CBOE 源内部与「全源失败」那一支：Finnhub / AV 胜出、
+        过期缓存、CBOE 盘中陈旧价三个出口都把 momentum_5d / volume_ratio 原样 None 交出去。
+        守卫：`tests/test_fetcher_single_exit.py`（AST：一个 return、回落函数唯一调用点）。
         """
+        data, path, cacheable = self._resolve(ticker)
+        return self._emit(ticker, data, path, cacheable)
+
+    def _emit(self, ticker: str, data: StockData, path: str, cacheable: bool) -> Dict:
+        """出口：补历史字段 → 入缓存（缓存存补过的对象）→ 字典。"""
+        _fill_history_fields(ticker, data, path)
+        if cacheable:
+            self._set_cache(ticker, data)
+        out = data.to_dict()
+        if data.data_source == DataQuality.FALLBACK:
+            # 标记数据不可用，下游 Agent 应跳过分析
+            out["_data_unavailable"] = True
+        return out
+
+    def _resolve(self, ticker: str) -> Tuple[StockData, str, bool]:
+        """降级链本体 → `(数据, 出口名, 是否入缓存)`。**只返回 StockData**——
+        出字典是 `_emit` 的事（结构守卫钉住本函数不许调 `.to_dict()`）。"""
         with self._lock:
             self._fetch_stats["total"] += 1
 
@@ -897,7 +1068,7 @@ class MultiSourceFetcher:
             ttl = (self.CACHE_TTL_REAL if cached.data_source == DataQuality.REAL
                    else self.CACHE_TTL_DEGRADED)
             if time.time() - cached.fetch_timestamp < ttl:
-                return cached.to_dict()
+                return cached, "cache_fresh", False
 
         # 2. 尝试降级链
         deferred: Optional[StockData] = None
@@ -907,7 +1078,6 @@ class MultiSourceFetcher:
                 deferred = deferred or data
                 continue
             if data and data.price > 0:
-                self._set_cache(ticker, data)
                 with self._lock:
                     self._fetch_stats[data.data_source] += 1
                 if data.data_source != DataQuality.REAL:
@@ -915,7 +1085,7 @@ class MultiSourceFetcher:
                         "[DataPipeline] %s 降级到 %s（源：%s）",
                         ticker, data.data_source, data.source_name
                     )
-                return data.to_dict()
+                return data, f"source:{data.source_name}", True
 
         # 3. 使用过期缓存（stale）— cached 已是副本，修改不影响缓存
         if cached and cached.price > 0:
@@ -928,64 +1098,35 @@ class MultiSourceFetcher:
                     "[DataPipeline] %s 使用过期缓存（%.0f秒前，源：%s）",
                     ticker, stale_age, cached.source_name
                 )
-                return cached.to_dict()
+                return cached, "cache_expired", False
 
         # 3.5 (v0.45.234) 被推迟的数（CBOE 盘中陈旧价）：比 price=0 让整只标的跳过强，
         # 但必须带着 degraded + price_source 标签出去，不能冒充官方收盘。
         if deferred is not None:
-            self._set_cache(ticker, deferred)
             with self._lock:
                 self._fetch_stats[deferred.data_source] += 1
             _log.warning(
                 "[DataPipeline] %s 其余源全部失败，退用 %s 的 %s 价 %.4f（非官方收盘）",
                 ticker, deferred.source_name, deferred.price_source, deferred.price
             )
-            return deferred.to_dict()
+            return deferred, f"deferred:{deferred.source_name}", True
 
-        # 4. 最后防线：安全默认值（明确标记为 fallback）
+        # 4. 最后防线：安全默认值（明确标记为 fallback；`_emit` 加 `_data_unavailable`）
+        # v0.45.270 起这一支也补 momentum_5d / volume_ratio（2026-09-17 CBOE 熔断 + yfinance
+        # 同时中断，独立回落链连尝试的机会都没有）；v0.45.473 起和其余出口一样由 `_emit` 统一补——
+        # BuzzBee/ChronosBee 读这两项时不检查 `_data_unavailable`（设计成部分降级）。
         with self._lock:
             self._fetch_stats["fallback"] += 1
         _log.error(
             "[DataPipeline] %s 所有数据源不可用！返回 FALLBACK 默认值（不可用于交易决策）",
             ticker
         )
-        fallback = StockData(
+        return StockData(
             price=0.0,
             data_source=DataQuality.FALLBACK,
             source_name="none",
             fetch_timestamp=time.time(),
-        ).to_dict()
-        # 标记数据不可用，下游 Agent 应跳过分析
-        fallback["_data_unavailable"] = True
-
-        # v0.45.270：momentum_5d / volume_ratio 各有一条独立于 CBOE/yfinance
-        # 主价源的回落链（自攒价格索引 + Twelve Data，见
-        # `_fill_momentum_from_index` / `_fill_volume_from_twelvedata`），
-        # 但此前只挂在 CBOESource.fetch() 内部——一旦 CBOE 熔断器先跳闸
-        # （2026-09-17 实测：CBOE「no_data」熔断 + yfinance 同时因本机网络
-        # 中断报 `'NoneType' object is not subscriptable`，两者失败在前，
-        # 连 CBOESource 内部都没跑到调 `_fetch_history_metrics` 那一步），
-        # 这条回落链**连尝试的机会都没有**——尽管它是两个独立数据源（本地
-        # 索引 + Twelve Data 各自的账号配额），当时大概率仍然健康。
-        # 走到这里意味着 4 个源全灭、主价确实拿不到（下游仍会看
-        # `_data_unavailable` 跳过完整分析），但不该因为价格拿不到就连带
-        # 牺牲这两项本可独立恢复的字段——BuzzBee/ChronosBee 读 momentum_5d/
-        # volume_ratio 时并不检查 `_data_unavailable`（这两只蜂本就设计成
-        # 部分降级，而不是整体跳过）。
-        try:
-            _hf = _fill_momentum_from_index(ticker, None)
-            _hf = _fill_volume_from_twelvedata(ticker, _hf)
-        except Exception as e:  # noqa: BLE001 — 这条回落本身失败不得掩盖主诊断
-            _log.debug("[%s] FALLBACK 末端 momentum/volume 回落失败: %s", ticker, e)
-            _hf = None
-        if _hf:
-            fallback["momentum_5d"] = _hf.get("momentum_5d")
-            fallback["momentum_source"] = _hf.get("momentum_source", fallback["momentum_source"])
-            fallback["momentum_as_of"] = _hf.get("momentum_as_of")
-            fallback["volume_ratio"] = _hf.get("volume_ratio")
-            fallback["avg_volume"] = _hf.get("avg_volume")
-            fallback["volume_source"] = _hf.get("volume_source")
-        return fallback
+        ), "all_sources_failed", False
 
     def _get_cache(self, ticker: str) -> Optional[StockData]:
         with self._lock:
