@@ -195,6 +195,19 @@ class TestAnalyzeNeverInventsAPrice:
         assert a == b
         assert a["gamma_exposure"] is not None
 
+    def test_result_records_chain_source(self, agent, monkeypatch, tmp_path):
+        """快照记下期权链来源（v0.45.475）：此前只能事后推，quote_set.error 还会被回填抹掉（10-05 BILI）。
+
+        变红的变异：删掉结果里的 `chain_source`；或写死成某个值。
+        """
+        monkeypatch.setenv("OPTIONS_SNAPSHOT_DISABLE", "1")
+        monkeypatch.setattr(agent.fetcher, "fetch_options_chain", lambda t: {**_chain(), "_source": "cboe"})
+        assert agent.analyze("NVDA", stock_price=301.0)["chain_source"] == "cboe"
+        monkeypatch.setattr(agent.fetcher, "fetch_options_chain", lambda t: {**_chain(), "_source": "yfinance"})
+        assert agent.analyze("NVDA", stock_price=301.0)["chain_source"] == "yfinance"
+        monkeypatch.setattr(agent.fetcher, "fetch_options_chain", lambda t: _chain())
+        assert agent.analyze("NVDA", stock_price=301.0)["chain_source"] == "unknown"
+
     def test_caller_price_unchanged_behaviour(self, agent, monkeypatch, tmp_path):
         """调用方给了价 ⇒ 用它，出处 caller（正常日子行为不变的正对照）。"""
         monkeypatch.setattr(agent.fetcher, "fetch_options_chain",
@@ -332,6 +345,7 @@ class TestYfinanceChainPrice:
         gammas = [c.get("gamma") for c in ch["calls"]]
         assert gammas and all(isinstance(g, float) and g > 0 for g in gammas)
         assert (ch["underlying_price"], ch["underlying_price_source"]) == (15.49, "yfinance_last_price")
+        assert ch["_source"] == "yfinance", "v0.45.475：链要自报来源，analyze 据此记 chain_source"
         S = 15.49
         expect = [C._bs_gamma(S, k, max(c["dte"], 0.5) / 365.0, c["impliedVolatility"])
                   for k, c in zip([14.0, 15.0, 16.0, 17.0], ch["calls"][:4])]

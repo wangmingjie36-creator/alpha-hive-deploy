@@ -1055,6 +1055,25 @@ QUARANTINE: List[Dict] = [
         "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
         "evidence": ("cache/options_snapshot_{T}_2026-10-09.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
     },
+    # v0.45.475：上面那批 yfinance 备用链只认 `quote_set.error`（09-04 起才有），06-30 ~ 09-03 认不出；而且
+    # `_refill_empty_quote_set` 事后会用 CBOE 回填空的 quote_set、把 error 抹掉（10-05 BILI 实测，回填于 23:33）。
+    # 改用期权链数据本身的厂商指纹：快照 key_levels 的 IV——CBOE 给 4 位小数，Yahoo 是二进制长浮点。
+    # 在已知来源的快照上核过：CBOE 581/582、yfinance 44/44、06-30 前 yfinance 主源时代 541/542 分对（例外各 1 份是
+    # 测试夹具写穿生产、早已隔离）；06-30 ~ 09-03 的 548 份全部可分，只有 09-01 BILI 是 yfinance。
+    {
+        "date": "2026-09-01",
+        "tickers": ("BILI",),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.475：当天 BILI 的期权链来自 yfinance 备用链（key_levels IV 为 Yahoo 长浮点指纹；该日没有 quote_set 可认），BS gamma 的 S 是行权价中位数，GEX 不是同一个量。",
+        "evidence": ("cache/options_snapshot_BILI_2026-09-01.json（key_levels.iv）", "CHANGELOG.md#v0.45.475"),
+    },
+    {
+        "date": "2026-10-05",
+        "tickers": ("BILI",),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.475：当天 BILI 的期权链来自 yfinance 备用链（key_levels IV 为 Yahoo 长浮点指纹）；quote_set 当晚 23:33 被 _refill_empty_quote_set 用 CBOE 回填，原来的 error 被抹掉，v0.45.472 按 quote_set.error 认时漏掉。",
+        "evidence": ("cache/options_snapshot_BILI_2026-10-05.json（key_levels.iv / _quote_set_refilled_at）", "CHANGELOG.md#v0.45.475"),
+    },
 ]
 
 

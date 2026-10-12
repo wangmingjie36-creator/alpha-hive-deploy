@@ -199,3 +199,13 @@ class TestFakeSnapshotQuarantineV0_45_472:
         """财报日盘后价是真实价（另一类、已修），不是假现价，不隔离。"""
         assert not sa.is_quarantined("2026-08-26", "CRM", "options.gamma_exposure")
         assert not sa.is_quarantined("2026-07-29", "MSFT", "options.iv_current")
+
+
+def test_fingerprinted_yfinance_days_quarantine_gex_only():
+    """v0.45.475：按 IV 小数位指纹认出的 yfinance 备用链日子（09-01 BILI 在 quote_set 之前；10-05 BILI 的 error 被回填抹掉）。
+
+    变红的变异：删掉这两条；或把 signals 扩到 IV / P/C。
+    """
+    for d in ("2026-09-01", "2026-10-05"):
+        assert sa.is_quarantined(d, "BILI", "options.gamma_exposure")
+        assert not sa.is_quarantined(d, "BILI", "options.iv_current")

@@ -460,6 +460,8 @@ class OptionsDataFetcher:
                 # v0.45.468：与 CBOE 分支同形——本链取数时的标的价与出处，analyze() 调用方没给价时用它
                 "underlying_price": _S if _S > 0 else None,
                 "underlying_price_source": _S_src if _S > 0 else "unavailable",
+                # v0.45.475：与 CBOE 分支的 `_source: "cboe"` 对称——analyze 据此在结果里记 `chain_source`
+                "_source": "yfinance",
             }
 
             # CBOE 已作主源优先尝试过；走到这里说明 CBOE 不可用、改用 yfinance。
@@ -2476,6 +2478,7 @@ class OptionsAgent:
                                  "error": "期权数据不可用（真实链获取失败）"},
                 "gamma_calendar": {},
                 "full_chain_oi": {},
+                "chain_source": "sample",   # v0.45.475
                 # v0.45.99 四合约报价集：样本链没有真实报价，诚实标不可用
                 # v0.45.104：改走 _qs_unavailable，形状与另外三个生产者一致
                 "quote_set": _qs_unavailable("期权数据不可用（真实链获取失败）",
@@ -2935,6 +2938,9 @@ class OptionsAgent:
             # v0.45.99: 四合约报价集（~30 DTE ATM/25Δ 的 bid/ask），只记账不进评分。
             # 旧快照没有这个键 —— 消费者必须 `.get("quote_set")`。
             "quote_set": quote_set,
+            # v0.45.475：这份结果的期权链来自哪（cboe / yfinance / unknown）。此前快照不记来源，只能事后推：
+            # quote_set.error 会被 `_refill_empty_quote_set` 回填抹掉（10-05 BILI 实测），只剩 IV 小数位数这种指纹可认。
+            "chain_source": options_chain.get("_source") or "unknown",
         }
 
         # 方案21: 出口消毒 — NaN/Inf → None（v0.45.462 前是 0.0，见 `_sanitize_result`）

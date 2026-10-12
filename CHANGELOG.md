@@ -5,7 +5,30 @@
 
 ---
 
-## [0.45.475] — 2026-10-12 — 占位（进行中：期权快照记录期权链来源 + 06-30~09-03 备用链日子按数据指纹认出并隔离 GEX）
+## [0.45.475] — 2026-10-12 — Fixed：期权快照记下期权链来源（`chain_source`），不再事后推；06-30 ~ 09-03 的 yfinance 备用链日子按数据指纹全部认出（548 份里只有 09-01 BILI），另补上 v0.45.472 漏掉的 10-05 BILI（quote_set 被回填抹掉了证据），两天的 GEX 隔离并清库
+
+### 为什么
+v0.45.472 按 `quote_set.error == "chain source is not cboe"` 认 yfinance 备用链，留下「06-30 ~ 09-03 认不出、待验证」——quote_set 09-04 起才有；
+那段的日志也没了（结构化日志最早 08-27，编排器日志 09-13 起），云端 CBOE 快照 08-26 起才有。用户问怎么解决。
+
+### 怎么认出来的：期权链数据本身的厂商指纹
+快照 `key_levels` 里存着原始合约的 IV：**CBOE 给 4 位小数（0.2851），Yahoo 是二进制长浮点（0.8906260937499999）**。
+在**已知来源**的快照上核：CBOE（09-04 起有 quote_set 且无 error）581/582、yfinance（quote_set.error）44/44、06-30 前 yfinance 主源时代 541/542 分对；
+三个例外里两个是同一份测试夹具（NVDA 06-23 / 07-08：IV 0.38/0.40/0.32、OI 600/400/200、GEX 0.3335 两天逐位相同，早已隔离），
+一个是 **10-05 BILI**：IV 是 Yahoo 指纹，quote_set 却没有 error——当晚 23:33 `_refill_empty_quote_set` 用 CBOE 把空的 quote_set 回填了，原来的 error 被抹掉，
+v0.45.472 因此漏认。06-30 ~ 09-03 的 548 份快照全部可分（零份缺 key_levels），**只有 09-01 BILI 是 yfinance**。
+
+### Fixed
+- **根治：快照记来源**。yfinance 链结果补 `_source: "yfinance"`（与 CBOE 链的 `_source: "cboe"` 对称），`analyze()` 结果新增 `chain_source`
+  （cboe / yfinance / unknown；样本早退为 sample）。以后认来源直接读这个键，不靠 quote_set（会被回填）、也不靠 IV 指纹。
+- **隔离**：`signal_archive.QUARANTINE` 加 09-01 BILI、10-05 BILI 两条（只隔离 `options.gamma_exposure`，同 v0.45.472 的 yfinance 那批）；
+  `experiments/purge_quarantined_signal_rows.py --expect 2` 清库（在线备份 `db_backups/pheromone_pre_v0.45.475_fingerprint_quarantine.db`）：129,916 → 129,914。
+- v0.45.472 的条目原地加注：「06-30 ~ 09-03 认不出，待验证」已查清；「44 份」少算了 10-05 BILI。
+
+### 验证
+- 新增 / 扩展 3 条测试（yfinance 链自报 `_source`；结果记 `chain_source`；两条指纹隔离只挡 GEX），变异 3/3 打红。
+- 全量 9209 passed；红的只有已知两项：`TestCoverageHorizon`（等 2027 BLS/BEA 日程）与 Alpha Bot 盘中采样触发的 session 级真实数据根闸。
+
 
 ## [0.45.474] — 2026-10-12 — Fixed：v0.45.471 二次检查——快照命中时 IV 不可得就连 RV 也不补（471 造成的回归）；深度报告 ctx 把 `iv_rv_spread` / `rv_30d` 兜成 0.0，v0.45.54 的「不可得」分支从来走不到，情景推演策略段照写「IV-RV=+0.0%」；471 的「IV Rank 分子」测试是空的（样本天数低于阈值）；更正 471 条目三处
 
@@ -99,7 +122,7 @@
 - **整数行权价形状、偏离 > 1%** 15 份（行权价中位数兜底；⚠️ 形状判，真实价恰好是 .00/.50 的概率约 2%/份）；
 - **不隔离**：5 份财报日盘后价（AMZN 07-30、CRM 08-26、MSFT 07-29、RKLB 07-22、TSLA 07-23）——那是真实价、时点不对（「收盘后用 current_price」那类，已由 `official_price` 修掉），不是假价。
 以上 4 类按（日期, 标的）隔离五类市场观测（iv_current / put_call_ratio / gamma_exposure / total_oi / bear.options_bear，与既有条目同口径；**不动 Agent 分**——那是审计轨迹）：33 个日期、360 行。
-另 **CBOE 主源时代退到 yfinance 备用链**的 44 份快照（09-04 起 `quote_set.error == "chain source is not cboe"`，16 个日期）只隔离 `options.gamma_exposure`（v0.45.468 前该链 BS gamma 的 S 是行权价中位数；当天 IV / P/C / OI 用的是调用方真价，不动）：22 行。06-30 ~ 09-03 的同类日子没有 quote_set、认不出，待验证。
+另 **CBOE 主源时代退到 yfinance 备用链**的 44 份快照（09-04 起 `quote_set.error == "chain source is not cboe"`，16 个日期）只隔离 `options.gamma_exposure`（v0.45.468 前该链 BS gamma 的 S 是行权价中位数；当天 IV / P/C / OI 用的是调用方真价，不动）：22 行。06-30 ~ 09-03 的同类日子没有 quote_set、认不出，待验证〔v0.45.475：已按 IV 小数位指纹查清——548 份里只有 09-01 BILI；另补上本条漏掉的 10-05 BILI（quote_set 被回填抹掉了 error）〕。
 70 个 (日期, 标的, 信号) 早已在既有隔离条目里（06-10、07-08 等）。
 **清库**：`experiments/purge_quarantined_signal_rows.py`（新，可复用）——sqlite 在线备份 `db_backups/pheromone_pre_v0.45.472_fake_snapshot_quarantine.db`，单个 `BEGIN IMMEDIATE` 事务内现读现判、命中数恰为预期 382 才删、删后零残留 + integrity ok：`signal_archive` 130,298 → 129,916。
 证据（核对用收盘价、逐份分类）：`~/alpha-hive-data/_manual_backups/2026-10-12_quarantine_evidence_v0.45.472/`。
