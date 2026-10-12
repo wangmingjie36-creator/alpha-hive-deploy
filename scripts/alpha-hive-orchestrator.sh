@@ -1543,7 +1543,27 @@ elif [ $STEP14_RC -eq 2 ]; then
             log "ERROR" "🚨 Step 14：备份仓里有导出之外的条目（外来文件 / 嵌套仓库），已拒绝提交——见 ${BACKUP_STATUS_JSON}（foreign_entries）"
             ;;
         git_error)
-            log "ERROR" "🚨 Step 14：git 调用异常（如超时），未确认是否已提交/推送——见 $BACKUP_STATUS_JSON"
+            # v0.45.480：同一个 git_error 底下有确定没提交的（add 失败、清单路径不在索引里），也有真说不准的
+            # （commit / push 抛异常）——按 run_backup 写的 git_outcome 说（取值唯一真相 run_backup.GIT_OUTCOMES）。
+            # 缺字段或不认识的值才说「未确认」。
+            BACKUP_GIT_OUTCOME=$(jq -r '.git_outcome // ""' "$BACKUP_STATUS_JSON" 2>/dev/null || echo "")
+            case "$BACKUP_GIT_OUTCOME" in
+                not_committed)
+                    log "ERROR" "🚨 Step 14：git 步骤失败，本轮未提交、未推送——见 $BACKUP_STATUS_JSON"
+                    ;;
+                commit_unknown)
+                    log "ERROR" "🚨 Step 14：git commit 调用异常（如超时），不确定是否已提交；本轮未推送——见 $BACKUP_STATUS_JSON"
+                    ;;
+                committed_not_pushed)
+                    log "ERROR" "🚨 Step 14：本地已提交，但之后的 git 调用或检查失败，本轮未推送——见 $BACKUP_STATUS_JSON"
+                    ;;
+                push_unknown)
+                    log "ERROR" "🚨 Step 14：git push 调用异常（如超时），不确定是否已推送；下一轮会再推——见 $BACKUP_STATUS_JSON"
+                    ;;
+                *)
+                    log "ERROR" "🚨 Step 14：git 步骤失败，未确认是否已提交/推送——见 $BACKUP_STATUS_JSON"
+                    ;;
+            esac
             ;;
         commit)
             log "ERROR" "🚨 Step 14：git commit 失败，未推送——见 $BACKUP_STATUS_JSON"

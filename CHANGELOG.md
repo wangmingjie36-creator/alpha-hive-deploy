@@ -5,6 +5,33 @@
 
 ---
 
+## [0.45.480] — 2026-10-12 — Fixed：编排器 Step 14 对备份 `git_error` 一律报「未确认是否已提交/推送」——`run_backup` 在 status.json 写 `git_outcome`，编排器按它说清这一轮提交了没有、推送了没有
+
+v0.45.430 二次检查记下的措辞偏差：同一个 `stage="git_error"` 底下，`SHA256SUMS` 列的路径不在索引里（430 新增）、`git add -A` 返回非 0、旧名元数据退役失败这几种**确定没提交**，而且根本不是「调用异常」；只有 `git commit` / `git push` 抛异常（如超时）时才真说不准——命令可能已经跑完了。编排器 Step 14 对它们一律报「git 调用异常（如超时），未确认是否已提交/推送」。判定（红 / 不红、`git_error_failed`）不变，只改说法。
+
+### Fixed
+- `data_backup/run_backup.py`：`stage="git_error"` 时 status.json 加 `git_outcome`，取值见常量 `GIT_OUTCOMES`：
+  - `not_committed`：旧名退役失败、`add` 失败或抛异常、清单路径不在索引、`diff` 抛异常、判「无变化」后工作树仍脏；
+  - `commit_unknown`：`git commit` 抛异常；
+  - `committed_not_pushed`：`commit` 返回 0 之后 `rev-parse` 抛异常，或工作树仍脏；
+  - `push_unknown`：`git push` 抛异常。
+  提交段用一个随进度推进的局部变量，异常时走到哪一步就说到哪一步。
+- `scripts/alpha-hive-orchestrator.sh` Step 14 的 `git_error)`：按 `git_outcome` 分四句；缺字段或不认识的值仍说「未确认是否已提交/推送」。旧措辞里的「git 调用异常」去掉了：`add` 返回非 0 不是异常。
+
+### 守卫（`tests/test_data_backup.py`，+23 条，全文件 148 通过）
+- `TestGitErrorOutcome`：12 条失败路径逐条在真实 git 仓（远端是本地裸仓库）上跑，核对 `git_outcome` 与实际（本地 HEAD 动没动、远端前进没有）。其中 `raise_after` 两行让 commit / push 真跑完再超时，这正是「说不准」不能写成「没提交 / 没推送」的理由。表覆盖 `GIT_OUTCOMES` 全部取值；另有 AST 对账，要求每处 `status.update(stage="git_error", …)` 都带 `git_outcome=`（现 6 处）。
+- `TestOrchestratorGitOutcomeWording`：抽编排器真实片段跑 bash。四种结局各有一句，句中不许出现与事实相反的词；`GIT_OUTCOMES` 每个取值都有专门一句（Python 加了取值、编排器没跟上就红）；缺字段、空串、null、未知值 ⇒「未确认」。
+- 变异 7 处（`PYTHONDONTWRITEBYTECODE=1`，跑完 `cmp` 核对还原）全红：清单路径一处写成 `commit_unknown`；commit 返回 0 后不推进；commit 前不标 `commit_unknown`；脏树一处漏写字段（结构对账 + 用例双红）；编排器删 `push_unknown` 一支（专句 + 两头对账双红）；`not_committed` 退回旧措辞；编排器读错字段名（5 红）。
+
+### 顺带修的测试
+- `TestRunBackupStageReporting::test_git_exception_during_push_reports_git_error_stage`：假 `_run_git(args, cwd)` 不收 `timeout=`，而 push 调用带这个参数 ⇒ 这条测的一直是 `TypeError`，不是它要模拟的超时，只因同样落进 `git_error` 才是绿的。改 `**kw`，并断言 error 里确实是 timed out（改回旧签名 ⇒ 红）。
+
+### 部署时序
+`run_backup` 下一个扫描日进生产；编排器从合入后**第二个**扫描日起执行。中间那一轮是旧编排器读新 status.json，不认识新字段，照旧措辞；新编排器遇到没有该字段的 status.json 说「未确认」。哪边先到都不出错。
+
+### 未验证
+- 全量套件在盘中跑：1 failed 是 iCloud 重名副本 `__init__ 2.py`（已知）；1 error 落在最后一个测试的收尾，跑测试那几分钟真实数据根里只有 Alpha Bot 的 5 个盘中快照被追加过（12:26:25–12:26:59 PDT），按此判断是数据根闸撞上 Alpha Bot，没有截下闸的原文、也没重跑全量。
+
 ## [0.45.479] — 2026-10-12 — 占位（进行中：期权观测隔离改按 swarm_results（归档真实来源）重判 + GEX 世代边界更正到 06-29 + 价格索引补回 7 行真收盘 + 清库 / 恢复脚本按审阅修）
 
 ## [0.45.478] — 2026-10-12 — Fixed（数据，用户批准）：`signal_archive` 剩余 6 行 `options.iv_current = 25.0`（v0.45.471 普查出的兜底常数）入隔离名单并清库；`purge_quarantined_signal_rows.py` 新增 `--only-tag`

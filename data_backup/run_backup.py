@@ -80,6 +80,9 @@ v0.45.269 之前编排器 Step 14 曾把 rc==2 硬解读为「已提交但推送
 导致 export/commit 失败（根本没提交成功）也被日志误报成「已提交」；
 Step 14 的分支现改为读 `stage` 字段而非只猜 rc；v0.45.278 起 `case` 语句
 再加 `init` / `git_error` 两支，否则会落进未识别分支只报 WARN。
+`git_error` 一支里提交 / 推送的结局各不相同，status.json 另记 `git_outcome`
+（取值见 `GIT_OUTCOMES`，v0.45.480）；此前编排器一律说「未确认是否已提交」，
+而清单路径不在索引里、`add` 失败这几种其实是确定没提交。
 
 ⚠️ 光读 `stage` 仍不够：`run_step()`（编排器里 Step 14 的启动函数）自己
 也把 rc=2 当"脚本不存在，跳过"的哨兵值，跟本模块的 rc=2 撞车——若脚本
@@ -118,6 +121,16 @@ GIT_TIMEOUT_S = 60
 #: 09-26 手工补推同一批两天的提交实测 43s——离 60s 太近。仓库从未 gc（全是松散对象，每次推送现场打包），
 #: 网速一慢就会再超。上限留在编排器 Step 14 的 `run_step --timeout 300` 之内（导出 + add/commit 十几秒）。
 GIT_PUSH_TIMEOUT_S = 240
+#: `stage == "git_error"` 时 status.json 的 `git_outcome`（v0.45.480）：这一轮到底提交了没有、推送了没有。
+#: 同一个 stage 底下既有确定没提交的（旧名退役失败、`add` 失败、清单路径不在索引里），也有真说不准的
+#: （`git commit` / `git push` 抛异常，如超时——命令可能已经做完）。编排器 Step 14 按它措辞；
+#: 增删取值要同步那边的 `case`（`tests/test_data_backup.py::TestOrchestratorGitOutcomeWording` 两头对账）。
+GIT_OUTCOMES = (
+    "not_committed",          # 本轮没有提交，也没推送
+    "commit_unknown",         # `git commit` 抛异常：可能已经提交；没推送
+    "committed_not_pushed",   # 已提交，之后的 git 调用或检查失败；没推送
+    "push_unknown",           # 提交阶段走完，`git push` 抛异常：可能已经推送
+)
 #: 备份仓体量预算（v0.45.417，用户 2026-10-05 定 600 MB）。远端是 GitHub 私有仓库，体量只增不减
 #: （历史不重写）；预算是「该停下来想想了」的红线，不是自动清理的触发器——超了就把这一轮标红，
 #: 数据本身已推送成功（`status["pushed"]`），不会因此丢备份。
@@ -272,7 +285,8 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
         if retire_legacy_manifest_from_index(backup_dir):
             status["legacy_manifest_retired"] = True
     except Exception as e:  # noqa: BLE001 —— 摘不掉就别导出：导出会把 manifest.json 写回大写名的索引条目
-        status.update(stage="git_error", ok=False, error=f"旧名元数据 MANIFEST.json 退役失败：{e}")
+        status.update(stage="git_error", ok=False, git_outcome="not_committed",
+                      error=f"旧名元数据 MANIFEST.json 退役失败：{e}")
         return _finish(status_file, history_file, status)
 
     # ── 1. 导出 ──────────────────────────────────────────────────────
@@ -335,6 +349,9 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
         return _finish(status_file, history_file, status)
 
     # ── 3. 提交 ──────────────────────────────────────────────────────
+    # 走到哪一步，异常时就能说到哪一步（`git_outcome`，v0.45.480）：commit 之前一定没提交；
+    # commit 本身抛异常说不准；commit 返回 0 之后一定已提交。
+    outcome = "not_committed"
     try:
         add = _run_git(["add", "-A"], backup_dir)
         if add.returncode != 0:
@@ -343,14 +360,14 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
             # 因为什么都没暂存而返回 0（"无变化"），进而整个流程"成功"地
             # 什么都没提交。必须在这里就中止，不能带着一次失败的 add 继续走
             # diff/commit（同 init 失败必须立刻中止的道理）。
-            status.update(stage="git_error", ok=False,
+            status.update(stage="git_error", ok=False, git_outcome=outcome,
                            error=f"git add -A 失败（returncode={add.returncode}）：{add.stderr[-2000:]}")
             return _finish(status_file, history_file, status)
 
         # v0.45.430：清单说备份了什么，索引里就得有什么（精确拼写）——不然提交的就是一份作假的 SHA256SUMS
         untracked = sums_paths_not_tracked(backup_dir)
         if untracked:
-            status.update(stage="git_error", ok=False, sums_not_tracked=untracked[:50],
+            status.update(stage="git_error", ok=False, git_outcome=outcome, sums_not_tracked=untracked[:50],
                           sums_not_tracked_count=len(untracked),
                           error=f"{export_mod.SUMS_NAME} 列了、索引里却没有这个精确拼写的路径 {len(untracked)} 个，"
                                 f"拒绝提交（多半是大小写不敏感的盘上撞名，或备份仓忽略规则吞了文件）：{untracked[:5]}")
@@ -361,10 +378,12 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
             status["commit"] = {"made": False, "reason": "无变化"}
         else:
             msg = commit_message or f"data backup {t0.strftime('%Y-%m-%d %H:%M:%S')}"
+            outcome = "commit_unknown"
             commit = _run_git(["commit", "-m", msg], backup_dir)
             if commit.returncode != 0:
                 status.update(stage="commit", ok=False, error=commit.stderr[-2000:])
                 return _finish(status_file, history_file, status)
+            outcome = "committed_not_pushed"
             sha = _run_git(["rev-parse", "HEAD"], backup_dir).stdout.strip()
             status["commit"] = {"made": True, "sha": sha, "message": msg}
 
@@ -376,20 +395,20 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
         if status_check.stdout.strip():
             dirty_n = len(status_check.stdout.strip().splitlines())
             status.update(
-                stage="git_error", ok=False,
+                stage="git_error", ok=False, git_outcome=outcome,
                 error=f"提交（或判定无变化）之后工作树仍有 {dirty_n} 处未提交改动——"
                       f"add/diff/commit 某一步可能被吞：{status_check.stdout[:2000]}",
             )
             return _finish(status_file, history_file, status)
     except Exception as e:  # noqa: BLE001 —— add/diff/commit/rev-parse 异常（如超时）不能撞上 secret_scan 的退出码 1
-        status.update(stage="git_error", ok=False, error=f"add/diff/commit 阶段异常：{e}")
+        status.update(stage="git_error", ok=False, git_outcome=outcome, error=f"add/diff/commit 阶段异常：{e}")
         return _finish(status_file, history_file, status)
 
     # ── 4. 推送（本地裸仓库路径——不是 GitHub）───────────────────────
     try:
         push = _run_git(["push", remote, branch], backup_dir, timeout=GIT_PUSH_TIMEOUT_S)
     except Exception as e:  # noqa: BLE001 —— push 异常（如超时）同上
-        status.update(stage="git_error", ok=False, error=f"push 阶段异常：{e}")
+        status.update(stage="git_error", ok=False, git_outcome="push_unknown", error=f"push 阶段异常：{e}")
         return _finish(status_file, history_file, status)
     if push.returncode != 0:
         status.update(stage="push", ok=False, error=push.stderr[-2000:])
