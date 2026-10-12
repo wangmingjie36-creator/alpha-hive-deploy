@@ -7,7 +7,47 @@
 
 ## [0.45.462] — 2026-10-12 — 占位（进行中：期权快照股价兜底 145/中位行权价 + NaN 消毒改 None + 快照原子严格写）
 
-## [0.45.461] — 2026-10-12 — 占位（进行中：v0.45.458 二次检查 6 条，从根因修）
+## [0.45.461] — 2026-10-12 — Fixed：v0.45.458 二次检查（从根因修）——解释器判据收成一条（目录不算可执行）且 exec 失败也弹窗；「怎么重新生成」只从一处出；环境数据根走 `hive_logger` 唯一规则（`~` 不展开）；`build_app` 自己执行输入规则；生成器目录判据覆盖它 import 的仓库模块
+
+`/code-review high` 审 v0.45.458（`cb14e5f9..0008c334`）报 6 条，用户要求全部从根因修。根因归成五个，都是「同一件事有两份写法、各自漂移」或「规则只挂在一个入口上」：
+
+### 根因与修法
+- **「解释器能不能 exec」判了两遍、两遍都不全（第 1 条）**：生成时 `os.access(X_OK)`、壳里 `[ -x "$PY" ]`——**目录也算可执行**。
+  - 后果：`PYTHON=/usr/local/bin`（漏了文件名）两道都放行；双击时 `exec` 失败，bash 直接退出、错误只进日志——看着就是「双击没反应」。
+  - 修法：唯一判据「普通文件（跟随软链）且可执行」，Python 侧 `interpreter_problem`、壳里 `SHELL_PY_USABLE` 是同一条，测试拿 7 类路径（文件 / 软链 / 目录 / 指向目录的软链 / 无执行位 / 不存在 / 断链）核对两边结论一致。
+  - 再往下一层：预检之外 `exec` 仍可能失败（格式 / 架构不对、刚被删）。壳里加 `shopt -s execfail`，失败后接着弹窗说出来（bash 3.2 实测：exec 的重定向随之撤销；目录退出码 126、二进制格式不对 1）。
+- **「怎么重新生成 .app」写了四份自由文本（第 2 条）**：壳里两处还是 `make alphabot-app PYTHON=新路径`（不带 `-C`：在随便哪个目录敲都找不到 Makefile；也不提绝对路径：照写裸名字会被 456 拒）；进不去代码目录那句说「用 --repo 重跑 make」（make 不收 `--repo`）；帮助页是另一份。
+  - 修法：命令只出自 `regen_hint(repo, python=None)`——代码目录是生产克隆 ⇒ 推荐入口 `canonical_entry()`（由 `production_clone.default_dest()` 推出）；否则 ⇒ 在那份代码里直跑生成器。缺 launcher.py 与进不去代码目录共用 `_repo_unusable_hint`。帮助页是静态 JS 取不到常量：测试核对它抄的就是 `canonical_entry()`。
+- **生成器自己解释环境 `ALPHA_HIVE_HOME`（第 3、5 条）**：458 的 `_env_home_absolute` 自己 `expanduser`，而数据根唯一规则 `hive_logger.resolve_data_root` 原样用。
+  - 后果：plist / 加引号的 export 里字面的 `~/x`：扫描、MCP 读 `./~/x`，生成器却算成 `$HOME/x`、判「与配置相同」不出声，首次还把 `$HOME/x` 记进配置。
+  - 修法：`hive_logger` 露出 `resolve_data_root` 的前一半 `explicit_data_root()`（原样、不展开、空串按未设），生成器只经它取值；不是绝对路径就不参与（`~` 开头另说明「不会被展开」）。第 5 条（重抄 `_must_be_absolute`）随之消失——两者本来就该是两条规则：命令行参数可展开后写成绝对路径，环境变量被别人原样读，展开即分歧。
+- **输入规则只挂在命令行入口（第 4 条）**：458 只在 `main` 拒显式空值，`build_app(repo="")` 仍被当成当前目录（cwd 恰是代码目录时静默生成指向它的 .app）。
+  - 修法：「给没给」的判法收成 `_given`（`None` = 没给，空白字符串 = 拒），`_reject_empty` 与 `build_app` 都经它；`build_app` 是写进 .app 的唯一出口，解释器须绝对也在这里执行。
+- **外层 make 命令行上的 PYTHON（第 6 条）**：经 MAKEFLAGS 传下来、`$(origin)` 也是 `command line`（make 3.81 实测）——那同样是人写的值，照收照核（裸名字照样拒）。Makefile 注释写明；原测试只守测试辅助 `_make` 的白名单（保留并改名、改说明），另加一条钉住产品行为。
+- **修第 3 条时实测暴露的同形缺口**：生成器在目标里新 import 了 `production_clone` / `hive_logger`，而 458 的目录判据 `GENERATOR_FILES` 只列两个文件 ⇒ 缺它们的目录被判可用、委托后子进程甩 traceback（测试的假克隆当场复现）。
+  - 修法：清单补成生成器真要的（`alphabot/__init__.py`、`production_clone.py`、`hive_logger.py`）；AST 测试扫 `macos_app.py` 的全部 import（含函数体内的延迟 import），凡是仓库里的模块必须在清单里；假克隆按清单拷真文件，不另抄。
+
+### 守卫
+- `tests/test_alphabot_launcher.py`：
+  - `TestInterpreterCheck`：两边判据一致（7 类路径）；目录解释器双击时弹「找不到可执行的」；过了预检仍 exec 失败（垃圾二进制）⇒ 弹窗、退出码 126。
+  - `TestRegenHints`：推荐入口指向 `production_clone.default_dest()`；帮助页含 `canonical_entry()`；非克隆给生成器直跑命令。
+  - `TestLaunchScriptHints`：壳里每处 `alphabot-app` 都是 `canonical_entry()`、换解释器带绝对路径占位；缺 launcher.py 弹重建办法；提示进双引号安全（含带 `" $ \``的路径）。
+  - 字面 `~` 的环境变量不记、不比较；`build_app` 拒空 repo / 空或相对解释器；判据覆盖生成器 import 的仓库模块；外层 make 命令行上的裸 PYTHON 被拒。
+- `tests/test_data_root_default.py`：`explicit_data_root` 原样取值、给了就与 `resolve_data_root` 相同。
+- 变异 12 处（先提交后变异，每轮清 pyc），全部变红：
+  - M1 判据不看是不是文件 / M2 壳里只看 `-x` / M3 不开 `execfail`；
+  - M4 克隆提示回裸 make / M5 推荐入口与克隆位置脱节 / M10 缺 launcher 弹窗回旧文 / M12 换解释器提示回旧文；
+  - M6 生成器自己 expanduser / M11 `explicit_data_root` 展开 `~`；
+  - M7 `build_app` 不拒空 repo / M8 `build_app` 不核解释器 / M9 判据漏仓库根模块。
+- 元守卫登记：`tests/test_reads_own_checkout.py` 的家目录检测器拦下本版两条测试里的字面 `~/x`、`~/d`（它们就是被测输入，断言的正是**不被展开**；纯函数 / HOME 已指向 tmp，不碰本机家目录）。
+  - 不拆开拼字符串躲扫描：新增 `LITERAL_TILDE_INPUTS`（作用域 ⇒ 理由），只放行这些作用域里的 `~/…` 字面量，`/Users/…` 与 `Path.home() / …` 照拦。
+  - `TestLiteralTildeInputsStayCurrent` 对账（条目不再用 `~` 字面量 ⇒ 红，白名单只许变小）。
+  - 变异 3 处全部变红：豁免不看作用域 / 不限 `~` 字面量 / 留着过期条目。
+- 两个文件 116 passed、守卫文件 40 passed；ruff 全绿。
+- 全量（登记前）：9083 passed、2 failed、1 error。
+  - failed 一条是已知的 `TestCoverageHorizon`（经济日历覆盖期告警），另一条就是上面那个元守卫（登记后该文件全绿）。
+  - error 是真实数据根闸挂在最后一条测试名下：闸已逐项核实为 Alpha Bot 盘中快照的末尾追加（5 个文件、原有内容逐字节未变、写入时刻散落在无关测试里），即已知误报。
+- 生效时点同 458：推荐入口跑**克隆**的 Makefile 与生成器，克隆快进到含本版的提交后才生效；已生成的 `.app` 里的壳要**重新生成一次**才换上新的判据与提示（壳不随代码目录更新）。
 
 ## [0.45.460] — 2026-10-12 — Fixed：v0.45.455 二次检查——mtime 只是「最后一次」修改要说清；开始时刻未知时不断言「收集期」、时间线不再经 stash 取不到就给空；demo 用例改用演示服务**真写出**的行
 
