@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.457] — 2026-10-12 — 占位（进行中：跨式账本净值行 `code` 取不到版本时写出 `—@—` 占位串——改存结构化字段，缺失即 None）
+
 ## [0.45.456] — 2026-10-10 — Fixed：v0.45.451 二次检查（从根因修）——要持久写下的路径收到时就须绝对（不猜「相对于哪」）、委托方只认目标并只转发明确给的参数、推荐入口 `make -C` 有真跑测试
 
 `/code-review high` 审 v0.45.451（`72736b36^..ebd0168f`）报 6 条，用户要求全部从根因修；6 条归成 4 个根因。
@@ -42,7 +44,31 @@
 
 ## [0.45.455] — 2026-10-10 — 占位（进行中：仓库根闸 / 真实数据根闸报红时逐文件标出「写入时刻在跑哪条测试」——session 级闸不再只挂在最后一条测试名下；叠加在 453 之上，并补 453 分类器的 demo 来源缺口）
 
-## [0.45.454] — 2026-10-10 — 占位（进行中：财报跨式隐含事件波动——算不出时写 None 不写 0；加「远期 IV 法」影子字段，旧 rv 法仍决定开仓）
+## [0.45.454] — 2026-10-10 — Fixed + Added：财报跨式「隐含事件波动 = 0」——算不出写 `None` 不写 0；新增「远期 IV 法」影子字段 `shadow_event`（只记录，旧 rv 法仍决定标签与开仓）
+
+### 为什么（用户 2026-10-10 在 Alpha Bot「跨式」页看到 CRCL / META / VKTX 比值与隐含波动都是 0.00，要求根因方案 → 回溯试算 → 「改成影子并行」）
+- **0 不是缺数据**：三只的历史财报样本都在（`earnings_cache/*_moves.json`：n=5 / 8 / 8），`rv_30d` 与独立 yfinance 复算对得上（89.65 / 47.26 / 108.36 vs 89.52 / 47.12 / 108.80）。真因是**扩散项估计量**：`rv_30d` 是向后看、含**财报之外**大跳空的总波动（近 30 日 VKTX +30.5%、CRCL +15.2%、META +10.7% 的单日跳空），拿它去扣「未来 28 天没有财报的普通日波动」，扣得比整个跨式价还多 ⇒ 事件² ≤ 0 ⇒ `max(·, 0)` 把「算不出」写成了 `0.0` ⇒ 页面读成「比值 0.00」、`raw_label` 写成 `cheap`。这是本项目「把失败改写成没发生过」的老形状。
+- **回溯试算（37 天 192 行 / 24 个事件，只读）推翻了我先前的推断**：旧方法并不是系统性偏 cheap——两种方法都算得出的 21 个事件里，新方法的隐含事件波动 17 个更低（中位 −0.82pp，比值 ×0.83），因为远期 IV 通常比 rv 高 ≈3 个点（期权风险溢价；旧方法把溢价留在了「事件波动」里）。**切换会让一批 rich 降成 fair**（事件层面 11 个 rich 里 5 个、可交易的 8 个里 1 个）。已结算事件只有 2 个，判不了谁更准 ⇒ 不直接切换，**影子并行**，攒够已结算事件后用实际波动比较两者的预测误差。
+- 触底在事件层面 3 → 0、行层面 22 → 7（新方法下）。
+
+### Fixed
+- **`earnings_vol_signal.compute_signal`**：事件² ≤ 0（舍入后为 0 也算）时 `implied_event_move_pct` / `ratio` / `raw_label` 写 **`None`**（以前 `0.0` / `0.0` / `"cheap"`）；`event_move_floor_hit=True` + `untradeable_reason` + `label="untradeable"` 不变，**照旧不可交易、不进账本**。已落盘的旧行不回改（仍是 `0.0`），两种写法并存。
+- **`settle_signals`**：不再要求 `implied_event_move_pct` 非 None 才回填——触底行的实际波动正是校准研究要的样本，不能因为这次改成 None 就漏结算（`realized_ratio` 对 implied 缺失给 None，同前）。
+- **Alpha Bot「跨式」页**：信号表里触底行的「比值」「隐含 vs 历史中位」显示 `—` 并注明「扣掉扩散后 ≤ 0，算不出」；判据是 `event_move_floor_hit`（**不是**值是不是 0——旧行存的是 0.0）。`alphabot/straddle.py::signals_today` 的透传白名单补上该键（不补则页面那段是死代码）。
+
+### Added
+- **`shadow_event`（`earnings_vol_signal.event_shadow`，`EVENT_SHADOW_SCHEMA=1`，`method="fwd_iv_v1"`）**：同一个公式，扩散项换成快照 `iv_term_structure` 里**两个都在财报之后**（到期日 ≥ 财报日 +2 日历日）的到期日之间的远期波动 `σ_fwd²=(T₂σ₂²−T₁σ₁²)/(T₂−T₁)`（天数用 as_of 自己算，不信期限结构里的 `dte`——它与 `selected_dte` 差过一天）；分母（历史中位）、阈值 1.30 / 0.75、其余公式不动。算不出 ⇒ `available=False` + `reason`、数值 None，从不填 0；计算抛异常 ⇒ `available=False, reason="error: …"` + WARNING，**不拖死主信号**。在 `scan` 里于 `compute_signal` 返回**之后**挂上（同 `gex_ctx` 的结构：函数里碰不到判断）。**只记录：不进标签、不进开单、不上页面、不是预注册检验的输入**。
+- 新测试 `tests/test_earnings_event_shadow.py`（32）：触底行 None 不是 0 且仍结算、手算值逐项对上（σ_fwd=29.6005 → 事件 7.7393 → 比值 1.5479）、财报前 / 边界到期日排除、9 种「算不出」各给原因、**有 / 没有期限结构两次 scan 除影子外逐项相同**、影子炸了主信号不变且 WARNING 可见、AST：全仓只有 earnings_vol_signal 提 `shadow_event` 且没有任何函数**读**它（含种病灶自证）、预注册 `units()` 对 `None` 与旧 `0.0` 一视同仁、Alpha Bot 透传。
+- 更新 `tests/test_earnings_vol_signal.py::test_floor_when_diffusion_exceeds_straddle`：原来断言的正是「写 0.0 / 标 cheap」。
+
+### 变异自证（种病灶 → 必红）
+触底写回 0.0 / 影子包含财报前到期日 / 影子反过来改主标签 / settle 重新要求 implied 非 None / 影子吞异常不记日志——各一个，全部被抓到。
+
+### 没做、以及下一步
+- **没切换**：旧 rv 法仍决定标签与开仓。`event_move_basis` 仍是 `straddle_minus_diffusion_plus_window`；影子的方法名是比较时分组的键（改口径要新增方法名，不要原地改 v1）。
+- **待办**：攒够已结算事件（现 2 个）后，用 `realized_abs_move_pct` 对比两种方法的 `implied_event_move_pct` 预测误差（按事件去重、按方法分组）；够了再决定要不要切换。历史中位当分母（biotech 如 VKTX 中位 3.29% 而最大一次 18%）偏低，是**另一个**独立问题，本版未碰。
+- `experiments/straddle_gex_prereg.md` §9 记了这次改动不改检验单位定义；`shadow_event` 若要进检验就是协议变更（§8）。
+
 
 ## [0.45.453] — 2026-10-10 — Changed：真实数据根闸报红时分辨「全部是 Alpha Bot 盘中采样的追加」——判定不变照样红，只把原因说清；pre-push 此时提示「隔一两分钟重推」、不再劝 `--no-verify`
 
@@ -77,7 +103,7 @@
 三件事表面不同，根因是同一个：**持久化写入没有唯一实现，守卫按名字长相认人**。
 - **「meta.json 没拒 NaN」不是漏了一个文件**：448 的 `ledger_io` 只有 JSONL 接口，整文件 JSON 文档没有入口，于是各模块自己 `json.dumps` 再原子替换。而 `meta.json` 不是装饰——**纸面组合的现金就存在里面**：v0.45.97 `"cash": NaN` 落盘、被 `json.loads` 照单全收，净值烂了四天（生产备份 `_pre_migration_snapshots/…/paper_portfolio_state.bak-nanfix-20260903/meta.json` 第 5 行原样还在）。读端更糟：**跨式腿与组合 Greeks 读到坏 meta 时「按新账本处理」⇒ 现金重置成起始资金 / 0，并在本轮末写回**——真实现金就此丢失，日志里只有一行 error。
 - **「24 个手写 `os.replace` 不在守卫里」不是清单漏了，是判据漏了**：448 的守卫只认 `open(x, "a")` 与「名字以 `_jsonl` 结尾的函数」，`_save_meta` 里 `json.dumps` → `os.replace` 这种写法对它完全不可见。普查（AST 认落点：`json.dump` / `write(json.dumps)` / `write_text(json.dumps)` / `os.replace` / `Path.replace` / 隔变量的 dumps→写文件）实际是 **84 处、59 个文件**，其中 22 处账本 / 状态 / 产物是 `open("w")` **非原子**直写（比 448 担心的「原子但没拒 NaN」危险一级：写到一半崩溃 = 半截文件）。
-- **普查中挖出的真病灶**：`hive_logger.SafeJSONEncoder` 把 NaN→null 的清洗挂在 `encode()` 上——那只有 `json.dumps` 走；**`json.dump(obj, f, cls=SafeJSONEncoder)` 走 `iterencode()`，清洗从来没生效**。实测 `atomic_json_write({"cash": nan})` 写出 `{"cash": NaN}`（docstring 却写着「自动防止 NaN/Inf」），日报主 JSON / 蜂群结果 / ML 报告 / 数据采集等 6 处 `json.dump(cls=SafeJSONEncoder)` 同病；生产 `.swarm_results_2026-08-28.json` 里 62 个 NaN 字面量（浏览器 `JSON.parse` 整份拒收）就是它。
+- **普查中挖出的真病灶**：`hive_logger.SafeJSONEncoder` 把 NaN→null 的清洗挂在 `encode()` 上——那只有 `json.dumps` 走；**`json.dump(obj, f, cls=SafeJSONEncoder)` 走 `iterencode()`，清洗从来没生效**。实测 `atomic_json_write({"cash": nan})` 写出 `{"cash": NaN}`（docstring 却写着「自动防止 NaN/Inf」），日报主 JSON / 蜂群结果 / 扫描断点 / ML 报告重跑 / 数据采集 / 拥挤度导出共 8 处 `json.dump(cls=SafeJSONEncoder)` 同病（v0.45.452 二次检查更正：初稿写「6 处」，是按单行 grep 数的，漏了两处跨行调用）；生产 `.swarm_results_2026-08-28.json` 里 62 个 NaN 字面量（浏览器 `JSON.parse` 整份拒收）就是它。
 - **严格读写本身还不够**：日报把这几本账的步骤都包在「非致命」except 里，严格读写抛出的异常会被吞成一行 WARNING——等于没修。必须在源头登记。
 
 ### Added
@@ -99,9 +125,18 @@
 - `tests/test_scan_timing.py` 计数键集合加 `ledger_io`；`tests/test_paper_portfolio_no_import_mkdir.py` 改经 `_save_meta` 写（`paper_portfolio._atomic_write_text` 已无调用方、删除）。`CLAUDE.md` 的 `ledger_io` 指针补「整文件文档 / 源头登记」。
 
 ### 验证
-- 生产只读：新的严格读取读 39 个生产文件（hedge_state / options_paper_state / paper_portfolio_state / vrp_state 全部 JSONL、5 个 `meta.json`、23 份 `greeks_*.json`）**全部通过**——今天的扫描不会因严格读取停下。全数据根 9499 个 JSON 文件里带 NaN 字面量的 23 个全是 06-09 / 06-15 / 08-28 的历史日报 / 蜂群结果 / 备份副本（`migrations_state/applied.jsonl` 那一处是字符串里的「NaN 修复」字样，严格读通过）。
+- 生产只读：新的严格读取读 39 个生产文件（hedge_state / options_paper_state / paper_portfolio_state / vrp_state 全部 JSONL、5 个 `meta.json`、23 份 `greeks_*.json`）**全部通过**——今天的扫描不会因严格读取停下。全数据根 9499 个 JSON 文件里带 NaN 字面量的 23 个：06-09 / 06-15 日报与蜂群结果、08-28 蜂群结果、06-26 两份 `report_snapshots`（RKLB / META）、09-03 纸面组合 NaN 修复前备份的 4 个文件（含 `"cash": NaN` 的 meta.json），以及它们在 `_git_backup/` / `_pre_migration_snapshots/` 里的副本；另有 `migrations_state/applied.jsonl`（及其备份）那一处是字符串里的「NaN 修复」字样，严格读通过。（v0.45.452 二次检查更正：初稿写成「全是 06-09 / 06-15 / 08-28 的日报 / 蜂群结果 / 备份副本」，漏了 06-26 快照与 09-03 备份。）
 - 变异 24 个全部打红（`scratchpad/mutate452.py`，每个只改一处、跑相关测试、按 sha256 还原）：编码器只挂 encode / default 不清洗 / 坏文档退回缺省 / 放行 NaN / 不登记 / 嵌套重复登记（**初版幸存**：NaN 在外层就被拒、没进内层，补「最里层 os.replace 失败只记一次」后打红）/ 线程锁超时不登记 / vrp·财报波动·跨式腿不持锁 / 跨式腿·Greeks 坏 meta 按新账本 / 纸面组合 meta 用 json.loads / vrp 读跳坏行 / 财报波动写不拒 NaN / 计数·告警·skipped·摘要行不接 / 守卫不认 os.replace·隔变量写·json.dump / atomic_json_write 退回 json.dump 直写 / 跨式腿追加绕过 ledger_io。
 - 全量套件：见提交说明。
+
+### 二次检查（同日，推送后）
+独立审查 + 自查，修了 3 处、更正 2 处措辞：
+- **守卫退化（修）**：改写成「认写入落点」时比 448 版多出三个盲区——函数里只要出现过 `ledger_io` 就整体豁免（`with ledger_io.locked(d): open(p, "a")` 看不见）、跳过 lambda、不扫类体。现在经 ledger_io 只豁免两个按形状猜的类别（`jsonl_helper` / `json_to_file`），真实落点照算；lambda 记在外层作用域；类体记在类名下。仓内当前无命中（盲区里没藏东西），补 2 条有牙测试，变异 3 个（跳过 lambda / 整函数豁免 / 不扫类体）全部打红。
+- **`report_snapshots` 的 `entry_price: null` 会让三处读者抛 TypeError（修）**：本版起 `atomic_json_write` 把 NaN 写成 null，`ReportSnapshot.load_from_json` 用 `data.get("entry_price", 0.0)` 读到 None，`weekly_optimizer` 的 `snap.entry_price > 0` ⇒ TypeError ⇒ 整段 WLS 中止（`bootstrap_validate`、`options_backtester`、`regime_analyzer` 同形）；此前 `nan > 0` 为 False、只是跳过这一条。根在生产端：侦察蜂价是 NaN 时 `float(x or 0.0)` 挡不住（NaN 是 truthy），`if not entry_price` 的 yfinance 兜底被跳过（06-26 RKLB / META 两份实例）。修两头：`alpha_hive_daily_report` 非有限入场价当「没有价」走兜底；`load_from_json` 把 null / 非数读成 0.0（所有读者都按 ≤0 排除；旧文件里的 NaN 原样，行为不变）。
+- **主扫描写 `analysis-*-ml-*.json` 那处不经编码器（修）**：`json.dump(enhanced, …, default=str)` 照写 NaN，而 Step 3 重跑的 `generate_ml_report` 经 `SafeJSONEncoder`——同一个文件内容取决于最后谁写的，上面「ML 报告改写成 null」只对了一半。补 `cls=SafeJSONEncoder`（`default=str` 照旧兜未知类型；numpy 整数此前被 `str` 成 `"3"`，现在是 `3`，与 Step 3 那份一致）。
+- 更正两处措辞：NaN 文件清单（见「验证」）、「6 处」→ 8 处。
+- 核过没问题：失败登记无重复计数、无每轮误报（所有 `load_json` 调用都带 default）；`atomic_json_write` 自带 `default=` 的调用方（options_analyzer）清洗先于 default、且捕获 ValueError；加锁入口内无线程（无死锁）；历史产物里从未出现 Infinity；日报 / 蜂群结果 / ML JSON 的其余读者对 null 与 NaN 结果相同或更好（`_finite` / `_num` / 真值判断）。
+- 已知、不改：`vrp_signal.settle` 与 `earnings_vol_signal.scan` 持锁期间逐票取网（K 线 / 财报日）——每日流程是单进程顺序跑、不受影响；只有扫描中途手动重跑同一目录时，后来者等满 300s 抛 `LedgerLockTimeout`（进 P2，不会无锁写）。
 
 ### 还没做（下一版起，按 `WRITERS` 里的「⚠️非原子」先迁）
 - **最高优先**：`options_analyzer` 四处原地重写每日期权快照（过了那一场再也取不回，vrp / 财报波动 / IV·价格索引都读它）、`backtest_engine` 原地回填 `report_snapshots/*.json`、`cloud_snapshot_fetch` 的 market / manifest、日报主 JSON 与蜂群结果。⚠️ 这几处现在写的数据里可能有 NaN（日报 / 蜂群结果有实测），迁到严格 `write_json` 前要先决定「拒绝」还是「按缓存约定改 null」，不能一刀切。
