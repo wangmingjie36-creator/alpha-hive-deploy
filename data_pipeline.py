@@ -520,7 +520,9 @@ def _fill_momentum_from_index(ticker: str, out: Optional[Dict],
         from price_history import momentum_5d_detail as _idx_momentum
         r = _idx_momentum(ticker, latest_close=session_close)
     except Exception as e:  # noqa: BLE001
-        _log.debug("[%s] 自攒动量索引不可用: %s", ticker, e)
+        # v0.45.470：原为 debug。「索引里没数据」走的是 `r is None`（下面那支）；走到这里是
+        # 代码 / 环境坏了（如路径解析抛错），与「没数据」不是一回事，必须看得见。
+        _log.warning("[%s] 自攒动量索引回落出错: %s: %s", ticker, type(e).__name__, e)
         return out
     if r is None:
         return out  # 索引也没有 → 保持 None，诚实缺数据

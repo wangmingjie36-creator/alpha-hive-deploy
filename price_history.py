@@ -95,7 +95,8 @@ def _default_db_path() -> str:
 
 
 # 库文件不存在是「回落静默失效」的原形（v0.45.463 之前 cwd 相对的默认值让它
-# 在生产上恒不存在，而 `return {}` 与「这只票库里没记录」长得一样）——每个路径报一次 warning。
+# 在生产上恒不存在，而 `return {}` 与「这只票库里没记录」长得一样）——每个路径报一次 warning；
+# 库在但读不了按 (路径, 异常类型) 报一次（v0.45.470）。
 _MISSING_DB_WARNED: set = set()
 
 
@@ -251,7 +252,13 @@ def _load_db_prices(ticker: str, db_path: Optional[str] = None) -> Dict[str, flo
         finally:
             conn.close()
     except Exception as e:  # noqa: BLE001 - DB 不可用不该阻断评分
-        _log.debug("[%s] DB 权威价读取失败: %s", ticker, e)
+        # v0.45.470：原为 debug。库在但读不了（锁 / 缺表 / 路径解析抛错）与「库不存在」同形——
+        # 结果都是 {}、都长得像「这只票没记录」——只堵后者等于只修了一半。按 (库, 异常类型) 报一次。
+        _key = (str(db_path), type(e).__name__)
+        if _key not in _MISSING_DB_WARNED:
+            _MISSING_DB_WARNED.add(_key)
+            _log.warning("[%s] 权威价库读取失败（%s）: %s: %s —— 价格索引只剩期权快照部分",
+                         ticker, db_path, type(e).__name__, e)
     return out
 
 

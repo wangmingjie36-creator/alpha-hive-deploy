@@ -9,7 +9,32 @@
 
 ## [0.45.471] — 2026-10-12 — 占位（进行中：期权 IV 无效且无缓存时 iv_current 不再兜底成常数 25.0）
 
-## [0.45.470] — 2026-10-12 — 占位（进行中：v0.45.463 二次检查）
+## [0.45.470] — 2026-10-12 — Fixed：v0.45.463 二次检查——「库在但读不了」与回落里的异常也改为 warning（463 只堵了「库不存在」那一半）；结构守卫改走共享文件枚举、放宽词表（存量 6 → 17 处，逐条核过生产调用方）、正对照改为真跑扫描器；更正 463 条目两处事实
+
+### 为什么（逐条，二次检查发现）
+1. **只修了一半的静默失败**：463 让「库不存在」会 warning，但 `_load_db_prices` 的 `except Exception`（锁 / 缺表 / 坏文件 / 路径解析抛错）与 `data_pipeline._fill_momentum_from_index` 的 `except` 仍是 debug ⇒ 结果同样是 `{}` / None，同样长得像「没数据」。这正是 463 那个 bug 两周没人红的形状（CLAUDE.md 判据 2：返回与抛两条路径各堵一次）。
+2. **结构守卫自己写了一份文件枚举**（裸 `git ls-files`）：仓库早有唯一共享实现 `tests/_repo_files.py::own_python_files`，其 docstring 记的正是「两份口径早晚漂移」（v0.45.176 只在生产 checkout 红）。463 那份没 git 时直接崩、不滤 vendored / 点号目录、遇非 UTF-8 文件整条守卫崩（v0.45.150 joblib 同形）。
+3. **守卫词表太窄，「全仓」言过其实**：只认 `.db/.sqlite/.json/.jsonl` 与 `cache/logs/chroma_db`。放宽探针多认出 11 处（`report_snapshots` ×7、`earnings_cache` ×3、`.html` ×1）。**逐个核过：都不是活 bug**——生产调用方全部显式传目录（daily_report / generate_deep_v2 / outcomes_fetcher / weekly_optimizer），或无调用方 / 只在 `__main__`，或拼到 `PATHS.home`（`earnings_history._resolve_cache_dir` 调用时求值）。
+4. **正对照只测了正则、没跑扫描器**：AST 那半边坏了照样绿。变异实测：扫描器丢掉仅关键字缺省（N3）在旧正对照下是**绿**的（全仓存量恰好没有仅关键字的命中）。
+5. **463 条目两处事实错**：回落补上次数 109 → 实为 121（漏数轮转后新文件里 09-25 的 12 条；每天都是 30 只不同标的，超 30 是同日多轮）；「存量 6 处」见第 3 条。已在 463 条目原地加更正注记，不改写原文。
+
+### Fixed
+- `price_history._load_db_prices`：读失败按 (库路径, 异常类型) WARNING 一次（与「库不存在」共用去重集合）。
+- `data_pipeline._fill_momentum_from_index`：回落抛异常 ⇒ WARNING（「索引里没数据」仍走 `m is None`、不报）。
+- `tests/test_price_history_default_paths.py` 结构守卫：文件集改走 `own_python_files`；非 UTF-8 / 语法错的自有文件**记账并断言为空**（不静默跳过）；词表加 `report_snapshots` / `earnings_cache` 与 csv / pkl / parquet / joblib / npz / html / log / xlsx 扩展名；KNOWN 17 条每条注明理由；docstring 写明**管不到**的形状（函数体里的 `Path("cache")` / `open("x.json")`、模块级常量、拼接字符串、词表外目录名）。
+- 正对照 `test_scanner_has_teeth` 改为在合成树上跑完整扫描器（位置 / 仅关键字 / 方法 / `os.getenv` / async / 子目录 / tests 排除 / 绝对路径与非路径负例 / big5 文件记账）。
+
+### Added
+- `TestReadFailuresAreLoud`（3）：坏库文件、缺 `predictions` 表、回落抛异常各会 warning。
+
+### 评分 / 世代边界
+- 只改日志级别与测试，评分零影响；不需要世代边界。
+
+### 验证
+- 新变异 8 个全红：DB 读失败退回 debug（2 红）、回落异常退回 debug（1）、扫描器丢仅关键字缺省（1，旧正对照下为绿）、非 UTF-8 静默跳过（1）、词表退回窄版（2）、去掉 `os.getenv` 分支（1）、生产模块新增 cwd 相对缺省（1）、不排除 tests/（2）。463 的 6 个变异在新测试下复跑仍全红。逐字节还原核 sha256、每次清 `__pycache__`。
+- rebase 到 v0.45.465（同日并行，把回落入口换成 `momentum_5d_detail`）后：`test_fallback_error_is_not_silent` 原先打桩在 `ph.momentum_5d` 上，**桩落空、本条变红**（被测路径不再经过它）——改为打在 `_default_cache_dir`（缺省路径解析，任何入口都绕不开）。rebase 后复跑全部变异：上面 8 个 + 463 的 M1/M2/M4/M5/M6 全红；463 的 M3 锚点被 465 改掉，按新调用形状重写为「给 `momentum_5d_detail` 传回 cwd 相对缓存目录」，4 红。
+- 相关 12 个测试文件 539 passed。全量（最终代码，含 465/468/469）9186 passed；1 failed = `TestCoverageHorizon`（日历覆盖期到点，设计内定期红）；1 error = 会话级真实数据根闸，闸自己核实为 Alpha Bot 盘中追加的 5 个 intraday 文件。均与本版无关。（中间一轮另有 `test_experiments_script_bootstrap` 红，来自 464 的 experiments 脚本，已由 468 修掉。）
+- 469 已把本文件测试数据第二项改成与首项同价（4 / 5 日锚点都得 +10%），rebase 自动合入；在最终代码上复跑 14 个变异全红。
 
 ## [0.45.469] — 2026-10-12 — Fixed：`momentum_5d` 自攒索引回落的窗口对齐主路径——全仓「5 日动量」实为 **4 个交易日**收益（yfinance `Close.iloc[-1] / iloc[-5]`，7 处），回落此前按 ≥5 个交易日挑锚点；`MOMENTUM_LOOKBACK` 5 → 4，`MOMENTUM_MAX_GAP` = LOOKBACK + 2（7 → 6，漏扫宽容仍是 2 天）
 
@@ -171,12 +196,12 @@ Bear 4 只变（BRK-B 2.94 → 2.53、COST 2.48 → 2.31：真价下偏斜 > 1.1
 
 ### Added
 - `tests/test_price_history_default_paths.py`（12）：生产环境形状（只设 `ALPHA_HIVE_HOME`、撤掉 conftest 的 `ALPHA_HIVE_CACHE_DIR` / `ALPHA_HIVE_DB_PATH`——留着它们旧实现在测试里恰好读对）+ cwd 里放同名诱饵（价格不同）：`_load_db_prices` / `momentum_5d` / `data_pipeline` 回落端到端读沙箱不读诱饵、cwd 不多出任何东西、空 cwd 保持空、环境覆盖照旧生效、库缺失会 warning、显式路径优先。
-- 同文件 `TestNoNewCwdRelativeDataDefaults`：AST 扫全仓（git 跟踪、除 tests/experiments）函数缺省参数与 `os.environ.get(X, "<相对数据路径>")`，**子集**语义 + 过期对账 + 正对照。存量 6 处登记在 `KNOWN_CWD_RELATIVE_DEFAULTS`（均不在扫描路径上：`iv_history._observed_accrual_rate`、`catalyst_exit_planner`、`ml_predictor*.save_to_file`、`alpha_hive_bot/config.py`；`earnings_vol_signal.scan` 的 `"cache"` 拼到 `BASE_DIR=PATHS.home` 不跟 cwd）。`test_paths_not_frozen_at_import` 的两个 `KNOWN` 不用动——本次没有新增也没有修掉 import 期冻结 / `__file__` 派生的点，那两条守卫本就看不见裸字面量。
+- 同文件 `TestNoNewCwdRelativeDataDefaults`：AST 扫全仓（git 跟踪、除 tests/experiments）函数缺省参数与 `os.environ.get(X, "<相对数据路径>")`，**子集**语义 + 过期对账 + 正对照。存量 6 处登记在 `KNOWN_CWD_RELATIVE_DEFAULTS`（**v0.45.470 更正：词表太窄、「全仓」言过其实，放宽后存量 17 处**；均不在扫描路径上：`iv_history._observed_accrual_rate`、`catalyst_exit_planner`、`ml_predictor*.save_to_file`、`alpha_hive_bot/config.py`；`earnings_vol_signal.scan` 的 `"cache"` 拼到 `BASE_DIR=PATHS.home` 不跟 cwd）。`test_paths_not_frozen_at_import` 的两个 `KNOWN` 不用动——本次没有新增也没有修掉 import 期冻结 / `__file__` 派生的点，那两条守卫本就看不见裸字面量。
 - `CLAUDE.md`「新产物的默认路径不许是相对路径」节加一行指针。
 
 ### 评分 / 世代边界
 - **存档分数一个都没变**：`signal_archive` 的 `price.momentum_5d` 不存 null，09-28 ~ 10-09 每个扫描日都是 30/30 有数 ⇒ 回落迁移后**一次都没被调用**（yfinance 都成功）。「09-25 后没有『自攒索引补上』日志」本身不是证据：`alpha_hive.data_pipeline` 正常日一行都不打。
-- 修好后只在 yfinance 失败的日子起作用：`momentum_5d` 从 None 回到索引值（= 09-26 之前的既有行为，09-21/24/25 共 109 次）⇒ ScoutBee / BuzzBee 的输入变化，`price.momentum_5d` 叶子信号会多出原本缺失的行。
+- 修好后只在 yfinance 失败的日子起作用：`momentum_5d` 从 None 回到索引值（= 09-26 之前的既有行为，09-21/24/25 共 109 次；**v0.45.470 更正：121 次**——漏数了 09-25 落在轮转后新日志文件里的 12 条）⇒ ScoutBee / BuzzBee 的输入变化，`price.momentum_5d` 叶子信号会多出原本缺失的行。
 - ⚠️ 回落本身滞后一个扫描日（当日 DB 行在取数之后写，索引从未接上当日观测）。回放 09-28 ~ 10-09 300 对（生产数据副本，真引擎）：回落 vs yfinance 平均 |Δ| 3.79pp、符号一致 66%；含当日价则 1.91pp / 83%。这是既有设计，本版未动。
 - **没有追加 IC 世代边界**（用户 10-12 确认）：存档零变化，且恢复的是现行世代（09-10 起）本就包含的行为。
 
