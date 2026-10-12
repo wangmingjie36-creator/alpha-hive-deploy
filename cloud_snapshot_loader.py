@@ -53,7 +53,9 @@ from typing import Dict, List, Optional, Tuple
 # 再在体内 `ref = ref or SNAPSHOT_REF`。写成 `ref: str = SNAPSHOT_REF` 会在
 # import 时把默认值绑死，monkeypatch 模块属性打不中 —— v0.45.37 刚因这个
 # pattern 在 replay_scoring 里造出过假守卫，本模块初版又犯了一次。
-SNAPSHOT_REF = "origin/cloud-snapshots"
+#: 快照分支名——唯一一处。读的远端跟踪 ref 与 `refresh` 拉的 refspec 都由它推出（v0.45.466 二次检查）
+SNAPSHOT_BRANCH = "cloud-snapshots"
+SNAPSHOT_REF = f"origin/{SNAPSHOT_BRANCH}"
 SNAPSHOT_SUBDIR = "cloud_snapshots"
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -104,9 +106,6 @@ def available_dates(ref: Optional[str] = None, repo: Optional[str] = None) -> Li
 # 所以：读者入口先 `refresh()`（补跑 `--date`、入场价回填），读不到时 `why_missing` 说清是哪一种；
 # 每日扫描再用 `lag_summary` 看一眼（routine 自己也三次静默停过）。读函数本身不出网，测试照旧用本地仓库。
 
-#: 只刷新 SNAPSHOT_REF 背后那一个远端跟踪 ref（显式 refspec：不碰 main，不用 GitHubTool 的白名单通道）
-_SNAPSHOT_REFSPEC = "+refs/heads/cloud-snapshots:refs/remotes/origin/cloud-snapshots"
-
 #: 本进程的刷新记录：仓库目录（realpath）→ `refresh` 的结果。没有这一项 = 本进程没刷新过
 _REFRESHED: Dict[str, dict] = {}
 
@@ -119,9 +118,13 @@ def _repo_key(repo: Optional[str]) -> str:
 
 
 def _git_fetch(repo: str, timeout: float) -> Optional[str]:
-    """拉 cloud-snapshots ⇒ 失败原因；成功 ⇒ None。本模块**唯一**出网的地方（测试里 conftest 默认钉住它）。"""
+    """拉 cloud-snapshots ⇒ 失败原因；成功 ⇒ None。本模块**唯一**出网的地方（测试里 conftest 默认钉住它）。
+
+    显式 refspec：只动 `SNAPSHOT_REF` 背后那一个远端跟踪 ref，不碰 main，也不走 GitHubTool 的白名单通道。
+    """
+    refspec = f"+refs/heads/{SNAPSHOT_BRANCH}:refs/remotes/origin/{SNAPSHOT_BRANCH}"
     try:
-        r = subprocess.run(["git", "fetch", "-q", "origin", _SNAPSHOT_REFSPEC], cwd=repo,
+        r = subprocess.run(["git", "fetch", "-q", "origin", refspec], cwd=repo,
                            capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as e:
         return f"{type(e).__name__}: {e}"

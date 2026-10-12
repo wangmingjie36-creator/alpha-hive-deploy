@@ -9,7 +9,6 @@ production_sync 的 `fetch origin main`——此前它的新鲜度全靠开发�
 """
 from __future__ import annotations
 
-import ast
 import datetime as dt
 import json
 import os
@@ -26,7 +25,6 @@ import cloud_snapshot_loader as csl  # noqa: E402
 from is_trading_day import is_trading_day  # noqa: E402
 from tests.test_cloud_snapshot_loader import _ticker_json  # noqa: E402
 
-REPO = Path(__file__).resolve().parent.parent
 D1, D2, LATER = "2026-08-19", "2026-08-20", "2026-08-21"
 
 
@@ -186,18 +184,76 @@ class TestDailyLag:
         s = self._lag(monkeypatch, "2026-10-09", "2026-10-12", ok=False)
         assert s["refresh_ok"] is False and s["refresh_error"] == "boom"
 
-    def test_daily_scan_writes_it_into_scan_timing(self):
-        """`main` 写进 `_timing.write(extra=…)` 的键里有 cloud_snapshots（编排器并进 status.json，告警读它）。"""
-        tree = ast.parse((REPO / "alpha_hive_daily_report.py").read_text(encoding="utf-8"))
-        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
-        keys = set()
-        for node in ast.walk(main):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "write"
-                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "_timing"):
-                for kw in node.keywords:
-                    if kw.arg == "extra" and isinstance(kw.value, ast.Dict):
-                        keys |= {k.value for k in kw.value.keys if isinstance(k, ast.Constant)}
-        assert "cloud_snapshots" in keys, keys
+
+class TestDailyScanObservation:
+    """真跑 `main()` 的蜂群路径（报告生成器打桩，同 test_production_sync）：每日扫描观测并写进 scan_timing、
+    观测**不挡**关键写入、补跑不观测（v0.45.466 二次检查：此前只有一条 AST 核键名，`if args.date` 反了也绿）。"""
+
+    @staticmethod
+    def _run_main(monkeypatch, tmp_path, *argv, lag_summary, scan_waits_for=None):
+        import alpha_hive_daily_report as adr
+        import yf_gate
+
+        class SwarmReporter:
+            date_str = "2026-09-14"
+            report_dir = tmp_path
+
+            def __init__(self, date_override=None):
+                pass
+
+            def run_swarm_scan(self, focus_tickers=None):
+                if scan_waits_for is not None:          # 扫描本身比观测慢（生产里扫描要几十分钟）
+                    assert scan_waits_for.wait(10), "观测没在扫描期间跑完"
+                return {"system_status": "✅ 蜂群协作完成", "swarm_metadata": {"tickers_analyzed": 1},
+                        "opportunities": [{"ticker": "NVDA"}]}
+
+            def save_report(self, report):
+                return "/dev/null"
+
+            def deploy_and_notify(self, report):
+                return {"gh_pages": {"success": True}, "deploy_env": "production"}
+
+        written = []
+        monkeypatch.setenv("ALPHA_HIVE_TARGET_DATE", "unset-by-teardown")   # main 在 --date 时直接写 os.environ
+        monkeypatch.setattr(adr, "AlphaHiveDailyReporter", SwarmReporter)
+        monkeypatch.setattr(yf_gate, "install", lambda: False)
+        monkeypatch.setattr(adr._timing, "write", lambda d, extra=None, **k: written.append(extra))
+        monkeypatch.setattr(csl, "lag_summary", lag_summary)
+        monkeypatch.setattr(sys, "argv", ["alpha_hive_daily_report.py", "--swarm", "--no-llm", "--force", *argv])
+        adr.main()
+        assert len(written) == 1, written
+        return written[0]["cloud_snapshots"]
+
+    def test_daily_scan_observes_during_the_scan_and_writes_it(self, monkeypatch, tmp_path):
+        import threading
+        done, seen = threading.Event(), []
+
+        def lag_summary(today, **k):
+            seen.append(today)
+            done.set()
+            return {"available": True, "lag": 1, "sentinel": True}
+        cs = self._run_main(monkeypatch, tmp_path, lag_summary=lag_summary, scan_waits_for=done)
+        assert seen == [dt.date(2026, 9, 14)] and cs.get("sentinel") is True, cs
+
+    def test_slow_observation_never_delays_the_write(self, monkeypatch, tmp_path):
+        """观测卡住（网络挂起）时 main 照样写出 scan_timing，并如实记「没观测到」——不等它。"""
+        import threading
+        release = threading.Event()
+
+        def lag_summary(today, **k):
+            release.wait(30)
+            return {"available": True, "lag": 1}
+        try:
+            cs = self._run_main(monkeypatch, tmp_path, lag_summary=lag_summary)
+        finally:
+            release.set()
+        assert cs["available"] is False and "仍未完成" in cs["reason"], cs
+
+    def test_backfill_does_not_observe(self, monkeypatch, tmp_path):
+        seen = []
+        cs = self._run_main(monkeypatch, tmp_path, "--date", "2026-09-11", "--no-snapshot",
+                            lag_summary=lambda today, **k: seen.append(today) or {"available": True})
+        assert seen == [] and cs["available"] is False and "补跑" in cs["reason"], cs
 
 
 def _status(cs="__absent__", step2="success"):

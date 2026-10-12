@@ -12,6 +12,7 @@ import contextlib
 import logging
 import math
 import os
+import threading
 import time
 from datetime import datetime
 from typing import Dict, List
@@ -2617,6 +2618,37 @@ def _refresh_cloud_snapshots() -> None:
               "——之后的日子可能只是本地没拉到")
 
 
+class _CloudSnapshotObservation:
+    """每日扫描的云端快照新鲜度观测（`cloud_snapshot_loader.lag_summary`），**与扫描并行**（v0.45.466 二次检查）。
+
+    它要出网（`git fetch`，最长 60 秒）。初版放在扫描末尾、`_timing.write` 之前：那次写入里的 `extra.gh_pages`
+    是编排器判「main 已跑到最后一步」的证据——Step 2 本就逼近超时的那天，这一分钟能让一轮跑完的扫描被杀、证据
+    没写出来、整轮记成失败。观测点不许挤占关键路径 ⇒ 扫描开始时在后台线程起跑，末尾**不等**：没跑完就如实记
+    「没观测到」（告警侧照报 P2「未观测」，不当成「查过了没事」）。
+    """
+
+    def __init__(self, date_str: str):
+        self._result = None
+        self._thread = threading.Thread(target=self._run, args=(date_str,),
+                                        name="cloud-snapshots-lag", daemon=True)
+        self._thread.start()
+
+    def _run(self, date_str: str) -> None:
+        try:
+            import cloud_snapshot_loader as csl
+            from datetime import date as _date
+            self._result = csl.lag_summary(_date.fromisoformat(date_str))
+        except Exception as e:  # noqa: BLE001 —— 观测点自身失败只记原因，不拖垮扫描
+            _log.warning("云端快照新鲜度观测失败（不影响扫描）: %s", e)
+            self._result = {"available": False, "reason": f"{type(e).__name__}: {e}"}
+
+    def result(self) -> dict:
+        if self._thread.is_alive():
+            return {"available": False,
+                    "reason": "后台刷新到扫描结束仍未完成（没有等它：不挤占 scan_timing 的写入）"}
+        return self._result
+
+
 @contextlib.contextmanager
 def _snapshot_ctx(args):
     """补跑时把期权/IV 取数切到当日云端快照；用不上就**明说**，绝不闷着。
@@ -2895,6 +2927,10 @@ def main():
     # 否则 --extended-pool / --max-tickers 对实际扫描完全不生效）
     focus_tickers = _resolve_focus_tickers(args)
 
+    # v0.45.466：云端快照新鲜度观测与扫描并行（见 _CloudSnapshotObservation）。
+    # 补跑（--date）不观测：落后量是相对今天的，与补跑日无关；补跑自己在 _snapshot_ctx 里刷新。
+    _cs_obs = None if args.date else _CloudSnapshotObservation(reporter.date_str)
+
     # v0.45.38：补跑历史交易日时，期权/IV 走当日云端快照而非实时抓取。
     # 不接快照的补跑会拿到**今天**的期权链再贴上补跑日的日期——一直如此，
     # 只是从来没人看见。下面这个上下文要么用上快照，要么把这件事说出来。
@@ -2997,18 +3033,9 @@ def main():
         _log.warning("新闻来源统计失败（不影响扫描）: %s", _e_ns)
         _news_sources = {"available": False, "reason": f"{type(_e_ns).__name__}: {_e_ns}"}
 
-    # v0.45.466：云端快照新鲜度（刷新 + 落后几个交易日）→ status.json → alert_manager P2。
-    # 补跑（--date）不观测：落后量是相对今天的，与补跑日无关；补跑自己在 _snapshot_ctx 里刷新过。
-    if args.date:
-        _cloud_snapshots = {"available": False, "reason": "补跑（--date）不观测"}
-    else:
-        try:
-            import cloud_snapshot_loader as _csl
-            from datetime import date as _cs_date
-            _cloud_snapshots = _csl.lag_summary(_cs_date.fromisoformat(reporter.date_str))
-        except Exception as _e_cs:  # noqa: BLE001 —— 观测点自身失败只记原因，不拖垮扫描
-            _log.warning("云端快照新鲜度观测失败（不影响扫描）: %s", _e_cs)
-            _cloud_snapshots = {"available": False, "reason": f"{type(_e_cs).__name__}: {_e_cs}"}
+    # v0.45.466：云端快照新鲜度（刷新 + 落后几个交易日）→ status.json → alert_manager P2。扫描开始时已在后台起跑，这里不等
+    _cloud_snapshots = ({"available": False, "reason": "补跑（--date）不观测"} if _cs_obs is None
+                        else _cs_obs.result())
 
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
     _timing.write(reporter.date_str, extra={"gh_pages": _timing.gh_pages_summary(_gh_pages),
