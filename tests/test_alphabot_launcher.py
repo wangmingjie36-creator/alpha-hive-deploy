@@ -322,10 +322,27 @@ class TestDataRootFollowsLauncher:
         ghost = tmp_path / "no" / "python3"
         assert self._main(tmp_path, "--python", str(ghost)) == 0
         cap = capsys.readouterr()
-        assert f"写进 .app 的解释器：{ghost}" in cap.out and "现在不存在或不可执行" in cap.err, cap
+        assert f"写进 .app 的解释器：{ghost}" in cap.out and "现在不能执行（不存在）" in cap.err, cap
+        assert self._main(tmp_path, "--python", str(tmp_path)) == 0      # 目录：X_OK 为真，458 不警告（v0.45.461）
+        cap = capsys.readouterr()
+        assert "现在不能执行（不是文件" in cap.err, cap
         assert self._main(tmp_path, "--python", sys.executable) == 0
         cap = capsys.readouterr()
-        assert f"写进 .app 的解释器：{sys.executable}" in cap.out and "不可执行" not in cap.err, cap
+        assert f"写进 .app 的解释器：{sys.executable}" in cap.out and "不能执行" not in cap.err, cap
+
+    def test_literal_tilde_env_home_is_not_expanded(self, tmp_path, home, monkeypatch, capsys):
+        """环境里字面的 `~/x`（plist / 加了引号的 export 都不展开）：扫描、MCP 按字面读 `./~/x`。458 自己 expanduser，
+        在这里算成「绝对、与配置相同」、首次还记下 `$HOME/x`——与扫描读的不是一个目录，分歧被藏住（v0.45.461）。"""
+        (home / "d").mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", "~/d")
+        assert self._main(tmp_path) == 0
+        err = capsys.readouterr().err
+        assert "相对路径" in err and "不会被展开" in err, err
+        assert LA.config_state(LA.load_config())[0] == "first", "字面 ~ 不该被展开后记进配置"
+        LA.save_config({"alpha_hive_home": str(home / "d")})
+        assert self._main(tmp_path) == 0
+        err = capsys.readouterr().err
+        assert "不会被展开" in err and "与启动器配置不同" not in err, err
 
     def test_explicit_home_silences_the_env_note(self, tmp_path, home, monkeypatch, capsys, data):
         """给了 --home，环境变量根本不参与：不许再提示「环境变量是相对路径、要设数据根用 --home」（自相矛盾）。"""
@@ -377,10 +394,11 @@ class TestDefaultRepoIsProductionClone:
 
     @staticmethod
     def _copy_generator(root: Path, version: str) -> Path:
+        """拷的文件清单取 `MA.GENERATOR_FILES`（判据唯一真相）+ 图标：生成器在目标里 import 什么，假克隆就有什么。"""
         pkg = root / "alphabot"
         (pkg / "macos").mkdir(parents=True)
-        for rel in ("macos_app.py", "launcher.py", "macos/AlphaBot.icns"):
-            shutil.copy2(REPO / "alphabot" / rel, pkg / rel)
+        for rel in (*MA.GENERATOR_FILES, "alphabot/macos/AlphaBot.icns"):
+            shutil.copy2(REPO / rel, root / rel)
         (pkg / "__init__.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
         return pkg
 
@@ -567,11 +585,35 @@ class TestDefaultRepoIsProductionClone:
         assert missing in err and "production_clone.py setup" in err and "Traceback" not in err, err
         assert not (tmp_path / "Apps").exists()
 
-    def test_build_app_empty_repo_is_a_path_not_absent(self, tmp_path, monkeypatch):
-        """`build_app(repo="")` 此前因真假值被当「没给」、悄悄生成指向本检出的 .app；现在空串就是一个路径（当前目录），照判据核对。"""
-        monkeypatch.chdir(tmp_path)                    # 当前目录不是代码目录
-        with pytest.raises(MA.BuildError, match="不是 Alpha Hive 代码目录"):
-            MA.build_app(tmp_path / "Apps", repo="")
+    def test_generator_files_cover_every_repo_module_the_generator_imports(self):
+        """判据要覆盖生成器在目标里 import 的每个仓库模块（含函数体内的延迟 import）：漏一个 ⇒ 缺它的目录被判可用、
+        委托后子进程甩 traceback（v0.45.461 实测：新 import 的 production_clone / hive_logger 不在 458 的清单里）。"""
+        import ast
+        tree = ast.parse((REPO / "alphabot" / "macos_app.py").read_text(encoding="utf-8"))
+        mods = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                mods.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                mods.add(node.module)
+                mods.update(f"{node.module}.{a.name}" for a in node.names)
+        needed = set()
+        for m in mods:
+            rel = m.replace(".", "/")
+            for cand in (f"{rel}.py", f"{rel}/__init__.py"):
+                if (REPO / cand).is_file():
+                    needed.add(cand)
+        assert "production_clone.py" in needed and "alphabot/launcher.py" in needed, needed   # 扫描本身没失明
+        assert needed <= set(MA.GENERATOR_FILES), needed - set(MA.GENERATOR_FILES)
+
+    @pytest.mark.parametrize("kw, msg", [({"repo": ""}, "repo 给了空值"), ({"repo": "  "}, "repo 给了空值"),
+                                         ({"python": ""}, "绝对路径"), ({"python": "python3"}, "绝对路径")])
+    def test_build_app_enforces_the_input_rules_itself(self, tmp_path, monkeypatch, kw, msg):
+        """`build_app` 是写进 .app 的唯一出口：显式空值拒绝、解释器须绝对——不只在命令行入口（v0.45.461）。
+        458 让 `repo=""` 成了「当前目录」：cwd 恰好是一份代码目录时，静默生成一个指向它的 .app（这里就让 cwd 是）。"""
+        monkeypatch.chdir(_fake_code_dir(tmp_path / "code"))
+        with pytest.raises(MA.BuildError, match=msg):
+            MA.build_app(tmp_path / "Apps", **kw)
         assert not (tmp_path / "Apps").exists()
 
     def test_one_criterion_for_all_three_callers(self, tmp_path):
@@ -636,12 +678,21 @@ class TestCanonicalMakeEntry:
         assert self._py_in_app(home) == MA.DEFAULT_PYTHON, "环境里的 PYTHON 被当成了 --python"
         assert "忽略环境变量 PYTHON=python3" in r.stdout + r.stderr, "忽略要说出来"
 
-    def test_outer_make_flags_do_not_leak_in(self, home, monkeypatch):
-        """外层 make 的命令行变量经 MAKEFLAGS 传给子 make、origin 成 command line；测试环境不许把它带进来。"""
+    def test_helper_is_hermetic_against_ambient_make_flags(self, home, monkeypatch):
+        """守的是**测试辅助** `_make`，不是产品：跑测试的 make（`make test PYTHON=…`）经 MAKEFLAGS 带下来的变量不许改变
+        本类结论（白名单 `_MAKE_ENV_KEEP`）。产品在同一情形下的行为见下一条。"""
         monkeypatch.setenv("MAKEFLAGS", " -- PYTHON=python3")
         r = self._make(home)
         assert r.returncode == 0, r.stderr
         assert self._py_in_app(home) == MA.DEFAULT_PYTHON
+
+    def test_outer_make_command_line_python_is_checked_not_ignored(self, home):
+        """外层 make 命令行上的 PYTHON 经 MAKEFLAGS 传下来，origin 是 command line：那是人写的值，照收照核
+        （裸名字照样拒、不生成），不当环境变量悄悄忽略（v0.45.461 写进 Makefile 注释的行为，这里钉住）。"""
+        r = self._make(home, env_extra={"MAKEFLAGS": " -- PYTHON=python3"})
+        assert r.returncode != 0 and "绝对路径" in r.stderr, r.stderr
+        assert "忽略环境变量" not in r.stdout + r.stderr
+        assert not (home / "Applications").exists()
 
     def test_command_line_python_wins_over_environment(self, home):
         r = self._make(home, f"PYTHON={sys.executable}", env_extra={"PYTHON": "python3"})
@@ -675,10 +726,32 @@ class TestLaunchScriptHints:
     def test_repo_under_desktop_keeps_tcc_hint(self, tmp_path, home):
         assert "桌面文件夹" in MA.launch_script(home / "Desktop" / "Alpha Hive", sys.executable)
 
-    @pytest.mark.parametrize("where", ["alpha-hive-prod", "Desktop/Alpha Hive"])
+    @pytest.mark.parametrize("where", ["alpha-hive-prod", "Desktop/Alpha Hive", "Desktop/it's \"$x\" `y`"])
     def test_hint_is_safe_inside_the_double_quoted_alert(self, home, where):
-        hint = MA._cd_failure_hint(home / where)
-        assert not any(c in hint for c in '"$`\\'), hint
+        for hint in (MA._repo_unusable_hint(home / where), MA._python_fix_hint(home / where)):
+            assert not any(c in hint for c in '"$`\\'), hint
+
+    @pytest.mark.parametrize("where", ["alpha-hive-prod", "Desktop/Alpha Hive"])
+    def test_every_regen_command_in_the_shell_comes_from_one_place(self, home, where):
+        """壳里不再有 `make alphabot-app` 这种不带 `-C` 的写法（在随便哪个目录敲都找不到 Makefile），换解释器的写法
+        带绝对路径占位（v0.45.461）。出现的每一处都是 `canonical_entry` / 生成器直跑，没有第三种。"""
+        script = MA.launch_script(home / where, sys.executable)
+        assert script.count("alphabot-app") == script.count(MA.canonical_entry()), script
+        if where == "alpha-hive-prod":
+            assert f"{MA.canonical_entry()} PYTHON=/" in script
+            assert "--repo" not in script
+        else:
+            assert "-m alphabot.macos_app --repo . --python /" in script and "alphabot-app" not in script
+
+    def test_missing_launcher_shows_the_repo_hint(self, tmp_path, home):
+        """代码目录在、却缺 launcher.py：处理办法与「进不去」同一出处（458 写的是「在新位置重跑 make alphabot-app」）。"""
+        clone = _fake_code_dir(home / "alpha-hive-prod")
+        exe, alerts = _app_exe(tmp_path, repo=clone, python=sys.executable)
+        (clone / "alphabot" / "launcher.py").unlink()
+        r = subprocess.run([str(exe)], env={**os.environ, "HOME": str(home)})
+        assert r.returncode == 1
+        shown = alerts.read_text(encoding="utf-8")
+        assert "没有 alphabot/launcher.py" in shown and "production_clone.py setup" in shown, shown
 
     def test_cd_failure_shows_the_hint(self, tmp_path, home):
         missing = home / "alpha-hive-prod"                    # 克隆被删：真跑一次壳，弹窗里得有重建办法
@@ -689,6 +762,68 @@ class TestLaunchScriptHints:
         assert r.returncode == 1
         shown = alerts.read_text(encoding="utf-8")
         assert "进不去代码目录" in shown and "production_clone.py setup" in shown, shown
+
+
+class TestInterpreterCheck:
+    """「写进 .app 的解释器现在能不能 exec」只有一条判据（v0.45.461）：生成时的 `interpreter_problem` 与壳里的
+    `SHELL_PY_USABLE`。458 两边各写一份、都只看执行位——目录也算可执行，`PYTHON=/usr/local/bin` 两道都放行。"""
+
+    @staticmethod
+    def _cases(tmp_path):
+        good = Path(_fake_python(tmp_path, "exit 0"))
+        plain = tmp_path / "plain"
+        plain.write_text("", encoding="utf-8")
+        (tmp_path / "to-good").symlink_to(good)
+        (tmp_path / "to-dir").symlink_to(tmp_path, target_is_directory=True)
+        (tmp_path / "dangling").symlink_to(tmp_path / "nowhere")
+        return {"exec-file": (good, True), "symlink-to-exec-file": (tmp_path / "to-good", True),
+                "missing": (tmp_path / "nowhere", False), "dir": (tmp_path, False),
+                "symlink-to-dir": (tmp_path / "to-dir", False), "not-executable": (plain, False),
+                "dangling-symlink": (tmp_path / "dangling", False)}
+
+    def test_python_and_shell_give_the_same_verdict(self, tmp_path):
+        for name, (path, usable) in self._cases(tmp_path).items():
+            py_ok = MA.interpreter_problem(str(path)) is None
+            sh_ok = subprocess.run(["bash", "-c", f'PY="$1"; {MA.SHELL_PY_USABLE}', "_", str(path)]).returncode == 0
+            assert (py_ok, sh_ok) == (usable, usable), name
+
+    def test_directory_interpreter_alerts_on_double_click(self, tmp_path, home):
+        exe, alerts = _app_exe(tmp_path, python=str(tmp_path))
+        r = subprocess.run([str(exe)], env={**os.environ, "HOME": str(home)})
+        assert r.returncode == 1
+        shown = alerts.read_text(encoding="utf-8") if alerts.exists() else "（没弹）"
+        assert "找不到可执行的" in shown and "是目录" in shown, shown
+
+    def test_exec_failure_alerts_instead_of_dying_silently(self, tmp_path, home):
+        """过了预检、exec 仍失败（格式 / 架构不对）：bash 缺省直接退出、错误只进日志——双击的人什么也看不到。"""
+        junk = tmp_path / "junk-python"
+        junk.write_bytes(b"\x00\x01\x02\x03not-a-binary\x00")
+        junk.chmod(0o755)
+        exe, alerts = _app_exe(tmp_path, repo=_fake_code_dir(tmp_path / "code"), python=str(junk))
+        r = subprocess.run([str(exe)], env={**os.environ, "HOME": str(home)})
+        assert r.returncode == 126
+        shown = alerts.read_text(encoding="utf-8") if alerts.exists() else "（没弹）"
+        assert f"执行 {junk} 失败" in shown and "launcher.log" in shown, shown
+
+
+class TestRegenHints:
+    """「怎么重新生成 .app」给人的命令只从 `regen_hint` / `canonical_entry` 出（v0.45.461）。"""
+
+    def test_canonical_entry_targets_the_production_clone(self, home):
+        import production_clone
+        cmd = MA.canonical_entry().split()
+        assert cmd[:2] == ["make", "-C"] and cmd[3] == "alphabot-app", cmd
+        assert Path(os.path.expanduser(cmd[2])) == production_clone.default_dest()
+
+    def test_help_page_shows_the_canonical_entry(self, home):
+        """帮助页是静态 JS，取不到 Python 常量：在这里核对它抄的就是推荐入口（改入口而忘了帮助页 ⇒ 红）。"""
+        help_js = (REPO / "alphabot" / "static" / "pages" / "help.js").read_text(encoding="utf-8")
+        assert MA.canonical_entry() in help_js
+        assert "PYTHON=/绝对路径" in help_js
+
+    def test_other_checkout_gets_the_direct_generator_command(self, tmp_path, home):
+        hint = MA.regen_hint(tmp_path / "dev", python="/x/python3")
+        assert hint.endswith("-m alphabot.macos_app --repo . --python /x/python3") and "make" not in hint, hint
 
 
 # ── 启动流程 ───────────────────────────────────────────────────────────────

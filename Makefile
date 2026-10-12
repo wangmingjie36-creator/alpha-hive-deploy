@@ -57,8 +57,10 @@ alphabot-demo:
 # .app 跑的代码缺省是生产克隆 ~/alpha-hive-prod（阶段 8）。统一入口：make -C ~/alpha-hive-prod alphabot-app（克隆自己的代码生成）；
 # 在别的检出里 make 也会把整次生成交给克隆自己的生成器（v0.45.451 起）；克隆不在就报错。测自己的检出才直接跑 -m alphabot.macos_app --repo .
 # ALPHABOT_GEN_PY = 跑生成器本身的解释器（不是写进 .app 的那个）；只有测试换它（tests/test_alphabot_launcher.py 真跑本目标）
-# PYTHON 只认**这条命令行上**给的（$(origin) = command line）：make 会把同名环境变量导入成 make 变量，而 PYTHON 是常见
-# 环境变量（node-gyp 等要求 export PYTHON=python3）——v0.45.456 起它会因「须绝对路径」让推荐入口无故失败（v0.45.458）
+# PYTHON 只认**命令行上**给的（$(origin) = command line）：make 会把同名环境变量导入成 make 变量，而 PYTHON 是常见
+# 环境变量（node-gyp 等要求 export PYTHON=python3）——v0.45.456 起它会因「须绝对路径」让推荐入口无故失败（v0.45.458）。
+# 「命令行」含外层 make 的命令行：在 `make X PYTHON=…` 的配方里再调本目标，PYTHON 经 MAKEFLAGS 传下来、origin 也是
+# command line（make 3.81 实测）——那同样是人写的值，照收照核（裸名字照样拒），不当环境变量忽略（v0.45.461）
 ALPHABOT_GEN_PY ?= /usr/local/bin/python3
 alphabot-app:
 	$(if $(filter environment%,$(origin PYTHON)),$(info 忽略环境变量 PYTHON=$(PYTHON)：.app 用的解释器只认这条命令行上的 PYTHON=/绝对路径))

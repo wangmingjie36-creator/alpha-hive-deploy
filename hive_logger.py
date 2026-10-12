@@ -64,11 +64,20 @@ def resolve_data_root(environ=None) -> Path:
     的环境快照来求「真实」数据根——会话期间 `ALPHA_HIVE_HOME` 已被换成沙箱（见 `tests/conftest.py`
     的 `pytest_configure`）。纯函数：不建目录、不碰文件系统。
     """
+    explicit = explicit_data_root(environ)
+    if explicit is not None:
+        return explicit
+    env = os.environ if environ is None else environ
+    return Path(env.get("HOME") or os.path.expanduser("~")) / DEFAULT_DATA_ROOT_NAME
+
+
+def explicit_data_root(environ=None):
+    """环境里**显式**给的数据根：`ALPHA_HIVE_HOME` 非空 ⇒ 原样的 `Path`（不展开 `~`、不按 cwd 解析——读者都这样用它）；
+    没给 / 空串 ⇒ None。`resolve_data_root` 的前一半，单独露出来给「只想知道环境有没有指定」的调用方
+    （`.app` 生成器顺手记数据根，v0.45.461）——别在调用方另写一份 `os.environ.get(...)` 再各自展开。"""
     env = os.environ if environ is None else environ
     explicit = env.get("ALPHA_HIVE_HOME")
-    if explicit:
-        return Path(explicit)
-    return Path(env.get("HOME") or os.path.expanduser("~")) / DEFAULT_DATA_ROOT_NAME
+    return Path(explicit) if explicit else None
 
 
 class _HivePaths:

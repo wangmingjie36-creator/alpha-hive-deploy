@@ -63,7 +63,11 @@ def default_repo() -> Path:
 
 
 #: 一份「能生成 .app、也能被 .app 执行」的 Alpha Hive 代码必须有的文件：生成器本身（委托要跑它）+ 壳要 exec 的 launcher
-GENERATOR_FILES = ("alphabot/macos_app.py", "alphabot/launcher.py")
+#: + 生成器在目标里 import 的仓库根模块（v0.45.461：提示取 `production_clone.default_dest`、环境数据根取
+#: `hive_logger.explicit_data_root`——缺了就是委托后子进程甩 traceback，正是本判据要消灭的形状）。
+#: 生成器新 import 仓库里别的模块时**加进来**；测试的假克隆按这份清单拷真文件（`_copy_generator`）。
+GENERATOR_FILES = ("alphabot/__init__.py", "alphabot/macos_app.py", "alphabot/launcher.py",
+                   "production_clone.py", "hive_logger.py")
 
 
 def generator_dir_problem(repo: Path) -> Optional[str]:
@@ -143,17 +147,73 @@ def info_plist() -> dict:
     }
 
 
-def _cd_failure_hint(repo: Path) -> str:
-    """进不去代码目录时弹窗里的处理办法——按代码目录**在哪**给，不写死某一种。
+def _home_tilde(p: Path) -> str:
+    """家目录下的路径写成 `~/…`：给人抄的命令里不嵌用户名（测试里也不嵌临时 HOME）。"""
+    try:
+        return "~/" + str(Path(p).relative_to(Path.home()))
+    except ValueError:
+        return str(p)
+
+
+def canonical_entry() -> str:
+    """推荐入口：重新生成指向生产克隆的 .app。帮助页抄的就是它（守卫 `TestRegenHints`）。"""
+    import production_clone
+    return f"make -C {_home_tilde(production_clone.default_dest())} alphabot-app"
+
+
+def _is_default_clone(repo: Path) -> bool:
+    import production_clone
+    return Path(repo).expanduser().resolve() == production_clone.default_dest().resolve()
+
+
+def regen_hint(repo: Path, python: Optional[str] = None) -> str:
+    """「怎么重新生成 cd 进 `repo` 的那个 .app」——壳里的弹窗给人的命令**只从这里出**（v0.45.461）。
+
+    此前四处各写一份自由文本：壳里两处还是 `make alphabot-app PYTHON=新路径`（不带 `-C`：在随便哪个目录敲都找不到
+    Makefile；也不提绝对路径：照写裸名字会被 456 的规则拒），进不去代码目录那句又说「用 --repo 重跑 make」（make 不收
+    `--repo`）。`python` 给了 ⇒ 带上换解释器的写法。代码目录是生产克隆 ⇒ 推荐入口 `canonical_entry`（帮助页抄的也是它）；
+    否则（开发时 `--repo` 生成的）⇒ 在那份代码里直接跑生成器。不嵌代码目录路径：结果要进壳里的双引号字符串。
+    """
+    if _is_default_clone(repo):
+        return f"在终端执行 {canonical_entry()}" + (f" PYTHON={python}" if python else "")
+    return (f"在那份代码目录里执行 {DEFAULT_PYTHON} -m alphabot.macos_app --repo ."
+            + (f" --python {python}" if python else ""))
+
+
+def _repo_unusable_hint(repo: Path) -> str:
+    """进不去代码目录 / 代码目录不完整时弹窗里的处理办法——按代码目录**是什么、在哪**给，不写死某一种。
 
     v0.45.436 起缺省代码目录是生产克隆（不在「桌面」下），弹窗却仍只说「打开『桌面文件夹』权限」「重跑
     make alphabot-app」：前者与克隆无关，后者在克隆丢了时只会报错（v0.45.439 二次检查）。
     """
-    hint = (f"代码目录是生产克隆就在开发检出里跑 {DEFAULT_PYTHON} production_clone.py setup 重建它"
-            "（每日扫描也靠它，丢了扫描同样停）；代码目录换了位置，就用 --repo 指向新位置重跑 make alphabot-app。")
+    if _is_default_clone(repo):
+        hint = (f"生产克隆丢了或不完整：在开发检出里跑 {DEFAULT_PYTHON} production_clone.py setup 重建它"
+                "（每日扫描也靠它，丢了扫描同样停），重建后不用重新生成 .app。")
+    else:
+        hint = f"代码目录挪了位置就到新位置重新生成（{regen_hint(repo)}）。"
     if _under_desktop_or_documents(repo):    # 只有这两处受 TCC 单独管控（iCloud 同步的也正是这两处）
         hint += "若是权限问题：系统设置 → 隐私与安全性 → 文件与文件夹 → Alpha Bot → 打开「桌面文件夹」/「文稿文件夹」。"
     return hint
+
+
+#: 壳里「解释器现在能不能 exec」的判断——与 `interpreter_problem` 是**同一条**：普通文件（跟随软链）且可执行。
+#: 只用 `[ -x ]` 时目录也算可执行（v0.45.461）。守卫 `TestInterpreterCheck` 拿同一批路径核对两边结论一致。
+SHELL_PY_USABLE = '[ -f "$PY" ] && [ -x "$PY" ]'
+
+
+def interpreter_problem(python: str) -> Optional[str]:
+    """写进 .app 的解释器现在能不能 exec ⇒ 问题描述；能 ⇒ None。与壳里的 `SHELL_PY_USABLE` 同一条判据（v0.45.461）。
+
+    v0.45.458 生成时只看 `os.access(X_OK)`、壳只看 `[ -x ]`——**目录也算可执行**：`PYTHON=/usr/local/bin` 两道都放行，
+    双击时 exec 失败只进日志、不弹窗，看着就是「双击没反应」。
+    """
+    if not os.path.exists(python):
+        return "不存在"
+    if not os.path.isfile(python):
+        return "不是文件（是目录？）"
+    if not os.access(python, os.X_OK):
+        return "没有执行权限"
+    return None
 
 
 def launch_script(repo: Path, python: str, osascript: str = DEFAULT_OSASCRIPT) -> str:
@@ -161,12 +221,18 @@ def launch_script(repo: Path, python: str, osascript: str = DEFAULT_OSASCRIPT) -
 
     `osascript` 只给测试换：真的那个弹的是模态对话框，测试会卡到 pytest-timeout，
     被杀的只是 bash，对话框留在屏幕上（Mac 实测）。
+
+    `exec` 本身失败（格式 / 架构不对、刚被删）也要弹窗：bash 缺省直接退出、错误只进日志——双击的人什么也看不到。
+    `execfail` 让脚本接着跑到下一行的 alert（v0.45.461，bash 3.2 实测：exec 的重定向随之撤销；目录退出码 126、
+    二进制格式不对 1）。
     """
     q_repo, q_py, q_osa = shlex.quote(str(repo)), shlex.quote(python), shlex.quote(osascript)
-    cd_hint = _cd_failure_hint(repo)          # 进双引号 bash 字符串：不许含 " $ `（守卫 TestLaunchScriptHints）
+    # 下面两段进双引号 bash 字符串：不许含 " $ ` \（守卫 TestLaunchScriptHints）
+    repo_hint = _repo_unusable_hint(repo)
+    py_fix = _python_fix_hint(repo)
     return f"""#!/bin/bash
 # Alpha Bot.app 启动脚本——由 alphabot/macos_app.py 生成（v{__version__}）。
-# 别手改：改生成器后重跑 make alphabot-app。逻辑在 alphabot/launcher.py，代码目录更新后下次启动即生效。
+# 别手改：要改就重新生成（{regen_hint(repo)}）。逻辑在 alphabot/launcher.py，代码目录更新后下次启动即生效。
 REPO={q_repo}
 PY={q_py}
 export LANG="${{LANG:-en_US.UTF-8}}"   # 从 Finder / Dock 启动没有 LANG：中文日志与对话框都按 UTF-8
@@ -176,21 +242,30 @@ alert() {{
   {q_osa} -e 'on run argv' -e 'activate' -e 'display alert "Alpha Bot 无法启动" message (item 1 of argv) as critical' -e 'end run' "$1" >/dev/null 2>&1
   echo "$(date '+%F %T') $1" >>"$LOG_DIR/launcher.log"
 }}
-if [ ! -x "$PY" ]; then
-  alert "找不到 ${{PY}}——Alpha Bot 与每日扫描、MCP 用的是同一个解释器。装回它即可；要换解释器：先用新解释器 -m pip install -r requirements.txt，再 make alphabot-app PYTHON=新路径（没装依赖的解释器起不了服务）"
+if ! {{ {SHELL_PY_USABLE}; }}; then
+  alert "找不到可执行的 ${{PY}}（不存在、是目录或没有执行权限）——Alpha Bot 与每日扫描、MCP 用的是同一个解释器。{py_fix}"
   exit 1
 fi
 if ! cd "$REPO" 2>/dev/null; then
-  alert "进不去代码目录 ${{REPO}}。{cd_hint}"
+  alert "进不去代码目录 ${{REPO}}。{repo_hint}"
   exit 1
 fi
 if [ ! -f alphabot/launcher.py ]; then
-  alert "$REPO 下没有 alphabot/launcher.py——仓库挪过位置或分支太旧。在新位置重跑 make alphabot-app。"
+  alert "$REPO 下没有 alphabot/launcher.py。{repo_hint}"
   exit 1
 fi
 export PATH="/usr/local/bin:$PATH"
+shopt -s execfail
 exec "$PY" -m alphabot.launcher "$@" >>"$LOG_DIR/launcher.log" 2>&1
+alert "执行 ${{PY}} 失败（退出码 $?，详情在 ~/Library/Logs/Alpha Bot/launcher.log）。{py_fix}"
+exit 126
 """
+
+
+def _python_fix_hint(repo: Path) -> str:
+    """解释器找不到 / 执行失败时的处理办法（两处弹窗共用）。"""
+    return ("装回它即可；要换解释器：先用新解释器 -m pip install -r requirements.txt，再"
+            f"{regen_hint(repo, python='/新解释器的绝对路径')}（没装依赖的解释器起不了服务）")
 
 
 def _is_ours(bundle: Path) -> bool:
@@ -207,10 +282,13 @@ def build_app(dest_dir: Path, *, repo: Optional[Path] = None, python: str = DEFA
 
     已存在同名 .app 但不是本生成器产出的（bundle id 不同）⇒ 拒绝覆盖，不删别人的东西。
     先在同目录临时位置建好，再换上去：中途失败不会留下半个 .app。
+
+    这里是写进 .app 的**唯一出口**：输入规则（显式空值拒绝、解释器须绝对路径）在这里执行，不只在命令行入口
+    （v0.45.461：458 只在 `main` 拒空值，`build_app(repo="")` 仍被当成当前目录——同一输入两个入口两种含义）。
     """
     dest_dir = Path(dest_dir).expanduser()
-    # 「给没给」只认 None（v0.45.458）：此前 `if repo` 让 `repo=""` 悄悄变成本检出、`Path("")` 却是当前目录——同值两义
-    repo = _repo_root() if repo is None else Path(repo).resolve()
+    repo = _repo_root() if _given(repo, "repo") is None else Path(repo).resolve()
+    python = _must_be_absolute(python, "python")
     problem = generator_dir_problem(repo)
     if problem:
         raise BuildError(f"{repo} {problem}")
@@ -298,33 +376,41 @@ def _validate_home(home_arg: Optional[str]) -> Optional[Path]:
     return hp
 
 
-def _reject_empty(args) -> None:
-    """显式给了空值（`--python ""`、脚本里 `--dest "$X"` 而 X 为空）是无效输入，不是「没给」（v0.45.458）。
+def _given(value, what: str):
+    """「给没给」的**唯一**判法：`None` = 没给（用缺省）；给了空白字符串 = 无效输入，拒绝，不当「没给」（v0.45.458 / 461）。
 
-    v0.45.456 本地分支用 `x or 缺省`、`if not x` 判「给没给」：空串被悄悄换成缺省解释器 / 缺省目录 / 不改数据根，
-    委托分支却用 `is not None` 原样转发——同一输入两支语义不同，显式输入被吞。现在「没给」只认 `None`，空值入口即拒。
+    v0.45.456 本地分支用 `x or 缺省`、`if not x` 判：空串被悄悄换成缺省解释器 / 缺省目录 / 不改数据根，委托分支却用
+    `is not None` 原样转发——同一输入两支语义不同，显式输入被吞。命令行入口（`_reject_empty`）与 `build_app` 都经这里。
     """
+    if isinstance(value, str) and not value.strip():
+        raise BuildError(f"{what} 给了空值（{value!r}）：不当成「没给」去用缺省；要缺省就别传这个参数")
+    return value
+
+
+def _reject_empty(args) -> None:
+    """命令行上显式给了空值（`--python ""`、脚本里 `--dest "$X"` 而 X 为空）⇒ 入口即拒（委托方与目标都先过它）。"""
     for flag in ("dest", "python", "home", "repo"):
-        val = getattr(args, flag)
-        if val is not None and not val.strip():
-            raise BuildError(f"--{flag} 给了空值（{val!r}）：不当成「没给」去用缺省；要缺省就别传这个参数")
+        _given(getattr(args, flag), f"--{flag}")
 
 
-def _env_home_absolute() -> Optional[str]:
+def _env_home_absolute() -> Optional[Path]:
     """环境 `ALPHA_HIVE_HOME` 能不能参与（记下 / 与配置比较）——**入口一次定类**（v0.45.458）。
 
-    空串按未设（与 `hive_logger.resolve_data_root` 同口径）。相对路径**整个不参与**：不记、也不拿去比较——v0.45.456
-    只在「首次记」那支拒，却在「与配置比较」那支照样按当前 cwd 解析，`make -C 克隆` 下就会误报「与启动器配置不同」。
+    取值走数据根的唯一规则 `hive_logger.explicit_data_root`：空串按未设、**原样**用（不展开 `~`、不规整）——扫描、
+    MCP 读到的就是这个值（v0.45.461：458 自己 `expanduser`，字面 `~/x` 在这里算「绝对、与配置相同」，扫描却在读
+    `./~/x`，分歧被藏住）。不是绝对路径**整个不参与**：不记、也不拿去比较——v0.45.456 只在「首次记」那支拒，
+    却在「与配置比较」那支照样按当前 cwd 解析，`make -C 克隆` 下就会误报「与启动器配置不同」。
     """
-    raw = os.environ.get("ALPHA_HIVE_HOME") or None
-    if raw is None:
+    from hive_logger import explicit_data_root     # 同在仓库根（`-m` 从仓库根跑）；import 不碰文件系统
+    p = explicit_data_root()
+    if p is None:
         return None
-    p = os.path.expanduser(raw)
-    if not os.path.isabs(p):
-        print(f"环境里的 ALPHA_HIVE_HOME={raw} 是相对路径：不记进启动器配置、也不拿它和配置比较"
+    if not p.is_absolute():
+        tilde = "（`~` 不会被展开：扫描、MCP 也按字面用它）" if str(p).startswith("~") else ""
+        print(f"环境里的 ALPHA_HIVE_HOME={p} 是相对路径{tilde}：不记进启动器配置、也不拿它和配置比较"
               "（双击时在别的目录下解析，含义会变；要设数据根用 --home 给绝对路径）", file=sys.stderr)
         return None
-    return os.path.normpath(p)
+    return p
 
 
 def _record_data_root(explicit_home: Optional[Path]) -> int:
@@ -350,11 +436,11 @@ def _record_data_root(explicit_home: Optional[Path]) -> int:
         want, why = explicit_home, "--home"
     elif env_home and state == "first":
         want, why = env_home, "环境 ALPHA_HIVE_HOME（配置里还没有数据根）"
-    elif env_home and (home is None or Path(env_home).resolve() != Path(home).expanduser().resolve()):
+    elif env_home and (home is None or env_home.resolve() != Path(home).expanduser().resolve()):
         print(f"环境里的 ALPHA_HIVE_HOME={env_home} 与启动器配置不同，没有改写配置；真要换用 --home", file=sys.stderr)
 
     if want:
-        hp = Path(want).expanduser()
+        hp = Path(want)                      # 两个来源都已是绝对路径（--home 已规整，环境变量不绝对就不参与）
         if not hp.is_dir():
             print(f"⚠️ 数据根 {hp}（来自 {why}）不存在，没写进配置", file=sys.stderr)
             if explicit_home is not None:
@@ -434,8 +520,10 @@ def main(argv=None) -> int:
     # 写进 .app 的解释器当场说出来、当场核对（v0.45.458）：此前要到双击才暴露（如旧生成器把裸名字原样写进壳）。
     # 只警告不拒：缺省解释器在 CI 上本来就不存在，人也可能之后才装；双击时壳仍会核对并弹窗
     print(f"写进 .app 的解释器：{python}")
-    if not os.access(python, os.X_OK):
-        print(f"⚠️ {python} 现在不存在或不可执行：双击 .app 时会弹窗「找不到」，装好它或用 --python 换一个", file=sys.stderr)
+    problem = interpreter_problem(python)    # 与壳里双击时那道检查同一条判据（v0.45.461）
+    if problem:
+        print(f"⚠️ {python} 现在不能执行（{problem}）：双击 .app 时会弹窗「找不到」，装好它或用 --python 换一个",
+              file=sys.stderr)
 
     rc = _record_data_root(home)
     if sys.platform != "darwin":
