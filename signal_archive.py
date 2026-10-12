@@ -675,6 +675,9 @@ QUARANTINE: List[Dict] = [
     # 逐份分类（明细见 CHANGELOG v0.45.472）。只隔离市场观测五类（同上方条目），不动 Agent 分。
     # 盘后价（财报日收盘后 current_price，已由 official_price 修掉的另一类）不在此列：AMZN 07-30 / CRM 08-26 /
     # MSFT 07-29 / RKLB 07-22 / TSLA 07-23。
+    # v0.45.476 二次检查撤回 6 对误判（行已从备份原样恢复）：CRWD 04-26 / 05-03 / 05-10 / 05-17——快照全在周日、
+    # 对照的是前一交易日的**拆股调整后**收盘（Twelve Data），比值恒 ≈ 4，不是假价；VKTX 08-12（34.5）与 MU 08-26（952.0）——
+    # 「行权价形状」判错：两者不在各自行权价网格的中点上（步长 2.5 / 5），不可能是行权价中位数；VKTX 那天就是调用方给的价。
     {
         "date": "2026-04-09",
         "tickers": ('CRCL', 'RKLB'),
@@ -701,10 +704,10 @@ QUARANTINE: List[Dict] = [
     },
     {
         "date": "2026-04-26",
-        "tickers": ('AAPL', 'COST', 'CRWD', 'DELL', 'HPE', 'RKLB'),
+        "tickers": ('AAPL', 'COST', 'DELL', 'HPE', 'RKLB'),
         "signals": ("options.iv_current", "options.put_call_ratio",
                     "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
-        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AAPL, COST, DELL, HPE, RKLB；现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：CRWD。",
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AAPL, COST, DELL, HPE, RKLB。",
         "evidence": ("cache/options_snapshot_{T}_2026-04-26.json", "CHANGELOG.md#v0.45.472"),
     },
     {
@@ -725,10 +728,10 @@ QUARANTINE: List[Dict] = [
     },
     {
         "date": "2026-05-03",
-        "tickers": ('AAPL', 'CRWD', 'META', 'SQ'),
+        "tickers": ('AAPL', 'META', 'SQ'),
         "signals": ("options.iv_current", "options.put_call_ratio",
                     "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
-        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AAPL, META, SQ；现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：CRWD。",
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AAPL, META, SQ。",
         "evidence": ("cache/options_snapshot_{T}_2026-05-03.json", "CHANGELOG.md#v0.45.472"),
     },
     {
@@ -749,10 +752,10 @@ QUARANTINE: List[Dict] = [
     },
     {
         "date": "2026-05-10",
-        "tickers": ('ASML', 'CRWD', 'UPST'),
+        "tickers": ('ASML', 'UPST'),
         "signals": ("options.iv_current", "options.put_call_ratio",
                     "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
-        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：ASML, UPST；现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：CRWD。",
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：ASML, UPST。",
         "evidence": ("cache/options_snapshot_{T}_2026-05-10.json", "CHANGELOG.md#v0.45.472"),
     },
     {
@@ -765,10 +768,10 @@ QUARANTINE: List[Dict] = [
     },
     {
         "date": "2026-05-17",
-        "tickers": ('BILI', 'CRCL', 'CRM', 'CRWD', 'ICLN', 'SQ'),
+        "tickers": ('BILI', 'CRCL', 'CRM', 'ICLN', 'SQ'),
         "signals": ("options.iv_current", "options.put_call_ratio",
                     "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
-        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：BILI, CRCL, CRM, ICLN, SQ；现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：CRWD。",
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：BILI, CRCL, CRM, ICLN, SQ。",
         "evidence": ("cache/options_snapshot_{T}_2026-05-17.json", "CHANGELOG.md#v0.45.472"),
     },
     {
@@ -916,28 +919,12 @@ QUARANTINE: List[Dict] = [
         "evidence": ("cache/options_snapshot_{T}_2026-07-15.json", "CHANGELOG.md#v0.45.472"),
     },
     {
-        "date": "2026-08-12",
-        "tickers": ('VKTX',),
-        "signals": ("options.iv_current", "options.put_call_ratio",
-                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
-        "reason": "v0.45.472：现价是 0.5 整数倍、偏离收盘 > 1%（行权价中位数兜底；形状判，≈2% 概率是恰好整数的真价）：VKTX。",
-        "evidence": ("cache/options_snapshot_{T}_2026-08-12.json", "CHANGELOG.md#v0.45.472"),
-    },
-    {
         "date": "2026-08-14",
         "tickers": ('QCOM',),
         "signals": ("options.iv_current", "options.put_call_ratio",
                     "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
         "reason": "v0.45.472：现价是 0.5 整数倍、偏离收盘 > 1%（行权价中位数兜底；形状判，≈2% 概率是恰好整数的真价）：QCOM。",
         "evidence": ("cache/options_snapshot_{T}_2026-08-14.json", "CHANGELOG.md#v0.45.472"),
-    },
-    {
-        "date": "2026-08-26",
-        "tickers": ('MU',),
-        "signals": ("options.iv_current", "options.put_call_ratio",
-                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
-        "reason": "v0.45.472：现价是 0.5 整数倍、偏离收盘 > 1%（行权价中位数兜底；形状判，≈2% 概率是恰好整数的真价）：MU。",
-        "evidence": ("cache/options_snapshot_{T}_2026-08-26.json", "CHANGELOG.md#v0.45.472"),
     },
     # v0.45.472：CBOE 主源时代（06-30 起）里退到 yfinance 备用链的日子——v0.45.468 前 yfinance 链补 BS gamma
     # 用「OI>50 的看涨行权价中位数」当 S（analyze 调 fetch_options_chain 从不传价），GEX 与 CBOE 链不是同一个量。
@@ -1058,8 +1045,9 @@ QUARANTINE: List[Dict] = [
     # v0.45.475：上面那批 yfinance 备用链只认 `quote_set.error`（09-04 起才有），06-30 ~ 09-03 认不出；而且
     # `_refill_empty_quote_set` 事后会用 CBOE 回填空的 quote_set、把 error 抹掉（10-05 BILI 实测，回填于 23:33）。
     # 改用期权链数据本身的厂商指纹：快照 key_levels 的 IV——CBOE 给 4 位小数，Yahoo 是二进制长浮点。
-    # 在已知来源的快照上核过：CBOE 581/582、yfinance 44/44、06-30 前 yfinance 主源时代 541/542 分对（例外各 1 份是
-    # 测试夹具写穿生产、早已隔离）；06-30 ~ 09-03 的 548 份全部可分，只有 09-01 BILI 是 yfinance。
+    # 在已知来源的快照上核过：CBOE 581/582、yfinance 44/44、06-30 前 yfinance 主源时代 541/542 分对（例外：CBOE 那份是
+    # 10-05 BILI 本身——证据被回填抹掉的那份；yfinance 时代那份是测试夹具写穿生产、早已隔离）〔v0.45.476 更正措辞〕；
+    # 06-30 ~ 09-03 共 548 份：样本链 8（已隔离）、测试夹具 1（07-08 NVDA，已隔离）、按指纹分出 CBOE 538、yfinance 1（09-01 BILI）。
     {
         "date": "2026-09-01",
         "tickers": ("BILI",),

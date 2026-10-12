@@ -224,3 +224,16 @@ def test_iv_constant_25_rows_quarantined_only_for_iv_current():
         assert not sa.is_quarantined(d, t, "options.iv_rank"), (d, t)
     assert not sa.is_quarantined("2026-09-15", "NVDA", "options.iv_current")
     assert not sa.is_quarantined("2026-06-09", "NVDA", "options.iv_current")
+
+
+def test_v0_45_476_false_positives_stay_unquarantined():
+    """v0.45.476 撤回的 6 对误判：CRWD 四个周日快照（对照的是拆股调整后的收盘，比值恒 ≈ 4）；
+    VKTX 08-12（34.5）与 MU 08-26（952.0）不在各自行权价网格中点上，不可能是行权价中位数。
+
+    变红的变异：把它们加回任何隔离条目。
+    """
+    for d, t in (("2026-04-26", "CRWD"), ("2026-05-03", "CRWD"), ("2026-05-10", "CRWD"), ("2026-05-17", "CRWD"),
+                 ("2026-08-12", "VKTX"), ("2026-08-26", "MU")):
+        for sig in ("options.iv_current", "options.gamma_exposure", "options.put_call_ratio"):
+            assert not sa.is_quarantined(d, t, sig), (d, t, sig)
+    assert sa.is_quarantined("2026-04-26", "AAPL", "options.gamma_exposure"), "同日其余标的照样隔离"
