@@ -349,7 +349,7 @@ def demo_hedge_view(as_of: Optional[str] = None, days: int = 12) -> dict:
         }
     old = [(cal[0] - timedelta(days=k)).isoformat() for k in (7, 6, 5)]
     return {
-        "source": "demo", "state_dir": "(演示数据)", "exists": True, "errors": {},
+        "source": "demo", "state_dir": "(演示数据)", "exists": True, "opened": True, "errors": {},
         "positions": ([{"ticker": "SPY", "shares": float(shares), "avg_price": round(avg, 4) if avg else None,
                         "entry_date": entry_date, "last_price": px, "last_mark_date": cal[-1].isoformat()}]
                       if shares else []),

@@ -220,3 +220,65 @@ class TestWiring:
         assert m["measurement_start"] == pg.MEASUREMENT_START
         for k in pg.PUBLIC_RULE_KEYS:
             assert k in m, k
+
+
+class TestSecondCheck:
+    """v0.45.459 二次检查（独立审阅 + 浏览器实看异常状态）补的守卫。"""
+
+    def test_never_opened_ledger_says_so_instead_of_zero_shares(self, tmp_path):
+        (tmp_path / "data" / DIRNAME).mkdir(parents=True)
+        d = _svc(tmp_path / "data").hedge()
+        assert d["data_available"] is True and d["opened"] is False and not d["errors"]
+        assert d["account"]["shares"] is None, "没开过账不是「0 股」"
+        assert d["account"]["identity_reason"] == "账本还没有记录"
+        assert d["freshness"]["stale"] is None and d["latest_is_as_of"] is None
+
+    def test_missing_positions_after_opening_is_an_error(self, root):
+        (root / DIRNAME / "positions.jsonl").unlink()
+        d = _svc(root).hedge()
+        assert "positions" in d["errors"] and "不存在" in d["errors"]["positions"]
+        assert d["account"]["shares"] is None and d["account"]["identity_reason"] == "持仓文件读不了"
+
+    def test_flat_book_file_present_is_zero_shares(self, root):
+        (root / DIRNAME / "positions.jsonl").write_text("", encoding="utf-8")
+        d = _svc(root).hedge()
+        assert not d["errors"] and d["account"]["shares"] == 0.0
+
+    def test_unreadable_meta_makes_date_unknown_not_null_text(self, root):
+        (root / DIRNAME / "meta.json").write_text('{"cash": NaN, "last_run_date": "2026-10-09"}', encoding="utf-8")
+        d = _svc(root).hedge()
+        assert "meta" in d["errors"] and d["as_of"] is None
+        assert d["latest_is_as_of"] is None and d["freshness"]["stale"] is None, "日期不可得 ⇒ 判断不了，不是 False"
+        assert d["account"]["identity_reason"] == "meta.json 读不了"
+        js = (STATIC / "pages" / "hedge.js").read_text(encoding="utf-8")
+        assert "d.latest_is_as_of === false" in js, "前端只在明确为 false 时报（null 不能被当成 false 印出「最后一天 null」）"
+
+    def test_old_mark_is_flagged(self, root):
+        p = root / DIRNAME / "positions.jsonl"
+        p.write_text(json.dumps({**POSITIONS[0], "last_mark_date": "2026-10-08", "last_price": 773.93}) + "\n",
+                     encoding="utf-8")
+        a = _svc(root).hedge()["account"]
+        assert a["mark_stale"] is True and a["mark_date"] == "2026-10-08"
+        assert _svc(_write(Path(str(root) + "_b"))).hedge()["account"]["mark_stale"] is False
+
+    def test_no_dead_error_field_from_audits(self, root):
+        """审计文件的 price_check 没有 error（异常中断的那一轮不写审计）：页面不再读一个永远不存在的字段。"""
+        assert "error" not in _svc(root).hedge()["latest"]["price_check"]
+        assert "pc.error" not in (STATIC / "pages" / "hedge.js").read_text(encoding="utf-8")
+
+    def test_price_source_labels_match_the_writer(self):
+        """标签键必须是 _default_mark 真会写的来源名（twelve_data_bar，不是 twelve_data_close）。"""
+        import inspect
+        js = (STATIC / "pages" / "hedge.js").read_text(encoding="utf-8")
+        src = inspect.getsource(pg._default_mark)
+        assert '"twelve_data_bar"' in src and "twelve_data_bar:" in js and "twelve_data_close:" not in js
+        assert "cboe_close:" in js and "cboe_intraday:" in js
+
+    def test_static_assets_are_revalidated_not_heuristically_cached(self, root):
+        """升级后新 index.html + 旧缓存 app.js ⇒ 新页面「没有这个页面」（浏览器里实际复现过）。/static/ 必须 no-cache。"""
+        c = _client(_svc(root))
+        for u in ("/static/app.js", "/static/pages/hedge.js", "/static/alphabot.css"):
+            r = c.get(u)
+            assert r.status_code == 200 and r.headers.get("cache-control") == "no-cache", (u, r.headers.get("cache-control"))
+        assert c.get("/").headers.get("cache-control") == "no-store"
+        assert c.get("/api/hedge").status_code == 200

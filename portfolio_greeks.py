@@ -1551,15 +1551,23 @@ def ledger_view(root=None) -> Dict:
         「读不了」，而不是整页出错，更不能把读不了当成「空仓」）。
     不写任何文件。"""
     d = Path(root if root is not None else PATHS.home) / "hedge_state"
-    out: Dict = {"state_dir": str(d), "exists": d.is_dir(), "positions": None, "meta": None, "errors": {},
+    out: Dict = {"state_dir": str(d), "exists": d.is_dir(), "opened": False, "positions": None, "meta": None, "errors": {},
                  "history": None, "rules": {k: CONFIG.get(k) for k in PUBLIC_RULE_KEYS},
                  "measurement_start": MEASUREMENT_START}
     if not out["exists"]:
         return out
-    try:
-        out["positions"] = ledger_io.load_jsonl(d / "positions.jsonl")
-    except (ledger_io.LedgerError, OSError) as exc:
-        out["errors"]["positions"] = f"{type(exc).__name__}: {exc}"
+    # 「开过账」= meta.json 在（第一次执行就写它）。开过账却没有持仓文件 ⇒ 被删了 / 数据根不对，是错不是空仓——
+    # 空仓时持仓文件照样在（写成空文件）。没开过账 ⇒ 持仓为 None、不报错，页面说「还没有记录」（v0.45.459 二次检查）。
+    out["opened"] = (d / "meta.json").exists()
+    pos_f = d / "positions.jsonl"
+    if not pos_f.exists():
+        if out["opened"]:
+            out["errors"]["positions"] = f"{pos_f} 不存在（meta.json 在：持仓文件被删了，或数据根不对）"
+    else:
+        try:
+            out["positions"] = ledger_io.load_jsonl(pos_f)
+        except (ledger_io.LedgerError, OSError) as exc:
+            out["errors"]["positions"] = f"{type(exc).__name__}: {exc}"
     try:
         out["meta"] = ledger_io.load_json(d / "meta.json", default=None)
     except (ledger_io.LedgerError, OSError) as exc:

@@ -144,7 +144,7 @@ export function gammaCurve(el, curve, spot) {
   });
 }
 
-export function lines(el, { x, series, xType = "category", yFmt = (v) => num(v), xFmt, bands = [], vmarks = [], hmarks = [], yMin }) {
+export function lines(el, { x, series, xType = "category", yFmt = (v) => num(v), xFmt, bands = [], vmarks = [], hmarks = [], yMin, yMax }) {
   const c = C();
   const marks = [
     ...vmarks.map((m) => vline(m.value, m.label, m.color || c.ink, m.type || "solid", m.width || 1.2)),
@@ -157,7 +157,7 @@ export function lines(el, { x, series, xType = "category", yFmt = (v) => num(v),
     tooltip: { trigger: "axis", valueFormatter: (v) => (isNum(v) ? yFmt(v) : "—"), axisPointer: { lineStyle: { color: c.lineStrong } } },
     xAxis: xType === "category" ? { type: "category", data: x, boundaryGap: false }
       : { type: "value", min: "dataMin", max: "dataMax", axisLabel: { formatter: xFmt || ((v) => num(v, 0)) } },
-    yAxis: { type: "value", scale: yMin === undefined, min: yMin, axisLabel: { formatter: yFmt } },
+    yAxis: { type: "value", scale: yMin === undefined && yMax === undefined, min: yMin, max: yMax, axisLabel: { formatter: yFmt } },
     series: series.map((s, i) => ({
       name: s.name, type: "line", data: s.data, showSymbol: s.symbol || false, symbolSize: 7, connectNulls: false,
       step: s.step, lineStyle: { width: s.width || 2, type: s.dash ? "dashed" : "solid", color: s.color },

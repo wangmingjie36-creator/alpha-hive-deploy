@@ -233,11 +233,18 @@ class _Guard:
         if deny is not None:
             return await JSONResponse(deny[1], status_code=deny[0])(scope, receive, send)
 
+        # /static/ 的 JS / CSS 必须每次向服务端核对（no-cache + ETag ⇒ 没变时 304）。此前不带 Cache-Control，浏览器 /
+        # 程序窗口按「启发式新鲜度」直接用缓存：升级后 index.html（no-store）是新的、app.js 却是旧的 ⇒ 新导航链接点开
+        # 「没有这个页面」（v0.45.459 二次检查在浏览器里实际复现）。本机服务，核对一次只是一个 304。
+        is_static = str(scope.get("path") or "").startswith("/static/")
+
         async def send_with_headers(message):
             if message["type"] == "http.response.start":
                 hs = list(message.get("headers") or [])
                 hs += [(b"content-security-policy", CSP.encode()), (b"x-content-type-options", b"nosniff"),
                        (b"referrer-policy", b"no-referrer")]
+                if is_static and not any(k.lower() == b"cache-control" for k, _ in hs):
+                    hs.append((b"cache-control", b"no-cache"))
                 message = {**message, "headers": hs}
             await send(message)
 

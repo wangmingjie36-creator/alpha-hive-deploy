@@ -57,7 +57,9 @@ def audit_brief(day: str, a: dict) -> dict:
         "execution_blocked": a.get("execution_blocked"),
         "spy_price": _num(a.get("spy_price")),
         "spy_mark": a.get("spy_mark"),
-        "price_check": {"n_stale": pc.get("n_stale"), "gaps": pc.get("gaps") or [], "error": pc.get("error"),
+        # 审计文件里的 price_check 没有 error 键：异常中断的那一轮根本不写审计（审计最后写），页面靠「最近审计不是
+        # 账本最后一天」/ 陈旧来报它（v0.45.459 二次检查：初版读一个永远不存在的 error，那条黄条恒不亮）
+        "price_check": {"n_stale": pc.get("n_stale"), "gaps": pc.get("gaps") or [],
                         "hedge_undecided": pc.get("hedge_undecided")},
     }
 
@@ -89,6 +91,23 @@ def account(positions: Optional[list], meta: Optional[dict], equity: List[dict])
     }
 
 
+def _identity_reason(acct: dict, errors: dict, opened: bool) -> Optional[str]:
+    """账目核对做不了时的真实原因（v0.45.459 二次检查：初版一律写「找不到同一天的放行净值行」，持仓读不了时也这么说）。"""
+    if acct.get("identity_ok") is not None:
+        return None
+    if errors.get("positions"):
+        return "持仓文件读不了"
+    if errors.get("meta"):
+        return "meta.json 读不了"
+    if not opened:
+        return "账本还没有记录"
+    if acct.get("shares") == 0 and not acct.get("mark_date"):
+        return "空仓，没有标记日"
+    if acct.get("nav") is None:
+        return "净值算不出来（缺现金或标记价）"
+    return f"找不到 {acct.get('mark_date')} 的放行净值行"
+
+
 def build_overview(view: dict, *, now_et: datetime) -> dict:
     """`portfolio_greeks.ledger_view()`（或演示数据，同形）→ 页面数据。纯函数。"""
     base = {"source": view.get("source", "ledger"), "now_et": now_et.isoformat(timespec="seconds"),
@@ -103,17 +122,23 @@ def build_overview(view: dict, *, now_et: datetime) -> dict:
     audits = hist.get("audits") or {}
     days = [audit_brief(d, audits[d]) for d in sorted(audits)]
     acct = account(view.get("positions"), view.get("meta"), equity)
+    errors = base["errors"]
+    opened = bool(view.get("opened", view.get("meta") is not None))
     as_of = acct.get("last_run_date")
+    acct["identity_reason"] = _identity_reason(acct, errors, opened)
+    # 持仓标记停在账本最后一天之前：那天以后 SPY 价取不到（生产 09-24 / 09-25 实有其事），市值 / 净值 / 浮动按旧价算
+    acct["mark_stale"] = bool(acct.get("mark_date") and as_of and acct["mark_date"] < as_of)
     expected, cal = SD.expected_ledger_date(now_et)
     excluded = hist.get("excluded") or {}
     return {
-        **base, "data_available": True, "as_of": as_of,
+        **base, "data_available": True, "opened": opened, "as_of": as_of,
+        # 账本日期不可得（meta 读不了 / 还没开账）⇒ stale 为 None（判断不了），不是 False（没陈旧）
         "freshness": {"as_of": as_of, "expected_as_of": expected, "calendar": cal,
-                      "stale": bool(as_of and as_of < expected)},
+                      "stale": (as_of < expected) if as_of else None},
         "account": acct,
         "latest": days[-1] if days else None,
-        # 最近一份放行的审计不是账本最后一天 ⇒ 那天的审计缺了或被拦了，页面要说
-        "latest_is_as_of": bool(days and days[-1]["date"] == as_of),
+        # 最近一份放行的审计不是账本最后一天 ⇒ 那天的审计缺了或被拦了，页面要说。两边有一边不可得 ⇒ None
+        "latest_is_as_of": (days[-1]["date"] == as_of) if (days and as_of) else None,
         "days": days,
         "equity": [{k: e.get(k) for k in ("date", "nav", "cash", "market_value", "spy_shares", "spy_price",
                                           "trades_today", "band_status")} for e in equity],
