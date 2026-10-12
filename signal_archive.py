@@ -1074,6 +1074,48 @@ QUARANTINE: List[Dict] = [
         "reason": "v0.45.475：当天 BILI 的期权链来自 yfinance 备用链（key_levels IV 为 Yahoo 长浮点指纹）；quote_set 当晚 23:33 被 _refill_empty_quote_set 用 CBOE 回填，原来的 error 被抹掉，v0.45.472 按 quote_set.error 认时漏掉。",
         "evidence": ("cache/options_snapshot_BILI_2026-10-05.json（key_levels.iv / _quote_set_refilled_at）", "CHANGELOG.md#v0.45.475"),
     },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.478（用户批准）：v0.45.471 普查出的 `options.iv_current == 25.0`（兜底常数）。共 18 行，
+    # 12 行已随 v0.45.472 的假现价 / 假链隔离删掉，这里是剩下的 6 行。只隔离 iv_current：
+    # 同日的 iv_rank / P/C / OI / GEX 不由这个常数产生（CRCL 06-09、BILI / META 06-15 的 iv_rank
+    # 可能由旧代码拿 25.0 当分子算出，**待验证**，未隔离）。
+    {
+        "date": "2026-06-09",
+        "tickers": ("CRCL",),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.478（用户 2026-10-12 批准）：OptionsAgent 当日 ATM IV 无效且无 last_valid_iv 缓存时把 iv_current 兜底成常数 25.0（v0.45.471 起改记 None、不入库）。这里的 25.0 不是观测；同日其余期权观测不是这个兜底的产物，不隔离。",
+        "evidence": (".swarm_results_2026-06-09.json（OracleBeeEcho.details.iv_current = 25.0，读的是 options_snapshot_CRCL_2026-06-10.json 槽位）",
+                     "CHANGELOG.md#v0.45.471", "CHANGELOG.md#v0.45.478"),
+    },
+    {
+        "date": "2026-06-15",
+        "tickers": ("BILI", "META"),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.478（用户 2026-10-12 批准）：OptionsAgent 当日 ATM IV 无效且无 last_valid_iv 缓存时把 iv_current 兜底成常数 25.0（v0.45.471 起改记 None、不入库）。这里的 25.0 不是观测；同日其余期权观测不是这个兜底的产物，不隔离。",
+        "evidence": (".swarm_results_2026-06-15.json（OracleBeeEcho.details.iv_current = 25.0；BILI 的快照文件之后被 02:12 重写成 12.5，入库值来自扫描结果）",
+                     "CHANGELOG.md#v0.45.471", "CHANGELOG.md#v0.45.478"),
+    },
+    {
+        "date": "2026-09-15",
+        "tickers": ("VKTX",),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.478（用户 2026-10-12 批准）：OptionsAgent 当日 ATM IV 无效且无 last_valid_iv 缓存时把 iv_current 兜底成常数 25.0（v0.45.471 起改记 None、不入库）。这里的 25.0 不是观测；同日其余期权观测不是这个兜底的产物，不隔离。",
+        "evidence": (".swarm_results_2026-09-15.json", "cache/options_snapshot_VKTX_2026-09-15.json", "CHANGELOG.md#v0.45.478"),
+    },
+    {
+        "date": "2026-09-16",
+        "tickers": ("VKTX",),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.478（用户 2026-10-12 批准）：OptionsAgent 当日 ATM IV 无效且无 last_valid_iv 缓存时把 iv_current 兜底成常数 25.0（v0.45.471 起改记 None、不入库）。这里的 25.0 不是观测；同日其余期权观测不是这个兜底的产物，不隔离。",
+        "evidence": (".swarm_results_2026-09-16.json", "cache/options_snapshot_VKTX_2026-09-16.json", "CHANGELOG.md#v0.45.478"),
+    },
+    {
+        "date": "2026-09-17",
+        "tickers": ("VKTX",),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.478（用户 2026-10-12 批准）：OptionsAgent 当日 ATM IV 无效且无 last_valid_iv 缓存时把 iv_current 兜底成常数 25.0（v0.45.471 起改记 None、不入库）。这里的 25.0 不是观测；同日其余期权观测不是这个兜底的产物，不隔离。",
+        "evidence": (".swarm_results_2026-09-17.json", "cache/options_snapshot_VKTX_2026-09-17.json", "CHANGELOG.md#v0.45.478"),
+    },
 ]
 
 

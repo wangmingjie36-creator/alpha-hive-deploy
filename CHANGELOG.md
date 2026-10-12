@@ -5,7 +5,33 @@
 
 ---
 
-## [0.45.478] — 2026-10-12 — 占位（进行中：清掉 signal_archive 剩余 6 行 options.iv_current = 25.0 兜底常数，用户批准）
+## [0.45.478] — 2026-10-12 — Fixed（数据，用户批准）：`signal_archive` 剩余 6 行 `options.iv_current = 25.0`（v0.45.471 普查出的兜底常数）入隔离名单并清库；`purge_quarantined_signal_rows.py` 新增 `--only-tag`
+
+### 为什么
+- v0.45.471 普查出 18 行 `options.iv_current == 25.0`（OptionsAgent 当日 ATM IV 无效且无缓存时的兜底常数，不是观测）；v0.45.472 的假现价 / 假链隔离已删掉其中 12 行。用户 10-12 批准「备份后删除剩下的 6 行」。
+- 只删行不够：`signal_archive` 由 `.swarm_results_{date}.json` 派生，回填会把它们写回来 ⇒ 先进 `QUARANTINE`（入库口拦截），再清库。
+
+### Fixed
+- `signal_archive.QUARANTINE` 新增 5 条（3 个日期组），`signals` **只有** `options.iv_current`、带 `tickers`：
+  | 日期 | 标的 | 出处 |
+  |---|---|---|
+  | 2026-06-09 | CRCL | `.swarm_results_2026-06-09.json`（读的是 `options_snapshot_CRCL_2026-06-10.json` 槽位） |
+  | 2026-06-15 | BILI、META | `.swarm_results_2026-06-15.json`（BILI 的快照文件之后被 02:12 重写成 12.5，入库值来自扫描结果） |
+  | 2026-09-15 / 16 / 17 | VKTX | 当日 `.swarm_results` + 快照 |
+- 清库（生产 `pheromone.db`）：`experiments/purge_quarantined_signal_rows.py --only-tag v0.45.478 --expect 6 --apply`，在线备份 `db_backups/pheromone_pre_v0.45.478_iv_constant_purge.db`；单个 `BEGIN IMMEDIATE` 事务内现读现判、命中恰为 6 才删；`signal_archive` 129,939 → 129,933。事后独立核对：库里 25.0 剩 0 行、备份里 6 行逐 id 在、两边 `integrity_check` ok。
+- 只读核对：这 6 个 id 恰好就是库里全部 `options.iv_current == 25.0` 的行（集合相等）。
+
+### Added
+- `experiments/purge_quarantined_signal_rows.py --only-tag TAG`：只删「命中的隔离条目 reason 含该标记」的行。不加时行为不变。
+  原因：不过滤时生产库命中 **31** 行（预期 6）——另有 25 行（CRWD 04-26 / 05-03 / 05-10、VKTX 08-12、MU 08-26，各 5 类期权观测）仍命中 main 上 v0.45.472 的条目。v0.45.476 会话确认：这 5 对是 472 的误判，已于 12:43 按原 id 逐行恢复，并将在 476 里把它们移出隔离名单（476 推送前，main 上不带 `--only-tag` 的清库会把它们再删一遍——别跑）。本次**未动**这 25 行。
+- `tests/test_signal_quarantine.py::test_iv_constant_25_rows_quarantined_only_for_iv_current`：6 对都挡 `iv_current`、都不挡同日 `iv_rank`、同日其他标的不挡。变异 3 个全红（删 `tickers`、把 `signals` 扩到 `iv_rank`、删掉 06-15 条目）。
+
+### 未处理（待验证）
+- CRCL 06-09、BILI / META 06-15 的 `options.iv_rank` 可能由 v0.43.19 之前的代码拿 25.0 当分子算出（那时 IV Rank = 当前 IV 对 HV×premium 分布排名）。未核实、未隔离。VKTX 09-15 ~ 17 的 `iv_rank_source` 是 `hv_proxy`（不读 `current_iv`），不受影响。
+- 21 份快照文件不动（原始记录，期权链无法重取）。
+
+### 评分 / 世代边界
+- 6 行都在 2026-10-09 之前的世代；当前世代（`cohort_start()` 10-09）IC 样本不受影响。不追加世代边界。
 
 ## [0.45.477] — 2026-10-12 — 占位（进行中：v0.45.473 二次检查）
 

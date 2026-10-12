@@ -209,3 +209,18 @@ def test_fingerprinted_yfinance_days_quarantine_gex_only():
     for d in ("2026-09-01", "2026-10-05"):
         assert sa.is_quarantined(d, "BILI", "options.gamma_exposure")
         assert not sa.is_quarantined(d, "BILI", "options.iv_current")
+
+
+def test_iv_constant_25_rows_quarantined_only_for_iv_current():
+    """v0.45.478（用户批准）：iv_current 兜底常数 25.0 剩下的 6 行——只挡 `options.iv_current`。
+
+    变红的变异：删掉任一条目；或把 signals 扩到同日其他期权观测（iv_rank 等不由这个常数产生）；
+    或去掉 tickers（会把同日其他标的的真实 IV 一起挡掉）。
+    """
+    pairs = [("2026-06-09", "CRCL"), ("2026-06-15", "BILI"), ("2026-06-15", "META"),
+             ("2026-09-15", "VKTX"), ("2026-09-16", "VKTX"), ("2026-09-17", "VKTX")]
+    for d, t in pairs:
+        assert sa.is_quarantined(d, t, "options.iv_current"), (d, t)
+        assert not sa.is_quarantined(d, t, "options.iv_rank"), (d, t)
+    assert not sa.is_quarantined("2026-09-15", "NVDA", "options.iv_current")
+    assert not sa.is_quarantined("2026-06-09", "NVDA", "options.iv_current")

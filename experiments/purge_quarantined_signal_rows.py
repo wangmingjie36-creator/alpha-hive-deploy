@@ -5,6 +5,10 @@
 
     python3 experiments/purge_quarantined_signal_rows.py --expect 382            # dry-run：只数
     python3 experiments/purge_quarantined_signal_rows.py --expect 382 --apply --backup <file.db>
+    python3 experiments/purge_quarantined_signal_rows.py --only-tag v0.45.478 --expect 6   # 只清某一批条目
+
+`--only-tag`（v0.45.478）：只删「命中的隔离条目 reason 里含该标记」的行。库里可能还挂着别的批次
+命中但没清的行（别的会话负责、未获批准由本次清），不加这个过滤 `--expect` 就对不上、只能停下。
 
 安全：`--apply` 先用 sqlite 在线备份 API 整库备份；再在单个 `BEGIN IMMEDIATE` 事务里**现读现判**
 （`is_quarantined()`，不依赖任何早先的快照结果），命中数必须恰好等于 `--expect` 才删，删后核对这些 id
@@ -24,18 +28,27 @@ def main():
     ap.add_argument("--expect", type=int, required=True, help="预期命中行数（不等就中止）")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--backup", default=None)
+    ap.add_argument("--only-tag", default=None,
+                    help="只删命中「reason 含该标记」的隔离条目的行（如 v0.45.478）；缺省 = 全部隔离行")
     a = ap.parse_args()
     import signal_archive as sa
     from hive_logger import PATHS
     db = Path(a.db) if a.db else Path(PATHS.db)
 
+    def _tagged(d, t, s):
+        # 与 sa.is_quarantined 同一判据，只是限定在 reason 带标记的条目上（现读 QUARANTINE，不缓存）
+        return any(q["date"] == d and s in q["signals"]
+                   and (q.get("tickers") is None or t in q["tickers"])
+                   and a.only_tag in q.get("reason", "")
+                   for q in sa.QUARANTINE)
+
     def hits(conn):
         return [i for i, d, t, s in conn.execute(f"SELECT id, date, ticker, signal FROM {sa.TABLE}")
-                if sa.is_quarantined(d, t, s)]
+                if sa.is_quarantined(d, t, s) and (a.only_tag is None or _tagged(d, t, s))]
 
     with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as ro:
         n = len(hits(ro))
-    print(f"{db}: 命中隔离名单 {n} 行（预期 {a.expect}）")
+    print(f"{db}: 命中隔离名单 {n} 行（预期 {a.expect}）" + (f"，限标记 {a.only_tag}" if a.only_tag else ""))
     if n != a.expect:
         raise SystemExit("命中数与预期不符——不删，停下")
     if not a.apply:
