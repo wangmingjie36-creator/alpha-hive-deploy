@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.481] — 2026-10-12 — 占位（进行中：08-14 前 iv_current = 25.0 日子的 options.iv_rank / iv_percentile 30 行入隔离并清库，用户批准；等 v0.45.479 推送后动 signal_archive）
+
 ## [0.45.480] — 2026-10-12 — Fixed：编排器 Step 14 对备份 `git_error` 一律报「未确认是否已提交/推送」——`run_backup` 在 status.json 写 `git_outcome`，编排器按它说清这一轮提交了没有、推送了没有
 
 v0.45.430 二次检查记下的措辞偏差：同一个 `stage="git_error"` 底下，`SHA256SUMS` 列的路径不在索引里（430 新增）、`git add -A` 返回非 0、旧名元数据退役失败这几种**确定没提交**，而且根本不是「调用异常」；只有 `git commit` / `git push` 抛异常（如超时）时才真说不准——命令可能已经跑完了。编排器 Step 14 对它们一律报「git 调用异常（如超时），未确认是否已提交/推送」。判定（红 / 不红、`git_error_failed`）不变，只改说法。
