@@ -195,7 +195,7 @@ class TestAnalyzeSlicesByGeneration:
 #: 不读任何系统输出、且没有任何边界直接改过其算法的信号 —— 必须保留全史。
 #: 若日后某条边界确实改了其中一个的定义：把它从这里移除，并在 CHANGELOG 写明依据。
 NEVER_SLICED_TODAY = (
-    "options.iv_current", "options.put_call_ratio", "options.gamma_exposure",
+    "options.iv_current", "options.put_call_ratio",
     "options.total_oi", "options.iv_rank", "options.iv_percentile", "options.iv_rank_is_real",
     "insider.filings", "insider.dollar_bought", "insider.dollar_sold",
     "insider.distinct_buyers", "insider.officer_buys",
@@ -211,6 +211,9 @@ NEVER_SLICED_TODAY = (
 
 #: CHANGELOG 里实测过「换了量」的系统输出 → 其世代起点不得早于该日。
 DOCUMENTED_REDEFINITIONS = {
+    # v0.45.472（补登 v0.34.0）：期权链主源 yfinance → CBOE，主链 GEX 的 gamma 来源与 S 都换了——yfinance 时代 gamma 是
+    # BS 补的、S 取行权价中位数；CBOE 时代 gamma 来自 CBOE。原在 NEVER_SLICED_TODAY，依据见 CHANGELOG v0.45.472。
+    "options.gamma_exposure": "2026-06-30",
     "agent.GuardBeeSentinel.score": "2026-09-07",      # v0.45.163 普查读法
     "agent.GuardBeeSentinel.direction": "2026-09-07",  # v0.45.163 方向 26.2% 不一致
     "guard.consistency_census": "2026-09-07",          # v0.45.163

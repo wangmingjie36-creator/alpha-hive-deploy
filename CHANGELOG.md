@@ -9,7 +9,43 @@
 
 ## [0.45.473] — 2026-10-12 — 占位（进行中：MultiSourceFetcher 历史字段回落收口到单一出口——Finnhub/AV 胜出、过期缓存、CBOE 推迟价三条路径 momentum_5d / volume_ratio 不再无回落直出）
 
-## [0.45.472] — 2026-10-12 — 占位（进行中：假现价日子的期权信号隔离 + 价格索引错日 / 盘中行清理 + 生产 cache 里 TEST 测试残留移出）
+## [0.45.472] — 2026-10-12 — Fixed（数据）：假现价 / 假链日子的期权观测隔离并清库（382 行）；`options.gamma_exposure` 补登 06-30 世代边界（yfinance 主源时代 GEX 是另一个量）；价格索引剩余 91 行错日 / 盘中价清理（12 行挪到正确日期）；生产 cache 的 TEST 测试残留移出
+
+用户批准「第 1、2、3、12 条都做」（v0.45.468 之后剩余问题清单）。
+
+### 1+2. 期权观测隔离（`signal_archive.QUARANTINE` 新增 49 条，生产库删 382 行）
+**判据**：每份 09-04 以前的期权快照，拿 `_snapshot_stock_price` 对照 Twelve Data 日线收盘（当天与前后一个交易日；非交易日取前一个交易日；
+56 只标的、03-02 ~ 09-03，免费档 56+4 次调用），再看快照内容。逐份分类：
+- **样本链** 88 份（04 ~ 07 月）：总 OI 85200 / P/C 0.54 / 到期 2026-03-21——硬编码样本链，整份期权观测是假的；
+- **现价常数 145.0 / 100.0** 21 份（analyze 兜底常数，或测试传入价写穿了生产）；
+- **偏离 > 20%** 9 份（VKTX 7.82、TSLA 189.45、NVDA 145.32 …，坏链或测试写穿）；
+- **整数行权价形状、偏离 > 1%** 15 份（行权价中位数兜底；⚠️ 形状判，真实价恰好是 .00/.50 的概率约 2%/份）；
+- **不隔离**：5 份财报日盘后价（AMZN 07-30、CRM 08-26、MSFT 07-29、RKLB 07-22、TSLA 07-23）——那是真实价、时点不对（「收盘后用 current_price」那类，已由 `official_price` 修掉），不是假价。
+以上 4 类按（日期, 标的）隔离五类市场观测（iv_current / put_call_ratio / gamma_exposure / total_oi / bear.options_bear，与既有条目同口径；**不动 Agent 分**——那是审计轨迹）：33 个日期、360 行。
+另 **CBOE 主源时代退到 yfinance 备用链**的 44 份快照（09-04 起 `quote_set.error == "chain source is not cboe"`，16 个日期）只隔离 `options.gamma_exposure`（v0.45.468 前该链 BS gamma 的 S 是行权价中位数；当天 IV / P/C / OI 用的是调用方真价，不动）：22 行。06-30 ~ 09-03 的同类日子没有 quote_set、认不出，待验证。
+70 个 (日期, 标的, 信号) 早已在既有隔离条目里（06-10、07-08 等）。
+**清库**：`experiments/purge_quarantined_signal_rows.py`（新，可复用）——sqlite 在线备份 `db_backups/pheromone_pre_v0.45.472_fake_snapshot_quarantine.db`，单个 `BEGIN IMMEDIATE` 事务内现读现判、命中数恰为预期 382 才删、删后零残留 + integrity ok：`signal_archive` 130,298 → 129,916。
+证据（核对用收盘价、逐份分类）：`~/alpha-hive-data/_manual_backups/2026-10-12_quarantine_evidence_v0.45.472/`。
+
+### 1'. `options.gamma_exposure` 补登世代边界 2026-06-30 / v0.34.0
+CBOE 主源切换（c738c567）前，主链 GEX 的 gamma 由 BS 补、S 取行权价中位数（analyze 从不给 fetch_options_chain 传价）；之后 gamma 来自 CBOE。
+这是**产生该值的函数变了**（按 `signal_archive` 判据换代，不是隔离），03-10 ~ 06-29 的 787 行保留、分析时与之后分开。
+`ic_rerun_readiness._COHORT_HISTORY` 按部署日期插在表头（末条不变 ⇒ `cohort_start()` 仍是 10-09，当前 IC 样本不受影响）；`COHORT_SIGNAL_SCOPE["v0.34.0"] = ("options.gamma_exposure",)`；
+测试：从 `NEVER_SLICED_TODAY` 移到 `DOCUMENTED_REDEFINITIONS`（该名单要求的做法），`FROZEN` 钉新条目原文摘要。
+
+### 3. 价格索引剩余行（`experiments/clean_price_index_misdated_20261012.py`，新）
+v0.45.464 保留并只报告的 91 行（76 行与相邻一天收盘吻合 ≤ 1%、15 行偏离 1–5%）细看：只有 39 行与相邻那天收盘**逐位吻合**（≤ 0.05%，真收盘、日期错一天），其余是盘前 / 盘中 / 盘后价。
+规则：逐位吻合且那天还没有行 ⇒ 挪过去（12 行，多为 08-11 → 08-10，即已隔离的 08-11 会话错位）；其余 79 行删。现在 613 行全部与当天收盘 ≤ 1%。
+备份：`~/alpha-hive-data/_manual_backups/2026-10-12_price_index_misdated_v0.45.472/`（原文件 + 核对收盘价 + 清单）。
+
+### 12. 生产 cache 的 TEST 测试残留
+10 个文件（`options_snapshot_TEST_*` ×4、`options_TEST_hist_iv_v3.json`、`options_TEST_last_valid_iv.json`、`.price_index_migrated_TEST`、`.iv_index_migrated_TEST`、`data_cache/{social,short}_TEST.json`）**移到** `~/alpha-hive-data/_manual_backups/2026-10-12_test_ticker_residue_v0.45.472/`（不删，可原样放回）。库里零 TEST 行；其余标的名全是真实票。
+data_cache 那两份是 09-05 / 09-07 写的——当时数据还在开发检出里（09-26 迁出），是迁移带过来的旧残留，不是新泄漏。
+
+### 验证
+- 新增 `TestFakeSnapshotQuarantineV0_45_472`（4 条：样本链整份隔离 / 行权价形状日隔离 / yfinance 日只隔离 GEX / 盘后价日不隔离）；世代 / 隔离 / IC 闸相关 311 条全绿。
+- 全量 9187 passed；红的只有已知两项：`TestCoverageHorizon`（等 2027 BLS/BEA 日程）与 Alpha Bot 盘中采样触发的 session 级真实数据根闸。
+
 
 ## [0.45.471] — 2026-10-12 — Fixed：期权当日 ATM IV 无效（<5% / >150% / 无 ATM 合约）且无可用 `last_valid_iv` 缓存时，`iv_current` 记 **None**、`data_quality` 判 degraded——此前兜底成常数 **25.0**，可照判 `"real"`；计数 `snapshot_slot_stats()["iv_unavailable"]`；读者全部容忍 None（报告显示「—」）
 
