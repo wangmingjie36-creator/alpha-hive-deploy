@@ -279,13 +279,14 @@ class TestResultReachesAlerts:
         monkeypatch.setattr(yf_gate, "install", lambda: False)
         monkeypatch.setattr(adr._timing, "write", lambda d, extra=None, **k: written.append((d, extra)))
         monkeypatch.setattr(sys, "argv", ["alpha_hive_daily_report.py", "--swarm", "--no-llm", "--force"])
+        import cloud_snapshot_loader as csl            # 每日观测在后台线程里跑；本条只核 extra 的键，行为见 test_cloud_snapshot_freshness
+        monkeypatch.setattr(csl, "lag_summary", lambda today, **k: {"available": True, "lag": 1})
         adr.main()
 
         assert len(written) == 1, written
         extra = written[0][1]
         assert set(extra) == {"gh_pages", "news_sources", "cloud_snapshots"}, f"extra 里出现了已退役的字段：{sorted(extra)}"
-        cs = extra["cloud_snapshots"]          # v0.45.466：测试里 conftest 钉住了出网 ⇒ 刷新失败如实记下
-        assert cs["refresh_ok"] is False and "测试默认离线" in cs["refresh_error"], cs
+        assert isinstance(extra["cloud_snapshots"], dict) and "available" in extra["cloud_snapshots"]
         ns = extra["news_sources"]
         assert ns["available"] is True and ns["by_source"] == {"yahoo_finance": 1}, ns
         ghp = extra["gh_pages"]

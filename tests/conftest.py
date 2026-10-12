@@ -8,6 +8,7 @@ import sys
 import os
 import pathlib
 import site
+import threading
 import weakref
 import pytest
 
@@ -363,37 +364,59 @@ def _block_git_transport_probe(request, monkeypatch):
     yield
 
 
-@pytest.fixture(autouse=True)
-def _block_cloud_snapshot_fetch(request, monkeypatch):
+#: 当前测试的快照出网闸状态：`calls` 记被拦的调用（供闸自身的测试核对），`allow_real` 只给 network 标记的用例
+_SNAPSHOT_FETCH_GATE = {"calls": [], "allow_real": False}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cloud_snapshot_fetch_gate():
     """`cloud_snapshot_loader._git_fetch`（v0.45.466）在 **git 子进程**里出网——上面两道（库级 API / 裸 socket）
     都挡不住。补跑入口 `_snapshot_ctx`、每日观测 `lag_summary`、入场价回填都会走到它，而缺省仓库就是本检出
     （origin = GitHub）。
 
-    只放行 origin 是**本地路径**的仓库（测试自己建的裸仓库：fetch 不出网，测试要真跑它）；其余钉成抛
-    `_OfflineInTests`（与真断网同一条降级路径）并记账。顺带每条测试清空本进程的刷新 / 告警记录，
-    免得上一条测试刷新过，下一条的「本地陈旧还是云端没有」判断跟着变。`network` 标记的用例不钉。
+    **session 级装、整个会话不撤**（v0.45.466 二次检查）：每日观测跑在后台线程里，线程可能活过起它的那条测试——
+    函数级 monkeypatch 在 teardown 撤掉闸之后它再拉，就真出网了（test_production_sync 的 main 用例实测会这样）。
+    只放行 origin 是**本地路径**的仓库（测试自己建的裸仓库：fetch 不出网，测试要真跑它）；其余抛 `_OfflineInTests`
+    （与真断网同一条降级路径）并记账。`network` 标记的用例经 `_SNAPSHOT_FETCH_GATE["allow_real"]` 放行。
     """
     import subprocess
     import cloud_snapshot_loader as _csl
-    monkeypatch.setattr(_csl, "_REFRESHED", {})
-    monkeypatch.setattr(_csl, "_WARNED", set())
-    if request.node.get_closest_marker("network"):
-        yield
-        return
-    real, calls = _csl._git_fetch, []
+    real = _csl._git_fetch
 
-    def _guarded(repo, timeout):
+    def _gated(repo, timeout):
         url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=repo,
                              capture_output=True, text=True).stdout.strip()
-        if url and (os.path.isabs(url) or url.startswith("file://")):
+        if _SNAPSHOT_FETCH_GATE["allow_real"] or (url and (os.path.isabs(url) or url.startswith("file://"))):
             return real(repo, timeout)
-        calls.append((repo, url))
+        _SNAPSHOT_FETCH_GATE["calls"].append((repo, url))
         raise _OfflineInTests(f"测试默认离线：cloud_snapshot_loader 要从 {url or '（无 origin）'} "
                               "拉 cloud-snapshots（tests/conftest.py）")
 
-    monkeypatch.setattr(_csl, "_git_fetch", _guarded)
+    _csl._git_fetch = _gated
+    yield
+    _csl._git_fetch = real
+
+
+@pytest.fixture(autouse=True)
+def _cloud_snapshot_per_test_state(request, monkeypatch):
+    """每条测试清空本进程的刷新 / 告警记录（免得上一条刷新过，下一条的「本地陈旧还是云端没有」跟着变），
+    并在收尾时**等本条测试起的每日观测线程做完**：活过测试的线程会把刷新记录写进下一条测试的表里。"""
+    import cloud_snapshot_loader as _csl
+    monkeypatch.setattr(_csl, "_REFRESHED", {})
+    monkeypatch.setattr(_csl, "_WARNED", set())
+    calls: list = []
+    monkeypatch.setitem(_SNAPSHOT_FETCH_GATE, "calls", calls)
+    monkeypatch.setitem(_SNAPSHOT_FETCH_GATE, "allow_real", bool(request.node.get_closest_marker("network")))
     request.node._snapshot_fetch_calls = calls
     yield
+    adr = sys.modules.get("alpha_hive_daily_report")
+    if adr is None:
+        return                      # 没导入过日报 ⇒ 不可能起过观测线程
+    name = adr._CloudSnapshotObservation.THREAD_NAME
+    for t in threading.enumerate():
+        if t.name == name:
+            t.join(15)
+            assert not t.is_alive(), f"每日观测线程 {name} 活过了起它的测试（15 秒没做完）——它会污染后面的测试"
 
 
 # ==================== 可复用的显式源桩（各模块 opt-in）====================

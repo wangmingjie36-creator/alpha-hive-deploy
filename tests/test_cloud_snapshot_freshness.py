@@ -307,3 +307,23 @@ class TestAlert:
 
     def test_scan_that_did_not_run_is_not_judged(self, tmp_path):
         assert _hits(tmp_path, _status(_cs(lag=9), step2="failed")) == []
+
+
+class TestTestIsolation:
+    """测试会话里这条出网的门一直关着、后台观测线程不活过起它的测试（v0.45.466 二次检查：初版闸是函数级 monkeypatch，
+    teardown 撤掉后，活过测试的观测线程再拉就真出网，还会把刷新记录写进下一条测试的表）。两条按定义顺序跑。"""
+
+    def test_gate_is_installed_for_the_whole_session(self):
+        assert csl._git_fetch.__qualname__.startswith("_cloud_snapshot_fetch_gate"), csl._git_fetch
+
+    def test_a_leaves_a_slow_observation_thread_behind(self, monkeypatch):
+        import time
+        import alpha_hive_daily_report as adr
+        monkeypatch.setattr(csl, "lag_summary", lambda today, **k: time.sleep(0.5) or {"available": True})
+        adr._CloudSnapshotObservation("2026-09-14")          # 不等它：测试收尾必须替我们等完
+
+    def test_b_no_observation_thread_outlives_its_test(self):
+        import threading
+        import alpha_hive_daily_report as adr
+        alive = [t for t in threading.enumerate() if t.name == adr._CloudSnapshotObservation.THREAD_NAME]
+        assert not alive, "上一条测试起的观测线程活过了它（conftest 收尾没等）"

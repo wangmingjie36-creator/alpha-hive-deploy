@@ -2627,10 +2627,12 @@ class _CloudSnapshotObservation:
     「没观测到」（告警侧照报 P2「未观测」，不当成「查过了没事」）。
     """
 
+    #: 线程名——测试收尾按它等线程做完（tests/conftest.py `_cloud_snapshot_per_test_state`）
+    THREAD_NAME = "cloud-snapshots-lag"
+
     def __init__(self, date_str: str):
         self._result = None
-        self._thread = threading.Thread(target=self._run, args=(date_str,),
-                                        name="cloud-snapshots-lag", daemon=True)
+        self._thread = threading.Thread(target=self._run, args=(date_str,), name=self.THREAD_NAME, daemon=True)
         self._thread.start()
 
     def _run(self, date_str: str) -> None:
