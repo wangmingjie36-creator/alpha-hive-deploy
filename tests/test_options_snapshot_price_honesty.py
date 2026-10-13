@@ -15,7 +15,7 @@
 
 import json
 import math
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -27,6 +27,20 @@ import price_history as ph
 from options_analyzer import OptionsAgent, OptionsAnalyzer
 
 NAN = float("nan")
+
+# `fetch_cboe_chain` 按 `C._pdt_now()` 选到期日（`_select_expiries`：DTE<3 一律排除，且 DTE 比日历天数
+# 少一天）。夹具合约的到期日若写死、钟不钉，到期前 3 个日历日起整条链被排除 ⇒ 返回 None（v0.45.489：
+# 原写死 2026-10-16，10-13 起三条红）。⇒ 钉钟，到期日按钉住的「今天」取远月，两者都不随真实日期漂。
+CBOE_NOW = datetime(2026, 10, 12, 14, 30)   # PT naive，与 `_snapshot_now` 的 17:30 ET 同一时刻
+CBOE_EXPIRY = datetime(2026, 11, 20)        # 远月标准月权：钉住的钟下 DTE=38，落在 far 桶
+
+
+def _occ(cp, k):
+    return f"NVDA{CBOE_EXPIRY:%y%m%d}{cp}{int(k * 1000):08d}"
+
+
+def _pin_cboe_clock(monkeypatch):
+    monkeypatch.setattr(C, "_pdt_now", lambda: CBOE_NOW)
 
 
 # ═══════════════════════════════════════════════════════════════ 现价唯一出处
@@ -64,8 +78,6 @@ class TestResolveStockPrice:
 class TestCboeChainCarriesUnderlyingPrice:
 
     def _payload(self, price):
-        def _occ(cp, k):
-            return f"NVDA261016{cp}{int(k * 1000):08d}"
         opts = [{"option": _occ(cp, k), "open_interest": 500, "iv": 0.3, "gamma": 0.05,
                  "bid": 1.0, "ask": 1.1, "volume": 10, "last_trade_price": 1.05}
                 for cp in ("C", "P") for k in (200.0, 220.0, 240.0)]
@@ -78,6 +90,7 @@ class TestCboeChainCarriesUnderlyingPrice:
         """
         monkeypatch.setattr(C, "_fetch_cboe_payload", lambda *a, **k: self._payload(219.34))
         monkeypatch.setattr(C, "is_market_open", lambda *a, **k: True)
+        _pin_cboe_clock(monkeypatch)
         chain = C.fetch_cboe_chain("NVDA", 0.0)
         assert chain is not None
         assert chain["underlying_price"] == pytest.approx(219.34)
@@ -90,6 +103,7 @@ class TestCboeChainCarriesUnderlyingPrice:
         """
         monkeypatch.setattr(C, "_fetch_cboe_payload", lambda *a, **k: self._payload(None))
         monkeypatch.setattr(C, "is_market_open", lambda *a, **k: True)
+        _pin_cboe_clock(monkeypatch)
         chain = C.fetch_cboe_chain("NVDA", 0.0)
         assert chain is not None and chain["underlying_price"] is None
         assert chain["underlying_price_source"] == "unavailable"
@@ -294,12 +308,13 @@ class TestGexNonFinite:
 
         变红的变异：把 `if not g or not math.isfinite(g)` 改回 `if not g`。
         """
-        opts = [{"option": f"NVDA261016{cp}00100000", "open_interest": 100, "iv": 0.3,
+        opts = [{"option": _occ(cp, 100.0), "open_interest": 100, "iv": 0.3,
                  "gamma": "NaN", "bid": 1.0, "ask": 1.1, "volume": 1, "last_trade_price": 1.0}
                 for cp in ("C", "P")]
         monkeypatch.setattr(C, "_fetch_cboe_payload",
                             lambda *a, **k: {"options": opts, "current_price": 100.0, "close": 100.0})
         monkeypatch.setattr(C, "is_market_open", lambda *a, **k: True)
+        _pin_cboe_clock(monkeypatch)
         chain = C.fetch_cboe_chain("NVDA", 0.0)
         gammas = [r["gamma"] for r in chain["calls"] + chain["puts"]]
         assert gammas and all(math.isfinite(g) and g > 0 for g in gammas)
@@ -475,8 +490,11 @@ class TestDownstreamFormattingToleratesNone:
         变红的变异：把守卫改回 `if pin_strike:`（None 价 ⇒ TypeError ⇒ analyze 吞掉 ⇒ 日历整份消失）。
         """
         from market_intelligence import calculate_gamma_expiry_calendar
-        calls = [{"expiration": "2026-11-20", "strike": 300.0, "openInterest": 5000, "gamma": 0.02}]
-        puts = [{"expiration": "2026-11-20", "strike": 280.0, "openInterest": 1000, "gamma": 0.01}]
+        # 被测函数直读 `date.today()`、丢弃已过期到期日，无注入接缝 ⇒ 到期日相对真实今天、在测试体内算
+        # （v0.45.489：原写死 2026-11-20，11-21 起红）。39 天 = 写下时（10-12）的原始间隔，留在 45 天近月窗口内。
+        expiry = (date.today() + timedelta(days=39)).isoformat()
+        calls = [{"expiration": expiry, "strike": 300.0, "openInterest": 5000, "gamma": 0.02}]
+        puts = [{"expiration": expiry, "strike": 280.0, "openInterest": 1000, "gamma": 0.01}]
         out = calculate_gamma_expiry_calendar(calls, puts, None)
-        assert out["pin_expiry"] == "2026-11-20"
+        assert out["pin_expiry"] == expiry
         assert "距当前" not in out["charm_note"]

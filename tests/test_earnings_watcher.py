@@ -12,6 +12,7 @@ Covers:
 - Singleton: get_watcher / auto_check_earnings
 """
 
+import json
 import types
 from datetime import datetime, date, timedelta
 
@@ -186,6 +187,22 @@ class TestGetEarningsDate:
         watcher = EarningsWatcher()
         result = watcher.get_earnings_date("XYZ")
         assert result is None
+
+    def test_empty_earnings_list_is_none_and_not_cached(self, monkeypatch):
+        """v0.45.500：AMD 07-20 的病。日历非空（有分红等别的键）、`Earnings Date` 是 `[]`：
+        `[]` 是假值却不是 None，旧实现一路放行到 `str([])[:10]`，把字符串 "[]" 当日期写进缓存。
+        变异：退回 `cal.get("Earnings Date")` + `str(x)[:10]` ⇒ 返回 "[]" 且写缓存。"""
+        _make_fake_yf(monkeypatch, calendar_data={"Earnings Date": [], "Ex-Dividend Date": datetime(2026, 11, 1)})
+        assert EarningsWatcher().get_earnings_date("AMD") is None
+        assert not (ew.CACHE_DIR / "AMD_date.json").exists()
+
+    def test_bad_cached_value_within_ttl_is_refetched(self, monkeypatch):
+        """旧版写进缓存的 "[]" 在 TTL 内也不认，当未命中重抓。变异：去掉读缓存时的日期校验 ⇒ 返回 "[]"。"""
+        (ew.CACHE_DIR / "AMD_date.json").write_text(json.dumps(
+            {"ticker": "AMD", "earnings_date": "[]", "source": "yfinance"}), encoding="utf-8")
+        _make_fake_yf(monkeypatch, calendar_data={"Earnings Date": [datetime(2026, 11, 3)]})
+        got = EarningsWatcher().get_earnings_date("AMD")
+        assert got["earnings_date"] == "2026-11-03" and got["cached"] is False
 
 
 # ==================== TestFetchEarningsResults ====================

@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 
 import sell_strike_report as R
 from alphabot import hedge as HG
+from alphabot import premium as PM
 from alphabot import straddle as SD
 from hive_logger import PATHS, get_logger
 
@@ -47,7 +48,11 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class BadRequest(ValueError):
-    """参数非法（服务端映射成 400）。"""
+    """参数非法（服务端映射成 400）。`param` = 出错的参数名（有就随 400 一起回给前端）。"""
+
+    def __init__(self, msg="", param: Optional[str] = None):
+        super().__init__(msg)
+        self.param = param
 
 
 def norm_ticker(t) -> str:
@@ -138,7 +143,8 @@ def _default_bars(ticker: str) -> dict:
         return {"available": True, "source": "twelve_data",
                 "bars": [{"date": str(r.get("date"))[:10], "close": r.get("close")} for r in rows]}
     except Exception as exc:  # noqa: BLE001
-        return {"available": False, "reason": f"exception:{type(exc).__name__}: {exc}", "bars": []}
+        # 自己的码（不叫 exception：溢价页把那个前缀读成「计算出错」，会把取数失败指错层）
+        return {"available": False, "reason": f"bars_fetch_exception:{type(exc).__name__}: {exc}", "bars": []}
 
 
 class AlphaBotService:
@@ -147,7 +153,8 @@ class AlphaBotService:
     def __init__(self, *, fetch_fn=None, bars_fn: Optional[Callable[[str], dict]] = None,
                  clock: Callable[[], float] = time.monotonic, demo: bool = False,
                  ledger_dir=None, live_ttl: float = LIVE_TTL_SEC, state_dir=None,
-                 straddle_root=None, straddle_quote_fn=None, now_fn: Optional[Callable[[], datetime]] = None):
+                 straddle_root=None, straddle_quote_fn=None, now_fn: Optional[Callable[[], datetime]] = None,
+                 premium_root=None):
         self.fetch_fn = fetch_fn
         self.bars_fn = bars_fn or _default_bars
         self.clock = clock
@@ -160,12 +167,17 @@ class AlphaBotService:
         self.straddle_quote_fn = straddle_quote_fn
         self.now_fn = now_fn or now_et
         self._straddle_cache: Dict[str, tuple] = {}
+        # 溢价页（v0.45.492）读的 IV 历史索引 / VRP 账本的数据根；None ⇒ 调用时的 PATHS.home（财报日读卖权账本 ledger_dir）
+        self.premium_root = premium_root
+        self._premium_cache: Dict[str, tuple] = {}
+        self._premium_rules_cache: Optional[dict] = None     # 规则常量与文案表进程内不变：算一次
         self._cache: Dict[str, tuple] = {}
         self._bars_cache: Dict[tuple, dict] = {}
         self._locks: Dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._settings_lock = threading.Lock()
-        self.stats = {"live_computed": 0, "live_cache_hits": 0, "live_failures": 0}
+        self.stats = {"live_computed": 0, "live_cache_hits": 0, "live_failures": 0,
+                      "premium_computed": 0, "premium_cache_hits": 0, "premium_failures": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -269,6 +281,7 @@ class AlphaBotService:
             "prereg": {k: (list(v) if isinstance(v, tuple) else v) for k, v in R.LG.PREREG.items()},
             "straddle": self.straddle_rules(),
             "hedge": self.hedge_rules(),
+            "premium": self.premium_rules(),
         })
 
     # ── 财报跨式账本（v0.45.424，只读）
@@ -386,6 +399,135 @@ class AlphaBotService:
                 _log.warning("[%s] 跨式盘中报价不可得：%s", t, res.get("reason"))
             self._straddle_cache[key] = (self.clock(), res)
             return {**res, "cache_age_sec": 0.0}
+
+    # ── 溢价（v0.45.492，只读）：单票全链按 IV ÷ 期限匹配 RV 排序
+    def _premium_deps(self) -> "PM.Deps":
+        """premium.py 不 import 卖权模块（火墙）：Δ / 平值 IV / 财报分类都从这里注入**卖权页、期限页用的同一个函数**，
+        三个页面的数对得上（改名或改行为由 tests/test_alphabot_premium.py 的对拍测试接住）。"""
+        import bars_integrity
+        import iv_history
+        import vrp_signal
+        r = R.L.RISK_FREE_RATE
+        return PM.Deps(leg=lambda c, S: R.C._leg(c, S, r), atm_iv=R._atm_iv, classify_earnings=R.C.classify_earnings,
+                       year_fraction=R.L.year_fraction, rv_from_closes=vrp_signal.realized_vol_from_closes,
+                       trading_days=bars_integrity.trading_days, find_gaps=bars_integrity.find_gaps,
+                       rank_fn=iv_history.iv_rank_from_history, max_spread_pct=R.C.MAX_SPREAD_PCT,
+                       iv_rank_min_days=iv_history.IV_RANK_MIN_DAYS, iv_rank_window=iv_history.IV_RANK_FULL_WINDOW,
+                       vrp_min_obs=int(vrp_signal.CONFIG["min_obs_per_ticker"]))
+
+    def premium_rules(self) -> dict:
+        """规则常量与文案表（进程内不变 ⇒ 只算一次；取不到不缓存，下次再试）。"""
+        if self._premium_rules_cache is None:
+            try:
+                self._premium_rules_cache = PM.public_rules(self._premium_deps()) | {"cache_ttl_sec": self.live_ttl}
+            except Exception as exc:  # noqa: BLE001 - 取不到就写明原因，不连坐 /api/method
+                return {"rules_error": f"{type(exc).__name__}: {exc}"}
+        return self._premium_rules_cache
+
+    def _premium_home(self) -> Path:
+        return Path(self.premium_root) if self.premium_root is not None else PATHS.home
+
+    def _premium_cache_dir(self) -> Path:
+        """= `PATHS.cache_dir` 的解析规则，但**不 mkdir**（那个属性一读就建目录，只读页面不该造成写入）。
+        显式给了 premium_root（测试）⇒ 只认它下面的 cache/。"""
+        if self.premium_root is not None:
+            return Path(self.premium_root) / "cache"
+        return Path(os.environ.get("ALPHA_HIVE_CACHE_DIR", str(PATHS.home / "cache")))
+
+    @staticmethod
+    def _local_name(t: str) -> str:
+        """本地文件按扫描侧代码命名（BRK-B），CBOE 侧写 BRK.B。"""
+        return t.replace(".", "-")
+
+    def _premium_fetch(self):
+        """溢价页取链的唯一入口。生产 = `sell_strike_ledger._default_fetch`（与卖权页同一个取数函数），
+        **不清进程缓存**：页面先走过 live()（它清缓存再拉一份），这里命中同一份 payload，不多发请求。"""
+        return self.fetch_fn or R.LG._default_fetch
+
+    def _premium_earnings(self, t: str, as_of: str, deps) -> dict:
+        """财报日 ← 卖权账本（日报钩子按本轮 ChronosBee 写进每行的 earnings_date）里该票最近一次有信息的观测。
+        只读、与总览 / 卖权页读的是同一个账本目录（`ledger_dir`）。**不读** earnings_cache 的兜底缓存（理由见
+        `premium.earnings_state`）。每个 tenor 只读最近两个月分片、**各读一次**（与 `ledger_dates` 同一覆盖范围；
+        逐日期调 rows_for_date 会把 MB 级分片重复解析几十次），挑哪一行由 `premium.earnings_observation` 判。"""
+        try:
+            rows: List[dict] = []
+            for tenor in R.LG.TENORS:
+                for path in R.LG._shard_paths(tenor, self.ledger_dir)[-2:]:
+                    rows.extend(R.LG._load_shard(path)[0])     # 坏行由账本自己的 assess 计数，这里只用好行
+        except Exception as exc:  # noqa: BLE001 - 账本读不了如实说，不当成「没有财报」
+            _log.warning("[%s] 溢价页读卖权账本财报日失败：%s: %s", t, type(exc).__name__, exc)
+            return PM.earnings_state(None, PM._why("scan_ledger_unreadable", type(exc).__name__), as_of=as_of, deps=deps)
+        entry = PM.earnings_observation(rows, ticker=self._local_name(t).upper(), lookback=PM.EARNINGS_SCAN_LOOKBACK)
+        return PM.earnings_state(entry, None, as_of=as_of, deps=deps)
+
+    def _premium_iv_index(self, t: str, as_of: str, deps) -> dict:
+        """IV 历史索引。只读：用 `_read_index`，**不用** `load_iv_history`（后者会写迁移标记）。"""
+        import iv_history
+        cdir = self._premium_cache_dir()
+        name = self._local_name(t)
+        if not os.path.exists(iv_history._index_path(name, str(cdir))):
+            return PM.iv_rank_block(None, PM._why("no_index_file"), as_of=as_of, deps=deps)
+        return PM.iv_rank_block(iv_history._read_index(name, str(cdir)), None, as_of=as_of, deps=deps)
+
+    def _premium_vrp(self, t: str, as_of: str, deps) -> dict:
+        """VRP 账本里这只票最新一行。路径 = 数据根下与 `vrp_signal.SIGNALS_FILE` 同一个相对位置（调用时求值；
+        那个常量本身在 import 期就冻住了数据根）。坏账本如实报原因，不当成「没有记录」。"""
+        import ledger_io
+        import vrp_signal
+        rel = vrp_signal.SIGNALS_FILE.relative_to(vrp_signal.BASE_DIR)
+        try:
+            rows, err = ledger_io.load_jsonl(self._premium_home() / rel), None
+        except Exception as exc:  # noqa: BLE001 - LedgerCorrupt / OSError：显示原因
+            rows, err = None, PM._why("ledger_unreadable", type(exc).__name__)
+            _log.warning("[%s] VRP 账本读不了：%s: %s", t, type(exc).__name__, exc)
+        return PM.vrp_block(rows, err, ticker=self._local_name(t).upper(), as_of=as_of, deps=deps)
+
+    def _premium_full(self, t: str, force: bool) -> dict:
+        with self._lock_for("premium:" + t):
+            ent = self._premium_cache.get(t)
+            if ent is not None and not force:
+                ttl = self.live_ttl if ent[1].get("data_available") else FAIL_TTL_SEC
+                if (self.clock() - ent[0]) < ttl:
+                    self.stats["premium_cache_hits"] += 1
+                    return {**ent[1], "cache_age_sec": round(max(0.0, self.clock() - ent[0]), 1)}
+            try:
+                raw, reason = self._premium_fetch()(t, as_of=None)
+                if raw is None:
+                    full = {"data_available": False, "reason": reason or PM._why("fetch_returned_none")}
+                else:
+                    deps = self._premium_deps()
+                    today = self.now_fn().date()
+                    as_of = PM.chain_as_of(raw)
+                    if self.demo:
+                        blocks = PM.unavailable_blocks(PM._why("demo_mode"), ticker=t, as_of=as_of, deps=deps)
+                    else:
+                        blocks = {"earnings": self._premium_earnings(t, as_of, deps),
+                                  "iv_index": self._premium_iv_index(t, as_of, deps),
+                                  "vrp": self._premium_vrp(t, as_of, deps)}
+                    full = PM.build(raw, bars=self.bars(t), today=today, deps=deps, **blocks)
+            except Exception as exc:  # noqa: BLE001 - 算不出来如实说，不给半张表
+                _log.warning("[%s] 溢价页计算失败：%s: %s", t, type(exc).__name__, exc)
+                full = {"data_available": False, "reason": PM._why("exception", f"{type(exc).__name__}: {exc}")}
+            ok = bool(full.get("data_available"))
+            self.stats["premium_computed" if ok else "premium_failures"] += 1
+            if not ok:
+                _log.warning("[%s] 溢价页不可得：%s", t, full.get("reason"))
+            self._premium_cache[t] = (self.clock(), full)
+            return {**full, "cache_age_sec": 0.0}
+
+    def premium(self, ticker, params: Optional[dict] = None) -> dict:
+        """溢价页。params = 查询参数（字符串）；`force=1` ⇒ 重算（不清 CBOE 进程缓存）。
+        参数错（含「链上没有这个到期日」）⇒ BadRequest，带上出错的参数名，前端只撤销那一个。"""
+        t = norm_ticker(ticker)
+        q = dict(params or {})
+        force = str(q.pop("force", "") or "") == "1"
+        try:
+            p = PM.parse_params(q)
+            out = PM.select(self._premium_full(t, force), p)
+        except PM.ParamError as exc:
+            raise BadRequest(str(exc), param=exc.param) from exc
+        out.update({"ticker": t, "demo": self.demo, "rules": self.premium_rules(), "disclaimer": PM.DISCLAIMER})
+        return clean_json(out)
 
     # ── 价格
     def bars(self, ticker) -> dict:

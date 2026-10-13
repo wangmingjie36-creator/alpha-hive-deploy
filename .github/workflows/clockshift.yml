@@ -1,0 +1,70 @@
+name: clockshift
+
+# 拨钟审计（v0.45.495）：把「现在」拨到未来 N 天跑离线测试集，找写死日期的时间炸弹。
+#
+# 为什么要单独一个 workflow、还要每日定时：炸弹按**日历**引爆，不按提交——没人推代码的那天它照样会炸。
+# 本仓已三次被它打到（v0.45.64 / 296 / 489）；489 那颗是夹具写下后**第二天**就引爆，只有推送时的 +7 能抢在前面。
+#
+# 怎么判红：`tools/clockshift/audit.py` 在**同一台 runner** 上先跑真实钟基线、再跑拨钟，只报
+# 「拨钟红而基线绿」的差集，差集再各重跑一次滤 flaky。基线里本来就红的（`TestCoverageHorizon` 到期告警、
+# 环境性失败）不计入——那些由 tests.yml 负责。任何一轮没跑成（收集错误 / 中断 / 零用例）⇒ 审计失败，
+# 不报成「0 条新红」。
+#
+# 机制与已知漏点（SQLite CURRENT_TIMESTAMP、git 提交时间、bash `date`……）见 tools/clockshift/clockshift.py。
+# 本机复现同一个 job：/usr/local/bin/python3 tools/clockshift/audit.py --days 45 -- -m "not integration and not network"
+#
+# 费用：本仓库公开，GitHub 托管 runner 对公开仓库免费。
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 14 * * *'   # 每天 14:00 UTC（太平洋 06:00/07:00），盘前
+  workflow_dispatch:
+    inputs:
+      days:
+        description: '偏移天数 JSON 数组，如 [7, 45, 400] 或 [120]'
+        required: false
+        default: '[7, 45, 400]'
+
+concurrency:
+  group: clockshift-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # +7：下周就炸的（最需要马上修）；+45：一个半月内；+400：跨年 / 年份字面量
+        days: ${{ fromJSON(github.event.inputs.days || '[7, 45, 400]') }}
+    name: audit +${{ matrix.days }}d
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 与 tests.yml 同一套依赖（pytest 系是纯测试依赖，刻意不进 requirements.txt）
+          pip install -r requirements.txt pytest pytest-timeout ruff
+
+      - name: Clock-shift audit (+${{ matrix.days }} days)
+        run: |
+          python tools/clockshift/audit.py --days ${{ matrix.days }} --log-dir clockshift-logs \
+            -- -m "not integration and not network" -q
+
+      - name: Upload pytest logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clockshift-logs-${{ matrix.days }}d
+          path: clockshift-logs/
+          retention-days: 14

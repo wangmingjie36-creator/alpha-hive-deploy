@@ -12,7 +12,13 @@ export async function api(path, opts = {}) {
   const r = await fetch(path, init);
   let data = null;
   try { data = await r.json(); } catch { /* 非 JSON 响应按错误处理 */ }
-  if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
+  if (!r.ok) {
+    // 带上状态码与出错的参数名（400 回复里有就带）：调用方据此分「参数被拒」与「服务端 / 网络出错」
+    const err = new Error((data && data.error) || `HTTP ${r.status}`);
+    err.status = r.status;
+    err.param = (data && data.param) || null;
+    throw err;
+  }
   return data;
 }
 

@@ -309,7 +309,103 @@ class AlertAnalyzer:
         # 9. 检测 P2: 云端快照没刷新上 / 落后（v0.45.466）
         self._check_cloud_snapshots(status)
 
+        # 10. 检测 P2: T+N 回填队列没在排空（v0.45.493）
+        self._check_outcomes_backlog(status)
+
+        # 11. 检测 P2: 本轮有票判不了财报日 / 观测字段接线断了（v0.45.500）
+        self._check_earnings_dates(status)
+
         return self.alerts
+
+    def _check_outcomes_backlog(self, status: Dict) -> None:
+        """T+N 实际价格回填队列（v0.45.493，`scan_timing.extra.outcomes_backlog`，写入者 `alpha_hive_daily_report.main`）。
+
+        0.45.493 之前回填每轮按文件名只取 50 份，字母序靠后的 7 只标的 09 月起一份都没回填过，日志每轮却是
+        `updated=50 errors=0`——「每轮都成功」不等于「队列在排空」。判据是最老一格的逾期天数：排空时停在 0~2，
+        饿死 / 出网长期失败时只增不减。超过 `max_overdue_days` ⇒ P2（不影响当天评分；影响 self_analyst 月度自诊断、
+        risk_engine 历史 VaR 等读 actual_prices 的诊断）。
+        """
+        if not self._swarm_scan_actually_ran(status):
+            return
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        ob = (st.get("extra") or {}).get("outcomes_backlog")
+        if not isinstance(ob, dict) or not ob.get("available"):
+            self.checks_skipped.append("回填队列检查（scan_timing 无可用 outcomes_backlog）")
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】T+N 回填队列未观测——实际价格有没有在补上未知",
+                {"原因": (ob or {}).get("reason") if isinstance(ob, dict) else "scan_timing.extra 无 outcomes_backlog",
+                 "影响": "不是「检查了没积压」，是「没检查」"},
+                ["outcomes_backlog", "observability"]
+            ))
+            return
+        late, limit = ob.get("oldest_overdue_days"), ob.get("max_overdue_days")
+        if not isinstance(late, int) or not isinstance(limit, int):
+            self.checks_skipped.append("回填队列逾期检查（outcomes_backlog 缺 oldest_overdue_days / max_overdue_days）")
+            return
+        if late > limit:
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】T+N 回填积压：最老一格已逾期 {late} 天（允许 {limit}）——队列没在排空",
+                {"最老一格": ob.get("oldest_item"),
+                 "待回填": f"{ob.get('pending_files')} 份 / {ob.get('pending_offsets')} 格",
+                 "影响": "report_snapshots 的 actual_prices 缺口持续：self_analyst 月度自诊断（要求 t7 非空）、"
+                         "risk_engine 历史 VaR 等会系统性漏掉这些样本",
+                 "建议": "看 alpha_hive.log 里「OutcomesFetcher 完成」的 network / deferred / unresolved：deferred 一直有 ⇒ "
+                         "出网配额不够或连续限流；unresolved 一直有 ⇒ 本地快照与 yfinance 都取不到价（标的停牌 / 代码写法）"},
+                ["outcomes_backlog", "data_quality"]
+            ))
+
+    def _check_earnings_dates(self, status: Dict) -> None:
+        """本轮财报日能不能判（v0.45.500，`scan_timing.extra.earnings_dates`，写入者 `alpha_hive_daily_report.main`，
+        统计 `earnings_calendar.summarize`）。
+
+        判不了的票：卖权行权价账本记 `unknown`（整单位排出检验）、跨式不出信号。此前唯一的痕迹是一条 warning，
+        而那条 yfinance 兜底在需要它的日子（09-24 / 09-25 / 10-12）一次都没被调到——没有任何东西会红。
+        `legacy_source` > 0 ⇒ ChronosBee 没写观测字段（接线断了），读者退回旧格式催化剂、当天财报又会被丢。
+        回放 09-15 ~ 10-12：正常日 unresolved = 0，只在 09-24 / 09-25（30 只）与 09-30（MU 财报当天，旧格式）非零。
+        """
+        if not self._swarm_scan_actually_ran(status):
+            return
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        ed = (st.get("extra") or {}).get("earnings_dates")
+        if not isinstance(ed, dict) or not ed.get("available"):
+            self.checks_skipped.append("财报日观测检查（scan_timing 无可用 earnings_dates）")
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】财报日观测未统计——本轮各票财报日能不能判未知",
+                {"原因": (ed or {}).get("reason") if isinstance(ed, dict) else "scan_timing.extra 无 earnings_dates",
+                 "影响": "不是「检查了都能判」，是「没检查」"},
+                ["earnings_dates", "observability"]
+            ))
+            return
+        n_bad, limit = ed.get("unresolved"), ed.get("max_unresolved")
+        legacy = ed.get("legacy_source")
+        if not isinstance(n_bad, int) or not isinstance(limit, int):
+            self.checks_skipped.append("财报日观测检查（earnings_dates 缺 unresolved / max_unresolved）")
+            return
+        if n_bad > limit:
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】{n_bad}/{ed.get('n')} 只票本轮判不了财报日（允许 {limit}）",
+                {"标的": ", ".join(ed.get("unresolved_tickers") or [])[:300],
+                 "影响": "卖权行权价账本这些票记 unknown（整单位不进检验）；跨式纸面腿不出信号",
+                 "建议": "看 alpha_hive.log 里 ChronosBeeHorizon 的 calendar unavailable：多为 yfinance 限流 / 断网，"
+                         "全体判不了时期权取数通常也挂了；个别票则查它的 yfinance calendar 是否没有 Earnings Date"},
+                ["earnings_dates", "data_quality"]
+            ))
+        if isinstance(legacy, int) and legacy > 0:
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】{legacy} 只票的财报日读的是旧格式催化剂——ChronosBee 没写 earnings_calendar 观测",
+                {"影响": "旧格式按 datetime.now() 过滤过，财报当天会被丢成「判不了」",
+                 "建议": "查 swarm_agents/chronos_bee.py 的 details[earnings_calendar] 是否还在写"},
+                ["earnings_dates", "observability"]
+            ))
 
     @staticmethod
     def _swarm_scan_actually_ran(status: Dict) -> bool:

@@ -66,6 +66,13 @@ class TestEligibility:
         s = evs.compute_signal("XYZ", AS_OF, _qs(), {"earnings_date": "2026-10-10"}, _stats(), None)
         assert s["eligible"] is False and "not within" in s["reason"]
 
+    @pytest.mark.parametrize("bad", ["[]", "soon", "NaT"])
+    def test_unparseable_earnings_date_is_named_not_window(self, bad):
+        """v0.45.500：非日期先被认出来。此前按字符串比，"[]" 靠 ASCII 序（'[' > '2'）碰巧被拒，
+        原因却写成「不在窗口内」。变异：去掉 `_iso_date` 那道 ⇒ reason 变回 not within。"""
+        s = evs.compute_signal("XYZ", AS_OF, _qs(), {"earnings_date": bad}, _stats(), None)
+        assert s["eligible"] is False and s["reason"].startswith("earnings date unparseable"), s["reason"]
+
     def test_event_must_clear_the_ledger_expiry_buffer_on_both_sides(self):
         """M1 回归：合格上界是 expiry − expiry_buffer_days，不是 expiry。
 
@@ -340,6 +347,8 @@ def _write_snap(cache, ticker, date, qs, rv=None, suffix=""):
 
 
 class _Watcher:
+    """`upcoming_fn` 的表驱动桩（v0.45.500 起 scan 不再收 `watcher=`；名字保留，方法即 upcoming_fn）。"""
+
     def __init__(self, table):
         self.table = table
         self.calls = []
@@ -365,8 +374,8 @@ class TestScan:
         def stats_fn(tk):
             stats_calls.append(tk)
             return _stats()
-        r1 = evs.scan(AS_OF, cache_dir=state, watcher=w, stats_fn=stats_fn)
-        r2 = evs.scan(AS_OF, cache_dir=state, watcher=w, stats_fn=stats_fn)
+        r1 = evs.scan(AS_OF, cache_dir=state, upcoming_fn=w.get_earnings_date, stats_fn=stats_fn)
+        r2 = evs.scan(AS_OF, cache_dir=state, upcoming_fn=w.get_earnings_date, stats_fn=stats_fn)
         assert {s["ticker"] for s in r1} == {"XYZ", "ABC"}          # OLD 被忽略
         rows = evs.load_signals()
         assert sum(1 for r in rows if r["as_of"] == AS_OF) == 2
@@ -387,14 +396,14 @@ class TestScan:
         """
         _write_snap(state, "XYZ", AS_OF, _qs(), rv=20.0)
         w = _Watcher({"XYZ": EARN})
-        evs.scan(AS_OF, cache_dir=state, watcher=w, stats_fn=lambda tk: _stats())
+        evs.scan(AS_OF, cache_dir=state, upcoming_fn=w.get_earnings_date, stats_fn=lambda tk: _stats())
         rows = evs.load_signals()
         assert len(rows) == 1 and rows[0]["settled_on"] is None
         rows[0].update({"realized_abs_move_pct": 4.0, "realized_move_pct": -4.0,
                         "realized_ratio": 0.44, "settled_on": "2026-09-25"})
         evs._write_jsonl(evs.SIGNALS_FILE, rows)
 
-        evs.scan(AS_OF, cache_dir=state, watcher=w, stats_fn=lambda tk: _stats())
+        evs.scan(AS_OF, cache_dir=state, upcoming_fn=w.get_earnings_date, stats_fn=lambda tk: _stats())
         again = evs.load_signals()
         assert len(again) == 1
         assert again[0]["realized_abs_move_pct"] == pytest.approx(4.0)
@@ -420,12 +429,12 @@ class TestScan:
     def test_scan_skips_network_when_quotes_dead(self, state):
         _write_snap(state, "XYZ", AS_OF, _qs(available=False))
         w = _Watcher({"XYZ": EARN})
-        r = evs.scan(AS_OF, cache_dir=state, watcher=w, stats_fn=lambda tk: pytest.fail("should not fetch"))
+        r = evs.scan(AS_OF, cache_dir=state, upcoming_fn=w.get_earnings_date, stats_fn=lambda tk: pytest.fail("should not fetch"))
         assert r[0]["reason"] == "quote_set unavailable" and w.calls == []
 
     def test_scan_handles_old_snapshot_without_quote_set(self, state):
         (state / f"options_snapshot_XYZ_{AS_OF}.json").write_text(json.dumps({"ticker": "XYZ"}))
-        r = evs.scan(AS_OF, cache_dir=state, watcher=_Watcher({}), stats_fn=lambda tk: None)
+        r = evs.scan(AS_OF, cache_dir=state, upcoming_fn=_Watcher({}).get_earnings_date, stats_fn=lambda tk: None)
         assert len(r) == 1 and r[0]["eligible"] is False
 
 

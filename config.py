@@ -960,7 +960,9 @@ PHEROMONE_CONFIG = {
 OUTCOMES_CONFIG = {
     "enabled": True,
     "rate_limit_seconds": 0.5,        # yfinance 请求间隔（秒）
-    "max_snapshots_per_run": 50,      # 单次最多处理快照数
+    # v0.45.493：配额只管真正出网的 yfinance 请求；本地快照价（九成的格子）不限量、不 sleep。
+    # 原 max_snapshots_per_run=50 按「文件」截断 + 按文件名排序 ⇒ 字母序靠后的标的永远轮不到（队列饿死）。
+    "max_network_fetches_per_run": 50,
 }
 
 # ==================== 动态蜂群配置 (Phase 2) ====================

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from hive_logger import PATHS, get_logger, atomic_json_write, read_json_cache
+from earnings_calendar import iso_date, parse_calendar
 
 _log = get_logger("earnings_watcher")
 
@@ -70,7 +71,12 @@ class EarningsWatcher:
 
     def get_earnings_date(self, ticker: str) -> Optional[Dict]:
         """
-        获取指定标的的下次财报日期
+        获取指定标的的下次财报日期（yfinance 日历，打网）
+
+        ⚠️ v0.45.500 起只服务 `--check-earnings` 与本模块 CLI。扫描、卖权 / 跨式账本、Alpha Bot 的财报日
+        一律经 `earnings_calendar`（读本轮 / 已落盘的 ChronosBee 观测，不打网）；本方法与它写的
+        `earnings_cache/{T}_date.json` **不得被别处读**（守卫 tests/test_earnings_calendar.py::TestSingleEntry）。
+        那份缓存只在这里刷新，09-04 后基本没人写过（报告 experiments/earnings_date_cache_staleness_report.md）。
 
         返回: {
             ticker, earnings_date (str YYYY-MM-DD), earnings_time (str "BMO"/"AMC"/"TAS"),
@@ -80,7 +86,8 @@ class EarningsWatcher:
         # 磁盘缓存 12 小时
         cache_path = CACHE_DIR / f"{ticker.upper()}_date.json"
         cached = read_json_cache(cache_path, _EARN_DATE_TTL)
-        if cached is not None:
+        # 旧版写过非日期（"[]"）：TTL 内也不认，当未命中重抓
+        if isinstance(cached, dict) and iso_date(cached.get("earnings_date")):
             cached["cached"] = True
             return cached
 
@@ -94,32 +101,13 @@ class EarningsWatcher:
             stock = yf.Ticker(ticker)
             cal = stock.calendar
 
-            if cal is None or (isinstance(cal, dict) and not cal):
+            # v0.45.500：与 ChronosBee 共用唯一解析器。此前这里 `cal.get("Earnings Date")` 拿到 `[]` 时
+            # （空列表是假值、却不是 None）一路放行到 `str([])[:10]`，把字符串 "[]" 当日期写进缓存（AMD 07-20）。
+            dates = parse_calendar(cal)
+            if not dates:
                 _log.info("%s: 无财报日期数据", ticker)
                 return None
-
-            # yfinance calendar 返回 dict: {'Earnings Date': [...], 'Revenue Avg': ...}
-            earnings_dates = None
-            if isinstance(cal, dict):
-                earnings_dates = cal.get("Earnings Date")
-                if earnings_dates and isinstance(earnings_dates, list):
-                    # 取最近的一个
-                    earnings_dates = earnings_dates[0]
-            # 有时返回 DataFrame
-            elif hasattr(cal, "iloc"):
-                try:
-                    earnings_dates = cal.iloc[0, 0]
-                except (IndexError, KeyError):
-                    pass
-
-            if earnings_dates is None:
-                return None
-
-            # 转为字符串
-            if hasattr(earnings_dates, "strftime"):
-                date_str = earnings_dates.strftime("%Y-%m-%d")
-            else:
-                date_str = str(earnings_dates)[:10]
+            date_str = dates[0]     # 升序；与旧实现「取第一个」同口径（get_today_earnings 还要看昨天）
 
             result = {
                 "ticker": ticker.upper(),

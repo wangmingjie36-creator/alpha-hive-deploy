@@ -58,7 +58,10 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
             try:
                 return _json(fn(request))
             except BadRequest as exc:
-                return _json({"error": str(exc)}, 400)
+                body = {"error": str(exc)}
+                if getattr(exc, "param", None):
+                    body["param"] = exc.param
+                return _json(body, 400)
         endpoint.__name__ = fn.__name__
         return endpoint
 
@@ -122,6 +125,10 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         return svc.bars(request.path_params["ticker"])
 
     @api
+    def premium(request):
+        return svc.premium(request.path_params["ticker"], dict(request.query_params))
+
+    @api
     def method(request):
         return svc.meta_texts()
 
@@ -182,6 +189,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/assess", assess),
         Route("/api/history/{ticker}", history),
         Route("/api/bars/{ticker}", bars),
+        Route("/api/premium/{ticker}", premium),
         Route("/api/method", method),
         Route("/api/intraday/{ticker}", intraday),
         Route("/api/intraday-dates/{ticker}", intraday_dates),

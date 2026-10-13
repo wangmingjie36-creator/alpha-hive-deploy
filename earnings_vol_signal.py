@@ -252,6 +252,11 @@ def _precheck(as_of: str, quote_set: Optional[dict], upcoming: Optional[dict]) -
     if not ed:
         return "no upcoming earnings date"
     expiry = quote_set.get("selected_expiry")
+    # v0.45.500：先解析再比较。此前直接按字符串比，"[]"（earnings_watcher 的旧 bug 写进缓存的）靠 ASCII 序
+    # ('[' > '2') 碰巧被拒，原因还被写成「不在窗口内」。
+    if _iso_date(ed) is None:
+        return f"earnings date unparseable: {ed!r}"
+    ed = _iso_date(ed).isoformat()
     # M1（v0.45.104）：不能只要求 ed ≤ expiry。账本在 expiry − buffer 天就强平，
     # 所以 expiry − ed ≤ buffer 的信号开仓后**必然**在财报前被平：它测不到事件，
     # 却会把一次纯来回点差损失当成“信号的一次检验”记进 KPI。
@@ -358,8 +363,8 @@ def compute_signal(ticker: str, as_of: str, quote_set: Optional[dict],
         "label": None, "raw_label": None, "tradeable": None, "untradeable_reason": None,
         "earnings_date": ed,
         # v0.45.105：这个字段**不是观测值**，改名以免日后被当成观测值用。
-        # 唯一的生产者 `EarningsWatcher.get_earnings_date` 写的是写死的 "AMC"
-        # （yfinance 的 calendar 不给时段），ChronosBee 催化剂那条路径同样。
+        # 唯一的生产者 `earnings_calendar.resolve`（v0.45.500 前是 EarningsWatcher / ChronosBee 催化剂）
+        # 写的是写死的 "AMC"（yfinance 的 calendar 不给时段）。
         # 叫 `earnings_time` 时，任何按盘前/盘后分层的校准都只会得到一个桶 + 一个
         # 空结果，然后被误读成"时段不影响"——本项目的「假数据披着观测值外衣」老病。
         # 真观测到了再填 `earnings_time_observed`，在那之前它恒为 None。
@@ -583,14 +588,15 @@ def _usable_capture(ctx, as_of: str) -> bool:
 
 @ledger_io.locked_by(_signals_dir)
 def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
-         watcher=None, stats_fn: Optional[Callable[[str], Optional[dict]]] = None,
+         stats_fn: Optional[Callable[[str], Optional[dict]]] = None,
          upcoming_fn: Optional[Callable[[str], Optional[dict]]] = None,
          gex_fn: Optional[Callable[[str], Optional[dict]]] = None) -> List[dict]:
     """当日全部常规快照 → 信号列表，并幂等落盘（先删该日旧行再追加）。
 
     `upcoming_fn(ticker) -> {"earnings_date": ..., "earnings_time": ...} | None` 可注入：
-    调用方（日报）手里已经有财报日时直接给过来，不必再造一个 EarningsWatcher。
-    缺省为 None 时行为与以前完全一致（延迟构造 EarningsWatcher）。
+    日报传本轮蜂群的 `earnings_calendar.upcoming_fn_from_swarm`。缺省（CLI / `options_paper_leg` 无信号时）
+    读 as_of 当天已落盘的扫描观测（`earnings_calendar.upcoming_fn_from_disk`，**不打网**；v0.45.500 前这里构造
+    EarningsWatcher 打 yfinance）。该日没扫描 ⇒ 全部判不了 ⇒ 不出信号。
 
     `gex_fn(ticker) -> gex_state | None`（v0.45.424）：每行加一个 `gex_ctx` 影子记录（见 `gex_ctx`），
     不参与任何判断。同一天重跑时，**当天第一次收盘后拿到的可得记录**保留（`_usable_capture`）；
@@ -603,19 +609,10 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
         return earnings_history.earnings_move_stats(tk, n=CONFIG["history_n"], today=as_of,
                                                     cache_dir=ecdir)
 
-    def _upcoming(tk: str) -> Optional[dict]:
-        nonlocal watcher
-        try:
-            if watcher is None:
-                from earnings_watcher import EarningsWatcher
-                watcher = EarningsWatcher()
-            return watcher.get_earnings_date(tk)
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("[%s] 下次财报日获取失败: %s", tk, exc)
-            return None
-
     stats_fn = stats_fn or _default_stats
-    upcoming_fn = upcoming_fn or _upcoming
+    if upcoming_fn is None:
+        import earnings_calendar
+        upcoming_fn = earnings_calendar.upcoming_fn_from_disk(as_of)
     captured_on, captured_at = _today_pdt(), _now_et()
     signals: List[dict] = []
     for ticker, snap in _iter_snapshots(cdir, as_of):

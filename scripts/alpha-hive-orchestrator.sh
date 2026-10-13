@@ -403,10 +403,27 @@ else
     # 那样日志会写「退回直连」而实际仍在走代理，两者不一致。
     # 这正是本项目反复出现的「标签宣称的事没发生」，不能在治它的代码里再犯一次。
     unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+    # v0.45.496：只 unset 还不是直连。macOS 上 Python 的 urllib.request.getproxies() 在环境变量
+    # **为空**时会经 _scproxy 读系统代理（Clash Verge 开着「系统代理」⇒ 仍是 127.0.0.1:7897），
+    # requests 同源。2026-10-12 实测：探活失败、日志写「退回直连」，扫描实际仍走那个坏掉的代理
+    # ⇒ 一小时内所有 HTTPS 主机 SSLEOFError、期权快照 0 份。no_proxy='*' 让环境变量非空
+    # （getproxies 不再查系统配置）且对一切主机 bypass；libcurl（curl_cffi）同样认它。
+    export NO_PROXY='*' no_proxy='*'
+    # 「直连」这句标签要能被执行验证：用扫描同一个解释器问一遍，还解析得出代理就报错，不许只写日志。
+    # 只看 http/https/all：getproxies 把任何 *_proxy 变量都收成「协议」（ALPHA_HIVE_PROXY ⇒ alpha_hive），无害、不该误报。
+    if ! _direct_check="$("$PYTHON3" -c '
+import sys, urllib.request
+p = {k: v for k, v in urllib.request.getproxies().items() if k in ("http", "https", "all")}
+print(p)
+sys.exit(1 if p else 0)
+' 2>&1)"; then
+        log "ERROR" "❌ 已清代理变量并设 no_proxy=*，Python 仍解析出代理 ${_direct_check} —— 本轮并非直连"
+    fi
+    unset _direct_check
     if [ "$PROXY_URL" = "none" ]; then
         log "INFO" "🌐 出站直连（ALPHA_HIVE_PROXY=none，显式关闭，非故障）"
     else
-        log "WARN" "⚠️ 代理 $PROXY_URL 探活失败 —— 本轮退回直连。"
+        log "WARN" "⚠️ 代理 $PROXY_URL 探活失败 —— 本轮退回直连（no_proxy=*，系统代理也不走）。"
         log "WARN" "   直连下 yfinance 历来 403/429（rv_30d、催化剂受影响），"
         log "WARN" "   期权链走 CBOE 不受影响。若 429 计数暴涨，先查代理是否在跑。"
     fi

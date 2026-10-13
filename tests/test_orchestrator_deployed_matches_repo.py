@@ -196,6 +196,7 @@ class TestDeployedMatchesRepo:
             "有人绕过仓库直接改了生产。把那次改动搬进仓库 scripts/ 提交合入，再重新部署；"
             "别直接覆盖（会丢掉那次改动）。先 `diff` 看清改了什么。")
 
+    @pytest.mark.external_clock  # 部署记录的时间戳是真实部署写的；拨钟后「超过 6 天没更新」恒成立
     def test_latest_main_version_is_deployed_or_pending(self, blobs):
         """stale（副本是 main 上的旧版）时：属于「合入后待下一轮」就放行，否则红并说明理由与处置。"""
         deployed, history, tip = blobs
