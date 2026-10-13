@@ -309,7 +309,51 @@ class AlertAnalyzer:
         # 9. 检测 P2: 云端快照没刷新上 / 落后（v0.45.466）
         self._check_cloud_snapshots(status)
 
+        # 10. 检测 P2: T+N 回填队列没在排空（v0.45.493）
+        self._check_outcomes_backlog(status)
+
         return self.alerts
+
+    def _check_outcomes_backlog(self, status: Dict) -> None:
+        """T+N 实际价格回填队列（v0.45.493，`scan_timing.extra.outcomes_backlog`，写入者 `alpha_hive_daily_report.main`）。
+
+        0.45.493 之前回填每轮按文件名只取 50 份，字母序靠后的 7 只标的 09 月起一份都没回填过，日志每轮却是
+        `updated=50 errors=0`——「每轮都成功」不等于「队列在排空」。判据是最老一格的逾期天数：排空时停在 0~2，
+        饿死 / 出网长期失败时只增不减。超过 `max_overdue_days` ⇒ P2（不影响当天评分；影响 self_analyst 月度自诊断、
+        risk_engine 历史 VaR 等读 actual_prices 的诊断）。
+        """
+        if not self._swarm_scan_actually_ran(status):
+            return
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        ob = (st.get("extra") or {}).get("outcomes_backlog")
+        if not isinstance(ob, dict) or not ob.get("available"):
+            self.checks_skipped.append("回填队列检查（scan_timing 无可用 outcomes_backlog）")
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】T+N 回填队列未观测——实际价格有没有在补上未知",
+                {"原因": (ob or {}).get("reason") if isinstance(ob, dict) else "scan_timing.extra 无 outcomes_backlog",
+                 "影响": "不是「检查了没积压」，是「没检查」"},
+                ["outcomes_backlog", "observability"]
+            ))
+            return
+        late, limit = ob.get("oldest_overdue_days"), ob.get("max_overdue_days")
+        if not isinstance(late, int) or not isinstance(limit, int):
+            self.checks_skipped.append("回填队列逾期检查（outcomes_backlog 缺 oldest_overdue_days / max_overdue_days）")
+            return
+        if late > limit:
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】T+N 回填积压：最老一格已逾期 {late} 天（允许 {limit}）——队列没在排空",
+                {"最老一格": ob.get("oldest_item"),
+                 "待回填": f"{ob.get('pending_files')} 份 / {ob.get('pending_offsets')} 格",
+                 "影响": "report_snapshots 的 actual_prices 缺口持续：self_analyst 月度自诊断（要求 t7 非空）、"
+                         "risk_engine 历史 VaR 等会系统性漏掉这些样本",
+                 "建议": "看 alpha_hive.log 里「OutcomesFetcher 完成」的 network / deferred / unresolved：deferred 一直有 ⇒ "
+                         "出网配额不够或连续限流；unresolved 一直有 ⇒ 本地快照与 yfinance 都取不到价（标的停牌 / 代码写法）"},
+                ["outcomes_backlog", "data_quality"]
+            ))
 
     @staticmethod
     def _swarm_scan_actually_ran(status: Dict) -> bool:

@@ -1438,7 +1438,7 @@ class AlphaHiveDailyReporter:
                     snapshots_dir=_snap_dir,
                     memory_store=self.memory_store,
                     rate_limit=_OC.get("rate_limit_seconds", 0.5),
-                    max_snapshots=_OC.get("max_snapshots_per_run", 50),
+                    max_network_fetches=_OC.get("max_network_fetches_per_run", 50),
                 )
                 self._submit_bg(_fetcher.run)
         except (ImportError, OSError) as e:
@@ -3039,10 +3039,20 @@ def main():
     _cloud_snapshots = ({"available": False, "reason": "补跑（--date）不观测"} if _cs_obs is None
                         else _cs_obs.result())
 
+    # v0.45.493：T+N 回填队列最老一格逾期几天 → status.json → alert_manager P2（队列饿死时日志每轮仍是
+    # `updated=50 errors=0`，只有逾期天数会一直涨）。只读、算不出来也写一条带原因的记录。
+    try:
+        from outcomes_fetcher import backlog_summary
+        _outcomes_backlog = backlog_summary(str(reporter.report_dir / "report_snapshots"))
+    except Exception as _e_ob:  # noqa: BLE001 —— 观测点自身失败只记原因，不拖垮扫描
+        _log.warning("回填队列观测失败（不影响扫描）: %s", _e_ob)
+        _outcomes_backlog = {"available": False, "reason": f"{type(_e_ob).__name__}: {_e_ob}"}
+
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
     _timing.write(reporter.date_str, extra={"gh_pages": _timing.gh_pages_summary(_gh_pages),
                                             "news_sources": _news_sources,
-                                            "cloud_snapshots": _cloud_snapshots})
+                                            "cloud_snapshots": _cloud_snapshots,
+                                            "outcomes_backlog": _outcomes_backlog})
     return report
 
 

@@ -35,8 +35,79 @@ except ImportError:
     _yf = None
 
 
+# 偏移天数 → 快照里 actual_prices 的子键
+_OFFSET_KEYS = {1: "t1", 7: "t7", 30: "t30"}
+
+#: 待回填里最老的一格逾期超过这么多自然日 ⇒ 队列没在排空（alert_manager P2）。
+#: 正常节奏下到期当天的扫描就会补上（本地快照价覆盖绝大多数），周末 / 假日 / 一两次取数失败最多拖几天。
+MAX_OVERDUE_DAYS = 7
+
+
+def _due_date(report_date, offset: int):
+    """某一格从哪天起「该回填了」：T+N 交易日 ≈ N×1.4 自然日，再加 3 天缓冲（修复 Bug #22：覆盖连续节假日 / 周末堆积）。"""
+    return report_date + timedelta(days=int(round(offset * 1.4)) + 3)
+
+
+def _is_rate_limit(e: Exception) -> bool:
+    msg = str(e)
+    return (type(e).__name__ == "YFRateLimitError"
+            or "Rate limited" in msg or "Too Many Requests" in msg)
+
+
+def backlog_summary(snapshots_dir: str, today=None) -> Dict:
+    """回填队列现状（只读，v0.45.493）：待回填几份 / 几格、最老一格逾期几天。
+
+    给 `alpha_hive_daily_report.main` 写进 `scan_timing.extra.outcomes_backlog` → status.json → alert_manager。
+    看**最老一格的逾期天数**而不是队列长度：回填在扫描后台线程里跑，写 scan_timing 时它可能还没跑完，
+    长度会随时序抖；逾期天数不受影响——队列在排空时它停在 0~2，饿死时它只增不减。
+    读原文 JSON（不经 ReportSnapshot），坏文件计数、不抛。
+    """
+    today = today or datetime.now().date()
+    files = offsets = bad = 0
+    oldest = None   # (逾期天数, "TICKER_date tN")
+    if not os.path.isdir(snapshots_dir):
+        return {"available": False, "reason": f"快照目录不存在：{snapshots_dir}"}
+    for fname in os.listdir(snapshots_dir):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(snapshots_dir, fname), encoding="utf-8") as f:
+                d = json.load(f)
+            report_date = datetime.strptime(d["date"], "%Y-%m-%d").date()
+            ap = d.get("actual_prices") or {}
+        except (OSError, ValueError, KeyError, TypeError):
+            bad += 1
+            continue
+        n = 0
+        for off, key in _OFFSET_KEYS.items():
+            if ap.get(key) is not None:
+                continue
+            due = _due_date(report_date, off)
+            if today >= due:
+                n += 1
+                late = (today - due).days
+                if oldest is None or late > oldest[0]:
+                    oldest = (late, f"{fname[:-5]} {key}")
+        if n:
+            files += 1
+            offsets += n
+    return {"available": True, "pending_files": files, "pending_offsets": offsets,
+            "oldest_overdue_days": oldest[0] if oldest else 0,
+            "oldest_item": oldest[1] if oldest else None,
+            "max_overdue_days": MAX_OVERDUE_DAYS, "unreadable_files": bad}
+
+
 class OutcomesFetcher:
-    """T+1 / T+7 / T+30 实际价格回填器"""
+    """T+1 / T+7 / T+30 实际价格回填器
+
+    v0.45.493 队列饿死根治：
+      · 本地快照价（不出网）不再受任何配额限制、也不 sleep——旧实现每轮只处理 50 份「文件」，且每查一格都 sleep，
+        而 9 成的格子本地就能查到；30 只标的 × 3 个期限每天最多到期 ~90 次 > 50 ⇒ 队列只增不减。
+      · 配额只管真正出网的 yfinance 请求（`max_network_fetches`），sleep 也只跟在出网请求后面。
+      · 待回填按**到期先后**排（最老的先），不再按文件名——旧实现每轮都从字母表开头重来，T / TMUS / TSLA / VKTX /
+        VZ / WMT / XOM 09 月起一份都没回填过，日志却每轮 `updated=50 errors=0`。
+      · 连续限流只停出网，本地回填照做完。
+    """
 
     # 偏移天数 → 快照字段映射
     _OFFSETS = {
@@ -50,19 +121,19 @@ class OutcomesFetcher:
         snapshots_dir: str,
         memory_store=None,
         rate_limit: float = 0.5,
-        max_snapshots: int = 50,
+        max_network_fetches: int = 50,
     ):
         """
         Args:
             snapshots_dir: report_snapshots 目录路径
             memory_store: MemoryStore 实例（可选，用于回写 agent_memory）
-            rate_limit: yfinance 请求间隔（秒）
-            max_snapshots: 单次最多处理快照数
+            rate_limit: yfinance 请求间隔（秒）；只跟在真正出网的请求后面
+            max_network_fetches: 单次最多发几次 yfinance 请求（本地快照价不计）；用完的格子留到下一轮，排在最前
         """
         self.snapshots_dir = snapshots_dir
         self.memory_store = memory_store
         self.rate_limit = rate_limit
-        self.max_snapshots = max_snapshots
+        self.max_network_fetches = max_network_fetches
         # {ticker: {date_str: entry_price}} 本地快照价格索引（懒加载）
         self._price_index_cache: Dict[str, Dict[str, float]] = {}
 
@@ -74,7 +145,8 @@ class OutcomesFetcher:
         Returns:
             {"scanned": int, "updated": int, "memory_updated": int, "errors": int}
         """
-        stats = {"scanned": 0, "updated": 0, "memory_updated": 0, "errors": 0}
+        stats = {"scanned": 0, "updated": 0, "memory_updated": 0, "errors": 0,
+                 "local_hits": 0, "network_fetches": 0, "network_deferred": 0, "unresolved": 0}
 
         pending = self._scan_pending()
         stats["scanned"] = len(pending)
@@ -84,57 +156,70 @@ class OutcomesFetcher:
 
         _log.info("OutcomesFetcher: 发现 %d 个待回填快照", len(pending))
 
-        _rl_streak = 0  # 连续 yfinance 限流计数：达阈值则中止本次回填
+        _rl_streak = 0  # 连续 yfinance 限流计数：达阈值则本轮不再出网（本地回填照做）
+        network_ok = _yf is not None   # 没装 yfinance ⇒ 要出网的格子全部记 deferred，不假装「试过了」
         for filepath, snapshot, missing_offsets in pending:
             try:
                 prices = {}
                 for offset in missing_offsets:
-                    price = self._fetch_price(snapshot.ticker, snapshot.date, offset)
+                    price = self._fetch_local(snapshot.ticker, snapshot.date, offset)
+                    if price is not None:
+                        stats["local_hits"] += 1
+                    elif not network_ok or stats["network_fetches"] >= self.max_network_fetches:
+                        stats["network_deferred"] += 1   # 留到下一轮（按到期先后排，下一轮排在最前）
+                        continue
+                    else:
+                        stats["network_fetches"] += 1
+                        try:
+                            price = self._fetch_remote(snapshot.ticker, snapshot.date, offset)
+                            _rl_streak = 0
+                        except Exception as e:  # noqa: BLE001 —— 只吞限流，其余照抛给下面的整份处理
+                            if not _is_rate_limit(e):
+                                raise
+                            stats["errors"] += 1
+                            stats["network_deferred"] += 1
+                            _rl_streak += 1
+                            if _rl_streak >= 3:
+                                network_ok = False
+                                _log.warning(
+                                    "OutcomesFetcher: 连续 %d 次 yfinance 限流，本轮不再出网"
+                                    "（本地快照价照常回填；要出网的格子下次运行时排在最前）", _rl_streak)
+                            else:
+                                _log.warning("OutcomesFetcher: %s +%d 限流跳过（连击 %d/3）",
+                                             filepath, offset, _rl_streak)
+                            continue
+                        finally:
+                            if self.rate_limit > 0:
+                                time.sleep(self.rate_limit)
                     if price is not None:
                         prices[offset] = price
-                    if self.rate_limit > 0:
-                        time.sleep(self.rate_limit)
+                    else:
+                        stats["unresolved"] += 1
 
                 if self._update_snapshot(filepath, snapshot, prices):
                     stats["updated"] += 1
 
                 mem_count = self._update_memory_store(snapshot, prices)
                 stats["memory_updated"] += mem_count
-                _rl_streak = 0  # 本快照成功 → 重置限流连击
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 —— 单份失败不拖垮整轮，计数并说出来
                 stats["errors"] += 1
-                _emsg = str(e)
-                _is_rl = (
-                    type(e).__name__ == "YFRateLimitError"
-                    or "Rate limited" in _emsg
-                    or "Too Many Requests" in _emsg
-                )
-                if _is_rl:
-                    _rl_streak += 1
-                    if _rl_streak >= 3:
-                        _log.warning(
-                            "OutcomesFetcher: 连续 %d 次 yfinance 限流，中止本次回填"
-                            "（剩余快照下次运行时再补）",
-                            _rl_streak,
-                        )
-                        break
-                    _log.warning(
-                        "OutcomesFetcher: %s 限流跳过（连击 %d/3）", filepath, _rl_streak
-                    )
-                else:
-                    _log.warning("OutcomesFetcher: %s 处理失败: %s", filepath, e)
+                _log.warning("OutcomesFetcher: %s 处理失败: %s", filepath, e)
 
         _log.info(
-            "OutcomesFetcher 完成: scanned=%d updated=%d memory=%d errors=%d",
+            "OutcomesFetcher 完成: scanned=%d updated=%d memory=%d errors=%d "
+            "local=%d network=%d deferred=%d unresolved=%d",
             stats["scanned"], stats["updated"], stats["memory_updated"], stats["errors"],
+            stats["local_hits"], stats["network_fetches"], stats["network_deferred"], stats["unresolved"],
         )
         return stats
 
     # ──────────────────── 内部方法 ────────────────────
 
     def _scan_pending(self) -> List[Tuple[str, object, List[int]]]:
-        """扫描需要回填价格的快照
+        """扫描需要回填价格的快照——**全部**，按最早到期的那一格从老到新排（v0.45.493）
+
+        不截断：截断只该落在出网请求上（见 run）。旧实现按文件名排、取前 50 份，字母序靠后的标的永远轮不到。
 
         Returns:
             [(filepath, ReportSnapshot, [missing_offset_days, ...])]
@@ -164,24 +249,20 @@ class OutcomesFetcher:
             except (ValueError, TypeError):
                 continue
 
+            first_due = None
             for offset, attr in self._OFFSETS.items():
                 if getattr(snap, attr, None) is not None:
                     continue  # 已有价格，跳过
-                # 修复 Bug #22：T+N 交易日 ≈ N×1.4 自然日，对 T+30 旧实现 +2 天余量不够
-                # 新实现：按 N×1.4 + 3 天缓冲（覆盖连续节假日 / 周末堆积）
-                target_date = report_date + timedelta(
-                    days=int(round(offset * 1.4)) + 3
-                )
-                if today >= target_date:
+                due = _due_date(report_date, offset)
+                if today >= due:
                     missing.append(offset)
+                    first_due = due if first_due is None else min(first_due, due)
 
             if missing:
-                results.append((fpath, snap, missing))
+                results.append((first_due, fname, (fpath, snap, missing)))
 
-            if len(results) >= self.max_snapshots:
-                break
-
-        return results
+        results.sort(key=lambda r: (r[0], r[1]))
+        return [r[2] for r in results]
 
     def _load_price_index(self, ticker: str) -> Dict[str, float]:
         """构建 {date_str: entry_price} 本地价格索引（来自 report_snapshots）。
@@ -275,6 +356,15 @@ class OutcomesFetcher:
         Returns:
             收盘价 or None
         """
+        # ① 本地快照优先：目标日的收盘价 = 该日快照的 entry_price，
+        #    无需联网。覆盖不到时（如 T+30 尚无未来快照）再走 yfinance。
+        _local = self._fetch_local(ticker, report_date, offset_days)
+        if _local is not None:
+            return _local
+        return self._fetch_remote(ticker, report_date, offset_days)
+
+    def _target_window(self, ticker: str, report_date: str, offset_days: int):
+        """(目标交易日, 窗口末日)；日期解析失败 ⇒ None。"""
         try:
             start = datetime.strptime(report_date, "%Y-%m-%d")
             if _BDAY_AVAILABLE:
@@ -283,20 +373,24 @@ class OutcomesFetcher:
             else:
                 # 降级：自然日偏移 × 1.5
                 target_date = start + timedelta(days=int(offset_days * 1.5))
-
-            end_date = target_date + timedelta(days=10)
+            return target_date, target_date + timedelta(days=10)
         except (ValueError, TypeError) as e:
             _log.debug("日期解析失败 %s +%dd: %s", ticker, offset_days, e)
             return None
 
-        # ① 本地快照优先：目标日的收盘价 = 该日快照的 entry_price，
-        #    无需联网。覆盖不到时（如 T+30 尚无未来快照）再走 yfinance。
-        _local = self._lookup_local_price(ticker, target_date, end_date)
-        if _local is not None:
-            return _local
-
-        if _yf is None:
+    def _fetch_local(self, ticker: str, report_date: str, offset_days: int) -> Optional[float]:
+        """只查本地快照价（不出网、不受配额、不 sleep）。"""
+        win = self._target_window(ticker, report_date, offset_days)
+        if win is None:
             return None
+        return self._lookup_local_price(ticker, *win)
+
+    def _fetch_remote(self, ticker: str, report_date: str, offset_days: int) -> Optional[float]:
+        """yfinance 取价。限流异常照抛（run 据此计连击）；其它网络 / 解析错误 ⇒ None。"""
+        win = self._target_window(ticker, report_date, offset_days)
+        if win is None or _yf is None:
+            return None
+        target_date, end_date = win
 
         try:
             stock = _yf.Ticker(ticker)

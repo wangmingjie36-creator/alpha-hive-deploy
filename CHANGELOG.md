@@ -26,7 +26,28 @@
 ### 评分 / 世代边界
 - 230 行都在 03-31 ~ 08-11，当前世代（10-09）之前，当前 IC 样本不受影响。不追加世代边界。
 
-## [0.45.493] — 2026-10-13 — 占位（进行中：outcomes_fetcher 回填队列饿死——按到期先后排队 + 产能 + 可观测；并执行 491 的 cs_rank / created_at 恢复（用户批准 A））
+## [0.45.493] — 2026-10-13 — Fixed：T+N 实际价格回填队列饿死（字母序最后 7 只 09 月起一份都没回填过，日志却每轮 `updated=50 errors=0`）——配额改为只管出网请求、本地快照价不限量不 sleep、按到期先后排队、连续限流只停出网；新增 `scan_timing.extra.outcomes_backlog` → alert_manager P2；491 的 cs_rank / created_at 恢复（用户批准方案 A）排在今天扫描之后执行
+
+### 根因（491 二次检查发现）
+- `outcomes_fetcher._scan_pending` 按文件名（标的在前）排序、取前 `max_snapshots_per_run = 50` 份；`run()` 每查一格都 `sleep(0.5)`，**本地快照价命中也算在 50 里、也 sleep**——而这个配额本意是护 yfinance。08-10 起 30 只 × T+1/T+7/T+30 每天最多到期 ~90 > 50 ⇒ 每轮从字母表开头重来，T / TMUS / TSLA / VKTX / VZ / WMT / XOM 09 月起 115 份快照 actual_prices 全空。
+- 10-13 离线模拟（yfinance 关掉）：待回填 424 份 / 576 格，其中 **516 格本地快照价就能查到**，60 格要出网（全是最新的：10-09 的 t1、08-28 的 t30）——不是「卡死的坏条目占着队头」，是纯产能 + 排序问题。
+- 「谁会红？」：没人。日志每轮 `scanned=50 updated=50 errors=0`，「每轮都成功」不等于「队列在排空」。
+
+### Fixed
+- `outcomes_fetcher.py`：`_scan_pending` 返回**全部**待回填、按最早到期一格从老到新排；`run()` 先查本地（`_fetch_local`，不计配额、不 sleep），查不到才出网（`_fetch_remote`，计入 `max_network_fetches`、sleep 只跟在出网后），配额用完 / 连续 3 次限流 ⇒ 记 `network_deferred` 留到下一轮（下一轮排在最前），本地回填照做完；限流改为逐格处理（旧实现整份放弃、连已查到的本地价也丢）。没装 yfinance ⇒ 要出网的格子记 deferred，不假装试过。`stats` 加 `local_hits / network_fetches / network_deferred / unresolved` 并进日志。`_fetch_price` 保留（= 本地 → 出网）。
+- `config.OUTCOMES_CONFIG`：`max_snapshots_per_run` → `max_network_fetches_per_run`（50，只管出网）；`alpha_hive_daily_report` 调用处同步。
+- 生产副本模拟（scratchpad 拷贝、离线）：一轮 0.4 s，待回填 424 → 60（剩下的都要出网），最老逾期 38 天 → 1 天；XOM 09-01 补上 t1 / t7。
+
+### Added
+- `outcomes_fetcher.backlog_summary()` + `alpha_hive_daily_report.main` 写 `scan_timing.extra.outcomes_backlog`（待回填份数 / 格数、最老一格逾期天数与是哪一格；算不出来写带原因的记录）。看逾期天数不看长度：回填在后台线程，写 scan_timing 时可能没跑完，长度随时序抖，逾期天数不抖。耗时 0.06 s。
+- `alert_manager._check_outcomes_backlog`：最老逾期 > `MAX_OVERDUE_DAYS`（7 自然日）⇒ P2；未观测 ⇒ P2「未观测」（不当成没积压）；扫描没跑不判。
+- `tests/test_outcomes_backlog_starvation.py`（14 条）：30 只标的、待回填远超 50 的夹具（自证过载）；一轮排空本地可查的且不 sleep；按到期排序；出网配额只管出网；限流只停出网；`backlog_summary` 与 `_scan_pending` 的「到期」同一定义；alert 五态；真跑 `main()` 写出 outcomes_backlog。变异：加回 50 份截断 / 改回按文件名排 / 本地命中也 sleep / main 不写观测 ⇒ 各自 1–2 条红。`tests/test_outcomes_fetcher.py::test_scan_respects_max_snapshots`（钉的正是饿死的截断）改为 `test_scan_returns_all_oldest_due_first`。
+- `tests/test_production_sync.py`：`extra` 键集合契约加 `outcomes_backlog`；「健康一轮」补健康的 `outcomes_backlog` 与 `history_fill` 计数（后者是进程级计数，单独跑这条时此前就会因缺它记 checks_skipped 而红——同 v0.45.466 对 paper_portfolio 的处理）。
+- 全套：9459 passed；余 1 红为 `TestCoverageHorizon`（经济日历覆盖期，设计上定期红，与本版无关）。
+
+### 491 恢复（方案 A，用户批准）
+- 工具前提「生产克隆已含 491 修复」今天扫描的 production_sync 之后才成立，且恢复与扫描后台回填不能并发（工具不持锁）⇒ 排在今天扫描结束后执行；结果补记于此。
+
 
 ## [0.45.492] — 2026-10-13 — 占位（进行中：Alpha Bot 标的页新增「溢价」tab——单票全链按 IV/RV 找卖方溢价高的期权）
 
