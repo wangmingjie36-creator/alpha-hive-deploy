@@ -9,7 +9,7 @@
 
 ### 为什么
 - `feedback_loop.ReportSnapshot.load_from_json` 手抄字段清单，v0.40.0 加 `cs_rank` 时只加了写、没加读；`save_to_json` 恒写 `created_at = now()`。`outcomes_fetcher._update_snapshot`（扫描后台每次都跑）走「读 → 填一格价格 → 存」⇒ 旧快照 cs_rank 变 null、created_at 变回填时刻。证据：数据备份仓库 `435482c`（10-09，ABBV_2026-10-05 `cs_rank {final 0.345…}` → null、t1 null → 266.69、created_at 10-05T14:42 → 10-09T14:43）、`ee261ff`（10-12，44 份）。
-- 10-12 生产现状：07-08 ~ 10-08 每天只剩 6–7 份有 cs_rank（`outcomes_fetcher` 每轮按文件名排序取 50 份，字母序靠后的还没轮到；T+30 迟早全抹）。v0.40.0 之前的 607 份本来就没有 cs_rank（`.swarm_results` 里也没有）。
+- 10-12 生产现状：07-08 ~ 10-08 每天只剩 6–7 份有 cs_rank——幸存的恰是字母序最后 7 只（T / TMUS / TSLA / VKTX / VZ / WMT / XOM），而它们 09 月起的 115 份 **actual_prices 全空、从未被回填过**：见下「二次检查发现」。v0.40.0 之前的 607 份本来就没有 cs_rank（`.swarm_results` 里也没有）。
 - 写者普查：`outcomes_fetcher._update_snapshot`（**唯一生产往返写者**）；`backtest_engine.BacktestEngine.backfill_prices.save_callback` 原文改写、保键（安全）；`alpha_hive_daily_report` 扫描新建（正确）；`generate_deep_v2._save_report_snapshot` 整份新建、口径不同，缺省写停更旧目录 `~/Desktop/深度分析报告/深度` ⇒ 潜伏（未改，已在 auto-memory）。读时丢的只有 `cs_rank`（`created_at` 是写时改），其余 13 个键 load 都读。
 
 ### 影响面
@@ -26,6 +26,11 @@
 
 ### 未做（等用户决定）
 - 生产数据**未写**。恢复须在本修复进入生产克隆之后（工具会拒），否则下一次回填再抹。
+
+### 二次检查发现（未修，另开版本号，等用户决定）
+- **`outcomes_fetcher` 回填队列饿死**：`_scan_pending` 按文件名（标的在前）排序、每轮只取 `OUTCOMES_CONFIG.max_snapshots_per_run = 50` 份。08-10 起 30 只标的 × T+1/T+7/T+30 每天最多到期 ~90 次，产能 50 ⇒ 队列只增不减，每轮都从字母表开头重来，靠后的标的永远轮不到。10-13 只读模拟：待回填 424 份，T / TMUS / TSLA / VKTX / VZ / WMT / XOM 占 238；日志每轮 `scanned=50 updated=50 errors=0`——**看起来全绿，其实恒漏同一批**。
+- 下游：`self_analyst.load_snapshots` 要求 `actual_prices.t7` 非空 ⇒ 这 7 只 09 月起被月度自诊断整体排除；`risk_engine` 历史 VaR、`options_backtester` / `regime_analyzer` 读 actual_prices 的也同样缺。`weekly_optimizer` / `BacktestAnalyzer(clean_t7=True)` 的 T+7 走 pheromone.db `close_t7`，不受影响。
+- 本版修复与恢复工具不受影响（恢复只碰 cs_rank / created_at）。
 
 
 ## [0.45.490] — 2026-10-13 — Fixed：v0.45.482 / 486 二次检查——多数规则补到偏斜与 yfinance 期限结构（482 只给了 iv_current）；key levels 的失败值 / 非正 IV 记 None（482 置 0 后渲染成「0.0%」）；486 漏掉的 14 行 rank / pct 入隔离并清库；更正 482 / 486 条目各一处
