@@ -374,11 +374,20 @@ class TestMainFlow:
         assert seen["max_seconds"] is None
         assert json.loads(out.read_text("utf-8"))["fg_exposure_gate_forward_test"]["line"] == GOOD["line"]
 
-    def test_default_budget_is_counted_from_main_start(self, monkeypatch, tmp_path):
+    def test_default_is_unbounded(self, monkeypatch, tmp_path):
+        """v0.45.446 起缺省不限时：不传 `--budget-seconds` 的调用方（每周任务 / 手动运行）没有看门狗，不该被截断。
+        变异「缺省改回 45」⇒ 红（每周任务又会在限流日拿到「超出时间预算」而不是结果）。"""
+        assert rr.FG_BUDGET_SECONDS_DEFAULT == 0
         self._argv(monkeypatch, tmp_path, "--quiet")
         seen = _fake_child(monkeypatch, _print_good())
         rr.main()
-        assert rr.FG_BUDGET_SECONDS_DEFAULT - 5 < seen["max_seconds"] <= rr.FG_BUDGET_SECONDS_DEFAULT
+        assert seen["max_seconds"] is None
+
+    def test_explicit_budget_is_counted_from_main_start(self, monkeypatch, tmp_path):
+        self._argv(monkeypatch, tmp_path, "--quiet", "--budget-seconds", "45")
+        seen = _fake_child(monkeypatch, _print_good())
+        rr.main()
+        assert 45 - 5 < seen["max_seconds"] <= 45
 
     @pytest.mark.parametrize("bad", ["-1", "nan", "inf", "abc"])
     def test_bad_budget_is_a_usage_error(self, monkeypatch, tmp_path, bad):
@@ -748,25 +757,28 @@ class TestOrchestratorReadsIt:
 
 
 class TestBudgetFitsOrchestratorTimeout:
-    """缺省预算必须放得进编排器 Step 11 的超时：编排器不传 `--budget-seconds`（改它要隔一个扫描日才部署），
-    缺省值就是生产值。到点后还有 TERM 宽限 + 写最终 JSON，再留 ≥10s 余量（解释器启动、慢盘、负载）。"""
+    """编排器 Step 11 给的预算必须放得进它自己的超时：到点后还有 TERM 宽限 + 写最终 JSON，
+    再留 ≥10s 余量（解释器启动、慢盘、负载）。v0.45.446 起工具缺省不限时 ⇒ **只认编排器显式传的值**，
+    没传不再退回缺省（那会拿「不限时」去比，或者更糟——拿一个与生产无关的数去比还比过了）。"""
 
-    def test_default_budget_plus_grace_fits(self):
+    def test_orchestrator_budget_plus_grace_fits(self):
         """超时取 `orchestrator_steps.STEP11_TIMEOUT_DEFAULT`（v0.45.391 起由 `TestStep11Timeout` 钉在仓库编排器那一行上，
-        一份真相）；编排器若显式传了 `--budget-seconds`，以它为准。"""
+        一份真相）；预算取编排器那一行的 `--budget-seconds`，取不到即红。"""
         import re
         text = repo_orchestrator_text()
         m = re.search(r'run_step\s+--timeout\s+\d+\s+"\$\{PROJECT_DIR\}/ic_rerun_readiness\.py"([^\n]*\n[^\n]*)', text)
         assert m, "编排器里找不到 Step 11 的 run_step 行（改了写法？这条守卫要跟着改，不许删）"
         flag = re.search(r"--budget-seconds\s+(\S+)", m.group(1))
-        budget = float(flag.group(1)) if flag else rr.FG_BUDGET_SECONDS_DEFAULT
+        assert flag, ("编排器 Step 11 没传 --budget-seconds：工具缺省不限时（v0.45.446），"
+                      "Step 11 会无预算地跑进 60s 看门狗")
+        budget = float(flag.group(1))
         timeout = osteps.STEP11_TIMEOUT_DEFAULT
         assert budget > 0, "生产不许不限时：0 = 不限时，会重新把 Step 11 推回超时"
         assert budget + rr._FG_KILL_GRACE_SECONDS + 10 <= timeout, (budget, timeout)
 
     def test_orchestrator_passes_the_budget_explicitly(self):
         """预算由有看门狗的调用方给（v0.45.437 起）：编排器必须**显式**传 `--budget-seconds`，不许靠工具的缺省值——
-        下一步缺省值会改成不限时（每周任务 / 手动运行没有看门狗），那时没传就等于 Step 11 不限时。
+        缺省值 v0.45.446 起不限时（每周任务 / 手动运行没有看门狗），没传就等于 Step 11 不限时。
         变异「删掉编排器 Step 11 行里的 --budget-seconds」⇒ 红。"""
         import re
         text = repo_orchestrator_text()

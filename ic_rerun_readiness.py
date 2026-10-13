@@ -66,8 +66,9 @@ F&G 子状态的时间预算与检查点（v0.45.392）
 （`fg_exposure_gate_forward_status`，逐日真实重放、要打 yfinance）在 09-30 拖到 >60s ⇒ 进程被杀、**整份**
 就绪度 JSON 没写出来，连与 F&G 无关的世代边界核对也一起丢了。v0.45.391 把健康路径压到约 12s，但整段取数
 被拒时退回逐次直连（实测约 56s），限流日仍会超时。于是：
-  · F&G 子状态放进**子进程**、开跑时就起（与其余各项并行），带截止时刻 `--budget-seconds`（缺省
-    `FG_BUDGET_SECONDS_DEFAULT`，从 `main()` 开始计；0 = 不限时）。到点 ⇒ TERM → 宽限 → KILL 子进程，
+  · F&G 子状态放进**子进程**、开跑时就起（与其余各项并行），带截止时刻 `--budget-seconds`（从 `main()`
+    开始计；0 = 不限时）。缺省 `FG_BUDGET_SECONDS_DEFAULT` 自 v0.45.446 起是 0：预算由**有看门狗的调用方**给
+    （编排器 Step 11 显式传 45，v0.45.437），每周任务 / 手动运行没有看门狗、不该被截断。到点 ⇒ TERM → 宽限 → KILL 子进程，
     F&G 段渲染成 `cannot_judge` + 专属 attention `ic_rerun.fg_exposure_gate_forward.budget_exceeded`；
     子进程自己崩 / 输出不合约定 / 起不来 ⇒ `….child_failed`。都**看得见**，不吞。
     为什么不用 SIGALRM / 协作式截止：会在 `paper_portfolio.run_replay` 的 finally（`CONFIG.clear()` 与
@@ -1655,12 +1656,12 @@ def fg_exposure_gate_forward_status(today: Optional[str] = None) -> Dict:
 
 # ── F&G 子状态：子进程 + 截止时刻（v0.45.392，见模块 docstring）────────────────────────────
 
-#: F&G 子状态的缺省时间预算（秒，从 `main()` 开始计）。**缺省值本身就要放得进编排器 Step 11 的超时**：
-#: 编排器不传 `--budget-seconds`（改编排器要隔一个扫描日才部署），所以 60s 的 `run_step --timeout` 减去
-#: 本值，要盖得住到点后的 TERM 宽限（`_FG_KILL_GRACE_SECONDS`）+ 写最终 JSON + 解释器启动（实测 <0.2s）。
-#: 两者的关系由 `tests/test_ic_rerun_fg_budget.py::TestBudgetFitsOrchestratorTimeout` 核对（超时取
-#: `orchestrator_steps.STEP11_TIMEOUT_DEFAULT`，它由 `tests/test_orchestrator_steps.py::TestStep11Timeout` 钉在编排器原文上）。
-FG_BUDGET_SECONDS_DEFAULT = 45.0
+#: F&G 子状态的缺省时间预算（秒，从 `main()` 开始计；0 = 不限时）。v0.45.446 起缺省**不限时**：
+#: 预算是看门狗的属性，归有看门狗的调用方给——编排器 Step 11 显式传 `--budget-seconds`（v0.45.437），
+#: 它与 60s `run_step --timeout` 的关系（盖得住 TERM 宽限 `_FG_KILL_GRACE_SECONDS` + 写最终 JSON + 解释器启动）
+#: 由 `tests/test_ic_rerun_fg_budget.py::TestBudgetFitsOrchestratorTimeout` 核对，**只认编排器显式传的值**。
+#: v0.45.392~445 这里是 45（那时编排器不传、缺省就是生产值），代价是每周任务 / 手动运行也被截在 45s。
+FG_BUDGET_SECONDS_DEFAULT = 0.0
 #: 到点后先 TERM 子进程（让它的 finally 清掉临时目录），等这么久仍在 ⇒ KILL
 _FG_KILL_GRACE_SECONDS = 2.0
 #: 子进程看门狗的轮询间隔 / 自身时限比父进程截止多给的余量（父进程在场时总是父进程先动手）
@@ -1682,7 +1683,7 @@ _FG_RUNNER_TEXT = {
     "interrupted": ("这份 JSON 是 F&G 开跑前先写出的检查点，进程之后被杀或崩溃、没写出最终结果；"
                     "其余各项（IC 就绪度 / 世代边界核对 / 共振 / 维度 IC）是本轮真实结果"),
     "budget_exceeded": ("本轮没有自证率数字，这不是检验的结论；同日手动跑 "
-                        "`/usr/local/bin/python3 ic_rerun_readiness.py --quiet --budget-seconds 0` 看完整结果；"
+                        "`/usr/local/bin/python3 ic_rerun_readiness.py --quiet` 看完整结果（缺省不限时）；"
                         "连续多天出现 ⇒ 行情源限流或重放变慢，需人看"),
     "child_failed": "本轮没有自证率数字；子进程的 stderr 在同一份日志里，需人看原因",
 }
@@ -2329,8 +2330,8 @@ def main() -> int:
     ))
     ap.add_argument("--quiet", action="store_true", help="只输出一行摘要")
     ap.add_argument("--budget-seconds", type=_budget_seconds, default=FG_BUDGET_SECONDS_DEFAULT, help=(
-        f"F&G 敞口门前瞻检验子状态的时间预算，从进程开始计（默认 {FG_BUDGET_SECONDS_DEFAULT:g}，放得进编排器 "
-        "Step 11 的 60s 超时；0 = 不限时）。到点 ⇒ 终止 F&G 子进程，该段报「超出时间预算」，其余各项照常"))
+        "F&G 敞口门前瞻检验子状态的时间预算，从进程开始计（默认 0 = 不限时；有看门狗的调用方自己给，"
+        "如编排器 Step 11 传 45 以放进它的 60s 超时）。到点 ⇒ 终止 F&G 子进程，该段报「超出时间预算」，其余各项照常"))
     args = ap.parse_args()
 
     # 外壳的 `date`：这次运行服务的业务日（v0.45.355）。消费方拿它与自己的 DATE_STR 比，

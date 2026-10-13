@@ -1157,7 +1157,35 @@ SPY 对冲行被过滤；用生产数据生成跨式页全部内容，搜不到 
 
 **没做**：不改生产代码；变异集是我按 Massive 路径 / 告警 / 印记 / 世代登记挑的 18 个，不等于前一个会话那 9 个，两者不能互相证明。
 
-## [0.45.446] — 2026-10-09 — 占位（进行中：ic_rerun_readiness F&G 预算缺省改不限时——根本修法第 2 步；原占 440 / 443 / 444 撞号让出）
+## [0.45.446] — 2026-10-09 — Changed：`ic_rerun_readiness` F&G 预算缺省改**不限时**（根本修法第 2 步）；守卫只认编排器显式传的值
+
+> 原占 440、443、444 都因占号提交未及时推上 main，先后被对冲账本历史读取闸（`804e2887`）、Step 12 analyst_targets（`5e3345a4`）、新闻通道降级可见化（`76b3bb23`）先进 git，三次让号，改 446（445 亦已被占）。
+> **推送时机（硬约束）：10-09 扫描的 `production_sync` 之后（14:00 PT 开跑，同步在最前面几步）、10-12 扫描之前。**
+> 10-09 那轮执行的仍是 437 之前的编排器（437 当轮才部署，见 CLAUDE.md「部署那轮仍跑旧编排器」）——它**不传** `--budget-seconds`。
+> 本版若在 10-09 同步前进 main ⇒ 当天生产 Python 缺省不限时 + 旧编排器不传 ⇒ Step 11 无预算地跑进 60s 看门狗，正是 v0.45.392 要治的形状。
+> 10-09 同步之后再推 ⇒ 10-12 同步进生产时，执行的已是 437（传 45）。
+> **合入说明（10-13，另一会话代为换基，正文未改）**：本版 10-09 写好后未推送，错过了上面的「10-12 之前」。晚推同样安全——10-12 扫描已确认 437 首次执行：Step 11 15:03:57→15:04:42，F&G 按 45s 预算截断、未触 60s 看门狗、世代边界 matches；此后生产执行的编排器都传 45。代码与 `9dd81c75` 相同，只是叠在其后 main 新增的 `_COHORT_HISTORY` 条目之上（无冲突）。
+
+第 1 步（v0.45.437）让编排器显式传 `--budget-seconds 45`；本版把只属于编排器的约束从工具缺省值里拿掉：
+每周任务（SKILL.md 那条 `ic_rerun_readiness.py --quiet`）与手动运行没有看门狗，此后自动不限时，**SKILL.md 一字不改**。
+
+### Changed
+- `ic_rerun_readiness.py`：`FG_BUDGET_SECONDS_DEFAULT` 45.0 → **0.0**（0 = 不限时，`deadline=None` 路径本就存在，原先只有 `--budget-seconds 0` 走得到）；
+  常量注释、模块 docstring「时间预算与检查点」、`--budget-seconds` 帮助文案改成「缺省不限时，有看门狗的调用方自己给」；
+  `budget_exceeded` 的 attention 提示「同日手动跑 `… --quiet --budget-seconds 0` 看完整结果」→「`… --quiet` 看完整结果（缺省不限时）」。
+- `tests/test_ic_rerun_fg_budget.py::TestBudgetFitsOrchestratorTimeout`：`test_default_budget_plus_grace_fits` → `test_orchestrator_budget_plus_grace_fits`，
+  **去掉「编排器没传就用缺省值」的退路**——取不到编排器 Step 11 行的 `--budget-seconds` 即红（此前退路会拿一个生产不用的数去比还比过了）。
+
+### Added / Replaced
+- `TestMainFlow::test_default_is_unbounded`（替换 `test_default_budget_is_counted_from_main_start`）：缺省为 0、不传参时子进程 `max_seconds is None`。
+- `TestMainFlow::test_explicit_budget_is_counted_from_main_start`：显式 `--budget-seconds 45` 仍从 `main()` 开始计（原断言的语义保留，换到显式值上）。
+
+### 验证
+- 相关测试（fg_budget / orchestrator_steps / ic_rerun_readiness* / fg_exposure_gate_forward_test）842 passed；ruff 通过。
+- 变异（`git archive` 拷贝、`--maxfail=100`，对照组 49 passed）：
+  缺省改回 45 ⇒ `test_default_is_unbounded` 红；删编排器 `--budget-seconds 45` ⇒ `…budget_plus_grace_fits` 与 `…passes_the_budget_explicitly` **两条**都红；
+  编排器传 0 / 55 ⇒ `…budget_plus_grace_fits` 红。⚠️ 项目 pytest 配置带 `-x`，不加 `--maxfail` 时第二条守卫根本没跑到——「一个红」只证明至少一条有牙。
+- 未跑真实数据 CLI：不限时路径与 `--budget-seconds 0` 逐字同一条（`deadline=None`），v0.45.392 / 400 已在真实数据上跑过。
 
 ## [0.45.445] — 2026-10-09 — Changed：新闻主源 Alpha Vantage → Massive（原 Polygon.io）；降级仍去 Yahoo；登世代边界 2026-10-09（与 v0.45.441 同日、早于维度 IC 窗口 10-12，不截断 H1）
 
