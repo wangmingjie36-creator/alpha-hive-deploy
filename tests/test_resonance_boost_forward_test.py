@@ -35,6 +35,14 @@ def _load_module():
 
 fwd = _load_module()
 
+
+@pytest.fixture(autouse=True)
+def _no_forward_test_excluded_days(monkeypatch):
+    """合成夹具的日期相对 FORWARD_START 写，会落在真实的协议排除日上（v0.45.484 起 2026-10-12）。
+    本文件测的是执行器的算术，不是排除名单——清空它；排除名单本身由 tests/test_forward_test_excluded_days.py 钉。"""
+    import signal_archive as _sa
+    monkeypatch.setattr(_sa, "FORWARD_TEST_EXCLUDED_DAYS", {})
+
 _EFFECT_KEYS = {"stats", "mean", "t", "p", "delta", "ic_b0", "ic_b3", "pooled_delta_by_rows",
                 "mean_ic_b0", "mean_ic_b3", "weeks_used", "gate_changes"}
 

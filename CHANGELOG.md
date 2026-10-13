@@ -498,7 +498,68 @@
   `TestBudgetFitsOrchestratorTimeout::test_orchestrator_budget_plus_grace_fits`（只认编排器显式传的值）的不等式加上收件窗口。
 - 顺带更正 392 留下的一句过时注释：`_FG_KILL_GRACE_SECONDS` 上方写「TERM 让它的 finally 清掉临时目录」，实际子进程保持 TERM 默认动作、临时目录由父进程收尸后删（392 实测信号处理器的异常会被 C 回调吞掉）。
 
-## [0.45.484] — 2026-10-13 — 占位（进行中：10-12 生产扫描遇本机 SSL 故障 30/30 全源 FALLBACK——按 v0.45.464 方式整日重放（当天代码 + 云端同场链 + 真实收盘）并调查为何无自动补跑）
+## [0.45.484] — 2026-10-13 — Fixed（数据，用户批准）：10-12 生产扫描 30/30 全源 FALLBACK（现价 0、样本链）——照 v0.45.464 整日重放补算（当天代码 + 云端同场链 + 真实收盘）并写回全部存档；该日排除出维度 IC / 共振加成两份预注册前瞻检验（修订 2·**事后**，结果未到期时登记）；调查：为何没有任何自动重试 / 补跑
+
+### 事故（已核实）
+- 10-12 生产扫描（代码 `0993efde` = v0.45.481）：编排器 14:00:08 代理探活失败 ⇒ 「退回直连」实际仍走 macOS 系统代理（根因与修复见 **v0.45.496**）⇒ 全部 TLS 握手 `SSLEOFError`。30/30 只 `MultiSourceFetcher` 全源 FALLBACK ⇒ 蜂群见现价 0；期权链 0 条；新闻 30/30 走 fallback、SEC / newsapi 断路器开、yfinance 冷却；Step 12 十个字段 0/30。
+- 产物：predictions 30 行入场价全 0（对一切统计不可见）；signal_archive 1621 行（动量取自攒索引 as_of 10-09、`price.volume_ratio` 1/30、`volatility_20d` 0/30）；F&G 缓存写进假 50；sentiment_baseline / agent_memory / Chroma 写进兜底值；网站发布了这份日报。
+- ⚠️ `signal_archive` 的 `sentiment.pct` 是 Buzz 情绪动量的历史来源（`swarm_agents/sentiment.py:129`，`delta_3d` 进分）⇒ 不处理的话 10-12 的兜底情绪会从 **10-15 扫描**起进分（`delta_7d` 10-19）。
+
+### 为什么没有任何自动重试 / 补跑（调查；按用户要求只报告、未改）
+1. **代理只探一次**（14:00:08），失败就整轮「直连」，扫描中途代理恢复也不再探；原 WARN 写「期权链走 CBOE 不受影响」——10-12 证伪（496 查清：直连其实没直连）。496 修了退回分支，**未做**探活失败后的重试 / 等待。
+2. **唯一的产出闸是「空扫描护栏」**（`tickers_analyzed == 0`）：30 只都「分析」了、只是价全 0，护栏放行 ⇒ predictions / signal_archive / 快照 / 账本 / 日报 / gh-pages 照写。逐标的层面 `_data_unavailable` 只让各蜂返回「安全」中性分，没有任何一层拒绝落库。
+3. **补跑闸只认「今天有没有产出」**：`.swarm_results` 存在 ⇒ 当晚网络恢复后也不会重扫。
+4. **编排器 `status=success`、「🎉 编排流程完成」**；Step 12 十字段 0/30 只是 WARN；alert_manager 当天 2 条 P1（性能、新闻降级）、无一条说「30/30 现价不可得」。
+- **建议（未实现，待用户决定）**：扫描在 FALLBACK 比例过阈值（如 ≥ 50%）时拒写 predictions / signal_archive / 账本、不部署、退出码非零并 P0；编排器把它当「无产出」⇒ 补跑闸放行，且探活失败时间隔重探若干次再决定直连。
+
+### 重放方法（`experiments/replay_1012_full_day_v0484.py` + `prep_sandbox_1012_v0484.py`）
+- **当天代码**：`0993efde` 独立检出里**进程内真调** `AlphaHiveDailyReporter().run_swarm_scan()`（不调 save_report / deploy；LLM 关；Slack 域名拒绝；`code_version` / `OutcomesFetcher` 置空）。
+- **扫描前状态**：数据根 APFS 克隆 + `db_backups/pheromone_2026-10-12.db`（编排器 14:01 扫描前整库备份）；备份仓跟踪且 14:00 后被改的文件取 `435482c`（10-09 扫描后）；扫描期间写的缓存删掉；`sentiment_baseline.db` 由 435482c 的 SQL 导出重建；Chroma 删掉 18 条 10-12 记忆。
+- **钟**：freezegun 钉在生产「蜂群协作启动」14:11:56 PDT（UTC 21:11:56，tick）。⚠️ freezegun 的 naive `now()` = 冻结 UTC + tz_offset；`tz_offset=-7` 又会把 `now(tz)` 一并错移（实测 now(ET)=10:11）⇒ tz_offset 保持 0、单独把 naive `now()` 改成本机时区。首版 union 没做这一步（naive now = 21:11），见下「写回」第二次。
+- **control（不过就不信 corrected）**：同一 harness 复现故障——清代理变量直连、`SSLContext.wrap_socket` 抛生产原文 `SSLEOFError`、yfinance 一律 429、CodeExecutor 子进程代理指死端口。结果：**29/30 final_score 逐位、30/30 方向 / 维度权重逐位**；NFLX 差 0.09，来源已定位：生产当天唯一一次 Twelve Data 量能补成功（volume_ratio 0.77，control 封死取不到）+ crowding 的 google_trends 代理值。修钟后重跑 control 结果相同。ML 模型（495 样本、OOS 50.4%）与 ML-Feedback 权重逐位等于生产。
+- **各输入的决定**（corrected）：
+  | 输入 | 决定 | 核对 |
+  |---|---|---|
+  | 期权链 / 宏观 | `cloud_snapshot_loader.snapshot_mode("2026-10-12")`（21:12Z 同场，29/30）| 用户既定（同 464）；快照模式下 quote_set 不可得、GEX 用截断主链——与正常日口径不同，如实记 |
+  | 现价 / 日线 / 动量 / 量能 | 生产实时路径（冻结钟 + 10-13 开盘前真取：yfinance 末根 = 10-12 收盘）| 30/30 入场价 = 云端官方收盘（28 只逐分相同）；**BILI 15.19 由 yfinance + Twelve Data 两源一致**（无云端快照），期权仍走当天代码的 yfinance 备用链 |
+  | 新闻（Massive）| 请求加 `published_utc.lte=2026-10-12T21:11:56Z` | 30/30 主源成功、按扫描时刻截断 |
+  | SEC Form 4 / EDGAR RSS | 按 acceptanceDateTime / updated ≤ 扫描时刻过滤 | 过滤 0 条：10-12 哥伦布日 EDGAR 不收件，current feed 最新是 10-09 晚 ⇒ 与生产应得逐条相同 |
+  | F&G | CNN 现取 | = 云端 market.json 10-12 21:12Z 的 46 |
+  | yfinance 异常流 / .info / 分析师 / 财报日历 | 10-13 开盘前现取（成交量仍是 10-12 场）| **.info / 分析师隔夜值、Reddit（ApeWisdom 滚动 24h）晚约 12h：待验证** |
+  | CodeExecutor 子进程 | 开盘前真跑，成功结果按代码哈希录制 | — |
+- **录制 / 拼合**：全部 HTTP（requests / urllib / yfinance curl_cffi）与 CodeExecutor 结果落盘。开盘前跑了 3 轮实取 + 1 轮补跑 CodeExecutor（10 只第三轮仍失败，05:58 补齐）；最终 `union` 模式**只用录制里成功的响应、不出网**拼出完整输入集（Massive 限流与 yfinance 冷却在离线快放下会被假性触发，两处已在 union / replay 模式绕开，见脚本注释）。
+- **确定性**：用 union 自己的录制再 `replay` 一遍——**final_score / direction / 维度分 / 维度权重 / 各蜂分 30/30 逐位相同**；残差只在不进分的字段：Scout 卖空数据源的断路器按线程完成顺序开（同 7 只在 real / fallback 间互换，置信 ±0.02）、cs_rank.catalyst 并列名次。
+- **覆盖率**（生产 Step 12 闸原样跑）：十字段全部 30/30，「覆盖率健康」。
+
+### 结果（30 只）
+- final_score 30/30 变：均值 +0.87、均 |Δ| 0.88、最大 2.21（MU 4.70 → 6.91）；区间 4.84–6.99、无一只 ≥ 7.5。
+- 方向 5 只翻转：TSLA neutral → bearish、CRCL neutral → bearish、CRM bearish → neutral、TMO bearish → neutral、SNOW neutral → bullish。分布 neutral 16 / bearish 13 / bullish 1。
+- 账本按用户决定**不动**，只记录：重放下纸面组合会开 1 笔空单（VKTX @28.34，score 4.84，high）；财报波动信号会记 30 行；VRP 会记 60 行（生产 1 行）。生产 10-12 实际 0 开 0 平。probability_scorecard 里生产那 12 行（垃圾分上的 ML 概率）照留。
+
+### 写回（用户批准「全部」；`experiments/writeback_1012_replay_v0484.py` plan → apply）
+- 写前值逐项核对（行哈希 / 文件 sha），任一处被改就整体中止；整库 sqlite backup + 原件备份；DB 一个事务、`integrity_check` ok。
+- **第一次**（10-13 07:33，union3）：`predictions` 30 行（入场价 30/30 > 0）、`signal_archive` 1621 → 2036、`.swarm_results_2026-10-12.json`、`report_snapshots/*_2026-10-12.json` 30 份、`agent_memory` 260 → 300 / `reasoning_sessions` / `adapted_weights`、`sentiment_baseline` 10-12 30 行、`cache/options_snapshot_*_2026-10-12.json` 30 份（生产当天 0 份）、`iv_history` 10-12 29 行、日报 md / json / X 线程。备份 `_manual_backups/2026-10-13_1012_replay_v0.45.484/`。
+- **第二次**（08:08，union4 = 修好本地钟）：分数与第一次 30/30 相同，只差时间戳 / created_at 与 AMZN 一只蜂（union3 漏取供给链同业行情，signal 维权重为 0、final 不变）；不碰 IV 索引。备份 `…_r2/`（含 `replay_artifacts/`：54 MB 输入录制、control / corrected 输出、开盘前抓取）。
+- ⚠️ **与并行会话的交叉**：v0.45.497（07:41）的快照回填工具见我已写入、幂等全跳过；**v0.45.499（07:50）**按用户批准隔离并清掉了 BILI 10-12 的 `options.iv_current` 6.25（Yahoo 求解失败阶梯值——重放代码早于 482 的多数规则，BILI 无云端链走 yfinance 备用链）。我第二次写回时**把那一行又插了回去**（plan 在 499 之后算，但整日删再插不看 QUARANTINE）——08:10 发现、先备份再删回（`…_r2/pheromone_before_bili_iv_revert.db`），现与 499 一致。BILI 同一条链的 P/C 298.46 仍在库（499 明确未动），BILI 的 Oracle 分（4.27 bullish）是当天代码在这条坏链上算的。
+- 不动：12 份 ML 深度报告与 `analysis-*-ml-2026-10-12.json`（叙事体裁，同 271 / 464；共振加成检验靠下条排除）、网站（下次扫描的 gh-pages 同步带上新日报）。
+
+### 预注册前瞻检验：10-12 整天排除（用户批准「隔离 10-12」）
+- 新增 `signal_archive.FORWARD_TEST_EXCLUDED_DAYS` / `forward_test_excluded()`——**不是** `QUARANTINE`：后者在入库口拦、purge 会删、且不隔离 Agent 评分；这里库里是对的重放值、要留给别的读者，只是不进检验。
+- `experiments/dim_ic_forward_test.load_rows` 跳过、`run()` 输出 `forward_test_excluded_days`；`experiments/resonance_boost_forward_test.load_reports` 跳过并计入 skipped「协议排除日」。两份预注册各加「修订 2（事后）」：登记于 10-13，该日 T+7 最早 10-21 到期 ⇒ 不可能受结果影响。
+- 第三份前瞻检验 **F&G 敞口门**（`fg_exposure_gate_forward_test.py`）也含 10-12、用户当时没被问到 ⇒ **未排除，待用户决定**。写回前后对比：判定用的自证 26/26（连续口径 23/26 · 决策 24/26）不变；只有不进判定的 `a_only_entries` 12 → 9（连续 10 → 5）。
+
+### 世代边界：不追加
+没有任何评分机制改动（重放跑的就是当天代码）；排除日由协议层处理，不需要边界。
+
+### Added（测试）
+- `tests/test_forward_test_excluded_days.py`（9）：登记完整且早于任何 T+7；两执行器都跳过并报出（各一条「清空名单后该日回来」对照）；排除日不经 QUARANTINE 整天实现。变异：两执行器的跳过各删一次 ⇒ 各自红。
+- 既有 `tests/test_dim_ic_forward_test.py` / `test_resonance_boost_forward_test.py` 加 autouse 夹具清空排除名单（合成夹具日期从 FORWARD_START = 10-12 起，测的是算术不是名单）；维度 IC 的输出白名单加 `forward_test_excluded_days`（日期列表，不含效应量）。
+- 全量：9639 passed、1 failed、1 error、2 xfailed（`--deselect` 了 `test_economic_calendar::TestCoverageHorizon`——NFP 表只到 12-04、设计内定期红，与本版无关）。那 1 failed（`test_gh_pages_unverified_parent::…test_two_attempts_exactly_as_logged`）与 1 error（`test_zero_weight_invariant::…test_reads_live_config_when_not_injected`）单独跑都 2 passed、文件与本版无交集（顺序 / 时序相关，未追）。ruff 全仓通过。
+
+### 教训（进 auto-memory）
+- 多个会话同时处理同一天时，**每一次**写生产前都要重新 fetch + 看 origin/main 新的数据类提交，不只第一次。
+- freezegun 冻 UTC 时 naive `now()` 不是本地时间；改 `tz_offset` 又会错移 aware 时间。
+- 写回改了生产的 mtime ⇒ 之后再用生产 mtime 判「扫描写过的缓存」会误删（prep 改为以写回前的 APFS 克隆为参照）。
 
 ## [0.45.482] — 2026-10-13 — Fixed：yfinance 期权链里 Yahoo 求解失败的 IV（减半阶梯 1 / ½ / ¼ / ⅛ / … 2⁻ⁿ + 正偏移，含地板 1e-05）在源头置 0 并打标记；ATM 窗口失败值不少于有效值 ⇒ 当日 IV 按不可得处理——此前中位数正好落成 12.5 / 6.25（/ 25 / 50），落在 5%–150% 有效区间、被当真实观测
 

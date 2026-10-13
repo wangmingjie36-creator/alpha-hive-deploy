@@ -1394,6 +1394,39 @@ def _rank_mirror_entries(entries: List[Dict]) -> List[Dict]:
 
 QUARANTINE.extend(_rank_mirror_entries(QUARANTINE))
 
+
+#: 前瞻检验排除日（v0.45.484）—— 与 `QUARANTINE` **不是一回事**，别合并：
+#:
+#: `QUARANTINE` 管「取错日子的观测」，在**入库口**拦（archive / backfill 不写、purge 工具会删），且划界原则是
+#: 不隔离 Agent 评分。这里管的是「整天由事后重放补算、不再是生产当时实际产出」的日子：库里存的是**对的**
+#: 重放值（要留着、要能被别的读者用），只是不进预注册前瞻检验——那两份协议的意向性分析口径是「系统当天
+#: 实际产出什么就算什么」，事后重放的整天不属于这个口径。
+#:
+#: 只由读者问 `forward_test_excluded(date)`：`experiments/dim_ic_forward_test.load_rows`、
+#: `experiments/resonance_boost_forward_test.load_reports`。登记须在该日任何结果（T+7）存在之前，
+#: 并在对应预注册里写「修订（事后）」。守卫 `tests/test_forward_test_excluded_days.py`。
+FORWARD_TEST_EXCLUDED_DAYS: Dict[str, Dict] = {
+    "2026-10-12": {
+        "version": "v0.45.484",
+        "registered": "2026-10-13",
+        "reason": (
+            "生产扫描遇本机出站故障（编排器 14:00:08 代理探活失败 ⇒ 整轮直连 ⇒ 全部 TLS 握手 SSLEOFError）："
+            "30/30 只 MultiSourceFetcher 全源 FALLBACK、现价 0、期权链 0 条、新闻/SEC/yfinance 全断。"
+            "当日数据于 2026-10-13 用当天代码（0993efde）+ 云端同场链 + 真实收盘整日重放补算并写回"
+            "（control 29/30 逐位复现生产存档）。用户决定：写回，但该日不进预注册前瞻检验。"
+            "登记时该日 T+7 尚未到期（≥ 2026-10-21），不可能受结果影响。"
+        ),
+        "evidence": ("~/.claude/logs/orchestrator-2026-10-12.log", "~/.claude/logs/scan_coverage-2026-10-12.json",
+                     "_manual_backups/2026-10-13_1012_replay_v0.45.484/"),
+    },
+}
+
+
+def forward_test_excluded(date: str) -> bool:
+    """该业务日是否排除在预注册前瞻检验之外（见 `FORWARD_TEST_EXCLUDED_DAYS`）。"""
+    return str(date)[:10] in FORWARD_TEST_EXCLUDED_DAYS
+
+
 def is_quarantined(date: str, ticker: str, signal: str) -> bool:
     """该 (日期, 标的, 信号) 是否在隔离名单内。入库与分析都应先问这一句。
 
