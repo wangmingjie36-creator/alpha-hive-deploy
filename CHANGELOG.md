@@ -5,7 +5,28 @@
 
 ---
 
-## [0.45.491] — 2026-10-13 — 占位（进行中：report_snapshots 读改写往返丢 cs_rank / 重写 created_at——load_from_json 不保留未知键）
+## [0.45.491] — 2026-10-13 — Fixed：report_snapshots 读回再存丢 `cs_rank`、改写 `created_at`——每次扫描的 T+1/T+7/T+30 回填都在抹（生产 1771 份里 cs_rank 被抹 866、created_at 被改 1473）；`save_to_json` 改为只写读回后改过的字段；附恢复工具（dry-run，**数据未动、待用户批准**）
+
+### 为什么
+- `feedback_loop.ReportSnapshot.load_from_json` 手抄字段清单，v0.40.0 加 `cs_rank` 时只加了写、没加读；`save_to_json` 恒写 `created_at = now()`。`outcomes_fetcher._update_snapshot`（扫描后台每次都跑）走「读 → 填一格价格 → 存」⇒ 旧快照 cs_rank 变 null、created_at 变回填时刻。证据：数据备份仓库 `435482c`（10-09，ABBV_2026-10-05 `cs_rank {final 0.345…}` → null、t1 null → 266.69、created_at 10-05T14:42 → 10-09T14:43）、`ee261ff`（10-12，44 份）。
+- 10-12 生产现状：07-08 ~ 10-08 每天只剩 6–7 份有 cs_rank（`outcomes_fetcher` 每轮按文件名排序取 50 份，字母序靠后的还没轮到；T+30 迟早全抹）。v0.40.0 之前的 607 份本来就没有 cs_rank（`.swarm_results` 里也没有）。
+- 写者普查：`outcomes_fetcher._update_snapshot`（**唯一生产往返写者**）；`backtest_engine.BacktestEngine.backfill_prices.save_callback` 原文改写、保键（安全）；`alpha_hive_daily_report` 扫描新建（正确）；`generate_deep_v2._save_report_snapshot` 整份新建、口径不同，缺省写停更旧目录 `~/Desktop/深度分析报告/深度` ⇒ 潜伏（未改，已在 auto-memory）。读时丢的只有 `cs_rank`（`created_at` 是写时改），其余 13 个键 load 都读。
+
+### 影响面
+- **`cs_rank` 在快照里零读者**（全仓只有 `experiments/patch_0917_oracle_price_v0464.py` 写它）——档案损失，没有在线计算读到 null；共振 / 维度 IC 前瞻检验、纸面组合、Alpha Bot 都不读快照 cs_rank。
+- `created_at` 有读者：`self_analyst.load_snapshots` 用它做「近 3 个月」截断 ⇒ 10-13 时窗口多放进 151 份（05-28 ~ 07-09；840 vs 689）——月度 Track B 简报（诊断，不进评分）。
+
+### Fixed
+- `feedback_loop.py`：`load_from_json` 读 `cs_rank` / `created_at`，并记下原文 + 读完那一刻的字段值（深拷贝）；`save_to_json` 经 `_merge_onto_loaded` 以原文为底只覆盖改过的字段——未知键、原文缺的键、读时规范化（entry_price null → 0.0）都不写回；`actual_prices` 逐子键；created_at 新快照首存盖戳、读回沿用。字段清单收进 `_payload()` 一处。
+
+### Added
+- `tests/test_report_snapshot_roundtrip.py`（11 条）：按原文**整份比**（生产形状 + 旧形状 + 未知键 / 未知子键）；经 `OutcomesFetcher._update_snapshot` 真写者；`test_every_saved_field_is_read_back` 抓「加了写忘了读」。变异：换回旧 `feedback_loop.py` ⇒ 9 红（余 2 条是「真改了要写」的正对照）；只删 `cs_rank` 读取行 ⇒ 2 红。
+- `experiments/restore_snapshot_cs_rank_v0491.py` + `tests/test_restore_snapshot_cs_rank_tool.py`（7 条，临时 git 仓库夹具）：从快照**自己的** git 历史（代码仓库 `origin/main`，阶段 6 前跟踪 report_snapshots；数据备份仓库 HEAD，09-24 起）找回。**按同一次扫描认版本**（身份 = composite_score / direction / entry_price / agent_votes）——08-25 / 08-26 一份文件 2~5 个版本，「最早非空」会拿到被同日重扫取代的那次；**不用 `.swarm_results`**（07-08 / 07-09 / 08-12 / 10-05 共 33 份与快照历史不一致，10-05 快照是 run-1、swarm_results 是 run-2）。dry-run 缺省；`--apply` 要求生产克隆已含本修复、整目录备份逐文件比对、`--expect-cs` / `--expect-created`、写前重读跳过并发改动、`record_tool_run` 登记。
+- 生产 dry-run（10-13）：cs_rank 可补 **866 / 866**（0 ambiguous、0 无历史），created_at 可改回 1473；与独立的 `--all` refs 评估逐文件一致。
+
+### 未做（等用户决定）
+- 生产数据**未写**。恢复须在本修复进入生产克隆之后（工具会拒），否则下一次回填再抹。
+
 
 ## [0.45.490] — 2026-10-13 — Fixed：v0.45.482 / 486 二次检查——多数规则补到偏斜与 yfinance 期限结构（482 只给了 iv_current）；key levels 的失败值 / 非正 IV 记 None（482 置 0 后渲染成「0.0%」）；486 漏掉的 14 行 rank / pct 入隔离并清库；更正 482 / 486 条目各一处
 
