@@ -791,6 +791,47 @@ mtime 从不早于写前读的 `time.time()`，所以本机永远复现不了。
 - freezegun 冻 UTC 时 naive `now()` 不是本地时间；改 `tz_offset` 又会错移 aware 时间。
 - 写回改了生产的 mtime ⇒ 之后再用生产 mtime 判「扫描写过的缓存」会误删（prep 改为以写回前的 APFS 克隆为参照）。
 
+## [0.45.483] — 2026-10-13 — Fixed（测试隔离）：10-12 全量测试期间生产 `pheromone.db` 被改动——判明是**并发写者**（另一会话的 v0.45.479 清库），不是 `TestMacBash`；但它的 `env -i` 子进程确实没隔离（数据根会解析到真实生产），补上 `ALPHA_HIVE_HOME` + 守卫
+
+### 结论：并发写者（有直接证据）
+- 10-12 13:02:04 起的全量（merge `142c7aa7`）teardown 时真实数据根闸红：`pheromone.db @13:08:57.673`、`pheromone.db-wal @13:08:57.746`，时间线落在 `TestMacBash::test_parity_and_fallback_under_bare_env[UTF-8]` 的 call 段。
+- 同一时刻另一会话（worktree `confident-lederberg-3b0de0`）在跑 v0.45.479 清库：会话记录里该命令 13:08:55.876 下发（`2026-10-12T20:08:55.876Z`，执行不早于此），`env -u ALPHA_HIVE_HOME … purge_quarantined_signal_rows.py --only-tag v0.45.479 --expect 128 --apply`（⇒ 缺省数据根 = 生产库），删 128 行（129,947 → 129,819），结果 **13:08:58.272** 返回。其持锁后备份 `db_backups/pheromone_pre_v0.45.479_purge.db` 生于 13:08:56.689、末次写 13:08:56.766；闸看到的两个 mtime 在备份之后约 0.9 s，正落在该命令窗口内。同一条命令里随后还有两次只读核对连接；COMMIT、检查点、只读连接各自改了哪个文件的 mtime **没有细分**（不影响归因：窗口内对生产库动手的只有这条命令）。
+- 同日 12:27–12:39 那轮没报 `pheromone.db`：闸本身就证明那段时间库没被改（起止指纹相同）；前后两次动库的备份在 12:18:32（v0.45.475 隔离）与 12:43:08（v0.45.476 恢复），都在窗口外。「不确定」来自并发写者什么时候动手，不来自测试。
+- 闸的时间线本来就只说「时间重合」（v0.45.455 措辞）；这次的归因法：`db_backups/` 里各次清库 / 恢复备份的 mtime + 其他会话 `~/.claude/projects/*/*.jsonl` 里同一时间窗的 `tool_use`。
+
+### 实测：测试不碰数据根（全程没有碰生产库）
+- 用 `sandbox-exec`（内核沙箱、子进程继承、穿过 `env -i` 依然生效）：写 `~/alpha-hive-data` / `~/alpha-hive-prod` / `~/.claude/scripts` / 开发检出的 `pheromone.db*` 一律拒，**读** `~/alpha-hive-data/pheromone.db*` 也拒；每次违规进统一日志（`log show --predicate 'sender == "Sandbox"'`，带进程名与 pid）。
+- 金丝雀先自证：`env -i` 下的 Python 以 `immutable=1`（不加锁、不碰 WAL，沙箱若失效也无害）打开 `pheromone.db` → 被拒且日志有 `deny(1) file-read-data …/pheromone.db`；写拒绝在 scratch 目录上同样留痕。
+- `tests/test_orchestrator_step_interp.py` 全文件 164 passed（`TestMacBash` 两条确实执行、非 skip），生产路径违规 **0** ⇒ `env -i` 子进程不打开数据根里任何东西，连读 `pheromone.db` 都没有。
+- 复核 v0.45.422 那条审计（不只看 logs）：AST 枚举 `tests/` 里 `env=` 不是字面继承 `os.environ` 的 64 处子进程调用（34 个文件，含字面 `env -i` / 剥 `ALPHA_HIVE_*` 的全部 10 个文件）+ 直接调 `resolve_data_root` 的 `test_data_root_default.py`，共 35 个文件（基线 `747cc880`）整体在同一沙箱里跑：2120 passed，生产路径违规 **0**。12 条未全程跑完，逐条核过：9 条 `test_ic_rerun_fg_budget` 只在**收尾**的 `ps` 清理处报错（setuid 的 `/bin/ps` 在沙箱里一律 exec 不了），测试体已在沙箱里跑完；2 条 `test_alphabot_launcher::TestNativeWindow` 在测试体里调 `ps` 失败，其子进程只是 `python -c pass` / `sleep`、环境原样继承会话沙箱；1 条 `test_data_migrations` 是 iCloud 重名副本致败（见「环境」），清掉后该文件在沙箱里重跑 48 passed、违规 0。
+
+### 发现：v0.45.422 审计记录对 `TestMacBash` 不成立
+- 422 记「剥 `ALPHA_HIVE_*` 的测试都显式设了或把 HOME 指空目录」。`TestMacBash` 两样都没有：`env -i` 把会话沙箱的 `ALPHA_HIVE_HOME` 与 `HOME` 一起剥掉 ⇒ 子进程里 `hive_logger.resolve_data_root` 落到 `expanduser("~")`（无 HOME 时查用户库）= 真实 `~/alpha-hive-data`。它没写穿只因为 `orchestrator_steps` 在这几条路上只读显式给的 `--json` / `--data-dir`（Step 2/4 的 `_resolve_dirs` 也只认 `--data-dir` / `ALPHA_HIVE_HOME`、不看 HOME）——是走运，不是隔离；哪天这条路 import 了 `hive_logger`，写进生产 `logs/` 也没人会红（闸豁免 logs）。
+- 生产里这些子进程两样都有：`ALPHA_HIVE_HOME` 来自 plist 的 EnvironmentVariables，编排器顶部又 `export` 一次；`HOME` 由 launchd 按用户补上（`launchctl print` **不列**它，别据此以为没有——编排器顶层第 1485 行在 `set -u` 下展开 `$HOME`，自 09-28 起每个扫描日都跑过，launchd err 日志 0 次 unbound variable）。⇒ 测试的 `env -i` 前缀比生产少了两样；补上 `ALPHA_HIVE_HOME` 即在数据根上与生产同形，不补 HOME 是本测试原有的「比生产更光」的条件。
+
+### Changed（测试）
+- `TestMacBash` 的 `env -i` 前缀加 `ALPHA_HIVE_HOME=<tmp_path>/alpha_hive_home`（数据根上与生产同形 + 隔离），并在派生任何子进程**之前**用生产的 `resolve_data_root` 对子进程环境求值，断言落在 `tmp_path` 内。
+
+### Added（守卫）
+- `tests/test_bare_env_children_pin_data_root.py`：AST 扫 `tests/` 里每一处 `env -i`（含同义的 `--ignore-environment` 与单独的 `-`；参数表字面量 `["/usr/bin/env", "-i", …]`，以及「`env -i NAME=…`」命令串），要求带 `ALPHA_HIVE_HOME=` 或 `HOME=`（只核有没有、不核值）；必须扫到已知那一处（`KNOWN_SITE`），否则报「守卫瞎了」；牙齿测试 7 条（缺 / 带 / f-string / 只提到名字不算赋值 / 命令串 / 同义写法 / 说明文字与 docstring 不算命令）。把 `env -i` 拆进变量再拼的写法扫不到，docstring 写明。
+- 变异 6 个全红、报错文案逐个对得上（沙箱内跑，还原后 sha256 一致）：M0 HEAD 原文件（元守卫点名该处）；M1 删掉前缀里的 `ALPHA_HIVE_HOME`（两道都红，报「解析到 /Users/igg/alpha-hive-data」）；M2 指向沙箱外（测试内断言红；静态守卫只管有没有，值归测试内断言）；M3 扫描器认不出 `-i`（牙齿 +「瞎了」红）；M4 扫描器恒放行（牙齿红）；M5 扫描器只认 `-i`（同义写法牙齿红）。
+- ⚠️ 首版守卫自己踩了一次：牙齿测试里用 `" ".join(("env", "-i"))` 拼样本，那个元组正是守卫要找的参数表形状；而 `own_python_files` 走 `git ls-files`，守卫文件**未提交时扫不到自己**，变异与全量都在未跟踪状态下跑、全绿。叠到 origin/main 提交后才红（点名自己第 89 行）。改成 `"env" + " -i"`（`ast.parse` 不折叠常量），跟踪状态下重跑 28 passed、变异 5/5 仍红。
+
+### 二次检查（同日，推送前）
+- ✗ 首稿说「launchd 不给 HOME」（据 `launchctl print`）——**错**：那里只列配置的变量；编排器顶层 `$HOME` 在 `set -u` 下每天跑过即反证。已改测试注释、守卫 docstring、本条与 memory；修法本身不受影响（钉住 `ALPHA_HIVE_HOME` 后数据根与 HOME 无关）。
+- ✗ 首稿说沙箱里「12 条因 `/bin/ps` 失败」——实为 9 条只在收尾报错（测试体已跑完）+ 2 条测试体内 + 1 条 iCloud 副本；后者清副本后在沙箱补跑。已更正上文。
+- ✗ 首稿把「备份之后 0.9 s」写成 DELETE / COMMIT / 检查点的确定次序——那是推测，已改成「未细分」。
+- 补：守卫原先只认 `-i`，`env --ignore-environment` / `env -` 同样清空环境却漏网——已加（M5 验牙齿）。
+
+### 环境
+- 本 worktree 里 180 个 iCloud 重名副本（135 与本体逐字节相同、45 是已提交 blob，独有内容 0；其中 `data_migrations/versions/__init__ 2.py` 让 `test_data_migrations` 的 `discover()` 抛 `MigrationLayoutError`）移进 `~/.Trash/icloud-dupes-hungry-feistel-20261013-022043/`；3 个重名**目录**未核、未动。
+
+### 评分 / 世代边界
+- 只动测试，生产代码零改动；不追加世代边界。
+
+### 验证
+- ruff 两文件全绿。全量（10-13 02:21，本 worktree，非沙箱）：9354 passed / 4 failed / 2 xfailed；会话级两道闸 teardown 无报警。4 条红均与本版无关：`TestCoverageHorizon`（设计内定期红：2027 经济日历未发布）；`test_options_snapshot_price_honesty` 3 条——v0.45.462 夹具写死到期日 2026-10-16（`NVDA261016…`），10-13 起日历 DTE < 7 被近月过滤挡掉 ⇒ 链为 None，**时间炸弹**，单跑同样红（已另开任务，未在本版修）。
+
 ## [0.45.482] — 2026-10-13 — Fixed：yfinance 期权链里 Yahoo 求解失败的 IV（减半阶梯 1 / ½ / ¼ / ⅛ / … 2⁻ⁿ + 正偏移，含地板 1e-05）在源头置 0 并打标记；ATM 窗口失败值不少于有效值 ⇒ 当日 IV 按不可得处理——此前中位数正好落成 12.5 / 6.25（/ 25 / 50），落在 5%–150% 有效区间、被当真实观测
 
 ### 为什么（核实过程，只读）
