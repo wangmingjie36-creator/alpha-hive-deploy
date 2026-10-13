@@ -117,7 +117,9 @@ def _selection_free(pytest_args):
 
 def render(base_bad, base_counts, results):
     lines = ["## 拨钟审计（tools/clockshift）", "",
-             f"真实钟基线：{base_counts}；基线已红 {len(base_bad)} 条（不计入）。", ""]
+             f"真实钟基线：{base_counts}；基线已红 {len(base_bad)} 条（不计入——它们由 tests.yml 负责，列在这里免得看不见）："]
+    lines += [f"- `{n}`" for n in sorted(base_bad)]
+    lines.append("")
     for r in results:
         head = f"### +{r['days']:g} 天：确认的新红 {len(r['confirmed'])} 条"
         lines += [head, f"计数：{r['counts']}"]

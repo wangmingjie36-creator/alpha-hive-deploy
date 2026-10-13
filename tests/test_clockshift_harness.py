@@ -171,6 +171,8 @@ class TestAudit:
         assert {n.split("::")[-1] for n in base_bad} == {"test_red"}
         assert [n.split("::")[-1] for n in results[0]["confirmed"]] == ["test_bomb"]
         assert results[0]["flaky"] == []
+        report = audit.render(base_bad, {}, results)
+        assert "test_red" in report, "基线已红的要逐条列出（不计入 ≠ 看不见）"
 
     def test_crashed_run_is_invalid_not_green(self, tmp_path):
         """某一轮跑崩（这里：收集错误）⇒ `RunInvalid` / 退出码 2，不能报成「0 条新红」。
