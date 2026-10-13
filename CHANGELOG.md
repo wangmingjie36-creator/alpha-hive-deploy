@@ -5,7 +5,25 @@
 
 ---
 
-## [0.45.501] — 2026-10-13 — 占位（进行中：v0.45.492 溢价子页二次检查 9 处根因修复）
+## [0.45.501] — 2026-10-13 — Fixed：v0.45.492 溢价子页二次检查（`/code-review` high）9 处根因修复——财报「视野内没有」不再判成「到期前没有」、连点不再互相覆盖、外部原因码表补全并加完整性守卫、日线落后与窗内缺口分开报、财报日跳过失败日、分片只解析一次、选中到期日掉出范围自动取消、取日线出错有自己的码、规则表只算一次
+
+### Fixed
+- **财报：扫描只知道「下一次」**（`premium._expiry_rows`）。492 把「视野内没有 / 记下的那次已过」照卖权账本的口径判成「到期前没有」（False），而本页 DTE 可到 365 天——120 天的到期日必然含下一次财报，却不提示。现在只有知道下一次日期才按它分（之前 False、之后 True），其余**每个到期日都判不了（None）**。原测试 `test_none_status_means_no_flag_not_unknown` 把这个 bug 当成正确行为钉住了，已改写为 `test_no_next_date_means_unknown_for_every_expiry`。（卖权账本的 `classify_earnings` 语义不动：它管 21–45 天、且属预注册口径。）
+- **财报：最新一天 Chronos 失败不再盖掉前一天的日期**：新纯函数 `premium.earnings_observation` 在该票最近 `EARNINGS_SCAN_LOOKBACK` 个有记录的日期里跳过 earnings_status 为 None / unknown 的日子；都没有信息才报「那次扫描没拿到财报信息」。
+- **前端连点竞态**（`premium.js`）：请求序号只认最后发出的那一个，慢的旧响应不覆盖新的、不存进本机；连着改两处时第二处叠在「最近一次发出的筛选」上（浏览器实测：首请求延迟 1.5 秒，OI 与方向两处都保住）。
+- **外部原因码表不全**：`price_unavailable`、`no_parseable_contracts`（CBOE 原始取数）未登记，页面会显示「未登记」。补登；新守卫用 AST **枚举产出方**——`cboe_options._raw_fail` 的全部码、`service._default_bars` 与 `vrp_signal.record_day` 写进 reason 的全部码——缺一个就红（旧守卫只核「表里的码在源文件里存在」）。
+- **日线落后与窗内缺口是两件事**（`premium.bars_context`）：492 用 find_gaps 的 critical（二者混在一起），落后 1–2 个交易日时页面不提、反而说「跨过缺口的 RV 窗口一律不可得」而 RV 其实照算。现在分别给 `lag_sessions`（页头写「截至 X，落后 N 个交易日，RV 照算」）与 `gaps_in_windows`（只列最长 RV 窗口覆盖范围内、末根之前缺的那几天）。
+- **选中的到期日掉出天数范围**：服务端 400（`param=expiry`），前端取消选中并说明；不再卡在空表上只能「恢复缺省」（浏览器实测）。
+- **取日线出错有自己的码** `bars_fetch_exception`（`service._default_bars`）：492 借用整页的 `exception` 前缀，被读成「计算出错」、指错层。
+
+### Changed（性能）
+- 财报日每个 tenor 只读最近两个月分片、**各解析一次**（492 逐日期调 `rows_for_date`，不在扫描名单的票最坏把 1.7MB 分片重复解析约 20 次）。
+- 规则常量与文案表每个服务实例只算一次（取不到不缓存、下次再试）。
+
+### 测试
+- `tests/test_alphabot_premium.py` 118 条（+16）。变异 37 个全部被抓住（新增 M31–M38 对应本版各条；M27 / M30 随代码迁到 `earnings_observation`）。
+- 浏览器（演示模式）实测竞态与选中到期日掉出范围两条。
+
 
 ## [0.45.500] — 2026-10-13 — 占位（进行中：财报日单一真相——共享日历解析器 + 按扫描日观测的 next_earnings 读取入口（本地最近有效观测兜底）+ 读者改接线，退役 earnings_cache/_date.json 直读）
 

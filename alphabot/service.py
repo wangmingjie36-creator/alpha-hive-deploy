@@ -143,7 +143,8 @@ def _default_bars(ticker: str) -> dict:
         return {"available": True, "source": "twelve_data",
                 "bars": [{"date": str(r.get("date"))[:10], "close": r.get("close")} for r in rows]}
     except Exception as exc:  # noqa: BLE001
-        return {"available": False, "reason": f"exception:{type(exc).__name__}: {exc}", "bars": []}
+        # 自己的码（不叫 exception：溢价页把那个前缀读成「计算出错」，会把取数失败指错层）
+        return {"available": False, "reason": f"bars_fetch_exception:{type(exc).__name__}: {exc}", "bars": []}
 
 
 class AlphaBotService:
@@ -169,6 +170,7 @@ class AlphaBotService:
         # 溢价页（v0.45.492）读的 IV 历史索引 / VRP 账本的数据根；None ⇒ 调用时的 PATHS.home（财报日读卖权账本 ledger_dir）
         self.premium_root = premium_root
         self._premium_cache: Dict[str, tuple] = {}
+        self._premium_rules_cache: Optional[dict] = None     # 规则常量与文案表进程内不变：算一次
         self._cache: Dict[str, tuple] = {}
         self._bars_cache: Dict[tuple, dict] = {}
         self._locks: Dict[str, threading.Lock] = {}
@@ -414,10 +416,13 @@ class AlphaBotService:
                        vrp_min_obs=int(vrp_signal.CONFIG["min_obs_per_ticker"]))
 
     def premium_rules(self) -> dict:
-        try:
-            return PM.public_rules(self._premium_deps()) | {"cache_ttl_sec": self.live_ttl}
-        except Exception as exc:  # noqa: BLE001 - 取不到就写明原因，不连坐 /api/method
-            return {"rules_error": f"{type(exc).__name__}: {exc}"}
+        """规则常量与文案表（进程内不变 ⇒ 只算一次；取不到不缓存，下次再试）。"""
+        if self._premium_rules_cache is None:
+            try:
+                self._premium_rules_cache = PM.public_rules(self._premium_deps()) | {"cache_ttl_sec": self.live_ttl}
+            except Exception as exc:  # noqa: BLE001 - 取不到就写明原因，不连坐 /api/method
+                return {"rules_error": f"{type(exc).__name__}: {exc}"}
+        return self._premium_rules_cache
 
     def _premium_home(self) -> Path:
         return Path(self.premium_root) if self.premium_root is not None else PATHS.home
@@ -440,22 +445,20 @@ class AlphaBotService:
         return self.fetch_fn or R.LG._default_fetch
 
     def _premium_earnings(self, t: str, as_of: str, deps) -> dict:
-        """财报日 ← 卖权账本（日报钩子按本轮 ChronosBee 写进每行的 earnings_date）里该票最近一行 recorded。
+        """财报日 ← 卖权账本（日报钩子按本轮 ChronosBee 写进每行的 earnings_date）里该票最近一次有信息的观测。
         只读、与总览 / 卖权页读的是同一个账本目录（`ledger_dir`）。**不读** earnings_cache 的兜底缓存（理由见
-        `premium.earnings_state`）。扫描那天失败的行是 unavailable，往回找最多 EARNINGS_SCAN_LOOKBACK 个日期。"""
-        name = self._local_name(t).upper()
+        `premium.earnings_state`）。每个 tenor 只读最近两个月分片、**各读一次**（与 `ledger_dates` 同一覆盖范围；
+        逐日期调 rows_for_date 会把 MB 级分片重复解析几十次），挑哪一行由 `premium.earnings_observation` 判。"""
         try:
-            for d in R.ledger_dates(state_dir=self.ledger_dir, limit=PM.EARNINGS_SCAN_LOOKBACK):
-                for tenor in R.LG.TENORS:
-                    for r in R.LG.rows_for_date(d, tenor, self.ledger_dir):
-                        if str(r.get("ticker") or "").upper() == name and r.get("status") == "recorded":
-                            entry = {"scan_date": d, "earnings_date": r.get("earnings_date"),
-                                     "earnings_status": r.get("earnings_status"), "source": r.get("earnings_source")}
-                            return PM.earnings_state(entry, None, as_of=as_of, deps=deps)
+            rows: List[dict] = []
+            for tenor in R.LG.TENORS:
+                for path in R.LG._shard_paths(tenor, self.ledger_dir)[-2:]:
+                    rows.extend(R.LG._load_shard(path)[0])     # 坏行由账本自己的 assess 计数，这里只用好行
         except Exception as exc:  # noqa: BLE001 - 账本读不了如实说，不当成「没有财报」
             _log.warning("[%s] 溢价页读卖权账本财报日失败：%s: %s", t, type(exc).__name__, exc)
             return PM.earnings_state(None, PM._why("scan_ledger_unreadable", type(exc).__name__), as_of=as_of, deps=deps)
-        return PM.earnings_state(None, None, as_of=as_of, deps=deps)
+        entry = PM.earnings_observation(rows, ticker=self._local_name(t).upper(), lookback=PM.EARNINGS_SCAN_LOOKBACK)
+        return PM.earnings_state(entry, None, as_of=as_of, deps=deps)
 
     def _premium_iv_index(self, t: str, as_of: str, deps) -> dict:
         """IV 历史索引。只读：用 `_read_index`，**不用** `load_iv_history`（后者会写迁移标记）。"""

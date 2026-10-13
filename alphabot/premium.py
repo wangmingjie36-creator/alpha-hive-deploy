@@ -98,11 +98,14 @@ REASONS = {
 EXTERNAL_REASONS = {
     "twelve_data_not_configured": ("alphabot/service.py", "没配 Twelve Data key"),
     "twelve_data_returned_nothing": ("alphabot/service.py", "Twelve Data 没返回日线"),
+    "bars_fetch_exception": ("alphabot/service.py", "取日线出错（{}）"),
     "stale_vintage": ("cboe_options.py", "CBOE 文件还停在上一交易日"),
     "payload_unavailable": ("cboe_options.py", "CBOE 文件拿不到"),
     "vintage_unverifiable": ("cboe_options.py", "CBOE 文件日期判不了"),
     "vintage_mismatch": ("cboe_options.py", "CBOE 文件日期不符"),
     "snapshot_mode_no_raw_chain": ("cboe_options.py", "补跑模式没有原始链"),
+    "price_unavailable": ("cboe_options.py", "CBOE 文件里没有可用的现价"),
+    "no_parseable_contracts": ("cboe_options.py", "CBOE 文件里没有能解析的合约"),
     "iv_and_rv_missing": ("vrp_signal.py", "那天 IV 与 RV 都缺"),
     "iv_missing": ("vrp_signal.py", "那天 IV 缺"),
     "rv_30d_missing": ("vrp_signal.py", "那天 RV30 缺"),
@@ -181,6 +184,11 @@ def _lag_sessions(d, as_of, deps: Deps) -> Optional[int]:
     if a is None or b is None:
         return None
     return len(deps.trading_days(b + timedelta(days=1), a)) if a > b else 0
+
+
+def num_s(x) -> str:
+    v = _num(x)
+    return "—" if v is None else (str(int(v)) if v == int(v) else f"{v:g}")
 
 
 def chain_as_of(raw: dict) -> str:
@@ -326,7 +334,7 @@ def rv_window(rows: Sequence[Tuple[str, Optional[float]]], n: int, *, missing: f
 def bars_context(bars: dict, *, today: date, deps: Deps) -> Tuple[dict, List[Tuple[str, Optional[float]]], frozenset]:
     """日线 → (整体状态, 可用于取窗的 (date, close), 缺失的交易日)。不可用时后两项为空。"""
     ctx = {"available": False, "reason": None, "source": (bars or {}).get("source"), "last_date": None,
-           "gaps_critical": [], "lag_sessions": None}
+           "gaps_in_windows": [], "lag_sessions": None}
     if not (bars or {}).get("available"):
         return ctx | {"reason": (bars or {}).get("reason") or _why("bars_unavailable")}, [], frozenset()
     rows, why = clean_bars(bars.get("bars") or [])
@@ -335,9 +343,13 @@ def bars_context(bars: dict, *, today: date, deps: Deps) -> Tuple[dict, List[Tup
     last = rows[-1][0]
     gaps = deps.find_gaps([d for d, _c in rows], today=today)
     missing = frozenset(gaps.get("missing") or [])
-    # find_gaps 把末端补到「上一个已完成交易日」⇒ 末根之后缺的交易日数 = 日线落后几个交易日
+    # 两件不同的事分开报（v0.45.492 二次检查）：find_gaps 的 critical 把二者混在一起——
+    #   · 末根之后缺的交易日（find_gaps 把末端补到「上一个已完成交易日」）= 日线**落后**几个交易日：窗口照算、但数据旧；
+    #   · 末根之前、最长 RV 窗口覆盖范围内缺的 = **窗内缺口**：跨过它的窗口不可得。
     lag = sum(1 for d in missing if d > last)
-    ctx |= {"last_date": last, "gaps_critical": list(gaps.get("critical") or []), "lag_sessions": lag}
+    oldest = rows[-(RV_N_MAX + 1)][0] if len(rows) > RV_N_MAX else rows[0][0]
+    ctx |= {"last_date": last, "lag_sessions": lag,
+            "gaps_in_windows": sorted(d for d in missing if oldest < d < last)}
     if lag > BARS_MAX_LAG_SESSIONS:
         return ctx | {"reason": _why("bars_stale", lag)}, [], missing
     return ctx | {"available": True}, rows, missing
@@ -449,7 +461,8 @@ def earnings_state(entry: Optional[dict], err: Optional[str], *, as_of: str, dep
     entry = {"scan_date", "earnings_date", "earnings_status", "source"}（那天该票任一 recorded 行；None = 最近的扫描里没有）。
     **不读** `earnings_cache/{T}_date.json`：那是兜底专用缓存、扫描几乎不写，2026-10-13 实测 NEE / CRCL 的缓存日期
     比扫描的晚一周以上——「财报在到期前」会被判成「到期后」，正是卖方最怕的那个方向。
-    status：known（有日期）/ none（扫描视野内没有财报，或记下的那次已过）/ unknown（判不了）。"""
+    status：known（有日期）/ none（扫描视野内没有财报，或记下的那次已过）/ unknown（判不了）。
+    none 只是给页头的说明：扫描只知道「下一次」，none 时下一次在哪不知道 ⇒ 到期日一律判不了（见 `_expiry_rows`）。"""
     out = {"status": "unknown", "date": None, "scan_date": None, "lag_sessions": None, "source": None, "reason": None}
     if err:
         return out | {"reason": err}
@@ -470,6 +483,29 @@ def earnings_state(entry: Optional[dict], err: Optional[str], *, as_of: str, dep
     out["date"] = d.isoformat()
     a = _date(as_of)
     return out | {"status": "none" if (a is not None and d < a) else "known"}
+
+
+def earnings_observation(rows: Sequence[dict], *, ticker: str, lookback: int) -> Optional[dict]:
+    """卖权账本行（两个 tenor 混在一起）→ 该票最近一次**有财报信息**的扫描观测（喂 `earnings_state`）。
+
+    只看 status == recorded 的行（扫描失败那天是 unavailable）；在该票最近 `lookback` 个有记录的日期里，
+    跳过 earnings_status 为 None / unknown 的日子（那天 Chronos 与兜底都失败）往回找——最新一天失败不该
+    盖掉前一天拿到的日期。都没有信息 ⇒ 返回最新那天（earnings_state 判「那次扫描没拿到财报信息」）；
+    一行都没有 ⇒ None（「最近的扫描里没有这只票」）。"""
+    mine = [r for r in rows if isinstance(r, dict) and str(r.get("ticker") or "").upper() == ticker
+            and r.get("status") == "recorded" and _date(r.get("date")) is not None]
+    if not mine:
+        return None
+    dates = sorted({str(r["date"])[:10] for r in mine}, reverse=True)[:lookback]
+
+    def entry(r):
+        return {"scan_date": str(r["date"])[:10], "earnings_date": r.get("earnings_date"),
+                "earnings_status": r.get("earnings_status"), "source": r.get("earnings_source")}
+    for d in dates:
+        good = [r for r in mine if str(r["date"])[:10] == d and r.get("earnings_status") not in (None, "unknown")]
+        if good:
+            return entry(good[0])
+    return entry(next(r for r in mine if str(r["date"])[:10] == dates[0]))
 
 
 def iv_rank_block(index: Optional[Mapping[str, float]], err: Optional[str], *, as_of: str, deps: Deps) -> dict:
@@ -582,9 +618,10 @@ def _expiry_rows(contracts, S, as_of, dte_of, *, bars: dict, earnings: dict, tod
 
     atm = [{"expiry": e, "dte": dte_of[e], "atm_iv": deps.atm_iv(contracts, S, e)} for e in expiries]
     kinks = forward_kinks(atm, as_of=as_of, deps=deps)
-    # 与卖权账本同一个分类函数：known ⇒ 按日期分；none ⇒ {"earnings_date": None} 判 "none"；unknown ⇒ None 判 "unknown"
-    earn_info = ({"earnings_date": earnings.get("date")} if earnings.get("status") == "known"
-                 else {"earnings_date": None} if earnings.get("status") == "none" else None)
+    # 扫描只知道**下一次**财报日（ChronosBee 只取 days_until ≥ 0 的那一个）。known ⇒ 按它分（之前 False、之后 True）；
+    # 其余——包括「视野内没有」与「记下的那次已过」——都不知道下一次在哪，**每个到期日都判不了（None）**。
+    # 不能像卖权账本那样把「none」当成「到期前没有财报」：本页 DTE 可到 365 天，120 天的到期日必然含下一次财报。
+    earn_info = {"earnings_date": earnings.get("date")} if earnings.get("status") == "known" else None
     out = {}
     for x in atm:
         e = x["expiry"]
@@ -673,6 +710,10 @@ def select(full: dict, p: dict) -> dict:
     exps = {e["expiry"] for e in full["expiries"]}
     if p.get("expiry") and p["expiry"] not in exps:
         raise ParamError(f"链上没有到期日 {p['expiry']}", "expiry")
+    if p.get("expiry"):
+        dte = next(e["dte"] for e in full["expiries"] if e["expiry"] == p["expiry"])
+        if not p["dte_min"] <= dte <= p["dte_max"]:
+            raise ParamError(f"到期日 {p['expiry']}（{num_s(dte)} 天）不在天数范围 {p['dte_min']}–{p['dte_max']} 内", "expiry")
     funnel = [dict(s) for s in full["funnel_fixed"]]
     rows = full["rows"]
     stages = [("dte", lambda r: p["dte_min"] <= r["dte"] <= p["dte_max"]),

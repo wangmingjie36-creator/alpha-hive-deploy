@@ -322,12 +322,23 @@ class TestEarningsState:
         assert self._s(None)["reason"] == "not_in_recent_scans"
         assert self._s(None, "scan_ledger_unreadable:OSError")["reason"] == "scan_ledger_unreadable:OSError"
 
-    def test_none_status_means_no_flag_not_unknown(self):
-        """「视野内没有财报」⇒ 到期日标记是 False（不是判不了的 None）；判不了 ⇒ None。"""
-        none = _build(earnings=self._s({**self.ok, "earnings_date": None, "earnings_status": "none"}))
-        unk = _build(earnings=self._s(None))
-        assert {e["earnings_before_expiry"] for e in none["expiries"]} == {False}
-        assert {e["earnings_before_expiry"] for e in unk["expiries"]} == {None}
+    @pytest.mark.parametrize("patch", [{"earnings_date": None, "earnings_status": "none"},          # 视野内没有
+                                       {"earnings_date": "2026-10-01", "earnings_status": "none"}])  # 记下的那次已过
+    def test_no_next_date_means_unknown_for_every_expiry(self, patch):
+        """扫描只知道**下一次**财报日。下一次不知道时，到期日一律判不了（None），**不是**「到期前没有」（False）：
+        本页 DTE 可到 365 天，120 天的到期日必然含下一次财报（v0.45.492 二次检查 #1）。"""
+        wide = {"dte_min": 0, "dte_max": 365, "delta_min": 0.0, "delta_max": 1.0, "oi_min": 0, "side": "both",
+                "sort": "iv_over_rv", "expiry": None}
+        full = _build(earnings=self._s({**self.ok, **patch}))
+        assert self._s({**self.ok, **patch})["status"] == "none"
+        assert {e["earnings_before_expiry"] for e in PM.select(full, wide)["expiries"]} == {None}
+        assert all(r["flags"]["earnings_before_expiry"] is None for r in full["rows"])
+
+    def test_known_next_date_splits_expiries(self):
+        """对照：知道下一次在 d ⇒ d 之前到期 False、之后 True（长期限同样 True）。"""
+        full = _build(earnings=self._s({**self.ok, "earnings_date": "2026-10-28"}))
+        for e in full["expiries"]:
+            assert e["earnings_before_expiry"] is (e["expiry"] >= "2026-10-28"), e["expiry"]
 
 
 class TestIvRank:
@@ -810,7 +821,7 @@ class TestReasonRegistry:
 
     def test_external_codes_really_come_from_their_module(self):
         for code, (src, _label) in PM.EXTERNAL_REASONS.items():
-            assert f'"{code}"' in (ROOT / src).read_text(encoding="utf-8"), (code, src)
+            assert re.search(rf'["\']{code}["\':]', (ROOT / src).read_text(encoding="utf-8")), (code, src)
 
     def test_teeth(self, tmp_path):
         fake = tmp_path / "m.py"
@@ -863,9 +874,9 @@ class TestEarningsFromScanLedger:
         assert _svc(ledger_dir=led).premium("NVDA")["earnings"]["reason"] == "scan_had_no_earnings_info"
 
     def test_unreadable_ledger_is_named(self, tmp_path, monkeypatch):
-        def boom(**_k):
+        def boom(*_a, **_k):
             raise OSError("disk")
-        monkeypatch.setattr(R, "ledger_dates", boom)
+        monkeypatch.setattr(R.LG, "_shard_paths", boom)
         r = _svc(ledger_dir=tmp_path).premium("NVDA")
         assert r["earnings"]["reason"] == "scan_ledger_unreadable:OSError" and r["data_available"]
 
@@ -874,3 +885,150 @@ class TestEarningsFromScanLedger:
         before = _fingerprint(led)
         _svc(ledger_dir=led).premium("NVDA")
         assert _fingerprint(led) == before
+
+
+# ─────────────────────────────── 二次检查（v0.45.492 第二轮）
+
+class TestEarningsObservationSkipsFailedDays:
+    """#5：最新一天 Chronos 失败（recorded 但 earnings_status unknown）不该盖掉前一天拿到的日期。"""
+
+    def test_falls_back_to_previous_informative_scan(self, tmp_path):
+        led = _ledger(tmp_path / "ledger", [("2026-10-08", "TSLA", "recorded", {"earnings_date": "2026-10-21"}),
+                                            (AS_OF, "TSLA", "recorded", None)])          # None ⇒ unknown
+        e = _svc(ledger_dir=led).premium("TSLA")["earnings"]
+        assert (e["status"], e["date"], e["scan_date"]) == ("known", "2026-10-21", "2026-10-08")
+
+    def test_all_uninformative_reports_the_latest(self, tmp_path):
+        led = _ledger(tmp_path / "ledger", [("2026-10-08", "TSLA", "recorded", None), (AS_OF, "TSLA", "recorded", None)])
+        e = _svc(ledger_dir=led).premium("TSLA")["earnings"]
+        assert (e["reason"], e["scan_date"]) == ("scan_had_no_earnings_info", AS_OF)
+
+    def test_lookback_is_bounded(self):
+        rows = [{"ticker": "X", "status": "recorded", "date": f"2026-09-{d:02d}", "earnings_status": "unknown"}
+                for d in range(1, 29)] + [{"ticker": "X", "status": "recorded", "date": "2026-08-01",
+                                           "earnings_status": "after_expiry", "earnings_date": "2026-10-30"}]
+        got = PM.earnings_observation(rows, ticker="X", lookback=PM.EARNINGS_SCAN_LOOKBACK)
+        assert got["scan_date"] == "2026-09-28" and got["earnings_status"] == "unknown"   # 不越过回看上限去捡旧日期
+        assert PM.earnings_observation(rows, ticker="X", lookback=100)["scan_date"] == "2026-08-01"   # 对照
+
+
+class TestShardsAreParsedOnce:
+    """#8：每个 tenor 最近两个月分片各解析一次（旧实现按日期逐个 rows_for_date，MB 级分片重复解析几十次）。"""
+
+    def test_load_count(self, tmp_path, monkeypatch):
+        days = ["2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02", AS_OF]
+        led = _ledger(tmp_path / "ledger", [(d, "NVDA", "unavailable", None) for d in days])
+        calls = []
+        real = R.LG._load_shard
+        monkeypatch.setattr(R.LG, "_load_shard", lambda p: calls.append(p) or real(p))
+        e = _svc(ledger_dir=led).premium("SPY")["earnings"]                      # 不在账本里 ⇒ 最坏情形
+        assert e["reason"] == "not_in_recent_scans"
+        assert len(calls) == 2 * len(R.LG.TENORS)                                # 两个月 × 两个 tenor，各一次
+
+
+class TestExternalReasonsAreComplete:
+    """#3：外部码表要**全**——逐个枚举产出方真实会给的码，缺一个就红（旧测试只核「表里的码存在」）。"""
+
+    @staticmethod
+    def _raw_fail_codes():
+        tree = ast.parse((ROOT / "cboe_options.py").read_text(encoding="utf-8"))
+        return {n.args[1].value for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and getattr(n.func, "id", None) == "_raw_fail" and len(n.args) > 1 and isinstance(n.args[1], ast.Constant)}
+
+    @staticmethod
+    def _reason_prefixes_in(path: Path, func: str):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == func)
+        out = set()
+        for n in ast.walk(fn):
+            vals = []
+            if isinstance(n, ast.Dict):
+                vals = [v for k, v in zip(n.keys, n.values) if isinstance(k, ast.Constant) and k.value == "reason"]
+            elif isinstance(n, ast.Assign) and any(isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant)
+                                                   and t.slice.value == "reason" for t in n.targets):
+                vals = [n.value]
+            for v in vals:
+                for c in ast.walk(v):
+                    if isinstance(c, ast.Constant) and isinstance(c.value, str) and re.match(r"^[a-z][a-z0-9_]*:?$", c.value):
+                        out.add(c.value.rstrip(":"))
+        return out
+
+    def test_every_cboe_raw_failure_is_registered(self):
+        codes = self._raw_fail_codes()
+        assert {"stale_vintage", "price_unavailable"} <= codes                    # 对照：扫描真的扫到了
+        assert codes - set(PM.EXTERNAL_REASONS) == set()
+
+    def test_every_bars_and_vrp_reason_is_registered(self):
+        bars = self._reason_prefixes_in(ROOT / "alphabot/service.py", "_default_bars")
+        vrp = self._reason_prefixes_in(ROOT / "vrp_signal.py", "record_day")
+        assert "bars_fetch_exception" in bars and "rv_30d_missing" in vrp         # 对照
+        assert (bars | vrp) - set(PM.EXTERNAL_REASONS) == set()
+
+    def test_bars_fetch_exception_has_its_own_code(self, monkeypatch):
+        """#7：取日线出错不再借用整页的「exception」（那个前缀读作「计算出错」，会指错层）。"""
+        import twelve_data
+        from alphabot import service as SV
+        monkeypatch.setattr(twelve_data, "is_configured", lambda: True)
+        monkeypatch.setattr(twelve_data, "fetch_bars", lambda *a, **k: (_ for _ in ()).throw(TimeoutError("slow")))
+        r = SV._default_bars("NVDA")
+        assert r["reason"].startswith("bars_fetch_exception:TimeoutError") and not r["reason"].startswith("exception")
+
+
+class TestBarsLagVersusGaps:
+    """#4：「日线落后」与「窗内缺口」是两件事，分开报；落后时 RV 照算但页面要看得见。"""
+
+    def test_lag_is_reported_not_called_a_gap(self):
+        deps = _deps()
+        ctx, rows, missing = PM.bars_context(_bars(_trading_bars("2026-10-07", 80)), today=TODAY, deps=deps)
+        assert ctx["available"] and ctx["lag_sessions"] == 1 and ctx["gaps_in_windows"] == []
+        assert PM.rv_window(rows, 20, missing=missing, rv_fn=deps.rv_from_closes)["value"] is not None
+
+    def test_inner_gap_is_reported(self):
+        full = _trading_bars("2026-10-08", 80)
+        hole = full[-15]["date"]
+        ctx, _rows, _m = PM.bars_context(_bars([b for b in full if b["date"] != hole]), today=TODAY, deps=_deps())
+        assert ctx["gaps_in_windows"] == [hole] and ctx["lag_sessions"] == 0
+
+    def test_old_gap_outside_every_window_is_not_reported(self):
+        full = _trading_bars("2026-10-08", 120)
+        hole = full[5]["date"]                                                   # 比最长窗口（61 根）还早
+        ctx, _rows, _m = PM.bars_context(_bars([b for b in full if b["date"] != hole]), today=TODAY, deps=_deps())
+        assert ctx["gaps_in_windows"] == []
+
+    def test_page_shows_both_facts(self):
+        js = (ROOT / "alphabot/static/pages/premium.js").read_text(encoding="utf-8")
+        assert "bars.lag_sessions > 0" in js and "gaps_in_windows" in js and "gaps_critical" not in js
+
+
+class TestPickedExpiryMustBeInWindow:
+    """#6：选中的到期日掉出天数范围 ⇒ 服务端 400（param=expiry），前端据此取消选中并说明——不会卡在空表上。"""
+
+    def test_out_of_window_is_rejected(self):
+        svc = _svc()
+        exp = next(e for e in svc.premium("NVDA")["expiries"] if e["dte"] > 40)
+        assert svc.premium("NVDA", {"expiry": exp["expiry"]})["rows_total"] >= 0          # 对照：窗口内可选
+        r = _client(svc).get(f"/api/premium/NVDA?expiry={exp['expiry']}&dte_max=30")
+        assert r.status_code == 400 and r.json()["param"] == "expiry"
+        js = (ROOT / "alphabot/static/pages/premium.js").read_text(encoding="utf-8")
+        assert 'e.param === "expiry" && pick' in js
+
+
+class TestRulesComputedOnce:
+    """#9：规则常量与文案表进程内不变 ⇒ 每个服务实例只算一次（旧实现每个请求重算）。"""
+
+    def test_once(self, monkeypatch):
+        calls = []
+        real = PM.public_rules
+        monkeypatch.setattr(PM, "public_rules", lambda deps: calls.append(1) or real(deps))
+        svc = _svc()
+        for q in ({}, {"side": "put"}, {"sort": "yield_ann"}):
+            assert svc.premium("NVDA", q)["rules"]["max_rows"] == PM.MAX_ROWS
+        svc.meta_texts()
+        assert len(calls) == 1
+
+    def test_failure_is_not_cached(self, monkeypatch):
+        svc = _svc()
+        monkeypatch.setattr(PM, "public_rules", lambda deps: 1 / 0)
+        assert "rules_error" in svc.premium_rules()
+        monkeypatch.undo()
+        assert "rules_error" not in svc.premium_rules()                         # 好了以后能恢复

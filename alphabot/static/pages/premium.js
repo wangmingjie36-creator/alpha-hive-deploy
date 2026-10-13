@@ -12,6 +12,8 @@ export async function premium(body, d, t, alive, force = false) {
   let r = null;            // 最近一次被服务端接受的结果
   let pick = null;         // 只看哪个到期日（不记在本机：到期日随链变）
   let notice = null;       // {text, retry?}
+  let seq = 0;             // 请求序号：只认最后发出的那一个（连点时慢的旧响应不许盖掉新的、更不许存进本机）
+  let wanted = null;       // 最近一次发出、还没有结论的筛选：连着改两处时第二处要叠在第一处上，不能只叠在「已接受」上
 
   const reasonZh = (code) => {
     if (code === null || code === undefined || code === "") return "—";
@@ -34,11 +36,14 @@ export async function premium(body, d, t, alive, force = false) {
   // prefs = 想用的筛选；initial = 页面首次打开（用的是本机记住的那份）
   async function apply(prefs, { initial = false, note = null } = {}) {
     if (!r) fill(body, loading("计算溢价…"));
+    const mine = ++seq;
+    wanted = prefs;
     let res;
     try {
       res = await api(url(prefs));
     } catch (e) {
-      if (!alive()) return;
+      if (!alive() || mine !== seq) return;
+      wanted = null;                     // 被拒 / 出错：下一次改动从「已接受」的那份重新叠
       if (e.status === 400 && e.param === "expiry" && pick) {
         pick = null;
         return apply(prefs, { initial, note: `${e.message}，已取消「只看该到期日」` });
@@ -56,7 +61,8 @@ export async function premium(body, d, t, alive, force = false) {
       draw();
       return;
     }
-    if (!alive()) return;
+    if (!alive() || mine !== seq) return;
+    wanted = null;
     r = res;
     force = false;
     setPref(PREF_KEY, prefs);          // 先验后存：到这里服务端已经接受
@@ -64,7 +70,7 @@ export async function premium(body, d, t, alive, force = false) {
     draw();
   }
 
-  const setParam = (k, v) => apply({ ...pref(PREF_KEY, {}), [k]: v });
+  const setParam = (k, v) => apply({ ...(wanted || pref(PREF_KEY, {})), [k]: v });
 
   function noticeBox() {
     if (!notice) return null;
@@ -118,7 +124,8 @@ export async function premium(body, d, t, alive, force = false) {
     const head = panel("这只票的波动率", {
       sub: `链 ${ch.as_of}（${ch.session_live ? "盘中，15 分钟延迟" : "收盘后快照"}），现价 ${money(ch.underlying_price)}；日线 ${bars.source || "—"} 截至 ${bars.last_date || "—"}；取于 ${timeAgo(r.cache_age_sec)}` },
       !bars.available ? h("p", { class: "callout warn" }, `日线不可得（${reasonZh(bars.reason)}）：所有 RV 与 IV/RV 显示为「—」，表仍列出、不按 0 排。`) : null,
-      bars.available && (bars.gaps_critical || []).length ? h("p", { class: "callout warn" }, `最近的日线缺 ${bars.gaps_critical.join("、")}：跨过缺口的 RV 窗口一律不可得。`) : null,
+      bars.available && (bars.gaps_in_windows || []).length ? h("p", { class: "callout warn" }, `日线缺 ${bars.gaps_in_windows.join("、")}：跨过它的 RV 窗口不可得（到期日表里写着是哪几个）。`) : null,
+      bars.available && bars.lag_sessions > 0 ? h("p", { class: "callout warn" }, `日线截至 ${bars.last_date}，落后 ${bars.lag_sessions} 个交易日：RV 照算，但用的是到那天为止的数据。`) : null,
       r.demo ? h("p", { class: "callout" }, "演示模式：合成链与合成日线，不读卖权账本的财报日 / IV 历史 / VRP 账本。") : null,
       table([{ label: "项", render: (x) => x[0] }, { label: "值", render: (x) => x[1] }], kv));
 
@@ -161,7 +168,7 @@ export async function premium(body, d, t, alive, force = false) {
       sub: `RV 窗口 = 到期前交易日数（夹在 ${rules.rv_n_min}–${rules.rv_n_max}）；点一行只看该到期日${pick ? `（当前：${pick}，再点取消）` : ""}`,
       right: h("button", { class: "btn", type: "button", onclick: () => downloadCSV(`alphabot-${t}-premium-expiries.csv`, expCols, ex) }, "导出 CSV") },
       ex.length ? ivEl : null,
-      ex.length ? table(expCols, ex, { onRow: (e) => { pick = pick === e.expiry ? null : e.expiry; apply(pref(PREF_KEY, {})); },
+      ex.length ? table(expCols, ex, { onRow: (e) => { pick = pick === e.expiry ? null : e.expiry; apply(wanted || pref(PREF_KEY, {})); },
         rowClass: (e) => (e.expiry === pick ? "sel" : "") })
         : h("div", { class: "empty" }, "天数范围内没有到期日。"),
       h("p", { class: "note" }, "同一到期日里所有合约共用一个 RV，所以到期日内按 IV/RV 排 = 按 IV 排（排出来的是偏度，通常是虚值 put 在前）。先在这里挑「整条期限都贵」的到期日，再到下表挑行权价。"));
