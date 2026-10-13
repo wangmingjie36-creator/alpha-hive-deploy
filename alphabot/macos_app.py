@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import os
 import plistlib
+import re
 import shlex
 import shutil
 import subprocess
@@ -167,21 +168,38 @@ def _is_default_clone(repo: Path) -> bool:
     return Path(repo).expanduser().resolve() == production_clone.default_dest().resolve()
 
 
-def regen_hint(repo: Path, python: Optional[str] = None) -> str:
-    """「怎么重新生成 cd 进 `repo` 的那个 .app」——壳里的弹窗给人的命令**只从这里出**（v0.45.461）。
+#: 给人抄进终端时**不用引号**也是一个词的字符（非 ASCII 字母照常：占位「/新解释器的绝对路径」原样）；其余 ⇒ 单引号引起来
+_PLAIN_WORD = re.compile(r"[^\s'\"$`\\;&|<>()*?\[\]{}!#~]+")
+
+#: 写进 .app 的解释器还要进给人抄的命令（`regen_hint`）、壳里双引号字符串中的提示与 make 配方的 `"$(PYTHON)"`：
+#: 这几个字符在那里会被 shell 解释或截断字符串（单引号：`shlex.quote` 引含单引号的词会生出双引号）。v0.45.498
+PY_UNSAFE_CHARS = "\"$`\\'\n"
+
+
+def _cmd_word(s: str) -> str:
+    return s if _PLAIN_WORD.fullmatch(s) else shlex.quote(s)
+
+
+def regen_hint(repo: Path, python: str) -> str:
+    """「怎么重新生成 cd 进 `repo`、用 `python` 跑的那个 .app」——给人的命令**只从这里出**（v0.45.461）。
 
     此前四处各写一份自由文本：壳里两处还是 `make alphabot-app PYTHON=新路径`（不带 `-C`：在随便哪个目录敲都找不到
     Makefile；也不提绝对路径：照写裸名字会被 456 的规则拒），进不去代码目录那句又说「用 --repo 重跑 make」（make 不收
-    `--repo`）。`python` 给了 ⇒ 带上换解释器的写法。代码目录是生产克隆 ⇒ 推荐入口 `canonical_entry`（帮助页抄的也是它）；
-    否则（开发时 `--repo` 生成的）⇒ 在那份代码里直接跑生成器。不嵌代码目录路径：结果要进壳里的双引号字符串。
+    `--repo`）。代码目录是生产克隆 ⇒ 推荐入口 `canonical_entry`（帮助页抄的也是它）；否则（开发时 `--repo` 生成的）⇒
+    在那份代码里直接跑生成器。不嵌代码目录路径：结果要进壳里的双引号字符串。
+
+    `python` **必填**（v0.45.498）：重新生成要沿用 .app 记下的那个解释器——等于缺省就不写（缺省命令生成的就是它），
+    否则带上 `PYTHON=` / `--python`。此前它可省、省了就等于「用缺省」：487 的过时提醒、壳头注释、「代码目录挪了」那句
+    都没传，照抄就把自定义解释器悄悄换回 `/usr/local/bin/python3`。要教人**换**解释器的那句传占位（`_python_fix_hint`）。
     """
+    py = "" if python == DEFAULT_PYTHON else _cmd_word(python)
     if _is_default_clone(repo):
-        return f"在终端执行 {canonical_entry()}" + (f" PYTHON={python}" if python else "")
+        return f"在终端执行 {canonical_entry()}" + (f" PYTHON={py}" if py else "")
     return (f"在那份代码目录里执行 {DEFAULT_PYTHON} -m alphabot.macos_app --repo ."
-            + (f" --python {python}" if python else ""))
+            + (f" --python {py}" if py else ""))
 
 
-def _repo_unusable_hint(repo: Path) -> str:
+def _repo_unusable_hint(repo: Path, python: str) -> str:
     """进不去代码目录 / 代码目录不完整时弹窗里的处理办法——按代码目录**是什么、在哪**给，不写死某一种。
 
     v0.45.436 起缺省代码目录是生产克隆（不在「桌面」下），弹窗却仍只说「打开『桌面文件夹』权限」「重跑
@@ -191,7 +209,7 @@ def _repo_unusable_hint(repo: Path) -> str:
         hint = (f"生产克隆丢了或不完整：在开发检出里跑 {DEFAULT_PYTHON} production_clone.py setup 重建它"
                 "（每日扫描也靠它，丢了扫描同样停），重建后不用重新生成 .app。")
     else:
-        hint = f"代码目录挪了位置就到新位置重新生成（{regen_hint(repo)}）。"
+        hint = f"代码目录挪了位置就到新位置重新生成（{regen_hint(repo, python)}）。"
     if _under_desktop_or_documents(repo):    # 只有这两处受 TCC 单独管控（iCloud 同步的也正是这两处）
         hint += "若是权限问题：系统设置 → 隐私与安全性 → 文件与文件夹 → Alpha Bot → 打开「桌面文件夹」/「文稿文件夹」。"
     return hint
@@ -229,11 +247,11 @@ def launch_script(repo: Path, python: str, osascript: str = DEFAULT_OSASCRIPT) -
     """
     q_repo, q_py, q_osa = shlex.quote(str(repo)), shlex.quote(python), shlex.quote(osascript)
     # 下面两段进双引号 bash 字符串：不许含 " $ ` \（守卫 TestLaunchScriptHints）
-    repo_hint = _repo_unusable_hint(repo)
+    repo_hint = _repo_unusable_hint(repo, python)
     py_fix = _python_fix_hint(repo)
     return f"""#!/bin/bash
 # Alpha Bot.app 启动脚本——由 alphabot/macos_app.py 生成（v{__version__}）。
-# 别手改：要改就重新生成（{regen_hint(repo)}）。逻辑在 alphabot/launcher.py，代码目录更新后下次启动即生效。
+# 别手改：要改就重新生成（{regen_hint(repo, python)}）。逻辑在 alphabot/launcher.py，代码目录更新后下次启动即生效。
 REPO={q_repo}
 PY={q_py}
 export LANG="${{LANG:-en_US.UTF-8}}"   # 从 Finder / Dock 启动没有 LANG：中文日志与对话框都按 UTF-8
@@ -290,6 +308,10 @@ def build_app(dest_dir: Path, *, repo: Optional[Path] = None, python: str = DEFA
     dest_dir = Path(dest_dir).expanduser()
     repo = _repo_root() if _given(repo, "repo") is None else Path(repo).resolve()
     python = _must_be_absolute(python, "python")
+    bad = sorted({c for c in python if c in PY_UNSAFE_CHARS}, key=PY_UNSAFE_CHARS.index)
+    if bad:
+        raise BuildError(f"解释器路径 {python!r} 含 {bad!r}：它要进 .app 里的提示与给人抄的重新生成命令，在那里会被 shell "
+                         "解释或截断。换一个不含这些字符的路径（指过去的软链即可）")
     problem = generator_dir_problem(repo)
     if problem:
         raise BuildError(f"{repo} {problem}")

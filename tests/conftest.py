@@ -759,11 +759,12 @@ def _real_paper_portfolio_state_dir(pytestconfig):
 
     v0.45.422：收集期环境不再是「真环境」——`pytest_configure` 先把 `ALPHA_HIVE_HOME` 换成会话沙箱
     （数据根缺省改成 `~/alpha-hive-data` 后，收集期冻住的常量否则会指向生产）。所以真身改按**调用 pytest 时**的
-    环境、用生产同一条规则 `resolve_data_root` 求；自检比的是 `PATHS.home`（此刻 = 收集期的会话沙箱）下的同一推导。
+    环境求（v0.45.498 起与真实数据根闸同一份推导 `_root_data_guard.production_data_root`，其内只调生产规则 `resolve_data_root`）；自检比的是 `PATHS.home`（此刻 = 收集期的会话沙箱）下的同一推导。
     顺带：此前交互 shell 不设该变量，真身其实落在代码检出里的冻结副本上——守卫一直盯着旧数据，不是生产。
     """
-    from hive_logger import PATHS, resolve_data_root
-    real = resolve_data_root(pytestconfig._alpha_hive_invocation_env) / "paper_portfolio_state"
+    from hive_logger import PATHS
+    # 「生产在哪」与真实数据根闸同一份推导（v0.45.498：此前这里自调 resolve_data_root，相对值下盯随 cwd 漂移的目录）
+    real = pathlib.Path(_paper_portfolio_real_dir(pytestconfig._alpha_hive_invocation_env))
     imported = sys.modules.get("paper_portfolio")
     if imported is not None:
         frozen_expected = pathlib.Path(PATHS.home) / "paper_portfolio_state"
@@ -774,6 +775,13 @@ def _real_paper_portfolio_state_dir(pytestconfig):
             "守卫盯的是过期路径 ⇒ 真写穿生产它也看不见。改 `_real_paper_portfolio_state_dir` "
             "使之与 `paper_portfolio.STATE_DIR` 的定义同步（或反之），不要在这里放行。")
     return real
+
+
+def _paper_portfolio_real_dir(invocation_env) -> str:
+    """paper_portfolio 状态目录的真身 = 测试眼里的生产数据根（`_root_data_guard.production_data_root`）下那一格。"""
+    env = dict(invocation_env)                        # `_root_data_guard` 在本文件后面顶层导入，调用时已在
+    return os.path.join(_root_data_guard.production_data_root(env, env.get("HOME") or os.path.expanduser("~")),
+                        "paper_portfolio_state")
 
 
 @pytest.fixture(autouse=True)
@@ -1352,6 +1360,12 @@ def artifact_signature():
 def default_path_sandbox_check():
     """把 `_assert_default_path_in_sandbox` 暴露给它的自证测试（同上：`conftest` 不可直接 import）。"""
     return _assert_default_path_in_sandbox
+
+
+@pytest.fixture
+def paper_portfolio_real_dir_fn():
+    """把 `_paper_portfolio_real_dir` 暴露给对拍测试（同上：`conftest` 不可直接 import）。"""
+    return _paper_portfolio_real_dir
 
 
 @pytest.fixture

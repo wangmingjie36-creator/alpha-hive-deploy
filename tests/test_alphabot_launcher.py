@@ -22,7 +22,7 @@ import socket
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePath
 
 import pytest
 
@@ -659,7 +659,8 @@ class TestCanonicalMakeEntry:
 
     @staticmethod
     def _make(home, *make_vars, env_extra=None):
-        (home / "alpha-hive-prod").symlink_to(REPO, target_is_directory=True)
+        if not (home / "alpha-hive-prod").is_symlink():     # 同一测试里可连跑两次（「照提醒做」再生成一遍）
+            (home / "alpha-hive-prod").symlink_to(REPO, target_is_directory=True)
         # 白名单：只带 make 与生成器真正要的（v0.45.458）。此前从 os.environ 减掉 ALPHA_HIVE_HOME / PYTHON（黑名单），
         # 外层 make 的命令行变量经 MAKEFLAGS 照样漏进子 make（`make test PYTHON=…` 时 origin 成了 command line）
         env = {k: os.environ[k] for k in _MAKE_ENV_KEEP if k in os.environ}
@@ -729,10 +730,36 @@ class TestLaunchScriptHints:
     def test_repo_under_desktop_keeps_tcc_hint(self, tmp_path, home):
         assert "桌面文件夹" in MA.launch_script(home / "Desktop" / "Alpha Hive", sys.executable)
 
+    @pytest.mark.parametrize("py", [MA.DEFAULT_PYTHON, "/opt/my py/bin/python3", "/opt/a(b)&c/python3"])
     @pytest.mark.parametrize("where", ["alpha-hive-prod", "Desktop/Alpha Hive", "Desktop/it's \"$x\" `y`"])
-    def test_hint_is_safe_inside_the_double_quoted_alert(self, home, where):
-        for hint in (MA._repo_unusable_hint(home / where), MA._python_fix_hint(home / where)):
+    def test_hint_is_safe_inside_the_double_quoted_alert(self, home, where, py):
+        """解释器 v0.45.498 起也进这些提示（重新生成要沿用它）：带空格 / 括号的照样不许生出 " $ ` \\。"""
+        for hint in (MA._repo_unusable_hint(home / where, py), MA._python_fix_hint(home / where)):
             assert not any(c in hint for c in '"$`\\'), hint
+
+    @pytest.mark.parametrize("where", ["alpha-hive-prod", "dev"])
+    def test_regen_commands_in_the_shell_keep_the_recorded_interpreter(self, home, where):
+        """壳头注释与「代码目录挪了」那句也是「怎么重新生成」：照抄不许把自定义解释器换回缺省（v0.45.498；461 起就漏）。
+        缺省解释器 ⇒ 命令里不写（推荐入口生成的就是它）——已装的缺省 .app 内容因此不变，不会为这次修复多提醒一次。"""
+        if where == "alpha-hive-prod":
+            (home / where).symlink_to(REPO, target_is_directory=True)
+        repo = (home / where) if where == "alpha-hive-prod" else _fake_code_dir(home / where)
+        custom = "/opt/my py/bin/python3"
+        script = MA.launch_script(repo, custom)
+        flag = "PYTHON=" if where == "alpha-hive-prod" else "--python "
+        expected = flag + shlex.quote(custom)
+        regen_cmds = [ln for ln in script.splitlines() if "重新生成（" in ln and "新解释器" not in ln]
+        assert regen_cmds and all(expected in ln for ln in regen_cmds), regen_cmds
+        default = MA.launch_script(repo, MA.DEFAULT_PYTHON)
+        default_cmds = "".join(ln for ln in default.splitlines() if "重新生成（" in ln and "新解释器" not in ln)
+        assert default_cmds and "PYTHON=" not in default_cmds and "--python" not in default_cmds, default_cmds
+
+    @pytest.mark.parametrize("ch", list(MA.PY_UNSAFE_CHARS))
+    def test_interpreter_with_shell_special_chars_is_refused(self, home, ch):
+        """解释器要进双引号提示、给人抄的命令与 make 配方的 "$(PYTHON)"：这些字符在那里会被解释或截断 ⇒ 生成前就拒。"""
+        with pytest.raises(MA.BuildError, match="解释器路径"):
+            MA.build_app(home / "Applications", repo=REPO, python=f"/opt/x{ch}y/python3")
+        assert not (home / "Applications").exists()
 
     @pytest.mark.parametrize("where", ["alpha-hive-prod", "Desktop/Alpha Hive"])
     def test_every_regen_command_in_the_shell_comes_from_one_place(self, home, where):
@@ -826,9 +853,7 @@ class TestShellDrift:
         app = self._install(home)
         d = MA.installed_drift(app)
         assert d["parts"] == [] and Path(d["repo"]) == REPO and d["python"] == sys.executable, d
-        ui = FakeUI()
-        LA.check_app_shell(ui)
-        assert ui.calls == []
+        assert LA.check_app_shell() is None
 
     def test_each_part_is_detected(self, home):
         app = self._install(home)
@@ -849,25 +874,74 @@ class TestShellDrift:
         monkeypatch.setattr(MA, "launch_script", lambda repo, python, *a, **k: real(repo, python, *a, **k) + "# 新版壳\n")
         assert MA.installed_drift(app)["parts"] == ["启动脚本"]
 
+    @staticmethod
+    def _launch(ui):
+        """`run()` 里的两段：启动开头算、成功交出窗口 / 页面时弹（v0.45.498）。"""
+        LA.announce_app_shell(ui, LA.check_app_shell())
+
+    @staticmethod
+    def _command_in(msg):
+        hint = msg.split("要换上新的：", 1)[1].rsplit("，之后重新打开", 1)[0]
+        return shlex.split(hint.split("执行 ", 1)[1])
+
     def test_drift_notifies_once_with_the_regen_command(self, home, capsys):
         app = self._install(home)
         self._edit(app)
         ui = FakeUI()
-        LA.check_app_shell(ui)
+        self._launch(ui)
         assert ui.kinds() == ["notice"], ui.calls
         msg = ui.calls[0][1]
-        assert "启动壳比代码旧" in msg and "启动脚本" in msg and MA.regen_hint(REPO) in msg, msg
-        LA.check_app_shell(ui)                              # 同一处差异：只记日志，不再弹
+        assert "启动壳比代码旧" in msg and "启动脚本" in msg and MA.regen_hint(REPO, sys.executable) in msg, msg
+        self._launch(ui)                                    # 同一处差异：只记日志，不再弹
         assert ui.kinds() == ["notice"]
         assert capsys.readouterr().out.count("启动壳过时") == 2, "每次启动都要记日志"
+
+    @staticmethod
+    def _custom_python(tmp_path):
+        """一个非缺省、带空格的解释器路径（软链到真解释器）：照提醒做之后 `.app` 记的必须还是它。"""
+        py = tmp_path / "my py" / "python3"
+        py.parent.mkdir()
+        py.symlink_to(sys.executable)
+        return str(py)
+
+    def test_following_the_notice_keeps_the_interpreter_direct_generator(self, home, tmp_path, monkeypatch):
+        """照提醒里的命令**真跑一遍**（开发检出那种：生成器直跑）：新壳的 `PY=` 不变、差异消失（v0.45.498）。
+        487 的提醒不带解释器：照做就把自定义解释器换回 /usr/local/bin/python3。"""
+        custom = self._custom_python(tmp_path)
+        app = MA.build_app(home / "Applications", repo=REPO, python=custom)
+        self._edit(app)
+        ui = FakeUI()
+        self._launch(ui)
+        cmd = self._command_in(ui.calls[0][1])
+        assert cmd[:3] == [MA.DEFAULT_PYTHON, "-m", "alphabot.macos_app"], cmd
+        monkeypatch.chdir(REPO)                             # 「在那份代码目录里执行」
+        assert MA.main(cmd[3:]) == 0
+        assert TestCanonicalMakeEntry._py_in_app(home) == custom
+        assert MA.installed_drift(app)["parts"] == [] and LA.check_app_shell() is None
+
+    def test_following_the_notice_keeps_the_interpreter_canonical_entry(self, home, tmp_path):
+        """推荐入口那种（生产克隆）：提醒给的 `make -C … alphabot-app PYTHON=…` 真跑 make，新壳的 `PY=` 不变。"""
+        custom = self._custom_python(tmp_path)
+        r = TestCanonicalMakeEntry._make(home, f"PYTHON={custom}")
+        assert r.returncode == 0, r.stderr
+        app = home / "Applications" / f"{MA.APP_NAME}.app"
+        self._edit(app)
+        ui = FakeUI()
+        self._launch(ui)
+        cmd = self._command_in(ui.calls[0][1])
+        assert cmd[:4] == MA.canonical_entry().split() and cmd[4:] == [f"PYTHON={custom}"], cmd
+        r = TestCanonicalMakeEntry._make(home, *cmd[4:])
+        assert r.returncode == 0, r.stderr
+        assert TestCanonicalMakeEntry._py_in_app(home) == custom
+        assert MA.installed_drift(app)["parts"] == [] and LA.check_app_shell() is None
 
     def test_a_new_difference_notifies_again(self, home):
         app = self._install(home)
         self._edit(app)
         ui = FakeUI()
-        LA.check_app_shell(ui)
+        self._launch(ui)
         self._edit(app, "exit 125", "exit 124")             # 又变了一处 ⇒ 指纹变了
-        LA.check_app_shell(ui)
+        self._launch(ui)
         assert ui.kinds() == ["notice", "notice"]
 
     def test_code_moving_on_again_notifies_again(self, home, monkeypatch):
@@ -878,18 +952,18 @@ class TestShellDrift:
         for tag in ("v2", "v3"):
             monkeypatch.setattr(MA, "launch_script",
                                 lambda repo, python, *a, _t=tag, **k: real(repo, python, *a, **k) + f"# {_t}\n")
-            LA.check_app_shell(ui)
+            self._launch(ui)
         assert ui.kinds() == ["notice", "notice"]
 
     def test_app_for_another_code_dir_is_not_judged_here(self, home, tmp_path, capsys):
         self._install(home, repo=_fake_code_dir(tmp_path / "other"))
         ui = FakeUI()
-        LA.check_app_shell(ui)
+        self._launch(ui)
         assert ui.calls == [] and "指向别的代码目录" in capsys.readouterr().out
 
     def test_no_app_installed_is_silent(self, home, capsys):
         ui = FakeUI()
-        LA.check_app_shell(ui)
+        self._launch(ui)
         assert ui.calls == [] and capsys.readouterr().out == ""
 
     def test_check_failure_is_logged_never_blocks(self, home, capsys):
@@ -898,16 +972,75 @@ class TestShellDrift:
         with open(foreign / "Info.plist", "wb") as f:
             plistlib.dump({"CFBundleIdentifier": "com.someone.else"}, f)
         ui = FakeUI()
-        LA.check_app_shell(ui)
+        self._launch(ui)
         assert ui.calls == [] and "启动壳核对失败" in capsys.readouterr().out
 
-    def test_every_launch_checks_first(self, home, monkeypatch):
-        seen = []
-        monkeypatch.setattr(LA, "check_app_shell", lambda ui: seen.append("check"))
-        monkeypatch.setattr(LA, "window_owner", lambda: 4242)
-        ui = FakeUI(window=True)
-        assert LA.run(ui) == 0                              # 窗口已开 ⇒ 调到前面就返回
-        assert seen == ["check"] and ui.kinds() == ["activate"]
+    _DRIFT = {"message": "启动壳比代码旧（测试）", "fingerprint": "f", "parts": ["启动脚本"]}
+
+    @staticmethod
+    def _serve(monkeypatch, state="free"):
+        """不真起服务：`probe` 给定状态，`spawn_server` / `wait_ready` 打桩——这组只看提醒落在流程的哪一步。
+        `from_app: False` ⇒ 关窗不去停服务；调用方另给空闲端口：两道都为了碰不到本机真在跑的 Alpha Bot。"""
+        monkeypatch.setattr(LA, "probe", lambda *a, **k: {
+            "state": state, "detail": "别人的程序", "info": {"version": "t", "demo": True, "from_app": False}})
+        monkeypatch.setattr(LA, "spawn_server", lambda *a, **k: (type("P", (), {"pid": 1})(), PurePath("server.log")))
+        monkeypatch.setattr(LA, "wait_ready", lambda *a, **k: None)
+
+    @pytest.mark.parametrize("path, ui_kw, state, expected", [
+        ("窗口已开 ⇒ 调到前面", {"window": True}, "free", ["activate", "notice"]),
+        ("服务已在跑 ⇒ 开页面", {}, "alphabot", ["notice", "open"]),
+        ("首次启动 ⇒ 先选（演示）再起服务", {"answers": [LA.DEMO]}, "free", ["ask", "notice", "open"]),
+        ("服务已在跑 ⇒ 开原生窗口", {"window": True}, "alphabot", ["notice", "window"]),
+    ])
+    def test_notice_comes_when_the_launch_is_handed_over(self, home, monkeypatch, path, ui_kw, state, expected):
+        """弹在**启动已成功、交出窗口 / 页面**那一刻（v0.45.498）：选数据根对话框在它之前结束，不叠在一起。
+        487 在启动一开始就弹 ⇒ 这里的顺序会是 notice 打头。原生窗口在本进程里阻塞到关窗 ⇒ 必须在交出之前弹。"""
+        monkeypatch.setattr(LA, "check_app_shell", lambda: dict(self._DRIFT))
+        monkeypatch.setattr(LA, "window_owner", lambda: 4242 if path.startswith("窗口已开") else None)
+        self._serve(monkeypatch, state)
+        ui = FakeUI(**ui_kw)
+        assert LA.main(["--port", str(_free_port())], ui=ui) == 0, path
+        assert ui.kinds() == expected, (path, ui.calls)
+
+    @pytest.mark.parametrize("why, ui_kw, state", [
+        ("端口被别人占", {}, "other"),
+        ("首次启动时取消", {"answers": [LA.CANCEL]}, "free"),
+    ])
+    def test_no_notice_when_the_launch_does_not_happen(self, home, monkeypatch, why, ui_kw, state):
+        """启动没成（失败弹窗 / 用户取消）⇒ 不弹、也不记「已提醒」：下次成功启动再提（487 会先弹它、再弹失败）。"""
+        monkeypatch.setattr(LA, "check_app_shell", lambda: dict(self._DRIFT))
+        self._serve(monkeypatch, state)
+        ui = FakeUI(**ui_kw)
+        LA.main(["--port", str(_free_port())], ui=ui)
+        assert "notice" not in ui.kinds(), (why, ui.calls)
+        assert not LA._shell_drift_seen_path().exists(), why
+
+    @pytest.mark.parametrize("step", ["installed_drift", "regen_hint", "notice", "record"])
+    def test_any_failure_in_the_reminder_never_blocks_the_launch(self, home, monkeypatch, capsys, step):
+        """提醒是附加功能：四步里哪一步抛，启动都照常完成、只记日志（487 只包住了 installed_drift，其余三步一抛就是
+        「启动器出错」弹窗、页面打不开）。没弹成 / 没记下 ⇒ 不算已提醒，下次再提。"""
+        self._edit(self._install(home))
+        boom = RuntimeError(f"测试：{step} 坏了")
+
+        def _raise(*a, **k):
+            raise boom
+        if step in ("installed_drift", "regen_hint"):
+            monkeypatch.setattr(MA, step, _raise)
+        elif step == "record":
+            import hive_logger
+            monkeypatch.setattr(hive_logger, "atomic_json_write", _raise)
+
+        class _UI(FakeUI):
+            def notice(self, message):
+                super().notice(message)
+                if step == "notice":
+                    raise boom
+        self._serve(monkeypatch, "alphabot")
+        ui = _UI()
+        assert LA.main(["--port", str(_free_port())], ui=ui) == 0, step
+        assert "open" in ui.kinds() and "alert" not in ui.kinds(), (step, ui.calls)
+        assert "不影响启动" in capsys.readouterr().out, step
+        assert not LA._shell_drift_seen_path().exists(), step
 
     def test_mac_notice_does_not_wait_and_shows_after_the_window(self, monkeypatch):
         """真 MacUI：起独立的 osascript 就走（不等用户点）；先 delay 再 activate，免得被随后开的窗口压住。"""

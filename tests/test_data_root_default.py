@@ -120,35 +120,72 @@ class TestGuardUsesTheOneRule:
         assert "active on /x/alpha-hive-data" in line and "不是绝对路径" in line and "改守缺省数据根" in line, line
 
 
-#: 生产代码里直接读 `ALPHA_HIVE_HOME` 的地方 ⇒ 理由（v0.45.488）。把它**变成路径**的只许 hive_logger（唯一规则）；
-#: 其余只问「设没设」，或刻意不取缺省。**双向相等**：新增读者要登记（先问能不能改经 hive_logger），删了要清。
-ENV_READERS = {
+class TestOneDerivationOfProduction:
+    """测试眼里「生产数据根在哪」只一份推导（v0.45.498）：真实数据根闸与 paper_portfolio 真身夹具都经
+    `_root_data_guard.production_data_root`。488 只改了闸，夹具仍自调 `resolve_data_root`——相对值下两者各守一处。"""
+
+    @pytest.mark.parametrize("raw", [None, "", "/abs/data", "~/x", "x", " "])
+    def test_both_guards_land_on_the_same_root(self, tmp_path, raw, paper_portfolio_real_dir_fn):
+        home = tmp_path / "h"
+        (home / DEFAULT_DATA_ROOT_NAME).mkdir(parents=True)
+        (home / "x").mkdir()
+        env = {"HOME": str(home)} if raw is None else {"HOME": str(home), "ALPHA_HIVE_HOME": raw}
+        root = _root_data_guard.production_data_root(env, env["HOME"])
+        paper = Path(paper_portfolio_real_dir_fn(env))
+        assert paper == Path(root) / "paper_portfolio_state" and paper.is_absolute(), (raw, paper)
+        guard = _root_data_guard.real_data_root(env, env["HOME"], _REPO_ROOT)
+        assert guard in (None, root), (raw, guard, root)               # 闸只在「在哪」之上加过滤
+        if raw in (None, "", "~/x", "x", " "):                          # 缺省根存在 ⇒ 闸必须真守在那里
+            assert guard == str(home / DEFAULT_DATA_ROOT_NAME), (raw, guard)
+
+    def test_relative_value_does_not_follow_the_cwd(self, tmp_path, monkeypatch, paper_portfolio_real_dir_fn):
+        """488 留下的那份：相对值按 pytest 当时的 cwd 解析，测试一 chdir 真身就挪了。"""
+        env = {"HOME": str(tmp_path / "h"), "ALPHA_HIVE_HOME": "data"}
+        before = paper_portfolio_real_dir_fn(env)
+        monkeypatch.chdir(tmp_path)
+        assert paper_portfolio_real_dir_fn(env) == before
+
+    def test_only_one_place_in_the_test_layer_calls_the_production_rule(self):
+        """测试基础设施里调 `resolve_data_root` 的只许 `production_data_root`：第三份推导一长出来就红。"""
+        import ast
+        tests_dir = Path(_REPO_ROOT) / "tests"
+        callers = set()
+        for name in ("conftest.py", "_root_data_guard.py"):
+            tree = ast.parse((tests_dir / name).read_text(encoding="utf-8"))
+            for fn in ast.walk(tree):
+                if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for n in ast.walk(fn):
+                        f = getattr(n, "func", None)
+                        if isinstance(n, ast.Call) and (getattr(f, "attr", None) or getattr(f, "id", None)) \
+                                == "resolve_data_root":
+                            callers.add(f"{name}::{fn.name}")
+        assert callers == {"_root_data_guard.py::production_data_root"}, callers
+
+
+#: 生产代码里每个**写出** `"ALPHA_HIVE_HOME"` 这个键的地方 ⇒ 角色（v0.45.488 / 498）。把它**变成路径**的只许 hive_logger
+#: （唯一规则）；其余只问「设没设」、只传给子进程，或刻意不取缺省。**双向相等**：新增要登记（先问能不能改经 hive_logger），
+#: 删了要清。认的是**常量本身**（不论读、写、还是先存进一个常量再用）：v0.45.488 按调用形状认（`.get` / 下标…），
+#: `ENV = "ALPHA_HIVE_HOME"; os.environ.get(ENV)` 这类间接写法看不见——形状有无数种，键只有一个值。
+ENV_KEY_SITES = {
     "hive_logger.py::explicit_data_root": "唯一规则（resolve_data_root 的前一半）",
     "alphabot/__main__.py::main": "只问设没设：没设时提示「用缺省数据根」",
+    "alphabot/launcher.py::spawn_server": "只传给服务子进程（写入；值是用户选的数据根，按唯一规则读）",
     "sell_strike_ledger.py::state_dir_status": "只问设没设，并把原值写进给人看的提示",
     "sell_strike_ledger.py::main": "只问设没设：没设时提示「按缺省数据根读写」",
     "orchestrator_steps.py::_resolve_dirs": "刻意不取缺省：生产总给 --data-dir；都没有就明说「无从核对」，不猜",
 }
 
 
-def _env_readers(src: str, rel: str) -> set:
-    """`rel::所在函数` 的集合：`.get/.getenv/.pop/.setdefault("ALPHA_HIVE_HOME")` 与读取型下标。写入（赋值）不算。"""
+def _env_key_sites(src: str, rel: str) -> set:
+    """`rel::所在函数` 的集合：值**恰为** `"ALPHA_HIVE_HOME"` 的字符串常量。日志里的 `f"ALPHA_HIVE_HOME=…"`、docstring
+    不是恰等，不算。模块级（含 `ENV = "ALPHA_HIVE_HOME"` 这种间接）记 `<module>`。"""
     import ast
     out = set()
 
     def visit(node, owner):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             owner = node.name
-        hit = False
-        if (isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant)
-                and node.args[0].value == "ALPHA_HIVE_HOME"):
-            f = node.func
-            hit = (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")) in {
-                "get", "getenv", "pop", "setdefault"}
-        elif (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load)
-              and isinstance(node.slice, ast.Constant) and node.slice.value == "ALPHA_HIVE_HOME"):
-            hit = True
-        if hit:
+        if isinstance(node, ast.Constant) and node.value == "ALPHA_HIVE_HOME":
             out.add(f"{rel}::{owner or '<module>'}")
         for ch in ast.iter_child_nodes(node):
             visit(ch, owner)
@@ -160,7 +197,7 @@ def _env_readers(src: str, rel: str) -> set:
 class TestDataRootFromEnvHasOneImplementation:
     """「从 ALPHA_HIVE_HOME 得出数据根」只有一份实现（v0.45.488）：测试闸自己写的那份就是这么漂出去的。"""
 
-    def test_readers_are_exactly_the_registered_ones(self):
+    def test_key_sites_are_exactly_the_registered_ones(self):
         from tests._repo_files import own_python_files
         root = Path(_REPO_ROOT)
         files, _how = own_python_files(root)
@@ -168,22 +205,27 @@ class TestDataRootFromEnvHasOneImplementation:
         for f in files:
             rel = f.relative_to(root).as_posix()
             if rel.split("/")[0] in {"tests", "experiments"} and rel != "tests/_root_data_guard.py":
-                continue                                   # 测试闸那份单独纳入：它就是这次收掉的重复实现
-            found |= _env_readers(f.read_text(encoding="utf-8", errors="replace"), rel)
+                continue                                   # 测试闸那份单独纳入：它就是 488 收掉的重复实现
+            found |= _env_key_sites(f.read_text(encoding="utf-8", errors="replace"), rel)
         assert "hive_logger.py::explicit_data_root" in found, "扫描器没看到唯一规则本身——扫描失明"
-        assert found == set(ENV_READERS), (
-            f"新增（先问能不能改经 hive_logger，确需直读再登记理由）：{sorted(found - set(ENV_READERS))}；"
-            f"已不存在（从 ENV_READERS 删掉）：{sorted(set(ENV_READERS) - found)}")
+        assert found == set(ENV_KEY_SITES), (
+            f"新增（先问能不能改经 hive_logger，确需直接写这个键再登记角色）：{sorted(found - set(ENV_KEY_SITES))}；"
+            f"已不存在（从 ENV_KEY_SITES 删掉）：{sorted(set(ENV_KEY_SITES) - found)}")
 
     @pytest.mark.parametrize("src, hit", [
-        ("import os\ndef f():\n    return os.environ.get('ALPHA_HIVE_HOME')\n", True),
-        ("import os\ndef f():\n    return os.getenv('ALPHA_HIVE_HOME', '/x')\n", True),
-        ("def f(env):\n    return env['ALPHA_HIVE_HOME']\n", True),
-        ("import os\ndef f(h):\n    os.environ['ALPHA_HIVE_HOME'] = h\n", False),        # 写入不是读者
-        ("def f():\n    return 'ALPHA_HIVE_HOME'\n", False),
+        ("import os\ndef f():\n    return os.environ.get('ALPHA_HIVE_HOME')\n", "x.py::f"),
+        ("import os\ndef f():\n    return os.getenv('ALPHA_HIVE_HOME', '/x')\n", "x.py::f"),
+        ("def f(env):\n    return env['ALPHA_HIVE_HOME']\n", "x.py::f"),
+        ("import os\ndef f(h):\n    os.environ['ALPHA_HIVE_HOME'] = h\n", "x.py::f"),     # 写也是经手这个键
+        # v0.45.498：488 的形状枚举看不见的间接写法
+        ("import os\nENV = 'ALPHA_HIVE_HOME'\ndef f():\n    return os.environ.get(ENV)\n", "x.py::<module>"),
+        ("import os\ndef f():\n    return os.environ.get(key='ALPHA_HIVE_HOME')\n", "x.py::f"),
+        ("import os\ndef f():\n    return dict(os.environ).get('ALPHA_HIVE_HOME')\n", "x.py::f"),
+        ("def f():\n    return 'ALPHA_HIVE_HOME=' + 'x'\n", None),                        # 消息文本不是这个键
+        ("def f():\n    \"\"\"读 ALPHA_HIVE_HOME\"\"\"\n", None),
     ])
     def test_scanner_has_teeth(self, src, hit):
-        assert bool(_env_readers(src, "x.py")) is hit
+        assert _env_key_sites(src, "x.py") == ({hit} if hit else set())
 
 
 class TestSessionWiring:
@@ -209,7 +251,8 @@ class TestSessionWiring:
     def test_paper_portfolio_real_location_follows_invocation_env(
             self, _real_paper_portfolio_state_dir, data_root_session_facts):
         facts = data_root_session_facts
-        assert _real_paper_portfolio_state_dir == \
-            resolve_data_root(facts["invocation_env"]) / "paper_portfolio_state"
+        inv = facts["invocation_env"]
+        assert _real_paper_portfolio_state_dir == Path(_root_data_guard.production_data_root(
+            inv, inv.get("HOME") or os.path.expanduser("~"))) / "paper_portfolio_state"
         assert not _real_paper_portfolio_state_dir.is_relative_to(Path(facts["session_home"])), \
             "paper_portfolio 真身落进了会话沙箱：守卫盯着自己（v0.45.303 那种失明）"

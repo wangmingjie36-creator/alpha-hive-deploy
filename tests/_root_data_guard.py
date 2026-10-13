@@ -172,6 +172,23 @@ def exempt_reachable_paths(relpaths: dict[str, str]) -> dict[str, str]:
     return out
 
 
+def production_data_root(environ, home: str) -> str:
+    """测试眼里「生产数据根在哪」的**唯一**推导（v0.45.498）：真实数据根闸、paper_portfolio 真身夹具都经它。
+
+    候选**只**从生产的唯一规则 `hive_logger.resolve_data_root` 来，本函数只加测试自己的一条策略（v0.45.488）：值不是绝对
+    路径时生产各进程按各自 cwd 解析，测试无从知道是哪；**不猜** ⇒ 改守生产缺省位置 `$HOME/alpha-hive-data`（编排器 /
+    plist / MCP / Alpha Bot 启动器写的都是绝对路径，测试真能伤到的是它），报告头照实说（`nonabsolute_env_note`）。
+    不选「闸失效」：那会在环境配错时恰好丢掉对真实数据的保护。
+    此前 488 只把这条策略放进 `real_data_root`，paper_portfolio 真身夹具仍自己调 `resolve_data_root`：相对值下它盯的是
+    随 cwd 漂移的相对目录（测试会 chdir），两个守卫各守一处——又是「同一件事两份推导」。
+    """
+    import hive_logger                               # 测试辅助模块：调用时导入，不在 conftest 收集期之前抢跑
+    cand = hive_logger.resolve_data_root({**environ, "HOME": home})
+    if not cand.is_absolute():
+        cand = Path(home) / hive_logger.DEFAULT_DATA_ROOT_NAME
+    return os.path.abspath(cand)
+
+
 def real_data_root(environ, home: str, repo_root: str) -> str | None:
     """测试进程**启动时**的真实数据根；没有就返回 None（本机之外的机器上它不存在）。
 
@@ -179,19 +196,11 @@ def real_data_root(environ, home: str, repo_root: str) -> str | None:
     ⚠️ 返回 None ⇒ 本闸在这台机器上**没有任何作用**——CI / 干净克隆都是这样，所以它的牙只能靠
     `tests/test_root_data_guard.py` 里合成数据根的测试证明，不能靠「这轮全套绿」证明。
 
-    候选**只**从生产的唯一规则 `hive_logger.resolve_data_root` 来，本闸只加自己的过滤（v0.45.488）。此前这里自己
-    `expanduser` + `abspath`：`~/x` 被展开成 `$HOME/x`、相对路径按 pytest 的 cwd 解析，而生产原样用（各进程按各自的
-    cwd）——两份实现恰在没被对拍到的输入上分了岔（`test_agrees_with_real_data_root_guard` 只对拍了未设 / 空串 / 绝对路径）。
-    值不是绝对路径时生产各进程按各自 cwd 解析，闸无从知道是哪；**不猜** ⇒ 改守生产缺省位置 `$HOME/alpha-hive-data`
-    （编排器 / plist / MCP / Alpha Bot 启动器写的都是绝对路径，测试真能伤到的是它），报告头照实说（`nonabsolute_env_note`）。
-    不选「闸失效」：那会在环境配错时恰好丢掉对真实数据的保护。
+    「在哪」只从 `production_data_root` 来（v0.45.488 / 498），本闸只加自己的两道过滤：不存在 / 就是仓库根 ⇒ None。
+    488 之前这里自己 `expanduser` + `abspath`：`~/x` 被展开成 `$HOME/x`、相对路径按 pytest 的 cwd 解析，而生产原样用——
+    两份实现恰在没被对拍到的输入上分了岔（`test_agrees_with_real_data_root_guard` 只对拍了未设 / 空串 / 绝对路径）。
     """
-    import hive_logger                               # 测试辅助模块：调用时导入，不在 conftest 收集期之前抢跑
-    env = {**environ, "HOME": home}
-    cand = hive_logger.resolve_data_root(env)
-    if not cand.is_absolute():
-        cand = Path(home) / hive_logger.DEFAULT_DATA_ROOT_NAME
-    cand = os.path.abspath(cand)
+    cand = production_data_root(environ, home)
     if not os.path.isdir(cand) or cand == os.path.abspath(repo_root):
         return None
     return cand

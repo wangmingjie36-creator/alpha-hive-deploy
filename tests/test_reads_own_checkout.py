@@ -143,6 +143,8 @@ LITERAL_TILDE_INPUTS = {
         "测试闸对字面 ~ 不展开、改守缺省位置（v0.45.488）：HOME 指向 tmp，纯函数不碰本机家目录",
     ("test_data_root_default.py", "TestGuardUsesTheOneRule::test_report_header_says_so::_Cfg"):
         "报告头说明「~ 值没被采用」（v0.45.488）：假 config 上的字符串，不碰文件系统",
+    ("test_data_root_default.py", "TestOneDerivationOfProduction::test_both_guards_land_on_the_same_root"):
+        "两个守卫对字面 ~ 落在同一根上（v0.45.498）：HOME 指向 tmp，纯函数不碰本机家目录",
 }
 
 

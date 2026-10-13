@@ -361,7 +361,9 @@ def _native_window(ui, browser: bool) -> bool:
     return True
 
 
-def _present(ui, url: str, port: int, *, use_window: bool, stop_on_close: bool) -> int:
+def _present(ui, url: str, port: int, *, use_window: bool, stop_on_close: bool,
+             drift: Optional[dict] = None) -> int:
+    announce_app_shell(ui, drift)            # 启动已成功、马上交出窗口 / 页面（原生窗口在本进程里阻塞到关窗，不能放在后面）
     if not use_window:
         ui.open_url(url)
         return 0
@@ -404,51 +406,72 @@ def _present(ui, url: str, port: int, *, use_window: bool, stop_on_close: bool) 
 
 # ── 启动壳是否过时（v0.45.487）──────────────────────────────────────────
 
-def check_app_shell(ui) -> None:
-    """已装 .app 的启动壳与「本代码现在会生成的」不一致 ⇒ 不挡启动地提醒一次；同一处差异只提醒一次。
+def check_app_shell() -> Optional[dict]:
+    """已装 .app 的启动壳与「本代码现在会生成的」不一致、且这处差异还没提醒过 ⇒ 要弹的提醒 `{message, fingerprint,
+    parts}`；否则 None。**只算、不弹**：弹在启动成功、交出窗口 / 页面那一刻（`announce_app_shell`，v0.45.498）。
 
     壳在生成那一刻写死、不随代码目录更新：代码一改壳，就得有人记得 `make -C ~/alpha-hive-prod alphabot-app`
     （v0.45.436~461 每次都要）。本检查跑在启动器里——启动器在代码目录里、随扫描日快进自动更新——所以已装的旧壳
     也查得出，不用先重新生成一次才有这个功能。比的是内容（`macos_app.installed_drift`），不是版本号。
-    只核对指向**本代码目录**的 .app（`--repo` 指去别处的那份由那份代码自己管）。核对本身出错只记日志、不挡启动：
-    没有提醒 = 退回本功能之前的状态，不会更糟。
+    只核对指向**本代码目录**的 .app（`--repo` 指去别处的那份由那份代码自己管）。
+
+    提醒是附加功能，坏了不许挡住启动 ⇒ **整段**一个边界，任何异常只记日志、当没有提醒（v0.45.498：487 只包住了
+    `installed_drift`，拼消息、弹、记「已提醒」都在外面，那几步一抛就成了「启动器出错」弹窗）。
     """
+    try:
+        return _app_shell_drift()
+    except Exception as exc:  # noqa: BLE001 —— 附加功能：退回本功能之前的状态，不会更糟
+        _log(f"启动壳核对失败（不影响启动）：{type(exc).__name__}: {exc}")
+        return None
+
+
+def _app_shell_drift() -> Optional[dict]:
     app = installed_app()
     if not app.exists():
-        return
+        return None
     from alphabot import macos_app
-    try:
-        d = macos_app.installed_drift(app)
-    except Exception as exc:  # noqa: BLE001 —— 提醒是附加功能，坏了不许挡住启动
-        _log(f"启动壳核对失败（不影响启动）：{type(exc).__name__}: {exc}")
-        return
+    d = macos_app.installed_drift(app)
     if Path(d["repo"]).resolve() != _repo_root():
         _log(f"{app} 指向别的代码目录 {d['repo']}，不由本代码核对")
-        return
+        return None
     if not d["parts"]:
-        return
+        return None
     parts = "、".join(d["parts"])
     _log(f"启动壳过时：{parts} 与本代码现在会生成的不同")
-    seen = _shell_drift_seen_path()
     try:
-        if json.loads(seen.read_text(encoding="utf-8")).get("fingerprint") == d["fingerprint"]:
-            return                                   # 这处差异已提醒过
+        if json.loads(_shell_drift_seen_path().read_text(encoding="utf-8")).get("fingerprint") == d["fingerprint"]:
+            return None                              # 这处差异已提醒过
     except (OSError, ValueError, AttributeError):
         pass                                         # 没记录 / 记录坏了 ⇒ 当没提醒过
-    ui.notice(f"Alpha Bot.app 的启动壳比代码旧（{parts}不同）。这次照常使用；"
-              f"要换上新的：{macos_app.regen_hint(Path(d['repo']))}，之后重新打开 Alpha Bot。")
-    try:                                             # 可再生（丢了只是多提醒一次）⇒ 缓存写法，不是账本
-        from hive_logger import atomic_json_write
-        atomic_json_write(seen, {"fingerprint": d["fingerprint"], "parts": d["parts"],
-                                 "at": time.strftime("%Y-%m-%d %H:%M:%S")})
-    except (OSError, ValueError) as exc:
-        _log(f"记不下「已提醒」（下次还会再提醒）：{exc}")
+    # 重新生成要沿用壳里记下的解释器（v0.45.498：此前不传 ⇒ 照提醒做就把自定义解释器换回缺省）
+    hint = macos_app.regen_hint(Path(d["repo"]), d["python"])
+    return {"fingerprint": d["fingerprint"], "parts": d["parts"],
+            "message": f"Alpha Bot.app 的启动壳比代码旧（{parts}不同）。这次照常使用；要换上新的：{hint}，"
+                       "之后重新打开 Alpha Bot。"}
+
+
+def announce_app_shell(ui, drift: Optional[dict]) -> None:
+    """`check_app_shell` 算出的提醒在**启动已成功、马上交出窗口 / 页面**时弹出并记「已提醒」（v0.45.498）。
+
+    此前在启动一开始就弹：首次启动的选数据根对话框、端口被占等失败弹窗都在它之后，3 秒后提醒叠上来；失败那次
+    还像是「壳旧导致启动失败」。现在失败 / 取消都不弹、也不记，下次成功启动再提。整段一个边界，坏了只记日志。
+    先弹后记：没弹成就不记（下次再提）；记不下只会多提醒一次。
+    """
+    if not drift:
+        return
+    try:
+        ui.notice(drift["message"])
+        from hive_logger import atomic_json_write    # 可再生（丢了只是多提醒一次）⇒ 缓存写法，不是账本
+        atomic_json_write(_shell_drift_seen_path(), {"fingerprint": drift["fingerprint"], "parts": drift["parts"],
+                                                     "at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    except Exception as exc:  # noqa: BLE001 —— 附加功能，坏了不许挡住启动
+        _log(f"启动壳提醒没弹成或没记下（不影响启动，下次还会再提醒）：{type(exc).__name__}: {exc}")
 
 
 # ── 入口 ────────────────────────────────────────────────────────────────
 
 def run(ui, *, port: Optional[int] = None, python: Optional[str] = None, browser: bool = False) -> int:
-    check_app_shell(ui)                       # 不挡启动：提醒延后弹出，核对出错只记日志（v0.45.487）
+    drift = check_app_shell()                 # 只算；弹在成功交出窗口 / 页面时（v0.45.487 / 498）
     cfg = load_config()
     port = int(port or cfg.get("port") or DEFAULT_PORT)
     url = f"http://{HOST}:{port}/"
@@ -458,12 +481,14 @@ def run(ui, *, port: Optional[int] = None, python: Optional[str] = None, browser
         if owner is not None:
             if ui.activate(owner):
                 _log(f"窗口已开着（pid {owner}）⇒ 调到前面")
+                announce_app_shell(ui, drift)
                 return 0
             _log(f"窗口进程 {owner} 在，但调不到前面 ⇒ 另开一个窗口")
     p = probe(port)
     if p["state"] == "alphabot":
         _log(f"已在运行（{p['info'].get('version')}{'，演示' if p['info'].get('demo') else ''}）⇒ 只开窗口 / 页面")
-        return _present(ui, url, port, use_window=use_window, stop_on_close=p["info"].get("from_app") is True)
+        return _present(ui, url, port, use_window=use_window, stop_on_close=p["info"].get("from_app") is True,
+                        drift=drift)
     if p["state"] == "other":
         raise LauncherError(f"端口 {port} 被别的程序占着（{p.get('detail')}）。\n\n"
                             f"查是谁：终端里 lsof -nP -iTCP:{port} -sTCP:LISTEN\n"
@@ -475,7 +500,7 @@ def run(ui, *, port: Optional[int] = None, python: Optional[str] = None, browser
     proc, log_path = spawn_server(mode, port, python=python)
     _log(f"起服务 pid={proc.pid} {'演示模式' if mode['demo'] else 'ALPHA_HIVE_HOME=' + mode['home']}")
     wait_ready(proc, port, log_path)
-    return _present(ui, url, port, use_window=use_window, stop_on_close=True)
+    return _present(ui, url, port, use_window=use_window, stop_on_close=True, drift=drift)
 
 
 def _log(msg: str) -> None:
