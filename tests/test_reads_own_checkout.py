@@ -139,6 +139,10 @@ LITERAL_TILDE_INPUTS = {
         "explicit_data_root 原样取值、不展开 ~：纯函数，不碰文件系统",
     ("test_alphabot_launcher.py", "TestDataRootFollowsLauncher::test_literal_tilde_env_home_is_not_expanded"):
         "环境 ALPHA_HIVE_HOME 的字面 ~ 不被 .app 生成器展开：HOME 由 home 夹具指向 tmp",
+    ("test_data_root_default.py", "TestGuardUsesTheOneRule::test_non_absolute_value_guards_the_default_root"):
+        "测试闸对字面 ~ 不展开、改守缺省位置（v0.45.488）：HOME 指向 tmp，纯函数不碰本机家目录",
+    ("test_data_root_default.py", "TestGuardUsesTheOneRule::test_report_header_says_so::_Cfg"):
+        "报告头说明「~ 值没被采用」（v0.45.488）：假 config 上的字符串，不碰文件系统",
 }
 
 

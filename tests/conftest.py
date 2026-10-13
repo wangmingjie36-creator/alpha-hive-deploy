@@ -1432,9 +1432,11 @@ def _gate_timeline(config) -> tuple:
 def pytest_report_header(config):
     """让「这台机器上真实数据根闸有没有生效」可见：不在时它什么都不保护，不能让这件事静默。"""
     root, fp = config.stash.get(_DATA_ROOT_BEFORE, (None, None))
+    note = _root_data_guard.nonabsolute_env_note(getattr(config, "_alpha_hive_invocation_env", {}) or {})
+    tail = f"；{note}" if note else ""                  # v0.45.488：环境值没被采用要说出来，不能静默改守别处
     if root is None:
-        return "real-data-root guard: INACTIVE（此机器上没有真实数据根；CI / 干净克隆都是这样，牙只靠合成测试证明）"
-    return f"real-data-root guard: active on {root}（{len(fp)} 个受闸条目）"
+        return f"real-data-root guard: INACTIVE（此机器上没有真实数据根；CI / 干净克隆都是这样，牙只靠合成测试证明）{tail}"
+    return f"real-data-root guard: active on {root}（{len(fp)} 个受闸条目）{tail}"
 
 
 @pytest.fixture(scope="session", autouse=True)

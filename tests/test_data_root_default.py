@@ -85,6 +85,107 @@ class TestResolveDataRoot:
             assert _root_data_guard.real_data_root(env, env["HOME"], _REPO_ROOT) == str(resolve_data_root(env)), env
 
 
+class TestGuardUsesTheOneRule:
+    """测试闸的「真实数据根」只从 `resolve_data_root` 来（v0.45.488）。上面那条对拍只覆盖未设 / 空串 / 绝对路径——
+    两份实现恰在 `~` 与相对路径上分岔（闸自己 expanduser、按 pytest 的 cwd 解析；生产原样用、按各自 cwd）。"""
+
+    @pytest.mark.parametrize("raw", ["~/x", "x", " "])
+    def test_non_absolute_value_guards_the_default_root(self, tmp_path, raw):
+        """非绝对值：生产各进程按各自 cwd 解析，闸无从知道是哪 ⇒ 不猜，改守缺省位置（不是失效：那会丢掉保护）。"""
+        home = tmp_path / "h"
+        (home / DEFAULT_DATA_ROOT_NAME).mkdir(parents=True)
+        (home / "x").mkdir()                                   # 旧实现把 `~/x` 展开到这里——新实现不许去这里
+        env = {"HOME": str(home), "ALPHA_HIVE_HOME": raw}
+        assert not resolve_data_root(env).is_absolute()
+        assert _root_data_guard.real_data_root(env, env["HOME"], _REPO_ROOT) == str(home / DEFAULT_DATA_ROOT_NAME)
+        assert "不是绝对路径" in _root_data_guard.nonabsolute_env_note(env)
+
+    @pytest.mark.parametrize("env", [{}, {"ALPHA_HIVE_HOME": ""}, {"ALPHA_HIVE_HOME": "/abs/data"}])
+    def test_note_only_when_the_value_was_not_used(self, env):
+        assert _root_data_guard.nonabsolute_env_note(env) is None
+
+    def test_report_header_says_so(self, request):
+        """报告头照实说「环境值没被采用、改守缺省」——不能静默改守别处。"""
+        mod = next(m for m in request.config.pluginmanager.get_plugins()
+                   if hasattr(m, "_DATA_ROOT_BEFORE") and hasattr(m, "pytest_report_header"))
+
+        class _Stash:
+            def get(self, key, default):
+                return ("/x/alpha-hive-data", {"a": "dir"})
+
+        class _Cfg:
+            stash = _Stash()
+            _alpha_hive_invocation_env = {"ALPHA_HIVE_HOME": "~/x"}
+        line = mod.pytest_report_header(_Cfg())
+        assert "active on /x/alpha-hive-data" in line and "不是绝对路径" in line and "改守缺省数据根" in line, line
+
+
+#: 生产代码里直接读 `ALPHA_HIVE_HOME` 的地方 ⇒ 理由（v0.45.488）。把它**变成路径**的只许 hive_logger（唯一规则）；
+#: 其余只问「设没设」，或刻意不取缺省。**双向相等**：新增读者要登记（先问能不能改经 hive_logger），删了要清。
+ENV_READERS = {
+    "hive_logger.py::explicit_data_root": "唯一规则（resolve_data_root 的前一半）",
+    "alphabot/__main__.py::main": "只问设没设：没设时提示「用缺省数据根」",
+    "sell_strike_ledger.py::state_dir_status": "只问设没设，并把原值写进给人看的提示",
+    "sell_strike_ledger.py::main": "只问设没设：没设时提示「按缺省数据根读写」",
+    "orchestrator_steps.py::_resolve_dirs": "刻意不取缺省：生产总给 --data-dir；都没有就明说「无从核对」，不猜",
+}
+
+
+def _env_readers(src: str, rel: str) -> set:
+    """`rel::所在函数` 的集合：`.get/.getenv/.pop/.setdefault("ALPHA_HIVE_HOME")` 与读取型下标。写入（赋值）不算。"""
+    import ast
+    out = set()
+
+    def visit(node, owner):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            owner = node.name
+        hit = False
+        if (isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "ALPHA_HIVE_HOME"):
+            f = node.func
+            hit = (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")) in {
+                "get", "getenv", "pop", "setdefault"}
+        elif (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load)
+              and isinstance(node.slice, ast.Constant) and node.slice.value == "ALPHA_HIVE_HOME"):
+            hit = True
+        if hit:
+            out.add(f"{rel}::{owner or '<module>'}")
+        for ch in ast.iter_child_nodes(node):
+            visit(ch, owner)
+
+    visit(ast.parse(src), None)
+    return out
+
+
+class TestDataRootFromEnvHasOneImplementation:
+    """「从 ALPHA_HIVE_HOME 得出数据根」只有一份实现（v0.45.488）：测试闸自己写的那份就是这么漂出去的。"""
+
+    def test_readers_are_exactly_the_registered_ones(self):
+        from tests._repo_files import own_python_files
+        root = Path(_REPO_ROOT)
+        files, _how = own_python_files(root)
+        found = set()
+        for f in files:
+            rel = f.relative_to(root).as_posix()
+            if rel.split("/")[0] in {"tests", "experiments"} and rel != "tests/_root_data_guard.py":
+                continue                                   # 测试闸那份单独纳入：它就是这次收掉的重复实现
+            found |= _env_readers(f.read_text(encoding="utf-8", errors="replace"), rel)
+        assert "hive_logger.py::explicit_data_root" in found, "扫描器没看到唯一规则本身——扫描失明"
+        assert found == set(ENV_READERS), (
+            f"新增（先问能不能改经 hive_logger，确需直读再登记理由）：{sorted(found - set(ENV_READERS))}；"
+            f"已不存在（从 ENV_READERS 删掉）：{sorted(set(ENV_READERS) - found)}")
+
+    @pytest.mark.parametrize("src, hit", [
+        ("import os\ndef f():\n    return os.environ.get('ALPHA_HIVE_HOME')\n", True),
+        ("import os\ndef f():\n    return os.getenv('ALPHA_HIVE_HOME', '/x')\n", True),
+        ("def f(env):\n    return env['ALPHA_HIVE_HOME']\n", True),
+        ("import os\ndef f(h):\n    os.environ['ALPHA_HIVE_HOME'] = h\n", False),        # 写入不是读者
+        ("def f():\n    return 'ALPHA_HIVE_HOME'\n", False),
+    ])
+    def test_scanner_has_teeth(self, src, hit):
+        assert bool(_env_readers(src, "x.py")) is hit
+
+
 class TestSessionWiring:
     def test_session_sandbox_was_in_place_at_collection(self, data_root_session_facts, tmp_path_factory):
         """收集期的 ALPHA_HIVE_HOME 就是会话沙箱：收集期冻住的常量落在沙箱里，碰不到真实数据根。"""

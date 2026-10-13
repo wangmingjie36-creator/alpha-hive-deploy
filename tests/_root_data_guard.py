@@ -71,6 +71,7 @@ import hashlib
 import json
 import os
 import re
+from pathlib import Path
 
 SKIP_DIR_NAMES = frozenset({
     ".git", ".claude",
@@ -174,16 +175,36 @@ def exempt_reachable_paths(relpaths: dict[str, str]) -> dict[str, str]:
 def real_data_root(environ, home: str, repo_root: str) -> str | None:
     """测试进程**启动时**的真实数据根；没有就返回 None（本机之外的机器上它不存在）。
 
-    必须在任何 env 隔离之前取（`_isolate_env` 会把 `ALPHA_HIVE_HOME` 改成沙箱）：`ALPHA_HIVE_HOME`
-    若在调用环境里设了就用它，否则取生产默认位置 `~/alpha-hive-data`。与仓库根相同的不算（那由仓库根闸管）。
+    必须在任何 env 隔离之前取（`_isolate_env` 会把 `ALPHA_HIVE_HOME` 改成沙箱）。与仓库根相同的不算（那由仓库根闸管）。
     ⚠️ 返回 None ⇒ 本闸在这台机器上**没有任何作用**——CI / 干净克隆都是这样，所以它的牙只能靠
     `tests/test_root_data_guard.py` 里合成数据根的测试证明，不能靠「这轮全套绿」证明。
+
+    候选**只**从生产的唯一规则 `hive_logger.resolve_data_root` 来，本闸只加自己的过滤（v0.45.488）。此前这里自己
+    `expanduser` + `abspath`：`~/x` 被展开成 `$HOME/x`、相对路径按 pytest 的 cwd 解析，而生产原样用（各进程按各自的
+    cwd）——两份实现恰在没被对拍到的输入上分了岔（`test_agrees_with_real_data_root_guard` 只对拍了未设 / 空串 / 绝对路径）。
+    值不是绝对路径时生产各进程按各自 cwd 解析，闸无从知道是哪；**不猜** ⇒ 改守生产缺省位置 `$HOME/alpha-hive-data`
+    （编排器 / plist / MCP / Alpha Bot 启动器写的都是绝对路径，测试真能伤到的是它），报告头照实说（`nonabsolute_env_note`）。
+    不选「闸失效」：那会在环境配错时恰好丢掉对真实数据的保护。
     """
-    cand = environ.get("ALPHA_HIVE_HOME") or os.path.join(home, "alpha-hive-data")
-    cand = os.path.abspath(os.path.expanduser(cand))
+    import hive_logger                               # 测试辅助模块：调用时导入，不在 conftest 收集期之前抢跑
+    env = {**environ, "HOME": home}
+    cand = hive_logger.resolve_data_root(env)
+    if not cand.is_absolute():
+        cand = Path(home) / hive_logger.DEFAULT_DATA_ROOT_NAME
+    cand = os.path.abspath(cand)
     if not os.path.isdir(cand) or cand == os.path.abspath(repo_root):
         return None
     return cand
+
+
+def nonabsolute_env_note(environ) -> str | None:
+    """调用环境里的 `ALPHA_HIVE_HOME` 不是绝对路径 ⇒ 给报告头的一句说明（闸改守缺省位置）；否则 None（v0.45.488）。"""
+    import hive_logger
+    explicit = hive_logger.explicit_data_root(environ)
+    if explicit is None or explicit.is_absolute():
+        return None
+    return (f"ALPHA_HIVE_HOME={str(explicit)!r} 不是绝对路径（生产各进程按各自 cwd 解析，闸无从确定）"
+            "⇒ 改守缺省数据根")
 
 
 def fingerprint(root: str, excluded=None) -> dict[str, str]:
