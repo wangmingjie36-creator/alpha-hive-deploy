@@ -328,7 +328,10 @@ def summary_line(snap: dict) -> str:
         + (f"/现价不可得{os_['stock_price_unavailable']}次" if os_.get("stock_price_unavailable") else "")
         + (f"/非有限数记None {os_['nan_sanitized']}个" if os_.get("nan_sanitized") else "")
         # v0.45.471：当日 ATM IV 无效且无缓存 ⇒ iv_current 记 None（不再兜底成 25.0）
-        + (f"/IV不可得{os_['iv_unavailable']}次" if os_.get("iv_unavailable") else ""))
+        + (f"/IV不可得{os_['iv_unavailable']}次" if os_.get("iv_unavailable") else "")
+        # v0.45.482：yfinance 链里 Yahoo 求解失败的 IV（置 0 的合约数 / ATM 窗口被失败值主导的次数）
+        + (f"/Yahoo失败IV{os_['iv_placeholder_contracts']}个" if os_.get("iv_placeholder_contracts") else "")
+        + (f"/失败IV主导{os_['iv_placeholder_majority']}次" if os_.get("iv_placeholder_majority") else ""))
     pg = c.get("portfolio_greeks")
     pg_s = ""
     if pg and pg.get("error"):

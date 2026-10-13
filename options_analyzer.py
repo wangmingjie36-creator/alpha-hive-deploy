@@ -400,6 +400,26 @@ class OptionsDataFetcher:
                     max_w = max(raw_weights) if raw_weights else 1.0
                     df["dte_weight"] = [w / max_w for w in raw_weights]
 
+            # ── v0.45.482：Yahoo 求解失败的 IV 在源头剔除（见 yahoo_iv 模块 docstring）──
+            # 减半阶梯 1 / ½ / ¼ / ⅛ / … 与地板 1e-05 不是观测（对照 CBOE 99.7% 相差 > 10 个波动率点）。
+            # 置 0（本链「缺失」的既有约定，fillna(0) 同此）并打 `_iv_placeholder` 标记——下游 ATM 中位数 / 偏斜 /
+            # key levels 都按 0 跳过，BS gamma 遇 sigma < 0.01 给 0；analyze() 据标记数 ATM 窗口里失败的占比。
+            # 此前 ATM 中位数正好落成 12.5 / 6.25（/ 25 / 50），落在 5%–150% 有效区间、被当真实观测。
+            from yahoo_iv import is_placeholder_iv
+            _n_placeholder = 0
+            for df in [calls_df, puts_df]:
+                if df is None or df.empty or "impliedVolatility" not in df.columns:
+                    continue
+                _ph = df["impliedVolatility"].map(is_placeholder_iv).astype(bool)
+                df.loc[_ph, "impliedVolatility"] = 0.0
+                df["_iv_placeholder"] = _ph
+                _n_placeholder += int(_ph.sum())
+            if _n_placeholder:
+                with _snap_stats_lock:
+                    _snap_stats["iv_placeholder_contracts"] += _n_placeholder
+                _log.warning("[%s] yfinance 链有 %d 个合约的 IV 是 Yahoo 求解失败值（减半阶梯 / 1e-05），已置 0、不进 ATM IV / 偏斜 / gamma",
+                             ticker, _n_placeholder)
+
             # ── 注入 BS gamma（yfinance 不返回 Greeks）──────────────
             # 用 Black-Scholes 为每份合约计算 gamma，填入 "gamma" 字段
             # 供下游 calculate_gamma_exposure() 使用
@@ -462,6 +482,8 @@ class OptionsDataFetcher:
                 "underlying_price_source": _S_src if _S > 0 else "unavailable",
                 # v0.45.475：与 CBOE 分支的 `_source: "cboe"` 对称——analyze 据此在结果里记 `chain_source`
                 "_source": "yfinance",
+                # v0.45.482：IV 是 Yahoo 求解失败值、已置 0 的合约数（逐合约标记在 `_iv_placeholder`）
+                "iv_placeholder_contracts": _n_placeholder,
             }
 
             # CBOE 已作主源优先尝试过；走到这里说明 CBOE 不可用、改用 yfinance。
@@ -1223,6 +1245,8 @@ class OptionsAnalyzer:
                 gap_med = statistics.median(gaps) if gaps else 0.0
                 # 自适应 ATM 容差：纯 ±4% 对低价股会归零（AMC≈$3 时 ±$0.12 < 行权价间距 $0.50）
                 atm_tol = max(stock_price * 0.04, gap_med * 1.2)
+                # v0.45.482：Yahoo 求解失败值（减半阶梯 ½ / ¼ / ⅛ / 1/16 / 1/32 都过得了 0.02~2.0）不进期限结构
+                from yahoo_iv import is_placeholder_iv
                 ivs = [
                     float(c["impliedVolatility"]) * 100
                     for c in calls_list
@@ -1230,6 +1254,7 @@ class OptionsAnalyzer:
                     and c.get("impliedVolatility")
                     and _math.isfinite(c["impliedVolatility"])
                     and 0.02 < c["impliedVolatility"] < 2.0
+                    and not is_placeholder_iv(c["impliedVolatility"])
                 ]
                 if ivs:
                     term_pts.append({
@@ -1655,6 +1680,8 @@ _snap_stats_lock = threading.Lock()
 #                            被就地减掉（v0.45.349，按份计；见 `_drop_legacy_gex_signal`）
 #   stock_price_unavailable  analyze() 现价不可得（调用方没给、期权链也没带）的次数（v0.45.462，见 `_resolve_stock_price`）
 #   nan_sanitized            出口消毒遇到的非有限数个数（v0.45.462：改写成 None，不再是 0.0；见 `_sanitize_result`）
+#   iv_placeholder_contracts yfinance 链里 IV 是 Yahoo 求解失败值（减半阶梯 / 1e-05）、被置 0 的合约数（v0.45.482，见 yahoo_iv）
+#   iv_placeholder_majority  analyze() ATM 窗口里失败值合约 ≥ 有效合约 ⇒ 不取中位数、按「无当日 IV」处理的次数（v0.45.482）
 #   iv_unavailable           analyze() 当日 ATM IV 无效（<5% / >150% / 没有可用合约）且无可用缓存、`iv_current` 记 None
 #                            的次数（v0.45.471：此前兜底成常数 25.0，见 analyze 内「IV 不可得」注释）
 #
@@ -1663,7 +1690,8 @@ _snap_stats_lock = threading.Lock()
 # 计数也读不出「几份快照有问题」。去重键带冻结时间戳：同一路径被重写成新快照后再出事，照样会报。
 _SNAP_STATS_KEYS = ("hits", "writes", "session_mismatch", "hits_before_close",
                     "writes_before_close", "calendar_fallback", "gex_signal_corrected",
-                    "stock_price_unavailable", "nan_sanitized", "iv_unavailable")
+                    "stock_price_unavailable", "nan_sanitized", "iv_unavailable",
+                    "iv_placeholder_contracts", "iv_placeholder_majority")
 
 # v0.45.349：OptionsAgent 每条返回路径都带这个键、值恒为 False ——「本结果的 options_score
 # 不含 GEX 分量」。旧代码写的快照没有这个键 ⇒ 命中时据此判定要不要减掉旧的 +1.0。
@@ -2445,6 +2473,7 @@ class OptionsAgent:
                 "iv_percentile": None,
                 "iv_current": None,
                 "iv_current_source": "unavailable",   # v0.45.471 schema 一致性
+                "iv_placeholders_atm": None,          # v0.45.482 schema 一致性（样本链不数）
                 "iv_raw_observed": None,      # v0.43.18 schema 一致性
                 "iv_rank_source": None,
                 "iv_rank_window_days": None,
@@ -2529,21 +2558,40 @@ class OptionsAgent:
         # 必须在计算 median 之前剔除，否则均值严重偏高
         _IV_UPPER_RAW = 2.0   # 盘后 raw 过滤上限（小数，= 200%），去除极端噪声
         raw_ivs = []
+        # v0.45.482：同一窗口里 IV 是 Yahoo 求解失败值的合约数（fetch_options_chain 已置 0 并打 `_iv_placeholder`；
+        # CBOE 链没有这个标记 ⇒ 恒 0）。只数、不进中位数。
+        _ph_window = 0
         # 现价不可得 ⇒ ATM 窗口定不了位 ⇒ 没有当日原始 IV（走下方既有的「原始 IV 无效」降级）
         for c in (calls_df if atm_price is not None else []):
             iv = c.get("impliedVolatility")
             strike = c.get("strike", 0)
             expiry = c.get("expiry", "")
-            if iv and 0.005 < iv < _IV_UPPER_RAW and atm_lower <= strike <= atm_upper and _expiry_ok(expiry):
-                raw_ivs.append(iv)
+            if atm_lower <= strike <= atm_upper and _expiry_ok(expiry):
+                if c.get("_iv_placeholder"):
+                    _ph_window += 1
+                elif iv and 0.005 < iv < _IV_UPPER_RAW:
+                    raw_ivs.append(iv)
 
         # 如果过滤后无数据，放宽到包含短期到期（保留上限过滤）
         if not raw_ivs and atm_price is not None:
+            _ph_window = 0
             for c in calls_df:
                 iv = c.get("impliedVolatility")
                 strike = c.get("strike", 0)
-                if iv and 0.005 < iv < _IV_UPPER_RAW and atm_lower <= strike <= atm_upper:
-                    raw_ivs.append(iv)
+                if atm_lower <= strike <= atm_upper:
+                    if c.get("_iv_placeholder"):
+                        _ph_window += 1
+                    elif iv and 0.005 < iv < _IV_UPPER_RAW:
+                        raw_ivs.append(iv)
+
+        # v0.45.482：窗口里求解失败的合约不少于有效合约 ⇒ 这条链当天的 IV 整体不可信，不取剩下几个的中位数。
+        # 依据：10-13 对照 CBOE，失败值主导的链里剩下的 Yahoo 值仍有 67% 相差 > 10 个波动率点（yahoo_iv docstring）。
+        # 按「无当日原始 IV」处理 ⇒ 走下方降级（有效缓存 / v0.45.471 的 None），data_quality 随之 degraded。
+        if _ph_window and _ph_window >= len(raw_ivs):
+            _snap_count("iv_placeholder_majority")
+            _log.warning("[%s] ATM 窗口 %d 个合约的 IV 是 Yahoo 求解失败值、有效的只有 %d 个 ⇒ 不取中位数，按无当日 IV 处理",
+                         ticker, _ph_window, len(raw_ivs))
+            raw_ivs = []
 
         _MIN_VALID_IV = 5.0    # IV < 5% 视为无效
         _MAX_VALID_IV = 150.0  # IV > 150% 视为异常（保留极高波动标的的合理空间）
@@ -2889,6 +2937,8 @@ class OptionsAgent:
             # v0.45.471：iv_current 出处 "observed"（当日实拉）| "last_valid_cache"（≤120h 前）| "unavailable"。
             # 旧快照没有这个键——那时 iv_current == 25.0 可能是兜底常数，读者不能当真观测。
             "iv_current_source": _iv_source,
+            # v0.45.482：ATM 窗口里 IV 是 Yahoo 求解失败值的合约数（CBOE 链恒 0）；≥ 有效合约数时当日 IV 按不可得处理
+            "iv_placeholders_atm": _ph_window,
             # v0.43.18 自攒 IV 历史原料：当日真实观测 IV（降级前），只记账不进评分
             "iv_raw_observed": _iv_raw_observed,
             "iv_rank_source": _iv_rank_source,      # "real_iv_{N}d" | "hv_proxy"
