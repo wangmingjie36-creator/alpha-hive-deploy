@@ -1337,6 +1337,51 @@ QUARANTINE: List[Dict] = [
 ]
 
 
+
+# ────────────────────────────────────────────────────────────────────────────
+# v0.45.494（用户 2026-10-13 批准）：08-14 前 iv_rank / iv_percentile 跟着 iv_current 一起隔离。
+#
+# 08-14（`f25e1fa3`，v0.43.19）之前 OptionsAgent 的 IV Rank / IV Percentile 是拿**当日 current_iv** 对历史分布排名
+# （`calculate_iv_rank(current_iv, hist_iv)` / `calculate_iv_percentile(current_iv, hist_iv)`；03-19 ~ 08-14 在用的
+# 14 个版本逐一核过）。所以凡是 current_iv 已被判为不可信、隔离了 `options.iv_current` 的 (日期, 标的)，同一份
+# rank / pct 也是那个不可信值的函数。既有条目（v0.45.238 会话错位、472 样本链 / 假现价、479 重判…）按「五类市场观测」
+# 写，不含这两类——本规则把它们补齐，而不是逐条复制 ~50 条字面量（那是同一个事实的 50 份副本，且新加的 08-14 前
+# iv_current 条目会再漏一次）。
+# 只补「源条目挡了 iv_current、没挡 iv_rank」且该 (日期, 标的) 尚未被别的条目挡 rank 的部分（478 那两条已由 481 覆盖）。
+# 08-14 起 rank 走 hv_proxy / 真实 IV 历史，不读 current_iv（VKTX 09-15 ~ 17 即此例），不补。
+_RANK_FROM_CURRENT_IV_UNTIL = "2026-08-14"
+_RANK_MIRROR_TAG = "v0.45.494"
+
+
+def _rank_mirror_entries(entries: List[Dict]) -> List[Dict]:
+    def _rank_blocked(d, t):
+        return any(q["date"] == d and "options.iv_rank" in q["signals"]
+                   and (q.get("tickers") is None or t in q["tickers"]) for q in entries)
+    out = []
+    for q in entries:
+        if (q["date"] >= _RANK_FROM_CURRENT_IV_UNTIL or "options.iv_current" not in q["signals"]
+                or "options.iv_rank" in q["signals"]):
+            continue
+        tks = q.get("tickers")
+        if tks is not None:
+            tks = tuple(t for t in tks if not _rank_blocked(q["date"], t))
+            if not tks:
+                continue
+        src = re.search(r"v\d+\.\d+\.\d+", q.get("reason", ""))
+        out.append({
+            "date": q["date"],
+            **({"tickers": tks} if tks is not None else {}),
+            "signals": ("options.iv_rank", "options.iv_percentile"),
+            "reason": (f"{_RANK_MIRROR_TAG}（用户 2026-10-13 批准）：镜像 {src.group(0) if src else '既有条目'} 对 iv_current 的隔离——"
+                       f"08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出。源条目理由：{q.get('reason', '')[:120]}"),
+            "evidence": tuple(q.get("evidence") or ()) + ("CHANGELOG.md#v0.45.494",),
+            "_mirror_of": q["date"],
+        })
+    return out
+
+
+QUARANTINE.extend(_rank_mirror_entries(QUARANTINE))
+
 def is_quarantined(date: str, ticker: str, signal: str) -> bool:
     """该 (日期, 标的, 信号) 是否在隔离名单内。入库与分析都应先问这一句。
 

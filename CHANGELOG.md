@@ -7,7 +7,24 @@
 
 ## [0.45.495] — 2026-10-13 — 占位（进行中：拨钟审计进 CI + 修拨钟 harness 子进程盲区（harness 搬进仓库））
 
-## [0.45.494] — 2026-10-13 — 占位（进行中：08-14 前 iv_current 已被隔离的日子，由它算出的 iv_rank / iv_percentile 一并隔离并清库，约 230 行，用户批准）
+## [0.45.494] — 2026-10-13 — Fixed（数据，用户批准）：08-14 前凡是 `iv_current` 已被隔离的 (日期, 标的)，`iv_rank` / `iv_percentile` 一并隔离（规则派生 45 条镜像）并清库 230 行
+
+### 为什么
+- v0.45.490 报告的同一盲区更大一片，用户 10-13：「备份并清掉这 230 行」。
+- 08-14（`f25e1fa3`，v0.43.19）之前 IV Rank / IV Percentile = 当日 `current_iv` 对历史分布排名。03-19 ~ 08-14 在用的 **14 个** `options_analyzer.py` 版本逐一核过：都是 `calculate_iv_rank(current_iv, hist_iv)` / `calculate_iv_percentile(current_iv, hist_iv)`，`f25e1fa3` 起才不再读 current_iv。⇒ current_iv 不可信（会话错位、样本链、假现价、Yahoo 失败值…）的那天，rank / pct 是同一个不可信值的函数。
+- 既有条目按「五类市场观测」写，不含这两类：v0.45.238 会话错位（92 行，含一条无版本号的「同上机制」条目 2 行）、v0.45.472 样本链 / 假现价（98）、v0.45.479 重判（38）。
+
+### Fixed
+- `signal_archive`：新增 `_rank_mirror_entries` 与常量 `_RANK_FROM_CURRENT_IV_UNTIL = "2026-08-14"`、`_RANK_MIRROR_TAG = "v0.45.494"`；`QUARANTINE.extend(_rank_mirror_entries(QUARANTINE))`。对每条「挡了 iv_current、没挡 iv_rank、日期 < 08-14」的源条目，生成同日期同 tickers 的 `iv_rank` + `iv_percentile` 镜像（reason 以标记开头、写明源版本与源理由，evidence 继承并加本条），跳过已被别的条目挡 rank 的标的（478 那两条已由 481 覆盖）。生成 45 条，0 条 ≥ 08-14。
+  - 为什么用规则而不是 ~50 条字面量：那是同一个代码史事实的 50 份副本，而且以后再加 08-14 前的 iv_current 条目会再漏一次——本仓 486 / 490 已经各漏过一次。
+- 清库（生产 `pheromone.db`）：`purge_quarantined_signal_rows.py --only-tag v0.45.494 --expect 230 --apply`；dry-run 加不加标记都恰好 230（库里没有别的待清批次）。备份 `db_backups/pheromone_pre_v0.45.494_rank_mirror.db`；`signal_archive` 131,359 → 131,129。事后独立核对：本批库里 0 / 备份 230；两边 `integrity_check` ok；库里命中隔离名单 0。08-14 前「干净日子」的 rank / pct 还有 1,602 行，不动。
+
+### Added / Changed（测试）
+- `tests/test_signal_quarantine.py::TestRankMirrorBefore0814`（6）：三种源（238 无版本号条目 / 472 / 238）的 iv_current 与 rank / pct 同挡；08-24 整日条目与 VKTX 09-15 的 rank 不跟；tickers 范围保持；每条镜像带标记与证据。变异 4 个全红（删 extend、镜像只挡 rank、截止日挪到 09-30、镜像丢 tickers——后两个还让 481 / 486 / 490 的测试一起红）。
+- v0.45.490 的 `test_rank_rows_from_placeholder_iv_whose_iv_current_was_purged_earlier` 删掉一个对照：06-29 NVDA 的 iv_current 已被别的条目隔离，按本规则 rank 也该挡，它不再是「真实的一对」。
+
+### 评分 / 世代边界
+- 230 行都在 03-31 ~ 08-11，当前世代（10-09）之前，当前 IC 样本不受影响。不追加世代边界。
 
 ## [0.45.493] — 2026-10-13 — 占位（进行中：outcomes_fetcher 回填队列饿死——按到期先后排队 + 产能 + 可观测；并执行 491 的 cs_rank / created_at 恢复（用户批准 A））
 

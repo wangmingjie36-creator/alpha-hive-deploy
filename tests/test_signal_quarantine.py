@@ -318,4 +318,45 @@ def test_rank_rows_from_placeholder_iv_whose_iv_current_was_purged_earlier():
         for s in ("options.iv_rank", "options.iv_percentile"):
             assert sa.is_quarantined(d, t, s), (d, t, s)
     assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_rank")
-    assert not sa.is_quarantined("2026-06-29", "NVDA", "options.iv_rank")
+    # v0.45.494：原来这里还有 06-29 NVDA 作对照——它的 iv_current 已被别的条目隔离，按 494 的镜像规则 rank 也该挡，
+    # 不再是「真实的一对」，删掉（只留 479 按归档运行核过的 06-23 TSLA）。
+
+
+class TestRankMirrorBefore0814:
+    """v0.45.494（用户批准）：08-14 前 iv_rank / iv_percentile 由 current_iv 算出 ⇒ 凡隔离了 iv_current 的 (日期, 标的)，
+    这两类一并隔离（规则派生，见 `_rank_mirror_entries`）。08-14 起 rank 不读 current_iv，不跟。"""
+
+    @pytest.mark.parametrize("d,t", [("2026-07-08", "NVDA"),    # v0.45.238 一族（无版本号的「同上机制」条目）
+                                     ("2026-04-09", "CRCL"),    # v0.45.472 样本链
+                                     ("2026-06-10", "NVDA")])   # v0.45.238 会话错位
+    def test_pre_cutoff_rank_follows_iv_current(self, d, t):
+        """变红的变异：删掉 `QUARANTINE.extend(...)`；或镜像只挡 iv_rank 不挡 iv_percentile。"""
+        assert sa.is_quarantined(d, t, "options.iv_current")
+        assert sa.is_quarantined(d, t, "options.iv_rank")
+        assert sa.is_quarantined(d, t, "options.iv_percentile")
+
+    def test_post_cutoff_rank_not_mirrored(self):
+        """08-24（v0.45.16 整日条目）与 VKTX 09-15（hv_proxy）：rank 不读 current_iv，不跟着隔离。
+
+        变红的变异：截止日往后挪（如 09-30）。
+        """
+        assert sa.is_quarantined("2026-08-24", "NVDA", "options.iv_current")
+        assert not sa.is_quarantined("2026-08-24", "NVDA", "options.iv_rank")
+        assert not sa.is_quarantined("2026-09-15", "VKTX", "options.iv_rank")
+
+    def test_tickers_stay_scoped(self):
+        """镜像沿用源条目的 tickers：同日没被隔离 iv_current 的标的，rank 不受牵连。
+
+        变红的变异：镜像丢掉 tickers（变成整日）。
+        """
+        assert not sa.is_quarantined("2026-04-09", "NVDA", "options.iv_current")
+        assert not sa.is_quarantined("2026-04-09", "NVDA", "options.iv_rank")
+
+    def test_mirrors_are_documented_and_tagged(self):
+        """每条镜像都带标记（--only-tag 清库靠它）、写明源版本与证据。"""
+        mirrors = [q for q in sa.QUARANTINE if "_mirror_of" in q]
+        assert len(mirrors) >= 40
+        for q in mirrors:
+            assert q["reason"].startswith(sa._RANK_MIRROR_TAG) and "镜像" in q["reason"]
+            assert "CHANGELOG.md#v0.45.494" in q["evidence"]
+            assert q["date"] < sa._RANK_FROM_CURRENT_IV_UNTIL
