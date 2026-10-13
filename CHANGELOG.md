@@ -7,7 +7,32 @@
 
 ## [0.45.499] — 2026-10-13 — 占位（进行中：BILI 10-12 假 IV 6.25（Yahoo 失败值）——删 IV 索引行 + signal_archive 隔离 options.iv_current）
 
-## [0.45.498] — 2026-10-13 — 占位（进行中：v0.45.487 / 488 二次检查——重新生成命令沿用壳里的解释器、测试里「生产在哪」只一份推导、提醒的时机与边界、ALPHA_HIVE_HOME 常量守卫）
+## [0.45.498] — 2026-10-13 — Fixed：v0.45.487 / 488 二次检查——「怎么重新生成 .app」的命令沿用壳里记下的解释器（487 的提醒照做会把自定义解释器换回缺省，壳里两处自 461 起同病）；过时提醒在启动成功、交出窗口 / 页面时才弹，整段两道边界；测试里「生产数据根在哪」只一份推导；`ALPHA_HIVE_HOME` 守卫认常量本身
+
+二次检查 7 条：修 5 条（#1、#2、#3 与 #5 合成一处、#7），#4 / #6 判定不修（理由见末尾）。
+
+### Fixed
+- **重新生成命令丢解释器**（`alphabot/macos_app.py`、`alphabot/launcher.py`）：`regen_hint(repo, python=None)` 省了 `python` 就等于「用缺省」，而手里有壳里记下的解释器的三处都没传——487 的过时提醒、壳头注释「别手改：要改就重新生成（…）」、「代码目录挪了位置就到新位置重新生成」那句（后两处 461 起）。用 `make … PYTHON=/自定义` 生成过的人照抄，`.app` 就被悄悄换回 `/usr/local/bin/python3`（458 起 make 的 `PYTHON` 只认命令行）。根因修法：`python` 改**必填**，每个调用方必须说清是「沿用记下的」还是「教人换（占位）」；等于缺省时命令里不写（推荐入口生成的就是它）⇒ 已装的缺省 `.app` 内容逐字节不变、不会因此多提醒一次（本机已装那份只读核对：`PY=/usr/local/bin/python3`，`installed_drift` 仍为空）。带空格等的路径单引号引起来（非 ASCII 字母照常，占位原样）。解释器从此进双引号提示与给人抄的命令 ⇒ 生成器拒绝含 `" $ \` \ '` 或换行的解释器路径（`PY_UNSAFE_CHARS`；make 配方 `"$(PYTHON)"` 本来也接不住它们），提示软链即可。
+- **提醒的时机与边界**（`alphabot/launcher.py`）：487 只把 `installed_drift` 包进 try，拼消息、弹窗、记「已提醒」都在外面——任一步一抛就成了「启动器出错」弹窗、页面打不开，与「坏了不许挡住启动」相反；且在启动一开始就弹：首次启动的选数据根对话框、端口被占的失败弹窗都排在它后面，3 秒后提醒叠上来，失败那次还像「壳旧导致启动失败」。拆成两段：`check_app_shell()` 只算（整段一个边界，出错只记日志）；`announce_app_shell(ui, drift)` 在**启动已成功、交出窗口 / 页面**时弹并记（整段一个边界；先弹后记：没弹成不记、下次再提）。落点：`_present` 开头（原生窗口在本进程里阻塞到关窗，不能放在它返回之后）与「已开窗口被调到前面」之后；失败 / 取消都不弹不记。
+- **测试里「生产在哪」两份推导**（`tests/_root_data_guard.py`、`tests/conftest.py`）：488 把「非绝对值改守缺省」只放进真实数据根闸，paper_portfolio 真身夹具仍自调 `resolve_data_root`——`ALPHA_HIVE_HOME` 是相对值时它盯随 cwd 漂移的相对目录（测试会 chdir，夹具在 monkeypatch 还原 cwd 之前比指纹），两个守卫各守一处。抽出 `production_data_root(environ, home)`（只管「在哪」：唯一规则 + 非绝对值退回缺省 + 取绝对），闸在其上只加「不存在 / 就是仓库根」两道过滤，夹具改经 `_paper_portfolio_real_dir` 调它。
+- **`ALPHA_HIVE_HOME` 守卫看不见间接写法**（`tests/test_data_root_default.py`）：488 的 `ENV_READERS` 按调用形状认（`.get` / `.getenv` / 下标 …），`ENV = "ALPHA_HIVE_HOME"; os.environ.get(ENV)`、`.get(key=…)`、`dict(os.environ).get(…)` 都漏。改认**常量本身**：生产代码里每个值恰为这个键的字符串常量所在处都要登记角色（`ENV_KEY_SITES`，6 处 = 原 5 处读者 + `launcher.spawn_server` 传给子进程）；日志里的 `f"ALPHA_HIVE_HOME=…"`、docstring 不是恰等，不误中。
+
+### Added（测试）
+- `TestShellDrift`：「照提醒做」**真跑一遍**两种入口——生成器直跑（开发检出）与 `make -C … alphabot-app PYTHON=…`（推荐入口，真跑 make）——新壳 `PY=` 不变、差异消失；启动流程四条路径上提醒的位置（已开窗口 / 服务已在跑开页面 / 开原生窗口 / 首次启动先选再弹）；端口被占与取消 ⇒ 不弹不记；四步（`installed_drift` / `regen_hint` / `notice` / 记录）逐个注入异常 ⇒ 启动照常、只记日志、不算已提醒。流程测试的 `probe` 桩带 `from_app: False` 且给空闲端口：关窗不去停服务，碰不到本机真在跑的 Alpha Bot。
+- `TestLaunchScriptHints`：壳里每条「重新生成」都带记下的解释器、缺省时都不带；带空格 / 括号的解释器照样不在双引号提示里生出 `" $ \` \`；`PY_UNSAFE_CHARS` 逐字符被拒且什么都没生成。
+- `TestOneDerivationOfProduction`：6 种输入（未设 / 空串 / 绝对 / `~/x` / `x` / 空白）下两个守卫落在同一根上；相对值不随 chdir 挪；AST：测试基础设施里调 `resolve_data_root` 的只许 `production_data_root`。`test_scanner_has_teeth` 补三种间接写法与两种不该中的文本。
+- `tests/test_reads_own_checkout.py::LITERAL_TILDE_INPUTS` 登记新增的字面 `~` 输入（HOME 指向 tmp）。
+
+### Changed
+- `CLAUDE.md`：Alpha Bot 行补提醒时机与 `regen_hint` 必填；数据根一节改指 `production_data_root` 与 `ENV_KEY_SITES`。
+
+### 判定不修
+- **#4「弹出即记已提醒，不管用户真看到没有」**：osascript 弹不出来只在没有图形会话 / 3 秒内注销 / 被杀这类情形；即便发生，后果有界——启动日志每次都记「启动壳过时」，代码再变一次指纹就变、会重新提醒。根治要么让启动器为等用户点「好」常驻（浏览器模式下 Dock 里多挂一个进程），要么在分离的子进程里「点了才改名落盘」，引入的东西比它防的大。本版「失败 / 取消不弹不记」已收掉其中「弹了却没启动成功」那一类。
+- **#6「只改版本号也会提醒」**：版本号是 Info.plist 的真实内容（Finder「显示简介」看得到），提醒属实、同一处只提醒一次；排除字段等于再维护一份「哪些差异算数」的规则——487 刻意避免的正是第二份规则。`alphabot.__version__` 09-30 起没动过。
+
+### 验证
+- 变异 17 处全红（#1 七处：提醒 / 壳头注释 / 挪目录那句各不传解释器、`regen_hint` 忽略它、不引号、不拒特殊字符、缺省也写进命令；#3+#5 五处：一开始就弹（487 形状）、核对段与弹记段各去边界、先记后弹、已开窗口那条路不弹；#2 三处：夹具自调 `resolve_data_root`、非绝对值不退回缺省、闸绕开 `production_data_root`；#7 两处：扫描器退回认调用形状、登记表漏一处）；每个变异体独立 pyc 前缀，还原后 182 passed。
+- 全量 9511 passed、1 failed、1 error，均与本版无关：failed 是已知的 `TestCoverageHorizon`；error 是真实数据根闸——07:33:30 另一会话 v0.45.484 的 10-12 整日重放同一秒新增 30 份 10-12 期权快照、改动 72 个文件（10-12 日报 / 蜂群结果 / IV 历史等）（同一秒的 `_manual_backups/2026-10-13_1012_replay_v0.45.484` 是其写前备份），另有 Alpha Bot 盘中追加；单独重跑挂名的 `test_zero_weight_invariant.py::…::test_reads_live_config_when_not_injected` 1 passed。
 
 ## [0.45.497] — 2026-10-13 — Fixed + Added：补跑时链取自目标日云端快照 ⇒ 数据记在目标日（IV 索引日期 / 「最后有效 IV」缓存 / mismatch 标签三处原按「运行时现拉」处理）；新增 10-12 期权快照回填工具（dry-run 29/29 通过；**未 apply**——并行会话的 10-12 重放已于 10-13 07:33 写入生产，工具按幂等检查全部跳过，见本条「结局」）
 
