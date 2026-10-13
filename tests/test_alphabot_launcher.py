@@ -870,6 +870,17 @@ class TestShellDrift:
         LA.check_app_shell(ui)
         assert ui.kinds() == ["notice", "notice"]
 
+    def test_code_moving_on_again_notifies_again(self, home, monkeypatch):
+        """装着的不动、代码又往前走了一步 ⇒ 是新的差异，要再提醒（指纹得同时摘要「应生成的」那一端）。"""
+        self._install(home)
+        real = MA.launch_script
+        ui = FakeUI()
+        for tag in ("v2", "v3"):
+            monkeypatch.setattr(MA, "launch_script",
+                                lambda repo, python, *a, _t=tag, **k: real(repo, python, *a, **k) + f"# {_t}\n")
+            LA.check_app_shell(ui)
+        assert ui.kinds() == ["notice", "notice"]
+
     def test_app_for_another_code_dir_is_not_judged_here(self, home, tmp_path, capsys):
         self._install(home, repo=_fake_code_dir(tmp_path / "other"))
         ui = FakeUI()
