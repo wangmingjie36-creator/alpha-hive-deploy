@@ -270,8 +270,14 @@
 - `tests/test_production_sync.py`：`extra` 键集合契约加 `outcomes_backlog`；「健康一轮」补健康的 `outcomes_backlog` 与 `history_fill` 计数（后者是进程级计数，单独跑这条时此前就会因缺它记 checks_skipped 而红——同 v0.45.466 对 paper_portfolio 的处理）。
 - 全套：9459 passed；余 1 红为 `TestCoverageHorizon`（经济日历覆盖期，设计上定期红，与本版无关）。
 
-### 491 恢复（方案 A，用户批准）
-- 工具前提「生产克隆已含 491 修复」今天扫描的 production_sync 之后才成立，且恢复与扫描后台回填不能并发（工具不持锁）⇒ 排在今天扫描结束后执行；结果补记于此。
+### 491 恢复（方案 A，用户批准）——已执行（10-13 15:34）
+- 前提：今天扫描 `production_sync` = fast_forwarded（生产克隆含 491 / 493）、step2 success（status.json 14:51）、无扫描进程。用户 07:55 手动先跑过一次，被工具的「生产克隆未含修复」闸拒绝、零写入（如设计）。
+- 扫描后 dry-run：1801 份（多出的 30 份是 10-13 新快照，cs_rank 全在 ⇒ 今天的回填已不再抹），cs_rank 补 866、created_at 改回 1473、0 ambiguous，与上午计划逐文件一致。
+- `--apply --expect-cs 866 --expect-created 1473`：先整目录备份 1801 份到 `_manual_backups/report_snapshots-pre-v0.45.491-restore/`（逐文件比对一致），写 1473 份、跳过 0；`applied.jsonl` 记 `T-restore_snapshot_cs_rank_v0491-20261013T153439`。
+- 事后核对：ABBV_2026-10-05 cs_rank.final = 0.345（run-1）、ABBV_2026-08-25 = 0.448（同日重扫取 run-2）；cs_rank 非空 1194 / 1801（余 607 是 v0.40.0 之前本来就没有的）；再 dry-run 计划 0 / 0。
+- ⚠️ 副作用（工具 docstring 说「其余任何字段不碰」，**不实**）：写盘走 `atomic_json_write`，它自 v0.45.452 起把 NaN 写成 null ⇒ RKLB_2026-06-26 / META_2026-06-26 两份的 `entry_price` NaN → null。已逐个核读者：`ReportSnapshot` 读成 0.0、`risk_engine` / `self_analyst` / `weekly_optimizer` / `paper_portfolio` / `dashboard_renderer` 对两者同样判「没有价」；`finrl_bridge` 的 `not entry` 此前放过 NaN、现在跳过（变好）。null 是 452 起的规范形态，不改回。备份里保留原值。docstring 已更正。
+- 今天回填（生产，14:48）：`scanned=424 updated=424 local=576 network=0 deferred=0 unresolved=0`；`outcomes_backlog` 待回填 0、最老逾期 0。一轮排空。
+- 注：`alpha_hive.log` 里 10-13 06:09:50 那两行「OutcomesFetcher … scanned=424 updated=370 memory=0」是本会话离线模拟（数据写在 scratchpad 拷贝，日志却落进生产日志），**不是生产运行**。
 
 
 ## [0.45.492] — 2026-10-13 — Added：Alpha Bot 标的页「溢价」tab——单票全链按 **IV ÷ 期限匹配 RV** 找卖方溢价高的期权（筛选工具，**未经前向检验、不进评分、不上网站、不写任何账本**）；并排偏度溢价、按 bid 年化、IV Rank、VRP 自身分位、扫描记下的财报日与链上「疑似事件」
