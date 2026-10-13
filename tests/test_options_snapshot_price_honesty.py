@@ -491,8 +491,8 @@ class TestDownstreamFormattingToleratesNone:
         """
         from market_intelligence import calculate_gamma_expiry_calendar
         # 被测函数直读 `date.today()`、丢弃已过期到期日，无注入接缝 ⇒ 到期日相对真实今天、在测试体内算
-        # （v0.45.489：原写死 2026-11-20，11-21 起红）。38 天 = 写下时的原始间隔，留在 45 天近月窗口内。
-        expiry = (date.today() + timedelta(days=38)).isoformat()
+        # （v0.45.489：原写死 2026-11-20，11-21 起红）。39 天 = 写下时（10-12）的原始间隔，留在 45 天近月窗口内。
+        expiry = (date.today() + timedelta(days=39)).isoformat()
         calls = [{"expiration": expiry, "strike": 300.0, "openInterest": 5000, "gamma": 0.02}]
         puts = [{"expiration": expiry, "strike": 280.0, "openInterest": 1000, "gamma": 0.01}]
         out = calculate_gamma_expiry_calendar(calls, puts, None)

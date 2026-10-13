@@ -88,9 +88,11 @@
   模块常量在此安全——它们只与被注入的钟比，不与真钟比（time-bomb 判据 1/3）。
 - **第二颗（拨钟审计 +120 天挖出）**：`TestDownstreamFormattingToleratesNone::test_gamma_calendar_survives_missing_price` 的到期日写死
   `2026-11-20`；`market_intelligence.calculate_gamma_expiry_calendar` 直读 `date.today()` 并丢弃已过期到期日，无注入接缝 ⇒
-  **11-21 起** `pin_expiry` 为 None。改为测试体内 `date.today() + 38 天`（写下时的原始间隔，留在 `_PIN_RISK_MAX_DTE=45` 近月窗口内），
+  **11-21 起** `pin_expiry` 为 None。改为测试体内 `date.today() + 39 天`（写下时 10-12 的原始间隔；初版写成 38 并称「原始间隔」，二次检查按 v0.45.462 提交日 10-12 核实为 39 后更正，留在 `_PIN_RISK_MAX_DTE=45` 近月窗口内），
   照兄弟文件 `test_gamma_expiry_calendar.py` 的写法。同文件另两处 `2026-11-20`（`_chain` 的 `expirations` 标签、yfinance 假 `Ticker.options`）
-  拨钟下不红，不动。
+  拨钟下不红，不动。二次检查补核：`_chain` 的行不带 `expiration`，那个列表只是标签、进不了 Gamma 日历；yfinance 那条在 12-18 之后
+  会**退化**（备用链不丢已过期到期日，dte 夹到 1，gamma 0.12 → 0.0005），但把 BS gamma 的 S 改回中位行权价 15.5 的变异在
+  真实钟与 +120 天下都红（3 条）——仍在测它要测的东西，故仍不动。
 
 ### 验证
 - 修后本文件 38/38 绿。
@@ -100,9 +102,10 @@
   （`test_options_paper_leg_settle_close`、`test_portfolio_greeks_price_session`）读过，都注入了钟（`_et_today` / `_pdt_now` / `_et_now`）；
   其余是已过期的 `260828` / `261002`，真实钟下仍绿 ⇒ 不与真钟比，**未逐条审读**，靠下面拨钟审计兜底（都没红）。
 - 拨钟 harness 全套件（auto-memory `alpha-hive-time-bomb-audit`）：真实钟 1 failed（设计红 `TestCoverageHorizon`）+ 1 teardown error
-  （真实数据根闸：`pheromone.db` 02:32:25 被写——同时刻另一会话在跑 0.45.484 的 `replay_1012.py`，并发写入者，与本改动无关；
-  本改动只动内存 dict）。+30 天 42 failed / +120 天 43 failed：多出的那 1 条就是上面第二颗；其余除设计红外全是**子进程读真钟**的 harness 假红（编排器 bash 解释器 golden parity、
-  `default_date_is_business_today`、Step 15 分派、真实数据根闸子 pytest——父进程期望值来自拨过的钟、子进程用真实 10-13），两轮失败集合除第二颗外逐条相同；除此之外无新炸弹。
+  （真实数据根闸：`pheromone.db` 02:32:25 被写——是 **v0.45.490 的清库**（用户批准的数据修正；其备份
+  `db_backups/pheromone_pre_v0.45.490_rank_from_placeholder_iv.db` mtime 02:32:24），并发写入者，与本改动无关；本改动只动内存 dict。
+  初版误归因于同时在跑的 0.45.484 `replay_1012.py`——二次检查读其源码：它把 `ALPHA_HIVE_HOME` 指向沙箱，写不到真实库；已更正）。+30 天 42 failed / +120 天 43 failed：多出的那 1 条就是上面第二颗；其余除设计红外全是**子进程读真钟**的 harness 假红（编排器 bash 解释器 golden parity、
+  `default_date_is_business_today`、Step 15 分派、真实数据根闸子 pytest——父进程期望值 / 写入的样本时戳来自拨过的钟、子进程用真实 10-13，逐类读过失败消息），两轮失败集合除第二颗外逐条相同；除此之外无新炸弹。
 - 修后本文件在拨钟 −10 / +3 / +4 / +38 / +39 / +120 / +400 / +1000 / +3650 天全绿。
   canary：**修前原文件**同一 harness 下 −1 天（10-12）全绿、0 天（10-13）3 红、+38（11-20）仍 3 红、+39（11-21）4 红——
   两颗的引爆日都被精确复现，证明 harness 确实拨到了本文件的被测路径。
