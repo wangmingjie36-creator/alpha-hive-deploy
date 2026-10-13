@@ -284,3 +284,23 @@ def test_iv_rank_from_constant_25_quarantined():
         assert not sa.is_quarantined(d, "VKTX", "options.iv_rank"), d
     assert not sa.is_quarantined("2026-04-26", "NVDA", "options.iv_rank")
     assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_rank")
+
+
+def test_yahoo_placeholder_iv_rows_quarantined():
+    """v0.45.486（用户批准）：iv_current = 12.5 / 6.25（Yahoo 求解失败阶梯值的中位数）。08-14 前的 12 对连同由它算出的
+    iv_rank / iv_percentile；TMO 08-31 只挡 iv_current（rank 走 hv_proxy，不读 current_iv）。
+
+    变红的变异：删任一日期条目；08-14 前的条目少了 iv_rank 或 iv_percentile；TMO 也挡 iv_rank；去掉 tickers。
+    """
+    pre = [("2026-03-11", "NVDA"), ("2026-03-12", "NVDA"), ("2026-06-15", "RKLB"),
+           ("2026-06-17", "BILI"), ("2026-06-17", "CRCL"), ("2026-06-17", "RKLB"), ("2026-06-17", "VKTX"),
+           ("2026-06-23", "CRCL"), ("2026-06-23", "META"), ("2026-06-23", "QCOM"), ("2026-06-23", "RKLB"),
+           ("2026-06-23", "VKTX")]
+    for d, t in pre:
+        for s in ("options.iv_current", "options.iv_rank", "options.iv_percentile"):
+            assert sa.is_quarantined(d, t, s), (d, t, s)
+    assert sa.is_quarantined("2026-08-31", "TMO", "options.iv_current")
+    assert not sa.is_quarantined("2026-08-31", "TMO", "options.iv_rank")
+    # 同日真实的一对（v0.45.479 按归档运行核过）
+    assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_current")
+    assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_rank")

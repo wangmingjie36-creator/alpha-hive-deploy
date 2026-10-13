@@ -9,7 +9,32 @@
 
 ## [0.45.487] — 2026-10-13 — 占位（进行中：Alpha Bot.app 启动壳过时提醒——启动器内存重生成比对）
 
-## [0.45.486] — 2026-10-13 — 占位（进行中：Yahoo 求解失败 IV（12.5 / 6.25）的归档行与其派生 iv_rank / iv_percentile 入隔离并清库 + IV 历史索引 TMO 09-01 一行，用户批准）
+## [0.45.486] — 2026-10-13 — Fixed（数据，用户批准）：`iv_current = 12.5 / 6.25`（Yahoo 求解失败阶梯值的中位数，v0.45.482 已在源头剔除）的 13 行归档与 08-14 前由它算出的 iv_rank / iv_percentile 24 行，入隔离并清库（37 行）；IV 历史索引那一行核实为已被同日后写覆盖、不动
+
+### 为什么
+- 用户 10-13：「先做第 1 步，源头修复，修完再清数据」。482（`9d774a69`）合入后执行。
+- 13 对逐对核对 `.swarm_results_{date}.json`：OracleBee `iv_current`、`iv_rank`、`iv_percentile` 与归档逐位相等。08-14（v0.43.19）前 rank / pct 由同一个 `current_iv` 算（`calculate_iv_rank(current_iv, hist_iv)`，481 已核五个版本），这 12 对 rank / pct 全是 0 / 0（分子是 12.5 或 6.25）。TMO 08-31 的 rank 走 `hv_proxy`（当前 HV 对 HV 分布），不读 `current_iv`，保留（31.63）。
+- 归档运行里共 20 次 12.5 / 6.25，另外 7 次不在 `signal_archive`（06-23 NVDA 已由 479 隔离；其余当天就没入库），无可清。
+
+### Fixed
+- `signal_archive.QUARANTINE` 追加 6 条（reason 标记 `v0.45.486`）：
+  | 日期 | 标的 | signals |
+  |---|---|---|
+  | 03-11、03-12 | NVDA | iv_current / iv_rank / iv_percentile |
+  | 06-15 | RKLB | 同上 |
+  | 06-17 | BILI、CRCL、RKLB、VKTX | 同上 |
+  | 06-23 | CRCL、META、QCOM、RKLB、VKTX | 同上 |
+  | 08-31 | TMO | 只 iv_current |
+- 清库（生产 `pheromone.db`）：`purge_quarantined_signal_rows.py --only-tag v0.45.486 --expect 37 --apply`；dry-run 加不加标记都恰好 37。备份 `db_backups/pheromone_pre_v0.45.486_yahoo_placeholder_iv.db`；`signal_archive` 131,410 → 131,373（481 之后表里多出的约 1,600 行是 0.45.484 会话的 10-12 整日重放，本次不涉及）。事后独立核对：本批 37 行库里 0、备份 37；两边 `integrity_check` ok；库里命中隔离名单的行 0；`iv_current` 落在 50 / 25 / 12.5 / 6.25 / 3.125 的行已为 0。
+
+### 未改（核实后不需要）
+- IV 历史索引 `cache/iv_history_TMO.jsonl` 的 `{"date": "2026-09-01", "iv": 6.2509}`：同日下一行是 `32.03`（当天重跑），读取端 `_read_index` 同日取最后一行 ⇒ 有效值已是 32.03（实测 `_read_index` 返回 32.03，TMO 有效历史里没有阶梯值）。改写一个正在追加的文件不改变任何读者看到的东西，不动。482 条目「IV 历史索引 1 行」的说法据此更正：**原始行 1 行，有效影响 0**。
+
+### Added
+- `tests/test_signal_quarantine.py::test_yahoo_placeholder_iv_rows_quarantined`：12 对 × 三类都挡、TMO 只挡 iv_current、同日真实的 06-23 TSLA 不挡。变异 4 个全红（删一个日期、06-23 少了 iv_percentile、TMO 也挡 iv_rank、06-23 去掉 tickers）。
+
+### 评分 / 世代边界
+- 37 行都在当前世代（10-09）之前，当前 IC 样本不受影响。不追加世代边界。
 
 ## [0.45.485] — 2026-10-13 — Fixed：392 二次检查跟进——父进程超预算时 F&G 已交的结果不丢（补上 400 没接住的「正在退出」一形，与 400 合成一个机制）；等 F&G 时的意外异常只判 F&G 段、不再盖掉检查点；`--budget-seconds` 上限；补测 `--today` 传递 / 谁杀的子进程 / 一处潜在 flaky
 

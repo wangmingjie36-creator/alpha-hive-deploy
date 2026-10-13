@@ -1247,6 +1247,58 @@ QUARANTINE: List[Dict] = [
         "evidence": (".swarm_results_2026-06-15.json（OracleBeeEcho.details.iv_current = 25.0 / iv_rank / iv_percentile）",
                      "CHANGELOG.md#v0.45.481"),
     },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.486（用户批准）：iv_current = 12.5 / 6.25——Yahoo 二分求解失败的减半阶梯值取中位数（v0.45.482 已在源头剔除）。
+    # 13 对逐对核对过 .swarm_results 与归档逐位相等。08-14 前的 12 对连同由它算出的 iv_rank / iv_percentile；
+    # TMO 08-31 只挡 iv_current（rank 走 hv_proxy）。06-23 NVDA 的 iv_current 已由 v0.45.479 隔离、不重复列。
+    {
+        "date": "2026-03-11",
+        "tickers": ('NVDA',),
+        "signals": ("options.iv_current", "options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.486（用户 2026-10-13 批准）：iv_current 是 Yahoo 求解失败值（减半阶梯 1/8、1/16 ×100 = 12.5 / 6.25）的中位数，不是观测（对照 CBOE：阶梯值 99.7% 相差 > 10 个波动率点，见 yahoo_iv）；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出，一并隔离。",
+        "evidence": (".swarm_results_2026-03-11.json（OracleBeeEcho.details.iv_current / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.482", "CHANGELOG.md#v0.45.486"),
+    },
+    {
+        "date": "2026-03-12",
+        "tickers": ('NVDA',),
+        "signals": ("options.iv_current", "options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.486（用户 2026-10-13 批准）：iv_current 是 Yahoo 求解失败值（减半阶梯 1/8、1/16 ×100 = 12.5 / 6.25）的中位数，不是观测（对照 CBOE：阶梯值 99.7% 相差 > 10 个波动率点，见 yahoo_iv）；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出，一并隔离。",
+        "evidence": (".swarm_results_2026-03-12.json（OracleBeeEcho.details.iv_current / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.482", "CHANGELOG.md#v0.45.486"),
+    },
+    {
+        "date": "2026-06-15",
+        "tickers": ('RKLB',),
+        "signals": ("options.iv_current", "options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.486（用户 2026-10-13 批准）：iv_current 是 Yahoo 求解失败值（减半阶梯 1/8、1/16 ×100 = 12.5 / 6.25）的中位数，不是观测（对照 CBOE：阶梯值 99.7% 相差 > 10 个波动率点，见 yahoo_iv）；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出，一并隔离。",
+        "evidence": (".swarm_results_2026-06-15.json（OracleBeeEcho.details.iv_current / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.482", "CHANGELOG.md#v0.45.486"),
+    },
+    {
+        "date": "2026-06-17",
+        "tickers": ('BILI', 'CRCL', 'RKLB', 'VKTX'),
+        "signals": ("options.iv_current", "options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.486（用户 2026-10-13 批准）：iv_current 是 Yahoo 求解失败值（减半阶梯 1/8、1/16 ×100 = 12.5 / 6.25）的中位数，不是观测（对照 CBOE：阶梯值 99.7% 相差 > 10 个波动率点，见 yahoo_iv）；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出，一并隔离。",
+        "evidence": (".swarm_results_2026-06-17.json（OracleBeeEcho.details.iv_current / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.482", "CHANGELOG.md#v0.45.486"),
+    },
+    {
+        "date": "2026-06-23",
+        "tickers": ('CRCL', 'META', 'QCOM', 'RKLB', 'VKTX'),
+        "signals": ("options.iv_current", "options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.486（用户 2026-10-13 批准）：iv_current 是 Yahoo 求解失败值（减半阶梯 1/8、1/16 ×100 = 12.5 / 6.25）的中位数，不是观测（对照 CBOE：阶梯值 99.7% 相差 > 10 个波动率点，见 yahoo_iv）；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出，一并隔离。",
+        "evidence": (".swarm_results_2026-06-23.json（OracleBeeEcho.details.iv_current / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.482", "CHANGELOG.md#v0.45.486"),
+    },
+    {
+        "date": "2026-08-31",
+        "tickers": ('TMO',),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.486（用户 2026-10-13 批准）：iv_current 是 Yahoo 求解失败值 1/16 ×100 = 6.25 的中位数，不是观测（见 yahoo_iv）。当天 iv_rank 走 hv_proxy（当前 HV 对 HV 分布），不读 current_iv，不隔离。",
+        "evidence": (".swarm_results_2026-08-31.json（OracleBeeEcho.details.iv_current = 6.25, iv_rank_source = hv_proxy）",
+                     "CHANGELOG.md#v0.45.482", "CHANGELOG.md#v0.45.486"),
+    },
 ]
 
 
