@@ -1295,7 +1295,7 @@ class AlphaHiveDailyReporter:
             import earnings_vol_signal as _evs
             import options_paper_leg as _opl
             _ev_signals = _evs.scan(self.date_str,
-                                    upcoming_fn=self._earnings_date_from_swarm(swarm_results),
+                                    upcoming_fn=self._earnings_date_from_swarm(swarm_results, self.date_str),
                                     gex_fn=self._gex_state_from_swarm(swarm_results))
             _ev_settled = _evs.settle_signals(self.date_str)
             _opl_result = _opl.run_for_date(self.date_str, signals=_ev_signals)
@@ -1362,7 +1362,7 @@ class AlphaHiveDailyReporter:
             import sell_strike_ledger as _ssl
             import sell_strike_report as _ssr
             _ss = _ssl.run_for_date(self.date_str, tickers=sorted(swarm_results.keys()),
-                                    upcoming_fn=self._earnings_date_from_swarm(swarm_results))
+                                    upcoming_fn=self._earnings_date_from_swarm(swarm_results, self.date_str))
             _ss_pt = _ss.get("per_tenor") or {}
             _ss_m, _ss_w = _ss_pt.get("monthly") or {}, _ss_pt.get("weekly") or {}
             # 放弃 / 取不到 K 线 / 待结算（其中过期）都打出来：Twelve Data key 过期时「结算 0」
@@ -1931,54 +1931,18 @@ class AlphaHiveDailyReporter:
         return "\n".join(lines)
 
     @staticmethod
-    def _earnings_date_from_swarm(swarm_results: Dict):
-        """v0.45.104：财报日改从**本轮扫描已有的** ChronosBee 催化剂里取，不再重打 yfinance。
+    def _earnings_date_from_swarm(swarm_results: Dict, as_of: str):
+        """财报日：本轮 ChronosBee 的按日观测，经唯一读取入口 `earnings_calendar`（v0.45.500）。**不打网。**
 
-        二次复查实测：`earnings_vol_signal.scan` 原先对每只通过报价预检的票各调一次
-        `EarningsWatcher.get_earnings_date`（走 `stock.calendar`），而 ChronosBee 在
-        同一轮扫描里早就取过同一个数据 —— 2026-09-02 的 `.swarm_results` 里 28/30 只
-        票带着 `type == "earnings"` 的催化剂。而 `earnings_cache/*_date.json` 的 TTL 是
-        12 小时、扫描每天跑一次，所以那 30 次调用**每天都是真打网**（实测该目录 24 个
-        文件最新停在 8/9，今天一个都没刷新）。yfinance 429 是本项目头号数据丢失原因，
-        限流后每次约 2s + 2s，白白多花约两分钟。
-
-        降级语义（区分「没有财报」与「蜂没跑出来」）：
-          · 该票有催化剂、但没有 earnings 条目 → 视野内确实没有财报 → None（零成本）
-          · 该票**完全没有**催化剂（蜂失败，9/2 是 WMT/SNOW 两只）→ **本函数自己**
-            延迟构造 `EarningsWatcher` 兜底（每天至多几次调用）
-
-        ⚠️ 兜底必须写在这里：`scan` 的 `upcoming_fn = upcoming_fn or _upcoming` 只在
-        **参数为 None** 时替换整个函数，不会因为某一只票返回 None 就回退。早先这段
-        注释写的是「由 scan 兜底」而代码做不到 —— 正是本轮复查在别处抓到的
-        「注释说的和代码做的不是一回事」。
+        沿革：v0.45.104 改从本轮 ChronosBee 催化剂取，蜂没产出催化剂时自己构造 `EarningsWatcher` 打 yfinance 兜底。
+        2026-10-13 调查（`experiments/earnings_date_cache_staleness_report.md`）：那条兜底与主路径同源，
+        主路径失败的那几天（09-24 / 09-25 / 10-12）期权取数也一起挂了，兜底一次都没被调到；而它唯一一次被调到
+        （MU 09-30）是因为 ChronosBee 把**当天**的财报丢了（`days_until` 用 `datetime.now()` 得 −1）。
+        现在读 ChronosBee 另记的未过滤原始日期，按 `as_of` 做日期算术；判不了 ⇒ None（卖权记 unknown），
+        不再打网。返回形状与语义见 `earnings_calendar` 模块 docstring。
         """
-        _watcher_box: list = []      # 延迟构造：没有票需要兜底时一次都不建
-
-        def _fallback(ticker: str):
-            try:
-                if not _watcher_box:
-                    from earnings_watcher import EarningsWatcher
-                    _watcher_box.append(EarningsWatcher())
-                return _watcher_box[0].get_earnings_date(ticker)
-            except Exception as exc:  # noqa: BLE001 - 兜底失败按「没有财报日」处理
-                _log.warning("[%s] 财报日兜底获取失败: %s", ticker, exc)
-                return None
-
-        def _fn(ticker: str):
-            det = ((swarm_results.get(ticker) or {}).get("agent_details") or {})
-            chronos = (det.get("ChronosBeeHorizon") or {}).get("details") or {}
-            cats = chronos.get("catalysts")
-            if not cats:
-                return _fallback(ticker)     # 蜂失败 → 打一次 yfinance
-            for c in cats:
-                if c.get("type") == "earnings" and c.get("date"):
-                    return {"earnings_date": str(c["date"])[:10],
-                            # ⚠️ 与 EarningsWatcher 一样是**假定值**不是观测值
-                            "earnings_time": "AMC",
-                            "earnings_time_assumed": True,
-                            "source": "chronos_bee_catalyst"}
-            return {"earnings_date": None, "source": "chronos_bee_no_earnings"}
-        return _fn
+        import earnings_calendar
+        return earnings_calendar.upcoming_fn_from_swarm(swarm_results, as_of)
 
     @staticmethod
     def _gex_state_from_swarm(swarm_results: Dict):
@@ -3048,11 +3012,22 @@ def main():
         _log.warning("回填队列观测失败（不影响扫描）: %s", _e_ob)
         _outcomes_backlog = {"available": False, "reason": f"{type(_e_ob).__name__}: {_e_ob}"}
 
+    # v0.45.500：本轮每只票的财报日能不能判 → status.json → alert_manager P2。判不了的票卖权记 unknown、
+    # 跨式不出信号——此前只在 warning 日志里（且那条兜底实际从没被调到过），没有任何东西会红。
+    try:
+        from earnings_calendar import summarize as _earnings_summarize
+        with open(reporter.report_dir / f".swarm_results_{reporter.date_str}.json", encoding="utf-8") as _f_ed:
+            _earnings_dates = _earnings_summarize(json.load(_f_ed), reporter.date_str)
+    except Exception as _e_ed:  # noqa: BLE001 —— 观测点自身失败只记原因，不拖垮扫描
+        _log.warning("财报日观测统计失败（不影响扫描）: %s", _e_ed)
+        _earnings_dates = {"available": False, "reason": f"{type(_e_ed).__name__}: {_e_ed}"}
+
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
     _timing.write(reporter.date_str, extra={"gh_pages": _timing.gh_pages_summary(_gh_pages),
                                             "news_sources": _news_sources,
                                             "cloud_snapshots": _cloud_snapshots,
-                                            "outcomes_backlog": _outcomes_backlog})
+                                            "outcomes_backlog": _outcomes_backlog,
+                                            "earnings_dates": _earnings_dates})
     return report
 
 

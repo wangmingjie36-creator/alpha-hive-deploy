@@ -229,8 +229,12 @@ class TestResultReachesAlerts:
         # v0.45.493：同理 T+N 回填队列（main() 每轮都写），健康 = 最老一格逾期在允许内
         healthy_ob = {"available": True, "pending_files": 30, "pending_offsets": 30, "oldest_overdue_days": 0,
                       "oldest_item": "XOM_2026-09-10 t1", "max_overdue_days": 7, "unreadable_files": 0}
+        # v0.45.500：同理财报日观测（main() 每轮都写），健康 = 30 只都判得了、没有旧格式
+        healthy_ed = {"available": True, "n": 30, "dated": 30, "only_past_dates": 0, "unresolved": 0,
+                      "unresolved_tickers": [], "legacy_source": 0, "max_unresolved": 0}
         snap = st.snapshot("2026-09-14", extra={"gh_pages": {"success": True}, "news_sources": healthy_news,
-                                                "cloud_snapshots": healthy_cs, "outcomes_backlog": healthy_ob})
+                                                "cloud_snapshots": healthy_cs, "outcomes_backlog": healthy_ob,
+                                                "earnings_dates": healthy_ed})
         # 同理组合 Greeks（v0.45.423 起 alert_manager 对「本轮没跑到组合 Greeks」记 checks_skipped）：
         # 健康一轮带一份「干净」的价核对计数；本测试自己拼 snapshot，不会经过真的 compute_day
         snap["counters"]["portfolio_greeks"] = {
@@ -290,7 +294,8 @@ class TestResultReachesAlerts:
 
         assert len(written) == 1, written
         extra = written[0][1]
-        assert set(extra) == {"gh_pages", "news_sources", "cloud_snapshots", "outcomes_backlog"}, f"extra 里出现了已退役的字段：{sorted(extra)}"
+        assert set(extra) == {"gh_pages", "news_sources", "cloud_snapshots", "outcomes_backlog",
+                              "earnings_dates"}, f"extra 里出现了已退役的字段：{sorted(extra)}"
         assert isinstance(extra["cloud_snapshots"], dict) and "available" in extra["cloud_snapshots"]
         ns = extra["news_sources"]
         assert ns["available"] is True and ns["by_source"] == {"yahoo_finance": 1}, ns

@@ -24,8 +24,35 @@
 - `tests/test_alphabot_premium.py` 118 条（+16）。变异 37 个全部被抓住（新增 M31–M38 对应本版各条；M27 / M30 随代码迁到 `earnings_observation`）。
 - 浏览器（演示模式）实测竞态与选中到期日掉出范围两条。
 
+## [0.45.500] — 2026-10-13 — Fixed + Added：财报日单一真相——唯一日历解析器 + 唯一读取入口 `earnings_calendar`（读本轮 / 已落盘的 ChronosBee 按日观测，不打网）；扫描、卖权 / 跨式账本改接线，`EarningsWatcher` 只留给 `--check-earnings`；`"[]"` 假日期根治；判不了财报日的票数进 status.json ⇒ P2
 
-## [0.45.500] — 2026-10-13 — 占位（进行中：财报日单一真相——共享日历解析器 + 按扫描日观测的 next_earnings 读取入口（本地最近有效观测兜底）+ 读者改接线，退役 earnings_cache/_date.json 直读）
+调查报告 `experiments/earnings_date_cache_staleness_report.md`（只读，10-13）：`earnings_cache/{T}_date.json` 停在 09-04 不是写入失败，是没人再写——v0.45.104 起它只是「蜂没产出催化剂」时的 yfinance 兜底，而兜底与主路径同源，主路径失败的那几天（09-24 / 09-25 / 10-12）期权取数也一起挂了，兜底**一次都没被调到**（结构化日志 watcher 0 条）。四个症状一个根子：同一个量两份真相、两个解析器——watcher 把 `Earnings Date: []` 写成字符串 `"[]"`；ChronosBee 用 `datetime.now()` 判未来、把**财报当天**丢成 −1；兜底与主路径相关失败；Alpha Bot 溢价页直读那份没人写的缓存（与 10-09 扫描比 9/30 只不一致，NEE / CRCL 是缓存日期更晚的危险方向）。
+
+### Added
+- **`earnings_calendar.py`**（新）：`parse_calendar`（唯一解析器：空列表 / 键缺失 / NaT / 垃圾 ⇒ 没有日期，日历不可用 ⇒ None；`pd.NaT.date().isoformat()` 不抛、返回 `"NaT"`，测试实测抓到，每条分支都过一遍 `date.fromisoformat`）；`observation`；`from_swarm_entry` / `resolve`（当天的财报算当天；只剩已过日期 ⇒ `{"earnings_date": None, "reason": "only_past_dates"}`；日历里没有财报日 / 蜂失败 ⇒ None 判不了）；`upcoming_fn_from_swarm`（扫描内）与 `upcoming_fn_from_disk` / `latest_observation`（读 `.swarm_results_<date>.json`，按日缓存，缺省只认当天；展示类读者可放宽 `max_age_days` 并显示 `observed_on`）；`summarize`（观测点）。v0.45.500 前落盘的结果没有观测字段 ⇒ 读旧催化剂（`source` 沿用 `chronos_bee_catalyst`），旧格式「没有财报条目」分不清 ⇒ 判不了。
+- **ChronosBee 纯新增 `details["earnings_calendar"]`**（`swarm_agents/chronos_bee.py`）：未过滤的原始日历日期 + `available` + `fetched_at`，随 `.swarm_results_<date>.json` 落盘——那就是按日观测，不另建缓存。**评分口径逐字不动**（`days_until >= 0` 照旧丢当天；改它会截断维度 IC 协议 H2，见卖权预注册修订第 5 条）。
+- **观测点**：`main()` 把 `earnings_calendar.summarize` 写进 `scan_timing.extra.earnings_dates` ⇒ `alert_manager._check_earnings_dates`：判不了的票数 > `MAX_UNRESOLVED`（0）⇒ P2（列出标的；影响：卖权记 unknown、跨式不出信号）；`legacy_source` > 0（ChronosBee 没写观测字段、接线断了）⇒ P2；统计缺失 ⇒ P2「未统计」。回放 09-15 ~ 10-12 生产 `.swarm_results`：正常日 0，只在 09-24 / 09-25（30/30）与 09-30（MU 财报当天，旧格式）非零——后者在新字段下不再报。
+
+### Changed
+- **日报**（`alpha_hive_daily_report.py`）：`_earnings_date_from_swarm(swarm_results, as_of)` 委托 `earnings_calendar.upcoming_fn_from_swarm`，两处钩子（跨式 `scan`、卖权 `run_for_date`）传 `self.date_str`；**不再构造 EarningsWatcher 兜底**。
+- **跨式**（`earnings_vol_signal.py`）：`scan` 去掉 `watcher=` 参数，缺省财报源改为 `upcoming_fn_from_disk(as_of)`（CLI / `options_paper_leg` 无信号时；不打网）；`_precheck` 先解析日期再比较——此前 `"[]"` 靠 ASCII 序（`'[' > '2'`）碰巧被拒、原因写成「不在窗口内」，现为 `earnings date unparseable: …`。
+- **卖权**（`sell_strike_ledger.py`）：CLI 缺省 `_default_upcoming_fn(as_of)` 改读已落盘观测。**预注册按「修 bug、不截断」记录**（用户 10-13 拍板），`experiments/sell_strike_routing_prereg.md` 追加「登记后修 bug 记录」：逐情形对照表——新标签进检验时与旧标签相同，变化只往排除方向（财报当天 none → before_expiry；空日历 / 蜂失败 → unknown）；唯一例外（旧兜底打网失败 ⇒ unknown，「只剩已过日期」新判 none = 旧兜底成功时的结果）如实写明且钉进测试；受影响的已记录行：无；披露调查中只看过标签列、没读结算字段。
+- **watcher**（`earnings_watcher.py`）：改用共享解析器（空列表 ⇒ None、不写缓存）；读缓存时校验日期，TTL 内的旧 `"[]"` 当未命中；docstring 写明只服务 `--check-earnings` 与 CLI。
+
+### Removed
+- 日报 / 跨式 / 卖权 CLI 里三处 `EarningsWatcher().get_earnings_date` 兜底。
+
+### Added（测试）
+- `tests/test_earnings_calendar.py`（新）：解析器各形状；读取（当天 / 已过 / 判不了 / 旧格式）；读盘（缺省只认当天、跳过蜂失败那天、坏文件 warning、每天只读一次、数据根调用时求值）；**`TestNeverLooserThanLegacy`**（把 v0.45.104 整条旧链语义原样抄成参照，9 种日历 × 蜂成败 × 有无其他催化剂 × 5 个到期日逐一比 `classify_earnings`；另有「这把尺有牙」与「唯一放宽情形」两条）；**`TestSingleEntry`**（AST：`get_earnings_date` 只在 watcher、`EarningsWatcher` 只在 watcher + 日报 `--check-earnings`、`_date.json` 字面量只在 watcher；探针自证）；**`TestChronosWritesTheObservation`**（真跑 ChronosBee：观测含当天、评分用的催化剂仍丢当天）；`summarize` / 告警五态 / 真跑 `main()` 写 `earnings_dates`。
+- `tests/test_daily_report_earnings_source.py` 重写（钉日报侧接线：不构造 watcher、用调用方的 as_of、两处钩子 AST）；`test_sell_strike_candidates.py` 的真实形状测试改用新入口；`test_earnings_vol_signal.py` 加非日期原因、`watcher=` 改 `upcoming_fn=`；`test_earnings_watcher.py` 加空列表不写缓存、TTL 内 `"[]"` 重抓。`test_production_sync.py` 的 `scan_timing.extra` 键登记与健康轮夹具加 `earnings_dates`（全量第一遍抓到的 3 红）。
+
+### 验证
+- 变异 14 处全红、红的理由逐条对得上（`PYTHONDONTWRITEBYTECODE=1` + 每轮清 `__pycache__` + `--maxfail=1000`，每轮 passed+failed = 基线 206）：当天不算（7 红）/ 空日历判 none（7）/ watcher 退回 `"[]"`（2）/ 读缓存不校验（1）/ 不做往返校验（3）/ 跨式不认非日期（3）/ 钩子 as_of 写错（1）/ summarize 不数旧格式（1）/ 告警不报旧格式（1）/ 卖权 CLI 退回 watcher（2）/ ChronosBee 不写观测（2）/ ChronosBee 评分含当天（1）/ 读盘缺省回看多天（1）/ 只剩已过日期判不了（5）；还原后 206 passed。
+- 全量两遍。**第一遍**（08:13 起）9613 passed / 4 failed / 1 error：3 红是 `test_production_sync` 的 extra 键登记与健康轮夹具没登记 `earnings_dates`（已补）；1 红是已知的 `TestCoverageHorizon`（BLS / BEA 2027 日程未发布）；error 是真实数据根闸——`replay_ohlc_state/` 18 个文件与 `pheromone.db` WAL / SHM 在 08:15:40 ~ 08:16:02 被改，本版不碰这些路径，写者未查明（**待验证**；同时段本机另有两个会话在跑全量），闸打开状态下单独重跑 13 个相关文件（含时间线挂名的两个文件与 `test_replay_ohlc_store.py`）645 passed、无闸红。**第二遍**（修完后）9616 passed / 1 failed / 1 error：failed 同上已知；error 是闸逐项核实「全部是 Alpha Bot 盘中采样追加，不是测试写的」（5 张 intraday 快照）。ruff 全过。**rebase 到 v0.45.501 之后第三遍** 9760 passed / 5 failed / 1 error：除已知 `TestCoverageHorizon` 外，4 红全指向 v0.45.495 新进的 `tools/clockshift/`（`test_no_unregistered_file_writer` / `test_every_tracked_top_level_entry_is_classified` / `test_no_new_file_derived_paths` / `test_no_new_route[__file__]`）——在不含本版的纯 origin/main（59dcb325）临时检出上单独跑同样 4 红，与本版无关；error 同上为 Alpha Bot 盘中追加；相关 629 条（含 alphabot 全部）全过。
+
+### 未做 / 交接
+- `earnings_cache/` 里 11 个不在 WATCHLIST 的孤儿 `_date.json`（含 AMD `"[]"`）没清：可再生缓存、生产不读，清理是数据动作，待用户决定。
+- Alpha Bot 溢价页（v0.45.492，另一会话）已改为读卖权账本行里的 `earnings_date`——正是本版入口的产出，口径自动对齐、不触发 `TestSingleEntry`。它若想在账本行不可得（取链失败）时仍有日期，可改调 `earnings_calendar.latest_observation(ticker, as_of, max_age_days=N)`。
 
 ## [0.45.499] — 2026-10-13 — Fixed（数据，用户批准「删掉假 iv」）：BILI 10-12 的 IV 6.25（Yahoo 求解失败值，来自 10-12 重放）——删 IV 索引行；`signal_archive` 隔离并清 `options.iv_current` 1 行
 

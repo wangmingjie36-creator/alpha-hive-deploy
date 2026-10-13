@@ -4,8 +4,6 @@
 **纪律。** 每条断言的 docstring 写明什么变异会让它变红。夹具全是内存 dict，无 skip。
 """
 
-import sys
-import types
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -744,40 +742,41 @@ def test_rung_for_maps_route_labels():
 
 # ───────────────────────────── 11. 财报标注（真实返回形状）
 
-def test_classify_earnings_on_real_upcoming_fn_shapes(monkeypatch):
-    """用 `_earnings_date_from_swarm` 本身产出三种真实形状：dict（有日期）/ {"earnings_date": None} / None。
+def test_classify_earnings_on_real_upcoming_fn_shapes():
+    """用日报钩子真用的 `upcoming_fn`（`earnings_calendar.upcoming_fn_from_swarm`，v0.45.500）产出的真实形状：
+    dict（有日期）/ {"earnings_date": None, "reason": "only_past_dates"} / None（判不了）。
 
-    变红的变异：None 当成 "none"（兜底失败被读成「没有财报」、进了独立单位）；
+    变红的变异：None 当成 "none"（判不了被读成「没有财报」、进了独立单位）；
     边界 d==as_of 或 d==expiry 不算 before_expiry；dict 缺键当成 "none"。
     """
-    import alpha_hive_daily_report as ahdr
+    import earnings_calendar as EC
 
-    class _Boom:
-        def __init__(self):
-            raise RuntimeError("offline")
+    def swarm(dates, *, failed=False):
+        if failed:
+            return {"agent_details": {"ChronosBeeHorizon": {"details": {}, "error": "boom"}}}
+        return {"agent_details": {"ChronosBeeHorizon": {"details": {EC.FIELD: {
+            "schema": EC.SCHEMA, "available": True, "dates": dates, "fetched_at": None}}}}}
 
-    monkeypatch.setitem(sys.modules, "earnings_watcher", types.SimpleNamespace(EarningsWatcher=_Boom))
-
-    def swarm(cats):
-        return {"agent_details": {"ChronosBeeHorizon": {"details": {"catalysts": cats} if cats else {}}}}
-
-    fn = ahdr.AlphaHiveDailyReporter._earnings_date_from_swarm({
-        "HAS": swarm([{"type": "earnings", "date": "2026-10-20"}]),
-        "EDGE": swarm([{"type": "earnings", "date": "2026-09-23"}]),
-        "NONE": swarm([{"type": "fda", "date": "2026-10-01"}]),
-        "FAIL": swarm(None),
-    })
     as_of, expiry = "2026-09-23", "2026-10-23"
-    assert fn("FAIL") is None, "夹具自检：兜底失败的真实形状是 None"
-    assert fn("NONE")["earnings_date"] is None
+    fn = EC.upcoming_fn_from_swarm({
+        "HAS": swarm(["2026-10-20"]),
+        "EDGE": swarm(["2026-09-23"]),          # 财报当天：ChronosBee 分数口径会丢它，读取端不丢
+        "PAST": swarm(["2026-09-01"]),
+        "EMPTY": swarm([]),
+        "FAIL": swarm(None, failed=True),
+    }, as_of)
+    assert fn("FAIL") is None and fn("EMPTY") is None, "夹具自检：判不了的真实形状是 None"
+    assert fn("PAST")["earnings_date"] is None
     assert SC.classify_earnings(fn("HAS"), as_of, expiry) == "before_expiry"
     assert SC.classify_earnings(fn("EDGE"), as_of, expiry) == "before_expiry"
     assert SC.classify_earnings(fn("HAS"), as_of, "2026-10-20") == "before_expiry"
     assert SC.classify_earnings(fn("HAS"), as_of, "2026-10-16") == "after_expiry"
-    assert SC.classify_earnings(fn("NONE"), as_of, expiry) == "none"
+    assert SC.classify_earnings(fn("PAST"), as_of, expiry) == "none"
     assert SC.classify_earnings(fn("FAIL"), as_of, expiry) == "unknown"
+    assert SC.classify_earnings(fn("EMPTY"), as_of, expiry) == "unknown"
     assert SC.classify_earnings({"earnings_date": "2026-09-01"}, as_of, expiry) == "none"
     assert SC.classify_earnings({"earnings_date": "soon"}, as_of, expiry) == "unknown"
+    assert SC.classify_earnings({"earnings_date": "[]"}, as_of, expiry) == "unknown"
     assert SC.classify_earnings({"source": "x"}, as_of, expiry) == "unknown"
 
 
