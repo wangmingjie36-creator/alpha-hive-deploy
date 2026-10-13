@@ -7,7 +7,36 @@
 
 ## [0.45.491] — 2026-10-13 — 占位（进行中：report_snapshots 读改写往返丢 cs_rank / 重写 created_at——load_from_json 不保留未知键）
 
-## [0.45.490] — 2026-10-13 — 占位（进行中：v0.45.482 / 486 二次检查）
+## [0.45.490] — 2026-10-13 — Fixed：v0.45.482 / 486 二次检查——多数规则补到偏斜与 yfinance 期限结构（482 只给了 iv_current）；key levels 的失败值 / 非正 IV 记 None（482 置 0 后渲染成「0.0%」）；486 漏掉的 14 行 rank / pct 入隔离并清库；更正 482 / 486 条目各一处
+
+### 发现（逐条）
+1. **偏斜没有多数规则**（482 的缺口）。482 逐合约剔除了失败值，但「失败值主导的链里幸存值也不可信」（10-13 对照 CBOE：67% 差 > 10 点）的依据是链级的，482 只用在了 iv_current。偏斜进 OracleBee 分与 call 流分类。
+2. **yfinance 期限结构没有多数规则**（同上），也进 OracleBee 分。
+3. **key levels 的 IV 变成 0.0**（482 引入的展示回退）：失败值置 0 后 `find_key_levels` 原样带出，`collect_data` 渲染成 `iv_pct = 0.0`——此前是假的 12.5，现在是假的 0。
+4. **486 漏了 14 行**：486 只从归档里**现存**的 `iv_current` 行找 12.5 / 6.25。另有 7 对的 `iv_current` 早被 472 / 479 隔离清掉，但 472 / 479 只挡五类市场观测、**不含 iv_rank / iv_percentile**——这 7 对 08-14 前的 rank / pct（全是 0 / 0）由同一个失败值算出，还在库里。改以 `.swarm_results` 为准全量重扫：25.0 一族（481）已无遗漏，12.5 / 6.25 一族只剩这 7 对 14 行。
+5. 文字：486「为什么」第三条说那 7 次「当天就没入库」——**不对**，都入过库，是被 472 / 479 清掉的（pre-472 备份里逐行都在）。482「为什么」说 9500 个非 CBOE 值「全部」是二分值——言过其实：容差 1e-5 下任何数在深度 ~17 都能找到二分近似；随机数对照只有 16% 深度 ≤ 14，Yahoo 值是 **95.6%**——机制成立，「全部」不成立。
+
+### 核过、没问题的
+- 新的逐合约 `_iv_placeholder` 列：pandas 3.0.1 `to_dict` 给原生 bool，`_write_cache` 另有 numpy 兜底，链缓存序列化无碍（482 的测试把 `_write_cache` 桩掉了，本次实测）。
+- 绕过源头剔除的 Yahoo 路径：`advanced_analyzer` 只用 CBOE（v0.45.197 起不回退 yfinance）；`greeks_engine` 没有喂链的调用方；`iv_crush_scraper` / `cboe_fetcher` 只读价量。
+- key levels 的 IV 改 None 不影响 475 的厂商指纹：指纹判定只在一次性实验脚本里用于历史日子，新快照自带 `chain_source`。
+- IV 历史索引那行（486「未改」）：实测 `_read_index` 返回同日后写的 32.03。
+
+### Fixed
+- `options_analyzer.OptionsAgent.analyze`：多数规则结果存成 `_iv_placeholder_majority`；成立时偏斜置为不可得（`skew_ratio None`、signal「Yahoo IV 求解失败值占多数，偏斜不可得」），在 call 流分类之前。
+- `OptionsAnalyzer._iv_term_points_yfinance`：逐到期日数 ATM 容差内的失败值，`失败 ≥ 有效` ⇒ 整个到期日不取、错误里写明。
+- `find_key_levels`：IV 经新 helper `_iv_or_none`——`_iv_placeholder` 或非正 / 非有限 ⇒ None（CBOE 链里 IV 为 0 的合约同样是缺失，一并改 None）。
+- `signal_archive.QUARANTINE` 追加 4 条（标记 `v0.45.490`，`iv_rank` + `iv_percentile`）：06-09 RKLB；06-17 MSFT / TSLA / AMZN；06-23 NVDA / AMZN；06-29 AMZN。清库 `--only-tag v0.45.490 --expect 14 --apply`（dry-run 加不加标记都恰好 14），备份 `db_backups/pheromone_pre_v0.45.490_rank_from_placeholder_iv.db`，`signal_archive` 131,373 → 131,359；事后核对本批库里 0 / 备份 14、两边 `integrity_check` ok、库里命中隔离名单 0。属用户 10-13 已批准的范围（12.5 / 6.25 及由它算出的 rank / pct）。
+
+### Added
+- `tests/test_yahoo_iv_placeholders.py`（36 → 40）：多数时偏斜不可得 + 少数时照算（正对照）；期限结构失败值主导的到期日整个不取；key levels 失败值 / 非正 IV 记 None。变异 4 个各红在点名的测试上。
+- `tests/test_signal_quarantine.py::test_rank_rows_from_placeholder_iv_whose_iv_current_was_purged_earlier`：变异 3 个全红。
+
+### 未处理（发现，待用户决定）
+- **同一盲区的更大一片**：08-14 前凡是 `iv_current` 已因别的原因被隔离的日子（472 样本链 / 假现价、v0.45.238 会话错位快照、479 重判），rank / pct 也是由那个不可信的 current_iv 算出的，而那些条目同样不含这两类。现库里还有 **230 行 / 115 对**（472：98、v0.45.238：92、479：38、另 2）。不属本次批准范围、且是别的版本的条目，未动。
+
+### 评分 / 世代边界
+- 偏斜 / 期限结构的多数规则只在链来自 yfinance 且失败值主导时起作用；当前世代（10-09 起）只有 BILI 10-09 一份 yfinance 链、抽样无失败值 ⇒ 预计评分零变化（全链待验证）。14 行都在当前世代之前。不追加世代边界。
 
 ## [0.45.489] — 2026-10-13 — 占位（进行中：tests/test_options_snapshot_price_honesty.py 写死 OCC 到期 2026-10-16 的时间炸弹，10-13 起 3 条红）
 

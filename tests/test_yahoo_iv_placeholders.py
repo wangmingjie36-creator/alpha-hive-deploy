@@ -266,3 +266,70 @@ class TestStatusLine:
         line0 = scan_timing.summary_line({"phases": {}, "counters": {"options_snapshot": {
             **base, "iv_placeholder_contracts": 0, "iv_placeholder_majority": 0}}})
         assert "Yahoo失败IV" not in line0 and "失败IV主导" not in line0
+
+
+# ═══════════════════════════════════════════════════════════════ v0.45.490：482 二次检查补的三处
+
+class TestMajorityRuleCoversTheWholeChain:
+    """482 只让 iv_current 吃多数规则；偏斜与 yfinance 期限结构只做了逐合约剔除——
+    而「失败值主导的链里幸存值也不可信」的依据（对照 CBOE 67% 差 > 10 点）是链级的，两者都进 OracleBee 分。"""
+
+    def test_skew_unavailable_when_atm_window_dominated(self, iv_agent, monkeypatch):
+        """3 失败 + 2 真（看涨）、看跌全真：不覆盖时偏斜照算（看跌 0.38 / 幸存看涨 0.43）。
+
+        变红的变异：删掉 analyze 里「多数 ⇒ 偏斜不可得」的覆盖。
+        """
+        r = _analyze_with(iv_agent, monkeypatch, [0.125009, 0.062509, 0.250007, 0.41, 0.43])
+        assert r["iv_skew_ratio"] is None
+        assert "求解失败" in r["iv_skew_signal"]
+
+    def test_skew_kept_when_failures_are_minority(self, iv_agent, monkeypatch):
+        """正对照：少数失败值时偏斜照常算出来（覆盖只在多数时生效）。"""
+        r = _analyze_with(iv_agent, monkeypatch, [0.062509, 0.41, 0.43, 0.45, 0.44])
+        assert isinstance(r["iv_skew_ratio"], float)
+
+    def test_term_structure_drops_expiries_dominated_by_failures(self, monkeypatch):
+        """到期日 A：ATM 2 失败 + 1 真 ⇒ 整个到期日不取（否则平均的是那一个幸存值）；到期日 B：1 失败 + 2 真 ⇒ 取 30。
+
+        变红的变异：删掉期限结构的逐到期日多数规则（A 也出点，atm_iv 30.0 冒充一个到期日的观测）。
+        """
+        exps = tuple(_exp(d) for d in (20, 45, 75, 120, 200))
+        dominated = set(exps[:2])
+
+        class _Chain:
+            def __init__(self, e):
+                ivs = [0.125009, 0.062509, 0.30] if e in dominated else [0.30, 0.125009, 0.30]
+                self.calls = pd.DataFrame({"strike": [99.0, 100.0, 101.0], "impliedVolatility": ivs})
+
+        class _Ticker:
+            options = exps
+
+            def __init__(self, t):
+                pass
+
+            def option_chain(self, e):
+                return _Chain(e)
+
+        monkeypatch.setattr(oa, "yf", types.SimpleNamespace(Ticker=_Ticker))
+        pts, errors = oa.OptionsAnalyzer._iv_term_points_yfinance("NVDA", 100.0)
+        got = {p["expiry"] for p in pts}
+        assert got and not (got & dominated), (got, dominated)
+        assert all(p["atm_iv"] == pytest.approx(30.0) for p in pts)
+        assert any("求解失败" in e for e in errors), errors
+
+
+class TestKeyLevelsShowMissingAsNone:
+
+    def test_failure_and_nonpositive_iv_render_none(self):
+        """482 把失败值置 0 后，key levels 的 iv 变成 0.0，collect_data 渲染成「0.0%」——缺失要写 None。
+
+        变红的变异：key levels 写回 `call.get("impliedVolatility")`。
+        """
+        calls = [{"strike": 100.0, "openInterest": 900, "impliedVolatility": 0.0, "_iv_placeholder": True},
+                 {"strike": 105.0, "openInterest": 800, "impliedVolatility": 0.0},
+                 {"strike": 110.0, "openInterest": 700, "impliedVolatility": 0.4523}]
+        puts = [dict(c) for c in calls]
+        kl = oa.OptionsAnalyzer().find_key_levels(calls, puts, 100.0)
+        by_strike = {lv["strike"]: lv["iv"] for lv in kl["resistance"]}
+        assert by_strike == {100.0: None, 105.0: None, 110.0: pytest.approx(0.4523)}
+        assert {lv["strike"]: lv["iv"] for lv in kl["support"]} == by_strike

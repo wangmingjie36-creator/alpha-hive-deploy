@@ -1299,6 +1299,41 @@ QUARANTINE: List[Dict] = [
         "evidence": (".swarm_results_2026-08-31.json（OracleBeeEcho.details.iv_current = 6.25, iv_rank_source = hv_proxy）",
                      "CHANGELOG.md#v0.45.482", "CHANGELOG.md#v0.45.486"),
     },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.490：486 漏掉的 7 对——iv_current（12.5 / 6.25）早被 472 / 479 清掉，由它算出的 rank / pct 还在。
+    # 判定以 .swarm_results 为准（不是以归档里现存的 iv_current 为准，那正是 486 的漏洞）。
+    {
+        "date": "2026-06-09",
+        "tickers": ('RKLB',),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.490（486 二次检查；属用户 10-13 批准的「12.5 / 6.25 及由它算出的 iv_rank / iv_percentile」范围）：这几对的 iv_current 是 Yahoo 求解失败阶梯值的中位数（12.5 / 6.25），已由 v0.45.472 / 479 隔离；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出（全是 0 / 0），而 472 / 479 只挡五类市场观测、不含这两类，486 又只从归档里现存的 iv_current 行找、漏了它们。",
+        "evidence": (".swarm_results_2026-06-09.json（OracleBeeEcho.details.iv_current ∈ {12.5, 6.25}, iv_rank = 0, iv_percentile = 0）",
+                     "CHANGELOG.md#v0.45.490"),
+    },
+    {
+        "date": "2026-06-17",
+        "tickers": ('MSFT', 'TSLA', 'AMZN'),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.490（486 二次检查；属用户 10-13 批准的「12.5 / 6.25 及由它算出的 iv_rank / iv_percentile」范围）：这几对的 iv_current 是 Yahoo 求解失败阶梯值的中位数（12.5 / 6.25），已由 v0.45.472 / 479 隔离；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出（全是 0 / 0），而 472 / 479 只挡五类市场观测、不含这两类，486 又只从归档里现存的 iv_current 行找、漏了它们。",
+        "evidence": (".swarm_results_2026-06-17.json（OracleBeeEcho.details.iv_current ∈ {12.5, 6.25}, iv_rank = 0, iv_percentile = 0）",
+                     "CHANGELOG.md#v0.45.490"),
+    },
+    {
+        "date": "2026-06-23",
+        "tickers": ('NVDA', 'AMZN'),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.490（486 二次检查；属用户 10-13 批准的「12.5 / 6.25 及由它算出的 iv_rank / iv_percentile」范围）：这几对的 iv_current 是 Yahoo 求解失败阶梯值的中位数（12.5 / 6.25），已由 v0.45.472 / 479 隔离；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出（全是 0 / 0），而 472 / 479 只挡五类市场观测、不含这两类，486 又只从归档里现存的 iv_current 行找、漏了它们。",
+        "evidence": (".swarm_results_2026-06-23.json（OracleBeeEcho.details.iv_current ∈ {12.5, 6.25}, iv_rank = 0, iv_percentile = 0）",
+                     "CHANGELOG.md#v0.45.490"),
+    },
+    {
+        "date": "2026-06-29",
+        "tickers": ('AMZN',),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.490（486 二次检查；属用户 10-13 批准的「12.5 / 6.25 及由它算出的 iv_rank / iv_percentile」范围）：这几对的 iv_current 是 Yahoo 求解失败阶梯值的中位数（12.5 / 6.25），已由 v0.45.472 / 479 隔离；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出（全是 0 / 0），而 472 / 479 只挡五类市场观测、不含这两类，486 又只从归档里现存的 iv_current 行找、漏了它们。",
+        "evidence": (".swarm_results_2026-06-29.json（OracleBeeEcho.details.iv_current ∈ {12.5, 6.25}, iv_rank = 0, iv_percentile = 0）",
+                     "CHANGELOG.md#v0.45.490"),
+    },
 ]
 
 

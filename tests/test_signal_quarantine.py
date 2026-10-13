@@ -304,3 +304,18 @@ def test_yahoo_placeholder_iv_rows_quarantined():
     # 同日真实的一对（v0.45.479 按归档运行核过）
     assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_current")
     assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_rank")
+
+
+def test_rank_rows_from_placeholder_iv_whose_iv_current_was_purged_earlier():
+    """v0.45.490（486 二次检查）：486 只从归档里现存的 iv_current 找 12.5 / 6.25，漏了 iv_current 早被 472 / 479 清掉的
+    7 对——它们 08-14 前的 iv_rank / iv_percentile 同样由失败值算出。
+
+    变红的变异：删任一日期条目；少了 iv_percentile；去掉 tickers。
+    """
+    pairs = [("2026-06-09", "RKLB"), ("2026-06-17", "MSFT"), ("2026-06-17", "TSLA"), ("2026-06-17", "AMZN"),
+             ("2026-06-23", "NVDA"), ("2026-06-23", "AMZN"), ("2026-06-29", "AMZN")]
+    for d, t in pairs:
+        for s in ("options.iv_rank", "options.iv_percentile"):
+            assert sa.is_quarantined(d, t, s), (d, t, s)
+    assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_rank")
+    assert not sa.is_quarantined("2026-06-29", "NVDA", "options.iv_rank")
