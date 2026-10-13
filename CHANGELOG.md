@@ -122,7 +122,65 @@
 - 未做：探活失败后的重试、扫描中途代理掉线（10-12 不是这个形状）。
 
 
-## [0.45.495] — 2026-10-13 — 占位（进行中：拨钟审计进 CI + 修拨钟 harness 子进程盲区（harness 搬进仓库））
+## [0.45.495] — 2026-10-13 — Added：拨钟审计进 CI（`clockshift.yml`：push + 每日 + 手动，+7 / +45 / +400 天，同机基线差分）；Fixed：拨钟 harness 搬进仓库（`tools/clockshift/`）并修掉造出 41 条假红的两个根因——跨不过进程边界（R1）与「只拨了一只钟」（R2）
+
+用户在 0.45.489 二次检查后批准两件事：拨钟审计进 CI；修 harness 的子进程盲区，「根据根因给方案再动手」。
+
+**根因（更正 0.45.489 的诊断）。** 489 把 +30 天全套件的 41 条假红统称「子进程读真钟」——**30 条是错的**，是按症状贴的标签。
+逐条查日期从哪来：
+- **R1 跨不过进程边界（11 条）**：拨钟是 pytest 进程内的猴补丁；`CLOCK_SHIFT_DAYS` 传下去了，子进程里没人读它
+  （`test_step_contract_*::test_default_date_is_business_today` 9、`test_root_data_guard` 子 pytest 2）。
+- **R2 同一进程里把一只钟劈成两半（30 条，进程内那条也红）**：旧 harness 只拨 `datetime.now/today`，刻意不拨 `time.time()`，
+  文件 mtime / `fromtimestamp()` 仍是真实时间 ⇒「现在」与「刚写的文件」差 N 天——真实的未来不存在这种世界，被测代码
+  （`orchestrator_steps` 的 `mtime_before_date`）**正确地**判了陈旧（`test_orchestrator_step_interp` 28、`test_data_backup` Step 15 2）。
+- 不变式：**拨钟要拨整个世界**——一切能被观察到的时间源一致前移。
+
+### Added
+- **`tools/clockshift/clockshift.py`**（原在 auto-memory 目录、仓库外；那份已删）：
+  - 一致前移：`datetime` / `date`、`time.time/time_ns/localtime/gmtime/ctime/asctime/strftime`、pandas `Timestamp.now`；
+    `os.stat/lstat/fstat` 读出的时间戳 +N、`os.utime` 写入显式时间 −N（刚写的文件 mtime ≈ 现在；`utime(p,(t,t))` 读回仍是 t）。
+  - 跨进程：`sitecustomize.py` 让每个 Python 进程**启动时**自己装（拨钟成为 `CLOCK_SHIFT_DAYS` + `PYTHONPATH` 的属性）；
+    包 `subprocess.Popen`，给自建 env、`env -i ...` 参数**只补缺不覆盖**这两项（显式值照用）。
+  - C 扩展安全网从「启动时 AST 扫全仓 + pre-import 全部第三方」（每进程 3.4–3.9 s，~100 个子进程负担不起，还必须在仓库根跑）
+    换成**导入钩子**：标准库 / site-packages 模块执行导入时临时换回真类（pandas Cython 基类段错误、`pydantic.v1` 元类冲突的根），
+    本仓与测试模块拿假类；子进程启动开销 0.03 s。旧踩坑 2/3/6（pre-import 清单、元类冲突、cwd 扫空）的根一起拔掉。
+  - 启动自检：所有钟一致、刚写文件 mtime ≈ 现在、`utime` 往返、替身作类属性不绑定 self——任一不成立启动即炸。
+  - 已知漏点写进 docstring：SQLite `CURRENT_TIMESTAMP`（5 处 `created_at` 默认值）、git 提交时间、bash `date`、`numpy.datetime64('now')`、
+    C 扩展直读系统钟、外部真实钟写下的记录。
+- **`tools/clockshift/audit.py`**：同机先跑真实钟基线、再跑各偏移，只报「拨钟红而基线绿」，差集各重跑一次（拨钟仍红且真实钟仍绿才确认）；
+  任一轮跑崩（退出码非 0/1、零用例、报失败却解析不出）⇒ 退出码 2，不报成「0 条新红」。结果写 `$GITHUB_STEP_SUMMARY`。
+- **`.github/workflows/clockshift.yml`**：push 到 main + 每日 14:00 UTC + `workflow_dispatch`（可给天数 JSON），矩阵 +7 / +45 / +400。
+  每日定时是必须的——炸弹按日历引爆、不按提交；489 那颗写下后第二天就炸，只有 push 时的 +7 抢得到。仓库公开，Actions 免费。
+- **marker `external_clock`**（pyproject 登记）：拿测试之外按真实钟写下的记录和「现在」比的测试；harness 启用时**摘掉**
+  （本仓约定：marker 摘、摘要可见，不写 skip）。现打在 `test_latest_main_version_is_deployed_or_pending`（读真实部署记录，拨后恒红）。
+- **`tests/test_clockshift_harness.py`**（13 条，~2.5 s，进常规 CI）：临时目录里造迷你测试集、真实子进程 pytest 跑 harness——
+  炸弹真实钟绿 / 拨钟红；R2（mtime、utime 往返）；R1 三种子进程（自建 env、`env -i`、经 bash 的孙进程）；日志时间戳；
+  pandas / pydantic.v1 导入安全且 pandas 钟一致；`external_clock` 摘掉；审计差分 / 跑崩判无效 / 只认摘要段。
+  R1 / R2 断言是正面的「确实跑了且通过」——只判「不在失败集合」会在子 pytest 整轮起不来时空洞地绿（变异实测）。
+- CLAUDE.md 新增「硬检查项：夹具里的日期会不会和真实钟比？」（指针 + 命令）。
+
+### 本轮自己撞上、已修的（都被「谁会红」接住）
+- **替身是普通函数会绑定 self**：`logging.Formatter.converter = time.localtime` 是类属性 ⇒ 拨钟下日志格式化全 TypeError，
+  叠上 3.11 `HTTPError(fp=None)` 的 `__getattr__` 缺陷 ⇒ pytest INTERNALERROR 崩整轮（审计判无效、退出码 2）。替身一律 `staticmethod`，
+  照原函数登记 `os.supports_*`。
+- **parse 扫全文**：失败用例「Captured stdout」里嵌套审计打印的 `FAILED x` 被当 nodeid ⇒ 重跑退出码 4（审计判无效）。只认摘要段。
+- **基线删键**：外层被拨时 `Popen` 包装把删掉的 `CLOCK_SHIFT_DAYS` 补回外层偏移 ⇒ 嵌套审计基线被拨。基线显式写 0。
+
+### 验证
+- 全套件（本机，`-m "not integration and not network"`）：
+  - 修前（旧 harness，0.45.489 时）：+30 天 42 红 = 设计红 1 + 假红 41。
+  - 修后 `audit.py --days 30 --days 120`：**确认新红 0 / 0**；两档失败集合与真实钟基线逐条相同（设计红 `TestCoverageHorizon` +
+    真实数据根闸——Alpha Bot 盘中采样 `alphabot_state/intraday` 写入，三轮都有、带不带 harness 都红）；9455 过、摘掉 external_clock 1 条；
+    子进程补 env 103 次。
+  - 强制装钩子、偏移 0（`CLOCK_SHIFT_FORCE=1`）：失败集合与基线相同（harness 自己不制造红）。
+- canary：修前原文件（489 前）跑 `audit.py --days 7 --days 45`：CBOE 那颗 10-13 已炸、基线就红 ⇒ 不报（已炸归 tests.yml）；
+  Gamma 日历那颗 +45 确认新红 ✓。
+- 变异（16 处，逐处真跑、全被杀）：`install()` 空转；去 stat +N；去 utime −N（这两处再各叠「删启动自检」各一次）；去 `Popen` 包装
+  （自建 env / `env -i` 两条红、经 bash 那条不红——它继承 `os.environ`，与设计一致）；删 `sitecustomize`（三条全红）；导入钩子不换真类；
+  pandas `today` 也拨；替身不包 `staticmethod`（+ 叠删自检）；审计不减基线；审计不判跑崩；parse 扫全文；不摘 `external_clock`；
+  基线删键而非写 0（外层 +30 下跑才显形）。去 stat/utime/staticmethod 时先响的是启动自检；自检也删时对应断言自己红。
+- `ruff check .` 全绿。
+- ⚠️ CI 上（Linux）尚未跑过——本条推送即触发首跑，结果见下一次更新。
 
 ## [0.45.494] — 2026-10-13 — Fixed（数据，用户批准）：08-14 前凡是 `iv_current` 已被隔离的 (日期, 标的)，`iv_rank` / `iv_percentile` 一并隔离（规则派生 45 条镜像）并清库 230 行
 

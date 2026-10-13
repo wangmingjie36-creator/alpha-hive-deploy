@@ -34,6 +34,10 @@ markers = [
     # **刻意不加进 addopts 的默认排除**——本机有网，这些测试照常跑、照常有价值；
     # 只有 CI 用 `-m "not integration and not network"` 把它们摘掉换取确定性。
     "network: hits live external endpoints; excluded in CI (run locally with -m network)",
+    # v0.45.495：拿「测试之外、按真实钟写下的记录」（部署记录、Alpha Bot 盘中采样……）和「现在」比。
+    # 拨钟 harness（tools/clockshift）挪不动外部世界，启用时把这些**摘掉**（摘要里是 N deselected，可见），
+    # 平时照常跑。只给真读外部真实状态的测试打——夹具自己造的日期不算，那正是审计要抓的。
+    "external_clock: compares against records written on the real clock outside the test; deselected by the clock-shift harness",
 ]
 
 [tool.coverage.run]

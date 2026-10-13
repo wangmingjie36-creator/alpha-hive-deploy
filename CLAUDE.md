@@ -199,6 +199,13 @@ v0.45.165 普查全仓（20 条，5 个文件）后补三条：
 
 **裸字面量缺省是另一族（v0.45.463）**：`db_path="pheromone.db"` / `os.environ.get(X, "cache")` 不含 `PATHS` / `__file__`，上面两条物种守卫都看不见；生产 cwd 是代码克隆，它们在那里恒读空且不报错。守卫 `tests/test_price_history_default_paths.py::TestNoNewCwdRelativeDataDefaults`（存量只许减）。
 
+## 硬检查项：夹具里的日期会不会和真实钟比？（2026-10-13 起）
+
+会 ⇒ **被测路径读几只钟就钉几只**（`cboe_options._pdt_now`、各 `_snapshot_now`……；钉一只漏一只正是 v0.45.489 那颗）；
+没有注入接缝 ⇒ 在测试体内按真实今天算相对日期。写完跑一次可执行审计，别靠 grep 日期字面量：
+`/usr/local/bin/python3 tools/clockshift/audit.py --days 7 --days 45 -- tests/test_xxx.py`（CI 的 `clockshift.yml` 在 push 与每日定时跑全量）。
+harness 的不变式「拨整个世界、不拨一只钟」与已知漏点见 `tools/clockshift/clockshift.py` docstring；历次炸弹与教训见 auto-memory `alpha-hive-time-bomb-audit.md`。
+
 ## 硬检查项：这个路径指向「代码」还是「数据」？（2026-09-08 起）
 
 **数据根规则（v0.45.422）**：唯一实现 `hive_logger.resolve_data_root`——`ALPHA_HIVE_HOME` 非空就用它，否则
