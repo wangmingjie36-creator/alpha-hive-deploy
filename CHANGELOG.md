@@ -38,7 +38,42 @@
 ### 评分 / 世代边界
 - 偏斜 / 期限结构的多数规则只在链来自 yfinance 且失败值主导时起作用；当前世代（10-09 起）只有 BILI 10-09 一份 yfinance 链、抽样无失败值 ⇒ 预计评分零变化（全链待验证）。14 行都在当前世代之前。不追加世代边界。
 
-## [0.45.489] — 2026-10-13 — 占位（进行中：tests/test_options_snapshot_price_honesty.py 写死 OCC 到期 2026-10-16 的时间炸弹，10-13 起 3 条红）
+## [0.45.489] — 2026-10-13 — Fixed（仅测试）：`tests/test_options_snapshot_price_honesty.py` 两颗时间炸弹——CBOE 夹具写死 OCC 到期 2026-10-16、钟没钉，10-13 起 3 条红（改为钉 `cboe_options._pdt_now`）；拨钟审计又挖出同文件第二颗：Gamma 日历夹具写死 2026-11-20，11-21 起红（改相对日期）
+
+**症状。** 干净 `origin/main` 上 10-13 起三条恒红（10-12 还绿）：
+`TestCboeChainCarriesUnderlyingPrice` 两条、`TestGexNonFinite::test_cboe_nan_gamma_takes_bs_fallback`。v0.45.462 引入。
+
+**根因（实测核对）。** 三处假 CBOE payload 的合约符号写死 `NVDA261016…`，而 `fetch_cboe_chain` 用**真实钟**
+`_pdt_now()` 经 `_select_expiries` 选到期日。同文件已钉了 `oa._snapshot_now`，却没钉 CBOE 这只钟。
+`_select_expiries` 排除 DTE<3，且 DTE 比日历天数少一天（v0.45.190，auto-memory `alpha-hive-dte-off-by-one`）⇒
+10-13 离 10-16 三个日历日 = DTE 2 ⇒ 唯一的到期日被排除 ⇒ 返回 None ⇒ 断言 / 下标失败。
+⚠️ 炸点是「≤3 个日历日」不是「<7 天」：没有远月时 DTE 3–6 的 near 桶照样收（这正是它撑到 10-12 的原因）。
+
+### Fixed（`tests/test_options_snapshot_price_honesty.py`）
+- 模块级 `CBOE_NOW = 2026-10-12 14:30`（PT naive，与 `_snapshot_now` 的 17:30 ET 同一时刻）+ `CBOE_EXPIRY = 2026-11-20`
+  （钉住的钟下 DTE=38，落 far 桶）；`_occ()` 从 `CBOE_EXPIRY` 派生，三条测试经 `_pin_cboe_clock` 钉 `C._pdt_now`。
+  选「钉钟」不选「today+30」：照 `test_gex_full_chain_view` / `test_quote_set` 的既有写法；相对日期仍读真钟，只是把炸弹挪远。
+  模块常量在此安全——它们只与被注入的钟比，不与真钟比（time-bomb 判据 1/3）。
+- **第二颗（拨钟审计 +120 天挖出）**：`TestDownstreamFormattingToleratesNone::test_gamma_calendar_survives_missing_price` 的到期日写死
+  `2026-11-20`；`market_intelligence.calculate_gamma_expiry_calendar` 直读 `date.today()` 并丢弃已过期到期日，无注入接缝 ⇒
+  **11-21 起** `pin_expiry` 为 None。改为测试体内 `date.today() + 38 天`（写下时的原始间隔，留在 `_PIN_RISK_MAX_DTE=45` 近月窗口内），
+  照兄弟文件 `test_gamma_expiry_calendar.py` 的写法。同文件另两处 `2026-11-20`（`_chain` 的 `expirations` 标签、yfinance 假 `Ticker.options`）
+  拨钟下不红，不动。
+
+### 验证
+- 修后本文件 38/38 绿。
+- 变异（钟钉在 10-12）：到期改 10-12 / 10-15 ⇒ 三条全红；改 10-16 / 10-18（日历 4 / 6 天，DTE 3 / 5，near 桶）⇒ 绿——与
+  上面「炸点 ≤3 日历日」一致；**撤掉钉钟 + 到期改回 10-16** ⇒ 今天三条全红（即原 bug 复现）。
+- 全仓 OCC 字面量 grep（`[A-Z]+2[0-9]{5}[CP][0-9]{8}` 及 f-string 形）：另 9 个文件命中。`261016` 的两处
+  （`test_options_paper_leg_settle_close`、`test_portfolio_greeks_price_session`）读过，都注入了钟（`_et_today` / `_pdt_now` / `_et_now`）；
+  其余是已过期的 `260828` / `261002`，真实钟下仍绿 ⇒ 不与真钟比，**未逐条审读**，靠下面拨钟审计兜底（都没红）。
+- 拨钟 harness 全套件（auto-memory `alpha-hive-time-bomb-audit`）：真实钟 1 failed（设计红 `TestCoverageHorizon`）+ 1 teardown error
+  （真实数据根闸：`pheromone.db` 02:32:25 被写——同时刻另一会话在跑 0.45.484 的 `replay_1012.py`，并发写入者，与本改动无关；
+  本改动只动内存 dict）。+30 天 42 failed / +120 天 43 failed：多出的那 1 条就是上面第二颗；其余除设计红外全是**子进程读真钟**的 harness 假红（编排器 bash 解释器 golden parity、
+  `default_date_is_business_today`、Step 15 分派、真实数据根闸子 pytest——父进程期望值来自拨过的钟、子进程用真实 10-13），两轮失败集合除第二颗外逐条相同；除此之外无新炸弹。
+- 修后本文件在拨钟 −10 / +3 / +4 / +38 / +39 / +120 / +400 / +1000 / +3650 天全绿。
+  canary：**修前原文件**同一 harness 下 −1 天（10-12）全绿、0 天（10-13）3 红、+38（11-20）仍 3 红、+39（11-21）4 红——
+  两颗的引爆日都被精确复现，证明 harness 确实拨到了本文件的被测路径。
 
 ## [0.45.488] — 2026-10-13 — Fixed（测试闸）：真实数据根只从 `resolve_data_root` 来——非绝对值不猜、改守缺省数据根并在报告头说明；对拍补 `~` / 相对 / 空白样本；AST 守卫：只有 hive_logger 把 `ALPHA_HIVE_HOME` 变成路径
 
