@@ -2475,6 +2475,13 @@ class OptionsAgent:
         options_chain = self.fetcher.fetch_options_chain(ticker)
         calls_df = options_chain.get("calls", [])
         puts_df = options_chain.get("puts", [])
+        # v0.45.497：链是否就是目标日那一场的（云端快照，`cboe_options.fetch_cboe_chain` 打的标）。
+        # 是 ⇒ 这份数据属于 `_snap_target`，不属于此刻的会话：IV 观测记到目标日、不刷新「最后有效 IV」
+        # 缓存（那是给**此刻**降级用的）、快照标签写 cloud_snapshot 而非「运行时现拉」。
+        # 不是（实时链 / 链缓存里的旧实时链）⇒ 维持原口径：数据属于此刻会话。
+        _chain_is_target = bool(options_chain.get("_from_snapshot")) and \
+            options_chain.get("_snapshot_vintage") == _snap_target
+        _obs_session = _snap_target if _chain_is_target else _snap_session
 
         # ===== P0-1 (v0.38.0): 样本链早退 =====
         # 样本期权链（CBOE+yfinance 全部失败时的硬编码兜底）绝不参与指标计算——
@@ -2634,7 +2641,7 @@ class OptionsAgent:
         if _iv_raw_observed is not None:
             try:
                 from iv_history import append_observation
-                append_observation(ticker, self.fetcher.cache_dir, _snap_session, _iv_raw_observed)
+                append_observation(ticker, self.fetcher.cache_dir, _obs_session, _iv_raw_observed)
             except Exception as _e_idx:  # noqa: BLE001 - 记账失败绝不影响评分
                 _log.debug("[%s] IV 索引写入跳过: %s", ticker, _e_idx)
 
@@ -2686,7 +2693,8 @@ class OptionsAgent:
             # 但它是「今天」的观测，比 5 天前的缓存诚实。
             if _MIN_VALID_IV <= _raw_iv <= _MAX_VALID_IV:
                 current_iv = _raw_iv
-                self.fetcher._save_last_valid_iv(ticker, _raw_iv)
+                if not _chain_is_target:   # v0.45.497：目标日的链不是「此刻」的观测，不进此刻的降级缓存
+                    self.fetcher._save_last_valid_iv(ticker, _raw_iv)
                 _log.info(
                     "%s 盘后采用当日实拉 IV %.2f%%（并刷新缓存）", ticker, _raw_iv
                 )
@@ -2732,8 +2740,9 @@ class OptionsAgent:
                     _iv_source = "unavailable"
                     _snap_count("iv_unavailable")
         else:
-            # 开市且 IV 有效 → 保存供收市后使用
-            self.fetcher._save_last_valid_iv(ticker, current_iv)
+            # 开市且 IV 有效 → 保存供收市后使用（目标日的云端链除外，v0.45.497）
+            if not _chain_is_target:
+                self.fetcher._save_last_valid_iv(ticker, current_iv)
 
         # 3. 计算各项指标
         # ── v0.43.18: 优先用自攒的真实 IV 历史；不足则诚实降级到 HV 代理 ──
@@ -3040,7 +3049,13 @@ class OptionsAgent:
                 result["_snapshot_session_complete"] = _complete_at_fetch
                 # v0.45.16：补跑时显式标注"期权是运行时实时拉的，不是目标日的"。
                 # CBOE/yfinance 无历史期权接口，这一点没法假装，只能让下游看得见。
-                if _is_backfill:
+                if _is_backfill and _chain_is_target:
+                    # v0.45.497：链取自云端快照、就是目标日那一场 ⇒ 口径一致，不是「运行时现拉」
+                    result["_options_as_of_mismatch"] = False
+                    result["_options_source"] = "cloud_snapshot"
+                    result["_options_target_date"] = _snap_target
+                    result["_options_fetched_on"] = _snap_session
+                elif _is_backfill:
                     result["_options_as_of_mismatch"] = True
                     result["_options_target_date"] = _snap_target
                     result["_options_fetched_on"] = _snap_session

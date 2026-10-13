@@ -7,7 +7,41 @@
 
 ## [0.45.498] — 2026-10-13 — 占位（进行中：v0.45.487 / 488 二次检查——重新生成命令沿用壳里的解释器、测试里「生产在哪」只一份推导、提醒的时机与边界、ALPHA_HIVE_HOME 常量守卫）
 
-## [0.45.497] — 2026-10-13 — 占位（进行中：回填 10-12 期权快照（当天扫描全程 TLS EOF、0 份），数据源 origin/cloud-snapshots）
+## [0.45.497] — 2026-10-13 — Fixed + Added：补跑时链取自目标日云端快照 ⇒ 数据记在目标日（IV 索引日期 / 「最后有效 IV」缓存 / mismatch 标签三处原按「运行时现拉」处理）；新增 10-12 期权快照回填工具（dry-run 29/29 通过，**`--apply` 待 10-13 扫描结束后执行**，用户批准范围：只补快照 + IV 索引）
+
+### 为什么
+- 10-12 扫描全程 TLS EOF（根因见 v0.45.496），期权快照 0 份；`origin/cloud-snapshots` 有当天收盘后（21:11 UTC）抓的 29/30 只（缺 BILI），vintage ok。
+- 现成读者只有 `--swarm --date D` 全量重扫——10-12 的 report_snapshots 已被纸面组合消费，重扫会改写已执行决策的输入（10-05 事故，auto-memory `alpha-hive-same-day-rescan.md`）。用户 10-13 选「只补快照 + IV 索引」、「今天扫描跑完后写」。
+- 查补跑路径时发现 `analyze` 把「补跑」一律当「链是运行时现拉的」（v0.45.16 的前提：CBOE / yfinance 无历史接口）。但 v0.45.59 起快照模式下链**就是**目标日的，三处随之错：
+  1. IV 观测按 `_snap_session`（此刻会话）记进 `iv_history` 索引 ⇒ 次日开盘后补跑 D，D 的 IV 被记到 D+1 名下（索引后写覆盖，要等 D+1 扫描才被改回；D+1 扫描失败就留着）；
+  2. 当日实拉 IV 刷进「最后有效 IV」缓存——那是给**此刻**降级用的（收市分支每次都刷，开市分支也刷）；
+  3. 快照标 `_options_as_of_mismatch: True` / 「运行时现拉」，与事实相反。
+
+### Fixed
+- `cboe_options.fetch_cboe_chain` 快照分支：返回浅拷贝并打 `_from_snapshot: True`、`_snapshot_vintage: <vintage_date>`（不改供给器缓存原件）。
+- `options_analyzer.OptionsAgent.analyze`：`_chain_is_target` = 链带 `_from_snapshot` 且 `_snapshot_vintage == _snap_target`（只认「就是那一场」，不认「来自云端」）。成立时：IV 索引记 `_snap_target`；两处 `_save_last_valid_iv` 都跳过；补跑快照标 `_options_as_of_mismatch: False`、`_options_source: "cloud_snapshot"`。不成立（实时链 / 链缓存里的旧实时链 / 别的场次）维持原口径，逐字节不变。正常扫描没有供给器 ⇒ 不受影响。
+
+### Added
+- `experiments/backfill_options_snapshot_from_cloud.py --date D [--tickers …] [--apply]`：同一份 `analyze`、在隔离里跑。
+  - 隔离：缓存目录用临时目录（fetcher 先读链缓存再走供给器；「最后有效 IV」/ hist_hv 缓存也都不碰生产）；IV 历史预置 = 生产索引 **< D** 的行；yfinance `history` 截到 ≤ D（`period="1y"` 现拉含 D 之后的 K 线 ⇒ HV 代理口径的 IV Rank 混进未来；实测 NVDA 不截会多出 10-13 盘中那根、末值 22.20 vs 22.14）。
+  - 只认能证明截到 D 的价格派生量：RV 只认 `twelve_data@D`、期限结构只认 `cboe`，其余置空并记进 `_backfill.nulled`。
+  - 自证（不过就不写）：`_options_source == "cloud_snapshot"` 且 mismatch 为 False；`_snapshot_stock_price` == 云端 `price_at_fetch`。
+  - 此刻会话不晚于 D ⇒ 拒绝（那一场还能正常扫）；生产已有常规 / 补跑快照的标的跳过；IV 索引已有 D 不再追加（幂等）。
+  - 默认 dry-run：结束时比对生产 cache 目录指纹，变了退出码 3。每份快照带 `_backfill` 出处块（工具 / 版本 / 云端 vintage / 抓取时刻 / 最后成交时刻 / 预置行数 / 截止日 / 置空清单）。
+- 产物落点：`cache/options_snapshot_{T}_{D}_backfilled-{跑批会话}.json`（既有补跑槽位，8 月 3 批先例）。`_SNAP_RE` 读者认不出该名字（日期前是 `-`）；有意读它的只有 `vrp_signal._snapshot_rv`（rv_30d）。
+
+### 10-12 dry-run（10-13 07:14 PT，盘中，只读）
+- 云端 29 只、待补 29、跳过 0、拒绝 0、置空 0（29 只 RV 全是 `twelve_data@2026-10-12`）；IV Rank 全为 `hv_proxy`（IV 索引仅约 30 天，不足 63）。NVDA 现价 226.32（= 云端 cboe_close）、IV 观测 31.44、P/C 0.71。生产 cache 指纹未变。
+- BILI 无云端快照，10-12 仍缺。
+
+### Added（测试）
+- `tests/test_cloud_chain_backfill_dates.py`（8）：钉此刻会话 10-13、目标 10-12、内存供给器；目标日云端链 ⇒ 索引记 10-12、两条墙钟分支（开市 / 收市，墙钟另钉——`_market_open` 读的是另一只钟）都不刷缓存、标签 cloud_snapshot；对照：别的场次的云端链、实时链维持原口径；打标不改供给器原件。变异 6 个全红（索引回 `_snap_session`、删收市守卫、删开市守卫、删标签分支、判据不看场次、cboe 不打标）。
+- `tests/test_backfill_options_snapshot_tool.py`（5）：置空规则（真实 dry-run 里一次没触发 ⇒ 只能在这里执行）、预置只取 < D、yfinance 截断与属性转发。变异 2 个全红（`<` 改 `<=`、RV 判据放宽到任意 twelve_data）。
+- 期权 / 快照 / CBOE / IV / VRP / 财报波动 / GEX / 卖权相关 1516 passed（唯一 error 是 Alpha Bot 盘中采样撞上真实数据根闸，闸已逐项核实为 Alpha Bot 追加）；ruff 通过。
+
+### 评分 / 世代边界
+- 不进评分、不进 signal_archive、不改 IC 样本；正常扫描路径行为不变。不追加世代边界。
+
 
 ## [0.45.496] — 2026-10-13 — Fixed：编排器代理探活失败后的「退回直连」实为仍走 macOS 系统代理（10-12 期权快照 0 份的根因）——退回时 `no_proxy='*'` 并用扫描解释器自证
 
