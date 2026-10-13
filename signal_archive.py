@@ -1334,6 +1334,18 @@ QUARANTINE: List[Dict] = [
         "evidence": (".swarm_results_2026-06-29.json（OracleBeeEcho.details.iv_current ∈ {12.5, 6.25}, iv_rank = 0, iv_percentile = 0）",
                      "CHANGELOG.md#v0.45.490"),
     },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.499：10-12 重放（10-13 07:33 写入生产，代码 0993efd = v0.45.481，早于 482 的多数规则）里
+    # BILI 的链来自 yfinance，ATM IV 全是 Yahoo 求解失败阶梯值 ⇒ iv_current = 6.25。形状同 v0.45.486 的 TMO 08-31。
+    {
+        "date": "2026-10-12",
+        "tickers": ('BILI',),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.499（用户 2026-10-13 批准「删掉假 iv」）：iv_current 是 Yahoo 求解失败值 1/16 ×100 = 6.25 的中位数，不是观测（见 yahoo_iv；BILI 前后几日 IV 49–53）。来自 10-12 重放，重放代码早于 v0.45.482 的多数规则。当天 iv_rank 走 hv_proxy（当前 HV 对 HV 分布），不读 current_iv，不隔离；同一条 yfinance 链的 P/C 298.46 不属本次批准范围，未动。",
+        "evidence": (".swarm_results_2026-10-12.json（OracleBeeEcho.details.iv_current = 6.25, iv_rank_source = hv_proxy, chain_source = yfinance）",
+                     "cache/options_snapshot_BILI_2026-10-12.json（iv_raw_observed = 6.2509375）",
+                     "CHANGELOG.md#v0.45.486", "CHANGELOG.md#v0.45.499"),
+    },
 ]
 
 

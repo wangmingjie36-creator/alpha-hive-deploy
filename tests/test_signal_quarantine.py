@@ -306,6 +306,18 @@ def test_yahoo_placeholder_iv_rows_quarantined():
     assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_rank")
 
 
+def test_bili_1012_replay_placeholder_iv_quarantined():
+    """v0.45.499（用户批准「删掉假 iv」）：10-12 重放写入的 BILI iv_current = 6.25（Yahoo 失败阶梯值，yfinance 链）。
+    形状同 486 的 TMO 08-31：只挡 iv_current，rank 走 hv_proxy 不挡；P/C 不在批准范围。
+
+    变红的变异：删该条目；去掉 tickers（同日 29 只真观测被连坐）；signals 加上 iv_rank / put_call_ratio。
+    """
+    assert sa.is_quarantined("2026-10-12", "BILI", "options.iv_current")
+    assert not sa.is_quarantined("2026-10-12", "BILI", "options.iv_rank")
+    assert not sa.is_quarantined("2026-10-12", "BILI", "options.put_call_ratio")
+    assert not sa.is_quarantined("2026-10-12", "NVDA", "options.iv_current")
+
+
 def test_rank_rows_from_placeholder_iv_whose_iv_current_was_purged_earlier():
     """v0.45.490（486 二次检查）：486 只从归档里现存的 iv_current 找 12.5 / 6.25，漏了 iv_current 早被 472 / 479 清掉的
     7 对——它们 08-14 前的 iv_rank / iv_percentile 同样由失败值算出。

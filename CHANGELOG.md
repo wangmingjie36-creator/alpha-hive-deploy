@@ -7,7 +7,27 @@
 
 ## [0.45.500] — 2026-10-13 — 占位（进行中：财报日单一真相——共享日历解析器 + 按扫描日观测的 next_earnings 读取入口（本地最近有效观测兜底）+ 读者改接线，退役 earnings_cache/_date.json 直读）
 
-## [0.45.499] — 2026-10-13 — 占位（进行中：BILI 10-12 假 IV 6.25（Yahoo 失败值）——删 IV 索引行 + signal_archive 隔离 options.iv_current）
+## [0.45.499] — 2026-10-13 — Fixed（数据，用户批准「删掉假 iv」）：BILI 10-12 的 IV 6.25（Yahoo 求解失败值，来自 10-12 重放）——删 IV 索引行；`signal_archive` 隔离并清 `options.iv_current` 1 行
+
+### 为什么
+- 10-13 07:33 并行会话把 10-12 重放结果写入生产（见 v0.45.497「结局」）。重放代码 `0993efd`（v0.45.481）早于 v0.45.482 的多数规则；BILI 的链来自 yfinance，ATM IV 全是 Yahoo 失败阶梯值 ⇒ `iv_raw_observed` 6.2509375、`iv_current` 6.25（0.062509 即 `yahoo_iv` 记录的「减半阶梯」值；BILI 前后几日 IV 49–53）。
+- 它进了两处会被读的地方：`cache/iv_history_BILI.jsonl`（IV Rank 分母，min-max 会被拉低）与 `signal_archive`（`options.iv_current`，进 IC 样本）。
+
+### Fixed
+- `cache/iv_history_BILI.jsonl`：删 `{"date": "2026-10-12", "iv": 6.2509}` 一行（34 → 33 行，临时文件 + `os.replace`）。备份 `_manual_backups/iv_history_BILI.pre_v0.45.497_fake_iv_20261012.jsonl`（文件名里的版本号写早了，内容即删前原样）。`load_iv_history("BILI")` 实测 31 天、48.6–60.4，无 < 10 的值。迁移标记 `.iv_index_migrated_BILI` 在 ⇒ 不会从快照重建回来。
+- `signal_archive.QUARANTINE` 新增 BILI 10-12 `options.iv_current` 一条（形状同 v0.45.486 的 TMO 08-31：iv_rank 走 hv_proxy、不读 current_iv，不挡；同一条 yfinance 链的 P/C 298.46 不在批准范围，未动）。
+- 清库：`purge_quarantined_signal_rows.py --only-tag v0.45.499 --expect 1 --apply`；不加标记的 dry-run 同为 1（库里无别的待清批次）。`signal_archive` 131,544 → 131,543；备份 `db_backups/pheromone_pre_v0.45.499_bili_1012_fake_iv.db`。独立核对：生产该行 0 / 备份 1，BILI 10-12 其余 6 行 options.* 保留，两边 integrity_check ok。
+
+### 未动
+- `cache/options_snapshot_BILI_2026-10-12.json` 原样保留（快照是「当天产出了什么」的审计轨迹，同 QUARANTINE 不改原始 JSON 的划界）；读它 IV 的只有 iv_history 迁移，已被标记挡住。
+- ⚠️ 若并行重放会话按旧计划再写一次生产，IV 索引行会回来；库行由 QUARANTINE 在入库口拦（前提是写入走的是含本条目的代码）。
+
+### Added（测试）
+- `tests/test_signal_quarantine.py::test_bili_1012_replay_placeholder_iv_quarantined`：挡 BILI iv_current，不挡 iv_rank / P/C / 同日别的标的。变异 3 个全红（删 tickers、加 iv_rank、改日期）；本文件 30 passed。
+
+### 评分 / 世代边界
+- 1 行，10-12 在当前世代（10-09 起）内：IC 样本少 BILI 10-12 的 iv_current 一个点（本就是假值）。不追加世代边界。
+
 
 ## [0.45.498] — 2026-10-13 — Fixed：v0.45.487 / 488 二次检查——「怎么重新生成 .app」的命令沿用壳里记下的解释器（487 的提醒照做会把自定义解释器换回缺省，壳里两处自 461 起同病）；过时提醒在启动成功、交出窗口 / 页面时才弹，整段两道边界；测试里「生产数据根在哪」只一份推导；`ALPHA_HIVE_HOME` 守卫认常量本身
 
