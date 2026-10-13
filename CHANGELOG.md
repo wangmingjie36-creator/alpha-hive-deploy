@@ -590,6 +590,23 @@ mtime 从不早于写前读的 `time.time()`，所以本机永远复现不了。
   canary：**修前原文件**同一 harness 下 −1 天（10-12）全绿、0 天（10-13）3 红、+38（11-20）仍 3 红、+39（11-21）4 红——
   两颗的引爆日都被精确复现，证明 harness 确实拨到了本文件的被测路径。
 
+### 复核（同日另一会话，只验证、无代码改动）：拨钟补到 +60 / +180
+- 拨钟**旧版** harness（495 搬进仓库前、memory 目录里那份）全套件（树 = `bc2c9294`，即二次检查 `f392782d` **之前**；9446 selected /
+  87 deselected）：真实钟 1 failed（设计红）+ 1 teardown error（真实数据根闸：`pheromone.db` @06:03:54.429 被写——是 **v0.45.494 的清库**
+  （备份 `db_backups/pheromone_pre_v0.45.494_rank_mirror.db` mtime 06:03:53），与上面 490 同一形状；闸点名的两条
+  `test_quote_set.py`、`test_experiments_script_bootstrap.py::test_stripping_the_injection_turns_every_real_file_red` 各单跑两遍，生产库 mtime 都不动）。
+  **+60 / +180 天各 42 failed，两轮失败集合逐条相同**：1 设计红 + 41 条旧 harness 自己造的假红，真实钟下全绿；按 v0.45.495 的归因
+  = R1 子进程不读偏移 11 条（step_contract 9、真实数据根闸子 pytest 2）+ R2 只拨了 `datetime`、没拨文件 mtime 30 条（编排器解释器 28、
+  Step 15 分派 2）——二次检查拿 `-vv` 全量失败正文逐条核过（初版统称「子进程读真钟」，30 条归因错，同 495 对 +30 那轮的更正）。
+  ⚠️ 这 41 条在旧 harness 下恒红，里面若有炸弹看不见 ⇒ 二次检查（10-16）在 `origin/main` `04dce858` 上用 495 的新 harness
+  （`tools/clockshift`，拨文件 mtime、跨进程）单跑这 42 条：0 / +60 / +180 天各 41 passed + 设计红 1、0 deselected。
+  ⇒ **+120 → +180 未见新炸弹**（全套件是 `bc2c9294` + 旧 harness；那 42 条是 `04dce858` + 新 harness）。
+- 近未来日期字面量密集的 17 个测试文件（9 个 OCC 字面量文件 + f-string 拼 OCC 的两个 `test_sell_strike_*` + 日期字面量 census
+  排名靠前的 5 个 + 本文件；那 5 个是否真拿到期日与钟比较**未逐个核**）在 +4 / +7 / +14 / +30 / +45 / +90 / +150 / +270 / +400 /
+  +1000 天各 763 passed（树 `bc2c9294`，旧 harness）。
+- 快进到 `91af111a`（含 `f392782d` 的 +39）后重核：上述 17 个 + `bc2c9294..HEAD` 改过的 4 个测试文件共 21 个，0 / +39 / +60 / +180 天各 845 passed。
+- canary 独立复现：修前原文件 −1 绿 / 0、+3、+38 红 3 / +39、+60、+180 红 4；修后同钟全绿。
+
 ## [0.45.488] — 2026-10-13 — Fixed（测试闸）：真实数据根只从 `resolve_data_root` 来——非绝对值不猜、改守缺省数据根并在报告头说明；对拍补 `~` / 相对 / 空白样本；AST 守卫：只有 hive_logger 把 `ALPHA_HIVE_HOME` 变成路径
 
 用户批准的方案（推荐项：非绝对值改守缺省、加 AST 守卫）。
