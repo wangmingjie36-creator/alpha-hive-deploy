@@ -7,7 +7,28 @@
 
 ## [0.45.497] — 2026-10-13 — 占位（进行中：回填 10-12 期权快照（当天扫描全程 TLS EOF、0 份），数据源 origin/cloud-snapshots）
 
-## [0.45.496] — 2026-10-13 — 占位（进行中：编排器代理探活失败后「退回直连」实为仍走 macOS 系统代理——改为真直连）
+## [0.45.496] — 2026-10-13 — Fixed：编排器代理探活失败后的「退回直连」实为仍走 macOS 系统代理（10-12 期权快照 0 份的根因）——退回时 `no_proxy='*'` 并用扫描解释器自证
+
+### 为什么
+- 10-12 扫描（14:00–15:03）：14:00:08 代理 127.0.0.1:7897 探活失败（10-01~10-09 每天都通过，唯一一次），编排器 `unset HTTPS_PROXY…` 并写「本轮退回直连」。之后一小时 CBOE / SEC / Massive / Twelve Data / apewisdom / Slack / 财政部**全部** `SSLEOFError: EOF occurred in violation of protocol`；CBOE 抓取 261 次 0 命中 ⇒ `options_snapshot` 写入 0、Step 12 十个字段 0/30。同刻 SSH 的 `git fetch`（production_sync）成功。
+- 机制：macOS 上 `urllib.request.getproxies()` 在环境变量**为空**时经 `_scproxy` 读系统代理；Clash Verge `enable_system_proxy: true` ⇒ `scutil --proxy` 指向 7897 ⇒ 「直连」的 Python 仍走那个坏掉的代理（`env -i` 实测 urllib / requests 都解析出 7897）。Clash 当时 GLOBAL 模式单节点；它接了 CONNECT、上游拨不通就关连接 ⇒ 客户端见 TLS EOF。10-12 的 Clash 服务日志已轮转，节点当时挂了是推断（10-13 早上同一节点又见 `context deadline exceeded`），待验证。
+- 原代码注释写着「必须真的清掉，不能只打日志……标签宣称的事没发生」——防住了终端残留变量，没防住系统代理这一层。
+
+### Fixed
+- `scripts/alpha-hive-orchestrator.sh` 代理段 else 分支（探活失败 / `ALPHA_HIVE_PROXY=none`）：`unset` 之后 `export NO_PROXY='*' no_proxy='*'`——环境变量非空 ⇒ `getproxies()` 不再查系统配置，且对一切主机 bypass；libcurl（curl_cffi / yfinance）同样认 `*`。
+- 同处新增自证：用 `$PYTHON3` 问一遍 `getproxies()`，仍有 http / https / all ⇒ `log ERROR「本轮并非直连」`。只看这三个键：`getproxies` 把任何 `*_proxy` 变量都收成「协议」（`ALPHA_HIVE_PROXY` ⇒ `alpha_hive`），初版没过滤时在测试里实际误报。
+- WARN 文案改为「本轮退回直连（no_proxy=*，系统代理也不走）」。
+
+### Added（测试）
+- `tests/test_orchestrator_direct_fallback.py`（6）：从仓库编排器**原样**抽出代理段用 bash 跑，探活对准拒连端口 127.0.0.1:9（不出网），launchd / 终端（预置 HTTPS_PROXY / ALL_PROXY）× 探活失败 / 显式 none 四种组合下断言环境层只剩 `no=*`、bypass 为真、requests 解析为空、真实 `getproxies()` 无 http/https、无 ERROR；假解释器构造「清了仍解析出代理」断言 ERROR 出现；macOS 负对照（只 unset 时系统代理开着就仍走代理，系统代理未开则 skip——主断言不依赖它，CI 上照跑）。
+- 变异 3 个全红：恢复修前代码（5 红）、只删 `no_proxy` 行（4 红；平台无关的环境层断言在 Linux 上同样红）、只删自证（1 红）。
+- 编排器相关测试 856 passed（`tests/test_orchestrator_*.py`、`test_scan_catchup.py`、`test_deploy_orchestrator.py`、`test_no_invisible_prod_data_skips.py`）；`bash -n`、ruff 通过。
+
+### 部署 / 影响面
+- 照常经 origin/main → 下一个扫描日 `deploy_orchestrator` 自动部署；部署那轮仍跑旧编排器，**第二个扫描日起生效**。本改动只动 shell 段、与 Python 无耦合。
+- 只在探活失败 / 显式 none 时改变行为；探活通过的分支一字未动。真直连下 yfinance 历来 403/429（原 WARN 照旧），CBOE 不受影响。
+- 未做：探活失败后的重试、扫描中途代理掉线（10-12 不是这个形状）。
+
 
 ## [0.45.495] — 2026-10-13 — 占位（进行中：拨钟审计进 CI + 修拨钟 harness 子进程盲区（harness 搬进仓库））
 
