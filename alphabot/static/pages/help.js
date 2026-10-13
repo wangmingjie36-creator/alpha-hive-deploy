@@ -415,7 +415,7 @@ export const SECTIONS = [
       ["提示端口被占", "8765 上是别的程序，弹窗会给 lsof 命令。"],
       ["关窗后服务还在", "升级前起的服务不带 --from-app，关窗不会停它：终端执行一次 make alphabot-stop，之后按新规则走。"],
       ["想换数据根", "终端执行 /usr/local/bin/python3 -m alphabot.launcher --reset，再双击 .app 重新选。"],
-      ["怎么拿到新版本", ".app 跑的是生产克隆 ~/alpha-hive-prod，每个扫描日扫描前自动更新；关掉 Alpha Bot 再打开即用上，不需要重新生成。"],
+      ["怎么拿到新版本", ".app 跑的是生产克隆 ~/alpha-hive-prod，每个扫描日扫描前自动更新；关掉 Alpha Bot 再打开即用上。只有 .app 自己的启动壳变了才要重新生成——那时打开 Alpha Bot 会弹一次提醒并给出命令（同一处变化只提醒一次）。"],
       ["换了 Python 或要重新生成 .app", "终端执行 make -C ~/alpha-hive-prod alphabot-app（用生产克隆自己的代码生成；换 Python 就在这条命令后面写 PYTHON=/绝对路径——只认命令行上写的，环境变量里的 PYTHON 会被忽略；相对路径或只写名字会被拒）。"]], "现象", "处理"),
   ]],
 

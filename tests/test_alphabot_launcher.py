@@ -76,6 +76,9 @@ class FakeUI:
         self.calls.append(("choose", prompt))
         return self.folders.pop(0) if self.folders else None
 
+    def notice(self, message):
+        self.calls.append(("notice", message))
+
     def open_url(self, url):
         self.calls.append(("open", url))
 
@@ -804,6 +807,113 @@ class TestInterpreterCheck:
         assert r.returncode == 126
         shown = alerts.read_text(encoding="utf-8") if alerts.exists() else "（没弹）"
         assert f"执行 {junk} 失败" in shown and "launcher.log" in shown, shown
+
+
+class TestShellDrift:
+    """已装 .app 的启动壳过时 ⇒ 启动时不挡启动地提醒一次（v0.45.487）。壳在生成那一刻写死，v0.45.436~461 每次改壳都要
+    人记得重新生成；`alphabot.__version__` 从 09-30 起没动过，版本号判不了 ⇒ 比内容：用壳里记下的输入在内存里重生成。"""
+
+    @staticmethod
+    def _install(home, repo=REPO):
+        return MA.build_app(home / "Applications", repo=repo, python=sys.executable)
+
+    @staticmethod
+    def _edit(app, old="exit 126", new="exit 125"):
+        exe = app / "Contents" / "MacOS" / MA.EXECUTABLE
+        exe.write_text(exe.read_text(encoding="utf-8").replace(old, new, 1), encoding="utf-8")
+
+    def test_freshly_generated_app_has_no_drift(self, home):
+        app = self._install(home)
+        d = MA.installed_drift(app)
+        assert d["parts"] == [] and Path(d["repo"]) == REPO and d["python"] == sys.executable, d
+        ui = FakeUI()
+        LA.check_app_shell(ui)
+        assert ui.calls == []
+
+    def test_each_part_is_detected(self, home):
+        app = self._install(home)
+        self._edit(app)
+        assert MA.installed_drift(app)["parts"] == ["启动脚本"]
+        with open(app / "Contents" / "Info.plist", "rb") as f:
+            info = plistlib.load(f)
+        info["CFBundleShortVersionString"] = "0.0.1"
+        with open(app / "Contents" / "Info.plist", "wb") as f:
+            plistlib.dump(info, f)
+        (app / "Contents" / "Resources" / "AlphaBot.icns").write_bytes(b"icns-old")
+        assert MA.installed_drift(app)["parts"] == ["启动脚本", "Info.plist", "图标"]
+
+    def test_code_moving_on_is_what_gets_detected(self, home, monkeypatch):
+        """真实场景是反过来的：装着的不动，代码往前走了（生成器改了壳）——同样要报。"""
+        app = self._install(home)
+        real = MA.launch_script
+        monkeypatch.setattr(MA, "launch_script", lambda repo, python, *a, **k: real(repo, python, *a, **k) + "# 新版壳\n")
+        assert MA.installed_drift(app)["parts"] == ["启动脚本"]
+
+    def test_drift_notifies_once_with_the_regen_command(self, home, capsys):
+        app = self._install(home)
+        self._edit(app)
+        ui = FakeUI()
+        LA.check_app_shell(ui)
+        assert ui.kinds() == ["notice"], ui.calls
+        msg = ui.calls[0][1]
+        assert "启动壳比代码旧" in msg and "启动脚本" in msg and MA.regen_hint(REPO) in msg, msg
+        LA.check_app_shell(ui)                              # 同一处差异：只记日志，不再弹
+        assert ui.kinds() == ["notice"]
+        assert capsys.readouterr().out.count("启动壳过时") == 2, "每次启动都要记日志"
+
+    def test_a_new_difference_notifies_again(self, home):
+        app = self._install(home)
+        self._edit(app)
+        ui = FakeUI()
+        LA.check_app_shell(ui)
+        self._edit(app, "exit 125", "exit 124")             # 又变了一处 ⇒ 指纹变了
+        LA.check_app_shell(ui)
+        assert ui.kinds() == ["notice", "notice"]
+
+    def test_app_for_another_code_dir_is_not_judged_here(self, home, tmp_path, capsys):
+        self._install(home, repo=_fake_code_dir(tmp_path / "other"))
+        ui = FakeUI()
+        LA.check_app_shell(ui)
+        assert ui.calls == [] and "指向别的代码目录" in capsys.readouterr().out
+
+    def test_no_app_installed_is_silent(self, home, capsys):
+        ui = FakeUI()
+        LA.check_app_shell(ui)
+        assert ui.calls == [] and capsys.readouterr().out == ""
+
+    def test_check_failure_is_logged_never_blocks(self, home, capsys):
+        foreign = home / "Applications" / f"{MA.APP_NAME}.app" / "Contents"
+        foreign.mkdir(parents=True)
+        with open(foreign / "Info.plist", "wb") as f:
+            plistlib.dump({"CFBundleIdentifier": "com.someone.else"}, f)
+        ui = FakeUI()
+        LA.check_app_shell(ui)
+        assert ui.calls == [] and "启动壳核对失败" in capsys.readouterr().out
+
+    def test_every_launch_checks_first(self, home, monkeypatch):
+        seen = []
+        monkeypatch.setattr(LA, "check_app_shell", lambda ui: seen.append("check"))
+        monkeypatch.setattr(LA, "window_owner", lambda: 4242)
+        ui = FakeUI(window=True)
+        assert LA.run(ui) == 0                              # 窗口已开 ⇒ 调到前面就返回
+        assert seen == ["check"] and ui.kinds() == ["activate"]
+
+    def test_mac_notice_does_not_wait_and_shows_after_the_window(self, monkeypatch):
+        """真 MacUI：起独立的 osascript 就走（不等用户点）；先 delay 再 activate，免得被随后开的窗口压住。"""
+        started = []
+
+        class _P:
+            def __init__(self, cmd, **kw):
+                started.append((cmd, kw))
+
+            def wait(self, *a, **k):
+                raise AssertionError("提醒不许等用户点")
+        monkeypatch.setattr(LA.subprocess, "Popen", _P)
+        LA.MacUI().notice("消息")
+        (cmd, kw), = started
+        script = [cmd[i + 1] for i, c in enumerate(cmd) if c == "-e"]
+        assert script.index(f"delay {LA.NOTICE_DELAY_SEC}") < script.index("activate"), script
+        assert cmd[-1] == "消息" and kw.get("start_new_session") is True
 
 
 class TestRegenHints:

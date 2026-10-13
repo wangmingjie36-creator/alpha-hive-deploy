@@ -17,6 +17,7 @@ Gatekeeper 不拦；代码目录若在「桌面」下（`--repo` 指过去），
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import plistlib
 import shlex
@@ -320,6 +321,48 @@ def build_app(dest_dir: Path, *, repo: Optional[Path] = None, python: str = DEFA
         shutil.rmtree(staging, ignore_errors=True)
     os.utime(bundle)                       # 让 Finder / Dock 重新读图标
     return bundle
+
+
+def _shell_assignment(script: str, var: str) -> str:
+    """壳里 `VAR=<shlex 引过的值>` 那一行的值（生成器写的就是这个形状）；没有就 `BuildError`。"""
+    for line in script.splitlines():
+        if line.startswith(f"{var}="):
+            parts = shlex.split(line[len(var) + 1:])
+            if len(parts) == 1:
+                return parts[0]
+    raise BuildError(f"启动脚本里找不到 {var}=（不是本生成器写的壳？）")
+
+
+def installed_drift(bundle: Path) -> dict:
+    """已装的 .app 与「本代码按它自己记下的输入**现在**会生成的」逐项比（v0.45.487）。只读。
+
+    ⇒ `{"repo", "python", "parts": [不同的部分], "fingerprint": 两端内容的摘要}`，`parts` 空 = 一致。
+    不是本生成器产出的（bundle id 不同）/ 壳里读不出 `REPO=`、`PY=` ⇒ `BuildError`。
+
+    为什么比内容、不比版本号：壳在生成那一刻写死，不随代码目录更新；v0.45.436~461 一路改壳，`alphabot.__version__`
+    却从 09-30 起没动过——版本号判不了「壳过时」。唯一真相是生成器本身：用壳里记下的代码目录与解释器在内存里重
+    生成一份，与装着的逐项比，没有第二份规则要同步。`fingerprint` 同时摘要「装着的」与「应生成的」，任一端变了就变
+    （调用方据此「同一处差异只提醒一次」）。
+    """
+    bundle = Path(bundle)
+    if not _is_ours(bundle):
+        raise BuildError(f"{bundle} 不是 Alpha Bot 生成器产出的（bundle id ≠ {BUNDLE_ID}）")
+    contents = bundle / "Contents"
+    have_script = (contents / "MacOS" / EXECUTABLE).read_text(encoding="utf-8")
+    repo, python = _shell_assignment(have_script, "REPO"), _shell_assignment(have_script, "PY")
+    with open(contents / "Info.plist", "rb") as f:
+        have_plist = plistlib.load(f)
+    icon = contents / "Resources" / "AlphaBot.icns"
+    have_icon = icon.read_bytes() if icon.is_file() else b""
+    want_script, want_plist, want_icon = launch_script(Path(repo), python), info_plist(), _icon_path().read_bytes()
+    parts = [name for name, have, want in (("启动脚本", have_script, want_script),
+                                           ("Info.plist", have_plist, want_plist),
+                                           ("图标", have_icon, want_icon)) if have != want]
+    h = hashlib.sha256()
+    for blob in (have_script.encode(), plistlib.dumps(have_plist), have_icon,
+                 want_script.encode(), plistlib.dumps(want_plist), want_icon):
+        h.update(hashlib.sha256(blob).digest())
+    return {"repo": repo, "python": python, "parts": parts, "fingerprint": h.hexdigest()}
 
 
 def _under_desktop_or_documents(path: Path) -> bool:

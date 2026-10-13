@@ -36,6 +36,8 @@ DEFAULT_PORT = 8765
 HOST = "127.0.0.1"
 READY_TIMEOUT_SEC = 90.0
 SERVER_LOG_MAX_BYTES = 5 * 1024 * 1024
+#: 「启动壳过时」提醒延后几秒弹（等窗口先开，见 `MacUI.notice`）
+NOTICE_DELAY_SEC = 3
 
 
 class LauncherError(Exception):
@@ -54,6 +56,15 @@ def log_dir() -> Path:
 
 def config_path() -> Path:
     return support_dir() / "launcher.json"
+
+
+def installed_app() -> Path:
+    """生成器缺省装到的位置（`macos_app` 的缺省 `--dest`）。装到别处的不核对（照样能用，只是没有过时提醒）。"""
+    return Path.home() / "Applications" / f"{APP_NAME}.app"
+
+
+def _shell_drift_seen_path() -> Path:
+    return support_dir() / "shell_drift_seen.json"
 
 
 def _repo_root() -> Path:
@@ -161,6 +172,18 @@ class MacUI:
         out = self._osa(['POSIX path of (choose folder with prompt (item 1 of argv) '
                          'default location (path to home folder))'], prompt)
         return out or None
+
+    def notice(self, message: str) -> None:
+        """不挡启动的提醒（v0.45.487）：起一个独立的 osascript 就走，不等用户点。
+
+        先 `delay` 几秒再 `activate`：启动器接着要开窗口，提醒若立刻弹出，会被随后打开的窗口压在后面、看着像没弹。
+        """
+        cmd = ["/usr/bin/osascript"]
+        for ln in ["on run argv", f"delay {NOTICE_DELAY_SEC}", "activate",
+                   'display alert "Alpha Bot" message (item 1 of argv) as informational', "end run"]:
+            cmd += ["-e", ln]
+        subprocess.Popen(cmd + [message], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
 
     def open_url(self, url: str) -> None:
         subprocess.run(["/usr/bin/open", url], check=False)
@@ -379,9 +402,53 @@ def _present(ui, url: str, port: int, *, use_window: bool, stop_on_close: bool) 
     return 0
 
 
+# ── 启动壳是否过时（v0.45.487）──────────────────────────────────────────
+
+def check_app_shell(ui) -> None:
+    """已装 .app 的启动壳与「本代码现在会生成的」不一致 ⇒ 不挡启动地提醒一次；同一处差异只提醒一次。
+
+    壳在生成那一刻写死、不随代码目录更新：代码一改壳，就得有人记得 `make -C ~/alpha-hive-prod alphabot-app`
+    （v0.45.436~461 每次都要）。本检查跑在启动器里——启动器在代码目录里、随扫描日快进自动更新——所以已装的旧壳
+    也查得出，不用先重新生成一次才有这个功能。比的是内容（`macos_app.installed_drift`），不是版本号。
+    只核对指向**本代码目录**的 .app（`--repo` 指去别处的那份由那份代码自己管）。核对本身出错只记日志、不挡启动：
+    没有提醒 = 退回本功能之前的状态，不会更糟。
+    """
+    app = installed_app()
+    if not app.exists():
+        return
+    from alphabot import macos_app
+    try:
+        d = macos_app.installed_drift(app)
+    except Exception as exc:  # noqa: BLE001 —— 提醒是附加功能，坏了不许挡住启动
+        _log(f"启动壳核对失败（不影响启动）：{type(exc).__name__}: {exc}")
+        return
+    if Path(d["repo"]).resolve() != _repo_root():
+        _log(f"{app} 指向别的代码目录 {d['repo']}，不由本代码核对")
+        return
+    if not d["parts"]:
+        return
+    parts = "、".join(d["parts"])
+    _log(f"启动壳过时：{parts} 与本代码现在会生成的不同")
+    seen = _shell_drift_seen_path()
+    try:
+        if json.loads(seen.read_text(encoding="utf-8")).get("fingerprint") == d["fingerprint"]:
+            return                                   # 这处差异已提醒过
+    except (OSError, ValueError, AttributeError):
+        pass                                         # 没记录 / 记录坏了 ⇒ 当没提醒过
+    ui.notice(f"Alpha Bot.app 的启动壳比代码旧（{parts}不同）。这次照常使用；"
+              f"要换上新的：{macos_app.regen_hint(Path(d['repo']))}，之后重新打开 Alpha Bot。")
+    try:                                             # 可再生（丢了只是多提醒一次）⇒ 缓存写法，不是账本
+        from hive_logger import atomic_json_write
+        atomic_json_write(seen, {"fingerprint": d["fingerprint"], "parts": d["parts"],
+                                 "at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    except (OSError, ValueError) as exc:
+        _log(f"记不下「已提醒」（下次还会再提醒）：{exc}")
+
+
 # ── 入口 ────────────────────────────────────────────────────────────────
 
 def run(ui, *, port: Optional[int] = None, python: Optional[str] = None, browser: bool = False) -> int:
+    check_app_shell(ui)                       # 不挡启动：提醒延后弹出，核对出错只记日志（v0.45.487）
     cfg = load_config()
     port = int(port or cfg.get("port") or DEFAULT_PORT)
     url = f"http://{HOST}:{port}/"
