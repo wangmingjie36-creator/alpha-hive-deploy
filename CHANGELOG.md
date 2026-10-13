@@ -5,7 +5,66 @@
 
 ---
 
-## [0.45.485] — 2026-10-13 — 占位（进行中：392 二次检查跟进，叠在 446 之上；原占 394→398→406 均未推送、482/484 被先占，改号）
+## [0.45.485] — 2026-10-13 — Fixed：392 二次检查跟进——父进程超预算时 F&G 已交的结果不丢（补上 400 没接住的「正在退出」一形，与 400 合成一个机制）；等 F&G 时的意外异常只判 F&G 段、不再盖掉检查点；`--budget-seconds` 上限；补测 `--today` 传递 / 谁杀的子进程 / 一处潜在 flaky
+
+> 编号说明：本版先后占过 0.45.394（10-02）→ 398（10-03）→ 406（10-04），都只提交在本地、未推送，先后被先进 main 的提交占用或越过。
+> 10-04 推送被拒时 main 已进 **0.45.400**（另一会话的二次检查独立修了下面 F1 的「子进程已退出」一形），本版改的正是 400 那几行；
+> 10-13 合入时又叠在 **0.45.446**（F&G 预算缺省改不限时，紧挨着的前一个提交）之上，号须排其后；号在构建当刻取 main 与各分支在途占号之上的第一个空号（10-13 上午 482、484 先后在构建中被先推占用，483 在途）⇒ 485。
+
+用户要求对已上 main 的 392（`2bbdb2f2`）做二次检查：两个独立复审（一个看进程 / 信号 / 契约语义，一个看测试与 CI 可移植性，都要求逐条复现），
+加上本会话在真实数据上补测 F&G 之外各项的耗时。**没有阻断项**：392 的默认生产路径上没找到会出错的地方；CI（Linux / Python 3.11，run 37034599566）上
+`tests/test_ic_rerun_fg_budget.py` 46/46 绿（整轮红只因已知的 `TestCoverageHorizon`）。找到的都是偏路径上的问题与测试缺口，本版修掉。
+
+### Fixed（`ic_rerun_readiness.py`）
+- **F1：父进程自己的几项拖过截止时刻时，丢掉子进程早已交的结果**（复审复现；v0.45.400 另一会话也独立实测到）。截止已过 ⇒
+  `communicate(timeout=max(0, …)=0)` 一字节不读就抛 `TimeoutExpired` ⇒ F&G 段报「超出时间预算（…仍未结束）」，attention 还把原因指向
+  「行情源限流或重放变慢」——真正慢的是父进程。它有两形：
+  - 子进程**已退出**（`poll()` 已有返回码）——**400 已修**（`poll() is not None` ⇒ 超时取 `max(剩余, 宽限)`）；
+  - 子进程**已交出结果、正在退出、还没被收尸**（`poll()` 仍是 None）——400 接不住：在 400 的代码上实测本版
+    `test_result_written_then_slow_exit_after_deadline_is_kept` 红，报成「F&G 子进程跑了 0.3s 仍未结束，已终止」。
+  现在收件至少给 `_FG_RESULT_MIN_WAIT_SECONDS=1` 秒，两形都接住，故把 400 的 `poll()` 分支并进这一个下限（留着它就成了一段删掉也不红的代码，
+  400 记的那个变异会失去牙齿）。400 的测试 `test_finished_child_is_kept_when_only_the_parent_overran` 原样保留、守「已退出」那形，
+  只把 docstring 里的变异说明改成合并后的（「收件下限退回 0」⇒ 红）；本版与它重复的那条测试不再加。
+  只在 F&G 之外各项超过预算时才可能走到（今天真实数据上那几项约 4.8s，见下），所以生产默认路径从没撞上过。
+- **F2：`--budget-seconds` 超大值（实测 3,000,000）让 `poll()` 的毫秒数溢出 C int ⇒ `OverflowError` ⇒ `run_tool` 的错误外壳盖掉已写出的检查点**
+  （世代边界核对随之丢失）。两处一起改：上限 `_FG_BUDGET_MAX_SECONDS=86400`（再大是用法错，不限时写 0）；`main()` 等 F&G 时的任何意外异常
+  只把 F&G 段判成 `child_failed`（「等待 F&G 子进程时出错（类型: 消息）」），其余各项与检查点都保住，子进程照样由 `with` 退出时终止。
+  编排器只传 45（v0.45.437 起），只有手动传超大值会走到。
+- 预算守卫（`TestBudgetFitsOrchestratorTimeout`）把收件窗口计入：45 + 1 + 2 + 10 ≤ 60。
+
+### 补测（`tests/test_ic_rerun_fg_budget.py`，446 时 49 → 55 条）
+- **`--today` 一路传到 F&G 执行器**（复审找到的**存活变异** G1 / G2 / G3：`main()` / `_FgChild` / 子进程入口任一处把 today 丢成 None，1252 条相关测试全绿）。
+  编排器传的是 `--today "${DATE_STR}"`，执行器拿它当前瞻窗口终点——丢了会静默按墙钟日期算（跨午夜 / 补跑旧日期时就错）。代码本身是对的，没有守卫。
+  现在进程内断言子进程命令行里的 today，真实进程树里让假执行器回写它收到的 today。
+- **SIGTERM 父进程后，子进程是父进程杀的、不是看门狗自己退的**（复审存活变异 C4：「遇 SystemExit 只删目录不杀子进程」靠看门狗 0.5s 内自退混过）。
+  两条真实进程树测试加断言：stderr 里没有看门狗那句「父进程已不在」。
+- **潜在 flaky**：「子进程不理 TERM ⇒ KILL」那条此前不等子进程装好 `SIG_IGN` 就到点，复审注入 0.9s 启动延迟即可复现 `AssertionError: -15`。改成先等标记文件。
+- F1「正在退出」一形 + `main()` 形的回归测试；F2 上限两侧；等待异常收口。
+- 文档更正：392 写「删 conftest 进程内钩子，只有它的守卫红」——只在本文件范围内成立；复审实测另有 `test_step_contract_ic_rerun.py::TestOkPath`
+  两条红（它们碰巧依赖进程内模式）。392 条目开头「两版都未推送」写于推送前，10-02 两版已上 main。
+
+### 复审核过、确认无误的（摘要）
+用 `run_step` 原文的 bash 外壳实测 TERM 在检查点之后 / 之前两种（rc=124、检查点在 / 无 JSON 时 `_base11` 新文案）；391 vs 392 三种输出模式在健康与降级
+两种状态下除 `generated_at` 外逐字节相同；信号处理器只在父进程、子进程分流在安装之前、重复 TERM 被忽略、父进程路径无 `except BaseException` 无 C 回调不出网；
+看门狗 `getppid()==--parent-pid`；fd 重定向与结果 fd 不被孙进程继承；`_detail`（含 `ohlc_window`）JSON 往返；重放 `_REPLAY_MODE` 不写库、三处执行器 `mode=ro`；
+`env -i` / cwd=`/` / 最小 PATH 下正常；连跑与 CPU 打满并发均 46/46；conftest 钩子不在导入期冻结任何数据路径。
+**本会话真实数据实测**：F&G 之外各项（含解释器启动）三次 4.74–4.87s——离检查点前被 60s 杀掉还远；父进程只 import yfinance（经 `swarm_agents → resilience`），不取数；
+这几轮已设 `ALPHA_HIVE_LOGS_DIR` 指向临时目录（生产日志新增 0 行），生产状态 sha256 不变。
+
+### 未改（复审判为非 bug）
+- SIGTERM 恰好落在 `Popen` 返回后、`with` 进入前（微秒级）会留孤儿与私有 TMPDIR：生产里 TERM 只在第 60s 到、子进程约 0.05s 已起好，碰不到；真发生时子进程看门狗自退。
+
+### 验证（在 446 之上合并后的树）
+- 变异（git archive 副本，每个一份新副本，临时目录圈在 scratch 内）：10 个——F1 收件窗口退回 0 / **result() 原样换回 400 的写法** / 446 缺省改回 45 / 446 编排器删掉 `--budget-seconds` / F2 上限退回 / 等待异常收口去掉 / today 在三处各丢一次 / 遇 SystemExit 不杀子进程——**10/10 红**，各由点名那条红。「换回 400」只红本版「正在退出」那一条（合并多接住的那一形确有守卫）；446 自己的两条守卫合并后照样有牙（缺省改回 45 ⇒ `test_default_is_unbounded`；编排器不传 ⇒ `…budget_plus_grace_fits` 与 `…passes_the_budget_explicitly` 两条）；`--today` 断言挪进 446 的显式预算测试后 G1 / G2 仍红。基线 55/55。
+- `ruff --select F821,F401,F841` 改动文件全过。
+- 全套 `-m "not integration and not network"`（本版树：`0993efde` + 446 + 本版；与最终基点 `747cc880` 只差一行 CHANGELOG 占号）：9401 passed / 5 failed / 2 xfailed（10.4 分钟）。5 条都与本版无关：`TestCoverageHorizon`（日期项）；`test_options_snapshot_price_honesty.py` 三条（在 `747cc880` 的 git archive 副本上同样 3 failed / 35 passed，main 自身的红，与在途的 482「Yahoo 占位 IV」相关，未插手）；以及本 worktree 里一个 iCloud 重名副本 `tests/test_ic_rerun_fg_budget 2.py`（10-02 编写 392 时的中途快照，git 忽略、未跟踪，19 行不在任何已提交版本里但均为后来改写掉的草稿——含会造不死进程的 `while True` 假执行器；移进废纸篓，不是 `rm`）里那条旧版测试按 45s 缺省断言而红。
+
+### 与 v0.45.446（缺省不限时）的关系
+- 446 之后不传 `--budget-seconds` 即不限时（`deadline=None` ⇒ 收件 `timeout=None`），本版的收件下限对它不起作用、也无需起作用；
+  下限 / 上限 / 等待异常收口在**有预算**时生效：编排器 Step 11 传的 45，以及手动传参。
+- 合并时两处测试按 446 的结构合入：`--today` 传递断言放进 446 的 `test_explicit_budget_is_counted_from_main_start`；
+  `TestBudgetFitsOrchestratorTimeout::test_orchestrator_budget_plus_grace_fits`（只认编排器显式传的值）的不等式加上收件窗口。
+- 顺带更正 392 留下的一句过时注释：`_FG_KILL_GRACE_SECONDS` 上方写「TERM 让它的 finally 清掉临时目录」，实际子进程保持 TERM 默认动作、临时目录由父进程收尸后删（392 实测信号处理器的异常会被 C 回调吞掉）。
 
 ## [0.45.484] — 2026-10-13 — 占位（进行中：10-12 生产扫描遇本机 SSL 故障 30/30 全源 FALLBACK——按 v0.45.464 方式整日重放（当天代码 + 云端同场链 + 真实收盘）并调查为何无自动补跑）
 

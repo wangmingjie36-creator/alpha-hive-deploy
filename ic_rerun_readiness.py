@@ -1658,12 +1658,19 @@ def fg_exposure_gate_forward_status(today: Optional[str] = None) -> Dict:
 
 #: F&G 子状态的缺省时间预算（秒，从 `main()` 开始计；0 = 不限时）。v0.45.446 起缺省**不限时**：
 #: 预算是看门狗的属性，归有看门狗的调用方给——编排器 Step 11 显式传 `--budget-seconds`（v0.45.437），
-#: 它与 60s `run_step --timeout` 的关系（盖得住 TERM 宽限 `_FG_KILL_GRACE_SECONDS` + 写最终 JSON + 解释器启动）
-#: 由 `tests/test_ic_rerun_fg_budget.py::TestBudgetFitsOrchestratorTimeout` 核对，**只认编排器显式传的值**。
+#: 它与 60s `run_step --timeout` 的关系（盖得住收件最短窗口 `_FG_RESULT_MIN_WAIT_SECONDS` + TERM 宽限 `_FG_KILL_GRACE_SECONDS`
+#: + 写最终 JSON + 解释器启动）由 `tests/test_ic_rerun_fg_budget.py::TestBudgetFitsOrchestratorTimeout` 核对，**只认编排器显式传的值**。
 #: v0.45.392~445 这里是 45（那时编排器不传、缺省就是生产值），代价是每周任务 / 手动运行也被截在 45s。
 FG_BUDGET_SECONDS_DEFAULT = 0.0
-#: 到点后先 TERM 子进程（让它的 finally 清掉临时目录），等这么久仍在 ⇒ KILL
+#: 到点后先 TERM 子进程，等这么久仍在 ⇒ KILL（子进程保持 TERM 默认动作，正常 TERM 即死，宽限用不上）
 _FG_KILL_GRACE_SECONDS = 2.0
+#: 收件的最短窗口（v0.45.485，392 二次检查 F1；v0.45.400 先独立修了其中「子进程已退出」那一形）：父进程自己的几项
+#: 拖过截止时刻才来收时，截止已过 ⇒ `communicate(timeout=0)` 一字节不读就抛 TimeoutExpired，把子进程**早已交卷**的结果
+#: 丢掉、报成「仍未结束」并把原因指向行情源。现在至少给这么久：已交卷 / 正在退出的子进程照收；真没跑完的，多等这一点再终止。
+#: 也计入预算守卫。
+_FG_RESULT_MIN_WAIT_SECONDS = 1.0
+#: `--budget-seconds` 的上限（v0.45.485，F2）：再大，`poll()` 的毫秒数会溢出 C int（实测 3,000,000 ⇒ OverflowError）。不限时写 0。
+_FG_BUDGET_MAX_SECONDS = 86400.0
 #: 子进程看门狗的轮询间隔 / 自身时限比父进程截止多给的余量（父进程在场时总是父进程先动手）
 _FG_CHILD_POLL_SECONDS = 0.5
 _FG_CHILD_SELF_DEADLINE_SLACK = 5.0
@@ -1829,12 +1836,11 @@ class _FgChild:
     def result(self) -> Dict:
         if self.proc is None:
             return _fg_runner_result("child_failed", f"无法启动 F&G 子进程（{self.spawn_error}）")
-        timeout = None if self.deadline is None else max(0.0, self.deadline - time.monotonic())
-        if timeout is not None and self.proc.poll() is not None:
-            # 子进程已经按时跑完、结果就在管道里：父进程自己的部分拖过了预算，不能拿它丢掉 F&G 的结果——
-            # CPython 的 communicate(timeout=0) 不看子进程死活、先判超时就抛（二次检查实测）。
-            # 只给读完管道的宽限，不用 None：孙进程若继承了管道，读到 EOF 可能遥遥无期（同 terminate 的注释）。
-            timeout = max(timeout, _FG_KILL_GRACE_SECONDS)
+        # 截止已过也至少给 `_FG_RESULT_MIN_WAIT_SECONDS` 收件（v0.45.485）：CPython 的 communicate(timeout=0) 不看子进程死活、
+        # 先判超时就抛。v0.45.400 用 `poll() is not None` 接住了「已退出」那种；还没被收尸、正在退出的（poll() 仍是 None）
+        # 同样会丢结果，这一个下限两种都接住，故合成一个机制。不用 None：孙进程若继承了管道，EOF 可能遥遥无期。
+        timeout = (None if self.deadline is None
+                   else max(_FG_RESULT_MIN_WAIT_SECONDS, self.deadline - time.monotonic()))
         try:
             raw, _ = self.proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -1925,8 +1931,9 @@ def _fg_child_main(argv: List[str]) -> int:
 
 def _budget_seconds(s: str) -> float:
     v = float(s)
-    if not (v >= 0) or v == float("inf"):        # 拒 NaN / 负数 / inf（不限时请写 0）
-        raise argparse.ArgumentTypeError(f"须为 ≥0 的有限秒数（0 = 不限时），收到 {s!r}")
+    if not (0 <= v <= _FG_BUDGET_MAX_SECONDS):   # 拒 NaN / 负数 / inf / 超上限（不限时请写 0）
+        raise argparse.ArgumentTypeError(
+            f"须为 0 ~ {_FG_BUDGET_MAX_SECONDS:g} 之间的秒数（0 = 不限时），收到 {s!r}")
     return v
 
 
@@ -2377,7 +2384,11 @@ def main() -> int:
             # 只写 --out：--json 打 stdout，打两份会让读 stdout 的人拿到两个 JSON 文档。
             _write_out_only(args.out, contract_envelope(
                 res, date, build_attention(res, bev, fwd_detail, fg_detail, dim_detail)))
-        fg_fwd = fg_run.result()
+        try:
+            fg_fwd = fg_run.result()
+        except Exception as e:  # noqa: BLE001 —— v0.45.485（F2）：等 F&G 的意外异常只判 F&G 段，不崩溃——
+            # 崩了 run_tool 会写错误外壳，盖掉上面已写出的检查点（世代边界核对随之丢失）。子进程照样由 `with` 退出时终止。
+            fg_fwd = _fg_runner_result("child_failed", f"等待 F&G 子进程时出错（{type(e).__name__}: {e}）")
     fg_detail = _take_detail(fg_fwd)
     res["fg_exposure_gate_forward_test"] = fg_fwd
 
