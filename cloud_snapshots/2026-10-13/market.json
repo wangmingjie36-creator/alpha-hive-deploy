@@ -1,0 +1,45 @@
+{
+ "schema_version": 1,
+ "fetched_at_utc": "2026-10-13T21:10:50.941254+00:00",
+ "cboe": {
+  "pcce": {
+   "total_pc_ratio": 1.016,
+   "call_volume": 8488330,
+   "put_volume": 8626375,
+   "date": "2026-10-13",
+   "signal": "fear",
+   "source": "synthetic_cboe_options",
+   "tickers_used": [
+    "SPY",
+    "QQQ",
+    "IWM"
+   ]
+  },
+  "vix_term": {
+   "vix_spot": 15.21,
+   "vix_1m": 16.77,
+   "vix_3m": 18.2,
+   "term_structure": "contango",
+   "contango_pct": 10.26,
+   "source": "vx_futures"
+  },
+  "skew": {
+   "skew_value": 155.06,
+   "signal": "extreme_tail_risk",
+   "date": "2026-10-12",
+   "source": "cboe_cdn"
+  },
+  "vvix": {
+   "vvix_value": 85.93,
+   "signal": "normal",
+   "date": "2026-10-12",
+   "source": "cboe_cdn"
+  },
+  "macro_score": 5.97,
+  "macro_sentiment": "neutral",
+  "timestamp": "2026-10-13T21:10:55.590666"
+ },
+ "fear_greed": null,
+ "fear_greed_error": "ModuleNotFoundError: No module named 'requests'",
+ "degraded_sections": {}
+}
