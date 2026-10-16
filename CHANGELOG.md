@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.524] — 2026-10-16 — 占位（进行中：测试套件提速——生产 sleep 注入接缝 + AST 守卫会话级解析缓存，不削弱任何守卫）
+
 ## [0.45.523] — 2026-10-16 — Fixed：`.claude/launch.json` 的 `dashboard` 预览端口 8765 → 8770，不再和 Alpha Bot 抢端口
 
 用户打开 Alpha Bot.app 弹「端口 8765 被别的程序占着（HTTP 404）」。查下来占端口的是一个 `python -m http.server 8765`（今天 02:20 起、绑 `*:8765` 全部网卡、目录是与本仓无关的 `~/Desktop/自动化台账`），端口号与 `launch.json` 里 `dashboard` 预览配置、也与 Alpha Bot 缺省端口（`alphabot.launcher.DEFAULT_PORT`）撞了。已手动关掉那个进程。
