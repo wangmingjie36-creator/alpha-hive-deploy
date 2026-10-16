@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.512] — 2026-10-16 — 占位（进行中：BILI 10-12 put/call 298.46 隔离 + yfinance 期权链 OI 陈旧时不算 P/C）
+
 ## [0.45.511] — 2026-10-16 — Fixed + Added：`signal_archive` 的每个写入点入库前都过 QUARANTINE——补 `backfill_fear_greed_legacy`（v0.45.267 起直写不查）、`data_backup/restore.py` 整库恢复后报出命中行数；新增全仓 AST 守卫
 
 > 原占 0.45.510（b628aa62），与先提交的 cfa3e004 撞号（该占位曾被 ed9c46b2 误删），按「先提交者保号」改到 511。
