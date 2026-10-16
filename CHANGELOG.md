@@ -85,6 +85,7 @@
 
 ### Tests
 - 新 `tests/test_quarantine_1014_prev_session.py`（10）：名单恰好 29 只 × 量比、BILI × 动量，JNJ 与其余动量不在内；通道 / Agent 评分 / `sentiment.pct` / 波动 / F&G 不隔离；不是协议排除日；T+7 按 backtester 日历 = 10-23 晚于登记日；生产形状夹具（30 只真实代码）下 H1 丢 10-14、保 10-15，**删掉条目该日回来**（对照），H2 不受影响。
+- 全量（恢复后的最终树 `064bf7ae`，`--deselect` 设计内定期红的 `TestCoverageHorizon`）：**9895 passed、2 xfailed、0 failed、0 error**。
 - ⚠️ **被并行提交整段撤掉过、已恢复**：`ed9c46b2`（v0.45.509，父提交正是本条的 `9e66aaf1`）的树把本条的 `QUARANTINE` 两条、§13.8、`tests/test_quarantine_1014_prev_session.py` 全部删掉、CHANGELOG 退回占位，提交信息没提——多半是那边工作区里的旧文件盖了上来。核对：那次提交后 `signal_archive.py` / 预注册与 508 之前逐字节相同 ⇒ 509 本身没改这两个文件，本次按 508 版本整文件恢复、CHANGELOG 只换回本条，509 的其余改动未动。撤掉期间（06:14 起）`is_quarantined` 对这 30 行为假；10-14 尚未结算，无影响。
 - 二次检查（同日）：§13.8 / 本条原写「W42 剩 10-13、10-15、10-16」，10-16 当时尚未扫描 ⇒ 改正；`test_registered_before_outcome` 原只比对测试里自写的登记日常量（恒真）⇒ 改为从本文件 0.45.508 标题读登记日、并核对两条条目的版本标记；拨钟审计 `tools/clockshift/audit.py --days 7 --days 45 --days 400` 新红 0；`restore_signal_rows_from_backup.py` 的信号集合随名单多了 `price.volume_ratio` / `price.momentum_5d`——手动工具、按 `--expect` 精确计数且不覆盖已有行，只会更早停下，不改。
 - 变异 7/7 被杀（量比条目失效、漏 XOM、多 JNJ、连带隔离通道、动量不限 BILI、日期错成 10-15、执行器不问隔离）；`PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。
