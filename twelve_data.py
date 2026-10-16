@@ -594,6 +594,10 @@ def fetch_volume_ratio(ticker: str, window: int = 20,
     `end_date` 与 `fetch_daily_closes` 同义：**截至该日（含）**。
     （生产端 `data_pipeline._fill_volume_from_twelvedata` 目前只走实时口径、
     不传这个参数；语义仍与另外两个入口保持一致，免得将来接补跑时又差一根。）
+
+    `as_of`（v0.45.505）：比值末根（`recent_volume` 那根）的日期。收盘后的扫描里它是前一交易日——
+    当日那根被 `_drop_forming_bar` 规则 ① 丢掉（当晚是临时值）；该不该收由调用方按「此刻最近一场
+    已收盘」判（`data_pipeline._fill_volume_from_twelvedata`），本函数只如实报出来。
     """
     # v0.45.125：走 `fetch_bars` 缓存（与 fetch_daily_closes / 尾段三个消费方同键），
     # 只用尾部 `window` 根，多取的不参与计算。
@@ -613,6 +617,7 @@ def fetch_volume_ratio(ticker: str, window: int = 20,
         "volume_ratio": recent_vol / avg_vol,
         "avg_volume": int(avg_vol),
         "recent_volume": int(recent_vol),
+        "as_of": rows[-1]["date"],
     }
 
 

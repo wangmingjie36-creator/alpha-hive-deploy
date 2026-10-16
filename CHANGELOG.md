@@ -40,7 +40,25 @@
 - `ruff check` 改动文件全绿。
 
 
-## [0.45.505] — 2026-10-16 — 占位（进行中：Twelve Data 量比兜底只在末根 = 最近已收盘交易日时采用，否则拒收并告警；输出 volume_as_of）
+## [0.45.505] — 2026-10-16 — Fixed：Twelve Data 量比兜底只在末根 = 「此刻最近一场已收盘」时采用（收盘后扫描里它止于 D-1 ⇒ 拒收、WARNING、`still_missing` ⇒ P2）；收下时输出 `volume_as_of`
+
+用户 2026-10-16 决定的止血方案。病根与证据见 auto-memory `alpha-hive-fallback-not-reached.md`「volume_ratio 的 Twelve Data 回落同样滞后一天」：TD 的当日那根当晚是临时值，被 `twelve_data._drop_forming_bar` 规则 ① 丢掉（**对的，未改**）⇒ ~17:15 ET 的生产扫描里兜底比值止于 D-1，而 yfinance 主路径含 D。归档里兜底仅生效过 2 次（09-15 QCOM / NVDA），都等于 yfinance 止于 D-1 的值；NVDA 报 1.0108，当天实际 0.676（缩量日报成正常量）。免费源里扫描时刻拿得到 D 定稿成交量的：零（CBOE 偏低中位 19%、Massive 免费档 19:00 ET 前 403、Tiingo 21:00 ET 前仍在改），所以是「宁缺」，不是换源。
+
+### Fixed
+- `data_pipeline._fill_volume_from_twelvedata`：比值末根日期 ≠ `_latest_closed_session()` ⇒ 拒收，WARNING 点名标的 / 量比 / TD 末根 / 应有场次，`volume_ratio` 留 None ⇒ 出口回落记 `missing` ⇒ `history_fill_stats().still_missing.volume` ⇒ alert_manager P2（已有通道，未新增告警）。末根缺 `as_of` 或应有场次判不了 ⇒ 同样拒收（不猜）。收下时结果带 `volume_as_of`。
+- 新增 `data_pipeline._latest_closed_session()`：yfinance 主路径窗口会结束的那一天。交易日且已过该场收盘（提前收盘日 13:00）⇒ 当天；盘前 / 盘中 ⇒ 前一交易日；周末 / 假日 ⇒ 之前最近一个交易日。规则全部复用 `portfolio_greeks._expected_session` / `_session_closed` / `_et_now`（唯一一只钟），不另抄交易日算术；先 import `is_trading_day` 证日历可用（那两个 helper 判不了时会静默给值），判不了 ⇒ None + WARNING。
+- 影响面：只在 yfinance 日线失败、走 TD 兜底的那几天，`price.volume_ratio` 从「D-1 的值」变成 None——**更少，不是不同**。盘中 / 盘前 / 周末 / 过了美东午夜的运行，TD 末根就是应有场次，照收（午夜后收到的是 D 的定稿值）。全源失败那一支（`MultiSourceFetcher` 最后防线）经同一出口 `_fill_history_fields`（v0.45.473），一并受闸。
+- **未加 IC 世代边界**（v0.45.463 / 465 先例；待用户确认）。
+
+### Added
+- `twelve_data.fetch_volume_ratio` 结果加 `as_of`（比值末根日期）；纯新增，生产唯一调用方是上面的兜底。
+- `StockData.volume_as_of` + `to_dict()["volume_as_of"]`（照 v0.45.465 `momentum_as_of`）：只由 TD 兜底填，其余来源不填。
+
+### Tests
+- 新 `tests/test_volume_fallback_session_gate.py`（12）：按 09-15 NVDA 形状造夹具（D-1 比值 1.0095 / D 0.6907），走真实 HTTP 解析 + `_drop_forming_bar` + 缓存，**两只钟一起钉**（`twelve_data._et_today` + `portfolio_greeks._et_now`）。覆盖：17:15 ET 拒收（WARNING 文本 + `still_missing` + `by_path` 计数）、全源失败支也受闸、提前收盘日 14:00 拒收 / 12:30 照收、盘中 / 盘前 / 午夜后 / 周末 / 感恩节照收并带 `volume_as_of`、钟不可用拒收、旧形状（无 `as_of`）拒收。
+- `tests/test_volume_ratio_fallback.py`：两个手搓 `fetch_volume_ratio` 返回值的桩补上 `as_of` 并钉住应有场次（旧形状现在会被拒收——那正是闸的一部分）；其余打桩 `_fill_volume_from_twelvedata` 的测试未动、照绿。
+- 变异 9/9 被杀（去闸、从不 / 总是退一场、不返回 `as_of`、`as_of` 取错根、不拷 `volume_as_of`、`to_dict` 漏键、helper 不吞异常、「今天」错一天）；`PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。
+- `tools/clockshift/audit.py --days 7 --days 45 --days 400`：新红 0。ruff 全绿。全量（rebase 到含 v0.45.506 的 main 后）：9781 passed / 1 failed——唯一的红是 `TestCoverageHorizon`（经济日历覆盖期，设计内定期红，干净 main 上同样红）。
 
 ## [0.45.504] — 2026-10-16 — 占位（进行中：扫描在多数标的取不到价格时拒写 predictions / 归档 / 账本、不发布、非零退出并告警；编排器代理探活失败后间隔重探）
 
