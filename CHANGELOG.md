@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.517] — 2026-10-16 — 占位（进行中：09-15 / 09-24 / 09-25 已证实取错窗口的量比与动量登进 QUARANTINE）
+
+## [0.45.516] — 2026-10-16 — 占位（进行中：calculate_put_call_ratio 无数据时不再返回假中性 1.0）
+
 ## [0.45.515] — 2026-10-16 — Added：Alpha Bot 卖权页「六种结构」下方新增「怎么卖」——每种结构的下单腿、推荐价位、标的价位、下单步骤、管理办法与风险
 
 用户反馈：表里只有权利金 / 最大亏损 / 回报 / 盈亏平衡，看不出「这行到底怎么下出去、挂什么价、什么时候收」。点任一结构行，盈亏图下方现在多一栏。
@@ -28,7 +32,30 @@
 - **不改** levels / candidates 既有输出与版本号（预注册样本不被截断）；只读、不写账本；火墙不变（`howto.py` 不 import 卖权模块，经 `service.py` 注入 `structure_quote` 与 `BASE_RUNG`）。
 - 验证：`tests/test_alphabot*.py` + `tests/test_sell_strike_integration.py` 共 454 项通过；`ruff check alphabot` 干净；演示模式浏览器实测（铁鹰 / 卖 put、路由 / 基线切换、帮助页）无控制台错误。
 
-## [0.45.514] — 2026-10-16 — 占位（进行中：删除 pre_scan_notify.py（0.45.510 起零调用方）及其 Slack 白名单登记 / 测试）
+## [0.45.514] — 2026-10-16 — Removed：删除 `pre_scan_notify.py`（v0.45.510 起零调用方）及其 Slack 白名单登记 / 测试；Slack 发送方从两个减为一个
+
+### 删了什么
+- `pre_scan_notify.py`（362 行）：扫描前 Slack 确认（Bot 私信 + 轮询回复）。v0.45.510 起编排器不再调用（每天 launchd 自己跑、Webhook 早已 404、没人回复）。
+  **顺带删掉了一个持久开关的唯一读者**：它读 `~/.alpha_hive_llm_mode`（写 `"always"` 可常开 LLM）。全仓核实没有别的读者，该开关随之消失
+  ——这是「编排器里没有任何路径能打开 LLM」的最后一块。
+- `tests/test_slack_notifier.py::TestPreScanWebhookFallback`（2 条，测它的 webhook 兜底）。
+- `tests/test_slack_send_whitelist.py`：`ALLOWED_SENDERS` 去掉它（只剩 `push_report_to_slack.py`）；扫描器「不该报」夹具里借用它名字的那条改用 `push_report_to_slack.py`。
+- 文档 / 注释：`CLAUDE.md`（Slack 两节）、`QUICK_START.md`、`SLACK_INTEGRATION_GUIDE.md`、`push_report_to_slack.py` 与 `slack_report_notifier.py` 的 docstring、`tests/conftest.py` 注释。
+  编排器里两处历史说明注释（解释为什么去掉确认）保留原样：改它们会再触发一次部署周期，而守卫只忽略整行注释、不影响。
+
+### Added（墓碑）
+- `tests/test_slack_send_whitelist.py::TestPreScanNotifyStaysRetired`（2 条）：文件不存在；全仓 Python 里没有 `import pre_scan_notify`（认 AST import，说明文字 / 注释提名字不算）。
+- **真跑变异**（Python 驱动、`PYTHONDONTWRITEBYTECODE=1`、还原后 sha256 一致、基线 53/53）：M1 把文件放回去 ⇒ `test_module_file_is_gone` 红；
+  M2 别的模块 `import pre_scan_notify` ⇒ `test_nothing_imports_it` 红；M3 只在注释里提名字 ⇒ **不红**（设计如此）；
+  M4 把它重新登记进 `ALLOWED_SENDERS`（文件不在）⇒ 既有的 `test_every_whitelisted_module_is_still_seen_sending` 红。
+
+### 验证
+- 全套：9914 passed、1 failed（已知的 `TestCoverageHorizon`）、84 deselected、2 xfailed、1 ERROR。
+- ⚠️ 那个 ERROR 是**真实数据根闸**（session 级，记在收集序最后一条测试名下）：`alphabot_state/intraday/2026-10-16` 下 5 张快照被追加，
+  mtime 散落在互不相关的编排器测试里，今天是交易日盘中、Alpha Bot 进程在跑——并发写入者，不是本版造成（闸自己的说明也是「等这批写完重跑」）。
+  对被 ERROR 点名的 `test_zero_weight_invariant` 与全部相关文件（白名单 / 通知器 / 编排器守卫 / 冻结路径 / 数据根 / 未定义名 / CHANGELOG）单独重跑：278 passed、无 ERROR。
+  没有等收盘后重跑全套——判断依据是上述三条（只在 alphabot_state、时间散落、进程在跑），**未做「收盘后全套零 ERROR」这一步，如实记在这里**。
+
 
 ## [0.45.513] — 2026-10-16 — Fixed：`earnings_vol_signal` 零快照诊断不再把缺省数据根说成「回落到代码目录」（照 v0.45.384 二次检查 #3 的 `vrp_signal` 修法）；同形假病因 `data_backup` 导出 / 备份拒绝文案两处 + 文档两处一并更正
 

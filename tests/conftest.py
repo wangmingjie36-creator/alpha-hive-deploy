@@ -628,7 +628,7 @@ def _block_slack(monkeypatch):
       ③ `get_session` 换成记录器 —— 掐掉 `slack_report_notifier` 里每一处
          `get_session("slack").post`，并**兼作观测点**：teardown 断言没有任何测试试图发送。
          （v0.45.341 起只剩这一个模块：`slack_notifier.py` 已删，它的发送面随之消失；
-         `pre_scan_notify` 直接 `requests.post`，由 `_offline_transport` 的库级闸兜住。）
+         曾有的 `pre_scan_notify` 直接 `requests.post`、由 `_offline_transport` 的库级闸兜住——该模块 v0.45.514 已删。）
          没有③的话，将来谁把 `enabled` 又弄成 True，①②会静默失效而没人知道
          （与本文件 `_isolate_paper_portfolio_state`「默认重绑 + teardown
          核对真身」同构，也是 CLAUDE.md「这个失败，下游怎么知道？」那条）。

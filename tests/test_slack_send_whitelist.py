@@ -1,8 +1,8 @@
-"""Slack 发送白名单：只有两个模块许发起 Slack 发送（v0.45.339）。
+"""Slack 发送白名单：只有一个模块许发起 Slack 发送（v0.45.339；v0.45.514 起从两个减为一个）。
 
-CLAUDE.md「Slack 通知精简规则」：Bot **只发两类消息** ——
-  ① 扫描前 LLM 模式确认（`pre_scan_notify.py`）
-  ② 富文本日报推送（`push_report_to_slack.py`）
+CLAUDE.md「Slack 通知精简规则」：Bot **只发一类消息** ——
+  富文本日报推送（`push_report_to_slack.py`）
+（原第二类「扫描前 LLM 模式确认」`pre_scan_notify.py` 已于 v0.45.510 停用、v0.45.514 删除；墓碑见本文件 `TestPreScanNotifyStaysRetired`。）
 其余（扫描开始/完成、SLO、权重更新、数据质量降级、逐标的高分/低分预警、扫描失败）
 **只进本地日志**。
 
@@ -47,7 +47,7 @@ CLAUDE.md「Slack 通知精简规则」：Bot **只发两类消息** ——
 conftest 的 `_block_slack` 仍在底下兜底（它的记录器会被本文件的覆盖，但 ①② 两道闸不变）。
 
 ⚠️ 已知盲区：编排器（v0.45.353 起在仓库 `scripts/alpha-hive-orchestrator.sh`）是 bash，本守卫只做 Python AST，扫不到。
-2026-09-23 人工核对：它只调 `pre_scan_notify.py` / `push_report_to_slack.py` /
+2026-09-23 人工核对（当时还调 `pre_scan_notify.py`，v0.45.514 已删）：它只调 `push_report_to_slack.py` /
 不带 `--dispatch` 的 `alert_manager.py`，没有 curl 到 Slack 的行。
 """
 from __future__ import annotations
@@ -66,8 +66,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent   # 指向**代码**，故用
 
 #: 唯一允许**发起** Slack 发送的模块（相对仓库根）→ 它发的是规则里哪一类。
 ALLOWED_SENDERS = {
-    "pre_scan_notify.py": "① 扫描前 LLM 模式确认（Bot 私信 + 轮询回复）",
-    "push_report_to_slack.py": "② 富文本日报推送",
+    "push_report_to_slack.py": "富文本日报推送",
 }
 
 #: 发送器库：模块 → 类名。**类体内部**的调用是实现（`send_plain_text` 调
@@ -521,7 +520,7 @@ _MUST_NOT_FLAG = {
     "只读状态": ("run_daily_scan.py",
              "from slack_report_notifier import SlackReportNotifier\n"
              "n = SlackReportNotifier()\nprint(n.enabled, n.use_user_token)\n"),
-    "白名单模块": ("pre_scan_notify.py",
+    "白名单模块": ("push_report_to_slack.py",
               "requests.post('https://slack.com/api/chat.postMessage', json={})\n"),
     "库类体内部": ("slack_report_notifier.py",
                "class SlackReportNotifier:\n"
@@ -801,3 +800,36 @@ class TestBreakerDoesNotDeadlock:
             "slack_breaker.record_failure 没有返回 —— 持锁发 Slack 的自死锁回来了")
         assert br.state == resilience.CircuitBreaker.OPEN
         assert armed_slack.attempts == []
+
+
+class TestPreScanNotifyStaysRetired:
+    """墓碑（v0.45.514）：`pre_scan_notify.py` 已删，别让它悄悄回来。
+
+    它是第二个合法发送方（扫描前 LLM 模式确认：Bot 私信 + 轮询回复），v0.45.510 起编排器不再调用——
+    每天 launchd 自己跑、Slack Webhook 早已 404、没人回复，只是空等 10 分钟；v0.45.514 连模块一起删。
+    随它一并删掉的还有 `~/.alpha_hive_llm_mode`（写 "always" 可常开 LLM）这个持久开关的唯一读者。
+    重新引入「扫描前确认」就是重新引入一条能打开 LLM 的路径——先过 `test_orchestrator_never_enables_llm` 与费用约定。
+    """
+
+    def test_module_file_is_gone(self):
+        assert not (REPO_ROOT / "pre_scan_notify.py").exists(), "pre_scan_notify.py 又回来了（v0.45.514 已删）"
+
+    def test_nothing_imports_it(self):
+        """AST 认 import（说明文字 / 注释里提它的名字不算）。"""
+        files, _how = own_python_files(REPO_ROOT)
+        offenders = []
+        for f in files:
+            rel = f.relative_to(REPO_ROOT).as_posix()
+            if rel == Path(__file__).relative_to(REPO_ROOT).as_posix():
+                continue
+            try:
+                tree = ast.parse(f.read_text(encoding="utf-8", errors="replace"))
+            except SyntaxError:
+                continue
+            for n in ast.walk(tree):
+                names = ([a.name for a in n.names] if isinstance(n, ast.Import)
+                         else [n.module or ""] if isinstance(n, ast.ImportFrom) else [])
+                if any(x.split(".")[0] == "pre_scan_notify" for x in names):
+                    offenders.append(f"{rel}:{n.lineno}")
+        assert not offenders, offenders
+
