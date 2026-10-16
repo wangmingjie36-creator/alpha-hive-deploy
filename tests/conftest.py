@@ -581,6 +581,21 @@ def stub_yfinance(monkeypatch):
     monkeypatch.setattr(yfinance, "Ticker", _OfflineTicker)
     monkeypatch.setattr(yfinance, "download", _raise_offline("yfinance.download"))
 
+    # v0.45.524：yfinance 被钉成**立即**失败后，消费它的模块照样按生产退避节奏重试，
+    # 每次 analyze 白睡 2×(0.7+1.4) 秒（整套里十几条恰好 4.2 秒的测试就是这个）。
+    # 只换**点名**的接缝（`tests/_retry_seams.py`），不碰全局 `time.sleep`；
+    # 生产配置下的退避节奏由 tests/test_retry_backoff_seams.py 钉住。
+    # 返回值是记录 [(模块, 秒)]——想断言退避的测试直接拿来用；
+    # 要真睡的测试在函数体里把 `_retry_sleep` 再 setattr 回去即可（后设的赢）。
+    import importlib
+    from tests._retry_seams import YF_RETRY_SLEEP_SEAMS
+    slept = []
+    for name in YF_RETRY_SLEEP_SEAMS:
+        mod = importlib.import_module(name)
+        assert callable(getattr(mod, "_retry_sleep", None)), f"{name} 缺退避接缝 _retry_sleep"
+        monkeypatch.setattr(mod, "_retry_sleep", lambda s, _n=name: slept.append((_n, s)))
+    return slept
+
 
 @pytest.fixture
 def offline_gate_blocked(request):

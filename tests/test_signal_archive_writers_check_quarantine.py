@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import _ast_cache
+
 ROOT = Path(__file__).resolve().parent.parent
 
 _WRITE = re.compile(r"\b(?:INSERT|REPLACE)\b(?:\s+OR\s+\w+)?\s+INTO\s+[\"'`]?(\{[^}]*\}|\w+)", re.I)
@@ -40,7 +42,7 @@ def _tracked_py():
 
 def _scan_source(src: str):
     """→ (写入目标集合, 是否引用 is_quarantined)。"""
-    tree = ast.parse(src)
+    tree = _ast_cache.parse(src)
     targets = set()
     refs = False
     for n in ast.walk(tree):
@@ -64,7 +66,7 @@ def _is_candidate(src: str, targets) -> bool:
 def _scan_repo():
     cands = {}
     for rel in _tracked_py():
-        src = (ROOT / rel).read_text(encoding="utf-8")
+        src = _ast_cache.read_text(ROOT / rel)
         targets, refs = _scan_source(src)
         if targets and _is_candidate(src, targets):
             cands[rel] = refs

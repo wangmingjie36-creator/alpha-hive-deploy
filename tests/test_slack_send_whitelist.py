@@ -61,6 +61,7 @@ from pathlib import Path
 import pytest
 
 from tests._repo_files import own_python_files
+from tests import _ast_cache
 
 REPO_ROOT = Path(__file__).resolve().parent.parent   # 指向**代码**，故用 __file__
 
@@ -191,7 +192,7 @@ def _scan_source(src: str, rel: str, specs: dict, allowed=None) -> list[tuple[st
     allowed = ALLOWED_SENDERS if allowed is None else allowed
     if rel in allowed:
         return []
-    tree = ast.parse(src)
+    tree = _ast_cache.parse(src)
     skip = _docstring_nodes(tree)
     hits: list[tuple[str, int, str]] = []
 
@@ -280,7 +281,7 @@ def _scan_repo(root: Path = REPO_ROOT, allowed=None) -> list[tuple[str, int, str
         if rel_p.parts[0] in _SKIP_TOP:
             continue
         try:
-            src = py.read_text(encoding="utf-8")
+            src = _ast_cache.read_text(py)
             hits += _scan_source(src, rel_p.as_posix(), specs, allowed)
         except (SyntaxError, UnicodeDecodeError) as e:   # 扫不了就红，别静默跳过
             hits.append((rel_p.as_posix(), 0, f"无法解析：{e!r}"))
@@ -347,7 +348,7 @@ class TestOnlyWhitelistedModulesSend:
         **还没 `git add` 的文件它看不见** —— 实测把该文件原样写回，`test_only_whitelisted_modules_send`
         照样绿，只有这里红。提交后全仓扫描才会接着以 R4/R6 报它（见 teeth 用例「复活的 slack_notifier.py」）。
         """
-        tree = ast.parse((REPO_ROOT / "slack_report_notifier.py").read_text(encoding="utf-8"))
+        tree = _ast_cache.parse_file(REPO_ROOT / "slack_report_notifier.py")
         cls = next(n for n in tree.body
                    if isinstance(n, ast.ClassDef) and n.name == "SlackReportNotifier")
         members = {f.name for f in cls.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))}
@@ -823,7 +824,7 @@ class TestPreScanNotifyStaysRetired:
             if rel == Path(__file__).relative_to(REPO_ROOT).as_posix():
                 continue
             try:
-                tree = ast.parse(f.read_text(encoding="utf-8", errors="replace"))
+                tree = _ast_cache.parse_file(f, errors="replace")
             except SyntaxError:
                 continue
             for n in ast.walk(tree):

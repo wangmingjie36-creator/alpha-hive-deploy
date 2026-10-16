@@ -41,6 +41,7 @@ import scan_timing
 import sell_strike_ledger as LG
 import sell_strike_report as R
 from tests._repo_files import own_python_files
+from tests import _ast_cache
 from tests.test_sell_strike_ledger import _persist, _raw, _ready_ledger_rows
 
 REPO = Path(__file__).resolve().parent.parent        # 指向**代码**，故用 __file__
@@ -174,7 +175,7 @@ class TestFirewallInward:
         scanned = _scan_new_modules()
         assert set(scanned) == set(NEW_MODULES), f"扫到的是 {sorted(scanned)}"
         for name in NEW_MODULES:
-            tree = ast.parse((REPO / name).read_text(encoding="utf-8"))
+            tree = _ast_cache.parse_file(REPO / name)
             assert _imports(tree), f"{name} 一条 import 都没扫到——探针坏了，不是「没有违规」"
         # ledger 确实 import 了下两层：层序判定有输入可判
         ledger_imports = {n for n, _l, _ in _imports(ast.parse((REPO / "sell_strike_ledger.py")
@@ -239,7 +240,7 @@ def sell_strike_importers(root=REPO):
             continue                                   # 四层自己互相 import 是正当的
         n += 1
         try:
-            tree = ast.parse(py.read_text(encoding="utf-8"))
+            tree = _ast_cache.parse_file(py)
         except (SyntaxError, UnicodeDecodeError, ValueError):
             unparsable.append(str(rel))                # 看不了 ≠ 没违规：记下来，下面断言它为空
             continue
@@ -343,7 +344,7 @@ def token_refs(token: str, root=REPO):
             continue
         n += 1
         try:
-            tree = ast.parse(py.read_text(encoding="utf-8"))
+            tree = _ast_cache.parse_file(py)
         except (SyntaxError, UnicodeDecodeError, ValueError):
             unparsable.append(str(rel))
             continue
@@ -621,7 +622,7 @@ class TestHookRecordsWithoutTouchingDailyMarkdown:
         卖权模块的那段）在前、本地报告一段在后（F2-7：报告失败不得吞掉账本日志与 0 行告警）；
         每段都 `except Exception` 兜住、都不碰 `report`；整个日报模块不调用卖权的 `render_markdown`。
         变异：同上两条 + 把 `except Exception` 收窄成 `except ImportError` / 报告写回账本那段里。"""
-        tree = ast.parse(DAILY.read_text(encoding="utf-8"))
+        tree = _ast_cache.parse_file(DAILY)
         notify_fn = next(n for n in ast.walk(tree)
                          if isinstance(n, ast.FunctionDef) and n.name == "_post_scan_notify")
 
@@ -679,7 +680,7 @@ class TestHookIsTheOnlyFreezeWriter:
         `write_local_report` 调用上一处（MCP 一处都没有）。变异：MCP 路径传 freeze=True / 钩子不传。"""
         hits = []
         for rel in sorted(ALLOWED_IMPORTERS):
-            for n in ast.walk(ast.parse((REPO / rel).read_text(encoding="utf-8"))):
+            for n in ast.walk(_ast_cache.parse_file(REPO / rel)):
                 if isinstance(n, ast.Call) and any(k.arg == "freeze" and isinstance(k.value, ast.Constant)
                                                    and k.value.value is True for k in n.keywords):
                     hits.append((rel, getattr(n.func, "attr", getattr(n.func, "id", "?"))))

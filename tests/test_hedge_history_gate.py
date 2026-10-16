@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _repo_files import own_python_files  # noqa: E402
+from tests import _ast_cache  # noqa: E402
 #: v0.45.442 补 `_load_audit`（按日期读 greeks_<日期>.json，绕过放行判定；独立审阅指出）。
 HISTORY_NAMES = frozenset({"STATE_DIR", "TRADES_FILE", "EQUITY_FILE", "POSITIONS_FILE", "META_FILE",
                            "_load_jsonl", "_load_audit"})
@@ -47,7 +48,7 @@ def _docstring_nodes(tree: ast.AST) -> set:
 
 def scan_source(src: str) -> list:
     """一段源码里碰 `hedge_state/` 历史的地方（行号 + 形状）；空列表 = 没碰。"""
-    tree = ast.parse(src)
+    tree = _ast_cache.parse(src)
     docs = _docstring_nodes(tree)
     aliases = set()
     hits = []
@@ -86,7 +87,7 @@ def _scan_repo() -> dict:
     found = {}
     for rel, p in _py_files():
         try:
-            hits = scan_source(p.read_text(encoding="utf-8"))
+            hits = scan_source(_ast_cache.read_text(p))
         except (SyntaxError, UnicodeDecodeError):
             continue
         if hits:

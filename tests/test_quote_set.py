@@ -56,6 +56,11 @@ def _offline(monkeypatch):
     #    直接给「空 + 一条错因」，与生产里真取不到时的形状一致。
     monkeypatch.setattr(options_analyzer.OptionsAnalyzer, "_iv_term_points_yfinance",
                         staticmethod(lambda ticker, stock_price: ([], ["offline: 本文件禁止出网"])))
+    # ③b 同理：`calculate_iv_rv_spread` 的 yfinance 日K 重试会在 ② 抛异常后真睡 0.7+1.4 秒。
+    #    只换它的退避接缝（v0.45.524，`tests/_retry_seams.py`），不碰全局 time.sleep；
+    #    退避在生产配置下仍然真睡，由 tests/test_retry_backoff_seams.py 钉住。
+    import market_intelligence
+    monkeypatch.setattr(market_intelligence, "_retry_sleep", lambda _s: None)
 
     # ④ teardown 核对真的没出网。没有④的话，将来 analyze 再多一条取数支路，
     #    ①②③ 会静默失效而没人知道——正是本次要修的那个形状本身。与 conftest 里

@@ -35,6 +35,19 @@ except ImportError:
     _opt_cb = None
     NETWORK_ERRORS = (ConnectionError, TimeoutError, OSError, ValueError, KeyError)
 
+
+def _retry_sleep(seconds: float) -> None:
+    """取数失败后的重试退避等待——**测试注入接缝**（v0.45.524），生产行为不变。
+
+    生产就是 `time.sleep(seconds)`，且在**调用时**查找 `time.sleep`，所以既有的
+    `monkeypatch.setattr(time, "sleep", …)` 照样生效。测试里 yfinance 被
+    `stub_yfinance` 钉成立即失败，每次 analyze 都会在这里白睡 0.7+1.4 秒；
+    `tests/conftest.py::stub_yfinance` 把本函数换成记录器。退避间隔本身由
+    `tests/test_retry_backoff_seams.py` 在生产配置下钉住——接缝若被改成什么都不做，那里会红。
+    """
+    import time
+    time.sleep(seconds)
+
 try:
     from hive_logger import FeatureRegistry
     FeatureRegistry.register("yfinance_options", yf is not None,
@@ -415,8 +428,7 @@ class OptionsDataFetcher:
                         break  # 成功则跳出重试
                     except (*NETWORK_ERRORS, TypeError) as e:
                         if _retry < 2:
-                            import time as _time
-                            _time.sleep(1.0 * (2 ** _retry))  # 1s, 2s 指数退避
+                            _retry_sleep(1.0 * (2 ** _retry))  # 1s, 2s 指数退避
                             continue
                         _log.warning("获取 %s %s 期权链失败（重试耗尽）：%s", ticker, expiry, e)
                         break
@@ -1249,8 +1261,6 @@ class OptionsAnalyzer:
         见 http_gate docstring）。失败原因逐条回传，**不再 `except: continue`
         静默丢弃**。
         """
-        import time
-
         errors: List[str] = []
         if yf is None:
             return [], ["yfinance 未安装"]
@@ -1272,7 +1282,7 @@ class OptionsAnalyzer:
                 except Exception as e:  # noqa: BLE001
                     last = e
                     if attempt < retries:
-                        time.sleep(0.7 * (attempt + 1))
+                        _retry_sleep(0.7 * (attempt + 1))
             errors.append(f"{what}:{type(last).__name__}:{last}")
             return None
 

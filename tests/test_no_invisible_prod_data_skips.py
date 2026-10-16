@@ -45,6 +45,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._ast_cache import SourceSegments
+
 TESTS_DIR = Path(__file__).resolve().parent
 
 # git 忽略的生产产物 —— 「只在一台机器上存在」的那些。
@@ -98,9 +100,12 @@ def invisible_prod_skips(source: str, filename: str = "<test>") -> list[str]:
     """
     tree = ast.parse(source, filename=filename)
     hits: list[str] = []
+    # 与 ast.get_source_segment 逐字节相同，但只切一次行（v0.45.524：逐函数调标准库版
+    # 是平方级，本守卫单条 27.7 秒里 96% 花在反复切行上；对账在 tests/test_ast_cache.py）
+    segments = SourceSegments(source)
 
     def mentions_prod(node) -> bool:
-        seg = ast.get_source_segment(source, node) or ""
+        seg = segments.get(node) or ""
         return any(tok in seg for tok in PROD_ARTIFACT_TOKENS)
 
     # ① 模块级 pytestmark
@@ -110,7 +115,7 @@ def invisible_prod_skips(source: str, filename: str = "<test>") -> list[str]:
         if not any(isinstance(t, ast.Name) and t.id == "pytestmark"
                    for t in node.targets):
             continue
-        seg = ast.get_source_segment(source, node) or ""
+        seg = segments.get(node) or ""
         if "skipif" in seg and any(tok in seg for tok in PROD_ARTIFACT_TOKENS):
             hits.append(
                 f"{filename}:{node.lineno} 模块级 pytestmark=skipif 依赖生产产物"
@@ -130,7 +135,7 @@ def invisible_prod_skips(source: str, filename: str = "<test>") -> list[str]:
                 continue        # 条件性已经写在 marker 上 —— 正是我们要的形状
             for dec in fn.decorator_list:
                 if mentions_prod(dec) and "skipif" in (
-                        ast.get_source_segment(source, dec) or ""):
+                        segments.get(dec) or ""):
                     hits.append(
                         f"{filename}:{dec.lineno} {cls_name}{fn.name} "
                         "的 @skipif 依赖生产产物，却没标 integration"

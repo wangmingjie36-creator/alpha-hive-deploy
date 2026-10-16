@@ -30,6 +30,7 @@ import data_pipeline as dp
 import price_history as ph
 from hive_logger import PATHS
 from tests._repo_files import own_python_files
+from tests import _ast_cache
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -245,7 +246,7 @@ def _scan_cwd_relative_defaults(root: Path = REPO_ROOT, _stats=None) -> set:
         if rel.parts[0] in _EXCLUDED_TOP:
             continue
         try:
-            tree = ast.parse(p.read_text(encoding="utf-8"))
+            tree = _ast_cache.parse_file(p)
         except (UnicodeDecodeError, SyntaxError, OSError):
             unreadable.append(rel.as_posix())
             continue

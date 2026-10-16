@@ -28,7 +28,8 @@ jobs:
   # （本仓头号故障形状：把失败改写成没发生过）、4 个是让每次 pytest 都刷
   # `DeprecationWarning: invalid escape sequence` 的 W605。
   #
-  # 独立成 job 而不是塞进 pytest：lint 30 秒出结果，pytest 要 4 分钟，
+  # 独立成 job 而不是塞进 pytest：lint 30 秒出结果，pytest 要近十分钟（2026-10 约 1 万条，
+  # 耗时以 Actions 页面为准；v0.45.524 前一度约 12 分钟），
   # 分开后「代码有 lint 错」和「测试挂了」在 Actions 页面上是两个格子，不用点进日志区分。
   # 刻意**不加** `needs:` —— 让它和 pytest 并行；lint 红不该挡住看测试结果。
   ruff:
@@ -46,6 +47,9 @@ jobs:
 
   pytest:
     runs-on: ubuntu-latest
+    # 整套耗时随「走到真睡 / 全仓 AST 扫描的测试」增长，不随测试条数（v0.45.524 实测：
+    # 93% 的测试 <0.1 秒）。逼近上限时先查 `--durations`，别直接调大：
+    # 真睡走 tests/_retry_seams.py 那种窄接缝，全仓解析走 tests/_ast_cache.py。
     timeout-minutes: 20
 
     steps:

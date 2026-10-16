@@ -49,6 +49,7 @@ import ast
 from pathlib import Path
 
 from tests._repo_files import own_python_files
+from tests import _ast_cache
 
 REPO_ROOT = Path(__file__).resolve().parent.parent   # 指向**代码**，故用 __file__
 
@@ -88,7 +89,7 @@ def _scan(root=None) -> set[str]:
         if path.parent.name != "tests":
             continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = _ast_cache.parse_file(path)
         except (OSError, SyntaxError):       # pragma: no cover - 读不了就不该静默算作"干净"
             raise
         for node in ast.walk(tree):

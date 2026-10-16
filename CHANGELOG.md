@@ -41,7 +41,34 @@ v0.45.522 报的 52 行里，06-17 VKTX / CRCL 两行已由 522 清掉，余 50 
 - 变异 5/5 被杀（只在本条目内改）：日期错、漏标的、AMC 日期挪到真实日、BIIB 日期错、连坐 P/C。
 - 全量（rebase 到 0e691475 后）：10030 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加，不是测试写的。ruff 全绿。
 
-## [0.45.524] — 2026-10-16 — 占位（进行中：测试套件提速——生产 sleep 注入接缝 + AST 守卫会话级解析缓存，不削弱任何守卫）
+## [0.45.524] — 2026-10-16 — Changed：测试套件提速（本机整套 790.8s → 562.0s，−29%）——生产退避改走窄注入接缝、全仓 AST 守卫共用会话级解析缓存；不削弱任何守卫
+
+起因：整套约 1 万条、CI 11–13 分钟，问「再加测试会不会越来越慢」。实测**不是条数的问题**：CI run 38923628786 里 93% 的测试 <0.1 秒，≥1 秒的 642 条占了 63% 的时间。本机 profile（给 `time.sleep` / `ast.parse` 挂计时、逐测试归因）找到两类：
+
+1. **测试里真睡生产退避**：进程内 sleep 共 124 秒，其中 108.5 秒恰是三处——`market_intelligence.calculate_iv_rv_spread` 的 yfinance 日K 重试（61 秒）、`OptionsAnalyzer._iv_term_points_yfinance._gated`（27 秒）、`report_deployer.commit_and_push_gh_pages` 推送重试（20 秒）。conftest 的 `stub_yfinance` 让 yfinance **立即**失败，生产照样按 0.7+1.4 秒退避——十几条恰好 4.2 秒的测试就是两处各 2.1 秒。另有 `vol_forecast.load_day` 的锁冲突测试真等 sqlite 缺省忙等 5 秒。
+2. **全仓 AST 守卫各自重解析全仓**：全仓一次 `ast.parse` 本机 2–3 秒，`test_paths_not_frozen_at_import` 的 `_scan()` 一个文件里被调 18 次。另：`test_no_invisible_prod_data_skips` 单条 22–28 秒**不是解析**，是对每个函数调 `ast.get_source_segment`——它每次把整份源码逐字符重新切行，平方级（cProfile：96% 在 `_splitlines_no_ff`）。
+
+### Added
+- `tests/_ast_cache.py`：会话级解析缓存。**键是源码全文**（不是 mtime/size——Linux 粗粒度 mtime 会撞，全文键不可能给出陈旧的树）；只缓存经 `_ast_cache.read_text()` 从**仓库根之内**读到的全文，tmp 合成树、有牙测试手写的样本、读完又改过的变异串一律直通 `ast.parse`（这样各守卫「吃源码串」的辅助函数不用改签名就自动分流）。`SyntaxError` 不缓存。另有 `SourceSegments`：切一次行、按节点取段，与 `ast.get_source_segment` 逐字节相同。⚠️ 返回的树会话内共享，**只读**。全仓（含 tests/）都缓存约 500 MB，守卫多只扫生产文件，实际约一半。
+- `tests/test_ast_cache.py`：对账——最大的 5 个真实文件缓存树 == 新解析树（`include_attributes=True`）；同路径内容变了拿新树；仓库外 / 未登记串直通；SyntaxError 与解码错照抛；`SourceSegments` 对 3 个真实文件的**每个**节点（>1000）及 CRLF / 单 CR / form feed / 中文与 `ast.get_source_segment` 逐字节相同。
+- `tests/_retry_seams.py`：退避接缝登记表；`tests/test_retry_backoff_seams.py`：**生产配置下**钉两半——① 每个接缝把秒数原样交给 `time.sleep` 且真耗墙钟（不打桩）；② 重试循环按原节奏调接缝（`_gated` 0.7/1.4、期权链 1/2 每到期日、日K 0.7/1.4）；外加「仓库里定义了 `_retry_sleep` 的模块都在登记表里」。没有这个文件，接缝被改成空函数时**没有任何测试会红**（别的测试都把它换掉了）。
+
+### Changed
+- `options_analyzer` / `market_intelligence` / `report_deployer`：新增模块级 `_retry_sleep(seconds)`，重试退避改走它。生产 = **调用时**查找的 `time.sleep`，行为不变；不写成 `_sleep = time.sleep` 是因为 `test_gh_pages_unverified_parent` 等既有测试 patch 的是全局 `time.sleep`，导入期绑定会让它们静默失效。顺手删了因此不再使用的局部 `import time`。
+- `vol_forecast.load_day`：`sqlite3.connect(..., timeout=_BUSY_TIMEOUT_S)`，常量 5.0 = sqlite3 缺省值（原先隐式）。锁冲突测试把它调到 0.05；新增两条：生产值是 5.0、`load_day` 真按它忙等（调到 0.3 时实测 ≥0.25 秒才抛）。
+- `tests/conftest.py::stub_yfinance`：同时把登记表里 yfinance 消费模块的 `_retry_sleep` 换成记录器并返回记录 `[(模块, 秒)]`。只换**点名**接缝，不碰全局 `time.sleep`——`test_root_data_guard` 的 `_SETTLE`、clockshift、`test_ic_rerun_fg_budget`、`test_ghpages_data_root_migration` 都靠真睡。
+- `tests/test_pipeline.py` 两条推送重试测试、`test_twelve_data` 的 yfinance 回落测试：点名替换接缝，**并新增退避节奏断言**（`[2,4]` / `[2,4,8]` / `[0.7,1.4]`，此前只数调用次数）；`test_quote_set::_offline` 同样替换 `market_intelligence._retry_sleep`。
+- 13 个全仓 AST 守卫改用 `_ast_cache`（`test_paths_not_frozen_at_import` / `test_git_failures_are_visible` / `test_gex_oracle_bear_neutralized` / `test_slack_send_whitelist` / `test_sell_strike_integration` / `test_zero_weight_invariant` / `test_gex_modifier_disconnected` / `test_hedge_history_gate` / `test_earnings_calendar` / `test_signal_archive_writers_check_quarantine` / `test_price_history_default_paths` / `test_network_marker_discipline` / `test_non_swarm_scan_retired`），纯机械替换 `ast.parse(p.read_text(encoding=…))` → `_ast_cache.parse_file(p)`、读 / 解析两步的换成 `read_text` + `parse`；`test_no_invisible_prod_data_skips` 改用 `SourceSegments`（单条 22 秒 → 1.4 秒）。
+- `.github/workflows/tests.yml`：「pytest 要 4 分钟」的陈旧注释改掉；`timeout-minutes: 20` 旁注明耗时随什么增长、逼近时先查什么。
+
+### 验证
+- 本机整套（`--maxfail=1000`，同机同时有别的会话在跑整套，数字有噪声）：前 790.8s / 10027 passed → 后 562.0s / 10051 passed；测试耗时和 775s → 540s；≥4 秒的测试 23 → 6，≥1 秒 225 → 115。后一轮尚不含 `test_quote_set` / `test_twelve_data` 的接缝替换（两文件再省约 25 秒，单跑 0.85 秒）。两轮都只有已知的 `TestCoverageHorizon` 红；另各有一条真实数据根闸 ERROR，均为并发写者：前一轮是 Alpha Bot 盘中采样追加 `alphabot_state/intraday/*.jsonl`，后一轮是用户 09:24 执行 v0.45.521 `relabel_nyse_calendar --apply`（pheromone.db + 快照 256 处）。
+- 变异（改真文件、跑、还原）：`options_analyzer._retry_sleep` 掏空 → `test_seam_*` 2 红；`market_intelligence` 循环不再调接缝 → 节奏测试红；`report_deployer` 退避 ×0 → `test_pipeline` 2 红。往 `vol_forecast.py` 同时注入模块级 `PATHS` 冻结、`run_git_cmd('git reset --hard …')`、`QueenDistiller(adapted_weights=…)`、`gamma_exposure` 比较、`import pre_scan_notify`、`import sell_strike_ledger`，并新建一个模块级 `skipif(pheromone.db)` 的测试文件 → 7 个守卫文件 9 条全红；各守卫原有的有牙测试照常绿。
+- CI：见下一条跟进记录（推送后测）。
+
+### Notes
+- **没做**：`pytest-xdist`（会话级的数据根 / 仓库根 / 时间线闸都假设单进程，需单独评估）；`test_guard_census_eviction::test_get_live_signals_identical_under_any_max_entries`（11.5 秒）是生产 `pheromone_board.publish` 逐条全量扫描的平方级耗时，不是测试的问题，改生产算法不在本次范围。剩余的进程内 sleep（约 15 秒）都是刻意的：超时 / 截止时间 / 锁争用 / 启动器就绪等待测试。
+- 新写全仓 AST 守卫：读用 `_ast_cache.read_text` / `parse_file`，**别**对缓存来的树做任何修改。新增带退避的取数模块：照 `_retry_sleep` 的写法加接缝并登记进 `tests/_retry_seams.py`（`test_registry_lists_every_module_that_defines_the_seam` 会逼你登记）。
 
 ## [0.45.523] — 2026-10-16 — Fixed：`.claude/launch.json` 的 `dashboard` 预览端口 8765 → 8770，不再和 Alpha Bot 抢端口
 

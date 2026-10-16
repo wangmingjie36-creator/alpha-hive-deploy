@@ -34,6 +34,7 @@ import paper_portfolio
 from hive_logger import PATHS
 
 
+from tests import _ast_cache
 from tests._repo_files import VENDORED, own_python_files
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -264,7 +265,7 @@ class TestSpeciesDoesNotSpread:
                                           "experiments", "node_modules")):
                 continue
             try:
-                src = p.read_text(encoding="utf-8")
+                src = _ast_cache.read_text(p)
             except UnicodeDecodeError:
                 # 非 UTF-8 源文件。**记账**再跳过——直接 continue 就是
                 # 「跳过缺失项＝把缺失渲染成不存在」（v0.45.114）；
@@ -273,7 +274,7 @@ class TestSpeciesDoesNotSpread:
             except OSError:
                 undecodable.append(str(r)); continue
             try:
-                tree = ast.parse(src)
+                tree = _ast_cache.parse(src)
             except SyntaxError:
                 unparsable.append(str(r)); continue
             if _visit is None:
@@ -1134,7 +1135,7 @@ def _discover_path_resolvers():
         if any(x in rel.parts for x in ("tests", "experiments", "__pycache__")):
             continue
         try:
-            tree = ast.parse(p.read_text(encoding="utf-8"))
+            tree = _ast_cache.parse_file(p)
         except (SyntaxError, UnicodeDecodeError, OSError):
             continue
         for n in ast.walk(tree):
@@ -1280,7 +1281,7 @@ class TestNoCachedResolvers:
             if any(x in rel.parts for x in ("tests", "experiments", "__pycache__")):
                 continue
             try:
-                tree = ast.parse(p.read_text(encoding="utf-8"))
+                tree = _ast_cache.parse_file(p)
             except (SyntaxError, UnicodeDecodeError, OSError):
                 continue
             for n in ast.walk(tree):

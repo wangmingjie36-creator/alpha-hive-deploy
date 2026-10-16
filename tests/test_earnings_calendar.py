@@ -23,6 +23,7 @@ import pytest
 
 import earnings_calendar as EC
 import sell_strike_candidates as SC
+from tests import _ast_cache
 
 REPO = Path(__file__).resolve().parent.parent
 AS_OF = "2026-10-13"
@@ -314,7 +315,7 @@ def _refs(pred):
     hits = {}
     for rel, p in _prod_files():
         try:
-            tree = ast.parse(p.read_text(encoding="utf-8"))
+            tree = _ast_cache.parse_file(p)
         except (SyntaxError, UnicodeDecodeError):
             continue
         n = sum(1 for node in ast.walk(tree) if pred(node))

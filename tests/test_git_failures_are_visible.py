@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_toolbox  # noqa: E402
 import report_deployer as rd  # noqa: E402
 from _repo_files import own_python_files  # noqa: E402
+from tests import _ast_cache  # noqa: E402
 from agent_toolbox import GitHubTool  # noqa: E402
 
 
@@ -52,7 +53,7 @@ def _production_sources():
         if rel.parts[0] == "tests":
             continue
         try:
-            out.append((rel.as_posix(), p.read_text(encoding="utf-8")))
+            out.append((rel.as_posix(), _ast_cache.read_text(p)))
         except (OSError, UnicodeDecodeError):
             continue
     return out
@@ -90,7 +91,7 @@ def _git_subcommand(arg):
 def _pull_call_texts(source: str):
     """`run_git_cmd` 首参为 `git pull …` 的调用：[(行号, 字面量文本)]（f-string 取常量段拼接）。"""
     out = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(_ast_cache.parse(source)):
         if not (isinstance(node, ast.Call) and _callee_name(node) == "run_git_cmd" and node.args):
             continue
         if _git_subcommand(node.args[0]) != "pull":
@@ -106,7 +107,7 @@ def _run_git_cmd_sites(source: str):
     """[(行号, 子命令或 None)]"""
     return [
         (node.lineno, _git_subcommand(node.args[0] if node.args else None))
-        for node in ast.walk(ast.parse(source))
+        for node in ast.walk(_ast_cache.parse(source))
         if isinstance(node, ast.Call) and _callee_name(node) == "run_git_cmd"
     ]
 
@@ -404,7 +405,7 @@ class TestAllowlistMatchesProductionCallSites:
         """约束值必须就是生产下发的那条字符串——否则收窄把现役调用也拒了，扫描前同步会停摆。"""
         sent = {}
         for _, src in _production_sources():
-            for node in ast.walk(ast.parse(src)):
+            for node in ast.walk(_ast_cache.parse(src)):
                 if isinstance(node, ast.Call) and _callee_name(node) == "run_git_cmd" and node.args:
                     a = node.args[0]
                     if isinstance(a, ast.Constant) and isinstance(a.value, str):
@@ -491,7 +492,7 @@ class TestCommitPushChainStaysRetired:
 def _discarded_deploy_calls(source: str):
     """`deploy_and_notify(...)` 作为裸语句（返回值直接丢弃）的行号。"""
     return [
-        node.lineno for node in ast.walk(ast.parse(source))
+        node.lineno for node in ast.walk(_ast_cache.parse(source))
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
         and _callee_name(node.value) == "deploy_and_notify"
     ]
@@ -510,7 +511,7 @@ class TestCallersReadTheResult:
         """正对照：CLI 调用点与 reporter 上的委托方法都要被扫到。
         （v0.45.316 前还有 GUI 的 `gui/interactions.py`，已随 gui/ 整体删除。）"""
         sites = {rel for rel, src in _production_sources()
-                 for node in ast.walk(ast.parse(src))
+                 for node in ast.walk(_ast_cache.parse(src))
                  if isinstance(node, ast.Call) and _callee_name(node) == "deploy_and_notify"}
         assert "alpha_hive_daily_report.py" in sites
 
