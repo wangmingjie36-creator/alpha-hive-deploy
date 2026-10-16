@@ -4,8 +4,8 @@
     {
       "name": "dashboard",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8765"],
-      "port": 8765
+      "runtimeArgs": ["-m", "http.server", "8770"],
+      "port": 8770
     },
     {
       "name": "rklb-preview",
