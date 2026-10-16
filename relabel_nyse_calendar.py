@@ -14,7 +14,7 @@
 
 **不改**（需出网 / 需整条价格路径，本工具只离线）：T+7 路径字段（`price_t7` / `return_t7` / `correct_t7` /
 `net_return_t7` / `exit_*` / `holding_days`，SL/TP 是否触发要重拉 OHLC）、`spy_return_t7`（本地没有 SPY 价）、
-`agent_memory.outcome_return_*`（另有「后一轮回填把前一轮写成 None」的既有缺陷，重算补不齐）。数目在报告里列出。
+`agent_memory.outcome_return_*`（另有「后一轮回填把前一轮写成 None」的既有缺陷，v0.45.527 修代码；历史按快照重建另议）。数目在报告里列出。
 
 **价格来源**：本地价格索引（`price_history._read_index`）+ `predictions.price_at_predict`，库优先——与
 `price_history.load_price_history` 合并口径相同；只读，不触发它的一次性迁移写入。

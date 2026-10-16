@@ -435,12 +435,18 @@ class OutcomesFetcher:
         if not entry or entry <= 0:
             return 0
 
-        t1_ret = ((prices[1] - entry) / entry) if 1 in prices else None
-        t7_ret = ((prices[7] - entry) / entry) if 7 in prices else None
-        t30_ret = ((prices[30] - entry) / entry) if 30 in prices else None
+        # 本轮回填到的 + 快照里早已存好的，一起写（v0.45.527）：`prices` 只含本轮到期的 offset，
+        # 只拿它算 ⇒ 缺的 horizon 是 None，旧 SQL 会把前几轮写好的覆写成 NULL。快照是这几列的唯一来源，
+        # 每轮按它整组重写还顺带把仍在途、曾被抹掉的行补回来。存储层另有 COALESCE 兜底。
+        rets: Dict[int, Optional[float]] = {}
+        for off, attr in self._OFFSETS.items():
+            px = prices[off] if off in prices else getattr(snapshot, attr, None)
+            rets[off] = ((px - entry) / entry) if isinstance(px, (int, float)) and px > 0 else None
+        t1_ret, t7_ret, t30_ret = rets[1], rets[7], rets[30]
 
-        # 确定 outcome（基于 T+7 方向准确性）
-        outcome = self._determine_outcome(snapshot.direction, t7_ret)
+        # 确定 outcome（基于 T+7 方向准确性）；还没有 T+7 ⇒ None（存储层保留原值），
+        # 不写 "neutral"——它进 get_agent_accuracy 的分母，等于把「还判不了」记成「没猜对」
+        outcome = self._determine_outcome(snapshot.direction, t7_ret) if t7_ret is not None else None
 
         # 按 (date, ticker) 匹配 agent_memory 中的记录
         updated = 0

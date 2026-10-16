@@ -406,16 +406,24 @@ class MemoryStore:
             _log.warning("get_agent_accuracy 失败: %s", e)
             return {"accuracy": 0.5, "sample_count": 0, "avg_return": 0.0}
 
-    def update_memory_outcome(self, memory_id: str, outcome: str,
+    def update_memory_outcome(self, memory_id: str, outcome: Optional[str],
                               t1: Optional[float] = None, t7: Optional[float] = None,
                               t30: Optional[float] = None) -> bool:
-        """更新记忆的实际结果（T+1/7/30 回看）"""
+        """更新记忆的实际结果（T+1/7/30 回看）——逐列写，None = 本次没有这一格、保留原值
+
+        v0.45.527：此前无条件 SET 四列，回填一轮只带本轮到期的 horizon ⇒ 每轮把前一轮存好的
+        覆写成 NULL、把已判的 correct/incorrect 写成 neutral（生产 23,800 行里三格齐的几乎没有）。
+        守卫 tests/test_agent_memory_outcome_horizons.py。
+        """
         try:
             conn = self._connect()
             cursor = conn.cursor()
             cursor.execute("""
                 UPDATE agent_memory
-                SET actual_outcome = ?, outcome_return_t1 = ?, outcome_return_t7 = ?, outcome_return_t30 = ?
+                SET actual_outcome     = COALESCE(?, actual_outcome),
+                    outcome_return_t1  = COALESCE(?, outcome_return_t1),
+                    outcome_return_t7  = COALESCE(?, outcome_return_t7),
+                    outcome_return_t30 = COALESCE(?, outcome_return_t30)
                 WHERE memory_id = ?
             """, (outcome, t1, t7, t30, memory_id))
             conn.commit()

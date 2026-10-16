@@ -5,7 +5,37 @@
 
 ---
 
-## [0.45.527] — 2026-10-16 — 占位（进行中：agent_memory 结果回填逐轮把已存的 T+1/T+7/T+30 覆写成 NULL——按出现的 horizon 逐列写 + actual_outcome 不降级）
+## [0.45.527] — 2026-10-16 — Fixed：`agent_memory` 结果回填逐轮把已存的 T+1 / T+7 / T+30 覆写成 NULL、把已判的 correct / incorrect 降级成 neutral；**历史值未改**（重建方案待用户批准，见下）
+
+2026-10-16 v0.45.521 期间发现：`OutcomesFetcher._update_memory_store(snapshot, prices)` 的 `prices` 只含**本轮**回填到的 offset，
+缺的算成 None 交给 `MemoryStore.update_memory_outcome`，后者无条件 `SET` 四列 ⇒「最后一轮赢」；`actual_outcome` 由 T+7 推出，
+本轮没有 T+7 就写 `"neutral"`。生产（只读）：23,800 行里 t1 非空 3,191 / t7 6,616 / t30 10,812，≥ 2 个 horizon 同时非空的只有 2,347 行。
+
+### Fixed
+- `memory_store.update_memory_outcome`：四列一律 `COALESCE(?, 列)`——None = 本次没有这一格、保留原值；真值照写（含覆盖旧值）。`outcome` 改 `Optional[str]`。
+- `outcomes_fetcher._update_memory_store`：收益按「本轮回填到的 + 快照里早已存好的」整组算（快照是这几列的唯一来源），仍在途的行每轮整组重写、顺带自愈；
+  还没有 T+7 ⇒ `outcome=None`（不写 `"neutral"`：它进 `get_agent_accuracy` 的分母，等于把「还判不了」记成「没猜对」）。
+
+### Added
+- `tests/test_agent_memory_outcome_horizons.py`（5 条）：驱动真实 `run()` 三轮（只有 T+1 → 到 T+7 → 只到 T+30，`_yf=None` 只走本地快照价），
+  每轮断言前几轮的 horizon 与已判 outcome 还在；一轮拿齐的正对照；存储层 None 不清值 / 真值照写 / 无此行返回 False。
+  修前 2 条红（`'neutral' is None`；t30 单列更新把 t1 / t7 清空、`correct` 变 None），修后全绿；拨钟审计 +7 / +45 天 0 新红。
+
+### 影响面（读者）
+- `MemoryStore.get_agent_accuracy`（`actual_outcome='correct'` ÷ `actual_outcome IS NOT NULL`）→ `AgentWeightManager.recalculate_all_weights`（日报主流程）
+  → 写 `agent_weights` 表。被降级的 neutral 进分母 ⇒ 各蜂准确率系统性偏低。**但 `agent_weights` 在本仓没有评分侧读者**
+  （`get_weights` / `get_weight` 只在 `agent_weight_manager.py` 内部自用）⇒ 不进生产分数。
+- `MemoryStore.get_recent_memories` → `QueenDistiller.enrich_with_historical_analogy` → `llm_service.find_historical_analogy`（喂给 LLM 的历史 t1 / t7 / t30）。
+  **仅 LLM 模式**（`enable_llm` 为假直接返回）；生产 `--no-llm` 不走。
+- 其余提到 `agent_memory` 的都是文档 / 实验脚本 / 读 `discovery` 等其它列的测试；`relabel_nyse_calendar.py` 明确不碰这几列。
+
+### 历史数据（只读核对，生产 `~/alpha-hive-data`，v0.45.521 apply 之后）——**未改，待用户批准**
+- 按快照 `actual_prices` 与 `entry_price` 重算：可补 t1 15,081 / t7 10,156 行；outcome `neutral → correct / incorrect / ambiguous` 5,213 / 4,277 / 666；
+  重算后三格齐 10,812 行（修前 0）。会改的行合计 15,391，其中 4,269 行的快照仍在途（下一次回填按新代码自愈），**10,812 行只能靠重建**。
+- 自校验：存值非空且与快照不等的 1,720 格（t1 300 / t7 600 / t30 820）**全部**等于 v0.45.521 前的快照值（即 521 已改快照、未改这张表）；
+  已判 outcome 与重算不一致 120 行，110 行同理归因 521；剩 **10 行（NFLX 2026-09-17 一份快照，direction=`bearish`、T+7 −8.1%、存 `incorrect`、现规则判 `correct`）原因待验证**。
+- 补不回：3,809 行无对应快照、559 行快照 `entry_price ≤ 0`——这两类本来就没有任何值（不是被抹掉的）。
+- 另有 1,500 行 `neutral` 但重算后仍无 T+7（按新语义应为 NULL）。
 
 ## [0.45.526] — 2026-10-16 — 占位（进行中：组合 Greeks 逐票 Delta 对冲——每只有跨式腿的标的用自己的股票对冲跨式 Delta；带 3% NAV、拉回 0；先 shadow 只算不成交）
 
