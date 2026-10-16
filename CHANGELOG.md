@@ -5,7 +5,28 @@
 
 ---
 
-## [0.45.515] — 2026-10-16 — 占位（进行中：Alpha Bot 卖权页「六种结构」补「怎么卖」详解与推荐价位——下单步骤、起挂 / 底线限价、止盈 / 止损买回价、标的价位触发）
+## [0.45.515] — 2026-10-16 — Added：Alpha Bot 卖权页「六种结构」下方新增「怎么卖」——每种结构的下单腿、推荐价位、标的价位、下单步骤、管理办法与风险
+
+用户反馈：表里只有权利金 / 最大亏损 / 回报 / 盈亏平衡，看不出「这行到底怎么下出去、挂什么价、什么时候收」。点任一结构行，盈亏图下方现在多一栏。
+
+### Added
+- `alphabot/howto.py`（纯函数，不 import 卖权模块、不读写文件）：同一份 `structure_quote` 报价翻译成可执行信息。
+  **下单腿**（买卖方向 / 合约 / 行权价 / 距现价 / |Δ| / σ 距离 / P(ITM) / bid·ask·中价）；
+  **推荐价位**：起挂限价 = 组合中价，底线价 = 自然价与中价之间 `floor_share`（0.5）处，止盈买回价（成交权利金 × 0.5）、
+  止损买回价（× 2.0；价差 / 铁鹰宽度不超过它时如实写 `None` + 说明，不给一个不可能触发的数）、管理日（月度到期前 21 天 / 周度 3 天）、
+  每张最大盈利 / 最大亏损 / 占用资金；**标的价位**（短腿 / 保护腿 / 盈亏平衡 / ±1σ / 下方·上方 Zero Gamma / 净 Major，各带距现价 %）；
+  **提示**（到期前有财报 / 财报日未知、负 gamma 下的裸卖结构、点差过宽、盘中报价）；
+  六种结构各一份静态说明（观点、下单、盈亏口径、管理、风险、别用的情形），多腿结构明确写「用组合单、别拆腿」。
+- 路由档（推荐）与基线档 0.20Δ 可切换；路由判不可用的一侧只剩基线档。
+- `alphabot/static/pages/howto.js`：只排版，不写任何价位公式；`ticker.js` 在盈亏图下方挂载；`help.js` 卖权章节加「⑤ 怎么卖」，数字取自 `/api/method`（`howto.rules`），不写字面量。
+- `service.live()` 在载荷里挂 `howto`；`meta_texts()` 给 `howto`（规则常量 + 说明）。
+- `tests/test_alphabot_howto.py`（29 条）：与「六种结构」表同源、手工梯子独立复算每个价位、提示只在该出现处出现、六份说明完整、纯函数（AST）、失败可见、前端不含价位公式。变异核对 4 处（底线价、止损失效、负 gamma 提示、起挂价）均变红。
+
+### Notes
+- ⚠️ **这些比例是业内通行的执行经验，不是本系统前向检验过的结论**：50% 止盈、2 倍止损、半价差让价、21 天管理日都没进预注册检验，页面、帮助页、模块 docstring 都这样写。它们回答「怎么执行」，不回答「该不该卖」。
+- 失败可见：`howto` 现算抛错 ⇒ 载荷里 `howto.available = False` + 原因，`stats.howto_failures` 计数，日志 warning；不会让整只票连坐（测试钉住）。
+- **不改** levels / candidates 既有输出与版本号（预注册样本不被截断）；只读、不写账本；火墙不变（`howto.py` 不 import 卖权模块，经 `service.py` 注入 `structure_quote` 与 `BASE_RUNG`）。
+- 验证：`tests/test_alphabot*.py` + `tests/test_sell_strike_integration.py` 共 454 项通过；`ruff check alphabot` 干净；演示模式浏览器实测（铁鹰 / 卖 put、路由 / 基线切换、帮助页）无控制台错误。
 
 ## [0.45.514] — 2026-10-16 — Removed：删除 `pre_scan_notify.py`（v0.45.510 起零调用方）及其 Slack 白名单登记 / 测试；Slack 发送方从两个减为一个
 
@@ -34,7 +55,57 @@
 
 ## [0.45.513] — 2026-10-16 — 占位（进行中：earnings_vol_signal `_cache_dir_hint` 不再把缺省数据根误诊为「回落到代码目录」，照 v0.45.384 vrp_signal 修法）
 
-## [0.45.512] — 2026-10-16 — 占位（进行中：BILI 10-12 put/call 298.46 隔离 + yfinance 期权链 OI 陈旧时不算 P/C）
+## [0.45.512] — 2026-10-16 — Fixed（数据，用户批准）：隔离并清掉 BILI 10-12 的 put/call 298.46；Added：yfinance 期权链 OI 陈旧检查——最近有成交的合约 OI 成片为 0（这一场的 OI 没发布）⇒ P/C / total_oi / 主链 GEX 记不可得
+
+用户 2026-10-16 决定（v0.45.503 查清来源后的两个待决项）。病根：10-12（哥伦布日）Yahoo 全市场 openInterest 几乎清零，只剩几个月没成交的旧合约上冻结的旧数。BILI 当天没有 CBOE 链、走 yfinance，±70% 行权价窗口 + 「按 OI 取前 40」恰好把冻结旧数挑出来 ⇒ $5 put 22,065 ÷ $8 call 74 = 298.46（前后几天 1.03 / 1.02 / 1.08）。它让 Oracle 被压约 0.85、Bear 被抬约 1.06，最终分约 −0.29（v0.45.503）。现行 main 遇到同样的链照样会算出 298。
+
+### 判据怎么来的（实测，只读）
+- 指标：本链（全部到期日、**过滤之前**），以最新一笔成交为参照往前 4 天内有成交的合约里，OI>0 的占比。
+- 10-12 录制（`_manual_backups/…_r2/replay_artifacts/recording_union4`，Yahoo v7 options 原始响应）：30 只**全部 0.00–0.04**。
+- 10-16 正常日实时取（30 只全量，只读请求、零费用）：**0.81–1.00**（最低 BILI 0.81、ABBV 0.83）。
+- 阈值取 0.5（两侧都有很宽的余量）；这类合约少于 20 个 ⇒ 判不了、照旧算。
+- 录制回放进**真实** `fetch_options_chain`：23 只在 4 个到期日窗口里 OI 全 0，已由既有「空 OI ⇒ 退样本」闸挡下；剩下 7 只（BILI / COST / CRM / MU / TMO / WMT / XOM）**全部**判陈旧。旧逻辑给它们算出 298.46 / 8.85 / 0.0 / 1.0 / 7.95 / 0.0 / 0.0。归档里这 6 只当天来自 CBOE 链（快照 `chain_source = cboe`），不受影响；只有 BILI 用了 yfinance。
+
+### Added
+- `options_analyzer`：
+  - `_oi_staleness_rows`（DataFrame → `(成交 epoch 秒 | None, OI)`，NaT / NaN / 缺列都安全）。
+  - `assess_oi_staleness`（纯函数；参照点是本链自己的最新成交，**不读钟**）。
+  - 常量 `_OI_STALE_RECENT_DAYS` = 4、`_OI_STALE_MIN_RECENT` = 20、`_OI_STALE_MAX_RATIO` = 0.5。
+- `fetch_options_chain`（yfinance 分支）在 ±70% 窗口与 top-40 **之前**收集，链上带 `oi_check`。陈旧时：
+  - 记 WARNING；
+  - `snapshot_slot_stats()["oi_stale_chains"]` 按标的去重计数；
+  - `scan_timing` 摘要行显示「/OI陈旧链N只」（仅非零时）。
+- `OptionsAgent.analyze` 在 `oi_check.stale` 时：
+  - `put_call_ratio`、`gamma_exposure`、`total_oi`、`total_oi_raw` 记 None；
+  - `gamma_squeeze_risk` 为 unknown；`flow_direction` 记 **"unknown"**（同 `gamma_squeeze_risk` 先例，不冒充 neutral）；
+  - `data_quality` 从 real 降为 degraded（否则 `scan_coverage_gate` 的「real 却 P/C 为空」会误红）；
+  - 结果带 `oi_check`（样本早退分支补 `None`，schema 一致）。
+- `generate_options_score`：P/C 为 None 时 flow 分取 **1.5**（0–3 量程中点，不奖不罚）。此前这条路径不存在（样本链早退）。
+- 没有 `oi_check` 的链（CBOE、旧缓存、旧快照）**一律照旧**。
+
+### Fixed（数据，用户批准「隔离 BILI 10-12 那条 298.46 的 put/call」）
+- `signal_archive.QUARANTINE` 新增 BILI 2026-10-12 × `options.put_call_ratio` 一条（tickers 限 BILI；reason 带证据）。
+- 清库：`purge_quarantined_signal_rows.py --only-tag v0.45.512 --expect 1 --apply`，`signal_archive` 137,614 → 137,613。
+  - 备份 `db_backups/pheromone_pre_v0.45.512_bili_1012_pc.db`。
+  - 核对：生产该行 0、备份 1；BILI 10-12 其余 5 行 options.* 保留；两边 integrity_check ok。
+  - 不加标记的 dry-run 命中 31 行：另 30 行是 v0.45.508 的批次，不归本次清。
+- `tests/test_signal_quarantine.py`：499 那条原先断言「BILI 10-12 P/C 不挡」（当时的批准范围），改由新测试 `test_bili_1012_stale_oi_put_call_quarantined` 覆盖。
+
+### 未动（待用户定）
+- 同链同源的 BILI 10-12 `options.total_oi` 22,160（前后几天约 16–17 万）与 `options.gamma_exposure` −0.0611，未获批准。
+- 10-14 BILI `options.total_oi` = 0.0（另一个故障日，来源**待验证**）。
+- `calculate_put_call_ratio` 在 call OI 为 0 时返回 1.0（假中性）、key levels / 异动 / 全链 OI（`full_pc_ratio`，10-12 记过 0.0）同样读 OI：本版只管有 `oi_check` 的主链三个量。
+- **未加 IC 世代边界**：只改「OI 陈旧那几天」的 P/C 从假值变 None（更少，不是不同）；正常日逐字节不变。
+
+### Tests
+- 新 `tests/test_yfinance_oi_stale.py`（19 条）。夹具按 BILI 10-12 形状造（自检：不加检查确实算出 298.46）。覆盖：
+  - 判据：阈值严格小于、最少样本、旧合约不进分母、窗口相对本链、无时间戳。
+  - 行解析的各种形状。
+  - 取链：标记、计数去重、WARNING；判据在窗口过滤**之前**算（近价合约推到窗口外仍判陈旧）。
+  - analyze：四个量记 None、不标 real、flow 中点；健康链不变；无 `oi_check` 的链照旧。
+  - 摘要行。
+- 变异 11/11 被杀：analyze 不读检查、只置 P/C 漏 GEX、漏 total_oi、阈值改成 ≤、去掉最少样本、旧合约进分母、DQ 仍 real、不计数、收集挪到窗口过滤之后、隔离连带 total_oi、隔离不限标的。
+- 全量（rebase 到 c3a41b0a 后）：9934 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另有 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加（06:50–06:51，开盘后），不是测试写的。`tools/clockshift/audit.py --days 7/45/400`：两个测试文件新红 0。ruff 全绿。
 
 ## [0.45.511] — 2026-10-16 — Fixed + Added：`signal_archive` 的每个写入点入库前都过 QUARANTINE——补 `backfill_fear_greed_legacy`（v0.45.267 起直写不查）、`data_backup/restore.py` 整库恢复后报出命中行数；新增全仓 AST 守卫
 
@@ -147,7 +218,11 @@
 - **为什么是 QUARANTINE、不是修订 2 的 `FORWARD_TEST_EXCLUDED_DAYS`**：协议 §3 登记时就把「`QUARANTINE` 登记的已知坏行」列为排除项，执行器 `weekly_series` 对假设的任一截断 / 隔离信号命中即丢行，H1 的信号表含输入层 ⇒ 这是**套用已登记的规则**，规则 / 常量 / 窗口 / 检视点都没动（不进 `AMENDMENTS`）。`FORWARD_TEST_EXCLUDED_DAYS` 管「事后重放补算的整天」（10-14 没有重放），且三份前瞻检验共用——登进去会连带把 10-14 从 F&G 敞口门里拿掉，而那边 10-14 自证失败的处理（v0.45.503）另待决定。
 - 后果：H1 当天只剩 JNJ（< `MIN_WIDTH` 20）⇒ 10-14 对 H1 无效（W42 剩 10-13 / 10-15，生产库只读核对各 30 只可用；10-16 待当天扫描）；H2 不读 `price.*` 照算。
 - **只隔离观测层**：`buzz.comp.*` 通道值是派生值（同 Agent 评分，不隔离）；且 §13.2 自证 ②「生产有分、重算却缺输入 = 0」会把隔离 / purge 掉的通道行算成自证失败。
-- 未动：09-15 QCOM / NVDA 据 v0.45.505 的记录是同形状的 TD 兜底量比（**本条未复核**）（窗口前，不影响 H1；要不要为一致性补登另议）；没跑 `purge_quarantined_signal_rows.py`（`is_quarantined` 已足够让 H1 丢行；删不删库里的 30 行另议）。
+- **09-15 QCOM / NVDA 复核（10-16，只读；未改归档 / 名单，待用户决定）**：
+  - `price.volume_ratio`：日志各有「丢弃 2026-09-15 那根」+「由 Twelve Data 补上」（14:14:20 NVDA 1.01x、14:15:31 QCOM 1.21x）。09-15 是周二，上一场是 09-14（`is_trading_day` 算）。用 Twelve Data 截至 09-14 的日线、把 09-14 那根成交量换成 131,942,300 / 13,755,800 股（整百股，比今天低 0.25% / 0.21%）即**逐位复现**归档值（1.01080 / 1.21243）——同 RKLB / VKTX 的「事后上调」形状；漏一根、窗口 19 / 21 根都对不上。当天应有值（截至 09-15）：NVDA 0.676（归档 1.011 ⇒ Buzz 量比档 50，应为 35）、QCOM 1.195（同档 50，通道不受影响）。
+  - `price.momentum_5d` 也是取错窗口：v0.45.465 之前的自攒索引回落，窗口 **09-04 → 09-14**（末端滞后一场；跨 5 场，yfinance 口径是 4 场——465 已记录的「≥5 个交易日挑锚点」）。用 Twelve Data 收盘与扫描价两种序列穷举，唯一同时复现两只（误差 < 1e-4）的窗口就是它。当天应有值（4 场截至 09-15）：NVDA −5.14（归档 −8.42）、QCOM +6.46（归档 +6.76）。
+  - 顺带普查（日志自 08-26 起；按文件时间衔接，未逐日核）：TD 量比兜底的生产记录只有 09-15 这 2 次 + 10-12 NFLX（故障日生产那次，归档已被重放值 0.6463 覆盖 ≈ 截至 10-12 的 0.6472，不是前一场）+ 10-14 的 29 次；另有 XOM 0.81 / 0.50 反复出现在凌晨，是测试夹具写进旧日志的，不是生产。自攒索引动量（465 前、滞后形状）进了归档的：09-15 2 只、**09-24 30 只**（29 只逐一复现为「末端 09-22、跨 5 场」——09-23 没有扫描 ⇒ 滞后两场；T 差 0.035 未解释，待验证）、**09-25 30 只**（与 09-24 逐位相同：两天 30 行 `price_at_predict` 全为 0，索引没有新点，窗口仍止于 09-22）。09-24 / 09-25 入场价为 0 ⇒ 本来就进不了任何按收益的检验。08-26 之前没有日志，未查。
+  - 以上都在 H1 窗口（10-12 起）之前，不影响维度 IC。465 当时的处置是「存档零变化」（用户 10-12 确认）。（窗口前，不影响 H1；要不要为一致性补登另议）；没跑 `purge_quarantined_signal_rows.py`（`is_quarantined` 已足够让 H1 丢行；删不删库里的 30 行另议）。
 
 ### Changed（文档）
 - `experiments/dim_ic_preregistration.md`：文首加「记录」一行；新增「### 记录（2026-10-16，v0.45.508）」§13.8（发生了什么 / 做了什么 / 为什么不是修订 / 为什么不隔离通道 / 为什么不走修订 2 / 为什么不可能受结果影响 / 代价 / 守卫）。
