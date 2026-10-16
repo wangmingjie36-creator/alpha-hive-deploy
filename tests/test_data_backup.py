@@ -1482,13 +1482,17 @@ class TestBackupRepoFollowsPaths:
         assert (rc, status["stage"], status.get("refused")) == (2, "init", "inside_code_repo"), status
         assert calls == []
         assert default.exists() == existed_before, f"代码检出里被造出了 {default}"
+        # v0.45.513：病因要说对——422 起「没设」解析到缺省数据根、进不了检出；能走到这里的是显式指向检出
+        assert "显式指到了检出" in status["error"] and "没设" not in status["error"], status["error"]
 
-    def test_export_main_refuses_inside_code_repo(self, tmp_path, monkeypatch):
+    def test_export_main_refuses_inside_code_repo(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(tmp_path / "code"))
         calls = _forbid_side_effects(monkeypatch)
         assert export_mod.main(["--src", str(tmp_path), "--out", str(tmp_path / "code" / "_git_backup")]) == 2
         assert calls == []
         assert not (tmp_path / "code").exists()
+        err = capsys.readouterr().err
+        assert "拒绝导出" in err and "显式指到了检出" in err and "没设" not in err, err   # v0.45.513：同上，病因要说对
 
     def test_orchestrator_does_not_spell_the_backup_repo(self):
         """位置只在 PATHS：编排器的可执行行里不许再出现 `_git_backup` / `--backup-dir`（注释不算）。"""

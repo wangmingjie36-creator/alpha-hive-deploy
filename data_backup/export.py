@@ -487,7 +487,8 @@ def main(argv=None) -> int:
     code_repo = backup_repo_inside_code_repo(out)
     if code_repo is not None:
         print(f"拒绝导出：目标 {out} 在代码仓库 {code_repo} 里"
-              "（未传 --out 时多半是没设 ALPHA_HIVE_HOME）", file=sys.stderr)
+              "（未传 --out 时多半是 ALPHA_HIVE_HOME 显式指到了检出；"
+              "v0.45.422 起未设 ⇒ 缺省数据根，不在检出里）", file=sys.stderr)
         return 2
     manifest = run_export(Path(args.src), out)
     write_manifest_and_sums(out, manifest)
