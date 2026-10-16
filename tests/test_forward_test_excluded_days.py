@@ -97,3 +97,43 @@ class TestResonanceSkips:
         monkeypatch.setattr(signal_archive, "FORWARD_TEST_EXCLUDED_DAYS", {})
         self._write(tmp_path, _DAY)
         assert [r["date"] for r in fwd.load_reports(tmp_path)["rows"]] == [_DAY]
+
+
+fg = _load("fg_exposure_gate_forward_test_x", "experiments/fg_exposure_gate_forward_test.py")
+
+
+class TestFgGateSkips:
+    """v0.45.503：F&G 敞口门前瞻检验——A / B 两臂与自证都不重放排除日，且 `run()` 报出来。"""
+
+    def _run(self, tmp_path, monkeypatch, insample=False):
+        import paper_portfolio as pp
+        snap = tmp_path / "snaps"
+        snap.mkdir()
+        (snap / "NVDA_2026-10-13.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(pp, "SNAPSHOT_DIR", snap)
+        monkeypatch.setattr(fg, "_snapshot_dates_in_window",
+                            lambda since, before: ["2026-10-09", _DAY, "2026-10-13"])
+        seen = {}
+
+        def _fake_eval(dates, since, before, root, **kw):
+            seen["dates"] = list(dates)
+            return {"status": "not_ready"}
+        monkeypatch.setattr(fg, "evaluate", _fake_eval)
+        monkeypatch.setattr(fg, "load_seed", lambda *a, **k: {})
+        monkeypatch.setattr(fg, "_forward_anchor_plan", lambda seed, dates: {"plan_dates": list(dates)})
+        monkeypatch.setattr(fg, "_forward_ohlc_store", lambda: None)
+        return fg.run(insample=insample, today="2026-10-16"), seen["dates"]
+
+    def test_excluded_day_not_replayed_and_reported(self, tmp_path, monkeypatch):
+        res, dates = self._run(tmp_path, monkeypatch)
+        assert dates == ["2026-10-09", "2026-10-13"]
+        assert res["forward_test_excluded_days"] == [_DAY]
+
+    def test_control_list_emptied_brings_it_back(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(signal_archive, "FORWARD_TEST_EXCLUDED_DAYS", {})
+        res, dates = self._run(tmp_path, monkeypatch)
+        assert _DAY in dates and res["forward_test_excluded_days"] == []
+
+    def test_insample_untouched(self, tmp_path, monkeypatch):
+        res, dates = self._run(tmp_path, monkeypatch, insample=True)
+        assert _DAY in dates and "forward_test_excluded_days" not in res

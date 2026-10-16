@@ -60,9 +60,60 @@
 - 变异 9/9 被杀（去闸、从不 / 总是退一场、不返回 `as_of`、`as_of` 取错根、不拷 `volume_as_of`、`to_dict` 漏键、helper 不吞异常、「今天」错一天）；`PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。
 - `tools/clockshift/audit.py --days 7 --days 45 --days 400`：新红 0。ruff 全绿。全量（rebase 到含 v0.45.506 的 main 后）：9781 passed / 1 failed——唯一的红是 `TestCoverageHorizon`（经济日历覆盖期，设计内定期红，干净 main 上同样红）。
 
-## [0.45.504] — 2026-10-16 — 占位（进行中：扫描在多数标的取不到价格时拒写 predictions / 归档 / 账本、不发布、非零退出并告警；编排器代理探活失败后间隔重探）
+## [0.45.504] — 2026-10-16 — Added：扫描输入闸——预取后多数标的取不到可用现价 ⇒ 在任何持久写入之前停下（不写预测 / 归档 / 快照 / 账本，不出日报、不部署），退出码 4；编排器代理探活失败间隔重探（缺省 4 次 × 60s），Step 2 被闸拒后等待、重定出站、重跑（缺省至多 2 次）
 
-## [0.45.503] — 2026-10-16 — 占位（进行中：F&G 敞口门前瞻检验排除 10-12；查 10-14 自证 27/31；BILI 10-12 P/C 298 的来源）
+### 为什么
+- 2026-10-12：14:00:08 代理探活**一次**失败就整轮「直连」（实为系统代理，v0.45.496），全部 TLS EOF；30/30 只现价 0 照样写库、发布、`status=success`（调查见 v0.45.484）。10-14 探活又失败一次（这次真直连：价格 / CBOE 正常、yfinance 0/30）。用户 10-16 决定：多数标的取不到价格时拒绝写入和发布，探活失败后间隔重试。
+
+### Added
+- `config.SCAN_PRICE_GATE = {"max_unavailable_ratio": 0.5}`。
+- `alpha_hive_daily_report`：`price_coverage()`（纯函数；「可用」= 有限正数价、`data_source` 非 fallback、无 `_data_unavailable`；没预取到也算不可用；**严格大于**阈值才拒）、`ScanInputsUnavailable`、`PRICE_GATE_EXIT = 4`、`_exit_code_for()`（`__main__` 的退出码映射抽成函数）。
+  - 闸在 `_init_scan_context` 预取之后、蜂群 / 信息素板 / 任何落库之前；不可用的标的照常 warning 列出（未达阈值也报）。
+  - `main()` 接住 ⇒ 不 `save_report`、不 `deploy_and_notify`，`scan_timing.extra` 写 `early_exit=price_gate` + 覆盖率明细，退出码 4。
+- `scripts/alpha-hive-orchestrator.sh`：
+  - 代理段拆成 `_probe_proxy_once` / `_configure_outbound`；探活失败按 `ALPHA_HIVE_PROXY_PROBE_ATTEMPTS`（4）× `ALPHA_HIVE_PROXY_PROBE_INTERVAL`（60s）重探，恢复了就走代理，日志写第几次通过 / 几次全败。
+  - Step 2 循环：退出码 4 ⇒ 打出 `scan_timing.extra.price_gate` 明细 ⇒ 等 `ALPHA_HIVE_STEP2_GATE_WAIT`（600s）⇒ `_configure_outbound` ⇒ 重跑，至多 `ALPHA_HIVE_STEP2_GATE_RETRIES`（2）次；其它退出码不重试。仍被拒 ⇒ 没有 `.swarm_results` ⇒ 既有完整性闸判零产出 ⇒ `status=failed` ⇒ alert_manager CRITICAL，补跑闸照样放行。`steps_result.step2_price_gate` 记次数与是否被拒。
+- `orchestrator_steps`：Step 2 退出码 4 单列「🛑 被输入闸拒绝……未写、未部署」（`reason: price_gate`），不再落进「失败但继续进行」。
+
+### 验证
+- **负对照（端到端）**：v0.45.484 的 10-12 故障复现 harness（直连 + TLS EOF + yfinance 429，扫描前沙箱）跑本版代码 ⇒ 预取后 `30/30 只取不到可用现价` 当场拒；沙箱里 10-12 的 `.swarm_results` / predictions / signal_archive / agent_memory / report_snapshots / 纸面净值行**全为 0**。
+- **正对照**：10-16 盘前对 30 只真跑 `prefetch_shared_data` ⇒ 30/30 `real`、不拒。
+- `tests/test_scan_price_gate.py`（32）：判据各形状、阈值严格大于、`main()` 早退不存不部署、退出码映射、代理重探（第 3 次恢复 / 4 次全败 / 首次即通 / attempts=1 等于旧行为）、Step 2 重试（成功 / 其它码不重试 / 拒后恢复 / 用尽 / 0 次）、闸位于 `_init_scan_context`。变异 5 处（`>` 改 `>=`、删 raise、删 main 的 except、编排器不重试、探活恒通）全红。
+- `tests/test_ml_model_guard.py::TestGateWiring`：判决→退出码搬进 `_exit_code_for` 后，守卫跟进到 `__main__` 真调到的这个函数（删掉 verdict 映射仍红，已核）。
+- `tests/test_orchestrator_direct_fallback.py` 设 `ALPHA_HIVE_PROXY_PROBE_INTERVAL=0`（对准拒连端口，免白等 3 分钟）；`test_orchestrator_steps.py` 加退出码 4 一条。
+
+### 部署 / 兼容
+- Python 闸随下一次扫描的 production_sync 生效；编排器照例**第二个扫描日**起生效。部署那一轮旧编排器见到退出码 4 ⇒ 按 Step 2 失败 + 零产出处理（不重试，但不会写垃圾）。
+- 不影响价格可得的日子；单只取不到（如 BRK-B 映射）不触发。`--date` 补跑同样过闸。
+- 未做（报给用户）：纸面组合在 yfinance 日线全取不到时仍照开新仓、但当天一笔都不出场（10-14 即此，见 v0.45.503），没人红。
+
+## [0.45.503] — 2026-10-16 — Fixed（预注册·**事后**修订）：F&G 敞口门前瞻检验排除 2026-10-12；查清 10-14 起自证 27/31（现 28/32）的原因；查清 BILI 10-12 P/C 298.46 的来源
+
+### F&G 敞口门：10-12 不重放（用户 10-16 决定）
+- `experiments/fg_exposure_gate_forward_test.run()` 前瞻模式剔除 `signal_archive.FORWARD_TEST_EXCLUDED_DAYS`（目前只有 10-12）：A / B 两臂连续重放与逐日重锚自证都不跑那天，前瞻模式的每个返回都带 `forward_test_excluded_days`（`_tag`）。`_forward_ohlc_store()` 仍只在 `run()` 里调（`tests/test_replay_ohlc_store.py` 钉住，首版拆函数时红过、已改回）。
+- 理由：生产纸面组合 10-12 读的是故障日快照（0 开 0 平），10-13 被重放覆盖后，重放读到的是生产从没见过的快照（A 会多开 VKTX 空单）。维度 IC / 共振加成两份已在 v0.45.484 同样排除。逐日重锚不受影响（10-13 那段锚点 = 生产 10-12 跑完的状态，不比前一次运行旧）。
+- 预注册 docstring 加「事后修订 v0.45.503」：**未动**窗口、变体、统计量、检视点、α、盲化、自证规则、种子、锚点；修订依据只看了自证计数，`decide()` 从未走到出统计量的分支。
+- 实测（生产数据、只读）：`forward_test_excluded_days=['2026-10-12']`，n_dates 19。
+
+### 10-14 起「无法判定」的原因（已查清，修法**待用户决定**）
+- 未复现的 4 笔全是 10-14 入场（ENPH / TMUS / T / QCOM 空），决策层全对，金额统一是生产的 0.99120 倍。
+- **不是 σ**：10-14 `signal_archive` 没有 `price.volatility_20d`（0 行），生产与重放都回落到 10-13 的值（5 天时效内），σ 逐位相同。
+- **是 NAV 基数**：10-14 生产纸面组合的 `_fetch_ohlc` 对 11 只持仓 + 4 只新票全部 `YFRateLimited`（真直连、Yahoo 挡）⇒ `_check_exit` 无 K 线 ⇒ 当天 0 出场 ⇒ 仓位基数仍是 50506.04；新仓入场价来自快照（CBOE）照常开。重放有 K 线，当天平掉 DELL / NEE（TIME）、NVDA / SNOW（SL）实亏 −444.53 ⇒ 基数 50061.51，比值 0.991198 = 尺寸比。生产 10-15 才补出这 4 笔（`exit_date` 倒填 10-14）；且 11+4 撞 `max_positions=15`，DELL / RKLB / SNOW 空单没开（重放开了 ⇒ a_only）。
+- 用「当天日线全取不到」的掩码重放 10-14 段 ⇒ 4 笔与净值行**逐字节**复现；同法 09-24 / 09-25 也逐字节复现。`equity_curve` 里 `unrealized == 0.0 且 positions_count > 0` 恰好就是这 4 个故障日（09-24、09-25、10-12、10-14）。
+- 判断：两边都没错——生产在没数据的日子照代码做了，重放用了生产没有的数据。修法候选见本条末与对话；**未实现**。
+
+### BILI 10-12 P/C 298.46（已查清，**未处理**）
+- 来源：BILI 无云端 CBOE 链 ⇒ 0993efd 的 yfinance 备用链（`options_analyzer.fetch_options_chain`：剔 DTE<3、取 4 个 DTE≥7 到期日、行权价 0.3–1.7× 现价、OI 前 40）⇒ `calculate_put_call_ratio` **按 OI**、DTE 加权、无下限无上限。
+- 10-12（哥伦布日）Yahoo 的 OI 几乎全被清零（30 只录制里近期成交过的合约约 9,300 行仅 16 行 OI>0），只剩几个半年没成交的旧合约的冻结 OI：01-15 到期 $5 put OI 22,065、$24 put 21，对 $8 call OI 74 ⇒ 22,086 / 74 = **298.46**（权重同一到期日相消）。前后几天 BILI 是 1.03 / 1.02 / 1.08；同链按成交量约 2.48（待验证该日 OI 缺失的原因）。
+- 影响（0993efd 代码）：Oracle 流向子分 P/C > 1.5 即 0（298 与 1.6 同分），Oracle 4.27（正常 P/C 约 5.12）⇒ final 约 −0.29；Bear 期权子分 8.0（否则 6.5）⇒ Bear 7.27（否则约 6.21）；Rival 的 ML 特征吃到 298；日报 thesis break L1 / L2 显示「已触发」（只展示，罚分 0）；`signal_archive` 存 298.46（全库唯一一次 P/C > 10）。
+- 现行 main 对同一条链**仍会**算出 298.46、无标记：482 / 490 只管占位 IV，不管 OI；全仓没有 P/C 合理性闸。
+
+### Added（测试，503）
+- `tests/test_forward_test_excluded_days.py::TestFgGateSkips`（3）：排除日不进重放且报出；清空名单该日回来；`--insample` 不受影响。变异（不剔除）⇒ 红。
+
+### 全量（503 + 504，rebase 到 f8429c1f 之后）
+- 9820 passed、0 failed、2 xfailed（`--deselect` 了设计内定期红的 `test_economic_calendar::TestCoverageHorizon`）；ruff 全仓通过；`bash -n` 编排器通过。
+
 
 ## [0.45.502] — 2026-10-16 — Fixed：v0.45.484 二次检查——写回工具整日替换 `signal_archive` 前过现行 `QUARANTINE`（10-13 把 v0.45.499 隔离的行插回去的那个洞）；484 条目两处更正；10-13 ~ 10-15 生产核对全部通过
 
