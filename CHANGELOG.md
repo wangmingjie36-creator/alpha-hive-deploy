@@ -5,9 +5,28 @@
 
 ---
 
-## [0.45.511] — 2026-10-16 — 占位（进行中：signal_archive 所有写入点入库前过 QUARANTINE——补 backfill_fear_greed_legacy + 全仓守卫）〔原占 0.45.510（b628aa62），与先提交的 cfa3e004「编排器去掉扫描前 Slack 确认」撞号：撞号是 ed9c46b2（v0.45.509）推送时误删了 cfa3e004 那条占位所致，按「先提交者保号」改到 511〕
+## [0.45.511] — 2026-10-16 — Fixed + Added：`signal_archive` 的每个写入点入库前都过 QUARANTINE——补 `backfill_fear_greed_legacy`（v0.45.267 起直写不查）、`data_backup/restore.py` 整库恢复后报出命中行数；新增全仓 AST 守卫
+
+> 原占 0.45.510（b628aa62），与先提交的 cfa3e004 撞号（该占位曾被 ed9c46b2 误删），按「先提交者保号」改到 511。
+
+### 为什么
+- 隔离名单只在正式入库口 `archive()`（`_rows_for`）拦截；绕开它直写 SQL 的脚本「各自负责」。10-13 实测靠不住：10-12 重放写回「整日删除再插入」不查名单，把 v0.45.499 清掉的 BILI 假 IV 插回生产（约 2 分钟后由该会话删回，v0.45.502 补了写回工具）。用户 10-16：「在入库前也过一遍隔离名单」。
+- 全仓普查写 `signal_archive` 的地方：`signal_archive.archive()` ✓、`writeback_1012_replay_v0484.py` ✓（502）、`restore_signal_rows_from_backup.py` ✓、**`backfill_fear_greed_legacy.py` ✗**；`backtester.py` 写的是 predictions；`data_backup/export.py` 只生成 .sql 文本；`data_backup/restore.py` 经 `executescript` 灌导出文件（不是 SQL 字面量，扫描看不见）。
+
+### Fixed
+- `backfill_fear_greed_legacy.run`：写前逐行 `is_quarantined`，命中剔除、打 WARNING，返回值新增 `quarantined` 计数（不许悄悄少写）。
+- `data_backup/restore.restore_db`：重建后数新库 `signal_archive` 里命中**现行** QUARANTINE 的行，返回 `quarantined_signal_rows`（取不到名单 ⇒ None + `quarantine_check_error`，不当 0）。**只报告不删**：整库恢复要忠实还原备份时刻；非 0 ⇒ 对新库重跑 `purge_quarantined_signal_rows.py`。无生产调用方（演练 / 灾备手动用）。
+
+### Added（测试）
+- `tests/test_signal_archive_writers_check_quarantine.py`（9）：AST 扫全部受跟踪的非测试 .py；SQL 字面量（含 f-string）写 `signal_archive`，或占位符目标且文件提到 signal_archive ⇒ 写入者，必须引用 `is_quarantined`。豁免表 `NOT_SIGNAL_ARCHIVE`（backtester / data_backup.export，逐条写理由）双向：过期即红。正对照：四个已知写入者必须被认出且合规；「有牙」6 例合成源码。粒度是文件不是函数（docstring 写明看不见的部分）。
+- `tests/test_backfill_fear_greed_legacy.py::TestQuarantineGate`（2）、`tests/test_data_backup.py::TestRestoreReportsQuarantinedRows`（2）。
+- 变异：撤掉 fear_greed 的检查 ⇒ 守卫与行为测试都红；restore 计数恒 0 ⇒ 红。相关 375 passed；ruff 通过。
+
+### 数据 / 评分
+- 不动任何数据；无评分影响。不追加世代边界。
 
 ## [0.45.510] — 2026-10-16 — 占位（进行中：编排器去掉扫描前 Slack 确认——每天 launchd 自己跑、Webhook 早已 404，空等 10 分钟）
+
 
 ## [0.45.509] — 2026-10-16 — Changed（事后修订）：F&G 敞口门自证在生产日线取不到的故障日按「没有日线」重放（09-24 / 09-25 / 10-14）；Added：生产纸面组合净值行记下本轮日线一次都没取到的标的（`ohlc_unavailable`）/ 时有时无的标的（`ohlc_partial`）
 
