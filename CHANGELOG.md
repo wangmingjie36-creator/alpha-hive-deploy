@@ -5,36 +5,41 @@
 
 ---
 
-## [0.45.510] — 2026-10-16 — 占位（进行中：编排器去掉扫描前 Slack 确认——每天 launchd 自己跑、Webhook 早已 404，空等 10 分钟）
+## [0.45.509] — 2026-10-16 — Changed（事后修订）：F&G 敞口门自证在生产日线取不到的故障日按「没有日线」重放（09-24 / 09-25 / 10-14）；Added：生产纸面组合净值行记下本轮日线一次都没取到的标的（`ohlc_unavailable`）/ 时有时无的标的（`ohlc_partial`）
 
-## [0.45.509] — 2026-10-16 — 占位（进行中：F&G 敞口门自证在生产日线全取不到的故障日按「无日线」重放）
+用户 2026-10-16 看过 v0.45.503 的 10-14 诊断后决定。病根（v0.45.503 已查清）：10-14 生产纸面组合 `_fetch_ohlc` 全被限流 ⇒ 0 出场、持仓按入场价估值，4 笔新仓按没扣掉四笔出场（−$444.53）的净值基数定额；逐日重锚的 A 有日线 ⇒ 四笔金额恰为生产的 0.99120 倍，自证 28/32（决策层 32/32）⇒ 无法判定。代理恢复后重新取数补不了：重放手里本来就有 10-14 的日线，对不上的是生产当天已经做了的事；改写生产账本会让自证拿重放比重放。
 
-## [0.45.508] — 2026-10-16 — Fixed（数据，用户批准；维度 IC 协议**事后·非修订**记录 §13.8）：2026-10-14 的 29 个 `price.volume_ratio`（Twelve Data 兜底，末根 10-13）与 BILI 的 `price.momentum_5d`（自攒索引窗口末端 10-13）登进 `QUARANTINE` ⇒ 维度 IC H1 当天无效；H2 / 共振加成 / F&G 敞口门不受影响
+### Changed
+- `experiments/fg_exposure_gate_forward_test.py`（docstring 【事后修订 v0.45.509】）：
+  - `_segmented_entries` 在 `paper_portfolio.replay_ohlc_mask(plan["ohlc_mask"])` 里逐段重放，每天实际挡下的请求数写进 `selfproof_segments.ohlc_masked_requests`。
+  - `_forward_anchor_plan` / `_rehearse_anchor_plan` 都经新 `_attach_ohlc_mask` 挂遮罩。遮哪天只认两个来源：生产净值行的 `ohlc_unavailable`，以及封闭的 `HISTORICAL_OHLC_OUTAGES`（09-24、09-25、10-14，日志取证，一律全部标的；10-12 已整天排除，不登记）。
+  - 以下情况不遮、只报，并写进失败原因：`ohlc_partial`（`ohlc_partial_days`）；净值行有故障形状（有持仓且未实现盈亏恰为 0）、但两个来源都没记的日子（`ohlc_outage_signature_unmarked`）。
+  - **统计量用的连续 A / B 不遮**。
+  - **未动**：窗口、变体、统计量、检视点、α、盲化、阈值、分母、四元组、种子、锚点。
+  - `_a_only_note` 的文案不再把 09-24/25 当现成解释（它们已被遮罩复刻）。
+- 真实数据 `run()`（10-16 05:52）：
+  - 自证从 28/32 升到 **32/32**，决策层 32/32，a_only 从 11 降到 **0**；`ohlc_masked_requests` 为 09-24 34、09-25 34、10-14 30。
+  - 状态从 `cannot_judge` 变为 `not_ready`（4/15 合格周）。
+  - 连续 A 的诊断不变（23/32，照报不判）。
 
-### 取证（只读；全部 30 只，yfinance 日线只取到 10-14 为止，没算任何收益或 IC）
-- 10-14 生产扫描 yfinance 全挡（429×4 后冷却），历史字段全走出口回落（`~/.claude/logs/orchestrator-2026-10-14.log`）。
-- `price.volume_ratio` 29/30 入档（JNJ 当天 TD 限流超时、未入档；14:19 补到的 2.23x 没进归档）：**29/29 是 10-13 的比值**——27 只与 yfinance「截至 10-13」到 4 位小数相等，RKLB 0.7304 vs 0.7327、VKTX 0.6039 vs 0.6072（成交量源差异）；与「截至 10-14」相去甚远（COST 0.62 vs 1.31、CRCL 0.48 vs 1.03、DELL 0.78 vs 1.68）。成因与修法见 v0.45.505。
-- `price.momentum_5d` 30/30 来自自攒索引：29 只末端 10-14、与 yfinance 一致；**BILI 末端 10-13**（+0.40%，yfinance 截至 10-14 为 −3.91%）。
-- `price.volatility_20d` 0/30 ⇒ `buzz.comp.volatility_signal` 全 50（缺失哨兵，横截面同值）——**缺失 ≠ 取错**，按协议 §3「降级日照算」不处理。`market.fear_greed` 32 是当天 CNN 实时值、横截面同值（未对 CNN 历史独立复核，待验证）。
-- 窗口内其余日子：10-13、10-15 零 TD 量比兜底、零索引动量兜底 ⇒ 只有 10-14。
-- 损伤量级（只用分数）：用正确的 D 值，16/30 只的量比档位会变；线性近似下纠正后 H1 横截面与实际的 Spearman ≈ 0.96（忽略背离 / 情绪动量调整，估算）。
-- 截止：10-14 的 T+7 = **2026-10-23**（`backtester._US_BDAY` 与 NYSE 日历一致）；本条登记于 10-16，此前 `close_t7` 全 NULL ⇒ 盲化未破。
-
-### Fixed
-- `signal_archive.QUARANTINE` 加两条：10-14 × 29 只（除 JNJ）× `price.volume_ratio`；10-14 × BILI × `price.momentum_5d`。生产库只读核对：命中恰好 30 行（29 + 1），全在 10-14。
-- **为什么是 QUARANTINE、不是修订 2 的 `FORWARD_TEST_EXCLUDED_DAYS`**：协议 §3 登记时就把「`QUARANTINE` 登记的已知坏行」列为排除项，执行器 `weekly_series` 对假设的任一截断 / 隔离信号命中即丢行，H1 的信号表含输入层 ⇒ 这是**套用已登记的规则**，规则 / 常量 / 窗口 / 检视点都没动（不进 `AMENDMENTS`）。`FORWARD_TEST_EXCLUDED_DAYS` 管「事后重放补算的整天」（10-14 没有重放），且三份前瞻检验共用——登进去会连带把 10-14 从 F&G 敞口门里拿掉，而那边 10-14 自证失败的处理（v0.45.503）另待决定。
-- 后果：H1 当天只剩 JNJ（< `MIN_WIDTH` 20）⇒ 10-14 对 H1 无效（W42 剩 10-13 / 10-15 / 10-16）；H2 不读 `price.*` 照算。
-- **只隔离观测层**：`buzz.comp.*` 通道值是派生值（同 Agent 评分，不隔离）；且 §13.2 自证 ②「生产有分、重算却缺输入 = 0」会把隔离 / purge 掉的通道行算成自证失败。
-- 未动：09-15 QCOM / NVDA 同形状的 D-1 TD 量比（窗口前，不影响 H1；要不要为一致性补登另议）；没跑 `purge_quarantined_signal_rows.py`（`is_quarantined` 已足够让 H1 丢行；删不删库里的 30 行另议）。
-
-### Changed（文档）
-- `experiments/dim_ic_preregistration.md`：文首加「记录」一行；新增「### 记录（2026-10-16，v0.45.508）」§13.8（发生了什么 / 做了什么 / 为什么不是修订 / 为什么不隔离通道 / 为什么不走修订 2 / 为什么不可能受结果影响 / 代价 / 守卫）。
+### Added
+- `paper_portfolio`：
+  - `_OHLC_RUN_OUTCOMES` 由 `run_for_date` 进出时设置和恢复（异常也恢复）。`_note_ohlc` 在 `_OHLC_FULL`、回放窗口、直连缓存、直连成功和直连异常各处记一次；空结果算取到，不算失败。
+  - `_run_for_date` 把一次都没取到的标的写进净值行 `ohlc_unavailable`（同时记 ERROR），取到过也失败过的写进 `ohlc_partial`。两者都返回给调用方；都没有时净值行逐字节同改动前（`split_unresolved` 先例）。
+  - `replay_ohlc_mask(mask)`：只在 `_REPLAY_AS_OF` 落在 mask 里时生效（生产路径恒不生效）。被挡的请求记成失败，所以遮罩重放的净值行与生产那天逐字节相同。退出时恢复；坏输入抛 ValueError。
+- ⚠️ 这只是**记录**。纸面组合当天日线全取不到时照样开仓、不出场、不进 P 级告警——这个缺口（用户决定项 2：整天跳过 / 照旧但报警 / 维持现状）仍待定，本版未动。
 
 ### Tests
-- 新 `tests/test_quarantine_1014_prev_session.py`（10）：名单恰好 29 只 × 量比、BILI × 动量，JNJ 与其余动量不在内；通道 / Agent 评分 / `sentiment.pct` / 波动 / F&G 不隔离；不是协议排除日；T+7 按 backtester 日历 = 10-23 晚于登记日；生产形状夹具（30 只真实代码）下 H1 丢 10-14、保 10-15，**删掉条目该日回来**（对照），H2 不受影响。
-- 变异 7/7 被杀（量比条目失效、漏 XOM、多 JNJ、连带隔离通道、动量不限 BILI、日期错成 10-15、执行器不问隔离）；`PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。
-- 相关 6 个文件 188 passed；ruff 全仓通过。
-- 全量：9849 passed、2 xfailed、0 failed（`--deselect` 设计内定期红的 `test_economic_calendar::TestCoverageHorizon`）；1 error = session 级真实数据根总闸：生产 `replay_ohlc_state/*.json` 05:52:31–36 被改写，总闸把它们记到互不相关的 alphabot 启动器测试上（几秒内成批）。同一时段另一会话（laughing-lumiere）的全量 05:44–05:55 与本次重叠；单独重跑被点名的两个文件 + 本条测试（179 passed），该目录 mtime 前后逐字节不变；本条改动不碰任何写入路径 ⇒ 判为并发写入者，非本条泄漏（谁写的未进一步定位，待验证）。
+- 新 `tests/test_fg_selfproof_ohlc_outage.py`（20 条）。走**真实** `_fetch_ohlc` → `_fetch_ohlc_direct` 和假 yfinance（异常 = 限流），按 10-14 的形状压成四天。覆盖：
+  - 生产标记：健康日不写键；全断日记全部标的和 ERROR；单只断只记它；时有时无记 partial；返回值；运行状态复位（含异常时）。
+  - 遮罩：只在重放、只对那天那几只生效；`None` 表示全部；退出时恢复；拒收坏输入。
+  - 端到端：不遮时金额层红（对照）；遮了全部复现，且那天的净值行逐字节同生产；单只遮罩够用；改仓位参数照样红；统计臂从不被遮。
+  - 遮哪天：两个来源；形状像但未记的只报不遮；失败原因点名；登记表封闭（日期早于 10-16 且带日志与净值行证据）；两条分段方案都挂遮罩（AST）。
+- `tests/test_fg_exposure_gate_forward_test.py`：`_SEGMENT_KEYS` 白名单加 4 个新子键（只有日期、标的、计数）。
+- 变异 8/8 被杀：取数不看遮罩、直连异常不记、partial 并进 unavailable、不写标记、分段不用遮罩、前瞻方案不挂、未记形状不报、登记表被忽略。
+- 全量（rebase 到 bf717490 后）：9870 passed / 0 failed（`TestCoverageHorizon` 经济日历覆盖期设计内红照惯例 deselect）；`tools/clockshift/audit.py --days 7/45/400` 新文件新红 0；ruff 全绿。
+
+## [0.45.508] — 2026-10-16 — 占位（进行中：10-14 量比取错日 ⇒ QUARANTINE 观测层，维度 IC H1 当天失效）
 
 ## [0.45.507] — 2026-10-16 — Fixed（仅测试基础设施）：两道 session 级总闸「逐文件写入时刻落在哪条测试」的定位按**本机 mtime 精度**放宽——Linux 内核按 tick 盖 inode 时间戳，mtime 可比写入那一刻的 `time.time()` 早一个 tick，call 开头的写入被标成 setup；`test_root_data_guard` 两条时间线测试因此在 Linux CI 上恒红（macOS 绿）
 
@@ -169,7 +174,7 @@ mtime 从不早于写前读的 `time.time()`，所以本机永远复现不了。
 - **不是 σ**：10-14 `signal_archive` 没有 `price.volatility_20d`（0 行），生产与重放都回落到 10-13 的值（5 天时效内），σ 逐位相同。
 - **是 NAV 基数**：10-14 生产纸面组合的 `_fetch_ohlc` 对 11 只持仓 + 4 只新票全部 `YFRateLimited`（真直连、Yahoo 挡）⇒ `_check_exit` 无 K 线 ⇒ 当天 0 出场 ⇒ 仓位基数仍是 50506.04；新仓入场价来自快照（CBOE）照常开。重放有 K 线，当天平掉 DELL / NEE（TIME）、NVDA / SNOW（SL）实亏 −444.53 ⇒ 基数 50061.51，比值 0.991198 = 尺寸比。生产 10-15 才补出这 4 笔（`exit_date` 倒填 10-14）；且 11+4 撞 `max_positions=15`，DELL / RKLB / SNOW 空单没开（重放开了 ⇒ a_only）。
 - 用「当天日线全取不到」的掩码重放 10-14 段 ⇒ 4 笔与净值行**逐字节**复现；同法 09-24 / 09-25 也逐字节复现。`equity_curve` 里 `unrealized == 0.0 且 positions_count > 0` 恰好就是这 4 个故障日（09-24、09-25、10-12、10-14）。
-- 判断：两边都没错——生产在没数据的日子照代码做了，重放用了生产没有的数据。修法候选见本条末与对话；**未实现**。
+- 判断：两边都没错——生产在没数据的日子照代码做了，重放用了生产没有的数据。修法候选见本条末与对话；**未实现**。〔v0.45.509：用户 10-16 选「自证在故障日按没有日线重放」，已实施，自证 32/32〕
 
 ### BILI 10-12 P/C 298.46（已查清，**未处理**）
 - 来源：BILI 无云端 CBOE 链 ⇒ 0993efd 的 yfinance 备用链（`options_analyzer.fetch_options_chain`：剔 DTE<3、取 4 个 DTE≥7 到期日、行权价 0.3–1.7× 现价、OI 前 40）⇒ `calculate_put_call_ratio` **按 OI**、DTE 加权、无下限无上限。

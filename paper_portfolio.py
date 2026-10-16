@@ -710,6 +710,55 @@ _REPLAY_OHLC_WINDOW: Optional[_ReplayOhlcWindow] = None
 #: 生产 `run_for_date` 不碰（直接跑 `run_for_date` 时它是 None ⇒ 窗口用最新版本并计数）。
 _REPLAY_AS_OF: Optional[str] = None
 
+# ── v0.45.509：日线取不到的记录（生产）与「按生产当时没有日线」重放（自证） ─────────────────────────────
+# 10-14（及 09-24/25）生产 `_fetch_ohlc` 全部被限流：当天 0 出场、仓位按入场价估值、新仓按没扣出场的净值定额，
+# `run_for_date` 却照常「成功」，只有日志里的 WARNING。F&G 敞口门自证拿有日线的重放去比，金额对不上 4 笔。
+#: `_run_for_date` 进入时设成 `{}`、退出时恢复：`{ticker: [取到次数, 失败次数]}`。只数**抛了异常**的失败
+#: （直连路径对异常与空结果都返回 `{}`，空结果是权威答案、不是失败）。None = 不在一次运行里，不记。
+_OHLC_RUN_OUTCOMES: Optional[Dict[str, List[int]]] = None
+#: 只有 `replay_ohlc_mask` 写它：`{重放日: None（全部标的）| frozenset(标的)}`。`_REPLAY_AS_OF` 落在里面
+#: ⇒ 该日对这些标的 `_fetch_ohlc` 一律返回 `{}`（与生产那天直连失败时拿到的一样）。生产路径恒为 None。
+_REPLAY_OHLC_MASK: Optional[Dict[str, Optional[frozenset]]] = None
+
+
+def _note_ohlc(ticker: str, ok: bool) -> None:
+    out = _OHLC_RUN_OUTCOMES
+    if out is not None:
+        out.setdefault(ticker, [0, 0])[0 if ok else 1] += 1
+
+
+@contextlib.contextmanager
+def replay_ohlc_mask(mask: Dict[str, Optional[frozenset]]):
+    """在 `with` 内，`run_replay` 重放到 `mask` 里的日子时，对其中的标的（`None` = 全部）`_fetch_ohlc` 返回 `{}`。
+
+    用途：F&G 敞口门自证按生产**当时**拿到的输入重放故障日（v0.45.509 事后修订）。yield 出计数
+    `{日期: 被挡下的请求数}`。退出时（含异常）恢复进入前的值。不碰 `_PRICE_CACHE` / `_OHLC_FULL`。"""
+    global _REPLAY_OHLC_MASK
+    for d, m in mask.items():
+        if not (isinstance(d, str) and _ISO_DATE_RE.match(d)) or not (m is None or isinstance(m, frozenset)):
+            raise ValueError(f"replay_ohlc_mask: {d!r} → {m!r}（要 YYYY-MM-DD → None | frozenset）")
+    prev = _REPLAY_OHLC_MASK
+    _REPLAY_OHLC_MASK = dict(mask)
+    _REPLAY_OHLC_MASK_HITS.clear()
+    try:
+        yield _REPLAY_OHLC_MASK_HITS
+    finally:
+        _REPLAY_OHLC_MASK = prev
+
+
+_REPLAY_OHLC_MASK_HITS: Dict[str, int] = {}
+
+
+def _masked_in_replay(ticker: str) -> bool:
+    mask, d = _REPLAY_OHLC_MASK, _REPLAY_AS_OF
+    if not mask or d is None or d not in mask:
+        return False
+    m = mask[d]
+    if m is not None and ticker not in m:
+        return False
+    _REPLAY_OHLC_MASK_HITS[d] = _REPLAY_OHLC_MASK_HITS.get(d, 0) + 1
+    return True
+
 
 def replay_ohlc_bounds(dates: List[str],
                        held_entry_dates: Optional[List[str]] = None) -> Optional[Tuple[str, str]]:
@@ -753,8 +802,13 @@ def _fetch_ohlc(ticker: str, start: str, end: str) -> Dict[str, Dict]:
     """拉 [start, end) 区间的每日 OHLC（end 排他，同 yfinance）。返回 {date_str: {Open, High, Low, Close}}"""
     # v0.38.2: 优先从全区间存储切片（prefetch_ohlc 预热后零网络调用）
     # 注意 end 排他（与 yfinance history(start,end) 语义一致，保证与直连路径行为完全相同）
+    # v0.45.509：自证重放生产没有日线的那天（`replay_ohlc_mask`）——生产那天直连失败拿到的就是 `{}`
+    if _masked_in_replay(ticker):
+        _note_ohlc(ticker, False)   # 记成失败：重放的净值行与生产那天一样带 ohlc_unavailable
+        return {}
     full = _OHLC_FULL.get(ticker)
     if full:
+        _note_ohlc(ticker, True)
         return {d: bar for d, bar in full.items() if start <= d < end}
 
     # v0.45.391：回放窗口（只在 `replay_ohlc_window` 作用域内非 None；生产路径恒为 None）。
@@ -764,6 +818,7 @@ def _fetch_ohlc(ticker: str, start: str, end: str) -> Dict[str, Dict]:
     if win is not None:
         sliced = win.serve(ticker, start, end)
         if sliced is not None:
+            _note_ohlc(ticker, True)
             return sliced
         out = _fetch_ohlc_direct(ticker, start, end)
         win.note_direct(out)
@@ -776,6 +831,7 @@ def _fetch_ohlc_direct(ticker: str, start: str, end: str) -> Dict[str, Dict]:
     逻辑一字未改——为了在回放窗口作用域内能数它的结局，生产路径照旧经 `_fetch_ohlc` 走到这里。"""
     key = (ticker, start, end)
     if key in _PRICE_CACHE:
+        _note_ohlc(ticker, True)
         return _PRICE_CACHE[key]
 
     try:
@@ -784,11 +840,14 @@ def _fetch_ohlc_direct(ticker: str, start: str, end: str) -> Dict[str, Dict]:
         hist = tkr.history(start=start, end=end, auto_adjust=False)
         if hist is None or len(hist) == 0:
             _PRICE_CACHE[key] = {}
+            _note_ohlc(ticker, True)
             return {}
         out = _bars_from_history(ticker, hist)
         _PRICE_CACHE[key] = out
+        _note_ohlc(ticker, True)
         return out
     except Exception as _e_ohlc:
+        _note_ohlc(ticker, False)
         # ── v0.45.50：失败结果**不再写进缓存** ──
         # 旧实现把 {} 存进 _PRICE_CACHE，而取用侧用 `if key in _PRICE_CACHE` 判定
         # （空 dict 也命中）—— 于是同一进程内该 (ticker, start, end) **永不重试**，
@@ -1633,15 +1692,25 @@ def run_for_date(as_of: str, verbose: bool = False,
     - 整轮读-改-写持 `paper_portfolio_state/` 目录锁（`ledger_io.locked`）——手动补跑与定时扫描撞上时，后到者等前者
       写完再读持仓 / 现金，不会拿旧快照开平仓、再把对方的记录覆盖掉；
     - 结局记进 `run_stats()`：此前日报把这里的任何异常当「非致命」吞成一行 WARNING，**组合整轮没跑也不红**。"""
-    global _LAST_RUN
+    global _LAST_RUN, _OHLC_RUN_OUTCOMES
+    _prev_outcomes, _OHLC_RUN_OUTCOMES = _OHLC_RUN_OUTCOMES, {}   # v0.45.509：本轮日线取数结局
     try:
         with ledger_io.locked(POSITIONS_FILE.parent):
             res = _run_for_date(as_of, verbose=verbose, market_fear_greed=market_fear_greed)
     except Exception as exc:  # noqa: BLE001 - 记下来、原样抛：调用方的处理不变
         _LAST_RUN = {"as_of": as_of, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
         raise
+    finally:
+        _OHLC_RUN_OUTCOMES = _prev_outcomes
     _LAST_RUN = {"as_of": as_of, "ok": True, "error": None}
     return res
+
+
+def _ohlc_run_gaps() -> Tuple[List[str], List[str]]:
+    """本轮（`run_for_date` 内）日线取数：（一次都没取到的标的，取到过也失败过的标的），各自排序。"""
+    out = _OHLC_RUN_OUTCOMES or {}
+    return (sorted(t for t, (ok, bad) in out.items() if bad and not ok),
+            sorted(t for t, (ok, bad) in out.items() if bad and ok))
 
 
 def _run_for_date(as_of: str, verbose: bool = False,
@@ -1799,6 +1868,16 @@ def _run_for_date(as_of: str, verbose: bool = False,
     # 没有时不写这个键（净值行逐字节同改动前）。
     if split_unresolved:
         equity_snapshot["split_unresolved"] = sorted(u["ticker"] for u in split_unresolved)
+    # v0.45.509：这一轮有标的日线一次都没取到（每次请求都抛了）⇒ 它今天没查出场、按入场价估值、新仓（若是它）
+    # 按入场价算——净值行带 `ohlc_unavailable`，F&G 敞口门自证据此按「那天它没有日线」重放；取到过又失败过的另记
+    # `ohlc_partial`（自证不遮、只报）。都没有时不写（净值行逐字节同改动前）。
+    ohlc_unavailable, ohlc_partial = _ohlc_run_gaps()
+    if ohlc_unavailable:
+        equity_snapshot["ohlc_unavailable"] = ohlc_unavailable
+        _log.error("[PaperPortfolio] %s %d 个标的日线一次都没取到（%s）——它们今天没查出场、按入场价估值；"
+                   "净值行已记 ohlc_unavailable", as_of, len(ohlc_unavailable), "、".join(ohlc_unavailable))
+    if ohlc_partial:
+        equity_snapshot["ohlc_partial"] = ohlc_partial
 
     # 去重：同一天多次运行时只保留最新快照
     existing_equity = _load_jsonl(EQUITY_FILE)
@@ -1830,6 +1909,9 @@ def _run_for_date(as_of: str, verbose: bool = False,
         # v0.45.416：今天换了口径的拆股 / 判不了口径的仓位（各 [] 表示没有）
         "split_adjusted": split_adjusted,
         "split_unresolved": split_unresolved,
+        # v0.45.509：本轮日线一次都没取到 / 时有时无的标的（各 [] 表示没有）
+        "ohlc_unavailable": ohlc_unavailable,
+        "ohlc_partial": ohlc_partial,
     }
 
 
