@@ -1,6 +1,6 @@
 // 卖权页「怎么卖」：选中结构的下单腿 / 推荐价位 / 标的价位 / 步骤与风险。
 // 全部数字由服务端 alphabot/howto.py 算好（同一份 structure_quote 报价），这里只排版，不另写公式。
-import { h, num, money, pct, signedPct, isNum, panel, table, seg, STRUCT_LABEL, plain, pref, setPref } from "../lib.js";
+import { h, num, money, pct, signedPct, isNum, panel, table, seg, STRUCT_LABEL, plain, pref, setPref, reasonInfo } from "../lib.js";
 
 const ACTION = { sell: "卖出开仓", buy: "买入开仓" };
 const CP = { P: "put", C: "call" };
@@ -82,7 +82,7 @@ export function howtoPanel({ hw, tenor, pick, S, redraw }) {
   } else {
     (tier.cautions || []).forEach((c) => body.push(h("p", { class: `callout ${c.level === "warn" ? "warn" : ""}` }, plain(c.text))));
     if (!tier.quotable) {
-      body.push(h("p", { class: "callout warn" }, `这一档不可报价：${tier.reason || "—"}。下面只列出涉及的合约，金额不可当成交价。`));
+      body.push(h("p", { class: "callout warn" }, `这一档不可报价：${reasonInfo(tier.reason).text}。下面只列出涉及的合约，金额不可当成交价。`));
       if ((tier.legs || []).length) body.push(legsTable(tier, S));
     } else {
       body.push(h("h3", {}, "① 下单腿"), legsTable(tier, S),

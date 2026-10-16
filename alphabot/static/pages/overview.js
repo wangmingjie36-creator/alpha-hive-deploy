@@ -1,6 +1,6 @@
 // 总览：账本某日（缺省最新一日）全部标的一屏。读的是收盘后记录的行，不逐只现拉（每只 4–7 秒）。
 import { api, h, helpLink, num, pct, pctPts, signChip, seg, table, panel, downloadCSV, pref, setPref, isNum,
-  ROUTE_SHORT, EARN_LABEL, SOURCE_LABEL, TENOR_LABEL, CURVE_LABEL, money, fill } from "../lib.js";
+  ROUTE_SHORT, EARN_LABEL, SOURCE_LABEL, TENOR_LABEL, CURVE_LABEL, money, fill, reasonInfo, methodRules } from "../lib.js";
 import { go } from "../app.js";
 
 export async function renderOverview(root, alive) {
@@ -8,6 +8,7 @@ export async function renderOverview(root, alive) {
   let date = null;
   let tenor = pref("ovTenor", "monthly");
   let filter = "all";
+  const maxSpread = (await methodRules())?.ladder?.max_spread_pct;   // 取不到就不写「上限 x%」
 
   async function draw() {
     const q = date ? `?date=${encodeURIComponent(date)}` : "";
@@ -18,11 +19,15 @@ export async function renderOverview(root, alive) {
     const rec = rows.filter((r) => r.status === "recorded");
     const unav = rows.filter((r) => r.status !== "recorded");
     const flagged = (r) => r.route && (r.route.flag_put || r.route.flag_call);
+    // 路由短腿：有合约的才算（无合约是另一回事，格子里写「无合约」）
+    const legsOf = (r) => ["put", "call"].map((sd) => r.route_legs?.[sd]).filter((l) => l && isNum(l.strike));
+    const bothQuotable = (r) => { const ls = legsOf(r); return ls.length === 2 && ls.every((l) => l.quotable); };
     const shown = rec.filter((r) =>
       filter === "all" ? true
         : filter === "neg" ? r.env?.sign_at_spot === "negative"
           : filter === "flag" ? flagged(r)
-            : r.earnings_status === "before_expiry" || r.earnings_status === "unknown");
+            : filter === "quotable" ? bothQuotable(r)
+              : r.earnings_status === "before_expiry" || r.earnings_status === "unknown");
 
     const head = h("div", { class: "page-head" },
       h("div", {},
@@ -47,9 +52,14 @@ export async function renderOverview(root, alive) {
 
     const assess = d.assess?.[tenor];
     const nNeg = rec.filter((r) => r.env?.sign_at_spot === "negative").length;
+    const allLegs = rec.flatMap(legsOf);
+    const bad = allLegs.filter((l) => !l.quotable);
+    const wide = bad.filter((l) => reasonInfo(l.reason).code === "short_spread_too_wide").length;
     const kpis = h("div", { class: "kpis" },
       kpi("已记录", `${rec.length}`), kpi("负 gamma", `${nNeg}`),
-      kpi("路由退到远档", `${rec.filter(flagged).length}`), kpi("不可得", `${unav.length}`));
+      kpi("路由退到远档", `${rec.filter(flagged).length}`), kpi("不可得", `${unav.length}`),
+      kpi("路由短腿不可报价", `${bad.length} / ${allLegs.length}`,
+        bad.length ? `其中点差过宽 ${wide}、其余 ${bad.length - wide}` : "全部可报价"));
 
     const cols = [
       { label: "代码", render: (r) => h("b", {}, r.ticker), csv: (r) => r.ticker },
@@ -64,15 +74,15 @@ export async function renderOverview(root, alive) {
         csv: (r) => `${r.route?.put}/${r.route?.call}` },
       { label: "到期", render: (r) => h("span", {}, r.expiry || "—", h("span", { class: "sub" }, isNum(r.dte) ? `${r.dte} 天` : "")),
         csv: (r) => r.expiry },
-      { label: "卖 put（路由档）", cls: "r", render: (r) => legCell(r.route_legs?.put), csv: (r) => r.route_legs?.put?.strike },
-      { label: "卖 call（路由档）", cls: "r", render: (r) => legCell(r.route_legs?.call), csv: (r) => r.route_legs?.call?.strike },
+      { label: "卖 put（路由档）", cls: "r", render: (r) => legCell(r.route_legs?.put, maxSpread), csv: (r) => r.route_legs?.put?.strike },
+      { label: "卖 call（路由档）", cls: "r", render: (r) => legCell(r.route_legs?.call, maxSpread), csv: (r) => r.route_legs?.call?.strike },
       { label: "财报", render: (r) => r.earnings_status === "before_expiry" || r.earnings_status === "unknown"
         ? h("span", { class: "chip warn" }, EARN_LABEL[r.earnings_status]) : (EARN_LABEL[r.earnings_status] || "—"),
       csv: (r) => r.earnings_status },
       { label: "报价", render: (r) => h("span", { class: "small muted" }, SOURCE_LABEL[r.underlying_price_source] || r.underlying_price_source || "—"),
         csv: (r) => r.underlying_price_source },
     ];
-    const filters = seg([["all", "全部"], ["neg", "负 gamma"], ["flag", "路由退后"], ["earn", "财报冲突"]], filter,
+    const filters = seg([["all", "全部"], ["quotable", "两侧可报价"], ["neg", "负 gamma"], ["flag", "路由退后"], ["earn", "财报冲突"]], filter,
       (v) => { filter = v; draw(); }, "筛选");
     const tbl = table(cols, shown, { onRow: (r) => go(`#/t/${r.ticker}/sell`) });
     const exportBtn = h("button", { class: "btn", type: "button",
@@ -82,14 +92,17 @@ export async function renderOverview(root, alive) {
       assess?.summary ? h("p", { class: "callout" }, assess.summary) : null,
       panel(`${TENOR_LABEL[tenor]}`, { right: h("div", { class: "controls" }, filters, exportBtn) },
         kpis, h("div", { style: { height: "14px" } }), tbl,
-        h("p", { class: "note" }, "点任一行进入该标的的卖权工作台。单笔回报 = 权利金 ÷ 占用资金（卖 put 按现金担保 K）；年化只在标的页作次要参考。")),
+        h("p", { class: "note" }, "点任一行进入该标的的卖权工作台。单笔回报 = 权利金 ÷ 占用资金（卖 put 按现金担保 K）；年化只在标的页作次要参考。「不可报价」多半是短腿点差过宽（流动性不够），格子里的小字是点差与持仓量（OI）；金额不可当成交价。")),
       unav.length ? panel("不可得", { sub: "当日没有记成候选的标的与原因" },
         table([{ label: "代码", render: (r) => r.ticker }, { label: "原因", render: (r) => r.unavailable_reason || "—" }], unav)) : null);
   }
   await draw();
 }
 
-function kpi(k, v) { return h("div", { class: "kpi" }, h("div", { class: "k" }, k), h("div", { class: "v" }, v)); }
+function kpi(k, v, sub) {
+  return h("div", { class: "kpi" }, h("div", { class: "k" }, k), h("div", { class: "v" }, v),
+    sub ? h("div", { class: "small muted" }, sub) : null);
+}
 function routeTxt(v) { return v === "far" ? h("b", {}, "far") : (ROUTE_SHORT[v] || "—"); }
 function zgDist(env) {
   if (!env) return "";
@@ -98,9 +111,21 @@ function zgDist(env) {
   if (isNum(env.zg_above_pct)) parts.push(`上方 ${pctPts(env.zg_above_pct)}`);
   return parts.join(" · ");
 }
-function legCell(leg) {
+function legCell(leg, maxSpread) {
   if (!leg) return "—";
   if (!isNum(leg.strike)) return h("span", { class: "muted small" }, "无合约");
-  return h("span", {}, `${num(leg.strike)} · ${num(Math.abs(leg.delta ?? NaN), 2)}Δ`,
-    h("span", { class: "sub" }, leg.quotable ? `单笔 ${pct(leg.yield_raw, 2)} · bid ${money(leg.bid)}` : `不可报价：${leg.reason || "—"}`));
+  const liq = `点差 ${isNum(leg.spread_pct) ? pct(leg.spread_pct, 0) : "—"} · OI ${isNum(leg.oi) ? num(leg.oi, 0) : "—"}`;
+  const head = `${num(leg.strike)} · ${num(Math.abs(leg.delta ?? NaN), 2)}Δ`;
+  if (leg.quotable) {
+    return h("span", {}, head, h("span", { class: "sub" }, `单笔 ${pct(leg.yield_raw, 2)} · bid ${money(leg.bid)}`),
+      h("span", { class: "sub" }, liq));
+  }
+  const r = reasonInfo(leg.reason);
+  // 点差过宽时把「多宽 / 上限多少」写出来；别的原因给 bid / ask，看得出是没有 bid 还是价差倒挂
+  const detail = r.code === "short_spread_too_wide"
+    ? `${isNum(leg.spread_pct) ? pct(leg.spread_pct, 0) : "—"}${isNum(maxSpread) ? ` > 上限 ${pct(maxSpread, 0)}` : ""}`
+    : `bid ${money(leg.bid)} / ask ${money(leg.ask)}`;
+  return h("span", {}, head,
+    h("span", { class: `sub reason ${r.tone}` }, `不可报价：${r.text}`),
+    h("span", { class: "sub" }, `${detail} · OI ${isNum(leg.oi) ? num(leg.oi, 0) : "—"}`));
 }

@@ -79,6 +79,39 @@ export const STRUCT_LABEL = {
   short_put: "卖 put", short_call: "卖 call", bull_put_spread: "牛市 put 价差",
   bear_call_spread: "熊市 call 价差", strangle: "宽跨", iron_condor: "铁鹰",
 };
+// 「不可报价」原因码 → 人话（v0.45.519）。键 = `sell_strike_candidates.structure_quote` 写出的原因码前缀（冒号前），
+// 外加 alphabot/howto.py 的 `mid_unavailable`；tests/test_alphabot_unquotable.py 用静态扫描双向核对，漏登记会红。
+// 查不到的码原样显示「未登记：…」，不静默吞成空白。
+export const REASON_LABEL = {
+  short_spread_too_wide: "点差过宽",
+  quote_not_ok: "没有有效 bid",
+  missing_leg: "缺合约",
+  credit_ge_width: "报价疑似失真",
+  non_positive_credit: "净权利金 ≤ 0",
+  rung_unavailable: "路由判不可用",
+  mid_unavailable: "中价不可得",
+};
+// 点差过宽是「流动性不够」、其余多半是「报价本身有问题」：两类着色不同
+export const REASON_TONE = { short_spread_too_wide: "warn" };
+const REASON_WHERE = {
+  put: "put 侧", call: "call 侧", put_short: "put 短腿", put_wing: "put 保护腿",
+  call_short: "call 短腿", call_wing: "call 保护腿", combined: "两翼合计",
+};
+export function reasonInfo(reason) {
+  const raw = String(reason ?? "");
+  const i = raw.indexOf(":");
+  const code = i < 0 ? raw : raw.slice(0, i);
+  const where = i < 0 ? "" : raw.slice(i + 1);
+  const label = REASON_LABEL[code];
+  return { raw, code, known: Boolean(label), tone: REASON_TONE[code] || "", where: REASON_WHERE[where] || "",
+    text: label ? `${label}${REASON_WHERE[where] ? `（${REASON_WHERE[where]}）` : ""}` : `未登记：${raw || "—"}` };
+}
+// 口径常量（点差上限等）只从服务端取一次，不在前端抄字面量；取不到就返回 null，调用方省略「上限 x%」
+let _methodCache = null;
+export function methodRules() {
+  if (!_methodCache) _methodCache = api("/api/method").catch(() => { _methodCache = null; return null; });
+  return _methodCache;
+}
 export const TENOR_LABEL = { monthly: "月度 21–45 天", weekly: "周度 7–20 天" };
 export const EARN_LABEL = { none: "无", after_expiry: "到期后", before_expiry: "到期前 ⚠", unknown: "未知" };
 export const SOURCE_LABEL = {

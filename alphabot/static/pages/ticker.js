@@ -1,7 +1,7 @@
 // 标的页：水平 / 希腊值 / 期限 / 卖权 / 价格。一次现算（服务端 60 秒缓存）喂全部子页。
 import { api, h, helpLink, num, money, pct, pctPts, usdShort, signedPct, distPct, signChip, seg, table, panel, isNum,
   downloadCSV, pref, setPref, timeAgo, SIGN_LABEL, CURVE_LABEL, ROUTE_LABEL, STRUCT_LABEL, TENOR_LABEL,
-  EARN_LABEL, SOURCE_LABEL, fill, plain } from "../lib.js";
+  EARN_LABEL, SOURCE_LABEL, fill, plain, reasonInfo } from "../lib.js";
 import { strikeBars, gammaCurve, lines, columns, payoff, C } from "../charts.js";
 import { premium } from "./premium.js";
 import { howtoPanel } from "./howto.js";
@@ -270,9 +270,9 @@ function sell(body, d) {
       const q = (row.ladder_quotes?.[side] || {})[k] || {};
       const cells = [
         td(h("b", {}, num(leg.strike))), td(num(Math.abs(leg.delta ?? NaN), 3)), td(pct(leg.itm_prob)),
-        td(num(leg.sigma_distance, 2)), td(h("span", {}, money(leg.bid), h("span", { class: "sub" }, `点差 ${pct(leg.spread_pct, 0)}`))),
+        td(num(leg.sigma_distance, 2)), td(h("span", {}, money(leg.bid), h("span", { class: "sub" }, `点差 ${pct(leg.spread_pct, 0)} · OI ${isNum(leg.oi) ? num(leg.oi, 0) : "—"}`))),
         td(q.quotable ? h("span", {}, pct(q.yield_raw, 2), h("span", { class: "sub" }, `年化 ${pct(q.yield_annualized, 0)}`))
-          : h("span", { class: "small muted" }, `不可报价：${(q.reason || "—").split(":")[0]}`)),
+          : h("span", { class: `small ${reasonInfo(q.reason).tone === "warn" ? "reason warn" : "muted"}` }, `不可报价：${reasonInfo(q.reason).text}`)),
       ];
       return side === "put" ? cells.reverse() : cells;
     };
@@ -290,7 +290,7 @@ function sell(body, d) {
       ? [h("td", { class: "r" }, money(q.credit)), h("td", { class: "r" }, q.max_loss === null ? "无上限" : money(q.max_loss)),
         h("td", { class: "r" }, h("span", {}, h("b", {}, pct(q.yield_raw, 2)), h("span", { class: "sub" }, `年化 ${pct(q.yield_annualized, 0)}`))),
         h("td", { class: "r" }, (q.breakevens || []).map((b) => num(b)).join(" / ") || "—")]
-      : [h("td", { class: "muted small", colspan: "4" }, `不可报价：${q.reason || "—"}`)];
+      : [h("td", { class: `small ${reasonInfo(q.reason).tone === "warn" ? "reason warn" : "muted"}`, colspan: "4" }, `不可报价：${reasonInfo(q.reason).text}`)];
     const structTbl = h("div", { class: "table-wrap" }, h("table", {},
       h("thead", {},
         h("tr", {}, h("th", {}, ""), h("th", { class: "c", colspan: "4" }, "路由档"), h("th", { class: "c", colspan: "4" }, "基线档 0.20Δ")),

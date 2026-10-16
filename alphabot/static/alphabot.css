@@ -258,3 +258,8 @@ details.sd-why p { font-size: 13px; color: var(--ink-2); margin: 6px 0 0; }
 /* 价位列别折行（日期 / 带单位的价格） */
 .howto td.r { white-space: nowrap; }
 tr.spot-row td { background: var(--sunk); font-weight: 600; }
+
+/* 「不可报价」原因着色（v0.45.519）：点差过宽 = 流动性不够（黄），其余 = 报价本身有问题（灰） */
+td .sub.reason { color: var(--ink-2); }
+td .sub.reason.warn { color: var(--warn); }
+td .reason.warn, td.reason.warn { color: var(--warn); }

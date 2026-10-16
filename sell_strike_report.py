@@ -674,6 +674,8 @@ def _side_brief(row: dict, side: str, rung) -> Optional[dict]:
     q = C.structure_quote(row.get("ladder"), f"short_{side}", rung)
     return {"rung": rung, "strike": leg.get("strike"), "delta": leg.get("delta"),
             "itm_prob": leg.get("itm_prob"), "bid": leg.get("bid"), "spread_pct": leg.get("spread_pct"),
+            # v0.45.519：Alpha Bot 总览要讲清「为什么不可报价」（点差多宽、有没有持仓）——纯新增键，既有键不动
+            "ask": leg.get("ask"), "mid": leg.get("mid"), "oi": leg.get("oi"),
             "quotable": q.get("quotable"), "reason": q.get("reason"),
             "yield_raw": q.get("yield_raw"), "yield_annualized": q.get("yield_annualized")}
 
