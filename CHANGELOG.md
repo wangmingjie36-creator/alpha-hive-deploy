@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.521] — 2026-10-16 — 占位（进行中：按 NYSE 日历离线重算 v0.45.520 查出的历史 T+N 标签（先备份）+ 维度 IC 协议事前说明，用户批准）
+
 ## [0.45.520] — 2026-10-16 — Fixed：T+N 交易日算术改用 NYSE 日历——`outcomes_fetcher` / `backtester` / `backfill_dir_accuracy` 此前用 pandas 联邦假日表（哥伦布 / 退伍军人日判休、耶稣受难日判开），跨这些日子的 T+1/T+7/T+30 标签差一个交易日；历史数据**未改**（影响面见下，待用户决定）
 
 **怎么发现的。** 拨钟 CI（v0.45.495）10-14 的每日定时 +7 档确认一条新红：`test_outcomes_backlog_starvation::test_rate_limit_streak_stops_network_but_not_local`，
