@@ -368,3 +368,41 @@ docstring 里：`tests/test_sell_strike_ledger.py` 的 `TestVersionTruncation`�
 - 测试补强（不改代码行为）：冻结路径首次真能产出 `reject_h0` 且报告逐字核对判定（原断言 `"reject_h0" in md` 也匹配
   `fail_to_reject_h0`）；+1 修正与预注册 seed 下的 p 逐位钉死（非信息块排在最前：它若消耗随机数，后面的抽样全移位）；
   一个 α_each < p ≤ α_family 的夹具钉住判定用 α_each；冻结日当天适用（`>=` 边界）；先到者赢不覆盖已存在的冻结文件。
+
+## 登记后修 bug 记录（2026-10-13，v0.45.500）—— 财报日来源，不截断
+
+按 §10 末段「修 bug 不是协议变更，但必须在修订节里记录，并说明受影响的已记录行」。由主会话拍板（用户 2026-10-13
+在对话里选「接入，按修 bug 记录」）。`PREREG.version` 不变，**不截断**。
+
+**改了什么**：日报钩子与 CLI 缺省给 `classify_earnings` 的财报日，来源从「ChronosBee 已按 `datetime.now()` 过滤的催化剂
++ 催化剂为空时构造 `EarningsWatcher` 打 yfinance 兜底」改为 `earnings_calendar`：ChronosBee 另记的**未过滤**原始日历日期，
+按 as_of 做日期算术；判不了就返回 None（⇒ `unknown`），**不再打网**。`classify_earnings` 本身、§3 的按单位排除与
+第 7 条「按票补一刀」都没动。
+
+**为什么算修 bug**：§3 与 `classify_earnings` 的约定是「as_of ≤ 财报日 ≤ expiry ⇒ before_expiry」，而实现把**财报当天**
+丢成「无财报」（§3 已记录这个缺陷，第 5 / 7 条是绕开它的补偿，不是对它的认可）；另外兜底解析器会把 yfinance 的空列表
+写成字符串 `"[]"`。调查与取证：`experiments/earnings_date_cache_staleness_report.md`。
+
+**逐情形对照**（守卫 `tests/test_earnings_calendar.py::TestNeverLooserThanLegacy`，把旧链语义原样抄成参照、
+9 种日历 × 蜂成败 × 有无其他催化剂 × 5 个到期日逐一比）：
+
+| 情形 | 旧标签 | 新标签 |
+|---|---|---|
+| 日历有未来财报日（不含当天） | 同 | 同 |
+| 财报当天、该票另有催化剂（如分红） | none（或下一季的 after_expiry） | **before_expiry** |
+| 财报当天、无其他催化剂 | 兜底 yfinance ⇒ before_expiry | before_expiry |
+| 日历里 Earnings Date 为空 / 缺键 | none（有其他催化剂）或 `"[]"` ⇒ unknown | **unknown** |
+| 蜂失败 / 日历不可用 | 兜底成功 ⇒ 按 yfinance 判；失败 ⇒ unknown | **unknown** |
+| 只剩已过的财报日 | none | none |
+
+新标签进检验（none / after_expiry）时与旧标签逐一相同；变化只往排除方向（before_expiry / unknown）。
+**唯一的例外**如实记下：旧兜底**打网失败**时旧标签是 unknown，而「只剩已过日期、且无其他催化剂」新链判 none
+——与旧兜底成功时的结果相同（同一测试文件 `test_the_only_loosening_when_the_old_fallback_failed` 钉住恰好只有这一种）。
+结构化日志 09-21 ~ 10-13 里旧兜底一次都没被调用过（`earnings_watcher` 0 条），已记录行里不存在该情形。
+
+**受影响的已记录行：无**。已记录行不改写；新口径从 v0.45.500 上线后的第一个扫描日起生效。截至 10-09 的 583 条
+recorded 行：`earnings_source` = `chronos_bee_catalyst` 581 条、`yfinance` 2 条（MU 09-30 两档，财报当天走了兜底，
+标 before_expiry——新口径给出相同标签）。新行的 `earnings_source` 会是 `chronos_bee_calendar`；该列只记录，不进任何判定。
+
+**看过什么**（§7）：调查中读过账本的 `earnings_date` / `earnings_status` / `earnings_source` / `status` 列与计数，
+并拿 `earnings_date` 对照过 yfinance 历史财报日；**没有读结算字段，没有按 flag / normal 比较任何结果。**

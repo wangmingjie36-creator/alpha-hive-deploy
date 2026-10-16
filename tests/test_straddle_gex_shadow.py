@@ -121,7 +121,8 @@ class TestShadowChangesNothing:
 
 class TestReaders:
     ALLOWED = {"earnings_vol_signal.py", "straddle_gex_prereg.py", "alphabot/straddle.py"}
-    WRITERS = {"gex_ctx", "_usable_capture", "scan", "shadow_summary"}     # 记录 / 同日取舍 / 只数个数
+    # 记录 / 同日取舍 / 只数个数。v0.45.380：写入点是 `_scan_with_info`（`scan` 只剩一层转发，不再引用 gex_ctx）
+    WRITERS = {"gex_ctx", "_usable_capture", "_scan_with_info", "shadow_summary"}
 
     @staticmethod
     def _mentions(root):
@@ -152,7 +153,8 @@ class TestReaders:
     def test_decisions_never_read_it(self):
         src = (REPO / "earnings_vol_signal.py").read_text(encoding="utf-8")
         assert self._funcs_reading(src) <= self.WRITERS, self._funcs_reading(src)
-        assert "scan" in self._funcs_reading(src), "探针要看得见真实的写入点，否则上一条恒真"
+        assert "_scan_with_info" in self._funcs_reading(src), "探针要看得见真实的写入点，否则上一条恒真"
+        assert "scan" not in self._funcs_reading(src), "scan 应只是转发；它又开始读 gex_ctx 就该回来对一遍白名单"
         assert "gex_ctx" not in (REPO / "options_paper_leg.py").read_text(encoding="utf-8")
 
     def test_has_teeth(self):

@@ -124,16 +124,19 @@ class TestFillVolumeFromTwelveData:
 
     def test_fills_gap_when_missing(self, monkeypatch):
         import twelve_data as _td_mod
+        # v0.45.505：只收末根 == 最近一场已收盘的比值（闸本身见 test_volume_fallback_session_gate.py）
+        monkeypatch.setattr(dp, "_latest_closed_session", lambda: "2026-01-02")
         monkeypatch.setattr(
             _td_mod, "fetch_volume_ratio",
             lambda ticker: {"volume_ratio": 0.81, "avg_volume": 14_000_000,
-                            "recent_volume": 11_000_000})
+                            "recent_volume": 11_000_000, "as_of": "2026-01-02"})
 
         out = {"momentum_5d": -4.47, "momentum_source": "price_index"}
         result = dp._fill_volume_from_twelvedata("XOM", out)
         assert result["volume_ratio"] == 0.81
         assert result["avg_volume"] == 14_000_000
         assert result["volume_source"] == "twelvedata"
+        assert result["volume_as_of"] == "2026-01-02"
         # 不能顺带把已有字段挤掉
         assert result["momentum_5d"] == -4.47
         assert result["momentum_source"] == "price_index"
@@ -141,10 +144,11 @@ class TestFillVolumeFromTwelveData:
     def test_none_input_still_fills_volume(self, monkeypatch):
         """momentum 索引也没数据时 out 是 None——volume 仍应独立尝试补上。"""
         import twelve_data as _td_mod
+        monkeypatch.setattr(dp, "_latest_closed_session", lambda: "2026-01-02")
         monkeypatch.setattr(
             _td_mod, "fetch_volume_ratio",
             lambda ticker: {"volume_ratio": 0.5, "avg_volume": 900_000,
-                            "recent_volume": 450_000})
+                            "recent_volume": 450_000, "as_of": "2026-01-02"})
 
         result = dp._fill_volume_from_twelvedata("XOM", None)
         assert result["volume_ratio"] == 0.5

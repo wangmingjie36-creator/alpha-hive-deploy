@@ -101,6 +101,7 @@ SKIP_EXACT = {
     "tests": "代码", "swarm_agents": "代码", "templates": "代码资源", "prompts": "代码资源",
     "experiments": "代码", "data_backup": "代码", "data_migrations": "代码（阶段 7 迁移运行器，v0.45.419）", "alpha_hive_bot": "代码", "marketing": "文档",
     "alphabot": "代码（Alpha Bot 前端，v0.45.388）", "scripts": "代码（受版本控制的编排器，v0.45.353）",
+    "tools": "代码（拨钟审计 harness tools/clockshift，v0.45.495）",
     "vercel.json": "代码配置（Vercel，v0.45.389）",
     "对比🆚": "文档",
     # 其它项目

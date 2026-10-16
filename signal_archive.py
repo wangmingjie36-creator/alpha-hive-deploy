@@ -675,6 +675,9 @@ QUARANTINE: List[Dict] = [
     # 逐份分类（明细见 CHANGELOG v0.45.472）。只隔离市场观测五类（同上方条目），不动 Agent 分。
     # 盘后价（财报日收盘后 current_price，已由 official_price 修掉的另一类）不在此列：AMZN 07-30 / CRM 08-26 /
     # MSFT 07-29 / RKLB 07-22 / TSLA 07-23。
+    # v0.45.476 二次检查撤回 6 对误判（行已从备份原样恢复）：CRWD 04-26 / 05-03 / 05-10 / 05-17——快照全在周日、
+    # 对照的是前一交易日的**拆股调整后**收盘（Twelve Data），比值恒 ≈ 4，不是假价；VKTX 08-12（34.5）与 MU 08-26（952.0）——
+    # 「行权价形状」判错：两者不在各自行权价网格的中点上（步长 2.5 / 5），不可能是行权价中位数；VKTX 那天就是调用方给的价。
     {
         "date": "2026-04-09",
         "tickers": ('CRCL', 'RKLB'),
@@ -701,10 +704,10 @@ QUARANTINE: List[Dict] = [
     },
     {
         "date": "2026-04-26",
-        "tickers": ('AAPL', 'COST', 'CRWD', 'DELL', 'HPE', 'RKLB'),
+        "tickers": ('AAPL', 'COST', 'DELL', 'HPE', 'RKLB'),
         "signals": ("options.iv_current", "options.put_call_ratio",
                     "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
-        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AAPL, COST, DELL, HPE, RKLB；现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：CRWD。",
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AAPL, COST, DELL, HPE, RKLB。",
         "evidence": ("cache/options_snapshot_{T}_2026-04-26.json", "CHANGELOG.md#v0.45.472"),
     },
     {
@@ -725,10 +728,10 @@ QUARANTINE: List[Dict] = [
     },
     {
         "date": "2026-05-03",
-        "tickers": ('AAPL', 'CRWD', 'META', 'SQ'),
+        "tickers": ('AAPL', 'META', 'SQ'),
         "signals": ("options.iv_current", "options.put_call_ratio",
                     "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
-        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AAPL, META, SQ；现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：CRWD。",
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AAPL, META, SQ。",
         "evidence": ("cache/options_snapshot_{T}_2026-05-03.json", "CHANGELOG.md#v0.45.472"),
     },
     {
@@ -749,10 +752,10 @@ QUARANTINE: List[Dict] = [
     },
     {
         "date": "2026-05-10",
-        "tickers": ('ASML', 'CRWD', 'UPST'),
+        "tickers": ('ASML', 'UPST'),
         "signals": ("options.iv_current", "options.put_call_ratio",
                     "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
-        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：ASML, UPST；现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：CRWD。",
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：ASML, UPST。",
         "evidence": ("cache/options_snapshot_{T}_2026-05-10.json", "CHANGELOG.md#v0.45.472"),
     },
     {
@@ -765,10 +768,10 @@ QUARANTINE: List[Dict] = [
     },
     {
         "date": "2026-05-17",
-        "tickers": ('BILI', 'CRCL', 'CRM', 'CRWD', 'ICLN', 'SQ'),
+        "tickers": ('BILI', 'CRCL', 'CRM', 'ICLN', 'SQ'),
         "signals": ("options.iv_current", "options.put_call_ratio",
                     "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
-        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：BILI, CRCL, CRM, ICLN, SQ；现价与当天及前后一天收盘都偏离 > 20%（测试写穿生产或坏链，整份不可信）：CRWD。",
+        "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：BILI, CRCL, CRM, ICLN, SQ。",
         "evidence": ("cache/options_snapshot_{T}_2026-05-17.json", "CHANGELOG.md#v0.45.472"),
     },
     {
@@ -828,14 +831,6 @@ QUARANTINE: List[Dict] = [
         "evidence": ("cache/options_snapshot_{T}_2026-06-22.json", "CHANGELOG.md#v0.45.472"),
     },
     {
-        "date": "2026-06-23",
-        "tickers": ('NVDA', 'TSLA'),
-        "signals": ("options.iv_current", "options.put_call_ratio",
-                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
-        "reason": "v0.45.472：现价是常数 145.0 / 100.0（analyze 兜底常数或测试传入价）：NVDA；现价是 0.5 整数倍、偏离收盘 > 1%（行权价中位数兜底；形状判，≈2% 概率是恰好整数的真价）：TSLA。",
-        "evidence": ("cache/options_snapshot_{T}_2026-06-23.json", "CHANGELOG.md#v0.45.472"),
-    },
-    {
         "date": "2026-06-24",
         "tickers": ('MSFT', 'NVDA', 'QCOM', 'TSLA'),
         "signals": ("options.iv_current", "options.put_call_ratio",
@@ -853,7 +848,7 @@ QUARANTINE: List[Dict] = [
     },
     {
         "date": "2026-06-26",
-        "tickers": ('AMZN', 'BILI', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'TSLA', 'VKTX'),
+        "tickers": ('AMZN', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'TSLA', 'VKTX'),
         "signals": ("options.iv_current", "options.put_call_ratio",
                     "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
         "reason": "v0.45.472：样本链（总 OI 85200 / P/C 0.54 / 到期 2026-03-21 的硬编码样本，整份期权观测是假的）：AMZN, BILI, META, MSFT, NVDA, QCOM, RKLB, TSLA, VKTX。",
@@ -916,28 +911,12 @@ QUARANTINE: List[Dict] = [
         "evidence": ("cache/options_snapshot_{T}_2026-07-15.json", "CHANGELOG.md#v0.45.472"),
     },
     {
-        "date": "2026-08-12",
-        "tickers": ('VKTX',),
-        "signals": ("options.iv_current", "options.put_call_ratio",
-                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
-        "reason": "v0.45.472：现价是 0.5 整数倍、偏离收盘 > 1%（行权价中位数兜底；形状判，≈2% 概率是恰好整数的真价）：VKTX。",
-        "evidence": ("cache/options_snapshot_{T}_2026-08-12.json", "CHANGELOG.md#v0.45.472"),
-    },
-    {
         "date": "2026-08-14",
         "tickers": ('QCOM',),
         "signals": ("options.iv_current", "options.put_call_ratio",
                     "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
         "reason": "v0.45.472：现价是 0.5 整数倍、偏离收盘 > 1%（行权价中位数兜底；形状判，≈2% 概率是恰好整数的真价）：QCOM。",
         "evidence": ("cache/options_snapshot_{T}_2026-08-14.json", "CHANGELOG.md#v0.45.472"),
-    },
-    {
-        "date": "2026-08-26",
-        "tickers": ('MU',),
-        "signals": ("options.iv_current", "options.put_call_ratio",
-                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
-        "reason": "v0.45.472：现价是 0.5 整数倍、偏离收盘 > 1%（行权价中位数兜底；形状判，≈2% 概率是恰好整数的真价）：MU。",
-        "evidence": ("cache/options_snapshot_{T}_2026-08-26.json", "CHANGELOG.md#v0.45.472"),
     },
     # v0.45.472：CBOE 主源时代（06-30 起）里退到 yfinance 备用链的日子——v0.45.468 前 yfinance 链补 BS gamma
     # 用「OI>50 的看涨行权价中位数」当 S（analyze 调 fetch_options_chain 从不传价），GEX 与 CBOE 链不是同一个量。
@@ -1055,7 +1034,397 @@ QUARANTINE: List[Dict] = [
         "reason": "v0.45.472：当天这些标的的期权链来自 yfinance 备用链，BS gamma 的 S 是行权价中位数而非股价，GEX 不是同一个量（v0.45.468 已修）。",
         "evidence": ("cache/options_snapshot_{T}_2026-10-09.json（quote_set.error）", "CHANGELOG.md#v0.45.468", "CHANGELOG.md#v0.45.472"),
     },
+    # v0.45.475：上面那批 yfinance 备用链只认 `quote_set.error`（09-04 起才有），06-30 ~ 09-03 认不出；而且
+    # `_refill_empty_quote_set` 事后会用 CBOE 回填空的 quote_set、把 error 抹掉（10-05 BILI 实测，回填于 23:33）。
+    # 改用期权链数据本身的厂商指纹：快照 key_levels 的 IV——CBOE 给 4 位小数，Yahoo 是二进制长浮点。
+    # 在已知来源的快照上核过：CBOE 581/582、yfinance 44/44、06-30 前 yfinance 主源时代 541/542 分对（例外：CBOE 那份是
+    # 10-05 BILI 本身——证据被回填抹掉的那份；yfinance 时代那份是测试夹具写穿生产、早已隔离）〔v0.45.476 更正措辞〕；
+    # 06-30 ~ 09-03 共 548 份：样本链 8（已隔离）、测试夹具 1（07-08 NVDA，已隔离）、按指纹分出 CBOE 538、yfinance 1（09-01 BILI）。
+    {
+        "date": "2026-09-01",
+        "tickers": ("BILI",),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.475：当天 BILI 的期权链来自 yfinance 备用链（key_levels IV 为 Yahoo 长浮点指纹；该日没有 quote_set 可认），BS gamma 的 S 是行权价中位数，GEX 不是同一个量。",
+        "evidence": ("cache/options_snapshot_BILI_2026-09-01.json（key_levels.iv）", "CHANGELOG.md#v0.45.475"),
+    },
+    {
+        "date": "2026-10-05",
+        "tickers": ("BILI",),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.475：当天 BILI 的期权链来自 yfinance 备用链（key_levels IV 为 Yahoo 长浮点指纹）；quote_set 当晚 23:33 被 _refill_empty_quote_set 用 CBOE 回填，原来的 error 被抹掉，v0.45.472 按 quote_set.error 认时漏掉。",
+        "evidence": ("cache/options_snapshot_BILI_2026-10-05.json（key_levels.iv / _quote_set_refilled_at）", "CHANGELOG.md#v0.45.475"),
+    },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.478（用户批准）：v0.45.471 普查出的 `options.iv_current == 25.0`（兜底常数）。共 18 行，
+    # 12 行已随 v0.45.472 的假现价 / 假链隔离删掉，这里是剩下的 6 行。只隔离 iv_current：
+    # 同日的 iv_rank / P/C / OI / GEX 不由这个常数产生（CRCL 06-09、BILI / META 06-15 的 iv_rank
+    # 可能由旧代码拿 25.0 当分子算出，**待验证**，未隔离）。
+    {
+        "date": "2026-06-09",
+        "tickers": ("CRCL",),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.478（用户 2026-10-12 批准）：OptionsAgent 当日 ATM IV 无效且无 last_valid_iv 缓存时把 iv_current 兜底成常数 25.0（v0.45.471 起改记 None、不入库）。这里的 25.0 不是观测；同日其余期权观测不是这个兜底的产物，不隔离。",
+        "evidence": (".swarm_results_2026-06-09.json（OracleBeeEcho.details.iv_current = 25.0，读的是 options_snapshot_CRCL_2026-06-10.json 槽位）",
+                     "CHANGELOG.md#v0.45.471", "CHANGELOG.md#v0.45.478"),
+    },
+    {
+        "date": "2026-06-15",
+        "tickers": ("BILI", "META"),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.478（用户 2026-10-12 批准）：OptionsAgent 当日 ATM IV 无效且无 last_valid_iv 缓存时把 iv_current 兜底成常数 25.0（v0.45.471 起改记 None、不入库）。这里的 25.0 不是观测；同日其余期权观测不是这个兜底的产物，不隔离。",
+        "evidence": (".swarm_results_2026-06-15.json（OracleBeeEcho.details.iv_current = 25.0；BILI 的快照文件之后被 02:12 重写成 12.5，入库值来自扫描结果）",
+                     "CHANGELOG.md#v0.45.471", "CHANGELOG.md#v0.45.478"),
+    },
+    {
+        "date": "2026-09-15",
+        "tickers": ("VKTX",),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.478（用户 2026-10-12 批准）：OptionsAgent 当日 ATM IV 无效且无 last_valid_iv 缓存时把 iv_current 兜底成常数 25.0（v0.45.471 起改记 None、不入库）。这里的 25.0 不是观测；同日其余期权观测不是这个兜底的产物，不隔离。",
+        "evidence": (".swarm_results_2026-09-15.json", "cache/options_snapshot_VKTX_2026-09-15.json", "CHANGELOG.md#v0.45.478"),
+    },
+    {
+        "date": "2026-09-16",
+        "tickers": ("VKTX",),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.478（用户 2026-10-12 批准）：OptionsAgent 当日 ATM IV 无效且无 last_valid_iv 缓存时把 iv_current 兜底成常数 25.0（v0.45.471 起改记 None、不入库）。这里的 25.0 不是观测；同日其余期权观测不是这个兜底的产物，不隔离。",
+        "evidence": (".swarm_results_2026-09-16.json", "cache/options_snapshot_VKTX_2026-09-16.json", "CHANGELOG.md#v0.45.478"),
+    },
+    {
+        "date": "2026-09-17",
+        "tickers": ("VKTX",),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.478（用户 2026-10-12 批准）：OptionsAgent 当日 ATM IV 无效且无 last_valid_iv 缓存时把 iv_current 兜底成常数 25.0（v0.45.471 起改记 None、不入库）。这里的 25.0 不是观测；同日其余期权观测不是这个兜底的产物，不隔离。",
+        "evidence": (".swarm_results_2026-09-17.json", "cache/options_snapshot_VKTX_2026-09-17.json", "CHANGELOG.md#v0.45.478"),
+    },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.479：按 `.swarm_results_<日期>.json` 的 OracleBee details（signal_archive 的真实来源，5343 个值逐位相同）重判，
+    # 补上 v0.45.472 按 cache 快照判漏掉的（同一天常是另一次运行）。判据与产出见
+    # `experiments/reclassify_option_quarantine_from_swarm_20261012.py`；同批撤回的见 CHANGELOG v0.45.479。
+    {
+        "date": "2026-03-31",
+        "tickers": ('AMZN',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.479：归档那次运行（swarm_results）的期权观测是假的——AMZN：样本链（总 OI 85200 / P/C 0.54）。",
+        "evidence": (".swarm_results_2026-03-31.json（OracleBeeEcho.details）", "CHANGELOG.md#v0.45.479"),
+    },
+    {
+        "date": "2026-04-02",
+        "tickers": ('AMZN',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.479：归档那次运行（swarm_results）的期权观测是假的——AMZN：样本链（总 OI 85200 / P/C 0.54）。",
+        "evidence": (".swarm_results_2026-04-02.json（OracleBeeEcho.details）", "CHANGELOG.md#v0.45.479"),
+    },
+    {
+        "date": "2026-04-06",
+        "tickers": ('AMZN',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.479：归档那次运行（swarm_results）的期权观测是假的——AMZN：样本链（总 OI 85200 / P/C 0.54）。",
+        "evidence": (".swarm_results_2026-04-06.json（OracleBeeEcho.details）", "CHANGELOG.md#v0.45.479"),
+    },
+    {
+        "date": "2026-06-09",
+        "tickers": ('AMZN', 'BILI', 'CRCL', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'TSLA', 'VKTX'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.479：归档那次运行（swarm_results）的期权观测是假的——AMZN：空链（总 OI 0，Yahoo 限流垃圾链）；BILI：空链（总 OI 0，Yahoo 限流垃圾链）；CRCL：空链（总 OI 0，Yahoo 限流垃圾链）；META：现价偏离收盘 > 20%；MSFT：现价常数 145 / 100；NVDA：现价偏离收盘 > 20%；QCOM：空链（总 OI 0，Yahoo 限流垃圾链）；RKLB：空链（总 OI 0，Yahoo 限流垃圾链）；TSLA：现价常数 145 / 100；VKTX：现价常数 145 / 100。",
+        "evidence": (".swarm_results_2026-06-09.json（OracleBeeEcho.details）", "CHANGELOG.md#v0.45.479"),
+    },
+    {
+        "date": "2026-06-15",
+        "tickers": ('BILI', 'META'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.479：归档那次运行（swarm_results）的期权观测是假的——BILI：样本链（总 OI 85200 / P/C 0.54）；META：空链（总 OI 0，Yahoo 限流垃圾链）。",
+        "evidence": (".swarm_results_2026-06-15.json（OracleBeeEcho.details）", "CHANGELOG.md#v0.45.479"),
+    },
+    {
+        "date": "2026-06-17",
+        "tickers": ('AMZN', 'META'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.479：归档那次运行（swarm_results）的期权观测是假的——AMZN：空链（总 OI 0，Yahoo 限流垃圾链）；META：样本链（总 OI 85200 / P/C 0.54）。",
+        "evidence": (".swarm_results_2026-06-17.json（OracleBeeEcho.details）", "CHANGELOG.md#v0.45.479"),
+    },
+    {
+        "date": "2026-06-18",
+        "tickers": ('NVDA', 'VKTX'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.479：归档那次运行（swarm_results）的期权观测是假的——NVDA：样本链（总 OI 85200 / P/C 0.54）；VKTX：样本链（总 OI 85200 / P/C 0.54）。",
+        "evidence": (".swarm_results_2026-06-18.json（OracleBeeEcho.details）", "CHANGELOG.md#v0.45.479"),
+    },
+    {
+        "date": "2026-06-23",
+        "tickers": ('AMZN', 'BILI'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.479：归档那次运行（swarm_results）的期权观测是假的——AMZN：样本链（总 OI 85200 / P/C 0.54）；BILI：样本链（总 OI 85200 / P/C 0.54）。",
+        "evidence": (".swarm_results_2026-06-23.json（OracleBeeEcho.details）", "CHANGELOG.md#v0.45.479"),
+    },
+    {
+        "date": "2026-06-26",
+        "tickers": ('CRCL',),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.479：归档那次运行（swarm_results）的期权观测是假的——CRCL：样本链（总 OI 85200 / P/C 0.54）。",
+        "evidence": (".swarm_results_2026-06-26.json（OracleBeeEcho.details）", "CHANGELOG.md#v0.45.479"),
+    },
+    {
+        "date": "2026-06-29",
+        "tickers": ('AMZN', 'BILI', 'CRCL', 'RKLB'),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": "v0.45.479：归档那次运行（swarm_results）的期权观测是假的——AMZN：空链（总 OI 0，Yahoo 限流垃圾链）；BILI：现价是落在行权价网格上的行权价中位数；CRCL：现价是落在行权价网格上的行权价中位数；RKLB：现价是落在行权价网格上的行权价中位数。",
+        "evidence": (".swarm_results_2026-06-29.json（OracleBeeEcho.details）", "CHANGELOG.md#v0.45.479"),
+    },
+    {
+        "date": "2026-08-31",
+        "tickers": ('TMO',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.479：归档那次运行的期权链来自 yfinance 备用链（key_levels IV 为 Yahoo 长浮点指纹，审阅发现、v0.45.475 按快照判时漏掉），GEX 的 BS gamma 用行权价中位数当 S。",
+        "evidence": (".swarm_results_2026-08-31.json（OracleBeeEcho.details.key_levels）", "CHANGELOG.md#v0.45.479"),
+    },
+    {
+        "date": "2026-06-23",
+        "tickers": ('NVDA',),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.479：归档那次运行的价、OI、P/C 都是真的（v0.45.472 按快照误判为常数 145，已撤回），但 iv_current 是垃圾常数 12.5——只挡这一项。",
+        "evidence": (".swarm_results_2026-06-23.json（OracleBeeEcho.details.iv_current）", "CHANGELOG.md#v0.45.479"),
+    },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.481（用户批准）：iv_current == 25.0（兜底常数）那些日子的 options.iv_rank / options.iv_percentile。
+    # 08-14 前的代码拿 current_iv 直接算这两个值（`calculate_iv_rank(current_iv, hist_iv)`），常数进 ⇒ 常数函数出。
+    # 15 对逐对核对过：.swarm_results 里 iv_current == 25.0、rank / pct 与归档逐位相等、无 iv_rank_source（旧代码）。
+    # VKTX 09-15 ~ 17 不在此列：那时 iv_rank 走 hv_proxy（当前 HV 对 HV 分布），不读 current_iv。
+    {
+        "date": "2026-04-26",
+        "tickers": ('AAPL', 'HPE', 'DELL'),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.481（用户 2026-10-12 批准）：v0.43.19（08-14）之前 IV Rank / IV Percentile = 当前 IV 对「HV×premium」历史分布排名，当日 ATM IV 无效且无缓存时当前 IV 被兜底成常数 25.0 ⇒ 这两个值是常数的函数，不是观测。META / BILI 06-15 用公开日线重建 HV、由 rank 反解 premium k=1.25（代码缺省）后百分位独立吻合到小数点（CRCL 06-09 任意合法 k 都给 0，同吻合）。",
+        "evidence": (".swarm_results_2026-04-26.json（OracleBeeEcho.details.iv_current = 25.0 / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.481"),
+    },
+    {
+        "date": "2026-05-03",
+        "tickers": ('AAPL',),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.481（用户 2026-10-12 批准）：v0.43.19（08-14）之前 IV Rank / IV Percentile = 当前 IV 对「HV×premium」历史分布排名，当日 ATM IV 无效且无缓存时当前 IV 被兜底成常数 25.0 ⇒ 这两个值是常数的函数，不是观测。META / BILI 06-15 用公开日线重建 HV、由 rank 反解 premium k=1.25（代码缺省）后百分位独立吻合到小数点（CRCL 06-09 任意合法 k 都给 0，同吻合）。",
+        "evidence": (".swarm_results_2026-05-03.json（OracleBeeEcho.details.iv_current = 25.0 / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.481"),
+    },
+    {
+        "date": "2026-05-10",
+        "tickers": ('UPST',),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.481（用户 2026-10-12 批准）：v0.43.19（08-14）之前 IV Rank / IV Percentile = 当前 IV 对「HV×premium」历史分布排名，当日 ATM IV 无效且无缓存时当前 IV 被兜底成常数 25.0 ⇒ 这两个值是常数的函数，不是观测。META / BILI 06-15 用公开日线重建 HV、由 rank 反解 premium k=1.25（代码缺省）后百分位独立吻合到小数点（CRCL 06-09 任意合法 k 都给 0，同吻合）。",
+        "evidence": (".swarm_results_2026-05-10.json（OracleBeeEcho.details.iv_current = 25.0 / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.481"),
+    },
+    {
+        "date": "2026-05-17",
+        "tickers": ('ICLN',),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.481（用户 2026-10-12 批准）：v0.43.19（08-14）之前 IV Rank / IV Percentile = 当前 IV 对「HV×premium」历史分布排名，当日 ATM IV 无效且无缓存时当前 IV 被兜底成常数 25.0 ⇒ 这两个值是常数的函数，不是观测。META / BILI 06-15 用公开日线重建 HV、由 rank 反解 premium k=1.25（代码缺省）后百分位独立吻合到小数点（CRCL 06-09 任意合法 k 都给 0，同吻合）。",
+        "evidence": (".swarm_results_2026-05-17.json（OracleBeeEcho.details.iv_current = 25.0 / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.481"),
+    },
+    {
+        "date": "2026-06-09",
+        "tickers": ('CRCL',),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.481（用户 2026-10-12 批准）：v0.43.19（08-14）之前 IV Rank / IV Percentile = 当前 IV 对「HV×premium」历史分布排名，当日 ATM IV 无效且无缓存时当前 IV 被兜底成常数 25.0 ⇒ 这两个值是常数的函数，不是观测。META / BILI 06-15 用公开日线重建 HV、由 rank 反解 premium k=1.25（代码缺省）后百分位独立吻合到小数点（CRCL 06-09 任意合法 k 都给 0，同吻合）。",
+        "evidence": (".swarm_results_2026-06-09.json（OracleBeeEcho.details.iv_current = 25.0 / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.481"),
+    },
+    {
+        "date": "2026-06-15",
+        "tickers": ('QCOM', 'TSLA', 'NVDA', 'MSFT', 'BILI', 'AMZN', 'META', 'CRCL'),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.481（用户 2026-10-12 批准）：v0.43.19（08-14）之前 IV Rank / IV Percentile = 当前 IV 对「HV×premium」历史分布排名，当日 ATM IV 无效且无缓存时当前 IV 被兜底成常数 25.0 ⇒ 这两个值是常数的函数，不是观测。META / BILI 06-15 用公开日线重建 HV、由 rank 反解 premium k=1.25（代码缺省）后百分位独立吻合到小数点（CRCL 06-09 任意合法 k 都给 0，同吻合）。",
+        "evidence": (".swarm_results_2026-06-15.json（OracleBeeEcho.details.iv_current = 25.0 / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.481"),
+    },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.486（用户批准）：iv_current = 12.5 / 6.25——Yahoo 二分求解失败的减半阶梯值取中位数（v0.45.482 已在源头剔除）。
+    # 13 对逐对核对过 .swarm_results 与归档逐位相等。08-14 前的 12 对连同由它算出的 iv_rank / iv_percentile；
+    # TMO 08-31 只挡 iv_current（rank 走 hv_proxy）。06-23 NVDA 的 iv_current 已由 v0.45.479 隔离、不重复列。
+    {
+        "date": "2026-03-11",
+        "tickers": ('NVDA',),
+        "signals": ("options.iv_current", "options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.486（用户 2026-10-13 批准）：iv_current 是 Yahoo 求解失败值（减半阶梯 1/8、1/16 ×100 = 12.5 / 6.25）的中位数，不是观测（对照 CBOE：阶梯值 99.7% 相差 > 10 个波动率点，见 yahoo_iv）；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出，一并隔离。",
+        "evidence": (".swarm_results_2026-03-11.json（OracleBeeEcho.details.iv_current / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.482", "CHANGELOG.md#v0.45.486"),
+    },
+    {
+        "date": "2026-03-12",
+        "tickers": ('NVDA',),
+        "signals": ("options.iv_current", "options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.486（用户 2026-10-13 批准）：iv_current 是 Yahoo 求解失败值（减半阶梯 1/8、1/16 ×100 = 12.5 / 6.25）的中位数，不是观测（对照 CBOE：阶梯值 99.7% 相差 > 10 个波动率点，见 yahoo_iv）；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出，一并隔离。",
+        "evidence": (".swarm_results_2026-03-12.json（OracleBeeEcho.details.iv_current / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.482", "CHANGELOG.md#v0.45.486"),
+    },
+    {
+        "date": "2026-06-15",
+        "tickers": ('RKLB',),
+        "signals": ("options.iv_current", "options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.486（用户 2026-10-13 批准）：iv_current 是 Yahoo 求解失败值（减半阶梯 1/8、1/16 ×100 = 12.5 / 6.25）的中位数，不是观测（对照 CBOE：阶梯值 99.7% 相差 > 10 个波动率点，见 yahoo_iv）；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出，一并隔离。",
+        "evidence": (".swarm_results_2026-06-15.json（OracleBeeEcho.details.iv_current / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.482", "CHANGELOG.md#v0.45.486"),
+    },
+    {
+        "date": "2026-06-17",
+        "tickers": ('BILI', 'CRCL', 'RKLB', 'VKTX'),
+        "signals": ("options.iv_current", "options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.486（用户 2026-10-13 批准）：iv_current 是 Yahoo 求解失败值（减半阶梯 1/8、1/16 ×100 = 12.5 / 6.25）的中位数，不是观测（对照 CBOE：阶梯值 99.7% 相差 > 10 个波动率点，见 yahoo_iv）；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出，一并隔离。",
+        "evidence": (".swarm_results_2026-06-17.json（OracleBeeEcho.details.iv_current / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.482", "CHANGELOG.md#v0.45.486"),
+    },
+    {
+        "date": "2026-06-23",
+        "tickers": ('CRCL', 'META', 'QCOM', 'RKLB', 'VKTX'),
+        "signals": ("options.iv_current", "options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.486（用户 2026-10-13 批准）：iv_current 是 Yahoo 求解失败值（减半阶梯 1/8、1/16 ×100 = 12.5 / 6.25）的中位数，不是观测（对照 CBOE：阶梯值 99.7% 相差 > 10 个波动率点，见 yahoo_iv）；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出，一并隔离。",
+        "evidence": (".swarm_results_2026-06-23.json（OracleBeeEcho.details.iv_current / iv_rank / iv_percentile）",
+                     "CHANGELOG.md#v0.45.482", "CHANGELOG.md#v0.45.486"),
+    },
+    {
+        "date": "2026-08-31",
+        "tickers": ('TMO',),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.486（用户 2026-10-13 批准）：iv_current 是 Yahoo 求解失败值 1/16 ×100 = 6.25 的中位数，不是观测（见 yahoo_iv）。当天 iv_rank 走 hv_proxy（当前 HV 对 HV 分布），不读 current_iv，不隔离。",
+        "evidence": (".swarm_results_2026-08-31.json（OracleBeeEcho.details.iv_current = 6.25, iv_rank_source = hv_proxy）",
+                     "CHANGELOG.md#v0.45.482", "CHANGELOG.md#v0.45.486"),
+    },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.490：486 漏掉的 7 对——iv_current（12.5 / 6.25）早被 472 / 479 清掉，由它算出的 rank / pct 还在。
+    # 判定以 .swarm_results 为准（不是以归档里现存的 iv_current 为准，那正是 486 的漏洞）。
+    {
+        "date": "2026-06-09",
+        "tickers": ('RKLB',),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.490（486 二次检查；属用户 10-13 批准的「12.5 / 6.25 及由它算出的 iv_rank / iv_percentile」范围）：这几对的 iv_current 是 Yahoo 求解失败阶梯值的中位数（12.5 / 6.25），已由 v0.45.472 / 479 隔离；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出（全是 0 / 0），而 472 / 479 只挡五类市场观测、不含这两类，486 又只从归档里现存的 iv_current 行找、漏了它们。",
+        "evidence": (".swarm_results_2026-06-09.json（OracleBeeEcho.details.iv_current ∈ {12.5, 6.25}, iv_rank = 0, iv_percentile = 0）",
+                     "CHANGELOG.md#v0.45.490"),
+    },
+    {
+        "date": "2026-06-17",
+        "tickers": ('MSFT', 'TSLA', 'AMZN'),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.490（486 二次检查；属用户 10-13 批准的「12.5 / 6.25 及由它算出的 iv_rank / iv_percentile」范围）：这几对的 iv_current 是 Yahoo 求解失败阶梯值的中位数（12.5 / 6.25），已由 v0.45.472 / 479 隔离；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出（全是 0 / 0），而 472 / 479 只挡五类市场观测、不含这两类，486 又只从归档里现存的 iv_current 行找、漏了它们。",
+        "evidence": (".swarm_results_2026-06-17.json（OracleBeeEcho.details.iv_current ∈ {12.5, 6.25}, iv_rank = 0, iv_percentile = 0）",
+                     "CHANGELOG.md#v0.45.490"),
+    },
+    {
+        "date": "2026-06-23",
+        "tickers": ('NVDA', 'AMZN'),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.490（486 二次检查；属用户 10-13 批准的「12.5 / 6.25 及由它算出的 iv_rank / iv_percentile」范围）：这几对的 iv_current 是 Yahoo 求解失败阶梯值的中位数（12.5 / 6.25），已由 v0.45.472 / 479 隔离；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出（全是 0 / 0），而 472 / 479 只挡五类市场观测、不含这两类，486 又只从归档里现存的 iv_current 行找、漏了它们。",
+        "evidence": (".swarm_results_2026-06-23.json（OracleBeeEcho.details.iv_current ∈ {12.5, 6.25}, iv_rank = 0, iv_percentile = 0）",
+                     "CHANGELOG.md#v0.45.490"),
+    },
+    {
+        "date": "2026-06-29",
+        "tickers": ('AMZN',),
+        "signals": ("options.iv_rank", "options.iv_percentile"),
+        "reason": "v0.45.490（486 二次检查；属用户 10-13 批准的「12.5 / 6.25 及由它算出的 iv_rank / iv_percentile」范围）：这几对的 iv_current 是 Yahoo 求解失败阶梯值的中位数（12.5 / 6.25），已由 v0.45.472 / 479 隔离；08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出（全是 0 / 0），而 472 / 479 只挡五类市场观测、不含这两类，486 又只从归档里现存的 iv_current 行找、漏了它们。",
+        "evidence": (".swarm_results_2026-06-29.json（OracleBeeEcho.details.iv_current ∈ {12.5, 6.25}, iv_rank = 0, iv_percentile = 0）",
+                     "CHANGELOG.md#v0.45.490"),
+    },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.499：10-12 重放（10-13 07:33 写入生产，代码 0993efd = v0.45.481，早于 482 的多数规则）里
+    # BILI 的链来自 yfinance，ATM IV 全是 Yahoo 求解失败阶梯值 ⇒ iv_current = 6.25。形状同 v0.45.486 的 TMO 08-31。
+    {
+        "date": "2026-10-12",
+        "tickers": ('BILI',),
+        "signals": ("options.iv_current",),
+        "reason": "v0.45.499（用户 2026-10-13 批准「删掉假 iv」）：iv_current 是 Yahoo 求解失败值 1/16 ×100 = 6.25 的中位数，不是观测（见 yahoo_iv；BILI 前后几日 IV 49–53）。来自 10-12 重放，重放代码早于 v0.45.482 的多数规则。当天 iv_rank 走 hv_proxy（当前 HV 对 HV 分布），不读 current_iv，不隔离；同一条 yfinance 链的 P/C 298.46 不属本次批准范围，未动。",
+        "evidence": (".swarm_results_2026-10-12.json（OracleBeeEcho.details.iv_current = 6.25, iv_rank_source = hv_proxy, chain_source = yfinance）",
+                     "cache/options_snapshot_BILI_2026-10-12.json（iv_raw_observed = 6.2509375）",
+                     "CHANGELOG.md#v0.45.486", "CHANGELOG.md#v0.45.499"),
+    },
 ]
+
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# v0.45.494（用户 2026-10-13 批准）：08-14 前 iv_rank / iv_percentile 跟着 iv_current 一起隔离。
+#
+# 08-14（`f25e1fa3`，v0.43.19）之前 OptionsAgent 的 IV Rank / IV Percentile 是拿**当日 current_iv** 对历史分布排名
+# （`calculate_iv_rank(current_iv, hist_iv)` / `calculate_iv_percentile(current_iv, hist_iv)`；03-19 ~ 08-14 在用的
+# 14 个版本逐一核过）。所以凡是 current_iv 已被判为不可信、隔离了 `options.iv_current` 的 (日期, 标的)，同一份
+# rank / pct 也是那个不可信值的函数。既有条目（v0.45.238 会话错位、472 样本链 / 假现价、479 重判…）按「五类市场观测」
+# 写，不含这两类——本规则把它们补齐，而不是逐条复制 ~50 条字面量（那是同一个事实的 50 份副本，且新加的 08-14 前
+# iv_current 条目会再漏一次）。
+# 只补「源条目挡了 iv_current、没挡 iv_rank」且该 (日期, 标的) 尚未被别的条目挡 rank 的部分（478 那两条已由 481 覆盖）。
+# 08-14 起 rank 走 hv_proxy / 真实 IV 历史，不读 current_iv（VKTX 09-15 ~ 17 即此例），不补。
+_RANK_FROM_CURRENT_IV_UNTIL = "2026-08-14"
+_RANK_MIRROR_TAG = "v0.45.494"
+
+
+def _rank_mirror_entries(entries: List[Dict]) -> List[Dict]:
+    def _rank_blocked(d, t):
+        return any(q["date"] == d and "options.iv_rank" in q["signals"]
+                   and (q.get("tickers") is None or t in q["tickers"]) for q in entries)
+    out = []
+    for q in entries:
+        if (q["date"] >= _RANK_FROM_CURRENT_IV_UNTIL or "options.iv_current" not in q["signals"]
+                or "options.iv_rank" in q["signals"]):
+            continue
+        tks = q.get("tickers")
+        if tks is not None:
+            tks = tuple(t for t in tks if not _rank_blocked(q["date"], t))
+            if not tks:
+                continue
+        src = re.search(r"v\d+\.\d+\.\d+", q.get("reason", ""))
+        out.append({
+            "date": q["date"],
+            **({"tickers": tks} if tks is not None else {}),
+            "signals": ("options.iv_rank", "options.iv_percentile"),
+            "reason": (f"{_RANK_MIRROR_TAG}（用户 2026-10-13 批准）：镜像 {src.group(0) if src else '既有条目'} 对 iv_current 的隔离——"
+                       f"08-14 前 iv_rank / iv_percentile 由同一个 current_iv 算出。源条目理由：{q.get('reason', '')[:120]}"),
+            "evidence": tuple(q.get("evidence") or ()) + ("CHANGELOG.md#v0.45.494",),
+            "_mirror_of": q["date"],
+        })
+    return out
+
+
+QUARANTINE.extend(_rank_mirror_entries(QUARANTINE))
+
+
+#: 前瞻检验排除日（v0.45.484）—— 与 `QUARANTINE` **不是一回事**，别合并：
+#:
+#: `QUARANTINE` 管「取错日子的观测」，在**入库口**拦（archive / backfill 不写、purge 工具会删），且划界原则是
+#: 不隔离 Agent 评分。这里管的是「整天由事后重放补算、不再是生产当时实际产出」的日子：库里存的是**对的**
+#: 重放值（要留着、要能被别的读者用），只是不进预注册前瞻检验——那两份协议的意向性分析口径是「系统当天
+#: 实际产出什么就算什么」，事后重放的整天不属于这个口径。
+#:
+#: 只由读者问 `forward_test_excluded(date)`：`experiments/dim_ic_forward_test.load_rows`、
+#: `experiments/resonance_boost_forward_test.load_reports`。登记须在该日任何结果（T+7）存在之前，
+#: 并在对应预注册里写「修订（事后）」。守卫 `tests/test_forward_test_excluded_days.py`。
+FORWARD_TEST_EXCLUDED_DAYS: Dict[str, Dict] = {
+    "2026-10-12": {
+        "version": "v0.45.484",
+        "registered": "2026-10-13",
+        "reason": (
+            "生产扫描遇本机出站故障（编排器 14:00:08 代理探活失败 ⇒ 整轮直连 ⇒ 全部 TLS 握手 SSLEOFError）："
+            "30/30 只 MultiSourceFetcher 全源 FALLBACK、现价 0、期权链 0 条、新闻/SEC/yfinance 全断。"
+            "当日数据于 2026-10-13 用当天代码（0993efde）+ 云端同场链 + 真实收盘整日重放补算并写回"
+            "（control 29/30 逐位复现生产存档）。用户决定：写回，但该日不进预注册前瞻检验。"
+            "登记时该日 T+7 尚未到期（≥ 2026-10-21），不可能受结果影响。"
+        ),
+        "evidence": ("~/.claude/logs/orchestrator-2026-10-12.log", "~/.claude/logs/scan_coverage-2026-10-12.json",
+                     "_manual_backups/2026-10-13_1012_replay_v0.45.484/"),
+    },
+}
+
+
+def forward_test_excluded(date: str) -> bool:
+    """该业务日是否排除在预注册前瞻检验之外（见 `FORWARD_TEST_EXCLUDED_DAYS`）。"""
+    return str(date)[:10] in FORWARD_TEST_EXCLUDED_DAYS
 
 
 def is_quarantined(date: str, ticker: str, signal: str) -> bool:

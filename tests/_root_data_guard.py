@@ -71,6 +71,7 @@ import hashlib
 import json
 import os
 import re
+from pathlib import Path
 
 SKIP_DIR_NAMES = frozenset({
     ".git", ".claude",
@@ -171,19 +172,48 @@ def exempt_reachable_paths(relpaths: dict[str, str]) -> dict[str, str]:
     return out
 
 
+def production_data_root(environ, home: str) -> str:
+    """测试眼里「生产数据根在哪」的**唯一**推导（v0.45.498）：真实数据根闸、paper_portfolio 真身夹具都经它。
+
+    候选**只**从生产的唯一规则 `hive_logger.resolve_data_root` 来，本函数只加测试自己的一条策略（v0.45.488）：值不是绝对
+    路径时生产各进程按各自 cwd 解析，测试无从知道是哪；**不猜** ⇒ 改守生产缺省位置 `$HOME/alpha-hive-data`（编排器 /
+    plist / MCP / Alpha Bot 启动器写的都是绝对路径，测试真能伤到的是它），报告头照实说（`nonabsolute_env_note`）。
+    不选「闸失效」：那会在环境配错时恰好丢掉对真实数据的保护。
+    此前 488 只把这条策略放进 `real_data_root`，paper_portfolio 真身夹具仍自己调 `resolve_data_root`：相对值下它盯的是
+    随 cwd 漂移的相对目录（测试会 chdir），两个守卫各守一处——又是「同一件事两份推导」。
+    """
+    import hive_logger                               # 测试辅助模块：调用时导入，不在 conftest 收集期之前抢跑
+    cand = hive_logger.resolve_data_root({**environ, "HOME": home})
+    if not cand.is_absolute():
+        cand = Path(home) / hive_logger.DEFAULT_DATA_ROOT_NAME
+    return os.path.abspath(cand)
+
+
 def real_data_root(environ, home: str, repo_root: str) -> str | None:
     """测试进程**启动时**的真实数据根；没有就返回 None（本机之外的机器上它不存在）。
 
-    必须在任何 env 隔离之前取（`_isolate_env` 会把 `ALPHA_HIVE_HOME` 改成沙箱）：`ALPHA_HIVE_HOME`
-    若在调用环境里设了就用它，否则取生产默认位置 `~/alpha-hive-data`。与仓库根相同的不算（那由仓库根闸管）。
+    必须在任何 env 隔离之前取（`_isolate_env` 会把 `ALPHA_HIVE_HOME` 改成沙箱）。与仓库根相同的不算（那由仓库根闸管）。
     ⚠️ 返回 None ⇒ 本闸在这台机器上**没有任何作用**——CI / 干净克隆都是这样，所以它的牙只能靠
     `tests/test_root_data_guard.py` 里合成数据根的测试证明，不能靠「这轮全套绿」证明。
+
+    「在哪」只从 `production_data_root` 来（v0.45.488 / 498），本闸只加自己的两道过滤：不存在 / 就是仓库根 ⇒ None。
+    488 之前这里自己 `expanduser` + `abspath`：`~/x` 被展开成 `$HOME/x`、相对路径按 pytest 的 cwd 解析，而生产原样用——
+    两份实现恰在没被对拍到的输入上分了岔（`test_agrees_with_real_data_root_guard` 只对拍了未设 / 空串 / 绝对路径）。
     """
-    cand = environ.get("ALPHA_HIVE_HOME") or os.path.join(home, "alpha-hive-data")
-    cand = os.path.abspath(os.path.expanduser(cand))
+    cand = production_data_root(environ, home)
     if not os.path.isdir(cand) or cand == os.path.abspath(repo_root):
         return None
     return cand
+
+
+def nonabsolute_env_note(environ) -> str | None:
+    """调用环境里的 `ALPHA_HIVE_HOME` 不是绝对路径 ⇒ 给报告头的一句说明（闸改守缺省位置）；否则 None（v0.45.488）。"""
+    import hive_logger
+    explicit = hive_logger.explicit_data_root(environ)
+    if explicit is None or explicit.is_absolute():
+        return None
+    return (f"ALPHA_HIVE_HOME={str(explicit)!r} 不是绝对路径（生产各进程按各自 cwd 解析，闸无从确定）"
+            "⇒ 改守缺省数据根")
 
 
 def fingerprint(root: str, excluded=None) -> dict[str, str]:
@@ -416,7 +446,44 @@ def explain_alphabot_appends(root: str, changes: dict[str, list[str]], before: d
 # 判定照旧，有变化就红。
 
 # 时间线：按发生顺序的 `(开始, 结束, nodeid, 阶段)`。时刻是 pytest 报告的 `start` / `stop`——pytest 内部自留的
-# `time.time()`，测试 mock 时间改不到它；与文件 mtime 同为墙钟。
+# `time.time()`，测试 mock 时间改不到它；与文件 mtime 同为墙钟，但**不同精度**（v0.45.507）：Linux 上 mtime 可比写入
+# 那一刻的 `time.time()` 早至多一个 tick，见 `mtime_lag`。按点比对会把 call 开头的写入标成 setup（CI 上两条测试因此恒红）。
+
+
+def mtime_lag() -> float:
+    """文件 mtime 最多比写入那一刻的 `time.time()` 早多少秒（v0.45.507）。
+
+    Linux 内核给 inode 盖时间戳用的是**粗粒度时钟**（`current_time()` → `ktime_get_coarse_real_ts64`，每个 tick 才前进
+    一次），`time.time()` 却是细粒度的：pytest 记下 call 开始后紧接着的写入，mtime 会落回 setup 里。上界是那只粗时钟的
+    分辨率；取**两倍**——虚拟机上 tick 会被推迟，宁可多列一段（措辞照实说分不开）也不要标错。这只钟不存在的平台
+    （macOS / APFS：实测 mtime 从不早于写前读的 `time.time()`）取 0。只管内核时钟，不管文件系统自身的时间戳粒度
+    （HFS+ / FAT 那种秒级盘不在本闸要管的范围里）。前提由 `TestTimelineLocate::test_mtime_lag_bounds_this_machine` 实测。"""
+    import time as _time
+    clk = getattr(_time, "CLOCK_REALTIME_COARSE", None)
+    return 2 * _time.clock_getres(clk) if clk is not None else 0.0
+
+
+def _regions(timeline: list, session_start: float | None) -> list:
+    """非空时间线切成首尾相接、互不重叠的区段 `(下界, 下界闭?, 上界, 上界闭?, 人读位置)`，按时间先后。
+    边界开闭照 v0.45.455 的逐点规则：测试阶段两端闭，本轮开始时刻归收集期，其余开。"""
+    inf = float("inf")
+    first = timeline[0][0]
+    if session_start is None:     # 不知道本轮何时开始：分不出收集期还是更早
+        out = [(-inf, False, first, False, "第一条测试开始之前（本轮开始时刻未知）")]
+    else:
+        out = [(-inf, False, session_start, False,
+                "早于本轮开始——写入者保留了旧 mtime（如 copy2 / utime / 解包），按时间定位不了"),
+               (session_start, True, first, False, "收集期（第一条测试开始之前：模块 import / 收集钩子）")]
+    prev = None
+    for start, stop, nodeid, when in timeline:
+        if prev is not None and start > prev[1]:
+            out.append((prev[1], False, start, False, f"两段之间（紧接 {prev[2]} 的 {prev[3]} 之后）"))
+        out.append((start, True, stop, True, f"{nodeid} 的 {when} 阶段"))
+        prev = (start, stop, nodeid, when)
+    out.append((prev[1], False, inf, False,
+                f"最后一段记录之后——即 {prev[2]} 的 teardown 阶段：最后一条测试的 teardown 也包含 "
+                "session / module 级 fixture 的收尾（本闸自己也在其中）"))
+    return out
 
 
 def change_mtime(root: str, rel: str, after_sig: str | None) -> float | None:
@@ -435,42 +502,40 @@ def change_mtime(root: str, rel: str, after_sig: str | None) -> float | None:
         return None
 
 
-def locate(t: float | None, timeline: list, session_start: float | None) -> str:
-    """把一个写入时刻放到时间线上，返回人读的位置。只说「那时在跑什么」，不说「是谁写的」。"""
+def locate(t: float | None, timeline: list, session_start: float | None, lag: float = 0.0) -> str:
+    """把一个写入时刻放到时间线上，返回人读的位置。只说「那时在跑什么」，不说「是谁写的」。
+
+    `lag`（v0.45.507）：mtime 可能比真实写入早至多这么多秒（`mtime_lag`），真实时刻在 `[t, t + lag]` 里——
+    这一窗跨了几段就照实列几段，不替读者挑一段。"""
     if t is None:
         return "已删除 / 读不到，没有 mtime——定位不了（二分跑测试文件）"
-    if session_start is not None and t < session_start:
-        return "早于本轮开始——写入者保留了旧 mtime（如 copy2 / utime / 解包），按时间定位不了"
+    hi = t + lag
     if not timeline:
+        if session_start is not None and hi < session_start:
+            return "早于本轮开始——写入者保留了旧 mtime（如 copy2 / utime / 解包），按时间定位不了"
         if session_start is None:
             return "没有时间线、本轮开始时刻也未知——定位不了"
         return "本轮没有任何测试报告：只可能在收集期或会话收尾"
-    if t < timeline[0][0]:
-        if session_start is None:     # 不知道本轮何时开始：分不出收集期还是更早
-            return "第一条测试开始之前（本轮开始时刻未知）"
-        return "收集期（第一条测试开始之前：模块 import / 收集钩子）"
-    prev = None
-    for start, stop, nodeid, when in timeline:
-        if t < start:
-            return f"两段之间（紧接 {prev[2]} 的 {prev[3]} 之后）"
-        if t <= stop:
-            return f"{nodeid} 的 {when} 阶段"
-        prev = (start, stop, nodeid, when)
-    return (f"最后一段记录之后——即 {prev[2]} 的 teardown 阶段：最后一条测试的 teardown 也包含 "
-            "session / module 级 fixture 的收尾（本闸自己也在其中）")
+    hits = [label for lo, lo_closed, up, up_closed, label in _regions(timeline, session_start)
+            if (hi >= lo if lo_closed else hi > lo) and (t <= up if up_closed else t < up)]
+    if len(hits) == 1 or lag <= 0:    # lag=0 只会在相邻两段共用的端点上命中两段：照逐点规则归前一段
+        return hits[0]
+    shown = "；或 ".join(hits) if len(hits) <= 4 else f"{hits[0]}；……（中间 {len(hits) - 2} 段）；或 {hits[-1]}"
+    return f"{shown}——本机 mtime 精度约 {lag * 1000:.0f} ms（内核按 tick 盖时间戳），这几段在此精度内分不开"
 
 
 def format_timeline(root: str, changes: dict[str, list[str]], after: dict[str, str], timeline: list,
                     session_start: float | None, limit: int = 25) -> str:
     """逐项列出写入时刻与当时的时间线位置（`diff` 的同一批路径、同样的上限）。"""
     import time as _time
+    lag = mtime_lag()
     lines = []
     for kind in ("added", "changed", "removed"):
         for rel in changes.get(kind, [])[:limit]:
             t = None if kind == "removed" else change_mtime(root, rel, after.get(rel))
             stamp = (_time.strftime("%H:%M:%S", _time.localtime(t)) + f".{int(t * 1000) % 1000:03d}"
                      if t is not None else "—")
-            lines.append(f"    {rel}  @{stamp}  → {locate(t, timeline, session_start)}")
+            lines.append(f"    {rel}  @{stamp}  → {locate(t, timeline, session_start, lag)}")
     return "\n".join(lines)
 
 

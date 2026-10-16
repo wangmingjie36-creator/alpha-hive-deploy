@@ -223,12 +223,28 @@ class TestResultReachesAlerts:
         healthy_news = {"available": True, "n_known": 30, "n_unknown": 0,
                         "primary_source": "massive", "by_source": {"massive": 30}, "primary_status": {"ok": 30},
                         "non_primary_share": 0.0, "refusal_messages": []}
-        snap = st.snapshot("2026-09-14", extra={"gh_pages": {"success": True}, "news_sources": healthy_news})
+        # v0.45.466：同理云端快照新鲜度（main() 每轮都写），健康 = 刷新成功、落后在允许内
+        healthy_cs = {"available": True, "refresh_ok": True, "refresh_error": None, "refreshed_at": "t",
+                      "newest_date": "2026-09-11", "max_lag": 1, "lag": 1, "missing_sessions": ["2026-09-14"]}
+        # v0.45.493：同理 T+N 回填队列（main() 每轮都写），健康 = 最老一格逾期在允许内
+        healthy_ob = {"available": True, "pending_files": 30, "pending_offsets": 30, "oldest_overdue_days": 0,
+                      "oldest_item": "XOM_2026-09-10 t1", "max_overdue_days": 7, "unreadable_files": 0}
+        # v0.45.500：同理财报日观测（main() 每轮都写），健康 = 30 只都判得了、没有旧格式
+        healthy_ed = {"available": True, "n": 30, "dated": 30, "only_past_dates": 0, "unresolved": 0,
+                      "unresolved_tickers": [], "legacy_source": 0, "max_unresolved": 0}
+        snap = st.snapshot("2026-09-14", extra={"gh_pages": {"success": True}, "news_sources": healthy_news,
+                                                "cloud_snapshots": healthy_cs, "outcomes_backlog": healthy_ob,
+                                                "earnings_dates": healthy_ed})
         # 同理组合 Greeks（v0.45.423 起 alert_manager 对「本轮没跑到组合 Greeks」记 checks_skipped）：
         # 健康一轮带一份「干净」的价核对计数；本测试自己拼 snapshot，不会经过真的 compute_day
         snap["counters"]["portfolio_greeks"] = {
             "n_stale": 0, "stale": [], "n_quote_stale": 0, "spy": {"stale": False},
             "execution_blocked": None, "hedge_undecided": None, "gaps": []}
+        # 纸面组合同理（v0.45.448）。此前本条只在全套里绿：计数是进程级状态，靠排在前面的测试跑过组合留下来
+        # ——单独跑这条一直是红的（v0.45.466 加检查时发现）。健康一轮显式带上，不靠执行顺序
+        snap["counters"]["paper_portfolio"] = {"as_of": "2026-09-14", "ok": True, "error": None}
+        # 历史字段回落计数同理（v0.45.473 起；也是进程级计数，单独跑这条时缺它 ⇒ checks_skipped，v0.45.493 发现）
+        snap["counters"]["history_fill"] = {"still_missing": {}, "by_path": {}}
         a, msgs = self._alerts(tmp_path, snap)
         assert not any("origin/main（" in m or "同步未执行" in m or "gh-pages 部署失败" in m for m in msgs), msgs
         assert not a.checks_skipped, a.checks_skipped
@@ -272,11 +288,15 @@ class TestResultReachesAlerts:
         monkeypatch.setattr(yf_gate, "install", lambda: False)
         monkeypatch.setattr(adr._timing, "write", lambda d, extra=None, **k: written.append((d, extra)))
         monkeypatch.setattr(sys, "argv", ["alpha_hive_daily_report.py", "--swarm", "--no-llm", "--force"])
+        import cloud_snapshot_loader as csl            # 每日观测在后台线程里跑；本条只核 extra 的键，行为见 test_cloud_snapshot_freshness
+        monkeypatch.setattr(csl, "lag_summary", lambda today, **k: {"available": True, "lag": 1})
         adr.main()
 
         assert len(written) == 1, written
         extra = written[0][1]
-        assert set(extra) == {"gh_pages", "news_sources"}, f"extra 里出现了已退役的字段：{sorted(extra)}"
+        assert set(extra) == {"gh_pages", "news_sources", "cloud_snapshots", "outcomes_backlog",
+                              "earnings_dates"}, f"extra 里出现了已退役的字段：{sorted(extra)}"
+        assert isinstance(extra["cloud_snapshots"], dict) and "available" in extra["cloud_snapshots"]
         ns = extra["news_sources"]
         assert ns["available"] is True and ns["by_source"] == {"yahoo_finance": 1}, ns
         ghp = extra["gh_pages"]

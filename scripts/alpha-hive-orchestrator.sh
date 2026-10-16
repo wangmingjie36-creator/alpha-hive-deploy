@@ -362,11 +362,15 @@ log "INFO" "📂 项目目录：$PROJECT_DIR"
 # 探活失败就退回直连，且**必须写进日志**——这条链路的存在与否
 # 会直接改变 429 计数的含义，不能静默。
 PROXY_URL="${ALPHA_HIVE_PROXY:-http://127.0.0.1:7897}"
-_proxy_ok=0
-if [ "$PROXY_URL" != "none" ]; then
+# v0.45.504：探活失败后间隔重探，不再「一次失败整轮放弃代理」。
+# 10-12（全源 TLS EOF、整天作废）与 10-14（真直连、yfinance 0/30）两次都是 14:00 那**一次**探活失败就定了整轮；
+# 代理 / 节点常是几分钟内自己恢复。默认 4 次、间隔 60s（最多多等 3 分钟）；两个值都可用环境变量覆盖（测试设 0）。
+PROXY_PROBE_ATTEMPTS="${ALPHA_HIVE_PROXY_PROBE_ATTEMPTS:-4}"
+PROXY_PROBE_INTERVAL="${ALPHA_HIVE_PROXY_PROBE_INTERVAL:-60}"
+_probe_proxy_once() {
     # 只探端口不够——端口开着但代理转发是坏的，会把整轮拖死。
     # 这里连一次真实 HTTPS（CBOE 根域，几百字节），8 秒超时。
-    if "$PYTHON3" -c '
+    "$PYTHON3" -c '
 import os, sys, socket, urllib.request
 url = sys.argv[1]
 host = url.split("//")[-1].split("/")[0]
@@ -387,9 +391,25 @@ except urllib.error.HTTPError:
 except Exception:
     sys.exit(1)
 sys.exit(0)
-' "$PROXY_URL" 2>/dev/null; then
-        _proxy_ok=1
-    fi
+' "$PROXY_URL" 2>/dev/null
+}
+# 定出站方式（代理 / 直连）并导出相应环境变量。Step 2 被输入闸拒绝后重试前会再调一次——代理恢复了就切回代理。
+_configure_outbound() {
+_proxy_ok=0
+if [ "$PROXY_URL" != "none" ]; then
+    _probe_i=1
+    while :; do
+        if _probe_proxy_once; then
+            _proxy_ok=1
+            [ "$_probe_i" -gt 1 ] && log "INFO" "🌐 代理第 ${_probe_i} 次探活通过（前 $((_probe_i - 1)) 次失败）"
+            break
+        fi
+        [ "$_probe_i" -ge "$PROXY_PROBE_ATTEMPTS" ] && break
+        log "WARN" "⚠️ 代理 $PROXY_URL 探活失败（第 ${_probe_i}/${PROXY_PROBE_ATTEMPTS} 次），${PROXY_PROBE_INTERVAL}s 后重探"
+        sleep "$PROXY_PROBE_INTERVAL"
+        _probe_i=$((_probe_i + 1))
+    done
+    unset _probe_i
 fi
 if [ "$_proxy_ok" = "1" ]; then
     export HTTP_PROXY="$PROXY_URL"  HTTPS_PROXY="$PROXY_URL"
@@ -403,14 +423,33 @@ else
     # 那样日志会写「退回直连」而实际仍在走代理，两者不一致。
     # 这正是本项目反复出现的「标签宣称的事没发生」，不能在治它的代码里再犯一次。
     unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+    # v0.45.496：只 unset 还不是直连。macOS 上 Python 的 urllib.request.getproxies() 在环境变量
+    # **为空**时会经 _scproxy 读系统代理（Clash Verge 开着「系统代理」⇒ 仍是 127.0.0.1:7897），
+    # requests 同源。2026-10-12 实测：探活失败、日志写「退回直连」，扫描实际仍走那个坏掉的代理
+    # ⇒ 一小时内所有 HTTPS 主机 SSLEOFError、期权快照 0 份。no_proxy='*' 让环境变量非空
+    # （getproxies 不再查系统配置）且对一切主机 bypass；libcurl（curl_cffi）同样认它。
+    export NO_PROXY='*' no_proxy='*'
+    # 「直连」这句标签要能被执行验证：用扫描同一个解释器问一遍，还解析得出代理就报错，不许只写日志。
+    # 只看 http/https/all：getproxies 把任何 *_proxy 变量都收成「协议」（ALPHA_HIVE_PROXY ⇒ alpha_hive），无害、不该误报。
+    if ! _direct_check="$("$PYTHON3" -c '
+import sys, urllib.request
+p = {k: v for k, v in urllib.request.getproxies().items() if k in ("http", "https", "all")}
+print(p)
+sys.exit(1 if p else 0)
+' 2>&1)"; then
+        log "ERROR" "❌ 已清代理变量并设 no_proxy=*，Python 仍解析出代理 ${_direct_check} —— 本轮并非直连"
+    fi
+    unset _direct_check
     if [ "$PROXY_URL" = "none" ]; then
         log "INFO" "🌐 出站直连（ALPHA_HIVE_PROXY=none，显式关闭，非故障）"
     else
-        log "WARN" "⚠️ 代理 $PROXY_URL 探活失败 —— 本轮退回直连。"
+        log "WARN" "⚠️ 代理 $PROXY_URL 探活 ${PROXY_PROBE_ATTEMPTS} 次全部失败 —— 本轮退回直连（no_proxy=*，系统代理也不走）。"
         log "WARN" "   直连下 yfinance 历来 403/429（rv_30d、催化剂受影响），"
         log "WARN" "   期权链走 CBOE 不受影响。若 429 计数暴涨，先查代理是否在跑。"
     fi
 fi
+}
+_configure_outbound
 unset _proxy_ok
 
 # v0.45.432：闸前就退出的失败也要落 status.json（同下方 TCC 分支）。不写的话 status.json 停在上一次成功，
@@ -976,8 +1015,40 @@ if [ "$LLM_FLAG" = "--use-llm" ]; then
 fi
 log "INFO" "   超时限制：${STEP2_TIMEOUT}s（${TICKER_COUNT} 只 × 120s/只，下限 1800s）"
 
-run_step --timeout $STEP2_TIMEOUT "$PROJECT_DIR/alpha_hive_daily_report.py" --swarm $LLM_FLAG --tickers $TICKERS_ARG >> "$LOGFILE" 2>&1
-STEP2_RC=$?
+# v0.45.504：输入闸。扫描预取后多数标的取不到可用现价 ⇒ Python 侧什么都不写（预测 / 归档 / 快照 / 账本 / 日报 / 网站）、
+# 退出码 4（`alpha_hive_daily_report.PRICE_GATE_EXIT`）。这里等一会儿、重新定出站方式（代理可能已恢复）再试；
+# 仍被拒 ⇒ 不写 .swarm_results ⇒ 下面的完整性闸判「零产出」⇒ status=failed ⇒ alert_manager CRITICAL，补跑闸照样放行。
+# 2026-10-12：30/30 现价 0 照样落库、发布、status=success——这一段就是为它加的。
+STEP2_GATE_RC=4
+STEP2_GATE_RETRIES="${ALPHA_HIVE_STEP2_GATE_RETRIES:-2}"
+STEP2_GATE_WAIT="${ALPHA_HIVE_STEP2_GATE_WAIT:-600}"
+STEP2_ATTEMPT=1
+while :; do
+    run_step --timeout $STEP2_TIMEOUT "$PROJECT_DIR/alpha_hive_daily_report.py" --swarm $LLM_FLAG --tickers $TICKERS_ARG >> "$LOGFILE" 2>&1
+    STEP2_RC=$?
+    [ "$STEP2_RC" -ne "$STEP2_GATE_RC" ] && break
+    _gate_detail=$("$PYTHON3" -c '
+import json, sys
+try:
+    g = (json.load(open(sys.argv[1])).get("extra") or {}).get("price_gate") or {}
+    print("%s/%s 只取不到现价（阈值 %s）" % (g.get("unavailable", "?"), g.get("total", "?"), g.get("max_unavailable_ratio", "?")))
+except Exception as e:
+    print("明细读不出（%s）" % type(e).__name__)
+' "${DATA_DIR}/logs/scan_timing.json" 2>/dev/null)
+    log "ERROR" "🛑 Step 2 输入闸拒绝（第 ${STEP2_ATTEMPT} 次）：${_gate_detail} —— 未写任何预测 / 归档 / 快照 / 账本，未发布"
+    if [ "$STEP2_ATTEMPT" -gt "$STEP2_GATE_RETRIES" ]; then
+        log "ERROR" "   已重试 ${STEP2_GATE_RETRIES} 次仍被拒 ⇒ 本轮按零产出处理（补跑闸放行：下次开机 / 下一个定时点会再跑）"
+        break
+    fi
+    log "WARN" "   ${STEP2_GATE_WAIT}s 后重新探活代理并重跑 Step 2（第 $((STEP2_ATTEMPT + 1)) 次）"
+    sleep "$STEP2_GATE_WAIT"
+    _configure_outbound
+    unset _proxy_ok
+    STEP2_ATTEMPT=$((STEP2_ATTEMPT + 1))
+    STEP2_START=$(date +%s)   # 解释器按最后一次的开跑时刻认 scan_timing
+done
+unset _gate_detail
+STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step2_price_gate\": {\"attempts\": ${STEP2_ATTEMPT}, \"refused\": $([ "$STEP2_RC" -eq "$STEP2_GATE_RC" ] && echo true || echo false)}}")
 STEP2_END=$(date +%s)
 STEP2_DURATION=$((STEP2_END - STEP2_START))
 # B：日志与 step2_hive_analysis 片段由 orchestrator_steps.py 判（rc=1 且主流程确实跑完 ⇒ success_with_warning）。
@@ -1543,7 +1614,27 @@ elif [ $STEP14_RC -eq 2 ]; then
             log "ERROR" "🚨 Step 14：备份仓里有导出之外的条目（外来文件 / 嵌套仓库），已拒绝提交——见 ${BACKUP_STATUS_JSON}（foreign_entries）"
             ;;
         git_error)
-            log "ERROR" "🚨 Step 14：git 调用异常（如超时），未确认是否已提交/推送——见 $BACKUP_STATUS_JSON"
+            # v0.45.480：同一个 git_error 底下有确定没提交的（add 失败、清单路径不在索引里），也有真说不准的
+            # （commit / push 抛异常）——按 run_backup 写的 git_outcome 说（取值唯一真相 run_backup.GIT_OUTCOMES）。
+            # 缺字段或不认识的值才说「未确认」。
+            BACKUP_GIT_OUTCOME=$(jq -r '.git_outcome // ""' "$BACKUP_STATUS_JSON" 2>/dev/null || echo "")
+            case "$BACKUP_GIT_OUTCOME" in
+                not_committed)
+                    log "ERROR" "🚨 Step 14：git 步骤失败，本轮未提交、未推送——见 $BACKUP_STATUS_JSON"
+                    ;;
+                commit_unknown)
+                    log "ERROR" "🚨 Step 14：git commit 调用异常（如超时），不确定是否已提交；本轮未推送——见 $BACKUP_STATUS_JSON"
+                    ;;
+                committed_not_pushed)
+                    log "ERROR" "🚨 Step 14：本地已提交，但之后的 git 调用或检查失败，本轮未推送——见 $BACKUP_STATUS_JSON"
+                    ;;
+                push_unknown)
+                    log "ERROR" "🚨 Step 14：git push 调用异常（如超时），不确定是否已推送；下一轮会再推——见 $BACKUP_STATUS_JSON"
+                    ;;
+                *)
+                    log "ERROR" "🚨 Step 14：git 步骤失败，未确认是否已提交/推送——见 $BACKUP_STATUS_JSON"
+                    ;;
+            esac
             ;;
         commit)
             log "ERROR" "🚨 Step 14：git commit 失败，未推送——见 $BACKUP_STATUS_JSON"

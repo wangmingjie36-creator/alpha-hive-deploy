@@ -853,21 +853,12 @@ def _is_network_failure(reason) -> bool:
     return isinstance(reason, str) and (reason in _BREAKER_REASONS or reason.startswith("exception:"))
 
 
-def _default_upcoming_fn() -> Callable[[str], Optional[dict]]:
-    """CLI 缺省：惰性构造 EarningsWatcher（同 `earnings_vol_signal.scan` 的 `_upcoming`）。
-    日报钩子传 `_earnings_date_from_swarm(<本轮蜂群结果>)`，不走这里。失败 ⇒ None ⇒ earnings "unknown"。"""
-    box: list = []
-
-    def _fn(ticker: str):
-        try:
-            if not box:
-                from earnings_watcher import EarningsWatcher
-                box.append(EarningsWatcher())
-            return box[0].get_earnings_date(ticker)
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("[%s] 财报日获取失败（记 unknown）: %s", ticker, exc)
-            return None
-    return _fn
+def _default_upcoming_fn(as_of: str) -> Callable[[str], Optional[dict]]:
+    """CLI 缺省：读 as_of 当天已落盘的扫描观测（`earnings_calendar.upcoming_fn_from_disk`，只认当天、**不打网**）。
+    日报钩子传本轮蜂群的 `upcoming_fn_from_swarm`，不走这里。判不了 ⇒ None ⇒ earnings "unknown"。
+    v0.45.500 前这里惰性构造 EarningsWatcher 打 yfinance（预注册 2026-10-13 一节，修 bug、不截断）。"""
+    import earnings_calendar
+    return earnings_calendar.upcoming_fn_from_disk(as_of)
 
 
 def run_for_date(as_of: str, *, tickers=None, upcoming_fn=None, state_dir=None,
@@ -902,7 +893,7 @@ def run_for_date(as_of: str, *, tickers=None, upcoming_fn=None, state_dir=None,
         tickers = WATCHLIST
     tickers = sorted({str(t) for t in tickers})
     fetch_fn = fetch_fn or _default_fetch
-    upcoming_fn = upcoming_fn or _default_upcoming_fn()
+    upcoming_fn = upcoming_fn or _default_upcoming_fn(as_of)
     breaker_n = int(CONFIG["fetch_breaker_consecutive_failures"])
     budget = float(CONFIG["fetch_time_budget_sec"])
 

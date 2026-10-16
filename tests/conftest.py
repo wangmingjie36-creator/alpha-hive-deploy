@@ -8,6 +8,7 @@ import sys
 import os
 import pathlib
 import site
+import threading
 import weakref
 import pytest
 
@@ -363,6 +364,61 @@ def _block_git_transport_probe(request, monkeypatch):
     yield
 
 
+#: 当前测试的快照出网闸状态：`calls` 记被拦的调用（供闸自身的测试核对），`allow_real` 只给 network 标记的用例
+_SNAPSHOT_FETCH_GATE = {"calls": [], "allow_real": False}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cloud_snapshot_fetch_gate():
+    """`cloud_snapshot_loader._git_fetch`（v0.45.466）在 **git 子进程**里出网——上面两道（库级 API / 裸 socket）
+    都挡不住。补跑入口 `_snapshot_ctx`、每日观测 `lag_summary`、入场价回填都会走到它，而缺省仓库就是本检出
+    （origin = GitHub）。
+
+    **session 级装、整个会话不撤**（v0.45.466 二次检查）：每日观测跑在后台线程里，线程可能活过起它的那条测试——
+    函数级 monkeypatch 在 teardown 撤掉闸之后它再拉，就真出网了（test_production_sync 的 main 用例实测会这样）。
+    只放行 origin 是**本地路径**的仓库（测试自己建的裸仓库：fetch 不出网，测试要真跑它）；其余抛 `_OfflineInTests`
+    （与真断网同一条降级路径）并记账。`network` 标记的用例经 `_SNAPSHOT_FETCH_GATE["allow_real"]` 放行。
+    """
+    import subprocess
+    import cloud_snapshot_loader as _csl
+    real = _csl._git_fetch
+
+    def _gated(repo, timeout):
+        url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=repo,
+                             capture_output=True, text=True).stdout.strip()
+        if _SNAPSHOT_FETCH_GATE["allow_real"] or (url and (os.path.isabs(url) or url.startswith("file://"))):
+            return real(repo, timeout)
+        _SNAPSHOT_FETCH_GATE["calls"].append((repo, url))
+        raise _OfflineInTests(f"测试默认离线：cloud_snapshot_loader 要从 {url or '（无 origin）'} "
+                              "拉 cloud-snapshots（tests/conftest.py）")
+
+    _csl._git_fetch = _gated
+    yield
+    _csl._git_fetch = real
+
+
+@pytest.fixture(autouse=True)
+def _cloud_snapshot_per_test_state(request, monkeypatch):
+    """每条测试清空本进程的刷新 / 告警记录（免得上一条刷新过，下一条的「本地陈旧还是云端没有」跟着变），
+    并在收尾时**等本条测试起的每日观测线程做完**：活过测试的线程会把刷新记录写进下一条测试的表里。"""
+    import cloud_snapshot_loader as _csl
+    monkeypatch.setattr(_csl, "_REFRESHED", {})
+    monkeypatch.setattr(_csl, "_WARNED", set())
+    calls: list = []
+    monkeypatch.setitem(_SNAPSHOT_FETCH_GATE, "calls", calls)
+    monkeypatch.setitem(_SNAPSHOT_FETCH_GATE, "allow_real", bool(request.node.get_closest_marker("network")))
+    request.node._snapshot_fetch_calls = calls
+    yield
+    adr = sys.modules.get("alpha_hive_daily_report")
+    if adr is None:
+        return                      # 没导入过日报 ⇒ 不可能起过观测线程
+    name = adr._CloudSnapshotObservation.THREAD_NAME
+    for t in threading.enumerate():
+        if t.name == name:
+            t.join(15)
+            assert not t.is_alive(), f"每日观测线程 {name} 活过了起它的测试（15 秒没做完）——它会污染后面的测试"
+
+
 # ==================== 可复用的显式源桩（各模块 opt-in）====================
 #
 # `_offline_transport` 是**兜底**：它让取数失败、行为与真离线一致，但生产代码
@@ -703,11 +759,12 @@ def _real_paper_portfolio_state_dir(pytestconfig):
 
     v0.45.422：收集期环境不再是「真环境」——`pytest_configure` 先把 `ALPHA_HIVE_HOME` 换成会话沙箱
     （数据根缺省改成 `~/alpha-hive-data` 后，收集期冻住的常量否则会指向生产）。所以真身改按**调用 pytest 时**的
-    环境、用生产同一条规则 `resolve_data_root` 求；自检比的是 `PATHS.home`（此刻 = 收集期的会话沙箱）下的同一推导。
+    环境求（v0.45.498 起与真实数据根闸同一份推导 `_root_data_guard.production_data_root`，其内只调生产规则 `resolve_data_root`）；自检比的是 `PATHS.home`（此刻 = 收集期的会话沙箱）下的同一推导。
     顺带：此前交互 shell 不设该变量，真身其实落在代码检出里的冻结副本上——守卫一直盯着旧数据，不是生产。
     """
-    from hive_logger import PATHS, resolve_data_root
-    real = resolve_data_root(pytestconfig._alpha_hive_invocation_env) / "paper_portfolio_state"
+    from hive_logger import PATHS
+    # 「生产在哪」与真实数据根闸同一份推导（v0.45.498：此前这里自调 resolve_data_root，相对值下盯随 cwd 漂移的目录）
+    real = pathlib.Path(_paper_portfolio_real_dir(pytestconfig._alpha_hive_invocation_env))
     imported = sys.modules.get("paper_portfolio")
     if imported is not None:
         frozen_expected = pathlib.Path(PATHS.home) / "paper_portfolio_state"
@@ -718,6 +775,13 @@ def _real_paper_portfolio_state_dir(pytestconfig):
             "守卫盯的是过期路径 ⇒ 真写穿生产它也看不见。改 `_real_paper_portfolio_state_dir` "
             "使之与 `paper_portfolio.STATE_DIR` 的定义同步（或反之），不要在这里放行。")
     return real
+
+
+def _paper_portfolio_real_dir(invocation_env) -> str:
+    """paper_portfolio 状态目录的真身 = 测试眼里的生产数据根（`_root_data_guard.production_data_root`）下那一格。"""
+    env = dict(invocation_env)                        # `_root_data_guard` 在本文件后面顶层导入，调用时已在
+    return os.path.join(_root_data_guard.production_data_root(env, env.get("HOME") or os.path.expanduser("~")),
+                        "paper_portfolio_state")
 
 
 @pytest.fixture(autouse=True)
@@ -1299,6 +1363,12 @@ def default_path_sandbox_check():
 
 
 @pytest.fixture
+def paper_portfolio_real_dir_fn():
+    """把 `_paper_portfolio_real_dir` 暴露给对拍测试（同上：`conftest` 不可直接 import）。"""
+    return _paper_portfolio_real_dir
+
+
+@pytest.fixture
 def data_root_session_facts(pytestconfig):
     """会话级数据根接线的事实，给 `tests/test_data_root_default.py` 自证（同上：`conftest` 不可直接 import）。
 
@@ -1338,7 +1408,8 @@ _SESSION_START_WALL = pytest.StashKey[float]()
 
 
 def pytest_sessionstart(session):
-    # 先记开始时刻再取指纹：取指纹期间被写的文件，mtime 也不会早于这个时刻（否则会被误标成「保留了旧 mtime」）
+    # 先记开始时刻再取指纹：取指纹期间被写的文件，mtime 也不会早于这个时刻（否则会被误标成「保留了旧 mtime」）。
+    # Linux 上 mtime 可比此刻早至多一个 tick（粗粒度内核时钟），`locate` 按 `mtime_lag` 放宽（v0.45.507）
     session.config.stash[_SESSION_START_WALL] = time.time()
     _GATE_TIMELINE.clear()
     session.config.stash[_ROOT_FP_BEFORE] = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)
@@ -1376,9 +1447,11 @@ def _gate_timeline(config) -> tuple:
 def pytest_report_header(config):
     """让「这台机器上真实数据根闸有没有生效」可见：不在时它什么都不保护，不能让这件事静默。"""
     root, fp = config.stash.get(_DATA_ROOT_BEFORE, (None, None))
+    note = _root_data_guard.nonabsolute_env_note(getattr(config, "_alpha_hive_invocation_env", {}) or {})
+    tail = f"；{note}" if note else ""                  # v0.45.488：环境值没被采用要说出来，不能静默改守别处
     if root is None:
-        return "real-data-root guard: INACTIVE（此机器上没有真实数据根；CI / 干净克隆都是这样，牙只靠合成测试证明）"
-    return f"real-data-root guard: active on {root}（{len(fp)} 个受闸条目）"
+        return f"real-data-root guard: INACTIVE（此机器上没有真实数据根；CI / 干净克隆都是这样，牙只靠合成测试证明）{tail}"
+    return f"real-data-root guard: active on {root}（{len(fp)} 个受闸条目）{tail}"
 
 
 @pytest.fixture(scope="session", autouse=True)

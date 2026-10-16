@@ -3,10 +3,11 @@ import { api, h, helpLink, num, money, pct, pctPts, usdShort, signedPct, distPct
   downloadCSV, pref, setPref, timeAgo, SIGN_LABEL, CURVE_LABEL, ROUTE_LABEL, STRUCT_LABEL, TENOR_LABEL,
   EARN_LABEL, SOURCE_LABEL, fill, plain } from "../lib.js";
 import { strikeBars, gammaCurve, lines, columns, payoff, C } from "../charts.js";
+import { premium } from "./premium.js";
 import { state, tickers, refreshMeta } from "../app.js";
 
-const TABS = [["levels", "水平"], ["greeks", "希腊值"], ["term", "期限"], ["sell", "卖权"], ["price", "价格"]];
-const TAB_HELP = { levels: "levels", greeks: "greeks", term: "greeks", sell: "sell", price: "price" };
+const TABS = [["levels", "水平"], ["greeks", "希腊值"], ["term", "期限"], ["sell", "卖权"], ["premium", "溢价"], ["price", "价格"]];
+const TAB_HELP = { levels: "levels", greeks: "greeks", term: "greeks", sell: "sell", premium: "premium", price: "price" };
 const VIEWS = [["next_expiry", "下一到期"], ["le_45dte", "≤45 天（路由用）"], ["full", "全部到期"]];
 
 export async function renderTicker(root, t, tab, alive, force = false) {
@@ -52,8 +53,8 @@ export async function renderTicker(root, t, tab, alive, force = false) {
     TABS.map(([k, label]) => h("a", { href: `#/t/${t}/${k}`, "aria-current": k === tab ? "page" : null }, label)));
   const body = h("div", {});
   fill(main, head, tabs, body);
-  const draw = { levels, greeks, term, sell, price }[tab] || levels;
-  await draw(body, d, t, alive);
+  const draw = { levels, greeks, term, sell, premium, price }[tab] || levels;
+  await draw(body, d, t, alive, force);
 }
 
 export function sidebar(current, pattern) {

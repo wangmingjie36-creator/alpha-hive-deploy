@@ -5,6 +5,7 @@
 密钥文件手动跑的一次性验收（见 CHANGELOG），不适合写进常跑的测试文件
 （那样等于把「密钥去哪扫」的清单和一次真实凭据样本焊进了 git 历史）。
 """
+import ast
 import fnmatch
 import glob
 import json
@@ -762,10 +763,11 @@ class TestRunBackupStageReporting:
         不是一回事，下游据此决定"下一轮直接重推还是要人工排查"。"""
         real_run_git = run_backup._run_git
 
-        def fake_run_git(args, cwd):
+        # `**kw`（v0.45.480 补）：push 带 `timeout=`，旧签名 `(args, cwd)` 让这一下抛的是 TypeError 而不是超时，照样落 git_error
+        def fake_run_git(args, cwd, **kw):
             if args and args[0] == "push":
                 raise subprocess.TimeoutExpired(cmd=["git", "push", "origin", "main"], timeout=60)
-            return real_run_git(args, cwd)
+            return real_run_git(args, cwd, **kw)
 
         _bypass_secret_scan(monkeypatch)
         monkeypatch.setattr(run_backup, "_run_git", fake_run_git)
@@ -783,6 +785,8 @@ class TestRunBackupStageReporting:
         assert status["stage"] == "git_error"
         assert status["ok"] is False
         assert status["commit"]["made"] is True  # 提交已经真实成功，只是 push 抛了异常
+        assert "timed out" in status["error"], status["error"]   # 抛的确实是模拟的超时
+        assert status["git_outcome"] == "push_unknown"
 
     def test_full_success_reports_done_stage(self, tmp_path, monkeypatch):
         """真实本地裸仓库模拟远端，走完整 export→scan→commit→push 全流程。"""
@@ -898,6 +902,99 @@ class TestRunBackupStageReporting:
         assert remote_head_after_round2 == remote_head_after_round1, (
             "远端不该前进——第二轮改动其实从未被提交/推送，"
             "如果远端头变了说明又发生了「假装成功」")
+
+
+def _git_fault(real, match, how):
+    """包一层 `run_backup._run_git`：参数前缀等于 `match` 的调用按 `how` 出事，其余照真跑。
+    `how`：`"raise"` 命令没跑就超时；`"raise_after"` 命令真跑完了、返回前超时（「说不准」指的正是这种）；
+    元组 = 伪造的 `(returncode, stdout, stderr)`。"""
+    def fake(args, cwd, **kw):
+        if tuple(args[:len(match)]) != match:
+            return real(args, cwd, **kw)
+        if how == "raise_after":
+            real(args, cwd, **kw)
+        if how in ("raise", "raise_after"):
+            raise subprocess.TimeoutExpired(cmd=["git", *args], timeout=60)
+        return subprocess.CompletedProcess(args, *how)
+    return fake
+
+
+def _rev(repo, ref="HEAD"):
+    r = subprocess.run(["git", "rev-parse", "-q", "--verify", ref], cwd=str(repo), capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+#: (id, 出事的地方, 怎么出事, git_outcome, 本地有没有新提交, 远端有没有前进)
+_GIT_ERROR_CASES = [
+    ("retire_raises", "retire", None, "not_committed", False, False),
+    ("add_rc", ("add",), (128, "", "模拟 index.lock"), "not_committed", False, False),
+    ("add_raises", ("add",), "raise", "not_committed", False, False),
+    ("sums_path_not_in_index", "exclude", None, "not_committed", False, False),
+    ("diff_raises", ("diff",), "raise", "not_committed", False, False),
+    ("diff_says_no_change_but_tree_dirty", ("diff", "--cached", "--quiet"), (0, "", ""), "not_committed", False, False),
+    ("commit_raises", ("commit",), "raise", "commit_unknown", False, False),
+    ("commit_raises_after_committing", ("commit",), "raise_after", "commit_unknown", True, False),
+    ("rev_parse_raises", ("rev-parse",), "raise", "committed_not_pushed", True, False),
+    ("dirty_after_commit", ("status", "--porcelain"), (0, " M SHA256SUMS\n", ""), "committed_not_pushed", True, False),
+    ("push_raises", ("push",), "raise", "push_unknown", True, False),
+    ("push_raises_after_pushing", ("push",), "raise_after", "push_unknown", True, True),
+]
+
+
+class TestGitErrorOutcome:
+    """v0.45.480：`stage == "git_error"` 时 status.json 的 `git_outcome` 如实说出这一轮提交了没有、推送了没有。
+
+    此前编排器对整个 git_error 一律说「未确认是否已提交/推送」，而清单路径不在索引里、`add` 失败这几种其实
+    是确定没提交。每一行都拿真实仓库核对：说「没提交」的，HEAD 真没动；说「说不准」的，确实有一种跑法
+    让它真的提交了 / 推送了（`raise_after` 行）——那正是不能说「没提交」的理由。
+    """
+    _h = TestRunBackupStageReporting
+
+    @pytest.mark.parametrize("case", _GIT_ERROR_CASES, ids=[c[0] for c in _GIT_ERROR_CASES])
+    def test_outcome_matches_what_actually_happened(self, tmp_path, monkeypatch, case):
+        _, where, how, expect, new_commit, pushed = case
+        _bypass_secret_scan(monkeypatch)
+        bare = tmp_path / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-q", "-b", "main", str(bare)], check=True, capture_output=True)
+        bk = tmp_path / "backup"
+        self._h._init_backup_git_repo(None, bk)
+        subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=str(bk), check=True, capture_output=True)
+        if where == "retire":
+            def boom(d):
+                raise RuntimeError("git rm 失败")
+            monkeypatch.setattr(run_backup, "retire_legacy_manifest_from_index", boom)
+        elif where == "exclude":   # 备份仓忽略规则吞掉导出文件 ⇒ SHA256SUMS 列的路径进不了索引
+            (bk / ".git" / "info").mkdir(exist_ok=True)
+            (bk / ".git" / "info" / "exclude").write_text("*.sql\n")
+        else:
+            monkeypatch.setattr(run_backup, "_run_git", _git_fault(run_backup._run_git, where, how))
+        head0, remote0 = _rev(bk), _rev(bare, "main")
+
+        st = run_backup.run(self._h._synthetic_src(None, tmp_path), bk, remote="origin", branch="main",
+                            status_file=tmp_path / "s.json", history_file=tmp_path / "h.jsonl")
+
+        assert (st["stage"], st["ok"], st.get("git_outcome")) == ("git_error", False, expect), st
+        assert json.loads((tmp_path / "s.json").read_text())["git_outcome"] == expect   # 编排器读的是落盘那份
+        assert (_rev(bk) != head0) == new_commit, st
+        assert (_rev(bare, "main") != remote0) == pushed, st
+
+    def test_cases_cover_every_outcome(self):
+        """`GIT_OUTCOMES` 每个取值都至少有一行真跑过；新增取值没配一行就红。"""
+        assert {c[3] for c in _GIT_ERROR_CASES} == set(run_backup.GIT_OUTCOMES)
+
+    def test_every_git_error_site_states_an_outcome(self):
+        """结构对账：run_backup 里每处 `status.update(stage="git_error", …)` 都带 `git_outcome=`——
+        以后新加一处 git_error 忘了写，编排器会退回「未确认」，这里先红。"""
+        tree = ast.parse(Path(run_backup.__file__).read_text(encoding="utf-8"))
+        sites = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "update"):
+                continue
+            kw = {k.arg: k.value for k in node.keywords}
+            if isinstance(kw.get("stage"), ast.Constant) and kw["stage"].value == "git_error":
+                sites.append((node.lineno, "git_outcome" in kw))
+        assert len(sites) >= 6, sites   # 退役 / add / 清单 / 脏树 / 提交段异常 / 推送异常；少了说明这条在空转
+        assert [ln for ln, ok in sites if not ok] == [], sites
 
 
 class TestForeignEntriesRefused:
@@ -1449,7 +1546,7 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
         ("init", "ERROR", "git 仓库初始化失败", "init_failed"),
         ("export", "ERROR", "数据导出失败", "export_failed"),
         ("foreign_entries", "ERROR", "备份仓里有导出之外的条目", "foreign_entries_failed"),
-        ("git_error", "ERROR", "git 调用异常", "git_error_failed"),
+        ("git_error", "ERROR", "未确认是否已提交/推送", "git_error_failed"),   # 没写 git_outcome（v0.45.480 前）
         ("commit", "ERROR", "git commit 失败", "commit_failed"),
         ("push", "WARN", "已提交但推送失败", "push_failed"),
         ("size_budget", "ERROR", "备份仓体量超出预算", "size_budget_failed"),
@@ -1492,6 +1589,47 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
         `.date == $d` 对缺失字段该判 false，不能因为 jq 的 null 处理意外放行。"""
         logs, steps_result = self._run(tmp_path, status_json={"stage": "push"})
         assert steps_result["step14_data_backup"]["status"] == "stale_or_missing_failed"
+
+
+_UNCONFIRMED = "未确认是否已提交/推送"
+
+
+class TestOrchestratorGitOutcomeWording:
+    """v0.45.480：Step 14 的 git_error 一支按 status.json 的 `git_outcome` 措辞（取值唯一真相 `run_backup.GIT_OUTCOMES`）。
+
+    此前一律「git 调用异常（如超时），未确认是否已提交/推送」——清单路径不在索引里（v0.45.430）、`add` 返回非 0
+    这几种既不是异常、也确定没提交。缺字段 / 不认识的值仍说「未确认」，那是真不知道。
+    """
+    _extract_block = TestOrchestratorStep14StageDispatch._extract_block
+    _run = TestOrchestratorStep14StageDispatch._run
+
+    def _logs_for(self, tmp_path, **extra):
+        logs, steps = self._run(tmp_path, status_json={"date": "2026-01-01", "stage": "git_error", **extra})
+        assert steps["step14_data_backup"]["status"] == "git_error_failed"
+        assert len(logs) == 1 and logs[0][0] == "ERROR", logs
+        return logs[0][1]
+
+    @pytest.mark.parametrize("outcome, says, never_says", [
+        ("not_committed", "本轮未提交、未推送", ("已提交", "不确定", "未确认")),
+        ("commit_unknown", "不确定是否已提交；本轮未推送", ("未确认", "本地已提交")),
+        ("committed_not_pushed", "本地已提交", ("不确定", "未确认", "未提交")),
+        ("push_unknown", "不确定是否已推送", ("未确认", "未推送")),
+    ])
+    def test_each_outcome_says_what_happened(self, tmp_path, outcome, says, never_says):
+        msg = self._logs_for(tmp_path, git_outcome=outcome)
+        assert says in msg and not [w for w in never_says if w in msg], msg
+
+    def test_every_outcome_run_backup_writes_has_its_own_wording(self):
+        """两头对账：run_backup 能写的每个取值，编排器都有专门一句；Python 加了取值、编排器没跟上就红。"""
+        import tempfile
+        for outcome in run_backup.GIT_OUTCOMES:
+            with tempfile.TemporaryDirectory() as d:
+                assert _UNCONFIRMED not in self._logs_for(Path(d), git_outcome=outcome), outcome
+
+    @pytest.mark.parametrize("extra", [{}, {"git_outcome": ""}, {"git_outcome": "some_future_outcome"}, {"git_outcome": None}])
+    def test_missing_or_unknown_outcome_stays_unconfirmed(self, tmp_path, extra):
+        """v0.45.480 前的 run_backup 不写这个字段：说不出就说「未确认」，不猜。"""
+        assert _UNCONFIRMED in self._logs_for(tmp_path, **extra)
 
 
 _STEP14_RC1_START = "elif [ $STEP14_RC -eq 1 ]; then"

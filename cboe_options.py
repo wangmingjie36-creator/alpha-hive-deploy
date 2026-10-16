@@ -1121,7 +1121,14 @@ def fetch_cboe_chain(
     有 4h 进程缓存，Step 2 约 30–55 分钟 ⇒ 同标的第二次取链必然命中）。
     """
     if _SNAPSHOT_PROVIDER is not None:
-        return (_snapshot(ticker) or {}).get("chain")
+        snap = _snapshot(ticker) or {}
+        chain = snap.get("chain")
+        # v0.45.497：标上「这条链来自云端快照、属于哪一场」。analyze 据此把 IV 观测记到那一场、
+        # 快照标签写 cloud_snapshot——否则次日开盘后补跑，目标日的链会被当成「运行时现拉」
+        # （IV 索引记到今天名下、`_options_as_of_mismatch` 写反）。浅拷贝：不改供给器缓存里的原件。
+        if isinstance(chain, dict):
+            chain = {**chain, "_from_snapshot": True, "_snapshot_vintage": snap.get("vintage_date")}
+        return chain
 
     data = _fetch_cboe_payload(ticker, timeout)
     if not data:

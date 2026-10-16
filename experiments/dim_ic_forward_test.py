@@ -180,6 +180,10 @@ def load_rows(db_path: Path, P, today: str) -> List[Dict]:
         d = r["date"][:10]
         if d > today or dt.date.fromisoformat(d).weekday() >= 5:
             continue
+        # 修订 2（v0.45.484，事后）：整天由事后重放补算的日子不进检验（`signal_archive.FORWARD_TEST_EXCLUDED_DAYS`）。
+        # 被排除的日子由 run() 的 `forward_test_excluded_days` 报出来，不是静默少行。
+        if signal_archive.forward_test_excluded(d):
+            continue
         try:
             ds = json.loads(r["dimension_scores"])
         except (json.JSONDecodeError, TypeError):
@@ -519,7 +523,10 @@ def run(db_path: Optional[str] = None, today: Optional[str] = None,
         repo_root: Optional[Path] = None, history: Optional[list] = None) -> Dict:
     P = _protocol()
     today = today or dt.date.today().isoformat()
-    base = {"forward_start": P.FORWARD_START, "today": today}
+    base = {"forward_start": P.FORWARD_START, "today": today,
+            # 修订 2（v0.45.484）：协议排除日照实报出（只列窗口内、已到 today 的）
+            "forward_test_excluded_days": sorted(d for d in signal_archive.FORWARD_TEST_EXCLUDED_DAYS
+                                                 if P.FORWARD_START <= d <= today)}
     # 窗口开始前也照常走完：登记日到窗口起点之间改了 config 权重，同样作废 H2（权重检查从登记日算起）
     db = Path(db_path) if db_path else _db_path()
     if not db.exists():

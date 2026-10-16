@@ -826,11 +826,14 @@ def extract(data: dict) -> dict:
         # Overview
         "overview": aa.get("overview", ""),
         # ① IV-RV Spread（来自 options_analyzer → OptionsAgent）
-        # v0.45.4 起上游缺数诚实返回 None（键存在，故 .get 默认值不生效），
-        # 这里必须显式兜住，否则下方 f-string 的比较与格式化会抛 TypeError。
-        "iv_rv_spread": odet.get("iv_rv_spread") or 0.0,
+        # v0.45.4 起上游缺数诚实返回 None（键存在，故 .get 默认值不生效）。
+        # v0.45.474：这里**保留 None**。此前在此兜成 0.0 ⇒ v0.45.54 写在 Step 1 提示词里的
+        # 「不可得」分支（`_ivrv_txt` / `_hv30_txt`）永远走不到，报告照写「IV-RV +0.0%」「HV30 0.0%」；
+        # v0.45.471 后 IV 不可得而 RV 照给的日子又多一种。各读者自己兜 None（叙事 `float(x or 0)` 后
+        # 按「两者皆 0 ⇒ 不写」跳过；展示一律写「不可得」）。
+        "iv_rv_spread": odet.get("iv_rv_spread"),
         "iv_rv_signal": odet.get("iv_rv_signal", ""),
-        "rv_30d": odet.get("rv_30d") or 0.0,
+        "rv_30d": odet.get("rv_30d"),
         # ⑤ Gamma 到期日历
         "gamma_calendar": odet.get("gamma_calendar", {}),
         # ② PEAD（来自 chronos_bee details）
@@ -1092,8 +1095,8 @@ PEAD历史财报漂移: {ctx.get('pead_summary','暂无历史数据')}（偏向:
 - P/C 比: {ctx['put_call_ratio']}（{'>1 偏空' if pc_float > 1 else '<1 偏多'}）
 - 总OI: {ctx['total_oi']:,.0f}
 - IV Skew: {ctx['iv_skew']} ({ctx['iv_skew_signal']})
-- IV 当前: {_iv_txt(ctx['iv_current'])} | HV30（已实现波动率）: {(ctx.get('rv_30d') or 0):.1f}%
-- IV-RV 价差: {(ctx.get('iv_rv_spread') or 0):+.1f}%（正值=期权相对HV偏贵，卖方有优势；负值=期权便宜，方向性买入占优），信号: {ctx.get('iv_rv_signal','')}
+- IV 当前: {_iv_txt(ctx['iv_current'])} | HV30（已实现波动率）: {_hv30_txt}
+- IV-RV 价差: {_ivrv_txt}（正值=期权相对HV偏贵，卖方有优势；负值=期权便宜，方向性买入占优），信号: {ctx.get('iv_rv_signal','')}
 - 流向: {ctx['flow_direction']}
 - 关键支撑: {json.dumps(ctx['key_levels'].get('support',[])[:3], ensure_ascii=False)}
 - 关键阻力: {json.dumps(ctx['key_levels'].get('resistance',[])[:3], ensure_ascii=False)}
@@ -3234,8 +3237,10 @@ def _build_scenario_narrative(ctx: dict) -> str:
 
     skew_f   = _sf(ctx['iv_skew'], 1.0)
     iv_rank  = float(ctx.get('iv_rank', 50) or 50)
-    iv_rv    = float(ctx.get('iv_rv_spread', 0) or 0)
-    iv_curr  = float(ctx.get('iv_current', 0) or 0)
+    # v0.45.474：只用于展示；不可得写「不可得」，不写 +0.0%（策略选择按 IV Rank，不读它）
+    _ivrv_raw = ctx.get('iv_rv_spread')
+    iv_rv_s  = (f"{float(_ivrv_raw):+.1f}%" if isinstance(_ivrv_raw, (int, float))
+                and not isinstance(_ivrv_raw, bool) else "不可得")
 
     # ── Confidence band（v0.45.54：不可得时不编一个统计陈述）──
     # 旧实现：区间兜底 ±1.5、σ 兜底 1.5，两者还互相自洽（band_w 由区间反推 3.0），
@@ -3591,7 +3596,7 @@ def _build_scenario_narrative(ctx: dict) -> str:
 
     # ── PARAGRAPH 4: Options strategy matching ────────────────────────
     p4 = (
-        f'<p><strong>期权策略匹配（基于第四章 IV Rank={iv_rank:.0f}%、Skew={ctx.get("iv_skew") or "N/A"}、IV-RV={iv_rv:+.1f}%）：</strong>'
+        f'<p><strong>期权策略匹配（基于第四章 IV Rank={iv_rank:.0f}%、Skew={ctx.get("iv_skew") or "N/A"}、IV-RV={iv_rv_s}）：</strong>'
         f'{strategy}。{cat_window_note}{pin_note}</p>'
     )
 

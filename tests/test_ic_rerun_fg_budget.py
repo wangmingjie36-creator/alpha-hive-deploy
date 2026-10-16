@@ -173,7 +173,8 @@ class TestChildOutcomes:
     def test_finished_child_is_kept_when_only_the_parent_overran(self, monkeypatch):
         """二次检查实测的 bug：子进程按时跑完，是父进程自己的部分（评估 / 边界核对 / 写检查点）拖过了预算——
         结果就在管道里，必须原样转交，不能报成「F&G 子进程跑了 Xs 仍未结束，已终止」并归因到行情源。
-        变异「删掉 `poll() is not None` 那段」⇒ 红（CPython communicate(timeout=0) 先判超时就抛）。"""
+        变异「收件下限退回 0」⇒ 红（CPython communicate(timeout=0) 先判超时就抛）。v0.45.400 时接住它的是 `poll() is not None`
+        分支；v0.45.485 起合进 `_FG_RESULT_MIN_WAIT_SECONDS` 这一个机制（另一形见下面 `…_slow_exit_after_deadline_…`）。"""
         _fake_child(monkeypatch, _print_good())
         with rr._FgChild("2026-10-01", time.monotonic() + 0.3) as h:
             h.proc.wait(timeout=10)          # 子进程在预算内跑完
@@ -191,17 +192,23 @@ class TestChildOutcomes:
         assert h.proc.poll() is not None, "超时后子进程必须已结束"
         assert took < 0.8 + rr._FG_KILL_GRACE_SECONDS + 2.0, took
 
-    def test_term_ignoring_child_is_killed_after_grace(self, monkeypatch, capsys):
+    def test_term_ignoring_child_is_killed_after_grace(self, monkeypatch, capsys, tmp_path):
         """子进程不理 TERM ⇒ 宽限后 KILL，且 stderr 记一行（生产子进程保持 TERM 默认动作，走到 KILL 说明它的信号处置被改了）。
         没有 KILL 这一步，父进程会在 `wait()` 上陪它一起挂到 60s。"""
         monkeypatch.setattr(rr, "_FG_KILL_GRACE_SECONDS", 0.3)
+        armed = tmp_path / "armed"
         code = ("import signal, sys, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-                "sys.stdout.write('armed'); sys.stdout.flush()\ntime.sleep(60)\n")
-        t = time.monotonic()
-        res, h = self._run(monkeypatch, code, deadline_in=0.8)
+                f"open({str(armed)!r}, 'w').write('1')\ntime.sleep(60)\n")
+        _fake_child(monkeypatch, code)
+        with rr._FgChild(None, time.monotonic() + 30) as h:
+            # 先等子进程真的装好 SIG_IGN 再到点——否则机器一慢，TERM 抢在 SIG_IGN 之前到，测的就不是「不理 TERM」（v0.45.485 复审）
+            assert _wait_for(armed, 10.0)
+            h.deadline = time.monotonic()
+            t = time.monotonic()
+            res = h.result()
         assert res[rr._DETAIL_KEY]["runner"] == "budget_exceeded"
         assert h.proc.returncode == -signal.SIGKILL, h.proc.returncode
-        assert time.monotonic() - t < 0.8 + 0.3 + 2.0
+        assert time.monotonic() - t < rr._FG_RESULT_MIN_WAIT_SECONDS + 0.3 + 2.0
         assert "TERM 后 0.3s 仍未退出，已 KILL" in capsys.readouterr().err
 
     def test_private_tmpdir_is_removed_after_kill(self, monkeypatch, tmp_path):
@@ -227,6 +234,18 @@ class TestChildOutcomes:
         assert res[rr._DETAIL_KEY]["runner"] == "budget_exceeded"
         assert h.proc.returncode == -signal.SIGTERM, "fake 子进程保持 TERM 默认动作，应被 TERM 直接终止"
         assert not os.path.exists(made) and not os.path.exists(root) and h.tmp_root is None
+
+    def test_result_written_then_slow_exit_after_deadline_is_kept(self, monkeypatch):
+        """F1 的另一形（v0.45.485）：结果已写完、stdout 已关，子进程收尾（解释器退出）慢一点——截止已过、`poll()` 仍是 None。
+        在最短收件窗口内照收。v0.45.400 的 `poll() is not None` 分支接不住这一形（在 400 的代码上实测本条红：报成
+        「F&G 子进程跑了 0.3s 仍未结束，已终止」）；「已退出」那一形由上面 400 的 `test_finished_child_is_kept_…` 守。"""
+        code = _print_good() + "sys.stdout.flush(); sys.stdout.close()\nimport time\ntime.sleep(0.4)\n"
+        _fake_child(monkeypatch, code)
+        with rr._FgChild(None, time.monotonic() + 0.1) as h:
+            time.sleep(0.3)
+            res = h.result()
+        assert res == GOOD, res
+        assert rr._FG_RESULT_MIN_WAIT_SECONDS >= 0.5, "最短收件窗口要盖得住一次正常的解释器退出"
 
     def test_unbounded_waits_as_long_as_it_takes(self, monkeypatch):
         res, _ = self._run(monkeypatch, "import time\ntime.sleep(1.2)\n" + _print_good(), deadline_in=None)
@@ -366,6 +385,35 @@ class TestMainFlow:
         segs = capsys.readouterr().out.strip().split("｜")
         assert _check_quiet_segments(segs) == [] and segs[2] == fg["line"]
 
+    def test_parent_late_keeps_the_delivered_result(self, monkeypatch, tmp_path):
+        """F1 的 `main()` 形：其余各项（这里打桩让 assess 睡 1s）拖过 0.5s 预算，子进程早交卷 ⇒ F&G 段是真结果。"""
+        _db, out = self._argv(monkeypatch, tmp_path, "--quiet", "--budget-seconds", "0.5")
+        _fake_child(monkeypatch, _print_good())
+        real = rr.assess
+        monkeypatch.setattr(rr, "assess", lambda *a, **k: (time.sleep(1.0), real(*a, **k))[1])
+        assert rr.main() == 1
+        env = json.loads(out.read_text("utf-8"))
+        assert env["fg_exposure_gate_forward_test"]["line"] == GOOD["line"]
+        assert not any(a["id"].startswith(FG + ".") for a in env["attention"]), env["attention"]
+
+    def test_unexpected_error_while_waiting_is_contained(self, monkeypatch, tmp_path):
+        """v0.45.485（F2）：等 F&G 时出了意料外的异常（实测：超大 --budget-seconds 让 poll 抛 OverflowError）——
+        只把 F&G 段判成 child_failed，不崩溃、不让 run_tool 的错误外壳盖掉已写出的检查点与世代边界核对。"""
+        _db, out = self._argv(monkeypatch, tmp_path, "--quiet")
+        _fake_child(monkeypatch, _print_good())
+
+        def _boom(self):
+            raise OverflowError("timeout is too large")
+
+        monkeypatch.setattr(rr._FgChild, "result", _boom)
+        assert rr.main() == 1
+        env = json.loads(out.read_text("utf-8"))
+        assert sc.validate(env) == [] and env["status"] == "attention"
+        fg = env["fg_exposure_gate_forward_test"]
+        assert fg["status"] == "cannot_judge" and "OverflowError" in fg["line"], fg
+        assert f"{FG}.child_failed" in {a["id"] for a in env["attention"]}
+        assert "verdict" in env["cohort_boundary_evidence"]
+
     def test_budget_zero_is_unbounded(self, monkeypatch, tmp_path):
         """0 = 不限时：子进程跑 1.2s 照样等它（同样的子进程在 1s 预算下会被终止，见上一条）。"""
         _db, out = self._argv(monkeypatch, tmp_path, "--quiet", "--budget-seconds", "0")
@@ -374,18 +422,33 @@ class TestMainFlow:
         assert seen["max_seconds"] is None
         assert json.loads(out.read_text("utf-8"))["fg_exposure_gate_forward_test"]["line"] == GOOD["line"]
 
-    def test_default_budget_is_counted_from_main_start(self, monkeypatch, tmp_path):
+    def test_default_is_unbounded(self, monkeypatch, tmp_path):
+        """v0.45.446 起缺省不限时：不传 `--budget-seconds` 的调用方（每周任务 / 手动运行）没有看门狗，不该被截断。
+        变异「缺省改回 45」⇒ 红（每周任务又会在限流日拿到「超出时间预算」而不是结果）。"""
+        assert rr.FG_BUDGET_SECONDS_DEFAULT == 0
         self._argv(monkeypatch, tmp_path, "--quiet")
         seen = _fake_child(monkeypatch, _print_good())
         rr.main()
-        assert rr.FG_BUDGET_SECONDS_DEFAULT - 5 < seen["max_seconds"] <= rr.FG_BUDGET_SECONDS_DEFAULT
+        assert seen["max_seconds"] is None
 
-    @pytest.mark.parametrize("bad", ["-1", "nan", "inf", "abc"])
+    def test_explicit_budget_is_counted_from_main_start(self, monkeypatch, tmp_path):
+        self._argv(monkeypatch, tmp_path, "--quiet", "--budget-seconds", "45")
+        seen = _fake_child(monkeypatch, _print_good())
+        rr.main()
+        assert 45 - 5 < seen["max_seconds"] <= 45
+        # 编排器传的 --today 必须一路传到子进程：执行器拿它当窗口终点，丢了就静默按墙钟日期算（v0.45.485 复审 G1/G2）
+        assert seen["today"] == TODAY, seen
+
+    @pytest.mark.parametrize("bad", ["-1", "nan", "inf", "abc", "86401", "3000000"])
     def test_bad_budget_is_a_usage_error(self, monkeypatch, tmp_path, bad):
         self._argv(monkeypatch, tmp_path, "--budget-seconds", bad)
         with pytest.raises(SystemExit) as e:
             rr.main()
         assert e.value.code == 2
+
+    def test_budget_upper_bound_is_inclusive(self):
+        """上限 = 一天（F2：再大 poll 的毫秒数会溢出 C int；要不限时写 0）。"""
+        assert rr._budget_seconds("86400") == 86400.0 and rr._budget_seconds("0") == 0.0
 
     def test_crash_in_cheap_parts_kills_the_child(self, monkeypatch, tmp_path):
         pidf = tmp_path / "child.pid"
@@ -414,8 +477,9 @@ class TestMainFlow:
 def test_conftest_keeps_fg_in_process_for_in_process_main(monkeypatch, tmp_path, capsys):
     """conftest 的 `_fg_sub_status_in_process` 真的生效：进程内调 `main()`（**不**手动置钩子）时，打在
     `fg_exposure_gate_forward_status` 上的桩被用到。删掉那个夹具 ⇒ 这里起真子进程、桩被无声绕过 ⇒ 红。
-    没有这一条，删夹具不会让任何测试变红（沙箱里真子进程恰好也很快返回一个 ⚠️ 段），而那些进程内测试
-    从此在子进程里绕开出网闸与 monkeypatch。"""
+    删夹具时本文件只有这一条红（沙箱里真子进程恰好也很快返回一个 ⚠️ 段，其余进程内测试照绿）；仓库里另有
+    `test_step_contract_ic_rerun.py::TestOkPath` 两条会红（复审实测）——但那是别的断言碰巧依赖它，不是守卫。
+    没有这一条，那些进程内测试会在子进程里绕开出网闸与 monkeypatch 而不自知。"""
     assert rr._FG_IN_PROCESS is True, "conftest 没把 _FG_IN_PROCESS 置 True"
     db = _make_db(tmp_path / "home", [])
     monkeypatch.setattr(rr, "fg_exposure_gate_forward_status",
@@ -487,6 +551,8 @@ def _c_callback_forever():
         libc.qsort(arr, 32, ctypes.sizeof(ctypes.c_int), cb)
 def run(today=None):
     mode = os.environ["FG_FAKE_MODE"]
+    with open(os.environ["FG_FAKE_TODAYFILE"], "w") as f:   # 子进程入口有没有把 --today 传到执行器
+        f.write(repr(today))
     if mode in ("hang", "c_callback"):
         with tempfile.TemporaryDirectory(prefix="fg_gate_fwd_") as td:
             with open(os.environ["FG_FAKE_TDFILE"], "w") as f:
@@ -532,6 +598,7 @@ def tree(tmp_path):
         out = tmp_path / "out.json"
         pidfile = tmp_path / "fg_child.pid"
         tdfile = tmp_path / "fg_child_tempdir.txt"
+        todayfile = tmp_path / "fg_child_today.txt"
         sock_log = tmp_path / "socket_attempts.log"
         stderr = tmp_path / "stderr.txt"
         sys_tmp = tmp_path / "sysT"           # 父进程与子进程的「系统临时目录」都圈在这里
@@ -543,7 +610,8 @@ def tree(tmp_path):
                       "ALPHA_HIVE_LOGS_DIR": str(home / "logs"), "ALPHA_HIVE_CACHE_DIR": str(home / "cache"),
                       "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(site),
                       "FG_BUDGET_SOCKET_LOG": str(self.sock_log), "TMPDIR": str(self.sys_tmp), **_DEAD_PROXY,
-                      "FG_FAKE_MODE": mode, "FG_FAKE_PIDFILE": str(self.pidfile), "FG_FAKE_TDFILE": str(self.tdfile)})
+                      "FG_FAKE_MODE": mode, "FG_FAKE_PIDFILE": str(self.pidfile), "FG_FAKE_TDFILE": str(self.tdfile),
+                      "FG_FAKE_TODAYFILE": str(self.todayfile)})
             return e
 
         def child_tempdir(self):
@@ -621,6 +689,8 @@ class TestRealProcessTree:
         assert rc == 143, f"rc={rc}\n{tree.stderr.read_text('utf-8')[-2000:]}"
         assert _gone(child), "父进程被 TERM 后 F&G 子进程还活着"
         assert not tree.child_tempdir().exists(), "子进程的重放临时目录残留"
+        # 是父进程杀的，不是子进程看门狗发现父进程没了自己退的（v0.45.485 复审 C4：只删目录不杀子进程的变异此前靠看门狗混过）
+        assert "父进程已不在" not in tree.stderr.read_text("utf-8")
         env = tree.env_json()
         assert sc.validate(env) == [] and env["date"] == TODAY
         assert env["fg_exposure_gate_forward_test"]["line"] == "⚠️ F&G 敞口门前瞻检验无法判定：进程在 F&G 重放结束前终止"
@@ -682,6 +752,8 @@ class TestRealProcessTree:
         err = tree.stderr.read_text("utf-8")
         assert "NOISE-PRINT" in err and "NOISE-FD1" in err
         assert "NOISE" not in stdout
+        # 真实进程树里 --today 一路传到执行器（v0.45.485 复审 G3：子进程入口写死 today=None 此前全绿）
+        assert tree.todayfile.read_text() == repr(TODAY)
 
     def test_ohlc_window_degraded_survives_the_process_hop(self, tree):
         """v0.45.391 复审 S1 的降级条目，经 `_detail` 白名单 → 子进程 JSON → 父进程解析后照样列出。
@@ -726,6 +798,7 @@ class TestOrchestratorReadsIt:
         assert _wait_for(tree.out)
         p.send_signal(signal.SIGTERM)
         assert p.wait(timeout=15) == 143
+        assert "父进程已不在" not in tree.stderr.read_text("utf-8")
         out = self._render(tree.out, 124, run_start)            # bash 把 143 记成 124
         frag = out["steps_fragment"]["step11_ic_rerun_readiness"]
         assert out["level"] in ("warn", "error")
@@ -748,25 +821,28 @@ class TestOrchestratorReadsIt:
 
 
 class TestBudgetFitsOrchestratorTimeout:
-    """缺省预算必须放得进编排器 Step 11 的超时：编排器不传 `--budget-seconds`（改它要隔一个扫描日才部署），
-    缺省值就是生产值。到点后还有 TERM 宽限 + 写最终 JSON，再留 ≥10s 余量（解释器启动、慢盘、负载）。"""
+    """编排器 Step 11 给的预算必须放得进它自己的超时：到点后还有 TERM 宽限 + 写最终 JSON，
+    再留 ≥10s 余量（解释器启动、慢盘、负载）。v0.45.446 起工具缺省不限时 ⇒ **只认编排器显式传的值**，
+    没传不再退回缺省（那会拿「不限时」去比，或者更糟——拿一个与生产无关的数去比还比过了）。"""
 
-    def test_default_budget_plus_grace_fits(self):
+    def test_orchestrator_budget_plus_grace_fits(self):
         """超时取 `orchestrator_steps.STEP11_TIMEOUT_DEFAULT`（v0.45.391 起由 `TestStep11Timeout` 钉在仓库编排器那一行上，
-        一份真相）；编排器若显式传了 `--budget-seconds`，以它为准。"""
+        一份真相）；预算取编排器那一行的 `--budget-seconds`，取不到即红。"""
         import re
         text = repo_orchestrator_text()
         m = re.search(r'run_step\s+--timeout\s+\d+\s+"\$\{PROJECT_DIR\}/ic_rerun_readiness\.py"([^\n]*\n[^\n]*)', text)
         assert m, "编排器里找不到 Step 11 的 run_step 行（改了写法？这条守卫要跟着改，不许删）"
         flag = re.search(r"--budget-seconds\s+(\S+)", m.group(1))
-        budget = float(flag.group(1)) if flag else rr.FG_BUDGET_SECONDS_DEFAULT
+        assert flag, ("编排器 Step 11 没传 --budget-seconds：工具缺省不限时（v0.45.446），"
+                      "Step 11 会无预算地跑进 60s 看门狗")
+        budget = float(flag.group(1))
         timeout = osteps.STEP11_TIMEOUT_DEFAULT
         assert budget > 0, "生产不许不限时：0 = 不限时，会重新把 Step 11 推回超时"
-        assert budget + rr._FG_KILL_GRACE_SECONDS + 10 <= timeout, (budget, timeout)
+        assert budget + rr._FG_RESULT_MIN_WAIT_SECONDS + rr._FG_KILL_GRACE_SECONDS + 10 <= timeout, (budget, timeout)
 
     def test_orchestrator_passes_the_budget_explicitly(self):
         """预算由有看门狗的调用方给（v0.45.437 起）：编排器必须**显式**传 `--budget-seconds`，不许靠工具的缺省值——
-        下一步缺省值会改成不限时（每周任务 / 手动运行没有看门狗），那时没传就等于 Step 11 不限时。
+        缺省值 v0.45.446 起不限时（每周任务 / 手动运行没有看门狗），没传就等于 Step 11 不限时。
         变异「删掉编排器 Step 11 行里的 --budget-seconds」⇒ 红。"""
         import re
         text = repo_orchestrator_text()

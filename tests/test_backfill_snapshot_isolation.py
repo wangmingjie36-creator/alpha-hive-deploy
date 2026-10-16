@@ -120,8 +120,12 @@ class TestBackfillUsesSeparateSlot:
             agent.analyze("NVDA", stock_price=100.0)
         # 走到 fetch 说明**没有**命中那份当日快照
 
-    def test_today_run_still_reads_today_slot(self, agent, monkeypatch, tmp_path):
-        """别把闸门写成"永远不命中"——正常当日扫描仍须复用快照。"""
+    def test_today_run_still_reads_today_slot(self, agent, monkeypatch, tmp_path, stub_yfinance):
+        """别把闸门写成"永远不命中"——正常当日扫描仍须复用快照。
+
+        `stub_yfinance`（v0.45.474）：这份最小快照没有 `rv_30d`，命中时 `_refresh_price_derived` 会补算 RV
+        （474 起 IV 缺失也补，RV 与 IV 无关）⇒ 会去 yfinance 取日K。本条测的是「命中」，不是补算，钉成离线。
+        """
         import json
 
         today = _SESSION

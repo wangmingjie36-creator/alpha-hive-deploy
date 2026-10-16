@@ -93,6 +93,10 @@ def counters() -> Dict[str, Optional[dict]]:
     v0.45.435 起还带「缺」（`n_unpriced` / `n_quote_missing` / `n_beta_missing` / `nav_missing` / `gaps`）与
     `hedge_undecided`（对冲决定做不出来的原因）——09-15~25 连续 7 天 unknown 曾零告警。
 
+    `history_fill`（v0.45.473）：`data_pipeline.MultiSourceFetcher` 唯一出口的历史字段回落——按出口
+    （哪个源胜出 / 过期缓存 / CBOE 盘中陈旧价 / 全源失败）数缺了几项、回落补上几项，外加最近一次仍缺的标的。
+    此前三个出口直接把 None 交出去，连「今天走了哪个出口」都只在 warning 日志里。
+
     `cboe_raw`（v0.45.333）：卖权行权价账本取原始链（`fetch_cboe_raw_contracts`）各出口的次数——
     ok / snapshot_mode / stale_vintage / payload_unavailable / vintage_mismatch / vintage_unverifiable /
     price_unavailable / no_parseable_contracts 分开数，不折叠。此前这组计数只有 cboe_options 自己和
@@ -103,7 +107,7 @@ def counters() -> Dict[str, Optional[dict]]:
                                       "gex_view": None, "cboe_raw": None,
                                       "options_snapshot": None, "hv_gap": None,
                                       "portfolio_greeks": None, "paper_portfolio": None,
-                                      "ledger_io": None}
+                                      "ledger_io": None, "history_fill": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -151,6 +155,13 @@ def counters() -> Dict[str, Optional[dict]]:
         out["ledger_io"] = ledger_io.failures()
     except Exception as e:  # noqa: BLE001
         _log.debug("ledger_io failures 不可得: %s", e)
+    try:
+        import data_pipeline
+        # v0.45.473：取数出口的 momentum_5d / volume_ratio 回落（各出口缺几项、补上几项、仍缺哪些标的）；
+        # 本进程没解析过任何标的 ⇒ None。still_missing 非空 ⇒ alert_manager P2
+        out["history_fill"] = data_pipeline.history_fill_stats()
+    except Exception as e:  # noqa: BLE001
+        _log.debug("history_fill stats 不可得: %s", e)
     return out
 
 
@@ -317,7 +328,10 @@ def summary_line(snap: dict) -> str:
         + (f"/现价不可得{os_['stock_price_unavailable']}次" if os_.get("stock_price_unavailable") else "")
         + (f"/非有限数记None {os_['nan_sanitized']}个" if os_.get("nan_sanitized") else "")
         # v0.45.471：当日 ATM IV 无效且无缓存 ⇒ iv_current 记 None（不再兜底成 25.0）
-        + (f"/IV不可得{os_['iv_unavailable']}次" if os_.get("iv_unavailable") else ""))
+        + (f"/IV不可得{os_['iv_unavailable']}次" if os_.get("iv_unavailable") else "")
+        # v0.45.482：yfinance 链里 Yahoo 求解失败的 IV（置 0 的合约数 / ATM 窗口被失败值主导的次数）
+        + (f"/Yahoo失败IV{os_['iv_placeholder_contracts']}个" if os_.get("iv_placeholder_contracts") else "")
+        + (f"/失败IV主导{os_['iv_placeholder_majority']}次" if os_.get("iv_placeholder_majority") else ""))
     pg = c.get("portfolio_greeks")
     pg_s = ""
     if pg and pg.get("error"):
@@ -344,5 +358,10 @@ def summary_line(snap: dict) -> str:
     if lf and lf.get("n"):                                              # v0.45.452
         where = ",".join(dict.fromkeys(Path(str(i.get("path"))).name for i in lf.get("items") or []))
         pg_s += f" | 账本读写失败 {lf['n']} 次({where})"
+    hf = c.get("history_fill")
+    sm = (hf or {}).get("still_missing") or {}
+    if sm.get("momentum") or sm.get("volume"):                          # v0.45.473
+        pg_s += (f" | 回落后仍缺 动量 {len(sm.get('momentum') or [])} 只"
+                 f"/量比 {len(sm.get('volume') or [])} 只")
     return ("耗时 " + " | ".join(parts) +
             f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s + pg_s)

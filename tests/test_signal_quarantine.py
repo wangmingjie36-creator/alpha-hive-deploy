@@ -179,7 +179,8 @@ def test_backfill_does_not_resurrect(db, tmp_path, monkeypatch):
 class TestFakeSnapshotQuarantineV0_45_472:
     """v0.45.472：期权快照现价 / 整条链不是当天观测的 (日期, 标的)，以及 CBOE 时代退到 yfinance 备用链的 GEX。
 
-    变红的变异：删掉任一条 v0.45.472 条目；或把 yfinance 那批的 signals 扩成五类（误伤当天真实的 IV / P/C / OI）。
+    变红的变异：删掉下面点名的几条 v0.45.472 条目（只抽查 3 条，不是全部 49 条——v0.45.479 更正原写法「任一条」）；
+    或把 yfinance 那批的 signals 扩成五类（误伤当天真实的 IV / P/C / OI）。
     """
 
     def test_sample_chain_day_is_quarantined_whole(self):
@@ -199,3 +200,175 @@ class TestFakeSnapshotQuarantineV0_45_472:
         """财报日盘后价是真实价（另一类、已修），不是假现价，不隔离。"""
         assert not sa.is_quarantined("2026-08-26", "CRM", "options.gamma_exposure")
         assert not sa.is_quarantined("2026-07-29", "MSFT", "options.iv_current")
+
+
+def test_fingerprinted_yfinance_days_quarantine_gex_only():
+    """v0.45.475：按 IV 小数位指纹认出的 yfinance 备用链日子（09-01 BILI 在 quote_set 之前；10-05 BILI 的 error 被回填抹掉）。
+
+    变红的变异：删掉这两条；或把 signals 扩到 IV / P/C。
+    """
+    for d in ("2026-09-01", "2026-10-05"):
+        assert sa.is_quarantined(d, "BILI", "options.gamma_exposure")
+        assert not sa.is_quarantined(d, "BILI", "options.iv_current")
+
+
+def test_iv_constant_25_rows_quarantined_only_for_iv_current():
+    """v0.45.478（用户批准）：iv_current 兜底常数 25.0 剩下的 6 行——只挡 `options.iv_current`。
+
+    变红的变异：删掉任一条目；或把 VKTX 09-15 ~ 17 的 signals 扩到 iv_rank（那时 hv_proxy，不读 current_iv）；
+    或去掉 tickers（会把同日其他标的的真实 IV 一起挡掉）。
+    v0.45.481：CRCL 06-09、BILI / META 06-15 的 iv_rank 已核实由 25.0 算出、另条隔离——本条只对 VKTX 断言 iv_rank 不挡，
+    另三对的 iv_rank 归 `test_iv_rank_from_constant_25_quarantined` 管。
+    """
+    pairs = [("2026-06-09", "CRCL"), ("2026-06-15", "BILI"), ("2026-06-15", "META"),
+             ("2026-09-15", "VKTX"), ("2026-09-16", "VKTX"), ("2026-09-17", "VKTX")]
+    for d, t in pairs:
+        assert sa.is_quarantined(d, t, "options.iv_current"), (d, t)
+        if t == "VKTX":
+            assert not sa.is_quarantined(d, t, "options.iv_rank"), (d, t)
+    assert not sa.is_quarantined("2026-09-15", "NVDA", "options.iv_current")
+    # v0.45.479：原对照用的 06-09 NVDA 其实是坏的（归档那次运行现价 63、OI 251、P/C 0.0，已整份隔离），换成归档运行核过是真值的一对
+    assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_current")
+
+
+def test_v0_45_476_false_positives_stay_unquarantined():
+    """v0.45.476 撤回的 6 对误判：CRWD 四个周日快照（对照的是拆股调整后的收盘，比值恒 ≈ 4）；
+    VKTX 08-12（34.5）与 MU 08-26（952.0）不在各自行权价网格中点上，不可能是行权价中位数。
+
+    变红的变异：把它们加回任何隔离条目。
+    """
+    for d, t in (("2026-04-26", "CRWD"), ("2026-05-03", "CRWD"), ("2026-05-10", "CRWD"), ("2026-05-17", "CRWD"),
+                 ("2026-08-12", "VKTX"), ("2026-08-26", "MU")):
+        for sig in ("options.iv_current", "options.gamma_exposure", "options.put_call_ratio"):
+            assert not sa.is_quarantined(d, t, sig), (d, t, sig)
+    assert sa.is_quarantined("2026-04-26", "AAPL", "options.gamma_exposure"), "同日其余标的照样隔离"
+
+
+
+class TestSwarmBasedReclassificationV0_45_479:
+    """v0.45.479：按 swarm_results（归档的真实来源）重判后的隔离面。
+
+    变红的变异：删掉任一 v0.45.479 条目；或把 06-23 TSLA / 06-26 BILI 加回去；或把 06-23 NVDA 整份隔离。
+    """
+
+    def test_archived_run_fakes_are_quarantined(self):
+        for d, t in (("2026-06-09", "VKTX"), ("2026-06-09", "NVDA"), ("2026-06-15", "BILI"),
+                     ("2026-06-17", "META"), ("2026-06-29", "BILI"), ("2026-03-31", "AMZN")):
+            assert sa.is_quarantined(d, t, "options.put_call_ratio"), (d, t)
+
+    def test_missed_yfinance_day_quarantines_gex_only(self):
+        assert sa.is_quarantined("2026-08-31", "TMO", "options.gamma_exposure")
+        assert not sa.is_quarantined("2026-08-31", "TMO", "options.put_call_ratio")
+
+    def test_archived_run_real_data_is_released(self):
+        for d, t in (("2026-06-23", "TSLA"), ("2026-06-26", "BILI")):
+            assert not sa.is_quarantined(d, t, "options.gamma_exposure"), (d, t)
+        assert not sa.is_quarantined("2026-06-23", "NVDA", "options.total_oi")
+        assert sa.is_quarantined("2026-06-23", "NVDA", "options.iv_current"), "IV 12.5 是垃圾常数，只挡这一项"
+
+
+def test_iv_rank_from_constant_25_quarantined():
+    """v0.45.481（用户批准）：08-14 前 iv_current == 25.0 的 15 对，iv_rank / iv_percentile 是常数的函数——两类都挡。
+
+    变红的变异：删任一日期条目；signals 少了 iv_percentile；去掉 tickers（同日真实标的会被一起挡掉）；
+    把 VKTX 09-15 ~ 17（hv_proxy 时代，rank 不读 current_iv）也加进来。
+    """
+    pairs = [("2026-04-26", "AAPL"), ("2026-04-26", "HPE"), ("2026-04-26", "DELL"), ("2026-05-03", "AAPL"),
+             ("2026-05-10", "UPST"), ("2026-05-17", "ICLN"), ("2026-06-09", "CRCL"),
+             ("2026-06-15", "QCOM"), ("2026-06-15", "TSLA"), ("2026-06-15", "NVDA"), ("2026-06-15", "MSFT"),
+             ("2026-06-15", "BILI"), ("2026-06-15", "AMZN"), ("2026-06-15", "META"), ("2026-06-15", "CRCL")]
+    for d, t in pairs:
+        for s in ("options.iv_rank", "options.iv_percentile"):
+            assert sa.is_quarantined(d, t, s), (d, t, s)
+    for d in ("2026-09-15", "2026-09-16", "2026-09-17"):
+        assert not sa.is_quarantined(d, "VKTX", "options.iv_rank"), d
+    assert not sa.is_quarantined("2026-04-26", "NVDA", "options.iv_rank")
+    assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_rank")
+
+
+def test_yahoo_placeholder_iv_rows_quarantined():
+    """v0.45.486（用户批准）：iv_current = 12.5 / 6.25（Yahoo 求解失败阶梯值的中位数）。08-14 前的 12 对连同由它算出的
+    iv_rank / iv_percentile；TMO 08-31 只挡 iv_current（rank 走 hv_proxy，不读 current_iv）。
+
+    变红的变异：删任一日期条目；08-14 前的条目少了 iv_rank 或 iv_percentile；TMO 也挡 iv_rank；去掉 tickers。
+    """
+    pre = [("2026-03-11", "NVDA"), ("2026-03-12", "NVDA"), ("2026-06-15", "RKLB"),
+           ("2026-06-17", "BILI"), ("2026-06-17", "CRCL"), ("2026-06-17", "RKLB"), ("2026-06-17", "VKTX"),
+           ("2026-06-23", "CRCL"), ("2026-06-23", "META"), ("2026-06-23", "QCOM"), ("2026-06-23", "RKLB"),
+           ("2026-06-23", "VKTX")]
+    for d, t in pre:
+        for s in ("options.iv_current", "options.iv_rank", "options.iv_percentile"):
+            assert sa.is_quarantined(d, t, s), (d, t, s)
+    assert sa.is_quarantined("2026-08-31", "TMO", "options.iv_current")
+    assert not sa.is_quarantined("2026-08-31", "TMO", "options.iv_rank")
+    # 同日真实的一对（v0.45.479 按归档运行核过）
+    assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_current")
+    assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_rank")
+
+
+def test_bili_1012_replay_placeholder_iv_quarantined():
+    """v0.45.499（用户批准「删掉假 iv」）：10-12 重放写入的 BILI iv_current = 6.25（Yahoo 失败阶梯值，yfinance 链）。
+    形状同 486 的 TMO 08-31：只挡 iv_current，rank 走 hv_proxy 不挡；P/C 不在批准范围。
+
+    变红的变异：删该条目；去掉 tickers（同日 29 只真观测被连坐）；signals 加上 iv_rank / put_call_ratio。
+    """
+    assert sa.is_quarantined("2026-10-12", "BILI", "options.iv_current")
+    assert not sa.is_quarantined("2026-10-12", "BILI", "options.iv_rank")
+    assert not sa.is_quarantined("2026-10-12", "BILI", "options.put_call_ratio")
+    assert not sa.is_quarantined("2026-10-12", "NVDA", "options.iv_current")
+
+
+def test_rank_rows_from_placeholder_iv_whose_iv_current_was_purged_earlier():
+    """v0.45.490（486 二次检查）：486 只从归档里现存的 iv_current 找 12.5 / 6.25，漏了 iv_current 早被 472 / 479 清掉的
+    7 对——它们 08-14 前的 iv_rank / iv_percentile 同样由失败值算出。
+
+    变红的变异：删任一日期条目；少了 iv_percentile；去掉 tickers。
+    """
+    pairs = [("2026-06-09", "RKLB"), ("2026-06-17", "MSFT"), ("2026-06-17", "TSLA"), ("2026-06-17", "AMZN"),
+             ("2026-06-23", "NVDA"), ("2026-06-23", "AMZN"), ("2026-06-29", "AMZN")]
+    for d, t in pairs:
+        for s in ("options.iv_rank", "options.iv_percentile"):
+            assert sa.is_quarantined(d, t, s), (d, t, s)
+    assert not sa.is_quarantined("2026-06-23", "TSLA", "options.iv_rank")
+    # v0.45.494：原来这里还有 06-29 NVDA 作对照——它的 iv_current 已被别的条目隔离，按 494 的镜像规则 rank 也该挡，
+    # 不再是「真实的一对」，删掉（只留 479 按归档运行核过的 06-23 TSLA）。
+
+
+class TestRankMirrorBefore0814:
+    """v0.45.494（用户批准）：08-14 前 iv_rank / iv_percentile 由 current_iv 算出 ⇒ 凡隔离了 iv_current 的 (日期, 标的)，
+    这两类一并隔离（规则派生，见 `_rank_mirror_entries`）。08-14 起 rank 不读 current_iv，不跟。"""
+
+    @pytest.mark.parametrize("d,t", [("2026-07-08", "NVDA"),    # v0.45.238 一族（无版本号的「同上机制」条目）
+                                     ("2026-04-09", "CRCL"),    # v0.45.472 样本链
+                                     ("2026-06-10", "NVDA")])   # v0.45.238 会话错位
+    def test_pre_cutoff_rank_follows_iv_current(self, d, t):
+        """变红的变异：删掉 `QUARANTINE.extend(...)`；或镜像只挡 iv_rank 不挡 iv_percentile。"""
+        assert sa.is_quarantined(d, t, "options.iv_current")
+        assert sa.is_quarantined(d, t, "options.iv_rank")
+        assert sa.is_quarantined(d, t, "options.iv_percentile")
+
+    def test_post_cutoff_rank_not_mirrored(self):
+        """08-24（v0.45.16 整日条目）与 VKTX 09-15（hv_proxy）：rank 不读 current_iv，不跟着隔离。
+
+        变红的变异：截止日往后挪（如 09-30）。
+        """
+        assert sa.is_quarantined("2026-08-24", "NVDA", "options.iv_current")
+        assert not sa.is_quarantined("2026-08-24", "NVDA", "options.iv_rank")
+        assert not sa.is_quarantined("2026-09-15", "VKTX", "options.iv_rank")
+
+    def test_tickers_stay_scoped(self):
+        """镜像沿用源条目的 tickers：同日没被隔离 iv_current 的标的，rank 不受牵连。
+
+        变红的变异：镜像丢掉 tickers（变成整日）。
+        """
+        assert not sa.is_quarantined("2026-04-09", "NVDA", "options.iv_current")
+        assert not sa.is_quarantined("2026-04-09", "NVDA", "options.iv_rank")
+
+    def test_mirrors_are_documented_and_tagged(self):
+        """每条镜像都带标记（--only-tag 清库靠它）、写明源版本与证据。"""
+        mirrors = [q for q in sa.QUARANTINE if "_mirror_of" in q]
+        assert len(mirrors) >= 40
+        for q in mirrors:
+            assert q["reason"].startswith(sa._RANK_MIRROR_TAG) and "镜像" in q["reason"]
+            assert "CHANGELOG.md#v0.45.494" in q["evidence"]
+            assert q["date"] < sa._RANK_FROM_CURRENT_IV_UNTIL

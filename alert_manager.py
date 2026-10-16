@@ -301,11 +301,111 @@ class AlertAnalyzer:
         self._check_portfolio_greeks_prices(status)
         self._check_paper_portfolio_run(status)
         self._check_ledger_io_failures(status)
+        self._check_history_fill(status)
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
         self._check_news_sources(status)
 
+        # 9. 检测 P2: 云端快照没刷新上 / 落后（v0.45.466）
+        self._check_cloud_snapshots(status)
+
+        # 10. 检测 P2: T+N 回填队列没在排空（v0.45.493）
+        self._check_outcomes_backlog(status)
+
+        # 11. 检测 P2: 本轮有票判不了财报日 / 观测字段接线断了（v0.45.500）
+        self._check_earnings_dates(status)
+
         return self.alerts
+
+    def _check_outcomes_backlog(self, status: Dict) -> None:
+        """T+N 实际价格回填队列（v0.45.493，`scan_timing.extra.outcomes_backlog`，写入者 `alpha_hive_daily_report.main`）。
+
+        0.45.493 之前回填每轮按文件名只取 50 份，字母序靠后的 7 只标的 09 月起一份都没回填过，日志每轮却是
+        `updated=50 errors=0`——「每轮都成功」不等于「队列在排空」。判据是最老一格的逾期天数：排空时停在 0~2，
+        饿死 / 出网长期失败时只增不减。超过 `max_overdue_days` ⇒ P2（不影响当天评分；影响 self_analyst 月度自诊断、
+        risk_engine 历史 VaR 等读 actual_prices 的诊断）。
+        """
+        if not self._swarm_scan_actually_ran(status):
+            return
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        ob = (st.get("extra") or {}).get("outcomes_backlog")
+        if not isinstance(ob, dict) or not ob.get("available"):
+            self.checks_skipped.append("回填队列检查（scan_timing 无可用 outcomes_backlog）")
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】T+N 回填队列未观测——实际价格有没有在补上未知",
+                {"原因": (ob or {}).get("reason") if isinstance(ob, dict) else "scan_timing.extra 无 outcomes_backlog",
+                 "影响": "不是「检查了没积压」，是「没检查」"},
+                ["outcomes_backlog", "observability"]
+            ))
+            return
+        late, limit = ob.get("oldest_overdue_days"), ob.get("max_overdue_days")
+        if not isinstance(late, int) or not isinstance(limit, int):
+            self.checks_skipped.append("回填队列逾期检查（outcomes_backlog 缺 oldest_overdue_days / max_overdue_days）")
+            return
+        if late > limit:
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】T+N 回填积压：最老一格已逾期 {late} 天（允许 {limit}）——队列没在排空",
+                {"最老一格": ob.get("oldest_item"),
+                 "待回填": f"{ob.get('pending_files')} 份 / {ob.get('pending_offsets')} 格",
+                 "影响": "report_snapshots 的 actual_prices 缺口持续：self_analyst 月度自诊断（要求 t7 非空）、"
+                         "risk_engine 历史 VaR 等会系统性漏掉这些样本",
+                 "建议": "看 alpha_hive.log 里「OutcomesFetcher 完成」的 network / deferred / unresolved：deferred 一直有 ⇒ "
+                         "出网配额不够或连续限流；unresolved 一直有 ⇒ 本地快照与 yfinance 都取不到价（标的停牌 / 代码写法）"},
+                ["outcomes_backlog", "data_quality"]
+            ))
+
+    def _check_earnings_dates(self, status: Dict) -> None:
+        """本轮财报日能不能判（v0.45.500，`scan_timing.extra.earnings_dates`，写入者 `alpha_hive_daily_report.main`，
+        统计 `earnings_calendar.summarize`）。
+
+        判不了的票：卖权行权价账本记 `unknown`（整单位排出检验）、跨式不出信号。此前唯一的痕迹是一条 warning，
+        而那条 yfinance 兜底在需要它的日子（09-24 / 09-25 / 10-12）一次都没被调到——没有任何东西会红。
+        `legacy_source` > 0 ⇒ ChronosBee 没写观测字段（接线断了），读者退回旧格式催化剂、当天财报又会被丢。
+        回放 09-15 ~ 10-12：正常日 unresolved = 0，只在 09-24 / 09-25（30 只）与 09-30（MU 财报当天，旧格式）非零。
+        """
+        if not self._swarm_scan_actually_ran(status):
+            return
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        ed = (st.get("extra") or {}).get("earnings_dates")
+        if not isinstance(ed, dict) or not ed.get("available"):
+            self.checks_skipped.append("财报日观测检查（scan_timing 无可用 earnings_dates）")
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】财报日观测未统计——本轮各票财报日能不能判未知",
+                {"原因": (ed or {}).get("reason") if isinstance(ed, dict) else "scan_timing.extra 无 earnings_dates",
+                 "影响": "不是「检查了都能判」，是「没检查」"},
+                ["earnings_dates", "observability"]
+            ))
+            return
+        n_bad, limit = ed.get("unresolved"), ed.get("max_unresolved")
+        legacy = ed.get("legacy_source")
+        if not isinstance(n_bad, int) or not isinstance(limit, int):
+            self.checks_skipped.append("财报日观测检查（earnings_dates 缺 unresolved / max_unresolved）")
+            return
+        if n_bad > limit:
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】{n_bad}/{ed.get('n')} 只票本轮判不了财报日（允许 {limit}）",
+                {"标的": ", ".join(ed.get("unresolved_tickers") or [])[:300],
+                 "影响": "卖权行权价账本这些票记 unknown（整单位不进检验）；跨式纸面腿不出信号",
+                 "建议": "看 alpha_hive.log 里 ChronosBeeHorizon 的 calendar unavailable：多为 yfinance 限流 / 断网，"
+                         "全体判不了时期权取数通常也挂了；个别票则查它的 yfinance calendar 是否没有 Earnings Date"},
+                ["earnings_dates", "data_quality"]
+            ))
+        if isinstance(legacy, int) and legacy > 0:
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】{legacy} 只票的财报日读的是旧格式催化剂——ChronosBee 没写 earnings_calendar 观测",
+                {"影响": "旧格式按 datetime.now() 过滤过，财报当天会被丢成「判不了」",
+                 "建议": "查 swarm_agents/chronos_bee.py 的 details[earnings_calendar] 是否还在写"},
+                ["earnings_dates", "observability"]
+            ))
 
     @staticmethod
     def _swarm_scan_actually_ran(status: Dict) -> bool:
@@ -591,6 +691,54 @@ class AlertAnalyzer:
                 ["data_quality", "news"]
             ))
 
+    def _check_cloud_snapshots(self, status: Dict) -> None:
+        """云端快照新鲜度（v0.45.466，`scan_timing.extra.cloud_snapshots`，写入者 `alpha_hive_daily_report.main`）。
+
+        补跑过去某天时期权 / IV / 官方收盘取自 `origin/cloud-snapshots`。阶段 8 后生产克隆里没人刷新它，
+        routine 自己也三次静默停过——两种情况此前都要等到补跑那天才显形，且那时补跑已降级成用当天数据。
+        每天看一眼：刷新失败、或落后超过 `max_lag` 个交易日 ⇒ P2（不影响当天扫描，只影响补跑可信度）。
+        """
+        if not self._swarm_scan_actually_ran(status):
+            return
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        cs = (st.get("extra") or {}).get("cloud_snapshots")
+        if not isinstance(cs, dict) or not cs.get("available"):
+            self.checks_skipped.append("云端快照新鲜度检查（scan_timing 无可用 cloud_snapshots）")
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】云端快照新鲜度未观测——补跑时能不能用上快照未知",
+                {"原因": (cs or {}).get("reason") if isinstance(cs, dict) else "scan_timing.extra 无 cloud_snapshots",
+                 "影响": "不是「检查了没落后」，是「没检查」"},
+                ["cloud_snapshots", "observability"]
+            ))
+            return
+        newest, lag, max_lag = cs.get("newest_date"), cs.get("lag"), cs.get("max_lag")
+        if not cs.get("refresh_ok"):
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】cloud-snapshots 刷新失败——本地最新只到 {newest}",
+                {"错误": cs.get("refresh_error"),
+                 "影响": "此后补跑读到的是本地旧 ref：缺的日子会被当成「没快照」、期权 / IV 改用当天数据",
+                 "建议": "在生产克隆里 git fetch origin cloud-snapshots 看报错（网络 / 凭据 / iCloud 重名 ref）"},
+                ["cloud_snapshots", "data_quality"]
+            ))
+            return                          # 本地 ref 没刷新上，落后量量的是本地，不另报
+        if not isinstance(lag, int) or not isinstance(max_lag, int):
+            self.checks_skipped.append("云端快照落后量检查（cloud_snapshots 缺 lag / max_lag）")
+            return
+        if lag > max_lag:
+            missing = cs.get("missing_sessions") or []
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】云端快照落后 {lag} 个交易日（最新 {newest}，允许 {max_lag}）——routine 可能停了",
+                {"缺的交易日": ", ".join(missing[:10]) + (" …" if len(missing) > 10 else ""),
+                 "影响": "这些日子若要补跑，期权 / IV / 官方收盘拿不到快照，只能用当天数据",
+                 "建议": "看 claude.ai routine `alpha-hive-cloud-snapshot` 的最近运行与回复里的代码版本"},
+                ["cloud_snapshots", "data_quality"]
+            ))
+
     def _check_paper_portfolio_run(self, status: Dict) -> None:
         """纸面组合这一轮跑没跑完（v0.45.448；`paper_portfolio.run_stats` 经 scan_timing 进来）。
 
@@ -645,6 +793,49 @@ class AlertAnalyzer:
                         "的上游（不要在写入端把它改成 null 了事）；LedgerLockTimeout ⇒ 查是否有别的写者卡住",
             },
             ["ledger_io", "data_quality"]
+        ))
+
+    def _check_history_fill(self, status: Dict) -> None:
+        """momentum_5d / volume_ratio 过了取数出口的回落仍缺（v0.45.473；`data_pipeline.history_fill_stats`
+        经 scan_timing 进来）。
+
+        这两项是 BuzzBee 动量 / 量能通道、ScoutBee 背离、BearBee、RivalBee ML 特征的输入，也是
+        `signal_archive` 的 `price.momentum_5d` / `price.volume_ratio`（维度 IC 协议 H1 输入）。缺了下游
+        各自按中性 / 不可用处理、不报错——所以在这里红。`still_missing` 非空 ⇒ P2；计数缺失 ⇒ checks_skipped
+        （`--date` 补跑走历史取数、不经 fetcher，本就没有这项）。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        hf = (st.get("counters") or {}).get("history_fill")
+        if not isinstance(hf, dict):
+            self.checks_skipped.append("历史字段回落检查（scan_timing 无 history_fill 计数）")
+            return
+        missing = hf.get("still_missing") or {}
+        mom, vol = list(missing.get("momentum") or []), list(missing.get("volume") or [])
+        if not (mom or vol):
+            return
+
+        def _names(ts):
+            return "、".join(ts[:10]) + (f" 等 {len(ts)} 只" if len(ts) > 10 else "")
+        paths = "；".join(
+            f"{p}：{v.get('n', 0)} 次"
+            + "".join(f"，{f} 缺 {v[f]['needed']} 补上 {v[f]['filled']}"
+                      + (f" 出错 {v[f]['errors']}" if v[f].get("errors") else "")
+                      for f in ("momentum", "volume")
+                      if isinstance(v.get(f), dict) and v[f].get("needed"))
+            for p, v in sorted((hf.get("by_path") or {}).items()))
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】历史字段回落后仍缺：momentum_5d {len(mom)} 只、volume_ratio {len(vol)} 只",
+            {
+                "momentum_5d": _names(mom) if mom else "无",
+                "volume_ratio": _names(vol) if vol else "无",
+                "各出口": paths or "无",
+                "影响": "这些标的的动量 / 量能通道按中性处理，signal_archive 当天缺 price.momentum_5d / price.volume_ratio 行",
+                "建议": "出错 > 0 ⇒ 看 alpha_hive.log「出口回落出错」；momentum 缺 ⇒ 查自攒价格索引覆盖"
+                        "（price_history.coverage_report）；volume 缺 ⇒ 查 Twelve Data key / 配额",
+            },
+            ["history_fill", "data_quality"]
         ))
 
     def get_critical_alerts(self) -> List[Alert]:

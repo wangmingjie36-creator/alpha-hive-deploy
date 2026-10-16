@@ -641,6 +641,12 @@ async def alphahive_get_options_snapshot(params: TickerInput) -> str:
             ].to_dict("records")
         ]
 
+        # v0.45.482：Yahoo 求解失败的 IV（减半阶梯 / 1e-05）不是观测，展示成 None 而不是 12.5% / 6.25% 之类
+        from yahoo_iv import is_placeholder_iv
+        for _row in top_c + top_p:
+            if is_placeholder_iv(_row.get("impliedVolatility")):
+                _row["impliedVolatility"] = None
+
         return _ok({
             "ticker":             params.ticker,
             "nearest_expiry":     exp,

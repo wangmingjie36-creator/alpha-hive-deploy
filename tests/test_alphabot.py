@@ -177,7 +177,7 @@ class TestReadOnlyLedger:
         for u in ("/api/meta", "/api/live/NVDA", "/api/live/NVDA?force=1", "/api/overview", f"/api/overview?date={AS_OF}",
                   "/api/ledger/dates", f"/api/ledger/rows?date={AS_OF}&full=1", f"/api/ledger/ticker/JNJ?date={AS_OF}",
                   "/api/assess", "/api/history/NVDA", "/api/bars/NVDA", "/api/method", "/api/intraday/NVDA",
-                  "/api/intraday-dates/NVDA", "/api/settings"):
+                  "/api/intraday-dates/NVDA", "/api/settings", "/api/premium/NVDA", "/api/premium/NVDA?side=put&force=1"):
             r = c.get(u)
             assert r.status_code == 200, (u, r.text[:200])
         assert c.put("/api/settings", json={"favorites": ["SPY"]}, headers={"X-AlphaBot": "1"}).status_code == 200
@@ -279,6 +279,8 @@ class TestLocalOnly:
     def test_bad_inputs_are_400(self):
         c = _client(_demo_service())
         assert c.get("/api/live/bad$").status_code == 400
+        assert c.get("/api/premium/bad$").status_code == 400
+        assert c.get("/api/premium/NVDA?dte_min=x").status_code == 400
         assert c.get("/api/ledger/rows?date=2026-13-01").status_code == 400
         too_many = [f"T{i}" for i in range(MAX_FOCUS + 1)]
         r = c.put("/api/settings", json={"focus": too_many}, headers={"X-AlphaBot": "1"})
@@ -443,7 +445,7 @@ class TestHelpPage:
         assert not bad, f"指向不存在的帮助章节：{bad}"
 
     def test_ticker_pages_all_have_a_help_target(self):
-        """五个子页各有去处：新增子页忘了登记 TAB_HELP，会退回「水平」说明而没人发现。"""
+        """六个子页各有去处：新增子页忘了登记 TAB_HELP，会退回「水平」说明而没人发现。"""
         txt = (STATIC / "pages" / "ticker.js").read_text(encoding="utf-8")
         tabs = re.search(r"const TABS = \[(.*?)\];", txt, re.S).group(1)
         keys = set(re.findall(r'\["([a-z]+)",', tabs))
