@@ -524,13 +524,13 @@ QueenDistiller 职责：
 
 ### Slack 推送规则
 - **富文本日报**（每日扫描结果）：由 **Claude Code 内置 Slack MCP 工具**（`slack_send_message`）直接推送到 **#alpha-hive 频道**（Channel ID: `C0AGUUWJXJS`），无需维护 user token 文件。
-- **扫描确认通知**（"是否启用 LLM？"）：用 **Alpha Hive Bot（Bot Token, xoxb-）** 发 DM 给用户。
+- **扫描确认通知**（"是否启用 LLM？"）：**v0.45.510 起已停用**——编排器不再调用 `pre_scan_notify.py`、永远 `--no-llm`（`tests/test_orchestrator_never_enables_llm.py` 钉住）。模块与 Slack 发送白名单登记仍在，只是没有调用方；要跑 LLM 扫描只能由人在终端显式 `--use-llm`，且仍须先问费用。
 - 分工：Bot 负责交互式通知（DM），Slack MCP 负责频道推送（富文本日报）。
 - Bot Token 已配置（`~/.alpha_hive_slack_bot_token`），供 Bot DM 使用。
 
 ### Slack 通知精简规则（减少噪音）
 - Bot **只发两类消息**：
-  1. 扫描前 LLM 模式确认（`pre_scan_notify.py`）
+  1. ~~扫描前 LLM 模式确认（`pre_scan_notify.py`）~~——v0.45.510 起已停用（无调用方，白名单登记保留）
   2. 富文本日报推送成功（`push_report_to_slack.py`）
 - **禁止发送**以下类型的 Slack DM：扫描开始/完成通知、SLO 违规告警、权重自适应更新、数据质量降级预警、逐标的高分机会/低分预警、扫描失败通知。
 - 这些信息仅写入本地日志文件，不打扰用户。

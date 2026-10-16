@@ -5,7 +5,45 @@
 
 ---
 
-## [0.45.510] — 2026-10-16 — 占位（进行中：编排器去掉扫描前 Slack 确认——每天 launchd 自己跑、Webhook 早已 404，空等 10 分钟）
+## [0.45.510] — 2026-10-16 — Removed：编排器去掉扫描前 Slack 确认（每天 launchd 自己跑、Webhook 早已 404，空等 10 分钟）；「编排器永远 --no-llm」钉成测试
+
+### 为什么去掉
+- 每天 14:00 launchd 自己启动编排器，Step 2 先调 `pre_scan_notify.py` 发 Slack 确认并等 10 分钟；Slack Webhook 早已 404、没人在回复，
+  结局恒为「10 分钟未收到确认 ⇒ `--no-llm`」（09-23、10-15 编排器日志可见）。这一步只有成本没有收益。
+
+### ⚠️ 更正我自己此前的一个错误结论
+- 查 09-23（日报进程被 3600s 超时杀掉、后处理钩子全未运行）时，我先说「Slack 那 10 分钟等待挤占了 Step 2 预算」。**不对。**
+  `STEP2_START` 与 `run_step --timeout $STEP2_TIMEOUT` 都在 Slack 等待**之后**才开始，预算从来不含这段等待：
+  09-23 的扫描 14:10:44 开始、15:10:43 被杀，整整 3600s 全是扫描自己跑的，只跑到 21/30（同日 CBOE 全部返回 09-22 陈旧数据、
+  32/32 落到 yfinance，每只约 170s，高于预算按 120s/只的假设）。
+- 所以**去掉确认不会让 Step 2 更不容易超时**，它只是让扫描提前 10 分钟开始（14:10 → 14:00）。09-23 那类超时要另外处理
+  （预算 / CBOE 陈旧时的降级节拍），本版不动。
+
+### Removed / Changed
+- `scripts/alpha-hive-orchestrator.sh`：Step 2 前的预通知整段删掉（`pre_scan_notify` 调用、`NOTIFY_RC` 分支、`PRE_SCAN_SCRIPT`、
+  「今日 LLM 已跑过」的 `LLM_DONE_FILE` 防重复标记及其 Step 2 之后的 `touch`、`--use-llm` 时 STEP2_TIMEOUT +900 的分支）。
+  `LLM_FLAG="--no-llm"` 保留为唯一一处纯字面赋值（`test_scan_price_gate` 抽出的脚本片段依赖这个变量名）。
+  **这不是「默认关闭 LLM」，是编排器里不再有任何路径能打开它**——要跑 LLM 扫描只能由人在终端显式 `--use-llm`，且仍须先问费用
+  （用户级约定「花钱前必须先问」，对定时任务同样生效）。
+- `ORCHESTRATOR_TIMEOUT=90000`（25h）数值**未动**：它当初为兼容 pre_scan 最长等 24h 而设，现在理由没了，但要不要收紧须把 Step 2 输入闸
+  最多 3 次重跑 + 每次等 600s（v0.45.504）一起算进去，是单独的决定；只把旁边的注释改成整行说明。
+- `CLAUDE.md`「Slack 推送规则」两处标注 v0.45.510 起已停用（扫描确认通知；「Bot 只发两类消息」第 1 类）。
+- **没动** `pre_scan_notify.py` 本身：`test_slack_send_whitelist` 把它登记为合法发送方、`test_slack_notifier` 还测它的 webhook 兜底。
+  它现在没有调用方；是否删除（连同白名单登记与那两处测试）留给后续决定。
+
+### Added
+- `tests/test_orchestrator_never_enables_llm.py`（3 条，读仓库那份编排器，CI 上也跑）：`LLM_FLAG` 只许一处纯字面 `--no-llm`；
+  代码（注释除外）不再出现 `--use-llm` / `pre_scan_notify` / `PRE_SCAN_SCRIPT` / `NOTIFY_RC` / `LLM_DONE_FILE`；Step 2 调用仍传 `$LLM_FLAG`
+  （否则旗标成了没人读的变量）；含有牙自证（把旧确认链放回去 / 第二处赋值 / 改成非字面 / 代码里出现 `--use-llm` 都被抓到，注释里提这些名字不算）。
+- **真跑变异**（`PYTHONDONTWRITEBYTECODE=1`，Python 驱动、锚点唯一断言、核 passed+failed = collected 3、还原后 sha256 一致并复跑 3/3 绿）：
+  M0 改动前的真实脚本（`cfa3e004`）⇒ 2 红；M1 旧确认链放回 ⇒ 2；M2 另处再赋值 ⇒ 2；M3 Step 2 调用不传 `$LLM_FLAG` ⇒ 1；M4 `LLM_FLAG` 改成要展开的写法 ⇒ 2。
+- 首跑守卫即抓到我自己的一处：`ORCHESTRATOR_TIMEOUT=…  # …pre_scan_notify…` 行尾注释里带了符号名（守卫只忽略整行注释，不去猜 bash 行尾注释的边界）⇒ 说明挪成整行注释。
+
+### 生效时间
+- 合入 origin/main 后，下一次 14:00 扫描前的自动部署（阶段 3）会把新编排器换进 `~/.claude/scripts/`，但**那一轮仍跑旧编排器**（运行中的 bash 读完旧版）；
+  **再下一轮**才是新的：届时 Step 2 应直接开始、日志里不再有「发送 Slack 确认通知」。核验：`grep -c "Slack 确认" ~/.claude/logs/orchestrator-<日期>.log` 应为 0。
+- 全量：bash -n 通过；读编排器原文的 27 个测试文件 + Slack 白名单 + CHANGELOG 完整性共 1523 passed（含新增 3 条）（未跑全套：改动只有一个 shell 脚本、一份文档和一个新测试）。
+
 
 ## [0.45.509] — 2026-10-16 — 占位（进行中：F&G 敞口门自证在生产日线全取不到的故障日按「无日线」重放）
 

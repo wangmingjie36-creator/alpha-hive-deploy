@@ -110,7 +110,9 @@ mkdir -p "$LOGDIR" "$REPORTDIR"
 # ================================================================
 # 全局超时看门狗（90 分钟硬限制 — 防止 launchd 永远不触发下一次）
 # ================================================================
-ORCHESTRATOR_TIMEOUT=90000  # 25h（兼容 pre_scan_notify 最长等 24h 用户确认）
+# 25h 是历史值：曾为兼容 pre_scan_notify 最长等 24h 用户确认；v0.45.510 起已无扫描前确认，数值**未动**——
+# 要不要收紧是单独的决定，须把 Step 2 输入闸最多 3 次重跑 + 每次等 600s 一起算进去。
+ORCHESTRATOR_TIMEOUT=90000  # 25h
 (
     sleep $ORCHESTRATOR_TIMEOUT
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] 🔴 全局超时！编排器运行超过 ${ORCHESTRATOR_TIMEOUT}s，强制退出（PID $$）" >> "$LOGDIR/orchestrator-$(date +%Y-%m-%d).log"
@@ -953,7 +955,7 @@ _data_migrations_step() {
 _data_migrations_step
 
 # ================================================================
-# Step 2: Alpha Hive 蜂群分析（执行前 Slack 确认 LLM 模式）
+# Step 2: Alpha Hive 蜂群分析（规则引擎，永远 --no-llm）
 # ================================================================
 log "INFO" ""
 log "INFO" "【Step 2/5】蜂群分析 - 启动"
@@ -961,37 +963,14 @@ log "INFO" "【Step 2/5】蜂群分析 - 启动"
 TICKERS_ARG="${TICKERS[*]}"
 log "INFO" "   标的列表：${TICKERS_ARG}"
 
-# ── 预通知：询问是否使用 LLM 模式 ──
-# pre_scan_notify.py: 等待 10 分钟用户回复，超时自动用 --no-llm
+# ── LLM 模式：编排器永远 --no-llm ──
+# v0.45.510：去掉扫描前 Slack 确认（pre_scan_notify.py）。每天由 launchd 自己跑，Slack Webhook 早已 404、
+# 没人在回复，这一步只是每天空等 10 分钟再退回 --no-llm（09-23 / 10-15 日志可见）。
+# ⚠️ 这不是「默认关闭 LLM」，是**编排器里不再有任何路径能打开它**：要跑 LLM 扫描只能由人在终端显式
+# `--use-llm`，并先按用户级约定说明费用、等明确批准（~/.claude/CLAUDE.md「花钱前必须先问」）。
+# ⚠️ 去掉它**不会**让 Step 2 的 3600s 预算变宽：STEP2_START / run_step --timeout 都在原先那 10 分钟之后才开始，
+# 预算从来不含这段等待；它只是让扫描提前 10 分钟开始（14:10 → 14:00）。
 LLM_FLAG="--no-llm"
-PRE_SCAN_SCRIPT="$PROJECT_DIR/pre_scan_notify.py"
-
-# ── 防重复：如果今天 LLM 模式已成功运行过，降级为 --no-llm ──
-LLM_DONE_FILE="/tmp/alpha_hive_llm_done_${DATE_STR}"
-if [ -f "$LLM_DONE_FILE" ]; then
-    log "INFO" "⚠️ 今日 LLM 模式已成功运行过，本次降级为 --no-llm（防止重复计费）"
-    log "INFO" "   如需强制重跑 LLM，请先删除 $LLM_DONE_FILE"
-elif [ -f "$PRE_SCAN_SCRIPT" ]; then
-    log "INFO" "📨 发送 Slack 确认通知（等待 10 分钟用户回复）..."
-    # v0.43.16: max-wait 1440(24h) → 10 分钟，与本段注释的设计意图一致。
-    # 24h 等待 × Slack Webhook 已 404 失效 = 每天的运行都挂满 24 小时才降级
-    # 执行，形成"昨天启动的进程恰好在今天 14:00 超时接力扫描"的病态节奏：
-    # 日志跨天错乱（8/11 内容写进 -08-10.log）、launchd 当日 fire 因实例
-    # 已存在被跳过、扫描时刻完全靠上一天的超时点对齐。Webhook 修复前该
-    # 确认机制送达不了任何人，等待只有成本没有收益。
-    run_step --timeout 900 "$PRE_SCAN_SCRIPT" --wait 5 --remind-interval 60 --max-wait 10 --tickers $TICKERS_ARG >> "$LOGFILE" 2>&1
-    NOTIFY_RC=$?
-    if [ $NOTIFY_RC -eq 42 ]; then
-        LLM_FLAG="--use-llm"
-        log "INFO" "✅ LLM 模式已确认启用"
-    elif [ $NOTIFY_RC -eq 124 ]; then
-        log "WARN" "⏰ Slack 通知超时，默认 --no-llm"
-    else
-        log "INFO" "⏱️ 使用规则引擎模式（免费）"
-    fi
-else
-    log "WARN" "pre_scan_notify.py 不存在，跳过 LLM 确认，默认 --no-llm"
-fi
 
 log "INFO" "   LLM 模式：$LLM_FLAG"
 STEP2_START=$(date +%s)
@@ -1009,10 +988,6 @@ TICKER_COUNT=$(echo "$TICKERS_ARG" | wc -w | tr -d ' ')
 [ "${TICKER_COUNT:-0}" -gt 0 ] 2>/dev/null || TICKER_COUNT=30   # 兜底：算不出就按满编
 STEP2_TIMEOUT=$(( TICKER_COUNT * 120 ))
 [ "$STEP2_TIMEOUT" -lt 1800 ] && STEP2_TIMEOUT=1800
-if [ "$LLM_FLAG" = "--use-llm" ]; then
-    # 沿用原设计的差额：LLM 模式比规则模式多 15 分钟（2700-1800）
-    STEP2_TIMEOUT=$(( STEP2_TIMEOUT + 900 ))
-fi
 log "INFO" "   超时限制：${STEP2_TIMEOUT}s（${TICKER_COUNT} 只 × 120s/只，下限 1800s）"
 
 # v0.45.504：输入闸。扫描预取后多数标的取不到可用现价 ⇒ Python 侧什么都不写（预测 / 归档 / 快照 / 账本 / 日报 / 网站）、
@@ -1113,13 +1088,6 @@ else
     log "ERROR" "   ⇒ 网站不会更新、日报不会生成、T+7 观测永久缺这一天"
     set_status failed
     STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"ticker_completeness\": {\"status\": \"failed\", \"reason\": \"file_missing\"}}")
-fi
-
-# ── LLM 防重复：无论 Step 2 成功/失败/超时，只要启动了 LLM 扫描就打标记 ──
-# 原逻辑仅在 RC=0 时创建标记，导致 Step 2 失败后当天仍可再次触发 LLM，造成重复计费
-if [ "$LLM_FLAG" = "--use-llm" ] && [ $STEP2_RC -ne 2 ]; then
-    touch "$LLM_DONE_FILE"
-    log "INFO" "🔒 LLM 防重复标记已创建：${LLM_DONE_FILE}（Step2 RC=${STEP2_RC}）"
 fi
 
 # ================================================================
