@@ -1388,6 +1388,55 @@ QUARANTINE: List[Dict] = [
         "evidence": ("~/.claude/logs/orchestrator-2026-10-14.log（「[BILI] momentum_5d 由自攒索引补上: +0.40%（截至 2026-10-13」）",
                      "CHANGELOG.md#v0.45.508"),
     },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.517（用户 2026-10-16 批准「全部已证实的」）：508 复核时顺带查出的、H1 窗口（10-12 起）之前的同类观测。
+    # 判据同 508：只登「逐位 / 万分之一内复现出错误窗口」的；复现不出的（09-24 T）不登。只隔离观测层 `price.*`。
+    {
+        "date": "2026-09-15",
+        "tickers": ("NVDA", "QCOM"),
+        "signals": ("price.volume_ratio",),
+        "reason": "v0.45.517（用户 2026-10-16 批准）：yfinance 失败 ⇒ Twelve Data 兜底，09-15 那根被 `_drop_forming_bar` 丢掉 ⇒ "
+                  "入档的是「最新一根 = 09-14（上一场）、窗口 = 截至 09-14 的 20 根」的量比。复核：Twelve Data 截至 09-14 的日线、"
+                  "只把 09-14 那根成交量换成 131,942,300 / 13,755,800 股（TD 事后上调了那根）即逐位复现 1.01080 / 1.21243；"
+                  "截至 09-15 应为 NVDA 0.676 / QCOM 1.195。",
+        "evidence": ("logs/alpha_hive.log.2（开发检出，09-15 段：14:14:20 NVDA 1.01x、14:15:31 QCOM 1.21x，各配「丢弃 2026-09-15 那根」）",
+                     "CHANGELOG.md#v0.45.505", "CHANGELOG.md#v0.45.508", "CHANGELOG.md#v0.45.517"),
+    },
+    {
+        "date": "2026-09-15",
+        "tickers": ("NVDA", "QCOM"),
+        "signals": ("price.momentum_5d",),
+        "reason": "v0.45.517（用户 2026-10-16 批准）：v0.45.465 之前的自攒索引回落，窗口末端是上一场 09-14、锚点取 ≥5 场前"
+                  "（465 已记录）⇒ 实际窗口 09-04 → 09-14。用 Twelve Data 收盘与扫描价两种序列穷举，唯一同时复现两只（误差 < 1e-4）"
+                  "的就是它。截至 09-15（4 场）应为 NVDA −5.14 / QCOM +6.46（归档 −8.42 / +6.76）。",
+        "evidence": ("logs/alpha_hive.log.2（开发检出，09-15 段：「[NVDA] momentum_5d 由自攒索引补上: -8.42%」「[QCOM] … +6.76%」）",
+                     "CHANGELOG.md#v0.45.465", "CHANGELOG.md#v0.45.508", "CHANGELOG.md#v0.45.517"),
+    },
+    {
+        "date": "2026-09-24",
+        "tickers": ("ABBV", "AMC", "AMZN", "BILI", "BRK-B", "COST", "CRCL", "CRM", "CVX", "DE",
+                    "DELL", "ENPH", "JNJ", "META", "MSFT", "MU", "NEE", "NFLX", "NVDA", "QCOM",
+                    "RKLB", "SNOW", "TMO", "TMUS", "TSLA", "VKTX", "VZ", "WMT", "XOM"),
+        "signals": ("price.momentum_5d",),
+        "reason": "v0.45.517（用户 2026-10-16 批准）：全源故障日（30 行 price_at_predict 全为 0），30/30 动量来自 465 之前的自攒索引回落；"
+                  "上一个扫描日是 09-22（09-23 无扫描）⇒ 窗口末端滞后两场。这 29 只与 Twelve Data「末端 09-22、往前 5 场」逐一相符"
+                  "（误差 < 0.02）。T 差 0.035、复现不出，**不登**（归档 −6.098，截至 09-24 的 4 场应为 +0.197，待验证）。",
+        "evidence": ("logs/alpha_hive.log（开发检出，09-24 段：30 行「momentum_5d 由自攒索引补上」）",
+                     "CHANGELOG.md#v0.45.465", "CHANGELOG.md#v0.45.508", "CHANGELOG.md#v0.45.517"),
+    },
+    {
+        "date": "2026-09-25",
+        "tickers": ("ABBV", "AMC", "AMZN", "BILI", "BRK-B", "COST", "CRCL", "CRM", "CVX", "DE",
+                    "DELL", "ENPH", "JNJ", "META", "MSFT", "MU", "NEE", "NFLX", "NVDA", "QCOM",
+                    "RKLB", "SNOW", "T", "TMO", "TMUS", "TSLA", "VKTX", "VZ", "WMT", "XOM"),
+        "signals": ("price.momentum_5d",),
+        "reason": "v0.45.517（用户 2026-10-16 批准）：又一个全源故障日（price_at_predict 全为 0）；30/30 动量与 09-24 归档**逐位相同**——"
+                  "09-24 没有可用价，索引没有新点，窗口仍止于 09-22（滞后三场）。T 也在内：无论它出自哪个窗口，都不是 09-25 的"
+                  "（归档 −6.098，截至 09-25 的 4 场应为 −0.275）。",
+        "evidence": ("pheromone.db signal_archive：09-25 与 09-24 的 price.momentum_5d 30/30 相等",
+                     "logs/alpha_hive.log（开发检出，09-25 段：30 行「momentum_5d 由自攒索引补上」）",
+                     "CHANGELOG.md#v0.45.517"),
+    },
 ]
 
 
