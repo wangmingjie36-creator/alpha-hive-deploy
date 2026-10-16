@@ -4535,7 +4535,7 @@ Step 2/4/5 的调用点与 alert_manager 新规则是 B2（v0.45.386），本版
 - 已知、不改：解释器不可用时 Step 11 兜底片段没有 `cohort_boundary` 键（B 之前恒有、未知时为 null）。`.get` 与 `jq .cohort_boundary.alarm`
   两种读法结果相同（都为空）；兜底那天本来就没人解读 JSON，可见信号是 ERROR 行 + `interp_fallback`。
 
-## [0.45.384] — 2026-09-29（10-12 二次检查后合入）— Fixed：`vrp_signal.record_day` 零快照时不再清空该日账本行（含已结算行）；部分重跑改为按票 upsert、没有可用快照的旧行保留；CLI `--record` 零快照退出 3 并点名读取目录；缺省缓存目录不再被凭空建出
+## [0.45.384] — 2026-09-29（10-12 二次检查，10-16 合入）— Fixed：`vrp_signal.record_day` 零快照时不再清空该日账本行（含已结算行）；部分重跑改为按票 upsert、没有可用快照的旧行保留；CLI `--record` 零快照退出 3 并点名读取目录；缺省缓存目录不再被凭空建出
 
 ### 事故形状（v0.45.380 同形普查「只列不修」的那一条，照其语义修）
 - `record_day(as_of)` 取 `keep = 其它日期的行`，遍历 `_iter_snapshots(cdir, as_of)` 后**无条件** `_write_jsonl(SIGNALS_FILE, sorted(keep + 本次行))`。
@@ -4624,7 +4624,7 @@ Step 2/4/5 的调用点与 alert_manager 新规则是 B2（v0.45.386），本版
    ⚠️ 这个新夹具当场暴露一个**测试**缺陷：M4（WARNING 只写目录末级名）在它上面**幸存**——`_iter_snapshots` 那条「快照读取失败」的 OSError 文本带快照完整路径，
    断言「告警点名了目录」被别的告警代答（子串有两个产出者，同 v0.45.332）。改为只取 `record_day` 自己那一条（`_record_warning`，并断言恰好一条）后 M4 打红 8 条。
 
-**合并**：经 `sync_with_base_branch` 并入 `origin/main`（`0e44fab0`）。冲突两处：`vrp_signal.py`（本分支两个诊断函数 vs main 的锁装饰器 ⇒ 两边都留）、
+**合并**（10-12 第一次）：经 `sync_with_base_branch` 并入 `origin/main`（`0e44fab0`）。冲突两处：`vrp_signal.py`（本分支两个诊断函数 vs main 的锁装饰器 ⇒ 两边都留）、
 `CHANGELOG.md`（核对过本分支对 merge-base 只改了 384 那一行；结果 = main 原文只把 384 占位行换成本条，脚本断言逐行相等）。
 `hive_logger.py` / 测试文件自动合并，逐处看过。复核仍成立：编排器（main / 部署副本 / 生产克隆的 `orchestrator_steps.py`）与 13 个 scheduled-tasks 对 `vrp_signal` 均 0 处。
 
@@ -4636,9 +4636,22 @@ Step 2/4/5 的调用点与 alert_manager 新规则是 B2（v0.45.386），本版
 - `tests/test_vrp_signal.py`：main 57 → 72。全套：（合并后工作树，12:27–12:39 PDT）1 failed、9223 passed、84 deselected、2 xfailed（合计 = selected 9226）+ 1 error。
   failed = 已知 `TestCoverageHorizon`（2027 BLS/BEA 日程未发布）。error = 会话级真实数据根闸，记在一条**已通过**测试的 teardown 上（不另占 selected）：变化的只有 5 个 `alphabot_state/intraday/2026-10-12/*.jsonl`，闸自带核实「只在末尾追加、原字节不变、时刻落在本轮」；进程表里 Alpha Bot（`python -m alphabot --port 8765`，06:57 起）在跑，追加时刻 12:36–12:37 正值盘中 ⇒ 并发写入者，与本改动无关（`vrp_state/` / `cache/` 无变化）。收盘后复跑（13:02–13:12 PDT，HEAD `142c7aa7`）：同样 1 failed / 9223 passed / 84 deselected / 2 xfailed + 1 error，但这次闸报的是**生产 `pheromone.db` + `-wal`**（13:08:57，时刻落在 `test_orchestrator_step_interp.py::TestMacBash::test_parity_and_fallback_under_bare_env[UTF-8]`——它用 `env -i` 同时剥掉 `HOME` 与 `ALPHA_HIVE_HOME`，按 v0.45.422 会解析到生产根）。本改动碰不到那条路径（只动 `vrp_signal` / `hive_logger.cache_dir_unmade` / VRP 测试）；第一轮同一条测试也跑了、`pheromone.db` 没变 ⇒ 非确定，可能是该测试的隔离漏洞，也可能是并发读写（两个其他会话的 `alpha_hive_mcp.py` 在跑，SQLite 关连接会 checkpoint）——**未判定**，已另开任务查（不重跑它，免得真写生产）。
 
+**合入（10-16）**：10-12 那次结束时没等到推送批准，又搁了 4 天。10-16 用户批准「合并最新 main 后推送」：main 已多 71 个提交，`sync_with_base_branch` 这次拒绝——
+范围里有 v0.45.467 新建的 `.claude/settings.json`（SessionStart 钩子），属沙箱保护文件，需在应用里确认远端；用户改在自己终端 `git merge --no-edit origin/main`（`b26fb264`），
+无冲突（CHANGELOG 自动合并，384 条目唯一、零冲突标记）。71 个提交未碰本版文件及其依赖（`vrp_signal` / `hive_logger` / `ledger_io` / 两份测试）。
+生产复核（只读）：账本 693 行、**已结算 184 行**（10-12 时 65 行）；10-12 之后无零快照日 ⇒ 仍无实际丢失。合入后测试：相关 258 条绿；**全量（05:44–05:55 PDT）抓到两条本版与 main 新守卫的冲突**（都是合并后才可能出现的）：
+  - `tests/test_data_root_default.py::TestDataRootFromEnvHasOneImplementation`（v0.45.488）：`_cache_dir_hint` 里 `k != "ALPHA_HIVE_HOME"` 是直接点名该键的新位置。
+    改为 `resolve_data_root({"HOME": os.environ.get("HOME", "")})`（只给 HOME 求缺省根，语义不变），不登记新位置。
+  - `tests/test_alphabot_premium.py::TestExternalReasonsAreComplete`（新）：按函数名 `"record_day"` 用 AST 收 reason 码，本版把产出 reason 的本体挪进了 `_record_day_with_info` ⇒ 收到空集，
+    其对照断言 `"rv_30d_missing" in vrp` 正确地红了（没有静默放行）。改为扫 `_record_day_with_info`。
+  - 变异（scratch 副本）：N1 本体加一个未登记 reason ⇒ 码表守卫红；N2 缺省根改回点名该键 ⇒ 键位置守卫红；N3 缺省根吃进显式设定（提示永不触发）⇒ 错根提示测试红；M19 仍红。
+  - 同一轮另 1 error 是真实数据根闸：变化只在 `replay_ohlc_state/`（17，05:52:28–36 成批）与 `earnings_cache/`（11 删除），本版代码到不了这两处；
+    同时段「重放 10-12 扫描」会话在跑（名字与目录吻合）——归因到并发写者只有时间 / 名字 / 可达性三条旁证，没有直接证据。
+  修后复跑全量（05:59–06:12 PDT）：1 failed（已知 `TestCoverageHorizon`）、9856 passed、84 deselected、2 xfailed（合计 = selected 9859），**无 error**。
+
 ### 未做
 - `BASE_DIR` / `STATE_DIR` / `SIGNALS_FILE` 仍是 import 期冻结（`test_paths_not_frozen_at_import` KNOWN 存量），未动。
-- v0.45.380（earnings）10-12 仍只在本地分支 `claude/angry-bhabha-8426f1`、未进 main（main 上仍是占位）；本版不依赖它。⚠️ **它合入时会撞上本版二次检查的 #2、#3 两条同形问题**：v0.45.452 只给 `scan` 挂了锁、它的 CLI 直调 `_scan_with_info`；它的提示同样写着「未设 ALPHA_HIVE_HOME ⇒ 回落到代码目录」。
+- v0.45.380（earnings）10-16 已合入 main（`571569a1` / `ba2d88b0`），本版不依赖它。复核本版二次检查 #2、#3 两条在它身上的情况：#2 **已处理**（`_scan_with_info` 也挂了锁）；#3 **未处理**——判定改成了 `explicit_data_root() is None`，但文案仍是「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录」，v0.45.422 起这句是假话（未设读的是生产根；生产显式设了该变量，故只在手动跑时误导）。不在本版范围，已另报。
 - 09-24 / 09-25 为什么没有期权快照：待验证（同 v0.45.380，不在本版范围）。
 
 ## [0.45.383] — 2026-09-29 — Fixed/Changed：日线完整性校验——`fetch_historical_hv` 缺交易日 ⇒ 重取一次、仍缺则 `iv_rank` 置空并计数；**改评分输入**，世代边界登记 09-28（作废 0 条 final_score 样本）

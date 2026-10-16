@@ -358,9 +358,11 @@ def _cache_dir_hint(cdir: Path) -> str:
     hints = []
     # v0.45.422 起未设 / 空串 ⇒ 缺省数据根 `~/alpha-hive-data`（就是生产），不再兜底到代码目录；
     # 读错根的来路因此反过来：**显式**设了别的根（shell 里残留的旧值、指回检出的回退配置）。
-    # 生产编排器与 plist 都设成缺省根本身 ⇒ 不会误报。判据走 hive_logger 的唯一解析，别另写一份。
+    # 生产编排器与 plist 都设成缺省根本身 ⇒ 不会误报。判据走 hive_logger 的唯一解析，别另写一份：
+    # 缺省根 = 只给 HOME 时 resolve_data_root 的结果——不在这里点名那个变量（v0.45.488 起「从它得出数据根」
+    # 只许一份实现，守卫 tests/test_data_root_default.py::TestDataRootFromEnvHasOneImplementation）。
     explicit = explicit_data_root()
-    default = resolve_data_root({k: v for k, v in os.environ.items() if k != "ALPHA_HIVE_HOME"})
+    default = resolve_data_root({"HOME": os.environ.get("HOME", "")})
     if explicit is not None and explicit != default:
         hints.append(f"ALPHA_HIVE_HOME 显式指向 {explicit}，不是缺省数据根 {default}（shell 里残留的旧值？）")
     # 快照的写者 options_analyzer 用 PATHS.cache_dir；显式传了别的 cache_dir 就会分叉。
