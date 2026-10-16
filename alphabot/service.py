@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 
 import sell_strike_report as R
 from alphabot import hedge as HG
+from alphabot import howto as HW
 from alphabot import premium as PM
 from alphabot import straddle as SD
 from hive_logger import PATHS, get_logger
@@ -177,7 +178,8 @@ class AlphaBotService:
         self._locks_guard = threading.Lock()
         self._settings_lock = threading.Lock()
         self.stats = {"live_computed": 0, "live_cache_hits": 0, "live_failures": 0,
-                      "premium_computed": 0, "premium_cache_hits": 0, "premium_failures": 0}
+                      "premium_computed": 0, "premium_cache_hits": 0, "premium_failures": 0,
+                      "howto_failures": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -201,11 +203,23 @@ class AlphaBotService:
                 return self._stamp(hit)
             res = clean_json(R.compute_live_detail(t, fetch_fn=self.fetch_fn, state_dir=self.ledger_dir))
             ok = bool(res.get("data_available"))
+            if ok:
+                res["howto"] = self._howto(t, res)
             self.stats["live_computed" if ok else "live_failures"] += 1
             if not ok:
                 _log.warning("[%s] 现算不可得：%s", t, res.get("reason"))
             self._cache[t] = (self.clock(), res)
             return self._stamp(self._cache[t])
+
+    def _howto(self, t: str, res: dict) -> dict:
+        """「怎么卖」：同一份报价翻译成下单腿 / 限价 / 买回价 / 标的价位（纯函数，见 `alphabot/howto.py`）。
+        算不出来不许吞成「没有这一栏」：写 `available: False` + 原因，前端显示原因，日志留 warning。"""
+        try:
+            return clean_json(HW.build(res, R.C.structure_quote, R.C.BASE_RUNG))
+        except Exception as exc:  # noqa: BLE001
+            self.stats["howto_failures"] += 1
+            _log.warning("[%s] 「怎么卖」现算失败：%s: %s", t, type(exc).__name__, exc)
+            return {"available": False, "reason": f"exception:{type(exc).__name__}: {exc}", "tenors": {}}
 
     def _fresh(self, t: str):
         ent = self._cache.get(t)
@@ -282,6 +296,7 @@ class AlphaBotService:
             "straddle": self.straddle_rules(),
             "hedge": self.hedge_rules(),
             "premium": self.premium_rules(),
+            "howto": HW.public_rules(),
         })
 
     # ── 财报跨式账本（v0.45.424，只读）
