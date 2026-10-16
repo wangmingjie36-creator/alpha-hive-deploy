@@ -71,7 +71,7 @@ v0.45.522 报的 52 行里，06-17 VKTX / CRCL 两行已由 522 清掉，余 50 
 - 变异 5/5 被杀（只在本条目内改）：日期错、漏标的、AMC 日期挪到真实日、BIIB 日期错、连坐 P/C。
 - 全量（rebase 到 0e691475 后）：10030 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加，不是测试写的。ruff 全绿。
 
-## [0.45.524] — 2026-10-16 — Changed：测试套件提速（本机整套 790.8s → 562.0s，−29%）——生产退避改走窄注入接缝、全仓 AST 守卫共用会话级解析缓存；不削弱任何守卫
+## [0.45.524] — 2026-10-16 — Changed：测试套件提速（CI pytest 717s → 526s、本机整套 790.8s → 562.0s）——生产退避改走窄注入接缝、全仓 AST 守卫共用会话级解析缓存；不削弱任何守卫
 
 起因：整套约 1 万条、CI 11–13 分钟，问「再加测试会不会越来越慢」。实测**不是条数的问题**：CI run 38923628786 里 93% 的测试 <0.1 秒，≥1 秒的 642 条占了 63% 的时间。本机 profile（给 `time.sleep` / `ast.parse` 挂计时、逐测试归因）找到两类：
 
@@ -94,7 +94,7 @@ v0.45.522 报的 52 行里，06-17 VKTX / CRCL 两行已由 522 清掉，余 50 
 ### 验证
 - 本机整套（`--maxfail=1000`，同机同时有别的会话在跑整套，数字有噪声）：前 790.8s / 10027 passed → 后 562.0s / 10051 passed；测试耗时和 775s → 540s；≥4 秒的测试 23 → 6，≥1 秒 225 → 115。后一轮尚不含 `test_quote_set` / `test_twelve_data` 的接缝替换（两文件再省约 25 秒，单跑 0.85 秒）。两轮都只有已知的 `TestCoverageHorizon` 红；另各有一条真实数据根闸 ERROR，均为并发写者：前一轮是 Alpha Bot 盘中采样追加 `alphabot_state/intraday/*.jsonl`，后一轮是用户 09:24 执行 v0.45.521 `relabel_nyse_calendar --apply`（pheromone.db + 快照 256 处）。
 - 变异（改真文件、跑、还原）：`options_analyzer._retry_sleep` 掏空 → `test_seam_*` 2 红；`market_intelligence` 循环不再调接缝 → 节奏测试红；`report_deployer` 退避 ×0 → `test_pipeline` 2 红。往 `vol_forecast.py` 同时注入模块级 `PATHS` 冻结、`run_git_cmd('git reset --hard …')`、`QueenDistiller(adapted_weights=…)`、`gamma_exposure` 比较、`import pre_scan_notify`、`import sell_strike_ledger`，并新建一个模块级 `skipif(pheromone.db)` 的测试文件 → 7 个守卫文件 9 条全红；各守卫原有的有牙测试照常绿。
-- CI：见下一条跟进记录（推送后测）。
+- CI（Linux，同一选择集）：提速前 run 38923628786 pytest 717.4s（job 12 分 43 秒，10010 passed）→ 提速后 run 38932984246（8a19d803）526.5s（job 9 分 44 秒，10044 passed），−27%；两轮都只有 `TestCoverageHorizon` 红。
 
 ### Notes
 - **没做**：`pytest-xdist`（会话级的数据根 / 仓库根 / 时间线闸都假设单进程，需单独评估）；`test_guard_census_eviction::test_get_live_signals_identical_under_any_max_entries`（11.5 秒）是生产 `pheromone_board.publish` 逐条全量扫描的平方级耗时，不是测试的问题，改生产算法不在本次范围。剩余的进程内 sleep（约 15 秒）都是刻意的：超时 / 截止时间 / 锁争用 / 启动器就绪等待测试。
