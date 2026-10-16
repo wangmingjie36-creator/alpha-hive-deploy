@@ -9,7 +9,37 @@
 
 ## [0.45.526] — 2026-10-16 — 占位（进行中：组合 Greeks 逐票 Delta 对冲——每只有跨式腿的标的用自己的股票对冲跨式 Delta；带 3% NAV、拉回 0；先 shadow 只算不成交）
 
-## [0.45.525] — 2026-10-16 — 占位（进行中：逐行核对 signal_archive 里 52 行 gamma_exposure = 0.0，假的隔离清库）
+## [0.45.525] — 2026-10-16 — Fixed（数据，用户批准「逐行核对那 52 行 GEX，假的也删掉」）：`options.gamma_exposure = 0.0` 的 50 行逐行核对，**全部**是「算不出」分支写的 0，登进 `QUARANTINE` 并清库
+
+v0.45.522 报的 52 行里，06-17 VKTX / CRCL 两行已由 522 清掉，余 50 行（2026-03-10 ~ 08-27）。v0.45.63 之前 `calculate_gamma_exposure` 在算不出时返回 0.0，而它与「做市商净 gamma 中性」同形，进了 `signal_archive`。逐行按**当时的代码**与**当天的产物**归到三条路径，没有一行是真实算出的 0。
+
+### 三条路径与证据（只读）
+1. **03-10 ~ 03-13，每天 10/10 只（40 行）**
+   - BS gamma 注入是 2026-03-16（d37cda98）才加的。此前 yfinance 链不带 Greeks，`c.get("gamma", 0)` 全为 0 ⇒ GEX 恒 0.0。
+   - 归档：03-13 10/10 为 0，注入当天 03-16 起 10/10 非 0（−0.65 ~ 88.2）。
+   - 当天总 OI 0.3 万 ~ 322 万，链本身是真的，只是没有 gamma。
+2. **AMC 08-04 / 08-10 / 08-12 / 08-13 / 08-25 / 08-26 / 08-27（7 行）**
+   - 当时代码（08-14 的 43591dfc 实读）有 `if stock_price < 5: return 0.0`，AMC 股价约 $2.6。v0.45.63（08-29）删了这道守卫。
+   - 同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），GEX 却是 0.0。
+   - 删守卫后 09-01 起 AMC GEX ≈ 6–17。08-10 无快照，同一守卫、同一股价区间。
+3. **ICLN 04-26、ICLN 05-10、BIIB 05-10（3 行）**
+   - 当时 `analyze()` 取链不传价，BS gamma 的 S 退到「OI > 50 的 call 行权价中位数」（5fe6a3ea 实读）。没有这样的 call ⇒ S = 0 ⇒ 不注入 gamma ⇒ 0.0（v0.45.462 删了这个兜底）。
+   - ICLN 两天：总 OI 119 / 178，快照前三档合计 91 / 151，剩下不足 30 ⇒ 不可能有 call OI > 50。
+   - BIIB：gamma 日历 4 个到期日 OI 44–242，net_gamma **全为 0.0** ⇒ 整条链没注入 gamma。
+   - 反例：ICLN 05-03 有 OI 2,511 的到期日 ⇒ 注入了 gamma ⇒ GEX −0.5084。
+
+### Fixed（数据）
+- `signal_archive.QUARANTINE` 新增 14 个条目（4 + 7 + 3，reason 带标记 v0.45.525 与上述证据），只挡 `options.gamma_exposure`。
+- 清库：`purge_quarantined_signal_rows.py --only-tag v0.45.525 --expect 50 --apply`，137,544 → 137,494。
+  - 备份 `db_backups/pheromone_pre_v0.45.525_gex_zero.db`。
+  - 核对：全库 GEX = 0.0 从 50 → 0；GEX 行 1,840 → 1,790；同日其余期权字段保留（例：03-10 NVDA 6 → 5）；两边 integrity_check ok。
+- 源头早已修：v0.45.63 起算不出返回 None、删 `< 5` 守卫；v0.45.462 起不再拿行权价中位数当 S；BS gamma 注入自 03-16 起。本版不改代码。
+
+### Tests
+- `tests/test_signal_quarantine.py::test_gex_zero_rows_quarantined_v0_45_525`：三组逐日期 / 逐标的核对。
+  - 反例：同日 P/C、紧邻的真实日子（03-16 NVDA、AMC 08-28 / 09-01、ICLN 05-03、BIIB 04-26）。
+- 变异 5/5 被杀（只在本条目内改）：日期错、漏标的、AMC 日期挪到真实日、BIIB 日期错、连坐 P/C。
+- 全量（rebase 到 0e691475 后）：10030 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加，不是测试写的。ruff 全绿。
 
 ## [0.45.524] — 2026-10-16 — 占位（进行中：测试套件提速——生产 sleep 注入接缝 + AST 守卫会话级解析缓存，不削弱任何守卫）
 

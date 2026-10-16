@@ -359,6 +359,30 @@ def test_bad_chain_option_observations_quarantined_v0_45_522():
     assert not sa.is_quarantined("2026-10-13", "BILI", "options.total_oi")
 
 
+_GEX_ZERO_0310_0313 = ("AMZN", "BILI", "CRCL", "META", "MSFT", "NVDA", "QCOM", "RKLB", "TSLA", "VKTX")
+_GEX_ZERO_AMC = ("2026-08-04", "2026-08-10", "2026-08-12", "2026-08-13", "2026-08-25", "2026-08-26", "2026-08-27")
+
+
+def test_gex_zero_rows_quarantined_v0_45_525():
+    """v0.45.525（用户批准「逐行核对那 52 行 GEX，假的也删掉」）：gamma_exposure = 0.0 的 50 行逐行核对后全是「算不出」分支：
+    ① 03-10 ~ 03-13 每天 10 只（BS gamma 注入 03-16 才加）；② AMC 08-04 ~ 08-27（`stock_price < 5` 守卫）；
+    ③ ICLN 04-26 / 05-10、BIIB 05-10（S 兜底取不到 ⇒ 不注入 gamma）。
+
+    变红的变异：漏任一日期 / 标的；连坐同日别的期权信号；连坐前后真实的日子（03-16、AMC 09-01、ICLN 05-03）。
+    """
+    for d in ("2026-03-10", "2026-03-11", "2026-03-12", "2026-03-13"):
+        for tk in _GEX_ZERO_0310_0313:
+            assert sa.is_quarantined(d, tk, "options.gamma_exposure"), (d, tk)
+        assert not sa.is_quarantined(d, "NVDA", "options.put_call_ratio")
+    for d in _GEX_ZERO_AMC:
+        assert sa.is_quarantined(d, "AMC", "options.gamma_exposure"), d
+    for d, tk in (("2026-04-26", "ICLN"), ("2026-05-10", "ICLN"), ("2026-05-10", "BIIB")):
+        assert sa.is_quarantined(d, tk, "options.gamma_exposure"), (d, tk)
+    for d, tk in (("2026-03-16", "NVDA"), ("2026-09-01", "AMC"), ("2026-08-28", "AMC"), ("2026-05-03", "ICLN"),
+                  ("2026-04-26", "BIIB")):
+        assert not sa.is_quarantined(d, tk, "options.gamma_exposure"), (d, tk)
+
+
 def test_rank_rows_from_placeholder_iv_whose_iv_current_was_purged_earlier():
     """v0.45.490（486 二次检查）：486 只从归档里现存的 iv_current 找 12.5 / 6.25，漏了 iv_current 早被 472 / 479 清掉的
     7 对——它们 08-14 前的 iv_rank / iv_percentile 同样由失败值算出。

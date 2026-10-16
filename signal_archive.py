@@ -1402,6 +1402,110 @@ QUARANTINE: List[Dict] = [
         "reason": "v0.45.522（用户 2026-10-16 批准）：yfinance 限流冷却中 BILI 期权链退到样本（14:15:51「降级为样本数据」「期权链为样本数据，跳过全部指标计算（中性早退）」）⇒ total_oi = 0 是早退分支的默认值，不是观测；当天 BILI 没有别的 options.* 行。",
         "evidence": ("~/.claude/logs/orchestrator-2026-10-14.log:377-378", "CHANGELOG.md#v0.45.522"),
     },
+    # v0.45.525（用户 2026-10-16 批准「逐行核对那 52 行 GEX，假的也删掉」）：gamma_exposure = 0.0 全库 50 行（另 2 行 06-17 已由 522 清掉）
+    # 逐行核对后**全部**是「算不出」分支写的 0，不是观测——三条路径，各自有当时代码与当天产物为证：
+    # ① 03-10 ~ 03-13（10/10 每天）：yfinance 链不带 Greeks，BS gamma 注入 2026-03-16（d37cda98）才加 ⇒ 每个合约 gamma 0 ⇒ 0.0。
+    {
+        "date": "2026-03-10",
+        "tickers": ('AMZN', 'BILI', 'CRCL', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'TSLA', 'VKTX'),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：BS gamma 注入 2026-03-16（d37cda98）才加，此前 yfinance 链不带 gamma ⇒ `c.get(\"gamma\", 0)` 全为 0 ⇒ GEX 恒 0.0（当天 10/10 只皆 0；注入当天 03-16 起 10/10 皆非 0）。不是观测。",
+        "evidence": ("git show d37cda98~1:options_analyzer.py（calculate_gamma_exposure 读 gamma，fetch 不注入）", "CHANGELOG.md#v0.45.525"),
+    },
+    {
+        "date": "2026-03-11",
+        "tickers": ('AMZN', 'BILI', 'CRCL', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'TSLA', 'VKTX'),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：BS gamma 注入 2026-03-16（d37cda98）才加，此前 yfinance 链不带 gamma ⇒ `c.get(\"gamma\", 0)` 全为 0 ⇒ GEX 恒 0.0（当天 10/10 只皆 0；注入当天 03-16 起 10/10 皆非 0）。不是观测。",
+        "evidence": ("git show d37cda98~1:options_analyzer.py（calculate_gamma_exposure 读 gamma，fetch 不注入）", "CHANGELOG.md#v0.45.525"),
+    },
+    {
+        "date": "2026-03-12",
+        "tickers": ('AMZN', 'BILI', 'CRCL', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'TSLA', 'VKTX'),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：BS gamma 注入 2026-03-16（d37cda98）才加，此前 yfinance 链不带 gamma ⇒ `c.get(\"gamma\", 0)` 全为 0 ⇒ GEX 恒 0.0（当天 10/10 只皆 0；注入当天 03-16 起 10/10 皆非 0）。不是观测。",
+        "evidence": ("git show d37cda98~1:options_analyzer.py（calculate_gamma_exposure 读 gamma，fetch 不注入）", "CHANGELOG.md#v0.45.525"),
+    },
+    {
+        "date": "2026-03-13",
+        "tickers": ('AMZN', 'BILI', 'CRCL', 'META', 'MSFT', 'NVDA', 'QCOM', 'RKLB', 'TSLA', 'VKTX'),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：BS gamma 注入 2026-03-16（d37cda98）才加，此前 yfinance 链不带 gamma ⇒ `c.get(\"gamma\", 0)` 全为 0 ⇒ GEX 恒 0.0（当天 10/10 只皆 0；注入当天 03-16 起 10/10 皆非 0）。不是观测。",
+        "evidence": ("git show d37cda98~1:options_analyzer.py（calculate_gamma_exposure 读 gamma，fetch 不注入）", "CHANGELOG.md#v0.45.525"),
+    },
+    # ② AMC 08-04 ~ 08-27：`calculate_gamma_exposure` 的 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除）；AMC 股价约 2.6。
+    {
+        "date": "2026-08-04",
+        "tickers": ('AMC',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
+        "evidence": ("cache/options_snapshot_AMC_2026-08-04.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+    },
+    {
+        "date": "2026-08-10",
+        "tickers": ('AMC',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
+        "evidence": ("cache/options_snapshot_AMC_2026-08-10.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+    },
+    {
+        "date": "2026-08-12",
+        "tickers": ('AMC',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
+        "evidence": ("cache/options_snapshot_AMC_2026-08-12.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+    },
+    {
+        "date": "2026-08-13",
+        "tickers": ('AMC',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
+        "evidence": ("cache/options_snapshot_AMC_2026-08-13.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+    },
+    {
+        "date": "2026-08-25",
+        "tickers": ('AMC',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
+        "evidence": ("cache/options_snapshot_AMC_2026-08-25.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+    },
+    {
+        "date": "2026-08-26",
+        "tickers": ('AMC',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
+        "evidence": ("cache/options_snapshot_AMC_2026-08-26.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+    },
+    {
+        "date": "2026-08-27",
+        "tickers": ('AMC',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
+        "evidence": ("cache/options_snapshot_AMC_2026-08-27.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+    },
+    # ③ ICLN 04-26 / 05-10、BIIB 05-10：analyze 取链不传价，BS gamma 的 S 退到「OI > 50 的 call 行权价中位数」，
+    #    当天一个这样的 call 都没有 ⇒ S = 0 ⇒ 不注入 gamma ⇒ 0.0（v0.45.462 删了这个兜底）。
+    {
+        "date": "2026-04-26",
+        "tickers": ('ICLN',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：analyze 取链不传价，BS gamma 的 S 退到「OI > 50 的 call 行权价中位数」，当天没有这样的 call ⇒ S = 0、不注入 gamma ⇒ GEX 0.0（v0.45.462 删了这个兜底）。总 OI 119，快照前三档 call / put 合计 91、余 28 ⇒ 不可能有 call OI > 50；gamma 日历 net_gamma 全 0。不是观测。",
+        "evidence": ("cache/options_snapshot_ICLN_2026-04-26.json", "git show 5fe6a3ea:options_analyzer.py（_atm_candidates = calls OI > 50）", "CHANGELOG.md#v0.45.525"),
+    },
+    {
+        "date": "2026-05-10",
+        "tickers": ('ICLN',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：analyze 取链不传价，BS gamma 的 S 退到「OI > 50 的 call 行权价中位数」，当天没有这样的 call ⇒ S = 0、不注入 gamma ⇒ GEX 0.0（v0.45.462 删了这个兜底）。总 OI 178，快照前三档合计 151、余 27 ⇒ 不可能有 call OI > 50；gamma 日历 net_gamma 全 0。不是观测。",
+        "evidence": ("cache/options_snapshot_ICLN_2026-05-10.json", "git show 5fe6a3ea:options_analyzer.py（_atm_candidates = calls OI > 50）", "CHANGELOG.md#v0.45.525"),
+    },
+    {
+        "date": "2026-05-10",
+        "tickers": ('BIIB',),
+        "signals": ("options.gamma_exposure",),
+        "reason": "v0.45.525（用户 2026-10-16 批准）：analyze 取链不传价，BS gamma 的 S 退到「OI > 50 的 call 行权价中位数」，当天没有这样的 call ⇒ S = 0、不注入 gamma ⇒ GEX 0.0（v0.45.462 删了这个兜底）。总 OI 631；快照 gamma 日历 4 个到期日（OI 44–242）net_gamma 全为 0.0 ⇒ 整条链没注入 gamma；gamma 日历 net_gamma 全 0。不是观测。",
+        "evidence": ("cache/options_snapshot_BIIB_2026-05-10.json", "git show 5fe6a3ea:options_analyzer.py（_atm_candidates = calls OI > 50）", "CHANGELOG.md#v0.45.525"),
+    },
     # ────────────────────────────────────────────────────────────────────────
     # v0.45.508（用户 2026-10-16 批准）：10-14 生产扫描 yfinance 全挡（429）⇒ 历史字段全走出口回落，其中两类取到了
     # **前一交易日**的观测。只隔离观测层 `price.*`：`buzz.comp.*` 通道值是派生值（同 Agent 评分，不隔离），且维度 IC
