@@ -141,6 +141,25 @@ F&G 挪到它真正适用的层次：组合层的仓位敞口控制——极度�
       **未动**：窗口、变体、统计量、检视点、α、盲化、自证（阈值、分母、四元组、逐日重锚）、种子、锚点。
       修订依据是写回前后的自证对照（判定用的 26/26 不变、只有不进判定的 a_only 12 → 9）；按盲化只看了进度与自证率，
       `decide()` 从未走到出统计量的分支（修订时 4 个合格周），修订不受结果影响。用户 2026-10-16 决定。
+      【事后修订 v0.45.509，2026-10-16 —— 改的是自证里 A 在**故障日**的行情输入，不是判定规则】
+      10-14 生产纸面组合的 `_fetch_ohlc` 全部被限流（YFRateLimited）：当天 0 出场、11 只持仓按入场价估值，4 笔新仓
+      （ENPH/TMUS/T/QCOM 空）按没扣掉 DELL/NEE/NVDA/SNOW 四笔出场（−$444.53）的净值基数 50506.04 定额。逐日重锚的 A
+      有日线，当天就把那四笔平掉、基数 50061.51 ⇒ 四笔金额恰为生产的 0.99120 倍，标的 / 日期 / 方向全对：28/32、
+      决策层 32/32，无法判定。生产按代码照常执行了一个没有数据的日子，重放用了生产当时没有的数据——两边都没错，但这样
+      的自证在检验「重放能否复现生产」之外，还在检验「生产那天有没有行情」，而后者不是本检验要问的。09-24/25 是同一
+      形状（生产 0 平 0 开，A 多开 4 笔，进 a_only）。
+      修订 = 自证的逐日重锚段在生产日线取不到的那天，对那几只（或全部）标的按「没有日线」重放
+      （`paper_portfolio.replay_ohlc_mask`：`_fetch_ohlc` 返回 `{}`，与生产那天直连失败拿到的一样）。遮哪天只认两个来源：
+      ① 生产净值行的 `ohlc_unavailable`（v0.45.509 起生产自己写：本轮每次请求都抛异常的标的）；② 此前的故障日，
+      由日志取证登记在 `HISTORICAL_OHLC_OUTAGES`（09-24、09-25、10-14，一律全部标的；10-12 已整天排除，不重复登记）——
+      登记表封闭，之后的故障日只能由生产净值行自己说。取到过也失败过的标的（`ohlc_partial`）**不遮**、只报；
+      净值行有故障形状（有持仓、未实现盈亏恰为 0）却两处都没记的日子也只报、不遮，失败原因里点名。
+      **统计量用的连续 A / B 不遮**：它们估计的是「门开 / 关」在真实行情下的差，遮掉等于换估计量
+      （`tests/test_fg_selfproof_ohlc_outage.py::test_statistic_arms_are_never_masked` 钉住）。
+      修订前实测（只重放 A，用户 10-16 先看了诊断再批）：10-14 段遮掉后 4/4 逐笔复现、净值行逐字节同生产；09-24/25
+      两段 0/0 且净值行逐字节同。修订后 `run()`：自证 32/32、决策层 32/32、a_only 11 → 0；状态 not_ready（4/15 合格周）。
+      **未动**：窗口、变体、统计量、检视点、α、盲化、SELFPROOF_MIN_RATE、分母、四元组、种子、锚点。按盲化只看了进度与
+      A 的复现计数，`decide()` 从未走到出统计量的分支（修订时 4 个合格周），修订不受结果影响。
 统计量 两个变体各自的 `equity_curve.jsonl` 按 ISO 周取"本周首个交易日 NAV"，相邻两个
       取值点间的百分比变化即该周收益率；ΔNAV_pct = B周收益率 − A周收益率。
       非极端 F&G 日两个变体的仓位应逐笔相同 ⇒ 多数周 ΔNAV_pct=0——这是**预期正常**，
@@ -712,6 +731,54 @@ def _production_processed_dates() -> set:
     return {r["date"] for r in pp._load_jsonl(pp.EQUITY_FILE) if isinstance(r, dict) and isinstance(r.get("date"), str)}
 
 
+# v0.45.509 事后修订：生产纸面组合「整轮日线取不到」的故障日，自证按生产当时拿到的输入（没有日线）重放。
+# v0.45.509 起生产净值行自己带 `ohlc_unavailable`（那天一次都没取到日线的标的）；之前的故障日由日志 + 净值行取证，
+# 登记在这里（一律视为**全部标的**）。10-12 也是这种日子，但已整天排出前瞻窗口（v0.45.503），不重复登记。
+HISTORICAL_OHLC_OUTAGES: Dict[str, str] = {
+    "2026-09-24": "orchestrator-2026-09-24.log：_fetch_ohlc 失败 87 次 / 21 个标的；净值行持仓 14、unrealized=0.0、"
+                  "0 平 0 开",
+    "2026-09-25": "orchestrator-2026-09-25.log：_fetch_ohlc 失败 310 次 / 21 个标的；净值行持仓 14、unrealized=0.0、"
+                  "0 平 0 开",
+    "2026-10-14": "orchestrator-2026-10-14.log：_fetch_ohlc 失败 36 次 / 16 个标的（11 只持仓 + 4 只新仓，各两轮，"
+                  "YFRateLimited）；净值行持仓 15、unrealized=0.0、0 平 4 开",
+}
+
+
+def _outage_signature(row: Dict) -> bool:
+    """净值行的「整轮没取到日线」形状：有持仓、未实现盈亏恰为 0（每只都按入场价估值）。只用来**提醒**没登记、
+    也没带 `ohlc_unavailable` 的日子，不用来决定遮哪天（09-01 起恰好命中 09-24/25、10-12、10-14 四天）。"""
+    return (row.get("unrealized") == 0 and isinstance(row.get("positions_count"), int)
+            and row["positions_count"] > 0)
+
+
+def _production_ohlc_mask(dates: List[str]) -> Tuple[Dict[str, Optional[frozenset]], Dict]:
+    """自证要遮的日线：`{日期: None（全部标的）| frozenset(标的)}` + 报告用的信息。
+
+    来源只有两个：生产净值行的 `ohlc_unavailable`（v0.45.509 起生产自己写）与 `HISTORICAL_OHLC_OUTAGES`。
+    `ohlc_partial`（取到过也失败过）**不遮**——生产那天对它是时有时无，没法逐次复刻——只报；
+    有故障形状却两处都没记的日子也只报（`ohlc_outage_signature_unmarked`），复现率掉下来时原因里会点名。"""
+    import paper_portfolio as pp
+    rows = {r["date"]: r for r in pp._load_jsonl(pp.EQUITY_FILE)
+            if isinstance(r, dict) and isinstance(r.get("date"), str)}
+    mask: Dict[str, Optional[frozenset]] = {}
+    partial: Dict[str, List[str]] = {}
+    unmarked: List[str] = []
+    for d in dates:
+        row = rows.get(d) or {}
+        if d in HISTORICAL_OHLC_OUTAGES:
+            mask[d] = None
+        elif row.get("ohlc_unavailable"):
+            mask[d] = frozenset(str(t) for t in row["ohlc_unavailable"])
+        elif row and _outage_signature(row):
+            unmarked.append(d)
+        if row.get("ohlc_partial"):
+            partial[d] = sorted(str(t) for t in row["ohlc_partial"])
+    info = {"ohlc_outage_days": {d: ("全部" if m is None else sorted(m)) for d, m in sorted(mask.items())},
+            "ohlc_partial_days": partial,
+            "ohlc_outage_signature_unmarked": unmarked}
+    return mask, info
+
+
 def _seed_last_run_date(seed: Optional[Dict[str, bytes]]) -> str:
     """种子的 last_run_date；空种子（只给合成测试用）记成 ""，排在任何日期之前。"""
     if not seed or "meta.json" not in seed:
@@ -792,13 +859,27 @@ def _anchor_plan(seed: Optional[Dict[str, bytes]], sources: List[Tuple[str, Dict
 
 
 def _segmented_entries(plan: Dict, sandbox_root: Path) -> set:
-    """按分段方案逐段重放 A（默认配置 `{}`，**从不**用 B 的配置），收集每段自己那几天开的仓位（四元组）。"""
+    """按分段方案逐段重放 A（默认配置 `{}`，**从不**用 B 的配置），收集每段自己那几天开的仓位（四元组）。
+
+    v0.45.509：`plan["ohlc_mask"]` 里的日子按生产当时拿到的输入重放——那几只（或全部）标的那天没有日线
+    （`paper_portfolio.replay_ohlc_mask`）。每天实际挡下的请求数写回 `plan["info"]["ohlc_masked_requests"]`。"""
+    import paper_portfolio as pp
     out = set()
-    for i, (k, seg_dates) in enumerate(plan["segments"]):
-        r = _replay_variant({}, Path(sandbox_root) / f"A_seg_{i:03d}", seg_dates, seed=plan["anchors"][k])
-        days = set(seg_dates)
-        out |= {_entry_key(t) for t in r["closed"] + r["open_positions"] if t.get("entry_date") in days}
+    with pp.replay_ohlc_mask(plan.get("ohlc_mask") or {}) as hits:
+        for i, (k, seg_dates) in enumerate(plan["segments"]):
+            r = _replay_variant({}, Path(sandbox_root) / f"A_seg_{i:03d}", seg_dates, seed=plan["anchors"][k])
+            days = set(seg_dates)
+            out |= {_entry_key(t) for t in r["closed"] + r["open_positions"] if t.get("entry_date") in days}
+        if "info" in plan and plan.get("ohlc_mask"):
+            plan["info"]["ohlc_masked_requests"] = dict(sorted(hits.items()))
     return out
+
+
+def _attach_ohlc_mask(plan: Dict, dates: List[str]) -> Dict:
+    """v0.45.509：把生产故障日的日线遮罩挂到分段方案上（只给自证用；统计量的连续 A / B 不读它）。"""
+    plan["ohlc_mask"], info = _production_ohlc_mask(dates)
+    plan["info"].update(info)
+    return plan
 
 
 def _forward_anchor_plan(seed: Dict[str, bytes], dates: List[str]) -> Dict:
@@ -823,7 +904,7 @@ def _forward_anchor_plan(seed: Dict[str, bytes], dates: List[str]) -> Dict:
                         dates, processed=_production_processed_dates())
     plan["info"]["unreadable_state_commits"] = unreadable
     plan["info"]["overlap_days_checked"] = len(overlap)
-    return plan
+    return _attach_ohlc_mask(plan, dates)
 
 
 def _rehearse_anchor_plan(seed: Dict[str, bytes], dates: List[str], repo_root: Optional[Path],
@@ -839,7 +920,7 @@ def _rehearse_anchor_plan(seed: Dict[str, bytes], dates: List[str], repo_root: O
                                (SOURCE_DATA_BACKUP, {k: v[1] for k, v in back_hist.items()})],
                         dates, processed=_production_processed_dates())
     plan["info"]["unreadable_state_commits"] = u1 + u2
-    return plan
+    return _attach_ohlc_mask(plan, dates)
 
 
 def _apply_seed(state_dir: Path, seed: Dict[str, bytes]) -> None:
@@ -958,8 +1039,9 @@ def _a_only_note(n: int) -> str:
     """v0.45.396：A 多开了生产没开的仓位时追加在失败原因末尾的一句。
 
     不含「评分链」「仓位金额」两个词：测试靠它们分辨失败原因走了哪一支（决策层 / 金额层），附注不能冒充分支。"""
-    return (f"；另：有 {n} 笔是 A 开了、生产当天没开——生产那天没处理完（09-24/25 被 yfinance 限流：当天不出场"
-            "也不开仓），或 A 的入场条件比生产当时更宽（入场规则 / 组合层配置被改）。单日段里它们不会带进后面的日子"
+    return (f"；另：有 {n} 笔是 A 开了、生产当天没开——生产那天没处理完（日线取不到的故障日已按生产当时没有日线重放，"
+            "见 ohlc_outage_days；没登记的故障形状日见 ohlc_outage_signature_unmarked），或 A 的入场条件比生产当时更宽"
+            "（入场规则 / 组合层配置被改）。单日段里它们不会带进后面的日子"
             "（跨多天 / 锚点旧的段会，见锚点缺口）；"
             "先查生产那几天日志里的「_fetch_ohlc … 失败」")
 
@@ -997,6 +1079,13 @@ def _selfproof_failure_reason(sp: Dict, ohlc: Optional[Dict] = None, segments: O
     if gaps:   # v0.45.408 二次检查：锚点有缺口的那几天是从更早的状态起跑的，原因要说到这一层
         reason += (f"；⚠️ 逐日锚点有缺口{gaps}：那几天从更早的状态起跑，生产在缺口里的良性分歧（如限流日多开）会带进来"
                    "——先核对数据备份仓库那几天的提交，再按上面的方向查")
+    seg = segments or {}
+    if seg.get("ohlc_outage_signature_unmarked"):   # v0.45.509
+        reason += (f"；⚠️ 生产净值行在 {'、'.join(seg['ohlc_outage_signature_unmarked'])} 有「整轮没取到日线」的形状"
+                   "（有持仓、未实现盈亏恰为 0），却既没带 ohlc_unavailable 也没登记进 HISTORICAL_OHLC_OUTAGES——"
+                   "先查那几天日志里的「_fetch_ohlc … 失败」")
+    if seg.get("ohlc_partial_days"):
+        reason += (f"；生产在 {'、'.join(seg['ohlc_partial_days'])} 有标的日线时有时无（ohlc_partial，自证没遮）")
     if _ohlc_partly_missing(ohlc):
         reason += (f"；⚠️ 但这次重放有行情缺失：整段取数 {ohlc.get('fallback')}/{ohlc.get('wide_fetches')} 个标的退回直连，"
                    f"直连 {ohlc.get('direct_requests')} 次请求里 {ohlc.get('direct_empty')} 次一根 bar 都没有——"
@@ -1557,6 +1646,9 @@ def _print_selfproof_details(res: Dict) -> None:
         print(f"  逐日重锚：{seg.get('segments')} 段｜锚点来源 {seg.get('anchor_sources')}｜跨多天的段 "
               f"{seg.get('multi_day_segments') or '无'}｜坏锚点 {list(seg.get('invalid_anchors') or {}) or '无'}"
               f"｜生产没处理的快照日 {seg.get('production_unprocessed_dates') or '无'}")
+        print(f"  按生产没有日线重放的故障日：{seg.get('ohlc_outage_days') or '无'}｜挡下的请求 "
+              f"{seg.get('ohlc_masked_requests') or '无'}｜日线时有时无（未遮）{seg.get('ohlc_partial_days') or '无'}"
+              f"｜有故障形状却未记 {seg.get('ohlc_outage_signature_unmarked') or '无'}")
     if cont:
         print(f"  连续 A（统计量那份，只作诊断）：精确 {cont.get('reproduced')}/{cont.get('real_entries')}｜决策层 "
               f"{cont.get('decision_reproduced')}/{cont.get('real_entries')}｜比生产多开 {cont.get('a_only_entries')} 笔")
