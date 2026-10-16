@@ -106,7 +106,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import ledger_io
-from hive_logger import PATHS, get_logger
+from hive_logger import PATHS, explicit_data_root, get_logger
 
 _log = get_logger("earnings_vol_signal")
 
@@ -614,7 +614,7 @@ def _snapshot_dir_diagnosis(cdir: Path, as_of: str) -> str:
 def _cache_dir_hint(cdir: Path) -> str:
     """两种「读错目录」的常见来路，命中才说；都不命中返回空串。"""
     hints = []
-    if "ALPHA_HIVE_HOME" not in os.environ:
+    if explicit_data_root() is None:      # 唯一实现（空串也算没设），不在这里另写一份 os.environ.get
         hints.append("未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录（生产由编排器 export）")
     # 快照的写者 options_analyzer 用 PATHS.cache_dir（读 ALPHA_HIVE_CACHE_DIR）；本模块读的是
     # `BASE_DIR / "cache"`。生产只 export ALPHA_HIVE_HOME，两者相同；设了前者就会分叉。
@@ -654,7 +654,7 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
 
 
 @ledger_io.locked_by(_signals_dir)
-def _scan_with_info(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
+def _scan_with_info(as_of: str, cache_dir, earnings_cache_dir,
                     stats_fn: Optional[Callable[[str], Optional[dict]]] = None,
                     upcoming_fn: Optional[Callable[[str], Optional[dict]]] = None,
                     gex_fn: Optional[Callable[[str], Optional[dict]]] = None) -> Tuple[List[dict], Dict]:
@@ -829,7 +829,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     from hive_logger import pdt_today
     args = sys.argv[1:] if argv is None else list(argv)
     d = args[0] if args else pdt_today()
-    signals, info = _scan_with_info(d)
+    signals, info = _scan_with_info(d, "cache", "earnings_cache")   # 与 scan() 缺省同值（相对 BASE_DIR 解析）
     if info["n_snapshots"] == 0:
         print(f"❓ {d}：no snapshots found in {info['cache_dir']}（{info['diagnosis']}）"
               f"——未改写 {SIGNALS_FILE}（该日已有 {info['n_existing_for_date']} 行原样保留）",

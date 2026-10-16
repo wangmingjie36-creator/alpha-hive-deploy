@@ -595,6 +595,26 @@ class TestMainExitCodes:
         assert "1 行原样保留" in rc.stderr
         assert ledger.read_bytes() == before
 
+    @pytest.mark.parametrize("with_snapshot", [True, False])
+    def test_cli_entry_reads_the_ledger_under_the_lock(self, state, monkeypatch, with_snapshot):
+        """v0.45.380 把 `scan` 拆成 `scan`（转发）+ `_scan_with_info`（本体）；CLI 直接走后者，绕过 `scan` 的装饰器。
+        账本锁（v0.45.452）可重入，所以只守 `scan` 时，去掉本体上的装饰器没有任何测试变红——CLI 路径就悄悄失锁。
+        零快照与有快照两条路径都要在锁里读账本（读-改-写不能被别的写者插进来）。"""
+        import ledger_io
+        monkeypatch.setattr(evs, "BASE_DIR", state.parent)
+        if with_snapshot:
+            _write_snap(state, "XYZ", AS_OF, _qs(available=False))
+        seen = []
+        real = evs.load_signals
+
+        def spy():
+            seen.append(ledger_io.is_locked_here(evs.SIGNALS_FILE.parent))
+            return real()
+        monkeypatch.setattr(evs, "load_signals", spy)
+        monkeypatch.setattr(evs, "summary_stats", lambda: {})   # main() 末尾的只读汇总也会读账本，不在锁里，不是被测对象
+        assert evs.main([AS_OF]) == (0 if with_snapshot else 3)
+        assert seen and all(seen), f"CLI 入口读账本时没持锁：{seen}"
+
     def test_main_with_snapshots_exits_0(self, state, monkeypatch, capsys):
         monkeypatch.setattr(evs, "BASE_DIR", state.parent)       # 默认 cache_dir="cache" 解析到 state
         _write_snap(state, "XYZ", AS_OF, _qs(available=False))    # 报价不可用 ⇒ 预检即停，不打网

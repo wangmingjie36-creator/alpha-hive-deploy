@@ -4688,6 +4688,26 @@ v0.45.371 复查时记下的副作用：期权墙逐行的虚线分隔从 `rgba(
 - 上面 09-23 那条日志结论收窄（见生产段）：原写「钩子那天没跑到」证据不够，改为「扫描起了、钩子没留痕」+ 待验证。
 - 全部变异在最终文件上重跑（基线 collected 52，每轮 passed+failed = 52，还原后 sha256 一致、52/52 绿）。
 
+### 合入 main 后的适配（2026-10-16，分支晾了两周，main 已前进 ~370 个提交）
+`earnings_vol_signal.py` 与 main 冲突（main 上 v0.45.424 / 428 / 452 / 454 / 500 都改过 `scan`），**以 main 为底把本版改动重新套上去**，没有拿旧文件硬合：
+- **main 的缺陷原样还在**：`scan` 末尾仍是 `existing = 其它日期的行; _write_jsonl(existing + signals)`，零快照照样删该日行。本版修复仍然必要。
+- 保留 main 的：`@ledger_io.locked_by` 账本锁、`gex_fn` / `gex_ctx` / `shadow_event`、收盘后 gex_ctx 的同日取舍（`_usable_capture`，搬运进按票 upsert 的循环）、
+  `upcoming_fn` 缺省读磁盘观测（`earnings_calendar`，不再有 `watcher` 参数）。
+- **锁**：本体 `_scan_with_info` 与 `scan` 两处都挂 `locked_by`（锁可重入）。CLI `main()` 直接走本体、绕过 `scan` 的装饰器——
+  只守 `scan` 时去掉本体上的装饰器**没有任何测试变红**（合入后变异 M12 暴露），CLI 路径会悄悄失锁。补 `test_cli_entry_reads_the_ledger_under_the_lock`（零快照 / 有快照两路，M12 ⇒ 2 红）。
+  零快照守卫放在 `load_signals()` **之后**：main 的 `test_read_modify_write_entrypoints_hold_the_lock[earnings_vol_signal-scan]` 用零快照目录探「读账本时持锁」，守卫放前面它会变成空探针。
+- **GEX 读者白名单**（`tests/test_straddle_gex_shadow.py::TestReaders`）：真正读 `gex_ctx` 的写入点现在是 `_scan_with_info`（`scan` 只剩转发）。`WRITERS` 里 `scan` 换成 `_scan_with_info`，
+  并加一条断言「`scan` 不得再读 `gex_ctx`」——它哪天又开始读，就该回来对一遍白名单。
+- **全量跑出 3 条守卫红，都是本版引入、都按守卫规则修（没有加豁免）**：
+  ① `test_data_root_default`（直接写 `"ALPHA_HIVE_HOME"` 键要登记）：`_cache_dir_hint` 改用 `hive_logger.explicit_data_root()`——
+  这正是规则第一问「能不能改经 hive_logger」的答案，不新增登记，且「空串也算没设」与数据根的唯一解析一致；
+  ② `test_price_history_default_paths`（新增 cwd 相对缺省 `"cache"`）：`_scan_with_info` 的两个路径参数去掉缺省值，`scan` 显式传入、CLI 显式传同值；
+  ③ `test_earnings_event_shadow::TestReaders`（`shadow_event` 写入点白名单）：与 GEX 那条同形，`scan` → `_scan_with_info`，并断言 `scan` 不得再写它。
+- 变异在合并后的最终文件上重跑；M0 钉 main 的提交（`6f570def`，不含修复），旧钉 `b7a9fb5f` 已不是 main 的行为：基线 collected 55（后加 2 条 = 57，下为最终 57 条上的结果），
+  M0 ⇒ 11 红；M1 5 / M2 2 / M3 1 / M4 3 / M5 2 / M6 2 / M7 1 / M8 1 / M9 7（含「只有 inode 变」）/ M10 1 / **M12 2**；
+  **M11 丢掉 gex_ctx 搬运** ⇒ 本文件 0 红（那是 main 的行为，不属于本版测试）→ 在 main 的 `test_straddle_gex_shadow` 里 2 红（`TestSameDayCapture`）；
+  **M13 `scan` 包装不持锁** ⇒ main 的 `test_ledger_io_v2` 1 红。即重套之后，main 对这两处的守卫仍然有牙。
+
 ### 同形普查（全仓 `get("as_of"|"date") != as_of` 式重写，只列不修）
 - ⚠️ `vrp_signal.record_day`（**同一个日更钩子紧接着调用**）：`keep = 其它日期的行` + 本次行 ⇒ 零快照同样删光该日行，
   含 `settle()` 回填的 `rv_forward` / `vrp_realized`（v0.45.104 的搬运同样只救重新产出的票）；缺省目录还走会 mkdir 的 `PATHS.cache_dir`。已另开任务。
@@ -4697,7 +4717,7 @@ v0.45.371 复查时记下的副作用：期权墙逐行的虚线分隔从 `rgba(
 ### 未做
 - 读者 / 写者目录不一致（本模块 `BASE_DIR / "cache"` vs `options_analyzer` 的 `PATHS.cache_dir`）只加了提示，没改默认值：生产只 export `ALPHA_HIVE_HOME`，两者相同。
 - `BASE_DIR` / `STATE_DIR` / `SIGNALS_FILE` 仍是 import 期冻结（`test_paths_not_frozen_at_import` KNOWN 存量），未动。
-- `_load_jsonl` 静默跳过坏行 ⇒ 每次正常改写都会把坏行丢掉：本版只让零输入不写，坏行问题未处理。
+- ~~`_load_jsonl` 静默跳过坏行~~（**已作废**：合入时 main 的 v0.45.452 已把账本读改成严格——坏行 ⇒ `LedgerCorrupt`，在写之前就抛，本版的 `load_signals()` 在零快照守卫之前调用，坏账本一样会先停下）。
 
 ## [0.45.379] — 2026-09-29 — Fixed（数据）：DE / XOM / COST / CVX 期权快照 2026-09-23 的 `iv_rank` / `iv_percentile` 重算（沿 v0.45.372 做法；仅这两个字段）
 
