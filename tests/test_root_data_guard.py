@@ -824,6 +824,60 @@ class TestTimelineLocate:
         assert "收集期" not in label and "开始时刻未知" in label
         assert "t.py::a 的 call 阶段" in g.locate(11.5, self.TL, session_start=None)
 
+    # ── v0.45.507：mtime 比 `time.time()` 粗（Linux 内核按 tick 盖时间戳），真实写入时刻在 [t, t + lag] ──
+    def test_lag_window_inside_one_segment_names_only_it(self):
+        label = g.locate(11.5, self.TL, session_start=5.0, lag=0.004)
+        assert label == "t.py::a 的 call 阶段", label
+
+    def test_lag_window_straddling_setup_and_call_names_both(self):
+        """CI 上的那一幕：call 开头的写入，mtime 落回 setup 末尾——不许只报 setup。"""
+        label = g.locate(10.998, self.TL, session_start=5.0, lag=0.004)
+        assert "t.py::a 的 setup 阶段" in label and "t.py::a 的 call 阶段" in label, label
+        assert "分不开" in label and "4 ms" in label, label
+
+    def test_lag_window_keeps_segments_in_the_middle(self):
+        """窗口跨三段：中间那段不许因为只看两端而丢掉。"""
+        label = g.locate(10.9, self.TL, session_start=5.0, lag=1.2)
+        for when in ("setup", "call", "teardown"):
+            assert f"t.py::a 的 {when} 阶段" in label, label
+
+    def test_lag_window_spanning_many_segments_is_abbreviated(self):
+        label = g.locate(10.5, self.TL, session_start=5.0, lag=10.0)
+        assert label.startswith("t.py::a 的 setup 阶段") and "中间 4 段" in label and "最后一段记录之后" in label, label
+
+    def test_lag_window_at_session_start_is_not_claimed_as_old_mtime(self):
+        """本轮开始之后一个 tick 内写的文件，mtime 可能早于开始时刻——不许只报「保留了旧 mtime」。"""
+        label = g.locate(4.999, self.TL, session_start=5.0, lag=0.004)
+        assert "早于本轮开始" in label and "收集期" in label, label
+        assert g.locate(4.0, self.TL, session_start=5.0, lag=0.004).startswith("早于本轮开始")
+        assert g.locate(4.999, [], session_start=5.0, lag=0.004).startswith("本轮没有任何测试报告")
+
+    def test_zero_lag_keeps_point_semantics_on_shared_boundaries(self):
+        """lag=0 与 v0.45.455 逐点规则逐字一致：相邻两段共用的端点归前一段，本轮开始时刻归收集期。"""
+        tl = [(10.0, 11.0, "t.py::a", "setup"), (11.0, 12.0, "t.py::a", "call")]
+        assert g.locate(11.0, tl, session_start=5.0) == "t.py::a 的 setup 阶段"
+        assert g.locate(5.0, tl, session_start=5.0).startswith("收集期")
+
+    def test_format_timeline_applies_this_machines_mtime_lag(self, monkeypatch):
+        """报错里那一节确实按 `mtime_lag()` 放宽——只测 `locate` 接不住「调用方忘了传 lag」。"""
+        sig = {"x.json": f"1:{int(10.998 * 1e9)}"}
+        monkeypatch.setattr(g, "mtime_lag", lambda: 0.004)
+        both = g.format_timeline("/nonexistent", {"changed": ["x.json"]}, sig, self.TL, 5.0)
+        assert "t.py::a 的 setup 阶段" in both and "t.py::a 的 call 阶段" in both, both
+        monkeypatch.setattr(g, "mtime_lag", lambda: 0.0)
+        assert "t.py::a 的 call 阶段" not in g.format_timeline("/nonexistent", {"changed": ["x.json"]}, sig, self.TL, 5.0)
+
+    def test_mtime_lag_bounds_this_machine(self, tmp_path):
+        """`mtime_lag` 的前提实测（它是放宽多少的唯一依据）：本机写文件，mtime 不早于写前读的 `time.time()` 超过它。
+        v0.45.455 只写了一句「与文件 mtime 同为墙钟」，没人量过——Linux 上不成立，两条时间线测试在 CI 恒红。"""
+        lag, probe, worst = g.mtime_lag(), tmp_path / "probe", 0.0
+        for _ in range(500):
+            before = time.time()
+            with open(probe, "ab") as f:
+                f.write(b"x")
+            worst = max(worst, before - os.stat(probe).st_mtime_ns / 1e9)
+        assert worst <= lag + 1e-6, f"mtime 比写前的 time.time() 早了 {worst * 1000:.3f} ms，超出 mtime_lag()={lag * 1000:.3f} ms"
+
     def test_change_mtime_reads_file_signature_and_stats_dirs(self, tmp_path):
         (tmp_path / "d").mkdir()
         assert g.change_mtime(str(tmp_path), "f", "3:1500000000000000000") == 1.5e9
@@ -842,25 +896,40 @@ def _labels(out: str) -> dict[str, str]:
     return res
 
 
+# 内层测试里每次写入前后各停这么久（v0.45.507）：mtime 精度（Linux 上 `mtime_lag()` 为几到几十毫秒）内的相邻几段
+# `locate` 会照实说「分不开」——而内层这几条测试整轮跑完都不到 8 ms。要断言「落在哪一段」，写入离段边界必须远于精度。
+_SETTLE = 0.05
+
+
+def _assert_settle_exceeds_mtime_lag():
+    assert g.mtime_lag() < _SETTLE, (
+        f"内层写入前后停 {_SETTLE}s 已不大于本机 mtime 精度 {g.mtime_lag()}s：「落在哪一段」的断言前提没了，调大 _SETTLE")
+
+
 def test_repo_root_gate_places_each_write_on_the_timeline(tmp_path):
     """收集期写 / 第一条测试写 / 最后一条什么都不写 / session fixture 收尾时写 / 保留旧 mtime / 删除——各归其位，
     最后一条测试**不**被当成写入时刻所在（它就是 pytest 记这条 error 的那个名字）。"""
-    root = _make_fake_checkout(tmp_path / "checkout", """
-        import os, pathlib, pytest
+    _assert_settle_exceeds_mtime_lag()
+    root = _make_fake_checkout(tmp_path / "checkout", f"""
+        import os, pathlib, pytest, time
         ROOT = pathlib.Path(__file__).resolve().parents[1]
         (ROOT / "at_collection.json").write_text("x")
+        time.sleep({_SETTLE})
 
         @pytest.fixture(scope="session")
         def writes_at_session_end():
             yield
+            time.sleep({_SETTLE})
             (ROOT / "at_session_teardown.json").write_text("x")
 
         def test_a_writes(writes_at_session_end):
+            time.sleep({_SETTLE})
             with open(ROOT / "report_snapshots/a.json", "ab") as f:
                 f.write(b"x")
             (ROOT / "old_mtime.json").write_text("x")
             os.utime(ROOT / "old_mtime.json", (1_000_000_000, 1_000_000_000))   # copy2 / 解包那种
             (ROOT / "probability_scorecard_state/published.jsonl").unlink()
+            time.sleep({_SETTLE})
 
         def test_z_last_does_nothing():
             pass
@@ -873,10 +942,10 @@ def test_repo_root_gate_places_each_write_on_the_timeline(tmp_path):
     assert "同一文件被写多次只看得到最后一次" in out, "mtime 是最后一次修改——不说清会让人以为没有更早的写入者"
     lab = _labels(out)
     assert "收集期" in lab["at_collection.json"], lab
-    assert "test_a_writes 的 call 阶段" in lab["report_snapshots/a.json"], lab
+    assert lab["report_snapshots/a.json"] == "tests/test_inner.py::test_a_writes 的 call 阶段", lab
     assert "早于本轮开始" in lab["old_mtime.json"], lab
     assert "定位不了" in lab["probability_scorecard_state/published.jsonl"], lab
-    assert "最后一段记录之后" in lab["at_session_teardown.json"], lab
+    assert lab["at_session_teardown.json"].startswith("最后一段记录之后"), lab
     assert not any("test_z_last_does_nothing 的 call" in v for v in lab.values()), \
         f"最后一条什么都没写，却被标成写入时刻所在：\n{lab}"
 
@@ -884,22 +953,27 @@ def test_repo_root_gate_places_each_write_on_the_timeline(tmp_path):
 def test_real_data_root_gate_names_the_test_running_when_a_concurrent_writer_wrote(tmp_path):
     """并发写入者（这里用线程模拟）在一条无关测试期间写：标出那条测试的阶段，措辞仍是「时间重合」。
     测试自己的写入归到它自己。"""
+    _assert_settle_exceeds_mtime_lag()
     data_root = _make_data_root(tmp_path / "alpha-hive-data")
-    root = _make_fake_checkout(tmp_path / "checkout", """
-        import os, pathlib, threading
+    root = _make_fake_checkout(tmp_path / "checkout", f"""
+        import os, pathlib, threading, time
         DR = pathlib.Path(os.environ["INNER_DATA_ROOT"])
         GO = threading.Event()
 
         def _writer():
             GO.wait(20)
-            (DR / "report_snapshots/by_writer.json").write_text("{}")
+            time.sleep({_SETTLE})
+            (DR / "report_snapshots/by_writer.json").write_text("{{}}")
+            time.sleep({_SETTLE})
 
         T = threading.Thread(target=_writer, daemon=True)
 
         def test_a_escapes():
             T.start()
+            time.sleep({_SETTLE})
             with open(DR / "pheromone.db", "ab") as f:
                 f.write(b"x")
+            time.sleep({_SETTLE})
 
         def test_b_unrelated():
             GO.set()
@@ -909,6 +983,6 @@ def test_real_data_root_gate_names_the_test_running_when_a_concurrent_writer_wro
     out = r.stdout + r.stderr
     assert r.returncode != 0 and "2 passed, 1 error" in out, out
     lab = _labels(out)
-    assert "test_a_escapes 的 call 阶段" in lab["pheromone.db"], lab
-    assert "test_b_unrelated 的 call 阶段" in lab["report_snapshots/by_writer.json"], lab
+    assert lab["pheromone.db"] == "tests/test_inner.py::test_a_escapes 的 call 阶段", lab
+    assert lab["report_snapshots/by_writer.json"] == "tests/test_inner.py::test_b_unrelated 的 call 阶段", lab
     assert "只说明时间重合，不等于是它写的" in out and "并发写入者" in out, out

@@ -5,7 +5,43 @@
 
 ---
 
-## [0.45.507] — 2026-10-16 — 占位（进行中：test_root_data_guard 两条时间线测试在 Linux CI 上红）
+## [0.45.507] — 2026-10-16 — Fixed（仅测试基础设施）：两道 session 级总闸「逐文件写入时刻落在哪条测试」的定位按**本机 mtime 精度**放宽——Linux 内核按 tick 盖 inode 时间戳，mtime 可比写入那一刻的 `time.time()` 早一个 tick，call 开头的写入被标成 setup；`test_root_data_guard` 两条时间线测试因此在 Linux CI 上恒红（macOS 绿）
+
+**症状。** CI `tests.yml`（run 38884127475，v0.45.505 那轮）3 条红：设计红 `TestCoverageHorizon`（等 BLS 2027 日程，未动）+
+`test_repo_root_gate_places_each_write_on_the_timeline`（`a.json` 标成 `test_a_writes 的 setup 阶段`，实际在 call 里写）+
+`test_real_data_root_gate_names_the_test_running_when_a_concurrent_writer_wrote`（`pheromone.db` 同样被标成 setup）。本机全绿。
+495 条目已记为「CI 既有问题」、不拨钟也红（run 38419282205）——红进一个本来就红的 CI，三天没人看出 506 那四条新红（见 506 条目）。
+
+**根因。** v0.45.455 的 `locate` 把 mtime 与 pytest 报告的 `start/stop`（`time.time()`）按点比较，注释写「与文件 mtime 同为墙钟」——
+同一只钟，**不同精度**：Linux 的 `current_time()` 取粗粒度时钟（`ktime_get_coarse_real_ts64`，每 tick 才前进一次），`time.time()` 是细粒度的
+⇒ mtime ∈ [真实写入 − 1 tick, 真实写入]。setup → call 之间不到 1 ms，call 开头的写入 mtime 几乎必然落回 setup。macOS（APFS）实测 2000 次
+mtime 从不早于写前读的 `time.time()`，所以本机永远复现不了。同一假设也写在 `pytest_sessionstart` 的注释里（「取指纹期间写的文件 mtime 不会
+早于开始时刻」），本轮开始后一个 tick 内的写入在 Linux 上会被误标成「保留了旧 mtime」。
+
+### Fixed
+- **`tests/_root_data_guard.py`**：新增 `mtime_lag()` = 2 × `clock_getres(CLOCK_REALTIME_COARSE)`（这只钟不存在的平台取 0；取两倍是给虚拟机上被推迟的
+  tick 留余量——宁可多列一段也不标错）；`locate(..., lag)` 把真实写入时刻当成窗口 `[t, t + lag]`，跨几段照实列几段并注明「在此精度内分不开」
+  （超过 4 段只列首尾 + 中间段数），**不替读者挑一段**；lag=0 与 455 的逐点规则逐字一致（共用端点归前一段，开始时刻归收集期）。区段切分抽成
+  `_regions`。`format_timeline` 传入本机 `mtime_lag()`。只管内核时钟，不管文件系统自身的时间戳粒度（HFS+/FAT 秒级盘不在本闸范围，docstring 写明）。
+- **`tests/test_root_data_guard.py`** 两条端到端测试：内层写入前后各停 `_SETTLE = 0.05s`——内层几条测试整轮跑完不到 8 ms，在 Linux 精度下
+  各段本来就分不开，「落在哪一段」的断言要求写入离段边界远于精度；外层先断言 `mtime_lag() < _SETTLE`（前提没了会红，不会静默）。断言收紧为
+  标签**全等**（原为子串）。
+- **`tests/conftest.py`**：`pytest_sessionstart` 那句注释补上 Linux 例外。
+
+### Added（测试）
+- `TestTimelineLocate`：窗口落在一段内只报那段 / 跨 setup·call 两段都报 / 跨三段不丢中间段 / 跨多段缩写 / 本轮开始附近不只报「旧 mtime」/
+  lag=0 共用端点归前一段 / `format_timeline` 确实用了 `mtime_lag()` / **`test_mtime_lag_bounds_this_machine`**：本机写 500 次文件，
+  mtime 早于写前 `time.time()` 的最大值不超过 `mtime_lag()`——这是放宽多少的唯一依据，455 只写了一句注释、没人量过。
+
+### 验证
+- 本机无 Linux：用 `sitecustomize` 把 `os.stat/lstat/fstat` 读出的 mtime 向下取整到 4 ms tick 模拟内核粗时钟。不暴露粗时钟（= 旧行为）⇒
+  `a.json` 那条 3/3 红，与 CI 同形；暴露粗时钟（`clock_getres`=4 ms）⇒ 19 条 6/6 绿；原生 macOS 3/3 绿。
+- 变异：前提测试在「mtime 取整但 `mtime_lag()` 说 0」下红（早 3.975 ms）；`format_timeline` 不传 lag ⇒ 红；`locate` 忽略 lag ⇒ 红。
+- 本机全量（CI 同参 `-m "not integration and not network"`）：9837 passed / 1 failed（设计红 `TestCoverageHorizon`）/ 1 error——
+  真实数据根闸：`replay_ohlc_state/` 17 个文件在 05:38:40–47 被改，按新时间线散落在 `test_sell_strike_levels` / `test_slack_notifier`
+  等无关测试里、约 2.5 s 一个；生产日志 `~/alpha-hive-data/logs/alpha_hive.log` 同一刻有 `[PaperPortfolio] 回放 OHLC 窗口` 一行
+  （今天 02:24 / 03:02 也各有一次，均早于本轮）——测试会话的日志落在沙箱，这行出自本轮之外的进程 ⇒ 并发写入者。复核：
+  replay / paper_portfolio / fg / 本闸 / 那三条时刻所在文件共 14 个重跑 745 passed、闸不红。CI 结果以推送后那轮为准。
 
 ## [0.45.506] — 2026-10-16 — Fixed（仅测试 / 分类表）：v0.45.495 把拨钟 harness 搬进 `tools/clockshift/` 后，四条全仓守卫在 origin/main 上恒红——四处全是代码 / 工具，按各守卫自己的规则登记进对应类别；补 sitecustomize 串接的行为测试（`KNOWN` 要求「写明守它的测试」，此前没有）
 

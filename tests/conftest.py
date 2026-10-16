@@ -1408,7 +1408,8 @@ _SESSION_START_WALL = pytest.StashKey[float]()
 
 
 def pytest_sessionstart(session):
-    # 先记开始时刻再取指纹：取指纹期间被写的文件，mtime 也不会早于这个时刻（否则会被误标成「保留了旧 mtime」）
+    # 先记开始时刻再取指纹：取指纹期间被写的文件，mtime 也不会早于这个时刻（否则会被误标成「保留了旧 mtime」）。
+    # Linux 上 mtime 可比此刻早至多一个 tick（粗粒度内核时钟），`locate` 按 `mtime_lag` 放宽（v0.45.507）
     session.config.stash[_SESSION_START_WALL] = time.time()
     _GATE_TIMELINE.clear()
     session.config.stash[_ROOT_FP_BEFORE] = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)
