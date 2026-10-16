@@ -42,7 +42,7 @@ def _get_secret(name: str) -> str:
         import os as _os
         return _os.environ.get(name, "")
 from dataclasses import dataclass
-from datetime import datetime, time as _dt_time
+from datetime import datetime, timedelta, time as _dt_time
 
 _log = logging.getLogger("alpha_hive.data_pipeline")
 
@@ -144,6 +144,7 @@ class StockData:
     momentum_source: "5d_real"（yfinance 历史K线计算）| "price_index"（自攒索引回落）| "unavailable"
     momentum_as_of: 自攒索引回落时窗口末端那一天（v0.45.465）；其余来源不填
     volume_source: "yfinance" | "twelvedata"（回落）| None（没有值）（v0.45.473）
+    volume_as_of: Twelve Data 回落时比值末根那一天（v0.45.505）；其余来源不填
 
     数据源只填**自己取到的**历史字段；缺的那几项由 `MultiSourceFetcher` 唯一出口
     `_fill_history_fields` 统一回落（v0.45.473），不归哪个源管。
@@ -170,6 +171,9 @@ class StockData:
     # 拿不到时是库里最新一天（上一个扫描日），比 yfinance 收盘后的窗口滞后一个扫描日。
     momentum_as_of: Optional[str] = None
     volume_source: Optional[str] = None
+    # v0.45.505：Twelve Data 回落的比值末根日期。只在它 == 此刻最近一场已收盘时才收（见
+    # `_fill_volume_from_twelvedata`），所以有值时它就是 yfinance 主路径会结束的那一天。
+    volume_as_of: Optional[str] = None
     fetch_timestamp: float = 0.0
     is_market_hours: bool = False
     # v0.45.234：price 取的是哪个字段（目前只有 CBOE 源填，见 cboe_options.official_price）。
@@ -196,6 +200,7 @@ class StockData:
             "momentum_source": self.momentum_source,
             "momentum_as_of": self.momentum_as_of,
             "volume_source": self.volume_source,
+            "volume_as_of": self.volume_as_of,
             "fetch_timestamp": self.fetch_timestamp,
             "is_market_hours": self.is_market_hours,
             "price_source": self.price_source,
@@ -602,6 +607,28 @@ def _cboe_session_close(payload: dict) -> Optional[Tuple[str, float]]:
     return session.isoformat(), px
 
 
+def _latest_closed_session() -> Optional[str]:
+    """此刻「最近一场已收盘」的交易日（ISO），即 yfinance 主路径的日线窗口会结束的那一天（v0.45.505）。
+
+    交易日且已过该场收盘（提前收盘日 13:00）⇒ 当天；交易日盘前 / 盘中 ⇒ 前一交易日；周末 / 假日 ⇒ 之前
+    最近一个交易日。规则全部复用 `portfolio_greeks`（`_expected_session` 判「这天用哪一场」、`_session_closed`
+    判「收了没」、`_et_now` 是唯一一只钟），不另抄一份交易日算术。
+    判不了（日历 / 时区不可用）⇒ None：调用方据此**拒收**，不猜。
+    """
+    try:
+        import is_trading_day as _cal  # noqa: F401 —— 先证日历可用：下面两个 helper 判不了时会静默给值
+        from portfolio_greeks import _et_now, _expected_session, _session_closed
+        now = _et_now()
+        today = now.date()
+        s = _expected_session(today.isoformat())
+        if s == today.isoformat() and not _session_closed(s, now):
+            s = _expected_session((today - timedelta(days=1)).isoformat())
+        return s
+    except Exception as e:  # noqa: BLE001
+        _log.warning("判不了最近一场已收盘的交易日: %s: %s", type(e).__name__, e)
+        return None
+
+
 def _fill_volume_from_twelvedata(ticker: str, out: Optional[Dict]) -> Optional[Dict]:
     """yfinance 拿不到 volume_ratio 时，回落 Twelve Data 日K（v0.45.81）。
 
@@ -611,6 +638,15 @@ def _fill_volume_from_twelvedata(ticker: str, out: Optional[Dict]) -> Optional[D
 
     不去动 momentum_5d：那条已经有自己的回落路径（自攒价格索引），
     这里只补 volume_ratio 这一项缺口。
+
+    **只收「末根 == 此刻最近一场已收盘」的比值**（v0.45.505，`_latest_closed_session`）：Twelve Data 当日那根
+    当晚是临时值、被 `twelve_data._drop_forming_bar` 规则 ① 丢掉（**那条规则是对的，勿改**），所以收盘后的生产
+    扫描（~17:15 ET）里它的比值止于 D-1，而 yfinance 主路径含 D。旧行为把 D-1 的比值当 D 的收下：2026-09-15
+    NVDA 报 1.01（D-1 1.0132），当天实际 0.676——一个 0.68× 的缩量日被说成量能正常。对不上 ⇒ 拒收（WARNING
+    点名标的 / 末根 / 应有场次），volume_ratio 留 None ⇒ `still_missing` ⇒ P2。盘中 / 盘前 / 周末跑时应有场次是
+    前一交易日，与 Twelve Data 末根一致，照收。收下时结果带 `volume_as_of`。
+    没有免费源能在扫描时给出 D 的定稿成交量（CBOE 收盘后偏低中位 19%、Massive 免费档 19:00 ET 前 403、
+    Tiingo 21:00 ET 前仍在改），所以这里是「宁缺」，不是去别处补。
 
     生产唯一调用点：`_fill_history_fields`（v0.45.473），同上。
     """
@@ -624,12 +660,18 @@ def _fill_volume_from_twelvedata(ticker: str, out: Optional[Dict]) -> Optional[D
         return out
     if v is None:
         return out  # Twelve Data 也没有 → 保持 None，诚实缺数据
+    as_of, want = v.get("as_of"), _latest_closed_session()
+    if as_of is None or want is None or as_of != want:
+        _log.warning("[%s] Twelve Data 量比 %.2fx 末根 %s ≠ 应有场次 %s（最近一场已收盘）—— 拒收，volume_ratio 留 None",
+                     ticker, v["volume_ratio"], as_of, want)
+        return out
     out = dict(out) if out else {}
     out["volume_ratio"] = v["volume_ratio"]
     out["avg_volume"] = v["avg_volume"]
     out["volume_source"] = "twelvedata"
-    _log.info("[%s] volume_ratio 由 Twelve Data 补上: %.2fx（yfinance 不可用）",
-              ticker, v["volume_ratio"])
+    out["volume_as_of"] = as_of
+    _log.info("[%s] volume_ratio 由 Twelve Data 补上: %.2fx（截至 %s；yfinance 不可用）",
+              ticker, v["volume_ratio"], as_of)
     return out
 
 
@@ -1011,6 +1053,7 @@ def _fill_history_fields(ticker: str, data: StockData, path: str) -> None:
                 data.volume_ratio = r["volume_ratio"]
                 data.avg_volume = r.get("avg_volume")
                 data.volume_source = "twelvedata"
+                data.volume_as_of = r.get("volume_as_of")
                 outcome["volume"] = "filled"
             else:
                 outcome["volume"] = "missing"
