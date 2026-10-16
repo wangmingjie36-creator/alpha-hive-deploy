@@ -81,7 +81,8 @@ v0.45.103~422 用 Twelve Data 日线「≤ as_of、5 个日历日内最后一根
 没做的事（已知局限）
 --------------------
 - 没有 SPY 点差/冲击成本模型（~1 bp，明说不建模）；没有融资利息（做空 SPY 的现金记正）。
-- 对冲工具只有 SPY 股票；不做指数认沽、不做逐票 delta 对冲、不对冲 vega/gamma（只告警）。
+- SPY 覆盖账的对冲工具只有 SPY 股票；不做指数认沽、不对冲 vega/gamma（只告警）。
+  逐票 delta 对冲 v0.45.526 起有了（`delta_hedge.py`；缺省 shadow 只算不成交，纸面成交要单独改 `delta_hedge_mode`）。
 - 期权重定价用 BS 平价面（每张合约各用自己的 IV 平移），不建模 skew 变化、不建模股息。
 - 股票价用 CBOE 官方收盘（与 paper_portfolio 的 yfinance 收盘应逐分相等；CBOE 文件盘中陈旧那几天
   该行判陈旧、当天不对冲，不退到 yfinance——本模块不碰 yfinance 限流）。
@@ -96,6 +97,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import re
 import sys
@@ -103,6 +105,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+import delta_hedge as dh
 import ledger_io
 from hive_logger import PATHS, get_logger
 
@@ -120,6 +123,10 @@ CONFIG = {
     "risk_free": 0.045,
     "beta_window": 60,               # OLS 用的交易日数
     "beta_cache_trading_days": 5,    # β 缓存有效期（交易日）
+    # ── 逐票 Delta 对冲（v0.45.526；规则与理由见 `delta_hedge.py`）──
+    "delta_hedge_mode": "shadow",    # off | shadow（只算不成交，缺省）| paper（纸面成交，改这一行单独提交）
+    "delta_hedge_band_pct": 3.0,     # 每只标的 |跨式腿净 $Delta + 对冲市值| 超过 NAV 的这么多 % 才动手（v1 主观常数）
+    "delta_hedge_rebalance_to": "center",   # center = 回 0 | edge = 只拉回带边
 }
 
 BASE_DIR = PATHS.home
@@ -750,6 +757,259 @@ def hedge_exposures(as_of: str, closes_fn: Optional[Callable[[str, str], Optiona
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 逐票 Delta 对冲（v0.45.526）：每个有跨式腿的标的，用自己的股票对冲跨式 Delta
+# ══════════════════════════════════════════════════════════════════════════════
+# 决策规则在 `delta_hedge.py`（纯函数）；这里只负责：取价 / 取持仓 / 落账 / 记账本的净值与成交。
+# 独立账本（不与 SPY 覆盖账混用：Alpha Bot 的 `account()` 取「第一条持仓」当 SPY）：
+#   hedge_state/delta_positions.jsonl · delta_trades.jsonl · delta_equity_curve.jsonl · delta_meta.json
+# 文件路径**调用时**由 STATE_DIR 解析（不是模块级常量）：测试把 STATE_DIR 指到 tmp 就整套跟着走。
+# shadow（缺省）= 只算、写进审计文件的 `delta_hedge` 一节，不写任何账本文件；paper = 纸面成交。
+
+DELTA_ROW_KIND = "delta_hedge"       # 聚合里与 SPY 覆盖行（kind="hedge"）区分：压力网格要按股票（带 β）处理它
+
+
+def _delta_mode() -> str:
+    mode = CONFIG.get("delta_hedge_mode")
+    if mode not in dh.MODES:
+        raise ValueError(f"delta_hedge_mode 只接受 {dh.MODES}，收到 {mode!r}")   # 拼错要当场红，不能静默当 off
+    return mode
+
+
+def _delta_paths() -> Dict[str, Path]:
+    return {"positions": STATE_DIR / "delta_positions.jsonl", "trades": STATE_DIR / "delta_trades.jsonl",
+            "equity": STATE_DIR / "delta_equity_curve.jsonl", "meta": STATE_DIR / "delta_meta.json"}
+
+
+def _delta_opened() -> bool:
+    return _delta_paths()["meta"].exists()
+
+
+def _delta_load_meta() -> Dict:
+    meta = ledger_io.load_json(_delta_paths()["meta"], default=None)
+    if meta is not None:
+        return meta
+    return {"version": _VERSION, "starting_date": None, "cash": 0.0, "last_run_date": None, "config_snapshot": {}}
+
+
+def _delta_save_meta(meta: Dict) -> None:
+    ledger_io.write_json(_delta_paths()["meta"], _scrub(meta))
+
+
+def _delta_positions() -> List[Dict]:
+    return _load_jsonl(_delta_paths()["positions"])
+
+
+def _delta_held_before_today(as_of: str) -> Tuple[Dict[str, Optional[float]], List[Dict]]:
+    """逐票对冲持仓（**交易前**视角）+ 今天已成交的逐票成交。今天已成交的从持仓里减掉：同日重跑才能
+    算出与第一次一模一样的决策（幂等，同 `_hedge_rows_before_today`）。
+    持仓行的 shares 读不出来 ⇒ 该标的记 None（决策判 held_shares_unknown），不当 0。"""
+    paths = _delta_paths()
+    today = [t for t in _load_jsonl(paths["trades"]) if t.get("date") == as_of]
+    held: Dict[str, Optional[float]] = {}
+    for p in _delta_positions():
+        tk = str(p.get("ticker") or "")
+        if tk:
+            held[tk] = _num(p.get("shares"))
+    for t in today:
+        tk, sh = str(t.get("ticker") or ""), _num(t.get("shares"))
+        if not tk or sh is None:
+            continue
+        if held.get(tk, 0.0) is None:
+            continue
+        held[tk] = (held.get(tk) or 0.0) - sh
+    return held, today
+
+
+def delta_hedge_day(as_of: str, option_rows: List[Dict], nav: Optional[float], closes_fn) -> Optional[Dict]:
+    """只读：今天每个标的的逐票对冲决策。mode=off ⇒ None。不写任何文件。
+    shadow 模式没有持仓账（或账是空的）⇒ `trade_shares` 是「从空仓起」要成交的量，`target_shares` 才是无状态的目标。"""
+    mode = _delta_mode()
+    if mode == "off":
+        return None
+    held, today = _delta_held_before_today(as_of)
+    straddle = dh.straddle_delta_by_name(option_rows)
+    names = sorted(set(straddle) | {t for t, v in held.items() if v is None or v != 0.0})
+    marks = {tk: _mark_from(closes_fn, tk, as_of) for tk in names}
+    decisions = dh.decide(straddle, held, marks, nav=nav, band_pct=float(CONFIG["delta_hedge_band_pct"]),
+                          rebalance_to=str(CONFIG["delta_hedge_rebalance_to"]))
+    traded: Dict[str, float] = {}
+    for t in today:
+        traded[str(t.get("ticker"))] = traded.get(str(t.get("ticker")), 0.0) + (_num(t.get("shares")) or 0.0)
+    for d in decisions:
+        d["traded_today"] = traded.get(d["ticker"], 0.0)
+    out = {"mode": mode, "band_pct": float(CONFIG["delta_hedge_band_pct"]),
+           "rebalance_to": str(CONFIG["delta_hedge_rebalance_to"]), "nav": _pos(nav),
+           "names": decisions, "executed": [], "blocked": {}}
+    out.update(dh.summarize(decisions))
+    return out
+
+
+def _delta_effective_trade(d: Dict) -> int:
+    """决策里**真能成交**的股数：要 hedge / exit，且价是 as_of 的官方收盘（盘中实时价只算不成交，同 SPY）。"""
+    if d.get("status") in ("hedge", "exit") and d.get("price_at_close"):
+        return int(d.get("trade_shares") or 0)
+    return 0
+
+
+def _delta_rows_after(as_of: str, section: Optional[Dict], beta_fn) -> List[Dict]:
+    """paper 模式：把「今天对冲成交后」的逐票对冲持仓并进聚合（SPY 带看到的是对冲后的残余暴露）。
+    只算真能成交的那部分（`_delta_effective_trade`）；价缺 / 陈旧的行带着缺价标记进来 ⇒ 聚合 partial ⇒ SPY 带 unknown。"""
+    rows: List[Dict] = []
+    if not section or section.get("mode") != "paper":
+        return rows
+    for d in section["names"]:
+        held = d.get("held_shares") or 0.0
+        after = held + _delta_effective_trade(d)
+        if d.get("status") == "unknown" and d.get("reason") == "held_shares_unknown":
+            after = None
+        if after is not None and after == 0.0:
+            continue
+        row = _blank_row(d["ticker"], DELTA_ROW_KIND)
+        row.update({"gamma_dollar_per_1pct": 0.0, "vega_dollar_per_pt": 0.0, "theta_dollar_per_day": 0.0,
+                    "qty": after, "price": d.get("price"), "price_missing": d.get("price") is None,
+                    "price_stale": bool(d.get("price_stale")), "price_session": d.get("price_session"),
+                    "price_source": d.get("price_source")})
+        if after is None or d.get("price") is None:
+            row["price_missing"] = True
+        else:
+            row["dollar_delta"] = round(after * d["price"], 2)
+        _apply_beta(row, beta_fn, as_of)
+        rows.append(row)
+    return rows
+
+
+def delta_overlay_value(as_of: str, closes_fn) -> Optional[float]:
+    """逐票对冲账净值 = cash + Σ shares × 当日价。没开过账不进 NAV（调用方判）；有仓但某只没价 ⇒ None。"""
+    meta = _delta_load_meta()
+    cash = _num(meta.get("cash"))
+    if cash is None:
+        return None
+    total = cash
+    for p in _delta_positions():
+        sh = _num(p.get("shares"))
+        if sh is None:
+            _log.error("[PortfolioGreeks] 逐票对冲账有 shares 非有限的仓位，账本净值不可得")
+            return None
+        if sh == 0:
+            continue
+        px = _mark_from(closes_fn, str(p.get("ticker") or ""), as_of)["price"]
+        if px is None:
+            return None
+        total += sh * px
+    return total
+
+
+def _execute_delta_trades(as_of: str, section: Dict) -> Tuple[List[Dict], Dict[str, str]]:
+    """按当日收盘成交逐票对冲（无点差 / 冲击成本模型，明说不建模）。返回 (成交记录, {标的: 未成交原因})。
+    只在拿到 as_of 官方收盘时成交；今天这只已成交过 ⇒ 跳过（同日重跑幂等）。成交记录自带定价场次证明，
+    `load_history` 只认带证明且场次对的成交。调用方持 hedge_state 目录锁。"""
+    paths = _delta_paths()
+    blocked: Dict[str, str] = {}
+    todo = []
+    for d in section["names"]:
+        if d.get("status") not in ("hedge", "exit") or not d.get("trade_shares"):
+            continue
+        if d.get("traded_today", 0.0) != 0.0:
+            continue                                   # 今天已成交过：重跑不再交易
+        if not d.get("price_at_close"):
+            blocked[d["ticker"]] = (f"{d['ticker']} 的价不是 {_expected_session(as_of)} 的官方收盘（"
+                                    f"{d.get('price_source')} @ {d.get('price_session')}）——成交按收盘记账，拒绝成交")
+            continue
+        todo.append(d)
+    if not todo:
+        return [], blocked
+    meta = _delta_load_meta()
+    cash = _num(meta.get("cash"))
+    if cash is None:
+        _log.error("[PortfolioGreeks] delta_meta.cash 非有限（%r）——拒绝逐票对冲成交", meta.get("cash"))
+        return [], {**blocked, **{d["ticker"]: "delta_meta.cash 非有限，拒绝成交" for d in todo}}
+    positions = {str(p.get("ticker")): dict(p) for p in _delta_positions()}
+    trades: List[Dict] = []
+    for d in todo:
+        tk, shares, px = d["ticker"], int(d["trade_shares"]), float(d["price"])
+        cur = positions.get(tk)
+        old = (_num(cur.get("shares")) or 0.0) if cur else 0.0
+        new = old + shares
+        cash -= shares * px
+        if not (math.isfinite(cash) and math.isfinite(new)):
+            _log.error("[PortfolioGreeks] 逐票对冲成交算出非有限值（%s cash=%r shares=%r），拒绝入账", tk, cash, new)
+            blocked[tk] = "成交算出非有限值，拒绝入账"
+            return trades, blocked
+        if new == 0:
+            positions.pop(tk, None)
+        else:
+            old_avg = _num((cur or {}).get("avg_price")) or px
+            same_side = old != 0 and (old > 0) == (new > 0)
+            if same_side and abs(new) > abs(old):
+                avg = (abs(old) * old_avg + abs(shares) * px) / abs(new)
+            elif same_side:
+                avg = old_avg
+            else:
+                avg = px
+            positions[tk] = {"ticker": tk, "shares": new, "avg_price": round(avg, 4),
+                             "entry_date": (cur or {}).get("entry_date") or as_of, "last_price": px,
+                             "last_mark_date": as_of}
+        trades.append({"date": as_of, "ticker": tk, "shares": shares, "price": px,
+                       "action": "buy" if shares > 0 else "sell", "fill": "close",
+                       "spread_model": "none (single-name spread/impact not modelled)",
+                       "reason": d.get("status"), "option_dd": d.get("option_dd"),
+                       "net_dd_before": d.get("net_dd"), "target_shares": d.get("target_shares"),
+                       "shares_after": new, "price_session": d.get("price_session"),
+                       "price_source": d.get("price_source"), "price_at_close": bool(d.get("price_at_close"))})
+    _write_jsonl(paths["positions"], list(positions.values()))
+    for t in trades:
+        _append_jsonl(paths["trades"], t)
+    if not meta.get("starting_date"):
+        meta["starting_date"] = as_of
+    meta["cash"] = cash
+    _delta_save_meta(meta)
+    for t in trades:
+        _log.info("[PortfolioGreeks] 逐票对冲 → %s %s %+d @ %.2f", as_of, t["ticker"], t["shares"], t["price"])
+    return trades, blocked
+
+
+def _delta_snapshot(as_of: str, closes_fn) -> Dict:
+    """逐票对冲账的净值快照（按日期去重）+ 盯市。每只持仓的价用 as_of 的 mark；有仓但某只没价 ⇒ 净值 None、
+    `marks_complete=False`（不拿旧价估值）。`marks_at_close`：所有持仓的价都是官方收盘。"""
+    meta = _delta_load_meta()
+    cash = _num(meta.get("cash"))
+    positions = _delta_positions()
+    mv, complete, at_close, n = 0.0, True, True, 0
+    for p in positions:
+        sh = _num(p.get("shares"))
+        if sh is None:
+            complete = False
+            continue
+        if sh == 0:
+            continue
+        n += 1
+        m = _mark_from(closes_fn, str(p.get("ticker") or ""), as_of)
+        if m["price"] is None:
+            complete = False
+            continue
+        mv += sh * m["price"]
+        at_close = at_close and bool(m["at_close"])
+        p["last_price"], p["last_mark_date"] = m["price"], as_of
+    if positions:
+        _write_jsonl(_delta_paths()["positions"], positions)
+    nav = (cash + mv) if (cash is not None and complete) else None
+    snap = {"date": as_of, "cash": _r(cash), "market_value": _r(mv) if complete else None, "nav": _r(nav),
+            "n_positions": n, "marks_complete": complete, "marks_at_close": at_close and complete,
+            "trades_today": sum(1 for t in _load_jsonl(_delta_paths()["trades"]) if t.get("date") == as_of)}
+    equity = [e for e in _load_jsonl(_delta_paths()["equity"]) if e.get("date") != as_of]
+    equity.append(snap)
+    equity.sort(key=lambda e: e["date"])
+    _write_jsonl(_delta_paths()["equity"], equity)
+    if not meta.get("starting_date"):
+        meta["starting_date"] = as_of
+    meta["last_run_date"], meta["version"] = as_of, _VERSION
+    meta["config_snapshot"] = dict(CONFIG)
+    meta.setdefault("cash", 0.0)
+    _delta_save_meta(meta)
+    return snap
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 聚合 / 合并 NAV / 对冲建议
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -801,7 +1061,8 @@ def aggregate(rows: List[Dict], nav: Optional[float]) -> Dict:
                  "lower_pct": target - band, "upper_pct": target + band},
         "vega_alert": bool(vega_alert),
         "gamma_alert": bool(gamma_alert),
-        "by_kind": {kind: sum(1 for r in rows if r.get("kind") == kind) for kind in ("stock", "option", "hedge")},
+        "by_kind": {kind: sum(1 for r in rows if r.get("kind") == kind)
+                    for kind in ("stock", "option", "hedge", DELTA_ROW_KIND)},
     }
 
 
@@ -872,6 +1133,11 @@ def combined_nav_detail(as_of: str, closes_fn: Optional[Callable[[str, str], Opt
         # 陈旧的 SPY 价 → None → 有仓时覆盖账本净值不可得（不拿昨收给今天的账估值）
         spy_price = _mark_from(closes_fn, CONFIG["hedge_instrument"], as_of)["price"]
     comps["hedge_overlay"] = hedge_overlay_value(as_of, spy_price)
+    if _delta_opened() or _delta_mode() == "paper":
+        # 逐票对冲账（v0.45.526）：开过账（delta_meta.json 在）或 paper 模式才进 NAV——paper 模式第一次跑时账还没开，
+        # 若这时不加这一项，第一次与同日重跑的 NAV 分量（以及审计文件）就不一样；没开账的价值是 0.0（无仓、现金 0）。
+        # shadow / off 且没开过账 ⇒ 不加这一项，与旧行为逐字节相同
+        comps["delta_overlay"] = delta_overlay_value(as_of, closes_fn)
     missing = [k for k, v in comps.items() if v is None]
     nav = None if missing else sum(comps.values())  # type: ignore[arg-type]
     return {"nav": (round(nav, 2) if nav is not None else None), "components": comps,
@@ -992,10 +1258,10 @@ def stress_table(rows: List[Dict], spy_price: Optional[float] = None) -> Dict:
                 _exclude(row, f"{row.get('ticker')}(hedge:{_no_price_label(row)})")
                 continue
             usable.append(("hedge", {"dd": dd}))
-        elif kind == "stock":
+        elif kind in ("stock", DELTA_ROW_KIND):
             dd, beta = _num(row.get("dollar_delta")), _num(row.get("beta"))
             if dd is None or beta is None:
-                _exclude(row, f"{row.get('ticker')}(stock:{_no_price_label(row) if dd is None else 'no beta'})")
+                _exclude(row, f"{row.get('ticker')}({kind}:{_no_price_label(row) if dd is None else 'no beta'})")
                 continue
             usable.append(("stock", {"dd": dd, "beta": beta}))
         elif kind == "option":
@@ -1159,6 +1425,17 @@ def _price_check(as_of: str, rows: List[Dict], spy_mark: Dict, rec: Optional[Dic
     return chk
 
 
+def _delta_price_check(section: Optional[Dict]) -> Dict:
+    """`price_check["delta_hedge"]`：审计 / status.json / alert_manager 读的逐票对冲摘要（mode=off ⇒ 全 0）。
+    shadow 下未决只记日志；paper 下 alert_manager 报 P2——逐票对冲停摆不能无人知道。"""
+    sec = section or {}
+    return {"mode": sec.get("mode") or "off", "n_names": int(sec.get("n_names") or 0),
+            "n_hedge": int(sec.get("n_hedge") or 0), "n_inside": int(sec.get("n_inside") or 0),
+            "n_undecided": int(sec.get("n_undecided") or 0),
+            "undecided": list(sec.get("undecided") or [])[:_PRICE_CHECK_LIST_MAX],
+            "n_blocked": len(sec.get("blocked") or {}), "blocked": dict(sec.get("blocked") or {})}
+
+
 def _data_gaps(chk: Dict) -> List[str]:
     """`price_check` 里「不是陈旧、是缺」的那几类，逐条写成人话（ERROR 日志 / 告警 / 摘要行读 `gaps`）。"""
     out = []
@@ -1190,8 +1467,11 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     stock_rows = stock_exposures(as_of, closes_fn=closes_fn, beta_fn=beta_fn)
     option_rows = option_exposures(as_of, quotes_fn=quotes_fn, beta_fn=beta_fn, closes_fn=closes_fn)
     hedge_rows, today_trade = _hedge_rows_before_today(as_of, closes_fn, spy_price, spy_mark=spy_mark)
-    rows = stock_rows + option_rows + hedge_rows
     nav_d = combined_nav_detail(as_of, closes_fn, spy_price=spy_price)
+    # 逐票 Delta 对冲先于 SPY 带：paper 模式下 SPY 带看到的是逐票对冲**之后**的残余暴露；shadow / off 不进聚合
+    delta_section = delta_hedge_day(as_of, option_rows, nav_d["nav"], closes_fn)
+    delta_rows = _delta_rows_after(as_of, delta_section, beta_fn)
+    rows = stock_rows + option_rows + hedge_rows + delta_rows
     # NAV 不分「交易前/后」：成交价=收盘价，−shares×px 的现金腿与 +shares×px 的市值腿
     # 恰好抵消，覆盖净值在交易瞬间不变——所以同日重跑用当前状态算 NAV 也与第一次一致。
     agg = aggregate(rows, nav_d["nav"])
@@ -1214,10 +1494,16 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     elif chk["hedge_undecided"]:
         _log.error("[PortfolioGreeks] %s：数据不全，今日对冲决定做不出来（%s）——%s", as_of,
                    chk["hedge_undecided"], "；".join(gaps) or "见 recommendation.reason")
+    chk["delta_hedge"] = _delta_price_check(delta_section)
+    if chk["delta_hedge"]["n_undecided"]:
+        _log.log(logging.ERROR if chk["delta_hedge"]["mode"] == "paper" else logging.WARNING,
+                 "[PortfolioGreeks] %s：逐票 Delta 对冲有 %d 只决定做不出来（%s）", as_of,
+                 chk["delta_hedge"]["n_undecided"],
+                 "；".join(f"{u['ticker']}:{u['reason']}" for u in chk["delta_hedge"]["undecided"]))
     _LAST_PRICE_CHECK = chk
     return {"as_of": as_of, "version": _VERSION, "spy_price": spy_price, "spy_mark": spy_mark,
             "nav": nav_d, "rows": rows, "aggregate": agg, "recommendation": rec, "stress": stress,
-            "today_trade": today_trade, "price_check": chk}
+            "today_trade": today_trade, "price_check": chk, "delta_hedge": delta_section}
 
 
 def _execute_trade(as_of: str, rec: Dict, agg: Dict, nav: Optional[float],
@@ -1311,6 +1597,21 @@ def _run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, exec
         res["executed"] = False
         res["aggregate_after"] = None
         return res
+    delta = res.get("delta_hedge")
+    if delta and delta.get("mode") == "paper":
+        # 逐票 Delta 对冲先于 SPY：SPY 带的决策（compute_day）已按「逐票对冲成交后」的暴露算
+        trades, blocked = _execute_delta_trades(as_of, delta)
+        # executed = 今天账本里的全部逐票成交（不只是这一轮新成交的）：第一次跑与同日重跑写出同一份审计（幂等）
+        delta["executed"] = [t for t in _load_jsonl(_delta_paths()["trades"]) if t.get("date") == as_of]
+        delta["blocked"] = blocked
+        for t in trades:                    # 与重跑（从账本重建 traded_today）一致 ⇒ 审计文件幂等
+            for d in delta["names"]:
+                if d["ticker"] == t["ticker"]:
+                    d["traded_today"] = (d.get("traded_today") or 0.0) + t["shares"]
+        res["price_check"]["delta_hedge"] = _delta_price_check(delta)
+        for tk, why in blocked.items():
+            _log.warning("[PortfolioGreeks] %s 逐票对冲 %s 未执行：%s", as_of, tk, why)
+        res["delta_equity_snapshot"] = _delta_snapshot(as_of, closes_fn)
     if executed is None and rec.get("action") in ("sell_spy", "buy_spy"):
         if spy_mark.get("price") is not None and spy_mark.get("at_close"):
             executed = _execute_trade(as_of, rec, res["aggregate"], nav, spy_mark=spy_mark)
@@ -1455,6 +1756,42 @@ def _verdict_audit(a: Dict, day: str) -> str:
     return "ok"
 
 
+def _verdict_delta_equity(e: Dict) -> str:
+    """逐票对冲账净值行的放行判据（v0.45.526）：自带 `marks_complete`（每只持仓都有 as_of 的价）与
+    `marks_at_close`（价都是官方收盘）；没有持仓时净值 = 现金，与价无关。"""
+    if "marks_complete" not in e:
+        return "no_provenance"
+    if _num(e.get("nav")) is None:
+        return "unpriced"
+    if (_num(e.get("n_positions")) or 0) and not e.get("marks_at_close"):
+        return "not_its_session_close"
+    return "ok"
+
+
+def _load_delta_history(d: Optional[Path]) -> Dict:
+    """逐票对冲账（delta_trades / delta_equity_curve）的历史，同样只放行能自证定价场次的记录。
+    成交的判据与 SPY 成交同一个 `_verdict_trade`（`price_session` 对且 `price_at_close`）。"""
+    paths = _delta_paths()
+    trades_f = d / "delta_trades.jsonl" if d is not None else paths["trades"]
+    equity_f = d / "delta_equity_curve.jsonl" if d is not None else paths["equity"]
+    kept: Dict[str, List] = {"trades": [], "equity": []}
+    excluded: Dict[str, Dict[str, int]] = {"trades": {}, "equity": {}}
+    excluded_dates: Dict[str, List[str]] = {"trades": [], "equity": []}
+    for kind, path, judge in (("trades", trades_f, _verdict_trade), ("equity", equity_f, _verdict_delta_equity)):
+        for rec, pre in _read_history_lines(path):
+            day = str(rec.get("date") or "") if isinstance(rec, dict) else ""
+            v = pre or judge(rec)
+            if v == "ok":
+                kept[kind].append(rec)
+            else:
+                excluded[kind][v] = excluded[kind].get(v, 0) + 1
+                excluded_dates[kind].append(day or "?")
+    for k in kept:
+        kept[k].sort(key=lambda r: str(r.get("date") or ""))
+    return {"trades": kept["trades"], "equity": kept["equity"], "excluded": excluded,
+            "excluded_dates": excluded_dates}
+
+
 def load_history(state_dir: Optional[Path] = None) -> Dict:
     """对冲账本历史的**唯一**读取口：只放行能自证「价属于自己那一场的收盘」的记录。
 
@@ -1519,7 +1856,7 @@ def load_history(state_dir: Optional[Path] = None) -> Dict:
     return {"trades": kept["trades"], "equity": kept["equity"], "audits": audits,
             "excluded": excluded, "excluded_dates": excluded_dates, "first_verified": first,
             "measurement_start": MEASUREMENT_START, "regressions": regressions,
-            "before_measurement_start": early}
+            "before_measurement_start": early, "delta": _load_delta_history(d)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1538,7 +1875,8 @@ def _fmt_pct(v, nd=2) -> str:
 
 #: 对外展示的规则常量（Alpha Bot 对冲页 / 帮助页取这一份，不在前端另抄）
 PUBLIC_RULE_KEYS = ("beta_delta_band_pct", "beta_delta_target_pct", "rebalance_to", "hedge_instrument",
-                    "vega_alert_pct", "gamma_alert_pct", "beta_window")
+                    "vega_alert_pct", "gamma_alert_pct", "beta_window",
+                    "delta_hedge_mode", "delta_hedge_band_pct", "delta_hedge_rebalance_to")
 
 
 def ledger_view(root=None) -> Dict:
@@ -1553,7 +1891,8 @@ def ledger_view(root=None) -> Dict:
     d = Path(root if root is not None else PATHS.home) / "hedge_state"
     out: Dict = {"state_dir": str(d), "exists": d.is_dir(), "opened": False, "positions": None, "meta": None, "errors": {},
                  "history": None, "rules": {k: CONFIG.get(k) for k in PUBLIC_RULE_KEYS},
-                 "measurement_start": MEASUREMENT_START}
+                 "measurement_start": MEASUREMENT_START,
+                 "delta_opened": False, "delta_positions": None, "delta_meta": None}   # v0.45.526：状态目录不存在时键也在
     if not out["exists"]:
         return out
     # 「开过账」= meta.json 在（第一次执行就写它）。开过账却没有持仓文件 ⇒ 被删了 / 数据根不对，是错不是空仓——
@@ -1572,6 +1911,18 @@ def ledger_view(root=None) -> Dict:
         out["meta"] = ledger_io.load_json(d / "meta.json", default=None)
     except (ledger_io.LedgerError, OSError) as exc:
         out["errors"]["meta"] = f"{type(exc).__name__}: {exc}"
+    # 逐票对冲账（v0.45.526）：开过账（delta_meta.json 在）才有；没开过 ⇒ None、不报错（shadow 缺省就是这样）
+    out["delta_opened"] = (d / "delta_meta.json").exists()
+    if out["delta_opened"]:
+        for key, fname, loader in (("delta_positions", "delta_positions.jsonl", ledger_io.load_jsonl),
+                                   ("delta_meta", "delta_meta.json",
+                                    lambda f: ledger_io.load_json(f, default=None))):
+            try:
+                out[key] = loader(d / fname) if (d / fname).exists() else None
+                if out[key] is None and key == "delta_positions":
+                    out["errors"][key] = f"{d / fname} 不存在（delta_meta.json 在：持仓文件被删了）"
+            except (ledger_io.LedgerError, OSError) as exc:
+                out["errors"][key] = f"{type(exc).__name__}: {exc}"
     try:
         out["history"] = load_history(d)
     except Exception as exc:  # noqa: BLE001 - 历史读不出来如实说，不当成「没有历史」
@@ -1616,6 +1967,37 @@ def _stale_price_line(res: Dict) -> str:
     if blocked:
         out += ("　" if out else "⚠️ ") + f"**未成交**：{blocked}"
     return out
+
+
+def _delta_markdown(sec: Optional[Dict]) -> List[str]:
+    """日报里的「逐票 Delta 对冲」小节（v0.45.526）。mode=off / 没有这一节（旧审计文件）⇒ 不写。"""
+    if not sec or not sec.get("names"):
+        return []
+    mode = sec.get("mode")
+    head = {"shadow": "只算不成交（shadow）", "paper": "纸面成交"}.get(mode, str(mode))
+    L = ["", f"**逐票 Delta 对冲**（{head}；带 NAV 的 ±{sec.get('band_pct'):.1f}%，"
+         f"{'拉回 0' if sec.get('rebalance_to') == 'center' else '拉回带边'}）：",
+         "", "| 标的 | 跨式腿 $Delta | % NAV | 目标对冲股数 | 今日成交 | 状态 |", "|---|---|---|---|---|---|"]
+    nav = _num(sec.get("nav"))
+    for d in sec["names"]:
+        dd = _num(d.get("option_dd"))
+        pct = f"{dd / nav * 100:+.1f}%" if (dd is not None and nav) else "—"
+        ts = d.get("trade_shares") or 0
+        state = d.get("status")
+        if state == "unknown":
+            state = f"未决：{d.get('reason')}"
+        L.append(f"| {d['ticker']} | {_fmt_usd(dd)} | {pct} | "
+                 f"{('%+d' % d['target_shares']) if d.get('target_shares') is not None else '—'} | "
+                 f"{('%+d' % ts) if ts else '—'} | {state} |")
+    if sec.get("n_undecided"):
+        L.append("")
+        L.append(f"⚠️ {sec['n_undecided']} 只决定做不出来（只影响这几只，别的照常）："
+                 + "；".join(f"{u['ticker']}（{u['detail']}）" for u in sec.get("undecided") or []))
+    if sec.get("blocked"):
+        L.append("未执行：" + "；".join(sec["blocked"].values()))
+    L.append("> 没有点差 / 冲击成本模型（单只股票比 SPY 贵）；只对冲 Delta，Gamma / Vega 不对冲；"
+             "带与拉回方式是 v1 主观常数，不是校准结果，也没有证据说明逐票对冲后更好。")
+    return L
 
 
 def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
@@ -1677,6 +2059,7 @@ def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
                  f"（{after.get('band_status')}）")
     elif res.get("executed") is False and rec.get("action") in ("sell_spy", "buy_spy"):
         L.append("**未执行**（dry-run / 只读渲染）")
+    L += _delta_markdown(res.get("delta_hedge"))
     if stress.get("cells"):
         spots, ivs = stress["spot_pct"], stress["iv_pts"]
         L += ["", "**压力网格**（行：β 调整后现货冲击；列：IV 平移 vol 点；单位 $）", "",

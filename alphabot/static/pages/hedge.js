@@ -20,6 +20,13 @@ const REASON = {
   no_date: "没有日期", intraday_run: "盘中跑的记录（价是实时价、不是收盘）",
 };
 const KIND = { equity: "净值", trades: "成交", audits: "审计" };
+// 逐票 Delta 对冲（v0.45.526）：原因码取自 delta_hedge.REASONS（tests/test_delta_hedge.py 双向核对），状态取自 decide()
+const D_STATUS = { hedge: "要对冲", inside: "带内，不动", exit: "跨式已平，清对冲", flat: "—", unknown: "决定做不出来" };
+const D_REASON = {
+  nav_unavailable: "NAV 不可得", option_delta_unknown: "跨式腿有一行 Delta 算不出（缺报价 / 缺价）",
+  price_missing: "取不到这只的价", price_stale: "价不是当天那一场的", held_shares_unknown: "对冲持仓账里股数读不出来",
+};
+const D_MODE = { shadow: "只算不成交（shadow）", paper: "纸面成交", off: "关闭" };
 const shares = (v) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}${num(Math.abs(v), 0)} 股` : "—");
 
 function latestPanel(L, rules) {
@@ -41,6 +48,58 @@ function latestPanel(L, rules) {
     h("p", { class: "small muted" }, `以上都是占合并 NAV 的百分比。覆盖 ${cov.n_rows ?? "—"} 行：缺价 ${cov.n_price_missing ?? "—"} · 缺报价 ${cov.n_quote_missing ?? "—"} · 缺 β ${cov.n_beta_missing ?? "—"}`
       + `${a.partial ? " · 数据不全（不全时一律不对冲）" : ""}${a.vega_alert ? " · vega 超告警线" : ""}${a.gamma_alert ? " · gamma 超告警线" : ""}`),
     rec.reason ? h("p", { class: "small" }, h("span", { class: "muted" }, "规则给出的理由："), rec.reason) : null);
+}
+
+function deltaPanel(D, rules) {
+  if (!D) return null;
+  const mode = D.mode || rules.delta_hedge_mode;
+  const sub = `${D_MODE[mode] || mode || "—"} · 每只标的 |跨式腿净 $Delta + 对冲市值| 超过 NAV 的 ${num(D.band_pct, 1)}% 才动手，${D.rebalance_to === "edge" ? "拉回带边" : "拉回 0"} · 用该标的自己的股票，不经 β`;
+  if (!D.available) {
+    return panel("逐票 Delta 对冲", { sub }, h("div", { class: "empty" },
+      "放行的审计里还没有这一节（这个功能上线前的审计没有，或跨式账本里没有持仓）。"));
+  }
+  const nameCols = [
+    { label: "标的", render: (r) => h("b", {}, r.ticker) },
+    { label: "跨式腿 $Delta", cls: "r", render: (r) => sMoney(r.option_dd) },
+    { label: "% NAV", cls: "r", render: (r) => sPct(r.option_pct_nav, 1) },
+    { label: "目标对冲股数", cls: "r", render: (r) => shares(r.target_shares) },
+    { label: "今日成交", cls: "r", render: (r) => (r.trade_shares ? shares(r.trade_shares) : "—") },
+    { label: "状态", render: (r) => (r.status === "unknown"
+      ? h("span", { class: "chip warn", title: r.reason || "" }, `未决：${D_REASON[r.reason] || r.reason || "—"}`)
+      : (D_STATUS[r.status] || r.status)) },
+  ];
+  const names = (D.names || []).filter((r) => r.status !== "flat");
+  const posCols = [
+    { label: "标的", render: (r) => h("b", {}, r.ticker) },
+    { label: "持股", cls: "r", render: (r) => shares(r.shares) },
+    { label: "均价", cls: "r", render: (r) => money(r.avg_price) },
+    { label: "标记价", cls: "r", render: (r) => money(r.last_price) },
+    { label: "标记日", render: (r) => r.last_mark_date || "—" },
+  ];
+  const tradeCols = [
+    { label: "日期", render: (r) => r.date }, { label: "标的", render: (r) => h("b", {}, r.ticker) },
+    { label: "成交", cls: "r", render: (r) => shares(r.shares) }, { label: "价", cls: "r", render: (r) => money(r.price) },
+    { label: "原因", render: (r) => D_STATUS[r.reason] || r.reason || "—" },
+    { label: "成交后持股", cls: "r", render: (r) => shares(r.shares_after) },
+  ];
+  const lastBits = [];
+  lastBits.push(h("p", { class: "small muted" }, `${D.latest_date} 的决策 · 合并 NAV ${money(D.nav, 0)} · 要对冲 ${D.n_hedge ?? 0} 只 / 带内 ${D.n_inside ?? 0} 只 / 未决 ${D.n_undecided ?? 0} 只。`
+    + (mode === "shadow" ? " shadow 没有对冲持仓账：「今日成交」是「若今天从空仓开始对冲」要成交的量，「目标对冲股数」才是把跨式 Delta 全抵掉需要持有的股数。" : "")));
+  if ((D.undecided || []).length) {
+    lastBits.push(h("p", { class: "callout warn" }, `${D.undecided.length} 只决定做不出来（只影响这几只，别的照常）：`
+      + D.undecided.map((u) => `${u.ticker}（${D_REASON[u.reason] || u.reason}）`).join("；")));
+  }
+  for (const [tk, why] of Object.entries(D.blocked || {})) lastBits.push(h("p", { class: "callout warn" }, `${tk} 未成交：${why}`));
+  for (const [k, v] of Object.entries(D.errors || {})) lastBits.push(h("p", { class: "callout warn" }, `${k} 读不了：${v}`));
+  const account = D.opened
+    ? [h("h3", {}, "逐票对冲账"), h("p", { class: "small muted" }, `起始现金 0，开账 ${D.starting_date || "—"} · 现金 ${money(D.cash, 0)}`),
+      (D.positions || []).length ? table(posCols, D.positions) : h("div", { class: "empty" }, "空仓。"),
+      h("h3", {}, "成交（放行的）"),
+      (D.trades || []).length ? table(tradeCols, D.trades) : h("div", { class: "empty" }, "放行的记录里还没有成交。")]
+    : [];
+  return panel("逐票 Delta 对冲", { sub }, ...lastBits,
+    names.length ? table(nameCols, names) : h("div", { class: "empty" }, "跨式账本里没有持仓。"), ...account,
+    h("p", { class: "note small muted" }, "没有点差 / 冲击成本模型（单只股票比 SPY 贵）；只对冲 Delta，Gamma / Vega 不对冲；带与拉回方式是 v1 主观常数，不是校准结果，也没有证据说明逐票对冲后更好。"));
 }
 
 function gatePanel(g) {
@@ -85,7 +144,12 @@ export async function renderHedge(root, alive) {
   for (const [k, v] of Object.entries(d.errors || {})) warns.push(`${{ positions: "持仓文件", meta: "meta.json", history: "历史" }[k] || k} 读不了：${v}`);
   for (const [kind, day] of g.regressions || []) warns.push(`${KIND[kind] || kind} 在已经有放行记录之后又出现了无定价证明的记录（${day}）——写入方退化了。`);
   const pc = L?.price_check || {};
-  if (pc.hedge_undecided) warns.push(`${L.date} 数据不全，对冲决定做不出来：${pc.hedge_undecided}`);
+  if (pc.hedge_undecided) {
+    // 点名缺价的标的（v0.45.526）：此前只说「1 price missing」，不说是哪一只
+    const who = [...(pc.stale || []).map((x) => `${x.ticker}（价属于 ${x.session || "?"}，来源 ${pxSrc(x.source)}，看到 ${money(x.seen_price)}，不是当天收盘）`),
+      ...(pc.unpriced || []).map((x) => `${x.ticker}（取不到价）`)];
+    warns.push(`${L.date} 数据不全，对冲决定做不出来：${pc.hedge_undecided}${who.length ? `——缺价的是：${who.join("；")}` : ""}`);
+  }
   if ((pc.gaps || []).length) warns.push(`${L.date} 另缺：${pc.gaps.join("；")}`);
 
   const kpis = h("div", { class: "kpis" },
@@ -129,6 +193,8 @@ export async function renderHedge(root, alive) {
         days.length ? bandEl : h("div", { class: "empty" }, "还没有放行的审计记录。")),
       panel("对冲腿累计盈亏", { sub: "每个扫描日收盘后的净值（= 现金 + SPY 市值）" },
         (d.equity || []).length ? eqEl : h("div", { class: "empty" }, "还没有放行的净值记录。"))),
+    h("div", { style: { height: "16px" } }),
+    deltaPanel(d.delta, rules),
     h("div", { style: { height: "16px" } }),
     panel("成交", { sub: `${(d.trades || []).length} 笔（放行的）· 按收盘价成交，SPY 点差约 1bp 未建模 · 「拉回到」是占合并 NAV 的带边 · 鼠标停在日期上看规则原文` },
       (d.trades || []).length ? table(tradeCols, d.trades) : h("div", { class: "empty" }, "放行的记录里还没有成交。")),

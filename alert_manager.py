@@ -585,6 +585,25 @@ class AlertAnalyzer:
                 ["portfolio_greeks", "data_quality"]
             ))
             return
+        dhc = pg.get("delta_hedge")
+        if isinstance(dhc, dict) and dhc.get("mode") == "paper" and (dhc.get("n_undecided") or dhc.get("n_blocked")):
+            # v0.45.526：逐票 Delta 对冲（纸面成交）：只影响缺数据的那几只，别的照常对冲——但停摆不能无人知道。
+            # shadow 下不报（只算不成交，未决只进日志与审计）。独立于下面 SPY 带的告警，两边互不吞。
+            und = "；".join(f"{u.get('ticker')}（{u.get('reason')}）" for u in dhc.get("undecided") or []) or "—"
+            blk = "；".join(str(v) for v in (dhc.get("blocked") or {}).values()) or "—"
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】逐票 Delta 对冲：{dhc.get('n_undecided', 0)} 只决定做不出来、"
+                f"{dhc.get('n_blocked', 0)} 只拒绝成交，这几只今天不对冲",
+                {
+                    "未决": und,
+                    "拒绝成交": blk,
+                    "影响": "只影响这几只标的的跨式腿 Delta 没被对冲；别的标的照常。连续几天都这样 = 这几只的 Delta 一直裸着",
+                    "建议": "看 hedge_state/greeks_<日期>.json 的 delta_hedge 一节（reason 码：nav_unavailable / "
+                            "option_delta_unknown / price_missing / price_stale / held_shares_unknown）",
+                },
+                ["portfolio_greeks", "data_quality"]
+            ))
         spy = pg.get("spy") or {}
         n_stale = int(pg.get("n_stale") or 0)
         n_quote_stale = int(pg.get("n_quote_stale") or 0)

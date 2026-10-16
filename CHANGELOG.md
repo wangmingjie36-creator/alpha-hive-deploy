@@ -37,7 +37,29 @@
 - 补不回：3,809 行无对应快照、559 行快照 `entry_price ≤ 0`——这两类本来就没有任何值（不是被抹掉的）。
 - 另有 1,500 行 `neutral` 但重算后仍无 T+7（按新语义应为 NULL）。
 
-## [0.45.526] — 2026-10-16 — 占位（进行中：组合 Greeks 逐票 Delta 对冲——每只有跨式腿的标的用自己的股票对冲跨式 Delta；带 3% NAV、拉回 0；先 shadow 只算不成交）
+## [0.45.526] — 2026-10-16 — Added：组合 Greeks 逐票 Delta 对冲——每只有跨式腿的标的用自己的股票对冲跨式 Delta（带 3% NAV、拉回 0；**缺省 shadow 只算不成交**）
+
+用户问「我的对冲能不能和跨式对冲」。分析（10-15 账本）：带外几乎全来自跨式腿——跨式腿 β·$Delta −45.9% NAV、股票账只有 +5.1%；而 SPY 带是用**单只股票自己的 60 日 β** 折算的：TSLA β=2.76 把 −8.2% 的原始 Delta 放大成 −22.8%，T / VZ 的 β 为负（−0.25 / −0.28）把各 +27% 左右的原始 Delta 翻成负的 β·Delta。用 SPY 抵这种单票暴露误差大且不可解释。三个候选里（单独对冲跨式 Delta / 用跨式对冲 Gamma-Vega / 用跨式替换 SPY）选第一个：跨式刚买入时 Delta≈0，拉不回 β·Delta，所以它不能替代 Delta 对冲；Gamma / Vega 本来很小（−0.09% / −0.31% NAV）且组合净空波动率是策略本身决定的，再买跨式去抵等于把刚卖出的波动率买回来。
+
+### Added
+- `delta_hedge.py`（**纯函数**，不 import 对冲引擎、不读写文件）：`straddle_delta_by_name`（每个标的的跨式腿净 $Delta；任一行算不出 ⇒ None，不拿部分和下单）+ `decide`（每个标的一条决策：hedge / inside / exit / flat / unknown）+ `summarize`。规则：对象 = 跨式腿净 $Delta（原始值、不乘 β、不含股票账同名仓位）；工具 = 该标的自己的股票、整股；带 = NAV 的 `delta_hedge_band_pct`%（缺省 **3.0**）；拉回 `center`（回 0，缺省）/ `edge`（向外取整，同 SPY 带）；**跨式平仓后目标强制回 0、无条件清仓**；缺数据**逐标的**判（原因码唯一一张表 `REASONS`）；坏持仓行（shares 读不出）判未知、不当 0。
+- `portfolio_greeks.py`：`CONFIG` 加 `delta_hedge_mode`（`off` / **`shadow`**（缺省，只算不成交，不写任何账本文件）/ `paper`）、`delta_hedge_band_pct`、`delta_hedge_rebalance_to`；`delta_hedge_day`（只读决策）、`_delta_rows_after`（paper：把对冲**之后**的持仓以 `kind="delta_hedge"` 并进聚合，SPY 带看到的是残余暴露；压力网格按股票带 β 处理）、`_execute_delta_trades`（只在拿到 as_of **官方收盘**时成交，盘中价拒绝并写原因；今天这只已成交过 ⇒ 跳过，同日重跑幂等）、`_delta_snapshot`、`delta_overlay_value`（NAV 新分量：paper 模式或开过账才有；shadow 且没开账 ⇒ 与旧行为逐字节相同）。独立账本 `hedge_state/delta_positions.jsonl` · `delta_trades.jsonl` · `delta_equity_curve.jsonl` · `delta_meta.json`（路径调用时由 `STATE_DIR` 解析）——**不复用 `positions.jsonl`**：Alpha Bot 的 `account()` 取「第一条持仓」当 SPY。
+- 历史放行闸：`load_history()["delta"]`（逐票成交同一个 `_verdict_trade`，净值行 `marks_complete` / `marks_at_close`）；`ledger_view` 加 `delta_opened` / `delta_positions` / `delta_meta`（状态目录不存在时键也在）；审计文件加 `delta_hedge` 一节；`price_check["delta_hedge"]` 摘要；日报小节「逐票 Delta 对冲」。
+- 可见性：`alert_manager` **paper 模式**下有标的决定做不出来 / 拒绝成交 ⇒ P2（shadow 只进日志与审计，不报）；`scan_timing` 摘要行占位。
+- Alpha Bot「对冲」页：新增「逐票 Delta 对冲」面板（决策表、paper 的持仓 / 成交 / 净值、未决与拒绝成交的原因），% NAV 服务端算；帮助页「对冲账本」章节加说明，常量取自 `/api/method`。**顺手做了上一轮提的改进**：「数据不全」黄条现在点名缺价的标的（此前只写 `1 price missing`，不说是哪一只，例如 10-15 的 BILI）。
+- 测试 58 条（18 + 26 + 14）：`tests/test_delta_hedge.py`（规则算术、清仓、逐标的未决、坏持仓、原因码 AST 双向、纯函数 AST）、`tests/test_portfolio_greeks_delta_hedge.py`（shadow 不写账本且与 off 的聚合 / SPY 建议逐位相同、paper 成交与 NAV、SPY 带看到残余、同日重跑逐字节幂等、带内不动、跨式平仓清仓、盘中价拒绝成交、逐标的隔离、历史闸、ledger_view、日报、告警、坏模式拼写直接抛）、`tests/test_alphabot_hedge_delta.py`（面板数据面 + 前端接线 + 帮助页常量不写字面量）。**变异核对 16 处**（center 方向反 / 不清仓 / 缺行当 0 / 坏持仓当 0 / edge 不向外取整 / 聚合不含对冲行 / 盘中价也成交 / 重复成交 / 首跑 NAV 分量缺 / shadow 也成交 / 坏模式当 off / 闸不拦无证明成交 / paper 未决不告警 / 取成第一份审计 / 不点名缺价标的）全部变红——其中「edge 不向外取整」第一版没牙（用例恰好整除），已补不整除用例。
+
+### 真实数据核对（10-15，只读重放，不出网、不写真实目录）
+- 用 10-15 审计里**记录的**价 / 报价 / β 重放 `compute_day`（持仓与净值读真实账本）：shadow 下带位结论（unknown）、β·Δ（−18.2144%）、NAV（150,380.19）、SPY 建议与记录**逐位相同**，NAV 分量没有 `delta_overlay`——shadow 不改任何既有决策。
+- 逐票决策（带 3%、拉回 0）：AMZN +40、NFLX −89、T **−1,703**、TSLA +34、VZ **−934**、CVX 带内；**6 只全部做得出决定**——BILI 价格陈旧让 SPY 带判「判断不了」，但它不是跨式标的、不影响逐票对冲（逐标的隔离）。对冲名义合计 $110k ≈ 73% NAV。
+- paper 预演（真实 `hedge_state` 复制到 tmp，BILI 假设修好）：5 笔成交；对冲后聚合 β·Δ +28.2%（股票账 +5.1% 加已持有 SPY 的 +22.6%）⇒ SPY 带出带偏多，**自动卖 26 股 SPY（持仓 44 → 18）**，与事前估算（约 25 股）吻合；逐票账 NAV 当天 0（现金 +$65,439 对空头市值）；同日重跑逐票账本文件逐字节相同。
+
+### Notes
+- ⚠️ **没有证据说明逐票对冲后更好**：带 3% 与拉回 0 是 v1 主观常数，不是校准结果；它是执行层选择，不是已验证的优势。**没有点差 / 冲击成本模型**（单只股票比 SPY 贵；T、VZ 这类低价股尤其）；只对冲 Delta，Gamma / Vega 不对冲（卖出跨式是负 Gamma，Delta 会反复漂移，靠带控制调仓频率）。
+- **上线节奏**：本版缺省 `shadow`，**不写任何新账本、不改任何既有决策**；先看几个扫描日的审计 `delta_hedge` 一节与对冲页面板，合理再把 `delta_hedge_mode` 改成 `paper`（一行配置，**单独提交**、单独说明）。打开 paper 的**第一天**会有 5 笔左右逐票成交 + SPY 带联动卖出，是预期行为。切 paper 属口径世代边界：SPY 覆盖账的净值曲线与此前不可直接比。
+- 决策确定、不依赖钟；所有路径调用时由 `STATE_DIR` 解析，既有测试文件一个字没改。
+- **顺带发现的既有毛病（未改）**：SPY 覆盖账在「当天有 SPY 成交」时同日重跑，审计文件不逐字节相同——重建「交易前」持仓时不还原均价（`rows[].avg_price` 763.7475 vs 765.1132）+ 覆盖账 NAV 有 ~5e-12 的浮点噪声。关掉逐票对冲、用同一份真实数据复现，与本版无关；只落在审计的字段上、不影响任何决策。
+- 验证：相关 912 项（含 `test_ledger_writes_go_through_ledger_io` / `test_hedge_history_gate` / `test_no_undefined_names` / `test_paths_not_frozen_at_import` / `test_data_root_default` 等元守卫）通过；`ruff` 全仓干净；clockshift 拨钟审计 +7 / +45 天新红 0 条。
 
 ## [0.45.525] — 2026-10-16 — Fixed（数据，用户批准「逐行核对那 52 行 GEX，假的也删掉」）：`options.gamma_exposure = 0.0` 的 50 行逐行核对，**全部**是「算不出」分支写的 0，登进 `QUARANTINE` 并清库
 

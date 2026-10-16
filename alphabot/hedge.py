@@ -25,6 +25,13 @@ from alphabot import straddle as SD
 AUDIT_AGG_KEYS = ("band", "band_status", "pct_nav", "sums", "coverage", "partial", "vega_alert", "gamma_alert", "nav")
 TRADE_KEYS = ("date", "action", "shares", "price", "price_source", "price_session", "beta_dd_pct_before",
               "beta_dd_usd_before", "target_usd", "excess_usd", "shares_after", "nav", "reason", "fill")
+#: 逐票 Delta 对冲（v0.45.526）给页面的字段
+DELTA_NAME_KEYS = ("ticker", "status", "reason", "option_dd", "held_shares", "target_shares", "trade_shares", "action",
+                   "net_dd", "net_pct_nav", "price", "price_session", "price_source", "price_at_close", "breach",
+                   "traded_today")
+DELTA_TRADE_KEYS = ("date", "ticker", "shares", "price", "action", "reason", "shares_after", "net_dd_before",
+                    "target_shares", "price_source", "price_session", "fill")
+DELTA_TRADES_SHOWN = 60
 #: 两个文件的净值差在这以内算对得上（各自四舍五入到分）
 IDENTITY_TOL_USD = 0.05
 
@@ -59,8 +66,57 @@ def audit_brief(day: str, a: dict) -> dict:
         "spy_mark": a.get("spy_mark"),
         # 审计文件里的 price_check 没有 error 键：异常中断的那一轮根本不写审计（审计最后写），页面靠「最近审计不是
         # 账本最后一天」/ 陈旧来报它（v0.45.459 二次检查：初版读一个永远不存在的 error，那条黄条恒不亮）
+        # stale / unpriced 点名到标的（v0.45.526）：此前页面只说「1 price missing」，不说是哪一只
         "price_check": {"n_stale": pc.get("n_stale"), "gaps": pc.get("gaps") or [],
-                        "hedge_undecided": pc.get("hedge_undecided")},
+                        "hedge_undecided": pc.get("hedge_undecided"),
+                        "stale": [{k: x.get(k) for k in ("ticker", "kind", "seen_price", "session", "source")}
+                                  for x in pc.get("stale") or [] if isinstance(x, dict)],
+                        "unpriced": [{k: x.get(k) for k in ("ticker", "kind", "source")}
+                                     for x in pc.get("unpriced") or [] if isinstance(x, dict)]},
+    }
+
+
+def _pct_nav(dd, nav) -> Optional[float]:
+    d, n = _num(dd), _num(nav)
+    return round(d / n * 100.0, 4) if (d is not None and n) else None
+
+
+def delta_overview(view: dict, audits: dict) -> dict:
+    """逐票 Delta 对冲面板的数据（v0.45.526）。纯函数，只读。
+    决策取**最近一份放行审计**里的 `delta_hedge` 一节（shadow 下这就是全部：没有持仓账）；
+    持仓 / 成交 / 净值只在开过账（paper）后才有，成交 / 净值同样经历史闸（`history["delta"]`）。"""
+    latest_day, sec = None, None
+    for day in sorted(audits or {}):
+        s = (audits[day] or {}).get("delta_hedge")
+        if isinstance(s, dict):
+            latest_day, sec = day, s
+    hist = (view.get("history") or {}).get("delta") or {}
+    rules = view.get("rules") or {}
+    errors = {k: v for k, v in (view.get("errors") or {}).items() if k.startswith("delta_")}
+    meta = view.get("delta_meta") if isinstance(view.get("delta_meta"), dict) else None
+    trades = sorted(hist.get("trades") or [], key=lambda t: str(t.get("date")))
+    excluded = hist.get("excluded") or {}
+    return {
+        "mode": (sec or {}).get("mode") or rules.get("delta_hedge_mode"),
+        "available": sec is not None, "latest_date": latest_day,
+        "band_pct": (sec or {}).get("band_pct", rules.get("delta_hedge_band_pct")),
+        "rebalance_to": (sec or {}).get("rebalance_to", rules.get("delta_hedge_rebalance_to")),
+        "nav": _num((sec or {}).get("nav")),
+        "names": [{**{k: n.get(k) for k in DELTA_NAME_KEYS}, "option_pct_nav": _pct_nav(n.get("option_dd"), (sec or {}).get("nav"))}
+                  for n in (sec or {}).get("names") or [] if isinstance(n, dict)],
+        "n_hedge": (sec or {}).get("n_hedge"), "n_inside": (sec or {}).get("n_inside"),
+        "n_undecided": (sec or {}).get("n_undecided"), "undecided": (sec or {}).get("undecided") or [],
+        "blocked": (sec or {}).get("blocked") or {},
+        "opened": bool(view.get("delta_opened")),
+        "cash": _num((meta or {}).get("cash")), "starting_date": (meta or {}).get("starting_date"),
+        "positions": [{k: p.get(k) for k in ("ticker", "shares", "avg_price", "last_price", "last_mark_date",
+                                              "entry_date")}
+                      for p in (view.get("delta_positions") or []) if isinstance(p, dict)],
+        "trades": [{k: t.get(k) for k in DELTA_TRADE_KEYS} for t in reversed(trades)][:DELTA_TRADES_SHOWN],
+        "equity": [{k: e.get(k) for k in ("date", "nav", "cash", "market_value", "n_positions", "trades_today")}
+                   for e in hist.get("equity") or []],
+        "gate": {"excluded": excluded, "excluded_total": {k: sum((v or {}).values()) for k, v in excluded.items()}},
+        "errors": errors,
     }
 
 
@@ -140,6 +196,7 @@ def build_overview(view: dict, *, now_et: datetime) -> dict:
         # 最近一份放行的审计不是账本最后一天 ⇒ 那天的审计缺了或被拦了，页面要说。两边有一边不可得 ⇒ None
         "latest_is_as_of": (days[-1]["date"] == as_of) if (days and as_of) else None,
         "days": days,
+        "delta": delta_overview(view, audits),
         "equity": [{k: e.get(k) for k in ("date", "nav", "cash", "market_value", "spy_shares", "spy_price",
                                           "trades_today", "band_status")} for e in equity],
         "trades": [{k: t.get(k) for k in TRADE_KEYS} for t in reversed(trades)],      # 新的在前
