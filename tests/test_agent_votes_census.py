@@ -229,14 +229,15 @@ def test_records_every_bee_despite_eviction(board):
 
 
 def test_survives_wall_clock_expiry(board):
-    """第二道减法：本循环跑在全扫描之后，早批条目已躺过 3600s 过期窗口。
+    """第二道减法：本循环跑在全扫描之后，早批条目已躺过过期窗口（v0.45.518 前是 3600s，现为 `PheromoneBoard.ENTRY_MAX_AGE_S`）。
 
     只堵溢出淘汰不够 —— 板空了同样交白卷。这里让整轮条目都超龄，
     板上一条不剩，而 agent_votes 必须照常齐全。
     """
     from alpha_hive_daily_report import build_agent_votes
 
-    stale = (datetime.now() - timedelta(seconds=3700)).isoformat()
+    # 年龄写成相对过期线（原写死 3700s：过期线放宽后夹具不再过期，「复现过期清空」的断言会先红在夹具上）
+    stale = (datetime.now() - timedelta(seconds=PheromoneBoard.ENTRY_MAX_AGE_S + 100)).isoformat()
     for agent, direction, score in ROUND:
         board.publish(_entry(agent, score=score, direction=direction, ts=stale))
     board.publish(_entry("Filler", ticker="OTHER", score=5.0))   # 触发存活过滤

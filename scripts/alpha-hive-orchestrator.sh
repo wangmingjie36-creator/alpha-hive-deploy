@@ -984,11 +984,18 @@ STEP2_START=$(date +%s)
 # 写死的常数还有第二个问题：WATCHLIST 是会变的（config.WATCHLIST 是唯一
 # 真相），名单一加票，常数就再次悄悄过期。故改为按只数算。
 # 取 120s/只（实测 90s 上留 33% 余量）；下限沿用原值，保证小名单不缩水。
+#
+# v0.45.518：120 → 180s/只（30 只 3600 → 5400s）。依据（2026-10-16 取 22 个扫描日）：正常日中位 ≈2080s（并行段 564 + 顺序段 1268 +
+# 收尾 249），但 09-21 / 09-23 两天撞线被杀、**整天丢失**（超时 = 全有或全无，且没有同日重试；T+7 观测永久缺口），
+# 10-12 余量仅 13%。09-23 是 CBOE 陈旧级联：顺序段 ≈127s/只（正常 ≈42），外推 30 只需 ≈4900s——5400s 刚好放得下；
+# 正常日余量仍 ≈60%。代价：真卡死的运行晚 30 分钟才被判超时。余量只报数、不判定，故改它不会连带触发告警。
+# ⚠️ **预算不可超过信息素板的墙钟过期线** `PheromoneBoard.ENTRY_MAX_AGE_S`（v0.45.518 同版放宽到 10800s）：
+# 超过它，后半段标的的 Guard / Bear 会静默读不到前面蜂的结论。两者的关系由 tests/test_pheromone_expiry_exceeds_scan_budget.py 焊住。
 TICKER_COUNT=$(echo "$TICKERS_ARG" | wc -w | tr -d ' ')
 [ "${TICKER_COUNT:-0}" -gt 0 ] 2>/dev/null || TICKER_COUNT=30   # 兜底：算不出就按满编
-STEP2_TIMEOUT=$(( TICKER_COUNT * 120 ))
+STEP2_TIMEOUT=$(( TICKER_COUNT * 180 ))
 [ "$STEP2_TIMEOUT" -lt 1800 ] && STEP2_TIMEOUT=1800
-log "INFO" "   超时限制：${STEP2_TIMEOUT}s（${TICKER_COUNT} 只 × 120s/只，下限 1800s）"
+log "INFO" "   超时限制：${STEP2_TIMEOUT}s（${TICKER_COUNT} 只 × 180s/只，下限 1800s）"
 
 # v0.45.504：输入闸。扫描预取后多数标的取不到可用现价 ⇒ Python 侧什么都不写（预测 / 归档 / 快照 / 账本 / 日报 / 网站）、
 # 退出码 4（`alpha_hive_daily_report.PRICE_GATE_EXIT`）。这里等一会儿、重新定出站方式（代理可能已恢复）再试；

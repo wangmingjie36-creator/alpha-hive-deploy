@@ -254,13 +254,13 @@ class TestFallbackStillWorksWhenNothingPublished:
 
 
 class TestStaleEntryIsStillRejected:
-    """普查视图保留墙钟过期（与 get_agent_entry / get_live_signals 同口径 3600s）：
+    """普查视图保留墙钟过期（与 get_agent_entry / get_live_signals 同口径 `ENTRY_MAX_AGE_S`）：
     「被容量挤掉」不该拦，「上一轮的陈货」该拦。成对断言，防把两件事一起放开。"""
 
-    def test_two_hour_old_entry_is_not_read(self, bear, board, fallbacks):
+    def test_entry_older_than_the_expiry_line_is_not_read(self, bear, board, fallbacks):
         board.publish(_entry("OracleBeeEcho", score=3.8, direction="bearish",
                              details={"pc_ratio": 0.9, "iv_rank": 40.0}))
-        stale = (datetime.now() - timedelta(hours=2)).isoformat()
+        stale = (datetime.now() - timedelta(seconds=PheromoneBoard.ENTRY_MAX_AGE_S + 60)).isoformat()
         board._latest_by_agent[(TICKER, "OracleBeeEcho")].timestamp = stale
 
         val, ds = _assess(bear, "options")
