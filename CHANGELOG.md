@@ -9,7 +9,41 @@
 
 ## [0.45.517] — 2026-10-16 — 占位（进行中：09-15 / 09-24 / 09-25 已证实取错窗口的量比与动量登进 QUARANTINE）
 
-## [0.45.516] — 2026-10-16 — 占位（进行中：calculate_put_call_ratio 无数据时不再返回假中性 1.0）
+## [0.45.516] — 2026-10-16 — Fixed：`calculate_put_call_ratio` 算不出时返回 None，不再是假中性 1.0（链空 / call 侧 OI 与成交量为 0 / 比值非有限）；analyze 计数 `pc_unavailable`、不标 real
+
+用户 2026-10-16 决定（v0.45.512 的待决项 3）。此前函数在两处早退里返回 1.0「默认中立」，与真实的 1.00 同形，一路进了评分、展示与 `signal_archive`。
+
+### 影响面取证（只读）
+- 归档里 `options.put_call_ratio` 恰为 1.0 的有 21 行（1,867 行的 1.1%）。逐行对照当天期权快照的 key_levels：
+  - **2 行是假中性**：2026-06-17 VKTX（call OI 0/0/0，put OI 10/2/1）、2026-06-17 CRCL（call OI 0/0/0，put OI 96/1/0）。
+  - 17 行两侧 OI 正常、量级相当，是真实值四舍五入。
+  - 2 行没有快照（META 03-23、CRCL 09-08）：总 OI 6.2 万 / 20.4 万，大概率真实，**待验证**。
+- 这 2 行**未隔离**（需用户批准写生产数据）。
+
+### Fixed
+- `options_analyzer.OptionsAnalyzer.calculate_put_call_ratio` → `Optional[float]`。以下情况返回 None：
+  - 任一侧链为空；
+  - call 侧（加权后）为 0，含两侧 OI 都为 0 后退到成交量、成交量也为 0；
+  - 比值非有限。
+  - 真实比值（含恰好 1.00）不变。两侧 OI 全 0 时退到成交量的既有行为也未动。
+- `OptionsAgent.analyze`：P/C 为 None（非 OI 陈旧）时，`pc_unavailable` 按标的去重计数，并记 WARNING。
+- `data_quality` 降级的条件从「OI 陈旧」扩到「P/C 为 None」，否则 `scan_coverage_gate` 的「real 却 P/C 为空」会误红。
+- 下游沿用 v0.45.512 已接好的 None 处理：
+  - flow 分取中点 1.5（原假中性 1.0 落在 [1.0, 1.5) 档得 1 分 ⇒ 这类日子 options_score +0.5）；
+  - `flow_direction` 记 "unknown"；
+  - Bear 用 `or 1.0` 走中性，Rival 回落中性（消费端的评分选择，不是落盘观测）。
+- `scan_timing` 摘要行显示「/P/C不可得N只」（仅非零时）。
+- **未加 IC 世代边界**：只有「算不出」的日子从 1.0 变 None（更少，不是不同）；能算的日子逐字节不变。
+
+### Tests
+- 新 `tests/test_put_call_ratio_unavailable.py`：
+  - 8 种算不出的形状（含 VKTX / CRCL 06-17 形状）都返回 None；
+  - 真实比值不变，真实的 1.00 仍是 1.00，成交量退路照旧；
+  - analyze：None、unknown、degraded、计数与去重、WARNING、评分中点 +0.5、健康链不变；
+  - 摘要行。
+- `tests/test_options_analyzer.py` 两条原断言「1.0 默认中立」改为 None。
+- 变异 5/5 被杀：两处早退改回 1.0、删有限检查、DQ 只认 OI 陈旧、不计数。
+- 全量（rebase 到 d5820bab 后）：9981 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加，不是测试写的。`tools/clockshift/audit.py --days 7/45/400` 新红 0；ruff 全绿。
 
 ## [0.45.515] — 2026-10-16 — Added：Alpha Bot 卖权页「六种结构」下方新增「怎么卖」——每种结构的下单腿、推荐价位、标的价位、下单步骤、管理办法与风险
 

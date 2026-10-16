@@ -333,7 +333,9 @@ def summary_line(snap: dict) -> str:
         + (f"/Yahoo失败IV{os_['iv_placeholder_contracts']}个" if os_.get("iv_placeholder_contracts") else "")
         + (f"/失败IV主导{os_['iv_placeholder_majority']}次" if os_.get("iv_placeholder_majority") else "")
         # v0.45.512：yfinance 链 OI 陈旧（这一场没发布）⇒ P/C / total_oi / 主链 GEX 记不可得的标的数
-        + (f"/OI陈旧链{os_['oi_stale_chains']}只" if os_.get("oi_stale_chains") else ""))
+        + (f"/OI陈旧链{os_['oi_stale_chains']}只" if os_.get("oi_stale_chains") else "")
+        # v0.45.516：P/C 算不出（此前是假中性 1.0）
+        + (f"/P/C不可得{os_['pc_unavailable']}只" if os_.get("pc_unavailable") else ""))
     pg = c.get("portfolio_greeks")
     pg_s = ""
     if pg and pg.get("error"):
