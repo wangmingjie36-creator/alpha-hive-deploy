@@ -9,7 +9,32 @@
 
 ## [0.45.509] — 2026-10-16 — 占位（进行中：F&G 敞口门自证在生产日线全取不到的故障日按「无日线」重放）
 
-## [0.45.508] — 2026-10-16 — 占位（进行中：10-14 量比取错日 ⇒ QUARANTINE 观测层，维度 IC H1 当天失效）
+## [0.45.508] — 2026-10-16 — Fixed（数据，用户批准；维度 IC 协议**事后·非修订**记录 §13.8）：2026-10-14 的 29 个 `price.volume_ratio`（Twelve Data 兜底，末根 10-13）与 BILI 的 `price.momentum_5d`（自攒索引窗口末端 10-13）登进 `QUARANTINE` ⇒ 维度 IC H1 当天无效；H2 / 共振加成 / F&G 敞口门不受影响
+
+### 取证（只读；全部 30 只，yfinance 日线只取到 10-14 为止，没算任何收益或 IC）
+- 10-14 生产扫描 yfinance 全挡（429×4 后冷却），历史字段全走出口回落（`~/.claude/logs/orchestrator-2026-10-14.log`）。
+- `price.volume_ratio` 29/30 入档（JNJ 当天 TD 限流超时、未入档；14:19 补到的 2.23x 没进归档）：**29/29 是 10-13 的比值**——27 只与 yfinance「截至 10-13」到 4 位小数相等，RKLB 0.7304 vs 0.7327、VKTX 0.6039 vs 0.6072（成交量源差异）；与「截至 10-14」相去甚远（COST 0.62 vs 1.31、CRCL 0.48 vs 1.03、DELL 0.78 vs 1.68）。成因与修法见 v0.45.505。
+- `price.momentum_5d` 30/30 来自自攒索引：29 只末端 10-14、与 yfinance 一致；**BILI 末端 10-13**（+0.40%，yfinance 截至 10-14 为 −3.91%）。
+- `price.volatility_20d` 0/30 ⇒ `buzz.comp.volatility_signal` 全 50（缺失哨兵，横截面同值）——**缺失 ≠ 取错**，按协议 §3「降级日照算」不处理。`market.fear_greed` 32 是当天 CNN 实时值、横截面同值（未对 CNN 历史独立复核，待验证）。
+- 窗口内其余日子：10-13、10-15 零 TD 量比兜底、零索引动量兜底 ⇒ 只有 10-14。
+- 损伤量级（只用分数）：用正确的 D 值，16/30 只的量比档位会变；线性近似下纠正后 H1 横截面与实际的 Spearman ≈ 0.96（忽略背离 / 情绪动量调整，估算）。
+- 截止：10-14 的 T+7 = **2026-10-23**（`backtester._US_BDAY` 与 NYSE 日历一致）；本条登记于 10-16，此前 `close_t7` 全 NULL ⇒ 盲化未破。
+
+### Fixed
+- `signal_archive.QUARANTINE` 加两条：10-14 × 29 只（除 JNJ）× `price.volume_ratio`；10-14 × BILI × `price.momentum_5d`。生产库只读核对：命中恰好 30 行（29 + 1），全在 10-14。
+- **为什么是 QUARANTINE、不是修订 2 的 `FORWARD_TEST_EXCLUDED_DAYS`**：协议 §3 登记时就把「`QUARANTINE` 登记的已知坏行」列为排除项，执行器 `weekly_series` 对假设的任一截断 / 隔离信号命中即丢行，H1 的信号表含输入层 ⇒ 这是**套用已登记的规则**，规则 / 常量 / 窗口 / 检视点都没动（不进 `AMENDMENTS`）。`FORWARD_TEST_EXCLUDED_DAYS` 管「事后重放补算的整天」（10-14 没有重放），且三份前瞻检验共用——登进去会连带把 10-14 从 F&G 敞口门里拿掉，而那边 10-14 自证失败的处理（v0.45.503）另待决定。
+- 后果：H1 当天只剩 JNJ（< `MIN_WIDTH` 20）⇒ 10-14 对 H1 无效（W42 剩 10-13 / 10-15 / 10-16）；H2 不读 `price.*` 照算。
+- **只隔离观测层**：`buzz.comp.*` 通道值是派生值（同 Agent 评分，不隔离）；且 §13.2 自证 ②「生产有分、重算却缺输入 = 0」会把隔离 / purge 掉的通道行算成自证失败。
+- 未动：09-15 QCOM / NVDA 同形状的 D-1 TD 量比（窗口前，不影响 H1；要不要为一致性补登另议）；没跑 `purge_quarantined_signal_rows.py`（`is_quarantined` 已足够让 H1 丢行；删不删库里的 30 行另议）。
+
+### Changed（文档）
+- `experiments/dim_ic_preregistration.md`：文首加「记录」一行；新增「### 记录（2026-10-16，v0.45.508）」§13.8（发生了什么 / 做了什么 / 为什么不是修订 / 为什么不隔离通道 / 为什么不走修订 2 / 为什么不可能受结果影响 / 代价 / 守卫）。
+
+### Tests
+- 新 `tests/test_quarantine_1014_prev_session.py`（10）：名单恰好 29 只 × 量比、BILI × 动量，JNJ 与其余动量不在内；通道 / Agent 评分 / `sentiment.pct` / 波动 / F&G 不隔离；不是协议排除日；T+7 按 backtester 日历 = 10-23 晚于登记日；生产形状夹具（30 只真实代码）下 H1 丢 10-14、保 10-15，**删掉条目该日回来**（对照），H2 不受影响。
+- 变异 7/7 被杀（量比条目失效、漏 XOM、多 JNJ、连带隔离通道、动量不限 BILI、日期错成 10-15、执行器不问隔离）；`PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。
+- 相关 6 个文件 188 passed；ruff 全仓通过。
+- 全量：9849 passed、2 xfailed、0 failed（`--deselect` 设计内定期红的 `test_economic_calendar::TestCoverageHorizon`）；1 error = session 级真实数据根总闸：生产 `replay_ohlc_state/*.json` 05:52:31–36 被改写，总闸把它们记到互不相关的 alphabot 启动器测试上（几秒内成批）。同一时段另一会话（laughing-lumiere）的全量 05:44–05:55 与本次重叠；单独重跑被点名的两个文件 + 本条测试（179 passed），该目录 mtime 前后逐字节不变；本条改动不碰任何写入路径 ⇒ 判为并发写入者，非本条泄漏（谁写的未进一步定位，待验证）。
 
 ## [0.45.507] — 2026-10-16 — Fixed（仅测试基础设施）：两道 session 级总闸「逐文件写入时刻落在哪条测试」的定位按**本机 mtime 精度**放宽——Linux 内核按 tick 盖 inode 时间戳，mtime 可比写入那一刻的 `time.time()` 早一个 tick，call 开头的写入被标成 setup；`test_root_data_guard` 两条时间线测试因此在 Linux CI 上恒红（macOS 绿）
 
