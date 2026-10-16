@@ -652,6 +652,12 @@ class TestGateWiring:
         tree = ast.parse(tail.replace('if __name__ == "__main__":', "if True:", 1))
         consts = {n.value for n in ast.walk(tree)
                   if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        # v0.45.504：判决 → 退出码搬进 `_exit_code_for`（同时映射输入闸的 4）。__main__ 调它时把它的函数体一并算进来；
+        # 只认 __main__ 真调到的那一个函数，别的地方出现这两个字符串不算。
+        if "_exit_code_for" in _called_names(tree):
+            fn = _fn(ast.parse(src), "_exit_code_for")
+            assert fn is not None, "__main__ 调了 _exit_code_for 但找不到它的定义"
+            consts |= {n.value for n in ast.walk(fn) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
         assert "constant" in consts and "near_constant" in consts, (
             "__main__ 没有按判决出码"
         )

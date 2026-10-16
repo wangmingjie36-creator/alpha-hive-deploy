@@ -2,9 +2,9 @@
 """
 💬 Alpha Hive Slack 报告通知器
 
-CLAUDE.md「Slack 通知精简规则」只许两类消息，本模块只服务这两处：
-  ① `pre_scan_notify.py`（LLM 模式确认）—— 只借用构造出的 token / 状态，自己发
-  ② `push_report_to_slack.py --force`（富文本日报）—— `send_rich_daily_report`
+CLAUDE.md「Slack 通知精简规则」现只许一类消息，本模块只服务这一处：
+  `push_report_to_slack.py --force`（富文本日报）—— `send_rich_daily_report`
+（原第二处 `pre_scan_notify.py`（LLM 模式确认）已于 v0.45.510 停用、v0.45.514 删除。）
 
 v0.45.341 删掉了零生产调用方的发送方法：`send_risk_alert` / `send_opportunity_alert` /
 `send_scan_progress` / `send_x_thread` / `send_daily_report` 及其 blocks 构建器与
@@ -391,7 +391,7 @@ class SlackReportNotifier:
           * 是 v0.45.339 那批被禁告警漏成私信的机制；
           * 频道与私信都回 channel 类错误时循环跑空，返回 None。
         2026-03-13 已判定它「与频道推送意图不符」，当时只把脚本改成默认跳过，降级本身留着。
-        要发私信就显式把用户 ID 当 `channel` 传进来（`pre_scan_notify` 就是自己这么发的）。
+        要发私信就显式把用户 ID 当 `channel` 传进来（已删的 `pre_scan_notify` 当年就是自己这么发的）。
         """
         try:
             from resilience import slack_breaker

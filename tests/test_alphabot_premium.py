@@ -960,7 +960,8 @@ class TestExternalReasonsAreComplete:
 
     def test_every_bars_and_vrp_reason_is_registered(self):
         bars = self._reason_prefixes_in(ROOT / "alphabot/service.py", "_default_bars")
-        vrp = self._reason_prefixes_in(ROOT / "vrp_signal.py", "record_day")
+        # v0.45.384 起 reason 由本体 `_record_day_with_info` 写（`record_day` 只是取第一项的薄包装）
+        vrp = self._reason_prefixes_in(ROOT / "vrp_signal.py", "_record_day_with_info")
         assert "bars_fetch_exception" in bars and "rv_30d_missing" in vrp         # 对照
         assert (bars | vrp) - set(PM.EXTERNAL_REASONS) == set()
 

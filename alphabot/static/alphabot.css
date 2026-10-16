@@ -249,3 +249,17 @@ details.sd-why p { font-size: 13px; color: var(--ink-2); margin: 6px 0 0; }
   .gate .bar { grid-column: 1 / -1; grid-row: 2; }
   .sd-greeks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* 卖权页「怎么卖」（v0.45.515） */
+.howto h3 { font: 600 14px/1.4 var(--sans); margin: 20px 0 8px; color: var(--ink); }
+.howto ol, .howto ul { margin: 6px 0 10px; padding-left: 20px; font-size: 13.5px; color: var(--ink-2); }
+.howto li { margin: 4px 0; }
+.howto .howto-steps { margin-top: 4px; }
+/* 价位列别折行（日期 / 带单位的价格） */
+.howto td.r { white-space: nowrap; }
+tr.spot-row td { background: var(--sunk); font-weight: 600; }
+
+/* 「不可报价」原因着色（v0.45.519）：点差过宽 = 流动性不够（黄），其余 = 报价本身有问题（灰） */
+td .sub.reason { color: var(--ink-2); }
+td .sub.reason.warn { color: var(--warn); }
+td .reason.warn, td.reason.warn { color: var(--warn); }

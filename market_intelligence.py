@@ -28,6 +28,19 @@ except Exception:  # pragma: no cover - 独立运行/测试时退化到标准库
     import logging as _logging
     _log = _logging.getLogger("alpha_hive.market_intel")
 
+
+def _retry_sleep(seconds: float) -> None:
+    """取数失败后的重试退避等待——**测试注入接缝**（v0.45.524），生产行为不变。
+
+    生产就是 `time.sleep(seconds)`，且在**调用时**查找 `time.sleep`，所以既有的
+    `monkeypatch.setattr(time, "sleep", …)` 照样生效。测试里 yfinance 被
+    `stub_yfinance` 钉成立即失败，每次 analyze 都会在这里白睡 0.7+1.4 秒；
+    `tests/conftest.py::stub_yfinance` 把本函数换成记录器。退避间隔本身由
+    `tests/test_retry_backoff_seams.py` 在生产配置下钉住——接缝若被改成什么都不做，那里会红。
+    """
+    import time
+    time.sleep(seconds)
+
 _BASE = Path(__file__).parent
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -940,8 +953,6 @@ def calculate_iv_rv_spread(
         _log.debug("[%s] Twelve Data RV 不可用，退回 yfinance: %s", ticker, _e_td)
 
     try:
-        import time
-
         try:                                    # v0.45.56 限流闸门
             from yf_gate import ensure as _yf_ensure
             _yf_ensure()
@@ -994,7 +1005,7 @@ def calculate_iv_rv_spread(
                 if _is_rl(_e_dl):
                     break          # 限流：重试只会加深，直接降级
             if _attempt < 2:
-                time.sleep(0.7 * (_attempt + 1))
+                _retry_sleep(0.7 * (_attempt + 1))
 
         if hist is None or hist.empty or len(hist) < lookback_days // 2:
             _empty["error"] = (f"yfinance 历史K线不可用（{type(_dl_err).__name__}:{_dl_err}）"

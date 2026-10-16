@@ -215,3 +215,34 @@ class TestRun:
                 "SELECT value FROM signal_archive WHERE signal='market.fear_greed'"
             ).fetchall()
         assert rows == [(29.0,)]
+
+
+class TestQuarantineGate:
+    """v0.45.511：本脚本直写 signal_archive、不经 archive() 的入库口 ⇒ 隔离名单要自己过。
+    10-13 实测同形状：10-12 重放写回「整日删除再插入」不查 QUARANTINE，把 v0.45.499 清掉的 BILI 假 IV 插了回去。"""
+
+    def test_quarantined_rows_are_not_written_and_are_counted(self, tmp_path, monkeypatch):
+        """变异：删掉剔除那段 ⇒ MSFT 行被写进去、quarantined 不是 1，红。"""
+        import signal_archive as sa
+        monkeypatch.setattr(sa, "QUARANTINE", [{"date": "2026-04-01", "tickers": ("MSFT",),
+                                                "signals": ("market.fear_greed",), "reason": "test"}])
+        db_path = _make_db(tmp_path, [
+            ("2026-04-01", "MSFT", "price.momentum_5d", 1.0),
+            ("2026-04-01", "NVDA", "price.momentum_5d", 2.0),
+        ])
+        _write_snapshot(tmp_path, "2026-04-01", {"MSFT": "F&G 45(Fear)", "NVDA": "F&G 45(Fear)"})
+
+        result = M.run(tmp_path, db_path, apply_changes=True)
+
+        assert result["quarantined"] == 1 and result["rows"] == 1
+        with sqlite3.connect(str(db_path)) as conn:
+            rows = conn.execute(
+                "SELECT ticker FROM signal_archive WHERE signal='market.fear_greed'").fetchall()
+        assert rows == [("NVDA",)]
+
+    def test_no_quarantine_hits_reports_zero(self, tmp_path, monkeypatch):
+        import signal_archive as sa
+        monkeypatch.setattr(sa, "QUARANTINE", [])
+        db_path = _make_db(tmp_path, [("2026-04-01", "MSFT", "price.momentum_5d", 1.0)])
+        _write_snapshot(tmp_path, "2026-04-01", {"MSFT": "F&G 45(Fear)"})
+        assert M.run(tmp_path, db_path, apply_changes=True)["quarantined"] == 0

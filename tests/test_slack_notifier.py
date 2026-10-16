@@ -1,8 +1,8 @@
 """
 tests/test_slack_notifier.py — SlackReportNotifier 单元测试
 
-覆盖：初始化、纯文本发送（mock HTTP）、conftest `_block_slack` 三道闸的自证、
-`pre_scan_notify` 的 webhook 兜底。
+覆盖：初始化、纯文本发送（mock HTTP）、conftest `_block_slack` 三道闸的自证。
+（v0.45.514：`pre_scan_notify` 的 webhook 兜底测试随该模块删除。）
 
 v0.45.341：blocks 构建器 / `send_risk_alert` 等告警类方法 / 失败重试队列 / 整个
 `slack_notifier.py` 已删（零生产调用方），它们的测试随之删除。白名单与墓碑见
@@ -197,47 +197,6 @@ class TestTestsCanNeverReachSlack:
         for _ in range(r._HEALTH_FAIL_THRESHOLD):
             r._record_src_failure("yfinance_short_interest")
         assert r._src_degraded.get("yfinance_short_interest") is True
-
-
-# ==================== pre_scan_notify 的 webhook 兜底 ====================
-
-class TestPreScanWebhookFallback:
-    """`pre_scan_notify.send_slack_notification` 第三级：直接读 `~/.alpha_hive_slack_webhook`。
-
-    v0.45.341 删掉 `slack_notifier.py`（它的 CLI 是唯一「写」这个文件的代码）时补上：
-    证明兜底只依赖文件本身，不依赖任何通知器模块。`HOME` 指到 tmp —— 既不读你
-    Mac 上的真 webhook，`requests.post` 也换成记录器，**不出网、不发消息**。
-    token 两级在 conftest 闸①下读不到 token（`_get_slack_token` 另行打成 None），只剩第三级。
-    """
-
-    @pytest.fixture
-    def net(self, monkeypatch, tmp_path):
-        import requests
-        import pre_scan_notify
-        calls = []
-
-        def _post(url, *a, **k):
-            calls.append((url, k.get("json")))
-            return types.SimpleNamespace(ok=True, text="ok", status_code=200,
-                                         json=lambda: {"ok": True})
-
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
-        monkeypatch.delenv("SLACK_USER_TOKEN", raising=False)
-        monkeypatch.setattr(requests, "post", _post)
-        monkeypatch.setattr(pre_scan_notify, "_get_slack_token", lambda: None)
-        return types.SimpleNamespace(calls=calls, home=tmp_path, mod=pre_scan_notify)
-
-    def test_webhook_file_is_used(self, net):
-        url = "https://hooks.slack.com/services/T0/B0/fallback-by-test"
-        (net.home / ".alpha_hive_slack_webhook").write_text(url + "\n", encoding="utf-8")
-        assert net.mod.send_slack_notification("LLM 模式确认（测试）") == (True, None, None)
-        assert net.calls == [(url, {"text": "LLM 模式确认（测试）"})]
-
-    def test_no_webhook_file_means_no_send(self, net):
-        """反对照：文件不在 ⇒ 三级全落空、零发送（上一条的 True 不是恒真）。"""
-        assert net.mod.send_slack_notification("x") == (False, None, None)
-        assert net.calls == []
 
 
 # ==================== 频道发不进去 ≠ 改发私信（v0.45.343）====================

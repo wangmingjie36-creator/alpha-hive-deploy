@@ -9,6 +9,18 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from hive_logger import get_logger
 
+
+def _retry_sleep(seconds: float) -> None:
+    """gh-pages 推送被拒后的退避等待——**测试注入接缝**（v0.45.524），生产行为不变。
+
+    生产就是 `time.sleep(seconds)`，在**调用时**查找 `time.sleep`，所以既有的
+    `monkeypatch.setattr(time, "sleep", …)`（`test_gh_pages_unverified_parent`）照样生效。
+    推送重试测试点名替换本函数，不再真等 2+4+8 秒；退避节奏由
+    `tests/test_retry_backoff_seams.py` 与 `tests/test_pipeline.py` 在生产配置下钉住。
+    """
+    import time
+    time.sleep(seconds)
+
 _log = get_logger("report_deployer")
 
 
@@ -314,7 +326,6 @@ def commit_and_push_gh_pages(repo: str, tree: str, message_fn, max_attempts: int
                「是否切 ssh.github.com:443」攒判据；不影响成败判定），成功路径为 None。
     """
     import subprocess
-    import time as _t
     result: Dict = {
         "success": False, "action": None, "commit": None, "parent": None,
         "parent_verified": None, "tree_unchanged": None, "n_changed": None,
@@ -402,7 +413,7 @@ def commit_and_push_gh_pages(repo: str, tree: str, message_fn, max_attempts: int
                 "gh-pages push 被拒 (attempt %d/%d)：%s —— %.0fs 后重新 fetch + 提交 + 推送",
                 attempt, max_attempts, result["last_error"], delay,
             )
-            _t.sleep(delay)
+            _retry_sleep(delay)
     return result
 
 

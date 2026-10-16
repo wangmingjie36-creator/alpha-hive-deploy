@@ -51,6 +51,7 @@ from pheromone_board import PheromoneBoard, PheromoneEntry
 from swarm_agents.bear_bee import BearBeeContrarian
 from swarm_agents.oracle_bee import OracleBeeEcho
 from tests._repo_files import own_python_files
+from tests import _ast_cache
 
 REPO_ROOT = Path(__file__).resolve().parent.parent   # 指向**代码**，故用 __file__
 #: OracleBee 的世代印记（`ic_rerun_readiness` 的 v0.45.349 边界判别器读它）。**写死字面量**，
@@ -762,7 +763,7 @@ class TestOracleMarkerOnlyProducedByOracle:
             if rel.parts[0] in TestGexKeyComparisonsAreKnown._SKIP_TOP:
                 continue
             try:
-                tree = ast.parse(py.read_text(encoding="utf-8"))
+                tree = _ast_cache.parse_file(py)
             except (SyntaxError, UnicodeDecodeError, OSError):
                 continue
             p_lines, r_lines = cls._classify(tree)
@@ -1000,7 +1001,7 @@ class TestGexKeyComparisonsAreKnown:
             if rel.parts[0] in cls._SKIP_TOP:
                 continue
             try:
-                tree = ast.parse(py.read_text(encoding="utf-8"))
+                tree = _ast_cache.parse_file(py)
             except (SyntaxError, UnicodeDecodeError, OSError):
                 continue
             relp = rel.as_posix()

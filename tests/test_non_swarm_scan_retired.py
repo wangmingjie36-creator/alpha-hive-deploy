@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import alpha_hive_daily_report as adr  # noqa: E402
 from _repo_files import own_python_files  # noqa: E402
+from tests import _ast_cache  # noqa: E402
 
 
 # ═════════════════════════════ 1. CLI 闸在扫描之前 ═════════════════════════════
@@ -147,7 +148,7 @@ CALL = "generate_ml_enhanced_report"
 def _directionless_calls(source: str):
     """调 `generate_ml_enhanced_report(...)` 却不传 `swarm_direction` 的行号。"""
     return [
-        node.lineno for node in ast.walk(ast.parse(source))
+        node.lineno for node in ast.walk(_ast_cache.parse(source))
         if isinstance(node, ast.Call)
         and (getattr(node.func, "attr", None) or getattr(node.func, "id", None)) == CALL
         and "swarm_direction" not in {k.arg for k in node.keywords}
@@ -162,7 +163,7 @@ def _production_sources():
         if rel.parts[0] == "tests":
             continue
         try:
-            out.append((rel.as_posix(), p.read_text(encoding="utf-8")))
+            out.append((rel.as_posix(), _ast_cache.read_text(p)))
         except (OSError, UnicodeDecodeError):
             continue
     return out
@@ -181,7 +182,7 @@ class TestNoDirectionlessLedgerWriter:
     def test_scanner_sees_the_live_call_sites(self):
         """正对照：扫描器扫得到两个真实调用点，上一条不是在空集上恒真。"""
         sites = {rel for rel, src in _production_sources()
-                 for node in ast.walk(ast.parse(src))
+                 for node in ast.walk(_ast_cache.parse(src))
                  if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == CALL}
         assert {"alpha_hive_daily_report.py", "generate_ml_report.py"} <= sites
 

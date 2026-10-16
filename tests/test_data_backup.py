@@ -1482,13 +1482,17 @@ class TestBackupRepoFollowsPaths:
         assert (rc, status["stage"], status.get("refused")) == (2, "init", "inside_code_repo"), status
         assert calls == []
         assert default.exists() == existed_before, f"代码检出里被造出了 {default}"
+        # v0.45.513：病因要说对——422 起「没设」解析到缺省数据根、进不了检出；能走到这里的是显式指向检出
+        assert "显式指到了检出" in status["error"] and "没设" not in status["error"], status["error"]
 
-    def test_export_main_refuses_inside_code_repo(self, tmp_path, monkeypatch):
+    def test_export_main_refuses_inside_code_repo(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(tmp_path / "code"))
         calls = _forbid_side_effects(monkeypatch)
         assert export_mod.main(["--src", str(tmp_path), "--out", str(tmp_path / "code" / "_git_backup")]) == 2
         assert calls == []
         assert not (tmp_path / "code").exists()
+        err = capsys.readouterr().err
+        assert "拒绝导出" in err and "显式指到了检出" in err and "没设" not in err, err   # v0.45.513：同上，病因要说对
 
     def test_orchestrator_does_not_spell_the_backup_repo(self):
         """位置只在 PATHS：编排器的可执行行里不许再出现 `_git_backup` / `--backup-dir`（注释不算）。"""
@@ -2398,3 +2402,34 @@ class TestManifestSecondReview:
         assert odd in "".join(run_backup._tracked_paths(bk)), "夹具前提：怪名文件确实进了索引"
         assert run_backup.sums_paths_not_tracked(bk) == []
         assert run_backup.foreign_entries(bk) == []
+
+
+class TestRestoreReportsQuarantinedRows:
+    """v0.45.511：整库恢复忠实还原备份时刻，不删行；但备份早于某次清库时，坏行会跟着回来 ⇒ 结果里必须报出来。"""
+
+    def _restore_with(self, tmp_path, rows):
+        src_root = tmp_path / "src"
+        src_root.mkdir()
+        with sqlite3.connect(src_root / "p.db") as c:
+            c.execute("CREATE TABLE signal_archive (id INTEGER PRIMARY KEY, date TEXT, ticker TEXT, "
+                      "signal TEXT, value REAL, created_at TEXT, UNIQUE(date, ticker, signal))")
+            c.executemany("INSERT INTO signal_archive (date,ticker,signal,value) VALUES (?,?,?,?)", rows)
+        out = tmp_path / "backup"
+        export_mod.export_db(src_root, "pheromone", "p.db", out / "db_exports")
+        return restore_mod.restore_db(out, "pheromone", tmp_path / "restored" / "p.db")
+
+    def test_counts_rows_hitting_current_quarantine_without_deleting(self, tmp_path, monkeypatch):
+        """变异：去掉 `**quarantine` 或计数恒 0 ⇒ 红。行照样恢复（row_counts 2）——只报告不删。"""
+        import signal_archive as sa
+        monkeypatch.setattr(sa, "QUARANTINE", [{"date": "2026-10-12", "tickers": ("BILI",),
+                                                "signals": ("options.iv_current",), "reason": "test"}])
+        r = self._restore_with(tmp_path, [("2026-10-12", "BILI", "options.iv_current", 6.25),
+                                          ("2026-10-12", "NVDA", "options.iv_current", 31.4)])
+        assert r["quarantined_signal_rows"] == 1
+        assert r["row_counts"]["signal_archive"] == 2
+
+    def test_clean_backup_reports_zero(self, tmp_path, monkeypatch):
+        import signal_archive as sa
+        monkeypatch.setattr(sa, "QUARANTINE", [])
+        r = self._restore_with(tmp_path, [("2026-10-12", "NVDA", "options.iv_current", 31.4)])
+        assert r["quarantined_signal_rows"] == 0 and "quarantine_check_error" not in r

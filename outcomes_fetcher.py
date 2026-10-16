@@ -19,15 +19,8 @@ from typing import Dict, List, Optional, Tuple
 
 _log = _logging.getLogger("alpha_hive.outcomes_fetcher")
 
-# ── 交易日计算（复用 backtester.py 模式） ──
-try:
-    import pandas as _pd
-    from pandas.tseries.holiday import USFederalHolidayCalendar as _USCal
-    from pandas.tseries.offsets import CustomBusinessDay as _CBDay
-    _US_BDAY = _CBDay(calendar=_USCal())
-    _BDAY_AVAILABLE = True
-except Exception:
-    _BDAY_AVAILABLE = False
+# ── 交易日计算：NYSE 日历的唯一实现（v0.45.520 前是 pandas 联邦假日表，哥伦布 / 退伍军人日判休、受难日判开）──
+from is_trading_day import add_trading_days
 
 try:
     import yfinance as _yf
@@ -303,9 +296,7 @@ class OutcomesFetcher:
                 base = datetime.strptime(str(base_str)[:10], "%Y-%m-%d")
             except (ValueError, TypeError):
                 return None
-            if _BDAY_AVAILABLE:
-                return (_pd.Timestamp(base) + off * _US_BDAY).strftime("%Y-%m-%d")
-            return (base + timedelta(days=int(off * 1.5))).strftime("%Y-%m-%d")
+            return add_trading_days(base, off).strftime("%Y-%m-%d")
 
         for snap in snaps:
             base = snap.get("date")
@@ -367,12 +358,7 @@ class OutcomesFetcher:
         """(目标交易日, 窗口末日)；日期解析失败 ⇒ None。"""
         try:
             start = datetime.strptime(report_date, "%Y-%m-%d")
-            if _BDAY_AVAILABLE:
-                target_ts = _pd.Timestamp(start) + offset_days * _US_BDAY
-                target_date = target_ts.to_pydatetime()
-            else:
-                # 降级：自然日偏移 × 1.5
-                target_date = start + timedelta(days=int(offset_days * 1.5))
+            target_date = add_trading_days(start, offset_days)
             return target_date, target_date + timedelta(days=10)
         except (ValueError, TypeError) as e:
             _log.debug("日期解析失败 %s +%dd: %s", ticker, offset_days, e)
@@ -449,12 +435,18 @@ class OutcomesFetcher:
         if not entry or entry <= 0:
             return 0
 
-        t1_ret = ((prices[1] - entry) / entry) if 1 in prices else None
-        t7_ret = ((prices[7] - entry) / entry) if 7 in prices else None
-        t30_ret = ((prices[30] - entry) / entry) if 30 in prices else None
+        # 本轮回填到的 + 快照里早已存好的，一起写（v0.45.527）：`prices` 只含本轮到期的 offset，
+        # 只拿它算 ⇒ 缺的 horizon 是 None，旧 SQL 会把前几轮写好的覆写成 NULL。快照是这几列的唯一来源，
+        # 每轮按它整组重写还顺带把仍在途、曾被抹掉的行补回来。存储层另有 COALESCE 兜底。
+        rets: Dict[int, Optional[float]] = {}
+        for off, attr in self._OFFSETS.items():
+            px = prices[off] if off in prices else getattr(snapshot, attr, None)
+            rets[off] = ((px - entry) / entry) if isinstance(px, (int, float)) and px > 0 else None
+        t1_ret, t7_ret, t30_ret = rets[1], rets[7], rets[30]
 
-        # 确定 outcome（基于 T+7 方向准确性）
-        outcome = self._determine_outcome(snapshot.direction, t7_ret)
+        # 确定 outcome（基于 T+7 方向准确性）；还没有 T+7 ⇒ None（存储层保留原值），
+        # 不写 "neutral"——它进 get_agent_accuracy 的分母，等于把「还判不了」记成「没猜对」
+        outcome = self._determine_outcome(snapshot.direction, t7_ret) if t7_ret is not None else None
 
         # 按 (date, ticker) 匹配 agent_memory 中的记录
         updated = 0

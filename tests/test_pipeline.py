@@ -544,13 +544,18 @@ class TestDeployStaticToGhPages:
                 r.stderr = ""
             return r
 
+        # v0.45.524：退避经 `report_deployer._retry_sleep` 接缝记录、不真等（此前真睡 2+4=6 秒）；
+        # 节奏照样断言。接缝在生产配置下真睡由 tests/test_retry_backoff_seams.py 钉住。
+        slept = []
         with patch("subprocess.check_output", side_effect=fake_check_output), \
              patch("subprocess.run", side_effect=fake_run), \
+             patch("report_deployer._retry_sleep", side_effect=slept.append), \
              patch.object(reporter, "_verify_cdn_deployment", return_value=True):
             reporter._deploy_static_to_ghpages()
 
         # 应尝试 3 次（2 次失败 + 1 次成功）
         assert len(push_calls) == 3
+        assert slept == [2.0, 4.0]
 
     def test_push_gives_up_after_max_retries(self, reporter_with_mock_git):
         """D3: push 在 4 次全部失败后放弃"""
@@ -581,12 +586,15 @@ class TestDeployStaticToGhPages:
                 r.stderr = ""
             return r
 
+        slept = []                      # v0.45.524：同上，此前真睡 2+4+8=14 秒
         with patch("subprocess.check_output", side_effect=fake_check_output), \
-             patch("subprocess.run", side_effect=fake_run):
+             patch("subprocess.run", side_effect=fake_run), \
+             patch("report_deployer._retry_sleep", side_effect=slept.append):
             reporter._deploy_static_to_ghpages()
 
         # 应尝试 4 次（1 初始 + 3 重试）
         assert len(push_calls) == 4
+        assert slept == [2.0, 4.0, 8.0]
 
     def test_sw_no_dashboard_data_in_precache(self, reporter_with_mock_git):
         """D1: sw.js 不应预缓存 dashboard-data.json"""

@@ -25,8 +25,8 @@
 1. 按标的批量 `yf.download`（**不用 `Ticker().history()`**——实测在本机
    间歇性抛 `TypeError: 'NoneType' object is not subscriptable`）。
    `yf.download` 返回 MultiIndex 列，按 [[alpha-hive-yfinance-multiindex]] 的标准修法解包。
-2. T+7 用 pandas `CustomBusinessDay(US)` 算真实交易日偏移，与
-   `backtester._get_price_at_date` 同一口径。
+2. T+7 用 `is_trading_day.add_trading_days` 算 NYSE 交易日偏移，与
+   `backtester._get_price_at_date` 同一口径（v0.45.520 前两者都是 pandas 联邦假日表，不是 NYSE）。
 3. 方向判定走 `outcome_utils.determine_outcome_triplet`（与主流程同源，
    不自写评分逻辑）。
 4. **自校验**：对 `exit_reason='T7_CLOSE'` 的行，没触发 SL/TP，
@@ -191,11 +191,9 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     import pandas as pd
-    from pandas.tseries.holiday import USFederalHolidayCalendar
-    from pandas.tseries.offsets import CustomBusinessDay
     from outcome_utils import determine_outcome_triplet
 
-    us_bday = CustomBusinessDay(calendar=USFederalHolidayCalendar())
+    from is_trading_day import add_trading_days
 
     # v0.45.160：argparse 的 default 是 None（不能塞 import 期冻结值），此处解析
     args.db = args.db or _db_path()
@@ -236,7 +234,7 @@ def main() -> int:
         by_ticker[r["ticker"]].append(r)
     lo = min(r["date"] for r in rows)
     hi = max(r["date"] for r in rows)
-    hi_pad = (pd.Timestamp(hi) + 25 * us_bday).date().isoformat()
+    hi_pad = add_trading_days(pd.Timestamp(hi).date(), 25).isoformat()
     _log.info("待回填 %d 条 / %d 只标的 / %s → %s",
               len(rows), len(by_ticker), lo, hi)
 
@@ -250,7 +248,7 @@ def main() -> int:
             misses += len(group)
             continue
         for r in group:
-            target = (pd.Timestamp(r["date"]) + HOLD_TRADING_DAYS * us_bday).date()
+            target = add_trading_days(pd.Timestamp(r["date"]).date(), HOLD_TRADING_DAYS)
             close, _ = _close_after(series, target)
             if close is None or close <= 0:
                 misses += 1

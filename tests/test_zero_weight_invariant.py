@@ -50,6 +50,7 @@ from gex_regime import RegimeWeightAdjuster
 from pheromone_board import PheromoneBoard
 from swarm_agents.queen_distiller import QueenDistiller
 from tests._repo_files import own_python_files
+from tests import _ast_cache
 
 REPO_ROOT = Path(__file__).resolve().parent.parent   # 指向**代码**，故用 __file__
 
@@ -195,7 +196,7 @@ class TestAdaptedWeightsNotWiredToProduction:
             if rel.parts[0] in cls._SKIP_TOP:
                 continue
             try:
-                tree = ast.parse(py.read_text(encoding="utf-8"))
+                tree = _ast_cache.parse_file(py)
             except (SyntaxError, UnicodeDecodeError):
                 continue
             for node in ast.walk(tree):

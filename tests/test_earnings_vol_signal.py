@@ -1,10 +1,16 @@
 """v0.45.101 财报事件波动率信号（earnings_vol_signal）。全部离线。"""
 
 import json
+import logging
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 import earnings_vol_signal as evs
+
+ROOT = Path(__file__).resolve().parent.parent
 
 AS_OF = "2026-09-03"
 EXPIRY = "2026-10-02"     # 29 DTE
@@ -436,6 +442,219 @@ class TestScan:
         (state / f"options_snapshot_XYZ_{AS_OF}.json").write_text(json.dumps({"ticker": "XYZ"}))
         r = evs.scan(AS_OF, cache_dir=state, upcoming_fn=_Watcher({}).get_earnings_date, stats_fn=lambda tk: None)
         assert len(r) == 1 and r[0]["eligible"] is False
+
+
+# ==================== 没有输入就不许删行（v0.45.380） ====================
+
+D_OTHER = "2026-09-02"
+_LOGGER = "alpha_hive.earnings_vol_signal"
+
+
+def _seed_ledger():
+    """该日 3 行（XYZ 已结算）+ 别的日期 1 行。
+
+    刻意用紧凑分隔符写（`_write_jsonl` 用的是默认 `", "`/`": "`）：即便被改写成**同样的内容**，
+    字节也会变。这里要钉的是「根本没写」，不只是「内容没丢」。"""
+    xyz = evs.compute_signal("XYZ", AS_OF, _qs(), UP, _stats(), 20.0)
+    xyz.update({"realized_abs_move_pct": 4.0, "realized_move_pct": -4.0,
+                "realized_ratio": 0.44, "settled_on": "2026-09-25"})
+    rows = [evs.compute_signal("XYZ", D_OTHER, _qs(), UP, _stats(), 20.0), xyz,
+            evs.compute_signal("ABC", AS_OF, _qs(), UP, _stats(), 20.0),
+            evs.compute_signal("DEF", AS_OF, _qs(), UP, _stats(), 20.0)]
+    evs.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    evs.SIGNALS_FILE.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows),
+                                encoding="utf-8")
+    return {(r["ticker"], r["as_of"]): r for r in rows}
+
+
+def _no_fetch(tk):
+    pytest.fail(f"没有快照就不该为 {tk} 打网")
+
+
+def _warnings(caplog):
+    return "\n".join(r.getMessage() for r in caplog.records
+                     if r.name == _LOGGER and r.levelno >= logging.WARNING)
+
+
+def _zero_snapshot_warning(caplog):
+    """只取 `scan` 自己那一条零快照 WARNING（v0.45.513）。拿全部告警拼起来断言，会让别的告警代答：
+    `_iter_snapshots` 的「快照读取失败」带快照完整路径（vrp_signal v0.45.384 二次检查 #6 实测变异因此幸存）。"""
+    lines = [r.getMessage() for r in caplog.records if r.name == _LOGGER and r.levelno >= logging.WARNING
+             and r.getMessage().startswith(f"财报事件波动率信号 {AS_OF}：未找到快照")]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
+class TestScanNeverDeletesRowsItDidNotRecompute:
+    """2026-09-29 v0.45.382（开工时编号 0.45.379）同形普查发现：`scan()` 零快照时照样把账本改写成「其它日期的行 + 空列表」，
+    cache 目录找错（09-29 时：未设 ALPHA_HIVE_HOME ⇒ PATHS.home 回落到代码目录，而那里的
+    options_paper_state/ 被 git 跟踪；v0.45.422 起未设 ⇒ 缺省数据根 = 生产）或当天缺快照时，
+    **该日已有的行连同已结算的一起删掉**。M4（v0.45.104）的结算字段搬运只救得了本次重新产出的票。"""
+
+    @pytest.mark.parametrize("layout", ["missing_dir", "empty_dir", "other_day_only"])
+    def test_zero_snapshots_leave_ledger_byte_identical(self, state, tmp_path, caplog, layout):
+        _seed_ledger()
+        before, ino = evs.SIGNALS_FILE.read_bytes(), evs.SIGNALS_FILE.stat().st_ino
+        cdir = tmp_path / "wrong_root" / "cache" if layout == "missing_dir" else state
+        if layout == "other_day_only":
+            _write_snap(state, "XYZ", D_OTHER, _qs(), rv=20.0)
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            r = evs.scan(AS_OF, cache_dir=cdir, stats_fn=_no_fetch, upcoming_fn=_no_fetch)
+
+        assert r == []
+        assert evs.SIGNALS_FILE.read_bytes() == before, "零快照改写了账本"
+        assert evs.SIGNALS_FILE.stat().st_ino == ino, "零快照做了一次原子替换（内容恰好没变也不许写）"
+        msg = _warnings(caplog)
+        assert str(cdir) in msg, f"WARNING 没点名读的是哪个目录：{msg!r}"
+        assert "账本未改写" in msg and "3 行原样保留" in msg
+        if layout == "missing_dir":
+            assert "目录不存在" in msg
+            assert not cdir.exists(), "诊断不许顺手把缺的目录建出来"
+        else:
+            assert "目录存在" in msg and "目录不存在" not in msg
+        if layout == "other_day_only":
+            assert f"最新 {D_OTHER}" in msg
+
+    def test_snapshots_present_but_no_signal_computed_leaves_ledger_untouched(self, state, monkeypatch, caplog):
+        _seed_ledger()
+        before = evs.SIGNALS_FILE.read_bytes()
+        _write_snap(state, "XYZ", AS_OF, _qs(), rv=20.0)
+        monkeypatch.setattr(evs, "compute_signal", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            r = evs.scan(AS_OF, cache_dir=state, stats_fn=lambda tk: _stats(),
+                         upcoming_fn=lambda tk: UP)
+        assert r == []
+        assert evs.SIGNALS_FILE.read_bytes() == before
+        assert "一条信号都没算出" in _warnings(caplog)
+
+    def test_partial_rerun_keeps_rows_it_did_not_recompute(self, state, caplog):
+        """该日 3 行、这次只剩 ABC 的快照：ABC 被替换，XYZ（已结算）与 DEF 原样保留并报出来。
+
+        选「保留」而不是「整日替换」：缺快照不是信号作废的证据；已结算样本删了补不回来；
+        与 `sell_strike_ledger._record_rows` 的按票 upsert 同一语义。"""
+        seeded = _seed_ledger()
+        _write_snap(state, "ABC", AS_OF, _qs(), rv=20.0)
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            r = evs.scan(AS_OF, cache_dir=state, stats_fn=lambda tk: _stats(),
+                         upcoming_fn=lambda tk: UP)
+
+        assert [s["ticker"] for s in r] == ["ABC"]        # 返回值只含本次算出的
+        rows = {(s["ticker"], s["as_of"]): s for s in evs.load_signals()}
+        assert set(rows) == set(seeded)
+        assert rows[("XYZ", AS_OF)] == seeded[("XYZ", AS_OF)]      # 已结算行一个字段都没动
+        assert rows[("XYZ", AS_OF)]["settled_on"] == "2026-09-25"
+        assert rows[("DEF", AS_OF)] == seeded[("DEF", AS_OF)]
+        assert rows[("XYZ", D_OTHER)] == seeded[("XYZ", D_OTHER)]
+        msg = _warnings(caplog)
+        assert "XYZ" in msg and "DEF" in msg and "已结算：XYZ" in msg
+
+        # upsert 仍幂等：同样的快照再跑一次，账本字节不变
+        after_first = evs.SIGNALS_FILE.read_bytes()
+        evs.scan(AS_OF, cache_dir=state, stats_fn=lambda tk: _stats(), upcoming_fn=lambda tk: UP)
+        assert evs.SIGNALS_FILE.read_bytes() == after_first
+
+    def test_kept_rows_warning_does_not_claim_missing_snapshot_when_it_exists(self, state, monkeypatch, caplog):
+        """快照在、但计算抛异常 / 快照坏 JSON 的票：旧行照留，WARNING 不许说成「无快照」（那是另一种病因）。"""
+        _seed_ledger()
+        _write_snap(state, "ABC", AS_OF, _qs(), rv=20.0)                       # 正常，被重算
+        _write_snap(state, "XYZ", AS_OF, _qs(), rv=20.0)                       # 快照在，compute 会炸
+        (state / f"options_snapshot_DEF_{AS_OF}.json").write_text("{not json")  # 快照坏
+        real = evs.compute_signal
+
+        def boom(tk, *a, **k):
+            if tk == "XYZ":
+                raise RuntimeError("boom")
+            return real(tk, *a, **k)
+        monkeypatch.setattr(evs, "compute_signal", boom)
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            r = evs.scan(AS_OF, cache_dir=state, stats_fn=lambda tk: _stats(), upcoming_fn=lambda tk: UP)
+        assert [s["ticker"] for s in r] == ["ABC"]
+        kept = {s["ticker"]: s for s in evs.load_signals() if s["as_of"] == AS_OF}
+        assert kept["XYZ"]["settled_on"] == "2026-09-25" and set(kept) == {"ABC", "XYZ", "DEF"}
+        msg = _warnings(caplog)
+        assert "（无快照）" not in msg and "计算失败" in msg and "读不出" in msg
+
+    def test_warning_names_the_two_wrong_directory_causes(self, state, tmp_path, monkeypatch, caplog):
+        _seed_ledger()
+        stale = tmp_path / "stale_checkout"                       # 显式、且不是缺省数据根
+        monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))   # 缺省根 = <fakehome>/alpha-hive-data，别碰真家目录
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(stale))
+        monkeypatch.setenv("ALPHA_HIVE_CACHE_DIR", str(tmp_path / "writer_cache"))
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            evs.scan(AS_OF, cache_dir=tmp_path / "reader_cache", stats_fn=_no_fetch, upcoming_fn=_no_fetch)
+        line = _zero_snapshot_warning(caplog)
+        assert f"ALPHA_HIVE_HOME 显式指向 {stale}，不是缺省数据根 {tmp_path / 'fakehome' / 'alpha-hive-data'}" in line, line
+        assert "代码目录" not in line, line
+        assert str(tmp_path / "writer_cache") in line and "与本次读取目录不同" in line, line
+
+    @pytest.mark.parametrize("home_env", ["unset", "empty", "equals_default"])
+    def test_default_data_root_is_not_reported_as_wrong(self, state, tmp_path, monkeypatch, caplog, home_env):
+        """v0.45.422 起未设 / 空串 ⇒ 缺省数据根 `~/alpha-hive-data`，那**就是**生产（编排器与 plist 也设成它）。
+        v0.45.380 初版在未设时报「数据根回落到代码目录」——422 之后这句是假话，会把手动跑的人引去查一个
+        不存在的问题，而那次手动跑读写的其实是生产（v0.45.513，照 vrp_signal v0.45.384 二次检查 #3）。"""
+        _seed_ledger()
+        fakehome = tmp_path / "fakehome"
+        monkeypatch.setenv("HOME", str(fakehome))
+        if home_env == "unset":
+            monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        else:
+            monkeypatch.setenv("ALPHA_HIVE_HOME", "" if home_env == "empty" else str(fakehome / "alpha-hive-data"))
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            r = evs.scan(AS_OF, cache_dir=state, stats_fn=_no_fetch, upcoming_fn=_no_fetch)
+        assert r == []
+        line = _zero_snapshot_warning(caplog)     # 零快照告警确实发出了（不是因为没告警才没提示）
+        assert "账本未改写" in line, line
+        # 「不许出现」查本模块**全部**告警，不只钉住的那一行：钉行防的是别的告警替「出现」代答；
+        # 对「不出现」，钉行反而放过「假提示挪到另一条 WARNING」。本夹具（空目录）里只有这一条告警。
+        msg = _warnings(caplog)
+        assert "ALPHA_HIVE_HOME" not in msg and "代码目录" not in msg, msg
+
+
+class TestMainExitCodes:
+
+    def test_cli_zero_snapshots_exits_3_names_dir_and_leaves_ledger(self, tmp_path):
+        """真跑 `__main__`：`_isolate_env` 已把 ALPHA_HIVE_HOME 指向 tmp_path，子进程继承它，
+        于是默认读 `<tmp>/cache`、写 `<tmp>/options_paper_state/`——都在沙箱里。"""
+        ledger = tmp_path / "options_paper_state" / "earnings_signals.jsonl"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text(json.dumps({"ticker": "XYZ", "as_of": AS_OF, "settled_on": "2026-09-25"}) + "\n",
+                          encoding="utf-8")
+        before = ledger.read_bytes()
+        rc = subprocess.run([sys.executable, str(ROOT / "earnings_vol_signal.py"), AS_OF],
+                            capture_output=True, text=True, cwd=tmp_path, timeout=60)
+        assert rc.returncode == 3, (rc.returncode, rc.stdout, rc.stderr)
+        assert f"no snapshots found in {tmp_path / 'cache'}" in rc.stderr
+        assert "1 行原样保留" in rc.stderr
+        assert ledger.read_bytes() == before
+
+    @pytest.mark.parametrize("with_snapshot", [True, False])
+    def test_cli_entry_reads_the_ledger_under_the_lock(self, state, monkeypatch, with_snapshot):
+        """v0.45.380 把 `scan` 拆成 `scan`（转发）+ `_scan_with_info`（本体）；CLI 直接走后者，绕过 `scan` 的装饰器。
+        账本锁（v0.45.452）可重入，所以只守 `scan` 时，去掉本体上的装饰器没有任何测试变红——CLI 路径就悄悄失锁。
+        零快照与有快照两条路径都要在锁里读账本（读-改-写不能被别的写者插进来）。"""
+        import ledger_io
+        monkeypatch.setattr(evs, "BASE_DIR", state.parent)
+        if with_snapshot:
+            _write_snap(state, "XYZ", AS_OF, _qs(available=False))
+        seen = []
+        real = evs.load_signals
+
+        def spy():
+            seen.append(ledger_io.is_locked_here(evs.SIGNALS_FILE.parent))
+            return real()
+        monkeypatch.setattr(evs, "load_signals", spy)
+        monkeypatch.setattr(evs, "summary_stats", lambda: {})   # main() 末尾的只读汇总也会读账本，不在锁里，不是被测对象
+        assert evs.main([AS_OF]) == (0 if with_snapshot else 3)
+        assert seen and all(seen), f"CLI 入口读账本时没持锁：{seen}"
+
+    def test_main_with_snapshots_exits_0(self, state, monkeypatch, capsys):
+        monkeypatch.setattr(evs, "BASE_DIR", state.parent)       # 默认 cache_dir="cache" 解析到 state
+        _write_snap(state, "XYZ", AS_OF, _qs(available=False))    # 报价不可用 ⇒ 预检即停，不打网
+        assert evs.main([AS_OF]) == 0
+        assert "XYZ" in capsys.readouterr().out
+        assert [s["ticker"] for s in evs.signals_for_date(AS_OF)] == ["XYZ"]
 
 
 # ==================== settle ====================

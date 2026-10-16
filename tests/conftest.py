@@ -581,6 +581,21 @@ def stub_yfinance(monkeypatch):
     monkeypatch.setattr(yfinance, "Ticker", _OfflineTicker)
     monkeypatch.setattr(yfinance, "download", _raise_offline("yfinance.download"))
 
+    # v0.45.524：yfinance 被钉成**立即**失败后，消费它的模块照样按生产退避节奏重试，
+    # 每次 analyze 白睡 2×(0.7+1.4) 秒（整套里十几条恰好 4.2 秒的测试就是这个）。
+    # 只换**点名**的接缝（`tests/_retry_seams.py`），不碰全局 `time.sleep`；
+    # 生产配置下的退避节奏由 tests/test_retry_backoff_seams.py 钉住。
+    # 返回值是记录 [(模块, 秒)]——想断言退避的测试直接拿来用；
+    # 要真睡的测试在函数体里把 `_retry_sleep` 再 setattr 回去即可（后设的赢）。
+    import importlib
+    from tests._retry_seams import YF_RETRY_SLEEP_SEAMS
+    slept = []
+    for name in YF_RETRY_SLEEP_SEAMS:
+        mod = importlib.import_module(name)
+        assert callable(getattr(mod, "_retry_sleep", None)), f"{name} 缺退避接缝 _retry_sleep"
+        monkeypatch.setattr(mod, "_retry_sleep", lambda s, _n=name: slept.append((_n, s)))
+    return slept
+
 
 @pytest.fixture
 def offline_gate_blocked(request):
@@ -628,7 +643,7 @@ def _block_slack(monkeypatch):
       ③ `get_session` 换成记录器 —— 掐掉 `slack_report_notifier` 里每一处
          `get_session("slack").post`，并**兼作观测点**：teardown 断言没有任何测试试图发送。
          （v0.45.341 起只剩这一个模块：`slack_notifier.py` 已删，它的发送面随之消失；
-         `pre_scan_notify` 直接 `requests.post`，由 `_offline_transport` 的库级闸兜住。）
+         曾有的 `pre_scan_notify` 直接 `requests.post`、由 `_offline_transport` 的库级闸兜住——该模块 v0.45.514 已删。）
          没有③的话，将来谁把 `enabled` 又弄成 True，①②会静默失效而没人知道
          （与本文件 `_isolate_paper_portfolio_state`「默认重绑 + teardown
          核对真身」同构，也是 CLAUDE.md「这个失败，下游怎么知道？」那条）。
@@ -1408,7 +1423,8 @@ _SESSION_START_WALL = pytest.StashKey[float]()
 
 
 def pytest_sessionstart(session):
-    # 先记开始时刻再取指纹：取指纹期间被写的文件，mtime 也不会早于这个时刻（否则会被误标成「保留了旧 mtime」）
+    # 先记开始时刻再取指纹：取指纹期间被写的文件，mtime 也不会早于这个时刻（否则会被误标成「保留了旧 mtime」）。
+    # Linux 上 mtime 可比此刻早至多一个 tick（粗粒度内核时钟），`locate` 按 `mtime_lag` 放宽（v0.45.507）
     session.config.stash[_SESSION_START_WALL] = time.time()
     _GATE_TIMELINE.clear()
     session.config.stash[_ROOT_FP_BEFORE] = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)

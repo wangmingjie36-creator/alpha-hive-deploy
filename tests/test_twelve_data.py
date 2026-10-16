@@ -191,9 +191,12 @@ class TestIntegrationWithMarketIntelligence:
             raise ConnectionError("no net")
 
         monkeypatch.setattr(yf, "download", _dl)
+        slept = []                       # v0.45.524：退避经接缝记录、不真等 0.7+1.4 秒
+        monkeypatch.setattr(mi, "_retry_sleep", slept.append)
         d = mi.calculate_iv_rv_spread("NVDA", 48.61)
         assert calls["n"] >= 1, "未回落到 yfinance"
         assert d["rv_30d"] is None and d["data_available"] is False
+        assert slept == [0.7, 1.4], "瞬时失败应按 0.7、1.4 秒退避重试"
 
 
 class TestFormingBarGuard:

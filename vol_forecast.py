@@ -62,6 +62,11 @@ from typing import Dict, List, Optional, Tuple
 # 依赖它做隔离；把它删掉会把那些测试打红。
 DB_PATH = None
 
+# 读库遇锁时的忙等上限（秒）。5.0 就是 sqlite3.connect 的缺省值——v0.45.524 只是把它
+# 写成显式常量，生产行为不变；它是测试注入接缝：锁冲突测试把它调小，不再真等 5 秒。
+# 等待本身仍被钉住（tests/test_vol_forecast.py::TestLoadDayResilience 的生产配置测试）。
+_BUSY_TIMEOUT_S = 5.0
+
 def _db_path() -> Path:
     """本模块用的 `pheromone.db` 路径。**调用时求值。**
 
@@ -185,7 +190,8 @@ def load_day(date: str, db_path: Optional[Path] = None) -> Dict[str, Dict[str, f
     # （路径是目录的情形给的是 'disk I/O error'，会自然传播。）
     if not Path(db_path).exists():
         return {}
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True,
+                          timeout=_BUSY_TIMEOUT_S)
     con.row_factory = sqlite3.Row
     try:
         rows = con.execute(

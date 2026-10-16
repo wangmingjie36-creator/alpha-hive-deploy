@@ -264,7 +264,9 @@ class TestReaders:
         src = (REPO / "earnings_vol_signal.py").read_text(encoding="utf-8")
         reads, writes = self._access(src)
         assert reads == set(), reads
-        assert {"scan", "compute_signal"} <= writes, "探针要看得见真实的写入点，否则上一条恒真"
+        # v0.45.380：`scan` 拆成转发（scan）+ 本体（_scan_with_info），后者才是写入点
+        assert {"_scan_with_info", "compute_signal"} <= writes, "探针要看得见真实的写入点，否则上一条恒真"
+        assert "scan" not in writes, "scan 应只是转发；它又开始写 shadow_event 就该回来对一遍白名单"
         assert "shadow_event" not in (REPO / "options_paper_leg.py").read_text(encoding="utf-8")
 
     def test_probe_has_teeth(self):

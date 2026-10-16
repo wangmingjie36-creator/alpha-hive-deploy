@@ -77,12 +77,19 @@ class PheromoneBoard:
     #     `ReportSnapshot.agent_votes`（逐蜂归因 → weekly_optimizer / self_analyst /
     #     feedback_loop）。生产实测当前世代 300 份里**只有 1 份**凑齐 8 只蜂，
     #     中位 3 只；BearBee 缺席 97.3%、BuzzBee 91.0%、ScoutBee 81.0%。
-    #     ⚠️ 该处是**全扫描结束后**取板，因此除溢出淘汰外还叠加了 3600s 墙钟过期
+    #     ⚠️ 该处是**全扫描结束后**取板，因此除溢出淘汰外还叠加了墙钟过期（当时 3600s，v0.45.518 起 `ENTRY_MAX_AGE_S`）
     #     （一轮扫描 ~56 分钟），两个成因未分离 —— 且它正确的修法多半不是换板读法，
     #     而是根本别读板：`swarm_results[ticker]['agent_details']` 里本来就有每蜂分数。
     #   · `compact_snapshot` —— `queen_distiller.py:1161` 落进 analysis JSON 的
     #     `pheromone_compact`（正是上面几次量测所用的仪器），另两处走 LLM 路径。
     MAX_ENTRIES = 80
+    #: 条目「墙钟过期」线（秒）：超过它的条目视为陈货。`publish` 的存活过滤与 `get_agent_entry` / 普查视图**共用这一个数**。
+    #: v0.45.518：3600 → 10800。原值恰好等于 Step 2 超时预算（3600s），于是「能跑完的扫描，条目年龄必小于过期线」
+    #: 这条不变式是**碰巧**成立的；预算放宽到 180s/只（30 只 5400s）后，拖到后半段的标的，其 Guard / Bear 经 `_read_peer` 读前面
+    #: 蜂的条目会得到 None，**静默按「没有这个同伴」评分**（跑完了，但质量悄悄变差）。板是每个进程新建、从空开始的（不跨轮、
+    #: 不读旧条目），过期线只防同进程内的陈货，放宽不会放进昨天的数据；正常日扫描最长 ~3100s，行为不变。
+    #: 与编排器预算的关系由 `tests/test_pheromone_expiry_exceeds_scan_budget.py` 焊住（过期线必须大于 Step 2 预算）。
+    ENTRY_MAX_AGE_S = 10800
     DECAY_RATE = 0.1
     MIN_STRENGTH = 0.2
 
@@ -226,7 +233,7 @@ class PheromoneBoard:
                     _age_s = (now - datetime.fromisoformat(e.timestamp)).total_seconds()
                 except (ValueError, TypeError):
                     continue  # 时间戳解析失败 → 视为过期
-                if _age_s >= 3600:
+                if _age_s >= self.ENTRY_MAX_AGE_S:
                     continue
                 # 衰减（仅同 ticker）
                 if not self._ticker_scoped or e.ticker == entry.ticker:
@@ -302,10 +309,9 @@ class PheromoneBoard:
             entries = [e for e in self._entries if ticker is None or e.ticker == ticker]
             return sorted(entries, key=lambda x: x.pheromone_strength, reverse=True)[:n]
 
-    #: `get_agent_entry` 认定「上一轮的陈货」的墙钟阈值，与 `publish` 里
-    #: 存活检查 2 用的是同一个 3600s —— 两处必须一致，否则同一条目在
-    #: 排行榜里已过期、在定点查询里还活着。
-    _AGENT_ENTRY_MAX_AGE_S = 3600
+    #: `get_agent_entry` 认定「陈货」的墙钟阈值，与 `publish` 里存活检查 2 用的是**同一个** `ENTRY_MAX_AGE_S` ——
+    #: 两处必须一致，否则同一条目在排行榜里已过期、在定点查询里还活着。（旧属性名保留：测试与调用方按它引用。）
+    _AGENT_ENTRY_MAX_AGE_S = ENTRY_MAX_AGE_S
 
     def get_agent_entry(self, ticker: str, agent_id: str):
         """定点取「某只蜂对某只标的本轮发布的最新条目」，取不到返回 None。

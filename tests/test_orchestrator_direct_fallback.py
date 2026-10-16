@@ -63,6 +63,8 @@ def _run(proxy_setting: str, extra_env=None):
         "PYTHON3": sys.executable,
         "PROBE_SRC": _PROBE,
         "ALPHA_HIVE_PROXY": proxy_setting,
+        # v0.45.504：探活失败会间隔重探（缺省 4 次 × 60s）；测试对准拒连端口，间隔置 0 免得白等 3 分钟
+        "ALPHA_HIVE_PROXY_PROBE_INTERVAL": "0",
     }
     # 用户 site（numpy / requests 等）按 HOME 解析，conftest 钉的 PYTHONUSERBASE 要带上
     for k in ("PYTHONUSERBASE",):

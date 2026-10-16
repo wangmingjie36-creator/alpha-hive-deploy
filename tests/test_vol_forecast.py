@@ -17,6 +17,7 @@
 
 import os
 import sqlite3
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -274,14 +275,29 @@ class TestLoadDayResilience:
         finally:
             os.chmod(db, 0o644)
 
-    def test_locked_db_raises_not_swallowed(self, tmp_path):
+    @staticmethod
+    def _locked_db(tmp_path):
+        db = tmp_path / "locked.db"
+        con = sqlite3.connect(str(db))
+        con.execute("CREATE TABLE signal_archive"
+                    "(date TEXT, ticker TEXT, signal TEXT, value REAL)")
+        con.commit()
+        blocker = sqlite3.connect(str(db), isolation_level="EXCLUSIVE")
+        blocker.execute("BEGIN EXCLUSIVE")
+        return db, con, blocker
+
+    def test_locked_db_raises_not_swallowed(self, tmp_path, monkeypatch):
         """`database is locked` **必须抛出**，不得被当成"无数据"吞掉。
 
         这是二次检查中发现的、由修复本身引入的缺陷：最初的 except 捕获整个
         OperationalError，而锁冲突也是这个类型。日报在 _post_scan_enrichment
         里写 signal_archive，load_day 读它 —— 并发时锁冲突真实存在。
         吞掉它会让波动率分层静默消失，CLI 还给出错误建议"先跑 --backfill"。
+
+        v0.45.524：忙等上限经 `vf._BUSY_TIMEOUT_S` 调小，不再真等生产的 5 秒；
+        生产值与接线由下面两条钉住。
         """
+        monkeypatch.setattr(vf, "_BUSY_TIMEOUT_S", 0.05)
         db = tmp_path / "locked.db"
         con = sqlite3.connect(str(db))
         con.execute("CREATE TABLE signal_archive"
@@ -295,6 +311,23 @@ class TestLoadDayResilience:
         finally:
             blocker.close()
             con.close()
+
+    def test_production_busy_timeout_is_sqlite_default(self):
+        """生产配置：遇锁忙等 5 秒（= sqlite3.connect 缺省值，v0.45.524 前是隐式的）。"""
+        assert vf._BUSY_TIMEOUT_S == 5.0
+
+    def test_busy_timeout_is_actually_waited(self, tmp_path, monkeypatch):
+        """接线：`load_day` 真按 `_BUSY_TIMEOUT_S` 忙等后才抛（不是立即失败）。"""
+        monkeypatch.setattr(vf, "_BUSY_TIMEOUT_S", 0.3)
+        db, con, blocker = self._locked_db(tmp_path)
+        t0 = time.monotonic()
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                vf.load_day("2026-07-29", db)
+        finally:
+            blocker.close()
+            con.close()
+        assert time.monotonic() - t0 >= 0.25
 
     def test_empty_table_still_returns_empty(self, tmp_path):
         """表存在但当天无行 —— 这是合法空状态，返回 {} 而非抛出。"""

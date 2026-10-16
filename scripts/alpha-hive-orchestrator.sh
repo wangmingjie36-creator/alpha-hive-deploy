@@ -110,7 +110,9 @@ mkdir -p "$LOGDIR" "$REPORTDIR"
 # ================================================================
 # 全局超时看门狗（90 分钟硬限制 — 防止 launchd 永远不触发下一次）
 # ================================================================
-ORCHESTRATOR_TIMEOUT=90000  # 25h（兼容 pre_scan_notify 最长等 24h 用户确认）
+# 25h 是历史值：曾为兼容 pre_scan_notify 最长等 24h 用户确认；v0.45.510 起已无扫描前确认，数值**未动**——
+# 要不要收紧是单独的决定，须把 Step 2 输入闸最多 3 次重跑 + 每次等 600s 一起算进去。
+ORCHESTRATOR_TIMEOUT=90000  # 25h
 (
     sleep $ORCHESTRATOR_TIMEOUT
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] 🔴 全局超时！编排器运行超过 ${ORCHESTRATOR_TIMEOUT}s，强制退出（PID $$）" >> "$LOGDIR/orchestrator-$(date +%Y-%m-%d).log"
@@ -362,11 +364,15 @@ log "INFO" "📂 项目目录：$PROJECT_DIR"
 # 探活失败就退回直连，且**必须写进日志**——这条链路的存在与否
 # 会直接改变 429 计数的含义，不能静默。
 PROXY_URL="${ALPHA_HIVE_PROXY:-http://127.0.0.1:7897}"
-_proxy_ok=0
-if [ "$PROXY_URL" != "none" ]; then
+# v0.45.504：探活失败后间隔重探，不再「一次失败整轮放弃代理」。
+# 10-12（全源 TLS EOF、整天作废）与 10-14（真直连、yfinance 0/30）两次都是 14:00 那**一次**探活失败就定了整轮；
+# 代理 / 节点常是几分钟内自己恢复。默认 4 次、间隔 60s（最多多等 3 分钟）；两个值都可用环境变量覆盖（测试设 0）。
+PROXY_PROBE_ATTEMPTS="${ALPHA_HIVE_PROXY_PROBE_ATTEMPTS:-4}"
+PROXY_PROBE_INTERVAL="${ALPHA_HIVE_PROXY_PROBE_INTERVAL:-60}"
+_probe_proxy_once() {
     # 只探端口不够——端口开着但代理转发是坏的，会把整轮拖死。
     # 这里连一次真实 HTTPS（CBOE 根域，几百字节），8 秒超时。
-    if "$PYTHON3" -c '
+    "$PYTHON3" -c '
 import os, sys, socket, urllib.request
 url = sys.argv[1]
 host = url.split("//")[-1].split("/")[0]
@@ -387,9 +393,25 @@ except urllib.error.HTTPError:
 except Exception:
     sys.exit(1)
 sys.exit(0)
-' "$PROXY_URL" 2>/dev/null; then
-        _proxy_ok=1
-    fi
+' "$PROXY_URL" 2>/dev/null
+}
+# 定出站方式（代理 / 直连）并导出相应环境变量。Step 2 被输入闸拒绝后重试前会再调一次——代理恢复了就切回代理。
+_configure_outbound() {
+_proxy_ok=0
+if [ "$PROXY_URL" != "none" ]; then
+    _probe_i=1
+    while :; do
+        if _probe_proxy_once; then
+            _proxy_ok=1
+            [ "$_probe_i" -gt 1 ] && log "INFO" "🌐 代理第 ${_probe_i} 次探活通过（前 $((_probe_i - 1)) 次失败）"
+            break
+        fi
+        [ "$_probe_i" -ge "$PROXY_PROBE_ATTEMPTS" ] && break
+        log "WARN" "⚠️ 代理 $PROXY_URL 探活失败（第 ${_probe_i}/${PROXY_PROBE_ATTEMPTS} 次），${PROXY_PROBE_INTERVAL}s 后重探"
+        sleep "$PROXY_PROBE_INTERVAL"
+        _probe_i=$((_probe_i + 1))
+    done
+    unset _probe_i
 fi
 if [ "$_proxy_ok" = "1" ]; then
     export HTTP_PROXY="$PROXY_URL"  HTTPS_PROXY="$PROXY_URL"
@@ -423,11 +445,13 @@ sys.exit(1 if p else 0)
     if [ "$PROXY_URL" = "none" ]; then
         log "INFO" "🌐 出站直连（ALPHA_HIVE_PROXY=none，显式关闭，非故障）"
     else
-        log "WARN" "⚠️ 代理 $PROXY_URL 探活失败 —— 本轮退回直连（no_proxy=*，系统代理也不走）。"
+        log "WARN" "⚠️ 代理 $PROXY_URL 探活 ${PROXY_PROBE_ATTEMPTS} 次全部失败 —— 本轮退回直连（no_proxy=*，系统代理也不走）。"
         log "WARN" "   直连下 yfinance 历来 403/429（rv_30d、催化剂受影响），"
         log "WARN" "   期权链走 CBOE 不受影响。若 429 计数暴涨，先查代理是否在跑。"
     fi
 fi
+}
+_configure_outbound
 unset _proxy_ok
 
 # v0.45.432：闸前就退出的失败也要落 status.json（同下方 TCC 分支）。不写的话 status.json 停在上一次成功，
@@ -931,7 +955,7 @@ _data_migrations_step() {
 _data_migrations_step
 
 # ================================================================
-# Step 2: Alpha Hive 蜂群分析（执行前 Slack 确认 LLM 模式）
+# Step 2: Alpha Hive 蜂群分析（规则引擎，永远 --no-llm）
 # ================================================================
 log "INFO" ""
 log "INFO" "【Step 2/5】蜂群分析 - 启动"
@@ -939,37 +963,14 @@ log "INFO" "【Step 2/5】蜂群分析 - 启动"
 TICKERS_ARG="${TICKERS[*]}"
 log "INFO" "   标的列表：${TICKERS_ARG}"
 
-# ── 预通知：询问是否使用 LLM 模式 ──
-# pre_scan_notify.py: 等待 10 分钟用户回复，超时自动用 --no-llm
+# ── LLM 模式：编排器永远 --no-llm ──
+# v0.45.510：去掉扫描前 Slack 确认（pre_scan_notify.py）。每天由 launchd 自己跑，Slack Webhook 早已 404、
+# 没人在回复，这一步只是每天空等 10 分钟再退回 --no-llm（09-23 / 10-15 日志可见）。
+# ⚠️ 这不是「默认关闭 LLM」，是**编排器里不再有任何路径能打开它**：要跑 LLM 扫描只能由人在终端显式
+# `--use-llm`，并先按用户级约定说明费用、等明确批准（~/.claude/CLAUDE.md「花钱前必须先问」）。
+# ⚠️ 去掉它**不会**让 Step 2 的 3600s 预算变宽：STEP2_START / run_step --timeout 都在原先那 10 分钟之后才开始，
+# 预算从来不含这段等待；它只是让扫描提前 10 分钟开始（14:10 → 14:00）。
 LLM_FLAG="--no-llm"
-PRE_SCAN_SCRIPT="$PROJECT_DIR/pre_scan_notify.py"
-
-# ── 防重复：如果今天 LLM 模式已成功运行过，降级为 --no-llm ──
-LLM_DONE_FILE="/tmp/alpha_hive_llm_done_${DATE_STR}"
-if [ -f "$LLM_DONE_FILE" ]; then
-    log "INFO" "⚠️ 今日 LLM 模式已成功运行过，本次降级为 --no-llm（防止重复计费）"
-    log "INFO" "   如需强制重跑 LLM，请先删除 $LLM_DONE_FILE"
-elif [ -f "$PRE_SCAN_SCRIPT" ]; then
-    log "INFO" "📨 发送 Slack 确认通知（等待 10 分钟用户回复）..."
-    # v0.43.16: max-wait 1440(24h) → 10 分钟，与本段注释的设计意图一致。
-    # 24h 等待 × Slack Webhook 已 404 失效 = 每天的运行都挂满 24 小时才降级
-    # 执行，形成"昨天启动的进程恰好在今天 14:00 超时接力扫描"的病态节奏：
-    # 日志跨天错乱（8/11 内容写进 -08-10.log）、launchd 当日 fire 因实例
-    # 已存在被跳过、扫描时刻完全靠上一天的超时点对齐。Webhook 修复前该
-    # 确认机制送达不了任何人，等待只有成本没有收益。
-    run_step --timeout 900 "$PRE_SCAN_SCRIPT" --wait 5 --remind-interval 60 --max-wait 10 --tickers $TICKERS_ARG >> "$LOGFILE" 2>&1
-    NOTIFY_RC=$?
-    if [ $NOTIFY_RC -eq 42 ]; then
-        LLM_FLAG="--use-llm"
-        log "INFO" "✅ LLM 模式已确认启用"
-    elif [ $NOTIFY_RC -eq 124 ]; then
-        log "WARN" "⏰ Slack 通知超时，默认 --no-llm"
-    else
-        log "INFO" "⏱️ 使用规则引擎模式（免费）"
-    fi
-else
-    log "WARN" "pre_scan_notify.py 不存在，跳过 LLM 确认，默认 --no-llm"
-fi
 
 log "INFO" "   LLM 模式：$LLM_FLAG"
 STEP2_START=$(date +%s)
@@ -983,18 +984,53 @@ STEP2_START=$(date +%s)
 # 写死的常数还有第二个问题：WATCHLIST 是会变的（config.WATCHLIST 是唯一
 # 真相），名单一加票，常数就再次悄悄过期。故改为按只数算。
 # 取 120s/只（实测 90s 上留 33% 余量）；下限沿用原值，保证小名单不缩水。
+#
+# v0.45.518：120 → 180s/只（30 只 3600 → 5400s）。依据（2026-10-16 取 22 个扫描日）：正常日中位 ≈2080s（并行段 564 + 顺序段 1268 +
+# 收尾 249），但 09-21 / 09-23 两天撞线被杀、**整天丢失**（超时 = 全有或全无，且没有同日重试；T+7 观测永久缺口），
+# 10-12 余量仅 13%。09-23 是 CBOE 陈旧级联：顺序段 ≈127s/只（正常 ≈42），外推 30 只需 ≈4900s——5400s 刚好放得下；
+# 正常日余量仍 ≈60%。代价：真卡死的运行晚 30 分钟才被判超时。余量只报数、不判定，故改它不会连带触发告警。
+# ⚠️ **预算不可超过信息素板的墙钟过期线** `PheromoneBoard.ENTRY_MAX_AGE_S`（v0.45.518 同版放宽到 10800s）：
+# 超过它，后半段标的的 Guard / Bear 会静默读不到前面蜂的结论。两者的关系由 tests/test_pheromone_expiry_exceeds_scan_budget.py 焊住。
 TICKER_COUNT=$(echo "$TICKERS_ARG" | wc -w | tr -d ' ')
 [ "${TICKER_COUNT:-0}" -gt 0 ] 2>/dev/null || TICKER_COUNT=30   # 兜底：算不出就按满编
-STEP2_TIMEOUT=$(( TICKER_COUNT * 120 ))
+STEP2_TIMEOUT=$(( TICKER_COUNT * 180 ))
 [ "$STEP2_TIMEOUT" -lt 1800 ] && STEP2_TIMEOUT=1800
-if [ "$LLM_FLAG" = "--use-llm" ]; then
-    # 沿用原设计的差额：LLM 模式比规则模式多 15 分钟（2700-1800）
-    STEP2_TIMEOUT=$(( STEP2_TIMEOUT + 900 ))
-fi
-log "INFO" "   超时限制：${STEP2_TIMEOUT}s（${TICKER_COUNT} 只 × 120s/只，下限 1800s）"
+log "INFO" "   超时限制：${STEP2_TIMEOUT}s（${TICKER_COUNT} 只 × 180s/只，下限 1800s）"
 
-run_step --timeout $STEP2_TIMEOUT "$PROJECT_DIR/alpha_hive_daily_report.py" --swarm $LLM_FLAG --tickers $TICKERS_ARG >> "$LOGFILE" 2>&1
-STEP2_RC=$?
+# v0.45.504：输入闸。扫描预取后多数标的取不到可用现价 ⇒ Python 侧什么都不写（预测 / 归档 / 快照 / 账本 / 日报 / 网站）、
+# 退出码 4（`alpha_hive_daily_report.PRICE_GATE_EXIT`）。这里等一会儿、重新定出站方式（代理可能已恢复）再试；
+# 仍被拒 ⇒ 不写 .swarm_results ⇒ 下面的完整性闸判「零产出」⇒ status=failed ⇒ alert_manager CRITICAL，补跑闸照样放行。
+# 2026-10-12：30/30 现价 0 照样落库、发布、status=success——这一段就是为它加的。
+STEP2_GATE_RC=4
+STEP2_GATE_RETRIES="${ALPHA_HIVE_STEP2_GATE_RETRIES:-2}"
+STEP2_GATE_WAIT="${ALPHA_HIVE_STEP2_GATE_WAIT:-600}"
+STEP2_ATTEMPT=1
+while :; do
+    run_step --timeout $STEP2_TIMEOUT "$PROJECT_DIR/alpha_hive_daily_report.py" --swarm $LLM_FLAG --tickers $TICKERS_ARG >> "$LOGFILE" 2>&1
+    STEP2_RC=$?
+    [ "$STEP2_RC" -ne "$STEP2_GATE_RC" ] && break
+    _gate_detail=$("$PYTHON3" -c '
+import json, sys
+try:
+    g = (json.load(open(sys.argv[1])).get("extra") or {}).get("price_gate") or {}
+    print("%s/%s 只取不到现价（阈值 %s）" % (g.get("unavailable", "?"), g.get("total", "?"), g.get("max_unavailable_ratio", "?")))
+except Exception as e:
+    print("明细读不出（%s）" % type(e).__name__)
+' "${DATA_DIR}/logs/scan_timing.json" 2>/dev/null)
+    log "ERROR" "🛑 Step 2 输入闸拒绝（第 ${STEP2_ATTEMPT} 次）：${_gate_detail} —— 未写任何预测 / 归档 / 快照 / 账本，未发布"
+    if [ "$STEP2_ATTEMPT" -gt "$STEP2_GATE_RETRIES" ]; then
+        log "ERROR" "   已重试 ${STEP2_GATE_RETRIES} 次仍被拒 ⇒ 本轮按零产出处理（补跑闸放行：下次开机 / 下一个定时点会再跑）"
+        break
+    fi
+    log "WARN" "   ${STEP2_GATE_WAIT}s 后重新探活代理并重跑 Step 2（第 $((STEP2_ATTEMPT + 1)) 次）"
+    sleep "$STEP2_GATE_WAIT"
+    _configure_outbound
+    unset _proxy_ok
+    STEP2_ATTEMPT=$((STEP2_ATTEMPT + 1))
+    STEP2_START=$(date +%s)   # 解释器按最后一次的开跑时刻认 scan_timing
+done
+unset _gate_detail
+STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step2_price_gate\": {\"attempts\": ${STEP2_ATTEMPT}, \"refused\": $([ "$STEP2_RC" -eq "$STEP2_GATE_RC" ] && echo true || echo false)}}")
 STEP2_END=$(date +%s)
 STEP2_DURATION=$((STEP2_END - STEP2_START))
 # B：日志与 step2_hive_analysis 片段由 orchestrator_steps.py 判（rc=1 且主流程确实跑完 ⇒ success_with_warning）。
@@ -1059,13 +1095,6 @@ else
     log "ERROR" "   ⇒ 网站不会更新、日报不会生成、T+7 观测永久缺这一天"
     set_status failed
     STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"ticker_completeness\": {\"status\": \"failed\", \"reason\": \"file_missing\"}}")
-fi
-
-# ── LLM 防重复：无论 Step 2 成功/失败/超时，只要启动了 LLM 扫描就打标记 ──
-# 原逻辑仅在 RC=0 时创建标记，导致 Step 2 失败后当天仍可再次触发 LLM，造成重复计费
-if [ "$LLM_FLAG" = "--use-llm" ] && [ $STEP2_RC -ne 2 ]; then
-    touch "$LLM_DONE_FILE"
-    log "INFO" "🔒 LLM 防重复标记已创建：${LLM_DONE_FILE}（Step2 RC=${STEP2_RC}）"
 fi
 
 # ================================================================

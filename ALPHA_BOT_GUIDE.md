@@ -56,7 +56,7 @@ export ALPHA_HIVE_HOME=~/alpha-hive-data   # 与编排器 / MCP 同一个值
 make alphabot                               # 等价于 /usr/local/bin/python3 -m alphabot --open
 ```
 
-⚠️ 没设 `ALPHA_HIVE_HOME` 会读代码目录下的账本（不是生产数据），启动时 stderr 会明说。
+没设 `ALPHA_HIVE_HOME` 时读缺省数据根 `~/alpha-hive-data`（v0.45.422 起；与编排器同址，就是生产数据），启动时 stderr 会说读的是哪个目录；数据根在别处才需要设。
 
 ### 方式 C：演示模式（不依赖真实数据）
 

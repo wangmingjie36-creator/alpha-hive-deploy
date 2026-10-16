@@ -75,6 +75,39 @@ DISCLAIMER_FULL = (
 DISCLAIMER_SHORT = "非投资建议，仅数据分析与情景推演。"
 
 
+#: v0.45.504：输入闸拒绝扫描时 `main()` 的退出码（编排器据此重试 Step 2）。
+PRICE_GATE_EXIT = 4
+
+
+class ScanInputsUnavailable(RuntimeError):
+    """预取后多数标的取不到可用现价——在任何持久写入之前停下（`config.SCAN_PRICE_GATE`）。"""
+
+    def __init__(self, coverage: Dict):
+        self.coverage = coverage
+        super().__init__(f"{coverage.get('unavailable')}/{coverage.get('total')} 只标的取不到可用现价"
+                         f"（> {coverage.get('max_unavailable_ratio')}）")
+
+
+def _price_usable(data) -> bool:
+    """预取到的单只行情能不能当现价用：有限正数、不是全源兜底、没打不可用标记。"""
+    if not isinstance(data, dict) or data.get("_data_unavailable"):
+        return False
+    if str(data.get("data_source") or "").lower() == "fallback":
+        return False
+    px = data.get("price")
+    return isinstance(px, (int, float)) and not isinstance(px, bool) and math.isfinite(px) and px > 0
+
+
+def price_coverage(stock_data: Dict, targets: List[str], max_unavailable_ratio: float) -> Dict:
+    """输入闸的判据（纯函数）。`targets` 里没出现在 `stock_data` 的也算取不到。"""
+    missing = [t for t in targets if not _price_usable((stock_data or {}).get(t))]
+    total = len(targets)
+    ratio = (len(missing) / total) if total else 0.0
+    return {"total": total, "unavailable": len(missing), "unavailable_tickers": missing,
+            "unavailable_ratio": round(ratio, 4), "max_unavailable_ratio": max_unavailable_ratio,
+            "refused": total > 0 and ratio > max_unavailable_ratio}
+
+
 @dataclass
 class OpportunityItem:
     """机会项目结构"""
@@ -568,6 +601,22 @@ class AlphaHiveDailyReporter:
         prefetch_elapsed = time.time() - start_time
         _timing.record("prefetch", prefetch_elapsed)
         _log.info("预取完成 (%.1fs) | 开始并行分析", prefetch_elapsed)
+        # v0.45.504 输入闸：多数标的没有可用现价 ⇒ 在第一次持久写入之前停下（蜂群、板、账本都还没动）。
+        # 2026-10-12 全源 TLS 失败、30/30 现价 0，扫描照跑、照写、照发布——这里是它本该停下的地方。
+        try:
+            from config import SCAN_PRICE_GATE as _SPG
+        except ImportError:
+            _SPG = {"max_unavailable_ratio": 0.5}
+        _cov = price_coverage(prefetched.get("stock_data") or {}, list(targets),
+                              float(_SPG.get("max_unavailable_ratio", 0.5)))
+        self._price_coverage = _cov
+        if _cov["unavailable"]:
+            _log.warning("预取现价不可用 %d/%d 只：%s", _cov["unavailable"], _cov["total"],
+                         ", ".join(_cov["unavailable_tickers"][:30]))
+        if _cov["refused"]:
+            _log.error("🛑 输入闸：%d/%d 只取不到可用现价（> %.0f%%）——本轮不写任何预测 / 归档 / 快照 / 账本、不发布",
+                       _cov["unavailable"], _cov["total"], _cov["max_unavailable_ratio"] * 100)
+            raise ScanInputsUnavailable(_cov)
 
         # v0.15.3: checkpoint 文件名加日期隔离，防止跨天 stale 复用
         _ckpt_date = datetime.now().strftime("%Y-%m-%d")
@@ -2900,8 +2949,17 @@ def main():
     # v0.45.38：补跑历史交易日时，期权/IV 走当日云端快照而非实时抓取。
     # 不接快照的补跑会拿到**今天**的期权链再贴上补跑日的日期——一直如此，
     # 只是从来没人看见。下面这个上下文要么用上快照，要么把这件事说出来。
-    with _snapshot_ctx(args):
-        report = reporter.run_swarm_scan(focus_tickers=focus_tickers)
+    try:
+        with _snapshot_ctx(args):
+            report = reporter.run_swarm_scan(focus_tickers=focus_tickers)
+    except ScanInputsUnavailable as _gate:
+        # v0.45.504：输入闸拒绝。什么都没写（闸在第一次持久写入之前）⇒ 不 save_report、不部署；
+        # scan_timing 照写一份带原因的（编排器读 extra.price_gate 打日志，Step 2 解释器据此判没跑完），退出码 4。
+        print(f"\n🛑 输入闸：{_gate}")
+        print("   - 未写 predictions / signal_archive / report_snapshots / 账本，未生成日报、未部署")
+        print("   - 常见原因：出站网络 / 代理故障（2026-10-12 即此）。编排器会等待后重探代理并重跑。")
+        _timing.write(reporter.date_str, extra={"early_exit": "price_gate", "price_gate": _gate.coverage})
+        return {"error": "price_gate", "price_gate": _gate.coverage}
 
     # v0.23.2 修复 #2：--samples-only 必须在 save_report 之前短路
     # 否则 _save_output_files 会生成 MD/HTML/PWA/X线程/rss.xml 到 repo 根，
@@ -3084,14 +3142,22 @@ def _force_exit_if_threads_stuck(grace_seconds: float = 10.0, exit_code: int = 0
         os._exit(exit_code)
 
 
+def _exit_code_for(result) -> int:
+    """`main()` 的结果 ⇒ 进程退出码（编排器 Step 2 读它）。
+    4 = 输入闸拒绝（v0.45.504，编排器等待后重探代理并重跑）；1 = ML 概率退化成常数（v0.45.145，要人动手）；0 = 正常。"""
+    if isinstance(result, dict) and result.get("error") == "price_gate":
+        return PRICE_GATE_EXIT
+    guard = (result.get("ml_model_guard") or {}) if isinstance(result, dict) else {}
+    return 1 if guard.get("verdict") in ("constant", "near_constant") else 0
+
+
 if __name__ == "__main__":
     _result = main()
     # v0.45.145：ML 概率退化成常数 → 退出码 1（Step 10/11/12 约定：1 = 要人动手）。
     # 判决由 _generate_ml_reports 挂在 report 上，main() 返回的正是同一个对象。
     # ⚠️ 键缺失 ≠ 健康：那说明 ML 批量根本没跑到闸（另有 warning 记录），
     # 那条路径的退出码语义不在本版改动面内，刻意不改。
-    _guard = (_result.get("ml_model_guard") or {}) if isinstance(_result, dict) else {}
-    _exit_code = 1 if _guard.get("verdict") in ("constant", "near_constant") else 0
+    _exit_code = _exit_code_for(_result)
     _force_exit_if_threads_stuck(exit_code=_exit_code)
     if _exit_code:
         import sys as _sys_main

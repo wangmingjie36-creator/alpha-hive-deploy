@@ -5,6 +5,838 @@
 
 ---
 
+## [0.45.527] — 2026-10-16 — Fixed：`agent_memory` 结果回填逐轮把已存的 T+1 / T+7 / T+30 覆写成 NULL、把已判的 correct / incorrect 降级成 neutral；**历史值未改**（重建方案待用户批准，见下）
+
+2026-10-16 v0.45.521 期间发现：`OutcomesFetcher._update_memory_store(snapshot, prices)` 的 `prices` 只含**本轮**回填到的 offset，
+缺的算成 None 交给 `MemoryStore.update_memory_outcome`，后者无条件 `SET` 四列 ⇒「最后一轮赢」；`actual_outcome` 由 T+7 推出，
+本轮没有 T+7 就写 `"neutral"`。生产（只读）：23,800 行里 t1 非空 3,191 / t7 6,616 / t30 10,812，≥ 2 个 horizon 同时非空的只有 2,347 行。
+
+### Fixed
+- `memory_store.update_memory_outcome`：四列一律 `COALESCE(?, 列)`——None = 本次没有这一格、保留原值；真值照写（含覆盖旧值）。`outcome` 改 `Optional[str]`。
+- `outcomes_fetcher._update_memory_store`：收益按「本轮回填到的 + 快照里早已存好的」整组算（快照是这几列的唯一来源），仍在途的行每轮整组重写、顺带自愈；
+  还没有 T+7 ⇒ `outcome=None`（不写 `"neutral"`：它进 `get_agent_accuracy` 的分母，等于把「还判不了」记成「没猜对」）。
+
+### Added
+- `tests/test_agent_memory_outcome_horizons.py`（5 条）：驱动真实 `run()` 三轮（只有 T+1 → 到 T+7 → 只到 T+30，`_yf=None` 只走本地快照价），
+  每轮断言前几轮的 horizon 与已判 outcome 还在；一轮拿齐的正对照；存储层 None 不清值 / 真值照写 / 无此行返回 False。
+  修前 2 条红（`'neutral' is None`；t30 单列更新把 t1 / t7 清空、`correct` 变 None），修后全绿；拨钟审计 +7 / +45 天 0 新红。
+
+### 影响面（读者）
+- `MemoryStore.get_agent_accuracy`（`actual_outcome='correct'` ÷ `actual_outcome IS NOT NULL`）→ `AgentWeightManager.recalculate_all_weights`（日报主流程）
+  → 写 `agent_weights` 表。被降级的 neutral 进分母 ⇒ 各蜂准确率系统性偏低。**但 `agent_weights` 在本仓没有评分侧读者**
+  （`get_weights` / `get_weight` 只在 `agent_weight_manager.py` 内部自用）⇒ 不进生产分数。
+- `MemoryStore.get_recent_memories` → `QueenDistiller.enrich_with_historical_analogy` → `llm_service.find_historical_analogy`（喂给 LLM 的历史 t1 / t7 / t30）。
+  **仅 LLM 模式**（`enable_llm` 为假直接返回）；生产 `--no-llm` 不走。
+- 其余提到 `agent_memory` 的都是文档 / 实验脚本 / 读 `discovery` 等其它列的测试；`relabel_nyse_calendar.py` 明确不碰这几列。
+
+### 历史数据（只读核对，生产 `~/alpha-hive-data`，v0.45.521 apply 之后）——**未改，待用户批准**
+- 按快照 `actual_prices` 与 `entry_price` 重算：可补 t1 15,081 / t7 10,156 行；outcome `neutral → correct / incorrect / ambiguous` 5,213 / 4,277 / 666；
+  重算后三格齐 10,812 行（修前 0）。会改的行合计 15,391，其中 4,269 行的快照仍在途（下一次回填按新代码自愈），**10,812 行只能靠重建**。
+- 自校验：存值非空且与快照不等的 1,720 格（t1 300 / t7 600 / t30 820）**全部**等于 v0.45.521 前的快照值（即 521 已改快照、未改这张表）；
+  已判 outcome 与重算不一致 120 行，110 行同理归因 521；剩 **10 行（NFLX 2026-09-17 一份快照，direction=`bearish`、T+7 −8.1%、存 `incorrect`、现规则判 `correct`）原因待验证**。
+- 补不回：3,809 行无对应快照、559 行快照 `entry_price ≤ 0`——这两类本来就没有任何值（不是被抹掉的）。
+- 另有 1,500 行 `neutral` 但重算后仍无 T+7（按新语义应为 NULL）。
+
+## [0.45.526] — 2026-10-16 — 占位（进行中：组合 Greeks 逐票 Delta 对冲——每只有跨式腿的标的用自己的股票对冲跨式 Delta；带 3% NAV、拉回 0；先 shadow 只算不成交）
+
+## [0.45.525] — 2026-10-16 — Fixed（数据，用户批准「逐行核对那 52 行 GEX，假的也删掉」）：`options.gamma_exposure = 0.0` 的 50 行逐行核对，**全部**是「算不出」分支写的 0，登进 `QUARANTINE` 并清库
+
+v0.45.522 报的 52 行里，06-17 VKTX / CRCL 两行已由 522 清掉，余 50 行（2026-03-10 ~ 08-27）。v0.45.63 之前 `calculate_gamma_exposure` 在算不出时返回 0.0，而它与「做市商净 gamma 中性」同形，进了 `signal_archive`。逐行按**当时的代码**与**当天的产物**归到三条路径，没有一行是真实算出的 0。
+
+### 三条路径与证据（只读）
+1. **03-10 ~ 03-13，每天 10/10 只（40 行）**
+   - BS gamma 注入是 2026-03-16（d37cda98）才加的。此前 yfinance 链不带 Greeks，`c.get("gamma", 0)` 全为 0 ⇒ GEX 恒 0.0。
+   - 归档：03-13 10/10 为 0，注入当天 03-16 起 10/10 非 0（−0.65 ~ 88.2）。
+   - 当天总 OI 0.3 万 ~ 322 万，链本身是真的，只是没有 gamma。
+2. **AMC 08-04 / 08-10 / 08-12 / 08-13 / 08-25 / 08-26 / 08-27（7 行）**
+   - 当时代码（08-14 的 43591dfc 实读）有 `if stock_price < 5: return 0.0`，AMC 股价约 $2.6。v0.45.63（08-29）删了这道守卫。
+   - 同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），GEX 却是 0.0。
+   - 删守卫后 09-01 起 AMC GEX ≈ 6–17。08-10 无快照，同一守卫、同一股价区间。
+3. **ICLN 04-26、ICLN 05-10、BIIB 05-10（3 行）**
+   - 当时 `analyze()` 取链不传价，BS gamma 的 S 退到「OI > 50 的 call 行权价中位数」（5fe6a3ea 实读）。没有这样的 call ⇒ S = 0 ⇒ 不注入 gamma ⇒ 0.0（v0.45.462 删了这个兜底）。
+   - ICLN 两天：总 OI 119 / 178，快照前三档合计 91 / 151，剩下不足 30 ⇒ 不可能有 call OI > 50。
+   - BIIB：gamma 日历 4 个到期日 OI 44–242，net_gamma **全为 0.0** ⇒ 整条链没注入 gamma。
+   - 反例：ICLN 05-03 有 OI 2,511 的到期日 ⇒ 注入了 gamma ⇒ GEX −0.5084。
+
+### Fixed（数据）
+- `signal_archive.QUARANTINE` 新增 14 个条目（4 + 7 + 3，reason 带标记 v0.45.525 与上述证据），只挡 `options.gamma_exposure`。
+- 清库：`purge_quarantined_signal_rows.py --only-tag v0.45.525 --expect 50 --apply`，137,544 → 137,494。
+  - 备份 `db_backups/pheromone_pre_v0.45.525_gex_zero.db`。
+  - 核对：全库 GEX = 0.0 从 50 → 0；GEX 行 1,840 → 1,790；同日其余期权字段保留（例：03-10 NVDA 6 → 5）；两边 integrity_check ok。
+- 源头早已修：v0.45.63 起算不出返回 None、删 `< 5` 守卫；v0.45.462 起不再拿行权价中位数当 S；BS gamma 注入自 03-16 起。本版不改代码。
+
+### Tests
+- `tests/test_signal_quarantine.py::test_gex_zero_rows_quarantined_v0_45_525`：三组逐日期 / 逐标的核对。
+  - 反例：同日 P/C、紧邻的真实日子（03-16 NVDA、AMC 08-28 / 09-01、ICLN 05-03、BIIB 04-26）。
+- 变异 5/5 被杀（只在本条目内改）：日期错、漏标的、AMC 日期挪到真实日、BIIB 日期错、连坐 P/C。
+- 全量（rebase 到 0e691475 后）：10030 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加，不是测试写的。ruff 全绿。
+
+## [0.45.524] — 2026-10-16 — Changed：测试套件提速（CI pytest 717s → 526s、本机整套 790.8s → 562.0s）——生产退避改走窄注入接缝、全仓 AST 守卫共用会话级解析缓存；不削弱任何守卫
+
+起因：整套约 1 万条、CI 11–13 分钟，问「再加测试会不会越来越慢」。实测**不是条数的问题**：CI run 38923628786 里 93% 的测试 <0.1 秒，≥1 秒的 642 条占了 63% 的时间。本机 profile（给 `time.sleep` / `ast.parse` 挂计时、逐测试归因）找到两类：
+
+1. **测试里真睡生产退避**：进程内 sleep 共 124 秒，其中 108.5 秒恰是三处——`market_intelligence.calculate_iv_rv_spread` 的 yfinance 日K 重试（61 秒）、`OptionsAnalyzer._iv_term_points_yfinance._gated`（27 秒）、`report_deployer.commit_and_push_gh_pages` 推送重试（20 秒）。conftest 的 `stub_yfinance` 让 yfinance **立即**失败，生产照样按 0.7+1.4 秒退避——十几条恰好 4.2 秒的测试就是两处各 2.1 秒。另有 `vol_forecast.load_day` 的锁冲突测试真等 sqlite 缺省忙等 5 秒。
+2. **全仓 AST 守卫各自重解析全仓**：全仓一次 `ast.parse` 本机 2–3 秒，`test_paths_not_frozen_at_import` 的 `_scan()` 一个文件里被调 18 次。另：`test_no_invisible_prod_data_skips` 单条 22–28 秒**不是解析**，是对每个函数调 `ast.get_source_segment`——它每次把整份源码逐字符重新切行，平方级（cProfile：96% 在 `_splitlines_no_ff`）。
+
+### Added
+- `tests/_ast_cache.py`：会话级解析缓存。**键是源码全文**（不是 mtime/size——Linux 粗粒度 mtime 会撞，全文键不可能给出陈旧的树）；只缓存经 `_ast_cache.read_text()` 从**仓库根之内**读到的全文，tmp 合成树、有牙测试手写的样本、读完又改过的变异串一律直通 `ast.parse`（这样各守卫「吃源码串」的辅助函数不用改签名就自动分流）。`SyntaxError` 不缓存。另有 `SourceSegments`：切一次行、按节点取段，与 `ast.get_source_segment` 逐字节相同。⚠️ 返回的树会话内共享，**只读**。全仓（含 tests/）都缓存约 500 MB，守卫多只扫生产文件，实际约一半。
+- `tests/test_ast_cache.py`：对账——最大的 5 个真实文件缓存树 == 新解析树（`include_attributes=True`）；同路径内容变了拿新树；仓库外 / 未登记串直通；SyntaxError 与解码错照抛；`SourceSegments` 对 3 个真实文件的**每个**节点（>1000）及 CRLF / 单 CR / form feed / 中文与 `ast.get_source_segment` 逐字节相同。
+- `tests/_retry_seams.py`：退避接缝登记表；`tests/test_retry_backoff_seams.py`：**生产配置下**钉两半——① 每个接缝把秒数原样交给 `time.sleep` 且真耗墙钟（不打桩）；② 重试循环按原节奏调接缝（`_gated` 0.7/1.4、期权链 1/2 每到期日、日K 0.7/1.4）；外加「仓库里定义了 `_retry_sleep` 的模块都在登记表里」。没有这个文件，接缝被改成空函数时**没有任何测试会红**（别的测试都把它换掉了）。
+
+### Changed
+- `options_analyzer` / `market_intelligence` / `report_deployer`：新增模块级 `_retry_sleep(seconds)`，重试退避改走它。生产 = **调用时**查找的 `time.sleep`，行为不变；不写成 `_sleep = time.sleep` 是因为 `test_gh_pages_unverified_parent` 等既有测试 patch 的是全局 `time.sleep`，导入期绑定会让它们静默失效。顺手删了因此不再使用的局部 `import time`。
+- `vol_forecast.load_day`：`sqlite3.connect(..., timeout=_BUSY_TIMEOUT_S)`，常量 5.0 = sqlite3 缺省值（原先隐式）。锁冲突测试把它调到 0.05；新增两条：生产值是 5.0、`load_day` 真按它忙等（调到 0.3 时实测 ≥0.25 秒才抛）。
+- `tests/conftest.py::stub_yfinance`：同时把登记表里 yfinance 消费模块的 `_retry_sleep` 换成记录器并返回记录 `[(模块, 秒)]`。只换**点名**接缝，不碰全局 `time.sleep`——`test_root_data_guard` 的 `_SETTLE`、clockshift、`test_ic_rerun_fg_budget`、`test_ghpages_data_root_migration` 都靠真睡。
+- `tests/test_pipeline.py` 两条推送重试测试、`test_twelve_data` 的 yfinance 回落测试：点名替换接缝，**并新增退避节奏断言**（`[2,4]` / `[2,4,8]` / `[0.7,1.4]`，此前只数调用次数）；`test_quote_set::_offline` 同样替换 `market_intelligence._retry_sleep`。
+- 13 个全仓 AST 守卫改用 `_ast_cache`（`test_paths_not_frozen_at_import` / `test_git_failures_are_visible` / `test_gex_oracle_bear_neutralized` / `test_slack_send_whitelist` / `test_sell_strike_integration` / `test_zero_weight_invariant` / `test_gex_modifier_disconnected` / `test_hedge_history_gate` / `test_earnings_calendar` / `test_signal_archive_writers_check_quarantine` / `test_price_history_default_paths` / `test_network_marker_discipline` / `test_non_swarm_scan_retired`），纯机械替换 `ast.parse(p.read_text(encoding=…))` → `_ast_cache.parse_file(p)`、读 / 解析两步的换成 `read_text` + `parse`；`test_no_invisible_prod_data_skips` 改用 `SourceSegments`（单条 22 秒 → 1.4 秒）。
+- `.github/workflows/tests.yml`：「pytest 要 4 分钟」的陈旧注释改掉；`timeout-minutes: 20` 旁注明耗时随什么增长、逼近时先查什么。
+
+### 验证
+- 本机整套（`--maxfail=1000`，同机同时有别的会话在跑整套，数字有噪声）：前 790.8s / 10027 passed → 后 562.0s / 10051 passed；测试耗时和 775s → 540s；≥4 秒的测试 23 → 6，≥1 秒 225 → 115。后一轮尚不含 `test_quote_set` / `test_twelve_data` 的接缝替换（两文件再省约 25 秒，单跑 0.85 秒）。两轮都只有已知的 `TestCoverageHorizon` 红；另各有一条真实数据根闸 ERROR，均为并发写者：前一轮是 Alpha Bot 盘中采样追加 `alphabot_state/intraday/*.jsonl`，后一轮是用户 09:24 执行 v0.45.521 `relabel_nyse_calendar --apply`（pheromone.db + 快照 256 处）。
+- 变异（改真文件、跑、还原）：`options_analyzer._retry_sleep` 掏空 → `test_seam_*` 2 红；`market_intelligence` 循环不再调接缝 → 节奏测试红；`report_deployer` 退避 ×0 → `test_pipeline` 2 红。往 `vol_forecast.py` 同时注入模块级 `PATHS` 冻结、`run_git_cmd('git reset --hard …')`、`QueenDistiller(adapted_weights=…)`、`gamma_exposure` 比较、`import pre_scan_notify`、`import sell_strike_ledger`，并新建一个模块级 `skipif(pheromone.db)` 的测试文件 → 7 个守卫文件 9 条全红；各守卫原有的有牙测试照常绿。
+- CI（Linux，同一选择集）：提速前 run 38923628786 pytest 717.4s（job 12 分 43 秒，10010 passed）→ 提速后 run 38932984246（8a19d803）526.5s（job 9 分 44 秒，10044 passed），−27%；两轮都只有 `TestCoverageHorizon` 红。
+
+### Notes
+- **没做**：`pytest-xdist`（会话级的数据根 / 仓库根 / 时间线闸都假设单进程，需单独评估）；`test_guard_census_eviction::test_get_live_signals_identical_under_any_max_entries`（11.5 秒）是生产 `pheromone_board.publish` 逐条全量扫描的平方级耗时，不是测试的问题，改生产算法不在本次范围。剩余的进程内 sleep（约 15 秒）都是刻意的：超时 / 截止时间 / 锁争用 / 启动器就绪等待测试。
+- 新写全仓 AST 守卫：读用 `_ast_cache.read_text` / `parse_file`，**别**对缓存来的树做任何修改。新增带退避的取数模块：照 `_retry_sleep` 的写法加接缝并登记进 `tests/_retry_seams.py`（`test_registry_lists_every_module_that_defines_the_seam` 会逼你登记）。
+
+## [0.45.523] — 2026-10-16 — Fixed：`.claude/launch.json` 的 `dashboard` 预览端口 8765 → 8770，不再和 Alpha Bot 抢端口
+
+用户打开 Alpha Bot.app 弹「端口 8765 被别的程序占着（HTTP 404）」。查下来占端口的是一个 `python -m http.server 8765`（今天 02:20 起、绑 `*:8765` 全部网卡、目录是与本仓无关的 `~/Desktop/自动化台账`），端口号与 `launch.json` 里 `dashboard` 预览配置、也与 Alpha Bot 缺省端口（`alphabot.launcher.DEFAULT_PORT`）撞了。已手动关掉那个进程。
+
+### Changed
+- `.claude/launch.json`：`dashboard` 的 `runtimeArgs` 与 `port` 8765 → 8770（实测 8770–8772 空闲）。Alpha Bot 缺省端口 8765 **不动**（启动器、帮助页、`ALPHA_BOT_GUIDE.md` 都写它）。
+
+### Notes
+- 治标：撞的是预览配置，不是 Alpha Bot 的问题；启动器的弹窗已经把原因和 `lsof` 命令写清楚了。
+- 已在跑的旧 `dashboard` 预览（若有）不会自己换端口，重新启动该预览才用新端口。
+
+## [0.45.522] — 2026-10-16 — Fixed（数据，用户批准「隔离并从库里删掉……不要脏数据污染历史库」）：坏链派生的 69 行期权观测登进 `QUARANTINE` 并清库；样本链中性早退不再写 `total_oi = 0`
+
+用户 2026-10-16 批准（v0.45.512 / 516 的待决项）。全部是「链取坏了，派生量照写」的形状：值不是观测，却进了 `signal_archive`、IC 样本与各类历史对比。
+
+### 隔离并清掉的 69 行（`signal_archive.QUARANTINE`，reason 带标记 v0.45.522）
+1. **BILI 2026-10-12 × `options.total_oi` / `options.gamma_exposure`（2 行）**
+   - 与 512 隔离的 P/C 298.46 是同一条 OI 陈旧的 yfinance 链。
+   - total_oi 22,160 只是冻结旧数（前后几天 16.0–17.0 万）；GEX −0.0611 由同一份 OI 加权。
+2. **2026-06-17 VKTX / CRCL × `put_call_ratio` / `total_oi` / `gamma_exposure`（6 行）**
+   - 残链：快照 key_levels 里 call OI 0/0/0，put OI 分别为 10/2/1 与 96/1/0。
+   - P/C 1.0 是 516 修掉的假中性。
+   - total_oi 13 / 97，前后几天 VKTX 2.3–2.4 万、CRCL 10–11 万。
+   - GEX 0.0 是 v0.45.63 前「算不出」写成的 0。
+3. **样本链早退的 `options.total_oi = 0`（61 行）：09-24 30/30、09-25 30/30、10-14 BILI**
+   - 期权链取不到 ⇒ `OptionsAgent.analyze` 中性早退：其余期权字段 None，唯独 total_oi 写 0 ⇒ 成了当天该标的唯一入档的期权「观测」。
+   - 核对：这 61 只当天没有任何别的 `options.*` 行。
+   - 日志：09-24 / 09-25 各 42 次「降级为样本数据」；10-14 BILI 14:15:51「期权链为样本数据，跳过全部指标计算（中性早退）」。
+   - 清库后全库 `options.total_oi = 0` 的行：61 → 0。
+- **清库**：`purge_quarantined_signal_rows.py --only-tag v0.45.522 --expect 69 --apply`，137,613 → 137,544。
+  - 备份 `db_backups/pheromone_pre_v0.45.522_bad_chain_options.db`。
+  - 核对：抽查 5 行生产 0 / 备份 1；BILI 10-12 剩 3 行（iv_rank / iv_percentile / iv_rank_is_real，hv_proxy 口径，不读这条链的 OI）；两边 integrity_check ok。
+
+### Fixed（源头）
+- `options_analyzer.OptionsAgent.analyze` 样本链早退分支：`total_oi` / `total_oi_raw` 从 0 改 None，与同分支其余字段一致。
+  - 下一次故障日不再往库里写这种 0。
+  - 读者对 None 早有处理：真实链 OI 陈旧时 512 起就记 None。
+
+### 未动（待用户定）
+- 全库另有 **52 行 `options.gamma_exposure = 0.0`**（2026-03-10 ~ 08-27，v0.45.63 前「算不出」写成 0 的旧习惯；06-17 VKTX / CRCL 那 2 行已在本次清掉）。不是同一条坏链，逐行是否真为「算不出」**待验证**，未动。
+
+### Tests
+- `tests/test_signal_quarantine.py::test_bad_chain_option_observations_quarantined_v0_45_522`：三组条目逐项核对，09-24 / 09-25 逐只核对全部 30 只；反例为前后一天与同日别的信号。
+  - 512 那条测试原先断言「同链 total_oi / GEX 不挡」（当时的批准范围），改为只钉 P/C 与 iv_rank。
+- `tests/test_quarantine_1014_prev_session.py`（508）的 `_entries()` 收窄到 `price.*`：同一天新增了本次的 `options.total_oi` 条目，原实现把 10-14 的全部条目都当成 508 的。
+- `tests/test_put_call_ratio_unavailable.py` 加样本早退 total_oi 为 None 一条。
+- 变异 6/6 被杀：样本早退改回 0、BILI 条目漏 GEX、06-17 漏 CRCL、09-25 日期错、09-24 漏 BRK-B（首次变异打到了 517 的同形元组上、没被杀 ⇒ 测试改为逐只核对全部 30 只，精确打本条目后被杀）、10-14 日期错。
+- 全量（rebase 到 93bf8f84 后）：10029 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加，不是测试写的。ruff 全绿。
+
+## [0.45.521] — 2026-10-16 — Added：按 NYSE 日历离线重算历史 T+N 标签的工具 `relabel_nyse_calendar.py`（默认 dry-run，写前备份）+ 维度 IC 协议 §13.9 事前实现对齐说明；用户 09:24 执行 `--apply`：predictions 413 处 / 快照 256 处，逐列比对备份无额外改动
+
+用户批准（2026-10-16）：「离线重算历史标签，先备份；协议补一条事前说明」。接 v0.45.520（代码已改 NYSE，此后标签算对）。
+
+### Added
+- **`relabel_nyse_calendar.py`**：只改「旧联邦日历取价日 ≠ NYSE 应取日」的已回填行——
+  `predictions` T+1 / T+30 的 `price_tN` / `return_tN` / `correct_tN` / `ambiguous_tN`、T+7 的 `close_t7` / `dir_correct_t7` / `dir_ambiguous_t7`
+  （与 `backtester` 同式，判定 `outcome_utils.determine_outcome_triplet`），报告快照 `actual_prices.t1/t7/t30`（经 `ReportSnapshot` 读回再存，未知键保留）。
+  价格只取本地（价格索引 + `predictions.price_at_predict`，库优先，同 `load_price_history` 口径），不出网。
+  闸：① 自校验存值 = 旧日历取价日收盘（±0.2%），否则跳过并列出；② 应取日本地无价跳过；③ `--apply` 才写，写前
+  `backup_before_write` 进 `db_backups/`（归因并发写入者靠它的 mtime）+ 受影响快照逐份复制进 `_manual_backups/report_snapshots-pre-v0.45.521-nyse-relabel/`；
+  ④ 单事务、`UPDATE … WHERE id=? AND 旧值=?` 影响行数须为 1 否则整体回滚，前后 `PRAGMA integrity_check`；每行新旧值写审计 JSON。重跑幂等。
+- 维度 IC 预注册 `experiments/dim_ic_preregistration.md`：头部「事前实现对齐」一行 + **§13.9**（按 §11「检视点之前的纯实现修正」标注，非修订、常量不动）。
+  内容：结果变量定义不变、实现改按 NYSE 数交易日；改动时窗口内 `close_t7` 非空 0 行、`checked_t7=1` 0 行（只读核对），重算落在窗口内 0 行；
+  窗口内首次受两表分歧影响的是 11-02~11-10 的预测；附注 §13.8 引用的 `backtester._US_BDAY` 已删、结论按 NYSE 仍成立。
+- `tests/test_relabel_nyse_calendar.py`（5 条，临时库 + 临时快照）：dry-run 零写入；只改本 bug 的行（自校验不过的、不受影响的不碰）、快照保留 `cs_rank`、
+  备份与审计落位；重跑幂等；计划后被并发改动 ⇒ 整体回滚；旧日历重建确是旧行为。变异 5 处全被杀
+  （新值取旧取价日 / 跳过自校验 / 去掉旧值条件 / 旧日历重建成 NYSE / 不备份库）。
+- `tests/test_trading_calendar_nyse.py` 的 AST 守卫加**双向**白名单 `ALLOWED_OLD_CALENDAR`：只许本工具为自校验故意重建旧日历，登记了却不再用也红。
+
+### dry-run 结果（生产 `~/alpha-hive-data`，2026-10-16 08:5x PDT，只读）
+| | 将重算 | 存值判定会变 | 跳过 |
+|---|---|---|---|
+| `predictions` T+1 | 30 | 4 | 0 |
+| `predictions` T+7（`close_t7` 系） | 112（预测日 03-26 ~ 10-05） | 17 | 0 |
+| `predictions` T+30 | 271 | 25 | 0 |
+| 快照 `actual_prices` t1 / t7 / t30 | 30 / 82 / 144 | — | 0 |
+
+- 全部通过自校验（0 行「存值≠旧取价日收盘」、0 行「应取日本地无价」）。
+- T+30「存值判定会变」25 ≠ v0.45.520 报的「日历致翻转」27：拆开后日历致翻转 27 行不变；另有 **5 行 T+30（02-26 ~ 03-10）当初按 v0.45.9 前的旧判定规则判**
+  （无模糊带，如看多 −0.53% 记对），重算按现行规则 ⇒ 这 5 行的判定一并更新。全表 T+30 规则漂移恰好就这 5 行、全在本次集合里 ⇒ 重算后 T+30 列全按现行规则。
+  入场价漂移（存的 return ≠ 用现入场价按存值重算）0 行。
+- **不在本工具范围**（只计数）：T+7 路径字段（SL 26 / T7_CLOSE 73 / TP 13，SL/TP 是否触发要重拉 OHLC）、`spy_return_t7` 112（本地无 SPY 价，需出网）。
+- **另两处发现，未处理**：① `predictions` T+1 全表 49 行存的判定与现行规则不一致（02~09 月，均不在本次集合）；
+  ② `agent_memory.outcome_return_t1/t7/t30`：`outcomes_fetcher._update_memory_store` 一次 UPDATE 写满三列、只有本轮回填的那格有值 ⇒ 后一轮把前一轮写成 None
+  （23,800 行里同时有 ≥2 个周期的仅 2,347 行），与日历无关、重算补不齐。
+
+### 执行（用户，2026-10-16 09:24 PDT）
+会话内 `--apply` 被权限闸（修改共享资源）拦下，未绕过；用户在终端执行。输出：已写入 predictions 413 处、快照 256 处。
+- 库备份 `db_backups/pheromone.db.bak-pre-v0.45.521-nyse-relabel-20261016-092445`；快照备份 + 审计 `_manual_backups/report_snapshots-pre-v0.45.521-nyse-relabel/`（234 份 + 审计 JSON）。
+- 在当天扫描（13:30 PT）与 Step 14 备份之前 ⇒ 当天备份会带上。
+
+### 执行后核对（只读）
+- **整表比对**备份 vs 当前 `predictions`：2013 行、无增删；改动的 390 行**全部**在审计登记的行与列内、登记外 0 处
+  （`price_t30`/`return_t30` 270、`close_t7` 112、`price_t1`/`return_t1` 30；判定列 `correct_t30` 17 / `ambiguous_t30` 15 / `dir_correct_t7` 16 /
+  `dir_ambiguous_t7` 5 / `correct_t1` 3 / `ambiguous_t1` 4）；审计里 1 行 T+30 两天收盘相同、实际未变。期间无其他写入者碰过这张表。
+- **快照比对**：234 份里除 `actual_prices.t1/t7/t30` 对应格外改动 0 处（`cs_rank` 等原样）；t30 143/144（同样一份两天同价）。
+- 受影响的 413 + 256 处现**全部**精确等于 NYSE 应取日收盘（重跑 dry-run 全为「已是应取日值」）。
+
+### Fixed（执行后核对发现）
+- **工具的幂等判断有洞**：重跑 dry-run 仍报 52 处「将重算」（predictions 36、快照 16）——两天价差 <0.2% 时，已写入的应取日值同样通过
+  「存值 ≈ 旧取价日收盘」自校验，被再计划一遍。核实 52 处全部已精确等于应取日值、判定相同 ⇒ 再跑只会写回同值，**生产数据无误**，但「重跑幂等」
+  的说法不成立。修：先判「存值 == 应取日收盘」⇒ 记「已是应取日值」跳过，再做自校验。测试补「价差 <0.2%」的夹具
+  （原夹具价差都 >0.2%，所以没抓到），去掉该判断的变异实测会红。
+
+## [0.45.520] — 2026-10-16 — Fixed：T+N 交易日算术改用 NYSE 日历——`outcomes_fetcher` / `backtester` / `backfill_dir_accuracy` 此前用 pandas 联邦假日表（哥伦布 / 退伍军人日判休、耶稣受难日判开），跨这些日子的 T+1/T+7/T+30 标签差一个交易日；历史数据**未改**（影响面见下，待用户决定）
+
+**怎么发现的。** 拨钟 CI（v0.45.495）10-14 的每日定时 +7 档确认一条新红：`test_outcomes_backlog_starvation::test_rate_limit_streak_stops_network_but_not_local`，
+本机逐日拨钟只在「今天」= 2026-10-21 红（+4 / +6 绿）。根因不在夹具：夹具两份快照恰为 10-09 / 10-12，而 10-12 是哥伦布日——
+联邦假日表判休、NYSE 开市 ⇒ 10-09 的 T+1 被算成 10-13。用户批准「修交易日历，先查历史影响面再动手」。
+
+**两张表的分歧**（2025–2027，用仓库 `is_trading_day` 逐日对照）：哥伦布日 2025-10-13 / 2026-10-12 / 2027-10-11、退伍军人日 11-11（三年）
+NYSE 开、联邦判休；耶稣受难日 2025-04-18 / 2026-04-03 / 2027-03-26 NYSE 休、联邦判开；2027-12-31 NYSE 开、联邦判休。共 10 天。
+取价语义是「目标日当天或之后第一根 bar」⇒ 受难日那批标签**早一天**（实为 T+N−1），哥伦布 / 退伍军人那批**晚一天**（T+N+1）。
+
+### Fixed
+- **`is_trading_day.add_trading_days(d, n)`**：T+N 交易日算术的唯一实现，判定直接复用 `is_trading_day()`（全仓「交易日」同一定义），
+  逐日步进、不用节假日列表 ⇒ 没有「列表只到某年、之后假日被静默忽略」的视野上限（`CustomBusinessDay(holidays=列表)` 正有此坑）。
+  语义与 pandas `d + n * CustomBusinessDay` 一致（从次日起数、负数向前、n=0 顺延）——2025-02~2027-11 每天 × n∈{±1,±7,30} 共 5320 组对照，
+  4746 组相同、574 组不同且**全部**能由那 10 个分歧日解释、0 组无法解释。
+- 调用点全换：`outcomes_fetcher._target_window` / `_target_key`（报告快照 `actual_prices`、本地价格索引反推键）；
+  `backtester._get_price_at_date`（`price_t1` / `close_t7` / `price_t30` / SPY 基准 / T7_CLOSE 平仓价）、`_simulate_trade_path` 取数窗口、
+  `get_pending_checks` 的到期 cutoff；`backfill_dir_accuracy`（`close_t7` 回填）。随之删掉五处「pandas 不可用 ⇒ 自然日偏移」的降级分支（outcomes_fetcher 2、backtester 3）
+  （不再依赖 pandas，分支不可达）与无人读的 `FeatureRegistry` 项 `pandas_bday`。
+- `tests/test_quarantine_1014_prev_session.py` 改读 `backtester.add_trading_days`（原读已删的 `_US_BDAY`；10-14 → 10-23 两表一致，断言不变）。
+- 已知局限（docstring）：不认临时休市（国丧日，如 2025-01-09），与 `is_trading_day()` 同。
+
+### Added
+- `tests/test_trading_calendar_nyse.py`（15 条）：已知分歧日逐个钉住；与 pandas 对照「只在分歧日处不同」（含反向自证：一处分歧都没有 ⇒ 红）；
+  `outcomes_fetcher` / `backtester` 调用点按 NYSE 取起点；**AST 守卫**：生产代码不许再出现 `USFederalHolidayCalendar` / `CustomBusinessDay` /
+  `AbstractHolidayCalendar`（认 import 与名字，不认注释）。变异 4 处全被杀（日历退回联邦 14 红、起算含当天 8 红、两个调用点各自退回各 2 红）。
+
+### 历史影响面（只读核对生产 `~/alpha-hive-data`，**未改任何数据**）
+数据跨度 2026-02-25 ~ 10-15，区间内分歧日只有 04-03（受难日）与 10-12（哥伦布日）。
+
+| | 已回填且受影响 | 按 NYSE 重算方向判定翻转 | 尚未回填、本版上线后直接算对 |
+|---|---|---|---|
+| `predictions` T+1（`price_t1`…） | 30（10-09 一批） | 4 | — |
+| `predictions` T+7（`close_t7` / `dir_correct_t7`；路径字段 T7_CLOSE 73 / SL 26 / TP 13） | 112（03-26~04-02、10-01~10-09） | 17 | 120 |
+| `predictions` T+30（`price_t30`…） | 271 | 27 | 870 |
+| 报告快照 `actual_prices` t1 / t7 / t30 | 30 / 82 / 144 | — | t7 150、t30 900 |
+
+- **自校验**：413 行受影响标签的存值 **413/413 等于「错位那天」的收盘**、0 行等于应取日 ⇒ 上面的取价语义推断就是生产实际行为。
+- 重算所需的应取日价格：`close_t7` / `price_t1` / `price_t30` 本地（价格索引 + `predictions.price_at_predict`）全覆盖、可离线重算；
+  `spy_return_t7` 要 SPY 价（本地索引 0 天）⇒ 需出网；T+7 **路径**字段（SL/TP 是否触发）要重拉 OHLC。
+- **维度 IC 预注册协议**（`experiments/dim_ic_protocol.py`，`OUTCOME_COLUMN = "close_t7"`，窗口自 2026-10-12）：窗口内最早一行 t7 按 NYSE 10-21 才回填，
+  ⇒ 本版上线时窗口内**尚无任何一行**按旧日历算出；窗口内第一次受日历分歧影响的是 11-02~11-10 的预测（跨 11-11）。是否为此记协议修订，待用户决定。
+
+## [0.45.519] — 2026-10-16 — Added：Alpha Bot 总览 / 标的页把「不可报价」讲清楚——原因码翻成人话，补点差与持仓量（OI）
+
+用户看着总览里满屏 `short_spread_too_wide:put` 问「不可报价正常吗」。核对账本（10-08 ~ 10-15 每天）：路由短腿约一半不可报价，几乎全是「短腿点差 > 25%」，集中在持仓量个位数到几十的合约；TSLA / NVDA 这类流动性好的票点差很小。**是设计行为，不是 bug**——但页面只吐原始代码、看不出是流动性问题。
+
+### Added
+- `sell_strike_report._side_brief` 增加 `ask` / `mid` / `oi` 三个键（**纯新增**，既有键不动；只被总览与账本浏览用）。
+- `static/lib.js`：`REASON_LABEL` / `REASON_TONE` / `reasonInfo()`——引擎写出的原因码 → 人话（点差过宽 / 没有有效 bid / 缺合约 / 报价疑似失真 / 净权利金 ≤ 0 / 路由判不可用 / 中价不可得），带「put 侧 / call 短腿 / 保护腿 / 两翼合计」定位；查不到的码显示「未登记：…」。`methodRules()` 只从 `/api/method` 取一次点差上限。
+- 总览页：每个短腿格子加「点差 · OI」；不可报价格子点差过宽时写「62% > 上限 25%」（黄色），其他原因给 bid / ask 与 OI（灰色）；顶部指标条加「路由短腿不可报价 N / M（其中点差过宽 k）」；筛选条加「两侧可报价」。
+- 标的页：梯子格子补 OI，梯子 / 六种结构表 / 「怎么卖」里的原因同样走对照表。
+- 帮助页：总览加「不可报价正常吗」一节与新指标说明；卖权章节的原因代码表加「页面上的写法」一列（取自同一张表）。点差上限一律取自服务端，不写字面量。
+- `tests/test_alphabot_unquotable.py`（10 条）：原因码**双向**静态对账（引擎写出的码都登记、表里无死键；扫描器有牙）、`_side_brief` 新键就是梯子里同一条腿的值且既有键不少、总览接口带新键、前端不再原样吐代码、点差上限不是字面量。变异核对 3 处（删一个标签 / oi 置 None / 总览吐原始 reason）均变红。
+
+### Notes
+- **不放宽 25% 点差上限**：它是预注册检验协议的一部分（冻结规则），放宽会让已攒样本不可比。帮助页写明「账本取收盘后快照，盘后盘口可能更宽（没有逐票核实，只能说可能）」。
+- 路由、候选、账本、levels / candidates 既有输出与版本号均未动。
+- 验证：`tests/test_alphabot*.py` + `tests/test_sell_strike*.py` 共 689 项通过；`ruff` 干净；演示模式浏览器实测（注入三种不可报价：点差过宽 / 无 bid / 未登记码；「两侧可报价」筛选 30→27；标的页梯子 OI）。
+
+## [0.45.518] — 2026-10-16 — Changed：Step 2 超时预算每只 120s → 180s（30 只 3600 → 5400s），并把信息素板过期线 3600 → 10800s 与预算焊在一起
+
+### 为什么改（取证：22 个有数据的扫描日）
+- 09-21、09-23 两天 Step 2 撞 3600s 被杀，**整天丢失**：超时 = 全有或全无（`.swarm_results` 没生成，已完成的标的全部作废）且没有同日重试 ⇒ T+7 观测永久缺口。
+  10-12 余量仅 13%，09-17 25%。
+- 正常日中位 ≈2080s = 并行段 564 + 顺序段 1268（≈42s/只）+ 收尾 249；预算 3600 ⇒ 余量 ≈40%。
+- 慢因有**两类**，各落在不同阶段：yfinance 429 风暴（09-21 / 09-24 / 10-12，每天 69–78 行 429；09-24 并行段 2×、收尾 4×，10-12 收尾 7×）；
+  CBOE 陈旧级联（09-23：150 行陈旧 + vintage 告警、429 仅 2 行；顺序段 ≈127s/只 = 3×，外推 30 只需 ≈4900s）。
+  ⇒ 「30 只 × 120s」不是线性模型，一个 3× 的慢因就够把总用时推过 3600。
+- 5400s 刚好放得下 09-23 的外推（≈4900）；正常日余量 ≈60%。**代价**：真卡死的运行晚 30 分钟才被判超时。
+  余量只报数、不判定（`预算余量` 行），没有告警门槛，也没有测试把 120 写死，故改它不会连带触发别的。
+
+### ⚠️ 只改一个数会引入静默降级——这是本版真正的内容
+- `PheromoneBoard` 条目超过 3600s 被当作陈货：`publish` 的存活过滤丢它，`get_agent_entry` / 普查视图对它返回 None；
+  Guard / Bear 经 `BeeAgent._read_peer` 读前面蜂的结论，**读到 None 就静默按「没有这个同伴」评分**。
+- 旧过期线 3600 恰好等于旧预算 3600，于是「能跑完的扫描，条目年龄必小于过期线」**碰巧成立**，没写在任何地方、没有测试守着。
+  预算放宽后，拖到后半段的标的（顺序段逐只处理，条目在 Phase 1 早早发布）会读不到前面蜂的结论：扫描「跑完了」、质量悄悄变差、没人红。
+- 板是**每个进程新建、从空开始**的（`_entries=[]`，`memory_store` 只是写出去），过期线只防同进程内的陈货，放宽不会放进昨天的数据；
+  正常日扫描最长 ≈3100s，行为不变。
+
+### Changed
+- `scripts/alpha-hive-orchestrator.sh`：`STEP2_TIMEOUT=$(( TICKER_COUNT * 120 ))` → `* 180`，日志行同步；注释写明取证与「不得超过板过期线」的约束。
+- `pheromone_board.py`：新增 `PheromoneBoard.ENTRY_MAX_AGE_S = 10800`，`publish` 的存活过滤与 `get_agent_entry` / 普查视图（`_AGENT_ENTRY_MAX_AGE_S`，旧属性名保留）
+  **引用同一个常量**（此前是两处各写一个 3600，注释里写着「必须一致」）。
+- `tests/test_agent_votes_census.py`、`tests/test_bear_bee_census_eviction.py`：夹具里写死的「3700s / 2 小时」改成相对 `ENTRY_MAX_AGE_S`
+  （放宽后绝对值夹具不再过期，「复现过期清空」的断言会先红在夹具上；后者测试名同步改为 `…older_than_the_expiry_line…`）。
+
+### Added
+- `tests/test_pheromone_expiry_exceeds_scan_budget.py`（9 条）：从编排器原文解析预算公式（系数 / 下限 / 日志行，缺或不唯一就抛，不猜）；
+  过期线必须 > 预算（名单再多 10 只仍成立）；30 只预算 ≥ 4900s（09-23 外推；变更探测器，附取证指针）；日志写的每只秒数与公式一致；
+  板里不得再有裸 `3600` 整数字面量（AST，注释不算）；成对行为断言（旧线之后、新线之前的条目仍可读；越过新线的条目照拦，publish 与 `get_agent_entry` 两条路都验）。
+- **真跑变异**（Python 驱动、`PYTHONDONTWRITEBYTECODE=1`、还原后 sha256 一致并复跑 81/81 绿；4 个相关文件共 81 条）：
+  P1 过期线退回 3600 ⇒ 3 红；P2 系数退回 120 ⇒ 3；P3 系数改 400（越线）⇒ 2；P4 `publish` 改回裸 3600 ⇒ 1（字面量守卫）；
+  P5 `get_agent_entry` 阈值改回裸 3600 ⇒ 3；P6 日志写 120 而公式 180 ⇒ 1；P7 `get_agent_entry` 不判过期 ⇒ 2。
+
+### 验证
+- 全套：9973 passed、1 failed（已知的 `TestCoverageHorizon`）、84 deselected、2 xfailed、1 ERROR（= collected 10060 + teardown 重复计数）。
+- ⚠️ 那个 ERROR 与 v0.45.514 那次**同一原因**：真实数据根闸（session 级，记在收集序最后一条测试名下）——`alphabot_state/intraday/2026-10-16` 下 5 个文件只被**追加**，
+  mtime 散落在互不相关的测试里（`test_iv_history` / `test_import_creates_no_data_dirs` / `test_ic_rerun_fg_budget`…），测试期间正是交易日盘中（美东 10:50）、Alpha Bot 进程在跑。
+  没有等收盘后重跑全套；与板 / 编排器相关的 81 条在变异驱动里单独跑过（全绿）。
+- 未穷尽：其余「1 小时」类缓存 TTL（`data_pipeline.CACHE_TTL_STALE`、`swarm_agents/cache` 的 ticker 有效性、`agent_weight_manager` 等）过期后是**重新取**，只多花时间、不会静默变成缺失，
+  与板的「过期 = None」性质不同；没有逐个核实它们在 >3600s 扫描里的行为（待验证）。
+
+### 没做 / 留给后续
+- 超时仍是「全有或全无 + 无重试」：本版只把撞线概率压低（09-23 类日子能跑完），没有消除整天丢失。重试 / 断点续跑见 memory `alpha-hive-scan-duration.md` 的取证与取舍；
+  断点续跑会碰横截面状态（`cs_rank` 等），要先读 `run_swarm_scan`，风险最大，**若放宽后仍有超时再议**。
+- 09-23 的 CBOE 陈旧为什么让顺序段慢 3×（怀疑陈旧丢弃这条路径绕过了 `[CB-cboe]` 断路器），**只看了日志、未读代码**，待验证。
+- 收尾段 10-12 为什么 1871s（正常 249s）待验证。
+- 生效时间：合入后下一个扫描日自动部署，再下一轮才用新编排器；`pheromone_board.py` 随生产克隆快进，次日扫描即生效。核验：编排器日志 `超时限制：5400s（30 只 × 180s/只`。
+
+
+## [0.45.517] — 2026-10-16 — Fixed（数据，用户批准「全部已证实的」）：09-15 NVDA / QCOM 的量比与动量、09-24 的 29 个动量（不含 T）、09-25 的 30 个动量登进 `QUARANTINE`——都已逐位 / 万分之一内复现出错误窗口；全在维度 IC 窗口之前，不碰 H1
+
+### 依据（只读复核，详见 v0.45.508 条「09-15 QCOM / NVDA 复核」）
+- **09-15 `price.volume_ratio`（NVDA / QCOM）**：Twelve Data 兜底丢了 09-15 那根 ⇒ 入档的是「最新一根 = 09-14（上一场；09-15 是周二，`is_trading_day` 算）、窗口 = 截至 09-14 的 20 根」的比值。Twelve Data 截至 09-14 的日线只把 09-14 那根成交量换成 131,942,300 / 13,755,800 股（整百股；TD 事后上调了 0.25% / 0.21%）即**逐位复现** 1.01080 / 1.21243。截至 09-15 应为 0.676 / 1.195——NVDA 的 Buzz 量比档因此从应有的 35 记成了 50，QCOM 同档。
+- **09-15 `price.momentum_5d`（NVDA / QCOM）**：465 之前的自攒索引回落（末端 = 上一个扫描日、锚点 ≥5 场前），实际窗口 09-04 → 09-14。Twelve Data 收盘与扫描价两种序列穷举，唯一同时复现两只（误差 < 1e-4）。截至 09-15（4 场）应为 −5.14 / +6.46，归档 −8.42 / +6.76。
+- **09-24 `price.momentum_5d`（29 只）**：全源故障日（30 行 `price_at_predict` 全为 0），30/30 动量来自同一回落；上一个扫描日 09-22（09-23 无扫描）⇒ 末端滞后两场。29 只与「末端 09-22、往前 5 场」逐一相符（< 0.02）。**T 不登**：差 0.035、复现不出（归档 −6.098；截至 09-24 的 4 场应为 +0.197——显然也不是当天窗口，但「出自哪个窗口」没证出来，待验证）。
+- **09-25 `price.momentum_5d`（30 只，含 T）**：又一个全源故障日；30/30 与 09-24 归档**逐位相同**——09-24 没有可用价、索引没有新点，窗口仍止于 09-22（滞后三场）。T 在内的理由：不论出自哪个窗口，−6.098 都不是 09-25 的（4 场应为 −0.275）。
+
+### Fixed
+- `signal_archive.QUARANTINE` 加 4 条（`reason` 以 `v0.45.517` 开头，均带 `tickers`，只隔离观测层 `price.*`；`buzz.comp.*` / Agent 评分不动，理由同 508）。生产库只读核对：命中恰好 **63 行**（09-15 量比 2 + 动量 2、09-24 动量 29、09-25 动量 30），无其它命中。
+
+### 影响面
+- 全在 `FORWARD_START`（10-12）之前 ⇒ 维度 IC H1 / H2 不受影响；09-24 / 09-25 入场价为 0，本来就进不了任何按收益的检验。
+- 入库口与所有直写脚本（v0.45.511 起全过 `is_quarantined`）今后不会再写这 63 格；**库里现存的 63 行没有删**（没跑 `purge_quarantined_signal_rows.py`）。⚠️ 整库恢复（`data_backup/restore.py`）会把它们与 508 的 30 行一起计进 `quarantined_signal_rows`——那是预期内的非 0，不是恢复出错。
+- `signal_archive.analyze` / `load_panel` 不问 `is_quarantined`（v0.45.26 起的已知状况），旧分析口径不变。
+- 不追加世代边界（只登已证实的坏格子，不改任何定义）。
+
+### Tests
+- 新 `tests/test_quarantine_prev_window_0915_0925.py`：名单恰好这 63 格对应的 4 组（09-24 不含 T、09-25 含 T）；`is_quarantined` 真值表含反面（名单外标的 / 信号 / 相邻日不挡）；只隔离观测层；证据指向本条、本条不是占位；全在维度 IC 窗口前；**入库口真的挡**（`archive()` 合成写入：被点名的格子不进、同批其它信号照写、09-24 T 照写）。
+- 变异 7/7 被杀（09-24 加 T、09-25 去 T、09-15 量比条目信号写错、09-15 动量条目日期错、09-25 连带隔离通道、`archive()` 不问隔离、版本标记写错）；`PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。拨钟审计 +7 / +45 / +400 天新红 0；ruff 通过。
+- 全量（`--deselect` 设计内定期红的 `TestCoverageHorizon`）：**9970 passed、2 xfailed、0 failed**；1 error = 真实数据根总闸：`alphabot_state/intraday/2026-10-16/*.jsonl` 07:42 PDT 成批追加——正在运行的 Alpha Bot（10-15 起的进程）盘中采样写的就是这些文件，闸的报错里点名过这类并发写入者；本条只改名单与测试，不碰该路径。
+
+## [0.45.516] — 2026-10-16 — Fixed：`calculate_put_call_ratio` 算不出时返回 None，不再是假中性 1.0（链空 / call 侧 OI 与成交量为 0 / 比值非有限）；analyze 计数 `pc_unavailable`、不标 real
+
+用户 2026-10-16 决定（v0.45.512 的待决项 3）。此前函数在两处早退里返回 1.0「默认中立」，与真实的 1.00 同形，一路进了评分、展示与 `signal_archive`。
+
+### 影响面取证（只读）
+- 归档里 `options.put_call_ratio` 恰为 1.0 的有 21 行（1,867 行的 1.1%）。逐行对照当天期权快照的 key_levels：
+  - **2 行是假中性**：2026-06-17 VKTX（call OI 0/0/0，put OI 10/2/1）、2026-06-17 CRCL（call OI 0/0/0，put OI 96/1/0）。
+  - 17 行两侧 OI 正常、量级相当，是真实值四舍五入。
+  - 2 行没有快照（META 03-23、CRCL 09-08）：总 OI 6.2 万 / 20.4 万，大概率真实，**待验证**。
+- 这 2 行**未隔离**（需用户批准写生产数据）。
+
+### Fixed
+- `options_analyzer.OptionsAnalyzer.calculate_put_call_ratio` → `Optional[float]`。以下情况返回 None：
+  - 任一侧链为空；
+  - call 侧（加权后）为 0，含两侧 OI 都为 0 后退到成交量、成交量也为 0；
+  - 比值非有限。
+  - 真实比值（含恰好 1.00）不变。两侧 OI 全 0 时退到成交量的既有行为也未动。
+- `OptionsAgent.analyze`：P/C 为 None（非 OI 陈旧）时，`pc_unavailable` 按标的去重计数，并记 WARNING。
+- `data_quality` 降级的条件从「OI 陈旧」扩到「P/C 为 None」，否则 `scan_coverage_gate` 的「real 却 P/C 为空」会误红。
+- 下游沿用 v0.45.512 已接好的 None 处理：
+  - flow 分取中点 1.5（原假中性 1.0 落在 [1.0, 1.5) 档得 1 分 ⇒ 这类日子 options_score +0.5）；
+  - `flow_direction` 记 "unknown"；
+  - Bear 用 `or 1.0` 走中性，Rival 回落中性（消费端的评分选择，不是落盘观测）。
+- `scan_timing` 摘要行显示「/P/C不可得N只」（仅非零时）。
+- **未加 IC 世代边界**：只有「算不出」的日子从 1.0 变 None（更少，不是不同）；能算的日子逐字节不变。
+
+### Tests
+- 新 `tests/test_put_call_ratio_unavailable.py`：
+  - 8 种算不出的形状（含 VKTX / CRCL 06-17 形状）都返回 None；
+  - 真实比值不变，真实的 1.00 仍是 1.00，成交量退路照旧；
+  - analyze：None、unknown、degraded、计数与去重、WARNING、评分中点 +0.5、健康链不变；
+  - 摘要行。
+- `tests/test_options_analyzer.py` 两条原断言「1.0 默认中立」改为 None。
+- 变异 5/5 被杀：两处早退改回 1.0、删有限检查、DQ 只认 OI 陈旧、不计数。
+- 全量（rebase 到 d5820bab 后）：9981 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加，不是测试写的。`tools/clockshift/audit.py --days 7/45/400` 新红 0；ruff 全绿。
+
+## [0.45.515] — 2026-10-16 — Added：Alpha Bot 卖权页「六种结构」下方新增「怎么卖」——每种结构的下单腿、推荐价位、标的价位、下单步骤、管理办法与风险
+
+用户反馈：表里只有权利金 / 最大亏损 / 回报 / 盈亏平衡，看不出「这行到底怎么下出去、挂什么价、什么时候收」。点任一结构行，盈亏图下方现在多一栏。
+
+### Added
+- `alphabot/howto.py`（纯函数，不 import 卖权模块、不读写文件）：同一份 `structure_quote` 报价翻译成可执行信息。
+  **下单腿**（买卖方向 / 合约 / 行权价 / 距现价 / |Δ| / σ 距离 / P(ITM) / bid·ask·中价）；
+  **推荐价位**：起挂限价 = 组合中价，底线价 = 自然价与中价之间 `floor_share`（0.5）处，止盈买回价（成交权利金 × 0.5）、
+  止损买回价（× 2.0；价差 / 铁鹰宽度不超过它时如实写 `None` + 说明，不给一个不可能触发的数）、管理日（月度到期前 21 天 / 周度 3 天）、
+  每张最大盈利 / 最大亏损 / 占用资金；**标的价位**（短腿 / 保护腿 / 盈亏平衡 / ±1σ / 下方·上方 Zero Gamma / 净 Major，各带距现价 %）；
+  **提示**（到期前有财报 / 财报日未知、负 gamma 下的裸卖结构、点差过宽、盘中报价）；
+  六种结构各一份静态说明（观点、下单、盈亏口径、管理、风险、别用的情形），多腿结构明确写「用组合单、别拆腿」。
+- 路由档（推荐）与基线档 0.20Δ 可切换；路由判不可用的一侧只剩基线档。
+- `alphabot/static/pages/howto.js`：只排版，不写任何价位公式；`ticker.js` 在盈亏图下方挂载；`help.js` 卖权章节加「⑤ 怎么卖」，数字取自 `/api/method`（`howto.rules`），不写字面量。
+- `service.live()` 在载荷里挂 `howto`；`meta_texts()` 给 `howto`（规则常量 + 说明）。
+- `tests/test_alphabot_howto.py`（31 条）：与「六种结构」表同源、手工梯子独立复算每个价位、提示只在该出现处出现、六份说明完整、纯函数（AST）、失败可见、前端不含价位公式。变异核对 4 处（底线价、止损失效、负 gamma 提示、起挂价）均变红。
+
+### Fixed（二次检查，同版）
+- **价差 / 铁鹰的单笔回报口径不一致**：起挂 / 底线价的回报曾用「该价权利金 ÷ 自然价口径的占用资金」，比表里同定义（credit ÷ (宽度 − credit)）偏低（例：宽度 5、起挂 1.00 ⇒ 24.4% 对 25.0%）。现按成交价重算占用资金。
+- **底线价可能低于自然价**：取整到最小报价单位时（自然价 0.9049、中价 = 自然价 ⇒ 0.90）底线会落到「立刻挂 bid / ask 就能成交」的价之下。现向上取整并钳住，起挂价 ≥ 底线价 ≥ 自然价。
+- **「财报日未知」黄色警告恒亮**：Alpha Bot 现算不查财报日（`compute_live_detail` 未传 `upcoming_fn`），现算行恒为 unknown，每只票（含 ETF）每个结构都弹，没有信息量。降为说明并写明「本页现算不查财报日」；「到期前有财报」仍是黄色警告。
+- 盈亏平衡价位的说明补「按自然价算；起挂价成交会略宽松」。
+- 新增 2 条回归测试（另有 1 条原有测试加强了财报提示级别的断言）（含零点差构造，变异核对：撤掉修复即红）；真实数据（SPY 月度 / 周度全部 12 个结构 × 2 档）核对起挂 ≥ 底线 ≥ 自然价。
+
+### Notes
+- ⚠️ **这些比例是业内通行的执行经验，不是本系统前向检验过的结论**：50% 止盈、2 倍止损、半价差让价、21 天管理日都没进预注册检验，页面、帮助页、模块 docstring 都这样写。它们回答「怎么执行」，不回答「该不该卖」。
+- 失败可见：`howto` 现算抛错 ⇒ 载荷里 `howto.available = False` + 原因，`stats.howto_failures` 计数，日志 warning；不会让整只票连坐（测试钉住）。
+- **不改** levels / candidates 既有输出与版本号（预注册样本不被截断）；只读、不写账本；火墙不变（`howto.py` 不 import 卖权模块，经 `service.py` 注入 `structure_quote` 与 `BASE_RUNG`）。
+- 验证：`tests/test_alphabot*.py` + `tests/test_sell_strike_integration.py` 共 454 项通过；`ruff check alphabot` 干净；演示模式浏览器实测（铁鹰 / 卖 put、路由 / 基线切换、帮助页）无控制台错误。
+
+## [0.45.514] — 2026-10-16 — Removed：删除 `pre_scan_notify.py`（v0.45.510 起零调用方）及其 Slack 白名单登记 / 测试；Slack 发送方从两个减为一个
+
+### 删了什么
+- `pre_scan_notify.py`（362 行）：扫描前 Slack 确认（Bot 私信 + 轮询回复）。v0.45.510 起编排器不再调用（每天 launchd 自己跑、Webhook 早已 404、没人回复）。
+  **顺带删掉了一个持久开关的唯一读者**：它读 `~/.alpha_hive_llm_mode`（写 `"always"` 可常开 LLM）。全仓核实没有别的读者，该开关随之消失
+  ——这是「编排器里没有任何路径能打开 LLM」的最后一块。
+- `tests/test_slack_notifier.py::TestPreScanWebhookFallback`（2 条，测它的 webhook 兜底）。
+- `tests/test_slack_send_whitelist.py`：`ALLOWED_SENDERS` 去掉它（只剩 `push_report_to_slack.py`）；扫描器「不该报」夹具里借用它名字的那条改用 `push_report_to_slack.py`。
+- 文档 / 注释：`CLAUDE.md`（Slack 两节）、`QUICK_START.md`、`SLACK_INTEGRATION_GUIDE.md`、`push_report_to_slack.py` 与 `slack_report_notifier.py` 的 docstring、`tests/conftest.py` 注释。
+  编排器里两处历史说明注释（解释为什么去掉确认）保留原样：改它们会再触发一次部署周期，而守卫只忽略整行注释、不影响。
+
+### Added（墓碑）
+- `tests/test_slack_send_whitelist.py::TestPreScanNotifyStaysRetired`（2 条）：文件不存在；全仓 Python 里没有 `import pre_scan_notify`（认 AST import，说明文字 / 注释提名字不算）。
+- **真跑变异**（Python 驱动、`PYTHONDONTWRITEBYTECODE=1`、还原后 sha256 一致、基线 53/53）：M1 把文件放回去 ⇒ `test_module_file_is_gone` 红；
+  M2 别的模块 `import pre_scan_notify` ⇒ `test_nothing_imports_it` 红；M3 只在注释里提名字 ⇒ **不红**（设计如此）；
+  M4 把它重新登记进 `ALLOWED_SENDERS`（文件不在）⇒ 既有的 `test_every_whitelisted_module_is_still_seen_sending` 红。
+
+### 验证
+- 全套：9914 passed、1 failed（已知的 `TestCoverageHorizon`）、84 deselected、2 xfailed、1 ERROR。
+- ⚠️ 那个 ERROR 是**真实数据根闸**（session 级，记在收集序最后一条测试名下）：`alphabot_state/intraday/2026-10-16` 下 5 张快照被追加，
+  mtime 散落在互不相关的编排器测试里，今天是交易日盘中、Alpha Bot 进程在跑——并发写入者，不是本版造成（闸自己的说明也是「等这批写完重跑」）。
+  对被 ERROR 点名的 `test_zero_weight_invariant` 与全部相关文件（白名单 / 通知器 / 编排器守卫 / 冻结路径 / 数据根 / 未定义名 / CHANGELOG）单独重跑：278 passed、无 ERROR。
+  没有等收盘后重跑全套——判断依据是上述三条（只在 alphabot_state、时间散落、进程在跑），**未做「收盘后全套零 ERROR」这一步，如实记在这里**。
+
+
+## [0.45.513] — 2026-10-16 — Fixed：`earnings_vol_signal` 零快照诊断不再把缺省数据根说成「回落到代码目录」（照 v0.45.384 二次检查 #3 的 `vrp_signal` 修法）；同形假病因 `data_backup` 导出 / 备份拒绝文案两处 + 文档两处一并更正
+
+### 为什么
+- v0.45.380（10-16 经 `571569a1` / `ba2d88b0` 合入）的 `_cache_dir_hint` 在 `explicit_data_root() is None` 时附「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录（生产由编排器 export）」。
+  v0.45.422 起 `hive_logger.resolve_data_root` 把未设 / 空串解析为 `$HOME/alpha-hive-data`——**那就是生产数据根**（编排器与 launchd plist 设的 `/Users/igg/alpha-hive-data` 与缺省相等）。
+  ⇒ 这是假诊断：把人引去查一个不存在的问题，而那次 env-less 手动跑读写的其实就是生产。生产自己设了该变量，从不显示它；只误导手动跑。
+- `vrp_signal` 的同一句在 v0.45.384 二次检查 #3 已改；384 条目「未做」点名了 380 这一处没改、另报。
+
+### Fixed
+- `earnings_vol_signal._cache_dir_hint`：只在 `explicit_data_root()` 非空 **且** ≠ 缺省根时提示「ALPHA_HIVE_HOME 显式指向 X，不是缺省数据根 Y（shell 里残留的旧值？）」。
+  缺省根 = `resolve_data_root({"HOME": os.environ.get("HOME", "")})`（只给 HOME，走 hive_logger 唯一解析）；本模块不写该键的恰等字面量，
+  `tests/test_data_root_default.py::ENV_KEY_SITES` 不增登记（本模块原本就没有登记位置，变异 M5 证明直接点名会被它拦下）。`ALPHA_HIVE_CACHE_DIR` 那条提示未动。
+- `data_backup/export.main` / `data_backup/run_backup.run` 拒绝「备份仓在代码仓库里」时的括注「未传 --out / --backup-dir 时多半是没设 ALPHA_HIVE_HOME」
+  →「多半是 ALPHA_HIVE_HOME 显式指到了检出；v0.45.422 起未设 ⇒ 缺省数据根，不在检出里」。同一函数的 docstring 422 后早已改对（「v0.45.422 前未设也会」），
+  只有消息字面量没跟上。只改文案：判定、`refused` / `stage`（编排器 Step 14 认的是这两个）不变。
+- 文档：`ALPHA_BOT_GUIDE.md`「没设会读代码目录下的账本（不是生产数据）」、`alphabot/__main__.py` 模块 docstring「读生产账本需要设」——
+  启动时的 stderr 本身 422 后已改对，只剩这两处说法。
+- v0.45.380 条目正文四处陈述旧行为（触发描述、env-less 复现、`_cache_dir_hint` 判据、合入适配 ①）加注「v0.45.422 起不成立 / 513 改」，不改写当时的事实记录。
+
+### 全仓普查（非测试；「回落 / 兜底到代码目录」「未设 / 没设 / 不带 ALPHA_HIVE_HOME」及英文说法）
+- 假话、已改：上面 `earnings_vol_signal` + `data_backup` 两处 + 文档两处。
+- 命中但成立（史实带版本号，或已按 422 更新）：`alphabot/__main__.py` 的 stderr、`alphabot/launcher.py`、`data_backup/export.py` docstring、`backup_continuity.py`、
+  `replay_scoring` / `signal_archive` / `vol_forecast` / `sell_strike_ledger` 的提示、`vrp_signal`、`hive_logger` docstring、`CLAUDE.md`。
+- `earnings_vol_signal.py` 其余 docstring / 注释未见旧行为陈述（`_snapshot_dir_diagnosis`「目录不存在多半是数据根找错了」仍成立——现在找错的来路是显式设错）。
+
+### Tests
+- `tests/test_earnings_vol_signal.py` 57 → 60（全离线；`HOME` 一律指向 tmp 里的假家目录，不碰真家目录）：
+  - `test_warning_names_the_two_wrong_directory_causes` 改写：`ALPHA_HIVE_HOME` 显式指向 tmp 里的 `stale_checkout` ⇒ 钉住 `scan` 自己那条零快照 WARNING
+    （`startswith("财报事件波动率信号 <日>：未找到快照")`，断言恰好一条）含「显式指向 <stale>，不是缺省数据根 <假家目录>/alpha-hive-data」、不含「代码目录」；写者目录提示照旧。
+  - 新 `test_default_data_root_is_not_reported_as_wrong` ×3（未设 / 空串 / 等于缺省）：钉住的那条存在且含「账本未改写」（告警确实发出了），
+    本模块**全部** WARNING 不含 `ALPHA_HIVE_HOME` / 「代码目录」。
+  - 两类断言取的范围**刻意不同**：「出现」钉到那一行（另一条告警——快照读取失败——带完整路径，会代答；镜像形状 v0.45.332 / 384 #6）；
+    「不出现」查全部告警（钉行会放过「假提示挪到另一条 WARNING」：M8 对钉行版负断言实测 0 红、对全部告警版 2 红）。
+- `tests/test_data_backup.py`：两条既有拒绝测试加断言——病因文案含「显式指到了检出」、不含「没设」（`test_export_main_refuses_inside_code_repo` 加 `capsys`）。
+- **真跑变异**（scratch 副本 = `git archive HEAD` + 本版 7 个改动文件；`PYTHONDONTWRITEBYTECODE=1`、每轮用 Python 删 pyc、`--maxfail=1000`、锚点唯一且「文件变了 + 新文本恰好出现一次」、
+  每轮 passed+failed = collected 250（`test_earnings_vol_signal` + `test_data_backup` + `test_data_root_default`）、每轮还原后 sha256 核对、收尾复跑 250/250）：
+  - M0 改动前真实文件（`git show ba2d88b0:earnings_vol_signal.py`，已核与改动前 HEAD 逐字节相同）⇒ 3 红，理由逐条核对：显式非缺省那条红在没有「显式指向」，
+    未设 / 空串两例红在旧提示「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录」出现了；等于缺省那例在 M0 上**绿**——符合预期，旧代码只在未设时提示。
+  - M0b `data_backup` 两文件改动前真实文件（`089176e4` / `b4ef5ad9`）⇒ 2 红。
+  - M1 提示退回旧两行 ⇒ 3；M2 去掉 `!= default`（显式即报）⇒ 1（等于缺省）；M3 缺省根吃进完整 environ（`resolve_data_root()`，显式值恒等于自己 ⇒ 永不提示）⇒ 1；
+    M4 提示不点名缺省根 ⇒ 1；M5 缺省根改回直接点名该键（行为不变）⇒ 1（`test_data_root_default` 键位置守卫）；M6 / M7 两处拒绝文案退回「没设」⇒ 各 1；
+    M8 假提示挪到另一条 WARNING ⇒ 2。全部与预期一致。
+  - 驱动两次中途停下（方向都安全，没有误报通过）：① M4 的替换串在文件里本就出现过，「恰好出现一次」闸整轮作废，改成唯一串后重跑；
+    ② 第二轮 M6 出现 **1 个 error**，驱动的 `errors == 0` 断言中止（当时驱动没打印详情，未捕获）——单独重跑 M6 与第三轮全量均 0 error、结果同预期。来源**未判定**：下面全量那次 error 的 Alpha Bot 盘中采样**排除**（今天第一批 06:50 PDT，晚于第二轮）；其它并发写者 / 别的原因都没有证据，不当作已解释。
+- ruff 通过。全量：两次，pytest 自身退出码都是 1、红的都只有已知项 + 同一种并发写入：
+  - 合并前（`264a4ff5` + 本版改动，06:46–06:59 PDT）：1 failed、9914 passed、84 deselected、2 xfailed（= selected 9917）+ 1 error；
+  - 合并 origin/main 后（`ab3af4c1`，07:01–07:12 PDT）：1 failed、9937 passed、84 deselected、2 xfailed（= selected 9940）+ 1 error。
+  - failed = 已知 `test_economic_calendar::TestCoverageHorizon`（2027 BLS/BEA 日程未发布，同 v0.45.377 / 380 / 382 / 384）。
+  - error（两次相同）= 会话级真实数据根闸，记在收集序最后一条测试的 teardown 上：变化只有 `alphabot_state/intraday/2026-10-16/` 5 个文件**末尾追加**（闸自核原字节不变），
+    时刻 06:50:48–06:51:30 / 07:11:29–07:12:10 PDT；进程表里 Alpha Bot 服务（`-m alphabot --port 8765`，10-15 起）在跑，当天采样批次 09:50 / 10:01 / 10:11 ET（约每 10 分钟一批）与时刻吻合 ⇒ 并发写入者。
+    本版对 alphabot 只改了 `__main__.py` 的 docstring，碰不到写路径。盘中跑 >10 分钟的全量必然撞上这道闸（按闸的说明，收盘后重跑才会干净）。
+
+### 未做
+- `_cache_dir_hint` 的第二条（`ALPHA_HIVE_CACHE_DIR` 与读取目录不同）仍直接读该环境变量，没照 `vrp_signal` 改成与 `PATHS.cache_dir_unmade()` 比：
+  那条不是假话，但它看不见「`BASE_DIR` import 期冻结 vs 写者调用时求值」那一种分叉；改它会新增一种提示情形，超出本版范围。
+- `BASE_DIR` / `STATE_DIR` / `SIGNALS_FILE` import 期冻结（`test_paths_not_frozen_at_import` KNOWN 存量），未动。
+
+## [0.45.512] — 2026-10-16 — Fixed（数据，用户批准）：隔离并清掉 BILI 10-12 的 put/call 298.46；Added：yfinance 期权链 OI 陈旧检查——最近有成交的合约 OI 成片为 0（这一场的 OI 没发布）⇒ P/C / total_oi / 主链 GEX 记不可得
+
+用户 2026-10-16 决定（v0.45.503 查清来源后的两个待决项）。病根：10-12（哥伦布日）Yahoo 全市场 openInterest 几乎清零，只剩几个月没成交的旧合约上冻结的旧数。BILI 当天没有 CBOE 链、走 yfinance，±70% 行权价窗口 + 「按 OI 取前 40」恰好把冻结旧数挑出来 ⇒ $5 put 22,065 ÷ $8 call 74 = 298.46（前后几天 1.03 / 1.02 / 1.08）。它让 Oracle 被压约 0.85、Bear 被抬约 1.06，最终分约 −0.29（v0.45.503）。现行 main 遇到同样的链照样会算出 298。
+
+### 判据怎么来的（实测，只读）
+- 指标：本链（全部到期日、**过滤之前**），以最新一笔成交为参照往前 4 天内有成交的合约里，OI>0 的占比。
+- 10-12 录制（`_manual_backups/…_r2/replay_artifacts/recording_union4`，Yahoo v7 options 原始响应）：30 只**全部 0.00–0.04**。
+- 10-16 正常日实时取（30 只全量，只读请求、零费用）：**0.81–1.00**（最低 BILI 0.81、ABBV 0.83）。
+- 阈值取 0.5（两侧都有很宽的余量）；这类合约少于 20 个 ⇒ 判不了、照旧算。
+- 录制回放进**真实** `fetch_options_chain`：23 只在 4 个到期日窗口里 OI 全 0，已由既有「空 OI ⇒ 退样本」闸挡下；剩下 7 只（BILI / COST / CRM / MU / TMO / WMT / XOM）**全部**判陈旧。旧逻辑给它们算出 298.46 / 8.85 / 0.0 / 1.0 / 7.95 / 0.0 / 0.0。归档里这 6 只当天来自 CBOE 链（快照 `chain_source = cboe`），不受影响；只有 BILI 用了 yfinance。
+
+### Added
+- `options_analyzer`：
+  - `_oi_staleness_rows`（DataFrame → `(成交 epoch 秒 | None, OI)`，NaT / NaN / 缺列都安全）。
+  - `assess_oi_staleness`（纯函数；参照点是本链自己的最新成交，**不读钟**）。
+  - 常量 `_OI_STALE_RECENT_DAYS` = 4、`_OI_STALE_MIN_RECENT` = 20、`_OI_STALE_MAX_RATIO` = 0.5。
+- `fetch_options_chain`（yfinance 分支）在 ±70% 窗口与 top-40 **之前**收集，链上带 `oi_check`。陈旧时：
+  - 记 WARNING；
+  - `snapshot_slot_stats()["oi_stale_chains"]` 按标的去重计数；
+  - `scan_timing` 摘要行显示「/OI陈旧链N只」（仅非零时）。
+- `OptionsAgent.analyze` 在 `oi_check.stale` 时：
+  - `put_call_ratio`、`gamma_exposure`、`total_oi`、`total_oi_raw` 记 None；
+  - `gamma_squeeze_risk` 为 unknown；`flow_direction` 记 **"unknown"**（同 `gamma_squeeze_risk` 先例，不冒充 neutral）；
+  - `data_quality` 从 real 降为 degraded（否则 `scan_coverage_gate` 的「real 却 P/C 为空」会误红）；
+  - 结果带 `oi_check`（样本早退分支补 `None`，schema 一致）。
+- `generate_options_score`：P/C 为 None 时 flow 分取 **1.5**（0–3 量程中点，不奖不罚）。此前这条路径不存在（样本链早退）。
+- 没有 `oi_check` 的链（CBOE、旧缓存、旧快照）**一律照旧**。
+
+### Fixed（数据，用户批准「隔离 BILI 10-12 那条 298.46 的 put/call」）
+- `signal_archive.QUARANTINE` 新增 BILI 2026-10-12 × `options.put_call_ratio` 一条（tickers 限 BILI；reason 带证据）。
+- 清库：`purge_quarantined_signal_rows.py --only-tag v0.45.512 --expect 1 --apply`，`signal_archive` 137,614 → 137,613。
+  - 备份 `db_backups/pheromone_pre_v0.45.512_bili_1012_pc.db`。
+  - 核对：生产该行 0、备份 1；BILI 10-12 其余 5 行 options.* 保留；两边 integrity_check ok。
+  - 不加标记的 dry-run 命中 31 行：另 30 行是 v0.45.508 的批次，不归本次清。
+- `tests/test_signal_quarantine.py`：499 那条原先断言「BILI 10-12 P/C 不挡」（当时的批准范围），改由新测试 `test_bili_1012_stale_oi_put_call_quarantined` 覆盖。
+
+### 未动（待用户定）
+- 同链同源的 BILI 10-12 `options.total_oi` 22,160（前后几天约 16–17 万）与 `options.gamma_exposure` −0.0611，未获批准。
+- 10-14 BILI `options.total_oi` = 0.0（另一个故障日，来源**待验证**）。
+- `calculate_put_call_ratio` 在 call OI 为 0 时返回 1.0（假中性）、key levels / 异动 / 全链 OI（`full_pc_ratio`，10-12 记过 0.0）同样读 OI：本版只管有 `oi_check` 的主链三个量。
+- **未加 IC 世代边界**：只改「OI 陈旧那几天」的 P/C 从假值变 None（更少，不是不同）；正常日逐字节不变。
+
+### Tests
+- 新 `tests/test_yfinance_oi_stale.py`（19 条）。夹具按 BILI 10-12 形状造（自检：不加检查确实算出 298.46）。覆盖：
+  - 判据：阈值严格小于、最少样本、旧合约不进分母、窗口相对本链、无时间戳。
+  - 行解析的各种形状。
+  - 取链：标记、计数去重、WARNING；判据在窗口过滤**之前**算（近价合约推到窗口外仍判陈旧）。
+  - analyze：四个量记 None、不标 real、flow 中点；健康链不变；无 `oi_check` 的链照旧。
+  - 摘要行。
+- 变异 11/11 被杀：analyze 不读检查、只置 P/C 漏 GEX、漏 total_oi、阈值改成 ≤、去掉最少样本、旧合约进分母、DQ 仍 real、不计数、收集挪到窗口过滤之后、隔离连带 total_oi、隔离不限标的。
+- 全量（rebase 到 c3a41b0a 后）：9934 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另有 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加（06:50–06:51，开盘后），不是测试写的。`tools/clockshift/audit.py --days 7/45/400`：两个测试文件新红 0。ruff 全绿。
+
+## [0.45.511] — 2026-10-16 — Fixed + Added：`signal_archive` 的每个写入点入库前都过 QUARANTINE——补 `backfill_fear_greed_legacy`（v0.45.267 起直写不查）、`data_backup/restore.py` 整库恢复后报出命中行数；新增全仓 AST 守卫
+
+> 原占 0.45.510（b628aa62），与先提交的 cfa3e004 撞号（该占位曾被 ed9c46b2 误删），按「先提交者保号」改到 511。
+
+### 为什么
+- 隔离名单只在正式入库口 `archive()`（`_rows_for`）拦截；绕开它直写 SQL 的脚本「各自负责」。10-13 实测靠不住：10-12 重放写回「整日删除再插入」不查名单，把 v0.45.499 清掉的 BILI 假 IV 插回生产（约 2 分钟后由该会话删回，v0.45.502 补了写回工具）。用户 10-16：「在入库前也过一遍隔离名单」。
+- 全仓普查写 `signal_archive` 的地方：`signal_archive.archive()` ✓、`writeback_1012_replay_v0484.py` ✓（502）、`restore_signal_rows_from_backup.py` ✓、**`backfill_fear_greed_legacy.py` ✗**；`backtester.py` 写的是 predictions；`data_backup/export.py` 只生成 .sql 文本；`data_backup/restore.py` 经 `executescript` 灌导出文件（不是 SQL 字面量，扫描看不见）。
+
+### Fixed
+- `backfill_fear_greed_legacy.run`：写前逐行 `is_quarantined`，命中剔除、打 WARNING，返回值新增 `quarantined` 计数（不许悄悄少写）。
+- `data_backup/restore.restore_db`：重建后数新库 `signal_archive` 里命中**现行** QUARANTINE 的行，返回 `quarantined_signal_rows`（取不到名单 ⇒ None + `quarantine_check_error`，不当 0）。**只报告不删**：整库恢复要忠实还原备份时刻；非 0 ⇒ 对新库重跑 `purge_quarantined_signal_rows.py`。无生产调用方（演练 / 灾备手动用）。
+
+### Added（测试）
+- `tests/test_signal_archive_writers_check_quarantine.py`（9）：AST 扫全部受跟踪的非测试 .py；SQL 字面量（含 f-string）写 `signal_archive`，或占位符目标且文件提到 signal_archive ⇒ 写入者，必须引用 `is_quarantined`。豁免表 `NOT_SIGNAL_ARCHIVE`（backtester / data_backup.export，逐条写理由）双向：过期即红。正对照：四个已知写入者必须被认出且合规；「有牙」6 例合成源码。粒度是文件不是函数（docstring 写明看不见的部分）。
+- `tests/test_backfill_fear_greed_legacy.py::TestQuarantineGate`（2）、`tests/test_data_backup.py::TestRestoreReportsQuarantinedRows`（2）。
+- 变异：撤掉 fear_greed 的检查 ⇒ 守卫与行为测试都红；restore 计数恒 0 ⇒ 红。相关 375 passed；ruff 通过。
+
+### 数据 / 评分
+- 不动任何数据；无评分影响。不追加世代边界。
+
+## [0.45.510] — 2026-10-16 — Removed：编排器去掉扫描前 Slack 确认（每天 launchd 自己跑、Webhook 早已 404，空等 10 分钟）；「编排器永远 --no-llm」钉成测试
+
+### 为什么去掉
+- 每天 14:00 launchd 自己启动编排器，Step 2 先调 `pre_scan_notify.py` 发 Slack 确认并等 10 分钟；Slack Webhook 早已 404、没人在回复，
+  结局恒为「10 分钟未收到确认 ⇒ `--no-llm`」（09-23、10-15 编排器日志可见）。这一步只有成本没有收益。
+
+### ⚠️ 更正我自己此前的一个错误结论
+- 查 09-23（日报进程被 3600s 超时杀掉、后处理钩子全未运行）时，我先说「Slack 那 10 分钟等待挤占了 Step 2 预算」。**不对。**
+  `STEP2_START` 与 `run_step --timeout $STEP2_TIMEOUT` 都在 Slack 等待**之后**才开始，预算从来不含这段等待：
+  09-23 的扫描 14:10:44 开始、15:10:43 被杀，整整 3600s 全是扫描自己跑的，只跑到 21/30（同日 CBOE 全部返回 09-22 陈旧数据、
+  32/32 落到 yfinance，每只约 170s，高于预算按 120s/只的假设）。
+- 所以**去掉确认不会让 Step 2 更不容易超时**，它只是让扫描提前 10 分钟开始（14:10 → 14:00）。09-23 那类超时要另外处理
+  （预算 / CBOE 陈旧时的降级节拍），本版不动。
+
+### Removed / Changed
+- `scripts/alpha-hive-orchestrator.sh`：Step 2 前的预通知整段删掉（`pre_scan_notify` 调用、`NOTIFY_RC` 分支、`PRE_SCAN_SCRIPT`、
+  「今日 LLM 已跑过」的 `LLM_DONE_FILE` 防重复标记及其 Step 2 之后的 `touch`、`--use-llm` 时 STEP2_TIMEOUT +900 的分支）。
+  `LLM_FLAG="--no-llm"` 保留为唯一一处纯字面赋值（`test_scan_price_gate` 抽出的脚本片段依赖这个变量名）。
+  **这不是「默认关闭 LLM」，是编排器里不再有任何路径能打开它**——要跑 LLM 扫描只能由人在终端显式 `--use-llm`，且仍须先问费用
+  （用户级约定「花钱前必须先问」，对定时任务同样生效）。
+- `ORCHESTRATOR_TIMEOUT=90000`（25h）数值**未动**：它当初为兼容 pre_scan 最长等 24h 而设，现在理由没了，但要不要收紧须把 Step 2 输入闸
+  最多 3 次重跑 + 每次等 600s（v0.45.504）一起算进去，是单独的决定；只把旁边的注释改成整行说明。
+- `CLAUDE.md`「Slack 推送规则」两处标注 v0.45.510 起已停用（扫描确认通知；「Bot 只发两类消息」第 1 类）。
+- **没动** `pre_scan_notify.py` 本身：`test_slack_send_whitelist` 把它登记为合法发送方、`test_slack_notifier` 还测它的 webhook 兜底。
+  它现在没有调用方；是否删除（连同白名单登记与那两处测试）留给后续决定。
+
+### Added
+- `tests/test_orchestrator_never_enables_llm.py`（3 条，读仓库那份编排器，CI 上也跑）：`LLM_FLAG` 只许一处纯字面 `--no-llm`；
+  代码（注释除外）不再出现 `--use-llm` / `pre_scan_notify` / `PRE_SCAN_SCRIPT` / `NOTIFY_RC` / `LLM_DONE_FILE`；Step 2 调用仍传 `$LLM_FLAG`
+  （否则旗标成了没人读的变量）；含有牙自证（把旧确认链放回去 / 第二处赋值 / 改成非字面 / 代码里出现 `--use-llm` 都被抓到，注释里提这些名字不算）。
+- **真跑变异**（`PYTHONDONTWRITEBYTECODE=1`，Python 驱动、锚点唯一断言、核 passed+failed = collected 3、还原后 sha256 一致并复跑 3/3 绿）：
+  M0 改动前的真实脚本（`cfa3e004`）⇒ 2 红；M1 旧确认链放回 ⇒ 2；M2 另处再赋值 ⇒ 2；M3 Step 2 调用不传 `$LLM_FLAG` ⇒ 1；M4 `LLM_FLAG` 改成要展开的写法 ⇒ 2。
+- 首跑守卫即抓到我自己的一处：`ORCHESTRATOR_TIMEOUT=…  # …pre_scan_notify…` 行尾注释里带了符号名（守卫只忽略整行注释，不去猜 bash 行尾注释的边界）⇒ 说明挪成整行注释。
+
+### 生效时间
+- 合入 origin/main 后，下一次 14:00 扫描前的自动部署（阶段 3）会把新编排器换进 `~/.claude/scripts/`，但**那一轮仍跑旧编排器**（运行中的 bash 读完旧版）；
+  **再下一轮**才是新的：届时 Step 2 应直接开始、日志里不再有「发送 Slack 确认通知」。核验：`grep -c "Slack 确认" ~/.claude/logs/orchestrator-<日期>.log` 应为 0。
+- 全量：bash -n 通过；读编排器原文的 27 个测试文件 + Slack 白名单 + CHANGELOG 完整性共 1523 passed（含新增 3 条）（未跑全套：改动只有一个 shell 脚本、一份文档和一个新测试）。
+
+
+
+## [0.45.509] — 2026-10-16 — Changed（事后修订）：F&G 敞口门自证在生产日线取不到的故障日按「没有日线」重放（09-24 / 09-25 / 10-14）；Added：生产纸面组合净值行记下本轮日线一次都没取到的标的（`ohlc_unavailable`）/ 时有时无的标的（`ohlc_partial`）
+
+用户 2026-10-16 看过 v0.45.503 的 10-14 诊断后决定。病根（v0.45.503 已查清）：10-14 生产纸面组合 `_fetch_ohlc` 全被限流 ⇒ 0 出场、持仓按入场价估值，4 笔新仓按没扣掉四笔出场（−$444.53）的净值基数定额；逐日重锚的 A 有日线 ⇒ 四笔金额恰为生产的 0.99120 倍，自证 28/32（决策层 32/32）⇒ 无法判定。代理恢复后重新取数补不了：重放手里本来就有 10-14 的日线，对不上的是生产当天已经做了的事；改写生产账本会让自证拿重放比重放。
+
+### Changed
+- `experiments/fg_exposure_gate_forward_test.py`（docstring 【事后修订 v0.45.509】）：
+  - `_segmented_entries` 在 `paper_portfolio.replay_ohlc_mask(plan["ohlc_mask"])` 里逐段重放，每天实际挡下的请求数写进 `selfproof_segments.ohlc_masked_requests`。
+  - `_forward_anchor_plan` / `_rehearse_anchor_plan` 都经新 `_attach_ohlc_mask` 挂遮罩。遮哪天只认两个来源：生产净值行的 `ohlc_unavailable`，以及封闭的 `HISTORICAL_OHLC_OUTAGES`（09-24、09-25、10-14，日志取证，一律全部标的；10-12 已整天排除，不登记）。
+  - 以下情况不遮、只报，并写进失败原因：`ohlc_partial`（`ohlc_partial_days`）；净值行有故障形状（有持仓且未实现盈亏恰为 0）、但两个来源都没记的日子（`ohlc_outage_signature_unmarked`）。
+  - **统计量用的连续 A / B 不遮**。
+  - **未动**：窗口、变体、统计量、检视点、α、盲化、阈值、分母、四元组、种子、锚点。
+  - `_a_only_note` 的文案不再把 09-24/25 当现成解释（它们已被遮罩复刻）。
+- 真实数据 `run()`（10-16 05:52）：
+  - 自证从 28/32 升到 **32/32**，决策层 32/32，a_only 从 11 降到 **0**；`ohlc_masked_requests` 为 09-24 34、09-25 34、10-14 30。
+  - 状态从 `cannot_judge` 变为 `not_ready`（4/15 合格周）。
+  - 连续 A 的诊断不变（23/32，照报不判）。
+
+### Added
+- `paper_portfolio`：
+  - `_OHLC_RUN_OUTCOMES` 由 `run_for_date` 进出时设置和恢复（异常也恢复）。`_note_ohlc` 在 `_OHLC_FULL`、回放窗口、直连缓存、直连成功和直连异常各处记一次；空结果算取到，不算失败。
+  - `_run_for_date` 把一次都没取到的标的写进净值行 `ohlc_unavailable`（同时记 ERROR），取到过也失败过的写进 `ohlc_partial`。两者都返回给调用方；都没有时净值行逐字节同改动前（`split_unresolved` 先例）。
+  - `replay_ohlc_mask(mask)`：只在 `_REPLAY_AS_OF` 落在 mask 里时生效（生产路径恒不生效）。被挡的请求记成失败，所以遮罩重放的净值行与生产那天逐字节相同。退出时恢复；坏输入抛 ValueError。
+- ⚠️ 这只是**记录**。纸面组合当天日线全取不到时照样开仓、不出场、不进 P 级告警——这个缺口（用户决定项 2：整天跳过 / 照旧但报警 / 维持现状）仍待定，本版未动。
+
+### Tests
+- 新 `tests/test_fg_selfproof_ohlc_outage.py`（20 条）。走**真实** `_fetch_ohlc` → `_fetch_ohlc_direct` 和假 yfinance（异常 = 限流），按 10-14 的形状压成四天。覆盖：
+  - 生产标记：健康日不写键；全断日记全部标的和 ERROR；单只断只记它；时有时无记 partial；返回值；运行状态复位（含异常时）。
+  - 遮罩：只在重放、只对那天那几只生效；`None` 表示全部；退出时恢复；拒收坏输入。
+  - 端到端：不遮时金额层红（对照）；遮了全部复现，且那天的净值行逐字节同生产；单只遮罩够用；改仓位参数照样红；统计臂从不被遮。
+  - 遮哪天：两个来源；形状像但未记的只报不遮；失败原因点名；登记表封闭（日期早于 10-16 且带日志与净值行证据）；两条分段方案都挂遮罩（AST）。
+- `tests/test_fg_exposure_gate_forward_test.py`：`_SEGMENT_KEYS` 白名单加 4 个新子键（只有日期、标的、计数）。
+- 变异 8/8 被杀：取数不看遮罩、直连异常不记、partial 并进 unavailable、不写标记、分段不用遮罩、前瞻方案不挂、未记形状不报、登记表被忽略。
+- 全量（rebase 到 bf717490 后）：9870 passed / 0 failed（`TestCoverageHorizon` 经济日历覆盖期设计内红照惯例 deselect）；`tools/clockshift/audit.py --days 7/45/400` 新文件新红 0；ruff 全绿。
+
+## [0.45.508] — 2026-10-16 — Fixed（数据，用户批准；维度 IC 协议**事后·非修订**记录 §13.8）：2026-10-14 的 29 个 `price.volume_ratio`（Twelve Data 兜底，末根 10-13）与 BILI 的 `price.momentum_5d`（自攒索引窗口末端 10-13）登进 `QUARANTINE` ⇒ 维度 IC H1 当天无效；H2 / 共振加成 / F&G 敞口门不受影响
+
+### 取证（只读；全部 30 只，yfinance 日线只取到 10-14 为止，没算任何收益或 IC）
+- 10-14 生产扫描 yfinance 全挡（429×4 后冷却），历史字段全走出口回落（`~/.claude/logs/orchestrator-2026-10-14.log`）。
+- `price.volume_ratio` 29/30 入档（JNJ 当天 TD 限流超时、未入档；14:19 补到的 2.23x 没进归档）：**29/29 入档的是「最新一根 = 10-13、均量窗口 = 截至 10-13 的 20 根」的比值**，不是 10-14 那场的（量比 = 最新一根成交量 ÷ 含它在内最近 20 根均量）。证据三层：① 日志 29/29 各有「丢弃 2026-10-14 那根」+「由 Twelve Data 补上」；② 用 Twelve Data 自己的日线 `fetch_volume_ratio(end_date="2026-10-13")` 重算，27 只逐位相等、`as_of` 2026-10-13；③ RKLB / VKTX（归档 0.7304 / 0.6039，今天重算 0.7327 / 0.6072）只差在 10-13 那根——其余 19 根取今天的值、10-13 换成 15,537,400 / 5,707,600 股（整百股，比今天低 0.33% / 0.55%）即逐位复现 ⇒ Twelve Data 在 10-14 扫描之后上调了那根成交量（推断，当时的原值已取不回）；漏一根、窗口 19 / 21 / 22 根三种解释都已排除。与「截至 10-14」相去甚远（COST 0.62 vs 1.31、CRCL 0.48 vs 1.03、DELL 0.78 vs 1.68）。成因与修法见 v0.45.505。
+- `price.momentum_5d` 30/30 来自自攒索引：29 只末端 10-14、与 yfinance 一致；**BILI 末端 10-13**（+0.40%，yfinance 截至 10-14 为 −3.91%）：它的 CBOE 数据陈旧（last_trade=10-13）被弃用，没有已核实的 10-14 收盘可并进窗口（日志 14:11:07 / 08）。同日 30 只的 `price_at_predict` 都在 Twelve Data 10-14 收盘的 0.1% 以内（BILI 含在内）⇒ 结果变量的基数不受影响。
+- `price.volatility_20d` 0/30 ⇒ `buzz.comp.volatility_signal` 全 50（缺失哨兵，横截面同值）——**缺失 ≠ 取错**，按协议 §3「降级日照算」不处理。`market.fear_greed` 32 是当天 CNN 实时值、横截面同值（未对 CNN 历史独立复核，待验证）。
+- 窗口内其余日子：10-13、10-15 零 TD 量比兜底、零索引动量兜底 ⇒ 只有 10-14。
+- 损伤量级（只用分数）：用正确的 D 值，16/30 只的量比档位会变；线性近似下纠正后 H1 横截面与实际的 Spearman ≈ 0.96（忽略背离 / 情绪动量调整，估算）。
+- 截止：10-14 的 T+7 = **2026-10-23**（`backtester._US_BDAY` 与 NYSE 日历一致）；本条登记于 10-16，此前 `close_t7` 全 NULL ⇒ 盲化未破。
+
+### Fixed
+- `signal_archive.QUARANTINE` 加两条：10-14 × 29 只（除 JNJ）× `price.volume_ratio`；10-14 × BILI × `price.momentum_5d`。生产库只读核对：命中恰好 30 行（29 + 1），全在 10-14。
+- **为什么是 QUARANTINE、不是修订 2 的 `FORWARD_TEST_EXCLUDED_DAYS`**：协议 §3 登记时就把「`QUARANTINE` 登记的已知坏行」列为排除项，执行器 `weekly_series` 对假设的任一截断 / 隔离信号命中即丢行，H1 的信号表含输入层 ⇒ 这是**套用已登记的规则**，规则 / 常量 / 窗口 / 检视点都没动（不进 `AMENDMENTS`）。`FORWARD_TEST_EXCLUDED_DAYS` 管「事后重放补算的整天」（10-14 没有重放），且三份前瞻检验共用——登进去会连带把 10-14 从 F&G 敞口门里拿掉，而那边 10-14 自证失败的处理（v0.45.503）另待决定。
+- 后果：H1 当天只剩 JNJ（< `MIN_WIDTH` 20）⇒ 10-14 对 H1 无效（W42 剩 10-13 / 10-15，生产库只读核对各 30 只可用；10-16 待当天扫描）；H2 不读 `price.*` 照算。
+- **只隔离观测层**：`buzz.comp.*` 通道值是派生值（同 Agent 评分，不隔离）；且 §13.2 自证 ②「生产有分、重算却缺输入 = 0」会把隔离 / purge 掉的通道行算成自证失败。
+- **09-15 QCOM / NVDA 复核（10-16，只读）**——用户批准后由 v0.45.517 登进 `QUARANTINE`（09-24 T 除外）：
+  - `price.volume_ratio`：日志各有「丢弃 2026-09-15 那根」+「由 Twelve Data 补上」（14:14:20 NVDA 1.01x、14:15:31 QCOM 1.21x）。09-15 是周二，上一场是 09-14（`is_trading_day` 算）。用 Twelve Data 截至 09-14 的日线、把 09-14 那根成交量换成 131,942,300 / 13,755,800 股（整百股，比今天低 0.25% / 0.21%）即**逐位复现**归档值（1.01080 / 1.21243）——同 RKLB / VKTX 的「事后上调」形状；漏一根、窗口 19 / 21 根都对不上。当天应有值（截至 09-15）：NVDA 0.676（归档 1.011 ⇒ Buzz 量比档 50，应为 35）、QCOM 1.195（同档 50，通道不受影响）。
+  - `price.momentum_5d` 也是取错窗口：v0.45.465 之前的自攒索引回落，窗口 **09-04 → 09-14**（末端滞后一场；跨 5 场，yfinance 口径是 4 场——465 已记录的「≥5 个交易日挑锚点」）。用 Twelve Data 收盘与扫描价两种序列穷举，唯一同时复现两只（误差 < 1e-4）的窗口就是它。当天应有值（4 场截至 09-15）：NVDA −5.14（归档 −8.42）、QCOM +6.46（归档 +6.76）。
+  - 顺带普查（日志自 08-26 起；按文件时间衔接，未逐日核）：TD 量比兜底的生产记录只有 09-15 这 2 次 + 10-12 NFLX（故障日生产那次，归档已被重放值 0.6463 覆盖 ≈ 截至 10-12 的 0.6472，不是前一场）+ 10-14 的 29 次；另有 XOM 0.81 / 0.50 反复出现在凌晨，是测试夹具写进旧日志的，不是生产。自攒索引动量（465 前、滞后形状）进了归档的：09-15 2 只、**09-24 30 只**（29 只逐一复现为「末端 09-22、跨 5 场」——09-23 没有扫描 ⇒ 滞后两场；T 差 0.035 未解释，待验证）、**09-25 30 只**（与 09-24 逐位相同：两天 30 行 `price_at_predict` 全为 0，索引没有新点，窗口仍止于 09-22）。09-24 / 09-25 入场价为 0 ⇒ 本来就进不了任何按收益的检验。08-26 之前没有日志，未查。
+  - 以上都在 H1 窗口（10-12 起）之前，不影响维度 IC。465 当时的处置是「存档零变化」（用户 10-12 确认）。（窗口前，不影响 H1；要不要为一致性补登另议）；没跑 `purge_quarantined_signal_rows.py`（`is_quarantined` 已足够让 H1 丢行；删不删库里的 30 行另议）。
+
+### Changed（文档）
+- `experiments/dim_ic_preregistration.md`：文首加「记录」一行；新增「### 记录（2026-10-16，v0.45.508）」§13.8（发生了什么 / 做了什么 / 为什么不是修订 / 为什么不隔离通道 / 为什么不走修订 2 / 为什么不可能受结果影响 / 代价 / 守卫）。
+
+### Tests
+- 新 `tests/test_quarantine_1014_prev_session.py`（10）：名单恰好 29 只 × 量比、BILI × 动量，JNJ 与其余动量不在内；通道 / Agent 评分 / `sentiment.pct` / 波动 / F&G 不隔离；不是协议排除日；T+7 按 backtester 日历 = 10-23 晚于登记日；生产形状夹具（30 只真实代码）下 H1 丢 10-14、保 10-15，**删掉条目该日回来**（对照），H2 不受影响。
+- 全量（恢复后的最终树 `064bf7ae`，`--deselect` 设计内定期红的 `TestCoverageHorizon`）：**9895 passed、2 xfailed、0 failed、0 error**。
+- ⚠️ **被并行提交整段撤掉过、已恢复**：`ed9c46b2`（v0.45.509，父提交正是本条的 `9e66aaf1`）的树把本条的 `QUARANTINE` 两条、§13.8、`tests/test_quarantine_1014_prev_session.py` 全部删掉、CHANGELOG 退回占位，提交信息没提——多半是那边工作区里的旧文件盖了上来。核对：那次提交后 `signal_archive.py` / 预注册与 508 之前逐字节相同 ⇒ 509 本身没改这两个文件，本次按 508 版本整文件恢复、CHANGELOG 只换回本条，509 的其余改动未动。撤掉期间（06:14 起）`is_quarantined` 对这 30 行为假；10-14 尚未结算，无影响。
+- **三次检查更正**：原写「RKLB / VKTX 与 yfinance 差 0.003 是成交量源差异」——**错**：今天 Twelve Data 自己重算出的就是 yfinance 那个值，差的是归档；真实原因见上（10-13 那根事后被上调）。另把「前一天的值」改成准确说法：窗口末端是上一交易日 10-13 那场（量比是最新一根 + 20 根均量窗口整体错一场）。`QUARANTINE` 两条的 `reason` 与 §13.8 同步改。
+- 二次检查（同日）：§13.8 / 本条原写「W42 剩 10-13、10-15、10-16」，10-16 当时尚未扫描 ⇒ 改正；`test_registered_before_outcome` 原只比对测试里自写的登记日常量（恒真）⇒ 改为从本文件 0.45.508 标题读登记日、并核对两条条目的版本标记；拨钟审计 `tools/clockshift/audit.py --days 7 --days 45 --days 400` 新红 0；`restore_signal_rows_from_backup.py` 的信号集合随名单多了 `price.volume_ratio` / `price.momentum_5d`——手动工具、按 `--expect` 精确计数且不覆盖已有行，只会更早停下，不改。
+- 变异 7/7 被杀（量比条目失效、漏 XOM、多 JNJ、连带隔离通道、动量不限 BILI、日期错成 10-15、执行器不问隔离）；`PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。
+- 相关 6 个文件 188 passed；ruff 全仓通过。
+- 全量（rebase 到 cfa3e004 **之前**的树；rebase 后只重跑了相关 7 个文件 207 passed）：9849 passed、2 xfailed、0 failed（`--deselect` 设计内定期红的 `test_economic_calendar::TestCoverageHorizon`）；1 error = session 级真实数据根总闸：生产 `replay_ohlc_state/*.json` 05:52:31–36 被改写，总闸把它们记到互不相关的 alphabot 启动器测试上（几秒内成批）。同一时段另一会话（laughing-lumiere）的全量 05:44–05:55 与本次重叠；单独重跑被点名的两个文件 + 本条测试（179 passed），该目录 mtime 前后逐字节不变；本条改动不碰任何写入路径 ⇒ 判为并发写入者，非本条泄漏（谁写的未进一步定位，待验证）。
+
+## [0.45.507] — 2026-10-16 — Fixed（仅测试基础设施）：两道 session 级总闸「逐文件写入时刻落在哪条测试」的定位按**本机 mtime 精度**放宽——Linux 内核按 tick 盖 inode 时间戳，mtime 可比写入那一刻的 `time.time()` 早一个 tick，call 开头的写入被标成 setup；`test_root_data_guard` 两条时间线测试因此在 Linux CI 上恒红（macOS 绿）
+
+**症状。** CI `tests.yml`（run 38884127475，v0.45.505 那轮）3 条红：设计红 `TestCoverageHorizon`（等 BLS 2027 日程，未动）+
+`test_repo_root_gate_places_each_write_on_the_timeline`（`a.json` 标成 `test_a_writes 的 setup 阶段`，实际在 call 里写）+
+`test_real_data_root_gate_names_the_test_running_when_a_concurrent_writer_wrote`（`pheromone.db` 同样被标成 setup）。本机全绿。
+495 条目已记为「CI 既有问题」、不拨钟也红（run 38419282205）——红进一个本来就红的 CI，三天没人看出 506 那四条新红（见 506 条目）。
+
+**根因。** v0.45.455 的 `locate` 把 mtime 与 pytest 报告的 `start/stop`（`time.time()`）按点比较，注释写「与文件 mtime 同为墙钟」——
+同一只钟，**不同精度**：Linux 的 `current_time()` 取粗粒度时钟（`ktime_get_coarse_real_ts64`，每 tick 才前进一次），`time.time()` 是细粒度的
+⇒ mtime ∈ [真实写入 − 1 tick, 真实写入]。setup → call 之间不到 1 ms，call 开头的写入 mtime 几乎必然落回 setup。macOS（APFS）实测 2000 次
+mtime 从不早于写前读的 `time.time()`，所以本机永远复现不了。同一假设也写在 `pytest_sessionstart` 的注释里（「取指纹期间写的文件 mtime 不会
+早于开始时刻」），本轮开始后一个 tick 内的写入在 Linux 上会被误标成「保留了旧 mtime」。
+
+### Fixed
+- **`tests/_root_data_guard.py`**：新增 `mtime_lag()` = 2 × `clock_getres(CLOCK_REALTIME_COARSE)`（这只钟不存在的平台取 0；取两倍是给虚拟机上被推迟的
+  tick 留余量——宁可多列一段也不标错）；`locate(..., lag)` 把真实写入时刻当成窗口 `[t, t + lag]`，跨几段照实列几段并注明「在此精度内分不开」
+  （超过 4 段只列首尾 + 中间段数），**不替读者挑一段**；lag=0 与 455 的逐点规则逐字一致（共用端点归前一段，开始时刻归收集期）。区段切分抽成
+  `_regions`。`format_timeline` 传入本机 `mtime_lag()`。只管内核时钟，不管文件系统自身的时间戳粒度（HFS+/FAT 秒级盘不在本闸范围，docstring 写明）。
+- **`tests/test_root_data_guard.py`** 两条端到端测试：内层写入前后各停 `_SETTLE = 0.05s`——内层几条测试整轮跑完不到 8 ms，在 Linux 精度下
+  各段本来就分不开，「落在哪一段」的断言要求写入离段边界远于精度；外层先断言 `mtime_lag() < _SETTLE`（前提没了会红，不会静默）。断言收紧为
+  标签**全等**（原为子串）。
+- **`tests/conftest.py`**：`pytest_sessionstart` 那句注释补上 Linux 例外。
+
+### Added（测试）
+- `TestTimelineLocate`：窗口落在一段内只报那段 / 跨 setup·call 两段都报 / 跨三段不丢中间段 / 跨多段缩写 / 本轮开始附近不只报「旧 mtime」/
+  lag=0 共用端点归前一段 / `format_timeline` 确实用了 `mtime_lag()` / **`test_mtime_lag_bounds_this_machine`**：本机写 500 次文件，
+  mtime 早于写前 `time.time()` 的最大值不超过 `mtime_lag()`——这是放宽多少的唯一依据，455 只写了一句注释、没人量过。
+
+### 验证
+- 本机无 Linux：用 `sitecustomize` 把 `os.stat/lstat/fstat` 读出的 mtime 向下取整到 4 ms tick 模拟内核粗时钟。不暴露粗时钟（= 旧行为）⇒
+  `a.json` 那条 3/3 红，与 CI 同形；暴露粗时钟（`clock_getres`=4 ms）⇒ 19 条 6/6 绿；原生 macOS 3/3 绿。
+- 变异：前提测试在「mtime 取整但 `mtime_lag()` 说 0」下红（早 3.975 ms）；`format_timeline` 不传 lag ⇒ 红；`locate` 忽略 lag ⇒ 红。
+- 本机全量（CI 同参 `-m "not integration and not network"`）：9837 passed / 1 failed（设计红 `TestCoverageHorizon`）/ 1 error——
+  真实数据根闸：`replay_ohlc_state/` 17 个文件在 05:38:40–47 被改，按新时间线散落在 `test_sell_strike_levels` / `test_slack_notifier`
+  等无关测试里、约 2.5 s 一个；生产日志 `~/alpha-hive-data/logs/alpha_hive.log` 同一刻有 `[PaperPortfolio] 回放 OHLC 窗口` 一行
+  （今天 02:24 / 03:02 也各有一次，均早于本轮）——测试会话的日志落在沙箱，这行出自本轮之外的进程 ⇒ 并发写入者。复核：
+  replay / paper_portfolio / fg / 本闸 / 那三条时刻所在文件共 14 个重跑 745 passed、闸不红。CI 结果以推送后那轮为准。
+
+## [0.45.506] — 2026-10-16 — Fixed（仅测试 / 分类表）：v0.45.495 把拨钟 harness 搬进 `tools/clockshift/` 后，四条全仓守卫在 origin/main 上恒红——四处全是代码 / 工具，按各守卫自己的规则登记进对应类别；补 sitecustomize 串接的行为测试（`KNOWN` 要求「写明守它的测试」，此前没有）
+
+**症状。** 干净检出 59dcb325 / afb6692b / 0f0c5ad5 上四条红：
+`test_ledger_writes_go_through_ledger_io::test_no_unregistered_file_writer`、`test_migrate_data_root::test_every_tracked_top_level_entry_is_classified`、
+`test_paths_not_frozen_at_import::TestFileDerivedSpeciesDoesNotSpread::test_no_new_file_derived_paths`、`…::TestFrozenViaModuleLevelCall::test_no_new_route[__file__]`。
+
+**为什么没人看见。** CI `tests.yml` 在 main 上自 59dcb325 起每轮都是 failure（最近一轮 run 38880626358：7 failed = 这 4 条 + 设计红
+`TestCoverageHorizon` + 两条 `test_root_data_guard` 时间线测试）。后两类 495 之前就红、495 条目里已记为「CI 既有问题」⇒ 新增的 4 条
+落进一个**本来就红**的 CI，结论从「红」到「红」，没有任何东西变色。拨钟审计的差分只报「拨钟红而基线绿」，这 4 条在基线里、按设计不计入
+（c39baa27 起逐条列出，但只在审计摘要里）。495 本机验证为何没撞上**未核实**（待验证；一种可能是验证时新文件尚未 `git add`——
+三条守卫的文件清单都来自 `git ls-files`）。
+
+### Fixed（逐条按守卫规则判，零语义放宽、零整目录豁免）
+- **`tools/clockshift/audit.py::main` 的 `raw_append`** → `WRITERS` 登记为「只给人看」：追加的是 `$GITHUB_STEP_SUMMARY`
+  （GitHub Actions 渲染给人看的步骤摘要，无代码读回）；不是账本、不是状态、不是缓存，不占任何「待迁移」上限。`--log-dir` 那处 `open("w")`
+  写纯文本日志，本来就不在六种落点里。
+- **顶层 `tools`** → `migrate_data_root.SKIP_EXACT` 登记为代码目录（与 `scripts` / `alphabot` 同列）；check-old 不再把它算 UNKNOWN。
+- **`audit.HERE` / `clockshift.HERE`（`__file__` 派生常量）** → `TestFileDerivedSpeciesDoesNotSpread.KNOWN` 的 A 类（代码锚点）：
+  两处都是 harness 自己的目录，用途是插进子进程 `PYTHONPATH`，让 `sitecustomize` / `-p clockshift` 能加载到——要的就是「代码在哪」，
+  改成 `PATHS.*` 会让拨钟轮在数据根下找不到 harness。`audit.HERE` 同时进 `MUST_STAY_FILE_ANCHORED`（防「一刀切」改走，参数化测试核它
+  解在仓库内且存在）；**`clockshift.HERE` 刻意不进**：那条参数化测试要 import 模块，而 `clockshift` 导入即安装、`INSTALLED` 是模块级
+  全局——以 `tools.clockshift.clockshift` 之名再导入一次就是另一份模块对象，在 CI 拨钟审计的轮次里会**二次拨钟**。它指错由
+  `test_clockshift_harness` 的子进程用例接住（R1 那三条）。
+- **`sitecustomize.py` 模块级 `_chain_next_sitecustomize()`（经函数体求值 `__file__`）** → `TestFrozenViaModuleLevelCall.KNOWN["__file__"]`：
+  **不冻结**——`here` 是函数局部，只用来在 `sys.path` 上认出本目录、执行排在其后的下一个 `sitecustomize`，函数返回 None、不存任何路径。
+  该类要求条目写明守它的测试，此前没有 ⇒ 新增 `tests/test_clockshift_harness.py::test_sitecustomize_chains_to_the_next_one[0/7]`：
+  `PYTHONPATH=<harness>:<另一个带 sitecustomize 的目录>` 起子进程，断言后者照常执行、拨钟照装（偏移 0 与 7 各一次）。
+
+### 验证
+- 四条守卫所在文件 + harness 测试：168 passed。
+- 新测试变异（逐处真跑、各 2/2 红）：`here` 改成 `os.getcwd()`；删掉模块末尾那次调用。
+- 全量（`--maxfail=1000`，本机）：**9769 passed、1 failed**——唯一红是设计红 `TestCoverageHorizon`（cpi 剩 55 天 / gdp 剩 13 天，BLS 2027 日程未发布，与本改动无关）。
+- `ruff check` 改动文件全绿。
+
+
+## [0.45.505] — 2026-10-16 — Fixed：Twelve Data 量比兜底只在末根 = 「此刻最近一场已收盘」时采用（收盘后扫描里它止于 D-1 ⇒ 拒收、WARNING、`still_missing` ⇒ P2）；收下时输出 `volume_as_of`
+
+用户 2026-10-16 决定的止血方案。病根与证据见 auto-memory `alpha-hive-fallback-not-reached.md`「volume_ratio 的 Twelve Data 回落同样滞后一天」：TD 的当日那根当晚是临时值，被 `twelve_data._drop_forming_bar` 规则 ① 丢掉（**对的，未改**）⇒ ~17:15 ET 的生产扫描里兜底比值止于 D-1，而 yfinance 主路径含 D。归档里兜底仅生效过 2 次（09-15 QCOM / NVDA），都等于 yfinance 止于 D-1 的值；NVDA 报 1.0108，当天实际 0.676（缩量日报成正常量）。免费源里扫描时刻拿得到 D 定稿成交量的：零（CBOE 偏低中位 19%、Massive 免费档 19:00 ET 前 403、Tiingo 21:00 ET 前仍在改），所以是「宁缺」，不是换源。
+
+### Fixed
+- `data_pipeline._fill_volume_from_twelvedata`：比值末根日期 ≠ `_latest_closed_session()` ⇒ 拒收，WARNING 点名标的 / 量比 / TD 末根 / 应有场次，`volume_ratio` 留 None ⇒ 出口回落记 `missing` ⇒ `history_fill_stats().still_missing.volume` ⇒ alert_manager P2（已有通道，未新增告警）。末根缺 `as_of` 或应有场次判不了 ⇒ 同样拒收（不猜）。收下时结果带 `volume_as_of`。
+- 新增 `data_pipeline._latest_closed_session()`：yfinance 主路径窗口会结束的那一天。交易日且已过该场收盘（提前收盘日 13:00）⇒ 当天；盘前 / 盘中 ⇒ 前一交易日；周末 / 假日 ⇒ 之前最近一个交易日。规则全部复用 `portfolio_greeks._expected_session` / `_session_closed` / `_et_now`（唯一一只钟），不另抄交易日算术；先 import `is_trading_day` 证日历可用（那两个 helper 判不了时会静默给值），判不了 ⇒ None + WARNING。
+- 影响面：只在 yfinance 日线失败、走 TD 兜底的那几天，`price.volume_ratio` 从「D-1 的值」变成 None——**更少，不是不同**。盘中 / 盘前 / 周末 / 过了美东午夜的运行，TD 末根就是应有场次，照收（午夜后收到的是 D 的定稿值）。全源失败那一支（`MultiSourceFetcher` 最后防线）经同一出口 `_fill_history_fields`（v0.45.473），一并受闸。
+- **未加 IC 世代边界**（v0.45.463 / 465 先例；待用户确认）。
+
+### Added
+- `twelve_data.fetch_volume_ratio` 结果加 `as_of`（比值末根日期）；纯新增，生产唯一调用方是上面的兜底。
+- `StockData.volume_as_of` + `to_dict()["volume_as_of"]`（照 v0.45.465 `momentum_as_of`）：只由 TD 兜底填，其余来源不填。
+
+### Tests
+- 新 `tests/test_volume_fallback_session_gate.py`（12）：按 09-15 NVDA 形状造夹具（D-1 比值 1.0095 / D 0.6907），走真实 HTTP 解析 + `_drop_forming_bar` + 缓存，**两只钟一起钉**（`twelve_data._et_today` + `portfolio_greeks._et_now`）。覆盖：17:15 ET 拒收（WARNING 文本 + `still_missing` + `by_path` 计数）、全源失败支也受闸、提前收盘日 14:00 拒收 / 12:30 照收、盘中 / 盘前 / 午夜后 / 周末 / 感恩节照收并带 `volume_as_of`、钟不可用拒收、旧形状（无 `as_of`）拒收。
+- `tests/test_volume_ratio_fallback.py`：两个手搓 `fetch_volume_ratio` 返回值的桩补上 `as_of` 并钉住应有场次（旧形状现在会被拒收——那正是闸的一部分）；其余打桩 `_fill_volume_from_twelvedata` 的测试未动、照绿。
+- 变异 9/9 被杀（去闸、从不 / 总是退一场、不返回 `as_of`、`as_of` 取错根、不拷 `volume_as_of`、`to_dict` 漏键、helper 不吞异常、「今天」错一天）；`PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。
+- `tools/clockshift/audit.py --days 7 --days 45 --days 400`：新红 0。ruff 全绿。全量（rebase 到含 v0.45.506 的 main 后）：9781 passed / 1 failed——唯一的红是 `TestCoverageHorizon`（经济日历覆盖期，设计内定期红，干净 main 上同样红）。
+
+## [0.45.504] — 2026-10-16 — Added：扫描输入闸——预取后多数标的取不到可用现价 ⇒ 在任何持久写入之前停下（不写预测 / 归档 / 快照 / 账本，不出日报、不部署），退出码 4；编排器代理探活失败间隔重探（缺省 4 次 × 60s），Step 2 被闸拒后等待、重定出站、重跑（缺省至多 2 次）
+
+### 为什么
+- 2026-10-12：14:00:08 代理探活**一次**失败就整轮「直连」（实为系统代理，v0.45.496），全部 TLS EOF；30/30 只现价 0 照样写库、发布、`status=success`（调查见 v0.45.484）。10-14 探活又失败一次（这次真直连：价格 / CBOE 正常、yfinance 0/30）。用户 10-16 决定：多数标的取不到价格时拒绝写入和发布，探活失败后间隔重试。
+
+### Added
+- `config.SCAN_PRICE_GATE = {"max_unavailable_ratio": 0.5}`。
+- `alpha_hive_daily_report`：`price_coverage()`（纯函数；「可用」= 有限正数价、`data_source` 非 fallback、无 `_data_unavailable`；没预取到也算不可用；**严格大于**阈值才拒）、`ScanInputsUnavailable`、`PRICE_GATE_EXIT = 4`、`_exit_code_for()`（`__main__` 的退出码映射抽成函数）。
+  - 闸在 `_init_scan_context` 预取之后、蜂群 / 信息素板 / 任何落库之前；不可用的标的照常 warning 列出（未达阈值也报）。
+  - `main()` 接住 ⇒ 不 `save_report`、不 `deploy_and_notify`，`scan_timing.extra` 写 `early_exit=price_gate` + 覆盖率明细，退出码 4。
+- `scripts/alpha-hive-orchestrator.sh`：
+  - 代理段拆成 `_probe_proxy_once` / `_configure_outbound`；探活失败按 `ALPHA_HIVE_PROXY_PROBE_ATTEMPTS`（4）× `ALPHA_HIVE_PROXY_PROBE_INTERVAL`（60s）重探，恢复了就走代理，日志写第几次通过 / 几次全败。
+  - Step 2 循环：退出码 4 ⇒ 打出 `scan_timing.extra.price_gate` 明细 ⇒ 等 `ALPHA_HIVE_STEP2_GATE_WAIT`（600s）⇒ `_configure_outbound` ⇒ 重跑，至多 `ALPHA_HIVE_STEP2_GATE_RETRIES`（2）次；其它退出码不重试。仍被拒 ⇒ 没有 `.swarm_results` ⇒ 既有完整性闸判零产出 ⇒ `status=failed` ⇒ alert_manager CRITICAL，补跑闸照样放行。`steps_result.step2_price_gate` 记次数与是否被拒。
+- `orchestrator_steps`：Step 2 退出码 4 单列「🛑 被输入闸拒绝……未写、未部署」（`reason: price_gate`），不再落进「失败但继续进行」。
+
+### 验证
+- **负对照（端到端）**：v0.45.484 的 10-12 故障复现 harness（直连 + TLS EOF + yfinance 429，扫描前沙箱）跑本版代码 ⇒ 预取后 `30/30 只取不到可用现价` 当场拒；沙箱里 10-12 的 `.swarm_results` / predictions / signal_archive / agent_memory / report_snapshots / 纸面净值行**全为 0**。
+- **正对照**：10-16 盘前对 30 只真跑 `prefetch_shared_data` ⇒ 30/30 `real`、不拒。
+- `tests/test_scan_price_gate.py`（32）：判据各形状、阈值严格大于、`main()` 早退不存不部署、退出码映射、代理重探（第 3 次恢复 / 4 次全败 / 首次即通 / attempts=1 等于旧行为）、Step 2 重试（成功 / 其它码不重试 / 拒后恢复 / 用尽 / 0 次）、闸位于 `_init_scan_context`。变异 5 处（`>` 改 `>=`、删 raise、删 main 的 except、编排器不重试、探活恒通）全红。
+- `tests/test_ml_model_guard.py::TestGateWiring`：判决→退出码搬进 `_exit_code_for` 后，守卫跟进到 `__main__` 真调到的这个函数（删掉 verdict 映射仍红，已核）。
+- `tests/test_orchestrator_direct_fallback.py` 设 `ALPHA_HIVE_PROXY_PROBE_INTERVAL=0`（对准拒连端口，免白等 3 分钟）；`test_orchestrator_steps.py` 加退出码 4 一条。
+
+### 部署 / 兼容
+- Python 闸随下一次扫描的 production_sync 生效；编排器照例**第二个扫描日**起生效。部署那一轮旧编排器见到退出码 4 ⇒ 按 Step 2 失败 + 零产出处理（不重试，但不会写垃圾）。
+- 不影响价格可得的日子；单只取不到（如 BRK-B 映射）不触发。`--date` 补跑同样过闸。
+- 未做（报给用户）：纸面组合在 yfinance 日线全取不到时仍照开新仓、但当天一笔都不出场（10-14 即此，见 v0.45.503），没人红。
+
+## [0.45.503] — 2026-10-16 — Fixed（预注册·**事后**修订）：F&G 敞口门前瞻检验排除 2026-10-12；查清 10-14 起自证 27/31（现 28/32）的原因；查清 BILI 10-12 P/C 298.46 的来源
+
+### F&G 敞口门：10-12 不重放（用户 10-16 决定）
+- `experiments/fg_exposure_gate_forward_test.run()` 前瞻模式剔除 `signal_archive.FORWARD_TEST_EXCLUDED_DAYS`（目前只有 10-12）：A / B 两臂连续重放与逐日重锚自证都不跑那天，前瞻模式的每个返回都带 `forward_test_excluded_days`（`_tag`）。`_forward_ohlc_store()` 仍只在 `run()` 里调（`tests/test_replay_ohlc_store.py` 钉住，首版拆函数时红过、已改回）。
+- 理由：生产纸面组合 10-12 读的是故障日快照（0 开 0 平），10-13 被重放覆盖后，重放读到的是生产从没见过的快照（A 会多开 VKTX 空单）。维度 IC / 共振加成两份已在 v0.45.484 同样排除。逐日重锚不受影响（10-13 那段锚点 = 生产 10-12 跑完的状态，不比前一次运行旧）。
+- 预注册 docstring 加「事后修订 v0.45.503」：**未动**窗口、变体、统计量、检视点、α、盲化、自证规则、种子、锚点；修订依据只看了自证计数，`decide()` 从未走到出统计量的分支。
+- 实测（生产数据、只读）：`forward_test_excluded_days=['2026-10-12']`，n_dates 19。
+
+### 10-14 起「无法判定」的原因（已查清，修法**待用户决定**）
+- 未复现的 4 笔全是 10-14 入场（ENPH / TMUS / T / QCOM 空），决策层全对，金额统一是生产的 0.99120 倍。
+- **不是 σ**：10-14 `signal_archive` 没有 `price.volatility_20d`（0 行），生产与重放都回落到 10-13 的值（5 天时效内），σ 逐位相同。
+- **是 NAV 基数**：10-14 生产纸面组合的 `_fetch_ohlc` 对 11 只持仓 + 4 只新票全部 `YFRateLimited`（真直连、Yahoo 挡）⇒ `_check_exit` 无 K 线 ⇒ 当天 0 出场 ⇒ 仓位基数仍是 50506.04；新仓入场价来自快照（CBOE）照常开。重放有 K 线，当天平掉 DELL / NEE（TIME）、NVDA / SNOW（SL）实亏 −444.53 ⇒ 基数 50061.51，比值 0.991198 = 尺寸比。生产 10-15 才补出这 4 笔（`exit_date` 倒填 10-14）；且 11+4 撞 `max_positions=15`，DELL / RKLB / SNOW 空单没开（重放开了 ⇒ a_only）。
+- 用「当天日线全取不到」的掩码重放 10-14 段 ⇒ 4 笔与净值行**逐字节**复现；同法 09-24 / 09-25 也逐字节复现。`equity_curve` 里 `unrealized == 0.0 且 positions_count > 0` 恰好就是这 4 个故障日（09-24、09-25、10-12、10-14）。
+- 判断：两边都没错——生产在没数据的日子照代码做了，重放用了生产没有的数据。修法候选见本条末与对话；**未实现**。〔v0.45.509：用户 10-16 选「自证在故障日按没有日线重放」，已实施，自证 32/32〕
+
+### BILI 10-12 P/C 298.46（已查清，**未处理**）
+- 来源：BILI 无云端 CBOE 链 ⇒ 0993efd 的 yfinance 备用链（`options_analyzer.fetch_options_chain`：剔 DTE<3、取 4 个 DTE≥7 到期日、行权价 0.3–1.7× 现价、OI 前 40）⇒ `calculate_put_call_ratio` **按 OI**、DTE 加权、无下限无上限。
+- 10-12（哥伦布日）Yahoo 的 OI 几乎全被清零（30 只录制里近期成交过的合约约 9,300 行仅 16 行 OI>0），只剩几个半年没成交的旧合约的冻结 OI：01-15 到期 $5 put OI 22,065、$24 put 21，对 $8 call OI 74 ⇒ 22,086 / 74 = **298.46**（权重同一到期日相消）。前后几天 BILI 是 1.03 / 1.02 / 1.08；同链按成交量约 2.48（待验证该日 OI 缺失的原因）。
+- 影响（0993efd 代码）：Oracle 流向子分 P/C > 1.5 即 0（298 与 1.6 同分），Oracle 4.27（正常 P/C 约 5.12）⇒ final 约 −0.29；Bear 期权子分 8.0（否则 6.5）⇒ Bear 7.27（否则约 6.21）；Rival 的 ML 特征吃到 298；日报 thesis break L1 / L2 显示「已触发」（只展示，罚分 0）；`signal_archive` 存 298.46（全库唯一一次 P/C > 10）。
+- 现行 main 对同一条链**仍会**算出 298.46、无标记：482 / 490 只管占位 IV，不管 OI；全仓没有 P/C 合理性闸。
+
+### Added（测试，503）
+- `tests/test_forward_test_excluded_days.py::TestFgGateSkips`（3）：排除日不进重放且报出；清空名单该日回来；`--insample` 不受影响。变异（不剔除）⇒ 红。
+
+### 全量（503 + 504，rebase 到 f8429c1f 之后）
+- 9820 passed、0 failed、2 xfailed（`--deselect` 了设计内定期红的 `test_economic_calendar::TestCoverageHorizon`）；ruff 全仓通过；`bash -n` 编排器通过。
+
+
+## [0.45.502] — 2026-10-16 — Fixed：v0.45.484 二次检查——写回工具整日替换 `signal_archive` 前过现行 `QUARANTINE`（10-13 把 v0.45.499 隔离的行插回去的那个洞）；484 条目两处更正；10-13 ~ 10-15 生产核对全部通过
+
+### Fixed
+- `experiments/writeback_1012_replay_v0484.py`：
+  - `plan`：`signal_archive` 新行里凡是现行 `signal_archive.is_quarantined` 认定的一律剔除，记入 `quarantine_dropped`（并打印）；
+  - `apply`：在写前值核对**之前**按 apply 时的现行名单再核一遍，有一行命中就整体中止、什么都不写（连备份都不开始）——名单在 plan 与 apply 之间会变，10-13 正是如此。
+  - 实测（只读）：拿 union4 沙箱重新 plan ⇒ `signal_archive 2035 → 2035`、`quarantine_dropped = [BILI options.iv_current]`；拿 10-13 第二次写回用过的旧 plan 做 dry-run apply ⇒ 中止并点名那一行。
+- `CHANGELOG` v0.45.484 两处〔v0.45.502 更正〕：第一次写回的 `iv_history` 是 30 行不是 29 行（含 BILI 6.25，后被 499 删）；逐位确定性核对的是 union3，最终写入的 union4 未单独再重放。
+
+### 生产核对（10-16，只读）
+- 生产克隆已含 v0.45.484（`b1340726`），10-13 / 10-14 / 10-15 三轮扫描与 Step 11 都正常跑完。
+- `experiments/dim_ic_forward_test.py`（生产代码）输出 `forward_test_excluded_days: ['2026-10-12']`；`resonance_boost_forward_test.py` 的 `skipped_files` 有「协议排除日」12（= 当天 12 份 analysis JSON），自证 253/255。
+- 10-12 predictions 的 T+1 已由 10-13 扫描回填 30/30（写回前入场价为 0 时回填会跳过）；`signal_archive` 10-12 仍 2035 行、BILI `options.iv_current` 0 行、`iv_history_BILI` 无 10-12 行（与 499 一致）。
+- ⭐ 484 预警的污染路径已核：10-15 扫描 30/30 只的 Buzz `delta_3d` 参照日都是 10-12，**全部**等于「当日情绪 − 写回后的 10-12 `sentiment.pct`」（若没写回，按故障日值算会不同，如 MSFT −7 vs −10、TSLA −10 vs −3）。
+
+### 顺带发现（未处理，报给用户）
+- **10-14 代理探活又失败**（14:00:10）。这次 496 修好的退回分支是真直连：CBOE 29/30、入场价 30/30，但 yfinance 全挡（`iv_rank` / `unusual_flow` / 分析师目标 / 催化剂 0/30）——是「降级日」不是 10-12 那种「垃圾日」，未重放。⇒ 探活一次失败就整轮放弃代理的问题（484 调查第 1 条）在三天里复发了一次。
+- Step 11 自 10-14 起 WARN：F&G 敞口门前瞻检验「无法判定」——A 臂重放复现 27/31，未复现的 4 笔全是 **10-14** 入场、决策层（标的 / 日期 / 方向）31/31 相同、只差仓位金额。与 10-12 写回无关（10-13 写回后当场核过 26/26）；疑与 10-14 降级（波动率来源）有关，待查。
+
+### Added（测试）
+- `tests/test_writeback_1012_quarantine_guard.py`（2）：命中隔离 ⇒ 中止、库与备份目录都没动；对照（名单里没有）⇒ 放行到写前值核对。变异：去掉 apply 的核对 ⇒ 红。
+
 ## [0.45.501] — 2026-10-13 — Fixed：v0.45.492 溢价子页二次检查（`/code-review` high）9 处根因修复——财报「视野内没有」不再判成「到期前没有」、连点不再互相覆盖、外部原因码表补全并加完整性守卫、日线落后与窗内缺口分开报、财报日跳过失败日、分片只解析一次、选中到期日掉出范围自动取消、取日线出错有自己的码、规则表只算一次
 
 ### Fixed
@@ -416,6 +1248,23 @@
   canary：**修前原文件**同一 harness 下 −1 天（10-12）全绿、0 天（10-13）3 红、+38（11-20）仍 3 红、+39（11-21）4 红——
   两颗的引爆日都被精确复现，证明 harness 确实拨到了本文件的被测路径。
 
+### 复核（同日另一会话，只验证、无代码改动）：拨钟补到 +60 / +180
+- 拨钟**旧版** harness（495 搬进仓库前、memory 目录里那份）全套件（树 = `bc2c9294`，即二次检查 `f392782d` **之前**；9446 selected /
+  87 deselected）：真实钟 1 failed（设计红）+ 1 teardown error（真实数据根闸：`pheromone.db` @06:03:54.429 被写——是 **v0.45.494 的清库**
+  （备份 `db_backups/pheromone_pre_v0.45.494_rank_mirror.db` mtime 06:03:53），与上面 490 同一形状；闸点名的两条
+  `test_quote_set.py`、`test_experiments_script_bootstrap.py::test_stripping_the_injection_turns_every_real_file_red` 各单跑两遍，生产库 mtime 都不动）。
+  **+60 / +180 天各 42 failed，两轮失败集合逐条相同**：1 设计红 + 41 条旧 harness 自己造的假红，真实钟下全绿；按 v0.45.495 的归因
+  = R1 子进程不读偏移 11 条（step_contract 9、真实数据根闸子 pytest 2）+ R2 只拨了 `datetime`、没拨文件 mtime 30 条（编排器解释器 28、
+  Step 15 分派 2）——二次检查拿 `-vv` 全量失败正文逐条核过（初版统称「子进程读真钟」，30 条归因错，同 495 对 +30 那轮的更正）。
+  ⚠️ 这 41 条在旧 harness 下恒红，里面若有炸弹看不见 ⇒ 二次检查（10-16）在 `origin/main` `04dce858` 上用 495 的新 harness
+  （`tools/clockshift`，拨文件 mtime、跨进程）单跑这 42 条：0 / +60 / +180 天各 41 passed + 设计红 1、0 deselected。
+  ⇒ **+120 → +180 未见新炸弹**（全套件是 `bc2c9294` + 旧 harness；那 42 条是 `04dce858` + 新 harness）。
+- 近未来日期字面量密集的 17 个测试文件（9 个 OCC 字面量文件 + f-string 拼 OCC 的两个 `test_sell_strike_*` + 日期字面量 census
+  排名靠前的 5 个 + 本文件；那 5 个是否真拿到期日与钟比较**未逐个核**）在 +4 / +7 / +14 / +30 / +45 / +90 / +150 / +270 / +400 /
+  +1000 天各 763 passed（树 `bc2c9294`，旧 harness）。
+- 快进到 `91af111a`（含 `f392782d` 的 +39）后重核：上述 17 个 + `bc2c9294..HEAD` 改过的 4 个测试文件共 21 个，0 / +39 / +60 / +180 天各 845 passed。
+- canary 独立复现：修前原文件 −1 绿 / 0、+3、+38 红 3 / +39、+60、+180 红 4；修后同钟全绿。
+
 ## [0.45.488] — 2026-10-13 — Fixed（测试闸）：真实数据根只从 `resolve_data_root` 来——非绝对值不猜、改守缺省数据根并在报告头说明；对拍补 `~` / 相对 / 空白样本；AST 守卫：只有 hive_logger 把 `ALPHA_HIVE_HOME` 变成路径
 
 用户批准的方案（推荐项：非绝对值改守缺省、加 AST 守卫）。
@@ -584,7 +1433,7 @@
   | yfinance 异常流 / .info / 分析师 / 财报日历 | 10-13 开盘前现取（成交量仍是 10-12 场）| **.info / 分析师隔夜值、Reddit（ApeWisdom 滚动 24h）晚约 12h：待验证** |
   | CodeExecutor 子进程 | 开盘前真跑，成功结果按代码哈希录制 | — |
 - **录制 / 拼合**：全部 HTTP（requests / urllib / yfinance curl_cffi）与 CodeExecutor 结果落盘。开盘前跑了 3 轮实取 + 1 轮补跑 CodeExecutor（10 只第三轮仍失败，05:58 补齐）；最终 `union` 模式**只用录制里成功的响应、不出网**拼出完整输入集（Massive 限流与 yfinance 冷却在离线快放下会被假性触发，两处已在 union / replay 模式绕开，见脚本注释）。
-- **确定性**：用 union 自己的录制再 `replay` 一遍——**final_score / direction / 维度分 / 维度权重 / 各蜂分 30/30 逐位相同**；残差只在不进分的字段：Scout 卖空数据源的断路器按线程完成顺序开（同 7 只在 real / fallback 间互换，置信 ±0.02）、cs_rank.catalyst 并列名次。
+- **确定性**〔v0.45.502 更正：下面这次逐位核对的是 **union3**（第一次写回的那份）；最终写入的 union4 只多修了本地钟，与 union3 分数 30/30 相同、仅 AMZN 一只蜂不同，**本身没有再做一遍自录制重放**〕：用 union 自己的录制再 `replay` 一遍——**final_score / direction / 维度分 / 维度权重 / 各蜂分 30/30 逐位相同**；残差只在不进分的字段：Scout 卖空数据源的断路器按线程完成顺序开（同 7 只在 real / fallback 间互换，置信 ±0.02）、cs_rank.catalyst 并列名次。
 - **覆盖率**（生产 Step 12 闸原样跑）：十字段全部 30/30，「覆盖率健康」。
 
 ### 结果（30 只）
@@ -594,7 +1443,7 @@
 
 ### 写回（用户批准「全部」；`experiments/writeback_1012_replay_v0484.py` plan → apply）
 - 写前值逐项核对（行哈希 / 文件 sha），任一处被改就整体中止；整库 sqlite backup + 原件备份；DB 一个事务、`integrity_check` ok。
-- **第一次**（10-13 07:33，union3）：`predictions` 30 行（入场价 30/30 > 0）、`signal_archive` 1621 → 2036、`.swarm_results_2026-10-12.json`、`report_snapshots/*_2026-10-12.json` 30 份、`agent_memory` 260 → 300 / `reasoning_sessions` / `adapted_weights`、`sentiment_baseline` 10-12 30 行、`cache/options_snapshot_*_2026-10-12.json` 30 份（生产当天 0 份）、`iv_history` 10-12 29 行、日报 md / json / X 线程。备份 `_manual_backups/2026-10-13_1012_replay_v0.45.484/`。
+- **第一次**（10-13 07:33，union3）：`predictions` 30 行（入场价 30/30 > 0）、`signal_archive` 1621 → 2036、`.swarm_results_2026-10-12.json`、`report_snapshots/*_2026-10-12.json` 30 份、`agent_memory` 260 → 300 / `reasoning_sessions` / `adapted_weights`、`sentiment_baseline` 10-12 30 行、`cache/options_snapshot_*_2026-10-12.json` 30 份（生产当天 0 份）、`iv_history` 10-12 29 行〔v0.45.502 更正：是 **30** 行——含 BILI 那行 Yahoo 失败值 6.25；它在 07:50 由 v0.45.499 删掉，所以第二次写回中止清单里只剩 29 个文件〕、日报 md / json / X 线程。备份 `_manual_backups/2026-10-13_1012_replay_v0.45.484/`。
 - **第二次**（08:08，union4 = 修好本地钟）：分数与第一次 30/30 相同，只差时间戳 / created_at 与 AMZN 一只蜂（union3 漏取供给链同业行情，signal 维权重为 0、final 不变）；不碰 IV 索引。备份 `…_r2/`（含 `replay_artifacts/`：54 MB 输入录制、control / corrected 输出、开盘前抓取）。
 - ⚠️ **与并行会话的交叉**：v0.45.497（07:41）的快照回填工具见我已写入、幂等全跳过；**v0.45.499（07:50）**按用户批准隔离并清掉了 BILI 10-12 的 `options.iv_current` 6.25（Yahoo 求解失败阶梯值——重放代码早于 482 的多数规则，BILI 无云端链走 yfinance 备用链）。我第二次写回时**把那一行又插了回去**（plan 在 499 之后算，但整日删再插不看 QUARANTINE）——08:10 发现、先备份再删回（`…_r2/pheromone_before_bili_iv_revert.db`），现与 499 一致。BILI 同一条链的 P/C 298.46 仍在库（499 明确未动），BILI 的 Oracle 分（4.27 bullish）是当天代码在这条坏链上算的。
 - 不动：12 份 ML 深度报告与 `analysis-*-ml-2026-10-12.json`（叙事体裁，同 271 / 464；共振加成检验靠下条排除）、网站（下次扫描的 gh-pages 同步带上新日报）。
@@ -616,6 +1465,47 @@
 - 多个会话同时处理同一天时，**每一次**写生产前都要重新 fetch + 看 origin/main 新的数据类提交，不只第一次。
 - freezegun 冻 UTC 时 naive `now()` 不是本地时间；改 `tz_offset` 又会错移 aware 时间。
 - 写回改了生产的 mtime ⇒ 之后再用生产 mtime 判「扫描写过的缓存」会误删（prep 改为以写回前的 APFS 克隆为参照）。
+
+## [0.45.483] — 2026-10-13 — Fixed（测试隔离）：10-12 全量测试期间生产 `pheromone.db` 被改动——判明是**并发写者**（另一会话的 v0.45.479 清库），不是 `TestMacBash`；但它的 `env -i` 子进程确实没隔离（数据根会解析到真实生产），补上 `ALPHA_HIVE_HOME` + 守卫
+
+### 结论：并发写者（有直接证据）
+- 10-12 13:02:04 起的全量（merge `142c7aa7`）teardown 时真实数据根闸红：`pheromone.db @13:08:57.673`、`pheromone.db-wal @13:08:57.746`，时间线落在 `TestMacBash::test_parity_and_fallback_under_bare_env[UTF-8]` 的 call 段。
+- 同一时刻另一会话（worktree `confident-lederberg-3b0de0`）在跑 v0.45.479 清库：会话记录里该命令 13:08:55.876 下发（`2026-10-12T20:08:55.876Z`，执行不早于此），`env -u ALPHA_HIVE_HOME … purge_quarantined_signal_rows.py --only-tag v0.45.479 --expect 128 --apply`（⇒ 缺省数据根 = 生产库），删 128 行（129,947 → 129,819），结果 **13:08:58.272** 返回。其持锁后备份 `db_backups/pheromone_pre_v0.45.479_purge.db` 生于 13:08:56.689、末次写 13:08:56.766；闸看到的两个 mtime 在备份之后约 0.9 s，正落在该命令窗口内。同一条命令里随后还有两次只读核对连接；COMMIT、检查点、只读连接各自改了哪个文件的 mtime **没有细分**（不影响归因：窗口内对生产库动手的只有这条命令）。
+- 同日 12:27–12:39 那轮没报 `pheromone.db`：闸本身就证明那段时间库没被改（起止指纹相同）；前后两次动库的备份在 12:18:32（v0.45.475 隔离）与 12:43:08（v0.45.476 恢复），都在窗口外。「不确定」来自并发写者什么时候动手，不来自测试。
+- 闸的时间线本来就只说「时间重合」（v0.45.455 措辞）；这次的归因法：`db_backups/` 里各次清库 / 恢复备份的 mtime + 其他会话 `~/.claude/projects/*/*.jsonl` 里同一时间窗的 `tool_use`。
+
+### 实测：测试不碰数据根（全程没有碰生产库）
+- 用 `sandbox-exec`（内核沙箱、子进程继承、穿过 `env -i` 依然生效）：写 `~/alpha-hive-data` / `~/alpha-hive-prod` / `~/.claude/scripts` / 开发检出的 `pheromone.db*` 一律拒，**读** `~/alpha-hive-data/pheromone.db*` 也拒；每次违规进统一日志（`log show --predicate 'sender == "Sandbox"'`，带进程名与 pid）。
+- 金丝雀先自证：`env -i` 下的 Python 以 `immutable=1`（不加锁、不碰 WAL，沙箱若失效也无害）打开 `pheromone.db` → 被拒且日志有 `deny(1) file-read-data …/pheromone.db`；写拒绝在 scratch 目录上同样留痕。
+- `tests/test_orchestrator_step_interp.py` 全文件 164 passed（`TestMacBash` 两条确实执行、非 skip），生产路径违规 **0** ⇒ `env -i` 子进程不打开数据根里任何东西，连读 `pheromone.db` 都没有。
+- 复核 v0.45.422 那条审计（不只看 logs）：AST 枚举 `tests/` 里 `env=` 不是字面继承 `os.environ` 的 64 处子进程调用（34 个文件，含字面 `env -i` / 剥 `ALPHA_HIVE_*` 的全部 10 个文件）+ 直接调 `resolve_data_root` 的 `test_data_root_default.py`，共 35 个文件（基线 `747cc880`）整体在同一沙箱里跑：2120 passed，生产路径违规 **0**。12 条未全程跑完，逐条核过：9 条 `test_ic_rerun_fg_budget` 只在**收尾**的 `ps` 清理处报错（setuid 的 `/bin/ps` 在沙箱里一律 exec 不了），测试体已在沙箱里跑完；2 条 `test_alphabot_launcher::TestNativeWindow` 在测试体里调 `ps` 失败，其子进程只是 `python -c pass` / `sleep`、环境原样继承会话沙箱；1 条 `test_data_migrations` 是 iCloud 重名副本致败（见「环境」），清掉后该文件在沙箱里重跑 48 passed、违规 0。
+
+### 发现：v0.45.422 审计记录对 `TestMacBash` 不成立
+- 422 记「剥 `ALPHA_HIVE_*` 的测试都显式设了或把 HOME 指空目录」。`TestMacBash` 两样都没有：`env -i` 把会话沙箱的 `ALPHA_HIVE_HOME` 与 `HOME` 一起剥掉 ⇒ 子进程里 `hive_logger.resolve_data_root` 落到 `expanduser("~")`（无 HOME 时查用户库）= 真实 `~/alpha-hive-data`。它没写穿只因为 `orchestrator_steps` 在这几条路上只读显式给的 `--json` / `--data-dir`（Step 2/4 的 `_resolve_dirs` 也只认 `--data-dir` / `ALPHA_HIVE_HOME`、不看 HOME）——是走运，不是隔离；哪天这条路 import 了 `hive_logger`，写进生产 `logs/` 也没人会红（闸豁免 logs）。
+- 生产里这些子进程两样都有：`ALPHA_HIVE_HOME` 来自 plist 的 EnvironmentVariables，编排器顶部又 `export` 一次；`HOME` 由 launchd 按用户补上（`launchctl print` **不列**它，别据此以为没有——编排器顶层第 1485 行在 `set -u` 下展开 `$HOME`，自 09-28 起每个扫描日都跑过，launchd err 日志 0 次 unbound variable）。⇒ 测试的 `env -i` 前缀比生产少了两样；补上 `ALPHA_HIVE_HOME` 即在数据根上与生产同形，不补 HOME 是本测试原有的「比生产更光」的条件。
+
+### Changed（测试）
+- `TestMacBash` 的 `env -i` 前缀加 `ALPHA_HIVE_HOME=<tmp_path>/alpha_hive_home`（数据根上与生产同形 + 隔离），并在派生任何子进程**之前**用生产的 `resolve_data_root` 对子进程环境求值，断言落在 `tmp_path` 内。
+
+### Added（守卫）
+- `tests/test_bare_env_children_pin_data_root.py`：AST 扫 `tests/` 里每一处 `env -i`（含同义的 `--ignore-environment` 与单独的 `-`；参数表字面量 `["/usr/bin/env", "-i", …]`，以及「`env -i NAME=…`」命令串），要求带 `ALPHA_HIVE_HOME=` 或 `HOME=`（只核有没有、不核值）；必须扫到已知那一处（`KNOWN_SITE`），否则报「守卫瞎了」；牙齿测试 7 条（缺 / 带 / f-string / 只提到名字不算赋值 / 命令串 / 同义写法 / 说明文字与 docstring 不算命令）。把 `env -i` 拆进变量再拼的写法扫不到，docstring 写明。
+- 变异 6 个全红、报错文案逐个对得上（沙箱内跑，还原后 sha256 一致）：M0 HEAD 原文件（元守卫点名该处）；M1 删掉前缀里的 `ALPHA_HIVE_HOME`（两道都红，报「解析到 /Users/igg/alpha-hive-data」）；M2 指向沙箱外（测试内断言红；静态守卫只管有没有，值归测试内断言）；M3 扫描器认不出 `-i`（牙齿 +「瞎了」红）；M4 扫描器恒放行（牙齿红）；M5 扫描器只认 `-i`（同义写法牙齿红）。
+- ⚠️ 首版守卫自己踩了一次：牙齿测试里用 `" ".join(("env", "-i"))` 拼样本，那个元组正是守卫要找的参数表形状；而 `own_python_files` 走 `git ls-files`，守卫文件**未提交时扫不到自己**，变异与全量都在未跟踪状态下跑、全绿。叠到 origin/main 提交后才红（点名自己第 89 行）。改成 `"env" + " -i"`（`ast.parse` 不折叠常量），跟踪状态下重跑 28 passed、变异 5/5 仍红。
+
+### 二次检查（同日，推送前）
+- ✗ 首稿说「launchd 不给 HOME」（据 `launchctl print`）——**错**：那里只列配置的变量；编排器顶层 `$HOME` 在 `set -u` 下每天跑过即反证。已改测试注释、守卫 docstring、本条与 memory；修法本身不受影响（钉住 `ALPHA_HIVE_HOME` 后数据根与 HOME 无关）。
+- ✗ 首稿说沙箱里「12 条因 `/bin/ps` 失败」——实为 9 条只在收尾报错（测试体已跑完）+ 2 条测试体内 + 1 条 iCloud 副本；后者清副本后在沙箱补跑。已更正上文。
+- ✗ 首稿把「备份之后 0.9 s」写成 DELETE / COMMIT / 检查点的确定次序——那是推测，已改成「未细分」。
+- 补：守卫原先只认 `-i`，`env --ignore-environment` / `env -` 同样清空环境却漏网——已加（M5 验牙齿）。
+
+### 环境
+- 本 worktree 里 180 个 iCloud 重名副本（135 与本体逐字节相同、45 是已提交 blob，独有内容 0；其中 `data_migrations/versions/__init__ 2.py` 让 `test_data_migrations` 的 `discover()` 抛 `MigrationLayoutError`）移进 `~/.Trash/icloud-dupes-hungry-feistel-20261013-022043/`；3 个重名**目录**未核、未动。
+
+### 评分 / 世代边界
+- 只动测试，生产代码零改动；不追加世代边界。
+
+### 验证
+- ruff 两文件全绿。全量（10-13 02:21，本 worktree，非沙箱）：9354 passed / 4 failed / 2 xfailed；会话级两道闸 teardown 无报警。4 条红均与本版无关：`TestCoverageHorizon`（设计内定期红：2027 经济日历未发布）；`test_options_snapshot_price_honesty` 3 条——v0.45.462 夹具写死到期日 2026-10-16（`NVDA261016…`），10-13 起日历 DTE < 7 被近月过滤挡掉 ⇒ 链为 None，**时间炸弹**，单跑同样红（已另开任务，未在本版修）。
 
 ## [0.45.482] — 2026-10-13 — Fixed：yfinance 期权链里 Yahoo 求解失败的 IV（减半阶梯 1 / ½ / ¼ / ⅛ / … 2⁻ⁿ + 正偏移，含地板 1e-05）在源头置 0 并打标记；ATM 窗口失败值不少于有效值 ⇒ 当日 IV 按不可得处理——此前中位数正好落成 12.5 / 6.25（/ 25 / 50），落在 5%–150% 有效区间、被当真实观测
 
@@ -4365,7 +5255,124 @@ Step 2/4/5 的调用点与 alert_manager 新规则是 B2（v0.45.386），本版
 - 已知、不改：解释器不可用时 Step 11 兜底片段没有 `cohort_boundary` 键（B 之前恒有、未知时为 null）。`.get` 与 `jq .cohort_boundary.alarm`
   两种读法结果相同（都为空）；兜底那天本来就没人解读 JSON，可见信号是 ERROR 行 + `interp_fallback`。
 
-## [0.45.384] — 2026-09-29 — 占位（进行中：vrp_signal.record_day 零快照时不再清空当天账本行（含已结算行）；局部重跑改 upsert；CLI 零快照 exit 3）
+## [0.45.384] — 2026-09-29（10-12 二次检查，10-16 合入）— Fixed：`vrp_signal.record_day` 零快照时不再清空该日账本行（含已结算行）；部分重跑改为按票 upsert、没有可用快照的旧行保留；CLI `--record` 零快照退出 3 并点名读取目录；缺省缓存目录不再被凭空建出
+
+### 事故形状（v0.45.380 同形普查「只列不修」的那一条，照其语义修）
+- `record_day(as_of)` 取 `keep = 其它日期的行`，遍历 `_iter_snapshots(cdir, as_of)` 后**无条件** `_write_jsonl(SIGNALS_FILE, sorted(keep + 本次行))`。
+  零快照 ⇒ 该日已有的行（含 `settle()` 回填过 `rv_forward` / `vrp_realized` / `settled_on` 的）整批删掉；v0.45.104 的结算字段搬运只救得了本次重新产出的票；
+  部分快照缺失 ⇒ 只删缺的那几只。日志只有 INFO「VRP 记录 0 行」。
+- 另一半：`_cache_dir(None)` 走 `PATHS.cache_dir`，那个 getter 会 mkdir ⇒ 不带 `ALPHA_HIVE_HOME` 手动跑一次，代码 checkout 里就多出空 `cache/`，
+  随后的告警只能说「该日在 <目录> 里没有任何常规期权快照」——「数据根找错了」被改写成「目录在、只是没快照」。`assess` 自称「纯读取，无副作用」，走的是同一个函数。
+- 触发：数据根 / 缓存目录指错 / 当日快照缺失。（09-29 写本条时 env-less 手动跑 ⇒ `PATHS.home` 回落到代码目录、改写被 git 跟踪的 `vrp_state/`；**v0.45.422 起 env-less 缺省就是生产数据根 `~/alpha-hive-data`，检出里的 `vrp_state/` 也已不再跟踪 ⇒ 同一个手动跑删的是生产行**——见文末二次检查。）
+- **复现**（数据根指向 scratch，里面拷的是 checkout 里被跟踪的 304 行账本）：改前 `vrp_signal.py --record --date 2026-09-22` ⇒
+  账本 304 → 274 行（09-22 的 30 行没了）、`<scratch>/cache` 被建出、stderr「该日在 …/cache 里没有任何常规期权快照」；
+  改后 ⇒ exit 3、「no snapshots found in <scratch>/cache（目录不存在）——未改写 …（该日已有 30 行原样保留）」、sha256 不变、目录未建。
+  改后 env-less 在 worktree 里跑 ⇒ exit 3 + 「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录」，被跟踪账本的 sha256 **与 inode** 均不变，未建出 `cache/`。
+- **生产**（只读核对）：09-29 时账本 334 行、已结算 0 行（首行 09-04，按 `is_trading_day` 算第 21 个交易日最早 2026-10-06 才能结算）。
+  ⚠️ **本版当时没有合入**，10-12 复核：604 行、**已结算 64 行**（基准日 09-04 ×30 / 09-08 ×4 / 09-09 ×30）已暴露 6 天；日志（09-22 → 10-12）里零快照钩子仍只有 09-24 / 09-25 两次 ⇒ **尚无实际丢失**。
+  **09-24、09-25 日更钩子真的走过零快照分支**（`alpha_hive.log*` 里 INFO「VRP 记录 0 行（2026-09-24 / 09-25 …）」+「VRP 信号已更新 … 记录 0」，同 v0.45.380 对 earnings 的核对）——
+  那两天账本里原本没有该日行，没删到东西，但账本被原子替换了一次；日志只有 INFO，看不出读的是哪个目录、它在不在——「数据根找错」与「当天真缺快照」在日志里长得一样。
+
+### Fixed
+- `vrp_signal.py`
+  - `record_day()`：零快照 ⇒ **不写账本**（连原子替换都不做），返回 `[]`，WARNING 写明读取目录、它在不在、该日已有几行原样保留。
+    `_snapshot_dir_diagnosis` 分：目录不存在 / 路径不是目录 / 有该日文件但都读不出（坏 JSON，有 WARNING）或不是 JSON 对象（`_iter_snapshots` 静默跳过）/ 只有别的日期（给出最新日期）/ 空目录；另有该业务日补跑文件时附一句「`record_day` 不认补跑文件」。
+    `_cache_dir_hint` 命中才附：`ALPHA_HIVE_HOME` **显式**指向缺省数据根以外的地方（10-12 改，见二次检查 #3）；读取目录与快照写者（`options_analyzer`，`PATHS.cache_dir`）不同。诊断只读：不建目录。
+    （每份可读快照恰好产出一行——缺数也记一行带 `reason`——所以本模块没有 earnings 那种「有快照、零信号」分支。）
+  - 落盘改为按 `(ticker, date)` **upsert**：本次有可用快照的票替换旧行（v0.45.104 搬运不变）；该日其余旧行**原位保留**，WARNING 列出票、并列写出三种保留成因（无该日快照 / 快照读不出 / 不是 JSON 对象）、标出其中已结算的。
+    **决定**（写进 `record_day` docstring）：缺快照不是「这行作废」的证据，只是这次没有输入；已结算样本删了补不回来；与 `earnings_vol_signal.scan`（v0.45.380）/ `sell_strike_ledger._record_rows` 同一语义。
+    同样的快照重跑仍字节幂等。
+  - `_prior_history` 仍收 upsert 之前那份「其它日期的行」，**n_obs / ts_pct 逐字不变**：它先跳过 `d >= as_of` 的行、再碰 `covered` / `hist`，本日行无论保留与否都进不了分母
+    （变异 M13 把实参换成全表 ⇒ 67/67 绿，即等价；另有断言钉住部分重跑后 BBB 的 `n_obs == 3`）。
+  - 返回值不变（只含本次写入的行），日报钩子无需改。本体拆成 `_record_day_with_info()`（多返回诊断 dict），`record_day()` 取第一项。
+  - `_cache_dir(None)` 改走 `PATHS.cache_dir_unmade()`：本模块对缓存目录只读（`_default_bars` 的本地价格索引兜底由 `price_history` 自己在写标记时 mkdir）。
+  - CLI：`--record` 零快照 ⇒ stderr「❓ --record <日>：no snapshots found in <目录>（诊断）——未改写 <账本>（该日已有 N 行原样保留）」、**退出 3**（不论就绪度）；
+    部分重跑 ⇒ stderr 列出保留的票，退出码照旧是就绪度；`--json` 另有 `record_info`；告警在 `--json` 下也走 stderr（stdout 仍是纯 JSON）。`--settle` / 就绪度照跑，`--out` 照写。
+- `hive_logger.py`：新增 `PATHS.cache_dir_unmade()`（同 `logs_dir_unmade` v0.45.239 的做法：解析逻辑只写一份，`cache_dir` getter 改为调它再 mkdir，行为不变）。
+
+### ⚠️ 推翻了 v0.45.104 的一个决定（退出码）
+- v0.45.104 刻意让 `--record` 写 0 行时退出码**仍归就绪度**（攒数中 = 1），理由是「编排器契约」，只加了 WARNING + JSON 计数，并有测试钉住 `code == 1  # 契约不变`。
+- 查证：**编排器从未调用过 `vrp_signal.py`**（仓库版与部署副本均 0 处；`git log -S vrp_signal -- scripts/alpha-hive-orchestrator.sh` 全历史 0 条；`~/.claude/scheduled-tasks` 10 个任务 0 处）——唯一的生产调用方是日报钩子 import 调 `record_day`。
+  而零快照报 1 与健康的「攒数中」逐字节相同，正是 v0.45.104 自己要治的「报错和正常态长得一样」。本版改为零快照一律 3（本 CLI 里 3 本来就是「无法判定」），该测试改写为 `test_record_zero_snapshots_exits_3_and_names_dir`。
+
+### 调用方（行为变化是有意的）
+- `alpha_hive_daily_report._post_scan_enrichment`（日更钩子，紧跟 earnings 那块）：零快照日从「静默改写账本 + INFO」变为「不写 + WARNING」；仍返回 `[]`，
+  `settle()` 照跑（旧行照样结算），钩子的 INFO「VRP 信号已更新 … 记录 0」照打。**没有改成抛异常**：钩子的 try 包着 record + settle，抛了会连带跳过当天结算。
+- `render_markdown` 读 `rows_for_date`：部分重跑后会连保留的旧行一起显示——它们本就是该日由真实快照算出的行。
+- `tests/test_sell_strike_integration.py` 把 `record_day` 桩成 `lambda: []`，不受影响。
+
+### Tests（09-29 第一轮，合并前；合并后的数字见文末二次检查）
+- `tests/test_vrp_signal.py` 57 → 67（11 新、1 条改写替换；全离线、tmp 目录）：
+  - `TestRecordNeverDeletesRowsItDidNotRewrite`：零快照 × 六种目录形态（缺目录 / 空目录 / 只有别的日期 / 该日文件坏 JSON / 该日文件是合法 JSON 但不是对象 / 只有补跑文件）⇒ 账本**字节与 inode 都不变**
+    （夹具刻意用紧凑分隔符写：upsert 语义下「内容相同的改写」只有这样才抓得到）、WARNING 含完整目录路径与对应诊断、缺的目录读完仍不存在；
+    部分重跑（AAA 无快照文件、CCC 快照坏 JSON，两种保留成因各一个夹具）⇒ 已结算行与保留行逐字段不变、被替换的票 `n_obs` 只数自己的历史、结算搬运照旧、WARNING 列出并标已结算、再跑一次字节幂等；
+    两种错目录提示（且两个目录都没被建出）；缺省目录（`cache_dir=None`）`record_day` 与 `assess` 都不建。
+  - `TestCliAndMarkdown`：`main()` 有索引（攒数中）无快照 ⇒ 退出 3、stderr 点名目录、账本字节不变、JSON 告警含「3 行原样保留」，三只都有快照 ⇒ 回到 1 且无告警；
+    真跑 `__main__` 子进程（`ALPHA_HIVE_HOME`=tmp、`ALPHA_HIVE_CACHE_DIR`=不存在的路径）⇒ 退出 3、stderr 点名目录与「目录不存在」、账本不变、目录未建。
+- **真跑变异**（在 `git archive HEAD` + 本版三个文件拼出的 scratch 副本里做，并发读 worktree 的会话看不到变异；`PYTHONDONTWRITEBYTECODE=1`、每轮用 Python 删 pyc、`--maxfail=1000`、
+  锚点唯一且「文件变了 + 新文本恰好出现一次」、每轮 passed+failed = collected 67、还原后 sha256 核对并复跑 67/67 绿；另用 `--tb=line` 逐条核对了 M0 / M1 / M5 / M14 **红的理由**）：
+  （第二轮时这道「恰好出现一次」闸还拦下了驱动自己的一个坏变异：替换成空串，`count("")` 恒为 len+1 ⇒ 整轮作废而非误报通过，改成非空替换后重跑。）
+  - M0 改动前真实文件（`git show b7a9fb5f:`）⇒ 11 红，理由逐条对得上：零快照 6 条红在「零快照改写了账本」、部分重跑红在 AAA/CCC 被删、错目录提示红在「没有任何 WARNING」、
+    缺省目录红在「record_day 把缺的缺省目录建出来了」、CLI 红在退出码 1（误报本身）、子进程红在 stderr 没有「no snapshots found」。新测试只经改动前就有的接口（`record_day` / `main` / `assess` / `__main__`），没有一条是 AttributeError。
+  - M1 删零行守卫 ⇒ 10 红（改写内容相同，全靠字节 / inode 抓到）；M2 upsert 改回整日替换 ⇒ 1；M3 诊断不分缺目录 ⇒ 3；M4 WARNING 只写末级目录名 ⇒ 7；
+    M5 CLI 零快照退就绪度 ⇒ 1；M6 保留旧行不报 ⇒ 1；M7 未设 HOME 不提示 ⇒ 1；M8 `_cache_dir(None)` 回到会 mkdir 的 getter ⇒ 2；M9 诊断顺手建目录 ⇒ 4；
+    M10 写者目录不同不提示 ⇒ 1；M11 补跑文件不提 ⇒ 1；M12 该日文件读不出不分 ⇒ 2；M14 该日行数写死 0 ⇒ 8；M15 保留成因只写「无快照」⇒ 1；M16 诊断不提非对象 JSON ⇒ 1；
+    M13（`_prior_history` 喂全表）⇒ 0 红＝等价变异，证明见上。
+- ruff 通过。全套：（基线 `e248b171` = v0.45.383 占位 + 本版占位）1 failed、7441 passed、82 deselected、2 xfailed（合计 = selected 7444）；
+  唯一红是 `test_economic_calendar::TestCoverageHorizon`（BLS 未发布 2027 日程的设计性告警，同 v0.45.377 / v0.45.380 / v0.45.382，与本改动无关）。
+
+### 自查（照 v0.45.380 二次检查的判据：诊断文案里每个病因词都要有一个会让它出现的夹具）
+- 第一版保留旧行的 WARNING 写的是「本次没有快照」，零快照诊断写的是「都读不出（见上方 WARNING）」——逐词对夹具时发现两处都不对：
+  快照在、但坏 JSON / 不是 JSON 对象时旧行同样会被保留；而非对象 JSON 在 `_iter_snapshots` 里是**静默**跳过的，「见上方 WARNING」指向一条不存在的日志。
+  改为并列写出成因，并给「坏 JSON」「非对象」各补一个夹具（M12 / M15 / M16 证明这几条断言有牙）。
+
+### 二次检查（2026-10-12，合入 main 之前）—— 六条，前两条是「没合入」本身造成的
+1. **修复 13 天没进 main**：09-29 停在「问用户能否推送」，main 上只有占位，生产照跑旧代码（见上「生产」条：64 行已结算样本暴露 6 天，未丢）。
+   占号规则管「别撞号」，管不到「占了号但没合」——同 `alpha-hive-repair-discipline`「占位标题久悬」。
+2. **朴素合并会让 CLI 写路径无锁**：v0.45.452 把 `record_day` / `settle` 迁入 `ledger_io` 并给 `record_day` 挂了 `@ledger_io.locked_by(_signals_dir)`；
+   本版的 CLI 直调 `_record_day_with_info`，锁若只留在外层，`--record` 的读-改-写就不持锁。修：本体也挂（`ledger_io` 同线程可重入，外层照留——
+   `test_ledger_io_v2::test_read_modify_write_entrypoints_hold_the_lock` 认 `record_day.__ledger_locked__`，且要求零快照时也在锁里读账本）。
+   新测 `test_cli_record_writes_under_the_ledger_lock`（spy `_write_jsonl` 时 `is_locked_here`）。附带：持锁会 mkdir 账本目录（`ledger_io.locked` 约定）——
+   零快照时**账本文件**仍一个字节不动，但「零副作用」不再严格成立：错根下会多出空 `vrp_state/`。照 main 的约定不改。
+3. **提示成了假话**：初版在未设 `ALPHA_HIVE_HOME` 时报「数据根回落到代码目录（生产由编排器 export）」。v0.45.422 起未设 / 空串 ⇒ `~/alpha-hive-data`，**那就是生产**
+   （编排器与 launchd plist 都设成 `/Users/igg/alpha-hive-data`，与缺省相等）⇒ 这句会把人引去查一个不存在的问题。改为：`hive_logger.explicit_data_root()`
+   非空且 ≠ `resolve_data_root`（去掉该变量后的缺省）才提示「显式指向 X，不是缺省数据根 Y（shell 里残留的旧值？）」；解析走 hive_logger 唯一实现。
+   新测 `test_default_data_root_is_not_reported_as_wrong` ×3（未设 / 空串 / 等于缺省，`HOME` 指向 tmp，不碰真家目录）。`hive_logger.cache_dir_unmade` 的 docstring 同一句一并改。
+4. **记忆里写了「修在暴露之前」**：从未上线，不成立；已在 auto-memory 更正。
+5. **本条正文两处过期**：触发描述（见上，已改）；「未做」里的「`_load_jsonl` 静默跳过坏行」——v0.45.452 起 `ledger_io.load_jsonl` 严格读、坏行即 `LedgerCorrupt`，已删。
+6. **诊断又漏一个病因词**：「都读不出（坏 JSON …）」——`_iter_snapshots` 对打不开的文件（`OSError`，如同名目录）同样告警跳过。改成「坏 JSON / 打不开」，补 `unopenable_same_day` 夹具。
+   ⚠️ 这个新夹具当场暴露一个**测试**缺陷：M4（WARNING 只写目录末级名）在它上面**幸存**——`_iter_snapshots` 那条「快照读取失败」的 OSError 文本带快照完整路径，
+   断言「告警点名了目录」被别的告警代答（子串有两个产出者，同 v0.45.332）。改为只取 `record_day` 自己那一条（`_record_warning`，并断言恰好一条）后 M4 打红 8 条。
+
+**合并**（10-12 第一次）：经 `sync_with_base_branch` 并入 `origin/main`（`0e44fab0`）。冲突两处：`vrp_signal.py`（本分支两个诊断函数 vs main 的锁装饰器 ⇒ 两边都留）、
+`CHANGELOG.md`（核对过本分支对 merge-base 只改了 384 那一行；结果 = main 原文只把 384 占位行换成本条，脚本断言逐行相等）。
+`hive_logger.py` / 测试文件自动合并，逐处看过。复核仍成立：编排器（main / 部署副本 / 生产克隆的 `orchestrator_steps.py`）与 13 个 scheduled-tasks 对 `vrp_signal` 均 0 处。
+
+**二次检查的变异**（合并后的代码，scratch 副本 = `git archive MERGE_HEAD` + 本版四个文件；同上一轮的全部纪律；测试集 `test_vrp_signal.py` + `test_ledger_io_v2.py`，collected 121）：
+- M0 = main 上合并前的真实文件（`git show a3c439ee:`，v0.45.452）⇒ 15 红，理由逐条核对：零快照 7 种形态「零快照改写了账本」、部分重跑 AAA/CCC 被删、错根提示缺失、
+  缺省根三例「没有任何 WARNING」、缺省缓存目录被建出、CLI 退出码 1、子进程无「no snapshots found」。CLI 持锁那条在 M0 上**绿**——符合预期：main 的 CLI 走的是带锁的 `record_day`，这个洞只存在于朴素合并里，由 M17 证明测试抓得到。
+- M1 14 / M2 1 / M3 3 / M4 8 / M5 1 / M6 1 / M7（显式非缺省根不提示）1 / M8 2 / M9 4 / M10 1 / M11 1 / M12 3 / M13 0（等价）/ M14 9 / M15 1 / M16 1 /
+  **M17（本体不持锁＝朴素合并）1 / M18（提示退回「未设 ⇒ 代码目录」）2 / M19（显式即报、不比缺省根）1 / M20（读不出不提打不开）2**；还原后 sha256 一致、复跑 121/121。
+- `tests/test_vrp_signal.py`：main 57 → 72。全套：（合并后工作树，12:27–12:39 PDT）1 failed、9223 passed、84 deselected、2 xfailed（合计 = selected 9226）+ 1 error。
+  failed = 已知 `TestCoverageHorizon`（2027 BLS/BEA 日程未发布）。error = 会话级真实数据根闸，记在一条**已通过**测试的 teardown 上（不另占 selected）：变化的只有 5 个 `alphabot_state/intraday/2026-10-12/*.jsonl`，闸自带核实「只在末尾追加、原字节不变、时刻落在本轮」；进程表里 Alpha Bot（`python -m alphabot --port 8765`，06:57 起）在跑，追加时刻 12:36–12:37 正值盘中 ⇒ 并发写入者，与本改动无关（`vrp_state/` / `cache/` 无变化）。收盘后复跑（13:02–13:12 PDT，HEAD `142c7aa7`）：同样 1 failed / 9223 passed / 84 deselected / 2 xfailed + 1 error，但这次闸报的是**生产 `pheromone.db` + `-wal`**（13:08:57，时刻落在 `test_orchestrator_step_interp.py::TestMacBash::test_parity_and_fallback_under_bare_env[UTF-8]`——它用 `env -i` 同时剥掉 `HOME` 与 `ALPHA_HIVE_HOME`，按 v0.45.422 会解析到生产根）。本改动碰不到那条路径（只动 `vrp_signal` / `hive_logger.cache_dir_unmade` / VRP 测试）；第一轮同一条测试也跑了、`pheromone.db` 没变 ⇒ 非确定，可能是该测试的隔离漏洞，也可能是并发读写（两个其他会话的 `alpha_hive_mcp.py` 在跑，SQLite 关连接会 checkpoint）——**未判定**，已另开任务查（不重跑它，免得真写生产）。
+
+**合入（10-16）**：10-12 那次结束时没等到推送批准，又搁了 4 天。10-16 用户批准「合并最新 main 后推送」：main 已多 71 个提交，`sync_with_base_branch` 这次拒绝——
+范围里有 v0.45.467 新建的 `.claude/settings.json`（SessionStart 钩子），属沙箱保护文件，需在应用里确认远端；用户改在自己终端 `git merge --no-edit origin/main`（`b26fb264`），
+无冲突（CHANGELOG 自动合并，384 条目唯一、零冲突标记）。71 个提交未碰本版文件及其依赖（`vrp_signal` / `hive_logger` / `ledger_io` / 两份测试）。
+生产复核（只读）：账本 693 行、**已结算 184 行**（10-12 时 65 行）；10-12 之后无零快照日 ⇒ 仍无实际丢失。合入后测试：相关 258 条绿；**全量（05:44–05:55 PDT）抓到两条本版与 main 新守卫的冲突**（都是合并后才可能出现的）：
+  - `tests/test_data_root_default.py::TestDataRootFromEnvHasOneImplementation`（v0.45.488）：`_cache_dir_hint` 里 `k != "ALPHA_HIVE_HOME"` 是直接点名该键的新位置。
+    改为 `resolve_data_root({"HOME": os.environ.get("HOME", "")})`（只给 HOME 求缺省根，语义不变），不登记新位置。
+  - `tests/test_alphabot_premium.py::TestExternalReasonsAreComplete`（新）：按函数名 `"record_day"` 用 AST 收 reason 码，本版把产出 reason 的本体挪进了 `_record_day_with_info` ⇒ 收到空集，
+    其对照断言 `"rv_30d_missing" in vrp` 正确地红了（没有静默放行）。改为扫 `_record_day_with_info`。
+  - 变异（scratch 副本）：N1 本体加一个未登记 reason ⇒ 码表守卫红；N2 缺省根改回点名该键 ⇒ 键位置守卫红；N3 缺省根吃进显式设定（提示永不触发）⇒ 错根提示测试红；M19 仍红。
+  - 同一轮另 1 error 是真实数据根闸：变化只在 `replay_ohlc_state/`（17，05:52:28–36 成批）与 `earnings_cache/`（11 删除），本版代码到不了这两处；
+    同时段「重放 10-12 扫描」会话在跑（名字与目录吻合）——归因到并发写者只有时间 / 名字 / 可达性三条旁证，没有直接证据。
+  修后复跑全量（05:59–06:12 PDT）：1 failed（已知 `TestCoverageHorizon`）、9856 passed、84 deselected、2 xfailed（合计 = selected 9859），**无 error**。
+
+### 未做
+- `BASE_DIR` / `STATE_DIR` / `SIGNALS_FILE` 仍是 import 期冻结（`test_paths_not_frozen_at_import` KNOWN 存量），未动。
+- v0.45.380（earnings）10-16 已合入 main（`571569a1` / `ba2d88b0`），本版不依赖它。复核本版二次检查 #2、#3 两条在它身上的情况：#2 **已处理**（`_scan_with_info` 也挂了锁）；#3 **未处理**——判定改成了 `explicit_data_root() is None`，但文案仍是「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录」，v0.45.422 起这句是假话（未设读的是生产根；生产显式设了该变量，故只在手动跑时误导）。不在本版范围，已另报。
+- 09-24 / 09-25 为什么没有期权快照：待验证（同 v0.45.380，不在本版范围）。
 
 ## [0.45.383] — 2026-09-29 — Fixed/Changed：日线完整性校验——`fetch_historical_hv` 缺交易日 ⇒ 重取一次、仍缺则 `iv_rank` 置空并计数；**改评分输入**，世代边界登记 09-28（作废 0 条 final_score 样本）
 
@@ -4560,7 +5567,104 @@ v0.45.371 复查时记下的副作用：期权墙逐行的虚线分隔从 `rgba(
 - `dashboard_renderer.py` 期权墙行 `border-bottom:1px dashed var(--border)`。对底色（`--surface`）：浅色 1.18（原）/ 1.29（371）→ **1.90**；暗色 1.42（原）/ 1.24（371）→ **1.36**（略低于原值、高于 371，暗色 `--border` 本身就是这个亮度，与全站其余分隔线一致）。
 - 纯装饰分隔，不承载信息；无新增测试（`test_dashboard_css_vars_defined` 已覆盖 `--border` 已定义）。全套 7374 passed / 2 xfailed。
 
-## [0.45.380] — 2026-09-29 — 占位（进行中：earnings_vol_signal.scan 零快照时不再清空当天账本行（含已结算行））
+## [0.45.380] — 2026-09-29 — Fixed：`earnings_vol_signal.scan` 零快照时不再清空该日账本行（含已结算行）；部分重跑改为按票 upsert、没重算到的旧行保留；CLI 零快照退出 3 并点名读取目录
+
+### 事故形状（v0.45.382 同形普查里「只列不修」的第一条；那一版开工时编号 0.45.379）
+- `scan(as_of)` 遍历完 `_iter_snapshots(cdir, as_of)` 后**无条件** `_write_jsonl(SIGNALS_FILE, 其它日期的行 + 本次信号)`。
+  零快照 ⇒ 该日已有的行（含 `settle_signals` 回填过的）整批删掉；M4（v0.45.104）的结算字段搬运只救得了本次重新产出的票；
+  部分快照缺失 ⇒ 只删缺的那几只。`__main__` 印一个空列表 + 汇总、退出 0，与「当天确实没有合格信号」无从区分。
+- 触发：cache 目录找错（不带 `ALPHA_HIVE_HOME` 手动跑 ⇒ `PATHS.home` 回落到代码目录，那里的 `options_paper_state/`
+  被 git 跟踪 ⇒ 改写的是陈旧的已提交副本）/ 当天快照缺失。（09-29 写本条时如此；**v0.45.422 起 env-less 缺省就是生产数据根 `~/alpha-hive-data`**，
+  同一个手动跑读写的是生产——见 v0.45.513。）
+  更正任务描述一处：缺省 `"cache"` 不是 cwd 相对——`_resolve_dir` 把相对路径挂在 `BASE_DIR`（import 期冻结的 `PATHS.home`）下。
+- **复现**（数据根指向 scratch，里面拷的是 checkout 里被跟踪的 334 行账本）：改前 `earnings_vol_signal.py 2026-09-22` ⇒
+  exit 0、日志只有 INFO「快照 0，合格 0（-）」、账本 334 → 304 行（09-22 的 30 行没了）；
+  改后 ⇒ exit 3、「no snapshots found in <scratch>/home/cache（目录不存在）」、sha256 不变。
+  改后 env-less 在 worktree 里跑 ⇒ exit 3 + 「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录」，被跟踪的账本与 `git status` 均无变化，未建出 `cache/`。
+  （这句提示 v0.45.422 起是假话，v0.45.513 改为「显式指向非缺省根」才报。）
+- **生产**（只读核对）：账本 364 行，其中已结算 10 行，都暴露在这条路径上。**09-24、09-25 日更钩子真的走过零快照分支**
+  （`~/alpha-hive-data/cache` 该两日 0 份 `options_snapshot`；日志 INFO「快照 0，合格 0（-）」+「期权纸面腿已更新 … 信号 0」）——
+  那两天账本里原本没有该日行，所以没删到东西，但在日志里与「当天没有合格信号」一模一样。那两天为什么没有期权快照：待验证（不在本版范围）。
+  另：09-23 cache 有 22 份快照、账本无 09-23 行；当前 `alpha_hive.log` 里有该日「蜂群协作启动 2026-09-23」与 ML 报告落盘，**但没有**「财报事件波动率信号 2026-09-23」行 ⇒ 扫描起了、钩子没留痕（同日 CBOE 报 `last_trade=2026-09-22` 陈旧、弃用，
+  22/30 份快照大概率与此有关）。原因待验证，与本 bug 无关。（轮转的 `.log.1–.3` 覆盖的是别的日期区间，不含这几天，不构成证据——此前写「含轮转」是凑数。）
+
+### Fixed
+- `earnings_vol_signal.py`
+  - `scan()`：零快照 / 有快照但一条信号都没算出 ⇒ **不写账本**（连原子替换都不做），返回 `[]`，WARNING 写明读取目录、
+    它在不在、该日已有几行原样保留。`_snapshot_dir_diagnosis` 分四种：目录不存在 / 有该日文件但都读不出 / 只有别的日期（给出最新日期）/ 空目录；
+    `_cache_dir_hint` 命中才附：未设 `ALPHA_HIVE_HOME`（v0.45.513 改为显式且 ≠ 缺省根）；`ALPHA_HIVE_CACHE_DIR` 与读取目录不同（快照写者 `options_analyzer` 用 `PATHS.cache_dir`
+    读它，本模块读 `BASE_DIR / "cache"`，不读它）。诊断只读：不建目录，也不调会 mkdir 的 `PATHS.cache_dir` getter。
+  - 落盘改为按 `(ticker, as_of)` **upsert**：本次重算到的票替换旧行（M4 搬运不变）；该日其余旧行**原位保留**，WARNING 列出票并标出其中已结算的。
+    **决定**（写进 `scan` docstring）：缺快照不是「信号作废」的证据，只是这次没有输入；已结算样本删了补不回来；
+    与 `sell_strike_ledger._record_rows`（空批不改、按票 upsert）同一语义。要撤掉某条信号请直接编辑账本。同样的快照重跑仍字节幂等。
+  - 返回值不变（只含本次算出的信号），日报钩子与 `options_paper_leg` 无需改。本体拆成 `_scan_with_info()`（多返回诊断 dict），`scan()` 取第一项。
+  - `__main__` → `main(argv)`：零快照 ⇒ stderr「❓ <日期>：no snapshots found in <目录>（诊断）——未改写 <账本>（该日已有 N 行原样保留）」、**退出 3**；
+    有快照但零信号 ⇒ 同样退出 3；正常 ⇒ 原输出、退出 0，有保留旧行时 stderr 列出。
+
+### 调用方（行为变化是有意的）
+- `alpha_hive_daily_report._post_scan_enrichment`（日更钩子）：零快照日从「静默改写账本 + INFO」变为「不写 + WARNING」；仍返回 `[]`，
+  `settle_signals` 与 `options_paper_leg.run_for_date(signals=[])` 照跑（旧信号照样结算、持仓照样盯市 / 平仓），与改前一致。
+  **没有改成抛异常**：钩子的 try 包着三步，抛了会连带跳过当天的结算与平仓。
+- `options_paper_leg.run_for_date(signals=None)` 的兜底 `signals_for_date(as_of) or scan(as_of)`：零快照照旧拿到 `[]`，只是不再顺手改写账本。
+  `render_markdown` 读 `signals_for_date`，部分重跑后会连保留的旧行一起显示——它们本就是该日由真实快照算出的信号。
+- `tests/test_sell_strike_integration.py` 把 `scan` 桩成 `lambda: []`，不受影响。编排器在非交易日整体跳过（`is_trading_day.py`），新 WARNING 不会每个周末报一次。
+
+### Tests
+- `tests/test_earnings_vol_signal.py` +8 条（全离线、tmp 目录）：
+  - `TestScanNeverDeletesRowsItDidNotRecompute`：零快照 × 三种目录形态（缺目录 / 空目录 / 只有别的日期）⇒ 账本**字节与 inode 都不变**
+    （夹具刻意用紧凑分隔符写：upsert 语义下「内容相同的改写」只有这样才抓得到）、WARNING 含目录路径与在 / 不在、缺的目录读完仍不存在；
+    有快照但全部计算失败 ⇒ 不写；部分重跑 ⇒ 已结算行与未重算行逐字段不变、WARNING 列出并标已结算、再跑一次字节幂等；两种错目录提示。
+  - `TestMainExitCodes`：真跑 `__main__` 子进程（继承 `_isolate_env` 的沙箱 `ALPHA_HIVE_HOME`，cwd=tmp）⇒ 退出 3、stderr 点名 `<tmp>/cache`、账本不变；`main()` 有快照 ⇒ 退出 0。
+- **真跑变异**（`PYTHONDONTWRITEBYTECODE=1`、每轮用 Python 删 pyc、`--maxfail=1000`、锚点唯一断言、每轮 passed+failed = collected 51、
+  还原后 sha256 核对并复跑 51/51 绿）：
+  - M0 改动前真实文件（`git show b7a9fb5f:`）⇒ 8 红：零快照 3 条红在「零快照改写了账本」、零信号那条红在字节、部分重跑红在该日行被删、
+    CLI 红在退出码 0（误报本身）；错目录提示那条红在「没有 WARNING」（新功能，无旧行为可比）；`main()` 那条是 AttributeError（新接口，正向对照，不算证据）。
+  - M1 删「没有信号就不写」守卫 ⇒ 5 红（改写的内容其实相同——紧凑分隔符夹具让字节不同；纯 inode 那一档由 M9 单独证明，见下）；M2 upsert 改回整日替换 ⇒ 1；M3 诊断不分在不在 ⇒ 1；
+    M4 WARNING 只写目录末级名 ⇒ 3；M5 CLI 零快照退 0 ⇒ 1；M6 保留旧行不报 ⇒ 2；M7 未设 HOME 不提示 ⇒ 1；M8 诊断顺手建目录 ⇒ 1；
+    **M9 零快照时原子重写相同字节（只有 inode 变）⇒ 3 红**（此前「字节与 inode 都不变」里 inode 那半从未被单独证明过）；M10 措辞退回「无快照」⇒ 1。
+- ruff 通过。全套（基线 `9e6bc675` = v0.45.378 + 本版占位）：7384 passed、1 failed、82 deselected、2 xfailed（合计 = collected 7469）；
+  唯一红是 `test_economic_calendar::TestCoverageHorizon`（BLS 未发布 2027 日程的设计性告警，同 v0.45.377 / v0.45.382，与本改动无关）。
+  合入 origin/main（v0.45.379 / 381 / 382）后重跑：7439 passed、同 1 failed、82 deselected、2 xfailed（= collected 7524）；
+  其后删掉诊断 dict 里两个无人读的键（`cache_dir_exists` / `written`），变异台账原样重跑结果一致。
+
+### 二次检查（本版自查，同日）
+- ⚠️ **诊断措辞会说错病因**（已修）：部分重跑保留旧行时 WARNING 写「（无快照）」，但保留的原因还有「快照在、计算抛异常」和「快照是坏 JSON」——
+  后两种下 WARNING 会把 `snapshot 存在` 说成 `无快照`，正是本版要治的那类误诊。账本本身是安全的（旧行、含已结算，都保住了）。
+  改成「快照缺失 / 读不出 / 计算失败，原因见上方 WARNING」；`test_kept_rows_warning_does_not_claim_missing_snapshot_when_it_exists` 用真的抛异常 + 坏 JSON 两种夹具钉住（M10 打红、M0 打红）。
+- 上面 09-23 那条日志结论收窄（见生产段）：原写「钩子那天没跑到」证据不够，改为「扫描起了、钩子没留痕」+ 待验证。
+- 全部变异在最终文件上重跑（基线 collected 52，每轮 passed+failed = 52，还原后 sha256 一致、52/52 绿）。
+
+### 合入 main 后的适配（2026-10-16，分支晾了两周，main 已前进 ~370 个提交）
+`earnings_vol_signal.py` 与 main 冲突（main 上 v0.45.424 / 428 / 452 / 454 / 500 都改过 `scan`），**以 main 为底把本版改动重新套上去**，没有拿旧文件硬合：
+- **main 的缺陷原样还在**：`scan` 末尾仍是 `existing = 其它日期的行; _write_jsonl(existing + signals)`，零快照照样删该日行。本版修复仍然必要。
+- 保留 main 的：`@ledger_io.locked_by` 账本锁、`gex_fn` / `gex_ctx` / `shadow_event`、收盘后 gex_ctx 的同日取舍（`_usable_capture`，搬运进按票 upsert 的循环）、
+  `upcoming_fn` 缺省读磁盘观测（`earnings_calendar`，不再有 `watcher` 参数）。
+- **锁**：本体 `_scan_with_info` 与 `scan` 两处都挂 `locked_by`（锁可重入）。CLI `main()` 直接走本体、绕过 `scan` 的装饰器——
+  只守 `scan` 时去掉本体上的装饰器**没有任何测试变红**（合入后变异 M12 暴露），CLI 路径会悄悄失锁。补 `test_cli_entry_reads_the_ledger_under_the_lock`（零快照 / 有快照两路，M12 ⇒ 2 红）。
+  零快照守卫放在 `load_signals()` **之后**：main 的 `test_read_modify_write_entrypoints_hold_the_lock[earnings_vol_signal-scan]` 用零快照目录探「读账本时持锁」，守卫放前面它会变成空探针。
+- **GEX 读者白名单**（`tests/test_straddle_gex_shadow.py::TestReaders`）：真正读 `gex_ctx` 的写入点现在是 `_scan_with_info`（`scan` 只剩转发）。`WRITERS` 里 `scan` 换成 `_scan_with_info`，
+  并加一条断言「`scan` 不得再读 `gex_ctx`」——它哪天又开始读，就该回来对一遍白名单。
+- **全量跑出 3 条守卫红，都是本版引入、都按守卫规则修（没有加豁免）**：
+  ① `test_data_root_default`（直接写 `"ALPHA_HIVE_HOME"` 键要登记）：`_cache_dir_hint` 改用 `hive_logger.explicit_data_root()`——
+  这正是规则第一问「能不能改经 hive_logger」的答案，不新增登记，且「空串也算没设」与数据根的唯一解析一致；
+  ⚠️ 判据换了来源、**文案没换**：仍说「回落到代码目录」，422 之后是假话（v0.45.384 二次检查 #3 同形），v0.45.513 改；
+  ② `test_price_history_default_paths`（新增 cwd 相对缺省 `"cache"`）：`_scan_with_info` 的两个路径参数去掉缺省值，`scan` 显式传入、CLI 显式传同值；
+  ③ `test_earnings_event_shadow::TestReaders`（`shadow_event` 写入点白名单）：与 GEX 那条同形，`scan` → `_scan_with_info`，并断言 `scan` 不得再写它。
+- 变异在合并后的最终文件上重跑；M0 钉 main 的提交（`6f570def`，不含修复），旧钉 `b7a9fb5f` 已不是 main 的行为：基线 collected 55（后加 2 条 = 57，下为最终 57 条上的结果），
+  M0 ⇒ 11 红；M1 5 / M2 2 / M3 1 / M4 3 / M5 2 / M6 2 / M7 1 / M8 1 / M9 7（含「只有 inode 变」）/ M10 1 / **M12 2**；
+  **M11 丢掉 gex_ctx 搬运** ⇒ 本文件 0 红（那是 main 的行为，不属于本版测试）→ 在 main 的 `test_straddle_gex_shadow` 里 2 红（`TestSameDayCapture`）；
+  **M13 `scan` 包装不持锁** ⇒ main 的 `test_ledger_io_v2` 1 红。即重套之后，main 对这两处的守卫仍然有牙。
+
+### 同形普查（全仓 `get("as_of"|"date") != as_of` 式重写，只列不修）
+- ⚠️ `vrp_signal.record_day`（**同一个日更钩子紧接着调用**）：`keep = 其它日期的行` + 本次行 ⇒ 零快照同样删光该日行，
+  含 `settle()` 回填的 `rv_forward` / `vrp_realized`（v0.45.104 的搬运同样只救重新产出的票）；缺省目录还走会 mkdir 的 `PATHS.cache_dir`。已另开任务。
+- `options_paper_leg` / `paper_portfolio` / `portfolio_greeks` 的 equity 曲线重写：每日恒写一行重算的 NAV，不是数据驱动的行集合，零输入不删行——非同形。
+- `sell_strike_ledger._record_rows`：早已「空批不改、按票 upsert」，本版照抄其语义。
+
+### 未做
+- 读者 / 写者目录不一致（本模块 `BASE_DIR / "cache"` vs `options_analyzer` 的 `PATHS.cache_dir`）只加了提示，没改默认值：生产只 export `ALPHA_HIVE_HOME`，两者相同。
+- `BASE_DIR` / `STATE_DIR` / `SIGNALS_FILE` 仍是 import 期冻结（`test_paths_not_frozen_at_import` KNOWN 存量），未动。
+- ~~`_load_jsonl` 静默跳过坏行~~（**已作废**：合入时 main 的 v0.45.452 已把账本读改成严格——坏行 ⇒ `LedgerCorrupt`，在写之前就抛，本版的 `load_signals()` 在零快照守卫之前调用，坏账本一样会先停下）。
 
 ## [0.45.379] — 2026-09-29 — Fixed（数据）：DE / XOM / COST / CVX 期权快照 2026-09-23 的 `iv_rank` / `iv_percentile` 重算（沿 v0.45.372 做法；仅这两个字段）
 
