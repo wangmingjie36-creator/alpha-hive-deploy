@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.508] — 2026-10-16 — 占位（进行中：10-14 量比取错日 ⇒ QUARANTINE 观测层，维度 IC H1 当天失效）
+
 ## [0.45.507] — 2026-10-16 — Fixed（仅测试基础设施）：两道 session 级总闸「逐文件写入时刻落在哪条测试」的定位按**本机 mtime 精度**放宽——Linux 内核按 tick 盖 inode 时间戳，mtime 可比写入那一刻的 `time.time()` 早一个 tick，call 开头的写入被标成 setup；`test_root_data_guard` 两条时间线测试因此在 Linux CI 上恒红（macOS 绿）
 
 **症状。** CI `tests.yml`（run 38884127475，v0.45.505 那轮）3 条红：设计红 `TestCoverageHorizon`（等 BLS 2027 日程，未动）+
