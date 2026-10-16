@@ -1164,6 +1164,13 @@ class TestStep2:
         assert (b_level, b_frag) == (level, expected)
         assert_message_carries_bash_lines(out["message"], b_texts)
 
+    def test_rc4_is_price_gate_not_generic_failure(self, tmp_path):
+        """v0.45.504：输入闸拒绝（退出码 4）有自己的说法，不落进「失败但继续进行」那支。"""
+        out = run("2", 4, data_dir=tmp_path / "empty", timeout=3600)
+        f = out["steps_fragment"][S2]
+        assert f["status"] == "failed" and f["reason"] == "price_gate" and f["rc"] == 4
+        assert out["level"] == "error" and "输入闸" in out["message"] and "失败，但继续进行" not in out["message"]
+
     def test_timeout_message_carries_budget(self, tmp_path):
         assert "⏰ Step 2 超时（>3600s），蜂群分析被终止！" == run("2", 124, timeout=3600)["message"]
 

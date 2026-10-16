@@ -965,6 +965,16 @@ OUTCOMES_CONFIG = {
     "max_network_fetches_per_run": 50,
 }
 
+# ==================== 扫描输入闸（v0.45.504）====================
+# 预取后「取不到可用现价」的标的占比**超过**这个比例 ⇒ 扫描在任何持久写入之前停下：不写 predictions / signal_archive /
+# report_snapshots / .swarm_results / 账本，不生成日报、不部署，退出码 4（`alpha_hive_daily_report.PRICE_GATE_EXIT`）。
+# 编排器见 4 会等一会儿、重新探活代理再跑（`scripts/alpha-hive-orchestrator.sh` Step 2）。
+# 「可用」= 有限正数价、`data_source` 不是 fallback、没打 `_data_unavailable`。单只取不到（如 BRK-B 映射问题）不受影响。
+# 2026-10-12：30/30 FALLBACK、现价 0，照样落库、发布、status=success（CHANGELOG v0.45.484 调查）。
+SCAN_PRICE_GATE = {
+    "max_unavailable_ratio": 0.5,
+}
+
 # ==================== 动态蜂群配置 (Phase 2) ====================
 SWARM_CONFIG = {
     "enabled": True,

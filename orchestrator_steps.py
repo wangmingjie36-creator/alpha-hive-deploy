@@ -1034,6 +1034,12 @@ def _interpret_step2(ctx: _Ctx) -> Tuple[str, List[str], Dict[str, dict]]:
         return ("warn", [f"⚠️ Step 2 已跑完（耗时 {ctx.dur_text}s，日报已生成）但退出码 1", why],
                 {key: frag})
     # failed（STEP2_RC 其他，else）
+    if ctx.rc == 4:
+        # v0.45.504：输入闸（`alpha_hive_daily_report.PRICE_GATE_EXIT`）——多数标的取不到可用现价，在任何持久写入之前停下。
+        # 不是「失败但继续」：本轮刻意什么都没写；编排器已按 STEP2_GATE_RETRIES 重试过（见日志「输入闸拒绝」）。
+        return ("error", [f"🛑 Step 2 被输入闸拒绝（耗时 {ctx.dur_text}s）：多数标的取不到可用现价——"
+                          "未写预测 / 归档 / 快照 / 账本，未生成日报、未部署（详见 scan_timing.extra.price_gate）"],
+                {key: {"status": "failed", "reason": "price_gate", "rc": 4, **ctx.dur()}})
     parts = [f"⚠️ Step 2 失败，但继续进行（耗时 {ctx.dur_text}s）"]
     frag = {"status": "failed", **ctx.dur()}
     if ctx.rc == 1:

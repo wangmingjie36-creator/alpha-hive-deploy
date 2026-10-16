@@ -131,6 +131,16 @@ F&G 挪到它真正适用的层次：组合层的仓位敞口控制——极度�
       精确 0/7、决策 2/7——逐日重锚照样会红，不是恒绿。
       **未动**：窗口、变体、统计量、检视点、α、盲化、SELFPROOF_MIN_RATE、分母、四元组、种子。修订只基于 A 的重放，
       没有算或看任何周度差 / 效应量（`decide()` 从未走到出统计量的分支，2/15 个合格周）。
+      【事后修订 v0.45.503，2026-10-16 —— 改的是**样本里少一天**，不是判定规则】
+      2026-10-12 生产扫描遇本机出站故障、30/30 只全源 FALLBACK；生产纸面组合当天读的是零价 / 样本链上的快照，
+      0 开 0 平。10-13 该日由事后整日重放补算并**覆盖**了 `report_snapshots/*_2026-10-12.json`（v0.45.484）——
+      此后重放读到的是生产当天从没见过的快照：A 会开出生产没开的 VKTX 空单（a_only 诊断随之变动），B 同理。
+      修订 = 前瞻 `run()` 的快照日剔除 `signal_archive.FORWARD_TEST_EXCLUDED_DAYS`（目前只有 10-12），两臂的连续
+      重放与逐日重锚自证都不跑那天；输出 `forward_test_excluded_days` 照实列出。逐日重锚不受影响：10-13 那段的
+      锚点是生产 10-12 跑完后的状态（不比生产前一次运行旧）。维度 IC / 共振加成两份预注册已在 v0.45.484 同样排除。
+      **未动**：窗口、变体、统计量、检视点、α、盲化、自证（阈值、分母、四元组、逐日重锚）、种子、锚点。
+      修订依据是写回前后的自证对照（判定用的 26/26 不变、只有不进判定的 a_only 12 → 9）；按盲化只看了进度与自证率，
+      `decide()` 从未走到出统计量的分支（修订时 4 个合格周），修订不受结果影响。用户 2026-10-16 决定。
 统计量 两个变体各自的 `equity_curve.jsonl` 按 ISO 周取"本周首个交易日 NAV"，相邻两个
       取值点间的百分比变化即该周收益率；ΔNAV_pct = B周收益率 − A周收益率。
       非极端 F&G 日两个变体的仓位应逐笔相同 ⇒ 多数周 ΔNAV_pct=0——这是**预期正常**，
@@ -1252,6 +1262,18 @@ def run(insample: bool = False, today: Optional[str] = None) -> Dict:
     today_d = today or dt.date.today().isoformat()
     since, before = (pp.CONFIG["bootstrap_date"], FORWARD_START) if insample else (FORWARD_START, today_d)
     dates = _snapshot_dates_in_window(since, before)
+    excluded: List[str] = []
+    if not insample:
+        # 事后修订 v0.45.503：协议排除日（`signal_archive.FORWARD_TEST_EXCLUDED_DAYS`）A / B 两臂与自证都不重放；
+        # 前瞻模式的每个返回都带 `forward_test_excluded_days`（见 `_tag`）。
+        import signal_archive
+        excluded = [d for d in dates if signal_archive.forward_test_excluded(d)]
+        dates = [d for d in dates if d not in excluded]
+
+    def _tag(res: Dict) -> Dict:
+        if not insample:
+            res["forward_test_excluded_days"] = excluded
+        return res
 
     if not insample and not dates:
         days = (dt.date.fromisoformat(today_d) - dt.date.fromisoformat(FORWARD_START)).days
@@ -1261,7 +1283,7 @@ def run(insample: bool = False, today: Optional[str] = None) -> Dict:
         if days > STALE_DAYS:
             res["stale"] = True
             res["reason"] = f"登记后 {days} 天仍无前瞻样本 —— 扫描停了，或快照不在 {pp.SNAPSHOT_DIR}"
-        return res
+        return _tag(res)
 
     seed: Optional[Dict[str, bytes]] = None
     if not insample:
@@ -1269,20 +1291,20 @@ def run(insample: bool = False, today: Optional[str] = None) -> Dict:
             seed = load_seed()
         except SeedError as e:
             # 绝不退回空沙箱：那会让自证在真实数据上必红，且原因会被读成「评分链被改」。
-            return {"status": "cannot_judge", "mode": "forward", "n_dates": len(dates),
-                    "reason": f"窗口起点种子不可用：{e}"}
+            return _tag({"status": "cannot_judge", "mode": "forward", "n_dates": len(dates),
+                         "reason": f"窗口起点种子不可用：{e}"})
         try:
             plan = _forward_anchor_plan(seed, dates)
         except SeedError as e:
             # v0.45.408：同理绝不退回连续重放——那正是逐日重锚要修掉的东西。
-            return {"status": "cannot_judge", "mode": "forward", "n_dates": len(dates),
-                    "reason": f"逐日锚点不可用：{e}"}
+            return _tag({"status": "cannot_judge", "mode": "forward", "n_dates": len(dates),
+                         "reason": f"逐日锚点不可用：{e}"})
 
     with tempfile.TemporaryDirectory(prefix="fg_gate_fwd_") as tmp:
         if insample:
             return evaluate(dates, since, before, Path(tmp), insample=True, seed=None)
-        return evaluate(dates, since, before, Path(tmp), insample=False, seed=seed, plan=plan,
-                        ohlc_store=_forward_ohlc_store())
+        return _tag(evaluate(dates, since, before, Path(tmp), insample=False, seed=seed, plan=plan,
+                             ohlc_store=_forward_ohlc_store()))
 
 
 def _forward_ohlc_store():
