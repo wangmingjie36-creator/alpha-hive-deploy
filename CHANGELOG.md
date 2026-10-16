@@ -5,7 +5,40 @@
 
 ---
 
-## [0.45.506] — 2026-10-16 — 占位（进行中：v0.45.495 引入 tools/clockshift 后四条全仓守卫红——按各守卫规则登记 / 改代码）
+## [0.45.506] — 2026-10-16 — Fixed（仅测试 / 分类表）：v0.45.495 把拨钟 harness 搬进 `tools/clockshift/` 后，四条全仓守卫在 origin/main 上恒红——四处全是代码 / 工具，按各守卫自己的规则登记进对应类别；补 sitecustomize 串接的行为测试（`KNOWN` 要求「写明守它的测试」，此前没有）
+
+**症状。** 干净检出 59dcb325 / afb6692b / 0f0c5ad5 上四条红：
+`test_ledger_writes_go_through_ledger_io::test_no_unregistered_file_writer`、`test_migrate_data_root::test_every_tracked_top_level_entry_is_classified`、
+`test_paths_not_frozen_at_import::TestFileDerivedSpeciesDoesNotSpread::test_no_new_file_derived_paths`、`…::TestFrozenViaModuleLevelCall::test_no_new_route[__file__]`。
+
+**为什么没人看见。** CI `tests.yml` 在 main 上自 59dcb325 起每轮都是 failure（最近一轮 run 38880626358：7 failed = 这 4 条 + 设计红
+`TestCoverageHorizon` + 两条 `test_root_data_guard` 时间线测试）。后两类 495 之前就红、495 条目里已记为「CI 既有问题」⇒ 新增的 4 条
+落进一个**本来就红**的 CI，结论从「红」到「红」，没有任何东西变色。拨钟审计的差分只报「拨钟红而基线绿」，这 4 条在基线里、按设计不计入
+（c39baa27 起逐条列出，但只在审计摘要里）。495 本机验证为何没撞上**未核实**（待验证；一种可能是验证时新文件尚未 `git add`——
+三条守卫的文件清单都来自 `git ls-files`）。
+
+### Fixed（逐条按守卫规则判，零语义放宽、零整目录豁免）
+- **`tools/clockshift/audit.py::main` 的 `raw_append`** → `WRITERS` 登记为「只给人看」：追加的是 `$GITHUB_STEP_SUMMARY`
+  （GitHub Actions 渲染给人看的步骤摘要，无代码读回）；不是账本、不是状态、不是缓存，不占任何「待迁移」上限。`--log-dir` 那处 `open("w")`
+  写纯文本日志，本来就不在六种落点里。
+- **顶层 `tools`** → `migrate_data_root.SKIP_EXACT` 登记为代码目录（与 `scripts` / `alphabot` 同列）；check-old 不再把它算 UNKNOWN。
+- **`audit.HERE` / `clockshift.HERE`（`__file__` 派生常量）** → `TestFileDerivedSpeciesDoesNotSpread.KNOWN` 的 A 类（代码锚点）：
+  两处都是 harness 自己的目录，用途是插进子进程 `PYTHONPATH`，让 `sitecustomize` / `-p clockshift` 能加载到——要的就是「代码在哪」，
+  改成 `PATHS.*` 会让拨钟轮在数据根下找不到 harness。`audit.HERE` 同时进 `MUST_STAY_FILE_ANCHORED`（防「一刀切」改走，参数化测试核它
+  解在仓库内且存在）；**`clockshift.HERE` 刻意不进**：那条参数化测试要 import 模块，而 `clockshift` 导入即安装、`INSTALLED` 是模块级
+  全局——以 `tools.clockshift.clockshift` 之名再导入一次就是另一份模块对象，在 CI 拨钟审计的轮次里会**二次拨钟**。它指错由
+  `test_clockshift_harness` 的子进程用例接住（R1 那三条）。
+- **`sitecustomize.py` 模块级 `_chain_next_sitecustomize()`（经函数体求值 `__file__`）** → `TestFrozenViaModuleLevelCall.KNOWN["__file__"]`：
+  **不冻结**——`here` 是函数局部，只用来在 `sys.path` 上认出本目录、执行排在其后的下一个 `sitecustomize`，函数返回 None、不存任何路径。
+  该类要求条目写明守它的测试，此前没有 ⇒ 新增 `tests/test_clockshift_harness.py::test_sitecustomize_chains_to_the_next_one[0/7]`：
+  `PYTHONPATH=<harness>:<另一个带 sitecustomize 的目录>` 起子进程，断言后者照常执行、拨钟照装（偏移 0 与 7 各一次）。
+
+### 验证
+- 四条守卫所在文件 + harness 测试：168 passed。
+- 新测试变异（逐处真跑、各 2/2 红）：`here` 改成 `os.getcwd()`；删掉模块末尾那次调用。
+- 全量（`--maxfail=1000`，本机）：**9769 passed、1 failed**——唯一红是设计红 `TestCoverageHorizon`（cpi 剩 55 天 / gdp 剩 13 天，BLS 2027 日程未发布，与本改动无关）。
+- `ruff check` 改动文件全绿。
+
 
 ## [0.45.505] — 2026-10-16 — 占位（进行中：Twelve Data 量比兜底只在末根 = 最近已收盘交易日时采用，否则拒收并告警；输出 volume_as_of）
 

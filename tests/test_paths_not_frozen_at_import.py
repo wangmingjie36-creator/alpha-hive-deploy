@@ -533,6 +533,8 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("health_check.py", "PROJECT"),               # git -C <仓库>
         ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
         ("collect_data.py", "_SCRIPT_DIR"),           # 运行环境探测
+        ("tools/clockshift/audit.py", "HERE"),        # harness 自己的目录：拨钟轮把它插到子 pytest 的 PYTHONPATH 首位（sitecustomize / `-p clockshift` 从这里加载），v0.45.495
+        ("tools/clockshift/clockshift.py", "HERE"),   # 同上：补进拨钟下每个子进程的 PYTHONPATH；不进 MUST_STAY——那条参数化测试要 import 它，而 import 即安装（模块名不同 ⇒ `INSTALLED` 是另一份 ⇒ 审计轮里二次拨钟）。指错由 `test_clockshift_harness` 的子进程用例接住
         ("alphabot/macos_app.py", "_DELEGATE"),       # 不是路径：委托子进程的源码文本，其中 `m.__file__` 在子进程里核对 import 到的生成器确实在目标代码目录下（「代码在哪」，v0.45.451）
         # ── B. 仓库内随代码发布的**只读**配置/文档 ──
         ("thesis_breaks.py", "_CONFIG_JSON_PATH"),    # thesis_breaks_config.json，生产只读
@@ -732,6 +734,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("health_check.py", "PROJECT"),               # git -C <仓库>
         ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
         ("collect_data.py", "_SCRIPT_DIR"),           # 运行环境探测
+        ("tools/clockshift/audit.py", "HERE"),        # 拨钟子进程的 PYTHONPATH（v0.45.495；改成 PATHS.home ⇒ 拨钟轮加载不到 harness）
         # 仓库内随代码发布的**只读**配置/文档
         ("thesis_breaks.py", "_CONFIG_JSON_PATH"),
         ("market_intelligence.py", "_BASE"),
@@ -872,7 +875,12 @@ class TestFrozenViaModuleLevelCall:
             # 事故原形回来了（见 `test_hive_logger_regression_is_not_allowlistable`）。
             ("hive_logger.py", "logger", "LogsDirRotatingFileHandler.current_target"),
         },
-        "__file__": set(),   # v0.45.244 实测 0 处
+        "__file__": {
+            # **不冻结**（v0.45.495）：`here` 是函数局部，只用来在 sys.path 上认出本目录、执行排在它之后的下一个
+            # sitecustomize；函数返回 None，没有路径被存进常量或对象。要的是「代码在哪」。行为由
+            # `tests/test_clockshift_harness.py::test_sitecustomize_chains_to_the_next_one` 守。
+            ("tools/clockshift/sitecustomize.py", "<expr>", "_chain_next_sitecustomize"),
+        },
     }
 
     _CTORS = ("__new__", "__init__", "__post_init__")
