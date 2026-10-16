@@ -5,7 +5,9 @@
 
 ---
 
-## [0.45.510] — 2026-10-16 — 占位（进行中：signal_archive 所有写入点入库前过 QUARANTINE——补 backfill_fear_greed_legacy + 全仓守卫）
+## [0.45.511] — 2026-10-16 — 占位（进行中：signal_archive 所有写入点入库前过 QUARANTINE——补 backfill_fear_greed_legacy + 全仓守卫）〔原占 0.45.510（b628aa62），与先提交的 cfa3e004「编排器去掉扫描前 Slack 确认」撞号：撞号是 ed9c46b2（v0.45.509）推送时误删了 cfa3e004 那条占位所致，按「先提交者保号」改到 511〕
+
+## [0.45.510] — 2026-10-16 — 占位（进行中：编排器去掉扫描前 Slack 确认——每天 launchd 自己跑、Webhook 早已 404，空等 10 分钟）
 
 ## [0.45.509] — 2026-10-16 — Changed（事后修订）：F&G 敞口门自证在生产日线取不到的故障日按「没有日线」重放（09-24 / 09-25 / 10-14）；Added：生产纸面组合净值行记下本轮日线一次都没取到的标的（`ohlc_unavailable`）/ 时有时无的标的（`ohlc_partial`）
 
