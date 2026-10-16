@@ -308,14 +308,27 @@ def test_yahoo_placeholder_iv_rows_quarantined():
 
 def test_bili_1012_replay_placeholder_iv_quarantined():
     """v0.45.499（用户批准「删掉假 iv」）：10-12 重放写入的 BILI iv_current = 6.25（Yahoo 失败阶梯值，yfinance 链）。
-    形状同 486 的 TMO 08-31：只挡 iv_current，rank 走 hv_proxy 不挡；P/C 不在批准范围。
+    形状同 486 的 TMO 08-31：只挡 iv_current，rank 走 hv_proxy 不挡；P/C 当时不在批准范围（512 另立条目）。
 
-    变红的变异：删该条目；去掉 tickers（同日 29 只真观测被连坐）；signals 加上 iv_rank / put_call_ratio。
+    变红的变异：删该条目；去掉 tickers（同日 29 只真观测被连坐）；signals 加上 iv_rank。
     """
     assert sa.is_quarantined("2026-10-12", "BILI", "options.iv_current")
     assert not sa.is_quarantined("2026-10-12", "BILI", "options.iv_rank")
-    assert not sa.is_quarantined("2026-10-12", "BILI", "options.put_call_ratio")
     assert not sa.is_quarantined("2026-10-12", "NVDA", "options.iv_current")
+
+
+def test_bili_1012_stale_oi_put_call_quarantined():
+    """v0.45.512（用户批准）：同一条 yfinance 链的 P/C 298.46——OI 陈旧（当天 Yahoo OI 几乎清零、只剩冻结旧数）。
+    只挡 BILI 这一天的 put_call_ratio；同链 total_oi / gamma_exposure 未获批准、不挡；别的日子 / 标的不挡。
+    （499 那条原先断言「P/C 不挡」——那是当时的批准范围，512 起改由本条覆盖。）
+
+    变红的变异：删该条目；去掉 tickers（同日 29 只真观测被连坐）；signals 加上 total_oi / gamma_exposure；日期错一天。
+    """
+    assert sa.is_quarantined("2026-10-12", "BILI", "options.put_call_ratio")
+    for sig in ("options.total_oi", "options.gamma_exposure", "options.iv_rank"):
+        assert not sa.is_quarantined("2026-10-12", "BILI", sig), sig
+    assert not sa.is_quarantined("2026-10-12", "NVDA", "options.put_call_ratio")
+    assert not sa.is_quarantined("2026-10-13", "BILI", "options.put_call_ratio")
 
 
 def test_rank_rows_from_placeholder_iv_whose_iv_current_was_purged_earlier():

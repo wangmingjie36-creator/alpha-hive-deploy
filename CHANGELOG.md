@@ -11,7 +11,57 @@
 
 ## [0.45.513] — 2026-10-16 — 占位（进行中：earnings_vol_signal `_cache_dir_hint` 不再把缺省数据根误诊为「回落到代码目录」，照 v0.45.384 vrp_signal 修法）
 
-## [0.45.512] — 2026-10-16 — 占位（进行中：BILI 10-12 put/call 298.46 隔离 + yfinance 期权链 OI 陈旧时不算 P/C）
+## [0.45.512] — 2026-10-16 — Fixed（数据，用户批准）：隔离并清掉 BILI 10-12 的 put/call 298.46；Added：yfinance 期权链 OI 陈旧检查——最近有成交的合约 OI 成片为 0（这一场的 OI 没发布）⇒ P/C / total_oi / 主链 GEX 记不可得
+
+用户 2026-10-16 决定（v0.45.503 查清来源后的两个待决项）。病根：10-12（哥伦布日）Yahoo 全市场 openInterest 几乎清零，只剩几个月没成交的旧合约上冻结的旧数。BILI 当天没有 CBOE 链、走 yfinance，±70% 行权价窗口 + 「按 OI 取前 40」恰好把冻结旧数挑出来 ⇒ $5 put 22,065 ÷ $8 call 74 = 298.46（前后几天 1.03 / 1.02 / 1.08）。它让 Oracle 被压约 0.85、Bear 被抬约 1.06，最终分约 −0.29（v0.45.503）。现行 main 遇到同样的链照样会算出 298。
+
+### 判据怎么来的（实测，只读）
+- 指标：本链（全部到期日、**过滤之前**），以最新一笔成交为参照往前 4 天内有成交的合约里，OI>0 的占比。
+- 10-12 录制（`_manual_backups/…_r2/replay_artifacts/recording_union4`，Yahoo v7 options 原始响应）：30 只**全部 0.00–0.04**。
+- 10-16 正常日实时取（30 只全量，只读请求、零费用）：**0.81–1.00**（最低 BILI 0.81、ABBV 0.83）。
+- 阈值取 0.5（两侧都有很宽的余量）；这类合约少于 20 个 ⇒ 判不了、照旧算。
+- 录制回放进**真实** `fetch_options_chain`：23 只在 4 个到期日窗口里 OI 全 0，已由既有「空 OI ⇒ 退样本」闸挡下；剩下 7 只（BILI / COST / CRM / MU / TMO / WMT / XOM）**全部**判陈旧。旧逻辑给它们算出 298.46 / 8.85 / 0.0 / 1.0 / 7.95 / 0.0 / 0.0。归档里这 6 只当天来自 CBOE 链（快照 `chain_source = cboe`），不受影响；只有 BILI 用了 yfinance。
+
+### Added
+- `options_analyzer`：
+  - `_oi_staleness_rows`（DataFrame → `(成交 epoch 秒 | None, OI)`，NaT / NaN / 缺列都安全）。
+  - `assess_oi_staleness`（纯函数；参照点是本链自己的最新成交，**不读钟**）。
+  - 常量 `_OI_STALE_RECENT_DAYS` = 4、`_OI_STALE_MIN_RECENT` = 20、`_OI_STALE_MAX_RATIO` = 0.5。
+- `fetch_options_chain`（yfinance 分支）在 ±70% 窗口与 top-40 **之前**收集，链上带 `oi_check`。陈旧时：
+  - 记 WARNING；
+  - `snapshot_slot_stats()["oi_stale_chains"]` 按标的去重计数；
+  - `scan_timing` 摘要行显示「/OI陈旧链N只」（仅非零时）。
+- `OptionsAgent.analyze` 在 `oi_check.stale` 时：
+  - `put_call_ratio`、`gamma_exposure`、`total_oi`、`total_oi_raw` 记 None；
+  - `gamma_squeeze_risk` 为 unknown；`flow_direction` 记 **"unknown"**（同 `gamma_squeeze_risk` 先例，不冒充 neutral）；
+  - `data_quality` 从 real 降为 degraded（否则 `scan_coverage_gate` 的「real 却 P/C 为空」会误红）；
+  - 结果带 `oi_check`（样本早退分支补 `None`，schema 一致）。
+- `generate_options_score`：P/C 为 None 时 flow 分取 **1.5**（0–3 量程中点，不奖不罚）。此前这条路径不存在（样本链早退）。
+- 没有 `oi_check` 的链（CBOE、旧缓存、旧快照）**一律照旧**。
+
+### Fixed（数据，用户批准「隔离 BILI 10-12 那条 298.46 的 put/call」）
+- `signal_archive.QUARANTINE` 新增 BILI 2026-10-12 × `options.put_call_ratio` 一条（tickers 限 BILI；reason 带证据）。
+- 清库：`purge_quarantined_signal_rows.py --only-tag v0.45.512 --expect 1 --apply`，`signal_archive` 137,614 → 137,613。
+  - 备份 `db_backups/pheromone_pre_v0.45.512_bili_1012_pc.db`。
+  - 核对：生产该行 0、备份 1；BILI 10-12 其余 5 行 options.* 保留；两边 integrity_check ok。
+  - 不加标记的 dry-run 命中 31 行：另 30 行是 v0.45.508 的批次，不归本次清。
+- `tests/test_signal_quarantine.py`：499 那条原先断言「BILI 10-12 P/C 不挡」（当时的批准范围），改由新测试 `test_bili_1012_stale_oi_put_call_quarantined` 覆盖。
+
+### 未动（待用户定）
+- 同链同源的 BILI 10-12 `options.total_oi` 22,160（前后几天约 16–17 万）与 `options.gamma_exposure` −0.0611，未获批准。
+- 10-14 BILI `options.total_oi` = 0.0（另一个故障日，来源**待验证**）。
+- `calculate_put_call_ratio` 在 call OI 为 0 时返回 1.0（假中性）、key levels / 异动 / 全链 OI（`full_pc_ratio`，10-12 记过 0.0）同样读 OI：本版只管有 `oi_check` 的主链三个量。
+- **未加 IC 世代边界**：只改「OI 陈旧那几天」的 P/C 从假值变 None（更少，不是不同）；正常日逐字节不变。
+
+### Tests
+- 新 `tests/test_yfinance_oi_stale.py`（19 条）。夹具按 BILI 10-12 形状造（自检：不加检查确实算出 298.46）。覆盖：
+  - 判据：阈值严格小于、最少样本、旧合约不进分母、窗口相对本链、无时间戳。
+  - 行解析的各种形状。
+  - 取链：标记、计数去重、WARNING；判据在窗口过滤**之前**算（近价合约推到窗口外仍判陈旧）。
+  - analyze：四个量记 None、不标 real、flow 中点；健康链不变；无 `oi_check` 的链照旧。
+  - 摘要行。
+- 变异 11/11 被杀：analyze 不读检查、只置 P/C 漏 GEX、漏 total_oi、阈值改成 ≤、去掉最少样本、旧合约进分母、DQ 仍 real、不计数、收集挪到窗口过滤之后、隔离连带 total_oi、隔离不限标的。
+- 全量（rebase 到 c3a41b0a 后）：9934 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另有 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加（06:50–06:51，开盘后），不是测试写的。`tools/clockshift/audit.py --days 7/45/400`：两个测试文件新红 0。ruff 全绿。
 
 ## [0.45.511] — 2026-10-16 — Fixed + Added：`signal_archive` 的每个写入点入库前都过 QUARANTINE——补 `backfill_fear_greed_legacy`（v0.45.267 起直写不查）、`data_backup/restore.py` 整库恢复后报出命中行数；新增全仓 AST 守卫
 
