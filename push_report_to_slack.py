@@ -4,7 +4,7 @@
 
 【架构说明 - 2026-03-13】
 频道推送改由 Claude Code 内置 Slack MCP（用户 OAuth 账号）完成，
-Bot Token (xoxb-) 仅保留用于 DM 交互式通知（pre_scan_notify.py）。
+Bot Token (xoxb-) 原仅用于 DM 交互式通知（pre_scan_notify.py，v0.45.510 停用、v0.45.514 已删）。
 
 原因：Bot Token 未被邀请进 #alpha-hive 频道，自动降级到 DM，
 与频道推送意图不符。Slack MCP 使用用户账号，天然有频道权限。
