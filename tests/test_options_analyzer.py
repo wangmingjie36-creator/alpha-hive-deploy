@@ -95,12 +95,12 @@ class TestPutCallRatio:
         calls = [{"openInterest": 0}]
         puts = [{"openInterest": 100}]
         ratio = analyzer.calculate_put_call_ratio(calls, puts)
-        assert ratio >= 0  # 不应崩溃
+        assert ratio is None  # v0.45.516：call 侧为 0 ⇒ 无定义（此前是假中性 1.0）
 
     def test_empty_chains(self):
         analyzer = OptionsAnalyzer()
         ratio = analyzer.calculate_put_call_ratio([], [])
-        assert ratio == 1.0  # 默认中立
+        assert ratio is None  # v0.45.516：算不出 ⇒ None（此前「默认中立」1.0）
 
 
 class TestGammaExposure:

@@ -56,9 +56,63 @@
 - 生效时间：合入后下一个扫描日自动部署，再下一轮才用新编排器；`pheromone_board.py` 随生产克隆快进，次日扫描即生效。核验：编排器日志 `超时限制：5400s（30 只 × 180s/只`。
 
 
-## [0.45.517] — 2026-10-16 — 占位（进行中：09-15 / 09-24 / 09-25 已证实取错窗口的量比与动量登进 QUARANTINE）
+## [0.45.517] — 2026-10-16 — Fixed（数据，用户批准「全部已证实的」）：09-15 NVDA / QCOM 的量比与动量、09-24 的 29 个动量（不含 T）、09-25 的 30 个动量登进 `QUARANTINE`——都已逐位 / 万分之一内复现出错误窗口；全在维度 IC 窗口之前，不碰 H1
 
-## [0.45.516] — 2026-10-16 — 占位（进行中：calculate_put_call_ratio 无数据时不再返回假中性 1.0）
+### 依据（只读复核，详见 v0.45.508 条「09-15 QCOM / NVDA 复核」）
+- **09-15 `price.volume_ratio`（NVDA / QCOM）**：Twelve Data 兜底丢了 09-15 那根 ⇒ 入档的是「最新一根 = 09-14（上一场；09-15 是周二，`is_trading_day` 算）、窗口 = 截至 09-14 的 20 根」的比值。Twelve Data 截至 09-14 的日线只把 09-14 那根成交量换成 131,942,300 / 13,755,800 股（整百股；TD 事后上调了 0.25% / 0.21%）即**逐位复现** 1.01080 / 1.21243。截至 09-15 应为 0.676 / 1.195——NVDA 的 Buzz 量比档因此从应有的 35 记成了 50，QCOM 同档。
+- **09-15 `price.momentum_5d`（NVDA / QCOM）**：465 之前的自攒索引回落（末端 = 上一个扫描日、锚点 ≥5 场前），实际窗口 09-04 → 09-14。Twelve Data 收盘与扫描价两种序列穷举，唯一同时复现两只（误差 < 1e-4）。截至 09-15（4 场）应为 −5.14 / +6.46，归档 −8.42 / +6.76。
+- **09-24 `price.momentum_5d`（29 只）**：全源故障日（30 行 `price_at_predict` 全为 0），30/30 动量来自同一回落；上一个扫描日 09-22（09-23 无扫描）⇒ 末端滞后两场。29 只与「末端 09-22、往前 5 场」逐一相符（< 0.02）。**T 不登**：差 0.035、复现不出（归档 −6.098；截至 09-24 的 4 场应为 +0.197——显然也不是当天窗口，但「出自哪个窗口」没证出来，待验证）。
+- **09-25 `price.momentum_5d`（30 只，含 T）**：又一个全源故障日；30/30 与 09-24 归档**逐位相同**——09-24 没有可用价、索引没有新点，窗口仍止于 09-22（滞后三场）。T 在内的理由：不论出自哪个窗口，−6.098 都不是 09-25 的（4 场应为 −0.275）。
+
+### Fixed
+- `signal_archive.QUARANTINE` 加 4 条（`reason` 以 `v0.45.517` 开头，均带 `tickers`，只隔离观测层 `price.*`；`buzz.comp.*` / Agent 评分不动，理由同 508）。生产库只读核对：命中恰好 **63 行**（09-15 量比 2 + 动量 2、09-24 动量 29、09-25 动量 30），无其它命中。
+
+### 影响面
+- 全在 `FORWARD_START`（10-12）之前 ⇒ 维度 IC H1 / H2 不受影响；09-24 / 09-25 入场价为 0，本来就进不了任何按收益的检验。
+- 入库口与所有直写脚本（v0.45.511 起全过 `is_quarantined`）今后不会再写这 63 格；**库里现存的 63 行没有删**（没跑 `purge_quarantined_signal_rows.py`）。⚠️ 整库恢复（`data_backup/restore.py`）会把它们与 508 的 30 行一起计进 `quarantined_signal_rows`——那是预期内的非 0，不是恢复出错。
+- `signal_archive.analyze` / `load_panel` 不问 `is_quarantined`（v0.45.26 起的已知状况），旧分析口径不变。
+- 不追加世代边界（只登已证实的坏格子，不改任何定义）。
+
+### Tests
+- 新 `tests/test_quarantine_prev_window_0915_0925.py`：名单恰好这 63 格对应的 4 组（09-24 不含 T、09-25 含 T）；`is_quarantined` 真值表含反面（名单外标的 / 信号 / 相邻日不挡）；只隔离观测层；证据指向本条、本条不是占位；全在维度 IC 窗口前；**入库口真的挡**（`archive()` 合成写入：被点名的格子不进、同批其它信号照写、09-24 T 照写）。
+- 变异 7/7 被杀（09-24 加 T、09-25 去 T、09-15 量比条目信号写错、09-15 动量条目日期错、09-25 连带隔离通道、`archive()` 不问隔离、版本标记写错）；`PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。拨钟审计 +7 / +45 / +400 天新红 0；ruff 通过。
+- 全量（`--deselect` 设计内定期红的 `TestCoverageHorizon`）：**9970 passed、2 xfailed、0 failed**；1 error = 真实数据根总闸：`alphabot_state/intraday/2026-10-16/*.jsonl` 07:42 PDT 成批追加——正在运行的 Alpha Bot（10-15 起的进程）盘中采样写的就是这些文件，闸的报错里点名过这类并发写入者；本条只改名单与测试，不碰该路径。
+
+## [0.45.516] — 2026-10-16 — Fixed：`calculate_put_call_ratio` 算不出时返回 None，不再是假中性 1.0（链空 / call 侧 OI 与成交量为 0 / 比值非有限）；analyze 计数 `pc_unavailable`、不标 real
+
+用户 2026-10-16 决定（v0.45.512 的待决项 3）。此前函数在两处早退里返回 1.0「默认中立」，与真实的 1.00 同形，一路进了评分、展示与 `signal_archive`。
+
+### 影响面取证（只读）
+- 归档里 `options.put_call_ratio` 恰为 1.0 的有 21 行（1,867 行的 1.1%）。逐行对照当天期权快照的 key_levels：
+  - **2 行是假中性**：2026-06-17 VKTX（call OI 0/0/0，put OI 10/2/1）、2026-06-17 CRCL（call OI 0/0/0，put OI 96/1/0）。
+  - 17 行两侧 OI 正常、量级相当，是真实值四舍五入。
+  - 2 行没有快照（META 03-23、CRCL 09-08）：总 OI 6.2 万 / 20.4 万，大概率真实，**待验证**。
+- 这 2 行**未隔离**（需用户批准写生产数据）。
+
+### Fixed
+- `options_analyzer.OptionsAnalyzer.calculate_put_call_ratio` → `Optional[float]`。以下情况返回 None：
+  - 任一侧链为空；
+  - call 侧（加权后）为 0，含两侧 OI 都为 0 后退到成交量、成交量也为 0；
+  - 比值非有限。
+  - 真实比值（含恰好 1.00）不变。两侧 OI 全 0 时退到成交量的既有行为也未动。
+- `OptionsAgent.analyze`：P/C 为 None（非 OI 陈旧）时，`pc_unavailable` 按标的去重计数，并记 WARNING。
+- `data_quality` 降级的条件从「OI 陈旧」扩到「P/C 为 None」，否则 `scan_coverage_gate` 的「real 却 P/C 为空」会误红。
+- 下游沿用 v0.45.512 已接好的 None 处理：
+  - flow 分取中点 1.5（原假中性 1.0 落在 [1.0, 1.5) 档得 1 分 ⇒ 这类日子 options_score +0.5）；
+  - `flow_direction` 记 "unknown"；
+  - Bear 用 `or 1.0` 走中性，Rival 回落中性（消费端的评分选择，不是落盘观测）。
+- `scan_timing` 摘要行显示「/P/C不可得N只」（仅非零时）。
+- **未加 IC 世代边界**：只有「算不出」的日子从 1.0 变 None（更少，不是不同）；能算的日子逐字节不变。
+
+### Tests
+- 新 `tests/test_put_call_ratio_unavailable.py`：
+  - 8 种算不出的形状（含 VKTX / CRCL 06-17 形状）都返回 None；
+  - 真实比值不变，真实的 1.00 仍是 1.00，成交量退路照旧；
+  - analyze：None、unknown、degraded、计数与去重、WARNING、评分中点 +0.5、健康链不变；
+  - 摘要行。
+- `tests/test_options_analyzer.py` 两条原断言「1.0 默认中立」改为 None。
+- 变异 5/5 被杀：两处早退改回 1.0、删有限检查、DQ 只认 OI 陈旧、不计数。
+- 全量（rebase 到 d5820bab 后）：9981 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加，不是测试写的。`tools/clockshift/audit.py --days 7/45/400` 新红 0；ruff 全绿。
 
 ## [0.45.515] — 2026-10-16 — Added：Alpha Bot 卖权页「六种结构」下方新增「怎么卖」——每种结构的下单腿、推荐价位、标的价位、下单步骤、管理办法与风险
 
@@ -75,7 +129,14 @@
 - 路由档（推荐）与基线档 0.20Δ 可切换；路由判不可用的一侧只剩基线档。
 - `alphabot/static/pages/howto.js`：只排版，不写任何价位公式；`ticker.js` 在盈亏图下方挂载；`help.js` 卖权章节加「⑤ 怎么卖」，数字取自 `/api/method`（`howto.rules`），不写字面量。
 - `service.live()` 在载荷里挂 `howto`；`meta_texts()` 给 `howto`（规则常量 + 说明）。
-- `tests/test_alphabot_howto.py`（29 条）：与「六种结构」表同源、手工梯子独立复算每个价位、提示只在该出现处出现、六份说明完整、纯函数（AST）、失败可见、前端不含价位公式。变异核对 4 处（底线价、止损失效、负 gamma 提示、起挂价）均变红。
+- `tests/test_alphabot_howto.py`（31 条）：与「六种结构」表同源、手工梯子独立复算每个价位、提示只在该出现处出现、六份说明完整、纯函数（AST）、失败可见、前端不含价位公式。变异核对 4 处（底线价、止损失效、负 gamma 提示、起挂价）均变红。
+
+### Fixed（二次检查，同版）
+- **价差 / 铁鹰的单笔回报口径不一致**：起挂 / 底线价的回报曾用「该价权利金 ÷ 自然价口径的占用资金」，比表里同定义（credit ÷ (宽度 − credit)）偏低（例：宽度 5、起挂 1.00 ⇒ 24.4% 对 25.0%）。现按成交价重算占用资金。
+- **底线价可能低于自然价**：取整到最小报价单位时（自然价 0.9049、中价 = 自然价 ⇒ 0.90）底线会落到「立刻挂 bid / ask 就能成交」的价之下。现向上取整并钳住，起挂价 ≥ 底线价 ≥ 自然价。
+- **「财报日未知」黄色警告恒亮**：Alpha Bot 现算不查财报日（`compute_live_detail` 未传 `upcoming_fn`），现算行恒为 unknown，每只票（含 ETF）每个结构都弹，没有信息量。降为说明并写明「本页现算不查财报日」；「到期前有财报」仍是黄色警告。
+- 盈亏平衡价位的说明补「按自然价算；起挂价成交会略宽松」。
+- 新增 2 条回归测试（另有 1 条原有测试加强了财报提示级别的断言）（含零点差构造，变异核对：撤掉修复即红）；真实数据（SPY 月度 / 周度全部 12 个结构 × 2 档）核对起挂 ≥ 底线 ≥ 自然价。
 
 ### Notes
 - ⚠️ **这些比例是业内通行的执行经验，不是本系统前向检验过的结论**：50% 止盈、2 倍止损、半价差让价、21 天管理日都没进预注册检验，页面、帮助页、模块 docstring 都这样写。它们回答「怎么执行」，不回答「该不该卖」。
@@ -108,7 +169,62 @@
   没有等收盘后重跑全套——判断依据是上述三条（只在 alphabot_state、时间散落、进程在跑），**未做「收盘后全套零 ERROR」这一步，如实记在这里**。
 
 
-## [0.45.513] — 2026-10-16 — 占位（进行中：earnings_vol_signal `_cache_dir_hint` 不再把缺省数据根误诊为「回落到代码目录」，照 v0.45.384 vrp_signal 修法）
+## [0.45.513] — 2026-10-16 — Fixed：`earnings_vol_signal` 零快照诊断不再把缺省数据根说成「回落到代码目录」（照 v0.45.384 二次检查 #3 的 `vrp_signal` 修法）；同形假病因 `data_backup` 导出 / 备份拒绝文案两处 + 文档两处一并更正
+
+### 为什么
+- v0.45.380（10-16 经 `571569a1` / `ba2d88b0` 合入）的 `_cache_dir_hint` 在 `explicit_data_root() is None` 时附「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录（生产由编排器 export）」。
+  v0.45.422 起 `hive_logger.resolve_data_root` 把未设 / 空串解析为 `$HOME/alpha-hive-data`——**那就是生产数据根**（编排器与 launchd plist 设的 `/Users/igg/alpha-hive-data` 与缺省相等）。
+  ⇒ 这是假诊断：把人引去查一个不存在的问题，而那次 env-less 手动跑读写的其实就是生产。生产自己设了该变量，从不显示它；只误导手动跑。
+- `vrp_signal` 的同一句在 v0.45.384 二次检查 #3 已改；384 条目「未做」点名了 380 这一处没改、另报。
+
+### Fixed
+- `earnings_vol_signal._cache_dir_hint`：只在 `explicit_data_root()` 非空 **且** ≠ 缺省根时提示「ALPHA_HIVE_HOME 显式指向 X，不是缺省数据根 Y（shell 里残留的旧值？）」。
+  缺省根 = `resolve_data_root({"HOME": os.environ.get("HOME", "")})`（只给 HOME，走 hive_logger 唯一解析）；本模块不写该键的恰等字面量，
+  `tests/test_data_root_default.py::ENV_KEY_SITES` 不增登记（本模块原本就没有登记位置，变异 M5 证明直接点名会被它拦下）。`ALPHA_HIVE_CACHE_DIR` 那条提示未动。
+- `data_backup/export.main` / `data_backup/run_backup.run` 拒绝「备份仓在代码仓库里」时的括注「未传 --out / --backup-dir 时多半是没设 ALPHA_HIVE_HOME」
+  →「多半是 ALPHA_HIVE_HOME 显式指到了检出；v0.45.422 起未设 ⇒ 缺省数据根，不在检出里」。同一函数的 docstring 422 后早已改对（「v0.45.422 前未设也会」），
+  只有消息字面量没跟上。只改文案：判定、`refused` / `stage`（编排器 Step 14 认的是这两个）不变。
+- 文档：`ALPHA_BOT_GUIDE.md`「没设会读代码目录下的账本（不是生产数据）」、`alphabot/__main__.py` 模块 docstring「读生产账本需要设」——
+  启动时的 stderr 本身 422 后已改对，只剩这两处说法。
+- v0.45.380 条目正文四处陈述旧行为（触发描述、env-less 复现、`_cache_dir_hint` 判据、合入适配 ①）加注「v0.45.422 起不成立 / 513 改」，不改写当时的事实记录。
+
+### 全仓普查（非测试；「回落 / 兜底到代码目录」「未设 / 没设 / 不带 ALPHA_HIVE_HOME」及英文说法）
+- 假话、已改：上面 `earnings_vol_signal` + `data_backup` 两处 + 文档两处。
+- 命中但成立（史实带版本号，或已按 422 更新）：`alphabot/__main__.py` 的 stderr、`alphabot/launcher.py`、`data_backup/export.py` docstring、`backup_continuity.py`、
+  `replay_scoring` / `signal_archive` / `vol_forecast` / `sell_strike_ledger` 的提示、`vrp_signal`、`hive_logger` docstring、`CLAUDE.md`。
+- `earnings_vol_signal.py` 其余 docstring / 注释未见旧行为陈述（`_snapshot_dir_diagnosis`「目录不存在多半是数据根找错了」仍成立——现在找错的来路是显式设错）。
+
+### Tests
+- `tests/test_earnings_vol_signal.py` 57 → 60（全离线；`HOME` 一律指向 tmp 里的假家目录，不碰真家目录）：
+  - `test_warning_names_the_two_wrong_directory_causes` 改写：`ALPHA_HIVE_HOME` 显式指向 tmp 里的 `stale_checkout` ⇒ 钉住 `scan` 自己那条零快照 WARNING
+    （`startswith("财报事件波动率信号 <日>：未找到快照")`，断言恰好一条）含「显式指向 <stale>，不是缺省数据根 <假家目录>/alpha-hive-data」、不含「代码目录」；写者目录提示照旧。
+  - 新 `test_default_data_root_is_not_reported_as_wrong` ×3（未设 / 空串 / 等于缺省）：钉住的那条存在且含「账本未改写」（告警确实发出了），
+    本模块**全部** WARNING 不含 `ALPHA_HIVE_HOME` / 「代码目录」。
+  - 两类断言取的范围**刻意不同**：「出现」钉到那一行（另一条告警——快照读取失败——带完整路径，会代答；镜像形状 v0.45.332 / 384 #6）；
+    「不出现」查全部告警（钉行会放过「假提示挪到另一条 WARNING」：M8 对钉行版负断言实测 0 红、对全部告警版 2 红）。
+- `tests/test_data_backup.py`：两条既有拒绝测试加断言——病因文案含「显式指到了检出」、不含「没设」（`test_export_main_refuses_inside_code_repo` 加 `capsys`）。
+- **真跑变异**（scratch 副本 = `git archive HEAD` + 本版 7 个改动文件；`PYTHONDONTWRITEBYTECODE=1`、每轮用 Python 删 pyc、`--maxfail=1000`、锚点唯一且「文件变了 + 新文本恰好出现一次」、
+  每轮 passed+failed = collected 250（`test_earnings_vol_signal` + `test_data_backup` + `test_data_root_default`）、每轮还原后 sha256 核对、收尾复跑 250/250）：
+  - M0 改动前真实文件（`git show ba2d88b0:earnings_vol_signal.py`，已核与改动前 HEAD 逐字节相同）⇒ 3 红，理由逐条核对：显式非缺省那条红在没有「显式指向」，
+    未设 / 空串两例红在旧提示「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录」出现了；等于缺省那例在 M0 上**绿**——符合预期，旧代码只在未设时提示。
+  - M0b `data_backup` 两文件改动前真实文件（`089176e4` / `b4ef5ad9`）⇒ 2 红。
+  - M1 提示退回旧两行 ⇒ 3；M2 去掉 `!= default`（显式即报）⇒ 1（等于缺省）；M3 缺省根吃进完整 environ（`resolve_data_root()`，显式值恒等于自己 ⇒ 永不提示）⇒ 1；
+    M4 提示不点名缺省根 ⇒ 1；M5 缺省根改回直接点名该键（行为不变）⇒ 1（`test_data_root_default` 键位置守卫）；M6 / M7 两处拒绝文案退回「没设」⇒ 各 1；
+    M8 假提示挪到另一条 WARNING ⇒ 2。全部与预期一致。
+  - 驱动两次中途停下（方向都安全，没有误报通过）：① M4 的替换串在文件里本就出现过，「恰好出现一次」闸整轮作废，改成唯一串后重跑；
+    ② 第二轮 M6 出现 **1 个 error**，驱动的 `errors == 0` 断言中止（当时驱动没打印详情，未捕获）——单独重跑 M6 与第三轮全量均 0 error、结果同预期。来源**未判定**：下面全量那次 error 的 Alpha Bot 盘中采样**排除**（今天第一批 06:50 PDT，晚于第二轮）；其它并发写者 / 别的原因都没有证据，不当作已解释。
+- ruff 通过。全量：两次，pytest 自身退出码都是 1、红的都只有已知项 + 同一种并发写入：
+  - 合并前（`264a4ff5` + 本版改动，06:46–06:59 PDT）：1 failed、9914 passed、84 deselected、2 xfailed（= selected 9917）+ 1 error；
+  - 合并 origin/main 后（`ab3af4c1`，07:01–07:12 PDT）：1 failed、9937 passed、84 deselected、2 xfailed（= selected 9940）+ 1 error。
+  - failed = 已知 `test_economic_calendar::TestCoverageHorizon`（2027 BLS/BEA 日程未发布，同 v0.45.377 / 380 / 382 / 384）。
+  - error（两次相同）= 会话级真实数据根闸，记在收集序最后一条测试的 teardown 上：变化只有 `alphabot_state/intraday/2026-10-16/` 5 个文件**末尾追加**（闸自核原字节不变），
+    时刻 06:50:48–06:51:30 / 07:11:29–07:12:10 PDT；进程表里 Alpha Bot 服务（`-m alphabot --port 8765`，10-15 起）在跑，当天采样批次 09:50 / 10:01 / 10:11 ET（约每 10 分钟一批）与时刻吻合 ⇒ 并发写入者。
+    本版对 alphabot 只改了 `__main__.py` 的 docstring，碰不到写路径。盘中跑 >10 分钟的全量必然撞上这道闸（按闸的说明，收盘后重跑才会干净）。
+
+### 未做
+- `_cache_dir_hint` 的第二条（`ALPHA_HIVE_CACHE_DIR` 与读取目录不同）仍直接读该环境变量，没照 `vrp_signal` 改成与 `PATHS.cache_dir_unmade()` 比：
+  那条不是假话，但它看不见「`BASE_DIR` import 期冻结 vs 写者调用时求值」那一种分叉；改它会新增一种提示情形，超出本版范围。
+- `BASE_DIR` / `STATE_DIR` / `SIGNALS_FILE` import 期冻结（`test_paths_not_frozen_at_import` KNOWN 存量），未动。
 
 ## [0.45.512] — 2026-10-16 — Fixed（数据，用户批准）：隔离并清掉 BILI 10-12 的 put/call 298.46；Added：yfinance 期权链 OI 陈旧检查——最近有成交的合约 OI 成片为 0（这一场的 OI 没发布）⇒ P/C / total_oi / 主链 GEX 记不可得
 
@@ -273,7 +389,7 @@
 - **为什么是 QUARANTINE、不是修订 2 的 `FORWARD_TEST_EXCLUDED_DAYS`**：协议 §3 登记时就把「`QUARANTINE` 登记的已知坏行」列为排除项，执行器 `weekly_series` 对假设的任一截断 / 隔离信号命中即丢行，H1 的信号表含输入层 ⇒ 这是**套用已登记的规则**，规则 / 常量 / 窗口 / 检视点都没动（不进 `AMENDMENTS`）。`FORWARD_TEST_EXCLUDED_DAYS` 管「事后重放补算的整天」（10-14 没有重放），且三份前瞻检验共用——登进去会连带把 10-14 从 F&G 敞口门里拿掉，而那边 10-14 自证失败的处理（v0.45.503）另待决定。
 - 后果：H1 当天只剩 JNJ（< `MIN_WIDTH` 20）⇒ 10-14 对 H1 无效（W42 剩 10-13 / 10-15，生产库只读核对各 30 只可用；10-16 待当天扫描）；H2 不读 `price.*` 照算。
 - **只隔离观测层**：`buzz.comp.*` 通道值是派生值（同 Agent 评分，不隔离）；且 §13.2 自证 ②「生产有分、重算却缺输入 = 0」会把隔离 / purge 掉的通道行算成自证失败。
-- **09-15 QCOM / NVDA 复核（10-16，只读；未改归档 / 名单，待用户决定）**：
+- **09-15 QCOM / NVDA 复核（10-16，只读）**——用户批准后由 v0.45.517 登进 `QUARANTINE`（09-24 T 除外）：
   - `price.volume_ratio`：日志各有「丢弃 2026-09-15 那根」+「由 Twelve Data 补上」（14:14:20 NVDA 1.01x、14:15:31 QCOM 1.21x）。09-15 是周二，上一场是 09-14（`is_trading_day` 算）。用 Twelve Data 截至 09-14 的日线、把 09-14 那根成交量换成 131,942,300 / 13,755,800 股（整百股，比今天低 0.25% / 0.21%）即**逐位复现**归档值（1.01080 / 1.21243）——同 RKLB / VKTX 的「事后上调」形状；漏一根、窗口 19 / 21 根都对不上。当天应有值（截至 09-15）：NVDA 0.676（归档 1.011 ⇒ Buzz 量比档 50，应为 35）、QCOM 1.195（同档 50，通道不受影响）。
   - `price.momentum_5d` 也是取错窗口：v0.45.465 之前的自攒索引回落，窗口 **09-04 → 09-14**（末端滞后一场；跨 5 场，yfinance 口径是 4 场——465 已记录的「≥5 个交易日挑锚点」）。用 Twelve Data 收盘与扫描价两种序列穷举，唯一同时复现两只（误差 < 1e-4）的窗口就是它。当天应有值（4 场截至 09-15）：NVDA −5.14（归档 −8.42）、QCOM +6.46（归档 +6.76）。
   - 顺带普查（日志自 08-26 起；按文件时间衔接，未逐日核）：TD 量比兜底的生产记录只有 09-15 这 2 次 + 10-12 NFLX（故障日生产那次，归档已被重放值 0.6463 覆盖 ≈ 截至 10-12 的 0.6472，不是前一场）+ 10-14 的 29 次；另有 XOM 0.81 / 0.50 反复出现在凌晨，是测试夹具写进旧日志的，不是生产。自攒索引动量（465 前、滞后形状）进了归档的：09-15 2 只、**09-24 30 只**（29 只逐一复现为「末端 09-22、跨 5 场」——09-23 没有扫描 ⇒ 滞后两场；T 差 0.035 未解释，待验证）、**09-25 30 只**（与 09-24 逐位相同：两天 30 行 `price_at_predict` 全为 0，索引没有新点，窗口仍止于 09-22）。09-24 / 09-25 入场价为 0 ⇒ 本来就进不了任何按收益的检验。08-26 之前没有日志，未查。
@@ -5199,12 +5315,14 @@ v0.45.371 复查时记下的副作用：期权墙逐行的虚线分隔从 `rgba(
   零快照 ⇒ 该日已有的行（含 `settle_signals` 回填过的）整批删掉；M4（v0.45.104）的结算字段搬运只救得了本次重新产出的票；
   部分快照缺失 ⇒ 只删缺的那几只。`__main__` 印一个空列表 + 汇总、退出 0，与「当天确实没有合格信号」无从区分。
 - 触发：cache 目录找错（不带 `ALPHA_HIVE_HOME` 手动跑 ⇒ `PATHS.home` 回落到代码目录，那里的 `options_paper_state/`
-  被 git 跟踪 ⇒ 改写的是陈旧的已提交副本）/ 当天快照缺失。
+  被 git 跟踪 ⇒ 改写的是陈旧的已提交副本）/ 当天快照缺失。（09-29 写本条时如此；**v0.45.422 起 env-less 缺省就是生产数据根 `~/alpha-hive-data`**，
+  同一个手动跑读写的是生产——见 v0.45.513。）
   更正任务描述一处：缺省 `"cache"` 不是 cwd 相对——`_resolve_dir` 把相对路径挂在 `BASE_DIR`（import 期冻结的 `PATHS.home`）下。
 - **复现**（数据根指向 scratch，里面拷的是 checkout 里被跟踪的 334 行账本）：改前 `earnings_vol_signal.py 2026-09-22` ⇒
   exit 0、日志只有 INFO「快照 0，合格 0（-）」、账本 334 → 304 行（09-22 的 30 行没了）；
   改后 ⇒ exit 3、「no snapshots found in <scratch>/home/cache（目录不存在）」、sha256 不变。
   改后 env-less 在 worktree 里跑 ⇒ exit 3 + 「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录」，被跟踪的账本与 `git status` 均无变化，未建出 `cache/`。
+  （这句提示 v0.45.422 起是假话，v0.45.513 改为「显式指向非缺省根」才报。）
 - **生产**（只读核对）：账本 364 行，其中已结算 10 行，都暴露在这条路径上。**09-24、09-25 日更钩子真的走过零快照分支**
   （`~/alpha-hive-data/cache` 该两日 0 份 `options_snapshot`；日志 INFO「快照 0，合格 0（-）」+「期权纸面腿已更新 … 信号 0」）——
   那两天账本里原本没有该日行，所以没删到东西，但在日志里与「当天没有合格信号」一模一样。那两天为什么没有期权快照：待验证（不在本版范围）。
@@ -5215,7 +5333,7 @@ v0.45.371 复查时记下的副作用：期权墙逐行的虚线分隔从 `rgba(
 - `earnings_vol_signal.py`
   - `scan()`：零快照 / 有快照但一条信号都没算出 ⇒ **不写账本**（连原子替换都不做），返回 `[]`，WARNING 写明读取目录、
     它在不在、该日已有几行原样保留。`_snapshot_dir_diagnosis` 分四种：目录不存在 / 有该日文件但都读不出 / 只有别的日期（给出最新日期）/ 空目录；
-    `_cache_dir_hint` 命中才附：未设 `ALPHA_HIVE_HOME`；`ALPHA_HIVE_CACHE_DIR` 与读取目录不同（快照写者 `options_analyzer` 用 `PATHS.cache_dir`
+    `_cache_dir_hint` 命中才附：未设 `ALPHA_HIVE_HOME`（v0.45.513 改为显式且 ≠ 缺省根）；`ALPHA_HIVE_CACHE_DIR` 与读取目录不同（快照写者 `options_analyzer` 用 `PATHS.cache_dir`
     读它，本模块读 `BASE_DIR / "cache"`，不读它）。诊断只读：不建目录，也不调会 mkdir 的 `PATHS.cache_dir` getter。
   - 落盘改为按 `(ticker, as_of)` **upsert**：本次重算到的票替换旧行（M4 搬运不变）；该日其余旧行**原位保留**，WARNING 列出票并标出其中已结算的。
     **决定**（写进 `scan` docstring）：缺快照不是「信号作废」的证据，只是这次没有输入；已结算样本删了补不回来；
@@ -5270,6 +5388,7 @@ v0.45.371 复查时记下的副作用：期权墙逐行的虚线分隔从 `rgba(
 - **全量跑出 3 条守卫红，都是本版引入、都按守卫规则修（没有加豁免）**：
   ① `test_data_root_default`（直接写 `"ALPHA_HIVE_HOME"` 键要登记）：`_cache_dir_hint` 改用 `hive_logger.explicit_data_root()`——
   这正是规则第一问「能不能改经 hive_logger」的答案，不新增登记，且「空串也算没设」与数据根的唯一解析一致；
+  ⚠️ 判据换了来源、**文案没换**：仍说「回落到代码目录」，422 之后是假话（v0.45.384 二次检查 #3 同形），v0.45.513 改；
   ② `test_price_history_default_paths`（新增 cwd 相对缺省 `"cache"`）：`_scan_with_info` 的两个路径参数去掉缺省值，`scan` 显式传入、CLI 显式传同值；
   ③ `test_earnings_event_shadow::TestReaders`（`shadow_event` 写入点白名单）：与 GEX 那条同形，`scan` → `_scan_with_info`，并断言 `scan` 不得再写它。
 - 变异在合并后的最终文件上重跑；M0 钉 main 的提交（`6f570def`，不含修复），旧钉 `b7a9fb5f` 已不是 main 的行为：基线 collected 55（后加 2 条 = 57，下为最终 57 条上的结果），

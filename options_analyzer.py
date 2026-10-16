@@ -896,15 +896,19 @@ class OptionsAnalyzer:
 
     def calculate_put_call_ratio(
         self, calls_df: List[Dict], puts_df: List[Dict]
-    ) -> float:
+    ) -> Optional[float]:
         """
         计算 Put/Call Ratio (开仓量权重，OI 优先，OI 全零时用 volume)
         P/C < 0.7 → 强多头信号
         0.7-1.5 → 中立
         > 1.5 → 强空头信号
+
+        算不出 ⇒ **None**（v0.45.516）。此前链空 / call 侧 OI（与成交量）为 0 时返回 1.0「默认中立」——与真实的
+        1.00 同形，进了归档：2026-06-17 VKTX（call OI 0、put OI 13）与 CRCL（call OI 0、put OI 97）两行就是它。
+        None 的下游处理同 v0.45.512 的 OI 陈旧：flow 分取中点、flow_direction "unknown"、data_quality 不标 real。
         """
         if not calls_df or not puts_df:
-            return 1.0  # 默认中立
+            return None
 
         import math
 
@@ -932,10 +936,13 @@ class OptionsAnalyzer:
             total_call_oi = _weighted_sum(calls_df, "volume")
             total_put_oi = _weighted_sum(puts_df, "volume")
 
+        # call 侧为 0（含 put 侧也为 0）⇒ 比值无定义，不是「中立」（v0.45.516）
         if total_call_oi == 0:
-            return 1.0  # 无数据时返回中立而非 0
+            return None
 
         ratio = total_put_oi / total_call_oi
+        if not math.isfinite(ratio):
+            return None
         return round(ratio, 2)
 
     def calculate_gamma_exposure(
@@ -1771,6 +1778,7 @@ _snap_stats_lock = threading.Lock()
 #   nan_sanitized            出口消毒遇到的非有限数个数（v0.45.462：改写成 None，不再是 0.0；见 `_sanitize_result`）
 #   iv_placeholder_contracts yfinance 链里 IV 是 Yahoo 求解失败值（减半阶梯 / 1e-05）、被置 0 的合约数（v0.45.482，见 yahoo_iv）
 #   iv_placeholder_majority  analyze() ATM 窗口里失败值合约 ≥ 有效合约 ⇒ 不取中位数、按「无当日 IV」处理的次数（v0.45.482）
+#   pc_unavailable           analyze() P/C 算不出（链空 / call 侧 OI 与成交量为 0；不含 OI 陈旧）的标的数（v0.45.516，按份计；此前是假中性 1.0）
 #   oi_stale_chains          yfinance 链的 OI 陈旧（最近有成交的合约 OI 成片为 0）、P/C 等记不可得的标的数（v0.45.512，按份计）
 #   iv_unavailable           analyze() 当日 ATM IV 无效（<5% / >150% / 没有可用合约）且无可用缓存、`iv_current` 记 None
 #                            的次数（v0.45.471：此前兜底成常数 25.0，见 analyze 内「IV 不可得」注释）
@@ -1781,7 +1789,8 @@ _snap_stats_lock = threading.Lock()
 _SNAP_STATS_KEYS = ("hits", "writes", "session_mismatch", "hits_before_close",
                     "writes_before_close", "calendar_fallback", "gex_signal_corrected",
                     "stock_price_unavailable", "nan_sanitized", "iv_unavailable",
-                    "iv_placeholder_contracts", "iv_placeholder_majority", "oi_stale_chains")
+                    "iv_placeholder_contracts", "iv_placeholder_majority", "oi_stale_chains",
+                    "pc_unavailable")
 
 # v0.45.349：OptionsAgent 每条返回路径都带这个键、值恒为 False ——「本结果的 options_score
 # 不含 GEX 分量」。旧代码写的快照没有这个键 ⇒ 命中时据此判定要不要减掉旧的 +1.0。
@@ -2890,6 +2899,10 @@ class OptionsAgent:
         _oi_stale = bool((options_chain.get("oi_check") or {}).get("stale"))
         if _oi_stale:
             put_call_ratio, gex = None, None
+        elif put_call_ratio is None:
+            # v0.45.516：链空 / call 侧 OI 为 0 ⇒ 算不出（此前是假中性 1.0）。按标的去重计数进 status.json
+            if _snap_count_once("pc_unavailable", ticker):
+                _log.warning("[%s] P/C 算不出（链空或 call 侧 OI 与成交量为 0），记 None", ticker)
         unusual_activity = self.analyzer.detect_unusual_activity(calls_df, puts_df, stock_price)
         key_levels = self.analyzer.find_key_levels(calls_df, puts_df, stock_price or 0.0)
         # S14: IV Skew 分析
@@ -3013,7 +3026,7 @@ class OptionsAgent:
             data_quality = "real"
         # v0.45.512：OI 陈旧 ⇒ 链只剩一半能用（IV 照用、OI 派生量记 None）——不许再标 real
         # （scan_coverage_gate 的标签诚实检查：「real 却 P/C 为空」会红）
-        if _oi_stale and data_quality == "real":
+        if (_oi_stale or put_call_ratio is None) and data_quality == "real":   # v0.45.516：P/C 算不出同理
             data_quality = "degraded"
 
         # 7.5 (v0.45.99) 四合约报价集：~30 DTE 的 ATM call/put + 25Δ call/put 真实 bid/ask。

@@ -317,7 +317,7 @@ def _levels(structure: str, legs: List[dict], breakevens: List[float], spot, em:
         elif lg["role"] == "wing":
             add("wing_strike", lg["side"], lg["strike"], "保护腿行权价——收盘越过它即亏满最大亏损")
     for b in breakevens or []:
-        add("breakeven", "put" if (_num(b) or 0) < (_num(spot) or 0) else "call", b, "盈亏平衡（到期口径）——收盘越过它开始净亏")
+        add("breakeven", "put" if (_num(b) or 0) < (_num(spot) or 0) else "call", b, "盈亏平衡（到期口径，按自然价算；起挂价成交会略宽松）——收盘越过它开始净亏")
     if puts:
         add("em_edge", "put", em.get("lo"), "−1σ 期望波动边界（到期口径）")
         add("zero_gamma", "put", zg.get("nearest_below"), "下方最近 Zero Gamma——跌破后现价处 gamma 环境可能翻转（仅环境参考）")
@@ -342,8 +342,10 @@ def _cautions(structure: str, legs: List[dict], row: Mapping[str, Any]) -> List[
                     "text": "到期前有财报：IV 含事件溢价，但财报跳空是卖方最典型的一次性亏损来源。"
                             "要做就在财报前平仓，或只做带保护腿的结构。"})
     elif es == "unknown":
-        out.append({"level": "warn", "code": "earnings_unknown",
-                    "text": "财报日未知：先去券商 / 公司公告核实到期前有没有财报，再决定做不做。"})
+        # 现算不查财报日（`compute_live_detail` 没传 upcoming_fn），所以现算行恒为 unknown——
+        # 恒亮的黄色警告没有信息量，降成说明；真要判断财报风险得自己去核实
+        out.append({"level": "info", "code": "earnings_unknown",
+                    "text": "本页的现算不查财报日（ETF 没有财报；个股请先去券商 / 公司公告核实到期前有没有财报，再决定做不做）。"})
     rt = row.get("route") or {}
     neg = any(str(r).startswith("negative_gamma_at_spot") for r in (rt.get("reasons") or []))
     if neg and structure in UNBOUNDED_CALL:
@@ -383,20 +385,25 @@ def _tier(structure: str, rungs: Mapping[str, Any], row: Mapping[str, Any], teno
     mid = _combo_mid(legs)
     if natural is None or mid is None:
         return {**base, "quotable": False, "reason": "mid_unavailable"}
-    start = _tick(max(mid, natural))
-    floor = _tick(natural + RULES["floor_share"] * (max(mid, natural) - natural))
-    floor = min(floor, start)
+    top = max(mid, natural)
+    # 底线不许低于自然价（取整到最小报价单位时向上取）：低于它等于主动送价，立刻挂 bid / ask 就能成交
+    nat_up = math.ceil(round(natural / RULES["tick"], 6)) * RULES["tick"]
+    floor = max(_tick(natural + RULES["floor_share"] * (top - natural)), round(nat_up, 2))
+    start = max(_tick(top), floor)
     collateral = _num(q.get("collateral"))
     max_loss = _num(q.get("max_loss"))
+    # 价差 / 铁鹰的占用资金 = 宽度 − 权利金：按哪个价成交就用哪个价算（与 `structure_quote` 同一口径），
+    # 否则「起挂价权利金 ÷ 自然价口径的占用资金」比表里同定义的数偏低
+    width = (max_loss + natural) if (structure in DEFINED_RISK and max_loss is not None) else None
 
     def yld(x):
-        return None if (collateral is None or collateral <= 0 or x is None) else round(x / collateral, 6)
+        coll = (width - x) if width is not None else collateral
+        return None if (coll is None or coll <= 0 or x is None) else round(x / coll, 6)
 
     tp = max(RULES["tick"], _tick(start * RULES["profit_take"]))
     stop = _tick(start * RULES["stop_mult"])
     stop_note = None
-    if structure in DEFINED_RISK and max_loss is not None:
-        width = max_loss + natural          # 价差整体到期最多值这么多
+    if width is not None:                   # 价差整体到期最多值 width
         if stop >= width:
             stop, stop_note = None, "价差最大价值（宽度）不超过 2 倍权利金：买回价止损形同虚设，改用标的价位触发。"
     limit = {"start": start, "floor": floor, "natural": round(natural, 4),

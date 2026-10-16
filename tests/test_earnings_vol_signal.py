@@ -476,11 +476,20 @@ def _warnings(caplog):
                      if r.name == _LOGGER and r.levelno >= logging.WARNING)
 
 
+def _zero_snapshot_warning(caplog):
+    """只取 `scan` 自己那一条零快照 WARNING（v0.45.513）。拿全部告警拼起来断言，会让别的告警代答：
+    `_iter_snapshots` 的「快照读取失败」带快照完整路径（vrp_signal v0.45.384 二次检查 #6 实测变异因此幸存）。"""
+    lines = [r.getMessage() for r in caplog.records if r.name == _LOGGER and r.levelno >= logging.WARNING
+             and r.getMessage().startswith(f"财报事件波动率信号 {AS_OF}：未找到快照")]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
 class TestScanNeverDeletesRowsItDidNotRecompute:
     """2026-09-29 v0.45.382（开工时编号 0.45.379）同形普查发现：`scan()` 零快照时照样把账本改写成「其它日期的行 + 空列表」，
-    cache 目录找错（未设 ALPHA_HIVE_HOME ⇒ PATHS.home 回落到代码目录，而那里的
-    options_paper_state/ 被 git 跟踪）或当天缺快照时，**该日已有的行连同已结算的一起删掉**。
-    M4（v0.45.104）的结算字段搬运只救得了本次重新产出的票。"""
+    cache 目录找错（09-29 时：未设 ALPHA_HIVE_HOME ⇒ PATHS.home 回落到代码目录，而那里的
+    options_paper_state/ 被 git 跟踪；v0.45.422 起未设 ⇒ 缺省数据根 = 生产）或当天缺快照时，
+    **该日已有的行连同已结算的一起删掉**。M4（v0.45.104）的结算字段搬运只救得了本次重新产出的票。"""
 
     @pytest.mark.parametrize("layout", ["missing_dir", "empty_dir", "other_day_only"])
     def test_zero_snapshots_leave_ledger_byte_identical(self, state, tmp_path, caplog, layout):
@@ -569,13 +578,38 @@ class TestScanNeverDeletesRowsItDidNotRecompute:
 
     def test_warning_names_the_two_wrong_directory_causes(self, state, tmp_path, monkeypatch, caplog):
         _seed_ledger()
-        monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        stale = tmp_path / "stale_checkout"                       # 显式、且不是缺省数据根
+        monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))   # 缺省根 = <fakehome>/alpha-hive-data，别碰真家目录
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(stale))
         monkeypatch.setenv("ALPHA_HIVE_CACHE_DIR", str(tmp_path / "writer_cache"))
         with caplog.at_level(logging.WARNING, logger=_LOGGER):
             evs.scan(AS_OF, cache_dir=tmp_path / "reader_cache", stats_fn=_no_fetch, upcoming_fn=_no_fetch)
+        line = _zero_snapshot_warning(caplog)
+        assert f"ALPHA_HIVE_HOME 显式指向 {stale}，不是缺省数据根 {tmp_path / 'fakehome' / 'alpha-hive-data'}" in line, line
+        assert "代码目录" not in line, line
+        assert str(tmp_path / "writer_cache") in line and "与本次读取目录不同" in line, line
+
+    @pytest.mark.parametrize("home_env", ["unset", "empty", "equals_default"])
+    def test_default_data_root_is_not_reported_as_wrong(self, state, tmp_path, monkeypatch, caplog, home_env):
+        """v0.45.422 起未设 / 空串 ⇒ 缺省数据根 `~/alpha-hive-data`，那**就是**生产（编排器与 plist 也设成它）。
+        v0.45.380 初版在未设时报「数据根回落到代码目录」——422 之后这句是假话，会把手动跑的人引去查一个
+        不存在的问题，而那次手动跑读写的其实是生产（v0.45.513，照 vrp_signal v0.45.384 二次检查 #3）。"""
+        _seed_ledger()
+        fakehome = tmp_path / "fakehome"
+        monkeypatch.setenv("HOME", str(fakehome))
+        if home_env == "unset":
+            monkeypatch.delenv("ALPHA_HIVE_HOME", raising=False)
+        else:
+            monkeypatch.setenv("ALPHA_HIVE_HOME", "" if home_env == "empty" else str(fakehome / "alpha-hive-data"))
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            r = evs.scan(AS_OF, cache_dir=state, stats_fn=_no_fetch, upcoming_fn=_no_fetch)
+        assert r == []
+        line = _zero_snapshot_warning(caplog)     # 零快照告警确实发出了（不是因为没告警才没提示）
+        assert "账本未改写" in line, line
+        # 「不许出现」查本模块**全部**告警，不只钉住的那一行：钉行防的是别的告警替「出现」代答；
+        # 对「不出现」，钉行反而放过「假提示挪到另一条 WARNING」。本夹具（空目录）里只有这一条告警。
         msg = _warnings(caplog)
-        assert "未设 ALPHA_HIVE_HOME" in msg
-        assert str(tmp_path / "writer_cache") in msg and "与本次读取目录不同" in msg
+        assert "ALPHA_HIVE_HOME" not in msg and "代码目录" not in msg, msg
 
 
 class TestMainExitCodes:

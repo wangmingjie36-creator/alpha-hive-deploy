@@ -1,7 +1,8 @@
 """`/usr/local/bin/python3 -m alphabot [--port 8765] [--no-poll] [--demo]`
 
 只绑回环地址：给了别的 `--host` ⇒ 退出码 2（账本是私有数据，局域网可见需要另做决定，不是一个参数的事）。
-读生产账本需要同 MCP 一样设 `ALPHA_HIVE_HOME`；没设时启动就说清楚读的是哪个目录。
+未设 `ALPHA_HIVE_HOME` 时读缺省数据根（与编排器 / MCP 同址，v0.45.422 起；此前要设才读得到生产）；
+没设时启动就说清楚读的是哪个目录。
 """
 from __future__ import annotations
 

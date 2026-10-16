@@ -266,7 +266,8 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
     if code_repo is not None:
         status.update(stage="init", ok=False, refused="inside_code_repo",
                       error=f"备份仓 {backup_dir} 在代码仓库 {code_repo} 里，拒绝建库/导出"
-                            "（未传 --backup-dir 时多半是没设 ALPHA_HIVE_HOME）")
+                            "（未传 --backup-dir 时多半是 ALPHA_HIVE_HOME 显式指到了检出；"
+                            "v0.45.422 起未设 ⇒ 缺省数据根，不在检出里）")
         return _finish(status_file, history_file, status)
 
     if not (backup_dir / ".git").is_dir():

@@ -106,7 +106,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import ledger_io
-from hive_logger import PATHS, explicit_data_root, get_logger
+from hive_logger import PATHS, explicit_data_root, get_logger, resolve_data_root
 
 _log = get_logger("earnings_vol_signal")
 
@@ -614,8 +614,16 @@ def _snapshot_dir_diagnosis(cdir: Path, as_of: str) -> str:
 def _cache_dir_hint(cdir: Path) -> str:
     """两种「读错目录」的常见来路，命中才说；都不命中返回空串。"""
     hints = []
-    if explicit_data_root() is None:      # 唯一实现（空串也算没设），不在这里另写一份 os.environ.get
-        hints.append("未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录（生产由编排器 export）")
+    # v0.45.422 起未设 / 空串 ⇒ 缺省数据根 `~/alpha-hive-data`（就是生产），不再兜底到代码目录；
+    # 读错根的来路因此反过来：**显式**设了别的根（shell 里残留的旧值、指回检出的回退配置）。
+    # 生产编排器与 plist 都设成缺省根本身 ⇒ 不会误报。v0.45.380 初版在未设时报「回落到代码目录」，
+    # 422 之后那是假话（v0.45.513 改，照 vrp_signal v0.45.384 二次检查 #3）。判据走 hive_logger 的唯一解析：
+    # 缺省根 = 只给 HOME 时 resolve_data_root 的结果——不在这里点名那个变量（v0.45.488 起「从它得出数据根」
+    # 只许一份实现，守卫 tests/test_data_root_default.py::TestDataRootFromEnvHasOneImplementation）。
+    explicit = explicit_data_root()
+    default = resolve_data_root({"HOME": os.environ.get("HOME", "")})
+    if explicit is not None and explicit != default:
+        hints.append(f"ALPHA_HIVE_HOME 显式指向 {explicit}，不是缺省数据根 {default}（shell 里残留的旧值？）")
     # 快照的写者 options_analyzer 用 PATHS.cache_dir（读 ALPHA_HIVE_CACHE_DIR）；本模块读的是
     # `BASE_DIR / "cache"`。生产只 export ALPHA_HIVE_HOME，两者相同；设了前者就会分叉。
     # 直接读 env 而不调 PATHS.cache_dir：那个 getter 会 mkdir，诊断不该有副作用。
