@@ -2584,8 +2584,10 @@ class OptionsAgent:
                 "iv_rank_source": None,
                 "iv_rank_window_days": None,
                 "put_call_ratio": None,
-                "total_oi": 0,
-                "total_oi_raw": 0,
+                # v0.45.522：曾是 0——与其余字段的 None 不一致，且是当天该标的唯一入档的期权「观测」
+                # （09-24 / 09-25 30/30、10-14 BILI 都是这么来的，已隔离清库）。
+                "total_oi": None,
+                "total_oi_raw": None,
                 "oi_check": None,             # v0.45.512 schema 一致性
                 "gamma_exposure": None,
                 "gamma_squeeze_risk": "unknown",

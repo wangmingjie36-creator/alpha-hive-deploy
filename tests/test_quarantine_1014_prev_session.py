@@ -43,7 +43,9 @@ P = _load("dim_ic_protocol_q1014", "experiments/dim_ic_protocol.py")
 
 
 def _entries():
-    return [q for q in signal_archive.QUARANTINE if q["date"] == _DAY]
+    # v0.45.522：同一天还有别的批次（BILI 样本链早退写的 options.total_oi = 0）——本文件只管 508 的 price.* 观测层
+    return [q for q in signal_archive.QUARANTINE
+            if q["date"] == _DAY and all(s.startswith("price.") for s in q["signals"])]
 
 
 def _rows(date):

@@ -18,7 +18,43 @@
 - 治标：撞的是预览配置，不是 Alpha Bot 的问题；启动器的弹窗已经把原因和 `lsof` 命令写清楚了。
 - 已在跑的旧 `dashboard` 预览（若有）不会自己换端口，重新启动该预览才用新端口。
 
-## [0.45.522] — 2026-10-16 — 占位（进行中：隔离并清掉 06-17 VKTX/CRCL 假中性 P/C、BILI 10-12 total_oi/GEX、BILI 10-14 total_oi=0）
+## [0.45.522] — 2026-10-16 — Fixed（数据，用户批准「隔离并从库里删掉……不要脏数据污染历史库」）：坏链派生的 69 行期权观测登进 `QUARANTINE` 并清库；样本链中性早退不再写 `total_oi = 0`
+
+用户 2026-10-16 批准（v0.45.512 / 516 的待决项）。全部是「链取坏了，派生量照写」的形状：值不是观测，却进了 `signal_archive`、IC 样本与各类历史对比。
+
+### 隔离并清掉的 69 行（`signal_archive.QUARANTINE`，reason 带标记 v0.45.522）
+1. **BILI 2026-10-12 × `options.total_oi` / `options.gamma_exposure`（2 行）**
+   - 与 512 隔离的 P/C 298.46 是同一条 OI 陈旧的 yfinance 链。
+   - total_oi 22,160 只是冻结旧数（前后几天 16.0–17.0 万）；GEX −0.0611 由同一份 OI 加权。
+2. **2026-06-17 VKTX / CRCL × `put_call_ratio` / `total_oi` / `gamma_exposure`（6 行）**
+   - 残链：快照 key_levels 里 call OI 0/0/0，put OI 分别为 10/2/1 与 96/1/0。
+   - P/C 1.0 是 516 修掉的假中性。
+   - total_oi 13 / 97，前后几天 VKTX 2.3–2.4 万、CRCL 10–11 万。
+   - GEX 0.0 是 v0.45.63 前「算不出」写成的 0。
+3. **样本链早退的 `options.total_oi = 0`（61 行）：09-24 30/30、09-25 30/30、10-14 BILI**
+   - 期权链取不到 ⇒ `OptionsAgent.analyze` 中性早退：其余期权字段 None，唯独 total_oi 写 0 ⇒ 成了当天该标的唯一入档的期权「观测」。
+   - 核对：这 61 只当天没有任何别的 `options.*` 行。
+   - 日志：09-24 / 09-25 各 42 次「降级为样本数据」；10-14 BILI 14:15:51「期权链为样本数据，跳过全部指标计算（中性早退）」。
+   - 清库后全库 `options.total_oi = 0` 的行：61 → 0。
+- **清库**：`purge_quarantined_signal_rows.py --only-tag v0.45.522 --expect 69 --apply`，137,613 → 137,544。
+  - 备份 `db_backups/pheromone_pre_v0.45.522_bad_chain_options.db`。
+  - 核对：抽查 5 行生产 0 / 备份 1；BILI 10-12 剩 3 行（iv_rank / iv_percentile / iv_rank_is_real，hv_proxy 口径，不读这条链的 OI）；两边 integrity_check ok。
+
+### Fixed（源头）
+- `options_analyzer.OptionsAgent.analyze` 样本链早退分支：`total_oi` / `total_oi_raw` 从 0 改 None，与同分支其余字段一致。
+  - 下一次故障日不再往库里写这种 0。
+  - 读者对 None 早有处理：真实链 OI 陈旧时 512 起就记 None。
+
+### 未动（待用户定）
+- 全库另有 **52 行 `options.gamma_exposure = 0.0`**（2026-03-10 ~ 08-27，v0.45.63 前「算不出」写成 0 的旧习惯；06-17 VKTX / CRCL 那 2 行已在本次清掉）。不是同一条坏链，逐行是否真为「算不出」**待验证**，未动。
+
+### Tests
+- `tests/test_signal_quarantine.py::test_bad_chain_option_observations_quarantined_v0_45_522`：三组条目逐项核对，09-24 / 09-25 逐只核对全部 30 只；反例为前后一天与同日别的信号。
+  - 512 那条测试原先断言「同链 total_oi / GEX 不挡」（当时的批准范围），改为只钉 P/C 与 iv_rank。
+- `tests/test_quarantine_1014_prev_session.py`（508）的 `_entries()` 收窄到 `price.*`：同一天新增了本次的 `options.total_oi` 条目，原实现把 10-14 的全部条目都当成 508 的。
+- `tests/test_put_call_ratio_unavailable.py` 加样本早退 total_oi 为 None 一条。
+- 变异 6/6 被杀：样本早退改回 0、BILI 条目漏 GEX、06-17 漏 CRCL、09-25 日期错、09-24 漏 BRK-B（首次变异打到了 517 的同形元组上、没被杀 ⇒ 测试改为逐只核对全部 30 只，精确打本条目后被杀）、10-14 日期错。
+- 全量（rebase 到 93bf8f84 后）：10029 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加，不是测试写的。ruff 全绿。
 
 ## [0.45.521] — 2026-10-16 — 占位（进行中：按 NYSE 日历离线重算 v0.45.520 查出的历史 T+N 标签（先备份）+ 维度 IC 协议事前说明，用户批准）
 

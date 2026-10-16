@@ -1352,10 +1352,55 @@ QUARANTINE: List[Dict] = [
         "date": "2026-10-12",
         "tickers": ('BILI',),
         "signals": ("options.put_call_ratio",),
-        "reason": "v0.45.512（用户 2026-10-16 批准「隔离 BILI 10-12 那条 298.46 的 put/call」）：P/C 是 yfinance 链 OI 陈旧的产物，不是观测——当天 Yahoo 的 OI 几乎全被清零（30 只标的「最近有成交的合约里 OI>0」占比 0.00–0.04，正常日 0.81–0.99），BILI 只剩 2026-05/06 起没成交的 $5 put 22,065、$24 put 21 与 $8 call 74 ⇒ 22,086 ÷ 74 = 298.46；前后几天 1.03 / 1.02 / 1.08。归档里唯一一条 P/C > 10。同链的 total_oi 22,160、gamma_exposure −0.0611 同源，未获批准、未动。",
+        "reason": "v0.45.512（用户 2026-10-16 批准「隔离 BILI 10-12 那条 298.46 的 put/call」）：P/C 是 yfinance 链 OI 陈旧的产物，不是观测——当天 Yahoo 的 OI 几乎全被清零（30 只标的「最近有成交的合约里 OI>0」占比 0.00–0.04，正常日 0.81–0.99），BILI 只剩 2026-05/06 起没成交的 $5 put 22,065、$24 put 21 与 $8 call 74 ⇒ 22,086 ÷ 74 = 298.46；前后几天 1.03 / 1.02 / 1.08。归档里唯一一条 P/C > 10。同链的 total_oi 22,160、gamma_exposure −0.0611 同源，当时未获批准；v0.45.522 另立条目隔离。",
         "evidence": ("_manual_backups/2026-10-13_1012_replay_v0.45.484_r2/replay_artifacts/recording_union4（Yahoo v7 options 响应）",
                      "cache/options_snapshot_BILI_2026-10-12.json（put_call_ratio = 298.46, total_oi = 22160）",
                      "CHANGELOG.md#v0.45.503", "CHANGELOG.md#v0.45.512"),
+    },
+    # v0.45.522（用户 2026-10-16 批准「隔离并从库里删掉……不要脏数据污染历史库」）：坏链派生的期权观测。
+    # ① 同一条 OI 陈旧的 BILI 10-12 yfinance 链上的另两个 OI 派生量（512 当时只批了 P/C）。
+    {
+        "date": "2026-10-12",
+        "tickers": ('BILI',),
+        "signals": ("options.total_oi", "options.gamma_exposure"),
+        "reason": "v0.45.522（用户 2026-10-16 批准）：与 v0.45.512 隔离的 P/C 298.46 同一条 OI 陈旧的 yfinance 链——total_oi 22,160 只是冻结旧数（$5 put 22,065 + $24 put 21 + $8 call 74；前后几天 16.0–17.0 万），gamma_exposure −0.0611 由同一份 OI 加权（前后几天 −1.25 / +0.68）。都不是观测。",
+        "evidence": ("cache/options_snapshot_BILI_2026-10-12.json（total_oi = 22160）", "CHANGELOG.md#v0.45.512",
+                     "CHANGELOG.md#v0.45.522"),
+    },
+    # ② 06-17 VKTX / CRCL：call 侧 OI 全 0 的残链。P/C 是 `calculate_put_call_ratio` 的假中性 1.0（v0.45.516 已改返回 None），
+    #    total_oi 13 / 97 与 GEX 0.0（v0.45.63 前「算不出」写成 0）同链。
+    {
+        "date": "2026-06-17",
+        "tickers": ('CRCL', 'VKTX'),
+        "signals": ("options.put_call_ratio", "options.total_oi", "options.gamma_exposure"),
+        "reason": "v0.45.522（用户 2026-10-16 批准）：当天两只的链只剩残片——快照 key_levels 的 call OI 0/0/0、put OI VKTX 10/2/1、CRCL 96/1/0。P/C 1.0 是 calculate_put_call_ratio 在 call 侧为 0 时返回的假中性（v0.45.516 起改 None）；total_oi 13 / 97（前后几天 VKTX 2.3–2.4 万、CRCL 10–11 万）；gamma_exposure 0.0 是 v0.45.63 前「算不出」写成的 0（前后几天 VKTX 1.64 / −0.002、CRCL 2.21 / 0.99）。都不是观测。",
+        "evidence": ("cache/options_snapshot_VKTX_2026-06-17.json", "cache/options_snapshot_CRCL_2026-06-17.json",
+                     "CHANGELOG.md#v0.45.516", "CHANGELOG.md#v0.45.522"),
+    },
+    # ③ 样本链早退写的 total_oi = 0（v0.45.522 起改 None）：期权链取不到 ⇒ `OptionsAgent.analyze` 中性早退，其余期权字段
+    #    全是 None、唯独 total_oi 写了 0 ⇒ 这一行是当天该标的唯一的期权「观测」。09-24 / 09-25 30/30、10-14 BILI。
+    {
+        "date": "2026-09-24",
+        "tickers": ('ABBV', 'AMC', 'AMZN', 'BILI', 'BRK-B', 'COST', 'CRCL', 'CRM', 'CVX', 'DE', 'DELL', 'ENPH', 'JNJ', 'META', 'MSFT',
+                    'MU', 'NEE', 'NFLX', 'NVDA', 'QCOM', 'RKLB', 'SNOW', 'T', 'TMO', 'TMUS', 'TSLA', 'VKTX', 'VZ', 'WMT', 'XOM'),
+        "signals": ("options.total_oi",),
+        "reason": "v0.45.522（用户 2026-10-16 批准）：yfinance 全挡日，期权链全部退到样本 ⇒ analyze 中性早退写 total_oi = 0（其余期权字段 None、当天这 30 只没有任何别的 options.* 行）。0 不是观测。",
+        "evidence": ("~/.claude/logs/orchestrator-2026-09-24.log（降级为样本数据 / 中性早退 42 次）", "CHANGELOG.md#v0.45.522"),
+    },
+    {
+        "date": "2026-09-25",
+        "tickers": ('ABBV', 'AMC', 'AMZN', 'BILI', 'BRK-B', 'COST', 'CRCL', 'CRM', 'CVX', 'DE', 'DELL', 'ENPH', 'JNJ', 'META', 'MSFT',
+                    'MU', 'NEE', 'NFLX', 'NVDA', 'QCOM', 'RKLB', 'SNOW', 'T', 'TMO', 'TMUS', 'TSLA', 'VKTX', 'VZ', 'WMT', 'XOM'),
+        "signals": ("options.total_oi",),
+        "reason": "v0.45.522（用户 2026-10-16 批准）：同 09-24——期权链全部退到样本 ⇒ 中性早退写 total_oi = 0，不是观测。",
+        "evidence": ("~/.claude/logs/orchestrator-2026-09-25.log（降级为样本数据 / 中性早退 42 次）", "CHANGELOG.md#v0.45.522"),
+    },
+    {
+        "date": "2026-10-14",
+        "tickers": ('BILI',),
+        "signals": ("options.total_oi",),
+        "reason": "v0.45.522（用户 2026-10-16 批准）：yfinance 限流冷却中 BILI 期权链退到样本（14:15:51「降级为样本数据」「期权链为样本数据，跳过全部指标计算（中性早退）」）⇒ total_oi = 0 是早退分支的默认值，不是观测；当天 BILI 没有别的 options.* 行。",
+        "evidence": ("~/.claude/logs/orchestrator-2026-10-14.log:377-378", "CHANGELOG.md#v0.45.522"),
     },
     # ────────────────────────────────────────────────────────────────────────
     # v0.45.508（用户 2026-10-16 批准）：10-14 生产扫描 yfinance 全挡（429）⇒ 历史字段全走出口回落，其中两类取到了

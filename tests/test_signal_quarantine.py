@@ -319,16 +319,44 @@ def test_bili_1012_replay_placeholder_iv_quarantined():
 
 def test_bili_1012_stale_oi_put_call_quarantined():
     """v0.45.512（用户批准）：同一条 yfinance 链的 P/C 298.46——OI 陈旧（当天 Yahoo OI 几乎清零、只剩冻结旧数）。
-    只挡 BILI 这一天的 put_call_ratio；同链 total_oi / gamma_exposure 未获批准、不挡；别的日子 / 标的不挡。
+    只挡 BILI 这一天的 put_call_ratio（同链 total_oi / gamma_exposure 由 522 另立条目，见下一条）；iv_rank 不挡；别的日子 / 标的不挡。
     （499 那条原先断言「P/C 不挡」——那是当时的批准范围，512 起改由本条覆盖。）
 
-    变红的变异：删该条目；去掉 tickers（同日 29 只真观测被连坐）；signals 加上 total_oi / gamma_exposure；日期错一天。
+    变红的变异：删该条目；去掉 tickers（同日 29 只真观测被连坐）；signals 加上 iv_rank；日期错一天。
     """
     assert sa.is_quarantined("2026-10-12", "BILI", "options.put_call_ratio")
-    for sig in ("options.total_oi", "options.gamma_exposure", "options.iv_rank"):
-        assert not sa.is_quarantined("2026-10-12", "BILI", sig), sig
+    assert not sa.is_quarantined("2026-10-12", "BILI", "options.iv_rank")
     assert not sa.is_quarantined("2026-10-12", "NVDA", "options.put_call_ratio")
     assert not sa.is_quarantined("2026-10-13", "BILI", "options.put_call_ratio")
+
+
+_UNIVERSE_0924 = ("ABBV", "AMC", "AMZN", "BILI", "BRK-B", "COST", "CRCL", "CRM", "CVX", "DE", "DELL", "ENPH", "JNJ",
+                  "META", "MSFT", "MU", "NEE", "NFLX", "NVDA", "QCOM", "RKLB", "SNOW", "T", "TMO", "TMUS", "TSLA",
+                  "VKTX", "VZ", "WMT", "XOM")
+
+
+def test_bad_chain_option_observations_quarantined_v0_45_522():
+    """v0.45.522（用户批准「不要脏数据污染历史库」）：坏链派生的期权观测。
+
+    ① BILI 10-12 同链 total_oi / GEX；② 06-17 VKTX / CRCL 残链（假中性 P/C、total_oi 13 / 97、GEX 0.0）；
+    ③ 样本链早退写的 total_oi = 0（09-24 / 09-25 30/30、10-14 BILI）。
+
+    变红的变异：删任一条目；③ 去掉 tickers 或漏标的；② 漏 signals；日期错一天；连坐同日真观测（见下面的 not）。
+    """
+    for sig in ("options.total_oi", "options.gamma_exposure"):
+        assert sa.is_quarantined("2026-10-12", "BILI", sig), sig
+    for tk in ("VKTX", "CRCL"):
+        for sig in ("options.put_call_ratio", "options.total_oi", "options.gamma_exposure"):
+            assert sa.is_quarantined("2026-06-17", tk, sig), (tk, sig)
+    assert not sa.is_quarantined("2026-06-16", "VKTX", "options.total_oi")
+    assert not sa.is_quarantined("2026-06-18", "CRCL", "options.total_oi")
+    for d in ("2026-09-24", "2026-09-25"):
+        for tk in _UNIVERSE_0924:          # 当天 30/30 都是样本链早退的 0，逐只核（漏一只就红）
+            assert sa.is_quarantined(d, tk, "options.total_oi"), (d, tk)
+        assert not sa.is_quarantined(d, "NVDA", "options.put_call_ratio")
+    assert sa.is_quarantined("2026-10-14", "BILI", "options.total_oi")
+    assert not sa.is_quarantined("2026-10-14", "NVDA", "options.total_oi")
+    assert not sa.is_quarantined("2026-10-13", "BILI", "options.total_oi")
 
 
 def test_rank_rows_from_placeholder_iv_whose_iv_current_was_purged_earlier():

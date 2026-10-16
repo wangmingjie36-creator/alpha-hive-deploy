@@ -95,3 +95,13 @@ def test_summary_line_only_when_nonzero():
     assert "P/C不可得2只" in line
     line0 = scan_timing.summary_line({"phases": {}, "counters": {"options_snapshot": {**base, "pc_unavailable": 0}}})
     assert "P/C不可得" not in line0
+
+
+def test_sample_chain_early_return_writes_no_fake_zero_oi(iv_agent, monkeypatch):  # noqa: F811
+    """v0.45.522：样本链中性早退的 total_oi / total_oi_raw 曾是 0——其余期权字段都是 None，唯独它是 0，成了当天该标的
+    唯一入档的期权「观测」（09-24 / 09-25 30/30、10-14 BILI，已隔离清库）。变红的变异：改回 0。"""
+    monkeypatch.setattr(iv_agent.fetcher, "fetch_options_chain",
+                        lambda t: {"source": "sample", "calls": [], "puts": [], "expirations": []})
+    r = iv_agent.analyze("BILI", stock_price=15.0)
+    assert r["data_quality"] == "unavailable"
+    assert r["total_oi"] is None and r["total_oi_raw"] is None and r["put_call_ratio"] is None
