@@ -121,8 +121,7 @@ class TestRegistry:
         heads = re.findall(r"^## \[0\.45\.508\] — (\d{4}-\d{2}-\d{2}) — ",
                            (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), re.M)
         assert heads == [_REGISTERED]
-        assert backtester._BDAY_AVAILABLE
-        t7 = (pd.Timestamp(_DAY) + 7 * backtester._US_BDAY).strftime("%Y-%m-%d")
+        t7 = backtester.add_trading_days(pd.Timestamp(_DAY).date(), 7).strftime("%Y-%m-%d")   # v0.45.520：NYSE 日历
         assert t7 == "2026-10-23"
         assert heads[0] < t7
 

@@ -19,15 +19,8 @@ from typing import Dict, List, Optional, Tuple
 
 _log = _logging.getLogger("alpha_hive.outcomes_fetcher")
 
-# ── 交易日计算（复用 backtester.py 模式） ──
-try:
-    import pandas as _pd
-    from pandas.tseries.holiday import USFederalHolidayCalendar as _USCal
-    from pandas.tseries.offsets import CustomBusinessDay as _CBDay
-    _US_BDAY = _CBDay(calendar=_USCal())
-    _BDAY_AVAILABLE = True
-except Exception:
-    _BDAY_AVAILABLE = False
+# ── 交易日计算：NYSE 日历的唯一实现（v0.45.520 前是 pandas 联邦假日表，哥伦布 / 退伍军人日判休、受难日判开）──
+from is_trading_day import add_trading_days
 
 try:
     import yfinance as _yf
@@ -303,9 +296,7 @@ class OutcomesFetcher:
                 base = datetime.strptime(str(base_str)[:10], "%Y-%m-%d")
             except (ValueError, TypeError):
                 return None
-            if _BDAY_AVAILABLE:
-                return (_pd.Timestamp(base) + off * _US_BDAY).strftime("%Y-%m-%d")
-            return (base + timedelta(days=int(off * 1.5))).strftime("%Y-%m-%d")
+            return add_trading_days(base, off).strftime("%Y-%m-%d")
 
         for snap in snaps:
             base = snap.get("date")
@@ -367,12 +358,7 @@ class OutcomesFetcher:
         """(目标交易日, 窗口末日)；日期解析失败 ⇒ None。"""
         try:
             start = datetime.strptime(report_date, "%Y-%m-%d")
-            if _BDAY_AVAILABLE:
-                target_ts = _pd.Timestamp(start) + offset_days * _US_BDAY
-                target_date = target_ts.to_pydatetime()
-            else:
-                # 降级：自然日偏移 × 1.5
-                target_date = start + timedelta(days=int(offset_days * 1.5))
+            target_date = add_trading_days(start, offset_days)
             return target_date, target_date + timedelta(days=10)
         except (ValueError, TypeError) as e:
             _log.debug("日期解析失败 %s +%dd: %s", ticker, offset_days, e)

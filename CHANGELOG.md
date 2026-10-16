@@ -5,7 +5,48 @@
 
 ---
 
-## [0.45.520] — 2026-10-16 — 占位（进行中：交易日历改 NYSE——outcomes_fetcher / backtester / backfill_dir_accuracy 用 USFederalHolidayCalendar，哥伦布 / 退伍军人日判休、受难日判开；先查历史影响面）
+## [0.45.520] — 2026-10-16 — Fixed：T+N 交易日算术改用 NYSE 日历——`outcomes_fetcher` / `backtester` / `backfill_dir_accuracy` 此前用 pandas 联邦假日表（哥伦布 / 退伍军人日判休、耶稣受难日判开），跨这些日子的 T+1/T+7/T+30 标签差一个交易日；历史数据**未改**（影响面见下，待用户决定）
+
+**怎么发现的。** 拨钟 CI（v0.45.495）10-14 的每日定时 +7 档确认一条新红：`test_outcomes_backlog_starvation::test_rate_limit_streak_stops_network_but_not_local`，
+本机逐日拨钟只在「今天」= 2026-10-21 红（+4 / +6 绿）。根因不在夹具：夹具两份快照恰为 10-09 / 10-12，而 10-12 是哥伦布日——
+联邦假日表判休、NYSE 开市 ⇒ 10-09 的 T+1 被算成 10-13。用户批准「修交易日历，先查历史影响面再动手」。
+
+**两张表的分歧**（2025–2027，用仓库 `is_trading_day` 逐日对照）：哥伦布日 2025-10-13 / 2026-10-12 / 2027-10-11、退伍军人日 11-11（三年）
+NYSE 开、联邦判休；耶稣受难日 2025-04-18 / 2026-04-03 / 2027-03-26 NYSE 休、联邦判开；2027-12-31 NYSE 开、联邦判休。共 10 天。
+取价语义是「目标日当天或之后第一根 bar」⇒ 受难日那批标签**早一天**（实为 T+N−1），哥伦布 / 退伍军人那批**晚一天**（T+N+1）。
+
+### Fixed
+- **`is_trading_day.add_trading_days(d, n)`**：T+N 交易日算术的唯一实现，判定直接复用 `is_trading_day()`（全仓「交易日」同一定义），
+  逐日步进、不用节假日列表 ⇒ 没有「列表只到某年、之后假日被静默忽略」的视野上限（`CustomBusinessDay(holidays=列表)` 正有此坑）。
+  语义与 pandas `d + n * CustomBusinessDay` 一致（从次日起数、负数向前、n=0 顺延）——2025-02~2027-11 每天 × n∈{±1,±7,30} 共 5320 组对照，
+  4746 组相同、574 组不同且**全部**能由那 10 个分歧日解释、0 组无法解释。
+- 调用点全换：`outcomes_fetcher._target_window` / `_target_key`（报告快照 `actual_prices`、本地价格索引反推键）；
+  `backtester._get_price_at_date`（`price_t1` / `close_t7` / `price_t30` / SPY 基准 / T7_CLOSE 平仓价）、`_simulate_trade_path` 取数窗口、
+  `get_pending_checks` 的到期 cutoff；`backfill_dir_accuracy`（`close_t7` 回填）。随之删掉五处「pandas 不可用 ⇒ 自然日偏移」的降级分支（outcomes_fetcher 2、backtester 3）
+  （不再依赖 pandas，分支不可达）与无人读的 `FeatureRegistry` 项 `pandas_bday`。
+- `tests/test_quarantine_1014_prev_session.py` 改读 `backtester.add_trading_days`（原读已删的 `_US_BDAY`；10-14 → 10-23 两表一致，断言不变）。
+- 已知局限（docstring）：不认临时休市（国丧日，如 2025-01-09），与 `is_trading_day()` 同。
+
+### Added
+- `tests/test_trading_calendar_nyse.py`（15 条）：已知分歧日逐个钉住；与 pandas 对照「只在分歧日处不同」（含反向自证：一处分歧都没有 ⇒ 红）；
+  `outcomes_fetcher` / `backtester` 调用点按 NYSE 取起点；**AST 守卫**：生产代码不许再出现 `USFederalHolidayCalendar` / `CustomBusinessDay` /
+  `AbstractHolidayCalendar`（认 import 与名字，不认注释）。变异 4 处全被杀（日历退回联邦 14 红、起算含当天 8 红、两个调用点各自退回各 2 红）。
+
+### 历史影响面（只读核对生产 `~/alpha-hive-data`，**未改任何数据**）
+数据跨度 2026-02-25 ~ 10-15，区间内分歧日只有 04-03（受难日）与 10-12（哥伦布日）。
+
+| | 已回填且受影响 | 按 NYSE 重算方向判定翻转 | 尚未回填、本版上线后直接算对 |
+|---|---|---|---|
+| `predictions` T+1（`price_t1`…） | 30（10-09 一批） | 4 | — |
+| `predictions` T+7（`close_t7` / `dir_correct_t7`；路径字段 T7_CLOSE 73 / SL 26 / TP 13） | 112（03-26~04-02、10-01~10-09） | 17 | 120 |
+| `predictions` T+30（`price_t30`…） | 271 | 27 | 870 |
+| 报告快照 `actual_prices` t1 / t7 / t30 | 30 / 82 / 144 | — | t7 150、t30 900 |
+
+- **自校验**：413 行受影响标签的存值 **413/413 等于「错位那天」的收盘**、0 行等于应取日 ⇒ 上面的取价语义推断就是生产实际行为。
+- 重算所需的应取日价格：`close_t7` / `price_t1` / `price_t30` 本地（价格索引 + `predictions.price_at_predict`）全覆盖、可离线重算；
+  `spy_return_t7` 要 SPY 价（本地索引 0 天）⇒ 需出网；T+7 **路径**字段（SL/TP 是否触发）要重拉 OHLC。
+- **维度 IC 预注册协议**（`experiments/dim_ic_protocol.py`，`OUTCOME_COLUMN = "close_t7"`，窗口自 2026-10-12）：窗口内最早一行 t7 按 NYSE 10-21 才回填，
+  ⇒ 本版上线时窗口内**尚无任何一行**按旧日历算出；窗口内第一次受日历分歧影响的是 11-02~11-10 的预测（跨 11-11）。是否为此记协议修订，待用户决定。
 
 ## [0.45.519] — 2026-10-16 — Added：Alpha Bot 总览 / 标的页把「不可报价」讲清楚——原因码翻成人话，补点差与持仓量（OI）
 

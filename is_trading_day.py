@@ -17,8 +17,9 @@
 
 from __future__ import annotations
 
+import functools
 import sys
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 
 def _easter(year: int) -> date:
@@ -168,6 +169,40 @@ def is_trading_day(d: date | None = None) -> tuple[bool, str]:
         return False, f"{d} 是美股假日：{holidays[d]}"
 
     return True, f"{d} 是交易日"
+
+
+@functools.lru_cache(maxsize=16384)
+def _is_open(d: date) -> bool:
+    return is_trading_day(d)[0]
+
+
+def add_trading_days(d: date | datetime, n: int) -> date:
+    """`d` 之后第 n 个（n<0：之前第 |n| 个）NYSE 交易日。**T+N 交易日算术的唯一实现**（v0.45.520）。
+
+    此前 `outcomes_fetcher` / `backtester` / `backfill_dir_accuracy` 用 pandas
+    `CustomBusinessDay(USFederalHolidayCalendar)`——那是**联邦假日表，不是 NYSE**：哥伦布日、退伍军人日
+    NYSE 开市却被判休，耶稣受难日 NYSE 休市却被判开（2025–2027 共 10 天相反）⇒ 窗口跨这些日子的
+    T+1/T+7/T+30 标签差一个交易日（v0.45.520 查清：已回填 413 行，按 NYSE 重算方向翻转 48 行）。
+    拨钟 CI 10-14 抓到的 10-21 炸点即此。
+
+    判定直接复用 `is_trading_day()`，与全仓「交易日」同一定义；逐日步进、不用节假日列表，
+    故没有「列表只到某年、之后假日被静默忽略」的视野上限。语义与 pandas 的 `d + n * CustomBusinessDay`
+    一致：从 d 的**次日**（n<0 为前一日）起数，d 本身是不是交易日都不计入；n=0 ⇒ d 若休市则顺延到下一交易日。
+    ⚠️ 不认临时休市（国丧日等，如 2025-01-09），与 `is_trading_day()` 同。
+    """
+    if isinstance(d, datetime):
+        d = d.date()
+    if n == 0:
+        while not _is_open(d):
+            d += timedelta(days=1)
+        return d
+    step = timedelta(days=1 if n > 0 else -1)
+    left = abs(n)
+    while left:
+        d += step
+        if _is_open(d):
+            left -= 1
+    return d
 
 
 def filename_is_nontrading_day(name: str) -> bool:

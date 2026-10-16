@@ -11,7 +11,7 @@ T+1 / T+7 / T+30 自动回看预测偏差：
 
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 # v0.27.3: 与美股交易日对齐的日期工具，避免本地时区为 CST/北京时跨午夜偏移
 try:
@@ -30,16 +30,9 @@ from typing import Dict, List, Optional
 
 from hive_logger import PATHS, get_logger, FeatureRegistry, SafeJSONEncoder
 
-try:
-    import pandas as _pd
-    from pandas.tseries.holiday import USFederalHolidayCalendar as _USCal
-    from pandas.tseries.offsets import CustomBusinessDay as _CBDay
-    _US_BDAY = _CBDay(calendar=_USCal())
-    _BDAY_AVAILABLE = True
-except Exception:
-    _BDAY_AVAILABLE = False
-FeatureRegistry.register("pandas_bday", _BDAY_AVAILABLE,
-                          "T+N 交易日计算降级为自然日" if not _BDAY_AVAILABLE else "")
+# T+N 交易日算术：NYSE 日历的唯一实现（v0.45.520 前是 pandas `CustomBusinessDay(USFederalHolidayCalendar)`——
+# 联邦假日表不是 NYSE：哥伦布 / 退伍军人日判休、受难日判开，跨这些日子的 T+N 标签差一个交易日）
+from is_trading_day import add_trading_days
 
 try:
     import yfinance as yf
@@ -300,11 +293,7 @@ class PredictionStore:
         # v0.33.0: cutoff 锚定 PDT —— entry_date 由 save_prediction 盖 PDT(line 169)，
         # 此处 cutoff 原用裸本地时(上海)，两者口径不一致导致当天预测被误判已满 T+N。
         # 用 _pdt_today() 作业务日回看起点，与 date 列同历比较。
-        if _BDAY_AVAILABLE:
-            cutoff_dt = _pd.Timestamp(_pdt_today()) - days * _US_BDAY
-            cutoff = cutoff_dt.strftime("%Y-%m-%d")
-        else:
-            cutoff = (_pdt_now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cutoff = add_trading_days(date.fromisoformat(_pdt_today()), -days).strftime("%Y-%m-%d")
 
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -1299,20 +1288,13 @@ class Backtester:
     def _get_price_at_date(
         self, ticker: str, predict_date: str, days_ahead: int
     ) -> Optional[float]:
-        """获取预测日后 N 个交易日的收盘价（跳过周末和美国法定假日）"""
+        """获取预测日后 N 个 NYSE 交易日的收盘价（`is_trading_day.add_trading_days`）"""
         if yf is None:
             return None
 
         try:
             start = datetime.strptime(predict_date, "%Y-%m-%d")
-            if _BDAY_AVAILABLE:
-                # 用 pandas CustomBusinessDay 计算真实交易日偏移
-                import pandas as _pd
-                target_ts = _pd.Timestamp(start) + days_ahead * _US_BDAY
-                target_date = target_ts.to_pydatetime()
-            else:
-                # 降级：自然日偏移（原行为）
-                target_date = start + timedelta(days=days_ahead)
+            target_date = add_trading_days(start, days_ahead)
 
             # 向后留 10 天窗口应对节假日连休
             end_date = target_date + timedelta(days=10)
@@ -1421,12 +1403,7 @@ class Backtester:
 
             # 拉 T+0 ~ T+N+缓冲 OHLC
             start_dt = datetime.strptime(predict_date, "%Y-%m-%d")
-            if _BDAY_AVAILABLE:
-                import pandas as _pd
-                end_ts = _pd.Timestamp(start_dt) + (days_ahead + 3) * _US_BDAY
-                end_dt = end_ts.to_pydatetime()
-            else:
-                end_dt = start_dt + timedelta(days=int((days_ahead + 3) * 1.5))
+            end_dt = add_trading_days(start_dt, days_ahead + 3)
 
             hist = self._history(
                 ticker,
