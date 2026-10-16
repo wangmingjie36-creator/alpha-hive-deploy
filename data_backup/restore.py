@@ -71,14 +71,32 @@ def restore_db(export_dir: Path, db_key: str, dest_path: Path) -> dict:
         tables = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
         row_counts = {t: conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] for t in tables}
+        quarantine = _quarantined_signal_rows(conn, tables)
     finally:
         conn.close()
 
     return {
         "db_key": db_key, "dest_path": str(dest_path),
         "integrity_check": integrity, "tables": tables, "row_counts": row_counts,
-        "rows_total": sum(row_counts.values()),
+        "rows_total": sum(row_counts.values()), **quarantine,
     }
+
+
+def _quarantined_signal_rows(conn: sqlite3.Connection, tables: list[str]) -> dict:
+    """重建出的 `signal_archive` 里命中**现行** QUARANTINE 的行数（v0.45.511）。只报告、不删：
+
+    整库恢复要忠实还原备份时刻；但备份若早于某次清库（`purge_quarantined_signal_rows`），被清掉的坏行会跟着
+    回来，且没人会红。恢复后见到非 0 ⇒ 对新库重跑清库脚本。没有该表 ⇒ 0；隔离名单取不到 ⇒ None + 原因（不当 0）。
+    """
+    if "signal_archive" not in tables:
+        return {"quarantined_signal_rows": 0}
+    try:
+        from signal_archive import is_quarantined
+    except Exception as e:  # noqa: BLE001 —— 记下原因，不冒充「没有命中」
+        return {"quarantined_signal_rows": None, "quarantine_check_error": f"{type(e).__name__}: {e}"}
+    n = sum(1 for d, t, s in conn.execute("SELECT date, ticker, signal FROM signal_archive")
+            if is_quarantined(str(d)[:10], t, s))
+    return {"quarantined_signal_rows": n}
 
 
 def restore_state(export_dir: Path, dest_root: Path, state_dirs: list[str], root_files: list[dict]) -> dict:

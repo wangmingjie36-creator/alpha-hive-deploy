@@ -120,6 +120,15 @@ def run(swarm_results_dir: Path, db_path: Path, apply_changes: bool = False) -> 
             if info["is_cnn"] is not None:
                 rows.append((date, ticker, "market.fear_greed_is_cnn", info["is_cnn"]))
 
+    # v0.45.511：直写 signal_archive 不经 archive() 的入库口，隔离名单要在这里自己过一遍（同 `_rows_for`）。
+    # 剔除数进返回值并打 WARNING——不许悄悄少写。
+    from signal_archive import is_quarantined
+    quarantined = [r for r in rows if is_quarantined(r[0], r[1], r[2])]
+    if quarantined:
+        rows = [r for r in rows if not is_quarantined(r[0], r[1], r[2])]
+        _log.warning("命中 QUARANTINE、不写入 %d 行：%s", len(quarantined),
+                     ", ".join(f"{d}/{t}/{s}" for d, t, s, _ in quarantined[:10]))
+
     _log.info("待回填天数: %d，行数: %d", len(targets), len(rows))
     for date, info in sorted(targets.items()):
         _log.info("  %s  value=%s (%s)  is_cnn=%s  tickers=%d",
@@ -134,7 +143,8 @@ def run(swarm_results_dir: Path, db_path: Path, apply_changes: bool = False) -> 
             conn.commit()
         _log.info("已写入 %d 行", len(rows))
 
-    return {"dates": len(targets), "rows": len(rows), "targets": targets}
+    return {"dates": len(targets), "rows": len(rows), "targets": targets,
+            "quarantined": len(quarantined)}
 
 
 def main() -> int:

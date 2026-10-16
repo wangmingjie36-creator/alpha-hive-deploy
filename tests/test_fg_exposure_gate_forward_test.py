@@ -69,7 +69,10 @@ _OHLC_WINDOW_KEYS = {"window", "wide_fetches", "served", "out_of_window", "fallb
 
 _SELFPROOF_KEYS = {"real_entries", "reproduced", "decision_reproduced", "a_only_entries"}
 _SEGMENT_KEYS = {"segments", "multi_day_segments", "stale_anchor_segments", "invalid_anchors",
-                 "production_unprocessed_dates", "anchor_sources", "unreadable_state_commits", "overlap_days_checked"}
+                 "production_unprocessed_dates", "anchor_sources", "unreadable_state_commits", "overlap_days_checked",
+                 # v0.45.509：按生产没有日线重放的故障日 / 挡下的请求数 / 时有时无的标的 / 有故障形状却未记的日子
+                 # ——只有日期、标的名与请求计数，没有价格 / 净值 / 收益
+                 "ohlc_outage_days", "ohlc_masked_requests", "ohlc_partial_days", "ohlc_outage_signature_unmarked"}
 
 
 def _assert_no_unexpected_top_level_keys(res):
