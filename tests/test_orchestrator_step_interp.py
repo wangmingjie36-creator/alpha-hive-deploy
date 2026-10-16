@@ -905,8 +905,18 @@ class TestMacBash:
         {"LC_ALL": "en_US.UTF-8"},
     ], ids=["C", "UTF-8"])
     def test_parity_and_fallback_under_bare_env(self, tmp_path, locale_env):
+        # 生产里这些子进程一直有 ALPHA_HIVE_HOME（plist 的 EnvironmentVariables，编排器顶部又 export 一次）和 HOME
+        # （launchd 按用户补上，`launchctl print` 不列；编排器顶层在 set -u 下展开 `$HOME` 每天都跑过）。
+        # env -i 两样都剥掉 ⇒ 子进程按 `hive_logger.resolve_data_root` 落到 `expanduser("~")`（无 HOME 时查用户库）
+        # = **真实生产数据根**。所以 ALPHA_HIVE_HOME 必须带上、且指向沙箱：数据根上与生产同形，也是隔离（v0.45.483）。
+        # 不带 HOME 是本测试原有的「比生产更光」的条件，照旧
         env_prefix = ["/usr/bin/env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE=1",
-                      f"TMPDIR={tmp_path}", *(f"{k}={v}" for k, v in locale_env.items())]
+                      f"TMPDIR={tmp_path}", f"ALPHA_HIVE_HOME={tmp_path / 'alpha_hive_home'}",
+                      *(f"{k}={v}" for k, v in locale_env.items())]
+        from hive_logger import resolve_data_root      # 生产的解析规则本身（纯函数），不另写一份
+        child_env = dict(a.split("=", 1) for a in env_prefix[2:])
+        assert tmp_path in resolve_data_root(child_env).parents, (
+            f"env -i 子进程的数据根解析到 {resolve_data_root(child_env)}，不在本测试的 tmp_path 里")
         calls = [tool_call(tmp_path, sid, 1, fresh_legacy(tmp_path, sid)) for sid in TOOL_SIDS]
         run = run_helper(tmp_path, calls, argv_prefix=env_prefix, env={})
         assert "unbound variable" not in run.stderr, run.stderr

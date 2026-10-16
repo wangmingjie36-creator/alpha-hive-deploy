@@ -5,6 +5,37 @@
 
 ---
 
+## [0.45.510] — 2026-10-16 — 占位（进行中：编排器去掉扫描前 Slack 确认——每天 launchd 自己跑、Webhook 早已 404，空等 10 分钟）
+
+## [0.45.509] — 2026-10-16 — 占位（进行中：F&G 敞口门自证在生产日线全取不到的故障日按「无日线」重放）
+
+## [0.45.508] — 2026-10-16 — Fixed（数据，用户批准；维度 IC 协议**事后·非修订**记录 §13.8）：2026-10-14 的 29 个 `price.volume_ratio`（Twelve Data 兜底，末根 10-13）与 BILI 的 `price.momentum_5d`（自攒索引窗口末端 10-13）登进 `QUARANTINE` ⇒ 维度 IC H1 当天无效；H2 / 共振加成 / F&G 敞口门不受影响
+
+### 取证（只读；全部 30 只，yfinance 日线只取到 10-14 为止，没算任何收益或 IC）
+- 10-14 生产扫描 yfinance 全挡（429×4 后冷却），历史字段全走出口回落（`~/.claude/logs/orchestrator-2026-10-14.log`）。
+- `price.volume_ratio` 29/30 入档（JNJ 当天 TD 限流超时、未入档；14:19 补到的 2.23x 没进归档）：**29/29 是 10-13 的比值**——27 只与 yfinance「截至 10-13」到 4 位小数相等，RKLB 0.7304 vs 0.7327、VKTX 0.6039 vs 0.6072（成交量源差异）；与「截至 10-14」相去甚远（COST 0.62 vs 1.31、CRCL 0.48 vs 1.03、DELL 0.78 vs 1.68）。成因与修法见 v0.45.505。
+- `price.momentum_5d` 30/30 来自自攒索引：29 只末端 10-14、与 yfinance 一致；**BILI 末端 10-13**（+0.40%，yfinance 截至 10-14 为 −3.91%）。
+- `price.volatility_20d` 0/30 ⇒ `buzz.comp.volatility_signal` 全 50（缺失哨兵，横截面同值）——**缺失 ≠ 取错**，按协议 §3「降级日照算」不处理。`market.fear_greed` 32 是当天 CNN 实时值、横截面同值（未对 CNN 历史独立复核，待验证）。
+- 窗口内其余日子：10-13、10-15 零 TD 量比兜底、零索引动量兜底 ⇒ 只有 10-14。
+- 损伤量级（只用分数）：用正确的 D 值，16/30 只的量比档位会变；线性近似下纠正后 H1 横截面与实际的 Spearman ≈ 0.96（忽略背离 / 情绪动量调整，估算）。
+- 截止：10-14 的 T+7 = **2026-10-23**（`backtester._US_BDAY` 与 NYSE 日历一致）；本条登记于 10-16，此前 `close_t7` 全 NULL ⇒ 盲化未破。
+
+### Fixed
+- `signal_archive.QUARANTINE` 加两条：10-14 × 29 只（除 JNJ）× `price.volume_ratio`；10-14 × BILI × `price.momentum_5d`。生产库只读核对：命中恰好 30 行（29 + 1），全在 10-14。
+- **为什么是 QUARANTINE、不是修订 2 的 `FORWARD_TEST_EXCLUDED_DAYS`**：协议 §3 登记时就把「`QUARANTINE` 登记的已知坏行」列为排除项，执行器 `weekly_series` 对假设的任一截断 / 隔离信号命中即丢行，H1 的信号表含输入层 ⇒ 这是**套用已登记的规则**，规则 / 常量 / 窗口 / 检视点都没动（不进 `AMENDMENTS`）。`FORWARD_TEST_EXCLUDED_DAYS` 管「事后重放补算的整天」（10-14 没有重放），且三份前瞻检验共用——登进去会连带把 10-14 从 F&G 敞口门里拿掉，而那边 10-14 自证失败的处理（v0.45.503）另待决定。
+- 后果：H1 当天只剩 JNJ（< `MIN_WIDTH` 20）⇒ 10-14 对 H1 无效（W42 剩 10-13 / 10-15 / 10-16）；H2 不读 `price.*` 照算。
+- **只隔离观测层**：`buzz.comp.*` 通道值是派生值（同 Agent 评分，不隔离）；且 §13.2 自证 ②「生产有分、重算却缺输入 = 0」会把隔离 / purge 掉的通道行算成自证失败。
+- 未动：09-15 QCOM / NVDA 同形状的 D-1 TD 量比（窗口前，不影响 H1；要不要为一致性补登另议）；没跑 `purge_quarantined_signal_rows.py`（`is_quarantined` 已足够让 H1 丢行；删不删库里的 30 行另议）。
+
+### Changed（文档）
+- `experiments/dim_ic_preregistration.md`：文首加「记录」一行；新增「### 记录（2026-10-16，v0.45.508）」§13.8（发生了什么 / 做了什么 / 为什么不是修订 / 为什么不隔离通道 / 为什么不走修订 2 / 为什么不可能受结果影响 / 代价 / 守卫）。
+
+### Tests
+- 新 `tests/test_quarantine_1014_prev_session.py`（10）：名单恰好 29 只 × 量比、BILI × 动量，JNJ 与其余动量不在内；通道 / Agent 评分 / `sentiment.pct` / 波动 / F&G 不隔离；不是协议排除日；T+7 按 backtester 日历 = 10-23 晚于登记日；生产形状夹具（30 只真实代码）下 H1 丢 10-14、保 10-15，**删掉条目该日回来**（对照），H2 不受影响。
+- 变异 7/7 被杀（量比条目失效、漏 XOM、多 JNJ、连带隔离通道、动量不限 BILI、日期错成 10-15、执行器不问隔离）；`PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。
+- 相关 6 个文件 188 passed；ruff 全仓通过。
+- 全量：9849 passed、2 xfailed、0 failed（`--deselect` 设计内定期红的 `test_economic_calendar::TestCoverageHorizon`）；1 error = session 级真实数据根总闸：生产 `replay_ohlc_state/*.json` 05:52:31–36 被改写，总闸把它们记到互不相关的 alphabot 启动器测试上（几秒内成批）。同一时段另一会话（laughing-lumiere）的全量 05:44–05:55 与本次重叠；单独重跑被点名的两个文件 + 本条测试（179 passed），该目录 mtime 前后逐字节不变；本条改动不碰任何写入路径 ⇒ 判为并发写入者，非本条泄漏（谁写的未进一步定位，待验证）。
+
 ## [0.45.507] — 2026-10-16 — Fixed（仅测试基础设施）：两道 session 级总闸「逐文件写入时刻落在哪条测试」的定位按**本机 mtime 精度**放宽——Linux 内核按 tick 盖 inode 时间戳，mtime 可比写入那一刻的 `time.time()` 早一个 tick，call 开头的写入被标成 setup；`test_root_data_guard` 两条时间线测试因此在 Linux CI 上恒红（macOS 绿）
 
 **症状。** CI `tests.yml`（run 38884127475，v0.45.505 那轮）3 条红：设计红 `TestCoverageHorizon`（等 BLS 2027 日程，未动）+
@@ -586,6 +617,23 @@ mtime 从不早于写前读的 `time.time()`，所以本机永远复现不了。
   canary：**修前原文件**同一 harness 下 −1 天（10-12）全绿、0 天（10-13）3 红、+38（11-20）仍 3 红、+39（11-21）4 红——
   两颗的引爆日都被精确复现，证明 harness 确实拨到了本文件的被测路径。
 
+### 复核（同日另一会话，只验证、无代码改动）：拨钟补到 +60 / +180
+- 拨钟**旧版** harness（495 搬进仓库前、memory 目录里那份）全套件（树 = `bc2c9294`，即二次检查 `f392782d` **之前**；9446 selected /
+  87 deselected）：真实钟 1 failed（设计红）+ 1 teardown error（真实数据根闸：`pheromone.db` @06:03:54.429 被写——是 **v0.45.494 的清库**
+  （备份 `db_backups/pheromone_pre_v0.45.494_rank_mirror.db` mtime 06:03:53），与上面 490 同一形状；闸点名的两条
+  `test_quote_set.py`、`test_experiments_script_bootstrap.py::test_stripping_the_injection_turns_every_real_file_red` 各单跑两遍，生产库 mtime 都不动）。
+  **+60 / +180 天各 42 failed，两轮失败集合逐条相同**：1 设计红 + 41 条旧 harness 自己造的假红，真实钟下全绿；按 v0.45.495 的归因
+  = R1 子进程不读偏移 11 条（step_contract 9、真实数据根闸子 pytest 2）+ R2 只拨了 `datetime`、没拨文件 mtime 30 条（编排器解释器 28、
+  Step 15 分派 2）——二次检查拿 `-vv` 全量失败正文逐条核过（初版统称「子进程读真钟」，30 条归因错，同 495 对 +30 那轮的更正）。
+  ⚠️ 这 41 条在旧 harness 下恒红，里面若有炸弹看不见 ⇒ 二次检查（10-16）在 `origin/main` `04dce858` 上用 495 的新 harness
+  （`tools/clockshift`，拨文件 mtime、跨进程）单跑这 42 条：0 / +60 / +180 天各 41 passed + 设计红 1、0 deselected。
+  ⇒ **+120 → +180 未见新炸弹**（全套件是 `bc2c9294` + 旧 harness；那 42 条是 `04dce858` + 新 harness）。
+- 近未来日期字面量密集的 17 个测试文件（9 个 OCC 字面量文件 + f-string 拼 OCC 的两个 `test_sell_strike_*` + 日期字面量 census
+  排名靠前的 5 个 + 本文件；那 5 个是否真拿到期日与钟比较**未逐个核**）在 +4 / +7 / +14 / +30 / +45 / +90 / +150 / +270 / +400 /
+  +1000 天各 763 passed（树 `bc2c9294`，旧 harness）。
+- 快进到 `91af111a`（含 `f392782d` 的 +39）后重核：上述 17 个 + `bc2c9294..HEAD` 改过的 4 个测试文件共 21 个，0 / +39 / +60 / +180 天各 845 passed。
+- canary 独立复现：修前原文件 −1 绿 / 0、+3、+38 红 3 / +39、+60、+180 红 4；修后同钟全绿。
+
 ## [0.45.488] — 2026-10-13 — Fixed（测试闸）：真实数据根只从 `resolve_data_root` 来——非绝对值不猜、改守缺省数据根并在报告头说明；对拍补 `~` / 相对 / 空白样本；AST 守卫：只有 hive_logger 把 `ALPHA_HIVE_HOME` 变成路径
 
 用户批准的方案（推荐项：非绝对值改守缺省、加 AST 守卫）。
@@ -786,6 +834,47 @@ mtime 从不早于写前读的 `time.time()`，所以本机永远复现不了。
 - 多个会话同时处理同一天时，**每一次**写生产前都要重新 fetch + 看 origin/main 新的数据类提交，不只第一次。
 - freezegun 冻 UTC 时 naive `now()` 不是本地时间；改 `tz_offset` 又会错移 aware 时间。
 - 写回改了生产的 mtime ⇒ 之后再用生产 mtime 判「扫描写过的缓存」会误删（prep 改为以写回前的 APFS 克隆为参照）。
+
+## [0.45.483] — 2026-10-13 — Fixed（测试隔离）：10-12 全量测试期间生产 `pheromone.db` 被改动——判明是**并发写者**（另一会话的 v0.45.479 清库），不是 `TestMacBash`；但它的 `env -i` 子进程确实没隔离（数据根会解析到真实生产），补上 `ALPHA_HIVE_HOME` + 守卫
+
+### 结论：并发写者（有直接证据）
+- 10-12 13:02:04 起的全量（merge `142c7aa7`）teardown 时真实数据根闸红：`pheromone.db @13:08:57.673`、`pheromone.db-wal @13:08:57.746`，时间线落在 `TestMacBash::test_parity_and_fallback_under_bare_env[UTF-8]` 的 call 段。
+- 同一时刻另一会话（worktree `confident-lederberg-3b0de0`）在跑 v0.45.479 清库：会话记录里该命令 13:08:55.876 下发（`2026-10-12T20:08:55.876Z`，执行不早于此），`env -u ALPHA_HIVE_HOME … purge_quarantined_signal_rows.py --only-tag v0.45.479 --expect 128 --apply`（⇒ 缺省数据根 = 生产库），删 128 行（129,947 → 129,819），结果 **13:08:58.272** 返回。其持锁后备份 `db_backups/pheromone_pre_v0.45.479_purge.db` 生于 13:08:56.689、末次写 13:08:56.766；闸看到的两个 mtime 在备份之后约 0.9 s，正落在该命令窗口内。同一条命令里随后还有两次只读核对连接；COMMIT、检查点、只读连接各自改了哪个文件的 mtime **没有细分**（不影响归因：窗口内对生产库动手的只有这条命令）。
+- 同日 12:27–12:39 那轮没报 `pheromone.db`：闸本身就证明那段时间库没被改（起止指纹相同）；前后两次动库的备份在 12:18:32（v0.45.475 隔离）与 12:43:08（v0.45.476 恢复），都在窗口外。「不确定」来自并发写者什么时候动手，不来自测试。
+- 闸的时间线本来就只说「时间重合」（v0.45.455 措辞）；这次的归因法：`db_backups/` 里各次清库 / 恢复备份的 mtime + 其他会话 `~/.claude/projects/*/*.jsonl` 里同一时间窗的 `tool_use`。
+
+### 实测：测试不碰数据根（全程没有碰生产库）
+- 用 `sandbox-exec`（内核沙箱、子进程继承、穿过 `env -i` 依然生效）：写 `~/alpha-hive-data` / `~/alpha-hive-prod` / `~/.claude/scripts` / 开发检出的 `pheromone.db*` 一律拒，**读** `~/alpha-hive-data/pheromone.db*` 也拒；每次违规进统一日志（`log show --predicate 'sender == "Sandbox"'`，带进程名与 pid）。
+- 金丝雀先自证：`env -i` 下的 Python 以 `immutable=1`（不加锁、不碰 WAL，沙箱若失效也无害）打开 `pheromone.db` → 被拒且日志有 `deny(1) file-read-data …/pheromone.db`；写拒绝在 scratch 目录上同样留痕。
+- `tests/test_orchestrator_step_interp.py` 全文件 164 passed（`TestMacBash` 两条确实执行、非 skip），生产路径违规 **0** ⇒ `env -i` 子进程不打开数据根里任何东西，连读 `pheromone.db` 都没有。
+- 复核 v0.45.422 那条审计（不只看 logs）：AST 枚举 `tests/` 里 `env=` 不是字面继承 `os.environ` 的 64 处子进程调用（34 个文件，含字面 `env -i` / 剥 `ALPHA_HIVE_*` 的全部 10 个文件）+ 直接调 `resolve_data_root` 的 `test_data_root_default.py`，共 35 个文件（基线 `747cc880`）整体在同一沙箱里跑：2120 passed，生产路径违规 **0**。12 条未全程跑完，逐条核过：9 条 `test_ic_rerun_fg_budget` 只在**收尾**的 `ps` 清理处报错（setuid 的 `/bin/ps` 在沙箱里一律 exec 不了），测试体已在沙箱里跑完；2 条 `test_alphabot_launcher::TestNativeWindow` 在测试体里调 `ps` 失败，其子进程只是 `python -c pass` / `sleep`、环境原样继承会话沙箱；1 条 `test_data_migrations` 是 iCloud 重名副本致败（见「环境」），清掉后该文件在沙箱里重跑 48 passed、违规 0。
+
+### 发现：v0.45.422 审计记录对 `TestMacBash` 不成立
+- 422 记「剥 `ALPHA_HIVE_*` 的测试都显式设了或把 HOME 指空目录」。`TestMacBash` 两样都没有：`env -i` 把会话沙箱的 `ALPHA_HIVE_HOME` 与 `HOME` 一起剥掉 ⇒ 子进程里 `hive_logger.resolve_data_root` 落到 `expanduser("~")`（无 HOME 时查用户库）= 真实 `~/alpha-hive-data`。它没写穿只因为 `orchestrator_steps` 在这几条路上只读显式给的 `--json` / `--data-dir`（Step 2/4 的 `_resolve_dirs` 也只认 `--data-dir` / `ALPHA_HIVE_HOME`、不看 HOME）——是走运，不是隔离；哪天这条路 import 了 `hive_logger`，写进生产 `logs/` 也没人会红（闸豁免 logs）。
+- 生产里这些子进程两样都有：`ALPHA_HIVE_HOME` 来自 plist 的 EnvironmentVariables，编排器顶部又 `export` 一次；`HOME` 由 launchd 按用户补上（`launchctl print` **不列**它，别据此以为没有——编排器顶层第 1485 行在 `set -u` 下展开 `$HOME`，自 09-28 起每个扫描日都跑过，launchd err 日志 0 次 unbound variable）。⇒ 测试的 `env -i` 前缀比生产少了两样；补上 `ALPHA_HIVE_HOME` 即在数据根上与生产同形，不补 HOME 是本测试原有的「比生产更光」的条件。
+
+### Changed（测试）
+- `TestMacBash` 的 `env -i` 前缀加 `ALPHA_HIVE_HOME=<tmp_path>/alpha_hive_home`（数据根上与生产同形 + 隔离），并在派生任何子进程**之前**用生产的 `resolve_data_root` 对子进程环境求值，断言落在 `tmp_path` 内。
+
+### Added（守卫）
+- `tests/test_bare_env_children_pin_data_root.py`：AST 扫 `tests/` 里每一处 `env -i`（含同义的 `--ignore-environment` 与单独的 `-`；参数表字面量 `["/usr/bin/env", "-i", …]`，以及「`env -i NAME=…`」命令串），要求带 `ALPHA_HIVE_HOME=` 或 `HOME=`（只核有没有、不核值）；必须扫到已知那一处（`KNOWN_SITE`），否则报「守卫瞎了」；牙齿测试 7 条（缺 / 带 / f-string / 只提到名字不算赋值 / 命令串 / 同义写法 / 说明文字与 docstring 不算命令）。把 `env -i` 拆进变量再拼的写法扫不到，docstring 写明。
+- 变异 6 个全红、报错文案逐个对得上（沙箱内跑，还原后 sha256 一致）：M0 HEAD 原文件（元守卫点名该处）；M1 删掉前缀里的 `ALPHA_HIVE_HOME`（两道都红，报「解析到 /Users/igg/alpha-hive-data」）；M2 指向沙箱外（测试内断言红；静态守卫只管有没有，值归测试内断言）；M3 扫描器认不出 `-i`（牙齿 +「瞎了」红）；M4 扫描器恒放行（牙齿红）；M5 扫描器只认 `-i`（同义写法牙齿红）。
+- ⚠️ 首版守卫自己踩了一次：牙齿测试里用 `" ".join(("env", "-i"))` 拼样本，那个元组正是守卫要找的参数表形状；而 `own_python_files` 走 `git ls-files`，守卫文件**未提交时扫不到自己**，变异与全量都在未跟踪状态下跑、全绿。叠到 origin/main 提交后才红（点名自己第 89 行）。改成 `"env" + " -i"`（`ast.parse` 不折叠常量），跟踪状态下重跑 28 passed、变异 5/5 仍红。
+
+### 二次检查（同日，推送前）
+- ✗ 首稿说「launchd 不给 HOME」（据 `launchctl print`）——**错**：那里只列配置的变量；编排器顶层 `$HOME` 在 `set -u` 下每天跑过即反证。已改测试注释、守卫 docstring、本条与 memory；修法本身不受影响（钉住 `ALPHA_HIVE_HOME` 后数据根与 HOME 无关）。
+- ✗ 首稿说沙箱里「12 条因 `/bin/ps` 失败」——实为 9 条只在收尾报错（测试体已跑完）+ 2 条测试体内 + 1 条 iCloud 副本；后者清副本后在沙箱补跑。已更正上文。
+- ✗ 首稿把「备份之后 0.9 s」写成 DELETE / COMMIT / 检查点的确定次序——那是推测，已改成「未细分」。
+- 补：守卫原先只认 `-i`，`env --ignore-environment` / `env -` 同样清空环境却漏网——已加（M5 验牙齿）。
+
+### 环境
+- 本 worktree 里 180 个 iCloud 重名副本（135 与本体逐字节相同、45 是已提交 blob，独有内容 0；其中 `data_migrations/versions/__init__ 2.py` 让 `test_data_migrations` 的 `discover()` 抛 `MigrationLayoutError`）移进 `~/.Trash/icloud-dupes-hungry-feistel-20261013-022043/`；3 个重名**目录**未核、未动。
+
+### 评分 / 世代边界
+- 只动测试，生产代码零改动；不追加世代边界。
+
+### 验证
+- ruff 两文件全绿。全量（10-13 02:21，本 worktree，非沙箱）：9354 passed / 4 failed / 2 xfailed；会话级两道闸 teardown 无报警。4 条红均与本版无关：`TestCoverageHorizon`（设计内定期红：2027 经济日历未发布）；`test_options_snapshot_price_honesty` 3 条——v0.45.462 夹具写死到期日 2026-10-16（`NVDA261016…`），10-13 起日历 DTE < 7 被近月过滤挡掉 ⇒ 链为 None，**时间炸弹**，单跑同样红（已另开任务，未在本版修）。
 
 ## [0.45.482] — 2026-10-13 — Fixed：yfinance 期权链里 Yahoo 求解失败的 IV（减半阶梯 1 / ½ / ¼ / ⅛ / … 2⁻ⁿ + 正偏移，含地板 1e-05）在源头置 0 并打标记；ATM 窗口失败值不少于有效值 ⇒ 当日 IV 按不可得处理——此前中位数正好落成 12.5 / 6.25（/ 25 / 50），落在 5%–150% 有效区间、被当真实观测
 

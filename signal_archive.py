@@ -1346,6 +1346,34 @@ QUARANTINE: List[Dict] = [
                      "cache/options_snapshot_BILI_2026-10-12.json（iv_raw_observed = 6.2509375）",
                      "CHANGELOG.md#v0.45.486", "CHANGELOG.md#v0.45.499"),
     },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.508（用户 2026-10-16 批准）：10-14 生产扫描 yfinance 全挡（429）⇒ 历史字段全走出口回落，其中两类取到了
+    # **前一交易日**的观测。只隔离观测层 `price.*`：`buzz.comp.*` 通道值是派生值（同 Agent 评分，不隔离），且维度 IC
+    # 协议 §13.2 自证 ②「生产有分、重算却缺输入 = 0」会把隔离 / purge 掉的通道行算成自证失败。
+    # 维度 IC H1 的信号表含输入层 `price.volume_ratio` ⇒ 这 29 行出局、当天只剩 JNJ（< 20）⇒ H1 当天无效；
+    # H2 / 共振加成 / F&G 敞口门不读 `price.*`，不受影响。协议记录见 `experiments/dim_ic_preregistration.md` §13.8。
+    {
+        "date": "2026-10-14",
+        "tickers": ("ABBV", "AMC", "AMZN", "BILI", "BRK-B", "COST", "CRCL", "CRM", "CVX", "DE",
+                    "DELL", "ENPH", "META", "MSFT", "MU", "NEE", "NFLX", "NVDA", "QCOM", "RKLB",
+                    "SNOW", "T", "TMO", "TMUS", "TSLA", "VKTX", "VZ", "WMT", "XOM"),
+        "signals": ("price.volume_ratio",),
+        "reason": "v0.45.508（用户 2026-10-16 批准）：yfinance 日线全挡，量比来自 Twelve Data 兜底；收盘后扫描里 TD 当日那根"
+                  "被 `_drop_forming_bar` 丢掉 ⇒ 比值末根是 10-13（v0.45.505 起这种值拒收）。29/29 与 yfinance「截至 10-13」"
+                  "的比值相等（27 只到 4 位小数；RKLB / VKTX 差 0.003，成交量源差异），与「截至 10-14」相去甚远（COST 0.62 vs 1.31、"
+                  "CRCL 0.48 vs 1.03）。JNJ 当天 TD 限流超时、未入档，不在名单里。",
+        "evidence": ("~/.claude/logs/orchestrator-2026-10-14.log（29 行「volume_ratio 由 Twelve Data 补上」，各配「丢弃盘中未完成的末根日线（2026-10-14）」）",
+                     "CHANGELOG.md#v0.45.505", "CHANGELOG.md#v0.45.508"),
+    },
+    {
+        "date": "2026-10-14",
+        "tickers": ("BILI",),
+        "signals": ("price.momentum_5d",),
+        "reason": "v0.45.508（用户 2026-10-16 批准）：yfinance 全挡 ⇒ 自攒索引回落，BILI 的当场收盘没进窗口 ⇒ 窗口末端 10-13，"
+                  "动量 +0.40%（= 10-13 归档值）；yfinance「截至 10-14」为 −3.91%。其余 29 只的回落末端是 10-14、与 yfinance 一致，不隔离。",
+        "evidence": ("~/.claude/logs/orchestrator-2026-10-14.log（「[BILI] momentum_5d 由自攒索引补上: +0.40%（截至 2026-10-13」）",
+                     "CHANGELOG.md#v0.45.508"),
+    },
 ]
 
 
