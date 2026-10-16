@@ -161,6 +161,23 @@ def test_third_party_import_safe_and_pandas_clock_agrees():
     assert p.stdout.strip() == str(_real_today() + dt.timedelta(days=SHIFT))
 
 
+@pytest.mark.parametrize("days", [0, SHIFT])
+def test_sitecustomize_chains_to_the_next_one(tmp_path, days):
+    """本目录的 `sitecustomize` 不吞掉 `sys.path` 上排在它之后的那个（拨不拨钟都照常执行），且拨钟照装。
+    这也是 `test_paths_not_frozen_at_import` 放行 `_chain_next_sitecustomize` 那条 `__file__` 路由的行为守卫：
+    `here` 只用来在 sys.path 上认出本目录。变红的变异：`here` 改成别的目录（如 `os.getcwd()`，认不出自己 ⇒
+    一个都不执行）；或删掉模块末尾那次调用。"""
+    nxt = tmp_path / "next"
+    nxt.mkdir()
+    (nxt / "sitecustomize.py").write_text("import sys\nsys._clockshift_chained_ran = True\n")
+    code = "import datetime, sys; print(getattr(sys, '_clockshift_chained_ran', False), datetime.date.today())"
+    env = {**os.environ, "CLOCK_SHIFT_DAYS": str(days), "PYTHONPATH": os.pathsep.join([str(HERE), str(nxt)])}
+    env.pop("CLOCK_SHIFT_FORCE", None)
+    p = subprocess.run([sys.executable, "-c", code], env=env, cwd=tmp_path, capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr[-2000:]
+    assert p.stdout.split() == ["True", str(_real_today() + dt.timedelta(days=days))], p.stdout + p.stderr[-2000:]
+
+
 class TestAudit:
 
     def test_reports_only_new_reds(self, tmp_path, capsys):
