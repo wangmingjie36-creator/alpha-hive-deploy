@@ -98,12 +98,19 @@ class TestCallSitesUseNyse:
         assert seen == ["2026-10-12", "2026-04-07"]
 
 
+#: 唯一许可：故意重建旧（错）日历做自校验的一次性重算工具。登记是**双向**的——它不再用了也要红（防白名单过期）。
+ALLOWED_OLD_CALENDAR = {
+    "relabel_nyse_calendar.py": "v0.45.521 重算历史标签：自校验「存值 = 旧联邦日历取价日的收盘」，不用于算新值",
+}
+
+
 def test_no_other_trading_day_arithmetic():
     """全仓（测试除外）不许再出现 pandas 的联邦假日表 / CustomBusinessDay——T+N 只经 `add_trading_days`。
     变红的变异：任一生产模块重新 `from pandas.tseries.holiday import USFederalHolidayCalendar`（或用
-    `CustomBusinessDay` 自建日历）。按 AST 认 import 与名字，不认注释 / 字符串里的提及。"""
+    `CustomBusinessDay` 自建日历）。按 AST 认 import 与名字，不认注释 / 字符串里的提及。
+    `ALLOWED_OLD_CALENDAR` 双向：登记的文件必须真的用到（否则白名单过期也红）。"""
     banned = {"USFederalHolidayCalendar", "CustomBusinessDay", "AbstractHolidayCalendar"}
-    hits = []
+    hits, allowed_seen = [], set()
     for p in sorted(_ROOT.rglob("*.py")):
         rel = p.relative_to(_ROOT)
         if rel.parts[0] in {"tests", ".claude", ".git", "node_modules"} or "site-packages" in rel.parts:
@@ -120,5 +127,11 @@ def test_no_other_trading_day_arithmetic():
                 names = [node.attr]
             elif isinstance(node, ast.Name):
                 names = [node.id]
-            hits += [f"{rel}:{node.lineno} {n}" for n in names if n in banned]
+            for n in names:
+                if n in banned:
+                    if str(rel) in ALLOWED_OLD_CALENDAR:
+                        allowed_seen.add(str(rel))
+                    else:
+                        hits.append(f"{rel}:{node.lineno} {n}")
     assert hits == [], hits
+    assert allowed_seen == set(ALLOWED_OLD_CALENDAR), f"白名单过期：{set(ALLOWED_OLD_CALENDAR) - allowed_seen}"

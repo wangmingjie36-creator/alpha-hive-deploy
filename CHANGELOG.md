@@ -58,7 +58,46 @@
 - 变异 6/6 被杀：样本早退改回 0、BILI 条目漏 GEX、06-17 漏 CRCL、09-25 日期错、09-24 漏 BRK-B（首次变异打到了 517 的同形元组上、没被杀 ⇒ 测试改为逐只核对全部 30 只，精确打本条目后被杀）、10-14 日期错。
 - 全量（rebase 到 93bf8f84 后）：10029 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加，不是测试写的。ruff 全绿。
 
-## [0.45.521] — 2026-10-16 — 占位（进行中：按 NYSE 日历离线重算 v0.45.520 查出的历史 T+N 标签（先备份）+ 维度 IC 协议事前说明，用户批准）
+## [0.45.521] — 2026-10-16 — Added：按 NYSE 日历离线重算历史 T+N 标签的工具 `relabel_nyse_calendar.py`（默认 dry-run，写前备份）+ 维度 IC 协议 §13.9 事前实现对齐说明；**生产数据写入尚未执行**（会话内 `--apply` 被权限闸拦下，待用户执行）
+
+用户批准（2026-10-16）：「离线重算历史标签，先备份；协议补一条事前说明」。接 v0.45.520（代码已改 NYSE，此后标签算对）。
+
+### Added
+- **`relabel_nyse_calendar.py`**：只改「旧联邦日历取价日 ≠ NYSE 应取日」的已回填行——
+  `predictions` T+1 / T+30 的 `price_tN` / `return_tN` / `correct_tN` / `ambiguous_tN`、T+7 的 `close_t7` / `dir_correct_t7` / `dir_ambiguous_t7`
+  （与 `backtester` 同式，判定 `outcome_utils.determine_outcome_triplet`），报告快照 `actual_prices.t1/t7/t30`（经 `ReportSnapshot` 读回再存，未知键保留）。
+  价格只取本地（价格索引 + `predictions.price_at_predict`，库优先，同 `load_price_history` 口径），不出网。
+  闸：① 自校验存值 = 旧日历取价日收盘（±0.2%），否则跳过并列出；② 应取日本地无价跳过；③ `--apply` 才写，写前
+  `backup_before_write` 进 `db_backups/`（归因并发写入者靠它的 mtime）+ 受影响快照逐份复制进 `_manual_backups/report_snapshots-pre-v0.45.521-nyse-relabel/`；
+  ④ 单事务、`UPDATE … WHERE id=? AND 旧值=?` 影响行数须为 1 否则整体回滚，前后 `PRAGMA integrity_check`；每行新旧值写审计 JSON。重跑幂等。
+- 维度 IC 预注册 `experiments/dim_ic_preregistration.md`：头部「事前实现对齐」一行 + **§13.9**（按 §11「检视点之前的纯实现修正」标注，非修订、常量不动）。
+  内容：结果变量定义不变、实现改按 NYSE 数交易日；改动时窗口内 `close_t7` 非空 0 行、`checked_t7=1` 0 行（只读核对），重算落在窗口内 0 行；
+  窗口内首次受两表分歧影响的是 11-02~11-10 的预测；附注 §13.8 引用的 `backtester._US_BDAY` 已删、结论按 NYSE 仍成立。
+- `tests/test_relabel_nyse_calendar.py`（5 条，临时库 + 临时快照）：dry-run 零写入；只改本 bug 的行（自校验不过的、不受影响的不碰）、快照保留 `cs_rank`、
+  备份与审计落位；重跑幂等；计划后被并发改动 ⇒ 整体回滚；旧日历重建确是旧行为。变异 5 处全被杀
+  （新值取旧取价日 / 跳过自校验 / 去掉旧值条件 / 旧日历重建成 NYSE / 不备份库）。
+- `tests/test_trading_calendar_nyse.py` 的 AST 守卫加**双向**白名单 `ALLOWED_OLD_CALENDAR`：只许本工具为自校验故意重建旧日历，登记了却不再用也红。
+
+### dry-run 结果（生产 `~/alpha-hive-data`，2026-10-16 08:5x PDT，只读）
+| | 将重算 | 存值判定会变 | 跳过 |
+|---|---|---|---|
+| `predictions` T+1 | 30 | 4 | 0 |
+| `predictions` T+7（`close_t7` 系） | 112（预测日 03-26 ~ 10-05） | 17 | 0 |
+| `predictions` T+30 | 271 | 25 | 0 |
+| 快照 `actual_prices` t1 / t7 / t30 | 30 / 82 / 144 | — | 0 |
+
+- 全部通过自校验（0 行「存值≠旧取价日收盘」、0 行「应取日本地无价」）。
+- T+30「存值判定会变」25 ≠ v0.45.520 报的「日历致翻转」27：拆开后日历致翻转 27 行不变；另有 **5 行 T+30（02-26 ~ 03-10）当初按 v0.45.9 前的旧判定规则判**
+  （无模糊带，如看多 −0.53% 记对），重算按现行规则 ⇒ 这 5 行的判定一并更新。全表 T+30 规则漂移恰好就这 5 行、全在本次集合里 ⇒ 重算后 T+30 列全按现行规则。
+  入场价漂移（存的 return ≠ 用现入场价按存值重算）0 行。
+- **不在本工具范围**（只计数）：T+7 路径字段（SL 26 / T7_CLOSE 73 / TP 13，SL/TP 是否触发要重拉 OHLC）、`spy_return_t7` 112（本地无 SPY 价，需出网）。
+- **另两处发现，未处理**：① `predictions` T+1 全表 49 行存的判定与现行规则不一致（02~09 月，均不在本次集合）；
+  ② `agent_memory.outcome_return_t1/t7/t30`：`outcomes_fetcher._update_memory_store` 一次 UPDATE 写满三列、只有本轮回填的那格有值 ⇒ 后一轮把前一轮写成 None
+  （23,800 行里同时有 ≥2 个周期的仅 2,347 行），与日历无关、重算补不齐。
+
+### 待执行（用户）
+`/usr/local/bin/python3 relabel_nyse_calendar.py --apply`（`~/alpha-hive-prod` 快进到含本版之后在其目录执行，或在开发检出执行——工具按 `ALPHA_HIVE_HOME` / 缺省
+`~/alpha-hive-data` 找生产库）。宜在当天扫描（13:30 PT 起）之外执行；执行后当天 Step 14 备份会带上（memory：人工修生产状态须赶在 Step 14 前）。
 
 ## [0.45.520] — 2026-10-16 — Fixed：T+N 交易日算术改用 NYSE 日历——`outcomes_fetcher` / `backtester` / `backfill_dir_accuracy` 此前用 pandas 联邦假日表（哥伦布 / 退伍军人日判休、耶稣受难日判开），跨这些日子的 T+1/T+7/T+30 标签差一个交易日；历史数据**未改**（影响面见下，待用户决定）
 
