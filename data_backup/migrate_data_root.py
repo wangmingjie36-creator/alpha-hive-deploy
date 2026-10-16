@@ -19,7 +19,8 @@
 
 为什么被跟踪的数据不挪
 ----------------------
-`report_deployer.auto_commit_and_notify` 用白名单 pathspec 提交（`git add report_snapshots/` 等）。
+（v0.45.402 前）`report_deployer.auto_commit_and_notify` 用白名单 pathspec 提交（`git add report_snapshots/` 等）；
+该链已随阶段 6 退役，下面这段是阶段 5 当时为什么不挪被跟踪数据的理由。
 把被跟踪的目录挪走，git 看到的是删除，下一次日报提交就会把全部账本的**删除**提交并推上公开 main——
 那是阶段 6（`git rm --cached` + `.gitignore`）该做、且该有意识地做的事。所以阶段 5 让它们原地冻结：
 读写方全走 `PATHS.home`，冻结副本没人读；若有人写，`check-old` 会看到内容变化。
@@ -66,6 +67,12 @@ MOVE_DIRS = (
     # 则新代码写新根、旧根里已记的行被留下，结算与预注册检验静默少几天。
     # 守卫：tests/test_migrate_data_root.py::test_every_backup_state_dir_is_moved
     "sell_strike_state",
+    # v0.45.388 Alpha Bot 状态（盘中快照不可重取 + 设置）
+    "alphabot_state",
+    # v0.45.410 回放行情库（F&G 前瞻检验；首次落定后冻结，重取的值可能已被 Yahoo 修订 ⇒ 按不可重取对待）
+    "replay_ohlc_state",
+    # v0.45.419 数据迁移运行记录（阶段 7；「库被动过什么」的唯一机器可读记录，不可重取）
+    "migrations_state",
     # 向量库 / 日志 / 备份轮转
     "chroma_db", "logs", "db_backups",
     # 缓存：可重建，但冷缓存会引发 yfinance 限流（头号数据丢失原因）⇒ 一并带走
@@ -92,7 +99,9 @@ SKIP_EXACT = {
     ".DS_Store": "Finder 元数据", RETIRE_DIRNAME: "阶段 5 自己的旧数据暂存区",
     # 代码目录
     "tests": "代码", "swarm_agents": "代码", "templates": "代码资源", "prompts": "代码资源",
-    "experiments": "代码", "data_backup": "代码", "alpha_hive_bot": "代码", "marketing": "文档",
+    "experiments": "代码", "data_backup": "代码", "data_migrations": "代码（阶段 7 迁移运行器，v0.45.419）", "alpha_hive_bot": "代码", "marketing": "文档",
+    "alphabot": "代码（Alpha Bot 前端，v0.45.388）", "scripts": "代码（受版本控制的编排器，v0.45.353）",
+    "vercel.json": "代码配置（Vercel，v0.45.389）",
     "对比🆚": "文档",
     # 其它项目
     "alpha-hive-web": "独立前端项目", "mcp-servers": "独立 MCP 项目",
@@ -474,6 +483,24 @@ def _git_ignored(old: Path, paths: list[str]) -> set[str] | None:
     return {x for x in r.stdout.decode().split("\0") if x}
 
 
+def _git_deleted_in_history(old: Path, paths: list[str]) -> set[str] | None:
+    """`paths` 里「曾被 git 跟踪、并被某个提交删除」的那些；git 失败返回 None（调用方判红）。
+
+    阶段 6 之后，生产同步的快进会把已解除跟踪的冻结数据从旧根工作区删掉。这种「消失」是 git 干的，
+    不是旁路写入方。⚠️ 但**不能**把「消失」一概放行：被忽略、从没进过 git 的日志被删 / 轮转，
+    正是旁路写入方的迹象（`test_deleted_ignored_file_is_a_write_not_git_sync`）。所以判据是
+    「git 历史里有一次删除它的提交」，不是「现在不在了」。分批传路径（命令行长度），实测 3125 条约 15 秒。
+    """
+    out: set[str] = set()
+    for i in range(0, len(paths), 400):
+        r = subprocess.run(["git", "-C", str(old), "log", "--diff-filter=D", "--name-only", "-z",
+                            "--pretty=format:", "HEAD", "--", *paths[i:i + 400]], capture_output=True)
+        if r.returncode != 0:
+            return None
+        out |= {x for x in r.stdout.decode().split("\0") if x.strip()}
+    return out
+
+
 def check_old(old: Path) -> dict:
     """旧位置零写入：MOVE 类名字不许重新出现；冻结数据不许被**旁路写入**。
 
@@ -493,6 +520,12 @@ def check_old(old: Path) -> dict:
     changed = sorted(k for k in set(base) | set(now_fp) if base.get(k) != now_fp.get(k))
     icloud = [p for p in changed if _ICLOUD_DUP.search(Path(p).name)]
     changed = [p for p in changed if p not in icloud]
+    # 阶段 6：已解除跟踪的冻结数据被生产同步的快进删掉（git 干的）⇒ 单列 removed_by_git，不红。
+    # 「现在有、且指纹变了」的写入照旧判红；被忽略、从没进过 git 的文件被删仍判红（可能是日志轮转）。
+    gone = [p for p in changed if p not in now_fp]
+    git_deleted = _git_deleted_in_history(old, gone) if gone else set()
+    removed = sorted(p for p in gone if p in (git_deleted or ()))
+    changed = [p for p in changed if p not in set(removed)]
     dirty = _git_dirty_paths(old, rec["frozen_tracked"])
     if dirty is None:
         written, synced, git_error = changed, [], True
@@ -506,9 +539,12 @@ def check_old(old: Path) -> dict:
             written = [p for p in changed if p in dirty or p in ignored]
             synced = [p for p in cand if p not in ignored]
             git_error = False
+    if git_deleted is None:
+        git_error = True            # 查不到「谁删的」⇒ 不许当成无害；gone 里的路径仍在 changed 里，照旧判红
     return {"ok": not (reappeared or written or pl["unknown"] or git_error),
             "reappeared": reappeared, "written_outside_git": written,
             "synced_by_git": synced, "icloud_duplicates": icloud,
+            "removed_by_git_count": len(removed), "removed_by_git_sample": removed[:5],
             "git_error": git_error, "unknown": pl["unknown"]}
 
 

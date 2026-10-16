@@ -87,6 +87,16 @@ def counters() -> Dict[str, Optional[dict]]:
     改动唯一的代价，必须可数而不是可估。两者放在这里是因为编排器已把本文件并进
     status.json，挂上即随每轮扫描落盘，无需改编排器（同 `code_version` 的走法）。
 
+    `portfolio_greeks`（v0.45.423）：组合 Greeks 当天的标的价场次核对（`price_check_stats`）——
+    多少行的价不属于 as_of 那一场（陈旧，不进 $Delta）、SPY 价是哪一场的、有没有因此拒绝成交。
+    此前同日跑恒用前一交易日的收盘、一个计数都没有；alert_manager 读它报 P2。
+    v0.45.435 起还带「缺」（`n_unpriced` / `n_quote_missing` / `n_beta_missing` / `nav_missing` / `gaps`）与
+    `hedge_undecided`（对冲决定做不出来的原因）——09-15~25 连续 7 天 unknown 曾零告警。
+
+    `history_fill`（v0.45.473）：`data_pipeline.MultiSourceFetcher` 唯一出口的历史字段回落——按出口
+    （哪个源胜出 / 过期缓存 / CBOE 盘中陈旧价 / 全源失败）数缺了几项、回落补上几项，外加最近一次仍缺的标的。
+    此前三个出口直接把 None 交出去，连「今天走了哪个出口」都只在 warning 日志里。
+
     `cboe_raw`（v0.45.333）：卖权行权价账本取原始链（`fetch_cboe_raw_contracts`）各出口的次数——
     ok / snapshot_mode / stale_vintage / payload_unavailable / vintage_mismatch / vintage_unverifiable /
     price_unavailable / no_parseable_contracts 分开数，不折叠。此前这组计数只有 cboe_options 自己和
@@ -95,12 +105,19 @@ def counters() -> Dict[str, Optional[dict]]:
     out: Dict[str, Optional[dict]] = {"yfinance": None, "twelve_data": None,
                                       "cboe": None, "cboe_chain": None,
                                       "gex_view": None, "cboe_raw": None,
-                                      "options_snapshot": None}
+                                      "options_snapshot": None, "hv_gap": None,
+                                      "portfolio_greeks": None, "paper_portfolio": None,
+                                      "ledger_io": None, "history_fill": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
     except Exception as e:  # noqa: BLE001 - 观测代码不得影响主流程
         _log.debug("yf_gate stats 不可得: %s", e)
+    try:
+        import options_analyzer
+        out["hv_gap"] = options_analyzer.hv_gap_stats()   # v0.45.383：日线缺交易日的校验/重取/降级计数
+    except Exception as e:  # noqa: BLE001
+        _log.debug("hv_gap stats 不可得: %s", e)
     try:
         import twelve_data
         out["twelve_data"] = twelve_data.bars_cache_stats()
@@ -122,6 +139,29 @@ def counters() -> Dict[str, Optional[dict]]:
         out["options_snapshot"] = options_analyzer.snapshot_slot_stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("options_snapshot stats 不可得: %s", e)
+    try:
+        import portfolio_greeks
+        out["portfolio_greeks"] = portfolio_greeks.price_check_stats()   # 本进程没跑过 ⇒ None
+    except Exception as e:  # noqa: BLE001
+        _log.debug("portfolio_greeks price_check 不可得: %s", e)
+    try:
+        import paper_portfolio
+        out["paper_portfolio"] = paper_portfolio.run_stats()   # v0.45.448；本进程没跑过 ⇒ None
+    except Exception as e:  # noqa: BLE001
+        _log.debug("paper_portfolio run_stats 不可得: %s", e)
+    try:
+        import ledger_io
+        # v0.45.452：账本 / 状态文件读写失败在源头登记（调用方把异常吞成 warning 也不影响这里）；n>0 ⇒ P2
+        out["ledger_io"] = ledger_io.failures()
+    except Exception as e:  # noqa: BLE001
+        _log.debug("ledger_io failures 不可得: %s", e)
+    try:
+        import data_pipeline
+        # v0.45.473：取数出口的 momentum_5d / volume_ratio 回落（各出口缺几项、补上几项、仍缺哪些标的）；
+        # 本进程没解析过任何标的 ⇒ None。still_missing 非空 ⇒ alert_manager P2
+        out["history_fill"] = data_pipeline.history_fill_stats()
+    except Exception as e:  # noqa: BLE001
+        _log.debug("history_fill stats 不可得: %s", e)
     return out
 
 
@@ -172,23 +212,6 @@ def production_sync_result(date_str: str) -> Optional[dict]:
         return None
 
 
-_GIT_PUSH_KEYS = ("success", "integration", "behind", "merge_commit", "conflicts",
-                  "attempts", "error", "skipped", "fetch_error")
-
-
-def git_push_summary(git_push: Optional[dict]) -> Optional[dict]:
-    """`results["git_push"]` 进 status.json 的精简版（v0.45.214）。
-
-    git 的 `output` 带整段 hint，截到 500 字符；None 原样返回（「没记录」≠「成功」）。
-    """
-    if not isinstance(git_push, dict):
-        return None
-    out = {k: git_push[k] for k in _GIT_PUSH_KEYS if k in git_push}
-    if git_push.get("output"):
-        out["output"] = str(git_push["output"])[:500]
-    return out
-
-
 _GH_PAGES_KEYS = ("success", "action", "attempts", "parent_verified", "tree_unchanged",
                   "n_changed", "skipped", "reason", "cdn_verified")
 
@@ -196,7 +219,7 @@ _GH_PAGES_KEYS = ("success", "action", "attempts", "parent_verified", "tree_unch
 def gh_pages_summary(gh_pages: Optional[dict]) -> Optional[dict]:
     """`results["gh_pages"]` 进 status.json 的精简版（v0.45.351）。
 
-    此前 `auto_commit_and_notify` 根本不返回 gh-pages 结局，status.json / 告警对它全盲
+    此前部署函数根本不返回 gh-pages 结局，status.json / 告警对它全盲
     （2026-09-25 推送失败被重试捷径判成「成功」，网站停两天零告警）。
     None 原样返回（「没记录」≠「成功」，告警侧记为未执行的检查）。
     `transport_probe` 只在推送失败时存在（为「是否切 ssh.github.com:443」攒判据），原样保留。
@@ -211,32 +234,6 @@ def gh_pages_summary(gh_pages: Optional[dict]) -> Optional[dict]:
         out["error"] = str(reason)[:300]
     if gh_pages.get("transport_probe"):
         out["transport_probe"] = gh_pages["transport_probe"]
-    return out
-
-
-def git_commit_summary(git_commit: Optional[dict]) -> Optional[dict]:
-    """`results["git_commit"]` 进 status.json 的精简版（v0.45.223）。
-
-    `pending_artifacts` 是提交前待提交的日报产物数：0 ⇒ 失败只是「没东西可提交」；
-    None（git status 就失败了）⇒ 不知道，按失败看。None 入参原样返回（工作区干净，未尝试提交）。
-
-    v0.45.227：`left_artifacts`（提交后仍没进 git 的日报产物数；None = 提交后那次 git status 失败）
-    与 `left_sample` 有才抄——没有这个键 = 旧代码或没走到提交，告警侧据此区分「没核」与「核不了」。
-    原因优先 `error`，其次 `add_errors`：提交成功但有 add 重试后仍失败时，`message` 只是提交成功的输出。
-    """
-    if not isinstance(git_commit, dict):
-        return None
-    out = {"success": git_commit.get("success"),
-           "pending_artifacts": git_commit.get("pending_artifacts")}
-    for key in ("left_artifacts", "left_sample"):
-        if key in git_commit:
-            out[key] = git_commit[key]
-    add_errors = git_commit.get("add_errors")
-    reason = (git_commit.get("error")
-              or ("git add 失败：" + "；".join(add_errors) if add_errors else None)
-              or git_commit.get("message"))
-    if reason:
-        out["reason"] = str(reason)[:300]
     return out
 
 
@@ -306,9 +303,65 @@ def summary_line(snap: dict) -> str:
         td_s += f"/失败{td.get('failures', '?')}(" + ",".join(
             f"{t}:{r}" for t, r in sorted(td["failed"].items())) + ")"
     cb_s = "—" if cb is None else f"抓取{cb.get('fetches', '?')}/命中{cb.get('hits', '?')}"
+    hg = c.get("hv_gap")
+    hg_s = ""
+    if hg and (hg.get("degraded") or hg.get("repaired") or hg.get("filled") or hg.get("check_errors")):
+        # 只在出过事时才占摘要行的位置：缺口已重取修好 / 第二源补齐 / 仍缺而置空 / 校验器自身出错，都点名。
+        # v0.45.387：被第二源补齐的标的也带着 `critical`（补之前的缺口），所以名字后要标「已补」，
+        # 否则读起来像是置空了；没补成的把原因也带上（td_unavailable / ratio_mismatch …）。
+        def _tag(g):
+            base = "+".join(g.get("critical") or [])
+            if g.get("filled"):
+                return base + "已补"
+            if g.get("unfilled"):
+                return base + "[" + ";".join(u.split(":", 1)[-1] for u in g["unfilled"][:1]) + "]"
+            return base
+        bad = ",".join(f"{t}:{_tag(g)}" for t, g in sorted((hg.get("tickers") or {}).items())
+                       if g.get("critical"))
+        hg_s = (f" | 日线缺口 修复{hg.get('repaired', '?')}/TD补{hg.get('filled', 0)}/置空{hg.get('degraded', '?')}"
+                f"/校验出错{hg.get('check_errors', '?')}" + (f"({bad})" if bad else ""))
     os_ = c.get("options_snapshot")
     os_s = "—" if os_ is None else (
         f"写入{os_.get('writes', '?')}/命中{os_.get('hits', '?')}"
-        f"/会话不符弃用{os_.get('session_mismatch', '?')}份/盘中快照命中{os_.get('hits_before_close', '?')}份")
+        f"/会话不符弃用{os_.get('session_mismatch', '?')}份/盘中快照命中{os_.get('hits_before_close', '?')}份"
+        # v0.45.462：只在出过事时占位——现价不可得（不再拿行权价中位数 / 145 冒充）、出口遇到非有限数
+        + (f"/现价不可得{os_['stock_price_unavailable']}次" if os_.get("stock_price_unavailable") else "")
+        + (f"/非有限数记None {os_['nan_sanitized']}个" if os_.get("nan_sanitized") else "")
+        # v0.45.471：当日 ATM IV 无效且无缓存 ⇒ iv_current 记 None（不再兜底成 25.0）
+        + (f"/IV不可得{os_['iv_unavailable']}次" if os_.get("iv_unavailable") else "")
+        # v0.45.482：yfinance 链里 Yahoo 求解失败的 IV（置 0 的合约数 / ATM 窗口被失败值主导的次数）
+        + (f"/Yahoo失败IV{os_['iv_placeholder_contracts']}个" if os_.get("iv_placeholder_contracts") else "")
+        + (f"/失败IV主导{os_['iv_placeholder_majority']}次" if os_.get("iv_placeholder_majority") else ""))
+    pg = c.get("portfolio_greeks")
+    pg_s = ""
+    if pg and pg.get("error"):
+        pg_s = f" | Greeks 异常中断({str(pg['error'])[:80]})"          # v0.45.442
+    elif pg and pg.get("hedge_undecided") and not (pg.get("n_stale") or pg.get("n_quote_stale")
+                                                  or (pg.get("spy") or {}).get("stale")
+                                                  or pg.get("execution_blocked")):
+        # v0.45.435：不是陈旧、是缺——对冲决定做不出来（两源取不到价 / 缺报价 / 缺 β / 缺 NAV）
+        pg_s = " | Greeks 数据不全不对冲(" + ("；".join(pg.get("gaps") or []) or str(pg["hedge_undecided"])) + ")"
+    elif pg and (pg.get("n_stale") or pg.get("n_quote_stale") or (pg.get("spy") or {}).get("stale")
+                 or pg.get("execution_blocked")):
+        # v0.45.423：同 hv_gap，只在出过事时占位——组合 Greeks 有价不属于当天那一场（不进 $Delta、不对冲）
+        names = ",".join(dict.fromkeys(f"{x.get('ticker')}@{x.get('session')}" for x in pg.get("stale") or []))
+        spy = pg.get("spy") or {}
+        pg_s = (f" | Greeks 陈旧价 {pg.get('n_stale', '?')} 行" + (f"({names})" if names else "")
+                + (f"/SPY@{spy.get('session')}" if spy.get("stale") else "")
+                + (f"/报价错场 {pg['n_quote_stale']}" if pg.get("n_quote_stale") else "")
+                + ("/拒绝成交" if pg.get("execution_blocked") else "")
+                + (("/另缺 " + "；".join(pg["gaps"])) if pg.get("gaps") else ""))
+    pp = c.get("paper_portfolio")
+    if pp and pp.get("error"):
+        pg_s += f" | 纸面组合异常中断({str(pp['error'])[:80]})"        # v0.45.448
+    lf = c.get("ledger_io")
+    if lf and lf.get("n"):                                              # v0.45.452
+        where = ",".join(dict.fromkeys(Path(str(i.get("path"))).name for i in lf.get("items") or []))
+        pg_s += f" | 账本读写失败 {lf['n']} 次({where})"
+    hf = c.get("history_fill")
+    sm = (hf or {}).get("still_missing") or {}
+    if sm.get("momentum") or sm.get("volume"):                          # v0.45.473
+        pg_s += (f" | 回落后仍缺 动量 {len(sm.get('momentum') or [])} 只"
+                 f"/量比 {len(sm.get('volume') or [])} 只")
     return ("耗时 " + " | ".join(parts) +
-            f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}")
+            f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s + pg_s)

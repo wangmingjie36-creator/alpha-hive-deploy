@@ -6,6 +6,7 @@ from swarm_agents._config import _log
 from swarm_agents.base import BeeAgent
 from resilience import NETWORK_ERRORS
 from models import AgentResult
+import earnings_calendar as _earnings_calendar
 from swarm_agents.utils import (
     clamp_score, append_context, blend_with_llm, build_confidence,
     make_error_result, AGENT_ERRORS, LLM_ERRORS,
@@ -106,11 +107,15 @@ class ChronosBeeHorizon(BeeAgent):
             # v0.45.31: 区分「抓取失败」与「确实无催化剂」——两者产出必须不同形
             _calendar_failed = False
             _calendar_error = ""
+            # v0.45.500：财报日的按日观测（未过滤的原始日期）。**只记录、不进评分**——下面 days_until 的
+            # 过滤与分数逐字不变（改它会截断维度 IC 协议 H2）；读者一律经 earnings_calendar.resolve。
+            _earnings_obs = None
 
             # 1. 从 yfinance 获取真实财报日期（v0.45.122：走预取包）
             try:
                 t = True   # 标记步骤 1 成功进入；1b 的目标价改走访问器，不再复用 Ticker 对象
                 cal = self._yf_calendar(ticker)
+                _earnings_obs = _earnings_calendar.observation(cal)
                 if cal is not None:
                     # cal 可能是 DataFrame 或 dict
                     if hasattr(cal, 'to_dict'):
@@ -516,6 +521,8 @@ class ChronosBeeHorizon(BeeAgent):
                     # v0.23.0 动态 exit 推荐
                     "recommended_hold_days": _rec_hold_days,
                     "exit_rationale": _exit_rationale,
+                    # v0.45.500：财报日按日观测（见 earnings_calendar 模块 docstring；不进评分）
+                    _earnings_calendar.FIELD: _earnings_obs,
                 },
             ).to_dict()
 

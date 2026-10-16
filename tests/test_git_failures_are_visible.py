@@ -1,7 +1,7 @@
 """
 部署链路里 git 失败必须有人会红（v0.45.210）
 
-固化一次持续半年的静默故障：`report_deployer.auto_commit_and_notify` 的测试推送分支
+固化一次持续半年的静默故障：`report_deployer`（前身 `auto_commit_and_notify`）的测试推送分支
 下发 `git checkout` / `git reset --hard`，自 2026-03-01 `GitHubTool` 白名单引入起
 就被拒绝——`run_git_cmd` 只 return 不出声，调用方又一律不看返回值，其后
 无条件 log「本地 main 已恢复至 origin/main（测试数据不污染生产）」。
@@ -9,15 +9,15 @@
 实际后果不是「测试环境没更新」，是**测试数据进了生产**：回滚没执行 ⇒ 规则引擎
 提交留在本地 main ⇒ 下一次生产推送把它一起送上 origin/main。白名单之后触发 7 次，
 origin/main 上恰好 7 个无 `swarm_metadata` 的日报提交（取证全文见
-`report_deployer.auto_commit_and_notify` docstring）。
+`report_deployer.deploy_and_notify` docstring）。
 
 四组，按「谁会红？」各堵一处：
   1. 生产代码里每个 `run_git_cmd("git <子命令> …")` 都必须在白名单内（静态，AST）
      + 白名单里不许出现破坏性子命令（防有人按「加两项」修回去）
   2. 白名单拒绝 / subprocess 自己炸，`run_git_cmd` 必须出声
-  3. 真 git 沙箱：非生产扫描不许在本地 main 造提交、不许推任何远端
-     （v0.45.213：「下一次推送不带非生产内容」改从 CLI 入口进，不再 xfail）
-  4. 生产分支两种失败形状的原因都要传到 results 与 warning；调用方不许丢弃返回值
+  3. 真 git 沙箱：部署（生产与否）不许在本地 main 造提交、不许推任何远端、不许动工作区
+     （v0.45.402 阶段 6 起提交 / 推送链已退役；此前这一组是「非生产扫描不许造提交」+「推送失败原因要传到 results」）
+  4. 调用方不许丢弃部署函数的返回值
 
 ⚠️ 沙箱里**必须**配 `test` remote：生产机上真配着。不配的话旧代码走
 `test remote 不存在` 短路，第 3 组对旧 bug 就是恒绿的。
@@ -25,6 +25,7 @@ origin/main 上恰好 7 个无 `swarm_metadata` 的日报提交（取证全文�
 
 import ast
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -132,11 +133,12 @@ class TestRunGitCmdCallSitesAreWhitelisted:
         缺了这条，上一条的「零违规」可能只是一个空扫描。"""
         hits = {(rel, sub) for rel, src in _production_sources()
                 for _, sub in _run_git_cmd_sites(src)}
-        assert ("production_sync.py", "fetch") in hits     # 字面量（v0.45.214 起推送链路在这里）
-        assert ("production_sync.py", "push") in hits      # f"git push origin {target}:…"
-        assert ("production_sync.py", "merge-tree") in hits
-        assert ("agent_toolbox.py", "add") in hits         # f"git add -- {…}"
-        assert ("agent_toolbox.py", "commit") in hits      # f"git commit -m {…}"
+        assert ("production_sync.py", "fetch") in hits     # 字面量（扫描前快进链路）
+        assert ("production_sync.py", "pull") in hits      # `git pull --ff-only --no-rebase`
+        assert ("production_sync.py", "merge-base") in hits
+        # v0.45.402：`push` / `merge-tree` 随 push_main 退役；不许再出现见 TestCommitPushChainStaysRetired
+        # v0.45.403：agent_toolbox 里的 add / commit / status / diff 调用点随 GitHubTool.commit/status 退役，
+        # 生产代码经 run_git_cmd 下发的子命令现在只剩 production_sync 的快进那几条
 
     def test_scanner_flags_the_shapes_that_broke_the_test_branch(self):
         """有牙：v0.45.210 前 report_deployer 里的原句必须被抓到。"""
@@ -163,7 +165,7 @@ class TestRunGitCmdCallSitesAreWhitelisted:
         assert not (GitHubTool._ALLOWED_GIT_CMDS & destructive), (
             "白名单里出现了会丢弃工作区/改写当前分支的子命令："
             f"{sorted(GitHubTool._ALLOWED_GIT_CMDS & destructive)}。"
-            "v0.45.210 已判定不这样修，理由见 report_deployer.auto_commit_and_notify docstring。"
+            "v0.45.210 已判定不这样修，理由见 report_deployer.deploy_and_notify docstring。"
         )
 
     def test_production_pull_is_fast_forward_only(self):
@@ -216,22 +218,49 @@ class TestRunGitCmdFailuresAreLoud:
         """正对照：不是「什么都打 error」。"""
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
         with caplog.at_level(logging.DEBUG):
-            r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd("git status --porcelain")
+            r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd("git rev-parse --git-dir")
         assert r["success"] is True
         assert not _records(caplog, "alpha_hive.agent_toolbox", logging.WARNING)
 
     def test_subprocess_failure_logs_warning(self, tmp_path, monkeypatch, caplog):
         """第二种失败形状（抛异常 ⇒ 只有 error 键）同样要出声。"""
         def boom(*a, **k):
-            raise subprocess.TimeoutExpired(cmd="git push", timeout=30)
+            raise subprocess.TimeoutExpired(cmd="git fetch", timeout=30)
         # 替换模块内引用，不碰全局 subprocess.run
         monkeypatch.setattr(agent_toolbox, "subprocess", SimpleNamespace(
             run=boom, SubprocessError=subprocess.SubprocessError))
         with caplog.at_level(logging.WARNING):
-            r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd("git push origin main")
+            r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd("git fetch origin main")
         assert r["success"] is False and "timed out" in r["error"]
         warns = _records(caplog, "alpha_hive.agent_toolbox", logging.WARNING)
-        assert warns and "git push origin main" in warns[0].getMessage()
+        assert warns and "git fetch origin main" in warns[0].getMessage()
+
+    def test_non_utf8_output_raises_instead_of_returning_a_failure(self, tmp_path):
+        """已知行为（钉住，不是赞成）：git 输出里有非 UTF-8 字节时，`run_git_cmd` **抛** `UnicodeDecodeError`
+        （`text=True` 解码失败，不在它 `except (SubprocessError, OSError)` 的范围内），不是返回 `success=False`。
+        所以调用方不能假设「它永远返回 dict」。v0.45.403 退役 `GitHubTool.status()` 时这条从它的测试里迁来
+        （原先只被 `status` 的测试顺带钉着；`status` 当时靠自己兜住它，现在没人兜了）。
+        若哪天 `run_git_cmd` 改成自己兜住，本条会先红，让人知道调用方的假设变了。
+        v0.45.413：白名单收窄后 `status` 不再被允许，改用 `rev-parse --abbrev-ref HEAD`——让 HEAD 指向一个**名字含
+        非 UTF-8 字节**的分支。APFS 不许建这种松散 ref 文件，所以直接写 `packed-refs` 与 `HEAD`（git 照常读）。
+        生产上碰不到：`production_sync` 的命令输出里分支名是 `main`，git 对路径默认 quotepath——但这是「碰不到」，
+        不是「不会抛」。"""
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+            env.pop(var, None)
+
+        def git(*a, **kw):
+            return subprocess.run(["git", *a], cwd=tmp_path, check=True, capture_output=True, env=env, **kw)
+        git("init", "-q", ".")
+        sha = git("commit-tree", git("mktree", input=b"").stdout.strip().decode(), "-m", "x").stdout.strip().decode()
+        (tmp_path / ".git" / "packed-refs").write_bytes(
+            b"# pack-refs with: peeled fully-peeled sorted \n" + sha.encode() + b" refs/heads/bad\xffbr\n")
+        (tmp_path / ".git" / "HEAD").write_bytes(b"ref: refs/heads/bad\xffbr\n")
+        # 正对照：输出里真有非 UTF-8 字节
+        assert b"\xff" in git("rev-parse", "--abbrev-ref", "HEAD").stdout
+        with pytest.raises(UnicodeDecodeError):
+            GitHubTool(repo_path=str(tmp_path)).run_git_cmd("git rev-parse --abbrev-ref HEAD")
 
 
 # ═════════════════════════════ 3/4. 真 git 沙箱 ═════════════════════════════
@@ -239,7 +268,6 @@ class TestRunGitCmdFailuresAreLoud:
 NON_PRODUCTION = {"system_status": "✅ 完成", "opportunities": [{"ticker": "NVDA"}]}
 PRODUCTION = {"system_status": "✅ 蜂群协作完成", "swarm_metadata": {"tickers_analyzed": 1}}
 LEFTOVER = "alpha-hive-daily-2026-03-13.json"
-
 
 @pytest.fixture
 def sandbox(tmp_path, monkeypatch):
@@ -282,206 +310,190 @@ def _warnings(caplog):
     return [r.getMessage() for r in _records(caplog, "alpha_hive.report_deployer", logging.WARNING)]
 
 
-class TestNonProductionScanIsNotDeployed:
+class TestDeployNeverTouchesTheCodeRepo:
+    """阶段 6（v0.45.402）：日报部署只推 gh-pages，**不提交、不推送代码仓库**。
 
-    def test_creates_no_commit_and_pushes_nowhere(self, sandbox, caplog):
+    v0.45.402 前这里是两组：非生产扫描不许造提交 / 推远端（2026-03-13 事故：回滚从未执行，测试数据进了生产），
+    以及生产分支两种推送失败形状的原因要传到 results 与 warning。提交 / 推送链整体退役后两组的前提都不在了，
+    换成它们共同的上位不变式：无论生产与否，部署都不许改本地 HEAD、不许推任何远端、不许动工作区。
+    ⚠️ 勿重建提交链：数据在数据根，往公开仓库提交数据正是阶段 6 要终结的事（见 `deploy_and_notify` docstring）。
+    """
+
+    def _assert_repo_untouched(self, sandbox, head):
+        assert sandbox.git("rev-parse", "HEAD").stdout == head, "部署在本地 main 上造了提交"
+        assert sandbox.git("ls-remote", str(sandbox.test)).stdout == ""
+        assert sandbox.origin_log() == ["init"], f"部署往 origin/main 推了东西：{sandbox.origin_log()}"
+
+    def test_non_production_deploys_nothing(self, sandbox, caplog):
         (sandbox.repo / LEFTOVER).write_text('{"system_status": "✅ 完成"}')
         head = sandbox.git("rev-parse", "HEAD").stdout
         with caplog.at_level(logging.INFO):
-            res = rd.auto_commit_and_notify(sandbox.reporter, NON_PRODUCTION)
-
-        assert sandbox.git("rev-parse", "HEAD").stdout == head, (
-            "非生产扫描在本地 main 上造了提交 —— 下一次生产推送会把它送上 origin/main"
-            "（2026-03-04~13 实际发生 7 次）")
-        assert sandbox.git("ls-remote", str(sandbox.test)).stdout == ""
-        assert sandbox.origin_log() == ["init"]
+            res = rd.deploy_and_notify(sandbox.reporter, NON_PRODUCTION)
+        self._assert_repo_untouched(sandbox, head)
         assert not sandbox.ghpages
         assert res["deploy_env"] == "none"
-        assert res["git_push"] == {"success": False, "skipped": "non_production", "remote": None}
+        assert res["gh_pages"] == {"success": False, "skipped": "non_production"}
+        assert "git_push" not in res and "git_commit" not in res, \
+            "返回里又出现了提交 / 推送字段：下游若还在读它们，退役就只做了一半"
         assert not any("已恢复" in r.getMessage() for r in caplog.records), \
             "又出现了「已恢复」式的无条件成功日志"
-
-    def test_leftover_artifacts_are_named_not_hidden(self, sandbox, caplog):
-        """管不到的残留（save_report 已写进工作区）要列出来，而不是装作不存在。
-
-        v0.45.213 起 CLI 不再跑非蜂群扫描、造不出这种残留；本条守的是部署函数
-        自身的契约（纵深防御：哪天有调用方把非生产报告递进来，它仍然出声）。
-        """
-        (sandbox.repo / LEFTOVER).write_text("{}")
-        (sandbox.repo / "backtester.py").write_text("# 半成品代码，不算日报产物")
-        with caplog.at_level(logging.WARNING):
-            res = rd.auto_commit_and_notify(sandbox.reporter, NON_PRODUCTION)
-        assert res["uncommitted_report_artifacts"] == [LEFTOVER]
-        assert any(LEFTOVER in m for m in _warnings(caplog))
-
-    def test_does_not_touch_the_working_tree(self, sandbox):
-        """「不污染本地 main」不许靠清工作区实现 —— 那就是 reset --hard。
-
-        对旧代码本条是等价的（reset 被白名单拒了）；它防的是按甲方案
-        「往白名单加 checkout/reset」修回去：那样账本与进行中的改动会被清掉。
-        """
-        (sandbox.repo / "hedge_state").mkdir()
-        (sandbox.repo / "hedge_state" / "trades.jsonl").write_text("leg\n")
-        (sandbox.repo / "index.html").write_text("进行中的改动")
-        rd.auto_commit_and_notify(sandbox.reporter, NON_PRODUCTION)
-        assert (sandbox.repo / "hedge_state" / "trades.jsonl").read_text() == "leg\n"
-        assert (sandbox.repo / "index.html").read_text() == "进行中的改动"
-
-    def test_next_production_push_carries_no_non_production_commit(self, sandbox):
-        """2026-03-13 事故链：规则引擎跑完 → 下一次蜂群扫描推送。"""
-        (sandbox.repo / LEFTOVER).write_text('{"system_status": "✅ 完成"}')
-        rd.auto_commit_and_notify(sandbox.reporter, NON_PRODUCTION)
-        (sandbox.repo / "index.html").write_text("prod-2026-03-16")
-        sandbox.reporter.date_str = "2026-03-16"
-        res = rd.auto_commit_and_notify(sandbox.reporter, PRODUCTION)
-        assert res["git_push"]["success"], res
-        assert len(sandbox.origin_log()) == 2, (
-            f"origin/main 上多出了非生产扫描造的提交：{sandbox.origin_log()}")
-
-    def test_next_production_push_carries_no_non_production_content(self, sandbox, monkeypatch):
-        """2026-03-13 事故链的**内容**层：非蜂群 CLI 扫描 → 下一次蜂群扫描推送。
-
-        v0.45.210 时本条是 `xfail(strict=True)`，写法是「测试自己往工作区种残留，
-        再直调部署函数」。那个形状**上游修好了也永远 XPASS 不了**——残留是测试种的，
-        不是扫描写的（v0.45.213 实测：退役落地后它照旧 XFAIL）。所以改从 CLI 入口进：
-        残留只能由被测的 `main()` 路由写出来。
-
-        `RuleEngineReporter` 复刻退役前那一串：`run_daily_scan` → `save_report`
-        （往工作区写日报 json）→ `auto_commit_and_notify`（非生产，不提交）。
-        退役后 `main()` 在构造它之前就退出，于是工作区里没有东西可被带走。
-        """
-        import alpha_hive_daily_report as adr
-        import yf_gate
-
-        class RuleEngineReporter:
-            def __init__(self, date_override=None):
-                pass
-
-            def run_daily_scan(self, focus_tickers=None):
-                return dict(NON_PRODUCTION)
-
-            def save_report(self, report):
-                (sandbox.repo / LEFTOVER).write_text('{"system_status": "✅ 完成"}')
-                return str(sandbox.repo / LEFTOVER)
-
-            def auto_commit_and_notify(self, report):
-                return rd.auto_commit_and_notify(sandbox.reporter, report)
-
-        monkeypatch.setattr(adr, "AlphaHiveDailyReporter", RuleEngineReporter)
-        monkeypatch.setattr(yf_gate, "install", lambda: False)
-        monkeypatch.setattr(adr._timing, "write", lambda *a, **k: None)
-        # --force：不然周末跑测试时交易日护栏先把旧代码挡掉，本条对旧 bug 只在交易日红
-        monkeypatch.setattr(sys, "argv", ["alpha_hive_daily_report.py", "--no-llm", "--force"])
-        try:
-            adr.main()
-        except SystemExit:
-            pass   # 退役后的正确行为；退出码与「未构造 reporter」见 test_non_swarm_scan_retired
-
-        sandbox.reporter.date_str = "2026-03-16"
-        (sandbox.repo / "index.html").write_text("prod-2026-03-16")
-        res = rd.auto_commit_and_notify(sandbox.reporter, PRODUCTION)
-        assert res["git_push"]["success"] and len(sandbox.origin_log()) == 2, (
-            f"正对照没立住：生产推送本身没把提交送上 origin，下面的断言会空转变绿：{res}")
-        shown = sandbox.git("--git-dir", str(sandbox.origin), "show", f"main:{LEFTOVER}", check=False)
-        assert shown.returncode != 0, f"origin/main 带上了非生产产物：{shown.stdout}"
-
-
-class TestProductionFailuresCarryTheirReason:
 
     @pytest.mark.parametrize("report", [
         PRODUCTION,
         {"distill_mode": "llm_enhanced"},
         {"swarm_results": {"NVDA": {"distill_mode": "llm_enhanced"}}},
     ], ids=["swarm", "llm", "llm-per-ticker"])
-    def test_production_run_commits_pushes_and_syncs_ghpages(self, sandbox, report):
-        """正对照：生产分支行为不变。"""
+    def test_production_deploys_ghpages_only(self, sandbox, report):
+        """正对照：生产分支仍部署 gh-pages（网站不受影响），但不提交、不推送。"""
         (sandbox.repo / "index.html").write_text("prod-2")
-        res = rd.auto_commit_and_notify(sandbox.reporter, report)
+        head = sandbox.git("rev-parse", "HEAD").stdout
+        res = rd.deploy_and_notify(sandbox.reporter, report)
         assert res["deploy_env"] == "production"
-        assert res["git_commit"]["success"] and res["git_push"]["success"], res
-        assert len(sandbox.origin_log()) == 2 and sandbox.ghpages == [1]
+        assert sandbox.ghpages == [1], "生产部署没去部署 gh-pages"
+        self._assert_repo_untouched(sandbox, head)
+        assert "git_push" not in res and "git_commit" not in res
 
-    def test_rejected_push_reason_reaches_warning(self, sandbox, caplog):
-        """形状一（git 非零退出，原因在 stderr）。
+    def test_does_not_touch_the_working_tree(self, sandbox):
+        """部署不许靠清工作区做任何事（那就是 reset --hard）：进行中的改动与未提交文件原样留着。"""
+        (sandbox.repo / "hedge_state").mkdir()
+        (sandbox.repo / "hedge_state" / "trades.jsonl").write_text("leg\n")
+        (sandbox.repo / "index.html").write_text("进行中的改动")
+        for report in (NON_PRODUCTION, PRODUCTION):
+            rd.deploy_and_notify(sandbox.reporter, report)
+        assert (sandbox.repo / "hedge_state" / "trades.jsonl").read_text() == "leg\n"
+        assert (sandbox.repo / "index.html").read_text() == "进行中的改动"
+        assert "index.html" in sandbox.git("status", "--porcelain").stdout, "改动应仍是未提交状态"
 
-        v0.45.210 时本条用「别的 session 先推了 ⇒ non-fast-forward」复刻 2026-09-01~11
-        六次真实失败。v0.45.214 起那种落后会在对象层合并后推上去（`tests/test_production_sync.py`），
-        不再是失败 ⇒ 这里改用远端 `pre-receive` 钩子**真拒绝**：原因仍须传到 results 与 warning，
-        且 origin/main 没动过就不许重试（同样的推送只会同样被拒）。"""
-        hook = sandbox.origin / "hooks" / "pre-receive"
-        hook.write_text("#!/bin/sh\necho '本仓库冻结中' >&2\nexit 1\n")
-        hook.chmod(0o755)
+    def test_ghpages_outcome_key_is_always_present(self, sandbox, monkeypatch):
+        """`gh_pages` 键始终存在（编排器用 scan_timing.extra.gh_pages 的存在当「main() 已跑到最后一步」的证据）：
+        部署函数返回非 dict、或抛异常，也各给一个 success=False 的结局，不许缺键。"""
+        monkeypatch.setattr(rd, "deploy_static_to_ghpages", lambda reporter: None)
+        res = rd.deploy_and_notify(sandbox.reporter, PRODUCTION)
+        assert res["gh_pages"]["success"] is False and "未返回结局" in res["gh_pages"]["error"]
 
-        (sandbox.repo / "index.html").write_text("prod-2")
+        def boom(reporter):
+            raise OSError("disk gone")
+        monkeypatch.setattr(rd, "deploy_static_to_ghpages", boom)
+        res = rd.deploy_and_notify(sandbox.reporter, PRODUCTION)
+        assert res["gh_pages"]["success"] is False and "disk gone" in res["gh_pages"]["error"]
+
+
+class TestAllowlistMatchesProductionCallSites:
+    """`GitHubTool._ALLOWED_GIT_CMDS` 与生产调用点**精确相等**，且会改本地状态的两个子命令有运行期参数约束（v0.45.413）。
+
+    「怕它变大也怕它变小」两条断言各一条：上面的 `test_every_production_call_site_is_allowed` 是子集方向
+    （调用点必须在白名单里——删了现役子命令会红）；这里补**超集方向**（白名单不许有无人调用的项——
+    有人顺手加 push / commit 会红）。只有子集那条时，白名单会悄悄积累无人使用的写操作，
+    v0.45.402~403 前它就攒了 13 个。
+    """
+
+    def test_allowlist_equals_the_subcommands_production_actually_uses(self):
+        used = {sub for _, src in _production_sources() for _, sub in _run_git_cmd_sites(src)}
+        assert used, "扫描器没读到任何调用点——下面的相等断言会空转"
+        assert GitHubTool._ALLOWED_GIT_CMDS == used, (
+            f"白名单与生产调用点不一致：只在白名单里（无人调用，删掉）{sorted(GitHubTool._ALLOWED_GIT_CMDS - used)}；"
+            f"只在调用点里（会被拒绝）{sorted(used - GitHubTool._ALLOWED_GIT_CMDS)}")
+
+    def test_exact_args_cover_exactly_the_state_changing_subcommands(self):
+        """会改本地状态的子命令（fetch 更新远端跟踪 ref，pull 改工作区 / 历史）必须都有精确参数约束；
+        约束只能落在白名单内的子命令上。"""
+        assert set(GitHubTool._EXACT_GIT_ARGS) == {"fetch", "pull"}
+        assert set(GitHubTool._EXACT_GIT_ARGS) <= GitHubTool._ALLOWED_GIT_CMDS
+
+    def test_exact_args_match_what_production_sends(self):
+        """约束值必须就是生产下发的那条字符串——否则收窄把现役调用也拒了，扫描前同步会停摆。"""
+        sent = {}
+        for _, src in _production_sources():
+            for node in ast.walk(ast.parse(src)):
+                if isinstance(node, ast.Call) and _callee_name(node) == "run_git_cmd" and node.args:
+                    a = node.args[0]
+                    if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                        parts = a.value.split()
+                        if len(parts) > 1 and parts[1] in GitHubTool._EXACT_GIT_ARGS:
+                            sent[parts[1]] = tuple(parts[2:])
+        assert sent == GitHubTool._EXACT_GIT_ARGS, sent
+
+    @pytest.mark.parametrize("cmd", [
+        "git pull --rebase origin main", "git pull origin main", "git pull --ff-only origin main",
+        "git pull --ff-only --no-rebase origin main --force", "git pull --ff-only --no-rebase origin dev",
+        "git fetch origin main:main", "git fetch --prune origin main", "git fetch origin", "git fetch --all",
+        "git fetch origin main --force",
+    ])
+    def test_state_changing_commands_with_other_args_are_refused_and_not_run(self, cmd, tmp_path, monkeypatch, caplog):
+        calls = []
+        monkeypatch.setattr(agent_toolbox, "subprocess", SimpleNamespace(
+            run=lambda *a, **k: calls.append(a), SubprocessError=subprocess.SubprocessError))
         with caplog.at_level(logging.WARNING):
-            res = rd.auto_commit_and_notify(sandbox.reporter, PRODUCTION)
-        assert res["git_push"]["success"] is False
-        assert "rejected" in res["git_push"]["output"] and "本仓库冻结中" in res["git_push"]["output"]
-        assert any("rejected" in m for m in _warnings(caplog))
-        assert res["git_push"]["attempts"] == 1
-        assert sandbox.origin_log() == ["init"]
+            r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd(cmd)
+        assert r["success"] is False and "not allowed" in r["error"], r
+        assert calls == [], f"被拒绝的命令仍被执行了：{calls}"
+        assert _records(caplog, "alpha_hive.agent_toolbox", logging.ERROR), "参数被拒没出声（调用方不看返回值时等于没发生）"
 
-    def test_error_shaped_push_failure_keeps_its_reason(self, sandbox, monkeypatch, caplog):
-        """形状二（白名单拒绝 / subprocess 抛异常 ⇒ 只有 error 键）。
-        v0.45.210 前 push_result 只抄 stdout/stderr，这里的原因会变成空串。"""
-        g = sandbox.reporter.agent_helper.git
-        real = g.run_git_cmd
+    @pytest.mark.parametrize("cmd", [
+        "git fetch origin main", "git pull --ff-only --no-rebase origin main",
+        "git rev-parse --verify HEAD", "git rev-parse --abbrev-ref HEAD",
+        "git merge-base --is-ancestor HEAD HEAD", "git rev-list --count HEAD",
+    ])
+    def test_production_commands_are_still_executed(self, cmd, tmp_path, monkeypatch):
+        """正对照：收窄没有把现役命令一并拒了（上一条是拒，这条是放；缺了它，上一条的绿可能只是「什么都拒」）。"""
+        calls = []
+        monkeypatch.setattr(agent_toolbox, "subprocess", SimpleNamespace(
+            run=lambda *a, **k: calls.append(a[0]) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SubprocessError=subprocess.SubprocessError))
+        r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd(cmd)
+        assert r["success"] is True and calls == [cmd.split()], (r, calls)
 
-        def fake(cmd):
-            if cmd.startswith("git push"):
-                return {"success": False, "error": "git push timed out after 30 seconds"}
-            return real(cmd)
+    @pytest.mark.parametrize("sub", [
+        "push", "commit", "add", "stash", "branch", "tag", "remote", "status", "log", "diff", "show",
+        "merge-tree", "commit-tree", "checkout", "reset", "clean", "restore", "rebase", "merge",
+    ])
+    def test_every_other_subcommand_is_refused_and_not_run(self, sub, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(agent_toolbox, "subprocess", SimpleNamespace(
+            run=lambda *a, **k: calls.append(a), SubprocessError=subprocess.SubprocessError))
+        r = GitHubTool(repo_path=str(tmp_path)).run_git_cmd(f"git {sub} x")
+        assert r == {"success": False, "error": f"Git subcommand not allowed: {sub}"}
+        assert calls == []
 
-        monkeypatch.setattr(g, "run_git_cmd", fake)
-        (sandbox.repo / "index.html").write_text("prod-2")
-        with caplog.at_level(logging.WARNING):
-            res = rd.auto_commit_and_notify(sandbox.reporter, PRODUCTION)
-        assert res["git_push"]["error"] == "git push timed out after 30 seconds"
-        assert any("timed out" in m for m in _warnings(caplog)), _warnings(caplog)
 
-    def test_status_failure_is_not_reported_as_clean(self, sandbox, monkeypatch, caplog):
-        """`git status` 挂了 ≠ 工作目录干净。
+class TestCommitPushChainStaysRetired:
+    """阶段 6（v0.45.402）退役的日报提交 / 推送链不许被接回去（墓碑 + AST）。
 
-        假值按 `GitHubTool.status()` 的失败契约写（v0.45.211：`success`+非空 `error`，
-        无 `modified_files`）。假值会和真实形状各走各的，所以下一条用真失败再验一遍。"""
-        monkeypatch.setattr(sandbox.reporter.agent_helper.git, "status",
-                            lambda: {"success": False, "error": "fatal: not a git repository"})
-        with caplog.at_level(logging.INFO):
-            res = rd.auto_commit_and_notify(sandbox.reporter, PRODUCTION)
-        assert not any("工作目录干净" in r.getMessage() for r in caplog.records)
-        assert any("git status 失败" in m and "not a git repository" in m
-                   for m in _warnings(caplog))
-        assert res["git_commit"]["success"] is False
+    为什么需要：`GitHubTool._ALLOWED_GIT_CMDS` 仍放行 `push` / `commit`（通用工具类，gh-pages 之外别处可能要用），
+    白名单测试拦不住「有人把 `git push origin main` 又写回部署路径」。往公开仓库提交数据正是阶段 6 要终结的事。
+    """
 
-    def test_real_status_failure_is_not_reported_as_clean(self, sandbox, caplog):
-        """同上，但不打桩：真 `GitHubTool.status()` 在真仓库里失败（索引损坏）。
+    def test_tombstones(self):
+        import production_sync
+        assert not hasattr(production_sync, "push_main"), "push_main 被接回去了（阶段 6 退役，勿重建）"
+        for name in ("commit", "status", "_staged_names", "_add_pathspec", "_parse_porcelain_z", "_failure_reason",
+                     "_rename_sources_pointing_outside", "_ADD_RETRY_DELAY_S"):
+            assert not hasattr(GitHubTool, name), f"GitHubTool.{name} 被接回去了（v0.45.403 退役，勿重建提交能力）"
+        assert not hasattr(agent_toolbox.AgentHelper, "summary"), "AgentHelper.summary 被接回去了"
+        for name in ("auto_commit_and_notify", "REPORT_ARTIFACT_PATHS", "_is_report_artifact", "_git_modified_files"):
+            assert not hasattr(rd, name), f"report_deployer.{name} 被接回去了（阶段 6 退役，勿重建）"
+        import scan_timing
+        for name in ("git_push_summary", "git_commit_summary"):
+            assert not hasattr(scan_timing, name), f"scan_timing.{name} 被接回去了"
 
-        上一条的假值只证明「调用方认得那个假形状」；本条证明它认得 `status()`
-        **真实**返回的形状 —— 两边任一侧改了失败形状，只有这条会红。"""
-        (sandbox.repo / ".git" / "index").write_bytes(b"garbage")
-        raw = sandbox.git("status", "--porcelain", check=False)
-        assert raw.returncode != 0, f"正对照：索引损坏后 git status 应当失败：{raw}"
-
-        with caplog.at_level(logging.INFO):
-            res = rd.auto_commit_and_notify(sandbox.reporter, PRODUCTION)
-        assert not any("工作目录干净" in r.getMessage() for r in caplog.records)
-        assert any("git status 失败" in m and "index" in m for m in _warnings(caplog)), \
-            _warnings(caplog)
-        assert res["git_commit"]["success"] is False
-        # v0.45.225：原因要进 results（⇒ status.json ⇒ 「日报提交失败」告警的原因栏），
-        # 不能只活在 warning 日志里。此前 results 里只有一句 "git status failed"。
-        reason = raw.stderr.strip().splitlines()[0]
-        assert reason in res["git_commit"]["error"], (reason, res["git_commit"])
+    def test_no_production_code_pushes_via_run_git_cmd(self):
+        subs = {sub for _, src in _production_sources() for _, sub in _run_git_cmd_sites(src)}
+        # v0.45.403 起 commit / add 也不许有：提交能力随 GitHubTool.commit() 一起退役，
+        # 但白名单 `_ALLOWED_GIT_CMDS` 仍放行它们，只有这条 AST 能拦「又写回一个 git commit」
+        for banned in ("push", "commit", "add"):
+            assert banned not in subs, f"生产代码里出现了 run_git_cmd('git {banned} …')：日报 / 部署不再向代码仓库提交或推送数据"
+        # 正对照：扫描器确实读到了别的子命令（空扫描会让上一行恒绿）
+        assert {"fetch", "pull"} <= subs
 
 
 # ═════════════════════════════ 调用方不许丢弃返回值 ═════════════════════════════
 
 def _discarded_deploy_calls(source: str):
-    """`auto_commit_and_notify(...)` 作为裸语句（返回值直接丢弃）的行号。"""
+    """`deploy_and_notify(...)` 作为裸语句（返回值直接丢弃）的行号。"""
     return [
         node.lineno for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-        and _callee_name(node.value) == "auto_commit_and_notify"
+        and _callee_name(node.value) == "deploy_and_notify"
     ]
 
 
@@ -491,7 +503,7 @@ class TestCallersReadTheResult:
         bad = [f"{rel}:{line}" for rel, src in _production_sources()
                for line in _discarded_deploy_calls(src)]
         assert not bad, (
-            "这些调用丢弃了 auto_commit_and_notify 的返回值 —— 推送失败时调用方照样报成功：\n  "
+            "这些调用丢弃了 deploy_and_notify 的返回值 —— gh-pages 部署失败时调用方照样报成功：\n  "
             + "\n  ".join(bad))
 
     def test_scanner_sees_every_caller(self):
@@ -499,12 +511,12 @@ class TestCallersReadTheResult:
         （v0.45.316 前还有 GUI 的 `gui/interactions.py`，已随 gui/ 整体删除。）"""
         sites = {rel for rel, src in _production_sources()
                  for node in ast.walk(ast.parse(src))
-                 if isinstance(node, ast.Call) and _callee_name(node) == "auto_commit_and_notify"}
+                 if isinstance(node, ast.Call) and _callee_name(node) == "deploy_and_notify"}
         assert "alpha_hive_daily_report.py" in sites
 
     def test_scanner_flags_a_discarded_result(self):
         """有牙：v0.45.210 前 gui/interactions.py（v0.45.316 已删）的原句。"""
-        src = ("reporter.auto_commit_and_notify(report)\n"
-               "sync = reporter.auto_commit_and_notify(report)\n"
-               "_p = reporter.auto_commit_and_notify(report).get('git_push')\n")
+        src = ("reporter.deploy_and_notify(report)\n"
+               "sync = reporter.deploy_and_notify(report)\n"
+               "_p = reporter.deploy_and_notify(report).get('gh_pages')\n")
         assert _discarded_deploy_calls(src) == [1]

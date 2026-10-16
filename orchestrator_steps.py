@@ -16,7 +16,9 @@
     「Step 2 没跑完……本轮网站不会更新」。
 
 本模块把这些格式知识收成一个**有测试**的解释器，供下一步（B）接进编排器，让 bash 不再持有任何格式知识。
-**本版只提供解释器，编排器尚未调用它。**
+B 起编排器经 `_apply_step_interp` 调用（v0.45.385 接了 Step 10/11/12/13/15，v0.45.386 接了 Step 2/4）；
+解释器不可用时 `_step_rc_fallback` 退回按退出码记（Step 2/4 逐字复现 B 之前的 status，10–15 记 interpreter_unavailable），
+片段带 `interp_fallback`、日志多一行 ERROR。
 
 用法
 ----
@@ -29,7 +31,7 @@ stdout **恰好一行** JSON、退出码**恒为 0**（任何内部错误都渲�
      "steps_fragment": {"<step key>": {...}}}
 
 输出用 `ensure_ascii`（纯 ASCII）：launchd 下 stdout 编码是什么都炸不了；bash 侧 `jq -r .message`
-会把 `\\uXXXX` 还原成中文。连这一行都解析不了时，bash 应退回只按 rc 记（B 的事）。
+会把 `\\uXXXX` 还原成中文。连这一行都解析不了时，bash 退回只按 rc 记（编排器的 `_step_rc_fallback`）。
 
 参数
 ----
@@ -59,16 +61,19 @@ B 接线须知：日期必须**显式**传给生产方
      与「上一轮留下的文件」无从区分，**不**放行，只会是 `stale_json`。
 所以 B **必须**把 DATE_STR 原样传给每个工具（参数名各不相同：`--end` / `--today` / `--date`，
 唯一真相是下方 `_TOOL_STEPS` 各条的 `date_flag`，测试核对它在生产方的 argparse 里真实存在），
-让外壳日期由编排器决定、与 `--date` 恒等；不要依赖工具按时钟取日期。
+让外壳日期由编排器决定、与 `--date` 恒等；不要依赖工具按时钟取日期。（B 起编排器已照做：各步 `run_step` 行
+带 `date_flag "${DATE_STR}"`，由 `tests/test_orchestrator_step_interp.py` 的结构守卫按 `_TOOL_STEPS` 核对。）
 
 与现行内联的关系
 ----------------
-对照对象是仓库 `scripts/alpha-hive-orchestrator.sh` 里各步的**分支链**（按 shell 变量名定位，不记行号：
+对照对象是 B 之前的冻结副本 `tests/fixtures/orchestrator_pre_b.sh.frozen` 里各步的**分支链**
+（B 起仓库编排器里的这些内联已删、换成 `_apply_step_interp` 调用；按 shell 变量名定位，不记行号：
 `STEP10_RC` / `STEP11_RC` / `STEP12_RC` / `STEP13_RC` / `STEP15_RC` / `STEP2_RC` 的 `if … elif … fi`，
 以及 `CONT_SUMMARY` / `READINESS_LINE` / `BOUNDARY_JSON` / `_S11_NEW` / `COV_SUMMARY` / `CALWATCH_SUMMARY` /
 `BACKUP_CONT_SUMMARY` 这几段内联）。对**旧格式 JSON（无 `schema_version`）**，各步的 `status` / 其余键 /
-日志级别与现行 bash **逐字相同**，只多一个 `"contract": "legacy"`——`tests/test_orchestrator_steps.py::TestGoldenLegacy`
-把这些分支链按模式从仓库副本里抽出来、在 bash 里配同一批夹具**真跑**对照。以下是**刻意的改动**，每条都有测试：
+日志级别与 B 之前的 bash **逐字相同**，只多一个 `"contract": "legacy"`——`tests/test_orchestrator_steps.py::TestGoldenLegacy`
+把这些分支链按模式从冻结副本里抽出来、在 bash 里配同一批夹具**真跑**对照（摘要钉在
+`tests/test_orchestrator_step_interp.py`，副本永远不许从 B 之后的编排器重新生成）。以下是**刻意的改动**，每条都有测试：
 
   (a) 新鲜度：外壳 `date` ≠ `--date`，或（给了 `--run-start` 时）`generated_at` 早于本步开始；
       旧格式则看 mtime（早于 `--run-start`，或 mtime 的本地日期早于 `--date`）⇒ 该 JSON「不是本轮的」。
@@ -109,15 +114,21 @@ B 接线须知：日期必须**显式**传给生产方
   (h) 读文件的硬化：只读**普通文件**（FIFO / 字符设备 / 目录一律不打开读，绝不阻塞）、`--out` JSON 大小封顶
       `MAX_JSON_BYTES`、嵌套深度封顶 `MAX_JSON_DEPTH`（真实产出只有个位数层；过深的合法 JSON 会让本模块的递归
       遍历与 `json.dumps` 撞上 RecursionError）——超限一律按「不可解析」记，原因写进片段，从不崩。
+  (i) Step 11 超时与就绪度 JSON 不可用时的**文案**（v0.45.391 复审 S5；`status` / `rc` / `cohort_boundary` / 级别
+      与 B 之前逐字相同，只换 message）：rc=124 说「⏰ 超时（>60s，run_step 看门狗杀掉…）」而不是「⚠️ 异常（exit=124）」；
+      JSON 本轮不可用（rc≠2）时边界那句说「本轮未核对——JSON 没写出来 / 不可用（原因）」，不再推给「代码早于 v0.45.334」
+      （那只在读到 JSON 却缺键时成立；09-30 的 rc=124 被它说成了版本问题）。秒数默认 `STEP11_TIMEOUT_DEFAULT`，
+      与仓库编排器 Step 11 的 `run_step --timeout` 有测试核对。冻结副本对照里 rc=124 那一行的文案按此替换后比对。
 
 **不归本解释器的：Step 5（gh-pages 部署）。** 自 v0.45.351 起由编排器的 `_step5_gh_pages_verdict` 调
 `report_deployer.py --gh-pages-step-status --since $STEP2_START`，按部署日志的**实际结局**判——那是比 Step 2
 退出码更直接的证据，判据与测试都在它自己那里，这里不再复制一份（复制就是第二份真相）。它的降级支
-（helper 无有效输出 ⇒ 退回按 `STEP2_RC` 判）仍把 rc=1 记成「本轮网站不会更新」；B 接线时让那一支改用
-`--step 2` 的 `status`（`success_with_warning` ⇒ 与 rc=0 同一支），不要在 bash 里再写一遍判据。
+（helper 无有效输出 ⇒ 退回按 `STEP2_RC` 判）曾把 rc=1 记成「本轮网站不会更新」；B2（v0.45.386）起那一支改读
+Step 2 调用点存下的 `STEP2_STATUS`（即 `--step 2` 的 `status`；`success_with_warning` ⇒ 与 rc=0 同一支），
+判据没有在 bash 里再写一遍。守卫：`tests/test_orchestrator_step5_gh_pages.py`。
 
 片段里新增的键（`contract` / `rc_status` / `attention` / `envelope_status` / `json_problem` / `date_rollover` /
-`problems` / `stale` / `error` / `warning` / `ml_model_guard` / `git_push_success` / `rc1_unverified` / `step2_status`）
+`problems` / `stale` / `error` / `warning` / `ml_model_guard` / `rc1_unverified` / `step2_status`）
 都是**追加**，现行键一个没删、没改名。
 
 守卫：`tests/test_orchestrator_steps.py`（表驱动 + 旧格式对照仓库副本真跑 + 子进程恒一行 + render_error）。
@@ -583,6 +594,11 @@ def _boundary_listed_in_attention(d: dict) -> bool:
         for a in att)
 
 
+#: Step 11 的 `run_step --timeout`（仓库编排器 Step 11 那一行；编排器不给 Step 11 传 --timeout-seconds）。
+#: `tests/test_orchestrator_steps.py::TestStep11Timeout` 核对它与仓库编排器那一行一致——改了超时而这里没跟，那条红。
+STEP11_TIMEOUT_DEFAULT = 60
+
+
 def _base11(rc: int, d: Optional[dict], ctx: _Ctx, why: str):
     line = _readiness_line(d) if d is not None else why
     if rc == 0:      # STEP11_RC=0
@@ -595,13 +611,27 @@ def _base11(rc: int, d: Optional[dict], ctx: _Ctx, why: str):
         level, parts, frag = "warn", ["⚠️ Step 11：无法判定 IC 重跑就绪度"], {"status": "undetermined"}
     elif rc == 2:    # STEP11_RC=2
         level, parts, frag = "warn", ["⏭️  Step 11 跳过（ic_rerun_readiness.py 不存在）"], {"status": "skipped"}
-    else:            # STEP11_RC 其他（else）——注意：Step 11 没有 124 分支，超时也落在这里
+    elif rc == 124:  # STEP11_RC=124：B 之前没有这一支（超时落进 else）。(i) 只改文案——status/rc/级别与 else 支逐字相同
+        level, parts, frag = ("warn", [f"⏰ Step 11 超时（>{ctx.timeout_text(STEP11_TIMEOUT_DEFAULT)}s，"
+                                       f"run_step 看门狗杀掉了 ic_rerun_readiness.py，exit={rc}），不影响主流程"],
+                              {"status": "error", "rc": rc})
+    else:            # STEP11_RC 其他（else）
         level, parts, frag = ("warn", [f"⚠️ Step 11 异常（exit={rc}），不影响主流程"],
                               {"status": "error", "rc": rc})
     # 世代边界核对（BOUNDARY_JSON 段 + `_S11_NEW` 合并）：片段恒带 cohort_boundary（取不到记 null，不假装正常）
     raw = _boundary_raw(d) if d is not None else None
     b = _jq_roundtrip(raw)
-    if raw is None:
+    if raw is None and d is None and rc != 2:
+        # (i) 就绪度 JSON 本轮不可用（没写出 / 不是本轮的 / 读不了）：不再说「代码早于 v0.45.334」——那是读到了
+        # JSON 却没有这个键时才成立的推断。09-30 rc=124 实况：那时 `--out` 只在最后写一次、边界核对排在 F&G
+        # 前瞻检验之后，超时 = 本轮根本没核对。v0.45.392 起 F&G 开跑前先写一次检查点（边界核对在里面）、F&G 有
+        # 时间预算 ⇒ rc=124 通常读得到检查点、不走这一支；还走到这里 = 死在检查点写出之前（F&G 之外的部分就超了时，
+        # 或检查点写盘失败，原因在 stderr）。rc=2（脚本不存在）照旧，与 B 之前逐字相同。
+        cause = ("ic_rerun_readiness.py 被 run_step 看门狗按超时杀掉，就绪度 JSON 没写出来"
+                 "（连 F&G 之前的检查点都没写出：超时发生在 F&G 之外的部分，或检查点写盘失败——看 stderr）" if rc == 124
+                 else "就绪度 JSON 本轮不可用")
+        parts.append(f"Step 11 世代边界核对：本轮未核对——{cause}{why}")
+    elif raw is None:
         parts.append("Step 11 世代边界核对：就绪度 JSON 里没有 cohort_boundary_evidence"
                      "（代码早于 v0.45.334 或 JSON 不可读），本轮未核对")
     elif b.get("alarm") is True:
@@ -775,7 +805,7 @@ def _rollover_text(step: _ToolStep, json_name: str, roll: dict) -> str:
            if roll.get("basis") == "generated_at>=run_start"
            else f"写于 {roll.get('written_at')}、mtime {roll.get('mtime')}（未给 --run-start，按日期与 mtime 判）")
     return (f"ℹ️ {step.label}：{json_name} 外壳 date={roll.get('json_date')} 是本轮 {roll.get('expected_date')} 的次日"
-            f"——工具跑过了午夜、按时钟取了日期（{why}），按本轮结果采用；B 应把 DATE_STR 用 {step.date_flag} 显式传入")
+            f"——工具跑过了午夜、按时钟取了日期（{why}），按本轮结果采用；编排器已用 {step.date_flag} 传 DATE_STR，仍出现 ⇒ 生产方没收到它")
 
 
 def _json_problem(step: _ToolStep, doc: _Doc, rc: int, json_name: str,
@@ -897,10 +927,10 @@ def _step2_rc1_evidence(ctx: _Ctx) -> Tuple[bool, List[str], dict]:
       ① v0.45.145 ML 退化闸：`main()` **正常返回**后，`__main__` 见 `ml_model_guard.verdict ∈
          {constant, near_constant}` 就 `sys.exit(1)`（线程卡死强退走 `os._exit(同一个码)`）；
       ② 任何未捕获异常（Python 默认 1）——其中一部分发生在 `.swarm_results` 与日报都已落盘之后
-         （`.swarm_results` 早在 `_post_scan_enrichment` 就写了；`auto_commit_and_notify` 只兜四种异常），
+         （`.swarm_results` 早在 `_post_scan_enrichment` 就写了；`deploy_and_notify` 只兜四种异常），
          所以「当日产物在」**证明不了**跑完。
     能区分二者的结构化信号：`main()` 的**最后一步**是 `_timing.write()` 写 `logs/scan_timing.json`
-    （`extra` 带 `git_push` 键；空扫描护栏那条早退写的是 `early_exit`）。它是本轮写的、日期对、不是早退
+    （`extra` 带 `gh_pages` 键——`main()` 无论部署成败都会写它；空扫描护栏那条早退写的是 `early_exit`；v0.45.402 前是 `git_push`）。它是本轮写的、日期对、不是早退
     ⇒ `main()` 已正常返回 ⇒ 退出码 1 只可能来自 ①。三样缺一样就保守记 failed（与现行一致）。
     「本轮写的」**只能**靠 `--run-start` 判（没给就不放行）：同一 DATE_STR 重跑时上一轮留下的
     scan_timing.json 日期同样对得上，而本轮可能根本没跑起来——`run_step` 在 TCC 拒绝时也返回 1。
@@ -937,8 +967,8 @@ def _step2_rc1_evidence(ctx: _Ctx) -> Tuple[bool, List[str], dict]:
         if not isinstance(t, dict) or t.get("date") != ctx.date:
             missing.append(f"scan_timing.json 的 date={t.get('date') if isinstance(t, dict) else None!r}"
                            f" ≠ {ctx.date}（主流程没跑到最后一步）")
-        elif not isinstance(t_extra, dict) or "early_exit" in t_extra or "git_push" not in t_extra:
-            missing.append("scan_timing.json 不是跑完主流程写的（早退或缺 git_push）")
+        elif not isinstance(t_extra, dict) or "early_exit" in t_extra or "gh_pages" not in t_extra:
+            missing.append("scan_timing.json 不是跑完主流程写的（早退或缺 gh_pages）")
         else:
             if ctx.run_start is None:
                 missing.append("未给 --run-start：分不出 scan_timing.json 是本轮写的还是同日上一轮留下的")
@@ -948,10 +978,6 @@ def _step2_rc1_evidence(ctx: _Ctx) -> Tuple[bool, List[str], dict]:
                     ts = t_mtime
                 if math.floor(ts) < math.floor(ctx.run_start):
                     missing.append(f"scan_timing.json 写于 {t.get('written_at')}，早于本步开始")
-            gp = t_extra.get("git_push")
-            ok = gp.get("success") if isinstance(gp, dict) else None
-            # 只认布尔：别的形状（列表 / 字符串）原样往下传，会在拼「推送成功 / 失败」时撞 unhashable → render_error
-            extra["git_push_success"] = ok if isinstance(ok, bool) else None
     except FileNotFoundError:
         missing.append("scan_timing.json 不存在（主流程没跑到最后一步）")
     except _JsonProblem as e:
@@ -1003,14 +1029,9 @@ def _interpret_step2(ctx: _Ctx) -> Tuple[str, List[str], Dict[str, dict]]:
             warning = "rc1_after_completion_unexplained"
             why = (f"按现行代码只有 ML 退化闸会在主流程跑完后退出 1，但复核判决为 {ml.get('verdict')!r}"
                    f"{'（' + ml['error'] + '）' if ml.get('error') else ''}——原因待查")
-        push = extra.get("git_push_success")
-        # 直接指向 scan_timing.json 本身：它并进 status.json 的那条 jq 合并 09-14~09-25 从没生效过（见 v0.45.351）
-        push_txt = {True: "推送成功",
-                    False: f"推送失败（见 {_resolve_dirs(ctx)[0] / 'logs' / 'scan_timing.json'} 的 extra.git_push）"}.get(
-            push, "推送结果未知")
         frag = {"status": "success_with_warning", **ctx.dur(), "rc": 1, "warning": warning,
-                "ml_model_guard": ml, "git_push_success": push}
-        return ("warn", [f"⚠️ Step 2 已跑完（耗时 {ctx.dur_text}s，日报已生成、{push_txt}）但退出码 1", why],
+                "ml_model_guard": ml}
+        return ("warn", [f"⚠️ Step 2 已跑完（耗时 {ctx.dur_text}s，日报已生成）但退出码 1", why],
                 {key: frag})
     # failed（STEP2_RC 其他，else）
     parts = [f"⚠️ Step 2 失败，但继续进行（耗时 {ctx.dur_text}s）"]

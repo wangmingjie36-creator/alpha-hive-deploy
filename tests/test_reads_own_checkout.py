@@ -130,12 +130,31 @@ def _module_marked_integration(tree) -> bool:
     return False
 
 
-def home_absolute_paths(source: str, filename: str = "<test>") -> list[str]:
+#: 「字面 `~/…` 本身就是被测输入」的测试作用域 ⇒ 理由（v0.45.461）。断言的正是这个字符串**不被展开**——
+#: 换成 tmp_path 就测不到它；拆开拼（`"~" + "/x"`）只是躲开扫描。这里不碰本机家目录：纯函数，或 HOME 已指向 tmp。
+#: 只放行这些作用域里的 `~/…` **字符串字面量**（`/Users/…` 与 `Path.home() / …` 照拦）；每条都必须还在用它
+#: （`TestLiteralTildeInputsStayCurrent` 对账：清掉了就从这里删，白名单只许跟着变小）。
+LITERAL_TILDE_INPUTS = {
+    ("test_data_root_default.py", "TestResolveDataRoot::test_explicit_part_is_taken_verbatim"):
+        "explicit_data_root 原样取值、不展开 ~：纯函数，不碰文件系统",
+    ("test_alphabot_launcher.py", "TestDataRootFollowsLauncher::test_literal_tilde_env_home_is_not_expanded"):
+        "环境 ALPHA_HIVE_HOME 的字面 ~ 不被 .app 生成器展开：HOME 由 home 夹具指向 tmp",
+    ("test_data_root_default.py", "TestGuardUsesTheOneRule::test_non_absolute_value_guards_the_default_root"):
+        "测试闸对字面 ~ 不展开、改守缺省位置（v0.45.488）：HOME 指向 tmp，纯函数不碰本机家目录",
+    ("test_data_root_default.py", "TestGuardUsesTheOneRule::test_report_header_says_so::_Cfg"):
+        "报告头说明「~ 值没被采用」（v0.45.488）：假 config 上的字符串，不碰文件系统",
+    ("test_data_root_default.py", "TestOneDerivationOfProduction::test_both_guards_land_on_the_same_root"):
+        "两个守卫对字面 ~ 落在同一根上（v0.45.498）：HOME 指向 tmp，纯函数不碰本机家目录",
+}
+
+
+def home_absolute_paths(source: str, filename: str = "<test>", literal_tilde_ok=None) -> list[str]:
     """返回「未标 integration 的作用域里出现家目录路径」的位置列表。
 
     **不看有没有 skip**：没有 skip 时它在别的机器上红得很可见，但在 worktree 里绿得很安静。
-    模块级常量不豁免 —— 要用就挪进标了 marker 的类里。
+    模块级常量不豁免 —— 要用就挪进标了 marker 的类里。`literal_tilde_ok` 缺省取 `LITERAL_TILDE_INPUTS`。
     """
+    tilde_ok = LITERAL_TILDE_INPUTS if literal_tilde_ok is None else literal_tilde_ok
     tree = ast.parse(source, filename=filename)
     if _module_marked_integration(tree):
         return []
@@ -148,6 +167,9 @@ def home_absolute_paths(source: str, filename: str = "<test>") -> list[str]:
             where = f"{where}{node.name}::"
         is_div = isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
         shown = None if (is_div and inner_of_div_chain) else _home_path(node)
+        if (shown and (filename, where.rstrip(":")) in tilde_ok
+                and isinstance(node, ast.Constant) and _HOME_TILDE.match(node.value)):
+            shown = None        # 登记过的「字面 ~ 是被测输入」——只放行 `~/…` 字面量
         if shown:
             hits.append(
                 f"{filename}:{node.lineno} {where.rstrip(':') or '<module>'} "
@@ -320,9 +342,35 @@ class TestHomePathDetectorHasTeeth:
         """整条链只报一次 —— 内层 BinOp 不许重复报。"""
         assert len(home_absolute_paths(self.BAD["path_home_v0.45.222"], "bad.py")) == 1
 
+    def test_literal_tilde_exemption_is_scoped(self):
+        """登记豁免只放行**那个作用域**里的 `~/…` 字面量：别的测试、`/Users/…`、`Path.home() / …` 照拦。"""
+        ok = {("t.py", "TestA::test_a"): "理由"}
+        src = ("from pathlib import Path\n"
+               "class TestA:\n"
+               "    def test_a(self):\n"
+               "        f('~/x')\n"
+               "    def test_b(self):\n"
+               "        f('~/x')\n")
+        hits = home_absolute_paths(src, "t.py", literal_tilde_ok=ok)
+        assert len(hits) == 1 and "TestA::test_b" in hits[0], hits
+        for other in ("'/Users/someone/x'", "Path.home() / 'Desktop'"):
+            src2 = f"from pathlib import Path\nclass TestA:\n    def test_a(self):\n        f({other})\n"
+            assert home_absolute_paths(src2, "t.py", literal_tilde_ok=ok), other
+        assert len(home_absolute_paths(src, "other.py", literal_tilde_ok=ok)) == 2, "换了文件名不许沾光"
+
     def test_skip_detector_really_misses_it(self):
         """钉住「为什么要另一个检测器」：按 git 忽略定口径的那个，对这段原文确实不响。"""
         assert invisible_prod_skips(self.BAD["skip"], "bad.py") == []
+
+
+class TestLiteralTildeInputsStayCurrent:
+    """`LITERAL_TILDE_INPUTS` 的每一条都必须还在用 `~/…` 字面量——清干净了不删，白名单就悄悄变成「这里随便写」。"""
+
+    @pytest.mark.parametrize("key", sorted(LITERAL_TILDE_INPUTS))
+    def test_entry_is_still_needed(self, key):
+        fname, where = key
+        hits = home_absolute_paths((TESTS_DIR / fname).read_text(encoding="utf-8"), fname, literal_tilde_ok={})
+        assert any(f" {where} 写死了家目录路径 '~/" in h for h in hits), f"{key} 已不用字面 ~，从 LITERAL_TILDE_INPUTS 删掉"
 
 
 class TestCwdDetectorHasTeeth:

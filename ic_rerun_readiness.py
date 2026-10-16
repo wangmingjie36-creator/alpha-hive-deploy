@@ -59,6 +59,28 @@ v0.44.1~0.44.3 修了 ML 预期收益的结构性看多偏斜、并把 RivalBee 
       无法判定 / 陈旧 / 已到检视点、维度 IC 协议 H1 锚点的截止日 …），**不从 `--quiet` 那行的图标反推**——
       H1 锚点「须早于 2026-10-12」那种写在 ⏳ 段里的截止日，按图标读永远报不出来。
 `--quiet` 那一行的格式与退出码 0/1/3 **不因外壳改变**。
+
+F&G 子状态的时间预算与检查点（v0.45.392）
+-----------------------------------------
+编排器 Step 11 在 `run_step --timeout 60` 下跑本工具；`--out` 原先只在最后写一次，而 F&G 敞口门前瞻检验
+（`fg_exposure_gate_forward_status`，逐日真实重放、要打 yfinance）在 09-30 拖到 >60s ⇒ 进程被杀、**整份**
+就绪度 JSON 没写出来，连与 F&G 无关的世代边界核对也一起丢了。v0.45.391 把健康路径压到约 12s，但整段取数
+被拒时退回逐次直连（实测约 56s），限流日仍会超时。于是：
+  · F&G 子状态放进**子进程**、开跑时就起（与其余各项并行），带截止时刻 `--budget-seconds`（从 `main()`
+    开始计；0 = 不限时）。缺省 `FG_BUDGET_SECONDS_DEFAULT` 自 v0.45.446 起是 0：预算由**有看门狗的调用方**给
+    （编排器 Step 11 显式传 45，v0.45.437），每周任务 / 手动运行没有看门狗、不该被截断。到点 ⇒ TERM → 宽限 → KILL 子进程，
+    F&G 段渲染成 `cannot_judge` + 专属 attention `ic_rerun.fg_exposure_gate_forward.budget_exceeded`；
+    子进程自己崩 / 输出不合约定 / 起不来 ⇒ `….child_failed`。都**看得见**，不吞。
+    为什么不用 SIGALRM / 协作式截止：会在 `paper_portfolio.run_replay` 的 finally（`CONFIG.clear()` 与
+    `update()` 之间）里抛出、把本进程的 CONFIG 弄成空的，也打断不了 C 层的 curl 卡顿；子进程里坏了就坏了。
+  · 其余各项（`assess` / 共振 / 维度 IC / 世代边界）先算完，`--out` **先写一次检查点**——F&G 段是显式占位
+    `cannot_judge`「进程在 F&G 重放结束前终止」（attention `….interrupted`）。进程之后被杀，编排器（先删文件、
+    再按 `--run-start` 核新鲜度）读到的就是这份检查点：边界核对与 IC 摘要照常可用。正常结束时被完整结果原子覆盖。
+  · `__main__` 装 SIGTERM → `SystemExit(143)`：编排器只 TERM 本进程（不是进程组），子进程收不到——由 `main()`
+    的 `with` 退出时连带终止它、再删它的私有临时目录。143 原样保留，编排器照旧把它记成超时（124）。子进程自己
+    **不**装这个处理器（异常会被 curl_cffi 的 C 回调吞掉，实测），TERM 即死。父进程被 KILL 时子进程靠自己的
+    看门狗（父进程没了 / 超过自身时限）退出。
+JSON 形状不变：键与键序同 v0.45.391，F&G 段仍是 `{status, line}`。
 """
 
 from __future__ import annotations
@@ -66,9 +88,17 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
+import os
 import re
+import shutil
+import signal
 import sqlite3
+import subprocess
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -124,6 +154,19 @@ _COHORT_HISTORY = [
     # 且按本表判据（哨兵语义/来源/算法改变）本就该记的两条边界找出来、按实际
     # 部署日期插入。两条都只影响各自单一信号，未在任何下游依赖边里出现，
     # 插入不改变任何已注册边界的 `cohort_start()`（取列表最后一条不变）。
+    # v0.45.472（补登，早于表的第一条，按实际部署日期插入，理由同上方 v0.45.275 那段）：
+    # ⚠️ v0.45.479 二次检查：下面 reason 里「06-29 当天的快照已由更早的扫描写下、首个完整 CBOE 日是 06-30」不对——
+    #   06-29 的 11 份快照都写于 c738c567 进 main 之后，归档那次运行（.swarm_results_2026-06-29.json）10 只里 9 只是 CBOE
+    #   （唯一的 AMZN 是 Yahoo 空链、已隔离）。严格说边界该是 06-29。没有改：本表必须按日期升序，而判据取「列表里最后一条」，
+    #   往**前**挪日期的更正条目放不进去（历来的更正都是往后顺延）；代价是 06-29 那 9 行 CBOE 口径的 GEX 落在旧世代。
+    #   reason 原文有摘要钉（只追加不改写），故更正写在这里与 CHANGELOG v0.45.479。另：「只影响这一个信号」严格说 v0.45.349
+    #   之前 GEX 还经 gex_signal / Bear gex<0 下限进过 Oracle 分与 bear.options_bear——那两个已在更晚的边界换代，结果不变。
+    ("2026-06-30", "v0.34.0",
+     "期权链主源由 yfinance 翻成 CBOE（c738c567，06-29 12:28 PDT 进 main；06-29 当天的快照已由更早的扫描写下，"
+     "首个完整 CBOE 日是 06-30）。`options.gamma_exposure` 因此换了量：yfinance 主源时代（BS gamma 自 03-16 起注入）"
+     "gamma 用 Black-Scholes 补、S 取「OI>50 的看涨行权价中位数」（analyze 调 fetch_options_chain 从不传价，"
+     "v0.45.468 才改用真实价）；CBOE 时代 gamma 来自 CBOE 本身（缺失才按真实价补）。两段不可混算。"
+     "只影响这一个信号（P/C、总 OI、IV 不依赖 gamma 的 S）；CBOE 时代里退到 yfinance 备用链的已知日子另走 QUARANTINE。"),
     ("2026-08-15", "v0.43.24",
      "GuardBeeSentinel 的 VIX 取数改走 CBOE 优先（脱离 yfinance 限流）。Step 1"
      "（同版更早提交）把「宏观数据整体降级」时的 vix/yield_curve/gold_trend 一律"
@@ -832,6 +875,106 @@ _COHORT_HISTORY = [
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段（`final_score` 是 ML 特征，只在断链行变）。"
      "LLM 模式本版未动：`llm_service.interpret_options_flow` 仍在 `result` 非空时调用（样本链结果也会送进去），"
      "那是 LLM 模式的另一件事。"),
+    ("2026-09-28", "v0.45.383",
+     "日线完整性校验（用户 2026-09-29 决定：阶段 1 直接做、缺口降级为「置空」、边界照 v0.45.369 先例登记 09-28 不作废样本）。"
+     "`options_analyzer.fetch_historical_hv` 对 yfinance 的 1y 日线校验交易日连续性（`bars_integrity.find_gaps`，交易日历复用 "
+     "`is_trading_day` + 一张临时休市表）：缺口落在**最后 21 根内** ⇒ 重取一次，仍缺 ⇒ 该标的 `iv_rank` / `iv_percentile` 置 None"
+     "（`iv_rank_source` 仍是 `hv_proxy`——`signal_archive` 把非 hv_proxy 一律当真实 IV，不能新增取值），结果带 `hv_gap`（缺的日期）；"
+     "Oracle 期权分的 `iv_signal` 走既有的「None ⇒ 中性 2.0」分支。缺口序列不写缓存（缓存键 v4→v5）。"
+     "**起因**：2026-09-23 yfinance 的 1y 日线缺了 09-22 一根，当天 8/22 只标的 iv_rank 静默错位（DE 存 43.26、正确 33.45；"
+     "BRK-B 的 rv_30d 14.52、正确 12.55）——旧代码返回的 HV 列表不带日期，少一根让 20 日窗口后移一天，没有任何告警。"
+     "**改变输出的输入**：只有「最后 21 根内缺交易日」的标的；其余逐位不变（真实 yfinance 数据上 BRK-B/XOM/NVDA 与旧公式逐位相等）。"
+     "`iv_signal` 是阶梯函数（<20 → 1.0，<40 → 2.0，40–70 → 3.0，≤85 → 2.0，其余 1.0），置空变 2.0 的幅度取决于原来落哪一档。"
+     "**为什么日期写 09-28 而新代码 09-29 才上线**：09-28 那天新旧代码输出逐项相同的前提是 30 只标的当天都没有缺口。旧代码不记日期，"
+     "归档里没有字段能直接说「当时缺没缺」，所以是**用外部数据重放**证明的（`experiments/hv_gap_equivalence_audit.py`，"
+     "证据冻结在 `experiments/hv_gap_equivalence_20260928.json`）：拿 09-28 归档的 (iv_rank, iv_percentile)，看完整序列能否精确复现"
+     "（容差 0.011），并看「删掉最后 21 根里任一根」能否同样复现。**29/30 只唯一证明为完整序列**；"
+     "**VKTX 一只只能按天推断**——它的 HV 是全年最高（rank=100 / percentile=99.57），删哪根输出都不变，单看这只分辨不出；"
+     "同日 29 只被唯一证明无缺口、0 只不一致，缺口按天发生（09-23 一天 8/22 只），故判其无缺口。"
+     "⚠️ 这一只是**概率推断，不是直接证明**，证据文件里单独标 `day_level_inference`，此处如实记。"
+     "⇒ **作废 0 条** final_score 样本（另登 09-29 会作废 09-28 的 30 条）。判定机制：`_BOUNDARY_EQUIVALENCE[\"v0.45.383\"]` 读该证据文件，"
+     "**逐（日期，标的）**判；证据里没有 ⇒ 不等价（举证责任在放宽一侧），`_equivalence_scan` 为此把日期与标的传给判据。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.383\"]`：Oracle details 带字面量 `hv_gap_checked: True`（成功 / 异常兜底 / 无效 ticker / 日报合成回退都写）。"
+     "预期判定：新代码首跑之前 `no_evidence_yet`（09-28 等价、无印记）；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.383\"]` = `agent.OracleBeeEcho.*` + `bear.options_bear`（同 v0.45.349：Oracle 分与方向、"
+     "Bear 读同伴方向）；`composite.final_score` 是 ALWAYS_SLICED。前瞻检验：维度 IC 协议 H2 会随 final_score 变，但本条早于 "
+     "FORWARD_START 2026-10-12 ⇒ 不截断（同 v0.45.369）。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段"
+     "（`odds_score` / `agent_agreement` / `final_score` 是 ML 特征，只在缺口日变）。"
+     "**关于 2026-09-23 的说明（更正，同日、部署前）**：本条最初写「另行重放 09-23 那 8 只当天分数、改已落库的 predictions 行」，前提是错的——"
+     "09-23 整轮扫描失败（status=failed，无扫描产出），`predictions` 无该日行、无 `.swarm_results`，8 只标的当天**没有落库的分数**；"
+     "只留下 12 只 ML 归档，8 只里仅 BILI（iv_rank 存 44.94、正确 45.58，未跨任何档位）与 CVX（当天期权链 TLS 失败走样本早退，归档里 iv_rank 本就是 None）在其中。"
+     "错的 iv_rank 没有进入任何落库的评分，故无需重放；详见 CHANGELOG v0.45.383「更正」。"),
+    ("2026-09-28", "v0.45.423",
+     "twelve_data 当日那根改按交易所收盘判（用户 2026-10-08 决定：从根因修、登边界 + 逐标的等价举证、照 v0.45.369 / 383 先例"
+     "登记 09-28 不作废样本；10-08 扫描前上线）。`twelve_data._drop_forming_bar` 规则 ① 此前只比日期——收盘后同一个美东日里"
+     "已经收完的当日那根照丢，生产扫描（17:10 ET 起）所有「截至今天」的 Twelve Data 窗口止于前一交易日。现在收盘 + 30 分钟后照收。"
+     "**正常日一个分都不变**：rv_30d / iv_rv_* 天天换量但不进分（展示 + VRP / 财报跨式账本）；进分的只有两条 Twelve Data **兜底**路径——"
+     "① yfinance 日线抛错时 `data_pipeline._fill_volume_from_twelvedata` 补 volume_ratio（Buzz volume_signal、拥挤度代理、Bear "
+     "momentum_bear；Rival 的 crowding 特征）；② `options_analyzer._fill_gaps_from_second_source`（下一根恰是当日那根的缺口从补不上"
+     "变成补得上 ⇒ iv_rank）。两条在兜底那几天都是从「比 yfinance 主路径少一根」对齐成一样，口径不变。"
+     "等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.423\"]`（`_equiv_td_session_bar`）：BuzzBee `details.volatility_20d` 是有限数"
+     "（四处赋值都在 yfinance `hist` 同一块、与 volume_ratio 同源 ⇒ 没走成交量回落）且 Oracle `hv_gap` ⊆ `hv_gap_filled`"
+     "（383 首跑前的记录读 383 冻结证据）。2026-10-08 生产实测：09-28~10-07 共 8 天 × 30 只 = 240 对**全部等价** ⇒ **作废 0 条**。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.423\"]`：Oracle details 字面量 `td_session_aware: True`（成功 / 异常兜底 / 无效 ticker / "
+     "日报合成回退都写）。预期判定：新代码首跑（10-08）之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.423\"]` = `agent.BuzzBeeWhisper.*` + `crowding.score` + `bear.score` + "
+     "`agent.OracleBeeEcho.*` + `bear.options_bear`（原始观测 volume_ratio / volume_signal / google_trends / iv_rank 不点名，"
+     "同 383，理由见该条注释）；"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 09-28 合并标签再扩一段。前瞻检验：本条登记日早于维度 IC 协议 FORWARD_START "
+     "2026-10-12、上线日（10-08）也早于它 ⇒ 不截断。"),
+    ("2026-09-28", "v0.45.438",
+     "更正 v0.45.423 条目（⚠️ 边界日期不动、作废仍 0 条；原条目不改写）。v0.45.423 的前提「收盘后的当日那根已经收完、被误丢」"
+     "**不成立**：2026-10-08 16:38 ET（收盘 38 分钟后）实测 Twelve Data 当日那根是临时值——SPY close 773.86、成交量只有窗口中位数的 "
+     "3.4%（官方 773.93 / 3,710 万，CBOE last_trade 校验与 yfinance 一致；AAPL、JNJ 同形）；17:15 ET 生产扫描取数时成交量已涨过 30%"
+     "（量闸只拦下 VKTX / RKLB / ENPH 三只），收盘价仍不是官方值。v0.45.438 把规则 ① 恢复为按美东日期丢（与 v0.45.423 之前相同），"
+     "所以原条目里「现在收盘 + 30 分钟后照收」「两条兜底路径从少一根对齐成一样」**都不再成立**：两条兜底路径回到 v0.45.423 之前的口径。"
+     "生产上跑过 v0.45.423 规则的只有 2026-10-08 一轮扫描；该日 30 只用 `_equiv_td_session_bar` 逐只核：**全部等价**"
+     "（Buzz `volatility_20d` 全为有限数 = 成交量全来自 yfinance；Oracle `hv_gap_filled` 全空 = 没有缺口用第二源补；"
+     "`close_correction` 当日未走 Twelve Data 兜底）⇒ 进评分的量与「按日期丢」逐字相同，本代样本无需切分。"
+     "边界与印记沿用（`_CORRECTS[\"v0.45.438\"] = \"v0.45.423\"`）：印记 `td_session_aware: True` 的字面量名是历史名，"
+     "现在只表示「v0.45.423 及之后这一代代码」，**不**表示 Twelve Data 按收盘判。`signal_archive.COHORT_SIGNAL_SCOPE` 照抄 423 的范围。"
+     "不进评分的账本另记（CHANGELOG v0.45.438）：VRP 10-08 结算的 27 行（基准日 09-09、窗口止于 10-08）用的是临时收盘。"),
+    ("2026-10-09", "v0.45.441",
+     "Scout 拥挤度去掉 `consensus_strength`（看多同伴数）这一项（用户 2026-10-09 决定：从根因去掉、不推迟读板；10-09 14:00 PT 扫描前上线）。"
+     "根因：Scout 与同伴蜂 Phase-1 **并行**，读板那一刻同伴多半还没发布——2026-10-08 实测 Oracle / Chronos 读到 0/30，Buzz 23/30，"
+     "CodeExecutor 30/30 但只是 `code_executor_agent.py:75` 那条 5.0/中性占位（最终看多 16 只、读板时看多只有 3 只）⇒ 该项 27/30 恒为 0；"
+     "09-28~10-08 共 270 行：0.0 占 235、16.7 占 31、33.3 占 4。完整普查（等四只同伴都发完再数）10-08 的看多同伴数分布是 0/1/2/3 个 = 4/13/12/1 只。"
+     "v0.45.279 / 304 修的是淘汰偏差与身份过滤，没碰这个时机问题。现在：缺失分量由 `calculate_crowding_score` 在其余四项间重归一化"
+     "（权重 0.7059）；`data_quality` 不再带 `bullish_agents` 键（没有被测量，不是降级）；Scout 的 `details.consensus_census` 删除，"
+     "换成世代印记 `consensus_in_score: False`。完整普查仍在 GuardBee（自己数）与 RivalBee（Phase-1.4，读 Phase-1 之后的板）。"
+     "**非等价**：crowding_score 对每一行都变（270 行平均 +5.67、最大 +18.92）；Scout 分平均 −0.34（最大 1.14）；confidence −0.02"
+     "（`real` 标签少一个）。重放（`.swarm_results` 09-28~10-08 共 270 行 / ml 报告 111 份，B0 自证 111/111）：规则层 Scout 方向翻 17/270"
+     "（neutral→bearish 14、bullish→neutral 3）；Queen 重放最终方向翻 3/111、final_score 变 2 行（最大 0.94）。"
+     "判别：`_BOUNDARY_MARKERS[\"v0.45.441\"]` = Scout details 字面量 `consensus_in_score: False`（成功 / 无效 ticker / 异常兜底都经 `analyze` 外壳写，"
+     "日报合成回退另写）。无等价判据（每行都变）⇒ 09-28~10-08 的样本在本条口径下全部归旧世代。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.441\"]` = `crowding.comp.consensus_strength` + `agent.ScoutBeeNova.*`（经 SIGNAL_UPSTREAM 闭包带出 "
+     "crowding.* / ml.* / Rival / Guard / bear.*——Rival / Guard 自己数的拥挤度没变，是依赖边按「同一个 CrowdingDetector 公式」代表换代，宁多切不少切）；"
+     "`composite.final_score` 是 ALWAYS_SLICED。前瞻检验：维度 IC 协议 FORWARD_START 2026-10-12——本条上线日 10-09 早于它 ⇒ H1 / H2 均不截断；"
+     "共振加成前瞻检验：重放读记录自己的 Scout 输出、自证不受影响，检验期内边界条数 +1（附带项）。"),
+    ("2026-10-09", "v0.45.445",
+     "新闻主源 Alpha Vantage → Massive（原 Polygon.io；用户 2026-10-08 决定「替换掉一直失败的 AV」）。"
+     "BuzzBee news 通道 = `sentiment_score × 10`，`sentiment_score = 1 + 9 × 看多文章占比`；本版只换**逐文章标签从哪来**："
+     "AV 是逐文章模型分 ±0.15、Massive 是 `insights` 逐票 positive/negative/neutral，降级仍去 Yahoo（关键词打标）。"
+     "**为什么必须登记**：换分类器 = 换 news_signal 量纲 ⇒ sentiment 维（权重 0.325）⇒ final_score。"
+     "**起因**：AV 免费 25 次/天 < 30 只，固定 5 只（TMUS/ENPH/NFLX/NEE/SNOW）每天走 Yahoo；10-05 重跑之后连续三轮服务端全拒"
+     "（10-06、10-07：0/30 走 AV），news 通道整片换成 Yahoo 量纲——那是**未登记的数据降级**，不是代码边界。"
+     "**校准**（2026-10-08 08:00 PDT，30 只同一时刻，只读）：Massive 29/30 可用（NFLX 一次 SSLError）；"
+     "Massive 同票对 09-28~10-02 的 AV 均值 平均 +1.5 / 中位 −1.0（13 低 12 高），Yahoo 同票 −27.1（23/24 更低），"
+     "同时刻 Massive − Yahoo +28.8（25/28 更高）⇒ Massive 的水平与 AV 相当、Yahoo 系统性偏低。"
+     "⚠️ 横截面排序没有证据（今天的快照对两周前的均值，秩相关 −0.41，n=25，新闻本身会变），不据此说「两源等价」。"
+     "**边界代价**：与 v0.45.441 同日（2026-10-09）⇒ `assess()` 切点不变——世代起点只取最新一组边界的日期，同日两条登记切点相同；"
+     "10-09 之前的样本在 441 登记时已全部归旧世代，本条**边际作废 0 条**（2026-10-09 清晨（PT）对生产库备份副本只读实测最新一组 "
+     "441 + 445：`n_all_samples=0`、`n_ripe_samples=0`，生产库 predictions 最新 10-08，此刻无 10-09 行）。"
+     "若单独在 10-08 登记，当时同法实测当前世代（09-28 / v0.45.383 起）`n_all_samples=240`、`n_ripe_samples=30`、已攒 1 个不重叠周，"
+     "即会作废 240 条（其中 30 条已到期）——这个代价被 441 的同日切换吸收了，不是本条凭空免掉的。不等价、不登 `_BOUNDARY_EQUIVALENCE`："
+     "旧代码记录没有 Massive 标签可重放。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.445\"]`：Buzz details 带 `news_primary == \"massive\"`（新代码每次都写，主源失败降级时也写）。"
+     "预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.445\"]` = `buzz.comp.news_signal` + `agent.BuzzBeeWhisper.*`（协议 §6 按层声明：改通道"
+     "必连带点名分）；`composite.final_score` 是 ALWAYS_SLICED。"
+     "前瞻检验：维度 IC 协议 H1（buzz_v1，通道是输入层）与 H2 都会随之变，但本条早于 FORWARD_START 2026-10-12 ⇒ 不截断；"
+     "窗口开始后再换主源 = 终止 H1。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登一代（`final_score` 是 ML 特征）。"
+     "⚠️ 10-05 重跑 / 10-06 / 10-07 三轮的 news 是 Yahoo 量纲（数据降级，不在任何代码边界内），已在本世代之前，不另隔离。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1009,6 +1152,17 @@ def _marker_buzz_momentum_as_of(d: dict) -> bool:
     return isinstance(sm, dict) and "as_of_source" in sm
 
 
+def _marker_buzz_news_primary_massive(d: dict) -> bool:
+    """v0.45.445：Buzz details 带 `news_primary == "massive"`。
+
+    新代码每次都写（主源失败降级到 Yahoo 时照写——与 `news_source` 不同，后者记的是实际来源）；
+    此前的 details 没有这个键。只认取值 "massive"：回滚到 AV 的配置写的是 "alpha_vantage"，那是另一回事、要另登边界。
+    """
+    b = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("BuzzBeeWhisper")
+    det = (b or {}).get("details") if isinstance(b, dict) else None
+    return isinstance(det, dict) and det.get("news_primary") == "massive"
+
+
 def _marker_oracle_gex_signal_neutralized(d: dict) -> bool:
     """v0.45.349：OracleBee 的 `details.gex_signal_in_score` 为字面量 `False`（成功与 error 兜底两条路径都写）。
 
@@ -1092,6 +1246,113 @@ def _equiv_oracle_chain_available(d: dict) -> bool:
     return not (isinstance(det, dict) and det.get("data_quality") == "unavailable")
 
 
+def _oracle_row_has_hv_gap_marker(d: dict) -> bool:
+    """这行是 v0.45.383 之后的代码写的吗：OracleBee `details.hv_gap_checked` 为字面量 `True`
+    （成功 / 异常兜底 / 无效 ticker / 日报合成回退都写）。只认 `is True`：此前的记录**没有**这个键。
+    **不看**实时 / 补跑——那是日期证据的问题，见 `_marker_oracle_hv_gap_checked`。"""
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("OracleBeeEcho")
+    det = o.get("details") if isinstance(o, dict) else None
+    return isinstance(det, dict) and det.get("hv_gap_checked") is True
+
+
+def _marker_oracle_hv_gap_checked(d: dict) -> bool:
+    """v0.45.383 的**日期**印记：新代码写的、且是**实时行**（补跑行不算日期证据，理由同 v0.45.373 对 369 的处理）。"""
+    return _oracle_row_has_hv_gap_marker(d) and not _is_backfill_row(d)
+
+
+#: v0.45.383 等价证据（冻结文件，由 `experiments/hv_gap_equivalence_audit.py` 生成）。代码随发布 ⇒ 锚 `__file__`，
+#: 不是生产数据（不随 `ALPHA_HIVE_HOME` 走）。
+_HV_GAP_EVIDENCE_PATH = Path(__file__).resolve().parent / "experiments" / "hv_gap_equivalence_20260928.json"
+#: 证据里算「新旧代码输出相同」的状态：唯一证明无缺口 / 按天推断（概率推断，见审计脚本）/ 新代码是空操作（非 hv_proxy 口径）
+_HV_GAP_EQUIV_STATUSES = frozenset({"verified", "day_level_inference", "not_applicable"})
+
+
+def _load_hv_gap_evidence() -> Dict[str, Dict[str, str]]:
+    """{日期: {标的: 状态}}。读不出 / 结构不对 ⇒ 空（**证不出等价就不算等价**）。每次现读——文件很小，且不缓存
+    就不会有「测试改了路径却读到旧缓存」的问题。"""
+    try:
+        with open(_HV_GAP_EVIDENCE_PATH, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return {day: {t: v.get("status") for t, v in (rec.get("tickers") or {}).items()}
+                for day, rec in (doc.get("days") or {}).items()}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _equiv_hv_gap_free(d: dict) -> bool:
+    """v0.45.383 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？= 那天那只标的的日线没有缺口。
+
+    旧代码不记日期，记录本身回答不了 ⇒ 判据读**冻结的外部证据**，按（日期，标的）查；
+    `_equivalence_scan` 把日期与标的放在 `_date` / `_ticker` 里传进来。缺这两个键或证据里没有 ⇒ False。"""
+    day, tk = d.get("_date"), d.get("_ticker")
+    if not day or not tk:
+        return False
+    return _load_hv_gap_evidence().get(day, {}).get(tk) in _HV_GAP_EQUIV_STATUSES
+
+
+def _oracle_row_has_td_session_marker(d: dict) -> bool:
+    """这行是 v0.45.423 之后的代码写的吗：OracleBee `details.td_session_aware` 为字面量 `True`
+    （每条返回路径都写，同 `hv_gap_checked`）。只认 `is True`：此前的记录没有这个键。不看实时 / 补跑。"""
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("OracleBeeEcho")
+    det = o.get("details") if isinstance(o, dict) else None
+    return isinstance(det, dict) and det.get("td_session_aware") is True
+
+
+def _marker_oracle_td_session_aware(d: dict) -> bool:
+    """v0.45.423 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383）。"""
+    return _oracle_row_has_td_session_marker(d) and not _is_backfill_row(d)
+
+
+def _finite_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _equiv_td_session_bar(d: dict) -> bool:
+    """v0.45.423 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？
+
+    本版把 `twelve_data._drop_forming_bar` 改成按交易所收盘判当日那根（收完照收；此前收盘后也丢）。
+    进评分的只有两条 Twelve Data 兜底路径，两条都要证明没走到（或走到了也不会变）：
+      ① 成交量回落（`data_pipeline._fill_volume_from_twelvedata`）只在 yfinance 日线**抛错**时走；那条路不算
+         `volatility_20d`。四处给 `volatility_20d` 赋值的地方都在 yfinance `hist` 同一块里、与 `volume_ratio` 同源
+         ⇒ BuzzBee `details.volatility_20d` 是有限数 ⇒ 这只票的 volume_ratio 来自 yfinance ⇒ 本版不改它。
+      ② 日线缺口第二源（`options_analyzer._fill_gaps_from_second_source`）：本版只让「下一根正好是当日那根」
+         的缺口变得补得上。Oracle `details.hv_gap` 为空，或其中每个缺口都已在 `hv_gap_filled` 里 ⇒ 不变。
+         `hv_gap_checked` 之前的记录（v0.45.383 首跑前）没有这两个字段 ⇒ 读 383 的冻结证据（该日该票日线无缺口）；
+         有 `hv_gap` 没有 `hv_gap_filled`（387 之前，生产上是 09-29）⇒ 那版还没有第二源补缺口，`hv_gap` 为空才算等价。
+    证不出就不算等价（举证责任在放宽一侧）。2026-10-08 实测：09-28~10-07 共 240 对（日期，标的）全部等价。"""
+    sr = d.get("swarm_results") or {}
+    det = sr.get("agent_details") or {}
+    buzz = (det.get("BuzzBeeWhisper") or {}).get("details") if isinstance(det.get("BuzzBeeWhisper"), dict) else None
+    if not (isinstance(buzz, dict) and _finite_number(buzz.get("volatility_20d"))):
+        return False
+    o = det.get("OracleBeeEcho")
+    ora = o.get("details") if isinstance(o, dict) else None
+    if isinstance(ora, dict) and ora.get("hv_gap_checked") is True:
+        gaps = ora.get("hv_gap")
+        if not isinstance(gaps, list):
+            return False
+        if "hv_gap_filled" not in ora:
+            # v0.45.383 ~ v0.45.386 的代码（生产上只有 09-29）：Twelve Data 第二源补缺口与 `hv_gap_filled` 是同一个提交
+            #（4bca556d / v0.45.387）加的，那时还没有这条路 ⇒ 只有「没有缺口」才证得出本版改动碰不到它
+            return not gaps
+        filled = ora.get("hv_gap_filled")
+        return isinstance(filled, list) and all(g in filled for g in gaps)
+    return _equiv_hv_gap_free(d)
+
+
+def _scout_row_has_consensus_marker(d: dict) -> bool:
+    """这行是 v0.45.441 之后的代码写的吗：ScoutBeeNova `details.consensus_in_score` 为字面量 `False`
+    （`ScoutBeeNova.analyze` 外壳对每条返回路径都写；日报合成回退另写）。只认 `is False`：此前的记录没有这个键。"""
+    o = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("ScoutBeeNova")
+    det = o.get("details") if isinstance(o, dict) else None
+    return isinstance(det, dict) and det.get("consensus_in_score") is False
+
+
+def _marker_scout_consensus_excluded(d: dict) -> bool:
+    """v0.45.441 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383 / 423）。"""
+    return _scout_row_has_consensus_marker(d) and not _is_backfill_row(d)
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1113,6 +1374,14 @@ _BOUNDARY_MARKERS = {
                   _marker_guard_macro_as_of_mode),
     "v0.45.369": ("agent_details.OracleBeeEcho.details.options_dq_from_agent is True",
                   _marker_oracle_options_dq_from_agent),
+    "v0.45.383": ("agent_details.OracleBeeEcho.details.hv_gap_checked is True",
+                  _marker_oracle_hv_gap_checked),
+    "v0.45.423": ("agent_details.OracleBeeEcho.details.td_session_aware is True",
+                  _marker_oracle_td_session_aware),
+    "v0.45.441": ("agent_details.ScoutBeeNova.details.consensus_in_score is False",
+                  _marker_scout_consensus_excluded),
+    "v0.45.445": ("agent_details.BuzzBeeWhisper.details.news_primary == \"massive\"",
+                  _marker_buzz_news_primary_massive),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1134,12 +1403,18 @@ _BOUNDARY_MARKERS = {
 _BOUNDARY_EQUIVALENCE = {
     "v0.45.369": ("OracleBeeEcho.details.data_quality != \"unavailable\"（期权链取到了 ⇒ 本版改动是空操作）",
                   _equiv_oracle_chain_available, _oracle_row_is_new_code),
+    "v0.45.383": ("冻结证据 experiments/hv_gap_equivalence_20260928.json：该（日期，标的）的日线无缺口"
+                  "（verified / day_level_inference / not_applicable）",
+                  _equiv_hv_gap_free, _oracle_row_has_hv_gap_marker),
+    "v0.45.423": ("BuzzBee details.volatility_20d 是有限数（volume_ratio 来自 yfinance、没走 Twelve Data 兜底）且日线缺口"
+                  "全补上（Oracle hv_gap ⊆ hv_gap_filled；383 首跑前读其冻结证据）",
+                  _equiv_td_session_bar, _oracle_row_has_td_session_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
 #: 判别器取印记时先查自己、查不到再查被更正的那条 —— 更正不是新改动，印记是同一个。
-#: 当前为空：09-28 的六条边界（v0.45.334 / 340 / 349 / 357 / 366 / 369）尚无更正。
-_CORRECTS: Dict[str, str] = {}
+#: v0.45.438 起有第一条：它更正 v0.45.423 的**口径说明**（日期不动），印记与等价判据沿用 423 的。
+_CORRECTS: Dict[str, str] = {"v0.45.438": "v0.45.423"}
 
 
 def cohort_boundary_evidence(home: Path, version: Optional[str] = None) -> dict:
@@ -1302,7 +1577,8 @@ def _equivalence_scan(root: Path, boundary: str, first: Optional[str], is_new, i
             if not isinstance(r, dict):
                 continue
             examined.add((date, _tk))
-            wrapped = {"swarm_results": r}
+            # v0.45.383：判据要按（日期，标的）查冻结证据，故一并传入；其余判据只读 swarm_results，忽略这两个键
+            wrapped = {"swarm_results": r, "_date": date, "_ticker": _tk}
             if is_new(wrapped):
                 continue
             (ok if is_equiv(wrapped) else bad).add(date)
@@ -1314,8 +1590,10 @@ def _equivalence_scan(root: Path, boundary: str, first: Optional[str], is_new, i
 #: 那两处的 `{status, line}` 形状有测试钉着（`test_*_forward_test.py::TestCarriedByReadiness`）。
 #: 为什么不从 `line` 反推：图标是给人看的渲染，H1 锚点的截止日写在 ⏳ 段里，按图标永远报不出来（v0.45.355）。
 _DETAIL_KEY = "_detail"
-#: 共振 / F&G 两个检验 `run()` 返回值里 `attention` 用得上的键（不含效应量）
-_FWD_DETAIL_KEYS = ("status", "reason", "stale", "look", "weeks", "next_look_at")
+#: 共振 / F&G 两个检验 `run()` 返回值里 `attention` 用得上的键（不含效应量）。
+#: `ohlc_window`（v0.45.391 复审 S1，只有 F&G 有）：回放行情窗口的取数计数——只是取数次数与失败标的，
+#: 不含价格 / 净值 / 收益；降级时另列 `ic_rerun.fg_exposure_gate_forward.ohlc_window_degraded`。
+_FWD_DETAIL_KEYS = ("status", "reason", "stale", "look", "weeks", "next_look_at", "ohlc_window")
 #: 维度 IC 协议执行器 `run()` 返回值里 `attention` 用得上的键——刻意**不含** `verdicts` / `descriptive`
 #: （结论与效应量只在检视点之后出现，本工具只报「到点了、去跑脚本看」，不转述结论）
 _DIM_DETAIL_KEYS = ("status", "reason", "forward_start", "today", "h1_weeks", "next_look_at",
@@ -1374,6 +1652,289 @@ def fg_exposure_gate_forward_status(today: Optional[str] = None) -> Dict:
         return {"status": "cannot_judge",
                 "line": f"⚠️ F&G 敞口门前瞻检验无法判定：{type(e).__name__}: {e}",
                 _DETAIL_KEY: {"status": "cannot_judge", "reason": f"{type(e).__name__}: {e}"}}
+
+
+# ── F&G 子状态：子进程 + 截止时刻（v0.45.392，见模块 docstring）────────────────────────────
+
+#: F&G 子状态的缺省时间预算（秒，从 `main()` 开始计；0 = 不限时）。v0.45.446 起缺省**不限时**：
+#: 预算是看门狗的属性，归有看门狗的调用方给——编排器 Step 11 显式传 `--budget-seconds`（v0.45.437），
+#: 它与 60s `run_step --timeout` 的关系（盖得住收件最短窗口 `_FG_RESULT_MIN_WAIT_SECONDS` + TERM 宽限 `_FG_KILL_GRACE_SECONDS`
+#: + 写最终 JSON + 解释器启动）由 `tests/test_ic_rerun_fg_budget.py::TestBudgetFitsOrchestratorTimeout` 核对，**只认编排器显式传的值**。
+#: v0.45.392~445 这里是 45（那时编排器不传、缺省就是生产值），代价是每周任务 / 手动运行也被截在 45s。
+FG_BUDGET_SECONDS_DEFAULT = 0.0
+#: 到点后先 TERM 子进程，等这么久仍在 ⇒ KILL（子进程保持 TERM 默认动作，正常 TERM 即死，宽限用不上）
+_FG_KILL_GRACE_SECONDS = 2.0
+#: 收件的最短窗口（v0.45.485，392 二次检查 F1；v0.45.400 先独立修了其中「子进程已退出」那一形）：父进程自己的几项
+#: 拖过截止时刻才来收时，截止已过 ⇒ `communicate(timeout=0)` 一字节不读就抛 TimeoutExpired，把子进程**早已交卷**的结果
+#: 丢掉、报成「仍未结束」并把原因指向行情源。现在至少给这么久：已交卷 / 正在退出的子进程照收；真没跑完的，多等这一点再终止。
+#: 也计入预算守卫。
+_FG_RESULT_MIN_WAIT_SECONDS = 1.0
+#: `--budget-seconds` 的上限（v0.45.485，F2）：再大，`poll()` 的毫秒数会溢出 C int（实测 3,000,000 ⇒ OverflowError）。不限时写 0。
+_FG_BUDGET_MAX_SECONDS = 86400.0
+#: 子进程看门狗的轮询间隔 / 自身时限比父进程截止多给的余量（父进程在场时总是父进程先动手）
+_FG_CHILD_POLL_SECONDS = 0.5
+_FG_CHILD_SELF_DEADLINE_SLACK = 5.0
+#: 子进程看门狗自行退出时用的退出码（父进程已不在、没人读它，只为日志里分得出来）
+_FG_CHILD_WATCHDOG_RC = 75
+#: 子进程入口：`python ic_rerun_readiness.py --_fg-child …`（`__main__` 在 `run_tool` 之前分流）
+_FG_CHILD_FLAG = "--_fg-child"
+#: **测试钩子**：True ⇒ F&G 子状态在本进程内算（不起子进程、不限时）。生产恒 False。
+#: `tests/conftest.py::_fg_sub_status_in_process` 对每条测试自动置 True——进程内调 `main()` 的测试靠
+#: monkeypatch 打桩 / 沙箱化 `paper_portfolio.SNAPSHOT_DIR` 与出网闸，这些到不了子进程。
+#: 子进程路径由 `tests/test_ic_rerun_fg_budget.py` 显式置回 False 测，真实 CLI 子进程测试（`TestRealCli`）本就不经 conftest。
+_FG_IN_PROCESS = False
+
+#: F&G 段被「执行层」（不是检验本身）判成无法判定的三种原因 → attention 里的说明。
+#: id = `ic_rerun.fg_exposure_gate_forward.<原因>`，与检验自己的 `….cannot_judge`（含自证率跌破阈值）分开路由。
+_FG_RUNNER_TEXT = {
+    "interrupted": ("这份 JSON 是 F&G 开跑前先写出的检查点，进程之后被杀或崩溃、没写出最终结果；"
+                    "其余各项（IC 就绪度 / 世代边界核对 / 共振 / 维度 IC）是本轮真实结果"),
+    "budget_exceeded": ("本轮没有自证率数字，这不是检验的结论；同日手动跑 "
+                        "`/usr/local/bin/python3 ic_rerun_readiness.py --quiet` 看完整结果（缺省不限时）；"
+                        "连续多天出现 ⇒ 行情源限流或重放变慢，需人看"),
+    "child_failed": "本轮没有自证率数字；子进程的 stderr 在同一份日志里，需人看原因",
+}
+
+
+def _fg_runner_result(kind: str, reason: str) -> Dict:
+    """执行层判定的 F&G 段：与检验自己的 cannot_judge 同形（`{status, line, _detail}`），`_detail.runner` 记原因。"""
+    assert kind in _FG_RUNNER_TEXT, kind
+    return {"status": "cannot_judge",
+            "line": f"⚠️ F&G 敞口门前瞻检验无法判定：{reason}",
+            _DETAIL_KEY: {"status": "cannot_judge", "reason": reason, "runner": kind}}
+
+
+def _fg_checkpoint_placeholder() -> Dict:
+    """检查点里的 F&G 段：显式占位，绝不能是「上一次的结果」或空。"""
+    return _fg_runner_result("interrupted", "进程在 F&G 重放结束前终止")
+
+
+def _fg_child_argv(today: Optional[str], max_seconds: Optional[float]) -> List[str]:
+    """子进程命令行。脚本路径取 `__file__`（指向**代码**：就是本文件自己），调用时求值。"""
+    argv = [sys.executable, str(Path(__file__).resolve()), _FG_CHILD_FLAG, "--parent-pid", str(os.getpid())]
+    if today:
+        argv += ["--today", today]
+    if max_seconds is not None:
+        argv += ["--max-seconds", repr(float(max_seconds))]
+    return argv
+
+
+def _parse_fg_child_output(raw: bytes) -> Dict:
+    """子进程 stdout → F&G 段。不合约定一律抛 `ValueError`（调用方渲染成 child_failed）：
+    多出的键也拒——它们会原样进 `--out`，而 F&G 段的形状 `{status, line}` 有测试钉着。"""
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        head = raw[:120].decode("utf-8", "replace")
+        raise ValueError(f"不是 JSON（{type(e).__name__}；开头 {head!r}）") from e
+    if not isinstance(obj, dict):
+        raise ValueError(f"顶层应为对象，收到 {type(obj).__name__}")
+    if not isinstance(obj.get("status"), str) or not isinstance(obj.get("line"), str):
+        raise ValueError(f"缺字符串键 status / line：{sorted(obj)}")
+    if _DETAIL_KEY in obj and not isinstance(obj[_DETAIL_KEY], dict):
+        raise ValueError(f"{_DETAIL_KEY} 应为对象，收到 {type(obj[_DETAIL_KEY]).__name__}")
+    extra = set(obj) - {"status", "line", _DETAIL_KEY}
+    if extra:
+        raise ValueError(f"多出键 {sorted(extra)}")
+    return obj
+
+
+class _FgInProcess:
+    """测试钩子 `_FG_IN_PROCESS` 用的同接口实现：`result()` 时才在本进程内算（无时限）。"""
+
+    def __init__(self, today: Optional[str]):
+        self.today = today
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def result(self) -> Dict:
+        return fg_exposure_gate_forward_status(today=self.today)
+
+
+class _FgChild:
+    """F&G 子状态的子进程句柄：构造即启动（与 `main()` 其余各项并行），`result()` 等到截止时刻。
+
+    「谁会红」逐条（每条都落成 F&G 段的 `cannot_judge` + 专属 attention，不抛、不吞）：
+      · 起不来（建临时目录或 `Popen` 抛）⇒ child_failed「无法启动」；
+      · 到截止时刻还没结束 ⇒ TERM →（宽限后仍在则 KILL，stderr 记一行）→ budget_exceeded；
+      · 自己退出码非 0（含被别人发信号杀掉）⇒ child_failed「退出码 N / 被信号 N 终止」；
+      · 退出码 0 但 stdout 不合约定 ⇒ child_failed「输出不合约定」。
+    `with` 退出（正常、异常、SIGTERM 转来的 `SystemExit`）时子进程若还活着一律终止——不留孤儿。
+
+    临时目录**由父进程收拾**：子进程拿到一个私有 `TMPDIR`（重放的 `TemporaryDirectory` 都建在里面），父进程在子进程
+    收尸**之后**整个删掉。不靠子进程自己的 finally——实测（v0.45.392，真实数据 + `--budget-seconds 5`）子进程收到 TERM 时
+    主线程正在 curl_cffi 的 C 回调里，`SystemExit` 被 cffi 吞掉（「Exception ignored from cffi callback」），子进程照跑、
+    宽限后被 KILL，`fg_gate_fwd_*` 留在系统临时目录里（09-21 / 09-24 各有一份同样的残留）。所以子进程保持 SIGTERM 的
+    系统默认动作（立刻终止，不管主线程在哪），收尾全归父进程。
+    子进程 stderr 直通本进程 stderr（编排器的日志），stdout 只装结果（子进程里把 fd 1 改指 stderr，见 `_fg_child_main`）。
+    """
+
+    def __init__(self, today: Optional[str], deadline: Optional[float]):
+        self.deadline = deadline                     # time.monotonic() 刻度；None = 不限时
+        self.t_start = time.monotonic()
+        self.proc: Optional[subprocess.Popen] = None
+        self.spawn_error: Optional[str] = None
+        self.tmp_root: Optional[str] = None
+        remaining = None if deadline is None else max(0.0, deadline - self.t_start)
+        try:
+            self.tmp_root = tempfile.mkdtemp(prefix="ic_rerun_fg_child_")
+            self.proc = subprocess.Popen(_fg_child_argv(today, remaining), stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.PIPE, env={**os.environ, "TMPDIR": self.tmp_root})
+        except Exception as e:  # noqa: BLE001 —— 起不来也要落成可见的一段，见 result()
+            self.spawn_error = f"{type(e).__name__}: {e}"
+            self._remove_tmp_root()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.terminate()
+        return False
+
+    def _remove_tmp_root(self) -> None:
+        """删子进程的私有临时目录。删不掉不改判定，但要说出来（残留在系统临时目录里没人会去看）。"""
+        root, self.tmp_root = self.tmp_root, None
+        if root is None:
+            return
+        shutil.rmtree(root, ignore_errors=True)
+        if os.path.exists(root):
+            print(f"⚠️  ic_rerun_readiness：F&G 子进程的临时目录 {root} 删不掉，残留在系统临时目录里", file=sys.stderr)
+
+    def terminate(self) -> None:
+        """TERM → 等 `_FG_KILL_GRACE_SECONDS` → KILL → 收尸 → 删临时目录。
+
+        子进程保持 SIGTERM 默认动作，正常情况下 TERM 即死、宽限用不上；KILL 是给「有人把子进程的 SIGTERM 处置改了」
+        留的后手，真走到这一步 stderr 记一行（那说明子进程的信号处置变了，需要人看）。KILL 与删目录都放在 finally：
+        等待期间被 SystemExit 打断也照样补刀、照样收拾。"""
+        p = self.proc
+        try:
+            if p is not None and p.poll() is None:
+                try:
+                    p.terminate()
+                    p.wait(timeout=_FG_KILL_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass
+                finally:
+                    if p.poll() is None:
+                        print(f"⚠️  ic_rerun_readiness：F&G 子进程 TERM 后 {_FG_KILL_GRACE_SECONDS:g}s 仍未退出，已 KILL",
+                              file=sys.stderr)
+                        p.kill()
+                        p.wait()
+        finally:
+            try:
+                # 不再读剩余输出：孙进程若继承了管道，读到 EOF 可能遥遥无期
+                if p is not None and p.stdout is not None and not p.stdout.closed:
+                    p.stdout.close()
+            finally:
+                if p is None or p.poll() is not None:     # 子进程已收尸才删：删早了它可能还在往里写
+                    self._remove_tmp_root()
+
+    def result(self) -> Dict:
+        if self.proc is None:
+            return _fg_runner_result("child_failed", f"无法启动 F&G 子进程（{self.spawn_error}）")
+        # 截止已过也至少给 `_FG_RESULT_MIN_WAIT_SECONDS` 收件（v0.45.485）：CPython 的 communicate(timeout=0) 不看子进程死活、
+        # 先判超时就抛。v0.45.400 用 `poll() is not None` 接住了「已退出」那种；还没被收尸、正在退出的（poll() 仍是 None）
+        # 同样会丢结果，这一个下限两种都接住，故合成一个机制。不用 None：孙进程若继承了管道，EOF 可能遥遥无期。
+        timeout = (None if self.deadline is None
+                   else max(_FG_RESULT_MIN_WAIT_SECONDS, self.deadline - time.monotonic()))
+        try:
+            raw, _ = self.proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            ran = time.monotonic() - self.t_start
+            self.terminate()
+            return _fg_runner_result("budget_exceeded", f"超出时间预算（F&G 子进程跑了 {ran:.1f}s 仍未结束，已终止；"
+                                                        "预算见 --budget-seconds，从进程开始计）")
+        rc = self.proc.returncode
+        if rc != 0:
+            how = f"被信号 {-rc} 终止" if rc < 0 else f"退出码 {rc}"
+            return _fg_runner_result("child_failed", f"F&G 子进程异常结束（{how}），未给出结果")
+        try:
+            return _parse_fg_child_output(raw or b"")
+        except ValueError as e:
+            return _fg_runner_result("child_failed", f"F&G 子进程输出不合约定：{e}")
+
+
+def _start_fg_sub_status(today: Optional[str], deadline: Optional[float]):
+    """F&G 子状态的句柄：生产 = `_FgChild`（立刻起子进程）；测试钩子 `_FG_IN_PROCESS` ⇒ `_FgInProcess`。"""
+    if _FG_IN_PROCESS:
+        return _FgInProcess(today)
+    return _FgChild(today, deadline)
+
+
+def _sigterm_to_exit(signum, _frame):
+    """SIGTERM → `SystemExit(128+signum)`：让 finally / `with` 照常执行（父进程借此终止 F&G 子进程、删它的临时目录）。
+    只响应第一次：清理中途再来一次 TERM 不打断清理（编排器 10s 后反正会 KILL）。
+    ⚠️ **只装在父进程**：从信号处理器里抛异常，落点若在 C 回调里（cffi / ctypes）会被吞掉——父进程这条路上没有
+    出网、没有 C 回调；子进程（curl_cffi）有，所以子进程保持系统默认动作（见 `_FgChild` docstring）。"""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise SystemExit(128 + signum)
+
+
+def _install_sigterm_exit() -> bool:
+    """装 `_sigterm_to_exit`；不在主线程（`signal.signal` 抛 ValueError）⇒ 返回 False、保持原处置。
+    只在 `__main__` 调——进程内调 `main()` 的测试不该把 pytest 自己的 SIGTERM 处置换掉。"""
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_to_exit)
+        return True
+    except ValueError:
+        return False
+
+
+def _start_fg_child_watchdog(parent_pid: int, max_seconds: Optional[float]) -> None:
+    """子进程看门狗：父进程没了（被 KILL ⇒ 本进程被过继，`getppid()` 变了）或超过自身时限 ⇒ stderr 记一行、
+    `os._exit`（另一个线程里抛异常停不下主线程，`os._exit` 能，不管主线程卡在哪）。父进程在场时它不会先于父进程动手
+    （自身时限 = 父进程给的剩余时间 + `_FG_CHILD_SELF_DEADLINE_SLACK`）。
+    这条路上没有父进程替它删临时目录 ⇒ 那一行把目录名点出来（父进程被 KILL 本身就要人看）。"""
+    t0 = time.monotonic()
+    limit = None if max_seconds is None else max_seconds + _FG_CHILD_SELF_DEADLINE_SLACK
+
+    def _loop():
+        while True:
+            time.sleep(_FG_CHILD_POLL_SECONDS)
+            orphaned = os.getppid() != parent_pid
+            if orphaned or (limit is not None and time.monotonic() - t0 > limit):
+                why = "父进程已不在" if orphaned else f"超过自身时限 {limit:g}s"
+                try:
+                    print(f"ic_rerun_readiness（F&G 子进程）：{why}，自行退出；临时目录 "
+                          f"{os.environ.get('TMPDIR', '?')} 可能残留", file=sys.stderr, flush=True)
+                finally:
+                    os._exit(_FG_CHILD_WATCHDOG_RC)
+
+    threading.Thread(target=_loop, name="fg-child-watchdog", daemon=True).start()
+
+
+def _fg_child_main(argv: List[str]) -> int:
+    """子进程入口：算 F&G 子状态，结果 JSON 写到**原** stdout；其余一切输出改去 stderr。
+
+    fd 级重定向（不是 `sys.stdout = …`）：依赖库在 C 层或直接写 fd 1 的输出也挡得住，stdout 管道里只有结果。
+    结果序列化失败 ⇒ 未捕获异常、退出码 1 ⇒ 父进程渲染成 child_failed（不是悄悄给个空段）。
+    """
+    ap = argparse.ArgumentParser(prog=f"ic_rerun_readiness.py {_FG_CHILD_FLAG}")
+    ap.add_argument("--parent-pid", type=int, required=True)
+    ap.add_argument("--today")
+    ap.add_argument("--max-seconds", type=float)
+    a = ap.parse_args(argv)
+    sys.stdout.flush()
+    result_fd = os.dup(1)
+    os.dup2(2, 1)
+    _start_fg_child_watchdog(a.parent_pid, a.max_seconds)
+    res = fg_exposure_gate_forward_status(today=a.today)
+    data = json.dumps(res, ensure_ascii=False).encode("utf-8")
+    with os.fdopen(result_fd, "wb") as f:
+        f.write(data)
+    return 0
+
+
+def _budget_seconds(s: str) -> float:
+    v = float(s)
+    if not (0 <= v <= _FG_BUDGET_MAX_SECONDS):   # 拒 NaN / 负数 / inf / 超上限（不限时请写 0）
+        raise argparse.ArgumentTypeError(
+            f"须为 0 ~ {_FG_BUDGET_MAX_SECONDS:g} 之间的秒数（0 = 不限时），收到 {s!r}")
+    return v
 
 
 def dim_ic_forward_status(db: Path, today: Optional[str] = None) -> Dict:
@@ -1548,25 +2109,76 @@ _DIM_SCRIPT = "experiments/dim_ic_forward_test.py"
 def _forward_test_attention(key: str, d: Dict) -> List[Dict]:
     """共振 / F&G 两个前瞻检验的条目。两者状态词表相同（`status_line` 同构）：
     `cannot_judge`（含自证率跌破阈值）/ `not_ready`（`stale` 时要人看）/ `confirmed`·`not_confirmed`
-    （已到检视点）/ 其他（未知状态——执行器改了词表而这里没跟上，也要有人红）。"""
+    （已到检视点）/ 其他（未知状态——执行器改了词表而这里没跟上，也要有人红）。
+
+    v0.45.392：F&G 段还可能是**执行层**判的无法判定（`_detail.runner`：检查点占位 / 超出时间预算 / 子进程失败，
+    见 `_FG_RUNNER_TEXT`）——各用专属 id，与检验自己的 `.cannot_judge`（含自证率跌破阈值）分开：
+    「检验跑了、结果不可信」与「检验这轮没跑完」是两件事，消费方要能分开路由。"""
     name, script = _FWD_TESTS[key]
     iid = f"ic_rerun.{key}"
     st = d.get("status")
     item = step_contract.attention_item
+    runner = d.get("runner")
+    if runner in _FG_RUNNER_TEXT:
+        return [item(f"{iid}.{runner}", "warn",
+                     f"{name}无法判定：{d.get('reason') or '（未给原因）'} —— {_FG_RUNNER_TEXT[runner]}")]
+    out: List[Dict] = []
     if st == "cannot_judge":
-        return [item(f"{iid}.cannot_judge", "warn",
-                     f"{name}无法判定：{d.get('reason') or '（执行器未给原因）'}"
-                     " —— 本周这份检验没跑成或不可信（自证率跌破阈值也落在这里），需人看原因")]
-    if st == "not_ready":
+        out.append(item(f"{iid}.cannot_judge", "warn",
+                        f"{name}无法判定：{d.get('reason') or '（执行器未给原因）'}"
+                        " —— 本周这份检验没跑成或不可信（自证率跌破阈值也落在这里），需人看原因"))
+    elif st == "not_ready":
         if d.get("stale"):
-            return [item(f"{iid}.stale", "warn",
-                         f"{name}：{d.get('reason') or '登记后长期无前瞻样本'}")]
-        return []
-    if st in ("confirmed", "not_confirmed"):
-        return [item(f"{iid}.checkpoint", "info",
-                     f"{name}已到{d.get('look') or ''}检视点 —— 手动跑 `/usr/local/bin/python3 {script}` 看结论"
-                     "（需人判断，勿自动改评分 / CONFIG）")]
-    return [item(f"{iid}.unknown_status", "warn", f"{name}状态未知：{st!r}（执行器的状态词表变了？）")]
+            out.append(item(f"{iid}.stale", "warn",
+                            f"{name}：{d.get('reason') or '登记后长期无前瞻样本'}"))
+    elif st in ("confirmed", "not_confirmed"):
+        out.append(item(f"{iid}.checkpoint", "info",
+                        f"{name}已到{d.get('look') or ''}检视点 —— 手动跑 `/usr/local/bin/python3 {script}` 看结论"
+                        "（需人判断，勿自动改评分 / CONFIG）"))
+    else:
+        out.append(item(f"{iid}.unknown_status", "warn", f"{name}状态未知：{st!r}（执行器的状态词表变了？）"))
+    # v0.45.391 复审 S1：回放行情窗口降级（整段取数退回逐次直连 / 窗口外请求）——判定不变，但它是 Step 11
+    # 被 60s 超时杀掉的前兆（实测全部退回时 17s → 56s），而此前只有 stderr 看得见。与状态条目并列、独立 id。
+    ow = d.get("ohlc_window")
+    if isinstance(ow, dict) and ow.get("degraded") is True:
+        fb = ow.get("fallback_tickers") or {}
+        names = "、".join(list(fb)[:5]) + (f" 等 {len(fb)} 个" if len(fb) > 5 else "")
+        st = ow.get("store") or {}
+        parts = []
+        # v0.45.410 二次检查：只因行情库自己的问题而降级时，不再说「整段取数 0/N 失败、退回逐次直连」（那不是事实）
+        # v0.45.415 二次检查：只因「不知道重放日」而降级时同理
+        if ow.get("fallback") or ow.get("out_of_window") or not (st.get("problem") or st.get("as_of_unknown")):
+            # v0.45.415 二次检查：有行情库时，已落定的日子由库按时点回答（直连拿到的已落定日子也换成库的值）——
+            # 有修订时与改动前的逐次取数（Yahoo 现在的值）不同，那句「结果相同」只在没有库时成立
+            same = ("已落定的日子由行情库按时点回答、其余与改动前的逐次取数相同" if st
+                    else "结果与改动前的逐次取数相同")
+            parts.append(f"整段取数 {ow.get('fallback')}/{ow.get('wide_fetches')} 个标的失败"
+                         f"{'（' + names + '）' if names else ''}、窗口外请求 {ow.get('out_of_window')} 次，"
+                         f"这些请求退回逐次直连（直连 {ow.get('direct_requests')} 次，其中 {ow.get('direct_empty')} 次"
+                         f"一根 bar 都没有）。{same}，但 Step 11 可能因此超时、世代边界核对随之没跑——"
+                         "需人看行情源（stderr 的「整段取数失败」WARNING 有原因）")
+        # v0.45.410：回放行情库自己的问题（坏文件 / 写不进去）——本次结果不受影响，但下次照样整段下载
+        if st.get("problem"):
+            parts.append(f"回放行情库：本次 {len(st.get('invalid_files') or [])} 个文件读不懂（已改名留证）、"
+                         f"写入失败 {len(st.get('write_errors') or [])} 次，目录里留着 {len(st.get('quarantined') or [])} 个"
+                         "改名留证的坏文件 —— 本次结果不受影响，但读不懂的标的冻结历史已按当时的 Yahoo 重建、写不进去的下次"
+                         "仍要整段下载（stderr 的 ReplayOhlcStore WARNING 有原因；目录 = PATHS.replay_ohlc_state；"
+                         "留证文件看过后删掉这条才会消）")
+        if st.get("as_of_unknown"):   # v0.45.415 二次检查：应恒为 0
+            parts.append(f"回放行情库：{st['as_of_unknown']} 次请求不知道重放日、用了最新版本——有回放没经 run_replay，"
+                         "时点数据在这些请求上失效（拆股 / 修订前的重放日读到了改后的价格）。需人查是哪条调用路径")
+        out.append(item(f"{iid}.ohlc_window_degraded", "warn", f"{name}：回放行情窗口降级 —— " + "；".join(parts)))
+    # v0.45.410 二次检查：近几天**确认**的修订（多半是拆股回溯复权）——与降级分开的独立 id；过了告警期只在进度行陈述
+    rst = (ow.get("store") or {}) if isinstance(ow, dict) else {}
+    if rst.get("revised_recent"):
+        tick = "、".join((rst.get("revised_recent_tickers") or [])[:5])
+        out.append(item(f"{iid}.ohlc_store_revised", "warn",
+                        f"{name}：回放行情库近 {rst.get('revision_alarm_days')} 天确认 {rst['revised_recent']} 根已落定日线被 "
+                        f"Yahoo 改了（{tick}）——多半是拆股回溯复权。回放按时点取版本（生效日之前用旧值、之后用新值），A / B "
+                        "如实复现生产当时看到的价格；生产纸面组合遇拆股按 v0.45.416 把在场仓位换到复权口径（判不了则当天不碰、"
+                        "净值行记 split_unresolved）。需人看：这几个标的近期有没有拆股、生产账本里那几天的 split_adjustments / "
+                        "split_unresolved、自证是否仍 100%（回放里拆股记录取不到而生产取到了会让 A 分叉）"))
+    return out
 
 
 def _dim_ic_attention(d: Dict) -> List[Dict]:
@@ -1690,24 +2302,31 @@ def contract_envelope(res: Dict, date: str, attention: List[Dict]) -> Dict:
                                   attention=attention, payload=res)
 
 
+def _write_out_only(path: str, env: Dict) -> None:
+    """`--out` 原子写（tmp + replace：被杀在半途也只会留下上一份完整文件，不会是半截 JSON）。
+    写不出去不改变判定（判定在写盘之前就完成了）、只打 stderr——消费方那边是「文件缺失」，照样会红。"""
+    try:
+        step_contract.write_out(path, env)
+    except OSError as e:
+        print(f"⚠️  无法写入 {path}: {e}", file=sys.stderr)
+
+
 def _emit(args, env: Dict) -> None:
     """`--out` 原子写 + `--json` 打印同一份外壳。写不出去不改变判定（判定在写盘之前就完成了）。"""
     if args.out:
-        try:
-            step_contract.write_out(args.out, env)
-        except OSError as e:
-            print(f"⚠️  无法写入 {args.out}: {e}", file=sys.stderr)
+        _write_out_only(args.out, env)
     if args.json:
         print(json.dumps(env, indent=2, ensure_ascii=False))
 
 
 def main() -> int:
+    t0 = time.monotonic()   # F&G 时间预算的起点（模块导入实测 <0.2s，不另算）
     ap = argparse.ArgumentParser(description="IC 重跑就绪度")
     ap.add_argument("--db", default=None, help="pheromone.db 路径（默认走 PATHS.db）")
     ap.add_argument("--target-ic", type=float, default=DEFAULT_TARGET_IC,
                     choices=sorted(_WEEKS_REQUIRED),
                     help=f"要检出的真实 |IC|（默认 {DEFAULT_TARGET_IC}=系统综合分实测）")
-    ap.add_argument("--today", help="覆盖今天的日期（测试用，YYYY-MM-DD）")
+    ap.add_argument("--today", help="覆盖今天的日期（YYYY-MM-DD；编排器 v0.45.385 起传扫描日 DATE_STR，过零点也评估扫描那天）")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--out", help=(
         "把 JSON 结果写到该文件（供编排器读）。"
@@ -1717,6 +2336,9 @@ def main() -> int:
         "（与 scan_continuity.py 同一理由）"
     ))
     ap.add_argument("--quiet", action="store_true", help="只输出一行摘要")
+    ap.add_argument("--budget-seconds", type=_budget_seconds, default=FG_BUDGET_SECONDS_DEFAULT, help=(
+        "F&G 敞口门前瞻检验子状态的时间预算，从进程开始计（默认 0 = 不限时；有看门狗的调用方自己给，"
+        "如编排器 Step 11 传 45 以放进它的 60s 超时）。到点 ⇒ 终止 F&G 子进程，该段报「超出时间预算」，其余各项照常"))
     args = ap.parse_args()
 
     # 外壳的 `date`：这次运行服务的业务日（v0.45.355）。消费方拿它与自己的 DATE_STR 比，
@@ -1736,20 +2358,39 @@ def main() -> int:
                     "ic_rerun.undetermined", "warn", f"IC 重跑就绪度无法判定：找不到 {db}（退出码 3）")]))
         return 3
 
-    res = assess(db_path=db, target_ic=args.target_ic, today=args.today)
-    fwd = resonance_forward_status(db.parent, db, today=args.today)
-    fwd_detail = _take_detail(fwd)      # 取走私有细节后 fwd 只剩 {status, line}，payload 形状不变
-    res["resonance_forward_test"] = fwd
-    fg_fwd = fg_exposure_gate_forward_status(today=args.today)
+    # v0.45.392：F&G 子状态（唯一慢、要出网的一项）放进子进程、**现在就起**，与下面各项并行；
+    # 其余各项先算完并写检查点，最后才在截止时刻前等 F&G（见模块 docstring「时间预算与检查点」）。
+    # `with` 退出——含 SIGTERM 转来的 SystemExit——时子进程若还活着一律终止。
+    deadline = None if args.budget_seconds == 0 else t0 + args.budget_seconds
+    with _start_fg_sub_status(args.today, deadline) as fg_run:
+        res = assess(db_path=db, target_ic=args.target_ic, today=args.today)
+        fwd = resonance_forward_status(db.parent, db, today=args.today)
+        fwd_detail = _take_detail(fwd)      # 取走私有细节后 fwd 只剩 {status, line}，payload 形状不变
+        dim_fwd = dim_ic_forward_status(db, today=args.today)
+        dim_detail = _take_detail(dim_fwd)
+        # 归档与 DB 同处一个安装 ⇒ 用 --db 的所在目录，别用代码目录（见 cohort_boundary_evidence docstring）。
+        # 放在 --out / --json / --quiet 之前：三种输出都要带上它（v0.45.334，见 boundary_evidence_status）
+        bev = boundary_evidence_status(db.parent)
+        # 按 v0.45.391 的键序赋值（共振 → F&G → 维度 IC → 世代边界）：F&G 先放显式占位，之后原位替换——
+        # 对已有键赋值不改变它在 dict 里的位置，所以 `--json` / `--out` 的键序与改动前相同。
+        fg_fwd = _fg_checkpoint_placeholder()
+        fg_detail = _take_detail(fg_fwd)
+        res["resonance_forward_test"] = fwd
+        res["fg_exposure_gate_forward_test"] = fg_fwd
+        res["dim_ic_forward_test"] = dim_fwd
+        res["cohort_boundary_evidence"] = bev
+        if args.out:
+            # 检查点：进程之后被杀，消费方读到的就是这一份（F&G 段是「进程在 F&G 重放结束前终止」，不是空、不是旧文件）。
+            # 只写 --out：--json 打 stdout，打两份会让读 stdout 的人拿到两个 JSON 文档。
+            _write_out_only(args.out, contract_envelope(
+                res, date, build_attention(res, bev, fwd_detail, fg_detail, dim_detail)))
+        try:
+            fg_fwd = fg_run.result()
+        except Exception as e:  # noqa: BLE001 —— v0.45.485（F2）：等 F&G 的意外异常只判 F&G 段，不崩溃——
+            # 崩了 run_tool 会写错误外壳，盖掉上面已写出的检查点（世代边界核对随之丢失）。子进程照样由 `with` 退出时终止。
+            fg_fwd = _fg_runner_result("child_failed", f"等待 F&G 子进程时出错（{type(e).__name__}: {e}）")
     fg_detail = _take_detail(fg_fwd)
     res["fg_exposure_gate_forward_test"] = fg_fwd
-    dim_fwd = dim_ic_forward_status(db, today=args.today)
-    dim_detail = _take_detail(dim_fwd)
-    res["dim_ic_forward_test"] = dim_fwd
-    # 归档与 DB 同处一个安装 ⇒ 用 --db 的所在目录，别用代码目录（见 cohort_boundary_evidence docstring）。
-    # 放在 --out / --json / --quiet 之前：三种输出都要带上它（v0.45.334，见 boundary_evidence_status）
-    bev = boundary_evidence_status(db.parent)
-    res["cohort_boundary_evidence"] = bev
 
     if args.out or args.json:
         # 只在要外壳时才列条目：`--quiet` 单跑（周度任务）的路径与 v0.45.355 之前评分与标签逐项相同
@@ -1813,6 +2454,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == _FG_CHILD_FLAG:
+        # F&G 子进程（由 `_FgChild` 拉起）：不走 run_tool / 外壳——结果是给父进程的 stdout JSON，
+        # 崩了就是退出码非 0，由父进程渲染成 child_failed。**不装** `_install_sigterm_exit`：SIGTERM 保持系统默认
+        # （立刻终止）——抛 SystemExit 会被 curl_cffi 的 C 回调吞掉（实测），临时目录由父进程删（见 `_FgChild`）。
+        sys.exit(_fg_child_main(sys.argv[2:]))
+    # v0.45.392：SIGTERM → SystemExit(143)。编排器 `run_step` 超时只 TERM 本进程（不是进程组）——
+    # 转成 SystemExit 后 `main()` 的 `with` 才能连带终止 F&G 子进程；143 原样作退出码，编排器照旧记超时（124）。
+    _install_sigterm_exit()
     if step_contract is None:
         # 没有 step_contract 就写不出外壳：只打 stderr，退出码 3（「无法判定」），不写 --out
         print(f"ic_rerun_readiness: 无法导入 step_contract（{_STEP_CONTRACT_IMPORT_ERROR}）—— 退出码 3，"

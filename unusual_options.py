@@ -29,6 +29,121 @@ except (ImportError, KeyError):
 
 import time as _time
 
+# ── 取数重试与退避（只针对「令牌等待超时」与瞬时网络错误）──────────────────────────
+# 2026-10-05 重跑 28/30 只丢了异常流，日志里能对上的失败有两类：yf_gate 的共享令牌桶（0.5 req/s）排队超过 60s
+# ⇒ `YFRateLimited("等待 yfinance 限流令牌超过 60s（Ticker.options）")`（14:28~14:29 的 options_analyzer / unusual_options
+# 各有记录），以及 `curl: (35) TLS connect error`。两者都是「错开即恢复」型——前者是自己人抢令牌，后者是瞬时握手。
+# ⚠️ 与 yf_gate 的设计一致，**不对 429 / 冷却重试**：「一次 429 的含义是现在就停，不是再试试」；
+#    冷却中（`限流冷却中`）、识别出的 429、以及其它异常一律不重试、直接失败（由 fetch_status 可见）。
+# 预算：每只标的共用 2 次（10s、20s）；进程内累计 RETRY_CIRCUIT_TRIP 只标的把预算用光后不再重试——
+# 持续饥饿时继续等只会把整轮扫描拖长，也加重对共享桶的占用。
+RETRY_BACKOFF_S = (10.0, 20.0)
+RETRY_CIRCUIT_TRIP = 5
+_retry_exhausted = 0
+_sleep = _time.sleep            # 测试可替换，避免真睡
+
+
+def _failure_kind(exc: BaseException) -> str:
+    """cooldown / rate_limited（不重试）；token_wait / transient（重试）；other（不重试）。"""
+    msg = str(exc)
+    if "限流冷却中" in msg:
+        return "cooldown"
+    if "等待 yfinance 限流令牌" in msg:
+        return "token_wait"
+    if type(exc).__name__ == "YFRateLimited":
+        return "rate_limited"
+    try:
+        from yf_gate import is_rate_limit_error
+        if is_rate_limit_error(exc):
+            return "rate_limited"
+    except Exception:  # noqa: BLE001
+        pass
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return "transient"
+    return "other"
+
+
+_RETRYABLE_KINDS = ("token_wait", "transient")
+
+
+class _RetryBudget:
+    """一只标的一次检测的重试预算（`.options` 与各 `option_chain` 共用）。"""
+
+    def __init__(self):
+        self.used = 0
+        self.kinds = []
+        self.paced_s = 0.0          # 本次检测在限速队列里排了多久（v0.45.429）
+        self._counted = False
+
+    def call(self, fn, ticker: str, what: str):
+        global _retry_exhausted
+        while True:
+            try:
+                self.paced_s += _pace()      # 重试那一次也排队：别在饥饿时由本模块反过来加压
+                return fn()
+            except Exception as e:  # noqa: BLE001
+                kind = _failure_kind(e)
+                budget_left = self.used < len(RETRY_BACKOFF_S)
+                with _cache_lock:
+                    tripped = _retry_exhausted >= RETRY_CIRCUIT_TRIP
+                    if kind in _RETRYABLE_KINDS and not budget_left and not self._counted:
+                        self._counted = True
+                        _retry_exhausted += 1
+                if kind not in _RETRYABLE_KINDS or not budget_left or tripped:
+                    e.args = (f"{e} [{kind}]",) + tuple(e.args[1:]) if e.args else (f"[{kind}]",)
+                    raise
+                delay = RETRY_BACKOFF_S[self.used]
+                self.used += 1
+                self.kinds.append(kind)
+                _log.warning("unusual_options %s %s 取数失败（%s），%.0fs 后重试（%d/%d）：%s",
+                             ticker, what, kind, delay, self.used, len(RETRY_BACKOFF_S), str(e)[:80])
+                _sleep(delay)
+
+
+# ── 对共享令牌桶限速（v0.45.429）────────────────────────────────────────────────
+# yf_gate 的令牌桶（`resilience.yfinance_limiter`，0.5 req/s）全进程只有一个。10-07 一轮扫描闸门放行 802 次，
+# 其中本模块每只标的最多 5 次（`.options` + 前 4 个到期日的 `option_chain`）≈ 150 次（约五分之一）；整轮对桶的占用
+# 接近满载，而桶是**轮询抢**的（`RateLimiter.acquire` 每 2s 醒来抢一次、非 FIFO）：排队的线程越多，其它取数
+# 在 60s 超时内抢到令牌的概率越低（2026-10-05 重跑时 options_analyzer 与本模块各有一次「等待令牌超过 60s」）。
+# 这里不减请求（到期日个数 / 取数内容都是评分口径，**不动**），只把本模块的请求排成一条队：
+# 全进程两次请求之间至少隔 `1 / (桶速率 × PACE_BUCKET_SHARE)` 秒，即**最多占桶的一半**，另一半留给其它取数。
+# 预约式（只在算槽位时持锁、睡眠时不持锁）：多线程各领一个递增的发送时刻，FIFO、不互相抢。
+# ⚠️ 这是「让路」不是「省量」：总需求没变，只是本模块排在别人后面。整轮是否更慢看 `scan_timing.phases.parallel`。
+PACE_BUCKET_SHARE = 0.5      # ≤ 0 关闭限速（测试用）
+PACE_MAX_WAIT_S = 60.0       # 单次排队上限：积压超过它就不再往后排（保护进程别被无限期挂住），照常放行
+_pace_lock = _threading.Lock()
+_pace_next = 0.0
+_pace_clock = _time.monotonic
+_pace_sleep = _time.sleep    # 测试可替换，避免真睡
+
+
+def _pace_interval() -> float:
+    """两次请求的最小间隔（秒）。取桶速率现值，不另存一个会与桶不一致的数字（同 yf_gate 的做法）。"""
+    if PACE_BUCKET_SHARE <= 0:
+        return 0.0
+    try:
+        from resilience import yfinance_limiter
+        rate = float(yfinance_limiter._rate)
+    except Exception:  # noqa: BLE001  桶不可得 ⇒ 退回当前设计值 0.5 req/s，不因此放开限速
+        rate = 0.5
+    return 1.0 / (rate * PACE_BUCKET_SHARE) if rate > 0 else 0.0
+
+
+def _pace() -> float:
+    """预约下一个发送时刻并睡到那一刻；返回实际睡了多久。"""
+    global _pace_next
+    interval = _pace_interval()
+    if interval <= 0:
+        return 0.0
+    with _pace_lock:
+        now = _pace_clock()
+        slot = min(max(now, _pace_next), now + PACE_MAX_WAIT_S)
+        _pace_next = slot + interval
+    wait = slot - now
+    if wait > 0:
+        _pace_sleep(wait)
+    return max(wait, 0.0)
+
 
 def _is_cached(ticker: str) -> bool:
     with _cache_lock:
@@ -58,16 +173,26 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
         "signals": [],
         "summary": "期权流数据不可用",
         "data_source": "fallback",
+        # v0.45.421：取数状态与「无异常」分开。此前 yfinance 把所有到期日的期权链都取失败，也返回
+        # 「无异常期权流信号 / neutral / 5.0 / data_source=yfinance_chain」——与真的没有异动不可区分，
+        # 且被缓存 300 秒（2026-10-05 重跑 28/30 只丢了这一路，日志里只有 2 条 warning）。
+        #   fetch_status: "ok" 全部到期日取到 / "partial" 部分取到 / "failed" 一个都没取到或根本没进循环
+        "fetch_status": "failed", "failure_reason": "", "chains_total": 0, "chains_failed": 0,
+        "retries": 0, "pace_wait_s": 0.0,
     }
 
+    retry = _RetryBudget()      # try 之外建：异常路径也要报 retries / pace_wait_s
     try:
         import yfinance as yf
         t = yf.Ticker(ticker)
 
         # 获取所有到期日的期权链
-        expirations = t.options
+        expirations = retry.call(lambda: t.options, ticker, "options")
         if not expirations:
             result["summary"] = "无期权链数据"
+            # yfinance 默认 hide_exceptions=True：取数失败与「该标的没有期权」在返回值里无法区分
+            result["failure_reason"] = "无到期日列表（取数失败，或该标的无期权——yfinance 无法区分）"
+            result["retries"], result["pace_wait_s"] = retry.used, round(retry.paced_s, 1)
             return result
 
         if not stock_price or stock_price <= 0:
@@ -86,6 +211,8 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
                     stock_price = 0.0
             if not stock_price or stock_price <= 0:
                 result["summary"] = "现价不可得，跳过异动检测"
+                result["failure_reason"] = "现价不可得"
+                result["retries"], result["pace_wait_s"] = retry.used, round(retry.paced_s, 1)
                 return result
 
         unusual_calls = []
@@ -108,10 +235,15 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
         if not near_expirations:
             near_expirations = [(expirations[0], 30)]
 
+        chains_total = chains_failed = 0
+        last_chain_error = ""
         for exp, days_to_exp in near_expirations[:4]:
+            chains_total += 1
             try:
-                chain = t.option_chain(exp)
+                chain = retry.call(lambda: t.option_chain(exp), ticker, f"option_chain {exp}")
             except Exception as e:
+                chains_failed += 1
+                last_chain_error = f"{type(e).__name__}: {str(e)[:80]}"
                 _log.debug("期权链获取失败 %s %s: %s", ticker, exp, e)
                 continue
 
@@ -246,6 +378,19 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
                     except (TypeError, ValueError, ZeroDivisionError):
                         continue
 
+        # --- 取数状态（v0.45.421）：每个到期日都失败 ⇒ 这不是「无异常」，是没数据 ---
+        if chains_total and chains_failed == chains_total:
+            _log.warning("unusual_options 全部 %d 个到期日期权链取数失败 %s：%s",
+                         chains_total, ticker, last_chain_error)
+            result["summary"] = "期权链全部取数失败"
+            result["failure_reason"] = f"全部 {chains_total} 个到期日取数失败：{last_chain_error}"
+            result["chains_total"], result["chains_failed"] = chains_total, chains_failed
+            result["retries"], result["pace_wait_s"] = retry.used, round(retry.paced_s, 1)
+            return result      # fallback 形状（5.0 / neutral / 无信号），**不缓存**
+        if chains_failed:
+            _log.warning("unusual_options 部分期权链取数失败 %s：%d/%d（%s）——结果只覆盖取到的到期日",
+                         ticker, chains_failed, chains_total, last_chain_error)
+
         # --- 综合评分 ---
         all_unusual = unusual_calls + unusual_puts
 
@@ -295,6 +440,10 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
             "put_premium_total": round(total_put_premium),
             "summary": summary,
             "data_source": "yfinance_chain",
+            "fetch_status": "partial" if chains_failed else "ok",
+            "failure_reason": f"{chains_failed}/{chains_total} 个到期日取数失败：{last_chain_error}" if chains_failed else "",
+            "chains_total": chains_total, "chains_failed": chains_failed,
+            "retries": retry.used, "pace_wait_s": round(retry.paced_s, 1),
         }
 
         with _cache_lock:
@@ -309,4 +458,6 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
     except Exception as e:
         _log.warning("unusual_options 检测失败 %s: %s", ticker, e)
         result["summary"] = f"检测失败: {str(e)[:50]}"
+        result["failure_reason"] = f"{type(e).__name__}: {str(e)[:80]}"
+        result["retries"], result["pace_wait_s"] = retry.used, round(retry.paced_s, 1)
         return result

@@ -92,11 +92,11 @@ import math
 import os
 import re
 import sys
-import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+import ledger_io
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("vrp_signal")
@@ -154,41 +154,19 @@ def _cache_dir(cache_dir) -> Path:
     return p if p.is_absolute() else BASE_DIR / p
 
 
+# 读写全经 `ledger_io`（v0.45.452）：严格读（坏行 ⇒ LedgerCorrupt，不再静默跳过——跳过一行 = 少一条样本、
+# 闸门照样算）、原子写 + 回读、拒 NaN。读-改-写的入口（record_day / settle）整段持目录锁。
+
 def _load_jsonl(path: Path) -> List[Dict]:
-    if not path.exists():
-        return []
-    out: List[Dict] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(rec, dict):
-                out.append(rec)
-    return out
+    return ledger_io.load_jsonl(path)
 
 
 def _write_jsonl(path: Path, records: List[Dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            for r in records:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    ledger_io.write_jsonl(path, records)
+
+
+def _signals_dir() -> Path:
+    return SIGNALS_FILE.parent
 
 
 def load_rows() -> List[Dict]:
@@ -336,6 +314,7 @@ def _label(ts_pct: float) -> str:
     return "mid"
 
 
+@ledger_io.locked_by(_signals_dir)
 def record_day(as_of: str, cache_dir=None) -> List[Dict]:
     """为 `as_of` 的每份常规快照写一行 VRP 记录（同日重跑 = 整日重写）。返回写入的行。
 
@@ -466,6 +445,7 @@ def _give_up(row: Dict, as_of: str, reason: str) -> None:
     _log.info("[%s] %s 的 VRP 行放弃结算：%s", row.get("ticker"), row.get("date"), reason)
 
 
+@ledger_io.locked_by(_signals_dir)
 def settle(as_of: str, bars_fn: Optional[Callable[[str], Optional[List[dict]]]] = None) -> int:
     """给已到期的行填 `rv_forward` / `vrp_realized`。每票最多取一次 K 线；没有可结算行的票不取。
 

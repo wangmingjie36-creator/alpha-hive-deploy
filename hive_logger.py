@@ -48,12 +48,44 @@ def reset_correlation_id():
 
 # ==================== 路径管理 ====================
 
+#: 生产数据根在家目录下的名字（数据根迁移阶段 5 起；编排器 `DATA_DIR`、launchd plist 指的都是它）。
+DEFAULT_DATA_ROOT_NAME = "alpha-hive-data"
+
+
+def resolve_data_root(environ=None) -> Path:
+    """数据根的**唯一**解析规则（v0.45.422）：`ALPHA_HIVE_HOME` 非空就用它，否则 `$HOME/alpha-hive-data`。
+
+    此前未设时兜底到**本文件所在目录**（代码检出）——阶段 5 之前数据就在那里，那时是对的；阶段 5 把生产
+    数据搬到 `~/alpha-hive-data` 后，检出里只剩搬家那天冻结的旧数据，交互 shell（不设这个变量）里手动跑的
+    工具便**静默**读写旧数据：不报错、结果看着正常。生产（编排器 export + plist）一直设着，不受影响。
+    空串按未设处理（与 `tests/_root_data_guard.real_data_root` 同口径）。
+
+    `environ` 缺省读当前 `os.environ`（调用时求值，测试逐条 setenv 生效）；测试框架传**调用 pytest 时**
+    的环境快照来求「真实」数据根——会话期间 `ALPHA_HIVE_HOME` 已被换成沙箱（见 `tests/conftest.py`
+    的 `pytest_configure`）。纯函数：不建目录、不碰文件系统。
+    """
+    explicit = explicit_data_root(environ)
+    if explicit is not None:
+        return explicit
+    env = os.environ if environ is None else environ
+    return Path(env.get("HOME") or os.path.expanduser("~")) / DEFAULT_DATA_ROOT_NAME
+
+
+def explicit_data_root(environ=None):
+    """环境里**显式**给的数据根：`ALPHA_HIVE_HOME` 非空 ⇒ 原样的 `Path`（不展开 `~`、不按 cwd 解析——读者都这样用它）；
+    没给 / 空串 ⇒ None。`resolve_data_root` 的前一半，单独露出来给「只想知道环境有没有指定」的调用方
+    （`.app` 生成器顺手记数据根，v0.45.461）——别在调用方另写一份 `os.environ.get(...)` 再各自展开。"""
+    env = os.environ if environ is None else environ
+    explicit = env.get("ALPHA_HIVE_HOME")
+    return Path(explicit) if explicit else None
+
+
 class _HivePaths:
     """集中管理所有路径，从环境变量读取，带默认值"""
 
     @property
     def home(self) -> Path:
-        return Path(os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__))))
+        return resolve_data_root()
 
     @property
     def git_repo_root(self) -> Path:
@@ -174,10 +206,67 @@ class _HivePaths:
         四个老账本（vrp_state 等）的 `BASE_DIR = PATHS.home` 写法已在
         `tests/test_paths_not_frozen_at_import.py::KNOWN` 登记为存量违规，别再添一个。
         不建目录：写入方自己 `mkdir`，只读的调用方（assess / MCP）不该为了「看一眼」造出空目录。
-        反过来，目录不存在也**不许**被只读出口说成「账本为空」（未设 env 时这里就是代码目录）：
+        反过来，目录不存在也**不许**被只读出口说成「账本为空」（如别的机器上没有 `~/alpha-hive-data`）：
         判定走 `sell_strike_ledger.state_dir_status`（v0.45.382）。
         """
         return self.home / "sell_strike_state"
+
+    @property
+    def alphabot_state(self) -> Path:
+        """Alpha Bot（卖权选择器的本机前端）自己的状态目录（v0.45.388）。
+
+        写：`alphabot.service`——`settings.json`（自选 / 盘中关注列表）与
+            `intraday/<美东日期>/<TICKER>.jsonl`（盘中快照，只存聚合数值、不存原始链）。
+        **与卖权账本目录分开**：前端对账本只读，自己的东西只写这里。
+        调用时求值（读 `ALPHA_HIVE_HOME`），不在消费方冻成模块级常量；只读路径不建目录。
+        """
+        return self.home / "alphabot_state"
+
+    @property
+    def replay_ohlc_state(self) -> Path:
+        """回放行情库（v0.45.410，`replay_ohlc_store.ReplayOhlcStore`）：已落定的日线只向 Yahoo 取一次。
+
+        写 / 读：F&G 敞口门前瞻检验的 `run()`（编排器 Step 11 与每周只读诊断任务经 `ic_rerun_readiness` 调它）。
+        每个标的一个 `<TICKER>.json`，只有价格。**不是可重建缓存**：首次落定后冻结、之后 Yahoo 的回溯修订不进库，
+        丢了重建出来的值可能不同 ⇒ 进数据备份（`data_backup/export.py` 的 `STATE_DIRS`）。
+        调用时求值（读 `ALPHA_HIVE_HOME`）；不建目录（写入方自己 `mkdir`）。
+        """
+        return self.home / "replay_ohlc_state"
+
+    @property
+    def migrations_state(self) -> Path:
+        """数据迁移运行器的运行记录目录（v0.45.419，阶段 7，`data_migrations.runner`）。
+
+        写：运行器——`applied.jsonl`（只追加：每条迁移 / 手工修复工具的「谁、何时、改了多少行、备份在哪」，
+        含补记的历史手工修复）。**不是可重建缓存**：它是「这个库被动过什么」的唯一机器可读记录，丢了就只剩
+        CHANGELOG 文字与散落的备份文件 ⇒ 进数据备份（`data_backup/export.py` 的 `STATE_DIRS`）。
+        调用时求值（读 `ALPHA_HIVE_HOME`）；只读路径不建目录（写入方自己 `mkdir`）。
+        """
+        return self.home / "migrations_state"
+
+    @property
+    def straddle_prereg_result(self) -> Path:
+        """财报跨式 × GEX 预注册检验的冻结结果（v0.45.424 / v0.45.428，`straddle_gex_prereg.run_once`）。
+
+        写：只有 `run_once()`，就绪后**只写一次**（`os.link` 先到者赢，永不覆盖）；读：`read_result()` / Alpha Bot 跨式页的进度。
+        放在跨式账本目录 `options_paper_state/` 里，随它进数据备份（`data_backup/export.py` 的 `STATE_DIRS`）。
+        ⚠️ 一份误写进真实数据根的文件会把协议**永久冻住**——所以必须调用时求值（读 `ALPHA_HIVE_HOME`），
+        conftest 的 `_isolate_straddle_prereg_result` 核它在沙箱里。不建目录。
+        """
+        return self.home / "options_paper_state" / "straddle_gex_prereg_result.json"
+
+    @property
+    def data_backup_repo(self) -> Path:
+        """数据备份仓库的工作区（`data_backup/run_backup.py`，编排器 Step 14 每个扫描日提交一次）（v0.45.408）。
+
+        读：`experiments/fg_exposure_gate_forward_test.py` 的逐日重锚——生产状态历史在数据根迁移阶段 5 之后
+        只提交到这里（代码仓库的 `paper_portfolio_state/` 提交止于 2026-09-25）。**本属性只读**，不建目录。
+        调用时求值（读 `ALPHA_HIVE_HOME`）。
+        v0.45.414 起它也是 `run_backup` / `export` 的缺省位置（经 `export.default_backup_repo()`），编排器 Step 14
+        不再自己写路径。`ALPHA_HIVE_HOME` 未设时随 `home` 取 `~/alpha-hive-data/_git_backup`（v0.45.422 前
+        兜底到代码检出）；显式指到代码仓库里的仍由 `export.backup_repo_inside_code_repo` 拒绝。
+        """
+        return self.home / "_git_backup"
 
     @property
     def google_credentials(self) -> str:
@@ -311,9 +400,18 @@ def get_logger(name: str) -> logging.Logger:
 
 
 class SafeJSONEncoder(json.JSONEncoder):
-    """JSON 编码器：安全处理 NaN / Inf / datetime / set / bytes / numpy / pandas / Decimal / Enum 等"""
+    """JSON 编码器：安全处理 NaN / Inf / datetime / set / bytes / numpy / pandas / Decimal / Enum 等
+
+    ⚠️ v0.45.452 前清洗只挂在 `encode()` 上——那只有 `json.dumps` 走；**`json.dump(obj, f, cls=SafeJSONEncoder)`
+    走 `iterencode()`，清洗从没生效**，照样写出 `NaN` / `Infinity` 字面量（不是合法 JSON，浏览器 `JSON.parse`
+    整份拒收）。实测：`.swarm_results_2026-08-28.json` 里 62 个 NaN、`atomic_json_write` 写出 `{"cash": NaN}`。
+    现在清洗挂在 `iterencode()`（dump / dumps 都经过它），`default()` 转出来的容器（DataFrame.to_dict 等）也再清洗一遍。
+    守卫：`tests/test_ledger_io_v2.py::TestSafeEncoderCoversDump`。"""
 
     def default(self, o):
+        return self._sanitize(self._default_raw(o))
+
+    def _default_raw(self, o):
         # ── 时间类 ──
         if isinstance(o, datetime):
             return o.isoformat()
@@ -426,8 +524,8 @@ class SafeJSONEncoder(json.JSONEncoder):
                 pass
             return str(o)
 
-    def encode(self, o):
-        return super().encode(self._sanitize(o))
+    def iterencode(self, o, _one_shot=False):
+        return super().iterencode(self._sanitize(o), _one_shot)
 
     def _sanitize(self, obj):
         """递归清洗数据：NaN → None, Inf → 'Inf'，numpy/pandas → 原生类型"""
@@ -497,31 +595,19 @@ def safe_json_dumps(data, **kwargs) -> str:
 
 
 def atomic_json_write(path, data, **kwargs):
-    """Atomically write JSON to *path* (write-to-tmp + os.replace).
-    自动使用 SafeJSONEncoder 防止 NaN/Inf 序列化错误。
+    """**可再生缓存**的原子写（v0.45.452 起物理写入走 `ledger_io.atomic_write_text`：临时文件任何异常都清掉、
+    fsync 目录、缺目录自动建、文件 0644）。
+
+    语义与账本不同、是有意的：缓存可从源头重取，所以 NaN / Inf 按 `SafeJSONEncoder` 的约定**改写**成 null / "Inf"
+    （而 `ledger_io.write_json` 是**拒绝**）；清洗后仍残留的非有限数 ⇒ `allow_nan=False` 抛 ValueError、文件不动。
+    不做写后回读（缓存不持锁，并发蜂同时写同一缓存时后写者赢是对的）。**账本 / 状态文件别用它**——用 `ledger_io`。
+    （v0.45.452 前这里直接 `json.dump(cls=SafeJSONEncoder)`，清洗从没生效，见 `SafeJSONEncoder` docstring。）
     """
-    import tempfile
-    path = Path(path)
+    import ledger_io
     kwargs.setdefault("ensure_ascii", False)
     kwargs.setdefault("cls", SafeJSONEncoder)
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", dir=str(path.parent), suffix=".tmp", delete=False
-        ) as tmp:
-            tmp_path = tmp.name
-            json.dump(data, tmp, **kwargs)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-        os.replace(tmp_path, str(path))
-    except OSError:
-        # Clean up temp file on failure
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-        raise
+    kwargs.setdefault("allow_nan", False)
+    ledger_io.atomic_write_text(path, json.dumps(data, **kwargs), verify=False)
 
 
 def read_json_cache(path, ttl: int = 300):

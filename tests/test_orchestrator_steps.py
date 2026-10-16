@@ -3,13 +3,12 @@
 分组：
   · TestGoldenLegacy —— 旧格式 JSON（无 `schema_version`）：片段去掉 `contract` 后与**现行 bash 逐字相同**、
     级别相同。期望值写成常量表 `GOLDEN`（好读），**且**这张表本身由 `test_row_is_what_the_repo_orchestrator_does`
-    对照仓库 `scripts/alpha-hive-orchestrator.sh`（唯一真相；部署副本与它逐字一致，由
-    `tests/test_orchestrator_deployed_matches_repo.py` 管）：按**模式**（shell 变量名 / 步骤标题，不按行号）
+    对照 B 之前的编排器：按**模式**（shell 变量名 / 步骤标题，不按行号）
     把各步的分支链抽出来，在 bash 里配同一批夹具**真跑**，逐条比片段、级别与日志原文。
-    本 worktree 尚未合入那份文件时退到 `git show origin/main:scripts/alpha-hive-orchestrator.sh`；两处都拿不到
-    就**红**（不是 skip：它随仓库发布，拿不到就是真缺）。需要 `/bin/bash` 与 `jq`（编排器本身就依赖二者）。
-    ⚠️ 等 B 把这些内联分支链换成 `orchestrator_steps.py` 调用后，按模式会找不到分支链而变红——那时把对照
-    钉到 B 之前的最后一个提交（`git show <sha>:scripts/…`）或让这组退役，别改成 skip。
+    B（v0.45.385）起编排器经 `_apply_step_interp` 调解释器、内联分支链已删 ⇒ 对照已钉到 B 之前的冻结副本
+    `tests/fixtures/orchestrator_pre_b.sh.frozen`（逐字节、摘要钉在 `test_orchestrator_step_interp.py`；
+    不用 `git show <sha>`：CI 是浅克隆）。副本缺失就**红**（不是 skip：它随仓库发布，拿不到就是真缺）。
+    新接线的守卫在 `tests/test_orchestrator_step_interp.py`。需要 `/bin/bash` 与 `jq`（编排器本身就依赖二者）。
   · TestVariants —— 每个工具步骤 × 八种 JSON 形态：v1 ok / attention / legacy / stale / 契约不符 / 崩溃 / 缺失 / 不可解析
   · TestDateRollover —— 跨午夜：外壳日期恰是次日且确是本轮写的 ⇒ 采用并标 `date_rollover`；其余日期不符照旧
   · TestAttention —— 外壳 status=attention ⇒ 全部条目进 message（封顶 + 「…(+N)」）；alarm ⇒ warn + 🚨
@@ -166,35 +165,28 @@ def frag(out: dict, step: str) -> dict:
     return out["steps_fragment"][KEY[step]]
 
 
-# ─────────────────────── 仓库里的编排器：按模式抽出分支链，在 bash 里真跑 ───────────────────────
-ORCH_REL = "scripts/alpha-hive-orchestrator.sh"
+# ─────────────────── B 之前的编排器（冻结副本）：按模式抽出分支链，在 bash 里真跑 ───────────────────
+#: B 之前最后一版编排器的逐字节副本。**永远不许**从 B 之后的编排器重新生成——摘要钉在
+#: `tests/test_orchestrator_step_interp.py::test_frozen_fixture_pinned`，改一个字节就红。
+PRE_B_REL = "tests/fixtures/orchestrator_pre_b.sh.frozen"
 
 
 @functools.lru_cache(maxsize=1)
-def _orchestrator_text_cached() -> Tuple[str, str]:
-    p = REPO_ROOT / ORCH_REL
-    if p.is_file():
-        return p.read_text(encoding="utf-8"), str(p)
-    try:
-        r = subprocess.run(["git", "-C", str(REPO_ROOT), "show", f"origin/main:{ORCH_REL}"],
-                           capture_output=True, timeout=60)
-    except (OSError, subprocess.SubprocessError) as e:
-        return "", f"git 不可用（{type(e).__name__}: {e}）"
-    if r.returncode == 0 and r.stdout:
-        return r.stdout.decode("utf-8"), f"git show origin/main:{ORCH_REL}"
-    return "", f"git show origin/main:{ORCH_REL} 失败：{r.stderr.decode(errors='replace').strip()}"
+def _orchestrator_text_cached() -> str:
+    p = REPO_ROOT / PRE_B_REL
+    return p.read_text(encoding="utf-8") if p.is_file() else ""
 
 
 def orchestrator_text() -> str:
-    text, where = _orchestrator_text_cached()
+    text = _orchestrator_text_cached()
     if not text:
-        pytest.fail(f"拿不到编排器原文：{REPO_ROOT / ORCH_REL} 不存在，且 {where}。它随仓库发布"
-                    "（v0.45.353 起受版本控制），拿不到就是真缺——不是 skip 的理由")
+        pytest.fail(f"拿不到 B 之前的编排器冻结副本 {REPO_ROOT / PRE_B_REL}。它随仓库发布，"
+                    "拿不到就是真缺——不是 skip 的理由")
     return text
 
 
 class _BashStep:
-    """一步分支链在仓库副本里的位置（全按模式）与它读的 shell 变量。
+    """一步分支链在 B 之前的冻结副本里的位置（全按模式）与它读的 shell 变量。
 
     anchor   该步之后第一处 `start` 才是它的分支链（Step 4 与 Step 2 的链都以 `if [ $STEP2_RC -eq 0 ]` 开头）
     start    抽取的第一行
@@ -230,10 +222,9 @@ BASH: Dict[str, _BashStep] = {
 def bash_block(step: str) -> str:
     text, spec = orchestrator_text(), BASH[step]
     a = re.search(spec.anchor, text, re.M)
-    assert a, (f"编排器里找不到 Step {step} 的锚点 {spec.anchor!r}——若 B 已把内联分支链换成 orchestrator_steps.py "
-               "调用，按本文件 docstring 把对照钉到 B 之前的提交或让这组退役")
+    assert a, f"B 之前的编排器冻结副本里找不到 Step {step} 的锚点 {spec.anchor!r}（副本被改过？摘要守卫应已先红）"
     s = re.compile(spec.start, re.M).search(text, a.end())
-    assert s, f"编排器里 Step {step} 的锚点之后找不到分支链起点 {spec.start!r}（B 已接线？见本文件 docstring）"
+    assert s, f"冻结副本里 Step {step} 的锚点之后找不到分支链起点 {spec.start!r}"
     from_ = s.start()
     if spec.through:
         t = re.compile(spec.through, re.M).search(text, s.end())
@@ -258,7 +249,7 @@ _LEVEL_OF = {"INFO": "info", "WARN": "warn", "ERROR": "error"}
 
 def run_bash(step: str, rc: int, json_path=None, *, timeout_seconds: int = 3600
              ) -> Tuple[str, List[str], dict]:
-    """在 bash 里跑仓库副本里该步的分支链。返回 (最高日志级别, 各条 log 原文, 该步的 STEPS_RESULT 条目)。"""
+    """在 bash 里跑 B 之前的冻结副本里该步的分支链。返回 (最高日志级别, 各条 log 原文, 该步的 STEPS_RESULT 条目)。"""
     spec = BASH[step]
     assigns = {spec.rc_var: rc}
     if spec.json_var:
@@ -355,6 +346,13 @@ GOLDEN = [
     ("15", 99, True, "warn", {"status": "error", "rc": 99}),
 ]
 GOLDEN_IDS = [f"STEP{g[0]}_RC={g[1]}" for g in GOLDEN]
+#: 刻意改动 (i)（orchestrator_steps 模块 docstring，v0.45.391 复审 S5）：B 之前 bash 的日志原文 → 解释器现在的文案。
+#: **只换 message**：同一行的片段（status / rc / cohort_boundary）与级别仍由上面的对照逐字核。
+#: Step 11 rc=124 是 `run_step` 看门狗超时（09-30 实况），旧文案「异常」没说出这一点。
+MESSAGE_DELIBERATE: Dict[Tuple[str, int], Dict[str, str]] = {
+    ("11", 124): {"⚠️ Step 11 异常（exit=124），不影响主流程":
+                  "⏰ Step 11 超时（>60s，run_step 看门狗杀掉了 ic_rerun_readiness.py，exit=124），不影响主流程"},
+}
 BASE_LEVEL = {(g[0], g[1]): g[3] for g in GOLDEN}
 BASE_STATUS = {(g[0], g[1]): g[4]["status"] for g in GOLDEN}
 
@@ -377,16 +375,22 @@ class TestGoldenLegacy:
 
     @pytest.mark.parametrize("step,rc,with_json,level,expected", GOLDEN, ids=GOLDEN_IDS)
     def test_row_is_what_the_repo_orchestrator_does(self, tmp_path, step, rc, with_json, level, expected):
-        """上面那张表不是凭记忆写的：把仓库副本里该步的分支链抽出来、同一夹具在 bash 里真跑，逐条相等。"""
+        """上面那张表不是凭记忆写的：把 B 之前的冻结副本里该步的分支链抽出来、同一夹具在 bash 里真跑，逐条相等。
+        片段与级别**无一例外**逐字相等；日志原文只有 `MESSAGE_DELIBERATE` 列出的那几行按刻意改动 (i) 替换后再比。"""
         p = legacy_json(tmp_path, step) if with_json else tmp_path / "absent.json"
         b_level, b_texts, b_frag = run_bash(step, rc, p)
         assert b_frag == _subst(expected, p)
         assert b_level == level
-        assert_message_carries_bash_lines(run(step, rc, p)["message"], b_texts)
+        swap = MESSAGE_DELIBERATE.get((step, rc), {})
+        assert set(swap) <= set(b_texts), f"刻意改动登记的 bash 原文已不在该支里：{set(swap) - set(b_texts)}"
+        message = run(step, rc, p)["message"]
+        assert_message_carries_bash_lines(message, [swap.get(t, t) for t in b_texts])
+        for old in swap:
+            assert old not in message, f"登记为刻意改掉的旧文案仍在 message 里：{old}"
 
     @pytest.mark.parametrize("step", STEPS)
-    def test_json_read_branches_match_repo_orchestrator(self, step):
-        """(a') 「哪几支读 JSON」不是凭记忆写的：从仓库副本的分支链里数 `open('$<JSON 变量>')` 出现在哪。
+    def test_json_read_branches_match_pre_b_orchestrator(self, step):
+        """(a') 「哪几支读 JSON」不是凭记忆写的：从 B 之前的冻结副本的分支链里数 `open('$<JSON 变量>')` 出现在哪。
         rc=2 除外——解释器在那一支刻意不读（(a)：脚本不存在，路径上的 JSON 不可能是本轮的）。"""
         spec = BASH[step]
         pre, branches = bash_branches(bash_block(step), spec.rc_var)
@@ -482,6 +486,55 @@ class TestGoldenLegacy:
         assert "（>90s）" in run("15", 124, None, timeout=90)["message"]
 
 
+class TestStep11Timeout:
+    """刻意改动 (i)（v0.45.391 复审 S5）：Step 11 被 `run_step` 看门狗杀掉（rc=124）时，message 说「超时」、
+    边界那句说「JSON 没写出来、本轮没核对」——09-30 实况里旧文案把它说成「异常」+「代码早于 v0.45.334 或 JSON 不可读」。
+    片段（status / rc / cohort_boundary）与级别**一个字不动**：那几个值由 GOLDEN 对冻结副本真跑核着。"""
+
+    def test_rc124_without_json_names_the_timeout_and_the_skipped_boundary_check(self, tmp_path):
+        """09-30 的形状：编排器先删后跑 ⇒ 被杀时 JSON 不存在。
+        变异「把 rc=124 文案改回『异常（exit=124）』」/「边界那句改回『代码早于 v0.45.334』」⇒ 红。"""
+        out = run("11", 124, tmp_path / "absent.json", run_start=RUN_START)
+        assert frag(out, "11") == {"status": "error", "rc": 124, "cohort_boundary": None}
+        assert out["level"] == "warn"
+        msg = out["message"]
+        assert "⏰ Step 11 超时（>60s，run_step 看门狗杀掉了 ic_rerun_readiness.py，exit=124）" in msg, msg
+        assert "异常（exit=124）" not in msg
+        assert "Step 11 世代边界核对：本轮未核对——ic_rerun_readiness.py 被 run_step 看门狗按超时杀掉，就绪度 JSON 没写出来" in msg
+        assert "代码早于 v0.45.334" not in msg
+
+    def test_rc124_seconds_follow_timeout_seconds(self, tmp_path):
+        assert "（>90s，run_step 看门狗" in run("11", 124, tmp_path / "absent.json", timeout=90)["message"]
+
+    def test_default_seconds_match_the_repo_orchestrator(self):
+        """编排器不给 Step 11 传 --timeout-seconds ⇒ 文案里的秒数是 `STEP11_TIMEOUT_DEFAULT`。
+        变异「编排器把 Step 11 改成 --timeout 120 而解释器没跟」⇒ 红（否则日志会把 120s 的超时说成 >60s）。"""
+        from tests._orchestrator import repo_orchestrator_text
+        m = re.findall(r'run_step --timeout (\d+) "\$\{PROJECT_DIR\}/ic_rerun_readiness\.py"', repo_orchestrator_text())
+        assert m == [str(ost.STEP11_TIMEOUT_DEFAULT)], m
+
+    @pytest.mark.parametrize("rc", [0, 1, 3, 99])
+    def test_missing_json_says_not_checked_instead_of_old_code(self, tmp_path, rc):
+        """JSON 本轮不可用（这里：不存在）⇒ 边界那句说「本轮未核对——就绪度 JSON 本轮不可用（原因）」。
+        旧文案「代码早于 v0.45.334」只在读到 JSON 却缺键时成立（下一条）。片段与改动前相同（cohort_boundary=null）。"""
+        out = run("11", rc, tmp_path / "absent.json", run_start=RUN_START)
+        assert frag(out, "11")["cohort_boundary"] is None
+        assert "Step 11 世代边界核对：本轮未核对——就绪度 JSON 本轮不可用（就绪度 JSON 不存在" in out["message"]
+        assert "代码早于 v0.45.334" not in out["message"]
+
+    def test_json_without_boundary_key_keeps_the_old_code_explanation(self, tmp_path):
+        """读到了 JSON、只是没有 cohort_boundary_evidence 键 ⇒ 「代码早于 v0.45.334」正是对的推断，文案不变。"""
+        payload = {k: v for k, v in LEGACY["11"].items() if k != "cohort_boundary_evidence"}
+        out = run("11", 124, legacy_json(tmp_path, "11", payload))
+        assert "代码早于 v0.45.334" in out["message"] and "⏰ Step 11 超时" in out["message"]
+
+    def test_rc2_boundary_text_is_unchanged(self, tmp_path):
+        """rc=2（脚本不存在）：与 B 之前逐字相同（GOLDEN 的 STEP11_RC=2 那行另有 bash 真跑对照）。"""
+        out = run("11", 2, tmp_path / "absent.json")
+        assert ("Step 11 世代边界核对：就绪度 JSON 里没有 cohort_boundary_evidence"
+                "（代码早于 v0.45.334 或 JSON 不可读），本轮未核对") in out["message"]
+
+
 # ═══════════════════════════════ 2. 每步 × 八种 JSON 形态 ═══════════════════════════════
 #: rc=1（五步都读 JSON 的那一支）的现行片段，形态测试以它为基准
 RC1 = {"10": {"status": "degraded", "duration_seconds": DUR, "detail_json": P},
@@ -504,7 +557,7 @@ def _problem_frag(step: str, status: str, rc: int, rc_status: str, **extra) -> d
 
 
 def _reads(step: str, rc: int) -> bool:
-    """bash 在哪几支读 JSON（`test_json_read_branches_match_repo_orchestrator` 从仓库副本核对过）。"""
+    """bash 在哪几支读 JSON（`test_json_read_branches_match_pre_b_orchestrator` 从冻结副本核对过）。"""
     return rc != 2 and (step == "11" or rc == 1)
 
 
@@ -958,16 +1011,19 @@ class TestHardening:
         assert f["status"] == "failed"
         assert sum("FIFO" in x for x in f["rc1_unverified"]) == 2, f
 
-    def test_git_push_success_of_odd_shape_is_unknown_not_render_error(self, tmp_path):
+    def test_scan_timing_without_gh_pages_key_is_not_proof_of_completion(self, tmp_path):
+        """完成标记是 `extra.gh_pages`（v0.45.402 起；此前是 `git_push`）。只带已退役的 `git_push` 的 scan_timing
+        （旧代码留下的、或有人把字段又写回去的）不是「主流程跑完」的证据 ⇒ 保守记 failed 并说清缺什么。"""
         d = make_day(tmp_path / "d")
         t = d / "logs" / "scan_timing.json"
         doc = json.loads(t.read_text())
-        doc["extra"]["git_push"]["success"] = [1]
+        assert "gh_pages" in doc["extra"], "正对照：夹具默认带 gh_pages，下面删掉它才有意义"
+        doc["extra"] = {"git_push": {"success": True}, "git_commit": {"success": True}}
         t.write_text(json.dumps(doc))
         out = run("2", 1, data_dir=d, run_start=RUN_START)
         f = out["steps_fragment"][S2]
-        assert f["status"] == "success_with_warning" and f["git_push_success"] is None
-        assert "推送结果未知" in out["message"]
+        assert f["status"] == "failed"
+        assert any("缺 gh_pages" in x for x in f["rc1_unverified"]), f
 
 
 # ═══════════════════════════════ 7. 全组合不变式 ═══════════════════════════════
@@ -1058,7 +1114,7 @@ TICKERS = ["NVDA", "TSLA", "MSFT", "QCOM", "VKTX", "META", "BILI", "AMZN"]
 
 
 def make_day(root: Path, date: str = DATE, *, swarm=True, daily=("json", "md"), timing="complete",
-             ml="near_constant", written_at="2026-09-28T14:46:43", git_push_success=True,
+             ml="near_constant", written_at="2026-09-28T14:46:43",
              report_root=None) -> Path:
     """造一天的 Step 2 产物。ml：near_constant = 09-24 实况（8 份里 6 份同值、共 2 个不同值）。"""
     rep = report_root or root
@@ -1070,7 +1126,7 @@ def make_day(root: Path, date: str = DATE, *, swarm=True, daily=("json", "md"), 
         (rep / f"alpha-hive-daily-{date}.{suffix}").write_text("{}" if suffix == "json" else "# 日报")
     if timing:
         extra = {"early_exit": "empty_scan_guard"} if timing == "early_exit" else {
-            "git_push": {"success": git_push_success}, "git_commit": {"success": True}}
+            "gh_pages": {"success": True, "action": "pushed_new_commit"}}
         (root / "logs").mkdir(exist_ok=True)
         (root / "logs" / "scan_timing.json").write_text(json.dumps(
             {"date": "2026-09-27" if timing == "wrong_date" else date, "written_at": written_at,
@@ -1104,7 +1160,7 @@ class TestStep2:
         unverified = f.pop("rc1_unverified", None)
         assert f == expected and out["level"] == level
         assert (unverified is not None) == (rc == 1)
-        b_level, b_texts, b_frag = run_bash("2", rc)          # 仓库副本里 STEP2_RC 的分支链真跑
+        b_level, b_texts, b_frag = run_bash("2", rc)          # 冻结副本里 STEP2_RC 的分支链真跑
         assert (b_level, b_frag) == (level, expected)
         assert_message_carries_bash_lines(out["message"], b_texts)
 
@@ -1117,19 +1173,11 @@ class TestStep2:
         out = run("2", 1, data_dir=d, run_start=RUN_START)
         assert out["steps_fragment"] == {S2: {
             "status": "success_with_warning", "duration_seconds": DUR, "rc": 1, "warning": "ml_model_constant",
-            "ml_model_guard": {"verdict": "near_constant", "n_files": 8, "n_numeric": 8, "distinct": 2},
-            "git_push_success": True}}
+            "ml_model_guard": {"verdict": "near_constant", "n_files": 8, "n_numeric": 8, "distinct": 2}}}
         assert out["level"] == "warn"
         assert "ML 概率退化（near_constant：8 份里只有 2 个不同值）" in out["message"]
-        assert "ml_model_guard.py --date 2026-09-28" in out["message"] and "推送成功" in out["message"]
-
-    def test_rc1_constant_and_push_failure_are_both_visible(self, tmp_path):
-        d = make_day(tmp_path / "d", ml="constant", git_push_success=False)
-        out = run("2", 1, data_dir=d, run_start=RUN_START)
-        f = out["steps_fragment"][S2]
-        assert f["ml_model_guard"]["verdict"] == "constant" and f["git_push_success"] is False
-        # 指向 scan_timing.json 本身，不指 status.json（那条 jq 合并 09-14~09-25 没生效过，见 v0.45.351）
-        assert f"推送失败（见 {d / 'logs' / 'scan_timing.json'} 的 extra.git_push）" in out["message"]
+        assert "ml_model_guard.py --date 2026-09-28" in out["message"]
+        assert "git_push" not in json.dumps(out["steps_fragment"]), "已退役的推送字段又出现在 status 片段里"
 
     def test_rc1_completed_but_ml_not_degenerate_says_unexplained(self, tmp_path):
         """主流程跑完 ⇒ 仍是 success_with_warning（部署确已完成），但原因如实写「待查」，不编一个。"""

@@ -276,8 +276,13 @@ class TestNextPrevCloseFirst:
         snapshots({"2026-08-31": {"VZ": s}})
         assert csl.load_official_close("2026-08-31", "VZ") == (50.02, csl.SNAP_CLOSE)
 
-    def test_no_snapshot_at_all(self, snapshots):
+    def test_no_snapshot_at_all(self, snapshots, monkeypatch):
+        """本地 ref 一天都没有：本进程没刷新过 ⇒ 说不清是云端没有还是本地没拉到（v0.45.466 起报 ref_stale）；
+        刷新成功之后仍没有 ⇒ 才是云端确实没有。"""
         snapshots({})
+        assert csl.load_official_close("2026-08-28", "DE") == (None, "snapshot_ref_stale")
+        monkeypatch.setitem(csl._REFRESHED, csl._repo_key(None),
+                            {"ok": True, "error": None, "at": "t", "newest_date": None})
         assert csl.load_official_close("2026-08-28", "DE") == (None, "snapshot_no_snapshot")
 
 

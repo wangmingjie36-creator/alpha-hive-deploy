@@ -154,7 +154,9 @@ def extract_raw(data: dict) -> dict:
 
     def fmt_levels(levels):
         return [
-            {"strike": l["strike"], "oi": l["oi"], "iv_pct": round(l.get("iv", 0) * 100, 1)}
+            {"strike": l["strike"], "oi": l["oi"],
+             # v0.45.462：iv 可能是 None（非有限数消毒后），照实给 None，不当 0
+             "iv_pct": round(l["iv"] * 100, 1) if isinstance(l.get("iv"), (int, float)) else None}
             for l in levels[:4]
         ]
 

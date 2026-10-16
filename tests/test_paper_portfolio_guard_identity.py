@@ -8,8 +8,12 @@
   * 单条测试往沙箱写状态文件 ⇒ teardown 误报「写到了**生产** paper_portfolio_state/」；
   * 更隐蔽：守卫**名义上在、实际盯的是沙箱自己**，测试真写穿生产它也看不见。
 
-整套/整文件跑不触发（约 10 个模块顶层就导入 `paper_portfolio`，收集期环境还是真的），
+整套/整文件跑不触发（约 10 个模块顶层就导入 `paper_portfolio`，收集期没有逐条沙箱），
 只在「单条/子集 + 夹具内首次导入」时露出。
+
+v0.45.422 起收集期也不是「真环境」了：`pytest_configure` 先设会话级 `ALPHA_HIVE_HOME` 沙箱（数据根缺省改成
+`~/alpha-hive-data` 后，收集期冻住的常量否则指向生产），真身改按调用 pytest 时的环境求。收集期那一格的前提随之改为
+「冻住的 STATE_DIR 落在会话沙箱里、绝不在真身下」；夹具推导的防漂移自检由 conftest 在收集期环境下做。
 
 **为什么必须子进程 + 原样拷贝的 conftest**（沿用 `test_root_data_guard.py` 的接线测试）：
 
@@ -82,7 +86,7 @@ from pathlib import Path
 _AT_COLLECTION_HEADER = '''
 import os
 from pathlib import Path
-import paper_portfolio  # noqa: F401 — 收集期导入（此刻环境还是真的）
+import paper_portfolio  # noqa: F401 — 收集期导入（此刻 ALPHA_HIVE_HOME 是会话沙箱，v0.45.422）
 '''
 
 # 合法：写夹具重绑后的路径。顺带断言重绑本身生效（防线①）。
@@ -164,9 +168,13 @@ def _assert_premise(first_import, probe, inner_basetemp, real_home, out):
         assert not Path(frozen).resolve().is_relative_to(real_home.resolve()), frozen
     else:
         assert probe["imported_at_collection"] is True, "收集期导入这一格没造出来"
-        # 收集期（真环境）导入的 STATE_DIR 就是真身；夹具对真身的推导必须与它一致（防漂移）
-        assert frozen == str(real_home / "paper_portfolio_state"), (
-            f"收集期导入的 paper_portfolio.STATE_DIR = {frozen}，与哨兵真身 {real_home / 'paper_portfolio_state'} 不符")
+        # v0.45.422：收集期环境是会话沙箱 ⇒ 冻住的 STATE_DIR 必须落在子进程的 basetemp 里、绝不在哨兵真身下。
+        # 落在真身下 = 会话沙箱没在收集前设上，收集期常量指向「生产」——正是本版要堵的口子。
+        # （夹具推导 vs paper_portfolio 推导的防漂移自检在 conftest 里、按收集期环境比，漂移会让子进程直接 error。）
+        assert Path(frozen).resolve().is_relative_to(inner_basetemp.resolve()), (
+            f"收集期导入的 paper_portfolio.STATE_DIR = {frozen}，不在会话沙箱（{inner_basetemp}）里")
+        assert not Path(frozen).resolve().is_relative_to(real_home.resolve()), (
+            f"收集期冻住的 STATE_DIR 指向了哨兵真身 {real_home}：会话级 ALPHA_HIVE_HOME 沙箱没在收集前生效")
 
 
 @pytest.mark.parametrize("first_import", ["in_fixture", "at_collection"])

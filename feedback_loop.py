@@ -3,8 +3,10 @@
 优化 7：准确度回溯、权重自动优化
 """
 
+import copy
 import logging as _logging
 import json
+import math
 import os
 import sqlite3
 from datetime import datetime
@@ -208,6 +210,13 @@ class ReportSnapshot:
         self.actual_price_t7 = None  # T+7 的价格
         self.actual_price_t30 = None  # T+30 的价格
 
+        # v0.45.491：快照的生成时刻。新快照首次存盘时盖戳；读回的快照沿用文件里的值，
+        # 回填 actual_prices 再存盘**不改它**（此前每次存盘都写 now()，T+30 回填会把它推后 ~45 天）。
+        self.created_at = None
+        # v0.45.491：load_from_json 读到的原文 + 读完那一刻派生出的字段值（深拷贝）。
+        # save_to_json 据此只写「读回之后改过的字段」，其余一律照原文写回——见 _merge_onto_loaded。
+        self._loaded = None
+
     def calculate_returns(self) -> Dict:
         """计算各时间段的实际收益"""
         returns = {}
@@ -252,13 +261,9 @@ class ReportSnapshot:
 
         return accuracy
 
-    def save_to_json(self, directory: str = "report_snapshots") -> str:
-        """保存快照到 JSON 文件"""
-
-        os.makedirs(directory, exist_ok=True)
-        filename = os.path.join(directory, f"{self.report_id}.json")
-
-        atomic_json_write(filename, {
+    def _payload(self) -> Dict:
+        """本类认识的全部字段（save_to_json 写、load_from_json 读的同一份清单）。"""
+        return {
             "ticker": self.ticker,
             "date": self.date,
             "composite_score": self.composite_score,
@@ -277,8 +282,31 @@ class ReportSnapshot:
                 "t7": self.actual_price_t7,
                 "t30": self.actual_price_t30
             },
-            "created_at": datetime.now().isoformat()
-        }, indent=2, default=lambda o: SafeJSONEncoder().default(o))
+            "created_at": self.created_at,
+        }
+
+    def save_to_json(self, directory: str = "report_snapshots") -> str:
+        """保存快照到 JSON 文件
+
+        读回再存（outcomes_fetcher 回填 actual_prices 就是这样）只改动读回之后改过的字段：
+        没改的照原文写回、原文没有的键不补、本类不认识的键原样保留。
+        ⚠️ v0.45.491 之前这里按 _payload 整份重写，而 load_from_json 漏读 cs_rank、
+        created_at 恒写 now() ⇒ 每次扫描的回填都把旧快照的 cs_rank 抹成 null、生成时刻改成回填时刻
+        （10-12 实测 1771 份里 866 份 cs_rank 已被抹）。
+        """
+
+        os.makedirs(directory, exist_ok=True)
+        filename = os.path.join(directory, f"{self.report_id}.json")
+
+        if self._loaded is None and self.created_at is None:
+            self.created_at = datetime.now().isoformat()
+        payload = self._payload()
+        if self._loaded is not None:
+            raw, at_load = self._loaded
+            payload = _merge_onto_loaded(raw, at_load, payload)
+
+        atomic_json_write(filename, payload, indent=2,
+                          default=lambda o: SafeJSONEncoder().default(o))
 
         return filename
 
@@ -294,20 +322,59 @@ class ReportSnapshot:
         snapshot.direction = data.get("direction", "Neutral")
         snapshot.price_target = data.get("price_target", 0.0)
         snapshot.stop_loss = data.get("stop_loss", 0.0)
-        snapshot.entry_price = data.get("entry_price", 0.0)
+        # v0.45.452 二次检查：`atomic_json_write` 起把 NaN 写成 null ⇒ 这里会读到 None；所有读者都按「≤0 = 没有价」排除，
+        # 而 `None > 0` 是 TypeError（weekly_optimizer 整段 WLS 会因此中止）。null / 缺键 / 非数 一律 0.0；旧文件里的 NaN 原样保留（nan > 0 为 False，行为不变）。
+        _ep = data.get("entry_price")
+        snapshot.entry_price = float(_ep) if isinstance(_ep, (int, float)) and not isinstance(_ep, bool) else 0.0
         snapshot.agent_votes = data.get("agent_votes", {})
         # 缺键 = v0.45.164 之前的板截断口径（见 __init__ 注释），不兜成 "agent_details"
         snapshot.agent_votes_source = data.get("agent_votes_source", "")
         snapshot.weights_used = data.get("weights_used", {})
         snapshot.low_conviction = data.get("low_conviction", False)
         snapshot.low_conviction_reason = data.get("low_conviction_reason", "")
+        snapshot.cs_rank = data.get("cs_rank")
+        snapshot.created_at = data.get("created_at")
 
         actual_prices = data.get("actual_prices", {})
         snapshot.actual_price_t1 = actual_prices.get("t1")
         snapshot.actual_price_t7 = actual_prices.get("t7")
         snapshot.actual_price_t30 = actual_prices.get("t30")
 
+        snapshot._loaded = (data, copy.deepcopy(snapshot._payload()))
         return snapshot
+
+
+_ABSENT = object()
+
+
+def _same(a, b) -> bool:
+    """相等，且把 NaN 视为等于 NaN（旧文件里的 NaN 入场价读回后没人改，不算改动）。"""
+    if isinstance(a, float) and isinstance(b, float) and math.isnan(a) and math.isnan(b):
+        return True
+    return type(a) is type(b) and a == b
+
+
+def _merge_onto_loaded(raw: Dict, at_load: Dict, now: Dict) -> Dict:
+    """以文件原文 `raw` 为底，只覆盖读回之后改过的字段（v0.45.491）。
+
+    `at_load` 是读完那一刻由 raw 派生出的字段值（深拷贝），`now` 是存盘时的字段值。
+    某字段 now == at_load ⇒ 没人改过 ⇒ 写 raw 里的原值（原文没有这个键就继续没有）——
+    于是读时做过的规范化（entry_price 的 null → 0.0、缺键 → 默认值）不会被写回盘里。
+    actual_prices 逐子键处理（回填只填其中一格，其余子键与未知子键照旧）。
+    """
+    out = dict(raw)
+    for k, v in now.items():
+        before = at_load.get(k, _ABSENT)
+        if k == "actual_prices" and isinstance(v, dict) and isinstance(before, dict):
+            base = raw.get(k) if isinstance(raw.get(k), dict) else {}
+            sub = _merge_onto_loaded(base, before, v)
+            if sub != base or k in raw:
+                out[k] = sub
+            continue
+        if _same(v, before):
+            continue
+        out[k] = v
+    return out
 
 
 class BacktestAnalyzer:

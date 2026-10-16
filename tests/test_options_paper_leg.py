@@ -253,19 +253,30 @@ class TestExits:
         r = opl.run_for_date("2026-09-21", quotes_fn=_quotes_fn({CALL: _q(0.4, 0.6), PUT: _q(0.4, 0.6)}), signals=[])
         assert r["closed_today"][0]["pnl_usd"] == pytest.approx((1.8 - 1.2) * 100 * 2)
 
-    def test_intrinsic_fallback_after_stale_window(self):
+    def test_pre_expiry_stale_waits_instead_of_intrinsic(self):
+        """v0.45.449：未到期报价取不到 ⇒ 等（报价恢复按报价平、否则到期按到期收盘结），**不**按内在价值提前平——
+        到期前的内在价值把剩余时间价值算成 0（v0.45.101~448 曾在事件后 stale 超 3 天就这么平）。"""
         opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])   # K=100
-        closes = {"2026-09-24": 112.0}
-        for d in ("2026-09-21", "2026-09-22", "2026-09-23"):
+        closes = {d: 112.0 for d in ("2026-09-21", "2026-09-24", "2026-09-30", EXPIRY)}
+        for d in ("2026-09-21", "2026-09-24", "2026-09-30"):     # 事件后、stale 远超 3 天、未到期，有收盘也不平
             r = opl.run_for_date(d, quotes_fn=_none_quotes, signals=[], closes_fn=lambda tk, dd: closes.get(dd))
-            assert len(r["positions"]) == 1, d                # stale 1..3 ≤ 3：等
-        r = opl.run_for_date("2026-09-24", quotes_fn=_none_quotes, signals=[], closes_fn=lambda tk, dd: closes.get(dd))
-        assert r["positions"] == []
-        t = r["closed_today"][0]
+            assert len(r["positions"]) == 1 and r["closed_today"] == [], d
+            assert r["settle_deferred"] == [] and r["positions"][0]["settle_deferred_since"] is None, d
+        r = opl.run_for_date(EXPIRY, quotes_fn=_none_quotes, signals=[], closes_fn=lambda tk, dd: closes.get(dd))
+        t = r["closed_today"][0]                                    # 到期：按到期那一场的收盘结算
         assert t["mark_source"] == "intrinsic" and t["exit_reason"] == "post_event"
         assert t["exit_premium"] == pytest.approx(12.0) and t["exit_underlying"] == 112.0
         assert t["exit_call"] is None and "INTRINSIC" in t["rationale"]
         assert t["pnl_usd"] == pytest.approx((12.0 - 2.2) * 100)
+
+    def test_pre_expiry_stale_closes_at_quotes_once_they_return(self):
+        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])
+        r = opl.run_for_date("2026-09-24", quotes_fn=_none_quotes, signals=[], closes_fn=lambda tk, d: 112.0)
+        assert r["closed_today"] == []
+        r = opl.run_for_date("2026-09-25", quotes_fn=_quotes_fn({CALL: _q(5.9, 6.1), PUT: _q(5.9, 6.1)}),
+                             signals=[], closes_fn=lambda tk, d: 112.0)
+        t = r["closed_today"][0]
+        assert t["mark_source"] == "cboe_mid" and t["exit_premium"] == pytest.approx(11.8)
 
     def test_intrinsic_needs_a_close_otherwise_hold(self):
         opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])
@@ -528,3 +539,68 @@ class TestQuoteContracts:
         monkeypatch.setattr(co, "_SNAPSHOT_PROVIDER", None)
         monkeypatch.setattr(co, "_fetch_cboe_payload", lambda tk, timeout, **kw: None)
         assert co.quote_contracts("XYZ", [CALL]) == {CALL: None}
+
+
+# ==================== cboe_options.quote_held（v0.45.424，Alpha Bot 跨式页盘中参考价）====================
+
+class TestQuoteHeld:
+    """合约报价与 `quote_contracts` 逐字段相同；现价出自同一份 payload，判据同 `fetch_cboe_raw_contracts`。"""
+
+    @staticmethod
+    def _payload(last_trade="2026-09-03T15:59:59"):
+        return {"symbol": "XYZ", "current_price": 104.0, "close": 101.0, "last_trade_time": last_trade, "options": [
+            {"option": CALL, "bid": 1.0, "ask": 1.2, "delta": 0.5, "gamma": 0.02, "vega": 0.1, "theta": -0.05,
+             "iv": 0.3, "open_interest": 10},
+            {"option": PUT, "bid": 0.9, "ask": 1.1, "delta": -0.5, "gamma": 0.02, "vega": 0.1, "theta": -0.04,
+             "iv": 0.3, "open_interest": 10}]}
+
+    @pytest.fixture
+    def co(self, monkeypatch):
+        import cboe_options as co
+        from datetime import datetime
+        monkeypatch.setattr(co, "_SNAPSHOT_PROVIDER", None)
+        monkeypatch.setattr(co, "_pdt_now", lambda: datetime(2026, 9, 3, 10, 0))
+        return co
+
+    def test_quotes_identical_to_quote_contracts(self, co, monkeypatch):
+        from datetime import datetime
+        p = self._payload()
+        monkeypatch.setattr(co, "_fetch_cboe_payload", lambda tk, timeout, **kw: p)
+        held = co.quote_held("XYZ", [CALL, PUT, "XYZ261002C00105000"], now_et=datetime(2026, 9, 3, 18, 0, tzinfo=co._ET_TZ))
+        assert held["quotes"] == co.quote_contracts("XYZ", [CALL, PUT, "XYZ261002C00105000"])
+        assert held["available"] is True and held["vintage_date"] == "2026-09-03"
+
+    def test_after_the_close_uses_close_not_after_hours(self, co, monkeypatch):
+        from datetime import datetime
+        monkeypatch.setattr(co, "_fetch_cboe_payload", lambda tk, timeout, **kw: self._payload())
+        held = co.quote_held("XYZ", [CALL], now_et=datetime(2026, 9, 3, 18, 0, tzinfo=co._ET_TZ))
+        assert held["session_live"] is False
+        assert held["underlying_price"] == pytest.approx(101.0) and held["underlying_price_source"] == "cboe_close"
+
+    def test_in_session_uses_current_price(self, co, monkeypatch):
+        from datetime import datetime
+        monkeypatch.setattr(co, "_fetch_cboe_payload", lambda tk, timeout, **kw: self._payload("2026-09-03T11:00:00"))
+        held = co.quote_held("XYZ", [CALL], now_et=datetime(2026, 9, 3, 11, 15, tzinfo=co._ET_TZ))
+        assert held["session_live"] is True
+        assert held["underlying_price"] == pytest.approx(104.0) and held["underlying_price_source"] == "cboe_intraday"
+
+    def test_unverifiable_vintage_is_refused(self, co, monkeypatch):
+        """v0.45.428：同 `fetch_cboe_raw_contracts`——报价是哪一天的都判不了，就不当「此刻的参考价」给出去。"""
+        from datetime import datetime
+        p = self._payload()
+        p["last_trade_time"] = "garbled"
+        monkeypatch.setattr(co, "_fetch_cboe_payload", lambda tk, timeout, **kw: p)
+        held = co.quote_held("XYZ", [CALL], now_et=datetime(2026, 9, 3, 18, 0, tzinfo=co._ET_TZ))
+        assert held["available"] is False and held["reason"] == "vintage_unverifiable" and held["quotes"] == {CALL: None}
+
+    def test_stale_snapshot_and_failure_are_unavailable(self, co, monkeypatch):
+        def stale(tk, timeout, **kw):
+            raise co.CboeStaleVintageError("XYZ", "2026-09-02", "2026-09-03")
+        monkeypatch.setattr(co, "_fetch_cboe_payload", stale)
+        assert co.quote_held("XYZ", [CALL]) == {**co.quote_held("XYZ", [CALL]), "available": False, "reason": "stale_vintage",
+                                                "quotes": {CALL: None}}
+        monkeypatch.setattr(co, "_fetch_cboe_payload", lambda tk, timeout, **kw: None)
+        assert co.quote_held("XYZ", [CALL])["reason"] == "payload_unavailable"
+        monkeypatch.setattr(co, "_SNAPSHOT_PROVIDER", lambda tk: {})
+        monkeypatch.setattr(co, "_fetch_cboe_payload", lambda *a, **k: pytest.fail("快照模式不该取数"))
+        assert co.quote_held("XYZ", [CALL])["reason"] == "snapshot_mode"

@@ -14,6 +14,7 @@ import statistics
 import threading
 
 from hive_logger import PATHS, get_logger, atomic_json_write
+import ledger_io
 
 _log = get_logger("options")
 
@@ -47,6 +48,110 @@ except ImportError:
 _TOTAL_OI_NOOP_WARNED = False
 
 
+# ── v0.45.383：日线完整性计数 ───────────────────────────────────────────────
+# 进 `scan_timing.counters.hv_gap` → status.json。只数**真发生了取数**的次数（缓存命中不计）。
+_HV_GAP_LOCK = threading.Lock()
+_HV_GAP_STATS: Dict[str, int] = {"checked": 0, "clean": 0, "repaired": 0, "degraded": 0,
+                                 "minor": 0, "check_errors": 0,
+                                 "filled": 0}          # v0.45.387：缺口用 Twelve Data 补出那一根（复权口径换算）
+_HV_GAP_TICKERS: Dict[str, Dict[str, List[str]]] = {}   # {ticker: {"critical": [...], "minor": [...]}}
+
+
+def _hv_gap_note(ticker: str, outcome: str, gaps: Optional[Dict[str, List[str]]],
+                 fill: Optional[Dict[str, List[str]]] = None) -> None:
+    """记一次校验结果。outcome: clean / repaired / filled / degraded。
+
+    `fill`（仅试过第二源时）= ``{"filled": [日期...], "unfilled": ["日期:原因"...]}``，原样进 `tickers`，
+    让 status.json 里既看得见「补了哪几天」，也看得见「为什么没补成」。值一律是字符串列表——
+    `hv_gap_stats()` 拷贝时按 `list(v)`，dict 会被拷成只剩键。"""
+    with _HV_GAP_LOCK:
+        _HV_GAP_STATS["checked"] += 1
+        _HV_GAP_STATS[outcome] += 1
+        if gaps and gaps.get("minor"):
+            _HV_GAP_STATS["minor"] += 1
+        if gaps and (gaps.get("critical") or gaps.get("minor")):
+            _HV_GAP_TICKERS[ticker] = {"critical": list(gaps.get("critical") or []),
+                                       "minor": list(gaps.get("minor") or [])}
+            if fill:
+                _HV_GAP_TICKERS[ticker]["filled"] = list(fill.get("filled") or [])
+                _HV_GAP_TICKERS[ticker]["unfilled"] = list(fill.get("unfilled") or [])
+
+
+def _clean_bars(hist) -> Tuple[List[str], List[float]]:
+    """(日期, 收盘) 两个等长列表，**剔除 Close 为 NaN / ≤0 的行**。
+
+    为什么剔：yfinance 偶有「日期在、Close 是 NaN」的行（2026-08-28 实测，Volume 却有值）。
+    `pct_change().dropna()` 会把它连同后一根的收益一起丢掉——和缺一根 bar 同样让 20 日窗口错位，
+    但 `find_gaps` 只看日期，从前看不见。把它当缺失处理，才会进重取 / 第二源修复 / 置空这条链。"""
+    dates: List[str] = []
+    closes: List[float] = []
+    for d, c in zip(hist.index, hist["Close"].tolist()):
+        if c == c and c > 0:
+            dates.append(d.strftime("%Y-%m-%d"))
+            closes.append(float(c))
+    return dates, closes
+
+
+def _fill_gaps_from_second_source(ticker: str, hist, gaps: Dict[str, List[str]]):
+    """重取后仍缺 ⇒ 向 Twelve Data 借缺的那几根（换算回复权口径，见 `bars_integrity.fill_gaps_from_reference`）。
+
+    返回 ``(新收盘 Series | None, {"filled": [...], "unfilled": ["日期:原因"...]})``。
+    **全有或全无**：有任何一根补不出就返回 None——半补的序列仍有缺口，不能拿去算 HV。
+    补完再跑一遍 `find_gaps` 复核；第二源不可用（未配 key / 限流 / 网络）或本函数自身出错，一律退回 None，
+    由调用方走既有的「置空」路径，且原因写进 `unfilled`（谁会红：计数器 + 摘要行点名）。"""
+    crit = list(gaps.get("critical") or [])
+    try:
+        import pandas as pd
+        import twelve_data as _td
+        from bars_integrity import fill_gaps_from_reference, find_gaps
+        rows = _td.fetch_bars(ticker, _td.SHARED_BARS_WINDOW)
+        if not rows and str((_td.bars_cache_stats().get("failed") or {}).get(ticker, "")).startswith("network"):
+            # 瞬时网络错误（2026-09-29 扫描 4/35 次真实请求 RemoteDisconnected/URLError）重试一次；
+            # 限流 / 404 / 接口报错重试没有意义，不重试。失败不入缓存，再调一次就是真重新请求。
+            rows = _td.fetch_bars(ticker, _td.SHARED_BARS_WINDOW)
+        if not rows:
+            return None, {"filled": [], "unfilled": [f"{d}:td_unavailable" for d in crit]}
+        dates, closes = _clean_bars(hist)
+        res = fill_gaps_from_reference(dates, closes, rows, crit)
+        if res["unfilled"]:
+            return None, {"filled": [], "unfilled": [f"{d}:{r}" for d, r in sorted(res["unfilled"].items())]}
+        again = find_gaps(res["dates"])
+        if again["critical"]:
+            return None, {"filled": [], "unfilled": [f"{d}:recheck_failed" for d in again["critical"]]}
+        return pd.Series(res["closes"]), {"filled": list(res["filled"]), "unfilled": []}
+    except Exception as e:  # noqa: BLE001 - 第二源的任何故障都不许拖垮主路径，但要留痕
+        _log.error("[%s] 第二源补日线自身出错（退回置空）: %s: %s", ticker, type(e).__name__, e)
+        return None, {"filled": [], "unfilled": [f"{d}:fill_error:{type(e).__name__}" for d in crit]}
+
+
+def _check_bars_gaps(ticker: str, hist) -> Optional[Dict[str, List[str]]]:
+    """对 yfinance 日线做完整性校验。校验**本身**出错返回 None 并计 `check_errors`——
+    校验器的 bug 不该把全部 iv_rank 置空，但也不能悄悄当作「没缺口」：错误进计数器、日志打 ERROR。"""
+    try:
+        from bars_integrity import find_gaps
+        return find_gaps(_clean_bars(hist)[0])
+    except Exception as e:  # noqa: BLE001
+        with _HV_GAP_LOCK:
+            _HV_GAP_STATS["check_errors"] += 1
+        _log.error("[%s] 日线完整性校验自身出错（本次按未校验放行）: %s: %s", ticker, type(e).__name__, e)
+        return None
+
+
+def hv_gap_stats() -> Dict:
+    """日线完整性校验的累计计数，供 scan_timing 收集。"""
+    with _HV_GAP_LOCK:
+        d = dict(_HV_GAP_STATS)
+        d["tickers"] = {t: {k: list(v) for k, v in g.items()} for t, g in _HV_GAP_TICKERS.items()}
+    return d
+
+
+def reset_hv_gap_stats() -> None:
+    with _HV_GAP_LOCK:
+        for k in _HV_GAP_STATS:
+            _HV_GAP_STATS[k] = 0
+        _HV_GAP_TICKERS.clear()
+
+
 class OptionsDataFetcher:
     """期权数据采集器 - 支持多源降级策略"""
 
@@ -57,6 +162,11 @@ class OptionsDataFetcher:
         self.cache_dir = cache_dir or str(PATHS.cache_dir)
         self.cache_ttl = 300  # 5 分钟缓存
         self.last_hist_hv_is_sample = False  # P0-1: 最近一次 fetch_historical_iv 是否落样本
+        # v0.45.383：最近一次 fetch_historical_hv 里「落在最后 21 根内」的缺失交易日（非空 ⇒ 当前 HV 不可信）。
+        # 每次分析都 new 一个 OptionsAgent（自带 fetcher），此标志不跨线程共享——
+        # 「并发改写」的担心 2026-09-29 已排除（见 CHANGELOG v0.45.383）。
+        self.last_hist_hv_gaps: List[str] = []
+        self.last_hist_hv_filled: List[str] = []
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def _get_cache_path(self, ticker: str, data_type: str) -> str:
@@ -193,12 +303,21 @@ class OptionsDataFetcher:
             _near_expiry_set = {e for e, d in _expiry_with_dte if d < 7}
 
             # 获取当前股价，用于 ATM 过滤（避免深度遗留低价合约污染 key levels）
-            _current_price = 0.0
+            # v0.45.468：同时记下出处，并作为本链的 `underlying_price` 带出、给下面的 BS gamma 用
+            # （与 CBOE 分支对齐）。逐个取有限正数——旧写法 `lastPrice or previousClose` 遇 NaN
+            # lastPrice 会取 NaN（NaN 为真值），ATM 过滤随之整段失效。
+            _current_price, _current_price_src = 0.0, "unavailable"
             try:
                 _fi = stock.fast_info
-                _current_price = float(
-                    _fi.get("lastPrice") or _fi.get("previousClose") or 0
-                )
+                for _k, _src in (("lastPrice", "yfinance_last_price"),
+                                 ("previousClose", "yfinance_previous_close")):
+                    try:
+                        _v = float(_fi.get(_k))
+                    except (TypeError, ValueError):
+                        continue
+                    if _math.isfinite(_v) and _v > 0:
+                        _current_price, _current_price_src = _v, _src
+                        break
             except (AttributeError, TypeError, KeyError, RuntimeError):
                 pass
 
@@ -281,6 +400,26 @@ class OptionsDataFetcher:
                     max_w = max(raw_weights) if raw_weights else 1.0
                     df["dte_weight"] = [w / max_w for w in raw_weights]
 
+            # ── v0.45.482：Yahoo 求解失败的 IV 在源头剔除（见 yahoo_iv 模块 docstring）──
+            # 减半阶梯 1 / ½ / ¼ / ⅛ / … 与地板 1e-05 不是观测（对照 CBOE 99.7% 相差 > 10 个波动率点）。
+            # 置 0（本链「缺失」的既有约定，fillna(0) 同此）并打 `_iv_placeholder` 标记——下游 ATM 中位数 / 偏斜 /
+            # key levels 都按 0 跳过，BS gamma 遇 sigma < 0.01 给 0；analyze() 据标记数 ATM 窗口里失败的占比。
+            # 此前 ATM 中位数正好落成 12.5 / 6.25（/ 25 / 50），落在 5%–150% 有效区间、被当真实观测。
+            from yahoo_iv import is_placeholder_iv
+            _n_placeholder = 0
+            for df in [calls_df, puts_df]:
+                if df is None or df.empty or "impliedVolatility" not in df.columns:
+                    continue
+                _ph = df["impliedVolatility"].map(is_placeholder_iv).astype(bool)
+                df.loc[_ph, "impliedVolatility"] = 0.0
+                df["_iv_placeholder"] = _ph
+                _n_placeholder += int(_ph.sum())
+            if _n_placeholder:
+                with _snap_stats_lock:
+                    _snap_stats["iv_placeholder_contracts"] += _n_placeholder
+                _log.warning("[%s] yfinance 链有 %d 个合约的 IV 是 Yahoo 求解失败值（减半阶梯 / 1e-05），已置 0、不进 ATM IV / 偏斜 / gamma",
+                             ticker, _n_placeholder)
+
             # ── 注入 BS gamma（yfinance 不返回 Greeks）──────────────
             # 用 Black-Scholes 为每份合约计算 gamma，填入 "gamma" 字段
             # 供下游 calculate_gamma_exposure() 使用
@@ -295,11 +434,18 @@ class OptionsDataFetcher:
                 except (ValueError, ZeroDivisionError):
                     return 0.0
 
-            # 估算股价：先用传入参数，无则从最大 OI 行权价中值推断
-            _S = stock_price or 0.0
-            if _S <= 0 and calls_df is not None and not calls_df.empty:
-                _atm_candidates = calls_df[calls_df["openInterest"] > 50]["strike"].tolist() if "openInterest" in calls_df.columns else []
-                _S = float(statistics.median(_atm_candidates)) if _atm_candidates else 0.0
+            # BS gamma 的 S：调用方给的有效价 ⇒ 上面 fast_info 取到的价 ⇒ 都没有就不补 gamma
+            # （下方 `_S <= 0` 跳过 ⇒ GEX「算不出」）。
+            # v0.45.462 前没给价就拿「OI>50 的看涨行权价中位数」当 S——那是行权价，不是股价；而 analyze()
+            # 调本函数从不传价，所以 yfinance 链的 GEX **每天**都按中位行权价算（BILI 几乎天天走这条）。
+            # v0.45.462 删了中位数却没接上这里本就取到的 fast_info 价 ⇒ yfinance 链的 GEX 恒 None（v0.45.468 二次检查）。
+            try:
+                _S = float(stock_price or 0.0)
+            except (TypeError, ValueError):
+                _S = 0.0
+            _S_src = "caller"
+            if not (_math.isfinite(_S) and _S > 0):
+                _S, _S_src = _current_price, _current_price_src
             for df in [calls_df, puts_df]:
                 if df is None or df.empty or _S <= 0:
                     continue
@@ -331,6 +477,13 @@ class OptionsDataFetcher:
                 "expirations": expirations,
                 # v0.17.0: 近期到期集合，供下游 total_oi 计算做权重衰减
                 "near_expiry_set": list(_near_expiry_set),
+                # v0.45.468：与 CBOE 分支同形——本链取数时的标的价与出处，analyze() 调用方没给价时用它
+                "underlying_price": _S if _S > 0 else None,
+                "underlying_price_source": _S_src if _S > 0 else "unavailable",
+                # v0.45.475：与 CBOE 分支的 `_source: "cboe"` 对称——analyze 据此在结果里记 `chain_source`
+                "_source": "yfinance",
+                # v0.45.482：IV 是 Yahoo 求解失败值、已置 0 的合约数（逐合约标记在 `_iv_placeholder`）
+                "iv_placeholder_contracts": _n_placeholder,
             }
 
             # CBOE 已作主源优先尝试过；走到这里说明 CBOE 不可用、改用 yfinance。
@@ -392,8 +545,12 @@ class OptionsDataFetcher:
         # P0-1 (v0.38.0): 标记本次历史 IV 是否为样本数据，供 analyze() 决定
         # IV Rank 是否可信（样本历史区间与真实现价 IV 错配会产生假 0/100 极值）
         self.last_hist_hv_is_sample = False
+        self.last_hist_hv_gaps = []
+        self.last_hist_hv_filled = []
 
-        cached = self._read_cache(ticker, "hist_hv_v4")
+        # v0.45.383：缓存键 v4 → v5。v5 里只放**通过完整性校验**的序列——缺口序列绝不进缓存，
+        # 否则 5 分钟内的后续调用会把错位的 HV 当成好数据直接读走（且读缓存时无从知道它有缺口）。
+        cached = self._read_cache(ticker, "hist_hv_v5")
         if cached:
             return cached
 
@@ -403,22 +560,48 @@ class OptionsDataFetcher:
             return self._get_sample_historical_hv(ticker)
 
         try:
-            try:                                # v0.45.56 限流闸门
-                from yf_gate import ensure as _yf_ensure
-                _yf_ensure()
-            except Exception:                   # pragma: no cover - 闸门不可得不阻断
-                pass
-
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="1y")
+            hist = None
+            gaps = None
+            repaired = False
+            for attempt in (1, 2):
+                try:                            # v0.45.56 限流闸门
+                    from yf_gate import ensure as _yf_ensure
+                    _yf_ensure()
+                except Exception:               # pragma: no cover - 闸门不可得不阻断
+                    pass
 
-            if hist.empty:
-                _log.warning("%s 历史数据不可用，使用样本数据", ticker)
-                self.last_hist_hv_is_sample = True
-                return self._get_sample_historical_hv(ticker)
+                hist = stock.history(period="1y")
+
+                if hist.empty:
+                    _log.warning("%s 历史数据不可用，使用样本数据", ticker)
+                    self.last_hist_hv_is_sample = True
+                    return self._get_sample_historical_hv(ticker)
+
+                gaps = _check_bars_gaps(ticker, hist)
+                if gaps is None or not gaps["critical"]:
+                    repaired = attempt == 2
+                    break
+                if attempt == 1:
+                    _log.warning("[%s] 日线缺交易日 %s（落在最后 21 根内，当前 HV 会错位），重取一次",
+                                 ticker, gaps["critical"])
+
+            # v0.45.387 阶段 2：重取后仍缺 ⇒ 先向 Twelve Data 借缺的那几根（换算回复权口径），
+            # 补不齐才走下面的「置空」。全有或全无，见 `_fill_gaps_from_second_source`。
+            close_series = hist["Close"]
+            fill_info = None
+            if gaps is not None and gaps["critical"]:
+                fixed, fill_info = _fill_gaps_from_second_source(ticker, hist, gaps)
+                if fixed is not None:
+                    close_series = fixed
+                    self.last_hist_hv_filled = list(fill_info["filled"])
+                    _hv_gap_note(ticker, "filled", gaps, fill_info)
+                    _log.warning("[%s] 日线缺交易日 %s，已用 Twelve Data 补齐（复权口径换算），HV Rank 照常计算",
+                                 ticker, gaps["critical"])
+                    gaps = {"missing": [], "critical": [], "minor": list(gaps.get("minor") or [])}
 
             # 计算历史已实现波动率（20日滚动）
-            returns = hist["Close"].pct_change().dropna()
+            returns = close_series.pct_change().dropna()
             rolling_vol = returns.rolling(window=20).std() * 100 * (252 ** 0.5)
             hv_values = rolling_vol.dropna().tolist()
 
@@ -430,13 +613,29 @@ class OptionsDataFetcher:
             # 且 clamp 生效时反而制造失真）。如实返回 HV 序列，最后 252 个点。
             hv_list = hv_values[-days:]
 
-            self._write_cache(ticker, "hist_hv_v4", hv_list)
+            if gaps is not None and gaps["critical"]:
+                # 重取后仍缺：仍返回序列（`min(hist_hv)` 等只需要量级的用法照旧），
+                # 但标记不可信、**不写缓存**；调用方据此把 iv_rank / iv_percentile 置 None（评分走中性）。
+                self.last_hist_hv_gaps = list(gaps["critical"])
+                _hv_gap_note(ticker, "degraded", gaps, fill_info)
+                _log.warning("[%s] 重取后日线仍缺交易日 %s（第二源也没补成：%s）：HV Rank 将置 None（不用错位的数据冒充）",
+                             ticker, gaps["critical"], (fill_info or {}).get("unfilled"))
+                return hv_list
+
+            if not self.last_hist_hv_filled:      # 第二源补齐的情形上面已计过 "filled"
+                _hv_gap_note(ticker, "repaired" if repaired else "clean", gaps)
+            self._write_cache(ticker, "hist_hv_v5", hv_list)
             return hv_list
 
         except (*NETWORK_ERRORS, TypeError) as e:
             _log.warning("获取 %s 历史 HV 失败：%s，使用样本数据", ticker, e)
             self.last_hist_hv_is_sample = True
             return self._get_sample_historical_hv(ticker)
+
+    def hist_hv_untrusted(self) -> bool:
+        """最近一次 `fetch_historical_hv` 的结果不可用于算 iv_rank：落了样本，或当前 HV 受缺口影响。"""
+        return bool(getattr(self, "last_hist_hv_is_sample", False)
+                    or getattr(self, "last_hist_hv_gaps", None))
 
     def fetch_expirations(self, ticker: str) -> List[str]:
         """获取期权到期日列表"""
@@ -577,6 +776,17 @@ class OptionsDataFetcher:
         return expirations
 
 
+
+
+def _iv_or_none(contract: Dict) -> Optional[float]:
+    """展示用的逐合约 IV：Yahoo 求解失败值（`_iv_placeholder`，v0.45.482 已置 0）或非正 / 非有限 ⇒ None（v0.45.490）。"""
+    if contract.get("_iv_placeholder"):
+        return None
+    try:
+        v = float(contract.get("impliedVolatility"))
+    except (TypeError, ValueError):
+        return None
+    return v if _math.isfinite(v) and v > 0 else None
 
 class OptionsAnalyzer:
     """期权信号分析器"""
@@ -721,6 +931,11 @@ class OptionsAnalyzer:
         # 正数 = net long gamma（压制波动），负数 = net short gamma（放大波动）
         # 除以 1e6 转为百万美元
         total = call_gamma + put_gamma
+        # v0.45.462：某个合约的 gamma / OI 是 NaN ⇒ 整个和是 NaN，而 `NaN <= 0` 为 False，
+        # 下面那道 `total <= 0` 挡不住 ⇒ 返回 NaN ⇒ 出口消毒。一条坏合约让总量不可信，按「算不出」处理。
+        if not _math.isfinite(total):
+            _log.warning("GEX 求和出现非有限数（某合约 gamma / OI 非有限），按不可得处理")
+            return None
         # v0.45.63：同上——total==0 表示整条链没有任何 gamma×OI（退化链），
         # 那是「算不出」不是「净 gamma 为零」。只修了上面两处而留下这处，
         # 就是 v0.45.49 `_get_metric_display` 那种「五个字段只修了一个」。
@@ -1041,14 +1256,22 @@ class OptionsAnalyzer:
                 gap_med = statistics.median(gaps) if gaps else 0.0
                 # 自适应 ATM 容差：纯 ±4% 对低价股会归零（AMC≈$3 时 ±$0.12 < 行权价间距 $0.50）
                 atm_tol = max(stock_price * 0.04, gap_med * 1.2)
+                # v0.45.482：Yahoo 求解失败值（减半阶梯 ½ / ¼ / ⅛ / 1/16 / 1/32 都过得了 0.02~2.0）不进期限结构
+                from yahoo_iv import is_placeholder_iv
+                _atm = [c for c in calls_list if abs(c.get("strike", 0) - stock_price) <= atm_tol]
+                _n_ph = sum(1 for c in _atm if is_placeholder_iv(c.get("impliedVolatility")))
                 ivs = [
                     float(c["impliedVolatility"]) * 100
-                    for c in calls_list
-                    if abs(c.get("strike", 0) - stock_price) <= atm_tol
-                    and c.get("impliedVolatility")
+                    for c in _atm
+                    if c.get("impliedVolatility")
                     and _math.isfinite(c["impliedVolatility"])
                     and 0.02 < c["impliedVolatility"] < 2.0
+                    and not is_placeholder_iv(c["impliedVolatility"])
                 ]
+                # v0.45.490（482 二次检查）：与 analyze 的 ATM 窗口同一多数规则——这个到期日失败值不少于有效值 ⇒ 整个到期日不取
+                if _n_ph and _n_ph >= len(ivs):
+                    errors.append(f"chain[{exp}]:ATM 内 {_n_ph} 个 IV 是 Yahoo 求解失败值、有效 {len(ivs)} 个，不取")
+                    continue
                 if ivs:
                     term_pts.append({
                         "expiry": exp,
@@ -1188,7 +1411,9 @@ class OptionsAnalyzer:
         5. 大额溢价: dollar_premium >= $500K
         """
         unusual = []
-        _sp = stock_price if stock_price > 0 else 0
+        # v0.45.462：现价不可得时 analyze 传 None（不再传行权价中位数冒充）⇒ OTM 类条件不判
+        _sp = (stock_price if (isinstance(stock_price, (int, float)) and _math.isfinite(stock_price)
+                               and stock_price > 0) else 0)
 
         def _scan(contracts: List[Dict], is_call: bool):
             for c in contracts:
@@ -1301,7 +1526,8 @@ class OptionsAnalyzer:
                     {
                         "strike": call.get("strike"),
                         "oi": call.get("openInterest"),
-                        "iv": call.get("impliedVolatility"),
+                        # v0.45.490：Yahoo 失败值（482 置 0、`_iv_placeholder`）与非正 IV 都是缺失，记 None 而不是 0
+                        "iv": _iv_or_none(call),
                     }
                 )
 
@@ -1318,7 +1544,8 @@ class OptionsAnalyzer:
                     {
                         "strike": put.get("strike"),
                         "oi": put.get("openInterest"),
-                        "iv": put.get("impliedVolatility"),
+                        # v0.45.490：Yahoo 失败值（482 置 0、`_iv_placeholder`）与非正 IV 都是缺失，记 None 而不是 0
+                        "iv": _iv_or_none(put),
                     }
                 )
 
@@ -1469,12 +1696,20 @@ _snap_stats_lock = threading.Lock()
 #   writes_before_close      收盘前写入的快照数（写入本身不重复，按次即按份）
 #   gex_signal_corrected     命中了几份**旧代码写的**快照、其 options_score 含已撤销的负 GEX +1.0，
 #                            被就地减掉（v0.45.349，按份计；见 `_drop_legacy_gex_signal`）
+#   stock_price_unavailable  analyze() 现价不可得（调用方没给、期权链也没带）的次数（v0.45.462，见 `_resolve_stock_price`）
+#   nan_sanitized            出口消毒遇到的非有限数个数（v0.45.462：改写成 None，不再是 0.0；见 `_sanitize_result`）
+#   iv_placeholder_contracts yfinance 链里 IV 是 Yahoo 求解失败值（减半阶梯 / 1e-05）、被置 0 的合约数（v0.45.482，见 yahoo_iv）
+#   iv_placeholder_majority  analyze() ATM 窗口里失败值合约 ≥ 有效合约 ⇒ 不取中位数、按「无当日 IV」处理的次数（v0.45.482）
+#   iv_unavailable           analyze() 当日 ATM IV 无效（<5% / >150% / 没有可用合约）且无可用缓存、`iv_current` 记 None
+#                            的次数（v0.45.471：此前兜底成常数 25.0，见 analyze 内「IV 不可得」注释）
 #
 # 为什么要去重：一只标的一轮扫描要调 3~4 次 analyze()（OracleBee / BearBee / advanced_analyzer /
 # 日报收尾），v0.45.238 按调用计时，一份盘中快照会被报 3~4 遍、一天可达上百条 WARNING，
 # 计数也读不出「几份快照有问题」。去重键带冻结时间戳：同一路径被重写成新快照后再出事，照样会报。
 _SNAP_STATS_KEYS = ("hits", "writes", "session_mismatch", "hits_before_close",
-                    "writes_before_close", "calendar_fallback", "gex_signal_corrected")
+                    "writes_before_close", "calendar_fallback", "gex_signal_corrected",
+                    "stock_price_unavailable", "nan_sanitized", "iv_unavailable",
+                    "iv_placeholder_contracts", "iv_placeholder_majority")
 
 # v0.45.349：OptionsAgent 每条返回路径都带这个键、值恒为 False ——「本结果的 options_score
 # 不含 GEX 分量」。旧代码写的快照没有这个键 ⇒ 命中时据此判定要不要减掉旧的 +1.0。
@@ -1596,19 +1831,76 @@ def _qs_unavailable(error: str, *, source: str = "cboe") -> Dict:
                 "contracts": {r: None for r in ("atm_call", "atm_put", "c25", "p25")}}
 
 
-def _sanitize_result(result: Dict) -> None:
-    """方案21: 遍历结果 dict，将 NaN/Inf float 替换为 0.0（就地修改）"""
+def _resolve_stock_price(caller_price, options_chain: Dict) -> Tuple[Optional[float], str]:
+    """analyze() 用的现价：**唯一出处**（v0.45.462）。返回 `(price | None, source)`。
+
+    1. 调用方给的价（有限、> 0）⇒ `"caller"`——与旧行为一致，调用方给了价的日子一个数都不变。
+    2. 否则期权链自带的标的价（CBOE payload 的 `official_price`，与链上报价同一时刻）⇒ 链标注的出处。
+    3. 都没有 ⇒ `(None, "unavailable")`。**不猜**：
+
+    旧实现在两处各自兜底成「OI>100 的看涨行权价中位数」，再没有就是常数 145.0。那是行权价，不是股价；
+    它被写进快照的 `_snapshot_stock_price`，又被 price_history 当「我们自己的观测」收进价格索引。
+    NaN 也在这里挡：`if not x` 拦不住 NaN（NaN 为真值），旧代码的第二处兜底因此会把 NaN 原样写进快照。
+    """
+    def _pos(v) -> Optional[float]:
+        if isinstance(v, bool):
+            return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if (_math.isfinite(f) and f > 0) else None
+
+    px = _pos(caller_price)
+    if px is not None:
+        return px, "caller"
+    chain = options_chain if isinstance(options_chain, dict) else {}
+    px = _pos(chain.get("underlying_price"))
+    if px is not None:
+        return px, str(chain.get("underlying_price_source") or "chain")
+    return None, "unavailable"
+
+
+def _sanitize_result(result: Dict, _path: str = "") -> List[str]:
+    """出口消毒：NaN / ±Inf → **None**（就地修改），返回被改写的键路径。
+
+    v0.45.462 前是 → 0.0：把「算不出」写成一个合法读数（P/C=0 读作极度看多、GEX=0 读作 gamma 中性、
+    iv_rank=0 读作历史最低），signal_archive 再把它当真观测归档进 IC。None 是本模块对「不可得」的既有口径
+    （样本早退分支、GEX / 偏斜的不可得返回都是 None），下游读者已按 None 处理。
+    实测这条路径在现行代码下触发不到（1901 份快照零 NaN；`options_score` 在消毒之前就算好了，消毒改不到它）
+    ——所以触发即异常：计数进 `snapshot_slot_stats()["nan_sanitized"]`（status.json），并由调用方打 WARNING。
+    """
+    hits: List[str] = []
+
+    def _bad(v) -> bool:
+        return isinstance(v, float) and not _math.isfinite(v)
+
     for key, val in result.items():
-        if isinstance(val, float) and (_math.isnan(val) or _math.isinf(val)):
-            result[key] = 0.0
+        here = f"{_path}.{key}" if _path else str(key)
+        if _bad(val):
+            result[key] = None
+            hits.append(here)
         elif isinstance(val, dict):
-            _sanitize_result(val)  # 递归处理嵌套 dict（如 iv_skew_detail）
+            hits.extend(_sanitize_result(val, here))  # 递归处理嵌套 dict（如 iv_skew_detail）
         elif isinstance(val, list):
             for i, item in enumerate(val):
-                if isinstance(item, float) and (_math.isnan(item) or _math.isinf(item)):
-                    val[i] = 0.0
+                if _bad(item):
+                    val[i] = None
+                    hits.append(f"{here}[{i}]")
                 elif isinstance(item, dict):
-                    _sanitize_result(item)  # 递归处理 list 内嵌套 dict（如 unusual_activity）
+                    hits.extend(_sanitize_result(item, f"{here}[{i}]"))  # list 内嵌套 dict（如 unusual_activity）
+    return hits
+
+
+def _write_snapshot(path, obj: Dict, indent: Optional[int] = None) -> None:
+    """期权快照落盘的唯一写法（v0.45.462）：原子替换 + 严格序列化（拒 NaN / 不可序列化）。
+
+    快照不是缓存：期权链只有实时接口，过了那一场就再也取不回，而 vrp / 财报波动 / IV·价格索引都读回它。
+    旧写法 `open(path, "w") + json.dump(default=str)`：① 先截断再写，写到一半中断 ⇒ 下次读坏 ⇒
+    「读取失败，重新计算」⇒ 用此刻的链覆盖那一场的冻结数据；② `default=str` 把不可序列化的值
+    悄悄写成字符串。失败抛 `ledger_io.LedgerError` / `OSError`，并由 ledger_io 在源头登记（status.json ⇒ P2）。
+    """
+    ledger_io.write_json(path, obj, indent=indent)
 
 
 class OptionsAgent:
@@ -1877,20 +2169,22 @@ class OptionsAgent:
         _fixed = []
 
         # ① IV-RV / RV30 —— 纯 yfinance 日K，随时可重拉
+        # v0.45.474：IV 不可得（None）照样重算——RV 是日K 派生、与 IV 无关，价差由
+        # calculate_iv_rv_spread 自己给 None。此前 `if _iv:` 在 v0.45.471 之前恒为真（不可得被兜成 25.0），
+        # 471 改 None 后变成「IV 缺 ⇒ 连 RV 也不补」，同一份快照里本可修复的 rv_30d 就一直空着。
         if cached.get("rv_30d") is None:
             _iv = cached.get("iv_current")
-            if _iv:
-                try:
-                    from market_intelligence import calculate_iv_rv_spread
-                    _d = calculate_iv_rv_spread(ticker, float(_iv))
-                    if _d.get("rv_30d") is not None:
-                        cached["rv_30d"] = _d.get("rv_30d")
-                        cached["iv_rv_spread"] = _d.get("iv_rv_spread")
-                        cached["iv_rv_signal"] = _d.get("iv_rv_signal") or "unknown"
-                        cached["iv_rv_detail"] = _d
-                        _fixed.append("rv_30d")
-                except Exception as _e:  # noqa: BLE001 - 重算失败保持原样
-                    _log.debug("[%s] 快照 RV 重算失败: %s", ticker, _e)
+            try:
+                from market_intelligence import calculate_iv_rv_spread
+                _d = calculate_iv_rv_spread(ticker, float(_iv) if _iv is not None else None)
+                if _d.get("rv_30d") is not None:
+                    cached["rv_30d"] = _d.get("rv_30d")
+                    cached["iv_rv_spread"] = _d.get("iv_rv_spread")
+                    cached["iv_rv_signal"] = _d.get("iv_rv_signal") or "unknown"
+                    cached["iv_rv_detail"] = _d
+                    _fixed.append("rv_30d")
+            except Exception as _e:  # noqa: BLE001 - 重算失败保持原样
+                _log.debug("[%s] 快照 RV 重算失败: %s", ticker, _e)
 
         # ② IV Rank —— **仅** hv_proxy 口径可重算（它由 HV 历史派生）。
         # 真实 IV 历史口径（real_iv_*）来自自攒的 IV 观测库，不是日K 派生，
@@ -1899,7 +2193,7 @@ class OptionsAgent:
                 and cached.get("iv_rank_source") == "hv_proxy"):
             try:
                 _hist_hv = self.fetcher.fetch_historical_hv(ticker)
-                if _hist_hv and not getattr(self.fetcher, "last_hist_hv_is_sample", False):
+                if _hist_hv and not self.fetcher.hist_hv_untrusted():
                     _cur_hv = _hist_hv[-1]
                     _rank, _ = self.analyzer.calculate_iv_rank(_cur_hv, _hist_hv)
                     if _rank is not None:
@@ -1918,8 +2212,7 @@ class OptionsAgent:
         if snap_path:
             try:
                 cached["_price_derived_refreshed_at"] = datetime.now().isoformat()
-                with open(snap_path, "w") as _f:
-                    json.dump(cached, _f, ensure_ascii=False, default=str)
+                _write_snapshot(snap_path, cached)
             except Exception as _e:  # noqa: BLE001 - 回写失败不影响本次返回值
                 _log.warning("[%s] 快照回写失败（本次结果仍已修复）: %s", ticker, _e)
         return True
@@ -1963,8 +2256,7 @@ class OptionsAgent:
         _log.info("[%s] 快照 quote_set 已回填（原快照抓取时 CBOE 不可用）", ticker)
         if snap_path:
             try:
-                with open(snap_path, "w") as _f:
-                    json.dump(cached, _f, ensure_ascii=False, default=str)
+                _write_snapshot(snap_path, cached)
             except Exception as _e:  # noqa: BLE001 - 回写失败不影响本次返回值
                 _log.warning("[%s] 快照回写失败（本次结果仍已回填）: %s", ticker, _e)
         return True
@@ -2050,8 +2342,7 @@ class OptionsAgent:
                  "%.2f → %.2f（v0.45.349）", ticker, _gex, _old, cached["options_score"])
         if snap_path:
             try:
-                with open(snap_path, "w") as _f:
-                    json.dump(cached, _f, ensure_ascii=False, default=str)
+                _write_snapshot(snap_path, cached)
             except Exception as _e:  # noqa: BLE001 - 回写失败不影响本次返回值
                 _log.warning("[%s] 快照回写失败（本次结果仍已修正）: %s", ticker, _e)
         return True
@@ -2184,6 +2475,13 @@ class OptionsAgent:
         options_chain = self.fetcher.fetch_options_chain(ticker)
         calls_df = options_chain.get("calls", [])
         puts_df = options_chain.get("puts", [])
+        # v0.45.497：链是否就是目标日那一场的（云端快照，`cboe_options.fetch_cboe_chain` 打的标）。
+        # 是 ⇒ 这份数据属于 `_snap_target`，不属于此刻的会话：IV 观测记到目标日、不刷新「最后有效 IV」
+        # 缓存（那是给**此刻**降级用的）、快照标签写 cloud_snapshot 而非「运行时现拉」。
+        # 不是（实时链 / 链缓存里的旧实时链）⇒ 维持原口径：数据属于此刻会话。
+        _chain_is_target = bool(options_chain.get("_from_snapshot")) and \
+            options_chain.get("_snapshot_vintage") == _snap_target
+        _obs_session = _snap_target if _chain_is_target else _snap_session
 
         # ===== P0-1 (v0.38.0): 样本链早退 =====
         # 样本期权链（CBOE+yfinance 全部失败时的硬编码兜底）绝不参与指标计算——
@@ -2199,6 +2497,8 @@ class OptionsAgent:
                 "iv_rank": None,
                 "iv_percentile": None,
                 "iv_current": None,
+                "iv_current_source": "unavailable",   # v0.45.471 schema 一致性
+                "iv_placeholders_atm": None,          # v0.45.482 schema 一致性（样本链不数）
                 "iv_raw_observed": None,      # v0.43.18 schema 一致性
                 "iv_rank_source": None,
                 "iv_rank_window_days": None,
@@ -2232,6 +2532,7 @@ class OptionsAgent:
                                  "error": "期权数据不可用（真实链获取失败）"},
                 "gamma_calendar": {},
                 "full_chain_oi": {},
+                "chain_source": "sample",   # v0.45.475
                 # v0.45.99 四合约报价集：样本链没有真实报价，诚实标不可用
                 # v0.45.104：改走 _qs_unavailable，形状与另外三个生产者一致
                 "quote_set": _qs_unavailable("期权数据不可用（真实链获取失败）",
@@ -2248,16 +2549,21 @@ class OptionsAgent:
         # 1. 只用 ATM 附近（±20%）的期权
         # 2. 过滤 <7 天到期的期权（临近到期 IV 被 Theta 衰减人为放大）
         # 3. 用中位数代替均值，抗极端值
+        # v0.45.462：现价**只在这里定一次**，下游（ATM IV 窗口 / GEX / 异动 / 偏斜 / 期限结构 /
+        # 快照的 `_snapshot_stock_price`）全用这一个值。见 `_resolve_stock_price`。
+        # 此前两处各自兜底：调用方没给价 ⇒ 「OI>100 的看涨行权价中位数」，再没有 ⇒ 常数 145.0。
+        # 假价被当成现价写进快照，又被 price_history 当成「我们自己的真实观测」读进价格索引：
+        # 实测 47 份快照现价 = 145.0（6–7 月）、09-17 全源中断那天 30/30 份是行权价中位数
+        # （NVDA 232.5 vs 真价 219.34）。CBOE payload 本来就带着同一时刻的真实标的价，只是被丢了。
+        stock_price, stock_price_source = _resolve_stock_price(stock_price, options_chain)
+        if stock_price is None:
+            _snap_count("stock_price_unavailable")
+            _log.warning("[%s] 现价不可得（调用方没给、期权链也没带）——ATM IV / GEX / 异动 / 偏斜 / "
+                         "期限结构按「不可得」处理，快照现价记 None，不拿行权价中位数或常数冒充", ticker)
         atm_price = stock_price
-        # v0.45.69：`if not atm_price` 拦不住 NaN（NaN 是 truthy），于是
-        # atm_lower/upper 全成 NaN，`NaN <= strike <= NaN` 恒 False，
-        # raw_ivs 必然为空 → data_quality 判成 degraded → iv_current 回落
-        # last_valid_iv 缓存。2026-08-28 补跑 9/9 只标的全中此坑。
-        if not atm_price or not _math.isfinite(atm_price):
-            all_strikes = [c.get("strike", 0) for c in calls_df if c.get("openInterest", 0) > 100]
-            atm_price = statistics.median(all_strikes) if all_strikes else 145.0
-        atm_lower = atm_price * 0.80
-        atm_upper = atm_price * 1.20
+        if atm_price is not None:
+            atm_lower = atm_price * 0.80
+            atm_upper = atm_price * 1.20
 
         # 判断到期日是否 >= 7 天
         min_expiry_days = 7
@@ -2277,20 +2583,41 @@ class OptionsAgent:
         # 必须在计算 median 之前剔除，否则均值严重偏高
         _IV_UPPER_RAW = 2.0   # 盘后 raw 过滤上限（小数，= 200%），去除极端噪声
         raw_ivs = []
-        for c in calls_df:
+        # v0.45.482：同一窗口里 IV 是 Yahoo 求解失败值的合约数（fetch_options_chain 已置 0 并打 `_iv_placeholder`；
+        # CBOE 链没有这个标记 ⇒ 恒 0）。只数、不进中位数。
+        _ph_window = 0
+        # 现价不可得 ⇒ ATM 窗口定不了位 ⇒ 没有当日原始 IV（走下方既有的「原始 IV 无效」降级）
+        for c in (calls_df if atm_price is not None else []):
             iv = c.get("impliedVolatility")
             strike = c.get("strike", 0)
             expiry = c.get("expiry", "")
-            if iv and 0.005 < iv < _IV_UPPER_RAW and atm_lower <= strike <= atm_upper and _expiry_ok(expiry):
-                raw_ivs.append(iv)
+            if atm_lower <= strike <= atm_upper and _expiry_ok(expiry):
+                if c.get("_iv_placeholder"):
+                    _ph_window += 1
+                elif iv and 0.005 < iv < _IV_UPPER_RAW:
+                    raw_ivs.append(iv)
 
         # 如果过滤后无数据，放宽到包含短期到期（保留上限过滤）
-        if not raw_ivs:
+        if not raw_ivs and atm_price is not None:
+            _ph_window = 0
             for c in calls_df:
                 iv = c.get("impliedVolatility")
                 strike = c.get("strike", 0)
-                if iv and 0.005 < iv < _IV_UPPER_RAW and atm_lower <= strike <= atm_upper:
-                    raw_ivs.append(iv)
+                if atm_lower <= strike <= atm_upper:
+                    if c.get("_iv_placeholder"):
+                        _ph_window += 1
+                    elif iv and 0.005 < iv < _IV_UPPER_RAW:
+                        raw_ivs.append(iv)
+
+        # v0.45.482：窗口里求解失败的合约不少于有效合约 ⇒ 这条链当天的 IV 整体不可信，不取剩下几个的中位数。
+        # 依据：10-13 对照 CBOE，失败值主导的链里剩下的 Yahoo 值仍有 67% 相差 > 10 个波动率点（yahoo_iv docstring）。
+        # 按「无当日原始 IV」处理 ⇒ 走下方降级（有效缓存 / v0.45.471 的 None），data_quality 随之 degraded。
+        _iv_placeholder_majority = bool(_ph_window) and _ph_window >= len(raw_ivs)
+        if _iv_placeholder_majority:
+            _snap_count("iv_placeholder_majority")
+            _log.warning("[%s] ATM 窗口 %d 个合约的 IV 是 Yahoo 求解失败值、有效的只有 %d 个 ⇒ 不取中位数，按无当日 IV 处理",
+                         ticker, _ph_window, len(raw_ivs))
+            raw_ivs = []
 
         _MIN_VALID_IV = 5.0    # IV < 5% 视为无效
         _MAX_VALID_IV = 150.0  # IV > 150% 视为异常（保留极高波动标的的合理空间）
@@ -2314,7 +2641,7 @@ class OptionsAgent:
         if _iv_raw_observed is not None:
             try:
                 from iv_history import append_observation
-                append_observation(ticker, self.fetcher.cache_dir, _snap_session, _iv_raw_observed)
+                append_observation(ticker, self.fetcher.cache_dir, _obs_session, _iv_raw_observed)
             except Exception as _e_idx:  # noqa: BLE001 - 记账失败绝不影响评分
                 _log.debug("[%s] IV 索引写入跳过: %s", ticker, _e_idx)
 
@@ -2344,7 +2671,10 @@ class OptionsAgent:
         #   B. 盘后 raw IV 在合理区间 (5%~150%) → 作为"次优缓存"保存并使用，
         #      避免直接使用极端 stale 值或硬编码 25.0
         #   C. 缓存 TTL 从 48h 延长到 120h（覆盖 3 天长周末 + 缓冲）
-        if not _market_open or current_iv < _MIN_VALID_IV:
+        # v0.45.471：开市分支的判据补上上界。此前开市时只挡 `< 5%`，>150% 的当日值照用并写进缓存
+        # ——与上面 `_iv_raw_observed` 的「有效」口径（5%~150%）不一致。
+        _iv_source = "observed"
+        if not _market_open or not (_MIN_VALID_IV <= current_iv <= _MAX_VALID_IV):
             _raw_iv = current_iv  # 保留原始值用于对比
             # ── v0.45.26：优先级倒置修复 ──
             # 旧逻辑：只要缓存存在就用缓存，**且命中时不刷新缓存**。
@@ -2363,7 +2693,8 @@ class OptionsAgent:
             # 但它是「今天」的观测，比 5 天前的缓存诚实。
             if _MIN_VALID_IV <= _raw_iv <= _MAX_VALID_IV:
                 current_iv = _raw_iv
-                self.fetcher._save_last_valid_iv(ticker, _raw_iv)
+                if not _chain_is_target:   # v0.45.497：目标日的链不是「此刻」的观测，不进此刻的降级缓存
+                    self.fetcher._save_last_valid_iv(ticker, _raw_iv)
                 _log.info(
                     "%s 盘后采用当日实拉 IV %.2f%%（并刷新缓存）", ticker, _raw_iv
                 )
@@ -2383,22 +2714,35 @@ class OptionsAgent:
                         "已关闭" if not _market_open else "异常数据",
                     )
                     current_iv = last_valid
+                    _iv_source = "last_valid_cache"
                 else:
+                    # ── v0.45.471：IV 不可得就是 None，不再兜底成常数 25.0 ──
+                    # 25.0 是一个具体到小数点的「当前隐含波动率」，下游分不出它是兜底：
+                    # 进 signal_archive `options.iv_current`（进 IC）、iv_rv_spread（25 − RV）、
+                    # 论点失效检查的 `iv`、报告与 LLM 提示词；有真实 IV 历史时还会当 IV Rank 的分子
+                    # （⇒ options_score）。更糟的是 data_quality 照判 "real"：raw_ivs 非空但中位数
+                    # 落在 (150%, 200%) 或 (0.5%, 5%) 时 `_has_real_iv` 为真、25.0 又 ≥ 5。
+                    # 实测数据根 21 份快照 iv_current == 25.0（2026-04 ~ 09），其中 6 份标 real。
+                    # 谁会红：计数进 `snapshot_slot_stats()["iv_unavailable"]`（status.json 摘要行），
+                    # data_quality 判 degraded，`iv_current_source` 写 "unavailable"。
                     if _cache_suspicious:
                         _log.warning(
                             "%s 缓存 IV %.2f%% 低于历史最低 %.2f%% × 70%% → 丢弃坏缓存；"
-                            "raw_iv=%.2f%% 同样异常，使用兜底 25.0%%",
+                            "raw_iv=%.2f%% 同样异常 ⇒ IV 不可得（记 None，不拿常数冒充）",
                             ticker, last_valid, min(hist_hv) if hist_hv else 0.0, _raw_iv,
                         )
                     else:
                         _log.warning(
-                            "%s raw_iv=%.2f%% 无效且无可用缓存，使用兜底 25.0%%",
+                            "%s raw_iv=%.2f%% 无效且无可用缓存 ⇒ IV 不可得（记 None，不拿常数冒充）",
                             ticker, _raw_iv,
                         )
-                    current_iv = 25.0
+                    current_iv = None
+                    _iv_source = "unavailable"
+                    _snap_count("iv_unavailable")
         else:
-            # 开市且 IV 有效 → 保存供收市后使用
-            self.fetcher._save_last_valid_iv(ticker, current_iv)
+            # 开市且 IV 有效 → 保存供收市后使用（目标日的云端链除外，v0.45.497）
+            if not _chain_is_target:
+                self.fetcher._save_last_valid_iv(ticker, current_iv)
 
         # 3. 计算各项指标
         # ── v0.43.18: 优先用自攒的真实 IV 历史；不足则诚实降级到 HV 代理 ──
@@ -2420,11 +2764,13 @@ class OptionsAgent:
                 # 降级块可能已被 last_valid_iv（TTL 120h，最长 5 天前）替换，
                 # 拿陈旧值比对新鲜分布 = 口径错配，与 v0.43.19 修掉的
                 # "拿真实 IV 比 HV 分布"是同一类错误。
+                # v0.45.471：current_iv 不可得时是 None ⇒ iv_rank_from_history 返回 (None, None)
+                # ⇒ 走下方 HV 代理（此前分子是常数 25.0，算出一个看似正常的 rank 进 options_score）。
                 _numer = _iv_raw_observed if _iv_raw_observed is not None else current_iv
                 _r, _p = iv_rank_from_history(_numer, _real_hist)
                 if _r is not None:
                     iv_rank, iv_percentile = _r, _p
-                    iv_current = round(current_iv, 2)
+                    iv_current = round(current_iv, 2) if current_iv is not None else None
                     _iv_rank_source = f"real_iv_{_real_days}d"
                     _iv_rank_window = _real_days
                     _log.info(
@@ -2444,22 +2790,25 @@ class OptionsAgent:
             if _current_hv is not None:
                 iv_rank, _ = self.analyzer.calculate_iv_rank(_current_hv, hist_hv)
                 iv_percentile = self.analyzer.calculate_iv_percentile(_current_hv, hist_hv)
-            iv_current = round(current_iv, 2)  # 展示值仍是真实 IV，不受 rank 口径影响
+            # 展示值仍是真实 IV，不受 rank 口径影响；不可得 ⇒ None（v0.45.471）
+            iv_current = round(current_iv, 2) if current_iv is not None else None
         # P0-1 (v0.38.0): 历史 IV 为样本数据时，IV Rank 不可信（样本区间与真实
         # 现价 IV 错配 → 假 0/100 极值），置 None 并在评分中走中性
+        # v0.45.383：「不可信」= 样本数据 **或** 当前 HV 受缺失交易日影响（`hist_hv_untrusted`）。
+        _hv_gap_dates = list(getattr(self.fetcher, "last_hist_hv_gaps", None) or [])
         if (_iv_rank_source == "hv_proxy"
-                and getattr(self.fetcher, "last_hist_hv_is_sample", False)):
+                and self.fetcher.hist_hv_untrusted()):
             # v0.43.19: ① 属性名随 fetch_historical_hv 改名同步（此处是字符串
             # 字面量，全局改名碰不到，漏改会让守卫因 getattr 默认 False 永久失效）
             # ② 限定 hv_proxy——真实 IV 历史路径不依赖 hist_hv，不该被它置 None
-            _log.warning("[%s] 历史 HV 为样本数据，HV Rank/Percentile 置 None（不可信）", ticker)
+            if _hv_gap_dates:
+                _log.warning("[%s] 日线缺交易日 %s，HV Rank/Percentile 置 None（不用错位的数据冒充）",
+                             ticker, _hv_gap_dates)
+            else:
+                _log.warning("[%s] 历史 HV 为样本数据，HV Rank/Percentile 置 None（不可信）", ticker)
             iv_rank = None
             iv_percentile = None
         put_call_ratio = self.analyzer.calculate_put_call_ratio(calls_df, puts_df)
-        # 估算股价（如果未提供，从期权链 ATM strike 推测）
-        if not stock_price:
-            all_strikes = [c.get("strike", 0) for c in calls_df if c.get("openInterest", 0) > 100]
-            stock_price = statistics.median(all_strikes) if all_strikes else 145.0
         gex = self.analyzer.calculate_gamma_exposure(
             calls_df, puts_df, stock_price
         )
@@ -2467,6 +2816,11 @@ class OptionsAgent:
         key_levels = self.analyzer.find_key_levels(calls_df, puts_df, stock_price or 0.0)
         # S14: IV Skew 分析
         iv_skew = self.analyzer.calculate_iv_skew(calls_df, puts_df, stock_price)
+        # v0.45.490（482 二次检查）：多数规则对整条链生效，不只 iv_current——同一份依据（失败值主导的链里幸存值
+        # 67% 也差 > 10 个波动率点）同样适用于偏斜；偏斜进 OracleBee 分与 call 流分类。
+        if _iv_placeholder_majority:
+            iv_skew = {"skew_ratio": None,
+                       "skew_signal": "Yahoo IV 求解失败值占多数，偏斜不可得"}
 
         # S15: IV 期限结构（个股 term structure）
         iv_term_struct = self.analyzer.calculate_iv_term_structure(ticker, stock_price)
@@ -2500,7 +2854,7 @@ class OptionsAgent:
             _gc_calls, _gc_puts = calls_df, puts_df
             try:
                 from cboe_options import fetch_cboe_chain_for_gex
-                _gc_full = fetch_cboe_chain_for_gex(ticker, stock_price or atm_price)
+                _gc_full = fetch_cboe_chain_for_gex(ticker, stock_price)
                 if _gc_full and (_gc_full.get("calls") or _gc_full.get("puts")):
                     _gc_calls = _gc_full.get("calls", [])
                     _gc_puts = _gc_full.get("puts", [])
@@ -2508,7 +2862,7 @@ class OptionsAgent:
                 _log.debug("[%s] Gamma 日历全到期日视图获取失败，退回近月截断链: %s",
                            ticker, _e_gcfull)
             gamma_calendar = calculate_gamma_expiry_calendar(
-                _gc_calls, _gc_puts, stock_price or atm_price
+                _gc_calls, _gc_puts, stock_price
             )
         except Exception as _e_gc:
             _log.debug("Gamma 到期日历计算失败 %s: %s", ticker, _e_gc)
@@ -2516,7 +2870,7 @@ class OptionsAgent:
         # v0.25.3: 全链 OI 采集（所有到期日汇总 OI 墙 + Max Pain）
         full_chain_oi: Dict = {}
         try:
-            full_chain_oi = self._fetch_full_chain_oi(ticker, stock_price or atm_price)
+            full_chain_oi = self._fetch_full_chain_oi(ticker, stock_price)
             if full_chain_oi:
                 _log.info("[%s] 全链OI采集完成：%d到期日，总OI %s，Max Pain $%.0f，全链P/C %.3f",
                           ticker,
@@ -2572,7 +2926,8 @@ class OptionsAgent:
         _has_real_iv = bool(raw_ivs)
         if _is_sample:
             data_quality = "unavailable"
-        elif not _has_real_iv or current_iv < _MIN_VALID_IV:
+        elif not _has_real_iv or current_iv is None or current_iv < _MIN_VALID_IV:
+            # v0.45.471：current_iv 不可得（None）⇒ degraded。此前它是常数 25.0、照判 real。
             data_quality = "degraded"
         else:
             data_quality = "real"
@@ -2584,9 +2939,10 @@ class OptionsAgent:
         if options_chain.get("_source") == "cboe":
             try:
                 from cboe_options import fetch_cboe_quote_set
-                # v0.45.104：**不再**拿 atm_price 当兜底价。stock_price 缺失/NaN 时
-                # 上面已把 atm_price 换成 `median(all_strikes)`（甚至字面量 145.0）——
-                # 那是**行权价中位数，不是股价**。把这个正数传进去会让
+                # v0.45.104：**不再**拿 atm_price 当兜底价。（当时 stock_price 缺失/NaN 时
+                # 上面会把 atm_price 换成 `median(all_strikes)`（甚至字面量 145.0）——
+                # 那是**行权价中位数，不是股价**。v0.45.104 只在这一个读者处绕开了它，
+                # 快照 / GEX / 异动仍吃假价；v0.45.462 在源头删掉兜底，见 `_resolve_stock_price`。）把这个正数传进去会让
                 # fetch_cboe_quote_set 里的 `_qs_num(stock_price)` 直接成立，从而
                 # **绕过它自己的 official_price 诚实取价路径**，并把
                 # underlying_price_source 标成 "caller"。实测（$145 链、行权价 120-180）：
@@ -2610,10 +2966,21 @@ class OptionsAgent:
             "data_quality": data_quality,  # "real" | "degraded" | "unavailable"
             "iv_rank": iv_rank,  # 0-100
             "iv_percentile": iv_percentile,  # 0-100
-            "iv_current": iv_current,  # 当前 IV（可能来自 last_valid 缓存，见降级逻辑）
+            "iv_current": iv_current,  # 当前 IV（可能来自 last_valid 缓存，见降级逻辑）；不可得 ⇒ None
+            # v0.45.471：iv_current 出处 "observed"（当日实拉）| "last_valid_cache"（≤120h 前）| "unavailable"。
+            # 旧快照没有这个键——那时 iv_current == 25.0 可能是兜底常数，读者不能当真观测。
+            "iv_current_source": _iv_source,
+            # v0.45.482：ATM 窗口里 IV 是 Yahoo 求解失败值的合约数（CBOE 链恒 0）；≥ 有效合约数时当日 IV 按不可得处理
+            "iv_placeholders_atm": _ph_window,
             # v0.43.18 自攒 IV 历史原料：当日真实观测 IV（降级前），只记账不进评分
             "iv_raw_observed": _iv_raw_observed,
             "iv_rank_source": _iv_rank_source,      # "real_iv_{N}d" | "hv_proxy"
+            # v0.45.383：因日线缺交易日而把 iv_rank 置空时，缺的是哪几天（否则只看到一个 None，看不出为什么）。
+            # 只在 hv_proxy 口径下有意义；真实 IV 历史口径恒为 []。
+            "hv_gap": _hv_gap_dates if _iv_rank_source == "hv_proxy" else [],
+            # v0.45.387：缺口被第二源补齐的日期（iv_rank 照常给出，但这几根 bar 是换算出来的）。
+            "hv_gap_filled": (list(getattr(self.fetcher, "last_hist_hv_filled", None) or [])
+                              if _iv_rank_source == "hv_proxy" else []),
             "iv_rank_window_days": _iv_rank_window,  # 真实 IV 样本天数（hv_proxy 时为 None）
             "put_call_ratio": put_call_ratio,
             # v0.17.0: total_oi 双口径 — raw（原始总和）+ stable（排除 DTE<7 近到期）
@@ -2654,10 +3021,18 @@ class OptionsAgent:
             # v0.45.99: 四合约报价集（~30 DTE ATM/25Δ 的 bid/ask），只记账不进评分。
             # 旧快照没有这个键 —— 消费者必须 `.get("quote_set")`。
             "quote_set": quote_set,
+            # v0.45.475：这份结果的期权链来自哪（cboe / yfinance / unknown）。此前快照不记来源，只能事后推：
+            # quote_set.error 会被 `_refill_empty_quote_set` 回填抹掉（10-05 BILI 实测），只剩 IV 小数位数这种指纹可认。
+            "chain_source": options_chain.get("_source") or "unknown",
         }
 
-        # 方案21: 出口消毒 — 遍历结果 dict，NaN/Inf → 安全默认值
-        _sanitize_result(result)
+        # 方案21: 出口消毒 — NaN/Inf → None（v0.45.462 前是 0.0，见 `_sanitize_result`）
+        _nan_paths = _sanitize_result(result)
+        if _nan_paths:
+            with _snap_stats_lock:
+                _snap_stats["nan_sanitized"] += len(_nan_paths)
+            _log.warning("[%s] 期权结果里有 %d 个非有限数，已记为 None（不可得）：%s",
+                         ticker, len(_nan_paths), ", ".join(_nan_paths[:8]))
 
         # ===== Snapshot cache 出口：写入 per-ticker-per-date 冻结快照 =====
         if not _snap_disabled:
@@ -2665,23 +3040,32 @@ class OptionsAgent:
                 result["_snapshot_timestamp"] = datetime.now().isoformat()
                 result["_snapshot_ticker"] = ticker
                 result["_snapshot_stock_price"] = stock_price
+                # v0.45.462：现价出处（caller / cboe_close / cboe_intraday / … / unavailable）。
+                # 旧快照没有这个键，那时的现价可能是行权价中位数或 145.0，读者不能当真观测
+                result["_snapshot_stock_price_source"] = stock_price_source
                 # v0.45.238：数据所属会话 + 取数时该会话是否已收盘（命中校验与观测点读这两个）
                 _complete_at_fetch = _snap_now >= _session_close(_snap_session)
                 result["_snapshot_session"] = _snap_session
                 result["_snapshot_session_complete"] = _complete_at_fetch
                 # v0.45.16：补跑时显式标注"期权是运行时实时拉的，不是目标日的"。
                 # CBOE/yfinance 无历史期权接口，这一点没法假装，只能让下游看得见。
-                if _is_backfill:
+                if _is_backfill and _chain_is_target:
+                    # v0.45.497：链取自云端快照、就是目标日那一场 ⇒ 口径一致，不是「运行时现拉」
+                    result["_options_as_of_mismatch"] = False
+                    result["_options_source"] = "cloud_snapshot"
+                    result["_options_target_date"] = _snap_target
+                    result["_options_fetched_on"] = _snap_session
+                elif _is_backfill:
                     result["_options_as_of_mismatch"] = True
                     result["_options_target_date"] = _snap_target
                     result["_options_fetched_on"] = _snap_session
-                with open(_snap_path, "w") as _f:
-                    json.dump(result, _f, default=str, indent=2)
+                _write_snapshot(_snap_path, result, indent=2)
                 _snap_count("writes")
                 if not _complete_at_fetch:
                     _snap_count("writes_before_close")
                 _log.info("[%s] 期权快照写入: %s", ticker, os.path.basename(_snap_path))
-            except OSError as _e:
+            except (OSError, ledger_io.LedgerError) as _e:
+                # 失败已由 ledger_io 在源头登记（status.json ⇒ P2）；本次结果照常返回，只是没冻结
                 _log.warning("[%s] 期权快照写入失败: %s", ticker, _e)
 
         return result

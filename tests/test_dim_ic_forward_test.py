@@ -46,9 +46,18 @@ def _load(name, rel):
 fx = _load("dim_ic_forward_test", "experiments/dim_ic_forward_test.py")
 P = _load("dim_ic_protocol", "experiments/dim_ic_protocol.py")
 
+
+@pytest.fixture(autouse=True)
+def _no_forward_test_excluded_days(monkeypatch):
+    """合成夹具的日期相对 FORWARD_START 写，会落在真实的协议排除日上（v0.45.484 起 2026-10-12）。
+    本文件测的是执行器的算术，不是排除名单——清空它；排除名单本身由 tests/test_forward_test_excluded_days.py 钉。"""
+    import signal_archive as _sa
+    monkeypatch.setattr(_sa, "FORWARD_TEST_EXCLUDED_DAYS", {})
+
 DIMS = ("signal", "catalyst", "sentiment", "odds", "risk_adj")
 _TOP_KEYS_ALWAYS = {"forward_start", "today", "status", "h1_weeks", "next_look_at", "looks_done",
-                    "verdicts", "truncation", "weight_change", "stale", "h1_anchor"}
+                    "verdicts", "truncation", "weight_change", "stale", "h1_anchor",
+                    "forward_test_excluded_days"}   # 修订 2（v0.45.484）：只是日期列表，不含效应量
 
 #: 窗口首日（周一）。窗口内的夹具日期一律相对它写——修订 1 把起点从 09-28 挪到 10-12 时，
 #: 写死的日期整批落到窗口前，测试红的原因变成「夹具过期」而不是「执行器错了」

@@ -90,15 +90,14 @@ class TestScanPending:
         assert snap.ticker == "AAPL"
         assert 1 in missing and 7 in missing and 30 in missing
 
-    def test_scan_respects_max_snapshots(self, snap_dir, make_snapshot):
-        """最多返回 max_snapshots 个"""
-        old_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    def test_scan_returns_all_oldest_due_first(self, snap_dir, make_snapshot):
+        """v0.45.493：不截断（旧的 max_snapshots=50 按文件截断正是队列饿死的成因），按到期先后排。"""
         for i in range(5):
             d = (datetime.now() - timedelta(days=60+i)).strftime("%Y-%m-%d")
             make_snapshot(ticker=f"T{i}", date=d)
-        fetcher = OutcomesFetcher(snap_dir, max_snapshots=2)
+        fetcher = OutcomesFetcher(snap_dir, max_network_fetches=2)
         pending = fetcher._scan_pending()
-        assert len(pending) == 2
+        assert [s.ticker for _, s, _ in pending] == ["T4", "T3", "T2", "T1", "T0"]
 
 
 # ==================== TestFetchPrice ====================

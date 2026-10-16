@@ -1,0 +1,402 @@
+{
+  "critical_bars": 21,
+  "days": {
+    "2026-09-28": {
+      "n_tickers": 30,
+      "summary": {
+        "day_level_inference": 1,
+        "verified": 29
+      },
+      "tickers": {
+        "ABBV": {
+          "ambiguous_drops": [],
+          "complete": [
+            15.05,
+            1.3
+          ],
+          "status": "verified",
+          "stored": [
+            15.05,
+            1.3
+          ]
+        },
+        "AMC": {
+          "ambiguous_drops": [],
+          "complete": [
+            23.08,
+            48.05
+          ],
+          "status": "verified",
+          "stored": [
+            23.08,
+            48.05
+          ]
+        },
+        "AMZN": {
+          "ambiguous_drops": [],
+          "complete": [
+            12.27,
+            13.42
+          ],
+          "status": "verified",
+          "stored": [
+            12.27,
+            13.42
+          ]
+        },
+        "BILI": {
+          "ambiguous_drops": [],
+          "complete": [
+            40.36,
+            22.51
+          ],
+          "status": "verified",
+          "stored": [
+            40.36,
+            22.51
+          ]
+        },
+        "BRK-B": {
+          "ambiguous_drops": [],
+          "complete": [
+            17.6,
+            18.18
+          ],
+          "status": "verified",
+          "stored": [
+            17.6,
+            18.18
+          ]
+        },
+        "COST": {
+          "ambiguous_drops": [],
+          "complete": [
+            21.53,
+            12.99
+          ],
+          "status": "verified",
+          "stored": [
+            21.53,
+            12.99
+          ]
+        },
+        "CRCL": {
+          "ambiguous_drops": [],
+          "complete": [
+            45.93,
+            74.03
+          ],
+          "status": "verified",
+          "stored": [
+            45.93,
+            74.03
+          ]
+        },
+        "CRM": {
+          "ambiguous_drops": [],
+          "complete": [
+            15.75,
+            16.02
+          ],
+          "status": "verified",
+          "stored": [
+            15.75,
+            16.02
+          ]
+        },
+        "CVX": {
+          "ambiguous_drops": [],
+          "complete": [
+            59.71,
+            51.52
+          ],
+          "status": "verified",
+          "stored": [
+            59.71,
+            51.52
+          ]
+        },
+        "DE": {
+          "ambiguous_drops": [],
+          "complete": [
+            34.92,
+            23.81
+          ],
+          "status": "verified",
+          "stored": [
+            34.92,
+            23.81
+          ]
+        },
+        "DELL": {
+          "ambiguous_drops": [],
+          "complete": [
+            52.85,
+            82.68
+          ],
+          "status": "verified",
+          "stored": [
+            52.85,
+            82.68
+          ]
+        },
+        "ENPH": {
+          "ambiguous_drops": [],
+          "complete": [
+            8.4,
+            11.26
+          ],
+          "status": "verified",
+          "stored": [
+            8.4,
+            11.26
+          ]
+        },
+        "JNJ": {
+          "ambiguous_drops": [],
+          "complete": [
+            19.02,
+            19.91
+          ],
+          "status": "verified",
+          "stored": [
+            19.02,
+            19.91
+          ]
+        },
+        "META": {
+          "ambiguous_drops": [],
+          "complete": [
+            98.17,
+            97.84
+          ],
+          "status": "verified",
+          "stored": [
+            98.17,
+            97.84
+          ]
+        },
+        "MSFT": {
+          "ambiguous_drops": [],
+          "complete": [
+            22.98,
+            47.19
+          ],
+          "status": "verified",
+          "stored": [
+            22.98,
+            47.19
+          ]
+        },
+        "MU": {
+          "ambiguous_drops": [],
+          "complete": [
+            3.77,
+            3.46
+          ],
+          "status": "verified",
+          "stored": [
+            3.77,
+            3.46
+          ]
+        },
+        "NEE": {
+          "ambiguous_drops": [],
+          "complete": [
+            15.86,
+            18.61
+          ],
+          "status": "verified",
+          "stored": [
+            15.86,
+            18.61
+          ]
+        },
+        "NFLX": {
+          "ambiguous_drops": [],
+          "complete": [
+            43.94,
+            53.68
+          ],
+          "status": "verified",
+          "stored": [
+            43.94,
+            53.68
+          ]
+        },
+        "NVDA": {
+          "ambiguous_drops": [],
+          "complete": [
+            15.48,
+            5.19
+          ],
+          "status": "verified",
+          "stored": [
+            15.48,
+            5.19
+          ]
+        },
+        "QCOM": {
+          "ambiguous_drops": [],
+          "complete": [
+            44.33,
+            75.32
+          ],
+          "status": "verified",
+          "stored": [
+            44.33,
+            75.32
+          ]
+        },
+        "RKLB": {
+          "ambiguous_drops": [],
+          "complete": [
+            11.97,
+            4.33
+          ],
+          "status": "verified",
+          "stored": [
+            11.97,
+            4.33
+          ]
+        },
+        "SNOW": {
+          "ambiguous_drops": [],
+          "complete": [
+            37.86,
+            73.16
+          ],
+          "status": "verified",
+          "stored": [
+            37.86,
+            73.16
+          ]
+        },
+        "T": {
+          "ambiguous_drops": [],
+          "complete": [
+            38.62,
+            32.47
+          ],
+          "status": "verified",
+          "stored": [
+            38.62,
+            32.47
+          ]
+        },
+        "TMO": {
+          "ambiguous_drops": [],
+          "complete": [
+            34.03,
+            32.9
+          ],
+          "status": "verified",
+          "stored": [
+            34.03,
+            32.9
+          ]
+        },
+        "TMUS": {
+          "ambiguous_drops": [],
+          "complete": [
+            43.47,
+            72.29
+          ],
+          "status": "verified",
+          "stored": [
+            43.47,
+            72.29
+          ]
+        },
+        "TSLA": {
+          "ambiguous_drops": [],
+          "complete": [
+            35.9,
+            56.28
+          ],
+          "status": "verified",
+          "stored": [
+            35.9,
+            56.28
+          ]
+        },
+        "VKTX": {
+          "ambiguous_drops": [
+            "2026-08-28",
+            "2026-08-31",
+            "2026-09-01",
+            "2026-09-02",
+            "2026-09-03",
+            "2026-09-04",
+            "2026-09-08",
+            "2026-09-09",
+            "2026-09-10",
+            "2026-09-11",
+            "2026-09-14",
+            "2026-09-15",
+            "2026-09-16",
+            "2026-09-17",
+            "2026-09-18",
+            "2026-09-21",
+            "2026-09-22",
+            "2026-09-23",
+            "2026-09-24",
+            "2026-09-25",
+            "2026-09-28"
+          ],
+          "basis": "同日 29 只被唯一证明无缺口、0 只不一致；缺口按天发生，此标的输出对单根缺失不敏感，单看分辨不出",
+          "complete": [
+            100.0,
+            99.57
+          ],
+          "status": "day_level_inference",
+          "stored": [
+            100,
+            99.57
+          ]
+        },
+        "VZ": {
+          "ambiguous_drops": [],
+          "complete": [
+            29.11,
+            51.08
+          ],
+          "status": "verified",
+          "stored": [
+            29.11,
+            51.08
+          ]
+        },
+        "WMT": {
+          "ambiguous_drops": [],
+          "complete": [
+            31.04,
+            19.91
+          ],
+          "status": "verified",
+          "stored": [
+            31.04,
+            19.91
+          ]
+        },
+        "XOM": {
+          "ambiguous_drops": [],
+          "complete": [
+            56.79,
+            62.77
+          ],
+          "status": "verified",
+          "stored": [
+            56.79,
+            62.77
+          ]
+        }
+      }
+    }
+  },
+  "generated_at": "2026-09-29T10:34:24",
+  "generator": "experiments/hv_gap_equivalence_audit.py",
+  "min_day_verified": 20,
+  "tolerance": 0.011,
+  "version": "v0.45.383"
+}

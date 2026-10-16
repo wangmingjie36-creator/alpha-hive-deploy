@@ -201,7 +201,7 @@ class TestPipelineDefers:
         monkeypatch.setattr(co, "_fetch_cboe_payload", lambda t, timeout=15: payload)
         monkeypatch.setattr(co, "_et_now", lambda: SCAN_ET)
         hist_calls = []
-        monkeypatch.setattr(dp, "_fetch_history_metrics", lambda t: hist_calls.append(t))
+        monkeypatch.setattr(dp, "_fetch_history_metrics", lambda t, session_close=None: hist_calls.append(t))
         src = dp.CBOESource()
         for _ in range(5):
             d = src.fetch("T")
@@ -214,6 +214,6 @@ class TestPipelineDefers:
         monkeypatch.setattr(co, "_fetch_cboe_payload",
                             lambda t, timeout=15: _p(26.06, "2026-09-11T15:59:59"))
         monkeypatch.setattr(co, "_et_now", lambda: SCAN_ET)
-        monkeypatch.setattr(dp, "_fetch_history_metrics", lambda t: None)
+        monkeypatch.setattr(dp, "_fetch_history_metrics", lambda t, session_close=None: None)
         d = dp.CBOESource().fetch("T")
         assert d.price == 26.06 and not d.defer and d.price_source == "cboe_close"

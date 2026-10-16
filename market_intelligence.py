@@ -436,7 +436,8 @@ def calculate_gamma_expiry_calendar(
             charm_dir = "neutral"
             charm_note = f"到期日 {pin_expiry} 多空 Gamma 接近均衡，Charm 方向中性。"
 
-        if pin_strike:
+        # v0.45.462：现价不可得（None）时只略去「距当前 x%」这句，不让整份日历因 TypeError 丢掉
+        if pin_strike and isinstance(stock_price, (int, float)) and stock_price > 0:
             charm_note += f" Pin 目标价 ${pin_strike:.0f}（OI最高行权价），距当前 ${stock_price:.0f} 约 {abs(pin_strike-stock_price)/stock_price*100:.1f}%。"
 
         # 清理内部字段
@@ -648,7 +649,7 @@ def calculate_signal_crowding(
 def check_thesis_breaks(
     ticker: str,
     current_price: float,
-    iv_current: float,
+    iv_current: Optional[float],   # None = 不可得（v0.45.471）⇒ 该条件记「未评估」
     put_call_ratio: float,
     bear_signals: List[str],
     swarm_score: float,
@@ -847,9 +848,27 @@ def check_thesis_breaks(
 # ① IV-RV Spread — 独立函数（也供 options_analyzer.py 调用）
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _iv_rv_without_iv(rv_annual: float, source: str) -> Dict[str, Any]:
+    """IV 不可得时的结果（v0.45.471）：RV 照给（它是日K 派生、与 IV 无关），价差 / 信号不可得。
+
+    此前上游会传常数 25.0 进来，算出一个「25 − RV」的价差和 cheap / fair / expensive 信号。
+    """
+    return {
+        "rv_30d": round(rv_annual, 2),
+        "iv_rv_spread": None,
+        "iv_rv_signal": "unknown",
+        "iv_rv_note": f"IV 不可得，无法与 RV30 {rv_annual:.1f}% 比较",
+        "data_available": False,
+        # 读者会原样渲染这一串（generate_ml_report「数据不可用：<error>」），所以写人话，不写内部 token
+        "error": "IV 不可得（当日 ATM IV 无效且无缓存）",
+        "iv_unavailable": True,
+        "source": source,
+    }
+
+
 def calculate_iv_rv_spread(
     ticker: str,
-    iv_current_pct: float,
+    iv_current_pct: Optional[float],
     lookback_days: int = 30,
 ) -> Dict[str, Any]:
     """
@@ -859,7 +878,8 @@ def calculate_iv_rv_spread(
     -------
     {
       "rv_30d"       : float,   # 年化 30 日已实现波动率（%）
-      "iv_rv_spread" : float,   # IV - RV（pp），正数=期权贵，负数=期权便宜
+      "iv_rv_spread" : float,   # IV - RV（pp），正数=期权贵，负数=期权便宜；
+                                # `iv_current_pct` 为 None（IV 不可得）⇒ None，信号 "unknown"（v0.45.471）
       "iv_rv_signal" : "expensive"|"cheap"|"fair",
       "iv_rv_note"   : str,     # 供 LLM 引用的自然语言
     }
@@ -900,6 +920,8 @@ def calculate_iv_rv_spread(
         from twelve_data import is_configured as _td_ok, realized_vol as _td_rv
         if _td_ok():
             _rv_td = _td_rv(ticker, lookback=lookback_days, end_date=_target or None)
+            if _rv_td is not None and iv_current_pct is None:
+                return _iv_rv_without_iv(_rv_td, ("twelve_data@" + _target) if _target else "twelve_data")
             if _rv_td is not None:
                 _spread_td = iv_current_pct - _rv_td
                 _sig_td = ("expensive" if _spread_td > 10
@@ -1020,6 +1042,9 @@ def calculate_iv_rv_spread(
             _empty["error"] = f"HV30={rv_annual:.1f}% 超出合理区间 (0, 300]"
             _empty["iv_rv_note"] = f"RV 数据异常（HV30={rv_annual:.1f}%），已跳过"
             return _empty
+
+        if iv_current_pct is None:
+            return _iv_rv_without_iv(rv_annual, "yfinance")
 
         spread = iv_current_pct - rv_annual
 

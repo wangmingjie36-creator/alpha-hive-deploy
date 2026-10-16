@@ -25,13 +25,28 @@ from __future__ import annotations
 import datetime as dt
 import glob
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
 import sys
-from pathlib import Path
+import unicodedata
+from pathlib import Path, PurePosixPath
 
 from .sqlite_readonly import db_open_uri, sha256_file
+
+# ── 导出自己写的元数据文件（v0.45.430）────────────────────────────────────
+SUMS_NAME = "SHA256SUMS"
+MANIFEST_NAME = "BACKUP_MANIFEST.json"
+#: 本轮导出写的元数据文件全集（`SHA256SUMS` 不列它们自己）。别处要认「哪些是导出元数据」引用这里，不另抄。
+META_FILES: tuple[str, ...] = (SUMS_NAME, MANIFEST_NAME)
+#: v0.45.430 前元数据清单的名字。APFS 缺省大小写不敏感：它与 ROOT_FILE_GLOBS 里网站 PWA 的 `manifest.json`
+#: 是**同一个目录项**——先拷进来的 `manifest.json` 被随后写的 `MANIFEST.json` 覆盖。v0.45.342（09-24）把
+#: `manifest.json` 纳入备份起，网站 manifest 一次都没进过备份，`SHA256SUMS` 却每天照列它的真实哈希；
+#: 索引里只有 `MANIFEST.json`（`core.ignorecase=true` 时 `git add -A` 认它为同一个文件）。
+#: 旧提交里只有这个名字：`restore.py` 按**精确拼写**认它；升级后第一轮由 `run_export`（磁盘）与
+#: `run_backup`（索引）把它摘掉。
+LEGACY_MANIFEST_NAME = "MANIFEST.json"
 
 # ── 导出范围清单（唯一真相在这里，CHANGELOG/memory 只引用不复制数字）──────
 DBS: dict[str, str] = {
@@ -50,9 +65,16 @@ STATE_DIRS: list[str] = [
     "report_snapshots", "paper_portfolio_state_backup", "reports",
     # v0.45.333 卖权行权价前向账本（月度/周度 jsonl 分片 + 本地 md 报告）。攒数期数据、丢了无法回溯
     # 重取（当日的 CBOE 双边报价与 OI 事后拿不到），但用户要求**不上公开网站**：它被 .gitignore
-    # 忽略、也**不在** report_deployer.REPORT_ARTIFACT_PATHS 里（那是自动提交进代码仓库）——
+    # 忽略、也从不进代码仓库（v0.45.402 前这里写的是「不在 report_deployer.REPORT_ARTIFACT_PATHS 里」，该白名单随阶段 6 退役）——
     # 耐久性只靠这里的私有备份。
     "sell_strike_state",
+    # v0.45.388 Alpha Bot 盘中快照 + 设置：盘中那一刻的水平事后拿不回来（CBOE 只给当下的延迟快照）。
+    "alphabot_state",
+    # v0.45.410 回放行情库（F&G 前瞻检验的日线，`replay_ohlc_store`）：首次落定后冻结，丢了重取到的可能是
+    # Yahoo 修订后的值，检验的历史输入会变 ⇒ 不当可重建缓存。每个标的一个小 JSON。
+    "replay_ohlc_state",
+    # v0.45.419 数据迁移运行记录（阶段 7）：「库被动过什么」的唯一机器可读记录，丢了只剩 CHANGELOG 文字。
+    "migrations_state",
 ]
 ROOT_FILE_GLOBS: list[str] = [
     "weight_history.jsonl", "pheromone_fallback.jsonl",
@@ -63,21 +85,33 @@ ROOT_FILE_GLOBS: list[str] = [
     "index.html", "dashboard-data.json", "manifest.json", "sw.js", "rss.xml",
     "paper_portfolio_card.html", "param_optimization_results.json", "param_optimization_report.html",
     "watchlist_override.yaml", "watchlist_override.json",
+    # v0.45.417 每日蜂群原始结果（逐蜂原始证据）：不可重取，`signal_archive.backfill` 与重放实验读它。
+    # 用户 2026-10-05 决定纳入（原样、不改格式、不去重）；117 个文件 ≈ 86 MB 原始 / 19 MB 压缩，约 +0.1 MB/天。
+    ".swarm_results_*.json",
 ]
+#: 排除理由的前缀分类（v0.45.417，`tests/test_data_backup.py` 守卫）：理由必须以其中之一开头——
+#: 「用户未定」不是一类。曾经 `.swarm_results_*` 与 `analysis-*-ml-*` 的理由写着「用户未定」，
+#: 没有任何东西会让这句话过期，两个不可重取的文件族就这样长期零异地副本。
+#:   rebuildable:<怎么重建>              可从别处重新生成，丢了不损失信息
+#:   derived:<已备份的来源>              由已备份的数据派生，来源在则它在
+#:   accepted-loss:<日期 + 谁决定>       明知不可重取仍不备份——必须有人、有日期
+EXCLUSION_REASON_PREFIXES = ("rebuildable:", "derived:", "accepted-loss:")
 #: 数据根里有、但**刻意不进**数据仓库的项，键 = `migrate_data_root` 的 MOVE 规则原文，值 = 理由。
 #: 不变式（`tests/test_data_backup.py::TestExportScopeCoversMoveRules`）：MOVE 规则的每一项
 #: 要么被 DBS / STATE_DIRS / ROOT_FILE_GLOBS 覆盖，要么在这里写明理由——新增数据产物时
 #: 两份表不许各自漂移（v0.45.342 前正是漂移：「已被代码仓库跟踪」这条排除理由被阶段 5 悄悄作废）。
 EXCLUDED_FROM_THIS_PASS: dict[str, str] = {
-    "chroma_db": "向量索引，可从 agent_memory 重建；BLOB 转十六进制文本会显著放大体积",
-    ".swarm_results_*.json": "体量大（~70 MB），不可重取，是否进数据仓库**用户未定**（需先定压缩方案）",
-    "analysis-*-ml-*.json": "体量大（~100 MB），不可重取，是否进数据仓库**用户未定**（需先定压缩方案）",
-    "logs": "日志；被跟踪的只有 4~5 月旧健康快照，历史已在 main",
-    "db_backups": "本机每日轮转备份；数据仓库本身就是它的异地版本",
-    "realtime_metrics.json": "每轮扫描覆盖的中间产物",
-    "cache": "可重建缓存", "data_cache": "可重建缓存", "earnings_cache": "可重建缓存",
-    "finviz_cache": "可重建缓存", "sec_cache": "可重建缓存", "reddit_cache": "可重建缓存",
-    ".factor_cache": "可重建缓存（Ken French 因子 parquet，二进制）", ".risk_cache": "可重建缓存（beta）",
+    "chroma_db": "rebuildable: 向量索引，可从 agent_memory 重建；BLOB 转十六进制文本会显著放大体积",
+    "analysis-*-ml-*.json": (
+        "accepted-loss:2026-10-05 用户定。1019 个文件 ≈ 118 MB 原始 / 20 MB 压缩；其 swarm_results 键与"
+        " .swarm_results 条目在 312/1019 个文件里逐字相同（其余 707 个不同，原因未核实），另含 advanced_analysis /"
+        " ml_prediction；ML 增强报告 HTML 已进备份。不纳入的代价：这两块只存在于这个文件里的内容丢了拿不回"),
+    "logs": "accepted-loss:2026-10-06 沿用 v0.45.342 的排除决定（日志，非数据；被跟踪的 4~5 月旧健康快照已在 main），用户未单独审议",
+    "db_backups": "derived:数据仓库 — 本机每日轮转备份；数据仓库本身就是它的异地版本",
+    "realtime_metrics.json": "rebuildable: 每轮扫描覆盖的中间产物",
+    "cache": "rebuildable: 可重建缓存", "data_cache": "rebuildable: 可重建缓存", "earnings_cache": "rebuildable: 可重建缓存",
+    "finviz_cache": "rebuildable: 可重建缓存", "sec_cache": "rebuildable: 可重建缓存", "reddit_cache": "rebuildable: 可重建缓存",
+    ".factor_cache": "rebuildable: Ken French 因子 parquet，二进制", ".risk_cache": "rebuildable: beta 缓存",
 }
 
 
@@ -263,6 +297,40 @@ def copy_root_files(src_root: Path, patterns: list[str], out_dir: Path) -> list[
     return records
 
 
+def _fold(name: str) -> str:
+    """大小写不敏感、规范化不敏感的盘（APFS 缺省 / HFS+ / Windows）眼里「同一个名字」的键。"""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", name).casefold())
+
+
+def case_collisions(rel_paths) -> list[list[str]]:
+    """在大小写不敏感的盘上会落进**同一个目录项**的拼写组（每组 ≥2 种拼写），排好序；空 ⇒ 无碰撞（v0.45.430）。
+
+    逐级比前缀而不只比全路径：`Reports/a.html` 与 `reports/b.html` 文件名不撞，两个目录却会合成一个，
+    git 只记得其中一种大小写 ⇒ `SHA256SUMS` 里另一种拼写成了假话。拼写一字不差的重复不算碰撞
+    （同一个文件被两条 glob 命中，内容相同）。
+    """
+    spellings: dict[str, set[str]] = {}
+    for rel in rel_paths:
+        parts = PurePosixPath(rel).parts
+        for i in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:i])
+            spellings.setdefault(_fold(prefix), set()).add(prefix)
+    return sorted(sorted(s) for s in spellings.values() if len(s) > 1)
+
+
+def _retire_legacy_manifest_file(out_dir: Path) -> bool:
+    """磁盘上**精确拼写**为 `MANIFEST.json` 的目录项删掉，返回删没删（v0.45.430）。
+
+    不能用 `.exists()` 判：大小写不敏感的盘上它对网站的 `manifest.json` 也返回 True。旧目录项留着，
+    随后拷的 `manifest.json` 会写进这个大写名的目录项里——内容对了，名字仍是 `MANIFEST.json`，
+    在大小写敏感的盘上恢复时就找不到它。里面只是上一轮的元数据（已在备份历史里，本轮重写成新名字）。
+    """
+    if LEGACY_MANIFEST_NAME in os.listdir(out_dir):
+        (out_dir / LEGACY_MANIFEST_NAME).unlink()
+        return True
+    return False
+
+
 def _code_git_head(code_repo: Path | None) -> str:
     """产出这份数据的**代码**版本（`git rev-parse HEAD`），拿不到时返回 `unavailable: <原因>`。
 
@@ -287,6 +355,57 @@ def _code_git_head(code_repo: Path | None) -> str:
     if r.returncode != 0 or not head:
         return f"unavailable: git rc={r.returncode} in {code_repo}: {r.stderr.strip()[:200]}"
     return head
+
+
+def default_backup_repo() -> Path:
+    """备份仓库工作区的缺省位置 = `PATHS.data_backup_repo`，**调用时求值**（v0.45.414）。
+
+    此前 `run_backup.main` / 本文件 `main` 的缺省值与编排器 Step 14 各写死一份
+    `~/alpha-hive-data/_git_backup`——阶段 3 早于全局迁移，备份子系统只能自己指向新数据根。
+    阶段 5 后 `ALPHA_HIVE_HOME` 已由编排器与 launchd plist 导出，三处收成这一处。
+    `ALPHA_HIVE_HOME` 未设时 `PATHS.home` 取缺省数据根 `~/alpha-hive-data`（v0.45.422；之前兜底到代码检出，
+    那时缺省会落进代码仓库）。显式把 `ALPHA_HIVE_HOME` 指到检出（阶段 5 回退的配置）仍由
+    `backup_repo_inside_code_repo` 拦下，不会在那里建库。
+    不吞 import 失败：这不是只作记录的字段（对照 `_code_git_head`），解析不出就不该往下跑。
+    """
+    from hive_logger import PATHS
+    return PATHS.data_backup_repo
+
+
+def backup_repo_inside_code_repo(path: Path) -> Path | None:
+    """`path` 落在代码仓库里（含就是仓库根）⇒ 返回代码仓库根；否则 None（v0.45.414）。
+
+    代码仓库 = `PATHS.git_repo_root`（不读 `ALPHA_HIVE_HOME`）。拦的是备份仓解析进代码检出：导出会把整份
+    生产数据铺进检出，之后 `run()` 再在里面 `git init` 出一个嵌套数据仓库。触发方式：显式 `--backup-dir`、
+    或 `ALPHA_HIVE_HOME` 被设成检出（阶段 5 回退）；v0.45.422 前 `ALPHA_HIVE_HOME` **未设**也会（那时兜底到检出）。
+
+    判「同一目录」比 (st_dev, st_ino)，不只比字符串（二次检查补）：`resolve()` 不折叠大小写（APFS 默认不分）
+    也不折叠固件链接（`/System/Volumes/Data/Users/…`），10-03 实测这两种写法都与检出同 inode、字符串前缀却不同
+    ⇒ 纯字符串判定往「放行」那边错。逐级上溯；还不存在的末段 stat 失败就跳过往上比。
+    """
+    from hive_logger import PATHS
+    code_repo = PATHS.git_repo_root.resolve()
+    try:
+        code_id = _dir_identity(code_repo)
+    except OSError:
+        code_id = None
+    target = Path(path).resolve()
+    for anc in (target, *target.parents):
+        if anc == code_repo:
+            return code_repo
+        if code_id is None:
+            continue
+        try:
+            if _dir_identity(anc) == code_id:
+                return code_repo
+        except OSError:
+            continue
+    return None
+
+
+def _dir_identity(p: Path) -> tuple[int, int]:
+    st = p.stat()
+    return st.st_dev, st.st_ino
 
 
 def run_export(src_root: Path, out_dir: Path, code_repo: Path | None = None) -> dict:
@@ -318,9 +437,12 @@ def run_export(src_root: Path, out_dir: Path, code_repo: Path | None = None) -> 
         recs, skipped = copy_state_dir(src_root, d, out_dir)
         manifest["state_dirs"][d] = recs
         manifest["state_dirs_skipped"][d] = skipped
-        skip_note = f"（跳过 {len(skipped)} 个非文本文件，见 MANIFEST.json state_dirs_skipped.{d}）" if skipped else ""
+        skip_note = f"（跳过 {len(skipped)} 个非文本文件，见 {MANIFEST_NAME} state_dirs_skipped.{d}）" if skipped else ""
         print(f"DIR {d}: {len(recs)} 文件{skip_note}")
 
+    # 必须在拷根文件之前：否则 `manifest.json` 会被拷进旧的大写目录项（见 `_retire_legacy_manifest_file`）
+    if _retire_legacy_manifest_file(out_dir):
+        print(f"已删除旧名元数据 {LEGACY_MANIFEST_NAME}（v0.45.430 起写 {MANIFEST_NAME}）")
     manifest["root_files"] = copy_root_files(src_root, ROOT_FILE_GLOBS, out_dir)
     print(f"根文件: {len(manifest['root_files'])} 个")
 
@@ -329,31 +451,47 @@ def run_export(src_root: Path, out_dir: Path, code_repo: Path | None = None) -> 
 
 
 def write_manifest_and_sums(out_dir: Path, manifest: dict) -> None:
+    """写 `SHA256SUMS` 与 `BACKUP_MANIFEST.json`；导出路径之间、或与这两个文件在大小写不敏感的盘上撞名 ⇒ 抛，什么都不写。
+
+    撞名检查必须在写元数据**之前**（v0.45.430）：旧名 `MANIFEST.json` 正是在这一步覆盖了刚拷进来的
+    `manifest.json`，而 `SHA256SUMS` 列的是覆盖前的哈希——没有任何东西会红。抛出由 `run_backup` 记
+    `stage="export"`、不提交。
+    """
     out_dir = Path(out_dir)
-    sums = []
-    for db_key, info in manifest["databases"].items():
+    entries: list[tuple[str, str]] = []  # (sha256, rel)
+    for db_key in manifest["databases"]:
         db_dir = out_dir / "db_exports" / db_key
         for fp in sorted(db_dir.glob("*")):
             if fp.is_file():
-                sums.append(f"{sha256_file(fp)}  {fp.relative_to(out_dir)}")
-    for _d, recs in manifest["state_dirs"].items():
-        for r in recs:
-            sums.append(f"{r['sha256']}  {r['rel']}")
-    for r in manifest["root_files"]:
-        sums.append(f"{r['sha256']}  {r['rel']}")
-    (out_dir / "SHA256SUMS").write_text("\n".join(sorted(sums)) + "\n", encoding="utf-8")
-    (out_dir / "MANIFEST.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+                entries.append((sha256_file(fp), str(fp.relative_to(out_dir))))
+    for recs in manifest["state_dirs"].values():
+        entries += [(r["sha256"], r["rel"]) for r in recs]
+    entries += [(r["sha256"], r["rel"]) for r in manifest["root_files"]]
+
+    collisions = case_collisions([rel for _, rel in entries] + list(META_FILES))
+    if collisions:
+        raise RuntimeError(f"导出路径在大小写不敏感的盘上会互相覆盖（{len(collisions)} 组，"
+                           f"{SUMS_NAME} 会替被覆盖的那份作假），拒绝写清单：{collisions[:5]}")
+    sums = sorted(f"{h}  {rel}" for h, rel in entries)
+    (out_dir / SUMS_NAME).write_text("\n".join(sums) + "\n", encoding="utf-8")
+    (out_dir / MANIFEST_NAME).write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(description="阶段 3.2 数据导出（按表 SQL + 文本状态）")
     ap.add_argument("--src", default="/Users/igg/Desktop/Alpha Hive")
-    ap.add_argument("--out", default=str(Path.home() / "alpha-hive-data" / "_git_backup"))
+    ap.add_argument("--out", default=None, help="缺省 PATHS.data_backup_repo（调用时求值）")
     args = ap.parse_args(argv)
-    manifest = run_export(Path(args.src), Path(args.out))
-    write_manifest_and_sums(Path(args.out), manifest)
-    print(f"\n导出完成：{args.out}，耗时 {manifest['duration_seconds']}s")
+    out = default_backup_repo() if args.out is None else Path(args.out)   # 同 run_backup.main：显式空串不换成缺省
+    code_repo = backup_repo_inside_code_repo(out)
+    if code_repo is not None:
+        print(f"拒绝导出：目标 {out} 在代码仓库 {code_repo} 里"
+              "（未传 --out 时多半是没设 ALPHA_HIVE_HOME）", file=sys.stderr)
+        return 2
+    manifest = run_export(Path(args.src), out)
+    write_manifest_and_sums(out, manifest)
+    print(f"\n导出完成：{out}，耗时 {manifest['duration_seconds']}s")
     return 0
 
 

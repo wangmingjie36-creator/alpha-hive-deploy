@@ -69,6 +69,18 @@
       （新旧两种记录都按预注册自证判据 —— 方向一致、分数差 ≤ SCORE_TOL —— 复现真 distill 的
       输出；「新记录错加 GEX」「旧记录漏加 GEX」两个方向各一条变异）。
 
+────────────────────────────────────────────────────────────────────
+修订 2（v0.45.484，2026-10-13，事后修订；盲化期内、被排除日的 T+7 尚未到期）
+────────────────────────────────────────────────────────────────────
+2026-10-12 生产扫描遇本机出站故障（代理探活失败 ⇒ 整轮直连 ⇒ 全部 TLS 握手失败）：30/30 只全源 FALLBACK、现价 0、
+期权链 0 条。当天 12 份 `analysis-*-ml-2026-10-12.json` 里是在零价 / 样本链上算出的分数；入场价当时为 0，按本预注册的
+联表口径本来就进不了 IC。2026-10-13 对该日整日重放补算并把 predictions 的入场价写回成真实收盘（v0.45.484）——这会让
+那 12 份故障日 JSON 在 10-21 结算后**进入**本检验。用户决定该日不进预注册前瞻检验。
+改了什么  `load_reports` 跳过 `signal_archive.FORWARD_TEST_EXCLUDED_DAYS` 里的日子，计入 skipped
+      「协议排除日」（不静默）。只此一天；其余规则（H1、度量、自证、MIN_CS、检视点、α、盲化）全部不变。
+为什么不可能受结果影响  登记时该日 T+7 未到期（最早 10-21），本窗口此前到期的样本里没有这一天。
+守卫  `tests/test_forward_test_excluded_days.py::TestResonanceSkips`（含清空名单的对照）。
+
 样本内复核：`--insample` 在 FORWARD_START 之前的样本上，用**现行权重**重算加权分后跑同一条链
 （加权分自证：用当时记录的权重应能复现当时记录的基础分）。它就是生成假设的那份数据，
 **只供复核报告数字，不能拿来确认。**
@@ -120,6 +132,7 @@ def load_reports(home: Path, since: Optional[str] = None, before: Optional[str] 
 
     缺字段的文件**计数**而不是静默跳过 —— 字段改名会让样本悄悄归零，计数让它看得见。
     """
+    import signal_archive
     rows, skipped = [], collections.Counter()
     for f in sorted(Path(home).glob("analysis-*-ml-*.json")):
         m = _FNAME.match(f.name)
@@ -128,6 +141,10 @@ def load_reports(home: Path, since: Optional[str] = None, before: Optional[str] 
             continue
         date = m.group(2)
         if (since and date < since) or (before and date >= before):
+            continue
+        if signal_archive.forward_test_excluded(date):
+            # 修订 2（v0.45.484，事后）：整天由事后重放补算的日子不进检验；计数，不静默
+            skipped["协议排除日（signal_archive.FORWARD_TEST_EXCLUDED_DAYS）"] += 1
             continue
         try:
             sr = json.loads(f.read_text(encoding="utf-8")).get("swarm_results") or {}

@@ -2,9 +2,13 @@
 Alpha Hive 测试 fixtures - 共享 mock 数据 + 隔离数据库
 """
 
+import datetime
+import time
 import sys
 import os
 import pathlib
+import site
+import threading
 import weakref
 import pytest
 
@@ -81,6 +85,34 @@ def _isolate_env(tmp_path, monkeypatch):
     # 在自动提交白名单里的 ⇒ 夹具模型会被当成生产模型提交推送。
     # ml_model_guard 自己也在 pytest 下默认关闭（两层），这里再显式关一次。
     monkeypatch.setenv("ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE", "1")
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _pin_child_user_site():
+    """测试换 HOME 不挪子进程的用户 site-packages：全会话钉一次 `PYTHONUSERBASE`（v0.45.426）。
+
+    子进程里的真 Python 启动时按 `$HOME` 推用户 site；本机 numpy / pytest / jinja2 / starlette / httpx /
+    anyio **只**装在用户 site。测试为隔离按 HOME 求的默认位置（`~/Library`、`~/.claude/scripts`、
+    `~/.alpha_hive_*`）把 HOME 指到 tmp——各文件各自在换（v0.45.426 时 13 个，且还在涨）⇒ 起的真解释器丢掉这半边依赖、
+    import 即死，红的是夹具不是被测代码；且只在 Mac 红，CI（依赖在系统 site）永远绿。
+    v0.45.397 在 alphabot 的 `home` 夹具里钉过一次；「换 HOME 时记得顺手钉」写在注释里不会被执行，
+    下一个换 HOME 的文件照样会忘 ⇒ 收到这里，唯一出处。
+
+    取值在会话开始时（任何测试 / 夹具换 HOME 之前），且 `site.getuserbase()` 返回本进程缓存的值、
+    不随当前 HOME 变 ⇒ 与谁先换 HOME 无关。不换 HOME 的测试拿到的是同一个值，等于没钉。
+    不掩盖生产问题：生产代码从不给子进程改 HOME（只改 `ALPHA_HIVE_HOME`），launchd / .app 拿的是真 HOME。
+
+    管不到：从零构造 env、不继承 `os.environ` 的子进程——那类测试要的就是「只有这几个变量」。
+    v0.45.426 时带沙箱 HOME 的只有 `test_scan_catchup`（照 launchd 现造环境），那里的 python 是不执行的桩。
+    守卫：`tests/test_child_user_site_pin.py`（删掉本夹具在任何机器上都红，含 CI）。
+    """
+    prev = os.environ.get("PYTHONUSERBASE")
+    os.environ["PYTHONUSERBASE"] = site.getuserbase()
+    yield
+    if prev is None:
+        os.environ.pop("PYTHONUSERBASE", None)
+    else:
+        os.environ["PYTHONUSERBASE"] = prev
 
 
 # ==================== 禁止测试调用真实 Anthropic API ====================
@@ -330,6 +362,61 @@ def _block_git_transport_probe(request, monkeypatch):
     monkeypatch.setattr(_gtp, "_tcp_connect", _deny_connect)
     request.node._git_probe_calls = calls
     yield
+
+
+#: 当前测试的快照出网闸状态：`calls` 记被拦的调用（供闸自身的测试核对），`allow_real` 只给 network 标记的用例
+_SNAPSHOT_FETCH_GATE = {"calls": [], "allow_real": False}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cloud_snapshot_fetch_gate():
+    """`cloud_snapshot_loader._git_fetch`（v0.45.466）在 **git 子进程**里出网——上面两道（库级 API / 裸 socket）
+    都挡不住。补跑入口 `_snapshot_ctx`、每日观测 `lag_summary`、入场价回填都会走到它，而缺省仓库就是本检出
+    （origin = GitHub）。
+
+    **session 级装、整个会话不撤**（v0.45.466 二次检查）：每日观测跑在后台线程里，线程可能活过起它的那条测试——
+    函数级 monkeypatch 在 teardown 撤掉闸之后它再拉，就真出网了（test_production_sync 的 main 用例实测会这样）。
+    只放行 origin 是**本地路径**的仓库（测试自己建的裸仓库：fetch 不出网，测试要真跑它）；其余抛 `_OfflineInTests`
+    （与真断网同一条降级路径）并记账。`network` 标记的用例经 `_SNAPSHOT_FETCH_GATE["allow_real"]` 放行。
+    """
+    import subprocess
+    import cloud_snapshot_loader as _csl
+    real = _csl._git_fetch
+
+    def _gated(repo, timeout):
+        url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=repo,
+                             capture_output=True, text=True).stdout.strip()
+        if _SNAPSHOT_FETCH_GATE["allow_real"] or (url and (os.path.isabs(url) or url.startswith("file://"))):
+            return real(repo, timeout)
+        _SNAPSHOT_FETCH_GATE["calls"].append((repo, url))
+        raise _OfflineInTests(f"测试默认离线：cloud_snapshot_loader 要从 {url or '（无 origin）'} "
+                              "拉 cloud-snapshots（tests/conftest.py）")
+
+    _csl._git_fetch = _gated
+    yield
+    _csl._git_fetch = real
+
+
+@pytest.fixture(autouse=True)
+def _cloud_snapshot_per_test_state(request, monkeypatch):
+    """每条测试清空本进程的刷新 / 告警记录（免得上一条刷新过，下一条的「本地陈旧还是云端没有」跟着变），
+    并在收尾时**等本条测试起的每日观测线程做完**：活过测试的线程会把刷新记录写进下一条测试的表里。"""
+    import cloud_snapshot_loader as _csl
+    monkeypatch.setattr(_csl, "_REFRESHED", {})
+    monkeypatch.setattr(_csl, "_WARNED", set())
+    calls: list = []
+    monkeypatch.setitem(_SNAPSHOT_FETCH_GATE, "calls", calls)
+    monkeypatch.setitem(_SNAPSHOT_FETCH_GATE, "allow_real", bool(request.node.get_closest_marker("network")))
+    request.node._snapshot_fetch_calls = calls
+    yield
+    adr = sys.modules.get("alpha_hive_daily_report")
+    if adr is None:
+        return                      # 没导入过日报 ⇒ 不可能起过观测线程
+    name = adr._CloudSnapshotObservation.THREAD_NAME
+    for t in threading.enumerate():
+        if t.name == name:
+            t.join(15)
+            assert not t.is_alive(), f"每日观测线程 {name} 活过了起它的测试（15 秒没做完）——它会污染后面的测试"
 
 
 # ==================== 可复用的显式源桩（各模块 opt-in）====================
@@ -643,7 +730,7 @@ def _pp_state_digest(path):
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _real_paper_portfolio_state_dir():
+def _real_paper_portfolio_state_dir(pytestconfig):
     """生产 `paper_portfolio_state/` 的真身——在**任何 function 级隔离动手之前**求值一次（v0.45.303）。
 
     事故：`_isolate_paper_portfolio_state` 原先用 `_pp.STATE_DIR` 当「真身」，可 `STATE_DIR` 是
@@ -665,22 +752,36 @@ def _real_paper_portfolio_state_dir():
     `PATHS.home` 是纯读（不建目录），此处不会给生产目录增加任何写入。
 
     **一致性自检**：若收集期已有人导入了 `paper_portfolio`（此刻没有任何测试动过它，
-    `STATE_DIR` 还是收集期真环境下的 import 期值），它必须与这里求得的一致——否则「本夹具对真身的推导」
+    `STATE_DIR` 还是收集期环境下的 import 期值），它必须与「同一推导在收集期环境下的值」一致——否则「本夹具对真身的推导」
     与「`paper_portfolio` 自己的推导」漂移了（例如有人把状态目录改名/迁走），守卫在盯过期路径。
     漂移就在这里红，而不是让守卫悄悄失明。未被收集期导入时无从比较（不假装比较过），
     该情形由 `tests/test_paper_portfolio_guard_identity.py` 在子进程里正面核对。
+
+    v0.45.422：收集期环境不再是「真环境」——`pytest_configure` 先把 `ALPHA_HIVE_HOME` 换成会话沙箱
+    （数据根缺省改成 `~/alpha-hive-data` 后，收集期冻住的常量否则会指向生产）。所以真身改按**调用 pytest 时**的
+    环境求（v0.45.498 起与真实数据根闸同一份推导 `_root_data_guard.production_data_root`，其内只调生产规则 `resolve_data_root`）；自检比的是 `PATHS.home`（此刻 = 收集期的会话沙箱）下的同一推导。
+    顺带：此前交互 shell 不设该变量，真身其实落在代码检出里的冻结副本上——守卫一直盯着旧数据，不是生产。
     """
     from hive_logger import PATHS
-    real = pathlib.Path(PATHS.home) / "paper_portfolio_state"
+    # 「生产在哪」与真实数据根闸同一份推导（v0.45.498：此前这里自调 resolve_data_root，相对值下盯随 cwd 漂移的目录）
+    real = pathlib.Path(_paper_portfolio_real_dir(pytestconfig._alpha_hive_invocation_env))
     imported = sys.modules.get("paper_portfolio")
     if imported is not None:
-        assert imported.STATE_DIR == real, (
+        frozen_expected = pathlib.Path(PATHS.home) / "paper_portfolio_state"
+        assert imported.STATE_DIR == frozen_expected, (
             f"守卫对「生产状态目录」的推导与 paper_portfolio 自己的推导不一致：\n"
-            f"  本夹具（PATHS.home / 'paper_portfolio_state'）= {real}\n"
-            f"  paper_portfolio.STATE_DIR（收集期 import 期值）  = {imported.STATE_DIR}\n"
+            f"  本夹具的推导（PATHS.home / 'paper_portfolio_state'，收集期环境）= {frozen_expected}\n"
+            f"  paper_portfolio.STATE_DIR（收集期 import 期值）              = {imported.STATE_DIR}\n"
             "守卫盯的是过期路径 ⇒ 真写穿生产它也看不见。改 `_real_paper_portfolio_state_dir` "
             "使之与 `paper_portfolio.STATE_DIR` 的定义同步（或反之），不要在这里放行。")
     return real
+
+
+def _paper_portfolio_real_dir(invocation_env) -> str:
+    """paper_portfolio 状态目录的真身 = 测试眼里的生产数据根（`_root_data_guard.production_data_root`）下那一格。"""
+    env = dict(invocation_env)                        # `_root_data_guard` 在本文件后面顶层导入，调用时已在
+    return os.path.join(_root_data_guard.production_data_root(env, env.get("HOME") or os.path.expanduser("~")),
+                        "paper_portfolio_state")
 
 
 @pytest.fixture(autouse=True)
@@ -743,6 +844,9 @@ def _isolate_paper_portfolio_state(tmp_path, monkeypatch, _real_paper_portfolio_
     monkeypatch.setattr(_pp, "CLOSED_FILE", sandbox / "closed_trades.jsonl")
     monkeypatch.setattr(_pp, "EQUITY_FILE", sandbox / "equity_curve.jsonl")
     monkeypatch.setattr(_pp, "META_FILE", sandbox / "meta.json")
+    # v0.45.416：拆股记录缓存的键是 (ticker, entry_date, **真实**今天)——同一次 pytest 里两个测试用同一个
+    # (标的, 入场日) 喂不同的假世界（GAPX / 08-10 就有两份），前一个查到的拆股会原样漏给后一个，结果取决于执行顺序。
+    monkeypatch.setattr(_pp, "_SPLIT_EVENTS_CACHE", {}, raising=False)
 
     yield
 
@@ -775,6 +879,27 @@ def _isolate_feedback_loop_close_t7_db(tmp_path, monkeypatch):
         return
     monkeypatch.setattr(feedback_loop, "PHEROMONE_DB_PATH",
                         tmp_path / "_no_such_pheromone.db", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _fg_sub_status_in_process(monkeypatch):
+    """进程内调 `ic_rerun_readiness.main()` 时，F&G 子状态留在本进程算（v0.45.392）。
+
+    生产里 `main()` 把 F&G 子状态放进**子进程**（带时间预算，见该模块 docstring）。可本仓进程内调 `main()`
+    的测试（`TestCarriedByReadiness` ×2、`TestEtaAndExitCodes`、`TestOkPath` …）全靠进程内的东西：
+    monkeypatch 打桩 `fg_exposure_gate_forward_status`、上面 `_isolate_paper_portfolio_state` 沙箱化的
+    `SNAPSHOT_DIR`、`_offline_transport` 出网闸——**一样都到不了子进程**。不置这个钩子，那些桩会被无声绕过，
+    子进程还可能读真实快照、真去打 yfinance（出网闸管不到它）。
+
+    子进程路径本身由 `tests/test_ic_rerun_fg_budget.py` 显式 `setattr(rr, "_FG_IN_PROCESS", False)` 测
+    （假子进程 + 真子进程两层），真实 CLI 子进程测试（`test_step_contract_ic_rerun.py::TestRealCli`）
+    不经本夹具、走的就是生产路径。
+    """
+    try:
+        import ic_rerun_readiness
+    except Exception:  # pragma: no cover - 模块不可得时无需处理
+        return
+    monkeypatch.setattr(ic_rerun_readiness, "_FG_IN_PROCESS", True)
 
 
 # ==================== Mock 股票数据 ====================
@@ -1081,20 +1206,6 @@ def _isolate_ml_model_file(request, tmp_path, monkeypatch):
 #    在这里是需求。
 _REPO_ROOT_FOR_GUARD = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 只盯「生产数据」级别的产物：样本库、向量库、三本期权账本。
-# 缓存目录（cache/ data_cache/ reddit_cache/ …）与 ml_model*.json 暂不入闸——
-# 前者危害是脏缓存、后者归 v0.45.149，另见 CHANGELOG v0.45.150 的分级表。
-_GUARDED_PRODUCTION_ARTIFACTS = (
-    "pheromone.db",
-    "metrics.db",
-    "chroma_db",
-    "vrp_state",
-    "options_paper_state",
-    "hedge_state",
-    "sell_strike_state",
-)
-
-
 def _artifact_signature(path):
     """(存在性, 大小, mtime_ns) 摘要；目录则递归汇总。
 
@@ -1186,6 +1297,48 @@ def _isolate_sell_strike_state(_isolate_env, request, tmp_path):
         "`sell_strike_ledger._state_dir()` 上，不要在这里放行。")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_alphabot_state(_isolate_env, tmp_path):
+    """Alpha Bot 状态目录（v0.45.388）防线①：`PATHS.alphabot_state` 此刻是绝对路径且在本测试沙箱里。
+    防线②（真身指纹）由仓库根默认拒绝总闸与真实数据根总闸（`_guard_real_data_root`）兜住。
+    判据同 `_assert_sell_strike_state_in_sandbox`（纯词法，不拿 cwd 补全）。"""
+    import hive_logger
+
+    p = pathlib.Path(hive_logger.PATHS.alphabot_state)
+    assert p.is_absolute(), f"PATHS.alphabot_state 解析成了相对路径 {p}：生产从仓库根跑会写穿仓库根"
+    assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+        f"PATHS.alphabot_state = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？")
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_replay_ohlc_state(_isolate_env, tmp_path):
+    """回放行情库（v0.45.410，`replay_ohlc_store`）防线①：`PATHS.replay_ohlc_state` 此刻是绝对路径且在本测试沙箱里。
+    F&G 前瞻检验的 `run()` 每次都会往这里写——测试里调 `run()` 的地方很多，任何一处把路径冻住都会写进真身。
+    防线②（真身指纹）由仓库根默认拒绝总闸与真实数据根总闸（`_guard_real_data_root`，v0.45.409）兜住。"""
+    import hive_logger
+
+    p = pathlib.Path(hive_logger.PATHS.replay_ohlc_state)
+    assert p.is_absolute(), f"PATHS.replay_ohlc_state 解析成了相对路径 {p}：生产从仓库根跑会写穿仓库根"
+    assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+        f"PATHS.replay_ohlc_state = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？")
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_straddle_prereg_result(_isolate_env, tmp_path):
+    """跨式 × GEX 预注册的冻结结果（v0.45.428，`straddle_gex_prereg.run_once`）防线①：`PATHS.straddle_prereg_result`
+    此刻是绝对路径且在本测试沙箱里。这个文件**只写一次、永不覆盖**——误写进真身就把协议永久冻住，比别的产物更不能漏。
+    防线②（真身指纹）由仓库根默认拒绝总闸与真实数据根总闸（`_guard_real_data_root`）兜住。"""
+    import hive_logger
+
+    p = pathlib.Path(hive_logger.PATHS.straddle_prereg_result)
+    assert p.is_absolute(), f"PATHS.straddle_prereg_result 解析成了相对路径 {p}：生产从仓库根跑会写穿仓库根"
+    assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+        f"PATHS.straddle_prereg_result = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？")
+    yield
+
+
 @pytest.fixture
 def sell_strike_state_sandbox_check():
     """把 `_assert_sell_strike_state_in_sandbox` 暴露给它的有牙自证（同 `default_path_sandbox_check`）。"""
@@ -1209,58 +1362,31 @@ def default_path_sandbox_check():
     return _assert_default_path_in_sandbox
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _guard_production_artifacts():
-    """第二道防线：整个 session 跑完，生产产物指纹必须没变。
+@pytest.fixture
+def paper_portfolio_real_dir_fn():
+    """把 `_paper_portfolio_real_dir` 暴露给对拍测试（同上：`conftest` 不可直接 import）。"""
+    return _paper_portfolio_real_dir
 
-    第一道防线是「路径调用时求值」——`PATHS.*` 全是 property，配上
-    `_isolate_env` 的 `monkeypatch.setenv` 本该够了。它失效过：把 `PATHS.x`
-    求值成模块级常量或类属性，值就冻在 import 那一刻，而 pytest 在**收集期**
-    就 import 生产模块，那时本文件的 fixture 一次都没跑过（实测收集结束时
-    `ALPHA_HIVE_HOME` 确为 `<UNSET>`）⇒ 冻成 checkout 根目录，隔离形同不存在。
 
-    v0.45.150 之前的实测后果：跑一次全套测试，`PredictionStore.__init__` →
-    `_init_table()` 会以读写模式打开**生产** `pheromone.db`（37 MB，喂 IC 闸 /
-    权重优化 / 概率记分卡的样本库），执行 `CREATE TABLE IF NOT EXISTS`、进入
-    WAL 模式、留下 `-wal`/`-shm`；`MemoryStore()` 还会在其上跑 `schema_migrate`。
+@pytest.fixture
+def data_root_session_facts(pytestconfig):
+    """会话级数据根接线的事实，给 `tests/test_data_root_default.py` 自证（同上：`conftest` 不可直接 import）。
 
-    为什么需要这一道而不是只修路径（照 `_isolate_paper_portfolio_state` 的理由）：
-    逐模块打补丁是打地鼠——本仓库已经为 `weekly_optimizer` / `feedback_loop` /
-    `paper_portfolio` 各写过一个专属 fixture，每次都是**事后**补的。本闸不认
-    模块、只认盘上的产物，因此对将来新增的写入路径同样有效。
-
-    ⚠️ 它是 session 级的，红在整轮末尾，不会指出是哪条测试写的。定位办法：
-    patch `sqlite3.connect` / `builtins.open` / `os.makedirs` 记 `nodeid` 与调用栈
-    （v0.45.150 就是这么把 `pheromone.db` 归因到 `backtester.py:99` 的）。
-    ⚠️ 若此时机器上正好在跑每日扫描，本闸也会红——那不是假警报，是提示你
-    「测试与生产写同一批文件的时间窗真实存在」。
-    """
-    real = {name: os.path.join(_REPO_ROOT_FOR_GUARD, name)
-            for name in _GUARDED_PRODUCTION_ARTIFACTS}
-    before = {n: _artifact_signature(p) for n, p in real.items()}
-
-    yield
-
-    touched = sorted(n for n, p in real.items()
-                     if _artifact_signature(p) != before[n])
-    assert not touched, (
-        f"测试写到了**生产**产物：{touched}\n"
-        f"（checkout 根目录 = {_REPO_ROOT_FOR_GUARD}）\n\n"
-        "十有八九是某处把 `PATHS.*` 派生的路径求值成了模块级常量、类属性，"
-        "或者写成了默认参数 `def f(db_path=DB_PATH)`——三者都冻在 import 期，"
-        "而 pytest 收集期 import ⇒ `_isolate_env` 的 setenv 追不上它。\n"
-        "改法：改成 property / 函数（调用时求值）；默认参数写 `= None` "
-        "再在函数体里解析。结构守卫见 "
-        "`tests/test_paths_not_frozen_at_import.py::TestSpeciesDoesNotSpread`。")
+    `invocation_env`：调用 pytest 时的 ALPHA_HIVE_HOME / HOME；`session_home`：`pytest_configure` 设的会话沙箱；
+    `guard_root`：真实数据根闸在 `pytest_sessionstart` 认定的根（None = 本机没有真实数据根，闸不生效）。"""
+    root, _fp = pytestconfig.stash.get(_DATA_ROOT_BEFORE, (None, None))
+    return {"invocation_env": dict(pytestconfig._alpha_hive_invocation_env),
+            "session_home": pytestconfig._alpha_hive_session_home,
+            "guard_root": root}
 
 
 # ==================== 仓库根「默认拒绝」总闸（v0.45.233） ====================
 #
-# 上面那道只盯 6 个点名的产物；本闸盯仓库根下**除代码以外的一切**，不维护清单。
-# 两道都留：上面那道是纵深防御，且 `_GUARDED_PRODUCTION_ARTIFACTS` 必须是本闸
-# 覆盖面的子集——`tests/test_root_data_guard.py` 断言这一点，谁把其中一项划进
-# 「代码」谁红。「代码」怎么界定、为什么这么界定，全在 `tests/_root_data_guard.py`
-# 的 docstring，这里不抄（抄一份就是快照）。
+# 本闸盯仓库根下**除代码以外的一切**，不维护清单（新产物默认就被盯住）。
+# 「代码」怎么界定、为什么这么界定，全在 `tests/_root_data_guard.py` 的 docstring，这里不抄（抄一份就是快照）。
+# v0.45.409（阶段 6 ⑤）：原先还有一道「点名 8 个产物」的清单式总闸（`_GUARDED_PRODUCTION_ARTIFACTS`）；
+# 数据搬到 `$ALPHA_HIVE_HOME` 后它盯的仓库根路径都不存在，被本闸完全覆盖，已删；
+# 对应的真缺口——测试写到**真实数据根**——由下面的 `_guard_real_data_root` 补上。
 #
 # 为什么「之前」的指纹取在 `pytest_sessionstart` 而不是 session fixture 的 setup：
 # fixture 最早也要等**收集结束**才跑，而冻结路径那一族正是在收集期 import 时
@@ -1275,16 +1401,65 @@ import _root_data_guard  # noqa: E402
 _ROOT_FP_BEFORE = pytest.StashKey[dict]()
 
 
+_DATA_ROOT_BEFORE = pytest.StashKey[tuple]()
+_DATA_ROOT_ALPHABOT = pytest.StashKey[tuple]()
+# v0.45.455：两道 session 级总闸报红时，逐文件标出「写入时刻在跑哪条测试」要用的本轮开始时刻与时间线。
+_SESSION_START_WALL = pytest.StashKey[float]()
+
+
 def pytest_sessionstart(session):
+    # 先记开始时刻再取指纹：取指纹期间被写的文件，mtime 也不会早于这个时刻（否则会被误标成「保留了旧 mtime」）
+    session.config.stash[_SESSION_START_WALL] = time.time()
+    _GATE_TIMELINE.clear()
     session.config.stash[_ROOT_FP_BEFORE] = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)
+    # 真实数据根：按**调用 pytest 时**的环境取——`pytest_configure` 已把 ALPHA_HIVE_HOME 换成会话沙箱
+    # （v0.45.422），`_isolate_env` 之后还会逐条换。读 os.environ 就会把沙箱当成「真实数据根」，闸当场失明。
+    invoked = session.config._alpha_hive_invocation_env
+    root = _root_data_guard.real_data_root(
+        invoked, invoked.get("HOME") or os.path.expanduser("~"), _REPO_ROOT_FOR_GUARD)
+    session.config.stash[_DATA_ROOT_BEFORE] = (
+        root, _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason) if root else None)
+    # v0.45.453：报红时分辨「全部是 Alpha Bot 盘中追加」要用的起点（会话开始时刻 + 近两天盘中文件的哈希）。只影响措辞。
+    _fp = session.config.stash[_DATA_ROOT_BEFORE][1]
+    session.config.stash[_DATA_ROOT_ALPHABOT] = (
+        datetime.datetime.now(datetime.timezone.utc),
+        _root_data_guard.alphabot_baseline(root, _fp, datetime.date.today()) if root else {})
+
+
+#: 本轮时间线：`pytest_runtest_logreport` 拿不到 config，只能经模块级引用写（`pytest_sessionstart` 清空）。
+_GATE_TIMELINE: list = []
+
+
+def pytest_runtest_logreport(report):
+    """逐条测试逐阶段记 (开始, 结束, nodeid, 阶段)——只给两道总闸报红时定位用（v0.45.455）。
+    `report.start/stop` 是 pytest 自留的墙钟，测试 mock `time` 改不到；与文件 mtime 可直接比。"""
+    _GATE_TIMELINE.append((report.start, report.stop, report.nodeid, report.when))
+
+
+def _gate_timeline(config) -> tuple:
+    """(本轮开始时刻 | None, 时间线)。时间线直接读模块级那份——v0.45.460：曾从 stash 取、取不到给 `[]`，
+    sessionstart 没调到本 conftest 时会把**已记下**的时间线扔掉、全标成「收集期」（实际调用里几乎走不到：
+    pytest 把参数下 `test*` 子目录的 conftest 也当 initial 加载）。开始时刻取不到就是 None，`locate` 会照实说。"""
+    return config.stash.get(_SESSION_START_WALL, None), _GATE_TIMELINE
+
+
+def pytest_report_header(config):
+    """让「这台机器上真实数据根闸有没有生效」可见：不在时它什么都不保护，不能让这件事静默。"""
+    root, fp = config.stash.get(_DATA_ROOT_BEFORE, (None, None))
+    note = _root_data_guard.nonabsolute_env_note(getattr(config, "_alpha_hive_invocation_env", {}) or {})
+    tail = f"；{note}" if note else ""                  # v0.45.488：环境值没被采用要说出来，不能静默改守别处
+    if root is None:
+        return f"real-data-root guard: INACTIVE（此机器上没有真实数据根；CI / 干净克隆都是这样，牙只靠合成测试证明）{tail}"
+    return f"real-data-root guard: active on {root}（{len(fp)} 个受闸条目）{tail}"
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _guard_repo_root_default_deny(request):
     """整个 session（含收集期）跑完，仓库根下的非代码内容必须一个字节都没变。
 
-    ⚠️ 与上面那道一样是 session 级的：红在整轮末尾，不指出是哪条测试写的。
-    定位：对红出来的路径 patch `builtins.open` / `os.makedirs` / `sqlite3.connect`
+    ⚠️ 与上面那道一样是 session 级的：红在整轮末尾，pytest 把它记在收集序最后一条测试名下（与原因无关）。
+    v0.45.455 起报错逐文件给出「mtime 落在哪条测试的哪个阶段」——只是时间重合，并发写入者照样会落在
+    无关测试期间。要确认是谁写的：对红出来的路径 patch `builtins.open` / `os.makedirs` / `sqlite3.connect`
     记 `nodeid` 与调用栈；或二分跑测试文件。
     ⚠️ 在**生产 checkout** 里跑时，每日扫描、别的 session 往生产目录写的东西都会让它红——
     那是真实存在的「测试与生产写同一批文件」的时间窗，不是假警报（数据根迁移阶段 5 之后才会消失）。
@@ -1296,16 +1471,94 @@ def _guard_repo_root_default_deny(request):
 
     yield
 
-    changes = _root_data_guard.diff(before, _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD))
+    after = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)
+    changes = _root_data_guard.diff(before, after)
+    if not changes:
+        return
+    started, timeline = _gate_timeline(request.config)
     assert not changes, (
-        f"测试往**仓库根**写了非代码内容（checkout 根目录 = {_REPO_ROOT_FOR_GUARD}）：\n"
+        f"本轮期间**仓库根**的非代码内容被改动了（checkout 根目录 = {_REPO_ROOT_FOR_GUARD}）：\n"
         f"{_root_data_guard.format_diff(changes)}\n\n"
         + ("⚠️ 基线取自 session fixture setup（sessionstart 未生效），收集期写入不在本次比对范围内。\n"
            if late else "")
-        + "被测代码的写入路径绕过了 `ALPHA_HIVE_HOME` 隔离：多半是 `Path(__file__).parent / 数据名`、"
+        + f"{_root_data_guard.timeline_section(_REPO_ROOT_FOR_GUARD, changes, after, timeline, started)}\n\n"
+        "若是测试写的：被测代码的写入路径绕过了 `ALPHA_HIVE_HOME` 隔离——多半是 `Path(__file__).parent / 数据名`、"
         "cwd 相对路径，或把 `PATHS.*` 求值成了模块级常量 / 类属性 / 默认参数。"
         "改成调用时读 `PATHS.*`。\n"
         "**不要**往 `tests/_root_data_guard.py` 的豁免里加数据路径——那里只放人写的代码。")
+
+@pytest.fixture(scope="session", autouse=True)
+def _guard_real_data_root(request):
+    """整个 session（含收集期）跑完，**真实数据根**里的生产数据必须一个字节都没变（v0.45.409，阶段 6 ⑤）。
+
+    阶段 5 之后生产数据在 `$ALPHA_HIVE_HOME`（~/alpha-hive-data）。`_isolate_env` 逐条把它改成沙箱，
+    但任何绕过隔离的写入（`__file__` 派生 / 模块级常量冻结 / subprocess 丢了 env / 硬编码 `~/alpha-hive-data`）
+    都会写到真实数据根——生产账本、样本库、模型，**不可重取**。此前没有任何东西会为此变红。
+    口径同仓库根闸：默认拒绝（除 `logs/`、`db_backups/` 与 `_` 打头的元目录外一切受闸；`_git_backup/` 例外照样受闸，
+    v0.45.427——`PATHS.data_backup_repo` 让测试碰得到它，10-03 夹具就是写进了这里）、`(size, mtime_ns)`、
+    `-shm` 只记大小。「之前」取在 `pytest_sessionstart`（收集期之前），理由见仓库根闸一节。
+
+    ⚠️ 与仓库根闸同样是 session 级：红在整轮末尾、记在最后一条测试名下；逐文件写入时刻落在哪条测试期间
+    见报错（v0.45.455，只是时间重合），确认法见仓库根闸。
+    ⚠️ **机器上正在跑每日扫描 / 周任务时它会红**（扫描写 `cache/`、`report_snapshots/`、`paper_portfolio_state/`…）——
+    那不是假警报，是「测试与生产写同一批文件的时间窗真实存在」；平日 14:00–15:00 与周日 09:07 前后别跑全套。
+    ⚠️ 没有真实数据根的机器上（CI / 干净克隆）本闸不做任何事（`pytest_report_header` 会说明）；它的牙由
+    `tests/test_root_data_guard.py` 的合成数据根测试证明，不能靠「这轮绿」证明。
+    """
+    root, before = request.config.stash.get(_DATA_ROOT_BEFORE, (None, None))
+
+    yield
+
+    if root is None:
+        return
+    after = _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason)
+    changes = _root_data_guard.diff(before, after)
+    if not changes:
+        return
+    started, baseline = request.config.stash.get(_DATA_ROOT_ALPHABOT, (None, {}))
+    v = _root_data_guard.explain_alphabot_appends(
+        root, changes, before, baseline, started, datetime.datetime.now(datetime.timezone.utc))
+    # 给 pre-push 契约闸的报告插件读（`changelog_guard._REPORT_PLUGIN`）：只有这里能逐项核实，钩子不抠输出文本
+    setattr(request.config, _root_data_guard.VERDICT_CONFIG_ATTR, {
+        "all_alphabot_appends": not v["unexplained"], "alphabot_files": sum(
+            1 for p in v["explained"] if p.endswith(".jsonl")),
+        "alphabot_records": v["records"], "unexplained": sum(len(x) for x in v["unexplained"].values())})
+    started_wall, timeline = _gate_timeline(request.config)
+    assert not changes, _real_data_root_message(root, changes, v) + "\n\n" + _root_data_guard.timeline_section(
+        root, changes, after, timeline, started_wall)
+
+
+def _real_data_root_message(root, changes: dict, v: dict) -> str:
+    """真实数据根闸的报错文案（v0.45.453 起按 `explain_alphabot_appends` 分三种；判定不受影响，照样红）。
+    v0.45.455 起调用方在其后接 `timeline_section`（逐文件写入时刻落在哪条测试期间），三种措辞都带。"""
+    if v["explained"] and not v["unexplained"]:
+        n_files = sum(1 for p in v["explained"] if p.endswith(".jsonl"))
+        return (
+            f"真实数据根（{root}）有变化，但**全部**是 Alpha Bot 盘中采样的追加——已逐项核实，不是测试写的：\n"
+            f"{_root_data_guard.format_diff(changes)}\n"
+            f"  {n_files} 个文件只在末尾新增了 {v['records']} 张快照：原有内容逐字节未变，快照时间都落在本轮测试期间。\n\n"
+            "判定照样是红（闸只认「没有变化」，不认「看起来像合法写入」）。处置：Alpha Bot 盘中按设定间隔整批写、"
+            "每批几十秒，等这一批写完重跑 / 重推即可。\n"
+            "**不要** `git push --no-verify`（会连 CHANGELOG 检查一起跳过），也**不要**往 `tests/_root_data_guard.py` "
+            "的豁免里加路径。\n"
+            "⚠️ 收盘后、或 Alpha Bot 根本没在跑时仍出现这条，就**不是**它——按测试写穿查："
+            "测试若绕过隔离、用 Alpha Bot 自己的代码往真实数据根写快照，长得和它一模一样。")
+    msg = (
+        f"本轮期间**真实数据根**（{root}）里的生产数据被改动了：\n"
+        f"{_root_data_guard.format_diff(changes)}\n\n"
+        "若是测试写的：被测代码绕过了 `ALPHA_HIVE_HOME` 隔离——多半是 `Path(__file__).parent / 数据名`、模块级常量冻结、"
+        "subprocess 丢了 env，或硬编码了 `~/alpha-hive-data`。改成调用时读 `PATHS.*`。\n"
+        "若这是每日扫描 / 周任务恰好在写（不是测试）：等它结束再跑。\n"
+        "**不要**往 `tests/_root_data_guard.py` 的豁免里加数据路径。")
+    if v["explained"]:
+        msg += (f"\n\n其中 {len(v['explained'])} 项已核实是 Alpha Bot 盘中追加（{v['records']} 张快照）；"
+                "**其余这些不能归因于它，问题在这里**：\n"
+                f"{_root_data_guard.format_diff(v['unexplained'])}")
+    if v["why"]:
+        msg += "\n\nAlpha Bot 目录下没能归因的项及原因：\n" + "\n".join(
+            f"    {p}：{r}" for p, r in sorted(v["why"].items()))
+    return msg
+
 
 # ==================== hive_logger 文件日志隔离（v0.45.239） ====================
 #
@@ -1357,6 +1610,16 @@ def pytest_configure(config):
     config._alpha_hive_logs_before_collection = {p: _artifact_signature(p) for p in watched}
     d = config._tmp_path_factory.mktemp("hive_logs_outside_tests", numbered=False)
     os.environ["ALPHA_HIVE_LOGS_DIR"] = str(d)
+    # 会话级 `ALPHA_HIVE_HOME` 沙箱（v0.45.422）：数据根缺省改成 `~/alpha-hive-data` 之后，收集期 import 就冻住的
+    # PATHS 派生常量（`config.py` 的 *_CONFIG、若干 `BASE_DIR` …，清单见 test_paths_not_frozen_at_import::KNOWN）
+    # 若在未设该变量时求值，会指向**本机真实生产数据**。必须早于收集，所以在这里、不在 session 夹具里设。
+    # 先记下调用 pytest 时的环境：真实数据根闸（`pytest_sessionstart`）与 paper_portfolio 真身夹具
+    # 要的是「生产在哪」，不是这个沙箱——拿沙箱推真身正是 v0.45.303 那种守卫盯着自己的失明。
+    config._alpha_hive_invocation_env = {
+        k: os.environ[k] for k in ("ALPHA_HIVE_HOME", "HOME") if k in os.environ}
+    h = config._tmp_path_factory.mktemp("hive_home_outside_tests", numbered=False)
+    config._alpha_hive_session_home = str(h)
+    os.environ["ALPHA_HIVE_HOME"] = str(h)
 
 
 def _hive_log_handler_escapes(sandbox, handlers=None):

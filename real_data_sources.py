@@ -317,7 +317,8 @@ def get_bullish_agents_count(ticker: str, board) -> Optional[int]:
 
 # ==================== 统一拥挤度指标获取 ====================
 
-def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None) -> Dict:
+def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None, *,
+                              peer_census: bool = True) -> Dict:
     """
     构建真实的拥挤度指标（替代 ScoutBeeNova 中的伪造数据）
 
@@ -325,6 +326,13 @@ def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None) -> Dict
         ticker: 股票代码
         stock_data: 来自 _fetch_stock_data() 的 yfinance 数据
         board: PheromoneBoard 实例（用于动态 bullish_agents）
+        peer_census: False ⇒ 不读板、不要「看多同伴数」这一项（v0.45.441）。
+            ScoutBeeNova 用 False：它与同伴蜂**并行**跑，读板那一刻同伴多半还没发布
+            （2026-10-08 实测：Oracle / Chronos 0/30 可见，Buzz 23/30，CodeExecutor 30/30 但只是 5.0/中性占位），
+            该项 27/30 恒为 0——是时机，不是同伴的看法。Guard / Rival 在 Phase-1 之后顺序执行、
+            读得到完整普查，保持 True。
+            False 时 `bullish_agents` / `consensus_census` 为 None，且 `data_quality` **不带**
+            `bullish_agents` 键（没有被测量，不是「降级」：给 "unavailable" 会按 0.7 分计入 Queen 的 data_real_pct）。
 
     Returns:
         {
@@ -344,7 +352,7 @@ def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None) -> Dict
     short_data = get_short_interest(ticker)
 
     # 3. 动态 bullish_agents（真实信息素板）
-    census = get_bullish_agents_detail(ticker, board)
+    census = get_bullish_agents_detail(ticker, board) if peer_census else None
     bullish = None if census is None else len(census["peers_bullish"])
 
     # 4. Google Trends — 暂不接入 pytrends（高频使用会被封 IP），
@@ -396,4 +404,8 @@ def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None) -> Dict
         }
     }
 
+    if not peer_census:
+        # 没有被测量 ≠ 降级：不留标签（留 "unavailable" 会被 Queen 按 0.7 计入 data_real_pct，
+        # 留 "real" 是谎）。Scout 的 confidence 里「real 标签数」那一项随之少一个——见 CHANGELOG v0.45.441。
+        metrics["data_quality"].pop("bullish_agents", None)
     return metrics

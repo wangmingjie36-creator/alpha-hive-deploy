@@ -258,7 +258,8 @@ def render_options_chart(
         unusual    = oracle.get("unusual_activity", [])
         pc_ratio   = float(oracle.get("put_call_ratio", 0) or 0)
         iv_rank    = float(oracle.get("iv_rank",    0) or 0)
-        iv_curr    = float(oracle.get("iv_current", 0) or 0)
+        _iv_c      = oracle.get("iv_current")   # v0.45.471：不可得 ⇒ None，标题写「—」而不是 0.0%
+        iv_curr_s  = f"{float(_iv_c):.1f}%" if _iv_c is not None else "—"
         total_oi   = int(oracle.get("total_oi",     0) or 0)
 
         if not support and not resistance:
@@ -271,7 +272,7 @@ def render_options_chart(
         price_str = f"${current_price:.1f}" if current_price else "N/A"
         fig.text(0.5, 0.918,
                  f"P/C Ratio {pc_ratio:.2f}  ·  IV Rank {iv_rank:.1f}%  ·  "
-                 f"IV Current {iv_curr:.1f}%  ·  Total OI {total_oi/1e6:.2f}M  ·  当前价 {price_str}",
+                 f"IV Current {iv_curr_s}  ·  Total OI {total_oi/1e6:.2f}M  ·  当前价 {price_str}",
                  ha="center", va="top", fontsize=9, color=_T3)
 
         # Aggregate OI
@@ -363,7 +364,7 @@ def render_options_chart(
         metrics = [
             ("P/C Ratio",    f"{pc_ratio:.2f}",      pc_col,  pc_sub),
             ("IV Rank",      f"{iv_rank:.1f}%",       ivr_col, "高波动" if iv_rank>70 else ("中等" if iv_rank>40 else "低波动区间")),
-            ("IV Current",   f"{iv_curr:.1f}%",       _ACCENT, "当前隐含波动率"),
+            ("IV Current",   iv_curr_s,               _ACCENT, "当前隐含波动率"),
             ("Total OI",     f"{total_oi/1e6:.2f}M",  _T1,     "全链条未平仓"),
             ("Put 最强支撑", f"${top_sup:.0f}",       _RED,    f"{sup_dict.get(top_sup,0)/1e3:.0f}K OI"),
             ("Call 最强阻力",f"${top_res:.0f}",       _GREEN,  f"{res_dict.get(top_res,0)/1e3:.0f}K OI"),

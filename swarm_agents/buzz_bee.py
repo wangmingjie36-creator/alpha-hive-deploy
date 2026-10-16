@@ -15,6 +15,15 @@ from swarm_agents.sentiment import (
 )
 
 
+def _news_primary_source() -> str:
+    """v0.45.445：配置的新闻主源名（只记录，不进合成）。读不到配置记 "unknown"，不猜。"""
+    try:
+        from newsapi_client import news_primary_source
+        return news_primary_source()
+    except Exception:  # noqa: BLE001 —— 只是记录字段，不能拖垮 Buzz
+        return "unknown"
+
+
 class BuzzBeeWhisper(BeeAgent):
     """情绪分析蜂 - 多源市场情绪量化
     对应维度：Sentiment (权重 0.20)
@@ -108,9 +117,16 @@ class BuzzBeeWhisper(BeeAgent):
             news_reasoning = ""
             news_mode = "fallback"  # 拉到真实文章前视为不可用
             headlines: list = []
+            # v0.45.444：新闻实际来自哪个源 + AV 那一步的结局。**只记录**：`news_mode` / data_quality.news
+            # 两种源都写 keyword（不改——新 DQ 取值要进 Queen 登记表），而 Yahoo 关键词打标与 AV 逐文章模型分
+            # 刻度不同（同票系统性低约 20 分），不记来源就看不出这一天换了分类器。
+            news_source = None
+            news_primary_status = None
             try:
                 from newsapi_client import get_ticker_news
                 news_ext = get_ticker_news(ticker, max_articles=10)
+                news_source = news_ext.get("source")
+                news_primary_status = (news_ext.get("primary_attempt") or {}).get("status")
                 if news_ext.get("is_real_data") and news_ext.get("total_articles", 0) >= 3:
                     news_signal = _safe_score(
                         news_ext.get("sentiment_score"), default=5.0,
@@ -127,6 +143,7 @@ class BuzzBeeWhisper(BeeAgent):
             except LLM_ERRORS as e:
                 _log.warning("BuzzBeeWhisper news unavailable for %s: %s", ticker, e)
                 news_desc = "新闻不可用（抓取失败）"
+                news_source = "error"
 
             # 5b. LLM 语义增强（有 API Key 时自动启用；默认 Cowork 本地不走）
             if headlines:
@@ -321,6 +338,13 @@ class BuzzBeeWhisper(BeeAgent):
                     },
                     "sentiment_momentum": sent_momentum,
                     "sentiment_divergence": sent_divergence,
+                    # v0.45.444：news 通道的实际来源（alpha_vantage / yahoo_finance / fallback / error）
+                    # 与主源那一步的结局；读者 = newsapi_client.summarize_news_sources → alert_manager
+                    "news_source": news_source,
+                    "news_primary_status": news_primary_status,
+                    # v0.45.445：本轮配置的新闻主源（massive / alpha_vantage）。新代码每次都写 ⇒ 兼作世代边界印记
+                    # （`ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.445"]`）；与 news_source 不同，主源失败降级时也照写
+                    "news_primary": _news_primary_source(),
                 },
                 extras={"sentinel_spike": _spike_msg},
             ).to_dict()
