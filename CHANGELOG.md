@@ -9,7 +9,62 @@
 
 ## [0.45.514] — 2026-10-16 — 占位（进行中：删除 pre_scan_notify.py（0.45.510 起零调用方）及其 Slack 白名单登记 / 测试）
 
-## [0.45.513] — 2026-10-16 — 占位（进行中：earnings_vol_signal `_cache_dir_hint` 不再把缺省数据根误诊为「回落到代码目录」，照 v0.45.384 vrp_signal 修法）
+## [0.45.513] — 2026-10-16 — Fixed：`earnings_vol_signal` 零快照诊断不再把缺省数据根说成「回落到代码目录」（照 v0.45.384 二次检查 #3 的 `vrp_signal` 修法）；同形假病因 `data_backup` 导出 / 备份拒绝文案两处 + 文档两处一并更正
+
+### 为什么
+- v0.45.380（10-16 经 `571569a1` / `ba2d88b0` 合入）的 `_cache_dir_hint` 在 `explicit_data_root() is None` 时附「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录（生产由编排器 export）」。
+  v0.45.422 起 `hive_logger.resolve_data_root` 把未设 / 空串解析为 `$HOME/alpha-hive-data`——**那就是生产数据根**（编排器与 launchd plist 设的 `/Users/igg/alpha-hive-data` 与缺省相等）。
+  ⇒ 这是假诊断：把人引去查一个不存在的问题，而那次 env-less 手动跑读写的其实就是生产。生产自己设了该变量，从不显示它；只误导手动跑。
+- `vrp_signal` 的同一句在 v0.45.384 二次检查 #3 已改；384 条目「未做」点名了 380 这一处没改、另报。
+
+### Fixed
+- `earnings_vol_signal._cache_dir_hint`：只在 `explicit_data_root()` 非空 **且** ≠ 缺省根时提示「ALPHA_HIVE_HOME 显式指向 X，不是缺省数据根 Y（shell 里残留的旧值？）」。
+  缺省根 = `resolve_data_root({"HOME": os.environ.get("HOME", "")})`（只给 HOME，走 hive_logger 唯一解析）；本模块不写该键的恰等字面量，
+  `tests/test_data_root_default.py::ENV_KEY_SITES` 不增登记（本模块原本就没有登记位置，变异 M5 证明直接点名会被它拦下）。`ALPHA_HIVE_CACHE_DIR` 那条提示未动。
+- `data_backup/export.main` / `data_backup/run_backup.run` 拒绝「备份仓在代码仓库里」时的括注「未传 --out / --backup-dir 时多半是没设 ALPHA_HIVE_HOME」
+  →「多半是 ALPHA_HIVE_HOME 显式指到了检出；v0.45.422 起未设 ⇒ 缺省数据根，不在检出里」。同一函数的 docstring 422 后早已改对（「v0.45.422 前未设也会」），
+  只有消息字面量没跟上。只改文案：判定、`refused` / `stage`（编排器 Step 14 认的是这两个）不变。
+- 文档：`ALPHA_BOT_GUIDE.md`「没设会读代码目录下的账本（不是生产数据）」、`alphabot/__main__.py` 模块 docstring「读生产账本需要设」——
+  启动时的 stderr 本身 422 后已改对，只剩这两处说法。
+- v0.45.380 条目正文四处陈述旧行为（触发描述、env-less 复现、`_cache_dir_hint` 判据、合入适配 ①）加注「v0.45.422 起不成立 / 513 改」，不改写当时的事实记录。
+
+### 全仓普查（非测试；「回落 / 兜底到代码目录」「未设 / 没设 / 不带 ALPHA_HIVE_HOME」及英文说法）
+- 假话、已改：上面 `earnings_vol_signal` + `data_backup` 两处 + 文档两处。
+- 命中但成立（史实带版本号，或已按 422 更新）：`alphabot/__main__.py` 的 stderr、`alphabot/launcher.py`、`data_backup/export.py` docstring、`backup_continuity.py`、
+  `replay_scoring` / `signal_archive` / `vol_forecast` / `sell_strike_ledger` 的提示、`vrp_signal`、`hive_logger` docstring、`CLAUDE.md`。
+- `earnings_vol_signal.py` 其余 docstring / 注释未见旧行为陈述（`_snapshot_dir_diagnosis`「目录不存在多半是数据根找错了」仍成立——现在找错的来路是显式设错）。
+
+### Tests
+- `tests/test_earnings_vol_signal.py` 57 → 60（全离线；`HOME` 一律指向 tmp 里的假家目录，不碰真家目录）：
+  - `test_warning_names_the_two_wrong_directory_causes` 改写：`ALPHA_HIVE_HOME` 显式指向 tmp 里的 `stale_checkout` ⇒ 钉住 `scan` 自己那条零快照 WARNING
+    （`startswith("财报事件波动率信号 <日>：未找到快照")`，断言恰好一条）含「显式指向 <stale>，不是缺省数据根 <假家目录>/alpha-hive-data」、不含「代码目录」；写者目录提示照旧。
+  - 新 `test_default_data_root_is_not_reported_as_wrong` ×3（未设 / 空串 / 等于缺省）：钉住的那条存在且含「账本未改写」（告警确实发出了），
+    本模块**全部** WARNING 不含 `ALPHA_HIVE_HOME` / 「代码目录」。
+  - 两类断言取的范围**刻意不同**：「出现」钉到那一行（另一条告警——快照读取失败——带完整路径，会代答；镜像形状 v0.45.332 / 384 #6）；
+    「不出现」查全部告警（钉行会放过「假提示挪到另一条 WARNING」：M8 对钉行版负断言实测 0 红、对全部告警版 2 红）。
+- `tests/test_data_backup.py`：两条既有拒绝测试加断言——病因文案含「显式指到了检出」、不含「没设」（`test_export_main_refuses_inside_code_repo` 加 `capsys`）。
+- **真跑变异**（scratch 副本 = `git archive HEAD` + 本版 7 个改动文件；`PYTHONDONTWRITEBYTECODE=1`、每轮用 Python 删 pyc、`--maxfail=1000`、锚点唯一且「文件变了 + 新文本恰好出现一次」、
+  每轮 passed+failed = collected 250（`test_earnings_vol_signal` + `test_data_backup` + `test_data_root_default`）、每轮还原后 sha256 核对、收尾复跑 250/250）：
+  - M0 改动前真实文件（`git show ba2d88b0:earnings_vol_signal.py`，已核与改动前 HEAD 逐字节相同）⇒ 3 红，理由逐条核对：显式非缺省那条红在没有「显式指向」，
+    未设 / 空串两例红在旧提示「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录」出现了；等于缺省那例在 M0 上**绿**——符合预期，旧代码只在未设时提示。
+  - M0b `data_backup` 两文件改动前真实文件（`089176e4` / `b4ef5ad9`）⇒ 2 红。
+  - M1 提示退回旧两行 ⇒ 3；M2 去掉 `!= default`（显式即报）⇒ 1（等于缺省）；M3 缺省根吃进完整 environ（`resolve_data_root()`，显式值恒等于自己 ⇒ 永不提示）⇒ 1；
+    M4 提示不点名缺省根 ⇒ 1；M5 缺省根改回直接点名该键（行为不变）⇒ 1（`test_data_root_default` 键位置守卫）；M6 / M7 两处拒绝文案退回「没设」⇒ 各 1；
+    M8 假提示挪到另一条 WARNING ⇒ 2。全部与预期一致。
+  - 驱动两次中途停下（方向都安全，没有误报通过）：① M4 的替换串在文件里本就出现过，「恰好出现一次」闸整轮作废，改成唯一串后重跑；
+    ② 第二轮 M6 出现 **1 个 error**，驱动的 `errors == 0` 断言中止（当时驱动没打印详情，未捕获）——单独重跑 M6 与第三轮全量均 0 error、结果同预期。来源**未判定**：下面全量那次 error 的 Alpha Bot 盘中采样**排除**（今天第一批 06:50 PDT，晚于第二轮）；其它并发写者 / 别的原因都没有证据，不当作已解释。
+- ruff 通过。全量：两次，pytest 自身退出码都是 1、红的都只有已知项 + 同一种并发写入：
+  - 合并前（`264a4ff5` + 本版改动，06:46–06:59 PDT）：1 failed、9914 passed、84 deselected、2 xfailed（= selected 9917）+ 1 error；
+  - 合并 origin/main 后（`ab3af4c1`，07:01–07:12 PDT）：1 failed、9937 passed、84 deselected、2 xfailed（= selected 9940）+ 1 error。
+  - failed = 已知 `test_economic_calendar::TestCoverageHorizon`（2027 BLS/BEA 日程未发布，同 v0.45.377 / 380 / 382 / 384）。
+  - error（两次相同）= 会话级真实数据根闸，记在收集序最后一条测试的 teardown 上：变化只有 `alphabot_state/intraday/2026-10-16/` 5 个文件**末尾追加**（闸自核原字节不变），
+    时刻 06:50:48–06:51:30 / 07:11:29–07:12:10 PDT；进程表里 Alpha Bot 服务（`-m alphabot --port 8765`，10-15 起）在跑，当天采样批次 09:50 / 10:01 / 10:11 ET（约每 10 分钟一批）与时刻吻合 ⇒ 并发写入者。
+    本版对 alphabot 只改了 `__main__.py` 的 docstring，碰不到写路径。盘中跑 >10 分钟的全量必然撞上这道闸（按闸的说明，收盘后重跑才会干净）。
+
+### 未做
+- `_cache_dir_hint` 的第二条（`ALPHA_HIVE_CACHE_DIR` 与读取目录不同）仍直接读该环境变量，没照 `vrp_signal` 改成与 `PATHS.cache_dir_unmade()` 比：
+  那条不是假话，但它看不见「`BASE_DIR` import 期冻结 vs 写者调用时求值」那一种分叉；改它会新增一种提示情形，超出本版范围。
+- `BASE_DIR` / `STATE_DIR` / `SIGNALS_FILE` import 期冻结（`test_paths_not_frozen_at_import` KNOWN 存量），未动。
 
 ## [0.45.512] — 2026-10-16 — Fixed（数据，用户批准）：隔离并清掉 BILI 10-12 的 put/call 298.46；Added：yfinance 期权链 OI 陈旧检查——最近有成交的合约 OI 成片为 0（这一场的 OI 没发布）⇒ P/C / total_oi / 主链 GEX 记不可得
 
@@ -5096,12 +5151,14 @@ v0.45.371 复查时记下的副作用：期权墙逐行的虚线分隔从 `rgba(
   零快照 ⇒ 该日已有的行（含 `settle_signals` 回填过的）整批删掉；M4（v0.45.104）的结算字段搬运只救得了本次重新产出的票；
   部分快照缺失 ⇒ 只删缺的那几只。`__main__` 印一个空列表 + 汇总、退出 0，与「当天确实没有合格信号」无从区分。
 - 触发：cache 目录找错（不带 `ALPHA_HIVE_HOME` 手动跑 ⇒ `PATHS.home` 回落到代码目录，那里的 `options_paper_state/`
-  被 git 跟踪 ⇒ 改写的是陈旧的已提交副本）/ 当天快照缺失。
+  被 git 跟踪 ⇒ 改写的是陈旧的已提交副本）/ 当天快照缺失。（09-29 写本条时如此；**v0.45.422 起 env-less 缺省就是生产数据根 `~/alpha-hive-data`**，
+  同一个手动跑读写的是生产——见 v0.45.513。）
   更正任务描述一处：缺省 `"cache"` 不是 cwd 相对——`_resolve_dir` 把相对路径挂在 `BASE_DIR`（import 期冻结的 `PATHS.home`）下。
 - **复现**（数据根指向 scratch，里面拷的是 checkout 里被跟踪的 334 行账本）：改前 `earnings_vol_signal.py 2026-09-22` ⇒
   exit 0、日志只有 INFO「快照 0，合格 0（-）」、账本 334 → 304 行（09-22 的 30 行没了）；
   改后 ⇒ exit 3、「no snapshots found in <scratch>/home/cache（目录不存在）」、sha256 不变。
   改后 env-less 在 worktree 里跑 ⇒ exit 3 + 「未设 ALPHA_HIVE_HOME ⇒ 数据根回落到代码目录」，被跟踪的账本与 `git status` 均无变化，未建出 `cache/`。
+  （这句提示 v0.45.422 起是假话，v0.45.513 改为「显式指向非缺省根」才报。）
 - **生产**（只读核对）：账本 364 行，其中已结算 10 行，都暴露在这条路径上。**09-24、09-25 日更钩子真的走过零快照分支**
   （`~/alpha-hive-data/cache` 该两日 0 份 `options_snapshot`；日志 INFO「快照 0，合格 0（-）」+「期权纸面腿已更新 … 信号 0」）——
   那两天账本里原本没有该日行，所以没删到东西，但在日志里与「当天没有合格信号」一模一样。那两天为什么没有期权快照：待验证（不在本版范围）。
@@ -5112,7 +5169,7 @@ v0.45.371 复查时记下的副作用：期权墙逐行的虚线分隔从 `rgba(
 - `earnings_vol_signal.py`
   - `scan()`：零快照 / 有快照但一条信号都没算出 ⇒ **不写账本**（连原子替换都不做），返回 `[]`，WARNING 写明读取目录、
     它在不在、该日已有几行原样保留。`_snapshot_dir_diagnosis` 分四种：目录不存在 / 有该日文件但都读不出 / 只有别的日期（给出最新日期）/ 空目录；
-    `_cache_dir_hint` 命中才附：未设 `ALPHA_HIVE_HOME`；`ALPHA_HIVE_CACHE_DIR` 与读取目录不同（快照写者 `options_analyzer` 用 `PATHS.cache_dir`
+    `_cache_dir_hint` 命中才附：未设 `ALPHA_HIVE_HOME`（v0.45.513 改为显式且 ≠ 缺省根）；`ALPHA_HIVE_CACHE_DIR` 与读取目录不同（快照写者 `options_analyzer` 用 `PATHS.cache_dir`
     读它，本模块读 `BASE_DIR / "cache"`，不读它）。诊断只读：不建目录，也不调会 mkdir 的 `PATHS.cache_dir` getter。
   - 落盘改为按 `(ticker, as_of)` **upsert**：本次重算到的票替换旧行（M4 搬运不变）；该日其余旧行**原位保留**，WARNING 列出票并标出其中已结算的。
     **决定**（写进 `scan` docstring）：缺快照不是「信号作废」的证据，只是这次没有输入；已结算样本删了补不回来；
@@ -5167,6 +5224,7 @@ v0.45.371 复查时记下的副作用：期权墙逐行的虚线分隔从 `rgba(
 - **全量跑出 3 条守卫红，都是本版引入、都按守卫规则修（没有加豁免）**：
   ① `test_data_root_default`（直接写 `"ALPHA_HIVE_HOME"` 键要登记）：`_cache_dir_hint` 改用 `hive_logger.explicit_data_root()`——
   这正是规则第一问「能不能改经 hive_logger」的答案，不新增登记，且「空串也算没设」与数据根的唯一解析一致；
+  ⚠️ 判据换了来源、**文案没换**：仍说「回落到代码目录」，422 之后是假话（v0.45.384 二次检查 #3 同形），v0.45.513 改；
   ② `test_price_history_default_paths`（新增 cwd 相对缺省 `"cache"`）：`_scan_with_info` 的两个路径参数去掉缺省值，`scan` 显式传入、CLI 显式传同值；
   ③ `test_earnings_event_shadow::TestReaders`（`shadow_event` 写入点白名单）：与 GEX 那条同形，`scan` → `_scan_with_info`，并断言 `scan` 不得再写它。
 - 变异在合并后的最终文件上重跑；M0 钉 main 的提交（`6f570def`，不含修复），旧钉 `b7a9fb5f` 已不是 main 的行为：基线 collected 55（后加 2 条 = 57，下为最终 57 条上的结果），
