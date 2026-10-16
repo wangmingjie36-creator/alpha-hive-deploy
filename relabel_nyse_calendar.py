@@ -24,7 +24,8 @@
 2. 应取日价格本地必须有，没有就跳过并列出（不出网、不猜）；
 3. `--apply` 才写；写前 `backup_before_write`（落 `db_backups/`，归因并发写入者靠它的 mtime）+ 受影响快照逐份复制，备份失败即中止；
 4. 写库在一个事务里，`UPDATE ... WHERE id=? AND 旧值=?`，影响行数必须恰为 1，否则整体回滚；前后 `PRAGMA integrity_check`。
-每行的新旧值写进审计 JSON（与快照备份同目录）。重跑幂等：已重算的行取价日 = 应取日，不再命中。
+每行的新旧值写进审计 JSON（与快照备份同目录）。重跑幂等：存值已精确等于应取日收盘的记「已是应取日值」跳过——
+这一判断必须先于自校验（v0.45.521 apply 后实测：两天价差 <0.2% 的 52 处，新值同样「等于」旧取价日收盘，若先自校验会被再计划一遍）。
 
 用法：
     /usr/local/bin/python3 relabel_nyse_calendar.py            # dry-run（缺省）：只报告
@@ -125,6 +126,9 @@ def plan_db(conn: sqlite3.Connection, prices: Prices):
                 continue
             st[f"{k} 受影响"] += 1
             pu, pr = prices.close(tk, used), prices.close(tk, right)
+            if pr is not None and stored == pr:
+                st[f"{k} 已是应取日值"] += 1          # 先于自校验：两天价差 <0.2% 时新值也会「等于」旧取价日收盘
+                continue
             if not _same(stored, pu):
                 st[f"{k} 跳过：存值≠旧取价日收盘"] += 1
                 continue
@@ -168,6 +172,9 @@ def plan_snapshots(snap_dir: str, prices: Prices):
                 continue
             st[f"快照 {k} 受影响"] += 1
             pu, pr = prices.close(tk, used), prices.close(tk, right)
+            if pr is not None and stored == pr:
+                st[f"快照 {k} 已是应取日值"] += 1
+                continue
             if not _same(stored, pu):
                 st[f"快照 {k} 跳过：存值≠旧取价日收盘"] += 1
                 continue

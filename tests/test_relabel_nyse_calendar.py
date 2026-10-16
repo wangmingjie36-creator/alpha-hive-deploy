@@ -33,6 +33,11 @@ def world(tmp_path):
         _row(c, date=RIGHT, ticker="NVDA", direction="neutral", price_at_predict=103.0)
         _row(c, date=USED, ticker="AMD", direction="neutral", price_at_predict=50.0)
         _row(c, date=RIGHT, ticker="AMD", direction="neutral", price_at_predict=51.0)
+        # 两天价差 <0.2%（TSLA 200.0 → 200.2）：重算后新值仍「等于」旧取价日收盘 ⇒ 幂等判断必须先于自校验
+        _row(c, date=USED, ticker="TSLA", direction="neutral", price_at_predict=200.0)
+        _row(c, date=RIGHT, ticker="TSLA", direction="neutral", price_at_predict=200.2)
+        _row(c, id=103, date=DAY, ticker="TSLA", direction="bullish", price_at_predict=190.0,
+             price_t1=200.0, return_t1=5.263, correct_t1=1, ambiguous_t1=0, checked_t1=1)
         # 受影响、存值 = 旧取价日收盘 ⇒ 应重算（看多：-2% 判错 → +3% 判对）
         _row(c, id=100, date=DAY, ticker="NVDA", direction="bullish", price_at_predict=100.0,
              price_t1=98.0, return_t1=-2.0, correct_t1=0, ambiguous_t1=0, checked_t1=1)
@@ -60,7 +65,7 @@ def test_dry_run_writes_nothing(world, capsys):
     assert R.main(["--db", str(db), "--snapshots", str(snaps)]) == 0
     assert (db.read_bytes(), (snaps / f"NVDA_{DAY}.json").read_bytes()) == before
     out = capsys.readouterr().out
-    assert "t1 将重算: 1" in out and "t1 跳过：存值≠旧取价日收盘: 1" in out
+    assert "t1 将重算: 2" in out and "t1 跳过：存值≠旧取价日收盘: 1" in out
 
 
 def test_apply_relabels_only_this_bug_and_backs_up(world):
@@ -72,18 +77,19 @@ def test_apply_relabels_only_this_bug_and_backs_up(world):
     assert _get(db, 100, "price_t1, return_t1, correct_t1, ambiguous_t1") == (103.0, 3.0, 1, 0)
     assert _get(db, 101, "price_t1, return_t1, correct_t1") == (77.0, 54.0, 1)
     assert _get(db, 102, "price_t1, return_t1") == (99.0, -1.0)
+    assert _get(db, 103, "price_t1") == (200.2,)
     snap = json.loads((snaps / f"NVDA_{DAY}.json").read_text(encoding="utf-8"))
     assert snap["actual_prices"]["t1"] == 103.0 and snap["cs_rank"] == {"final": 0.5}
     assert list((db.parent / "db_backups").glob("pheromone.db.bak-pre-v0.45.521-nyse-relabel-*"))
     bdir = db.parent / "_manual_backups" / "report_snapshots-pre-v0.45.521-nyse-relabel"
     assert json.loads((bdir / f"NVDA_{DAY}.json").read_text(encoding="utf-8"))["actual_prices"]["t1"] == 98.0
     audit = json.loads((bdir / "nyse_relabel_v0.45.521_audit.json").read_text(encoding="utf-8"))
-    assert [(c["id"], c["used"], c["right"]) for c in audit["db_changes"]] == [(100, USED, RIGHT)]
+    assert [(c["id"], c["used"], c["right"]) for c in audit["db_changes"]] == [(100, USED, RIGHT), (103, USED, RIGHT)]
 
 
 def test_rerun_is_idempotent(world, capsys):
-    """重算后再跑：取价日已是应取日 ⇒ 0 处可改（自校验把新值当「存值≠旧取价日」跳过）。
-    变红的变异：自校验比对的是应取日（会再改一遍）。"""
+    """重算后再跑：0 处可改——包括两天价差 <0.2% 的 TSLA（新值也「等于」旧取价日收盘，靠先判「已是应取日值」挡住）。
+    变红的变异：去掉「已是应取日值」判断（v0.45.521 apply 后生产实测 52 处被再计划）；或自校验比对的是应取日。"""
     db, snaps = world
     R.main(["--apply", "--db", str(db), "--snapshots", str(snaps)])
     capsys.readouterr()

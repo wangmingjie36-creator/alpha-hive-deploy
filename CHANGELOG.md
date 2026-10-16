@@ -92,7 +92,7 @@ v0.45.522 报的 52 行里，06-17 VKTX / CRCL 两行已由 522 清掉，余 50 
 - 变异 6/6 被杀：样本早退改回 0、BILI 条目漏 GEX、06-17 漏 CRCL、09-25 日期错、09-24 漏 BRK-B（首次变异打到了 517 的同形元组上、没被杀 ⇒ 测试改为逐只核对全部 30 只，精确打本条目后被杀）、10-14 日期错。
 - 全量（rebase 到 93bf8f84 后）：10029 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加，不是测试写的。ruff 全绿。
 
-## [0.45.521] — 2026-10-16 — Added：按 NYSE 日历离线重算历史 T+N 标签的工具 `relabel_nyse_calendar.py`（默认 dry-run，写前备份）+ 维度 IC 协议 §13.9 事前实现对齐说明；**生产数据写入尚未执行**（会话内 `--apply` 被权限闸拦下，待用户执行）
+## [0.45.521] — 2026-10-16 — Added：按 NYSE 日历离线重算历史 T+N 标签的工具 `relabel_nyse_calendar.py`（默认 dry-run，写前备份）+ 维度 IC 协议 §13.9 事前实现对齐说明；用户 09:24 执行 `--apply`：predictions 413 处 / 快照 256 处，逐列比对备份无额外改动
 
 用户批准（2026-10-16）：「离线重算历史标签，先备份；协议补一条事前说明」。接 v0.45.520（代码已改 NYSE，此后标签算对）。
 
@@ -129,9 +129,23 @@ v0.45.522 报的 52 行里，06-17 VKTX / CRCL 两行已由 522 清掉，余 50 
   ② `agent_memory.outcome_return_t1/t7/t30`：`outcomes_fetcher._update_memory_store` 一次 UPDATE 写满三列、只有本轮回填的那格有值 ⇒ 后一轮把前一轮写成 None
   （23,800 行里同时有 ≥2 个周期的仅 2,347 行），与日历无关、重算补不齐。
 
-### 待执行（用户）
-`/usr/local/bin/python3 relabel_nyse_calendar.py --apply`（`~/alpha-hive-prod` 快进到含本版之后在其目录执行，或在开发检出执行——工具按 `ALPHA_HIVE_HOME` / 缺省
-`~/alpha-hive-data` 找生产库）。宜在当天扫描（13:30 PT 起）之外执行；执行后当天 Step 14 备份会带上（memory：人工修生产状态须赶在 Step 14 前）。
+### 执行（用户，2026-10-16 09:24 PDT）
+会话内 `--apply` 被权限闸（修改共享资源）拦下，未绕过；用户在终端执行。输出：已写入 predictions 413 处、快照 256 处。
+- 库备份 `db_backups/pheromone.db.bak-pre-v0.45.521-nyse-relabel-20261016-092445`；快照备份 + 审计 `_manual_backups/report_snapshots-pre-v0.45.521-nyse-relabel/`（234 份 + 审计 JSON）。
+- 在当天扫描（13:30 PT）与 Step 14 备份之前 ⇒ 当天备份会带上。
+
+### 执行后核对（只读）
+- **整表比对**备份 vs 当前 `predictions`：2013 行、无增删；改动的 390 行**全部**在审计登记的行与列内、登记外 0 处
+  （`price_t30`/`return_t30` 270、`close_t7` 112、`price_t1`/`return_t1` 30；判定列 `correct_t30` 17 / `ambiguous_t30` 15 / `dir_correct_t7` 16 /
+  `dir_ambiguous_t7` 5 / `correct_t1` 3 / `ambiguous_t1` 4）；审计里 1 行 T+30 两天收盘相同、实际未变。期间无其他写入者碰过这张表。
+- **快照比对**：234 份里除 `actual_prices.t1/t7/t30` 对应格外改动 0 处（`cs_rank` 等原样）；t30 143/144（同样一份两天同价）。
+- 受影响的 413 + 256 处现**全部**精确等于 NYSE 应取日收盘（重跑 dry-run 全为「已是应取日值」）。
+
+### Fixed（执行后核对发现）
+- **工具的幂等判断有洞**：重跑 dry-run 仍报 52 处「将重算」（predictions 36、快照 16）——两天价差 <0.2% 时，已写入的应取日值同样通过
+  「存值 ≈ 旧取价日收盘」自校验，被再计划一遍。核实 52 处全部已精确等于应取日值、判定相同 ⇒ 再跑只会写回同值，**生产数据无误**，但「重跑幂等」
+  的说法不成立。修：先判「存值 == 应取日收盘」⇒ 记「已是应取日值」跳过，再做自校验。测试补「价差 <0.2%」的夹具
+  （原夹具价差都 >0.2%，所以没抓到），去掉该判断的变异实测会红。
 
 ## [0.45.520] — 2026-10-16 — Fixed：T+N 交易日算术改用 NYSE 日历——`outcomes_fetcher` / `backtester` / `backfill_dir_accuracy` 此前用 pandas 联邦假日表（哥伦布 / 退伍军人日判休、耶稣受难日判开），跨这些日子的 T+1/T+7/T+30 标签差一个交易日；历史数据**未改**（影响面见下，待用户决定）
 
