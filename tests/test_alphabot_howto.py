@@ -110,6 +110,25 @@ class TestArithmetic:
             assert t["quotable"]
             assert t["limit"]["natural"] - 1e-9 <= t["limit"]["floor"] <= t["limit"]["start"] + 1e-9
 
+    def test_floor_never_below_natural_even_with_fractional_quotes(self):
+        """取整到 0.01 时底线可能掉到自然价之下（自然价 0.9049、中价 = 自然价 ⇒ 0.90）——那等于主动送价。"""
+        lad = _ladder()
+        lad["put"]["0.20"]["short"] = _leg(95, "P", 1.5049, 1.5049)
+        lad["put"]["0.20"]["wing"] = _leg(90, "P", 0.6, 0.6)      # 零点差：中价 = 自然价
+        t = _build(_detail(lad))["tenors"]["monthly"]["bull_put_spread"]["route"]
+        L = t["limit"]
+        assert L["natural"] == pytest.approx(0.9049)
+        assert L["floor"] >= L["natural"] - 1e-9 and L["start"] >= L["floor"]
+
+    def test_spread_yield_uses_collateral_at_the_fill_price(self):
+        """价差回报 = credit ÷ (宽度 − credit)：起挂价成交就用起挂价算占用资金，与 `structure_quote` 同一定义。
+        （曾拿起挂价权利金去除自然价口径的占用资金，比表里同定义的数偏低。）"""
+        L = _build(_detail(_ladder()))["tenors"]["monthly"]["bull_put_spread"]["route"]["limit"]
+        assert L["yield_start"] == pytest.approx(L["start"] / (5 - L["start"]), abs=1e-6)
+        assert L["yield_floor"] == pytest.approx(L["floor"] / (5 - L["floor"]), abs=1e-6)
+        sp = _build(_detail(_ladder()))["tenors"]["monthly"]["short_put"]["route"]["limit"]
+        assert sp["yield_start"] == pytest.approx(sp["start"] / 95.0, abs=1e-6)     # 现金担保：占用资金与价位无关
+
     def test_spread_stop_is_void_when_it_exceeds_the_width(self):
         """宽度 5、权利金 2.6 ⇒ 2×权利金 = 5.2 ≥ 宽度：买回价止损不可能触发，必须是 None + 说明，不是一个看着合理的数。"""
         lad = _ladder()
@@ -161,6 +180,10 @@ class TestCautions:
     def test_earnings_before_expiry_and_unknown_warn(self):
         assert "earnings_before_expiry" in self._codes(_detail(_ladder(), earnings="before_expiry"), "short_put")
         assert "earnings_unknown" in self._codes(_detail(_ladder(), earnings="unknown"), "short_put")
+        lv = {c["code"]: c["level"] for c in _build(_detail(_ladder(), earnings="unknown"))["tenors"]["monthly"]["short_put"]["route"]["cautions"]}
+        assert lv["earnings_unknown"] == "info", "现算恒为 unknown：恒亮的黄色警告没有信息量"
+        lv = {c["code"]: c["level"] for c in _build(_detail(_ladder(), earnings="before_expiry"))["tenors"]["monthly"]["short_put"]["route"]["cautions"]}
+        assert lv["earnings_before_expiry"] == "warn"
         for ok in ("none", "after_expiry"):
             assert not {"earnings_before_expiry", "earnings_unknown"} & self._codes(_detail(_ladder(), earnings=ok), "short_put")
 
