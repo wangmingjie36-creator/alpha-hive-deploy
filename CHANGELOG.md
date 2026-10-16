@@ -5,9 +5,63 @@
 
 ---
 
+## [0.45.515] — 2026-10-16 — 占位（进行中：Alpha Bot 卖权页「六种结构」补「怎么卖」详解与推荐价位——下单步骤、起挂 / 底线限价、止盈 / 止损买回价、标的价位触发）
+
+## [0.45.514] — 2026-10-16 — 占位（进行中：删除 pre_scan_notify.py（0.45.510 起零调用方）及其 Slack 白名单登记 / 测试）
+
 ## [0.45.513] — 2026-10-16 — 占位（进行中：earnings_vol_signal `_cache_dir_hint` 不再把缺省数据根误诊为「回落到代码目录」，照 v0.45.384 vrp_signal 修法）
 
-## [0.45.512] — 2026-10-16 — 占位（进行中：BILI 10-12 put/call 298.46 隔离 + yfinance 期权链 OI 陈旧时不算 P/C）
+## [0.45.512] — 2026-10-16 — Fixed（数据，用户批准）：隔离并清掉 BILI 10-12 的 put/call 298.46；Added：yfinance 期权链 OI 陈旧检查——最近有成交的合约 OI 成片为 0（这一场的 OI 没发布）⇒ P/C / total_oi / 主链 GEX 记不可得
+
+用户 2026-10-16 决定（v0.45.503 查清来源后的两个待决项）。病根：10-12（哥伦布日）Yahoo 全市场 openInterest 几乎清零，只剩几个月没成交的旧合约上冻结的旧数。BILI 当天没有 CBOE 链、走 yfinance，±70% 行权价窗口 + 「按 OI 取前 40」恰好把冻结旧数挑出来 ⇒ $5 put 22,065 ÷ $8 call 74 = 298.46（前后几天 1.03 / 1.02 / 1.08）。它让 Oracle 被压约 0.85、Bear 被抬约 1.06，最终分约 −0.29（v0.45.503）。现行 main 遇到同样的链照样会算出 298。
+
+### 判据怎么来的（实测，只读）
+- 指标：本链（全部到期日、**过滤之前**），以最新一笔成交为参照往前 4 天内有成交的合约里，OI>0 的占比。
+- 10-12 录制（`_manual_backups/…_r2/replay_artifacts/recording_union4`，Yahoo v7 options 原始响应）：30 只**全部 0.00–0.04**。
+- 10-16 正常日实时取（30 只全量，只读请求、零费用）：**0.81–1.00**（最低 BILI 0.81、ABBV 0.83）。
+- 阈值取 0.5（两侧都有很宽的余量）；这类合约少于 20 个 ⇒ 判不了、照旧算。
+- 录制回放进**真实** `fetch_options_chain`：23 只在 4 个到期日窗口里 OI 全 0，已由既有「空 OI ⇒ 退样本」闸挡下；剩下 7 只（BILI / COST / CRM / MU / TMO / WMT / XOM）**全部**判陈旧。旧逻辑给它们算出 298.46 / 8.85 / 0.0 / 1.0 / 7.95 / 0.0 / 0.0。归档里这 6 只当天来自 CBOE 链（快照 `chain_source = cboe`），不受影响；只有 BILI 用了 yfinance。
+
+### Added
+- `options_analyzer`：
+  - `_oi_staleness_rows`（DataFrame → `(成交 epoch 秒 | None, OI)`，NaT / NaN / 缺列都安全）。
+  - `assess_oi_staleness`（纯函数；参照点是本链自己的最新成交，**不读钟**）。
+  - 常量 `_OI_STALE_RECENT_DAYS` = 4、`_OI_STALE_MIN_RECENT` = 20、`_OI_STALE_MAX_RATIO` = 0.5。
+- `fetch_options_chain`（yfinance 分支）在 ±70% 窗口与 top-40 **之前**收集，链上带 `oi_check`。陈旧时：
+  - 记 WARNING；
+  - `snapshot_slot_stats()["oi_stale_chains"]` 按标的去重计数；
+  - `scan_timing` 摘要行显示「/OI陈旧链N只」（仅非零时）。
+- `OptionsAgent.analyze` 在 `oi_check.stale` 时：
+  - `put_call_ratio`、`gamma_exposure`、`total_oi`、`total_oi_raw` 记 None；
+  - `gamma_squeeze_risk` 为 unknown；`flow_direction` 记 **"unknown"**（同 `gamma_squeeze_risk` 先例，不冒充 neutral）；
+  - `data_quality` 从 real 降为 degraded（否则 `scan_coverage_gate` 的「real 却 P/C 为空」会误红）；
+  - 结果带 `oi_check`（样本早退分支补 `None`，schema 一致）。
+- `generate_options_score`：P/C 为 None 时 flow 分取 **1.5**（0–3 量程中点，不奖不罚）。此前这条路径不存在（样本链早退）。
+- 没有 `oi_check` 的链（CBOE、旧缓存、旧快照）**一律照旧**。
+
+### Fixed（数据，用户批准「隔离 BILI 10-12 那条 298.46 的 put/call」）
+- `signal_archive.QUARANTINE` 新增 BILI 2026-10-12 × `options.put_call_ratio` 一条（tickers 限 BILI；reason 带证据）。
+- 清库：`purge_quarantined_signal_rows.py --only-tag v0.45.512 --expect 1 --apply`，`signal_archive` 137,614 → 137,613。
+  - 备份 `db_backups/pheromone_pre_v0.45.512_bili_1012_pc.db`。
+  - 核对：生产该行 0、备份 1；BILI 10-12 其余 5 行 options.* 保留；两边 integrity_check ok。
+  - 不加标记的 dry-run 命中 31 行：另 30 行是 v0.45.508 的批次，不归本次清。
+- `tests/test_signal_quarantine.py`：499 那条原先断言「BILI 10-12 P/C 不挡」（当时的批准范围），改由新测试 `test_bili_1012_stale_oi_put_call_quarantined` 覆盖。
+
+### 未动（待用户定）
+- 同链同源的 BILI 10-12 `options.total_oi` 22,160（前后几天约 16–17 万）与 `options.gamma_exposure` −0.0611，未获批准。
+- 10-14 BILI `options.total_oi` = 0.0（另一个故障日，来源**待验证**）。
+- `calculate_put_call_ratio` 在 call OI 为 0 时返回 1.0（假中性）、key levels / 异动 / 全链 OI（`full_pc_ratio`，10-12 记过 0.0）同样读 OI：本版只管有 `oi_check` 的主链三个量。
+- **未加 IC 世代边界**：只改「OI 陈旧那几天」的 P/C 从假值变 None（更少，不是不同）；正常日逐字节不变。
+
+### Tests
+- 新 `tests/test_yfinance_oi_stale.py`（19 条）。夹具按 BILI 10-12 形状造（自检：不加检查确实算出 298.46）。覆盖：
+  - 判据：阈值严格小于、最少样本、旧合约不进分母、窗口相对本链、无时间戳。
+  - 行解析的各种形状。
+  - 取链：标记、计数去重、WARNING；判据在窗口过滤**之前**算（近价合约推到窗口外仍判陈旧）。
+  - analyze：四个量记 None、不标 real、flow 中点；健康链不变；无 `oi_check` 的链照旧。
+  - 摘要行。
+- 变异 11/11 被杀：analyze 不读检查、只置 P/C 漏 GEX、漏 total_oi、阈值改成 ≤、去掉最少样本、旧合约进分母、DQ 仍 real、不计数、收集挪到窗口过滤之后、隔离连带 total_oi、隔离不限标的。
+- 全量（rebase 到 c3a41b0a 后）：9934 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；另有 1 个 session 级真实数据根闸 error，闸已逐项核实全部是 Alpha Bot 盘中采样追加（06:50–06:51，开盘后），不是测试写的。`tools/clockshift/audit.py --days 7/45/400`：两个测试文件新红 0。ruff 全绿。
 
 ## [0.45.511] — 2026-10-16 — Fixed + Added：`signal_archive` 的每个写入点入库前都过 QUARANTINE——补 `backfill_fear_greed_legacy`（v0.45.267 起直写不查）、`data_backup/restore.py` 整库恢复后报出命中行数；新增全仓 AST 守卫
 
@@ -29,7 +83,45 @@
 ### 数据 / 评分
 - 不动任何数据；无评分影响。不追加世代边界。
 
-## [0.45.510] — 2026-10-16 — 占位（进行中：编排器去掉扫描前 Slack 确认——每天 launchd 自己跑、Webhook 早已 404，空等 10 分钟）
+## [0.45.510] — 2026-10-16 — Removed：编排器去掉扫描前 Slack 确认（每天 launchd 自己跑、Webhook 早已 404，空等 10 分钟）；「编排器永远 --no-llm」钉成测试
+
+### 为什么去掉
+- 每天 14:00 launchd 自己启动编排器，Step 2 先调 `pre_scan_notify.py` 发 Slack 确认并等 10 分钟；Slack Webhook 早已 404、没人在回复，
+  结局恒为「10 分钟未收到确认 ⇒ `--no-llm`」（09-23、10-15 编排器日志可见）。这一步只有成本没有收益。
+
+### ⚠️ 更正我自己此前的一个错误结论
+- 查 09-23（日报进程被 3600s 超时杀掉、后处理钩子全未运行）时，我先说「Slack 那 10 分钟等待挤占了 Step 2 预算」。**不对。**
+  `STEP2_START` 与 `run_step --timeout $STEP2_TIMEOUT` 都在 Slack 等待**之后**才开始，预算从来不含这段等待：
+  09-23 的扫描 14:10:44 开始、15:10:43 被杀，整整 3600s 全是扫描自己跑的，只跑到 21/30（同日 CBOE 全部返回 09-22 陈旧数据、
+  32/32 落到 yfinance，每只约 170s，高于预算按 120s/只的假设）。
+- 所以**去掉确认不会让 Step 2 更不容易超时**，它只是让扫描提前 10 分钟开始（14:10 → 14:00）。09-23 那类超时要另外处理
+  （预算 / CBOE 陈旧时的降级节拍），本版不动。
+
+### Removed / Changed
+- `scripts/alpha-hive-orchestrator.sh`：Step 2 前的预通知整段删掉（`pre_scan_notify` 调用、`NOTIFY_RC` 分支、`PRE_SCAN_SCRIPT`、
+  「今日 LLM 已跑过」的 `LLM_DONE_FILE` 防重复标记及其 Step 2 之后的 `touch`、`--use-llm` 时 STEP2_TIMEOUT +900 的分支）。
+  `LLM_FLAG="--no-llm"` 保留为唯一一处纯字面赋值（`test_scan_price_gate` 抽出的脚本片段依赖这个变量名）。
+  **这不是「默认关闭 LLM」，是编排器里不再有任何路径能打开它**——要跑 LLM 扫描只能由人在终端显式 `--use-llm`，且仍须先问费用
+  （用户级约定「花钱前必须先问」，对定时任务同样生效）。
+- `ORCHESTRATOR_TIMEOUT=90000`（25h）数值**未动**：它当初为兼容 pre_scan 最长等 24h 而设，现在理由没了，但要不要收紧须把 Step 2 输入闸
+  最多 3 次重跑 + 每次等 600s（v0.45.504）一起算进去，是单独的决定；只把旁边的注释改成整行说明。
+- `CLAUDE.md`「Slack 推送规则」两处标注 v0.45.510 起已停用（扫描确认通知；「Bot 只发两类消息」第 1 类）。
+- **没动** `pre_scan_notify.py` 本身：`test_slack_send_whitelist` 把它登记为合法发送方、`test_slack_notifier` 还测它的 webhook 兜底。
+  它现在没有调用方；是否删除（连同白名单登记与那两处测试）留给后续决定。
+
+### Added
+- `tests/test_orchestrator_never_enables_llm.py`（3 条，读仓库那份编排器，CI 上也跑）：`LLM_FLAG` 只许一处纯字面 `--no-llm`；
+  代码（注释除外）不再出现 `--use-llm` / `pre_scan_notify` / `PRE_SCAN_SCRIPT` / `NOTIFY_RC` / `LLM_DONE_FILE`；Step 2 调用仍传 `$LLM_FLAG`
+  （否则旗标成了没人读的变量）；含有牙自证（把旧确认链放回去 / 第二处赋值 / 改成非字面 / 代码里出现 `--use-llm` 都被抓到，注释里提这些名字不算）。
+- **真跑变异**（`PYTHONDONTWRITEBYTECODE=1`，Python 驱动、锚点唯一断言、核 passed+failed = collected 3、还原后 sha256 一致并复跑 3/3 绿）：
+  M0 改动前的真实脚本（`cfa3e004`）⇒ 2 红；M1 旧确认链放回 ⇒ 2；M2 另处再赋值 ⇒ 2；M3 Step 2 调用不传 `$LLM_FLAG` ⇒ 1；M4 `LLM_FLAG` 改成要展开的写法 ⇒ 2。
+- 首跑守卫即抓到我自己的一处：`ORCHESTRATOR_TIMEOUT=…  # …pre_scan_notify…` 行尾注释里带了符号名（守卫只忽略整行注释，不去猜 bash 行尾注释的边界）⇒ 说明挪成整行注释。
+
+### 生效时间
+- 合入 origin/main 后，下一次 14:00 扫描前的自动部署（阶段 3）会把新编排器换进 `~/.claude/scripts/`，但**那一轮仍跑旧编排器**（运行中的 bash 读完旧版）；
+  **再下一轮**才是新的：届时 Step 2 应直接开始、日志里不再有「发送 Slack 确认通知」。核验：`grep -c "Slack 确认" ~/.claude/logs/orchestrator-<日期>.log` 应为 0。
+- 全量：bash -n 通过；读编排器原文的 27 个测试文件 + Slack 白名单 + CHANGELOG 完整性共 1523 passed（含新增 3 条）（未跑全套：改动只有一个 shell 脚本、一份文档和一个新测试）。
+
 
 
 ## [0.45.509] — 2026-10-16 — Changed（事后修订）：F&G 敞口门自证在生产日线取不到的故障日按「没有日线」重放（09-24 / 09-25 / 10-14）；Added：生产纸面组合净值行记下本轮日线一次都没取到的标的（`ohlc_unavailable`）/ 时有时无的标的（`ohlc_partial`）
@@ -70,8 +162,8 @@
 
 ### 取证（只读；全部 30 只，yfinance 日线只取到 10-14 为止，没算任何收益或 IC）
 - 10-14 生产扫描 yfinance 全挡（429×4 后冷却），历史字段全走出口回落（`~/.claude/logs/orchestrator-2026-10-14.log`）。
-- `price.volume_ratio` 29/30 入档（JNJ 当天 TD 限流超时、未入档；14:19 补到的 2.23x 没进归档）：**29/29 是 10-13 的比值**——27 只与 yfinance「截至 10-13」到 4 位小数相等，RKLB 0.7304 vs 0.7327、VKTX 0.6039 vs 0.6072（成交量源差异）；与「截至 10-14」相去甚远（COST 0.62 vs 1.31、CRCL 0.48 vs 1.03、DELL 0.78 vs 1.68）。成因与修法见 v0.45.505。
-- `price.momentum_5d` 30/30 来自自攒索引：29 只末端 10-14、与 yfinance 一致；**BILI 末端 10-13**（+0.40%，yfinance 截至 10-14 为 −3.91%）。
+- `price.volume_ratio` 29/30 入档（JNJ 当天 TD 限流超时、未入档；14:19 补到的 2.23x 没进归档）：**29/29 入档的是「最新一根 = 10-13、均量窗口 = 截至 10-13 的 20 根」的比值**，不是 10-14 那场的（量比 = 最新一根成交量 ÷ 含它在内最近 20 根均量）。证据三层：① 日志 29/29 各有「丢弃 2026-10-14 那根」+「由 Twelve Data 补上」；② 用 Twelve Data 自己的日线 `fetch_volume_ratio(end_date="2026-10-13")` 重算，27 只逐位相等、`as_of` 2026-10-13；③ RKLB / VKTX（归档 0.7304 / 0.6039，今天重算 0.7327 / 0.6072）只差在 10-13 那根——其余 19 根取今天的值、10-13 换成 15,537,400 / 5,707,600 股（整百股，比今天低 0.33% / 0.55%）即逐位复现 ⇒ Twelve Data 在 10-14 扫描之后上调了那根成交量（推断，当时的原值已取不回）；漏一根、窗口 19 / 21 / 22 根三种解释都已排除。与「截至 10-14」相去甚远（COST 0.62 vs 1.31、CRCL 0.48 vs 1.03、DELL 0.78 vs 1.68）。成因与修法见 v0.45.505。
+- `price.momentum_5d` 30/30 来自自攒索引：29 只末端 10-14、与 yfinance 一致；**BILI 末端 10-13**（+0.40%，yfinance 截至 10-14 为 −3.91%）：它的 CBOE 数据陈旧（last_trade=10-13）被弃用，没有已核实的 10-14 收盘可并进窗口（日志 14:11:07 / 08）。同日 30 只的 `price_at_predict` 都在 Twelve Data 10-14 收盘的 0.1% 以内（BILI 含在内）⇒ 结果变量的基数不受影响。
 - `price.volatility_20d` 0/30 ⇒ `buzz.comp.volatility_signal` 全 50（缺失哨兵，横截面同值）——**缺失 ≠ 取错**，按协议 §3「降级日照算」不处理。`market.fear_greed` 32 是当天 CNN 实时值、横截面同值（未对 CNN 历史独立复核，待验证）。
 - 窗口内其余日子：10-13、10-15 零 TD 量比兜底、零索引动量兜底 ⇒ 只有 10-14。
 - 损伤量级（只用分数）：用正确的 D 值，16/30 只的量比档位会变；线性近似下纠正后 H1 横截面与实际的 Spearman ≈ 0.96（忽略背离 / 情绪动量调整，估算）。
@@ -82,7 +174,7 @@
 - **为什么是 QUARANTINE、不是修订 2 的 `FORWARD_TEST_EXCLUDED_DAYS`**：协议 §3 登记时就把「`QUARANTINE` 登记的已知坏行」列为排除项，执行器 `weekly_series` 对假设的任一截断 / 隔离信号命中即丢行，H1 的信号表含输入层 ⇒ 这是**套用已登记的规则**，规则 / 常量 / 窗口 / 检视点都没动（不进 `AMENDMENTS`）。`FORWARD_TEST_EXCLUDED_DAYS` 管「事后重放补算的整天」（10-14 没有重放），且三份前瞻检验共用——登进去会连带把 10-14 从 F&G 敞口门里拿掉，而那边 10-14 自证失败的处理（v0.45.503）另待决定。
 - 后果：H1 当天只剩 JNJ（< `MIN_WIDTH` 20）⇒ 10-14 对 H1 无效（W42 剩 10-13 / 10-15，生产库只读核对各 30 只可用；10-16 待当天扫描）；H2 不读 `price.*` 照算。
 - **只隔离观测层**：`buzz.comp.*` 通道值是派生值（同 Agent 评分，不隔离）；且 §13.2 自证 ②「生产有分、重算却缺输入 = 0」会把隔离 / purge 掉的通道行算成自证失败。
-- 未动：09-15 QCOM / NVDA 同形状的 D-1 TD 量比（窗口前，不影响 H1；要不要为一致性补登另议）；没跑 `purge_quarantined_signal_rows.py`（`is_quarantined` 已足够让 H1 丢行；删不删库里的 30 行另议）。
+- 未动：09-15 QCOM / NVDA 据 v0.45.505 的记录是同形状的 TD 兜底量比（**本条未复核**）（窗口前，不影响 H1；要不要为一致性补登另议）；没跑 `purge_quarantined_signal_rows.py`（`is_quarantined` 已足够让 H1 丢行；删不删库里的 30 行另议）。
 
 ### Changed（文档）
 - `experiments/dim_ic_preregistration.md`：文首加「记录」一行；新增「### 记录（2026-10-16，v0.45.508）」§13.8（发生了什么 / 做了什么 / 为什么不是修订 / 为什么不隔离通道 / 为什么不走修订 2 / 为什么不可能受结果影响 / 代价 / 守卫）。
@@ -91,6 +183,7 @@
 - 新 `tests/test_quarantine_1014_prev_session.py`（10）：名单恰好 29 只 × 量比、BILI × 动量，JNJ 与其余动量不在内；通道 / Agent 评分 / `sentiment.pct` / 波动 / F&G 不隔离；不是协议排除日；T+7 按 backtester 日历 = 10-23 晚于登记日；生产形状夹具（30 只真实代码）下 H1 丢 10-14、保 10-15，**删掉条目该日回来**（对照），H2 不受影响。
 - 全量（恢复后的最终树 `064bf7ae`，`--deselect` 设计内定期红的 `TestCoverageHorizon`）：**9895 passed、2 xfailed、0 failed、0 error**。
 - ⚠️ **被并行提交整段撤掉过、已恢复**：`ed9c46b2`（v0.45.509，父提交正是本条的 `9e66aaf1`）的树把本条的 `QUARANTINE` 两条、§13.8、`tests/test_quarantine_1014_prev_session.py` 全部删掉、CHANGELOG 退回占位，提交信息没提——多半是那边工作区里的旧文件盖了上来。核对：那次提交后 `signal_archive.py` / 预注册与 508 之前逐字节相同 ⇒ 509 本身没改这两个文件，本次按 508 版本整文件恢复、CHANGELOG 只换回本条，509 的其余改动未动。撤掉期间（06:14 起）`is_quarantined` 对这 30 行为假；10-14 尚未结算，无影响。
+- **三次检查更正**：原写「RKLB / VKTX 与 yfinance 差 0.003 是成交量源差异」——**错**：今天 Twelve Data 自己重算出的就是 yfinance 那个值，差的是归档；真实原因见上（10-13 那根事后被上调）。另把「前一天的值」改成准确说法：窗口末端是上一交易日 10-13 那场（量比是最新一根 + 20 根均量窗口整体错一场）。`QUARANTINE` 两条的 `reason` 与 §13.8 同步改。
 - 二次检查（同日）：§13.8 / 本条原写「W42 剩 10-13、10-15、10-16」，10-16 当时尚未扫描 ⇒ 改正；`test_registered_before_outcome` 原只比对测试里自写的登记日常量（恒真）⇒ 改为从本文件 0.45.508 标题读登记日、并核对两条条目的版本标记；拨钟审计 `tools/clockshift/audit.py --days 7 --days 45 --days 400` 新红 0；`restore_signal_rows_from_backup.py` 的信号集合随名单多了 `price.volume_ratio` / `price.momentum_5d`——手动工具、按 `--expect` 精确计数且不覆盖已有行，只会更早停下，不改。
 - 变异 7/7 被杀（量比条目失效、漏 XOM、多 JNJ、连带隔离通道、动量不限 BILI、日期错成 10-15、执行器不问隔离）；`PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。
 - 相关 6 个文件 188 passed；ruff 全仓通过。

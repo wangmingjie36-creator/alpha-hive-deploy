@@ -1346,6 +1346,17 @@ QUARANTINE: List[Dict] = [
                      "cache/options_snapshot_BILI_2026-10-12.json（iv_raw_observed = 6.2509375）",
                      "CHANGELOG.md#v0.45.486", "CHANGELOG.md#v0.45.499"),
     },
+    # v0.45.512：同一条 yfinance 链的 P/C。10-12（哥伦布日）Yahoo 全市场 OI 几乎清零，只剩几个月没成交的旧合约上
+    # 冻结的旧数 ⇒ $5 put 22,065 ÷ $8 call 74 = 298.46（前后几天 0.64–1.08）。源头判据见 options_analyzer.assess_oi_staleness。
+    {
+        "date": "2026-10-12",
+        "tickers": ('BILI',),
+        "signals": ("options.put_call_ratio",),
+        "reason": "v0.45.512（用户 2026-10-16 批准「隔离 BILI 10-12 那条 298.46 的 put/call」）：P/C 是 yfinance 链 OI 陈旧的产物，不是观测——当天 Yahoo 的 OI 几乎全被清零（30 只标的「最近有成交的合约里 OI>0」占比 0.00–0.04，正常日 0.81–0.99），BILI 只剩 2026-05/06 起没成交的 $5 put 22,065、$24 put 21 与 $8 call 74 ⇒ 22,086 ÷ 74 = 298.46；前后几天 1.03 / 1.02 / 1.08。归档里唯一一条 P/C > 10。同链的 total_oi 22,160、gamma_exposure −0.0611 同源，未获批准、未动。",
+        "evidence": ("_manual_backups/2026-10-13_1012_replay_v0.45.484_r2/replay_artifacts/recording_union4（Yahoo v7 options 响应）",
+                     "cache/options_snapshot_BILI_2026-10-12.json（put_call_ratio = 298.46, total_oi = 22160）",
+                     "CHANGELOG.md#v0.45.503", "CHANGELOG.md#v0.45.512"),
+    },
     # ────────────────────────────────────────────────────────────────────────
     # v0.45.508（用户 2026-10-16 批准）：10-14 生产扫描 yfinance 全挡（429）⇒ 历史字段全走出口回落，其中两类取到了
     # **前一交易日**的观测。只隔离观测层 `price.*`：`buzz.comp.*` 通道值是派生值（同 Agent 评分，不隔离），且维度 IC
@@ -1359,9 +1370,11 @@ QUARANTINE: List[Dict] = [
                     "SNOW", "T", "TMO", "TMUS", "TSLA", "VKTX", "VZ", "WMT", "XOM"),
         "signals": ("price.volume_ratio",),
         "reason": "v0.45.508（用户 2026-10-16 批准）：yfinance 日线全挡，量比来自 Twelve Data 兜底；收盘后扫描里 TD 当日那根"
-                  "被 `_drop_forming_bar` 丢掉 ⇒ 比值末根是 10-13（v0.45.505 起这种值拒收）。29/29 与 yfinance「截至 10-13」"
-                  "的比值相等（27 只到 4 位小数；RKLB / VKTX 差 0.003，成交量源差异），与「截至 10-14」相去甚远（COST 0.62 vs 1.31、"
-                  "CRCL 0.48 vs 1.03）。JNJ 当天 TD 限流超时、未入档，不在名单里。",
+                  "被 `_drop_forming_bar` 丢掉 ⇒ 入档的是「最新一根 = 10-13、均量窗口 = 截至 10-13 的 20 根」的量比，不是 10-14 那场的"
+                  "（v0.45.505 起这种值拒收）。复核（10-16）：Twelve Data 自己的日线 `fetch_volume_ratio(end_date=2026-10-13)` 重算，"
+                  "27 只逐位相等、as_of 2026-10-13；RKLB / VKTX 只差在 10-13 那根成交量——其余 19 根取今天的值、10-13 换成 15,537,400 /"
+                  " 5,707,600 股即逐位复现（Twelve Data 事后上调了那根，推断，原值已取不回）。与「截至 10-14」相去甚远（COST 0.62 vs"
+                  " 1.31、CRCL 0.48 vs 1.03）。JNJ 当天 TD 限流超时、未入档，不在名单里。",
         "evidence": ("~/.claude/logs/orchestrator-2026-10-14.log（29 行「volume_ratio 由 Twelve Data 补上」，各配「丢弃盘中未完成的末根日线（2026-10-14）」）",
                      "CHANGELOG.md#v0.45.505", "CHANGELOG.md#v0.45.508"),
     },
@@ -1369,7 +1382,8 @@ QUARANTINE: List[Dict] = [
         "date": "2026-10-14",
         "tickers": ("BILI",),
         "signals": ("price.momentum_5d",),
-        "reason": "v0.45.508（用户 2026-10-16 批准）：yfinance 全挡 ⇒ 自攒索引回落，BILI 的当场收盘没进窗口 ⇒ 窗口末端 10-13，"
+        "reason": "v0.45.508（用户 2026-10-16 批准）：yfinance 全挡 ⇒ 自攒索引回落；BILI 的 CBOE 数据陈旧（last_trade=10-13）被弃用 ⇒ "
+                  "没有已核实的 10-14 收盘 ⇒ 窗口末端 10-13，"
                   "动量 +0.40%（= 10-13 归档值）；yfinance「截至 10-14」为 −3.91%。其余 29 只的回落末端是 10-14、与 yfinance 一致，不隔离。",
         "evidence": ("~/.claude/logs/orchestrator-2026-10-14.log（「[BILI] momentum_5d 由自攒索引补上: +0.40%（截至 2026-10-13」）",
                      "CHANGELOG.md#v0.45.508"),

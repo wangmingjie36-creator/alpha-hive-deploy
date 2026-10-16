@@ -152,6 +152,62 @@ def reset_hv_gap_stats() -> None:
         _HV_GAP_TICKERS.clear()
 
 
+# ── v0.45.512：yfinance 链的 OI 是不是这一场的 ─────────────────────────────────────────────
+# 2026-10-12（哥伦布日）Yahoo 全市场的 openInterest 几乎被清零，只剩几个月没成交的旧合约上冻结的旧数：
+# 30 只标的「最近有成交的合约里 OI>0 的占比」全部 ≤ 0.04（9,300 个里 16 个），BILI 的 P/C 因此是
+# $5 put 22,065 ÷ $8 call 74 = 298.46（前后几天 ≈1.0）。同一指标在正常日（10-16 实测 12 只）是 0.81–0.99。
+# 判据只看**最近有成交**的合约（以本链最新一笔成交为参照、往前 `_OI_STALE_RECENT_DAYS` 天）——
+# 刚成交过的合约几乎一定有未平仓量；它们的 OI 成片是 0，说明这一场的 OI 没发布，不是市场没仓位。
+# 必须在 ±70% 行权价窗口与「按 OI 取前 40」之前算：那两道过滤正是把冻结旧数挑出来的地方。
+_OI_STALE_RECENT_DAYS = 4
+_OI_STALE_MIN_RECENT = 20      # 最近有成交的合约少于这个数 ⇒ 判不了（照旧算，`judgeable=False`）
+_OI_STALE_MAX_RATIO = 0.5      # 其中 OI>0 的占比低于它 ⇒ 本链 OI 陈旧
+
+
+def _oi_staleness_rows(df) -> List[Tuple[Optional[float], float]]:
+    """一张 yfinance 期权表（DataFrame）⇒ `[(最后成交的 epoch 秒 | None, OI), …]`。列缺失 ⇒ []。"""
+    if df is None or getattr(df, "empty", True):
+        return []
+    cols = getattr(df, "columns", ())
+    if "openInterest" not in cols or "lastTradeDate" not in cols:
+        return []
+    out: List[Tuple[Optional[float], float]] = []
+    for ts, oi in zip(df["lastTradeDate"], df["openInterest"]):
+        t: Optional[float] = None
+        try:
+            if isinstance(ts, (int, float)):
+                t = float(ts) if _math.isfinite(float(ts)) else None
+            elif ts is not None and hasattr(ts, "timestamp"):
+                t = float(ts.timestamp())
+                if not _math.isfinite(t):
+                    t = None
+        except (TypeError, ValueError, OverflowError):
+            t = None   # NaT 等
+        try:
+            o = float(oi)
+        except (TypeError, ValueError):
+            o = 0.0
+        out.append((t, o if _math.isfinite(o) else 0.0))
+    return out
+
+
+def assess_oi_staleness(rows: List[Tuple[Optional[float], float]]) -> Dict:
+    """`rows` = 本链（全部到期日、过滤之前）每个合约的（最后成交时刻，OI）。返回
+    `{recent_contracts, recent_with_oi, ratio, judgeable, stale}`；`stale` 只在 `judgeable` 时可能为真。"""
+    ts = [t for t, _ in rows if t is not None]
+    out = {"recent_contracts": 0, "recent_with_oi": 0, "ratio": None, "judgeable": False, "stale": False}
+    if not ts:
+        return out
+    cut = max(ts) - _OI_STALE_RECENT_DAYS * 86400
+    recent = [oi for t, oi in rows if t is not None and t >= cut]
+    n, k = len(recent), sum(1 for oi in recent if oi > 0)
+    out.update(recent_contracts=n, recent_with_oi=k, ratio=round(k / n, 4) if n else None)
+    if n >= _OI_STALE_MIN_RECENT:
+        out["judgeable"] = True
+        out["stale"] = (k / n) < _OI_STALE_MAX_RATIO
+    return out
+
+
 class OptionsDataFetcher:
     """期权数据采集器 - 支持多源降级策略"""
 
@@ -323,6 +379,7 @@ class OptionsDataFetcher:
 
             calls_list = []
             puts_list = []
+            _oi_rows: List[Tuple[Optional[float], float]] = []   # v0.45.512：过滤之前的（成交时刻，OI）
 
             for expiry in expirations:
                 for _retry in range(3):  # 最多重试 2 次（U3: 期权链重试）
@@ -330,6 +387,7 @@ class OptionsDataFetcher:
                         chain = stock.option_chain(expiry)
                         calls = chain.calls
                         puts = chain.puts
+                        _oi_rows.extend(_oi_staleness_rows(calls) + _oi_staleness_rows(puts))
 
                         # 过滤无效数据（保留 OI >= 0，不再要求 > 100）
                         calls = calls[calls["openInterest"] >= 0]
@@ -484,7 +542,16 @@ class OptionsDataFetcher:
                 "_source": "yfinance",
                 # v0.45.482：IV 是 Yahoo 求解失败值、已置 0 的合约数（逐合约标记在 `_iv_placeholder`）
                 "iv_placeholder_contracts": _n_placeholder,
+                # v0.45.512：本链 OI 是不是这一场的（见 `assess_oi_staleness`）；stale ⇒ analyze 不拿它算 P/C 等
+                "oi_check": assess_oi_staleness(_oi_rows),
             }
+            if result["oi_check"]["stale"]:
+                _oc = result["oi_check"]
+                _snap_count_once("oi_stale_chains", ticker)
+                _log.warning("[%s] yfinance 链 OI 陈旧：最近 %d 天有成交的 %d 个合约里只有 %d 个 OI>0（%.0f%% < %.0f%%）"
+                             "——这一场的 OI 没发布，P/C / total_oi / 主链 GEX 记不可得",
+                             ticker, _OI_STALE_RECENT_DAYS, _oc["recent_contracts"], _oc["recent_with_oi"],
+                             100 * _oc["ratio"], 100 * _OI_STALE_MAX_RATIO)
 
             # CBOE 已作主源优先尝试过；走到这里说明 CBOE 不可用、改用 yfinance。
             # 若 yfinance 也限流返回纯空 OI（疑垃圾），退样本而非污染下游。
@@ -1554,7 +1621,7 @@ class OptionsAnalyzer:
     def generate_options_score(
         self,
         iv_rank: float,
-        put_call_ratio: float,
+        put_call_ratio: Optional[float],
         gex: float,
         unusual: List[Dict],
     ) -> Tuple[float, str]:
@@ -1583,7 +1650,11 @@ class OptionsAnalyzer:
             iv_signal = 1.0  # 极高 IV
 
         # Flow Signal (0-3)：P/C 越低越多头
-        if put_call_ratio < 0.7:
+        # v0.45.512：P/C 不可得（yfinance 链 OI 陈旧）⇒ 1.5 = 0–3 量程中点，不奖不罚（同 iv_rank 为 None 的处理思路；
+        # 此前没有这条路径——样本链早退，不走这里）。
+        if put_call_ratio is None:
+            flow_signal = 1.5
+        elif put_call_ratio < 0.7:
             flow_signal = 3.0
         elif put_call_ratio < 1.0:
             flow_signal = 2.0
@@ -1700,6 +1771,7 @@ _snap_stats_lock = threading.Lock()
 #   nan_sanitized            出口消毒遇到的非有限数个数（v0.45.462：改写成 None，不再是 0.0；见 `_sanitize_result`）
 #   iv_placeholder_contracts yfinance 链里 IV 是 Yahoo 求解失败值（减半阶梯 / 1e-05）、被置 0 的合约数（v0.45.482，见 yahoo_iv）
 #   iv_placeholder_majority  analyze() ATM 窗口里失败值合约 ≥ 有效合约 ⇒ 不取中位数、按「无当日 IV」处理的次数（v0.45.482）
+#   oi_stale_chains          yfinance 链的 OI 陈旧（最近有成交的合约 OI 成片为 0）、P/C 等记不可得的标的数（v0.45.512，按份计）
 #   iv_unavailable           analyze() 当日 ATM IV 无效（<5% / >150% / 没有可用合约）且无可用缓存、`iv_current` 记 None
 #                            的次数（v0.45.471：此前兜底成常数 25.0，见 analyze 内「IV 不可得」注释）
 #
@@ -1709,7 +1781,7 @@ _snap_stats_lock = threading.Lock()
 _SNAP_STATS_KEYS = ("hits", "writes", "session_mismatch", "hits_before_close",
                     "writes_before_close", "calendar_fallback", "gex_signal_corrected",
                     "stock_price_unavailable", "nan_sanitized", "iv_unavailable",
-                    "iv_placeholder_contracts", "iv_placeholder_majority")
+                    "iv_placeholder_contracts", "iv_placeholder_majority", "oi_stale_chains")
 
 # v0.45.349：OptionsAgent 每条返回路径都带这个键、值恒为 False ——「本结果的 options_score
 # 不含 GEX 分量」。旧代码写的快照没有这个键 ⇒ 命中时据此判定要不要减掉旧的 +1.0。
@@ -2505,6 +2577,7 @@ class OptionsAgent:
                 "put_call_ratio": None,
                 "total_oi": 0,
                 "total_oi_raw": 0,
+                "oi_check": None,             # v0.45.512 schema 一致性
                 "gamma_exposure": None,
                 "gamma_squeeze_risk": "unknown",
                 "unusual_activity": [],
@@ -2812,6 +2885,11 @@ class OptionsAgent:
         gex = self.analyzer.calculate_gamma_exposure(
             calls_df, puts_df, stock_price
         )
+        # v0.45.512：本链 OI 陈旧（这一场没发布，只剩冻结旧数）⇒ 拿它算出的 P/C / GEX / total_oi 都不是观测。
+        # 10-12 BILI 的 P/C 298.46 就是这样来的。CBOE 链与旧缓存没有 `oi_check` ⇒ 照旧。
+        _oi_stale = bool((options_chain.get("oi_check") or {}).get("stale"))
+        if _oi_stale:
+            put_call_ratio, gex = None, None
         unusual_activity = self.analyzer.detect_unusual_activity(calls_df, puts_df, stock_price)
         key_levels = self.analyzer.find_key_levels(calls_df, puts_df, stock_price or 0.0)
         # S14: IV Skew 分析
@@ -2913,8 +2991,10 @@ class OptionsAgent:
         else:
             gamma_squeeze_risk = "medium"
 
-        # 6. 判断流向
-        if put_call_ratio < 0.85:
+        # 6. 判断流向（P/C 不可得 ⇒ "unknown"，同 gamma_squeeze_risk 的先例，不冒充 neutral）
+        if put_call_ratio is None:
+            flow_direction = "unknown"
+        elif put_call_ratio < 0.85:
             flow_direction = "bullish"
         elif put_call_ratio > 1.2:
             flow_direction = "bearish"
@@ -2931,6 +3011,10 @@ class OptionsAgent:
             data_quality = "degraded"
         else:
             data_quality = "real"
+        # v0.45.512：OI 陈旧 ⇒ 链只剩一半能用（IV 照用、OI 派生量记 None）——不许再标 real
+        # （scan_coverage_gate 的标签诚实检查：「real 却 P/C 为空」会红）
+        if _oi_stale and data_quality == "real":
+            data_quality = "degraded"
 
         # 7.5 (v0.45.99) 四合约报价集：~30 DTE 的 ATM call/put + 25Δ call/put 真实 bid/ask。
         # 只记账、不进评分——为将来期权纸面交易腿攒数据。只在链来自 CBOE 时才取
@@ -2985,9 +3069,11 @@ class OptionsAgent:
             "put_call_ratio": put_call_ratio,
             # v0.17.0: total_oi 双口径 — raw（原始总和）+ stable（排除 DTE<7 近到期）
             # stable 口径用于日环比对比，避免 Opex 周到期日脱落导致 OI 跳变
-            "total_oi": self._calc_total_oi(calls_df, puts_df, options_chain),
-            "total_oi_raw": (sum(c.get("openInterest", 0) for c in calls_df)
-                             + sum(p.get("openInterest", 0) for p in puts_df)),
+            "total_oi": None if _oi_stale else self._calc_total_oi(calls_df, puts_df, options_chain),
+            "total_oi_raw": None if _oi_stale else (sum(c.get("openInterest", 0) for c in calls_df)
+                                                    + sum(p.get("openInterest", 0) for p in puts_df)),
+            # v0.45.512：yfinance 链的 OI 检查结果（CBOE 链 / 旧缓存 ⇒ None）
+            "oi_check": options_chain.get("oi_check"),
             "gamma_exposure": gex,
             "gamma_squeeze_risk": gamma_squeeze_risk,
             "unusual_activity": unusual_activity,
