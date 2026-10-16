@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.520] — 2026-10-16 — 占位（进行中：交易日历改 NYSE——outcomes_fetcher / backtester / backfill_dir_accuracy 用 USFederalHolidayCalendar，哥伦布 / 退伍军人日判休、受难日判开；先查历史影响面）
+
 ## [0.45.519] — 2026-10-16 — 占位（进行中：Alpha Bot 总览 / 标的页「不可报价」原因码翻成人话，补点差与持仓量；数据层只加 ask / mid / oi 三个键）
 
 ## [0.45.518] — 2026-10-16 — Changed：Step 2 超时预算每只 120s → 180s（30 只 3600 → 5400s），并把信息素板过期线 3600 → 10800s 与预算焊在一起
