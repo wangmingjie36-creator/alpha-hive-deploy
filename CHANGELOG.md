@@ -5,7 +5,27 @@
 
 ---
 
-## [0.45.502] — 2026-10-16 — 占位（进行中：v0.45.484 二次检查——CHANGELOG 两处更正、写回工具整日替换前过 QUARANTINE、10-13~15 生产核对）
+## [0.45.502] — 2026-10-16 — Fixed：v0.45.484 二次检查——写回工具整日替换 `signal_archive` 前过现行 `QUARANTINE`（10-13 把 v0.45.499 隔离的行插回去的那个洞）；484 条目两处更正；10-13 ~ 10-15 生产核对全部通过
+
+### Fixed
+- `experiments/writeback_1012_replay_v0484.py`：
+  - `plan`：`signal_archive` 新行里凡是现行 `signal_archive.is_quarantined` 认定的一律剔除，记入 `quarantine_dropped`（并打印）；
+  - `apply`：在写前值核对**之前**按 apply 时的现行名单再核一遍，有一行命中就整体中止、什么都不写（连备份都不开始）——名单在 plan 与 apply 之间会变，10-13 正是如此。
+  - 实测（只读）：拿 union4 沙箱重新 plan ⇒ `signal_archive 2035 → 2035`、`quarantine_dropped = [BILI options.iv_current]`；拿 10-13 第二次写回用过的旧 plan 做 dry-run apply ⇒ 中止并点名那一行。
+- `CHANGELOG` v0.45.484 两处〔v0.45.502 更正〕：第一次写回的 `iv_history` 是 30 行不是 29 行（含 BILI 6.25，后被 499 删）；逐位确定性核对的是 union3，最终写入的 union4 未单独再重放。
+
+### 生产核对（10-16，只读）
+- 生产克隆已含 v0.45.484（`b1340726`），10-13 / 10-14 / 10-15 三轮扫描与 Step 11 都正常跑完。
+- `experiments/dim_ic_forward_test.py`（生产代码）输出 `forward_test_excluded_days: ['2026-10-12']`；`resonance_boost_forward_test.py` 的 `skipped_files` 有「协议排除日」12（= 当天 12 份 analysis JSON），自证 253/255。
+- 10-12 predictions 的 T+1 已由 10-13 扫描回填 30/30（写回前入场价为 0 时回填会跳过）；`signal_archive` 10-12 仍 2035 行、BILI `options.iv_current` 0 行、`iv_history_BILI` 无 10-12 行（与 499 一致）。
+- ⭐ 484 预警的污染路径已核：10-15 扫描 30/30 只的 Buzz `delta_3d` 参照日都是 10-12，**全部**等于「当日情绪 − 写回后的 10-12 `sentiment.pct`」（若没写回，按故障日值算会不同，如 MSFT −7 vs −10、TSLA −10 vs −3）。
+
+### 顺带发现（未处理，报给用户）
+- **10-14 代理探活又失败**（14:00:10）。这次 496 修好的退回分支是真直连：CBOE 29/30、入场价 30/30，但 yfinance 全挡（`iv_rank` / `unusual_flow` / 分析师目标 / 催化剂 0/30）——是「降级日」不是 10-12 那种「垃圾日」，未重放。⇒ 探活一次失败就整轮放弃代理的问题（484 调查第 1 条）在三天里复发了一次。
+- Step 11 自 10-14 起 WARN：F&G 敞口门前瞻检验「无法判定」——A 臂重放复现 27/31，未复现的 4 笔全是 **10-14** 入场、决策层（标的 / 日期 / 方向）31/31 相同、只差仓位金额。与 10-12 写回无关（10-13 写回后当场核过 26/26）；疑与 10-14 降级（波动率来源）有关，待查。
+
+### Added（测试）
+- `tests/test_writeback_1012_quarantine_guard.py`（2）：命中隔离 ⇒ 中止、库与备份目录都没动；对照（名单里没有）⇒ 放行到写前值核对。变异：去掉 apply 的核对 ⇒ 红。
 
 ## [0.45.501] — 2026-10-13 — Fixed：v0.45.492 溢价子页二次检查（`/code-review` high）9 处根因修复——财报「视野内没有」不再判成「到期前没有」、连点不再互相覆盖、外部原因码表补全并加完整性守卫、日线落后与窗内缺口分开报、财报日跳过失败日、分片只解析一次、选中到期日掉出范围自动取消、取日线出错有自己的码、规则表只算一次
 
@@ -586,7 +606,7 @@
   | yfinance 异常流 / .info / 分析师 / 财报日历 | 10-13 开盘前现取（成交量仍是 10-12 场）| **.info / 分析师隔夜值、Reddit（ApeWisdom 滚动 24h）晚约 12h：待验证** |
   | CodeExecutor 子进程 | 开盘前真跑，成功结果按代码哈希录制 | — |
 - **录制 / 拼合**：全部 HTTP（requests / urllib / yfinance curl_cffi）与 CodeExecutor 结果落盘。开盘前跑了 3 轮实取 + 1 轮补跑 CodeExecutor（10 只第三轮仍失败，05:58 补齐）；最终 `union` 模式**只用录制里成功的响应、不出网**拼出完整输入集（Massive 限流与 yfinance 冷却在离线快放下会被假性触发，两处已在 union / replay 模式绕开，见脚本注释）。
-- **确定性**：用 union 自己的录制再 `replay` 一遍——**final_score / direction / 维度分 / 维度权重 / 各蜂分 30/30 逐位相同**；残差只在不进分的字段：Scout 卖空数据源的断路器按线程完成顺序开（同 7 只在 real / fallback 间互换，置信 ±0.02）、cs_rank.catalyst 并列名次。
+- **确定性**〔v0.45.502 更正：下面这次逐位核对的是 **union3**（第一次写回的那份）；最终写入的 union4 只多修了本地钟，与 union3 分数 30/30 相同、仅 AMZN 一只蜂不同，**本身没有再做一遍自录制重放**〕：用 union 自己的录制再 `replay` 一遍——**final_score / direction / 维度分 / 维度权重 / 各蜂分 30/30 逐位相同**；残差只在不进分的字段：Scout 卖空数据源的断路器按线程完成顺序开（同 7 只在 real / fallback 间互换，置信 ±0.02）、cs_rank.catalyst 并列名次。
 - **覆盖率**（生产 Step 12 闸原样跑）：十字段全部 30/30，「覆盖率健康」。
 
 ### 结果（30 只）
@@ -596,7 +616,7 @@
 
 ### 写回（用户批准「全部」；`experiments/writeback_1012_replay_v0484.py` plan → apply）
 - 写前值逐项核对（行哈希 / 文件 sha），任一处被改就整体中止；整库 sqlite backup + 原件备份；DB 一个事务、`integrity_check` ok。
-- **第一次**（10-13 07:33，union3）：`predictions` 30 行（入场价 30/30 > 0）、`signal_archive` 1621 → 2036、`.swarm_results_2026-10-12.json`、`report_snapshots/*_2026-10-12.json` 30 份、`agent_memory` 260 → 300 / `reasoning_sessions` / `adapted_weights`、`sentiment_baseline` 10-12 30 行、`cache/options_snapshot_*_2026-10-12.json` 30 份（生产当天 0 份）、`iv_history` 10-12 29 行、日报 md / json / X 线程。备份 `_manual_backups/2026-10-13_1012_replay_v0.45.484/`。
+- **第一次**（10-13 07:33，union3）：`predictions` 30 行（入场价 30/30 > 0）、`signal_archive` 1621 → 2036、`.swarm_results_2026-10-12.json`、`report_snapshots/*_2026-10-12.json` 30 份、`agent_memory` 260 → 300 / `reasoning_sessions` / `adapted_weights`、`sentiment_baseline` 10-12 30 行、`cache/options_snapshot_*_2026-10-12.json` 30 份（生产当天 0 份）、`iv_history` 10-12 29 行〔v0.45.502 更正：是 **30** 行——含 BILI 那行 Yahoo 失败值 6.25；它在 07:50 由 v0.45.499 删掉，所以第二次写回中止清单里只剩 29 个文件〕、日报 md / json / X 线程。备份 `_manual_backups/2026-10-13_1012_replay_v0.45.484/`。
 - **第二次**（08:08，union4 = 修好本地钟）：分数与第一次 30/30 相同，只差时间戳 / created_at 与 AMZN 一只蜂（union3 漏取供给链同业行情，signal 维权重为 0、final 不变）；不碰 IV 索引。备份 `…_r2/`（含 `replay_artifacts/`：54 MB 输入录制、control / corrected 输出、开盘前抓取）。
 - ⚠️ **与并行会话的交叉**：v0.45.497（07:41）的快照回填工具见我已写入、幂等全跳过；**v0.45.499（07:50）**按用户批准隔离并清掉了 BILI 10-12 的 `options.iv_current` 6.25（Yahoo 求解失败阶梯值——重放代码早于 482 的多数规则，BILI 无云端链走 yfinance 备用链）。我第二次写回时**把那一行又插了回去**（plan 在 499 之后算，但整日删再插不看 QUARANTINE）——08:10 发现、先备份再删回（`…_r2/pheromone_before_bili_iv_revert.db`），现与 499 一致。BILI 同一条链的 P/C 298.46 仍在库（499 明确未动），BILI 的 Oracle 分（4.27 bullish）是当天代码在这条坏链上算的。
 - 不动：12 份 ML 深度报告与 `analysis-*-ml-2026-10-12.json`（叙事体裁，同 271 / 464；共振加成检验靠下条排除）、网站（下次扫描的 gh-pages 同步带上新日报）。

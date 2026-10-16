@@ -65,6 +65,14 @@ def plan(sandbox, prod, plan_dir, scope, report_path=None):
     for t in tables:
         cols, old = _rows(pdb, t)
         _, new = _rows(sdb, t)
+        if t == "signal_archive":
+            # v0.45.502：整日「删再插」不能把隔离名单里的行插回去。10-13 第二次写回（08:08）正是这么把 v0.45.499
+            # 刚隔离并清掉的 BILI options.iv_current 6.25 插了回去——plan 在 499 之后生成，但沙箱是 499 之前的代码跑的，
+            # 新行里照样有那一行，而整日替换不经 archive() 的入库口。现行 QUARANTINE 认定的行一律剔除并记账。
+            import signal_archive as _sa
+            dropped = [r for r in new if _sa.is_quarantined(str(r["date"])[:10], r["ticker"], r["signal"])]
+            new = [r for r in new if r not in dropped]
+            P["quarantine_dropped"] = [(r["ticker"], r["signal"]) for r in dropped]
         P["db"][t] = {"cols": cols, "old_hash": _h(old), "old_n": len(old), "old": old, "new": new}
     if "core" in scope:
         o = {r["ticker"]: r for r in P["db"]["predictions"]["old"]}
@@ -111,6 +119,7 @@ def plan(sandbox, prod, plan_dir, scope, report_path=None):
     with open(os.path.join(plan_dir, "plan.json"), "w") as f:
         json.dump(P, f, ensure_ascii=False, default=str)
     summ = {t: f'{v["old_n"]} → {len(v["new"])}' for t, v in P["db"].items()}
+    summ["quarantine_dropped"] = P.get("quarantine_dropped", [])
     summ["text_files"] = len(P.get("text_files") or {})
     print("plan:", json.dumps({"db": summ, "files": len(P["files"]), "jsonl_files": len(P["jsonl_rows"]),
                                "sentiment_baseline": None if not P["sentiment_baseline"] else
@@ -125,6 +134,12 @@ def apply(plan_dir, prod, backup_dir, dry_run):
     pdb = os.path.join(prod, "pheromone.db")
     # 1) 写前值核对：任何一处被别人改过 ⇒ 整体中止
     bad = []
+    # 0) 隔离名单在 plan 与 apply 之间可能变（10-13 即如此）：apply 时按**现行**名单再核一次，有一行命中就整体中止
+    import signal_archive as _sa
+    q_hit = [(r["ticker"], r["signal"]) for r in P["db"].get("signal_archive", {}).get("new", [])
+             if _sa.is_quarantined(str(r["date"])[:10], r["ticker"], r["signal"])]
+    if q_hit:
+        sys.exit(f"待写的 signal_archive 行命中现行 QUARANTINE，整体中止、什么都没写：{q_hit}——重新 plan")
     for t, v in P["db"].items():
         _, cur = _rows(pdb, t)
         if _h(cur) != v["old_hash"]:
