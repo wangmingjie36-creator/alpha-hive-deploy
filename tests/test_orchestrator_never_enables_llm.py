@@ -6,7 +6,7 @@
 `LLM_FLAG` 只许有一处纯字面赋值 `--no-llm`，且代码里（注释除外）不再出现 `--use-llm` / `pre_scan_notify`
 / 旧防重复标记。以后谁要重新开 LLM 路径，必须先改这条测试——也就是先过一遍「要花钱」这个问题。
 
-不在这里测的：`pre_scan_notify.py` 本身仍在（`test_slack_send_whitelist` 把它登记为合法发送方），只是没人调用。
+补记（v0.45.514）：`pre_scan_notify.py` 已删除；墓碑见 `tests/test_slack_send_whitelist.py::TestPreScanNotifyStaysRetired`。
 """
 from tests._orchestrator import orch_literal, repo_orchestrator_text
 

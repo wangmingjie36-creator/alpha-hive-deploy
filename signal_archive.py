@@ -1359,9 +1359,11 @@ QUARANTINE: List[Dict] = [
                     "SNOW", "T", "TMO", "TMUS", "TSLA", "VKTX", "VZ", "WMT", "XOM"),
         "signals": ("price.volume_ratio",),
         "reason": "v0.45.508（用户 2026-10-16 批准）：yfinance 日线全挡，量比来自 Twelve Data 兜底；收盘后扫描里 TD 当日那根"
-                  "被 `_drop_forming_bar` 丢掉 ⇒ 比值末根是 10-13（v0.45.505 起这种值拒收）。29/29 与 yfinance「截至 10-13」"
-                  "的比值相等（27 只到 4 位小数；RKLB / VKTX 差 0.003，成交量源差异），与「截至 10-14」相去甚远（COST 0.62 vs 1.31、"
-                  "CRCL 0.48 vs 1.03）。JNJ 当天 TD 限流超时、未入档，不在名单里。",
+                  "被 `_drop_forming_bar` 丢掉 ⇒ 入档的是「最新一根 = 10-13、均量窗口 = 截至 10-13 的 20 根」的量比，不是 10-14 那场的"
+                  "（v0.45.505 起这种值拒收）。复核（10-16）：Twelve Data 自己的日线 `fetch_volume_ratio(end_date=2026-10-13)` 重算，"
+                  "27 只逐位相等、as_of 2026-10-13；RKLB / VKTX 只差在 10-13 那根成交量——其余 19 根取今天的值、10-13 换成 15,537,400 /"
+                  " 5,707,600 股即逐位复现（Twelve Data 事后上调了那根，推断，原值已取不回）。与「截至 10-14」相去甚远（COST 0.62 vs"
+                  " 1.31、CRCL 0.48 vs 1.03）。JNJ 当天 TD 限流超时、未入档，不在名单里。",
         "evidence": ("~/.claude/logs/orchestrator-2026-10-14.log（29 行「volume_ratio 由 Twelve Data 补上」，各配「丢弃盘中未完成的末根日线（2026-10-14）」）",
                      "CHANGELOG.md#v0.45.505", "CHANGELOG.md#v0.45.508"),
     },
@@ -1369,7 +1371,8 @@ QUARANTINE: List[Dict] = [
         "date": "2026-10-14",
         "tickers": ("BILI",),
         "signals": ("price.momentum_5d",),
-        "reason": "v0.45.508（用户 2026-10-16 批准）：yfinance 全挡 ⇒ 自攒索引回落，BILI 的当场收盘没进窗口 ⇒ 窗口末端 10-13，"
+        "reason": "v0.45.508（用户 2026-10-16 批准）：yfinance 全挡 ⇒ 自攒索引回落；BILI 的 CBOE 数据陈旧（last_trade=10-13）被弃用 ⇒ "
+                  "没有已核实的 10-14 收盘 ⇒ 窗口末端 10-13，"
                   "动量 +0.40%（= 10-13 归档值）；yfinance「截至 10-14」为 −3.91%。其余 29 只的回落末端是 10-14、与 yfinance 一致，不隔离。",
         "evidence": ("~/.claude/logs/orchestrator-2026-10-14.log（「[BILI] momentum_5d 由自攒索引补上: +0.40%（截至 2026-10-13」）",
                      "CHANGELOG.md#v0.45.508"),
