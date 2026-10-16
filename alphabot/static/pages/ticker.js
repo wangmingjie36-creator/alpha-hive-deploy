@@ -4,6 +4,7 @@ import { api, h, helpLink, num, money, pct, pctPts, usdShort, signedPct, distPct
   EARN_LABEL, SOURCE_LABEL, fill, plain } from "../lib.js";
 import { strikeBars, gammaCurve, lines, columns, payoff, C } from "../charts.js";
 import { premium } from "./premium.js";
+import { howtoPanel } from "./howto.js";
 import { state, tickers, refreshMeta } from "../app.js";
 
 const TABS = [["levels", "水平"], ["greeks", "希腊值"], ["term", "期限"], ["sell", "卖权"], ["premium", "溢价"], ["price", "价格"]];
@@ -296,7 +297,7 @@ function sell(body, d) {
         h("tr", {}, h("th", {}, "结构"), ...["权利金", "最大亏损", "单笔回报", "盈亏平衡"].map((x) => h("th", { class: "r" }, x)),
           ...["权利金", "最大亏损", "单笔回报", "盈亏平衡"].map((x) => h("th", { class: "r" }, x)))),
       h("tbody", {}, structRows.map((r) => {
-        const tr = h("tr", { class: `link${r.k === pick ? " sel" : ""}`, tabindex: "0", title: "点击查看到期盈亏",
+        const tr = h("tr", { class: `link${r.k === pick ? " sel" : ""}`, tabindex: "0", title: "点击查看到期盈亏与怎么卖",
           onclick: () => { pick = r.k; draw(); }, onkeydown: (e) => { if (e.key === "Enter") { pick = r.k; draw(); } } },
         h("td", {}, h("b", {}, STRUCT_LABEL[r.k])), ...qCells(r.route), ...qCells(r.base));
         return tr;
@@ -314,10 +315,12 @@ function sell(body, d) {
       panel("Delta 梯子", { sub: "put 在左、call 在右；框出的格子是路由选中的档。P(ITM) = N(d2) 风险中性概率，不是 |Δ|；单笔回报 = bid ÷ 占用资金" }, ladderTbl),
       h("div", { style: { height: "20px" } }),
       h("div", { class: "grid" },
-        panel("六种结构", { sub: "卖按 bid、买按 ask，每股口径（×100 为每张）" }, structTbl,
+        panel("六种结构", { sub: "卖按 bid、买按 ask，每股口径（×100 为每张）；点一行，下面看「怎么卖」" }, structTbl,
           h("p", { class: "note" }, plain(d.yield_note))),
         panel(`到期盈亏 · ${STRUCT_LABEL[pick]}`, { sub: `只按到期收盘算，不含存续期内触及；虚线 = ±1σ 期望波动（${money(em.move_1sigma)}）` },
           series.length ? pfEl : h("div", { class: "empty" }, "这个结构两档都不可报价。"))),
+      h("div", { style: { height: "20px" } }),
+      howtoPanel({ hw: d.howto, tenor, pick, S, redraw: draw }),
       h("div", { style: { height: "20px" } }),
       panel("局限", {}, h("ul", { class: "small muted" }, (d.caveats || []).map((x) => h("li", {}, plain(x))))));
     if (series.length) payoff(pfEl, { grid: pf.grid, series, spot: S, band: { lo: em.lo, hi: em.hi } });
