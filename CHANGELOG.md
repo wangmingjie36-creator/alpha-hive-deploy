@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.513] — 2026-10-16 — 占位（进行中：earnings_vol_signal `_cache_dir_hint` 不再把缺省数据根误诊为「回落到代码目录」，照 v0.45.384 vrp_signal 修法）
+
 ## [0.45.512] — 2026-10-16 — 占位（进行中：BILI 10-12 put/call 298.46 隔离 + yfinance 期权链 OI 陈旧时不算 P/C）
 
 ## [0.45.511] — 2026-10-16 — Fixed + Added：`signal_archive` 的每个写入点入库前都过 QUARANTINE——补 `backfill_fear_greed_legacy`（v0.45.267 起直写不查）、`data_backup/restore.py` 整库恢复后报出命中行数；新增全仓 AST 守卫
