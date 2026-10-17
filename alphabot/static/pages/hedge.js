@@ -85,6 +85,10 @@ function deltaPanel(D, rules) {
   const lastBits = [];
   lastBits.push(h("p", { class: "small muted" }, `${D.latest_date} 的决策 · 合并 NAV ${money(D.nav, 0)} · 要对冲 ${D.n_hedge ?? 0} 只 / 带内 ${D.n_inside ?? 0} 只 / 未决 ${D.n_undecided ?? 0} 只。`
     + (mode === "shadow" ? " shadow 没有对冲持仓账：「今日成交」是「若今天从空仓开始对冲」要成交的量，「目标对冲股数」才是把跨式 Delta 全抵掉需要持有的股数。" : "")));
+  if (D.nav_basis && D.nav_basis !== "full") {
+    lastBits.push(h("p", { class: "callout warn" }, `带宽用的 NAV 不含逐票对冲账里 ${(D.nav_unmarked || []).join("、")} 的盈亏（这几只持仓标的当天没有可用的价）：`
+      + "它只是对冲仓的盈亏、相对合并 NAV 是个零头；但合并 NAV 本身这一天算不出来，所以上面 SPY 带的判断是「判断不了」。"));
+  }
   if ((D.undecided || []).length) {
     lastBits.push(h("p", { class: "callout warn" }, `${D.undecided.length} 只决定做不出来（只影响这几只，别的照常）：`
       + D.undecided.map((u) => `${u.ticker}（${D_REASON[u.reason] || u.reason}）`).join("；")));

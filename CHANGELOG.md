@@ -7,7 +7,29 @@
 
 ## [0.45.530] — 2026-10-17 — 占位（进行中：清掉 v0.45.508 量比 29 行 + v0.45.517 63 行；10-14 BILI 动量 1 行故意保留）
 
-## [0.45.529] — 2026-10-17 — 占位（进行中：逐票 Delta 对冲（0.45.526）二次检查——paper 下持仓标的的陈旧价会把 NAV 整体做成 None、连坐全部标的；paper 首日无成交时 delta_positions.jsonl 不建、对冲页误报「持仓文件被删」）
+## [0.45.529] — 2026-10-17 — Fixed：逐票 Delta 对冲（0.45.526）二次检查——paper 下持仓标的的陈旧价把 NAV 整体做成 None、连坐全部标的；paper 首日无成交时 `delta_positions.jsonl` 不建、对冲页误报「持仓文件被删了」
+
+0.45.526 的 CHANGELOG 写「缺数据**逐标的**判、别的照常」。二次检查用实验验证这句话，**在 paper 模式下对持仓标的不成立**。shadow（缺省，现在线上跑的）两处都不受影响：shadow 没有逐票账本、NAV 里没有 `delta_overlay` 这一项。
+
+### Fixed
+- **持仓标的的陈旧价连坐全部标的（paper）**：`delta_overlay_value` 对持仓标的取当日价，价不是 as_of 官方收盘（盘中陈旧文件：10-15 的 BILI 就是）⇒ 返回 None ⇒ 合并 NAV 缺 `delta_overlay` ⇒ NAV=None ⇒ `decide()` 对**所有**标的判 `nav_unavailable`——一只缺价，连价格完全正常的标的也停摆。实验（第 2 天 BBB 陈旧、AAA 正常）：修前两只都是 `unknown/nav_unavailable`。盘中陈旧文件约每 30 只里有 1 只，6 个对冲标的 ≈ 每 5 个交易日就有 1 天会这样。
+  修法：NAV 缺的**恰好只有** `delta_overlay`、且原因是某几只持仓标的缺价（`combined_nav_detail` 新增 `delta_overlay_unmarked` 点名）时，**逐票带宽的分母**用「不含这一块」的 NAV（`delta_hedge.nav_basis = "excluding_unmarked_delta_overlay"`，`nav_unmarked` 点名）。理由：overlay 只是对冲仓的盈亏（成交瞬间 NAV 中性），相对 15 万的合并 NAV 是个零头。**SPY 带的 NAV 规则不改**——任一分量缺失仍是 None，那一天 SPY 带仍判「判断不了」（与此前因任何一行缺价而 unknown 同性质）。其它分量缺失（如跨式账 NAV 行没了）回退不适用，所有标的仍判 `nav_unavailable`。
+  对冲页面板在口径被换时给黄条说明（不含谁、为什么、SPY 带为什么是判断不了）。
+- **paper 首日没有成交 ⇒ 对冲页误报**：`_delta_snapshot` 只在有持仓时写 `delta_positions.jsonl`；首日全在带内（没有成交）时 `delta_meta.json` 已开账、持仓文件却不存在 ⇒ `ledger_view` 报「持仓文件被删了」（假警报）。现在开账即写（空仓写空文件）。
+
+### Added
+- 测试 +8 条（`tests/test_portfolio_greeks_delta_hedge.py::TestSecondCheck` 7 条 + `tests/test_alphabot_hedge_delta.py` 1 条）：陈旧持仓标的不连坐 / 口径披露且 SPY 带规则不变 / 无缺失时口径为 full / 其它分量缺失回退不适用 / 首日无成交账本一致 / 跳式平仓当天重跑逐字节幂等 / 股票账同名仓位不被抵消 / 口径到页面。**变异核对 18 处**（上一版 15 处 + 本版 3 处：回退失效、回退放宽到任何缺失、空仓不写文件）全部变红。（更正：0.45.526 的 CHANGELOG 与汇报写「变异 16 处」，实际列出的是 15 处——脚本里有一条被跳过的占位被我数进去了；这 15 处当时都是红的。）
+
+### 核对（没有问题的疑点，留档）
+- 跨式平仓当天同日重跑：逐字节幂等（`test_exit_day_rerun_is_byte_identical`）。
+- 股票账里同名标的：对冲对象只含跨式腿，不被 500 股股票仓影响（决策仍是 −200，聚合里股票仓 5 万仍在）。
+- 其它模块按 `kind` / `by_kind` 读这些行的：只有 `portfolio_greeks.py` 自己（压力网格、日报「SPY 覆盖」股数）；`delta_hedge` 是独立的 `kind`，不污染它们。
+- 修复前后在**同一份输入**下 `aggregate / recommendation / nav / stress / price_check` 与逐票决策逐项一致（真实账本 + 10-15 记录的价 / 报价 / β 重放）。注意：重放用的是**当前**真实持仓（10-16 14:33 扫描后股票仓位已从 11 只变 8 只），所以 β·Δ 不再是 10-15 当天记录的 −18.2144 而是 −16.617——**数据漂移，不是回归**（修复前代码同样得 −16.617）；0.45.526 记录的「逐位一致」是 10-16 上午、持仓尚未变动时的结果。
+
+### Notes（未处理的残余风险）
+- paper 下若某只逐票成交因「非价格原因」未能落账（`delta_meta.cash` 非有限、成交算出非有限值——都要先有账本坏数据）：`compute_day` 里 SPY 带已按「逐票对冲已成交」的假设做了决策，当天 SPY 可能少 / 多对冲；该情形会写 `blocked` 并走 P2 告警，但本版不拦 SPY。需要先出现账本坏数据才会触发，概率极低，故没加第二道闸。
+- 既有毛病（0.45.526 已记，仍未改）：SPY 覆盖账当天有 SPY 成交时同日重跑，审计 `rows[].avg_price` 与 NAV 有 ~5e-12 浮点差。
+- 验证：相关 920 项（含各元守卫）通过；`ruff` 全仓干净；clockshift 拨钟审计 +7 / +45 天新红 0 条。
 
 ## [0.45.528] — 2026-10-17 — Changed：`PheromoneBoard.publish` 只扫同标的条目的快路径（大 `MAX_ENTRIES` 下 O(n²) → 近似 O(同标的条数)），**逐位等价**于旧全量扫描；生产扫描时长**不变**
 

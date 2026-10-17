@@ -878,8 +878,9 @@ def _delta_rows_after(as_of: str, section: Optional[Dict], beta_fn) -> List[Dict
     return rows
 
 
-def delta_overlay_value(as_of: str, closes_fn) -> Optional[float]:
-    """逐票对冲账净值 = cash + Σ shares × 当日价。没开过账不进 NAV（调用方判）；有仓但某只没价 ⇒ None。"""
+def delta_overlay_value(as_of: str, closes_fn, diag: Optional[Dict] = None) -> Optional[float]:
+    """逐票对冲账净值 = cash + Σ shares × 当日价。没开过账不进 NAV（调用方判）；有仓但某只没价 ⇒ None。
+    `diag`（可选）收集「没价」的标的（`diag["unmarked"]`），供 `compute_day` 判断 None 是不是只因某几只持仓标的缺价。"""
     meta = _delta_load_meta()
     cash = _num(meta.get("cash"))
     if cash is None:
@@ -894,8 +895,12 @@ def delta_overlay_value(as_of: str, closes_fn) -> Optional[float]:
             continue
         px = _mark_from(closes_fn, str(p.get("ticker") or ""), as_of)["price"]
         if px is None:
-            return None
+            if diag is not None:
+                diag.setdefault("unmarked", []).append(str(p.get("ticker") or ""))
+            continue                            # 点完名再统一判 None（多只缺价时一次说全）
         total += sh * px
+    if diag is not None and diag.get("unmarked"):
+        return None
     return total
 
 
@@ -990,8 +995,7 @@ def _delta_snapshot(as_of: str, closes_fn) -> Dict:
         mv += sh * m["price"]
         at_close = at_close and bool(m["at_close"])
         p["last_price"], p["last_mark_date"] = m["price"], as_of
-    if positions:
-        _write_jsonl(_delta_paths()["positions"], positions)
+    _write_jsonl(_delta_paths()["positions"], positions)      # 空仓也写（空文件）：开了账就必须有持仓文件
     nav = (cash + mv) if (cash is not None and complete) else None
     snap = {"date": as_of, "cash": _r(cash), "market_value": _r(mv) if complete else None, "nav": _r(nav),
             "n_positions": n, "marks_complete": complete, "marks_at_close": at_close and complete,
@@ -1137,11 +1141,17 @@ def combined_nav_detail(as_of: str, closes_fn: Optional[Callable[[str, str], Opt
         # 逐票对冲账（v0.45.526）：开过账（delta_meta.json 在）或 paper 模式才进 NAV——paper 模式第一次跑时账还没开，
         # 若这时不加这一项，第一次与同日重跑的 NAV 分量（以及审计文件）就不一样；没开账的价值是 0.0（无仓、现金 0）。
         # shadow / off 且没开过账 ⇒ 不加这一项，与旧行为逐字节相同
-        comps["delta_overlay"] = delta_overlay_value(as_of, closes_fn)
+        delta_diag: Dict = {}
+        comps["delta_overlay"] = delta_overlay_value(as_of, closes_fn, delta_diag)
+    else:
+        delta_diag = None
     missing = [k for k, v in comps.items() if v is None]
     nav = None if missing else sum(comps.values())  # type: ignore[arg-type]
-    return {"nav": (round(nav, 2) if nav is not None else None), "components": comps,
-            "missing": missing, "not_started": not_started, "spy_price": spy_price}
+    out = {"nav": (round(nav, 2) if nav is not None else None), "components": comps,
+           "missing": missing, "not_started": not_started, "spy_price": spy_price}
+    if delta_diag is not None:
+        out["delta_overlay_unmarked"] = list(delta_diag.get("unmarked") or [])
+    return out
 
 
 def combined_nav(as_of: str, closes_fn: Optional[Callable[[str, str], Optional[float]]] = None) -> Optional[float]:
@@ -1469,7 +1479,19 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     hedge_rows, today_trade = _hedge_rows_before_today(as_of, closes_fn, spy_price, spy_mark=spy_mark)
     nav_d = combined_nav_detail(as_of, closes_fn, spy_price=spy_price)
     # 逐票 Delta 对冲先于 SPY 带：paper 模式下 SPY 带看到的是逐票对冲**之后**的残余暴露；shadow / off 不进聚合
-    delta_section = delta_hedge_day(as_of, option_rows, nav_d["nav"], closes_fn)
+    # 逐票带宽的分母（v0.45.529）：NAV 缺的**只有** delta_overlay 且原因是某几只持仓标的缺价 ⇒ 带宽用「不含这一块」的 NAV。
+    # 否则一只持仓标的的陈旧价（盘中陈旧文件约每 30 只里有 1 只）会把 NAV 整体做成 None，连价格正常的标的也判未知——
+    # 逐标的隔离就成了空话。overlay 自己只是对冲仓的盈亏（成交瞬间 NAV 中性），相对 15 万的 NAV 是个零头；
+    # SPY 带的 NAV 仍按「任一分量缺失 ⇒ None」判（不改）。
+    band_nav, nav_basis = nav_d["nav"], "full"
+    if (band_nav is None and nav_d.get("missing") == ["delta_overlay"] and nav_d.get("delta_overlay_unmarked")):
+        band_nav = sum(v for v in nav_d["components"].values() if v is not None)
+        nav_basis = "excluding_unmarked_delta_overlay"
+    delta_section = delta_hedge_day(as_of, option_rows, band_nav, closes_fn)
+    if delta_section is not None:
+        delta_section["nav_basis"] = nav_basis
+        if nav_basis != "full":
+            delta_section["nav_unmarked"] = list(nav_d.get("delta_overlay_unmarked") or [])
     delta_rows = _delta_rows_after(as_of, delta_section, beta_fn)
     rows = stock_rows + option_rows + hedge_rows + delta_rows
     # NAV 不分「交易前/后」：成交价=收盘价，−shares×px 的现金腿与 +shares×px 的市值腿

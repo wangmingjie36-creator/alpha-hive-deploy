@@ -305,6 +305,95 @@ class TestPerNameIsolation:
         assert n["AAA"]["status"] == "hedge"
 
 
+class TestSecondCheck:
+    """二次检查（0.45.529）挖出的两处：持仓标的的陈旧价把 NAV 整体做成 None、连坐全部标的；
+    paper 首日没有成交时 `delta_positions.jsonl` 不建、对冲页误报「持仓文件被删了」。"""
+
+    @pytest.fixture(autouse=True)
+    def paper(self, state):
+        pg.CONFIG["delta_hedge_mode"] = "paper"
+
+    @staticmethod
+    def _two_names():
+        st = [_straddle("AAA"), _straddle("BBB")]
+        q = {**_quotes_for("AAA", 0.6, -0.4), **_quotes_for("BBB", 0.6, -0.4)}
+        return st, q, {"AAA": 100.0, "BBB": 100.0, "SPY": SPY}
+
+    def _day1_then_stale_bbb(self):
+        st, q, px = self._two_names()
+        _seed(st)
+        r1 = _run(_closes(px), q)
+        assert {t["ticker"] for t in r1["delta_hedge"]["executed"]} == {"AAA", "BBB"}
+        _seed(st, day=NEXT)
+        q2 = {**_quotes_for("AAA", 0.75, -0.25), **_quotes_for("BBB", 0.75, -0.25)}      # 两只都漂出带：各该再卖 300 股
+        stale = {"price": 100.0, "source": "cboe_stale_intraday", "session": AS_OF, "at_close": False}
+        return _run(_closes({"AAA": 100.0, "BBB": stale, "SPY": SPY}), q2, day=NEXT)
+
+    def test_one_stale_held_name_does_not_poison_the_others(self, state):
+        r = self._day1_then_stale_bbb()
+        n = _names(r)
+        assert n["AAA"]["status"] == "hedge" and n["AAA"]["trade_shares"] == -300          # 价格正常的照常决策、照常成交
+        assert [t["ticker"] for t in r["delta_hedge"]["executed"] if t["date"] == NEXT] == ["AAA"]
+        assert n["BBB"]["status"] == "unknown" and n["BBB"]["trade_shares"] == 0           # 缺价的这只自己判未决
+        assert r["price_check"]["delta_hedge"]["n_undecided"] == 1
+
+    def test_the_basis_is_disclosed_and_spy_band_keeps_its_strict_rule(self, state):
+        r = self._day1_then_stale_bbb()
+        assert r["delta_hedge"]["nav_basis"] == "excluding_unmarked_delta_overlay"
+        assert r["delta_hedge"]["nav_unmarked"] == ["BBB"] and r["delta_hedge"]["nav"] == pytest.approx(200_000.0)
+        assert r["nav"]["nav"] is None and r["nav"]["missing"] == ["delta_overlay"]        # 合并 NAV 仍是 None（SPY 带的规则没改）
+        assert r["aggregate"]["band_status"] == "unknown" and r["recommendation"]["action"] == "hold"
+
+    def test_basis_is_full_when_nothing_is_missing(self, state):
+        st, q, px = self._two_names()
+        _seed(st)
+        r = _run(_closes(px), q)
+        assert r["delta_hedge"]["nav_basis"] == "full" and "nav_unmarked" not in r["delta_hedge"]
+        assert r["nav"]["delta_overlay_unmarked"] == []
+
+    def test_any_other_missing_nav_component_still_makes_every_name_unknown(self, state):
+        """回退只认「NAV 缺的恰好只有 delta_overlay」：跨式账 NAV 行没了，所有标的仍判 nav_unavailable。"""
+        st, q, px = self._two_names()
+        _seed(st)
+        opl.EQUITY_FILE.write_text("", encoding="utf-8")
+        r = _run(_closes(px), q, execute=False)
+        assert r["nav"]["nav"] is None and "straddle_leg" in r["nav"]["missing"]
+        assert {d["reason"] for d in r["delta_hedge"]["names"]} == {"nav_unavailable"}
+        assert r["delta_hedge"]["nav_basis"] == "full"
+
+    def test_paper_day_without_trades_still_has_a_consistent_ledger(self, state, tmp_path):
+        st, _, px = _long_x()
+        _seed(st)
+        r = _run(_closes(px), _quotes_for("XYZ", 0.51, -0.49))               # Δ 很小：带内、没有成交
+        assert r["delta_hedge"]["executed"] == [] and _names(r)["XYZ"]["status"] == "inside"
+        assert (pg.STATE_DIR / "delta_positions.jsonl").exists()
+        assert pg._load_jsonl(pg.STATE_DIR / "delta_positions.jsonl") == []
+        v = pg.ledger_view(tmp_path)
+        assert v["delta_opened"] is True and v["delta_positions"] == [] and "delta_positions" not in v["errors"]
+
+    def test_exit_day_rerun_is_byte_identical(self, state):
+        st, q, px = _long_x()
+        _seed(st)
+        _run(_closes(px), q)
+        _seed([], day=NEXT)
+        _run(_closes(px), {}, day=NEXT)
+        s1 = {p.name: p.read_bytes() for p in sorted(pg.STATE_DIR.glob("*")) if p.is_file()}
+        _run(_closes(px), {}, day=NEXT)
+        assert {p.name: p.read_bytes() for p in sorted(pg.STATE_DIR.glob("*")) if p.is_file()} == s1
+        assert len(pg._load_jsonl(pg.STATE_DIR / "delta_trades.jsonl")) == 2
+
+    def test_a_stock_book_position_in_the_same_ticker_is_not_hedged_away(self, state):
+        """对冲对象只含跨式腿：同一个标的在股票账里的方向仓位不被抵消。"""
+        from test_portfolio_greeks import _stock
+        st, q, px = _long_x()
+        _seed(st)
+        _jsonl(pp.POSITIONS_FILE, [_stock("XYZ", "bullish", shares=500, entry=100.0)])
+        r = _run(_closes(px), q)
+        d = _names(r)["XYZ"]
+        assert d["option_dd"] == pytest.approx(20_000.0) and d["trade_shares"] == -200      # 与有没有 500 股股票仓无关
+        assert r["aggregate"]["sums"]["beta_dollar_delta"] == pytest.approx(50_000.0, abs=1.0)   # 股票仓 5 万仍在
+
+
 class TestReadSide:
     def _paper_day(self):
         pg.CONFIG["delta_hedge_mode"] = "paper"

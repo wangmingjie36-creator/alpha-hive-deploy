@@ -94,6 +94,14 @@ class TestDeltaOverview:
         assert n["T"]["option_pct_nav"] == pytest.approx(40014.0 / 150380.19 * 100, abs=1e-3)
         assert n["BILI"]["option_pct_nav"] is None                                          # 未决的没有 Delta ⇒ 不可得，不是 0
 
+    def test_nav_basis_reaches_the_page_and_the_front_end_discloses_it(self, tmp_path):
+        sec = _section(nav_basis="excluding_unmarked_delta_overlay", nav_unmarked=["BBB"])
+        root = _write(tmp_path / "d", {"2026-10-15": _audit("2026-10-15", delta=sec)})
+        D = _svc(root).hedge()["delta"]
+        assert D["nav_basis"] == "excluding_unmarked_delta_overlay" and D["nav_unmarked"] == ["BBB"]
+        js = (STATIC / "pages" / "hedge.js").read_text(encoding="utf-8")
+        assert 'D.nav_basis !== "full"' in js and "带宽用的 NAV 不含" in js
+
     def test_audit_without_the_section_says_so(self, tmp_path):
         root = _write(tmp_path / "d", {"2026-10-15": _audit("2026-10-15")})
         D = _svc(root).hedge()["delta"]

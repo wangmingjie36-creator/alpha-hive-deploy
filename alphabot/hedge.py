@@ -102,6 +102,8 @@ def delta_overview(view: dict, audits: dict) -> dict:
         "band_pct": (sec or {}).get("band_pct", rules.get("delta_hedge_band_pct")),
         "rebalance_to": (sec or {}).get("rebalance_to", rules.get("delta_hedge_rebalance_to")),
         "nav": _num((sec or {}).get("nav")),
+        # 带宽分母的口径（0.45.529）：full = 合并 NAV；excluding_unmarked_delta_overlay = 不含缺价持仓标的的那块盈亏
+        "nav_basis": (sec or {}).get("nav_basis"), "nav_unmarked": (sec or {}).get("nav_unmarked") or [],
         "names": [{**{k: n.get(k) for k in DELTA_NAME_KEYS}, "option_pct_nav": _pct_nav(n.get("option_dd"), (sec or {}).get("nav"))}
                   for n in (sec or {}).get("names") or [] if isinstance(n, dict)],
         "n_hedge": (sec or {}).get("n_hedge"), "n_inside": (sec or {}).get("n_inside"),
