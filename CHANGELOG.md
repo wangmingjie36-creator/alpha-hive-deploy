@@ -9,7 +9,35 @@
 
 ## [0.45.529] — 2026-10-17 — 占位（进行中：逐票 Delta 对冲（0.45.526）二次检查——paper 下持仓标的的陈旧价会把 NAV 整体做成 None、连坐全部标的；paper 首日无成交时 delta_positions.jsonl 不建、对冲页误报「持仓文件被删」）
 
-## [0.45.528] — 2026-10-17 — 占位（进行中：pheromone_board.publish 在大 MAX_ENTRIES 下的 O(n²) 扫描，行为等价提速调查）
+## [0.45.528] — 2026-10-17 — Changed：`PheromoneBoard.publish` 只扫同标的条目的快路径（大 `MAX_ENTRIES` 下 O(n²) → 近似 O(同标的条数)），**逐位等价**于旧全量扫描；生产扫描时长**不变**
+
+`publish` 每次都遍历全板：对每条做 ① 强度 < `MIN_STRENGTH` 丢 ② 解析时间戳、年龄 ≥ `ENTRY_MAX_AGE_S` 丢 ③ 同标的才衰减（`ticker_scoped`），
+再从头找第一条同标的同方向条目加支持数。n 条累计 O(n²)。生产 `MAX_ENTRIES=80` 把 n 封在 81 内（一轮 270 次 publish ≈ 7ms），
+**慢的只是把 `MAX_ENTRIES` 调到 4000 / 10000 做「与容量无关」对照的两条测试**（v0.45.524 交接里列为最慢的非睡眠测试）。
+
+### Changed
+- `pheromone_board.py`：逐条判定抽成 `_survives_publish`（**全量与快路径共用这一份**，原文未改）；快路径只改「访问哪些条目」——
+  别标的条目在旧代码里只可能因 ①② 或过期被丢、从不被改，于是用索引证明三者都不成立时跳过它们：干净不变式（float 强度且 ≥ MIN、
+  时间戳可解析为 naive、无同一对象重复上板）+ 全板最早时间戳的下界（年龄对时间戳单调，最早那条没过期 ⇒ 全都没过期，当场用 now 求值、
+  不假设时钟单调）。任何一条不成立 ⇒ 全量扫描、索引惰性重建；索引作废事件：`_entries` 换对象 / 长度变（外部 extend、`clear`）/
+  `MIN_STRENGTH` 变 / 溢出截断 / 非 str ticker / 带时区 now 或时间戳 / 同一对象重复 publish / `ticker_scoped` 关。
+  板满时不重建（反正要截断）⇒ **生产稳态走的就是全量扫描**。每次 publish 后 `_entries` 仍是新列表对象（旧代码的可观察性质，照留）。
+- 前提「已上板条目的 ticker / timestamp / pheromone_strength 只由本板改写」：全仓生产代码零外部写，AST 守卫钉住（见下）。
+
+### Added
+- `tests/test_pheromone_publish_fast_path.py`（6 条）：旧 `publish` 原文冻成 `_RefBoard`，80 个种子 × 300 步随机动作同时驱动两块板，
+  每步比整板状态（顺序 + 全部可变字段，强度按 repr）、`_latest_by_agent`、列表对象是否换新、抛的异常（类型 + 消息）；动作覆盖过期 / 未来 / 坏 /
+  带时区时间戳、强度 < MIN / NaN / 非数字 / > 1、重复 publish、外部 extend、`clear`、运行中改 `MIN_STRENGTH` / `ENTRY_MAX_AGE_S` /
+  `MAX_ENTRIES` / `ticker_scoped`、时钟回拨；断言两条路径都大量走到（种子固定，快 4268 / 全量 13552 次）。另有灌洪形状对照、
+  别标的过期仍被淘汰、AST 守卫（+有牙）、参照实现不得引用新方法。
+- 变异自证：10 个变异体（去过期前提 / 去重复检查 / 强度恒真 / 收带时区时间戳 ×2 / 复用列表对象 / 无视 MIN 变化 / 加成扫未衰减分组 /
+  无视 ticker_scoped / 去长度检查）**全红**。第 11 个（支持加成后再核强度）不红，查明是死代码（MIN ≤ 1 时加成后 ≥ MIN；MIN > 1 时
+  校验过的新条目入板必作废索引）⇒ 删掉，理由写进注释。
+
+### 实测（本机）
+- `test_get_live_signals_identical_under_any_max_entries` 9.16s → 0.27s；`test_resonance_identical_under_any_max_entries` 1.45s → < 0.2s。
+- 微基准：10,005 次 publish @ MAX 10000 8.67s → 0.15s；生产形状（MAX 80、30 标的 × 9 蜂）7.09ms → 7.07ms（不变）。
+- 未改任何测试的 `MAX_ENTRIES` 参数；板的淘汰键 / 衰减 / 过期语义一律未动。
 
 ## [0.45.527] — 2026-10-16 — Fixed：`agent_memory` 结果回填逐轮把已存的 T+1 / T+7 / T+30 覆写成 NULL、把已判的 correct / incorrect 降级成 neutral；**历史值未改**（重建方案待用户批准，见下）
 
