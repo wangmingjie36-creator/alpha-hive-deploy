@@ -1536,6 +1536,10 @@ QUARANTINE: List[Dict] = [
                   "动量 +0.40%（= 10-13 归档值）；yfinance「截至 10-14」为 −3.91%。其余 29 只的回落末端是 10-14、与 yfinance 一致，不隔离。",
         "evidence": ("~/.claude/logs/orchestrator-2026-10-14.log（「[BILI] momentum_5d 由自攒索引补上: +0.40%（截至 2026-10-13」）",
                      "CHANGELOG.md#v0.45.508"),
+        # v0.45.530（用户 2026-10-17 批准「清 92 行、留这 1 行」）：照常隔离，但库里这一行**不删**
+        "keep_rows": ("维度 IC 冻结评分器（buzz_v1 阶段 2）要用归档的原始动量重算背离调整，自证 ② 要求「生产有分、重算缺输入」= 0、"
+                      "不许放宽；10-14 在自证窗口（09-28 起）内——删掉这一行，将来自证就多一条缺输入、判不过。"
+                      "生产当天的分正是用这个（取错窗口的）值算的，重算也该用它才能逐位复现。H1 那天本来就因量比隔离而无效。"),
     },
     # ────────────────────────────────────────────────────────────────────────
     # v0.45.517（用户 2026-10-16 批准「全部已证实的」）：508 复核时顺带查出的、H1 窗口（10-12 起）之前的同类观测。
@@ -1637,7 +1641,7 @@ QUARANTINE.extend(_rank_mirror_entries(QUARANTINE))
 
 #: 前瞻检验排除日（v0.45.484）—— 与 `QUARANTINE` **不是一回事**，别合并：
 #:
-#: `QUARANTINE` 管「取错日子的观测」，在**入库口**拦（archive / backfill 不写、purge 工具会删），且划界原则是
+#: `QUARANTINE` 管「取错日子的观测」，在**入库口**拦（archive / backfill 不写、purge 工具会删——带 `keep_rows` 的条目除外，见 `purge_due`），且划界原则是
 #: 不隔离 Agent 评分。这里管的是「整天由事后重放补算、不再是生产当时实际产出」的日子：库里存的是**对的**
 #: 重放值（要留着、要能被别的读者用），只是不进预注册前瞻检验——那两份协议的意向性分析口径是「系统当天
 #: 实际产出什么就算什么」，事后重放的整天不属于这个口径。
@@ -1682,6 +1686,22 @@ def is_quarantined(date: str, ticker: str, signal: str) -> bool:
         if tickers is None or ticker in tickers:
             return True
     return False
+
+
+def purge_due(date: str, ticker: str, signal: str, only_tag: Optional[str] = None) -> bool:
+    """库里若有这一行，清库时该不该删（v0.45.530）。清库工具与整库恢复的报告共用这一处判据。
+
+    先要 `is_quarantined` 为真；再要求命中某条**不带 `keep_rows`** 的条目（给了 `only_tag` 还要求该条目
+    reason 含它）。只被 `keep_rows` 条目命中的行照常隔离（入库口拦、分析排除），但库里已有的不删——
+    现有唯一一条是 10-14 BILI `price.momentum_5d`，理由见该条目。同一格还被别的条目命中 ⇒ 照删。
+    """
+    if not is_quarantined(date, ticker, signal):
+        return False
+    return any(q["date"] == date and signal in q["signals"]
+               and (q.get("tickers") is None or ticker in q["tickers"])
+               and not q.get("keep_rows")
+               and (only_tag is None or only_tag in q.get("reason", ""))
+               for q in QUARANTINE)
 
 
 def ensure_schema(db_path: Optional[Path] = None) -> None:

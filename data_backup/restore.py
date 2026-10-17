@@ -87,16 +87,24 @@ def _quarantined_signal_rows(conn: sqlite3.Connection, tables: list[str]) -> dic
 
     整库恢复要忠实还原备份时刻；但备份若早于某次清库（`purge_quarantined_signal_rows`），被清掉的坏行会跟着
     回来，且没人会红。恢复后见到非 0 ⇒ 对新库重跑清库脚本。没有该表 ⇒ 0；隔离名单取不到 ⇒ None + 原因（不当 0）。
+
+    v0.45.530：只数**该清**的行（`signal_archive.purge_due`，与清库脚本同一判据）；条目带 `keep_rows`、故意留在库里的
+    另报 `quarantined_kept_rows`——否则这个数恒 ≥ 1，「非 0 就去清库」的信号就失灵了。
     """
     if "signal_archive" not in tables:
-        return {"quarantined_signal_rows": 0}
+        return {"quarantined_signal_rows": 0, "quarantined_kept_rows": 0}
     try:
-        from signal_archive import is_quarantined
+        from signal_archive import is_quarantined, purge_due
     except Exception as e:  # noqa: BLE001 —— 记下原因，不冒充「没有命中」
         return {"quarantined_signal_rows": None, "quarantine_check_error": f"{type(e).__name__}: {e}"}
-    n = sum(1 for d, t, s in conn.execute("SELECT date, ticker, signal FROM signal_archive")
-            if is_quarantined(str(d)[:10], t, s))
-    return {"quarantined_signal_rows": n}
+    due = kept = 0
+    for d, t, s in conn.execute("SELECT date, ticker, signal FROM signal_archive"):
+        d = str(d)[:10]
+        if purge_due(d, t, s):
+            due += 1
+        elif is_quarantined(d, t, s):
+            kept += 1
+    return {"quarantined_signal_rows": due, "quarantined_kept_rows": kept}
 
 
 def restore_state(export_dir: Path, dest_root: Path, state_dirs: list[str], root_files: list[dict]) -> dict:

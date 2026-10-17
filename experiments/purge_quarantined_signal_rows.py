@@ -13,6 +13,11 @@
 安全：`--apply` 先用 sqlite 在线备份 API 整库备份；再在单个 `BEGIN IMMEDIATE` 事务里**现读现判**
 （`is_quarantined()`，不依赖任何早先的快照结果），命中数必须恰好等于 `--expect` 才删，删后核对这些 id
 零残留、`integrity_check` 为 ok，全部通过才 COMMIT（v0.45.479：备份改在持写锁之后、integrity_check 改在 COMMIT 之前且用 raise）。
+
+`keep_rows`（v0.45.530）：隔离条目可带 `keep_rows: "<理由>"`——照常在入库口拦、照常被分析排除，但**库里已有的行不删**。
+一行只被带 `keep_rows` 的条目命中 ⇒ 不删（报「保留 N 行」）；还被别的条目命中 ⇒ 照删。现有唯一一条：10-14 BILI
+`price.momentum_5d`（维度 IC 冻结评分器自证 ② 要它在，见该条目）。判据唯一实现是 `signal_archive.purge_due`
+（整库恢复的报告也用它）。守卫 `tests/test_purge_keep_rows.py`。
 """
 import argparse
 import sqlite3
@@ -35,20 +40,18 @@ def main():
     from hive_logger import PATHS
     db = Path(a.db) if a.db else Path(PATHS.db)
 
-    def _tagged(d, t, s):
-        # 与 sa.is_quarantined 同一判据，只是限定在 reason 带标记的条目上（现读 QUARANTINE，不缓存）
-        return any(q["date"] == d and s in q["signals"]
-                   and (q.get("tickers") is None or t in q["tickers"])
-                   and a.only_tag in q.get("reason", "")
-                   for q in sa.QUARANTINE)
-
     def hits(conn):
         return [i for i, d, t, s in conn.execute(f"SELECT id, date, ticker, signal FROM {sa.TABLE}")
-                if sa.is_quarantined(d, t, s) and (a.only_tag is None or _tagged(d, t, s))]
+                if sa.purge_due(d, t, s, a.only_tag)]
+
+    def kept(conn):
+        return sum(1 for _i, d, t, s in conn.execute(f"SELECT id, date, ticker, signal FROM {sa.TABLE}")
+                   if sa.is_quarantined(d, t, s) and not sa.purge_due(d, t, s))
 
     with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as ro:
-        n = len(hits(ro))
-    print(f"{db}: 命中隔离名单 {n} 行（预期 {a.expect}）" + (f"，限标记 {a.only_tag}" if a.only_tag else ""))
+        n, k = len(hits(ro)), kept(ro)
+    print(f"{db}: 命中隔离名单 {n} 行（预期 {a.expect}）" + (f"，限标记 {a.only_tag}" if a.only_tag else "")
+          + (f"；另有 {k} 行按 keep_rows 保留、不删" if k else ""))
     if n != a.expect:
         raise SystemExit("命中数与预期不符——不删，停下")
     if not a.apply:

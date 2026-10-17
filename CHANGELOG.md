@@ -5,7 +5,29 @@
 
 ---
 
-## [0.45.530] — 2026-10-17 — 占位（进行中：清掉 v0.45.508 量比 29 行 + v0.45.517 63 行；10-14 BILI 动量 1 行故意保留）
+## [0.45.530] — 2026-10-17 — Fixed（数据，用户批准）+ Added：清掉 v0.45.508 / 517 的 92 行隔离观测；10-14 BILI `price.momentum_5d` 1 行**故意保留**，做成清库工具认的 `keep_rows` 键而不只是一句说明
+
+### 为什么清 / 为什么留那一行
+- 清：`QUARANTINE` 只在入库口拦，`signal_archive.analyze` / `load_panel`、`misjudgment_pattern_walkforward`、`ml_expected_return_replay` 等读者**不问** `is_quarantined`——留在库里的取错窗口值照样被它们读到（这正是 v0.45.26 起「入库口拦 + 清库」的设计）。清之前生产库里命中整份隔离名单的行**只有这 93 行**——其余条目在库里的命中都已是 0（只核了总数，没有逐批翻各次清库记录）。
+- 留：维度 IC 冻结评分器（buzz_v1 阶段 2）要用归档的**原始动量**重算背离调整（`_detect_sentiment_price_divergence` 读 `momentum_5d`，不是通道值），§13.2 自证 ② 要求「生产有分、重算缺输入」= 0、不许放宽，而 10-14 在自证窗口（09-28 起）内——删掉它，将来自证就多一条缺输入、判不过。生产当天的分正是用这个取错窗口的值算的，重算也要用它才能逐位复现；H1 那天本来就因 29 个量比被隔离而无效。其余 92 行用不着：量比只经 `buzz.comp.volume_signal` 进分；09-15 / 09-24 / 09-25 在自证窗口之前。
+- ⚠️ 给阶段 2 的提醒（推断，评分器尚未实现）：评分器读归档输入时**不能**按 `is_quarantined` 跳过，否则这一行同样会变成「缺输入」。
+
+### Added
+- 隔离条目可带 `keep_rows: "<理由>"`——照常隔离（入库口拦、分析排除），但库里已有的行不删。判据唯一实现 `signal_archive.purge_due(date, ticker, signal, only_tag=None)`：先过 `is_quarantined`，再要求命中某条**不带** `keep_rows`（且 reason 含 `only_tag`，若给了）的条目；同一格还被别的条目命中 ⇒ 照删。其余条目行为不变。
+- `experiments/purge_quarantined_signal_rows.py` 改用 `purge_due`；dry-run 报「另有 N 行按 keep_rows 保留、不删」。
+- `data_backup/restore.py`：整库恢复的报告 `quarantined_signal_rows` 只数**该清**的行（`purge_due`），故意保留的另报 `quarantined_kept_rows`。
+- `signal_archive.QUARANTINE` 10-14 BILI `price.momentum_5d` 条目加 `keep_rows`（理由同上）。
+
+### Fixed（数据）
+- 生产库只读 dry-run：不带标记、`--expect 92` 恰好命中 92 行 + 报「保留 1 行」（说明此刻名单外没有别的未清批次）。`--apply` 前后：`signal_archive` **139,588 → 139,496**；备份 `~/alpha-hive-data/db_backups/pheromone_pre_v0.45.530_purge_508_517.db`（持写锁后在线备份，integrity_check ok）。
+- 对照备份逐行核对：删掉的恰好 92 行、全部 `is_quarantined`——09-25 动量 30、09-24 动量 29、10-14 量比 29、09-15 量比 2 + 动量 2；备份之后没有新增行；live 库 integrity_check ok；库里命中隔离名单的只剩 10-14 BILI 动量 0.4021（id 284189）。
+- 不影响任何检验：维度 IC 执行器按 `is_quarantined` 判、不读这些值；无评分影响；不追加世代边界。
+
+### Tests
+- 新 `tests/test_purge_keep_rows.py`（10）：带 `keep_rows` 的条目**恰好**这一条（多了少了都红）且理由成文、仍被隔离；`purgeable` 真值表（keep 格不删、同只别的信号照删、未隔离不删、`only_tag` 照常过滤、同格另有普通条目则照删）；真脚本端到端（临时库）：dry-run 报保留、`--apply` 后该行在、同批隔离行没了、未隔离行不动、备份是删前状态；按「全部隔离行」数成 3 ⇒ 对不上、停下、一行不删；整库恢复：保留行只进 `quarantined_kept_rows`、早于清库的备份照样报出该清的行。
+- 变异 8/8 被杀（`purge_due` 忽略 `keep_rows` / `any`→`all` / 忽略 `only_tag`、恢复报告把保留行算成该清 / 保留计数恒 0、工具保留计数恒 0 / 绕过 `purge_due`、去掉条目的 `keep_rows`）；`PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。ruff 通过。
+- **二次检查（同日）抓到并修正**：① 初版只改了清库工具，`data_backup/restore.py` 的 `quarantined_signal_rows` 照数全部隔离行 ⇒ 清库后它**恒 ≥ 1**，而它的说明是「非 0 ⇒ 对新库重跑清库」——信号失灵。改为两边共用 `signal_archive.purge_due`、保留行另报。② 本条初稿称「266 / … / 522 各批都已清到 0」，实际只核了「名单外命中总数为 0」，改为照实说。③ `FORWARD_TEST_EXCLUDED_DAYS` 注释里「purge 工具会删」补上 `keep_rows` 例外。
+- 全量（最终树，`--deselect` 设计内定期红的 `TestCoverageHorizon`）：**10134 passed、2 xfailed、0 failed、0 error**。最终代码对生产库 dry-run：「该清 0 行；另有 1 行按 keep_rows 保留」。
 
 ## [0.45.529] — 2026-10-17 — Fixed：逐票 Delta 对冲（0.45.526）二次检查——paper 下持仓标的的陈旧价把 NAV 整体做成 None、连坐全部标的；paper 首日无成交时 `delta_positions.jsonl` 不建、对冲页误报「持仓文件被删了」
 
@@ -406,7 +428,7 @@ NYSE 开、联邦判休；耶稣受难日 2025-04-18 / 2026-04-03 / 2027-03-26 N
 
 ### 影响面
 - 全在 `FORWARD_START`（10-12）之前 ⇒ 维度 IC H1 / H2 不受影响；09-24 / 09-25 入场价为 0，本来就进不了任何按收益的检验。
-- 入库口与所有直写脚本（v0.45.511 起全过 `is_quarantined`）今后不会再写这 63 格；**库里现存的 63 行没有删**（没跑 `purge_quarantined_signal_rows.py`）。⚠️ 整库恢复（`data_backup/restore.py`）会把它们与 508 的 30 行一起计进 `quarantined_signal_rows`——那是预期内的非 0，不是恢复出错。
+- 入库口与所有直写脚本（v0.45.511 起全过 `is_quarantined`）今后不会再写这 63 格；~~库里现存的 63 行没有删~~ → **v0.45.530（10-17）已清**。整库恢复（`data_backup/restore.py`）的 `quarantined_signal_rows` 现在预期为 1（10-14 BILI 动量，`keep_rows` 故意保留）。
 - `signal_archive.analyze` / `load_panel` 不问 `is_quarantined`（v0.45.26 起的已知状况），旧分析口径不变。
 - 不追加世代边界（只登已证实的坏格子，不改任何定义）。
 
@@ -730,7 +752,7 @@ NYSE 开、联邦判休；耶稣受难日 2025-04-18 / 2026-04-03 / 2027-03-26 N
   - `price.volume_ratio`：日志各有「丢弃 2026-09-15 那根」+「由 Twelve Data 补上」（14:14:20 NVDA 1.01x、14:15:31 QCOM 1.21x）。09-15 是周二，上一场是 09-14（`is_trading_day` 算）。用 Twelve Data 截至 09-14 的日线、把 09-14 那根成交量换成 131,942,300 / 13,755,800 股（整百股，比今天低 0.25% / 0.21%）即**逐位复现**归档值（1.01080 / 1.21243）——同 RKLB / VKTX 的「事后上调」形状；漏一根、窗口 19 / 21 根都对不上。当天应有值（截至 09-15）：NVDA 0.676（归档 1.011 ⇒ Buzz 量比档 50，应为 35）、QCOM 1.195（同档 50，通道不受影响）。
   - `price.momentum_5d` 也是取错窗口：v0.45.465 之前的自攒索引回落，窗口 **09-04 → 09-14**（末端滞后一场；跨 5 场，yfinance 口径是 4 场——465 已记录的「≥5 个交易日挑锚点」）。用 Twelve Data 收盘与扫描价两种序列穷举，唯一同时复现两只（误差 < 1e-4）的窗口就是它。当天应有值（4 场截至 09-15）：NVDA −5.14（归档 −8.42）、QCOM +6.46（归档 +6.76）。
   - 顺带普查（日志自 08-26 起；按文件时间衔接，未逐日核）：TD 量比兜底的生产记录只有 09-15 这 2 次 + 10-12 NFLX（故障日生产那次，归档已被重放值 0.6463 覆盖 ≈ 截至 10-12 的 0.6472，不是前一场）+ 10-14 的 29 次；另有 XOM 0.81 / 0.50 反复出现在凌晨，是测试夹具写进旧日志的，不是生产。自攒索引动量（465 前、滞后形状）进了归档的：09-15 2 只、**09-24 30 只**（29 只逐一复现为「末端 09-22、跨 5 场」——09-23 没有扫描 ⇒ 滞后两场；T 差 0.035 未解释，待验证）、**09-25 30 只**（与 09-24 逐位相同：两天 30 行 `price_at_predict` 全为 0，索引没有新点，窗口仍止于 09-22）。09-24 / 09-25 入场价为 0 ⇒ 本来就进不了任何按收益的检验。08-26 之前没有日志，未查。
-  - 以上都在 H1 窗口（10-12 起）之前，不影响维度 IC。465 当时的处置是「存档零变化」（用户 10-12 确认）。（窗口前，不影响 H1；要不要为一致性补登另议）；没跑 `purge_quarantined_signal_rows.py`（`is_quarantined` 已足够让 H1 丢行；删不删库里的 30 行另议）。
+  - 以上都在 H1 窗口（10-12 起）之前，不影响维度 IC。465 当时的处置是「存档零变化」（用户 10-12 确认）。（窗口前，不影响 H1；要不要为一致性补登另议）；没跑 `purge_quarantined_signal_rows.py`（`is_quarantined` 已足够让 H1 丢行；删不删库里的 30 行另议）。→ **v0.45.530（10-17）清掉其中 29 行量比；BILI 动量 1 行按 `keep_rows` 故意保留**。
 
 ### Changed（文档）
 - `experiments/dim_ic_preregistration.md`：文首加「记录」一行；新增「### 记录（2026-10-16，v0.45.508）」§13.8（发生了什么 / 做了什么 / 为什么不是修订 / 为什么不隔离通道 / 为什么不走修订 2 / 为什么不可能受结果影响 / 代价 / 守卫）。
