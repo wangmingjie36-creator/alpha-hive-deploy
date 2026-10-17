@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.528] — 2026-10-17 — 占位（进行中：pheromone_board.publish 在大 MAX_ENTRIES 下的 O(n²) 扫描，行为等价提速调查）
+
 ## [0.45.527] — 2026-10-16 — Fixed：`agent_memory` 结果回填逐轮把已存的 T+1 / T+7 / T+30 覆写成 NULL、把已判的 correct / incorrect 降级成 neutral；**历史值未改**（重建方案待用户批准，见下）
 
 2026-10-16 v0.45.521 期间发现：`OutcomesFetcher._update_memory_store(snapshot, prices)` 的 `prices` 只含**本轮**回填到的 offset，
