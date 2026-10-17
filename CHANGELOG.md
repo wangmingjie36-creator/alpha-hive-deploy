@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.529] — 2026-10-17 — 占位（进行中：逐票 Delta 对冲（0.45.526）二次检查——paper 下持仓标的的陈旧价会把 NAV 整体做成 None、连坐全部标的；paper 首日无成交时 delta_positions.jsonl 不建、对冲页误报「持仓文件被删」）
+
 ## [0.45.528] — 2026-10-17 — 占位（进行中：pheromone_board.publish 在大 MAX_ENTRIES 下的 O(n²) 扫描，行为等价提速调查）
 
 ## [0.45.527] — 2026-10-16 — Fixed：`agent_memory` 结果回填逐轮把已存的 T+1 / T+7 / T+30 覆写成 NULL、把已判的 correct / incorrect 降级成 neutral；**历史值未改**（重建方案待用户批准，见下）
