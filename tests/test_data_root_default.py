@@ -170,6 +170,7 @@ ENV_KEY_SITES = {
     "hive_logger.py::explicit_data_root": "唯一规则（resolve_data_root 的前一半）",
     "alphabot/__main__.py::main": "只问设没设：没设时提示「用缺省数据根」",
     "alphabot/launcher.py::spawn_server": "只传给服务子进程（写入；值是用户选的数据根，按唯一规则读）",
+    "llm_shadow_scan.py::build_child_env": "只传给影子扫描子进程（写入；值是影子根而非生产根——config 在 import 期固化路径，必须换进程）",
     "sell_strike_ledger.py::state_dir_status": "只问设没设，并把原值写进给人看的提示",
     "sell_strike_ledger.py::main": "只问设没设：没设时提示「按缺省数据根读写」",
     "orchestrator_steps.py::_resolve_dirs": "刻意不取缺省：生产总给 --data-dir；都没有就明说「无从核对」，不猜",

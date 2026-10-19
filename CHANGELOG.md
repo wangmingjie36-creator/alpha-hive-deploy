@@ -81,7 +81,55 @@
 - **第 3 块**：自证通过后，执行器 H1 改读 `buzz_v1` 重算值、吸收「只点名冻结层」的边界（§12 第 8 条）。
 - 背离调整从未触发——它在 buzz_v1 里照抄保留（定义如此），是否值得在生产里留着是另一件事，本版不动。
 
-## [0.45.555] — 2026-10-19 — 占位（进行中：LLM 影子 A/B——独立入口 + 独立数据根 + 每日 $3 硬上限；llm_service 补 5.5 代模型定价/去 temperature/截断观测；Oracle 提示词精简；不进评分、不调 LLM 先落代码）
+## [0.45.555] — 2026-10-19 — Added：LLM 影子 A/B（入口 `llm_shadow_scan.py` + 读者 `llm_shadow_report.py` + 预注册；每日 $3 硬上限、两进程隔离、只记录不进评分）；Fixed：`llm_service` 成本公式少算缓存部分、未登记模型按 Haiku 价记账、LLM 臂截断无人可见
+
+> 用户 2026-10-19 决定做「LLM 影子 A/B」（前瞻，而非历史重跑），每日硬上限 $3，模型 Opus 5.5（低 effort）。本版只落**代码与测试**，
+> **没有任何 LLM 调用、没有接 launchd / 编排器**；首次真跑须用户批准（见「未做」）。
+
+### 为什么（2026-10-19 实测，试跑累计花费 $0.571，三次各自批准）
+- 「LLM 时代」边界：日报里 `LLM催化剂:` / `LLM意图:` 文本 02-26 起间断出现、03-20~04-17 最密、04-20 起一条没有；`distill_mode=rule_engine` **不能**判当天有没有用 LLM（蒸馏标签不随蜂层面的 LLM 增强变）。04-20~6 月是否开过 LLM 待验证。
+- 网站累计收益对早期样本极敏感：含全部样本 −0.99%；剔除 ≤04-17（280 行）−10.83%。但早期段与后期段还混着行情、CRCL 02-26 单笔 +28%、04-26 ScoutBee 重平衡 ⇒ 不能直接说成 LLM 有效；历史重跑不可行（输入非当时快照 + 模型知识截止 2026-06 的前视偏差）⇒ 只能前瞻。
+- 一次扫描（3 只）= 21 次 LLM 调用（7 个调用点 × 3）。**OracleBee 一个提示词 8.9K~38K token（`json.dumps(整包期权结果)`），占 21 条总输入的 84%**；真大头是 `call_exp_oi` + `put_exp_oi`（逐行权价×到期日 OI 矩阵，各约 2 万字符）。
+- **Haiku 4.5 的 18/18 次调用都以 `max_tokens` 停止**；Guard 的 JSON 在 `"score": 7.57,` 处被切断 ⇒ `call_json` 返回 None ⇒ 该蜂静默回落规则引擎。以前没有任何地方看得出「LLM 臂其实没在工作」。
+
+### Fixed — `llm_service`
+- **成本公式**：`usage.input_tokens` 是**未缓存**输入，总输入 = input + 缓存写 + 缓存读（`count_tokens` 实测 2318 = 1505 + 812 + 0）。旧公式 `input − 缓存写 − 缓存读` 少收缓存部分的全价，缓存读多时还会出现负的「未缓存」输入。改为各项相加；Opus 5.5 读缓存倍率 0.05（其余 0.10）。`input_tokens` 计数改为三项之和。
+- **未登记模型一律拒绝**（`unpriced_refusals` 计数）。旧写法 `_PRICING.get(model, Haiku 价)`：换成 Sonnet/Opus 5.5 后内置预算闸少算 2~4 倍、拦不住。已登记 `claude-sonnet-5-5`（$2/$10）与 `claude-opus-5-5`（$4/$20）。
+- **预算预检**：以前只按 `max_tokens × 输出单价` 估；现在加输入估算（每字符 1 token，保守），并对**在途调用做预留**（并行蜂共用一个预算，N 个同时通过预检不再一起超支；`finally` 释放，异常路径也释放）。
+- `extra_body` 传深拷贝（档案是进程级共享状态；测试里一次乱改就污染全局档案——有牙测试当场抓到）。
+
+### Added — `llm_service`
+- 模型档案 `_MODEL_PROFILES`：Sonnet 5.5 / Opus 5.5 **不传 `temperature`**（非默认值会 400）、思考走 `extra_body`（Sonnet 用 `between_tools`，Opus 用 adaptive + `effort=low`）、`max_tokens = max(请求×3, 请求+1024)`（思考 token 计入 max_tokens）。
+- `set_model_override()`：进程级覆盖，影子入口用；生产扫描不设 ⇒ 行为不变。
+- 四个观测计数（`get_usage()`）：`truncated_calls`（`stop_reason == "max_tokens"`）、`json_parse_failures`（拿到文本却解析不出 JSON）、`budget_refusals`、`unpriced_refusals`；每日重置。
+- `_compact_options_for_llm()`（`interpret_options_flow` 用）：丢 `raw_chain` 与四个矩阵键、`top_*_oi` 留 5、`unusual_activity` 换成「总数 + 多空计数 + 入选明细」；入选 = 溢价前 8 ∪ 成交量前 5 ∪ vol/OI 前 5。**不改入参**。实测 Opus 分词器 40.6K→6.1K、39.5K→6.2K、9.6K→4.8K（−85%/−84%/−50%）。⚠️ 只按溢价取前 N 会漏掉成交量极端的小额新仓（NVDA 当天一条 869 手 call_sweep），所以三口径取并集。
+
+### Added — `llm_shadow_scan.py`
+- 缺省 `--plan`（只打印，不拷贝不扫描）；`--control`（LLM 关，免费，核对输入复现度）；`--run`（花钱，**还须**环境变量 `ALPHA_HIVE_LLM_SHADOW_SPEND=1`）。
+- **两进程**：`config.py` 在 import 期把 `PATHS.db` / `PATHS.home/"cache"` / 日志路径固化成模块常量，在已 import 过 `config` 的进程里再改 `ALPHA_HIVE_HOME` 会让扫描写进**生产库**。父进程只计划 + 拷贝（只读生产：SQLite 备份 API 以 `mode=ro` 打开 + 拷 `cache/`），扫描放进全新子进程；子进程开扫前核对：数据根 = 影子根、`PATHS.db` 在影子根、`config` 里无任何值指向生产根、`LLM_CONFIG.daily_budget_usd` = `--daily-cap`。
+- 每日硬上限 $3；精简后 Opus 5.5 低 effort ≈ $0.117/只（试跑分项）⇒ `PER_TICKER_USD=0.135`，$3 约 22 只 ⇒ 按日期轮换覆盖子集，不让上限在当天中途随机截掉后几只。
+- 结果存 `<影子根>/shadow_status/<日期>.json`（逐只最终分 / 方向 / 影子 `rule_score` / 蒸馏模式 + 用量 + 质量判定）与 `swarm_results-<日期>.json` 全文；影子库每次重拷、不累积。
+- ⚠️ **更正我自己此前反复说的一个错误结论**：「`swarm_results` 里的 `rule_score` 是纯规则分，所以两条臂天然成对」**不对**。`rule_score` 由各蜂的维度分算出，而蜂在 LLM 模式下已把 LLM 混进自己的分数（OracleBee 以 0.6 权重混入 `smart_money_score` 并可改写方向）；Queen 的 LLM 只是再加一层。读 `queen_distiller._run_llm_engine` 才发现的。所以影子里的 `rule_score` **不是规则臂**，只隔离 Queen 那一层。**规则臂 = 生产当天自己的规则引擎结果**（生产库同日同标的的 `final_score` / `direction`；生产收盘后 14:00 才跑、影子紧随其后，输入一致）。
+- 「不健康的一天不要拿去比」：有预算 / 定价拒绝、LLM 一次没调成、截断率 / JSON 失败率 > 10%、蒸馏走 LLM 的标的 < 80% ⇒ 退出码 5。
+
+### Added — `llm_shadow_report.py` 与 `experiments/llm_shadow_prereg.md`
+- 报告是 `shadow_status` 的**读者**（`test_persistent_writes_have_readers` 要求每个落盘写入都登记读者——「没人读就别写」；不用类别糊过去，而是把读者真写出来）。
+- 预注册（看数据之前写的）：主检验唯一——两臂方向不同的标的日里，McNemar 精确检验（双侧，α=0.05）；门槛：健康 LLM 日 ≥ 20 且「方向不一致且 T+7 已出」的标的日 ≥ 60，**没到之前命中率那段代码根本不执行**（有牙测试：未达门槛却计算 ⇒ `pytest.fail`）。任何提示词 / 模型 / `max_tokens` / 精简规则改动 ⇒ 新一代、重新计数。
+- 描述性输出（不含「谁更准」）：成对数、分差、方向翻转率、Queen 层 / 蜂层分解、**输入噪声基线**（`--control` 与生产的分差——两次扫描间取数 / 时点差异；LLM 臂的分差要和它比）、缺失数。生产库一律 `mode=ro`。
+
+### 验证
+- 新增 `tests/test_llm_service_5_5_models.py`（43）、`tests/test_llm_shadow_scan.py`（68）、`tests/test_llm_shadow_report.py`（37）；全部假客户端 / 假子进程，**零 API 调用**。`ENV_KEY_SITES` 登记 `llm_shadow_scan.py::build_child_env`（只传给子进程）；`test_persistent_writes_have_readers` 登记三处写入（状态 → 报告读；swarm_results 全文 = FORENSIC；影子根拷贝 = CODE「搬文件」）。
+- **变异验证 14/14 变红、文件逐字节还原**：成本公式回到「减缓存」/ 未登记模型回退 Haiku 价 / 5.5 模型照传 temperature / 在途预留不释放 / 异动只按溢价 / 精简函数改入参 / 去掉 `--run` 花钱闸 / 子进程不核对 config 固化路径 / 子进程环境不指向影子根 / 根目录嵌套检查失效 / **报告把影子 `rule_score` 当规则臂** / 未达门槛也计算命中率 / 不健康的日子进样本 / 缺失当成 0。
+- **真跑 `--control`（LLM 关）3 只标的**，影子根放临时目录：生产 `pheromone.db` 的 mtime / 大小、日志 mtime / 大小、数据根与 `cache/` 文件数前后逐项一致；影子库 +3 行（2043→2046）、生产库仍 2043；影子日志落在影子根。耗时 416s（含本进程 ML 首次训练）。
+
+### 数据 / 评分
+- 不进评分、不动任何生产数据；生产扫描仍 `--no-llm`（`test_orchestrator_never_enables_llm` 未动）。无评分影响，不追加世代边界。
+
+### 未做 / 待用户决定
+- **未接 launchd / 编排器**；首次 `--run` 须用户批准（预计 ≈ $2.6/天、约 $55/月，上限 $3/天）。
+- 同日保真度（影子 `--control` 的 `final_score` 应与同日生产一致）未验——需在生产 14:00 扫描**之后**跑一次；本次是上午跑的，没有同日生产值可比。预注册要求**第一次真跑之前先跑一次**，作为输入噪声基线。
+- 大提示词精简版与原版**从未对照**（仅最小那条 9.6K→4.8K 对照过：三次分数 4.5、方向 neutral 一致，文案标签三次互异）；其余六个调用点的提示词未精简（合计仅占输入 16%，省不了多少钱且增加变量）。
+- 既有红（与本版无关）：`tests/test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`——经济日历覆盖期不足，需补日历。
 
 ## [0.45.554] — 2026-10-19 — Added：输入层代码指纹守卫 `signal_code_fingerprints.py`（buzz_v1 阶段 2 第 1 块）——决定维度 IC 协议 H1 输入的代码一改，就必须登记一条确认（边界 / 测量误差修正 / 产出值不变），否则测试红、进度行 ⚠️、到检视点不出结论
 

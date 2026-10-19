@@ -229,6 +229,9 @@ SITE_ARTIFACTS: dict = {
     'sec_edgar.py::SECEdgarClient.get_insider_trades': ('sec_cache/*_insider_summary.json',),
     'sec_edgar.py::SECEdgarClient.get_recent_form4_filings': ('sec_cache/*_form4_list.json',),
     'self_analyst.py::main': ('self_analysis_briefs/self_analysis_*.md',),
+    'llm_shadow_scan.py::run_child': ('shadow_status/swarm_results-<date>.json',),
+    'llm_shadow_scan.py::seed_shadow_root': ('LLM 影子根的 pheromone.db + cache/（每次扫描前重拷）',),
+    'llm_shadow_scan.py::write_status': ('shadow_status/<date>.json',),
     'sell_strike_ledger.py::_write_shard': ('sell_strike_state/<tenor>/*.jsonl',),
     'sell_strike_report.py::write_local_report': ('sell_strike_state/reports/sell-strike-*.md',),
     'step_contract.py::write_out': ('orchestrator step --out JSON envelopes',),
@@ -307,6 +310,8 @@ ARTIFACTS: dict = {
         '扫描计时 / 计数；编排器用 jq 并进 status.json，Step2 解释器拿它作证据'),
     'migrations_state/applied.jsonl': (READ, [('data_migrations/runner.py::read_ledger', 'applied.jsonl'), ('data_migrations/runner.py::record_tool_run', 'applied.jsonl')],
         '迁移账本追加；文件名在模块常量 LEDGER_NAME，消费者 read_ledger → run_pending 判已应用'),
+    'shadow_status/swarm_results-<date>.json': (FORENSIC, [],
+        'LLM 影子扫描当天 .swarm_results 全文留底（含叙事 / 各维度分）；比较只用 shadow_status/<date>.json 里的逐只摘要，出疑点时才翻这份'),
     'ml_model_cache.json': (FORENSIC, [],
         '本进程训出、实际打分的那个模型的取证副本（HGB；无 sklearn 时 SGD / Simple 降级同一文件）。v0.45.551 起**只写不读**：'
         '报告生成器每个进程自己训一次（确定性、约 1 秒），不再按「文件日期 = 今天」读回别人写的模型（08-28 / 09-04 事故）；'
@@ -337,6 +342,8 @@ ARTIFACTS: dict = {
         '回放日线库；_entry 经 _path 读。唯一的构造者在 experiments/fg_exposure_gate_forward_test.py，由 ic_rerun_readiness Step11 加载'),
     'report_snapshots/*.json': (READ, [('self_analyst.py::load_snapshots', 'actual_prices'), ('risk_engine.py::_load_snapshot_returns', 'actual_prices'), ('feedback_loop.py::ReportSnapshot.load_from_json', 'actual_prices'), ('feedback_loop.py::BacktestAnalyzer.__init__', 'report_snapshots'), ('weekly_optimizer.py::_snapshots_dir', 'report_snapshots'), ('alert_manager.py::AlertAnalyzer._check_outcomes_backlog', 'report_snapshots')],
         '原地回填 actual_prices；写者只经 backtest_engine CLI 手动触发，读者是月度自诊断/风控/反馈环'),
+    'shadow_status/<date>.json': (READ, [('llm_shadow_report.py::load_days', '????-??-??.json')],
+        'LLM 影子 A/B 每日状态（逐只标的最终分 / 方向 / 用量 / 质量判定）；llm_shadow_report 读，协议 experiments/llm_shadow_prereg.md'),
     'sell_strike_state/<tenor>/*.jsonl': (READ, [('sell_strike_ledger.py::_state_dir', 'PATHS.sell_strike_state'), ('sell_strike_ledger.py::_shard', '{date_str[:7]}.jsonl')],
         '卖权月度分片账本；_load_shard/load_rows → sell_strike_report、MCP、Alpha Bot'),
     'vrp_state/vrp_signals.jsonl': (READ, [('vrp_signal.py::load_rows', 'vrp_signals.jsonl'), ('vrp_signal.py::_record_day_with_info', 'vrp_signals.jsonl')],
@@ -490,6 +497,8 @@ ARTIFACTS: dict = {
     'vrp_signal --out JSON': (HUMAN, [],
         'CLI --out 导出；编排器并没有调用 vrp_signal'),
     # ── CODE
+    'LLM 影子根的 pheromone.db + cache/（每次扫描前重拷）': (CODE, [],
+        '搬文件：把生产此刻的库与缓存只读拷给影子子进程；读者是子进程里整个蜂群（经 PATHS 解析，静态扫描看不到），不是某个函数'),
     '.git/hooks/*': (CODE, [],
         '安装 pre-commit/pre-push 钩子'),
     'RETIRE_RECORD.undone-*.json (+moved files)': (CODE, [],
