@@ -31,6 +31,7 @@ import random
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -129,8 +130,9 @@ def path_counter(monkeypatch):
 
 
 def _state_of(e):
-    return (e.agent_id, e.ticker, e.direction, repr(e.self_score), repr(e.pheromone_strength),
-            e.support_count, tuple(e.supporting_agents), e.timestamp, e.discovery, e.source)
+    g = lambda k: getattr(e, k, "<missing>")  # noqa: E731 —— 板上可能有缺字段的非标准对象
+    return (g("agent_id"), g("ticker"), g("direction"), repr(g("self_score")), repr(g("pheromone_strength")),
+            g("support_count"), tuple(g("supporting_agents") or ()), g("timestamp"), g("discovery"), g("source"))
 
 
 def _board_state(b):
@@ -184,6 +186,7 @@ def _run_scenario(seed: int, steps: int, clock):
     max_entries = rng.choice([3, 8, 25, 80, 10000])
     published = []                                           # [(ref_entry, new_entry)]
     raised = [0]
+    restore = None
 
     def set_both(attr, val):
         setattr(ref, attr, val)
@@ -226,6 +229,21 @@ def _run_scenario(seed: int, steps: int, clock):
             elif a < 0.96:
                 set_both("_ticker_scoped", rng.random() < 0.7)
                 pair = None
+            elif a < 0.985:
+                # 扫到一半抛：某档衰减率不是数（旧代码同样抛，已衰减的条目留在板上）。v0.45.528 复查补的动作——
+                # 此前唯一的异常源是非数字强度，它恒走全量、索引本已作废，于是「抛出时索引仍有效」从没被测到
+                poison = rng.choice(["_fresh_decay", "_medium_decay", "_old_decay"])
+                restore = (poison, getattr(new, poison))
+                set_both(poison, "x")
+                spec = _rand_spec(rng, clock.current, tickers)
+                pair = (_make(spec), _make(spec))
+            elif a < 0.99:
+                # 缺 ticker 的非标准对象（旧代码按强度丢掉它，不读 ticker；强度够高则两边都抛 AttributeError）
+                st = rng.choice([0.1, 0.1, 0.1, 1.0])
+                for b in (ref, new):
+                    b._entries.extend([SimpleNamespace(pheromone_strength=st,
+                                                       timestamp=clock.current.isoformat())])
+                pair = None
             else:
                 pair = None
 
@@ -240,6 +258,9 @@ def _run_scenario(seed: int, steps: int, clock):
                         outcome.append((type(exc), str(exc)))
                 assert outcome[0] == outcome[1], f"seed={seed} step={step}: 异常不同 {outcome}"
                 raised[0] += outcome[0] is not None
+                if restore is not None:
+                    set_both(*restore)
+                    restore = None
                 published.append(pair)
                 assert (ref._entries is prev_ref) == (new._entries is prev_new), \
                     f"seed={seed} step={step}: _entries 列表对象是否换新，两条实现不一致"
@@ -287,6 +308,76 @@ class TestEquivalentToFullScan:
             ref.clear()
             new.clear()
         assert path_counter["fast"] >= 600, path_counter
+
+    @pytest.mark.parametrize("trigger", ["fast", "slow_dup", "slow_expired"])
+    def test_raise_mid_scan_leaves_index_invalid(self, clock, trigger):
+        """扫到一半抛出（旧代码同样抛）后，已衰减到 MIN 以下却没来得及丢的条目，下一次 publish 必须被丢。
+
+        v0.45.528 复查发现：原实现在扫描**之后**才作废索引，抛出时索引仍「有效」，下一次别标的 publish
+        走快路径跳过了那条 0.15 的条目（旧代码会按存活检查 1 丢掉它）。三种触发：快路径中途抛、
+        因重复 publish 走全量中途抛（下一次条件消失）、因最早条目过期走全量中途抛（下一次仍全量，作对照）。
+        """
+        out = []
+        for cls in (_RefBoard, PheromoneBoard):
+            b = cls()
+            now = clock.current
+            a = PheromoneEntry(agent_id="A", ticker="T", discovery="x", source="s", self_score=5.0,
+                               direction="bullish", pheromone_strength=0.35)
+            a.timestamp = (now - timedelta(minutes=20)).isoformat()   # medium 档
+            b.publish(a)
+            b.publish(PheromoneEntry(agent_id="B", ticker="T", discovery="x", source="s",
+                                     self_score=5.0, direction="neutral"))   # 新鲜、不同方向（不给 A 加成）
+            if trigger == "slow_expired":
+                z = PheromoneEntry(agent_id="Z", ticker="Q", discovery="x", source="s",
+                                   self_score=5.0, direction="bullish")
+                z.timestamp = (now - timedelta(hours=4)).isoformat()
+                b.publish(z)
+            b._medium_decay, b._fresh_decay = 0.1, "x"               # A 衰到 0.15，B 抛
+            third = a if trigger == "slow_dup" else PheromoneEntry(
+                agent_id="C", ticker="T", discovery="x", source="s", self_score=5.0, direction="bearish")
+            with pytest.raises(TypeError):
+                b.publish(third)
+            b._fresh_decay = 0.05
+            b.publish(PheromoneEntry(agent_id="D", ticker="U", discovery="x", source="s",
+                                     self_score=5.0, direction="bullish"))
+            out.append(_board_state(b))
+            b.clear()
+        assert out[1] == out[0]
+        assert "A" not in {s[0] for s in out[1][0]}, "0.15 < MIN 的 A 本应在下一次 publish 被丢"
+
+    def test_same_object_published_twice_drops_per_occurrence(self, clock):
+        """同一对象两次上板：旧代码按**出现次数**逐个判定——第一次衰减后还 ≥ MIN 留下、第二次衰减后 < MIN 丢掉，
+        板上剩一份。按对象身份过滤会把两份都删掉，所以重复上板必须走全量。
+
+        随机序列里这个形状约 1% 的种子才撞上一次（v0.45.528 复查实测：改了动作分布后它就漏了），故单列。
+        """
+        out = []
+        for cls in (_RefBoard, PheromoneBoard):
+            b = cls()
+            x = PheromoneEntry(agent_id="X", ticker="T", discovery="x", source="s", self_score=5.0,
+                               direction="bullish", pheromone_strength=0.42)
+            b.publish(x)
+            b.publish(x)                                             # 0.42 → 0.37，板上 [x, x]
+            for agent in ("Y1", "Y2"):                               # 0.37→0.32→0.27；0.27→0.22 留、0.22→0.17 丢
+                b.publish(PheromoneEntry(agent_id=agent, ticker="T", discovery="x", source="s",
+                                         self_score=5.0, direction="bearish"))
+            out.append(_board_state(b))
+            b.clear()
+        assert out[1] == out[0]
+        assert [s[0] for s in out[0][0]].count("X") == 1, "参照实现本应留下恰好一份 X（夹具没造出目标形状）"
+
+    def test_object_without_ticker_falls_back_instead_of_raising(self, clock):
+        """板上缺 ticker 的非标准对象：旧代码按强度丢掉它、不读 ticker；重建索引不得因此抛 AttributeError。"""
+        out = []
+        for cls in (_RefBoard, PheromoneBoard):
+            b = cls()
+            b._entries.extend([SimpleNamespace(pheromone_strength=0.1,
+                                               timestamp=clock.current.isoformat())])
+            b.publish(PheromoneEntry(agent_id="D", ticker="U", discovery="x", source="s",
+                                     self_score=5.0, direction="bullish"))
+            out.append(_board_state(b))
+            b.clear()
+        assert out[1] == out[0] and len(out[1][0]) == 1
 
     def test_expiry_still_happens_on_fast_path_boards(self, clock):
         """快路径必须照样淘汰过期的**别标的**条目（只靠同标的扫描会漏掉它）。"""

@@ -232,9 +232,10 @@ class PheromoneBoard:
             now = datetime.now()
             group = self._ticker_group_if_rest_untouched(now, entry)
             if group is None:
+                # 先作废索引再扫：扫到一半抛出时（旧代码同样抛），已衰减却没来得及丢的条目不能留在一份「有效」的索引里
+                self._idx_list = None            # 下次 publish 惰性重建
                 self._entries = [e for e in self._entries
                                  if self._survives_publish(e, now, entry.ticker)]
-                self._idx_list = None            # 索引失效，下次 publish 惰性重建
                 bump_scan = self._entries
             else:
                 bump_scan = self._publish_scan_group(now, entry.ticker, group)
@@ -308,7 +309,8 @@ class PheromoneBoard:
     # 作废索引的事件：_entries 换了对象 / 长度变了（外部 extend、clear）/ MIN_STRENGTH 变了 / 溢出截断 /
     # 非 str ticker / 带时区的 now 或时间戳 / 同一对象重复 publish / ticker_scoped 关闭。
     #
-    # ⚠️ 不变式的前提：**已上板条目的 ticker / timestamp / pheromone_strength 只由本板改写**。
+    # ⚠️ 不变式的前提：**已上板条目的 ticker / timestamp / pheromone_strength 只由本板改写**
+    # （同一条目对象再发到另一块板也算外部写：那块板的衰减会改它。生产每次 publish 都新建条目、每进程一块板）。
     # 全仓生产代码无此类外部写（守卫 tests/test_pheromone_publish_fast_path.py 的 AST 断言）；
     # 若将来真要改已发布条目，先改这里，别让快路径静默漏掉一次淘汰。
     # 等价性证明：同文件把旧 publish 原文冻成参照实现，随机序列逐次比对整板状态。
@@ -375,13 +377,15 @@ class PheromoneBoard:
         ids = set()
         oldest = None
         for e in self._entries:
-            if type(e.ticker) is not str or id(e) in ids or not self._strength_ok(e):
-                return False
+            # 任何异常一律只是「快路径不适用」：全量扫描是旧代码原样，该抛的在那里按旧顺序、旧消息抛
+            # （例：缺 ticker 的非标准对象，旧代码先按强度丢掉它、根本不读 ticker）
             try:
+                if type(e.ticker) is not str or id(e) in ids or not self._strength_ok(e):
+                    return False
                 ts = datetime.fromisoformat(e.timestamp)
-            except (ValueError, TypeError):
-                return False
-            if ts.utcoffset() is not None:
+                if ts.utcoffset() is not None:
+                    return False
+            except Exception:
                 return False
             ids.add(id(e))
             groups.setdefault(e.ticker, []).append(e)
@@ -395,6 +399,7 @@ class PheromoneBoard:
     def _publish_scan_group(self, now: datetime, ticker: str,
                             group: List[PheromoneEntry]) -> List[PheromoneEntry]:
         """快路径：只对同标的条目跑 `_survives_publish`，其余条目已证明会原样存活。返回同标的存活者。"""
+        self._idx_list = None                    # 扫完才恢复；中途抛出则索引保持作废（理由同全量路径）
         survivors: List[PheromoneEntry] = []
         gone = set()
         clean = True
