@@ -103,7 +103,7 @@ v0.23.1（2026-04-17）「混合双轨」：周日定时任务 `alpha-hive-sampl
 - 复核无问题：代码 diff 逐段对过；墓碑行为测试起的云端快照观测线程由 conftest 的离线闸与收尾等待管住（同既有 `test_non_swarm_scan_retired`）；
   归档 4 个文件 sha256 / 大小 / 日期与记录逐个一致，检出里已无残留。
 - ⚠️ **归档降低了这 4 个文件的冗余度（当时没说）**：它们原在 iCloud 同步的桌面上（等于有一份云端副本），`_archive/` 却**不在**
-  `data_backup/export.py` 的备份范围里 ⇒ 现在只有本机一份。与 `pheromone_bak/`、`stray_old_root/` 的先例一致；要不要纳入备份由用户定。
+  `data_backup/export.py` 的备份范围里 ⇒ 现在只有本机一份。与 `pheromone_bak/`、`stray_old_root/` 的先例一致。**用户 2026-10-19 决定：保持现状、只留本机**（同那两个目录），不改备份范围。
 - 仓库外：`~/.claude/scheduled-tasks/alpha-hive-sample-accumulator/SKILL.md` 按 v0.45.316「保留可恢复」仍在盘上——若有人恢复这个任务，
   命令会因参数已删 exit 2 大声失败，不会静默扫描。
 
