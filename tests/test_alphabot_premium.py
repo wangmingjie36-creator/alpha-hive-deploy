@@ -1053,8 +1053,6 @@ def _chosen(b):
 class TestPicks:
     def test_known_risk_is_excluded_and_its_healthy_twin_is_not(self):
         for flag, code in (("earnings_before_expiry", "pick_earnings_before_expiry"),
-                           ("event_inside", "pick_event_inside"),
-                           ("stale_last_trade", "pick_stale_quote"),
                            ("dte_le_2", f"pick_low_dte:{PM.LOW_DTE}")):
             bad = _pr("2026-11-20", 2.0, strike=80.0, **{flag: True})
             ok = _pr("2026-12-18", 1.2, strike=85.0)
@@ -1071,6 +1069,32 @@ class TestPicks:
         assert _chosen(b) == [("2026-11-20", 90.0)]
         assert b["items"][0]["caveats"] == ["pick_earnings_unknown", "pick_event_unknown", "pick_stale_unknown",
                                             "pick_tenor_exceeds_rv"]
+
+    def test_heuristic_event_and_no_trade_are_caveats_not_exclusions(self):
+        """v0.45.539：期限结构鼓包是启发式（会误报、一报就连坐之后所有到期日）、「最近一场还没成交」不是报价风险
+        （盘中开盘头几个小时大多数虚值合约都是这样）——都只标注。疑似事件写出大小。"""
+        ev = dict(_pr("2026-11-20", 2.0, strike=80.0, event_inside=True), event_move=0.0342)
+        nt = _pr("2026-12-18", 1.9, strike=85.0, stale_last_trade=True)
+        b = PM.picks([ev, nt], "both")["put"]
+        assert _chosen(b) == [("2026-11-20", 80.0), ("2026-12-18", 85.0)] and b["excluded"] == []
+        assert b["items"][0]["caveats"] == ["pick_event_inside:3.4"]
+        assert b["items"][1]["caveats"] == ["pick_no_trade_this_session"]
+        nosize = PM.picks([_pr("2026-11-20", 2.0, event_inside=True)], "both")["put"]   # 没有大小也不丢标注
+        assert nosize["items"][0]["caveats"] == ["pick_event_inside:?"]
+
+    def test_morning_session_chain_still_has_picks(self):
+        """盘中场景：文件日期是今天，绝大多数合约末笔成交还是昨天（合成链本来人人同一时刻成交，这里改成上午的样子）。"""
+        raw = _demo_raw()
+        prev = "2026-10-08T15:58:00"
+        cs = [dict(c, last_trade_time=prev) if i % 10 else c for i, c in enumerate(raw["contracts"])]
+        raw = dict(raw, contracts=cs, session_live=True)
+        full = _build(raw)
+        assert sum(1 for x in full["rows"] if x["flags"]["stale_last_trade"]) > 0.8 * len(full["rows"])   # 对照：确是上午
+        p = PM.parse_params({})
+        pk = PM.select(full, p)["picks"]
+        for side in ("put", "call"):
+            assert len(pk[side]["items"]) == PM.PICK_N, side
+            assert any("pick_no_trade_this_session" in it["caveats"] for it in pk[side]["items"])
 
     def test_no_rv_cannot_be_ranked(self):
         b = PM.picks([_pr("2026-11-20", None)], "both")["put"]
@@ -1091,14 +1115,22 @@ class TestPicks:
         cross = [_pr("2026-11-20", 1.45, yld=0.05), _pr("2026-12-18", 1.449, yld=0.20)]     # 跨档：IV/RV 优先
         assert _chosen(PM.picks(cross, "both")["put"])[0][0] == "2026-11-20"
 
-    def test_excluded_list_only_above_the_last_pick(self):
+    def test_excluded_list_only_above_the_lowest_pick(self):
         rows = [_pr("2026-11-20", 1.2), _pr("2026-12-18", 1.1), _pr("2027-01-15", 1.0)]
         rows += [_pr("2026-11-27", 2.0, earnings_before_expiry=True),
                  _pr("2026-11-27", 1.95, strike=85.0, earnings_before_expiry=True),
-                 _pr("2026-12-04", 0.5, event_inside=True)]
+                 _pr("2026-12-04", 0.5, earnings_before_expiry=True)]
         b = PM.picks(rows, "both")["put"]
         assert [(x["row"]["expiry"], x["row"]["strike"]) for x in b["excluded"]] == [("2026-11-27", 90.0)]
-        assert b["excluded_counts"] == {"pick_earnings_before_expiry": 2, "pick_event_inside": 1}
+        assert b["excluded_counts"] == {"pick_earnings_before_expiry": 3}
+
+    def test_threshold_is_the_lowest_pick_not_the_last(self):
+        """档内按收益排 ⇒ 最后一张不一定最低（二次检查复现：首选 1.44 / 1.41 / 1.43，1.42 被排除的没列出来）。"""
+        rows = [_pr("2026-11-06", 1.44, yld=0.30), _pr("2026-11-13", 1.41, yld=0.20), _pr("2026-11-20", 1.43, yld=0.10),
+                _pr("2026-11-27", 1.42, yld=0.50, earnings_before_expiry=True)]
+        b = PM.picks(rows, "both")["put"]
+        assert [it["row"]["iv_over_rv"] for it in b["items"]] == [1.44, 1.41, 1.43]      # 对照：最后一张确实不是最低
+        assert [x["row"]["expiry"] for x in b["excluded"]] == ["2026-11-27"]
 
     def test_sides(self):
         rows = [_pr("2026-11-20", 1.2), _pr("2026-11-20", 1.3, side="call", strike=110.0)]
@@ -1170,7 +1202,13 @@ class TestRefreshPullsAFreshChain:
         svc.premium("NVDA", {"force": "1"})
         assert len(calls) == 2                                                   # 只重算：premium 自己取一次
         svc.premium("NVDA", {"refresh": "1"})
-        assert len(calls) == 4                                                   # live(force) 一次 + 重算一次
+        assert len(calls) == 3                                                   # 只取一次链：不再为暖缓存跑一遍 live()
+
+    def test_refresh_does_not_run_the_ticker_detail(self, monkeypatch):
+        ran = []
+        svc = _svc()
+        monkeypatch.setattr(svc, "live", lambda *a, **k: ran.append(1))
+        assert svc.premium("NVDA", {"refresh": "1"})["data_available"] and ran == []
 
     def test_refresh_invalidates_cboe_cache_on_the_production_path(self, monkeypatch):
         hit = []

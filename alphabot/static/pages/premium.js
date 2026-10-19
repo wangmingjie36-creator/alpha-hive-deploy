@@ -10,14 +10,20 @@ import { state } from "../app.js";
 const PREF_KEY = "premium.params";
 // 盘中自动刷新间隔：同跨式页（每次约 1.5MB 全链、经 CBOE 闸串行；再密会挡住别的页现拉）
 const AUTO_MS = 120000;
+// 开着自动刷新的票（只在内存里：顶部「重新拉取」会重建本子页，不能因此把开关悄悄关掉；刷新整页 / 重开程序则回到关）
+const AUTO_ON = new Set();
 
-export async function premium(body, d, t, alive, force = false) {
+export async function premium(body, d, t, routeAlive, force = false) {
+  // 顶部「重新拉取」在同一路由里重建本子页、沿用同一个 routeAlive ⇒ 被换掉的旧实例仍算「活着」，它的定时器
+  // 会在后台接着拉 CBOE（与新实例叠成两份）。本实例只在自己的容器还挂在页面上时才算活（v0.45.539）。
+  const alive = () => routeAlive() && body.isConnected;
   let r = null;            // 最近一次被服务端接受的结果
   let pick = null;         // 只看哪个到期日（不记在本机：到期日随链变）
   let notice = null;       // {text, retry?}
   let seq = 0;             // 请求序号：只认最后发出的那一个（连点时慢的旧响应不许盖掉新的、更不许存进本机）
   let wanted = null;       // 最近一次发出、还没有结论的筛选：连着改两处时第二处要叠在第一处上，不能只叠在「已接受」上
-  let auto = false;        // 盘中自动刷新（不记在本机：打开页面就开始定时拉 CBOE 不该是缺省）
+  let auto = AUTO_ON.has(t);  // 盘中自动刷新（不记在本机：打开页面就开始定时拉 CBOE 不该是缺省）
+  let pendingDraw = false;   // 自动刷新的结果到了、但用户正在输入框里打字：等离开输入框再重画
   let lastPull = null;     // 上一次自动刷新成功的美东时刻
 
   const reasonZh = (code) => {
@@ -64,18 +70,37 @@ export async function premium(body, d, t, alive, force = false) {
       notice = e.status === 400
         ? { text: `筛选没生效：${e.message}（保留上一次的筛选）` }
         : { text: `取数出错：${e.message}${r ? "（下面仍是上一次的结果）" : ""}`, retry: () => apply(prefs, { initial }) };
-      draw();
+      show(refresh);
       return;
     }
     if (!alive() || mine !== seq) return;
     wanted = null;
+    if (refresh && !res.data_available && r?.data_available) {
+      // 自动刷新这一拍没拉到（开盘后 CBOE 文件常还停在上一交易日）：不拿「不可得」换掉屏幕上那份好结果，
+      // 照实说出来、注明下面是几点的报价，下一拍再试
+      const at = quoteAt(r.chain?.payload_last_trade_time);
+      notice = { text: `自动刷新这一拍没拉到新链（${reasonZh(res.reason)}）——下面仍是${at ? `报价 ${at} ET ` : "上一次"}的结果，约 2 分钟后再试。` };
+      show(true);
+      return;
+    }
     r = res;
     force = false;
     if (refresh) lastPull = new Date().toLocaleTimeString("zh-CN", { timeZone: "America/New_York", hour12: false });
     setPref(PREF_KEY, prefs);          // 先验后存：到这里服务端已经接受
     notice = note ? { text: note } : null;
+    show(refresh);
+  }
+
+  // 自动刷新整页重画会冲掉输入框里打了一半、还没回车 / 离开的数字（onchange 要到那时才触发）
+  const typing = () => { const a = document.activeElement; return !!a && a.tagName === "INPUT" && body.contains(a); };
+  function show(fromAuto) {
+    if (fromAuto && typing()) { pendingDraw = true; return; }
+    pendingDraw = false;
     draw();
   }
+  body.addEventListener("focusout", () => setTimeout(() => {
+    if (alive() && pendingDraw && !typing()) show(false);
+  }, 0));
 
   const setParam = (k, v) => apply({ ...(wanted || pref(PREF_KEY, {})), [k]: v });
 
@@ -83,14 +108,15 @@ export async function premium(body, d, t, alive, force = false) {
   const sessionLive = () => !!state.meta?.session?.live;
   let busy = false;
   async function autoTick() {
-    if (busy || !auto || !sessionLive()) return;
+    if (busy || !auto || !sessionLive() || typing()) return;     // 正在打字：这一拍跳过
     busy = true;
     try { await apply(wanted || pref(PREF_KEY, {}), { refresh: true }); } finally { busy = false; }
   }
   let drawnLive = null;    // 按钮文案画出时的交易时段状态：开 / 收盘翻转而这一拍不拉时也要重画，不然文案停在旧状态
   const timer = setInterval(() => {
     if (!alive()) { clearInterval(timer); return; }
-    if (auto && r && sessionLive() !== drawnLive) draw();
+    if (pendingDraw && !typing()) show(false);         // 兜底：离开输入框的 focusout 没收到（窗口不在前台等）也要补画
+    if (auto && r && !typing() && sessionLive() !== drawnLive) draw();
     autoTick();
   }, AUTO_MS);
   function autoBtn() {
@@ -99,7 +125,7 @@ export async function premium(body, d, t, alive, force = false) {
       : sessionLive() ? `自动刷新：开（盘中约每 2 分钟${lastPull ? `；上次 ${lastPull} ET` : ""}）`
         : "自动刷新：开（现在不在交易时段，暂停）";
     return h("button", { class: "btn", type: "button", "aria-pressed": String(auto),
-      onclick: () => { auto = !auto; draw(); if (auto) autoTick(); } }, label);
+      onclick: () => { auto = !auto; if (auto) AUTO_ON.add(t); else AUTO_ON.delete(t); draw(); if (auto) autoTick(); } }, label);
   }
   // CBOE 文件末笔成交时刻（美东、15 分钟延迟），"2026-10-16T16:00:00" → "10-16 16:00"
   const quoteAt = (s) => (typeof s === "string" && s.length >= 16 ? `${s.slice(5, 10)} ${s.slice(11, 16)}` : null);
@@ -271,7 +297,7 @@ export async function premium(body, d, t, alive, force = false) {
       { label: "bid", cls: "r", render: (it) => num(it.row.bid) },
       { label: "理由", render: (it) => h("span", {}, why(it.row),
         it.caveats.length ? h("span", { style: { display: "inline-flex", gap: "4px", flexWrap: "wrap", marginLeft: "6px" } },
-          it.caveats.map((c) => h("span", { class: "chip" }, reasonZh(c)))) : null) },
+          it.caveats.map((c) => h("span", { class: c.startsWith("pick_event_inside") ? "chip warn" : "chip" }, reasonZh(c)))) : null) },
     ];
     const sideBlock = (side, b) => {
       if (!b) return null;
@@ -285,8 +311,9 @@ export async function premium(body, d, t, alive, force = false) {
         counts ? h("p", { class: "small muted" }, `这一边 ${b.n_candidates} 张里被排除的：${counts}（一张可能有多个原因）`) : null);
     };
     const picksPanel = panel("首选", {
-      sub: `规则：先排除已知有风险的（到期前有财报、这段期限疑似含事件、最近一场没成交、${rules.low_dte} 天内到期、没有 RV），`
-        + `再按 IV/RV 每 ${rules.pick_ivrv_band} 一档、档内年化收益高的在前；同一到期日只取一张，各取前 ${rules.pick_n}。判不了的不排除，标在理由后面。` },
+      sub: `规则：先排除已知有风险的（到期前有财报、${rules.low_dte} 天内到期、没有 RV），`
+        + `再按 IV/RV 每 ${rules.pick_ivrv_band} 一档、档内年化收益高的在前；同一到期日只取一张，各取前 ${rules.pick_n}。`
+        + "判不了的、期限结构里的疑似事件（启发式，写出大小）、最近一场还没成交的不排除，标在理由后面。" },
       sideBlock("put", pk.put), sideBlock("call", pk.call),
       h("p", { class: "note" }, "按上面的规则挑出，不是「最优」：这套排序从未被前向检验过，高 IV/RV 也可能是市场看到了你没看到的风险。"));
 

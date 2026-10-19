@@ -104,10 +104,10 @@ REASONS = {
     "off_hours_no_bids": "整条链没有买价——不在交易时段，CBOE 盘外不给买卖价",
     "no_bids_in_session": "盘中整条链没有买价（CBOE 文件异常）",
     # 首选：排除（已知有风险）
-    "pick_no_rv": "没有 RV，排不了", "pick_earnings_before_expiry": "到期前有财报",
-    "pick_event_inside": "这段期限疑似含事件", "pick_stale_quote": "这张最近一场没成交", "pick_low_dte": "{} 天内到期",
-    # 首选：照实标注（判不了，不排除）
+    "pick_no_rv": "没有 RV，排不了", "pick_earnings_before_expiry": "到期前有财报", "pick_low_dte": "{} 天内到期",
+    # 首选：照实标注（不排除）——判不了的，与启发式 / 非风险的信号
     "pick_earnings_unknown": "财报日判不了", "pick_event_unknown": "事件判不了",
+    "pick_event_inside": "期限内疑似含事件 ±{}%", "pick_no_trade_this_session": "最近一场还没成交（报价仍是即时的）",
     "pick_stale_unknown": "末笔成交时间判不了", "pick_tenor_exceeds_rv": "期限长于 RV 窗口",
     # 首选：这一边为空
     "pick_no_rows": "筛选后这一边没有合约", "pick_all_excluded": "这一边的合约全被排除",
@@ -727,8 +727,13 @@ def _sort_key(sort: str):
 
 
 def _pick_flags(r: dict) -> Tuple[List[str], List[str]]:
-    """(排除原因, 照实标注)。只排除**已知**有风险的；判不了（None）不排除，写进标注——
-    不在扫描名单里的票财报日恒未知，若连「不知道」也排除，首选就永远是空的。"""
+    """(排除原因, 照实标注)。只排除**已知、权威**的风险（财报日、≤LOW_DTE 天、没有 RV）；其余写进标注：
+    · 判不了（None）——不在扫描名单里的票财报日恒未知，连「不知道」也排除的话首选就永远是空的；
+    · 期限结构鼓包（启发式，有检出下限也有假阳性：最近一周的报价噪声会让之后所有到期日都标「含」）——
+      硬排除会让一个小鼓包清空后面全部到期日，所以只标注并写出大小，由人判断（v0.45.539）；
+    · 「最近一场还没成交」——bid / ask 是即时报价，没成交不是报价风险；盘外整链没有买价、这条只在盘中起作用，
+      开盘头几个小时大多数虚值合约都还没成交，硬排除会让首选在上午几乎是空的（v0.45.539）。
+      流动性由 OI 下限与价差闸把关。"""
     f = r.get("flags") or {}
     excl, cav = [], []
     if r.get("iv_over_rv") is None:
@@ -738,11 +743,12 @@ def _pick_flags(r: dict) -> Tuple[List[str], List[str]]:
     elif f.get("earnings_before_expiry") is None:
         cav.append(_why("pick_earnings_unknown"))
     if f.get("event_inside") is True:
-        excl.append(_why("pick_event_inside"))
+        em = r.get("event_move")
+        cav.append(_why("pick_event_inside", f"{em * 100:.1f}" if isinstance(em, (int, float)) else "?"))
     elif f.get("event_inside") is None:
         cav.append(_why("pick_event_unknown"))
     if f.get("stale_last_trade") is True:
-        excl.append(_why("pick_stale_quote"))
+        cav.append(_why("pick_no_trade_this_session"))
     elif f.get("stale_last_trade") is None:
         cav.append(_why("pick_stale_unknown"))
     if f.get("dte_le_2"):
@@ -772,7 +778,7 @@ def _one_per_expiry(ranked: List[tuple], n: int) -> List[tuple]:
 
 def picks(rows: List[dict], side_param: str) -> Dict[str, Optional[dict]]:
     """「首选」：rows = 已过全部筛选的合约（截断前）。每个方向：剔除已知风险 → IV/RV 分档 + 年化收益排 →
-    同一到期日只取一张、取前 PICK_N。另列 IV/RV 高过最后一张首选、却被排除的合约（同样每个到期日一张）。
+    同一到期日只取一张、取前 PICK_N。另列 IV/RV 高过首选里最低那张、却被排除的合约（同样每个到期日一张）。
     方向不在筛选里 ⇒ None。按规则挑出，**未经前向检验**。"""
     out: Dict[str, Optional[dict]] = {}
     for side in ("put", "call"):
@@ -788,7 +794,8 @@ def picks(rows: List[dict], side_param: str) -> Dict[str, Optional[dict]]:
             for code in excl:                            # 按完整码计（带明细），前端直接翻译
                 counts[code] = counts.get(code, 0) + 1
         chosen = _one_per_expiry(sorted(ok, key=lambda x: _pick_key(x[0])), PICK_N)
-        floor = chosen[-1][0]["iv_over_rv"] if chosen else None
+        # 门槛 = 首选里**最低**的 IV/RV（档内按收益排，最后一张不一定最低）
+        floor = min(x[0]["iv_over_rv"] for x in chosen) if chosen else None
         above = [x for x in bad if x[0].get("iv_over_rv") is not None and (floor is None or x[0]["iv_over_rv"] > floor)]
         shown = _one_per_expiry(sorted(above, key=lambda x: _pick_key(x[0])), PICK_EXCLUDED_MAX)
         empty = None if chosen else (_why("pick_all_excluded") if bad else _why("pick_no_rows"))
