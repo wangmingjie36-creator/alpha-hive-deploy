@@ -177,6 +177,30 @@ class TestCohortBoundary:
         hits = [r for d, v, r in _COHORT_HISTORY if v == "v0.45.537"]
         assert len(hits) == 1 and "ml_weight_adjustments_shadow" in hits[0]
 
+    def test_marker_recognises_new_records_only(self, board):
+        """印记判据：新代码的蒸馏结果认得出、旧归档形状（无影子键）认不出、补跑行不算日期证据。
+
+        没有这条时，印记函数里键名拼错 ⇒ 边界证据永远停在 no_evidence_yet，没有任何测试会红（v0.45.540 补）。
+        """
+        import ic_rerun_readiness as rr
+        q, _ = _queens(board)
+        out = q.distill("T", list(_RESULTS))
+        judge = rr._BOUNDARY_MARKERS["v0.45.537"][1]
+        assert judge({"swarm_results": out}) is True
+        old = {k: v for k, v in out.items() if k != "ml_weight_adjustments_shadow"}
+        assert judge({"swarm_results": old}) is False
+        backfill = dict(out, agent_details={"GuardBeeSentinel": {"details": {
+            "vix_term_structure": {"macro_as_of_mode": "backfill"}}}})
+        assert judge({"swarm_results": backfill}) is False
+
+    def test_ml_generation_entry_names_direction_features(self):
+        """蜂后方向变 ⇒ direction_encoded 与 agent_agreement（与蜂群方向一致的占比）都变；初版写反了（v0.45.540）。"""
+        import probability_scorecard as ps
+        hits = [r for d, v, r in ps._ML_ESTIMATOR_GENERATIONS if "v0.45.537" in v]
+        assert len(hits) == 1
+        assert "direction_encoded" in hits[0] and "agent_agreement" in hits[0]
+        assert "不受影响。" not in hits[0]
+
     def test_scope_is_empty(self):
         """蜂后层改动：不改任何归档蜂信号 ⇒ 不截断维度 IC 的 H1 / H2（先例 v0.45.228 / 334）。"""
         import signal_archive

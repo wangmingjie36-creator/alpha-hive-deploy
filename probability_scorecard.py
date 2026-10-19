@@ -254,7 +254,9 @@ _ML_ESTIMATOR_GENERATIONS = [
      "蜂后 ML 反馈停用（维度权重乘数与方向票重缩放都不再施加，只记影子）。`_prepare_ml_input` 一行没动；"
      "`final_score` 这个特征的**上游定义**变了：基础分改用 config 原样权重、方向票不再按 ML 乘数缩放"
      "（离线重放 09-10 → 10-16 共 750 行：最终分 |Δ| 均值 0.086、最大 1.0，方向约 9.5% 改变）。"
-     "`agent_agreement` 取自各蜂自己的方向，不受影响。按 v0.45.334 条「估计量的定义变了就登记」登记，**没有重放 Δprobability**；"
+     "`direction_encoded`（蜂群方向编码）与 `agent_agreement`（与**蜂群方向**一致的蜂占比，`generate_ml_report._prepare_ml_input` / "
+     "`ml_predictor` 训练端同口径）随蜂后方向变 ⇒ 约 9.5% 的行这两个特征也变（v0.45.540 更正：初版写「agent_agreement 取自各蜂自己的方向、"
+     "不受影响」是错的，且漏了 direction_encoded；更正时本代 0 份报告）。按 v0.45.334 条「估计量的定义变了就登记」登记，**没有重放 Δprobability**；"
      "世代边界见 `ic_rerun_readiness._COHORT_HISTORY` 同版条目。"),
 ]
 

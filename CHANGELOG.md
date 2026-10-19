@@ -5,7 +5,27 @@
 
 ---
 
-## [0.45.540] — 2026-10-19 — 占位（进行中：v0.45.537 二次检查——ML 世代条目特征影响面写错、印记无测试）
+## [0.45.540] — 2026-10-19 — Fixed：二次检查 v0.45.537——ML 世代条目把受影响的特征写反了（漏 `direction_encoded`、误称 `agent_agreement` 不受影响）；边界印记函数没有任何测试
+
+用户要求二次检查。生产代码（蜂后、扫描观测点、重放兼容）逐项复核未查出 bug；查出两处登记 / 守卫问题。
+
+### Fixed
+- `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 的 v0.45.537 条：原写「`agent_agreement` 取自各蜂自己的方向，不受影响」。
+  实际 `agent_agreement` = 与**蜂群方向**一致的蜂占比（`generate_ml_report._prepare_ml_input`，训练端 `ml_predictor` 同口径），
+  `direction_encoded` = 蜂群方向编码——蜂后方向一变两者都变，537 让约 9.5% 的行翻方向 ⇒ 三个特征（`final_score` 之外还有这两个）的上游都变了。
+  改的是该条说明文字；更正时这一代 0 份报告（10-19 扫描尚未运行），不改任何样本归属（先例：v0.45.334 标签改名）。
+
+### Added
+- `tests/test_queen_ml_feedback_disabled.py` +2：`test_marker_recognises_new_records_only`（新蒸馏结果认得出、去掉影子键的旧形状认不出、
+  补跑行不算日期证据；变异：印记键名拼错 ⇒ 红）——此前印记函数零测试，拼错只会让边界证据永远停在 `no_evidence_yet`；
+  `test_ml_generation_entry_names_direction_features`（世代条目必须点名 `direction_encoded` 与 `agent_agreement`）。
+
+### 复核过、没问题的
+- 全部读者：生产只有 `_compute_direction_vote` 读 `ml_feedback_enabled` / `ml_adjustments`（恒 False / {} ⇒ 不缩放）；共振检验 `replay` /
+  `rebase_with_current_weights` 与两个 09-17 重放脚本对新记录（{}）都是空操作；`generate_deep_v2` 只透传 `dimension_weights_base`。
+- 印记能落地：`analysis-*-ml-*.json` 的 `swarm_results` 存整份蒸馏结果（10-16 META 实测含 `gex_regime_mod` 等全部键）；
+  生产只读跑 `cohort_boundary_evidence(…, "v0.45.537")` = `no_evidence_yet`（符合预期）。
+- 运行期探针：`QueenDistiller.DEFAULT_WEIGHTS` 与 `config.EVALUATION_WEIGHTS` 键集合完全相同 ⇒ 不会因多余键误报。
 
 ## [0.45.539] — 2026-10-19 — 占位（进行中：v0.45.536 溢价首选 / 自动刷新二次检查 7 处根因修复）
 
