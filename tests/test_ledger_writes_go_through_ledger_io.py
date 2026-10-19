@@ -45,7 +45,7 @@ CATEGORIES = {LEDGER, STATE, ARTIFACT, CACHE, HUMAN, CODE}
 DEBT_CATEGORIES = (LEDGER, STATE, ARTIFACT)
 
 #: 「待迁移」三类的条数上限（等号比较）。迁走一条 ⇒ 删条目并把这里减一；**不许为了登记新写入方而加一**。
-CEILING = {LEDGER: 18, STATE: 12, ARTIFACT: 12, CACHE: 7}
+CEILING = {LEDGER: 18, STATE: 12, ARTIFACT: 12, CACHE: 6}   # v0.45.546：删 data_fetcher.py（7 → 6）
 
 _NA = "⚠️非原子"   # 理由里带这个标记 = 现在就是 open("w") 直写，写到一半崩溃 = 半截文件（迁移优先级最高）
 
@@ -103,7 +103,6 @@ WRITERS: dict = {
     "quiver_fetcher.py::QuiverFetcher._save_cache": (CACHE, "Quiver 响应缓存（原子；读坏 ⇒ 重取）"),
     "risk_engine.py::_estimate_beta": (CACHE, "β 24h 缓存（读坏忽略）"),
     "vix_term_structure.py::get_vix_term_structure": (CACHE, "VIX 期限结构 30 分钟缓存（读坏 ⇒ 重取）"),
-    "data_fetcher.py::<module>": (CACHE, "示例脚本采集汇总 realtime_metrics.json（无生产读者）"),
     # ── 只给人看
     "alert_manager.py::AlertAnalyzer.save_alerts": (HUMAN, "告警汇总文件"),
     "alpha_hive_daily_report.py::main": (HUMAN, "样本模式最小结果 JSON（仓内无读者）"),

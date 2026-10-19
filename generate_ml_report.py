@@ -2748,19 +2748,10 @@ def main():
         tickers = args.tickers
         _log.info("分析指定标的: %s", tickers)
 
-    # 加载实时数据（如果存在）
     report_dir = PATHS.home
-    realtime_file = report_dir / "realtime_metrics.json"
-
+    # v0.45.546：不再读 realtime_metrics.json——写它的编排器 Step 1（data_fetcher）已删；留在数据根里的旧文件
+    # 不会再更新，读它 = 永远读一份过期价格。取价直接走下面的蜂群缓存 → fetch_stock_data → {T}_raw.json 链。
     metrics = {}
-    if realtime_file.exists():
-        try:
-            with open(realtime_file) as f:
-                metrics = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            _log.warning("加载实时数据失败: %s，继续使用空数据", e)
-    else:
-        _log.warning("未找到 realtime_metrics.json，将使用样本数据")
 
     # 创建生成器
     report_gen = MLEnhancedReportGenerator()
@@ -2806,7 +2797,7 @@ def main():
         try:
             _log.info("生成 %s ML 增强报告...", ticker)
 
-            # 获取该标的的数据（优先 realtime_metrics → swarm 缓存 → yfinance 实时）
+            # 获取该标的的数据（swarm 缓存 → 多源链 → 磁盘 {T}_raw.json；v0.45.546 起不再有 realtime_metrics）
             ticker_data = metrics.get(ticker)
             if not ticker_data or not ticker_data.get("sources", {}).get("yahoo_finance", {}).get("current_price"):
                 # v0.40.1: 与 v36.0 同一反模式的第 3 处漏网之鱼——原初始化 100.0，

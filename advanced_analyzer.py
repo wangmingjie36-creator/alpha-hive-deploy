@@ -4,7 +4,6 @@
 """
 
 import logging as _logging
-import json
 import math
 from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -1266,13 +1265,16 @@ class AdvancedAnalyzer:
 
 # ==================== 脚本示例 ====================
 if __name__ == "__main__":
-    import json
-
     analyzer = AdvancedAnalyzer()
 
-    # 加载实时数据
-    with open("realtime_metrics.json") as f:
-        metrics = json.load(f)
+    # 演示数据：v0.45.546 起不再有 realtime_metrics.json（编排器 Step 1 已删），改用蜂群缓存里的现价
+    from swarm_agents import get_cached_stock_data
+    metrics = {}
+    for _t in ("NVDA", "VKTX", "TSLA"):
+        _c = get_cached_stock_data(_t) or {}
+        if _c.get("price"):
+            metrics[_t] = {"ticker": _t, "sources": {"yahoo_finance": {
+                "current_price": _c["price"], "price_change_5d": _c.get("momentum_5d")}}}
 
     # 生成分析报告
     print("🎯 Alpha Hive 高级分析系统")

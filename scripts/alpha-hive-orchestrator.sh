@@ -716,30 +716,14 @@ _orchestrator_autodeploy() {
 }
 _orchestrator_autodeploy
 
-# ================================================================
-# Step 1: 数据采集 (Data Fetcher)
-# ================================================================
-log "INFO" ""
-log "INFO" "【Step 1/5】数据采集 - 启动"
+# v0.45.546：原 Step 1（data_fetcher.py：写死的 NVDA/VKTX/TSLA 三只的 Yahoo / SEC / Google Trends / SeekingAlpha 指标
+# → realtime_metrics.json + cache/）已删除。蜂群不读它；两个读者都改了源：Slack 日报的价格兜底 / 5 日涨跌改读 .swarm_results，
+# Step 3 兜底（generate_ml_report.main）不再读 realtime_metrics.json（直接走蜂群缓存 → fetch_stock_data）。
+#
+# ⚠️ STEP1_START 必须保留：它是**主流程起点**——write_status 的 total_duration_seconds 与收尾的 TOTAL_DURATION 都拿它减；
+# 本脚本 `set -u`，变量没定义 ⇒ 写状态时 "unbound variable" 直接退出（status.json 与其后各步全没了）。名字沿用旧的，
+# 免得改动那两处与以它为位置锚点的测试。守卫 tests/test_step1_data_fetcher_retired.py::test_pipeline_start_is_defined_before_use。
 STEP1_START=$(date +%s)
-
-run_step --timeout 300 "$PROJECT_DIR/data_fetcher.py" >> "$LOGFILE" 2>&1
-STEP1_RC=$?
-STEP1_END=$(date +%s)
-STEP1_DURATION=$((STEP1_END - STEP1_START))
-if [ $STEP1_RC -eq 0 ]; then
-    log "INFO" "✅ Step 1 成功（耗时 ${STEP1_DURATION}s）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step1_data_fetcher\": {\"status\": \"success\", \"duration_seconds\": $STEP1_DURATION}}")
-elif [ $STEP1_RC -eq 124 ]; then
-    log "ERROR" "⏰ Step 1 超时（>300s），继续进行"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step1_data_fetcher\": {\"status\": \"timeout\", \"duration_seconds\": $STEP1_DURATION}}")
-elif [ $STEP1_RC -eq 2 ]; then
-    log "WARN" "⏭️  Step 1 跳过（脚本不存在）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step1_data_fetcher\": {\"status\": \"skipped\"}}")
-else
-    log "WARN" "⚠️ Step 1 失败，但继续进行（耗时 ${STEP1_DURATION}s）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step1_data_fetcher\": {\"status\": \"failed\", \"duration_seconds\": $STEP1_DURATION}}")
-fi
 
 # ================================================================
 # DB 备份：在蜂群分析前备份 pheromone.db（sqlite 在线备份 + 有下限的轮转）

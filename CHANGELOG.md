@@ -31,7 +31,48 @@
 
 ## [0.45.547] — 2026-10-19 — 占位（进行中：ML 两项——扫描开头的重复训练改用报告生成器同一个模型、删扫描后「增量学习」重训）
 
-## [0.45.546] — 2026-10-19 — 占位（进行中：删编排器 Step 1 data_fetcher + generate_ml_report 兜底读 realtime_metrics.json 那段）
+## [0.45.546] — 2026-10-19 — Removed：编排器 Step 1（data_fetcher）——蜂群不读它；它唯一的活读者 Slack 日报改读 `.swarm_results`（价格兜底与 5 日涨跌从写死的 3 只扩到 30 只，3 只的值不变），Step 3 兜底不再读会过期的 realtime_metrics.json
+
+用户决定（2026-10-19）：「现在开始」（死链二次检查第二档 ②）。
+
+### ⚠️ 它不是死链——审计漏了一个活读者
+二次检查的三路审计（与主会话）都判 Step 1「近乎死链：唯一读者是很少触发的 Step 3 兜底」。动手前逐个文件名复查时发现
+**Slack 日报**（编排器 Step 7 `push_report_to_slack` → `SlackReportNotifier.send_rich_daily_report` → `_format_rich_daily_mrkdwn`）
+的价格兜底与「(5d ±x%)」只从 Step 1 写的 `cache/metrics_<T>_<date>.json` 来 ⇒ **只有写死的 NVDA / TSLA / VKTX 三只**有。
+直接删 Step 1 会让这三只在 Slack 里少一项。教训记进 auto-memory alpha-hive-dead-field（「按文件名拼法搜」：读者用 f-string 拼文件名，搜模块名搜不到）。
+
+### Changed
+- `slack_report_notifier._format_rich_daily_mrkdwn`：价格兜底改读 `.swarm_results_<date>.json` 的 Scout `details.price`，5 日涨跌改读 Buzz
+  `details.momentum_5d`（30 只全有）。10-16 生产实测三只与 Step 1 的值逐位相等（差在 1e-15）⇒ 这三只显示不变；**另外 27 只此前没有价格 /
+  5 日涨跌，现在有了**（Slack 日报每行多出「$价 (5d ±x%)」）。`.swarm_results` 读不到 ⇒ warning，那两项空缺（不静默）。
+  analysis JSON / `{T}_raw.json` 的价格优先级不变。
+- `generate_ml_report.main()`（Step 3 兜底）：不再读 `realtime_metrics.json`——写它的步骤没了，数据根里那份旧文件不再更新，读它 = 永远读过期价格。
+  取价直接走既有的蜂群缓存 → `fetch_stock_data` → `{T}_raw.json` 链；顺手删掉误导人的「将使用样本数据」日志。
+- `advanced_analyzer.py` 的 `__main__` 演示：改用蜂群缓存的现价；随之删掉无人用的 `import json`。
+
+### Removed
+- 编排器 Step 1 整块（换成说明注释，写法同 534 删 Step 8）；`data_fetcher.py` 与 `tests/test_data_fetcher.py`；
+  `tests/test_ledger_writes_go_through_ledger_io.py` 里它的 `WRITERS` 登记，缓存类上限 7 → 6（「只许减」守卫按设计红了一次）。
+- **过渡轮**：合入后下一扫描日仍跑旧编排器，它找不到已删的脚本 ⇒ `run_step` 返回 2 ⇒ 记 `skipped`。
+- ⚠️ **差点埋下的雷**：Step 1 块里的 `STEP1_START=$(date +%s)` 其实是**主流程起点**——`write_status` 的 `total_duration_seconds` 与收尾的
+  `TOTAL_DURATION` 都拿它减，而编排器 `set -uo pipefail` ⇒ 整块删掉后，新编排器会在扫描之后写状态时 "unbound variable" **直接退出**
+  （status.json 与其后各步全没了）。全量测试里 `test_scan_catchup::test_sandbox_rebind_applies` 拿它当位置锚点、碰巧红了才发现。
+  修：保留这一行（名字沿用，免得改那两处与 4 个以它为锚点的测试），加守卫「恰好一处赋值且早于第一次使用」（删掉那行 ⇒ 红）。
+
+### 证明蜂群输出不变
+- Step 1 是独立进程，只能经它写的文件影响蜂群：`realtime_metrics.json`、`cache/{social,yahoo,gtrends,sec_form4,seekingalpha}#<t>.json`、
+  `cache/metrics_<T>_<date>.json`。全仓（`git ls-files -z`，含字符串拼法）按这几种文件名查读者：只有 Slack（已改源）与 `generate_ml_report.main`
+  （已删）；对 cache 目录的全部 glob（`earnings_vol_signal` / `iv_history` / `price_history` / `vrp_signal`）只匹配 `options_snapshot_*` /
+  `iv_history_*` / `price_history_*`。⇒ 蜂群零读者，删掉不改任何分数。
+
+### Added
+- `tests/test_step1_data_fetcher_retired.py`（10 条）：`STEP1_START` 主流程起点「恰好一处赋值且早于使用」（编排器 `set -u` 前提一并断言）；模块不在、编排器无 Step 1（正对照认得出 Slack 那步）、生产代码不再提 `realtime_metrics.json`
+  （备份 / 迁移清单除外）、不再拼 `metrics_<T>_<date>` 文件名；Slack 行为三条：30 只都从 `.swarm_results` 出价格与 5 日涨跌、旧 metrics 文件
+  不被读、`.swarm_results` 缺失打 warning。变异：删掉 `chg_5d` 赋值 ⇒ 2 条红。
+- `tests/test_dead_chains_batch1_retired.py` 的正对照从 `data_fetcher.py` 改认 `push_report_to_slack.py`。
+
+### 没动的
+- 数据根里的旧 `realtime_metrics.json` 与 cache 里那几个文件原样留着；`data_backup` 清单照旧列着它（「可重建」类）。
 
 ## [0.45.545] — 2026-10-19 — Changed：组合 Greeks 的对冲计算可按标的排除（`hedge_exclude_tickers`，缺省 BILI）——一只标的长期缺价不再让整个组合每天判「数据不全」
 
