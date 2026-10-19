@@ -1358,30 +1358,9 @@ fi
 # 写入 status.json
 # ================================================================
 log "INFO" ""
-# ================================================================
-# Step 8: 记录性能指标 (Week 2 新增)
-# ================================================================
-log "INFO" ""
-log "INFO" "【Step 8/9】性能指标收集 - 启动"
-STEP8_START=$(date +%s)
-
-run_step --timeout 300 "$PROJECT_DIR/metrics_collector.py" --record --status-json "$REPORTDIR/status.json" >> "$LOGFILE" 2>&1
-STEP8_RC=$?
-STEP8_END=$(date +%s)
-STEP8_DURATION=$((STEP8_END - STEP8_START))
-if [ $STEP8_RC -eq 0 ]; then
-    log "INFO" "✅ Step 8 成功（耗时 ${STEP8_DURATION}s）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step8_metrics_collection\": {\"status\": \"success\", \"duration_seconds\": $STEP8_DURATION}}")
-elif [ $STEP8_RC -eq 124 ]; then
-    log "ERROR" "⏰ Step 8 超时（>300s），继续进行"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step8_metrics_collection\": {\"status\": \"timeout\", \"duration_seconds\": $STEP8_DURATION}}")
-elif [ $STEP8_RC -eq 2 ]; then
-    log "WARN" "⏭️  Step 8 跳过（脚本不存在）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step8_metrics_collection\": {\"status\": \"skipped\"}}")
-else
-    log "WARN" "⚠️ Step 8 失败，但不影响主流程（耗时 ${STEP8_DURATION}s）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step8_metrics_collection\": {\"status\": \"failed\", \"duration_seconds\": $STEP8_DURATION}}")
-fi
+# v0.45.534：原 Step 8（metrics_collector.py --record --status-json）已删除——
+# 该模块没有 __main__ / argparse，每天跑 0 秒、什么都不做，却记 `step8_metrics_collection: success`（假成功）。
+# 真正的指标写入在 Step 2 内部（MetricsCollector → metrics.db），同版一并退役：三张表零读者 / 只喂一行日志。
 
 # v0.45.316：原 Step 9（pheromone_recorder.py 信息素持久化 + 准确率追踪）已删除——
 # 该脚本从未存在，每天只打一行「Step 9 跳过（脚本不存在）」。信息素与预测
@@ -1700,7 +1679,6 @@ log "INFO" "📂 日志位置：$LOGFILE"
 log "INFO" ""
 log "INFO" "✅ Phase 1 流程：Step 1-5（数据采集、蜂群分析、ML 报告、仪表板、部署）"
 log "INFO" "✨ Phase 2 Week 1：Step 6-7（智能告警 + Slack 推送）"
-log "INFO" "✨ Phase 2 Week 2：Step 8（性能监控系统 - 时序数据库）"
 log "INFO" "✨ Phase 2 Week 3：Week 3 内集成（动态蜂群扩展 - AdaptiveSpawner）"
 log "INFO" "✨ Phase 2 Week 4：Step 9（信息素持久化 + T+1/T+7/T+30 准确率追踪）"
 

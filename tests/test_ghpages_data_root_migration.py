@@ -81,7 +81,7 @@ def _make_reporter(monkeypatch, tmp_path, repo_path):
         ("MemoryStore", None), ("CodeExecutorAgent", None),
         ("CODE_EXECUTION_CONFIG", {"enabled": False}),
         ("VectorMemory", None), ("VECTOR_MEMORY_CONFIG", {"enabled": False}),
-        ("MetricsCollector", None), ("EarningsWatcher", None),
+        ("EarningsWatcher", None),
         ("Backtester", None),
     ]:
         monkeypatch.setattr(mod, name, val)

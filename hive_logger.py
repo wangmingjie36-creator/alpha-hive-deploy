@@ -646,8 +646,8 @@ def optional_import(module: str, attr: str = None, *, default=None):
 
     Usage::
 
-        MetricsCollector = optional_import("metrics_collector", "MetricsCollector")
-        # MetricsCollector 为类或 None
+        Backtester = optional_import("backtester", "Backtester")
+        # Backtester 为类或 None
     """
     try:
         mod = importlib.import_module(module)

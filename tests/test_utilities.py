@@ -194,38 +194,6 @@ class TestValidateWatchlist:
         assert format_errors == [], f"WATCHLIST 有格式问题: {format_errors}"
 
 
-# ==================== MetricsCollector thread_count ====================
-
-class TestMetricsCollectorThreads:
-    def test_get_thread_count(self):
-        from metrics_collector import MetricsCollector
-        count = MetricsCollector.get_thread_count()
-        assert isinstance(count, int)
-        assert count >= 1  # 至少主线程
-
-    def test_record_scan_captures_threads(self, tmp_path):
-        import sqlite3
-        from metrics_collector import MetricsCollector
-        db = str(tmp_path / "test_metrics.db")
-        mc = MetricsCollector(db_path=db)
-        mc.record_scan(ticker_count=3, duration_seconds=2.0, agent_count=6, agent_total=6)
-        conn = sqlite3.connect(db)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT thread_count FROM scan_metrics ORDER BY id DESC LIMIT 1").fetchone()
-        conn.close()
-        assert row["thread_count"] >= 1
-
-    def test_summary_includes_thread_stats(self, tmp_path):
-        from metrics_collector import MetricsCollector
-        db = str(tmp_path / "test_metrics.db")
-        mc = MetricsCollector(db_path=db)
-        mc.record_scan(ticker_count=2, duration_seconds=1.5, agent_count=6, agent_total=6)
-        summary = mc.get_summary(days=1)
-        assert "max_thread_count" in summary
-        assert "avg_thread_count" in summary
-        assert summary["max_thread_count"] >= 1
-
-
 # ==================== Slack webhook env var (#20) ====================
 
 class TestSlackWebhookEnvVar:

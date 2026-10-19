@@ -14,7 +14,7 @@ class TestSchemaSetup:
         conn.close()
 
         assert "agent_memory" in tables
-        assert "reasoning_sessions" in tables
+        assert "reasoning_sessions" not in tables   # v0.45.534 退役，不再建表
         assert "agent_weights" not in tables   # v0.45.531 退役，不再建表
 
     def test_wal_mode_enabled(self, memory_store):
@@ -63,15 +63,6 @@ class TestAgentMemory:
 
 
 class TestSession:
-    def test_save_session(self, memory_store):
-        sid = memory_store.generate_session_id("test")
-        ok = memory_store.save_session(
-            session_id=sid, date="2026-02-25", run_mode="test",
-            tickers=["NVDA"], swarm_results={"NVDA": {"final_score": 7.5}},
-            pheromone_snapshot=[], duration=1.5,
-        )
-        assert ok
-
     def test_session_id_format(self, memory_store):
         # 会话 ID = {date}_{mode}_{ts_ms}，日期段取自当前墙钟。原来写死 `"2026" in sid`，
         # 到 2027-01-01 恒红（2026-02-25 写下，与任何代码改动无关）。

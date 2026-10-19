@@ -11,7 +11,6 @@ from swarm_agents.utils import (
 )
 from swarm_agents.sentiment import (
     _get_sentiment_momentum, _detect_sentiment_price_divergence,
-    _upsert_sentiment, _check_sentiment_spike,
 )
 
 
@@ -275,11 +274,8 @@ class BuzzBeeWhisper(BeeAgent):
                 confidence += 0.10
             confidence = min(1.0, confidence)
 
-            # ── 情绪基线更新 + 突变检测（#13）──
-            from datetime import datetime as _dt
-            _today_str = _dt.now().strftime("%Y-%m-%d")
-            _upsert_sentiment(ticker, _today_str, bullish_pct)
-            _spike_msg = _check_sentiment_spike(ticker, bullish_pct, _today_str)
+            # v0.45.534：此处曾写 sentiment_baseline.db + 情绪突变检测（只出日志 + 零读者的 sentinel_spike），已退役；
+            # 位于分数算完之后，不影响 score / direction / details。
 
             return AgentResult(
                 score=round(score, 2),
@@ -346,7 +342,6 @@ class BuzzBeeWhisper(BeeAgent):
                     # （`ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.445"]`）；与 news_source 不同，主源失败降级时也照写
                     "news_primary": _news_primary_source(),
                 },
-                extras={"sentinel_spike": _spike_msg},
             ).to_dict()
 
         except AGENT_ERRORS as e:

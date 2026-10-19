@@ -51,7 +51,53 @@
 - 全量：10128 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；ruff 全绿。
 - 版本号订正：实现时注释 / 测试参数先写成了「v0.45.528 / pre_528」（别人的号），推送前统一改为 535 并重跑相关 287 条。
 
-## [0.45.534] — 2026-10-19 — 占位（进行中：死链清理第一批——编排器 Step 8 空跑报成功、metrics.db 链、reasoning_sessions、sentiment_baseline、sector_sentiment 与死属性；不碰评分）
+
+## [0.45.534] — 2026-10-19 — Removed：死链清理第一批（不碰评分）——编排器 Step 8 空跑报成功、metrics.db 链、`reasoning_sessions`、`sentiment_baseline.db`、逐标的 `sector_sentiment` 与两个死属性
+
+用户决定（2026-10-19）：「先做零风险那批：修掉或删掉编排器 Step 8 空跑，加上第三档整批清理（metrics.db 链、reasoning_sessions、sentiment_baseline、
+sector_sentiment 和死属性）。barrier_outcomes 先不动」。来源：v0.45.531 之后二次检查全仓死链（三路只读审计：SQL 表 / 落盘产物 / 扫描流程；
+读者数到成员粒度、排除 tests/、查字符串 / 仓库外 / 动态派发，每个「零读者」配正对照——同法能找到 `signal_archive` / `predictions` /
+`report_snapshots` 的活读者）。主会话亲自复核了 Step 8 无 `__main__`、`get_summary` / `get_ticker_history` 零调用、`reasoning_sessions` 零 SELECT、
+`sentinel_spike` 在 `.swarm_results` 与 analysis JSON 里 0 次、逐标的 `sector_sentiment` 在当日三类落盘里 0 次。
+
+### Removed
+- **编排器 Step 8**（`scripts/alpha-hive-orchestrator.sh`）：`metrics_collector.py --record --status-json` 没有 `__main__` / argparse，
+  每天 0 秒、什么都不做，却记 `step8_metrics_collection: success`（假成功），换成说明注释（同 v0.45.316 删原 Step 9 的写法）；结尾横幅那行一并删。
+  **过渡轮**：合入后下一扫描日仍跑旧编排器，它找不到已删的脚本 ⇒ `run_step` 返回 2 ⇒ 记 `skipped`（如实，且无人读 step8 结局）。
+- **metrics.db 链**：`metrics_collector.py` 整个模块与 `tests/test_metrics_collector.py`、`tests/test_utilities.py::TestMetricsCollectorThreads`；
+  日报的 `MetricsCollector` 导入 / 初始化 / `_post_scan_metrics` 里的记录 + SLO 块；`config.METRICS_CONFIG`（零读者）；Makefile 的 py_compile 一行。
+  `ticker_metrics` / `slo_violations` 零读者；`scan_metrics` 只喂 30s SLO（实际 P95 ≈ 1917s，242 条违规里 232 条是它）的一行日志；
+  `cleanup` 零调用 ⇒ 自 2026-02-25 起无界增长。扫描耗时仍由 `_timing.record("swarm_total")` 落 `logs/scan_timing.json`。
+- **`reasoning_sessions`**（`memory_store.py`）：建表 / 两个索引 / `save_session` / `TABLE_SESSIONS` / 日报里后台提交那段；随之变死的 `_safe_json_truncate`
+  与两个 import。⚠️ **`cleanup_old_data` 里那句 `DELETE FROM reasoning_sessions` 同步删**——否则新库上抛 `no such table`、被 except 吞掉，
+  同一事务里 agent_memory 的清理也静默不生效（墓碑里有专门回归，变异会红）。
+- **`sentiment_baseline.db`**（`swarm_agents/sentiment.py`）：`_sentiment_db_path` / `_init_sentiment_db` / `_upsert_sentiment` / `_get_sentiment_baseline` /
+  `_check_sentiment_spike` 与两个阈值常量；BuzzBee 里的调用与 `extras={"sentinel_spike": …}`。v0.45.340 起动量改读 signal_archive 后它只剩一行
+  WARNING 日志 + 零读者字段；任何 Buzz 运行（MCP / 深度报告 / 重放）都会写它。**位于 Buzz 分数算完之后，不改 score / direction / details /
+  `components`**（维度 IC 协议：不动通道、不动合成层 ⇒ 不截断 H1/H2）。
+- **逐标的 `swarm_results[t]["sector_sentiment"]`**（`_compute_sector_sentiment` 原 Step 3）：在 .swarm_results / 快照 / 档案落盘之后才写，从未被保存；
+  `SENTIMENT_MOMENTUM_CONFIG` 里只服务它的 `sector_deviation_high/mid` 两键。**板块汇总 `sector_sentiment_contagion` 保留**（已发布在 gh-pages 日报 JSON，
+  仓库外读者无法排除）。
+- 死属性 `self.risks`、`self._results_lock`。
+
+### Added
+- `tests/test_dead_chains_batch1_retired.py`（13 条）：模块不在；AST 认 import（含 `optional_import("metrics_collector", …)`）/ 退役函数调用（含当回调传走）/
+  五张表的 SQL（读也拦）/ `sentinel_spike` 与逐标的 `sector_sentiment` 写入（认结构不认子串，汇总键做正对照）/ 编排器无 Step 8；
+  新库不建 `reasoning_sessions`；**新库上 `cleanup_old_data` 仍能删旧 agent_memory**；四个探测器各配正反对照。
+  变异：在 `feedback_loop.py` 植入导入 + `save_session` + `FROM sentiment_baseline`，在 `memory_store.py` 植回那句 DELETE ⇒ 4 条红；还原后 13/13 绿。
+
+### Changed
+- 测试随删：`test_memory_store.py`（断言新库**不含** `reasoning_sessions`、删 `test_save_session`）、`test_pipeline.py` 四处 / `test_ghpages_data_root_migration.py`
+  一处 `MetricsCollector` monkeypatch、`test_paths_not_frozen_at_import.py` 的 `METRICS_CONFIG` 登记、`test_slack_send_whitelist.py` 里以 `sentiment.py`
+  那行日志为锚点的真文件变异用例与 `test_sentiment_spike`（被测路径已不存在；「改前的情绪突变块」作为扫描器合成样本照留）。
+- `hive_logger.optional_import` 文档示例改用 `Backtester`。
+
+### 没动的（明确）
+- 生产数据根里的旧 `metrics.db`、`sentiment_baseline.db`、pheromone.db 的 `reasoning_sessions` 表原样留着（删 = 改生产数据，未做）；`data_backup` 的
+  export / restore / migrate 清单照旧列着这两个 .db（文件还在、历史照备）。
+- `barrier_outcomes`（用户：先不动）；二次检查的第二档（Chronos IV-crush 抓取、Step 1 `data_fetcher`、重复 ML 训练、扫描后 ML 增量学习）碰评分链或其输入，
+  未做；两个活链疑点（Rival ML 合成样本、Queen ML 维度权重缺 OOS 缩放）已另开会话核实。
+- 仓库外 `alpha-hive-daily-scan` 定时任务的 SKILL.md 仍列着 Step 8（文档，不执行），未改。
 
 ## [0.45.533] — 2026-10-19 — Fixed：v0.45.528 publish 快路径复查——扫描**中途抛出**时索引仍「有效」、重建索引遇缺字段对象抛错，两处都会与旧全量扫描分岔；随机等价测试补上漏测的形状
 

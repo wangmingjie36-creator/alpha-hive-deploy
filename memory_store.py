@@ -1,41 +1,21 @@
 #!/usr/bin/env python3
 """
 💾 Alpha Hive Memory Store - 持久化记忆系统
-Agent 级别跨会话记忆 + 会话聚合 + 动态权重管理
+Agent 级别跨会话记忆（会话聚合 v0.45.534、动态权重 v0.45.531 已退役）
 """
 
 import sqlite3
 import os
-import json
 import uuid
 import atexit
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from threading import Lock, local as _thread_local
-from hive_logger import get_logger, PATHS, SafeJSONEncoder
+from hive_logger import get_logger, PATHS
 
 _log = get_logger("memory_store")
 
-
-def _safe_json_truncate(data, max_chars=5000):
-    """JSON 安全截断：按 self_score 降序排列后从低分尾部删除（S6 优先级截断）"""
-    if not isinstance(data, list):
-        s = json.dumps(data, cls=SafeJSONEncoder)
-        return s[:max_chars] if len(s) > max_chars else s
-    # S6: 按 (self_score, support_count) 降序，高价值信号优先保留
-    items = sorted(
-        data,
-        key=lambda x: (x.get("self_score", 0) if isinstance(x, dict) else 0,
-                        x.get("support_count", 0) if isinstance(x, dict) else 0),
-        reverse=True,
-    )
-    while items:
-        s = json.dumps(items, cls=SafeJSONEncoder)
-        if len(s) <= max_chars:
-            return s
-        items = items[:-1]  # 删除最低分条目
-    return "[]"
 
 @dataclass
 class MemoryEntry:
@@ -61,7 +41,6 @@ class MemoryStore:
     """持久化记忆存储 - SQLite 后端（WAL 模式 + 连接安全）"""
 
     TABLE_AGENT_MEMORY = "agent_memory"
-    TABLE_SESSIONS = "reasoning_sessions"
 
     @property
     def DB_PATH(self) -> str:
@@ -175,28 +154,7 @@ class MemoryStore:
             except sqlite3.OperationalError:
                 pass  # 列已存在（新建库或已迁移）
 
-            # 表 2: reasoning_sessions - 会话级别聚合
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS reasoning_sessions (
-                    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id               TEXT UNIQUE NOT NULL,
-                    date                     TEXT NOT NULL,
-                    run_mode                 TEXT NOT NULL,
-                    tickers                  TEXT NOT NULL,
-                    agent_count              INTEGER NOT NULL,
-                    resonances_detected      INTEGER DEFAULT 0,
-                    top_opportunity_ticker   TEXT,
-                    top_opportunity_score    REAL,
-                    final_report_summary     TEXT,
-                    pheromone_snapshot       TEXT,
-                    total_duration_seconds   REAL,
-                    created_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            # 索引
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_rs_date ON reasoning_sessions(date)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_rs_mode ON reasoning_sessions(run_mode)")
+            # reasoning_sessions 表 v0.45.534 退役：不再建、不再写（零读者；生产库旧表原样留着）。
 
             # agent_weights 表 v0.45.531 退役：不再建、不再写（生产库里的旧表原样留着，没有读者）。
             # 理由与墓碑见 tests/test_agent_weight_manager_retired.py。
@@ -277,45 +235,6 @@ class MemoryStore:
             _log.warning("save_agent_memories_batch 失败 (%d 条): %s", len(entries), e)
             return 0
 
-    def save_session(self, session_id: str, date: str, run_mode: str,
-                     tickers: List[str], swarm_results: Dict,
-                     pheromone_snapshot: List[Dict], duration: float) -> bool:
-        """保存会话级别聚合"""
-        try:
-            conn = self._connect()
-            cursor = conn.cursor()
-
-            top_opp = None
-            top_score = None
-            if swarm_results and isinstance(swarm_results, dict):
-                for ticker, result in swarm_results.items():
-                    score = result.get('final_score', 0)
-                    if top_score is None or score > top_score:
-                        top_opp = ticker
-                        top_score = score
-
-            summary = _safe_json_truncate(
-                {"top_ticker": top_opp, "top_score": top_score, "total_tickers": len(tickers)},
-                500
-            )
-
-            cursor.execute("""
-                INSERT OR REPLACE INTO reasoning_sessions (
-                    session_id, date, run_mode, tickers, agent_count,
-                    resonances_detected, top_opportunity_ticker, top_opportunity_score,
-                    final_report_summary, pheromone_snapshot, total_duration_seconds
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (session_id, date, run_mode, json.dumps(tickers, cls=SafeJSONEncoder), len(tickers),
-                  len([e for e in pheromone_snapshot if e.get('support_count', 0) >= 3]),
-                  top_opp, top_score, summary, _safe_json_truncate(pheromone_snapshot, 5000), duration))
-
-            conn.commit()
-            return True
-
-        except (sqlite3.Error, OSError, TypeError, ValueError) as e:
-            _log.warning("save_session 失败: %s", e)
-            return False
-
     def get_recent_memories(self, ticker: str, days: int = 30,
                             agent_id: Optional[str] = None, limit: int = 50) -> List[Dict]:
         """获取近期记忆"""
@@ -385,7 +304,7 @@ class MemoryStore:
         return f"{date}_{run_mode}_{ts_ms}"
 
     def cleanup_old_data(self, retention_days: int = 180) -> int:
-        """删除超过 retention_days 的旧记忆和会话记录
+        """删除超过 retention_days 的旧记忆（reasoning_sessions 已于 v0.45.534 退役）
 
         Returns:
             删除的 agent_memory 记录数
@@ -397,9 +316,6 @@ class MemoryStore:
                 "DELETE FROM agent_memory WHERE date < ?", (cutoff,)
             )
             mem_deleted = cursor.rowcount
-            conn.execute(
-                "DELETE FROM reasoning_sessions WHERE date < ?", (cutoff,)
-            )
             conn.commit()
             if mem_deleted:
                 _log.info("清理旧记忆 %d 条（>%d 天）", mem_deleted, retention_days)

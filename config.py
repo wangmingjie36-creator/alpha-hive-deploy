@@ -897,20 +897,6 @@ ALERT_CONFIG = {
     "alerts_log_dir": str(PATHS.logs_dir),
 }
 
-# ==================== 性能监控配置 (Phase 2) ====================
-METRICS_CONFIG = {
-    "enabled": True,
-    "db_path": str(PATHS.home / "metrics.db"),
-    "retention_days": 90,  # 保留 90 天数据
-    "collect_metrics": {
-        "execution_time": True,
-        "memory_usage": True,
-        "file_sizes": True,
-        "report_quality": True,
-        "deployment_status": True,
-    }
-}
-
 # ==================== predictions 保留期 ====================
 # ⚠️ 这是**样本量的唯一上限**，不是磁盘配额。
 #
@@ -1301,9 +1287,6 @@ SENTIMENT_MOMENTUM_CONFIG = {
     "divergence_bull_trap_sentiment": 65,   # 情绪 > 65% 且价格跌 → 看多陷阱
     "divergence_hidden_opp_sentiment": 35,  # 情绪 < 35% 且价格涨 → 隐藏机会
     "divergence_price_threshold": 3.0,      # 价格变动阈值 (%)
-    # 跨标的情绪传染
-    "sector_deviation_high": 15,            # 偏离板块 > 15 ppt = overheating/undervalued
-    "sector_deviation_mid": 8,              # 偏离板块 > 8 ppt = above/below_sector
     # 冲突驱动增强
     "conflict_heavy_min_agents": 2,         # 多空双方各 ≥ 2 Agent = 重度冲突
     "conflict_dq_resolve_threshold": 0.55,  # DQ 加权占比 ≥ 55% 才能解决方向冲突

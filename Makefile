@@ -20,7 +20,6 @@ lint:
 	python3 -m py_compile hive_logger.py
 	python3 -m py_compile resilience.py
 	python3 -m py_compile models.py
-	python3 -m py_compile metrics_collector.py
 	@echo "All core files compile OK"
 
 # ==================== 蜂群扫描 ====================

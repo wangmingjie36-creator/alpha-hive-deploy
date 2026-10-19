@@ -30,7 +30,6 @@ _log = get_logger("daily_report")
 import scan_timing as _timing
 
 # 可选模块（optional_import 优雅降级）
-MetricsCollector = optional_import("metrics_collector", "MetricsCollector")
 from generate_ml_report import MLEnhancedReportGenerator
 from pheromone_board import PheromoneBoard
 from swarm_agents import (
@@ -384,10 +383,6 @@ class AlphaHiveDailyReporter:
 
         # 结果存储
         self.opportunities: List[OpportunityItem] = []
-        self.risks: List[Dict] = []
-
-        # 线程安全锁（用于并行执行时保护共享数据）
-        self._results_lock = Lock()
 
         # Phase 3 P4: 初始化代码执行 Agent（失败时降级）
         self.code_executor_agent = None
@@ -417,14 +412,6 @@ class AlphaHiveDailyReporter:
                         self.vector_memory.cleanup()
             except (ImportError, OSError, ValueError, RuntimeError) as e:
                 _log.warning("向量记忆初始化失败: %s", e)
-
-        # Week 4: 指标收集器
-        self.metrics = None
-        if MetricsCollector:
-            try:
-                self.metrics = MetricsCollector()
-            except (OSError, ValueError, RuntimeError) as e:
-                _log.warning("MetricsCollector 初始化失败: %s", e)
 
         # 财报自动监控器
         self.earnings_watcher = None
@@ -833,7 +820,7 @@ class AlphaHiveDailyReporter:
         return time.time() - ctx.start_time
 
     def _post_scan_metrics(self, ctx: '_SwarmContext', swarm_results: Dict, elapsed: float) -> None:
-        """扫描后指标：LLM 统计 + MetricsCollector + SLO 检查 + 回测 + 权重自适应 + DB 清理"""
+        """扫描后指标：LLM 统计 + 回测 + 权重自适应 + DB 清理"""
         _timing.record("swarm_total", elapsed)
         # LLM Token 使用统计
         try:
@@ -846,66 +833,8 @@ class AlphaHiveDailyReporter:
         except (ImportError, AttributeError, KeyError) as e:
             _log.info("蜂群耗时：%.1fs (LLM stats unavailable: %s)", elapsed, e)
 
-        # MetricsCollector 记录 + SLO
-        if self.metrics:
-            try:
-                scores = [d.get("final_score", 5.0) for d in swarm_results.values()]
-                agent_errors = sum(
-                    1 for d in swarm_results.values()
-                    if d.get("supporting_agents", 0) == 0
-                )
-                resonance_n = sum(
-                    1 for d in swarm_results.values()
-                    if d.get("resonance", {}).get("resonance_detected")
-                )
-                avg_real = (
-                    sum(d.get("data_real_pct", 0) for d in swarm_results.values()) / len(swarm_results)
-                    if swarm_results else 0
-                )
-                llm_c, llm_cost = 0, 0.0
-                try:
-                    import llm_service as _ls
-                    _u = _ls.get_usage()
-                    llm_c, llm_cost = _u.get("call_count", 0), _u.get("total_cost_usd", 0.0)
-                except (ImportError, AttributeError, KeyError):
-                    pass
-
-                self.metrics.record_scan(
-                    ticker_count=len(swarm_results),
-                    duration_seconds=elapsed,
-                    agent_count=len(ctx.all_agents),
-                    prefetch_seconds=ctx.prefetch_elapsed,
-                    avg_score=sum(scores) / len(scores) if scores else 5.0,
-                    max_score=max(scores) if scores else 5.0,
-                    min_score=min(scores) if scores else 5.0,
-                    agent_errors=agent_errors,
-                    agent_total=len(swarm_results) * len(ctx.all_agents),
-                    data_real_pct=avg_real,
-                    resonance_count=resonance_n,
-                    llm_calls=llm_c,
-                    llm_cost_usd=llm_cost,
-                    session_id=self._session_id or "",
-                    scan_mode="swarm",
-                )
-                for ticker, data in swarm_results.items():
-                    self.metrics.record_ticker(
-                        ticker=ticker,
-                        final_score=data.get("final_score", 5.0),
-                        direction=data.get("direction", "neutral"),
-                        supporting_agents=data.get("supporting_agents", 0),
-                        data_real_pct=data.get("data_real_pct", 0),
-                        resonance_detected=data.get("resonance", {}).get("resonance_detected", False),
-                        session_id=self._session_id or "",
-                    )
-
-                violations = self.metrics.check_slo(days=1)
-                if violations:
-                    _vio_text = "; ".join(v["details"] for v in violations)
-                    _log.warning("SLO 违规 %d 条: %s", len(violations), _vio_text)
-                    # SLO 违规仅写日志，不发 Slack DM（减少噪音）
-                    pass
-            except (OSError, ValueError, KeyError, TypeError) as e:
-                _log.warning("指标收集异常: %s", e)
+        # v0.45.534：此处曾写 MetricsCollector（metrics.db 三张表 + 30s SLO 检查）。零读者 / 只喂一行恒红日志，已退役；
+        # 扫描耗时由上面的 _timing.record("swarm_total") 落 logs/scan_timing.json。墓碑 tests/test_dead_chains_batch1_retired.py。
 
         # 回测反馈循环
         # v0.45.118：这一段 2026-09-04 实测 342s（逐条待检预测各发一次
@@ -1167,14 +1096,7 @@ class AlphaHiveDailyReporter:
                 _opp["thesis_break_l1"] = _sr["thesis_break_l1"]
                 _opp["thesis_break_l2"] = _sr["thesis_break_l2"]
 
-        # 保存会话
-        if self.memory_store and self._session_id:
-            snapshot = ctx.board.compact_snapshot()
-            self._submit_bg(
-                self.memory_store.save_session,
-                self._session_id, self.date_str, "swarm",
-                ctx.targets, swarm_results, snapshot, elapsed
-            )
+        # v0.45.534：此处曾把会话汇总写进 reasoning_sessions 表（零读者），已退役。
 
         # 向量记忆存储
         if self.vector_memory and self.vector_memory.enabled:
@@ -1646,12 +1568,10 @@ class AlphaHiveDailyReporter:
         return opportunities
 
     def _compute_sector_sentiment(self, swarm_results):
-        """P4a: 跨标的情绪传染网络（纯规则引擎，零 API 费用）— mutates swarm_results"""
+        """P4a: 板块平均情绪汇总（纯规则引擎，零 API 费用）——只读 swarm_results（v0.45.534 起不再改写它）"""
         sector_sentiment_summary = {}
         try:
-            from config import WATCHLIST, SENTIMENT_MOMENTUM_CONFIG as _SMC
-            _deviation_high = _SMC.get("sector_deviation_high", 15)
-            _deviation_mid = _SMC.get("sector_deviation_mid", 8)
+            from config import WATCHLIST
 
             # Step 1: 提取每个 ticker 的 BuzzBeeWhisper 情绪百分比
             _sector_sentiments: dict[str, list[tuple[str, float]]] = {}
@@ -1679,38 +1599,9 @@ class AlphaHiveDailyReporter:
                     _avg = sum(_p for _, _p in _items) / len(_items)
                     _sector_avgs[_sec] = round(_avg, 1)
 
-            # Step 3: 计算个股偏离 & 注入 swarm_results
-            for _tk, _sd in swarm_results.items():
-                _wl = WATCHLIST.get(_tk, {})
-                _sector = _wl.get("sector", "Other") if isinstance(_wl, dict) else "Other"
-                if _sector not in _sector_avgs:
-                    continue
-                _tk_pct = None
-                for _t, _p in _sector_sentiments.get(_sector, []):
-                    if _t == _tk:
-                        _tk_pct = _p
-                        break
-                if _tk_pct is None:
-                    continue
-                _dev = round(_tk_pct - _sector_avgs[_sector], 1)
-                if _dev > _deviation_high:
-                    _sig = "overheating"
-                elif _dev > _deviation_mid:
-                    _sig = "above_sector"
-                elif _dev < -_deviation_high:
-                    _sig = "undervalued"
-                elif _dev < -_deviation_mid:
-                    _sig = "below_sector"
-                else:
-                    _sig = "in_line"
-                _sd["sector_sentiment"] = {
-                    "sector": _sector,
-                    "sector_avg_pct": _sector_avgs[_sector],
-                    "ticker_pct": round(_tk_pct, 1),
-                    "deviation_ppt": _dev,
-                    "signal": _sig,
-                    "peers": [_t for _t, _ in _sector_sentiments[_sector] if _t != _tk],
-                }
+            # v0.45.534：原 Step 3（逐标的偏离 → swarm_results[t]["sector_sentiment"]）已删——它在 .swarm_results /
+            # 快照 / 档案都落盘**之后**才写进去，生产里从未被保存、零读者。板块均值汇总照旧进日报 JSON
+            # （`sector_sentiment_contagion`，已发布在 gh-pages，保留）。
 
             sector_sentiment_summary = {
                 sec: {"avg_pct": avg, "count": len(_sector_sentiments.get(sec, []))}
