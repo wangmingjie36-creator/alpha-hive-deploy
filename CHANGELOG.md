@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.549] — 2026-10-19 — 占位（进行中：v0.45.543 二次检查——Step 6 跨零点 + 同日重扫时误判 no_output）
+
 ## [0.45.548] — 2026-10-19 — Fixed：v0.45.538 二次检查——世代印记用「缺 `ml_adjustment` 键」，在 03-12 早期格式旧归档上误报 `boundary_too_late`；改成正面印记 `ml_auxiliary_in_score: False`；二阶 Guard 效应实测订正
 
 起因：用户要求二次检查 v0.45.538。对生产 1142 份 `analysis-*-ml-*.json` 跑 `cohort_boundary_evidence("v0.45.538")` ⇒
