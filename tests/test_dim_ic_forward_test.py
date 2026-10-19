@@ -57,7 +57,8 @@ def _no_forward_test_excluded_days(monkeypatch):
 DIMS = ("signal", "catalyst", "sentiment", "odds", "risk_adj")
 _TOP_KEYS_ALWAYS = {"forward_start", "today", "status", "h1_weeks", "next_look_at", "looks_done",
                     "verdicts", "truncation", "weight_change", "stale", "h1_anchor",
-                    "forward_test_excluded_days"}   # 修订 2（v0.45.484）：只是日期列表，不含效应量
+                    "forward_test_excluded_days",   # 修订 2（v0.45.484）：只是日期列表，不含效应量
+                    "input_code_guard"}             # v0.45.554：单元名与指纹状态，不含效应量
 
 #: 窗口首日（周一）。窗口内的夹具日期一律相对它写——修订 1 把起点从 09-28 挪到 10-12 时，
 #: 写死的日期整批落到窗口前，测试红的原因变成「夹具过期」而不是「执行器错了」
@@ -592,6 +593,63 @@ class TestRun:
         assert res["h1_anchor"]["state"] == "fallback"
         line = fx.status_line(res)
         assert line.startswith("⚠️") and "回退到原登记对象" in line
+
+
+class TestInputCodeGuard:
+    """v0.45.554：输入层代码有未确认的改动 ⇒ 检视点前 ⚠️、检视点上「无法判定」（协议 §6 按层声明的机械执行）。"""
+
+    BAD = {"ok": False, "unacknowledged": ["buzz.news"], "errors": {}}
+    OK = {"ok": True, "unacknowledged": [], "errors": {}}
+
+    def _repo(self, tmp_path):
+        return _config_repo(tmp_path, [("2026-09-09", dict(P.FROZEN_WEIGHTS))])
+
+    def test_real_code_passes_the_guard(self):
+        g = fx.input_code_guard()
+        assert g == {"ok": True, "unacknowledged": [], "errors": {}}, g
+
+    def test_before_a_look_it_is_a_warning_naming_the_unit(self, tmp_path):
+        res = fx.run(db_path=str(_make_db(tmp_path, [])), today=_d(-3), repo_root=self._repo(tmp_path),
+                     history=[], code_guard=self.BAD)
+        assert res["status"] == "not_ready" and res["input_code_guard"] == self.BAD
+        line = fx.status_line(res)
+        assert line.startswith("⚠️") and "buzz.news" in line and "signal_code_fingerprints.py" in line
+
+    def test_ok_guard_adds_no_warning(self, tmp_path):
+        res = fx.run(db_path=str(_make_db(tmp_path, [])), today=_d(-3), repo_root=self._repo(tmp_path),
+                     history=[], code_guard=self.OK)
+        assert "signal_code_fingerprints" not in fx.status_line(res)
+
+    @pytest.mark.parametrize("status", ["in_progress", "concluded"])
+    def test_at_a_look_it_blocks_any_verdict(self, status):
+        """判别：检视点上守卫不 ok ⇒ 不许带着 verdicts 出去（哪怕它们已经算出来了）。"""
+        res = {"forward_start": P.FORWARD_START, "today": _d(200), "status": status,
+               "verdicts": {"H1": {"result": "significant_positive", "ic": 0.2, "p": 0.001}},
+               "looks_done": ["中检"], "h1_weeks": 26, "next_look_at": 52}
+        out = fx.apply_code_guard(res, self.BAD)
+        assert out["status"] == "cannot_judge" and "buzz.news" in out["reason"]
+        assert "verdicts" not in out and not ({"ic", "p", "t", "ci95"} & set(_all_keys(out)))
+        assert fx.status_line(out).startswith("⚠️")
+
+    def test_at_a_look_an_ok_guard_passes_through(self):
+        res = {"status": "in_progress", "verdicts": {}, "looks_done": ["中检"], "h1_weeks": 26, "next_look_at": 52}
+        assert fx.apply_code_guard(res, self.OK)["status"] == "in_progress"
+
+    def test_guard_crash_is_not_ok(self, monkeypatch):
+        import signal_code_fingerprints as scf
+
+        def boom(*a, **k):
+            raise RuntimeError("模拟守卫崩溃")
+        monkeypatch.setattr(scf, "check", boom)
+        g = fx.input_code_guard()
+        assert g["ok"] is False and "模拟守卫崩溃" in g["errors"]["*"]
+
+    def test_guard_error_state_is_reported(self, monkeypatch):
+        import signal_code_fingerprints as scf
+        monkeypatch.setattr(scf, "check", lambda *a, **k: {"ok": False, "units": {
+            "price.fields": {"state": "error", "error": "定位不到"}}})
+        g = fx.input_code_guard()
+        assert g == {"ok": False, "unacknowledged": [], "errors": {"price.fields": "定位不到"}}
 
 
 # ── 6. 进度行 ───────────────────────────────────────────────────────────────

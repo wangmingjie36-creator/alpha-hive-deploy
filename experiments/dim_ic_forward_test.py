@@ -27,6 +27,9 @@
 9. 锚点 —— `anchor_status()`：`H1_ANCHOR_VERSION` 须在边界表里且早于 `FORWARD_START`；到窗口起点仍不满足 ⇒
    H1 回退到原登记对象（行为与第 8 条相同，只是对象名义不同），进度行标 ⚠️；截止前未登记在进度行提示截止日。
 10. 自证 —— 阶段 2 实现；本版没有评分器，因此也不吸收任何冻结层边界。
+11. 输入层代码指纹（v0.45.554，事前实现对齐：§6「按层声明」的机械执行）—— `input_code_guard()` /
+    `apply_code_guard()`。输入层代码有未确认的改动（`signal_code_fingerprints.ACKS` 没跟上）⇒ 进度行 ⚠️；
+    到检视点仍未确认 ⇒「无法判定」、不出结论。守卫自己坏了同样算不 ok。
 
 事前实现选择（协议没写到、这里补的；改动须在 CHANGELOG 标「事前实现对齐」或「事后」）
 ---------------------------------------------------------------------------------
@@ -516,11 +519,54 @@ def decide(h1_weeks: List[Tuple], h2_weeks: List[Tuple], P, *,
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# 输入层代码指纹守卫（v0.45.554，协议 §6「按层声明」的机械执行、§12 第 11 条）
+# ────────────────────────────────────────────────────────────────────────────
+
+def input_code_guard() -> Dict:
+    """`signal_code_fingerprints.check()` 的摘要：{"ok", "unacknowledged": [单元], "errors": {单元: 原因}}。
+
+    H1 是否该截断，取决于「输入层代码的每次改动都登记了」——这一前提由指纹守卫核对。
+    守卫自己加载 / 计算失败，同样当作不 ok（渲染成 ⚠️），不当作「没改动」。
+    """
+    try:
+        import signal_code_fingerprints as scf   # 调用时导入：它坏了只影响这一项，不拖垮整个执行器
+        res = scf.check()
+    except Exception as e:  # noqa: BLE001 —— 任何失败都必须变成可见的 ⚠️
+        return {"ok": False, "unacknowledged": [], "errors": {"*": f"{type(e).__name__}: {e}"}}
+    return {"ok": bool(res["ok"]),
+            "unacknowledged": [u for u, x in res["units"].items() if x["state"] == "unacknowledged"],
+            "errors": {u: x["error"] for u, x in res["units"].items() if x["state"] == "error"}}
+
+
+def _guard_problem(guard: Dict) -> str:
+    parts = []
+    if guard.get("unacknowledged"):
+        parts.append(f"输入层代码有未确认的改动（{'、'.join(guard['unacknowledged'])}）")
+    if guard.get("errors"):
+        parts.append("指纹守卫算不出：" + "；".join(f"{u}: {e}" for u, e in guard["errors"].items()))
+    return "；".join(parts) or "指纹守卫未通过"
+
+
+def apply_code_guard(res: Dict, guard: Dict) -> Dict:
+    """检视点（in_progress / concluded）上守卫不 ok ⇒ 改判「无法判定」、不出任何结论（盲化不变）。
+
+    未到检视点时只附上守卫状态，由进度行渲染成 ⚠️——还有时间去登记，不必提前作废什么。
+    """
+    if guard.get("ok") or res.get("status") not in ("in_progress", "concluded"):
+        return {**res, "input_code_guard": guard}
+    keep = {k: res[k] for k in ("forward_start", "today", "forward_test_excluded_days") if k in res}
+    return {**keep, "status": "cannot_judge", "input_code_guard": guard,
+            "reason": (f"{_guard_problem(guard)}——H1 该不该截断无法判定（协议 §6 按层声明），先跑 "
+                       "`signal_code_fingerprints.py` 按提示登记，再重跑本脚本")}
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # 编排
 # ────────────────────────────────────────────────────────────────────────────
 
 def run(db_path: Optional[str] = None, today: Optional[str] = None,
-        repo_root: Optional[Path] = None, history: Optional[list] = None) -> Dict:
+        repo_root: Optional[Path] = None, history: Optional[list] = None,
+        code_guard: Optional[Dict] = None) -> Dict:
     P = _protocol()
     today = today or dt.date.today().isoformat()
     base = {"forward_start": P.FORWARD_START, "today": today,
@@ -562,8 +608,9 @@ def run(db_path: Optional[str] = None, today: Optional[str] = None,
                  descriptive={d: series[d] for d in P.DESCRIPTIVE_DIMS})
     stale = (not rows and (dt.date.fromisoformat(today) - dt.date.fromisoformat(P.FORWARD_START)).days
              >= STALE_DAYS)
-    return {**base, **res, "truncation": {h1: trunc[h1], h2: trunc[h2]},
-            "weight_change": wchg, "stale": stale, "h1_anchor": anchor}
+    out = {**base, **res, "truncation": {h1: trunc[h1], h2: trunc[h2]},
+           "weight_change": wchg, "stale": stale, "h1_anchor": anchor}
+    return apply_code_guard(out, code_guard if code_guard is not None else input_code_guard())
 
 
 def status_line(res: Dict) -> str:
@@ -592,6 +639,10 @@ def status_line(res: Dict) -> str:
         warns.append(f"权重历史无法判定（{wc['unknown']}）")
     if res.get("stale"):
         warns.append(f"登记窗口起点 {res.get('forward_start')} 后仍无任何样本——扫描停了或路径错了")
+    guard = res.get("input_code_guard")
+    if guard is not None and not guard.get("ok"):
+        warns.append(f"{_guard_problem(guard)}——跑 signal_code_fingerprints.py 按提示登记；"
+                     "未登记前 H1 截断与否无法判定，到检视点将不出结论")
     tail = ("；⚠️ " + "；".join(warns)) if warns else ""
     tail += "".join(f"；{n}" for n in notes)
     if st == "concluded":

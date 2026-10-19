@@ -7,7 +7,80 @@
 
 ## [0.45.555] — 2026-10-19 — 占位（进行中：LLM 影子 A/B——独立入口 + 独立数据根 + 每日 $3 硬上限；llm_service 补 5.5 代模型定价/去 temperature/截断观测；Oracle 提示词精简；不进评分、不调 LLM 先落代码）
 
-## [0.45.554] — 2026-10-19 — 占位（进行中：buzz_v1 阶段 2 第 1 块——Buzz 通道代码指纹守卫：改了通道代码却没在世代边界点名通道 ⇒ 测试红）
+## [0.45.554] — 2026-10-19 — Added：输入层代码指纹守卫 `signal_code_fingerprints.py`（buzz_v1 阶段 2 第 1 块）——决定维度 IC 协议 H1 输入的代码一改，就必须登记一条确认（边界 / 测量误差修正 / 产出值不变），否则测试红、进度行 ⚠️、到检视点不出结论
+
+用户 2026-10-19 决定「先做第 1 块，开始阶段 2」。协议上是**事前实现对齐**（§13.10）：只把 §6「按层声明」变成会红的检查，规则、常量、窗口、检视点都没动，
+且只会让执行器更保守。
+
+### 问题
+
+维度 IC 协议修订 1 的 H1 只在**登记过**的输入层边界上截断。v0.45.330 的 `_buzz_scope_gaps` 只守一个方向：「点名了通道，必须连带点名分」。
+**反方向没人守**：改了通道或通道读的行情 / F&G 代码，却只点名分或干脆没登记——H1 会把一次输入层改动当成冻结层改动吸收掉。
+窗口 2026-10-12 已开，这种错不可逆（评分器 / 吸收那两块晚做只损失样本，这一块晚做损效度）。
+
+### Added
+
+- `signal_code_fingerprints.py`：
+  - `UNITS`：决定 H1 输入的代码切成 6 个单元——`buzz.channels`（`BuzzBeeWhisper.analyze` 里合成之前的全部语句 + 模块级辅助函数 +
+    `cache._safe_score` + config 的量比 / 波动率阈值）、`buzz.reddit` / `buzz.news` / `buzz.yahoo` / `buzz.fear_greed`（四个通道模块整文件）、
+    `price.fields`（`data_pipeline` / `cache` / `price_history` / `twelve_data` 里所有提到 `momentum_5d` / `volume_ratio` / `volatility_20d` 的顶层定义，
+    自动识别——新增一条算动量的路径，指纹自己就变）。各单元信号的并集恰好等于协议 `H1_INPUT_SIGNALS`。
+  - 指纹：去 docstring 后 `ast.unparse` 的 sha256 前 16 位——注释、空行、docstring 不影响；冻结层（合成权重、合成之后的调整）不在指纹里。
+    定位不到（文件 / 函数 / 赋值 / 阈值键不见了）⇒ 抛 `FingerprintError`，不当作「没变」。
+  - `ACKS`（只追加）+ `registry_problems()`：每次指纹变化一条确认。边界确认的 version 须在 `_COHORT_HISTORY`、在 `COHORT_SIGNAL_SCOPE` 声明过、
+    且经依赖边闭包触及该单元的信号（复用 `signal_archive.generation_boundaries()`）；`measurement_fix` / `no_value_change` 须写明凭什么（≥20 字）。
+  - `how_to_acknowledge()`：失配时告诉改代码的人三选一怎么登；CLI `python3 signal_code_fingerprints.py` 列各单元状态。
+- `experiments/dim_ic_forward_test.py`：`input_code_guard()`（调用时导入；守卫自己崩了也算不 ok）+ `apply_code_guard()`：
+  检视点前只在进度行加 ⚠️（点名单元）；检视点上（`in_progress` / `concluded`）守卫不 ok ⇒ 改判 `cannot_judge`、丢掉 verdicts（盲化不变）。
+  `run()` 多一个 `input_code_guard` 键、可注入 `code_guard`。
+- 协议文档：§6 指向守卫、§12 第 11 条、新增 §13.10（缺口 / 做法 / 基线 / 为什么是事前实现对齐 / 为什么不可能受结果影响 / 已知不管的）。
+
+### 基线：窗口审计（不拿今天的代码当基线）
+
+在每个扫描日实际运行的 commit 上重算指纹（commit 由生产日志 `alpha_hive.code_version` 反推：10-09 acae617f / 10-12 0993efde / 10-13 c39baa27 /
+10-14·15 fb3a8d46 / 10-16 54c3d411）：
+
+| 单元 | 10-09 → 10-12 | 窗口内（10-12 → 今天） |
+|---|---|---|
+| buzz.channels / reddit / news / yahoo / fear_greed | 不变 | 不变（今天 v0.45.534 删的基线写入在分数算完之后、不在通道块里） |
+| price.fields | 变（当天上午 v0.45.462~477，在首个窗口扫描之前 ⇒ 属起点） | **10-16 变一次：v0.45.505** |
+
+- 6 个单元的 `baseline` = 10-12 首个窗口扫描实际运行的代码。
+- **v0.45.505 登记为 `measurement_fix`**：收盘后扫描里旧 Twelve Data 兜底把前一交易日的量比记成当天（用错场次），修法是拒收、不是换函数；
+  窗口内被污染的 10-14 共 29 行已由 v0.45.508 隔离。同 v0.45.463/465 先例不登记边界。⚠️ 若改登边界，它点名 `price.volume_ratio`（H1 输入层），
+  会在 10-16 截断 H1、截断前只有 1 个合格周 ⇒ H1 直接判无法检验。v0.45.505 当时写「待用户确认」，本版把判断登记在案并提请用户确认。
+  10-12/13/15 是否也有旧兜底污染：本版未逐日核（待验证）。
+
+### 测试
+
+- `tests/test_signal_code_fingerprints.py`（新，39 条）：守卫本体（失配时报错信息就是登记说明）；灵敏度——通道公式 / 阈值 / `_safe_score` /
+  兜底动量窗口改一处 ⇒ 变，新增一条算 `volume_ratio` 的路径 ⇒ 变，四个通道模块任意代码改动 ⇒ 变；**只改注释 / docstring ⇒ 不变**；
+  **改合成权重、改合成之后的计算 ⇒ 不变**（冻结层改动不许被要求输入层确认）；共享大模块里不相干的函数 ⇒ 不变；定位不到（合成赋值改名、
+  被指名的函数改名、阈值键改名、文件里没有行情字段定义、文件不见了）⇒ 抛 / 报 error；登记表合成用例 8 种毛病各报一次；
+  覆盖 = `H1_INPUT_SIGNALS`、不含冻结层。
+- `tests/test_dim_ic_forward_test.py`：真实代码过守卫；检视点前 ⚠️ 点名单元；ok 不加噪音；检视点上拦住 verdicts（`in_progress` / `concluded` 各一）；
+  守卫崩溃 / 报 error 都算不 ok；白名单键加 `input_code_guard`。
+
+### 变异测试（真跑，13/13 被杀，0 存活）
+
+不去 docstring、通道块把合成及之后也算进去、行情字段只取第一个定义、算不出指纹当 ok、边界确认不查是否触及该单元、未声明影响面也收、
+F&G 单元漏 `market.fear_greed`、找不到顶层定义静默给空（**首轮存活**——确认一次之后该单元就永远不再跟踪那段代码；补了「被指名的函数 / 阈值键改名
+⇒ 抛」后被杀）、不查说明长度、检视点上从不拦、进度行不报守卫、守卫崩溃当 ok、`run()` 不接守卫。每次从保存的原文恢复并核对逐字节一致，禁用 pyc。
+
+### 核对
+
+- 协议 / 执行器 / 指纹 / 就绪度闸 / 世代边界 / 路径冻结 6 个测试文件 424 passed（另 1 个并发写入 ERROR，见下）；ruff All checks passed。
+- 全量（`--maxfail=1000`）：10363 passed / 1 failed / 2 xfailed / 84 deselected / 1 error。失败 = 既有设计红 `TestCoverageHorizon`；
+  ERROR = 数据根 session 级闸，闸自己逐项核实 5 个文件（`alphabot_state/intraday/2026-10-19/*.jsonl`）全是 Alpha Bot 盘中采样的末尾追加、
+  原内容逐字节未变，不是测试写的（pytest 记在收集序最后一条测试名下，与该测试无关）。
+- 冒烟（生产库只读）：`input_code_guard = {'ok': True, …}`；进度行与改前逐字相同（`⏳ … H1 已结算合格周 0/26（窗口自 2026-10-12）`）。
+- 中途一次 1 ERROR：数据根守卫报 `alphabot_state/intraday/2026-10-19/META.jsonl` 被写——盘中 Alpha Bot 采样（并发写入者），
+  本版测试只读源码；单独重跑 190 passed、0 error。
+
+### 未做 / 下一步
+
+- **阶段 2 第 2 块**：冻结评分器 + 自证（09-28 起每天与生产分逐位一致、缺输入行 = 0）。**第 3 块**：自证通过后吸收冻结层边界。
+- 请用户确认 v0.45.505 的 `measurement_fix` 归类（见上）。
 
 ## [0.45.553] — 2026-10-19 — Fixed：v0.45.551 二次检查——同日后来训的模型会冲掉早上那份快照（报告指纹就对不上了）；快照改为同日多模型并存、manifest 记模型指纹
 
