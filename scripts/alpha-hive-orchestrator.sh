@@ -220,6 +220,76 @@ run_step() {
 }
 
 # ================================================================
+# 步骤产出后置条件（v0.45.543）：退出码 0 ≠ 干成了
+# ================================================================
+# 墓碑：v0.45.534 删掉的 Step 8 没有 __main__，每天 0 秒退出 0、记 success——run_step 只看退出码，
+# 「脚本根本没干活」与「干成了」同为 0。Step 2/4/10–15 经步骤解释器核对本轮 --out JSON（stale_json /
+# missing_json 早已会红）；其余只看退出码的步骤（Step 1 / 3 / 6）在这里声明产出：
+#   · 跑之前 `_STEPn_MARK="$(_step_marker)"`（建一个空文件，mtime = 本步开始）
+#   · 退出码 0 之后 `_no_output <key> <rc> <duration> <marker> <产出路径>...`：
+#     任一产出不存在、或比标记旧（不是本步写的）⇒ 记 {"status":"failed","reason":"no_output","missing":[…]}
+#     + ERROR 日志，返回 0（= 「是，没产出」），调用方随后按该步 rc≠0 支的口径处理整体状态。
+#   · 新鲜度只用 bash 内建 `-ot`（不用 stat -f：Linux CI 上语义不同）；同一秒写出不算旧。
+#   · 标记建不了 ⇒ 退到只核「存在」，日志 WARN 说明未核新鲜度（文件根本不在照样判 no_output）。
+# 每个 run_step 调用归哪一类（解释器 / 后置条件 / 回读记录 / 豁免）登记在
+# tests/test_orchestrator_step_postconditions.py::STEP_OUTPUTS，新增 run_step 不登记即红。
+_step_marker() {
+    local _m=""
+    _m="$(mktemp "${TMPDIR:-/tmp}/alpha_hive_stepmark.XXXXXX" 2>/dev/null)" \
+        || _m="$(mktemp "${LOGDIR:-/tmp}/alpha_hive_stepmark.XXXXXX" 2>/dev/null)" \
+        || _m=""
+    printf '%s' "${_m}"
+}
+
+# 用法：_postcondition <marker|""> <path>...；设 _PC_MISSING（换行分隔的缺失 / 陈旧文件名）与 _PC_FRESHNESS（checked|unchecked）
+# 返回 0 = 全部在且是本步写的；1 = 有缺
+_postcondition() {
+    local _mark="$1" _p=""
+    shift
+    _PC_MISSING=""
+    _PC_FRESHNESS="checked"
+    if [ -z "${_mark}" ] || [ ! -f "${_mark}" ]; then
+        _PC_FRESHNESS="unchecked"
+    fi
+    for _p in "$@"; do
+        if [ ! -f "${_p}" ]; then
+            _PC_MISSING="${_PC_MISSING}$(basename "${_p}")
+"
+        elif [ "${_PC_FRESHNESS}" = "checked" ] && [ "${_p}" -ot "${_mark}" ]; then
+            _PC_MISSING="${_PC_MISSING}$(basename "${_p}")（旧文件，不是本步写的）
+"
+        fi
+    done
+    [ -z "${_PC_MISSING}" ]
+}
+
+# 用法：_no_output <key> <rc> <duration> <marker|""> <path>...
+# 返回 0 = rc 为 0 但产出缺失，已写 STEPS_RESULT[key] 与 ERROR 日志；返回 1 = 不归它管（rc≠0 或产出齐全）。
+# 用完删标记文件。
+_no_output() {
+    local _key="$1" _rc="$2" _dur="$3" _mark="$4" _miss_json=""
+    shift 4
+    if [ "${_rc}" != "0" ]; then
+        [ -n "${_mark}" ] && rm -f "${_mark}"
+        return 1
+    fi
+    if _postcondition "${_mark}" "$@"; then
+        if [ "${_PC_FRESHNESS}" = "unchecked" ]; then
+            log "WARN" "⚠️ ${_key}：建不了步骤标记文件，只核了产出存在、未核是不是本步写的"
+        fi
+        [ -n "${_mark}" ] && rm -f "${_mark}"
+        return 1
+    fi
+    [ -n "${_mark}" ] && rm -f "${_mark}"
+    _miss_json="$(printf '%s' "${_PC_MISSING}" | jq -R . | jq -sc .)"
+    case "${_dur}" in ''|*[!0-9]*) _dur=0 ;; esac
+    log "ERROR" "🚨 ${_key}：退出码 0 但没有本轮产出——$(printf '%s' "${_PC_MISSING}" | tr '\n' ' ')（记 failed:no_output）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq --arg k "${_key}" --argjson m "${_miss_json:-[]}" --argjson d "${_dur}" \
+        '. + {($k): {"status": "failed", "reason": "no_output", "missing": $m, "duration_seconds": $d}}')
+    return 0
+}
+
+# ================================================================
 # 步骤解释器接线（B）：Step 2/4/10/11/12/13/15 的「退出码 + --out JSON → 日志 + steps_result 片段」
 # 唯一真相在 orchestrator_steps.py（有测试）。bash 只做三件事：调用、校验形状、合并。
 #   · 恒不中断扫描、恒不调 set_status：OVERALL_STATUS 只由 Step 2 调用点按 STEP2_RC 定（与 B 之前逐支相同）
@@ -1156,12 +1226,21 @@ else
         # skipped 覆盖成 success，又是一个假标签。
         STEP3_RC=3
     else
+    _STEP3_MARK="$(_step_marker)"
     run_step --timeout 600 "$PROJECT_DIR/generate_ml_report.py" --tickers $MISSING_TICKERS >> "$LOGFILE" 2>&1
     STEP3_RC=$?
     fi
     STEP3_END=$(date +%s)
     STEP3_DURATION=$((STEP3_END - STEP3_START))
-    if [ $STEP3_RC -eq 3 ]; then
+    # 后置条件（v0.45.543）：要它补的每一只都得有本轮写出的 ML HTML（文件名同上面的「已生成」判据）。
+    # no_output 同 rc≠0 支：整体 partial。跨日跳过（rc=3）不归它管。bash 3.2 + set -u：空数组展开会报未定义，用 ${A[@]+…} 写法。
+    _STEP3_OUTPUTS=()
+    for _t in $MISSING_TICKERS; do
+        _STEP3_OUTPUTS+=("$DATA_DIR/alpha-hive-${_t}-ml-enhanced-${DATE_STR}.html")
+    done
+    if _no_output step3_ml_report "$STEP3_RC" "$STEP3_DURATION" "${_STEP3_MARK:-}" ${_STEP3_OUTPUTS[@]+"${_STEP3_OUTPUTS[@]}"}; then
+        set_status partial
+    elif [ $STEP3_RC -eq 3 ]; then
         # v0.45.95：跨日跳过。不计入 OVERALL_STATUS —— 这是主动的正确选择，
         # 不是失败；但也绝不能标成 success。
         STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step3_ml_report\": {\"status\": \"skipped\", \"reason\": \"date_rolled_over\", \"run_date\": \"$DATE_STR\", \"now\": \"$_NOW_DATE\"}}")
@@ -1295,11 +1374,20 @@ log "INFO" ""
 log "INFO" "【Step 6/6】智能告警分析 - 启动"
 STEP6_START=$(date +%s)
 
+_STEP6_MARK="$(_step_marker)"
 run_step --timeout 300 "$PROJECT_DIR/alert_manager.py" --status-json "$REPORTDIR/status.json" --output-dir "$LOGDIR" >> "$LOGFILE" 2>&1
 STEP6_RC=$?
 STEP6_END=$(date +%s)
 STEP6_DURATION=$((STEP6_END - STEP6_START))
-if [ $STEP6_RC -eq 0 ]; then
+# 后置条件（v0.45.543）：alert_manager 无论有无告警都写 alerts-<日期>.json（v0.45.543 起；此前无告警不写）。
+# 它按 datetime.now() 取日期 ⇒ 跨零点时是次日的文件：两个名字任一是本步写的就算。no_output 同 rc≠0 支：不升级整体状态。
+_STEP6_ALERTS="$LOGDIR/alerts-${DATE_STR}.json"
+if [ $STEP6_RC -eq 0 ] && [ ! -f "${_STEP6_ALERTS}" ]; then
+    _STEP6_ALERTS="$LOGDIR/alerts-$(date +%Y-%m-%d).json"
+fi
+if _no_output step6_alert_analysis "$STEP6_RC" "$STEP6_DURATION" "${_STEP6_MARK}" "${_STEP6_ALERTS}"; then
+    :
+elif [ $STEP6_RC -eq 0 ]; then
     log "INFO" "✅ Step 6 成功（耗时 ${STEP6_DURATION}s）"
     STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step6_alert_analysis\": {\"status\": \"success\", \"duration_seconds\": $STEP6_DURATION}}")
 elif [ $STEP6_RC -eq 124 ]; then

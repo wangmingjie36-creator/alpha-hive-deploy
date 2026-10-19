@@ -891,7 +891,9 @@ class AlertAnalyzer:
             "critical_count": len(self.get_critical_alerts()),
             "high_count": len(self.get_high_alerts()),
             "medium_count": len(self.get_medium_alerts()),
-            "alerts": [a.to_dict() for a in self.alerts]
+            "alerts": [a.to_dict() for a in self.alerts],
+            # v0.45.543：无告警也写本文件 ⇒「没告警」与「检查没跑全」要能从文件里分开
+            "checks_skipped": list(getattr(self, "checks_skipped", []) or []),
         }
 
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -971,6 +973,12 @@ def main():
     analyzer = AlertAnalyzer()
     alerts = analyzer.analyze(Path(args.status_json))
 
+    # 2. 保存告警——v0.45.543 起**无告警也写**（alerts 为空列表）：编排器 Step 6 以「本步写出了
+    # alerts-<日期>.json」为后置条件，此前无告警不写文件 ⇒ 退出码 0 是唯一证据，与「什么都没干」分不开
+    # （v0.45.534 删掉的 Step 8 就是这样天天记 success）。文件只给人看，没有代码读者。
+    output_path = Path(args.output_dir) / f"alerts-{datetime.now().strftime('%Y-%m-%d')}.json"
+    analyzer.save_alerts(output_path)
+
     if not alerts:
         # v0.45.47：只有**全部检查都执行过**才敢说 healthy
         if analyzer.checks_skipped:
@@ -981,9 +989,6 @@ def main():
             _log.info("No alerts detected - system healthy")
         return
 
-    # 2. 保存告警
-    output_path = Path(args.output_dir) / f"alerts-{datetime.now().strftime('%Y-%m-%d')}.json"
-    analyzer.save_alerts(output_path)
     _log.info("Alerts saved: %s", output_path)
     _log.info("   Critical: %d", len(analyzer.get_critical_alerts()))
     _log.info("   High: %d", len(analyzer.get_high_alerts()))
