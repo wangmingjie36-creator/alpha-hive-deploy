@@ -59,19 +59,60 @@ def _pdt_now():
         return datetime.now()
 
 
+def model_fingerprint(model) -> dict:
+    """本进程实际用来打分的那个模型的身份证，随每份报告写进 `ml_prediction.model`。
+
+    `sha256`（前 16 位）取自 `pickle.dumps(model._clf)`——HGB 的 `save_model` 写进 JSON 的 `model_bytes`
+    正是这份字节的 base64 ⇒ 报告可以直接对上 `ml_model_history` 里的快照。没有 `_clf` 的降级模型
+    （SimpleMLModel）退用权重的 JSON。算不出来时 `sha256=None` 并写明 `fingerprint_error`，
+    不让「没记」看起来像「没有」。读者：`ml_model_guard.check_day`（当日指纹清单进判定描述）。
+    """
+    import hashlib
+    import pickle
+
+    fp = {
+        "sha256": None,
+        "model_type": type(model).__name__,
+        "n_samples_seen": getattr(model, "_n_samples_seen", None),
+        "training_accuracy": getattr(model, "training_accuracy", None),
+        "oos_accuracy": getattr(model, "oos_accuracy", None),
+        "trained_at": _pdt_now().isoformat(),
+    }
+    try:
+        clf = getattr(model, "_clf", None)
+        if clf is not None and getattr(model, "_fitted", getattr(model, "is_trained", False)):
+            payload = pickle.dumps(clf)
+        else:
+            payload = json.dumps(getattr(model, "weights", {}), sort_keys=True, default=str).encode("utf-8")
+        fp["sha256"] = hashlib.sha256(payload).hexdigest()[:16]
+    except Exception as e:  # noqa: BLE001 —— 记下原因、照常出报告；守卫按 sha256=None 计数
+        fp["fingerprint_error"] = f"{type(e).__name__}: {e}"
+        _log.warning("ML 模型指纹计算失败（报告照出，指纹记为 None）：%s", fp["fingerprint_error"])
+    return fp
+
+
 class MLEnhancedReportGenerator:
     """ML 增强的报告生成器"""
 
-    # ⭐ Task 2: 全局模型缓存（类级别，跨实例共享 + 磁盘持久化）
-    _model_cache = {}          # 内存缓存（同一进程内）
-    _cache_date = None         # 缓存日期
-    _training_lock = Lock()    # 防止并发重复训练
+    # 模型只在**本进程内**复用：{PDT 日期: (模型, 指纹)}，同一进程多份报告共用一次训练。
+    #
+    # v0.45.551：**不再读回磁盘上的 `ml_model_cache.json`**。此前「文件 mtime 是今天（PDT）」就整天照用、
+    # 不核来源 ⇒ 当天更早任何进程写进去的模型都会被扫描当成自己的：2026-08-29 03:08 / 09-04 10:38 两次
+    # pytest 进程经当时冻结的类属性把一个 200 样本模型写进生产 cache，当天扫描启动即读进这里，后来扫描
+    # 自己把真模型写回磁盘也救不回 ⇒ 两天报告 12/12 份概率逐位相同（0.149 / 0.590，已逐位复现，见
+    # CHANGELOG 0.45.551）。缓存的有效期键（日期）不是模型真正的依赖（库内容 + 代码），而训练本身确定性
+    # 且约 1 秒（random_state=42，生产库副本上两个独立进程训出的模型字节相同）⇒ 读回缓存省不下什么，
+    # 却要信任别人写的文件。`ml_model_cache.json` 仍照写，只作事后取证（`ml_model_history` 快照），
+    # **勿把读回接回来**；守卫 `tests/test_ml_report_no_disk_model_cache.py`。
+    _model_cache = {}
+    _training_lock = Lock()    # 防止同进程并发重复训练
     # ⚠️ v0.45.149：这里**不能**是类属性。它曾是
     #     `_model_file = PATHS.home / "ml_model_cache.json"`
     # —— 类体在 import 那一刻求值一次就冻住，而 `tests/` 里有 7 个模块在**模块级**
     # import 本类，pytest 收集期跑在任何 fixture 之前（`ALPHA_HIVE_HOME` 尚未设），
     # 于是整个 session 冻成**仓库根**，`_isolate_env` 的沙箱对它完全无效
-    # ⇒ 跑一次全套测试就把生产真正读的那份模型换成了测试夹具模型。
+    # ⇒ 跑一次全套测试就把生产 cache 换成了测试进程训的模型（08-28 / 09-04 的真因，见上；
+    # 不是 n=30 / n=35 的夹具——那是 v0.45.148/149 的误判，2026-10-19 更正）。
     # property 是调用时求值，写不出这个 bug。
 
     # ⭐ Task 3: 异步 HTML 生成（后台文件写入）
@@ -95,60 +136,45 @@ class MLEnhancedReportGenerator:
             MLEnhancedReportGenerator._file_writer_pool = ThreadPoolExecutor(max_workers=3)
             atexit.register(MLEnhancedReportGenerator._file_writer_pool.shutdown, wait=True)
 
-        # ⭐ Task 2: 智能缓存策略（内存 + 磁盘）
         today = pdt_today()
-
-        # 策略 1：检查内存缓存（同一进程内的快速复用）
-        if today in self._model_cache:
-            _log.info("复用内存缓存 ML 模型（无需重新训练）")
-            self.ml_service.model = self._model_cache[today]
-
-        # 策略 2：检查磁盘缓存（跨进程的缓存）
-        elif self._check_disk_cache(today):
-            _log.info("复用磁盘缓存 ML 模型（昨日已训练）")
-            self._load_model_from_disk()
-            # 同时更新内存缓存
-            self._model_cache[today] = self.ml_service.model
-            self._cache_date = today
-
-        # 策略 3：需要训练
-        else:
-            with self._training_lock:
-                # 双重检查（防止并发重复训练）
-                if today not in self._model_cache and not self._check_disk_cache(today):
-                    _log.info("初始化 ML 模型（首次训练）...")
-                    real_data = self._build_real_training_data()
-                    if len(real_data) >= self.MIN_REAL_SAMPLES:
-                        _log.info("✅ [ML-REAL] 使用 %d 条真实验证数据训练 ML 模型", len(real_data))
-                        self._training_data_source = "real"
-                        self.ml_service.data_builder.historical_records = real_data
-                    else:
-                        if real_data:
-                            _log.warning(
-                                "⚠️ [ML-MIXED] 真实数据仅 %d 条（不足 %d），"
-                                "回退到硬编码样本训练，预测置信度受限",
-                                len(real_data), self.MIN_REAL_SAMPLES,
-                            )
-                        else:
-                            _log.warning(
-                                "⚠️ [ML-SAMPLE] 无真实验证数据，使用硬编码样本训练，"
-                                "预测结果仅供参考（请积累 %d+ 条 T+7 验证记录后重训）",
-                                self.MIN_REAL_SAMPLES,
-                            )
-                        self._training_data_source = "sample"
-                    self.ml_service.train_model()
-                    # 缓存到内存
-                    self._model_cache[today] = self.ml_service.model
-                    self._cache_date = today
-                    # 缓存到磁盘（供后续进程使用）
-                    self._save_model_to_disk()
+        with self._training_lock:
+            if today in self._model_cache:
+                _log.info("复用本进程已训练的 ML 模型（无需重新训练）")
+            else:
+                _log.info("初始化 ML 模型（本进程首次训练）...")
+                real_data = self._build_real_training_data()
+                if len(real_data) >= self.MIN_REAL_SAMPLES:
+                    _log.info("✅ [ML-REAL] 使用 %d 条真实验证数据训练 ML 模型", len(real_data))
+                    source = "real"
+                    self.ml_service.data_builder.historical_records = real_data
                 else:
-                    # 另一个线程已经训练，从缓存中恢复
-                    if today in self._model_cache:
-                        self.ml_service.model = self._model_cache[today]
+                    if real_data:
+                        _log.warning(
+                            "⚠️ [ML-MIXED] 真实数据仅 %d 条（不足 %d），"
+                            "回退到硬编码样本训练，预测置信度受限",
+                            len(real_data), self.MIN_REAL_SAMPLES,
+                        )
                     else:
-                        self._load_model_from_disk()
-                        self._model_cache[today] = self.ml_service.model
+                        _log.warning(
+                            "⚠️ [ML-SAMPLE] 无真实验证数据，使用硬编码样本训练，"
+                            "预测结果仅供参考（请积累 %d+ 条 T+7 验证记录后重训）",
+                            self.MIN_REAL_SAMPLES,
+                        )
+                    source = "sample"
+                self.ml_service.train_model()
+                fp = model_fingerprint(self.ml_service.model)
+                fp["training_data_source"] = source
+                self._model_cache[today] = (self.ml_service.model, fp)
+                _log.info("ML 模型指纹 %s（n=%s，OOS=%s）",
+                          fp.get("sha256"), fp.get("n_samples_seen"), fp.get("oos_accuracy"))
+                # 只写不读：供事后取证（save_model 内挂 ml_model_history 快照）
+                self._save_model_to_disk()
+            model, fp = self._model_cache[today]
+        self.ml_service.model = model
+        # 指纹随每份报告落盘（`ml_prediction.model`）：哪天的概率出自哪个模型，不用再翻日志重建。
+        # 此前缓存命中的实例 `_training_data_source` 恒为 "unknown"（08-28 / 09-04 记录里全是它）。
+        self._model_fingerprint = dict(fp)
+        self._training_data_source = fp.get("training_data_source", "unknown")
 
     def _build_real_training_data(self) -> list:
         """从 pheromone.db 读取真实验证数据构建训练集（T+7 已验证）。
@@ -202,44 +228,13 @@ class MLEnhancedReportGenerator:
             max_rows=max_rows,
         )
 
-    def _check_disk_cache(self, today: str) -> bool:
-        """检查磁盘缓存是否存在且有效"""
-        try:
-            if not self._model_file.exists():
-                return False
-
-            # 检查文件修改时间是否是今天（PDT 口径，与 today=pdt_today() 一致）。
-            # 否则本机上海时区渲染的 file_date 与 PDT today 在晚间窗口恒不相等 → 缓存永不命中、每次重训。
-            import os
-            mtime = os.path.getmtime(str(self._model_file))
-            try:
-                from zoneinfo import ZoneInfo
-                file_date = datetime.fromtimestamp(mtime, ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
-            except Exception:
-                file_date = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
-            return file_date == today
-        except (FileNotFoundError, OSError, KeyError, ValueError, json.JSONDecodeError) as e:
-            # 缓存检查失败，重新训练
-            return False
-
     @property
     def _model_file(self):
-        """磁盘缓存文件（JSON，安全序列化）。见类体顶部为何必须是 property。"""
+        """取证副本落点（`ml_model_cache.json`，只写不读）。见类体顶部为何必须是 property。"""
         return PATHS.ml_model_cache
 
-    def _load_model_from_disk(self):
-        """从磁盘加载模型（委托给 model.load_model，兼容 SGD/Simple 格式）"""
-        try:
-            result = self.ml_service.model.load_model(str(self._model_file))
-            if not result:
-                _log.warning("磁盘缓存加载返回 False，将重新训练")
-                self.ml_service.train_model()
-        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError) as e:
-            _log.warning("磁盘缓存加载失败：%s，将重新训练", e)
-            self.ml_service.train_model()
-
     def _save_model_to_disk(self):
-        """保存模型到磁盘（委托给 model.save_model，SGD/Simple 均支持 JSON）"""
+        """把本进程训出的模型写成取证副本（委托 model.save_model；save_model 内会快照进 ml_model_history）。"""
         try:
             self.ml_service.model.save_model(str(self._model_file))
         except (TypeError, OSError) as e:
@@ -365,6 +360,8 @@ class MLEnhancedReportGenerator:
                 "training_data_source": self._training_data_source,  # "real"/"sample"/"unknown"
                 # v0.45.50：输入特征里有几个是补齐的（空 = 全部为真实观测）
                 "input_features_missing": list(getattr(self, "_ml_input_missing", [])),
+                # v0.45.551：出这条概率的模型是哪个（见 `model_fingerprint`）；`__new__` 构造的实例没有它 ⇒ None
+                "model": dict(getattr(self, "_model_fingerprint", None) or {}) or None,
             },
             "combined_recommendation": {
                 **self._combine_recommendations(advanced_analysis, ml_prediction),

@@ -5,7 +5,63 @@
 
 ---
 
-## [0.45.551] — 2026-10-19 — 占位（进行中：ML 报告不再读磁盘模型缓存、报告记录模型指纹）
+## [0.45.551] — 2026-10-19 — Fixed：ML 报告生成器不再读回磁盘上的 `ml_model_cache.json`（08-28 / 09-04 常数概率的真因，已逐位复现）；每份报告记下出概率的模型指纹
+
+用户决定（2026-10-19）：「按方案修：删磁盘 cache 读取、报告记录模型指纹、配会红的测试与守卫、更正代码注释，占号写 CHANGELOG」。
+
+### 为什么（重查结论，订正 v0.45.148 / 149）
+- 2026-08-28 / 09-04 两天 ML 报告 12/12 份概率逐位相同（`0.14901620144018954` / `0.5899693787928219`）。v0.45.148 / 149 归因于
+  「`save_model` 相对路径默认值 + 测试里 `svc.train_model()` 的 n=35 夹具覆盖 `ml_model.json`」，并把 `n=30 / oos None` 定为「被夹具覆盖」的机读签名。
+  **这三点都不对**（上层结论「跑 pytest 污染了生产模型」是对的）：
+  1. 被污染的是报告真正读的 **`ml_model_cache.json`**：pytest 进程（日志同秒有 `TestAgent` / `SUPER_BULLISH` / `[TEST]`；08-29 03:08:41、
+     09-04 10:38:31）里的 `MLEnhancedReportGenerator.__init__` 经当时 import 期冻结的类属性 `_model_file` 写到仓库根（当时的生产位置）。
+  2. 写进去的是 **n=200 的 HGB**（102 轮 / OOS 42.0 / in-sample 93.5；41 轮 / 56.0 / 83.0）：`_build_real_training_data` 走 import 期冻结的
+     `backtester.DB_PATH`（生产库）取前 200 条，`build_training_data_from_db` 在沙箱里拿空集 ⇒ 回落用这 200 条（日志「使用 200 条硬编码数据」是误导）。
+     n=200 ≥ 校准门槛 100 ⇒ 不收缩，0.149 才可能出现。
+  3. **为什么扫描自己救不回**：缓存规则是「文件 mtime 是今天（PDT）就照用、不核来源」。当天扫描一启动就把它读进类级 `_model_cache`；当时的
+     「ML 增量学习」随后把真 497 样本模型写回磁盘（09:08:38 / 14:59:17），出报告（09:10 / 15:02）用的仍是内存那份。
+  - `n=30 / 96.67 / oos None`（09-07 01:15 的 `ml_model.json`）是 pytest 里**一个跑 RivalBee 的测试**写的 Rival 合成模型（与 `ml_predictor_extended`
+    30 条硬编码样本训出的 `model_bytes` 逐字节相同），v0.45.538 前每次生产扫描也都写它（`ml_model_history` 09-08~10-16 的 ml_model 快照 28/29 份是它）
+    ⇒ 「oos None = 夹具签名」不成立；真正污染报告的 n=200 模型 oos 有值，`PoisonedModelError` 拦不住。
+  - 08-28 另两只（NVDA / TSLA `0.515218499184382`）是 08-28 14:42 **另一个进程**里健康的 497 样本模型（iv / pcr 为 NaN），不是「同一常数模型的另一条路径」。
+- **复现（只读）**：git archive 当天代码 + 09-09 库备份副本，把 `checked_t7` 截到 08-14 / 08-25 重训，指纹（轮数 / OOS / in-sample）对上日志，
+  按 `_prepare_ml_input` 从 JSON 还原 12 维输入重放 ⇒ 两天各 12/12 **逐位吻合**；NVDA / TSLA 用 `eaddfe3e` 真模型重放同样逐位吻合。
+  Rival 合成模型重放得 0.5803 / 0.5497（且 n=30 校准值域 [0.35, 0.65] 排除 0.149）⇒ 它没进这两天的报告。
+  证据全文：`side-session-notes/local_13678f4b-…/constant-model-days-reattribution.md`；auto-memory `alpha-hive-constant-model-days.md` 顶部更正节。
+- **现状**：污染入口已由 v0.45.149（`_model_file` property）/ 150（`DB_PATH` 不冻结）/ 422（conftest 收集前设沙箱）堵上；「同进程重训救不回」随 v0.45.547 删
+  增量学习而消失。**残留的是信任本身**：当天更早任何进程（手动跑的工具、别的检出、泄漏的测试）写进数据根的模型，扫描都会整天照用、不重训。
+  而这份信任换来的只是省一次训练：生产库副本实测训练约 **1 秒**、两个独立进程训出的模型 **sha 相同**（random_state=42）⇒ 读回缓存省不下什么。
+
+### Changed
+- `generate_ml_report.MLEnhancedReportGenerator.__init__`：**删掉磁盘读回**（`_check_disk_cache` / `_load_model_from_disk` 整个删除）。每个进程自己训一次，
+  进程内类级缓存保留（同进程多份报告共用一次训练）。`ml_model_cache.json` 照写，**只写不读**（取证副本，`save_model` 内照常快照进 `ml_model_history`）。
+  - 行为差异（订正 v0.45.547「唯一行为差异」那句）：当天扫描**之后**再启动的进程（Step 3 补跑、手动报告）不再沿用早上那个模型，而是按当时的库重训；
+    库没变则逐位相同，库变了则是新模型——两者都随报告记指纹，可区分。正常日扫描本就是当天第一个训练的进程（缓存是昨天的），分数与概率不变。
+  - 顺带修：缓存命中的实例 `training_data_source` 恒为 `"unknown"`（08-28 / 09-04 记录里全是它）——现随模型一起存、每个实例都对。
+- `tests/test_persistent_writes_have_readers.py`：`ml_model_cache.json` 由 READ（读者 `_model_file`）改登记为 **FORENSIC**。
+
+### Added
+- `generate_ml_report.model_fingerprint(model)`：`sha256`（`pickle.dumps(model._clf)` 前 16 位 ＝ 快照 `model_bytes` base64 解码后的同一份字节）+
+  类型 / 样本数 / 训练精度 / OOS / 训练时刻 / 训练数据来源；算不出 ⇒ `sha256=None` + `fingerprint_error`（warning，不拖垮报告）。
+  随每份报告写进 `analysis-*-ml-*.json` 的 **`ml_prediction.model`**。
+- `ml_model_guard`：`DayRecord.model_sha`、`DegeneracyVerdict.model_fingerprint_counts` / `n_without_fingerprint`；当日描述列出「出概率的模型指纹 sha×份数」、
+  同日混用多个模型时注明、无指纹份数单列。**只进描述、不改判定**（同日不同进程在库变化后各自训练属正常）。快照缺失的措辞改为「缺失＝快照失败或被关闭」
+  （原「命中磁盘缓存、当天未训练时属正常」已不可能）。
+- `tests/test_ml_report_no_disk_model_cache.py`（12 条）：当天磁盘上别人写的合法模型（n=77、oos 有值、过得了 PoisonedModelError）不被使用；
+  取证副本 = 本进程模型（指纹对上 `model_bytes`）；同进程只训一次；每个实例的训练来源都已知；报告带指纹；指纹失败显式记录；同数据两次训练指纹相同；
+  守卫读出指纹且不改判定；AST：生产代码**零个** `.load_model(` 调用、`PATHS.ml_model_cache` 只经 `_model_file`、`_model_file` 只被 `_save_model_to_disk` 用；探测器正对照。
+  **变异自证**：换回旧生成器（读回磁盘）⇒ 行为测试与两条 AST 守卫红；删报告 `model` 字段 ⇒ 红；守卫 `_model_sha` 恒 None ⇒ 红；进程内缓存失效 ⇒ 红。
+
+### Fixed（注释 / 文档订正，无行为变化）
+- `ml_predictor.PoisonedModelError` docstring、`load_model` 内注释与日志 / 异常措辞：去掉「被测试夹具覆盖的机读签名」，改为「小样本、无 OOS」，注明 v0.45.551 起生产零加载点。
+- `ml_predictor._snapshot_saved_model`、`ml_model_guard` 模块 docstring（「复现 2026-09-04 需要当时那份模型」一节整节订正）、`generate_ml_report` 类体注释、
+  `tests/conftest.py` / `tests/test_ml_model_path_isolation.py` / `tests/test_ml_model_guard.py` 相关 docstring。
+
+### 不需要的
+- 不进评分（v0.45.537 / 538 起 ML 模型不进 `final_score`）⇒ 不加 `_COHORT_HISTORY` 世代边界。
+- 估计量定义没变（同一训练函数、同一特征、同一随机种子）⇒ 不登记 `probability_scorecard._ML_ESTIMATOR_GENERATIONS`；同日混用模型现在可由指纹直接看出。
+- `PoisonedModelError` 保留（只对仍手动加载模型的工具与测试生效）；`ml_model.json`（PENDING_DEAD）不在本版范围。
+
 
 ## [0.45.550] — 2026-10-19 — Removed：三个零读者写入方——`last_run_status.json` / `crowding_<T>.json` / `training_data.json`（v0.45.543 读者登记表的 PENDING_DEAD，上限 7 → 4）
 

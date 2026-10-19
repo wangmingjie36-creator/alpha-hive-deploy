@@ -187,10 +187,14 @@ class TestPathResolvedLazily:
 # ===================== ② 守卫：拒绝被夹具覆盖的模型 =====================
 
 class TestPoisonedModelGuard:
-    """`oos_accuracy is None` + 样本量偏低 = 「被测试夹具覆盖」的机读签名。"""
+    """`oos_accuracy is None` + 样本量偏低 ⇒ 拒绝加载（小样本、无外样本验证）。
+
+    ⚠️ 2026-10-19 更正：v0.45.149 称之为「被测试夹具覆盖」的机读签名，不成立——n=30 / oos None
+    是 v0.45.538 前每次生产扫描 RivalBee 都写的合成模型；污染 08-28 / 09-04 报告的是 n=200、oos 有值的模型。
+    """
 
     def test_rejects_fixture_signature(self, tmp_path):
-        """n=30 / oos=None —— 生产 2026-09-07 01:15 实际被写成的那份。"""
+        """n=30 / oos=None —— 生产 2026-09-07 01:15 实际被写成的那份（pytest 里跑 RivalBee 的测试写的合成模型）。"""
         path = _write(tmp_path / "poisoned.json", _model_json(30, None))
         with pytest.raises(PoisonedModelError):
             HGBModel().load_model(path)

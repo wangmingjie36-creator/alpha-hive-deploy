@@ -308,8 +308,10 @@ ARTIFACTS: dict = {
         '扫描计时 / 计数；编排器用 jq 并进 status.json，Step2 解释器拿它作证据'),
     'migrations_state/applied.jsonl': (READ, [('data_migrations/runner.py::read_ledger', 'applied.jsonl'), ('data_migrations/runner.py::record_tool_run', 'applied.jsonl')],
         '迁移账本追加；文件名在模块常量 LEDGER_NAME，消费者 read_ledger → run_pending 判已应用'),
-    'ml_model_cache.json': (READ, [('generate_ml_report.py::MLEnhancedReportGenerator._model_file', 'PATHS.ml_model_cache')],
-        '生产模型（HGB；无 sklearn 时 SGD / Simple 降级同一文件）：v0.45.547 起扫描进程里只由报告生成器 _model_file 读回（Queen 用 ml_generator 的同一模型）'),
+    'ml_model_cache.json': (FORENSIC, [],
+        '本进程训出、实际打分的那个模型的取证副本（HGB；无 sklearn 时 SGD / Simple 降级同一文件）。v0.45.551 起**只写不读**：'
+        '报告生成器每个进程自己训一次（确定性、约 1 秒），不再按「文件日期 = 今天」读回别人写的模型（08-28 / 09-04 事故）；'
+        'save_model 内快照进 ml_model_history，报告里 ml_prediction.model.sha256 可对上快照。勿把读回接回来'),
     'options_paper_state/*.jsonl': (READ, [('alphabot/straddle.py::load_ledger', 'closed_trades.jsonl'), ('alphabot/straddle.py::load_ledger', 'positions.jsonl'), ('alphabot/straddle.py::load_ledger', 'equity_curve.jsonl')],
         '跨式账本 closed_trades；options_paper_leg 自身 compute_kpis/run 与 Alpha Bot 跨式页读'),
     'options_paper_state/earnings_signals.jsonl': (READ, [('alphabot/straddle.py::load_ledger', 'earnings_signals.jsonl'), ('straddle_gex_prereg.py::_load_rows', 'earnings_signals.jsonl')],

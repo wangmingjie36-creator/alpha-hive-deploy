@@ -1182,10 +1182,9 @@ def _isolate_ml_model_file(request, tmp_path, monkeypatch):
          没有②的话，①将来静默失效不会有人知道（CLAUDE.md 硬检查项：
          「这个失败，下游怎么知道？」）。
 
-    被保护的是**三个**文件，不只是出事的那个：`ml_model_cache.json` 才是生产
-    真正读的那份（`alpha_hive_daily_report` / `generate_ml_report` /
-    `queen_distiller` 三处都显式传它），这次侥幸没被写到，纯粹因为两个写入者
-    恰好用了不同文件名。
+    被保护的是**三个**文件，不只是出事的那个：`ml_model_cache.json` 当时是生产
+    真正读的那份（2026-10-19 重查：08-28 / 09-04 正是它被 pytest 写穿——经当时冻结的类属性，
+    写进的是 n=200 模型；v0.45.551 起它只写不读，仍是取证副本，照样要隔离）。
     """
     try:
         import ml_predictor as _mp

@@ -743,6 +743,8 @@ class TestSnapshotLandsInTheTrackedDir:
         v0.45.149 认定「模型被测试夹具覆盖」的机读签名是
         **`oos_accuracy is None` + `n_samples_seen` 明显偏低**
         （真实训练路径样本 ≥60 一定走 `_eval_oos_purged` 填 oos）。
+        ⚠️ 2026-10-19 更正：那只说明「小样本、无 OOS」，不说明「被测试覆盖」（见 CHANGELOG 0.45.551）；
+        两个字段仍是判模型好坏、对上报告指纹的归因材料。
 
         ⚠️ **不能用 `training_accuracy` 判** —— 夹具模型的精度**反而更好看**
         （实测 96.67 / 100.0，真模型只有 71.63），拿精度判会把最该拦的那个
