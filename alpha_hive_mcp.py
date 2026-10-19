@@ -620,6 +620,10 @@ async def alphahive_get_options_snapshot(params: TickerInput) -> str:
         if calls is None:
             return _err(f"No options data available for {params.ticker}.")
 
+        # v0.45.542：这一场的 OI 没发布（oi_staleness）⇒ OI 派生的字段一律 None，成交量照给（10-12 那种日子
+        # Yahoo 只剩冻结旧数，OI 比 / 最大 OI 行权价全是几个月前的旧仓位）。只看这一个到期日，样本少时判不了 ⇒ 照旧。
+        import oi_staleness
+        _oi_check = oi_staleness.assess_frames([calls, puts])
         c_oi  = int(calls["openInterest"].fillna(0).sum())
         p_oi  = int(puts["openInterest"].fillna(0).sum())
         c_vol = int(calls["volume"].fillna(0).sum())
@@ -647,9 +651,13 @@ async def alphahive_get_options_snapshot(params: TickerInput) -> str:
             if is_placeholder_iv(_row.get("impliedVolatility")):
                 _row["impliedVolatility"] = None
 
+        if _oi_check["stale"]:
+            c_oi = p_oi = None
+            top_c = top_p = []
         return _ok({
             "ticker":             params.ticker,
             "nearest_expiry":     exp,
+            "oi_stale":           _oi_check["stale"],
             "put_call_oi_ratio":  round(p_oi  / c_oi,  3) if c_oi  else None,
             "put_call_vol_ratio": round(p_vol / c_vol, 3) if c_vol else None,
             "total_call_oi":      c_oi,

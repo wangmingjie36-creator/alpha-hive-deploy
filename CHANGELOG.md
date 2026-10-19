@@ -7,7 +7,62 @@
 
 ## [0.45.543] — 2026-10-19 — 占位（进行中：死链两道守卫——落盘写入者读者登记表 + 编排器步骤产出后置条件）
 
-## [0.45.542] — 2026-10-19 — 占位（进行中：OI 陈旧链的全部 OI 派生量从源头置不可得 + P/C 不再退到成交量口径）
+## [0.45.542] — 2026-10-19 — Fixed（根因）：OI 陈旧判据抽成全仓共用的 `oi_staleness`，凡从 yfinance 取链又读 OI 的入口与下游都按「不可得」处理；P/C 在 OI 全零时不再退到成交量口径
+
+用户 2026-10-19 要求「从根因开始修」。v0.45.512 只把主链的 P/C / total_oi / 主链 GEX 记成 None。盘点后发现，同一条陈旧链上**还有六处在读 OI**，其中一处会进评分。
+
+### 根因与影响面（10-12 录制实测，只读）
+- 根因：Yahoo 在 10-12 没发布这一场的 OI（只剩冻结旧数），而读 OI 的入口各自直接用，只有主链的三个量过了 512 的判据。
+- 同一天 CBOE 链的 OI 连续正常（COST / TMO / CRM / MU / WMT / XOM / NVDA 与 10-09、10-13 同量级）⇒ 只是 Yahoo 一侧。
+- **异动检测 `detect_unusual_activity`（进评分）**：OI 0 被 `or 1` 当成 1 ⇒ vol/OI = 成交量 ⇒ 有成交的合约几乎都成了「扫单」。
+  - BILI 10-12 旧逻辑：9 条异动、5 条看涨、9 条扫单；新逻辑：1 / 0 / 0。
+  - 看涨条数进 `options_score` 的 unusual_signal：BILI 当天的 5.0 = IV 2 + 流向 0 + GEX 1 + **异动 2**，这 2 分出自陈旧 OI。
+- **关键价位**：按 OI 排序挑出的正是冻结旧数——支撑 $5（OI 22,065）/ $24 / $11（OI 0），阻力 $8（OI 74）。
+- **call 流分类第一票**：按 OI 的远近月分布投票。
+- **gamma 日历**：CBOE 全到期日视图取不到时，退回用的就是这条陈旧链。
+- **全链 OI 的 yfinance 降级**：没有判据，10-12 记过全链 P/C 0.0（call OI 0 / put OI 10），OI 墙与 Max Pain 同源。
+- **Oracle 的 `unusual_options`**：跳过 OI ≤ 0 的合约（v0.45.54）⇒ 陈旧日近期合约全被跳过、只剩冻结旧合约 ⇒ 方向 / 分数不是观测。10-12 录制 30/30 判陈旧。
+- **MCP `alphahive_get_options_snapshot` 的 yfinance 路径**：OI 比与最大 OI 行权价按冻结旧数算。
+- **P/C 口径混用**：两侧 OI 全零时退到成交量，算出来照样叫 `put_call_ratio`、照样进评分 / 归档。
+
+### Fixed
+- 新模块 `oi_staleness.py`：`rows_from_frame` / `assess` / `assess_frames` 与三个常量，判据原样搬自 512。`options_analyzer` 的 `assess_oi_staleness` / `_oi_staleness_rows` 改为它的别名，只有一份判据。
+- `options_analyzer`：
+  - `calculate_put_call_ratio`：删成交量退路，OI 全零 ⇒ None。
+  - `detect_unusual_activity(..., oi_reliable)`：
+    - 不可信时不判「Vol/OI 扫单」「OTM 投机」两条，条目 oi / ratio 记 None；只看成交量 / 价格的三条照判。
+    - 平时条目里的 oi 记真实值，不再把 0 写成 1，比率仍按 max(oi, 1)。
+  - `classify_call_flow(..., oi_reliable)`：不可信时第一票不投（unknown）。
+  - `OptionsAgent.analyze` 在 `oi_check.stale` 时：
+    - 关键价位为 `{}`（同样本链早退）；
+    - 异动与 call 流按不可信调用；
+    - gamma 日历若要退回这条近月链 ⇒ `{}`。
+  - `_fetch_full_chain_oi` 的 yfinance 降级：收集过滤前的原表过判据，陈旧 ⇒ `{}`（同失败），计入 `oi_stale_chains` 并记 WARNING。
+- `unusual_options.detect_unusual_flow`：取完链后过判据，陈旧 ⇒ fallback 形状（5.0 / neutral / 无信号）。
+  - `fetch_status = "oi_stale"`，带 `oi_check`，**不缓存**，记 WARNING。
+  - Oracle 见 `data_source = fallback` 不做异动加减分、`_unusual_flow_ok` 记 None（覆盖率闸照实算缺失）。
+- `alpha_hive_mcp.alphahive_get_options_snapshot`：yfinance 路径陈旧 ⇒ OI 派生字段（OI 比、总 OI、最大 OI 合约）为 None，成交量照给，新增 `oi_stale` 字段。
+- 只影响 OI 陈旧的日子与 OI 全零的链；健康链逐字节不变（异动条目的 oi 字段 0 不再写成 1 除外）。**未加 IC 世代边界**：陈旧日罕见（已知 10-12），变化是假值变不可得。
+
+### 未动
+- 归档里 BILI 10-12 的 Oracle 分（含那 2 分假异动）与 final_score：QUARANTINE 不用于评分，10-12 已整天排出三份前瞻检验。
+- 深度报告本地提示词把 None P/C 兜成 1.0（`generate_deep_v2.py:957`，try 里，只是展示文字）。
+
+### Tests
+- 新 `tests/test_oi_staleness_consumers.py`（18）：
+  - 判据只有一份（别名即模块函数）；
+  - P/C 无成交量退路；
+  - 异动检测（不判 vol/OI 两条、只看成交量的照判、记真实 OI）；
+  - call 流第一票；
+  - analyze 端到端：四处不可得 + 健康链对照 + **夹具自检**（陈旧链照旧读 OI 真会出扫单 / 第一票）；
+  - 全链 OI 降级：陈旧 ⇒ {} + 计数 + WARNING，健康 ⇒ 照算；
+  - `unusual_options`：陈旧 ⇒ oi_stale / fallback / 不缓存，健康 ⇒ ok，Oracle 认作不可得；
+  - MCP：陈旧 ⇒ OI 字段 None、成交量照给，健康照旧。
+- `tests/test_put_call_ratio_unavailable.py`：516 写的「OI 全零仍退到成交量」改为断言 None。
+- 变异 10/10 被杀：恢复成交量退路、analyze 异动不传标记、关键价位读陈旧、gamma 日历读陈旧、call 流不传标记、第一票不看标记、全链降级无闸、`or 1` 写回、`unusual_options` 无闸、MCP 无闸。
+  - 「异动不传标记」「call 流不传标记」首次存活（原夹具成交量不到 50、冻结合约不在远月 ⇒ 用例空转），换成「有成交 + 远月冻结大 OI」的链并加夹具自检后被杀。
+- 10-12 录制回放：`unusual_options` 判据 30/30 陈旧；BILI 主链异动 9 / 5 / 9 → 1 / 0 / 0；关键价位旧逻辑挑出冻结旧数。
+- 全量：10183 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；ruff 全绿。
 
 
 ## [0.45.541] — 2026-10-19 — Changed：ChronosBee 的 IV-crush 抓取移出扫描（每轮少 90 次 yfinance，约 3 分钟 yf_gate 队列）、改由 generate_deep_v2 缺数据时现场抓；重放 A/B 证 ChronosBee 产出与板上条目逐位不变

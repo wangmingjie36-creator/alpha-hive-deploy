@@ -177,6 +177,7 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
         # 「无异常期权流信号 / neutral / 5.0 / data_source=yfinance_chain」——与真的没有异动不可区分，
         # 且被缓存 300 秒（2026-10-05 重跑 28/30 只丢了这一路，日志里只有 2 条 warning）。
         #   fetch_status: "ok" 全部到期日取到 / "partial" 部分取到 / "failed" 一个都没取到或根本没进循环
+        #   v0.45.542：/ "oi_stale" 取到了，但这一场的 OI 没发布（oi_staleness 判陈旧）⇒ 同 failed 走 fallback
         "fetch_status": "failed", "failure_reason": "", "chains_total": 0, "chains_failed": 0,
         "retries": 0, "pace_wait_s": 0.0,
     }
@@ -237,6 +238,7 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
 
         chains_total = chains_failed = 0
         last_chain_error = ""
+        _raw_frames: list = []   # v0.45.542：过滤之前的原表，给 OI 陈旧判据（oi_staleness）用
         for exp, days_to_exp in near_expirations[:4]:
             chains_total += 1
             try:
@@ -249,6 +251,7 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
 
             calls = chain.calls
             puts = chain.puts
+            _raw_frames += [calls, puts]
 
             if calls is None or calls.empty:
                 continue
@@ -390,6 +393,24 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
         if chains_failed:
             _log.warning("unusual_options 部分期权链取数失败 %s：%d/%d（%s）——结果只覆盖取到的到期日",
                          ticker, chains_failed, chains_total, last_chain_error)
+
+        # --- v0.45.542：这一场的 OI 没发布（oi_staleness）⇒ 判不了异动 ---
+        # 本模块跳过 OI ≤ 0 的合约（v0.45.54）；OI 陈旧那天有成交的近期合约 OI 几乎全是 0 ⇒ 全被跳过，剩下的只有
+        # 几个月没成交、OI 冻结的旧合约 ⇒ 方向 / 分数都不是观测（10-12 BILI 的 Oracle「看涨」方向就出自这里）。
+        # 与「取数失败」同形：fallback（5.0 / neutral / 无信号）、不缓存；fetch_status 记 oi_stale 以区分。
+        import oi_staleness
+        _oi_check = oi_staleness.assess_frames(_raw_frames)
+        if _oi_check["stale"]:
+            _log.warning("unusual_options %s 期权链 OI 陈旧：最近有成交的 %d 个合约里只有 %d 个 OI>0——跳过异动检测",
+                         ticker, _oi_check["recent_contracts"], _oi_check["recent_with_oi"])
+            result["summary"] = "期权链 OI 陈旧（这一场未发布），跳过异动检测"
+            result["fetch_status"] = "oi_stale"
+            result["failure_reason"] = (f"最近有成交的 {_oi_check['recent_contracts']} 个合约里只有 "
+                                        f"{_oi_check['recent_with_oi']} 个 OI>0")
+            result["oi_check"] = _oi_check
+            result["chains_total"], result["chains_failed"] = chains_total, chains_failed
+            result["retries"], result["pace_wait_s"] = retry.used, round(retry.paced_s, 1)
+            return result      # fallback 形状，**不缓存**
 
         # --- 综合评分 ---
         all_unusual = unusual_calls + unusual_puts
