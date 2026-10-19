@@ -1,68 +1,13 @@
-"""情绪基线 SQLite 存储 + 情绪动量 + 情绪-价格背离检测"""
+"""情绪动量 + 情绪-价格背离检测
+
+v0.45.534：原「情绪基线 SQLite 存储 + 突变检测」（sentiment_baseline.db）已退役——自 v0.45.340 动量改读
+signal_archive 后，它只剩一行 WARNING 日志与一个零读者的 `sentinel_spike` 字段；且任何 Buzz 运行（MCP / 深度报告 /
+重放）都会写它。墓碑 tests/test_dead_chains_batch1_retired.py。生产数据根里的旧 .db 原样留着（备份照旧）。
+"""
 
 from typing import Dict, Optional
 from swarm_agents._config import _log
 
-
-# ── 情绪基线 SQLite 存储（#13）──
-def _sentiment_db_path():
-    from pathlib import Path
-    from hive_logger import PATHS
-    return Path(PATHS.home) / "sentiment_baseline.db"
-
-
-def _init_sentiment_db():
-    """初始化情绪基线 DB（幂等）"""
-    import sqlite3 as _sq
-    db = _sentiment_db_path()
-    db.parent.mkdir(parents=True, exist_ok=True)
-    conn = _sq.connect(str(db))
-    conn.execute("""CREATE TABLE IF NOT EXISTS sentiment_baseline (
-        ticker TEXT NOT NULL,
-        date   TEXT NOT NULL,
-        sentiment_pct INTEGER NOT NULL,
-        PRIMARY KEY (ticker, date)
-    )""")
-    conn.commit()
-    conn.close()
-
-
-def _upsert_sentiment(ticker: str, date_str: str, pct: int):
-    """写入或更新当日情绪值"""
-    import sqlite3 as _sq
-    try:
-        _init_sentiment_db()
-        with _sq.connect(str(_sentiment_db_path())) as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO sentiment_baseline (ticker, date, sentiment_pct) VALUES (?,?,?)",
-                (ticker, date_str, pct),
-            )
-            conn.execute(
-                "DELETE FROM sentiment_baseline WHERE date < date('now', '-60 days')"
-            )
-    except (OSError, ValueError, TypeError) as _e:
-        _log.debug("sentiment_baseline upsert error: %s", _e)
-
-
-def _get_sentiment_baseline(ticker: str, days: int = 30) -> Optional[float]:
-    """获取过去 N 天的平均情绪值（排除今日），无数据返回 None"""
-    import sqlite3 as _sq
-    try:
-        with _sq.connect(str(_sentiment_db_path())) as conn:
-            row = conn.execute(
-                f"SELECT AVG(sentiment_pct) FROM sentiment_baseline "
-                f"WHERE ticker=? AND date < date('now') AND date >= date('now', '-{days} days')",
-                (ticker,),
-            ).fetchone()
-            if row and row[0] is not None:
-                return float(row[0])
-    except (OSError, ValueError, TypeError) as _e:
-        _log.debug("sentiment_baseline query error: %s", _e)
-    return None
-
-
-_SENTIMENT_SPIKE_THRESHOLD = 20   # 偏差超过 20 个百分点触发告警
-_SENTIMENT_MIN_DAYS = 5            # 至少 5 天基线才触发告警
 
 # ── 情绪动量配置 ──
 try:
@@ -212,31 +157,3 @@ def _detect_sentiment_price_divergence(
             "description": f"💡 隐藏机会：情绪仅{sentiment_pct}%看多但5日涨{momentum_5d:.1f}%"
         })
     return result
-
-
-def _check_sentiment_spike(ticker: str, current_pct: int, today: str) -> Optional[str]:
-    """
-    对比当日情绪与 30 天基线，偏差 >THRESHOLD 时写一条 WARNING 日志。
-    返回告警描述字符串（无告警时返回 None）。
-
-    v0.45.339：**只写日志，不发 Slack。** 此前这里在 `n.enabled` 时调
-    `send_risk_alert` —— 而 `enabled = bool(user_token) or webhook_alive`，
-    本机有 Bot Token ⇒ 恒真；Bot 不在 #alpha-hive ⇒ `not_in_channel` 降级成
-    **私信用户**（生产日志实测 6 条：CRM / DELL×2 / VKTX / RKLB / MU）。
-    CLAUDE.md「Slack 通知精简规则」明令禁止逐标的预警；守卫
-    `tests/test_slack_send_whitelist.py`。
-    """
-    baseline = _get_sentiment_baseline(ticker, days=30)
-    if baseline is None:
-        return None
-    delta = current_pct - baseline
-    if abs(delta) < _SENTIMENT_SPIKE_THRESHOLD:
-        return None
-
-    direction_str = "看多骤升" if delta > 0 else "看空骤降"
-    msg = (
-        f"{ticker} 情绪突变 [{direction_str}]：当日 {current_pct}%，"
-        f"30日均值 {baseline:.1f}%，偏差 {delta:+.1f}ppt"
-    )
-    _log.warning("📡 情绪突变告警 %s", msg)
-    return msg

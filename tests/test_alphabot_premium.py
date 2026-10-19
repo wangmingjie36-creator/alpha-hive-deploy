@@ -1033,3 +1033,203 @@ class TestRulesComputedOnce:
         assert "rules_error" in svc.premium_rules()
         monkeypatch.undo()
         assert "rules_error" not in svc.premium_rules()                         # 好了以后能恢复
+
+
+# ─────────────────────────────── v0.45.536：首选 / 整链没有买价 / 盘中自动刷新
+
+_NOFLAG = {"earnings_before_expiry": False, "event_inside": False, "stale_last_trade": False, "dte_le_2": False,
+           "tenor_exceeds_rv_window": False}
+
+
+def _pr(expiry, ivrv, *, side="put", strike=90.0, yld=0.10, **flags):
+    return {"expiry": expiry, "side": side, "strike": strike, "iv_over_rv": ivrv, "yield_ann": yld,
+            "flags": _NOFLAG | flags}
+
+
+def _chosen(b):
+    return [(it["row"]["expiry"], it["row"]["strike"]) for it in b["items"]]
+
+
+class TestPicks:
+    def test_known_risk_is_excluded_and_its_healthy_twin_is_not(self):
+        for flag, code in (("earnings_before_expiry", "pick_earnings_before_expiry"),
+                           ("dte_le_2", f"pick_low_dte:{PM.LOW_DTE}")):
+            bad = _pr("2026-11-20", 2.0, strike=80.0, **{flag: True})
+            ok = _pr("2026-12-18", 1.2, strike=85.0)
+            b = PM.picks([bad, ok], "both")["put"]
+            assert _chosen(b) == [("2026-12-18", 85.0)], flag
+            assert b["excluded"] == [{"row": bad, "reasons": [code]}] and b["excluded_counts"] == {code: 1}
+            twin = PM.picks([_pr("2026-11-20", 2.0, strike=80.0), ok], "both")["put"]   # 对照：去掉那个标记就选它
+            assert _chosen(twin)[0] == ("2026-11-20", 80.0) and twin["excluded"] == []
+
+    def test_unknown_is_a_caveat_not_an_exclusion(self):
+        r = _pr("2026-11-20", 1.5, earnings_before_expiry=None, event_inside=None, stale_last_trade=None,
+                tenor_exceeds_rv_window=True)
+        b = PM.picks([r], "both")["put"]
+        assert _chosen(b) == [("2026-11-20", 90.0)]
+        assert b["items"][0]["caveats"] == ["pick_earnings_unknown", "pick_event_unknown", "pick_stale_unknown",
+                                            "pick_tenor_exceeds_rv"]
+
+    def test_heuristic_event_and_no_trade_are_caveats_not_exclusions(self):
+        """v0.45.539：期限结构鼓包是启发式（会误报、一报就连坐之后所有到期日）、「最近一场还没成交」不是报价风险
+        （盘中开盘头几个小时大多数虚值合约都是这样）——都只标注。疑似事件写出大小。"""
+        ev = dict(_pr("2026-11-20", 2.0, strike=80.0, event_inside=True), event_move=0.0342)
+        nt = _pr("2026-12-18", 1.9, strike=85.0, stale_last_trade=True)
+        b = PM.picks([ev, nt], "both")["put"]
+        assert _chosen(b) == [("2026-11-20", 80.0), ("2026-12-18", 85.0)] and b["excluded"] == []
+        assert b["items"][0]["caveats"] == ["pick_event_inside:3.4"]
+        assert b["items"][1]["caveats"] == ["pick_no_trade_this_session"]
+        nosize = PM.picks([_pr("2026-11-20", 2.0, event_inside=True)], "both")["put"]   # 没有大小也不丢标注
+        assert nosize["items"][0]["caveats"] == ["pick_event_inside:?"]
+
+    def test_morning_session_chain_still_has_picks(self):
+        """盘中场景：文件日期是今天，绝大多数合约末笔成交还是昨天（合成链本来人人同一时刻成交，这里改成上午的样子）。"""
+        raw = _demo_raw()
+        prev = "2026-10-08T15:58:00"
+        cs = [dict(c, last_trade_time=prev) if i % 10 else c for i, c in enumerate(raw["contracts"])]
+        raw = dict(raw, contracts=cs, session_live=True)
+        full = _build(raw)
+        assert sum(1 for x in full["rows"] if x["flags"]["stale_last_trade"]) > 0.8 * len(full["rows"])   # 对照：确是上午
+        p = PM.parse_params({})
+        pk = PM.select(full, p)["picks"]
+        for side in ("put", "call"):
+            assert len(pk[side]["items"]) == PM.PICK_N, side
+            assert any("pick_no_trade_this_session" in it["caveats"] for it in pk[side]["items"])
+
+    def test_no_rv_cannot_be_ranked(self):
+        b = PM.picks([_pr("2026-11-20", None)], "both")["put"]
+        assert b["items"] == [] and b["empty_reason"] == "pick_all_excluded"
+        assert b["excluded"] == [] and b["excluded_counts"] == {"pick_no_rv": 1}   # 没有 IV/RV 的不进「更高但被排除」
+
+    def test_one_per_expiry_and_top_n(self):
+        rows = [_pr("2026-11-20", 1.9 - i * 0.01, strike=80.0 + i) for i in range(5)]       # 同一到期日的 5 个行权价
+        rows += [_pr(f"2026-12-{d:02d}", 1.5 - d * 0.001, strike=90.0) for d in (4, 11, 18)]
+        b = PM.picks(rows, "both")["put"]
+        assert _chosen(b) == [("2026-11-20", 80.0), ("2026-12-04", 90.0), ("2026-12-11", 90.0)]
+        assert len(b["items"]) == PM.PICK_N and b["n_candidates"] == 8
+
+    def test_band_then_yield(self):
+        # 同一档（1.40/0.05 不能落到 27 档）：档内 IV/RV 低一点但收益高的在前
+        same = [_pr("2026-11-20", 1.449, yld=0.05), _pr("2026-12-18", 1.40, yld=0.20)]
+        assert _chosen(PM.picks(same, "both")["put"])[0][0] == "2026-12-18"
+        cross = [_pr("2026-11-20", 1.45, yld=0.05), _pr("2026-12-18", 1.449, yld=0.20)]     # 跨档：IV/RV 优先
+        assert _chosen(PM.picks(cross, "both")["put"])[0][0] == "2026-11-20"
+
+    def test_excluded_list_only_above_the_lowest_pick(self):
+        rows = [_pr("2026-11-20", 1.2), _pr("2026-12-18", 1.1), _pr("2027-01-15", 1.0)]
+        rows += [_pr("2026-11-27", 2.0, earnings_before_expiry=True),
+                 _pr("2026-11-27", 1.95, strike=85.0, earnings_before_expiry=True),
+                 _pr("2026-12-04", 0.5, earnings_before_expiry=True)]
+        b = PM.picks(rows, "both")["put"]
+        assert [(x["row"]["expiry"], x["row"]["strike"]) for x in b["excluded"]] == [("2026-11-27", 90.0)]
+        assert b["excluded_counts"] == {"pick_earnings_before_expiry": 3}
+
+    def test_threshold_is_the_lowest_pick_not_the_last(self):
+        """档内按收益排 ⇒ 最后一张不一定最低（二次检查复现：首选 1.44 / 1.41 / 1.43，1.42 被排除的没列出来）。"""
+        rows = [_pr("2026-11-06", 1.44, yld=0.30), _pr("2026-11-13", 1.41, yld=0.20), _pr("2026-11-20", 1.43, yld=0.10),
+                _pr("2026-11-27", 1.42, yld=0.50, earnings_before_expiry=True)]
+        b = PM.picks(rows, "both")["put"]
+        assert [it["row"]["iv_over_rv"] for it in b["items"]] == [1.44, 1.41, 1.43]      # 对照：最后一张确实不是最低
+        assert [x["row"]["expiry"] for x in b["excluded"]] == ["2026-11-27"]
+
+    def test_sides(self):
+        rows = [_pr("2026-11-20", 1.2), _pr("2026-11-20", 1.3, side="call", strike=110.0)]
+        both = PM.picks(rows, "both")
+        assert _chosen(both["put"]) == [("2026-11-20", 90.0)] and _chosen(both["call"]) == [("2026-11-20", 110.0)]
+        only = PM.picks(rows, "put")
+        assert only["call"] is None and only["put"]["items"]
+        assert PM.picks([], "both")["put"]["empty_reason"] == "pick_no_rows"
+
+    def test_service_picks_ignore_sort_and_truncation(self):
+        svc = _svc()
+        got = [svc.premium("NVDA", WIDE | {"sort": s})["picks"] for s in PM.SORTS]
+        assert got[0]["put"]["items"] and got[0]["call"]["items"]                 # 对照：合成链上真挑得出
+        assert got[0] == got[1] == got[2]
+        r = svc.premium("NVDA", WIDE)
+        assert r["truncated"]
+        for side in ("put", "call"):
+            for it in r["picks"][side]["items"]:
+                assert it["row"]["side"] == side and not PM._pick_flags(it["row"])[0]
+
+    def test_picked_expiry_narrows_picks(self):
+        svc = _svc()
+        e = svc.premium("NVDA")["picks"]["put"]["items"][0]["row"]["expiry"]
+        one = svc.premium("NVDA", {"expiry": e})["picks"]["put"]
+        assert [it["row"]["expiry"] for it in one["items"]] == [e]
+
+
+def _zero_bids(raw, session_live):
+    return dict(raw, session_live=session_live, contracts=[dict(c, bid=0.0, ask=0.0) for c in raw["contracts"]])
+
+
+class TestNoBidsIsExplained:
+    def test_off_hours_and_in_session(self):
+        raw = _demo_raw()
+        assert _build(raw)["chain"]["no_bids"] is None                           # 对照：有买价的链
+        off = _build(_zero_bids(raw, False))
+        assert off["chain"]["no_bids"] == "off_hours_no_bids" and off["rows"] == []
+        assert _build(_zero_bids(raw, True))["chain"]["no_bids"] == "no_bids_in_session"
+
+    def test_one_bid_is_enough_to_not_claim_it(self):
+        raw = _zero_bids(_demo_raw(), False)
+        good = _demo_raw()["contracts"]
+        i = next(i for i, c in enumerate(good) if _build(dict(_demo_raw(), contracts=[c]))["rows"])
+        raw["contracts"][i] = good[i]
+        assert _build(raw)["chain"]["no_bids"] is None
+
+    def test_no_iv_at_all_is_not_blamed_on_bids(self):
+        raw = _zero_bids(_demo_raw(), False)
+        raw["contracts"] = [dict(c, iv=None) for c in raw["contracts"]]          # 卡在「有 IV 与 Δ」，不是买价
+        off = _build(raw)
+        assert {s["stage"]: s["n"] for s in off["funnel_fixed"]}["priced"] == 0
+        assert off["chain"]["no_bids"] is None
+
+    def test_expiry_table_survives(self):
+        off = _build(_zero_bids(_demo_raw(), False))
+        assert any(e["atm_iv"] for e in off["expiries"])                         # IV 来自文件，不依赖买价
+
+
+class TestRefreshPullsAFreshChain:
+    def test_refresh_refetches_force_does_not(self):
+        calls = []
+
+        def fetch(t, as_of=None):
+            calls.append(t)
+            return syn.demo_payload(t, AS_OF), None
+        svc = _svc(fetch_fn=fetch)
+        svc.premium("NVDA")
+        assert len(calls) == 1
+        svc.premium("NVDA", {"force": "1"})
+        assert len(calls) == 2                                                   # 只重算：premium 自己取一次
+        svc.premium("NVDA", {"refresh": "1"})
+        assert len(calls) == 3                                                   # 只取一次链：不再为暖缓存跑一遍 live()
+
+    def test_refresh_does_not_run_the_ticker_detail(self, monkeypatch):
+        ran = []
+        svc = _svc()
+        monkeypatch.setattr(svc, "live", lambda *a, **k: ran.append(1))
+        assert svc.premium("NVDA", {"refresh": "1"})["data_available"] and ran == []
+
+    def test_refresh_invalidates_cboe_cache_on_the_production_path(self, monkeypatch):
+        hit = []
+        monkeypatch.setattr(R, "_invalidate_cached_payload", lambda t: hit.append(t))
+        monkeypatch.setattr(R.LG, "_default_fetch", lambda t, *, as_of=None: (syn.demo_payload(t, AS_OF), None))
+        svc = AlphaBotService(fetch_fn=None, bars_fn=lambda t: _bars(_trading_bars("2026-10-08", 120)),
+                              now_fn=lambda: NOW, premium_root=Path("/nonexistent-premium-root"))
+        svc.premium("NVDA", {"force": "1"})
+        assert hit == []                                                         # 对照：force 不清
+        r = svc.premium("NVDA", {"refresh": "1"})
+        assert hit == ["NVDA"] and r["data_available"] and r["cache_age_sec"] == 0.0
+
+    def test_bad_param_fails_before_fetching(self):
+        calls = []
+
+        def fetch(t, as_of=None):
+            calls.append(t)
+            return syn.demo_payload(t, AS_OF), None
+        with pytest.raises(BadRequest):
+            _svc(fetch_fn=fetch).premium("NVDA", {"refresh": "1", "side": "x"})
+        assert calls == []
+
+    def test_http(self):
+        assert _client(_svc()).get("/api/premium/NVDA?refresh=1").status_code == 200

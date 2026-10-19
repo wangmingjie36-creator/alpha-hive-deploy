@@ -103,7 +103,7 @@ class TestModelPathIsolation:
         ("ml_predictor", "SimpleMLModel", "ml_model"),
         ("ml_predictor", "SGDMLModel", "ml_model"),
         ("ml_predictor", "HGBModel", "ml_model"),
-        ("ml_predictor_extended", "SimpleMLModel", "ml_model_extended"),
+        # v0.45.538：`ml_predictor_extended` 已退役（守卫 tests/test_rival_ml_adjustment_retired.py）
     ])
     def test_no_arg_save_lands_in_sandbox(self, mod_name, cls_name, expected_attr,
                                           tmp_path, monkeypatch):
@@ -113,9 +113,6 @@ class TestModelPathIsolation:
         证过：把 `save_model` **函数体**里的解析改回相对字面量，那种断言照样
         全绿。它测的是被调函数，不是接线（v0.45.126 的教训）。
         这里只认「调完之后文件出现在哪」。
-
-        `ml_predictor_extended` 是 `ml_predictor` 导入失败时的降级实现，
-        同病必须一起治（「改二分支先问另一支是不是同病更重」）。
         """
         import importlib
         from hive_logger import PATHS
@@ -137,12 +134,6 @@ class TestModelPathIsolation:
             " —— 它把文件写到别处去了")
         after = repo_copy.read_bytes() if repo_copy.exists() else None
         assert after == before, f"写到了仓库根的 {repo_copy}"
-
-    def test_extended_default_path_is_absolute(self):
-        """helper 本身也断言一次（与上面那条是不同层：一个测接线，一个测取值）。"""
-        import ml_predictor_extended as mpe
-        p = mpe.default_extended_model_path()
-        assert pathlib.Path(p).is_absolute(), f"extended 默认路径不是绝对路径：{p}"
 
 
 class TestPathResolvedLazily:
@@ -196,10 +187,14 @@ class TestPathResolvedLazily:
 # ===================== ② 守卫：拒绝被夹具覆盖的模型 =====================
 
 class TestPoisonedModelGuard:
-    """`oos_accuracy is None` + 样本量偏低 = 「被测试夹具覆盖」的机读签名。"""
+    """`oos_accuracy is None` + 样本量偏低 ⇒ 拒绝加载（小样本、无外样本验证）。
+
+    ⚠️ 2026-10-19 更正：v0.45.149 称之为「被测试夹具覆盖」的机读签名，不成立——n=30 / oos None
+    是 v0.45.538 前每次生产扫描 RivalBee 都写的合成模型；污染 08-28 / 09-04 报告的是 n=200、oos 有值的模型。
+    """
 
     def test_rejects_fixture_signature(self, tmp_path):
-        """n=30 / oos=None —— 生产 2026-09-07 01:15 实际被写成的那份。"""
+        """n=30 / oos=None —— 生产 2026-09-07 01:15 实际被写成的那份（pytest 里跑 RivalBee 的测试写的合成模型）。"""
         path = _write(tmp_path / "poisoned.json", _model_json(30, None))
         with pytest.raises(PoisonedModelError):
             HGBModel().load_model(path)

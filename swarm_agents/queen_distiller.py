@@ -173,32 +173,34 @@ class QueenDistiller:
             except (ImportError, AttributeError):
                 self.DIMENSION_WEIGHTS = dict(self.DEFAULT_WEIGHTS)
 
-        # Enhancement C: ML 反馈权重调整
+        # Enhancement C（ML 特征重要性 → 维度权重 + 投票票重）——**v0.45.537 起只算不施加**。
+        #
+        # 两个消费者都关了：本处「乘维度权重再归一化」与 `_compute_direction_vote` 的票重缩放。
+        # 乘数照算、落盘到 `ml_weight_adjustments_shadow` 留审计；`ml_adjustments` 恒空、
+        # `ml_feedback_enabled` 恒 False（记录如实反映「没施加」）。
+        # 为什么关（09-10 → 10-16 生产 25 个扫描日，CHANGELOG v0.45.537）：
+        #   ① 没有任何 OOS 闸：场内重训模型 OOS 均值 51.5%、8 天 < 50%（测试集约 124 条，SE≈4.5pp），
+        #      同一天 Rival 那一项已被 `_ml_oos_trust_factor` 置零（该项 v0.45.538 已整个删掉），这里照改权重；
+        #   ② 重要性是**训练集**上的 permutation importance（in-sample ≈70% vs OOS ≈45%）；
+        #   ③ 按维度**取均值**再比 1/5 基准 ⇒ 下限 0.5 是常态、特征越多越难抬：odds 25/25 天压在下限，
+        #      signal 24/25 天高于下限（常 1.5–2.0）——它结构上只会抬 sentiment / signal；
+        #   ④ 投票通道把 09-09 已在分数上归零的 Scout 的票放大到 Chronos/Oracle 的 4 倍，
+        #      离线重放 750 行里约 9.5% 的方向因此改变。
+        # ⚠️ **不要接回去，也不要把 `config.ML_FEEDBACK_CONFIG` 的 enable_* 改成 False**：
+        # 共振加成前瞻检验的重放按**记录的** `ml_feedback_enabled` / `ml_weight_adjustments`
+        # 复现投票、按**当时的** config 开关决定施不施加 —— 翻 config 会让窗口里的旧记录复现不出来
+        # （自证 < 95% ⇒ exit 3）。投票缩放代码因此保留，只供重放旧记录用。
+        # 守卫：tests/test_queen_ml_feedback_disabled.py
         self.ml_adjustments: Dict[str, float] = {}
         self.ml_feedback_enabled = False
+        self.ml_adjustments_shadow: Dict[str, float] = {}
         if ml_model:
-            self.ml_adjustments = self._compute_ml_weight_adjustments()
-            if self.ml_adjustments:
-                self.ml_feedback_enabled = True
-                try:
-                    from config import ML_FEEDBACK_CONFIG as _MFC
-                except ImportError:
-                    _MFC = {}
-                if _MFC.get("enable_dimension_weighting", True):
-                    for dim, factor in self.ml_adjustments.items():
-                        if dim in self.DIMENSION_WEIGHTS:
-                            self.DIMENSION_WEIGHTS[dim] *= factor
-                    # 归一化使权重总和 = 1.0
-                    _total = sum(self.DIMENSION_WEIGHTS.values())
-                    if _total > 0:
-                        self.DIMENSION_WEIGHTS = {
-                            k: round(v / _total, 4)
-                            for k, v in self.DIMENSION_WEIGHTS.items()
-                        }
-                    _log.info(
-                        "[ML-Feedback] 维度权重已调整: %s",
-                        {k: round(v, 3) for k, v in self.DIMENSION_WEIGHTS.items()},
-                    )
+            self.ml_adjustments_shadow = self._compute_ml_weight_adjustments()
+            if self.ml_adjustments_shadow:
+                _log.info(
+                    "[ML-Feedback] 影子乘数（v0.45.537 起不施加）: %s",
+                    self.ml_adjustments_shadow,
+                )
 
     def _assert_regime_preserved_zeros(self, ticker: str, regime_weights: Dict) -> bool:
         """政体层保零守卫（v0.45.176）：喂进评分的权重里，零维必须仍为零。
@@ -338,63 +340,22 @@ class QueenDistiller:
             "present_count": present_count,
         }
 
-    _OOS_TRUST_CACHE: tuple = ()  # (mtime, factor) 类级缓存，避免每票读盘
-
-    @classmethod
-    def _ml_oos_trust_factor(cls) -> float:
-        """v0.40.0: 从 ml_model_cache.json 读 OOS 精度 → ML 调整信任系数。
-
-        OOS >= half_threshold: 1.0 | >= zero_threshold: 0.5 | 低于: 0.0
-        OOS 缺失（旧模型/样本<60）: 1.0（不惩罚，待下次训练产生）。
-        """
-        try:
-            from config import ML_FEEDBACK_CONFIG as _MFC
-        except (ImportError, AttributeError):
-            _MFC = {}
-        half_th = float(_MFC.get("oos_trust_half_threshold", 55.0))
-        zero_th = float(_MFC.get("oos_trust_zero_threshold", 50.0))
-        try:
-            import os as _os
-            import json as _json
-            from hive_logger import PATHS as _PATHS
-            # v0.45.149：兜底曾是相对路径 `"ml_model_cache.json"`，会读到
-            # 当前工作目录里的野文件。绝对路径取不到就应当放弃，不该改读 cwd。
-            _path = str(_PATHS.ml_model_cache)
-            _mtime = _os.path.getmtime(_path)
-            if cls._OOS_TRUST_CACHE and cls._OOS_TRUST_CACHE[0] == _mtime:
-                return cls._OOS_TRUST_CACHE[1]
-            with open(_path) as _f:
-                _oos = _json.load(_f).get("oos_accuracy")
-            if _oos is None:
-                factor = 1.0
-            elif _oos >= half_th:
-                factor = 1.0
-            elif _oos >= zero_th:
-                factor = 0.5
-            else:
-                factor = 0.0
-            cls._OOS_TRUST_CACHE = (_mtime, factor)
-            return factor
-        except Exception:
-            return 1.0  # 读不到时不惩罚（fail-open）
-
     def _compute_weighted_score(self, ticker: str, dim_scores: Dict,
                                 dim_confidence: Dict,
                                 dimension_coverage_pct: float,
                                 present_count: int,
                                 valid_results: List[Dict],
                                 override_weights: Dict = None) -> Dict:
-        """ML 调整 + 5D 加权 + 覆盖度压缩 + 共振增强。返回 dict。"""
-        ml_adjustment = 0.0
-        for r in valid_results:
-            if r.get("dimension") == "ml_auxiliary":
-                ml_score = _safe_score(r.get("score", 5.0), default=5.0, lo=0.0, hi=10.0, label="ml_score")
-                ml_conf = _safe_score(r.get("confidence", 0.5), default=0.5, lo=0.0, hi=1.0, label="ml_conf")
-                ml_adjustment = (ml_score - 5.0) * 0.1 * ml_conf
-                # v0.40.0: 按 OOS（时序外样本）精度缩放 ML 信任度——
-                # in-sample 精度是自考自评；OOS <55% 减半、<50%（不如抛硬币）置零。
-                # 阈值见 config.ML_FEEDBACK_CONFIG（oos_trust_*）。
-                ml_adjustment *= self._ml_oos_trust_factor()
+        """5D 加权 + 覆盖度压缩 + 共振增强。返回 dict。
+
+        v0.45.538：RivalBee 的 `ml_adjustment`（`(rival_score − 5)·0.1·conf·OOS 信任系数`）**已拿掉，勿接回**。
+        Rival 的概率出自 30 条 2023 年硬编码样本训的模型（`ml_predictor_extended`，已退役），信任闸
+        `_ml_oos_trust_factor` 量的却是另一个模型（`ml_model_cache.json` 的真模型）的 OOS；它对分数是
+        一个只向上的抬分（09-15 起重放 613 行：均值 +0.034、最大 +0.110、从不为负）。要让 ML 重新进分，
+        先预注册前瞻检验并登记世代边界。`valid_results` 参数保留只为签名不变
+        （`experiments/resonance_boost_forward_test.rebase_with_current_weights` 按位置传它）。
+        守卫：`tests/test_rival_ml_adjustment_retired.py`。
+        """
 
         _weights = override_weights if override_weights else self.DIMENSION_WEIGHTS
         _n_dims = len(_weights)
@@ -445,7 +406,7 @@ class QueenDistiller:
         elif dimension_coverage_pct < 80.0:
             coverage_warning = f"仅 {present_count}/{_n_dims} 维度可用，缺失维度施加 -0.3 惩罚"
 
-        adjusted_score = base_score + ml_adjustment
+        adjusted_score = base_score
 
         # ⚠️ 共振加成正在做预注册前瞻检验（v0.45.242，`experiments/resonance_boost_forward_test.py`）：
         # 样本内它是评分链里唯一测得出损失排序信息的一步，但证据是事后分析，用户定的是
@@ -464,7 +425,6 @@ class QueenDistiller:
             "base_score": base_score,
             "adjusted_score": adjusted_score,
             "rule_score": rule_score,
-            "ml_adjustment": ml_adjustment,
             "resonance": resonance,
             "coverage_warning": coverage_warning,
         }
@@ -661,7 +621,10 @@ class QueenDistiller:
         _total_w_raw = sum(_all_conf) or 1.0
         _weight_cap = _total_w_raw * 0.4
 
-        # Enhancement C: ML 反馈 → Agent 投票置信度调整
+        # Enhancement C: ML 反馈 → Agent 投票置信度调整。
+        # ⚠️ v0.45.537 起生产里 `ml_feedback_enabled` 恒 False，本段只在**重放旧记录**时走到
+        # （共振加成前瞻检验把记录的 ml_feedback_enabled / ml_weight_adjustments 塞回来复现当天投票）。
+        # 别删：删了窗口内 v0.45.537 之前的记录就复现不出来。
         try:
             from config import ML_FEEDBACK_CONFIG as _MFC_vote
         except ImportError:
@@ -1166,7 +1129,6 @@ class QueenDistiller:
             override_weights=_regime_weights_used)
         adjusted_score = ws["adjusted_score"]
         rule_score = ws["rule_score"]
-        ml_adjustment = ws["ml_adjustment"]
         resonance = ws["resonance"]
         coverage_warning = ws["coverage_warning"]
 
@@ -1328,9 +1290,11 @@ class QueenDistiller:
             "dimension_confidence": dim_confidence,
             "dimension_weights": dict(_regime_weights_used),
             "dimension_weights_base": dict(self.DIMENSION_WEIGHTS),
-            "ml_adjustment": round(ml_adjustment, 3),
-            "ml_contribution_pct": round(abs(ml_adjustment) / max(abs(final_score), 0.01) * 100, 1),
             "base_score_before_resonance": round(adjusted_score, 2),
+            # v0.45.538/548：RivalBee（ml_auxiliary）不进分，恒写字面量 False。它是世代边界的**正面印记**
+            # （`ic_rerun_readiness._marker_rival_ml_adjustment_retired`）：此前的记录没有这个键；
+            # 用「缺 `ml_adjustment` 键」当印记会被早期格式的旧归档误认（03-12 实测）。勿改成 True / 勿删。
+            "ml_auxiliary_in_score": False,
             "pheromone_compact": self.board.compact_snapshot(ticker),
             "data_quality": dv["data_quality_summary"],
             "data_real_pct": tp["data_real_pct"],
@@ -1385,9 +1349,11 @@ class QueenDistiller:
             "vote_excluded_agents": dv["vote_excluded_agents"],
             # Enhancement B: 置信度校准
             "confidence_calibration": confidence_calibration,
-            # Enhancement C: ML 反馈权重
+            # Enhancement C: ML 反馈权重。v0.45.537 起前两个键恒为 {} / False（没施加）；
+            # 算出来但没施加的乘数在 `_shadow`。重放按前两个键复现，别把影子写进它们。
             "ml_weight_adjustments": dict(self.ml_adjustments),
             "ml_feedback_enabled": self.ml_feedback_enabled,
+            "ml_weight_adjustments_shadow": dict(self.ml_adjustments_shadow),
             # 升级 #1: GEX 政体诊断（v0.45.334 起 applied=False：gex_adjustment 算了但没施加）
             "gex_regime_mod": _gex_mod_result,
             # v0.45.362：每只标的一份 GEX 状态（全到期日视图 + 可得性标记），展示 / 存档只读这一份；

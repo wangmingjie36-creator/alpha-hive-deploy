@@ -946,7 +946,7 @@ def write_weights_to_config(new_weights: dict, dry_run: bool = False) -> bool:
         for k in ["signal", "catalyst", "sentiment", "odds", "risk_adj"]:
             v = new_weights.get(k, DEFAULT_WEIGHTS[k])
             lines.append(f'    "{k}":    {v:.4f}{_tail(k)}')
-        lines.append("    # ml_auxiliary: 不在此处（RivalBeeVanguard 作为 ±0.5 独立调整项）")
+        lines.append("    # ml_auxiliary: 不在此处（RivalBeeVanguard 不进分，v0.45.538）")
         lines.append("}")
         new_block = "\n".join(lines)
 

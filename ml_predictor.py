@@ -16,8 +16,9 @@ _log = logging.getLogger("alpha_hive.ml_predictor")
 def _snapshot_saved_model(filename: str) -> None:
     """把刚写盘的模型留一份带日期快照（v0.45.145）。
 
-    2026-09-04 模型退化成常数函数**无法事后归因**，因为 `ml_model.json` /
-    `ml_model_cache.json` 是原地覆盖、没有任何版本留存。快照落在
+    2026-08-28 / 09-04 模型退化成常数函数当时**无法事后归因**，因为 `ml_model.json` /
+    `ml_model_cache.json` 是原地覆盖、没有任何版本留存（2026-10-19 才靠日志 + 库备份按指纹重建出来：
+    是 pytest 进程写进 cache 的 n=200 模型，见 CHANGELOG 0.45.551）。快照落在
     `ml_model_history/{stem}-YYYY-MM-DD.json`，配 `manifest.jsonl` 记
     sha256 / 样本数 / 训练精度，下次退化可直接捞出当天的模型重放。
 
@@ -53,13 +54,17 @@ _OOS_MIN_SAMPLES = 60
 
 
 class PoisonedModelError(ValueError):
-    """磁盘上的模型带着「被测试夹具覆盖」的机读签名，拒绝加载。
+    """磁盘上的模型样本太少且没有 OOS（n < 60 且 oos=None），拒绝加载。
 
-    **继承 `ValueError` 是有意的**：生产三个 `load_model` 调用点
-    （`alpha_hive_daily_report` L460 / L874 两个 try、
-    `generate_ml_report._load_model_from_disk`）的 except 子句都已经捕获
-    `ValueError`，抛它会走进它们**既有的**「重训」恢复分支，而不是把整条
-    流水线打断。换成自定义基类或 `RuntimeError` 就变成生产事故。
+    ⚠️ 2026-10-19 更正：v0.45.149 把它叫作「被测试夹具覆盖」的机读签名，**不成立**——
+    v0.45.538 前每次生产扫描都由 RivalBee（30 条硬编码样本）把 `ml_model.json` 写成 n=30 / oos None；
+    而真正污染 08-28 / 09-04 报告的是 n=200、oos 有值的模型，本守卫拦不住它。
+    它能说的只有「小样本、无外样本验证、不该拿来打分」。
+    v0.45.551 起生产代码**零个** `load_model` 调用点（报告生成器每个进程自己训，不读回文件；
+    守卫 `tests/test_ml_report_no_disk_model_cache.py`），本守卫只对仍手动加载模型的工具与测试生效。
+
+    **继承 `ValueError` 是有意的**：当年生产的 `load_model` 调用点的 except 子句都捕获 `ValueError`，
+    抛它走进既有的「重训」恢复分支；换成自定义基类或 `RuntimeError` 就变成生产事故。
     """
 
 
@@ -201,37 +206,7 @@ class HistoricalDataBuilder:
         """添加新的交易记录"""
         self.historical_records.append(record)
 
-    def save_to_file(self, filename: str = "training_data.json"):
-        """保存训练数据到文件"""
-        data = [
-            {
-                "ticker": r.ticker,
-                "date": r.date,
-                "crowding_score": r.crowding_score,
-                "catalyst_quality": r.catalyst_quality,
-                "momentum_5d": r.momentum_5d,
-                "volatility": r.volatility,
-                "market_sentiment": r.market_sentiment,
-                "actual_return_3d": r.actual_return_3d,
-                "actual_return_7d": r.actual_return_7d,
-                "actual_return_30d": r.actual_return_30d,
-                "win_3d": r.win_3d,
-                "win_7d": r.win_7d,
-                "win_30d": r.win_30d,
-                # v2 新特征
-                "iv_rank": r.iv_rank,
-                "put_call_ratio": r.put_call_ratio,
-                "final_score": r.final_score,
-                "odds_score": r.odds_score,
-                "risk_adj_score": r.risk_adj_score,
-                "agent_agreement": r.agent_agreement,
-                "direction_encoded": r.direction_encoded,
-            }
-            for r in self.historical_records
-        ]
-
-        with open(filename, "w") as f:
-            json.dump(data, f, indent=2)
+    # v0.45.550：原 save_to_file（写 cwd 下 training_data.json）生产零调用者、文件零读者，已删。
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -310,12 +285,11 @@ def catalyst_quality_from_score(score) -> str:
     "B" 占真实等级的 **57.4%**（461/803），是五档里最常见的一档，
     于是缺失与它完全同形，比用 "B+" 更糟。而且 "B" 是合法枚举值 ⇒
     `_missing_features` 不算它缺 ⇒ 两套账目对不上（58/803 份）。
-    **本函数的契约不变**（`swarm_agents/rival_bee.py:87` 依赖它），
+    **本函数的契约不变**（`swarm_agents/rival_bee.py` 依赖它），
     改的是调用方：`generate_ml_report._prepare_ml_input` 自 v0.45.147 起
     在分数不可用时**根本不调本函数**，直接给 `None`。
-    rival_bee 那一处未改——它的产物经 `ml_auxiliary` → `ml_adjustment` →
-    `final_score` 进 `predictions` 表，动它需要 `_COHORT_HISTORY` 世代边界，
-    是另一个量级的改动，已登记为独立任务。
+    rival_bee 那一处 v0.45.151 也改成了「不可用时不调本函数、给 None」。
+    （v0.45.538 起 rival_bee 的产物不再经 `ml_adjustment` 进 `final_score`。）
     """
     try:
         v = float(score)
@@ -419,10 +393,12 @@ def market_sentiment_from_score(sentiment: float) -> float:
 # 但那 +0.19 是**巧合**——倾斜的均值恰好抵消了动量带来的正偏，不是因为符号对。
 # **宁要 +1.06pp 的可辩护公式，不要 +0.19pp 的不可辩护公式。**
 #
-# `CROWDING_NEUTRAL` 保留，但用途变了：它是 `rival_bee` 取不到真实拥挤度时喂给
+# `CROWDING_NEUTRAL` 保留，但用途变了：它曾是 `rival_bee` 取不到真实拥挤度时喂给
 # **`probability`** 的中性回落值（那里 crowding 是权重最大的特征，回落值选错会
 # 直接偏斜概率）。取实测中位数而非量表中点 50 —— 实测只有 4.6% 的样本 ≥50，
 # 在这个分布里 50 等于"极不拥挤"。
+# ⚠️ v0.45.538 起 rival_bee 不再有模型、不再算拥挤度 ⇒ 本常数**没有生产读者**了，
+# 只剩测试夹具当缺省值用（退不退役另议）。
 #
 # ⚠️ **这是经验常数，会过期。** 由 `tests/test_ml_expected_return.py::
 # TestCrowdingCalibrationDrift` 对着生产库分布守着：漂出容许带就红。
@@ -852,8 +828,7 @@ FEATURE_NAMES_V1 = ["crowding", "catalyst", "momentum", "volatility", "sentiment
 
 
 #: 等级 → 数值编码。**本模块唯一真相**，三个模型类都走 `_encode_catalyst`。
-#: （`ml_predictor_extended.py:567` 还有第四份，那是本模块导入失败时的应急降级，
-#: 只有 rival_bee 会走且从不传 None，v0.45.147 未动，在此登记以免遗忘。）
+#: （`ml_predictor_extended.py` 曾有第四份副本；该模块 v0.45.538 随 RivalBee 的合成样本模型退役。）
 _CATALYST_ENCODING = {"A+": 1.0, "A": 0.85, "B+": 0.70, "B": 0.55, "C": 0.40}
 
 
@@ -1704,14 +1679,14 @@ class HGBModel:
                          data.get("feature_count", 0), len(FEATURE_NAMES))
             return False
 
-        # ── v0.45.149: 拒绝「被测试夹具覆盖」的模型 ──────────────────────
-        # 判据是 `oos_accuracy` 而**不是** `training_accuracy`。夹具模型的训练
+        # ── v0.45.149: 拒绝小样本、无 OOS 的模型 ──────────────────────
+        # 判据是 `oos_accuracy` 而**不是** `training_accuracy`。小样本模型的训练
         # 精度反而更好看（实测 96.67% / 100.0%，真模型只有 71.63%），拿精度判
         # 会把最该拦的那个当成「训练得好」放行 —— 这是本条最关键的一句。
         #
-        # 为什么 `oos_accuracy is None` 是机读签名：真实训练路径只要样本
-        # >= `_OOS_MIN_SAMPLES` 就一定走 `_eval_oos_purged` 把它填上；样本不足
-        # 才留 None（见 `train()` 里那个同名闸门）。
+        # `oos_accuracy is None`：样本 >= `_OOS_MIN_SAMPLES` 就一定走 `_eval_oos_purged`
+        # 把它填上；样本不足才留 None（见 `train()` 里那个同名闸门）。
+        # ⚠️ 2026-10-19 更正：它**不是**「被测试夹具覆盖」的签名（见 PoisonedModelError docstring）。
         #
         # 两个条件必须**同时**成立。样本够却 oos 为 None 是另一件事——OOS 验证
         # 自己抛了异常（`train()` 里那条 except 会 warning）——那种模型不该被拒，
@@ -1719,20 +1694,18 @@ class HGBModel:
         _n_raw = data.get("n_samples_seen")
         _n = _n_raw if usable_dim(_n_raw) else 0   # 类型闸照抄本仓 `usable_dim`
         if data.get("oos_accuracy") is None and _n < _OOS_MIN_SAMPLES:
-            # 先 log 再 raise：调用方之一（alpha_hive_daily_report L469）
-            # 只把异常记成 `_log.debug`，INFO 级别下等于没人知道。
+            # 先 log 再 raise：调用方可能只把异常记成 `_log.debug`，INFO 级别下等于没人知道。
             # CLAUDE.md 的硬检查项——「这个失败，下游怎么知道？」——要求
             # 观测点不能依赖调用方的心情，所以这里自己红一次。
             _log.error(
-                "拒绝加载模型 %s：oos_accuracy 缺失且样本仅 %s 条（< %d）。"
-                "这是「跑测试时被夹具模型覆盖」的机读签名 —— "
-                "训练精度 %.1f%% 看着很高恰恰是夹具的特征，不要拿它判。",
+                "拒绝加载模型 %s：oos_accuracy 缺失且样本仅 %s 条（< %d）——"
+                "小样本、无外样本验证的模型不该拿来打分；训练精度 %.1f%% 看着高恰恰是小样本的特征。",
                 filename, _n_raw, _OOS_MIN_SAMPLES,
                 data.get("training_accuracy", 0.0) or 0.0,
             )
             raise PoisonedModelError(
                 f"{filename}: oos_accuracy=None 且 n_samples_seen={_n_raw} "
-                f"(< {_OOS_MIN_SAMPLES})，疑似被测试夹具覆盖，拒绝加载"
+                f"(< {_OOS_MIN_SAMPLES})：小样本、无 OOS，拒绝加载"
             )
 
         # 恢复 pickle 模型

@@ -178,37 +178,6 @@ class TestFeatureRegistry:
         assert FeatureRegistry.log_status() == {}
 
 
-# ==================== _rebalance_weights ====================
-
-class TestRebalanceWeights:
-    def test_empty_dict(self):
-        from agent_weight_manager import AgentWeightManager
-        assert AgentWeightManager._rebalance_weights({}) == {}
-
-    def test_single_agent(self):
-        from agent_weight_manager import AgentWeightManager
-        result = AgentWeightManager._rebalance_weights({"A": 2.0})
-        assert result == {"A": 1.0}
-
-    def test_mean_equals_one(self):
-        from agent_weight_manager import AgentWeightManager
-        w = {"A": 0.8, "B": 1.2, "C": 1.5, "D": 0.5, "E": 1.0, "F": 1.0}
-        result = AgentWeightManager._rebalance_weights(w)
-        mean = sum(result.values()) / len(result)
-        assert abs(mean - 1.0) < 0.01
-
-    def test_preserves_relative_order(self):
-        from agent_weight_manager import AgentWeightManager
-        w = {"A": 3.0, "B": 1.0, "C": 2.0}
-        result = AgentWeightManager._rebalance_weights(w)
-        assert result["A"] > result["C"] > result["B"]
-
-    def test_zero_total_fallback(self):
-        from agent_weight_manager import AgentWeightManager
-        result = AgentWeightManager._rebalance_weights({"A": 0.0, "B": 0.0})
-        assert result == {"A": 1.0, "B": 1.0}
-
-
 # ==================== validate_watchlist ====================
 
 class TestValidateWatchlist:
@@ -223,38 +192,6 @@ class TestValidateWatchlist:
         # 现有 WATCHLIST 应该无严重警告（格式/字段问题）
         format_errors = [w for w in warnings if "格式异常" in w or "缺少必填字段" in w]
         assert format_errors == [], f"WATCHLIST 有格式问题: {format_errors}"
-
-
-# ==================== MetricsCollector thread_count ====================
-
-class TestMetricsCollectorThreads:
-    def test_get_thread_count(self):
-        from metrics_collector import MetricsCollector
-        count = MetricsCollector.get_thread_count()
-        assert isinstance(count, int)
-        assert count >= 1  # 至少主线程
-
-    def test_record_scan_captures_threads(self, tmp_path):
-        import sqlite3
-        from metrics_collector import MetricsCollector
-        db = str(tmp_path / "test_metrics.db")
-        mc = MetricsCollector(db_path=db)
-        mc.record_scan(ticker_count=3, duration_seconds=2.0, agent_count=6, agent_total=6)
-        conn = sqlite3.connect(db)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT thread_count FROM scan_metrics ORDER BY id DESC LIMIT 1").fetchone()
-        conn.close()
-        assert row["thread_count"] >= 1
-
-    def test_summary_includes_thread_stats(self, tmp_path):
-        from metrics_collector import MetricsCollector
-        db = str(tmp_path / "test_metrics.db")
-        mc = MetricsCollector(db_path=db)
-        mc.record_scan(ticker_count=2, duration_seconds=1.5, agent_count=6, agent_total=6)
-        summary = mc.get_summary(days=1)
-        assert "max_thread_count" in summary
-        assert "avg_thread_count" in summary
-        assert summary["max_thread_count"] >= 1
 
 
 # ==================== Slack webhook env var (#20) ====================

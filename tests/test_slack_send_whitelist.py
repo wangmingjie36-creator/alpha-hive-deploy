@@ -560,12 +560,10 @@ class TestScannerHasTeeth:
         assert _scan_source(src, rel, specs, allowed={})
 
     @pytest.mark.parametrize("rel, anchor, block", [
-        ("swarm_agents/sentiment.py",
-         '    _log.warning("📡 情绪突变告警 %s", msg)\n', _PRE_FIX_SENTIMENT),
         ("resilience.py",
          '                        self.name, self._failure_count,\n                    )\n',
          _PRE_FIX_BREAKER),
-    ], ids=["sentiment", "resilience"])
+    ], ids=["resilience"])
     def test_real_file_mutation_goes_red(self, rel, anchor, block, specs):
         """真文件注入变异：把改前的发送块插回**当前**源码的原位置，扫描器必须报出来。
 
@@ -661,15 +659,8 @@ class TestForbiddenPathsStayLogOnly:
         assert n.send_plain_text("武装自检：本条应被记录") is True
         assert len(armed_slack.attempts) == 1, armed_slack.attempts
 
-    def test_sentiment_spike(self, armed_slack, monkeypatch, caplog):
-        """变红的变异：在日志行后接回 `SlackReportNotifier().send_plain_text(msg)`。"""
-        import swarm_agents.sentiment as s
-        monkeypatch.setattr(s, "_get_sentiment_baseline", lambda t, days=30: 55.0)
-        with caplog.at_level(logging.WARNING):
-            msg = s._check_sentiment_spike("DELL", 30, "2026-09-23")
-        assert armed_slack.attempts == []      # 先证本组要证的事：零发送
-        assert msg and "DELL" in msg
-        assert "📡 情绪突变告警" in caplog.text and "DELL" in caplog.text
+    # v0.45.534：`test_sentiment_spike`（情绪突变只写日志、不发 Slack）随 `_check_sentiment_spike` 整段退役删除——
+    # 被测路径不存在了；「改前的情绪突变块」作为扫描器的合成样本（`_scan_source` 用例）照留。
 
     def test_data_source_degradation(self, armed_slack, monkeypatch, caplog):
         """变红的变异：在降级分支接回 `SlackReportNotifier().send_plain_text(...)`。"""

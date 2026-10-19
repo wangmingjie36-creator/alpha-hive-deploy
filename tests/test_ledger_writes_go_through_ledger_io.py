@@ -45,7 +45,7 @@ CATEGORIES = {LEDGER, STATE, ARTIFACT, CACHE, HUMAN, CODE}
 DEBT_CATEGORIES = (LEDGER, STATE, ARTIFACT)
 
 #: 「待迁移」三类的条数上限（等号比较）。迁走一条 ⇒ 删条目并把这里减一；**不许为了登记新写入方而加一**。
-CEILING = {LEDGER: 18, STATE: 12, ARTIFACT: 12, CACHE: 7}
+CEILING = {LEDGER: 18, STATE: 12, ARTIFACT: 12, CACHE: 6}   # v0.45.546：删 data_fetcher.py（7 → 6）
 
 _NA = "⚠️非原子"   # 理由里带这个标记 = 现在就是 open("w") 直写，写到一半崩溃 = 半截文件（迁移优先级最高）
 
@@ -103,23 +103,16 @@ WRITERS: dict = {
     "quiver_fetcher.py::QuiverFetcher._save_cache": (CACHE, "Quiver 响应缓存（原子；读坏 ⇒ 重取）"),
     "risk_engine.py::_estimate_beta": (CACHE, "β 24h 缓存（读坏忽略）"),
     "vix_term_structure.py::get_vix_term_structure": (CACHE, "VIX 期限结构 30 分钟缓存（读坏 ⇒ 重取）"),
-    "data_fetcher.py::<module>": (CACHE, "示例脚本采集汇总 realtime_metrics.json（无生产读者）"),
     # ── 只给人看
     "alert_manager.py::AlertAnalyzer.save_alerts": (HUMAN, "告警汇总文件"),
-    "alpha_hive_daily_report.py::main": (HUMAN, "样本模式最小结果 JSON（仓内无读者）"),
     "entry_price_backfill.py::main": (HUMAN, "回填判决 --out 导出"),
     "ibkr_sync.py::export_daily_actions": (HUMAN, "给人手动下单的订单清单"),
     "ibkr_sync.py::reconcile": (HUMAN, "模拟 vs 真实成交对账报告"),
     "ml_model_guard.py::snapshot_model_file": (HUMAN, "模型留档 manifest.jsonl（无代码读者；v0.45.448 登记的「守卫读回」不对）"),
-    "ml_predictor.py::HistoricalDataBuilder.save_to_file": (HUMAN, "训练数据导出（无调用者）"),
-    "ml_predictor_extended.py::HistoricalDataBuilder.save_to_file": (HUMAN, "训练数据导出（无调用者）"),
-    "ml_predictor_extended.py::SimpleMLModel.save_model": (HUMAN, "降级模型文件（无生产读者）"),
     "param_optimizer.py::run_grid": (HUMAN, "参数网格结果（只给 --html 渲染）"),
     "portfolio_backtest.py::main": (HUMAN, "组合回测 --save 导出"),
-    "run_daily_scan.py::_write_status": (HUMAN, "last_run_status.json（无读者）"),
     "sell_strike_report.py::write_local_report": (HUMAN, "卖权本地 Markdown 报告"),
     "thesis_breaks.py::ThesisBreakMonitor.save_to_json": (HUMAN, "论点失效配置导出（只有 __main__ 示例调用）"),
-    "crowding_detector.py::CrowdingDetector.save_to_json": (HUMAN, "拥挤度导出（无调用者）"),
     "data_backup/migrate_data_root.py::_write_report": (HUMAN, "数据根迁移报告"),
     "data_backup/export.py::export_db": (HUMAN, "库导出 _meta.json（restore 只做核对展示）"),
     "vrp_signal.py::main": (HUMAN, "CLI --out 导出"),

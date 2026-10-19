@@ -250,8 +250,8 @@ ARCHIVE_STATICALLY_UNPROVABLE = {
     # Oracle details = {**options_result, ...}
     *{("OracleBeeEcho", k) for k in ("gamma_exposure", "iv_current", "iv_percentile", "iv_rank",
                                       "iv_rank_source", "put_call_ratio", "total_oi")},
-    # Rival details = {**prediction, ...}
-    *{("RivalBeeVanguard", k) for k in ("expected_30d", "expected_7d", "probability")},
+    # Rival details = {**expectation, ...}（v0.45.538 起没有 probability：模型退役、`ml.probability` 抽取器摘除）
+    *{("RivalBeeVanguard", k) for k in ("expected_30d", "expected_7d")},
     # Scout components 的值是变量 component_scores
     *{("ScoutBeeNova", "components." + k) for k in ("consensus_strength", "google_trends",
                                                      "seeking_alpha_views", "short_squeeze_risk",

@@ -879,8 +879,10 @@ class TestAttention:
         """生产方已把世代边界告警列成 alarm 条目（原文 + 处理方式）⇒ 基础段只留一句指针，不再重复一遍。
         条目用真生产方 `ic_rerun_readiness.build_attention` 造，与生产同形。"""
         import ic_rerun_readiness as irr
+        # 维度 IC 健康 = 锚点 ok 且两道 H1 前提（v0.45.556 起进外壳）都通过 ⇒ 只剩边界那一条
         items = irr.build_attention({}, BEV_ALARM, {"status": "not_ready"}, {"status": "not_ready"},
-                                    {"status": "not_ready", "h1_anchor": {"state": "ok"}})
+                                    {"status": "not_ready", "h1_anchor": {"state": "ok"},
+                                     "input_code_guard": {"ok": True}, "buzz_v1_self_proof": {"ok": True}})
         assert len(items) == 1 and items[0]["id"].startswith(ost._BOUNDARY_ATTENTION_ID + "."), items
         p = v1_json(tmp_path, "11", attention=items,
                     payload=dict(LEGACY["11"], cohort_boundary_evidence=BEV_ALARM))

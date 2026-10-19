@@ -141,22 +141,22 @@ class TestCatalystGradeConversion:
 # 特征真的被读进 TrainingData
 # ════════════════════════════════════════════════════════════════════════════
 
-class TestFeaturesReachTrainingData:
-    """拦截 `MLPredictionService.predict_for_opportunity`，检查它收到的
-    `TrainingData` —— 这是"读到了"唯一的直接证据。
+class TestFeaturesReachExpectedReturns:
+    """拦截 `ml_predictor.expected_returns`，检查它收到的输入 —— 这是"读到了"唯一的直接证据。
+
+    v0.45.538：Rival 不再有 ML 模型（合成样本训的 `ml_predictor_extended` 已退役），
+    `expected_returns` 只读 `catalyst_quality` 与 `momentum_5d`。原先只喂模型的
+    `iv_rank` / `put_call_ratio` / 拥挤度三项随之不再计算，它们的测试一并删掉。
     """
 
     def _captured(self, bee, ticker="TEST", monkeypatch=None):
         captured = {}
 
-        class _FakeService:
-            def predict_for_opportunity(self, data):
-                captured["data"] = data
-                return {"probability": 0.5, "expected_3d": 0.0,
-                        "expected_7d": 0.0, "expected_30d": 0.0}
+        def _fake_expected_returns(data):
+            captured["data"] = data
+            return {"expected_3d": 0.0, "expected_7d": 0.0, "expected_30d": 0.0}
 
-        import ml_predictor_extended as mpe
-        monkeypatch.setattr(mpe, "MLPredictionService", _FakeService)
+        monkeypatch.setattr(mp, "expected_returns", _fake_expected_returns)
         # 让重量级依赖安静下来
         monkeypatch.setattr(bee, "_get_stock_data",
                             lambda t: {"volatility_20d": 30.0, "momentum_5d": 1.0,
@@ -172,66 +172,19 @@ class TestFeaturesReachTrainingData:
         bee.analyze(ticker)
         return captured.get("data")
 
-    def test_reads_real_catalyst_and_options_features(self, bee, monkeypatch):
+    def test_reads_real_catalyst_and_momentum(self, bee, monkeypatch):
         bee.board.publish(_entry("ChronosBeeHorizon", score=8.8))
-        bee.board.publish(_entry("OracleBeeEcho",
-                                 details={"iv_rank": 77.0, "pc_ratio": 1.9}))
         data = self._captured(bee, monkeypatch=monkeypatch)
-        assert data is not None, "ML 服务未被调用"
+        assert data is not None, "expected_returns 未被调用"
         assert data.catalyst_quality == "A+", "催化剂分 8.8 应转成 A+"
-        assert data.iv_rank == pytest.approx(77.0)
-        assert data.put_call_ratio == pytest.approx(1.9)
+        assert data.momentum_5d == pytest.approx(1.0)
 
     def test_falls_back_distinguishably_when_peers_absent(self, bee, monkeypatch):
-        """板上空 ⇒ 回落值必须与"读到中性真值"可区分。
-
-        ⚠️ v0.45.151：`catalyst_quality` 的回落由 "B" 改为 **None**。
-        原约定（"B" 而非 "B+"，因为 "B+" 是 magnitude 1.0 的基准档）方向对但
-        **选错了值**：生产实测 "B" 是众数（461/803 = 57.4%，五档里最常见），
-        于是「读不到」与「质量正好是 B」依然完全同形。None → NaN 才真的可区分。
-        `iv_rank` / `put_call_ratio` 的 50.0 / 1.0 本版未动（另一个问题）。
+        """板上空 ⇒ `catalyst_quality` 给 **None**（v0.45.151），不给众数 "B"。
         完整证据与下游影响见 tests/test_rival_bee_catalyst_missing.py。
         """
         data = self._captured(bee, monkeypatch=monkeypatch)
         assert data.catalyst_quality is None
-        assert data.iv_rank == pytest.approx(50.0)
-        assert data.put_call_ratio == pytest.approx(1.0)
-
-    def test_partial_oracle_details_are_tolerated(self, bee, monkeypatch):
-        """OracleBee 的 details 是条件填充的（`if result:` 之下逐键 set），
-        缺键必须各自独立回落，不能一个缺就全丢。"""
-        bee.board.publish(_entry("OracleBeeEcho", details={"iv_rank": 12.0}))
-        data = self._captured(bee, monkeypatch=monkeypatch)
-        assert data.iv_rank == pytest.approx(12.0)
-        assert data.put_call_ratio == pytest.approx(1.0)
-
-    @pytest.mark.parametrize("junk", [None, float("nan"), "high", [1]])
-    def test_junk_option_values_fall_back(self, bee, monkeypatch, junk):
-        bee.board.publish(_entry("OracleBeeEcho",
-                                 details={"iv_rank": junk, "pc_ratio": junk}))
-        data = self._captured(bee, monkeypatch=monkeypatch)
-        assert data.iv_rank == pytest.approx(50.0)
-        assert data.put_call_ratio == pytest.approx(1.0)
-
-    def test_real_crowding_is_still_passed(self, bee, monkeypatch):
-        """v0.44.2 的改动不能被 v0.44.3 回退掉。"""
-        import real_data_sources as rds
-        import crowding_detector as cd
-
-        monkeypatch.setattr(rds, "get_real_crowding_metrics",
-                            lambda t, s, b: {"social_messages_per_day": 1})
-
-        class _Det:
-            def __init__(self, ticker):
-                pass
-
-            def calculate_crowding_score(self, metrics):
-                return 41.5, {}
-
-        monkeypatch.setattr(cd, "CrowdingDetector", _Det)
-        bee.board = PheromoneBoard()
-        data = self._captured(bee, monkeypatch=monkeypatch)
-        assert data.crowding_score == pytest.approx(41.5)
 
 
 # ════════════════════════════════════════════════════════════════════════════

@@ -141,11 +141,13 @@ class _FakeMLModel:
 
 
 class TestMLFeedbackZeroInvariant:
-    """ML 反馈层是乘法，天然保零 —— 但这件事必须被断言钉住，不能靠「碰巧」。"""
+    """ML 反馈层（v0.45.537 起只算影子、不施加）不得让归零维度复活。"""
 
     def test_ml_feedback_cannot_resurrect_zero(self, monkeypatch):
-        """变红的变异：把 `self.DIMENSION_WEIGHTS[dim] *= factor` 改成 `+= factor`
-        或改成 `= factor`（两者都会让 signal 从 0 变成非零）。
+        """变红的变异：把影子乘数重新乘回基准权重时写成 `+= factor` / `= factor`。
+
+        v0.45.537 前这里守的是「乘法保零」；关掉施加后守的是「接回去也不能复活零」
+        的最低线，更严的「基准权重 == config」见 `test_queen_ml_feedback_disabled`。
         """
         _pin_config(monkeypatch)
         queen = QueenDistiller(PheromoneBoard(), ml_model=_FakeMLModel(), enable_llm=False)
@@ -154,10 +156,10 @@ class TestMLFeedbackZeroInvariant:
         assert queen.DIMENSION_WEIGHTS["catalyst"] != pytest.approx(0.332, abs=1e-3), (
             "读到的是真 config 而不是注入值 —— importlib.reload 又把 monkeypatch "
             "冲掉了，本条测试退化为「碰巧真 config 也有零维」")
-        assert queen.ml_feedback_enabled, (
-            "前提一：ML 反馈**确实被激活了** —— 否则它是空跑，证明不了乘法保零"
+        assert queen.ml_adjustments_shadow, (
+            "前提一：ML 乘数**确实算出来了** —— 否则它是空跑，证明不了保零"
             "（MEMORY：判「接没接上」不能看输出动没动）")
-        assert queen.ml_adjustments.get("signal", 1.0) > 1.0, (
+        assert queen.ml_adjustments_shadow.get("signal", 1.0) > 1.0, (
             "前提二：ML 确实在试图**放大** signal，这样保零才是被检验过的")
 
         for dim in _ZEROED:

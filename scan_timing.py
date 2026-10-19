@@ -355,9 +355,16 @@ def summary_line(snap: dict) -> str:
                 + (f"/报价错场 {pg['n_quote_stale']}" if pg.get("n_quote_stale") else "")
                 + ("/拒绝成交" if pg.get("execution_blocked") else "")
                 + (("/另缺 " + "；".join(pg["gaps"])) if pg.get("gaps") else ""))
+    dhp = (pg or {}).get("delta_hedge") if isinstance(pg, dict) else None
+    if isinstance(dhp, dict) and dhp.get("mode") == "paper" and (dhp.get("n_undecided") or dhp.get("n_blocked")):
+        # v0.45.526：逐票 Delta 对冲（纸面成交）有标的决定做不出来 / 拒绝成交——shadow 下只进审计，不占位
+        pg_s += (f" | 逐票对冲未决{dhp.get('n_undecided', 0)}只/拒绝成交{dhp.get('n_blocked', 0)}只("
+                 + ",".join(u.get("ticker", "?") for u in dhp.get("undecided") or []) + ")")
     pp = c.get("paper_portfolio")
     if pp and pp.get("error"):
         pg_s += f" | 纸面组合异常中断({str(pp['error'])[:80]})"        # v0.45.448
+    elif pp and pp.get("skipped"):                                      # v0.45.535
+        pg_s += f" | 纸面组合整天跳过(持仓日线全断 {len(pp.get('ohlc_unavailable') or [])} 只)"
     lf = c.get("ledger_io")
     if lf and lf.get("n"):                                              # v0.45.452
         where = ",".join(dict.fromkeys(Path(str(i.get("path"))).name for i in lf.get("items") or []))

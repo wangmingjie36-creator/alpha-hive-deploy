@@ -130,7 +130,7 @@ SKIP_EXACT = {
 SKIP_GLOBS = (
     ("*.py", "代码"), ("*.md", "文档"), ("*.txt", "文档"),
     ("*.bak*", "人工备份"), (".fuse_hidden*", "FUSE 残留"), ("*.backup_*", "人工备份"),
-    (".checkpoint_*", "扫描断点（只在当天有用）"), (".samples-only-*.json", "样本模式残留"),
+    (".checkpoint_*", "扫描断点（只在当天有用）"), (".samples-only-*.json", "样本模式残留（模式 v0.45.552 已删；旧根那 4 个 10-19 已归档到 _archive/samples_only/）"),
     ("bee_icon_*.png", "图标"), ("chart_*_NVDA_*.png", "遗留"),
     ("ml_model.corrupted-*", "取证副本"), ("ml_model_cache.pre-restore-*", "取证副本"),
 )

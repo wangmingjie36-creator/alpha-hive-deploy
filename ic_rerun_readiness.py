@@ -974,7 +974,50 @@ _COHORT_HISTORY = [
      "必连带点名分）；`composite.final_score` 是 ALWAYS_SLICED。"
      "前瞻检验：维度 IC 协议 H1（buzz_v1，通道是输入层）与 H2 都会随之变，但本条早于 FORWARD_START 2026-10-12 ⇒ 不截断；"
      "窗口开始后再换主源 = 终止 H1。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登一代（`final_score` 是 ML 特征）。"
-     "⚠️ 10-05 重跑 / 10-06 / 10-07 三轮的 news 是 Yahoo 量纲（数据降级，不在任何代码边界内），已在本世代之前，不另隔离。"),
+     "⚠️ 10-05 重跑 / 10-06 / 10-07 三轮的 news 是 Yahoo 量纲（数据降级，不在任何代码边界内），已在本世代之前，不另隔离。"),    ("2026-10-19", "v0.45.537",
+     "关掉 QueenDistiller 的 ML 反馈两个消费者（用户 2026-10-19 选方案 A）：① 用每日重训 HGB 的特征重要性乘蜂后**基准维度权重**再归一化；"
+     "② 用同一组乘数缩放每只蜂的**方向票重**。两处都没有 OOS 闸（Rival 那一项有 `_ml_oos_trust_factor`）。"
+     "乘数照算、落盘 `ml_weight_adjustments_shadow`；`ml_feedback_enabled` 恒 False、`ml_weight_adjustments` 恒 {}（如实记录没施加）。"
+     "**依据**（09-10 → 10-16，25 个扫描日 × 30 只，只读 `.swarm_results_*.json` + `ml_model_history/manifest.jsonl`）："
+     "场内模型 OOS 均值 51.5%、8 天 < 50%（测试集约 124 条、SE≈4.5pp）；基准权重 14/25 天偏离 config，最大 09-18 sentiment 0.549"
+     "（config 0.325，当天 OOS 46.3%）；signal 乘数 24/25 天高于下限、常 1.5–2.0 ⇒ 分数权重已归零的 Scout 一票顶 Chronos/Oracle 四票。"
+     "重要性是训练集上的 permutation importance，按维度取均值 ⇒ odds 25/25 天压在 0.5 下限（结构上只抬得动 sentiment / signal）。"
+     "**口径变化**（离线重放 750 行，`resonance_boost_forward_test` 的 rebase / replay）：加权分 750/750 复现；去掉 ML 后基础分"
+     "|Δ| 日均最大 0.46（09-18，单只最大 0.86）、当日排名 Spearman 最低 0.84；方向改变约 71/750（9.5%，重放复现率 92% ⇒ 近似值）；"
+     "最终分 |Δ| 均值 0.086、最大 1.0 ⇒ `rule_direction` 与 `final_score` 口径都变。"
+     "**边界代价**：本世代（2026-10-09 / v0.45.441+445 起）至今 180 条 predictions（10-09、10-12~16 各 30）、已到期 0 条，全部归旧世代"
+     "（2026-10-19 清晨对生产库 `read_only_connect` 只读实测）。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.537\"]`：蒸馏结果带 `ml_weight_adjustments_shadow` 键。预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.537\"]` = `()`：蜂后层改动，不改任何归档蜂信号（先例 v0.45.176 / 212 / 228 / 334）；"
+     "`composite.final_score` 是 ALWAYS_SLICED。前瞻检验：维度 IC 协议 H1 不动；H2 的对象是蜂后调整**之前**的 Σ冻结权重×维度分、"
+     "截断信号只有三只蜂的 score 与 `EVALUATION_WEIGHTS` 字面量（本版没动）⇒ **不截断**。共振加成前瞻检验：重放按记录的"
+     "`ml_feedback_enabled` / `ml_weight_adjustments` 复现投票 ⇒ 新旧记录都能复现、自证不受影响（`config.ML_FEEDBACK_CONFIG` 的 enable_* "
+     "**刻意保持 True**，翻了旧记录就复现不出），检验期内边界条数 +1（附带项）。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登一代（`final_score` 是 ML 特征）。"),
+    ("2026-10-19", "v0.45.538",
+     "RivalBee 的 ML 不再进分（用户 2026-10-19 选「根因修复」）：① `QueenDistiller._compute_weighted_score` 拿掉 "
+     "`ml_adjustment = (rival_score − 5)·0.1·conf·OOS 信任系数`，`_ml_oos_trust_factor` 与 config 的 `oos_trust_*` 一起删；"
+     "② `ml_predictor_extended`（`HistoricalDataBuilder` 30 条 2023 年硬编码样本 + 每只标的重训一次 HGB、写生产 `ml_model.json`）整体退役，"
+     "Rival 改为直接调 `ml_predictor.expected_returns`（动量 × 催化剂档）——方向、expected_3d/7d/30d、confidence（0.8/0.3）逐位不变，"
+     "分数从 `prob·10 + 0.5·tech` 变成 `5.0 + 0.5·tech`（原概率被小样本校准压在 0.54–0.58，相当于平移约 −0.4~−0.8）；"
+     "Rival 不再发布 `probability` / `ml_probability`，Bear 读它的 `< 0.45` 分支（03-27 后从未触发）随之删。"
+     "**依据**：概率出自合成样本训的模型，而信任闸读的是 `ml_model_cache.json` 真模型的 OOS ⇒ 闸门放行与否和被放行的东西无关；"
+     "生产记录里 `ml_adjustment` 恒 ≥0（只向上抬分），逐日随真模型 OOS 在 1 / 0.5 / 0 之间跳。"
+     "**口径变化**（离线重放：`resonance_boost_forward_test.replay`，B0 = 记录的 base，CF = base − ml_adjustment；"
+     "09-15 起 `.swarm_results_*.json` 全部 30 只 630 行、自证 613）：Δfinal 均值 −0.034、最小 −0.110、从不为正；"
+     "|Δ|>0.05 共 180 行；跨 6.0 决策线 7 行、7.5 线 1 行；按方向判的纸面入场变 3 笔（09-16 TMO 多头失去资格、09-22 DELL / 10-02 BRK-B "
+     "空头获得资格）；当日 Spearman(B0, CF) 最小 0.9983；21 天里 10 天当日排序有变。10-12 起 120 行：均值 −0.009、0 行跨线。"
+     "未计入的二阶项：Guard 无共振时 `avg_score` 含 Rival 分，Guard<4 才扣分（斜率 0.2/分），估计 ≤ 0.02。"
+     "**边界代价**：本世代（2026-10-09 / v0.45.441+445 起）至今 180 条 predictions（10-09、10-12~16 各 30）、已到期 0 条，全部归旧世代"
+     "（2026-10-19 清晨对生产库 `read_only_connect` 只读实测）；与 v0.45.537 同日且那条先落地（7d234c6d）⇒ 本条边际作废 0 条（同 441 + 445 的同日先例）。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.538\"]`：蒸馏结果有 `final_score` 却**没有** `ml_adjustment` 键（此前每份完整蒸馏结果都有），且是实时行。"
+     "预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。⚠️ 若推送赶不上 10-19 的扫描，本条日期须改成首个跑新代码的扫描日。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.538\"]` = `agent.RivalBeeVanguard.score`（闭包带出 Guard / Bear / swarm_agreement）；"
+     "**刻意不点名 `ml.*`**：`ml.expected_7d/30d` 输入与公式都没变、逐位相同，点名会白切它们的序列；`ml.probability` 抽取器已摘除、不再写新行。"
+     "`composite.final_score` 是 ALWAYS_SLICED。前瞻检验：维度 IC 协议 H1 不动；H2 的对象是蜂后调整**之前**的 Σ冻结权重×维度分、"
+     "截断信号只有 Chronos / Buzz / Oracle 的 score 与 `EVALUATION_WEIGHTS` 字面量（都没动；三只是 Phase-1，在 Rival 之前跑完）⇒ **不截断**。"
+     "共振加成前瞻检验：重放从记录的 `base_score_before_resonance` 起步，不重算 ml_adjustment ⇒ 新旧记录都能复现、自证不受影响。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 与 v0.45.537 合并为同一代 `v0.45.537+v0.45.538`（该表日期须唯一）。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1348,9 +1391,29 @@ def _scout_row_has_consensus_marker(d: dict) -> bool:
     return isinstance(det, dict) and det.get("consensus_in_score") is False
 
 
+def _marker_rival_ml_adjustment_retired(d: dict) -> bool:
+    """v0.45.538 的**日期**印记：蒸馏结果的 `ml_auxiliary_in_score` 为字面量 `False`，且是实时行。
+
+    v0.45.548 更正：初版用「有 `final_score` 却没有 `ml_adjustment` 键」当印记 —— 正是
+    `_marker_oracle_gex_signal_neutralized` docstring 记过的「把缺键当印记」那个坑：生产归档里
+    `analysis-NVDA-ml-2026-03-12.json` 是早期格式（有 `final_score`、从来就没有 `ml_adjustment`），
+    被认成新口径 ⇒ `cohort_boundary_evidence("v0.45.538")` 报 `boundary_too_late`、首见日 03-12（1142 份实测）。
+    改成新代码**正面**写的键；只认 `is False`（新代码从不写 True，出现 True 只能是有人把它接回去了）。"""
+    sr = d.get("swarm_results")
+    return (isinstance(sr, dict) and sr.get("ml_auxiliary_in_score") is False
+            and not _is_backfill_row(d))
+
+
 def _marker_scout_consensus_excluded(d: dict) -> bool:
     """v0.45.441 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383 / 423）。"""
     return _scout_row_has_consensus_marker(d) and not _is_backfill_row(d)
+
+
+def _marker_queen_ml_shadow(d: dict) -> bool:
+    """v0.45.537 的**日期**印记：蒸馏结果带 `ml_weight_adjustments_shadow` 键（新代码每只标的都写，
+    没有模型时写 {}；此前的记录没有这个键），且是实时行（补跑行不算日期证据，同 v0.45.441）。"""
+    sr = d.get("swarm_results")
+    return isinstance(sr, dict) and "ml_weight_adjustments_shadow" in sr and not _is_backfill_row(d)
 
 
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
@@ -1382,6 +1445,10 @@ _BOUNDARY_MARKERS = {
                   _marker_scout_consensus_excluded),
     "v0.45.445": ("agent_details.BuzzBeeWhisper.details.news_primary == \"massive\"",
                   _marker_buzz_news_primary_massive),
+    "v0.45.537": ("swarm_results 带 ml_weight_adjustments_shadow 键",
+                  _marker_queen_ml_shadow),
+    "v0.45.538": ("swarm_results.ml_auxiliary_in_score is False",
+                  _marker_rival_ml_adjustment_retired),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1596,8 +1663,10 @@ _DETAIL_KEY = "_detail"
 _FWD_DETAIL_KEYS = ("status", "reason", "stale", "look", "weeks", "next_look_at", "ohlc_window")
 #: 维度 IC 协议执行器 `run()` 返回值里 `attention` 用得上的键——刻意**不含** `verdicts` / `descriptive`
 #: （结论与效应量只在检视点之后出现，本工具只报「到点了、去跑脚本看」，不转述结论）
+#: `input_code_guard` / `buzz_v1_self_proof`（v0.45.556）：H1 两道前提的核对摘要，只有单元名与计数。
 _DIM_DETAIL_KEYS = ("status", "reason", "forward_start", "today", "h1_weeks", "next_look_at",
-                    "looks_done", "truncation", "weight_change", "stale", "h1_anchor")
+                    "looks_done", "truncation", "weight_change", "stale", "h1_anchor",
+                    "input_code_guard", "buzz_v1_self_proof")
 
 
 def _detail(fres: Dict, keys) -> Dict:
@@ -2234,6 +2303,32 @@ def _dim_ic_attention(d: Dict) -> List[Dict]:
     if d.get("stale"):
         out.append(item(f"{iid}.stale", "warn",
                         f"{name}：登记窗口起点 {fs} 后仍无任何样本 —— 扫描停了或路径错了"))
+    # v0.45.556：H1 的两道前提——输入层代码指纹守卫（v0.45.554）与 buzz_v1 自证（v0.45.556）。检视点之前执行器只把
+    # 它们渲染成进度行的 ⚠️、不改状态 ⇒ 这里不逐项列，按条目读的消费方就永远看不见（554 起漏着，556 由 TestRealCli
+    # 的图标双条件抓到）。检视点上它们会把状态改判 cannot_judge（上面已有一条），这里仍按前提单列：id 说明是哪一道。
+    g = d.get("input_code_guard")
+    if isinstance(g, dict) and not g.get("ok"):
+        why = "；".join(filter(None, (
+            f"未确认的改动：{'、'.join(g['unacknowledged'])}" if g.get("unacknowledged") else "",
+            ("算不出：" + "；".join(f"{u}: {e}" for u, e in g["errors"].items())) if g.get("errors") else ""))) or "未给原因"
+        out.append(item(f"{iid}.input_code_guard", "warn",
+                        f"{name}：输入层代码指纹守卫未通过（{why}）—— 跑 `/usr/local/bin/python3 signal_code_fingerprints.py` "
+                        "按提示三选一登记（拿不准选边界）；未登记前到检视点将不出结论（协议 §13.10）"))
+    sp = d.get("buzz_v1_self_proof")
+    if isinstance(sp, dict) and not sp.get("ok"):
+        why = (f"算不出：{sp['error']}" if sp.get("error") else
+               f"{sp.get('n_matched', 0)}/{sp.get('n', 0)} 逐位一致，失配 {sp.get('n_mismatched', 0)}、"
+               f"缺输入 {sp.get('n_missing', 0)}")
+        out.append(item(f"{iid}.buzz_v1_self_proof", "warn",
+                        f"{name}：buzz_v1 自证未通过（{why}）—— 跑 `/usr/local/bin/python3 buzz_v1.py` 看失配明细；"
+                        "未通过前到检视点将不出结论（协议 §13.11）"))
+    for key, what in (("input_code_guard", "输入层代码指纹守卫"), ("buzz_v1_self_proof", "buzz_v1 自证")):
+        if not isinstance(d.get(key), dict) and st != "cannot_judge":
+            # 执行器 `run()` 走完全程的返回都带这两个键；读不到 = 形状变了 / 白名单漏了 / 桩没带 ⇒ 前提核对会无声消失，
+            # 单列一条。cannot_judge 豁免：`run()` 找不到 / 读不出库的两条早退不带这两个键，执行器没加载起来也不带——
+            # 那时 cannot_judge 那条已在报。
+            out.append(item(f"{iid}.{key}_unknown", "warn",
+                            f"{name}：读不到{what}的结果（{key}={d.get(key)!r}）—— 这道 H1 前提没有核对"))
     return out
 
 

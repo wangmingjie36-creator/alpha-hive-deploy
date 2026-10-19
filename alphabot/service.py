@@ -531,13 +531,22 @@ class AlphaBotService:
             return {**full, "cache_age_sec": 0.0}
 
     def premium(self, ticker, params: Optional[dict] = None) -> dict:
-        """溢价页。params = 查询参数（字符串）；`force=1` ⇒ 重算（不清 CBOE 进程缓存）。
+        """溢价页。params = 查询参数（字符串）；`force=1` ⇒ 重算（不清 CBOE 进程缓存：顶部「重新拉取」先走过
+        live(force) 拉了新链，这里复用同一份）；`refresh=1` ⇒ 先清该票的 CBOE 进程缓存再重算——给不经过顶部
+        「重新拉取」的盘中自动刷新用，否则 force 只会拿缓存里同一 vintage 日内可活 4 小时的旧链重算一遍。
+        只清缓存、不走 live()：后者为了暖缓存要把标的页整套明细（GEX / 梯子 / 怎么卖）算一遍，且它取链失败时
+        这里会再取一次、重试翻倍（v0.45.539）。
         参数错（含「链上没有这个到期日」）⇒ BadRequest，带上出错的参数名，前端只撤销那一个。"""
         t = norm_ticker(ticker)
         q = dict(params or {})
         force = str(q.pop("force", "") or "") == "1"
+        refresh = str(q.pop("refresh", "") or "") == "1"
         try:
-            p = PM.parse_params(q)
+            p = PM.parse_params(q)                       # 先验参数：参数错不该白拉一次链
+            if refresh:
+                if self.fetch_fn is None:                # 注入的取数函数（演示 / 测试）本来就每次现取，没有这层缓存
+                    R._invalidate_cached_payload(t)
+                force = True
             out = PM.select(self._premium_full(t, force), p)
         except PM.ParamError as exc:
             raise BadRequest(str(exc), param=exc.param) from exc

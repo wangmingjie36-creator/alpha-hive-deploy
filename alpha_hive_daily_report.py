@@ -30,7 +30,6 @@ _log = get_logger("daily_report")
 import scan_timing as _timing
 
 # 可选模块（optional_import 优雅降级）
-MetricsCollector = optional_import("metrics_collector", "MetricsCollector")
 from generate_ml_report import MLEnhancedReportGenerator
 from pheromone_board import PheromoneBoard
 from swarm_agents import (
@@ -80,7 +79,9 @@ PRICE_GATE_EXIT = 4
 
 
 class ScanInputsUnavailable(RuntimeError):
-    """预取后多数标的取不到可用现价——在任何持久写入之前停下（`config.SCAN_PRICE_GATE`）。"""
+    """预取后多数标的取不到可用现价——在写任何与今天行情有关的产物之前停下（`config.SCAN_PRICE_GATE`）。
+    v0.45.544 订正：闸之前唯一的落盘是 `_init_scan_context` 开头的 ML 日常重训（`ml_model_cache.json`），训练数据是
+    历史样本、与今天的现价无关；预测 / 归档 / 快照 / 账本 / 日报 / 网站都在闸之后。"""
 
     def __init__(self, coverage: Dict):
         self.coverage = coverage
@@ -346,6 +347,39 @@ def _assert_config_zeros_survive(effective: dict, adapted_diag: "dict | None" = 
     return True
 
 
+def _assert_base_weights_equal_config(effective: dict, cfg_weights: "dict | None" = None) -> bool:
+    """扫描期观测点（v0.45.537）：蜂后**基准**权重必须逐维等于 `config.EVALUATION_WEIGHTS`。
+
+    上一个观测点只守「零维仍为零」，因为当时基准层还有一条合法的乘法改写（ML 反馈）。
+    v0.45.537 关掉它之后基准层就没有任何合法改写了，可以守得更严：任何一维偏离都红。
+    （ML 反馈在 09-18 把 sentiment 从 0.325 推到 0.549，零维守卫对此恒绿。）
+    逐标的政体调整在下游，不归这里管。
+
+    Returns:
+        True = 相等（容差 1e-4）。False = 有通道在改写基准权重（error 日志 + stdout 告警）。
+    """
+    if cfg_weights is not None:
+        cfg_w = dict(cfg_weights)
+    else:
+        try:
+            import config as _cfg
+            cfg_w = dict(_cfg.EVALUATION_WEIGHTS)
+        except (ImportError, AttributeError) as e:
+            _log.warning("基准权重相等检查跳过（config 读取失败）: %s", e)
+            return True
+    diff = {d: (effective.get(d), w) for d, w in cfg_w.items()
+            if not isinstance(effective.get(d), (int, float)) or abs(effective[d] - w) > 1e-4}
+    if diff:
+        _log.error(
+            "基准权重偏离 config：%s（实际, config）—— 有通道在改写蜂后基准权重"
+            "（历史上是 adapted_weights、ML 反馈，分别于 v0.45.176 / v0.45.537 断开）。",
+            diff,
+        )
+        print(f"⚠️  基准权重偏离 config：{diff}")
+        return False
+    return True
+
+
 class AlphaHiveDailyReporter:
     """Alpha Hive 日报生成引擎"""
 
@@ -384,10 +418,6 @@ class AlphaHiveDailyReporter:
 
         # 结果存储
         self.opportunities: List[OpportunityItem] = []
-        self.risks: List[Dict] = []
-
-        # 线程安全锁（用于并行执行时保护共享数据）
-        self._results_lock = Lock()
 
         # Phase 3 P4: 初始化代码执行 Agent（失败时降级）
         self.code_executor_agent = None
@@ -417,14 +447,6 @@ class AlphaHiveDailyReporter:
                         self.vector_memory.cleanup()
             except (ImportError, OSError, ValueError, RuntimeError) as e:
                 _log.warning("向量记忆初始化失败: %s", e)
-
-        # Week 4: 指标收集器
-        self.metrics = None
-        if MetricsCollector:
-            try:
-                self.metrics = MetricsCollector()
-            except (OSError, ValueError, RuntimeError) as e:
-                _log.warning("MetricsCollector 初始化失败: %s", e)
 
         # 财报自动监控器
         self.earnings_watcher = None
@@ -556,30 +578,15 @@ class AlphaHiveDailyReporter:
         _adapted_diag = Backtester.load_adapted_weights() if Backtester else None
         import llm_service as _llm_check_q
 
-        # Enhancement C: 尝试加载已训练的 ML 模型用于 QueenDistiller 维度权重反馈
-        _ml_model_for_queen = None
-        try:
-            from ml_predictor import MLPredictionService as _MPS
-            _ml_svc_tmp = _MPS()
-            _ml_model_file = PATHS.ml_model_cache
-            if _ml_model_file.exists():
-                _ml_svc_tmp.model.load_model(str(_ml_model_file))
-                if _ml_svc_tmp.model.is_trained:
-                    _ml_model_for_queen = _ml_svc_tmp.model
-                    _log.info("ML 模型已加载用于 QueenDistiller 维度权重反馈")
-        except (ImportError, OSError, ValueError, TypeError) as e:
-            _log.debug("ML 模型加载跳过: %s", e)
-
-        # ── ML 每日重训（用真实数据替换硬编码假数据）──
-        try:
-            from config import ML_TRAINING_CONFIG as _MTC
-            if _MTC.get("daily_retrain", True) and _ml_svc_tmp:
-                _retrain_result = _ml_svc_tmp.train_model()
-                if _retrain_result.get("status") == "success" and _ml_svc_tmp.model.is_trained:
-                    _ml_model_for_queen = _ml_svc_tmp.model
-                    _log.info("ML 模型已用真实数据重训")
-        except (ImportError, OSError, ValueError, TypeError, NameError) as e:
-            _log.debug("ML 每日重训跳过: %s", e)
+        # 交给 QueenDistiller 的 ML 模型：v0.45.537 起只用来算**影子**乘数（落盘 `ml_weight_adjustments_shadow`），
+        # 不改权重、不改票重。v0.45.547 起直接用报告生成器 `self.ml_generator` 那一个实例——它在 __init__ 里已按
+        # 「当日内存 / 当日磁盘缓存 / 从库重训」备好了今天的模型；此前这里再读一次缓存、再 `train_model()` 重训一遍
+        # （同一个库、同一个 random_state，日志里两次的样本数 / OOS / 特征完全相同），训出来的只多写一份没人读的 ml_model.json。
+        # 证明（同一份生产库副本上两种取法的特征重要性与影子乘数逐位相等）见 experiments/ml_dedupe_proof_v0547.py。
+        _gen_model = getattr(getattr(self.ml_generator, "ml_service", None), "model", None)
+        _ml_model_for_queen = _gen_model if getattr(_gen_model, "is_trained", False) else None
+        if _ml_model_for_queen is None:
+            _log.warning("报告生成器没有可用的 ML 模型 ⇒ 蜂后本轮不算影子乘数（ml_weight_adjustments_shadow 为空）")
 
         queen = QueenDistiller(
             board,
@@ -587,6 +594,7 @@ class AlphaHiveDailyReporter:
             ml_model=_ml_model_for_queen,
         )
         _assert_config_zeros_survive(queen.DIMENSION_WEIGHTS, _adapted_diag)
+        _assert_base_weights_equal_config(queen.DIMENSION_WEIGHTS)
 
         # rival_agent 必须在 all_agents 里：下面的 inject_prefetched 靠它注入
         # `_prefetched_stock`，漏了会让 Rival 逐标的直接抓 yfinance（限流风险）。
@@ -601,7 +609,8 @@ class AlphaHiveDailyReporter:
         prefetch_elapsed = time.time() - start_time
         _timing.record("prefetch", prefetch_elapsed)
         _log.info("预取完成 (%.1fs) | 开始并行分析", prefetch_elapsed)
-        # v0.45.504 输入闸：多数标的没有可用现价 ⇒ 在第一次持久写入之前停下（蜂群、板、账本都还没动）。
+        # v0.45.504 输入闸：多数标的没有可用现价 ⇒ 在写任何与今天行情有关的产物之前停下（蜂群、板、账本都还没动；
+        # v0.45.544 订正：上面的 ML 日常重训已写过 ml_model_cache.json，但它只用历史样本、与今天的现价无关）。
         # 2026-10-12 全源 TLS 失败、30/30 现价 0，扫描照跑、照写、照发布——这里是它本该停下的地方。
         try:
             from config import SCAN_PRICE_GATE as _SPG
@@ -833,7 +842,7 @@ class AlphaHiveDailyReporter:
         return time.time() - ctx.start_time
 
     def _post_scan_metrics(self, ctx: '_SwarmContext', swarm_results: Dict, elapsed: float) -> None:
-        """扫描后指标：LLM 统计 + MetricsCollector + SLO 检查 + 回测 + 权重自适应 + DB 清理"""
+        """扫描后指标：LLM 统计 + 回测 + 权重自适应 + DB 清理"""
         _timing.record("swarm_total", elapsed)
         # LLM Token 使用统计
         try:
@@ -846,66 +855,8 @@ class AlphaHiveDailyReporter:
         except (ImportError, AttributeError, KeyError) as e:
             _log.info("蜂群耗时：%.1fs (LLM stats unavailable: %s)", elapsed, e)
 
-        # MetricsCollector 记录 + SLO
-        if self.metrics:
-            try:
-                scores = [d.get("final_score", 5.0) for d in swarm_results.values()]
-                agent_errors = sum(
-                    1 for d in swarm_results.values()
-                    if d.get("supporting_agents", 0) == 0
-                )
-                resonance_n = sum(
-                    1 for d in swarm_results.values()
-                    if d.get("resonance", {}).get("resonance_detected")
-                )
-                avg_real = (
-                    sum(d.get("data_real_pct", 0) for d in swarm_results.values()) / len(swarm_results)
-                    if swarm_results else 0
-                )
-                llm_c, llm_cost = 0, 0.0
-                try:
-                    import llm_service as _ls
-                    _u = _ls.get_usage()
-                    llm_c, llm_cost = _u.get("call_count", 0), _u.get("total_cost_usd", 0.0)
-                except (ImportError, AttributeError, KeyError):
-                    pass
-
-                self.metrics.record_scan(
-                    ticker_count=len(swarm_results),
-                    duration_seconds=elapsed,
-                    agent_count=len(ctx.all_agents),
-                    prefetch_seconds=ctx.prefetch_elapsed,
-                    avg_score=sum(scores) / len(scores) if scores else 5.0,
-                    max_score=max(scores) if scores else 5.0,
-                    min_score=min(scores) if scores else 5.0,
-                    agent_errors=agent_errors,
-                    agent_total=len(swarm_results) * len(ctx.all_agents),
-                    data_real_pct=avg_real,
-                    resonance_count=resonance_n,
-                    llm_calls=llm_c,
-                    llm_cost_usd=llm_cost,
-                    session_id=self._session_id or "",
-                    scan_mode="swarm",
-                )
-                for ticker, data in swarm_results.items():
-                    self.metrics.record_ticker(
-                        ticker=ticker,
-                        final_score=data.get("final_score", 5.0),
-                        direction=data.get("direction", "neutral"),
-                        supporting_agents=data.get("supporting_agents", 0),
-                        data_real_pct=data.get("data_real_pct", 0),
-                        resonance_detected=data.get("resonance", {}).get("resonance_detected", False),
-                        session_id=self._session_id or "",
-                    )
-
-                violations = self.metrics.check_slo(days=1)
-                if violations:
-                    _vio_text = "; ".join(v["details"] for v in violations)
-                    _log.warning("SLO 违规 %d 条: %s", len(violations), _vio_text)
-                    # SLO 违规仅写日志，不发 Slack DM（减少噪音）
-                    pass
-            except (OSError, ValueError, KeyError, TypeError) as e:
-                _log.warning("指标收集异常: %s", e)
+        # v0.45.534：此处曾写 MetricsCollector（metrics.db 三张表 + 30s SLO 检查）。零读者 / 只喂一行恒红日志，已退役；
+        # 扫描耗时由上面的 _timing.record("swarm_total") 落 logs/scan_timing.json。墓碑 tests/test_dead_chains_batch1_retired.py。
 
         # 回测反馈循环
         # v0.45.118：这一段 2026-09-04 实测 342s（逐条待检预测各发一次
@@ -943,119 +894,17 @@ class AlphaHiveDailyReporter:
             except (OSError, ValueError, KeyError, TypeError) as e:
                 _log.warning("回测异常: %s", e)
 
-        # ── feedback_loop 路径的权重建议合并 ──
-        try:
-            from feedback_loop import BacktestAnalyzer as _FBAnalyzer
-            _snap_dir = os.path.join(str(self.report_dir), "report_snapshots")
-            # v0.45.87：接入 close_t7 干净口径（此前用只有约1/3 可信的
-            # actual_prices.t7），与 weekly_optimizer.py 共用同一份实现。
-            # v0.45.98：显式传 close_t7_db_path=self.report_dir/"pheromone.db"，
-            # 与上一行 _snap_dir 用同一个基准目录（self.report_dir），不用
-            # feedback_loop.py 的 __file__ 相对缺省值——否则 snapshots 和
-            # close_t7 库可能来自两个不同目录，worktree 场景下已实测会不一致。
-            _fb_analyzer = _FBAnalyzer(
-                directory=_snap_dir, clean_t7=True,
-                close_t7_db_path=self.report_dir / "pheromone.db")
-            if _fb_analyzer.snapshots:
-                _suggestion = _fb_analyzer.suggest_weight_adjustments()
-                if _suggestion and _suggestion.get("new_weights"):
-                    _new_w = _suggestion["new_weights"]
-                    # 安全钳位 [0.05, 0.50] + 归一化
-                    _clamped = {k: max(0.05, min(0.50, v)) for k, v in _new_w.items()}
-                    _total = sum(_clamped.values())
-                    if _total > 0:
-                        _clamped = {k: round(v / _total, 4) for k, v in _clamped.items()}
-                        if adapted:
-                            for k in adapted:
-                                if k in _clamped:
-                                    adapted[k] = round((adapted[k] + _clamped[k]) / 2, 4)
-                        else:
-                            adapted = _clamped
-                        _log.info("feedback_loop 权重建议已合并: %s", _clamped)
-        except (ImportError, OSError, ValueError, KeyError, TypeError, ZeroDivisionError) as e:
-            _log.debug("feedback_loop 权重合并跳过: %s", e)
-
-        # ── AgentWeightManager: 按 Agent 准确率更新投票权重 ──
-        if self.memory_store and adapted:
-            try:
-                from agent_weight_manager import AgentWeightManager
-                _wm = AgentWeightManager(self.memory_store)
-                _wm.recalculate_all_weights()
-                _wm.apply_dimension_feedback(adapted)
-                _log.info("Agent 权重已按准确率更新")
-            except (ImportError, OSError, ValueError, TypeError, AttributeError) as e:
-                _log.debug("AgentWeightManager 更新跳过: %s", e)
+        # v0.45.531：此处曾有「feedback_loop 权重建议合并进 adapted」+「AgentWeightManager 把它和按快照判的准确率
+        # 写进 agent_weights 表」两段。那张表没有任何评分侧读者；准确率按快照方向判、同组各蜂结果相同（0/1418），
+        # 量的是蜂群不是蜂；表里的差异全来自 v0.45.176 已断开的 adapted_weights ⇒ 接进评分 = 换个入口接回旁路。
+        # 已退役，**勿重建**；adapt_weights 照算照写 adapted_weights 表留审计（见上）。墓碑 tests/test_agent_weight_manager_retired.py。
         _timing.record("backtest_weights", time.monotonic() - _t_backtest)
 
-        # ---- ML 增量学习（利用新验证的 T+7 数据）----
-        if Backtester and bt:
-            try:
-                verified_rows = bt.store.get_recently_verified_t7(limit=50)
-                if len(verified_rows) >= 5:
-                    # v0.44.3：阈值唯一真相 = catalyst_quality_from_score
-                    # （此前同一套阈值在三处各写一份嵌套 _cat_qual）
-                    from ml_predictor import (
-                        MLPredictionService,
-                        TrainingData,
-                        catalyst_quality_from_score as _cat_qual,
-                    )
-
-                    new_training = []
-                    direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
-                    for r in verified_rows:
-                        ds = json.loads(r.get("dimension_scores") or "{}")
-                        # 计算 agent_agreement（共识度）
-                        _ad = json.loads(r.get("agent_directions") or "{}")
-                        _dir = r.get("direction", "neutral")
-                        if _ad:
-                            _majority = sum(1 for d in _ad.values() if d == _dir)
-                            _agree = _majority / len(_ad)
-                        else:
-                            _agree = 0.5
-                        new_training.append(TrainingData(
-                            ticker=r["ticker"], date=r["date"],
-                            crowding_score=ds.get("signal", 5.0) * 10,
-                            catalyst_quality=_cat_qual(ds.get("catalyst", 5.0)),
-                            momentum_5d=0.0, volatility=5.0,
-                            market_sentiment=(ds.get("sentiment", 5.0) - 5) * 20,
-                            actual_return_3d=float(r["return_t7"] or 0) * 0.4,
-                            actual_return_7d=float(r["return_t7"] or 0),
-                            actual_return_30d=float(r["return_t7"] or 0) * 2.5,
-                            win_3d=bool(r["correct_t7"]),
-                            win_7d=bool(r["correct_t7"]),
-                            win_30d=bool(r["correct_t7"]),
-                            # v2 新特征
-                            iv_rank=float(r.get("iv_rank")) if r.get("iv_rank") is not None else 50.0,
-                            put_call_ratio=float(r.get("put_call_ratio")) if r.get("put_call_ratio") is not None else 1.0,
-                            final_score=float(r.get("final_score")) if r.get("final_score") is not None else 5.0,
-                            odds_score=ds.get("odds", 5.0),
-                            risk_adj_score=ds.get("risk_adj", 5.0),
-                            agent_agreement=_agree,
-                            direction_encoded=direction_map.get(_dir, 0.0),
-                        ))
-
-                    ml_svc = MLPredictionService()
-                    model_file = PATHS.ml_model_cache
-                    if model_file.exists():
-                        ml_svc.model.load_model(str(model_file))
-
-                    if not ml_svc.model.is_trained:
-                        ml_svc.model.train(new_training)
-                    else:
-                        ml_svc.model.incremental_train(new_training)
-
-                    ml_svc.model.save_model(str(model_file))
-                    _log.info(
-                        "🧠 ML 增量学习完成：%d 条验证数据 → 模型已更新",
-                        len(new_training),
-                    )
-                elif verified_rows:
-                    _log.info(
-                        "ML 增量学习跳过：仅 %d 条验证数据（需 ≥ 5）",
-                        len(verified_rows),
-                    )
-            except (ImportError, OSError, ValueError, TypeError, KeyError, AttributeError) as e:
-                _log.warning("ML 增量学习异常: %s", e)
+        # v0.45.547：此处曾有「ML 增量学习」——拿 50 条最近验证过的 T+7 记录拼成 TrainingData（momentum 恒 0、volatility 恒 5.0、
+        # 3/30 日收益按 T+7 乘 0.4 / 2.5 编出来），调 `incremental_train`；而 HGB 的 incremental_train 只看列表非空、随即从库里
+        # **全量重训**，再覆盖 ml_model_cache.json。缓存只在文件日期 = 今天（PDT）时有效 ⇒ 次日照样重训，它的产物只给当天之后
+        # 启动的进程用，还把当天取证快照换成一个没给任何标的打过分的模型（10-16：打分的 OOS 45.2%，快照里 56.8%）；
+        # 缓存不存在时更会直接 `train()` 在那 50 条编造特征上。已删，**勿重建**；墓碑 tests/test_ml_retrain_dedupe.py。
 
         # 权重自适应仅写日志，不发 Slack DM（减少噪音）
 
@@ -1205,14 +1054,7 @@ class AlphaHiveDailyReporter:
                 _opp["thesis_break_l1"] = _sr["thesis_break_l1"]
                 _opp["thesis_break_l2"] = _sr["thesis_break_l2"]
 
-        # 保存会话
-        if self.memory_store and self._session_id:
-            snapshot = ctx.board.compact_snapshot()
-            self._submit_bg(
-                self.memory_store.save_session,
-                self._session_id, self.date_str, "swarm",
-                ctx.targets, swarm_results, snapshot, elapsed
-            )
+        # v0.45.534：此处曾把会话汇总写进 reasoning_sessions 表（零读者），已退役。
 
         # 向量记忆存储
         if self.vector_memory and self.vector_memory.enabled:
@@ -1331,8 +1173,11 @@ class AlphaHiveDailyReporter:
         try:
             import paper_portfolio as _pp
             _pp_result = _pp.run_for_date(self.date_str, verbose=False)
-            _log.info("纸面组合已更新: %s (nav=%s)", self.date_str,
-                      (_pp_result or {}).get("nav", "?"))
+            if (_pp_result or {}).get("skipped"):   # v0.45.535：持仓日线全断 ⇒ 整天跳过（paper_portfolio 已记 ERROR / run_stats）
+                _log.warning("纸面组合整天跳过: %s（%s）", self.date_str, _pp_result["skipped"])
+            else:
+                _log.info("纸面组合已更新: %s (nav=%s)", self.date_str,
+                          (_pp_result or {}).get("nav", "?"))
         except Exception as e:
             _log.warning("纸面组合更新失败(非致命): %s", e)
 
@@ -1681,12 +1526,10 @@ class AlphaHiveDailyReporter:
         return opportunities
 
     def _compute_sector_sentiment(self, swarm_results):
-        """P4a: 跨标的情绪传染网络（纯规则引擎，零 API 费用）— mutates swarm_results"""
+        """P4a: 板块平均情绪汇总（纯规则引擎，零 API 费用）——只读 swarm_results（v0.45.534 起不再改写它）"""
         sector_sentiment_summary = {}
         try:
-            from config import WATCHLIST, SENTIMENT_MOMENTUM_CONFIG as _SMC
-            _deviation_high = _SMC.get("sector_deviation_high", 15)
-            _deviation_mid = _SMC.get("sector_deviation_mid", 8)
+            from config import WATCHLIST
 
             # Step 1: 提取每个 ticker 的 BuzzBeeWhisper 情绪百分比
             _sector_sentiments: dict[str, list[tuple[str, float]]] = {}
@@ -1714,38 +1557,9 @@ class AlphaHiveDailyReporter:
                     _avg = sum(_p for _, _p in _items) / len(_items)
                     _sector_avgs[_sec] = round(_avg, 1)
 
-            # Step 3: 计算个股偏离 & 注入 swarm_results
-            for _tk, _sd in swarm_results.items():
-                _wl = WATCHLIST.get(_tk, {})
-                _sector = _wl.get("sector", "Other") if isinstance(_wl, dict) else "Other"
-                if _sector not in _sector_avgs:
-                    continue
-                _tk_pct = None
-                for _t, _p in _sector_sentiments.get(_sector, []):
-                    if _t == _tk:
-                        _tk_pct = _p
-                        break
-                if _tk_pct is None:
-                    continue
-                _dev = round(_tk_pct - _sector_avgs[_sector], 1)
-                if _dev > _deviation_high:
-                    _sig = "overheating"
-                elif _dev > _deviation_mid:
-                    _sig = "above_sector"
-                elif _dev < -_deviation_high:
-                    _sig = "undervalued"
-                elif _dev < -_deviation_mid:
-                    _sig = "below_sector"
-                else:
-                    _sig = "in_line"
-                _sd["sector_sentiment"] = {
-                    "sector": _sector,
-                    "sector_avg_pct": _sector_avgs[_sector],
-                    "ticker_pct": round(_tk_pct, 1),
-                    "deviation_ppt": _dev,
-                    "signal": _sig,
-                    "peers": [_t for _t, _ in _sector_sentiments[_sector] if _t != _tk],
-                }
+            # v0.45.534：原 Step 3（逐标的偏离 → swarm_results[t]["sector_sentiment"]）已删——它在 .swarm_results /
+            # 快照 / 档案都落盘**之后**才写进去，生产里从未被保存、零读者。板块均值汇总照旧进日报 JSON
+            # （`sector_sentiment_contagion`，已发布在 gh-pages，保留）。
 
             sector_sentiment_summary = {
                 sec: {"avg_pct": avg, "count": len(_sector_sentiments.get(sec, []))}
@@ -2587,29 +2401,17 @@ class AlphaHiveDailyReporter:
 
 def _resolve_focus_tickers(args) -> List[str]:
     """
-    v0.23.0 扩样本：统一 CLI 解析优先级
-      1. 显式 --tickers 列表 → 直接用
-      2. --extended-pool → WATCHLIST + WATCHLIST_EXTENDED（101 只）
-      3. --all-watchlist → WATCHLIST 每日扫描池 30 只（v0.45.6 起与编排器同源）
-      4. 默认 → args.tickers 里的 10 只
-    --max-tickers 是硬上限（防止首次跑太久）
-    """
-    if getattr(args, "extended_pool", False):
-        try:
-            from config import get_extended_watchlist
-            tickers = list(get_extended_watchlist().keys())
-        except (ImportError, AttributeError):
-            _log.warning("get_extended_watchlist 不可用，降级到 WATCHLIST")
-            tickers = list(WATCHLIST.keys())
-    elif getattr(args, "all_watchlist", False):
-        tickers = list(WATCHLIST.keys())
-    else:
-        tickers = list(args.tickers)
+    CLI 标的解析：
+      1. --all-watchlist → WATCHLIST 每日扫描池（v0.45.6 起与编排器同源）
+      2. 否则 → args.tickers（显式 --tickers 或缺省列表）
 
-    max_n = getattr(args, "max_tickers", None)
-    if max_n and max_n > 0:
-        tickers = tickers[:max_n]
-    return tickers
+    v0.45.552：`--extended-pool`（并入候补池 WATCHLIST_EXTENDED）与 `--max-tickers` 已删——
+    它们只给已退役的 `--samples-only` 样本积累器用过；脱离那道短路单独用，就是一次
+    101 只、会部署的生产扫描。要扩池：把候补标的升进 `config.WATCHLIST`。
+    """
+    if getattr(args, "all_watchlist", False):
+        return list(WATCHLIST.keys())
+    return list(args.tickers)
 
 
 def _refresh_cloud_snapshots() -> None:
@@ -2762,26 +2564,6 @@ def main():
         help='扫描配置中的全部核心监控列表（WATCHLIST，约 25 只）'
     )
     parser.add_argument(
-        '--extended-pool',
-        action='store_true',
-        help='v0.23.0 扩样本：扫描 WATCHLIST + WATCHLIST_EXTENDED（101 只，覆盖 14 sector）'
-    )
-    parser.add_argument(
-        '--max-tickers',
-        type=int,
-        default=None,
-        help='限制扫描的最大标的数（配合 --extended-pool 用，防止首次跑太久）'
-    )
-    parser.add_argument(
-        '--samples-only',
-        action='store_true',
-        help=(
-            'v0.23.1 样本积累模式：只跑蜂群扫描写 pheromone.db，'
-            '不生成 HTML 日报 / 不推 GitHub / 不推 Slack。'
-            '用于离线积累 T+30 样本，零 API 费用（需配合 --no-llm）。'
-        )
-    )
-    parser.add_argument(
         '--swarm',
         action='store_true',
         help=('蜂群协作模式（7 个自治工蜂：6 核心并行 + BearBeeContrarian 看空对冲）。'
@@ -2832,8 +2614,8 @@ def main():
     args = parser.parse_args()
 
     # v0.45.213：非蜂群扫描（原 `run_daily_scan` 规则引擎路径）已退役。
-    # 闸放在**任何取数、任何落盘之前**——不是照 --samples-only 那样跑完再在
-    # save_report 之前短路，因为那条路在扫描**过程中**就写生产状态：
+    # 闸放在**任何取数、任何落盘之前**——不是跑完再在 save_report 之前短路
+    # （已退役的 --samples-only 当年就是那样做的），因为那条路在扫描**过程中**就写生产状态：
     #   · `generate_ml_enhanced_report` → `probability_scorecard.record_published`
     #     按 (date, ticker) 先写者占位。规则引擎先跑，当天蜂群扫描真正印出去的
     #     那个数就被拒收，账本里留下 direction=None 的一行（实测）。
@@ -2871,10 +2653,11 @@ def main():
     # ── 美股交易日护栏 ──
     # 周末 / 美股假日（Juneteenth、Good Friday…）跳过完整简报生成，不对无交易日产出幽灵报告。
     # 用 PDT 日期判断（= 美股交易日），不依赖本机时区（用户在中国，Mac 时钟 +15h）。
-    # 例外：--samples-only（周日 cron 故意跑样本积累，且不生成 dated 报告/不部署）、
-    #       --check-earnings（财报检查工具）、--force 均放行。
+    # 例外：--check-earnings（财报检查工具）、--force 放行。
+    # （v0.45.552 前还放行 --samples-only：已退役的周日样本积累器。库里那批周日样本仍由
+    #  backtester / dashboard_renderer 的非交易日过滤挡在门面口径之外。）
     # fail-open：检查本身异常时继续生成，宁可多生成也绝不误跳过有效交易日。
-    if not (args.samples_only or args.check_earnings or args.force):
+    if not (args.check_earnings or args.force):
         try:
             from datetime import date as _date_guard
             from hive_logger import pdt_today as _pdt_today_guard
@@ -2938,8 +2721,7 @@ def main():
             _log.info("今日无 watchlist 标的发布财报")
         return result
 
-    # 确定扫描标的（v0.23.2 修复：主扫描路径也必须接入 _resolve_focus_tickers，
-    # 否则 --extended-pool / --max-tickers 对实际扫描完全不生效）
+    # 确定扫描标的
     focus_tickers = _resolve_focus_tickers(args)
 
     # v0.45.466：云端快照新鲜度观测与扫描并行（见 _CloudSnapshotObservation）。
@@ -2953,36 +2735,13 @@ def main():
         with _snapshot_ctx(args):
             report = reporter.run_swarm_scan(focus_tickers=focus_tickers)
     except ScanInputsUnavailable as _gate:
-        # v0.45.504：输入闸拒绝。什么都没写（闸在第一次持久写入之前）⇒ 不 save_report、不部署；
+        # v0.45.504：输入闸拒绝。与今天行情有关的什么都没写（v0.45.544 订正：ML 日常重训的模型缓存除外）⇒ 不 save_report、不部署；
         # scan_timing 照写一份带原因的（编排器读 extra.price_gate 打日志，Step 2 解释器据此判没跑完），退出码 4。
         print(f"\n🛑 输入闸：{_gate}")
         print("   - 未写 predictions / signal_archive / report_snapshots / 账本，未生成日报、未部署")
         print("   - 常见原因：出站网络 / 代理故障（2026-10-12 即此）。编排器会等待后重探代理并重跑。")
         _timing.write(reporter.date_str, extra={"early_exit": "price_gate", "price_gate": _gate.coverage})
         return {"error": "price_gate", "price_gate": _gate.coverage}
-
-    # v0.23.2 修复 #2：--samples-only 必须在 save_report 之前短路
-    # 否则 _save_output_files 会生成 MD/HTML/PWA/X线程/rss.xml 到 repo 根，
-    # 被下次 daily-scan 的 deploy_and_notify 误 commit 污染生产网站
-    if args.samples_only:
-        # 修复 #7：error dict 不应静默成功退出
-        if isinstance(report, dict) and "error" in report:
-            print(f"\n❌ 样本积累扫描失败: {report.get('error')}")
-            _log.error("samples-only scan error: %s", report.get("error"))
-            return report
-        n_results_early = len(report.get("swarm_results") or report.get("ticker_results") or {})
-        # 只保存最小 JSON 供 Hive app 读取（pheromone.db 已在 run_swarm_scan 写入）
-        try:
-            json_file = reporter.report_dir / f".samples-only-{reporter.date_str}.json"
-            with open(json_file, "w", encoding="utf-8") as f:
-                json.dump(report, f, ensure_ascii=False, indent=2, cls=SafeJSONEncoder)
-            _log.info("样本模式: 仅保存 %s", json_file.name)
-        except (OSError, TypeError) as e:
-            _log.warning("samples-only JSON 保存失败 (但 pheromone.db 已写入): %s", e)
-        print(f"\n📦 样本积累模式: 完成 {n_results_early} 标的扫描, pheromone.db 已写入")
-        print(f"   - 跳过 save_report (避免生成 HTML/MD/PWA 污染 repo)")
-        print(f"   - 跳过 deploy_and_notify (不推 gh-pages / Slack)")
-        return report
 
     # v0.27.2 空扫描护栏：数据源全线失败（如 yfinance 429 限流触发断路器）会产出
     # tickers_analyzed=0 / opportunities=0 的空报告。此时绝不能 save_report + 部署，
@@ -3009,17 +2768,6 @@ def main():
     with _timing.timed("save_report"):
         report_path = reporter.save_report(report)
     _log.info("报告已保存：%s", report_path)
-
-    # v0.23.1: --samples-only 模式跳过所有部署 / Slack / gh-pages，只为积累 pheromone.db 样本
-    # （保留为死代码兜底；上方已 early return，此处不会到达）
-    if args.samples_only:
-        n_results = len(report.get("swarm_results") or report.get("ticker_results") or {})
-        print(f"\n📦 样本积累模式：完成 {n_results} 标的扫描，已写入 pheromone.db")
-        print(f"   - 跳过 HTML 报告生成")
-        print(f"   - 跳过 GitHub / gh-pages 推送")
-        print(f"   - 跳过 Slack 通知")
-        print(f"   下次回测 / Bootstrap / FF 归因 会自动读到这批新样本")
-        return report
 
     # 部署：gh-pages（网站）+ Hive App + Slack
     # v0.45.402（数据根迁移阶段 6）：日报不再提交 / 推送代码仓库 main——数据在数据根，不进公开仓库。

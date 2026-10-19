@@ -10,6 +10,7 @@ Alpha Hive - LLM 服务层
 - 内置重试 + 超时 + 降级
 """
 
+import copy
 import json
 import logging as _logging
 import os
@@ -47,13 +48,31 @@ _client = None
 _lock = threading.Lock()
 
 # Token 使用追踪（每日自动重置）
+#
+# v0.45.555：新增四个「LLM 臂是否真在工作」的观测计数（原先全无）。它们回答的是
+# 「谁会红？」——LLM 输出被 max_tokens 截断、JSON 因此解析失败、各蜂悄悄回落规则引擎，
+# 在此之前没有任何地方看得出来（2026-10-19 实测：Haiku 4.5 的 18/18 次调用都以 max_tokens
+# 停止，Guard 的 JSON 在 `"score": 7.57,` 处被切断）。
+#   truncated_calls      stop_reason == "max_tokens" 的调用数
+#   json_parse_failures  call_json 拿到了文本、却解析不出 JSON（调用方随即回落规则引擎）
+#   budget_refusals      被每日预算预检拒绝的调用数（该蜂回落规则引擎）
+#   unpriced_refusals    模型不在 _PRICING 里而被拒绝的调用数
+_EXTRA_COUNTERS = ("truncated_calls", "json_parse_failures", "budget_refusals", "unpriced_refusals")
 _token_usage = {
     "input_tokens": 0,
     "output_tokens": 0,
     "total_cost_usd": 0.0,
     "call_count": 0,
+    **{k: 0 for k in _EXTRA_COUNTERS},
 }
 _budget_date: Optional[date] = None  # 当前预算对应的日期
+_inflight_cost: float = 0.0  # 已通过预检、尚未返回的调用的最坏情况费用（并行蜂共用同一预算）
+
+
+def _bump(key: str, n: int = 1) -> None:
+    """给 _token_usage 的计数器加一（线程安全；字典里没有这个键就当 0 起算）。"""
+    with _lock:
+        _token_usage[key] = _token_usage.get(key, 0) + n
 
 
 def _maybe_reset_daily_budget() -> None:
@@ -73,13 +92,56 @@ def _maybe_reset_daily_budget() -> None:
             _token_usage["output_tokens"] = 0
             _token_usage["total_cost_usd"] = 0.0
             _token_usage["call_count"] = 0
+            for _k in _EXTRA_COUNTERS:
+                _token_usage[_k] = 0
             _budget_date = today
 
-# 定价（claude-haiku-4-5）
+# 定价（美元 / token）。`cache_read_mult`：缓存读取相对输入单价的倍率（缺省 0.10；Opus 5.5 为 0.05）。
+# 来源：claude-api 技能的价目表（缓存日期 2026-10-06）。⚠️ 不在表里的模型一律拒绝调用
+# （v0.45.555 前是按 Haiku 价计费——换成 5.5 代模型后会少算 2~4 倍，内置预算闸形同虚设）。
 _PRICING = {
     "claude-haiku-4-5-20251001": {"input": 1.0 / 1_000_000, "output": 5.0 / 1_000_000},
     "claude-sonnet-4-6": {"input": 3.0 / 1_000_000, "output": 15.0 / 1_000_000},
+    "claude-sonnet-5-5": {"input": 2.0 / 1_000_000, "output": 10.0 / 1_000_000},
+    "claude-opus-5-5": {"input": 4.0 / 1_000_000, "output": 20.0 / 1_000_000, "cache_read_mult": 0.05},
 }
+
+# 模型档案：Sonnet 5.5 / Opus 5.5 不接受非默认采样参数（temperature 会 400），思考的开关也不同：
+#   Sonnet 5.5 关思考用 {"type": "between_tools"}（"disabled" 会 400）；
+#   Opus 5.5 关不掉思考，只能压 effort（output_config.effort="low"）。
+# 思考 token 计入 max_tokens，所以这两个模型的 max_tokens 要放宽：max(请求值×mult, 请求值+add)
+# （2026-10-19 实测 Opus 加 1024 余量后 0/15 截断；Sonnet 不放宽时 11/18 截断）。
+# SDK 版本较旧（0.84.0）未必认识这些字段，故统一走 extra_body。
+_MODEL_PROFILES = {
+    "claude-sonnet-5-5": {
+        "sampling": False,
+        "extra_body": {"thinking": {"type": "between_tools"}},
+        "max_tokens_mult": 3, "max_tokens_add": 1024,
+    },
+    "claude-opus-5-5": {
+        "sampling": False,
+        "extra_body": {"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}},
+        "max_tokens_mult": 3, "max_tokens_add": 1024,
+    },
+}
+_DEFAULT_PROFILE = {"sampling": True, "extra_body": None, "max_tokens_mult": 1, "max_tokens_add": 0}
+
+# 进程级模型覆盖：影子 A/B 入口（llm_shadow_scan.py）设置后，所有调用点（它们的 model 缺省值都是
+# Haiku）统一改用这个模型。生产扫描不设它 ⇒ 行为与以前完全一致。
+_model_override: Optional[str] = None
+
+
+def set_model_override(model: Optional[str]) -> None:
+    """设置（或清除）进程级模型覆盖。必须是 _PRICING 里登记过的模型，否则抛 ValueError。"""
+    global _model_override
+    if model is not None and model not in _PRICING:
+        raise ValueError(f"模型 {model!r} 未在 llm_service._PRICING 登记，拒绝覆盖")
+    _model_override = model
+
+
+def _effective_max_tokens(model: str, requested: int) -> int:
+    prof = _MODEL_PROFILES.get(model, _DEFAULT_PROFILE)
+    return max(int(requested * prof["max_tokens_mult"]), int(requested) + prof["max_tokens_add"])
 
 # 429 限流重试等待时间（秒）。TPM 窗口 60s 重置，两次重试足以覆盖大多数限流场景。
 _RATE_LIMIT_RETRY_DELAYS: tuple = (60, 60)
@@ -190,6 +252,10 @@ def call(
     if client is None:
         return None
 
+    # 进程级模型覆盖（影子 A/B 入口设置；生产扫描不设 ⇒ 行为不变）
+    if _model_override:
+        model = _model_override
+
     # 每日预算重置（跨日自动清零）
     _maybe_reset_daily_budget()
 
@@ -199,18 +265,45 @@ def call(
         _budget = _llm_cfg.get("daily_budget_usd", 1.0)
     except (ImportError, KeyError):
         _budget = 1.0
-    pricing = _PRICING.get(model, {"input": 1.0 / 1_000_000, "output": 5.0 / 1_000_000})
-    # 保守估算：假设输出填满 max_tokens（实际通常远小于此）
-    _estimated_cost = max_tokens * pricing["output"]
+
+    # 不在定价表里的模型一律拒绝（v0.45.555 前按 Haiku 价计费：换 5.5 代模型后少算 2~4 倍，预算闸拦不住）
+    pricing = _PRICING.get(model)
+    if pricing is None:
+        _bump("unpriced_refusals")
+        _log.error("LLM 模型 %r 未在 _PRICING 登记，拒绝调用（避免按错误单价记账）", model)
+        return None
+
+    eff_max_tokens = _effective_max_tokens(model, max_tokens)
+    # 保守估算：输入按每字符 1 个 token 计（实测 JSON 约 0.6、中文约 1），输出假设填满 max_tokens
+    _estimated_cost = (
+        (len(prompt) + len(system) + 50) * pricing["input"]
+        + eff_max_tokens * pricing["output"]
+    )
+    global _inflight_cost
     with _lock:
         _current_cost = _token_usage["total_cost_usd"]
-        if _current_cost + _estimated_cost >= _budget:
+        # 并行蜂共用一个预算：已放行但还没返回的调用也要算进去，否则 N 个同时通过预检会一起超支
+        if _current_cost + _inflight_cost + _estimated_cost >= _budget:
+            _token_usage["budget_refusals"] = _token_usage.get("budget_refusals", 0) + 1
             _log.warning(
-                "LLM 预算预检不通过（已用 $%.3f + 预估 $%.4f >= 上限 $%.2f），自动降级",
-                _current_cost, _estimated_cost, _budget,
+                "LLM 预算预检不通过（已用 $%.3f + 在途 $%.3f + 预估 $%.4f >= 上限 $%.2f），自动降级",
+                _current_cost, _inflight_cost, _estimated_cost, _budget,
             )
             return None
+        _inflight_cost += _estimated_cost
 
+    try:
+        return _do_request(client, prompt, system, model, eff_max_tokens, temperature,
+                           cache_system, pricing)
+    finally:
+        with _lock:
+            _inflight_cost -= _estimated_cost
+
+
+def _do_request(client, prompt: str, system: str, model: str, max_tokens: int,
+                temperature: float, cache_system: bool, pricing: Dict) -> Optional[str]:
+    """call() 的实际请求部分（预算预检与在途预留由 call() 负责）。"""
+    prof = _MODEL_PROFILES.get(model, _DEFAULT_PROFILE)
     try:
         messages = [{"role": "user", "content": prompt}]
 
@@ -218,8 +311,13 @@ def call(
             "model": model,
             "max_tokens": max_tokens,
             "messages": messages,
-            "temperature": temperature,
         }
+        # Sonnet 5.5 / Opus 5.5 不接受非默认采样参数（传 temperature 会 400）
+        if prof["sampling"]:
+            kwargs["temperature"] = temperature
+        if prof["extra_body"]:
+            # 深拷贝：档案是进程级共享状态，不能把同一个字典交给 SDK（谁改它都会污染之后所有调用）
+            kwargs["extra_body"] = copy.deepcopy(prof["extra_body"])
         if system:
             if cache_system:
                 # Prompt caching: 相同 system prompt 在多 ticker 调用间复用缓存
@@ -271,22 +369,31 @@ def call(
                 text += block.text
 
         # 追踪用量（含 prompt caching 计费），pricing 已在预算预检处定义
+        #
+        # ⚠️ usage.input_tokens 是**未缓存**的输入 token，不含缓存写入 / 读取：总输入 =
+        # input_tokens + cache_creation + cache_read（2026-10-19 用 count_tokens 实测：
+        # 2318 = 1505 + 812 + 0）。v0.45.555 前这里写成 input − 缓存写 − 缓存读，
+        # 于是缓存部分少收了全价、缓存读多时甚至会出现负的「未缓存」输入。
         usage = response.usage
         cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
         cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-        non_cached_input = usage.input_tokens - cache_create - cache_read
+        uncached_input = usage.input_tokens
         cost = (
-            non_cached_input * pricing["input"]
-            + cache_create * pricing["input"] * 1.25   # 缓存写入 1.25x
-            + cache_read * pricing["input"] * 0.10     # 缓存读取 0.1x
+            uncached_input * pricing["input"]
+            + cache_create * pricing["input"] * 1.25                                  # 缓存写入 1.25x
+            + cache_read * pricing["input"] * pricing.get("cache_read_mult", 0.10)    # 缓存读取
             + usage.output_tokens * pricing["output"]
         )
 
         with _lock:
-            _token_usage["input_tokens"] += usage.input_tokens
+            _token_usage["input_tokens"] += uncached_input + cache_create + cache_read
             _token_usage["output_tokens"] += usage.output_tokens
             _token_usage["total_cost_usd"] += cost
             _token_usage["call_count"] += 1
+
+        # 输出被 max_tokens 截断：调用方多半拿到半截文本 / 残缺 JSON 而回落规则引擎，必须看得见
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            _bump("truncated_calls")
 
         return text
 
@@ -341,6 +448,10 @@ def call_json(
         except json.JSONDecodeError:
             pass
 
+    # 拿到了文本却解析不出 JSON（多半是被 max_tokens 截断）⇒ 调用方随即回落规则引擎。
+    # 以前这里无声返回 None，没有任何地方看得出「LLM 臂其实没在工作」。
+    _bump("json_parse_failures")
+    _log.warning("LLM 返回无法解析为 JSON（%d 字符），调用方将回落规则引擎", len(text))
     return None
 
 
@@ -775,6 +886,56 @@ def interpret_catalyst_impact(
     return call_json(prompt, system=system, max_tokens=256, temperature=0.2)
 
 
+# OracleBee 的提示词里，整包倾倒的期权结果几乎全是下面几个键撑起来的（2026-10-19 对 NVDA 实测，
+# 6.9 万字符里 call_exp_oi + put_exp_oi 约 4 万、unusual_activity 约 1.7 万）：
+# 逐行权价 × 到期日的 OI 矩阵对「识别聪明钱意图」几乎没有边际信息——系统提示词要 LLM 看的是
+# IV Rank、P/C 比、短期虚值 Call 买入这类结构，它们都在标量字段与前几大持仓里。
+_OPTIONS_MATRIX_KEYS = frozenset({"call_exp_oi", "put_exp_oi", "oi_by_strike_call", "oi_by_strike_put"})
+
+
+def _compact_options_for_llm(
+    options_result: Dict, n_top: int = 5, n_prem: int = 8, n_vol: int = 5, n_ratio: int = 5,
+) -> Dict:
+    """把期权分析结果精简成给 LLM 看的版本（输入 token 约减 85%）。**不改动入参**（返回新字典）。
+
+    - 丢掉 `raw_chain` 与四个逐行权价 / 到期日矩阵；
+    - `top_call_oi` / `top_put_oi` 各留前 n_top 档（实测聚合 OI 最大的 5 档全部在里面）；
+    - `unusual_activity` 换成「总数 + 多空计数 + 入选明细」。入选 = 溢价前 n_prem ∪ 成交量前 n_vol ∪
+      vol/OI 前 n_ratio（去重，按溢价降序）。⚠️ 只按溢价取前 10 会漏掉成交量极端的小额新仓
+      （实测 NVDA 当天一条 869 手 call_sweep、vol/OI 869 被丢）——那正是「聪明钱」信号，所以三个口径取并集。
+    """
+    d = {k: v for k, v in options_result.items() if k != "raw_chain"}
+
+    fc = d.get("full_chain_oi")
+    if isinstance(fc, dict):
+        d["full_chain_oi"] = {
+            k: (v[:n_top] if k in ("top_call_oi", "top_put_oi") and isinstance(v, list) else v)
+            for k, v in fc.items() if k not in _OPTIONS_MATRIX_KEYS
+        }
+
+    ua = d.get("unusual_activity")
+    if isinstance(ua, list):
+        items = [x for x in ua if isinstance(x, dict)]
+
+        def _num(x: Dict, key: str) -> float:
+            try:
+                return float(x.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        chosen: Dict[int, Dict] = {}
+        for key, n in (("dollar_premium", n_prem), ("volume", n_vol), ("ratio", n_ratio)):
+            for x in sorted(items, key=lambda y: _num(y, key), reverse=True)[:n]:
+                chosen[id(x)] = x
+        d["unusual_activity"] = {
+            "total_count": len(ua),
+            "bullish_count": sum(1 for x in items if x.get("bullish") is True),
+            "bearish_count": sum(1 for x in items if x.get("bullish") is False),
+            "selected": sorted(chosen.values(), key=lambda y: _num(y, "dollar_premium"), reverse=True),
+        }
+    return d
+
+
 def interpret_options_flow(
     ticker: str,
     options_result: Dict,
@@ -813,7 +974,7 @@ def interpret_options_flow(
     prompt = f"""解读 {ticker} 的期权流数据：
 
 期权分析结果:
-{json.dumps({k: v for k, v in options_result.items() if k not in ('raw_chain',)}, ensure_ascii=False)}
+{json.dumps(_compact_options_for_llm(options_result), ensure_ascii=False)}
 
 股票状态:
 - 价格: ${stock_data.get('price', 0):.2f}

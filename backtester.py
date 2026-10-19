@@ -394,30 +394,6 @@ class PredictionStore:
             _log.warning("Path result 更新失败 id=%s: %s", pred_id, e)
             return False
 
-    def get_recently_verified_t7(self, limit: int = 50) -> List[Dict]:
-        """获取最近一批已被 T+7 验证的记录（按日期倒序）
-
-        用于增量 ML 训练：每次 run_backtest() 之后调用，
-        获取 checked_t7=1 且 return_t7 IS NOT NULL 的最新记录。
-        """
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                rows = conn.execute(f"""
-                    SELECT ticker, date, final_score, direction,
-                           dimension_scores, iv_rank, put_call_ratio,
-                           agent_directions,
-                           return_t7, correct_t7
-                    FROM {self.TABLE}
-                    WHERE checked_t7 = 1 AND return_t7 IS NOT NULL
-                    ORDER BY date DESC
-                    LIMIT ?
-                """, (limit,)).fetchall()
-                return [dict(r) for r in rows]
-        except (sqlite3.Error, OSError) as e:
-            _log.warning("获取已验证 T+7 记录失败: %s", e)
-            return []
-
     def get_accuracy_stats(self, period: str = "t7", days: int = 90,
                            exclude_nontrading_days: bool = False,
                            use_direction_metric: bool = False) -> Dict:
@@ -426,6 +402,8 @@ class PredictionStore:
 
         exclude_nontrading_days=True（dashboard 门面口径）：排除周末/假日预测
         （周日 sample-accumulator 扩展池样本 + 漂移幽灵），只算核心交易日。
+        样本来源已退役（v0.45.316 删定时任务、v0.45.552 删 --samples-only），但库里
+        2026-03~05 的周日样本还在 ⇒ 这道过滤仍有用，别跟着删。
         默认 False，研究/其它调用保留全样本。fail-open：构建过滤出错则不过滤。
 
         返回: {
@@ -461,7 +439,7 @@ class PredictionStore:
         _amb = (" AND COALESCE(dir_ambiguous_t7, 0) = 0 AND dir_correct_t7 IS NOT NULL"
                 if _use_dir else f" AND COALESCE(ambiguous_{period}, 0) = 0")
 
-        # v32.3: 门面口径 —— 构建"排除非交易日"子句（周日 sample-accumulator 样本）
+        # v32.3: 门面口径 —— 构建"排除非交易日"子句（周日 sample-accumulator 样本；来源已退役，历史样本仍在库里）
         _excl = ""
         _excl_p: list = []
         if exclude_nontrading_days:
@@ -1673,8 +1651,10 @@ class Backtester:
             if opts_row and opts_row["total"] > 0:
                 lines.append(f"  期权数据记录: {opts_row['total']} 条")
                 lines.append(f"  平均期权评分: {opts_row['avg_opts_score']:.1f}/10")
-                lines.append(f"  平均 IV Rank: {opts_row['avg_iv_rank']:.1f}")
-                lines.append(f"  平均 P/C Ratio: {opts_row['avg_pc_ratio']:.2f}")
+                # v0.45.544：窗口内全是 NULL 时 AVG 返回 None（P/C / iv_rank 都可能记 None）⇒「—」，不让 :.2f 抛
+                _avg_iv, _avg_pc = opts_row["avg_iv_rank"], opts_row["avg_pc_ratio"]
+                lines.append(f"  平均 IV Rank: {_avg_iv:.1f}" if _avg_iv is not None else "  平均 IV Rank: —")
+                lines.append(f"  平均 P/C Ratio: {_avg_pc:.2f}" if _avg_pc is not None else "  平均 P/C Ratio: —")
 
                 # IV Rank 变化（T+1）
                 iv_change_row = conn.execute(f"""

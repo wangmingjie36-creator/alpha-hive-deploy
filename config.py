@@ -365,10 +365,12 @@ WATCHLIST = {
 # ══════════════════════════════════════════════════════════════════════════════
 # v0.22.0: 扩展池（S&P 500 高流动性 + 期权活跃核心 ~75 只）
 # 方向1a：扩 watchlist 以增加样本量（原 25 只 → 100 只）
-# 用法：扫描脚本按需合并 WATCHLIST + WATCHLIST_EXTENDED（CLI --all-watchlist 或 --extended-pool）
+# v0.45.552：扫描它的 CLI（`--extended-pool`，只给已退役的周日样本积累器用过）已删。
+# 现在它是候补池：降级标的的去处（名称 / 板块 / 失效条件 / catalyst 留在这里），
+# 要扫某只就把它升进 WATCHLIST——编排器只读 WATCHLIST。
 # ══════════════════════════════════════════════════════════════════════════════
 WATCHLIST_EXTENDED = {
-    # 候补样本池：仅 `--extended-pool` 时并入，不参与每日扫描。
+    # 候补样本池：不参与每日扫描（v0.45.552 起也没有 CLI 单独扫它，见上方注释）。
     # v0.45.6：原 WATCHLIST 中从未被扫过的 11 只降级至此——**不是删除**，
     # 扩池样本量直接决定统计功效（实测 10→30 把出结论时间缩短 5.18×），
     # 凭空砍掉 11 只样本不划算。
@@ -448,7 +450,8 @@ WATCHLIST_EXTENDED = {
 
 def get_extended_watchlist() -> dict:
     """返回合并后的标的池（30 只每日扫描 + 71 只候补 = 101）。
-    调用方：`python3 alpha_hive_daily_report.py --extended-pool`
+    （原调用方 `alpha_hive_daily_report.py --extended-pool` 已于 v0.45.552 删除；
+    现在只有 `tests/test_watchlist_single_source.py` 用它守「候补池不许悄悄缩水」。）
 
     v0.23.2 修复：语义明确为"WATCHLIST 优先"（核心标的的 catalyst 配置不被扩展池覆盖）。
     如需覆盖核心标的，直接改 WATCHLIST 而非往 WATCHLIST_EXTENDED 加同名。
@@ -675,9 +678,9 @@ CATALYSTS = {
 # 架构说明：
 #   - 5 个主维度参与加权平均（权重和 = 1.0）
 #   - Options 数据 → OracleBeeEcho 内部融合（options + unusual，比例见 AGENT_SCORING）→ odds 维度
-#   - ML 预测 → RivalBeeVanguard → dimension="ml_auxiliary" → 不参与主公式
-#     作为独立调整项附加：final_score += (ml_score - 5.0) * 0.1 * ml_confidence（最大 ±0.5 分）
-#   - 两者不存在双重计算
+#   - RivalBeeVanguard → dimension="ml_auxiliary" → 不参与主公式，**也不再进分**
+#     （v0.45.538 拿掉了 `final_score += (rival_score − 5)·0.1·conf` 那一项：Rival 的概率出自
+#     硬编码合成样本训的模型；见 `QueenDistiller._compute_weighted_score` docstring，勿接回）
 #
 # v0.45.172（2026-09-09，用户明确决策，非自动优化写入）：
 #   `experiments/final_score_dilution_report.md`（干净口径 close_t7、N_eff≈23 不重叠周）
@@ -700,7 +703,7 @@ EVALUATION_WEIGHTS = {
     "sentiment":    0.3250,   # BuzzBeeWhisper: 情绪与叙事 —— 三维中唯一方向显著（未校正）
     "odds":    0.3430,   # OracleBeeEcho: 期权 IV + 异动（v0.45.315 删 Polymarket）
     "risk_adj":    0.0000,   # GuardBeeSentinel: 交叉验证 + 风险调整 —— IC -0.084，归零（见上）
-    # ml_auxiliary: 不在此处（RivalBeeVanguard 作为 ±0.5 独立调整项）
+    # ml_auxiliary: 不在此处（RivalBeeVanguard 不进分，v0.45.538）
 }
 
 # ML 概率上界（防止小样本过度自信，统一源，避免魔术数字散落各处）
@@ -784,7 +787,7 @@ def validate_watchlist():
     # CATALYSTS 中有但**两个池子都没有**的 ticker。
     # v0.45.6：口径从 WATCHLIST 放宽到 WATCHLIST + WATCHLIST_EXTENDED——
     # WATCHLIST 收窄为每日扫描的 30 只后，候补池标的的 catalyst 配置是**合法的**
-    # （`--extended-pool` 会用到），按旧口径会误报 10 个孤儿。
+    # （降级标的升回 WATCHLIST 时要用），按旧口径会误报 10 个孤儿。
     # 真正该报的是"配了 catalyst 却哪个池子都不在"，那才是死配置。
     _known = set(WATCHLIST.keys()) | set(WATCHLIST_EXTENDED.keys())
     orphan_catalysts = set(CATALYSTS.keys()) - _known
@@ -895,20 +898,6 @@ ALERT_CONFIG = {
     # 告警输出
     "save_alerts_json": True,  # 保存告警到 JSON 文件
     "alerts_log_dir": str(PATHS.logs_dir),
-}
-
-# ==================== 性能监控配置 (Phase 2) ====================
-METRICS_CONFIG = {
-    "enabled": True,
-    "db_path": str(PATHS.home / "metrics.db"),
-    "retention_days": 90,  # 保留 90 天数据
-    "collect_metrics": {
-        "execution_time": True,
-        "memory_usage": True,
-        "file_sizes": True,
-        "report_quality": True,
-        "deployment_status": True,
-    }
 }
 
 # ==================== predictions 保留期 ====================
@@ -1301,9 +1290,6 @@ SENTIMENT_MOMENTUM_CONFIG = {
     "divergence_bull_trap_sentiment": 65,   # 情绪 > 65% 且价格跌 → 看多陷阱
     "divergence_hidden_opp_sentiment": 35,  # 情绪 < 35% 且价格涨 → 隐藏机会
     "divergence_price_threshold": 3.0,      # 价格变动阈值 (%)
-    # 跨标的情绪传染
-    "sector_deviation_high": 15,            # 偏离板块 > 15 ppt = overheating/undervalued
-    "sector_deviation_mid": 8,              # 偏离板块 > 8 ppt = above/below_sector
     # 冲突驱动增强
     "conflict_heavy_min_agents": 2,         # 多空双方各 ≥ 2 Agent = 重度冲突
     "conflict_dq_resolve_threshold": 0.55,  # DQ 加权占比 ≥ 55% 才能解决方向冲突
@@ -1335,13 +1321,13 @@ CONFIDENCE_CALIBRATION_CONFIG = {
 ML_FEEDBACK_CONFIG = {
     "min_adjustment": 0.5,          # 维度调整因子下限
     "max_adjustment": 2.0,          # 维度调整因子上限
-    "enable_dimension_weighting": True,   # 是否启用维度权重调整
-    "enable_vote_boosting": True,         # 是否启用 Agent 投票置信度调整
-    # v0.40.0: 按 OOS（purged 时序外样本）精度缩放 QueenDistiller 的 ML 调整信任度
-    # in-sample 精度是自考自评；OOS < half 阈值 → ml_adjustment 减半，
-    # < zero 阈值（不如抛硬币）→ 置零。OOS 缺失（样本<60）不惩罚。
-    "oos_trust_half_threshold": 55.0,
-    "oos_trust_zero_threshold": 50.0,
+    # ⚠️ v0.45.537 起生产**已不施加**这两项（QueenDistiller 只算影子乘数，见其 __init__），
+    # 下面两个开关现在只给**重放旧记录**用（共振加成前瞻检验按当时 config 决定施不施加）。
+    # **保持 True，别改成 False** —— 改了窗口内的旧记录复现不出来，检验自证失败（exit 3）。
+    "enable_dimension_weighting": True,   # 维度权重调整（仅重放旧记录）
+    "enable_vote_boosting": True,         # Agent 投票置信度调整（仅重放旧记录）
+    # v0.45.538：`oos_trust_half_threshold` / `oos_trust_zero_threshold` 已删 —— 唯一读者
+    # `QueenDistiller._ml_oos_trust_factor`（只缩放 RivalBee 的 ml_adjustment）随那一项一起退役。
 }
 
 # ==================== ML HGB 树模型配置（v15.0 替代 SGD）====================
@@ -1360,7 +1346,6 @@ ML_HGBC_CONFIG = {
 ML_TRAINING_CONFIG = {
     "use_real_data": True,             # 优先使用真实数据训练
     "min_real_samples": 30,            # 真实数据最少样本数
-    "daily_retrain": True,             # 每日重训
     "max_training_rows": 500,          # 训练数据行数上限
     "blend_hardcoded_when_sparse": True,  # 真实数据不足时混入硬编码数据
 }

@@ -212,6 +212,11 @@ class SlackReportNotifier:
 
         # ── 加载每个标的的补充数据 ──
         ticker_extras: Dict[str, Dict] = {}
+        # v0.45.546：价格兜底与 5 日涨跌改读扫描自己的 .swarm_results（30 只全有）。此前读编排器 Step 1（data_fetcher）
+        # 写的 cache/metrics_{T}_{date}.json，只有写死的 NVDA/TSLA/VKTX 三只有；两者同源同值（10-16 实测三只逐位相等）。
+        swarm_results = self._load_json(os.path.join(project_dir, f".swarm_results_{date_str}.json")) or {}
+        if not swarm_results:
+            _log.warning("Slack 日报：找不到 .swarm_results_%s.json，价格兜底与 5 日涨跌本次空缺", date_str)
         all_tickers = [o["ticker"] for o in opps]
 
         for ticker in all_tickers:
@@ -237,14 +242,13 @@ class SlackReportNotifier:
             raw_json = self._load_json(os.path.join(project_dir, f"{ticker}_raw.json"))
             if raw_json and raw_json.get("price"):
                 extras["price"] = raw_json["price"]
-            metrics = self._load_json(
-                os.path.join(cache_dir, f"metrics_{ticker}_{date_str}.json")
-            )
-            if metrics:
-                yf = metrics.get("sources", {}).get("yahoo_finance", {})
-                if not extras.get("price"):
-                    extras["price"] = yf.get("current_price")
-                extras["chg_5d"] = yf.get("price_change_5d")
+            _ad = (swarm_results.get(ticker) or {}).get("agent_details") or {}
+            _scan_px = ((_ad.get("ScoutBeeNova") or {}).get("details") or {}).get("price")
+            _mom_5d = ((_ad.get("BuzzBeeWhisper") or {}).get("details") or {}).get("momentum_5d")
+            if not extras.get("price") and isinstance(_scan_px, (int, float)) and not isinstance(_scan_px, bool) and _scan_px > 0:
+                extras["price"] = _scan_px
+            if isinstance(_mom_5d, (int, float)) and not isinstance(_mom_5d, bool):
+                extras["chg_5d"] = _mom_5d
 
             # 社交情绪
             social = self._load_json(

@@ -123,6 +123,13 @@ class PheromoneBoard:
         # 供 `get_agent_entry` / `BeeAgent._read_peer` 做「上游蜂这轮说了什么」的定点
         # 查询。理由见 `get_agent_entry` docstring。天然有界：|标的| × |蜂|。
         self._latest_by_agent: Dict[tuple, PheromoneEntry] = {}
+        # publish 快路径的索引（只是加速结构，作废即走全量扫描；见 `_survives_publish` 上方说明）
+        self._idx_list = None                    # 索引对应的 _entries 列表对象；None = 作废
+        self._idx_len = 0
+        self._idx_min_strength = None
+        self._idx_groups: Dict[str, List[PheromoneEntry]] = {}
+        self._idx_ids: set = set()
+        self._idx_oldest = None
         self._memory_store = memory_store
         self._session_id = session_id or "default_session"
         # Phase 2: 使用线程池替代 daemon 线程，确保退出时等待写入完成
@@ -220,39 +227,23 @@ class PheromoneBoard:
         """
         self._validate_entry(entry)  # 方案13: 入口验证
         with self._lock:
-            # 单遍衰减 + 存活过滤（合并两个循环，减少 datetime 解析次数）
-            # 仅衰减同 ticker 条目（避免跨 ticker 误杀：TSLA 发布不应衰减 NVDA）
+            # 单遍衰减 + 存活过滤；仅衰减同 ticker 条目（避免跨 ticker 误杀：TSLA 发布不应衰减 NVDA）。
+            # 逐条判定只有一份实现（`_survives_publish`）；快路径只改「访问哪些条目」，见 `_ticker_group_if_rest_untouched`。
             now = datetime.now()
-            _surviving = []
-            for e in self._entries:
-                # 存活检查 1: 强度过低
-                if e.pheromone_strength < self.MIN_STRENGTH:
-                    continue
-                # 存活检查 2: 时间戳解析 + 超时淘汰（>60min）
-                try:
-                    _age_s = (now - datetime.fromisoformat(e.timestamp)).total_seconds()
-                except (ValueError, TypeError):
-                    continue  # 时间戳解析失败 → 视为过期
-                if _age_s >= self.ENTRY_MAX_AGE_S:
-                    continue
-                # 衰减（仅同 ticker）
-                if not self._ticker_scoped or e.ticker == entry.ticker:
-                    _age_m = _age_s / 60
-                    if _age_m < self._fresh_minutes:
-                        e.pheromone_strength -= self._fresh_decay
-                    elif _age_m < 30:
-                        e.pheromone_strength -= self._medium_decay
-                    else:
-                        e.pheromone_strength -= self._old_decay
-                    # 衰减后二次检查（防止衰减到 MIN 以下）
-                    if e.pheromone_strength < self.MIN_STRENGTH:
-                        continue
-                _surviving.append(e)
-            self._entries = _surviving
+            group = self._ticker_group_if_rest_untouched(now, entry)
+            if group is None:
+                # 先作废索引再扫：扫到一半抛出时（旧代码同样抛），已衰减却没来得及丢的条目不能留在一份「有效」的索引里
+                self._idx_list = None            # 下次 publish 惰性重建
+                self._entries = [e for e in self._entries
+                                 if self._survives_publish(e, now, entry.ticker)]
+                bump_scan = self._entries
+            else:
+                bump_scan = self._publish_scan_group(now, entry.ticker, group)
 
             # 若同 ticker + direction 已有条目，增加支持数（排除同 agent 重复）
+            # 快路径下 bump_scan 是同标的子序列（保持 _entries 原序），「第一条匹配」与全表扫描是同一条。
             found_resonance = False
-            for e in self._entries:
+            for e in bump_scan:
                 if e.ticker == entry.ticker and e.direction == entry.direction:
                     # 仅当不同 Agent 时才增加支持
                     if entry.agent_id not in e.supporting_agents:
@@ -275,6 +266,9 @@ class PheromoneBoard:
                     self.MAX_ENTRIES, self._entries,
                     key=lambda x: (x.self_score, x.support_count, x.pheromone_strength),
                 )
+                self._idx_list = None            # 截断后顺序已变，索引失效
+            elif group is not None and self._idx_list is not None:
+                self._index_append(entry)
 
             # 批量异步持久化到 DB：先缓冲，达到阈值后批量提交（减少 fsync 次数）
             if self._memory_store:
@@ -293,6 +287,157 @@ class PheromoneBoard:
                 self._write_buffer.append(entry_dict)
                 if len(self._write_buffer) >= self._BATCH_SIZE:
                     self._flush_writes()
+
+    # ── publish 的存活扫描：逐条判定 + 只访问同标的条目的快路径（v0.45.528）────────────────
+    #
+    # 为什么要快路径：全量扫描每次 publish 都要遍历并解析**全部**条目的时间戳，n 条累计 O(n²)。
+    # 生产 MAX_ENTRIES=80 把 n 封在 81 以内（一轮 ~270 次 publish ≈ 2 万次迭代，约 10ms），
+    # **对生产扫描时长没有可测收益**；受益的是把 MAX_ENTRIES 调到 4000/10000 做「与容量无关」对照的
+    # 测试（`test_*_identical_under_any_max_entries`）。所以快路径的唯一要求是**结果逐位相同**：
+    #
+    # 全量扫描对「别的标的」的条目 e 只做三件事 ——
+    #   ① e.pheromone_strength < MIN_STRENGTH 则丢；② 时间戳不可解析 / 与 now 不可相减则丢；
+    #   ③ 年龄 >= ENTRY_MAX_AGE_S 则丢；否则原样保留（不衰减：ticker_scoped）。
+    # 快路径只在能证明这三条对**所有**别标的条目都不成立时才跳过它们：
+    #   ①② 由索引的「干净」不变式保证（每条都是 float 强度且不低于建索引时的 MIN_STRENGTH、时间戳能
+    #       解析成 naive datetime、无同一对象重复上板）；强度只会被本板改动：同标的衰减后低于 MIN 当场就丢；
+    #       支持加成后 = min(1.0, s+0.2) ≥ MIN（MIN ≤ 1 时），MIN > 1 时校验过的新条目（≤ 1.0）入板必作废索引，
+    #       故加成不需另核；新条目入板时逐条核验，不合格即作废索引。
+    #   ③ 记全板最早时间戳（只降不升的下界）；年龄对时间戳单调，最早那条没过期 ⇒ 全都没过期。
+    #       当场用 now 求值，不假设时钟单调。
+    # 前提任何一条不满足 ⇒ 走全量扫描（逐条判定是同一个 `_survives_publish`），索引下次惰性重建。
+    # 作废索引的事件：_entries 换了对象 / 长度变了（外部 extend、clear）/ MIN_STRENGTH 变了 / 溢出截断 /
+    # 非 str ticker / 带时区的 now 或时间戳 / 同一对象重复 publish / ticker_scoped 关闭。
+    #
+    # ⚠️ 不变式的前提：**已上板条目的 ticker / timestamp / pheromone_strength 只由本板改写**
+    # （同一条目对象再发到另一块板也算外部写：那块板的衰减会改它。生产每次 publish 都新建条目、每进程一块板）。
+    # 全仓生产代码无此类外部写（守卫 tests/test_pheromone_publish_fast_path.py 的 AST 断言）；
+    # 若将来真要改已发布条目，先改这里，别让快路径静默漏掉一次淘汰。
+    # 等价性证明：同文件把旧 publish 原文冻成参照实现，随机序列逐次比对整板状态。
+
+    def _survives_publish(self, e: PheromoneEntry, now: datetime, ticker: str) -> bool:
+        """publish 对单条既有条目的存活 + 衰减判定（全量与快路径共用这一份）。"""
+        # 存活检查 1: 强度过低
+        if e.pheromone_strength < self.MIN_STRENGTH:
+            return False
+        # 存活检查 2: 时间戳解析 + 超时淘汰（ENTRY_MAX_AGE_S）
+        try:
+            _age_s = (now - datetime.fromisoformat(e.timestamp)).total_seconds()
+        except (ValueError, TypeError):
+            return False  # 时间戳解析失败 → 视为过期
+        if _age_s >= self.ENTRY_MAX_AGE_S:
+            return False
+        # 衰减（仅同 ticker）
+        if not self._ticker_scoped or e.ticker == ticker:
+            _age_m = _age_s / 60
+            if _age_m < self._fresh_minutes:
+                e.pheromone_strength -= self._fresh_decay
+            elif _age_m < 30:
+                e.pheromone_strength -= self._medium_decay
+            else:
+                e.pheromone_strength -= self._old_decay
+            # 衰减后二次检查（防止衰减到 MIN 以下）
+            if e.pheromone_strength < self.MIN_STRENGTH:
+                return False
+        return True
+
+    def _strength_ok(self, e: PheromoneEntry) -> bool:
+        s = e.pheromone_strength
+        return type(s) is float and not s < self.MIN_STRENGTH
+
+    def _ticker_group_if_rest_untouched(self, now: datetime, entry: PheromoneEntry):
+        """快路径前提全部成立时返回 entry.ticker 的同标的条目（_entries 原序子序列），否则 None。"""
+        if not self._ticker_scoped or type(entry.ticker) is not str:
+            return None
+        try:
+            if now.utcoffset() is not None:
+                return None
+        except (AttributeError, TypeError):
+            return None
+        if (self._idx_list is not self._entries
+                or self._idx_len != len(self._entries)
+                or self._idx_min_strength != self.MIN_STRENGTH):
+            # 板已满 ⇒ 这次多半又要溢出截断、索引随即作废，重建白做：直接全量。生产 MAX_ENTRIES=80 的稳态就是这条
+            if len(self._entries) >= self.MAX_ENTRIES or not self._rebuild_index():
+                return None
+        if id(entry) in self._idx_ids:
+            return None                          # 同一对象重复上板：逐次出现的判定须走全量
+        if self._idx_oldest is not None:
+            try:
+                if (now - self._idx_oldest).total_seconds() >= self.ENTRY_MAX_AGE_S:
+                    return None                  # 至少有一条可能过期
+            except (TypeError, ValueError):
+                return None
+        return self._idx_groups.get(entry.ticker, [])
+
+    def _rebuild_index(self) -> bool:
+        """从 _entries 重建快路径索引；任何一条不满足「干净」不变式即返回 False（索引保持作废）。"""
+        self._idx_list = None
+        groups: Dict[str, List[PheromoneEntry]] = {}
+        ids = set()
+        oldest = None
+        for e in self._entries:
+            # 任何异常一律只是「快路径不适用」：全量扫描是旧代码原样，该抛的在那里按旧顺序、旧消息抛
+            # （例：缺 ticker 的非标准对象，旧代码先按强度丢掉它、根本不读 ticker）
+            try:
+                if type(e.ticker) is not str or id(e) in ids or not self._strength_ok(e):
+                    return False
+                ts = datetime.fromisoformat(e.timestamp)
+                if ts.utcoffset() is not None:
+                    return False
+            except Exception:
+                return False
+            ids.add(id(e))
+            groups.setdefault(e.ticker, []).append(e)
+            if oldest is None or ts < oldest:
+                oldest = ts
+        self._idx_groups, self._idx_ids, self._idx_oldest = groups, ids, oldest
+        self._idx_min_strength = self.MIN_STRENGTH
+        self._idx_list, self._idx_len = self._entries, len(self._entries)
+        return True
+
+    def _publish_scan_group(self, now: datetime, ticker: str,
+                            group: List[PheromoneEntry]) -> List[PheromoneEntry]:
+        """快路径：只对同标的条目跑 `_survives_publish`，其余条目已证明会原样存活。返回同标的存活者。"""
+        self._idx_list = None                    # 扫完才恢复；中途抛出则索引保持作废（理由同全量路径）
+        survivors: List[PheromoneEntry] = []
+        gone = set()
+        clean = True
+        for e in group:
+            if self._survives_publish(e, now, ticker):
+                survivors.append(e)
+                if not self._strength_ok(e):
+                    clean = False
+            else:
+                gone.add(id(e))
+        if gone:
+            self._entries = [e for e in self._entries if id(e) not in gone]
+            self._idx_ids -= gone
+        else:
+            self._entries = self._entries.copy()  # 与全量路径一致：每次 publish 后都是新列表对象
+        if survivors:
+            self._idx_groups[ticker] = survivors
+        else:
+            self._idx_groups.pop(ticker, None)
+        self._idx_list = self._entries if clean else None
+        self._idx_len = len(self._entries)
+        return survivors
+
+    def _index_append(self, entry: PheromoneEntry) -> None:
+        """把刚追加的新条目登记进索引；不满足「干净」不变式则作废索引（下次 publish 走全量）。"""
+        try:
+            ts = datetime.fromisoformat(entry.timestamp)
+            naive = ts.utcoffset() is None
+        except (ValueError, TypeError):
+            naive = False
+        if not naive or not self._strength_ok(entry):
+            self._idx_list = None
+            return
+        self._idx_groups.setdefault(entry.ticker, []).append(entry)
+        self._idx_ids.add(id(entry))
+        if self._idx_oldest is None or ts < self._idx_oldest:
+            self._idx_oldest = ts
+        self._idx_list, self._idx_len = self._entries, len(self._entries)
 
     def get_top_signals(self, ticker: str = None, n: int = 5) -> List[PheromoneEntry]:
         """
@@ -525,7 +670,7 @@ class PheromoneBoard:
         "pc_ratio", "iv_rank", "iv_skew", "gex",                    # OracleBee
         "sentiment_score", "reddit_momentum",                        # BuzzBee
         "catalyst_count", "nearest_days", "analyst_upside_pct",      # ChronosBee
-        "ml_probability", "expected_7d",                             # RivalBee
+        "expected_7d",                                               # RivalBee（v0.45.538 起不再有 ml_probability）
         "consistency", "conflict_type", "resonance_detected",        # GuardBee
         "bear_score", "signal_count",                                # BearBee
     }
@@ -656,3 +801,5 @@ class PheromoneBoard:
         with self._lock:
             self._entries.clear()
             self._latest_by_agent.clear()
+            self._idx_list = None
+            self._idx_groups, self._idx_ids = {}, set()

@@ -44,8 +44,10 @@ class TestFunction:
         """真实的 1.00 照旧（区分的是「算不出」与「算出来恰好 1」）。"""
         assert A.calculate_put_call_ratio(_legs([500]), _legs([500])) == 1.0
 
-    def test_volume_fallback_still_used_when_both_oi_zero(self):
-        assert A.calculate_put_call_ratio(_legs([0], vol=40), _legs([0], vol=20)) == pytest.approx(0.5)
+    def test_no_volume_fallback_when_both_oi_zero(self):
+        """v0.45.542：OI 全零不再退到成交量（成交量 P/C 是另一个量，原实现照样叫 put_call_ratio）。
+        变红的变异：恢复成交量退路（这里会得到 0.5）。"""
+        assert A.calculate_put_call_ratio(_legs([0], vol=40), _legs([0], vol=20)) is None
 
 
 def _chain(call_oi, put_oi=3000):

@@ -585,6 +585,25 @@ class AlertAnalyzer:
                 ["portfolio_greeks", "data_quality"]
             ))
             return
+        dhc = pg.get("delta_hedge")
+        if isinstance(dhc, dict) and dhc.get("mode") == "paper" and (dhc.get("n_undecided") or dhc.get("n_blocked")):
+            # v0.45.526：逐票 Delta 对冲（纸面成交）：只影响缺数据的那几只，别的照常对冲——但停摆不能无人知道。
+            # shadow 下不报（只算不成交，未决只进日志与审计）。独立于下面 SPY 带的告警，两边互不吞。
+            und = "；".join(f"{u.get('ticker')}（{u.get('reason')}）" for u in dhc.get("undecided") or []) or "—"
+            blk = "；".join(str(v) for v in (dhc.get("blocked") or {}).values()) or "—"
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】逐票 Delta 对冲：{dhc.get('n_undecided', 0)} 只决定做不出来、"
+                f"{dhc.get('n_blocked', 0)} 只拒绝成交，这几只今天不对冲",
+                {
+                    "未决": und,
+                    "拒绝成交": blk,
+                    "影响": "只影响这几只标的的跨式腿 Delta 没被对冲；别的标的照常。连续几天都这样 = 这几只的 Delta 一直裸着",
+                    "建议": "看 hedge_state/greeks_<日期>.json 的 delta_hedge 一节（reason 码：nav_unavailable / "
+                            "option_delta_unknown / price_missing / price_stale / held_shares_unknown）",
+                },
+                ["portfolio_greeks", "data_quality"]
+            ))
         spy = pg.get("spy") or {}
         n_stale = int(pg.get("n_stale") or 0)
         n_quote_stale = int(pg.get("n_quote_stale") or 0)
@@ -752,6 +771,20 @@ class AlertAnalyzer:
         if not isinstance(pp, dict):
             self.checks_skipped.append("纸面组合运行结局检查（scan_timing 无 paper_portfolio 计数）")
             return
+        if pp.get("skipped") and not pp.get("error"):
+            # v0.45.535：持仓日线全断 ⇒ 整天跳过（不开仓、不写净值）。设计内的跳过，但这一天组合没有记录——要看得见
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】纸面组合：{pp.get('as_of')} 持仓日线全部取不到，整天跳过（未开仓、未写净值）",
+                {
+                    "跳过原因": str(pp["skipped"]),
+                    "取不到的持仓": "、".join(pp.get("ohlc_unavailable") or []) or "（未记）",
+                    "影响": "这一天没有净值行与新仓；下次运行会从入场日起补查出场（出场日照实际触发日记）",
+                    "建议": "看 alpha_hive.log 里「_fetch_ohlc … 失败」与代理 / yfinance 限流；连续多天跳过要查出站",
+                },
+                ["paper_portfolio", "data_quality"]
+            ))
+            return
         if not pp.get("error"):
             return
         self.alerts.append(Alert(
@@ -858,7 +891,9 @@ class AlertAnalyzer:
             "critical_count": len(self.get_critical_alerts()),
             "high_count": len(self.get_high_alerts()),
             "medium_count": len(self.get_medium_alerts()),
-            "alerts": [a.to_dict() for a in self.alerts]
+            "alerts": [a.to_dict() for a in self.alerts],
+            # v0.45.543：无告警也写本文件 ⇒「没告警」与「检查没跑全」要能从文件里分开
+            "checks_skipped": list(getattr(self, "checks_skipped", []) or []),
         }
 
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -938,6 +973,12 @@ def main():
     analyzer = AlertAnalyzer()
     alerts = analyzer.analyze(Path(args.status_json))
 
+    # 2. 保存告警——v0.45.543 起**无告警也写**（alerts 为空列表）：编排器 Step 6 以「本步写出了
+    # alerts-<日期>.json」为后置条件，此前无告警不写文件 ⇒ 退出码 0 是唯一证据，与「什么都没干」分不开
+    # （v0.45.534 删掉的 Step 8 就是这样天天记 success）。文件只给人看，没有代码读者。
+    output_path = Path(args.output_dir) / f"alerts-{datetime.now().strftime('%Y-%m-%d')}.json"
+    analyzer.save_alerts(output_path)
+
     if not alerts:
         # v0.45.47：只有**全部检查都执行过**才敢说 healthy
         if analyzer.checks_skipped:
@@ -948,9 +989,6 @@ def main():
             _log.info("No alerts detected - system healthy")
         return
 
-    # 2. 保存告警
-    output_path = Path(args.output_dir) / f"alerts-{datetime.now().strftime('%Y-%m-%d')}.json"
-    analyzer.save_alerts(output_path)
     _log.info("Alerts saved: %s", output_path)
     _log.info("   Critical: %d", len(analyzer.get_critical_alerts()))
     _log.info("   High: %d", len(analyzer.get_high_alerts()))

@@ -5,7 +5,7 @@
 = **298.46**（前后几天 ≈1.0），Oracle 被压 0.85、Bear 被抬 1.06。
 
 **判据。** 本链（全部到期日、过滤之前）以最新一笔成交为参照、往前 4 天内有成交的合约里 OI>0 的占比：10-12 录制的
-30 只全部 ≤ 0.04；10-16 正常日实测 12 只 0.81–0.99。< 0.5 判陈旧；这类合约不足 20 个判不了（照旧算）。
+30 只全部 ≤ 0.04；10-16 正常日实测 12 只 0.81–0.99。< 0.25 判陈旧（v0.45.544 从 0.5 降下，见 oi_staleness）；这类合约不足 20 个判不了（照旧算）。
 
 本文件零网络：yfinance 打桩，成交时刻写死日期（判据只跟本链自己的最新成交比，不读钟）。
 """
@@ -96,9 +96,16 @@ class TestAssess:
         """10-16 实测最低的 BILI 0.81。"""
         assert not oa.assess_oi_staleness(_r(108, 87))["stale"]
 
-    def test_threshold_is_strictly_below_half(self):
-        assert not oa.assess_oi_staleness(_r(40, 20))["stale"]
-        assert oa.assess_oi_staleness(_r(40, 19))["stale"]
+    def test_threshold_is_strictly_below_a_quarter(self):
+        """v0.45.544：阈值 0.25（0.5 离正常日最低 0.575 太近）。变红的变异：改回 0.5（20/40 = 0.5 那条仍过，
+        12/40 = 0.3 会被判陈旧）；或 ≤。"""
+        assert not oa.assess_oi_staleness(_r(40, 10))["stale"]
+        assert not oa.assess_oi_staleness(_r(40, 12))["stale"]
+        assert oa.assess_oi_staleness(_r(40, 9))["stale"]
+
+    def test_lowest_healthy_pooled_observation_is_not_stale(self):
+        """10-19 实测正常日最低：SNOW 60 天内前 4 个到期日合起来 0.575（357 个最近有成交的合约）。"""
+        assert not oa.assess_oi_staleness(_r(357, 205))["stale"]
 
     def test_too_few_recent_contracts_is_not_judgeable(self):
         """变红的变异：去掉最少样本数（冷门标的一两个零 OI 新合约就会被判陈旧）。"""

@@ -86,7 +86,7 @@ class TestHorizonsAccumulateAcrossPasses:
             assert r["t1"] == pytest.approx(0.01)
             assert r["t7"] is None and r["t30"] is None
             # 没有 T+7 ⇒ 方向对错还判不了：留空，不写成 "neutral"
-            #（"neutral" 进 get_agent_accuracy 的分母，等于记一次「没猜对」）
+            #（「还判不了」≠「判为中性」；曾有读者把 neutral 计进准确率分母）
             assert r["actual_outcome"] is None
 
         # 第 2 轮：T+7 到了 —— T+1 必须还在

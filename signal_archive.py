@@ -460,8 +460,9 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     # （期望值从 `agent_details` 导出，不写死 6 —— 关掉 CodeExecutor 时应得是 5）。
     # 库里的历史行不改写，只是不再写入新行。
 
-    # ── ML 预测 ───────────────────────────────────────────────
-    "ml.probability": _path("agent_details.RivalBeeVanguard.details.probability"),
+    # ── RivalBee 预期收益 ─────────────────────────────────────
+    # v0.45.538：`ml.probability` 已摘除 —— 它出自 30 条 2023 年硬编码样本训的模型
+    # （`ml_predictor_extended`，已退役），Rival 不再产出概率。库里的历史行不改写，只是不再写入新行。
     "ml.expected_7d": _path("agent_details.RivalBeeVanguard.details.expected_7d"),
     "ml.expected_30d": _path("agent_details.RivalBeeVanguard.details.expected_30d"),
 
@@ -1439,49 +1440,49 @@ QUARANTINE: List[Dict] = [
         "tickers": ('AMC',),
         "signals": ("options.gamma_exposure",),
         "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
-        "evidence": ("cache/options_snapshot_AMC_2026-08-04.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+        "evidence": ("cache/options_snapshot_AMC_2026-08-04.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
     },
     {
         "date": "2026-08-10",
         "tickers": ('AMC',),
         "signals": ("options.gamma_exposure",),
         "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
-        "evidence": ("cache/options_snapshot_AMC_2026-08-10.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+        "evidence": ("08-10 无期权快照：同一守卫（v0.45.63 前 `stock_price < 5 ⇒ 0.0`）、同一股价区间（$2.5–2.7），前后 08-04 / 08-12 快照为证", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525", "CHANGELOG.md#v0.45.544"),
     },
     {
         "date": "2026-08-12",
         "tickers": ('AMC',),
         "signals": ("options.gamma_exposure",),
         "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
-        "evidence": ("cache/options_snapshot_AMC_2026-08-12.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+        "evidence": ("cache/options_snapshot_AMC_2026-08-12.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
     },
     {
         "date": "2026-08-13",
         "tickers": ('AMC',),
         "signals": ("options.gamma_exposure",),
         "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
-        "evidence": ("cache/options_snapshot_AMC_2026-08-13.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+        "evidence": ("cache/options_snapshot_AMC_2026-08-13.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
     },
     {
         "date": "2026-08-25",
         "tickers": ('AMC',),
         "signals": ("options.gamma_exposure",),
         "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
-        "evidence": ("cache/options_snapshot_AMC_2026-08-25.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+        "evidence": ("cache/options_snapshot_AMC_2026-08-25.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
     },
     {
         "date": "2026-08-26",
         "tickers": ('AMC',),
         "signals": ("options.gamma_exposure",),
         "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
-        "evidence": ("cache/options_snapshot_AMC_2026-08-26.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+        "evidence": ("cache/options_snapshot_AMC_2026-08-26.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
     },
     {
         "date": "2026-08-27",
         "tickers": ('AMC',),
         "signals": ("options.gamma_exposure",),
         "reason": "v0.45.525（用户 2026-10-16 批准）：当时 calculate_gamma_exposure 有 `if stock_price < 5: return 0.0`（v0.45.63 于 08-29 删除），AMC 股价约 $2.6 ⇒ 恒 0.0。同日快照的 gamma 日历 net_gamma 数十万到上千万（链上有 gamma），删守卫后 09-01 起 GEX ≈ 6–17。不是观测。",
-        "evidence": ("cache/options_snapshot_AMC_2026-08-27.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0；08-10 无快照）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
+        "evidence": ("cache/options_snapshot_AMC_2026-08-27.json（gamma_calendar.net_gamma 非零、gamma_exposure 0.0）", "CHANGELOG.md#v0.45.63", "CHANGELOG.md#v0.45.525"),
     },
     # ③ ICLN 04-26 / 05-10、BIIB 05-10：analyze 取链不传价，BS gamma 的 S 退到「OI > 50 的 call 行权价中位数」，
     #    当天一个这样的 call 都没有 ⇒ S = 0 ⇒ 不注入 gamma ⇒ 0.0（v0.45.462 删了这个兜底）。
@@ -1536,6 +1537,10 @@ QUARANTINE: List[Dict] = [
                   "动量 +0.40%（= 10-13 归档值）；yfinance「截至 10-14」为 −3.91%。其余 29 只的回落末端是 10-14、与 yfinance 一致，不隔离。",
         "evidence": ("~/.claude/logs/orchestrator-2026-10-14.log（「[BILI] momentum_5d 由自攒索引补上: +0.40%（截至 2026-10-13」）",
                      "CHANGELOG.md#v0.45.508"),
+        # v0.45.530（用户 2026-10-17 批准「清 92 行、留这 1 行」）：照常隔离，但库里这一行**不删**
+        "keep_rows": ("维度 IC 冻结评分器（buzz_v1 阶段 2）要用归档的原始动量重算背离调整，自证 ② 要求「生产有分、重算缺输入」= 0、"
+                      "不许放宽；10-14 在自证窗口（09-28 起）内——删掉这一行，将来自证就多一条缺输入、判不过。"
+                      "生产当天的分正是用这个（取错窗口的）值算的，重算也该用它才能逐位复现。H1 那天本来就因量比隔离而无效。"),
     },
     # ────────────────────────────────────────────────────────────────────────
     # v0.45.517（用户 2026-10-16 批准「全部已证实的」）：508 复核时顺带查出的、H1 窗口（10-12 起）之前的同类观测。
@@ -1637,7 +1642,7 @@ QUARANTINE.extend(_rank_mirror_entries(QUARANTINE))
 
 #: 前瞻检验排除日（v0.45.484）—— 与 `QUARANTINE` **不是一回事**，别合并：
 #:
-#: `QUARANTINE` 管「取错日子的观测」，在**入库口**拦（archive / backfill 不写、purge 工具会删），且划界原则是
+#: `QUARANTINE` 管「取错日子的观测」，在**入库口**拦（archive / backfill 不写、purge 工具会删——带 `keep_rows` 的条目除外，见 `purge_due`），且划界原则是
 #: 不隔离 Agent 评分。这里管的是「整天由事后重放补算、不再是生产当时实际产出」的日子：库里存的是**对的**
 #: 重放值（要留着、要能被别的读者用），只是不进预注册前瞻检验——那两份协议的意向性分析口径是「系统当天
 #: 实际产出什么就算什么」，事后重放的整天不属于这个口径。
@@ -1682,6 +1687,22 @@ def is_quarantined(date: str, ticker: str, signal: str) -> bool:
         if tickers is None or ticker in tickers:
             return True
     return False
+
+
+def purge_due(date: str, ticker: str, signal: str, only_tag: Optional[str] = None) -> bool:
+    """库里若有这一行，清库时该不该删（v0.45.530）。清库工具与整库恢复的报告共用这一处判据。
+
+    先要 `is_quarantined` 为真；再要求命中某条**不带 `keep_rows`** 的条目（给了 `only_tag` 还要求该条目
+    reason 含它）。只被 `keep_rows` 条目命中的行照常隔离（入库口拦、分析排除），但库里已有的不删——
+    现有唯一一条是 10-14 BILI `price.momentum_5d`，理由见该条目。同一格还被别的条目命中 ⇒ 照删。
+    """
+    if not is_quarantined(date, ticker, signal):
+        return False
+    return any(q["date"] == date and signal in q["signals"]
+               and (q.get("tickers") is None or ticker in q["tickers"])
+               and not q.get("keep_rows")
+               and (only_tag is None or only_tag in q.get("reason", ""))
+               for q in QUARANTINE)
 
 
 def ensure_schema(db_path: Optional[Path] = None) -> None:
@@ -2123,7 +2144,7 @@ SIGNAL_UPSTREAM: Dict[str, Tuple[str, ...]] = {
     # Scout/Oracle 方向）——`tests/test_signal_archive_generations.py::TestBearPeerReadsAreEdges` 按 AST 核这两条边
     "bear.insider_bear": ("agent.ScoutBeeNova.direction",),
     "bear.options_bear": ("agent.OracleBeeEcho.direction",),
-    # Bear 读 Rival 的 ml_probability / expected_7d、Guard 的 consistency / conflict_type
+    # Bear 读 Rival 的 expected_7d（v0.45.538 前还读 ml_probability）、Guard 的 consistency / conflict_type
     "bear.score": ("ml.*", "agent.GuardBeeSentinel.*", "guard.consistency_census",
                    "bear.insider_bear", "bear.overval_bear", "bear.options_bear", "bear.short_int_bear"),
     "agent.BearBeeContrarian.*": ("bear.score",),
@@ -2308,6 +2329,12 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 按维度 IC 协议 §6「按层声明」：点名 `buzz.comp.news_signal` **和** `agent.BuzzBeeWhisper.*`（通道值变 ⇒ 分跟着变）。
     # 下游（Guard 读 Buzz 分、Scout consensus_strength 读 Buzz 方向、swarm_agreement、ml.* 等）由 _scope_closure 带出。
     "v0.45.445": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*"),
+    # 10-19：蜂后 ML 反馈两个消费者（维度权重、方向票重）停用，只记影子乘数。蜂后层 ⇒ 不改任何归档蜂信号。
+    "v0.45.537": (),
+    # 10-19：RivalBee 分数不再含合成模型概率（`prob·10` → 5.0 基线），ml_adjustment 退出 final_score。
+    # 只点名 Rival 的分：方向与 `ml.expected_7d/30d` 逐位不变（不点名 `ml.*`，免得白切它们）；
+    # Guard 读 Rival 分 ⇒ Guard / Bear / swarm_agreement 由 _scope_closure 带出。
+    "v0.45.538": ("agent.RivalBeeVanguard.score",),
 }
 
 

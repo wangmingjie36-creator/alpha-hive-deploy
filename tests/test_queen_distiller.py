@@ -123,36 +123,20 @@ class TestDistill:
         # 共振后评分 > 无共振基线
         assert out_boosted["final_score"] > out_baseline["final_score"]
 
-    def test_ml_auxiliary_adjustment(self, queen, monkeypatch):
-        """ML 辅助分应调整最终评分（隔离 v0.40.0 OOS 信任系数——
-        生产 ml_model_cache.json 的 OOS<50% 时系数为 0 会正确地屏蔽调整，
-        本测试验证的是调整机制本身，固定系数=1.0）"""
-        from swarm_agents.queen_distiller import QueenDistiller
-        monkeypatch.setattr(QueenDistiller, "_ml_oos_trust_factor",
-                            classmethod(lambda cls: 1.0))
+    def test_ml_auxiliary_score_does_not_move_final_score(self, queen):
+        """v0.45.538：RivalBee（ml_auxiliary）的分数**不再进** final_score。
+
+        此前 `ml_adjustment = (score − 5)·0.1·conf·OOS 信任系数` 加在加权分上；那个分数出自
+        合成样本训的模型，信任系数量的却是另一个模型。本条取代原先的
+        「ML 辅助分应调整最终评分」与「OOS 差时置零」两条。完整守卫见
+        tests/test_rival_ml_adjustment_retired.py。
+        """
         base_results = [_make_result("signal", 7.0)]
-        ml_high = base_results + [_make_result("ml_auxiliary", 9.0)]
-        ml_low = base_results + [_make_result("ml_auxiliary", 2.0)]
+        out_high = queen.distill("NVDA", base_results + [_make_result("ml_auxiliary", 9.0)])
+        out_low = queen.distill("NVDA", base_results + [_make_result("ml_auxiliary", 2.0)])
 
-        out_high = queen.distill("NVDA", ml_high)
-        out_low = queen.distill("NVDA", ml_low)
-
-        assert out_high["final_score"] > out_low["final_score"]
-
-    def test_ml_adjustment_zeroed_when_oos_poor(self, queen, monkeypatch):
-        """v0.40.0: OOS<50%（不如抛硬币）时 ML 调整应被置零"""
-        from swarm_agents.queen_distiller import QueenDistiller
-        monkeypatch.setattr(QueenDistiller, "_ml_oos_trust_factor",
-                            classmethod(lambda cls: 0.0))
-        base_results = [_make_result("signal", 7.0)]
-        ml_high = base_results + [_make_result("ml_auxiliary", 9.0)]
-        ml_low = base_results + [_make_result("ml_auxiliary", 2.0)]
-
-        out_high = queen.distill("NVDA", ml_high)
-        out_low = queen.distill("NVDA", ml_low)
-
-        # 信任系数 0 → ML 高低分不再产生任何差异
-        assert out_high["final_score"] == pytest.approx(out_low["final_score"], abs=0.01)
+        assert out_high["final_score"] == out_low["final_score"]
+        assert "ml_adjustment" not in out_high
 
     def test_data_quality_aggregation(self, queen):
         results = [
@@ -450,7 +434,8 @@ class TestQueenHelpers:
         dim_confidence = {"signal": 1.0, "catalyst": 1.0, "sentiment": 1.0, "odds": 1.0, "risk_adj": 1.0}
         ws = queen._compute_weighted_score("TEST", dim_scores, dim_confidence, 100.0, 5, [])
         assert 7.5 <= ws["base_score"] <= 8.5, f"全 8.0 输入时 base_score 应≈8.0，got {ws['base_score']}"
-        assert ws["ml_adjustment"] == 0.0
+        assert "ml_adjustment" not in ws   # v0.45.538 退役
+        assert ws["adjusted_score"] == ws["base_score"]
 
     def test_weighted_score_low_coverage(self, queen):
         """1/5 维度 → 压缩至中性区间"""
@@ -747,14 +732,14 @@ class TestMLFeedbackWeighting:
         assert queen_no_ml.ml_adjustments == {}
 
     def test_ml_feedback_adjustments(self, board):
-        """有 ml_model → 维度权重归一化调整"""
+        """有 ml_model → 只算影子乘数，不改权重（v0.45.537，守卫全文见 test_queen_ml_feedback_disabled）"""
         model = self._make_mock_ml_model()
         queen_ml = QueenDistiller(board, ml_model=model)
-        assert queen_ml.ml_feedback_enabled is True
-        assert len(queen_ml.ml_adjustments) > 0
-        # 权重应该已归一化
-        total = sum(queen_ml.DIMENSION_WEIGHTS.values())
-        assert abs(total - 1.0) < 0.01, f"权重总和应 ≈ 1.0，got {total}"
+        queen_no_ml = QueenDistiller(board, ml_model=None)
+        assert queen_ml.ml_feedback_enabled is False
+        assert queen_ml.ml_adjustments == {}
+        assert len(queen_ml.ml_adjustments_shadow) > 0
+        assert queen_ml.DIMENSION_WEIGHTS == queen_no_ml.DIMENSION_WEIGHTS
 
     def test_ml_feedback_clamp(self, board):
         """调整因子被 clamp 到 [0.5, 2.0]"""
@@ -772,7 +757,8 @@ class TestMLFeedbackWeighting:
         }
         model = self._make_mock_ml_model(importance=extreme)
         queen_ml = QueenDistiller(board, ml_model=model)
-        for dim, adj in queen_ml.ml_adjustments.items():
+        assert queen_ml.ml_adjustments_shadow
+        for dim, adj in queen_ml.ml_adjustments_shadow.items():
             assert 0.5 <= adj <= 2.0, f"{dim} adjustment {adj} out of clamp range"
 
     def test_ml_feedback_untrained_model(self, board):
@@ -785,10 +771,15 @@ class TestMLFeedbackWeighting:
         assert queen_ml.ml_adjustments == {}
 
     def test_ml_vote_boost(self, board):
-        """有 ML 模型时 Agent 投票权重应受 ml_adjustments 影响"""
+        """重放旧记录时（记录里 ml_feedback_enabled=True + 乘数），票重照旧受 ml_adjustments 影响。
+
+        v0.45.537 起生产不再施加；这条路径只给共振加成前瞻检验重放旧记录用，所以仍要守着。
+        """
         model = self._make_mock_ml_model()
         queen_ml = QueenDistiller(board, ml_model=model)
-        assert queen_ml.ml_feedback_enabled is True
+        assert queen_ml.ml_feedback_enabled is False
+        queen_ml.ml_feedback_enabled = True                       # 旧记录里的两个键
+        queen_ml.ml_adjustments = dict(queen_ml.ml_adjustments_shadow)
 
         # 使用明确的多数方向（3 bullish vs 1 bearish）避免触发仲裁
         results = [
@@ -822,6 +813,7 @@ class TestMLFeedbackWeighting:
         out = queen.distill("TEST", results)
         assert "ml_weight_adjustments" in out
         assert "ml_feedback_enabled" in out
+        assert "ml_weight_adjustments_shadow" in out
         assert isinstance(out["ml_weight_adjustments"], dict)
         assert isinstance(out["ml_feedback_enabled"], bool)
 

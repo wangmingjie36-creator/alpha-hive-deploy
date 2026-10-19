@@ -15,6 +15,8 @@
 """
 
 import ast
+import base64
+import hashlib
 import json
 from pathlib import Path
 
@@ -486,17 +488,58 @@ class TestSnapshot:
         lines = (tmp_path / G.HISTORY_DIRNAME / G.MANIFEST_NAME).read_text().strip().split("\n")
         assert len(lines) == 2
 
-    def test_same_day_changed_content_overwrites_and_manifest_shows_both(self, tmp_path):
+    def test_same_day_changed_content_keeps_both_models(self, tmp_path):
+        """v0.45.551：同日存了另一个模型 ⇒ **不覆盖**，另存 `~{指纹}`。此前覆盖成最新一次——v0.45.551 起
+        同日后启动的进程（Step 3 补跑、手动报告）会按当时的库重训，覆盖会冲掉早上给主报告打分的那个模型。"""
         src = self._model(tmp_path, n=30)
-        G.snapshot_model_file(src, date_str="2026-09-07")
-        src.write_text(json.dumps({"model_type": "hgb", "n_samples_seen": 45}),
+        first = G.snapshot_model_file(src, date_str="2026-09-07")
+        morning = first.read_bytes()
+        src.write_text(json.dumps({"model_type": "hgb", "n_samples_seen": 45,
+                                   "model_bytes": base64.b64encode(b"later-clf").decode()}),
                        encoding="utf-8")
         dest = G.snapshot_model_file(src, date_str="2026-09-07")
-        assert dest is not None
+        later_sha = hashlib.sha256(b"later-clf").hexdigest()[:16]
+        assert dest is not None and dest.name == f"ml_model_cache-2026-09-07~{later_sha}.json"
         assert json.loads(dest.read_text())["n_samples_seen"] == 45
-        hashes = {json.loads(l)["sha256"] for l in
-                  (tmp_path / G.HISTORY_DIRNAME / G.MANIFEST_NAME).read_text().strip().split("\n")}
-        assert len(hashes) == 2, "日内换过模型必须能从 manifest 的 sha256 看出来"
+        assert first.read_bytes() == morning, "当日第一个模型被覆盖了"
+        recs = [json.loads(l) for l in
+                (tmp_path / G.HISTORY_DIRNAME / G.MANIFEST_NAME).read_text().strip().split("\n")]
+        assert len({r["sha256"] for r in recs}) == 2, "日内换过模型必须能从 manifest 的 sha256 看出来"
+        assert recs[-1]["model_sha256"] == later_sha and recs[-1]["snapshot"] == dest.name
+        # 同一个后来的模型再存一次：不重写、不再另起文件
+        assert G.snapshot_model_file(src, date_str="2026-09-07") is None
+        assert len(list((tmp_path / G.HISTORY_DIRNAME).glob("ml_model_cache-2026-09-07*.json"))) == 2
+
+    def test_variant_without_model_bytes_falls_back_to_file_digest(self, tmp_path):
+        src = self._model(tmp_path, n=30)
+        G.snapshot_model_file(src, date_str="2026-09-07")
+        src.write_text(json.dumps({"model_type": "sgd", "n_samples_seen": 45}), encoding="utf-8")
+        dest = G.snapshot_model_file(src, date_str="2026-09-07")
+        assert dest.name == f"ml_model_cache-2026-09-07~{hashlib.sha256(src.read_bytes()).hexdigest()[:16]}.json"
+
+    def test_retention_counts_dates_not_files(self, tmp_path):
+        """同日几个模型同进同退：retain=2 留最近两个**日期**的全部文件，不是最近两个文件。"""
+        src = self._model(tmp_path)
+        for d, variants in (("2026-09-01", 1), ("2026-09-02", 2), ("2026-09-03", 2)):
+            for i in range(variants):
+                src.write_text(json.dumps({"d": d, "i": i}), encoding="utf-8")
+                G.snapshot_model_file(src, date_str=d, retain=2)
+        kept = sorted(p.name for p in (tmp_path / G.HISTORY_DIRNAME).glob("ml_model_cache-*.json"))
+        assert len(kept) == 4 and all("2026-09-02" in k or "2026-09-03" in k for k in kept), kept
+
+    def test_variant_counts_as_snapshot_present(self, tmp_path):
+        hist = tmp_path / G.HISTORY_DIRNAME
+        hist.mkdir()
+        (hist / "ml_model_cache-2026-09-07~0123456789abcdef.json").write_text("{}", encoding="utf-8")
+        assert G._snapshot_exists(tmp_path, "2026-09-07")
+        assert not G._snapshot_exists(tmp_path, "2026-09-08")
+
+    def test_snapshot_regex_reads_both_forms(self):
+        m = G._SNAPSHOT_RE.match("ml_model_cache-2026-09-07~0123456789abcdef.json")
+        assert m and m.group("stem") == "ml_model_cache" and m.group("date") == "2026-09-07"
+        m = G._SNAPSHOT_RE.match("ml_model_cache-2026-09-07.json")
+        assert m and m.group("stem") == "ml_model_cache" and m.group("variant") is None
+        assert not G._SNAPSHOT_RE.match("ml_model_cache-2026-09-07~xyz.json")
 
     def test_retention_prunes_oldest_only(self, tmp_path):
         src = self._model(tmp_path)
@@ -564,7 +607,8 @@ class TestSnapshotWiring:
     （v0.45.135 教训）。新增第 5 个 save_model 忘了钩 → 这条变红。
     """
 
-    @pytest.mark.parametrize("mod", ["ml_predictor.py", "ml_predictor_extended.py"])
+    # v0.45.538：`ml_predictor_extended.py` 已退役，只剩主模块
+    @pytest.mark.parametrize("mod", ["ml_predictor.py"])
     def test_every_save_model_snapshots(self, mod):
         tree = ast.parse((REPO / mod).read_text(encoding="utf-8"))
         found = [n for n in ast.walk(tree)
@@ -742,6 +786,8 @@ class TestSnapshotLandsInTheTrackedDir:
         v0.45.149 认定「模型被测试夹具覆盖」的机读签名是
         **`oos_accuracy is None` + `n_samples_seen` 明显偏低**
         （真实训练路径样本 ≥60 一定走 `_eval_oos_purged` 填 oos）。
+        ⚠️ 2026-10-19 更正：那只说明「小样本、无 OOS」，不说明「被测试覆盖」（见 CHANGELOG 0.45.551）；
+        两个字段仍是判模型好坏、对上报告指纹的归因材料。
 
         ⚠️ **不能用 `training_accuracy` 判** —— 夹具模型的精度**反而更好看**
         （实测 96.67 / 100.0，真模型只有 71.63），拿精度判会把最该拦的那个

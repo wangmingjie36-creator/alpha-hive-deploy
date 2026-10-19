@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging as _logging
 import sys
 import os
@@ -198,7 +197,6 @@ def _run_scan(tickers: list[str]) -> None:
     report = reporter.run_swarm_scan(tickers)
 
     duration = time.time() - start_time
-    error_msg = None
 
     if report and "opportunities" in report:
         opportunities = report["opportunities"]
@@ -214,48 +212,10 @@ def _run_scan(tickers: list[str]) -> None:
     else:
         n_opps = 0
 
-    # 写入运行状态（Sprint 1.4）
-    _write_status(
-        status="success",
-        duration=duration,
-        tickers=tickers,
-        n_opportunities=n_opps,
-        error=error_msg,
-    )
+    # v0.45.550：此处原写 logs/last_run_status.json（Sprint 1.4）——全仓零读者，已删；结果见上面的打印与日志。
+    _log.info("扫描完成：%d 只标的，%d 个机会，耗时 %.1fs", len(tickers), n_opps, duration)
 
     print("\n蜂群扫描完成！")
-
-
-def _write_status(
-    status: str,
-    duration: float,
-    tickers: list[str],
-    n_opportunities: int = 0,
-    error: str | None = None,
-) -> None:
-    """写入 logs/last_run_status.json（Sprint 1.4）"""
-    # v0.45.260（数据根迁移阶段 2）：此前是 `Path(__file__).parent / "logs"`，
-    # 改用 `PATHS.logs_dir`（已按调用时求值 + 建目录实现，见 hive_logger.py）。
-    from hive_logger import PATHS
-    log_dir = PATHS.logs_dir
-    status_file = log_dir / "last_run_status.json"
-
-    data = {
-        "timestamp": datetime.now().isoformat(),
-        "status": status,
-        "duration_seconds": round(duration, 1),
-        "tickers": tickers,
-        "n_tickers": len(tickers),
-        "n_opportunities": n_opportunities,
-    }
-    if error:
-        data["error"] = error[:500]
-
-    try:
-        status_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-        _log.info("状态写入: %s", status_file)
-    except OSError as e:
-        _log.warning("无法写入状态文件: %s", e)
 
 
 def main() -> None:
@@ -284,13 +244,6 @@ def main() -> None:
         print(f"\n扫描失败: {e}\n")
         import traceback
         traceback.print_exc()
-
-        _write_status(
-            status="failed",
-            duration=0,
-            tickers=args.tickers,
-            error=str(e),
-        )
 
         # 扫描失败仅写日志，不发 Slack DM
         sys.exit(1)

@@ -69,7 +69,7 @@ def _agent_results(direction):
     out = []
     for agent, dim in _DIMS.items():
         d = direction if agent in _VOTERS else "neutral"
-        # Rival 取 5.0 ⇒ ml_adjustment = 0（不去碰 ML 信任度那条读盘路径的数值）
+        # Rival 取 5.0（v0.45.538 起 Rival 分数本就不进 final_score）
         score = 5.0 if agent in ("RivalBeeVanguard", "CodeExecutorAgent", "BearBeeContrarian") else _CORE_SCORE
         details = {}
         if agent == "GuardBeeSentinel":

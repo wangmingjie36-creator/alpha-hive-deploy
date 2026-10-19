@@ -1,0 +1,496 @@
+"""
+tests/test_llm_shadow_scan.py — v0.45.555：LLM 影子 A/B 入口
+
+全部用假子进程 / 假扫描，**不起真实蜂群、不调任何 LLM、不碰真实数据根**。覆盖：
+  · 标的数 / 轮换 / 根目录互斥 / 质量判定（纯函数）
+  · 拷贝：只读生产、影子库 = 生产此刻的样子、状态目录跨天保留
+  · 花钱闸：--run 无环境变量 ⇒ 拒绝且不拷贝；--plan 不落任何东西
+  · 两进程隔离：子进程环境指向影子根；config 固化路径到生产 ⇒ 拒绝
+  · 子进程：扫描异常 ⇒ 状态记 error + 退出码 3；LLM 一次没调成 ⇒ 不健康 + 退出码 5
+"""
+import hashlib
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import types
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+import llm_shadow_scan as sh
+
+_REPO = Path(__file__).resolve().parent.parent
+
+
+# ==================== 纯函数 ====================
+
+class TestMaxTickers:
+    @pytest.mark.parametrize("cap,expected", [(3.0, 22), (0.135, 1), (0.134, 0), (0, 0), (-1, 0), (10.0, 74)])
+    def test_cases(self, cap, expected):
+        assert sh.max_tickers(cap) == expected
+
+
+class TestPickTickers:
+    U = [f"T{i:02d}" for i in range(30)]
+
+    def test_deterministic(self):
+        d = date(2026, 10, 19)
+        assert sh.pick_tickers(self.U, d, 22) == sh.pick_tickers(self.U, d, 22)
+
+    def test_length_and_wraps(self):
+        got = sh.pick_tickers(self.U, date(2026, 10, 19), 22)
+        assert len(got) == 22 and len(set(got)) == 22 and set(got) <= set(self.U)
+
+    def test_k_ge_n_returns_all_in_order(self):
+        assert sh.pick_tickers(self.U, date(2026, 10, 19), 30) == self.U
+        assert sh.pick_tickers(self.U, date(2026, 10, 19), 99) == self.U
+
+    @pytest.mark.parametrize("k", [0, -3])
+    def test_nonpositive_k_is_empty(self, k):
+        assert sh.pick_tickers(self.U, date(2026, 10, 19), k) == []
+
+    def test_empty_universe(self):
+        assert sh.pick_tickers([], date(2026, 10, 19), 5) == []
+
+    def test_coverage_roughly_even_over_a_month(self):
+        """每天只放 22/30：长期看每只都被覆盖，且次数相差不大（否则固定漏掉几只名字）。"""
+        counts = {t: 0 for t in self.U}
+        for i in range(60):
+            for t in sh.pick_tickers(self.U, date.fromordinal(739900 + i), 22):
+                counts[t] += 1
+        assert min(counts.values()) > 0
+        assert max(counts.values()) - min(counts.values()) <= 6
+
+    def test_consecutive_days_differ(self):
+        assert sh.pick_tickers(self.U, date(2026, 10, 19), 22) != sh.pick_tickers(self.U, date(2026, 10, 20), 22)
+
+
+class TestRoots:
+    def test_sibling_is_ok(self, tmp_path):
+        sh.check_roots(tmp_path / "prod", tmp_path / "shadow")
+
+    @pytest.mark.parametrize("shadow", ["prod", "prod/_shadow", "."])
+    def test_equal_or_nested_rejected(self, tmp_path, shadow):
+        prod = tmp_path / "prod"
+        prod.mkdir()
+        s = (tmp_path / shadow).resolve() if shadow != "." else tmp_path
+        with pytest.raises(ValueError):
+            sh.check_roots(prod, s)
+
+    def test_default_is_sibling_of_prod(self, tmp_path):
+        d = sh.default_shadow_root(tmp_path / "alpha-hive-data")
+        assert d == tmp_path / sh.SHADOW_DIRNAME
+        sh.check_roots(tmp_path / "alpha-hive-data", d)
+
+
+def _usage(**kw):
+    base = {"call_count": 100, "truncated_calls": 0, "json_parse_failures": 0,
+            "budget_refusals": 0, "unpriced_refusals": 0}
+    base.update(kw)
+    return base
+
+
+def _tickers(n=10, mode="llm_enhanced"):
+    return {f"T{i}": {"present": True, "distill_mode": mode} for i in range(n)}
+
+
+class TestQuality:
+    def test_healthy(self):
+        q = sh.quality_report(_usage(), _tickers(), llm_on=True)
+        assert q["healthy"] and q["reasons"] == []
+
+    @pytest.mark.parametrize("kw,needle", [
+        ({"budget_refusals": 1}, "budget_refusals"),
+        ({"unpriced_refusals": 2}, "unpriced_refusals"),
+        ({"call_count": 0}, "call_count=0"),
+        ({"truncated_calls": 11}, "truncation_rate"),
+        ({"json_parse_failures": 11}, "json_parse_failure_rate"),
+    ])
+    def test_each_failure_mode_is_unhealthy(self, kw, needle):
+        q = sh.quality_report(_usage(**kw), _tickers(), llm_on=True)
+        assert not q["healthy"]
+        assert any(needle in r for r in q["reasons"])
+
+    def test_queen_not_using_llm_is_unhealthy(self):
+        q = sh.quality_report(_usage(), _tickers(mode="rule_engine"), llm_on=True)
+        assert not q["healthy"] and any("queen_llm_rate" in r for r in q["reasons"])
+
+    def test_boundary_exactly_at_threshold_is_healthy(self):
+        q = sh.quality_report(_usage(truncated_calls=10), _tickers(), llm_on=True)   # 10/100 == 阈值，不超过
+        assert q["healthy"]
+
+    def test_control_mode_never_judged_on_llm_metrics(self):
+        q = sh.quality_report(_usage(call_count=0), _tickers(mode="rule_engine"), llm_on=False)
+        assert q["healthy"] and q["llm_on"] is False
+
+    def test_missing_counters_do_not_crash(self):
+        q = sh.quality_report({}, {}, llm_on=True)
+        assert not q["healthy"]                                    # call_count=0
+        assert q["truncation_rate"] is None                         # 没有分母 ⇒ None，不是 0
+
+
+class TestPerTicker:
+    def test_missing_ticker_marked_absent(self):
+        out = sh.per_ticker_from_swarm_results({"AAA": {"final_score": 6.1}}, ["AAA", "BBB"])
+        assert out["BBB"] == {"present": False}
+        assert out["AAA"]["present"] is True
+
+    def test_missing_fields_are_none_not_zero(self):
+        out = sh.per_ticker_from_swarm_results({"AAA": {"final_score": 6.1}}, ["AAA"])["AAA"]
+        assert out["final_score"] == 6.1
+        assert out["rule_score"] is None and out["llm_confidence"] is None
+
+    def test_non_dict_entry_is_absent(self):
+        assert sh.per_ticker_from_swarm_results({"AAA": None}, ["AAA"])["AAA"] == {"present": False}
+
+
+class TestBuildStatus:
+    def _st(self, mode="run"):
+        pt = {"AAA": {"present": True, "distill_mode": "llm_enhanced"}, "BBB": {"present": False}}
+        return sh.build_status(day=date(2026, 10, 19), mode=mode, model=sh.MODEL, cap=3.0,
+                               requested=["AAA", "BBB"], usage=_usage(total_cost_usd=0.5, input_tokens=9, output_tokens=3),
+                               per_ticker=pt, elapsed=12.34, error=None)
+
+    def test_scanned_excludes_absent(self):
+        st = self._st()
+        assert st["tickers_requested"] == ["AAA", "BBB"] and st["tickers_scanned"] == ["AAA"]
+
+    def test_model_recorded_only_when_llm_on(self):
+        assert self._st("run")["model"] == sh.MODEL
+        assert self._st("control")["model"] is None
+
+    def test_json_serialisable_and_strict(self):
+        json.dumps(self._st(), allow_nan=False)
+
+
+# ==================== 拷贝 ====================
+
+def _make_prod(tmp_path):
+    prod = tmp_path / "prod"
+    (prod / "cache").mkdir(parents=True)
+    db = prod / "pheromone.db"
+    con = sqlite3.connect(db)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("CREATE TABLE predictions (id INTEGER PRIMARY KEY, ticker TEXT)")
+    con.executemany("INSERT INTO predictions(ticker) VALUES (?)", [("AAA",), ("BBB",)])
+    con.commit()
+    con.close()
+    (prod / "cache" / "iv_history_AAA.jsonl").write_text('{"iv": 1}\n', encoding="utf-8")
+    (prod / "cache" / "options_snapshot_AAA_2026-10-19.json").write_text("{}", encoding="utf-8")
+    return prod
+
+
+def _digest(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+class TestSeed:
+    def test_db_and_cache_copied(self, tmp_path):
+        prod = _make_prod(tmp_path)
+        shadow = tmp_path / "shadow"
+        sh.seed_shadow_root(prod / "pheromone.db", prod / "cache", shadow)
+        con = sqlite3.connect(shadow / "pheromone.db")
+        assert [r[0] for r in con.execute("SELECT ticker FROM predictions ORDER BY id")] == ["AAA", "BBB"]
+        con.close()
+        assert (shadow / "cache" / "iv_history_AAA.jsonl").read_text(encoding="utf-8") == '{"iv": 1}\n'
+        assert (shadow / "cache" / "options_snapshot_AAA_2026-10-19.json").exists()
+
+    def test_production_is_not_modified(self, tmp_path):
+        prod = _make_prod(tmp_path)
+        files = [p for p in prod.rglob("*") if p.is_file()]
+        before = {p: (_digest(p), p.stat().st_mtime_ns) for p in files}
+        sh.seed_shadow_root(prod / "pheromone.db", prod / "cache", tmp_path / "shadow")
+        after = {p: (_digest(p), p.stat().st_mtime_ns) for p in prod.rglob("*") if p.is_file()}
+        assert {p: v for p, v in after.items() if p in before} == before
+        assert set(after) - set(before) <= {prod / "pheromone.db-wal", prod / "pheromone.db-shm"}
+
+    def test_reseed_replaces_stale_db_and_cache_but_keeps_status(self, tmp_path):
+        prod = _make_prod(tmp_path)
+        shadow = tmp_path / "shadow"
+        (shadow / "cache").mkdir(parents=True)
+        (shadow / "cache" / "stale.json").write_text("old", encoding="utf-8")
+        (shadow / "pheromone.db").write_bytes(b"not a database")
+        (shadow / sh.STATUS_DIRNAME).mkdir()
+        (shadow / sh.STATUS_DIRNAME / "2026-10-16.json").write_text("{}", encoding="utf-8")
+        sh.seed_shadow_root(prod / "pheromone.db", prod / "cache", shadow)
+        assert not (shadow / "cache" / "stale.json").exists()
+        assert (shadow / sh.STATUS_DIRNAME / "2026-10-16.json").exists()      # 比较结果跨天保留
+        sqlite3.connect(shadow / "pheromone.db").execute("SELECT count(*) FROM predictions").fetchone()
+
+    def test_missing_cache_is_ok(self, tmp_path):
+        prod = _make_prod(tmp_path)
+        sh.seed_shadow_root(prod / "pheromone.db", tmp_path / "nope", tmp_path / "shadow")
+        assert (tmp_path / "shadow" / "pheromone.db").exists()
+
+    def test_missing_source_db_fails_loudly(self, tmp_path):
+        with pytest.raises(sqlite3.Error):
+            sh.seed_shadow_root(tmp_path / "absent.db", tmp_path / "cache", tmp_path / "shadow")
+
+
+# ==================== 子进程环境 / config 固化检查 ====================
+
+class TestChildEnv:
+    def test_points_to_shadow_and_sets_budget(self, tmp_path):
+        env = sh.build_child_env({"PATH": "/bin", "ALPHA_HIVE_HOME": "/prod"}, tmp_path / "shadow", 3.0)
+        assert env["ALPHA_HIVE_HOME"] == str(tmp_path / "shadow")
+        assert float(env["ALPHA_HIVE_LLM_BUDGET_USD"]) == 3.0
+        assert env["PATH"] == "/bin"
+
+    def test_overrides_that_redirect_paths_are_removed(self, tmp_path):
+        env = sh.build_child_env({"ALPHA_HIVE_DB_PATH": "/prod/x.db", "ALPHA_HIVE_CACHE_DIR": "/prod/c",
+                                  "ALPHA_HIVE_TARGET_DATE": "2026-01-01", "ALPHA_HIVE_PHEROMONE_DB": "/p"},
+                                 tmp_path / "shadow", 3.0)
+        for k in ("ALPHA_HIVE_DB_PATH", "ALPHA_HIVE_CACHE_DIR", "ALPHA_HIVE_TARGET_DATE", "ALPHA_HIVE_PHEROMONE_DB"):
+            assert k not in env
+
+    def test_does_not_mutate_input_and_keeps_spend_flag(self, tmp_path):
+        src = {"ALPHA_HIVE_LLM_SHADOW_SPEND": "1", "ALPHA_HIVE_HOME": "/prod"}
+        env = sh.build_child_env(src, tmp_path / "shadow", 3.0)
+        assert src == {"ALPHA_HIVE_LLM_SHADOW_SPEND": "1", "ALPHA_HIVE_HOME": "/prod"}
+        assert env["ALPHA_HIVE_LLM_SHADOW_SPEND"] == "1"
+
+
+class TestFrozenPaths:
+    def test_detects_top_level_and_nested(self, tmp_path):
+        prod = tmp_path / "prod"
+        mod = types.SimpleNamespace(
+            DB=str(prod / "pheromone.db"),
+            CFG={"db_path": prod / "x.db", "cache_dir": str(tmp_path / "shadow" / "cache"),
+                 "deep": {"log": str(prod / "logs" / "a.log")}},
+            OK={"cache_dir": str(tmp_path / "shadow" / "cache")},
+        )
+        bad = sh.frozen_prod_paths(mod, prod)
+        assert "DB" in bad
+        assert "CFG['db_path']" in bad
+        assert "CFG['deep']['log']" in bad
+        assert not any(b.startswith("OK") for b in bad)
+
+    def test_clean_module_is_empty(self, tmp_path):
+        mod = types.SimpleNamespace(A="x", B={"p": str(tmp_path / "shadow")})
+        assert sh.frozen_prod_paths(mod, tmp_path / "prod") == []
+
+
+# ==================== 参数 ====================
+
+class TestParseArgs:
+    def test_default_is_plan(self):
+        a = sh.parse_args([])
+        assert a.plan and not a.run and not a.control and a.daily_cap == 3.0
+
+    def test_modes_are_mutually_exclusive(self):
+        with pytest.raises(SystemExit):
+            sh.parse_args(["--run", "--control"])
+
+    @pytest.mark.parametrize("cap", ["0", "-1"])
+    def test_nonpositive_cap_rejected(self, cap):
+        with pytest.raises(SystemExit):
+            sh.parse_args(["--daily-cap", cap])
+
+    def test_child_requires_its_arguments(self):
+        with pytest.raises(SystemExit):
+            sh.parse_args(["--child", "--run"])
+
+
+# ==================== 父进程：计划 / 闸 / 拷贝 / 起子进程 ====================
+
+@pytest.fixture
+def prod_env(tmp_path, monkeypatch):
+    prod = _make_prod(tmp_path)
+    monkeypatch.setenv("ALPHA_HIVE_HOME", str(prod))
+    monkeypatch.delenv("ALPHA_HIVE_DB_PATH", raising=False)
+    monkeypatch.delenv("ALPHA_HIVE_CACHE_DIR", raising=False)
+    monkeypatch.delenv(sh.SPEND_ENV, raising=False)
+    return prod
+
+
+class _Spawn:
+    def __init__(self, rc=0):
+        self.calls = []
+        self.rc = rc
+
+    def __call__(self, cmd, env=None, cwd=None):
+        self.calls.append({"cmd": cmd, "env": env, "cwd": cwd})
+        return types.SimpleNamespace(returncode=self.rc)
+
+
+class TestRunShadowParent:
+    def test_plan_touches_nothing(self, prod_env, tmp_path, capsys):
+        spawn = _Spawn()
+        rc = sh.run_shadow(sh.parse_args(["--plan"]), spawn=spawn, now=date(2026, 10, 19))
+        assert rc == 0 and spawn.calls == []
+        assert not (tmp_path / sh.SHADOW_DIRNAME).exists()
+        out = capsys.readouterr().out
+        assert "标的 22/" in out and "$3.00" in out
+
+    def test_run_without_spend_env_refused_and_nothing_copied(self, prod_env, tmp_path):
+        spawn = _Spawn()
+        rc = sh.run_shadow(sh.parse_args(["--run"]), spawn=spawn, now=date(2026, 10, 19))
+        assert rc == sh.EXIT_USAGE and spawn.calls == []
+        assert not (tmp_path / sh.SHADOW_DIRNAME).exists()
+
+    def test_run_with_spend_env_seeds_and_spawns_child_on_shadow(self, prod_env, tmp_path, monkeypatch):
+        monkeypatch.setenv(sh.SPEND_ENV, "1")
+        spawn = _Spawn(rc=0)
+        rc = sh.run_shadow(sh.parse_args(["--run", "--tickers", "3"]), spawn=spawn, now=date(2026, 10, 19))
+        assert rc == 0
+        shadow = tmp_path / sh.SHADOW_DIRNAME
+        assert (shadow / "pheromone.db").exists() and (shadow / "cache").is_dir()
+        (call,) = spawn.calls
+        cmd, env = call["cmd"], call["env"]
+        assert "--child" in cmd and "--run" in cmd
+        assert cmd[cmd.index("--shadow-root") + 1] == str(shadow)
+        assert cmd[cmd.index("--prod-root") + 1] == str(prod_env)
+        assert len(cmd[cmd.index("--child-tickers") + 1].split(",")) == 3
+        assert env["ALPHA_HIVE_HOME"] == str(shadow)               # 子进程从启动那刻起就指向影子根
+        assert float(env["ALPHA_HIVE_LLM_BUDGET_USD"]) == 3.0
+        assert call["cwd"] == str(_REPO)
+
+    def test_control_needs_no_spend_env(self, prod_env, tmp_path):
+        spawn = _Spawn()
+        rc = sh.run_shadow(sh.parse_args(["--control", "--tickers", "2"]), spawn=spawn, now=date(2026, 10, 19))
+        assert rc == 0 and len(spawn.calls) == 1 and "--control" in spawn.calls[0]["cmd"]
+
+    def test_child_exit_code_is_propagated(self, prod_env, monkeypatch):
+        monkeypatch.setenv(sh.SPEND_ENV, "1")
+        assert sh.run_shadow(sh.parse_args(["--run", "--tickers", "1"]), spawn=_Spawn(rc=5),
+                             now=date(2026, 10, 19)) == 5
+
+    def test_nested_shadow_root_rejected_before_any_copy(self, prod_env):
+        bad = prod_env / "inside"
+        with pytest.raises(ValueError):
+            sh.run_shadow(sh.parse_args(["--control", "--shadow-root", str(bad)]), spawn=_Spawn(),
+                          now=date(2026, 10, 19))
+        assert not bad.exists()
+
+    def test_production_files_unchanged_by_a_run(self, prod_env, monkeypatch):
+        monkeypatch.setenv(sh.SPEND_ENV, "1")
+        before = {p: _digest(p) for p in prod_env.rglob("*") if p.is_file() and p.suffix != ".db-shm"}
+        sh.run_shadow(sh.parse_args(["--run", "--tickers", "2"]), spawn=_Spawn(), now=date(2026, 10, 19))
+        after = {p: _digest(p) for p in prod_env.rglob("*") if p.is_file()}
+        assert {p: after[p] for p in before if p in after} == before
+
+
+# ==================== 子进程 ====================
+
+@pytest.fixture
+def child_env(tmp_path, monkeypatch):
+    import llm_service
+    import config
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    sqlite3.connect(shadow / "pheromone.db").close()
+    monkeypatch.setenv("ALPHA_HIVE_HOME", str(shadow))
+    monkeypatch.delenv("ALPHA_HIVE_DB_PATH", raising=False)
+    monkeypatch.setitem(config.LLM_CONFIG, "daily_budget_usd", 3.0)
+    monkeypatch.setattr(llm_service, "_disabled", False)
+    monkeypatch.setattr(llm_service, "_model_override", None)
+    monkeypatch.setattr(llm_service, "_client", None)
+    monkeypatch.setattr(llm_service, "_token_usage", {
+        "input_tokens": 0, "output_tokens": 0, "total_cost_usd": 0.0, "call_count": 0,
+        "truncated_calls": 0, "json_parse_failures": 0, "budget_refusals": 0, "unpriced_refusals": 0})
+    return shadow
+
+
+def _child_args(shadow, tmp_path, *flags, tickers="AAA,BBB"):
+    return sh.parse_args([*flags, "--child", "--shadow-root", str(shadow),
+                          "--prod-root", str(tmp_path / "prod"), "--child-tickers", tickers])
+
+
+def _fake_results(mode="llm_enhanced"):
+    return {t: {"final_score": 6.5, "direction": "bullish", "rule_score": 6.0, "rule_direction": "neutral",
+                "distill_mode": mode, "llm_confidence": 0.7, "data_real_pct": 90.0} for t in ("AAA", "BBB")}
+
+
+class TestRunChild:
+    def test_refuses_when_env_root_is_not_shadow(self, child_env, tmp_path, monkeypatch):
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(tmp_path / "somewhere-else"))
+        with pytest.raises(RuntimeError, match="不是影子根"):
+            sh.run_child(_child_args(child_env, tmp_path, "--control"), scan=lambda t: {})
+
+    def test_refuses_when_config_froze_production_paths(self, child_env, tmp_path, monkeypatch):
+        monkeypatch.setattr(sh, "frozen_prod_paths", lambda cfg, prod: ["PIPELINE['db_path']"])
+        with pytest.raises(RuntimeError, match="固化在生产根"):
+            sh.run_child(_child_args(child_env, tmp_path, "--control"), scan=lambda t: {})
+
+    def test_refuses_when_budget_did_not_reach_config(self, child_env, tmp_path, monkeypatch):
+        import config
+        monkeypatch.setitem(config.LLM_CONFIG, "daily_budget_usd", 1.0)     # 与 --daily-cap 3.0 不一致
+        with pytest.raises(RuntimeError, match="预算上限没传到位"):
+            sh.run_child(_child_args(child_env, tmp_path, "--control"), scan=lambda t: {})
+
+    def test_control_scan_writes_status_and_results_and_exits_zero(self, child_env, tmp_path):
+        calls = []
+        rc = sh.run_child(_child_args(child_env, tmp_path, "--control"),
+                          scan=lambda t: calls.append(t) or _fake_results("rule_engine"), now=date(2026, 10, 19))
+        assert rc == 0 and calls == [["AAA", "BBB"]]
+        st = json.loads((child_env / sh.STATUS_DIRNAME / "2026-10-19.json").read_text(encoding="utf-8"))
+        assert st["mode"] == "control" and st["model"] is None
+        assert st["per_ticker"]["AAA"]["rule_score"] == 6.0
+        assert (child_env / sh.STATUS_DIRNAME / "swarm_results-2026-10-19.json").exists()
+
+    def test_run_mode_sets_model_override(self, child_env, tmp_path, monkeypatch):
+        import llm_service
+        monkeypatch.setattr(llm_service, "_get_client", lambda: object())
+        sh.run_child(_child_args(child_env, tmp_path, "--run"), scan=lambda t: _fake_results(),
+                     now=date(2026, 10, 19))
+        assert llm_service._model_override == sh.MODEL
+
+    def test_run_mode_with_zero_llm_calls_is_unhealthy(self, child_env, tmp_path, monkeypatch):
+        """LLM 一次都没调成（比如全被拒绝）时，不能把这一天当成「LLM 臂」：退出码 5，状态里写明原因。"""
+        import llm_service
+        monkeypatch.setattr(llm_service, "_get_client", lambda: object())
+        rc = sh.run_child(_child_args(child_env, tmp_path, "--run"), scan=lambda t: _fake_results("rule_engine"),
+                          now=date(2026, 10, 19))
+        assert rc == sh.EXIT_UNHEALTHY
+        st = json.loads((child_env / sh.STATUS_DIRNAME / "2026-10-19.json").read_text(encoding="utf-8"))
+        assert st["quality"]["healthy"] is False
+        assert any("call_count=0" in r for r in st["quality"]["reasons"])
+
+    def test_run_mode_healthy_day(self, child_env, tmp_path, monkeypatch):
+        import llm_service
+        monkeypatch.setattr(llm_service, "_get_client", lambda: object())
+        monkeypatch.setattr(llm_service, "get_usage", lambda: _usage(total_cost_usd=0.9))
+        rc = sh.run_child(_child_args(child_env, tmp_path, "--run"), scan=lambda t: _fake_results(),
+                          now=date(2026, 10, 19))
+        assert rc == 0
+
+    def test_scan_exception_recorded_and_exit_3(self, child_env, tmp_path):
+        def boom(_):
+            raise RuntimeError("CBOE 全挂")
+        rc = sh.run_child(_child_args(child_env, tmp_path, "--control"), scan=boom, now=date(2026, 10, 19))
+        assert rc == sh.EXIT_SCAN_ERROR
+        st = json.loads((child_env / sh.STATUS_DIRNAME / "2026-10-19.json").read_text(encoding="utf-8"))
+        assert "CBOE 全挂" in st["error"]
+
+    def test_run_without_api_key_exits_usage_without_scanning(self, child_env, tmp_path, monkeypatch):
+        import llm_service
+        monkeypatch.setattr(llm_service, "_get_client", lambda: None)
+        called = []
+        rc = sh.run_child(_child_args(child_env, tmp_path, "--run"), scan=lambda t: called.append(t) or {})
+        assert rc == sh.EXIT_USAGE and called == []
+
+
+# ==================== 命令行冒烟 ====================
+
+class TestCliSmoke:
+    def test_plan_via_subprocess_creates_nothing(self, tmp_path):
+        prod = _make_prod(tmp_path)
+        env = dict(os.environ, ALPHA_HIVE_HOME=str(prod))
+        r = subprocess.run([sys.executable, str(_REPO / "llm_shadow_scan.py"), "--plan"],
+                           env=env, capture_output=True, text=True, cwd=str(_REPO), timeout=60)
+        assert r.returncode == 0, r.stderr[-800:]
+        assert "标的 22/" in r.stdout
+        assert not (tmp_path / sh.SHADOW_DIRNAME).exists()
+
+    def test_run_without_env_refused_via_subprocess(self, tmp_path):
+        prod = _make_prod(tmp_path)
+        env = {k: v for k, v in os.environ.items() if k != sh.SPEND_ENV}
+        env["ALPHA_HIVE_HOME"] = str(prod)
+        r = subprocess.run([sys.executable, str(_REPO / "llm_shadow_scan.py"), "--run"],
+                           env=env, capture_output=True, text=True, cwd=str(_REPO), timeout=60)
+        assert r.returncode == sh.EXIT_USAGE
+        assert sh.SPEND_ENV in r.stdout
+        assert not (tmp_path / sh.SHADOW_DIRNAME).exists()

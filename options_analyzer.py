@@ -165,60 +165,15 @@ def reset_hv_gap_stats() -> None:
         _HV_GAP_TICKERS.clear()
 
 
-# ── v0.45.512：yfinance 链的 OI 是不是这一场的 ─────────────────────────────────────────────
-# 2026-10-12（哥伦布日）Yahoo 全市场的 openInterest 几乎被清零，只剩几个月没成交的旧合约上冻结的旧数：
-# 30 只标的「最近有成交的合约里 OI>0 的占比」全部 ≤ 0.04（9,300 个里 16 个），BILI 的 P/C 因此是
-# $5 put 22,065 ÷ $8 call 74 = 298.46（前后几天 ≈1.0）。同一指标在正常日（10-16 实测 12 只）是 0.81–0.99。
-# 判据只看**最近有成交**的合约（以本链最新一笔成交为参照、往前 `_OI_STALE_RECENT_DAYS` 天）——
-# 刚成交过的合约几乎一定有未平仓量；它们的 OI 成片是 0，说明这一场的 OI 没发布，不是市场没仓位。
-# 必须在 ±70% 行权价窗口与「按 OI 取前 40」之前算：那两道过滤正是把冻结旧数挑出来的地方。
-_OI_STALE_RECENT_DAYS = 4
-_OI_STALE_MIN_RECENT = 20      # 最近有成交的合约少于这个数 ⇒ 判不了（照旧算，`judgeable=False`）
-_OI_STALE_MAX_RATIO = 0.5      # 其中 OI>0 的占比低于它 ⇒ 本链 OI 陈旧
+# ── v0.45.512：yfinance 链的 OI 是不是这一场的（v0.45.542 起判据在共用模块 `oi_staleness`，这里只留别名）──
+# 全仓凡从 yfinance 取链又读 OI 的入口都过同一个判断；陈旧 ⇒ OI 派生量一律不可得。理由与实测见该模块 docstring。
+import oi_staleness as _oi_st  # noqa: E402
 
-
-def _oi_staleness_rows(df) -> List[Tuple[Optional[float], float]]:
-    """一张 yfinance 期权表（DataFrame）⇒ `[(最后成交的 epoch 秒 | None, OI), …]`。列缺失 ⇒ []。"""
-    if df is None or getattr(df, "empty", True):
-        return []
-    cols = getattr(df, "columns", ())
-    if "openInterest" not in cols or "lastTradeDate" not in cols:
-        return []
-    out: List[Tuple[Optional[float], float]] = []
-    for ts, oi in zip(df["lastTradeDate"], df["openInterest"]):
-        t: Optional[float] = None
-        try:
-            if isinstance(ts, (int, float)):
-                t = float(ts) if _math.isfinite(float(ts)) else None
-            elif ts is not None and hasattr(ts, "timestamp"):
-                t = float(ts.timestamp())
-                if not _math.isfinite(t):
-                    t = None
-        except (TypeError, ValueError, OverflowError):
-            t = None   # NaT 等
-        try:
-            o = float(oi)
-        except (TypeError, ValueError):
-            o = 0.0
-        out.append((t, o if _math.isfinite(o) else 0.0))
-    return out
-
-
-def assess_oi_staleness(rows: List[Tuple[Optional[float], float]]) -> Dict:
-    """`rows` = 本链（全部到期日、过滤之前）每个合约的（最后成交时刻，OI）。返回
-    `{recent_contracts, recent_with_oi, ratio, judgeable, stale}`；`stale` 只在 `judgeable` 时可能为真。"""
-    ts = [t for t, _ in rows if t is not None]
-    out = {"recent_contracts": 0, "recent_with_oi": 0, "ratio": None, "judgeable": False, "stale": False}
-    if not ts:
-        return out
-    cut = max(ts) - _OI_STALE_RECENT_DAYS * 86400
-    recent = [oi for t, oi in rows if t is not None and t >= cut]
-    n, k = len(recent), sum(1 for oi in recent if oi > 0)
-    out.update(recent_contracts=n, recent_with_oi=k, ratio=round(k / n, 4) if n else None)
-    if n >= _OI_STALE_MIN_RECENT:
-        out["judgeable"] = True
-        out["stale"] = (k / n) < _OI_STALE_MAX_RATIO
-    return out
+_OI_STALE_RECENT_DAYS = _oi_st.RECENT_DAYS
+_OI_STALE_MIN_RECENT = _oi_st.MIN_RECENT
+_OI_STALE_MAX_RATIO = _oi_st.MAX_RATIO
+_oi_staleness_rows = _oi_st.rows_from_frame
+assess_oi_staleness = _oi_st.assess
 
 
 class OptionsDataFetcher:
@@ -910,7 +865,7 @@ class OptionsAnalyzer:
         self, calls_df: List[Dict], puts_df: List[Dict]
     ) -> Optional[float]:
         """
-        计算 Put/Call Ratio (开仓量权重，OI 优先，OI 全零时用 volume)
+        计算 Put/Call Ratio（DTE 加权未平仓量；v0.45.542 起 OI 全零不再退到成交量，记 None）
         P/C < 0.7 → 强多头信号
         0.7-1.5 → 中立
         > 1.5 → 强空头信号
@@ -939,14 +894,10 @@ class OptionsAnalyzer:
                 if v and not (isinstance(v, float) and math.isnan(v))
             )
 
-        # 优先使用 DTE 加权 openInterest
+        # DTE 加权 openInterest。v0.45.542：OI 全零时**不再**退到成交量——成交量 P/C 是另一个量（当日流量，不是存量），
+        # 原实现算出来照样叫 put_call_ratio、照样进评分 / 归档，两种口径混在同一列里，读者分不出来。
         total_call_oi = _weighted_sum(calls_df, "openInterest")
         total_put_oi = _weighted_sum(puts_df, "openInterest")
-
-        # OI 全零时降级为 volume
-        if total_call_oi == 0 and total_put_oi == 0:
-            total_call_oi = _weighted_sum(calls_df, "volume")
-            total_put_oi = _weighted_sum(puts_df, "volume")
 
         # call 侧为 0（含 put 侧也为 0）⇒ 比值无定义，不是「中立」（v0.45.516）
         if total_call_oi == 0:
@@ -1378,6 +1329,7 @@ class OptionsAnalyzer:
         stock_price: float,
         skew_data: Dict = None,
         term_data: Dict = None,
+        oi_reliable: bool = True,
     ) -> Dict:
         """
         P1-⑤ Call 流分类引擎（v0.20.0）：
@@ -1399,7 +1351,8 @@ class OptionsAnalyzer:
         votes = {"A": "unknown", "B": "unknown", "C": "unknown"}
 
         # ── A. 期限分布：长端 vs 近端 OI 集中度 ──
-        if calls_df:
+        # v0.45.542：本链 OI 陈旧 ⇒ 这一票不投（「unknown」），只剩 IV 偏斜与期限结构两票
+        if calls_df and oi_reliable:
             long_oi = 0
             short_oi = 0
             try:
@@ -1482,7 +1435,7 @@ class OptionsAnalyzer:
 
     def detect_unusual_activity(
         self, calls_df: List[Dict], puts_df: List[Dict],
-        stock_price: float = 0.0
+        stock_price: float = 0.0, oi_reliable: bool = True
     ) -> List[Dict]:
         """
         检测异动信号（v0.16.0 重写：对齐 unusual_options.py 多维检测逻辑）
@@ -1493,6 +1446,10 @@ class OptionsAnalyzer:
         3. OTM 投机买入: OTM >= 5% 且 vol >= 100 且 vol/oi >= 2
         4. 短期急单: 到期 <= 14 天 且 OTM >= 3% 且 vol >= 100
         5. 大额溢价: dollar_premium >= $500K
+
+        `oi_reliable=False`（v0.45.542，本链 OI 陈旧，见 `oi_staleness`）⇒ 1、3 两条（要 vol/OI）不判，条目的 oi / ratio 记
+        None。此前陈旧那天每个有成交的合约 OI 都是 0、被当成 1 ⇒ vol/OI = 成交量 ⇒ 几乎全被判成「扫单」，看涨一侧的条数
+        还进 options_score。只看成交量 / 价格的 2、4、5 照判。
         """
         unusual = []
         # v0.45.462：现价不可得时 analyze 传 None（不再传行权价中位数冒充）⇒ OTM 类条件不判
@@ -1502,7 +1459,8 @@ class OptionsAnalyzer:
         def _scan(contracts: List[Dict], is_call: bool):
             for c in contracts:
                 volume = int(c.get("volume", 0) or 0)
-                oi = int(c.get("openInterest", 0) or 1)
+                # v0.45.542：条目里记真实 OI（原 `or 1` 把 0 写成 1）；比率仍按 max(oi, 1) 算（OI 0 = 全是新建仓）
+                oi = int(c.get("openInterest", 0) or 0) if oi_reliable else None
                 strike = float(c.get("strike", 0) or 0)
                 last_price = float(c.get("lastPrice", 0) or 0)
                 expiry = c.get("expiry", "")
@@ -1510,7 +1468,7 @@ class OptionsAnalyzer:
                 if volume < 50 or strike <= 0:
                     continue
 
-                vol_oi = volume / max(oi, 1)
+                vol_oi = volume / max(oi, 1) if oi is not None else None
                 dollar_premium = volume * last_price * 100
                 otm_pct = 0.0
                 if _sp > 0:
@@ -1530,7 +1488,7 @@ class OptionsAnalyzer:
                 reasons = []
 
                 # 条件 1: Vol/OI Sweep
-                if vol_oi >= 5 and volume >= 200:
+                if vol_oi is not None and vol_oi >= 5 and volume >= 200:
                     is_unusual = True
                     reasons.append(f"Vol/OI={vol_oi:.1f}x")
 
@@ -1540,7 +1498,7 @@ class OptionsAnalyzer:
                     reasons.append(f"大单{volume:,}手")
 
                 # 条件 3: OTM 投机
-                if otm_pct >= 5 and volume >= 100 and vol_oi >= 2:
+                if vol_oi is not None and otm_pct >= 5 and volume >= 100 and vol_oi >= 2:
                     is_unusual = True
                     reasons.append(f"OTM+{otm_pct:.1f}%投机")
 
@@ -1556,13 +1514,14 @@ class OptionsAnalyzer:
 
                 if is_unusual:
                     _type_prefix = "call" if is_call else "put"
-                    _type = f"{_type_prefix}_sweep" if vol_oi >= 5 else f"large_{_type_prefix}_volume"
+                    _type = (f"{_type_prefix}_sweep" if vol_oi is not None and vol_oi >= 5
+                             else f"large_{_type_prefix}_volume")
                     entry = {
                         "type": _type,
                         "strike": strike,
                         "volume": volume,
                         "oi": oi,
-                        "ratio": round(vol_oi, 2),
+                        "ratio": round(vol_oi, 2) if vol_oi is not None else None,
                         "bullish": is_call,
                         "otm_pct": round(otm_pct, 1),
                         "dollar_premium": round(dollar_premium),
@@ -2059,9 +2018,11 @@ class OptionsAgent:
                 stock = yf.Ticker(ticker)
                 all_exps = list(stock.options) if hasattr(stock, "options") else []
 
+            _raw_frames: list = []   # v0.45.542：过滤之前的原表，给 OI 陈旧判据用
             for exp in all_exps[:max_expirations]:
                 try:
                     chain = stock.option_chain(exp)
+                    _raw_frames += [chain.calls, chain.puts]
                     c_df = chain.calls[["strike", "openInterest"]].copy()
                     p_df = chain.puts[["strike", "openInterest"]].copy()
 
@@ -2103,6 +2064,17 @@ class OptionsAgent:
                     used_exps += 1
                 except Exception:
                     continue
+
+            # v0.45.542：yfinance 降级这一路也要过 OI 陈旧判据——10-12 它记下全链 P/C 0.0（call OI 0、put OI 10）、
+            # OI 墙与 Max Pain 也全按冻结旧数算。陈旧 ⇒ 整份不可得（{}，同失败），计数 + WARNING。
+            if _raw_frames:
+                _fc_check = _oi_st.assess_frames(_raw_frames)
+                if _fc_check["stale"]:
+                    _snap_count_once("oi_stale_chains", ticker)
+                    _log.warning("[%s] 全链 OI（yfinance 降级）陈旧：最近有成交的 %d 个合约里只有 %d 个 OI>0——"
+                                 "全链 OI 墙 / Max Pain / 全链 P/C 记不可得", ticker,
+                                 _fc_check["recent_contracts"], _fc_check["recent_with_oi"])
+                    return {}
 
             if not call_oi and not put_oi:
                 return {}
@@ -2603,7 +2575,8 @@ class OptionsAgent:
                 "gamma_squeeze_risk": "unknown",
                 "unusual_activity": [],
                 "key_levels": {},
-                "flow_direction": "neutral",
+                # v0.45.544：链取不到 ⇒ 流向不可得（同 P/C 为 None 的路径记 "unknown"；原写 "neutral" 冒充中性观测）
+                "flow_direction": "unknown",
                 "options_score": 5.0,
                 OPTIONS_GEX_MARKER: False,    # v0.45.349：见 generate_options_score 的 GEX 注释
                 "signal_summary": "期权数据不可用（真实链获取失败）",
@@ -2915,8 +2888,10 @@ class OptionsAgent:
             # v0.45.516：链空 / call 侧 OI 为 0 ⇒ 算不出（此前是假中性 1.0）。按标的去重计数进 status.json
             if _snap_count_once("pc_unavailable", ticker):
                 _log.warning("[%s] P/C 算不出（链空或 call 侧 OI 与成交量为 0），记 None", ticker)
-        unusual_activity = self.analyzer.detect_unusual_activity(calls_df, puts_df, stock_price)
-        key_levels = self.analyzer.find_key_levels(calls_df, puts_df, stock_price or 0.0)
+        unusual_activity = self.analyzer.detect_unusual_activity(calls_df, puts_df, stock_price,
+                                                                 oi_reliable=not _oi_stale)
+        # v0.45.542：OI 陈旧 ⇒ 关键价位（按 OI 排序挑出来的正是冻结旧数那几档）不可得，同样本链早退写 {}
+        key_levels = {} if _oi_stale else self.analyzer.find_key_levels(calls_df, puts_df, stock_price or 0.0)
         # S14: IV Skew 分析
         iv_skew = self.analyzer.calculate_iv_skew(calls_df, puts_df, stock_price)
         # v0.45.490（482 二次检查）：多数规则对整条链生效，不只 iv_current——同一份依据（失败值主导的链里幸存值
@@ -2964,9 +2939,13 @@ class OptionsAgent:
             except Exception as _e_gcfull:
                 _log.debug("[%s] Gamma 日历全到期日视图获取失败，退回近月截断链: %s",
                            ticker, _e_gcfull)
-            gamma_calendar = calculate_gamma_expiry_calendar(
-                _gc_calls, _gc_puts, stock_price
-            )
+            # v0.45.542：退回的近月链若 OI 陈旧 ⇒ 按到期日的 OI / net gamma / Pin 全是冻结旧数 ⇒ 不算（{} 同失败）
+            if _oi_stale and _gc_calls is calls_df:
+                gamma_calendar = {}
+            else:
+                gamma_calendar = calculate_gamma_expiry_calendar(
+                    _gc_calls, _gc_puts, stock_price
+                )
         except Exception as _e_gc:
             _log.debug("Gamma 到期日历计算失败 %s: %s", ticker, _e_gc)
 
@@ -2990,6 +2969,7 @@ class OptionsAgent:
             call_flow_classification = self.analyzer.classify_call_flow(
                 calls_df, puts_df, stock_price,
                 skew_data=iv_skew, term_data=iv_term_struct,
+                oi_reliable=not _oi_stale,
             )
         except Exception as _e_cf:
             _log.debug("classify_call_flow 失败 %s: %s", ticker, _e_cf)

@@ -64,19 +64,23 @@
 （并发 session 实测，未由本模块复核）。方向上只会**加宽**健康日与事故日
 之间那道空隙，不会让阈值变松。
 
-## 复现 2026-09-04 需要当时那份模型
+## 复现 2026-08-28 / 09-04（2026-10-19 已逐位复现）
 
-生产 `ml_model.json` 已于 v0.45.152 从 `pheromone.db` 重训恢复
-（`n=497 / acc 71.63 / oos 44.35`），**已不是 09-04 当时那份**。
-当时那份被污染的模型保留在
-`ml_model.corrupted-2026-09-07T0130.json`（`n=30 / acc 96.67 / oos None`），
+⚠️ 更正：这里原写「当时那份被污染的模型保留在 `ml_model.corrupted-2026-09-07T0130.json`」——**不对**。
+那份（`n=30 / acc 96.67 / oos None`）是 09-07 01:15 pytest 里一个跑 RivalBee 的测试写的 Rival 合成模型
+（与 `ml_predictor_extended` 30 条硬编码样本训出的逐字节相同），且写的是**没有读者**的 `ml_model.json`。
+两天报告真正用的是 pytest 进程（08-29 03:08、09-04 10:38）写进 `ml_model_cache.json` 的 **n=200 模型**
+（102 轮 / OOS 42.0；41 轮 / 56.0），当天扫描按「文件日期 = 今天」读回、整天照用。复现法：09-09 库备份副本
+截 `checked_t7` 到 08-14 / 08-25 重训、对上日志指纹，重放当日 12 维输入 ⇒ 0.149 / 0.590 逐位吻合（CHANGELOG 0.45.551）。
+v0.45.551 起报告不再读回磁盘模型，且每份报告记 `ml_prediction.model.sha256`，本闸在当日描述里列出指纹。
+
 污染前健康副本在 `ml_model_cache.pre-restore-2026-09-07.json`。
 两者都被 `.gitignore` 的 `ml_model*.json` 忽略（实测确认本模块的
 `!ml_model_history/*.json` 反向规则只作用于该目录内，未误放行它们）。
 
-⚠️ **判模型真伪不能用 accuracy** —— 夹具模型 96.67 比真模型 71.63 更好看。
-可用信号是 `oos_accuracy is None` + `n_samples_seen` 明显偏低，
-本模块的 `manifest.jsonl` 两个字段都记了。
+⚠️ **判模型好坏不能用 accuracy** —— 小样本模型 96.67 比真模型 71.63 更好看。
+`oos_accuracy is None` + `n_samples_seen` 偏低只能说明「小样本、无外样本验证」，
+**不能**说明「被测试覆盖」（2026-10-19 更正，见上）；`manifest.jsonl` 两个字段都记了。
 
 ## 为什么读磁盘而不是读内存
 
@@ -97,9 +101,9 @@
 
 ## 模型版本快照
 
-09-04 那次**无法事后归因**，因为 `ml_model.json` / `ml_model_cache.json` 被
-原地覆盖、没有任何版本留存。`snapshot_model_file()` 在每次 `save_model` 之后
-留一份 `ml_model_history/{stem}-YYYY-MM-DD.json`，并往
+09-04 那次当时**无法事后归因**，因为 `ml_model.json` / `ml_model_cache.json` 被
+原地覆盖、没有任何版本留存（2026-10-19 靠日志 + 库备份才重建出来）。`snapshot_model_file()` 在每次 `save_model` 之后
+留一份 `ml_model_history/{stem}-YYYY-MM-DD.json`（同日之后存的不同模型另存 `…~{指纹}.json`，不覆盖；v0.45.551），并往
 `ml_model_history/manifest.jsonl` 追加一行元数据（sha256 / 样本数 / 训练精度），
 下次退化时可以直接把当天的模型捞出来重放。
 
@@ -195,7 +199,10 @@ INPUT_COLLAPSE_RATIO = 2
 SNAPSHOT_DISABLE_ENV = "ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE"
 
 #: 快照文件名形状，删旧文件时用它把「我们写的」与「别人放的」分开
-_SNAPSHOT_RE = re.compile(r"^(?P<stem>.+)-(?P<date>\d{4}-\d{2}-\d{2})\.json$")
+#: `{stem}-YYYY-MM-DD.json`（当日第一个模型）或 `{stem}-YYYY-MM-DD~{16 位 hex}.json`（当日之后存的**另一个**模型，
+#: 后缀 = 模型指纹，与报告 `ml_prediction.model.sha256` 同一口径；v0.45.551 起同日不同模型不再互相覆盖）。
+_SNAPSHOT_RE = re.compile(
+    r"^(?P<stem>.+)-(?P<date>\d{4}-\d{2}-\d{2})(?:~(?P<variant>[0-9a-f]{16}))?\.json$")
 
 _ANALYSIS_RE = re.compile(r"^analysis-(?P<ticker>.+)-ml-(?P<date>\d{4}-\d{2}-\d{2})\.json$")
 
@@ -236,6 +243,12 @@ class DegeneracyVerdict:
     #: 所以它**只能用来加一句提示，绝不能用来放行**：真实 12 维有差异而这 5 维
     #: 恰好相同的日子，据它放行就会把真退化判成「输入塌了」——漏报比误报危险。
     distinct_inputs: Optional[int] = None
+    #: v0.45.551：当日报告 `ml_prediction.model.sha256` → 份数。出概率的是哪个模型直接写在报告里，
+    #: 归因不必再翻日志重建（08-28 / 09-04 两次靠日志 + 库备份重放才查清）。**只用于描述，不参与判定**：
+    #: 同日不同进程在库变化后各自训练、指纹不同属正常。
+    model_fingerprint_counts: Dict[str, int] = field(default_factory=dict)
+    #: 没有模型指纹的报告份数（v0.45.551 之前的报告没有这个字段；之后出现 = 指纹计算失败，见报告里的 fingerprint_error）
+    n_without_fingerprint: int = 0
 
     @property
     def is_degenerate(self) -> bool:
@@ -301,10 +314,19 @@ class DegeneracyVerdict:
             parts.append(f"记录的输入向量 {self.distinct_inputs} 个不同（仅 5/12 维）")
         if self.n_without_swarm_results:
             parts.append(f"无 swarm_results 的报告 {self.n_without_swarm_results}/{self.n_files} 份")
+        if self.model_fingerprint_counts:
+            fps = sorted(self.model_fingerprint_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+            parts.append("出概率的模型指纹：" + ", ".join(f"{sha}×{n}" for sha, n in fps))
+            if len(fps) > 1:
+                parts.append(f"当日混用了 {len(fps)} 个模型（同日不同进程在库变化后各自训练属正常，"
+                             "但这几份概率不是同一个估计量）")
+        if self.n_without_fingerprint:
+            parts.append(f"无模型指纹的报告 {self.n_without_fingerprint}/{self.n_files} 份"
+                         "（v0.45.551 之前的报告没有该字段；之后出现＝指纹计算失败）")
         parts.append(
             "当日模型快照：" + ("已留存" if self.snapshot_present
-                              else f"缺失（{HISTORY_DIRNAME}/ 里没有当日文件；"
-                                   "命中磁盘缓存、当天未训练时属正常）")
+                              else f"缺失（{HISTORY_DIRNAME}/ 里没有当日文件；v0.45.551 起出报告的进程都会训练并快照，"
+                                   "缺失＝快照失败 / 被环境变量关闭 / 补跑日报告日期不是训练当天）")
         )
         if self.is_degenerate:
             parts.append(
@@ -326,7 +348,8 @@ class DegeneracyVerdict:
             else:
                 parts.append(
                     f"输入是有区分度的 ⇒ 恒定来自模型。归因材料在 {HISTORY_DIRNAME}/，"
-                    "拿当日快照重放当日输入即可复现"
+                    "按上面的模型指纹对上当日快照（sha256 = 快照 model_bytes 解码后的前 16 位），"
+                    "重放当日输入即可复现"
                 )
         return "；".join(parts)
 
@@ -343,6 +366,8 @@ def evaluate_probabilities(
     snapshot_present: bool = False,
     n_without_swarm_results: int = 0,
     distinct_inputs: Optional[int] = None,
+    model_fingerprint_counts: Optional[Dict[str, int]] = None,
+    n_without_fingerprint: int = 0,
 ) -> DegeneracyVerdict:
     """对一批 probability 下判定。纯函数，判据全部在这里，没有第二份实现。
 
@@ -384,6 +409,8 @@ def evaluate_probabilities(
         snapshot_present=snapshot_present,
         n_without_swarm_results=n_without_swarm_results,
         distinct_inputs=distinct_inputs,
+        model_fingerprint_counts=dict(model_fingerprint_counts or {}),
+        n_without_fingerprint=n_without_fingerprint,
     )
 
 
@@ -401,6 +428,15 @@ class DayRecord:
     #: `swarm_results` 是否存在且非空。**跨 schema 世代都可用**——
     #: 不像 `unreliable` / `input_features_missing`，那两个在 2026-06-25 是 `None`。
     has_swarm_results: bool
+    #: v0.45.551：`ml_prediction.model.sha256`（出这条概率的模型）；旧报告 / 计算失败为 None
+    model_sha: Optional[str] = None
+
+
+def _model_sha(mlp: dict) -> Optional[str]:
+    """`ml_prediction.model.sha256`；字段缺失 / 形状不对 / 空 ⇒ None（按「无指纹」计数，不丢弃该份报告）。"""
+    model = mlp.get("model")
+    sha = model.get("sha256") if isinstance(model, dict) else None
+    return sha if isinstance(sha, str) and sha else None
 
 
 def read_day_records(report_dir, date_str: str) -> Tuple[List[DayRecord], List[str]]:
@@ -432,6 +468,7 @@ def read_day_records(report_dir, date_str: str) -> Tuple[List[DayRecord], List[s
             input_signature=(json.dumps(inp, sort_keys=True, default=str)
                              if isinstance(inp, dict) and inp else None),
             has_swarm_results=bool(payload.get("swarm_results")),
+            model_sha=_model_sha(mlp),
         ))
     return out, unreadable
 
@@ -448,7 +485,7 @@ def _snapshot_exists(report_dir, date_str: str) -> bool:
     hist = Path(report_dir) / HISTORY_DIRNAME
     if not hist.is_dir():
         return False
-    return any(hist.glob(f"*-{date_str}.json"))
+    return any(hist.glob(f"*-{date_str}.json")) or any(hist.glob(f"*-{date_str}~*.json"))
 
 
 def check_day(report_dir, date_str: str) -> DegeneracyVerdict:
@@ -465,6 +502,8 @@ def check_day(report_dir, date_str: str) -> DegeneracyVerdict:
         snapshot_present=_snapshot_exists(report_dir, date_str),
         n_without_swarm_results=sum(1 for r in records if not r.has_swarm_results),
         distinct_inputs=(len(sigs) if sigs else None),
+        model_fingerprint_counts=dict(Counter(r.model_sha for r in records if r.model_sha)),
+        n_without_fingerprint=sum(1 for r in records if not r.model_sha),
     )
 
 
@@ -527,7 +566,7 @@ def _snapshot_disabled() -> bool:
 
 
 def _prune_snapshots(hist: Path, stem: str, retain: int) -> None:
-    """只删形如 `{stem}-YYYY-MM-DD.json` 的自产文件，保留最新 `retain` 份。"""
+    """只删 `_SNAPSHOT_RE` 认得的自产文件，保留最新 `retain` 个**日期**（同日的几个模型同进同退）。"""
     if retain <= 0:
         return
     mine = []
@@ -535,11 +574,31 @@ def _prune_snapshots(hist: Path, stem: str, retain: int) -> None:
         m = _SNAPSHOT_RE.match(p.name)
         if m and m.group("stem") == stem:
             mine.append((m.group("date"), p))
-    for _date, p in sorted(mine, reverse=True)[retain:]:
+    keep = set(sorted({d for d, _p in mine}, reverse=True)[:retain])
+    for date, p in mine:
+        if date in keep:
+            continue
         try:
             p.unlink()
         except OSError as e:
             _log.warning("清理旧模型快照失败 %s: %s", p.name, e)
+
+
+def model_bytes_sha(parsed) -> Optional[str]:
+    """模型文件 JSON 里 `model_bytes`（base64 的 pickle）解码后的 sha256 前 16 位。
+
+    与 `generate_ml_report.model_fingerprint` 的 `sha256` 是**同一份字节**（`pickle.dumps(model._clf)`）⇒
+    报告里的指纹可以直接对上快照。没有 `model_bytes`（SGD / Simple 降级格式）或解不开 ⇒ None。
+    """
+    import base64
+    import binascii
+    raw = parsed.get("model_bytes") if isinstance(parsed, dict) else None
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return hashlib.sha256(base64.b64decode(raw)).hexdigest()[:16]
+    except (binascii.Error, ValueError):
+        return None
 
 
 def snapshot_model_file(
@@ -557,8 +616,8 @@ def snapshot_model_file(
     且当日 manifest 缺行 / 快照缺失会由 `DegeneracyVerdict.describe()`
     在每日那条日志里说出来——这就是「这个失败，下游怎么知道」的答案。
 
-    ⚠️ 快照缺失**不构成硬错误**：命中磁盘缓存的那天根本不会调 `save_model`，
-    当天没有快照是正常的。
+    ⚠️ 快照缺失**不构成硬错误**（被环境变量关闭、或补跑日报告日期 ≠ 训练当天）。
+    v0.45.551 前「命中磁盘缓存的那天根本不会调 `save_model`」也是原因之一；现在出报告的进程都会训练并保存。
 
     ⚠️ pytest 里默认不写（见 `_snapshot_disabled`）——测试夹具模型混进
     这个目录会被自动提交成「生产模型」，是有误导性的假证据。
@@ -581,9 +640,9 @@ def snapshot_model_file(
                 date_str = _dt.date.today().isoformat()
 
         digest = hashlib.sha256(raw).hexdigest()
-        dest = hist / f"{src.stem}-{date_str}.json"
 
         meta = {}
+        model_sha = None
         try:
             parsed = json.loads(raw.decode("utf-8"))
             if isinstance(parsed, dict):
@@ -592,8 +651,16 @@ def snapshot_model_file(
                     for k in ("model_type", "is_trained", "n_samples_seen",
                               "training_accuracy", "oos_accuracy")
                 }
+                model_sha = model_bytes_sha(parsed)
         except (UnicodeDecodeError, json.JSONDecodeError):
             meta = {"parse_error": True}
+
+        # 同日已有一份**不同的**模型 ⇒ 不覆盖，另存 `{stem}-{date}~{指纹}.json`（v0.45.551）。
+        # 此前「变了就覆盖成最新一次」：v0.45.551 起同日后启动的进程（Step 3 补跑、手动报告）会按当时的库重训，
+        # 覆盖会把早上真正给主报告打分的那个模型冲掉，报告里的指纹就再也对不上快照。
+        dest = hist / f"{src.stem}-{date_str}.json"
+        if dest.exists() and hashlib.sha256(dest.read_bytes()).hexdigest() != digest:
+            dest = hist / f"{src.stem}-{date_str}~{model_sha or digest[:16]}.json"
 
         line = {
             "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -601,14 +668,14 @@ def snapshot_model_file(
             "source": src.name,
             "snapshot": dest.name,
             "sha256": digest,
+            "model_sha256": model_sha,   # 与报告 ml_prediction.model.sha256 同口径（SGD / Simple 无 ⇒ None）
             "bytes": len(raw),
             **meta,
         }
         with open(hist / MANIFEST_NAME, "a", encoding="utf-8") as f:
             f.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
 
-        # 同日重复保存：内容没变就不重写（省 churn），变了就覆盖成最新一次。
-        # manifest 上面已经记了每一次的 sha256，日内演化仍可追。
+        # 同日重复保存同一个模型：不重写（省 churn）。manifest 上面已经记了每一次。
         if dest.exists() and hashlib.sha256(dest.read_bytes()).hexdigest() == digest:
             return None
 

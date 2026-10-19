@@ -612,14 +612,27 @@ async def alphahive_get_options_snapshot(params: TickerInput) -> str:
             tkr  = yf.Ticker(params.ticker)
             exps = tkr.options
             if not exps:
-                return None, None, None
+                return None, None, None, []
             chain = tkr.option_chain(exps[0])
-            return exps[0], chain.calls, chain.puts
+            # v0.45.544：OI 陈旧判据要几个到期日合起来（单个到期日会误判：10-19 SNOW 最近到期日 0.18）⇒ 另取后 3 个，
+            # 只用来判，不进展示。取失败就少判几个（样本不够 ⇒ judgeable=False ⇒ 照旧）。
+            judge = [chain.calls, chain.puts]
+            for _e in list(exps)[1:4]:
+                try:
+                    _c = tkr.option_chain(_e)
+                    judge += [_c.calls, _c.puts]
+                except Exception:   # noqa: BLE001 —— 只影响判据样本量，判不了就照旧
+                    continue
+            return exps[0], chain.calls, chain.puts, judge
 
-        exp, calls, puts = await asyncio.to_thread(_fetch)
+        exp, calls, puts, judge_frames = await asyncio.to_thread(_fetch)
         if calls is None:
             return _err(f"No options data available for {params.ticker}.")
 
+        # v0.45.542：这一场的 OI 没发布（oi_staleness）⇒ OI 派生的字段一律 None，成交量照给（10-12 那种日子
+        # Yahoo 只剩冻结旧数，OI 比 / 最大 OI 行权价全是几个月前的旧仓位）。v0.45.544：用前 4 个到期日来判。
+        import oi_staleness
+        _oi_check = oi_staleness.assess_frames(judge_frames)
         c_oi  = int(calls["openInterest"].fillna(0).sum())
         p_oi  = int(puts["openInterest"].fillna(0).sum())
         c_vol = int(calls["volume"].fillna(0).sum())
@@ -647,9 +660,13 @@ async def alphahive_get_options_snapshot(params: TickerInput) -> str:
             if is_placeholder_iv(_row.get("impliedVolatility")):
                 _row["impliedVolatility"] = None
 
+        if _oi_check["stale"]:
+            c_oi = p_oi = None
+            top_c = top_p = []
         return _ok({
             "ticker":             params.ticker,
             "nearest_expiry":     exp,
+            "oi_stale":           _oi_check["stale"],
             "put_call_oi_ratio":  round(p_oi  / c_oi,  3) if c_oi  else None,
             "put_call_vol_ratio": round(p_vol / c_vol, 3) if c_vol else None,
             "total_call_oi":      c_oi,

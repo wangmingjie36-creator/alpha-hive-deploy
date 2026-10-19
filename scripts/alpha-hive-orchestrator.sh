@@ -220,6 +220,76 @@ run_step() {
 }
 
 # ================================================================
+# 步骤产出后置条件（v0.45.543）：退出码 0 ≠ 干成了
+# ================================================================
+# 墓碑：v0.45.534 删掉的 Step 8 没有 __main__，每天 0 秒退出 0、记 success——run_step 只看退出码，
+# 「脚本根本没干活」与「干成了」同为 0。Step 2/4/10–15 经步骤解释器核对本轮 --out JSON（stale_json /
+# missing_json 早已会红）；其余只看退出码的步骤（Step 3 / 6）在这里声明产出：
+#   · 跑之前 `_STEPn_MARK="$(_step_marker)"`（建一个空文件，mtime = 本步开始）
+#   · 退出码 0 之后 `_no_output <key> <rc> <duration> <marker> <产出路径>...`：
+#     任一产出不存在、或比标记旧（不是本步写的）⇒ 记 {"status":"failed","reason":"no_output","missing":[…]}
+#     + ERROR 日志，返回 0（= 「是，没产出」），调用方随后按该步 rc≠0 支的口径处理整体状态。
+#   · 新鲜度只用 bash 内建 `-ot`（不用 stat -f：Linux CI 上语义不同）；同一秒写出不算旧。
+#   · 标记建不了 ⇒ 退到只核「存在」，日志 WARN 说明未核新鲜度（文件根本不在照样判 no_output）。
+# 每个 run_step 调用归哪一类（解释器 / 后置条件 / 回读记录 / 豁免）登记在
+# tests/test_orchestrator_step_postconditions.py::STEP_OUTPUTS，新增 run_step 不登记即红。
+_step_marker() {
+    local _m=""
+    _m="$(mktemp "${TMPDIR:-/tmp}/alpha_hive_stepmark.XXXXXX" 2>/dev/null)" \
+        || _m="$(mktemp "${LOGDIR:-/tmp}/alpha_hive_stepmark.XXXXXX" 2>/dev/null)" \
+        || _m=""
+    printf '%s' "${_m}"
+}
+
+# 用法：_postcondition <marker|""> <path>...；设 _PC_MISSING（换行分隔的缺失 / 陈旧文件名）与 _PC_FRESHNESS（checked|unchecked）
+# 返回 0 = 全部在且是本步写的；1 = 有缺
+_postcondition() {
+    local _mark="$1" _p=""
+    shift
+    _PC_MISSING=""
+    _PC_FRESHNESS="checked"
+    if [ -z "${_mark}" ] || [ ! -f "${_mark}" ]; then
+        _PC_FRESHNESS="unchecked"
+    fi
+    for _p in "$@"; do
+        if [ ! -f "${_p}" ]; then
+            _PC_MISSING="${_PC_MISSING}$(basename "${_p}")
+"
+        elif [ "${_PC_FRESHNESS}" = "checked" ] && [ "${_p}" -ot "${_mark}" ]; then
+            _PC_MISSING="${_PC_MISSING}$(basename "${_p}")（旧文件，不是本步写的）
+"
+        fi
+    done
+    [ -z "${_PC_MISSING}" ]
+}
+
+# 用法：_no_output <key> <rc> <duration> <marker|""> <path>...
+# 返回 0 = rc 为 0 但产出缺失，已写 STEPS_RESULT[key] 与 ERROR 日志；返回 1 = 不归它管（rc≠0 或产出齐全）。
+# 用完删标记文件。
+_no_output() {
+    local _key="$1" _rc="$2" _dur="$3" _mark="$4" _miss_json=""
+    shift 4
+    if [ "${_rc}" != "0" ]; then
+        [ -n "${_mark}" ] && rm -f "${_mark}"
+        return 1
+    fi
+    if _postcondition "${_mark}" "$@"; then
+        if [ "${_PC_FRESHNESS}" = "unchecked" ]; then
+            log "WARN" "⚠️ ${_key}：建不了步骤标记文件，只核了产出存在、未核是不是本步写的"
+        fi
+        [ -n "${_mark}" ] && rm -f "${_mark}"
+        return 1
+    fi
+    [ -n "${_mark}" ] && rm -f "${_mark}"
+    _miss_json="$(printf '%s' "${_PC_MISSING}" | jq -R . | jq -sc .)"
+    case "${_dur}" in ''|*[!0-9]*) _dur=0 ;; esac
+    log "ERROR" "🚨 ${_key}：退出码 0 但没有本轮产出——$(printf '%s' "${_PC_MISSING}" | tr '\n' ' ')（记 failed:no_output）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq --arg k "${_key}" --argjson m "${_miss_json:-[]}" --argjson d "${_dur}" \
+        '. + {($k): {"status": "failed", "reason": "no_output", "missing": $m, "duration_seconds": $d}}')
+    return 0
+}
+
+# ================================================================
 # 步骤解释器接线（B）：Step 2/4/10/11/12/13/15 的「退出码 + --out JSON → 日志 + steps_result 片段」
 # 唯一真相在 orchestrator_steps.py（有测试）。bash 只做三件事：调用、校验形状、合并。
 #   · 恒不中断扫描、恒不调 set_status：OVERALL_STATUS 只由 Step 2 调用点按 STEP2_RC 定（与 B 之前逐支相同）
@@ -716,30 +786,14 @@ _orchestrator_autodeploy() {
 }
 _orchestrator_autodeploy
 
-# ================================================================
-# Step 1: 数据采集 (Data Fetcher)
-# ================================================================
-log "INFO" ""
-log "INFO" "【Step 1/5】数据采集 - 启动"
+# v0.45.546：原 Step 1（data_fetcher.py：写死的 NVDA/VKTX/TSLA 三只的 Yahoo / SEC / Google Trends / SeekingAlpha 指标
+# → realtime_metrics.json + cache/）已删除。蜂群不读它；两个读者都改了源：Slack 日报的价格兜底 / 5 日涨跌改读 .swarm_results，
+# Step 3 兜底（generate_ml_report.main）不再读 realtime_metrics.json（直接走蜂群缓存 → fetch_stock_data）。
+#
+# ⚠️ STEP1_START 必须保留：它是**主流程起点**——write_status 的 total_duration_seconds 与收尾的 TOTAL_DURATION 都拿它减；
+# 本脚本 `set -u`，变量没定义 ⇒ 写状态时 "unbound variable" 直接退出（status.json 与其后各步全没了）。名字沿用旧的，
+# 免得改动那两处与以它为位置锚点的测试。守卫 tests/test_step1_data_fetcher_retired.py::test_pipeline_start_is_defined_before_use。
 STEP1_START=$(date +%s)
-
-run_step --timeout 300 "$PROJECT_DIR/data_fetcher.py" >> "$LOGFILE" 2>&1
-STEP1_RC=$?
-STEP1_END=$(date +%s)
-STEP1_DURATION=$((STEP1_END - STEP1_START))
-if [ $STEP1_RC -eq 0 ]; then
-    log "INFO" "✅ Step 1 成功（耗时 ${STEP1_DURATION}s）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step1_data_fetcher\": {\"status\": \"success\", \"duration_seconds\": $STEP1_DURATION}}")
-elif [ $STEP1_RC -eq 124 ]; then
-    log "ERROR" "⏰ Step 1 超时（>300s），继续进行"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step1_data_fetcher\": {\"status\": \"timeout\", \"duration_seconds\": $STEP1_DURATION}}")
-elif [ $STEP1_RC -eq 2 ]; then
-    log "WARN" "⏭️  Step 1 跳过（脚本不存在）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step1_data_fetcher\": {\"status\": \"skipped\"}}")
-else
-    log "WARN" "⚠️ Step 1 失败，但继续进行（耗时 ${STEP1_DURATION}s）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step1_data_fetcher\": {\"status\": \"failed\", \"duration_seconds\": $STEP1_DURATION}}")
-fi
 
 # ================================================================
 # DB 备份：在蜂群分析前备份 pheromone.db（sqlite 在线备份 + 有下限的轮转）
@@ -1172,12 +1226,21 @@ else
         # skipped 覆盖成 success，又是一个假标签。
         STEP3_RC=3
     else
+    _STEP3_MARK="$(_step_marker)"
     run_step --timeout 600 "$PROJECT_DIR/generate_ml_report.py" --tickers $MISSING_TICKERS >> "$LOGFILE" 2>&1
     STEP3_RC=$?
     fi
     STEP3_END=$(date +%s)
     STEP3_DURATION=$((STEP3_END - STEP3_START))
-    if [ $STEP3_RC -eq 3 ]; then
+    # 后置条件（v0.45.543）：要它补的每一只都得有本轮写出的 ML HTML（文件名同上面的「已生成」判据）。
+    # no_output 同 rc≠0 支：整体 partial。跨日跳过（rc=3）不归它管。bash 3.2 + set -u：空数组展开会报未定义，用 ${A[@]+…} 写法。
+    _STEP3_OUTPUTS=()
+    for _t in $MISSING_TICKERS; do
+        _STEP3_OUTPUTS+=("$DATA_DIR/alpha-hive-${_t}-ml-enhanced-${DATE_STR}.html")
+    done
+    if _no_output step3_ml_report "$STEP3_RC" "$STEP3_DURATION" "${_STEP3_MARK:-}" ${_STEP3_OUTPUTS[@]+"${_STEP3_OUTPUTS[@]}"}; then
+        set_status partial
+    elif [ $STEP3_RC -eq 3 ]; then
         # v0.45.95：跨日跳过。不计入 OVERALL_STATUS —— 这是主动的正确选择，
         # 不是失败；但也绝不能标成 success。
         STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step3_ml_report\": {\"status\": \"skipped\", \"reason\": \"date_rolled_over\", \"run_date\": \"$DATE_STR\", \"now\": \"$_NOW_DATE\"}}")
@@ -1311,11 +1374,24 @@ log "INFO" ""
 log "INFO" "【Step 6/6】智能告警分析 - 启动"
 STEP6_START=$(date +%s)
 
+_STEP6_MARK="$(_step_marker)"
 run_step --timeout 300 "$PROJECT_DIR/alert_manager.py" --status-json "$REPORTDIR/status.json" --output-dir "$LOGDIR" >> "$LOGFILE" 2>&1
 STEP6_RC=$?
 STEP6_END=$(date +%s)
 STEP6_DURATION=$((STEP6_END - STEP6_START))
-if [ $STEP6_RC -eq 0 ]; then
+# 后置条件（v0.45.543）：alert_manager 无论有无告警都写 alerts-<日期>.json（v0.45.543 起；此前无告警不写）。
+# 它按 datetime.now() 取日期 ⇒ 跨零点时是次日的文件：两个名字任一是本步写的就算。no_output 同 rc≠0 支：不升级整体状态。
+# v0.45.549：按「哪个名字是本步写的」选，不按「DATE_STR 那个在不在」——同一天第二次扫描跨零点时，DATE_STR 名下
+# 是上一轮留下的旧文件、本轮写的是次日名，543 版会挑中旧文件误判 no_output。
+_STEP6_ALERTS="$LOGDIR/alerts-${DATE_STR}.json"
+_STEP6_ALERTS_NOW="$LOGDIR/alerts-$(date +%Y-%m-%d).json"
+if [ "${_STEP6_ALERTS_NOW}" != "${_STEP6_ALERTS}" ] && [ -f "${_STEP6_ALERTS_NOW}" ] \
+        && { [ -z "${_STEP6_MARK}" ] || ! [ "${_STEP6_ALERTS_NOW}" -ot "${_STEP6_MARK}" ]; }; then
+    _STEP6_ALERTS="${_STEP6_ALERTS_NOW}"
+fi
+if _no_output step6_alert_analysis "$STEP6_RC" "$STEP6_DURATION" "${_STEP6_MARK}" "${_STEP6_ALERTS}"; then
+    :
+elif [ $STEP6_RC -eq 0 ]; then
     log "INFO" "✅ Step 6 成功（耗时 ${STEP6_DURATION}s）"
     STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step6_alert_analysis\": {\"status\": \"success\", \"duration_seconds\": $STEP6_DURATION}}")
 elif [ $STEP6_RC -eq 124 ]; then
@@ -1358,30 +1434,9 @@ fi
 # 写入 status.json
 # ================================================================
 log "INFO" ""
-# ================================================================
-# Step 8: 记录性能指标 (Week 2 新增)
-# ================================================================
-log "INFO" ""
-log "INFO" "【Step 8/9】性能指标收集 - 启动"
-STEP8_START=$(date +%s)
-
-run_step --timeout 300 "$PROJECT_DIR/metrics_collector.py" --record --status-json "$REPORTDIR/status.json" >> "$LOGFILE" 2>&1
-STEP8_RC=$?
-STEP8_END=$(date +%s)
-STEP8_DURATION=$((STEP8_END - STEP8_START))
-if [ $STEP8_RC -eq 0 ]; then
-    log "INFO" "✅ Step 8 成功（耗时 ${STEP8_DURATION}s）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step8_metrics_collection\": {\"status\": \"success\", \"duration_seconds\": $STEP8_DURATION}}")
-elif [ $STEP8_RC -eq 124 ]; then
-    log "ERROR" "⏰ Step 8 超时（>300s），继续进行"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step8_metrics_collection\": {\"status\": \"timeout\", \"duration_seconds\": $STEP8_DURATION}}")
-elif [ $STEP8_RC -eq 2 ]; then
-    log "WARN" "⏭️  Step 8 跳过（脚本不存在）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step8_metrics_collection\": {\"status\": \"skipped\"}}")
-else
-    log "WARN" "⚠️ Step 8 失败，但不影响主流程（耗时 ${STEP8_DURATION}s）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step8_metrics_collection\": {\"status\": \"failed\", \"duration_seconds\": $STEP8_DURATION}}")
-fi
+# v0.45.534：原 Step 8（metrics_collector.py --record --status-json）已删除——
+# 该模块没有 __main__ / argparse，每天跑 0 秒、什么都不做，却记 `step8_metrics_collection: success`（假成功）。
+# 真正的指标写入在 Step 2 内部（MetricsCollector → metrics.db），同版一并退役：三张表零读者 / 只喂一行日志。
 
 # v0.45.316：原 Step 9（pheromone_recorder.py 信息素持久化 + 准确率追踪）已删除——
 # 该脚本从未存在，每天只打一行「Step 9 跳过（脚本不存在）」。信息素与预测
@@ -1700,7 +1755,6 @@ log "INFO" "📂 日志位置：$LOGFILE"
 log "INFO" ""
 log "INFO" "✅ Phase 1 流程：Step 1-5（数据采集、蜂群分析、ML 报告、仪表板、部署）"
 log "INFO" "✨ Phase 2 Week 1：Step 6-7（智能告警 + Slack 推送）"
-log "INFO" "✨ Phase 2 Week 2：Step 8（性能监控系统 - 时序数据库）"
 log "INFO" "✨ Phase 2 Week 3：Week 3 内集成（动态蜂群扩展 - AdaptiveSpawner）"
 log "INFO" "✨ Phase 2 Week 4：Step 9（信息素持久化 + T+1/T+7/T+30 准确率追踪）"
 

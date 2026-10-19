@@ -66,6 +66,13 @@ EARNINGS_SCAN_LOOKBACK = 10
 EARNINGS_MAX_SCAN_LAG_SESSIONS = 5
 IV_RANK_MAX_LAG_SESSIONS = 3
 MAX_ROWS = 300
+#: 「首选」：每个方向取前几张；同一方向同一到期日只取一张（到期日内按 IV/RV 排 = 按 IV 排，不去重的话前几名
+#: 只是同一到期日相邻的几个虚值行权价）
+PICK_N = 3
+#: IV/RV 按这个宽度分档，同档内年化收益高的在前（档内差别小于 IV 本身的报价噪声，不该只看 IV/RV 的小数位）
+PICK_IVRV_BAND = 0.05
+#: 被排除、但 IV/RV 高过最后一张首选的合约，每个方向最多列几张（同样每个到期日一张）
+PICK_EXCLUDED_MAX = 3
 SPREAD_EPS = 1e-9            # 同 structure_quote 的 _TOL_EPS：价差恰好等于上限算通过
 YIELD_DP = 6
 
@@ -93,6 +100,17 @@ REASONS = {
     # 整页
     "underlying_price_unavailable": "现价不可得", "as_of_unavailable": "链的日期不可得", "fetch_returned_none": "取链没有返回",
     "exception": "计算出错（{}）", "demo_mode": "演示模式不读本地数据",
+    # 整条链没有买价（「有买价」一道全挡）
+    "off_hours_no_bids": "整条链没有买价——不在交易时段，CBOE 盘外不给买卖价",
+    "no_bids_in_session": "盘中整条链没有买价（CBOE 文件异常）",
+    # 首选：排除（已知有风险）
+    "pick_no_rv": "没有 RV，排不了", "pick_earnings_before_expiry": "到期前有财报", "pick_low_dte": "{} 天内到期",
+    # 首选：照实标注（不排除）——判不了的，与启发式 / 非风险的信号
+    "pick_earnings_unknown": "财报日判不了", "pick_event_unknown": "事件判不了",
+    "pick_event_inside": "期限内疑似含事件 ±{}%", "pick_no_trade_this_session": "最近一场还没成交（报价仍是即时的）",
+    "pick_stale_unknown": "末笔成交时间判不了", "pick_tenor_exceeds_rv": "期限长于 RV 窗口",
+    # 首选：这一边为空
+    "pick_no_rows": "筛选后这一边没有合约", "pick_all_excluded": "这一边的合约全被排除",
 }
 #: 由别的模块产出、经本页透传的码 → 产出它的源文件（测试核对该文件里真有这个字面量）
 EXTERNAL_REASONS = {
@@ -281,6 +299,7 @@ def public_rules(deps: Deps) -> dict:
             "earnings_max_scan_lag_sessions": EARNINGS_MAX_SCAN_LAG_SESSIONS, "iv_rank_min_days": deps.iv_rank_min_days,
             "iv_rank_window": deps.iv_rank_window, "iv_rank_max_lag_sessions": IV_RANK_MAX_LAG_SESSIONS,
             "vrp_min_obs": deps.vrp_min_obs, "max_rows": MAX_ROWS,
+            "pick_n": PICK_N, "pick_ivrv_band": PICK_IVRV_BAND, "pick_excluded_max": PICK_EXCLUDED_MAX,
             "reasons": dict(REASONS) | {k: v[1] for k, v in EXTERNAL_REASONS.items()}, "stages": dict(STAGES)}
 
 
@@ -685,10 +704,15 @@ def build(raw: dict, *, bars: dict, earnings: dict, iv_index: dict, vrp: dict, t
                           payload_ltt) for c, leg, e, dte in passed]
 
     iv30, r30 = pct_to_dec(raw.get("iv30")), headline["rv30"]
+    nf = {s["stage"]: s["n"] for s in funnel}
+    no_bids = None
+    if nf["priced"] > 0 and nf["quote_gate"] == 0:      # 有 IV 与 Δ、却一张买价都没有：盘外常态，盘中是文件坏了
+        no_bids = _why("no_bids_in_session") if raw.get("session_live") else _why("off_hours_no_bids")
     return {
         "data_available": True, "reason": None,
         "chain": {"as_of": as_of, "underlying_price": S, "underlying_price_source": raw.get("underlying_price_source"),
-                  "payload_last_trade_time": payload_ltt, "session_live": raw.get("session_live")},
+                  "payload_last_trade_time": payload_ltt, "session_live": raw.get("session_live"),
+                  "no_bids": no_bids},
         "headline": headline | {"iv30": iv30, "iv30_over_rv30": (iv30 / r30["value"]) if (iv30 and r30["value"]) else None},
         "bars": bctx, "earnings": earnings, "history": {"iv_rank": iv_index, "vrp": vrp},
         "funnel_fixed": funnel, "expiries": [exp_rows[e] for e in sorted(exp_rows)], "rows": rows,
@@ -700,6 +724,85 @@ def _sort_key(sort: str):
         v = r.get(sort)
         return (v is None, -(v or 0.0), -(r.get("iv") or 0.0), r.get("expiry") or "", r.get("strike") or 0.0)
     return key
+
+
+def _pick_flags(r: dict) -> Tuple[List[str], List[str]]:
+    """(排除原因, 照实标注)。只排除**已知、权威**的风险（财报日、≤LOW_DTE 天、没有 RV）；其余写进标注：
+    · 判不了（None）——不在扫描名单里的票财报日恒未知，连「不知道」也排除的话首选就永远是空的；
+    · 期限结构鼓包（启发式，有检出下限也有假阳性：最近一周的报价噪声会让之后所有到期日都标「含」）——
+      硬排除会让一个小鼓包清空后面全部到期日，所以只标注并写出大小，由人判断（v0.45.539）；
+    · 「最近一场还没成交」——bid / ask 是即时报价，没成交不是报价风险；盘外整链没有买价、这条只在盘中起作用，
+      开盘头几个小时大多数虚值合约都还没成交，硬排除会让首选在上午几乎是空的（v0.45.539）。
+      流动性由 OI 下限与价差闸把关。"""
+    f = r.get("flags") or {}
+    excl, cav = [], []
+    if r.get("iv_over_rv") is None:
+        excl.append(_why("pick_no_rv"))
+    if f.get("earnings_before_expiry") is True:
+        excl.append(_why("pick_earnings_before_expiry"))
+    elif f.get("earnings_before_expiry") is None:
+        cav.append(_why("pick_earnings_unknown"))
+    if f.get("event_inside") is True:
+        em = r.get("event_move")
+        cav.append(_why("pick_event_inside", f"{em * 100:.1f}" if isinstance(em, (int, float)) else "?"))
+    elif f.get("event_inside") is None:
+        cav.append(_why("pick_event_unknown"))
+    if f.get("stale_last_trade") is True:
+        cav.append(_why("pick_no_trade_this_session"))
+    elif f.get("stale_last_trade") is None:
+        cav.append(_why("pick_stale_unknown"))
+    if f.get("dte_le_2"):
+        excl.append(_why("pick_low_dte", LOW_DTE))
+    if f.get("tenor_exceeds_rv_window"):
+        cav.append(_why("pick_tenor_exceeds_rv"))
+    return excl, cav
+
+
+def _pick_key(r: dict):
+    """IV/RV 按 PICK_IVRV_BAND 分档（先 round 掉浮点误差：1.40/0.05 = 27.999…），档内年化收益高的在前。"""
+    v = r["iv_over_rv"]
+    return (-math.floor(round(v / PICK_IVRV_BAND, 6)), -(r.get("yield_ann") or 0.0), -v,
+            r.get("expiry") or "", r.get("strike") or 0.0)
+
+
+def _one_per_expiry(ranked: List[tuple], n: int) -> List[tuple]:
+    out, seen = [], set()
+    for x in ranked:
+        if x[0]["expiry"] not in seen:
+            seen.add(x[0]["expiry"])
+            out.append(x)
+            if len(out) == n:
+                break
+    return out
+
+
+def picks(rows: List[dict], side_param: str) -> Dict[str, Optional[dict]]:
+    """「首选」：rows = 已过全部筛选的合约（截断前）。每个方向：剔除已知风险 → IV/RV 分档 + 年化收益排 →
+    同一到期日只取一张、取前 PICK_N。另列 IV/RV 高过首选里最低那张、却被排除的合约（同样每个到期日一张）。
+    方向不在筛选里 ⇒ None。按规则挑出，**未经前向检验**。"""
+    out: Dict[str, Optional[dict]] = {}
+    for side in ("put", "call"):
+        if side_param not in ("both", side):
+            out[side] = None
+            continue
+        ok, bad, counts = [], [], {}
+        for r in rows:
+            if r["side"] != side:
+                continue
+            excl, cav = _pick_flags(r)
+            (bad if excl else ok).append((r, excl, cav))
+            for code in excl:                            # 按完整码计（带明细），前端直接翻译
+                counts[code] = counts.get(code, 0) + 1
+        chosen = _one_per_expiry(sorted(ok, key=lambda x: _pick_key(x[0])), PICK_N)
+        # 门槛 = 首选里**最低**的 IV/RV（档内按收益排，最后一张不一定最低）
+        floor = min(x[0]["iv_over_rv"] for x in chosen) if chosen else None
+        above = [x for x in bad if x[0].get("iv_over_rv") is not None and (floor is None or x[0]["iv_over_rv"] > floor)]
+        shown = _one_per_expiry(sorted(above, key=lambda x: _pick_key(x[0])), PICK_EXCLUDED_MAX)
+        empty = None if chosen else (_why("pick_all_excluded") if bad else _why("pick_no_rows"))
+        out[side] = {"items": [{"row": r, "caveats": cav} for r, _e, cav in chosen],
+                     "excluded": [{"row": r, "reasons": excl} for r, excl, _c in shown],
+                     "excluded_counts": counts, "n_candidates": len(ok) + len(bad), "empty_reason": empty}
+    return out
 
 
 def select(full: dict, p: dict) -> dict:
@@ -736,6 +839,7 @@ def select(full: dict, p: dict) -> dict:
     out = {k: v for k, v in full.items() if k not in ("rows", "expiries", "funnel_fixed")}
     out.update({"params": dict(p), "funnel": funnel,
                 "empty_reason": "no_contracts" if first_zero == "chain" else first_zero, "expiries": expiries,
+                "picks": picks(rows, p["side"]),
                 "rows": rows[:MAX_ROWS], "rows_total": len(rows), "truncated": len(rows) > MAX_ROWS,
                 "max_rows": MAX_ROWS})
     return out

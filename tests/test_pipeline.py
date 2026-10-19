@@ -61,7 +61,6 @@ class TestBuildSwarmReport:
         monkeypatch.setattr(mod, "CODE_EXECUTION_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "VectorMemory", None)
         monkeypatch.setattr(mod, "VECTOR_MEMORY_CONFIG", {"enabled": False})
-        monkeypatch.setattr(mod, "MetricsCollector", None)
         monkeypatch.setattr(mod, "EarningsWatcher", None)
         monkeypatch.setattr(mod, "Backtester", None)
 
@@ -181,7 +180,6 @@ class TestDataQualityGate:
         monkeypatch.setattr(mod, "CODE_EXECUTION_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "VectorMemory", None)
         monkeypatch.setattr(mod, "VECTOR_MEMORY_CONFIG", {"enabled": False})
-        monkeypatch.setattr(mod, "MetricsCollector", None)
         monkeypatch.setattr(mod, "EarningsWatcher", None)
         monkeypatch.setattr(mod, "Backtester", None)
         from alpha_hive_daily_report import AlphaHiveDailyReporter
@@ -346,7 +344,6 @@ class TestDeployStaticToGhPages:
         monkeypatch.setattr(mod, "CODE_EXECUTION_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "VectorMemory", None)
         monkeypatch.setattr(mod, "VECTOR_MEMORY_CONFIG", {"enabled": False})
-        monkeypatch.setattr(mod, "MetricsCollector", None)
         monkeypatch.setattr(mod, "EarningsWatcher", None)
         monkeypatch.setattr(mod, "Backtester", None)
 
@@ -736,7 +733,6 @@ class _ReporterMixin:
         monkeypatch.setattr(mod, "CODE_EXECUTION_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "VectorMemory", None)
         monkeypatch.setattr(mod, "VECTOR_MEMORY_CONFIG", {"enabled": False})
-        monkeypatch.setattr(mod, "MetricsCollector", None)
         monkeypatch.setattr(mod, "EarningsWatcher", None)
         monkeypatch.setattr(mod, "Backtester", None)
         from alpha_hive_daily_report import AlphaHiveDailyReporter

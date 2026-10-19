@@ -67,6 +67,8 @@ logs/scan_timing.json
 logs/production_sync.json
 
 # v0.23.6: sample-accumulator 产出，不应进入 git（agent_toolbox `git add -A` 会误 stage）
+# v0.45.552：写它的 --samples-only 已删；开发检出根目录的 4 个旧文件（04-26~05-17）10-19 已归档到数据根 _archive/samples_only/。
+# 这行留着当保险（谁从归档拷回检出里查东西，不会被 git add -A 带走），零代价
 .samples-only-*.json
 # 部署 push 日志（每次跑都变，无版本意义）
 .gh_pages_deploy_log.jsonl

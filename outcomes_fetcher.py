@@ -445,7 +445,7 @@ class OutcomesFetcher:
         t1_ret, t7_ret, t30_ret = rets[1], rets[7], rets[30]
 
         # 确定 outcome（基于 T+7 方向准确性）；还没有 T+7 ⇒ None（存储层保留原值），
-        # 不写 "neutral"——它进 get_agent_accuracy 的分母，等于把「还判不了」记成「没猜对」
+        # 不写 "neutral"——「还判不了」不等于「判为中性」（读者曾把 neutral 计进准确率分母，v0.45.527）
         outcome = self._determine_outcome(snapshot.direction, t7_ret) if t7_ret is not None else None
 
         # 按 (date, ticker) 匹配 agent_memory 中的记录

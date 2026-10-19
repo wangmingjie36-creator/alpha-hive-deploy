@@ -237,30 +237,10 @@ class ChronosBeeHorizon(BeeAgent):
                 else:
                     _analyst_info = {}  # 无可信现价，宁可不展示目标价卡片
 
-            # 1c. IV Crush 历史数据（财报期权定价核心参考）
-            # 注意：使用独立本地变量，不写入 ctx（ctx 是 _get_history_context 返回的字符串）
-            _iv_crush_data: dict = {}
-            _iv_crush_summary: str = ""
-            try:
-                import sys as _sys
-                import os as _os_iv
-                _hive_dir = _os_iv.path.dirname(_os_iv.path.dirname(__file__))
-                if _hive_dir not in _sys.path:
-                    _sys.path.insert(0, _hive_dir)
-                from iv_crush_scraper import get_iv_crush_data, format_iv_crush_summary
-                _iv_data = get_iv_crush_data(ticker)
-                _iv_crush_data    = _iv_data
-                _iv_crush_summary = format_iv_crush_summary(_iv_data)
-                # 把 IV Crush 信息附加到财报催化剂（如已存在）
-                if _iv_data.get("avg_abs_move") and catalysts_found:
-                    for _c in catalysts_found:
-                        if _c.get("type") == "earnings":
-                            _c["iv_crush_avg_move"] = _iv_data["avg_abs_move"]
-                            _c["implied_move"] = _iv_data.get("current_implied_move")
-                            _c["beat_rate"] = _iv_data.get("historical_beat_rate")
-                            break
-            except Exception as _e_iv:
-                _log.debug("IV Crush unavailable for %s: %s", ticker, _e_iv)
+            # 1c.（v0.45.541 移出扫描）IV Crush 历史数据：只写进 details 与财报催化剂的三个附加键，评分不读；
+            # 全仓唯一读者是手动跑的 generate_deep_v2；而 iv_crush_scraper 每只标的 3 次 yfinance（不走缓存；A/B 实测 30 只
+            # 366 → 276），全排在 yf_gate 那一个 0.5 req/s 的全进程桶里 ⇒ 每轮约 3 分钟 yfinance 队列让给了一个评分不读的字段。
+            # 现由 generate_deep_v2 在缺数据时现场抓。墓碑 tests/test_iv_crush_out_of_scan.py。
 
             # 1d. ② PEAD 历史量化（财报后价格漂移统计）
             _pead_data: dict = {}
@@ -512,8 +492,6 @@ class ChronosBeeHorizon(BeeAgent):
                 details={
                     "catalysts": catalysts_found[:5],
                     "analyst_targets": _analyst_info or {},
-                    "iv_crush": _iv_crush_data,
-                    "iv_crush_summary": _iv_crush_summary,
                     # ② PEAD 历史量化
                     "pead": _pead_data,
                     "pead_summary": _pead_text,

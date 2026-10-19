@@ -199,7 +199,7 @@ class TestSpeciesDoesNotSpread:
         ("earnings_vol_signal.py", "BASE_DIR"),
         # config.py：多为 `str(...)` 快照，消费方多数自行重解析，危害待判
         ("config.py", "CACHE_CONFIG"), ("config.py", "RUNTIME_CONFIG"),
-        ("config.py", "ALERT_CONFIG"), ("config.py", "METRICS_CONFIG"),
+        ("config.py", "ALERT_CONFIG"),
         ("config.py", "PHEROMONE_CONFIG"), ("config.py", "MEMORY_CONFIG"),
         ("config.py", "VECTOR_MEMORY_CONFIG"), ("config.py", "CODE_EXECUTION_CONFIG"),
         ("config.py", "_OVERRIDE_YAML"), ("config.py", "_OVERRIDE_JSON"),
