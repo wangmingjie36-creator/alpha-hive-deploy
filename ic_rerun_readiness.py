@@ -1392,11 +1392,15 @@ def _scout_row_has_consensus_marker(d: dict) -> bool:
 
 
 def _marker_rival_ml_adjustment_retired(d: dict) -> bool:
-    """v0.45.538 的**日期**印记：完整蒸馏结果（有 `final_score`）却没有 `ml_adjustment` 键，且是实时行。
+    """v0.45.538 的**日期**印记：蒸馏结果的 `ml_auxiliary_in_score` 为字面量 `False`，且是实时行。
 
-    此前每份完整蒸馏结果都写 `ml_adjustment`（02-25 起）；缺字段的残缺记录没有 `final_score`，不会被误认。"""
+    v0.45.548 更正：初版用「有 `final_score` 却没有 `ml_adjustment` 键」当印记 —— 正是
+    `_marker_oracle_gex_signal_neutralized` docstring 记过的「把缺键当印记」那个坑：生产归档里
+    `analysis-NVDA-ml-2026-03-12.json` 是早期格式（有 `final_score`、从来就没有 `ml_adjustment`），
+    被认成新口径 ⇒ `cohort_boundary_evidence("v0.45.538")` 报 `boundary_too_late`、首见日 03-12（1142 份实测）。
+    改成新代码**正面**写的键；只认 `is False`（新代码从不写 True，出现 True 只能是有人把它接回去了）。"""
     sr = d.get("swarm_results")
-    return (isinstance(sr, dict) and "final_score" in sr and "ml_adjustment" not in sr
+    return (isinstance(sr, dict) and sr.get("ml_auxiliary_in_score") is False
             and not _is_backfill_row(d))
 
 
@@ -1443,7 +1447,7 @@ _BOUNDARY_MARKERS = {
                   _marker_buzz_news_primary_massive),
     "v0.45.537": ("swarm_results 带 ml_weight_adjustments_shadow 键",
                   _marker_queen_ml_shadow),
-    "v0.45.538": ("swarm_results 有 final_score 却没有 ml_adjustment 键",
+    "v0.45.538": ("swarm_results.ml_auxiliary_in_score is False",
                   _marker_rival_ml_adjustment_retired),
 }
 

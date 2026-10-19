@@ -5,7 +5,29 @@
 
 ---
 
-## [0.45.548] — 2026-10-19 — 占位（进行中：v0.45.538 二次检查——世代印记用「缺键」在 03-12 旧归档上误报 boundary_too_late）
+## [0.45.548] — 2026-10-19 — Fixed：v0.45.538 二次检查——世代印记用「缺 `ml_adjustment` 键」，在 03-12 早期格式旧归档上误报 `boundary_too_late`；改成正面印记 `ml_auxiliary_in_score: False`；二阶 Guard 效应实测订正
+
+起因：用户要求二次检查 v0.45.538。对生产 1142 份 `analysis-*-ml-*.json` 跑 `cohort_boundary_evidence("v0.45.538")` ⇒
+`boundary_too_late`、首见日 **2026-03-12**——`analysis-NVDA-ml-2026-03-12.json` 是早期格式（有 `final_score`、**从来没有** `ml_adjustment`），
+被 538 的印记「有 final_score 却没有 ml_adjustment 键」认成新口径。这正是 `_marker_oracle_gex_signal_neutralized` docstring 早就记过的
+「把缺键当印记」那个坑，538 照犯了一遍。上线后 Step 11 会一直报「边界写晚了」。
+
+### Fixed
+- `swarm_agents/queen_distiller.py`：蒸馏结果恒写 `ml_auxiliary_in_score: False`（同 v0.45.334 `gex_regime_mod.applied: False` 的先例）。
+- `ic_rerun_readiness._marker_rival_ml_adjustment_retired` 改认 `ml_auxiliary_in_score is False`（只认字面量 False）且是实时行；
+  `_BOUNDARY_MARKERS["v0.45.538"]` 的说明同步。修后生产 1142 份：537 / 538 都是 `no_evidence_yet`（正确：新代码还没跑过）。
+  ⚠️ `_COHORT_HISTORY` 里 538 那条原因文本仍描述旧印记——按「只追加、不就地改写」原则不动，以本条与印记 docstring 为准。
+- ⚠️ **时序**：印记只在跑了本版的扫描里出现 ⇒ 本版必须赶上 10-19 14:00 的扫描，否则 10-19 记录没有印记、会报 `boundary_too_early`。
+
+### 订正（538 条目里的估计）
+- 538 写「Guard 二阶项估计 ≤ 0.02」——实测（09-15 起 `.swarm_results_*.json` 660 行，按记录的 `top_signals_count` / `adjustment_factor`
+  / Rival 技术分与 EPS 信号近似重算，未计 Guard 宏观调整）：无共振的 574 行里 Guard 分平均 −0.112（−0.159 ~ −0.051）；
+  Guard 扣分变化 88 行、对 final_score 平均 −0.019、**最大 −0.032**；19 行 Guard 分跨过 4.0 的扣分线。方向与一阶项相同（都往下）。
+
+### Tests
+- `tests/test_rival_ml_adjustment_retired.py::TestBoundaryMarker`（+8）：蒸馏结果写印记且判别器认它；03-12 早期格式形状不算新；
+  旧现代记录不算；只认字面量 False（True / None / 0 / "False" 都不算）；补跑行不算日期证据。
+  变异：印记改回「有 final_score 且没有 ml_adjustment」⇒ 红。
 
 ## [0.45.547] — 2026-10-19 — 占位（进行中：ML 两项——扫描开头的重复训练改用报告生成器同一个模型、删扫描后「增量学习」重训）
 

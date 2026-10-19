@@ -273,3 +273,41 @@ class TestDetectorsHaveTeeth:
     ])
     def test_name_detector_fires(self, src, name):
         assert name in _names_used(ast.parse(src))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 5. 世代印记（v0.45.548：初版「缺 ml_adjustment 键」在 03-12 早期格式旧归档上误报 boundary_too_late）
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestBoundaryMarker:
+    """`_marker_rival_ml_adjustment_retired` 只认新代码**正面**写的 `ml_auxiliary_in_score is False`。"""
+
+    @staticmethod
+    def _marker(d):
+        from ic_rerun_readiness import _marker_rival_ml_adjustment_retired
+        return _marker_rival_ml_adjustment_retired(d)
+
+    def test_queen_writes_the_marker(self, queen):
+        out = queen.distill("TEST", _core_results() + [_result("RivalBeeVanguard", "ml_auxiliary", 6.0)])
+        assert out["ml_auxiliary_in_score"] is False
+        assert self._marker({"swarm_results": out}) is True
+
+    def test_early_format_record_without_ml_adjustment_is_not_new(self):
+        """生产 `analysis-NVDA-ml-2026-03-12.json` 的形状：有 final_score、从来没有 ml_adjustment。
+        变红的变异：印记改回「有 final_score 且没有 ml_adjustment」。"""
+        sr = {"ticker": "NVDA", "final_score": 6.1, "direction": "bullish", "agent_details": {}}
+        assert self._marker({"swarm_results": sr}) is False
+
+    def test_old_modern_record_is_not_new(self):
+        sr = {"final_score": 6.1, "ml_adjustment": 0.05, "base_score_before_resonance": 6.0}
+        assert self._marker({"swarm_results": sr}) is False
+
+    @pytest.mark.parametrize("val", [True, None, 0, "False"])
+    def test_only_literal_false_counts(self, val):
+        assert self._marker({"swarm_results": {"final_score": 6.0, "ml_auxiliary_in_score": val}}) is False
+
+    def test_backfill_row_is_not_date_evidence(self):
+        sr = {"final_score": 6.0, "ml_auxiliary_in_score": False,
+              "agent_details": {"GuardBeeSentinel": {"details": {
+                  "vix_term_structure": {"macro_as_of_mode": "backfill"}}}}}
+        assert self._marker({"swarm_results": sr}) is False

@@ -1291,6 +1291,10 @@ class QueenDistiller:
             "dimension_weights": dict(_regime_weights_used),
             "dimension_weights_base": dict(self.DIMENSION_WEIGHTS),
             "base_score_before_resonance": round(adjusted_score, 2),
+            # v0.45.538/548：RivalBee（ml_auxiliary）不进分，恒写字面量 False。它是世代边界的**正面印记**
+            # （`ic_rerun_readiness._marker_rival_ml_adjustment_retired`）：此前的记录没有这个键；
+            # 用「缺 `ml_adjustment` 键」当印记会被早期格式的旧归档误认（03-12 实测）。勿改成 True / 勿删。
+            "ml_auxiliary_in_score": False,
             "pheromone_compact": self.board.compact_snapshot(ticker),
             "data_quality": dv["data_quality_summary"],
             "data_real_pct": tp["data_real_pct"],
