@@ -7,7 +7,19 @@
 
 ## [0.45.533] — 2026-10-19 — 占位（进行中：v0.45.528 publish 快路径复查——扫描中途抛出时索引未作废、重建遇非标准对象抛错；随机测试补覆盖）
 
-## [0.45.532] — 2026-10-19 — 占位（进行中：二次检查 v0.45.524 / 528——publish 快路径前提守卫空扫与解析失败时恒绿）
+## [0.45.532] — 2026-10-19 — Fixed：二次检查 v0.45.524（测试提速）/ v0.45.528（publish 快路径）——快路径的前提守卫在「什么都没扫到」与「违规文件恰好解析失败」时恒绿，补成对断言
+
+用户要求二次检查这两版。结论：**生产代码两版都没查出 bug**；查出一个守卫的牙口问题，已修。
+
+### Fixed
+- `tests/test_pheromone_publish_fast_path.py::TestNoExternalWritesToBoardOwnedFields`：它钉的是快路径正确性的**唯一前提**（已上板条目的 `ticker` / `timestamp` / `pheromone_strength` 只由本板改写），但读不了 / 解析不了的文件直接 `continue`、也不数扫了几个文件。实测两种情况都恒绿：枚举返回空表；违规文件同时有语法错误。现抽出 `_scan_external_writes`，返回（违规, 扫到的文件数, 读 / 解析失败清单），断言扫到 >100 个生产文件且失败清单为空。新增两条有牙测试（空枚举必红、语法错 / 非 UTF-8 的违规文件被报出而非跳过）。变异：去掉失败记账 / 去掉文件数断言 / 往 `vol_forecast.py` 注入 `e.timestamp = "x"`，三者各自变红。
+
+### 核对过、没有问题的（记下来免得下次重查）
+- **528 快路径逐位等价的论证成立**：别标的条目只在「强度、时间戳可解析、年龄」三条都可证不变时才跳过；同标的子序列保持 `_entries` 原序，故「第一条同向条目加支持」与全表扫描是同一条；截断 / `clear()` / 改 `MIN_STRENGTH` / 外部 extend 都作废索引。`MIN_STRENGTH > 1` 时加成把强度压到 1.0 < MIN 的情形，由同一次 publish 追加的新条目（校验后 ≤ 1.0）作废索引兜住（NaN 也被校验钳到 1.0）。
+- **前提在生产里成立**：生产代码只**读** `board._entries`（`queen_distiller` 的列表推导）；`snapshot()` / `compact_snapshot()` 返回字典副本；全仓无 `_entries` 的就地排序 / 删除 / 下标赋值；生产里 3 处动态 `setattr` 都不指向信息素条目。
+- **524 没有让任何测试变成空测**：`stub_yfinance` 现在替换退避接缝，若有测试靠记录全局 `time.sleep` 来断言「429 不重试」就会恒绿——逐个查过：用 `stub_yfinance` 的文件里只有本版自己的测试碰 sleep；`test_yf_gate` 的「429 不重试」数的是调用次数、且不用 `stub_yfinance`。共享解析缓存的树：接入的守卫里无任何改树写法（`NodeTransformer` / `fix_missing_locations` / 给节点赋属性）。
+- CI：两版合入后的 `tests.yml` 运行都只有已知的 `TestCoverageHorizon` 红（pytest 已降到 6–7.5 分钟）；时钟拨动审计 `clockshift.yml` 在含两版的 76cea818 上通过（推送与两次定时）。
+
 
 ## [0.45.531] — 2026-10-18 — 占位（进行中：退役 AgentWeightManager 死链——agent_weights 无评分读者、准确率按快照判不分蜂、差异来自已断开的 adapted_weights；agent_memory 重建标为不做）
 

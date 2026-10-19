@@ -328,6 +328,26 @@ def _external_writes(source: str):
     return hits
 
 
+def _scan_external_writes(root, files=None):
+    """→ (违规 [(相对路径, 行号, 语句)], 扫到的文件数, 读 / 解析失败 ["路径: 原因"])。"""
+    root = Path(root)
+    if files is None:
+        files, _ = own_python_files(root)
+    bad, scanned, unreadable = [], 0, []
+    for p in files:
+        rel = p.relative_to(root)
+        if rel.parts[0] == "tests" or rel.as_posix() == _OWNER:
+            continue
+        try:
+            hits = _external_writes(_ast_cache.read_text(p))
+        except (OSError, UnicodeDecodeError, SyntaxError) as e:
+            unreadable.append(f"{rel.as_posix()}: {type(e).__name__}")
+            continue
+        scanned += 1
+        bad += [(rel.as_posix(), ln, s) for ln, s in hits]
+    return bad, scanned, unreadable
+
+
 class TestNoExternalWritesToBoardOwnedFields:
 
     def test_production_code_has_none(self):
@@ -338,21 +358,26 @@ class TestNoExternalWritesToBoardOwnedFields:
         是 ⇒ 快路径的前提破了，改 `pheromone_board.py`；不是 ⇒ 换个字段名或在此登记理由。
         动态 `setattr(obj, name, ...)` 静态看不出写的是哪个字段，本守卫管不到（现存 3 处都在快照 / 时钟工具上）。
         """
-        files, _ = own_python_files(_ROOT)
-        bad = []
-        for p in files:
-            rel = p.relative_to(_ROOT)
-            if rel.parts[0] == "tests" or rel.as_posix() == _OWNER:
-                continue
-            try:
-                src = _ast_cache.read_text(p)
-            except (OSError, UnicodeDecodeError):
-                continue
-            try:
-                bad += [(rel.as_posix(), ln, s) for ln, s in _external_writes(src)]
-            except SyntaxError:
-                continue
+        bad, scanned, unreadable = _scan_external_writes(_ROOT)
+        # v0.45.532：成对断言。此前读不了 / 解析不了的文件 `continue` 掉、也不数扫了几个——
+        # 枚举返回空表或违规文件恰好解析失败时本条恒绿（实测两种都绿）。
+        assert scanned > 100, f"只扫到 {scanned} 个生产文件 —— 枚举坏了，「无外部写」等于没查"
+        assert not unreadable, f"这些生产文件读不了 / 解析不了，本守卫看不见它们：{unreadable}"
         assert not bad, f"板外改写信息素条目自有字段（破坏 publish 快路径前提）: {bad}"
+
+    def test_empty_enumeration_is_red(self, monkeypatch):
+        monkeypatch.setattr(sys.modules[__name__], "own_python_files", lambda root: ([], "git"))
+        with pytest.raises(AssertionError, match="只扫到 0 个"):
+            self.test_production_code_has_none()
+
+    def test_unparsable_violator_is_reported_not_skipped(self, tmp_path):
+        f = tmp_path / "bad.py"
+        f.write_text("e.pheromone_strength = 0\ndef (:\n", encoding="utf-8")
+        g = tmp_path / "big5.py"
+        g.write_bytes("e.ticker = '中'\n".encode("big5"))
+        bad, scanned, unreadable = _scan_external_writes(tmp_path, files=[f, g])
+        assert scanned == 0 and bad == []
+        assert sorted(u.split(":")[0] for u in unreadable) == ["bad.py", "big5.py"], unreadable
 
     def test_guard_has_teeth(self):
         src = ("def f(board, e, es):\n"
