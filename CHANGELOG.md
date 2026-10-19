@@ -218,7 +218,11 @@
 - 文件：`ml_model.json`（`save_model()` 无参缺省落点，全仓无参 `load_model` = 0）、`.samples-only-<date>.json`、
   `logs/last_run_status.json`、`crowding_<T>.json`、`training_data.json`（后两个写入方零生产调用者）。
 - ⭐ **首次实战**：换基到含 v0.45.538 的 main 后守卫当场红——「`ml_predictor_extended` 两处落点已经不写文件了 / 两条 PENDING_DEAD 的见证没了，
-  删条目并把上限减一」⇒ 照提示删条目、上限 9 → 7。这正是「只许减」要的形状：清理落地，登记表被逼着同步收缩。审计里的 Step 1 `data_fetcher` 与扫描后 ML 增量重训由 v0.45.546 / 547 删除，**不**登记。
+  删条目并把上限减一」⇒ 照提示删条目、上限 9 → 7。这正是「只许减」要的形状：清理落地，登记表被逼着同步收缩。
+- 换基到含 v0.45.546 / 547 的 main：守卫再红 6 条（`data_fetcher` 两处落点过期、`realtime_metrics.json` / data_fetcher 缓存的读者没了、
+  `_init_scan_context` 不再读 `ml_model_cache.json`、`STEP_OUTPUTS` 里的 `data_fetcher.py` 不再被调用）⇒ 逐条照删。
+  ⚠️ 普查漏了一个读者：546 实测 Slack 日报经 f-string 读 `cache/metrics_<T>_<date>.json`，而登记表只记了 `CacheManager.load`——
+  登记表只要求「至少一个仍有效的读者」，漏记额外读者不会误判死链，但读者清单**不是**完整的消费者清单。令牌匹配本身看得见 f-string 片段。审计里的 Step 1 `data_fetcher` 与扫描后 ML 增量重训由 v0.45.546 / 547 删除，**不**登记。
 
 ### 变异证据（真仓库，改完即 `git checkout` 还原）
 - 读者登记表 6 条全红：① `scan_coverage_gate.py` 的 `FROM predictions` 改名 ⇒「读者…不再读这张表」；② 生产文件新增

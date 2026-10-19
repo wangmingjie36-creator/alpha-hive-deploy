@@ -24,9 +24,8 @@ metrics.db 三张表、`reasoning_sessions`、`sentiment_baseline.db`、编排�
   **PENDING_DEAD**（已知死链、待清理）：每条带一个**见证**（写入点或「哪个函数里还有哪段字符串」）。
   条数与 `CEILING_PENDING_DEAD` 等号比较 ⇒ 只许减：清理掉一条，见证消失 ⇒ 红，提醒删条目并把上限减一；
   新发现的死链**不许**登记进来当债务——要么删掉写入方，要么接上读者。
-  2026-10-19 审计里还开着的：编排器 Step 1 `data_fetcher`（`realtime_metrics.json` + `cache/` 下的
-  `metrics_*` 等缓存）、`barrier_outcomes`、`agent_memory`（读者只在 LLM 模式）、`ml_model.json`（无读者）、
-  扫描后 ML 增量重训的产出。
+  2026-10-19 审计里还开着的：`barrier_outcomes`、`agent_memory`（读者只在 LLM 模式）、`ml_model.json`（无读者）；
+  审计里另两项（编排器 Step 1 `data_fetcher`、扫描后 ML 增量重训）由 v0.45.546 / 547 删除，不登记。
 
 v1 的边界（写明，免得把「没查」读成「没问题」）
 ------------------------------------------
@@ -149,8 +148,6 @@ SITE_ARTIFACTS: dict = {
     'data_backup/restore.py::restore_state': ('restored state dirs',),
     'data_backup/run_backup.py::_append_history': ('logs/backup_status_history.jsonl',),
     'data_backup/run_backup.py::_write_status': ('logs/backup_status.json',),
-    'data_fetcher.py::<module>': ('realtime_metrics.json',),
-    'data_fetcher.py::CacheManager.save': ('cache/<source>_<T>.json (data_fetcher)',),
     'data_migrations/__main__.py::main': ('logs/data_migrations.json',),
     'data_migrations/runner.py::append_record': ('migrations_state/applied.jsonl',),
     'data_migrations/runner.py::online_backup': ('_manual_backups/pheromone.db.bak-*',),
@@ -314,8 +311,8 @@ ARTIFACTS: dict = {
         '扫描计时 / 计数；编排器用 jq 并进 status.json，Step2 解释器拿它作证据'),
     'migrations_state/applied.jsonl': (READ, [('data_migrations/runner.py::read_ledger', 'applied.jsonl'), ('data_migrations/runner.py::record_tool_run', 'applied.jsonl')],
         '迁移账本追加；文件名在模块常量 LEDGER_NAME，消费者 read_ledger → run_pending 判已应用'),
-    'ml_model_cache.json': (READ, [('alpha_hive_daily_report.py::AlphaHiveDailyReporter._init_scan_context', 'PATHS.ml_model_cache'), ('generate_ml_report.py::MLEnhancedReportGenerator._model_file', 'PATHS.ml_model_cache')],
-        '生产模型（HGB；无 sklearn 时 SGD / Simple 降级同一文件）：扫描与 ML 报告 load_model 读回，QueenDistiller._ml_oos_trust_factor 读 oos'),
+    'ml_model_cache.json': (READ, [('generate_ml_report.py::MLEnhancedReportGenerator._model_file', 'PATHS.ml_model_cache')],
+        '生产模型（HGB；无 sklearn 时 SGD / Simple 降级同一文件）：v0.45.547 起扫描进程里只由报告生成器 _model_file 读回（Queen 用 ml_generator 的同一模型）'),
     'options_paper_state/*.jsonl': (READ, [('alphabot/straddle.py::load_ledger', 'closed_trades.jsonl'), ('alphabot/straddle.py::load_ledger', 'positions.jsonl'), ('alphabot/straddle.py::load_ledger', 'equity_curve.jsonl')],
         '跨式账本 closed_trades；options_paper_leg 自身 compute_kpis/run 与 Alpha Bot 跨式页读'),
     'options_paper_state/earnings_signals.jsonl': (READ, [('alphabot/straddle.py::load_ledger', 'earnings_signals.jsonl'), ('straddle_gex_prereg.py::_load_rows', 'earnings_signals.jsonl')],
@@ -338,8 +335,6 @@ ARTIFACTS: dict = {
         '网格结果；main --html 经 _results_file 读回渲染 HTML（手动离线工具）'),
     'probability_scorecard_state/published.jsonl': (READ, [('probability_scorecard.py::_ledger_path', 'published.jsonl')],
         '概率前向账本；load_ledger→score_published 只经人工跑的 CLI --published，没有定时读者'),
-    'realtime_metrics.json': (READ, [('generate_ml_report.py::main', 'realtime_metrics.json')],
-        '编排器 Step1 采集汇总；Step3 generate_ml_report.main 加载，编排器后置条件核存在'),
     'replay_ohlc_state/<TICKER>.json': (READ, [('replay_ohlc_store.py::ReplayOhlcStore._path', '{ticker}.json')],
         '回放日线库；_entry 经 _path 读。唯一的构造者在 experiments/fg_exposure_gate_forward_test.py，由 ic_rerun_readiness Step11 加载'),
     'report_snapshots/*.json': (READ, [('self_analyst.py::load_snapshots', 'actual_prices'), ('risk_engine.py::_load_snapshot_returns', 'actual_prices'), ('feedback_loop.py::ReportSnapshot.load_from_json', 'actual_prices'), ('feedback_loop.py::BacktestAnalyzer.__init__', 'report_snapshots'), ('weekly_optimizer.py::_snapshots_dir', 'report_snapshots'), ('alert_manager.py::AlertAnalyzer._check_outcomes_backlog', 'report_snapshots')],
@@ -361,8 +356,6 @@ ARTIFACTS: dict = {
         '启动壳过时「已提醒」指纹；消费者 _app_shell_drift（check_app_shell），丢了只是多提醒一次'),
     'cache/.price_index_migrated_*': (CACHE, [('price_history.py::_migration_marker', '.price_index_migrated_')],
         '一次性迁移哨兵；load_price_history 自己用 exists() 检查（self）'),
-    'cache/<source>_<T>.json (data_fetcher)': (CACHE, [('data_fetcher.py::CacheManager.load', '.json'), ('data_fetcher.py::CacheManager.__init__', 'PATHS.cache_dir')],
-        'data_fetcher 各源 TTL 缓存；同类 get_* 先 cache.load'),
     'cache/cboe_daily/*.json': (CACHE, [('cboe_fetcher.py::CBOEDailyFetcher._read_cache', 'cached_at'), ('cboe_fetcher.py::CBOEDailyFetcher.__init__', 'PATHS.cboe_daily_cache')],
         'CBOE PCCE/VIX期限/SKEW/VVIX TTL 缓存；fetch_* 先 _read_cache'),
     'cache/congress_trades.json': (CACHE, [('congress_trades_scraper.py::_cache_path', 'congress_trades.json')],
@@ -421,7 +414,7 @@ ARTIFACTS: dict = {
     'logs/last_run_status.json': (PENDING_DEAD, [],
         '全仓没有读者；run_daily_scan.py 只能手动跑，编排器不调用它'),
     'ml_model.json': (PENDING_DEAD, [],
-        'save_model() 无参时的缺省落点（MLPredictionService.train_model 训完无参 save_model()；扫描开始 daily_retrain 与 generate_ml_report 都会走到）：全仓无参 load_model 调用点 = 0，生产只读 ml_model_cache.json'),
+        'save_model() 无参时的缺省落点（MLPredictionService.train_model 训完无参 save_model()；v0.45.547 起只经报告生成器走到）：全仓无参 load_model 调用点 = 0，生产只读 ml_model_cache.json'),
     'training_data.json': (PENDING_DEAD, [],
         '生产零调用者（仅 tests 调用），也无任何读者'),
     # ── AUDIT
@@ -535,7 +528,7 @@ ARTIFACTS: dict = {
 
 
 #: PENDING_DEAD 文件产物的见证：(文件::限定名, 令牌)——该函数体里还出现这段字符串 ⇒ 死链还在。
-#: 写入落点本身就是专门写它的（`data_fetcher.py::<module>`）时，见证可以就写那个落点与文件名。
+#: 写入落点本身就是专门写它的（如 `run_daily_scan.py::_write_status`）时，见证可以就写那个落点与文件名。
 PENDING_WITNESS: dict = {
     ".samples-only-<date>.json": ("alpha_hive_daily_report.py::main", ".samples-only-"),
     "crowding_<T>.json": ("crowding_detector.py::CrowdingDetector.save_to_json", "crowding_"),
@@ -840,6 +833,7 @@ class TestRealRepoPositiveControls:
     def test_known_file_writes_and_readers(self):
         f = S.repo_facts()
         sites = S.file_write_sites(f)
-        assert "data_fetcher.py::<module>" in sites and "paper_portfolio.py::_save_meta" in sites
+        assert "alpha_hive_daily_report.py::AlphaHiveDailyReporter.save_report" in sites
+        assert "paper_portfolio.py::_save_meta" in sites
         assert S.scope_reads_token(f, "cloud_snapshot_loader.py::load_market", "market.json")
         assert len(sites) > 100, f"只扫到 {len(sites)} 处写入——扫描器坏了？"

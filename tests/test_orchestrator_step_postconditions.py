@@ -50,7 +50,6 @@ KINDS = {INTERPRETER, POSTCONDITION, READ_BACK, EXEMPT}
 #: 脚本名 → (类别, 证据)。POSTCONDITION 的证据 = `_no_output` 的 key；READ_BACK 的证据 = 段里必须出现的变量名。
 STEP_OUTPUTS = {
     "deploy_orchestrator.py": (READ_BACK, "_rec"),            # 部署记录先删后写，`_orchestrator_autodeploy` 读回
-    "data_fetcher.py": (EXEMPT, "Step 1 正由 v0.45.546 整步删除（死链清理）；换基到含 546 的 main 后删本条"),
     "run_data_migrations.py": (READ_BACK, "_rec"),            # 迁移记录先删后写
     "alpha_hive_daily_report.py": (INTERPRETER, "2"),
     "generate_ml_report.py": (POSTCONDITION, "step3_ml_report"),
