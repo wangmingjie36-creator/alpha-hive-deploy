@@ -394,30 +394,6 @@ class PredictionStore:
             _log.warning("Path result 更新失败 id=%s: %s", pred_id, e)
             return False
 
-    def get_recently_verified_t7(self, limit: int = 50) -> List[Dict]:
-        """获取最近一批已被 T+7 验证的记录（按日期倒序）
-
-        用于增量 ML 训练：每次 run_backtest() 之后调用，
-        获取 checked_t7=1 且 return_t7 IS NOT NULL 的最新记录。
-        """
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                rows = conn.execute(f"""
-                    SELECT ticker, date, final_score, direction,
-                           dimension_scores, iv_rank, put_call_ratio,
-                           agent_directions,
-                           return_t7, correct_t7
-                    FROM {self.TABLE}
-                    WHERE checked_t7 = 1 AND return_t7 IS NOT NULL
-                    ORDER BY date DESC
-                    LIMIT ?
-                """, (limit,)).fetchall()
-                return [dict(r) for r in rows]
-        except (sqlite3.Error, OSError) as e:
-            _log.warning("获取已验证 T+7 记录失败: %s", e)
-            return []
-
     def get_accuracy_stats(self, period: str = "t7", days: int = 90,
                            exclude_nontrading_days: bool = False,
                            use_direction_metric: bool = False) -> Dict:

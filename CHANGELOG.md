@@ -29,7 +29,37 @@
   旧现代记录不算；只认字面量 False（True / None / 0 / "False" 都不算）；补跑行不算日期证据。
   变异：印记改回「有 final_score 且没有 ml_adjustment」⇒ 红。
 
-## [0.45.547] — 2026-10-19 — 占位（进行中：ML 两项——扫描开头的重复训练改用报告生成器同一个模型、删扫描后「增量学习」重训）
+
+## [0.45.547] — 2026-10-19 — Removed：扫描进程里 ML 模型只训一次（归报告生成器）——删扫描开头的重复重训与扫描后的「ML 增量学习」；生产库副本上实证两种取法逐位相同
+
+用户决定（2026-10-19）：「现在开始」（死链二次检查第二档 ③+④，等 v0.45.538 合入后合成一版）。
+
+### 为什么
+- **扫描开头**（`_init_scan_context`）：读 ml_model_cache.json 后又 `MLPredictionService().train_model()` 重训一遍交给蜂后。它和报告生成器 `__init__`
+  那次同一个库、同一个 `random_state`、相隔约 1 秒（日志两次的样本数 / OOS / 特征一致）。v0.45.537 起蜂后只用它算影子乘数、v0.45.538 起 Rival 也不再读模型
+  ⇒ 这次重训唯一的作用是多写一份没人读的 `ml_model.json`。
+- **扫描后「ML 增量学习」**：拿 50 条最近验证过的 T+7 记录拼 `TrainingData`（momentum 恒 0、volatility 恒 5.0、3 / 30 日收益按 T+7 乘 0.4 / 2.5 编出来），
+  调 HGB `incremental_train`——它只看列表非空、随即从库里**全量重训**，覆盖 ml_model_cache.json。缓存只在文件日期 = 今天（PDT）时有效 ⇒ 次日照样重训；
+  产物只给当天之后启动的进程用，还把当天取证快照换成一个没给任何标的打过分的模型（10-16：打分的 OOS 45.2%，快照里 56.8%）；缓存缺失时更会直接
+  `train()` 在那 50 条编造特征上。它取样还读 `return_t7`（SL/TP 截断口径，见 auto-memory alpha-hive-return-t7-clamp）。
+
+### Changed / Removed
+- `alpha_hive_daily_report._init_scan_context`：蜂后的模型 = `self.ml_generator.ml_service.model`（生成器 __init__ 已按「当日内存 / 当日磁盘缓存 /
+  从库重训」备好）；拿不到 ⇒ warning，本轮影子乘数为空（不静默）。删掉读缓存与重训两段。
+- 删扫描后「ML 增量学习」整段（换成说明注释）；随之删唯一调用方的 `PredictionStore.get_recently_verified_t7` 与 `tests/test_backtester.py` 里它的测试类；
+  `config.ML_TRAINING_CONFIG["daily_retrain"]`（唯一读者随之删）。
+
+### 证明（`experiments/ml_dedupe_proof_v0547.py`，生产库只读拷进沙箱）
+- 同一进程先后两种取法：生成器 `__init__` 训练 vs 旧的 `MLPredictionService().train_model()` ⇒ **OOS（56.8%）、特征重要性、4 个样本的预测概率、
+  蜂后影子乘数全部逐位相等**，VERDICT PASS。
+- 评分：v0.45.537 / 538 之后 ML 模型不进 `final_score`（蜂后只算影子、Rival 不再读模型）⇒ 删扫描后重训从结构上不碰当天分数（它在 .swarm_results /
+  快照 / 档案落盘之后才跑）；次日生成器按缓存日期规则照样从库重训 ⇒ 次日模型也不变。
+- 唯一行为差异：当天扫描**之后**再启动的进程（手动深度报告、同日重跑）读到的缓存是早上真正打分的那个模型，而不是扫描后重训的——取证快照也就对了。
+
+### Added
+- `tests/test_ml_retrain_dedupe.py`（5 条）：日报里不再有 `train_model` / `incremental_train` / `get_recently_verified_t7` / `MLPredictionService(`；
+  `_init_scan_context` 取 `ml_generator`、不再 `load_model`；正对照：同一探测法认得出生成器里那次训练；退役 API 与配置键已不在；探测器正反对照。
+- 证明脚本 `experiments/ml_dedupe_proof_v0547.py`。
 
 ## [0.45.546] — 2026-10-19 — Removed：编排器 Step 1（data_fetcher）——蜂群不读它；它唯一的活读者 Slack 日报改读 `.swarm_results`（价格兜底与 5 日涨跌从写死的 3 只扩到 30 只，3 只的值不变），Step 3 兜底不再读会过期的 realtime_metrics.json
 

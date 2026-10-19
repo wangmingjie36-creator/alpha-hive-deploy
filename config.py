@@ -1343,7 +1343,6 @@ ML_HGBC_CONFIG = {
 ML_TRAINING_CONFIG = {
     "use_real_data": True,             # 优先使用真实数据训练
     "min_real_samples": 30,            # 真实数据最少样本数
-    "daily_retrain": True,             # 每日重训
     "max_training_rows": 500,          # 训练数据行数上限
     "blend_hardcoded_when_sparse": True,  # 真实数据不足时混入硬编码数据
 }

@@ -578,31 +578,15 @@ class AlphaHiveDailyReporter:
         _adapted_diag = Backtester.load_adapted_weights() if Backtester else None
         import llm_service as _llm_check_q
 
-        # Enhancement C: 尝试加载已训练的 ML 模型交给 QueenDistiller。
-        # v0.45.537 起蜂后只拿它算**影子**乘数（落盘 `ml_weight_adjustments_shadow`），不改权重、不改票重。
-        _ml_model_for_queen = None
-        try:
-            from ml_predictor import MLPredictionService as _MPS
-            _ml_svc_tmp = _MPS()
-            _ml_model_file = PATHS.ml_model_cache
-            if _ml_model_file.exists():
-                _ml_svc_tmp.model.load_model(str(_ml_model_file))
-                if _ml_svc_tmp.model.is_trained:
-                    _ml_model_for_queen = _ml_svc_tmp.model
-                    _log.info("ML 模型已加载（QueenDistiller 只算影子乘数，v0.45.537）")
-        except (ImportError, OSError, ValueError, TypeError) as e:
-            _log.debug("ML 模型加载跳过: %s", e)
-
-        # ── ML 每日重训（用真实数据替换硬编码假数据）──
-        try:
-            from config import ML_TRAINING_CONFIG as _MTC
-            if _MTC.get("daily_retrain", True) and _ml_svc_tmp:
-                _retrain_result = _ml_svc_tmp.train_model()
-                if _retrain_result.get("status") == "success" and _ml_svc_tmp.model.is_trained:
-                    _ml_model_for_queen = _ml_svc_tmp.model
-                    _log.info("ML 模型已用真实数据重训")
-        except (ImportError, OSError, ValueError, TypeError, NameError) as e:
-            _log.debug("ML 每日重训跳过: %s", e)
+        # 交给 QueenDistiller 的 ML 模型：v0.45.537 起只用来算**影子**乘数（落盘 `ml_weight_adjustments_shadow`），
+        # 不改权重、不改票重。v0.45.547 起直接用报告生成器 `self.ml_generator` 那一个实例——它在 __init__ 里已按
+        # 「当日内存 / 当日磁盘缓存 / 从库重训」备好了今天的模型；此前这里再读一次缓存、再 `train_model()` 重训一遍
+        # （同一个库、同一个 random_state，日志里两次的样本数 / OOS / 特征完全相同），训出来的只多写一份没人读的 ml_model.json。
+        # 证明（同一份生产库副本上两种取法的特征重要性与影子乘数逐位相等）见 experiments/ml_dedupe_proof_v0547.py。
+        _gen_model = getattr(getattr(self.ml_generator, "ml_service", None), "model", None)
+        _ml_model_for_queen = _gen_model if getattr(_gen_model, "is_trained", False) else None
+        if _ml_model_for_queen is None:
+            _log.warning("报告生成器没有可用的 ML 模型 ⇒ 蜂后本轮不算影子乘数（ml_weight_adjustments_shadow 为空）")
 
         queen = QueenDistiller(
             board,
@@ -916,75 +900,11 @@ class AlphaHiveDailyReporter:
         # 已退役，**勿重建**；adapt_weights 照算照写 adapted_weights 表留审计（见上）。墓碑 tests/test_agent_weight_manager_retired.py。
         _timing.record("backtest_weights", time.monotonic() - _t_backtest)
 
-        # ---- ML 增量学习（利用新验证的 T+7 数据）----
-        if Backtester and bt:
-            try:
-                verified_rows = bt.store.get_recently_verified_t7(limit=50)
-                if len(verified_rows) >= 5:
-                    # v0.44.3：阈值唯一真相 = catalyst_quality_from_score
-                    # （此前同一套阈值在三处各写一份嵌套 _cat_qual）
-                    from ml_predictor import (
-                        MLPredictionService,
-                        TrainingData,
-                        catalyst_quality_from_score as _cat_qual,
-                    )
-
-                    new_training = []
-                    direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
-                    for r in verified_rows:
-                        ds = json.loads(r.get("dimension_scores") or "{}")
-                        # 计算 agent_agreement（共识度）
-                        _ad = json.loads(r.get("agent_directions") or "{}")
-                        _dir = r.get("direction", "neutral")
-                        if _ad:
-                            _majority = sum(1 for d in _ad.values() if d == _dir)
-                            _agree = _majority / len(_ad)
-                        else:
-                            _agree = 0.5
-                        new_training.append(TrainingData(
-                            ticker=r["ticker"], date=r["date"],
-                            crowding_score=ds.get("signal", 5.0) * 10,
-                            catalyst_quality=_cat_qual(ds.get("catalyst", 5.0)),
-                            momentum_5d=0.0, volatility=5.0,
-                            market_sentiment=(ds.get("sentiment", 5.0) - 5) * 20,
-                            actual_return_3d=float(r["return_t7"] or 0) * 0.4,
-                            actual_return_7d=float(r["return_t7"] or 0),
-                            actual_return_30d=float(r["return_t7"] or 0) * 2.5,
-                            win_3d=bool(r["correct_t7"]),
-                            win_7d=bool(r["correct_t7"]),
-                            win_30d=bool(r["correct_t7"]),
-                            # v2 新特征
-                            iv_rank=float(r.get("iv_rank")) if r.get("iv_rank") is not None else 50.0,
-                            put_call_ratio=float(r.get("put_call_ratio")) if r.get("put_call_ratio") is not None else 1.0,
-                            final_score=float(r.get("final_score")) if r.get("final_score") is not None else 5.0,
-                            odds_score=ds.get("odds", 5.0),
-                            risk_adj_score=ds.get("risk_adj", 5.0),
-                            agent_agreement=_agree,
-                            direction_encoded=direction_map.get(_dir, 0.0),
-                        ))
-
-                    ml_svc = MLPredictionService()
-                    model_file = PATHS.ml_model_cache
-                    if model_file.exists():
-                        ml_svc.model.load_model(str(model_file))
-
-                    if not ml_svc.model.is_trained:
-                        ml_svc.model.train(new_training)
-                    else:
-                        ml_svc.model.incremental_train(new_training)
-
-                    ml_svc.model.save_model(str(model_file))
-                    _log.info(
-                        "🧠 ML 增量学习完成：%d 条验证数据 → 模型已更新",
-                        len(new_training),
-                    )
-                elif verified_rows:
-                    _log.info(
-                        "ML 增量学习跳过：仅 %d 条验证数据（需 ≥ 5）",
-                        len(verified_rows),
-                    )
-            except (ImportError, OSError, ValueError, TypeError, KeyError, AttributeError) as e:
-                _log.warning("ML 增量学习异常: %s", e)
+        # v0.45.547：此处曾有「ML 增量学习」——拿 50 条最近验证过的 T+7 记录拼成 TrainingData（momentum 恒 0、volatility 恒 5.0、
+        # 3/30 日收益按 T+7 乘 0.4 / 2.5 编出来），调 `incremental_train`；而 HGB 的 incremental_train 只看列表非空、随即从库里
+        # **全量重训**，再覆盖 ml_model_cache.json。缓存只在文件日期 = 今天（PDT）时有效 ⇒ 次日照样重训，它的产物只给当天之后
+        # 启动的进程用，还把当天取证快照换成一个没给任何标的打过分的模型（10-16：打分的 OOS 45.2%，快照里 56.8%）；
+        # 缓存不存在时更会直接 `train()` 在那 50 条编造特征上。已删，**勿重建**；墓碑 tests/test_ml_retrain_dedupe.py。
 
         # 权重自适应仅写日志，不发 Slack DM（减少噪音）
 
