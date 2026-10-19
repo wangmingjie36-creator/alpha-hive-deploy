@@ -402,6 +402,8 @@ class PredictionStore:
 
         exclude_nontrading_days=True（dashboard 门面口径）：排除周末/假日预测
         （周日 sample-accumulator 扩展池样本 + 漂移幽灵），只算核心交易日。
+        样本来源已退役（v0.45.316 删定时任务、v0.45.552 删 --samples-only），但库里
+        2026-03~05 的周日样本还在 ⇒ 这道过滤仍有用，别跟着删。
         默认 False，研究/其它调用保留全样本。fail-open：构建过滤出错则不过滤。
 
         返回: {
@@ -437,7 +439,7 @@ class PredictionStore:
         _amb = (" AND COALESCE(dir_ambiguous_t7, 0) = 0 AND dir_correct_t7 IS NOT NULL"
                 if _use_dir else f" AND COALESCE(ambiguous_{period}, 0) = 0")
 
-        # v32.3: 门面口径 —— 构建"排除非交易日"子句（周日 sample-accumulator 样本）
+        # v32.3: 门面口径 —— 构建"排除非交易日"子句（周日 sample-accumulator 样本；来源已退役，历史样本仍在库里）
         _excl = ""
         _excl_p: list = []
         if exclude_nontrading_days:

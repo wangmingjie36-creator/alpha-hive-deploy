@@ -12,6 +12,8 @@
      `test_git_failures_are_visible::TestNonProductionScanIsNotDeployed`）。
 
 所以「照 `--samples-only` 在 save_report 之前短路」只堵得住第 2 层——闸必须在扫描之前。
+（`--samples-only` / `--extended-pool` / `--max-tickers` 自身也已于 v0.45.552 删除，
+墓碑在 `tests/test_samples_only_mode_retired.py`；下面的参数化随之去掉那两组。）
 
 三组，各堵一处：
   1. CLI：不带 `--swarm` 的扫描在**构造 reporter 之前**就退出（exit 2）。
@@ -101,9 +103,7 @@ class TestCliRejectsNonSwarmScanBeforeScanning:
         ["--force", "--no-llm"],
         ["--force", "--no-llm", "--tickers", "NVDA", "TSLA"],
         ["--force", "--all-watchlist"],
-        ["--force", "--extended-pool", "--max-tickers", "3"],
-        ["--force", "--no-llm", "--samples-only"],
-    ], ids=["bare", "no-llm", "tickers", "all-watchlist", "extended-pool", "samples-only"])
+    ], ids=["bare", "no-llm", "tickers", "all-watchlist"])
     def test_exits_before_constructing_the_reporter(self, cli, argv, capsys):
         with pytest.raises(SystemExit) as exc:
             cli.run(*argv)

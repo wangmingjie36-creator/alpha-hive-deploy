@@ -62,7 +62,7 @@ CATEGORIES = {READ, CACHE, HUMAN, AUDIT, FORENSIC, BACKUP, CODE, PENDING_DEAD}
 NEEDS_READER = {READ, CACHE}
 
 #: 已知死链的条数（表 + 文件产物合计）。等号比较：清理一条就减一，**不许加**。
-CEILING_PENDING_DEAD = 4
+CEILING_PENDING_DEAD = 3
 
 #: 「自读」标记：缓存的读写在同一个函数里（读不到才取、取完写回）。只对 CACHE 有效，且该函数里必须真有读调用。
 SELF = "self"
@@ -113,7 +113,6 @@ SITE_ARTIFACTS: dict = {
     'alpha_hive_daily_report.py::AlphaHiveDailyReporter._save_output_files': ('alpha-hive-daily-*.md (+thread txt/index.html/rss.xml)',),
     'alpha_hive_daily_report.py::AlphaHiveDailyReporter.run_swarm_scan._analyze_and_save': ('.checkpoint_<session>_<date>.json',),
     'alpha_hive_daily_report.py::AlphaHiveDailyReporter.save_report': ('alpha-hive-daily-*.json',),
-    'alpha_hive_daily_report.py::main': ('.samples-only-<date>.json',),
     'alphabot/launcher.py::_open_server_log': ('Alpha Bot server.log',),
     'alphabot/launcher.py::_present': ('Alpha Bot window.pid',),
     'alphabot/launcher.py::announce_app_shell': ('Alpha Bot shell_drift_seen.json',),
@@ -406,8 +405,6 @@ ARTIFACTS: dict = {
     'sec_cache/edgar_rss.json': (CACHE, [('edgar_rss.py::EdgarRSSClient.get_recent_form4_alerts', 'edgar_rss.json', SELF)],
         'self：文件名只在模块常量 _CACHE_PATH，同函数磁盘缓存读回；ScoutBee 经 get_today_form4_alerts 调用'),
     # ── PENDING_DEAD
-    '.samples-only-<date>.json': (PENDING_DEAD, [],
-        '只在手动 --samples-only 时写；注释说「供 Hive app 读取」但仓内无读者，编排器也不跑该模式'),
     'ml_model.json': (PENDING_DEAD, [],
         'save_model() 无参时的缺省落点（MLPredictionService.train_model 训完无参 save_model()；v0.45.547 起只经报告生成器走到）：全仓无参 load_model 调用点 = 0，生产只读 ml_model_cache.json'),
     # ── AUDIT
@@ -521,9 +518,8 @@ ARTIFACTS: dict = {
 
 
 #: PENDING_DEAD 文件产物的见证：(文件::限定名, 令牌)——该函数体里还出现这段字符串 ⇒ 死链还在。
-#: 写入落点本身就是专门写它的（如 `alpha_hive_daily_report.py::main` 之于 `.samples-only-`）时，见证可以就写那个落点与文件名。
+#: 写入落点本身就是专门写它的（如 v0.45.552 前 `alpha_hive_daily_report.py::main` 之于 `.samples-only-`）时，见证可以就写那个落点与文件名。
 PENDING_WITNESS: dict = {
-    ".samples-only-<date>.json": ("alpha_hive_daily_report.py::main", ".samples-only-"),
     "ml_model.json": ("ml_predictor.py::default_model_path", "PATHS.ml_model"),
 }
 

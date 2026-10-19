@@ -7,7 +7,9 @@
 weight_history 等事故触发本工具。
 
 每周一 PDT 08:00 由 scheduled-task `alpha-hive-health-check` 自动跑：
-对 4 个核心定时任务做"运行 + 真实产出"双重验证。
+对核心定时任务做"运行 + 真实产出"双重验证。
+（v0.45.552：sample-accumulator 那一项已删——该定时任务 v0.42.1 停用、v0.45.316 删除，
+`--samples-only` 模式 v0.45.552 退役，留着这项检查只会每次报 fail。）
 
 输出：
   • logs/health_<date>.json — 完整结构化结果（保留 30 天）
@@ -18,7 +20,7 @@ weight_history 等事故触发本工具。
 
 用法
 ----
-    python3 health_check.py              # 完整 4 任务体检
+    python3 health_check.py              # 完整体检
     python3 health_check.py --json       # 仅输出 JSON
     python3 health_check.py --no-slack   # 关闭 Slack 推送
 """
@@ -28,7 +30,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass, asdict
@@ -39,7 +40,7 @@ from typing import List, Optional
 _log = logging.getLogger("alpha_hive.health_check")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-# `PROJECT` 只用作 `git -C <仓库>` 的锚点（下面两处 `git log`/`git ls-files`），
+# `PROJECT` 只用作 `git -C <仓库>` 的锚点（下面的 `git log`），
 # 这是「代码在哪」不是数据，`__file__` 锚定正确（已在
 # tests/test_paths_not_frozen_at_import.py 的 MUST_STAY_FILE_ANCHORED 登记）。
 # v0.45.260（数据根迁移阶段 2）：本文件其余 9 处数据路径（.swarm_results_*.json /
@@ -253,101 +254,7 @@ def check_weekly_optimizer() -> List[CheckResult]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. sample-accumulator 健康检查
-# ══════════════════════════════════════════════════════════════════════════════
-
-def check_sample_accumulator() -> List[CheckResult]:
-    from hive_logger import PATHS
-    results = []
-    db_path = Path(PATHS.db)
-    if not db_path.exists():
-        results.append(CheckResult(
-            "sample-accumulator: pheromone.db",
-            "alpha-hive-sample-accumulator",
-            "fail", "数据库不存在", None,
-        ))
-        return results
-
-    # 上周日是哪一天 — v0.24.7 修复 bug
-    # 旧实现：今天周日 weekday=6, (6+1)%7=0, last_sunday=today
-    # 但 sample-accumulator 18:01 才跑，若今天周日 < 18:00 应看 7 天前
-    today = _now()
-    if today.weekday() == 6 and today.hour < 18:
-        # 今天周日但还没到 sample-accumulator 时间 → 看上一个周日
-        last_sunday = today - timedelta(days=7)
-    elif today.weekday() == 6:
-        # 今天周日且已过 18:00 → 看今天
-        last_sunday = today
-    else:
-        # 工作日 → 看最近的上个周日
-        days_back = today.weekday() + 1  # Mon=0→1, Tue=1→2, ..., Sat=5→6
-        last_sunday = today - timedelta(days=days_back)
-    last_sunday_str = last_sunday.strftime("%Y-%m-%d")
-
-    # 周日 18:01 sample-accumulator 应该写入 ≥ 30 笔
-    try:
-        with sqlite3.connect(str(db_path)) as conn:
-            n = conn.execute(
-                "SELECT COUNT(*) FROM predictions WHERE date = ?",
-                (last_sunday_str,)
-            ).fetchone()[0]
-    except sqlite3.Error as e:
-        results.append(CheckResult(
-            "sample-accumulator: pheromone.db 查询",
-            "alpha-hive-sample-accumulator",
-            "fail", f"SQL 错误: {e}", None,
-        ))
-        return results
-
-    # v0.24.7 修复：实测 5-3 跑 39 个 ticker 但只 13 笔入库（部分 Agent 失败属常态）
-    # 降低 OK 阈值到 12（合理可用样本），warn 阈值 5
-    if n >= 12:
-        sev = "ok"
-        msg = f"上周日 {last_sunday_str} 写入 {n} 笔 ✓"
-    elif n >= 5:
-        sev = "warn"
-        msg = f"上周日 {last_sunday_str} 仅 {n} 笔（期望 ≥12；可能多个 Agent yfinance 失败）"
-    else:
-        sev = "fail"
-        msg = f"上周日 {last_sunday_str} 仅 {n} 笔（任务可能静默失败！检查权限批准 / 网络）"
-
-    results.append(CheckResult(
-        "sample-accumulator: 上周日写入量",
-        "alpha-hive-sample-accumulator",
-        sev, msg,
-        {"last_sunday": last_sunday_str, "n_predictions": n},
-    ))
-
-    # 检查 .samples-only 是否进了 git（应该被 gitignore）
-    try:
-        out = subprocess.check_output(
-            ["git", "-C", str(PROJECT), "ls-files",
-             ".samples-only-*.json"],
-            timeout=5,
-        ).decode().strip()
-        if out:
-            results.append(CheckResult(
-                "sample-accumulator: 仓库污染检查",
-                "alpha-hive-sample-accumulator",
-                "fail",
-                f"⚠️ {len(out.splitlines())} 个 .samples-only-*.json 已进 git（应被 .gitignore）",
-                None,
-            ))
-        else:
-            results.append(CheckResult(
-                "sample-accumulator: 仓库污染检查",
-                "alpha-hive-sample-accumulator",
-                "ok",
-                ".samples-only-*.json 未污染 git 仓库 ✓", None,
-            ))
-    except (subprocess.SubprocessError, OSError):
-        pass  # 非致命
-
-    return results
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 4. monthly-self-analysis 健康检查
+# 3. monthly-self-analysis 健康检查
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_monthly_self_analysis() -> List[CheckResult]:
@@ -461,7 +368,6 @@ def run_all_checks() -> dict:
     all_results = []
     all_results.extend(check_daily_scan())
     all_results.extend(check_weekly_optimizer())
-    all_results.extend(check_sample_accumulator())
     all_results.extend(check_monthly_self_analysis())
     all_results.extend(check_health_check_self())  # v0.24.7 Meta-check
 

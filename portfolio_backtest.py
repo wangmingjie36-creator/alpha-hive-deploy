@@ -75,7 +75,8 @@ class BacktestConfig:
     spy_below_ma_pct: float = 3.0          # SPY < MA × (1 - pct%) → risk-off
     # ── v32.3: dashboard 门面口径 ──
     # True = 剔除非交易日预测（周日 sample-accumulator 扩展池样本 + 漂移幽灵），
-    # 让 dashboard 净值/胜率只反映核心实盘策略。默认 False：optimizer / factor_attribution /
+    # 来源已退役（定时任务 v0.45.316 删除、--samples-only v0.45.552 删除）但库里 2026-03~05 的
+    # 周日样本还在 ⇒ 本过滤仍在保护门面口径，别跟着删。让 dashboard 净值/胜率只反映核心实盘策略。默认 False：optimizer / factor_attribution /
     # bootstrap 等研究路径保留全样本（样本积累本就要这些数据）。仅 dashboard 调用设 True。
     exclude_nontrading_days: bool = False
     # ── 交易成本开关（v0.45.374）──
@@ -401,7 +402,7 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
         return {"error": "无已验证预测数据"}
 
     # v32.3: dashboard 门面口径 —— 剔除非交易日预测（周日 sample-accumulator 扩展池样本 +
-    # 漂移幽灵）。默认 False（研究路径保留全样本）。fail-open 逐行：日期解析失败的行保留。
+    # 漂移幽灵；来源已退役、历史样本仍在库里，见 PortfolioConfig 该字段注释）。默认 False（研究路径保留全样本）。fail-open 逐行：日期解析失败的行保留。
     if cfg.exclude_nontrading_days:
         try:
             from is_trading_day import is_trading_day as _itd_pb

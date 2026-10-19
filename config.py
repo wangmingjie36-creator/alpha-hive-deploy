@@ -365,10 +365,12 @@ WATCHLIST = {
 # ══════════════════════════════════════════════════════════════════════════════
 # v0.22.0: 扩展池（S&P 500 高流动性 + 期权活跃核心 ~75 只）
 # 方向1a：扩 watchlist 以增加样本量（原 25 只 → 100 只）
-# 用法：扫描脚本按需合并 WATCHLIST + WATCHLIST_EXTENDED（CLI --all-watchlist 或 --extended-pool）
+# v0.45.552：扫描它的 CLI（`--extended-pool`，只给已退役的周日样本积累器用过）已删。
+# 现在它是候补池：降级标的的去处（名称 / 板块 / 失效条件 / catalyst 留在这里），
+# 要扫某只就把它升进 WATCHLIST——编排器只读 WATCHLIST。
 # ══════════════════════════════════════════════════════════════════════════════
 WATCHLIST_EXTENDED = {
-    # 候补样本池：仅 `--extended-pool` 时并入，不参与每日扫描。
+    # 候补样本池：不参与每日扫描（v0.45.552 起也没有 CLI 单独扫它，见上方注释）。
     # v0.45.6：原 WATCHLIST 中从未被扫过的 11 只降级至此——**不是删除**，
     # 扩池样本量直接决定统计功效（实测 10→30 把出结论时间缩短 5.18×），
     # 凭空砍掉 11 只样本不划算。
@@ -448,7 +450,8 @@ WATCHLIST_EXTENDED = {
 
 def get_extended_watchlist() -> dict:
     """返回合并后的标的池（30 只每日扫描 + 71 只候补 = 101）。
-    调用方：`python3 alpha_hive_daily_report.py --extended-pool`
+    （原调用方 `alpha_hive_daily_report.py --extended-pool` 已于 v0.45.552 删除；
+    现在只有 `tests/test_watchlist_single_source.py` 用它守「候补池不许悄悄缩水」。）
 
     v0.23.2 修复：语义明确为"WATCHLIST 优先"（核心标的的 catalyst 配置不被扩展池覆盖）。
     如需覆盖核心标的，直接改 WATCHLIST 而非往 WATCHLIST_EXTENDED 加同名。
@@ -784,7 +787,7 @@ def validate_watchlist():
     # CATALYSTS 中有但**两个池子都没有**的 ticker。
     # v0.45.6：口径从 WATCHLIST 放宽到 WATCHLIST + WATCHLIST_EXTENDED——
     # WATCHLIST 收窄为每日扫描的 30 只后，候补池标的的 catalyst 配置是**合法的**
-    # （`--extended-pool` 会用到），按旧口径会误报 10 个孤儿。
+    # （降级标的升回 WATCHLIST 时要用），按旧口径会误报 10 个孤儿。
     # 真正该报的是"配了 catalyst 却哪个池子都不在"，那才是死配置。
     _known = set(WATCHLIST.keys()) | set(WATCHLIST_EXTENDED.keys())
     orphan_catalysts = set(CATALYSTS.keys()) - _known

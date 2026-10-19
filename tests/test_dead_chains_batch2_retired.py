@@ -86,7 +86,9 @@ class TestTombstoneHasTeeth:
         assert _has_member("ml_predictor.py", "HistoricalDataBuilder", "add_record")
 
     def test_literal_check_sees_live_literals(self):
-        assert any(".samples-only-" in s for s in _string_constants("alpha_hive_daily_report.py"))
+        # v0.45.552 前认的是 `.samples-only-`——那个写入方也退役了（见 tests/test_samples_only_mode_retired.py），
+        # 换成同文件里活着的 f-string 文件名，顺带正面核对「占位渲染成 `{}`」在真实源码上成立。
+        assert ".swarm_results_{}.json" in _string_constants("alpha_hive_daily_report.py")
 
     def test_fstring_filenames_render_to_the_registered_shape(self):
         tree = ast.parse('def f(t):\n    open(f"crowding_{t}.json", "w")\n    log = "alpha_hive.crowding_detector"\n')

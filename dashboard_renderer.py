@@ -1018,7 +1018,8 @@ def _load_accuracy_data() -> dict:
         _ps11 = _PS11()
         with _sq11.connect(_ps11.db_path) as _cn11:
             _cn11.row_factory = _sq11.Row
-            # v32.3: 门面口径 —— 构建"排除非交易日"子句（周日 sample-accumulator 样本），
+            # v32.3: 门面口径 —— 构建"排除非交易日"子句（周日 sample-accumulator 样本；
+            # 来源 v0.45.552 已整个退役，但库里历史周日样本还在 ⇒ 子句别删），
             # 应用到下面所有 pill 查询，使准确率面板与策略块同口径。fail-open：出错则空子句。
             _excl11 = ""
             _excl11_p: list = []

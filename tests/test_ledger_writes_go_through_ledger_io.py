@@ -105,7 +105,6 @@ WRITERS: dict = {
     "vix_term_structure.py::get_vix_term_structure": (CACHE, "VIX 期限结构 30 分钟缓存（读坏 ⇒ 重取）"),
     # ── 只给人看
     "alert_manager.py::AlertAnalyzer.save_alerts": (HUMAN, "告警汇总文件"),
-    "alpha_hive_daily_report.py::main": (HUMAN, "样本模式最小结果 JSON（仓内无读者）"),
     "entry_price_backfill.py::main": (HUMAN, "回填判决 --out 导出"),
     "ibkr_sync.py::export_daily_actions": (HUMAN, "给人手动下单的订单清单"),
     "ibkr_sync.py::reconcile": (HUMAN, "模拟 vs 真实成交对账报告"),

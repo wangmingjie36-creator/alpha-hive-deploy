@@ -5,7 +5,57 @@
 
 ---
 
-## [0.45.552] — 2026-10-19 — 占位（进行中：退役 --samples-only 样本积累模式 + --extended-pool / --max-tickers）
+## [0.45.552] — 2026-10-19 — Removed：`--samples-only` 样本积累模式整个退役（连同 `--extended-pool` / `--max-tickers` 与 `health_check.check_sample_accumulator`）；已知死链 4 → 3
+
+用户问「`.samples-only-<date>.json` 是什么板块」后决定：把整个退役模式清干净，不只删那一处写入；`--extended-pool` / `--max-tickers` 经分析后一起删。
+
+### 背景
+v0.23.1（2026-04-17）「混合双轨」：周日定时任务 `alpha-hive-sample-accumulator` 跑 `--swarm --no-llm --extended-pool --max-tickers 50 --samples-only`，
+用规则引擎扫 101 只扩展池、只写 pheromone.db 攒 T+30 样本，另存一份「供 Hive app 读取」的 JSON——仓内从来没有这个读者
+（v0.45.543 读者登记表登记为 PENDING_DEAD）。定时任务 v0.42.1 停用、v0.45.316 删除；模式代码一直留着。
+
+### 删前实测（都是只读）
+- 生产库周末预测 110 行 / 5 个周日，最后一天 **2026-05-17**；候补池（`WATCHLIST_EXTENDED`）标的只在其中 4 个周日入库，**工作日 0 行**
+  ⇒ `--extended-pool` 从来只给积累器用。编排器传 `--tickers`、Makefile 用 `--all-watchlist`、现存定时任务都不调它。
+- `--extended-pool` 脱离 `--samples-only` 的短路单独用 = 101 只的**生产扫描**：写概率账本 / `signal_archive` / 纸面组合、推 gh-pages，
+  且工作日样本躲不过非交易日过滤、会混进维度 IC 窗口。留着是一个「看着像扩样本、实际改生产」的口子。要扩池：把标的升进 `config.WATCHLIST`。
+- `health_check.check_sample_accumulator()` 实跑：**恒 fail**「上周日 2026-10-18 仅 0 笔（任务可能静默失败！）」。
+- `.samples-only-*.json` 现存位置：数据根 0 个、生产克隆 0 个、**开发检出根目录 4 个**（04-26 / 05-03 / 05-10 / 05-17，约 460KB，被 .gitignore 挡着）。
+
+### Removed
+- `alpha_hive_daily_report.py`：CLI `--samples-only` / `--extended-pool` / `--max-tickers`；交易日护栏对 `--samples-only` 的放行；
+  `save_report` 前的短路与 `.samples-only-<date>.json` 写入；`save_report` 后注释自认「不会到达」的兜底分支；
+  `_resolve_focus_tickers` 只剩 `--all-watchlist` / `--tickers` 两支。现在传这三个参数 ⇒ argparse `unrecognized arguments` exit 2（大声失败，不跑扫描）。
+- `health_check.py::check_sample_accumulator`（及 `run_all_checks` 里的调用、随之无用的 `import sqlite3`），文件头说明同步改。
+
+### 刻意保留（只改注释说明来源已退役）
+- `backtester.get_accuracy_stats` / `dashboard_renderer` / `portfolio_backtest` 的 `exclude_nontrading_days` 非交易日过滤，
+  以及 `close_correction` 对周日样本的取价口径：库里那 110 行周日样本还在，门面口径仍靠它们。
+- `.gitignore` 的 `.samples-only-*.json`、`data_backup/migrate_data_root.py` 的 SKIP 规则：开发检出根目录还有 4 个旧文件，删了会被 `git add -A` 带走 / 被迁移工具归 UNKNOWN。
+  那 4 个文件本身未删（用户数据，删需用户点头）。
+- `config.WATCHLIST_EXTENDED` / `get_extended_watchlist`：候补池仍是降级标的的去处（看板公司名 / 板块、thesis_breaks 孤儿判定、catalyst 校验），
+  `test_watchlist_single_source` 守它不缩水；注释从「`--extended-pool` 时并入」改成「要扫就升进 WATCHLIST」。
+
+### Changed（测试随之收缩）
+- `tests/test_persistent_writes_have_readers.py`：删代码后先按设计红两条（「`main` 已经不写文件了」「见证没了 ⇒ 删条目、上限减一」），
+  照删 `SITE_ARTIFACTS` / `ARTIFACTS` / `PENDING_WITNESS` 各一条，`CEILING_PENDING_DEAD` 4 → 3。
+- `tests/test_dead_chains_batch2_retired.py`：正对照原本认 `.samples-only-` 字面量，换成同文件活着的 `.swarm_results_{}.json`（顺带核对 f-string 渲染在真实源码上成立）。
+- `tests/test_ledger_writes_go_through_ledger_io.py::WRITERS`：删 `alpha_hive_daily_report.py::main`（HUMAN「样本模式最小结果 JSON」；同样先红「已经不命中」，HUMAN 类无上限）。
+- `tests/test_non_swarm_scan_retired.py`：参数化去掉 `extended-pool` / `samples-only` 两组（参数已不存在，会以 argparse 报错而非「退役」字样退出）。
+
+### Added
+- `tests/test_samples_only_mode_retired.py`（墓碑）：三个 CLI 选项不许回到 `add_argument`、`args.<它们>` 不许被读、`.samples-only-{}.json` 完整文件名
+  不许出现在任何非测试 .py 的字符串常量里、`check_sample_accumulator` 不许回来；行为面 `--swarm … --samples-only` 等在构造 reporter 前 exit 2。
+  保留项正面钉住（三处 `exclude_nontrading_days`、.gitignore 行、候补池非空且不与 WATCHLIST 重叠）。
+  负对照：换回旧 `alpha_hive_daily_report.py` + `health_check.py` ⇒ 7 条全红；合成旧形状源码被判据认出；注释 / docstring 里的 `--samples-only` 字样不算。
+  正对照：判据认得出活着的 `--swarm` / `--all-watchlist` / `--tickers`；去掉退役参数的同一命令照常扫描且标的正确。
+
+### 验证
+全套 `/usr/local/bin/python3 -m pytest`：10320 passed；红的只有已知 `TestCoverageHorizon`、上面那条 `WRITERS`（已删、复跑绿），以及一条 session 级真实数据根闸 ERROR——
+闸自己的诊断：5 个 `alphabot_state/intraday/2026-10-19/*.jsonl` 只在末尾追加了盘中快照、原有字节未变（Alpha Bot 盘中采样，非测试写穿）。
+
+### 剩下的已知死链（3 条）
+`agent_memory`、`barrier_outcomes`（两张表，政策 / 用户暂缓）；`ml_model.json`（`train_model()` 无参 `save_model()`，零读者）。
 
 ## [0.45.551] — 2026-10-19 — Fixed：ML 报告生成器不再读回磁盘上的 `ml_model_cache.json`（08-28 / 09-04 常数概率的真因，已逐位复现）；每份报告记下出概率的模型指纹
 

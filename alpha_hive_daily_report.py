@@ -2401,29 +2401,17 @@ class AlphaHiveDailyReporter:
 
 def _resolve_focus_tickers(args) -> List[str]:
     """
-    v0.23.0 扩样本：统一 CLI 解析优先级
-      1. 显式 --tickers 列表 → 直接用
-      2. --extended-pool → WATCHLIST + WATCHLIST_EXTENDED（101 只）
-      3. --all-watchlist → WATCHLIST 每日扫描池 30 只（v0.45.6 起与编排器同源）
-      4. 默认 → args.tickers 里的 10 只
-    --max-tickers 是硬上限（防止首次跑太久）
-    """
-    if getattr(args, "extended_pool", False):
-        try:
-            from config import get_extended_watchlist
-            tickers = list(get_extended_watchlist().keys())
-        except (ImportError, AttributeError):
-            _log.warning("get_extended_watchlist 不可用，降级到 WATCHLIST")
-            tickers = list(WATCHLIST.keys())
-    elif getattr(args, "all_watchlist", False):
-        tickers = list(WATCHLIST.keys())
-    else:
-        tickers = list(args.tickers)
+    CLI 标的解析：
+      1. --all-watchlist → WATCHLIST 每日扫描池（v0.45.6 起与编排器同源）
+      2. 否则 → args.tickers（显式 --tickers 或缺省列表）
 
-    max_n = getattr(args, "max_tickers", None)
-    if max_n and max_n > 0:
-        tickers = tickers[:max_n]
-    return tickers
+    v0.45.552：`--extended-pool`（并入候补池 WATCHLIST_EXTENDED）与 `--max-tickers` 已删——
+    它们只给已退役的 `--samples-only` 样本积累器用过；脱离那道短路单独用，就是一次
+    101 只、会部署的生产扫描。要扩池：把候补标的升进 `config.WATCHLIST`。
+    """
+    if getattr(args, "all_watchlist", False):
+        return list(WATCHLIST.keys())
+    return list(args.tickers)
 
 
 def _refresh_cloud_snapshots() -> None:
@@ -2576,26 +2564,6 @@ def main():
         help='扫描配置中的全部核心监控列表（WATCHLIST，约 25 只）'
     )
     parser.add_argument(
-        '--extended-pool',
-        action='store_true',
-        help='v0.23.0 扩样本：扫描 WATCHLIST + WATCHLIST_EXTENDED（101 只，覆盖 14 sector）'
-    )
-    parser.add_argument(
-        '--max-tickers',
-        type=int,
-        default=None,
-        help='限制扫描的最大标的数（配合 --extended-pool 用，防止首次跑太久）'
-    )
-    parser.add_argument(
-        '--samples-only',
-        action='store_true',
-        help=(
-            'v0.23.1 样本积累模式：只跑蜂群扫描写 pheromone.db，'
-            '不生成 HTML 日报 / 不推 GitHub / 不推 Slack。'
-            '用于离线积累 T+30 样本，零 API 费用（需配合 --no-llm）。'
-        )
-    )
-    parser.add_argument(
         '--swarm',
         action='store_true',
         help=('蜂群协作模式（7 个自治工蜂：6 核心并行 + BearBeeContrarian 看空对冲）。'
@@ -2646,8 +2614,8 @@ def main():
     args = parser.parse_args()
 
     # v0.45.213：非蜂群扫描（原 `run_daily_scan` 规则引擎路径）已退役。
-    # 闸放在**任何取数、任何落盘之前**——不是照 --samples-only 那样跑完再在
-    # save_report 之前短路，因为那条路在扫描**过程中**就写生产状态：
+    # 闸放在**任何取数、任何落盘之前**——不是跑完再在 save_report 之前短路
+    # （已退役的 --samples-only 当年就是那样做的），因为那条路在扫描**过程中**就写生产状态：
     #   · `generate_ml_enhanced_report` → `probability_scorecard.record_published`
     #     按 (date, ticker) 先写者占位。规则引擎先跑，当天蜂群扫描真正印出去的
     #     那个数就被拒收，账本里留下 direction=None 的一行（实测）。
@@ -2685,10 +2653,11 @@ def main():
     # ── 美股交易日护栏 ──
     # 周末 / 美股假日（Juneteenth、Good Friday…）跳过完整简报生成，不对无交易日产出幽灵报告。
     # 用 PDT 日期判断（= 美股交易日），不依赖本机时区（用户在中国，Mac 时钟 +15h）。
-    # 例外：--samples-only（周日 cron 故意跑样本积累，且不生成 dated 报告/不部署）、
-    #       --check-earnings（财报检查工具）、--force 均放行。
+    # 例外：--check-earnings（财报检查工具）、--force 放行。
+    # （v0.45.552 前还放行 --samples-only：已退役的周日样本积累器。库里那批周日样本仍由
+    #  backtester / dashboard_renderer 的非交易日过滤挡在门面口径之外。）
     # fail-open：检查本身异常时继续生成，宁可多生成也绝不误跳过有效交易日。
-    if not (args.samples_only or args.check_earnings or args.force):
+    if not (args.check_earnings or args.force):
         try:
             from datetime import date as _date_guard
             from hive_logger import pdt_today as _pdt_today_guard
@@ -2752,8 +2721,7 @@ def main():
             _log.info("今日无 watchlist 标的发布财报")
         return result
 
-    # 确定扫描标的（v0.23.2 修复：主扫描路径也必须接入 _resolve_focus_tickers，
-    # 否则 --extended-pool / --max-tickers 对实际扫描完全不生效）
+    # 确定扫描标的
     focus_tickers = _resolve_focus_tickers(args)
 
     # v0.45.466：云端快照新鲜度观测与扫描并行（见 _CloudSnapshotObservation）。
@@ -2774,29 +2742,6 @@ def main():
         print("   - 常见原因：出站网络 / 代理故障（2026-10-12 即此）。编排器会等待后重探代理并重跑。")
         _timing.write(reporter.date_str, extra={"early_exit": "price_gate", "price_gate": _gate.coverage})
         return {"error": "price_gate", "price_gate": _gate.coverage}
-
-    # v0.23.2 修复 #2：--samples-only 必须在 save_report 之前短路
-    # 否则 _save_output_files 会生成 MD/HTML/PWA/X线程/rss.xml 到 repo 根，
-    # 被下次 daily-scan 的 deploy_and_notify 误 commit 污染生产网站
-    if args.samples_only:
-        # 修复 #7：error dict 不应静默成功退出
-        if isinstance(report, dict) and "error" in report:
-            print(f"\n❌ 样本积累扫描失败: {report.get('error')}")
-            _log.error("samples-only scan error: %s", report.get("error"))
-            return report
-        n_results_early = len(report.get("swarm_results") or report.get("ticker_results") or {})
-        # 只保存最小 JSON 供 Hive app 读取（pheromone.db 已在 run_swarm_scan 写入）
-        try:
-            json_file = reporter.report_dir / f".samples-only-{reporter.date_str}.json"
-            with open(json_file, "w", encoding="utf-8") as f:
-                json.dump(report, f, ensure_ascii=False, indent=2, cls=SafeJSONEncoder)
-            _log.info("样本模式: 仅保存 %s", json_file.name)
-        except (OSError, TypeError) as e:
-            _log.warning("samples-only JSON 保存失败 (但 pheromone.db 已写入): %s", e)
-        print(f"\n📦 样本积累模式: 完成 {n_results_early} 标的扫描, pheromone.db 已写入")
-        print(f"   - 跳过 save_report (避免生成 HTML/MD/PWA 污染 repo)")
-        print(f"   - 跳过 deploy_and_notify (不推 gh-pages / Slack)")
-        return report
 
     # v0.27.2 空扫描护栏：数据源全线失败（如 yfinance 429 限流触发断路器）会产出
     # tickers_analyzed=0 / opportunities=0 的空报告。此时绝不能 save_report + 部署，
@@ -2823,17 +2768,6 @@ def main():
     with _timing.timed("save_report"):
         report_path = reporter.save_report(report)
     _log.info("报告已保存：%s", report_path)
-
-    # v0.23.1: --samples-only 模式跳过所有部署 / Slack / gh-pages，只为积累 pheromone.db 样本
-    # （保留为死代码兜底；上方已 early return，此处不会到达）
-    if args.samples_only:
-        n_results = len(report.get("swarm_results") or report.get("ticker_results") or {})
-        print(f"\n📦 样本积累模式：完成 {n_results} 标的扫描，已写入 pheromone.db")
-        print(f"   - 跳过 HTML 报告生成")
-        print(f"   - 跳过 GitHub / gh-pages 推送")
-        print(f"   - 跳过 Slack 通知")
-        print(f"   下次回测 / Bootstrap / FF 归因 会自动读到这批新样本")
-        return report
 
     # 部署：gh-pages（网站）+ Hive App + Slack
     # v0.45.402（数据根迁移阶段 6）：日报不再提交 / 推送代码仓库 main——数据在数据根，不进公开仓库。
