@@ -1381,9 +1381,13 @@ STEP6_END=$(date +%s)
 STEP6_DURATION=$((STEP6_END - STEP6_START))
 # 后置条件（v0.45.543）：alert_manager 无论有无告警都写 alerts-<日期>.json（v0.45.543 起；此前无告警不写）。
 # 它按 datetime.now() 取日期 ⇒ 跨零点时是次日的文件：两个名字任一是本步写的就算。no_output 同 rc≠0 支：不升级整体状态。
+# v0.45.549：按「哪个名字是本步写的」选，不按「DATE_STR 那个在不在」——同一天第二次扫描跨零点时，DATE_STR 名下
+# 是上一轮留下的旧文件、本轮写的是次日名，543 版会挑中旧文件误判 no_output。
 _STEP6_ALERTS="$LOGDIR/alerts-${DATE_STR}.json"
-if [ $STEP6_RC -eq 0 ] && [ ! -f "${_STEP6_ALERTS}" ]; then
-    _STEP6_ALERTS="$LOGDIR/alerts-$(date +%Y-%m-%d).json"
+_STEP6_ALERTS_NOW="$LOGDIR/alerts-$(date +%Y-%m-%d).json"
+if [ "${_STEP6_ALERTS_NOW}" != "${_STEP6_ALERTS}" ] && [ -f "${_STEP6_ALERTS_NOW}" ] \
+        && { [ -z "${_STEP6_MARK}" ] || ! [ "${_STEP6_ALERTS_NOW}" -ot "${_STEP6_MARK}" ]; }; then
+    _STEP6_ALERTS="${_STEP6_ALERTS_NOW}"
 fi
 if _no_output step6_alert_analysis "$STEP6_RC" "$STEP6_DURATION" "${_STEP6_MARK}" "${_STEP6_ALERTS}"; then
     :

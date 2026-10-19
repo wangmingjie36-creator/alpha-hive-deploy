@@ -5,7 +5,22 @@
 
 ---
 
-## [0.45.549] — 2026-10-19 — 占位（进行中：v0.45.543 二次检查——Step 6 跨零点 + 同日重扫时误判 no_output）
+## [0.45.549] — 2026-10-19 — Fixed：v0.45.543 二次检查——Step 6 后置条件在「同一天第二次扫描且跨零点」时误判 no_output
+
+### 为什么
+- `alert_manager` 按 `datetime.now()` 给 `alerts-<日期>.json` 命名；543 版只在 `alerts-<DATE_STR>.json` **不存在**时才去看次日名。
+  同一天先扫过一轮（留下 DATE_STR 名下的文件）、第二轮跑过零点 ⇒ 本轮写的是次日名，却挑中上一轮的旧文件 ⇒ 误记
+  `failed:no_output`（假红，Step 6 不升级整体状态，但 alert_manager 下一轮会出一条 P1）。
+
+### Fixed
+- `scripts/alpha-hive-orchestrator.sh` Step 6：按「哪个名字是本步写的」选——次日名存在且不早于本步标记就用它，否则用 DATE_STR 名。
+- `tests/test_orchestrator_step_postconditions.py`：新增两条真跑用例（跨零点 + DATE_STR 名下是旧文件 ⇒ success；两个名字都是旧文件 ⇒ no_output）。
+  正对照：前一条在 543 版编排器上实跑为红（`missing: ['alerts-2000-01-01.json（旧文件，不是本步写的）']`），换上本版为绿。
+
+### 二次检查其余结论（无需改）
+- Step 3：`generate_ml_report` 产出写在 `PATHS.home`（= 编排器 `DATA_DIR`）、退出前 `shutdown(wait=True)` 等异步写完；它**单只失败仍退出 0**
+  （只记日志）——543 的后置条件正是把这种部分失败从「success」改记 `failed:no_output` + partial（设计内的行为变化，会出 P1）。
+- 编排器 `bash -n`、`orchestrator_lint.py` 0 命中；main 上相关测试 1168 passed。
 
 ## [0.45.548] — 2026-10-19 — Fixed：v0.45.538 二次检查——世代印记用「缺 `ml_adjustment` 键」，在 03-12 早期格式旧归档上误报 `boundary_too_late`；改成正面印记 `ml_auxiliary_in_score: False`；二阶 Guard 效应实测订正
 

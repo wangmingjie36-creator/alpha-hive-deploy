@@ -249,6 +249,24 @@ class TestRealStepBlocks:
         r = self._step6(orch, tmp_path, ': > "$LOGDIR/alerts-${DATE_STR}.json"')
         assert r["steps"]["step6_alert_analysis"]["status"] == "success", r
 
+    def test_step6_rollover_after_an_earlier_same_day_run_is_success(self, orch, tmp_path):
+        """v0.45.549：DATE_STR 名下是上一轮留下的旧文件，本轮跨零点写的是次日名 ⇒ 认次日名，不误判 no_output。
+        （543 版只在 DATE_STR 文件「不存在」时才看次日名 ⇒ 这里会红。）"""
+        block = _block(orch, "# Step 6: 智能告警分析", "# Step 7: 推送")
+        pre = ('REPORTDIR="$DATA_DIR"\nDATE_STR="2000-01-01"\n'
+               ': > "$LOGDIR/alerts-2000-01-01.json"; touch -t 200001010000 "$LOGDIR/alerts-2000-01-01.json"\n')
+        write = ': > "$LOGDIR/alerts-$(date +%Y-%m-%d).json"'
+        r = _bash(_funcs(orch) + _stub_run_step(write) + "STUB_RC=0\n" + pre + block, tmp=tmp_path)
+        assert r["steps"]["step6_alert_analysis"]["status"] == "success", r
+
+    def test_step6_stale_files_under_both_names_is_red(self, orch, tmp_path):
+        block = _block(orch, "# Step 6: 智能告警分析", "# Step 7: 推送")
+        pre = ('REPORTDIR="$DATA_DIR"\nDATE_STR="2000-01-01"\n'
+               'for f in "$LOGDIR/alerts-2000-01-01.json" "$LOGDIR/alerts-$(date +%Y-%m-%d).json"; do '
+               ': > "$f"; touch -t 200001010000 "$f"; done\n')
+        r = _bash(_funcs(orch) + _stub_run_step("") + "STUB_RC=0\n" + pre + block, tmp=tmp_path)
+        assert r["steps"]["step6_alert_analysis"]["reason"] == "no_output", r
+
 
 class TestEveryRunStepDeclaresItsEvidence:
 
