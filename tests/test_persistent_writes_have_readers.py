@@ -63,7 +63,7 @@ CATEGORIES = {READ, CACHE, HUMAN, AUDIT, FORENSIC, BACKUP, CODE, PENDING_DEAD}
 NEEDS_READER = {READ, CACHE}
 
 #: 已知死链的条数（表 + 文件产物合计）。等号比较：清理一条就减一，**不许加**。
-CEILING_PENDING_DEAD = 9
+CEILING_PENDING_DEAD = 7
 
 #: 「自读」标记：缓存的读写在同一个函数里（读不到才取、取完写回）。只对 CACHE 有效，且该函数里必须真有读调用。
 SELF = "self"
@@ -188,8 +188,6 @@ SITE_ARTIFACTS: dict = {
     'ml_predictor.py::HistoricalDataBuilder.save_to_file': ('training_data.json',),
     'ml_predictor.py::SGDMLModel.save_model': ('ml_model_cache.json', 'ml_model.json'),
     'ml_predictor.py::SimpleMLModel.save_model': ('ml_model_cache.json', 'ml_model.json'),
-    'ml_predictor_extended.py::HistoricalDataBuilder.save_to_file': ('training_data_extended.json',),
-    'ml_predictor_extended.py::SimpleMLModel.save_model': ('ml_model_extended.json',),
     'newsapi_client.py::_safe_cache': ('cache/news/{T}_news.json',),
     'options_analyzer.py::OptionsDataFetcher._save_last_valid_iv': ('cache/options_{T}_last_valid_iv.json',),
     'options_analyzer.py::OptionsDataFetcher._write_cache': ('cache/options_{T}_{type}.json',),
@@ -423,13 +421,9 @@ ARTIFACTS: dict = {
     'logs/last_run_status.json': (PENDING_DEAD, [],
         '全仓没有读者；run_daily_scan.py 只能手动跑，编排器不调用它'),
     'ml_model.json': (PENDING_DEAD, [],
-        'save_model() 无参时的缺省落点（MLPredictionService.train_model，RivalBee 经 ml_predictor_extended 触发）：全仓无参 load_model 调用点 = 0，生产只读 ml_model_cache.json'),
-    'ml_model_extended.json': (PENDING_DEAD, [],
-        '只在 import ml_predictor 失败时才写；其 load_model 全仓零调用'),
+        'save_model() 无参时的缺省落点（MLPredictionService.train_model 训完无参 save_model()；扫描开始 daily_retrain 与 generate_ml_report 都会走到）：全仓无参 load_model 调用点 = 0，生产只读 ml_model_cache.json'),
     'training_data.json': (PENDING_DEAD, [],
         '生产零调用者（仅 tests 调用），也无任何读者'),
-    'training_data_extended.json': (PENDING_DEAD, [],
-        '全仓零调用者（含测试外），也无读者'),
     # ── AUDIT
     'code_executor sandbox audit.log': (AUDIT, [],
         '代码执行沙箱审计追加；get_audit_log 存在但全仓零调用'),
@@ -546,8 +540,6 @@ PENDING_WITNESS: dict = {
     ".samples-only-<date>.json": ("alpha_hive_daily_report.py::main", ".samples-only-"),
     "crowding_<T>.json": ("crowding_detector.py::CrowdingDetector.save_to_json", "crowding_"),
     "training_data.json": ("ml_predictor.py::HistoricalDataBuilder.save_to_file", "training_data.json"),
-    "training_data_extended.json": ("ml_predictor_extended.py::HistoricalDataBuilder.save_to_file", "training_data_extended.json"),
-    "ml_model_extended.json": ("ml_predictor_extended.py::default_extended_model_path", "PATHS.ml_model_extended"),
     "logs/last_run_status.json": ("run_daily_scan.py::_write_status", "last_run_status.json"),
     "ml_model.json": ("ml_predictor.py::default_model_path", "PATHS.ml_model"),
 }
