@@ -6,7 +6,7 @@
 4-19 sample-accumulator 跑了 0 笔 / 4-26 weekly-optimizer 没写
 weight_history 等事故触发本工具。
 
-每周一 PDT 08:00 由 scheduled-task `alpha-hive-health-check` 自动跑：
+手动运行（原每周一由 scheduled-task `alpha-hive-health-check` 自动跑，该任务 v0.45.316 已删）：
 对核心定时任务做"运行 + 真实产出"双重验证。
 （v0.45.552：sample-accumulator 那一项已删——该定时任务 v0.42.1 停用、v0.45.316 删除，
 `--samples-only` 模式 v0.45.552 退役，留着这项检查只会每次报 fail。）

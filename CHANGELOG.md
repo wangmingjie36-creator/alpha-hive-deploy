@@ -95,6 +95,18 @@ v0.23.1（2026-04-17）「混合双轨」：周日定时任务 `alpha-hive-sampl
   copy2 → 逐个核 sha256 与大小 → 全部通过才删源文件；记录 `ARCHIVE_RECORD_20261019.json`（源路径 / sha256 / 字节数 / 原 mtime / 原因）。
 - `.gitignore` 行、`migrate_data_root` SKIP 规则与墓碑说明里「检出里还有 4 个旧文件」的措辞改为「已归档」；`.gitignore` 行留作保险（零代价）。
 
+### 二次检查（同日，用户要求复查本版全部动作）——只改了措辞，没有行为错误
+- ⚠️ **首轮盘点被截断过**：盘点 grep 接了 `| head -100`，排除 CHANGELOG 的 `grep -v "^./CHANGELOG.md"` 因路径不带 `./` 没生效，CHANGELOG 行占满了
+  100 行额度。复查用不截断的 `git grep origin/main`（全类型文件）重扫：**没有漏掉的功能性引用**，只漏了两处测试注释——
+  `test_thesis_breaks_coverage_universe.py` 的「`--extended-pool` 时在用」、`test_watchlist_single_source.py::test_pools_do_not_overlap` 的理由，已改。
+- `health_check.py` 文件头「每周一由 scheduled-task 自动跑」早已过期（该任务 v0.45.316 删），本版动过相邻几行却没改它，现已改成「手动运行」。
+- 复核无问题：代码 diff 逐段对过；墓碑行为测试起的云端快照观测线程由 conftest 的离线闸与收尾等待管住（同既有 `test_non_swarm_scan_retired`）；
+  归档 4 个文件 sha256 / 大小 / 日期与记录逐个一致，检出里已无残留。
+- ⚠️ **归档降低了这 4 个文件的冗余度（当时没说）**：它们原在 iCloud 同步的桌面上（等于有一份云端副本），`_archive/` 却**不在**
+  `data_backup/export.py` 的备份范围里 ⇒ 现在只有本机一份。与 `pheromone_bak/`、`stray_old_root/` 的先例一致；要不要纳入备份由用户定。
+- 仓库外：`~/.claude/scheduled-tasks/alpha-hive-sample-accumulator/SKILL.md` 按 v0.45.316「保留可恢复」仍在盘上——若有人恢复这个任务，
+  命令会因参数已删 exit 2 大声失败，不会静默扫描。
+
 ## [0.45.551] — 2026-10-19 — Fixed：ML 报告生成器不再读回磁盘上的 `ml_model_cache.json`（08-28 / 09-04 常数概率的真因，已逐位复现）；每份报告记下出概率的模型指纹
 
 用户决定（2026-10-19）：「按方案修：删磁盘 cache 读取、报告记录模型指纹、配会红的测试与守卫、更正代码注释，占号写 CHANGELOG」。

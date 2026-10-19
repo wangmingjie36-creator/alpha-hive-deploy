@@ -71,7 +71,8 @@ class TestWatchlistIntegrity:
         assert bad == [], f"这些 ticker 会被蜂群 _validate_ticker 静默中性化: {bad}"
 
     def test_pools_do_not_overlap(self):
-        """两池重叠会让 `--extended-pool` 的计数与实际不符。"""
+        """两池重叠 ⇒ 同一标的两份名称 / 板块 / catalyst，`get_extended_watchlist` 与看板按「WATCHLIST 优先」合并时
+        候补池那份被静默盖掉。（v0.45.552 前的理由是 `--extended-pool` 计数不符，那个参数已删。）"""
         from config import WATCHLIST, WATCHLIST_EXTENDED
 
         dup = sorted(set(WATCHLIST) & set(WATCHLIST_EXTENDED))
