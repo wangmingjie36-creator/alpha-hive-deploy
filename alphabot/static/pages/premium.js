@@ -5,8 +5,11 @@
 import { api, h, num, pct, money, isNum, panel, seg, table, downloadCSV, pref, setPref, fill, loading,
   timeAgo, plain } from "../lib.js";
 import { lines, C } from "../charts.js";
+import { state } from "../app.js";
 
 const PREF_KEY = "premium.params";
+// 盘中自动刷新间隔：同跨式页（每次约 1.5MB 全链、经 CBOE 闸串行；再密会挡住别的页现拉）
+const AUTO_MS = 120000;
 
 export async function premium(body, d, t, alive, force = false) {
   let r = null;            // 最近一次被服务端接受的结果
@@ -14,6 +17,8 @@ export async function premium(body, d, t, alive, force = false) {
   let notice = null;       // {text, retry?}
   let seq = 0;             // 请求序号：只认最后发出的那一个（连点时慢的旧响应不许盖掉新的、更不许存进本机）
   let wanted = null;       // 最近一次发出、还没有结论的筛选：连着改两处时第二处要叠在第一处上，不能只叠在「已接受」上
+  let auto = false;        // 盘中自动刷新（不记在本机：打开页面就开始定时拉 CBOE 不该是缺省）
+  let lastPull = null;     // 上一次自动刷新成功的美东时刻
 
   const reasonZh = (code) => {
     if (code === null || code === undefined || code === "") return "—";
@@ -25,22 +30,23 @@ export async function premium(body, d, t, alive, force = false) {
   };
   const stageZh = (k) => r?.rules?.stages?.[k] || k;
 
-  const url = (prefs) => {
+  const url = (prefs, refresh) => {
     const q = Object.entries({ ...prefs, ...(pick ? { expiry: pick } : {}) })
       .filter(([, v]) => v !== undefined && v !== null && v !== "")
       .map(([k, v]) => `${k}=${encodeURIComponent(v)}`);
-    if (force) q.push("force=1");
+    if (refresh) q.push("refresh=1");      // 服务端先重拉一份新链再算（自动刷新不经过顶部「重新拉取」）
+    else if (force) q.push("force=1");
     return `/api/premium/${encodeURIComponent(t)}?${q.join("&")}`;
   };
 
   // prefs = 想用的筛选；initial = 页面首次打开（用的是本机记住的那份）
-  async function apply(prefs, { initial = false, note = null } = {}) {
+  async function apply(prefs, { initial = false, note = null, refresh = false } = {}) {
     if (!r) fill(body, loading("计算溢价…"));
     const mine = ++seq;
     wanted = prefs;
     let res;
     try {
-      res = await api(url(prefs));
+      res = await api(url(prefs, refresh));
     } catch (e) {
       if (!alive() || mine !== seq) return;
       wanted = null;                     // 被拒 / 出错：下一次改动从「已接受」的那份重新叠
@@ -65,12 +71,38 @@ export async function premium(body, d, t, alive, force = false) {
     wanted = null;
     r = res;
     force = false;
+    if (refresh) lastPull = new Date().toLocaleTimeString("zh-CN", { timeZone: "America/New_York", hour12: false });
     setPref(PREF_KEY, prefs);          // 先验后存：到这里服务端已经接受
     notice = note ? { text: note } : null;
     draw();
   }
 
   const setParam = (k, v) => apply({ ...(wanted || pref(PREF_KEY, {})), [k]: v });
+
+  // 交易时段以服务端日历为准（/api/meta 每分钟刷新，同跨式页）；收盘后、节假日不拉
+  const sessionLive = () => !!state.meta?.session?.live;
+  let busy = false;
+  async function autoTick() {
+    if (busy || !auto || !sessionLive()) return;
+    busy = true;
+    try { await apply(wanted || pref(PREF_KEY, {}), { refresh: true }); } finally { busy = false; }
+  }
+  let drawnLive = null;    // 按钮文案画出时的交易时段状态：开 / 收盘翻转而这一拍不拉时也要重画，不然文案停在旧状态
+  const timer = setInterval(() => {
+    if (!alive()) { clearInterval(timer); return; }
+    if (auto && r && sessionLive() !== drawnLive) draw();
+    autoTick();
+  }, AUTO_MS);
+  function autoBtn() {
+    drawnLive = sessionLive();
+    const label = !auto ? "自动刷新：关"
+      : sessionLive() ? `自动刷新：开（盘中约每 2 分钟${lastPull ? `；上次 ${lastPull} ET` : ""}）`
+        : "自动刷新：开（现在不在交易时段，暂停）";
+    return h("button", { class: "btn", type: "button", "aria-pressed": String(auto),
+      onclick: () => { auto = !auto; draw(); if (auto) autoTick(); } }, label);
+  }
+  // CBOE 文件末笔成交时刻（美东、15 分钟延迟），"2026-10-16T16:00:00" → "10-16 16:00"
+  const quoteAt = (s) => (typeof s === "string" && s.length >= 16 ? `${s.slice(5, 10)} ${s.slice(11, 16)}` : null);
 
   function noticeBox() {
     if (!notice) return null;
@@ -89,7 +121,8 @@ export async function premium(body, d, t, alive, force = false) {
       return;
     }
     if (!r.data_available) {
-      fill(body, noticeBox(), panel(null, {}, h("div", { class: "empty" }, "溢价不可得。"),
+      // 自动刷新开着时整页不可得也要能关掉（下一拍可能就好了，所以不自动关）
+      fill(body, noticeBox(), panel(null, {}, h("div", { class: "empty" }, "溢价不可得。"), auto ? autoBtn() : null,
         h("p", { class: "callout warn" }, `原因：${reasonZh(r.reason)}`),
         h("p", { class: "small muted" }, r.reason === "stale_vintage"
           ? "CBOE 的延迟文件还停在上一交易日（开盘后一段时间常见）——不拿昨天的链冒充今天，稍后点「重新拉取」。"
@@ -122,7 +155,9 @@ export async function premium(body, d, t, alive, force = false) {
       ["财报日", earn(r.earnings)],
     ];
     const head = panel("这只票的波动率", {
-      sub: `链 ${ch.as_of}（${ch.session_live ? "盘中，15 分钟延迟" : "收盘后快照"}），现价 ${money(ch.underlying_price)}；日线 ${bars.source || "—"} 截至 ${bars.last_date || "—"}；取于 ${timeAgo(r.cache_age_sec)}` },
+      sub: `报价 ${quoteAt(ch.payload_last_trade_time) ? `${quoteAt(ch.payload_last_trade_time)} ET` : ch.as_of}（${ch.session_live ? "盘中，15 分钟延迟" : "收盘后快照"}），现价 ${money(ch.underlying_price)}；日线 ${bars.source || "—"} 截至 ${bars.last_date || "—"}；取于 ${timeAgo(r.cache_age_sec)}` },
+      ch.no_bids ? h("p", { class: "callout warn" }, `${reasonZh(ch.no_bids)}。到期日表的 IV / RV 照常，合约表与首选要等`,
+        ch.no_bids === "off_hours_no_bids" ? "开盘（美东 9:30）后点右上角「重新拉取」，或打开下面的「自动刷新」。" : "下一份 CBOE 文件，稍后再刷新。") : null,
       !bars.available ? h("p", { class: "callout warn" }, `日线不可得（${reasonZh(bars.reason)}）：所有 RV 与 IV/RV 显示为「—」，表仍列出、不按 0 排。`) : null,
       bars.available && (bars.gaps_in_windows || []).length ? h("p", { class: "callout warn" }, `日线缺 ${bars.gaps_in_windows.join("、")}：跨过它的 RV 窗口不可得（到期日表里写着是哪几个）。`) : null,
       bars.available && bars.lag_sessions > 0 ? h("p", { class: "callout warn" }, `日线截至 ${bars.last_date}，落后 ${bars.lag_sessions} 个交易日：RV 照算，但用的是到那天为止的数据。`) : null,
@@ -136,7 +171,8 @@ export async function premium(body, d, t, alive, force = false) {
         h("span", { class: "small" }, "天数"), numInput("dte_min", "1", "64px"), "–", numInput("dte_max", "1", "64px"),
         h("span", { class: "small" }, "|Δ|"), numInput("delta_min", "0.01"), "–", numInput("delta_max", "0.01"),
         h("span", { class: "small" }, "OI ≥"), numInput("oi_min", "50", "84px"),
-        h("button", { class: "btn", type: "button", onclick: () => { pick = null; apply({}); } }, "恢复缺省")));
+        h("button", { class: "btn", type: "button", onclick: () => { pick = null; apply({}); } }, "恢复缺省"),
+        autoBtn()));
 
     // ── 逐到期日
     const ex = (r.expiries || []).filter((e) => e.in_window);
@@ -219,12 +255,43 @@ export async function premium(body, d, t, alive, force = false) {
         seg(sorts, p.sort, (v) => setParam("sort", v), "排序"),
         h("button", { class: "btn", type: "button", onclick: () => downloadCSV(`alphabot-${t}-premium.csv`, cols, rows) }, "导出 CSV")) },
       rows.length ? table(cols.filter((c) => !c.csvOnly), rows) : h("div", { class: "empty" },
-        `没有合约过筛选——卡在「${stageZh(r.empty_reason)}」这一道。`),
+        ch.no_bids ? `没有合约：${reasonZh(ch.no_bids)}。` : `没有合约过筛选——卡在「${stageZh(r.empty_reason)}」这一道。`),
       h("p", { class: "note" }, `漏斗：${funnelLine}`),
       h("p", { class: "note" }, plain(r.disclaimer || "")));
 
+    // ── 首选（服务端按公开规则挑好）
+    const pk = r.picks || {};
+    const why = (x) => [`IV/RV ${num(x.iv_over_rv, 2)}×`, `年化 ${pct(x.yield_ann)}`,
+      isNum(x.sigma_distance) ? `离现价 ${num(x.sigma_distance, 2)}σ` : null, `OI ${num(x.oi, 0)}`, `价差 ${pct(x.spread_pct, 0)}`]
+      .filter(Boolean).join(" · ");
+    const contract = (x) => `${x.expiry.slice(5)} ${x.side} ${num(x.strike, x.strike % 1 ? 1 : 0)}（${num(x.dte, 0)} 天，Δ ${num(x.delta, 2)}）`;
+    const pickCols = [
+      { label: "#", cls: "r", render: (it) => it.i },
+      { label: "合约", render: (it) => h("b", {}, contract(it.row)) },
+      { label: "bid", cls: "r", render: (it) => num(it.row.bid) },
+      { label: "理由", render: (it) => h("span", {}, why(it.row),
+        it.caveats.length ? h("span", { style: { display: "inline-flex", gap: "4px", flexWrap: "wrap", marginLeft: "6px" } },
+          it.caveats.map((c) => h("span", { class: "chip" }, reasonZh(c)))) : null) },
+    ];
+    const sideBlock = (side, b) => {
+      if (!b) return null;
+      const counts = Object.entries(b.excluded_counts || {}).map(([k, n]) => `${reasonZh(k)} ${n}`).join("、");
+      return h("div", { style: { marginBottom: "14px" } },
+        h("h3", { style: { margin: "4px 0 6px" } }, side === "put" ? "卖 put" : "卖 call"),
+        b.items.length ? table(pickCols, b.items.map((it, i) => ({ ...it, i: i + 1 })))
+          : h("div", { class: "empty" }, ch.no_bids ? reasonZh(ch.no_bids) : reasonZh(b.empty_reason)),
+        b.excluded.length ? h("p", { class: "small" }, "IV/RV 更高但被排除：",
+          b.excluded.map((e, i) => h("span", {}, i ? "；" : "", h("b", {}, contract(e.row)), ` IV/RV ${num(e.row.iv_over_rv, 2)}× — ${e.reasons.map(reasonZh).join("、")}`))) : null,
+        counts ? h("p", { class: "small muted" }, `这一边 ${b.n_candidates} 张里被排除的：${counts}（一张可能有多个原因）`) : null);
+    };
+    const picksPanel = panel("首选", {
+      sub: `规则：先排除已知有风险的（到期前有财报、这段期限疑似含事件、最近一场没成交、${rules.low_dte} 天内到期、没有 RV），`
+        + `再按 IV/RV 每 ${rules.pick_ivrv_band} 一档、档内年化收益高的在前；同一到期日只取一张，各取前 ${rules.pick_n}。判不了的不排除，标在理由后面。` },
+      sideBlock("put", pk.put), sideBlock("call", pk.call),
+      h("p", { class: "note" }, "按上面的规则挑出，不是「最优」：这套排序从未被前向检验过，高 IV/RV 也可能是市场看到了你没看到的风险。"));
+
     fill(body, noticeBox(), head, h("div", { style: { height: "20px" } }), controls, h("div", { style: { height: "20px" } }),
-      expPanel, h("div", { style: { height: "20px" } }), rowPanel);
+      picksPanel, h("div", { style: { height: "20px" } }), expPanel, h("div", { style: { height: "20px" } }), rowPanel);
     if (ex.length) {
       const c = C();
       lines(ivEl, { x: ex.map((e) => e.expiry.slice(5)), yFmt: (x) => pct(x, 0),

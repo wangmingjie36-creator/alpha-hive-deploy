@@ -531,13 +531,19 @@ class AlphaBotService:
             return {**full, "cache_age_sec": 0.0}
 
     def premium(self, ticker, params: Optional[dict] = None) -> dict:
-        """溢价页。params = 查询参数（字符串）；`force=1` ⇒ 重算（不清 CBOE 进程缓存）。
+        """溢价页。params = 查询参数（字符串）；`force=1` ⇒ 重算（不清 CBOE 进程缓存：顶部「重新拉取」先走过
+        live(force) 拉了新链，这里复用同一份）；`refresh=1` ⇒ 先 live(force=True) 拉一份新链再重算——给不经过
+        顶部「重新拉取」的盘中自动刷新用（同 `straddle_live`），否则 force 只会拿 CBOE 进程缓存里的旧链重算一遍。
         参数错（含「链上没有这个到期日」）⇒ BadRequest，带上出错的参数名，前端只撤销那一个。"""
         t = norm_ticker(ticker)
         q = dict(params or {})
         force = str(q.pop("force", "") or "") == "1"
+        refresh = str(q.pop("refresh", "") or "") == "1"
         try:
-            p = PM.parse_params(q)
+            p = PM.parse_params(q)                       # 先验参数：参数错不该白拉一次链
+            if refresh:
+                self.live(t, force=True)                 # 清该票 CBOE 进程缓存并重拉；不可得由下面的重算如实报
+                force = True
             out = PM.select(self._premium_full(t, force), p)
         except PM.ParamError as exc:
             raise BadRequest(str(exc), param=exc.param) from exc
