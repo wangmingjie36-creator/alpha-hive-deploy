@@ -62,7 +62,7 @@ CATEGORIES = {READ, CACHE, HUMAN, AUDIT, FORENSIC, BACKUP, CODE, PENDING_DEAD}
 NEEDS_READER = {READ, CACHE}
 
 #: 已知死链的条数（表 + 文件产物合计）。等号比较：清理一条就减一，**不许加**。
-CEILING_PENDING_DEAD = 7
+CEILING_PENDING_DEAD = 4
 
 #: 「自读」标记：缓存的读写在同一个函数里（读不到才取、取完写回）。只对 CACHE 有效，且该函数里必须真有读调用。
 SELF = "self"
@@ -134,7 +134,6 @@ SITE_ARTIFACTS: dict = {
     'code_executor.py::CodeExecutor.execute_python': ('sandbox scripts/script_*.py',),
     'collect_data.py::main': ('{T}_raw.json',),
     'congress_trades_scraper.py::_save_cache': ('cache/congress_trades.json',),
-    'crowding_detector.py::CrowdingDetector.save_to_json': ('crowding_<T>.json',),
     'dashboard_renderer.py::render_dashboard_html': ('dashboard-data.json',),
     'data_backup/export.py::copy_root_files': ('data backup repo (root files)',),
     'data_backup/export.py::copy_state_dir': ('data backup repo (state dirs)',),
@@ -182,7 +181,6 @@ SITE_ARTIFACTS: dict = {
     'migrate_ambiguous_backfill.py::main': ('db_backups/pheromone_pre_P0_tolerance_fix_*.db',),
     'ml_model_guard.py::snapshot_model_file': ('ml_model_history/{stem}-{date}.json + manifest.jsonl',),
     'ml_predictor.py::HGBModel.save_model': ('ml_model_cache.json', 'ml_model.json'),
-    'ml_predictor.py::HistoricalDataBuilder.save_to_file': ('training_data.json',),
     'ml_predictor.py::SGDMLModel.save_model': ('ml_model_cache.json', 'ml_model.json'),
     'ml_predictor.py::SimpleMLModel.save_model': ('ml_model_cache.json', 'ml_model.json'),
     'newsapi_client.py::_safe_cache': ('cache/news/{T}_news.json',),
@@ -227,7 +225,6 @@ SITE_ARTIFACTS: dict = {
     'report_deployer.py::_append_gh_pages_deploy_log': ('logs/.gh_pages_deploy_log.jsonl',),
     'report_web_assets.py::write_pwa_files': ('manifest.json + sw.js (PWA)',),
     'risk_engine.py::_estimate_beta': ('.risk_cache/beta_*.json',),
-    'run_daily_scan.py::_write_status': ('logs/last_run_status.json',),
     'scan_timing.py::write': ('logs/scan_timing.json',),
     'sec_edgar.py::SECEdgarClient._load_cik_map': ('sec_cache/company_tickers.json',),
     'sec_edgar.py::SECEdgarClient.get_insider_trades': ('sec_cache/*_insider_summary.json',),
@@ -409,14 +406,8 @@ ARTIFACTS: dict = {
     # ── PENDING_DEAD
     '.samples-only-<date>.json': (PENDING_DEAD, [],
         '只在手动 --samples-only 时写；注释说「供 Hive app 读取」但仓内无读者，编排器也不跑该模式'),
-    'crowding_<T>.json': (PENDING_DEAD, [],
-        '方法全仓零调用者（.save_to_json 调用点都是 ReportSnapshot 的），写者与读者都不存在'),
-    'logs/last_run_status.json': (PENDING_DEAD, [],
-        '全仓没有读者；run_daily_scan.py 只能手动跑，编排器不调用它'),
     'ml_model.json': (PENDING_DEAD, [],
         'save_model() 无参时的缺省落点（MLPredictionService.train_model 训完无参 save_model()；v0.45.547 起只经报告生成器走到）：全仓无参 load_model 调用点 = 0，生产只读 ml_model_cache.json'),
-    'training_data.json': (PENDING_DEAD, [],
-        '生产零调用者（仅 tests 调用），也无任何读者'),
     # ── AUDIT
     'code_executor sandbox audit.log': (AUDIT, [],
         '代码执行沙箱审计追加；get_audit_log 存在但全仓零调用'),
@@ -528,12 +519,9 @@ ARTIFACTS: dict = {
 
 
 #: PENDING_DEAD 文件产物的见证：(文件::限定名, 令牌)——该函数体里还出现这段字符串 ⇒ 死链还在。
-#: 写入落点本身就是专门写它的（如 `run_daily_scan.py::_write_status`）时，见证可以就写那个落点与文件名。
+#: 写入落点本身就是专门写它的（如 `alpha_hive_daily_report.py::main` 之于 `.samples-only-`）时，见证可以就写那个落点与文件名。
 PENDING_WITNESS: dict = {
     ".samples-only-<date>.json": ("alpha_hive_daily_report.py::main", ".samples-only-"),
-    "crowding_<T>.json": ("crowding_detector.py::CrowdingDetector.save_to_json", "crowding_"),
-    "training_data.json": ("ml_predictor.py::HistoricalDataBuilder.save_to_file", "training_data.json"),
-    "logs/last_run_status.json": ("run_daily_scan.py::_write_status", "last_run_status.json"),
     "ml_model.json": ("ml_predictor.py::default_model_path", "PATHS.ml_model"),
 }
 

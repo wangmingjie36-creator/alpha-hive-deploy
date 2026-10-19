@@ -4,11 +4,8 @@
 """
 
 import logging as _logging
-import json
 import math as _math
-from datetime import datetime
 from typing import Dict, Tuple, List
-from hive_logger import SafeJSONEncoder
 
 _log = _logging.getLogger("alpha_hive.crowding_detector")
 
@@ -487,28 +484,7 @@ class CrowdingDetector:
         else:
             return f"{self.ticker} 拥挤度低，信息相对不为人知。该标的存在更大的非共识空间和上升潜力。"
 
-    def save_to_json(self, metrics: Dict, initial_score: float, filename: str = None) -> str:
-        """保存拥挤度分析到 JSON"""
-
-        if filename is None:
-            filename = f"crowding_{self.ticker}.json"
-
-        crowding_score, component_scores = self.calculate_crowding_score(metrics)
-        category, color = self.get_crowding_category(crowding_score)
-
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump({
-                "ticker": self.ticker,
-                "crowding_score": crowding_score,
-                "category": category,
-                "component_scores": component_scores,
-                "adjustment_factor": self.get_adjustment_factor(crowding_score),
-                "final_score": initial_score * self.get_adjustment_factor(crowding_score),
-                "metrics": metrics,
-                "created_at": datetime.now().isoformat()
-            }, f, ensure_ascii=False, indent=2, cls=SafeJSONEncoder)
-
-        return filename
+    # v0.45.550：原 save_to_json（写 cwd 下 crowding_<T>.json）全仓零调用者、文件零读者，已删。
 
 
 def get_crowding_metrics(ticker: str, board=None) -> Dict:

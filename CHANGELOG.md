@@ -7,7 +7,35 @@
 
 ## [0.45.551] — 2026-10-19 — 占位（进行中：ML 报告不再读磁盘模型缓存、报告记录模型指纹）
 
-## [0.45.550] — 2026-10-19 — 占位（进行中：删三个零读者写入方——last_run_status.json / crowding_*.json / training_data.json）
+## [0.45.550] — 2026-10-19 — Removed：三个零读者写入方——`last_run_status.json` / `crowding_<T>.json` / `training_data.json`（v0.45.543 读者登记表的 PENDING_DEAD，上限 7 → 4）
+
+用户决定（2026-10-19）：「后三个文件的写入代码在生产里根本没人调用，直接删代码」。
+
+### Removed
+- `run_daily_scan.py::_write_status`（写 `logs/last_run_status.json`，Sprint 1.4）：全仓零读者；只有手动跑的 `run_daily_scan.py` 自己写它，编排器不调。
+  成功路径改为一行 `_log.info` 汇总（标的数 / 机会数 / 耗时；终端打印照旧），失败路径原本就有 `_log.error(exc_info=True)` + 打印 + exit 1。
+  连带删掉只为它存在的 `import json` 与 `error_msg` 变量。
+- `crowding_detector.py::CrowdingDetector.save_to_json`（写 cwd 下 `crowding_<T>.json`）：全仓零调用者（`.save_to_json` 的调用点全是 `ReportSnapshot` 的）。
+  连带删 `json` / `datetime` / `SafeJSONEncoder` 三个 import。⚠️ 删 `from hive_logger import …` 意味着单独 import 本模块不再加载 `hive_logger`
+  （它在导入时配置 `alpha_hive` 日志处理器）：隔离子进程实测 ScoutBee / GuardBee / `swarm_agents` / `alpha_hive_daily_report` 在 import 本模块前都已载入
+  `hive_logger`，本模块 `__main__` 只用 `print` ⇒ 生产无影响。
+- `ml_predictor.py::HistoricalDataBuilder.save_to_file`（写 cwd 下 `training_data.json`）：生产零调用者；唯一调用方测试 `test_save_to_file` 一并删，
+  `test_price_history_default_paths.py::KNOWN_CWD_RELATIVE_DEFAULTS` 对应一条删除（子集语义，存量只许减）。
+
+### Changed（登记表随之收缩——守卫按设计先红、点名删哪条）
+- `tests/test_persistent_writes_have_readers.py`：删三处落点、三个产物、三条见证，`CEILING_PENDING_DEAD` 7 → 4。删完代码后它先红出 6 条
+  「落点不写了 / 见证没了 ⇒ 删条目、减上限」，照删即绿。
+- `tests/test_ledger_writes_go_through_ledger_io.py::WRITERS`：删三条「只给人看」登记（同样先红「已经不命中」）。
+
+### Added
+- `tests/test_dead_chains_batch2_retired.py`（墓碑）：三个成员不许回来（AST），三个**完整文件名**不许再以字符串常量出现在原文件里
+  （f-string 占位渲染成 `{}` 再比）。负对照：换回旧代码两条全红；正对照：认得出活着的 `ReportSnapshot.save_to_json` / `.samples-only-` 字面量。
+  ⚠️ 首版按片段比（`crowding_` / `training_data`）在新代码上假红——误中 logger 名 `alpha_hive.crowding_detector` 与 docstring 里的
+  `build_training_data_from_db`；改成整文件名 + f-string 渲染后才对。
+
+### 剩下的已知死链（4 条）
+`agent_memory`、`barrier_outcomes`（两张表，政策 / 用户暂缓）；`ml_model.json`（`train_model()` 无参 `save_model()`，零读者）；
+`.samples-only-<date>.json`（只在手动 `--samples-only` 时写）。
 
 ## [0.45.549] — 2026-10-19 — Fixed：v0.45.543 二次检查——Step 6 后置条件在「同一天第二次扫描且跨零点」时误判 no_output
 

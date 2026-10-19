@@ -201,37 +201,7 @@ class HistoricalDataBuilder:
         """添加新的交易记录"""
         self.historical_records.append(record)
 
-    def save_to_file(self, filename: str = "training_data.json"):
-        """保存训练数据到文件"""
-        data = [
-            {
-                "ticker": r.ticker,
-                "date": r.date,
-                "crowding_score": r.crowding_score,
-                "catalyst_quality": r.catalyst_quality,
-                "momentum_5d": r.momentum_5d,
-                "volatility": r.volatility,
-                "market_sentiment": r.market_sentiment,
-                "actual_return_3d": r.actual_return_3d,
-                "actual_return_7d": r.actual_return_7d,
-                "actual_return_30d": r.actual_return_30d,
-                "win_3d": r.win_3d,
-                "win_7d": r.win_7d,
-                "win_30d": r.win_30d,
-                # v2 新特征
-                "iv_rank": r.iv_rank,
-                "put_call_ratio": r.put_call_ratio,
-                "final_score": r.final_score,
-                "odds_score": r.odds_score,
-                "risk_adj_score": r.risk_adj_score,
-                "agent_agreement": r.agent_agreement,
-                "direction_encoded": r.direction_encoded,
-            }
-            for r in self.historical_records
-        ]
-
-        with open(filename, "w") as f:
-            json.dump(data, f, indent=2)
+    # v0.45.550：原 save_to_file（写 cwd 下 training_data.json）生产零调用者、文件零读者，已删。
 
 
 # ════════════════════════════════════════════════════════════════════════════

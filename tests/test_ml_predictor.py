@@ -997,27 +997,6 @@ class TestHistoricalDataBuilder:
         builder.add_record(_make_sample())
         assert len(builder.get_training_data()) == n_before + 1
 
-    def test_save_to_file(self):
-        builder = HistoricalDataBuilder()
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-            path = f.name
-        try:
-            builder.save_to_file(path)
-            with open(path) as f:
-                saved = json.load(f)
-            assert len(saved) == 8
-            assert saved[0]["ticker"] == "NVDA"
-            # v2 新字段应序列化
-            assert "iv_rank" in saved[0]
-            assert "put_call_ratio" in saved[0]
-            assert "final_score" in saved[0]
-            assert "odds_score" in saved[0]
-            assert "risk_adj_score" in saved[0]
-            assert "agent_agreement" in saved[0]
-            assert "direction_encoded" in saved[0]
-        finally:
-            os.unlink(path)
-
 
 class TestScalerSerializationBug:
     """回归测试：save → load → incremental_train 不因 n_samples_seen_ 类型丢失而崩溃
