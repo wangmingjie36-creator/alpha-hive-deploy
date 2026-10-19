@@ -183,7 +183,52 @@
 - `tests/test_rival_bee_peer_features.py`：三处「P/C 回落 1.0」的断言改为 None（该文件原注「本版未动（另一个问题）」——即本次修掉的这一个）。
 - 全量：10197 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；ruff 全绿。
 
-## [0.45.543] — 2026-10-19 — 占位（进行中：死链两道守卫——落盘写入者读者登记表 + 编排器步骤产出后置条件）
+## [0.45.543] — 2026-10-19 — Added：死链两道根因守卫——落盘写入的读者登记表（表 + 文件，已知死链只许减）+ 编排器步骤产出后置条件（退出码 0 但没本轮产出 ⇒ failed:no_output）
+
+用户批准的设计（2026-10-19）：文件按「写入落点 + 读者令牌」登记；no_output 与该步 rc≠0 支同口径计整体状态。
+来源：10-19 全仓只读审计找出约 15 条死链（2 月起累积），531 / 534 / 541 逐条删——**但没有任何东西让「写了没人读」可见**，
+编排器 `run_step` 又把退出码 0 当成功（534 删掉的 Step 8 没有 `__main__`，天天 0 秒退出 0、记 success）。这两道是根因修复。
+
+### Added
+- `tests/test_persistent_writes_have_readers.py` + 量具 `tests/_persistent_io_scan.py`（读者登记表守卫）：
+  - **表**：生产源码里写 SQLite 表的 SQL（CREATE / INSERT / REPLACE / UPDATE…SET，含 f-string `{self.TABLE}` 与 `.format(t=TABLE)`，
+    按同文件常量解析；docstring 不算）⇒ 表名必须在 `TABLES` 登记读者（该函数体里 `SELECT … FROM/JOIN` 它）或类别。现登记 8 张。
+  - **文件**：写入落点（沿用 ledger 守卫六类 + `open(w/x)` / `write_text` / `pickle·joblib·yaml.dump` / `to_csv·parquet` /
+    `ledger_io.write*` / `atomic_json_write` / `shutil.copy*`）共 **147 处 → 136 个产物**，每个产物登记读者 `(文件::限定名, 令牌)`
+    或类别 HUMAN / AUDIT / FORENSIC / BACKUP / CODE；CACHE 也要读者（同函数读写标 `SELF`，且该函数里必须真有读调用）。
+    模块级路径常量（`SIGNALS_FILE = STATE_DIR / "vrp_signals.jsonl"`）里的文件名归到**引用它的函数**，读者因此能写到成员粒度。
+  - 红的条件：新写入未登记；登记的写入不再命中（过期）；读者不存在 / 函数体里不再有令牌或 SELECT；读者在 tests/ 或 experiments/；
+    读者就是写入方（非 SELF 缓存）；**PENDING_DEAD 条数 ≠ `CEILING_PENDING_DEAD`（=9，等号比较，只许减）**；PENDING_DEAD 的见证消失（清理完要删条目、减上限）。
+  - 普查方法：三路只读代理逐处读代码给出产物 / 类别 / 读者，读者令牌逐条经扫描器核对；主会话复核改判（`run_replay` 改绑临时目录、
+    不算读者；弱令牌 `.json` 换成可辨认的片段）。
+- `scripts/alpha-hive-orchestrator.sh`：`_step_marker` / `_postcondition` / `_no_output`。Step 3（每只要它补的标的都得有本轮 ML HTML ⇒
+  否则 partial）与 Step 6（`alerts-<日期>.json`，跨零点认次日名）跑前建标记文件，退出码 0 后产出不在或比标记旧（`-ot`，bash 内建，
+  Linux CI 同语义）⇒ `{"status":"failed","reason":"no_output","missing":[…]}` + ERROR 日志（alert_manager 对 failed 出 P1）。
+  标记建不了 ⇒ 退到只核存在、日志 WARN。
+- `tests/test_orchestrator_step_postconditions.py`：每个 `run_step` 调用按脚本名登记「凭什么说它干成了」——解释器核 `--out`
+  （Step 2/4/10–15）/ 后置条件 / 调用点回读本轮记录（部署、迁移、备份、解释器自身）/ 豁免（Step 7：无 `--force` 恒 exit 2）；
+  双向核对，新增 `run_step` 不登记即红。真跑：抽三个函数与 Step 3 / 6 整块配假 `run_step` 在 bash 里跑（两种 locale）。
+
+### Changed
+- `alert_manager.py`：**无告警也写** `alerts-<日期>.json`（`alerts: []`，新增 `checks_skipped`）——此前无告警不写文件，退出码 0
+  是 Step 6 唯一证据。文件只给人看、无代码读者。Python 先于编排器进生产（同步在部署前），首轮新编排器即兼容。
+
+### 已知死链（PENDING_DEAD，9 条，只许减）
+- 表：`agent_memory`（内容读者只在 LLM 模式）、`barrier_outcomes`（用户：先不动）。
+- 文件：`ml_model.json`（`save_model()` 无参缺省落点，全仓无参 `load_model` = 0）、`ml_model_extended.json`（随 538 退役 extended 消失）、
+  `.samples-only-<date>.json`、`logs/last_run_status.json`、`crowding_<T>.json`、`training_data.json`、`training_data_extended.json`
+  （后三个写入方零生产调用者）。审计里的 Step 1 `data_fetcher` 与扫描后 ML 增量重训由 v0.45.546 / 547 删除，**不**登记。
+
+### 变异证据（真仓库，改完即 `git checkout` 还原）
+- 读者登记表 6 条全红：① `scan_coverage_gate.py` 的 `FROM predictions` 改名 ⇒「读者…不再读这张表」；② 生产文件新增
+  `INSERT INTO shadow_metrics` ⇒「表…有写入却未登记」；③ 新增 `open(p/"orphan.json","w")` ⇒「未登记的落盘写入」；
+  ④ `vrp_signal.load_rows` 改名 ⇒「读者不存在了」；⑤ `.samples-only-` 字样改掉 ⇒「见证没了」；⑥ 上限 9→10 ⇒「已知死链 9 条，上限 10」。
+- 后置条件 3 条全红：Step 1 调用前加 `false &&`（当时 Step 1 还在）、`-ot` 改 `-nt`、Step 6 标记置空。另有 `TestGuardsHaveTeeth`
+  对函数源码 4 种变异（判据反向 / 恒说有产出 / 记了片段却说不归我管 / 不写片段）各须改变同一用例结果。
+
+### 边界（写在两个守卫的 docstring 里）
+- v1 只查表与文件；`swarm_results` 等 dict 字段算了没人读**不在范围**。读者「存在且引用令牌」是静态判据：读者本身从不被调用
+  或只在 LLM 模式调用时看不见——那正是 PENDING_DEAD 要人工登记的。写入助手吃路径参数时，落点↔产物对应来自登记表本身。
 
 ## [0.45.542] — 2026-10-19 — Fixed（根因）：OI 陈旧判据抽成全仓共用的 `oi_staleness`，凡从 yfinance 取链又读 OI 的入口与下游都按「不可得」处理；P/C 在 OI 全零时不再退到成交量口径
 
