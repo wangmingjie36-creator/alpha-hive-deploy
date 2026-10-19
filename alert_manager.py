@@ -771,6 +771,20 @@ class AlertAnalyzer:
         if not isinstance(pp, dict):
             self.checks_skipped.append("纸面组合运行结局检查（scan_timing 无 paper_portfolio 计数）")
             return
+        if pp.get("skipped") and not pp.get("error"):
+            # v0.45.535：持仓日线全断 ⇒ 整天跳过（不开仓、不写净值）。设计内的跳过，但这一天组合没有记录——要看得见
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】纸面组合：{pp.get('as_of')} 持仓日线全部取不到，整天跳过（未开仓、未写净值）",
+                {
+                    "跳过原因": str(pp["skipped"]),
+                    "取不到的持仓": "、".join(pp.get("ohlc_unavailable") or []) or "（未记）",
+                    "影响": "这一天没有净值行与新仓；下次运行会从入场日起补查出场（出场日照实际触发日记）",
+                    "建议": "看 alpha_hive.log 里「_fetch_ohlc … 失败」与代理 / yfinance 限流；连续多天跳过要查出站",
+                },
+                ["paper_portfolio", "data_quality"]
+            ))
+            return
         if not pp.get("error"):
             return
         self.alerts.append(Alert(

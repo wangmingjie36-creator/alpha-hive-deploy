@@ -1293,8 +1293,11 @@ class AlphaHiveDailyReporter:
         try:
             import paper_portfolio as _pp
             _pp_result = _pp.run_for_date(self.date_str, verbose=False)
-            _log.info("纸面组合已更新: %s (nav=%s)", self.date_str,
-                      (_pp_result or {}).get("nav", "?"))
+            if (_pp_result or {}).get("skipped"):   # v0.45.535：持仓日线全断 ⇒ 整天跳过（paper_portfolio 已记 ERROR / run_stats）
+                _log.warning("纸面组合整天跳过: %s（%s）", self.date_str, _pp_result["skipped"])
+            else:
+                _log.info("纸面组合已更新: %s (nav=%s)", self.date_str,
+                          (_pp_result or {}).get("nav", "?"))
         except Exception as e:
             _log.warning("纸面组合更新失败(非致命): %s", e)
 

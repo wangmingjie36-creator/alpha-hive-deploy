@@ -363,6 +363,8 @@ def summary_line(snap: dict) -> str:
     pp = c.get("paper_portfolio")
     if pp and pp.get("error"):
         pg_s += f" | 纸面组合异常中断({str(pp['error'])[:80]})"        # v0.45.448
+    elif pp and pp.get("skipped"):                                      # v0.45.535
+        pg_s += f" | 纸面组合整天跳过(持仓日线全断 {len(pp.get('ohlc_unavailable') or [])} 只)"
     lf = c.get("ledger_io")
     if lf and lf.get("n"):                                              # v0.45.452
         where = ",".join(dict.fromkeys(Path(str(i.get("path"))).name for i in lf.get("items") or []))

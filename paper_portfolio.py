@@ -749,6 +749,18 @@ def replay_ohlc_mask(mask: Dict[str, Optional[frozenset]]):
 _REPLAY_OHLC_MASK_HITS: Dict[str, int] = {}
 
 
+def _masked_replay_day() -> bool:
+    """当前重放日是否在 `replay_ohlc_mask` 里（= 在复刻某个历史故障日的生产行为）。"""
+    mask, d = _REPLAY_OHLC_MASK, _REPLAY_AS_OF
+    return bool(mask) and d is not None and d in mask
+
+
+def _held_ohlc_outage(held: List[str]) -> bool:
+    """本轮到目前为止：有持仓，且**每一只**持仓的日线请求都失败、一次都没取到（v0.45.535）。"""
+    out = _OHLC_RUN_OUTCOMES or {}
+    return bool(held) and all((out.get(t) or [0, 0])[0] == 0 and (out.get(t) or [0, 0])[1] > 0 for t in held)
+
+
 def _masked_in_replay(ticker: str) -> bool:
     mask, d = _REPLAY_OHLC_MASK, _REPLAY_AS_OF
     if not mask or d is None or d not in mask:
@@ -1703,6 +1715,8 @@ def run_for_date(as_of: str, verbose: bool = False,
     finally:
         _OHLC_RUN_OUTCOMES = _prev_outcomes
     _LAST_RUN = {"as_of": as_of, "ok": True, "error": None}
+    if res.get("skipped"):   # v0.45.535：整天跳过 ⇒ status.json ⇒ alert_manager P2（成功时形状不变）
+        _LAST_RUN.update(skipped=res["skipped"], ohlc_unavailable=list(res.get("ohlc_unavailable") or []))
     return res
 
 
@@ -1803,6 +1817,22 @@ def _run_for_date(as_of: str, verbose: bool = False,
             remaining.append(pos)
     positions = remaining
 
+    # ── v0.45.535：持仓日线全断 ⇒ 整天跳过（用户 2026-10-19 定）──
+    # 10-14：生产 `_fetch_ohlc` 全被限流 ⇒ 0 出场、持仓按入场价估值，新仓却照开、按没扣掉当天出场的净值定额
+    # （4 笔金额偏高 0.88%，次日才补出场）。判不了出场的那天，开仓的仓位基数也是错的 ⇒ 什么都不写：不开仓、不写净值行 /
+    # 持仓 / meta（账本逐字节不动），下一次运行照常从 (entry_date, as_of] 补查出场。没有持仓时基数就是现金，不跳。
+    # 只看持仓（Step 1 是唯一先于开仓的取数）；部分持仓取不到照旧走 `ohlc_unavailable` 标记。
+    # 例外：`replay_ohlc_mask` 正在复刻的历史故障日（09-24 / 09-25 / 10-14，早于本规则）照旧——否则 F&G 自证拿新规则去
+    # 比当时没有这条规则的生产，必然对不上。规则生效后的全断日生产不写净值行 ⇒ 自证本来就不重放它。
+    _held = sorted({p.ticker for p in positions})
+    if _held_ohlc_outage(_held) and not _masked_replay_day():
+        (_log.info if _REPLAY_MODE else _log.error)(
+            "[PaperPortfolio] %s 持仓 %d 只的日线一次都没取到（%s）——判不了出场、仓位基数不可信，整天跳过："
+            "不开仓、不写净值 / 持仓 / meta，下次运行补查出场", as_of, len(_held), "、".join(_held))
+        return {"as_of": as_of, "skipped": "ohlc_unavailable", "ohlc_unavailable": _held, "nav": None,
+                "opened_today": 0, "positions": [], "realized_pnl_today": 0.0, "equity_snapshot": None,
+                "split_adjusted": [], "split_unresolved": [], "ohlc_partial": []}
+
     # ── Step 2: 开新仓 ──
     snapshots = _load_snapshots_for_date(as_of)
     existing_tix = {p.ticker for p in positions}
@@ -1874,8 +1904,11 @@ def _run_for_date(as_of: str, verbose: bool = False,
     ohlc_unavailable, ohlc_partial = _ohlc_run_gaps()
     if ohlc_unavailable:
         equity_snapshot["ohlc_unavailable"] = ohlc_unavailable
-        _log.error("[PaperPortfolio] %s %d 个标的日线一次都没取到（%s）——它们今天没查出场、按入场价估值；"
-                   "净值行已记 ohlc_unavailable", as_of, len(ohlc_unavailable), "、".join(ohlc_unavailable))
+        # v0.45.535：重放里（含 F&G 自证按「没有日线」复刻历史故障日）只记 INFO——那是故意遮的，不是生产故障；
+        # 打 ERROR 会让每天 Step 11 的日志里出现三条与当天无关的「故障」
+        (_log.info if _REPLAY_MODE else _log.error)(
+            "[PaperPortfolio] %s %d 个标的日线一次都没取到（%s）——它们今天没查出场、按入场价估值；"
+            "净值行已记 ohlc_unavailable", as_of, len(ohlc_unavailable), "、".join(ohlc_unavailable))
     if ohlc_partial:
         equity_snapshot["ohlc_partial"] = ohlc_partial
 
