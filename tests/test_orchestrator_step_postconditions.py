@@ -12,13 +12,13 @@ v0.45.534 删掉的 Step 8（`metrics_collector.py --record`）没有 `__main__`
                     （`stale_json` / `missing_json` 早已会红）。
   · POSTCONDITION —— 跑之前 `$(_step_marker)`，退出码 0 后 `_no_output <key> …产出路径`：产出不在、或比标记旧
                     ⇒ `{"status": "failed", "reason": "no_output", "missing": […]}` + ERROR 日志；
-                    整体状态同该步 rc≠0 支（Step 3 ⇒ partial；Step 1 / 6 不升级）。alert_manager 对 `failed` 出 P1。
+                    整体状态同该步 rc≠0 支（Step 3 ⇒ partial；Step 6 不升级）。alert_manager 对 `failed` 出 P1。
   · READ_BACK    —— 调用点之后自己回读本轮记录（先删后写的 `--out` / 按日期核的 status 文件）；登记它读的那个变量名，
                     段里没有就红。
   · EXEMPT       —— 退出码 0 在生产路径上不可达等，写明理由。
 
 本文件的断言分三层：
-  1. 真跑：从仓库编排器（`tests/_orchestrator.py`，CI 上也跑）抽出三个函数与 Step 1 / 3 / 6 整块，
+  1. 真跑：从仓库编排器（`tests/_orchestrator.py`，CI 上也跑）抽出三个函数与 Step 3 / 6 整块，
      配假 `run_step`（退出 0、写或不写产出）在 bash 里跑，看 `STEPS_RESULT` / 整体状态。
   2. 登记表：每个 `run_step` 调用归类、归类的证据在段里；登记了却不再调用也红（怕它变大，也怕它变小）。
   3. 有牙：把函数源码做变异（`-ot` 判据拿掉 / 永远返回「有产出」/ 不写片段）后再跑同一个用例，必须变结果。
@@ -50,7 +50,7 @@ KINDS = {INTERPRETER, POSTCONDITION, READ_BACK, EXEMPT}
 #: 脚本名 → (类别, 证据)。POSTCONDITION 的证据 = `_no_output` 的 key；READ_BACK 的证据 = 段里必须出现的变量名。
 STEP_OUTPUTS = {
     "deploy_orchestrator.py": (READ_BACK, "_rec"),            # 部署记录先删后写，`_orchestrator_autodeploy` 读回
-    "data_fetcher.py": (POSTCONDITION, "step1_data_fetcher"),
+    "data_fetcher.py": (EXEMPT, "Step 1 正由 v0.45.546 整步删除（死链清理）；换基到含 546 的 main 后删本条"),
     "run_data_migrations.py": (READ_BACK, "_rec"),            # 迁移记录先删后写
     "alpha_hive_daily_report.py": (INTERPRETER, "2"),
     "generate_ml_report.py": (POSTCONDITION, "step3_ml_report"),
@@ -216,27 +216,7 @@ def _stub_run_step(write: str) -> str:
 
 
 class TestRealStepBlocks:
-    """Step 1 / 3 / 6 整块从仓库编排器抽出来真跑：接没接上、整体状态口径对不对，只有真跑看得出。"""
-
-    def _step1(self, orch, tmp, write, rc=0):
-        block = _block(orch, "# Step 1: 数据采集", "# DB 备份：")
-        return _bash(_funcs(orch) + _stub_run_step(write) + f"STUB_RC={rc}\n" + block, tmp=tmp)
-
-    def test_step1_exit0_without_output_is_red(self, orch, tmp_path):
-        r = self._step1(orch, tmp_path, "")
-        s1 = r["steps"]["step1_data_fetcher"]
-        assert s1["status"] == "failed" and s1["reason"] == "no_output", r
-        assert s1["missing"] == ["realtime_metrics.json"]
-        assert r["status"] == "success", "Step 1 的 rc≠0 支不升级整体状态，no_output 同口径"
-
-    def test_step1_with_output_is_success(self, orch, tmp_path):
-        r = self._step1(orch, tmp_path, ': > "$DATA_DIR/realtime_metrics.json"')
-        assert r["steps"]["step1_data_fetcher"]["status"] == "success", r
-
-    def test_step1_failure_branch_unchanged(self, orch, tmp_path):
-        r = self._step1(orch, tmp_path, "", rc=1)
-        assert r["steps"]["step1_data_fetcher"]["status"] == "failed"
-        assert "reason" not in r["steps"]["step1_data_fetcher"], r
+    """Step 3 / 6 整块从仓库编排器抽出来真跑：接没接上、整体状态口径对不对，只有真跑看得出。"""
 
     def _step3(self, orch, tmp, write, rc=0):
         block = _block(orch, "# Step 3: ML 增强报告生成", "# Step 4/5:")
@@ -285,7 +265,7 @@ class TestEveryRunStepDeclaresItsEvidence:
     def test_scanner_sees_every_real_call(self, orch):
         """正对照：扫描器认得出真编排器里的调用形状（带 / 不带 --timeout、${PROJECT_DIR} / $PROJECT_DIR）。"""
         names = {s for s, _ in run_step_calls(orch)}
-        assert {"data_fetcher.py", "alert_manager.py", "orchestrator_steps.py", "ic_rerun_readiness.py"} <= names, names
+        assert {"generate_ml_report.py", "alert_manager.py", "orchestrator_steps.py", "ic_rerun_readiness.py"} <= names, names
         raw = len(re.findall(r"^[ \t]*run_step[ \t]", orch, re.M))
         assert raw == len(run_step_calls(orch)), "有 run_step 调用的写法扫描器没认出来——扩 _RUN_STEP，别让它漏登记"
 
@@ -298,8 +278,8 @@ class TestGuardsHaveTeeth:
         assert any("new_tool.py" in p for p in classify_problems(mutated, STEP_OUTPUTS))
 
     def test_dropping_the_postcondition_call_goes_red(self, orch):
-        mutated = orch.replace("_no_output step1_data_fetcher ", "true ", 1)
-        assert any("step1_data_fetcher" in p for p in classify_problems(mutated, STEP_OUTPUTS))
+        mutated = orch.replace("_no_output step3_ml_report ", "true ", 1)
+        assert any("step3_ml_report" in p for p in classify_problems(mutated, STEP_OUTPUTS))
         mutated = orch.replace('_STEP6_MARK="$(_step_marker)"', '_STEP6_MARK=""', 1)
         assert any("_step_marker" in p for p in classify_problems(mutated, STEP_OUTPUTS))
 
@@ -307,8 +287,8 @@ class TestGuardsHaveTeeth:
         assert any("ghost.py" in p for p in classify_problems(orch, {**STEP_OUTPUTS, "ghost.py": (EXEMPT, "x")}))
 
     def test_interpreter_claim_needs_the_call(self, orch):
-        reg = {**STEP_OUTPUTS, "data_fetcher.py": (INTERPRETER, "1")}
-        assert any("data_fetcher.py" in p for p in classify_problems(orch, reg))
+        reg = {**STEP_OUTPUTS, "alert_manager.py": (INTERPRETER, "6")}
+        assert any("alert_manager.py" in p for p in classify_problems(orch, reg))
 
     @pytest.mark.parametrize("mutation, case", [
         (("-ot", "-nt"), "old"),                                      # 新鲜度判据反了

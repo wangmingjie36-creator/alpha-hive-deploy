@@ -224,7 +224,7 @@ run_step() {
 # ================================================================
 # 墓碑：v0.45.534 删掉的 Step 8 没有 __main__，每天 0 秒退出 0、记 success——run_step 只看退出码，
 # 「脚本根本没干活」与「干成了」同为 0。Step 2/4/10–15 经步骤解释器核对本轮 --out JSON（stale_json /
-# missing_json 早已会红）；其余只看退出码的步骤（Step 1 / 3 / 6）在这里声明产出：
+# missing_json 早已会红）；其余只看退出码的步骤（Step 3 / 6）在这里声明产出：
 #   · 跑之前 `_STEPn_MARK="$(_step_marker)"`（建一个空文件，mtime = 本步开始）
 #   · 退出码 0 之后 `_no_output <key> <rc> <duration> <marker> <产出路径>...`：
 #     任一产出不存在、或比标记旧（不是本步写的）⇒ 记 {"status":"failed","reason":"no_output","missing":[…]}
