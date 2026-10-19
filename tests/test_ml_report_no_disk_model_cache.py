@@ -139,6 +139,29 @@ class TestFingerprintRecorded:
         fp = model_fingerprint(Unpicklable())
         assert fp["sha256"] is None and "fingerprint_error" in fp
 
+    def test_unfitted_model_is_marked_weights_basis(self):
+        """训练失败 / 降级模型退用权重指纹——必须标明，别被当成能对上快照的模型身份。"""
+        from generate_ml_report import model_fingerprint
+        from ml_predictor import HGBModel
+        fresh = HGBModel()
+        assert model_fingerprint(fresh)["basis"] == "weights"
+        fresh.train(_rows(77))
+        assert model_fingerprint(fresh)["basis"] == "clf"
+
+    def test_report_fingerprint_matches_snapshot_manifest(self, gen_cls, tmp_path, monkeypatch):
+        """端到端：报告指纹 = 快照 manifest 的 model_sha256，且同日另一个模型不会把它的快照冲掉。"""
+        import ml_model_guard as g
+        from hive_logger import PATHS
+        monkeypatch.setenv("ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE", "0")
+        gen = gen_cls()
+        sha = gen._model_fingerprint["sha256"]
+        hist = Path(PATHS.ml_model_cache).parent / g.HISTORY_DIRNAME
+        recs = [json.loads(line) for line in (hist / g.MANIFEST_NAME).read_text().splitlines()]
+        assert any(r["model_sha256"] == sha and r["source"] == "ml_model_cache.json" for r in recs)
+        _plant_same_day_model(77)               # 同日另一个进程存了另一个模型
+        snaps = {g.model_bytes_sha(json.loads(p.read_text())) for p in hist.glob("ml_model_cache-*.json")}
+        assert sha in snaps, "早上打分那个模型的快照被同日后来的模型冲掉了"
+
     def test_fingerprint_is_deterministic_across_trainings(self):
         """同样的数据训两次 ⇒ 同一指纹（删掉读回的前提：训练是确定性的）。"""
         from generate_ml_report import model_fingerprint

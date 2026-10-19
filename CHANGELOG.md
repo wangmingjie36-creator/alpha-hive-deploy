@@ -5,7 +5,34 @@
 
 ---
 
-## [0.45.553] — 2026-10-19 — 占位（进行中：v0.45.551 二次检查——同日后来的模型会冲掉早上那份快照）
+## [0.45.553] — 2026-10-19 — Fixed：v0.45.551 二次检查——同日后来训的模型会冲掉早上那份快照（报告指纹就对不上了）；快照改为同日多模型并存、manifest 记模型指纹
+
+用户要求（2026-10-19）：「二次检查以上更新有没有 bug」。
+
+### 查到的问题
+- **（中，v0.45.551 引入）同日快照被冲掉**：`ml_model_guard.snapshot_model_file` 同日再存**不同**内容时「覆盖成最新一次」。v0.45.551 前同日后启动的进程
+  命中磁盘缓存、不训练也不保存，所以当天快照就是早上那个模型；v0.45.551 起它们按当时的库重训并保存——Step 3 补跑在扫描写完 T+7 回填之后跑，库已变 ⇒
+  训出另一个模型 ⇒ **把早上给主报告打分的那个模型的快照冲掉**，那 12 份报告里的 `ml_prediction.model.sha256` 就再也对不上任何快照文件；
+  manifest 只记文件 sha256（≠ 报告指纹口径），也接不住。正是 v0.45.551 要建的那条归因链断在第一天。
+- **（低）未拟合模型的指纹看着像模型身份**：训练失败 / 降级模型时 `model_fingerprint` 退用权重 JSON 的哈希，记录里与真模型指纹无从区分。
+- 已核、无问题：新增 `ml_prediction.model` 字段——全仓没有遍历 `ml_prediction` 键的生产读者（`report_formatters` / `generate_deep_v2` / `collect_data` 都按名取键）；
+  进程内缓存改存 `(模型, 指纹)` 元组——生产与测试都没有别处读 `_model_cache`；`DegeneracyVerdict` 新字段都带缺省、加在末尾，位置构造不受影响。
+
+### Fixed
+- `ml_model_guard.snapshot_model_file`：同日已有**不同**模型 ⇒ 不覆盖，另存 `{stem}-{date}~{模型指纹}.json`（指纹 = `model_bytes` 解码后 sha256 前 16 位，
+  与报告同口径；无 `model_bytes` 的 SGD / Simple 退用文件 sha256 前 16 位）。当日第一个模型仍用原名 `{stem}-{date}.json`（老快照与读法不变）。
+  同一模型再存仍不重写。manifest 每行新增 **`model_sha256`**，`snapshot` 字段写实际落点。
+- `_SNAPSHOT_RE` 认两种名字；`_prune_snapshots` 改为保留最近 `retain` 个**日期**（同日几个模型同进同退，原来按文件数会把同日变体挤掉老日期）；
+  `_snapshot_exists` 认变体名。快照缺失的描述补「补跑日报告日期不是训练当天」这一正常原因。
+- `generate_ml_report.model_fingerprint` 新增 `basis`：`"clf"`（已拟合模型的 pickle，可对上快照）/ `"weights"`（降级或未拟合，对不上任何快照）。
+- 新增 `ml_model_guard.model_bytes_sha(parsed)`：快照 / 模型文件 → 报告指纹口径的唯一实现。
+
+### Tests
+- `tests/test_ml_model_guard.py`：原 `test_same_day_changed_content_overwrites_…` 改为 `…_keeps_both_models`（早上那份逐字节不变、变体名带指纹、manifest
+  记 `model_sha256` 与实际落点、同一模型再存不另起文件）；新增无 `model_bytes` 回落、按日期裁剪、变体算「当日有快照」、文件名正则两种形式。
+- `tests/test_ml_report_no_disk_model_cache.py`：新增 `basis` 标记、端到端「报告指纹 = manifest `model_sha256`，且同日另一模型存过之后早上那份快照仍在」。
+- **变异自证**：恢复同日覆盖 ⇒ 4 条红（含端到端）；按文件数裁剪 ⇒ 红；存在性不认变体 ⇒ 红；`basis` 不写 ⇒ 红。
+
 
 ## [0.45.552] — 2026-10-19 — Removed：`--samples-only` 样本积累模式整个退役（连同 `--extended-pool` / `--max-tickers` 与 `health_check.check_sample_accumulator`）；已知死链 4 → 3
 

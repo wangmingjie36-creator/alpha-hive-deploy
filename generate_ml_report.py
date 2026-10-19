@@ -63,8 +63,9 @@ def model_fingerprint(model) -> dict:
     """本进程实际用来打分的那个模型的身份证，随每份报告写进 `ml_prediction.model`。
 
     `sha256`（前 16 位）取自 `pickle.dumps(model._clf)`——HGB 的 `save_model` 写进 JSON 的 `model_bytes`
-    正是这份字节的 base64 ⇒ 报告可以直接对上 `ml_model_history` 里的快照。没有 `_clf` 的降级模型
-    （SimpleMLModel）退用权重的 JSON。算不出来时 `sha256=None` 并写明 `fingerprint_error`，
+    正是这份字节的 base64 ⇒ 报告可以直接对上 `ml_model_history` 里的快照（manifest 的 `model_sha256`、
+    同日另存的 `…~{指纹}.json`）。没有已拟合 `_clf` 时（SimpleMLModel，或训练失败的模型）退用权重的 JSON，
+    `basis` 写明是哪一种——权重指纹对不上任何快照，别拿它当模型身份。算不出来时 `sha256=None` 并写明 `fingerprint_error`，
     不让「没记」看起来像「没有」。读者：`ml_model_guard.check_day`（当日指纹清单进判定描述）。
     """
     import hashlib
@@ -72,6 +73,7 @@ def model_fingerprint(model) -> dict:
 
     fp = {
         "sha256": None,
+        "basis": None,                 # "clf"（pickle 的已拟合模型）/ "weights"（降级 / 未拟合）
         "model_type": type(model).__name__,
         "n_samples_seen": getattr(model, "_n_samples_seen", None),
         "training_accuracy": getattr(model, "training_accuracy", None),
@@ -81,9 +83,10 @@ def model_fingerprint(model) -> dict:
     try:
         clf = getattr(model, "_clf", None)
         if clf is not None and getattr(model, "_fitted", getattr(model, "is_trained", False)):
-            payload = pickle.dumps(clf)
+            payload, fp["basis"] = pickle.dumps(clf), "clf"
         else:
             payload = json.dumps(getattr(model, "weights", {}), sort_keys=True, default=str).encode("utf-8")
+            fp["basis"] = "weights"
         fp["sha256"] = hashlib.sha256(payload).hexdigest()[:16]
     except Exception as e:  # noqa: BLE001 —— 记下原因、照常出报告；守卫按 sha256=None 计数
         fp["fingerprint_error"] = f"{type(e).__name__}: {e}"

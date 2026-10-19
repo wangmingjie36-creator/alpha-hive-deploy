@@ -103,7 +103,7 @@ v0.45.551 起报告不再读回磁盘模型，且每份报告记 `ml_prediction.
 
 09-04 那次当时**无法事后归因**，因为 `ml_model.json` / `ml_model_cache.json` 被
 原地覆盖、没有任何版本留存（2026-10-19 靠日志 + 库备份才重建出来）。`snapshot_model_file()` 在每次 `save_model` 之后
-留一份 `ml_model_history/{stem}-YYYY-MM-DD.json`，并往
+留一份 `ml_model_history/{stem}-YYYY-MM-DD.json`（同日之后存的不同模型另存 `…~{指纹}.json`，不覆盖；v0.45.551），并往
 `ml_model_history/manifest.jsonl` 追加一行元数据（sha256 / 样本数 / 训练精度），
 下次退化时可以直接把当天的模型捞出来重放。
 
@@ -199,7 +199,10 @@ INPUT_COLLAPSE_RATIO = 2
 SNAPSHOT_DISABLE_ENV = "ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE"
 
 #: 快照文件名形状，删旧文件时用它把「我们写的」与「别人放的」分开
-_SNAPSHOT_RE = re.compile(r"^(?P<stem>.+)-(?P<date>\d{4}-\d{2}-\d{2})\.json$")
+#: `{stem}-YYYY-MM-DD.json`（当日第一个模型）或 `{stem}-YYYY-MM-DD~{16 位 hex}.json`（当日之后存的**另一个**模型，
+#: 后缀 = 模型指纹，与报告 `ml_prediction.model.sha256` 同一口径；v0.45.551 起同日不同模型不再互相覆盖）。
+_SNAPSHOT_RE = re.compile(
+    r"^(?P<stem>.+)-(?P<date>\d{4}-\d{2}-\d{2})(?:~(?P<variant>[0-9a-f]{16}))?\.json$")
 
 _ANALYSIS_RE = re.compile(r"^analysis-(?P<ticker>.+)-ml-(?P<date>\d{4}-\d{2}-\d{2})\.json$")
 
@@ -322,8 +325,8 @@ class DegeneracyVerdict:
                          "（v0.45.551 之前的报告没有该字段；之后出现＝指纹计算失败）")
         parts.append(
             "当日模型快照：" + ("已留存" if self.snapshot_present
-                              else f"缺失（{HISTORY_DIRNAME}/ 里没有当日文件；v0.45.551 起出报告的"
-                                   "进程都会训练并快照，缺失＝快照失败或被环境变量关闭）")
+                              else f"缺失（{HISTORY_DIRNAME}/ 里没有当日文件；v0.45.551 起出报告的进程都会训练并快照，"
+                                   "缺失＝快照失败 / 被环境变量关闭 / 补跑日报告日期不是训练当天）")
         )
         if self.is_degenerate:
             parts.append(
@@ -482,7 +485,7 @@ def _snapshot_exists(report_dir, date_str: str) -> bool:
     hist = Path(report_dir) / HISTORY_DIRNAME
     if not hist.is_dir():
         return False
-    return any(hist.glob(f"*-{date_str}.json"))
+    return any(hist.glob(f"*-{date_str}.json")) or any(hist.glob(f"*-{date_str}~*.json"))
 
 
 def check_day(report_dir, date_str: str) -> DegeneracyVerdict:
@@ -563,7 +566,7 @@ def _snapshot_disabled() -> bool:
 
 
 def _prune_snapshots(hist: Path, stem: str, retain: int) -> None:
-    """只删形如 `{stem}-YYYY-MM-DD.json` 的自产文件，保留最新 `retain` 份。"""
+    """只删 `_SNAPSHOT_RE` 认得的自产文件，保留最新 `retain` 个**日期**（同日的几个模型同进同退）。"""
     if retain <= 0:
         return
     mine = []
@@ -571,11 +574,31 @@ def _prune_snapshots(hist: Path, stem: str, retain: int) -> None:
         m = _SNAPSHOT_RE.match(p.name)
         if m and m.group("stem") == stem:
             mine.append((m.group("date"), p))
-    for _date, p in sorted(mine, reverse=True)[retain:]:
+    keep = set(sorted({d for d, _p in mine}, reverse=True)[:retain])
+    for date, p in mine:
+        if date in keep:
+            continue
         try:
             p.unlink()
         except OSError as e:
             _log.warning("清理旧模型快照失败 %s: %s", p.name, e)
+
+
+def model_bytes_sha(parsed) -> Optional[str]:
+    """模型文件 JSON 里 `model_bytes`（base64 的 pickle）解码后的 sha256 前 16 位。
+
+    与 `generate_ml_report.model_fingerprint` 的 `sha256` 是**同一份字节**（`pickle.dumps(model._clf)`）⇒
+    报告里的指纹可以直接对上快照。没有 `model_bytes`（SGD / Simple 降级格式）或解不开 ⇒ None。
+    """
+    import base64
+    import binascii
+    raw = parsed.get("model_bytes") if isinstance(parsed, dict) else None
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return hashlib.sha256(base64.b64decode(raw)).hexdigest()[:16]
+    except (binascii.Error, ValueError):
+        return None
 
 
 def snapshot_model_file(
@@ -593,8 +616,8 @@ def snapshot_model_file(
     且当日 manifest 缺行 / 快照缺失会由 `DegeneracyVerdict.describe()`
     在每日那条日志里说出来——这就是「这个失败，下游怎么知道」的答案。
 
-    ⚠️ 快照缺失**不构成硬错误**：命中磁盘缓存的那天根本不会调 `save_model`，
-    当天没有快照是正常的。
+    ⚠️ 快照缺失**不构成硬错误**（被环境变量关闭、或补跑日报告日期 ≠ 训练当天）。
+    v0.45.551 前「命中磁盘缓存的那天根本不会调 `save_model`」也是原因之一；现在出报告的进程都会训练并保存。
 
     ⚠️ pytest 里默认不写（见 `_snapshot_disabled`）——测试夹具模型混进
     这个目录会被自动提交成「生产模型」，是有误导性的假证据。
@@ -617,9 +640,9 @@ def snapshot_model_file(
                 date_str = _dt.date.today().isoformat()
 
         digest = hashlib.sha256(raw).hexdigest()
-        dest = hist / f"{src.stem}-{date_str}.json"
 
         meta = {}
+        model_sha = None
         try:
             parsed = json.loads(raw.decode("utf-8"))
             if isinstance(parsed, dict):
@@ -628,8 +651,16 @@ def snapshot_model_file(
                     for k in ("model_type", "is_trained", "n_samples_seen",
                               "training_accuracy", "oos_accuracy")
                 }
+                model_sha = model_bytes_sha(parsed)
         except (UnicodeDecodeError, json.JSONDecodeError):
             meta = {"parse_error": True}
+
+        # 同日已有一份**不同的**模型 ⇒ 不覆盖，另存 `{stem}-{date}~{指纹}.json`（v0.45.551）。
+        # 此前「变了就覆盖成最新一次」：v0.45.551 起同日后启动的进程（Step 3 补跑、手动报告）会按当时的库重训，
+        # 覆盖会把早上真正给主报告打分的那个模型冲掉，报告里的指纹就再也对不上快照。
+        dest = hist / f"{src.stem}-{date_str}.json"
+        if dest.exists() and hashlib.sha256(dest.read_bytes()).hexdigest() != digest:
+            dest = hist / f"{src.stem}-{date_str}~{model_sha or digest[:16]}.json"
 
         line = {
             "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -637,14 +668,14 @@ def snapshot_model_file(
             "source": src.name,
             "snapshot": dest.name,
             "sha256": digest,
+            "model_sha256": model_sha,   # 与报告 ml_prediction.model.sha256 同口径（SGD / Simple 无 ⇒ None）
             "bytes": len(raw),
             **meta,
         }
         with open(hist / MANIFEST_NAME, "a", encoding="utf-8") as f:
             f.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
 
-        # 同日重复保存：内容没变就不重写（省 churn），变了就覆盖成最新一次。
-        # manifest 上面已经记了每一次的 sha256，日内演化仍可追。
+        # 同日重复保存同一个模型：不重写（省 churn）。manifest 上面已经记了每一次。
         if dest.exists() and hashlib.sha256(dest.read_bytes()).hexdigest() == digest:
             return None
 
