@@ -7,7 +7,54 @@
 
 ## [0.45.542] — 2026-10-19 — 占位（进行中：OI 陈旧链的全部 OI 派生量从源头置不可得 + P/C 不再退到成交量口径）
 
-## [0.45.541] — 2026-10-19 — 占位（进行中：ChronosBee 的 IV-crush 抓取移出扫描、改由 generate_deep_v2 缺数据时现场抓；重放 A/B 证分数逐位不变 + 429 前后对照）
+
+## [0.45.541] — 2026-10-19 — Changed：ChronosBee 的 IV-crush 抓取移出扫描（每轮少 90 次 yfinance，约 3 分钟 yf_gate 队列）、改由 generate_deep_v2 缺数据时现场抓；重放 A/B 证 ChronosBee 产出与板上条目逐位不变
+
+用户决定（2026-10-19）：「先做 ①：把 ChronosBee 的 IV-crush 抓取移出扫描、改由 generate_deep_v2 缺数据时现场抓；用重放 A/B 证明分数逐位不变，
+记录上线前后的 429 次数」。来源：v0.45.534 之后的死链二次检查第二档。
+
+### 为什么
+- `iv_crush_scraper.get_iv_crush_data` 的结果只写进 ChronosBee `details.iv_crush` / `iv_crush_summary` 与财报催化剂上的
+  `iv_crush_avg_move` / `implied_move` / `beat_rate`——**评分不读**；全仓唯一读者是手动跑的 `generate_deep_v2`（编排器 / 定时任务都不跑它）。
+- 它每只标的 3 次 yfinance、不走缓存，全排在 `yf_gate` 那**一个** 0.5 req/s、burst 1 的全进程桶里（`resilience.yfinance_limiter`）。
+  ⚠️ 更正审计子代理的说法：它**走** yf_gate（`yf_gate.install()` 全局 patch 了 `yf.Ticker`），不是绕过限流器；代价是占队列，不是直连。
+
+### Changed
+- `swarm_agents/chronos_bee.py`：删「1c. IV Crush」整段与 details 里两个键（换成说明注释）。
+- `generate_deep_v2.py`：新增 `_try_fetch_iv_crush(ctx)`，挂在报告生成主路径 `_try_compute_gex(ctx)` 之后——旧 `.swarm_results` 里带着的照用、
+  不打网；缺了现场抓。`extract()` 保持纯转换、不打网（现有测试直接调它）。抓取失败 / 无可用数据 / 摘要格式化失败**各打一条 warning**，
+  格式化失败不连带丢掉已取到的面板数据（写测试时抓到的：最初放在同一个 try 里）。
+
+### 证据：重放 A/B（`experiments/iv_crush_ab_v0541.py`）
+- 10-12 那份整日录制已不在（原会话 scratchpad 已清空），改为**只录 ChronosBee 需要的请求**：A = origin/main 38379ea3 实盘录制
+  （2026-10-19 03:32 PDT，离生产 14:00 扫描 10 小时，30 只、831s），再离线重放 A 与 B（B = A + 本版两个文件，`diff -rq` 只差这两个）。
+  网络层沿用 `replay_1012_full_day_v0484.py` 的录制 / 重放；装配同生产（`prefetch_shared_data` + `inject_prefetched` + `yf_gate.install()`）。
+- **结果**：30/30 只 ChronosBee 的 `score` / `direction` / `confidence` / `dimension` / `data_quality` / `discovery` / `source` 与 details
+  （去掉被删的两个键与三个附加键后）**逐位相同**；板上 30 条（去掉写入时刻与按时衰减的强度）逐位相同；B 没有任何 A 之外的缺失请求。
+  yfinance 请求 **366 → 276（−90，每只 3 次）**，urllib 34 → 33。
+- 唯一容忍的差异：`details.earnings_calendar.fetched_at` / `details.pead.generated_at`（墙钟时刻）——对照组（A 录制 vs A 重放）同一路径同样不同。
+- ⚠️ 首轮整跑判 FAIL：板上 `details.catalyst_types` 在 10 只上顺序相反。根因是 `list({…})`（集合转列表）+ 字符串哈希按进程随机：
+  **同一份旧代码**以 `PYTHONHASHSEED=0` / `1` 各重放一次就互相翻转；A、B 同用 seed 0 ⇒ 全部逐位相同，判 PASS。该字段零读者，是既有的进程级随机，
+  与本版无关（未改）；harness 文档已写明重放要固定 seed。
+- 判据有牙：在 B 的输出上植入 score +0.01 / details 多一个键 / 板上 discovery 改一字 / 多一个缺失请求 ⇒ 四种都判 FAIL。
+- 本机没装 freezegun，没为一次 A/B 改用户的 Python 环境 ⇒ 不冻结时钟；三次运行同日、相隔分钟，按日期算的字段一致，秒级时刻落进对照噪声。
+
+### 429 前后对照（`experiments/iv_crush_429_before_after_v0541.py`，口径同 `scan_coverage_gate.check_rate_limit`）
+- **上线前（09-21 ~ 10-16，21 个有日志的扫描日）**：`Too Many Requests` 中位数 0、均值 11.0、最大 74；17/21 天为 0，
+  非零的 4 天（09-21 65 / 09-24 74 / 10-12 71 / 10-14 20）都是整天的故障 / 限流事件。
+- ⇒ **对 429 的改善大概率测不出来**（基线中位数已是 0），本版的收益主要是每轮约 3 分钟的 yf_gate 队列让给评分要用的请求（扫描耗时瓶颈见
+  auto-memory alpha-hive-scan-duration）。上线后跑同一脚本看「后」组；`BOUNDARY` 预设 10-19（推送早于当天 14:00 扫描），**待核实**生产克隆当天是否已含本版。
+- 实盘下别的蜂可能因队列变短而拿到更多数据 ⇒ 实盘分数不保证逐位不变（重放下逐位不变证明的是代码改动本身中性）。
+
+### Added
+- `tests/test_iv_crush_out_of_scan.py`（9 条）：生产代码里 import `iv_crush_scraper` 的**恰好**只有 `generate_deep_v2.py`（双向）；
+  ChronosBee 不再写五个 IV-crush 键（`catalysts` 做正对照）；`extract()` 零打网；已有记录不抓 / 缺了去抓 / 抓失败打 warning / 无数据打 warning /
+  格式化失败保留面板数据（变异：把格式化挪回同一个 try ⇒ 红）；探测器正反对照。
+- 两个实验脚本（A/B harness、429 前后对照），只读生产日志、只写沙箱。
+
+### 协议
+- 评分函数与评分输入都没动（ChronosBee 的 AgentResult 逐位不变）⇒ 不截断维度 IC H1/H2，不需要世代边界（同 534 先例）；
+  ChronosBee 是 catalyst 维，以上 A/B 即提交时附的证据。
 
 ## [0.45.540] — 2026-10-19 — Fixed：二次检查 v0.45.537——ML 世代条目把受影响的特征写反了（漏 `direction_encoded`、误称 `agent_agreement` 不受影响）；边界印记函数没有任何测试
 

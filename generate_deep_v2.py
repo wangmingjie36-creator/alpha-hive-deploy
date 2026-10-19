@@ -545,8 +545,9 @@ def extract(data: dict) -> dict:
             if c.get("event", "").startswith("分析师"):
                 pass
 
-    # IV Crush（财报历史波动 + 隐含幅度）
-    iv_crush = cdet.get("iv_crush", {})
+    # IV Crush（财报历史波动 + 隐含幅度）。v0.45.541 起扫描不再抓：旧 .swarm_results 里带着的照用，
+    # 缺了由 `_try_fetch_iv_crush(ctx)` 在报告生成阶段现场抓（extract 本身保持纯转换、不打网）。
+    iv_crush = cdet.get("iv_crush") or {}
     iv_crush_summary = cdet.get("iv_crush_summary", "")
 
     # ML 预测
@@ -4856,6 +4857,33 @@ def _local_fallback(ctx: dict, section: str) -> str:
 
 # ── HTML 生成 ─────────────────────────────────────────────────────────────────
 
+def _try_fetch_iv_crush(ctx: dict) -> None:
+    """v0.45.541：IV Crush 面板的数据在报告生成阶段现场抓（扫描不再抓——评分不读它，只有本报告读）。
+
+    扫描记录里已经带着（旧记录）⇒ 照用、不打网。抓不到 ⇒ 面板按「无数据」不渲染（下游判 avg_abs_move），
+    并打 warning——失败要说出来，不是静默空白。
+    """
+    if ctx.get("iv_crush"):
+        return
+    ticker = ctx.get("ticker")
+    try:
+        from iv_crush_scraper import get_iv_crush_data, format_iv_crush_summary
+        data = get_iv_crush_data(ticker) or {}
+    except Exception as e:  # noqa: BLE001 —— 报告的一节，失败不拖垮整份报告，但要说出来
+        _log.warning("IV Crush 现场抓取失败（%s）：%s——本报告不含 IV Crush 面板", ticker, e)
+        ctx["iv_crush"], ctx["iv_crush_summary"] = {}, ""
+        return
+    ctx["iv_crush"] = data                  # 先落数据：摘要格式化失败不该连带丢掉已取到的面板数据
+    if not data.get("avg_abs_move"):
+        _log.warning("IV Crush 现场抓取无可用数据（%s，source=%s）——本报告不含 IV Crush 面板",
+                     ticker, data.get("source"))
+    try:
+        ctx["iv_crush_summary"] = format_iv_crush_summary(data) if data else ""
+    except Exception as e:  # noqa: BLE001
+        _log.warning("IV Crush 摘要格式化失败（%s）：%s——面板照常，摘要留空", ticker, e)
+        ctx["iv_crush_summary"] = ""
+
+
 def _try_compute_gex(ctx: dict) -> None:
     """
     在报告生成阶段补算 Dealer GEX。
@@ -7241,6 +7269,9 @@ def main():
     #         在报告生成阶段用 ctx['price'] 实时重算，保证 CH4 GEX 卡片有数据
     print("📐 检查 GEX 数据...")
     _try_compute_gex(ctx)
+
+    # 2b-pre2. IV Crush：v0.45.541 起扫描不再抓，缺了在这里现场抓（只有本报告读它）
+    _try_fetch_iv_crush(ctx)
 
     # 2a-2. SABR 波动率曲面分析（CH4 增强）
     ctx["vol_surface_html"] = ""
