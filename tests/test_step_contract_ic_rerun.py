@@ -124,7 +124,8 @@ def _run(tmp_path: Path, db: Path, *args, prelude: str = "", history_through: st
     """真起 CLI 子进程，返回 (rc, 外壳 | None, stdout, stderr)。
 
     `prelude` 为空 ⇒ 直接 `python ic_rerun_readiness.py …`；非空 ⇒ `python -c`：先执行 prelude（只准改被测
-    CLI 看得到的**外部数据**视图，例如执行器读的边界表），再以 `runpy.run_path(..., run_name="__main__")`
+    CLI 看得到的**外部数据**视图，例如执行器读的边界表；v0.45.556 起也用来换执行器两道 H1 前提核对的**结果**——
+    `buzz_v1.self_proof` / `signal_code_fingerprints.check`，它们各有自己的测试），再以 `runpy.run_path(..., run_name="__main__")`
     跑**同一个真实脚本文件**——入口那一行照样是被测对象。
     """
     out = tmp_path / "out.json"
@@ -279,16 +280,20 @@ class TestRealCli:
         里少掉锚点那条（`anchor_status` ⇒ `pending`），被测脚本本身原样跑。
         段首图标与条目的对照写成双条件（不是 skip）：维度 IC 除锚点外没有别的 warn ⇒ 段首必须是 ⏳；
         有（例如浅克隆 / 无 git 的环境里「权重历史无法判定」）⇒ 段首必须是 ⚠️。两支都是真断言。
+
+        v0.45.556：沙箱库没有归档 ⇒ buzz_v1 自证恒不通过、恒有一条 warn ⇒ ⏳ 那支永远走不到。prelude 把自证换成
+        通过的摘要（与锚点视图同理：只换前提，被测脚本原样跑）；自证不通过的端到端路径见下一条测试。
         """
         db = _make_db(tmp_path / "home", [])
         prelude = (
-            "import importlib.util, signal_archive, ic_rerun_readiness as _rr\n"
+            "import importlib.util, signal_archive, ic_rerun_readiness as _rr, buzz_v1\n"
             f"_s = importlib.util.spec_from_file_location('dim_ic_protocol', "
             f"{str(REPO_ROOT / 'experiments' / 'dim_ic_protocol.py')!r})\n"
             "_P = importlib.util.module_from_spec(_s); _s.loader.exec_module(_P)\n"
             "_hist = [e for e in _rr._COHORT_HISTORY if e[1] != _P.H1_ANCHOR_VERSION]\n"
             "assert len(_hist) < len(_rr._COHORT_HISTORY), '前提：锚点版本确实在边界表里'\n"
-            "signal_archive._cohort_history = lambda: _hist\n")
+            "signal_archive._cohort_history = lambda: _hist\n"
+            f"buzz_v1.self_proof = lambda *a, **k: dict({_SP_OK!r})\n")
         rc, env, out, err = _run(tmp_path, db, "--today", self.TODAY, "--quiet", prelude=prelude)
         ids = _check(rc, env, err, expect_rc=1, expect_date=self.TODAY, expect_status="attention")
         (anchor,) = ids["ic_rerun.dim_ic.h1_anchor_pending"]
@@ -302,6 +307,36 @@ class TestRealCli:
             assert seg.startswith("⚠️ "), (other_dim_warns, seg)
         else:
             assert seg.startswith("⏳ "), f"维度 IC 没有别的 warn 时段首应是 ⏳（截止日正是藏在这里）：{seg}"
+        _assert_payload_intact(env)
+
+    def test_self_proof_failure_reaches_envelope(self, tmp_path):
+        """v0.45.556 端到端：沙箱库没有归档 ⇒ 真的 buzz_v1 自证不通过 ⇒ `--quiet` 维度 IC 段 ⚠️，**且**外壳里有
+        `ic_rerun.dim_ic.buzz_v1_self_proof` warn。初版只有前者（白名单没带键、条目没列）——按条目读的消费方看不见。
+        变红的变异：`_DIM_DETAIL_KEYS` 去掉 `buzz_v1_self_proof`；`_dim_ic_attention` 不列这一条。"""
+        db = _make_db(tmp_path / "home", [])
+        rc, env, out, err = _run(tmp_path, db, "--today", self.TODAY, "--quiet")
+        ids = _check(rc, env, err, expect_rc=1, expect_date=self.TODAY, expect_status="attention")
+        (a,) = ids["ic_rerun.dim_ic.buzz_v1_self_proof"]
+        assert a["level"] == "warn" and "buzz_v1 自证未通过" in a["message"], a
+        seg = _quiet_segments(out)[3]
+        assert seg.startswith("⚠️ ") and "buzz_v1 自证未通过" in seg, seg
+        _assert_payload_intact(env)
+
+    def test_code_guard_failure_reaches_envelope(self, tmp_path):
+        """v0.45.554 起漏着的同一个洞：输入层指纹守卫红 ⇒ 段首 ⚠️ 且外壳有 `ic_rerun.dim_ic.input_code_guard`。
+        prelude 只把指纹核对换成「buzz.news 未确认」（自证换成通过，免得两条混在一起），被测脚本原样跑。"""
+        db = _make_db(tmp_path / "home", [])
+        prelude = (
+            "import signal_code_fingerprints as _scf, buzz_v1\n"
+            "_scf.check = lambda: {'ok': False, 'units': {'buzz.news': {'state': 'unacknowledged'}}}\n"
+            f"buzz_v1.self_proof = lambda *a, **k: dict({_SP_OK!r})\n")
+        rc, env, out, err = _run(tmp_path, db, "--today", self.TODAY, "--quiet", prelude=prelude)
+        ids = _check(rc, env, err, expect_rc=1, expect_date=self.TODAY, expect_status="attention")
+        (a,) = ids["ic_rerun.dim_ic.input_code_guard"]
+        assert a["level"] == "warn" and "buzz.news" in a["message"], a
+        assert "ic_rerun.dim_ic.buzz_v1_self_proof" not in ids, "前提：自证已换成通过"
+        seg = _quiet_segments(out)[3]
+        assert seg.startswith("⚠️ ") and "buzz.news" in seg, seg
         _assert_payload_intact(env)
 
     def test_crash_is_exit_3_with_error_envelope(self, tmp_path):
@@ -394,6 +429,7 @@ class TestOkPath:
         items = rr._dim_ic_attention(rr._take_detail(st))
         assert set(st) == {"status", "line"}, "取走 _detail 后只剩公开形状"
         got = {a["id"]: a for a in items}
+        # v0.45.556：读不出库是 `run()` 的早退，不跑两道 H1 前提、不带摘要键 ⇒ 不多出 `*_unknown`（cannot_judge 豁免）
         assert set(got) == {"ic_rerun.dim_ic.cannot_judge", "ic_rerun.dim_ic.h1_anchor_pending"}, sorted(got)
         assert got["ic_rerun.dim_ic.h1_anchor_pending"]["deadline"] == P.FORWARD_START
 
@@ -438,9 +474,37 @@ class TestOkPath:
     def test_missing_anchor_state_is_not_silently_ok(self):
         """执行器若不再给出 `h1_anchor`（形状变了 / 桩没带 `_detail`），锚点截止日会无声消失 ⇒ 单列一条 warn，
         不让「读不到」渲染成「没事」。"""
-        items = rr._dim_ic_attention({"status": "not_ready", "forward_start": P.FORWARD_START})
+        items = rr._dim_ic_attention({"status": "not_ready", "forward_start": P.FORWARD_START,
+                                      "input_code_guard": _GUARD_OK, "buzz_v1_self_proof": _SP_OK})
         assert [a["id"] for a in items] == ["ic_rerun.dim_ic.h1_anchor_unknown"]
         assert items[0]["level"] == "warn" and items[0]["deadline"] == P.FORWARD_START
+
+    @pytest.mark.parametrize("key", ["input_code_guard", "buzz_v1_self_proof"])
+    def test_missing_precondition_result_is_not_silently_ok(self, key):
+        """v0.45.556：执行器走完全程的返回都带这两个摘要；读不到（形状变了 / 白名单漏了 / 桩没带）⇒ 那道 H1 前提
+        等于没核，单列一条 warn。cannot_judge 时不报——`run()` 读不出库的早退与执行器没加载起来都不带，那条已在报。
+        变红的变异：删掉 `*_unknown` 那段；或把 cannot_judge 豁免去掉。"""
+        d = {k: v for k, v in _DIM_BASE.items() if k != key}
+        assert [a["id"] for a in rr._dim_ic_attention(d)] == [f"ic_rerun.dim_ic.{key}_unknown"]
+        cj = {**d, "status": "cannot_judge", "reason": "执行器加载失败"}
+        assert [a["id"] for a in rr._dim_ic_attention(cj)] == ["ic_rerun.dim_ic.cannot_judge"]
+
+    def test_precondition_messages_say_what_and_how_to_fix(self):
+        """条目消息要能单独读懂：哪个单元没确认 / 自证几比几、去跑哪个脚本。"""
+        got = {a["id"]: a["message"] for a in rr._dim_ic_attention(
+            {**_DIM_BASE, "input_code_guard": _GUARD_RED, "buzz_v1_self_proof": _SP_RED})}
+        g, s = got["ic_rerun.dim_ic.input_code_guard"], got["ic_rerun.dim_ic.buzz_v1_self_proof"]
+        assert "buzz.news" in g and "signal_code_fingerprints.py" in g, g
+        assert "119/120" in s and "失配 1" in s and "buzz_v1.py" in s, s
+        err = rr._dim_ic_attention({**_DIM_BASE, "buzz_v1_self_proof": {"ok": False, "error": "OperationalError: x"}})
+        assert "算不出：OperationalError: x" in err[0]["message"], err
+
+    def test_detail_whitelist_carries_preconditions(self):
+        """白名单漏了键 ⇒ 执行器给了也到不了 `_dim_ic_attention`（v0.45.554 的指纹守卫就是这样漏的）。"""
+        assert {"input_code_guard", "buzz_v1_self_proof"} <= set(rr._DIM_DETAIL_KEYS)
+        fres = {**_DIM_BASE, "buzz_v1_self_proof": _SP_RED}
+        assert "ic_rerun.dim_ic.buzz_v1_self_proof" in {
+            a["id"] for a in rr._dim_ic_attention(rr._detail(fres, rr._DIM_DETAIL_KEYS))}
 
 
 # ═══════════════════════════════ 条目 ↔ 图标对照 ═══════════════════════════════
@@ -460,9 +524,16 @@ _FWD_STATES = [
 ]
 
 _ANC_OK = {"state": "ok", "version": P.H1_ANCHOR_VERSION, "date": "2026-09-28"}
+#: v0.45.556：执行器 H1 两道前提的摘要形状（`input_code_guard()` / `buzz_v1_self_proof()`）
+_GUARD_OK = {"ok": True, "unacknowledged": [], "errors": {}}
+_SP_OK = {"ok": True, "window": ["2026-09-28", "2026-10-01"], "n": 120, "n_matched": 120, "n_mismatched": 0,
+          "n_missing": 0, "stopped_by": None}
 _DIM_BASE = {"status": "not_ready", "forward_start": P.FORWARD_START, "today": "2026-10-01", "h1_weeks": 0,
              "next_look_at": 26, "looks_done": [], "verdicts": {}, "truncation": {"H1": None, "H2": None},
-             "weight_change": {"date": None}, "stale": False, "h1_anchor": _ANC_OK}
+             "weight_change": {"date": None}, "stale": False, "h1_anchor": _ANC_OK,
+             "input_code_guard": _GUARD_OK, "buzz_v1_self_proof": _SP_OK}
+_GUARD_RED = {"ok": False, "unacknowledged": ["buzz.news"], "errors": {}}
+_SP_RED = {**_SP_OK, "ok": False, "n_matched": 119, "n_mismatched": 1}
 _DIM_STATES = [
     ("clean", {}, set()),
     ("anchor_pending", {"h1_anchor": {"state": "pending", "version": P.H1_ANCHOR_VERSION, "date": None,
@@ -487,6 +558,19 @@ _DIM_STATES = [
                                      "h1_anchor": {"state": "pending", "version": P.H1_ANCHOR_VERSION,
                                                    "date": None, "problem": "未登记"}},
      {"cannot_judge", "h1_anchor_pending"}),
+    # v0.45.556：检视点之前两道前提只让进度行 ⚠️、不改状态 ⇒ 必须各有一条带自己 id 的 warn
+    ("code_guard_red", {"input_code_guard": _GUARD_RED}, {"input_code_guard"}),
+    ("code_guard_error", {"input_code_guard": {"ok": False, "unacknowledged": [], "errors": {"*": "ImportError: x"}}},
+     {"input_code_guard"}),
+    ("self_proof_red", {"buzz_v1_self_proof": _SP_RED}, {"buzz_v1_self_proof"}),
+    ("self_proof_error", {"buzz_v1_self_proof": {"ok": False, "error": "OperationalError: no such table"}},
+     {"buzz_v1_self_proof"}),
+    ("both_red", {"input_code_guard": _GUARD_RED, "buzz_v1_self_proof": _SP_RED},
+     {"input_code_guard", "buzz_v1_self_proof"}),
+    # 检视点上执行器把状态改判 cannot_judge、两个摘要键照带（`apply_code_guard` / `apply_self_proof` 的 keep）
+    ("cannot_judge_by_both", {"status": "cannot_judge", "reason": "输入层代码有未确认的改动……",
+                              "input_code_guard": _GUARD_RED, "buzz_v1_self_proof": _SP_RED},
+     {"cannot_judge", "input_code_guard", "buzz_v1_self_proof"}),
 ]
 
 

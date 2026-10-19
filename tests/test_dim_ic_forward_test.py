@@ -54,11 +54,28 @@ def _no_forward_test_excluded_days(monkeypatch):
     import signal_archive as _sa
     monkeypatch.setattr(_sa, "FORWARD_TEST_EXCLUDED_DAYS", {})
 
+
+_SP_OK = {"ok": True, "window": ["2026-09-28", "2026-12-31"], "n": 450, "n_matched": 450,
+          "n_mismatched": 0, "n_missing": 0, "stopped_by": None}
+
+
+#: 未打桩的原函数（测包装本身时直接调它）
+_REAL_SELF_PROOF = fx.buzz_v1_self_proof
+
+
+@pytest.fixture(autouse=True)
+def _self_proof_ok(monkeypatch):
+    """合成库里没有 signal_archive，真跑自证必然「算不出」。本文件测执行器的算术——默认把自证摘要固定为通过；
+    自证本身由 tests/test_buzz_v1.py 钉，接线由下面 TestBuzzV1SelfProofWiring 用注入的摘要测。"""
+    monkeypatch.setattr(fx, "buzz_v1_self_proof", lambda db, today: dict(_SP_OK))
+
+
 DIMS = ("signal", "catalyst", "sentiment", "odds", "risk_adj")
 _TOP_KEYS_ALWAYS = {"forward_start", "today", "status", "h1_weeks", "next_look_at", "looks_done",
                     "verdicts", "truncation", "weight_change", "stale", "h1_anchor",
                     "forward_test_excluded_days",   # 修订 2（v0.45.484）：只是日期列表，不含效应量
-                    "input_code_guard"}             # v0.45.554：单元名与指纹状态，不含效应量
+                    "input_code_guard",             # v0.45.554：单元名与指纹状态，不含效应量
+                    "buzz_v1_self_proof"}           # v0.45.556：自证计数与窗口，不含效应量
 
 #: 窗口首日（周一）。窗口内的夹具日期一律相对它写——修订 1 把起点从 09-28 挪到 10-12 时，
 #: 写死的日期整批落到窗口前，测试红的原因变成「夹具过期」而不是「执行器错了」
@@ -650,6 +667,63 @@ class TestInputCodeGuard:
             "price.fields": {"state": "error", "error": "定位不到"}}})
         g = fx.input_code_guard()
         assert g == {"ok": False, "unacknowledged": [], "errors": {"price.fields": "定位不到"}}
+
+
+class TestBuzzV1SelfProofWiring:
+    """v0.45.556：buzz_v1 自证接进执行器——未通过 ⇒ 检视点前 ⚠️、检视点上「无法判定」（§13.2、§12 第 10 条）。"""
+
+    BAD = {"ok": False, "window": ["2026-09-28", "2026-12-31"], "n": 450, "n_matched": 447,
+           "n_mismatched": 2, "n_missing": 1, "stopped_by": None}
+
+    def _repo(self, tmp_path):
+        return _config_repo(tmp_path, [("2026-09-09", dict(P.FROZEN_WEIGHTS))])
+
+    def test_failed_self_proof_is_a_warning_before_a_look(self, tmp_path):
+        res = fx.run(db_path=str(_make_db(tmp_path, [])), today=_d(-3), repo_root=self._repo(tmp_path),
+                     history=[], self_proof=self.BAD)
+        assert res["status"] == "not_ready" and res["buzz_v1_self_proof"] == self.BAD
+        line = fx.status_line(res)
+        assert line.startswith("⚠️") and "447/450" in line and "buzz_v1.py" in line
+
+    def test_passing_self_proof_adds_nothing(self, tmp_path):
+        res = fx.run(db_path=str(_make_db(tmp_path, [])), today=_d(-3), repo_root=self._repo(tmp_path),
+                     history=[], self_proof=dict(_SP_OK))
+        assert "buzz_v1" not in fx.status_line(res)
+
+    @pytest.mark.parametrize("status", ["in_progress", "concluded"])
+    def test_at_a_look_a_failed_self_proof_blocks_verdicts(self, status):
+        res = {"forward_start": P.FORWARD_START, "today": _d(200), "status": status,
+               "verdicts": {"H1": {"result": "significant_positive", "ic": 0.2, "p": 0.001}},
+               "looks_done": ["中检"], "h1_weeks": 26, "next_look_at": 52,
+               "input_code_guard": {"ok": True, "unacknowledged": [], "errors": {}}}
+        out = fx.apply_self_proof(res, self.BAD)
+        assert out["status"] == "cannot_judge" and "自证未通过" in out["reason"]
+        assert "verdicts" not in out and out["input_code_guard"]["ok"] is True
+        assert not ({"ic", "p", "t", "ci95"} & set(_all_keys(out)))
+
+    def test_code_guard_and_self_proof_both_reported_when_both_fail(self):
+        res = {"status": "in_progress", "verdicts": {}, "looks_done": ["中检"], "h1_weeks": 26, "next_look_at": 52}
+        out = fx.apply_self_proof(fx.apply_code_guard(res, TestInputCodeGuard.BAD), self.BAD)
+        line = fx.status_line(out)
+        assert out["status"] == "cannot_judge" and out["buzz_v1_self_proof"] == self.BAD
+        assert line.startswith("⚠️") and "buzz.news" in line
+
+    def test_wrapper_turns_a_crash_into_not_ok(self, monkeypatch):
+        import buzz_v1
+
+        def boom(*a, **k):
+            raise RuntimeError("模拟自证崩溃")
+        monkeypatch.setattr(buzz_v1, "self_proof", boom)
+        sp = _REAL_SELF_PROOF(Path("/nonexistent.db"), _d(0))
+        assert sp["ok"] is False and "模拟自证崩溃" in sp["error"]
+        assert "算不出" in fx.status_line({"status": "not_ready", "buzz_v1_self_proof": sp, "truncation": {},
+                                            "weight_change": {}, "forward_start": P.FORWARD_START})
+
+    def test_wrapper_keeps_only_counts_and_window(self, monkeypatch):
+        import buzz_v1
+        monkeypatch.setattr(buzz_v1, "self_proof", lambda *a, **k: {
+            **_SP_OK, "mismatched": [{"production": 5.0, "buzz_v1": 5.01}], "missing": []})
+        assert set(_REAL_SELF_PROOF(Path("/x.db"), _d(0))) == set(fx._SELF_PROOF_KEYS) - {"error"}
 
 
 # ── 6. 进度行 ───────────────────────────────────────────────────────────────

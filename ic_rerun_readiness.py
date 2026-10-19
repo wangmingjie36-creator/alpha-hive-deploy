@@ -1663,8 +1663,10 @@ _DETAIL_KEY = "_detail"
 _FWD_DETAIL_KEYS = ("status", "reason", "stale", "look", "weeks", "next_look_at", "ohlc_window")
 #: 维度 IC 协议执行器 `run()` 返回值里 `attention` 用得上的键——刻意**不含** `verdicts` / `descriptive`
 #: （结论与效应量只在检视点之后出现，本工具只报「到点了、去跑脚本看」，不转述结论）
+#: `input_code_guard` / `buzz_v1_self_proof`（v0.45.556）：H1 两道前提的核对摘要，只有单元名与计数。
 _DIM_DETAIL_KEYS = ("status", "reason", "forward_start", "today", "h1_weeks", "next_look_at",
-                    "looks_done", "truncation", "weight_change", "stale", "h1_anchor")
+                    "looks_done", "truncation", "weight_change", "stale", "h1_anchor",
+                    "input_code_guard", "buzz_v1_self_proof")
 
 
 def _detail(fres: Dict, keys) -> Dict:
@@ -2301,6 +2303,32 @@ def _dim_ic_attention(d: Dict) -> List[Dict]:
     if d.get("stale"):
         out.append(item(f"{iid}.stale", "warn",
                         f"{name}：登记窗口起点 {fs} 后仍无任何样本 —— 扫描停了或路径错了"))
+    # v0.45.556：H1 的两道前提——输入层代码指纹守卫（v0.45.554）与 buzz_v1 自证（v0.45.556）。检视点之前执行器只把
+    # 它们渲染成进度行的 ⚠️、不改状态 ⇒ 这里不逐项列，按条目读的消费方就永远看不见（554 起漏着，556 由 TestRealCli
+    # 的图标双条件抓到）。检视点上它们会把状态改判 cannot_judge（上面已有一条），这里仍按前提单列：id 说明是哪一道。
+    g = d.get("input_code_guard")
+    if isinstance(g, dict) and not g.get("ok"):
+        why = "；".join(filter(None, (
+            f"未确认的改动：{'、'.join(g['unacknowledged'])}" if g.get("unacknowledged") else "",
+            ("算不出：" + "；".join(f"{u}: {e}" for u, e in g["errors"].items())) if g.get("errors") else ""))) or "未给原因"
+        out.append(item(f"{iid}.input_code_guard", "warn",
+                        f"{name}：输入层代码指纹守卫未通过（{why}）—— 跑 `/usr/local/bin/python3 signal_code_fingerprints.py` "
+                        "按提示三选一登记（拿不准选边界）；未登记前到检视点将不出结论（协议 §13.10）"))
+    sp = d.get("buzz_v1_self_proof")
+    if isinstance(sp, dict) and not sp.get("ok"):
+        why = (f"算不出：{sp['error']}" if sp.get("error") else
+               f"{sp.get('n_matched', 0)}/{sp.get('n', 0)} 逐位一致，失配 {sp.get('n_mismatched', 0)}、"
+               f"缺输入 {sp.get('n_missing', 0)}")
+        out.append(item(f"{iid}.buzz_v1_self_proof", "warn",
+                        f"{name}：buzz_v1 自证未通过（{why}）—— 跑 `/usr/local/bin/python3 buzz_v1.py` 看失配明细；"
+                        "未通过前到检视点将不出结论（协议 §13.11）"))
+    for key, what in (("input_code_guard", "输入层代码指纹守卫"), ("buzz_v1_self_proof", "buzz_v1 自证")):
+        if not isinstance(d.get(key), dict) and st != "cannot_judge":
+            # 执行器 `run()` 走完全程的返回都带这两个键；读不到 = 形状变了 / 白名单漏了 / 桩没带 ⇒ 前提核对会无声消失，
+            # 单列一条。cannot_judge 豁免：`run()` 找不到 / 读不出库的两条早退不带这两个键，执行器没加载起来也不带——
+            # 那时 cannot_judge 那条已在报。
+            out.append(item(f"{iid}.{key}_unknown", "warn",
+                            f"{name}：读不到{what}的结果（{key}={d.get(key)!r}）—— 这道 H1 前提没有核对"))
     return out
 
 
