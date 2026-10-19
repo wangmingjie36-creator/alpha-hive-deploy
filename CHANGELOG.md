@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.550] — 2026-10-19 — 占位（进行中：删三个零读者写入方——last_run_status.json / crowding_*.json / training_data.json）
+
 ## [0.45.549] — 2026-10-19 — Fixed：v0.45.543 二次检查——Step 6 后置条件在「同一天第二次扫描且跨零点」时误判 no_output
 
 ### 为什么
