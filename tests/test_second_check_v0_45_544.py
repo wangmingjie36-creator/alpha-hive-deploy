@@ -77,17 +77,11 @@ class TestChart:
         assert "Call偏多 →看涨" in texts and "0.60" in texts and "2.00M" in texts
 
 
-def test_rival_passes_none_pc_as_missing():
-    """板上 OracleBee 的 P/C 取不到 ⇒ RivalBee 的 ML 特征传 None，交给 ml_predictor 列进 imputed_features。
-    变红的变异：回落改回 1.0 / 不判 NaN。"""
-    import inspect
-
+def test_none_pc_is_listed_as_imputed():
+    """P/C 取不到 ⇒ `TrainingData.put_call_ratio=None` ⇒ ml_predictor 列进 imputed_features。
+    （v0.45.538：原本这里还守 RivalBee 的 `_usable_pc` 读法——Rival 的模型与 Oracle P/C 读取随合成样本模型一起退役，
+    那半条随之删；`_feature_quality` 对 None 的处理仍服务 ML 报告路径，留着。）"""
     from ml_predictor import TrainingData, _feature_quality
-    from swarm_agents import rival_bee
-    assert rival_bee._usable_pc(None) is None and rival_bee._usable_pc(float("nan")) is None
-    assert rival_bee._usable_pc(True) is None and rival_bee._usable_pc(0.8) == 0.8
-    src = inspect.getsource(rival_bee)
-    assert "_iv_rank, _pc_ratio = 50.0, None" in src and "_pc_ratio = _usable_pc(_pc_raw)" in src
     q = _feature_quality(TrainingData(ticker="SYN", date="2026-10-19", crowding_score=50.0, catalyst_quality="B",
                                       momentum_5d=0.0, volatility=0.3, market_sentiment=0.0, iv_rank=50.0,
                                       put_call_ratio=None, actual_return_3d=0.0, actual_return_7d=0.0,

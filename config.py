@@ -675,9 +675,9 @@ CATALYSTS = {
 # 架构说明：
 #   - 5 个主维度参与加权平均（权重和 = 1.0）
 #   - Options 数据 → OracleBeeEcho 内部融合（options + unusual，比例见 AGENT_SCORING）→ odds 维度
-#   - ML 预测 → RivalBeeVanguard → dimension="ml_auxiliary" → 不参与主公式
-#     作为独立调整项附加：final_score += (ml_score - 5.0) * 0.1 * ml_confidence（最大 ±0.5 分）
-#   - 两者不存在双重计算
+#   - RivalBeeVanguard → dimension="ml_auxiliary" → 不参与主公式，**也不再进分**
+#     （v0.45.538 拿掉了 `final_score += (rival_score − 5)·0.1·conf` 那一项：Rival 的概率出自
+#     硬编码合成样本训的模型；见 `QueenDistiller._compute_weighted_score` docstring，勿接回）
 #
 # v0.45.172（2026-09-09，用户明确决策，非自动优化写入）：
 #   `experiments/final_score_dilution_report.md`（干净口径 close_t7、N_eff≈23 不重叠周）
@@ -700,7 +700,7 @@ EVALUATION_WEIGHTS = {
     "sentiment":    0.3250,   # BuzzBeeWhisper: 情绪与叙事 —— 三维中唯一方向显著（未校正）
     "odds":    0.3430,   # OracleBeeEcho: 期权 IV + 异动（v0.45.315 删 Polymarket）
     "risk_adj":    0.0000,   # GuardBeeSentinel: 交叉验证 + 风险调整 —— IC -0.084，归零（见上）
-    # ml_auxiliary: 不在此处（RivalBeeVanguard 作为 ±0.5 独立调整项）
+    # ml_auxiliary: 不在此处（RivalBeeVanguard 不进分，v0.45.538）
 }
 
 # ML 概率上界（防止小样本过度自信，统一源，避免魔术数字散落各处）
@@ -1323,11 +1323,8 @@ ML_FEEDBACK_CONFIG = {
     # **保持 True，别改成 False** —— 改了窗口内的旧记录复现不出来，检验自证失败（exit 3）。
     "enable_dimension_weighting": True,   # 维度权重调整（仅重放旧记录）
     "enable_vote_boosting": True,         # Agent 投票置信度调整（仅重放旧记录）
-    # v0.40.0: 按 OOS（purged 时序外样本）精度缩放 QueenDistiller 的 ML 调整信任度
-    # in-sample 精度是自考自评；OOS < half 阈值 → ml_adjustment 减半，
-    # < zero 阈值（不如抛硬币）→ 置零。OOS 缺失（样本<60）不惩罚。
-    "oos_trust_half_threshold": 55.0,
-    "oos_trust_zero_threshold": 50.0,
+    # v0.45.538：`oos_trust_half_threshold` / `oos_trust_zero_threshold` 已删 —— 唯一读者
+    # `QueenDistiller._ml_oos_trust_factor`（只缩放 RivalBee 的 ml_adjustment）随那一项一起退役。
 }
 
 # ==================== ML HGB 树模型配置（v15.0 替代 SGD）====================

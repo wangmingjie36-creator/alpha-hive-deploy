@@ -103,7 +103,7 @@ class TestModelPathIsolation:
         ("ml_predictor", "SimpleMLModel", "ml_model"),
         ("ml_predictor", "SGDMLModel", "ml_model"),
         ("ml_predictor", "HGBModel", "ml_model"),
-        ("ml_predictor_extended", "SimpleMLModel", "ml_model_extended"),
+        # v0.45.538：`ml_predictor_extended` 已退役（守卫 tests/test_rival_ml_adjustment_retired.py）
     ])
     def test_no_arg_save_lands_in_sandbox(self, mod_name, cls_name, expected_attr,
                                           tmp_path, monkeypatch):
@@ -113,9 +113,6 @@ class TestModelPathIsolation:
         证过：把 `save_model` **函数体**里的解析改回相对字面量，那种断言照样
         全绿。它测的是被调函数，不是接线（v0.45.126 的教训）。
         这里只认「调完之后文件出现在哪」。
-
-        `ml_predictor_extended` 是 `ml_predictor` 导入失败时的降级实现，
-        同病必须一起治（「改二分支先问另一支是不是同病更重」）。
         """
         import importlib
         from hive_logger import PATHS
@@ -137,12 +134,6 @@ class TestModelPathIsolation:
             " —— 它把文件写到别处去了")
         after = repo_copy.read_bytes() if repo_copy.exists() else None
         assert after == before, f"写到了仓库根的 {repo_copy}"
-
-    def test_extended_default_path_is_absolute(self):
-        """helper 本身也断言一次（与上面那条是不同层：一个测接线，一个测取值）。"""
-        import ml_predictor_extended as mpe
-        p = mpe.default_extended_model_path()
-        assert pathlib.Path(p).is_absolute(), f"extended 默认路径不是绝对路径：{p}"
 
 
 class TestPathResolvedLazily:

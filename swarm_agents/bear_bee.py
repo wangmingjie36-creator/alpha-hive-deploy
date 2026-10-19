@@ -369,17 +369,16 @@ class BearBeeContrarian(BeeAgent):
     def _assess_ml_prediction(self, ticker: str,
                               bearish_signals: List[str],
                               data_sources: Dict[str, str]) -> float:
-        """评估 ML 预测看空信号。返回 ml_bear。"""
+        """评估 RivalBee 预期收益看空信号。返回 ml_bear。
+
+        v0.45.538：删掉了 `ml_probability < 0.45` 那一支 —— Rival 不再有模型、不再发布概率；
+        那支此前也从未触发（合成模型的概率 03-27 后再没低于 0.54）。
+        """
         ml_bear = 0.0
         rival_entry = self._read_peer(ticker, "RivalBeeVanguard")
         if rival_entry and rival_entry.discovery:
             data_sources["ml"] = "real"
             _rd = getattr(rival_entry, 'details', {}) or {}
-            ml_prob = _rd.get("ml_probability")
-            if ml_prob is not None and ml_prob < 0.45:
-                ml_bear = 6.0 + (0.45 - ml_prob) * 10
-                ml_bear = min(8.5, ml_bear)
-                bearish_signals.append(f"ML模型看空(概率{ml_prob:.0%})")
             exp_7d = _rd.get("expected_7d")
             if exp_7d is not None and exp_7d < -3:
                 ml_bear = max(ml_bear, 5.5)

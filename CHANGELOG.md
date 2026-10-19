@@ -225,7 +225,61 @@
 - 变异 6/6 杀死。浏览器实测：失败一拍保留旧结果 + 顶部说明；打字时结果不冲掉输入；「重新拉取」后开关仍开；
   「重新拉取」后 130 秒内只有一次自动刷新请求（旧实例已停）。
 
-## [0.45.538] — 2026-10-19 — 占位（进行中：Rival 合成样本 ML 进分的根因修复——final_score 拿掉 ml_adjustment、退役 ml_predictor_extended 与信任闸）
+## [0.45.538] — 2026-10-19 — Removed（用户 2026-10-19 选「根因修复」）：RivalBee 的 ML 退出评分——`final_score` 拿掉 `ml_adjustment`、删 OOS 信任闸、退役 `ml_predictor_extended`（30 条 2023 年硬编码训练样本）；世代边界 2026-10-19
+
+起因：10-19 只读「死链」审计里两份结论打架——一份说 Rival 的 `ml_adjustment` 被信任闸缩到 0，一份说预测是活的。
+实测两份都只对一部分日子：Rival 每只标的都 new 一个 `ml_predictor_extended.MLPredictionService`，在 `HistoricalDataBuilder`
+的 30 条 2023 年硬编码样本（22 赢 / 8 输）上重训 HGB（自 58b77863，2026-03-10 委托 `ml_predictor.create_ml_model`），
+每次扫描训 30 次、写生产 `ml_model.json`（n=30 / acc 96.67 / oos None）；概率被小样本校准 `0.3·raw + 0.35` 压在 0.542–0.584。
+`QueenDistiller` 把 `(rival_score − 5)·0.1·conf` 乘上 `_ml_oos_trust_factor` 加进加权分——而那个系数读的是 `ml_model_cache.json`
+**真模型**的 OOS ⇒ 闸门放不放行与被放行的东西无关，逐日在 1 / 0.5 / 0 之间跳。模块 docstring「只在 ml_predictor 导入失败时降级」不对：
+Rival 无条件走它。完整调查（file:line、生产证据）见 auto-memory `alpha-hive-rival-synthetic-model.md`。
+
+### Removed
+- `swarm_agents/queen_distiller.py`：`_compute_weighted_score` 不再加 `ml_adjustment`（`adjusted_score = base_score`）；
+  删 `_ml_oos_trust_factor` / `_OOS_TRUST_CACHE`；蒸馏结果不再写 `ml_adjustment` / `ml_contribution_pct`。`valid_results` 参数保留只为签名不变
+  （`experiments/resonance_boost_forward_test.rebase_with_current_weights` 按位置传它，检验脚本不动）。
+- `config.ML_FEEDBACK_CONFIG` 的 `oos_trust_half_threshold` / `oos_trust_zero_threshold`（唯一读者随之删）。`enable_*` 两个开关**没动**（v0.45.537 的地盘）。
+- `ml_predictor_extended.py` 整个模块；`hive_logger.PATHS.ml_model_extended`。数据根里 2026-03 那份旧 `ml_model_extended.json` 不删，备份清单照带。
+- `signal_archive` 的 `ml.probability` 抽取器（历史行不改写，只是不再写新行；同 v0.45.182 摘 `guard.top_signals_count` 的先例）。
+- `swarm_agents/bear_bee.py::_assess_ml_prediction` 的 `ml_probability < 0.45` 分支（03-27 后从未触发；没有写者了）；
+  `pheromone_board._DETAIL_KEYS` 的 `ml_probability`。
+
+### Changed
+- `swarm_agents/rival_bee.py`：不再有模型。直接调 `ml_predictor.expected_returns`（只读动量与 ChronosBee 的催化剂档）——
+  **方向、`expected_3d/7d/30d`、confidence（0.8 / 0.3）、`data_quality.ml_prediction` 取值逐位不变**；分数从 `prob·10 + 0.5·tech`
+  改成 `5.0 + 0.5·tech`（5.0 = 原先「概率 0.5」的分数）；不再发布 `probability` / `ml_probability`；只喂模型的拥挤度与 Oracle
+  `iv_rank` / `pc_ratio` 读取一并删（少一次拥挤度取数）——含同日 v0.45.544 刚加的 `rival_bee._usable_pc`（P/C 取不到传 None）：
+  它只服务被退役的模型输入，随之删；`tests/test_second_check_v0_45_544.py` 里守它的那半条删掉，`_feature_quality` 对 None 的那半条保留。`ml_predictor.CROWDING_NEUTRAL` 因此没有生产读者了（只剩测试夹具，退不退役另议）。
+- 每次扫描少 30 次 HGB 训练；生产 `ml_model.json` 不再被写成「n=30 / acc 96.67 / oos None」——那正是 v0.45.149 加载守卫认作「pytest 夹具覆盖」的签名，
+  [[alpha-hive-constant-model-days]] 那次事故的归因要重查（待验证；现在的加载方都读 `ml_model_cache.json`，不受影响）。
+
+### 口径变化（离线重放，只读）
+`resonance_boost_forward_test.replay` 真实链（共振 → 三重惩罚 → 投票 → GEX 按记录），B0 = 记录的 base，CF = base − ml_adjustment；
+09-15 起 `.swarm_results_*.json` 全部 30 只 630 行、自证 613：Δfinal 均值 −0.034、最小 −0.110、**从不为正**（只向上的抬分）；
+|Δ|>0.05 共 180 行；跨 6.0 决策线 7 行、7.5 线 1 行；按方向判的纸面入场变 3 笔（09-16 TMO 多头失去资格、09-22 DELL / 10-02 BRK-B 空头获得资格；
+白名单 / 其他闸会不会挡：待验证）；当日 Spearman(B0, CF) 最小 0.9983。10-12 起 120 行：均值 −0.009、0 行跨线。
+未计入的二阶项：Guard 无共振时 `avg_score` 含 Rival 分（现在约低 0.4–0.8），Guard<4 才扣分（斜率 0.2/分），估计 ≤ 0.02。
+
+### 世代边界与前瞻检验
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 2026-10-19 / v0.45.538（v0.45.537 同日且先落地 ⇒ 边际作废 0 条；单独看本世代 180 条、已到期 0 条）；
+  印记 `_BOUNDARY_MARKERS["v0.45.538"]`（有 `final_score` 却没有 `ml_adjustment` 键的实时行）；`probability_scorecard._ML_ESTIMATOR_GENERATIONS`
+  与 537 合并成同一代 `v0.45.537+v0.45.538`（该表日期须唯一，同 441+445 先例；537 那条只改了版本标签、正文末尾追加第二批说明）。
+  ⚠️ 推送若赶不上 10-19 的扫描，日期要改成首个跑新代码的扫描日。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.538"]` = `agent.RivalBeeVanguard.score`（闭包：Guard / Bear / swarm_agreement）。
+  **刻意不点名 `ml.*`**（原计划写的是 `ml.*`）：`ml.expected_7d/30d` 输入与公式都没变、逐位相同，点名会白切两条序列。
+- 维度 IC 协议：H1 不动；H2 的对象是蜂后调整**之前**的加权合成、截断信号只有 Chronos / Buzz / Oracle 的 score 与权重字面量 ⇒ **不截断**。
+- 共振加成前瞻检验：重放从记录的 `base_score_before_resonance` 起步、不重算 ml_adjustment ⇒ 新旧记录都能复现，自证不受影响（不会 exit 3）。
+
+### Tests
+- 新增 `tests/test_rival_ml_adjustment_retired.py`（25 条）：蜂后 final_score 与 Rival 分 / 置信度无关（配「改核心维会动」自证）；
+  Rival 不训练、不写模型文件、不发布概率，分数 = 5.0 + 0.5·tech、方向 = 预期收益符号；全仓无人 import `ml_predictor_extended`；
+  生产代码无信任闸名字；`swarm_agents/` 不碰 `HistoricalDataBuilder` / `MLPredictionService` / `train_model`；探测器对病灶源码会红。
+  变异：把 `ml_adjustment` 接回 `adjusted_score` ⇒ 红。
+- 改：`test_queen_distiller`（两条 ML 调整测试合成一条「不进分」）、`test_rival_bee_peer_features` / `test_rival_bee_catalyst_missing`
+  （拦截点从 `MLPredictionService.predict_for_opportunity` 换成 `expected_returns`；删 iv_rank / pc / 拥挤度三项与第四份编码副本的测试）、
+  `test_ml_expected_return`（删降级实现镜像）、`test_ml_model_path_isolation` / `test_ml_model_guard`（去掉 extended 参数）、
+  `test_ledger_writes_go_through_ledger_io` / `test_price_history_default_paths`（存量登记各减）。
 
 ## [0.45.537] — 2026-10-19 — Changed（用户 2026-10-19 选方案 A）：蜂后 ML 反馈两个消费者都停用——维度权重乘数与方向票重缩放只算影子、不施加（没有 OOS 闸）；世代边界 2026-10-19
 

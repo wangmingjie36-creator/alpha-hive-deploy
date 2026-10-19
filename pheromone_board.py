@@ -670,7 +670,7 @@ class PheromoneBoard:
         "pc_ratio", "iv_rank", "iv_skew", "gex",                    # OracleBee
         "sentiment_score", "reddit_momentum",                        # BuzzBee
         "catalyst_count", "nearest_days", "analyst_upside_pct",      # ChronosBee
-        "ml_probability", "expected_7d",                             # RivalBee
+        "expected_7d",                                               # RivalBee（v0.45.538 起不再有 ml_probability）
         "consistency", "conflict_type", "resonance_detected",        # GuardBee
         "bear_score", "signal_count",                                # BearBee
     }

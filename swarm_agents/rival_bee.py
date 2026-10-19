@@ -1,7 +1,6 @@
-"""RivalBeeVanguard - 竞争分析与 ML 预测蜂 (ML 辅助维度)"""
+"""RivalBeeVanguard - 竞争分析与预期收益蜂（ml_auxiliary 维度；v0.45.538 起无 ML 模型、不进分）"""
 
 from typing import Dict
-from hive_logger import pdt_today  # v0.28.0: 美股交易日工具
 from swarm_agents._config import _log, _AS
 from swarm_agents.base import BeeAgent
 from models import AgentResult
@@ -11,16 +10,11 @@ from swarm_agents.utils import (
 
 
 
-def _usable_pc(v):
-    """OracleBee 发布的 `pc_ratio` ⇒ ML 特征：有限数照用，取不到（None / NaN / 非数）⇒ None（v0.45.544）。
-    None 交给 ml_predictor 的 `_feature_quality` 列进 imputed_features 并按中性插补——不兜成 1.0 冒充中性观测。"""
-    if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and v not in (float("inf"), float("-inf")):
-        return float(v)
-    return None
-
 class RivalBeeVanguard(BeeAgent):
-    """竞争分析与 ML 预测蜂 - 概率预测 + 行业动量对标
-    不直接参与 5 维公式，作为额外调整项
+    """竞争分析蜂 - 预期收益（动量 × 催化剂）+ 技术指标 + 分析师 EPS 修正
+
+    不参与 5 维公式，v0.45.538 起也不再作为 final_score 的调整项（勿接回）；
+    它的方向参与投票，分数经 GuardBee 的普查均分间接起作用。
     """
 
     def analyze(self, ticker: str) -> Dict:
@@ -30,76 +24,39 @@ class RivalBeeVanguard(BeeAgent):
         try:
             ctx = self._get_history_context(ticker)
 
-            # 尝试 ML 预测
-            prediction = {}
+            # 预期收益（动量 × 催化剂档）—— v0.45.538 起**不再有 ML 模型**。
+            #
+            # 此前这里每只标的都 new 一个 `ml_predictor_extended.MLPredictionService`，在 30 条
+            # 2023 年硬编码样本上重训 HGB、写生产 `ml_model.json`，拿它的概率当 Rival 的分数
+            # （经 `QueenDistiller` 的 ml_adjustment 进 final_score）。那个概率被小样本校准压在
+            # 0.54–0.58，是个只向上的近似常数。整条已退役，**勿接回**：要让 ML 进分，先预注册前瞻检验。
+            # 方向本来就只取 `expected_returns` 的符号（与模型无关），所以本段只保留它需要的两个输入：
+            # 5 日动量与 ChronosBee 的催化剂档。守卫：tests/test_rival_ml_adjustment_retired.py
+            expectation = {}
             tech = {"tech_score_adj": 0.0, "tech_direction": "neutral", "summary": ""}
             try:
-                from ml_predictor_extended import MLPredictionService, TrainingData
-                service = MLPredictionService()
+                import types as _types
+                from ml_predictor import expected_returns, catalyst_quality_from_score
 
                 stock = self._get_stock_data(ticker)
-                # P0-2: momentum_5d 可为 None（真实 5 日动量不可得）→ ML 特征用中性 0.0
+                # P0-2: momentum_5d 可为 None（真实 5 日动量不可得）→ expected_returns 内按 0（无观点）处理
                 _mom_ml = stock.get("momentum_5d")
-                if _mom_ml is None:
-                    _mom_ml = 0.0
 
-                # v0.44.2：传**真实**拥挤度，不再写死 50.0。
-                #
-                # 走的是 ScoutBee / GuardBee 已在用的同一条路（**不另造一套**）。
-                #
-                # 成本：`get_real_crowding_metrics` 内的两个网络调用都有缓存
-                # （social TTL 3600s / short interest TTL 86400s），且 stock 数据
-                # 由上面已取的 `_get_stock_data` 传入。ScoutBee 先跑时本调用是
-                # 缓存命中；最坏情况（与 ScoutBee 并行同时未命中）每标的多一次抓取。
-                # GuardBee 在 Phase-1.5，必然命中。
-                #
-                # ⚠️ 拿不到就用 CROWDING_NEUTRAL（中性），**不要**回落到 50.0 ——
-                # 实测只有 4.6% 的样本 ≥50，50 在这个分布里等于"极不拥挤 → 加分"，
-                # 那会把降级悄悄变成看多偏斜。
-                try:
-                    from ml_predictor import CROWDING_NEUTRAL as _CRD_NEUTRAL
-                except ImportError:
-                    _CRD_NEUTRAL = 23.30
-                _crowding = _CRD_NEUTRAL
-                try:
-                    from crowding_detector import CrowdingDetector
-                    from real_data_sources import get_real_crowding_metrics
-                    _detector = CrowdingDetector(ticker)
-                    _metrics = get_real_crowding_metrics(ticker, stock, self.board)
-                    _c_raw, _ = _detector.calculate_crowding_score(_metrics)
-                    # v0.45.50：拥挤度现在可为 None（全部分量不可得）。
-                    # 保留上面已设的 _CRD_NEUTRAL，而不是让 None 盖掉它。
-                    if _c_raw is not None:
-                        _crowding = _c_raw
-                    else:
-                        _log.debug("RivalBeeVanguard %s 拥挤度全分量不可得，"
-                                   "沿用中性 %.2f", ticker, _CRD_NEUTRAL)
-                except (ImportError, ValueError, KeyError, TypeError,
-                        AttributeError) as _e:
-                    _log.warning(
-                        "RivalBeeVanguard 拥挤度不可用 %s: %s（回落中性 %.2f）",
-                        ticker, _e, _CRD_NEUTRAL,
-                    )
-
-                # v0.44.3：从信息素板读**真实**的催化剂等级与期权指标。
+                # v0.44.3：从信息素板读**真实**的催化剂等级。
                 #
                 # 前提是本蜂已从 Phase-1 移到 **Phase-1.5**（见
                 # `alpha_hive_daily_report` 的分阶段调用）——Phase-1 内部并行，
                 # 同批蜂之间读不到彼此，排在后面才读得到。
                 #
-                # ⚠️ 三个都必须能接受"读不到"：板上条目会衰减淘汰、上游蜂可能失败。
-                # 回落值刻意选**可与真实值区分**的中性档，并留 debug 日志 ——
-                # 这样"没读到"不会伪装成"读到了一个中性值"。
                 # v0.45.151：读不到时给 **None**，不给 "B"。
                 #
                 # "B" 是生产**众数**（461/803 = 57.4%，五档里最常见的一档），
-                # 拿它当缺失哨兵 ⇒「读不到」与「质量正好是 B」在特征上完全同形。
+                # 拿它当缺失哨兵 ⇒「读不到」与「质量正好是 B」完全同形。
                 # 当前世代 188 份生产 JSON 反解实测：真值≠"B" 的 39 份里 27 份
                 # 被记成了 "B"，流向**全部**是 C→B，即 magnitude 0.7 当成 0.9、
                 # `expected_7d/30d` 幅度系统性高估 28.6%。
                 #
-                # None 一路走到 `ml_predictor._encode_catalyst` → NaN，由 HGB 的
-                # 原生缺失处理接住（v0.45.147 已铺好这条路）。
+                # None 在 `expected_returns` 里落到 `_CATALYST_MAGNITUDE_DEFAULT`。
                 #
                 # ⚠️ `catalyst_quality_from_score` 的契约**不变**（它对 None 仍返回
                 # "B"，理由被推翻的证据见其 docstring）—— 改的是本调用方：分数不可用
@@ -113,13 +70,8 @@ class RivalBeeVanguard(BeeAgent):
                 if (isinstance(_cat_raw, (int, float))
                         and not isinstance(_cat_raw, bool)
                         and _cat_raw == _cat_raw):
-                    try:
-                        from ml_predictor import catalyst_quality_from_score
-                        _cat_quality = catalyst_quality_from_score(_cat_raw)
-                        _cat_source = "peer_read"
-                    except ImportError:
-                        _log.warning("RivalBeeVanguard %s: ml_predictor 不可用，"
-                                     "catalyst_quality 记为缺失", ticker)
+                    _cat_quality = catalyst_quality_from_score(_cat_raw)
+                    _cat_source = "peer_read"
                 elif _chronos is None:
                     _log.info("RivalBeeVanguard %s: 板上无 ChronosBee 条目，"
                               "catalyst_quality 记为缺失（不再伪装成 \"B\"）", ticker)
@@ -127,75 +79,31 @@ class RivalBeeVanguard(BeeAgent):
                     _log.warning("RivalBeeVanguard %s: ChronosBee 条目分数不可用"
                                  "（%r），catalyst_quality 记为缺失", ticker, _cat_raw)
 
-                # OracleBee 发布的键名是 `pc_ratio`（不是 put_call_ratio）与 `iv_rank`
-                # v0.45.544：P/C 取不到（Oracle 不在板上 / 记 None——512 / 516 起会出现）⇒ 传 None，由 ml_predictor 的
-                # `_feature_quality` 列进 imputed_features 并按中性插补（同 v0.45.3 的 volatility）；原先兜成 1.0、
-                # 不进缺失清单，等于把「没有」报成「中性观测」。iv_rank 的 50.0 回落未动。
-                _iv_rank, _pc_ratio = 50.0, None
-                _oracle = self._read_peer(ticker, "OracleBeeEcho")
-                if _oracle is not None:
-                    _od = getattr(_oracle, "details", None) or {}
-                    _iv_raw, _pc_raw = _od.get("iv_rank"), _od.get("pc_ratio")
-                    if isinstance(_iv_raw, (int, float)) and _iv_raw == _iv_raw:
-                        _iv_rank = float(_iv_raw)
-                    _pc_ratio = _usable_pc(_pc_raw)
-                else:
-                    _log.debug("RivalBeeVanguard %s: 板上无 OracleBee 条目，"
-                               "iv_rank 回落中性、put_call_ratio 记缺失", ticker)
-
-                opportunity = TrainingData(
-                    ticker=ticker,
-                    date=pdt_today(),  # v0.28.0: 美股交易日
-                    crowding_score=_crowding,
-                    catalyst_quality=_cat_quality,
-                    momentum_5d=_mom_ml,
-                    # v0.45.3: 透传 None（不补 0.0）——ml_predictor 的
-                    # `_feature_quality()` 会把它列进 imputed_features
-                    volatility=stock.get("volatility_20d"),
-                    market_sentiment=_mom_ml * 5,
-                    iv_rank=_iv_rank,
-                    put_call_ratio=_pc_ratio,
-                    actual_return_3d=0.0,
-                    actual_return_7d=0.0,
-                    actual_return_30d=0.0,
-                    win_3d=False,
-                    win_7d=False,
-                    win_30d=False,
-                )
-                prediction = service.predict_for_opportunity(opportunity)
+                # `expected_returns` 只读这两个属性（getattr），不需要整份 TrainingData。
+                _er = expected_returns(_types.SimpleNamespace(
+                    catalyst_quality=_cat_quality, momentum_5d=_mom_ml))
+                expectation = {k: round(_er[k], 2)
+                               for k in ("expected_3d", "expected_7d", "expected_30d")}
             except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
-                _log.warning("RivalBeeVanguard ML prediction unavailable for %s: %s", ticker, e)
+                _log.warning("RivalBeeVanguard 预期收益不可用 %s: %s", ticker, e)
 
-            if prediction:
-                prob = prediction.get("probability", 0.5)
-                # 双向守卫：类型检查 + NaN 检查 + 双侧边界（统一上界来自 config）
-                if not isinstance(prob, (int, float)) or prob != prob:  # NaN guard
-                    _log.warning("RivalBeeVanguard: ML prob 异常值 %r，回退 0.5", prob)
-                    prob = 0.5
-                try:
-                    from config import ML_PROB_CAP as _ML_CAP
-                except ImportError:
-                    _ML_CAP = 0.95
-                prob = max(0.0, min(float(prob), _ML_CAP))
-                prediction["probability"] = prob   # 回写，保持 details 一致
-                ret_7d = prediction.get("expected_7d", 0.0)
-                ret_30d = prediction.get("expected_30d", 0.0)
+            if expectation:
+                ret_7d = expectation["expected_7d"]
+                ret_30d = expectation["expected_30d"]
                 avg_ret = (ret_7d + ret_30d) / 2
-
-                score = prob * 10  # 胜率 → 0-10
-                score = clamp_score(score)
 
                 direction = "bullish" if avg_ret > 0 else ("bearish" if avg_ret < 0 else "neutral")
 
-                discovery = f"ML 胜率 {prob*100:.0f}% | 7d {ret_7d:+.2f}% | 30d {ret_30d:+.2f}%"
+                discovery = f"预期 7d {ret_7d:+.2f}% | 30d {ret_30d:+.2f}%"
 
-                # Phase 2: 技术指标辅助（ML 可用时权重减半，仅作微调）
+                # 技术指标辅助（权重减半，仅作微调）。基线 5.0 = 原先「概率 0.5」的分数；
+                # v0.45.538 起本分**不进 final_score**，只经 Guard 的普查均分间接起作用。
                 tech = self._calc_technical_indicators(ticker)
-                score = clamp_score(score + tech["tech_score_adj"] * 0.5)
+                score = clamp_score(5.0 + tech["tech_score_adj"] * 0.5)
                 if tech["summary"]:
                     discovery = f"{discovery} | {tech['summary']}"
             else:
-                # ML 不可用 → 技术指标增强的动量评分
+                # 预期收益不可用 → 技术指标增强的动量评分
                 stock = self._get_stock_data(ticker)
                 # P0-2: momentum 为 None 时按 0（中性）参与评分，方向只看技术指标
                 mom = stock.get("momentum_5d")
@@ -254,14 +162,14 @@ class RivalBeeVanguard(BeeAgent):
 
             self._publish(ticker, discovery, "ml_predictor", round(score, 2), direction,
                          details={
-                             "ml_probability": prediction.get("probability") if prediction else None,
-                             "expected_7d": prediction.get("expected_7d") if prediction else None,
-                             "expected_30d": prediction.get("expected_30d") if prediction else None,
+                             "expected_7d": expectation.get("expected_7d") if expectation else None,
+                             "expected_30d": expectation.get("expected_30d") if expectation else None,
                              "momentum_5d": stock.get("momentum_5d") if stock else None,
                          })
 
-            # Phase 2: confidence = ML 模型可用性
-            confidence = 0.3 if not prediction else 0.8
+            # confidence = 预期收益路径可用性（0.8 / 0.3）。v0.45.538 拿掉模型时**刻意不动**：
+            # 它决定 Rival 方向票的票重，改它会改 rule_direction，要另登世代边界。
+            confidence = 0.3 if not expectation else 0.8
             confidence = min(1.0, confidence)
 
             return AgentResult(
@@ -272,14 +180,16 @@ class RivalBeeVanguard(BeeAgent):
                 source="RivalBeeVanguard",
                 dimension="ml_auxiliary",
                 data_quality={
-                    "ml_prediction": "real" if prediction else "fallback_momentum",
+                    # 键名与取值沿用（Queen 的 DQ 登记表认这两个值）；"real" 现在指
+                    # 「预期收益由真实动量 + 催化剂算出」，不再指有模型。
+                    "ml_prediction": "real" if expectation else "fallback_momentum",
                     # CLAUDE.md 硬检查项「这个失败，下游怎么知道？」——此前读不到
                     # 只有一行 _log.debug，生产日志级别之下等于没有观测点，
                     # 而回落值 "B" 又与真值同形 ⇒ 失败被改写成「没发生过」。
                     "catalyst_quality": _cat_source,
                 },
                 details={
-                    **(prediction if prediction else {"momentum_5d": stock.get("momentum_5d")}),
+                    **(expectation if expectation else {"momentum_5d": stock.get("momentum_5d")}),
                     "eps_revision": eps_rev,
                     "technical_indicators": tech,
                 },
@@ -403,8 +313,8 @@ class RivalBeeVanguard(BeeAgent):
         计算 RSI-14 / MACD Histogram / Bollinger Band% 三个核心技术指标
 
         用处：
-        1. ML 不可用时，替代简单动量做评分（比单纯 mom_5d 有区分度）
-        2. ML 可用时，作为辅助信号微调评分（±0.5）
+        1. 预期收益不可用时，替代简单动量做评分（比单纯 mom_5d 有区分度）
+        2. 预期收益可用时，作为辅助信号微调评分（±0.5）
 
         零新依赖：只用 yfinance history + math
 

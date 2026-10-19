@@ -436,39 +436,7 @@ class TestSingleSourceOfTruth:
         )
 
 
-class TestFallbackMirrorsPrimary:
-    """`ml_predictor_extended.SimpleMLModel` 是 `ml_predictor` **导入失败时**的
-    降级实现，因此不能 import 主实现 —— 重复是结构性强制的。
-    本测试把"强制的重复"变成"被测试的重复"。
+# v0.45.538：`TestFallbackMirrorsPrimary` 已删 —— 它守的「降级实现 `ml_predictor_extended.SimpleMLModel`
+# 与主实现数值一致」随该模块退役失去对象（守卫 tests/test_rival_ml_adjustment_retired.py）。
 
-    **改任何一份都必须同时改另一份，否则这里会红。**
-    """
 
-    @pytest.mark.parametrize("mom,crd,q", [
-        (0.0, 50.0, "B+"),
-        (-2.0, 50.0, "B+"),
-        (+3.5, 20.0, "A"),
-        (-5.0, 90.0, "C"),
-        (0.0, 0.0, "A+"),
-        (+1.0, 100.0, "B"),
-    ])
-    def test_numeric_agreement(self, mom, crd, q):
-        import ml_predictor_extended as mpe
-
-        primary = mp.expected_returns(
-            _data(momentum_5d=mom, crowding_score=crd, catalyst_quality=q))
-
-        fb = mpe.SimpleMLModel()
-        fallback = fb.predict_return(
-            _data(momentum_5d=mom, crowding_score=crd, catalyst_quality=q))
-
-        for k in ("expected_3d", "expected_7d", "expected_30d"):
-            assert fallback[k] == pytest.approx(primary[k], abs=1e-9), (
-                f"{k}: 降级实现 {fallback[k]:+.4f} ≠ 主实现 {primary[k]:+.4f}"
-            )
-
-    def test_fallback_has_no_nonnegative_clamp(self):
-        """旧降级实现用 `max(0, ...)` 让负值结构性不可能。"""
-        import ml_predictor_extended as mpe
-        out = mpe.SimpleMLModel().predict_return(_data(momentum_5d=-3.0))
-        assert out["expected_7d"] < 0

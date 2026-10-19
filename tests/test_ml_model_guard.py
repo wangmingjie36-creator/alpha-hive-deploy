@@ -564,7 +564,8 @@ class TestSnapshotWiring:
     （v0.45.135 教训）。新增第 5 个 save_model 忘了钩 → 这条变红。
     """
 
-    @pytest.mark.parametrize("mod", ["ml_predictor.py", "ml_predictor_extended.py"])
+    # v0.45.538：`ml_predictor_extended.py` 已退役，只剩主模块
+    @pytest.mark.parametrize("mod", ["ml_predictor.py"])
     def test_every_save_model_snapshots(self, mod):
         tree = ast.parse((REPO / mod).read_text(encoding="utf-8"))
         found = [n for n in ast.walk(tree)

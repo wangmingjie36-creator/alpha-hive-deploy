@@ -31,12 +31,9 @@
 （v0.45.147 已在其 docstring 记录理由被推翻的证据）。改的是**调用方**。
 """
 
-import math
-
 import pytest
 
 import ml_predictor as mp
-import ml_predictor_extended as mpe
 from pheromone_board import PheromoneBoard, PheromoneEntry
 from swarm_agents.rival_bee import RivalBeeVanguard
 
@@ -132,20 +129,20 @@ class TestPeerLookupSurvivesOverflow:
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestMissingCatalystIsNotTheMode:
-    """拦截 `MLPredictionService.predict_for_opportunity` 看它**实参**收到什么 ——
-    这是"喂进模型的到底是哪个值"唯一的直接证据（v0.45.142：钉最终消费点的实参）。
+    """拦截 `ml_predictor.expected_returns` 看它**实参**收到什么 ——
+    这是"喂进预期收益的到底是哪个值"唯一的直接证据（v0.45.142：钉最终消费点的实参）。
+    v0.45.538 起最终消费点从 `MLPredictionService.predict_for_opportunity`（已随合成模型退役）
+    换成 `expected_returns` 本身。
     """
 
     def _captured(self, bee, monkeypatch, ticker="TEST"):
         captured = {}
 
-        class _FakeService:
-            def predict_for_opportunity(self, data):
-                captured["data"] = data
-                return {"probability": 0.5, "expected_3d": 0.0,
-                        "expected_7d": 0.0, "expected_30d": 0.0}
+        def _fake_expected_returns(data):
+            captured["data"] = data
+            return {"expected_3d": 0.0, "expected_7d": 0.0, "expected_30d": 0.0}
 
-        monkeypatch.setattr(mpe, "MLPredictionService", _FakeService)
+        monkeypatch.setattr(mp, "expected_returns", _fake_expected_returns)
         monkeypatch.setattr(bee, "_get_stock_data",
                             lambda t: {"volatility_20d": 30.0, "momentum_5d": 1.0,
                                        "price": 100.0, "volume_ratio": 1.0})
@@ -165,7 +162,7 @@ class TestMissingCatalystIsNotTheMode:
         「读不到」与「质量正好是 B」在特征上完全同形。必须给 None。
         """
         data, _ = self._captured(bee, monkeypatch)
-        assert data is not None, "ML 服务未被调用"
+        assert data is not None, "expected_returns 未被调用"
         assert data.catalyst_quality is None, (
             f"读不到催化剂却喂了 {data.catalyst_quality!r} —— "
             "那是真实等级里最常见的一档，缺失被伪装成观测")
@@ -202,34 +199,7 @@ class TestMissingCatalystIsNotTheMode:
         assert (result["data_quality"] or {}).get("catalyst_quality") == "peer_read"
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# 3. 第四份 catalyst 编码副本（ml_predictor 导入失败时的应急降级）
-# ════════════════════════════════════════════════════════════════════════════
-
-class TestExtendedFallbackEncoderMirrorsPrimary:
-    """`ml_predictor_extended.SimpleMLModel.encode_catalyst_quality` 是第四份表。
-
-    它只在 `ml_predictor` 导入失败时生效，且**只有 rival_bee 会走**。
-    rival_bee 一旦开始传 `None`，这份副本会给 0.5 —— 而 0.5 恰好落在
-    C(0.40) 与 B(0.55) **之间**，是任何真实等级都产不出的值，
-    树模型却会拿它当一个真实的中间档去切分（同 v0.45.147 对主表的判据）。
-    """
-
-    def test_real_grades_match_primary(self):
-        m = mpe.SimpleMLModel()
-        for g in ("A+", "A", "B+", "B", "C"):
-            assert m.encode_catalyst_quality(g) == mp._encode_catalyst(g), g
-
-    def test_none_matches_primary_missing_semantics(self):
-        got = mpe.SimpleMLModel().encode_catalyst_quality(None)
-        assert math.isnan(got), (
-            f"None 被编码成 {got!r}；主表 `_encode_catalyst(None)` 给 NaN，"
-            "两份表对缺失的语义必须一致")
-
-    def test_unknown_literal_still_05_in_both(self):
-        """成对：未知字面量的旧行为**不动**（本仓无生产路径产得出它）。"""
-        assert mpe.SimpleMLModel().encode_catalyst_quality("X") == 0.5
-        assert mp._encode_catalyst("X") == 0.5
+# 3. （v0.45.538 删）第四份 catalyst 编码副本 `ml_predictor_extended.SimpleMLModel` 随该模块退役。
 
 
 # ════════════════════════════════════════════════════════════════════════════

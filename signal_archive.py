@@ -460,8 +460,9 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     # （期望值从 `agent_details` 导出，不写死 6 —— 关掉 CodeExecutor 时应得是 5）。
     # 库里的历史行不改写，只是不再写入新行。
 
-    # ── ML 预测 ───────────────────────────────────────────────
-    "ml.probability": _path("agent_details.RivalBeeVanguard.details.probability"),
+    # ── RivalBee 预期收益 ─────────────────────────────────────
+    # v0.45.538：`ml.probability` 已摘除 —— 它出自 30 条 2023 年硬编码样本训的模型
+    # （`ml_predictor_extended`，已退役），Rival 不再产出概率。库里的历史行不改写，只是不再写入新行。
     "ml.expected_7d": _path("agent_details.RivalBeeVanguard.details.expected_7d"),
     "ml.expected_30d": _path("agent_details.RivalBeeVanguard.details.expected_30d"),
 
@@ -2143,7 +2144,7 @@ SIGNAL_UPSTREAM: Dict[str, Tuple[str, ...]] = {
     # Scout/Oracle 方向）——`tests/test_signal_archive_generations.py::TestBearPeerReadsAreEdges` 按 AST 核这两条边
     "bear.insider_bear": ("agent.ScoutBeeNova.direction",),
     "bear.options_bear": ("agent.OracleBeeEcho.direction",),
-    # Bear 读 Rival 的 ml_probability / expected_7d、Guard 的 consistency / conflict_type
+    # Bear 读 Rival 的 expected_7d（v0.45.538 前还读 ml_probability）、Guard 的 consistency / conflict_type
     "bear.score": ("ml.*", "agent.GuardBeeSentinel.*", "guard.consistency_census",
                    "bear.insider_bear", "bear.overval_bear", "bear.options_bear", "bear.short_int_bear"),
     "agent.BearBeeContrarian.*": ("bear.score",),
@@ -2330,6 +2331,10 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     "v0.45.445": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*"),
     # 10-19：蜂后 ML 反馈两个消费者（维度权重、方向票重）停用，只记影子乘数。蜂后层 ⇒ 不改任何归档蜂信号。
     "v0.45.537": (),
+    # 10-19：RivalBee 分数不再含合成模型概率（`prob·10` → 5.0 基线），ml_adjustment 退出 final_score。
+    # 只点名 Rival 的分：方向与 `ml.expected_7d/30d` 逐位不变（不点名 `ml.*`，免得白切它们）；
+    # Guard 读 Rival 分 ⇒ Guard / Bear / swarm_agreement 由 _scope_closure 带出。
+    "v0.45.538": ("agent.RivalBeeVanguard.score",),
 }
 
 

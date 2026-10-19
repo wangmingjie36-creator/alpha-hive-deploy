@@ -310,12 +310,11 @@ def catalyst_quality_from_score(score) -> str:
     "B" 占真实等级的 **57.4%**（461/803），是五档里最常见的一档，
     于是缺失与它完全同形，比用 "B+" 更糟。而且 "B" 是合法枚举值 ⇒
     `_missing_features` 不算它缺 ⇒ 两套账目对不上（58/803 份）。
-    **本函数的契约不变**（`swarm_agents/rival_bee.py:87` 依赖它），
+    **本函数的契约不变**（`swarm_agents/rival_bee.py` 依赖它），
     改的是调用方：`generate_ml_report._prepare_ml_input` 自 v0.45.147 起
     在分数不可用时**根本不调本函数**，直接给 `None`。
-    rival_bee 那一处未改——它的产物经 `ml_auxiliary` → `ml_adjustment` →
-    `final_score` 进 `predictions` 表，动它需要 `_COHORT_HISTORY` 世代边界，
-    是另一个量级的改动，已登记为独立任务。
+    rival_bee 那一处 v0.45.151 也改成了「不可用时不调本函数、给 None」。
+    （v0.45.538 起 rival_bee 的产物不再经 `ml_adjustment` 进 `final_score`。）
     """
     try:
         v = float(score)
@@ -419,10 +418,12 @@ def market_sentiment_from_score(sentiment: float) -> float:
 # 但那 +0.19 是**巧合**——倾斜的均值恰好抵消了动量带来的正偏，不是因为符号对。
 # **宁要 +1.06pp 的可辩护公式，不要 +0.19pp 的不可辩护公式。**
 #
-# `CROWDING_NEUTRAL` 保留，但用途变了：它是 `rival_bee` 取不到真实拥挤度时喂给
+# `CROWDING_NEUTRAL` 保留，但用途变了：它曾是 `rival_bee` 取不到真实拥挤度时喂给
 # **`probability`** 的中性回落值（那里 crowding 是权重最大的特征，回落值选错会
 # 直接偏斜概率）。取实测中位数而非量表中点 50 —— 实测只有 4.6% 的样本 ≥50，
 # 在这个分布里 50 等于"极不拥挤"。
+# ⚠️ v0.45.538 起 rival_bee 不再有模型、不再算拥挤度 ⇒ 本常数**没有生产读者**了，
+# 只剩测试夹具当缺省值用（退不退役另议）。
 #
 # ⚠️ **这是经验常数，会过期。** 由 `tests/test_ml_expected_return.py::
 # TestCrowdingCalibrationDrift` 对着生产库分布守着：漂出容许带就红。
@@ -852,8 +853,7 @@ FEATURE_NAMES_V1 = ["crowding", "catalyst", "momentum", "volatility", "sentiment
 
 
 #: 等级 → 数值编码。**本模块唯一真相**，三个模型类都走 `_encode_catalyst`。
-#: （`ml_predictor_extended.py:567` 还有第四份，那是本模块导入失败时的应急降级，
-#: 只有 rival_bee 会走且从不传 None，v0.45.147 未动，在此登记以免遗忘。）
+#: （`ml_predictor_extended.py` 曾有第四份副本；该模块 v0.45.538 随 RivalBee 的合成样本模型退役。）
 _CATALYST_ENCODING = {"A+": 1.0, "A": 0.85, "B+": 0.70, "B": 0.55, "C": 0.40}
 
 

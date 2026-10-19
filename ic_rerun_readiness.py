@@ -994,6 +994,30 @@ _COHORT_HISTORY = [
      "`ml_feedback_enabled` / `ml_weight_adjustments` 复现投票 ⇒ 新旧记录都能复现、自证不受影响（`config.ML_FEEDBACK_CONFIG` 的 enable_* "
      "**刻意保持 True**，翻了旧记录就复现不出），检验期内边界条数 +1（附带项）。"
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登一代（`final_score` 是 ML 特征）。"),
+    ("2026-10-19", "v0.45.538",
+     "RivalBee 的 ML 不再进分（用户 2026-10-19 选「根因修复」）：① `QueenDistiller._compute_weighted_score` 拿掉 "
+     "`ml_adjustment = (rival_score − 5)·0.1·conf·OOS 信任系数`，`_ml_oos_trust_factor` 与 config 的 `oos_trust_*` 一起删；"
+     "② `ml_predictor_extended`（`HistoricalDataBuilder` 30 条 2023 年硬编码样本 + 每只标的重训一次 HGB、写生产 `ml_model.json`）整体退役，"
+     "Rival 改为直接调 `ml_predictor.expected_returns`（动量 × 催化剂档）——方向、expected_3d/7d/30d、confidence（0.8/0.3）逐位不变，"
+     "分数从 `prob·10 + 0.5·tech` 变成 `5.0 + 0.5·tech`（原概率被小样本校准压在 0.54–0.58，相当于平移约 −0.4~−0.8）；"
+     "Rival 不再发布 `probability` / `ml_probability`，Bear 读它的 `< 0.45` 分支（03-27 后从未触发）随之删。"
+     "**依据**：概率出自合成样本训的模型，而信任闸读的是 `ml_model_cache.json` 真模型的 OOS ⇒ 闸门放行与否和被放行的东西无关；"
+     "生产记录里 `ml_adjustment` 恒 ≥0（只向上抬分），逐日随真模型 OOS 在 1 / 0.5 / 0 之间跳。"
+     "**口径变化**（离线重放：`resonance_boost_forward_test.replay`，B0 = 记录的 base，CF = base − ml_adjustment；"
+     "09-15 起 `.swarm_results_*.json` 全部 30 只 630 行、自证 613）：Δfinal 均值 −0.034、最小 −0.110、从不为正；"
+     "|Δ|>0.05 共 180 行；跨 6.0 决策线 7 行、7.5 线 1 行；按方向判的纸面入场变 3 笔（09-16 TMO 多头失去资格、09-22 DELL / 10-02 BRK-B "
+     "空头获得资格）；当日 Spearman(B0, CF) 最小 0.9983；21 天里 10 天当日排序有变。10-12 起 120 行：均值 −0.009、0 行跨线。"
+     "未计入的二阶项：Guard 无共振时 `avg_score` 含 Rival 分，Guard<4 才扣分（斜率 0.2/分），估计 ≤ 0.02。"
+     "**边界代价**：本世代（2026-10-09 / v0.45.441+445 起）至今 180 条 predictions（10-09、10-12~16 各 30）、已到期 0 条，全部归旧世代"
+     "（2026-10-19 清晨对生产库 `read_only_connect` 只读实测）；与 v0.45.537 同日且那条先落地（7d234c6d）⇒ 本条边际作废 0 条（同 441 + 445 的同日先例）。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.538\"]`：蒸馏结果有 `final_score` 却**没有** `ml_adjustment` 键（此前每份完整蒸馏结果都有），且是实时行。"
+     "预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。⚠️ 若推送赶不上 10-19 的扫描，本条日期须改成首个跑新代码的扫描日。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.538\"]` = `agent.RivalBeeVanguard.score`（闭包带出 Guard / Bear / swarm_agreement）；"
+     "**刻意不点名 `ml.*`**：`ml.expected_7d/30d` 输入与公式都没变、逐位相同，点名会白切它们的序列；`ml.probability` 抽取器已摘除、不再写新行。"
+     "`composite.final_score` 是 ALWAYS_SLICED。前瞻检验：维度 IC 协议 H1 不动；H2 的对象是蜂后调整**之前**的 Σ冻结权重×维度分、"
+     "截断信号只有 Chronos / Buzz / Oracle 的 score 与 `EVALUATION_WEIGHTS` 字面量（都没动；三只是 Phase-1，在 Rival 之前跑完）⇒ **不截断**。"
+     "共振加成前瞻检验：重放从记录的 `base_score_before_resonance` 起步，不重算 ml_adjustment ⇒ 新旧记录都能复现、自证不受影响。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 与 v0.45.537 合并为同一代 `v0.45.537+v0.45.538`（该表日期须唯一）。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1367,6 +1391,15 @@ def _scout_row_has_consensus_marker(d: dict) -> bool:
     return isinstance(det, dict) and det.get("consensus_in_score") is False
 
 
+def _marker_rival_ml_adjustment_retired(d: dict) -> bool:
+    """v0.45.538 的**日期**印记：完整蒸馏结果（有 `final_score`）却没有 `ml_adjustment` 键，且是实时行。
+
+    此前每份完整蒸馏结果都写 `ml_adjustment`（02-25 起）；缺字段的残缺记录没有 `final_score`，不会被误认。"""
+    sr = d.get("swarm_results")
+    return (isinstance(sr, dict) and "final_score" in sr and "ml_adjustment" not in sr
+            and not _is_backfill_row(d))
+
+
 def _marker_scout_consensus_excluded(d: dict) -> bool:
     """v0.45.441 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383 / 423）。"""
     return _scout_row_has_consensus_marker(d) and not _is_backfill_row(d)
@@ -1410,6 +1443,8 @@ _BOUNDARY_MARKERS = {
                   _marker_buzz_news_primary_massive),
     "v0.45.537": ("swarm_results 带 ml_weight_adjustments_shadow 键",
                   _marker_queen_ml_shadow),
+    "v0.45.538": ("swarm_results 有 final_score 却没有 ml_adjustment 键",
+                  _marker_rival_ml_adjustment_retired),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，

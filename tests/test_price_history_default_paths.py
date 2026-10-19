@@ -211,7 +211,6 @@ KNOWN_CWD_RELATIVE_DEFAULTS = {
     ("iv_history.py", "_observed_accrual_rate", "cache"),          # 生产调用方 vrp_signal 显式传绝对路径
     ("catalyst_exit_planner.py", "load_catalysts_for_ticker", "catalysts.json"),  # 仅 dynamic_exit_backtest
     ("ml_predictor.py", "save_to_file", "training_data.json"),
-    ("ml_predictor_extended.py", "save_to_file", "training_data_extended.json"),
     ("alpha_hive_bot/config.py", "os.environ.get", "./subscribers.db"),  # Telegram bot，独立部署
     ("backtest_engine.py", "__init__", "./report_snapshots"),      # 无调用方
     ("regime_analyzer.py", "__init__", "report_snapshots"),        # 无调用方

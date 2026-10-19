@@ -189,8 +189,8 @@ class _HivePaths:
     def ml_model_cache(self) -> Path:
         """生产**真正读**的那份 ML 模型。
 
-        三个消费点都显式指它：`alpha_hive_daily_report`（两处）、
-        `generate_ml_report._model_file`、`queen_distiller._ml_oos_trust_factor`。
+        消费点都显式指它：`alpha_hive_daily_report`（两处）、
+        `generate_ml_report._model_file`（v0.45.538 起 `queen_distiller._ml_oos_trust_factor` 已退役）。
 
         ⚠️ 必须与 `ml_model` 保持为**不同文件**。`train_model()` 会无参保存到
         `ml_model`，而 `tests/` 里有 11 处无参调它 —— 把两者合并成同一个路径
@@ -199,10 +199,8 @@ class _HivePaths:
         """
         return self.home / "ml_model_cache.json"
 
-    @property
-    def ml_model_extended(self) -> Path:
-        """`ml_predictor_extended.SimpleMLModel` 的落盘位置（降级实现专用）。"""
-        return self.home / "ml_model_extended.json"
+    # v0.45.538：`ml_model_extended` 已删 —— 唯一写者 `ml_predictor_extended` 退役。
+    # 数据根里那份旧 `ml_model_extended.json`（2026-03 起没人写）仍由备份清单带走，不读。
 
     @property
     def sell_strike_state(self) -> Path:

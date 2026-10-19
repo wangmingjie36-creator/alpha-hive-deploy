@@ -112,8 +112,6 @@ WRITERS: dict = {
     "ibkr_sync.py::reconcile": (HUMAN, "模拟 vs 真实成交对账报告"),
     "ml_model_guard.py::snapshot_model_file": (HUMAN, "模型留档 manifest.jsonl（无代码读者；v0.45.448 登记的「守卫读回」不对）"),
     "ml_predictor.py::HistoricalDataBuilder.save_to_file": (HUMAN, "训练数据导出（无调用者）"),
-    "ml_predictor_extended.py::HistoricalDataBuilder.save_to_file": (HUMAN, "训练数据导出（无调用者）"),
-    "ml_predictor_extended.py::SimpleMLModel.save_model": (HUMAN, "降级模型文件（无生产读者）"),
     "param_optimizer.py::run_grid": (HUMAN, "参数网格结果（只给 --html 渲染）"),
     "portfolio_backtest.py::main": (HUMAN, "组合回测 --save 导出"),
     "run_daily_scan.py::_write_status": (HUMAN, "last_run_status.json（无读者）"),

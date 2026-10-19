@@ -148,8 +148,9 @@ CASES = [
      {"sentiment_score": 25}, "news", 7.5, "news"),
     ("catalyst", "ChronosBeeHorizon", "neutral", 4.5,
      {"nearest_days": 3}, "catalyst", 5.0, None),
+    # v0.45.538：Rival 不再发布 ml_probability（`< 0.45` 分支随之删）⇒ 只剩 expected_7d < −3 ⇒ 5.5
     ("ml", "RivalBeeVanguard", "bearish", 3.0,
-     {"ml_probability": 0.35, "expected_7d": -4.0}, "ml", 7.0, None),
+     {"expected_7d": -4.0}, "ml", 5.5, None),
     ("guard", "GuardBeeSentinel", "bearish", 3.5,
      {"consistency": 0.3, "conflict_type": ""}, "guard", 5.5, None),
 ]

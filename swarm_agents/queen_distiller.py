@@ -180,7 +180,7 @@ class QueenDistiller:
         # `ml_feedback_enabled` 恒 False（记录如实反映「没施加」）。
         # 为什么关（09-10 → 10-16 生产 25 个扫描日，CHANGELOG v0.45.537）：
         #   ① 没有任何 OOS 闸：场内重训模型 OOS 均值 51.5%、8 天 < 50%（测试集约 124 条，SE≈4.5pp），
-        #      同一天 Rival 那一项已被 `_ml_oos_trust_factor` 置零，这里照改权重；
+        #      同一天 Rival 那一项已被 `_ml_oos_trust_factor` 置零（该项 v0.45.538 已整个删掉），这里照改权重；
         #   ② 重要性是**训练集**上的 permutation importance（in-sample ≈70% vs OOS ≈45%）；
         #   ③ 按维度**取均值**再比 1/5 基准 ⇒ 下限 0.5 是常态、特征越多越难抬：odds 25/25 天压在下限，
         #      signal 24/25 天高于下限（常 1.5–2.0）——它结构上只会抬 sentiment / signal；
@@ -340,63 +340,22 @@ class QueenDistiller:
             "present_count": present_count,
         }
 
-    _OOS_TRUST_CACHE: tuple = ()  # (mtime, factor) 类级缓存，避免每票读盘
-
-    @classmethod
-    def _ml_oos_trust_factor(cls) -> float:
-        """v0.40.0: 从 ml_model_cache.json 读 OOS 精度 → ML 调整信任系数。
-
-        OOS >= half_threshold: 1.0 | >= zero_threshold: 0.5 | 低于: 0.0
-        OOS 缺失（旧模型/样本<60）: 1.0（不惩罚，待下次训练产生）。
-        """
-        try:
-            from config import ML_FEEDBACK_CONFIG as _MFC
-        except (ImportError, AttributeError):
-            _MFC = {}
-        half_th = float(_MFC.get("oos_trust_half_threshold", 55.0))
-        zero_th = float(_MFC.get("oos_trust_zero_threshold", 50.0))
-        try:
-            import os as _os
-            import json as _json
-            from hive_logger import PATHS as _PATHS
-            # v0.45.149：兜底曾是相对路径 `"ml_model_cache.json"`，会读到
-            # 当前工作目录里的野文件。绝对路径取不到就应当放弃，不该改读 cwd。
-            _path = str(_PATHS.ml_model_cache)
-            _mtime = _os.path.getmtime(_path)
-            if cls._OOS_TRUST_CACHE and cls._OOS_TRUST_CACHE[0] == _mtime:
-                return cls._OOS_TRUST_CACHE[1]
-            with open(_path) as _f:
-                _oos = _json.load(_f).get("oos_accuracy")
-            if _oos is None:
-                factor = 1.0
-            elif _oos >= half_th:
-                factor = 1.0
-            elif _oos >= zero_th:
-                factor = 0.5
-            else:
-                factor = 0.0
-            cls._OOS_TRUST_CACHE = (_mtime, factor)
-            return factor
-        except Exception:
-            return 1.0  # 读不到时不惩罚（fail-open）
-
     def _compute_weighted_score(self, ticker: str, dim_scores: Dict,
                                 dim_confidence: Dict,
                                 dimension_coverage_pct: float,
                                 present_count: int,
                                 valid_results: List[Dict],
                                 override_weights: Dict = None) -> Dict:
-        """ML 调整 + 5D 加权 + 覆盖度压缩 + 共振增强。返回 dict。"""
-        ml_adjustment = 0.0
-        for r in valid_results:
-            if r.get("dimension") == "ml_auxiliary":
-                ml_score = _safe_score(r.get("score", 5.0), default=5.0, lo=0.0, hi=10.0, label="ml_score")
-                ml_conf = _safe_score(r.get("confidence", 0.5), default=0.5, lo=0.0, hi=1.0, label="ml_conf")
-                ml_adjustment = (ml_score - 5.0) * 0.1 * ml_conf
-                # v0.40.0: 按 OOS（时序外样本）精度缩放 ML 信任度——
-                # in-sample 精度是自考自评；OOS <55% 减半、<50%（不如抛硬币）置零。
-                # 阈值见 config.ML_FEEDBACK_CONFIG（oos_trust_*）。
-                ml_adjustment *= self._ml_oos_trust_factor()
+        """5D 加权 + 覆盖度压缩 + 共振增强。返回 dict。
+
+        v0.45.538：RivalBee 的 `ml_adjustment`（`(rival_score − 5)·0.1·conf·OOS 信任系数`）**已拿掉，勿接回**。
+        Rival 的概率出自 30 条 2023 年硬编码样本训的模型（`ml_predictor_extended`，已退役），信任闸
+        `_ml_oos_trust_factor` 量的却是另一个模型（`ml_model_cache.json` 的真模型）的 OOS；它对分数是
+        一个只向上的抬分（09-15 起重放 613 行：均值 +0.034、最大 +0.110、从不为负）。要让 ML 重新进分，
+        先预注册前瞻检验并登记世代边界。`valid_results` 参数保留只为签名不变
+        （`experiments/resonance_boost_forward_test.rebase_with_current_weights` 按位置传它）。
+        守卫：`tests/test_rival_ml_adjustment_retired.py`。
+        """
 
         _weights = override_weights if override_weights else self.DIMENSION_WEIGHTS
         _n_dims = len(_weights)
@@ -447,7 +406,7 @@ class QueenDistiller:
         elif dimension_coverage_pct < 80.0:
             coverage_warning = f"仅 {present_count}/{_n_dims} 维度可用，缺失维度施加 -0.3 惩罚"
 
-        adjusted_score = base_score + ml_adjustment
+        adjusted_score = base_score
 
         # ⚠️ 共振加成正在做预注册前瞻检验（v0.45.242，`experiments/resonance_boost_forward_test.py`）：
         # 样本内它是评分链里唯一测得出损失排序信息的一步，但证据是事后分析，用户定的是
@@ -466,7 +425,6 @@ class QueenDistiller:
             "base_score": base_score,
             "adjusted_score": adjusted_score,
             "rule_score": rule_score,
-            "ml_adjustment": ml_adjustment,
             "resonance": resonance,
             "coverage_warning": coverage_warning,
         }
@@ -1171,7 +1129,6 @@ class QueenDistiller:
             override_weights=_regime_weights_used)
         adjusted_score = ws["adjusted_score"]
         rule_score = ws["rule_score"]
-        ml_adjustment = ws["ml_adjustment"]
         resonance = ws["resonance"]
         coverage_warning = ws["coverage_warning"]
 
@@ -1333,8 +1290,6 @@ class QueenDistiller:
             "dimension_confidence": dim_confidence,
             "dimension_weights": dict(_regime_weights_used),
             "dimension_weights_base": dict(self.DIMENSION_WEIGHTS),
-            "ml_adjustment": round(ml_adjustment, 3),
-            "ml_contribution_pct": round(abs(ml_adjustment) / max(abs(final_score), 0.01) * 100, 1),
             "base_score_before_resonance": round(adjusted_score, 2),
             "pheromone_compact": self.board.compact_snapshot(ticker),
             "data_quality": dv["data_quality_summary"],
