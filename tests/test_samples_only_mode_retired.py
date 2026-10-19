@@ -15,7 +15,8 @@
 
 刻意保留的（第 4 组正面钉住，免得下一个「顺手清理」把它们带走）：
   - backtester / dashboard_renderer / portfolio_backtest 的 `exclude_nontrading_days`：库里 110 行周日样本还在。
-  - `.gitignore` 的 `.samples-only-*.json`：开发检出根目录还有 04-26 ~ 05-17 的 4 个旧文件。
+  - `.gitignore` 的 `.samples-only-*.json`：开发检出根目录曾有 04-26 ~ 05-17 的 4 个旧文件（10-19 已归档到数据根
+    `_archive/samples_only/`，sha256 记录同目录）；这行留作保险——从归档拷回检出里查东西时不会被 `git add -A` 带走。
   - `config.WATCHLIST_EXTENDED`：候补池（降级标的的名称 / 板块 / 失效条件），要扫就升进 WATCHLIST。
 """
 
@@ -162,7 +163,7 @@ class TestKeptOnPurpose:
 
     def test_gitignore_still_covers_old_files(self):
         lines = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
-        assert ".samples-only-*.json" in lines, "开发检出根目录还有旧 .samples-only 文件，删了这行它们会被 git add -A 带走"
+        assert ".samples-only-*.json" in lines, "留作保险：从 _archive/samples_only/ 拷回检出里的旧文件不该被 git add -A 带走"
 
     def test_candidate_pool_remains(self):
         import config

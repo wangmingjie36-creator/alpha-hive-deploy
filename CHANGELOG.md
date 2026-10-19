@@ -86,6 +86,13 @@ v0.23.1（2026-04-17）「混合双轨」：周日定时任务 `alpha-hive-sampl
 ### 剩下的已知死链（3 条）
 `agent_memory`、`barrier_outcomes`（两张表，政策 / 用户暂缓）；`ml_model.json`（`train_model()` 无参 `save_model()`，零读者）。
 
+### 后续（同日，用户批准）：开发检出里的 4 个旧文件已归档
+- 先比对再处置：04-26 / 05-10 的 `opportunities` 与 pheromone.db 逐条一致（分数只差舍入 ≤0.05、方向 100% 一致）；05-03 有 26 个、05-17 有 21 个标的
+  **只在这些文件里**（当年没写进库，且没有入场价 / 维度分，统计上用不上）⇒ 是孤本，归档不删。
+- `~/Desktop/Alpha Hive/.samples-only-2026-{04-26,05-03,05-10,05-17}.json` → `~/alpha-hive-data/_archive/samples_only/`（照阶段 6 `pheromone_bak/` 的先例）：
+  copy2 → 逐个核 sha256 与大小 → 全部通过才删源文件；记录 `ARCHIVE_RECORD_20261019.json`（源路径 / sha256 / 字节数 / 原 mtime / 原因）。
+- `.gitignore` 行、`migrate_data_root` SKIP 规则与墓碑说明里「检出里还有 4 个旧文件」的措辞改为「已归档」；`.gitignore` 行留作保险（零代价）。
+
 ## [0.45.551] — 2026-10-19 — Fixed：ML 报告生成器不再读回磁盘上的 `ml_model_cache.json`（08-28 / 09-04 常数概率的真因，已逐位复现）；每份报告记下出概率的模型指纹
 
 用户决定（2026-10-19）：「按方案修：删磁盘 cache 读取、报告记录模型指纹、配会红的测试与守卫、更正代码注释，占号写 CHANGELOG」。
