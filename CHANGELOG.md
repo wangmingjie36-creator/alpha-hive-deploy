@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.553] — 2026-10-19 — 占位（进行中：v0.45.551 二次检查——同日后来的模型会冲掉早上那份快照）
+
 ## [0.45.552] — 2026-10-19 — Removed：`--samples-only` 样本积累模式整个退役（连同 `--extended-pool` / `--max-tickers` 与 `health_check.check_sample_accumulator`）；已知死链 4 → 3
 
 用户问「`.samples-only-<date>.json` 是什么板块」后决定：把整个退役模式清干净，不只删那一处写入；`--extended-pool` / `--max-tickers` 经分析后一起删。
