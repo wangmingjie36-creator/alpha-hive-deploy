@@ -45,7 +45,41 @@
 - CI：两版合入后的 `tests.yml` 运行都只有已知的 `TestCoverageHorizon` 红（pytest 已降到 6–7.5 分钟）；时钟拨动审计 `clockshift.yml` 在含两版的 76cea818 上通过（推送与两次定时）。
 
 
-## [0.45.531] — 2026-10-18 — 占位（进行中：退役 AgentWeightManager 死链——agent_weights 无评分读者、准确率按快照判不分蜂、差异来自已断开的 adapted_weights；agent_memory 重建标为不做）
+## [0.45.531] — 2026-10-18 — Removed：退役 `AgentWeightManager` / `agent_weights` 表这条死链（无评分读者；准确率按快照判、量的是蜂群不是蜂；表里的差异全来自 v0.45.176 已断开的 `adapted_weights`）；`agent_memory` 结果列历史重建**决定不做**
+
+用户决定（2026-10-18）：「退役 AgentWeightManager 这条死链：先重数读者，删调用与 agent_weights 写入，加墓碑测试……同时把 agent_memory 重建标为不做」。
+起因是 v0.45.527 之后讨论「认真验证后再接进评分」——只读核对生产库后发现不存在「验证通过再接入」这条路：
+
+- **没有读者**（本次重数到成员粒度）：`agent_weights` 只被 `MemoryStore.get_agent_weights` 读，后者只被 `AgentWeightManager` 自己读；
+  `get_weight` / `get_weights` / `weighted_average_score` / `print_weight_summary` 零外部调用；部署脚本 / 定时任务 / skills 零引用。
+- **度量量的不是蜂**：`agent_memory.actual_outcome` 由快照级 `snapshot.direction` 判，同一 (ticker, date) 所有蜂共用 ⇒ 有结果的 1,418 组里组内不一致 **0** 组；
+  9 只蜂「准确率」0.146–0.155，按 `1 + (acc − 0.5) × 2` 全员贴 0.3 下限，信息量为零。
+- **表里的差异是旁路**：生产表 Scout 0.868 / Oracle 1.097 / Buzz 1.058 / Chronos 1.068 / Guard 0.903 来自 `apply_dimension_feedback(adapted)`，
+  `adapted` = `Backtester.adapt_weights()`（v0.45.176 断开、勿接回的第三条权重通道）与 feedback_loop 建议对半合并。接进评分 = 换个入口接回旁路，
+  且截断维度 IC 协议 H2、让共振加成前瞻检验自证失败。按蜂**自己的票**（`agent_vote_correct`）的准确率已在 v0.45.175/176 置换检验中阴性。
+
+### Removed
+- `agent_weight_manager.py`（整个模块）与 `tests/test_agent_weight_manager.py`；`tests/test_utilities.py::TestRebalanceWeights`。
+- `alpha_hive_daily_report.py`：「feedback_loop 权重建议合并进 `adapted`」+「`AgentWeightManager` 写 `agent_weights`」两段（42 行，换成说明注释）。
+  前一段唯一的消费者就是后一段；`suggest_weight_adjustments` 本身无副作用、`weekly_optimizer` 仍在用，**函数保留**。
+  `bt.adapt_weights(...)` **照算照写** `adapted_weights` 表留审计（CLAUDE.md 约定不变）。
+- `memory_store.py`：`TABLE_WEIGHTS`、`agent_weights` 建表与 8 行种子、`get_agent_weights` / `update_agent_weight` / `get_agent_accuracy` / `VALID_PERIODS`。
+  **生产库里的旧 `agent_weights` 表原样留着**（8 行、无读者；删表 = 改生产数据，未做）；新库不再建。
+
+### Added
+- `tests/test_agent_weight_manager_retired.py`（9 条）：模块不在；AST 认 import / 认方法名调用（换类名重写也拦）/ 认 SQL 里把 `agent_weights` 当表名（读也拦——接进评分第一步就是 SELECT）；
+  `MemoryStore` 不再有那三个方法；新库不建表（`agent_memory` 正对照）；三个探测器各配正反对照。
+  变异：往 `feedback_loop.py` 植入 `apply_dimension_feedback(...)` + `SELECT … FROM agent_weights` ⇒ 2 条红，还原后全绿。
+
+### Changed
+- `tests/test_memory_store.py`：断言改为新库**不含** `agent_weights`，删掉依赖已删 API 的 3 条。
+- `outcomes_fetcher.py` / `tests/test_agent_memory_outcome_horizons.py`：两处注释不再引用已删的 `get_agent_accuracy`。
+
+### 决定：`agent_memory` 结果列历史重建不做（关闭 v0.45.527 的「待用户批准」）
+- 唯一两个读者：准确率→权重这条线随本次退役；历史类比只在 LLM 模式（生产 `--no-llm`）。
+- 这些列是 `report_snapshots` 的派生缓存（527 自校验：1,720 格差异全部由快照解释），快照不被任何代码删除，真要用随时可从快照算；
+  `agent_memory` 每日扫描 `cleanup_old_data(180)` 滚动删除，被抹的行约在 2027-03 前后自然清空（按「t30 已回填 ≈ 9 月初以前」推算，未逐行核）。
+- v0.45.527 起新写入的行正确；在途 4,269 行下一次回填自愈。
 
 ## [0.45.530] — 2026-10-17 — Fixed（数据，用户批准）+ Added：清掉 v0.45.508 / 517 的 92 行隔离观测；10-14 BILI `price.momentum_5d` 1 行**故意保留**，做成清库工具认的 `keep_rows` 键而不只是一句说明
 
@@ -156,6 +190,7 @@
   已判 outcome 与重算不一致 120 行，110 行同理归因 521；剩 **10 行（NFLX 2026-09-17 一份快照，direction=`bearish`、T+7 −8.1%、存 `incorrect`、现规则判 `correct`）原因待验证**。
 - 补不回：3,809 行无对应快照、559 行快照 `entry_price ≤ 0`——这两类本来就没有任何值（不是被抹掉的）。
 - 另有 1,500 行 `neutral` 但重算后仍无 T+7（按新语义应为 NULL）。
+- **→ v0.45.531：决定不重建**（理由见该条）。
 
 ## [0.45.526] — 2026-10-16 — Added：组合 Greeks 逐票 Delta 对冲——每只有跨式腿的标的用自己的股票对冲跨式 Delta（带 3% NAV、拉回 0；**缺省 shadow 只算不成交**）
 

@@ -178,37 +178,6 @@ class TestFeatureRegistry:
         assert FeatureRegistry.log_status() == {}
 
 
-# ==================== _rebalance_weights ====================
-
-class TestRebalanceWeights:
-    def test_empty_dict(self):
-        from agent_weight_manager import AgentWeightManager
-        assert AgentWeightManager._rebalance_weights({}) == {}
-
-    def test_single_agent(self):
-        from agent_weight_manager import AgentWeightManager
-        result = AgentWeightManager._rebalance_weights({"A": 2.0})
-        assert result == {"A": 1.0}
-
-    def test_mean_equals_one(self):
-        from agent_weight_manager import AgentWeightManager
-        w = {"A": 0.8, "B": 1.2, "C": 1.5, "D": 0.5, "E": 1.0, "F": 1.0}
-        result = AgentWeightManager._rebalance_weights(w)
-        mean = sum(result.values()) / len(result)
-        assert abs(mean - 1.0) < 0.01
-
-    def test_preserves_relative_order(self):
-        from agent_weight_manager import AgentWeightManager
-        w = {"A": 3.0, "B": 1.0, "C": 2.0}
-        result = AgentWeightManager._rebalance_weights(w)
-        assert result["A"] > result["C"] > result["B"]
-
-    def test_zero_total_fallback(self):
-        from agent_weight_manager import AgentWeightManager
-        result = AgentWeightManager._rebalance_weights({"A": 0.0, "B": 0.0})
-        assert result == {"A": 1.0, "B": 1.0}
-
-
 # ==================== validate_watchlist ====================
 
 class TestValidateWatchlist:

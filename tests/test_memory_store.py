@@ -15,7 +15,7 @@ class TestSchemaSetup:
 
         assert "agent_memory" in tables
         assert "reasoning_sessions" in tables
-        assert "agent_weights" in tables
+        assert "agent_weights" not in tables   # v0.45.531 退役，不再建表
 
     def test_wal_mode_enabled(self, memory_store):
         import sqlite3
@@ -23,12 +23,6 @@ class TestSchemaSetup:
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         conn.close()
         assert mode == "wal"
-
-    def test_default_weights_initialized(self, memory_store):
-        weights = memory_store.get_agent_weights()
-        assert len(weights) >= 6
-        assert "ScoutBeeNova" in weights
-        assert weights["ScoutBeeNova"] == 1.0
 
 
 class TestAgentMemory:
@@ -100,20 +94,6 @@ class TestOutcome:
 
         updated = memory_store.update_memory_outcome(mid, "correct", t1=2.5, t7=5.0)
         assert updated
-
-
-class TestWeights:
-    def test_update_weight(self, memory_store):
-        ok = memory_store.update_agent_weight("ScoutBeeNova", 1.5)
-        assert ok
-
-        weights = memory_store.get_agent_weights()
-        assert weights["ScoutBeeNova"] == 1.5
-
-    def test_accuracy_empty(self, memory_store):
-        acc = memory_store.get_agent_accuracy("ScoutBeeNova")
-        assert acc["sample_count"] == 0
-        assert acc["accuracy"] == 0.5  # 默认
 
 
 class TestConnectionReuse:

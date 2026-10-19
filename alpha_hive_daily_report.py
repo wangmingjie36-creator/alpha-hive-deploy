@@ -943,48 +943,10 @@ class AlphaHiveDailyReporter:
             except (OSError, ValueError, KeyError, TypeError) as e:
                 _log.warning("回测异常: %s", e)
 
-        # ── feedback_loop 路径的权重建议合并 ──
-        try:
-            from feedback_loop import BacktestAnalyzer as _FBAnalyzer
-            _snap_dir = os.path.join(str(self.report_dir), "report_snapshots")
-            # v0.45.87：接入 close_t7 干净口径（此前用只有约1/3 可信的
-            # actual_prices.t7），与 weekly_optimizer.py 共用同一份实现。
-            # v0.45.98：显式传 close_t7_db_path=self.report_dir/"pheromone.db"，
-            # 与上一行 _snap_dir 用同一个基准目录（self.report_dir），不用
-            # feedback_loop.py 的 __file__ 相对缺省值——否则 snapshots 和
-            # close_t7 库可能来自两个不同目录，worktree 场景下已实测会不一致。
-            _fb_analyzer = _FBAnalyzer(
-                directory=_snap_dir, clean_t7=True,
-                close_t7_db_path=self.report_dir / "pheromone.db")
-            if _fb_analyzer.snapshots:
-                _suggestion = _fb_analyzer.suggest_weight_adjustments()
-                if _suggestion and _suggestion.get("new_weights"):
-                    _new_w = _suggestion["new_weights"]
-                    # 安全钳位 [0.05, 0.50] + 归一化
-                    _clamped = {k: max(0.05, min(0.50, v)) for k, v in _new_w.items()}
-                    _total = sum(_clamped.values())
-                    if _total > 0:
-                        _clamped = {k: round(v / _total, 4) for k, v in _clamped.items()}
-                        if adapted:
-                            for k in adapted:
-                                if k in _clamped:
-                                    adapted[k] = round((adapted[k] + _clamped[k]) / 2, 4)
-                        else:
-                            adapted = _clamped
-                        _log.info("feedback_loop 权重建议已合并: %s", _clamped)
-        except (ImportError, OSError, ValueError, KeyError, TypeError, ZeroDivisionError) as e:
-            _log.debug("feedback_loop 权重合并跳过: %s", e)
-
-        # ── AgentWeightManager: 按 Agent 准确率更新投票权重 ──
-        if self.memory_store and adapted:
-            try:
-                from agent_weight_manager import AgentWeightManager
-                _wm = AgentWeightManager(self.memory_store)
-                _wm.recalculate_all_weights()
-                _wm.apply_dimension_feedback(adapted)
-                _log.info("Agent 权重已按准确率更新")
-            except (ImportError, OSError, ValueError, TypeError, AttributeError) as e:
-                _log.debug("AgentWeightManager 更新跳过: %s", e)
+        # v0.45.531：此处曾有「feedback_loop 权重建议合并进 adapted」+「AgentWeightManager 把它和按快照判的准确率
+        # 写进 agent_weights 表」两段。那张表没有任何评分侧读者；准确率按快照方向判、同组各蜂结果相同（0/1418），
+        # 量的是蜂群不是蜂；表里的差异全来自 v0.45.176 已断开的 adapted_weights ⇒ 接进评分 = 换个入口接回旁路。
+        # 已退役，**勿重建**；adapt_weights 照算照写 adapted_weights 表留审计（见上）。墓碑 tests/test_agent_weight_manager_retired.py。
         _timing.record("backtest_weights", time.monotonic() - _t_backtest)
 
         # ---- ML 增量学习（利用新验证的 T+7 数据）----
