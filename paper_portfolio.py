@@ -1774,6 +1774,11 @@ def _run_for_date(as_of: str, verbose: bool = False,
     cash = float(meta["cash"])
 
     # ── Step 1: 检查现有仓位是否触发出场 ──
+    # v0.45.544：「持仓全断」的判定对象必须是**进 Step 1 之前**的全部持仓（535 原实现在 Step 1 之后取 `positions`，
+    # 已平掉的仓位不在其中 ⇒ A 取到日线并平仓、B / C 取不到 ⇒ 判「全断」整天跳过，但 A 的平仓记录已写进
+    # closed_trades、持仓与现金没写 ⇒ 下次运行 A 再平一次，重复记账）。
+    _held_at_start = sorted({p.ticker for p in positions})
+    _closed_before = len(closed)
     remaining = []
     pnl_today = 0.0
     split_adjusted: List[Dict] = []
@@ -1824,8 +1829,9 @@ def _run_for_date(as_of: str, verbose: bool = False,
     # 只看持仓（Step 1 是唯一先于开仓的取数）；部分持仓取不到照旧走 `ohlc_unavailable` 标记。
     # 例外：`replay_ohlc_mask` 正在复刻的历史故障日（09-24 / 09-25 / 10-14，早于本规则）照旧——否则 F&G 自证拿新规则去
     # 比当时没有这条规则的生产，必然对不上。规则生效后的全断日生产不写净值行 ⇒ 自证本来就不重放它。
-    _held = sorted({p.ticker for p in positions})
-    if _held_ohlc_outage(_held) and not _masked_replay_day():
+    _held = _held_at_start
+    # 第二道保险：Step 1 已经写过平仓记录（`_append_jsonl(CLOSED_FILE)`）就绝不跳过——跳过只在「什么都还没写」时成立
+    if _held_ohlc_outage(_held) and not _masked_replay_day() and len(closed) == _closed_before:
         (_log.info if _REPLAY_MODE else _log.error)(
             "[PaperPortfolio] %s 持仓 %d 只的日线一次都没取到（%s）——判不了出场、仓位基数不可信，整天跳过："
             "不开仓、不写净值 / 持仓 / meta，下次运行补查出场", as_of, len(_held), "、".join(_held))
@@ -1967,7 +1973,10 @@ def bootstrap_from_history(verbose: bool = False) -> None:
     for d in all_dates:
         res = run_for_date(d, verbose=verbose)
         if verbose:
-            print(f"   {d}  NAV=${res['nav']:,.2f}  持仓={len(res['positions'])}  今日开仓={res['opened_today']}")
+            if res.get("skipped"):   # v0.45.544
+                print(f"   {d}  整天跳过（{res['skipped']}）")
+            else:
+                print(f"   {d}  NAV=${res['nav']:,.2f}  持仓={len(res['positions'])}  今日开仓={res['opened_today']}")
 
 
 def run_replay(config_overrides: Dict, state_dir: Path,
@@ -2396,6 +2405,9 @@ def main():
     if args.cmd == "run":
         as_of = args.date or pdt_today()  # v0.28.0: 美股交易日
         res = run_for_date(as_of, verbose=args.verbose)
+        if res.get("skipped"):   # v0.45.544：整天跳过时 nav 是 None
+            print(f"\n⚠️ {as_of}  整天跳过（{res['skipped']}：{'、'.join(res.get('ohlc_unavailable') or [])}）——未开仓、未写净值")
+            return
         print(f"\n📊 {as_of}  NAV=${res['nav']:,.2f}  持仓={len(res['positions'])}  "
               f"今日开仓={res['opened_today']}  已实现P&L=${res['realized_pnl_today']:+.2f}")
         return

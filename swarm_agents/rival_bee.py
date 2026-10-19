@@ -10,6 +10,14 @@ from swarm_agents.utils import (
 )
 
 
+
+def _usable_pc(v):
+    """OracleBee 发布的 `pc_ratio` ⇒ ML 特征：有限数照用，取不到（None / NaN / 非数）⇒ None（v0.45.544）。
+    None 交给 ml_predictor 的 `_feature_quality` 列进 imputed_features 并按中性插补——不兜成 1.0 冒充中性观测。"""
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and v not in (float("inf"), float("-inf")):
+        return float(v)
+    return None
+
 class RivalBeeVanguard(BeeAgent):
     """竞争分析与 ML 预测蜂 - 概率预测 + 行业动量对标
     不直接参与 5 维公式，作为额外调整项
@@ -120,18 +128,20 @@ class RivalBeeVanguard(BeeAgent):
                                  "（%r），catalyst_quality 记为缺失", ticker, _cat_raw)
 
                 # OracleBee 发布的键名是 `pc_ratio`（不是 put_call_ratio）与 `iv_rank`
-                _iv_rank, _pc_ratio = 50.0, 1.0
+                # v0.45.544：P/C 取不到（Oracle 不在板上 / 记 None——512 / 516 起会出现）⇒ 传 None，由 ml_predictor 的
+                # `_feature_quality` 列进 imputed_features 并按中性插补（同 v0.45.3 的 volatility）；原先兜成 1.0、
+                # 不进缺失清单，等于把「没有」报成「中性观测」。iv_rank 的 50.0 回落未动。
+                _iv_rank, _pc_ratio = 50.0, None
                 _oracle = self._read_peer(ticker, "OracleBeeEcho")
                 if _oracle is not None:
                     _od = getattr(_oracle, "details", None) or {}
                     _iv_raw, _pc_raw = _od.get("iv_rank"), _od.get("pc_ratio")
                     if isinstance(_iv_raw, (int, float)) and _iv_raw == _iv_raw:
                         _iv_rank = float(_iv_raw)
-                    if isinstance(_pc_raw, (int, float)) and _pc_raw == _pc_raw:
-                        _pc_ratio = float(_pc_raw)
+                    _pc_ratio = _usable_pc(_pc_raw)
                 else:
                     _log.debug("RivalBeeVanguard %s: 板上无 OracleBee 条目，"
-                               "iv_rank/put_call_ratio 回落中性", ticker)
+                               "iv_rank 回落中性、put_call_ratio 记缺失", ticker)
 
                 opportunity = TrainingData(
                     ticker=ticker,

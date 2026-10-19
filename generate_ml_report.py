@@ -1148,6 +1148,8 @@ class MLEnhancedReportGenerator:
         if gex == "unknown":
             gex = "—"
         flow = opts.get("flow_direction") or opts.get("options_score") or "—"
+        if flow == "unknown":   # v0.45.544：P/C 取不到 ⇒ 流向不可得
+            flow = "—"
         skew = opts.get("iv_skew_ratio", opts.get("iv_skew"))
         # v0.27.1 bug fix: dict.get() 不会用默认值若 key 存在但 value=None；用 `or` 保护
         unusual = opts.get("unusual_activity") or []
@@ -2156,10 +2158,12 @@ class MLEnhancedReportGenerator:
         oracle_ad = swarm.get("agent_details", {}).get("OracleBeeEcho", {})
         _oracle_sc = float(oracle_ad.get("score", 5) if oracle_ad else 5)
         _iv_rank_v = float(options.get("iv_rank", 50) or 50)
-        _pcr_v = float(options.get("put_call_ratio", 1.0) or 1.0)
+        # v0.45.544：P/C 取不到 ⇒「—」（原 `or 1.0` 把 None 写成 1.0，也把真实的 0 抹成 1.0）
+        _pcr_raw = options.get("put_call_ratio")
+        _pcr_s = f"{float(_pcr_raw):.1f}" if isinstance(_pcr_raw, (int, float)) else "—"
         if _oracle_sc >= 7:
             _thesis_items.append(("期权", abs(_oracle_sc - 5),
-                                  f"期权结构强看涨（OracleBee {_oracle_sc:.1f}/10），IV Rank {_iv_rank_v:.0f}%，P/C {_pcr_v:.1f}"))
+                                  f"期权结构强看涨（OracleBee {_oracle_sc:.1f}/10），IV Rank {_iv_rank_v:.0f}%，P/C {_pcr_s}"))
         elif _oracle_sc <= 3:
             _thesis_items.append(("期权", abs(_oracle_sc - 5),
                                   f"期权结构看跌（OracleBee {_oracle_sc:.1f}/10），IV Rank {_iv_rank_v:.0f}%"))

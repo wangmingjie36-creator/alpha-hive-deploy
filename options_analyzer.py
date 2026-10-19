@@ -2575,7 +2575,8 @@ class OptionsAgent:
                 "gamma_squeeze_risk": "unknown",
                 "unusual_activity": [],
                 "key_levels": {},
-                "flow_direction": "neutral",
+                # v0.45.544：链取不到 ⇒ 流向不可得（同 P/C 为 None 的路径记 "unknown"；原写 "neutral" 冒充中性观测）
+                "flow_direction": "unknown",
                 "options_score": 5.0,
                 OPTIONS_GEX_MARKER: False,    # v0.45.349：见 generate_options_score 的 GEX 注释
                 "signal_summary": "期权数据不可用（真实链获取失败）",

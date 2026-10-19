@@ -8,8 +8,15 @@
 刚成交过的合约几乎一定有未平仓量；它们的 OI 成片是 0 ⇒ 这一场的 OI 没发布，不是市场没仓位。< `MAX_RATIO` 判陈旧；
 这类合约少于 `MIN_RECENT` 个 ⇒ 判不了（`judgeable=False`，调用方照旧）。参照点是链自己的最新成交，**不读钟**。
 
+**样本要是几个到期日合起来（v0.45.544 二次检查）。** 单个到期日会误判：10-19 正常日 SNOW 六个到期日里三个只有
+0.12–0.19（新挂的周权 / 个别到期日 OI 发布不全，原因待验证），MCP 原先只看最近一个到期日 ⇒ 0.18 ⇒ 正常日判陈旧。
+前 4 个到期日合起来：正常日最低 0.575（SNOW，60 天内前 4 个）、主链（DTE≥8 的 4 个）最低 0.81；10-12 故障日最高 0.04。
+「任一到期日正常就不算陈旧」也不行——10-12 TMO 有一个到期日是 1.0。阈值相应从 0.5 降到 0.25（两侧余量都约 10 倍于
+故障日最高值 / 约一半正常日最低值），调用方一律传多个到期日。
+
 **读者。** 凡是从 yfinance 取期权链、又读 OI 的入口都先过这里（v0.45.542 盘点：主链 `fetch_options_chain`、全链 OI 的
-yfinance 降级、`unusual_options.detect_unusual_flow`、MCP `alphahive_get_options_snapshot` 的 yfinance 路径）。陈旧 ⇒ 由
+yfinance 降级、`unusual_options.detect_unusual_flow`、MCP `alphahive_get_options_snapshot` 的 yfinance 路径——它取前 4 个
+到期日来判，展示仍只用最近一个）。陈旧 ⇒ 由
 OI 派生的量一律记不可得；只读成交量 / 价格 / IV 的部分照用。守卫 `tests/test_oi_staleness_consumers.py`。
 """
 from __future__ import annotations
@@ -19,7 +26,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 RECENT_DAYS = 4
 MIN_RECENT = 20       # 最近有成交的合约少于这个数 ⇒ 判不了
-MAX_RATIO = 0.5       # 其中 OI>0 的占比低于它 ⇒ 本链 OI 陈旧
+MAX_RATIO = 0.25      # 其中 OI>0 的占比低于它 ⇒ 本链 OI 陈旧（v0.45.544：0.5 离正常日最低 0.575 太近）
 
 Row = Tuple[Optional[float], float]
 

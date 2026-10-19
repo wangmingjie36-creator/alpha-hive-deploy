@@ -640,6 +640,8 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     _gst = _gex_state.of(sd)
     gex = _gst["total_gex"] if _gst and _gst.get("available") else None
     flow_dir = oracle.get("flow_direction", None)
+    if flow_dir == "unknown":   # v0.45.544：P/C 取不到 ⇒ 流向不可得，按「-」显示 / 隐藏，不把 unknown 原样贴到网站
+        flow_dir = None
     # v0.45.362：分档同样取自 gex_state（Oracle 的 gamma_squeeze_risk 是主链分档、方向相反）。本字段当前无渲染点
     gsr = _gex_state.squeeze_label(_gex_state.display_regime(sd)) if _gst else None
     iv_current = oracle.get("iv_current", None)

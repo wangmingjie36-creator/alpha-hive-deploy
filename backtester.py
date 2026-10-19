@@ -1673,8 +1673,10 @@ class Backtester:
             if opts_row and opts_row["total"] > 0:
                 lines.append(f"  期权数据记录: {opts_row['total']} 条")
                 lines.append(f"  平均期权评分: {opts_row['avg_opts_score']:.1f}/10")
-                lines.append(f"  平均 IV Rank: {opts_row['avg_iv_rank']:.1f}")
-                lines.append(f"  平均 P/C Ratio: {opts_row['avg_pc_ratio']:.2f}")
+                # v0.45.544：窗口内全是 NULL 时 AVG 返回 None（P/C / iv_rank 都可能记 None）⇒「—」，不让 :.2f 抛
+                _avg_iv, _avg_pc = opts_row["avg_iv_rank"], opts_row["avg_pc_ratio"]
+                lines.append(f"  平均 IV Rank: {_avg_iv:.1f}" if _avg_iv is not None else "  平均 IV Rank: —")
+                lines.append(f"  平均 P/C Ratio: {_avg_pc:.2f}" if _avg_pc is not None else "  平均 P/C Ratio: —")
 
                 # IV Rank 变化（T+1）
                 iv_change_row = conn.execute(f"""

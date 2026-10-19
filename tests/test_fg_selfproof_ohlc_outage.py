@@ -381,6 +381,25 @@ class TestWholeDaySkip:
         assert _S_D2 in eq and "NVDA" in eq[_S_D2]["ohlc_unavailable"] and "META" not in eq[_S_D2]["ohlc_unavailable"]
         assert eq[_S_D1]["positions_count"] == 2
 
+    def test_an_exit_then_the_rest_down_never_double_books(self, world):
+        """v0.45.544（535 二次检查，高）：持仓 NVDA、META；D2 NVDA 取到日线并冲过止盈 ⇒ Step 1 已写平仓记录；
+        META 取不到。535 原实现在 Step 1 之后取持仓 ⇒ 只剩 [META] ⇒ 判「全断」跳过 ⇒ NVDA 的平仓已落盘、持仓 / 现金
+        没写 ⇒ D3 再平一次（重复记账）。变红的变异：持仓集合改回 Step 1 之后取，且去掉「已写平仓不跳过」保险。"""
+        _write_snapshot(world.snap, "META", _S_D1, 7.5, "bullish")
+        _, _, prod = _production(world, {_S_D2: {"META"}})
+        closed = pp._load_jsonl(prod / "closed_trades.jsonl")
+        assert [t["ticker"] for t in closed].count("NVDA") == 1, closed
+        assert _S_D2 in _equity(prod / "equity_curve.jsonl")
+        assert "NVDA" not in {p["ticker"] for p in pp._load_jsonl(prod / "positions.jsonl")}
+
+    def test_written_exit_blocks_the_skip_even_if_the_rule_says_outage(self, world, monkeypatch):
+        """第二道保险单独验：判据被（假设地）判成全断，但 Step 1 已写过平仓 ⇒ 仍照常跑完、账本一致。"""
+        monkeypatch.setattr(pp, "_held_ohlc_outage", lambda held: bool(held))
+        _, _, prod = _production(world)
+        closed = pp._load_jsonl(prod / "closed_trades.jsonl")
+        assert [t["ticker"] for t in closed].count("NVDA") == 1
+        assert _S_D2 in _equity(prod / "equity_curve.jsonl")
+
     def test_no_positions_is_not_skipped(self, world, monkeypatch):
         """没有持仓 ⇒ 仓位基数就是现金，不跳（D1 全断也照开 NVDA，入场价来自快照）。"""
         monkeypatch.setattr(pp, "_LAST_RUN", None)

@@ -189,13 +189,14 @@ class TestFeaturesReachTrainingData:
         原约定（"B" 而非 "B+"，因为 "B+" 是 magnitude 1.0 的基准档）方向对但
         **选错了值**：生产实测 "B" 是众数（461/803 = 57.4%，五档里最常见），
         于是「读不到」与「质量正好是 B」依然完全同形。None → NaN 才真的可区分。
-        `iv_rank` / `put_call_ratio` 的 50.0 / 1.0 本版未动（另一个问题）。
+        `iv_rank` 的 50.0 本版未动（另一个问题）；`put_call_ratio` 的 1.0 回落 v0.45.544 起改为 None
+        （ml_predictor 列进 imputed_features 并中性插补），理由同上：1.0 与「读到中性真值」同形。
         完整证据与下游影响见 tests/test_rival_bee_catalyst_missing.py。
         """
         data = self._captured(bee, monkeypatch=monkeypatch)
         assert data.catalyst_quality is None
         assert data.iv_rank == pytest.approx(50.0)
-        assert data.put_call_ratio == pytest.approx(1.0)
+        assert data.put_call_ratio is None   # v0.45.544：取不到 ⇒ None，不再兜成 1.0
 
     def test_partial_oracle_details_are_tolerated(self, bee, monkeypatch):
         """OracleBee 的 details 是条件填充的（`if result:` 之下逐键 set），
@@ -203,7 +204,7 @@ class TestFeaturesReachTrainingData:
         bee.board.publish(_entry("OracleBeeEcho", details={"iv_rank": 12.0}))
         data = self._captured(bee, monkeypatch=monkeypatch)
         assert data.iv_rank == pytest.approx(12.0)
-        assert data.put_call_ratio == pytest.approx(1.0)
+        assert data.put_call_ratio is None   # v0.45.544：取不到 ⇒ None，不再兜成 1.0
 
     @pytest.mark.parametrize("junk", [None, float("nan"), "high", [1]])
     def test_junk_option_values_fall_back(self, bee, monkeypatch, junk):
@@ -211,7 +212,7 @@ class TestFeaturesReachTrainingData:
                                  details={"iv_rank": junk, "pc_ratio": junk}))
         data = self._captured(bee, monkeypatch=monkeypatch)
         assert data.iv_rank == pytest.approx(50.0)
-        assert data.put_call_ratio == pytest.approx(1.0)
+        assert data.put_call_ratio is None   # v0.45.544：取不到 ⇒ None，不再兜成 1.0
 
     def test_real_crowding_is_still_passed(self, bee, monkeypatch):
         """v0.44.2 的改动不能被 v0.44.3 回退掉。"""

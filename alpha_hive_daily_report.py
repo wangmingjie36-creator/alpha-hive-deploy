@@ -79,7 +79,9 @@ PRICE_GATE_EXIT = 4
 
 
 class ScanInputsUnavailable(RuntimeError):
-    """预取后多数标的取不到可用现价——在任何持久写入之前停下（`config.SCAN_PRICE_GATE`）。"""
+    """预取后多数标的取不到可用现价——在写任何与今天行情有关的产物之前停下（`config.SCAN_PRICE_GATE`）。
+    v0.45.544 订正：闸之前唯一的落盘是 `_init_scan_context` 开头的 ML 日常重训（`ml_model_cache.json`），训练数据是
+    历史样本、与今天的现价无关；预测 / 归档 / 快照 / 账本 / 日报 / 网站都在闸之后。"""
 
     def __init__(self, coverage: Dict):
         self.coverage = coverage
@@ -623,7 +625,8 @@ class AlphaHiveDailyReporter:
         prefetch_elapsed = time.time() - start_time
         _timing.record("prefetch", prefetch_elapsed)
         _log.info("预取完成 (%.1fs) | 开始并行分析", prefetch_elapsed)
-        # v0.45.504 输入闸：多数标的没有可用现价 ⇒ 在第一次持久写入之前停下（蜂群、板、账本都还没动）。
+        # v0.45.504 输入闸：多数标的没有可用现价 ⇒ 在写任何与今天行情有关的产物之前停下（蜂群、板、账本都还没动；
+        # v0.45.544 订正：上面的 ML 日常重训已写过 ml_model_cache.json，但它只用历史样本、与今天的现价无关）。
         # 2026-10-12 全源 TLS 失败、30/30 现价 0，扫描照跑、照写、照发布——这里是它本该停下的地方。
         try:
             from config import SCAN_PRICE_GATE as _SPG
@@ -2844,7 +2847,7 @@ def main():
         with _snapshot_ctx(args):
             report = reporter.run_swarm_scan(focus_tickers=focus_tickers)
     except ScanInputsUnavailable as _gate:
-        # v0.45.504：输入闸拒绝。什么都没写（闸在第一次持久写入之前）⇒ 不 save_report、不部署；
+        # v0.45.504：输入闸拒绝。与今天行情有关的什么都没写（v0.45.544 订正：ML 日常重训的模型缓存除外）⇒ 不 save_report、不部署；
         # scan_timing 照写一份带原因的（编排器读 extra.price_gate 打日志，Step 2 解释器据此判没跑完），退出码 4。
         print(f"\n🛑 输入闸：{_gate}")
         print("   - 未写 predictions / signal_archive / report_snapshots / 账本，未生成日报、未部署")

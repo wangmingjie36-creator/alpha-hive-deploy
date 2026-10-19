@@ -5,7 +5,61 @@
 
 ---
 
-## [0.45.544] — 2026-10-19 — 占位（进行中：本会话 504~542 二次检查——整天跳过写坏账本、MCP OI 判据误判、None 下游崩溃等）
+## [0.45.544] — 2026-10-19 — Fixed：本会话 504 ~ 542 的二次检查——整天跳过会写坏账本（高）、MCP / OI 陈旧判据在正常日误判、P/C / total_oi 为 None 时下游崩溃或造假值，及几处文档 / 证据订正
+
+用户 2026-10-19 要求二次检查。三个只读审查代理分头审 542 / 509 + 535 + 504 / 512 + 516 + 522 的 None 下游，另加一次实时链实测，共确认 8 件。
+
+### Fixed
+1. **（高，535 引入）整天跳过可能写坏账本。**
+   - 535 在 Step 1（出场检查）**之后**才取持仓集合，已平掉的不在其中。
+   - 场景：A 取到日线并平仓、B / C 取不到 ⇒ 按 [B, C] 判「全断」整天跳过。A 的平仓已写进 `closed_trades`，持仓 / 现金没写 ⇒ 下次运行 A 再平一次（重复记账、现金与盈亏算两遍）。
+   - 修：持仓集合改在 Step 1 **之前**取（`_held_at_start`）；第二道保险：Step 1 已写过平仓记录就绝不跳过。
+   - `paper_portfolio.py run` 命令行与 `bootstrap_from_history(verbose)` 在跳过日格式化 `nav=None` 会 TypeError ⇒ 改为打印「整天跳过」。
+2. **（中，542 引入）OI 陈旧判据在正常日误判。**
+   - 10-19 正常日实测：SNOW 六个到期日里三个只有 0.12–0.19。MCP 原先只看最近一个到期日 ⇒ 0.18 ⇒ 误判陈旧。
+   - Oracle 的 `unusual_options`（60 天内前 4 个）SNOW 0.577，离 0.5 太近。
+   - 「任一到期日正常就不算陈旧」也不行：10-12 TMO 有一个到期日 1.0。
+   - 修：`oi_staleness.MAX_RATIO` 0.5 → **0.25**（故障日几个到期日合起来最高 0.04，正常日最低 0.575）；MCP 另取后 3 个到期日只用来判、不进展示。实测 30 只正常日在 `unusual_options` 与 MCP 两种样本下都不判陈旧。
+3. **（中，522 引入）深度报告在 total_oi 为 None 时整份失败。**
+   - `ctx["total_oi"] = odet.get("total_oi", 0)` 在键存在、值为 None 时不生效 ⇒ `:,.0f` 抛 TypeError（`_build_swarm_narrative`、HTML、`main()` 的 print，以及 LLM 提示 3 处）。
+   - 522 把样本链早退的 0 改成 None 后，09-24 / 09-25 那种全断日 30 只都会撞上。
+   - 修：新 `_oi_fmt`，取不到显示「—」。P/C 取不到显示「—」（不再印出 `P/C=None`），叙述写「不可得」而不是「多空均衡」「<1 偏多」。
+4. **（中低，516 之后暴露）P/C 为 None 被兜成假值。**
+   - `generate_deep_v2.main()` 的论点失效评估把 None 兜成 1.0 ⇒ 记成「评估过、没触发」⇒ 改传 None（check_thesis_breaks 记「未评估」）。
+   - `chart_engine.render_options_chart`：None 兜成 0.00 ⇒ 染绿、标「Call偏多 →看涨」（06-17 VKTX / CRCL 那种有关键价位、P/C 为 None 的形状）⇒ 显示「—」「不可得」；总 OI 同理。
+   - `generate_ml_report` 论点胶囊 `or 1.0`（也会把真实的 0 抹成 1.0）⇒「—」。
+   - `RivalBeeVanguard`：Oracle 的 P/C 取不到时 ML 特征兜成 1.0、不进 imputed_features ⇒ 新 `_usable_pc`，传 None，由 `ml_predictor._feature_quality` 列入缺失并中性插补（同 v0.45.3 的 volatility；iv_rank 的 50.0 回落未动）。
+5. **（低）** `backtester.print_report`：窗口内 P/C / iv_rank 全 NULL ⇒ `AVG` 为 None ⇒ `:.2f` 抛 ⇒「—」。
+6. **（低）流向 "unknown" 的展示与口径。**
+   - 网站卡片与 ML 报告把 "unknown" 原样贴出 ⇒ 网站按「-」处理（卡片隐藏），ML 报告显示「—」。
+   - 样本链早退仍写 `flow_direction: "neutral"`，与 P/C 为 None 的路径不一致 ⇒ 改 "unknown"。
+7. **（订正，504）**「输入闸在任何持久写入之前」不准确：闸之前 `_init_scan_context` 的 ML 日常重训会写 `ml_model_cache.json`。它只用历史样本、与当天现价无关，无实际损害；三处注释改为「在写任何与今天行情有关的产物之前」。
+8. **（订正，525）** AMC 08-10 隔离条目的证据写了不存在的快照文件 ⇒ 改为「08-10 无快照，同一守卫、同一股价区间，前后 08-04 / 08-12 快照为证」。
+
+### 审查确认无问题的
+- 542 其余各处（调用方、`{}` 的读者、`unusual_options` 不缓存、`_oi_stale` 定义顺序）。
+- 509 遮罩、535 其余路径（空日线不会触发出场、拆股口径判断不写账本、每条取数路径都记结局）。
+- 504 闸的判据与编排器 Step 2 循环（`set -u` 下变量都先赋值、重试次数、`STEP2_START` 重置）。
+- Oracle 的评分路径：`data_quality` 降为 degraded 不会让 Oracle 把整份期权结果当不可用（`_options_data_usable` 只排除 unavailable）。
+- 512 / 522 / 525 隔离条目的语法与 v0.45.494 镜像规则（不产生连带隔离）。
+
+### Tests
+- `tests/test_fg_selfproof_ohlc_outage.py`：
+  - 新「一只平仓、其余取不到 ⇒ 不重复记账」：两处修法都撤掉时红。
+  - 新「判据说全断但 Step 1 已写平仓 ⇒ 仍照常跑」：只去掉第二道保险时红。
+- `tests/test_yfinance_oi_stale.py`：阈值用例改为 0.25（含 0.3 不判陈旧）+ 正常日最低实测 0.575 不判陈旧。
+- `tests/test_oi_staleness_consumers.py`：MCP「最近到期日 OI 成片 0、其余正常 ⇒ 不判陈旧」，MCP 只拿最近一个到期日来判时红；常量断言改 0.25。
+- 新 `tests/test_second_check_v0_45_544.py`（10）：
+  - 深度报告 `_oi_fmt` / extract / 两段叙述在 None 下不崩且显示「—」「不可得」；
+  - 论点失效评估传 None；
+  - 期权图表 None 不再「0.00 Call偏多 →看涨」、真实值不变（从 figure 里取文字比对）；
+  - RivalBee `_usable_pc` 与 `_feature_quality` 列入缺失；
+  - 样本链流向 unknown 与网站隐藏；
+  - 回测报告 NULL 平均值。
+  - 论点失效与回测这两处没有接缝，用源码断言，测试说明里写明原因。
+- 变异：535 两处修法各被一条杀；阈值改回 0.5、MCP 单到期日各被杀；None 下游 8 个变异全杀。
+- `tests/test_rival_bee_peer_features.py`：三处「P/C 回落 1.0」的断言改为 None（该文件原注「本版未动（另一个问题）」——即本次修掉的这一个）。
+- 全量：10197 passed / 0 failed / 2 xfailed（`TestCoverageHorizon` 设计内红照惯例 deselect）；ruff 全绿。
 
 ## [0.45.543] — 2026-10-19 — 占位（进行中：死链两道守卫——落盘写入者读者登记表 + 编排器步骤产出后置条件）
 

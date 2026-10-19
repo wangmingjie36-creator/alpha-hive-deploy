@@ -256,11 +256,16 @@ def render_options_chart(
         support    = oracle.get("key_levels", {}).get("support",    [])
         resistance = oracle.get("key_levels", {}).get("resistance", [])
         unusual    = oracle.get("unusual_activity", [])
-        pc_ratio   = float(oracle.get("put_call_ratio", 0) or 0)
+        # v0.45.544：P/C / 总 OI 取不到（None）⇒ 显示「—」，不兜成 0.00（0.00 会被染绿、标「Call偏多 →看涨」）
+        _pc_raw    = oracle.get("put_call_ratio")
+        pc_ratio   = float(_pc_raw) if isinstance(_pc_raw, (int, float)) else None
         iv_rank    = float(oracle.get("iv_rank",    0) or 0)
         _iv_c      = oracle.get("iv_current")   # v0.45.471：不可得 ⇒ None，标题写「—」而不是 0.0%
         iv_curr_s  = f"{float(_iv_c):.1f}%" if _iv_c is not None else "—"
-        total_oi   = int(oracle.get("total_oi",     0) or 0)
+        _oi_raw    = oracle.get("total_oi")
+        total_oi   = int(_oi_raw) if isinstance(_oi_raw, (int, float)) else None
+        pc_s       = f"{pc_ratio:.2f}" if pc_ratio is not None else "—"
+        oi_s       = f"{total_oi/1e6:.2f}M" if total_oi is not None else "—"
 
         if not support and not resistance:
             return None
@@ -271,8 +276,8 @@ def render_options_chart(
                  ha="center", va="top", fontsize=14, fontweight="bold", color=_T1)
         price_str = f"${current_price:.1f}" if current_price else "N/A"
         fig.text(0.5, 0.918,
-                 f"P/C Ratio {pc_ratio:.2f}  ·  IV Rank {iv_rank:.1f}%  ·  "
-                 f"IV Current {iv_curr_s}  ·  Total OI {total_oi/1e6:.2f}M  ·  当前价 {price_str}",
+                 f"P/C Ratio {pc_s}  ·  IV Rank {iv_rank:.1f}%  ·  "
+                 f"IV Current {iv_curr_s}  ·  Total OI {oi_s}  ·  当前价 {price_str}",
                  ha="center", va="top", fontsize=9, color=_T3)
 
         # Aggregate OI
@@ -353,19 +358,20 @@ def render_options_chart(
         ax2.set_xticks([]); ax2.set_yticks([])
         ax2.set_xlim(0, 1); ax2.set_ylim(0, 1)
 
-        pc_col  = _RED   if pc_ratio > 1   else (_GOLD if pc_ratio > 0.7 else _GREEN)
+        pc_col  = (_T1 if pc_ratio is None else
+                   _RED if pc_ratio > 1 else (_GOLD if pc_ratio > 0.7 else _GREEN))
         ivr_col = _RED   if iv_rank  > 70  else (_GOLD if iv_rank  > 40  else _GREEN)
-        pc_sub  = ("Put偏多 →看跌" if pc_ratio > 1 else
+        pc_sub  = ("不可得" if pc_ratio is None else "Put偏多 →看跌" if pc_ratio > 1 else
                    ("偏中性" if pc_ratio > 0.7 else "Call偏多 →看涨"))
 
         # max by OI value, not by strike key
         top_sup = max(sup_dict, key=lambda k: sup_dict[k]) if sup_dict else 0.0
         top_res = max(res_dict, key=lambda k: res_dict[k]) if res_dict else 0.0
         metrics = [
-            ("P/C Ratio",    f"{pc_ratio:.2f}",      pc_col,  pc_sub),
+            ("P/C Ratio",    pc_s,                   pc_col,  pc_sub),
             ("IV Rank",      f"{iv_rank:.1f}%",       ivr_col, "高波动" if iv_rank>70 else ("中等" if iv_rank>40 else "低波动区间")),
             ("IV Current",   iv_curr_s,               _ACCENT, "当前隐含波动率"),
-            ("Total OI",     f"{total_oi/1e6:.2f}M",  _T1,     "全链条未平仓"),
+            ("Total OI",     oi_s,                   _T1,     "全链条未平仓"),
             ("Put 最强支撑", f"${top_sup:.0f}",       _RED,    f"{sup_dict.get(top_sup,0)/1e3:.0f}K OI"),
             ("Call 最强阻力",f"${top_res:.0f}",       _GREEN,  f"{res_dict.get(top_res,0)/1e3:.0f}K OI"),
         ]

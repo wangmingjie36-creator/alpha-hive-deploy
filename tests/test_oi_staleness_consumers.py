@@ -207,17 +207,19 @@ class TestUnusualOptionsModule:
 # ═══════════════════════════════ MCP 快照 ═══════════════════════════════
 
 class TestMcpSnapshot:
-    def _call(self, monkeypatch, stale):
+    def _call(self, monkeypatch, stale, frames=None):
         import alpha_hive_mcp as m
-        c, p = _chain_frames(stale)[0]
+        frames = frames or _chain_frames(stale)
+        exps = [_exp(d) for d in (30, 60, 90, 120)]
 
         class _T:
-            options = (_exp(30),)
+            options = tuple(exps)
 
             def __init__(self, t):
                 pass
 
             def option_chain(self, e):
+                c, p = frames[exps.index(e)]
                 return types.SimpleNamespace(calls=c.copy(), puts=p.copy())
         monkeypatch.setattr(m.yf, "Ticker", _T)
         fn = getattr(m.alphahive_get_options_snapshot, "fn", m.alphahive_get_options_snapshot)
@@ -233,7 +235,15 @@ class TestMcpSnapshot:
         out = self._call(monkeypatch, stale=False)
         assert out["oi_stale"] is False and out["put_call_oi_ratio"] and out["highest_oi_call"]
 
+    def test_one_odd_nearest_expiry_is_not_judged_alone(self, monkeypatch):
+        """v0.45.544：10-19 SNOW 形状——最近到期日 OI 成片 0（新挂周权 / 发布不全），其余到期日正常 ⇒ 不判陈旧。
+        原实现只看最近一个到期日 ⇒ 正常日误判。变红的变异：MCP 只拿最近一个到期日来判。"""
+        frames = _chain_frames(stale=False)
+        frames[0] = _chain_frames(stale=True)[0]
+        out = self._call(monkeypatch, stale=False, frames=frames)
+        assert out["oi_stale"] is False and out["highest_oi_call"] is not None
+
 
 def test_recent_constant_is_shared():
-    assert RECENT is not None and oi_staleness.MIN_RECENT == 20 and oi_staleness.MAX_RATIO == 0.5
+    assert RECENT is not None and oi_staleness.MIN_RECENT == 20 and oi_staleness.MAX_RATIO == 0.25
     assert isinstance(pd.Timestamp(RECENT), pd.Timestamp)

@@ -758,8 +758,10 @@ def extract(data: dict) -> dict:
         "guard": guard,
         "bear": bear,
         # Oracle data
-        "put_call_ratio": odet.get("put_call_ratio", "N/A"),
-        "total_oi": odet.get("total_oi", 0),
+        # v0.45.544：取不到（None，v0.45.512 / 516 / 522 起会出现）⇒ P/C 显示「—」、total_oi 保持 None 由 `_oi_fmt` 渲染；
+        # 原 `.get(k, 0)` 在键存在、值为 None 时不生效 ⇒ 下面的 `:,.0f` 直接 TypeError（整份深度报告失败）
+        "put_call_ratio": odet.get("put_call_ratio") if odet.get("put_call_ratio") is not None else "—",
+        "total_oi": odet.get("total_oi"),
         "iv_skew": iv_skew,
         "iv_skew_signal": iv_skew_signal,
         "otm_put_iv": otm_put_iv,
@@ -1020,7 +1022,7 @@ Scout:{fmt_score(ctx['scout'].get('score'))} Rival:{fmt_score(ctx['rival'].get('
 完成结构化预分析（严格按格式，无HTML）：""",
 
         "options": f"""分析 {ticker} 期权市场结构：
-P/C={ctx['put_call_ratio']} | 总OI={ctx['total_oi']:,.0f} | IV Skew={ctx['iv_skew']}({ctx['iv_skew_signal']}) | IV={_iv_txt(ctx['iv_current'])}
+P/C={ctx['put_call_ratio']} | 总OI={_oi_fmt(ctx['total_oi'])} | IV Skew={ctx['iv_skew']}({ctx['iv_skew_signal']}) | IV={_iv_txt(ctx['iv_current'])}
 IV-RV价差:{_ivrv_txt} | HV30={_hv30_txt}
 流向:{ctx['flow_direction']} | 关键阻力:{json.dumps(ctx['key_levels'].get('resistance',[])[:2],ensure_ascii=False)}
 关键支撑:{json.dumps(ctx['key_levels'].get('support',[])[:2],ensure_ascii=False)}
@@ -1055,7 +1057,7 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 - Rival(ML辅助) {fmt_score(ctx['rival'].get('score'))}, 7日预期 {ctx['ml_7d']:+.1f}%
 - Buzz(情绪) {fmt_score(ctx['buzz'].get('score'))}, 发现: {ctx['buzz'].get('discovery','')[:100]}
 - Chronos(催化剂) {fmt_score(ctx['chronos'].get('score'))}
-- Oracle(期权) {fmt_score(ctx['oracle'].get('score'))}, P/C={ctx['put_call_ratio']}, OI={ctx['total_oi']:,.0f}
+- Oracle(期权) {fmt_score(ctx['oracle'].get('score'))}, P/C={ctx['put_call_ratio']}, OI={_oi_fmt(ctx['total_oi'])}
 - Guard(宏观) {fmt_score(ctx['guard'].get('score'))}, 发现: {ctx['guard'].get('discovery','')[:100]}
 - Bear(逆向) {fmt_score(ctx['bear'].get('score'))}, 信号: {', '.join(ctx['bear_signals'][:2])}
 
@@ -1093,8 +1095,8 @@ PEAD历史财报漂移: {ctx.get('pead_summary','暂无历史数据')}（偏向:
 
         "options": f"""
 深度分析 {ticker} 的期权市场结构：
-- P/C 比: {ctx['put_call_ratio']}（{'>1 偏空' if pc_float > 1 else '<1 偏多'}）
-- 总OI: {ctx['total_oi']:,.0f}
+- P/C 比: {ctx['put_call_ratio']}（{('>1 偏空' if pc_float > 1 else '<1 偏多') if ctx['put_call_ratio'] != '—' else '不可得'}）
+- 总OI: {_oi_fmt(ctx['total_oi'])}
 - IV Skew: {ctx['iv_skew']} ({ctx['iv_skew_signal']})
 - IV 当前: {_iv_txt(ctx['iv_current'])} | HV30（已实现波动率）: {_hv30_txt}
 - IV-RV 价差: {_ivrv_txt}（正值=期权相对HV偏贵，卖方有优势；负值=期权便宜，方向性买入占优），信号: {ctx.get('iv_rv_signal','')}
@@ -1521,7 +1523,7 @@ def _build_swarm_narrative(ctx: dict) -> str:
         f'<p><strong>蜂群综合评分 <span class="{sc_cls}">{score:.2f}/10</span>，方向 {direction}，{score_interp}。</strong>'
         f'置信区间 [{cb_lo:.2f}–{cb_hi:.2f}]（区间宽度 {cb_hi-cb_lo:.2f}，鉴别力 {disc_label}），'
         f'维度分散度 σ={dim_std:.1f}（{std_warn}）。'
-        f'期权流 <span class="highlight">{ctx["flow_direction"]}</span>，近端P/C={ctx["put_call_ratio"]}，总OI {ctx["total_oi"]:,.0f}。</p>')
+        f'期权流 <span class="highlight">{ctx["flow_direction"]}</span>，近端P/C={ctx["put_call_ratio"]}，总OI {_oi_fmt(ctx["total_oi"])}。</p>')
 
     # P2: 维度交叉推理（替代固定模板）
     _dim_parts = []
@@ -1995,6 +1997,14 @@ def _build_catalyst_narrative(ctx: dict) -> str:
             + pead_para)
 
 
+def _oi_fmt(v) -> str:
+    """总 OI 展示：取不到（None / 非数）⇒「—」（v0.45.544）。"""
+    try:
+        return f"{float(v):,.0f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def _iv_txt(v) -> str:
     """当前 IV 的展示串。不可得（None，v0.45.471 起上游不再兜底成 25.0）⇒ 「—」。"""
     return f"{float(v):.1f}%" if isinstance(v, (int, float)) and not isinstance(v, bool) else "—"
@@ -2069,7 +2079,7 @@ def _build_options_narrative(ctx: dict) -> str:
         _sw_hist_txt = "。"
 
     p1 = (
-        f'<p><strong>期权市场结构：近端P/C={pcr}（{"Call偏多，买方主导，看多氛围浓" if pcr_f<0.9 else "Put偏多，下行对冲需求强" if pcr_f>1.1 else "多空均衡"}），'
+        f'<p><strong>期权市场结构：近端P/C={pcr}（{"不可得" if pcr == "—" else "Call偏多，买方主导，看多氛围浓" if pcr_f<0.9 else "Put偏多，下行对冲需求强" if pcr_f>1.1 else "多空均衡"}），'
         f'总OI {oi:,.0f}，IV Current {_iv_txt(iv)}，IV Rank {iv_rank:.0f}%（{iv_interp}），'
         f'IV Skew {skew}（{"Put溢价偏高，尾部风险定价显著" if skew_f>1.2 else "Skew中性，定价均衡" if skew_f>0.8 else "Call溢价偏高，上行投机情绪浓"}）。</strong>'
         f'{"期权综合评分 " + f"{options_score:.1f}/10，{iv_skew_signal}；" if options_score else ""}'
@@ -5945,8 +5955,10 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
     guard_res_boost = guard_res.get("confidence_boost", 0)
 
     # 总 OI 显示（万 = ×10,000；不使用"百万"，避免单位混淆）
-    total_oi = ctx.get("total_oi", 0)
-    if total_oi >= 100_000_000:
+    total_oi = ctx.get("total_oi")
+    if not isinstance(total_oi, (int, float)):   # v0.45.544：取不到 ⇒「—」
+        oi_str = "—"
+    elif total_oi >= 100_000_000:
         oi_str = f"{total_oi/100_000_000:.1f}亿"
     elif total_oi >= 10_000:
         oi_str = f"{total_oi/10_000:.0f}万"
@@ -7601,11 +7613,11 @@ def main():
     ctx["thesis_break_data"] = {}
     try:
         from market_intelligence import check_thesis_breaks
-        _tb_pcr = ctx.get("put_call_ratio", 1.0)
+        _tb_pcr = ctx.get("put_call_ratio")
         try:
             _tb_pcr = float(_tb_pcr)
         except (ValueError, TypeError):
-            _tb_pcr = 1.0
+            _tb_pcr = None   # v0.45.544：不可得 ⇒ None（check_thesis_breaks 记「未评估」），不兜成 1.0 冒充「评估过、没触发」
         _tb_result = check_thesis_breaks(
             ticker=ticker,
             current_price=float(ctx.get("price") or 0.0),
@@ -7633,7 +7645,7 @@ def main():
         ctx["aa_hist_n"] = int(_accuracy.get("n", 0))
         ctx["aa_hist_avg_ret_7d"] = float(_accuracy.get("avg_ret_7d", 0))
 
-    print(f"   OracleBee: P/C={ctx['put_call_ratio']}, OI={ctx['total_oi']:,}, Skew={ctx['iv_skew']}")
+    print(f"   OracleBee: P/C={ctx['put_call_ratio']}, OI={_oi_fmt(ctx['total_oi'])}, Skew={ctx['iv_skew']}")
     print(f"   催化剂: {len(ctx['catalysts'])} 个 | 异常流: {len(ctx['unusual_activity'])} 笔")
     _pre_conflicts = detect_conflicts(ctx)
     if _pre_conflicts:
