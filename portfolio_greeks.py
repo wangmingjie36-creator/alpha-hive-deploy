@@ -103,7 +103,7 @@ import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import delta_hedge as dh
 import ledger_io
@@ -123,6 +123,11 @@ CONFIG = {
     "risk_free": 0.045,
     "beta_window": 60,               # OLS 用的交易日数
     "beta_cache_trading_days": 5,    # β 缓存有效期（交易日）
+    # 不进对冲计算的标的（v0.45.545，用户决定）：它的股票仓 / 跨式腿不进 $Delta、聚合、压力表、逐票对冲，
+    # 也就**不再因它缺价而让整天判「数据不全」**。⚠️ 这不是「它没有敞口」——敞口照旧存在，只是 SPY 覆盖不管它；
+    # 每天按建仓价估算它的名义额与 % NAV 写进审计 `excluded_from_hedge`（日报 / 对冲页都看得到），别让它悄悄变大。
+    # BILI：CBOE 里它的标的价 last_trade 恒落后一天、Twelve Data 当晚又不给当天那根 ⇒ 10-15、10-16 连两天只它一只缺价。
+    "hedge_exclude_tickers": ["BILI"],
     # ── 逐票 Delta 对冲（v0.45.526；规则与理由见 `delta_hedge.py`）──
     "delta_hedge_mode": "shadow",    # off | shadow（只算不成交，缺省）| paper（纸面成交，改这一行单独提交）
     "delta_hedge_band_pct": 3.0,     # 每只标的 |跨式腿净 $Delta + 对冲市值| 超过 NAV 的这么多 % 才动手（v1 主观常数）
@@ -597,19 +602,24 @@ def _apply_beta(row: Dict, beta_fn, as_of: str) -> None:
 
 def stock_exposures(as_of: str, positions: Optional[List[Dict]] = None,
                     closes_fn: Optional[Callable[[str, str], Optional[float]]] = None,
-                    beta_fn: Optional[Callable[[str, str], Tuple[Optional[float], Optional[str]]]] = None
+                    beta_fn: Optional[Callable[[str, str], Tuple[Optional[float], Optional[str]]]] = None,
+                    exclude: Optional[Iterable[str]] = None
                     ) -> List[Dict]:
     """股票纸面组合每条持仓一行：qty = +shares（bullish）/ −shares（bearish）。
     股票没有 gamma/vega/theta，那三项是真实的 0.0 而不是「未知」。
-    价只认 as_of 那一场（`_resolve_mark`）；陈旧价不进 $Delta。"""
+    价只认 as_of 那一场（`_resolve_mark`）；陈旧价不进 $Delta。
+    `exclude`：不出行的标的（`CONFIG["hedge_exclude_tickers"]`，由 compute_day 传入并另行记账）。"""
     closes_fn = closes_fn or _default_mark
     beta_fn = beta_fn or _default_beta
     if positions is None:
         import paper_portfolio as pp
         positions = _load_jsonl(pp.POSITIONS_FILE)
     rows: List[Dict] = []
+    skip = {str(t).upper() for t in (exclude or ())}
     for p in positions or []:
         tk = str(p.get("ticker") or "")
+        if tk.upper() in skip:
+            continue
         row = _blank_row(tk, "stock")
         row.update({"direction": p.get("direction"), "entry_date": p.get("entry_date"),
                     "gamma_dollar_per_1pct": 0.0, "vega_dollar_per_pt": 0.0, "theta_dollar_per_day": 0.0})
@@ -632,7 +642,8 @@ def stock_exposures(as_of: str, positions: Optional[List[Dict]] = None,
 def option_exposures(as_of: str, positions: Optional[List[Dict]] = None,
                      quotes_fn: Optional[Callable[[str, List[str]], Dict[str, Optional[dict]]]] = None,
                      beta_fn: Optional[Callable[[str, str], Tuple[Optional[float], Optional[str]]]] = None,
-                     closes_fn: Optional[Callable[[str, str], Optional[float]]] = None) -> List[Dict]:
+                     closes_fn: Optional[Callable[[str, str], Optional[float]]] = None,
+                     exclude: Optional[Iterable[str]] = None) -> List[Dict]:
     """跨式腿每张合约一行（一笔跨式两行）。qty = ±contracts×100（long +，short −）。
     Greeks 来自 CBOE 重新报价（单位见模块头）：
         $Delta      = qty × delta × S
@@ -651,8 +662,11 @@ def option_exposures(as_of: str, positions: Optional[List[Dict]] = None,
         positions = _load_jsonl(opl.POSITIONS_FILE)
     want = _expected_session(as_of)
     rows: List[Dict] = []
+    skip = {str(t).upper() for t in (exclude or ())}
     for p in positions or []:
         tk = str(p.get("ticker") or "")
+        if tk.upper() in skip:
+            continue                      # 不报价、不取价、不算 β：排除就是整只不碰（敞口另由 excluded_exposure 记账）
         side = str(p.get("side") or "")
         n = _num(p.get("contracts"))
         legs = [("call", p.get("call_symbol")), ("put", p.get("put_symbol"))]
@@ -708,6 +722,49 @@ def option_exposures(as_of: str, positions: Optional[List[Dict]] = None,
             _apply_beta(row, beta_fn, as_of)
             rows.append(row)
     return rows
+
+
+def _excluded_tickers() -> List[str]:
+    return [str(t).upper() for t in (CONFIG.get("hedge_exclude_tickers") or []) if str(t).strip()]
+
+
+def excluded_exposure(nav: Optional[float], stock_positions: Optional[List[Dict]] = None,
+                      option_positions: Optional[List[Dict]] = None) -> Optional[Dict]:
+    """被 `hedge_exclude_tickers` 挡在对冲之外的那几只，**到底还剩多少敞口**——不让「排除」变成「看不见」。
+    股票仓按**建仓价**估名义额（不取任何价：取价正是它被排除的原因）：bullish 为正、bearish 为负；
+    跨式腿只数张数（没有报价就没有 Delta，不编）。没有配置排除 ⇒ None；配了但今天没持仓 ⇒ 空 names（说明它没起作用）。"""
+    excl = _excluded_tickers()
+    if not excl:
+        return None
+    if stock_positions is None:
+        import paper_portfolio as pp
+        stock_positions = _load_jsonl(pp.POSITIONS_FILE)
+    if option_positions is None:
+        import options_paper_leg as opl
+        option_positions = _load_jsonl(opl.POSITIONS_FILE)
+    nav = _pos(nav)
+    names: List[Dict] = []
+    for tk in excl:
+        usd, n_stock, unknown = 0.0, 0, False
+        for p in stock_positions or []:
+            if str(p.get("ticker") or "").upper() != tk:
+                continue
+            n_stock += 1
+            sh, px = _num(p.get("shares")), _pos(p.get("entry_price"))
+            if sh is None or px is None:
+                unknown = True
+                continue
+            usd += (-1.0 if str(p.get("direction")) == "bearish" else 1.0) * sh * px
+        n_legs = sum(1 for p in option_positions or [] if str(p.get("ticker") or "").upper() == tk)
+        if not n_stock and not n_legs:
+            continue
+        names.append({"ticker": tk, "n_stock_positions": n_stock, "n_straddles": n_legs,
+                      "stock_usd_est": None if unknown or not n_stock else round(usd, 2),
+                      "stock_pct_nav_est": (round(usd / nav * 100.0, 3)
+                                            if (nav and n_stock and not unknown) else None),
+                      "basis": "entry_price"})
+    return {"configured": excl, "names": names, "nav": nav,
+            "note": "按建仓价估算的名义额（不取现价）；这些仓不进 $Delta / 聚合 / 压力表 / 逐票对冲，SPY 覆盖不管它们"}
 
 
 def _hedge_positions() -> List[Dict]:
@@ -1474,10 +1531,19 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     beta_fn = beta_fn or _default_beta
     spy_mark = _mark_from(closes_fn, CONFIG["hedge_instrument"], as_of)
     spy_price = spy_mark["price"]
-    stock_rows = stock_exposures(as_of, closes_fn=closes_fn, beta_fn=beta_fn)
-    option_rows = option_exposures(as_of, quotes_fn=quotes_fn, beta_fn=beta_fn, closes_fn=closes_fn)
+    excl = _excluded_tickers()
+    stock_rows = stock_exposures(as_of, closes_fn=closes_fn, beta_fn=beta_fn, exclude=excl)
+    option_rows = option_exposures(as_of, quotes_fn=quotes_fn, beta_fn=beta_fn, closes_fn=closes_fn, exclude=excl)
     hedge_rows, today_trade = _hedge_rows_before_today(as_of, closes_fn, spy_price, spy_mark=spy_mark)
     nav_d = combined_nav_detail(as_of, closes_fn, spy_price=spy_price)
+    excluded = excluded_exposure(nav_d["nav"])
+    for e in (excluded or {}).get("names") or []:
+        # WARNING 不是 ERROR：这是配置里写明的取舍；但每天都留一行，估算值跟着走，敞口变大时看得见
+        _log.warning("[PortfolioGreeks] %s：%s 在 hedge_exclude_tickers 里，不进对冲计算（股票仓 %d 笔，按建仓价估 %s"
+                     "，占 NAV %s；跨式 %d 笔）", as_of, e["ticker"], e["n_stock_positions"],
+                     (f"${e['stock_usd_est']:+,.0f}" if e["stock_usd_est"] is not None else "不可估"),
+                     (f"{e['stock_pct_nav_est']:+.2f}%" if e["stock_pct_nav_est"] is not None else "—"),
+                     e["n_straddles"])
     # 逐票 Delta 对冲先于 SPY 带：paper 模式下 SPY 带看到的是逐票对冲**之后**的残余暴露；shadow / off 不进聚合
     # 逐票带宽的分母（v0.45.529）：NAV 缺的**只有** delta_overlay 且原因是某几只持仓标的缺价 ⇒ 带宽用「不含这一块」的 NAV。
     # 否则一只持仓标的的陈旧价（盘中陈旧文件约每 30 只里有 1 只）会把 NAV 整体做成 None，连价格正常的标的也判未知——
@@ -1525,7 +1591,8 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     _LAST_PRICE_CHECK = chk
     return {"as_of": as_of, "version": _VERSION, "spy_price": spy_price, "spy_mark": spy_mark,
             "nav": nav_d, "rows": rows, "aggregate": agg, "recommendation": rec, "stress": stress,
-            "today_trade": today_trade, "price_check": chk, "delta_hedge": delta_section}
+            "today_trade": today_trade, "price_check": chk, "delta_hedge": delta_section,
+            "excluded_from_hedge": excluded}
 
 
 def _execute_trade(as_of: str, rec: Dict, agg: Dict, nav: Optional[float],
@@ -1991,6 +2058,20 @@ def _stale_price_line(res: Dict) -> str:
     return out
 
 
+def _excluded_line(ex: Optional[Dict]) -> str:
+    """日报里的一行：谁被挡在对冲之外、估计还剩多少敞口。没配置 / 今天没持仓 ⇒ 空串。"""
+    names = (ex or {}).get("names") or []
+    if not names:
+        return ""
+    bits = []
+    for e in names:
+        usd = e.get("stock_usd_est")
+        bits.append(f"{e['ticker']}（股票 {e.get('n_stock_positions', 0)} 笔"
+                    + (f"，按建仓价估 {_fmt_usd(usd)} / {_fmt_pct(e.get('stock_pct_nav_est'))} NAV" if usd is not None else "")
+                    + (f"；跨式 {e['n_straddles']} 笔" if e.get("n_straddles") else "") + "）")
+    return "**不进对冲计算**（`hedge_exclude_tickers`，敞口仍在、SPY 覆盖不管）：" + "；".join(bits)
+
+
 def _delta_markdown(sec: Optional[Dict]) -> List[str]:
     """日报里的「逐票 Delta 对冲」小节（v0.45.526）。mode=off / 没有这一节（旧审计文件）⇒ 不写。"""
     if not sec or not sec.get("names"):
@@ -2074,6 +2155,9 @@ def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
     stale_line = _stale_price_line(res)
     if stale_line:
         L.append(stale_line)
+    excl_line = _excluded_line(res.get("excluded_from_hedge"))
+    if excl_line:
+        L.append(excl_line)
     L.append(f"**今日建议**：`{rec.get('action')}` {int(rec.get('spy_shares') or 0):+d} SPY —— {rec.get('reason')}")
     if trade:
         L.append(f"**已执行**（纸面）：{int(trade.get('shares') or 0):+d} SPY @ ${_num(trade.get('price')) or 0:.2f}，"

@@ -62,6 +62,11 @@ def audit_brief(day: str, a: dict) -> dict:
         "executed": bool(a.get("executed")),
         "executed_shares": _num((trade or {}).get("shares")),
         "execution_blocked": a.get("execution_blocked"),
+        # 被 hedge_exclude_tickers 挡在对冲外的标的与估算敞口（v0.45.545）：页面要说出来，不能让排除变成看不见
+        "excluded_from_hedge": [{k: x.get(k) for k in ("ticker", "n_stock_positions", "n_straddles",
+                                                       "stock_usd_est", "stock_pct_nav_est", "basis")}
+                                for x in ((a.get("excluded_from_hedge") or {}).get("names") or [])
+                                if isinstance(x, dict)],
         "spy_price": _num(a.get("spy_price")),
         "spy_mark": a.get("spy_mark"),
         # 审计文件里的 price_check 没有 error 键：异常中断的那一轮根本不写审计（审计最后写），页面靠「最近审计不是

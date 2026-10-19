@@ -5,6 +5,29 @@
 
 ---
 
+## [0.45.545] — 2026-10-19 — Changed：组合 Greeks 的对冲计算可按标的排除（`hedge_exclude_tickers`，缺省 BILI）——一只标的长期缺价不再让整个组合每天判「数据不全」
+
+用户 2026-10-19 看对冲页：10-15、10-16 连续两天「判断不了（数据不全）」、不动，要求「如果一直是 BILI 的问题，把 BILI 的数据不算在对冲里面」。
+
+### 取证
+- 两天的审计文件里缺价的**只有 BILI 一只**（10-15：`cboe_stale_intraday`；10-16：看到 $14.43 但属于 10-15，来源 Twelve Data 日线）；其余 23 只价格全好，却跟着整天 unknown、`no hedge on partial data`。
+- 根因在取价链而非账本：BILI 在 CBOE 的标的价 last_trade 恒落后一天（今天 07:28 实测：last_trade=10-16、应为 10-19，本源被弃用），Twelve Data 又按美东日期丢当晚那根（v0.45.438 设计）。两个源同时对 BILI 失效，收盘后同日跑就拿不到当天收盘。
+- 没动取价链（它对别的标的是对的）：改取价规则会碰 `_default_mark` 的「只认 as_of 那一场」不变式。
+
+### Changed
+- `portfolio_greeks.py`：新增 `CONFIG["hedge_exclude_tickers"]`（缺省 `["BILI"]`，大小写不敏感）。被排除的标的**整只不碰**：股票仓与跨式腿都不出行（`stock_exposures` / `option_exposures` 新增 `exclude` 参数），所以不取价、不算 β、不报价，也不进 $Delta / 聚合 / 压力表 / 逐票对冲。
+- **排除不是静默的**：新增 `excluded_exposure()`，每天按**建仓价**估算被排除股票仓的名义额（bearish 为负）与 % NAV（不取现价——取价正是它被排除的原因），跨式腿只数笔数（无报价不编 Delta）；写进审计文件 `excluded_from_hedge`、日报一行「不进对冲计算」、每次运行一行 WARNING。配了排除但当天没持仓 ⇒ `names` 为空（看得出它没起作用）。
+- `alphabot/hedge.py` `audit_brief` 带出 `excluded_from_hedge`；`alphabot/static/pages/hedge.js` 在对冲页黄条点名「BILI 不进对冲计算（配置里排除）：按建仓价估 −$2,436（−1.6% NAV）；敞口仍在，SPY 覆盖不管它」。
+
+### 代价（要知道）
+- BILI 是 bearish 空头约 $2.4k、占 NAV 约 1.6%，**这部分净空头敞口 SPY 覆盖不再对冲**——对 ±15% 的带而言是零头，但它是「少算一块」而不是「没有这一块」；若它的仓位变大，页面上的估算额会跟着变。
+- 其他标的缺价照旧整天 unknown（`test_other_missing_prices_still_block`）：排除只给点名的标的，不是「缺价就放行」。
+- 已写成 unknown 的 10-15 / 10-16 审计与账本**不重算**：补跑历史日会拉到今天的 CBOE 链，其余标的反而全判陈旧（10-12 那种形状）。下一个扫描日起生效。
+
+### 测试
+- 新增 `tests/test_portfolio_greeks_exclude.py`（12 条）：对照（不排除 ⇒ BILI 缺价让整本账 unknown）、排除后带位能判出且带外仍会给 SPY 建议、整只不碰（价 / β / 报价都没问过它）、估算额带符号与 % NAV、审计 / 日报 / 页面摘要都点名、别的标的缺价仍拦、大小写。变异检验：让 `_excluded_tickers` 恒返回空 ⇒ 主断言变红。
+- `test_portfolio_greeks*`、`test_alphabot_hedge*`、`test_delta_hedge`、`test_hedge_history_gate` 共 243 条全绿；ruff 通过。
+
 ## [0.45.544] — 2026-10-19 — Fixed：本会话 504 ~ 542 的二次检查——整天跳过会写坏账本（高）、MCP / OI 陈旧判据在正常日误判、P/C / total_oi 为 None 时下游崩溃或造假值，及几处文档 / 证据订正
 
 用户 2026-10-19 要求二次检查。三个只读审查代理分头审 542 / 509 + 535 + 504 / 512 + 516 + 522 的 None 下游，另加一次实时链实测，共确认 8 件。

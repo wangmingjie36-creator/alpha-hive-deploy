@@ -155,6 +155,12 @@ export async function renderHedge(root, alive) {
     warns.push(`${L.date} 数据不全，对冲决定做不出来：${pc.hedge_undecided}${who.length ? `——缺价的是：${who.join("；")}` : ""}`);
   }
   if ((pc.gaps || []).length) warns.push(`${L.date} 另缺：${pc.gaps.join("；")}`);
+  // 被排除的标的不是「没有敞口」：点名 + 估算额，让它变大时看得见（v0.45.545）
+  for (const x of L?.excluded_from_hedge || []) {
+    warns.push(`${L.date} ${x.ticker} 不进对冲计算（配置里排除）：股票 ${x.n_stock_positions} 笔` +
+      (x.stock_usd_est != null ? `，按建仓价估 ${sMoney(x.stock_usd_est, 0)}（${sPct(x.stock_pct_nav_est)} NAV）` : "") +
+      (x.n_straddles ? `，跨式 ${x.n_straddles} 笔` : "") + "；敞口仍在，SPY 覆盖不管它。");
+  }
 
   const kpis = h("div", { class: "kpis" },
     kpi(`持有 ${a.ticker || rules.hedge_instrument || "SPY"}`, shares(a.shares), "", a.entry_date ? `自 ${a.entry_date}` : null),
