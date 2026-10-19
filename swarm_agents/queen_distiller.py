@@ -173,32 +173,34 @@ class QueenDistiller:
             except (ImportError, AttributeError):
                 self.DIMENSION_WEIGHTS = dict(self.DEFAULT_WEIGHTS)
 
-        # Enhancement C: ML 反馈权重调整
+        # Enhancement C（ML 特征重要性 → 维度权重 + 投票票重）——**v0.45.537 起只算不施加**。
+        #
+        # 两个消费者都关了：本处「乘维度权重再归一化」与 `_compute_direction_vote` 的票重缩放。
+        # 乘数照算、落盘到 `ml_weight_adjustments_shadow` 留审计；`ml_adjustments` 恒空、
+        # `ml_feedback_enabled` 恒 False（记录如实反映「没施加」）。
+        # 为什么关（09-10 → 10-16 生产 25 个扫描日，CHANGELOG v0.45.537）：
+        #   ① 没有任何 OOS 闸：场内重训模型 OOS 均值 51.5%、8 天 < 50%（测试集约 124 条，SE≈4.5pp），
+        #      同一天 Rival 那一项已被 `_ml_oos_trust_factor` 置零，这里照改权重；
+        #   ② 重要性是**训练集**上的 permutation importance（in-sample ≈70% vs OOS ≈45%）；
+        #   ③ 按维度**取均值**再比 1/5 基准 ⇒ 下限 0.5 是常态、特征越多越难抬：odds 25/25 天压在下限，
+        #      signal 24/25 天高于下限（常 1.5–2.0）——它结构上只会抬 sentiment / signal；
+        #   ④ 投票通道把 09-09 已在分数上归零的 Scout 的票放大到 Chronos/Oracle 的 4 倍，
+        #      离线重放 750 行里约 9.5% 的方向因此改变。
+        # ⚠️ **不要接回去，也不要把 `config.ML_FEEDBACK_CONFIG` 的 enable_* 改成 False**：
+        # 共振加成前瞻检验的重放按**记录的** `ml_feedback_enabled` / `ml_weight_adjustments`
+        # 复现投票、按**当时的** config 开关决定施不施加 —— 翻 config 会让窗口里的旧记录复现不出来
+        # （自证 < 95% ⇒ exit 3）。投票缩放代码因此保留，只供重放旧记录用。
+        # 守卫：tests/test_queen_ml_feedback_disabled.py
         self.ml_adjustments: Dict[str, float] = {}
         self.ml_feedback_enabled = False
+        self.ml_adjustments_shadow: Dict[str, float] = {}
         if ml_model:
-            self.ml_adjustments = self._compute_ml_weight_adjustments()
-            if self.ml_adjustments:
-                self.ml_feedback_enabled = True
-                try:
-                    from config import ML_FEEDBACK_CONFIG as _MFC
-                except ImportError:
-                    _MFC = {}
-                if _MFC.get("enable_dimension_weighting", True):
-                    for dim, factor in self.ml_adjustments.items():
-                        if dim in self.DIMENSION_WEIGHTS:
-                            self.DIMENSION_WEIGHTS[dim] *= factor
-                    # 归一化使权重总和 = 1.0
-                    _total = sum(self.DIMENSION_WEIGHTS.values())
-                    if _total > 0:
-                        self.DIMENSION_WEIGHTS = {
-                            k: round(v / _total, 4)
-                            for k, v in self.DIMENSION_WEIGHTS.items()
-                        }
-                    _log.info(
-                        "[ML-Feedback] 维度权重已调整: %s",
-                        {k: round(v, 3) for k, v in self.DIMENSION_WEIGHTS.items()},
-                    )
+            self.ml_adjustments_shadow = self._compute_ml_weight_adjustments()
+            if self.ml_adjustments_shadow:
+                _log.info(
+                    "[ML-Feedback] 影子乘数（v0.45.537 起不施加）: %s",
+                    self.ml_adjustments_shadow,
+                )
 
     def _assert_regime_preserved_zeros(self, ticker: str, regime_weights: Dict) -> bool:
         """政体层保零守卫（v0.45.176）：喂进评分的权重里，零维必须仍为零。
@@ -661,7 +663,10 @@ class QueenDistiller:
         _total_w_raw = sum(_all_conf) or 1.0
         _weight_cap = _total_w_raw * 0.4
 
-        # Enhancement C: ML 反馈 → Agent 投票置信度调整
+        # Enhancement C: ML 反馈 → Agent 投票置信度调整。
+        # ⚠️ v0.45.537 起生产里 `ml_feedback_enabled` 恒 False，本段只在**重放旧记录**时走到
+        # （共振加成前瞻检验把记录的 ml_feedback_enabled / ml_weight_adjustments 塞回来复现当天投票）。
+        # 别删：删了窗口内 v0.45.537 之前的记录就复现不出来。
         try:
             from config import ML_FEEDBACK_CONFIG as _MFC_vote
         except ImportError:
@@ -1385,9 +1390,11 @@ class QueenDistiller:
             "vote_excluded_agents": dv["vote_excluded_agents"],
             # Enhancement B: 置信度校准
             "confidence_calibration": confidence_calibration,
-            # Enhancement C: ML 反馈权重
+            # Enhancement C: ML 反馈权重。v0.45.537 起前两个键恒为 {} / False（没施加）；
+            # 算出来但没施加的乘数在 `_shadow`。重放按前两个键复现，别把影子写进它们。
             "ml_weight_adjustments": dict(self.ml_adjustments),
             "ml_feedback_enabled": self.ml_feedback_enabled,
+            "ml_weight_adjustments_shadow": dict(self.ml_adjustments_shadow),
             # 升级 #1: GEX 政体诊断（v0.45.334 起 applied=False：gex_adjustment 算了但没施加）
             "gex_regime_mod": _gex_mod_result,
             # v0.45.362：每只标的一份 GEX 状态（全到期日视图 + 可得性标记），展示 / 存档只读这一份；

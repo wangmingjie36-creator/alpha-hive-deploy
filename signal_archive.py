@@ -2328,6 +2328,8 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 按维度 IC 协议 §6「按层声明」：点名 `buzz.comp.news_signal` **和** `agent.BuzzBeeWhisper.*`（通道值变 ⇒ 分跟着变）。
     # 下游（Guard 读 Buzz 分、Scout consensus_strength 读 Buzz 方向、swarm_agreement、ml.* 等）由 _scope_closure 带出。
     "v0.45.445": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*"),
+    # 10-19：蜂后 ML 反馈两个消费者（维度权重、方向票重）停用，只记影子乘数。蜂后层 ⇒ 不改任何归档蜂信号。
+    "v0.45.537": (),
 }
 
 

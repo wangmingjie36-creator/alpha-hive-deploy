@@ -429,7 +429,7 @@ QueenDistiller 职责：
 
 🚨 **v0.45.175 发现该决策从未在生产实际生效；v0.45.176（2026-09-10）已断开旁路，自此 config 才真是唯一真相。** 旁路是 `Backtester.adapt_weights()`（第三条通道，见上文「核心组件指针」），config 只拿到两成投票权；下游 `gex_regime.RegimeWeightAdjuster` 的 `max(0.02, ·)` 地板还会把零复活成 2%，两处同版修完。全链路实测（含最不利政体分支）signal=risk_adj=**0.0000**，对比 09-09 生产实际的 0.2059/0.1982。
 
-⚠️ **仍然：判断「生产实际用了哪套权重」看 `swarm.dimension_weights`，不看 config。** 断开的是已知那一条，ML 反馈（乘法）与政体调整（相对偏移）依然会逐标的改写权重——它们是设计内的，且都保零。扫描期有观测点 `_assert_config_zeros_survive`（config 归零的维度非零就打 error），不变式守卫在 `tests/test_zero_weight_invariant.py`。世代边界 2026-09-10 / v0.45.176（作废 09-09 的 30 条样本）。
+⚠️ **仍然：判断「生产实际用了哪套权重」看 `swarm.dimension_weights`，不看 config。** 政体调整（相对偏移）依然逐标的改写权重——设计内、保零。**蜂后 ML 反馈（维度权重乘数 + 方向票重缩放）v0.45.537 已停用**：没有 OOS 闸（8/25 天模型 OOS < 50% 照改）、重要性取自训练集、按特征数取均值的形式只抬得动 sentiment/signal，且把分数已归零的 Scout 的票放大到 4 倍；现只记影子 `ml_weight_adjustments_shadow`。⚠️ **勿接回，也勿把 `ML_FEEDBACK_CONFIG` 的 enable_* 改成 False**（共振加成检验重放旧记录靠它们）。守卫 `tests/test_queen_ml_feedback_disabled.py`。扫描期观测点：`_assert_config_zeros_survive`（零维非零）+ `_assert_base_weights_equal_config`（基准权重逐维 = config，v0.45.537），不变式守卫在 `tests/test_zero_weight_invariant.py`。世代边界 2026-09-10 / v0.45.176（作废 09-09 的 30 条样本）。
 
 说明：
 - Signal: 披露与基本面共振强度

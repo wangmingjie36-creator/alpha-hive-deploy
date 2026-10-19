@@ -273,11 +273,11 @@ class TestOnlyScoutExcludes:
 
 class TestRegistryWiring:
     def test_cohort_entry_is_last_and_dated_before_forward_start(self):
-        # 同日可以再登别的边界（v0.45.445 同在 10-09）：要求 441 在**最新日期组**里，不要求它恰好是表尾
-        last_day = rr._COHORT_HISTORY[-1][0]
-        group = [(d, v, r) for d, v, r in rr._COHORT_HISTORY if d == last_day]
-        assert last_day == "2026-10-09" and any(v == _V for _, v, _ in group), [(d, v) for d, v, _ in group]
-        date, ver, reason = next(e for e in group if e[1] == _V)
+        # 同日可以再登别的边界（v0.45.445 同在 10-09），之后也会有更晚的边界（v0.45.537 在 10-19）：
+        # 要求 441 恰好一条、日期是 10-09；「表尾 / 最新日期组」随后续登记而变，不归本测试管。
+        hits = [(d, v, r) for d, v, r in rr._COHORT_HISTORY if v == _V]
+        assert len(hits) == 1 and hits[0][0] == "2026-10-09", [(d, v) for d, v, _ in hits]
+        date, ver, reason = hits[0]
         assert date < "2026-10-12", "须早于维度 IC 协议 FORWARD_START，否则 H1 / H2 被截断"
         assert "consensus_in_score" in reason and "非等价" in reason
 

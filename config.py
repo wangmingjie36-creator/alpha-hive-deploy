@@ -1318,8 +1318,11 @@ CONFIDENCE_CALIBRATION_CONFIG = {
 ML_FEEDBACK_CONFIG = {
     "min_adjustment": 0.5,          # 维度调整因子下限
     "max_adjustment": 2.0,          # 维度调整因子上限
-    "enable_dimension_weighting": True,   # 是否启用维度权重调整
-    "enable_vote_boosting": True,         # 是否启用 Agent 投票置信度调整
+    # ⚠️ v0.45.537 起生产**已不施加**这两项（QueenDistiller 只算影子乘数，见其 __init__），
+    # 下面两个开关现在只给**重放旧记录**用（共振加成前瞻检验按当时 config 决定施不施加）。
+    # **保持 True，别改成 False** —— 改了窗口内的旧记录复现不出来，检验自证失败（exit 3）。
+    "enable_dimension_weighting": True,   # 维度权重调整（仅重放旧记录）
+    "enable_vote_boosting": True,         # Agent 投票置信度调整（仅重放旧记录）
     # v0.40.0: 按 OOS（purged 时序外样本）精度缩放 QueenDistiller 的 ML 调整信任度
     # in-sample 精度是自考自评；OOS < half 阈值 → ml_adjustment 减半，
     # < zero 阈值（不如抛硬币）→ 置零。OOS 缺失（样本<60）不惩罚。

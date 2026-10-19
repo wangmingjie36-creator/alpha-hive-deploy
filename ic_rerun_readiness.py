@@ -974,7 +974,26 @@ _COHORT_HISTORY = [
      "必连带点名分）；`composite.final_score` 是 ALWAYS_SLICED。"
      "前瞻检验：维度 IC 协议 H1（buzz_v1，通道是输入层）与 H2 都会随之变，但本条早于 FORWARD_START 2026-10-12 ⇒ 不截断；"
      "窗口开始后再换主源 = 终止 H1。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登一代（`final_score` 是 ML 特征）。"
-     "⚠️ 10-05 重跑 / 10-06 / 10-07 三轮的 news 是 Yahoo 量纲（数据降级，不在任何代码边界内），已在本世代之前，不另隔离。"),
+     "⚠️ 10-05 重跑 / 10-06 / 10-07 三轮的 news 是 Yahoo 量纲（数据降级，不在任何代码边界内），已在本世代之前，不另隔离。"),    ("2026-10-19", "v0.45.537",
+     "关掉 QueenDistiller 的 ML 反馈两个消费者（用户 2026-10-19 选方案 A）：① 用每日重训 HGB 的特征重要性乘蜂后**基准维度权重**再归一化；"
+     "② 用同一组乘数缩放每只蜂的**方向票重**。两处都没有 OOS 闸（Rival 那一项有 `_ml_oos_trust_factor`）。"
+     "乘数照算、落盘 `ml_weight_adjustments_shadow`；`ml_feedback_enabled` 恒 False、`ml_weight_adjustments` 恒 {}（如实记录没施加）。"
+     "**依据**（09-10 → 10-16，25 个扫描日 × 30 只，只读 `.swarm_results_*.json` + `ml_model_history/manifest.jsonl`）："
+     "场内模型 OOS 均值 51.5%、8 天 < 50%（测试集约 124 条、SE≈4.5pp）；基准权重 14/25 天偏离 config，最大 09-18 sentiment 0.549"
+     "（config 0.325，当天 OOS 46.3%）；signal 乘数 24/25 天高于下限、常 1.5–2.0 ⇒ 分数权重已归零的 Scout 一票顶 Chronos/Oracle 四票。"
+     "重要性是训练集上的 permutation importance，按维度取均值 ⇒ odds 25/25 天压在 0.5 下限（结构上只抬得动 sentiment / signal）。"
+     "**口径变化**（离线重放 750 行，`resonance_boost_forward_test` 的 rebase / replay）：加权分 750/750 复现；去掉 ML 后基础分"
+     "|Δ| 日均最大 0.46（09-18，单只最大 0.86）、当日排名 Spearman 最低 0.84；方向改变约 71/750（9.5%，重放复现率 92% ⇒ 近似值）；"
+     "最终分 |Δ| 均值 0.086、最大 1.0 ⇒ `rule_direction` 与 `final_score` 口径都变。"
+     "**边界代价**：本世代（2026-10-09 / v0.45.441+445 起）至今 180 条 predictions（10-09、10-12~16 各 30）、已到期 0 条，全部归旧世代"
+     "（2026-10-19 清晨对生产库 `read_only_connect` 只读实测）。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.537\"]`：蒸馏结果带 `ml_weight_adjustments_shadow` 键。预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.537\"]` = `()`：蜂后层改动，不改任何归档蜂信号（先例 v0.45.176 / 212 / 228 / 334）；"
+     "`composite.final_score` 是 ALWAYS_SLICED。前瞻检验：维度 IC 协议 H1 不动；H2 的对象是蜂后调整**之前**的 Σ冻结权重×维度分、"
+     "截断信号只有三只蜂的 score 与 `EVALUATION_WEIGHTS` 字面量（本版没动）⇒ **不截断**。共振加成前瞻检验：重放按记录的"
+     "`ml_feedback_enabled` / `ml_weight_adjustments` 复现投票 ⇒ 新旧记录都能复现、自证不受影响（`config.ML_FEEDBACK_CONFIG` 的 enable_* "
+     "**刻意保持 True**，翻了旧记录就复现不出），检验期内边界条数 +1（附带项）。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登一代（`final_score` 是 ML 特征）。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1353,6 +1372,13 @@ def _marker_scout_consensus_excluded(d: dict) -> bool:
     return _scout_row_has_consensus_marker(d) and not _is_backfill_row(d)
 
 
+def _marker_queen_ml_shadow(d: dict) -> bool:
+    """v0.45.537 的**日期**印记：蒸馏结果带 `ml_weight_adjustments_shadow` 键（新代码每只标的都写，
+    没有模型时写 {}；此前的记录没有这个键），且是实时行（补跑行不算日期证据，同 v0.45.441）。"""
+    sr = d.get("swarm_results")
+    return isinstance(sr, dict) and "ml_weight_adjustments_shadow" in sr and not _is_backfill_row(d)
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1382,6 +1408,8 @@ _BOUNDARY_MARKERS = {
                   _marker_scout_consensus_excluded),
     "v0.45.445": ("agent_details.BuzzBeeWhisper.details.news_primary == \"massive\"",
                   _marker_buzz_news_primary_massive),
+    "v0.45.537": ("swarm_results 带 ml_weight_adjustments_shadow 键",
+                  _marker_queen_ml_shadow),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，

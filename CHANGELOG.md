@@ -9,7 +9,54 @@
 
 ## [0.45.538] — 2026-10-19 — 占位（进行中：Rival 合成样本 ML 进分的根因修复——final_score 拿掉 ml_adjustment、退役 ml_predictor_extended 与信任闸）
 
-## [0.45.537] — 2026-10-19 — 占位（进行中：关掉蜂后 ML 维度权重反馈与投票缩放——未按 OOS 设闸，用户选方案 A）
+## [0.45.537] — 2026-10-19 — Changed（用户 2026-10-19 选方案 A）：蜂后 ML 反馈两个消费者都停用——维度权重乘数与方向票重缩放只算影子、不施加（没有 OOS 闸）；世代边界 2026-10-19
+
+起因：只读死链审计里顺带发现，10-16 日志 `[ML-Feedback] 维度权重已调整 … sentiment 0.402`，而当天模型 OOS 45.2%。
+CLAUDE.md 一直写「ML 反馈（乘法）是设计内、保零」——保零没错，问题是**它没有按模型质量设闸**。
+Rival 的 `ml_adjustment` 会乘 `_ml_oos_trust_factor`（OOS < 50% 置零），蜂后这两处不乘。
+
+### 证据（09-10 → 10-16，25 个扫描日 × 30 只；只读 `.swarm_results_*.json` + `ml_model_history/manifest.jsonl`；config 权重自 09-09 未变）
+- 链路：`alpha_hive_daily_report.py` 加载 + `daily_retrain` → `QueenDistiller(ml_model=…)` →
+  `_compute_ml_weight_adjustments`（`HGBModel.get_feature_importance` = **训练集**上的 permutation importance）→
+  ① `__init__` 乘基准权重再归一化；② `_compute_direction_vote` 乘每只蜂的票重。两处都只要求 importance 非空。
+- 场内重训模型 OOS 均值 **51.5%**，**8 天 < 50%**（09-11 39.8 / 09-14 / 09-18 46.3 / 09-30 / 10-01 / 10-14 / 10-15 / 10-16 45.2），
+  18 天 < 55%；测试集约 124 条、SE≈4.5pp ⇒ 整段都落在随机猜的噪声里。那 8 天 Rival 的 `ml_adjustment` 是 0/30，同一个模型照样在改蜂后权重。
+- 函数形式：12 个特征均匀时每个 ≈0.083，维度均值 /0.2 ≈ 0.42 ⇒ 下限 0.5 是常态，按维度**取均值** ⇒ 特征越多越难抬。
+  odds（3 个特征）**25/25 天**压在下限；signal（1 个特征）24/25 天高于下限、常 1.5–2.0。
+- 基准权重 14/25 天偏离 config；最大 09-18 sentiment **0.549**（config 0.325，当天 OOS 46.3%），09-10 catalyst 0.532。
+- 投票通道：signal 乘数 2.0 对其余 0.5 ⇒ 分数权重 09-09 已归零的 Scout 一票顶 Chronos/Oracle 四票。
+- 离线重放（`resonance_boost_forward_test.rebase_with_current_weights` / `replay`，开 ML vs 去掉 ML）：加权分 750/750 复现；
+  去掉 ML 后基础分 |Δ| 日均最大 0.46（09-18，单只 0.86）、当日排名 Spearman 最低 0.84；方向改变约 **71/750（9.5%）**，
+  零权重偏离的日子也照翻（投票通道）；最终分 |Δ| 均值 0.086、最大 1.0。⚠️ 重放对记录的（最终分, 方向）复现 691/750（92%），方向数是近似值。
+
+### Changed
+- `swarm_agents/queen_distiller.py`：`__init__` 只算 `ml_adjustments_shadow`（打一行 info），`ml_adjustments` 恒 {}、`ml_feedback_enabled` 恒 False；
+  蒸馏结果新增 `ml_weight_adjustments_shadow`，原两个键如实记「没施加」。`_compute_direction_vote` 的缩放代码**保留**——
+  只在重放旧记录时走到（共振加成前瞻检验把记录的两个键塞回去复现当天投票），删了窗口内的旧记录就复现不出。
+- `config.ML_FEEDBACK_CONFIG`：`enable_dimension_weighting` / `enable_vote_boosting` **刻意保持 True** 并加注释——
+  重放按**当时的** config 决定施不施加，翻成 False 会让窗口内旧记录的投票复现不出来（自证 < 95% ⇒ exit 3）。
+- `alpha_hive_daily_report.py`：新增扫描期观测点 `_assert_base_weights_equal_config`（基准权重逐维必须 = config，容差 1e-4；
+  否则 error 日志 + stdout）。零维守卫 `_assert_config_zeros_survive` 对 ML 反馈恒绿（10-16 实测），基准层没有合法改写之后可以守得更严。
+  ML 模型照旧加载与每日重训（`ml_model_cache.json` 仍是 Rival 信任系数与报告的输入）。
+
+### 世代边界与协议代价
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-10-19", "v0.45.537", …)`；`signal_archive.COHORT_SIGNAL_SCOPE["v0.45.537"] = ()`
+  （蜂后层，先例 176 / 212 / 228 / 334）；印记 `_BOUNDARY_MARKERS["v0.45.537"]`（蒸馏结果带 `ml_weight_adjustments_shadow`）；
+  `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日登一代（`final_score` 是 ML 特征，没有重放 Δprobability）。
+- **代价**：当前世代（2026-10-09 起）180 条 predictions、已到期 0 条归旧世代（生产库 `read_only_connect` 只读实测）。
+- 维度 IC 协议：H1 不动；H2 的对象是蜂后调整**之前**的 Σ冻结权重×维度分（`dim_ic_forward_test.py` 就是这么算的），截断信号只有三只蜂的 score
+  与 `EVALUATION_WEIGHTS` 字面量（本版没动）⇒ **不截断**。顺带：此前生产排序 ≠ H2 检验的对象（09-18 sentiment 0.549 vs 0.325），现在更接近了。
+- 共振加成前瞻检验：自证照旧（生产数据实跑 `ic_rerun_readiness --quiet`：4/10 合格周，自证 99%），检验期内边界条数 +1（附带项）。
+- F&G 敞口门：重放把生产记录的信号当输入，机械上不受影响（自证 100% 不变）。
+
+### Tests
+- 新增 `tests/test_queen_ml_feedback_disabled.py`（14 条）：影子乘数确实算出来（正对照）、基准权重 = config、两个键记「没施加」、
+  票重与无模型逐项相等、蒸馏结果字段；旧记录照旧可重放（塞回两个键缩放仍生效、config 开关 AST 钉 True、新记录经共振重放复现）；
+  运行期探针（相等为真、10-16 生产权重必红而零维守卫看不见、真蜂后 + 模型为真、扫描里确实调用了一次）；世代边界登记与空 scope。
+  变异：重新乘回权重红 3 条、投票读影子红 3 条、config 开关翻 False 红 2 条。
+- 改写 `tests/test_queen_distiller.py` 三条 ML 用例与 `tests/test_zero_weight_invariant.py::TestMLFeedbackZeroInvariant` 的前提，改读影子乘数。
+- `tests/test_scout_consensus_excluded.py::test_cohort_entry_is_last_and_dated_before_forward_start` 原钉「最新边界日期 = 10-09」，任何更晚的边界都会让它红；改为按版本找 441 那一条（恰好一条、10-09、早于 FORWARD_START）。
+- 全套：10149 passed；另 2 红 1 错与本版无关——经济日历覆盖期告警（GDP/CPI/NFP 下一年日程未发布，按设计会红）、真实数据根闸（`replay_ohlc_state/` 17 个文件 02:52:24–30 被写，时刻对上我同时手跑的 `ic_rerun_readiness --quiet` 的 F&G 重放，散落在无关测试里，属并发写入者）。
 
 ## [0.45.536] — 2026-10-19 — Added：Alpha Bot 溢价子页「首选」卡片（按公开规则替用户把表看一遍）+ 盘中自动刷新、页头报价时刻、盘外空表说明原因
 

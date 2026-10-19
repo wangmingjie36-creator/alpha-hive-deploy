@@ -747,14 +747,14 @@ class TestMLFeedbackWeighting:
         assert queen_no_ml.ml_adjustments == {}
 
     def test_ml_feedback_adjustments(self, board):
-        """有 ml_model → 维度权重归一化调整"""
+        """有 ml_model → 只算影子乘数，不改权重（v0.45.537，守卫全文见 test_queen_ml_feedback_disabled）"""
         model = self._make_mock_ml_model()
         queen_ml = QueenDistiller(board, ml_model=model)
-        assert queen_ml.ml_feedback_enabled is True
-        assert len(queen_ml.ml_adjustments) > 0
-        # 权重应该已归一化
-        total = sum(queen_ml.DIMENSION_WEIGHTS.values())
-        assert abs(total - 1.0) < 0.01, f"权重总和应 ≈ 1.0，got {total}"
+        queen_no_ml = QueenDistiller(board, ml_model=None)
+        assert queen_ml.ml_feedback_enabled is False
+        assert queen_ml.ml_adjustments == {}
+        assert len(queen_ml.ml_adjustments_shadow) > 0
+        assert queen_ml.DIMENSION_WEIGHTS == queen_no_ml.DIMENSION_WEIGHTS
 
     def test_ml_feedback_clamp(self, board):
         """调整因子被 clamp 到 [0.5, 2.0]"""
@@ -772,7 +772,8 @@ class TestMLFeedbackWeighting:
         }
         model = self._make_mock_ml_model(importance=extreme)
         queen_ml = QueenDistiller(board, ml_model=model)
-        for dim, adj in queen_ml.ml_adjustments.items():
+        assert queen_ml.ml_adjustments_shadow
+        for dim, adj in queen_ml.ml_adjustments_shadow.items():
             assert 0.5 <= adj <= 2.0, f"{dim} adjustment {adj} out of clamp range"
 
     def test_ml_feedback_untrained_model(self, board):
@@ -785,10 +786,15 @@ class TestMLFeedbackWeighting:
         assert queen_ml.ml_adjustments == {}
 
     def test_ml_vote_boost(self, board):
-        """有 ML 模型时 Agent 投票权重应受 ml_adjustments 影响"""
+        """重放旧记录时（记录里 ml_feedback_enabled=True + 乘数），票重照旧受 ml_adjustments 影响。
+
+        v0.45.537 起生产不再施加；这条路径只给共振加成前瞻检验重放旧记录用，所以仍要守着。
+        """
         model = self._make_mock_ml_model()
         queen_ml = QueenDistiller(board, ml_model=model)
-        assert queen_ml.ml_feedback_enabled is True
+        assert queen_ml.ml_feedback_enabled is False
+        queen_ml.ml_feedback_enabled = True                       # 旧记录里的两个键
+        queen_ml.ml_adjustments = dict(queen_ml.ml_adjustments_shadow)
 
         # 使用明确的多数方向（3 bullish vs 1 bearish）避免触发仲裁
         results = [
@@ -822,6 +828,7 @@ class TestMLFeedbackWeighting:
         out = queen.distill("TEST", results)
         assert "ml_weight_adjustments" in out
         assert "ml_feedback_enabled" in out
+        assert "ml_weight_adjustments_shadow" in out
         assert isinstance(out["ml_weight_adjustments"], dict)
         assert isinstance(out["ml_feedback_enabled"], bool)
 

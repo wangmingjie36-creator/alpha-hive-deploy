@@ -250,7 +250,12 @@ _ML_ESTIMATOR_GENERATIONS = [
      "同日落地的第二批【v0.45.445】（两批合并为一代，同 09-06 / 09-07 的先例；`ic_rerun_readiness._COHORT_HISTORY` 里仍是两条同日边界）："
      "新闻主源 AV → Massive：BuzzBee news 通道换了逐文章标签的分类器 ⇒ sentiment 维分 ⇒ `final_score` 特征的上游定义变"
      "（`_prepare_ml_input` 一行没动）；Buzz 方向随之变 ⇒ `agent_agreement` 跟着变。幅度与校准见 `ic_rerun_readiness` 同版条目"
-     "（Massive 同票对 AV 时代均值 +1.5 / 中位 −1.0，Yahoo −27.1）。按 v0.45.334 条「估计量的定义变了就登记」登记，**没有重放 Δprobability**。"),
+     "（Massive 同票对 AV 时代均值 +1.5 / 中位 −1.0，Yahoo −27.1）。按 v0.45.334 条「估计量的定义变了就登记」登记，**没有重放 Δprobability**。"),    ("2026-10-19", "v0.45.537",
+     "蜂后 ML 反馈停用（维度权重乘数与方向票重缩放都不再施加，只记影子）。`_prepare_ml_input` 一行没动；"
+     "`final_score` 这个特征的**上游定义**变了：基础分改用 config 原样权重、方向票不再按 ML 乘数缩放"
+     "（离线重放 09-10 → 10-16 共 750 行：最终分 |Δ| 均值 0.086、最大 1.0，方向约 9.5% 改变）。"
+     "`agent_agreement` 取自各蜂自己的方向，不受影响。按 v0.45.334 条「估计量的定义变了就登记」登记，**没有重放 Δprobability**；"
+     "世代边界见 `ic_rerun_readiness._COHORT_HISTORY` 同版条目。"),
 ]
 
 

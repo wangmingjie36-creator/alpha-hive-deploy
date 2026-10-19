@@ -345,6 +345,39 @@ def _assert_config_zeros_survive(effective: dict, adapted_diag: "dict | None" = 
     return True
 
 
+def _assert_base_weights_equal_config(effective: dict, cfg_weights: "dict | None" = None) -> bool:
+    """扫描期观测点（v0.45.537）：蜂后**基准**权重必须逐维等于 `config.EVALUATION_WEIGHTS`。
+
+    上一个观测点只守「零维仍为零」，因为当时基准层还有一条合法的乘法改写（ML 反馈）。
+    v0.45.537 关掉它之后基准层就没有任何合法改写了，可以守得更严：任何一维偏离都红。
+    （ML 反馈在 09-18 把 sentiment 从 0.325 推到 0.549，零维守卫对此恒绿。）
+    逐标的政体调整在下游，不归这里管。
+
+    Returns:
+        True = 相等（容差 1e-4）。False = 有通道在改写基准权重（error 日志 + stdout 告警）。
+    """
+    if cfg_weights is not None:
+        cfg_w = dict(cfg_weights)
+    else:
+        try:
+            import config as _cfg
+            cfg_w = dict(_cfg.EVALUATION_WEIGHTS)
+        except (ImportError, AttributeError) as e:
+            _log.warning("基准权重相等检查跳过（config 读取失败）: %s", e)
+            return True
+    diff = {d: (effective.get(d), w) for d, w in cfg_w.items()
+            if not isinstance(effective.get(d), (int, float)) or abs(effective[d] - w) > 1e-4}
+    if diff:
+        _log.error(
+            "基准权重偏离 config：%s（实际, config）—— 有通道在改写蜂后基准权重"
+            "（历史上是 adapted_weights、ML 反馈，分别于 v0.45.176 / v0.45.537 断开）。",
+            diff,
+        )
+        print(f"⚠️  基准权重偏离 config：{diff}")
+        return False
+    return True
+
+
 class AlphaHiveDailyReporter:
     """Alpha Hive 日报生成引擎"""
 
@@ -543,7 +576,8 @@ class AlphaHiveDailyReporter:
         _adapted_diag = Backtester.load_adapted_weights() if Backtester else None
         import llm_service as _llm_check_q
 
-        # Enhancement C: 尝试加载已训练的 ML 模型用于 QueenDistiller 维度权重反馈
+        # Enhancement C: 尝试加载已训练的 ML 模型交给 QueenDistiller。
+        # v0.45.537 起蜂后只拿它算**影子**乘数（落盘 `ml_weight_adjustments_shadow`），不改权重、不改票重。
         _ml_model_for_queen = None
         try:
             from ml_predictor import MLPredictionService as _MPS
@@ -553,7 +587,7 @@ class AlphaHiveDailyReporter:
                 _ml_svc_tmp.model.load_model(str(_ml_model_file))
                 if _ml_svc_tmp.model.is_trained:
                     _ml_model_for_queen = _ml_svc_tmp.model
-                    _log.info("ML 模型已加载用于 QueenDistiller 维度权重反馈")
+                    _log.info("ML 模型已加载（QueenDistiller 只算影子乘数，v0.45.537）")
         except (ImportError, OSError, ValueError, TypeError) as e:
             _log.debug("ML 模型加载跳过: %s", e)
 
@@ -574,6 +608,7 @@ class AlphaHiveDailyReporter:
             ml_model=_ml_model_for_queen,
         )
         _assert_config_zeros_survive(queen.DIMENSION_WEIGHTS, _adapted_diag)
+        _assert_base_weights_equal_config(queen.DIMENSION_WEIGHTS)
 
         # rival_agent 必须在 all_agents 里：下面的 inject_prefetched 靠它注入
         # `_prefetched_stock`，漏了会让 Rival 逐标的直接抓 yfinance（限流风险）。
