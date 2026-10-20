@@ -114,99 +114,10 @@ class TrainingData:
     direction_encoded: float = 0.0    # bullish=1, neutral=0, bearish=-1
 
 
-class HistoricalDataBuilder:
-    """构建训练数据集"""
-
-    def __init__(self):
-        # 收集的历史交易记录
-        self.historical_records: List[TrainingData] = [
-            # NVDA 记录
-            TrainingData(
-                ticker="NVDA", date="2023-10-18",
-                crowding_score=68.0, catalyst_quality="A",
-                momentum_5d=5.2, volatility=4.8, market_sentiment=45,
-                actual_return_3d=8.5, actual_return_7d=18.9, actual_return_30d=32.1,
-                win_3d=True, win_7d=True, win_30d=True,
-                iv_rank=62.0, put_call_ratio=0.8, final_score=8.2,
-                odds_score=7.5, risk_adj_score=6.8, agent_agreement=0.85, direction_encoded=1.0,
-            ),
-            TrainingData(
-                ticker="NVDA", date="2023-04-19",
-                crowding_score=72.0, catalyst_quality="A",
-                momentum_5d=3.8, volatility=5.1, market_sentiment=35,
-                actual_return_3d=12.8, actual_return_7d=22.3, actual_return_30d=18.5,
-                win_3d=True, win_7d=True, win_30d=True,
-                iv_rank=55.0, put_call_ratio=0.75, final_score=7.8,
-                odds_score=7.0, risk_adj_score=7.2, agent_agreement=0.71, direction_encoded=1.0,
-            ),
-            TrainingData(
-                ticker="NVDA", date="2024-01-24",
-                crowding_score=75.0, catalyst_quality="A+",
-                momentum_5d=6.5, volatility=6.1, market_sentiment=55,
-                actual_return_3d=5.2, actual_return_7d=15.6, actual_return_30d=38.9,
-                win_3d=True, win_7d=True, win_30d=True,
-                iv_rank=70.0, put_call_ratio=0.65, final_score=8.8,
-                odds_score=8.0, risk_adj_score=7.5, agent_agreement=0.86, direction_encoded=1.0,
-            ),
-            # VKTX 记录
-            TrainingData(
-                ticker="VKTX", date="2023-06-15",
-                crowding_score=58.0, catalyst_quality="A+",
-                momentum_5d=2.1, volatility=12.3, market_sentiment=60,
-                actual_return_3d=42.1, actual_return_7d=38.5, actual_return_30d=22.3,
-                win_3d=True, win_7d=True, win_30d=True,
-                iv_rank=78.0, put_call_ratio=0.55, final_score=8.5,
-                odds_score=7.8, risk_adj_score=5.5, agent_agreement=0.71, direction_encoded=1.0,
-            ),
-            TrainingData(
-                ticker="VKTX", date="2023-11-22",
-                crowding_score=42.0, catalyst_quality="A",
-                momentum_5d=1.5, volatility=8.9, market_sentiment=40,
-                actual_return_3d=8.2, actual_return_7d=12.5, actual_return_30d=15.8,
-                win_3d=True, win_7d=True, win_30d=True,
-                iv_rank=65.0, put_call_ratio=0.90, final_score=7.5,
-                odds_score=6.5, risk_adj_score=6.0, agent_agreement=0.57, direction_encoded=1.0,
-            ),
-            # TSLA 记录
-            TrainingData(
-                ticker="TSLA", date="2024-01-17",
-                crowding_score=71.0, catalyst_quality="B+",
-                momentum_5d=4.2, volatility=7.8, market_sentiment=30,
-                actual_return_3d=12.3, actual_return_7d=18.2, actual_return_30d=12.5,
-                win_3d=True, win_7d=True, win_30d=True,
-                iv_rank=58.0, put_call_ratio=1.10, final_score=7.2,
-                odds_score=6.0, risk_adj_score=5.8, agent_agreement=0.57, direction_encoded=1.0,
-            ),
-            # 负例（失败的交易）
-            TrainingData(
-                ticker="NVDA", date="2023-08-01",
-                crowding_score=82.0, catalyst_quality="B",
-                momentum_5d=8.5, volatility=7.2, market_sentiment=70,
-                actual_return_3d=-2.3, actual_return_7d=1.2, actual_return_30d=-5.8,
-                win_3d=False, win_7d=False, win_30d=False,
-                iv_rank=85.0, put_call_ratio=1.35, final_score=6.0,
-                odds_score=4.5, risk_adj_score=4.0, agent_agreement=0.43, direction_encoded=1.0,
-            ),
-            TrainingData(
-                ticker="VKTX", date="2023-09-15",
-                crowding_score=65.0, catalyst_quality="C",
-                momentum_5d=-3.2, volatility=11.5, market_sentiment=-20,
-                actual_return_3d=-8.5, actual_return_7d=-12.3, actual_return_30d=-18.9,
-                win_3d=False, win_7d=False, win_30d=False,
-                iv_rank=72.0, put_call_ratio=1.50, final_score=4.8,
-                odds_score=3.5, risk_adj_score=3.2, agent_agreement=0.29, direction_encoded=1.0,
-            ),
-        ]
-
-    def get_training_data(self) -> List[TrainingData]:
-        """获取所有训练数据"""
-        return self.historical_records
-
-    def add_record(self, record: TrainingData):
-        """添加新的交易记录"""
-        self.historical_records.append(record)
-
-    # v0.45.550：原 save_to_file（写 cwd 下 training_data.json）生产零调用者、文件零读者，已删。
+# v0.45.558：`HistoricalDataBuilder`（8 条手写的 2023 年「历史交易」）已删。它只在 DB 直读样本闸不过时
+# 被 `MLPredictionService.train_model` 拿来训练 ⇒ 数据库读失败的那天，ML 报告会悄悄用 8 条假数据训出模型、
+# 照常出概率。现在没有真实数据就**不训练**（`train_model` 返回 error 并打 ERROR），模型不可用会经
+# `predict_for_opportunity` 的 `model_unavailable` 标记与 `ml_model_guard` 的常数闸两处变红。勿接回。
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -393,16 +304,9 @@ def market_sentiment_from_score(sentiment: float) -> float:
 # 但那 +0.19 是**巧合**——倾斜的均值恰好抵消了动量带来的正偏，不是因为符号对。
 # **宁要 +1.06pp 的可辩护公式，不要 +0.19pp 的不可辩护公式。**
 #
-# `CROWDING_NEUTRAL` 保留，但用途变了：它曾是 `rival_bee` 取不到真实拥挤度时喂给
-# **`probability`** 的中性回落值（那里 crowding 是权重最大的特征，回落值选错会
-# 直接偏斜概率）。取实测中位数而非量表中点 50 —— 实测只有 4.6% 的样本 ≥50，
-# 在这个分布里 50 等于"极不拥挤"。
-# ⚠️ v0.45.538 起 rival_bee 不再有模型、不再算拥挤度 ⇒ 本常数**没有生产读者**了，
-# 只剩测试夹具当缺省值用（退不退役另议）。
-#
-# ⚠️ **这是经验常数，会过期。** 由 `tests/test_ml_expected_return.py::
-# TestCrowdingCalibrationDrift` 对着生产库分布守着：漂出容许带就红。
-CROWDING_NEUTRAL = 23.30      # 实测中位数（2026-08-16, n=1057）
+# v0.45.558：`CROWDING_NEUTRAL`（23.30，拥挤度实测中位数）已删。它是 `rival_bee` 取不到真实拥挤度时
+# 喂给合成样本模型的中性回落值；v0.45.538 起 Rival 不再有模型、不再算拥挤度 ⇒ 零生产读者，
+# 它的漂移守卫 `TestCrowdingCalibrationDrift` 也就成了白跑，一并删。
 
 # 期限缩放。⚠️ 三个期限是**同一个量的缩放**，不是三个独立预测，因此符号恒同。
 # 下游 `rival_bee.py` 的 `avg_ret = (expected_7d + expected_30d)/2` 因此等于
@@ -429,7 +333,7 @@ def expected_returns(data: "TrainingData") -> Dict[str, float]:
 
     刻意**不**把 `crowding_score` 掺进来：方向未确立（连续版仅过 1/4 口径），
     且它已在 probability 里是权重最大的特征、又经 adj_factor 作用于综合分。
-    理由详见上方 `CROWDING_NEUTRAL` 处的长注释。
+    理由详见上方拥挤度那段长注释。
     """
     mag = _CATALYST_MAGNITUDE.get(
         getattr(data, "catalyst_quality", None), _CATALYST_MAGNITUDE_DEFAULT
@@ -1775,10 +1679,12 @@ class MLPredictionService:
 
     def __init__(self):
         self.model = create_ml_model()
-        self.data_builder = HistoricalDataBuilder()
+        #: 调用方预载的**真实**记录（`generate_ml_report` 用比 DB 直读更低的样本闸预载），DB 直读闸不过时才用。
+        #: v0.45.558 起缺省为空、**不再有硬编码样本**（原 `HistoricalDataBuilder` 的 8 条已删）。
+        self.fallback_records: List[TrainingData] = []
 
     def train_model(self) -> Dict:
-        """训练模型 — 优先使用真实数据，不足时降级到硬编码"""
+        """训练模型 — 只用真实数据：DB 直读过闸就用它，否则用调用方预载的真实记录；都没有就不训练。"""
         real_data = []
         _min_samples = 30
         try:
@@ -1795,15 +1701,17 @@ class MLPredictionService:
         if real_data:
             _log.info("使用 %d 条真实数据训练 ML 模型", len(real_data))
             training_data = real_data
-        else:
-            training_data = self.data_builder.get_training_data()
-            # v0.45.142：别替失败原因下结论。`historical_records` 既可能是
-            # `HistoricalDataBuilder.__init__` 的硬编码样本，也可能是调用方
-            # （`generate_ml_report`）用更低的阈值预载进来的**真实**数据——
-            # 旧文案一律说成「硬编码数据」，在后一种情形下是假的（实测过：
-            # 日志说「使用 200 条硬编码数据」，那 200 条全是库里的真实记录）。
-            _log.info("DB 直读未过 %d 条样本闸，改用 data_builder 现有的 %d 条记录训练",
+        elif self.fallback_records:
+            training_data = self.fallback_records
+            _log.info("DB 直读未过 %d 条样本闸，改用调用方预载的 %d 条真实记录训练",
                       _min_samples, len(training_data))
+        else:
+            # v0.45.558：此前这里退回 8 条硬编码样本照常训练 ⇒ 读库失败的日子悄悄出假概率。
+            # 现在不训练：模型保持未训练，`predict_for_opportunity` 标 `model_unavailable`，
+            # 全部标的概率相同 ⇒ `ml_model_guard` 的常数闸也会红。
+            _log.error("ML 训练没有任何真实数据（DB 直读未过 %d 条样本闸、也无预载记录）⇒ 不训练，模型不可用",
+                       _min_samples)
+            return {"status": "error", "message": "no real training data"}
 
         result = self.model.train(training_data)
 
@@ -1818,8 +1726,8 @@ class MLPredictionService:
         if hasattr(self.model, "incremental_train"):
             return self.model.incremental_train(new_data)
         # SimpleMLModel fallback: 追加数据后全量重训
-        self.data_builder.historical_records.extend(new_data)
-        return self.model.train(self.data_builder.get_training_data())
+        self.fallback_records.extend(new_data)
+        return self.model.train(self.fallback_records)
 
     def predict_for_opportunity(self, data: TrainingData) -> Dict:
         """为某个机会预测"""
@@ -1838,6 +1746,9 @@ class MLPredictionService:
             data = _dc_replace(data, crowding_score=min(100.0, max(0.0, data.crowding_score)))
 
         prediction = self.model.predict_return(data)
+        if not self.model.is_trained:
+            # v0.45.558：没有真实训练数据 ⇒ 模型未训练，predict_return 给的是中性占位值，不是预测。
+            prediction = {**prediction, "model_unavailable": True, "unreliable": True}
 
         return {
             "ticker": data.ticker,
@@ -1858,6 +1769,8 @@ class MLPredictionService:
         # v0.45.3: 特征缺太多时不给方向。原来无论插补多少维都照常输出
         # "STRONG BUY"，而插补值全是中性 → 概率被推向 0.5 → 稳定落进
         # "HOLD"，读起来像一个真实判断。
+        if prediction.get("model_unavailable"):
+            return "NO CALL - 没有真实训练数据，模型不可用"
         if prediction.get("unreliable"):
             _n = len(prediction.get("imputed_features") or [])
             return f"NO CALL - 12 维特征缺 {_n} 个，数据不足以支撑结论"
@@ -1878,7 +1791,8 @@ class MLPredictionService:
             "is_trained": self.model.is_trained,
             "training_accuracy": self.model.training_accuracy,
             "weights": self.model.weights,
-            "training_samples": len(self.data_builder.get_training_data()),
+            # v0.45.558：原为「data_builder 里有几条」（缺省恒为 8 条硬编码样本）；改报模型实际训练用的样本数
+            "training_samples": getattr(self.model, "_n_samples_seen", None),
         }
 
 

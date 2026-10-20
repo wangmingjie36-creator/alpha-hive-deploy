@@ -7,7 +7,34 @@
 
 ## [0.45.559] — 2026-10-20 — 占位（进行中：BuzzBee data_quality["volatility"] 硬编码 "real"——volatility_20d 缺失时改标 "unavailable"，先盘点读者与协议影响）
 
-## [0.45.558] — 2026-10-20 — 占位（进行中：退役 ml_predictor.CROWDING_NEUTRAL 与 HistoricalDataBuilder 8 条硬编码训练样本）
+## [0.45.558] — 2026-10-20 — Removed（用户 2026-10-20 定「两样都删」）：`ml_predictor.HistoricalDataBuilder`（8 条手写的 2023 年训练样本）与 `ml_predictor.CROWDING_NEUTRAL`；没有真实训练数据时 ML 报告不再悄悄用假数据训练，改为标「模型不可用」
+
+起因：v0.45.538 退役 RivalBee 的合成样本模型后的遗留清单。① `HistoricalDataBuilder` 与 538 删的 30 条同类——手写的「历史交易」——
+只在 `MLPredictionService.train_model` 的 DB 直读未过 30 条样本闸、且调用方没预载时被拿来训练 ⇒ 数据库读失败的那天，ML 报告会用 8 条假数据
+训出模型、照常出概率（`training_data_source="sample"`），没有任何东西会红。生产库几百条样本，平时走不到，但这是「失败没传导到下游」的形状。
+② `CROWDING_NEUTRAL`（23.30）是 Rival 取不到拥挤度时喂合成模型的回落值，538 后零生产读者，它的漂移守卫（读生产库的 integration 测试）也成了白跑。
+两者都不进 `final_score`，不碰任何预注册检验，不需要世代边界。
+
+### Removed
+- `ml_predictor.HistoricalDataBuilder` 整个类（含 `add_record` / `get_training_data`）与 `ml_predictor.CROWDING_NEUTRAL`。
+
+### Changed
+- `ml_predictor.MLPredictionService`：`data_builder` 换成 `fallback_records: List[TrainingData]`（缺省空，只装调用方预载的**真实**记录）。
+  `train_model`：DB 直读过闸 → 用它；否则有预载 → 用预载；**都没有 ⇒ 不训练**，打 ERROR、返回 `{"status": "error"}`。
+  `predict_for_opportunity`：模型未训练时在 prediction 里标 `model_unavailable: True` + `unreliable: True`，推荐语 `NO CALL - 没有真实训练数据，模型不可用`。
+  `get_model_info().training_samples` 改报模型实际训练样本数（原为 data_builder 条数，缺省恒为 8）。
+- `generate_ml_report`：低门槛预载改写进 `fallback_records`；预载不够时 `training_data_source` 记 `"unavailable"`（原 `"sample"`）并打 ERROR；
+  若 `train_model` 自己的 DB 直读过了闸则仍记 `"real"`。不抛异常——抛了会连 `analysis-*.json`（承载 `swarm_results`，前瞻检验与世代印记都读它）一起写不出来。
+- 不可用那天的可见性：ERROR 日志 + 报告里的 `model_unavailable` / `"unavailable"` + 全部标的概率相同（未训练模型给中性占位）⇒ `ml_model_guard` 的常数闸红。
+
+### Tests
+- `tests/test_ml_predictor.py`：测试夹具改用测试内的 8 条合成样本 `_training_set()` / `_service()`（原借用生产的硬编码类）；
+  `TestHistoricalDataBuilder` → `TestNoRealDataMeansNoModel`（无数据不训练、预测标不可用 + NO CALL、预载照常训练、两个名字已不存在）。
+- `tests/test_ml_real_training.py`：「无真实数据降级到硬编码」→「无真实数据不训练」。
+- `tests/test_ml_expected_return.py`：删 `TestCrowdingCalibrationDrift` / `TestCrowdingNeutralIsNotScaleMidpoint`，夹具拥挤度改本地常量。
+- `tests/test_ml_report_no_disk_model_cache.py`：`gen_cls` 预载合成记录（沙箱库空、又没了硬编码兜底）；来源取值 `sample` → `unavailable`。
+- `tests/test_dead_chains_batch2_retired.py`：新增 `RETIRED_CLASSES`（整类退役的不再当「改名」报红，但必须真的不在，`test_retired_classes_are_gone`）；正对照换成活成员。
+- 变异：把「无数据 ⇒ error」改回用 8 条假样本训练 ⇒ 3 条红。
 
 ## [0.45.557] — 2026-10-20 — 占位（进行中：波动率兜底——yfinance 缺 volatility_20d 时用 Twelve Data adjust=all 定稿日线到 D−1 + CBOE 核实的 D 收盘、同公式补上；按 measurement_fix 登记 price.fields，用户 10-20 确认）
 

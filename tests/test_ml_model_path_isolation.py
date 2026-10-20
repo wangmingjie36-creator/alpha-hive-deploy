@@ -84,7 +84,16 @@ class TestModelPathIsolation:
         sandbox_model = pathlib.Path(default_model_path())
         assert not sandbox_model.exists(), "前置条件：沙箱里本不该已有模型"
 
-        result = MLPredictionService().train_model()
+        # v0.45.558：沙箱库是空的、生产代码又不再有 8 条硬编码兜底 ⇒ 预载合成记录才训得起来
+        from ml_predictor import TrainingData
+        svc = MLPredictionService()
+        svc.fallback_records = [
+            TrainingData(ticker=f"S{i}", date="2024-01-01", crowding_score=30.0 + 5 * i,
+                         catalyst_quality="AB"[i % 2], momentum_5d=float(i - 4), volatility=5.0,
+                         market_sentiment=0.0, actual_return_3d=0.0, actual_return_7d=0.0,
+                         actual_return_30d=0.0, win_3d=i % 3 != 0, win_7d=i % 3 != 0, win_30d=i % 3 != 0)
+            for i in range(8)]
+        result = svc.train_model()
         assert result.get("status") == "success", (
             f"训练没成功，本测试测不到 save 路径：{result}")
 

@@ -221,13 +221,13 @@ class TestTrainModelIntegration:
         assert result.get("status") == "success"
 
     @patch("ml_predictor.build_training_data_from_db")
-    def test_train_model_fallback_to_hardcoded(self, mock_build):
-        """无真实数据时降级到硬编码"""
+    def test_train_model_refuses_without_real_data(self, mock_build):
+        """无真实数据 ⇒ 不训练（v0.45.558 前降级到 8 条硬编码样本照常训练、照常出概率）。"""
         mock_build.return_value = []
 
         svc = MLPredictionService()
         result = svc.train_model()
 
-        assert result.get("status") == "success"
-        # 确认用了硬编码数据（HistoricalDataBuilder 有 8 条）
+        assert result.get("status") == "error"
+        assert not svc.model.is_trained
         mock_build.assert_called_once()

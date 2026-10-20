@@ -125,14 +125,14 @@ class MLEnhancedReportGenerator:
     # 回退预加载的样本量下限。**有意**低于 `ML_TRAINING_CONFIG.min_real_samples`
     # （30）：`MLPredictionService.train_model()` 自己会用 30 作闸直读 DB，闸过了
     # 就用它的结果、这里预载的数据被整包丢弃；只有闸不过（样本稀少）时才轮得到
-    # `historical_records`。两处都用 30 的话，这条回退永远够不着。
+    # `fallback_records`。两处都用 30 的话，这条回退永远够不着。
     MIN_REAL_SAMPLES = 10
 
     def __init__(self):
         self.analyzer = AdvancedAnalyzer()
         self.ml_service = MLPredictionService()
         self.timestamp = _pdt_now()  # 美西时区，避免本机 +15h 漂移导致报告日期错标
-        self._training_data_source = "unknown"  # "real" | "sample" | "unknown"
+        self._training_data_source = "unknown"  # "real" | "unavailable" | "unknown"（v0.45.558 前还有 "sample"）
 
         # ⭐ Task 3: 初始化异步文件写入线程池（全局单例）
         if MLEnhancedReportGenerator._file_writer_pool is None:
@@ -149,22 +149,19 @@ class MLEnhancedReportGenerator:
                 if len(real_data) >= self.MIN_REAL_SAMPLES:
                     _log.info("✅ [ML-REAL] 使用 %d 条真实验证数据训练 ML 模型", len(real_data))
                     source = "real"
-                    self.ml_service.data_builder.historical_records = real_data
+                    self.ml_service.fallback_records = real_data
                 else:
-                    if real_data:
-                        _log.warning(
-                            "⚠️ [ML-MIXED] 真实数据仅 %d 条（不足 %d），"
-                            "回退到硬编码样本训练，预测置信度受限",
-                            len(real_data), self.MIN_REAL_SAMPLES,
-                        )
-                    else:
-                        _log.warning(
-                            "⚠️ [ML-SAMPLE] 无真实验证数据，使用硬编码样本训练，"
-                            "预测结果仅供参考（请积累 %d+ 条 T+7 验证记录后重训）",
-                            self.MIN_REAL_SAMPLES,
-                        )
-                    source = "sample"
+                    # v0.45.558：此前这里退回 8 条硬编码样本训练（source="sample"）、照常出概率。
+                    # 现在不预载 ⇒ train_model 若 DB 直读也不过闸就不训练，报告里概率标 model_unavailable。
+                    _log.error(
+                        "❌ [ML-UNAVAILABLE] 真实验证数据仅 %d 条（不足 %d）且不再有硬编码兜底 ⇒ "
+                        "除非 DB 直读过闸，本轮 ML 模型不可用",
+                        len(real_data), self.MIN_REAL_SAMPLES,
+                    )
+                    source = "unavailable"
                 self.ml_service.train_model()
+                if source == "unavailable" and getattr(self.ml_service.model, "is_trained", False):
+                    source = "real"   # 预载不够，但 train_model 自己的 DB 直读过了闸 —— 用的仍是真实数据
                 fp = model_fingerprint(self.ml_service.model)
                 fp["training_data_source"] = source
                 self._model_cache[today] = (self.ml_service.model, fp)
@@ -360,7 +357,7 @@ class MLEnhancedReportGenerator:
             "ml_prediction": {
                 **ml_prediction,
                 "current_price": float(_current_price) if _current_price else None,
-                "training_data_source": self._training_data_source,  # "real"/"sample"/"unknown"
+                "training_data_source": self._training_data_source,  # "real"/"unavailable"/"unknown"
                 # v0.45.50：输入特征里有几个是补齐的（空 = 全部为真实观测）
                 "input_features_missing": list(getattr(self, "_ml_input_missing", [])),
                 # v0.45.551：出这条概率的模型是哪个（见 `model_fingerprint`）；`__new__` 构造的实例没有它 ⇒ None
