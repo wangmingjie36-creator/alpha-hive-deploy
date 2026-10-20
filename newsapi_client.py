@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import observation_archive as _obs
 from hive_logger import PATHS, atomic_json_write, get_logger, pdt_today
 
 _log = get_logger("newsapi")
@@ -389,6 +390,9 @@ def get_ticker_news(ticker: str, max_articles: int = 10) -> Dict:
         result = fetch(ticker, key, max_articles)
         status = result.pop("primary_status", None)
         message = result.pop("primary_message", None)
+        if _obs.REF_KEY not in result:
+            # v0.45.568：主源这次没拿到内容 ⇒ 原始观测档案记一条失败事件（拿到了内容的已在取数处落档）
+            _obs.fetch_failed(f"news.{primary}", status or "no_data", message=message)
         if result.get("is_real_data"):
             attempt = {"source": primary, "status": "ok"}
         else:
@@ -406,6 +410,8 @@ def get_ticker_news(ticker: str, max_articles: int = 10) -> Dict:
 
     # 2. Yahoo Finance 免费备用
     result = _fetch_yf_news(ticker, max_articles)
+    if _obs.REF_KEY not in result:
+        _obs.fetch_failed("news.yahoo_finance", "no_data")
     result["primary_attempt"] = attempt
     _safe_cache(cache_path, result)
     return result
@@ -492,6 +498,10 @@ def _fetch_yf_news(ticker: str, max_articles: int = 10) -> Dict:
         news_items = resp.json().get("news", [])
         if not news_items:
             return _fallback(ticker)
+        # v0.45.568：原始条目进观测档案（只存、不改值）；地址随结果的 `observation` 键走、进派生缓存
+        _ref = _obs.observe("news.yahoo_finance",
+                            {"ticker": ticker, "max_articles": max_articles, "news": news_items},
+                            request={"url": _YF_NEWS_URL, "params": params})
 
         raw_articles = []
         for item in news_items[:max_articles]:
@@ -509,7 +519,9 @@ def _fetch_yf_news(ticker: str, max_articles: int = 10) -> Dict:
             })
 
         raw_articles = _label_sentiment(raw_articles)
-        return _build_result(ticker, raw_articles, source="yahoo_finance")
+        result = _build_result(ticker, raw_articles, source="yahoo_finance")
+        result[_obs.REF_KEY] = _ref
+        return result
 
     except NETWORK_ERRORS as e:
         _log.debug("YF news fetch failed for %s: %s", ticker, e)
@@ -566,6 +578,10 @@ def _fetch_av_news(ticker: str, api_key: str, max_articles: int = 10) -> Dict:
         feed = data.get("feed", [])
         if not feed:
             return _primary_fail(ticker, "empty_feed")
+        # v0.45.568：原始 feed 进观测档案；请求参数去掉 apikey（`_redact` 另有一道按键名的兜底）
+        _ref = _obs.observe("news.alpha_vantage", {"ticker": ticker, "max_articles": max_articles, "feed": feed},
+                            request={"url": _AV_NEWS_URL,
+                                     "params": {k: v for k, v in params.items() if k != "apikey"}})
 
         raw_articles = []
         for item in feed[:max_articles]:
@@ -602,7 +618,9 @@ def _fetch_av_news(ticker: str, api_key: str, max_articles: int = 10) -> Dict:
 
         if _news_breaker:
             _news_breaker.record_success()
-        return _build_result(ticker, raw_articles, source="alpha_vantage")
+        result = _build_result(ticker, raw_articles, source="alpha_vantage")
+        result[_obs.REF_KEY] = _ref
+        return result
 
     except NETWORK_ERRORS as e:
         _log.debug("AV news fetch failed for %s: %s", ticker, _redact(e, api_key))
@@ -659,6 +677,10 @@ def _fetch_massive_news(ticker: str, api_key: str, max_articles: int = 10) -> Di
     results = data.get("results") or []
     if not results:
         return _primary_fail(ticker, "empty_feed")
+    # v0.45.568：原始 results 进观测档案（key 在请求头里，不在 params）
+    _ref = _obs.observe("news.massive", {"ticker": ticker, "symbol": sym, "max_articles": max_articles,
+                                         "results": results},
+                        request={"url": _MASSIVE_NEWS_URL, "params": params})
 
     raw_articles = []
     no_insight = 0
@@ -678,6 +700,7 @@ def _fetch_massive_news(ticker: str, api_key: str, max_articles: int = 10) -> Di
         })
     result = _build_result(ticker, raw_articles, source="massive")
     result["massive_no_insight"] = no_insight
+    result[_obs.REF_KEY] = _ref
     return result
 
 

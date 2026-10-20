@@ -315,7 +315,49 @@ class AlertAnalyzer:
         # 11. 检测 P2: 本轮有票判不了财报日 / 观测字段接线断了（v0.45.500）
         self._check_earnings_dates(status)
 
+        # 12. 检测 P2: H1 原始观测溯源不全（v0.45.568，buzz_v1 根治阶段 1）
+        self._check_observation_archive(status)
+
         return self.alerts
+
+    def _check_observation_archive(self, status: Dict) -> None:
+        """BuzzBee 四个情绪通道的原始观测溯源是否完整（v0.45.568，`scan_timing.extra.observation_archive`，写入者
+        `alpha_hive_daily_report.main`，统计 `observation_archive.summarize`）。
+
+        buzz_v1 根治的阶段 2 要从档案重算通道、桥接期逐位核对且「一条观测都不缺」——缺了不报，桥接就会在某天无声地断：
+        链接缺失（取数模块没给地址 / 缓存是旧代码写的）、payload 不在档（缓存由非扫描进程填的）、落盘失败、本进程没开档。
+        """
+        if not self._swarm_scan_actually_ran(status):
+            return
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        oa = (st.get("extra") or {}).get("observation_archive")
+        if not isinstance(oa, dict) or not oa.get("available"):
+            self.checks_skipped.append("原始观测档案检查（scan_timing 无可用 observation_archive）")
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】原始观测档案未统计——本轮 Buzz 情绪通道的观测是否齐全未知",
+                {"原因": (oa or {}).get("reason") if isinstance(oa, dict) else "scan_timing.extra 无 observation_archive",
+                 "影响": "不是「检查了都齐」，是「没检查」"},
+                ["observation_archive", "observability"]
+            ))
+            return
+        if oa.get("ok"):
+            return
+        missing = {k: v for k, v in (oa.get("missing_refs") or {}).items() if v}
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            "📊 【P2 中】原始观测档案不全——这一天不能计入 buzz_v1 桥接核对",
+            {"已开档": oa.get("enabled"),
+             "缺链接（通道: 只数）": missing or "无",
+             "payload 不在档": oa.get("missing_payloads"),
+             "无溯源块的票": oa.get("n_without_block"),
+             "落盘失败": oa.get("failures"),
+             "示例": "; ".join((oa.get("examples") or []) + (oa.get("failure_samples") or []))[:300],
+             "建议": "缓存由旧代码 / 非扫描进程填的只影响上线头一天；连续出现查 observation_archive 的 failure_samples 与 ledger_io 失败"},
+            ["observation_archive", "data_quality"]
+        ))
 
     def _check_outcomes_backlog(self, status: Dict) -> None:
         """T+N 实际价格回填队列（v0.45.493，`scan_timing.extra.outcomes_backlog`，写入者 `alpha_hive_daily_report.main`）。

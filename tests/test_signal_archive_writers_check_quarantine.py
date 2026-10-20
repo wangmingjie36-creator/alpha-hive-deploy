@@ -31,6 +31,8 @@ _WRITE = re.compile(r"\b(?:INSERT|REPLACE)\b(?:\s+OR\s+\w+)?\s+INTO\s+[\"'`]?(\{
 NOT_SIGNAL_ARCHIVE = {
     "backtester.py": "`{self.TABLE}` 是 Backtester.TABLE = \"predictions\"；文件提到 signal_archive 只为读联表",
     "data_backup/export.py": "`INSERT INTO \"{table}\"` 是生成 .sql 导出文本、不写库；导回走 restore.py（见模块 docstring）",
+    "observation_archive.py": "`INSERT INTO {LINKS_TABLE}` 写的是 observation_links（原始观测溯源，v0.45.568），不是 signal_archive；"
+                              "提到 signal_archive 是因为由它的 archive() 在同一事务里调用。溯源不是信号值，不按 QUARANTINE 剔除",
 }
 
 

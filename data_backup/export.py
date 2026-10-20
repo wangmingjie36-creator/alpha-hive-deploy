@@ -75,6 +75,10 @@ STATE_DIRS: list[str] = [
     "replay_ohlc_state",
     # v0.45.419 数据迁移运行记录（阶段 7）：「库被动过什么」的唯一机器可读记录，丢了只剩 CHANGELOG 文字。
     "migrations_state",
+    # v0.45.568 H1 原始观测档案（buzz_v1 根治阶段 1）：扫描那一刻的 Reddit 榜 / 新闻条目 / 热搜表 / F&G，事后取不回来。
+    # ⚠️ **过渡安排**：用户 2026-10-20 定它最终走单独的私有备份仓（估算一年约 50–75 MB，不挤本仓 600 MB 预算）；
+    # 建仓前先跟本仓走（用户同日选「先跟现有备份走，建仓后迁出」）。建好后从这里删掉、改由新仓备份。
+    "observation_archive",
 ]
 ROOT_FILE_GLOBS: list[str] = [
     "weight_history.jsonl", "pheromone_fallback.jsonl",

@@ -241,6 +241,18 @@ class _HivePaths:
         return self.home / "replay_ohlc_state"
 
     @property
+    def observation_archive(self) -> Path:
+        """H1 原始观测档案（v0.45.568，`observation_archive`，buzz_v1 根治阶段 1）。
+
+        写：扫描进程（`observation_archive.enable()` 之后）——`payloads/<sha 前两位>/<sha>.json`（内容寻址、写过不重写）
+        与 `events/<业务日>.jsonl`（每次取数的结局）。**不是可重建缓存**：扫描那一刻的 Reddit 榜单 / 新闻列表 / 热搜榜
+        事后拿不回来 ⇒ 进数据备份（`data_backup/export.py` 的 `STATE_DIRS`）；用户 2026-10-20 定最终走单独的私有备份仓，
+        建仓前先跟现有备份走。
+        调用时求值（读 `ALPHA_HIVE_HOME`）；只读路径不建目录（写入方自己 `mkdir`）。
+        """
+        return self.home / "observation_archive"
+
+    @property
     def migrations_state(self) -> Path:
         """数据迁移运行器的运行记录目录（v0.45.419，阶段 7，`data_migrations.runner`）。
 

@@ -143,6 +143,26 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "改后补跑 = 实时：NVDA 10-16 用真实日线补跑得 24.6525、等于那天实时入档值；同一份日线两条路径四个字段逐位一致。只影响补跑出来的日子，"
      "维度 IC 窗口内目前没有（10-12~10-19 正常日都是实时扫描、符合一个月窗口），不改变任何已入窗样本。"
      "**用户 2026-10-20 在对话里说「现在修补跑路径的 60 天窗口」**（对应我的建议：改成与实时同一窗口、按测量误差修正）；不登记边界"),
+    # v0.45.568（buzz_v1 根治阶段 1，原始观测入档）：四个通道模块只加「把取到的原始内容交给 observation_archive」与结果里的
+    # `observation` 溯源键，评分路径一个字节没动。证据同一份，四条各写一遍（每条都要能单独读懂）。
+    ("buzz.reddit",     "ed4f8f7798e1f52b", "no_value_change",
+     "v0.45.568：_fetch_ranking 每次真取数后 observation_archive.observe / 失败 fetch_failed，get_ticker_sentiment 给结果加 "
+     "observation={两张榜的内容地址}（安静结果同加）；评分算式与去向不变。改动前（origin/main 原文）与改动后在同一批随机榜单上"
+     "逐字段比对 4500 个结果全同（档案关 / 开两遍，去掉时间戳与新键），真实 ApeWisdom 榜单重放 3 只全同。"
+     "**用户 2026-10-20 在对话里选「按 no_value_change 登记」**；不登记边界"),
+    ("buzz.news",       "b8ca2ec2930beb38", "no_value_change",
+     "v0.45.568：Massive / AV / Yahoo 三个取数函数拿到原始条目后 observation_archive.observe（AV 的 apikey 不进请求记录），"
+     "结果加 observation 键（进派生缓存）；get_ticker_news 在主源 / Yahoo 没拿到内容时记失败事件。清洗、去重、打标、算分与降级去向不变。"
+     "改动前后在 600 例随机新闻（含限速 / 空 feed / 去重 / 两种主源）上逐字段比对全同（含主源结局计数），真实 Massive 3 只重放全同。"
+     "**用户 2026-10-20 在对话里选「按 no_value_change 登记」**；不登记边界"),
+    ("buzz.yahoo",      "ceec8fceb4921eae", "no_value_change",
+     "v0.45.568：get_trending_tickers 真取数后 observe（存的就是缓存里那张代码表）/ 失败记事件，get_ticker_attention 用 reuse "
+     "给结果加 observation 键（缓存命中也补档）；名次 → 关注度的算式不变。改动前后 3000 个随机结果逐字段全同、真实热搜表重放 3 只全同。"
+     "**用户 2026-10-20 在对话里选「按 no_value_change 登记」**；不登记边界"),
+    ("buzz.fear_greed", "4da4f4f1e1317e2f", "no_value_change",
+     "v0.45.568：CNN / alternative.me 取到后 observe（CNN 存 fear_and_greed 对象，不存历史序列）、结果加 observation 键，"
+     "两源都失败时各记一条失败事件；URL 字面量改成同值常量。取值、取整（round half even）、兜底顺序不变。改动前后 400 例随机读数"
+     "（含解析失败 / CNN 挂 / 双挂）逐字段全同，真实 CNN 重放全同。**用户 2026-10-20 在对话里选「按 no_value_change 登记」**；不登记边界"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change"})

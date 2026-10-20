@@ -170,6 +170,7 @@ alphabot_state/
 /alphabot_state/
 /replay_ohlc_state/
 /migrations_state/
+/observation_archive/
 /chroma_db/
 /logs/
 /db_backups/

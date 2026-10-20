@@ -73,6 +73,8 @@ MOVE_DIRS = (
     "replay_ohlc_state",
     # v0.45.419 数据迁移运行记录（阶段 7；「库被动过什么」的唯一机器可读记录，不可重取）
     "migrations_state",
+    # v0.45.568 H1 原始观测档案（扫描那一刻的 Reddit 榜 / 新闻条目 / 热搜表 / F&G，不可重取）
+    "observation_archive",
     # 向量库 / 日志 / 备份轮转
     "chroma_db", "logs", "db_backups",
     # 缓存：可重建，但冷缓存会引发 yfinance 限流（头号数据丢失原因）⇒ 一并带走

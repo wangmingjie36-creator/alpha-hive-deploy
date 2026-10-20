@@ -1786,12 +1786,17 @@ def archive(swarm_results: Dict, date: str, db_path: Optional[Path] = None,
     only = _check_only(only)
     ensure_schema(db_path)
     rows = _rows_for(swarm_results, date, only)
-    if not rows:
+    # v0.45.568：BuzzBee 的原始观测溯源与 buzz.comp.* **同一事务**写进 observation_links——同日重扫时两边同样「后者覆盖
+    # 前者」，链接永远指向产出库里那组通道值的那一轮观测（阶段 2 的冻结通道层按它取 payload 重算）。定向回填（only）不碰链接
+    import observation_archive
+    links = observation_archive.link_rows(swarm_results, date) if only is None else []
+    if not rows and not links:
         return 0
     with sqlite3.connect(db_path) as conn:
         conn.executemany(
             f"INSERT OR REPLACE INTO {TABLE} (date,ticker,signal,value) "
             f"VALUES (?,?,?,?)", rows)
+        observation_archive.write_links(conn, links)
         conn.commit()
     return len(rows)
 

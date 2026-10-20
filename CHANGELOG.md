@@ -5,7 +5,68 @@
 
 ---
 
-## [0.45.568] — 2026-10-20 — 占位（进行中：buzz_v1 根治阶段 1——H1 情绪类原始观测入档（Reddit / 新闻 / Yahoo 热搜 / F&G），每个分数带溯源）
+## [0.45.568] — 2026-10-20 — Added：H1 原始观测档案 `observation_archive`（buzz_v1 根治阶段 1）——喂 Buzz 四个情绪通道的原始取数（Reddit 两张榜 / 新闻条目 / 热搜表 / F&G）在取数那一刻内容寻址落档，每个分数都能指出它用的是哪一份；只存、不改任何值
+
+用户 10-20：「我要做长期最优的方案和从根因解决问题的方案」，并选定四阶段、单独私有备份仓、桥接期 ≥ 10 个扫描日。
+
+### 根因（为什么要它）
+
+第 3 块要判「这条边界是不是只动了冻结层」，现在唯一依据是登记边界时人写的信号范围。判不了的根子在于：生产把**取数**（去 ApeWisdom / Massive /
+Yahoo / CNN 拿东西）和**解释**（算成通道分）写在同一段代码里，只存解释后的数字——「只动了解释」永远是一句声明。同一形状已出过多次：423/438 改了兜底日取数、
+按惯例只点名了分；输入层指纹守卫刻意不看取数层；10-12 整日重放时 Reddit 排名晚取约 12 小时只能标「待验证」；08-27 复现不出。
+根治：① 原始观测原样入档（**本版**）→ ② buzz_v1 向下冻结到通道层、从档案重算，桥接期逐位核对 → ③ 守住取数链 → ④ 协议修订 3、执行器切换。
+之后生产怎么改 Buzz 都碰不到 buzz_v1，「只动冻结层」不再需要人判。
+
+### Added
+
+- `observation_archive.py`（新）：
+  - `payloads/<sha 前两位>/<sha>.json`：sha = `{kind, payload}` 规范 JSON 的 sha256（**内容寻址**，同一份榜单被谁用、被哪个进程用地址都相同，写过不重写）；
+    `events/<业务日>.jsonl`：每次真去取数的结局（成败、sha、请求参数——键名像密钥的一律丢）。七种 kind 唯一登记在 `KINDS`。
+  - 只在扫描进程 `enable()` 后写盘（`alpha_hive_daily_report.main` 开扫前调，补跑记 `mode=backfill`）；MCP / Alpha Bot / 云端例程照样算地址、不写。
+  - **绝不抛进取数代码**；写盘走 `ledger_io`（失败源头登记 ⇒ P2），本模块另计 `stats()["failures"]`。
+  - 读者：`load(sha)`（内容与地址对不上 ⇒ `LedgerCorrupt`）、`load_links(db, date)`。
+- 四个通道模块：取到原始内容后 `observe`、没取到记 `fetch_failed`；结果加 `observation` 溯源键（派生缓存里一起存，缓存命中也带着）。Reddit 榜单与热搜表的缓存
+  本身就是原始内容 ⇒ 命中时 `reuse()` 顺手补档（缓存是别的进程填的也不缺）。CNN 只存 `fear_and_greed` 对象（其余是历史序列，不是今天的观测）。
+- BuzzBee：`details["observations"]` = `{reddit/news/yahoo/fear_greed: {expected, ref}}`，**写在合成之后**（合成之前的语句与模块级函数在 `buzz.channels` 指纹里，该单元未变）。
+- `signal_archive.archive`：在写 `buzz.comp.*` 的**同一事务**里写 `observation_links(date, ticker, consumer, refs)`——同日重扫两边同样后者覆盖前者，链接永远指向库里那组通道值的
+  那一轮观测；定向回填（`only=`）不碰链接。
+- 完整性观测：`observation_archive.summarize` → `scan_timing.extra.observation_archive` → `alert_manager._check_observation_archive`（缺链接 / payload 不在档 / 没开档 /
+  落盘失败 ⇒ P2；统计缺失本身也是 P2，不是静默）。
+- `PATHS.observation_archive`；conftest 防线①（沙箱内 + 每条测试前后复位进程级开关）；`data_backup/export.py` 的 `STATE_DIRS` 加入（**过渡**：用户定最终走单独私有仓，
+  建仓前先跟现有备份走——建仓属对外动作，另行确认）。
+
+### 协议（维度 IC）
+
+`buzz.reddit` / `buzz.news` / `buzz.yahoo` / `buzz.fear_greed` 指纹 → 各追加 `no_value_change`（用户 10-20 在对话里选「按 no_value_change 登记」，条目里写证据）；
+`buzz.channels`、`price.fields` 未变。§13.10 记一条。**不登记边界、协议规则一字未改**——修订 3 要在桥接核对通过后、看任何结果之前单独登记。
+
+### 取证：改动前后值逐位不变
+
+把 origin/main 的四个模块原文与新版放在同一批随机输入上逐字段比对（去掉时间戳与新键；网络全打桩；档案关 / 开各一遍）：Reddit 4500 个结果（含 None / 非数值 /
+小写代码 / 整张榜失败）、新闻 600 例（Massive / AV 两种主源、限速、空 feed、去重、BRK-B，含主源结局计数）、热搜 3000 个、F&G 400 例（含解析失败、CNN 挂、双挂）——
+全部相同；档案开的那遍写了 1475 份 payload、3177 条事件、0 失败。（比对脚本起初在新旧两份上各抽一次随机条数上限，报了 7 篇对 9 篇的假差异——是脚本的错，修正后全同。）
+
+### 真实数据核对（不花钱）
+
+临时数据根里真取一次（ApeWisdom / Massive / Yahoo / CNN；NVDA / TSLA / BRK-B），再用档案里的 payload 替身网络重跑同一套代码：10 项（3 × Reddit / 新闻 / 热搜 + F&G）
+逐字段相同，重放时算出的地址与原地址一致。体量：Reddit 每张榜约 13.6 KB、Massive 每只约 26–37 KB、热搜与 F&G 不到 0.3 KB ⇒ 30 只一天约 1 MB 原始 JSON
+（git 压缩后估约 0.2–0.3 MB，待上线后实测）。
+
+### 测试
+
+- `tests/test_observation_archive.py`（新，62 条）：内容寻址 / 只在开档进程写 / 写过不重写 / 别的进程填的缓存命中时补档 / 失败事件 / 密钥两道（模块不传 + 档案按键名丢）/
+  读回校验 / 绝不抛（NaN、未登记 kind、写盘失败）；四个模块各自的溯源与「**存下的内容足够重算**」（拿 payload 当响应重跑，结果逐字段相同）；BuzzBee 溯源块、
+  有无地址分数与 details 逐位相同、新闻取数抛异常时不崩；链接表同事务 / 重扫覆盖 / 定向回填不碰；完整性统计六种；告警四种；`main()` 开扫前开档、收尾写 scan_timing。
+- 变异测试（真跑，18/18 被杀；首轮 15/18，补了「Reddit 只有一张榜有地址」「兜底结果不该有观测」「AV 模块自己去 key」三条）。
+
+### 核对
+
+- 全量（不带 -x）：**10823 passed**、1 failed、1 error（499s）。failed = 经济日历覆盖不足（既有设计内告警）；error = 数据根闸，逐文件时间线是盘中 Alpha Bot
+  追加 `alphabot_state/intraday/2026-10-20/*.jsonl`（散落在互不相关的测试里——并发写入者，不是测试写的）。
+- 全量跑出本版漏登记的 6 处，均已补：`migrate_data_root.MOVE_DIRS`（备份范围必须与迁移分类表一一对应）、`.gitignore`、持久写入登记表（`observation_links` 表的读者 +
+  两个文件产物；链接写入随之挪进 `observation_archive.write_links`，表名占位才能在同文件解析）、`test_production_sync` 的健康一轮与 extra 键全集、
+  `NOT_SIGNAL_ARCHIVE`（`observation_archive.py` 写的是 observation_links、不是 signal_archive）。
+- 相关守卫 550 条 + 新文件 62 条全绿；指纹六单元与最后一条确认一致；拨钟审计（新测试 +7 / +45 天）新红 0；ruff 全绿。
 
 ## [0.45.567] — 2026-10-20 — Fixed：v0.45.559 二次检查——世代边界等价判据把**出错的 BuzzBee** 误判为「证不出等价」，部署当天任何一只 Buzz 出错都会让 Step 11 误报 `boundary_too_early`
 

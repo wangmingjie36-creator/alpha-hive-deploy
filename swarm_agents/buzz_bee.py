@@ -1,6 +1,7 @@
 """BuzzBeeWhisper - 情绪分析蜂 (Sentiment 维度, 权重 0.20)"""
 
 from typing import Dict
+import observation_archive as _obs_archive
 from swarm_agents._config import _log, _AS
 from swarm_agents.cache import _safe_score
 from swarm_agents.base import BeeAgent
@@ -277,6 +278,12 @@ class BuzzBeeWhisper(BeeAgent):
             # v0.45.534：此处曾写 sentiment_baseline.db + 情绪突变检测（只出日志 + 零读者的 sentinel_spike），已退役；
             # 位于分数算完之后，不影响 score / direction / details。
 
+            # v0.45.568：四个情绪通道各自用的是哪一份原始观测（buzz_v1 根治阶段 1，`observation_archive`）。
+            # 刻意写在合成之后：合成之前的语句与模块级函数都在输入层指纹（buzz.channels）里——这里只多存、不改任何值。
+            # news_ext / yt 在各自的 try 里赋值，取数抛异常时未绑定 ⇒ 经 locals() 取（拿不到 = 该通道无观测）
+            _observations = _obs_archive.buzz_refs(reddit=reddit_data, news=locals().get("news_ext"),
+                                                   yahoo=locals().get("yt"), fear_greed=fg)
+
             return AgentResult(
                 score=round(score, 2),
                 direction=direction,
@@ -347,6 +354,9 @@ class BuzzBeeWhisper(BeeAgent):
                     # v0.45.559：世代边界印记（字面量 True）——data_quality.volatility 自本版起按 volatility_20d 是否为 None 上报。
                     # 读者 = `ic_rerun_readiness._marker_buzz_volatility_dq_from_value`；此前的 details 没有这个键。勿改成 False / 勿删
                     "volatility_dq_from_value": True,
+                    # v0.45.568：原始观测溯源 {通道: {expected, ref}}；读者 = signal_archive.archive（→ observation_links）
+                    # 与 observation_archive.summarize（→ scan_timing → alert_manager P2）
+                    "observations": _observations,
                 },
             ).to_dict()
 

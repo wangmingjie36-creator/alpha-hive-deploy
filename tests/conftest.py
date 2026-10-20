@@ -1340,6 +1340,23 @@ def _isolate_replay_ohlc_state(_isolate_env, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_observation_archive(_isolate_env, tmp_path):
+    """H1 原始观测档案（v0.45.568，`observation_archive`）防线①：`PATHS.observation_archive` 此刻是绝对路径且在本测试沙箱里。
+    另：档案开关是**进程级**状态（扫描进程 `enable()` 一次）——一条测试跑了 `main()` 就会让之后每条测试的取数都落盘，
+    所以每条测试前后都复位（关档、清已知地址、清统计）。防线②（真身指纹）由仓库根默认拒绝总闸与真实数据根总闸兜住。"""
+    import hive_logger
+    import observation_archive
+
+    p = pathlib.Path(hive_logger.PATHS.observation_archive)
+    assert p.is_absolute(), f"PATHS.observation_archive 解析成了相对路径 {p}：生产从仓库根跑会写穿仓库根"
+    assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+        f"PATHS.observation_archive = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？")
+    observation_archive._reset_for_tests()
+    yield
+    observation_archive._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_straddle_prereg_result(_isolate_env, tmp_path):
     """跨式 × GEX 预注册的冻结结果（v0.45.428，`straddle_gex_prereg.run_once`）防线①：`PATHS.straddle_prereg_result`
     此刻是绝对路径且在本测试沙箱里。这个文件**只写一次、永不覆盖**——误写进真身就把协议永久冻住，比别的产物更不能漏。
