@@ -57,7 +57,10 @@ _lock = threading.Lock()
 #   json_parse_failures  call_json 拿到了文本、却解析不出 JSON（调用方随即回落规则引擎）
 #   budget_refusals      被每日预算预检拒绝的调用数（该蜂回落规则引擎）
 #   unpriced_refusals    模型不在 _PRICING 里而被拒绝的调用数
-_EXTRA_COUNTERS = ("truncated_calls", "json_parse_failures", "budget_refusals", "unpriced_refusals")
+#   failed_calls         已发出请求却没拿到响应的调用数（429 重试耗尽 / 连接 / 超时 / API 报错）——
+#                        call_count 只数成功的，失败的以前完全看不见（v0.45.560）
+_EXTRA_COUNTERS = ("truncated_calls", "json_parse_failures", "budget_refusals", "unpriced_refusals",
+                   "failed_calls")
 _token_usage = {
     "input_tokens": 0,
     "output_tokens": 0,
@@ -295,6 +298,9 @@ def call(
     try:
         return _do_request(client, prompt, system, model, eff_max_tokens, temperature,
                            cache_system, pricing)
+    except Exception:
+        _bump("failed_calls")      # 非 429 的 API 报错（如 400）交外层处理前先记一笔，再原样抛出
+        raise
     finally:
         with _lock:
             _inflight_cost -= _estimated_cost
@@ -358,6 +364,7 @@ def _do_request(client, prompt: str, system: str, model: str, max_tokens: int,
                         "LLM 429 限流，%d 次重试全部失败，降级返回 None",
                         len(_RATE_LIMIT_RETRY_DELAYS),
                     )
+                    _bump("failed_calls")
                     return None
                 else:
                     raise  # 非 RateLimitError，交给外层 except 处理
@@ -400,6 +407,7 @@ def _do_request(client, prompt: str, system: str, model: str, max_tokens: int,
     except (ConnectionError, TimeoutError, OSError, ValueError) as e:
         _log.error("LLM API call failed: %s", type(e).__name__)
         _log.debug("LLM API call details:", exc_info=True)
+        _bump("failed_calls")
         return None
 
 

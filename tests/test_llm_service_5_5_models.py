@@ -28,6 +28,7 @@ def _reset_llm_state(monkeypatch):
     monkeypatch.setattr(llm_service, "_token_usage", {
         "input_tokens": 0, "output_tokens": 0, "total_cost_usd": 0.0, "call_count": 0,
         "truncated_calls": 0, "json_parse_failures": 0, "budget_refusals": 0, "unpriced_refusals": 0,
+        "failed_calls": 0,
     })
     from datetime import date
     monkeypatch.setattr(llm_service, "_budget_date", date.today())
@@ -207,14 +208,43 @@ class TestCounters:
         assert c.calls == []
         assert llm_service.get_usage()["budget_refusals"] == 1     # 字典里原先没有这个键也不能 KeyError
 
+    def test_connection_error_counted_as_failed_call(self, monkeypatch):
+        """call_count 只数成功的：请求发了却没拿到响应，以前完全看不见（v0.45.560）。"""
+        _install(monkeypatch, _FakeClient(raises=ConnectionError("x")))
+        assert llm_service.call("hi") is None
+        u = llm_service.get_usage()
+        assert u["failed_calls"] == 1 and u["call_count"] == 0
+
+    def test_unexpected_api_error_counted_then_propagates(self, monkeypatch):
+        _install(monkeypatch, _FakeClient(raises=RuntimeError("400 bad request")))
+        with pytest.raises(RuntimeError):
+            llm_service.call("hi")
+        assert llm_service.get_usage()["failed_calls"] == 1
+
+    def test_rate_limit_exhausted_counted(self, monkeypatch):
+        import anthropic
+        monkeypatch.setattr(llm_service, "_RATE_LIMIT_RETRY_DELAYS", ())
+        monkeypatch.setattr(llm_service.time, "sleep", lambda s: None)
+        err = anthropic.RateLimitError.__new__(anthropic.RateLimitError)
+        _install(monkeypatch, _FakeClient(raises=err))
+        assert llm_service.call("hi") is None
+        assert llm_service.get_usage()["failed_calls"] == 1
+
+    def test_success_and_refusals_are_not_failed_calls(self, monkeypatch):
+        _install(monkeypatch, _FakeClient())
+        assert llm_service.call("hi") == "ok"
+        assert llm_service.call("hi", model="claude-mystery-9") is None
+        assert llm_service.get_usage()["failed_calls"] == 0
+
     def test_daily_reset_clears_extra_counters(self, monkeypatch):
         from datetime import date, timedelta
         monkeypatch.setattr(llm_service, "_budget_date", date.today() - timedelta(days=1))
         llm_service._token_usage["truncated_calls"] = 7
         llm_service._token_usage["json_parse_failures"] = 3
+        llm_service._token_usage["failed_calls"] = 2
         llm_service._maybe_reset_daily_budget()
         u = llm_service.get_usage()
-        assert u["truncated_calls"] == 0 and u["json_parse_failures"] == 0
+        assert u["truncated_calls"] == 0 and u["json_parse_failures"] == 0 and u["failed_calls"] == 0
 
 
 # ==================== 在途预留 ====================

@@ -42,8 +42,12 @@
 `--control`：LLM 关闭、其余同 `--run`，免费；用来核对影子根的输入复现度（它的 `final_score` 应与同日生产一致；
 须在生产 14:00 扫描**之后**跑，否则没有同日生产值可比）。
 
-退出码：0 健康；2 用法 / 未批准；3 扫描异常（已记状态）；5 跑完了但 LLM 臂不健康（有预算 / 定价拒绝，
-或截断率 / JSON 失败率 / 蒸馏未走 LLM 的比例超阈值）——**不健康的一天不要拿去比**。
+退出码：0 健康；2 用法 / 未批准 / 当天已有付费记录；3 扫描异常（已记状态）；5 跑完了但 LLM 臂不健康（有预算 / 定价拒绝，
+或截断率 / JSON 失败率 / 请求失败率 / 蒸馏未走 LLM 的比例超阈值）——**不健康的一天不要拿去比**。
+
+一天只许付费跑一次（v0.45.560）：每日硬上限只在 `llm_service` 进程内计，同一天再起一个 `--run` 就是第二份预算。
+所以 `--run` 起飞前先写占位 `shadow_status/<日期>.json`（子进程崩了它就留在那儿、按不健康日计），已有该文件即拒绝；
+`--control` 写 `<日期>.control.json` 与 `swarm_results-<日期>.control.json`，不会覆盖付过费的记录。
 """
 from __future__ import annotations
 
@@ -117,11 +121,14 @@ def quality_report(usage: Dict, per_ticker: Dict[str, Dict], *, llm_on: bool) ->
     jfail = int(usage.get("json_parse_failures", 0) or 0)
     bref = int(usage.get("budget_refusals", 0) or 0)
     uref = int(usage.get("unpriced_refusals", 0) or 0)
+    failed = int(usage.get("failed_calls", 0) or 0)          # 发出了请求却没拿到响应（call_count 只数成功的）
+    attempts = calls + failed
     n_t = len(per_ticker)
     queen_llm = sum(1 for v in per_ticker.values() if v.get("distill_mode") == "llm_enhanced")
     rates = {
         "truncation_rate": round(trunc / calls, 4) if calls else None,
         "json_parse_failure_rate": round(jfail / calls, 4) if calls else None,
+        "failed_call_rate": round(failed / attempts, 4) if attempts else None,
         "queen_llm_rate": round(queen_llm / n_t, 4) if n_t else None,
     }
     reasons: List[str] = []
@@ -136,6 +143,9 @@ def quality_report(usage: Dict, per_ticker: Dict[str, Dict], *, llm_on: bool) ->
             reasons.append(f"truncation_rate={rates['truncation_rate']:.0%} > {MAX_FAIL_RATE:.0%}")
         if rates["json_parse_failure_rate"] is not None and rates["json_parse_failure_rate"] > MAX_FAIL_RATE:
             reasons.append(f"json_parse_failure_rate={rates['json_parse_failure_rate']:.0%} > {MAX_FAIL_RATE:.0%}")
+        if rates["failed_call_rate"] is not None and rates["failed_call_rate"] > MAX_FAIL_RATE:
+            reasons.append(f"failed_call_rate={rates['failed_call_rate']:.0%} > {MAX_FAIL_RATE:.0%}"
+                           f"（{failed} 次请求没拿到响应，对应的蜂回落规则引擎）")
         if rates["queen_llm_rate"] is not None and rates["queen_llm_rate"] < MIN_QUEEN_LLM_RATE:
             reasons.append(f"queen_llm_rate={rates['queen_llm_rate']:.0%} < {MIN_QUEEN_LLM_RATE:.0%}（蒸馏没走 LLM）")
     return {**rates, "healthy": not reasons, "reasons": reasons, "llm_on": llm_on}
@@ -177,7 +187,7 @@ def build_status(*, day: date, mode: str, model: Optional[str], cap: float, requ
         "elapsed_sec": round(elapsed, 1),
         "usage": {k: usage.get(k) for k in (
             "total_cost_usd", "call_count", "input_tokens", "output_tokens",
-            "truncated_calls", "json_parse_failures", "budget_refusals", "unpriced_refusals")},
+            "truncated_calls", "json_parse_failures", "budget_refusals", "unpriced_refusals", "failed_calls")},
         "quality": quality_report(usage, per_ticker, llm_on=llm_on),
         "per_ticker": per_ticker,
         "error": error,
@@ -217,11 +227,46 @@ def seed_shadow_root(src_db: Path, src_cache: Path, shadow_root: Path) -> None:
         shutil.copytree(src_cache, dst_cache)
 
 
+def status_path(shadow_root: Path, day_iso: str, mode: str) -> Path:
+    """状态文件路径。**control 与 run 分文件**（v0.45.560）：以前同日同名，晚到的 --control 会把
+    已经花了钱的 --run 记录（与 swarm_results 全文）覆盖掉。"""
+    suffix = ".json" if mode == "run" else ".control.json"
+    return Path(shadow_root) / STATUS_DIRNAME / f"{day_iso}{suffix}"
+
+
+def swarm_results_path(shadow_root: Path, day_iso: str, mode: str) -> Path:
+    suffix = ".json" if mode == "run" else ".control.json"
+    return Path(shadow_root) / STATUS_DIRNAME / f"swarm_results-{day_iso}{suffix}"
+
+
+def started_stub(*, day: date, mode: str, cap: float, requested: Sequence[str]) -> Dict:
+    """子进程起飞前先落的占位记录：子进程若中途崩溃 / 被杀，这一天留下的是「不健康、已开始」，
+    而不是「什么都没有」——后者会让同一天可以再付一次费（每日硬上限只在进程内计，跨进程要靠这个文件）。"""
+    return {
+        "schema": 1, "date": day.isoformat(), "mode": mode, "state": "started",
+        "model": MODEL if mode == "run" else None, "daily_cap_usd": cap,
+        "tickers_requested": list(requested), "tickers_scanned": [], "elapsed_sec": None,
+        "usage": {},      # 子进程没写完 ⇒ 花费未知（报告的累计花费会偏低）
+        "quality": {"healthy": False, "llm_on": mode == "run",
+                    "reasons": ["子进程没有写完状态（崩溃 / 被中断）——按已开始、无可用数据计"]},
+        "per_ticker": {}, "error": None, "written_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def drop_stub(path: Path) -> None:
+    """子进程没真正开跑（用法错误、起不来）时撤掉占位，免得一天白白被锁住；不是占位就不动。"""
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(doc, dict) and doc.get("state") == "started":
+        Path(path).unlink()
+
+
 def write_status(shadow_root: Path, status: Dict) -> Path:
     import ledger_io
-    d = shadow_root / STATUS_DIRNAME
-    d.mkdir(parents=True, exist_ok=True)
-    path = d / f"{status['date']}.json"
+    path = status_path(shadow_root, status["date"], status["mode"])
+    path.parent.mkdir(parents=True, exist_ok=True)
     ledger_io.write_json(path, status)
     return path
 
@@ -277,6 +322,10 @@ def frozen_prod_paths(config_module, prod_root: Path) -> List[str]:
 def run_child(args: argparse.Namespace, *, scan: Callable[[List[str]], Dict] = default_scan,
               now: Optional[date] = None) -> int:
     """子进程：此时环境已指向影子根。核对隔离 → 扫描 → 写状态。"""
+    if args.run and os.environ.get(SPEND_ENV) != "1":
+        # 父进程已核对过；这里再核一次，免得有人直接 `--child --run` 绕过花钱闸
+        print(f"❌ 拒绝：--run 会调用 LLM 花钱，必须显式设置环境变量 {SPEND_ENV}=1")
+        return EXIT_USAGE
     import hive_logger
     shadow_root = Path(args.shadow_root)
     prod_root = Path(args.prod_root)
@@ -303,7 +352,7 @@ def run_child(args: argparse.Namespace, *, scan: Callable[[List[str]], Dict] = d
     else:
         llm_service.disable()
 
-    day = now or date.today()
+    day = date.fromisoformat(args.child_day) if args.child_day else (now or date.today())
     tickers = [t for t in args.child_tickers.split(",") if t]
     t0 = time.time()
     error: Optional[str] = None
@@ -320,12 +369,13 @@ def run_child(args: argparse.Namespace, *, scan: Callable[[List[str]], Dict] = d
     path = write_status(shadow_root, status)
     if swarm_results:
         import ledger_io
-        ledger_io.write_json(path.parent / f"swarm_results-{day.isoformat()}.json", swarm_results)
+        ledger_io.write_json(swarm_results_path(shadow_root, day.isoformat(), mode), swarm_results)
     q = status["quality"]
     print(f"状态已写 {path}")
     print(f"用量 ${usage.get('total_cost_usd', 0):.4f} / {usage.get('call_count', 0)} 次调用 | "
           f"截断 {usage.get('truncated_calls', 0)} | JSON 失败 {usage.get('json_parse_failures', 0)} | "
-          f"预算拒绝 {usage.get('budget_refusals', 0)} | 定价拒绝 {usage.get('unpriced_refusals', 0)}")
+          f"预算拒绝 {usage.get('budget_refusals', 0)} | 定价拒绝 {usage.get('unpriced_refusals', 0)} | "
+          f"请求失败 {usage.get('failed_calls', 0)}")
     print(f"健康 {q['healthy']} {q['reasons'] if q['reasons'] else ''}")
     if error:
         return EXIT_SCAN_ERROR
@@ -369,12 +419,30 @@ def run_shadow(args: argparse.Namespace, *, environ: Optional[Dict[str, str]] = 
         print("❌ 没有可扫描的标的")
         return EXIT_USAGE
 
+    sp = status_path(shadow_root, day.isoformat(), mode)
+    if mode == "run" and sp.exists():
+        # 每日硬上限由 llm_service 在**进程内**计；同一天再起一个进程就是第二份预算（$3 变 $6）。
+        # 所以跨进程的「今天花过没有」只能由这个文件回答——有了就拒绝（删它要人手动，且看得见）。
+        print(f"❌ 拒绝：{day} 已有付费记录 {sp}（含子进程中途崩溃留下的占位）。再跑一次会重复花钱并覆盖它；"
+              f"确认要重跑请先人工移走该文件。")
+        return EXIT_USAGE
+
     seed_shadow_root(src_db, src_cache, shadow_root)
+    if mode == "run":
+        write_status(shadow_root, started_stub(day=day, mode=mode, cap=args.daily_cap, requested=tickers))
     cmd = [sys.executable, str(Path(__file__).resolve()), "--child", "--run" if mode == "run" else "--control",
            "--daily-cap", repr(float(args.daily_cap)), "--shadow-root", str(shadow_root),
-           "--prod-root", str(prod_root), "--child-tickers", ",".join(tickers)]
-    proc = spawn(cmd, env=build_child_env(dict(env), shadow_root, args.daily_cap),
-                 cwd=str(Path(__file__).resolve().parent))
+           "--prod-root", str(prod_root), "--child-tickers", ",".join(tickers),
+           "--child-day", day.isoformat()]
+    try:
+        proc = spawn(cmd, env=build_child_env(dict(env), shadow_root, args.daily_cap),
+                     cwd=str(Path(__file__).resolve().parent))
+    except BaseException:
+        if mode == "run":
+            drop_stub(sp)          # 进程根本没起来 ⇒ 没花钱，别锁住这一天
+        raise
+    if mode == "run" and int(proc.returncode) == EXIT_USAGE:
+        drop_stub(sp)              # 子进程在花钱之前就以用法错误退出（如没有 API Key）
     return int(proc.returncode)
 
 
@@ -391,6 +459,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--prod-root", default="", help=argparse.SUPPRESS)
     ap.add_argument("--child-tickers", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--child-day", default="", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     if not (args.plan or args.control or args.run):
         args.plan = True

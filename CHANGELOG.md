@@ -5,6 +5,24 @@
 
 ---
 
+## [0.45.560] — 2026-10-20 — Fixed：v0.45.555 LLM 影子 A/B 二次检查——同日 `--control` 会覆盖付过费的 `--run` 记录、同一天可以付两次费、子进程可绕过花钱闸、失败的 LLM 请求无处可见
+
+> 用户 2026-10-20 要求二次检查 v0.45.555。**没有任何 LLM 调用**（全部假客户端 / 假子进程）；`--run` 仍从未真跑过。
+
+### Fixed
+- **`--control` 会覆盖同日付过费的 `--run`**：两者原先都写 `shadow_status/<日期>.json` 与 `swarm_results-<日期>.json`。预注册要求首次真跑前先跑 `--control`、而 `--control` 又须在生产 14:00 扫描之后跑——同一天先后跑两个就会把花了 $2.6 的状态与 swarm_results 全文换成没有 LLM 的那份。现 control 写 `<日期>.control.json` / `swarm_results-<日期>.control.json`，`llm_shadow_report.load_days` 按模式读各自的文件。
+- **「每日硬上限 $3」只在进程内成立**：`llm_service` 的日预算是进程内存，同一天再起一个 `--run`（手滑、launchd 重试、上次 exit 5 后重来）就是第二份 $3。现 `--run` 起飞前先落占位 `shadow_status/<日期>.json`，已有该文件即拒绝（退出码 2，提示人工移走才能重跑）。占位写 `state: "started"`、`healthy: False`：子进程中途崩溃 / 被杀时这一天留下的是「不健康的一天」而不是「什么都没有」；子进程在花钱之前就以用法错误退出（没 API Key）或根本起不来时撤掉占位，不白白锁住这一天。
+- **子进程绕过花钱闸**：`SPEND_ENV` 只在父进程核对，直接 `llm_shadow_scan.py --child --run …` 不受约束。子进程自己也核一次。
+- **失败的 LLM 请求无处可见**：`call_count` 只数成功的；429 重试耗尽 / 连接超时 / API 报错（含 400）后该蜂静默回落规则引擎，质量判定看不到——只有 Queen 层的 `queen_llm_rate` 间接露一点。新增 `failed_calls` 计数（`llm_service`，每日重置），`quality_report` 加 `failed_call_rate`，> 10% 整天不入比较。
+- 子进程日期与父进程不会在跨午夜时分叉：新增隐藏参数 `--child-day`，状态占位与最终状态用同一个日期。
+
+### 验证
+- 新增 / 改测试：`test_llm_shadow_scan.py`（+19）、`test_llm_shadow_report.py`（+3）、`test_llm_service_5_5_models.py`（+4）；注册表 `test_persistent_writes_have_readers.py` 增 control 两个产物（读者 / 取证）。
+- **变异验证 9/9 变红、文件逐字节还原**：子进程花钱闸去掉 / control 与 run 共用文件 / 同日重跑闸去掉 / 占位不写 / 用法错误退出仍留占位 / 质量判定忽略失败率 / 抛出的失败不计数 / 已处理的失败不计数 / 读者只读一种文件名。
+
+### 已核、未改（待用户决定）
+- **预留与上限的相互作用**：在途预留按 `max_tokens×3 × $20/MTok + 输入字符数 × $4/MTok` 估，用 10-19 试跑的 21 条真实提示词算，单只标的的 7 个调用点预留合计约 $0.2~0.45（Oracle 按原版大提示词时偏高），并行 4 只标的 × 约 5 只蜂时峰值在途预留约 $0.7，而 PER_TICKER 的实际成本只有 $0.117。⇒ 按 22 只 / 实际 ≈ $2.6 计，**累计花到约 $2.3 之后（约第 20 只起）预检可能开始拒绝**，当天后几只回落规则引擎、`budget_refusals>0`、整天不入比较，$2.5 白花。⚠️ 这是推算（用的是估算公式与试跑提示词，未真跑 22 只），**待验证**。倾向把每日标的数降到 18（≈ $2.1/天）留出余量；这会改用户批准过的覆盖 / 费用数字，所以没自行改。
+
 ## [0.45.559] — 2026-10-20 — 占位（进行中：BuzzBee data_quality["volatility"] 硬编码 "real"——volatility_20d 缺失时改标 "unavailable"，先盘点读者与协议影响）
 
 ## [0.45.558] — 2026-10-20 — Removed（用户 2026-10-20 定「两样都删」）：`ml_predictor.HistoricalDataBuilder`（8 条手写的 2023 年训练样本）与 `ml_predictor.CROWDING_NEUTRAL`；没有真实训练数据时 ML 报告不再悄悄用假数据训练，改为标「模型不可用」
