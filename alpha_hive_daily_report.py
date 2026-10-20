@@ -2237,6 +2237,9 @@ class AlphaHiveDailyReporter:
                     "BuzzBeeWhisper": {
                         "score": 5.0,
                         "discovery": _buzz_disc,
+                        # v0.45.559 世代印记（与 BuzzBee 成功路径同一字面量）：本回退不贴 data_quality 标签，
+                        # 但缺键会被判别器读成旧代码 ⇒ 同 v0.45.441 的 Scout 印记，无条件写
+                        "details": {"volatility_dq_from_value": True},
                     },
                     "ScoutBeeNova": {
                         "score": _opp.get("opp_score", 5.0),

@@ -128,3 +128,136 @@ class TestQueenClassifiesTheLabel:
         assert tp_new["dq_unclassified"] == []
         n = len(new["data_quality"])
         assert tp_old["data_real_pct"] - tp_new["data_real_pct"] == pytest.approx(30.0 / n, abs=0.11)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 世代边界登记（用户 2026-10-20 选「边界、日期 10-19」，同 v0.45.369 的等价处置）
+# ════════════════════════════════════════════════════════════════════════════
+
+_V = "v0.45.559"
+_MARK = "volatility_dq_from_value"
+
+
+def _brow(*, vol20=22.5, new=False, details=True, backfill=False):
+    """一只标的的蒸馏结果（只放判据 / 印记读的字段）。"""
+    agents = {}
+    if details:
+        det = {"volatility_20d": vol20, "volume_ratio": 1.1}
+        if new:
+            det[_MARK] = True
+        agents["BuzzBeeWhisper"] = {"score": 5.0, "details": det}
+    else:
+        agents["BuzzBeeWhisper"] = {"score": 5.0, "error": "boom"}
+    if backfill:
+        agents["GuardBeeSentinel"] = {"details": {"vix_term_structure": {"macro_as_of_mode": "backfill"}}}
+    return {"agent_details": agents}
+
+
+def _write(root, day, rows, archive=("AAA",)):
+    import json
+    (root / f".swarm_results_{day}.json").write_text(json.dumps(rows), encoding="utf-8")
+    for tk in archive:
+        (root / f"analysis-{tk}-ml-{day}.json").write_text(json.dumps({"swarm_results": rows.get(tk, _brow())}),
+                                                             encoding="utf-8")
+
+
+class TestBoundaryRegistered:
+
+    def test_entry_scope_marker_equivalence(self):
+        import ic_rerun_readiness as rr
+        import signal_archive as sa
+        assert [d for d, v, _r in rr._COHORT_HISTORY if v == _V] == ["2026-10-19"]
+        assert sa.COHORT_SIGNAL_SCOPE[_V] == ()          # 空范围 = 只切 composite.final_score；缺登记 ⇒ 按「影响全部」处理
+        assert _V in rr._BOUNDARY_MARKERS and _V in rr._BOUNDARY_EQUIVALENCE
+
+    def test_does_not_truncate_dim_ic_h1_or_h2(self):
+        """空范围边界不触及 H1 的输入层 / 冻结层，也不触及 H2 的三只蜂分。
+        变红的变异：把 `COHORT_SIGNAL_SCOPE["v0.45.559"]` 删掉（未声明 ⇒ 影响全部 ⇒ 截断 H1）或点名 `agent.BuzzBeeWhisper.*`。"""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+        import dim_ic_forward_test as F
+        import dim_ic_protocol as P
+        import ic_rerun_readiness as rr
+        entry = next(e for e in rr._COHORT_HISTORY if e[1] == _V)
+        for name, _obj, sigs in P.HYPOTHESES:
+            assert F.truncation_point(sigs, P, [entry]) is None, name
+
+    def test_ml_estimator_generation_label_extended(self):
+        import probability_scorecard as ps
+        assert any(d == "2026-10-19" and _V in v.split("+") for d, v, _t in ps._ML_ESTIMATOR_GENERATIONS)
+
+
+class TestMarker:
+
+    def test_real_buzz_writes_the_marker(self, buzz):
+        import ic_rerun_readiness as rr
+        rec = {"swarm_results": {"agent_details": {"BuzzBeeWhisper": buzz(volatility_20d=None)}}}
+        assert rr._marker_buzz_volatility_dq_from_value(rec) is True
+
+    @pytest.mark.parametrize("d", [
+        {}, {"swarm_results": {"agent_details": {"BuzzBeeWhisper": None}}},
+        {"swarm_results": _brow()},                                                    # 旧代码：没有这个键
+        {"swarm_results": {"agent_details": {"BuzzBeeWhisper": {"details": {_MARK: 1}}}}},
+        {"swarm_results": _brow(new=True, backfill=True)},                             # 补跑行不算日期证据
+    ], ids=["empty", "buzz_none", "old_code", "not_literal_true", "backfill"])
+    def test_marker_only_literal_true_on_live_rows(self, d):
+        import ic_rerun_readiness as rr
+        assert rr._marker_buzz_volatility_dq_from_value(d) is False
+
+    def test_synthetic_fallback_writes_the_marker_unconditionally(self):
+        """日报合成回退自己拼 Buzz 条目：印记写在字面量 dict 里（不在 if / try 里）。缺键会被判别器读成旧代码。"""
+        import ast
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / "alpha_hive_daily_report.py").read_text(encoding="utf-8")
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_generate_synthetic_swarm_results")
+        hits = [n for n in ast.walk(fn) if isinstance(n, ast.Dict)
+                and any(isinstance(k, ast.Constant) and k.value == _MARK for k in n.keys)
+                and any(isinstance(v, ast.Constant) and v.value is True
+                        for k, v in zip(n.keys, n.values) if isinstance(k, ast.Constant) and k.value == _MARK)]
+        assert hits, f"合成回退里没有写 {_MARK}: True"
+
+
+class TestEquivalenceJudge:
+
+    @pytest.mark.parametrize("row,expect", [
+        (_brow(), True),                         # 有波动率 ⇒ 本版是空操作
+        (_brow(vol20=0.0), True),                # 0.0 是值
+        (_brow(vol20=float("nan")), True),       # NaN 在两版里都标 real（判据与代码同一条件 `is not None`）
+        (_brow(vol20=None), False),              # 本版改标签的那一种
+        (_brow(details=False), True),            # Buzz 异常兜底：两版都不贴 volatility 标签
+        ({"agent_details": {"BuzzBeeWhisper": {"details": {"volume_ratio": 1.1}}}}, False),   # 缺键 ⇒ 证不出
+    ], ids=["present", "zero", "nan", "none", "no_details", "key_missing"])
+    def test_judge(self, row, expect):
+        """变红的变异：判据恒真（`volatility_20d is None` 的旧记录也放行）/ 恒假。"""
+        import ic_rerun_readiness as rr
+        assert rr._equiv_buzz_volatility_present({"swarm_results": row}) is expect
+
+
+class TestBoundaryVerdict:
+
+    def test_before_deploy_is_no_evidence_yet(self, tmp_path):
+        """上线前的真实形状：10-19 全是旧代码、30/30 有波动率 ⇒ 还没证据，不报警。"""
+        import ic_rerun_readiness as rr
+        _write(tmp_path, "2026-10-19", {"AAA": _brow(), "BBB": _brow()})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
+        assert ev["verdict"] == "no_evidence_yet" and ev["unmarked_after_boundary"] == [], ev
+
+    def test_marker_on_deploy_day_matches(self, tmp_path):
+        """首跑后：印记首见 10-20，其前只有可证等价的旧记录 ⇒ matches（边际作废 0 条）。
+        变红的变异：删掉 `_BOUNDARY_EQUIVALENCE["v0.45.559"]`（⇒ boundary_too_early）。"""
+        import ic_rerun_readiness as rr
+        _write(tmp_path, "2026-10-19", {"AAA": _brow(), "BBB": _brow()})
+        _write(tmp_path, "2026-10-20", {"AAA": _brow(new=True, vol20=None), "BBB": _brow(new=True)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
+        assert ev["verdict"] == "matches" and ev["marker_first_seen"] == "2026-10-20", ev
+        assert ev["equivalent_before_marker"] == ["2026-10-19"]
+
+    def test_old_code_day_with_missing_volatility_is_too_early(self, tmp_path):
+        """首跑前若出现缺波动率的旧代码扫描日 ⇒ 那天真按旧标签算了 ⇒ boundary_too_early。"""
+        import ic_rerun_readiness as rr
+        _write(tmp_path, "2026-10-19", {"AAA": _brow(), "BBB": _brow(vol20=None)})
+        _write(tmp_path, "2026-10-20", {"AAA": _brow(new=True), "BBB": _brow(new=True)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
+        assert ev["verdict"] == "boundary_too_early" and ev["unmarked_after_boundary"] == ["2026-10-19"], ev

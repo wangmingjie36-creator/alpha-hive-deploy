@@ -212,10 +212,24 @@ forming-bar 护栏属协议 §13.10「已知不管的」取数细节（不在指
 
 ### Tests
 
-- `tests/test_buzz_volatility_dq_label.py`：三个行情通道参数化（缺 ⇒ 通道 50 + `unavailable`；在 ⇒ `real`；0.0 是值不是缺失）；截住 AgentResult
+- `tests/test_buzz_volatility_dq_label.py`（共 27 条，登记相关 19 条见下节）：三个行情通道参数化（缺 ⇒ 通道 50 + `unavailable`；在 ⇒ `real`；0.0 是值不是缺失）；截住 AgentResult
   把标签换回旧值重跑 ⇒ 分 / 方向 / 置信度 / 通道逐项相同；经真实 `_apply_triple_penalty` 记 0.7、不进 `dq_unclassified`。变异：改回硬编码 ⇒ 红。
 
-### 登记（待用户决定）
+### 登记（用户 2026-10-20 选「边界、日期 10-19」+ 赶 10-20 扫描推送）
+
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-10-19", "v0.45.559", …)`：与 v0.45.537 / 538 同日扩展同一标签，**边际作废 0 条**。
+  日期早于新代码首跑（10-20）照 v0.45.369 处置：`_BOUNDARY_EQUIVALENCE["v0.45.559"]` = `_equiv_buzz_volatility_present`
+  （Buzz `volatility_20d` 不是 None，或 Buzz 没有 details ⇒ 本版空操作；实测 10-19 30/30、10-16 30/30 等价，负对照 10-14 0/30）；
+  `_BOUNDARY_MARKERS["v0.45.559"]` = Buzz `details.volatility_dq_from_value` 字面量 True（成功路径 + `alpha_hive_daily_report` 合成回退，
+  实时行）。生产数据只读实测当前判定 `no_evidence_yet`、10-19 记为等价；首跑后预期 `matches`。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.559"] = ()`（只切 `composite.final_score`，先例 v0.45.209 / 314 / 315 / 369）。
+  实测 `dim_ic_forward_test.truncation_point` 对它返回 None ⇒ **不截断维度 IC 的 H1 / H2**（未声明范围的边界会截断 H1，测试钉住）。
+- `probability_scorecard._ML_ESTIMATOR_GENERATIONS`：10-19 一代扩标签为 `v0.45.537+v0.45.538+v0.45.559`（同日零代价，改名时已有 1 天报告，
+  归属不变；生产数据无任何文件引用旧标签串）。
+- `signal_code_fingerprints`：六个单元指纹不变（改动与印记都在合成之后的 `return` 里）⇒ 不需要 ACK。
+- 测试再加 19 条：登记 / 空范围 / H1·H2 不截断 / ML 世代标签 / 真实 Buzz 写印记 / 印记只认实时行字面量 True / 合成回退无条件写印记（AST）/
+  等价判据 6 例 / 判定器三态（`no_evidence_yet` → `matches`，旧代码缺波动率日 ⇒ `boundary_too_early`）。变异：删等价登记、删范围声明、
+  判据恒真各自变红。
 
 ## [0.45.558] — 2026-10-20 — Removed（用户 2026-10-20 定「两样都删」）：`ml_predictor.HistoricalDataBuilder`（8 条手写的 2023 年训练样本）与 `ml_predictor.CROWDING_NEUTRAL`；没有真实训练数据时 ML 报告不再悄悄用假数据训练，改为标「模型不可用」
 

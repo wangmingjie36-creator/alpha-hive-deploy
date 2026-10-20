@@ -344,6 +344,9 @@ class BuzzBeeWhisper(BeeAgent):
                     # v0.45.445：本轮配置的新闻主源（massive / alpha_vantage）。新代码每次都写 ⇒ 兼作世代边界印记
                     # （`ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.445"]`）；与 news_source 不同，主源失败降级时也照写
                     "news_primary": _news_primary_source(),
+                    # v0.45.559：世代边界印记（字面量 True）——data_quality.volatility 自本版起按 volatility_20d 是否为 None 上报。
+                    # 读者 = `ic_rerun_readiness._marker_buzz_volatility_dq_from_value`；此前的 details 没有这个键。勿改成 False / 勿删
+                    "volatility_dq_from_value": True,
                 },
             ).to_dict()
 

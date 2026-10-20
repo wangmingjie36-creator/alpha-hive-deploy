@@ -1018,6 +1018,30 @@ _COHORT_HISTORY = [
      "截断信号只有 Chronos / Buzz / Oracle 的 score 与 `EVALUATION_WEIGHTS` 字面量（都没动；三只是 Phase-1，在 Rival 之前跑完）⇒ **不截断**。"
      "共振加成前瞻检验：重放从记录的 `base_score_before_resonance` 起步，不重算 ml_adjustment ⇒ 新旧记录都能复现、自证不受影响。"
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 与 v0.45.537 合并为同一代 `v0.45.537+v0.45.538`（该表日期须唯一）。"),
+    ("2026-10-19", "v0.45.559",
+     "BuzzBee 的 `data_quality[\"volatility\"]` 由硬编码 \"real\" 改为按 `volatility_20d` 是否为 None 上报（缺 ⇒ \"unavailable\"，"
+     "`PROXY_SOURCES` 0.7 档，与同组 momentum / volume 一致）。用户 2026-10-20 选「边界、日期 10-19」。"
+     "缺失时通道早已回中性 50（v0.45.3），标签却照报满分——同 v0.45.209 GuardBee crowding 的形状。"
+     "Buzz 自身分 / 方向 / 置信度 / 七通道逐项不变（`tests/test_buzz_volatility_dq_label.py` 截住构造把标签换回旧值重跑核对）；"
+     "改动写在合成之后的 `return` 里 ⇒ `signal_code_fingerprints` 六个单元指纹全部不变、不需要 ACK。"
+     "**口径变化只在蜂后层**：① `_apply_triple_penalty` 的 `data_real_pct` → `quality_factor` → `rule_score`（< 80 才压缩）；"
+     "② S5 重度冲突的 DQ 票重（只数 `REAL_SOURCES`）→ `rule_direction`（存档方向，不进 `final_score`）；③ `dim_data_quality`（展示）。"
+     "**幅度**（只读重放 `.swarm_results_*.json` 全史 2228 行，其中 153 行 `volatility_20d` 为 None 且标 real："
+     "08-26 一只、08-28 / 09-17 / 09-24 / 09-25 / 10-14 各 30/30、09-15 两只）：`data_real_pct` 每行 −1.2~−1.3pp，最低值按现行标签集 "
+     "89.2 → 88.0、按当日存档值 85.4 → 84.3（09-17 NEE；09-18 前 `quiet` / `peer_read` 未登记 ⇒ 47 行存档值低于现行重放），"
+     "两种口径 **0 行跌破 80** ⇒ `rule_score` 全史不变；S5：现行代码（Bear/Guard 不计票）重放 21 行重度冲突、其中 14 行 Buzz 投方向，"
+     "**0 行跨 0.55**；按当日标签集，09-17 ENPH / TMUS / VZ 的看多占比 0.549 → 0.570 会由 neutral 变 bullish ⇒ 机制真实、只在贴线时生效。"
+     "**为什么日期写 10-19 而新代码 10-20 才上线**（同 v0.45.369 的处置）：10-19 的 30 只 `volatility_20d` 全部有值 ⇒ 本版在那天是空操作，"
+     "与 v0.45.537 / 538 同日扩展同一标签、不新开空分区，**边际作废 0 条**。等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.559\"]`"
+     "（Buzz `volatility_20d` 不是 None，或 Buzz 没有 details）：实测 10-19 30/30、10-16 30/30 等价，负对照 10-14 0/30。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.559\"]`：Buzz `details.volatility_dq_from_value` 字面量 True（成功路径 + 日报合成回退），实时行。"
+     "预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。⚠️ 若首跑前出现 `volatility_20d` 为 None 的旧代码扫描日 ⇒ `boundary_too_early`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.559\"]` = `()`：只动蜂后层，不改任何归档蜂信号（先例 v0.45.209 / 314 / 315 / 369）；"
+     "`composite.final_score` 是 ALWAYS_SLICED。前瞻检验：维度 IC 协议 H1 的输入层（`buzz.comp.*` / `price.*` / `market.fear_greed`）"
+     "与冻结层（`agent.BuzzBeeWhisper.score` / `sentiment.pct`）都不读该标签；H2 的对象是蜂后调整**之前**的 Σ冻结权重×维度分 ⇒ "
+     "**都不截断**（实测 `dim_ic_forward_test.truncation_point` 对空范围边界返回 None）。共振加成前瞻检验：重放读记录的 data_quality ⇒ "
+     "新旧记录都能复现，检验期内边界条数 +1（附带项）。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签"
+     "（`final_score` / `direction_encoded` / `agent_agreement` 特征只在缺波动率行可能变）。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1416,6 +1440,35 @@ def _marker_queen_ml_shadow(d: dict) -> bool:
     return isinstance(sr, dict) and "ml_weight_adjustments_shadow" in sr and not _is_backfill_row(d)
 
 
+def _buzz_row_has_volatility_dq_marker(d: dict) -> bool:
+    """这行是 v0.45.559 之后的代码写的吗：BuzzBee `details.volatility_dq_from_value` 为字面量 `True`
+    （成功路径与日报合成回退都写；Buzz 走异常兜底时没有 details，等价判据接住）。只认 `is True`：此前的记录没有这个键。
+    不看实时 / 补跑——那是日期证据的问题，见 `_marker_buzz_volatility_dq_from_value`。"""
+    b = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("BuzzBeeWhisper")
+    det = b.get("details") if isinstance(b, dict) else None
+    return isinstance(det, dict) and det.get("volatility_dq_from_value") is True
+
+
+def _marker_buzz_volatility_dq_from_value(d: dict) -> bool:
+    """v0.45.559 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.441 / 537）。"""
+    return _buzz_row_has_volatility_dq_marker(d) and not _is_backfill_row(d)
+
+
+def _equiv_buzz_volatility_present(d: dict) -> bool:
+    """v0.45.559 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？
+
+    本版只改 `volatility_20d is None` 那一种情形下 BuzzBee 的 `data_quality["volatility"]`（"real" → "unavailable"），
+    分 / 方向 / 置信度 / 通道都不变。Buzz details 的 `volatility_20d` 不是 None ⇒ 本版改动在这份记录上是空操作 ⇒ 等价。
+    Buzz 没有 details（异常兜底 `make_error_result`、日报合成回退）⇒ 两版都不贴 volatility 标签、同一条路 ⇒ 也等价。
+    有 details 却没有 `volatility_20d` 键 ⇒ 证不出（举证责任在放宽一侧）。
+    判据与代码同一个条件（`is not None`，不是「有限数」）：NaN 在两版里都标 real。"""
+    b = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("BuzzBeeWhisper")
+    det = b.get("details") if isinstance(b, dict) else None
+    if not isinstance(det, dict):
+        return True
+    return "volatility_20d" in det and det["volatility_20d"] is not None
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1449,6 +1502,8 @@ _BOUNDARY_MARKERS = {
                   _marker_queen_ml_shadow),
     "v0.45.538": ("swarm_results.ml_auxiliary_in_score is False",
                   _marker_rival_ml_adjustment_retired),
+    "v0.45.559": ("agent_details.BuzzBeeWhisper.details.volatility_dq_from_value is True",
+                  _marker_buzz_volatility_dq_from_value),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1476,6 +1531,8 @@ _BOUNDARY_EQUIVALENCE = {
     "v0.45.423": ("BuzzBee details.volatility_20d 是有限数（volume_ratio 来自 yfinance、没走 Twelve Data 兜底）且日线缺口"
                   "全补上（Oracle hv_gap ⊆ hv_gap_filled；383 首跑前读其冻结证据）",
                   _equiv_td_session_bar, _oracle_row_has_td_session_marker),
+    "v0.45.559": ("BuzzBee details.volatility_20d 不是 None（或 Buzz 没有 details）⇒ 本版改动是空操作",
+                  _equiv_buzz_volatility_present, _buzz_row_has_volatility_dq_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。

@@ -2431,6 +2431,10 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 只点名 Rival 的分：方向与 `ml.expected_7d/30d` 逐位不变（不点名 `ml.*`，免得白切它们）；
     # Guard 读 Rival 分 ⇒ Guard / Bear / swarm_agreement 由 _scope_closure 带出。
     "v0.45.538": ("agent.RivalBeeVanguard.score",),
+    # 10-19（v0.45.559，新代码 10-20 上线，等价论证见 ic_rerun_readiness 同版条目）：BuzzBee data_quality.volatility 改按
+    # volatility_20d 是否为 None 上报 —— 只改标签，Buzz 分 / 方向 / 通道不变；没有归档信号读 data_quality ⇒ 只动蜂后层
+    # （data_real_pct 压缩线、S5 冲突 DQ 票重）⇒ 只动 composite.final_score（ALWAYS_SLICED）。同 v0.45.209 / 369
+    "v0.45.559": (),
 }
 
 
