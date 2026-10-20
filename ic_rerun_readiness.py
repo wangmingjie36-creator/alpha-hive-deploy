@@ -2433,8 +2433,35 @@ def _boundary_attention(bev: Dict, dim: Dict) -> List[Dict]:
     return out
 
 
-def build_attention(res: Dict, bev: Dict, fwd: Dict, fg: Dict, dim: Dict) -> List[Dict]:
-    """本工具的全部 `attention` 条目。`fwd` / `fg` / `dim` 是三个执行器的结构化结果（`_take_detail`）。"""
+def _pooled_recheck_attention(today: Optional[str]) -> List[Dict]:
+    """`signal_archive.DELIBERATELY_POOLED` 里到了复检日的条目 ⇒ 每条一个 warn（v0.45.565）。
+
+    刻意池化是「已知某条边界改了这个信号、先不切」的取舍，到期没人复检它就永远池化下去——这条就是「谁会红」。
+    按外壳的业务日 `today` 判（不读真实钟：测试传固定 `--today`，拨钟审计看不到它）；`today=None` ⇒ 不判。
+    """
+    if not today:
+        return []
+    try:
+        import signal_archive
+        pooled = dict(signal_archive.DELIBERATELY_POOLED)
+    except Exception as e:  # noqa: BLE001 —— 核不了就说核不了（同本文件各前瞻检验段），不让整个工具退出码 3
+        return [step_contract.attention_item(
+            "ic_rerun.deliberately_pooled.unavailable", "warn",
+            f"刻意池化复检核对不了（signal_archive.DELIBERATELY_POOLED 读不到：{type(e).__name__}: {e}）")]
+    out = []
+    for sig, rec in sorted(pooled.items()):
+        if today >= rec["recheck_on_or_after"]:
+            out.append(step_contract.attention_item(
+                f"ic_rerun.deliberately_pooled.{sig}", "warn",
+                f"{sig} 跨 {rec['boundary']} 刻意池化，已到复检日 {rec['recheck_on_or_after']}：先核条件「{rec['recheck_when']}」"
+                f"是否满足，再按 signal_archive.DELIBERATELY_POOLED 的 how 复检、决定维持还是切（结论记进 CHANGELOG）"))
+    return out
+
+
+def build_attention(res: Dict, bev: Dict, fwd: Dict, fg: Dict, dim: Dict,
+                    today: Optional[str] = None) -> List[Dict]:
+    """本工具的全部 `attention` 条目。`fwd` / `fg` / `dim` 是三个执行器的结构化结果（`_take_detail`）。
+    `today` = 外壳业务日，只给刻意池化的复检提醒用。"""
     item = step_contract.attention_item
     out = []
     if res.get("ready"):
@@ -2449,6 +2476,7 @@ def build_attention(res: Dict, bev: Dict, fwd: Dict, fg: Dict, dim: Dict) -> Lis
     out += _forward_test_attention("resonance_forward", fwd)
     out += _forward_test_attention("fg_exposure_gate_forward", fg)
     out += _dim_ic_attention(dim)
+    out += _pooled_recheck_attention(today)
     return out
 
 
@@ -2543,7 +2571,7 @@ def main() -> int:
             # 检查点：进程之后被杀，消费方读到的就是这一份（F&G 段是「进程在 F&G 重放结束前终止」，不是空、不是旧文件）。
             # 只写 --out：--json 打 stdout，打两份会让读 stdout 的人拿到两个 JSON 文档。
             _write_out_only(args.out, contract_envelope(
-                res, date, build_attention(res, bev, fwd_detail, fg_detail, dim_detail)))
+                res, date, build_attention(res, bev, fwd_detail, fg_detail, dim_detail, today=date)))
         try:
             fg_fwd = fg_run.result()
         except Exception as e:  # noqa: BLE001 —— v0.45.485（F2）：等 F&G 的意外异常只判 F&G 段，不崩溃——
@@ -2554,7 +2582,7 @@ def main() -> int:
 
     if args.out or args.json:
         # 只在要外壳时才列条目：`--quiet` 单跑（周度任务）的路径与 v0.45.355 之前评分与标签逐项相同
-        _emit(args, contract_envelope(res, date, build_attention(res, bev, fwd_detail, fg_detail, dim_detail)))
+        _emit(args, contract_envelope(res, date, build_attention(res, bev, fwd_detail, fg_detail, dim_detail, today=date)))
 
     if args.json:
         return 0 if res["ready"] else 1

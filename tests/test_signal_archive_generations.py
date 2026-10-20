@@ -913,3 +913,68 @@ class TestBearSubscoreSlicing:
         assert {"agent.OracleBeeEcho.score", "agent.OracleBeeEcho.direction",
                 "bear.options_bear", "bear.insider_bear"} <= hit, sorted(hit)
         assert "options.gamma_exposure" not in hit and "bear.overval_bear" not in hit, sorted(hit)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 刻意池化（v0.45.565）：已知边界改了它的值、用户决定先不切 —— 不许静默，到期要出声
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestDeliberatelyPooled:
+    """`sentiment.pct` = int(Buzz 合成值)；v0.45.445 换新闻源改了新闻通道 ⇒ 改了它。用户 2026-10-20 定先不切，
+    11 月复检（理由、反证、复检条件与做法都在 `signal_archive.DELIBERATELY_POOLED`）。
+
+    这里不按真实钟判「到期」（那是拨钟审计专抓的时间炸弹）：到期提醒走报告与 `ic_rerun_readiness` 的
+    attention，按传入的业务日判，下面用固定日期测两侧。
+    """
+
+    def test_record_is_well_formed(self):
+        history = {v: d for d, v, _r in irr._COHORT_HISTORY}
+        for sig, rec in sa.DELIBERATELY_POOLED.items():
+            assert sig in sa.SIGNAL_EXTRACTORS, sig
+            assert rec["boundary"] in history and rec["boundary"] in sa.COHORT_SIGNAL_SCOPE, rec
+            assert datetime.date.fromisoformat(rec["recheck_on_or_after"]) > datetime.date.fromisoformat(
+                history[rec["boundary"]]), rec
+            for k in ("why", "known_counter_evidence", "recheck_when", "how"):
+                assert rec[k].strip(), (sig, k)
+
+    def test_boundary_really_changed_the_signal_input(self):
+        """「刻意不切」的前提是边界真的改了它——边界必须直接点名 `changed_via`，且它确实是本信号的输入。"""
+        rec = sa.DELIBERATELY_POOLED["sentiment.pct"]
+        assert sa._matching({rec["changed_via"]}, sa.COHORT_SIGNAL_SCOPE[rec["boundary"]]), rec
+        src = (_REPO / "swarm_agents" / "buzz_bee.py").read_text(encoding="utf-8")
+        assert "bullish_pct = int(sentiment_composite)" in src and '"sentiment_pct": bullish_pct' in src, (
+            "sentiment.pct 不再是 int(合成值) —— 前提变了，重审这条池化")
+        assert "news_signal        * _bw.get(\"news\"" in src, "新闻通道不再进合成值 —— 前提变了，重审这条池化"
+
+    def test_signal_is_actually_not_sliced(self):
+        """真切了却忘删记录 ⇒ 报告 / attention 会对一个已经切了的信号喊复检。变红的变异：把 sentiment.pct 加进 445 的范围。"""
+        for sig, rec in sa.DELIBERATELY_POOLED.items():
+            entry = next(e for e in irr._COHORT_HISTORY if e[1] == rec["boundary"])
+            assert sa.generation_boundaries([sig], [entry]) == {}, (sig, "已被切，删掉 DELIBERATELY_POOLED 里这条")
+
+    def test_attention_fires_on_and_after_recheck_day_only(self):
+        rec = sa.DELIBERATELY_POOLED["sentiment.pct"]
+        due = datetime.date.fromisoformat(rec["recheck_on_or_after"])
+        def ids(today):
+            return {a["id"] for a in irr.build_attention(
+                {}, {}, {"status": "not_ready"}, {"status": "not_ready"}, {}, today=today)}
+        key = "ic_rerun.deliberately_pooled.sentiment.pct"
+        assert key not in ids((due - datetime.timedelta(days=1)).isoformat())
+        assert key in ids(due.isoformat()) and key in ids((due + datetime.timedelta(days=30)).isoformat())
+        assert key not in ids(None), "不传业务日 ⇒ 不判（不许偷读真实钟）"
+
+    def test_attention_survives_unimportable_registry(self, monkeypatch):
+        """读不到登记表 ⇒ 一条可见的 warn，不抛（`ic_rerun_readiness` 有只带 step_contract 的最小运行环境，
+        `tests/test_ic_rerun_fg_budget.py` 的真进程树就是；v0.45.565 初版在那里让整个工具退出码 3）。"""
+        monkeypatch.setitem(sys.modules, "signal_archive", None)
+        items = irr._pooled_recheck_attention("2099-01-01")
+        assert [a["id"] for a in items] == ["ic_rerun.deliberately_pooled.unavailable"], items
+        assert items[0]["level"] == "warn", items
+
+    def test_report_names_the_pooled_signal(self, capsys):
+        gens = {"signals": {"sentiment.pct": {"gen_start": None, "gen_version": None, "n_total": 10,
+                                              "n_in_generation": 10, "n_excluded": 0}},
+                "undeclared_versions": []}
+        sa._print_generations([], gens)
+        out = capsys.readouterr().out
+        assert "刻意池化：sentiment.pct" in out and "DELIBERATELY_POOLED" in out, out

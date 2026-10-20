@@ -2253,6 +2253,10 @@ SIGNAL_LEAVES = frozenset({
     "options.iv_rank", "options.iv_percentile", "options.iv_rank_is_real",
     # v0.45.362：CBOE 链 + Scout 价（同 price.* 按原始数据算）；只有本版上线后的记录才有，早于它的边界无从作用
     "gex.available", "gex.total_gex", "gex.negative",
+    # ⚠️ 不是真叶子：= int(Buzz 合成值)，合成值是 buzz.comp.* 七个通道的加权和 ⇒ 通道换代它跟着换。
+    # 留在这里是**刻意池化**（v0.45.565，用户 2026-10-20 定）：理由与复检条件见 `DELIBERATELY_POOLED`。
+    # 复检决定切 ⇒ 移出本集合，在 SIGNAL_UPSTREAM 登 `Edge("buzz.comp.*", "self")`（结构修法，草稿见分支
+    # claude/gifted-hawking-5866b0 的 72137325，未合入）。
     "sentiment.pct",
     # v0.45.349：bear.insider_bear / bear.options_bear 移出（读 Scout / Oracle 方向，见 SIGNAL_UPSTREAM）
     "bear.overval_bear", "bear.short_int_bear",
@@ -2424,6 +2428,7 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 按维度 IC 协议 §6「按层声明」：点名 `buzz.comp.news_signal` **和** `agent.BuzzBeeWhisper.*`（通道值变 ⇒ 分跟着变）。
     # 下游（Guard 读 Buzz 分与方向、Bear 读 Buzz 方向与情绪、swarm_agreement 等）由 _scope_closure 带出。
     # v0.45.561 更正：Scout 的 consensus_strength 同日（441）起不再读同伴，`ml.expected_*` 从来不读 Buzz ⇒ 都不在闭包里。
+    # ⚠️ 本条也改了 `sentiment.pct`（新闻通道权重 0.25），**刻意不点名**——见 `DELIBERATELY_POOLED`（v0.45.565）。
     "v0.45.445": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*"),
     # 10-19：蜂后 ML 反馈两个消费者（维度权重、方向票重）停用，只记影子乘数。蜂后层 ⇒ 不改任何归档蜂信号。
     "v0.45.537": (),
@@ -2435,6 +2440,36 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # volatility_20d 是否为 None 上报 —— 只改标签，Buzz 分 / 方向 / 通道不变；没有归档信号读 data_quality ⇒ 只动蜂后层
     # （data_real_pct 压缩线、S5 冲突 DQ 票重）⇒ 只动 composite.final_score（ALWAYS_SLICED）。同 v0.45.209 / 369
     "v0.45.559": (),
+}
+
+
+#: 刻意池化（v0.45.565 起）：某条边界**确实**改了这个信号的值，但用户决定暂不切、先保留跨世代样本，
+#: 到复检条件满足时再定。与 v0.45.256「实测没换 ⇒ 照证据不列」不同：这里**已知换了**，不切是取舍，不是证据。
+#: `analyze()` 的世代报告逐条列出（到了复检日标 ⏰）；到了复检日 `ic_rerun_readiness` 的 `attention[]` 出一条 warn
+#: （周度任务读它）。`tests/test_signal_archive_generations.py::TestDeliberatelyPooled` 钉住「边界确实改了它、确实没切、
+#: 报告与 attention 到期会出声」。复检后：维持 ⇒ 更新 `recheck_on_or_after` 并在 CHANGELOG 记结论；
+#: 切 ⇒ 删本条，按 `SIGNAL_LEAVES` 里 sentiment.pct 那段注释的结构修法改。
+DELIBERATELY_POOLED: Dict[str, Dict[str, str]] = {
+    "sentiment.pct": {
+        "boundary": "v0.45.445",
+        "changed_via": "buzz.comp.news_signal",      # 该边界经它改了本信号（守卫要求边界直接点名它）
+        "why": ("10-09 新闻主源 AV → Massive 改了新闻通道（合成值权重 0.25）⇒ 改了 pct。切在 10-09 会让 analyze() 里 "
+                "pct 的 t7 / t30 样本从 1674 / 1104 清零到 11 月初 / 12 月初；且旧世代本身就是 AV / Yahoo 两种新闻刻度按天混，"
+                "切掉代码边界也去不掉那一层。pct 只用于探索性 IC 报告：生产评分不读世代，维度 IC 预注册检验（H1）"
+                "读的是 10-12 起的 buzz_v1，两种做法下都不受影响。"),
+        "known_counter_evidence": ("固定走 Yahoo 的 5 只（TMUS/ENPH/NFLX/NEE/SNOW）在 10-09 前后横截面位置变了："
+                                   "新闻分相对其余 25 只的落差 −25.0 → −5.0（AV 窗 09-28~10-02 → Massive 窗 10-09~10-19），"
+                                   "pct 落差 −6.1 → −2.9、日内分位 0.29 → 0.40；而 Massive 相对 AV 的整体水平几乎没动"
+                                   "（均值 +1.5、中位 −1.0）⇒ 变的是这 5 只的**相对位置**，逐日横截面 rank IC 吃的正是它。"
+                                   "（sentiment-pct-buzz 会话 10-20 实测，生产库只读副本、未做显著性检验、混有行情。）"
+                                   "这 5 只每天走 Yahoo 是因为 AV 配额只够 25 只。"),
+        "recheck_when": "10-09 之后 sentiment.pct 已结算的 t7 交易日 ≥ 10（逐日 IC 的出数门槛）",
+        # 第 10 个交易日 10-22 + 7 个交易日 = 11-02 结算，次日回填（`is_trading_day.add_trading_days`；漏扫一天就顺延）
+        "recheck_on_or_after": "2026-11-03",
+        "how": ("临时把 sentiment.pct 加进 COHORT_SIGNAL_SCOPE['v0.45.445'] 跑 `--analyze`，得 10-09 起的新世代 IC，"
+                "与缺省（池化）结果比；同时按上面 5 只是否进 / 出两端分位看排序。新世代与全史同号、且新世代自身不在"
+                "噪音带外反号 ⇒ 维持池化；否则切。"),
+    },
 }
 
 
@@ -2827,6 +2862,13 @@ def _print_generations(rows: List[Dict], generations: Dict) -> None:
         print(f"    ⚠️ 未声明影响面的边界（已按全部信号切，原始观测在白丢样本）："
               f"{', '.join(generations['undeclared_versions'])} —— "
               f"去 signal_archive.COHORT_SIGNAL_SCOPE 补声明")
+    today = datetime.date.today().isoformat()
+    for s, rec in sorted(DELIBERATELY_POOLED.items()):
+        if s not in sigs:
+            continue
+        due = "⏰ 已到复检日" if today >= rec["recheck_on_or_after"] else f"复检日 ≥ {rec['recheck_on_or_after']}"
+        print(f"    ⚠️ 刻意池化：{s} 跨 {rec['boundary']} 混算（已知该边界改了它的值）—— {due}；"
+              f"条件：{rec['recheck_when']}。详见 signal_archive.DELIBERATELY_POOLED")
     print()
 
 

@@ -68,7 +68,27 @@
   `alphabot_state/intraday/2026-10-20/*.jsonl`（07:52~07:53，散落在互不相关的测试里——并发写入者，不是测试写的）。
 - 相关 8 个文件 207 passed；指纹六单元与最后一条确认一致；拨钟审计（新测试 +7 / +45 天）新红 0；ruff 全绿。
 
-## [0.45.565] — 2026-10-20 — 占位（进行中：signal_archive 的 sentiment.pct 改为 buzz.comp.* 的 self 边下游，补切 v0.45.445（10-09）世代，用户 10-20 批准）
+## [0.45.565] — 2026-10-20 — Changed：`sentiment.pct` 跨 v0.45.445 **刻意池化**（用户 2026-10-20 定：先不切、11 月复检）——新增 `signal_archive.DELIBERATELY_POOLED` 登记理由 / 已知反证 / 复检条件，`--analyze` 世代报告点名、到复检日 `ic_rerun_readiness` 出 attention
+
+> 起因：v0.45.561 的 AST 对账发现 `sentiment.pct`（= `int(Buzz 合成值)`，新闻通道权重 0.25）被 10-09 的 v0.45.445（新闻主源 AV → Massive）改了值，却登记为叶子、钉在 `NEVER_SLICED_TODAY`。只读审计（sentiment-pct-buzz 会话，报告 `side-session-notes/local_415c9e15…/sentiment-pct-generation-audit.md`）：补切会让 `analyze()` 里它的 t7 / t30 样本 1674 / 1104 → 0，到复检条件满足前不出数；生产评分、维度 IC H1/H2（445 早于 FORWARD_START 10-12）、buzz_v1 自证、`assess()` 都不受影响。
+> 决定经过如实记录：用户在审计会话里先选了「切（结构修法）」，该会话做出了草稿（分支 `claude/gifted-hawking-5866b0` 的 `72137325`，**未合入、未推送**）；随后在本会话改定「先不切」，并要求停掉那个会话、本号改做本条。草稿保留在分支上供复检决定切时取用。
+
+### Changed — `signal_archive.py`
+- 新增 `DELIBERATELY_POOLED`：`{信号: {boundary, changed_via, why, known_counter_evidence, recheck_when, recheck_on_or_after, how}}`。与 v0.45.256「实测没换 ⇒ 照证据不列」不同：这里**已知换了**，不切是取舍。
+  - `sentiment.pct`：边界 v0.45.445（经 `buzz.comp.news_signal`）；不切的理由 = 切了 t7/t30 清零到 11 月初 / 12 月初、旧世代本就是 AV / Yahoo 两种新闻刻度按天混（切代码边界去不掉那层）、它只服务探索性 IC 报告。
+  - **已知反证照录**：固定走 Yahoo 的 5 只（TMUS/ENPH/NFLX/NEE/SNOW；AV 配额只够 25 只）10-09 前后横截面位置变了——新闻分相对其余 25 只的落差 −25.0 → −5.0、pct 落差 −6.1 → −2.9、日内分位 0.29 → 0.40，而 Massive 相对 AV 的整体水平几乎没动（均值 +1.5、中位 −1.0）⇒ 变的是相对位置，逐日 rank IC 吃的正是它（审计会话实测，未做显著性检验、混有行情）。复检以此为基线。
+  - 复检条件：10-09 之后已结算的 t7 交易日 ≥ 10（逐日 IC 出数门槛）；最早 **2026-11-03**（第 10 个交易日 10-22，`is_trading_day.add_trading_days` + 7 = 11-02 结算，次日回填；漏扫顺延）。复检做法写在 `how`：临时点名跑 `--analyze` 得新世代 IC 与池化结果比，并看那 5 只的分位。
+- `--analyze` 世代报告逐条打印「⚠️ 刻意池化：<信号> 跨 <边界> 混算 —— 复检日 ≥ … / ⏰ 已到复检日」。
+- `SIGNAL_LEAVES` 里 `sentiment.pct`、`COHORT_SIGNAL_SCOPE["v0.45.445"]` 各加注释：不是真叶子、刻意不点名、复检决定切时的结构修法（`Edge("buzz.comp.*", "self")`）。
+
+### Changed — `ic_rerun_readiness.py`
+- `build_attention(..., today=None)` 新增 `_pooled_recheck_attention`：外壳业务日 ≥ `recheck_on_or_after` ⇒ 每条一个 warn（id `ic_rerun.deliberately_pooled.<信号>`），周度任务经 `attention[]` 看得到。按传入的 `--today` 判、**不读真实钟**（`today=None` ⇒ 不判）——否则就是拨钟审计专抓的「今天绿、某天红」。`main()` 两处调用都传业务日。读不到登记表（本工具有只带 `step_contract` 的最小运行环境）⇒ 一条 warn `ic_rerun.deliberately_pooled.unavailable`，不抛——初版直接 `import` 让 `test_ic_rerun_fg_budget.py` 的 8 条真进程树用例里整个工具退出码 3，全套测试抓到后改。
+
+### 验证
+- 新增 `TestDeliberatelyPooled`（6 条：登记表读不到时只出 warn 不抛 / 记录完整 / 边界确实点名了 `changed_via` 且它确是 pct 的输入（读 buzz_bee 源码）/ 确实没被切 / attention 只在复检日及之后出 / 报告点名）+ `test_step_contract_ic_rerun.py::TestOkPath::test_deliberately_pooled_recheck_reaches_the_envelope`（端到端：`--today` 前一天无、当天有）。
+- **变异 7/7 变红**（文件逐字节还原）：真切了却没删记录 / attention 不接 / attention 偷读真实钟 / 报告不打印 / `changed_via` 写成边界没点名的通道 / 复检日早于边界 / `main()` 不传业务日。⚠️ 本仓 pytest 配置遇首个失败即停，变异脚本初版只数 `FAILED` 行，把「语法错导致 ERROR」和「被前一条失败挡住」读成了存活，改为看退出码后才得到 7/7。
+- 全部 70 个现役信号世代起点、逐条边界影响面前后**逐字相同**（本条不改依赖边、不改任何边界范围）；维度 IC H1/H2 不受影响。
+- 未改：08-26 v0.45.2~15 不补点名 `buzz.comp.volatility_signal`（审计会话实测会让它 t7 1674 → 808；用户本次只定了 pct，维持现状）。
 
 ## [0.45.564] — 2026-10-20 — Changed（用户 10-20 两项决定）：`volatility_20d` 最少根数 20 → 19（一个月只有 19 个交易日的天不再所有标的整天缺波动率）；buzz_v1 自证跳过协议排除日（坏数据有了正规出路）；查明 08-27 复现不出的原因是 `--date` 补跑路径用 60 天窗口（未改，待定）
 
