@@ -5,7 +5,30 @@
 
 ---
 
-## [0.45.567] — 2026-10-20 — 占位（进行中：v0.45.559 二次检查——等价判据把出错的 Buzz（归档里 details == {}）误判为不等价，部署日任一 Buzz 出错会误报 boundary_too_early）
+## [0.45.567] — 2026-10-20 — Fixed：v0.45.559 二次检查——世代边界等价判据把**出错的 BuzzBee** 误判为「证不出等价」，部署当天任何一只 Buzz 出错都会让 Step 11 误报 `boundary_too_early`
+
+### Fixed
+
+- `ic_rerun_readiness._equiv_buzz_volatility_present`：初版按「出错的 Buzz 没有 details ⇒ 等价」判，可 Queen 存 agent_details 时写的是
+  `r.get("details") or {}` ⇒ 出错行在归档里是 **`details == {}` 外加 `error`**、永远「有 details」⇒ 走到「缺 `volatility_20d` 键 ⇒ 证不出」⇒
+  该日记为不等价。新代码的出错路径（`make_error_result` / 无效 ticker）不写印记 ⇒ 等价扫描窗口含印记首见那天 ⇒ 10-20 首跑当天只要一只 Buzz 出错，
+  v0.45.559 的判定就是 `boundary_too_early`（`BOUNDARY_ALARM_VERDICTS` ⇒ 编排器 Step 11 报警）。方向是**误报**、不是放行；生产全史 2228 行出错的 Buzz
+  0 行，所以尚未发生。现改为认 `error`：Buzz 带 `error` ⇒ 两版都不贴 volatility 标签（data_quality 是 `{"source": "error", …}`）⇒ 等价。
+  `_BOUNDARY_EQUIVALENCE["v0.45.559"]` 的说明串同步。`_COHORT_HISTORY` 里 v0.45.559 那条的原因文本**不改写**（已进 main，只追加不改写；
+  它写的「或 Buzz 没有 details」是不完整、不是错，更正记在这里）。
+- 测试为什么没抓到：`tests/test_buzz_volatility_dq_label.py` 的夹具把出错行**手写**成「没有 details」——生产里不存在的形状，正好把 bug 藏住
+  （同「夹具让生产值不可达」）。夹具改成生产形状（`details: {}` + `error`），另加 `TestJudgeOnRealQueenRecords`：真实 BuzzBee（真触发 TypeError 走
+  `make_error_result`）→ 真实 `queen.distill` → 判据 / 印记 / 判定器，钉住「出错行 `details == {}`」与「部署日一只 Buzz 出错仍是 `matches`」。
+  变异：拿掉 `error` 分支 ⇒ 3 条红（含两条真实 Queen 记录的）。共 33 条。
+
+### 二次检查里核过、没有问题的
+
+- NaN 波动率：BuzzBee 的阈值比较对 NaN 全为 False 会落进「低波动 75」分支，但 `volatility_20d` 的每个计算点（`data_pipeline` 三处 yfinance、`cache` 一处、
+  Twelve Data 复权回落）都先滤掉 NaN / inf，其余赋值点只转抄这些结果 ⇒ 到不了 Buzz。
+- 合成回退的 Buzz 条目多了 `details`（只含印记）：生产读者全用 `.get`；`report_formatters._build_sentiment` 进入 details 分支后每行都有
+  `is not None` 守卫 ⇒ 渲染不变。
+- 同日三条边界（537 / 538 / 559）Step 11 都核（`boundary_evidence_status` 取末条同日全部）；537 / 538 生产实测已 `matches`，559 现为 `no_evidence_yet`。
+- `data_quality_grade` 只看维度覆盖度、不读标签 ⇒ 不是 559 的读者。
 
 ## [0.45.566] — 2026-10-20 — 占位（进行中：`--date` 补跑路径的行情字段改用与实时扫描相同的一个月窗口——此前波动率按 as_of 前 60 天的全部日线（约 40 根）算，与实时（约 21 根）不是同一个量；用户 10-20：「现在修补跑路径的 60 天窗口」）
 

@@ -1459,11 +1459,19 @@ def _equiv_buzz_volatility_present(d: dict) -> bool:
 
     本版只改 `volatility_20d is None` 那一种情形下 BuzzBee 的 `data_quality["volatility"]`（"real" → "unavailable"），
     分 / 方向 / 置信度 / 通道都不变。Buzz details 的 `volatility_20d` 不是 None ⇒ 本版改动在这份记录上是空操作 ⇒ 等价。
-    Buzz 没有 details（异常兜底 `make_error_result`、日报合成回退）⇒ 两版都不贴 volatility 标签、同一条路 ⇒ 也等价。
-    有 details 却没有 `volatility_20d` 键 ⇒ 证不出（举证责任在放宽一侧）。
+    另外三种形状两版走同一条路、都不贴 volatility 标签 ⇒ 也等价：
+      · Buzz 带 `error`（`make_error_result` 的 data_quality 是 {"source": "error", …}；无效 ticker 同理）。⚠️ 认 `error`
+        而不是「没有 details」：Queen 存 agent_details 时写的是 `r.get("details") or {}` ⇒ 出错的 Buzz 在归档里是
+        `details == {}`、永远「有 details」（二次检查实测；初版按「没有 details」判，出错行会被误判成不等价 ⇒ 误报
+        boundary_too_early——新代码的出错行也不带印记，部署当天任何一只 Buzz 出错就会红）；
+      · 本行没有 Buzz（Queen 没拿到它的结果）；
+      · Buzz 没有 details（日报合成回退的旧记录：不经 Queen、不贴 DQ）。
+    有 details、没有 `error`、却没有 `volatility_20d` 键 ⇒ 证不出（举证责任在放宽一侧）。
     判据与代码同一个条件（`is not None`，不是「有限数」）：NaN 在两版里都标 real。"""
     b = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("BuzzBeeWhisper")
-    det = b.get("details") if isinstance(b, dict) else None
+    if not isinstance(b, dict) or b.get("error"):
+        return True
+    det = b.get("details")
     if not isinstance(det, dict):
         return True
     return "volatility_20d" in det and det["volatility_20d"] is not None
@@ -1531,7 +1539,7 @@ _BOUNDARY_EQUIVALENCE = {
     "v0.45.423": ("BuzzBee details.volatility_20d 是有限数（volume_ratio 来自 yfinance、没走 Twelve Data 兜底）且日线缺口"
                   "全补上（Oracle hv_gap ⊆ hv_gap_filled；383 首跑前读其冻结证据）",
                   _equiv_td_session_bar, _oracle_row_has_td_session_marker),
-    "v0.45.559": ("BuzzBee details.volatility_20d 不是 None（或 Buzz 没有 details）⇒ 本版改动是空操作",
+    "v0.45.559": ("BuzzBee details.volatility_20d 不是 None（或 Buzz 出错 / 不在本行 / 没有 details）⇒ 本版改动是空操作",
                   _equiv_buzz_volatility_present, _buzz_row_has_volatility_dq_marker),
 }
 

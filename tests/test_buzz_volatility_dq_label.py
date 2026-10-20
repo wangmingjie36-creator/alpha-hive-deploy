@@ -49,12 +49,13 @@ def buzz(monkeypatch, stub_reddit):
     monkeypatch.setattr(fear_greed, "get_fear_greed", lambda: dict(_CNN_FG))
     monkeypatch.setattr(nc, "get_ticker_news", lambda ticker, max_articles=10: dict(_NEWS))
 
-    def run(**overrides):
+    def run(allow_error=False, **overrides):
         stock = {**_STOCK, **overrides}
         monkeypatch.setattr(_swarm_cache, "_fetch_stock_data",
                             lambda ticker, target_date=None: dict(stock))
         r = BuzzBeeWhisper(PheromoneBoard()).analyze("NVDA")
-        assert "error" not in r, r.get("error")
+        if not allow_error:
+            assert "error" not in r, r.get("error")
         return r
     return run
 
@@ -138,16 +139,25 @@ _V = "v0.45.559"
 _MARK = "volatility_dq_from_value"
 
 
-def _brow(*, vol20=22.5, new=False, details=True, backfill=False):
-    """一只标的的蒸馏结果（只放判据 / 印记读的字段）。"""
+def _brow(*, vol20=22.5, new=False, shape="ok", backfill=False):
+    """一只标的的蒸馏结果（只放判据 / 印记读的字段）。
+
+    shape：``ok`` = 正常；``errored`` = 生产里出错的 Buzz（Queen 写 `details: r.get("details") or {}` ⇒ **`{}` 不是缺键**，
+    外加 `error`——二次检查前这里手写成「没有 details」，那个形状生产里不存在，正好把判据的 bug 藏住了）；
+    ``synthetic_old`` = 日报合成回退的旧记录（不经 Queen、没有 details、没有 error）。真实 Queen 产出的形状另见
+    `TestJudgeOnRealQueenRecords`。"""
     agents = {}
-    if details:
+    if shape == "ok":
         det = {"volatility_20d": vol20, "volume_ratio": 1.1}
         if new:
             det[_MARK] = True
         agents["BuzzBeeWhisper"] = {"score": 5.0, "details": det}
+    elif shape == "errored":
+        agents["BuzzBeeWhisper"] = {"score": 5.0, "details": {}, "error": "TypeError: boom"}
+    elif shape == "synthetic_old":
+        agents["BuzzBeeWhisper"] = {"score": 5.0, "discovery": ""}
     else:
-        agents["BuzzBeeWhisper"] = {"score": 5.0, "error": "boom"}
+        raise ValueError(shape)
     if backfill:
         agents["GuardBeeSentinel"] = {"details": {"vix_term_structure": {"macro_as_of_mode": "backfill"}}}
     return {"agent_details": agents}
@@ -226,11 +236,14 @@ class TestEquivalenceJudge:
         (_brow(vol20=0.0), True),                # 0.0 是值
         (_brow(vol20=float("nan")), True),       # NaN 在两版里都标 real（判据与代码同一条件 `is not None`）
         (_brow(vol20=None), False),              # 本版改标签的那一种
-        (_brow(details=False), True),            # Buzz 异常兜底：两版都不贴 volatility 标签
+        (_brow(shape="errored"), True),          # Buzz 异常兜底：两版都不贴 volatility 标签（生产形状 details == {}）
+        (_brow(shape="synthetic_old"), True),    # 日报合成回退旧记录：不经 Queen、不贴 DQ
+        ({"agent_details": {}}, True),           # 本行没有 Buzz
         ({"agent_details": {"BuzzBeeWhisper": {"details": {"volume_ratio": 1.1}}}}, False),   # 缺键 ⇒ 证不出
-    ], ids=["present", "zero", "nan", "none", "no_details", "key_missing"])
+        ({"agent_details": {"BuzzBeeWhisper": {"details": {}}}}, False),                       # 空 details 且没出错 ⇒ 证不出
+    ], ids=["present", "zero", "nan", "none", "errored", "synthetic_old", "no_buzz", "key_missing", "empty_no_error"])
     def test_judge(self, row, expect):
-        """变红的变异：判据恒真（`volatility_20d is None` 的旧记录也放行）/ 恒假。"""
+        """变红的变异：判据恒真（`volatility_20d is None` 的旧记录也放行）/ 恒假 / 拿掉 `error` 分支（errored 变 False）。"""
         import ic_rerun_readiness as rr
         assert rr._equiv_buzz_volatility_present({"swarm_results": row}) is expect
 
@@ -261,3 +274,42 @@ class TestBoundaryVerdict:
         _write(tmp_path, "2026-10-20", {"AAA": _brow(new=True), "BBB": _brow(new=True)})
         ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
         assert ev["verdict"] == "boundary_too_early" and ev["unmarked_after_boundary"] == ["2026-10-19"], ev
+
+
+class TestJudgeOnRealQueenRecords:
+    """判据 / 印记吃的是**真实 Queen** 写进 agent_details 的形状（真实 BuzzBee → `queen.distill`），不是手写夹具。
+
+    二次检查（v0.45.559）的教训：初版等价判据按「出错的 Buzz 没有 details」判，测试夹具也照这个想象手写 ⇒ 全绿；
+    可 Queen 存的是 `r.get("details") or {}`，出错行在归档里是 `details == {}` ⇒ 判据说「证不出」⇒ 部署当天任何一只
+    Buzz 出错（新代码的出错行也不带印记）都会让 Step 11 误报 boundary_too_early。"""
+
+    def _record(self, queen, result):
+        return {"swarm_results": queen.distill("NVDA", [result])}
+
+    def test_errored_buzz_record_is_equivalent_and_unmarked(self, queen, buzz):
+        import ic_rerun_readiness as rr
+        err = buzz(allow_error=True, volume_ratio="not-a-number")     # 真实 TypeError ⇒ make_error_result
+        assert err.get("error"), "没走到异常兜底——本测试就测不到出错形状"
+        rec = self._record(queen, err)
+        b = rec["swarm_results"]["agent_details"]["BuzzBeeWhisper"]
+        assert b["details"] == {} and b["error"], b                    # 钉住生产形状：空 dict，不是缺键
+        assert rr._buzz_row_has_volatility_dq_marker(rec) is False      # 出错路径不写印记
+        assert rr._equiv_buzz_volatility_present(rec) is True           # …所以必须靠判据认作等价
+
+    def test_success_record_with_missing_volatility_is_marked(self, queen, buzz):
+        import ic_rerun_readiness as rr
+        rec = self._record(queen, buzz(volatility_20d=None))
+        assert rec["swarm_results"]["data_quality"]["BuzzBeeWhisper"]["volatility"] == "unavailable"
+        assert rr._marker_buzz_volatility_dq_from_value(rec) is True
+        assert rr._equiv_buzz_volatility_present(rec) is False          # 旧代码遇到它会改标签 ⇒ 不等价（新代码靠印记跳过）
+
+    def test_deploy_day_with_an_errored_buzz_still_matches(self, tmp_path, queen, buzz):
+        """部署当天一只 Buzz 出错：其余带印记、出错那只无印记但等价 ⇒ 仍是 matches。
+        变红的变异：拿掉判据里的 `error` 分支（⇒ boundary_too_early）。"""
+        import ic_rerun_readiness as rr
+        err = self._record(queen, buzz(allow_error=True, volume_ratio="not-a-number"))["swarm_results"]
+        ok_new = self._record(queen, buzz())["swarm_results"]
+        _write(tmp_path, "2026-10-19", {"AAA": _brow(), "BBB": _brow(shape="errored")})
+        _write(tmp_path, "2026-10-20", {"AAA": ok_new, "BBB": err})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V)
+        assert ev["verdict"] == "matches" and ev["marker_first_seen"] == "2026-10-20", ev
