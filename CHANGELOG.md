@@ -70,7 +70,48 @@
 - 全量：**10652 passed**、1 failed、0 error（611s）。唯一 failed = 经济日历覆盖不足（BLS / BEA 2027 日程未发布，既有设计内告警，无关）；全量期间未改 worktree。
 - 相关 9 个文件 416 passed；拨钟审计（556 / 557 / 562 涉及的 8 个测试文件 +7 / +45 天）确认的新红 0；ruff 全绿；指纹六个单元全部与最后一条确认一致。
 
-## [0.45.561] — 2026-10-20 — 占位（进行中：signal_archive 依赖表拆 ml.* 为逐信号条目 + 依赖边加生效区间 + 双向守卫，根治 ml.expected_* 被无关世代边界白切）
+## [0.45.561] — 2026-10-20 — Fixed：`signal_archive` 依赖表的三层根因——`ml.*` 通配拆成逐信号条目、依赖边加生效区间（闭包按边界当天的边走）、读同伴的边改成对全部蜂 AST 双向对账；`ml.expected_7d/30d` 与 Rival 方向不再被无关边界白切（起点 10-09 → 09-07）
+
+> 用户 2026-10-20 定：世代边界维持 v0.45.538 只点名 Rival 分、不补 `ml.*`，并要求从根因解决 `ml.expected_*` 被无关边界（如 10-09 的 v0.45.445 换 Buzz 新闻源）反复白切。
+> **只改元数据与测试，不改任何生产评分代码、不加 `_COHORT_HISTORY` 条目**（没有信号换定义）。
+
+### 根因（三层）
+1. **粒度太粗**：`SIGNAL_UPSTREAM["ml.*"]` 一个通配把已退役的 `ml.probability`（读拥挤度 + Phase-1 方向 + Chronos 分）与 `ml.expected_7d/30d`（只读 Chronos 分；动量是原始行情）捆在一起 ⇒ 拥挤度 / 同伴方向的每条边界都切 `ml.expected_*`。
+2. **没有时间维度**：`_scope_closure` 用**当前**的表闭包**全部历史**边界 ⇒ 删一条已不存在的边会让早先边界对旧数据的闭包悄悄缩小（v0.45.441 因此不敢删 `consensus_strength ← 同伴方向`），留着它又让此后的边界经它白切下游（10-09 的 445 ⇒ Buzz 方向 ⇒ consensus_strength ⇒ 拥挤度 ⇒ …）。
+3. **守卫只单向、只管 Bear**：`TestBearPeerReadsAreEdges` 只查 Bear 两个方法的 `.direction`、只问「读了没登记」；本次的毛病是**多边**，它恒绿。
+
+### Changed — `signal_archive.py`
+- 依赖边改为 `Edge(up, via, since, until)`：`via` ∈ peer / census / self / formula / aggregate（前两类由 AST 守卫对账）；`[since, until)` 是扫描日期。新增 `edge_active()` / `active_upstream()`；`_scope_closure(..., on=日期)`，`generation_boundaries` 按每条边界的日期传 `on`（`on=None` = 任一时刻生效过即算，只给不带日期的探查用）。
+- 逐信号登记：`ml.expected_7d/30d ← agent.ChronosBeeHorizon.score`（peer，自 2026-08-17）；`agent.RivalBeeVanguard.direction ← ml.expected_*`（self）；`agent.RivalBeeVanguard.score` 与 `bear.score` 挂退役概率的上游（`_ML_PROBABILITY_READS`：拥挤度 formula + 全部 Phase-1 方向 census + Chronos 分 peer，区间 [08-17, 10-19)）——`ml.probability` 不在信号宇宙里（抽取器已摘除，历史行仍按「不认识 ⇒ 受全部边界约束」处理，故不能当节点）。
+- `crowding.comp.consensus_strength ← 同伴方向` 加止期 2026-10-09（v0.45.441 起 Scout `peer_census=False`）。
+- 补登此前漏掉的边（都不挪任何当前起点）：`agent.GuardBeeSentinel.* ← guard.macro_adj`（self，`score + macro_adj`）；`bear.score ← agent.BuzzBeeWhisper.direction`（Buzz 看空 ⇒ news_bear 下限 5.5，**AST 双向对账找出**）、`← sentiment.pct`、`← catalyst.nearest_days`、`← Scout/Oracle/Buzz 的 score`（只进看空理由文字，LLM 模式下进提示词）、`← 全部前序蜂的分与方向`（census，LLM 看空论点）。
+- `COHORT_SIGNAL_SCOPE`：拆 `ml.*` 后，原先经 `ml.*`（含 probability）带出 Rival 的三条边界显式点名 Rival——`v0.44.1~0.44.3` 加 `agent.RivalBeeVanguard.*`、`v0.45.151` 加 `agent.RivalBeeVanguard.score`；`v0.45.50` 的 `ml.*` 收窄为 `agent.RivalBeeVanguard.score`（② 训练集与 Rival 自算拥挤度的 None 处理只进概率）。各条注释里「下游含 ml.*」的说法更正。
+
+### 历史考据（`git log -S` / `git show`）
+- **08-17 之前**：`rival_bee.py` 写死 `crowding_score=50.0`、`catalyst_quality="B+"`（`86108031`、`4f48da71^` 均如此），Rival 在 Phase-1 并行、读不到同伴 ⇒ `expected_7d = 8.0 + 0.8×动量`（CHANGELOG v0.44.1 实测 1057 配对零反例），**不读任何系统输出**。
+- **08-17（v0.44.1~0.44.3，同一条边界）**：v0.44.1 去偏时曾加以 50 为中心的拥挤度倾斜，v0.44.2 同日否决（「拥挤度不再进入 `expected_returns`」）并开始传真实拥挤度（只进概率）；v0.44.3 移到 Phase-1.5、催化剂档改读 Chronos 分。代码 08-16 写成、08-26 才补提交（`4f48da71` / `5130e8a5`，生产当时跑开发检出工作区）——日期沿用 `_COHORT_HISTORY` 的 08-17。
+- **之后**：`expected_returns` 函数体 `4f48da71` → HEAD 逐字相同；`_CATALYST_MAGNITUDE` / `_HORIZON_SCALE` 不变；`catalyst_quality_from_score` 的阈值在 v0.45.142 只是从 if 链搬成表（`b19167c2` diff 同值）；HGB / Simple / SGD 三个模型类的 `predict_return` 都委托 `expected_returns`（`4f48da71`、`bdffa1cc^`）。唯一改动 = v0.45.151（09-07，Chronos 读不到时给 None 不给 "B"、`_read_peer` 走定点索引），已在表。
+- Bear 读 Rival / Chronos / Buzz 的代码早于归档起点（`git log -S` 最早 02-24~03-09）⇒ `since=None`。
+
+### 世代起点变动（`generation_boundaries` 对全部 70 个现役信号，前后对比）
+| 信号 | 之前 | 之后 | 依据 |
+|---|---|---|---|
+| `ml.expected_7d` / `ml.expected_30d` | 10-09 v0.45.445 | **09-07 v0.45.151**（早 32 天） | 只读 Chronos 分；Chronos 分最后一次被点名是 08-26；09-07 之后没有边界改它的输入或公式（v0.45.538 CHANGELOG：逐位不变） |
+| `agent.RivalBeeVanguard.direction` | 10-09 v0.45.445 | **09-07 v0.45.151**（早 32 天） | 方向 = sign(expected_7d + 30d)，EPS / 技术指标回落读原始行情；概率从未进方向 |
+| `crowding.score/signal/adj_factor`、`crowding.comp.consensus_strength`、`agent.ScoutBeeNova.score/direction`、`bear.insider_bear` | 10-09 v0.45.445 | 10-09 **v0.45.441**（日期不变，只换标签） | 同日 445 不再经已止的 consensus_strength 边传下来；441 本身直接点名 Scout / consensus_strength |
+其余 60 个信号起点逐字不变。**维度 IC 协议 H1 / H2**：两组截断信号的世代起点、逐条边界命中、`truncation_point` / `h1_truncation`（均为 None）前后完全相同——它们全是叶子，闭包结构上碰不到。
+逐条边界的影响面（`generation_boundaries(全部, [该条])`，供 `signal_code_fingerprints` 等按单条边界查询的读者）：13 条边界不再命中 `ml.expected_*` + Rival 方向（v0.45.2~15、30、50、128、191、201、279、349、383、423、438、441、445，均经拥挤度 / 同伴方向），445 另不再命中拥挤度链 7 个；v0.43.24（08-15，Guard VIX 改走 CBOE）**新增**命中 Guard / Bear / bear.score / swarm_agreement（新补的 `Guard ← macro_adj` 边；该版本改了 macro_adj、而 macro_adj 直接加进 Guard 分），对当前起点无影响。
+
+### Added — 守卫（`tests/test_signal_archive_generations.py`，62 → 80 条，替换 `TestBearPeerReadsAreEdges`）
+- `TestPeerReadEdgesMatchCode`：AST 枚举各蜂模块全部读板位点（`_read_peer` / `_read_census` / `self.board.*` / `getattr(self.board, …)` / 拥挤度看多数，`peer_census=False` 不算读）及其读了条目的哪些字段（含 details 的键、`return` 出方法后在别处的读取），与位点表双向相等；位点表推出的（下游, 上游）节点对与今天生效的 peer / census 边**按读法分开**逐对相等——漏边、多边都红。
+- `TestEdgeWindows`：区间端点必须当天有边界盖住下游、`generation_boundaries` 按边界日期闭包（合成前后两例）、consensus 止期的两头（349 照传、445 不传）、`ml.expected_*` 不被 30/349/441/445/538 切、其起点必须来自点名它或 Chronos 分的边界。
+- `TestRivalExpectedReturnsIgnorePeers`：只改同伴方向 / 分 / 拥挤度（两条取数路都换掉），`expected_3d/7d/30d` 与方向逐位不变；正对照：只改 Chronos 分（B+ → A+）必须变。
+- **变异 13/13 变红**（文件逐字节还原）：删真边 / 加假边（peer 与 formula 各一）/ 删 Bear insider 边 / 删本版补的 Bear←Buzz 方向边 / consensus 止期挪到无边界日 / 去掉止期 / 闭包忽略日期 / Rival 新读 Scout 方向 / Rival 把拥挤度掺进动量 / Scout 恢复数看多同伴 / Bear 新读一个 details 键 / Guard 普查不再读 self_score。初版有两个存活变异（节点对跨读法并集比、`generation_boundaries` 不传日期无人测），已补成按读法分开比 + 合成日期用例后才 13/13。
+
+### 已核、未改（待用户决定）
+- **`sentiment.pct` 没被 v0.45.445 切**：它是 Buzz 的 `int(sentiment_composite)`，合成值里新闻通道权重 0.25 ⇒ 换新闻源改了它的值，但它登记为叶子、且在 `NEVER_SLICED_TODAY` 里被钉成「从不切」（v0.45.2~15 改 Buzz 时同理）。它是 H1 冻结层信号、也是「唯一可交易信号」那条 sentiment——补点名会挪它的起点，故只报告不改。445 早于 `FORWARD_START`（10-12），不截断 H1。
+- `bear.options_bear` 读 Oracle 的 `details.iv_skew`，v0.45.128（09-05）换了 skew 的 IV 来源却没点名它；当前起点 09-28 晚于 09-05，无现时影响（发布的 `iv_skew` 是否就是被换源的那个量：待验证）。
+- `guard.adj_factor ← crowding.score`（formula 边）仍让 441 过切 Guard 自算的拥挤度（441 只改 Scout 的读法、不改公式）——441 条目原文已声明「宁多切不少切」，未动。
 
 ## [0.45.560] — 2026-10-20 — Fixed：v0.45.555 LLM 影子 A/B 二次检查——同日 `--control` 会覆盖付过费的 `--run` 记录、同一天可以付两次费、子进程可绕过花钱闸、失败的 LLM 请求无处可见
 
