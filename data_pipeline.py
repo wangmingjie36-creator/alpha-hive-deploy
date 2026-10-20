@@ -493,7 +493,7 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
         else:
             data.volume_ratio = None
 
-        if len(hist) >= 20:
+        if len(hist) >= 19:   # v0.45.564：20 → 19，同 `_fetch_history_metrics`（理由见那里）
             returns = hist["Close"].pct_change().dropna()
             if len(returns) >= 2:
                 vol = float(returns.std() * (252 ** 0.5) * 100)
@@ -551,7 +551,11 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
             out["avg_volume"] = int(avg_vol)
             out["volume_ratio"] = recent_vol / avg_vol
 
-        if len(hist) >= 20:
+        # v0.45.564（用户 10-20 定）：门槛 20 → 19 根。`period="1mo"` 的窗口有时只有 19 个交易日（约每年 15 天：1 月新年 +
+        # 马丁路德金日、3 月上中旬接 2 月总统日、6 / 7 月接六月节 / 独立日），门槛 20 让那些天**所有**标的整天缺波动率
+        # （2026-03-10/13、06-22、07-06 归档全是旧缺值哨兵 0.0）。19 根 = 18 个收益，同一个估计量少一个观测；只有这些天从
+        # 缺变有值，其余日子逐位不变。仍不覆盖的：极少数窗口只有 18 根（2020~2035 共 5 天，如 2024-01-22；维度 IC 窗口内没有）。
+        if len(hist) >= 19:
             returns = hist["Close"].pct_change().dropna()
             if len(returns) >= 2:
                 vol = float(returns.std() * (252 ** 0.5) * 100)
@@ -732,11 +736,11 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
 
     - **价**：拆股 + 分红复权（`twelve_data.fetch_adjusted_bars`，`adjust=all`）——yfinance `history()` 缺省
       `auto_adjust=True`。本模块别处的 Twelve Data 日线是**未复权**的，不能拿来补（含除息窗口跨档 28/6900）。
-    - **窗口**：(S − 1 个日历月, S]，左端不含、≥ 20 根；S = 此刻最近一场已收盘（`_latest_closed_session`，即 yfinance
-      主路径会结束的那一天）。上月没有同一天（如 10-31 → 9 月）取上月最后一天。生产归档 08-26~10-16 的正常日
-      30/30 逐行符合这条窗口规则。**先按日历数窗口里的交易日**（v0.45.562）：一个日历月有时只有 19 个（约每年 15 天，
-      如 2027-01-04、每年 3 月上中旬），yfinance 主路径要 ≥ 20 根，那些天对**所有**标的都不出值（2026-03-10/13、06-22、
-      07-06 归档全是旧哨兵 0.0）——回落是同一个量，所以同样不出值，且不白发必被拒的请求。
+    - **窗口**：(S − 1 个日历月, S]，左端不含、≥ 19 根（v0.45.564 前是 20，与主路径同改）；S = 此刻最近一场已收盘
+      （`_latest_closed_session`，即 yfinance 主路径会结束的那一天）。上月没有同一天（如 10-31 → 9 月）取上月最后一天。
+      生产归档 08-26~10-16 的正常日 30/30 逐行符合这条窗口规则。**先按日历数窗口里的交易日**（v0.45.562）：不足门槛
+      就不发请求——主路径那些天同样不出值，回落是同一个量。门槛 20 时一个月只有 19 个交易日的天（约每年 15 天）整天缺
+      （2026-03-10/13、06-22、07-06 归档全是旧哨兵 0.0）；564 起门槛 19，只剩极少数 18 个交易日的天（2020~2035 共 5 天）。
     - **公式**：逐日涨跌幅的样本标准差（ddof=1）× √252 × 100，同 `_fetch_history_metrics`。写在本函数里而不是
       辅助函数里：输入层指纹守卫（`signal_code_fingerprints` 的 price.fields）只认提到这三个行情字段的定义。
     - **S 那一根从哪来**：TD 末根 == S（盘中 / 盘前 / 周末 / 午夜后补跑：S 是前一场，TD 已定稿）⇒ 用 TD 的；
@@ -785,8 +789,8 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
         _log.warning("[%s] 数不了窗口 (%s, %s] 的交易日: %s: %s —— 波动率回落拒收，volatility_20d 留 None",
                      ticker, lo, want, type(e).__name__, e)
         return out
-    if n_sessions < 20:
-        _log.warning("[%s] 窗口 (%s, %s] 只有 %d 个交易日（< 20）：yfinance 主路径同样不出值（日历性缺口，约每年 15 天）"
+    if n_sessions < 19:
+        _log.warning("[%s] 窗口 (%s, %s] 只有 %d 个交易日（< 19）：yfinance 主路径同样不出值（日历性缺口，2020~2035 共 5 天）"
                      "—— 不发请求，volatility_20d 留 None", ticker, lo, want, n_sessions)
         return out
     try:
@@ -818,8 +822,8 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
         return out
 
     closes = [c for day_, c in series if lo < day_ <= want]
-    if len(closes) < 20:
-        _log.warning("[%s] Twelve Data 复权日线窗口 (%s, %s] 只有 %d 根（需 ≥ 20）—— 波动率回落拒收，volatility_20d 留 None",
+    if len(closes) < 19:
+        _log.warning("[%s] Twelve Data 复权日线窗口 (%s, %s] 只有 %d 根（需 ≥ 19）—— 波动率回落拒收，volatility_20d 留 None",
                      ticker, lo, want, len(closes))
         return out
     rets = [b / a - 1 for a, b in zip(closes[:-1], closes[1:])]
@@ -975,7 +979,7 @@ class YFinanceSource:
                 data.volume_ratio = recent_vol / avg_vol
                 data.volume_source = "yfinance"
 
-            if len(hist) >= 20:
+            if len(hist) >= 19:   # v0.45.564：20 → 19，同 `_fetch_history_metrics`（理由见那里）
                 returns = hist["Close"].pct_change().dropna()
                 if len(returns) >= 2:
                     vol = float(returns.std() * (252 ** 0.5) * 100)

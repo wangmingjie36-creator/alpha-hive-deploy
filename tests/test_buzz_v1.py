@@ -315,6 +315,42 @@ class TestSelfProof:
         res = B.self_proof(str(_proof_db(tmp_path)), end="2026-10-25", history=[(stop, "vF", "")])
         assert not res["ok"] and "H1 窗口起点" in res["error"] and res["stopped_by"]["date"] == stop
 
+    @staticmethod
+    def _with_bad_row(tmp_path, day):
+        """`_proof_db` 再加一行：某天某票有生产分、却一个通道都没归档（自证 ② 缺输入）。"""
+        db = _proof_db(tmp_path)
+        con = sqlite3.connect(db)
+        con.execute("INSERT INTO predictions VALUES (?,?,?)", (day, "ZZZ", json.dumps({"sentiment": 5.0})))
+        con.commit()
+        con.close()
+        return db
+
+    def test_protocol_excluded_day_is_skipped_and_reported(self, tmp_path):
+        """v0.45.564（用户 10-20 定）：排除日不进 H1 检验，自证不替它担保——坏行落在排除日上不再让自证永远不过；
+        跳过了哪天、几行照样报出来。判别：同一个库不给排除名单就红。"""
+        db = self._with_bad_row(tmp_path, "2026-09-30")
+        ok = B.self_proof(str(db), end="2026-10-02", history=[], excluded_days=["2026-09-30"])
+        assert ok["ok"] and ok["excluded_days"] == ["2026-09-30"] and ok["n_excluded"] == 1, ok
+        assert ok["n"] == 4, "排除日那一行不计入比对行数"
+        bad = B.self_proof(str(db), end="2026-10-02", history=[], excluded_days=[])
+        assert not bad["ok"] and bad["n_missing"] == 1 and bad["excluded_days"] == [] and bad["n_excluded"] == 0
+
+    def test_default_exclusions_come_from_the_protocol_list(self, monkeypatch, tmp_path):
+        db = self._with_bad_row(tmp_path, "2026-09-30")
+        monkeypatch.setattr(signal_archive, "FORWARD_TEST_EXCLUDED_DAYS", {"2026-09-30": {"version": "vX"}})
+        res = B.self_proof(str(db), end="2026-10-02", history=[])
+        assert res["ok"] and res["excluded_days"] == ["2026-09-30"], res
+
+    def test_excluded_day_channels_still_serve_as_references(self, tmp_path):
+        """只跳过「比对哪些行」，不跳过「读哪些输入」：排除日的归档通道照样当 3 日参照（生产当时就是这么算的）。"""
+        ch_ref, ch_now = _FLAT, _with(130.0)
+        want = B.score(ch_now, None, int(B.composite(ch_ref)))["score"]
+        rows = _chan_rows("2026-10-12", "T", ch_ref) + _chan_rows("2026-10-15", "T", ch_now)
+        db = _db(tmp_path, rows, preds=[("2026-10-12", "T", 1.0), ("2026-10-15", "T", want)])
+        res = B.self_proof(str(db), end="2026-10-16", history=[], excluded_days=["2026-10-12"])
+        assert res["ok"] and res["n"] == 1 and res["n_excluded"] == 1, res
+        assert B.momentum_adj(int(B.composite(ch_now)) - int(B.composite(ch_ref))) != 0, "前提：参照确实改变了分数"
+
     def test_default_history_goes_through_the_signal_archive_hook(self, monkeypatch):
         """边界表与执行器的截断判定同一个入口（`signal_archive._cohort_history`），替换它两边一起变。"""
         self._scope_vf(monkeypatch)

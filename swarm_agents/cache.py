@@ -223,7 +223,7 @@ def _fetch_stock_data(ticker: str, target_date: Optional[str] = None) -> Dict:
                 data["avg_volume"] = int(avg_vol)
                 data["volume_ratio"] = recent_vol / avg_vol if avg_vol > 0 else 1.0
 
-            if len(hist) >= 20:
+            if len(hist) >= 19:   # v0.45.564：20 → 19，同 data_pipeline._fetch_history_metrics（一个月有时只有 19 个交易日）
                 returns = hist["Close"].pct_change().dropna()
                 if len(returns) >= 2:
                     _vol = float(returns.std() * (252 ** 0.5) * 100)

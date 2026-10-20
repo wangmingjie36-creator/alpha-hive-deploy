@@ -287,23 +287,94 @@ class TestWindow:
         got = _fill(session_close=("2026-01-15", items[-1][1])).volatility_20d
         assert got == pytest.approx(_pandas_vol(_window(items, "2025-12-15", "2026-01-15")), abs=1e-9)
 
-    def test_month_with_only_19_sessions_sends_no_request(self, monkeypatch, caplog):
-        """v0.45.562：(02-10, 03-10] 只有 19 个交易日（02-16 休市）——yfinance 主路径要 ≥ 20 根，那些天对所有标的
-        都不出值（生产 03-10 归档全是旧哨兵 0.0）。回落同样不出值，且**不发请求**（此前 30 只各发一次、全被拒）。"""
+    def test_month_with_19_sessions_now_gets_a_value(self, monkeypatch):
+        """v0.45.564（用户 10-20 定门槛 20 → 19）：(02-10, 03-10] 只有 19 个交易日（02-16 休市）——门槛 20 时主路径与回落
+        都整天不出值（生产 03-10 归档全是旧哨兵 0.0）。现在 19 根照算，与主路径同一个量。"""
         _freeze(monkeypatch, 2026, 3, 10, 17, 15)
-        http = _HTTP(monkeypatch, _items(dt.date(2026, 3, 10)))
+        items = _items(dt.date(2026, 3, 10))
+        _HTTP(monkeypatch, items)
+        data = _fill(session_close=("2026-03-10", items[-1][1]))
+        closes = _window(items, "2026-02-10", "2026-03-10")
+        assert len(closes) == 19, "前提：这一天的窗口恰好 19 根"
+        assert data.volatility_20d == pytest.approx(_pandas_vol(closes), abs=1e-9)
+
+    def test_month_with_only_18_sessions_sends_no_request(self, monkeypatch, caplog):
+        """(2023-12-22, 2024-01-22] 只有 18 个交易日（圣诞、元旦、马丁路德金日）——门槛 19 下主路径仍不出值（2020~2035 共
+        5 天、维度 IC 窗口内没有）。回落同样不出值，且**不发请求**。"""
+        _freeze(monkeypatch, 2024, 1, 22, 17, 15)
+        http = _HTTP(monkeypatch, _items(dt.date(2024, 1, 22)))
         with caplog.at_level(logging.WARNING, logger="alpha_hive.data_pipeline"):
-            data = _fill(session_close=("2026-03-10", 100.0))
+            data = _fill(session_close=("2024-01-22", 100.0))
         assert data.volatility_20d is None and http.params == []
-        assert any("只有 19 个交易日" in r.getMessage() for r in caplog.records)
+        assert any("只有 18 个交易日" in r.getMessage() for r in caplog.records)
         assert dp.history_fill_stats()["still_missing"]["volatility"] == ["NVDA"]
 
-    def test_fewer_than_20_bars_rejects(self, monkeypatch, caplog):
+    def test_fewer_than_19_bars_rejects(self, monkeypatch, caplog):
+        """日历上够 19 个交易日、TD 却缺根（这里只给 15 根）⇒ 拒收。"""
         _freeze(monkeypatch, 2026, 10, 16, 11, 0)
         _HTTP(monkeypatch, _items(dt.date(2026, 10, 15), n=15))
         with caplog.at_level(logging.WARNING, logger="alpha_hive.data_pipeline"):
             assert _fill().volatility_20d is None
-        assert any("需 ≥ 20" in r.getMessage() for r in caplog.records)
+        assert any("需 ≥ 19" in r.getMessage() for r in caplog.records)
+
+
+# ───────────────────────────── 4b. 主路径门槛 19 根（v0.45.564）
+@pytest.fixture
+def yf_frame(monkeypatch):
+    import yfinance
+    holder = {"frame": None}
+
+    class _T:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def history(self, **_k):
+            return holder["frame"]
+
+    monkeypatch.setattr(yfinance, "Ticker", _T)
+    monkeypatch.setattr(dp, "_exchange_now", lambda: None)     # 不丢末根：只测门槛
+    return holder
+
+
+def _yf(n):
+    items = _items(dt.date(2026, 3, 10), n=n)
+    return pd.DataFrame({"Close": [c for _, c in items], "Volume": [1e6] * n},
+                        index=pd.DatetimeIndex([d for d, _ in items])), [c for _, c in items]
+
+
+class TestMainPathThreshold:
+    @pytest.mark.parametrize("n, has", [(19, True), (18, False), (20, True)])
+    def test_history_metrics(self, yf_frame, n, has):
+        frame, closes = _yf(n)
+        yf_frame["frame"] = frame
+        v = dp._fetch_history_metrics("NVDA").get("volatility_20d")
+        assert (v == pytest.approx(_pandas_vol(closes), abs=1e-9)) if has else v is None
+
+    @pytest.mark.parametrize("n, has", [(19, True), (18, False)])
+    def test_yfinance_source(self, yf_frame, n, has):
+        yf_frame["frame"], _ = _yf(n)
+        data = dp.YFinanceSource().fetch("NVDA")
+        assert (data.volatility_20d is not None) is has
+        assert data.volatility_source == ("yfinance" if has else None)
+
+    @pytest.mark.parametrize("n, has", [(19, True), (18, False)])
+    def test_historical_date_path(self, yf_frame, n, has):
+        """`--date` 补跑路径（`_fetch_historical_stock_data`）同一个门槛。⚠️ 它的窗口是 as_of 前 60 天的全部日线（约 40 根），
+        与实时路径的一个月不同——那是另一处既有口径差（08-27 归档 30/30 符合 60 天窗口），本版未改。"""
+        yf_frame["frame"], _ = _yf(n)
+        out = dp._fetch_historical_stock_data("NVDA", "2026-03-10")
+        assert (out.get("volatility_20d") is not None) is has, out
+
+    @pytest.mark.parametrize("n, has", [(19, True), (18, False)])
+    def test_cache_fallback_path_when_data_pipeline_is_unavailable(self, monkeypatch, yf_frame, n, has):
+        """`swarm_agents/cache.py` 在 data_pipeline 导入失败时的保守回落——同一个量，同一个门槛。"""
+        from swarm_agents import cache as C
+        yf_frame["frame"], _ = _yf(n)
+        monkeypatch.setitem(sys.modules, "data_pipeline", None)
+        monkeypatch.setattr(C, "_yf_cache", {})
+        monkeypatch.setattr(C.yfinance_limiter, "acquire", lambda *a, **k: True)
+        out = C._fetch_stock_data(f"T{n}")
+        assert (out.get("volatility_20d") is not None) is has, out
 
 
 # ───────────────────────────── 5. 判不了就拒收，不猜

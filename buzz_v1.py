@@ -37,7 +37,8 @@ v0.45.556 实测：锚点 → 2026-10-19 HEAD，上述代码与常数逐位未�
 
 自证（§13.2；实现可以用于检验的前提，两项都要）
 -----------------------------------------------
-从锚点日起、到第一条**只点名冻结层**的边界之前的每个扫描日：
+从锚点日起、到第一条**只点名冻结层**的边界之前的每个扫描日（协议排除日 `FORWARD_TEST_EXCLUDED_DAYS` 除外——它们不进 H1，
+v0.45.564 起不比对、只报出跳过了哪几天）：
   ① 重算值与生产 `predictions.dimension_scores.sentiment` **逐位相等**（记录精度 = 2 位小数，不许放宽容差）；
   ② 生产有分、重算却缺输入的行数为 **0**。
 截止条件收窄为「只点名冻结层」（v0.45.556 实现选择，已写进协议 §13.11）：同时点名输入层的边界（如 v0.45.445 新闻换源）
@@ -252,15 +253,27 @@ def _protocol():
 
 
 def self_proof(db_path: Optional[str] = None, end: Optional[str] = None,
-               history: Optional[list] = None, max_examples: int = 10) -> Dict:
+               history: Optional[list] = None, max_examples: int = 10,
+               excluded_days: Optional[Iterable[str]] = None) -> Dict:
     """§13.2 自证。返回 {"ok", "window", "n", "n_matched", "n_mismatched", "n_missing", "mismatched", "missing",
-    "stopped_by"}；`ok` = 有样本 且 ① 全等 且 ② 缺输入 0。读库失败 ⇒ ok=False 并带 `error`（不当作通过）。"""
+    "stopped_by", "excluded_days", "n_excluded"}；`ok` = 有样本 且 ① 全等 且 ② 缺输入 0。读库失败 ⇒ ok=False 并带 `error`
+    （不当作通过）。
+
+    **跳过协议排除日**（v0.45.564，用户 10-20 定）：`signal_archive.FORWARD_TEST_EXCLUDED_DAYS` 里的日子不进 H1 检验，自证不必替它们
+    担保——此前一天坏数据会让自证永远不过、检视点永远「无法判定」，没有正规出路；现在出路就是按协议把那天登记为排除日。
+    只跳过「比对哪些行」，不跳过「读哪些输入」：排除日的归档通道照样可以当别的日子的 3 日参照（生产当时就是这么算的）。
+    跳过了哪些天、几行，原样报出（`excluded_days` / `n_excluded`），不静默。"""
     db = Path(db_path) if db_path else _db_path()
     stop = frozen_only_boundary(history)
     hi = end or dt.date.today().isoformat()
     if stop:
         hi = min(hi, _shift(stop["date"], -1))
-    base = {"window": [ANCHOR_DATE, hi], "stopped_by": stop}
+    if excluded_days is None:
+        import signal_archive
+        excluded_days = signal_archive.FORWARD_TEST_EXCLUDED_DAYS
+    excluded = {str(d)[:10] for d in excluded_days}
+    base = {"window": [ANCHOR_DATE, hi], "stopped_by": stop,
+            "excluded_days": sorted(d for d in excluded if ANCHOR_DATE <= d <= hi), "n_excluded": 0}
     forward_start = _protocol().FORWARD_START
     if stop and stop["date"] <= forward_start:
         # v0.45.562：窗口起点之前（含当天）的边界不截断 H1（`truncation_point` 只认窗口内的），而它之后生产分已不是
@@ -275,6 +288,9 @@ def self_proof(db_path: Optional[str] = None, end: Optional[str] = None,
             for d, t, ds in con.execute("SELECT date, ticker, dimension_scores FROM predictions "
                                         "WHERE date >= ? AND date <= ? AND dimension_scores IS NOT NULL",
                                         (ANCHOR_DATE, hi + "~")):
+                if d[:10] in excluded:
+                    base["n_excluded"] += 1
+                    continue
                 try:
                     v = (json.loads(ds) or {}).get("sentiment")
                 except (json.JSONDecodeError, TypeError, AttributeError):
@@ -315,6 +331,8 @@ def main() -> int:
         print(f"{head}：{w[0]} ~ {w[1]}，{res.get('n', 0)} 行，逐位一致 {res.get('n_matched', 0)}，"
               f"失配 {res.get('n_mismatched', 0)}，缺输入 {res.get('n_missing', 0)}"
               + (f"；窗口止于 {res['stopped_by']['date']}（{res['stopped_by']['version']}，只点名冻结层）" if res.get("stopped_by") else "")
+              + (f"；跳过协议排除日 {'、'.join(res['excluded_days'])}（{res.get('n_excluded', 0)} 行）"
+                 if res.get("excluded_days") else "")
               + (f"；{res['error']}" if res.get("error") else ""))
         for x in res.get("mismatched", []):
             print(f"   失配 {x['date']} {x['ticker']}: 生产 {x['production']} vs buzz_v1 {x['buzz_v1']}（参照 {x['ref_date']}）")

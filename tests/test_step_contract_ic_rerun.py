@@ -527,7 +527,7 @@ _ANC_OK = {"state": "ok", "version": P.H1_ANCHOR_VERSION, "date": "2026-09-28"}
 #: v0.45.556：执行器 H1 两道前提的摘要形状（`input_code_guard()` / `buzz_v1_self_proof()`）
 _GUARD_OK = {"ok": True, "unacknowledged": [], "errors": {}}
 _SP_OK = {"ok": True, "window": ["2026-09-28", "2026-10-01"], "n": 120, "n_matched": 120, "n_mismatched": 0,
-          "n_missing": 0, "stopped_by": None}
+          "n_missing": 0, "stopped_by": None, "excluded_days": [], "n_excluded": 0}
 _DIM_BASE = {"status": "not_ready", "forward_start": P.FORWARD_START, "today": "2026-10-01", "h1_weeks": 0,
              "next_look_at": 26, "looks_done": [], "verdicts": {}, "truncation": {"H1": None, "H2": None},
              "weight_change": {"date": None}, "stale": False, "h1_anchor": _ANC_OK,
