@@ -184,7 +184,38 @@ forming-bar 护栏属协议 §13.10「已知不管的」取数细节（不在指
 ### 已核、未改（待用户决定）
 - **预留与上限的相互作用**：在途预留按 `max_tokens×3 × $20/MTok + 输入字符数 × $4/MTok` 估，用 10-19 试跑的 21 条真实提示词算，单只标的的 7 个调用点预留合计约 $0.2~0.45（Oracle 按原版大提示词时偏高），并行 4 只标的 × 约 5 只蜂时峰值在途预留约 $0.7，而 PER_TICKER 的实际成本只有 $0.117。⇒ 按 22 只 / 实际 ≈ $2.6 计，**累计花到约 $2.3 之后（约第 20 只起）预检可能开始拒绝**，当天后几只回落规则引擎、`budget_refusals>0`、整天不入比较，$2.5 白花。⚠️ 这是推算（用的是估算公式与试跑提示词，未真跑 22 只），**待验证**。倾向把每日标的数降到 18（≈ $2.1/天）留出余量；这会改用户批准过的覆盖 / 费用数字，所以没自行改。
 
-## [0.45.559] — 2026-10-20 — 占位（进行中：BuzzBee data_quality["volatility"] 硬编码 "real"——volatility_20d 缺失时改标 "unavailable"，先盘点读者与协议影响）
+## [0.45.559] — 2026-10-20 — Fixed：BuzzBee `data_quality["volatility"]` 不再硬编码 `"real"`——`volatility_20d` 缺失时标 `"unavailable"`（与同组 momentum / volume 一致）
+
+`volatility_20d` 为 None 时波动率通道已回中性 50（v0.45.3），标签却照报 `"real"`（同 v0.45.209 GuardBee `crowding` 的形状）。
+生产史 `.swarm_results_*.json` 2228 行里 153 行如此（08-26 一只、08-28 / 09-17 / 09-24 / 09-25 / 10-14 各 30/30、09-15 两只），
+`components.volatility_signal` 全为 50、标签全为 `real`。
+
+### Fixed
+
+- `swarm_agents/buzz_bee.py`：`"volatility": "real" if vol20 is not None else "unavailable"`。写在 `return` 里、不在合成之前另起变量 ⇒
+  `signal_code_fingerprints` 的 `buzz.channels`（只覆盖 `sentiment_composite = …` 之前的语句）指纹不变，6 个单元全部与最后一条确认一致、
+  不需要新 ACK。`"unavailable"` 早已在 `QueenDistiller.PROXY_SOURCES`（0.7 档），不是新标签。
+
+### 影响面（读者盘点，只读重放生产记录）
+
+- **Buzz 自身输出不读该标签**：分 / 方向 / 置信度 / 七个通道逐项不变 ⇒ 维度 IC 协议 H1 的输入层（`buzz.comp.*`、`price.*`）与冻结层
+  （`agent.BuzzBeeWhisper.score`、`sentiment.pct`）都不动；H2 的对象是蜂后调整**之前**的 Σ冻结权重×维度分 ⇒ 也不动。`signal_archive` 不归档
+  `data_quality` / `data_real_pct` / 置信度 / 蜂后方向。
+- **蜂后三处读者**：① `_apply_triple_penalty` 的 `data_real_pct`（< 80 才压缩 `rule_score`）：153 行每行 −1.2~−1.3pp；最低值按现行标签集
+  89.2 → 88.0、按当日存档值 85.4 → 84.3（09-17 NEE；08-28 / 09-15 / 09-17 共 47 行存档值低于现行重放，因 `quiet` / `peer_read` 09-18 才登记），
+  两种口径都 **0 行跌破 80** ⇒ `rule_score` / `final_score` 全史不变；② S5 重度冲突的 DQ 票重（只数 `REAL_SOURCES`）：Buzz 投方向时票重 −0.1×conf，
+  可翻 `rule_direction`（→ 存档方向，不进 `final_score`）。现行代码（Bear/Guard 不计票、现行标签集）重放 153 行里 21 行重度冲突、14 行 Buzz 投方向，
+  **0 行跨 0.55**；按当日代码（09-17 时 `quiet` / `peer_read` 尚未登记）09-17 ENPH / TMUS / VZ 三行会由 neutral 变 bullish（0.549→0.570）——机制真实存在、
+  只在贴线时生效；③ `dim_data_quality["sentiment"]`（展示，Buzz 一项降级 ⇒ 约 −6pp）。
+- **展示**：网站「数据真实度」（`data_real_pct` 均值）缺波动率的日子约 −1.2pp；降级横幅 / 日报「数据质量」小节会把 `BuzzBeeWhisper.volatility`
+  算作降级通道（本来就该看见）。LLM 模式提示词（生产不走）同样少一个 real。
+
+### Tests
+
+- `tests/test_buzz_volatility_dq_label.py`：三个行情通道参数化（缺 ⇒ 通道 50 + `unavailable`；在 ⇒ `real`；0.0 是值不是缺失）；截住 AgentResult
+  把标签换回旧值重跑 ⇒ 分 / 方向 / 置信度 / 通道逐项相同；经真实 `_apply_triple_penalty` 记 0.7、不进 `dq_unclassified`。变异：改回硬编码 ⇒ 红。
+
+### 登记（待用户决定）
 
 ## [0.45.558] — 2026-10-20 — Removed（用户 2026-10-20 定「两样都删」）：`ml_predictor.HistoricalDataBuilder`（8 条手写的 2023 年训练样本）与 `ml_predictor.CROWDING_NEUTRAL`；没有真实训练数据时 ML 报告不再悄悄用假数据训练，改为标「模型不可用」
 

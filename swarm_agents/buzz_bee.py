@@ -287,7 +287,10 @@ class BuzzBeeWhisper(BeeAgent):
                 data_quality={
                     "momentum": "real" if _mom_raw is not None else "unavailable",
                     "volume": "real" if vol_ratio is not None else "unavailable",
-                    "volatility": "real",
+                    # v0.45.559：曾硬编码 "real"。volatility_20d 为 None 时通道已回中性 50（上方第 3 步），
+                    # 标签却照报真实 ⇒ data_real_pct 与 S5 冲突仲裁的 DQ 票重都按满分计（同 v0.45.209 Guard crowding）。
+                    # 刻意写在这里、不在合成之前另起变量：buzz.channels 输入层指纹只覆盖合成之前的语句
+                    "volatility": "real" if vol20 is not None else "unavailable",
                     # P1-1: 区分"榜单正常但不在前100（quiet，真实低热度）" vs "API 挂了（fallback）"
                     "reddit": ("real" if (reddit_data and reddit_data.get("rank"))
                                else ("fallback" if (not reddit_data or reddit_data.get("is_fallback"))
