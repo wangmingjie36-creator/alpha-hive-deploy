@@ -371,8 +371,9 @@ def summary_line(snap: dict) -> str:
         pg_s += f" | 账本读写失败 {lf['n']} 次({where})"
     hf = c.get("history_fill")
     sm = (hf or {}).get("still_missing") or {}
-    if sm.get("momentum") or sm.get("volume"):                          # v0.45.473
+    if sm.get("momentum") or sm.get("volume") or sm.get("volatility"):  # v0.45.473；波动率 v0.45.557
         pg_s += (f" | 回落后仍缺 动量 {len(sm.get('momentum') or [])} 只"
-                 f"/量比 {len(sm.get('volume') or [])} 只")
+                 f"/量比 {len(sm.get('volume') or [])} 只"
+                 f"/波动率 {len(sm.get('volatility') or [])} 只")
     return ("耗时 " + " | ".join(parts) +
             f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s + pg_s)

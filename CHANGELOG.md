@@ -54,7 +54,85 @@
 - `tests/test_dead_chains_batch2_retired.py`：新增 `RETIRED_CLASSES`（整类退役的不再当「改名」报红，但必须真的不在，`test_retired_classes_are_gone`）；正对照换成活成员。
 - 变异：把「无数据 ⇒ error」改回用 8 条假样本训练 ⇒ 3 条红。
 
-## [0.45.557] — 2026-10-20 — 占位（进行中：波动率兜底——yfinance 缺 volatility_20d 时用 Twelve Data adjust=all 定稿日线到 D−1 + CBOE 核实的 D 收盘、同公式补上；按 measurement_fix 登记 price.fields，用户 10-20 确认）
+## [0.45.557] — 2026-10-20 — Added：波动率兜底——yfinance 缺 `volatility_20d` 时用 Twelve Data **复权**日线（`adjust=all`）+ 源核实的当场收盘、同窗口同公式补上；缺了现在会红（P2）；指纹按 `measurement_fix` 登记（用户 10-20 确认）
+
+此前三项行情字段里只有波动率没有回落：yfinance 故障日整天缺（08-26 起 153/1048 行，集中在 5 个故障日），Buzz 波动率通道取 50、
+纸面组合退回分档仓位，而且**缺了无人红**（不在 `_HISTORY_FIELDS` 里）。用户 10-19 问能否补；先后要求「先验证复权口径」「扫描后做影子对比」，
+10-20 确认按测量误差修正、开始实现。证据与取舍全文见 auto-memory `alpha-hive-volatility-fallback-adjustment.md`。
+
+### 先验证的两件事（10-19，只读）
+
+- **复权口径不一致**：生产 `_fetch_history_metrics` 用 `yf.Ticker(t).history(period="1mo")`，yfinance 1.2.0 缺省 `auto_adjust=True` ⇒ 分红复权
+  （生产归档 `price.volatility_20d` 对照：含除息、两口径可分的窗口命中复权 171、未复权 7——其中 6 条**恰是除息日当晚**，Yahoo 当晚还没把当天分红
+  复权进去）。Twelve Data 缺省参数（即本仓 `_fetch_rows` 的请求）给**未复权**收盘：VZ / T / ABBV / DE 除息日前 149/149 根贴 yfinance 未复权 Close；
+  `adjust=all` 才贴 Adj Close（T / ABBV / DE 111/111，VZ 偏 2.3e-4）。口径不一致的代价：含除息窗口波动率差中位 0.15 点、最大 4.27，**跨档 28/6900**
+  （VZ 10-09 除息后复权 37–38、未复权 41–42，正跨 40）。
+- **影子对比**（10-19 扫描后，TD `adjust=all` × 30 只对归档 926 行）：**正常日 742 行跨档 0**、≤0.001 的 656、中位 0、最大 0.062（VZ / T 复权因子略异）；
+  TD 与 yfinance 窗口根数 742/742 相同。除息当晚 6 行跨档 1（预期分歧，见下）。当天 30 行跨档 0。08-27 / 08-31 生产值本身复现不出（**待验证**，早于 H1 锚点）。
+
+### Added
+
+- `twelve_data.py`：`fetch_adjusted_bars(ticker)`——`adjust=all` 的最新日线，末根照过 `_drop_forming_bar`（规则 ① 未动）；**另一份缓存**
+  （键同 `_bars_key(ticker, None)`），不并进 `fetch_bars` 的共享缓存——那份是未复权的，`close_correction` 等读者拿它对官方原始收盘。失败不入缓存；
+  计数进 `bars_cache_stats()["adjusted"]`（fetches / hits / entries），失败原因照记 `failed`。`_fetch_rows` 加 `adjust` 参数，缺省 None ⇒ 请求逐字节不变。
+- `data_pipeline.py`：`_fill_volatility_from_twelvedata`，挂在唯一出口 `_fill_history_fields`（第三条回落，同 momentum / volume，AST 守卫只许这一个调用点）。
+  - 窗口 (S − 1 个日历月, S]、左端不含、≥ 20 根；S = 此刻最近一场已收盘（`_latest_closed_session`，即 yfinance 主路径会结束的那天）。生产归档正常日 30/30 符合。
+  - 公式与 `_fetch_history_metrics` 相同（逐日涨跌幅样本标准差 × √252 × 100）；**写在本函数里**——指纹守卫只认提到行情字段名的定义。
+  - S 那一根：TD 末根 == S（盘中 / 盘前 / 周末 / 午夜后）⇒ 用 TD 的；TD 末根 == S 的前一交易日（收盘后的生产扫描）且源核实过 S 的官方收盘
+    （`session_close`，CBOE `close_verdict`）⇒ 接上它。其余**拒收**（WARNING 点名标的 / TD 末根 / 应有场次 / 有无核实收盘），判不了场次也拒收。
+  - `_previous_session(day)`：复用 `portfolio_greeks._expected_session`，先 import 日历证明可用（它在日历缺时会原样返回入参）。
+  - `StockData.volatility_source`（`yfinance` / `twelvedata_adjusted` / None）与 `volatility_as_of`（回落时窗口末端）进 `to_dict`；三处 yfinance 自算处由源标 `yfinance`。
+- 可观测：`_HISTORY_FIELDS` 加 `volatility` ⇒ `history_fill_stats` 的 by_path / `still_missing` 带它；`alert_manager._check_history_fill` P2 报
+  「volatility_20d N 只」（此前缺波动率无人红）；`scan_timing` 摘要「回落后仍缺 …/波动率 N 只」。
+
+### 已知分歧与代价
+
+- **S 恰是除息日**：生产 yfinance 当晚按未复权算（6/6 例），TD `adjust=all` 当晚复不复权**待验证**（只能等下次除息日当晚取一次）。只落在「yfinance 故障 ×
+  除息日」那一格；影子里跨档 1/6。
+- 每只故障票多 1 次 TD 请求（另一份缓存）。全天故障 30 只约多 30 × 8.6s ≈ 4 分钟：10-14（yfinance 30/30 故障）Step 2 只用了 609s（预算余 83%），
+  预算 10-19 起 5400s，够。Step 2 四个 worker 并行时限流队列深度约 5，单次等令牌 < 90s 上限。
+
+### 协议（维度 IC，H1 输入层）
+
+`price.fields` 指纹 `5695d133951a5c2d` → `a88fcacdf09e1ead`，`signal_code_fingerprints.ACKS` 追加 `measurement_fix`（凭什么写在条目里）；协议 §13.10「窗口开始后的确认」
+记一条。同一个量、只是故障日从缺失变有值；窗口内波动率只在 10-14 缺过（该日 H1 已无效），不改变任何已入窗样本。同 v0.45.463/465/505 先例**不登记
+IC 世代边界**。**用户 2026-10-20 在对话里确认按测量误差修正。**
+
+### 测试
+
+- `tests/test_volatility_fallback.py`（新）：只换 HTTP 层，走真解析 + `_drop_forming_bar` + 缓存，钉两只钟。
+  - 同一串收盘喂生产 `_fetch_history_metrics` 与回落：逐位一致（1e-9）。**真实金值**：DELL 10-16（10-19 取的 TD 复权收盘）在收盘后扫描时刻
+    接核实收盘 ⇒ 与生产归档 60.0354824 差 < 1e-5，同在 60 以上那档。
+  - 收盘后：接的是核实收盘不是 TD 临时那根（判别：临时那根故意差 5%）；无核实收盘 / 核实收盘是别的日子 / TD 缺 D-1 ⇒ 拒收、WARNING 点名、
+    `still_missing`；感恩节次日提前收盘 ⇒ 前一交易日 11-25 接上；请求带 `adjust=all`、共享日线请求不带、两份缓存不串。
+  - 盘中 / 盘前 / 午夜后 / 周末 ⇒ 用 TD 自己的定稿根。窗口左端不含（判别）、月末取上月最后一天、< 20 根拒收。
+  - 判不了：钟不可用、日历不可用（`_previous_session` 必须先证可用）、未配 key（不发请求）、接口错（记 failed、不入缓存）、回落抛错计 errors 且不挡另两条。
+  - 缓存：一票一天一次请求、返回副本、已有值不回落。
+- `tests/test_fetcher_single_exit.py`：`FILL_FUNCS` 加第三条（唯一调用点守卫）；记录桩带 volatility；每个出口都补并带 `session_close`；源自算的标
+  `yfinance` 不回落（yfinance 源与 CBOE 两条路径）；只缺波动率也报 P2；计数 / scan_timing / P2 的精确断言加上 volatility。
+- `tests/test_twelve_data.py`：`clear_bars_cache` 归零的精确断言加 `adjusted`。
+
+### 变异测试（真跑，19/19 被杀，0 存活）
+
+请求不带 adjust、复权入口不传 all、复权结果读共享缓存、失败也入缓存、清缓存漏复权那份、没核实收盘也接、不核收盘属于哪天、不核 TD 末根是前一交易日、
+左端含、ddof=0、门槛 20→10、前一交易日不先证日历、出口不调回落、计数不含波动率、回落标签写错、CBOE / yfinance 源不标来源（2）、P2 不看波动率、摘要不看波动率。
+
+### 上线前实测（10-20 盘前，生产代码路径、真 Twelve Data，数据根指到临时目录）
+
+VZ / T / ABBV / DELL / NVDA 兜底 vs 此刻 yfinance 主路径 vs 归档 10-19：**5/5 同档**；DELL / NVDA 差 0.0000、ABBV 0.0005、VZ 0.063、T 0.036（复权因子）。
+未复权口径下 VZ 会是 ~41.8（跨 40）；复权后 37.78 vs 生产 37.72。TD 5 次请求、0 失败。
+
+### 核对
+
+- 全量：**10613 passed**、1 failed、0 error（553s）。唯一的 failed = 经济日历覆盖不足（BLS / BEA 2027 日程未发布，既有的设计内告警，与本版无关）。
+  全量期间未改 worktree 任何文件（10-19 的教训）。
+- 相关：`test_volatility_fallback` / `test_fetcher_single_exit` / `test_twelve_data` / `test_volume_fallback_session_gate` 127 passed；
+  `test_signal_code_fingerprints` 39 passed；ruff 全绿；`signal_code_fingerprints.py` 六个单元全部与最后一条确认一致。
+
+### 顺带发现（未改，已开任务）
+
+- `swarm_agents/buzz_bee.py` 的 `data_quality["volatility"]` **恒写 `"real"`**（动量 / 量比是按值有无判的）——缺波动率、通道取 50 时仍标 real。
+  改它可能动 Queen 的数据质量计分 ⇒ 另开任务先查读者与影响面，不并进本版。
 
 ## [0.45.556] — 2026-10-19 — Added：冻结版 Buzz 评分 `buzz_v1.py` + 自证（buzz_v1 阶段 2 第 2 块）——09-28 ~ 10-16 生产 15 个扫描日 450 行逐位一致、缺输入 0；接进维度 IC 执行器（未通过 ⇒ ⚠️、检视点上不出结论）；Fixed：就绪度外壳补列两道 H1 前提的条目（指纹守卫自 554 起只有进度行 ⚠️）
 

@@ -829,12 +829,12 @@ class AlertAnalyzer:
         ))
 
     def _check_history_fill(self, status: Dict) -> None:
-        """momentum_5d / volume_ratio 过了取数出口的回落仍缺（v0.45.473；`data_pipeline.history_fill_stats`
-        经 scan_timing 进来）。
+        """momentum_5d / volume_ratio / volatility_20d 过了取数出口的回落仍缺（v0.45.473；volatility v0.45.557；
+        `data_pipeline.history_fill_stats` 经 scan_timing 进来）。
 
-        这两项是 BuzzBee 动量 / 量能通道、ScoutBee 背离、BearBee、RivalBee ML 特征的输入，也是
-        `signal_archive` 的 `price.momentum_5d` / `price.volume_ratio`（维度 IC 协议 H1 输入）。缺了下游
-        各自按中性 / 不可用处理、不报错——所以在这里红。`still_missing` 非空 ⇒ P2；计数缺失 ⇒ checks_skipped
+        前两项是 BuzzBee 动量 / 量能通道、ScoutBee 背离、BearBee、RivalBee ML 特征的输入；volatility_20d 是 Buzz
+        波动率通道与纸面组合波动率目标仓位的输入。三项也是 `signal_archive` 的 `price.*`（维度 IC 协议 H1 输入）。
+        缺了下游各自按中性 / 不可用处理、不报错——所以在这里红。`still_missing` 非空 ⇒ P2；计数缺失 ⇒ checks_skipped
         （`--date` 补跑走历史取数、不经 fetcher，本就没有这项）。"""
         st = status.get("scan_timing")
         if not isinstance(st, dict):
@@ -845,7 +845,8 @@ class AlertAnalyzer:
             return
         missing = hf.get("still_missing") or {}
         mom, vol = list(missing.get("momentum") or []), list(missing.get("volume") or [])
-        if not (mom or vol):
+        vlt = list(missing.get("volatility") or [])
+        if not (mom or vol or vlt):
             return
 
         def _names(ts):
@@ -854,19 +855,24 @@ class AlertAnalyzer:
             f"{p}：{v.get('n', 0)} 次"
             + "".join(f"，{f} 缺 {v[f]['needed']} 补上 {v[f]['filled']}"
                       + (f" 出错 {v[f]['errors']}" if v[f].get("errors") else "")
-                      for f in ("momentum", "volume")
+                      for f in ("momentum", "volume", "volatility")
                       if isinstance(v.get(f), dict) and v[f].get("needed"))
             for p, v in sorted((hf.get("by_path") or {}).items()))
         self.alerts.append(Alert(
             AlertLevel.MEDIUM,
-            f"📊 【P2 中】历史字段回落后仍缺：momentum_5d {len(mom)} 只、volume_ratio {len(vol)} 只",
+            f"📊 【P2 中】历史字段回落后仍缺：momentum_5d {len(mom)} 只、volume_ratio {len(vol)} 只、"
+            f"volatility_20d {len(vlt)} 只",
             {
                 "momentum_5d": _names(mom) if mom else "无",
                 "volume_ratio": _names(vol) if vol else "无",
+                "volatility_20d": _names(vlt) if vlt else "无",
                 "各出口": paths or "无",
-                "影响": "这些标的的动量 / 量能通道按中性处理，signal_archive 当天缺 price.momentum_5d / price.volume_ratio 行",
+                "影响": "这些标的的动量 / 量能 / 波动率通道按中性处理，signal_archive 当天缺对应的 price.* 行；"
+                        "缺波动率的纸面组合退回分档仓位",
                 "建议": "出错 > 0 ⇒ 看 alpha_hive.log「出口回落出错」；momentum 缺 ⇒ 查自攒价格索引覆盖"
-                        "（price_history.coverage_report）；volume 缺 ⇒ 查 Twelve Data key / 配额",
+                        "（price_history.coverage_report）；volume 缺 ⇒ 查 Twelve Data key / 配额（收盘后扫描里拒收是"
+                        "常态，见 v0.45.505）；volatility 缺 ⇒ 看「波动率回落拒收」WARNING（多半是 CBOE 当场收盘没核实）"
+                        "与 Twelve Data 失败原因（status.json twelve_data.failed）",
             },
             ["history_fill", "data_quality"]
         ))

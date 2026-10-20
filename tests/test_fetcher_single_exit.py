@@ -35,7 +35,8 @@ from tests._repo_files import own_python_files
 
 ROOT = Path(__file__).resolve().parent.parent
 DP_FILE = ROOT / "data_pipeline.py"
-FILL_FUNCS = ("_fill_momentum_from_index", "_fill_volume_from_twelvedata")
+FILL_FUNCS = ("_fill_momentum_from_index", "_fill_volume_from_twelvedata",
+              "_fill_volatility_from_twelvedata")   # 第三条 v0.45.557
 
 
 @pytest.fixture(autouse=True)
@@ -46,10 +47,18 @@ def _fresh_stats():
 
 
 class _Fills:
-    """两条回落的记录桩：记下谁、带什么 session_close 被调了几次。`mom` / `vol` 为 None ⇒ 回落也拿不到。"""
+    """三条回落的记录桩：记下谁、带什么 session_close 被调了几次。`mom` / `vol` / `vlt` 为 None ⇒ 回落也拿不到。"""
 
-    def __init__(self, mp, mom=-2.5, vol=0.8, as_of="2026-10-08"):
-        self.mom_calls, self.vol_calls = [], []
+    def __init__(self, mp, mom=-2.5, vol=0.8, as_of="2026-10-08", vlt=31.5):
+        self.mom_calls, self.vol_calls, self.vlt_calls = [], [], []
+
+        def _w(ticker, out, session_close=None):
+            self.vlt_calls.append((ticker, session_close))
+            if vlt is None:
+                return out
+            return {"volatility_20d": vlt, "volatility_source": "twelvedata_adjusted", "volatility_as_of": as_of}
+
+        mp.setattr(dp, "_fill_volatility_from_twelvedata", _w)
 
         def _m(ticker, out, session_close=None):
             self.mom_calls.append((ticker, session_close))
@@ -249,6 +258,19 @@ class TestCboeInternalBranches:
         assert out["volume_ratio"] == 0.8 and out["volume_source"] == "twelvedata"
         assert fills.mom_calls == [] and fills.vol_calls == ["VZ"]
 
+    def test_volatility_from_yfinance_is_labelled_and_short_history_falls_back(self, monkeypatch, yf_history):
+        """v0.45.557：CBOE 胜出、yfinance 够 20 根 ⇒ 波动率由源标 `yfinance`、不回落；不够 20 根 ⇒ 出口回落，
+        且拿到 CBOE 核实的当场收盘接窗口末端。"""
+        fills = _Fills(monkeypatch)
+        yf_history["frame"] = _yf_frame([40.0 + (i % 4) * 0.3 for i in range(22)])
+        out = self._cboe(monkeypatch).fetch("VZ")
+        assert out["volatility_20d"] is not None and out["volatility_source"] == "yfinance"
+        assert fills.vlt_calls == []
+        yf_history["frame"] = _yf_frame([40.0, 40.0, 40.0, 41.0, 41.0, 41.0])
+        out = self._cboe(monkeypatch).fetch("VZ2")
+        assert (out["volatility_20d"], out["volatility_source"]) == (31.5, "twelvedata_adjusted")
+        assert fills.vlt_calls == [("VZ2", ("2026-10-09", 36.24))]
+
 
 class TestYFinanceSourceBranches:
     def test_short_history_passes_its_own_last_close(self, monkeypatch, yf_history):
@@ -320,6 +342,27 @@ class TestLabels:
         out = _fetcher([_Src("finnhub", _degraded("finnhub", session_close=("2026-10-09", 1.0)))]).fetch("X")
         assert not {"session_close", "history_checked", "defer"} & set(out)
 
+    def test_volatility_fill_gets_label_as_of_and_session_close(self, monkeypatch):
+        """v0.45.557：第三条回落同样是出口的属性——Finnhub 胜出也补；源核实的收盘原样交给它接窗口末端。"""
+        fills = _Fills(monkeypatch)
+        out = _fetcher([_Src("finnhub", _degraded("finnhub", session_close=("2026-10-08", 36.24)))]).fetch("VZ")
+        assert (out["volatility_20d"], out["volatility_source"], out["volatility_as_of"]) == \
+            (31.5, "twelvedata_adjusted", "2026-10-08")
+        assert fills.vlt_calls == [("VZ", ("2026-10-08", 36.24))]
+
+    def test_source_computed_volatility_is_labelled_and_not_refetched(self, monkeypatch, yf_history):
+        """yfinance 自己算出的波动率由源标 `yfinance`（标签与值同一处），出口不再回落。"""
+        fills = _Fills(monkeypatch)
+        yf_history["frame"] = _yf_frame([100.0 + (i % 3) for i in range(22)])
+        out = _fetcher([dp.YFinanceSource()]).fetch("NVDA")
+        assert out["volatility_20d"] is not None and out["volatility_source"] == "yfinance"
+        assert out["volatility_as_of"] is None and fills.vlt_calls == []
+
+    def test_unfilled_volatility_has_no_label(self, monkeypatch):
+        _Fills(monkeypatch, vlt=None)
+        out = _fetcher([_Src("finnhub", _degraded("finnhub"))]).fetch("NVDA")
+        assert (out["volatility_20d"], out["volatility_source"], out["volatility_as_of"]) == (None, None, None)
+
     def test_one_fill_raising_does_not_skip_the_other(self, monkeypatch):
         def _boom(ticker, out, session_close=None):
             raise RuntimeError("index broken")
@@ -374,7 +417,8 @@ class TestCountersAndAlert:
         p = s["by_path"]["source:finnhub"]
         assert p["n"] == 2 and p["momentum"] == {"needed": 2, "filled": 0, "errors": 0}
         assert p["volume"] == {"needed": 2, "filled": 2, "errors": 0}
-        assert s["still_missing"] == {"momentum": ["NVDA", "TSLA"], "volume": []}
+        assert p["volatility"] == {"needed": 2, "filled": 2, "errors": 0}
+        assert s["still_missing"] == {"momentum": ["NVDA", "TSLA"], "volume": [], "volatility": []}
 
     def test_later_success_clears_still_missing(self, monkeypatch):
         _Fills(monkeypatch, mom=None)
@@ -392,18 +436,30 @@ class TestCountersAndAlert:
     def test_reaches_scan_timing_and_raises_p2(self, monkeypatch, tmp_path):
         import alert_manager as am
         import scan_timing as stt
-        _Fills(monkeypatch, mom=None, vol=None)
+        _Fills(monkeypatch, mom=None, vol=None, vlt=None)
         _fetcher([_Src("finnhub", _degraded("finnhub"))]).fetch("NVDA")
         c = stt.counters()
-        assert c["history_fill"]["still_missing"] == {"momentum": ["NVDA"], "volume": ["NVDA"]}
-        assert "回落后仍缺 动量 1 只/量比 1 只" in stt.summary_line({"phases": {}, "counters": c})
+        assert c["history_fill"]["still_missing"] == {"momentum": ["NVDA"], "volume": ["NVDA"], "volatility": ["NVDA"]}
+        assert "回落后仍缺 动量 1 只/量比 1 只/波动率 1 只" in stt.summary_line({"phases": {}, "counters": c})
         hits = self._analyze(tmp_path, c["history_fill"])[0]
         assert len(hits) == 1 and hits[0].level == am.AlertLevel.MEDIUM
         assert "NVDA" in hits[0].details["momentum_5d"] and "source:finnhub" in hits[0].details["各出口"]
+        assert "NVDA" in hits[0].details["volatility_20d"] and "volatility 缺 1" in hits[0].details["各出口"]
+
+    def test_volatility_alone_missing_still_raises_p2(self, monkeypatch, tmp_path):
+        """v0.45.557：此前缺波动率无人红（不在 _HISTORY_FIELDS 里）。只缺它也要报。"""
+        import scan_timing as stt
+        _Fills(monkeypatch, vlt=None)
+        _fetcher([_Src("finnhub", _degraded("finnhub"))]).fetch("NVDA")
+        c = stt.counters()
+        assert c["history_fill"]["still_missing"] == {"momentum": [], "volume": [], "volatility": ["NVDA"]}
+        assert "波动率 1 只" in stt.summary_line({"phases": {}, "counters": c})
+        (hit,) = self._analyze(tmp_path, c["history_fill"])[0]
+        assert "volatility_20d 1 只" in hit.message and hit.details["momentum_5d"] == "无"
 
     @pytest.mark.parametrize("counter, alerted, skipped", [
         ({"resolutions": 3, "by_path": {}, "window_behind_session": 0,
-          "still_missing": {"momentum": [], "volume": []}}, False, False),
+          "still_missing": {"momentum": [], "volume": [], "volatility": []}}, False, False),
         (None, False, True),
     ])
     def test_clean_is_silent_and_missing_is_skipped(self, tmp_path, counter, alerted, skipped):
