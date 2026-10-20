@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.559] — 2026-10-20 — 占位（进行中：BuzzBee data_quality["volatility"] 硬编码 "real"——volatility_20d 缺失时改标 "unavailable"，先盘点读者与协议影响）
+
 ## [0.45.558] — 2026-10-20 — 占位（进行中：退役 ml_predictor.CROWDING_NEUTRAL 与 HistoricalDataBuilder 8 条硬编码训练样本）
 
 ## [0.45.557] — 2026-10-20 — 占位（进行中：波动率兜底——yfinance 缺 volatility_20d 时用 Twelve Data adjust=all 定稿日线到 D−1 + CBOE 核实的 D 收盘、同公式补上；按 measurement_fix 登记 price.fields，用户 10-20 确认）
