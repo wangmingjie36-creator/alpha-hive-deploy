@@ -363,6 +363,22 @@ class ObservableCircuitBreaker:
 
 # ==================== 数据源适配器 ====================
 
+def _volatility_20d_window_lo(as_of):
+    """行情字段窗口的左端（**不含**）：`as_of` 往前一个日历月；上月没有同一天（如 10-31 → 9 月）取上月最后一天（v0.45.566 抽出）。
+
+    实时 yfinance `period="1mo"` 收盘后那一跑的窗口就是 (lo, as_of]（生产归档 08-26~10-16 正常日 30/30 符合，v0.45.557 核实）。
+    唯一实现：Twelve Data 波动率回落（`_fill_volatility_from_twelvedata`）与 `--date` 补跑（`_fetch_historical_stock_data`）
+    都用它。函数名带 `volatility_20d` 是有意的——输入层指纹守卫按名字认它，窗口规则一改守卫就红。
+    """
+    y, m = (as_of.year, as_of.month - 1) if as_of.month > 1 else (as_of.year - 1, 12)
+    for day in (as_of.day, 30, 29, 28):
+        try:
+            return as_of.replace(year=y, month=m, day=day)
+        except ValueError:
+            continue
+    raise ValueError(f"算不出 {as_of} 前一个月的同日")   # 28 日恒存在，走不到
+
+
 def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
     """v0.41.6: `--date` 补跑历史交易日时，锚定该日期的真实收盘价。
 
@@ -470,6 +486,14 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
             _r2["_as_of_date"] = as_of_date
             _r2["_price_from_cloud_snapshot"] = True
             return _r2
+
+        # v0.45.566（用户 10-20：「现在修补跑路径的 60 天窗口」）：行情字段只用与实时扫描**同一个窗口** (as_of − 1 个日历月, as_of]
+        # （实时 yfinance `period="1mo"` 收盘后那一跑就是它，生产归档正常日 30/30 符合）。此前直接用上面多拉的 60 天（约 40 根）：
+        # 波动率是另一个量（2026-08-27 是次日补跑的，归档 30/30 符合 60 天窗口），一个月只有 19 根时量比均量还多算进窗口外的一根。
+        # 多拉 60 天只为保证根数够，不是窗口。价格（末根 = as_of 当天）不受影响。
+        _lo = _volatility_20d_window_lo(as_of)
+        _win_idx = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
+        hist = hist[_win_idx.date > _lo]
 
         data = StockData(
             price=float(hist["Close"].iloc[-1]),
@@ -742,7 +766,8 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
       就不发请求——主路径那些天同样不出值，回落是同一个量。门槛 20 时一个月只有 19 个交易日的天（约每年 15 天）整天缺
       （2026-03-10/13、06-22、07-06 归档全是旧哨兵 0.0）；564 起门槛 19，只剩极少数 18 个交易日的天（2020~2035 共 5 天）。
     - **公式**：逐日涨跌幅的样本标准差（ddof=1）× √252 × 100，同 `_fetch_history_metrics`。写在本函数里而不是
-      辅助函数里：输入层指纹守卫（`signal_code_fingerprints` 的 price.fields）只认提到这三个行情字段的定义。
+      辅助函数里：输入层指纹守卫（`signal_code_fingerprints` 的 price.fields）只认提到这三个行情字段（或名字里带它们）
+      的定义——窗口左端因此放在名字带字段名的 `_volatility_20d_window_lo` 里（v0.45.566，与 `--date` 补跑共用）。
     - **S 那一根从哪来**：TD 末根 == S（盘中 / 盘前 / 周末 / 午夜后补跑：S 是前一场，TD 已定稿）⇒ 用 TD 的；
       TD 末根 == S 的前一交易日（收盘后的生产扫描：TD 当日那根当晚是临时值、被 `twelve_data._drop_forming_bar`
       规则 ① 丢掉——**那条规则是对的，勿改**）且源核实过 S 的官方收盘（`session_close`，CBOE `close_verdict`）
@@ -771,14 +796,7 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
         _log.warning("[%s] 判不了最近一场已收盘 —— 波动率回落拒收，volatility_20d 留 None", ticker)
         return out
     d = datetime.strptime(want, "%Y-%m-%d").date()
-    y, m = (d.year, d.month - 1) if d.month > 1 else (d.year - 1, 12)
-    lo = None
-    for day in (d.day, 30, 29, 28):
-        try:
-            lo = d.replace(year=y, month=m, day=day).isoformat()
-            break
-        except ValueError:
-            continue
+    lo = _volatility_20d_window_lo(d).isoformat()   # v0.45.566：与 `--date` 补跑同一个实现
     try:
         from is_trading_day import is_trading_day as _is_session
         x, n_sessions = datetime.strptime(lo, "%Y-%m-%d").date() + timedelta(days=1), 0
