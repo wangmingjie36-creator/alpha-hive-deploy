@@ -319,12 +319,22 @@ def _api_end_date(end_date: str) -> str:
 
 
 def _fetch_rows(ticker: str, days: int,
-                end_date: Optional[str] = None) -> Optional[List[dict]]:
+                end_date: Optional[str] = None,
+                adjust: Optional[str] = None) -> Optional[List[dict]]:
     """共享抓取层：一次请求拿回 `{date, close, vol}` 逐根日线（已剔除半根）。
 
     `fetch_daily_closes` / `fetch_volume_ratio` 共用同一次限流令牌 + 同一份
     解析逻辑，避免两个口径各发一次请求、各自出一套"哪天算今天"的判断。
+
+    `adjust`（v0.45.557）：原样作为接口的 `adjust` 参数发出（`"all"` = 拆股 + 分红复权）。缺省 None ⇒ 请求里
+    **不带**这个参数，与此前逐字节相同——接口缺省只按拆股复权，收盘贴 yfinance 的**未复权** Close
+    （2026-10-19 实测，见 `fetch_adjusted_bars`）。
     """
+    def _fail(reason: str) -> None:
+        # v0.45.562：复权请求（波动率回落）的失败带口径前缀——`failed[标的]` 只存最近一次原因，
+        # 读者（`options_analyzer` 按 `network` 前缀决定重不重试）问的是共享日线自己的失败
+        _record_failure(ticker, f"adjust={adjust}:{reason}" if adjust else reason)
+
     key = api_key()
     if not key:
         return None      # 未配置不算失败：这是「没开这条腿」，不是「这条腿坏了」
@@ -339,11 +349,13 @@ def _fetch_rows(ticker: str, days: int,
     if end_date:
         # 接口是左闭右开的，+1 天才等于调用方要的「含该日」（见 `_api_end_date`）
         params["end_date"] = _api_end_date(end_date)
+    if adjust:
+        params["adjust"] = adjust
 
     rl = _get_limiter()
     if rl is not None and not rl.acquire(timeout=90.0):
         _log.warning("[%s] Twelve Data 限流令牌等待超时", ticker)
-        _record_failure(ticker, "limiter_timeout")
+        _fail("limiter_timeout")
         return None
 
     try:
@@ -360,11 +372,11 @@ def _fetch_rows(ticker: str, days: int,
                        ticker, params["symbol"])
         else:
             _log.warning("[%s] Twelve Data HTTP %s", ticker, e.code)
-        _record_failure(ticker, f"http{e.code}")
+        _fail(f"http{e.code}")
         return None
     except Exception as e:  # noqa: BLE001
         _log.warning("[%s] Twelve Data 请求失败: %s", ticker, e)
-        _record_failure(ticker, f"network:{type(e).__name__}")
+        _fail(f"network:{type(e).__name__}")
         return None
 
     global _daily_used
@@ -374,7 +386,7 @@ def _fetch_rows(ticker: str, days: int,
         d = json.loads(raw)
     except ValueError:
         _log.warning("[%s] Twelve Data 返回非 JSON", ticker)
-        _record_failure(ticker, "non_json")
+        _fail("non_json")
         return None
 
     # 免费档超额/参数错时返回 {"code":..,"message":..,"status":"error"}，
@@ -383,13 +395,13 @@ def _fetch_rows(ticker: str, days: int,
     if isinstance(d, dict) and d.get("status") == "error":
         _log.warning("[%s] Twelve Data 错误 %s: %s", ticker,
                      d.get("code"), str(d.get("message"))[:120])
-        _record_failure(ticker, f"api_error:{d.get('code')}")
+        _fail(f"api_error:{d.get('code')}")
         return None
 
     values = d.get("values") if isinstance(d, dict) else None
     if not values:
         _log.warning("[%s] Twelve Data 无 values 段", ticker)
-        _record_failure(ticker, "no_values")
+        _fail("no_values")
         return None
 
     rows: List[dict] = []
@@ -515,6 +527,46 @@ def _bars_key(ticker: str, end_date: Optional[str]) -> Tuple[str, Optional[str]]
     return (repo_ticker(ticker), end_date if end_date else _et_today())
 
 
+# ── 复权日线（v0.45.557，波动率兜底专用）──────────────────────────────────────
+#: 一个日历月至多约 23 个交易日；多要的只是同一次请求的 outputsize，不多花配额。
+ADJUSTED_WINDOW = 40
+_ADJ_CACHE: Dict[Tuple[str, Optional[str], str], List[dict]] = {}
+_adj_stats = {"fetches": 0, "hits": 0}
+
+
+def fetch_adjusted_bars(ticker: str, adjust: str = "all") -> Optional[List[dict]]:
+    """拆股 + 分红复权（`adjust=all`）的最新日线 `[{date, close, vol}]`，升序；末根同样过 `_drop_forming_bar`。
+
+    **只给 `data_pipeline._fill_volatility_from_twelvedata` 用。** 生产的 `volatility_20d` 出自 yfinance
+    `history()`，缺省 `auto_adjust=True` ⇒ 分红复权；本模块其余入口不传 `adjust`，拿到的是**未复权**收盘。
+    2026-10-19 实测（VZ / T / ABBV / DE）：缺省参数除息日前 149/149 根贴 yfinance 未复权 Close、0 根贴复权；
+    `adjust=all` 贴 Adj Close（T / ABBV / DE 111/111，容差 2e-4；VZ 偏 2.3e-4，复权因子略异）。含除息日的
+    窗口里两种口径的波动率差中位 0.15 点、最大 4.3 点，跨档 28/6900 ——不能拿未复权的来补。
+
+    ⚠️ **不并进 `fetch_bars` 的共享缓存**：那份是未复权的，`close_correction` 等读者拿它对官方原始收盘。
+    这里另发一次请求、另一份缓存（键 = (标的, 美东当日, adjust)），只在 yfinance 缺波动率时才被调到。
+    失败不入缓存（同 `fetch_bars`）；失败原因由 `_fetch_rows` 记进 `bars_cache_stats()["failed"]`、带
+    `adjust=<口径>:` 前缀（v0.45.562：免得被当成共享日线自己的失败——`options_analyzer` 按原因决定重不重试）；
+    请求 / 命中次数在 `bars_cache_stats()["adjusted"]`。
+
+    `adjust` 由调用方显式传（v0.45.562）：口径的字面量于是写在提到 `volatility_20d` 的回落函数里，输入层指纹守卫
+    看得见它的改动（本函数不提行情字段名，守卫看不见这里）。同标的同日的并发首次请求不去重（只在故障日被调、每票一次）。
+    """
+    key = (*_bars_key(ticker, None), adjust)
+    with _BARS_LOCK:
+        ent = _ADJ_CACHE.get(key)
+        if ent is not None:
+            _adj_stats["hits"] += 1
+            return [dict(r) for r in ent]
+        _adj_stats["fetches"] += 1
+    rows = _fetch_rows(ticker, ADJUSTED_WINDOW, adjust=adjust)
+    if not rows:
+        return rows
+    with _BARS_LOCK:
+        _ADJ_CACHE[key] = rows
+    return [dict(r) for r in rows]
+
+
 def warm_bars_cache(tickers: List[str], days: int = SHARED_BARS_WINDOW,
                     end_date: Optional[str] = None) -> Dict[str, int]:
     """顺序预热：把这些票的日线各取一次进缓存。单票失败只记数、不中断。
@@ -562,22 +614,29 @@ def bars_cache_stats() -> Dict:
     （`http404` / `api_error:<code>` / `no_values` / `non_json` / `limiter_timeout` /
     `network:<异常名>`）。未配置 key 不计入——那是没开这条腿，不是腿坏了。
     `failures` 也数 `earnings_history` 直接调 `_fetch_rows` 的那几次，所以它**不受**
-    `fetches` 约束。"""
+    `fetches` 约束。
+
+    `adjusted`（v0.45.557）：复权日线 `fetch_adjusted_bars` 的 `fetches`（真发出去的请求）/ `hits` / `entries`，
+    与上面的计数分开——那是另一份缓存、另一次请求；它的失败照样记在 `failures` / `failed`。"""
     with _BARS_LOCK:
         d = dict(_bars_cache_stats)
         d["entries"] = len(_BARS_CACHE)
         d["failed"] = dict(_FAILED)
+        d["adjusted"] = {**_adj_stats, "entries": len(_ADJ_CACHE)}
     return d
 
 
 def clear_bars_cache() -> None:
-    """清空日线缓存并把计数归零（测试之间、以及长驻进程换日时用）。"""
+    """清空日线缓存（含复权那份）并把计数归零（测试之间、以及长驻进程换日时用）。"""
     with _BARS_LOCK:
         _BARS_CACHE.clear()
+        _ADJ_CACHE.clear()
         _INFLIGHT.clear()
         _FAILED.clear()
         for k in _bars_cache_stats:
             _bars_cache_stats[k] = 0
+        for k in _adj_stats:
+            _adj_stats[k] = 0
 
 
 def fetch_volume_ratio(ticker: str, window: int = 20,

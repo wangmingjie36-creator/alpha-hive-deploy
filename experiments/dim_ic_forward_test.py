@@ -565,7 +565,9 @@ def apply_code_guard(res: Dict, guard: Dict) -> Dict:
 # buzz_v1 自证（v0.45.556，协议 §13.2、§12 第 10 条）
 # ────────────────────────────────────────────────────────────────────────────
 
-_SELF_PROOF_KEYS = ("ok", "window", "n", "n_matched", "n_mismatched", "n_missing", "stopped_by", "error")
+#: `excluded_days` / `n_excluded`（v0.45.564）：自证跳过的协议排除日与行数——跳过了什么照样报出来，不静默
+_SELF_PROOF_KEYS = ("ok", "window", "n", "n_matched", "n_mismatched", "n_missing", "stopped_by", "error",
+                    "excluded_days", "n_excluded")
 
 
 def buzz_v1_self_proof(db: Path, today: str) -> Dict:

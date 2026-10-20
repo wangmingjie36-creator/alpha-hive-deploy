@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
+import observation_archive as _obs
 from hive_logger import atomic_json_write, read_json_cache
 
 _log = _logging.getLogger("alpha_hive.yahoo_trending")
@@ -62,7 +63,10 @@ def get_trending_tickers(count: int = 25) -> List[str]:
         if cached is not None:
             return cached
 
+        # v0.45.568：每次真去取数的结局进原始观测档案（`observation_archive`，只存、不改去向）
+        _request = {"url": "https://query2.finance.yahoo.com/v1/finance/trending/US", "params": {"count": count}}
         if _req is None:
+            _obs.fetch_failed("yahoo.trending", "no_requests", request=_request)
             return []
 
         try:
@@ -73,10 +77,14 @@ def get_trending_tickers(count: int = 25) -> List[str]:
                 timeout=8,
             )
             if not resp.ok:
+                _obs.fetch_failed("yahoo.trending", "http_error", request=_request,
+                                  message=f"HTTP {resp.status_code}")
                 return []
 
             quotes = resp.json()["finance"]["result"][0]["quotes"]
             tickers = [q["symbol"] for q in quotes if "symbol" in q]
+            # 存的就是缓存里的那张代码表（评分只用名次）：缓存命中时 `reuse` 算出同一个地址
+            _obs.observe("yahoo.trending", {"symbols": tickers}, request=_request)
 
             try:
                 atomic_json_write(_cache_path(), tickers)
@@ -87,6 +95,8 @@ def get_trending_tickers(count: int = 25) -> List[str]:
 
         except NETWORK_ERRORS as e:
             _log.debug("Yahoo Trending 获取失败: %s", e)
+            _obs.fetch_failed("yahoo.trending", "network_error", request=_request,
+                              message=f"{type(e).__name__}: {e}")
             return []
 
 
@@ -106,6 +116,8 @@ def get_ticker_attention(ticker: str) -> Dict:
 
     if not trending:
         return _default_result(ticker)
+    # v0.45.568：本次评分用的那张热搜表的观测地址（缓存命中也算），随结果的 `observation` 键走
+    _ref = _obs.reuse("yahoo.trending", {"symbols": trending})
 
     # 查找排名（从 1 开始）
     rank = None
@@ -123,6 +135,7 @@ def get_ticker_attention(ticker: str) -> Dict:
             "is_real_data": True,
             "description": "未上 Yahoo 热搜",
             "timestamp": datetime.now().isoformat(),
+            _obs.REF_KEY: _ref,
         }
 
     # 评分：排名越靠前分越高
@@ -143,6 +156,7 @@ def get_ticker_attention(ticker: str) -> Dict:
         "is_real_data": True,
         "description": f"Yahoo热搜 #{rank}/25",
         "timestamp": datetime.now().isoformat(),
+        _obs.REF_KEY: _ref,
     }
 
 

@@ -12,7 +12,6 @@ import pytest
 from ml_predictor import (
     SimpleMLModel,
     TrainingData,
-    HistoricalDataBuilder,
     MLPredictionService,
     FEATURE_NAMES,
     FEATURE_NAMES_V1,
@@ -52,6 +51,27 @@ def _make_sample(win: bool = True, **overrides) -> TrainingData:
     )
     defaults.update(overrides)
     return TrainingData(**defaults)
+
+
+def _training_set() -> list:
+    """8 条合成训练样本（测试夹具）。v0.45.558 前测试借用生产的 `HistoricalDataBuilder` 硬编码样本；
+    那个类已从生产代码删除（生产没有真实数据就不训练），夹具留在测试里。"""
+    out = []
+    for k in range(8):
+        win = k % 4 != 3                       # 6 赢 2 输：两类都有，分类器才学得出概率
+        out.append(_make_sample(
+            win=win, ticker=f"S{k}", crowding_score=40.0 + 5 * k,
+            catalyst_quality=("A", "B", "C", "B+")[k % 4], momentum_5d=(k - 3) * 1.5,
+            volatility=3.0 + k, market_sentiment=10.0 * (k - 4), iv_rank=20.0 + 8 * k,
+        ))
+    return out
+
+
+def _service() -> "MLPredictionService":
+    """预载了合成样本的服务：测试沙箱的库是空的，生产代码又不再有硬编码兜底。"""
+    svc = MLPredictionService()
+    svc.fallback_records = _training_set()
+    return svc
 
 
 def _build_training_set(n_pos: int = 5, n_neg: int = 3) -> list:
@@ -235,7 +255,7 @@ class TestSimpleMLModel:
 
     def test_train(self):
         model = SimpleMLModel()
-        data = HistoricalDataBuilder().get_training_data()
+        data = _training_set()
         result = model.train(data)
         assert result["status"] == "success"
         assert result["samples"] == len(data)
@@ -249,14 +269,14 @@ class TestSimpleMLModel:
 
     def test_predict_probability(self):
         model = SimpleMLModel()
-        data = HistoricalDataBuilder().get_training_data()
+        data = _training_set()
         model.train(data)
         prob = model.predict_probability(data[0])
         assert 0.0 <= prob <= 1.0
 
     def test_predict_return(self):
         model = SimpleMLModel()
-        data = HistoricalDataBuilder().get_training_data()
+        data = _training_set()
         model.train(data)
         ret = model.predict_return(data[0])
         assert "probability" in ret
@@ -266,7 +286,7 @@ class TestSimpleMLModel:
 
     def test_save_and_load(self):
         model = SimpleMLModel()
-        data = HistoricalDataBuilder().get_training_data()
+        data = _training_set()
         model.train(data)
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
@@ -671,16 +691,16 @@ class TestMLPredictionService:
     def test_init(self):
         svc = MLPredictionService()
         assert svc.model is not None
-        assert svc.data_builder is not None
+        assert svc.fallback_records == []   # v0.45.558：缺省没有任何硬编码样本
 
     def test_train_model(self):
-        svc = MLPredictionService()
+        svc = _service()
         result = svc.train_model()
         assert result["status"] == "success"
         assert svc.model.is_trained
 
     def test_predict_for_opportunity(self):
-        svc = MLPredictionService()
+        svc = _service()
         sample = _make_sample()
         prediction = svc.predict_for_opportunity(sample)
         assert "ticker" in prediction
@@ -689,14 +709,14 @@ class TestMLPredictionService:
 
     def test_predict_auto_trains(self):
         """首次预测时应自动训练模型"""
-        svc = MLPredictionService()
+        svc = _service()
         assert not svc.model.is_trained
         prediction = svc.predict_for_opportunity(_make_sample())
         assert svc.model.is_trained
         assert "prediction" in prediction
 
     def test_get_model_info(self):
-        svc = MLPredictionService()
+        svc = _service()
         svc.train_model()
         info = svc.get_model_info()
         assert info["is_trained"]
@@ -705,7 +725,7 @@ class TestMLPredictionService:
         assert "weights" in info
 
     def test_incremental_train(self):
-        svc = MLPredictionService()
+        svc = _service()
         svc.train_model()
         new_data = [_make_sample(win=True, crowding_score=55)]
         result = svc.incremental_train(new_data)
@@ -714,7 +734,7 @@ class TestMLPredictionService:
 
     def test_prediction_structure(self):
         """验证预测返回的完整结构"""
-        svc = MLPredictionService()
+        svc = _service()
         svc.train_model()
         pred = svc.predict_for_opportunity(_make_sample())
         # 顶层字段
@@ -744,9 +764,9 @@ class TestIncrementalTrainingLoop:
         import tempfile
 
         from ml_predictor import SGDMLModel
-        svc = MLPredictionService()
+        svc = _service()
         svc.model = SGDMLModel()  # v0.33.0: 显式用 SGD fallback（工厂默认 HGB；本测试验证 SGD 增量+序列化闭环）
-        svc.train_model()  # 8 个硬编码样本
+        svc.train_model()  # 8 条合成夹具样本（_training_set）
 
         # 模拟 5 条新验证数据
         verified = [
@@ -782,7 +802,7 @@ class TestIncrementalTrainingLoop:
     @pytest.mark.timeout(_HEAVY_CPU_TIMEOUT)
     def test_incremental_improves_or_maintains(self):
         """增量学习后模型应保持功能正常（不崩溃，能预测）"""
-        svc = MLPredictionService()
+        svc = _service()
         svc.train_model()
 
         # 增量学习 3 批
@@ -961,41 +981,35 @@ class TestIncrementalTrainingLoop:
 
 
 # ===========================================================================
-# HistoricalDataBuilder 测试
+# 没有真实训练数据 ⇒ 不训练、标不可用（v0.45.558，原 TestHistoricalDataBuilder 测的 8 条硬编码样本已从生产删除）
 # ===========================================================================
 
-class TestHistoricalDataBuilder:
-    """测试 HistoricalDataBuilder"""
+class TestNoRealDataMeansNoModel:
 
-    def test_get_training_data(self):
-        builder = HistoricalDataBuilder()
-        data = builder.get_training_data()
-        assert len(data) == 8  # 8 个硬编码样本
+    def test_train_model_refuses_without_any_real_data(self):
+        svc = MLPredictionService()
+        result = svc.train_model()            # 沙箱库是空的、也没预载
+        assert result["status"] == "error"
+        assert not svc.model.is_trained
 
-    def test_samples_have_v2_fields(self):
-        """硬编码样本应包含 v2 新字段"""
-        builder = HistoricalDataBuilder()
-        data = builder.get_training_data()
-        for td in data:
-            # v2 字段应有非默认值（至少某些样本）
-            assert hasattr(td, "iv_rank")
-            assert hasattr(td, "put_call_ratio")
-            assert hasattr(td, "final_score")
-            assert hasattr(td, "odds_score")
-            assert hasattr(td, "risk_adj_score")
-            assert hasattr(td, "agent_agreement")
-            assert hasattr(td, "direction_encoded")
-            # 值范围校验
-            assert 0 <= td.iv_rank <= 100
-            assert td.put_call_ratio > 0
-            assert 0 <= td.final_score <= 10
-            assert 0 <= td.agent_agreement <= 1
+    def test_prediction_is_marked_unavailable(self):
+        svc = MLPredictionService()
+        pred = svc.predict_for_opportunity(_make_sample())
+        assert pred["prediction"]["model_unavailable"] is True
+        assert pred["prediction"]["unreliable"] is True
+        assert pred["recommendation"].startswith("NO CALL")
 
-    def test_add_record(self):
-        builder = HistoricalDataBuilder()
-        n_before = len(builder.get_training_data())
-        builder.add_record(_make_sample())
-        assert len(builder.get_training_data()) == n_before + 1
+    def test_preloaded_real_records_still_train(self):
+        """成对：调用方预载的记录照常训练（generate_ml_report 的低门槛回退靠它）。"""
+        svc = _service()
+        assert svc.train_model()["status"] == "success"
+        pred = svc.predict_for_opportunity(_make_sample())
+        assert "model_unavailable" not in pred["prediction"]
+
+    def test_hardcoded_builder_is_gone(self):
+        import ml_predictor
+        assert not hasattr(ml_predictor, "HistoricalDataBuilder")
+        assert not hasattr(ml_predictor, "CROWDING_NEUTRAL")
 
 
 class TestScalerSerializationBug:
@@ -1005,10 +1019,10 @@ class TestScalerSerializationBug:
     def test_load_then_incremental_train_no_crash(self):
         """save → load → incremental_train 应正常工作（不抛 'int has no attribute shape'）"""
         import tempfile
-        from ml_predictor import SGDMLModel, MLPredictionService
+        from ml_predictor import SGDMLModel
 
         # v0.33.0: 工厂默认 HGB（无 _scaler/不支持 partial_fit）；这些是 SGD fallback 序列化回归测试，显式注入 SGD
-        svc = MLPredictionService()
+        svc = _service()
         svc.model = SGDMLModel()
         svc.train_model()
 
@@ -1036,10 +1050,10 @@ class TestScalerSerializationBug:
     def test_scaler_n_samples_seen_is_numpy_after_load(self):
         """加载后 scaler.n_samples_seen_ 应为 numpy 类型（有 .shape 属性）"""
         import tempfile
-        from ml_predictor import SGDMLModel, MLPredictionService
+        from ml_predictor import SGDMLModel
 
         # v0.33.0: 工厂默认 HGB（无 _scaler/不支持 partial_fit）；这些是 SGD fallback 序列化回归测试，显式注入 SGD
-        svc = MLPredictionService()
+        svc = _service()
         svc.model = SGDMLModel()
         svc.train_model()
 
@@ -1062,10 +1076,10 @@ class TestScalerSerializationBug:
     def test_multiple_save_load_incremental_cycles(self):
         """多轮 save→load→incremental→save 循环不退化"""
         import tempfile
-        from ml_predictor import SGDMLModel, MLPredictionService
+        from ml_predictor import SGDMLModel
 
         # v0.33.0: 工厂默认 HGB（无 _scaler/不支持 partial_fit）；这些是 SGD fallback 序列化回归测试，显式注入 SGD
-        svc = MLPredictionService()
+        svc = _service()
         svc.model = SGDMLModel()
         svc.train_model()
 

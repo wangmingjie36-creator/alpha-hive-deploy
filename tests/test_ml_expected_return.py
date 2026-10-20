@@ -19,8 +19,6 @@ ML 预期收益与概率的**可达性**不变式（v0.44.1）
 """
 
 import math
-import sqlite3
-from pathlib import Path
 
 import pytest
 
@@ -28,17 +26,18 @@ import ml_predictor as mp
 from ml_predictor import TrainingData
 
 
+_CROWDING_TYPICAL = 23.30   # 拥挤度实测中位数（2026-08-16, n=1057）；仅作夹具取值
+
+
 def _data(**kw):
     """构造 TrainingData，只覆盖关心的字段。
 
-    ⚠️ `crowding_score` 默认取 `mp.CROWDING_NEUTRAL` 而**不是字面量 50.0**。
-    v0.44.2 按实测分布把中性点重标到 23.30（实测只有 4.6% 的样本 ≥50），
-    此后「50」在这个分布里代表 p95 之上的**高拥挤**，不再是中性。
-    用常数表达"中性"，标定再变时这些测试不会悄悄错位。
+    `crowding_score` 取 23.30（v0.44.2 的实测中位数）。`expected_returns` 不读拥挤度，取值只为夹具像真数据；
+    v0.45.558 前这里引用生产常数 `mp.CROWDING_NEUTRAL`，该常数随 Rival 模型退役已删。
     """
     base = dict(
         ticker="TEST", date="2026-08-14",
-        crowding_score=mp.CROWDING_NEUTRAL, catalyst_quality="B+", momentum_5d=0.0,
+        crowding_score=_CROWDING_TYPICAL, catalyst_quality="B+", momentum_5d=0.0,
         volatility=30.0, market_sentiment=0.0,
         actual_return_3d=0.0, actual_return_7d=0.0, actual_return_30d=0.0,
         win_3d=False, win_7d=False, win_30d=False,
@@ -75,7 +74,7 @@ class TestNegativeExpectedReturnIsReachable:
         动量为 0 的样本在近 12 个扫描日占 **63.7%**。
         """
         out = mp.expected_returns(
-            _data(momentum_5d=0.0, crowding_score=mp.CROWDING_NEUTRAL))
+            _data(momentum_5d=0.0, crowding_score=_CROWDING_TYPICAL))
         for k in ("expected_3d", "expected_7d", "expected_30d"):
             assert out[k] == pytest.approx(0.0, abs=1e-9), f"{k} = {out[k]}"
 
@@ -162,109 +161,8 @@ class TestCrowdingStaysOutOfExpectedReturns:
             assert math.isfinite(out)
 
 
-@pytest.mark.integration   # 读生产 pheromone.db —— 条件性写在 marker 上，不写进 skip
-class TestCrowdingCalibrationDrift:
-    """`CROWDING_NEUTRAL` 是**经验常数**，会过期。
-
-    它取自 2026-08-16 的实测分布（n=1057，中位 23.30）。用途是 `rival_bee`
-    取不到真实拥挤度时喂给 **`probability`** 的中性回落值 —— 那里 crowding 是
-    权重最大的特征（0.18），回落值选错会直接偏斜概率。
-
-    **为什么不能用量表中点 50**：实测只有 **4.6%** 的样本 ≥50，在这个分布里
-    50 等于"极不拥挤"。检测器自己的档位（<30 低 / 30~60 中 / ≥60 高）中心约 45，
-    也与实测差得远 —— 95% 以上的样本落在"低拥挤度"档。
-
-    失效是**静默的**：公式照跑、结果照出，只是悄悄带上偏斜。
-    这正是本项目最常见的故障形状。
-
-    ⚠️ 为什么容许带这么宽（±40%）：这是**过期告警**，不是精度断言。
-    目的是在常数明显失配时吵醒人，而不是每次小幅漂移就红。
-
-    v0.45.165：本组核对的是**生产分布本身**（常数还跟不跟得上实测中位），
-    换夹具就测不到它要测的东西 —— 所以不补桩，改标 `@pytest.mark.integration`：
-    条件性写在 marker 上（默认输出里是 `N deselected`），不藏在一条默认执行时
-    静默跳过的 skip 里。`pheromone.db` 命中 `.gitignore` 的 `*.db`，
-    旧写法在干净检出与 CI 上恒 skip —— 断言从未被求值过。
-
-    ⚠️ 纯常数钉桩那半条（「别把 CROWDING_NEUTRAL 改回 50」）已拆到
-    `TestCrowdingNeutralIsNotScaleMidpoint`，它不需要任何生产数据，无条件跑。
-    """
-
-    PROD_DB = Path(__file__).resolve().parent.parent / "pheromone.db"
-
-    def _crowding_scores(self):
-        # 只有 `-m integration` 显式选中才走到这里 —— 缺库即判红，不跳过。
-        assert self.PROD_DB.exists(), (
-            f"生产 pheromone.db 不在 {self.PROD_DB} —— 本组核对生产分布，"
-            "已标 @pytest.mark.integration（默认排除）；显式选中却没有库就该红。"
-        )
-        con = sqlite3.connect(f"file:{self.PROD_DB}?mode=ro", uri=True)
-        try:
-            rows = [v for (v,) in con.execute(
-                "SELECT value FROM signal_archive "
-                "WHERE signal = 'crowding.score' AND value IS NOT NULL")]
-        except sqlite3.OperationalError as e:
-            # v0.45.24: 存根库（测试/worktree 环境自动生成的 pheromone.db）
-            # 可能只有 predictions 表。只把「表不存在」当合法 skip；
-            # database is locked 等其他 OperationalError 照抛——吞掉会把
-            # 瞬时可重试状态误报成「数据不足」。
-            if "no such table" in str(e):
-                pytest.skip(f"pheromone.db 无 signal_archive 表（存根库）：{e}")
-            raise
-        finally:
-            con.close()
-        # 实测生产库 1356 条。低于 100 不是「样本还不够」，是收录断了。
-        assert len(rows) >= 100, (
-            f"crowding.score 只有 {len(rows)} 条（地板 100）—— signal_archive "
-            "很可能已停止收录它，CROWDING_NEUTRAL 的漂移将无从观测。"
-        )
-        return sorted(float(v) for v in rows)
-
-    def test_neutral_still_tracks_observed_median(self):
-        v = self._crowding_scores()
-        med = v[len(v) // 2]
-        lo, hi = mp.CROWDING_NEUTRAL * 0.6, mp.CROWDING_NEUTRAL * 1.4
-        assert lo <= med <= hi, (
-            f"实测中位数 {med:.2f} 已漂出 CROWDING_NEUTRAL="
-            f"{mp.CROWDING_NEUTRAL} 的容许带 [{lo:.2f}, {hi:.2f}] "
-            f"（n={len(v)}）—— 常数已过期，会给 expected_returns 带来系统性偏斜。"
-            f"重标方式见 ml_predictor.py 的长注释。"
-        )
-
-    def test_observed_distribution_still_makes_50_a_bad_fallback(self):
-        """选择理由的**数据侧**：≥50 的占比必须仍然很小。
-
-        v0.45.165 拆分说明：本条原名 `test_scale_midpoint_50_would_be_wrong`，
-        同时挂着两句断言 —— 一句要生产数据（这句），一句是纯常数钉桩
-        （`abs(CROWDING_NEUTRAL - 50) > 5`，不需要任何数据）。两句挂在一起，
-        意味着**纯常数那句也跟着在 CI 上恒不执行**：有人把常数改回 50，
-        没有任何东西会红。现已拆走，见
-        `TestCrowdingNeutralIsNotScaleMidpoint::test_not_reverted_to_scale_midpoint`。
-        """
-        v = self._crowding_scores()
-        ge50 = sum(1 for x in v if x >= 50.0) / len(v)
-        assert ge50 < 0.25, (
-            f"实测 ≥50 的占比 {ge50:.1%} —— 若已接近半数，"
-            f"CROWDING_NEUTRAL 的选择理由（50 在此分布里代表极不拥挤）需重新评估"
-        )
-
-
-class TestCrowdingNeutralIsNotScaleMidpoint:
-    """钉住"为什么不用 50"这个**判断本身** —— 零外部依赖，任何环境都跑。
-
-    从 `TestCrowdingCalibrationDrift` 拆出来（v0.45.165）。原先它和一句读生产库的
-    断言同处一条测试，于是被生产库的 skip 连坐，在干净检出与 CI 上从未求值 ——
-    「谁会红？」的答案曾是「没人」。这条断言只看常数，不看数据，没有任何理由
-    跟着生产库走。
-    """
-
-    def test_not_reverted_to_scale_midpoint(self):
-        assert abs(mp.CROWDING_NEUTRAL - 50.0) > 5.0, (
-            f"CROWDING_NEUTRAL 被改回量表中点 50 附近（当前 {mp.CROWDING_NEUTRAL}）—— "
-            "但 2026-08-16 实测只有 4.6% 的样本 ≥50，50 在此分布里代表极不拥挤，"
-            "用它作回落值会让降级悄悄变成偏斜。实测占比由 "
-            "TestCrowdingCalibrationDrift（-m integration）持续核对。"
-        )
+# v0.45.558：`TestCrowdingCalibrationDrift` / `TestCrowdingNeutralIsNotScaleMidpoint` 已删 —— 它们守的
+# `ml_predictor.CROWDING_NEUTRAL` 随 RivalBee 合成样本模型（v0.45.538）失去全部生产读者，常数一并删除。
 
 
 class TestMissingMomentumHandling:

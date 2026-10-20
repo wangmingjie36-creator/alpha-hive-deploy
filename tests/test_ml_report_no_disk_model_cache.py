@@ -34,6 +34,8 @@ def gen_cls(monkeypatch):
     """每条测试一个干净的进程内缓存（类级字典跨测试共享）。"""
     from generate_ml_report import MLEnhancedReportGenerator as G
     monkeypatch.setattr(G, "_model_cache", {})
+    # v0.45.558：沙箱库是空的，生产代码又不再有 8 条硬编码兜底 ⇒ 预载合成「真实」记录（走低门槛预载那条路）
+    monkeypatch.setattr(G, "_build_real_training_data", lambda self: _rows(40))
     return G
 
 
@@ -112,7 +114,7 @@ class TestNoDiskReadBack:
     def test_training_source_known_for_every_instance(self, gen_cls):
         """旧实现只给第一个实例设 `_training_data_source`，缓存命中的实例恒为 "unknown"（08-28 / 09-04 的记录全是它）。"""
         a, b = gen_cls(), gen_cls()
-        assert a._training_data_source in ("real", "sample")
+        assert a._training_data_source in ("real", "unavailable")
         assert b._training_data_source == a._training_data_source
 
 
@@ -127,7 +129,7 @@ class TestFingerprintRecorded:
         recorded = report["ml_prediction"]["model"]
         assert recorded and recorded["sha256"] == gen._model_fingerprint["sha256"]
         assert recorded["n_samples_seen"] == gen.ml_service.model._n_samples_seen
-        assert recorded["training_data_source"] in ("real", "sample")
+        assert recorded["training_data_source"] in ("real", "unavailable")
 
     def test_fingerprint_failure_is_recorded_not_hidden(self):
         """算不出来 ⇒ sha256=None + 写明原因；不能让「没记」看起来像「没有」，也不能拖垮报告。"""

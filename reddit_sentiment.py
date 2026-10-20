@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import observation_archive as _obs
 from hive_logger import atomic_json_write
 from resilience import get_session, reddit_limiter, singleton_client, NETWORK_ERRORS
 
@@ -88,13 +89,17 @@ class RedditSentimentClient:
                 except (json.JSONDecodeError, OSError) as exc:
                     _log.debug("Reddit ranking 缓存读取失败 (%s): %s", filter_name, exc)
 
+        # v0.45.568：每次真去取数的结局进原始观测档案（`observation_archive`，只存、不改去向）
+        _request = {"url": f"{APEWISDOM_BASE}/filter/{filter_name}/page/1"}
         if requests is None:
+            _obs.fetch_failed("apewisdom.ranking", "no_requests", request=_request)
             return []
 
         try:
             from resilience import reddit_breaker
             if not reddit_breaker.allow_request():
                 _log.debug("Reddit circuit breaker OPEN, returning cached")
+                _obs.fetch_failed("apewisdom.ranking", "breaker_open", request=_request)
                 return []
         except ImportError:
             reddit_breaker = None
@@ -109,6 +114,7 @@ class RedditSentimentClient:
             if reddit_breaker:
                 reddit_breaker.record_success()
             results = resp.json().get("results", [])
+            _obs.observe("apewisdom.ranking", {"filter": filter_name, "results": results}, request=_request)
 
             # 保存缓存
             self._ranking_cache[filter_name] = {
@@ -125,6 +131,8 @@ class RedditSentimentClient:
             if reddit_breaker:
                 reddit_breaker.record_failure()
             _log.warning("获取 Reddit 排名失败 (%s): %s", filter_name, e)
+            _obs.fetch_failed("apewisdom.ranking", "network_error", request=_request,
+                              message=f"{type(e).__name__}: {e}")
             return []
 
     def get_ticker_sentiment(self, ticker: str) -> Dict:
@@ -155,6 +163,10 @@ class RedditSentimentClient:
         # 从多个子版获取数据
         all_stocks = self._fetch_ranking("all-stocks")
         wsb = self._fetch_ranking("wallstreetbets")
+        # v0.45.568：本次评分实际用的两张榜（缓存命中也算）的观测地址——结果的 `observation` 键随派生缓存一起存。
+        # 空榜（取数失败）也是一份观测：它决定了下面走安静 / 兜底分支
+        _refs = {"all-stocks": _obs.reuse("apewisdom.ranking", {"filter": "all-stocks", "results": all_stocks}),
+                 "wallstreetbets": _obs.reuse("apewisdom.ranking", {"filter": "wallstreetbets", "results": wsb})}
 
         # 在排名中查找目标 ticker
         all_match = self._find_ticker(all_stocks, ticker_upper)
@@ -169,7 +181,9 @@ class RedditSentimentClient:
             # P1-1 (v0.38.0): 区分"榜单拉到了但 ticker 不在前100（真安静）"
             # vs "API 全灭（降级）"——此前两者都返回 quiet，下游无法区分
             _fetch_failed = not all_stocks and not wsb
-            return self._quiet_result(ticker, is_fallback=_fetch_failed)
+            _quiet = self._quiet_result(ticker, is_fallback=_fetch_failed)
+            _quiet[_obs.REF_KEY] = _refs
+            return _quiet
 
         # v0.45.89：**别用 `.get(k, 默认值)` 挡 None。** 默认值只在键"不存在"时
         # 生效；上游把值显式置成 null（键在、值是 None）时它永不触发，None 就
@@ -275,6 +289,7 @@ class RedditSentimentClient:
             "sources": sources,
             "wsb_rank": wsb_match.get("rank") if wsb_match else None,
             "timestamp": datetime.now().isoformat(),
+            _obs.REF_KEY: _refs,
         }
 
         try:

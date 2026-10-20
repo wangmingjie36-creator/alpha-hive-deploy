@@ -35,11 +35,20 @@ RETIRED_LITERALS = {
 }
 
 
+#: 后来**整个类**都退役了的（成员自然也不在）。只认登记在这里的——别的类找不到照旧当「改名了」报红；
+#: 这里登记的类必须真的不在（`test_retired_classes_are_gone`），免得它掩护一次改名。
+RETIRED_CLASSES = {
+    ("ml_predictor.py", "HistoricalDataBuilder"),   # v0.45.558：8 条硬编码训练样本整类删除
+}
+
+
 def _has_member(rel: str, cls, name: str) -> bool:
     tree = _ast_cache.parse_file(REPO_ROOT / rel)
     scope = tree.body
     if cls is not None:
         found = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls]
+        if not found and (rel, cls) in RETIRED_CLASSES:
+            return False
         assert found, f"{rel} 里找不到类 {cls}——改名了？墓碑要跟着改，别让它对着不存在的类恒绿"
         scope = found[0].body
     return any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name for n in scope)
@@ -70,6 +79,12 @@ class TestRetiredWritersStayRetired:
         assert not back, (f"这些写入方又回来了：{back}。它们写的文件全仓零读者（v0.45.550 删除）——"
                           "真要恢复，先在 tests/test_persistent_writes_have_readers.py 登记读者")
 
+    def test_retired_classes_are_gone(self):
+        back = [f"{rel}::{cls}" for rel, cls in RETIRED_CLASSES
+                if any(isinstance(n, ast.ClassDef) and n.name == cls
+                       for n in _ast_cache.parse_file(REPO_ROOT / rel).body)]
+        assert not back, f"登记为整类退役的类又回来了：{back}"
+
     def test_artifact_names_are_gone(self):
         back = {rel: [s for s in _string_constants(rel) if name in s]
                 for rel, name in RETIRED_LITERALS.items()}
@@ -83,7 +98,8 @@ class TestTombstoneHasTeeth:
     def test_member_check_sees_live_members(self):
         assert _has_member("feedback_loop.py", "ReportSnapshot", "save_to_json")
         assert _has_member("run_daily_scan.py", None, "main")
-        assert _has_member("ml_predictor.py", "HistoricalDataBuilder", "add_record")
+        # v0.45.558：原先认 `HistoricalDataBuilder.add_record`——整个类已删，换同文件里活着的成员
+        assert _has_member("ml_predictor.py", "MLPredictionService", "train_model")
 
     def test_literal_check_sees_live_literals(self):
         # v0.45.552 前认的是 `.samples-only-`——那个写入方也退役了（见 tests/test_samples_only_mode_retired.py），

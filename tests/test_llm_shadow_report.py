@@ -35,7 +35,8 @@ def _pt(final, direction, rule=None, present=True):
 def _write(root, doc):
     d = Path(root) / rep.STATUS_DIRNAME
     d.mkdir(parents=True, exist_ok=True)
-    (d / f"{doc['date']}.json").write_text(json.dumps(doc), encoding="utf-8")
+    suffix = ".json" if doc.get("mode", "run") == "run" else ".control.json"      # 与 llm_shadow_scan.status_path 一致
+    (d / f"{doc['date']}{suffix}").write_text(json.dumps(doc), encoding="utf-8")
 
 
 def _prod_db(path, rows):
@@ -76,6 +77,22 @@ class TestLoadDays:
         _write(tmp_path, _status("2026-10-21", {}, mode="control"))
         assert [d["date"] for d in rep.load_days(tmp_path)] == ["2026-10-19", "2026-10-20"]
         assert [d["date"] for d in rep.load_days(tmp_path, "control")] == ["2026-10-21"]
+
+    def test_run_and_control_same_day_live_in_separate_files(self, tmp_path):
+        """晚到的 control 不能覆盖付过费的 run（v0.45.560）：两者同日并存、各读各的。"""
+        _write(tmp_path, _status("2026-10-19", {"A": _pt(6.0, "bullish")}))
+        _write(tmp_path, _status("2026-10-19", {"A": _pt(5.0, "neutral")}, mode="control"))
+        (run,) = rep.load_days(tmp_path)
+        (ctl,) = rep.load_days(tmp_path, "control")
+        assert run["mode"] == "run" and ctl["mode"] == "control"
+        assert run["per_ticker"]["A"]["final_score"] != ctl["per_ticker"]["A"]["final_score"]
+
+    def test_corrupt_control_file_raises_not_skipped(self, tmp_path):
+        import ledger_io
+        _write(tmp_path, _status("2026-10-19", {}, mode="control"))
+        (tmp_path / rep.STATUS_DIRNAME / "2026-10-20.control.json").write_text("{not json", encoding="utf-8")
+        with pytest.raises(ledger_io.LedgerCorrupt):
+            rep.load_days(tmp_path, "control")
 
     def test_corrupt_file_raises_not_skipped(self, tmp_path):
         import ledger_io

@@ -56,7 +56,7 @@ from collections import defaultdict
 from fnmatch import fnmatchcase
 from pathlib import Path
 from statistics import mean
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 
 # v0.45.160：`DB_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.db`。
 # 保留这个名字是因为 `tests/` 有多处 `monkeypatch.setattr(<mod>, "DB_PATH", ...)`
@@ -1786,12 +1786,17 @@ def archive(swarm_results: Dict, date: str, db_path: Optional[Path] = None,
     only = _check_only(only)
     ensure_schema(db_path)
     rows = _rows_for(swarm_results, date, only)
-    if not rows:
+    # v0.45.568：BuzzBee 的原始观测溯源与 buzz.comp.* **同一事务**写进 observation_links——同日重扫时两边同样「后者覆盖
+    # 前者」，链接永远指向产出库里那组通道值的那一轮观测（阶段 2 的冻结通道层按它取 payload 重算）。定向回填（only）不碰链接
+    import observation_archive
+    links = observation_archive.link_rows(swarm_results, date) if only is None else []
+    if not rows and not links:
         return 0
     with sqlite3.connect(db_path) as conn:
         conn.executemany(
             f"INSERT OR REPLACE INTO {TABLE} (date,ticker,signal,value) "
             f"VALUES (?,?,?,?)", rows)
+        observation_archive.write_links(conn, links)
         conn.commit()
     return len(rows)
 
@@ -2087,6 +2092,7 @@ def _forward_realized_vol(tickers: List[str], dates: List[str],
 # 分工（边界日期只在 `ic_rerun_readiness._COHORT_HISTORY` 维护，这里不抄）：
 #   · `COHORT_SIGNAL_SCOPE`：每条边界**直接**改了哪些归档信号；
 #   · `SIGNAL_UPSTREAM`：哪些信号读别的系统输出 —— 上游换代，下游同一天换代（传递闭包）。
+#     每条边带生效区间（v0.45.561，`Edge`）：闭包按边界**当天**生效的边走，改表不再追溯改写历史世代。
 #     追加边界的人只写直接目标，不必自己推「Bear 读 Guard、Rival 读拥挤度……」；
 #   · `SIGNAL_LEAVES`：不读任何系统输出的信号，只在边界**直接**点名时换代；
 #   · `ALWAYS_SLICED`：`composite.final_score` 受全部边界约束 —— `_COHORT_HISTORY`
@@ -2115,41 +2121,127 @@ UNARCHIVED_NODES = frozenset({"agent.CodeExecutorAgent.score",
 _PHASE1 = ("ScoutBeeNova", "OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon", "CodeExecutorAgent")
 _PHASE1_DIRS = tuple(f"agent.{a}.direction" for a in _PHASE1)
 
-#: 下游信号模式 → 它读的**系统输出**（上游模式）。只登记「读系统输出」的边；
+class Edge(NamedTuple):
+    """一条依赖边：下游读 `up`（fnmatch 模式）这个系统输出。
+
+    `via` —— 这条边**为什么**存在，也决定谁来核它：
+      · `"peer"`      读同伴条目（`BeeAgent._read_peer`）的某个字段；
+      · `"census"`    读板普查（`get_live_signals` / `detect_resonance` / 拥挤度的看多同伴数）；
+      · `"self"`      同一只蜂内部的合成（子分 → 总分、分量 → 拥挤度、预期收益 → 方向）；
+      · `"formula"`   自算一份同公式的量，以入档的那份代表「公式换代」（Rival / Guard 的拥挤度）；
+      · `"aggregate"` 聚合层（`swarm_agreement` 遍历全部方向）。
+      `peer` / `census` 两类由 `tests/test_signal_archive_generations.py::TestPeerReadEdgesMatchCode`
+      按 AST 与代码**双向**对账（读了没登记、登记了没读都红）；其余三类是人工维护的结构事实。
+
+    `since` / `until` —— 生效区间 `[since, until)`，扫描日期（ISO）；`None` = 不设限。
+      边界日期 D 落在区间内，这条边才把 D 的换代传下去（`_scope_closure(..., on=D)`）。
+      **为什么要有时间维度**（v0.45.561）：此前闭包拿**当前**的表去推**全部历史**边界 ——
+      删一条已不存在的边会让早先边界对旧数据的闭包悄悄缩小（v0.45.441 因此不敢删
+      consensus_strength 那条），留着它又会让此后无关的边界白切下游（v0.45.445 改 Buzz
+      新闻源 ⇒ Buzz 方向 ⇒ consensus_strength ⇒ … ⇒ `ml.expected_*`，而 `ml.expected_*`
+      根本不读这些）。有了区间，两头都对。
+      ⚠️ 区间端点就是下游自己换了定义（多读 / 少读了一个量）⇒ 那一天必须有一条边界的闭包盖住下游
+      （`TestEdgeWindows::test_window_endpoints_are_boundaries` 钉着）。拿不准的端点写 `None`
+      （＝保守地当它一直在），**不要猜日期**。
+    """
+    up: str
+    via: str
+    since: Optional[str] = None
+    until: Optional[str] = None
+
+
+EDGE_KINDS = frozenset({"peer", "census", "self", "formula", "aggregate"})
+
+
+def _edges(ups: Iterable[str], via: str, since: Optional[str] = None,
+           until: Optional[str] = None) -> Tuple[Edge, ...]:
+    return tuple(Edge(u, via, since, until) for u in ups)
+
+
+#: 依赖边区间端点（扫描日期）。每个都对应 `_COHORT_HISTORY` 里一条点名了下游的边界。
+#: v0.44.1~0.44.3 首个扫描日：Rival 移到 Phase-1.5，催化剂档改读 ChronosBee 分（此前写死 "B+"），
+#: 拥挤度改传真实值（此前写死 50.0）；`expected_returns` 去掉拥挤度项（v0.44.2 否决 v0.44.1 的倾斜项）。
+_EDGE_V0_44 = "2026-08-17"
+#: v0.45.441：Scout 拥挤度不再数看多同伴（`peer_census=False`）⇒ consensus_strength 恒 None。
+_EDGE_V0_45_441 = "2026-10-09"
+#: v0.45.538：Rival 退役合成样本模型 ⇒ 分数不再含概率，Bear 删 `ml_probability < 0.45` 分支。
+_EDGE_V0_45_538 = "2026-10-19"
+
+#: 已退役的 `ml.probability`（v0.45.538 起不写新行、抽取器已摘除 ⇒ 不在信号宇宙里）读过的系统输出。
+#: 它不能当节点（历史行会从「不认识 ⇒ 受全部边界约束」变成按依赖切），所以读它的下游直接挂到它的上游，
+#: 区间 = 它活着的那段：[v0.44.2/0.44.3 接上真实特征, v0.45.538 退役)。
+#:   · 拥挤度：Rival 自算一份（同一个 CrowdingDetector ⇒ `crowding.score` 代表公式），其看多同伴数读板
+#:     普查 —— v0.45.279 之前是排行榜、不按身份过滤，Scout 也会被数进去 ⇒ 保守取全部 Phase-1 方向；
+#:   · 催化剂档：读 ChronosBee 的 self_score。
+#:   · OracleBee 的 iv_rank / pc_ratio 是原始观测（同 Bear 读的内幕金额 / P/C），不是边。
+_ML_PROBABILITY_READS = (
+    (Edge("crowding.score", "formula", _EDGE_V0_44, _EDGE_V0_45_538),)
+    + _edges(_PHASE1_DIRS, "census", _EDGE_V0_44, _EDGE_V0_45_538)
+    + (Edge("agent.ChronosBeeHorizon.score", "peer", _EDGE_V0_44, _EDGE_V0_45_538),)
+)
+
+#: 下游信号（fnmatch 模式）→ 它读的**系统输出**（`Edge`）。只登记「读系统输出」的边；
 #: 读原始市场数据（期权链 / SEC / 行情）不是边 —— 那些量不随系统逻辑换代。
-SIGNAL_UPSTREAM: Dict[str, Tuple[str, ...]] = {
+#: v0.45.561：逐信号登记（此前一个 `ml.*` 通配把已删的 `ml.probability` 与 `ml.expected_*`
+#: 捆在一起，后者因此被它根本不读的拥挤度 / Phase-1 方向反复白切）+ 每条边带生效区间。
+SIGNAL_UPSTREAM: Dict[str, Tuple[Edge, ...]] = {
     # Scout 拥挤度的 consensus_strength = 读板那一刻已发布同伴的看多数
     # （`real_data_sources.get_bullish_agents_count`）。Phase-1 并行 ⇒ 读到谁取决于竞态，
     # 但读到的是同伴**方向**：生产库 03~09 月取值 0~5 只看多，不是常数。
-    "crowding.comp.consensus_strength": tuple(d for d in _PHASE1_DIRS if "ScoutBeeNova" not in d),
-    "crowding.score": ("crowding.comp.*",),
-    "crowding.signal": ("crowding.score",),
-    "crowding.adj_factor": ("crowding.score",),
-    "agent.ScoutBeeNova.*": ("crowding.score", "crowding.adj_factor"),    # 方向按拥挤度阈值定
-    # Rival（Phase-1.4）：自算一份拥挤度当 ML 特征（此时 Phase-1 已全部发布），读 Chronos 的 self_score。
-    # Rival / Guard 自算的拥挤度不入档，与 Scout 同一个 CrowdingDetector 公式 ⇒ 以
-    # `crowding.score` 代表「公式换代」（下面 guard.adj_factor 同理）
-    "ml.*": ("crowding.score", "agent.ChronosBeeHorizon.score") + _PHASE1_DIRS,
-    "agent.RivalBeeVanguard.*": ("ml.*",),
+    # v0.45.441（10-09）起 Scout 不再数（恒 None）⇒ 边止于 10-09；此前的边界照旧经它传递。
+    "crowding.comp.consensus_strength": _edges(
+        (d for d in _PHASE1_DIRS if "ScoutBeeNova" not in d), "census", until=_EDGE_V0_45_441),
+    "crowding.score": (Edge("crowding.comp.*", "self"),),
+    "crowding.signal": (Edge("crowding.score", "self"),),
+    "crowding.adj_factor": (Edge("crowding.score", "self"),),
+    "agent.ScoutBeeNova.*": _edges(("crowding.score", "crowding.adj_factor"), "self"),  # 方向按拥挤度阈值定
+    # Rival 的预期收益 = 催化剂档幅度 × 5 日动量（`ml_predictor.expected_returns`；动量是原始行情、不是边）。
+    # 08-17 之前：Rival 在 Phase-1、催化剂档写死 "B+"、拥挤度写死 50.0 ⇒ 闭式 8.0 + 0.8×动量，不读任何系统输出。
+    # 08-17 起：催化剂档 = `catalyst_quality_from_score(ChronosBee.self_score)`。拥挤度 / Phase-1 方向只进过
+    # 概率（`_ML_PROBABILITY_READS`），从来没进过预期收益（v0.44.2 否决拥挤度倾斜项，同一条边界内）。
+    # 行为差分守卫：`TestRivalExpectedReturnsIgnorePeers`（只动同伴方向 / 拥挤度，expected_* 逐位不变）。
+    "ml.expected_7d": (Edge("agent.ChronosBeeHorizon.score", "peer", since=_EDGE_V0_44),),
+    "ml.expected_30d": (Edge("agent.ChronosBeeHorizon.score", "peer", since=_EDGE_V0_44),),
+    # Rival 方向 = sign(expected_7d + expected_30d)（EPS 修正只把 neutral 翻开、预期收益不可用时退技术指标，
+    # 两者读的都是原始行情）—— 概率从来不进方向（v0.45.538 CHANGELOG：方向逐位不变）
+    "agent.RivalBeeVanguard.direction": _edges(("ml.expected_7d", "ml.expected_30d"), "self"),
+    # Rival 分 = 概率×10（+技术指标微调）—— v0.45.538 起概率退役，分数 = 5.0 + 0.5×技术指标（原始行情）
+    "agent.RivalBeeVanguard.score": _ML_PROBABILITY_READS,
     # Guard：avg_score / consistency 读 Phase-1 + Rival 的分与方向；自算一份拥挤度（看多数取自同一份普查）
-    "guard.consistency_census": _PHASE1_DIRS + ("agent.RivalBeeVanguard.direction",),
-    "guard.adj_factor": ("crowding.score",) + _PHASE1_DIRS + ("agent.RivalBeeVanguard.direction",),
-    "agent.GuardBeeSentinel.*": tuple(f"agent.{a}.*" for a in _PHASE1) + (
-        "agent.RivalBeeVanguard.*", "guard.consistency_census", "guard.adj_factor"),
+    "guard.consistency_census": _edges(_PHASE1_DIRS + ("agent.RivalBeeVanguard.direction",), "census"),
+    "guard.adj_factor": ((Edge("crowding.score", "formula"),)
+                         + _edges(_PHASE1_DIRS + ("agent.RivalBeeVanguard.direction",), "census")),
+    "agent.GuardBeeSentinel.*": (
+        _edges(tuple(f"agent.{a}.*" for a in _PHASE1) + ("agent.RivalBeeVanguard.*",), "census")
+        # v0.45.561 补登：`score = clamp(score + macro_adj)`（guard_bee.py）。凡点名 macro_adj 的边界都同时点名了
+        # Guard（v0.43.24 除外，其后 Guard 另有更晚的边界）⇒ 补边不挪任何起点
+        + _edges(("guard.consistency_census", "guard.adj_factor", "guard.macro_adj"), "self")),
     # v0.45.349：Bear 的两个子分读同伴的**方向**（系统输出），此前误登在 SIGNAL_LEAVES「不读任何系统输出」。
     # `_assess_insider_selling`：`scout_entry.direction == "bearish"` ⇒ insider_bear 下限 6.0；
     # `_assess_options_puts`：`oracle_entry.direction == "bearish"` ⇒ options_bear 下限 5.5（bear_bee.py）。
     # 同处读的内幕金额 / P/C / IV Rank / skew / gex 是原始观测，不是边。
     # 补边不挪任何已算出的世代起点（两者当前起点都由 v0.45.288 直接点名决定，其后再无边界触及
-    # Scout/Oracle 方向）——`tests/test_signal_archive_generations.py::TestBearPeerReadsAreEdges` 按 AST 核这两条边
-    "bear.insider_bear": ("agent.ScoutBeeNova.direction",),
-    "bear.options_bear": ("agent.OracleBeeEcho.direction",),
-    # Bear 读 Rival 的 expected_7d（v0.45.538 前还读 ml_probability）、Guard 的 consistency / conflict_type
-    "bear.score": ("ml.*", "agent.GuardBeeSentinel.*", "guard.consistency_census",
-                   "bear.insider_bear", "bear.overval_bear", "bear.options_bear", "bear.short_int_bear"),
-    "agent.BearBeeContrarian.*": ("bear.score",),
+    # Scout/Oracle 方向）——`TestPeerReadEdgesMatchCode` 按 AST 双向核这两条边
+    "bear.insider_bear": (Edge("agent.ScoutBeeNova.direction", "peer"),),
+    "bear.options_bear": (Edge("agent.OracleBeeEcho.direction", "peer"),),
+    # Bear 总分：四个入档子分 + 不入档的 news / catalyst / ml / guard 子分（读同伴 details）
+    # + LLM 模式下普查看多同伴（`_generate_llm_bear_thesis`；生产恒 --no-llm，按代码出边保守列）。
+    # v0.45.561 补登三条此前漏掉的 peer 边（双向对账时 AST 找出来的）：Buzz 方向（看空 ⇒ news_bear 下限 5.5）、
+    # `sentiment.pct`（Buzz 的 sentiment_score 即同一个 bullish_pct）、`catalyst.nearest_days`（≤7 天 ⇒ 5.0）。
+    # bear.score 的起点由表尾 v0.45.538 决定，补边不挪它。
+    "bear.score": (
+        _edges(("bear.insider_bear", "bear.overval_bear", "bear.options_bear", "bear.short_int_bear"), "self")
+        + _edges(("ml.expected_7d", "guard.consistency_census", "agent.GuardBeeSentinel.*",
+                  "agent.BuzzBeeWhisper.direction", "sentiment.pct", "catalyst.nearest_days",
+                  # 只进理由文字的三个 self_score（LLM 模式下文字进提示词 ⇒ 按代码出边保守列）
+                  "agent.ScoutBeeNova.score", "agent.OracleBeeEcho.score", "agent.BuzzBeeWhisper.score"), "peer")
+        + _edges(tuple(f"agent.{a}.*" for a in _PHASE1)
+                 + ("agent.RivalBeeVanguard.*", "agent.GuardBeeSentinel.*"), "census")
+        # v0.45.538 之前还读 Rival 的 `ml_probability`（< 0.45 ⇒ ml_bear 5.5）
+        + _ML_PROBABILITY_READS),
+    "agent.BearBeeContrarian.*": (Edge("bear.score", "self"),),
     # 多数派占比：遍历 agent_details 里**全部**蜂的方向（含 CodeExecutor / Guard / Bear）
-    "composite.swarm_agreement": ("agent.*.direction",),
+    "composite.swarm_agreement": (Edge("agent.*.direction", "aggregate"),),
 }
 
 #: 受**全部**边界约束的信号（见上方分工）。
@@ -2166,6 +2258,10 @@ SIGNAL_LEAVES = frozenset({
     "options.iv_rank", "options.iv_percentile", "options.iv_rank_is_real",
     # v0.45.362：CBOE 链 + Scout 价（同 price.* 按原始数据算）；只有本版上线后的记录才有，早于它的边界无从作用
     "gex.available", "gex.total_gex", "gex.negative",
+    # ⚠️ 不是真叶子：= int(Buzz 合成值)，合成值是 buzz.comp.* 七个通道的加权和 ⇒ 通道换代它跟着换。
+    # 留在这里是**刻意池化**（v0.45.565，用户 2026-10-20 定）：理由与复检条件见 `DELIBERATELY_POOLED`。
+    # 复检决定切 ⇒ 移出本集合，在 SIGNAL_UPSTREAM 登 `Edge("buzz.comp.*", "self")`（结构修法，草稿见分支
+    # claude/gifted-hawking-5866b0 的 72137325，未合入）。
     "sentiment.pct",
     # v0.45.349：bear.insider_bear / bear.options_bear 移出（读 Scout / Oracle 方向，见 SIGNAL_UPSTREAM）
     "bear.overval_bear", "bear.short_int_bear",
@@ -2198,7 +2294,9 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 08-15：ScoutBee momentum_5d 缺失哨兵 0.0（伪造持平）→ None（诚实缺失）。
     "v0.43.25": ("price.momentum_5d",),
     # 08-17：expected_returns 去偏 + probability 居中 + RivalBee 三特征接真实数据
-    "v0.44.1~0.44.3": ("ml.*",),
+    # v0.45.561：拆 `ml.*` 后显式点名 Rival —— 此前 Rival 分 / 方向经 `ml.*`（含 ml.probability）带出；
+    # 本版同时修了 Rival 的 EPS 单向棘轮（方向）、概率居中（分）
+    "v0.44.1~0.44.3": ("ml.*", "agent.RivalBeeVanguard.*"),
     # v0.45.275（P1 补登）08-26（早于同日 v0.45.30，按部署时间序插入）：
     # BuzzBee 背离检测 None 语义修复 + volatility_20d 缺失哨兵 0.0→None（同批
     # data_pipeline 改动，Buzz details 是直接透传）。
@@ -2217,15 +2315,19 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
                  "catalyst.nearest_days", "catalyst.max_weight"),
     # 08-27：① 拥挤度全分量不可得返回 None（旧：20.59 →「低拥挤」→ 1.2 加分）；
     # ② 训练集剔除维度缺失样本 ⇒ ml.*；⑥ 信息素坏值 1.0 → 0.5 ⇒ 板排序 ⇒ Guard 的 n=5 窗口。
+    # v0.45.561：② 与 Rival 自算拥挤度的 None 处理只进**概率**（训练集 / 特征），`expected_returns` 不读
+    # 训练集也不读拥挤度 ⇒ `ml.*` 收窄为它真正指的 Rival 分（`ml.probability` 已不在信号宇宙里）。
     # ③ 0DTE `or 30` 在 `OptionsDataFetcher` 的 BS gamma 回填里，而主链 `_select_expiries`
     # 只取 DTE≥7 ⇒ `options.gamma_exposure` 走不到，不列
-    "v0.45.50": ("crowding.score", "guard.adj_factor", "ml.*", "agent.GuardBeeSentinel.*"),
+    "v0.45.50": ("crowding.score", "guard.adj_factor", "agent.RivalBeeVanguard.score",
+                 "agent.GuardBeeSentinel.*"),
     # 09-05：① Oracle 期限结构 / 25Δ skew 的 IV 换 CBOE ⇒ options_score（`options.iv_current`
     # 本就取自 OptionsAgent，不变）；② Bear 估值项 P/E 复活
     "v0.45.128": ("agent.OracleBeeEcho.*", "bear.overval_bear"),
     # 09-07：Rival 读 Chronos 的 catalyst_quality 修复。probability 在当前 HGB 上 0/173 变，
     # 但那是模型性质不是定义性质（该条原文「定义变了就登记」）⇒ ml.* 整体列
-    "v0.45.151": ("ml.*",),
+    # v0.45.561：拆 `ml.*` 后显式点名 Rival 分（概率的催化剂特征同源）；方向经 ml.expected_* 带出
+    "v0.45.151": ("ml.*", "agent.RivalBeeVanguard.score"),
     # 09-07：detect_resonance 改读定点视图 ⇒ Guard 自身的共振判定（risk_adj 维分）
     "v0.45.156": ("agent.GuardBeeSentinel.*",),
     # 09-07：Guard 改走普查。`guard.adj_factor` 的输入也跟着变（看多数改取普查），但 v0.45.256
@@ -2283,7 +2385,8 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # ② BearBee `gex < 0 ⇒ options_bear ≥ 5.0` 下限删除 ⇒ `bear.options_bear` 直接点名。
     # `options.gamma_exposure` 本身的算法没动（照算、照落盘），仍是叶子、不切。
     # 下游经 SIGNAL_UPSTREAM：Oracle 方向 → consensus_strength → crowding.* → Scout → bear.insider_bear，
-    # 以及 ml.* / Rival / Guard / bear.score / Bear / swarm_agreement —— 由 _scope_closure 带出，不手写
+    # 以及 Rival 分（经概率，v0.45.538 前）/ Guard / bear.score / Bear / swarm_agreement —— 由 _scope_closure 带出，不手写
+    # （v0.45.561 更正：`ml.expected_*` 与 Rival 方向不读 Oracle 方向 / 拥挤度，不在本条闭包里）
     "v0.45.349": ("agent.OracleBeeEcho.*", "bear.options_bear"),
     # 09-28（与 v0.45.334/340/349 同日）：日报 VIX 改当日收盘（收盘后延迟报价优先，CSV 兜底）+
     # 陈旧 VIX 不计 Guard 宏观票 ⇒ `_calc_macro_adjustment` 的输入换了量 ⇒ `guard.macro_adj`
@@ -2319,15 +2422,18 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
                   "agent.OracleBeeEcho.*", "bear.options_bear"),
     # 10-09（v0.45.441）：Scout 拥挤度去掉 consensus_strength（Scout 与同伴并行、读板时同伴没发布 ⇒ 27/30 恒为 0）。
     # 该分量本身从此恒为 None（点名它）；其余经 SIGNAL_UPSTREAM 带出：crowding.score → crowding.* → agent.ScoutBeeNova.*
-    # （分平均 −0.34、confidence −0.02、方向有翻）→ ml.* / Rival / Guard / bear.*。
+    # （分平均 −0.34、confidence −0.02、方向有翻）→ Guard / bear.*（v0.45.561 更正：不含 `ml.expected_*` / Rival 方向）。
     # ⚠️ 过切：Rival / Guard 自己数的拥挤度（Phase-1 之后读完整普查）没变，但依赖边把它们挂在 crowding.score 上
     # 「代表同一个 CrowdingDetector 公式换代」——宁多切不少切（同 v0.45.423 的 crowding.score）。
     # 那条 SIGNAL_UPSTREAM 边（consensus_strength ← Phase-1 同伴方向）**保留**：它描述的是旧世代数据的真实依赖，
     # 删了会让早先边界（如 v0.45.349 经 Oracle 方向）对历史行的闭包悄悄缩小。
+    # v0.45.561：改为带止期 10-09 —— 早先边界照旧经它传递，此后的边界（如同日的 v0.45.445）不再经它白切下游。
     "v0.45.441": ("crowding.comp.consensus_strength", "agent.ScoutBeeNova.*"),
     # 10-09（v0.45.445）：新闻主源 AV → Massive（降级仍去 Yahoo）。改的是**通道**（news 的逐文章标签换了分类器），
     # 按维度 IC 协议 §6「按层声明」：点名 `buzz.comp.news_signal` **和** `agent.BuzzBeeWhisper.*`（通道值变 ⇒ 分跟着变）。
-    # 下游（Guard 读 Buzz 分、Scout consensus_strength 读 Buzz 方向、swarm_agreement、ml.* 等）由 _scope_closure 带出。
+    # 下游（Guard 读 Buzz 分与方向、Bear 读 Buzz 方向与情绪、swarm_agreement 等）由 _scope_closure 带出。
+    # v0.45.561 更正：Scout 的 consensus_strength 同日（441）起不再读同伴，`ml.expected_*` 从来不读 Buzz ⇒ 都不在闭包里。
+    # ⚠️ 本条也改了 `sentiment.pct`（新闻通道权重 0.25），**刻意不点名**——见 `DELIBERATELY_POOLED`（v0.45.565）。
     "v0.45.445": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*"),
     # 10-19：蜂后 ML 反馈两个消费者（维度权重、方向票重）停用，只记影子乘数。蜂后层 ⇒ 不改任何归档蜂信号。
     "v0.45.537": (),
@@ -2335,6 +2441,40 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 只点名 Rival 的分：方向与 `ml.expected_7d/30d` 逐位不变（不点名 `ml.*`，免得白切它们）；
     # Guard 读 Rival 分 ⇒ Guard / Bear / swarm_agreement 由 _scope_closure 带出。
     "v0.45.538": ("agent.RivalBeeVanguard.score",),
+    # 10-19（v0.45.559，新代码 10-20 上线，等价论证见 ic_rerun_readiness 同版条目）：BuzzBee data_quality.volatility 改按
+    # volatility_20d 是否为 None 上报 —— 只改标签，Buzz 分 / 方向 / 通道不变；没有归档信号读 data_quality ⇒ 只动蜂后层
+    # （data_real_pct 压缩线、S5 冲突 DQ 票重）⇒ 只动 composite.final_score（ALWAYS_SLICED）。同 v0.45.209 / 369
+    "v0.45.559": (),
+}
+
+
+#: 刻意池化（v0.45.565 起）：某条边界**确实**改了这个信号的值，但用户决定暂不切、先保留跨世代样本，
+#: 到复检条件满足时再定。与 v0.45.256「实测没换 ⇒ 照证据不列」不同：这里**已知换了**，不切是取舍，不是证据。
+#: `analyze()` 的世代报告逐条列出（到了复检日标 ⏰）；到了复检日 `ic_rerun_readiness` 的 `attention[]` 出一条 warn
+#: （周度任务读它）。`tests/test_signal_archive_generations.py::TestDeliberatelyPooled` 钉住「边界确实改了它、确实没切、
+#: 报告与 attention 到期会出声」。复检后：维持 ⇒ 更新 `recheck_on_or_after` 并在 CHANGELOG 记结论；
+#: 切 ⇒ 删本条，按 `SIGNAL_LEAVES` 里 sentiment.pct 那段注释的结构修法改。
+DELIBERATELY_POOLED: Dict[str, Dict[str, str]] = {
+    "sentiment.pct": {
+        "boundary": "v0.45.445",
+        "changed_via": "buzz.comp.news_signal",      # 该边界经它改了本信号（守卫要求边界直接点名它）
+        "why": ("10-09 新闻主源 AV → Massive 改了新闻通道（合成值权重 0.25）⇒ 改了 pct。切在 10-09 会让 analyze() 里 "
+                "pct 的 t7 / t30 样本从 1674 / 1104 清零到 11 月初 / 12 月初；且旧世代本身就是 AV / Yahoo 两种新闻刻度按天混，"
+                "切掉代码边界也去不掉那一层。pct 只用于探索性 IC 报告：生产评分不读世代，维度 IC 预注册检验（H1）"
+                "读的是 10-12 起的 buzz_v1，两种做法下都不受影响。"),
+        "known_counter_evidence": ("固定走 Yahoo 的 5 只（TMUS/ENPH/NFLX/NEE/SNOW）在 10-09 前后横截面位置变了："
+                                   "新闻分相对其余 25 只的落差 −25.0 → −5.0（AV 窗 09-28~10-02 → Massive 窗 10-09~10-19），"
+                                   "pct 落差 −6.1 → −2.9、日内分位 0.29 → 0.40；而 Massive 相对 AV 的整体水平几乎没动"
+                                   "（均值 +1.5、中位 −1.0）⇒ 变的是这 5 只的**相对位置**，逐日横截面 rank IC 吃的正是它。"
+                                   "（sentiment-pct-buzz 会话 10-20 实测，生产库只读副本、未做显著性检验、混有行情。）"
+                                   "这 5 只每天走 Yahoo 是因为 AV 配额只够 25 只。"),
+        "recheck_when": "10-09 之后 sentiment.pct 已结算的 t7 交易日 ≥ 10（逐日 IC 的出数门槛）",
+        # 第 10 个交易日 10-22 + 7 个交易日 = 11-02 结算，次日回填（`is_trading_day.add_trading_days`；漏扫一天就顺延）
+        "recheck_on_or_after": "2026-11-03",
+        "how": ("临时把 sentiment.pct 加进 COHORT_SIGNAL_SCOPE['v0.45.445'] 跑 `--analyze`，得 10-09 起的新世代 IC，"
+                "与缺省（池化）结果比；同时按上面 5 只是否进 / 出两端分位看排序。新世代与全史同号、且新世代自身不在"
+                "噪音带外反号 ⇒ 维持池化；否则切。"),
+    },
 }
 
 
@@ -2349,14 +2489,32 @@ def _matching(names: Iterable[str], patterns: Iterable[str]) -> Set[str]:
     return {n for n in names if any(fnmatchcase(n, p) for p in pats)}
 
 
-def _scope_closure(direct: Iterable[str], universe: Set[str]) -> Set[str]:
-    """直接目标 + 沿 `SIGNAL_UPSTREAM` 往下游传递，直到不再扩张。"""
+def edge_active(edge: Edge, on: Optional[str]) -> bool:
+    """边在扫描日期 `on` 是否生效（`[since, until)`）。`on=None` ⇒ 任何时候生效过就算（最保守的并集）。"""
+    if on is None:
+        return True
+    return (edge.since is None or edge.since <= on) and (edge.until is None or on < edge.until)
+
+
+def active_upstream(down: str, on: Optional[str]) -> Tuple[str, ...]:
+    """`SIGNAL_UPSTREAM[down]` 在 `on` 当天生效的上游模式。"""
+    return tuple(e.up for e in SIGNAL_UPSTREAM.get(down, ()) if edge_active(e, on))
+
+
+def _scope_closure(direct: Iterable[str], universe: Set[str],
+                   on: Optional[str] = None) -> Set[str]:
+    """直接目标 + 沿 `SIGNAL_UPSTREAM` 往下游传递，直到不再扩张。
+
+    `on` = 边界日期：只走那天生效的边（v0.45.561）。缺省 `None` 走全部边（任一时刻生效过即算）——
+    只给不带日期的探查用；`generation_boundaries()` 一律按边界日期传。
+    """
     hit = _matching(universe, direct)
     grew = True
     while grew:
         grew = False
-        for down, ups in SIGNAL_UPSTREAM.items():
-            if not _matching(hit, ups):
+        for down in SIGNAL_UPSTREAM:
+            ups = active_upstream(down, on)
+            if not ups or not _matching(hit, ups):
                 continue
             new = _matching(universe, (down,)) - hit
             if new:
@@ -2384,7 +2542,7 @@ def generation_boundaries(signals: Iterable[str],
     out: Dict[str, Dict] = {}
     for date, version, _reason in history:
         declared = version in COHORT_SIGNAL_SCOPE
-        hit = (_scope_closure(COHORT_SIGNAL_SCOPE[version], universe) if declared
+        hit = (_scope_closure(COHORT_SIGNAL_SCOPE[version], universe, on=date) if declared
                else set(universe))
         for s in (hit | ALWAYS_SLICED | unknown) & signals:
             out[s] = {"date": date, "version": version, "undeclared": not declared}
@@ -2709,6 +2867,13 @@ def _print_generations(rows: List[Dict], generations: Dict) -> None:
         print(f"    ⚠️ 未声明影响面的边界（已按全部信号切，原始观测在白丢样本）："
               f"{', '.join(generations['undeclared_versions'])} —— "
               f"去 signal_archive.COHORT_SIGNAL_SCOPE 补声明")
+    today = datetime.date.today().isoformat()
+    for s, rec in sorted(DELIBERATELY_POOLED.items()):
+        if s not in sigs:
+            continue
+        due = "⏰ 已到复检日" if today >= rec["recheck_on_or_after"] else f"复检日 ≥ {rec['recheck_on_or_after']}"
+        print(f"    ⚠️ 刻意池化：{s} 跨 {rec['boundary']} 混算（已知该边界改了它的值）—— {due}；"
+              f"条件：{rec['recheck_when']}。详见 signal_archive.DELIBERATELY_POOLED")
     print()
 
 

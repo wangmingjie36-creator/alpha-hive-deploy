@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
+import observation_archive as _obs
 from hive_logger import atomic_json_write, read_json_cache
 from resilience import get_session, NETWORK_ERRORS
 
@@ -74,8 +75,12 @@ def get_fear_greed() -> Dict:
         # ── 主数据源：CNN 股票市场 F&G ───────────────────────────────────
         result = _fetch_cnn_fg()
         if result is None:
+            # v0.45.568：没拿到内容 ⇒ 原始观测档案记失败事件（拿到了的已在取数处落档）
+            _obs.fetch_failed("fear_greed.cnn", "unavailable", request={"url": _CNN_URL})
             # ── 备用：Alternative.me（加密 F&G）───────────────────────
             result = _fetch_alternative_me()
+            if result is None:
+                _obs.fetch_failed("fear_greed.alternative_me", "unavailable", request={"url": _ALT_URL})
         if result is None:
             result = _default_result()
 
@@ -87,11 +92,15 @@ def get_fear_greed() -> Dict:
         return result
 
 
+_CNN_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+_ALT_URL = "https://api.alternative.me/fng/?limit=1"
+
+
 def _fetch_cnn_fg() -> Optional[Dict]:
     """从 CNN 非官方 API 获取股票市场 Fear & Greed Index（免费，无需 Key）"""
     try:
         resp = get_session("fear_greed").get(
-            "https://production.dataviz.cnn.io/index/fearandgreed/graphdata",
+            _CNN_URL,
             headers={
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
                 "Referer": "https://edition.cnn.com/",
@@ -109,6 +118,8 @@ def _fetch_cnn_fg() -> Optional[Dict]:
 
         value = int(round(float(raw_score)))
         rating = fg.get("rating", "")
+        # v0.45.568：CNN 的 fear_and_greed 对象原样进观测档案（graphdata 其余是历史序列，不是今天的观测）
+        _ref = _obs.observe("fear_greed.cnn", {"fear_and_greed": fg}, request={"url": _CNN_URL})
 
         # 统一 classification 命名
         _cls_map = {
@@ -129,6 +140,7 @@ def _fetch_cnn_fg() -> Optional[Dict]:
             "is_real_data": True,
             "source": "cnn",
             "timestamp": datetime.now().isoformat(),
+            _obs.REF_KEY: _ref,
         }
     except NETWORK_ERRORS as e:
         _log.debug("CNN F&G 获取失败: %s", e)
@@ -142,7 +154,7 @@ def _fetch_alternative_me() -> Optional[Dict]:
     """从 Alternative.me 获取加密市场 F&G（备用）"""
     try:
         resp = get_session("fear_greed").get(
-            "https://api.alternative.me/fng/?limit=1",
+            _ALT_URL,
             headers={"User-Agent": "AlphaHive/1.0"},
             timeout=8,
         )
@@ -151,6 +163,7 @@ def _fetch_alternative_me() -> Optional[Dict]:
 
         data = resp.json().get("data", [{}])[0]
         value = int(data.get("value", 50))
+        _ref = _obs.observe("fear_greed.alternative_me", {"data": data}, request={"url": _ALT_URL})
         classification = data.get("value_classification", "Neutral")
         sentiment_score = round(max(1.0, min(10.0, value / 10.0)), 1)
 
@@ -162,6 +175,7 @@ def _fetch_alternative_me() -> Optional[Dict]:
             "is_real_data": True,
             "source": "alternative_me",
             "timestamp": datetime.now().isoformat(),
+            _obs.REF_KEY: _ref,
         }
     except NETWORK_ERRORS as e:
         _log.debug("Alternative.me F&G 获取失败: %s", e)

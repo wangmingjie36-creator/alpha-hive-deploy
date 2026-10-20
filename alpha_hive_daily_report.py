@@ -2237,6 +2237,9 @@ class AlphaHiveDailyReporter:
                     "BuzzBeeWhisper": {
                         "score": 5.0,
                         "discovery": _buzz_disc,
+                        # v0.45.559 世代印记（与 BuzzBee 成功路径同一字面量）：本回退不贴 data_quality 标签，
+                        # 但缺键会被判别器读成旧代码 ⇒ 同 v0.45.441 的 Scout 印记，无条件写
+                        "details": {"volatility_dq_from_value": True},
                     },
                     "ScoutBeeNova": {
                         "score": _opp.get("opp_score", 5.0),
@@ -2728,6 +2731,11 @@ def main():
     # 补跑（--date）不观测：落后量是相对今天的，与补跑日无关；补跑自己在 _snapshot_ctx 里刷新。
     _cs_obs = None if args.date else _CloudSnapshotObservation(reporter.date_str)
 
+    # v0.45.568：本进程的原始观测（Reddit 榜 / 新闻条目 / 热搜表 / F&G）自此落档（buzz_v1 根治阶段 1）。
+    # 只在扫描进程开：MCP / Alpha Bot / 云端例程照样算地址、不写盘。补跑记 mode=backfill——取到的是今天的世界，事件里看得出来
+    import observation_archive as _obs_archive
+    _obs_archive.enable(reporter.date_str, mode="backfill" if args.date else "live")
+
     # v0.45.38：补跑历史交易日时，期权/IV 走当日云端快照而非实时抓取。
     # 不接快照的补跑会拿到**今天**的期权链再贴上补跑日的日期——一直如此，
     # 只是从来没人看见。下面这个上下文要么用上快照，要么把这件事说出来。
@@ -2828,12 +2836,22 @@ def main():
         _log.warning("财报日观测统计失败（不影响扫描）: %s", _e_ed)
         _earnings_dates = {"available": False, "reason": f"{type(_e_ed).__name__}: {_e_ed}"}
 
+    # v0.45.568：本轮 BuzzBee 四个情绪通道的原始观测溯源是否完整 → status.json → alert_manager P2。
+    # 缺链接 / payload 不在档 / 落盘失败都会红——阶段 2 的桥接核对要求「一条观测都不缺」
+    try:
+        with open(reporter.report_dir / f".swarm_results_{reporter.date_str}.json", encoding="utf-8") as _f_ob:
+            _observation_archive = _obs_archive.summarize(json.load(_f_ob))
+    except Exception as _e_ob:  # noqa: BLE001 —— 观测点自身失败只记原因，不拖垮扫描
+        _log.warning("原始观测完整性统计失败（不影响扫描）: %s", _e_ob)
+        _observation_archive = {"available": False, "reason": f"{type(_e_ob).__name__}: {_e_ob}"}
+
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
     _timing.write(reporter.date_str, extra={"gh_pages": _timing.gh_pages_summary(_gh_pages),
                                             "news_sources": _news_sources,
                                             "cloud_snapshots": _cloud_snapshots,
                                             "outcomes_backlog": _outcomes_backlog,
-                                            "earnings_dates": _earnings_dates})
+                                            "earnings_dates": _earnings_dates,
+                                            "observation_archive": _observation_archive})
     return report
 
 

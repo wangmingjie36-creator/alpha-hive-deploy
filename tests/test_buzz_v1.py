@@ -142,6 +142,23 @@ class TestFrozen:
             for mom in (None, -30.0, -9.0, -3.01, -3.0, 0.0, 3.0, 3.01, 9.0, 30.0):
                 assert S._detect_sentiment_price_divergence(pct, mom, "T")["score_adj"] == B.divergence_adj(pct, mom)
 
+    def test_production_momentum_adjustment_amounts_and_lag_still_match(self, tmp_path):
+        """v0.45.562 补：上一条只核了阈值与宽限常数，**调整幅度（±0.5 / ±0.2）与 3 日回看**写死在生产
+        `_get_sentiment_momentum` 里、不在 config——直接在沙箱库上跑那个生产函数逐点对照。同样到登记冻结层边界为止。"""
+        if B.frozen_only_boundary() is not None:
+            return
+        from swarm_agents import sentiment as S
+        as_of = "2026-11-10"
+        for k in range(1, 10):                                          # 参照日 = as_of − k 天
+            db = _db(tmp_path, [(B._shift(as_of, -k), "T", "sentiment.pct", 50.0)], name=f"lag{k}.db")
+            got = S._get_sentiment_momentum("T", 70, as_of=as_of, db_path=db)
+            eligible = B.REF_LAG_DAYS <= k <= B.REF_LAG_DAYS + B.REF_SLACK_DAYS
+            assert (got["delta_3d"] is not None) is eligible, (k, got)
+        db = _db(tmp_path, [(B._shift(as_of, -B.REF_LAG_DAYS), "T", "sentiment.pct", 50.0)], name="amt.db")
+        for delta in range(-30, 31):
+            got = S._get_sentiment_momentum("T", 50 + delta, as_of=as_of, db_path=db)
+            assert got["delta_3d"] == delta and got["momentum_score_adj"] == B.momentum_adj(delta), (delta, got)
+
 
 # ── 3. 归档输入与参照 ───────────────────────────────────────────────────────
 
@@ -263,3 +280,79 @@ class TestSelfProof:
         hist = [("2026-10-09", "vI", ""), ("2026-10-20", "vF", ""), ("2026-09-20", "vF", "")]
         assert B.frozen_only_boundary(hist) == {"date": "2026-10-20", "version": "vF"}
         assert B.frozen_only_boundary([("2026-10-09", "vI", "")]) is None
+
+    @staticmethod
+    def _scope_vf(monkeypatch):
+        monkeypatch.setattr(signal_archive, "COHORT_SIGNAL_SCOPE", {
+            **signal_archive.COHORT_SIGNAL_SCOPE, "vF": ("agent.BuzzBeeWhisper.score",)})
+
+    def test_boundary_dated_on_the_anchor_day_is_not_a_stop(self, monkeypatch):
+        """锚点那天的边界本来就是锚点那一组（v0.45.423 / 438 也登记在 09-28），不截止自证窗口（`<=` 判别）。"""
+        self._scope_vf(monkeypatch)
+        assert B.frozen_only_boundary([(B.ANCHOR_DATE, "vF", "")]) is None
+        assert B.frozen_only_boundary([(B._shift(B.ANCHOR_DATE, 1), "vF", "")]) is not None
+
+    def test_window_stops_the_day_before_the_boundary(self, monkeypatch, tmp_path):
+        """自证窗口止于边界**前一天**：边界当天那行（这里故意放一行缺输入的）不进窗口。"""
+        self._scope_vf(monkeypatch)
+        db = _proof_db(tmp_path)
+        con = sqlite3.connect(db)
+        con.execute("INSERT INTO predictions VALUES (?,?,?)", ("2026-10-20", "ZZZ", json.dumps({"sentiment": 5.0})))
+        con.commit()
+        con.close()
+        res = B.self_proof(str(db), end="2026-10-25", history=[("2026-10-20", "vF", "")])
+        assert res["ok"] and res["window"] == [B.ANCHOR_DATE, "2026-10-19"], res
+        assert res["stopped_by"] == {"date": "2026-10-20", "version": "vF"}
+        bad = B.self_proof(str(db), end="2026-10-25", history=[("2026-10-21", "vF", "")])
+        assert not bad["ok"] and bad["n_missing"] == 1, "前提：那一行若进了窗口就会红"
+
+    @pytest.mark.parametrize("stop", ["2026-10-05", "2026-10-12"])
+    def test_frozen_boundary_before_the_h1_window_is_not_a_pass(self, monkeypatch, tmp_path, stop):
+        """v0.45.562：窗口起点之前（含当天）的冻结层边界不截断 H1，H1 读的生产分自窗口起就不是 buzz_v1——
+        自证窗口止于它之前，一天 H1 样本都担保不了，不许报通过（此前 4 行全等照样 ok）。"""
+        self._scope_vf(monkeypatch)
+        assert _protocol().FORWARD_START == "2026-10-12", "前提：参数化日期按窗口起点 10-12 取"
+        res = B.self_proof(str(_proof_db(tmp_path)), end="2026-10-25", history=[(stop, "vF", "")])
+        assert not res["ok"] and "H1 窗口起点" in res["error"] and res["stopped_by"]["date"] == stop
+
+    @staticmethod
+    def _with_bad_row(tmp_path, day):
+        """`_proof_db` 再加一行：某天某票有生产分、却一个通道都没归档（自证 ② 缺输入）。"""
+        db = _proof_db(tmp_path)
+        con = sqlite3.connect(db)
+        con.execute("INSERT INTO predictions VALUES (?,?,?)", (day, "ZZZ", json.dumps({"sentiment": 5.0})))
+        con.commit()
+        con.close()
+        return db
+
+    def test_protocol_excluded_day_is_skipped_and_reported(self, tmp_path):
+        """v0.45.564（用户 10-20 定）：排除日不进 H1 检验，自证不替它担保——坏行落在排除日上不再让自证永远不过；
+        跳过了哪天、几行照样报出来。判别：同一个库不给排除名单就红。"""
+        db = self._with_bad_row(tmp_path, "2026-09-30")
+        ok = B.self_proof(str(db), end="2026-10-02", history=[], excluded_days=["2026-09-30"])
+        assert ok["ok"] and ok["excluded_days"] == ["2026-09-30"] and ok["n_excluded"] == 1, ok
+        assert ok["n"] == 4, "排除日那一行不计入比对行数"
+        bad = B.self_proof(str(db), end="2026-10-02", history=[], excluded_days=[])
+        assert not bad["ok"] and bad["n_missing"] == 1 and bad["excluded_days"] == [] and bad["n_excluded"] == 0
+
+    def test_default_exclusions_come_from_the_protocol_list(self, monkeypatch, tmp_path):
+        db = self._with_bad_row(tmp_path, "2026-09-30")
+        monkeypatch.setattr(signal_archive, "FORWARD_TEST_EXCLUDED_DAYS", {"2026-09-30": {"version": "vX"}})
+        res = B.self_proof(str(db), end="2026-10-02", history=[])
+        assert res["ok"] and res["excluded_days"] == ["2026-09-30"], res
+
+    def test_excluded_day_channels_still_serve_as_references(self, tmp_path):
+        """只跳过「比对哪些行」，不跳过「读哪些输入」：排除日的归档通道照样当 3 日参照（生产当时就是这么算的）。"""
+        ch_ref, ch_now = _FLAT, _with(130.0)
+        want = B.score(ch_now, None, int(B.composite(ch_ref)))["score"]
+        rows = _chan_rows("2026-10-12", "T", ch_ref) + _chan_rows("2026-10-15", "T", ch_now)
+        db = _db(tmp_path, rows, preds=[("2026-10-12", "T", 1.0), ("2026-10-15", "T", want)])
+        res = B.self_proof(str(db), end="2026-10-16", history=[], excluded_days=["2026-10-12"])
+        assert res["ok"] and res["n"] == 1 and res["n_excluded"] == 1, res
+        assert B.momentum_adj(int(B.composite(ch_now)) - int(B.composite(ch_ref))) != 0, "前提：参照确实改变了分数"
+
+    def test_default_history_goes_through_the_signal_archive_hook(self, monkeypatch):
+        """边界表与执行器的截断判定同一个入口（`signal_archive._cohort_history`），替换它两边一起变。"""
+        self._scope_vf(monkeypatch)
+        monkeypatch.setattr(signal_archive, "_cohort_history", lambda: [("2026-10-20", "vF", "")])
+        assert B.frozen_only_boundary() == {"date": "2026-10-20", "version": "vF"}

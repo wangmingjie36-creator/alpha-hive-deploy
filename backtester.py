@@ -1299,13 +1299,14 @@ class Backtester:
             # 不依赖本机钟——与 data_pipeline._drop_forming_bar 同一套判据。
             # 那个函数丢的是末根且要求 len>=3，此处取 iloc[0] 且常只有 1 根，
             # 复用不了，故单独判。
+            # v0.45.563：阈值改用 `_session_last_minute`（平日 15:59、提前收盘日 12:59）——写死 15:59 时，提前收盘日
+            # 收盘后的那一跑会把当天当成未收盘、白白推迟一天评分。
             try:
-                from datetime import time as _dt_time
-                from data_pipeline import _exchange_now
+                from data_pipeline import _exchange_now, _session_last_minute
                 _xnow = _exchange_now()
                 if (_xnow is not None
                         and hist.index[0].date() == _xnow.date()
-                        and _xnow.time() < _dt_time(15, 59)):
+                        and _xnow.time() < _session_last_minute(_xnow.date())):
                     _log.info(
                         "[%s] T+%d 目标日 %s 尚未收盘（交易所时间 %s），"
                         "跳过本次评分，留待收盘后重评",

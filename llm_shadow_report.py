@@ -48,7 +48,9 @@ def load_days(shadow_root: Path, mode: str = "run") -> List[Dict]:
     if not d.is_dir():
         return []
     out = []
-    for p in sorted(d.glob("????-??-??.json")):
+    # run 与 control 分文件（v0.45.560）：`<日期>.json` / `<日期>.control.json`
+    pattern = "????-??-??.json" if mode == "run" else "????-??-??.control.json"
+    for p in sorted(d.glob(pattern)):
         doc = ledger_io.load_json(p)
         if doc.get("mode") == mode:
             out.append(doc)

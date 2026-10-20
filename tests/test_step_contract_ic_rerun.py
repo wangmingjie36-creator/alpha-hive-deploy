@@ -400,6 +400,30 @@ class TestOkPath:
     共振 / F&G 换成只回 `{status, line}` 的 ⏳ 桩（同 `test_*_forward_test.py::TestCarriedByReadiness` 的桩形状），
     维度 IC 的桩额外带 `_detail`（锚点 ok）——不带的后果见下一条。"""
 
+    def test_deliberately_pooled_recheck_reaches_the_envelope(self, monkeypatch, tmp_path):
+        """v0.45.565：到了 `signal_archive.DELIBERATELY_POOLED` 的复检日，外壳 attention 出一条 warn——
+        按 `--today` 判（main 把业务日传给 build_attention），前一天没有。"""
+        import datetime as _dt
+        import signal_archive
+        for fn, name in (("resonance_forward_status", "共振加成前瞻检验"),
+                         ("fg_exposure_gate_forward_status", "F&G 敞口门前瞻检验")):
+            monkeypatch.setattr(rr, fn, lambda *a, _n=name, **k: {"status": "not_ready", "line": f"⏳ {_n}：桩"})
+        monkeypatch.setattr(rr, "dim_ic_forward_status", lambda *a, **k: {
+            "status": "not_ready", "line": "⏳ 维度 IC 协议：桩", rr._DETAIL_KEY: dict(_DIM_BASE)})
+        due = signal_archive.DELIBERATELY_POOLED["sentiment.pct"]["recheck_on_or_after"]
+        before = (_dt.date.fromisoformat(due) - _dt.timedelta(days=1)).isoformat()
+        db = _make_db(tmp_path / "home", _weekly_rows(2))
+        got = {}
+        for today in (before, due):
+            out = tmp_path / f"o-{today}.json"
+            monkeypatch.setattr(sys, "argv", [TOOL, "--db", str(db), "--today", today, "--quiet", "--out", str(out)])
+            rr.main()
+            env = json.loads(out.read_text(encoding="utf-8"))
+            assert sc.validate(env) == [], env
+            got[today] = {a["id"] for a in env["attention"]}
+        key = "ic_rerun.deliberately_pooled.sentiment.pct"
+        assert key not in got[before] and key in got[due], got
+
     def test_nothing_to_look_at_is_ok_and_exit_1(self, monkeypatch, tmp_path):
         for fn, name in (("resonance_forward_status", "共振加成前瞻检验"),
                          ("fg_exposure_gate_forward_status", "F&G 敞口门前瞻检验")):
@@ -527,7 +551,7 @@ _ANC_OK = {"state": "ok", "version": P.H1_ANCHOR_VERSION, "date": "2026-09-28"}
 #: v0.45.556：执行器 H1 两道前提的摘要形状（`input_code_guard()` / `buzz_v1_self_proof()`）
 _GUARD_OK = {"ok": True, "unacknowledged": [], "errors": {}}
 _SP_OK = {"ok": True, "window": ["2026-09-28", "2026-10-01"], "n": 120, "n_matched": 120, "n_mismatched": 0,
-          "n_missing": 0, "stopped_by": None}
+          "n_missing": 0, "stopped_by": None, "excluded_days": [], "n_excluded": 0}
 _DIM_BASE = {"status": "not_ready", "forward_start": P.FORWARD_START, "today": "2026-10-01", "h1_weeks": 0,
              "next_look_at": 26, "looks_done": [], "verdicts": {}, "truncation": {"H1": None, "H2": None},
              "weight_change": {"date": None}, "stale": False, "h1_anchor": _ANC_OK,

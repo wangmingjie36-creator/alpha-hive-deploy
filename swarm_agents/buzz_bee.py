@@ -1,6 +1,7 @@
 """BuzzBeeWhisper - 情绪分析蜂 (Sentiment 维度, 权重 0.20)"""
 
 from typing import Dict
+import observation_archive as _obs_archive
 from swarm_agents._config import _log, _AS
 from swarm_agents.cache import _safe_score
 from swarm_agents.base import BeeAgent
@@ -277,6 +278,12 @@ class BuzzBeeWhisper(BeeAgent):
             # v0.45.534：此处曾写 sentiment_baseline.db + 情绪突变检测（只出日志 + 零读者的 sentinel_spike），已退役；
             # 位于分数算完之后，不影响 score / direction / details。
 
+            # v0.45.568：四个情绪通道各自用的是哪一份原始观测（buzz_v1 根治阶段 1，`observation_archive`）。
+            # 刻意写在合成之后：合成之前的语句与模块级函数都在输入层指纹（buzz.channels）里——这里只多存、不改任何值。
+            # news_ext / yt 在各自的 try 里赋值，取数抛异常时未绑定 ⇒ 经 locals() 取（拿不到 = 该通道无观测）
+            _observations = _obs_archive.buzz_refs(reddit=reddit_data, news=locals().get("news_ext"),
+                                                   yahoo=locals().get("yt"), fear_greed=fg)
+
             return AgentResult(
                 score=round(score, 2),
                 direction=direction,
@@ -287,7 +294,10 @@ class BuzzBeeWhisper(BeeAgent):
                 data_quality={
                     "momentum": "real" if _mom_raw is not None else "unavailable",
                     "volume": "real" if vol_ratio is not None else "unavailable",
-                    "volatility": "real",
+                    # v0.45.559：曾硬编码 "real"。volatility_20d 为 None 时通道已回中性 50（上方第 3 步），
+                    # 标签却照报真实 ⇒ data_real_pct 与 S5 冲突仲裁的 DQ 票重都按满分计（同 v0.45.209 Guard crowding）。
+                    # 刻意写在这里、不在合成之前另起变量：buzz.channels 输入层指纹只覆盖合成之前的语句
+                    "volatility": "real" if vol20 is not None else "unavailable",
                     # P1-1: 区分"榜单正常但不在前100（quiet，真实低热度）" vs "API 挂了（fallback）"
                     "reddit": ("real" if (reddit_data and reddit_data.get("rank"))
                                else ("fallback" if (not reddit_data or reddit_data.get("is_fallback"))
@@ -341,6 +351,12 @@ class BuzzBeeWhisper(BeeAgent):
                     # v0.45.445：本轮配置的新闻主源（massive / alpha_vantage）。新代码每次都写 ⇒ 兼作世代边界印记
                     # （`ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.445"]`）；与 news_source 不同，主源失败降级时也照写
                     "news_primary": _news_primary_source(),
+                    # v0.45.559：世代边界印记（字面量 True）——data_quality.volatility 自本版起按 volatility_20d 是否为 None 上报。
+                    # 读者 = `ic_rerun_readiness._marker_buzz_volatility_dq_from_value`；此前的 details 没有这个键。勿改成 False / 勿删
+                    "volatility_dq_from_value": True,
+                    # v0.45.568：原始观测溯源 {通道: {expected, ref}}；读者 = signal_archive.archive（→ observation_links）
+                    # 与 observation_archive.summarize（→ scan_timing → alert_manager P2）
+                    "observations": _observations,
                 },
             ).to_dict()
 

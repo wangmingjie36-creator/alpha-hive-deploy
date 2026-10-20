@@ -88,13 +88,41 @@ class TestRoots:
 
 def _usage(**kw):
     base = {"call_count": 100, "truncated_calls": 0, "json_parse_failures": 0,
-            "budget_refusals": 0, "unpriced_refusals": 0}
+            "budget_refusals": 0, "unpriced_refusals": 0, "failed_calls": 0}
     base.update(kw)
     return base
 
 
 def _tickers(n=10, mode="llm_enhanced"):
     return {f"T{i}": {"present": True, "distill_mode": mode} for i in range(n)}
+
+
+class TestQualityFailedCalls:
+    """call_count 只数成功的——请求失败（429 耗尽 / 超时 / API 报错）以前无处可见，那些蜂静默回落规则引擎。"""
+
+    def test_failed_calls_over_threshold_unhealthy(self):
+        q = sh.quality_report(_usage(call_count=80, failed_calls=20), _tickers(), llm_on=True)   # 20/100 = 20%
+        assert q["healthy"] is False and q["failed_call_rate"] == 0.2
+        assert any("failed_call_rate" in r for r in q["reasons"])
+
+    def test_failed_calls_at_threshold_ok(self):
+        q = sh.quality_report(_usage(call_count=90, failed_calls=10), _tickers(), llm_on=True)   # 10/100 == 阈值
+        assert q["healthy"] is True
+
+    def test_missing_key_treated_as_zero(self):
+        u = _usage()
+        u.pop("failed_calls")
+        assert sh.quality_report(u, _tickers(), llm_on=True)["healthy"] is True
+
+    def test_all_failed_is_unhealthy_with_both_reasons(self):
+        q = sh.quality_report(_usage(call_count=0, failed_calls=30), _tickers(mode="rule_engine"), llm_on=True)
+        assert q["healthy"] is False and q["failed_call_rate"] == 1.0
+        assert any("call_count=0" in r for r in q["reasons"])
+
+    def test_status_records_failed_calls(self):
+        st = sh.build_status(day=date(2026, 10, 19), mode="run", model=sh.MODEL, cap=3.0, requested=["A"],
+                             usage=_usage(failed_calls=4), per_ticker=_tickers(1), elapsed=1.0, error=None)
+        assert st["usage"]["failed_calls"] == 4
 
 
 class TestQuality:
@@ -384,13 +412,15 @@ def child_env(tmp_path, monkeypatch):
     sqlite3.connect(shadow / "pheromone.db").close()
     monkeypatch.setenv("ALPHA_HIVE_HOME", str(shadow))
     monkeypatch.delenv("ALPHA_HIVE_DB_PATH", raising=False)
+    monkeypatch.setenv(sh.SPEND_ENV, "1")        # 子进程自己也核一次花钱闸（见 TestChildSpendGate）
     monkeypatch.setitem(config.LLM_CONFIG, "daily_budget_usd", 3.0)
     monkeypatch.setattr(llm_service, "_disabled", False)
     monkeypatch.setattr(llm_service, "_model_override", None)
     monkeypatch.setattr(llm_service, "_client", None)
     monkeypatch.setattr(llm_service, "_token_usage", {
         "input_tokens": 0, "output_tokens": 0, "total_cost_usd": 0.0, "call_count": 0,
-        "truncated_calls": 0, "json_parse_failures": 0, "budget_refusals": 0, "unpriced_refusals": 0})
+        "truncated_calls": 0, "json_parse_failures": 0, "budget_refusals": 0, "unpriced_refusals": 0,
+        "failed_calls": 0})
     return shadow
 
 
@@ -426,10 +456,10 @@ class TestRunChild:
         rc = sh.run_child(_child_args(child_env, tmp_path, "--control"),
                           scan=lambda t: calls.append(t) or _fake_results("rule_engine"), now=date(2026, 10, 19))
         assert rc == 0 and calls == [["AAA", "BBB"]]
-        st = json.loads((child_env / sh.STATUS_DIRNAME / "2026-10-19.json").read_text(encoding="utf-8"))
+        st = json.loads((child_env / sh.STATUS_DIRNAME / "2026-10-19.control.json").read_text(encoding="utf-8"))
         assert st["mode"] == "control" and st["model"] is None
         assert st["per_ticker"]["AAA"]["rule_score"] == 6.0
-        assert (child_env / sh.STATUS_DIRNAME / "swarm_results-2026-10-19.json").exists()
+        assert (child_env / sh.STATUS_DIRNAME / "swarm_results-2026-10-19.control.json").exists()
 
     def test_run_mode_sets_model_override(self, child_env, tmp_path, monkeypatch):
         import llm_service
@@ -462,7 +492,7 @@ class TestRunChild:
             raise RuntimeError("CBOE 全挂")
         rc = sh.run_child(_child_args(child_env, tmp_path, "--control"), scan=boom, now=date(2026, 10, 19))
         assert rc == sh.EXIT_SCAN_ERROR
-        st = json.loads((child_env / sh.STATUS_DIRNAME / "2026-10-19.json").read_text(encoding="utf-8"))
+        st = json.loads((child_env / sh.STATUS_DIRNAME / "2026-10-19.control.json").read_text(encoding="utf-8"))
         assert "CBOE 全挂" in st["error"]
 
     def test_run_without_api_key_exits_usage_without_scanning(self, child_env, tmp_path, monkeypatch):
@@ -471,6 +501,128 @@ class TestRunChild:
         called = []
         rc = sh.run_child(_child_args(child_env, tmp_path, "--run"), scan=lambda t: called.append(t) or {})
         assert rc == sh.EXIT_USAGE and called == []
+
+
+class TestChildSpendGate:
+    def test_child_run_without_spend_env_refused_before_anything(self, child_env, tmp_path, monkeypatch):
+        """有人直接 `--child --run` 就绕过了父进程的花钱闸——子进程自己也得核。"""
+        monkeypatch.delenv(sh.SPEND_ENV, raising=False)
+        called = []
+        rc = sh.run_child(_child_args(child_env, tmp_path, "--run"), scan=lambda t: called.append(t) or {})
+        assert rc == sh.EXIT_USAGE and called == []
+        assert not (child_env / sh.STATUS_DIRNAME).exists()
+
+    def test_child_control_needs_no_spend_env(self, child_env, tmp_path, monkeypatch):
+        monkeypatch.delenv(sh.SPEND_ENV, raising=False)
+        assert sh.run_child(_child_args(child_env, tmp_path, "--control"), scan=lambda t: _fake_results("rule_engine"),
+                            now=date(2026, 10, 19)) == 0
+
+    def test_child_day_argument_overrides_clock(self, child_env, tmp_path):
+        args = sh.parse_args(["--control", "--child", "--shadow-root", str(child_env), "--prod-root",
+                              str(tmp_path / "prod"), "--child-tickers", "AAA", "--child-day", "2026-10-17"])
+        sh.run_child(args, scan=lambda t: _fake_results("rule_engine"), now=date(2026, 10, 19))
+        assert (child_env / sh.STATUS_DIRNAME / "2026-10-17.control.json").exists()
+
+
+class TestRunAndControlDoNotCollide:
+    """晚到的 --control 不许覆盖已经花了钱的 --run（状态与 swarm_results 全文都是）。"""
+
+    def test_control_after_run_same_day_keeps_run_record(self, child_env, tmp_path, monkeypatch):
+        import llm_service
+        monkeypatch.setattr(llm_service, "_get_client", lambda: object())
+        monkeypatch.setattr(llm_service, "get_usage", lambda: _usage(total_cost_usd=0.9))
+        day = date(2026, 10, 19)
+        sh.run_child(_child_args(child_env, tmp_path, "--run"), scan=lambda t: _fake_results(), now=day)
+        before = (child_env / sh.STATUS_DIRNAME / "2026-10-19.json").read_bytes()
+        before_sr = (child_env / sh.STATUS_DIRNAME / "swarm_results-2026-10-19.json").read_bytes()
+        sh.run_child(_child_args(child_env, tmp_path, "--control"), scan=lambda t: _fake_results("rule_engine"), now=day)
+        assert (child_env / sh.STATUS_DIRNAME / "2026-10-19.json").read_bytes() == before
+        assert (child_env / sh.STATUS_DIRNAME / "swarm_results-2026-10-19.json").read_bytes() == before_sr
+        assert (child_env / sh.STATUS_DIRNAME / "2026-10-19.control.json").exists()
+
+    def test_status_path_by_mode(self, tmp_path):
+        assert sh.status_path(tmp_path, "2026-10-19", "run").name == "2026-10-19.json"
+        assert sh.status_path(tmp_path, "2026-10-19", "control").name == "2026-10-19.control.json"
+        assert sh.swarm_results_path(tmp_path, "2026-10-19", "control").name == "swarm_results-2026-10-19.control.json"
+
+
+class TestSameDayRerunGuard:
+    """每日硬上限只在进程内计；同一天再起一个 --run 就是第二份预算。跨进程靠状态文件挡。"""
+
+    def _run(self, prod_env, spawn, monkeypatch, day=date(2026, 10, 19)):
+        monkeypatch.setenv(sh.SPEND_ENV, "1")
+        return sh.run_shadow(sh.parse_args(["--run", "--tickers", "2"]), spawn=spawn, now=day)
+
+    def test_stub_written_before_child_starts(self, prod_env, tmp_path, monkeypatch):
+        seen = {}
+
+        def spawn(cmd, env=None, cwd=None):
+            p = tmp_path / sh.SHADOW_DIRNAME / sh.STATUS_DIRNAME / "2026-10-19.json"
+            seen["doc"] = json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+            return types.SimpleNamespace(returncode=0)
+        self._run(prod_env, spawn, monkeypatch)
+        assert seen["doc"]["state"] == "started" and seen["doc"]["quality"]["healthy"] is False
+        assert seen["doc"]["mode"] == "run"
+
+    def test_second_run_same_day_refused_and_nothing_copied_or_spawned(self, prod_env, tmp_path, monkeypatch, capsys):
+        assert self._run(prod_env, _Spawn(rc=0), monkeypatch) == 0         # 子进程没写完 ⇒ 占位还在
+        spawn2 = _Spawn()
+        marker = tmp_path / sh.SHADOW_DIRNAME / "pheromone.db"
+        mtime = marker.stat().st_mtime_ns
+        assert self._run(prod_env, spawn2, monkeypatch) == sh.EXIT_USAGE
+        assert spawn2.calls == [] and marker.stat().st_mtime_ns == mtime
+        assert "已有付费记录" in capsys.readouterr().out
+
+    def test_next_day_not_blocked(self, prod_env, monkeypatch):
+        assert self._run(prod_env, _Spawn(rc=0), monkeypatch, day=date(2026, 10, 19)) == 0
+        assert self._run(prod_env, _Spawn(rc=0), monkeypatch, day=date(2026, 10, 20)) == 0
+
+    def test_finished_status_also_blocks_rerun(self, prod_env, tmp_path, monkeypatch):
+        """子进程正常写完（哪怕不健康，exit 5）也算今天花过——不能再来一次。"""
+        shadow = tmp_path / sh.SHADOW_DIRNAME
+
+        def spawn(cmd, env=None, cwd=None):
+            sh.write_status(shadow, sh.build_status(
+                day=date(2026, 10, 19), mode="run", model=sh.MODEL, cap=3.0, requested=["A"],
+                usage=_usage(total_cost_usd=2.5), per_ticker={"A": {"present": True, "distill_mode": "llm_enhanced"}},
+                elapsed=1.0, error=None))
+            return types.SimpleNamespace(returncode=5)
+        assert self._run(prod_env, spawn, monkeypatch) == 5
+        assert self._run(prod_env, _Spawn(), monkeypatch) == sh.EXIT_USAGE
+
+    def test_usage_error_exit_releases_the_day(self, prod_env, tmp_path, monkeypatch):
+        """子进程在花钱之前就以用法错误退出（没 API Key）⇒ 没花钱，不该锁住这一天。"""
+        assert self._run(prod_env, _Spawn(rc=sh.EXIT_USAGE), monkeypatch) == sh.EXIT_USAGE
+        assert not (tmp_path / sh.SHADOW_DIRNAME / sh.STATUS_DIRNAME / "2026-10-19.json").exists()
+        assert self._run(prod_env, _Spawn(rc=0), monkeypatch) == 0
+
+    def test_spawn_failure_releases_the_day_and_propagates(self, prod_env, tmp_path, monkeypatch):
+        def boom(cmd, env=None, cwd=None):
+            raise OSError("exec failed")
+        with pytest.raises(OSError):
+            self._run(prod_env, boom, monkeypatch)
+        assert not (tmp_path / sh.SHADOW_DIRNAME / sh.STATUS_DIRNAME / "2026-10-19.json").exists()
+
+    def test_control_never_blocked_and_leaves_run_record_alone(self, prod_env, tmp_path, monkeypatch):
+        assert self._run(prod_env, _Spawn(rc=0), monkeypatch) == 0
+        stub = tmp_path / sh.SHADOW_DIRNAME / sh.STATUS_DIRNAME / "2026-10-19.json"
+        before = stub.read_bytes()
+        for _ in range(2):                                                   # 免费的 control 可重复
+            assert sh.run_shadow(sh.parse_args(["--control", "--tickers", "2"]), spawn=_Spawn(rc=0),
+                                 now=date(2026, 10, 19)) == 0
+        assert stub.read_bytes() == before
+
+    def test_stub_counts_as_unhealthy_day_for_the_report(self, prod_env, tmp_path, monkeypatch):
+        import llm_shadow_report as rpt
+        self._run(prod_env, _Spawn(rc=1), monkeypatch)                       # 子进程崩了，只剩占位
+        days = rpt.load_days(tmp_path / sh.SHADOW_DIRNAME)
+        assert len(days) == 1 and rpt.healthy_days(days) == [] and rpt.llm_rows(days) == []
+
+    def test_child_command_carries_the_day(self, prod_env, monkeypatch):
+        spawn = _Spawn(rc=0)
+        self._run(prod_env, spawn, monkeypatch)
+        cmd = spawn.calls[0]["cmd"]
+        assert cmd[cmd.index("--child-day") + 1] == "2026-10-19"
 
 
 # ==================== 命令行冒烟 ====================

@@ -76,9 +76,31 @@ def _exchange_now():
         return None
 
 
+def _session_last_minute(d) -> "_dt_time":
+    """`d` 那一场最后一根分钟线的时刻（美东）= 收盘时刻 − 1 分钟：平日 15:59，提前收盘日 12:59（v0.45.563）。
+
+    「这根日线还在不在形成」的**唯一**阈值，四处共用：`_drop_forming_bar` / `_completed_bar_close` /
+    `backtester._get_price_at_date` / `backfill_dir_accuracy._close_after`（AST 守卫
+    `tests/test_early_close_forming_bar.py` 钉住不许再写死）。拿它比的是 `_exchange_now`——SPY 最后一根分钟线的
+    时间戳，收盘后恒为这一刻，所以不能拿收盘时刻本身比。
+    此前四处都写死 15:59：提前收盘日（感恩节次日、当年是交易日的平安夜、7/3）收盘后 SPY 末根是 12:59 < 15:59 ⇒
+    当天那根被当成「还在形成」——主路径丢掉它，动量 / 量比 / 波动率止于 D−1（维度 IC H1 窗口内 2026-11-27、12-24）。
+    收盘时刻取 `is_trading_day.session_close_et`（按规则推、不按表，不会过期）；日历抛错 ⇒ WARNING + 按常规 15:59
+    （与改前一致，不更糟）。
+    """
+    try:
+        from is_trading_day import session_close_et
+        return (datetime.combine(d, session_close_et(d)) - timedelta(minutes=1)).time()
+    except Exception as e:  # noqa: BLE001 —— 判不了就退回改前的判据，但要看得见
+        _log.warning("交易日历不可用（%s: %s）—— 按常规收盘 15:59 判 %s 的末根是否还在形成，提前收盘日会误丢当天那根",
+                     type(e).__name__, e, d)
+        return _dt_time(15, 59)
+
+
 def _drop_forming_bar(hist):
     """若日线末根是"当日盘中正在形成"的 bar，返回去掉末根的 hist；否则原样返回。
-    判据（不依赖本机钟）：末根日期 == 交易所真实当日 且 当前时间 < 收盘 15:59 美东。
+    判据（不依赖本机钟）：末根日期 == 交易所真实当日 且 当前时间 < 该场最后一根分钟线
+    （`_session_last_minute`：平日 15:59、提前收盘日 12:59；v0.45.563 前写死 15:59）。
     任何异常都原样返回（绝不影响主流程）。"""
     try:
         if hist is None or len(hist) < 3:
@@ -86,7 +108,7 @@ def _drop_forming_bar(hist):
         xnow = _exchange_now()
         if xnow is None:
             return hist
-        if hist.index[-1].date() == xnow.date() and xnow.time() < _dt_time(15, 59):
+        if hist.index[-1].date() == xnow.date() and xnow.time() < _session_last_minute(xnow.date()):
             return hist.iloc[:-1]
     except Exception:
         pass
@@ -101,8 +123,9 @@ def _completed_bar_close(hist) -> Optional[Tuple[str, float]]:
     但当「核实过的收盘」交给自攒索引当窗口末端（`StockData.session_close`）就违反 v0.45.465 的契约
     （盘中价 / 判不了归属的价不许进窗口）。所以这里反过来：**能证明收了才给**。
 
-    判据与 `_drop_forming_bar` 同一份：交易所时钟可得，且末根不是「交易所当日 + 15:59 美东之前」。
-    （`_exchange_now` 是 SPY 最后一根分钟线的时间戳——收盘后恒为 15:59，故不能写 16:00。）
+    判据与 `_drop_forming_bar` 同一份：交易所时钟可得，且末根不是「交易所当日 + 该场最后一根分钟线之前」。
+    （`_exchange_now` 是 SPY 最后一根分钟线的时间戳——收盘后恒为那一刻：平日 15:59、提前收盘日 12:59，故不能写
+    收盘时刻本身；阈值见 `_session_last_minute`，v0.45.563 前写死 15:59，提前收盘日收盘后也给 None。）
     """
     try:
         if hist is None or len(hist) < 1:
@@ -111,7 +134,7 @@ def _completed_bar_close(hist) -> Optional[Tuple[str, float]]:
         if xnow is None:
             return None
         d = hist.index[-1].date()
-        if d > xnow.date() or (d == xnow.date() and xnow.time() < _dt_time(15, 59)):
+        if d > xnow.date() or (d == xnow.date() and xnow.time() < _session_last_minute(d)):
             return None
         px = float(hist["Close"].iloc[-1])
         if not (math.isfinite(px) and px > 0):
@@ -145,6 +168,8 @@ class StockData:
     momentum_as_of: 自攒索引回落时窗口末端那一天（v0.45.465）；其余来源不填
     volume_source: "yfinance" | "twelvedata"（回落）| None（没有值）（v0.45.473）
     volume_as_of: Twelve Data 回落时比值末根那一天（v0.45.505）；其余来源不填
+    volatility_source: "yfinance" | "twelvedata_adjusted"（回落）| None（没有值）（v0.45.557）
+    volatility_as_of: Twelve Data 回落时窗口末端那一天（v0.45.557）；其余来源不填
 
     数据源只填**自己取到的**历史字段；缺的那几项由 `MultiSourceFetcher` 唯一出口
     `_fill_history_fields` 统一回落（v0.45.473），不归哪个源管。
@@ -174,6 +199,10 @@ class StockData:
     # v0.45.505：Twelve Data 回落的比值末根日期。只在它 == 此刻最近一场已收盘时才收（见
     # `_fill_volume_from_twelvedata`），所以有值时它就是 yfinance 主路径会结束的那一天。
     volume_as_of: Optional[str] = None
+    # v0.45.557：波动率的来源与回落时的窗口末端。只在窗口末端 == 此刻最近一场已收盘时才收（见
+    # `_fill_volatility_from_twelvedata`），所以有值时它就是 yfinance 主路径会结束的那一天。
+    volatility_source: Optional[str] = None
+    volatility_as_of: Optional[str] = None
     fetch_timestamp: float = 0.0
     is_market_hours: bool = False
     # v0.45.234：price 取的是哪个字段（目前只有 CBOE 源填，见 cboe_options.official_price）。
@@ -201,6 +230,8 @@ class StockData:
             "momentum_as_of": self.momentum_as_of,
             "volume_source": self.volume_source,
             "volume_as_of": self.volume_as_of,
+            "volatility_source": self.volatility_source,
+            "volatility_as_of": self.volatility_as_of,
             "fetch_timestamp": self.fetch_timestamp,
             "is_market_hours": self.is_market_hours,
             "price_source": self.price_source,
@@ -332,6 +363,22 @@ class ObservableCircuitBreaker:
 
 # ==================== 数据源适配器 ====================
 
+def _volatility_20d_window_lo(as_of):
+    """行情字段窗口的左端（**不含**）：`as_of` 往前一个日历月；上月没有同一天（如 10-31 → 9 月）取上月最后一天（v0.45.566 抽出）。
+
+    实时 yfinance `period="1mo"` 收盘后那一跑的窗口就是 (lo, as_of]（生产归档 08-26~10-16 正常日 30/30 符合，v0.45.557 核实）。
+    唯一实现：Twelve Data 波动率回落（`_fill_volatility_from_twelvedata`）与 `--date` 补跑（`_fetch_historical_stock_data`）
+    都用它。函数名带 `volatility_20d` 是有意的——输入层指纹守卫按名字认它，窗口规则一改守卫就红。
+    """
+    y, m = (as_of.year, as_of.month - 1) if as_of.month > 1 else (as_of.year - 1, 12)
+    for day in (as_of.day, 30, 29, 28):
+        try:
+            return as_of.replace(year=y, month=m, day=day)
+        except ValueError:
+            continue
+    raise ValueError(f"算不出 {as_of} 前一个月的同日")   # 28 日恒存在，走不到
+
+
 def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
     """v0.41.6: `--date` 补跑历史交易日时，锚定该日期的真实收盘价。
 
@@ -440,6 +487,14 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
             _r2["_price_from_cloud_snapshot"] = True
             return _r2
 
+        # v0.45.566（用户 10-20：「现在修补跑路径的 60 天窗口」）：行情字段只用与实时扫描**同一个窗口** (as_of − 1 个日历月, as_of]
+        # （实时 yfinance `period="1mo"` 收盘后那一跑就是它，生产归档正常日 30/30 符合）。此前直接用上面多拉的 60 天（约 40 根）：
+        # 波动率是另一个量（2026-08-27 是次日补跑的，归档 30/30 符合 60 天窗口），一个月只有 19 根时量比均量还多算进窗口外的一根。
+        # 多拉 60 天只为保证根数够，不是窗口。价格（末根 = as_of 当天）不受影响。
+        _lo = _volatility_20d_window_lo(as_of)
+        _win_idx = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
+        hist = hist[_win_idx.date > _lo]
+
         data = StockData(
             price=float(hist["Close"].iloc[-1]),
             data_source=DataQuality.REAL,
@@ -462,12 +517,13 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
         else:
             data.volume_ratio = None
 
-        if len(hist) >= 20:
+        if len(hist) >= 19:   # v0.45.564：20 → 19，同 `_fetch_history_metrics`（理由见那里）
             returns = hist["Close"].pct_change().dropna()
             if len(returns) >= 2:
                 vol = float(returns.std() * (252 ** 0.5) * 100)
                 if not (math.isnan(vol) or math.isinf(vol)):
                     data.volatility_20d = vol
+                    data.volatility_source = "yfinance"
 
         result = data.to_dict()
         result["_as_of_date"] = as_of_date
@@ -519,7 +575,11 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
             out["avg_volume"] = int(avg_vol)
             out["volume_ratio"] = recent_vol / avg_vol
 
-        if len(hist) >= 20:
+        # v0.45.564（用户 10-20 定）：门槛 20 → 19 根。`period="1mo"` 的窗口有时只有 19 个交易日（约每年 15 天：1 月新年 +
+        # 马丁路德金日、3 月上中旬接 2 月总统日、6 / 7 月接六月节 / 独立日），门槛 20 让那些天**所有**标的整天缺波动率
+        # （2026-03-10/13、06-22、07-06 归档全是旧缺值哨兵 0.0）。19 根 = 18 个收益，同一个估计量少一个观测；只有这些天从
+        # 缺变有值，其余日子逐位不变。仍不覆盖的：极少数窗口只有 18 根（2020~2035 共 5 天，如 2024-01-22；维度 IC 窗口内没有）。
+        if len(hist) >= 19:
             returns = hist["Close"].pct_change().dropna()
             if len(returns) >= 2:
                 vol = float(returns.std() * (252 ** 0.5) * 100)
@@ -675,6 +735,130 @@ def _fill_volume_from_twelvedata(ticker: str, out: Optional[Dict]) -> Optional[D
     return out
 
 
+def _previous_session(day: str) -> Optional[str]:
+    """`day` 之前最近一个交易日（ISO）。判不了 ⇒ None：调用方据此拒收，不猜（v0.45.557）。
+
+    复用 `portfolio_greeks._expected_session`（「这天用哪一场」的唯一实现）；它在日历不可用时**原样返回入参**，
+    所以先 import 日历证明可用——同 `_latest_closed_session`。
+    """
+    try:
+        import is_trading_day as _cal  # noqa: F401 —— 先证日历可用：_expected_session 判不了时会静默给值
+        from portfolio_greeks import _expected_session
+        prev = _expected_session((datetime.strptime(day, "%Y-%m-%d").date() - timedelta(days=1)).isoformat())
+        return prev if prev < day else None
+    except Exception as e:  # noqa: BLE001
+        _log.warning("判不了 %s 的前一交易日: %s: %s", day, type(e).__name__, e)
+        return None
+
+
+def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
+                                     session_close: Optional[Tuple[str, float]] = None) -> Optional[Dict]:
+    """yfinance 拿不到 volatility_20d 时，用 Twelve Data **复权**日线按同一公式补上（v0.45.557）。
+
+    此前波动率没有回落：yfinance 故障日整天缺（08-26 起 153/1048 行，集中在 5 个故障日），Buzz 波动率通道取 50、
+    纸面组合退回分档仓位。口径与生产 yfinance 主路径逐项对齐（2026-10-19 只读核实）：
+
+    - **价**：拆股 + 分红复权（`twelve_data.fetch_adjusted_bars`，`adjust=all`）——yfinance `history()` 缺省
+      `auto_adjust=True`。本模块别处的 Twelve Data 日线是**未复权**的，不能拿来补（含除息窗口跨档 28/6900）。
+    - **窗口**：(S − 1 个日历月, S]，左端不含、≥ 19 根（v0.45.564 前是 20，与主路径同改）；S = 此刻最近一场已收盘
+      （`_latest_closed_session`，即 yfinance 主路径会结束的那一天）。上月没有同一天（如 10-31 → 9 月）取上月最后一天。
+      生产归档 08-26~10-16 的正常日 30/30 逐行符合这条窗口规则。**先按日历数窗口里的交易日**（v0.45.562）：不足门槛
+      就不发请求——主路径那些天同样不出值，回落是同一个量。门槛 20 时一个月只有 19 个交易日的天（约每年 15 天）整天缺
+      （2026-03-10/13、06-22、07-06 归档全是旧哨兵 0.0）；564 起门槛 19，只剩极少数 18 个交易日的天（2020~2035 共 5 天）。
+    - **公式**：逐日涨跌幅的样本标准差（ddof=1）× √252 × 100，同 `_fetch_history_metrics`。写在本函数里而不是
+      辅助函数里：输入层指纹守卫（`signal_code_fingerprints` 的 price.fields）只认提到这三个行情字段（或名字里带它们）
+      的定义——窗口左端因此放在名字带字段名的 `_volatility_20d_window_lo` 里（v0.45.566，与 `--date` 补跑共用）。
+    - **S 那一根从哪来**：TD 末根 == S（盘中 / 盘前 / 周末 / 午夜后补跑：S 是前一场，TD 已定稿）⇒ 用 TD 的；
+      TD 末根 == S 的前一交易日（收盘后的生产扫描：TD 当日那根当晚是临时值、被 `twelve_data._drop_forming_bar`
+      规则 ① 丢掉——**那条规则是对的，勿改**）且源核实过 S 的官方收盘（`session_close`，CBOE `close_verdict`）
+      ⇒ 接上它。复权历史后接原始收盘是自洽的：复权只改除息日**之前**的价——**前提是 TD 当晚已把 S 当天的公司行动计入
+      前面的复权价**（待验证）。拆股没计入会造出 −50% / −90% 的假收益，所以接上的那一天变动 > 30% 就拒收（v0.45.562；
+      真有 > 30% 的单日行情也只是这天缺值，与回落之前一样）。
+    - 其余一律**拒收**（WARNING 点名标的 / TD 末根 / 应有场次 / 有无核实收盘），volatility_20d 留 None ⇒
+      `still_missing` ⇒ P2；判不了场次也拒收，不猜。
+
+    影子对比（10-19 扫描后，归档 926 行）：正常日 742 行跨档 0、中位差 0、最大 0.062（VZ / T 的复权因子略异）。
+    ⚠️ 已知分歧（都只落在 yfinance 故障的那几天）：
+    - **S 恰是除息日**：生产 yfinance 当晚还没把当天分红复权进去（按未复权算，6/6 例）；TD `adjust=all` 当晚复不复权
+      **待验证**。影子里跨档 1/6。
+    - **提前收盘日**（感恩节次日、平安夜）：v0.45.563 前主路径的 `_drop_forming_bar` 用写死的 15:59 判「还在形成」，而那天
+      SPY 末根分钟线是 12:59 ⇒ 收盘后照样丢掉当天那根、窗口止于 D−1。563 起按日历收盘时刻判（`_session_last_minute`），
+      主路径与本回落都止于 D，这一条分歧已不存在。
+    - **非收盘后跑**（盘中 / 周末 / 午夜后）：yfinance 1.2 的 `period="1mo"` 是 Yahoo `range=1mo`，从**此刻**往回数，
+      左端可能比 (S − 1 月) 多 / 少 1–2 根；生产收盘后那一跑两者一致。
+
+    生产唯一调用点：`_fill_history_fields`（同上两条回落，AST 守卫 `tests/test_fetcher_single_exit.py`）。
+    """
+    if out is not None and out.get("volatility_20d") is not None:
+        return out
+    want = _latest_closed_session()
+    if want is None:
+        _log.warning("[%s] 判不了最近一场已收盘 —— 波动率回落拒收，volatility_20d 留 None", ticker)
+        return out
+    d = datetime.strptime(want, "%Y-%m-%d").date()
+    lo = _volatility_20d_window_lo(d).isoformat()   # v0.45.566：与 `--date` 补跑同一个实现
+    try:
+        from is_trading_day import is_trading_day as _is_session
+        x, n_sessions = datetime.strptime(lo, "%Y-%m-%d").date() + timedelta(days=1), 0
+        while x <= d:
+            n_sessions += bool(_is_session(x)[0])
+            x += timedelta(days=1)
+    except Exception as e:  # noqa: BLE001 —— 日历判不了就不发请求、不猜
+        _log.warning("[%s] 数不了窗口 (%s, %s] 的交易日: %s: %s —— 波动率回落拒收，volatility_20d 留 None",
+                     ticker, lo, want, type(e).__name__, e)
+        return out
+    if n_sessions < 19:
+        _log.warning("[%s] 窗口 (%s, %s] 只有 %d 个交易日（< 19）：yfinance 主路径同样不出值（日历性缺口，2020~2035 共 5 天）"
+                     "—— 不发请求，volatility_20d 留 None", ticker, lo, want, n_sessions)
+        return out
+    try:
+        from twelve_data import fetch_adjusted_bars as _td_adjusted
+        rows = _td_adjusted(ticker, adjust="all")   # 口径字面量写在这里：指纹守卫看得见复权口径的改动
+    except Exception as e:  # noqa: BLE001
+        _log.warning("[%s] Twelve Data 复权日线不可用: %s: %s", ticker, type(e).__name__, e)
+        return out
+    if not rows:
+        return out   # 未配 key / 接口失败（原因已记进 bars_cache_stats）⇒ 诚实缺数据，still_missing 会报
+    series = [(r["date"], float(r["close"])) for r in rows]
+    last = series[-1][0]
+    if last == want:
+        end_from = "twelvedata"
+    elif (session_close is not None and session_close[0] == want
+          and last == _previous_session(want)):
+        jump = float(session_close[1]) / series[-1][1] - 1
+        if abs(jump) > 0.30:
+            _log.warning("[%s] 核实收盘 %s@%s 相对 TD 复权日线前一交易日 %s 变动 %+.1f%%（> 30%%）—— 疑似 TD 还没把当天的"
+                         "公司行动（拆股 / 大额分红）计入前面的复权价，接上会造出假收益；波动率回落拒收，volatility_20d 留 None",
+                         ticker, session_close[1], want, series[-1][1], jump * 100)
+            return out
+        series.append((want, float(session_close[1])))
+        end_from = "verified_close"
+    else:
+        _log.warning("[%s] Twelve Data 复权日线末根 %s、应有场次 %s（最近一场已收盘）、核实收盘 %s —— 窗口末端对不上，"
+                     "波动率回落拒收，volatility_20d 留 None", ticker, last, want,
+                     f"{session_close[1]}@{session_close[0]}" if session_close else "无")
+        return out
+
+    closes = [c for day_, c in series if lo < day_ <= want]
+    if len(closes) < 19:
+        _log.warning("[%s] Twelve Data 复权日线窗口 (%s, %s] 只有 %d 根（需 ≥ 19）—— 波动率回落拒收，volatility_20d 留 None",
+                     ticker, lo, want, len(closes))
+        return out
+    rets = [b / a - 1 for a, b in zip(closes[:-1], closes[1:])]
+    mean = sum(rets) / len(rets)
+    vol = math.sqrt(sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)) * math.sqrt(252) * 100
+    if not math.isfinite(vol):
+        _log.warning("[%s] Twelve Data 复权日线算出的波动率不是有限数（%r）—— 拒收", ticker, vol)
+        return out
+    out = dict(out) if out else {}
+    out["volatility_20d"] = vol
+    out["volatility_source"] = "twelvedata_adjusted"
+    out["volatility_as_of"] = want
+    _log.info("[%s] volatility_20d 由 Twelve Data 复权日线补上: %.2f%%（窗口 (%s, %s] %d 根，末根取自 %s；yfinance 不可用）",
+              ticker, vol, lo, want, len(closes), end_from)
+    return out
+
+
 class CBOESource:
     """主数据源：CBOE 延迟报价（options 端点自带现价，稳定无限流；用户定调"股价也走 CBOE"）
 
@@ -749,6 +933,7 @@ class CBOESource:
                 data.volume_ratio = metrics.get("volume_ratio")
                 data.volume_source = "yfinance" if data.volume_ratio is not None else None
                 data.volatility_20d = metrics.get("volatility_20d")   # v0.45.3: 不再补 0.0
+                data.volatility_source = "yfinance" if data.volatility_20d is not None else None
             else:
                 data.momentum_source = "unavailable"
                 _log.warning("[CBOE] %s 历史K线不可得，momentum_5d/volume_ratio 待出口回落", ticker)
@@ -812,12 +997,13 @@ class YFinanceSource:
                 data.volume_ratio = recent_vol / avg_vol
                 data.volume_source = "yfinance"
 
-            if len(hist) >= 20:
+            if len(hist) >= 19:   # v0.45.564：20 → 19，同 `_fetch_history_metrics`（理由见那里）
                 returns = hist["Close"].pct_change().dropna()
                 if len(returns) >= 2:
                     vol = float(returns.std() * (252 ** 0.5) * 100)
                     if not (math.isnan(vol) or math.isinf(vol)):
                         data.volatility_20d = vol
+                        data.volatility_source = "yfinance"
 
             self.breaker.record_success()
             return data
@@ -938,13 +1124,14 @@ class FinnhubSource:
 
 # ==================== 历史字段出口回落（v0.45.473）====================
 #
-# momentum_5d / volume_ratio 各有一条独立于主价源的回落（自攒价格索引 / Twelve Data）。
+# momentum_5d / volume_ratio / volatility_20d 各有一条独立于主价源的回落（自攒价格索引 / Twelve Data /
+# Twelve Data 复权日线，最后一条 v0.45.557）。
 # 回落是**出口的属性**，不是某个源的：不管哪个源胜出、走哪个出口，缺的项都在这里补一次。
 # 此前挂在 CBOESource 内部 + 「全源失败」一支（v0.45.270）——Finnhub / AV 胜出、过期缓存、
 # CBOE 盘中陈旧价三个出口，以及 CBOE 内部「yfinance 空历史 / 均量 NaN」两条分支都够不着
 # （auto-memory `alpha-hive-fallback-not-reached.md` 的第四次）。
 
-_HISTORY_FIELDS = ("momentum", "volume")
+_HISTORY_FIELDS = ("momentum", "volume", "volatility")   # volatility：v0.45.557（此前缺了无人红）
 _history_lock = threading.Lock()
 # 本进程还没解析过任何标的 ⇒ None（scan_timing 约定：None 是「没跑」，不是「零次」）
 _history_stats: Optional[Dict] = None
@@ -984,7 +1171,8 @@ def history_fill_stats() -> Optional[Dict]:
       过出口，所以 `cache_expired` 只会在有人绕过 `_emit` 写缓存时出现（v0.45.477 更正：473 写成会计）。
       「这一轮用了几次过期缓存」看 `[DataPipeline] … 使用过期缓存` 日志与 `get_all_metrics()["fetch_stats"]["stale"]`。
     - `window_behind_session`：回落给了 momentum，但窗口末端早于该源核实的那一场收盘（值滞后）。
-    - `still_missing`：各字段在**最近一次**出口后仍为 None 的标的 ⇒ alert_manager P2。
+    - `still_missing`：各字段（momentum / volume / volatility，后者 v0.45.557 起）在**最近一次**出口后仍为 None 的标的
+      ⇒ alert_manager P2。
     本进程没解析过任何标的 ⇒ None。
     """
     with _history_lock:
@@ -1009,11 +1197,13 @@ def reset_history_fill_stats() -> None:
 
 
 def _fill_history_fields(ticker: str, data: StockData, path: str) -> None:
-    """出口唯一的历史字段回落（v0.45.473）：`data` 缺 momentum_5d / volume_ratio 就各补一次，就地改。
+    """出口唯一的历史字段回落（v0.45.473）：`data` 缺 momentum_5d / volume_ratio / volatility_20d 就各补一次，就地改。
 
     标签与值同一处定：源自己算的值由源标（`5d_real` / `yfinance`），这里补上的标
-    `price_index`（+ `momentum_as_of`）/ `twelvedata`；补不上的标 `unavailable`。
-    `data.session_close`（源核实过的某一场官方收盘）交给 momentum 回落当窗口末端（v0.45.465）。
+    `price_index`（+ `momentum_as_of`）/ `twelvedata`（+ `volume_as_of`）/ `twelvedata_adjusted`
+    （+ `volatility_as_of`，v0.45.557）；momentum 补不上的标 `unavailable`。
+    `data.session_close`（源核实过的某一场官方收盘）交给 momentum 回落当窗口末端（v0.45.465），
+    也交给 volatility 回落接在 Twelve Data 定稿日线之后（v0.45.557）。
     已补过（`history_checked`，缓存命中）不重跑——Twelve Data 有日配额。
     """
     if data.history_checked:
@@ -1057,6 +1247,22 @@ def _fill_history_fields(ticker: str, data: StockData, path: str) -> None:
                 outcome["volume"] = "filled"
             else:
                 outcome["volume"] = "missing"
+
+    if data.volatility_20d is None:
+        try:
+            r = _fill_volatility_from_twelvedata(ticker, None, data.session_close)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("[%s] volatility_20d 出口回落出错（%s）: %s: %s",
+                         ticker, path, type(e).__name__, e)
+            outcome["volatility"] = "error"
+        else:
+            if r and r.get("volatility_20d") is not None:
+                data.volatility_20d = r["volatility_20d"]
+                data.volatility_source = "twelvedata_adjusted"
+                data.volatility_as_of = r.get("volatility_as_of")
+                outcome["volatility"] = "filled"
+            else:
+                outcome["volatility"] = "missing"
 
     data.history_checked = True
     _record_history_fill(ticker, path, outcome, window_behind)

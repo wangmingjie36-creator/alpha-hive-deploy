@@ -56,7 +56,8 @@ def _no_forward_test_excluded_days(monkeypatch):
 
 
 _SP_OK = {"ok": True, "window": ["2026-09-28", "2026-12-31"], "n": 450, "n_matched": 450,
-          "n_mismatched": 0, "n_missing": 0, "stopped_by": None}
+          "n_mismatched": 0, "n_missing": 0, "stopped_by": None,
+          "excluded_days": ["2026-10-12"], "n_excluded": 30}   # v0.45.564：自证跳过的协议排除日
 
 
 #: 未打桩的原函数（测包装本身时直接调它）
@@ -724,6 +725,14 @@ class TestBuzzV1SelfProofWiring:
         monkeypatch.setattr(buzz_v1, "self_proof", lambda *a, **k: {
             **_SP_OK, "mismatched": [{"production": 5.0, "buzz_v1": 5.01}], "missing": []})
         assert set(_REAL_SELF_PROOF(Path("/x.db"), _d(0))) == set(fx._SELF_PROOF_KEYS) - {"error"}
+
+    def test_wrapper_reports_skipped_excluded_days(self, monkeypatch):
+        """v0.45.564：自证跳过了哪些协议排除日、几行，必须随摘要带出来（不静默）。上一条拿白名单自己比自己，白名单漏键也绿——
+        这里写死要带的值（变异「白名单去掉 excluded_days」曾在上一条下存活）。"""
+        import buzz_v1
+        monkeypatch.setattr(buzz_v1, "self_proof", lambda *a, **k: dict(_SP_OK))
+        sp = _REAL_SELF_PROOF(Path("/x.db"), _d(0))
+        assert sp["excluded_days"] == ["2026-10-12"] and sp["n_excluded"] == 30, sp
 
 
 # ── 6. 进度行 ───────────────────────────────────────────────────────────────
