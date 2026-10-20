@@ -298,6 +298,9 @@ def summary_line(snap: dict) -> str:
     cb = c.get("cboe")
     yf_s = "—" if yf is None else f"{yf.get('calls', '?')}次(429×{yf.get('rate_limited', '?')})"
     td_s = "—" if td is None else f"请求{td.get('fetches', '?')}/命中{td.get('hits', '?')}"
+    adj = (td or {}).get("adjusted") or {}
+    if adj.get("fetches"):                                              # v0.45.562：复权日线（波动率回落）另一份缓存
+        td_s += f"/复权请求{adj['fetches']}"                            # 的请求单列——它的失败也算在下面的「失败」里
     if td is not None and td.get("failed"):
         # v0.45.363：点名失败的标的与原因——BRK-B 恒 404 曾只活在 WARNING 日志里
         td_s += f"/失败{td.get('failures', '?')}(" + ",".join(

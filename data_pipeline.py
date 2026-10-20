@@ -711,19 +711,28 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
       `auto_adjust=True`。本模块别处的 Twelve Data 日线是**未复权**的，不能拿来补（含除息窗口跨档 28/6900）。
     - **窗口**：(S − 1 个日历月, S]，左端不含、≥ 20 根；S = 此刻最近一场已收盘（`_latest_closed_session`，即 yfinance
       主路径会结束的那一天）。上月没有同一天（如 10-31 → 9 月）取上月最后一天。生产归档 08-26~10-16 的正常日
-      30/30 逐行符合这条窗口规则。
+      30/30 逐行符合这条窗口规则。**先按日历数窗口里的交易日**（v0.45.562）：一个日历月有时只有 19 个（约每年 15 天，
+      如 2027-01-04、每年 3 月上中旬），yfinance 主路径要 ≥ 20 根，那些天对**所有**标的都不出值（2026-03-10/13、06-22、
+      07-06 归档全是旧哨兵 0.0）——回落是同一个量，所以同样不出值，且不白发必被拒的请求。
     - **公式**：逐日涨跌幅的样本标准差（ddof=1）× √252 × 100，同 `_fetch_history_metrics`。写在本函数里而不是
       辅助函数里：输入层指纹守卫（`signal_code_fingerprints` 的 price.fields）只认提到这三个行情字段的定义。
     - **S 那一根从哪来**：TD 末根 == S（盘中 / 盘前 / 周末 / 午夜后补跑：S 是前一场，TD 已定稿）⇒ 用 TD 的；
       TD 末根 == S 的前一交易日（收盘后的生产扫描：TD 当日那根当晚是临时值、被 `twelve_data._drop_forming_bar`
       规则 ① 丢掉——**那条规则是对的，勿改**）且源核实过 S 的官方收盘（`session_close`，CBOE `close_verdict`）
-      ⇒ 接上它。复权历史后接原始收盘是自洽的：复权只改除息日**之前**的价。
+      ⇒ 接上它。复权历史后接原始收盘是自洽的：复权只改除息日**之前**的价——**前提是 TD 当晚已把 S 当天的公司行动计入
+      前面的复权价**（待验证）。拆股没计入会造出 −50% / −90% 的假收益，所以接上的那一天变动 > 30% 就拒收（v0.45.562；
+      真有 > 30% 的单日行情也只是这天缺值，与回落之前一样）。
     - 其余一律**拒收**（WARNING 点名标的 / TD 末根 / 应有场次 / 有无核实收盘），volatility_20d 留 None ⇒
       `still_missing` ⇒ P2；判不了场次也拒收，不猜。
 
     影子对比（10-19 扫描后，归档 926 行）：正常日 742 行跨档 0、中位差 0、最大 0.062（VZ / T 的复权因子略异）。
-    ⚠️ 已知分歧：**S 恰是除息日**时生产 yfinance 当晚还没把当天分红复权进去（按未复权算，6/6 例）；TD `adjust=all`
-    当晚复不复权**待验证**。只落在「yfinance 故障 × 除息日」那一格，影子里跨档 1/6。
+    ⚠️ 已知分歧（都只落在 yfinance 故障的那几天）：
+    - **S 恰是除息日**：生产 yfinance 当晚还没把当天分红复权进去（按未复权算，6/6 例）；TD `adjust=all` 当晚复不复权
+      **待验证**。影子里跨档 1/6。
+    - **提前收盘日**（感恩节次日、平安夜）：主路径的 `_drop_forming_bar` 用写死的 15:59 判「还在形成」，而那天 SPY 末根
+      分钟线是 12:59 ⇒ 收盘后照样丢掉当天那根、窗口止于 D−1；本回落止于 D。主路径那是旧 bug（另案），这里不跟着错。
+    - **非收盘后跑**（盘中 / 周末 / 午夜后）：yfinance 1.2 的 `period="1mo"` 是 Yahoo `range=1mo`，从**此刻**往回数，
+      左端可能比 (S − 1 月) 多 / 少 1–2 根；生产收盘后那一跑两者一致。
 
     生产唯一调用点：`_fill_history_fields`（同上两条回落，AST 守卫 `tests/test_fetcher_single_exit.py`）。
     """
@@ -733,9 +742,32 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
     if want is None:
         _log.warning("[%s] 判不了最近一场已收盘 —— 波动率回落拒收，volatility_20d 留 None", ticker)
         return out
+    d = datetime.strptime(want, "%Y-%m-%d").date()
+    y, m = (d.year, d.month - 1) if d.month > 1 else (d.year - 1, 12)
+    lo = None
+    for day in (d.day, 30, 29, 28):
+        try:
+            lo = d.replace(year=y, month=m, day=day).isoformat()
+            break
+        except ValueError:
+            continue
+    try:
+        from is_trading_day import is_trading_day as _is_session
+        x, n_sessions = datetime.strptime(lo, "%Y-%m-%d").date() + timedelta(days=1), 0
+        while x <= d:
+            n_sessions += bool(_is_session(x)[0])
+            x += timedelta(days=1)
+    except Exception as e:  # noqa: BLE001 —— 日历判不了就不发请求、不猜
+        _log.warning("[%s] 数不了窗口 (%s, %s] 的交易日: %s: %s —— 波动率回落拒收，volatility_20d 留 None",
+                     ticker, lo, want, type(e).__name__, e)
+        return out
+    if n_sessions < 20:
+        _log.warning("[%s] 窗口 (%s, %s] 只有 %d 个交易日（< 20）：yfinance 主路径同样不出值（日历性缺口，约每年 15 天）"
+                     "—— 不发请求，volatility_20d 留 None", ticker, lo, want, n_sessions)
+        return out
     try:
         from twelve_data import fetch_adjusted_bars as _td_adjusted
-        rows = _td_adjusted(ticker)
+        rows = _td_adjusted(ticker, adjust="all")   # 口径字面量写在这里：指纹守卫看得见复权口径的改动
     except Exception as e:  # noqa: BLE001
         _log.warning("[%s] Twelve Data 复权日线不可用: %s: %s", ticker, type(e).__name__, e)
         return out
@@ -747,6 +779,12 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
         end_from = "twelvedata"
     elif (session_close is not None and session_close[0] == want
           and last == _previous_session(want)):
+        jump = float(session_close[1]) / series[-1][1] - 1
+        if abs(jump) > 0.30:
+            _log.warning("[%s] 核实收盘 %s@%s 相对 TD 复权日线前一交易日 %s 变动 %+.1f%%（> 30%%）—— 疑似 TD 还没把当天的"
+                         "公司行动（拆股 / 大额分红）计入前面的复权价，接上会造出假收益；波动率回落拒收，volatility_20d 留 None",
+                         ticker, session_close[1], want, series[-1][1], jump * 100)
+            return out
         series.append((want, float(session_close[1])))
         end_from = "verified_close"
     else:
@@ -755,16 +793,7 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
                      f"{session_close[1]}@{session_close[0]}" if session_close else "无")
         return out
 
-    d = datetime.strptime(want, "%Y-%m-%d").date()
-    y, m = (d.year, d.month - 1) if d.month > 1 else (d.year - 1, 12)
-    lo = None
-    for day in (d.day, 30, 29, 28):
-        try:
-            lo = d.replace(year=y, month=m, day=day).isoformat()
-            break
-        except ValueError:
-            continue
-    closes = [c for day_, c in series if lo is not None and lo < day_ <= want]
+    closes = [c for day_, c in series if lo < day_ <= want]
     if len(closes) < 20:
         _log.warning("[%s] Twelve Data 复权日线窗口 (%s, %s] 只有 %d 根（需 ≥ 20）—— 波动率回落拒收，volatility_20d 留 None",
                      ticker, lo, want, len(closes))

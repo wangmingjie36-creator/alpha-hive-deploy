@@ -871,8 +871,10 @@ class AlertAnalyzer:
                         "缺波动率的纸面组合退回分档仓位",
                 "建议": "出错 > 0 ⇒ 看 alpha_hive.log「出口回落出错」；momentum 缺 ⇒ 查自攒价格索引覆盖"
                         "（price_history.coverage_report）；volume 缺 ⇒ 查 Twelve Data key / 配额（收盘后扫描里拒收是"
-                        "常态，见 v0.45.505）；volatility 缺 ⇒ 看「波动率回落拒收」WARNING（多半是 CBOE 当场收盘没核实）"
-                        "与 Twelve Data 失败原因（status.json twelve_data.failed）",
+                        "常态，见 v0.45.505）；volatility 缺 ⇒ 当天几乎全部标的都缺且无出错 ⇒ 多半是**日历性缺口**（一个月"
+                        "窗口只有 19 个交易日，yfinance 主路径也要 ≥ 20 根，约每年 15 天；看「窗口…只有 N 个交易日」WARNING），"
+                        "否则看「波动率回落拒收」WARNING（多半是 CBOE 当场收盘没核实）与 Twelve Data 失败原因"
+                        "（status.json twelve_data.failed，复权请求带 adjust=all: 前缀）",
             },
             ["history_fill", "data_quality"]
         ))

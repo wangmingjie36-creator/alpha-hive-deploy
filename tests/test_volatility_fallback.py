@@ -203,6 +203,19 @@ class TestAfterCloseProductionScan:
         assert data.volatility_as_of == "2026-11-27"
         assert data.volatility_20d == pytest.approx(_pandas_vol(_window(items, "2026-10-27", "2026-11-27")), abs=1e-9)
 
+    def test_suspected_unapplied_split_is_rejected(self, monkeypatch, caplog):
+        """v0.45.562：复权历史接原始核实收盘的前提是 TD 当晚已把 S 当天的公司行动计入前面的价（待验证）。没计入时拆股
+        造出 −50% 的假收益（波动率 ~190%、跨到最高档）——接上那天变动 > 30% 就拒收。"""
+        _freeze(monkeypatch, 2026, 10, 16, 17, 15)
+        items = _items(self.D)
+        _HTTP(monkeypatch, items)
+        prev = items[-2][1]                                           # TD 止于 10-15（10-16 临时那根被规则 ① 丢）
+        with caplog.at_level(logging.WARNING, logger="alpha_hive.data_pipeline"):
+            assert _fill(session_close=("2026-10-16", round(prev * 0.5, 4))).volatility_20d is None
+        assert any("公司行动" in r.getMessage() for r in caplog.records)
+        assert _fill("TSLA", session_close=("2026-10-16", round(prev * 1.25, 4))).volatility_20d is not None, \
+            "+25% 的真行情照收（阈值是 30%）"
+
     def test_request_carries_adjust_all_and_shared_bars_do_not(self, monkeypatch):
         """复权只在这条请求上；共享日线（close_correction 等读者对官方原始收盘）的请求逐字不变。"""
         _freeze(monkeypatch, 2026, 10, 16, 17, 15)
@@ -220,7 +233,7 @@ class TestOffHoursUsesSettledBar:
     @pytest.mark.parametrize("frozen, served_last, want", [
         ((2026, 10, 16, 11, 0), dt.date(2026, 10, 16), "2026-10-15"),    # 盘中：TD 给了半根（丢），末根 10-15
         ((2026, 10, 16, 8, 0), dt.date(2026, 10, 15), "2026-10-15"),     # 盘前
-        ((2026, 10, 17, 0, 30), dt.date(2026, 10, 16), "2026-10-16"),    # 过了美东午夜：10-16 已不是「当日」
+        ((2026, 10, 15, 0, 30), dt.date(2026, 10, 14), "2026-10-14"),    # 周四过了美东午夜：周三那根已不是「当日」
         ((2026, 10, 18, 10, 0), dt.date(2026, 10, 16), "2026-10-16"),    # 周日 ⇒ 周五
     ], ids=["intraday", "premarket", "after_midnight", "weekend"])
     def test_accepts_without_verified_close(self, monkeypatch, frozen, served_last, want):
@@ -254,6 +267,36 @@ class TestWindow:
         _HTTP(monkeypatch, items)
         data = _fill(session_close=("2026-03-31", items[-1][1]))
         assert data.volatility_20d == pytest.approx(_pandas_vol(_window(items, "2026-02-28", "2026-03-31")), abs=1e-9)
+
+    def test_month_end_clamp_is_exact_on_a_trading_day(self, monkeypatch):
+        """v0.45.562 补判别：12-31 ⇒ 11 月没有 31 日，左端取 11-30（周一、有那根）且不含它。上一条的 02-28 是周六，
+        左端取 02-27~03-01 结果都一样、判别不出；这里取错一天（如只试 28 日 ⇒ 11-28）会把 11-30 算进窗口。"""
+        _freeze(monkeypatch, 2026, 12, 31, 17, 15)
+        items = _items(dt.date(2026, 12, 31))
+        _HTTP(monkeypatch, items)
+        got = _fill(session_close=("2026-12-31", items[-1][1])).volatility_20d
+        excl = _pandas_vol(_window(items, "2026-11-30", "2026-12-31"))
+        incl = _pandas_vol([c for d, c in items if "2026-11-30" <= d <= "2026-12-31"])
+        assert "2026-11-30" in dict(items) and abs(excl - incl) > 1e-3, "前提：11-30 那根确实在、且会改变结果"
+        assert got == pytest.approx(excl, abs=1e-9)
+
+    def test_january_rolls_back_into_previous_year(self, monkeypatch):
+        _freeze(monkeypatch, 2026, 1, 15, 17, 15)
+        items = _items(dt.date(2026, 1, 15))
+        _HTTP(monkeypatch, items)
+        got = _fill(session_close=("2026-01-15", items[-1][1])).volatility_20d
+        assert got == pytest.approx(_pandas_vol(_window(items, "2025-12-15", "2026-01-15")), abs=1e-9)
+
+    def test_month_with_only_19_sessions_sends_no_request(self, monkeypatch, caplog):
+        """v0.45.562：(02-10, 03-10] 只有 19 个交易日（02-16 休市）——yfinance 主路径要 ≥ 20 根，那些天对所有标的
+        都不出值（生产 03-10 归档全是旧哨兵 0.0）。回落同样不出值，且**不发请求**（此前 30 只各发一次、全被拒）。"""
+        _freeze(monkeypatch, 2026, 3, 10, 17, 15)
+        http = _HTTP(monkeypatch, _items(dt.date(2026, 3, 10)))
+        with caplog.at_level(logging.WARNING, logger="alpha_hive.data_pipeline"):
+            data = _fill(session_close=("2026-03-10", 100.0))
+        assert data.volatility_20d is None and http.params == []
+        assert any("只有 19 个交易日" in r.getMessage() for r in caplog.records)
+        assert dp.history_fill_stats()["still_missing"]["volatility"] == ["NVDA"]
 
     def test_fewer_than_20_bars_rejects(self, monkeypatch, caplog):
         _freeze(monkeypatch, 2026, 10, 16, 11, 0)
@@ -302,8 +345,15 @@ class TestUnjudgeable:
         _freeze(monkeypatch, 2026, 10, 16, 11, 0)
         http = _HTTP(monkeypatch, _items(dt.date(2026, 10, 15)), fail=True)
         assert _fill().volatility_20d is None
-        assert td.bars_cache_stats()["failed"] == {"NVDA": "api_error:429"}
+        # v0.45.562：带口径前缀——`options_analyzer` 按 `failed[标的]` 的 `network` 前缀决定共享日线重不重试
+        assert td.bars_cache_stats()["failed"] == {"NVDA": "adjust=all:api_error:429"}
         assert _fill().volatility_20d is None and len(http.params) == 2, "失败不入缓存，下一次照常重试"
+
+    def test_shared_bars_failure_reason_has_no_prefix(self, monkeypatch):
+        _freeze(monkeypatch, 2026, 10, 16, 11, 0)
+        _HTTP(monkeypatch, _items(dt.date(2026, 10, 15)), fail=True)
+        assert td.fetch_bars("NVDA") is None
+        assert td.bars_cache_stats()["failed"] == {"NVDA": "api_error:429"}
 
     def test_fill_raising_is_counted_and_does_not_block_others(self, monkeypatch):
         def _boom(*_a, **_k):
@@ -328,6 +378,22 @@ class TestCacheAndCounters:
         assert td.bars_cache_stats()["adjusted"] == {"fetches": 1, "hits": 1, "entries": 1}
         td.clear_bars_cache()
         assert td.bars_cache_stats()["adjusted"] == {"fetches": 0, "hits": 0, "entries": 0}
+
+    def test_cache_is_keyed_by_adjust_mode(self, monkeypatch):
+        _freeze(monkeypatch, 2026, 10, 16, 11, 0)
+        http = _HTTP(monkeypatch, _items(dt.date(2026, 10, 15)))
+        td.fetch_adjusted_bars("NVDA", adjust="all")
+        td.fetch_adjusted_bars("NVDA", adjust="splits")
+        assert [p["adjust"] for p in http.params] == ["all", "splits"]
+
+    def test_summary_line_lists_adjusted_requests(self):
+        import scan_timing as stt
+        base = {"fetches": 3, "hits": 1, "failures": 0, "failed": {}}
+        with_adj = stt.summary_line({"phases": {}, "counters": {
+            "twelve_data": {**base, "adjusted": {"fetches": 2, "hits": 0, "entries": 2}}}})
+        without = stt.summary_line({"phases": {}, "counters": {
+            "twelve_data": {**base, "adjusted": {"fetches": 0, "hits": 0, "entries": 0}}}})
+        assert "请求3/命中1/复权请求2" in with_adj and "复权请求" not in without
 
     def test_returns_copies(self, monkeypatch):
         _freeze(monkeypatch, 2026, 10, 16, 11, 0)

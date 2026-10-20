@@ -22,8 +22,12 @@ v0.45.556 实测：锚点 → 2026-10-19 HEAD，上述代码与常数逐位未�
 输入（全部取自 `pheromone.db` 的 `signal_archive` 表）
 -----------------------------------------------------
 - 7 个通道 `buzz.comp.*`（v0.45.340 起全精度入档）。
-- 背离调整用的**原始** 5 日动量：`price.momentum_5d`（取自 Scout 的 details——与 Buzz 用的是同一份共享行情，
-  v0.45.556 实测 09-28 起 450/450 逐位相等）。不在库里 = 当天动量不可得（生产里 `_mom_raw is None` ⇒ 背离「unavailable」、调整 0）。
+- 背离调整用的**原始** 5 日动量：`price.momentum_5d`（取自 Scout 的 details——与 Buzz 用的是同一份共享行情）。
+  v0.45.562 更正：556 写的「450/450 逐位相等」不对——那是拿蜂群结果文件比的，10-05 同日重扫后文件与库不是同一轮。按库里的
+  `buzz.comp.momentum_signal` 反推，09-28~10-19 的 480 行里 477 行逐位相等，10-05 的 VKTX / COST / SNOW 三行差约 1e-14
+  （Buzz 自己那份动量与 Scout 的在末位不同）。只在恰好落在背离阈值上时才可能改变结果；背离调整在生产里从未触发，
+  自证覆盖不到这一项。不在库里 = 当天动量不可得（生产里 `_mom_raw is None` ⇒ 背离「unavailable」、调整 0）——
+  库里分不出「Scout 没取到」与「没入档」，所以缺它不计入自证 ②。
 - 动量调整的 3 日参照：参照**日期**的选法照锚点代码——该票「日期 ≤ 当日−3 天」的最近一个有 `sentiment.pct` 的归档日，
   且不早于 当日−3−4 天；参照**值**：参照日 ≥ 锚点日 ⇒ 用当天归档通道 × 本文件的冻结权重重算 `int(合成值)`
   （**不直接读 `sentiment.pct`**：否则生产以后改合成权重，会从「历史参照值」这条侧门漏进来）；参照日 < 锚点日 ⇒
@@ -217,11 +221,14 @@ def recompute(con: sqlite3.Connection, keys: Iterable[Tuple[str, str]]) -> Dict[
 # ────────────────────────────────────────────────────────────────────────────
 
 def frozen_only_boundary(history: Optional[list] = None, input_signals: Optional[Tuple[str, ...]] = None) -> Optional[Dict]:
-    """锚点日之后第一条**只**点名冻结层（不触及任何输入层信号）的边界——自证窗口到它为止（不含）。"""
+    """锚点日之后第一条**只**点名冻结层（不触及任何输入层信号）的边界——自证窗口到它为止（不含）。
+
+    边界表经 `signal_archive._cohort_history()` 读（v0.45.562）：与执行器的截断判定同一个入口——此前直读
+    `ic_rerun_readiness._COHORT_HISTORY`，生产里是同一张表，但替换那个入口的测试 / 视图（如 TestRealCli 的 prelude）
+    会让自证与截断看到两张不同的表。"""
     import signal_archive
     if history is None:
-        import ic_rerun_readiness
-        history = ic_rerun_readiness._COHORT_HISTORY
+        history = signal_archive._cohort_history()
     if input_signals is None:
         input_signals = _protocol().H1_INPUT_SIGNALS
     hits = []
@@ -254,6 +261,13 @@ def self_proof(db_path: Optional[str] = None, end: Optional[str] = None,
     if stop:
         hi = min(hi, _shift(stop["date"], -1))
     base = {"window": [ANCHOR_DATE, hi], "stopped_by": stop}
+    forward_start = _protocol().FORWARD_START
+    if stop and stop["date"] <= forward_start:
+        # v0.45.562：窗口起点之前（含当天）的边界不截断 H1（`truncation_point` 只认窗口内的），而它之后生产分已不是
+        # buzz_v1 ⇒ H1 整个窗口读的都是别的东西。自证窗口止于它之前，一天 H1 样本都担保不了——不许算通过。
+        return {**base, "ok": False, "n": 0,
+                "error": (f"只点名冻结层的边界 {stop['version']}（{stop['date']}）不晚于 H1 窗口起点 {forward_start}："
+                          "窗口前的边界不截断 H1，H1 读到的生产分自窗口起就不是 buzz_v1，自证担保不了任何一天")}
     try:
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         try:
