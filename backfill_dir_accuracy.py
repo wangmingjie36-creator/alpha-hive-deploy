@@ -156,11 +156,11 @@ def _close_after(series, target_date):
         return None, None
     hit_date = hit.index[0].date()
     try:
-        from datetime import time as _dt_time
-        from data_pipeline import _exchange_now
+        # v0.45.563：阈值同 data_pipeline 的唯一实现（提前收盘日 12:59，不再写死 15:59）
+        from data_pipeline import _exchange_now, _session_last_minute
         _xnow = _exchange_now()
         if (_xnow is not None and hit_date == _xnow.date()
-                and _xnow.time() < _dt_time(15, 59)):
+                and _xnow.time() < _session_last_minute(_xnow.date())):
             return None, None
     except Exception:  # noqa: BLE001 - 护栏失效不该阻断取价
         pass

@@ -76,9 +76,31 @@ def _exchange_now():
         return None
 
 
+def _session_last_minute(d) -> "_dt_time":
+    """`d` 那一场最后一根分钟线的时刻（美东）= 收盘时刻 − 1 分钟：平日 15:59，提前收盘日 12:59（v0.45.563）。
+
+    「这根日线还在不在形成」的**唯一**阈值，四处共用：`_drop_forming_bar` / `_completed_bar_close` /
+    `backtester._get_price_at_date` / `backfill_dir_accuracy._close_after`（AST 守卫
+    `tests/test_early_close_forming_bar.py` 钉住不许再写死）。拿它比的是 `_exchange_now`——SPY 最后一根分钟线的
+    时间戳，收盘后恒为这一刻，所以不能拿收盘时刻本身比。
+    此前四处都写死 15:59：提前收盘日（感恩节次日、当年是交易日的平安夜、7/3）收盘后 SPY 末根是 12:59 < 15:59 ⇒
+    当天那根被当成「还在形成」——主路径丢掉它，动量 / 量比 / 波动率止于 D−1（维度 IC H1 窗口内 2026-11-27、12-24）。
+    收盘时刻取 `is_trading_day.session_close_et`（按规则推、不按表，不会过期）；日历抛错 ⇒ WARNING + 按常规 15:59
+    （与改前一致，不更糟）。
+    """
+    try:
+        from is_trading_day import session_close_et
+        return (datetime.combine(d, session_close_et(d)) - timedelta(minutes=1)).time()
+    except Exception as e:  # noqa: BLE001 —— 判不了就退回改前的判据，但要看得见
+        _log.warning("交易日历不可用（%s: %s）—— 按常规收盘 15:59 判 %s 的末根是否还在形成，提前收盘日会误丢当天那根",
+                     type(e).__name__, e, d)
+        return _dt_time(15, 59)
+
+
 def _drop_forming_bar(hist):
     """若日线末根是"当日盘中正在形成"的 bar，返回去掉末根的 hist；否则原样返回。
-    判据（不依赖本机钟）：末根日期 == 交易所真实当日 且 当前时间 < 收盘 15:59 美东。
+    判据（不依赖本机钟）：末根日期 == 交易所真实当日 且 当前时间 < 该场最后一根分钟线
+    （`_session_last_minute`：平日 15:59、提前收盘日 12:59；v0.45.563 前写死 15:59）。
     任何异常都原样返回（绝不影响主流程）。"""
     try:
         if hist is None or len(hist) < 3:
@@ -86,7 +108,7 @@ def _drop_forming_bar(hist):
         xnow = _exchange_now()
         if xnow is None:
             return hist
-        if hist.index[-1].date() == xnow.date() and xnow.time() < _dt_time(15, 59):
+        if hist.index[-1].date() == xnow.date() and xnow.time() < _session_last_minute(xnow.date()):
             return hist.iloc[:-1]
     except Exception:
         pass
@@ -101,8 +123,9 @@ def _completed_bar_close(hist) -> Optional[Tuple[str, float]]:
     但当「核实过的收盘」交给自攒索引当窗口末端（`StockData.session_close`）就违反 v0.45.465 的契约
     （盘中价 / 判不了归属的价不许进窗口）。所以这里反过来：**能证明收了才给**。
 
-    判据与 `_drop_forming_bar` 同一份：交易所时钟可得，且末根不是「交易所当日 + 15:59 美东之前」。
-    （`_exchange_now` 是 SPY 最后一根分钟线的时间戳——收盘后恒为 15:59，故不能写 16:00。）
+    判据与 `_drop_forming_bar` 同一份：交易所时钟可得，且末根不是「交易所当日 + 该场最后一根分钟线之前」。
+    （`_exchange_now` 是 SPY 最后一根分钟线的时间戳——收盘后恒为那一刻：平日 15:59、提前收盘日 12:59，故不能写
+    收盘时刻本身；阈值见 `_session_last_minute`，v0.45.563 前写死 15:59，提前收盘日收盘后也给 None。）
     """
     try:
         if hist is None or len(hist) < 1:
@@ -111,7 +134,7 @@ def _completed_bar_close(hist) -> Optional[Tuple[str, float]]:
         if xnow is None:
             return None
         d = hist.index[-1].date()
-        if d > xnow.date() or (d == xnow.date() and xnow.time() < _dt_time(15, 59)):
+        if d > xnow.date() or (d == xnow.date() and xnow.time() < _session_last_minute(d)):
             return None
         px = float(hist["Close"].iloc[-1])
         if not (math.isfinite(px) and px > 0):
@@ -729,8 +752,9 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
     ⚠️ 已知分歧（都只落在 yfinance 故障的那几天）：
     - **S 恰是除息日**：生产 yfinance 当晚还没把当天分红复权进去（按未复权算，6/6 例）；TD `adjust=all` 当晚复不复权
       **待验证**。影子里跨档 1/6。
-    - **提前收盘日**（感恩节次日、平安夜）：主路径的 `_drop_forming_bar` 用写死的 15:59 判「还在形成」，而那天 SPY 末根
-      分钟线是 12:59 ⇒ 收盘后照样丢掉当天那根、窗口止于 D−1；本回落止于 D。主路径那是旧 bug（另案），这里不跟着错。
+    - **提前收盘日**（感恩节次日、平安夜）：v0.45.563 前主路径的 `_drop_forming_bar` 用写死的 15:59 判「还在形成」，而那天
+      SPY 末根分钟线是 12:59 ⇒ 收盘后照样丢掉当天那根、窗口止于 D−1。563 起按日历收盘时刻判（`_session_last_minute`），
+      主路径与本回落都止于 D，这一条分歧已不存在。
     - **非收盘后跑**（盘中 / 周末 / 午夜后）：yfinance 1.2 的 `period="1mo"` 是 Yahoo `range=1mo`，从**此刻**往回数，
       左端可能比 (S − 1 月) 多 / 少 1–2 根；生产收盘后那一跑两者一致。
 
