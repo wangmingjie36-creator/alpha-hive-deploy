@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.586] — 2026-10-21 — 占位（进行中：影子宽跨记录——按 experiments/straddle_strangle_shadow_prereg.md §10；信号行记 25Δ 宽跨报价、账本开 / 平仓抄影子记录、`straddle_strangle_shadow.py`（PREREG / progress / run_once）、跨式页只显示计数）
+
 ## [0.45.585] — 2026-10-21 — Fixed：v0.45.579 / 582 二次检查——监视器缓存 `gdp.pages` 是坏值时连 `--force` 仍崩（579 的自愈漏了这一层）；GuardBee 测试与仪表盘的 `get_next_event` 解耦；`fomc_vote_days` docstring 去掉会过期的证据快照；GuardBee「权重 0.15」的过时说明
 
 ### Fixed
