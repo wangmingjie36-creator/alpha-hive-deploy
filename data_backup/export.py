@@ -16,7 +16,7 @@
   probability_scorecard_state/ ml_model_history/ self_analysis_briefs/
   db_snapshots/ sell_strike_state/`
 - 根目录文本文件：`weight_history.jsonl pheromone_fallback.jsonl
-  ml_model.json ml_model_cache.json ml_model_extended.json`
+  ml_model_cache.json ml_model_extended.json`（`ml_model.json` v0.45.570 起无写者、不再导出）
 
 只读打开策略见 `sqlite_readonly.py`（照抄阶段 0 脚本，未重新发明）。
 """
@@ -82,7 +82,7 @@ STATE_DIRS: list[str] = [
 ]
 ROOT_FILE_GLOBS: list[str] = [
     "weight_history.jsonl", "pheromone_fallback.jsonl",
-    "ml_model.json", "ml_model_cache.json", "ml_model_extended.json",
+    "ml_model_cache.json", "ml_model_extended.json",   # ml_model.json 已无写者，见 EXCLUDED_FROM_THIS_PASS（v0.45.570）
     # v0.45.342：与 main 对齐（理由同上）——日报 / ML 报告 / 站点文件 / 参数优化产物。
     "alpha-hive-daily-*.json", "alpha-hive-daily-*.md", "alpha-hive-thread-*.txt",
     "alpha-hive-*-ml-enhanced-*.html", "deep-*.html", "*_raw.json",
@@ -113,6 +113,8 @@ EXCLUDED_FROM_THIS_PASS: dict[str, str] = {
     "logs": "accepted-loss:2026-10-06 沿用 v0.45.342 的排除决定（日志，非数据；被跟踪的 4~5 月旧健康快照已在 main），用户未单独审议",
     "db_backups": "derived:数据仓库 — 本机每日轮转备份；数据仓库本身就是它的异地版本",
     "realtime_metrics.json": "rebuildable: 每轮扫描覆盖的中间产物",
+    "ml_model.json": ("derived:ml_model_history/ — v0.45.570 删掉 train_model 的缺省存盘后无写者、零读者；"
+                      "数据根里剩的那份与同日 ml_model_cache.json 逐字节相同，其快照 ml_model-<日期>.json 在已备份的 ml_model_history/ 里"),
     "cache": "rebuildable: 可重建缓存", "data_cache": "rebuildable: 可重建缓存", "earnings_cache": "rebuildable: 可重建缓存",
     "finviz_cache": "rebuildable: 可重建缓存", "sec_cache": "rebuildable: 可重建缓存", "reddit_cache": "rebuildable: 可重建缓存",
     ".factor_cache": "rebuildable: Ken French 因子 parquet，二进制", ".risk_cache": "rebuildable: beta 缓存",

@@ -9,7 +9,45 @@
 
 ## [0.45.571] — 2026-10-21 — 占位（进行中：编排器 Step 7 `push_report_to_slack.py` 死步骤清理——生产恒退出 2 跳过）
 
-## [0.45.570] — 2026-10-21 — 占位（进行中：清掉 ml_model.json 已知死链——train_model 的缺省存盘零读者）
+## [0.45.570] — 2026-10-21 — Removed：ML 模型的缺省落盘路径 `ml_model.json`——`train_model()` 训完不再存盘，`save_model` / `load_model` 的路径必填（v0.45.543 读者登记表最后一条文件类 PENDING_DEAD，上限 3 → 2）
+
+用户决定（2026-10-21）：选「删掉缺省落盘」（另两个选项：只停 `train_model` 的自动存盘、保留缺省路径；或改登记为 FORENSIC）。
+
+**核实（动手前）**：生产唯一写 `ml_model.json` 的是 `generate_ml_report.MLEnhancedReportGenerator.__init__` 里的
+`train_model()`（训完无参 `save_model()` ⇒ `PATHS.ml_model`），它紧接着 `_save_model_to_disk` 把**同一个模型**显式写进取证副本
+`ml_model_cache.json`——生产数据根 10-19 / 10-20 两份文件 sha256 逐字节相同，`ml_model_history/manifest.jsonl` 每天各记一份相同快照。
+全仓无参 `load_model` 调用点 = 0（2026-02-24 导入模板模块起就是 0）；`ml_model_guard._snapshot_exists` 认任意 stem 的当日快照，cache 那份就够；
+`data_backup/export.py` 把它列在根目录导出清单里。⇒ 删掉不影响评分、报告、取证与当日快照闸。
+
+### Removed
+- `ml_predictor.py`：`default_model_path()` 删除；`SimpleMLModel` / `SGDMLModel` / `HGBModel` 三对 `save_model` / `load_model` 的
+  `filename` 改为必填（无参调用 ⇒ `TypeError`）；`MLPredictionService.train_model()` 不再存盘，直接返回训练结果
+  （报告生成器照旧显式写 `PATHS.ml_model_cache`）。连带删掉不再用的 `typing.Optional`。
+- `hive_logger.PATHS.ml_model` 删除。`ml_model_cache` 的 docstring 改写：原「必须与 `ml_model` 保持为不同文件」的约束
+  （防测试里无参 `train_model()` 写穿生产）随缺省路径一起失去对象——**没有缺省，就没有可以指错的东西**；
+  改为「不要把它做成缺省路径」，并订正「生产真正读的那份」（v0.45.551 起只写不读）。
+
+### Changed
+- `data_backup/export.py`：`ml_model.json` 移出 `ROOT_FILE_GLOBS`，在 `EXCLUDED_FROM_THIS_PASS` 写明 `derived:` 理由
+  （剩下那份与同日 cache 逐字节相同，其快照 `ml_model-<日期>.json` 在已备份的 `ml_model_history/` 里）。迁移清单
+  `migrate_data_root.py` 是阶段 5 的历史记录，不动。生产数据根里旧的 `ml_model.json` 与 `ml_model_history/ml_model-*.json` 原样留着（删 = 改生产数据，未做）。
+- `tests/test_persistent_writes_have_readers.py`：删产物 `ml_model.json`、三处 `save_model` 落点里的该项、`PENDING_WITNESS` 唯一一条（现为空），
+  `CEILING_PENDING_DEAD` 3 → 2。删完代码后它先红「见证没了 ⇒ 删条目并把上限减一」，照删即绿。
+- `tests/conftest.py::_isolate_ml_model_file`：防线①原核对 `default_model_path()` 在沙箱，改核对生产唯一的显式落点 `PATHS.ml_model_cache`；
+  防线②（teardown 比对仓库根 / 调用目录里三个模型文件的真身指纹，含 `ml_model.json`）不变——专抓绕过 `PATHS` 的写入。
+- `tests/test_ml_model_path_isolation.py`：「无参 `save_model()` / `train_model()` 必须落进沙箱」一组与 `default_model_path` 跟随环境变量一条随缺省路径退役，
+  判据搬进墓碑；`_model_file` 调用时求值与中毒守卫两组不动。`tests/test_ml_model_guard.py` 删 `default_model_path` 在 `PATHS.home` 下那条。
+- `tests/test_rival_ml_adjustment_retired.py::test_analyze_writes_no_model_file`：原比 `PATHS.ml_model.exists()`（属性已删），改比数据根整体文件集合（不含 `logs/`）——更严。
+
+### Added
+- `tests/test_ml_model_default_path_retired.py`（墓碑）：`default_model_path` / `PATHS.ml_model` 不许回来；三个类六个方法的 `filename` 无缺省值
+  （签名 + 行为：无参 `TypeError`、显式路径照写——正对照）；生产源码里以**完整文件名**出现 `ml_model.json` 的作用域与白名单双向相等
+  （只剩备份排除键与历史迁移清单；比完整文件名、不含 docstring，片段会误中 `ml_model_cache` / `ml_model_history`）；`train_model()` 训完数据根不新增文件
+  （正对照：同一探测器认得出随后显式写的 `ml_model_cache.json`；日志目录不算产物）。变异实测：往 `train_model` 塞回 `ml_model.json` 写入 ⇒ 字面量与行为两条红；
+  给 `HGBModel.save_model` 加回缺省值 ⇒ 签名与行为两条红。
+
+### 剩下的已知死链（2 条）
+`agent_memory`、`barrier_outcomes`（两张表，政策 / 用户暂缓）。
 
 ## [0.45.569] — 2026-10-21 — 占位（进行中：alert_manager 性能 P1 恒真闸——5 秒常数基线对 ~2000 秒的真实扫描天天报警，改成只在真变慢时响）
 

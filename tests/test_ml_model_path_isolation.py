@@ -1,4 +1,4 @@
-"""ML 模型产物路径隔离 + 「被夹具覆盖」加载守卫（v0.45.149）。
+"""ML 模型产物路径隔离 + 「被夹具覆盖」加载守卫（v0.45.149；缺省路径 v0.45.570 删除，见墓碑 test_ml_model_default_path_retired.py）。
 
 事故复盘见 `tests/conftest.py::_isolate_ml_model_file` 的 docstring 与
 CHANGELOG v0.45.148 补记 B。这里只放**会红**的断言。
@@ -19,11 +19,9 @@ import pytest
 import ml_predictor
 from ml_predictor import (
     HGBModel,
-    MLPredictionService,
     PoisonedModelError,
     TrainingData,
     _OOS_MIN_SAMPLES,
-    default_model_path,
 )
 
 
@@ -62,88 +60,10 @@ def _write(path, payload):
     return str(path)
 
 
-# ===================== ① 路径：产物不落仓库根 =====================
-
-class TestModelPathIsolation:
-    """`train_model()` 的无参 `save_model()` 必须落在沙箱里。"""
-
-    def test_default_path_is_absolute_and_not_cwd_relative(self):
-        """默认路径必须是绝对路径 —— 相对路径才是「在哪跑就写到哪」的根因。"""
-        p = default_model_path()
-        assert pathlib.Path(p).is_absolute(), f"默认模型路径不是绝对路径：{p}"
-
-    def test_train_model_writes_into_sandbox_not_repo_root(self, tmp_path):
-        """成对断言：① 仓库根那份没被动；② 沙箱里确实多出了一份。
-
-        只有 ① 的话，把 `save_model` 改成 `pass` 也能绿 —— 那正是我们要
-        排除的「什么都没发生也算通过」。
-        """
-        real = REPO_ROOT / "ml_model.json"
-        before = real.read_bytes() if real.exists() else None
-
-        sandbox_model = pathlib.Path(default_model_path())
-        assert not sandbox_model.exists(), "前置条件：沙箱里本不该已有模型"
-
-        # v0.45.558：沙箱库是空的、生产代码又不再有 8 条硬编码兜底 ⇒ 预载合成记录才训得起来
-        from ml_predictor import TrainingData
-        svc = MLPredictionService()
-        svc.fallback_records = [
-            TrainingData(ticker=f"S{i}", date="2024-01-01", crowding_score=30.0 + 5 * i,
-                         catalyst_quality="AB"[i % 2], momentum_5d=float(i - 4), volatility=5.0,
-                         market_sentiment=0.0, actual_return_3d=0.0, actual_return_7d=0.0,
-                         actual_return_30d=0.0, win_3d=i % 3 != 0, win_7d=i % 3 != 0, win_30d=i % 3 != 0)
-            for i in range(8)]
-        result = svc.train_model()
-        assert result.get("status") == "success", (
-            f"训练没成功，本测试测不到 save 路径：{result}")
-
-        # ② 沙箱里确实写出来了（判别力的一半）
-        assert sandbox_model.exists(), (
-            f"train_model() 成功了却没在沙箱落盘：{sandbox_model}")
-        assert sandbox_model.is_relative_to(tmp_path), (
-            f"落盘位置逃出沙箱：{sandbox_model}")
-
-        # ① 仓库根那份逐字节没变（另一半）
-        after = real.read_bytes() if real.exists() else None
-        assert after == before, (
-            f"跑测试改到了仓库根的 {real} —— 这正是 v0.45.149 要根治的事故")
-
-    @pytest.mark.parametrize("mod_name,cls_name,expected_attr", [
-        ("ml_predictor", "SimpleMLModel", "ml_model"),
-        ("ml_predictor", "SGDMLModel", "ml_model"),
-        ("ml_predictor", "HGBModel", "ml_model"),
-        # v0.45.538：`ml_predictor_extended` 已退役（守卫 tests/test_rival_ml_adjustment_retired.py）
-    ])
-    def test_no_arg_save_lands_in_sandbox(self, mod_name, cls_name, expected_attr,
-                                          tmp_path, monkeypatch):
-        """**逐个类**走真实接线：无参 `save_model()` 必须落进沙箱。
-
-        为什么不能只断言 `default_model_path()` 返回绝对路径 —— mutation M7
-        证过：把 `save_model` **函数体**里的解析改回相对字面量，那种断言照样
-        全绿。它测的是被调函数，不是接线（v0.45.126 的教训）。
-        这里只认「调完之后文件出现在哪」。
-        """
-        import importlib
-        from hive_logger import PATHS
-
-        mod = importlib.import_module(mod_name)
-        model = getattr(mod, cls_name)()
-
-        target = getattr(PATHS, expected_attr)
-        assert target.is_relative_to(tmp_path), f"前置条件坏了：{target} 不在沙箱"
-        assert not target.exists(), "前置条件：沙箱里本不该已有模型文件"
-
-        repo_copy = REPO_ROOT / target.name
-        before = repo_copy.read_bytes() if repo_copy.exists() else None
-
-        model.save_model()          # ← 无参，正是生产 train_model() 的调用方式
-
-        assert target.exists(), (
-            f"{mod_name}.{cls_name}.save_model() 无参调用后，沙箱里没有 {target}"
-            " —— 它把文件写到别处去了")
-        after = repo_copy.read_bytes() if repo_copy.exists() else None
-        assert after == before, f"写到了仓库根的 {repo_copy}"
-
+# ===================== ① 路径：调用时求值 =====================
+# v0.45.570：原「① 路径：产物不落仓库根」一组（`train_model()` / 无参 `save_model()` 必须落进沙箱）随缺省路径
+# 一起退役——没有缺省路径了，无参调用直接 TypeError、`train_model()` 不写任何文件。
+# 那一组的判据（成对：沙箱里确实没新增 + 显式路径确实写得出来）搬进墓碑 `tests/test_ml_model_default_path_retired.py`。
 
 class TestPathResolvedLazily:
     """路径必须**调用时**求值 —— 冻住就等于隔离失效。
@@ -179,19 +99,6 @@ class TestPathResolvedLazily:
         assert second != first and second.is_relative_to(elsewhere), (
             f"`_model_file` 没跟着 ALPHA_HIVE_HOME 变（{first} -> {second}）"
             " —— 它又被写成了 import 时求值的类属性，测试隔离对它无效。")
-
-    def test_default_model_path_follows_env(self, tmp_path, monkeypatch):
-        """`ml_predictor.default_model_path()` 同理：函数而非模块级常量。"""
-        first = pathlib.Path(default_model_path())
-        elsewhere = tmp_path / "elsewhere2"
-        elsewhere.mkdir()
-        monkeypatch.setenv("ALPHA_HIVE_HOME", str(elsewhere))
-        second = pathlib.Path(default_model_path())
-
-        assert second != first and second.is_relative_to(elsewhere), (
-            f"default_model_path() 没跟着环境变量变（{first} -> {second}）"
-            " —— 多半被改成了模块级常量，import 时就冻住了。")
-
 
 # ===================== ② 守卫：拒绝被夹具覆盖的模型 =====================
 

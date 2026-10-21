@@ -79,9 +79,10 @@ def _isolate_env(tmp_path, monkeypatch):
     # （data_quality 标 real），被当日正式扫描按"快照命中"复用进日报
     monkeypatch.setenv("OPTIONS_SNAPSHOT_DISABLE", "1")
     # v0.45.145 同款第二层防线：禁止测试把模型写进 ml_model_history/。
-    # `HGBModel.save_model` 的默认文件名是**相对路径**，tests/ 里约 12 处
+    # 当年 `HGBModel.save_model` 的默认文件名是**相对路径**，tests/ 里约 12 处
     # `svc.train_model()` 不传 tmp 路径 ⇒ 在主 checkout 跑 pytest 会往 cwd 写
-    # ml_model.json，本模块会顺手快照它。而 ml_model_history/ 是 git 跟踪 +
+    # ml_model.json，本模块会顺手快照它（v0.45.570 起 save_model 没有缺省路径、
+    # train_model 也不再存盘，但显式传路径的测试照样会触发快照）。而 ml_model_history/ 当时是 git 跟踪 +
     # 在自动提交白名单里的 ⇒ 夹具模型会被当成生产模型提交推送。
     # ml_model_guard 自己也在 pytest 下默认关闭（两层），这里再显式关一次。
     monkeypatch.setenv("ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE", "1")
@@ -1138,12 +1139,13 @@ def _ml_model_digest(path):
 
 
 def _assert_default_path_in_sandbox(raw, tmp_path):
-    """`_isolate_ml_model_file` 防线①：默认落盘位置是**绝对路径**且在 tmp 沙箱里。
+    """`_isolate_ml_model_file` 防线①：模型落盘位置是**绝对路径**且在 tmp 沙箱里。
 
     先断言绝对、再判包含（v0.45.240）：`Path(相对).resolve()` 按 **cwd** 补全，而 v0.45.224 起测试期间
-    cwd 就在本测试的 tmp 里 ⇒ `default_model_path()` 被改回 `"ml_model.json"` 时 resolve 出
+    cwd 就在本测试的 tmp 里 ⇒ 路径被改回 `"ml_model.json"` 这类相对值时 resolve 出
     `tmp/_cwd/ml_model.json`，包含判定恒真、本闸不响（实测）。测试里这条相对路径只写进空目录，
     **伤的是生产**：编排器从仓库根跑，写穿的正是 v0.45.149 那次事故的模型文件。
+    （v0.45.570 前核对的是 `default_model_path()`；缺省路径删除后核对生产唯一显式写的 `PATHS.ml_model_cache`。）
     """
     p = pathlib.Path(raw)
     assert p.is_absolute(), (
@@ -1152,14 +1154,14 @@ def _assert_default_path_in_sandbox(raw, tmp_path):
     resolved = p.resolve()
     assert resolved.is_relative_to(tmp_path.resolve()), (
         f"ML 模型默认落盘位置逃出了测试沙箱：{resolved}（沙箱应为 {tmp_path}）。"
-        "多半是 default_model_path() 被写成了模块级常量（import 时求值 = 冻住旧值）。")
+        "多半是这条路径被写成了模块级常量 / 类属性（import 时求值 = 冻住旧值）。")
 
 
 @pytest.fixture(autouse=True)
 def _isolate_ml_model_file(request, tmp_path, monkeypatch):
     """核对测试没把 ML 模型写进仓库根（或 pytest 的 cwd）。
 
-    v0.45.149。事故：`ml_predictor` 的三对 `save_model/load_model` 默认值是
+    v0.45.149。事故：`ml_predictor` 的三对 `save_model/load_model` 默认值曾是
     **cwd 相对路径** `"ml_model.json"`，而 `MLPredictionService.train_model()`
     在训练成功后**无参**调用 `save_model()`，`tests/` 里有 11 处
     `svc.train_model()` 不传路径 —— 于是**在主 checkout 跑一次 pytest，就用
@@ -1169,12 +1171,12 @@ def _isolate_ml_model_file(request, tmp_path, monkeypatch):
 
     两道防线：
 
-      ① **路径侧**（在生产代码里，不在这个 fixture 里）：默认值改为
-         `ml_predictor.default_model_path()` → `PATHS.home / MODEL_FILENAME`，
-         而 `PATHS.home` 读 `ALPHA_HIVE_HOME`，上面的 `_isolate_env` 已经把它
-         指向 tmp_path。**注意这道防线本来就该罩住模型文件，是那六个裸相对
-         路径默认值从它底下钻了出去** —— 与限流器只覆盖 6/40 个调用点同形。
-         本 fixture 因此在 setup 时**正面核对**这道防线真的生效，而不是再
+      ① **路径侧**（在生产代码里，不在这个 fixture 里）：v0.45.149 把默认值改为
+         `ml_predictor.default_model_path()` → `PATHS.home / …`；**v0.45.570 起干脆没有默认值**
+         （`save_model` / `load_model` 的 filename 必填、`train_model` 不存盘，墓碑
+         `tests/test_ml_model_default_path_retired.py`）。生产唯一的显式落点是
+         `PATHS.ml_model_cache`，而 `PATHS.home` 读 `ALPHA_HIVE_HOME`，上面的 `_isolate_env`
+         已经把它指向 tmp_path。本 fixture 在 setup 时**正面核对**它真的落在沙箱里，而不是再
          monkeypatch 一遍把问题盖住（盖住了就再也测不出它退化）。
 
       ② **指纹侧**：teardown 比对真身。兜住任何绕过①的写法 —— 新写的测试
@@ -1201,8 +1203,9 @@ def _isolate_ml_model_file(request, tmp_path, monkeypatch):
     watched |= {pathlib.Path(request.config.invocation_params.dir).resolve() / n for n in _ML_MODEL_FILES}
     before = {p: _ml_model_digest(p) for p in watched}
 
-    # 防线①的正面核对：默认落盘位置必须落在 tmp 沙箱里。
-    _assert_default_path_in_sandbox(_mp.default_model_path(), tmp_path)
+    # 防线①的正面核对：生产唯一的模型落点必须落在 tmp 沙箱里（v0.45.570 前核对 default_model_path()）。
+    from hive_logger import PATHS as _PATHS
+    _assert_default_path_in_sandbox(str(_PATHS.ml_model_cache), tmp_path)
 
     yield
 
@@ -1210,8 +1213,7 @@ def _isolate_ml_model_file(request, tmp_path, monkeypatch):
     assert not touched, (
         f"测试写到了**仓库根/cwd** 的 ML 模型文件：{touched}。"
         "默认落盘位置已经全局指向 tmp，还能改到真身说明有绕过它的写入路径"
-        "（硬编码相对路径？subprocess？）——去把那条路径也接到 "
-        "`ml_predictor.default_model_path()` 上，不要在这里放行。")
+        "（硬编码相对路径？subprocess？）——落盘路径一律从 `PATHS` 调用时求值，不要在这里放行。")
 
 # ==================== 生产产物总闸（v0.45.150） ====================
 

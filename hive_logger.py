@@ -168,7 +168,7 @@ class _HivePaths:
         return self.logs_dir / "production_sync.json"
 
     # ── ML 模型产物（v0.45.149）─────────────────────────────────────────
-    # 三个文件名此前散落在 `ml_predictor` 的六个函数签名默认值、
+    # 文件名此前散落在 `ml_predictor` 的六个函数签名默认值、
     # `generate_ml_report` 的一个**类属性**、以及三处字面量里。收进这里的
     # 理由不只是整洁：`_HivePaths` 的属性是**调用时求值**的，天然读得到
     # 测试逐条 setenv 的 `ALPHA_HIVE_HOME`；写成模块级常量或类属性就会在
@@ -176,26 +176,16 @@ class _HivePaths:
     # 在 pytest 收集期冻成仓库根，隔离对它完全无效）。
 
     @property
-    def ml_model(self) -> Path:
-        """`ml_predictor.save_model()` 无参调用时的落盘位置。
-
-        ⚠️ 生产**不读**这个文件（全仓 `load_model` 无参调用点 = 0），它只是
-        `MLPredictionService.train_model()` 的副产物。此前默认值是 cwd 相对
-        路径 `"ml_model.json"`，于是「在哪跑 pytest 就写到哪」。
-        """
-        return self.home / "ml_model.json"
-
-    @property
     def ml_model_cache(self) -> Path:
-        """生产**真正读**的那份 ML 模型。
+        """报告生成器训出的 ML 模型的**取证副本**（只写不读）。
 
-        消费点都显式指它：`alpha_hive_daily_report`（两处）、
-        `generate_ml_report._model_file`（v0.45.538 起 `queen_distiller._ml_oos_trust_factor` 已退役）。
+        唯一写者 `generate_ml_report._model_file` → `_save_model_to_disk`；v0.45.551 起生产零个
+        `load_model` 调用点（每个进程自己训，不读回），`save_model` 内快照进 `ml_model_history/`。
 
-        ⚠️ 必须与 `ml_model` 保持为**不同文件**。`train_model()` 会无参保存到
-        `ml_model`，而 `tests/` 里有 11 处无参调它 —— 把两者合并成同一个路径
-        （「统一到单一真相」最容易踩的那种统一法）等于让每次跑测试都直接
-        写穿生产模型。
+        ⚠️ **不要把它做成 `save_model` / `load_model` 的缺省路径。** v0.45.570 前
+        `train_model()` 训完无参存到另一个文件 `ml_model.json`（零读者，已删），而
+        `tests/` 里十来处无参调 `train_model()` —— 缺省若指向这里，每次跑测试都写穿它
+        （v0.45.149 / 08-28 那类事故）。现在没有缺省：要写这份文件只能显式传这条路径。
         """
         return self.home / "ml_model_cache.json"
 

@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List
 import statistics
 from dataclasses import dataclass
 
@@ -41,10 +41,14 @@ def _snapshot_saved_model(filename: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 模型产物路径 —— 唯一真相（v0.45.149）
+# 模型落盘路径：没有缺省值（v0.45.570）
 # ---------------------------------------------------------------------------
-# 模型文件名的唯一真相在 `hive_logger.PATHS.ml_model`（与 PATHS.db 同族）。
-# 这里刻意不再复制一份文件名常量：复制一份就有两个真相。
+# `save_model` / `load_model` 的 `filename` 必填。此前缺省落到 `PATHS.ml_model`（数据根 `ml_model.json`），
+# 只有 `MLPredictionService.train_model()` 训完无参存一份——全仓零个读者，且与报告生成器紧接着写的
+# 取证副本 `ml_model_cache.json` 逐字节相同（生产 10-19 / 10-20 两份 sha256 一致）。缺省路径连同
+# `default_model_path()` / `PATHS.ml_model` 一并删除：没有缺省，测试里无参的 `train_model()` 也就写不到任何地方
+# （v0.45.149 那类「测试写穿生产模型」从根上没了）。要持久化就显式传路径（报告生成器传 `PATHS.ml_model_cache`）。
+# ⚠️ 勿恢复缺省路径；墓碑 `tests/test_ml_model_default_path_retired.py`。
 
 # `_eval_oos_purged` 的最小样本量。`train()` 的闸门、它的日志文案、以及
 # `HGBModel.load_model` 的中毒守卫共用这**一个**数：守卫判的正是「样本少到
@@ -66,23 +70,6 @@ class PoisonedModelError(ValueError):
     **继承 `ValueError` 是有意的**：当年生产的 `load_model` 调用点的 except 子句都捕获 `ValueError`，
     抛它走进既有的「重训」恢复分支；换成自定义基类或 `RuntimeError` 就变成生产事故。
     """
-
-
-def default_model_path() -> str:
-    """`save_model` / `load_model` 的默认落盘位置。
-
-    **必须是函数，不能是模块级常量。** `PATHS.home` 每次都重读
-    `ALPHA_HIVE_HOME` 环境变量，而 `tests/conftest.py::_isolate_env` 是在
-    **每个测试开始时**才 setenv 的。写成模块级常量的话，值在 import 那一刻
-    就冻住了 —— 只要 `ml_predictor` 被任何一个更早的测试导入过，隔离就静默
-    失效，失效方式和本次事故一模一样（把夹具模型写回仓库根）。
-
-    不做 try/except 兜底：兜底只能兜出一个相对路径，而相对路径正是本次
-    事故的根因。`hive_logger` 无项目内依赖，导不进来是环境整体坏了，
-    不该在这里被改写成「悄悄退回 cwd」。
-    """
-    from hive_logger import PATHS
-    return str(PATHS.ml_model)
 
 
 @dataclass
@@ -677,11 +664,8 @@ class SimpleMLModel:
             }
         return dict(sorted(importance.items(), key=lambda x: -x[1]["weight"]))
 
-    def save_model(self, filename: Optional[str] = None):
+    def save_model(self, filename: str):
         """保存模型（JSON 格式，安全序列化）"""
-        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
-        if filename is None:
-            filename = default_model_path()
         model_data = {
             "weights": self.weights,
             "feature_stats": self.feature_stats,
@@ -695,11 +679,8 @@ class SimpleMLModel:
         _log.info("模型已保存：%s", filename)
         _snapshot_saved_model(filename)
 
-    def load_model(self, filename: Optional[str] = None):
+    def load_model(self, filename: str):
         """加载模型（JSON 格式，安全反序列化）"""
-        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
-        if filename is None:
-            filename = default_model_path()
         # 兼容旧版 pickle 文件
         if filename.endswith(".pkl") and not os.path.exists(filename):
             filename = filename.replace(".pkl", ".json")
@@ -970,12 +951,8 @@ class SGDMLModel:
         }
 
     # ---- 序列化（JSON，无 pickle）----
-    def save_model(self, filename: Optional[str] = None):
+    def save_model(self, filename: str):
         """保存模型到 JSON"""
-
-        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
-        if filename is None:
-            filename = default_model_path()
 
         model_data: Dict = {
             "model_type": "sgd",
@@ -1013,13 +990,9 @@ class SGDMLModel:
         _log.info("SGD 模型已保存：%s", filename)
         _snapshot_saved_model(filename)
 
-    def load_model(self, filename: Optional[str] = None):
+    def load_model(self, filename: str):
         """从 JSON 加载模型（兼容旧 SimpleMLModel 格式）"""
         import numpy as np
-
-        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
-        if filename is None:
-            filename = default_model_path()
 
         if filename.endswith(".pkl") and not os.path.exists(filename):
             filename = filename.replace(".pkl", ".json")
@@ -1519,14 +1492,10 @@ class HGBModel:
         }
 
     # ---- 序列化 ----
-    def save_model(self, filename: Optional[str] = None):
+    def save_model(self, filename: str):
         """保存模型到 JSON（pickle base64 + 元数据）"""
         import base64
         import pickle
-
-        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
-        if filename is None:
-            filename = default_model_path()
 
         model_data: Dict = {
             "model_type": "hgb",
@@ -1556,14 +1525,10 @@ class HGBModel:
         else:
             _snapshot_saved_model(filename)
 
-    def load_model(self, filename: Optional[str] = None) -> bool:
+    def load_model(self, filename: str) -> bool:
         """加载 HGB 模型（支持 pickle base64 恢复）"""
         import base64
         import pickle
-
-        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
-        if filename is None:
-            filename = default_model_path()
 
         if not os.path.exists(filename):
             return False
@@ -1713,13 +1678,8 @@ class MLPredictionService:
                        _min_samples)
             return {"status": "error", "message": "no real training data"}
 
-        result = self.model.train(training_data)
-
-        # 保存模型
-        if result.get("status") == "success":
-            self.model.save_model()
-
-        return result
+        # v0.45.570：训完不再自动存盘（缺省落点 `ml_model.json` 零读者，已删）；要留档的调用方自己传路径 save_model。
+        return self.model.train(training_data)
 
     def incremental_train(self, new_data: List[TrainingData]) -> Dict:
         """增量学习（仅 SGDMLModel 支持，SimpleMLModel 降级为全量重训）"""
