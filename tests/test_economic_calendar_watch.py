@@ -904,7 +904,11 @@ class TestMalformedCacheSelfRepairs:
         [1, 2],                                                    # 顶层不是对象
         {"last_checked_at": "2026-08-28T09:00:00", "upstream": [1, 2]},
         {"last_checked_at": "2026-08-28T09:00:00", "upstream": {"gdp": "oops"}},
-    ], ids=["top-level-list", "upstream-list", "gdp-entry-string"])
+        # v0.45.585：579 漏了 pages 两层——check() 在节流判断前就对它做 `in`，连 --force 都 TypeError
+        {"last_checked_at": "2026-08-28T09:00:00", "upstream": {"gdp": {"determinable": True, "pages": 5}}},
+        {"last_checked_at": "2026-08-28T09:00:00", "upstream": {"gdp": {"determinable": True,
+                                                                        "pages": {"rolling": {}, "next_year": 5}}}},
+    ], ids=["top-level-list", "upstream-list", "gdp-entry-string", "gdp-pages-int", "gdp-next-year-page-int"])
     @pytest.mark.parametrize("force", [False, True], ids=["throttle-eligible", "forced"])
     def test_bad_shape_rechecks_and_rewrites(self, monkeypatch, tmp_state, state, force):
         import economic_calendar_watch as w

@@ -24,11 +24,20 @@ SWEEP_FROM, SWEEP_TO = date(2025, 1, 1), date(2028, 1, 26)
 
 
 def _old_rule(ref):
-    """v0.45.582 之前 GuardBee 的判据，原样照抄：最近一个事件是 FOMC 且 ≤3 天。"""
-    nxt = ec.get_next_event(ref_date=ref)
-    if nxt and nxt.get("days_until", 99) <= 3 and nxt.get("type") == "fomc":
-        return nxt["days_until"]
-    return None
+    """v0.45.582 之前 GuardBee 的判据：参考日起**最近的一个**宏观事件是 FOMC 且 ≤3 天 ⇒ 投票。
+
+    当时经 `get_next_event()` 实现；这里直接用四张原始表重写同一语义（同日 FOMC 优先 = 当时
+    `get_upcoming_events` 先扫 `_FOMC`、排序稳定），**不经** `get_next_event`——那是仪表盘的函数，
+    改它不该让 GuardBee 的测试红（v0.45.585 解耦）。重写与当时实现逐日一致已在 v0.45.585 核过（CHANGELOG）。
+    """
+    events = []
+    for rank, tbl in enumerate((ec._FOMC, ec._CPI, ec._NFP, ec._GDP)):
+        events += [(d, rank) for d in ec._parse_dates(tbl) if d >= ref]
+    if not events:
+        return None
+    d, rank = min(events)
+    days = (d - ref).days
+    return days if rank == 0 and days <= FOMC_VOTE_WINDOW_DAYS else None
 
 
 def _days(lo, hi):
@@ -62,6 +71,8 @@ class TestMaskedDaysNowVote:
         import vix_term_structure
         monkeypatch.setattr(vix_term_structure, "get_vix_term_structure",
                             lambda force_refresh=False: pytest.fail("补跑不许读实时期限结构"))
+        # 测试前后都不许装着快照——conftest 的 autouse `_no_leaked_macro_snapshot` 逐条强制（v0.45.366）⇒
+        # 测试前的状态恒为「未装」，卸载就是复原。别改成用 monkeypatch 还原全局：那会在守卫检查之后才还原，守卫照红。
         fm.set_macro_snapshot("2027-09-13", {})
         try:
             g = GuardBeeSentinel.__new__(GuardBeeSentinel)

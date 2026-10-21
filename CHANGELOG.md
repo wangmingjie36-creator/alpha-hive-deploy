@@ -5,7 +5,34 @@
 
 ---
 
-## [0.45.585] — 2026-10-21 — 占位（进行中：579/582 二次检查——监视器缓存 gdp.pages 坏值仍崩、GuardBee 测试与 get_next_event 解耦、docstring 快照与过时权重）
+## [0.45.585] — 2026-10-21 — Fixed：v0.45.579 / 582 二次检查——监视器缓存 `gdp.pages` 是坏值时连 `--force` 仍崩（579 的自愈漏了这一层）；GuardBee 测试与仪表盘的 `get_next_event` 解耦；`fomc_vote_days` docstring 去掉会过期的证据快照；GuardBee「权重 0.15」的过时说明
+
+### Fixed
+
+- `economic_calendar_watch._cache_shape_problem`：补核 GDP 结论里的 `pages` 及其每一页必须是对象。579 只核到「每张表的结论是对象」，
+  而 `check()` 在节流判断**之前**对 `pages` 做 `"next_year" in …`（`_render` 还会 `.get`）⇒ `{"gdp": {"pages": 5}}` 实测连 `--force` 也 TypeError，
+  正是 579 声称已治好的「只能手删缓存」。`{"pages": {"next_year": 5}}` 不崩在 `check()` 里，但旧代码当它可信、照常节流，渲染时才崩——一并当坏缓存重写。
+  docstring 写明只核**容器**：字段值（如 `new_items` 的类型）坏了照旧在节流读时崩（响亮），`--force` / 过节流窗口那一轮重写。
+
+### Changed
+
+- `swarm_agents/guard_bee.py`：`fomc_vote_days` 的 docstring 只留不变式与指针（CHANGELOG 0.45.582、守卫测试），去掉写死的比对区间、「11 个版本」、
+  存档数值——抄 2028 日期后就会过期，证据本来就在 CHANGELOG。模块与类 docstring 的「RiskAdj 维度，权重 0.15」改为指向
+  `config.EVALUATION_WEIGHTS["risk_adj"]`（v0.45.176 起为 0），并写明仍影响评分的是 `macro_regime` → `RegimeWeightAdjuster`。
+
+### Changed（测试）
+
+- `tests/test_guard_fomc_vote.py::_old_rule`：不再经 `economic_calendar.get_next_event`（现在只有仪表盘用它），改用四张原始表重写同一语义
+  （同日 FOMC 优先）。重写与原实现逐日核对：2025-01-01 ~ 2028-12-31 共 1461 天零差异。变异：让 `get_next_event` 恒返回 None ⇒
+  GuardBee 的 5 条照绿、日历自己的测试 3 条红（证明变异生效、GuardBee 测试已不受牵连）。
+- `tests/test_economic_calendar_watch.py::TestMalformedCacheSelfRepairs`：加 `pages` 是整数、`pages.next_year` 是整数两种坏形状（× 是否 `--force` = 4 条）；
+  拿掉新检查 ⇒ 这 4 条红。
+
+### 复查结论被证伪的一条（不改）
+
+- 「`test_through_guard_macro_path` 结束时把快照置空而不是恢复测试前状态」：conftest 的 autouse `_no_leaked_macro_snapshot`（v0.45.366）逐条强制
+  测试前后都不许装着快照 ⇒ 测试前的状态恒为「未装」，`finally: set_macro_snapshot(None)` 就是复原，也是项目约定。改用 monkeypatch 还原三个模块全局
+  反而会在守卫检查之后才还原 ⇒ 守卫报错（实测）。保留原写法，补一行注释说明。
 
 ## [0.45.584] — 2026-10-21 — Added：Alpha Bot 跨式页「跨式 vs 宽跨」并排对比卡（只读、不下结论）+ 影子宽跨预注册**草案**（未登记、未实现）
 

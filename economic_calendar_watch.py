@@ -418,8 +418,11 @@ def _load_state(path: Path) -> Dict[str, Any]:
 def _cache_shape_problem(state: Any) -> Optional[str]:
     """节流缓存的形状对不对（v0.45.579）。对 ⇒ None；不对 ⇒ 一句原因。
 
-    只核 `check()` 会去 `.get` 的那几层：顶层是对象、`upstream`（若有）是对象、其中每个表的结论（若有）是对象。
-    读坏的 JSON 早已由 `_load_state` 变成 `{}`（= 从未查过），这里管的是「能解析、形状不对」。
+    核的是**容器**：`check()` / `_render` 会对它 `.get` / `in` 的每一层——顶层、`upstream`（若有）、其中每个表的
+    结论（若有）、GDP 结论里的 `pages`（若有）与其中每一页（若有）都得是对象。读坏的 JSON 早已由 `_load_state` 变成
+    `{}`（= 从未查过），这里管的是「能解析、形状不对」。字段值（如 `new_items` 的类型）不在这里核：坏了在节流读时
+    照崩（响亮），`--force` / 过了节流窗口的那一轮整份重写。
+    v0.45.585：补 `pages` 两层——579 漏了它，`{"gdp": {"pages": 5}}` 在节流判断前就 TypeError，连 `--force` 都救不回。
     """
     if not isinstance(state, dict):
         return f"状态文件顶层是 {type(state).__name__}，不是对象"
@@ -431,6 +434,14 @@ def _cache_shape_problem(state: Any) -> Optional[str]:
     for key, entry in upstream.items():
         if not isinstance(entry, dict):
             return f"状态文件的 upstream.{key} 是 {type(entry).__name__}，不是对象"
+        pages = entry.get("pages")
+        if pages is None:
+            continue
+        if not isinstance(pages, dict):
+            return f"状态文件的 upstream.{key}.pages 是 {type(pages).__name__}，不是对象"
+        for name, page in pages.items():
+            if page is not None and not isinstance(page, dict):
+                return f"状态文件的 upstream.{key}.pages.{name} 是 {type(page).__name__}，不是对象"
     return None
 
 

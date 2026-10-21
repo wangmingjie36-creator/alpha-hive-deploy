@@ -1,4 +1,4 @@
-"""GuardBeeSentinel - 交叉验证与风险评估蜂 (RiskAdj 维度, 权重 0.15)"""
+"""GuardBeeSentinel - 交叉验证与风险评估蜂（RiskAdj 维度；权重以 config.EVALUATION_WEIGHTS 为准）"""
 
 from typing import Dict
 from swarm_agents._config import _log
@@ -17,14 +17,10 @@ FOMC_VOTE_WINDOW_DAYS = 3
 def fomc_vote_days(ref_date=None):
     """参考日起 `FOMC_VOTE_WINDOW_DAYS` 天内最近一次 FOMC 还有几天；窗口内没有 ⇒ None。
 
-    v0.45.582：看窗口内**全部**事件，不只看最近的一个。此前用 `get_next_event()`（只给最近一个宏观事件）
-    再判它是不是 FOMC ⇒ 窗口里若有别的事件排在 FOMC **之前**，这张票就被遮住。BLS 把 2027 年 9 月 CPI
-    排在 09-14、FOMC 是 09-15 ⇒ 09-12~09-14 三个参考日（扫描日 09-13 周一、09-14 周二）都不会投票。
-    同一天的平局本来就由 FOMC 赢（`get_upcoming_events` 先扫 `_FOMC`、排序稳定）。
-    与旧规则的差别**只在被遮的那几天**：逐日比对 2025-01-01~2028-01-26 只差上述三天；economic_calendar 历来
-    11 个版本在各自在用期间都没有被遮的日子（生产存档 2026-09-14/15/16 的 fomc_days = 2/1/0 也印证）⇒
-    已累积的样本一条不变。守卫 `tests/test_guard_fomc_vote.py`。
-    仪表盘倒计时仍用 `get_next_event()`——它要的就是「下一个事件」。
+    不变式：看窗口内**全部**宏观事件，不只看最近的一个——别的事件（CPI / NFP / GDP）排在 FOMC 之前，
+    FOMC 临近这件事照样成立（v0.45.582 前用 `get_next_event()`，会被遮住）。与旧规则的差别只在
+    「窗口里有非 FOMC 事件排在 FOMC 之前」的日子；首例、证据与「为何不登记世代边界」见 CHANGELOG 0.45.582，
+    守卫 `tests/test_guard_fomc_vote.py`。仪表盘倒计时仍用 `get_next_event()`——它要的就是「下一个事件」。
     """
     from economic_calendar import get_upcoming_events
     for e in get_upcoming_events(days=FOMC_VOTE_WINDOW_DAYS, ref_date=ref_date):
@@ -35,7 +31,9 @@ def fomc_vote_days(ref_date=None):
 
 class GuardBeeSentinel(BeeAgent):
     """交叉验证与风险评估蜂 - 共振检测 + 拥挤度折扣 + 风险调整
-    对应维度：RiskAdj (权重 0.15)
+    对应维度：RiskAdj。权重唯一真相是 `config.EVALUATION_WEIGHTS["risk_adj"]`（v0.45.176 起为 0，本分数不直接进 final_score）。
+    仍会影响评分的是它判出的宏观政体 `macro_regime`：Queen 经 `gex_regime.RegimeWeightAdjuster` 据此调各维权重。
+    （v0.45.585：此前这里写「权重 0.15」，与 config 早已不符。）
     """
 
     def analyze(self, ticker: str) -> Dict:
