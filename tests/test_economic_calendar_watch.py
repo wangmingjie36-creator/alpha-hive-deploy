@@ -136,6 +136,16 @@ class TestParsers:
         assert _release_date_to_quarter(date.fromisoformat(iso)) == expected
 
 
+@pytest.fixture(autouse=True)
+def _frozen_calendar(monkeypatch):
+    """本文件的场景（「我们只核到 2026-12、上游已有 2027」「2026-09-20 本地 stale」）都是照
+    抄录 2027 之前的表尾 / verified_through 挑的 ⇒ 钉在冻结形状上（v0.45.572，见 tests/_frozen_calendar.py）。
+    否则每抄进一年新日程，这里就有一批场景失效。"""
+    from tests._frozen_calendar import freeze_calendar
+    freeze_calendar(monkeypatch)
+    yield
+
+
 @pytest.fixture
 def tmp_state(tmp_path):
     return tmp_path / "watch_state.json"

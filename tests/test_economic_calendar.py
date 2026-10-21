@@ -111,6 +111,18 @@ class TestGetNextEvent:
 import logging
 
 
+# ── 冻结日历形状（v0.45.572）──
+# TestCalendarHealth / TestStalenessIsLoud / TestWarningLabelHonesty 验的是「表快走完 / 走完时
+# 怎么吼」的**逻辑**，场景日期却是照真实表尾挑的——每抄进一年新日程就整体失效。
+# 这三组钉在冻结形状上（理由与形状见 tests/_frozen_calendar.py）；真实表够不够长只由
+# TestCoverageHorizon（真实 today）守——那条才是要它红的。
+@pytest.fixture
+def frozen_tables(monkeypatch):
+    from tests._frozen_calendar import freeze_calendar
+    freeze_calendar(monkeypatch)
+    yield
+
+
 class TestCoverageHorizon:
     """⏰ 陈旧化闸门 —— 唯一一组故意用真实 today 的测试
 
@@ -157,6 +169,7 @@ class TestCoverageHorizon:
         )
 
 
+@pytest.mark.usefixtures("frozen_tables")
 class TestCalendarHealth:
     """get_calendar_health() —— 逐表体检"""
 
@@ -213,6 +226,7 @@ class TestCalendarHealth:
         assert set(h["exhausted_tables"]) == {"fomc", "cpi", "nfp", "gdp"}
 
 
+@pytest.mark.usefixtures("frozen_tables")
 class TestStalenessIsLoud:
     """表走完 / 快走完时必须留下日志痕迹，不能安静地返回 []"""
 
@@ -384,6 +398,7 @@ class TestPublishedDates:
             )
 
 
+@pytest.mark.usefixtures("frozen_tables")
 class TestWarningLabelHonesty:
     """v0.45.68 二次检查：告警自己在标签上撒谎
 

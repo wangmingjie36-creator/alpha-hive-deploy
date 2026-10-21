@@ -7,7 +7,46 @@
 
 ## [0.45.573] — 2026-10-21 — 占位（进行中：测试会话用内核沙箱禁写真实数据根——统一日志查被吞的拒绝、沙箱生效时指纹比对降级为说明、金丝雀自证、适配两处 ps）
 
-## [0.45.572] — 2026-10-21 — 占位（进行中：经济日历 2027 日程抄录——CPI/NFP/GDP 表按 BLS/BEA 官方已发布日程续表）
+## [0.45.572] — 2026-10-21 — Changed：经济日历抄入 2027 官方日程——CPI 12 条、NFP 12 条、GDP 初值 4 条，三表 `verified_through` 上移；`TestCoverageHorizon` 转绿。另查明 BEA 的 2027 日程其实早在 `next-year` 页，此前几次核对（含监视器）都看错了页
+
+### Changed
+
+- `economic_calendar.py`：逐条抄自官方日程（2026-10-21 抓取），每张表都与**第二个独立官方源**逐条比对，全部一致：
+  - `_CPI` 2027（参考月 2026-12 ~ 2027-11）：01-13 / 02-11 / 03-10 / 04-13 / 05-12 / 06-10 / 07-14 / 08-11 / 09-14 / 10-14 / 11-10 / 12-10。
+    源 `bls.gov/schedule/news_release/cpi.htm`，对照 BLS 年度总表 `bls.gov/schedule/2027/home.htm`（10-04 时还是 404）12/12。
+  - `_NFP` 2027（同上参考月）：01-08 / 02-05 / 03-05 / 04-02 / 05-07 / 06-04 / 07-02 / 08-06 / 09-03 / 10-08 / 11-05 / 12-03。
+    源 `empsit.htm`，对照同一年度总表 12/12。
+  - `_GDP` 2027（四条均为「GDP (Advance Estimate)」）：01-28 = 4Q26 / 04-29 = 1Q27 / 07-29 = 2Q27 / 10-28 = 3Q27。
+    源 `bea.gov/news/schedule/next-year`（「Year 2027」区块），对照 BEA 官方订阅源 `…/schedule/ics/online-calendar-subscription.ics` 4/4。
+  - `verified_through`：cpi 2026-12-10 → **2027-12-10**、nfp 2026-12-04 → **2027-12-03**、gdp 2026-10-29 → **2027-10-28**；fomc 不变（官方 2028 仍只有 01-26 一次）。
+    `pending` 改写为下一段未发布范围（BLS 2028 年度总表 404；BEA 4Q27 初值未排），均标「待验证」。
+  - 2026 尾巴（CPI 11-10 / 12-10、NFP 11-06 / 12-04）在今天的官方页上仍是原值，未变。
+- **生产影响**：今天起三表不再 stale；GDP 原定 10-30 起 exhausted（宏观日历只剩 FOMC / CPI / NFP、GuardBee 体检字段报 `exhausted`）的那一刻不会到来。
+  下次变红：fomc 2027-07-31、nfp 2027-09-05、cpi 2027-09-12、gdp 2027-09-29（按 `get_calendar_health` 逐日算，非心算）。
+
+### 查明：BEA 的 2027 日程不在 `/news/schedule`
+
+- BEA 的次年日程在 **`/news/schedule/next-year`**（日程页导航里的「2027 Schedule」标签）；`/news/schedule` 只列滚动窗口内的近期发布、`/full` 只多了当年已过去的。
+  10-04 的两次手工核对和 `economic_calendar_watch` 都只看这两页 ⇒ 记成「BEA 2027 未发布」。**那是看错了页，不能据此推断 BEA 当时发没发**。
+- 监视器的 GDP 检查因此有结构性盲区：要等新一年的初值滚进「近期」窗口才看得见（实测今天 `/news/schedule` 最新初值仍是 3Q26）。本次**未改监视器**（另起一项）。
+- 顺带：BEA 的 ICS 与网页在一条无关发布上不一致（县级 GDP：网页 12-08、ICS 12-02）⇒ 以网页为准、ICS 只作交叉核对；BLS 的 `bls.ics` 今天仍无任何 2027 条目（滞后于网页）。
+
+### Changed（测试）
+
+- 新增 `tests/_frozen_calendar.py::freeze_calendar`：把四张表截到本次抄录前的表尾、`verified_through` 同步回退。
+  `test_economic_calendar.py` 的 `TestCalendarHealth` / `TestStalenessIsLoud` / `TestWarningLabelHonesty` 与 `test_economic_calendar_watch.py` 全文件改用它。
+  原因：这些测试验的是「快走完 / 走完时怎么吼」「上游比我们新时怎么报」的**逻辑**，场景日期（2026-09-10 / 09-20 / 12-15、2027-06-01、「我们只核到 2026-12」）却是照真实表尾挑的——
+  抄进 2027 后 7 条一起红，红的全不是逻辑。真实表够不够长仍只由 `TestCoverageHorizon`（真实 today）守，`TestDateProvenance` / `TestPublishedDates` 仍看真实表，**阈值一个没动**。
+- 夹具正面核对自己接上了两条读路径（`get_upcoming_events` 读模块级列表、`get_calendar_health` 读 `_TABLE_SPECS`），并清掉自检触发的告警节流。
+  变异（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、`--maxfail=1000`，三轮均 62 条全计）：不打模块级列表 ⇒ 42 errors（断在 `get_upcoming_events` 那条自检）；
+  不打 `_TABLE_SPECS` ⇒ 42 errors（断在体检那条自检）；不清节流 ⇒ 2 failed（两条 stale WARNING 测试）。
+
+### 抄完后重跑的 FOMC 平局遍历（auto-memory 要求）
+
+- 全部 FOMC × 提前 0~3 天（25×4=100 次）：**3 漏**（修前 0）——BLS 把 2027 年 9 月 CPI 排在 **09-14**，恰是 FOMC 09-15 前一天 ⇒ 参考日 09-12~09-14 时 `get_next_event` 返回 CPI，
+  GuardBee 的「FOMC ≤3 天」risk_off 票不投（扫描日是 09-13 周一、09-14 周二）。日期本身是官方值、没抄错；「只看最近一个事件」是 GuardBee 现行语义
+  （`test_backfill_macro_asof` 的 docstring 已写明「CPI / GDP 抢在前面时 Guard 本就不投 FOMC 票」）。改它会改评分，**本次不动**，记为待决事项（距发生约 11 个月）。
+  2027 的四次 GDP 初值都在 FOMC **次日**（01-27/28、04-28/29、07-28/29、10-27/28），在后面、不遮票。
 
 ## [0.45.571] — 2026-10-21 — 占位（进行中：编排器 Step 7 `push_report_to_slack.py` 死步骤清理——生产恒退出 2 跳过）
 
