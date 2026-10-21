@@ -499,11 +499,12 @@ class TestOkPath:
         """执行器若不再给出 `h1_anchor`（形状变了 / 桩没带 `_detail`），锚点截止日会无声消失 ⇒ 单列一条 warn，
         不让「读不到」渲染成「没事」。"""
         items = rr._dim_ic_attention({"status": "not_ready", "forward_start": P.FORWARD_START,
-                                      "input_code_guard": _GUARD_OK, "buzz_v1_self_proof": _SP_OK})
+                                      "input_code_guard": _GUARD_OK, "buzz_v1_self_proof": _SP_OK,
+                                      "buzz_v1_bridge": _BR_OK})
         assert [a["id"] for a in items] == ["ic_rerun.dim_ic.h1_anchor_unknown"]
         assert items[0]["level"] == "warn" and items[0]["deadline"] == P.FORWARD_START
 
-    @pytest.mark.parametrize("key", ["input_code_guard", "buzz_v1_self_proof"])
+    @pytest.mark.parametrize("key", ["input_code_guard", "buzz_v1_self_proof", "buzz_v1_bridge"])
     def test_missing_precondition_result_is_not_silently_ok(self, key):
         """v0.45.556：执行器走完全程的返回都带这两个摘要；读不到（形状变了 / 白名单漏了 / 桩没带）⇒ 那道 H1 前提
         等于没核，单列一条 warn。cannot_judge 时不报——`run()` 读不出库的早退与执行器没加载起来都不带，那条已在报。
@@ -552,10 +553,18 @@ _ANC_OK = {"state": "ok", "version": P.H1_ANCHOR_VERSION, "date": "2026-09-28"}
 _GUARD_OK = {"ok": True, "unacknowledged": [], "errors": {}}
 _SP_OK = {"ok": True, "window": ["2026-09-28", "2026-10-01"], "n": 120, "n_matched": 120, "n_mismatched": 0,
           "n_missing": 0, "stopped_by": None, "excluded_days": [], "n_excluded": 0}
+#: v0.45.583：冻结通道层桥接核对的摘要形状（`buzz_v1_bridge()`）——阶段 4 前只是进度
+_BR_OK = {"ok": True, "ready": False, "end": "2026-10-01", "required_days": 10,
+          "groups": {"sentiment": {"n_pass": 3, "n_fail": 0, "n_incomplete": 0, "ready": False, "first_fail": None},
+                     "price": {"n_pass": 2, "n_fail": 0, "n_incomplete": 1, "ready": False, "first_fail": None}},
+          "score": {"n": 60, "n_match": 60}, "n_errors": 0}
+_BR_RED = {**_BR_OK, "ok": False,
+           "groups": {**_BR_OK["groups"],
+                      "price": {"n_pass": 2, "n_fail": 1, "n_incomplete": 0, "ready": False, "first_fail": "2026-10-22"}}}
 _DIM_BASE = {"status": "not_ready", "forward_start": P.FORWARD_START, "today": "2026-10-01", "h1_weeks": 0,
              "next_look_at": 26, "looks_done": [], "verdicts": {}, "truncation": {"H1": None, "H2": None},
              "weight_change": {"date": None}, "stale": False, "h1_anchor": _ANC_OK,
-             "input_code_guard": _GUARD_OK, "buzz_v1_self_proof": _SP_OK}
+             "input_code_guard": _GUARD_OK, "buzz_v1_self_proof": _SP_OK, "buzz_v1_bridge": _BR_OK}
 _GUARD_RED = {"ok": False, "unacknowledged": ["buzz.news"], "errors": {}}
 _SP_RED = {**_SP_OK, "ok": False, "n_matched": 119, "n_mismatched": 1}
 _DIM_STATES = [
@@ -591,6 +600,9 @@ _DIM_STATES = [
      {"buzz_v1_self_proof"}),
     ("both_red", {"input_code_guard": _GUARD_RED, "buzz_v1_self_proof": _SP_RED},
      {"input_code_guard", "buzz_v1_self_proof"}),
+    # v0.45.583：桥接核对失败 / 算不出 ⇒ 进度行 ⚠️ + 自己 id 的一条 warn（阶段 4 前不改状态）
+    ("bridge_red", {"buzz_v1_bridge": _BR_RED}, {"buzz_v1_bridge"}),
+    ("bridge_error", {"buzz_v1_bridge": {"ok": False, "error": "OperationalError: x"}}, {"buzz_v1_bridge"}),
     # 检视点上执行器把状态改判 cannot_judge、两个摘要键照带（`apply_code_guard` / `apply_self_proof` 的 keep）
     ("cannot_judge_by_both", {"status": "cannot_judge", "reason": "输入层代码有未确认的改动……",
                               "input_code_guard": _GUARD_RED, "buzz_v1_self_proof": _SP_RED},

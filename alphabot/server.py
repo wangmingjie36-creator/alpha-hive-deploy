@@ -152,6 +152,10 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
     def straddle_live(request):
         return svc.straddle_live(request.path_params["ticker"], force=_q(request, "force") == "1")
 
+    @api
+    def straddle_compare(request):
+        return svc.straddle_compare(request.path_params["ticker"], _q(request, "as_of"))
+
     async def settings(request: Request):
         if request.method == "GET":
             return _json(svc.settings())
@@ -197,6 +201,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/straddle", straddle),
         Route("/api/hedge", hedge),
         Route("/api/straddle/live/{ticker}", straddle_live),
+        Route("/api/straddle/compare/{ticker}", straddle_compare),
         Route("/api/settings", settings, methods=["GET", "PUT"]),
         Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
     ]

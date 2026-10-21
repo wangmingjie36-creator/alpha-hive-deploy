@@ -40,8 +40,8 @@ class TestStateDoesNotLeakAcrossTests:
         yb = cache.yfinance_breaker
         for _ in range(yb._failure_threshold):
             yb.record_failure()
-        # ② slack 熔断器（此前两个文件靠「换新实例」隔离它）
-        sb = resilience.slack_breaker
+        # ② 第二个模块级熔断器（v0.45.575 前是 slack_breaker，随 Slack 发送模块删除，改用 reddit_breaker）
+        sb = resilience.reddit_breaker
         for _ in range(sb._failure_threshold):
             sb.record_failure()
         # ③ 独立的 ObservableCircuitBreaker，靠模块级引用活到下一条测试
@@ -66,7 +66,7 @@ class TestStateDoesNotLeakAcrossTests:
 
         # 被 from-import 的那份绑定与 resilience 上的是同一个对象 —— 所以只能原地 reset
         assert cache.yfinance_breaker is resilience.yfinance_breaker
-        for br in (resilience.yfinance_breaker, resilience.slack_breaker):
+        for br in (resilience.yfinance_breaker, resilience.reddit_breaker):
             assert br.state == resilience.CircuitBreaker.CLOSED, f"{br.name} 漏过来了：{br.state}"
             assert br._failure_count == 0, f"{br.name} 失败计数漏过来了：{br._failure_count}"
         ob = _KEPT.pop("observable")
@@ -85,8 +85,7 @@ class TestRegistryIsDerived:
         module_level = {n: v for n, v in vars(resilience).items()
                         if isinstance(v, resilience.CircuitBreaker)}
         # 正对照：推导出来的名单不能是空的（否则下面的循环恒真）
-        assert {"sec_breaker", "yfinance_breaker", "reddit_breaker",
-                "slack_breaker"} <= set(module_level), sorted(module_level)
+        assert {"sec_breaker", "yfinance_breaker", "reddit_breaker"} <= set(module_level), sorted(module_level)
         module_level["fred_macro._fred_breaker"] = fred_macro._fred_breaker
         module_level["newsapi_client._news_breaker"] = newsapi_client._news_breaker
         for name, br in module_level.items():

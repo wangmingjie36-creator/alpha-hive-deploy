@@ -24,7 +24,7 @@ class TestEachTransportIsBlocked:
         assert offline_gate_blocked() == ["urlopen cdn.cboe.com"]
 
     def test_requests_session(self, offline_gate_blocked):
-        """reddit_sentiment 走这条（Slack 另有专闸 _block_slack）。"""
+        """reddit_sentiment 走这条（当年 Slack 另有专闸 _block_slack，v0.45.575 随发送模块删除）。"""
         import requests
         with pytest.raises(OSError, match="测试默认离线"):
             requests.get("https://api.github.com", timeout=5)

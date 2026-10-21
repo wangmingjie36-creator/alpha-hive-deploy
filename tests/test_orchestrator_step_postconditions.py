@@ -23,8 +23,8 @@ v0.45.534 删掉的 Step 8（`metrics_collector.py --record`）没有 `__main__`
   2. 登记表：每个 `run_step` 调用归类、归类的证据在段里；登记了却不再调用也红（怕它变大，也怕它变小）。
   3. 有牙：把函数源码做变异（`-ot` 判据拿掉 / 永远返回「有产出」/ 不写片段）后再跑同一个用例，必须变结果。
 
-范围外：Step 7（`push_report_to_slack.py`）生产恒退出 2（`skipped_manual`）——它不冒充成功，但每天跑一次只为退出 2，
-本身是另一条死步骤，归死链清理队列（auto-memory `alpha-hive-dead-field.md`），不在本守卫里删。
+原豁免项 Step 7（`push_report_to_slack.py`，生产恒退出 2 `skipped_manual`）v0.45.571 已整步删除，
+墓碑 `tests/test_step7_push_report_retired.py`。
 需要 `/bin/bash` 与 `jq`（编排器本身就依赖二者；CI 的 ubuntu-latest 自带）。
 """
 from __future__ import annotations
@@ -54,7 +54,6 @@ STEP_OUTPUTS = {
     "alpha_hive_daily_report.py": (INTERPRETER, "2"),
     "generate_ml_report.py": (POSTCONDITION, "step3_ml_report"),
     "alert_manager.py": (POSTCONDITION, "step6_alert_analysis"),
-    "push_report_to_slack.py": (EXEMPT, "无 --force 恒 exit 2（skipped_manual）；编排器从不传 --force，退出码 0 不可达"),
     "scan_continuity.py": (INTERPRETER, "10"),
     "ic_rerun_readiness.py": (INTERPRETER, "11"),
     "scan_coverage_gate.py": (INTERPRETER, "12"),
@@ -235,7 +234,7 @@ class TestRealStepBlocks:
         assert r["steps"]["step3_ml_report"]["status"] == "success" and r["status"] == "success", r
 
     def _step6(self, orch, tmp, write, rc=0):
-        block = _block(orch, "# Step 6: 智能告警分析", "# Step 7: 推送")
+        block = _block(orch, "# Step 6: 智能告警分析", "# 写入 status.json")
         pre = 'REPORTDIR="$DATA_DIR"\nDATE_STR="$(date +%Y-%m-%d)"\n'
         return _bash(_funcs(orch) + _stub_run_step(write) + f"STUB_RC={rc}\n" + pre + block, tmp=tmp)
 
@@ -252,7 +251,7 @@ class TestRealStepBlocks:
     def test_step6_rollover_after_an_earlier_same_day_run_is_success(self, orch, tmp_path):
         """v0.45.549：DATE_STR 名下是上一轮留下的旧文件，本轮跨零点写的是次日名 ⇒ 认次日名，不误判 no_output。
         （543 版只在 DATE_STR 文件「不存在」时才看次日名 ⇒ 这里会红。）"""
-        block = _block(orch, "# Step 6: 智能告警分析", "# Step 7: 推送")
+        block = _block(orch, "# Step 6: 智能告警分析", "# 写入 status.json")
         pre = ('REPORTDIR="$DATA_DIR"\nDATE_STR="2000-01-01"\n'
                ': > "$LOGDIR/alerts-2000-01-01.json"; touch -t 200001010000 "$LOGDIR/alerts-2000-01-01.json"\n')
         write = ': > "$LOGDIR/alerts-$(date +%Y-%m-%d).json"'
@@ -260,7 +259,7 @@ class TestRealStepBlocks:
         assert r["steps"]["step6_alert_analysis"]["status"] == "success", r
 
     def test_step6_stale_files_under_both_names_is_red(self, orch, tmp_path):
-        block = _block(orch, "# Step 6: 智能告警分析", "# Step 7: 推送")
+        block = _block(orch, "# Step 6: 智能告警分析", "# 写入 status.json")
         pre = ('REPORTDIR="$DATA_DIR"\nDATE_STR="2000-01-01"\n'
                'for f in "$LOGDIR/alerts-2000-01-01.json" "$LOGDIR/alerts-$(date +%Y-%m-%d).json"; do '
                ': > "$f"; touch -t 200001010000 "$f"; done\n')

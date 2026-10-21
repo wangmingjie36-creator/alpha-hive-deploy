@@ -107,7 +107,8 @@ def counters() -> Dict[str, Optional[dict]]:
                                       "gex_view": None, "cboe_raw": None,
                                       "options_snapshot": None, "hv_gap": None,
                                       "portfolio_greeks": None, "paper_portfolio": None,
-                                      "ledger_io": None, "history_fill": None}
+                                      "ledger_io": None, "history_fill": None,
+                                      "strangle_shadow": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -162,6 +163,13 @@ def counters() -> Dict[str, Optional[dict]]:
         out["history_fill"] = data_pipeline.history_fill_stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("history_fill stats 不可得: %s", e)
+    try:
+        import straddle_strangle_shadow
+        # v0.45.586：影子宽跨记录（信号行 / 账本开仓 / 账本平仓三处只记录的挂接点）在源头登记的计数；
+        # `errors` > 0（记录没写成）⇒ alert_manager P2。不可导入 ⇒ None（不写 {}：空 dict 会被读成「零故障」）
+        out["strangle_shadow"] = straddle_strangle_shadow.stats()
+    except Exception as e:  # noqa: BLE001
+        _log.debug("strangle_shadow stats 不可得: %s", e)
     return out
 
 

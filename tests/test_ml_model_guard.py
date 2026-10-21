@@ -737,31 +737,22 @@ class TestSnapshotLandsInTheTrackedDir:
 
     v0.45.145 把快照目录写成 `模型文件.parent / HISTORY_DIRNAME`。
     v0.45.149 随后把 `save_model` 的默认路径从 cwd 相对字符串改成
-    `default_model_path()` → `PATHS.ml_model`（绝对路径）。
+    `default_model_path()` → `PATHS.ml_model`（绝对路径；v0.45.570 起缺省路径整个删除，
+    生产只显式传 `PATHS.ml_model_cache`）。
     **于是快照落在哪，从此取决于 `PATHS` 家族的指向** —— 那是本模块之外的值。
 
-    若将来有人把 `PATHS.ml_model` 挪进 cache 目录或用户目录，快照会静默落到
+    若将来有人把 `PATHS.ml_model_cache` 挪进 cache 目录或用户目录，快照会静默落到
     数据根之外（v0.45.402 前这里写的是「git 跟踪范围之外：`REPORT_ARTIFACT_PATHS` 白名单、`.gitignore`
     反向规则全部失效」；阶段 6 起快照不进代码仓库，耐久性靠 `data_backup/export.py` 的 STATE_DIRS），
     症状是「文件确实生成了、但永远没有备份」——与 v0.45.111「新账本没进白名单」同形，
     是本仓最难自己发现的那一类。这一组就是那个耦合的守卫。
     """
 
-    def test_default_model_path_stays_under_paths_home(self):
-        from hive_logger import PATHS
-        from ml_predictor import default_model_path
-        assert Path(default_model_path()).parent == Path(PATHS.home), (
-            "模型默认路径不在 PATHS.home 下 ⇒ 快照会落到仓库外，"
-            "白名单与 .gitignore 反向规则一起失效"
-        )
-
     def test_production_cache_path_stays_under_paths_home(self):
-        """有读者的是 `ml_model_cache.json`，不是 `ml_model.json`。
+        """生产唯一的模型落点 `ml_model_cache.json` 必须在 `PATHS.home` 下（快照随它落在同级）。
 
-        v0.45.149 实测：`ml_model.json` 全仓 0 个读者，生产三个消费点
-        （`alpha_hive_daily_report` / `generate_ml_report._model_file` /
-        `queen_distiller._ml_oos_trust_factor`）**全部显式**指 cache 那份。
-        所以这一条比上一条更要紧。
+        v0.45.570 前这里还有一条 `default_model_path()` 的同款断言——缺省路径（`ml_model.json`，
+        零读者）已删除，`save_model` 只剩显式路径，生产唯一传的就是这一条。
         """
         from hive_logger import PATHS
         assert Path(PATHS.ml_model_cache).parent == Path(PATHS.home)
@@ -771,7 +762,7 @@ class TestSnapshotLandsInTheTrackedDir:
         """端到端：对 cache 路径调 `snapshot_model_file`，快照必须落在它旁边。
 
         用 tmp_path 而非真目录 —— 断言的是**相对关系**（快照目录 =
-        模型文件同级的 HISTORY_DIRNAME），上面两条负责把这个同级目录钉在仓库根。
+        模型文件同级的 HISTORY_DIRNAME），上面那条负责把这个同级目录钉在数据根。
         """
         src = tmp_path / "ml_model_cache.json"
         src.write_text('{"model_type": "hgb"}', encoding="utf-8")

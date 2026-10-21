@@ -111,6 +111,18 @@ class TestGetNextEvent:
 import logging
 
 
+# ── 冻结日历形状（v0.45.572）──
+# TestCalendarHealth / TestStalenessIsLoud / TestWarningLabelHonesty 验的是「表快走完 / 走完时
+# 怎么吼」的**逻辑**，场景日期却是照真实表尾挑的——每抄进一年新日程就整体失效。
+# 这三组钉在冻结形状上（理由与形状见 tests/_frozen_calendar.py）；真实表够不够长只由
+# TestCoverageHorizon（真实 today）守——那条才是要它红的。
+@pytest.fixture
+def frozen_tables(monkeypatch):
+    from tests._frozen_calendar import freeze_calendar
+    freeze_calendar(monkeypatch)
+    yield
+
+
 class TestCoverageHorizon:
     """⏰ 陈旧化闸门 —— 唯一一组故意用真实 today 的测试
 
@@ -157,6 +169,7 @@ class TestCoverageHorizon:
         )
 
 
+@pytest.mark.usefixtures("frozen_tables")
 class TestCalendarHealth:
     """get_calendar_health() —— 逐表体检"""
 
@@ -213,6 +226,7 @@ class TestCalendarHealth:
         assert set(h["exhausted_tables"]) == {"fomc", "cpi", "nfp", "gdp"}
 
 
+@pytest.mark.usefixtures("frozen_tables")
 class TestStalenessIsLoud:
     """表走完 / 快走完时必须留下日志痕迹，不能安静地返回 []"""
 
@@ -371,19 +385,48 @@ class TestPublishedDates:
         assert [d for d in _CPI if d.startswith("2025-11")] == []
         assert [d for d in _NFP if d.startswith("2025-10")] == []
 
-    def test_bls_tables_have_no_unpublished_2027_entries(self):
-        """BLS/BEA 2027 日程未发布时，表里不许出现 2027 —— 空着，等官方"""
+    def test_2027_dates_are_the_published_ones(self):
+        """🔴 2027 年 BLS / BEA 日程的定点核对（v0.45.576；v0.45.572 于 2026-10-21 抄入）
+
+        出处：CPI / NFP 抄自 bls.gov/schedule/news_release/{cpi,empsit}.htm，并与 BLS 年度总表
+        schedule/2027/home.htm 逐条一致；GDP 抄自 bea.gov/news/schedule/next-year「Year 2027」，并与 BEA 官方 ICS
+        逐条一致。表里任何一条被「按规律」改掉（如 CPI 04-13→04-14、NFP 04-02→04-09）、删掉或多出来都要红——
+        有序 / 去重 / verified_through 三条测试都只看形状不看值，挡不住。
+
+        取代 v0.45.405 的 `test_bls_tables_have_no_unpublished_2027_entries`：那条在三表 verified_through
+        都越过 2027-01-01 后对每张表都 `continue`，一条断言都不执行（「没发布就别填」的通则仍由
+        `test_no_dates_beyond_verified_through` 守，对哪一年都成立）。
+        """
+        from economic_calendar import _CPI, _NFP, _GDP
+        published = {
+            # 参考月 2026-12 ~ 2027-11
+            "cpi": ["2027-01-13", "2027-02-11", "2027-03-10", "2027-04-13",
+                    "2027-05-12", "2027-06-10", "2027-07-14", "2027-08-11",
+                    "2027-09-14", "2027-10-14", "2027-11-10", "2027-12-10"],
+            "nfp": ["2027-01-08", "2027-02-05", "2027-03-05", "2027-04-02",
+                    "2027-05-07", "2027-06-04", "2027-07-02", "2027-08-06",
+                    "2027-09-03", "2027-10-08", "2027-11-05", "2027-12-03"],
+            # 4Q26 / 1Q27 / 2Q27 / 3Q27 的 GDP (Advance Estimate)
+            "gdp": ["2027-01-28", "2027-04-29", "2027-07-29", "2027-10-28"],
+        }
+        for key, table in (("cpi", _CPI), ("nfp", _NFP), ("gdp", _GDP)):
+            got = [d for d in table if d.startswith("2027-")]
+            assert got == published[key], f"{key} 表的 2027 日期与官方日程不一致：{got}"
+
+    def test_gdp_source_is_the_next_year_page(self):
+        """🔴 GDP 表的「去哪抄」必须指向 BEA 次年页（v0.45.576 二次检查）
+
+        `source` 会出现在过期告警与 TestCoverageHorizon 的失败文案里，让人「去这里抄」。要续的永远是次年，
+        而滚动页 /news/schedule 看不到次年——v0.45.572 之前指的正是它，10-04 两次手工核对也正是去错了这页。
+        与监视器读的次年页同一个 URL（两处各写一份，这里对账）。
+        """
         from economic_calendar import _TABLE_SPECS
-        for key in ("cpi", "nfp", "gdp"):
-            spec = _TABLE_SPECS[key]
-            if date.fromisoformat(spec["verified_through"]) >= date(2027, 1, 1):
-                continue          # 官方已发布并核对过，本条自动让路
-            assert not [d for d in spec["dates"] if d >= "2027-01-01"], (
-                f"{key} 表出现了 2027 日期，但 verified_through 仍是 "
-                f"{spec['verified_through']} —— 要么核对后上移边界，要么删掉"
-            )
+        import economic_calendar_watch as w
+        assert _TABLE_SPECS["gdp"]["source"] == w._BEA_NEXT_YEAR == \
+            "https://www.bea.gov/news/schedule/next-year"
 
 
+@pytest.mark.usefixtures("frozen_tables")
 class TestWarningLabelHonesty:
     """v0.45.68 二次检查：告警自己在标签上撒谎
 

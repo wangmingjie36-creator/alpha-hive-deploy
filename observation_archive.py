@@ -70,10 +70,19 @@ KINDS: Dict[str, str] = {
     "yahoo.trending": '{"symbols": 热搜代码表（按名次）}',
     "fear_greed.cnn": '{"fear_and_greed": CNN graphdata 的 fear_and_greed 对象原样}',
     "fear_greed.alternative_me": '{"data": alternative.me data[0] 原样（⚠️ 加密市场 F&G）}',
+    # v0.45.580（阶段 1b，`observation_layer`）：行情日线与交易所时钟
+    "yfinance.daily": '{"ticker", "request", "tz", "index", "columns", "dtypes", "data"}（observation_layer.frame_payload，可逐位还原）',
+    "exchange.clock": '{"spy_last_minute": 带时区 ISO 时间戳或 null}（判末根日线还在不在形成）',
 }
 
+#: 观测层版本（v0.45.580）：产出这些观测的取数代码是哪一版。每条取数事件、每个溯源块都记它。
+#: 取数方式（源 / 参数 / 兜底顺序）一改就是新版本——buzz_v1 固定用旧版本，见 `observation_layer` 模块说明。
+LAYER_VERSION = "obs-1"
+
 #: BuzzBee 四个情绪通道（`buzz_refs` / `summarize` 的键）
-CHANNELS = ("reddit", "news", "yahoo", "fear_greed")
+CHANNELS = ("reddit", "news", "yahoo", "fear_greed", "price")
+#: 行情通道读的三个字段（`price` 溯源块：三者有一个不是 None 就该有观测）
+PRICE_FIELDS = ("momentum_5d", "volume_ratio", "volatility_20d")
 #: Reddit 通道每次都用这两张榜（`reddit_sentiment.get_ticker_sentiment`）
 REDDIT_FILTERS = ("all-stocks", "wallstreetbets")
 #: 链接表（`signal_archive.archive` 同一事务写；读者 = 阶段 2 的冻结通道层）
@@ -249,7 +258,7 @@ def _event(kind: str, status: str, *, sha: Optional[str], request: Optional[Mapp
            message: Optional[str] = None) -> None:
     import ledger_io
     rec: Dict[str, Any] = {"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-                           "mode": _state["mode"], "kind": kind, "status": status, "sha": sha}
+                           "mode": _state["mode"], "layer": LAYER_VERSION, "kind": kind, "status": status, "sha": sha}
     if request:
         rec["request"] = _redact(request)
     if message:
@@ -287,13 +296,18 @@ def _ref(d: Any) -> Optional[str]:
     return v if is_address(v) else None
 
 
-def buzz_refs(*, reddit: Any, news: Any, yahoo: Any, fear_greed: Any) -> Dict[str, Dict[str, Any]]:
-    """四个情绪通道各自用的观测：``{通道: {"expected": 该不该有, "ref": 地址或 None}}``。
+def buzz_refs(*, reddit: Any, news: Any, yahoo: Any, fear_greed: Any, price: Any) -> Dict[str, Any]:
+    """BuzzBee 各通道用的观测：``{通道: {"expected": 该不该有, "ref": 地址或 None}, "_layer": 观测层版本}``。
 
-    `expected`：Reddit = 拿到了结果（安静 / 兜底也是由那两张榜决定的，空榜也是一份观测）；其余三个 = 结果是真实数据
-    （不是真实数据时通道就是中性 50，重算不需要观测）。`expected` 却拿不到地址 ⇒ `summarize` 计缺失。
+    `expected`：Reddit = 拿到了结果（安静 / 兜底也是由那两张榜决定的，空榜也是一份观测）；新闻 / 热搜 / F&G = 结果是
+    真实数据（不是真实数据时通道就是中性 50，重算不需要观测）；`price`（v0.45.580）= 三个行情字段有一个不是 None。
+    `expected` 却拿不到完整地址 ⇒ `summarize` 计缺失。
+
+    `price` 收的是 `data_pipeline` 出口的行情字典：它的 `observations` 由**算出这三个字段的那条路径**自己登记
+    （主路径 = 日线 + 时钟；回落补上的字段登记成 None = 用了但没存，见 `data_pipeline._fill_history_fields`）。
+    有 None 就整块记缺失，并在 `gaps` 里点名缺哪份。参数必填：漏传会直接报错，不会静默少一块。
     """
-    out: Dict[str, Dict[str, Any]] = {}
+    out: Dict[str, Any] = {"_layer": LAYER_VERSION}
     if isinstance(reddit, Mapping):
         r = reddit.get(REF_KEY)
         refs = {f: r.get(f) for f in REDDIT_FILTERS} if isinstance(r, Mapping) else None
@@ -304,6 +318,16 @@ def buzz_refs(*, reddit: Any, news: Any, yahoo: Any, fear_greed: Any) -> Dict[st
     for ch, d in (("news", news), ("yahoo", yahoo), ("fear_greed", fear_greed)):
         exp = bool(isinstance(d, Mapping) and d.get("is_real_data"))
         out[ch] = {"expected": exp, "ref": _ref(d) if exp else None}
+    if isinstance(price, Mapping) and any(price.get(f) is not None for f in PRICE_FIELDS):
+        refs = price.get("observations")
+        refs = dict(refs) if isinstance(refs, Mapping) else {}
+        gaps = sorted(k for k, v in refs.items() if not is_address(v))
+        ok = bool(refs) and not gaps
+        out["price"] = {"expected": True, "ref": refs if ok else None}
+        if not ok:
+            out["price"]["gaps"] = gaps or ["<无观测登记>"]
+    else:
+        out["price"] = {"expected": False, "ref": None}
     return out
 
 
@@ -318,6 +342,11 @@ def _shas(ch: str, ref: Any) -> Optional[List[str]]:
         if not isinstance(ref, Mapping):
             return None
         vals = [ref.get(f) for f in REDDIT_FILTERS]
+        return vals if all(is_address(v) for v in vals) else None
+    if ch == "price":
+        if not isinstance(ref, Mapping) or not ref:
+            return None
+        vals = list(ref.values())
         return vals if all(is_address(v) for v in vals) else None
     return [ref] if is_address(ref) else None
 
@@ -361,7 +390,9 @@ def load_links(db_path: Path, date: str, consumer: str = CONSUMER_BUZZ) -> Dict[
         try:
             rows = con.execute(f"SELECT ticker, refs FROM {LINKS_TABLE} WHERE date=? AND consumer=?",
                                (date, consumer)).fetchall()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower():
+                raise                    # v0.45.588：锁住 / 坏库不是「没有链接」——照抛，别让读错误渲染成「这天没溯源」
             return {}
     finally:
         con.close()
@@ -405,7 +436,8 @@ def summarize(swarm_results: Mapping, base: Optional[Path] = None) -> Dict[str, 
             if shas is None:
                 missing_refs[ch] += 1
                 if len(examples) < _FAILURE_SAMPLES:
-                    examples.append(f"{ticker}: {ch} 无地址")
+                    gaps = v.get("gaps")
+                    examples.append(f"{ticker}: {ch} 无地址" + (f"（缺 {', '.join(gaps)}）" if gaps else ""))
                 continue
             for s in shas:
                 if not payload_path(s, base).exists():

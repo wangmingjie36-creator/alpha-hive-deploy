@@ -359,6 +359,8 @@ class TestEconomicCalendarWatch:
             up[k] = {"source": url, "our_verified_through": _TABLE_SPECS[k]["verified_through"],
                      "determinable": True, "new_available": bool(new.get(k)),
                      "new_items": list(new.get(k, [])), "reason": None}
+        # 现行监视器写的 GDP 缓存带两页读数（v0.45.574）；不带 = 出自只读滚动页的旧版 ⇒ 不节流、立即联网重查
+        up["gdp"]["pages"] = {"rolling": {"quarters": []}, "next_year": {"quarters": []}}
         return up
 
     def _run_state(self, tmp_path, today: date, state):
@@ -440,10 +442,16 @@ class TestEconomicCalendarWatch:
         _check(self.TOOL, rc, env, p, expect_rc=0, expect_date=today.isoformat(), expect_status="ok")
 
     def test_crash_is_3_with_error_envelope(self, tmp_path):
-        """坏状态文件（`upstream` 是列表）⇒ `dict(list)` 抛 TypeError（未捕获）。改造前 rc=1 = 「要人动手」。"""
+        """节流缓存里一条结论的字段类型不对（`new_items` 是整数）⇒ attention 渲染 `new[:6]` 抛 TypeError（未捕获）。
+        改造前 rc=1 = 「要人动手」。
+
+        v0.45.579 前这里用「`upstream` 是列表」触发崩溃；那种**容器形状**不对现在当没有缓存、联网重查并重写
+        （自愈，见 `economic_calendar_watch._cache_shape_problem`），不再崩——崩溃外壳要另找一条真实的未捕获异常。
+        字段级的坏值仍会在节流读缓存时崩（响亮），`--force` 或过了节流窗口的那一轮会整份重写。"""
         today = _day_all_ok()
-        rc, env, p = self._run_state(tmp_path, today, {"last_checked_at": f"{today.isoformat()}T06:00:00",
-                                                      "upstream": [1, 2]})
+        rc, env, p = self._run_state(tmp_path, today, {
+            "last_checked_at": f"{today.isoformat()}T06:00:00", "action_required": False,
+            "upstream": {"cpi": {"determinable": True, "new_available": True, "new_items": 5, "reason": None}}})
         _crash_checks(self.TOOL, rc, env, p, today.isoformat())
 
 

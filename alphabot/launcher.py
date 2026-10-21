@@ -345,10 +345,10 @@ def window_owner() -> Optional[int]:
         return None
     except PermissionError:
         pass
-    # -ww：procps 的管道输出本不限宽，但环境里设了 COLUMNS 就按它截（CI 上确实被截，长解释器路径会把
-    # 标记挤出去）；-ww 压过 COLUMNS。macOS 的 BSD ps 此时本就不限宽，加了也一样
-    r = subprocess.run(["/bin/ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
-    return pid if "alphabot.launcher" in r.stdout else None
+    # v0.45.573：用 pgrep（非 setuid）。测试会话的内核写沙箱里 exec 不了 setuid 的 /bin/ps；pgrep -f 在内部按**完整**
+    # 命令行匹配、只输出 pid，也就没有 v0.45.412 那次「ps 管道输出被 COLUMNS 截断、标记被挤出去」的问题。
+    r = subprocess.run(["/usr/bin/pgrep", "-f", r"alphabot\.launcher"], capture_output=True, text=True)
+    return pid if str(pid) in r.stdout.split() else None
 
 
 def _native_window(ui, browser: bool) -> bool:

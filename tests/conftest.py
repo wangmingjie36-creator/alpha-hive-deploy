@@ -79,9 +79,10 @@ def _isolate_env(tmp_path, monkeypatch):
     # （data_quality 标 real），被当日正式扫描按"快照命中"复用进日报
     monkeypatch.setenv("OPTIONS_SNAPSHOT_DISABLE", "1")
     # v0.45.145 同款第二层防线：禁止测试把模型写进 ml_model_history/。
-    # `HGBModel.save_model` 的默认文件名是**相对路径**，tests/ 里约 12 处
+    # 当年 `HGBModel.save_model` 的默认文件名是**相对路径**，tests/ 里约 12 处
     # `svc.train_model()` 不传 tmp 路径 ⇒ 在主 checkout 跑 pytest 会往 cwd 写
-    # ml_model.json，本模块会顺手快照它。而 ml_model_history/ 是 git 跟踪 +
+    # ml_model.json，本模块会顺手快照它（v0.45.570 起 save_model 没有缺省路径、
+    # train_model 也不再存盘，但显式传路径的测试照样会触发快照）。而 ml_model_history/ 当时是 git 跟踪 +
     # 在自动提交白名单里的 ⇒ 夹具模型会被当成生产模型提交推送。
     # ml_model_guard 自己也在 pytest 下默认关闭（两层），这里再显式关一次。
     monkeypatch.setenv("ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE", "1")
@@ -239,11 +240,11 @@ def _offline_transport(request, monkeypatch):
     `vix_term_structure._get_vx_futures`——但只用了**三种传输**：
 
         urllib.request.urlopen          ← CBOE payload / CBOE VIX / http_gate / vixcentral
-        requests.Session.request        ← reddit_sentiment（及 Slack，另有专闸）
+        requests.Session.request        ← reddit_sentiment（及当年的 Slack 发送，v0.45.575 已删）
         curl_cffi.Session.request       ← yfinance 1.2（libcurl 在 C 层开 socket）
 
     本文件已有的四条「关掉某个源」的 fixture（`_block_llm_api` /
-    `_block_same_day_macro` 的财政部+Finnhub / Twelve Data / `_block_slack`）
+    `_block_same_day_macro` 的财政部+Finnhub / Twelve Data / `_block_slack`（v0.45.575 已删））
     都是源级的，而它们的 docstring 里那句**「新增任何外部数据源，同一个 commit
     里必须在这里加一行」已经失败四次**（v0.45.56 / .60 / .61，以及这次的六个源）。
     传输层只有三个入口且几乎不变，新增数据源自动被罩住——这是那条政策本身的修法。
@@ -610,84 +611,10 @@ def offline_gate_blocked(request):
 
 
 # ==================== 禁止测试碰 Slack ====================
-
-@pytest.fixture(autouse=True)
-def _block_slack(monkeypatch):
-    """禁止任何测试使用生产 Slack 凭证、出网、或真的发消息（v0.45.131）。
-
-    事故：双层出网探针（socket + curl_cffi）实测发现
-    `test_instrument_integrity.py::TestSourceHealthTracking::
-    test_three_empty_responses_trigger_alert` 会**真的往 #alpha-hive
-    （C0AGUUWJXJS）发一条「数据源降级」告警**——
-
-        _record_src_failure → _try_src_slack_alert → SlackReportNotifier()
-          ├ __init__ 里 requests.head(真 webhook)                  ← 出网
-          └ enabled = bool(user_token)，而本机 user_token 解析得到 59 字符
-             → send_risk_alert → _send_slack_message
-             → get_session("slack").post(chat.postMessage)         ← 真发送
-
-    `test_utilities.py::TestSlackWebhookEnvVar::test_report_notifier_env_var`
-    是同一根因的轻症版（只走到 head）。而这类告警本就被 CLAUDE.md 的
-    「Slack 通知精简规则」明令禁止发送。**在测试里 `new` 一个通知器对象
-    ＝一次对外动作**——这是本仓库此前没有覆盖到的一类副作用。
-
-    三道闸，各管一件事：
-
-      ① `_read_user_token → None`
-         测试永不使用**生产**凭证。要测 token 分支的测试自己 setattr 一个假
-         token（`test_slack_notifier.py` 里就这么写），后设的赢。
-      ② `_check_webhook_alive → False`
-         掐掉 `__init__` 里那次 `requests.head`。
-         ①② 合起来让 `enabled` 恒为 False，于是 `_try_src_slack_alert` 的
-         `if getattr(n, "enabled", False)` 守卫会在任何发送之前短路。
-      ③ `get_session` 换成记录器 —— 掐掉 `slack_report_notifier` 里每一处
-         `get_session("slack").post`，并**兼作观测点**：teardown 断言没有任何测试试图发送。
-         （v0.45.341 起只剩这一个模块：`slack_notifier.py` 已删，它的发送面随之消失；
-         曾有的 `pre_scan_notify` 直接 `requests.post`、由 `_offline_transport` 的库级闸兜住——该模块 v0.45.514 已删。）
-         没有③的话，将来谁把 `enabled` 又弄成 True，①②会静默失效而没人知道
-         （与本文件 `_isolate_paper_portfolio_state`「默认重绑 + teardown
-         核对真身」同构，也是 CLAUDE.md「这个失败，下游怎么知道？」那条）。
-
-    真要测发送的测试自己 `patch("slack_report_notifier.get_session")`
-    （`test_slack_notifier.py` 里就这么写），会覆盖③，本 fixture 不改它们的语义。
-    """
-    import importlib
-
-    attempts = []
-
-    class _SlackSessionRecorder:
-        """任何 .post/.get 都记一笔并炸掉——不允许测试真的发出去。"""
-
-        def __getattr__(self, name):
-            def _call(*args, **kwargs):
-                url = args[0] if args else kwargs.get("url", "?")
-                attempts.append(f"{name} {str(url)[:90]}")
-                raise RuntimeError(
-                    "测试试图真的调用 Slack（conftest._block_slack 拦下）。"
-                    "要测发送请自行 patch('<模块>.get_session')。")
-            return _call
-
-    def _fake_get_session(*_a, **_k):
-        return _SlackSessionRecorder()
-
-    try:
-        mod = importlib.import_module("slack_report_notifier")
-    except Exception:  # pragma: no cover - 模块不可得时无需拦
-        pass
-    else:
-        monkeypatch.setattr(mod, "get_session", _fake_get_session, raising=False)
-        monkeypatch.setattr(mod.SlackReportNotifier, "_read_user_token",
-                            lambda self: None)
-        monkeypatch.setattr(mod.SlackReportNotifier, "_check_webhook_alive",
-                            staticmethod(lambda url: False))
-
-    yield
-
-    assert not attempts, (
-        f"本条测试试图真的往 Slack 发消息：{sorted(set(attempts))}。"
-        "①② 两道闸本该让 enabled 恒为 False、在发送前就短路——"
-        "走到这里说明有测试把 enabled 又弄成了 True 而没有自己 patch "
-        "get_session。去那条测试里补 patch，不要在这里放行。")
+# v0.45.575：原 `_block_slack`（v0.45.131，三道闸：假 token / 掐 webhook 探测 / 记录器会话）随
+# `slack_report_notifier` 一起删除——它打桩的对象不存在了，仓库里已没有任何能发 Slack 的代码。
+# 现在的防线：① 静态守卫 `tests/test_slack_send_whitelist.py`（白名单为空，R1–R6 + 墓碑认出任何重新引入的发送）；
+# ② 本文件 `_offline_transport` 在传输层挡住一切出网（含 slack.com / hooks.slack.com）。
 
 
 # ==================== cwd / sys.path 不许跨测试泄漏 ====================
@@ -800,7 +727,7 @@ def _paper_portfolio_real_dir(invocation_env) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_paper_portfolio_state(tmp_path, monkeypatch, _real_paper_portfolio_state_dir):
+def _isolate_paper_portfolio_state(tmp_path, monkeypatch, _real_paper_portfolio_state_dir, pytestconfig):
     """把 paper_portfolio 的四个状态文件 + SNAPSHOT_DIR 全局重绑到 tmp，并核对状态文件真身没被动过。
 
     v0.45.104。事故：一个只想验「run_for_date 入口会拒绝错模式」的测试，
@@ -835,6 +762,10 @@ def _isolate_paper_portfolio_state(tmp_path, monkeypatch, _real_paper_portfolio_
     `ALPHA_HIVE_HOME` 指向 tmp），它会被冻成沙箱路径，`real` 与下面的 `sandbox` 成了同一个目录——
     守卫盯着沙箱自己，单条测试写沙箱被误报为写穿生产，真写穿生产反而看不见。
     ⚠️ 别改回 `_pp.STATE_DIR`：回归测试 `tests/test_paper_portfolio_guard_identity.py` 会红。
+
+    v0.45.577：写沙箱生效且真身落在被禁写的根下时，②（teardown 指纹比对）**不再判红**——测试进程树写不进去
+    （内核拒，被吞的写由会话级 `_guard_by_write_sandbox` 从统一日志里逐条定位报红），指纹变化只可能来自沙箱外的写入者：
+    14:00 每日扫描收尾就写这四个文件，v0.45.573 漏改这里 ⇒ 扫描时段全量里会有一串逐条 ERROR。①（全局重绑）照旧。
     """
     try:
         import paper_portfolio as _pp
@@ -865,6 +796,8 @@ def _isolate_paper_portfolio_state(tmp_path, monkeypatch, _real_paper_portfolio_
 
     yield
 
+    if _write_sandbox.covers(getattr(pytestconfig, "_alpha_hive_write_sandbox", None), _real_paper_portfolio_state_dir):
+        return          # 内核护着：变化只可能来自沙箱外（会话末尾的终端摘要会列出数据根变化）
     touched = [n for n, p in real.items() if _pp_state_digest(p) != before[n]]
     assert not touched, (
         f"测试写到了**生产** paper_portfolio_state/：{touched}。"
@@ -1138,12 +1071,13 @@ def _ml_model_digest(path):
 
 
 def _assert_default_path_in_sandbox(raw, tmp_path):
-    """`_isolate_ml_model_file` 防线①：默认落盘位置是**绝对路径**且在 tmp 沙箱里。
+    """`_isolate_ml_model_file` 防线①：模型落盘位置是**绝对路径**且在 tmp 沙箱里。
 
     先断言绝对、再判包含（v0.45.240）：`Path(相对).resolve()` 按 **cwd** 补全，而 v0.45.224 起测试期间
-    cwd 就在本测试的 tmp 里 ⇒ `default_model_path()` 被改回 `"ml_model.json"` 时 resolve 出
+    cwd 就在本测试的 tmp 里 ⇒ 路径被改回 `"ml_model.json"` 这类相对值时 resolve 出
     `tmp/_cwd/ml_model.json`，包含判定恒真、本闸不响（实测）。测试里这条相对路径只写进空目录，
     **伤的是生产**：编排器从仓库根跑，写穿的正是 v0.45.149 那次事故的模型文件。
+    （v0.45.570 前核对的是 `default_model_path()`；缺省路径删除后核对生产唯一显式写的 `PATHS.ml_model_cache`。）
     """
     p = pathlib.Path(raw)
     assert p.is_absolute(), (
@@ -1152,14 +1086,14 @@ def _assert_default_path_in_sandbox(raw, tmp_path):
     resolved = p.resolve()
     assert resolved.is_relative_to(tmp_path.resolve()), (
         f"ML 模型默认落盘位置逃出了测试沙箱：{resolved}（沙箱应为 {tmp_path}）。"
-        "多半是 default_model_path() 被写成了模块级常量（import 时求值 = 冻住旧值）。")
+        "多半是这条路径被写成了模块级常量 / 类属性（import 时求值 = 冻住旧值）。")
 
 
 @pytest.fixture(autouse=True)
 def _isolate_ml_model_file(request, tmp_path, monkeypatch):
     """核对测试没把 ML 模型写进仓库根（或 pytest 的 cwd）。
 
-    v0.45.149。事故：`ml_predictor` 的三对 `save_model/load_model` 默认值是
+    v0.45.149。事故：`ml_predictor` 的三对 `save_model/load_model` 默认值曾是
     **cwd 相对路径** `"ml_model.json"`，而 `MLPredictionService.train_model()`
     在训练成功后**无参**调用 `save_model()`，`tests/` 里有 11 处
     `svc.train_model()` 不传路径 —— 于是**在主 checkout 跑一次 pytest，就用
@@ -1169,12 +1103,12 @@ def _isolate_ml_model_file(request, tmp_path, monkeypatch):
 
     两道防线：
 
-      ① **路径侧**（在生产代码里，不在这个 fixture 里）：默认值改为
-         `ml_predictor.default_model_path()` → `PATHS.home / MODEL_FILENAME`，
-         而 `PATHS.home` 读 `ALPHA_HIVE_HOME`，上面的 `_isolate_env` 已经把它
-         指向 tmp_path。**注意这道防线本来就该罩住模型文件，是那六个裸相对
-         路径默认值从它底下钻了出去** —— 与限流器只覆盖 6/40 个调用点同形。
-         本 fixture 因此在 setup 时**正面核对**这道防线真的生效，而不是再
+      ① **路径侧**（在生产代码里，不在这个 fixture 里）：v0.45.149 把默认值改为
+         `ml_predictor.default_model_path()` → `PATHS.home / …`；**v0.45.570 起干脆没有默认值**
+         （`save_model` / `load_model` 的 filename 必填、`train_model` 不存盘，墓碑
+         `tests/test_ml_model_default_path_retired.py`）。生产唯一的显式落点是
+         `PATHS.ml_model_cache`，而 `PATHS.home` 读 `ALPHA_HIVE_HOME`，上面的 `_isolate_env`
+         已经把它指向 tmp_path。本 fixture 在 setup 时**正面核对**它真的落在沙箱里，而不是再
          monkeypatch 一遍把问题盖住（盖住了就再也测不出它退化）。
 
       ② **指纹侧**：teardown 比对真身。兜住任何绕过①的写法 —— 新写的测试
@@ -1201,8 +1135,9 @@ def _isolate_ml_model_file(request, tmp_path, monkeypatch):
     watched |= {pathlib.Path(request.config.invocation_params.dir).resolve() / n for n in _ML_MODEL_FILES}
     before = {p: _ml_model_digest(p) for p in watched}
 
-    # 防线①的正面核对：默认落盘位置必须落在 tmp 沙箱里。
-    _assert_default_path_in_sandbox(_mp.default_model_path(), tmp_path)
+    # 防线①的正面核对：生产唯一的模型落点必须落在 tmp 沙箱里（v0.45.570 前核对 default_model_path()）。
+    from hive_logger import PATHS as _PATHS
+    _assert_default_path_in_sandbox(str(_PATHS.ml_model_cache), tmp_path)
 
     yield
 
@@ -1210,8 +1145,7 @@ def _isolate_ml_model_file(request, tmp_path, monkeypatch):
     assert not touched, (
         f"测试写到了**仓库根/cwd** 的 ML 模型文件：{touched}。"
         "默认落盘位置已经全局指向 tmp，还能改到真身说明有绕过它的写入路径"
-        "（硬编码相对路径？subprocess？）——去把那条路径也接到 "
-        "`ml_predictor.default_model_path()` 上，不要在这里放行。")
+        "（硬编码相对路径？subprocess？）——落盘路径一律从 `PATHS` 调用时求值，不要在这里放行。")
 
 # ==================== 生产产物总闸（v0.45.150） ====================
 
@@ -1370,6 +1304,24 @@ def _isolate_straddle_prereg_result(_isolate_env, tmp_path):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_straddle_strangle_shadow_result(_isolate_env, tmp_path):
+    """影子宽跨预注册的冻结结果（v0.45.586，`straddle_strangle_shadow.run_once`）防线①：同上一个夹具——
+    `PATHS.straddle_strangle_shadow_result` 此刻是绝对路径且在本测试沙箱里（只写一次、永不覆盖，误写进真身会永久冻住协议）。
+    防线②（真身指纹）由仓库根默认拒绝总闸与真实数据根总闸兜住。另清零本进程的影子记录计数（故障登记是进程级全局状态，
+    不清的话上一条测试造的故障会让下一条测试的 `stats()["errors"]` 非零）。"""
+    import hive_logger
+    import straddle_strangle_shadow
+
+    p = pathlib.Path(hive_logger.PATHS.straddle_strangle_shadow_result)
+    assert p.is_absolute(), f"PATHS.straddle_strangle_shadow_result 解析成了相对路径 {p}：生产从仓库根跑会写穿仓库根"
+    assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+        f"PATHS.straddle_strangle_shadow_result = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？")
+    straddle_strangle_shadow.reset_stats()
+    yield
+    straddle_strangle_shadow.reset_stats()
+
+
 @pytest.fixture
 def sell_strike_state_sandbox_check():
     """把 `_assert_sell_strike_state_in_sandbox` 暴露给它的有牙自证（同 `default_path_sandbox_check`）。"""
@@ -1397,6 +1349,20 @@ def default_path_sandbox_check():
 def paper_portfolio_real_dir_fn():
     """把 `_paper_portfolio_real_dir` 暴露给对拍测试（同上：`conftest` 不可直接 import）。"""
     return _paper_portfolio_real_dir
+
+
+@pytest.fixture
+def write_sandbox_guard_fn():
+    """把写沙箱生效时的判定 `_guard_by_write_sandbox` 暴露给 `tests/test_write_sandbox.py`（`conftest` 不可直接 import）。"""
+    return _guard_by_write_sandbox
+
+
+@pytest.fixture
+def paper_portfolio_isolation_fn():
+    """把逐条夹具 `_isolate_paper_portfolio_state` 的原函数（生成器）暴露给 `tests/test_write_sandbox.py`，验 v0.45.577 的让位。"""
+    fx = _isolate_paper_portfolio_state
+    getter = getattr(fx, "_get_wrapped_function", None)       # pytest ≥ 8.4
+    return getter() if getter else getattr(fx, "__wrapped__", fx)
 
 
 @pytest.fixture
@@ -1428,6 +1394,7 @@ def data_root_session_facts(pytestconfig):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _root_data_guard  # noqa: E402
+import _write_sandbox  # noqa: E402
 
 _ROOT_FP_BEFORE = pytest.StashKey[dict]()
 
@@ -1480,9 +1447,20 @@ def pytest_report_header(config):
     root, fp = config.stash.get(_DATA_ROOT_BEFORE, (None, None))
     note = _root_data_guard.nonabsolute_env_note(getattr(config, "_alpha_hive_invocation_env", {}) or {})
     tail = f"；{note}" if note else ""                  # v0.45.488：环境值没被采用要说出来，不能静默改守别处
+    sb = getattr(config, "_alpha_hive_write_sandbox", None) or {}
+    if sb.get("active"):
+        sb_line = (f"write sandbox: ACTIVE（内核禁写 {sb['root']}{'，继承自外层会话' if sb.get('inherited') else ''}；"
+                   "数据根变化只说明、不报红，测试写入的拒绝记录才报红）")
+        for k in ("stale_marker", "registry_error"):     # v0.45.577：说清楚，不静默
+            if sb.get(k):
+                sb_line += f"\n  ⚠️ {sb[k]}"
+    else:
+        sb_line = f"write sandbox: INACTIVE（{sb.get('reason') or '未尝试'}）——真实数据根闸按指纹比对判红"
+    # 返回单个字符串（两行用换行连）：既有测试按子串读报告头（`'active on …' in header`）
     if root is None:
-        return f"real-data-root guard: INACTIVE（此机器上没有真实数据根；CI / 干净克隆都是这样，牙只靠合成测试证明）{tail}"
-    return f"real-data-root guard: active on {root}（{len(fp)} 个受闸条目）{tail}"
+        return (f"real-data-root guard: INACTIVE（此机器上没有真实数据根；CI / 干净克隆都是这样，牙只靠合成测试证明）{tail}\n"
+                + sb_line)
+    return f"real-data-root guard: active on {root}（{len(fp)} 个受闸条目）{tail}\n" + sb_line
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -1532,6 +1510,9 @@ def _guard_real_data_root(request):
 
     ⚠️ 与仓库根闸同样是 session 级：红在整轮末尾、记在最后一条测试名下；逐文件写入时刻落在哪条测试期间
     见报错（v0.45.455，只是时间重合），确认法见仓库根闸。
+    ⭐ **v0.45.573 起，写沙箱生效时（macOS + 本机有真实数据根）判据换了**：测试进程树被内核禁写真实数据根，
+    红的是「统一日志里有对它的写拒绝」（逐条定位到测试）或「核对不了」，指纹差异只可能来自沙箱外的写入者 ⇒ 只在终端摘要说明。
+    下面这段「扫描 / Alpha Bot 在写时会红」只在沙箱**未生效**时成立。见 `_guard_by_write_sandbox` 与 `tests/_write_sandbox.py`。
     ⚠️ **机器上正在跑每日扫描 / 周任务时它会红**（扫描写 `cache/`、`report_snapshots/`、`paper_portfolio_state/`…）——
     那不是假警报，是「测试与生产写同一批文件的时间窗真实存在」；平日 14:00–15:00 与周日 09:07 前后别跑全套。
     ⚠️ 没有真实数据根的机器上（CI / 干净克隆）本闸不做任何事（`pytest_report_header` 会说明）；它的牙由
@@ -1545,6 +1526,10 @@ def _guard_real_data_root(request):
         return
     after = _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason)
     changes = _root_data_guard.diff(before, after)
+    sb = getattr(request.config, "_alpha_hive_write_sandbox", None) or {}
+    if sb.get("active"):
+        _guard_by_write_sandbox(request.config, sb, root, changes)
+        return
     if not changes:
         return
     started, baseline = request.config.stash.get(_DATA_ROOT_ALPHABOT, (None, {}))
@@ -1558,6 +1543,45 @@ def _guard_real_data_root(request):
     started_wall, timeline = _gate_timeline(request.config)
     assert not changes, _real_data_root_message(root, changes, v) + "\n\n" + _root_data_guard.timeline_section(
         root, changes, after, timeline, started_wall)
+
+
+def _guard_by_write_sandbox(config, sb: dict, root: str, changes: dict) -> None:
+    """沙箱生效时的判据（v0.45.573）：测试进程树**写不进**真实数据根（内核拒），所以——
+    ① 统一日志里有对它的写拒绝 ⇒ 有测试 / 被测代码试图写生产（哪怕被 `except OSError` 吞了）⇒ 红，逐条定位到测试；
+    ② 查不了日志 ⇒ 红（核对失败不能当「没有」；生产数据本身有内核护着，红的是「没核对」）；
+    ③ 指纹有差异但没有拒绝 ⇒ 只能是沙箱外的写入者（Alpha Bot 盘中采样 / 每日扫描 / 别的会话）⇒ 说明，不红。"""
+    if not sb.get("check_log"):
+        # 继承外层沙箱的内层会话：生产照样被内核护着；它期间的拒绝落在外层会话的查询窗里，由外层核对
+        if changes:
+            config._alpha_hive_external_writes = changes
+        return
+    found, err = _write_sandbox.denials(sb)
+    found, foreign = _write_sandbox.attribute(sb, found)      # v0.45.577：并发会话各报各的
+    _write_sandbox.mark(sb, checked=err is None)
+    _write_sandbox.close(sb)
+    if foreign:
+        config._alpha_hive_foreign_denials = foreign
+    assert err is None, (
+        f"写沙箱生效中（{root} 由内核禁写，生产数据未受损），但核对「有没有测试试图写它」失败：{err}\n"
+        "核对失败不能当没有。重跑；若持续失败，临时用 ALPHA_HIVE_TEST_WRITE_SANDBOX=0 退回指纹闸并查明原因。")
+    if found:
+        started_wall, timeline = _gate_timeline(config)
+        rows = "\n".join(
+            f"    {d['path']}\n      {d['op']} by {d['proc']}({d['pid']}) @ {d['ts']} → "
+            f"{_root_data_guard.locate(_write_sandbox.ts_epoch(d['ts']), timeline, started_wall, lag=_write_sandbox.LOG_TS_LAG)}"
+            + (f"\n      归属：{d['who']}" if d.get("who") and d["who"] != "本会话" else "")
+            for d in found[:50])
+        more = f"\n    …另有 {len(found) - 50} 条" if len(found) > 50 else ""
+        raise AssertionError(
+            f"本轮有测试（或被测代码、或它起的子进程）试图写**真实数据根**（{root}），被内核写沙箱拒绝了 {len(found)} 次——"
+            "生产数据未受损，但被测代码绕过了 `ALPHA_HIVE_HOME` 隔离：\n"
+            f"{rows}{more}\n\n"
+            "这些拒绝只可能来自受沙箱约束的测试进程树（沙箱外的 Alpha Bot / 扫描从不被拒；另一个同时在跑的测试会话"
+            "登记过的进程已剔除，归属不明的照样列出并注明），时间定位见每条末尾（会话级闸，"
+            "pytest 把它记在最后一条测试头上，那条测试名与原因无关）。若当时测试没红，是被测代码吞了 PermissionError——"
+            "那正是要修的：改成调用时读 `PATHS.*`。**不要**往豁免里加路径。")
+    if changes:
+        config._alpha_hive_external_writes = changes
 
 
 def _real_data_root_message(root, changes: dict, v: dict) -> str:
@@ -1623,6 +1647,24 @@ def _hive_log_watch_paths(*roots):
                    for r in roots if r for n in _HIVE_LOG_FILES})
 
 
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """写沙箱生效时，真实数据根的变化来自沙箱外——只在这里说一声，不报红（v0.45.573）。"""
+    foreign = getattr(config, "_alpha_hive_foreign_denials", None)
+    if foreign:          # v0.45.577
+        terminalreporter.write_sep("-", "真实数据根：另一个测试会话的写拒绝（由它自己报，不在这里报红）")
+        for d in foreign[:20]:
+            terminalreporter.write_line(f"  {d['path']}  {d['op']} by {d['proc']}({d['pid']}) @ {d['ts']}  —— {d['who']}")
+    changes = getattr(config, "_alpha_hive_external_writes", None)
+    if not changes:
+        return
+    sb = getattr(config, "_alpha_hive_write_sandbox", {}) or {}
+    terminalreporter.write_sep("-", "真实数据根：沙箱外的写入（说明，不报红）")
+    terminalreporter.write_line(
+        f"写沙箱生效中，本测试进程树写不进 {sb.get('root')}，以下变化来自沙箱外的写入者"
+        "（Alpha Bot 盘中采样 / 每日扫描 / 别的会话）：")
+    terminalreporter.write_line(_root_data_guard.format_diff(changes))
+
+
 @pytest.hookimpl(trylast=True)  # 晚于 tmpdir 插件的 pytest_configure（它才建 _tmp_path_factory）
 def pytest_configure(config):
     """⓪：会话级 `ALPHA_HIVE_LOGS_DIR` 缺省（逐条测试由 `_isolate_env` 覆盖）；顺带取 ③ 的「之前」快照。
@@ -1649,6 +1691,12 @@ def pytest_configure(config):
     # 要的是「生产在哪」，不是这个沙箱——拿沙箱推真身正是 v0.45.303 那种守卫盯着自己的失明。
     config._alpha_hive_invocation_env = {
         k: os.environ[k] for k in ("ALPHA_HIVE_HOME", "HOME") if k in os.environ}
+    # v0.45.573：内核写沙箱——收集之前就让本进程及其子进程**写不进**真实数据根（由内核保证，不再靠事后比指纹去猜）。
+    # 真实数据根与 `pytest_sessionstart` 的闸同一推导；套不上 / 金丝雀没被拒 ⇒ `active=False`，闸回到指纹比对。
+    # 原因与设计见 `tests/_write_sandbox.py`。
+    _invoked = config._alpha_hive_invocation_env
+    config._alpha_hive_write_sandbox = _write_sandbox.apply(_root_data_guard.real_data_root(
+        _invoked, _invoked.get("HOME") or os.path.expanduser("~"), _REPO_ROOT_FOR_GUARD))
     h = config._tmp_path_factory.mktemp("hive_home_outside_tests", numbered=False)
     config._alpha_hive_session_home = str(h)
     os.environ["ALPHA_HIVE_HOME"] = str(h)

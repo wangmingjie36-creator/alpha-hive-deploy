@@ -50,7 +50,7 @@ except ImportError:
     CodeExecutorAgent = None
     CODE_EXECUTION_CONFIG = {"enabled": False}
 
-# v0.45.339：此处不再 import SlackReportNotifier —— 本模块唯一的 Slack 发送是
+# v0.45.339：此处不再 import SlackReportNotifier（该模块 v0.45.575 已删）—— 本模块唯一的 Slack 发送是
 # 财报更新通知（CLAUDE.md「Slack 通知精简规则」白名单之外），已改为只写日志。
 EarningsWatcher = optional_import("earnings_watcher", "EarningsWatcher")
 
@@ -1042,7 +1042,7 @@ class AlphaHiveDailyReporter:
                           report: Dict, elapsed: float) -> None:
         """扫描后通知：Slack推送 + 失效条件 + 日历 + 会话存储 + 向量记忆 + 反馈循环"""
         # 逐标的机会/风险通知已禁用（减少 Slack DM 噪音）
-        # Bot 只发：1) LLM 确认提示  2) 富文本日报推送成功
+        # Bot 不发任何 Slack 消息（v0.45.571 起白名单为空；原两类 LLM 确认 / 富文本日报已于 v0.45.514 / v0.45.571 删除）
 
         # 失效条件回填进 report["opportunities"]（保持 JSON 形状不变）。
         # v0.45.57：**计算已上移到 _attach_thesis_breaks，在建报告之前跑**——
@@ -1912,8 +1912,8 @@ class AlphaHiveDailyReporter:
         result = self.earnings_watcher.check_and_update(tickers, report_path)
 
         # 有更新就逐只写一条 INFO 日志。v0.45.339 起**不再发 Slack**（此前走
-        # send_opportunity_alert）：CLAUDE.md「Slack 通知精简规则」只允许 LLM 模式确认
-        # 与富文本日报两类，逐标的通知不在其内。守卫 tests/test_slack_send_whitelist.py。
+        # send_opportunity_alert）：CLAUDE.md「Slack 通知精简规则」下逐标的通知只进日志
+        #（v0.45.571 起 Bot 不发任何消息）。守卫 tests/test_slack_send_whitelist.py。
         if result.get("updated"):
             for ticker in result["updated"]:
                 ed = result["earnings_data"].get(ticker, {})

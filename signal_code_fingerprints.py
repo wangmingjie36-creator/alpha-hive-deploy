@@ -87,7 +87,10 @@ UNITS: Dict[str, Dict] = {
         "code": (("data_pipeline.py", "mentions_price_fields"),
                  ("swarm_agents/cache.py", "mentions_price_fields"),
                  ("price_history.py", "mentions_price_fields"),
-                 ("twelve_data.py", "mentions_price_fields")),
+                 ("twelve_data.py", "mentions_price_fields"),
+                 # v0.45.580：观测层（行情日线 / 交易所时钟的取数）整份算进来——它不提字段名，按名字认不出，
+                 # 但它决定三个字段的原始输入；「观测层版本化」接上双版本之前，改它一律要确认
+                 ("observation_layer.py", "module")),
         "signals": ("price.momentum_5d", "price.volume_ratio", "price.volatility_20d",
                     "buzz.comp.momentum_signal", "buzz.comp.volume_signal", "buzz.comp.volatility_signal"),
     },
@@ -163,6 +166,13 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "v0.45.568：CNN / alternative.me 取到后 observe（CNN 存 fear_and_greed 对象，不存历史序列）、结果加 observation 键，"
      "两源都失败时各记一条失败事件；URL 字面量改成同值常量。取值、取整（round half even）、兜底顺序不变。改动前后 400 例随机读数"
      "（含解析失败 / CNN 挂 / 双挂）逐字段全同，真实 CNN 重放全同。**用户 2026-10-20 在对话里选「按 no_value_change 登记」**；不登记边界"),
+    # v0.45.580（buzz_v1 根治阶段 1b，行情原始日线入档）：data_pipeline 的 yfinance 日线 / SPY 时钟改经新的 observation_layer 取
+    # （取到即原样落档、返回内容不变），三条路径登记用了哪几份观测、回落补上的字段登记「用了但没存」；observation_layer.py 整份并入本单元
+    ("price.fields",    "ec921fd7cee79071", "no_value_change",
+     "v0.45.580：只多存、不改值。改动前（origin/main 原文）与改动后在同一批随机输入上逐字段比对——CBOE 胜出时的 _fetch_history_metrics 800 例、"
+     "YFinanceSource.fetch 800 例（含 session_close）、--date 补跑 300 例（含云端快照拼接那一支）、MultiSourceFetcher 出口回落 200 例（含 "
+     "history_fill 计数），档案关 / 开两遍全部相同；真实 yfinance 数据（10-21 盘中、末根正在形成、被丢弃）用档案里的日线 + 时钟重跑 33 项全同。"
+     "**用户 2026-10-21 在对话里选「按 no_value_change 登记」**；不登记边界"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change"})

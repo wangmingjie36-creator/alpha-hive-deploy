@@ -7,12 +7,14 @@ Slack 日报（Step 7 `push_report_to_slack` → `_format_rich_daily_mrkdwn`）�
 `metrics_<T>_<date>.json` 来 ⇒ 只有那三只有。现在改读扫描自己的 `.swarm_results`（Scout `price` / Buzz `momentum_5d`，
 30 只全有；10-16 实测三只与 Step 1 的值逐位相等）。另一个读者 `generate_ml_report.main()`（Step 3 兜底）不再读 realtime_metrics.json——
 写它的步骤没了，留在数据根里的旧文件读一次就是一份过期价格。
+
+v0.45.571：那个 Slack 读者连同 Step 7 / `push_report_to_slack.py` / `_format_rich_daily_mrkdwn` 一起删了
+（它只在手动 `--force` 时跑，生产从未调到）⇒ 原来钉「Slack 改读 .swarm_results」的 `TestSlackReadsScanResults` 随之删除；
+「没人再读 realtime_metrics.json / 没人再拼 metrics_<T>_<date>.json」两条全仓扫描继续守。
 """
 from __future__ import annotations
 
 import ast
-import json
-import logging
 from pathlib import Path
 
 from tests import _ast_cache
@@ -64,7 +66,7 @@ class TestStep1StaysRetired:
         run_lines = [ln for ln in orch.splitlines() if ln.strip().startswith("run_step")]
         assert not any("data_fetcher.py" in ln for ln in run_lines)
         assert "step1_data_fetcher" not in "\n".join(ln for ln in orch.splitlines() if not ln.lstrip().startswith("#"))
-        assert any("push_report_to_slack.py" in ln for ln in run_lines)   # 正对照：同一解析认得出仍在跑的步骤
+        assert any("alert_manager.py" in ln for ln in run_lines)   # 正对照：同一解析认得出仍在跑的步骤
 
     def test_pipeline_start_is_defined_before_use(self):
         """删 Step 1 时差点把 `STEP1_START=$(date +%s)` 一起删了：编排器 `set -u`，write_status 与 TOTAL_DURATION 都减它 ⇒
@@ -84,53 +86,6 @@ class TestStep1StaysRetired:
 
     def test_nobody_builds_metrics_cache_name(self):
         assert not _scan(_builds_metrics_cache_name)
-
-
-def _write_day(tmp_path, *, swarm=True, legacy_metrics=False):
-    d = "2026-10-16"
-    report = tmp_path / f"alpha-hive-daily-{d}.json"
-    report.write_text(json.dumps({"date": d, "opportunities": [
-        {"ticker": "NVDA", "opp_score": 7.0, "direction": "看多"},
-        {"ticker": "ABBV", "opp_score": 5.0, "direction": "中性"},
-    ]}), encoding="utf-8")
-    if swarm:
-        (tmp_path / f".swarm_results_{d}.json").write_text(json.dumps({
-            "NVDA": {"agent_details": {"ScoutBeeNova": {"details": {"price": 214.13}},
-                                       "BuzzBeeWhisper": {"details": {"momentum_5d": -5.386179766220689}}}},
-            "ABBV": {"agent_details": {"ScoutBeeNova": {"details": {"price": 201.5}},
-                                       "BuzzBeeWhisper": {"details": {"momentum_5d": 2.04}}}},
-        }), encoding="utf-8")
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    if legacy_metrics:
-        (cache / f"metrics_NVDA_{d}.json").write_text(json.dumps(
-            {"sources": {"yahoo_finance": {"current_price": 999.0, "price_change_5d": 99.0}}}), encoding="utf-8")
-    return str(report), str(cache)
-
-
-def _render(tmp_path, **kw):
-    from slack_report_notifier import SlackReportNotifier
-    report, cache = _write_day(tmp_path, **kw)
-    return SlackReportNotifier()._format_rich_daily_mrkdwn(
-        report, cache, str(tmp_path / "data_cache"), str(tmp_path / "finviz"), "https://example.invalid", llm_mode=False)
-
-
-class TestSlackReadsScanResults:
-
-    def test_price_and_5d_come_from_swarm_results_for_every_ticker(self, tmp_path):
-        text = _render(tmp_path)
-        assert "*NVDA*" in text and "$214.13 (5d -5.4%)" in text
-        assert "$201.5 (5d +2.0%)" in text          # 此前只有写死的三只才有，ABBV 一个字都没有
-
-    def test_legacy_metrics_file_is_not_read(self, tmp_path):
-        text = _render(tmp_path, legacy_metrics=True)
-        assert "999" not in text and "+99.0%" not in text and "$214.13 (5d -5.4%)" in text
-
-    def test_missing_swarm_results_is_loud(self, tmp_path, caplog):
-        with caplog.at_level(logging.WARNING):
-            text = _render(tmp_path, swarm=False)
-        assert "(5d" not in text
-        assert "找不到 .swarm_results_2026-10-16.json" in caplog.text
 
 
 class TestDetectorsHaveTeeth:

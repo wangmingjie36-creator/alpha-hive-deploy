@@ -230,6 +230,106 @@ class TestLive:
         assert calls == [t, t]
 
 
+#: 2026-10-21 财报日实测的 T 24.50 call 腿：股价跌到 22.4 后变深度虚值，bid=0、ask 真实、IV 与 Greeks 正常（v0.45.581）
+BID_ZERO_CALL = {"bid": 0.0, "ask": 0.02, "mid": None, "spread_pct": None, "iv": 0.2955, "delta": 0.0511,
+                 "gamma": 0.0842, "vega": 0.0038, "theta": -0.0065, "quote_ok": False}
+
+
+def _book(side):
+    return next(p for p in syn.demo_straddle_ledger(AS_OF)["positions"] if p["side"] == side)
+
+
+def _live_with(root, p, *, call=None, put=None):
+    """演示报价上改写某条腿再走一遍真实的 `straddle_live`（服务层 + live_view）。返回 (结果, 未改写的报价)。"""
+    base = syn.demo_quote_held(p["ticker"], [p["call_symbol"], p["put_symbol"]], AS_OF)["quotes"]
+
+    def fn(t, syms):
+        q = syn.demo_quote_held(t, syms, AS_OF)
+        for sym, over in ((p["call_symbol"], call), (p["put_symbol"], put)):
+            if over is not None:
+                q["quotes"][sym] = {**q["quotes"][sym], **over}
+        return q
+    return _svc(root, straddle_quote_fn=fn).straddle_live(p["ticker"], force=True), base
+
+
+class TestLiveBidZeroLeg:
+    """v0.45.581：某条腿 bid=0 时，mid 仍不给；卖跨式的立即平仓价按 ask 给；Greeks 在 IV 正常时照用。
+    每条「放行」都配一条「不放行」的对照——否则规则放宽成「什么都放」时这组测试不会红。"""
+
+    def test_short_exit_now_uses_ask_and_mid_stays_empty(self, root):
+        p = _book("short")
+        r, base = _live_with(root, p, call=BID_ZERO_CALL)
+        put_ask = base[p["put_symbol"]]["ask"]
+        assert r["quote_ok"] is False and r["mark_mid"] is None and r["unrealized_mid_usd"] is None
+        assert r["exit_now_basis"] == "ask_only" and r["bid_zero_legs"] == ["call"]
+        assert r["exit_now_premium"] == pytest.approx(0.02 + put_ask)
+        # 卖跨式盈亏 = (入场权利金 − 买回价) × 100 × 张数，手算，不借被测函数
+        assert r["exit_now_usd"] == pytest.approx((p["entry_premium"] - (0.02 + put_ask)) * 100.0 * p["contracts"])
+
+    def test_greeks_keep_the_bid_zero_leg_and_say_so(self, root):
+        p = _book("short")
+        r, _ = _live_with(root, p, call=BID_ZERO_CALL)
+        g = r["greeks"]
+        assert g["complete"] is True and g["missing"] == [] and g["degraded_legs"] == ["call"]
+        assert all(g[k] is not None for k in ("dollar_delta", "gamma_dollar_per_1pct", "theta_dollar_per_day", "vega_dollar_per_pt"))
+
+    def test_long_exit_still_needs_a_bid(self, root):
+        """买跨式按 bid 卖出：bid=0 即无买盘，立即平仓价仍不给；Greeks 与方向无关，照用。"""
+        p = _book("long")
+        r, _ = _live_with(root, p, call=BID_ZERO_CALL)
+        assert r["exit_now_premium"] is None and r["exit_now_usd"] is None and r["exit_now_basis"] is None
+        assert r["bid_zero_legs"] == ["call"] and r["greeks"]["degraded_legs"] == ["call"]
+
+    def test_both_legs_bid_zero_short_still_exits_on_asks(self, root):
+        p = _book("short")
+        r, _ = _live_with(root, p, call=BID_ZERO_CALL, put={**BID_ZERO_CALL, "ask": 0.05})
+        assert r["bid_zero_legs"] == ["call", "put"] and r["exit_now_premium"] == pytest.approx(0.07)
+
+    def test_normal_quotes_are_unchanged(self, root):
+        p = _book("short")
+        r, base = _live_with(root, p)
+        assert r["quote_ok"] and r["exit_now_basis"] == "bid_ask" and r["bid_zero_legs"] == []
+        assert r["greeks"]["degraded_legs"] == []
+        assert r["exit_now_premium"] == pytest.approx(base[p["call_symbol"]]["ask"] + base[p["put_symbol"]]["ask"])
+
+    @pytest.mark.parametrize("name,over", [
+        ("ask 为 0（整条腿没有卖盘）", {"bid": 0.0, "ask": 0.0}),
+        ("ask 缺失", {"bid": 0.0, "ask": None}),
+        ("报价倒挂（ask < bid）", {"bid": 0.30, "ask": 0.10}),
+        ("bid 为负", {"bid": -0.01, "ask": 0.10}),
+    ])
+    def test_dead_or_crossed_leg_is_not_waved_through(self, root, name, over):
+        p = _book("short")
+        r, _ = _live_with(root, p, call={**BID_ZERO_CALL, **over})
+        assert r["exit_now_usd"] is None and r["exit_now_basis"] is None, name
+        assert r["bid_zero_legs"] == [] and r["greeks"]["degraded_legs"] == [], name
+        assert r["greeks"]["complete"] is False and "call:no_quote" in r["greeks"]["missing"], name
+        assert r["greeks"]["dollar_delta"] is None, name       # 缺的腿不当 0
+
+    @pytest.mark.parametrize("name,over", [
+        ("iv 为 0（CBOE 全零占位）", {"iv": 0.0, "delta": 0.0, "gamma": 0.0, "vega": 0.0, "theta": 0.0}),
+        ("iv 缺失", {"iv": None}),
+        ("某个 Greek 缺失", {"gamma": None}),
+    ])
+    def test_degenerate_greeks_are_not_used_but_exit_still_is(self, root, name, over):
+        """平仓价与 Greeks 各判各的：ask 真实就给平仓价；Greeks 不可信就不拿来用（不当 0）。"""
+        p = _book("short")
+        r, _ = _live_with(root, p, call={**BID_ZERO_CALL, **over})
+        assert r["exit_now_basis"] == "ask_only" and r["exit_now_usd"] is not None, name
+        assert r["greeks"]["degraded_legs"] == [] and r["greeks"]["complete"] is False, name
+        assert r["greeks"]["dollar_delta"] is None, name
+
+    def test_front_end_reads_exactly_the_fields_the_backend_sends(self, root):
+        """后端新增的三个字段，前端都要读到；前端读的名字后端都要真给（不靠肉眼对）。"""
+        r, _ = _live_with(root, _book("short"), call=BID_ZERO_CALL)
+        names = ("exit_now_basis", "bid_zero_legs", "degraded_legs")
+        assert "exit_now_basis" in r and "bid_zero_legs" in r and "degraded_legs" in r["greeks"]
+        js = "\n".join(ln for ln in (STATIC / "pages" / "straddle.js").read_text(encoding="utf-8").splitlines()
+                       if not ln.lstrip().startswith("//"))
+        for n in names:
+            assert n in js, f"前端没读 {n}"
+
+
 class TestDemoDates:
     def test_demo_today_is_the_eastern_date(self, monkeypatch):
         """v0.45.428：演示链缺省日期按美东（跨式演示账本与报价都按美东造）；按本机（太平洋）日期时，

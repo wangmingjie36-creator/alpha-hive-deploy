@@ -24,7 +24,7 @@ metrics.db 三张表、`reasoning_sessions`、`sentiment_baseline.db`、编排�
   **PENDING_DEAD**（已知死链、待清理）：每条带一个**见证**（写入点或「哪个函数里还有哪段字符串」）。
   条数与 `CEILING_PENDING_DEAD` 等号比较 ⇒ 只许减：清理掉一条，见证消失 ⇒ 红，提醒删条目并把上限减一；
   新发现的死链**不许**登记进来当债务——要么删掉写入方，要么接上读者。
-  2026-10-19 审计里还开着的：`barrier_outcomes`、`agent_memory`（读者只在 LLM 模式）、`ml_model.json`（无读者）；
+  2026-10-19 审计里还开着的：`barrier_outcomes`、`agent_memory`（读者只在 LLM 模式）；`ml_model.json`（无读者）v0.45.570 已删；
   审计里另两项（编排器 Step 1 `data_fetcher`、扫描后 ML 增量重训）由 v0.45.546 / 547 删除，不登记。
 
 v1 的边界（写明，免得把「没查」读成「没问题」）
@@ -62,7 +62,7 @@ CATEGORIES = {READ, CACHE, HUMAN, AUDIT, FORENSIC, BACKUP, CODE, PENDING_DEAD}
 NEEDS_READER = {READ, CACHE}
 
 #: 已知死链的条数（表 + 文件产物合计）。等号比较：清理一条就减一，**不许加**。
-CEILING_PENDING_DEAD = 3
+CEILING_PENDING_DEAD = 2
 
 #: 「自读」标记：缓存的读写在同一个函数里（读不到才取、取完写回）。只对 CACHE 有效，且该函数里必须真有读调用。
 SELF = "self"
@@ -181,9 +181,9 @@ SITE_ARTIFACTS: dict = {
     'ledger_io.py::_atomic_write_text': ("ledger_io primitive (callers' ledgers)",),
     'migrate_ambiguous_backfill.py::main': ('db_backups/pheromone_pre_P0_tolerance_fix_*.db',),
     'ml_model_guard.py::snapshot_model_file': ('ml_model_history/{stem}-{date}.json + manifest.jsonl',),
-    'ml_predictor.py::HGBModel.save_model': ('ml_model_cache.json', 'ml_model.json'),
-    'ml_predictor.py::SGDMLModel.save_model': ('ml_model_cache.json', 'ml_model.json'),
-    'ml_predictor.py::SimpleMLModel.save_model': ('ml_model_cache.json', 'ml_model.json'),
+    'ml_predictor.py::HGBModel.save_model': ('ml_model_cache.json',),
+    'ml_predictor.py::SGDMLModel.save_model': ('ml_model_cache.json',),
+    'ml_predictor.py::SimpleMLModel.save_model': ('ml_model_cache.json',),
     'newsapi_client.py::_safe_cache': ('cache/news/{T}_news.json',),
     'observation_archive.py::_ensure_payload': ('observation_archive/payloads/<sha2>/<sha>.json',),
     'observation_archive.py::_event': ('observation_archive/events/<date>.jsonl',),
@@ -240,6 +240,7 @@ SITE_ARTIFACTS: dict = {
     'sell_strike_report.py::write_local_report': ('sell_strike_state/reports/sell-strike-*.md',),
     'step_contract.py::write_out': ('orchestrator step --out JSON envelopes',),
     'straddle_gex_prereg.py::run_once': ('options_paper_state/straddle_gex_prereg_result.json',),
+    'straddle_strangle_shadow.py::run_once': ('options_paper_state/straddle_strangle_shadow_result.json',),
     'thesis_breaks.py::ThesisBreakMonitor.save_to_json': ('thesis_breaks_<T>.json (cwd)',),
     'tools/clockshift/audit.py::main': ('$GITHUB_STEP_SUMMARY',),
     'tools/clockshift/audit.py::run_pytest': ('clockshift --log-dir/{label}.log',),
@@ -264,8 +265,8 @@ ARTIFACTS: dict = {
         '开着窗口的启动器 pid；路径助手 _window_pid_path，实际消费者 window_owner（main 中判重复窗口）'),
     'RETIRE_RECORD.json': (READ, [('data_backup/migrate_data_root.py::check_old', 'RETIRE_RECORD.json'), ('data_backup/migrate_data_root.py::unretire', 'RETIRE_RECORD.json')],
         '旧数据根退役记录（同时挪文件）；check-old/unretire CLI 子命令读回，一次性迁移工具'),
-    'alpha-hive-daily-*.json': (READ, [('push_report_to_slack.py::main', 'alpha-hive-daily-'), ('dashboard_renderer.py::_iter_prev_reports', 'alpha-hive-daily-'), ('alert_manager.py::AlertAnalyzer.analyze', 'alpha-hive-daily-')],
-        '日报主 JSON；Slack 推送 Step7、仪表板历史、告警、orchestrator_steps/collect_data 读'),
+    'alpha-hive-daily-*.json': (READ, [('dashboard_renderer.py::_iter_prev_reports', 'alpha-hive-daily-'), ('alert_manager.py::AlertAnalyzer.analyze', 'alpha-hive-daily-')],
+        '日报主 JSON；仪表板历史、告警、orchestrator_steps/collect_data 读（Slack 推送 Step7 v0.45.571 删）'),
     'alpha-hive-daily-*.md (+thread txt/index.html/rss.xml)': (READ, [('dashboard_renderer.py::render_dashboard_html', 'alpha-hive-daily-'), ('report_deployer.py::deploy_static_to_ghpages', 'alpha-hive-daily-'), ('alpha_hive_bot/push_job.py::fetch_daily_md', 'alpha-hive-daily-')],
         '日报 MD 被仪表板嵌入、部署到 gh-pages 后 Telegram 推送拉取；X 线程 txt 只给人看；index/rss 经部署上网站'),
     'alphabot_state/intraday/<date>/*.jsonl': (READ, [('alphabot/service.py::AlphaBotService.intraday', '.jsonl'), ('alphabot/service.py::AlphaBotService.intraday_dates', 'intraday')],
@@ -328,6 +329,8 @@ ARTIFACTS: dict = {
         '跨式账本现金/元数据；_load_meta 每轮读回，Alpha Bot 跨式页读'),
     'options_paper_state/straddle_gex_prereg_result.json': (READ, [('straddle_gex_prereg.py::_result_path', 'PATHS.straddle_prereg_result')],
         '跨式 GEX 预注册冻结结果；read_result ← progress（Alpha Bot 跨式页）/ run_once'),
+    'options_paper_state/straddle_strangle_shadow_result.json': (READ, [('straddle_strangle_shadow.py::_result_path', 'PATHS.straddle_strangle_shadow_result')],
+        '影子宽跨预注册冻结结果；read_result ← progress（Alpha Bot 跨式页）/ run_once'),
     'orchestrator step --out JSON envelopes': (READ, [('orchestrator_steps.py::_load_doc', 'schema_version')],
         'Step 10–15 工具的 --out 外壳；编排器步骤解释器 _load_doc 读'),
     'orchestrator_deploy.json': (READ, [('scripts/alpha-hive-orchestrator.sh', 'orchestrator_deploy.json')],
@@ -360,8 +363,8 @@ ARTIFACTS: dict = {
         'VRP 账本；文件名在模块常量 SIGNALS_FILE 里，load_rows→render_markdown（日报），Alpha Bot _premium_vrp'),
     'weight_history.jsonl': (READ, [('health_check.py::check_weekly_optimizer', 'weight_history.jsonl'), ('weekly_optimizer.py::_history_file', 'weight_history.jsonl')],
         '权重审计日志；health_check（定时任务）读，_last_applied_record 用于回滚'),
-    '{T}_raw.json': (READ, [('generate_ml_report.py::main', '_raw.json'), ('slack_report_notifier.py::SlackReportNotifier._format_rich_daily_mrkdwn', '_raw.json')],
-        '手动方案B 精简原始数据；ML 报告取价兜底、Slack 富文本日报优先读（push_report_to_slack 调）'),
+    '{T}_raw.json': (READ, [('generate_ml_report.py::main', '_raw.json')],
+        '手动方案B 精简原始数据；ML 报告取价兜底（原 Slack 富文本日报读者 v0.45.571 删）'),
     # ── CACHE
     '.checkpoint_<session>_<date>.json': (CACHE, [('alpha_hive_daily_report.py::AlphaHiveDailyReporter._init_scan_context', '.checkpoint_'), ('alpha_hive_daily_report.py::AlphaHiveDailyReporter._load_checkpoint', 'saved_at')],
         '扫描崩溃恢复断点；_init_scan_context 定路径，_load_checkpoint（run_swarm_scan 调用）读回，扫完删除'),
@@ -421,9 +424,6 @@ ARTIFACTS: dict = {
         'CIK 映射缓存，同一函数读写（self）'),
     'sec_cache/edgar_rss.json': (CACHE, [('edgar_rss.py::EdgarRSSClient.get_recent_form4_alerts', 'edgar_rss.json', SELF)],
         'self：文件名只在模块常量 _CACHE_PATH，同函数磁盘缓存读回；ScoutBee 经 get_today_form4_alerts 调用'),
-    # ── PENDING_DEAD
-    'ml_model.json': (PENDING_DEAD, [],
-        'save_model() 无参时的缺省落点（MLPredictionService.train_model 训完无参 save_model()；v0.45.547 起只经报告生成器走到）：全仓无参 load_model 调用点 = 0，生产只读 ml_model_cache.json'),
     # ── AUDIT
     'code_executor sandbox audit.log': (AUDIT, [],
         '代码执行沙箱审计追加；get_audit_log 存在但全仓零调用'),
@@ -540,9 +540,9 @@ ARTIFACTS: dict = {
 
 #: PENDING_DEAD 文件产物的见证：(文件::限定名, 令牌)——该函数体里还出现这段字符串 ⇒ 死链还在。
 #: 写入落点本身就是专门写它的（如 v0.45.552 前 `alpha_hive_daily_report.py::main` 之于 `.samples-only-`）时，见证可以就写那个落点与文件名。
-PENDING_WITNESS: dict = {
-    "ml_model.json": ("ml_predictor.py::default_model_path", "PATHS.ml_model"),
-}
+#: v0.45.570 前唯一一条是 `ml_model.json`（`ml_predictor.py::default_model_path` 里的 `PATHS.ml_model`）——缺省路径已删，见墓碑
+#: `tests/test_ml_model_default_path_retired.py`。
+PENDING_WITNESS: dict = {}
 
 
 # ═════════════════════════════════════════════════════════════════════ 对账（纯函数，便于有牙测试）

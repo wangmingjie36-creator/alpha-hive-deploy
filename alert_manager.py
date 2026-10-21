@@ -5,6 +5,7 @@
 """
 
 import json
+import math
 import os
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,25 @@ _log = get_logger("alerts")
 NEWS_NON_PRIMARY_P1_SHARE = 0.20
 #: 已知来源的标的少于这个数就不判（Buzz 大面积报错时比例没有意义），改报 P2「无法判定」。
 NEWS_MIN_KNOWN = 10
+
+#: v0.45.569：Step 2 用掉**它自己的超时预算**的这个比例即 P1「性能异常」（= 余量 < 25%）。预算是编排器按只数算的
+#: `STEP2_TIMEOUT`，经 status.json 的 `step2_budget` 进来 ⇒ 告警线随预算 / 名单长度移动，**不是秒数常数**。
+#: 此前是 `total_duration_seconds > perf_baseline_seconds(缺省 5.0，没有任何调用方传过) × 1.5`，而真实扫描 1200–3800 秒
+#: ⇒ 每个跑完的扫描日都报「性能下降 24000–76000%」（恒真闸，把人训练成忽略 P1）。
+#: 为什么以预算为尺：Step 2 超时 = 全有或全无、无同日重试，整天永久丢失（09-21 / 09-23）；用掉的比例就是「离丢一天还差多远」。
+#: 标定（编排器日志「Step 2 预算余量」，09-22…10-20 共 20 个 30 只扫描日，各按当天预算）：正常日用掉 17–68%
+#: （3600s 预算时代多在 55–68%，5400s 起 36%）；09-24（yfinance 429 风暴）74% 不响；10-12（余量 13%，唯一擦边）87% 响；
+#: 09-23（CBOE 陈旧级联）外推 ≈4900/5400 = 91% 响。⚠️ 75% 是主观取值、未经前向检验。
+#: 守卫 `tests/test_alert_step2_budget.py`：真实日回放 + 正常日离告警线 ≥1.25 倍 + 告警线低于超时本身（两头都钉）。
+STEP2_BUDGET_USED_P1 = 0.75
+
+#: v0.45.578：partial 兜底告警列「非正常结局的步骤」时视为正常的取值（只影响展示，不影响是否报警）。
+_STEP_OK_STATUSES = frozenset({"success", "complete", "skipped", "skipped_builtin", "skipped_manual"})
+
+
+def _finite_number(x) -> bool:
+    """int / float、非 bool、有限值。JSON 里的 null / 字符串 / NaN 都不算。"""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 
 
 def _ran_from_production_clone(scan_timing: Dict) -> bool:
@@ -119,9 +139,10 @@ class Alert:
 class AlertAnalyzer:
     """告警分析引擎"""
 
-    def __init__(self, report_dir: Path = None, perf_baseline_seconds: float = 5.0):
+    def __init__(self, report_dir: Path = None):
+        # v0.45.569：删掉 `perf_baseline_seconds=5.0`——性能告警线改由 status.json 的 Step 2 预算导出
+        # （见 `STEP2_BUDGET_USED_P1`）。别再加秒数常数基线：没有调用方会传，缺省值就是生产值。
         self.report_dir = report_dir or PATHS.home
-        self.perf_baseline = perf_baseline_seconds
         self.alerts: List[Alert] = []
         # v0.45.47：记录**哪些检查没能执行**。
         # 「零告警」有两种完全不同的成因——「查过了，没问题」与「根本没查成」，
@@ -190,6 +211,19 @@ class AlertAnalyzer:
                     },
                     ["step_failure", step_name]
                 ))
+            elif step_result.get('status') == 'timeout':
+                # v0.45.578：编排器对 Step 3 rc=124 记 timeout 并置 partial（Step 2 超时同样有 timeout 这个取值），
+                # 此前只认 failed ⇒ 超时那轮零告警；v0.45.569 删掉恒真的性能 P1 之后会报「system healthy」。
+                self.alerts.append(Alert(
+                    AlertLevel.HIGH,
+                    f"⚠️ 【P1 高】步骤超时：{step_name}",
+                    {
+                        "步骤": step_name,
+                        "耗时": f"{step_result.get('duration_seconds', 'N/A')}秒",
+                        "状态": "超时被杀",
+                    },
+                    ["step_failure", step_name]
+                ))
             elif step_name == 'step2_hive_analysis' and step_result.get('status') == 'success_with_warning':
                 # v0.45.386（编排器 B2）：rc=1 但主流程确实跑完 ⇒ 解释器记 success_with_warning（此前是 failed，
                 # 且 step4_dashboard 也记 failed，共两条 P1）。这是 rc=1 跑完的日子（09-24 / 09-25；09-25 是 ML 近常数，
@@ -223,20 +257,8 @@ class AlertAnalyzer:
                     ["step_interp_fallback", step_name]
                 ))
 
-        # 3. 检测 P1: 性能异常 (>150% baseline)
-        total_duration = status.get('total_duration_seconds', 0)
-        if total_duration > self.perf_baseline * 1.5:
-            self.alerts.append(Alert(
-                AlertLevel.HIGH,
-                "⚠️ 【P1 高】性能异常",
-                {
-                    "实际耗时": f"{total_duration}秒",
-                    "基线耗时": f"{self.perf_baseline}秒",
-                    "性能下降": f"{(total_duration / self.perf_baseline - 1) * 100:.1f}%",
-                    "建议": "检查系统负载，优化缓慢的步骤"
-                },
-                ["performance"]
-            ))
+        # 3. 检测 P1: 性能异常——Step 2 逼近它自己的超时预算（v0.45.569；此前 5 秒常数基线比总耗时，恒真）
+        self._check_step2_budget(status)
 
         # 4. 检测 P1: 数据异常 (无报告生成)
         report_file = self.report_dir / f"alpha-hive-daily-{datetime.now().strftime('%Y-%m-%d')}.md"
@@ -301,6 +323,7 @@ class AlertAnalyzer:
         self._check_portfolio_greeks_prices(status)
         self._check_paper_portfolio_run(status)
         self._check_ledger_io_failures(status)
+        self._check_strangle_shadow(status)
         self._check_history_fill(status)
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
@@ -318,7 +341,115 @@ class AlertAnalyzer:
         # 12. 检测 P2: H1 原始观测溯源不全（v0.45.568，buzz_v1 根治阶段 1）
         self._check_observation_archive(status)
 
+        # 13. 检测 P1: 标的丢失 / 完整性判不了（v0.45.578）
+        self._check_ticker_completeness(status)
+
+        # 14. 兜底 P1: status=partial 却没有任何 P0 / P1 说明原因（v0.45.578）——必须排在所有检查之后
+        self._check_partial_explained(status)
+
         return self.alerts
+
+    def _check_ticker_completeness(self, status: Dict) -> None:
+        """编排器标的完整性闸的结局（`steps_result.ticker_completeness`，v0.45.4 起写）→ 告警（v0.45.578）。
+
+        此前本类不读它：丢了几只（incomplete）/ 判不了（unknown）时编排器置 partial、只打 ERROR 日志，alerts 里一条
+        都没有——一直被恒真的性能 P1 碰巧遮住，v0.45.569 删掉那条后会报「system healthy」。
+        判据是「不等于 complete 就报」，不是逐个列坏取值：编排器将来加的新取值默认会红。零产出写 failed 并置
+        status=failed ⇒ 上面 P0 先返回，到不了这里。Step 2 跑了却没有这一项 ⇒ checks_skipped。
+        """
+        steps = status.get("steps_result")
+        if not isinstance(steps, dict):
+            return
+        tc = steps.get("ticker_completeness")
+        if tc is None:
+            if "step2_hive_analysis" in steps:
+                self.checks_skipped.append("标的完整性检查（steps_result 缺 ticker_completeness）")
+            return
+        state = tc.get("status") if isinstance(tc, dict) else None
+        if state == "complete":
+            return
+        if state == "incomplete":
+            title = f"⚠️ 【P1 高】标的丢失：产出 {tc.get('actual', '?')}/{tc.get('intended', '?')} 只"
+        else:
+            title = f"⚠️ 【P1 高】标的完整性无法判定（{state if state else tc!r}）"[:120]
+        self.alerts.append(Alert(
+            AlertLevel.HIGH,
+            title,
+            {"结局": tc if isinstance(tc, dict) else repr(tc),
+             "影响": "缺的标的这一天没有预测 / 快照 / T+7 观测（永久缺口）",
+             "建议": "编排器日志「标的丢失」行列出缺哪几只；查 alpha_hive.log 带调用栈的「并行分析失败」"},
+            ["ticker_completeness", "data_quality"]
+        ))
+
+    def _check_partial_explained(self, status: Dict) -> None:
+        """兜底：status=partial 但本轮分析没产出任何 P0 / P1 ⇒ P1（v0.45.578）。
+
+        partial 只由编排器在某一步出问题时置（Step 2 rc≠0、标的丢失 / 判不了、Step 3 超时 / 失败 / 无产出、gh-pages
+        失败……）。上面各条按步骤认得出的都会报；这条只接「编排器新加了一个置 partial 的分支、本类还不认识」——
+        否则那一轮就是「整体 partial + alerts 为空 + 日志写 system healthy」。
+        """
+        if status.get("status") != "partial":
+            return
+        if any(a.level in (AlertLevel.CRITICAL, AlertLevel.HIGH) for a in self.alerts):
+            return
+        steps = status.get("steps_result")
+        odd = {}
+        if isinstance(steps, dict):
+            # 没有 status 键的片段（如 step2_price_gate 的 attempts / refused）是附带信息，不列
+            odd = {k: (v.get("status") if isinstance(v, dict) else repr(v)) for k, v in steps.items()
+                   if not isinstance(v, dict) or ("status" in v and v.get("status") not in _STEP_OK_STATUSES)}
+        self.alerts.append(Alert(
+            AlertLevel.HIGH,
+            "⚠️ 【P1 高】整体状态 partial，但没有任何具体告警说明原因",
+            {"非正常结局的步骤": odd or "无（steps_result 里每一步都正常——编排器在别处置了 partial）",
+             "影响": "本类不认识的那种 partial：先查编排器日志里的 ERROR / set_status partial 来自哪一步",
+             "建议": "定位后在 alert_manager 给那一步补一条具体告警，本条兜底才不会再响"},
+            ["partial_unexplained", "observability"]
+        ))
+
+    def _check_step2_budget(self, status: Dict) -> None:
+        """Step 2 用掉了自己超时预算的多少（v0.45.569，`status.step2_budget`，写入者编排器 `write_status`）。
+
+        v0.45.569 前这里比的是 `total_duration_seconds > perf_baseline_seconds × 1.5`，基线缺省 5.0 秒、没有调用方传过；
+        09-22 起每个跑完的扫描日都出这条 P1（10-05…10-20 的 alerts-*.json 全有，「性能下降」20000–76000%）。
+        现在的判据只有一个：Step 2 耗时 ÷ 它的超时预算 ≥ `STEP2_BUDGET_USED_P1`。全流程总耗时不再是判据——
+        非 Step 2 部分 10-20 只有 27 秒。⚠️ v0.45.569 这里原写「其余各步有自己的超时与失败告警」，**不实**：当时只认
+        failed，Step 3 超时 / 标的丢失置 partial 却零告警，此前全靠恒真的本条碰巧遮住；v0.45.578 补了 timeout、
+        `_check_ticker_completeness` 与 partial 兜底 `_check_partial_explained`。
+
+        - 预算字段可用 ⇒ 照判（不看 Step 2 成没成功：跑到一半崩掉时耗时同样说明问题；超时被杀且零产出那轮
+          status=failed，上面 P0 先返回，没走到 P0 的超时余量≈0，在这里响）。
+        - Step 2 记在 steps_result 里、预算字段却缺 / 不是有限数 / 预算 ≤0 ⇒ checks_skipped（没查成，不是没问题）。
+        - Step 2 根本没跑（steps_result 里没有它）且无预算 ⇒ 无可判，不记。
+        """
+        b = status.get("step2_budget")
+        timeout = b.get("timeout_seconds") if isinstance(b, dict) else None
+        used = b.get("duration_seconds") if isinstance(b, dict) else None
+        if not (_finite_number(timeout) and _finite_number(used) and timeout > 0 and used >= 0):
+            steps = status.get("steps_result")
+            if isinstance(steps, dict) and "step2_hive_analysis" in steps:
+                self.checks_skipped.append(f"Step 2 预算余量检查（status.json 的 step2_budget 不可用：{b!r}）"[:240])
+                _log.warning("step2_budget 不可用（%r）—— **性能（Step 2 预算余量）检查未执行**", b)
+            return
+        frac = used / timeout
+        if frac < STEP2_BUDGET_USED_P1:
+            return
+        tickers = status.get("tickers")
+        n = len(tickers) if isinstance(tickers, list) else "?"
+        self.alerts.append(Alert(
+            AlertLevel.HIGH,
+            f"⚠️ 【P1 高】性能异常：Step 2 用掉超时预算的 {frac:.0%}（告警线 {STEP2_BUDGET_USED_P1:.0%}）",
+            {
+                "Step 2 耗时": f"{used:.0f}秒",
+                "超时预算": f"{timeout:.0f}秒（{n} 只）",
+                "余量": f"{timeout - used:.0f}秒",
+                "全流程耗时": f"{status.get('total_duration_seconds', 'N/A')}秒",
+                "后果": "Step 2 超时 = 全有或全无、无同日重试，整天永久丢失（09-21 / 09-23 先例）",
+                "建议": "看 status.json 的 scan_timing.phases 哪段变长；查 counters.yfinance.rate_limited（429）与 "
+                        "counters.cboe.stale（09-23 CBOE 陈旧级联、09-24 / 10-12 429 风暴）",
+            },
+            ["performance"]
+        ))
 
     def _check_observation_archive(self, status: Dict) -> None:
         """BuzzBee 四个情绪通道的原始观测溯源是否完整（v0.45.568，`scan_timing.extra.observation_archive`，写入者
@@ -870,6 +1001,37 @@ class AlertAnalyzer:
             ["ledger_io", "data_quality"]
         ))
 
+    def _check_strangle_shadow(self, status: Dict) -> None:
+        """影子宽跨记录没写成（v0.45.586；`straddle_strangle_shadow.stats()` 经 scan_timing 进来）。
+
+        三处只记录的挂接点（信号行的影子宽跨报价 / 账本开仓的影子记录 / 账本平仓的假想盈亏）都被包在「不得影响主流程」的
+        except 里——账本照开照平、扫描照跑，所以记录丢了没人会知道，而预注册检验的样本就这样悄悄少一笔。`errors`（记录没写成的
+        次数）> 0 ⇒ P2；不可成交 / 没有信号记录 / 平仓无价是**数据**（协议 §4 如实报告），不在这里报警；计数缺失 ⇒ checks_skipped。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        ss = (st.get("counters") or {}).get("strangle_shadow")
+        if not isinstance(ss, dict):
+            self.checks_skipped.append("影子宽跨记录检查（scan_timing 无 strangle_shadow 计数）")
+            return
+        if not ss.get("errors"):
+            return
+        items = ss.get("items") or []
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】影子宽跨记录没写成 {ss['errors']} 次：预注册检验（experiments/straddle_strangle_shadow_prereg.md）"
+            f"的样本少了对应的单位",
+            {
+                "明细": "；".join(f"{i.get('kind')} {i.get('ticker') or '—'}：{i.get('detail')}" for i in items[:5])
+                        + (f"（另 {ss['errors'] - 5} 次略）" if ss["errors"] > 5 else ""),
+                "影响": "账本本身不受影响（开仓、平仓、现金都照常）；受影响的那笔没有影子记录，不进检验",
+                "建议": "看 alpha_hive.log 里「影子宽跨」的 WARNING（带堆栈）；signal_error ⇒ 信号行没带影子宽跨报价，"
+                        "entry_error / exit_error ⇒ 那笔持仓 / 平仓记录的影子记录缺失或标 error。"
+                        "修好后已丢的记录补不回（入场时点的报价没了），如实在检验里按 no_record 计数",
+            },
+            ["strangle_shadow", "data_quality"]
+        ))
+
     def _check_history_fill(self, status: Dict) -> None:
         """momentum_5d / volume_ratio / volatility_20d 过了取数出口的回落仍缺（v0.45.473；volatility v0.45.557；
         `data_pipeline.history_fill_stats` 经 scan_timing 进来）。
@@ -963,7 +1125,7 @@ class AlertDispatcher:
         # 明令只进日志的那一类；告警本身已由 `main()` 写入 alerts-*.json 与日志。
         # 编排器 Step 6 不带 `--dispatch`，故生产此前未走到这里；堵的是手动那条路。
         if self.config.get('slack_enabled', False):
-            _log.info("ALERT_CONFIG.slack_enabled 被忽略：Slack 只许发 LLM 模式确认与富文本日报"
+            _log.info("ALERT_CONFIG.slack_enabled 被忽略：Bot 不发任何 Slack 消息"
                       "（CLAUDE.md「Slack 通知精简规则」），告警只写 alerts-*.json 与日志")
 
         if self.config.get('email_enabled', False):

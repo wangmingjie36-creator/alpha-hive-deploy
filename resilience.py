@@ -154,7 +154,8 @@ class CircuitBreaker:
            的 Step 2 与 Step 3）之后，扫描进程都是**一行日志不再打、直到被编排器
            超时杀掉**——与死锁吻合；生产侧因果未取线程转储，待验证。
 
-        守卫：`tests/test_slack_send_whitelist.py`（静态白名单 + 本函数的死锁回归）。
+        v0.45.575 起 Slack 发送代码与 `slack_breaker` 已整个删除，上面是历史。
+        守卫：`tests/test_slack_send_whitelist.py`（静态白名单 + 本函数「打开时必须返回」的回归）。
         """
         with self._lock:
             self._failure_count += 1
@@ -268,7 +269,6 @@ _sessions_lock = threading.Lock()
 _SOURCE_TIMEOUTS = {
     "sec_edgar": 15,
     "reddit": 15,
-    "slack": 20,
     "default": 15,
 }
 
@@ -379,5 +379,4 @@ reddit_breaker = CircuitBreaker("reddit", failure_threshold=5, recovery_timeout=
 # v0.40.0: finviz_limiter/finviz_breaker/stocktwits_limiter 已随
 # finviz_sentiment.py / stocktwits_sentiment.py 模块删除一并移除
 
-# Slack webhook: 低频发送
-slack_breaker = CircuitBreaker("slack", failure_threshold=3, recovery_timeout=300.0)
+# v0.45.575：slack_breaker 与 "slack" 会话超时随 slack_report_notifier（唯一使用者）一并删除——Bot 不发任何 Slack 消息。

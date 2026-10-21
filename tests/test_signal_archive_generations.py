@@ -325,9 +325,23 @@ import ast
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent.parent
-_BEE_MODULES = {m: _REPO / "swarm_agents" / f"{m}.py"
-                for m in ("scout_bee", "oracle_bee", "buzz_bee", "chronos_bee",
-                          "rival_bee", "guard_bee", "bear_bee")}
+#: swarm_agents/ 下**不扫**的模块 → (理由, 是否允许出现 board)。其余 *.py 一律当「可能读同伴的蜂」扫——
+#: 清单由目录推出（v0.45.587；此前手写 7 个名字，新加一个读同伴的蜂模块守卫照样全绿，实测）。
+#: 允许 False 的条目由 `test_module_inventory_is_complete` 核「源码里确实没有 board」，理由不是只写在这里。
+_NOT_BEE_MODULES = {
+    "__init__": ("包入口，只做导出", False),
+    "_config": ("配置常量", False),
+    "cache": ("缓存工具", False),
+    "utils": ("打分 / 错误结果工具函数", False),
+    "sentiment": ("BuzzBee 的情绪计算辅助，不持有 board", False),
+    "base": ("读板机制本身（`_read_peer` 定点索引 + 排行榜回退、`publish`），读法由 "
+             "tests/test_bear_bee_census_eviction.py 等专门测试管；各蜂经 `self._read_peer` 的调用在蜂模块里被扫", True),
+    "queen_distiller": ("汇总层：读板结果（共振、快照）只进 composite.final_score——ALWAYS_SLICED、受全部边界约束，"
+                        "不产生依赖边", True),
+}
+_BEE_MODULES = {p.stem: p for p in sorted((_REPO / "swarm_agents").glob("*.py"))
+                if p.stem not in _NOT_BEE_MODULES}
+#: 不在 swarm_agents/ 里的 Phase-1 蜂（`_PHASE1` 里的 CodeExecutorAgent）
 _BEE_MODULES["code_executor_agent"] = _REPO / "code_executor_agent.py"
 
 #: 读板的机制本身（不是消费者）：它们的内部读法由各自的专门测试管（定点索引 / 普查回退）
@@ -482,6 +496,7 @@ def _board_read_sites():
         for meth, fn in _functions(_parse(path)).items():
             if (mod, meth) in _MECHANISM_METHODS:
                 continue
+            problems += [f"{mod}.{meth}: {p}" for p in _escaped_board_uses(fn)]
             for n in ast.walk(fn):
                 how = None
                 if isinstance(n, ast.Call):
@@ -510,14 +525,41 @@ def _board_read_sites():
     return sites, problems
 
 
+def _escaped_board_uses(fn) -> list:
+    """`self.board` 出现在 AST 追不到读法的位置 ⇒ 每处一条问题（v0.45.587）。
+
+    认得的用法只有：`self.board.<属性>`、`getattr(self.board, "<名>")`、直接作为参数交给已登记的读板函数
+    （`_BOARD_FUNCS`）、真假判断（`if self.board` / `and` / `not` / `is None`）、以及给它赋值。
+    其余——赋给别名（`b = self.board; b.get_live_signals(t)`）、当参数传给别的函数、放进容器——读法都看不见，
+    此前一律静默绿（实测：Rival 里经别名读普查，本守卫全绿）。
+    """
+    parent = {c: p for p in ast.walk(fn) for c in ast.iter_child_nodes(p)}
+    out = []
+    for n in ast.walk(fn):
+        if not _is_self_board(n) or isinstance(n.ctx, ast.Store):
+            continue
+        p = parent.get(n)
+        ok = ((isinstance(p, ast.Attribute) and p.value is n)
+              or (isinstance(p, ast.Call) and _call_name(p) == "getattr" and p.args and p.args[0] is n)
+              or (isinstance(p, ast.Call) and _call_name(p) in _BOARD_FUNCS and n in p.args)
+              or (isinstance(p, ast.keyword) and isinstance(parent.get(p), ast.Call)
+                  and _call_name(parent[p]) in _BOARD_FUNCS)
+              or (isinstance(p, (ast.If, ast.IfExp, ast.While)) and p.test is n)
+              or isinstance(p, ast.BoolOp)
+              or (isinstance(p, ast.UnaryOp) and isinstance(p.op, ast.Not))
+              or (isinstance(p, ast.Compare) and all(isinstance(o, (ast.Is, ast.IsNot)) for o in p.ops)))
+        if not ok:
+            out.append(f"第 {n.lineno} 行 `self.board` 被赋给别名 / 外传（{type(p).__name__}），"
+                       "AST 追不到读了谁、读了什么——改成直接 `self.board.<方法>` 或 `self._read_peer`，或登记新写法")
+    return out
+
+
 def _entry_reads(fn, var: str) -> set:
     """方法 `fn` 里读了绑定在 `var` 上的条目的哪些字段：属性、`getattr(var, "x")`、details 的键。"""
-    fields, details_vars, details_direct = set(), set(), []
+    fields, details_vars = set(), set()
     for n in ast.walk(fn):
         if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == var:
             fields.add(n.attr)
-            if n.attr == "details":
-                details_direct.append(n)
         elif (isinstance(n, ast.Call) and _call_name(n) == "getattr" and len(n.args) >= 2
               and isinstance(n.args[0], ast.Name) and n.args[0].id == var
               and isinstance(n.args[1], ast.Constant)):
@@ -665,6 +707,26 @@ def _pairs_from_table(kinds=("peer", "census"), on="9999-12-31") -> set:
 
 
 class TestPeerReadEdgesMatchCode:
+
+    def test_module_inventory_is_complete(self):
+        """扫哪些模块由 swarm_agents/*.py 推出；排除项必须真实存在，声称「不碰 board」的源码里确实没有 board。
+        变红的变异：新建一个读同伴的 swarm_agents 模块（被扫 ⇒ 位点没登记而红）；排除项里写一个不存在的模块名。"""
+        stems = {p.stem for p in (_REPO / "swarm_agents").glob("*.py")}
+        assert set(_NOT_BEE_MODULES) <= stems, f"排除项里有不存在的模块：{sorted(set(_NOT_BEE_MODULES) - stems)}"
+        assert stems - set(_NOT_BEE_MODULES) == set(_BEE_MODULES) - {"code_executor_agent"}
+        touching = [m for m, (_why, may) in _NOT_BEE_MODULES.items()
+                    if not may and "board" in (_REPO / "swarm_agents" / f"{m}.py").read_text(encoding="utf-8")]
+        assert not touching, f"{touching} 登记为不碰 board，源码里却出现了 board —— 移出排除项让守卫扫它"
+        assert {"scout_bee", "rival_bee", "guard_bee", "bear_bee"} <= set(_BEE_MODULES), "推出的清单漏了已知读同伴的蜂"
+
+    def test_alias_board_use_is_flagged(self):
+        """正反对照：别名读板要报出来；直接 `self.board.<方法>`、`if self.board`、传给已登记的读板函数不报。"""
+        bad = ast.parse("def f(self, t):\n    b = self.board\n    return b.get_live_signals(t)\n").body[0]
+        good = ast.parse("def f(self, t, s):\n    if self.board and self.board is not None:\n"
+                         "        get_real_crowding_metrics(t, s, self.board, peer_census=False)\n"
+                         "        return self.board.get_live_signals(t)\n").body[0]
+        assert len(_escaped_board_uses(bad)) == 1, _escaped_board_uses(bad)
+        assert _escaped_board_uses(good) == [], _escaped_board_uses(good)
 
     def test_every_board_read_site_is_registered(self):
         """位点多一个少一个都红：新加一处 `_read_peer` / 普查却没登记数据流 ⇒ 依赖表无从对账。"""

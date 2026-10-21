@@ -87,9 +87,13 @@
   - **「对冲」页（v0.45.459）** `alphabot/hedge.py`：组合 Greeks 的纸面 SPY 覆盖账本（持仓 / 现金 / 成交 / 净值 / 每日带位）。**只读**，数据只经 `portfolio_greeks.ledger_view()`（历史走 `load_history` 放行闸，被拦记录只给计数；本模块不读文件，AST 测试钉住）。守卫 `tests/test_alphabot_hedge.py`
   - **「溢价」子页（v0.45.492）** `alphabot/premium.py`：单票全链按 IV ÷ 期限匹配 RV 排序（筛选工具，**未经前向检验**）。纯函数（AST 守纯度），外部函数经 `Deps` 由 service 注入；取链只经 `_premium_fetch`、**不清 CBOE 进程缓存**（盘中自动刷新走 `refresh=1` ⇒ 先 `live(force=True)` 再算，v0.45.536）；「首选」卡片 `premium.picks` 在截断前挑、只排除**已知且权威**的风险（财报日 / ≤2 天 / 无 RV），判不了、期限结构鼓包（启发式）、盘中未成交都只标注（v0.45.536 / 539）；前端子页活性 = 路由活 **且** 自己的容器还挂着（「重新拉取」在同一路由里重建子页，旧实例的定时器否则会在后台续拉，v0.45.539）；财报日取卖权账本里最近一次有效扫描的 Chronos 日期，**不读** `earnings_cache` 兜底缓存（实测有日期偏晚、会把「到期前」判成「到期后」）；IV 历史 / VRP 账本只读（`_read_index`、缓存目录不 mkdir）。筛→排→截断都在服务端；原因码唯一表 `REASONS`（AST 双向对账）。守卫 `tests/test_alphabot_premium.py`
   - **「跨式」页（v0.45.424）** `alphabot/straddle.py`：财报跨式纸面账本的持仓 / 平仓 / 逐仓 Greeks / 盘中参考报价（`cboe_options.quote_held`）。**只读**，不写账本、不拿账本 mark 顶替拿不到的报价；**不显示任何一笔的 `gex_ctx`**（跨式 GEX 预注册的盲期，协议 `experiments/straddle_gex_prereg.md`，冻结只经 `straddle_gex_prereg.py --run-once`）。信号行的 `gex_ctx` 只记录、不进开单（守卫 `tests/test_straddle_gex_shadow.py`、`tests/test_alphabot_straddle.py`）
+  - **「跨式 vs 宽跨」对比卡（v0.45.584）** `alphabot/strangle_compare.py`：同一份当日快照的 ATM 跨式与 25Δ 宽跨并排（权利金 / 进出成本 / 点差旗标 / 盈亏平衡带 / 历史涨跌落在带外 k/n / 按账本定仓的张数）。⚠️ **只并排事实、没有推荐字段**（系统里已结算事件极少，任何「按标的选结构」都是拟合；测试钉住键名）；账本按权利金定仓 ⇒ 宽跨张数是跨式的数倍，名义风险不一定更小
+  - **影子宽跨记录（v0.45.586，协议 `experiments/straddle_strangle_shadow_prereg.md` v1）** `straddle_strangle_shadow.py`：信号行 `strangle_quote` / 持仓 `shadow_strangle` / 平仓记录里的假想盈亏，**只记录、不进任何判断**（守卫 `tests/test_straddle_strangle_shadow.py`：有无记录的账本行为差分 + AST 读者白名单）。⚠️ **盲期：冻结前不得把某笔的影子盈亏与它的跨式盈亏拼在一起看**（含「看看 T 那一笔」；`closed_trades.jsonl` 里两个盈亏都在，是信息论上盲不了、靠纪律）；登记前入场的 8 笔不进检验；进度 `/usr/local/bin/python3 straddle_strangle_shadow.py`，冻结只经 `--run-once`。记录失败在源头登记（scan_timing `strangle_shadow` → alert_manager P2）
 - **账本读写** `ledger_io.py`（v0.45.448；v0.45.452 加整文件文档 `write_json` / `load_json`）：加锁（目录 flock，同进程可重入）+ 原子替换 + 严格序列化（拒 NaN / 非对象）+ 写后回读；读到坏行 / 坏文档抛 `LedgerCorrupt`（外部损坏 ⇒ 停下、从备份恢复，**不跳过、不当新账本**——`meta.json` 里存着现金）。失败在它**源头**登记（`failures()` ⇒ status.json ⇒ P2），调用方吞异常也照红。⚠️ 新账本 / 状态写入**一律走它**，可再生缓存走 `hive_logger.atomic_json_write`；守卫 `tests/test_ledger_writes_go_through_ledger_io.py` 按**写入落点**认（不看函数名），存量 84 处逐条按类别登记在 `WRITERS`，「待迁移」类有上限、只许减
 - **财报日唯一入口** `earnings_calendar.py`（v0.45.500）：唯一日历解析器 + 读取入口（读本轮 / 已落盘的 ChronosBee `details.earnings_calendar` 按日观测，**不打网**）；扫描、卖权 / 跨式账本、展示一律经它。`EarningsWatcher.get_earnings_date` 与 `earnings_cache/{T}_date.json` 只服务 `--check-earnings`，**不得被别处读**（守卫 `tests/test_earnings_calendar.py::TestSingleEntry`）。ChronosBee 评分口径（丢当天财报）刻意不动——改它截断维度 IC 协议 H2
 - **H1 原始观测档案** `observation_archive.py`（v0.45.568，buzz_v1 根治阶段 1）：喂 Buzz 四个情绪通道的原始取数（Reddit 两张榜 / 新闻条目 / 热搜表 / F&G）在取数处**内容寻址**落档（`PATHS.observation_archive`），每个分数经 `details.observations` → `observation_links` 表（与 `buzz.comp.*` 同一事务）指出它用的是哪一份。只在扫描进程 `enable()` 后写盘，**只存、不改值**；缺链接 / 不在档 / 落盘失败 ⇒ P2。⚠️ 给 H1 通道加取数源 = 在 `KINDS` 登记 + 取数处 `observe`，否则阶段 2 的冻结通道层重算不了。守卫 `tests/test_observation_archive.py`
+  - **观测层** `observation_layer.py`（v0.45.580 起，取数与解释分家的第一块）：行情日线（`yf_history`）与交易所时钟（`spy_last_minute`）从这里取、取到即落档、返回内容不变；`data_pipeline` 三条路径把用了哪几份登记进 `StockData.observations`（回落补上的登 None = 用了但没存）。版本号 `observation_archive.LAYER_VERSION`；⚠️ **改它的源 / 参数 / 兜底顺序 = 新版本**（buzz_v1 固定用旧版本，双版本接线在「观测层版本化」那步做），在那之前它整份在输入层指纹 `price.fields` 里。守卫 `tests/test_price_observations.py`
+  - **冻结通道层** `buzz_v1_channels.py`（v0.45.583，根治阶段 2）：原始观测 → 7 个通道，逐字抄窗口起点 10-12 的代码（纯 Python、不 import 生产代码 / config / pandas，数值逐位复刻 numpy 成对求和）；`buzz_v1.py --bridge` 逐日核对它与入档通道逐位相等，结果进维度 IC 进度行（阶段 4 前只是进度）。⚠️ 照抄的含义是**不修**窗口起点的怪行为（新闻时效加权死代码、F&G 兜底加密指数……），要修 = 新定义重新登记；阶段 4 前生产改了这些通道算法 / 常数 ⇒ `tests/test_buzz_v1_channels.py` 的常数对照与差分对拍开发期红
 - **月度自诊断** `self_analyst.py`（Track B）：输出 `self_analysis_briefs/YYYY-MM.md`，含每蜂维度 rank-IC 小节（v0.40.0）
 - **LLM 影子 A/B（v0.45.555）** `llm_shadow_scan.py`（入口）+ `llm_shadow_report.py`（读者）+ `experiments/llm_shadow_prereg.md`（预注册，**看数据之前写的**）：生产永远 `--no-llm`，想知道「LLM 开是否更准」只能前瞻——每天紧随生产 14:00 扫描之后，在**独立数据根**（缺省生产根的同级 `alpha-hive-llm-shadow`）里开着 LLM 再跑一遍，**只记录、不进评分**。不变式：① **两进程**——`config.py` 在 import 期固化 `PATHS.*`，不能在已 import 的进程里改数据根，扫描必须在以影子根起的新子进程里跑（子进程开扫前核对 config 无任何值指向生产根）；② 缺省 `--plan` 不花钱，`--run` 还须环境变量 `ALPHA_HIVE_LLM_SHADOW_SPEND=1`，**首次真跑必须先问用户**（费用 / 上限常量在 `llm_shadow_scan.py`）；③ ⚠️ **影子里的 `rule_score` 不是规则臂**（蜂层面的 LLM 已混进维度分，只隔离 Queen 那层）——规则臂 = **生产同日同标的的结果**；④ 不健康的一天（预算 / 定价拒绝、截断 / JSON 失败率超阈值、蒸馏没走 LLM）整天不入比较；⑤ 提示词 / 模型 / `max_tokens` / 精简规则任一改动 ⇒ 新一代、重新计数；⑥（v0.45.560）**一天只许付费跑一次**——$3 上限只在进程内计，跨进程靠 `shadow_status/<日期>.json` 挡（子进程起飞前先落占位；`--control` 写 `<日期>.control.json` 分文件）。`llm_service` 的相关护栏：未登记定价的模型一律拒绝、5.5 代模型不传 `temperature`、成本公式里 `usage.input_tokens` **不含**缓存 token。⚠️ **没接 launchd / 编排器**，接入前读 auto-memory `alpha-hive-llm-ab-pilot.md`。守卫 `tests/test_llm_service_5_5_models.py`、`tests/test_llm_shadow_scan.py`、`tests/test_llm_shadow_report.py`
 - **IBKR 桥接** `ibkr_sync.py`：手动流程（export actions → 用户 TWS 下单 → import CSV → reconcile），状态在 `paper_account/`
@@ -220,6 +224,13 @@ harness 的不变式「拨整个世界、不拨一只钟」与已知漏点见 `t
 测试会话在 `tests/conftest.py::pytest_configure` **收集之前**设会话级 `ALPHA_HIVE_HOME` 沙箱，并记下调用时环境给
 「生产在哪」的守卫用——别把这个沙箱挪进 session 夹具（太晚，收集期冻住的常量会指向生产）。
 那个「生产在哪」也只从 `resolve_data_root` 来（v0.45.488：测试闸曾自己 expanduser，在 `~` / 相对值上与生产分岔；非绝对值改守缺省并在报告头说明），测试层只经 `tests/_root_data_guard.py::production_data_root` 一处推导（真实数据根闸与 paper_portfolio 真身夹具共用，v0.45.498）；把 `ALPHA_HIVE_HOME` 变成路径的只许 hive_logger，生产代码里每个写出这个键的地方双向登记在 `tests/test_data_root_default.py::ENV_KEY_SITES`（认常量本身、不认调用形状，v0.45.498）。
+
+**测试会话内核写沙箱（v0.45.573）**：macOS 上 `pytest_configure`（收集前）给测试进程树套 `sandbox_init` 禁写真实数据根（子进程继承），
+真实数据根闸改判「统一日志里的写拒绝」；Alpha Bot 盘中采样 / 每日扫描在沙箱外照写、**不再让全量报 ERROR**
+（扫描那半 v0.45.577 才成立：逐条的 paper_portfolio 指纹夹具在沙箱覆盖真身时让位给内核）。
+并发测试会话护同一个根时，拒绝按 `/tmp/alpha-hive-write-sandbox-<uid>/` 里登记的进程号分归属（v0.45.577；内核日志只有 `进程(pid)`）：
+别的会话的不在本会话报红，**谁都没登记的照样红**并注明可能是谁的。
+沙箱里 exec 不了 setuid 程序（`/bin/ps` 用 `pgrep` 代替）、`log show` 跑不了（查日志助手在套沙箱前起）。设计与陷阱见 `tests/_write_sandbox.py`，守卫 `tests/test_write_sandbox.py`。
 
 **真实数据根闸的豁免只认断言、不认注释（v0.45.427）**：`PATHS` 落在闸豁免区（`logs/`、`db_backups/`、`_` 元目录）的属性必须恰好是
 `tests/test_root_data_guard.py::PATHS_IN_EXEMPT_AREAS_OK` 里写明「谁负责隔离」的几个——新增属性落进 `_` 目录会红，让它受闸
@@ -529,12 +540,13 @@ QueenDistiller 职责：
 - 测试与调试始终使用 `--no-llm`，不消耗 API 费用。
 
 ### Slack 推送规则
-- **富文本日报**（每日扫描结果）：由 **Claude Code 内置 Slack MCP 工具**（`slack_send_message`）直接推送到 **#alpha-hive 频道**（Channel ID: `C0AGUUWJXJS`），无需维护 user token 文件。
+- **频道推送只走 Claude Code 内置 Slack MCP 工具**（`slack_send_message`）→ **#alpha-hive 频道**（Channel ID: `C0AGUUWJXJS`）；现在只有月度自诊断定时任务在用。
+  ⚠️ **每日富文本日报目前没有任何自动推送**（2026-10-21 核：频道里只有 09-03 / 10-03 两条月度自诊断，`alpha-hive-daily-scan` 定时任务未注册）；Bot 侧的 `push_report_to_slack.py` 已于 v0.45.571 随编排器 Step 7 删除（不传 `--force` 恒 exit 2，从没推过）。**用户 2026-10-21 定：现在不需要每日日报推送**——别再提议恢复，用户主动要再做。
 - **扫描确认通知**（"是否启用 LLM？"）：**已删除**（v0.45.510 停用、v0.45.514 删 `pre_scan_notify.py`）。编排器永远 `--no-llm`（`tests/test_orchestrator_never_enables_llm.py` 钉住），墓碑 `tests/test_slack_send_whitelist.py::TestPreScanNotifyStaysRetired`；要跑 LLM 扫描只能由人在终端显式 `--use-llm`，且仍须先问费用。
-- 分工：Slack MCP 负责频道推送（富文本日报）；Bot DM 现在只剩「日报推送成功」一类（交互式的扫描确认已于 v0.45.514 删除）。
-- Bot Token 已配置（`~/.alpha_hive_slack_bot_token`），供 Bot DM 使用。
+- 分工：Slack MCP 负责频道推送；**仓库里没有任何 Slack 发送代码**（`slack_report_notifier.py` 连同 `resilience.slack_breaker`、`config.SLACK_CHANNEL_ID` 于 v0.45.575 删除，冻结副本只留作测试的正对照 `tests/fixtures/slack_report_notifier.py.frozen`）。
+- Bot Token 文件 `~/.alpha_hive_slack_bot_token` 仍在本机，但仓库里已无代码读它（`config._SECRET_REGISTRY` 与 `scan_secrets` 只是凭证登记 / 泄密扫描清单）。
 
 ### Slack 通知精简规则（减少噪音）
-- Bot **只发一类消息**：富文本日报推送成功（`push_report_to_slack.py`）。（原第二类「扫描前 LLM 模式确认」已于 v0.45.514 删除。）
+- Bot **不发任何消息**（`tests/test_slack_send_whitelist.py` 白名单为空）。原第一类「富文本日报」`push_report_to_slack.py` v0.45.571 删除（墓碑 `tests/test_step7_push_report_retired.py`），原第二类「扫描前 LLM 模式确认」v0.45.514 删除。加回任何一类先由用户改本条规则。
 - **禁止发送**以下类型的 Slack DM：扫描开始/完成通知、SLO 违规告警、权重自适应更新、数据质量降级预警、逐标的高分机会/低分预警、扫描失败通知。
 - 这些信息仅写入本地日志文件，不打扰用户。

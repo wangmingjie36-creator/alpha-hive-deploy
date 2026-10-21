@@ -41,7 +41,7 @@ def _get_secret(name: str) -> str:
     except Exception:  # noqa: BLE001
         import os as _os
         return _os.environ.get(name, "")
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, time as _dt_time
 
 _log = logging.getLogger("alpha_hive.data_pipeline")
@@ -64,14 +64,12 @@ def _exchange_now():
     with _EXCHANGE_NOW_LOCK:
         if _EXCHANGE_NOW_CACHE is not None:  # double-check：进锁后再判一次
             return _EXCHANGE_NOW_CACHE or None
-        try:
-            import yfinance as yf
-            intra = yf.Ticker("SPY").history(period="1d", interval="1m")
-            if not intra.empty:
-                _EXCHANGE_NOW_CACHE = intra.index[-1]
-                return _EXCHANGE_NOW_CACHE
-        except Exception:
-            pass
+        # v0.45.580：取数进观测层（取到 / 取不到都落档）；返回值与改前直接调 yfinance 逐位相同、异常同样吞掉
+        import observation_layer as _obs_layer
+        ts = _obs_layer.spy_last_minute()
+        if ts is not None:
+            _EXCHANGE_NOW_CACHE = ts
+            return _EXCHANGE_NOW_CACHE
         _EXCHANGE_NOW_CACHE = False
         return None
 
@@ -216,6 +214,9 @@ class StockData:
     session_close: Optional[Tuple[str, float]] = None
     # v0.45.473：已过出口回落（`_fill_history_fields`）。缓存存的是回落后的对象，命中时不重跑。不进 to_dict。
     history_checked: bool = False
+    # v0.45.580（buzz_v1 根治阶段 1b）：算出三个行情字段**实际用到**的原始观测 {键: 地址}，由那条路径自己登记——
+    # 主路径 `yf_daily` + `exchange_clock`；回落补上的字段登记 None（用了但没存）。进 to_dict（BuzzBee 写进溯源块）。
+    observations: Dict[str, Optional[str]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return {
@@ -235,6 +236,7 @@ class StockData:
             "fetch_timestamp": self.fetch_timestamp,
             "is_market_hours": self.is_market_hours,
             "price_source": self.price_source,
+            "observations": dict(self.observations),
         }
 
 
@@ -391,13 +393,14 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
     只能用 yfinance 历史K线实现——这是唯一有 start=/end= 历史区间能力的源。
     """
     try:
-        import yfinance as yf
+        import observation_layer as _obs_layer
         as_of = datetime.strptime(as_of_date, "%Y-%m-%d").date()
         from datetime import timedelta
         # 往前多拉 60 天，留够 20 日均量/5 日动量/20 日波动率的计算窗口
         start = as_of - timedelta(days=60)
         end = as_of + timedelta(days=1)  # yfinance end 是开区间，+1 天才含 as_of 当天
-        hist = yf.Ticker(ticker).history(start=start.isoformat(), end=end.isoformat())
+        # v0.45.580：取到即原样落档（补跑不看交易所时钟，只有日线这一份）
+        hist, _ref_daily = _obs_layer.yf_history(ticker, start=start.isoformat(), end=end.isoformat())
         if hist.empty:
             fb = StockData(data_source=DataQuality.FALLBACK).to_dict()
             fb["_data_unavailable"] = True
@@ -482,6 +485,7 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
             # ⚠️ volume_ratio 不给：它要拿**目标日**成交量比均量，
             # 而这条路径下目标日的量本来就没取到。用前一日的量冒充会静默失真。
             _d2.volume_ratio = None
+            _d2.observations = {"yf_daily": _ref_daily, "snapshot_close": None}   # v0.45.580：快照收盘尚未入档
             _r2 = _d2.to_dict()
             _r2["_as_of_date"] = as_of_date
             _r2["_price_from_cloud_snapshot"] = True
@@ -500,6 +504,7 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
             data_source=DataQuality.REAL,
             source_name="yfinance_historical",
             fetch_timestamp=time.time(),
+            observations={"yf_daily": _ref_daily},   # v0.45.580
         )
         if len(hist) >= 5:
             data.momentum_5d = float((hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100)
@@ -535,6 +540,19 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
         return fallback
 
 
+def _history_observations(ref_daily: Optional[str], n_raw: int) -> Dict[str, Optional[str]]:
+    """算出行情字段用到的原始观测（v0.45.580，buzz_v1 根治阶段 1b）：日线 + 判末根用到的交易所时钟。
+
+    时钟只在 `_drop_forming_bar` 真看过它时登记（≥ 3 根才看）——不为登记多发一次 SPY 请求。
+    值是 None = 用了但没存（地址算不出），BuzzBee 的溯源块据此记缺失（`observation_archive.buzz_refs`）。
+    """
+    import observation_layer as _obs_layer
+    obs: Dict[str, Optional[str]] = {"yf_daily": ref_daily}
+    if n_raw >= 3:
+        obs["exchange_clock"] = _obs_layer.clock_ref(_exchange_now())
+    return obs
+
+
 def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
     """P0-2 (v0.38.0): 从 yfinance 历史K线独立计算 momentum_5d / volume_ratio /
     avg_volume / volatility_20d（含 forming-bar 护栏）。
@@ -547,10 +565,11 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
     回落现在只在 `MultiSourceFetcher` 的唯一出口 `_fill_history_fields` 里做。
     """
     try:
-        import yfinance as yf
-        hist = yf.Ticker(ticker).history(period="1mo")
+        import observation_layer as _obs_layer
+        hist, _ref_daily = _obs_layer.yf_history(ticker, period="1mo")   # v0.45.580：取到即原样落档，返回内容不变
         if hist.empty or len(hist) < 2:
             return None
+        _n_raw = len(hist)
         hist = _drop_forming_bar(hist)
         if hist.empty or len(hist) < 2:
             return None
@@ -588,6 +607,7 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
 
         out["_price_from_hist"] = float(hist["Close"].iloc[-1])
         out["momentum_source"] = "yfinance"
+        out["_observations"] = _history_observations(_ref_daily, _n_raw)
         return out
     except Exception as e:
         _log.debug("_fetch_history_metrics %s failed: %s", ticker, e)
@@ -934,6 +954,7 @@ class CBOESource:
                 data.volume_source = "yfinance" if data.volume_ratio is not None else None
                 data.volatility_20d = metrics.get("volatility_20d")   # v0.45.3: 不再补 0.0
                 data.volatility_source = "yfinance" if data.volatility_20d is not None else None
+                data.observations = {**data.observations, **(metrics.get("_observations") or {})}   # v0.45.580
             else:
                 data.momentum_source = "unavailable"
                 _log.warning("[CBOE] %s 历史K线不可得，momentum_5d/volume_ratio 待出口回落", ticker)
@@ -957,12 +978,12 @@ class YFinanceSource:
         if not self.breaker.allow_request():
             return None
         try:
-            import yfinance as yf
-            t = yf.Ticker(ticker)
-            hist = t.history(period="1mo")
+            import observation_layer as _obs_layer
+            hist, _ref_daily = _obs_layer.yf_history(ticker, period="1mo")   # v0.45.580：取到即原样落档
             if hist.empty or len(hist) < 2:
                 self.breaker.record_failure("empty_history")
                 return None
+            _n_raw = len(hist)
 
             # v0.29.4 盘中护栏：丢弃"当日正在形成"的盘中 bar，确保下游
             # 价格/动量/成交量全用已收盘日线（盘中跑扫描时取的是收盘价而非盘中价）
@@ -1005,6 +1026,7 @@ class YFinanceSource:
                         data.volatility_20d = vol
                         data.volatility_source = "yfinance"
 
+            data.observations = _history_observations(_ref_daily, _n_raw)   # v0.45.580
             self.breaker.record_success()
             return data
 
@@ -1222,6 +1244,9 @@ def _fill_history_fields(ticker: str, data: StockData, path: str) -> None:
             if r and r.get("momentum_5d") is not None:
                 data.momentum_5d = r["momentum_5d"]
                 data.momentum_source = "price_index"
+                # v0.45.580：回落的原始输入阶段 1b 还没存 ⇒ 登记「用了但没存」。换新 dict、不就地改：
+                # StockData 在缓存 / 过期缓存路径上是浅拷贝，就地改会连带改到别的对象
+                data.observations = {**data.observations, "price_index": None}
                 data.momentum_as_of = r.get("momentum_as_of")
                 outcome["momentum"] = "filled"
                 window_behind = (data.session_close is not None
@@ -1243,6 +1268,7 @@ def _fill_history_fields(ticker: str, data: StockData, path: str) -> None:
                 data.volume_ratio = r["volume_ratio"]
                 data.avg_volume = r.get("avg_volume")
                 data.volume_source = "twelvedata"
+                data.observations = {**data.observations, "td_unadjusted": None}   # v0.45.580：同上
                 data.volume_as_of = r.get("volume_as_of")
                 outcome["volume"] = "filled"
             else:
@@ -1259,6 +1285,7 @@ def _fill_history_fields(ticker: str, data: StockData, path: str) -> None:
             if r and r.get("volatility_20d") is not None:
                 data.volatility_20d = r["volatility_20d"]
                 data.volatility_source = "twelvedata_adjusted"
+                data.observations = {**data.observations, "td_adjusted": None}   # v0.45.580：同上
                 data.volatility_as_of = r.get("volatility_as_of")
                 outcome["volatility"] = "filled"
             else:

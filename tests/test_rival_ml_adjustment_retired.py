@@ -169,9 +169,15 @@ class TestRivalHasNoModel:
         monkeypatch.setattr(rival, "_get_stock_data", lambda t: {"momentum_5d": 1.0})
         monkeypatch.setattr(rival, "_calc_technical_indicators",
                             lambda t: {"tech_score_adj": 0.0, "tech_direction": "neutral", "summary": ""})
-        before = PATHS.ml_model.exists()
+        # v0.45.570：`PATHS.ml_model`（ml_model.json）连同缺省路径已删 ⇒ 改比数据根整体（日志不算产物）
+        home = PATHS.home
+
+        def _files():
+            return {p.relative_to(home).as_posix() for p in home.rglob("*")
+                    if p.is_file() and p.relative_to(home).parts[0] != "logs"} if home.exists() else set()
+        before = _files()
         rival.analyze("TEST")
-        assert PATHS.ml_model.exists() == before, "RivalBee 又在写 ml_model.json 了"
+        assert _files() == before, f"RivalBee 往数据根写了文件：{sorted(_files() - before)}"
 
 
 # ══════════════════════════════════════════════════════════════════════════

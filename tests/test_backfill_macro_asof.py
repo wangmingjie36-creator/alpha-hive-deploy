@@ -22,7 +22,7 @@ import fred_macro as fm
 from is_trading_day import is_trading_day
 
 # 模块加载早于任何 fixture：此刻抓到的是真函数（下面有条测试要在桩之后换回真日历）
-_REAL_NEXT_EVENT = economic_calendar.get_next_event
+_REAL_UPCOMING = economic_calendar.get_upcoming_events
 
 D = "2026-08-27"
 # CBOE 官方收盘（2026-09-28 拉的 CSV）：08-26 15.21 / 08-27 14.51 / 08-28 14.43
@@ -324,8 +324,10 @@ class TestGuardBackfill:
                             lambda force_refresh=False: (self.live_vts.append(1), {"structure": "contango"})[1])
         self.cal_refs = []
         import economic_calendar
-        monkeypatch.setattr(economic_calendar, "get_next_event",
-                            lambda ref_date=None: (self.cal_refs.append(ref_date), None)[1])
+        # v0.45.582：GuardBee 的 FOMC 票改走 get_upcoming_events（看 3 天内全部事件）——桩打在它上面，
+        # 否则真日历漏进来：实时口径的测试会在每次 FOMC 前 3 天里多一张 risk_off 票（时间炸弹）
+        monkeypatch.setattr(economic_calendar, "get_upcoming_events",
+                            lambda days=30, ref_date=None: (self.cal_refs.append(ref_date), [])[1])
 
     def _snap_macro(self, **vix):
         return {"data_source": f"cloud_snapshot+treasury@{D}", "yield_curve": "normal", "gold_trend": "stable",
@@ -383,22 +385,21 @@ class TestGuardBackfill:
         assert r["regime_votes"]["risk_off"] == 0
 
     def test_fomc_distance_is_counted_from_d(self):
-        """变红的变异：`get_next_event()` 不带 `ref_date`（按运行当天数）。"""
+        """变红的变异：FOMC 查询不带 `ref_date`（按运行当天数）。"""
         fm.set_macro_snapshot(D, MARKET_827)
         _guard_live_macro(self._snap_macro())
         assert self.cal_refs == [date(2026, 8, 27)]
 
     def test_fomc_vote_uses_the_real_calendar_on_d(self, monkeypatch):
-        """真日历正对照：取 D = 某次 FOMC 前 2 天、且真日历说「D 的下一个事件就是这次 FOMC」
-        （`get_next_event` 只给最近一个事件，CPI / GDP 抢在前面时 Guard 本就不投 FOMC 票）⇒ risk_off +1。"""
+        """真日历正对照：取 D = 某次 FOMC 前 2 天（交易日）⇒ risk_off +1、fomc_days = 2。
+        （v0.45.582 前还要求「D 的下一个事件就是这次 FOMC」——旧规则只看最近一个事件，CPI / GDP 排在前面会遮住这张票；
+        现在看 3 天内全部事件，这个前提不再需要。被遮那几天的专门钉在 tests/test_guard_fomc_vote.py。）"""
         from datetime import timedelta
-        monkeypatch.setattr(economic_calendar, "get_next_event", _REAL_NEXT_EVENT)
+        monkeypatch.setattr(economic_calendar, "get_upcoming_events", _REAL_UPCOMING)
         ref = None
         for f in economic_calendar._parse_dates(economic_calendar._FOMC):
             cand = f - timedelta(days=2)
-            nxt = _REAL_NEXT_EVENT(ref_date=cand)
-            if (date(2026, 1, 1) <= cand < date(2026, 9, 1) and is_trading_day(cand)[0]
-                    and nxt and nxt["type"] == "fomc" and nxt["days_until"] == 2):
+            if date(2026, 1, 1) <= cand < date(2026, 9, 1) and is_trading_day(cand)[0]:
                 ref = cand
                 break
         assert ref is not None, "日历里找不到合适的 FOMC 前两天——本条正对照失效了"
@@ -425,8 +426,10 @@ class TestGuardLiveUnchanged:
         fm.set_macro_snapshot(None)
         self.cal_refs = []
         import economic_calendar
-        monkeypatch.setattr(economic_calendar, "get_next_event",
-                            lambda ref_date=None: (self.cal_refs.append(ref_date), None)[1])
+        # v0.45.582：GuardBee 的 FOMC 票改走 get_upcoming_events（看 3 天内全部事件）——桩打在它上面，
+        # 否则真日历漏进来：实时口径的测试会在每次 FOMC 前 3 天里多一张 risk_off 票（时间炸弹）
+        monkeypatch.setattr(economic_calendar, "get_upcoming_events",
+                            lambda days=30, ref_date=None: (self.cal_refs.append(ref_date), [])[1])
 
     @pytest.mark.parametrize("structure,off", [("backwardation", 2), ("contango", 0), ("flat", 0), ("unknown", 0)])
     def test_live_term_structure_still_read_live(self, monkeypatch, structure, off):

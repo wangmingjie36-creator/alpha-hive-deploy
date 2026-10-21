@@ -37,7 +37,6 @@ def _run_dry_run(tickers: list[str]) -> bool:
     checks = [
         ("alpha_hive_daily_report", "AlphaHiveDailyReporter"),
         ("swarm_agents", "BeeAgent"),
-        ("slack_report_notifier", "SlackReportNotifier"),
         ("dashboard_renderer", "render_dashboard_html"),
         ("pheromone_board", "PheromoneBoard"),
         ("llm_service", None),
@@ -69,17 +68,7 @@ def _run_dry_run(tickers: list[str]) -> bool:
         print(f"  ❌ yfinance: {e}")
         ok = False
 
-    # 3. Slack 连通性
-    print()
-    try:
-        from slack_report_notifier import SlackReportNotifier
-        notifier = SlackReportNotifier()
-        if notifier.enabled:
-            print(f"  ✅ Slack: 已启用（{'User Token' if notifier.use_user_token else 'Webhook'}）")
-        else:
-            print("  ⚠️  Slack: 未启用（无 token/webhook 或 webhook 失效）")
-    except Exception as e:
-        print(f"  ❌ Slack: {e}")
+    # （原「3. Slack 连通性」随 slack_report_notifier 于 v0.45.575 删除：Bot 不发任何 Slack 消息。）
 
     # 4. 关键目录/文件检查
     print()

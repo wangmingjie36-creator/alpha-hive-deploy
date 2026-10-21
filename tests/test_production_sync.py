@@ -190,8 +190,13 @@ class TestResultReachesAlerts:
     @staticmethod
     def _alerts(tmp_path, snap):
         from alert_manager import AlertAnalyzer
+        # v0.45.569：健康一轮也带 step2_budget（编排器 write_status 每轮都写）；缺了它性能检查记 checks_skipped
         status = {"status": "success", "total_duration_seconds": 1,
-                  "steps_result": {"step2_hive_analysis": {"status": "success"}},
+                  # v0.45.578：同理 ticker_completeness（编排器在 Step 2 之后每轮都写）
+                  "steps_result": {"step2_hive_analysis": {"status": "success"},
+                                   "ticker_completeness": {"status": "complete", "count": 30}},
+                  "step2_budget": {"timeout_seconds": 5400, "duration_seconds": 1965,
+                                   "headroom_seconds": 3435, "headroom_pct": 63},
                   "scan_timing": snap}
         p = tmp_path / "status.json"
         p.write_text(json.dumps(status, ensure_ascii=False))

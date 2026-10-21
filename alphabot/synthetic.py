@@ -163,6 +163,33 @@ def demo_quote_held(ticker: str, symbols: List[str], as_of: Optional[str] = None
             "payload_last_trade_time": chain["payload_last_trade_time"], "quotes": _held(chain, symbols)}
 
 
+def demo_compare_inputs(ticker: str, as_of: Optional[str] = None) -> Tuple[dict, List[dict]]:
+    """跨式 vs 宽跨对比卡的演示输入：(`quote_set` 形状, 历史财报涨跌 8 条)。与 `cboe_options.select_quote_set` 同口径取法：
+    dte 最接近 30 的到期日、离现价最近的行权价（ATM 两腿）、delta 最接近 ±0.25 的 call / put（25Δ 两腿）。零网络、确定性。"""
+    chain = demo_payload(ticker, as_of)
+    S = chain["underlying_price"]
+    exp = min({c["dte"] for c in chain["contracts"]}, key=lambda d: (abs(d - 30), -d))
+    legs = [c for c in chain["contracts"] if c["dte"] == exp]
+    atm_k = min({c["strike"] for c in legs}, key=lambda k: abs(k - S))
+
+    def pick(cp: str, key) -> str:
+        return min((c for c in legs if c["cp"] == cp), key=key)["symbol"]
+    syms = {"atm_call": pick("C", lambda c: abs(c["strike"] - atm_k)), "atm_put": pick("P", lambda c: abs(c["strike"] - atm_k)),
+            "c25": pick("C", lambda c: abs(c["delta"] - 0.25)), "p25": pick("P", lambda c: abs(c["delta"] + 0.25))}
+    held = _held(chain, list(syms.values()))
+    qs = {"data_available": True, "error": None, "selected_expiry": legs[0]["expiry"], "selected_dte": exp,
+          "underlying_price": S, "market_open": False, "fetched_at": chain["fetched_at"],
+          "contracts": {role: held[sym] for role, sym in syms.items()}}
+    d0 = date.fromisoformat(chain["as_of"])
+    seed = _seed(str(ticker).upper())
+    moves = []
+    for i in range(8):
+        mv = round((1.0 + 8.0 * _rand(seed, 70 + i) ** 2) * (1.0 if _rand(seed, 90 + i) > 0.45 else -1.0), 4)
+        ed = (d0 - timedelta(days=45 + 91 * i)).isoformat()
+        moves.append({"earnings_date": ed, "move_pct": mv, "abs_move_pct": abs(mv)})
+    return qs, moves
+
+
 #: (代码, 方向, 当前 mark 相对入场权利金的倍数)：两笔赚、两笔亏
 _DEMO_BOOK = (("NVDA", "short", 0.86), ("JNJ", "short", 1.09), ("TSLA", "long", 0.82), ("AMZN", "long", 1.12))
 _DEMO_CLOSED = (("COST", "short", 1.34, 3.47, 2.00, 0.46), ("MU", "long", 0.70, 4.40, 3.03, -0.31),

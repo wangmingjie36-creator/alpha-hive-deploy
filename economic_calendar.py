@@ -6,7 +6,11 @@
 - FOMC: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
 - CPI:  https://www.bls.gov/schedule/news_release/cpi.htm
 - NFP:  https://www.bls.gov/schedule/news_release/empsit.htm
-- GDP:  https://www.bea.gov/news/schedule
+- GDP:  https://www.bea.gov/news/schedule/next-year （次年日程）
+        + https://www.bea.gov/news/schedule （当年剩下的发布）
+        `/news/schedule` 只列当年剩下的发布，次年的条目不在那里，v0.45.572 前几次核对因此误判
+        「BEA 未发布」。表要续的永远是次年，所以 `_TABLE_SPECS["gdp"]["source"]` 指向 next-year 页
+        （v0.45.576：此前仍指滚动页，过期告警会把人带回那张看不到次年的页面）。
 已过去的日期以**实际发布**为准（v0.45.405 起），不以当初的日程为准——停摆会
 推迟或取消发布，日程页事后还会被改写。判定**按参考期**：该期后来发布了（推迟，
 含改名）⇒ 记实际发布日；该期始终没有发布（取消）⇒ 删，不找替身日期。
@@ -60,8 +64,9 @@ _FOMC = [
 ]
 
 # ── CPI 数据发布（BLS Consumer Price Index，08:30 ET）──
-# 核对时间：2026-10-04（三次核对，结论不变；另查 bls.ics 订阅源无 2027 条目、2027 年度总表 404），
-# 逐条对照 bls.gov/schedule/news_release/cpi.htm
+# 核对时间：2026-10-21（2027 全年已发布，v0.45.572 抄录），
+# 逐条对照 bls.gov/schedule/news_release/cpi.htm，并与 BLS 年度总表 bls.gov/schedule/2027/home.htm
+# 交叉核对（两页 12/12 一致；bls.ics 订阅源当日仍无 2027 条目，滞后于网页）
 _CPI = [
     # 表按**发布日**排列，不按参考月（12 月 CPI 在次年 1 月发布，归次年那一行）。
     # 已过去的日期（2025 全年 + 2026-01~09，共 20 条）v0.45.405 于 2026-10-04 改按**实际发布**
@@ -80,12 +85,17 @@ _CPI = [
     "2026-01-13", "2026-02-13", "2026-03-11", "2026-04-10",
     "2026-05-12", "2026-06-10", "2026-07-14", "2026-08-12",
     "2026-09-11", "2026-10-14", "2026-11-10", "2026-12-10",
-    # 2027：BLS 尚未发布 → 待验证，见 _TABLE_SPECS["cpi"]["pending"]。禁止推算填空。
+    # 2027：v0.45.572 抄自官方日程（参考月 2026-12 ~ 2027-11）。2026-10-04 核对时尚未发布。
+    "2027-01-13", "2027-02-11", "2027-03-10", "2027-04-13",
+    "2027-05-12", "2027-06-10", "2027-07-14", "2027-08-11",
+    "2027-09-14", "2027-10-14", "2027-11-10", "2027-12-10",
+    # 2028（参考月 2027-12 起）：BLS 尚未发布 → 待验证，见 _TABLE_SPECS["cpi"]["pending"]。禁止推算填空。
 ]
 
 # ── 非农就业 NFP（BLS Employment Situation，08:30 ET）──
-# 核对时间：2026-10-04（三次核对，结论不变；另查 bls.ics 订阅源无 2027 条目、2027 年度总表 404），
-# 逐条对照 bls.gov/schedule/news_release/empsit.htm
+# 核对时间：2026-10-21（2027 全年已发布，v0.45.572 抄录），
+# 逐条对照 bls.gov/schedule/news_release/empsit.htm，并与 BLS 年度总表 bls.gov/schedule/2027/home.htm
+# 交叉核对（两页 12/12 一致；bls.ics 订阅源当日仍无 2027 条目，滞后于网页）
 _NFP = [
     # 表按**发布日**排列，不按参考月。
     # 已过去的日期（2025 全年 + 2026-01-09~10-02，共 21 条）v0.45.405 于 2026-10-04 改按
@@ -102,12 +112,18 @@ _NFP = [
     "2026-01-09", "2026-02-11", "2026-03-06", "2026-04-03",
     "2026-05-08", "2026-06-05", "2026-07-02", "2026-08-07",
     "2026-09-04", "2026-10-02", "2026-11-06", "2026-12-04",
-    # 2027：BLS 尚未发布 → 待验证。禁止推算填空。
+    # 2027：v0.45.572 抄自官方日程（参考月 2026-12 ~ 2027-11）。2026-10-04 核对时尚未发布。
+    "2027-01-08", "2027-02-05", "2027-03-05", "2027-04-02",
+    "2027-05-07", "2027-06-04", "2027-07-02", "2027-08-06",
+    "2027-09-03", "2027-10-08", "2027-11-05", "2027-12-03",
+    # 2028（参考月 2027-12 起）：BLS 尚未发布 → 待验证。禁止推算填空。
 ]
 
 # ── GDP 初值 / Advance Estimate（BEA，08:30 ET）──
-# 核对时间：2026-10-04（二次核对，结论不变：滚动日程末条仍是 2026-12-23，无 2027 初值），
-# 对照 bea.gov/news/schedule
+# 核对时间：2026-10-21（v0.45.572），对照 bea.gov/news/schedule/next-year「Year 2027」，
+# 并与 BEA 官方订阅源 bea.gov/news/schedule/ics/online-calendar-subscription.ics 交叉核对（4/4 一致）。
+# ⚠️ 2026-10-04 的两次核对只看了 /news/schedule 与 /full（末条 2026-12-23），没看 next-year 页，
+#    故当时记成「2027 未发布」——那是我们看错了页，不能据此推断 BEA 当时是否已发布。
 _GDP = [
     # 每个参考季度的**首次**估计发布日。
     # 已过去的日期（共 7 条）v0.45.405 于 2026-10-04 改按**实际发布**核对：逐条对照 BEA GDP
@@ -128,7 +144,10 @@ _GDP = [
     # 第四条由 v0.45.65 修正：10-28 → 10-29（官方「GDP (Advance Estimate),
     # 3rd Quarter 2026 — October 29」）
     "2026-02-20", "2026-04-30", "2026-07-30", "2026-10-29",
-    # 2027：BEA 当前日程只排到 2026-12-23，2027 未发布 → 待验证。禁止推算填空。
+    # 2027：v0.45.572 抄自官方日程，四条均为「GDP (Advance Estimate)」：
+    #   01-28 = 4th Quarter and Year 2026；04-29 = 1Q27；07-29 = 2Q27；10-28 = 3Q27
+    "2027-01-28", "2027-04-29", "2027-07-29", "2027-10-28",
+    # 4Q27 初值（2028 年初）：BEA 尚未发布 → 待验证。禁止推算填空。
 ]
 
 # 事件元数据
@@ -173,22 +192,26 @@ _TABLE_SPECS: Dict[str, Dict[str, Any]] = {
     "cpi": {
         "dates": _CPI,
         "source": "https://www.bls.gov/schedule/news_release/cpi.htm",
-        "verified_through": "2026-12-10",
-        "pending": "2027 全年日程 BLS 尚未发布（2026-10-04 三次核对：cpi.htm 只到 2026-12，"
-                   "2027 年度总表 404，bls.ics 无 2027 条目）→ 待验证",
+        "verified_through": "2027-12-10",
+        "pending": "2028 年日程（参考月 2027-12 起）BLS 尚未发布（2026-10-21 核对：cpi.htm 只到 "
+                   "2027-12-10，2028 年度总表 schedule/2028/home.htm 404）→ 待验证",
     },
     "nfp": {
         "dates": _NFP,
         "source": "https://www.bls.gov/schedule/news_release/empsit.htm",
-        "verified_through": "2026-12-04",
-        "pending": "2027 全年日程 BLS 尚未发布（2026-10-04 三次核对：empsit.htm 只到 2026-12，"
-                   "2027 年度总表 404，bls.ics 无 2027 条目）→ 待验证",
+        "verified_through": "2027-12-03",
+        "pending": "2028 年日程（参考月 2027-12 起）BLS 尚未发布（2026-10-21 核对：empsit.htm 只到 "
+                   "2027-12-03，2028 年度总表 schedule/2028/home.htm 404）→ 待验证",
     },
     "gdp": {
         "dates": _GDP,
-        "source": "https://www.bea.gov/news/schedule",
-        "verified_through": "2026-10-29",
-        "pending": "BEA 滚动日程当前只到 2026-12-23，2027 初值日期未发布（2026-10-04 再核对）→ 待验证",
+        # v0.45.576：指向次年页——告警与 TestCoverageHorizon 的失败文案都让人「去这里抄」，
+        # 而要续的永远是次年；滚动页 /news/schedule 看不到次年（10-04 正是去错了那页）。
+        # 与 economic_calendar_watch._BEA_NEXT_YEAR 同值，守卫 TestDateProvenance。
+        "source": "https://www.bea.gov/news/schedule/next-year",
+        "verified_through": "2027-10-28",
+        "pending": "4Q27 初值（2028 年初）BEA 尚未发布（2026-10-21 核对：/news/schedule/next-year "
+                   "只到 2027-12-22；当年剩下的发布见 /news/schedule）→ 待验证",
     },
 }
 
@@ -216,7 +239,8 @@ def get_calendar_health(ref_date: Optional[date] = None) -> Dict[str, Any]:
     """
     体检硬编码日历的覆盖情况 —— **逐表**算，取最差的那张。
 
-    为什么必须逐表：FOMC 已经排到 2028，CPI/NFP/GDP 只到 2026-12。
+    为什么必须逐表：美联储提前 1.5~2.5 年发布会期，FOMC 表常比 CPI/NFP/GDP 多排出一年左右
+    （v0.45.65 写这段时 FOMC 已到 2028、另三张只到 2026-12）。
     若用 max(全部日期) 算总地平线，会得到「还有 500 天覆盖」的健康读数，
     而四条数据里有三条早已断供——聚合掩盖分量，正是本项目要治的那类静默降级。
 

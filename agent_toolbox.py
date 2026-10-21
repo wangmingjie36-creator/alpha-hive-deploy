@@ -54,7 +54,7 @@ v0.45.204 续做**方法粒度**：`GitHubTool` 是活类，但类里的方法�
 不是测试。（v0.45.211 起 `status` 有了 `tests/test_github_tool_status.py`，删它现在会红；
 上面这句是 v0.45.204 当时的实测，留作「零红对死活零信息量」的校准记录。）
 
-要加 MCP 工具 → `alpha_hive_mcp.py`；要发 Slack → `slack_report_notifier.py`。
+要加 MCP 工具 → `alpha_hive_mcp.py`；Slack 发送模块 v0.45.575 已删（Bot 不发任何消息，加回先由用户改 CLAUDE.md 规则）。
 """
 
 import shlex

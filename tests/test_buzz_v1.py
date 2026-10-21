@@ -110,7 +110,9 @@ class TestFrozen:
             elif isinstance(n, ast.ImportFrom):
                 mods.add((n.module or "").split(".")[0])
         allowed = {"__future__", "argparse", "datetime", "json", "sqlite3", "sys", "collections", "pathlib",
-                   "typing", "importlib", "hive_logger", "signal_archive", "ic_rerun_readiness"}
+                   "typing", "importlib", "hive_logger", "signal_archive", "ic_rerun_readiness",
+                   # v0.45.583：观测档案只是读档 / 格式（不评分）；冻结通道层本身也守着同样的纯度（test_buzz_v1_channels）
+                   "observation_archive", "buzz_v1_channels"}
         assert mods <= allowed, f"冻结评分器不许依赖生产评分代码 / config：{sorted(mods - allowed)}"
 
     def test_protocol_constants_agree(self):

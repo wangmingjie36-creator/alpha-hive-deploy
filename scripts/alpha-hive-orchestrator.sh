@@ -787,7 +787,7 @@ _orchestrator_autodeploy() {
 _orchestrator_autodeploy
 
 # v0.45.546：原 Step 1（data_fetcher.py：写死的 NVDA/VKTX/TSLA 三只的 Yahoo / SEC / Google Trends / SeekingAlpha 指标
-# → realtime_metrics.json + cache/）已删除。蜂群不读它；两个读者都改了源：Slack 日报的价格兜底 / 5 日涨跌改读 .swarm_results，
+# → realtime_metrics.json + cache/）已删除。蜂群不读它；两个读者都改了源：Slack 日报的价格兜底 / 5 日涨跌改读 .swarm_results（该日报 v0.45.571 已删），
 # Step 3 兜底（generate_ml_report.main）不再读 realtime_metrics.json（直接走蜂群缓存 → fetch_stock_data）。
 #
 # ⚠️ STEP1_START 必须保留：它是**主流程起点**——write_status 的 total_duration_seconds 与收尾的 TOTAL_DURATION 都拿它减；
@@ -813,7 +813,7 @@ STEP1_START=$(date +%s)
 #   - 清理只在当日备份成功后才跑，只动 pheromone_YYYY-MM-DD.db（不碰 pheromone_pre_*），
 #     删「超过 DB_BACKUP_KEEP_DAYS 天」的，但无论多旧都保留最新 DB_BACKUP_KEEP_MIN 份。
 #   - 结局进日志 + status.json 的 steps_result.db_backup。只记录、不升级 OVERALL_STATUS、
-#     不触发 Slack（CLAUDE.md「Slack 通知精简规则」只允许两类消息）。
+#     不触发 Slack（CLAUDE.md「Slack 通知精简规则」：Bot 不发扫描类消息）。
 #   - 整段不用 bash 碰本目录（连 [ -f ] 都交给 Python），避开 TCC。
 #   - Python 走 heredoc 重定向到临时文件，**不要**改成 "$(... <<'EOF' ...)"：
 #     /bin/bash 是 3.2.57，命令替换里的 heredoc 遇到括号/引号会解析错。
@@ -1042,7 +1042,10 @@ STEP2_START=$(date +%s)
 # v0.45.518：120 → 180s/只（30 只 3600 → 5400s）。依据（2026-10-16 取 22 个扫描日）：正常日中位 ≈2080s（并行段 564 + 顺序段 1268 +
 # 收尾 249），但 09-21 / 09-23 两天撞线被杀、**整天丢失**（超时 = 全有或全无，且没有同日重试；T+7 观测永久缺口），
 # 10-12 余量仅 13%。09-23 是 CBOE 陈旧级联：顺序段 ≈127s/只（正常 ≈42），外推 30 只需 ≈4900s——5400s 刚好放得下；
-# 正常日余量仍 ≈60%。代价：真卡死的运行晚 30 分钟才被判超时。余量只报数、不判定，故改它不会连带触发告警。
+# 正常日余量仍 ≈60%。代价：真卡死的运行晚 30 分钟才被判超时。
+# ⚠️ v0.45.569 起**余量会触发告警**：alert_manager 读 status.json 的 step2_budget，Step 2 用掉预算的比例 ≥ `alert_manager.STEP2_BUDGET_USED_P1` ⇒ P1
+# 「性能异常」。告警线是预算的比例 ⇒ 改这里的系数，告警线跟着动；调低到让告警线贴近正常日会让
+# tests/test_alert_step2_budget.py 红（要求正常日离告警线 ≥1.25 倍），届时连同 STEP2_BUDGET_USED_P1 一起重新标定。
 # ⚠️ **预算不可超过信息素板的墙钟过期线** `PheromoneBoard.ENTRY_MAX_AGE_S`（v0.45.518 同版放宽到 10800s）：
 # 超过它，后半段标的的 Guard / Bear 会静默读不到前面蜂的结论。两者的关系由 tests/test_pheromone_expiry_exceeds_scan_budget.py 焊住。
 TICKER_COUNT=$(echo "$TICKERS_ARG" | wc -w | tr -d ' ')
@@ -1097,7 +1100,7 @@ STEP2_STATUS="${_SI_STATUS:-}"   # 立刻取：下一次 _apply_step_interp（St
 if [ "${STEP2_RC}" -ne 0 ]; then
     set_status partial
 fi
-# ── v0.45.118 预算余量可见化（只报数，不判定；判定闸是下一版的事）──
+# ── v0.45.118 预算余量可见化（v0.45.569 起由 alert_manager 判定：用掉比例 ≥ STEP2_BUDGET_USED_P1 ⇒ P1，读 status.json 的 step2_budget）──
 # 08-26→09-04 Step 2 从 749s 涨到 3342s、中间被杀两次，全程没有一行日志
 # 说"离预算还剩多少"。09-04 实际余量 258s（7%），而没人知道。
 if [ "${STEP2_TIMEOUT:-0}" -gt 0 ]; then
@@ -1406,34 +1409,13 @@ else
 fi
 
 # ================================================================
-# Step 7: 推送每日简报到 Slack (Phase 2 新增)
-# ================================================================
-log "INFO" ""
-log "INFO" "【Step 7/7】推送每日简报到 Slack - 启动"
-STEP7_START=$(date +%s)
-
-run_step --timeout 300 "$PROJECT_DIR/push_report_to_slack.py" >> "$LOGFILE" 2>&1
-STEP7_RC=$?
-STEP7_END=$(date +%s)
-STEP7_DURATION=$((STEP7_END - STEP7_START))
-if [ $STEP7_RC -eq 0 ]; then
-    log "INFO" "✅ Step 7 成功（耗时 ${STEP7_DURATION}s）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step7_push_report\": {\"status\": \"success\", \"duration_seconds\": $STEP7_DURATION}}")
-elif [ $STEP7_RC -eq 124 ]; then
-    log "ERROR" "⏰ Step 7 超时（>300s），继续进行"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step7_push_report\": {\"status\": \"timeout\", \"duration_seconds\": $STEP7_DURATION}}")
-elif [ $STEP7_RC -eq 2 ]; then
-    log "INFO" "⏭️  Step 7 跳过（Slack 推送由 Claude Code MCP 手动执行）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step7_push_report\": {\"status\": \"skipped_manual\"}}")
-else
-    log "WARN" "⚠️ Step 7 失败，但不影响主流程（耗时 ${STEP7_DURATION}s）"
-    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step7_push_report\": {\"status\": \"failed\", \"duration_seconds\": $STEP7_DURATION}}")
-fi
-
-# ================================================================
 # 写入 status.json
 # ================================================================
 log "INFO" ""
+# v0.45.571：原 Step 7（push_report_to_slack.py）已删除——不带 --force 时脚本在推送前就 exit 2，
+# 每天只为记一条 `step7_push_report: skipped_manual`（生产日志从未走到推送路径）；该键零读者
+#（Step 6 alert_manager 在它之前就跑完）。脚本与它独用的 Slack 富文本日报格式化一并删除。
+
 # v0.45.534：原 Step 8（metrics_collector.py --record --status-json）已删除——
 # 该模块没有 __main__ / argparse，每天跑 0 秒、什么都不做，却记 `step8_metrics_collection: success`（假成功）。
 # 真正的指标写入在 Step 2 内部（MetricsCollector → metrics.db），同版一并退役：三张表零读者 / 只喂一行日志。
@@ -1754,7 +1736,7 @@ log "INFO" "📊 总耗时：${TOTAL_DURATION}s"
 log "INFO" "📂 日志位置：$LOGFILE"
 log "INFO" ""
 log "INFO" "✅ Phase 1 流程：Step 1-5（数据采集、蜂群分析、ML 报告、仪表板、部署）"
-log "INFO" "✨ Phase 2 Week 1：Step 6-7（智能告警 + Slack 推送）"
+log "INFO" "✨ Phase 2 Week 1：Step 6（智能告警）"
 log "INFO" "✨ Phase 2 Week 3：Week 3 内集成（动态蜂群扩展 - AdaptiveSpawner）"
 log "INFO" "✨ Phase 2 Week 4：Step 9（信息素持久化 + T+1/T+7/T+30 准确率追踪）"
 

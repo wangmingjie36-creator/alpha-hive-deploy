@@ -13,7 +13,6 @@
 本文件的判据：过期线 > 预算（含名单再长一点的余量），且板里不再有第二处裸 `3600` 字面量。
 """
 import ast
-import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -21,6 +20,8 @@ import pytest
 
 from pheromone_board import PheromoneBoard, PheromoneEntry
 from tests._orchestrator import repo_orchestrator_text
+# v0.45.569：公式解析挪到 tests/_orchestrator.py 与 test_alert_step2_budget.py 共用（告警线也按这份预算算）
+from tests._orchestrator import step2_budget as _budget, step2_budget_formula as _budget_formula
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -30,22 +31,6 @@ GROWTH_HEADROOM_TICKERS = 10
 #: 09-23（CBOE 陈旧级联）外推 30 只需要 ≈4900s。预算低于它，那一类日子又会整天丢失。
 #: 这是个**变更探测器**：谁要调低系数，先回去读 CHANGELOG v0.45.518 的取证，再来改这个数。
 MIN_BUDGET_FOR_30_TICKERS_S = 4900
-
-
-def _budget_formula(orch_text: str):
-    """→ (每只秒数, 下限秒数, 日志里写的每只秒数)；任何一项找不到或不唯一都抛，不猜。"""
-    code = "\n".join(ln for ln in orch_text.splitlines() if not ln.lstrip().startswith("#"))
-    coef = re.findall(r"^STEP2_TIMEOUT=\$\(\( TICKER_COUNT \* (\d+) \)\)\s*$", code, re.M)
-    floor = re.findall(r'^\[ "\$STEP2_TIMEOUT" -lt (\d+) \] && STEP2_TIMEOUT=(\d+)\s*$', code, re.M)
-    logged = re.findall(r"× (\d+)s/只，下限 (\d+)s", code)
-    assert len(coef) == 1, f"STEP2_TIMEOUT 的『按只数算』公式找不到或不唯一：{coef}"
-    assert len(floor) == 1 and floor[0][0] == floor[0][1], f"STEP2_TIMEOUT 下限行找不到或不自洽：{floor}"
-    assert len(logged) == 1, f"超时限制日志行找不到或不唯一：{logged}"
-    return int(coef[0]), int(floor[0][0]), int(logged[0][0])
-
-
-def _budget(n_tickers: int, coef: int, floor: int) -> int:
-    return max(n_tickers * coef, floor)
 
 
 def _n_watchlist() -> int:

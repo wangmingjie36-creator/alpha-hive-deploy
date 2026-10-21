@@ -63,7 +63,21 @@ function greeksGrid(g, warnAt) {
     g.directional ? h("p", { class: "callout warn" },
       `已明显带方向：每份跨式净 Δ ${num(g.net_delta_per_straddle, 2)}（入场时约为 0，提示阈值 ${num(warnAt, 2)}）。账本不做 delta 对冲，这一笔现在相当于持有 ${shares}。`) : null,
     !g.complete ? h("div", { class: "small muted" }, `Greeks 不全：${(g.missing || []).join("、")}`) : null,
+    g.degraded_legs?.length ? h("div", { class: "small muted" },
+      `Greeks 含 ${g.degraded_legs.join("、")} 腿（bid=0）的 CBOE 模型值，仅供参考；账本侧仍按严格报价口径，当晚可能显示缺报价。`) : null,
   ];
+}
+
+// 为什么 mid / 立即平仓价不可得：bid=0 的腿（卖跨式仍可按 ask 买回）与真缺报价要分开说
+function quoteNote(r, side) {
+  if (r.quote_ok) return null;
+  const zero = r.bid_zero_legs || [];
+  if (!zero.length) return "两腿报价不全，mid 与立即平仓价不可得。";
+  const names = zero.join("、");
+  if (isNum(r.exit_now_usd)) return `${names} 腿 bid=0：mid 不可得；立即平仓价按 ask 给出（卖跨式买回只看 ask）。`;
+  return side === "long"
+    ? `${names} 腿 bid=0（无买盘）：mid 不可得；买跨式按 bid 卖出，立即平仓价不可得。`
+    : `${names} 腿 bid=0：mid 不可得；另一条腿没有可用的 ask，立即平仓价也不可得。`;
 }
 
 function levelsLine(lv, be) {
@@ -71,6 +85,56 @@ function levelsLine(lv, be) {
   const rel = (x) => (!isNum(x) || !be?.available ? "" : x < be.lo ? "（带下方）" : x > be.hi ? "（带上方）" : "（带内）");
   return h("div", { class: "sd-row" }, h("span", { class: "grade", title: "证据等级：Zero Gamma C、Major D" }, "C/D"), " 当天 GEX（≤45 天视图）：现价处 ", signChip(lv.sign_at_spot),
     ` · 最近零点 ${num(lv.zg_nearest)}${rel(lv.zg_nearest)} · 净 Major+ ${num(lv.net_major_pos, 0)}${rel(lv.net_major_pos)} · 净 Major− ${num(lv.net_major_neg, 0)}${rel(lv.net_major_neg)}`);
+}
+
+// ── 跨式 vs 宽跨 并排对比卡（v0.45.584）：只并排事实，不给「选哪个」（没有推荐 / 综合分字段，守卫钉住）
+const CMP_NAME = { straddle: "跨式（ATM）", strangle: "宽跨（25Δ）" };
+
+function compareCard(r) {
+  if (!r.available) return h("p", { class: "small muted" }, `对比不可得：${r.reason_zh || r.reason || "—"}`);
+  const A = r.structures.straddle, B = r.structures.strangle;
+  const cell = (s, render) => (s.available ? h("td", {}, render(s)) : h("td", { class: "na" }, "—"));
+  const sub = (t) => h("span", { class: "sub" }, t);
+  const leg = (l, k) => (l ? `${k} bid ${num(l.bid)} / ask ${num(l.ask)} · Δ ${num(l.delta, 2)} · OI ${num(l.oi, 0)}` : `${k} —`);
+  const rows = [
+    ["行权价", (s) => (s.legs.put.strike === s.legs.call.strike ? `K ${num(s.legs.call.strike)}（put / call 同价）` : `put ${num(s.legs.put.strike)} · call ${num(s.legs.call.strike)}`),
+      (s) => h("span", {}, sub(leg(s.legs.put, "put")), sub(leg(s.legs.call, "call")))],
+    ["收到的权利金（按 bid）", (s) => num(s.premium), (s) => sub(`占现价 ${pctPts(s.premium_frac_of_spot * 100, 2)}`)],
+    ["立刻进出一次要付掉权利金的", (s) => pctPts(s.round_trip_frac * 100, 0), (s) => sub(`买回按 ask：${num(s.cost_to_close)}`)],
+    ["最大腿点差", (s) => pctPts(s.max_spread_frac * 100, 1), (s) => (s.flags || []).map((f) => h("span", { class: "chip warn", title: f.text }, `> ${pctPts(f.limit * 100, 0)} 闸门`))],
+    ["到期盈亏平衡带", (s) => `${num(s.band.lo)} – ${num(s.band.hi)}`, (s) => sub(`相对现价 ${signedPct(s.band.lo_pct)} … ${signedPct(s.band.hi_pct)}`)],
+    ["历史涨跌落在带外", (s) => (s.hist_outside.n ? `${s.hist_outside.k} / ${s.hist_outside.n}` : "—"),
+      (s) => (s.hist_outside.ci95 ? sub(`95% 区间 ${pctPts(s.hist_outside.ci95[0] * 100, 0)}–${pctPts(s.hist_outside.ci95[1] * 100, 0)}（样本很小）`) : null)],
+    [`账本定仓${isNum(r.nav) ? `（按 NAV ${money(r.nav, 0)} 估算）` : ""}`, (s) => (s.sizing.contracts ? `${s.sizing.contracts} 张` : "—"),
+      (s) => (s.sizing.contracts ? sub(`${num(s.sizing.shares, 0)} 股 · 名义 ${money(s.sizing.notional_usd, 0)}`) : sub(String(s.sizing.reason || "")))],
+  ];
+  const head = h("thead", {}, h("tr", {}, h("th", { scope: "col" }, ""), h("th", { scope: "col" }, CMP_NAME.straddle), h("th", { scope: "col" }, CMP_NAME.strangle)));
+  const body = h("tbody", {}, rows.map(([label, main, extra], i) => h("tr", {}, h("th", { scope: "row" }, label),
+    ...[A, B].map((s) => (!s.available && i === 0 ? h("td", { class: "na" }, s.reason_zh || "不可得")
+      : cell(s, (x) => h("span", {}, main(x), extra ? extra(x) : null)))))));
+  const sig = r.signal || {};
+  const hist = r.hist;
+  return h("div", { class: "cmp" },
+    h("div", { class: "cmp-head" }, `快照 ${r.as_of}（${r.market_open === false ? "收盘后" : r.market_open ? "盘中" : "时段未知"}）· 标的 ${num(r.underlying_price)} · 到期 ${r.selected_expiry || "—"}${isNum(r.dte) ? `（${r.dte} 天）` : ""}${sig.earnings_date ? ` · 财报 ${sig.earnings_date}` : ""}`),
+    h("div", { class: "cmp-scroll" }, h("table", { class: "cmp-grid" }, head, body)),
+    isNum(r.premium_ratio) ? h("div", { class: "sd-row" }, `宽跨权利金是跨式的 ${pctPts(r.premium_ratio * 100, 0)}`,
+      isNum(r.contracts_ratio) ? `；同一风险预算下张数是跨式的 ${num(r.contracts_ratio, 1)} 倍——名义风险不一定更小。` : "。") : null,
+    hist ? h("div", { class: "sd-row" }, `这只票过去 ${hist.n} 次财报的 2 日涨跌（财报日早于 ${r.as_of}）：`,
+      hist.moves.map((m) => signedPct(m.move_pct)).join(" · "),
+      `；中位 |涨跌| ${pctPts(hist.median_abs_pct, 2)}、最大 ${pctPts(hist.max_abs_pct, 2)}`,
+      isNum(sig.implied_event_move_pct) ? `；信号日的隐含事件波动 ${pctPts(sig.implied_event_move_pct, 2)}` : "")
+      : h("div", { class: "small muted" }, `历史财报涨跌不可得：${r.hist_reason_zh || "—"}`),
+    h("ul", { class: "small muted cmp-notes" }, (r.caveats || []).map((c) => h("li", {}, c.text))));
+}
+
+async function loadCompare(el, ticker, asOf) {
+  fill(el, h("div", { class: "small muted" }, `正在读 ${ticker} ${asOf} 的快照…`));
+  try {
+    const r = await api(`/api/straddle/compare/${encodeURIComponent(ticker)}${asOf ? `?as_of=${encodeURIComponent(asOf)}` : ""}`);
+    if (el.isConnected) fill(el, compareCard(r));
+  } catch (e) {
+    if (el.isConnected) fill(el, h("div", { class: "small err" }, `对比拉取失败：${e.message || e}`));
+  }
 }
 
 function renderLive(el, r, p, warnAt) {
@@ -85,8 +149,8 @@ function renderLive(el, r, p, warnAt) {
     h("div", { class: "sd-k" }, `盘中参考 · ${PX_SRC[r.underlying_price_source] || r.underlying_price_source || "—"} · 最后成交 ${when || "—"}${r.cache_age_sec ? ` · ${Math.round(r.cache_age_sec)} 秒前` : ""}${r.demo ? " · 演示" : ""}`),
     h("div", { class: "sd-row" }, `现价 `, h("b", {}, num(r.underlying_price)), ` · mark（mid）`, h("b", {}, num(r.mark_mid)),
       ` → `, h("b", { class: tone(r.unrealized_mid_usd) }, `${sMoney(r.unrealized_mid_usd)}（${signedPct(r.unrealized_mid_pct)}）`),
-      ` · 立即平仓（付点差）`, h("b", { class: tone(r.exit_now_usd) }, sMoney(r.exit_now_usd))),
-    r.quote_ok ? null : h("div", { class: "small muted" }, "两腿报价不全，mid 与立即平仓价不可得。"),
+      ` · 立即平仓（${r.exit_now_basis === "ask_only" ? "按 ask" : "付点差"}）`, h("b", { class: tone(r.exit_now_usd) }, sMoney(r.exit_now_usd))),
+    quoteNote(r, p.side) ? h("div", { class: "small muted" }, quoteNote(r, p.side)) : null,
     h("div", { class: "sd-row" }, bandText(p.side, r.band)),
     greeksGrid(r.greeks, warnAt),
     levelsLine(r.levels, r.breakeven),
@@ -100,6 +164,11 @@ function positionCard(p, d, liveEls) {
   liveEls[p.ticker] = { el: liveEl, p, warnAt };
   renderLive(liveEl, null, p, warnAt);
   const stale = p.mark_source !== "cboe_mid";
+  // 入场时的对比：展开才读（只读本机快照与缓存文件，不联网）
+  const cmpBody = h("div", { class: "cmp" }, h("div", { class: "small muted" }, "展开时才读入场日的快照。"));
+  const cmpDet = h("details", { class: "sd-why", ontoggle: () => {
+    if (cmpDet.open && !cmpDet.dataset.loaded) { cmpDet.dataset.loaded = "1"; loadCompare(cmpBody, p.ticker, p.entry_date); }
+  } }, h("summary", {}, "入场时：跨式 vs 宽跨（只并排事实）"), cmpBody);
   return h("article", { class: "sd-card", "aria-label": `${p.ticker} ${SIDE[p.side] || p.side}` },
     h("div", { class: "sd-head" },
       h("span", { class: "tk" }, p.ticker), h("span", { class: "chip" }, SIDE[p.side] || p.side),
@@ -121,6 +190,7 @@ function positionCard(p, d, liveEls) {
     h("details", { class: "sd-why" }, h("summary", {}, "入场理由"),
       h("p", {}, `隐含事件波动 ${pctPts(es.implied_event_move_pct, 2)} vs 历史中位 ${pctPts(es.hist_median_abs_move_pct, 2)}（n=${es.hist_n ?? "—"}），比值 ${num(es.ratio, 2)}；最大腿点差 ${isNum(es.max_leg_spread_pct) ? pctPts(es.max_leg_spread_pct * 100, 1) : "—"}；30 日实现波动 ${pctPts(es.rv_30d, 1)}；入场时两腿 Δ 之和 ${num(es.straddle_net_delta, 3)}。`),
       h("p", { class: "small muted" }, plain(p.rationale || ""))),
+    cmpDet,
     liveEl);
 }
 
@@ -146,6 +216,28 @@ function shadowPanel(s, rules) {
     gate("信息块（两种政体都有的财报周）", n.blocks, need.min_informative_blocks),
     h("p", { class: "callout lock" }, `盲期：检验冻结前，页面不把任何一笔的 GEX 和它之后的盈亏、实际波动放在一起；自己拼起来按政体比较就是偷看，会作废这次检验。协议 v${pre.version ?? "—"}：${pre.doc || "experiments/straddle_gex_prereg.md"}。`),
     h("div", { class: "small muted" }, `按状态：${Object.entries(s.by_status || {}).map(([k, v]) => `${k} ${v}`).join("、") || "—"}`));
+}
+
+// 影子宽跨记录（v0.45.586，协议 experiments/straddle_strangle_shadow_prereg.md）：**只显示计数**——任何一笔的影子盈亏、
+// 与跨式盈亏的差都不在这一页（盲期：自己拼起来按结构比较就是偷看）。
+const SS_STATUS = { ok: "进检验", no_record: "没有影子记录", before_start: "登记前入场（排除）", long_side: "多头（只描述）",
+  entry_unquotable: "入场时宽跨不可成交", entry_no_signal_record: "信号行没带记录", entry_no_size: "定仓给不出张数",
+  exit_unpriced: "平仓日无价", exit_error: "平仓记录出错", exit_not_applicable: "不适用", unusable: "数据不全" };
+
+function strangleShadowPanel(s, rules) {
+  const pre = rules?.strangle_prereg || {};
+  if (!s?.available) {
+    return panel("影子宽跨记录", { sub: "攒样本中 · 冻结前只给计数" }, h("p", { class: "small muted" }, `进度不可得：${s?.reason || "—"}`));
+  }
+  const need = s.need || {};
+  const byStatus = Object.entries(s.by_status || {}).map(([k, v]) => `${SS_STATUS[k] || k} ${v}`).join("、") || "—";
+  const openBy = Object.entries(s.open_by_status || {}).map(([k, v]) => `${k} ${v}`).join("、") || "—";
+  return panel("影子宽跨记录", { sub: s.frozen ? "检验已冻结" : (s.ready ? "已就绪，等待运行一次" : "攒样本中 · 冻结前只给计数") },
+    h("p", { class: "small" }, `每笔被账本开仓的跨式，同一天、同一份快照里再记一份假想的 25Δ 宽跨（只记录、不开仓）。自 ${s.start_date} 起入场的：持仓中带记录 ${s.n_open_recorded} 笔（${openBy}）；已平仓 ${s.n_closed} 笔，其中进检验 ${s.n_units} 笔（只检验空头）。`),
+    gate("进检验的空头单位", s.n_units, need.min_units),
+    gate("财报周（块）", s.n_blocks, need.min_blocks),
+    h("p", { class: "callout lock" }, `盲期：检验冻结前，页面不显示任何一笔的影子盈亏，也不把它和跨式盈亏放在一起；自己拼起来比较就是偷看，会作废这次检验。协议 v${pre.version ?? "—"}：${pre.doc || "experiments/straddle_strangle_shadow_prereg.md"}。`),
+    h("div", { class: "small muted" }, `已平仓按状态：${byStatus}`));
 }
 
 export async function renderStraddle(root, alive) {
@@ -229,7 +321,13 @@ export async function renderStraddle(root, alive) {
     { label: "最大腿点差", cls: "r", render: (r) => (isNum(r.max_leg_spread_pct) ? pctPts(r.max_leg_spread_pct * 100, 1) : "—") },
     { label: "财报", render: (r) => r.earnings_date || "—" },
     { label: "状态", render: (r) => h("span", { class: "small" }, r.status, r.untradeable_reason ? h("span", { class: "sub" }, r.untradeable_reason) : null) },
+    { label: "跨式 vs 宽跨", render: (r) => h("button", { class: "btn", type: "button", onclick: () => {
+      loadCompare(cmpHost, r.ticker, sig.as_of);
+      cmpPanel.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    } }, `看 ${r.ticker} 对比`) },
   ];
+  const cmpHost = h("div", { class: "cmp" }, h("div", { class: "small muted" }, "点上面「今日信号」某一行的按钮，这里并排显示这只票的 ATM 跨式与 25Δ 宽跨；只读本机快照与缓存，不联网。"));
+  const cmpPanel = panel("跨式 vs 宽跨", { sub: "只并排事实，不给「选哪个」：系统里已结算事件还很少，任何选择规则目前都是在拟合" }, cmpHost);
 
   fill(root, head,
     warns.map((w) => h("p", { class: "callout warn" }, w)),
@@ -255,9 +353,13 @@ export async function renderStraddle(root, alive) {
         h("p", { class: "note" }, `横轴：信号日的「隐含 ÷ 历史中位」（≥ ${num(rules.rich_ratio, 2)} 卖、≤ ${num(rules.cheap_ratio, 2)} 买）；纵轴：财报后「实际 ÷ 隐含」，< 1 说明期权给贵了（利好卖跨式）。点少时只能看个大概，不足以下结论。`)),
       shadowPanel(d.shadow, rules)),
     h("div", { style: { height: "16px" } }),
+    strangleShadowPanel(d.strangle_shadow, rules),
+    h("div", { style: { height: "16px" } }),
     panel(`今日信号（${sig.as_of || "—"}）`, { sub: `${sig.n_rows ?? 0} 只标的，合格 ${(sig.eligible || []).length} 只` },
       (sig.eligible || []).length ? table(sigCols, sig.eligible) : h("div", { class: "empty" }, "今天没有合格信号。"),
       (sig.ineligible_reasons || []).length ? h("p", { class: "note" }, `不合格原因：${sig.ineligible_reasons.map(([r, n]) => `${r} ${n}`).join("；")}`) : null),
+    h("div", { style: { height: "16px" } }),
+    cmpPanel,
     h("p", { class: "note small muted", style: { marginTop: "14px" } }, "成交约定：买入按 ask、卖出按 bid（付点差），盯市用 CBOE 中间价。没有 delta 对冲；卖跨式风险无上界，权利金上限只为让两侧规模可比，不是仓位规则。观察项，不进评分、不构成投资建议。"));
 
   const c = C();
