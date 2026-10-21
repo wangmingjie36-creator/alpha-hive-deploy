@@ -2,9 +2,12 @@
 """
 💬 Alpha Hive Slack 报告通知器
 
-CLAUDE.md「Slack 通知精简规则」现只许一类消息，本模块只服务这一处：
-  `push_report_to_slack.py --force`（富文本日报）—— `send_rich_daily_report`
-（原第二处 `pre_scan_notify.py`（LLM 模式确认）已于 v0.45.510 停用、v0.45.514 删除。）
+CLAUDE.md「Slack 通知精简规则」：v0.45.571 起**没有任何生产代码发 Slack**——本模块只剩发送原语
+（`send_plain_text` / `_send_via_api` / `_send_slack_message_payload`）与配置探测（`enabled`，
+`run_daily_scan.py --dry-run` 与本文件的 `__main__` 读它），零生产调用方。
+（原唯一一类「富文本日报」`push_report_to_slack.py --force` → `send_rich_daily_report` 与其格式化
+`_format_rich_daily_mrkdwn` 已于 v0.45.571 删除：编排器 Step 7 不传 --force、每天只 exit 2，
+手动 --force 生产日志里从未出现过（v0.45.343 记 Bot 不在 #alpha-hive，现状待验证）；原第二类 `pre_scan_notify.py` v0.45.514 已删。）
 
 v0.45.341 删掉了零生产调用方的发送方法：`send_risk_alert` / `send_opportunity_alert` /
 `send_scan_progress` / `send_x_thread` / `send_daily_report` 及其 blocks 构建器与
@@ -15,12 +18,10 @@ v0.45.341 删掉了零生产调用方的发送方法：`send_risk_alert` / `send
 删掉的名字留作墓碑，把旧调用块原样放回会红。
 """
 
-import json
 import os
 import requests
 from resilience import get_session
-from typing import Any, Dict, List, Optional
-from datetime import datetime
+from typing import Dict, Optional
 from hive_logger import get_logger
 
 _log = get_logger("slack_report_notifier")
@@ -123,257 +124,6 @@ class SlackReportNotifier:
         except FileNotFoundError:
             return None
 
-    # ------------------------------------------------------------------
-    # 富文本日报（March-3 格式）
-    # ------------------------------------------------------------------
-
-    def send_rich_daily_report(
-        self,
-        report_json_path: str,
-        cache_dir: str,
-        data_cache_dir: str,
-        finviz_cache_dir: str,
-        dashboard_url: str = "https://wangmingjie36-creator.github.io/alpha-hive-deploy/",
-        *,
-        llm_mode: bool = True,
-    ) -> bool:
-        """
-        读取报告 JSON + 各级缓存，生成 March-3 富文本格式并推送到 Slack。
-
-        Args:
-            report_json_path: alpha-hive-daily-YYYY-MM-DD.json 的绝对路径
-            cache_dir:        cache/ 目录（含 metrics_*.json, fear_greed.json）
-            data_cache_dir:   data_cache/ 目录（含 social_*.json, short_*.json）
-            finviz_cache_dir: finviz_cache/ 目录（含 *_sentiment.json）
-            dashboard_url:    GitHub Pages URL
-            llm_mode:         是否为 LLM 增强模式
-        Returns:
-            是否发送成功
-        """
-        if not self.enabled:
-            _log.warning("Slack 通知未启用，跳过富文本日报")
-            return False
-
-        try:
-            text = self._format_rich_daily_mrkdwn(
-                report_json_path, cache_dir, data_cache_dir,
-                finviz_cache_dir, dashboard_url, llm_mode=llm_mode,
-            )
-        except Exception as exc:
-            _log.error("构建富文本日报失败: %s", exc, exc_info=True)
-            return False
-
-        return self.send_plain_text(text)
-
-    # ---- 内部：构建 mrkdwn 纯文本 ----
-
-    @staticmethod
-    def _load_json(path: str) -> Any:
-        """安全加载 JSON，失败返回 None"""
-        try:
-            with open(path, encoding="utf-8") as f:
-                return json.load(f)
-        except (OSError, json.JSONDecodeError):
-            return None
-
-    def _format_rich_daily_mrkdwn(
-        self,
-        report_json_path: str,
-        cache_dir: str,
-        data_cache_dir: str,
-        finviz_cache_dir: str,
-        dashboard_url: str,
-        *,
-        llm_mode: bool = True,
-    ) -> str:
-        """
-        构建 March-3 风格 Slack mrkdwn 文本。
-
-        返回一段完整的 Slack 消息文本（纯 mrkdwn，无 Block Kit）。
-        """
-        report = self._load_json(report_json_path)
-        if not report:
-            raise FileNotFoundError(f"无法加载报告: {report_json_path}")
-
-        project_dir = os.path.dirname(os.path.abspath(report_json_path))
-        date_str = report.get("date", datetime.now().strftime("%Y-%m-%d"))
-        opps = sorted(
-            report.get("opportunities", []),
-            key=lambda x: x.get("opp_score", 0),
-            reverse=True,
-        )
-        total_tickers = len(opps)
-        mode_label = "LLM 增强模式" if llm_mode else "规则引擎模式"
-
-        # ── 加载宏观 ──
-        fg_data = self._load_json(os.path.join(cache_dir, "fear_greed.json")) or {}
-        fg_value = fg_data.get("value", "?")
-        fg_class = fg_data.get("classification", "?")
-
-        # ── 加载每个标的的补充数据 ──
-        ticker_extras: Dict[str, Dict] = {}
-        # v0.45.546：价格兜底与 5 日涨跌改读扫描自己的 .swarm_results（30 只全有）。此前读编排器 Step 1（data_fetcher）
-        # 写的 cache/metrics_{T}_{date}.json，只有写死的 NVDA/TSLA/VKTX 三只有；两者同源同值（10-16 实测三只逐位相等）。
-        swarm_results = self._load_json(os.path.join(project_dir, f".swarm_results_{date_str}.json")) or {}
-        if not swarm_results:
-            _log.warning("Slack 日报：找不到 .swarm_results_%s.json，价格兜底与 5 日涨跌本次空缺", date_str)
-        all_tickers = [o["ticker"] for o in opps]
-
-        for ticker in all_tickers:
-            extras: Dict[str, Any] = {}
-
-            # 价格 / 5d 变动
-            # 优先从扫描时写入的 analysis-{ticker}-ml-{date}.json 读取实时价格
-            # （避免 metrics 凌晨快照价格过时；ScoutBeeNova 在扫描时拉取真实价格）
-            analysis_json = self._load_json(
-                os.path.join(project_dir, f"analysis-{ticker}-ml-{date_str}.json")
-            )
-            if analysis_json:
-                _scout_price = (
-                    analysis_json.get("swarm_results", {})
-                    .get("agent_details", {})
-                    .get("ScoutBeeNova", {})
-                    .get("details", {})
-                    .get("price")
-                )
-                if _scout_price:
-                    extras["price"] = _scout_price
-            # {ticker}_raw.json 仅在手动 collect_data.py 运行时生成，优先级高于 analysis
-            raw_json = self._load_json(os.path.join(project_dir, f"{ticker}_raw.json"))
-            if raw_json and raw_json.get("price"):
-                extras["price"] = raw_json["price"]
-            _ad = (swarm_results.get(ticker) or {}).get("agent_details") or {}
-            _scan_px = ((_ad.get("ScoutBeeNova") or {}).get("details") or {}).get("price")
-            _mom_5d = ((_ad.get("BuzzBeeWhisper") or {}).get("details") or {}).get("momentum_5d")
-            if not extras.get("price") and isinstance(_scan_px, (int, float)) and not isinstance(_scan_px, bool) and _scan_px > 0:
-                extras["price"] = _scan_px
-            if isinstance(_mom_5d, (int, float)) and not isinstance(_mom_5d, bool):
-                extras["chg_5d"] = _mom_5d
-
-            # 社交情绪
-            social = self._load_json(
-                os.path.join(data_cache_dir, f"social_{ticker}.json")
-            )
-            if social:
-                extras["bullish_pct"] = social.get("bullish_pct")
-
-            # 空头比例
-            short_data = self._load_json(
-                os.path.join(data_cache_dir, f"short_{ticker}.json")
-            )
-            if short_data:
-                extras["short_pct"] = short_data.get("short_pct_float")
-
-            ticker_extras[ticker] = extras
-
-        # ── 计算共振（score >= 6.0 且方向非中性）──
-        resonance_count = sum(
-            1 for o in opps
-            if o.get("opp_score", 0) >= 6.0 and o.get("direction", "中性") != "中性"
-        )
-
-        # ── 宏观情绪标签 ──
-        if isinstance(fg_value, (int, float)):
-            if fg_value <= 25:
-                macro_tag = "RISK_OFF"
-            elif fg_value >= 75:
-                macro_tag = "RISK_ON"
-            else:
-                macro_tag = "NEUTRAL"
-            fg_emoji = "🔴" if fg_value <= 25 else ("🟢" if fg_value >= 75 else "🟡")
-        else:
-            macro_tag = "N/A"
-            fg_emoji = "⚪"
-
-        # ── 构建消息 ──
-        lines: List[str] = []
-
-        # Header
-        lines.append(
-            f"🐝 *【{date_str}】Alpha Hive 蜂群日报*  {mode_label}"
-        )
-        lines.append(
-            f"今日摘要 | {total_tickers} 标的 | 共振 {resonance_count}/{total_tickers}"
-        )
-        lines.append("─────────────────────────")
-
-        # 标的评分列表
-        lines.append("*📊 标的评分*")
-        lines.append("")
-        for opp in opps:
-            tk = opp["ticker"]
-            score = opp.get("opp_score", 0)
-            direction = opp.get("direction", "中性")
-            opt_sig = opp.get("options_signal", "")
-            ex = ticker_extras.get(tk, {})
-
-            # 方向 emoji
-            if direction == "看多":
-                dir_label = "BULLISH 📈"
-            elif direction == "看空":
-                dir_label = "BEARISH 📉"
-            else:
-                dir_label = "中性"
-
-            # 共振标记
-            resonance_mark = ""
-            if score >= 6.0 and direction != "中性":
-                resonance_mark = "  共振"
-
-            # 价格片段
-            price_frag = ""
-            if ex.get("price"):
-                price_frag = f"  ${ex['price']}"
-                if isinstance(ex.get("chg_5d"), (int, float)):
-                    price_frag += f" (5d {ex['chg_5d']:+.1f}%)"
-
-            # short 片段
-            short_frag = ""
-            if ex.get("short_pct") and ex["short_pct"] > 0.05:
-                short_frag = f" | short {ex['short_pct']*100:.1f}%"
-
-            line = f"• *{tk}*  `{score:.1f}/10`  {dir_label}{resonance_mark}{price_frag} | {opt_sig}{short_frag}"
-            lines.append(line)
-
-        # 板块分布
-        lines.append("")
-        lines.append("*🔀 板块分布*")
-        try:
-            from config import WATCHLIST
-            sector_map: Dict[str, List[str]] = {}
-            for tk in all_tickers:
-                sector = WATCHLIST.get(tk, {}).get("sector", "Other")
-                sector_map.setdefault(sector, []).append(tk)
-            sector_parts = [f"{s}: {' '.join(ts)}" for s, ts in sector_map.items()]
-            lines.append(" | ".join(sector_parts))
-        except ImportError:
-            lines.append("N/A")
-
-        # 宏观环境
-        lines.append("")
-        lines.append(f"*🌡️ 宏观环境*  `{macro_tag}`")
-        lines.append(f"Fear & Greed: *{fg_value}* ({fg_class} {fg_emoji})")
-
-        # 社交情绪
-        lines.append("")
-        lines.append("*📡 社交情绪*")
-        social_parts = []
-        for tk in all_tickers:
-            bp = ticker_extras.get(tk, {}).get("bullish_pct")
-            if bp is not None:
-                flag = " 🟢" if bp >= 80 else (" 🔴" if bp <= 40 else "")
-                social_parts.append(f"{tk} {bp:.0f}%{flag}")
-        lines.append(" | ".join(social_parts) if social_parts else "N/A")
-
-        # 报告链接
-        lines.append("")
-        lines.append(f"📎 <{dashboard_url}|完整报告>")
-        lines.append(
-            "_⚠️ 非投资建议。蜂群 AI 分析，所有交易决策需自行判断和风控。_"
-        )
-
-        return "\n".join(lines)
-
     def send_plain_text(self, text: str, channel: Optional[str] = None) -> bool:
         """发送纯文本消息到 `channel`（缺省 #alpha-hive）。发不进去就返回 False，不换目的地。"""
         if not self.enabled:
@@ -390,7 +140,7 @@ class SlackReportNotifier:
 
         v0.45.343 删掉了「频道回 not_in_channel / channel_not_found ⇒ 自动改发私信用户」的降级
         （原 `config.SLACK_DM_FALLBACK`）。Bot 从未被邀请进 #alpha-hive，于是这条降级：
-          * 让 `push_report_to_slack --force` 每次把日报**实发到私信**，调用方只拿到 True，
+          * 让 `push_report_to_slack --force`（v0.45.571 已删）每次把日报**实发到私信**，调用方只拿到 True，
             照样记「✅ 日报已成功推送到 Slack #alpha-hive」—— 目的地变了，下游无从得知；
           * 是 v0.45.339 那批被禁告警漏成私信的机制；
           * 频道与私信都回 channel 类错误时循环跑空，返回 None。
@@ -474,8 +224,8 @@ class SlackReportNotifier:
 if __name__ == "__main__":
     # v0.45.339：手动入口**只报配置状态，不发任何消息**。此前这里连发连接测试 /
     # 机会告警 / 风险告警 / 扫描进度四条 —— 后三类正是 CLAUDE.md「Slack 通知精简
-    # 规则」明令禁止的类型。真要验证发送链路，用白名单内的
-    # `push_report_to_slack.py --force`（富文本日报）。守卫 tests/test_slack_send_whitelist.py。
+    # 规则」明令禁止的类型。v0.45.571 起白名单为空（没有任何模块许发起发送）；
+    # 要加回一类消息先由用户改规则。守卫 tests/test_slack_send_whitelist.py。
     notifier = SlackReportNotifier()
     mode = "Token" if notifier.use_user_token else ("Webhook" if notifier.enabled else "无")
     print(f"Slack 通知器：enabled={notifier.enabled}  模式={mode}  频道={notifier.CHANNEL_ID}")

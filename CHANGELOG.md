@@ -48,7 +48,47 @@
   （`test_backfill_macro_asof` 的 docstring 已写明「CPI / GDP 抢在前面时 Guard 本就不投 FOMC 票」）。改它会改评分，**本次不动**，记为待决事项（距发生约 11 个月）。
   2027 的四次 GDP 初值都在 FOMC **次日**（01-27/28、04-28/29、07-28/29、10-27/28），在后面、不遮票。
 
-## [0.45.571] — 2026-10-21 — 占位（进行中：编排器 Step 7 `push_report_to_slack.py` 死步骤清理——生产恒退出 2 跳过）
+## [0.45.571] — 2026-10-21 — Removed：编排器 Step 7 + `push_report_to_slack.py` + 它独用的 Slack 富文本日报格式化——不带 `--force` 恒 exit 2，生产从没推过；Bot 从此不发任何 Slack 消息（白名单为空）
+
+用户决定（2026-10-21）：「连脚本一起删」（另一选项是只删编排器调用、脚本留作手动调试）。死链清理队列的一项：v0.45.543 后置条件守卫把它登记为豁免
+（退出码 0 不可达）——不冒充成功，但每天跑一次只为退出 2。
+
+### 核实（删前）
+- 生产编排器日志 10-01~10-20 每个扫描日都是「Step 7 跳过」；`~/alpha-hive-data/logs` 的结构化日志里 `push_report_to_slack` 只有跳过那一行，从没走到推送路径。
+- `status.json` 的 `step7_push_report` 键零读者：alert_manager（Step 6，唯一遍历 `steps_result` 的 Python）在 Step 7 之前就跑完；网站 / MCP / 其他 Python 都不点名它。
+- `--force` 调用方：定时任务 / skills / launchd / `~/.claude/scripts`（只有部署副本与旧 `.bak`）/ shell 历史均零。
+- ⚠️ CLAUDE.md「富文本日报由 Slack MCP 推送」不符合现实：#alpha-hive 里只有 09-03 / 10-03 两条月度自诊断，`alpha-hive-daily-scan` 定时任务未注册
+  ⇒ **现在没有任何东西在推每日日报**（删 Step 7 不改变这一点——它本来就不推）。要恢复由用户决定；CLAUDE.md 已改写为现状。
+- 手动 `--force` 能否发进频道**待验证**（v0.45.343 时 Bot 不在 #alpha-hive ⇒ exit 1）；没实测，因为实测就是真发一条。
+
+### Removed
+- `scripts/alpha-hive-orchestrator.sh`：整个 Step 7 区块（`run_step push_report_to_slack.py` 与 `step7_push_report` 四种结局），原位留注释；
+  收尾横幅「Step 6-7（智能告警 + Slack 推送）」→「Step 6（智能告警）」；两处说「只允许两类消息」的注释同步。
+- `push_report_to_slack.py`（整个文件）。
+- `slack_report_notifier.SlackReportNotifier`：`send_rich_daily_report` / `_format_rich_daily_mrkdwn` / `_load_json`（约 250 行，只服务上面那个脚本）与随之无用的
+  `json` / `datetime` / `Any` / `List` import。剩下发送原语（`send_plain_text` / `_send_via_api` / `_send_slack_message_payload`）与配置探测（`enabled`），
+  **零生产调用方**——留着是给将来经用户改规则后加回的消息类型用；要不要整个模块也删，是另一个决定。
+
+### Changed（守卫与测试）
+- `tests/test_slack_send_whitelist.py`：`ALLOWED_SENDERS` 变空；`send_rich_daily_report` 进墓碑 `RETIRED_SEND_METHODS`；原来由 push_report_to_slack 命中承担的
+  「扫描器在真代码上的正对照」改为新用例 `test_scanner_sees_real_sender_code`（真库源码换成不享受类体豁免的路径名后必须命中 R1 + R4；
+  变异 `send_names |= methods` → `pass` 实测变红）；两跳闭包改用合成类钉住；白名单豁免机制改用合成名单测。
+- `tests/test_orchestrator_step_postconditions.py`：`STEP_OUTPUTS` 删 `push_report_to_slack.py`（EXEMPT 类别暂无实例，保留）；Step 6 区块的结束锚点从
+  「# Step 7: 推送」改为「# 写入 status.json」。
+- `tests/test_persistent_writes_have_readers.py`：`alpha-hive-daily-*.json` 与 `{T}_raw.json` 的读者表删掉已不存在的两条（守卫按设计红并点名；两者仍各有活读者）。
+- `tests/test_step1_data_fetcher_retired.py`：删 `TestSlackReadsScanResults`（被测的格式化器没了）；它与 `tests/test_dead_chains_batch1_retired.py` 的「同一解析认得出仍在跑的步骤」
+  正对照从 push_report_to_slack 改为 alert_manager。
+- `tests/test_slack_notifier.py`：删 `--force` 端到端用例与 `send_rich_daily_report` 断言。
+- 文档：CLAUDE.md「Slack 推送规则 / 通知精简规则」改为现状（Bot 不发任何消息；每日日报目前无自动推送）；`SLACK_INTEGRATION_GUIDE.md` / `QUICK_START.md` 顶部现行规则摘要同步。
+
+### Added
+- 墓碑 `tests/test_step7_push_report_retired.py`：脚本不在、编排器无 Step 7 / 无 `step7_push_report` 结局键（正对照 alert_manager）、格式化成员不在、全仓非测试代码不导入 /
+  不在非 docstring 字符串里点名它（探测器自带正反样本）；外加兼容一轮的行为证据：编排器 `run_step` 对缺失脚本返回 2。
+
+### 上线
+- 只删不加，Python 侧无耦合：合入后第一个扫描日部署新编排器、那轮仍跑**旧编排器**——它照旧 `run_step push_report_to_slack.py`，脚本已不在 ⇒ `run_step` 返回 2
+  （日志「脚本不存在，跳过」）⇒ 落到原 `skipped_manual` 分支，`status.json` 与删前同值。第二个扫描日起新编排器执行，`step7_push_report` 键消失。
+- 核验（第二个扫描日后）：`grep -c "Step 7" ~/.claude/logs/orchestrator-<日期>.log` = 0；当天 `status.json` 的 `steps_result` 无 `step7_push_report`。
 
 ## [0.45.570] — 2026-10-21 — Removed：ML 模型的缺省落盘路径 `ml_model.json`——`train_model()` 训完不再存盘，`save_model` / `load_model` 的路径必填（v0.45.543 读者登记表最后一条文件类 PENDING_DEAD，上限 3 → 2）
 

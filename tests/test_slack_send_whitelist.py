@@ -1,9 +1,10 @@
-"""Slack 发送白名单：只有一个模块许发起 Slack 发送（v0.45.339；v0.45.514 起从两个减为一个）。
+"""Slack 发送白名单：没有任何模块许发起 Slack 发送（v0.45.339 两个；v0.45.514 减为一个；v0.45.571 起为空）。
 
-CLAUDE.md「Slack 通知精简规则」：Bot **只发一类消息** ——
-  富文本日报推送（`push_report_to_slack.py`）
-（原第二类「扫描前 LLM 模式确认」`pre_scan_notify.py` 已于 v0.45.510 停用、v0.45.514 删除；墓碑见本文件 `TestPreScanNotifyStaysRetired`。）
-其余（扫描开始/完成、SLO、权重更新、数据质量降级、逐标的高分/低分预警、扫描失败）
+CLAUDE.md「Slack 通知精简规则」：Bot **不发任何消息**。
+（原第一类「富文本日报」`push_report_to_slack.py` 已于 v0.45.571 删除——编排器 Step 7 不传 `--force`、每天只 exit 2；
+原第二类「扫描前 LLM 模式确认」`pre_scan_notify.py` 已于 v0.45.510 停用、v0.45.514 删除；墓碑见本文件
+`TestPreScanNotifyStaysRetired` 与 `tests/test_step7_push_report_retired.py`。）
+一切信息（扫描开始/完成、SLO、权重更新、数据质量降级、逐标的高分/低分预警、扫描失败）
 **只进本地日志**。
 
 ────────────────────────────────────────────────────────────────────────
@@ -31,7 +32,8 @@ CLAUDE.md「Slack 通知精简规则」：Bot **只发一类消息** ——
 ────────────────────────────────────────────────────────────────────────
 1. `TestOnlyWhitelistedModulesSend` —— 静态：AST 扫本仓每个非测试 .py。
    **双向**：白名单外不许有发送（怕它变大）；白名单内每个模块必须**真被扫到**在发送
-   （怕它变小 —— 既防名单过期，也是探针在真代码上的正对照：扫描器瞎了这条先红）。
+   （怕它变小 —— 防名单过期）。白名单为空后，「探针在真代码上的正对照」改由真发送器库
+   `slack_report_notifier.py` 在**去掉类体豁免**时必须被扫到来承担（扫描器瞎了这条先红）。
    v0.45.341 删掉零生产调用方的发送代码后，被删的名字留作**墓碑**继续按发送认
    （`RETIRED_SEND_METHODS` / `RETIRED_SENDER_MODULES`，理由在定义处）。
 2. `TestScannerHasTeeth` —— 合成源码 + 真文件注入变异：每种检测规则至少一个会红的
@@ -47,8 +49,8 @@ CLAUDE.md「Slack 通知精简规则」：Bot **只发一类消息** ——
 conftest 的 `_block_slack` 仍在底下兜底（它的记录器会被本文件的覆盖，但 ①② 两道闸不变）。
 
 ⚠️ 已知盲区：编排器（v0.45.353 起在仓库 `scripts/alpha-hive-orchestrator.sh`）是 bash，本守卫只做 Python AST，扫不到。
-2026-09-23 人工核对（当时还调 `pre_scan_notify.py`，v0.45.514 已删）：它只调 `push_report_to_slack.py` /
-不带 `--dispatch` 的 `alert_manager.py`，没有 curl 到 Slack 的行。
+2026-09-23 人工核对（当时还调 `pre_scan_notify.py`，v0.45.514 已删；`push_report_to_slack.py` v0.45.571 已删）：
+它只调不带 `--dispatch` 的 `alert_manager.py`，没有 curl 到 Slack 的行。
 """
 from __future__ import annotations
 
@@ -65,10 +67,10 @@ from tests import _ast_cache
 
 REPO_ROOT = Path(__file__).resolve().parent.parent   # 指向**代码**，故用 __file__
 
-#: 唯一允许**发起** Slack 发送的模块（相对仓库根）→ 它发的是规则里哪一类。
-ALLOWED_SENDERS = {
-    "push_report_to_slack.py": "富文本日报推送",
-}
+#: 允许**发起** Slack 发送的模块（相对仓库根）→ 它发的是规则里哪一类。
+#: v0.45.571 起为空：唯一一类「富文本日报」（`push_report_to_slack.py`）随编排器 Step 7 一起删了。
+#: 要加回一类消息，先由用户改 CLAUDE.md「Slack 通知精简规则」，再登记到这里。
+ALLOWED_SENDERS: dict[str, str] = {}
 
 #: 发送器库：模块 → 类名。**类体内部**的调用是实现（`send_plain_text` 调
 #: `_send_via_api`），不算发起；同文件里类体之外（CLI 入口、模块级代码）照样算。
@@ -84,9 +86,11 @@ SENDER_LIBS = {
 #: `real_data_sources` 那两处旧块包在 `except Exception` 里，**吞成一行 debug 日志**：
 #: 既没发、也没报，正是 CLAUDE.md「这个失败，下游怎么知道？」要治的形状。
 #: 若有人连库带调用一起 revert，推导会把方法重新收进集合 —— 两条复活路径都红。
+#: v0.45.571 追加 `send_rich_daily_report`（富文本日报，随 `push_report_to_slack.py` 一起删）。
 RETIRED_SEND_METHODS = frozenset({
     "send_risk_alert", "send_opportunity_alert", "send_scan_progress", "send_x_thread",
     "send_daily_report", "test_connection", "retry_failed", "_send_slack_message",
+    "send_rich_daily_report",
 })
 #: 整个删掉的发送器模块 → 它的类名。导入模块或引用类名即算。
 RETIRED_SENDER_MODULES = {"slack_notifier": "SlackNotifier"}
@@ -306,21 +310,29 @@ class TestOnlyWhitelistedModulesSend:
             + "\n告警类信息请改成写日志（_log.warning），不要加进白名单。")
 
     def test_every_whitelisted_module_is_still_seen_sending(self):
-        """白名单的反方向：名单上的每个模块必须**真被扫到**在发送。
-
-        两个用处：① 名单过期（某模块不再发送却还挂着许可）会红；② 这是扫描器在
-        **真代码**上的正对照 —— 规则全瞎时上一条会恒绿，这一条先红。
-
-        变红的变异：把 `_scan_source` 里的 `distinctive |= methods` 改成 `pass`
-        （按方法名认发送整个失明）⇒ push_report_to_slack 唯一的命中
-        `send_rich_daily_report` 消失 ⇒ 缺席。
-        """
+        """白名单的反方向：名单上的每个模块必须**真被扫到**在发送（名单过期会红）。
+        v0.45.571 起名单为空，这条暂时空转；真代码上的正对照见下一条。"""
         seen = {f for f, _ln, _why in _scan_repo(allowed={})}
         missing = set(ALLOWED_SENDERS) - seen
         assert not missing, (
             f"白名单里的 {sorted(missing)} 没被扫到任何发送 —— 要么它已不再发 Slack"
             "（从 ALLOWED_SENDERS 删掉），要么扫描器瞎了（先修扫描器）。")
         assert set(ALLOWED_SENDERS) <= seen
+
+    def test_scanner_sees_real_sender_code(self):
+        """扫描器在**真代码**上的正对照（v0.45.571 起白名单为空，原来由 push_report_to_slack 的
+        `send_rich_daily_report` 命中承担）：真发送器库的源码换一个不享受类体豁免的路径名再扫，
+        必须按 R1（类内 `self.<发送方法>()`）与 R4（`get_session("slack")`）报出来。
+        规则全瞎时 `test_only_whitelisted_modules_send` 会恒绿，这一条先红。
+
+        变红的变异：把 `_scan_source` 里的 `send_names |= methods` 改成 `pass`（R1 失明）；
+        或删掉 R4 那段。
+        """
+        specs = _load_sender_specs(REPO_ROOT)
+        src = (REPO_ROOT / "slack_report_notifier.py").read_text(encoding="utf-8")
+        assert not _scan_source(src, "slack_report_notifier.py", specs), "库自身路径应享受类体豁免"
+        rules = {why.split()[0] for _f, _ln, why in _scan_source(src, "relocated_sender.py", specs)}
+        assert {"R1", "R4"} <= rules, f"真发送器代码没被认出来（只命中 {sorted(rules)}）"
 
     def test_sender_methods_are_derived_not_everything(self):
         """推导出的发送方法集合：该有的都有，不该有的没有。
@@ -331,11 +343,17 @@ class TestOnlyWhitelistedModulesSend:
         """
         specs = _load_sender_specs(REPO_ROOT)
         srn = specs["slack_report_notifier.py"][1]
-        # 种子（方法体里有 .post）+ 一跳闭包（send_plain_text）+ 两跳闭包（send_rich_daily_report）
-        assert {"_send_via_api", "_send_slack_message_payload",
-                "send_plain_text", "send_rich_daily_report"} <= srn
+        # 种子（方法体里有 .post）+ 一跳闭包（send_plain_text）
+        assert {"_send_via_api", "_send_slack_message_payload", "send_plain_text"} <= srn
         assert not {"_read_user_token", "_check_webhook_alive", "_is_valid_webhook",
-                    "_format_rich_daily_mrkdwn", "_load_json", "__init__"} & srn
+                    "_read_webhook_from_file", "__init__"} & srn
+        # 两跳闭包：真库里原来的实例（send_rich_daily_report）v0.45.571 删了，用合成类钉住
+        fake = _sender_methods("class K:\n"
+                               "    def a(self):\n        self.b()\n"
+                               "    def b(self):\n        self.c()\n"
+                               "    def c(self):\n        self.s.post(1)\n"
+                               "    def d(self):\n        return 1\n", "K")
+        assert fake == {"a", "b", "c"}
 
     def test_retired_names_are_really_gone(self):
         """墓碑只记**已删除**的东西。墓碑里的方法又回到了库里 ⇒ 先回 CLAUDE.md 改规则
@@ -477,7 +495,6 @@ _MUST_FLAG = {
     "别名导入 + 一跳闭包": ("swarm_agents/x.py",
                      "from slack_report_notifier import SlackReportNotifier as S\n"
                      "S().send_plain_text('降级告警')\n"),
-    "两跳闭包": ("x.py", "n.send_rich_daily_report(p, c, d, f)\n"),
     "私有发送方法": ("x.py", "n._send_via_api('t', 'C0AGUUWJXJS')\n"),
     "getattr 字符串": ("x.py", "getattr(n, 'send_plain_text')('t')\n"),
     "SlackNotifier 经模块属性": ("alert_x.py",
@@ -521,8 +538,6 @@ _MUST_NOT_FLAG = {
     "只读状态": ("run_daily_scan.py",
              "from slack_report_notifier import SlackReportNotifier\n"
              "n = SlackReportNotifier()\nprint(n.enabled, n.use_user_token)\n"),
-    "白名单模块": ("push_report_to_slack.py",
-              "requests.post('https://slack.com/api/chat.postMessage', json={})\n"),
     "库类体内部": ("slack_report_notifier.py",
                "class SlackReportNotifier:\n"
                "    def send_plain_text(self, t):\n        return self._send_via_api(t, 'C')\n"),
@@ -555,9 +570,12 @@ class TestScannerHasTeeth:
         assert _scan_source(f"n.{method}('t', 'm')\n", "swarm_agents/x.py", specs)
 
     def test_empty_whitelist_makes_allowed_module_red(self, specs):
-        """白名单确实在起作用 —— 同一段代码，换掉路径豁免就红。"""
-        rel, src = _MUST_NOT_FLAG["白名单模块"]
+        """白名单确实在起作用 —— 同一段代码，登记了就豁免，换掉路径豁免就红。
+        （v0.45.571 起真白名单为空，用合成名单测豁免机制本身。）"""
+        rel, src = ("sender_x.py", "requests.post('https://slack.com/api/chat.postMessage', json={})\n")
+        assert not _scan_source(src, rel, specs, allowed={rel: "合成"})
         assert _scan_source(src, rel, specs, allowed={})
+        assert _scan_source(src, rel, specs)      # 真白名单为空 ⇒ 缺省就红
 
     @pytest.mark.parametrize("rel, anchor, block", [
         ("resilience.py",

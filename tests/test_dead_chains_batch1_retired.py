@@ -140,7 +140,7 @@ class TestBatch1StaysRetired:
                                               if ln.strip().startswith("run_step") and '"' in ln]
         assert not re.search(r"(?m)^[^#\n]*step8_metrics_collection", orch), "step8 结局键又写回 status.json 了"
         # 正对照：同一解析方式认得出仍在跑的步骤
-        assert any("push_report_to_slack.py" in ln for ln in orch.splitlines() if ln.strip().startswith("run_step"))
+        assert any("alert_manager.py" in ln for ln in orch.splitlines() if ln.strip().startswith("run_step"))
 
 
 class TestMemoryStoreAfterRetirement:
