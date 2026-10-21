@@ -580,6 +580,43 @@ def buzz_v1_self_proof(db: Path, today: str) -> Dict:
     return {k: r[k] for k in _SELF_PROOF_KEYS if k in r}
 
 
+#: 桥接核对摘要（v0.45.583，根治阶段 2）只留计数与状态——不含任何收益 / 效应量
+_BRIDGE_KEYS = ("ok", "ready", "end", "required_days", "error", "note")
+_BRIDGE_GROUP_KEYS = ("n_pass", "n_fail", "n_incomplete", "ready", "first_fail")
+
+
+def buzz_v1_bridge(db: Path, today: str) -> Dict:
+    """冻结通道层桥接核对的摘要（`buzz_v1.bridge`）。算不出同样记 ok=False（可见），不当作通过。
+
+    **只是进度**：阶段 4（协议修订 3）之前 H1 仍读入档通道，桥接失败不改 H1 的状态，只在进度行标 ⚠️、外壳出一条。
+    """
+    try:
+        import buzz_v1
+        r = buzz_v1.bridge(str(db), end=today)
+    except Exception as e:  # noqa: BLE001 —— 任何失败都必须变成可见的 ⚠️
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    out = {k: r[k] for k in _BRIDGE_KEYS if k in r}
+    out["groups"] = {g: {k: G.get(k) for k in _BRIDGE_GROUP_KEYS} for g, G in (r.get("groups") or {}).items()}
+    out["score"] = dict(r.get("score") or {})
+    out["n_errors"] = len(r.get("errors") or [])
+    return out
+
+
+def _bridge_text(br: Dict) -> str:
+    if br.get("error"):
+        return f"buzz_v1 桥接核对算不出（{br['error']}）"
+    if br.get("note"):
+        return f"buzz_v1 桥接核对：{br['note']}"
+    names = {"sentiment": "情绪", "price": "行情"}
+    parts = [f"{names.get(g, g)} {G.get('n_pass', 0)}/{br.get('required_days')}"
+             + (f"（失败 {G['n_fail']}，首次 {G.get('first_fail')}）" if G.get("n_fail") else "")
+             for g, G in (br.get("groups") or {}).items()]
+    sc = br.get("score") or {}
+    tail = f"，整分逐位 {sc.get('n_match', 0)}/{sc.get('n', 0)}" if sc.get("n") else ""
+    tail += f"，冻结层报错 {br['n_errors']} 次" if br.get("n_errors") else ""
+    return f"buzz_v1 桥接核对 {'；'.join(parts)} 天通过{tail}"
+
+
 def _self_proof_problem(sp: Dict) -> str:
     if sp.get("error"):
         return f"buzz_v1 自证算不出（{sp['error']}）"
@@ -603,7 +640,8 @@ def apply_self_proof(res: Dict, sp: Dict) -> Dict:
 
 def run(db_path: Optional[str] = None, today: Optional[str] = None,
         repo_root: Optional[Path] = None, history: Optional[list] = None,
-        code_guard: Optional[Dict] = None, self_proof: Optional[Dict] = None) -> Dict:
+        code_guard: Optional[Dict] = None, self_proof: Optional[Dict] = None,
+        bridge: Optional[Dict] = None) -> Dict:
     P = _protocol()
     today = today or dt.date.today().isoformat()
     base = {"forward_start": P.FORWARD_START, "today": today,
@@ -648,7 +686,10 @@ def run(db_path: Optional[str] = None, today: Optional[str] = None,
     out = {**base, **res, "truncation": {h1: trunc[h1], h2: trunc[h2]},
            "weight_change": wchg, "stale": stale, "h1_anchor": anchor}
     out = apply_code_guard(out, code_guard if code_guard is not None else input_code_guard())
-    return apply_self_proof(out, self_proof if self_proof is not None else buzz_v1_self_proof(db, today))
+    out = apply_self_proof(out, self_proof if self_proof is not None else buzz_v1_self_proof(db, today))
+    # v0.45.583：桥接核对只是进度（阶段 4 前 H1 仍读入档通道），无论上面判成什么都附上
+    out["buzz_v1_bridge"] = bridge if bridge is not None else buzz_v1_bridge(db, today)
+    return out
 
 
 def status_line(res: Dict) -> str:
@@ -684,6 +725,12 @@ def status_line(res: Dict) -> str:
     sp = res.get("buzz_v1_self_proof")
     if sp is not None and not sp.get("ok"):
         warns.append(f"{_self_proof_problem(sp)}——跑 buzz_v1.py 看明细；未通过前到检视点将不出结论")
+    br = res.get("buzz_v1_bridge")
+    if br is not None:
+        if br.get("ok"):
+            notes.append(_bridge_text(br))
+        else:
+            warns.append(f"{_bridge_text(br)}——跑 `buzz_v1.py --bridge` 看失配明细（阶段 4 前不影响 H1）")
     tail = ("；⚠️ " + "；".join(warns)) if warns else ""
     tail += "".join(f"；{n}" for n in notes)
     if st == "concluded":

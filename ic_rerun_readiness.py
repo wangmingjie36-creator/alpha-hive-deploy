@@ -1729,9 +1729,10 @@ _FWD_DETAIL_KEYS = ("status", "reason", "stale", "look", "weeks", "next_look_at"
 #: 维度 IC 协议执行器 `run()` 返回值里 `attention` 用得上的键——刻意**不含** `verdicts` / `descriptive`
 #: （结论与效应量只在检视点之后出现，本工具只报「到点了、去跑脚本看」，不转述结论）
 #: `input_code_guard` / `buzz_v1_self_proof`（v0.45.556）：H1 两道前提的核对摘要，只有单元名与计数。
+#: `buzz_v1_bridge`（v0.45.583）：冻结通道层桥接核对的计数与状态（阶段 4 前只是进度）。
 _DIM_DETAIL_KEYS = ("status", "reason", "forward_start", "today", "h1_weeks", "next_look_at",
                     "looks_done", "truncation", "weight_change", "stale", "h1_anchor",
-                    "input_code_guard", "buzz_v1_self_proof")
+                    "input_code_guard", "buzz_v1_self_proof", "buzz_v1_bridge")
 
 
 def _detail(fres: Dict, keys) -> Dict:
@@ -2387,7 +2388,24 @@ def _dim_ic_attention(d: Dict) -> List[Dict]:
         out.append(item(f"{iid}.buzz_v1_self_proof", "warn",
                         f"{name}：buzz_v1 自证未通过（{why}）—— 跑 `/usr/local/bin/python3 buzz_v1.py` 看失配明细；"
                         "未通过前到检视点将不出结论（协议 §13.11）"))
-    for key, what in (("input_code_guard", "输入层代码指纹守卫"), ("buzz_v1_self_proof", "buzz_v1 自证")):
+    br = d.get("buzz_v1_bridge")
+    if isinstance(br, dict) and not br.get("ok"):
+        if br.get("error"):
+            why = f"算不出：{br['error']}"
+        else:
+            fails = [f"{g} 失败 {G.get('n_fail')} 天（首次 {G.get('first_fail')}）"
+                     for g, G in (br.get("groups") or {}).items() if G.get("n_fail")]
+            sc = br.get("score") or {}
+            if sc.get("n") != sc.get("n_match"):
+                fails.append(f"整分逐位 {sc.get('n_match')}/{sc.get('n')}")
+            if br.get("n_errors"):
+                fails.append(f"冻结层报错 {br['n_errors']} 次")
+            why = "；".join(fails) or "未给原因"
+        out.append(item(f"{iid}.buzz_v1_bridge", "warn",
+                        f"{name}：buzz_v1 桥接核对未通过（{why}）—— 跑 `/usr/local/bin/python3 buzz_v1.py --bridge` 看失配明细；"
+                        "冻结通道层与生产通道对不上（或有没存下的隐藏输入），查清前不能进阶段 4（阶段 4 前不影响 H1）"))
+    for key, what in (("input_code_guard", "输入层代码指纹守卫"), ("buzz_v1_self_proof", "buzz_v1 自证"),
+                      ("buzz_v1_bridge", "buzz_v1 桥接核对")):
         if not isinstance(d.get(key), dict) and st != "cannot_judge":
             # 执行器 `run()` 走完全程的返回都带这两个键；读不到 = 形状变了 / 白名单漏了 / 桩没带 ⇒ 前提核对会无声消失，
             # 单列一条。cannot_judge 豁免：`run()` 找不到 / 读不出库的两条早退不带这两个键，执行器没加载起来也不带——

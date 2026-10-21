@@ -44,10 +44,22 @@ v0.45.564 起不比对、只报出跳过了哪几天）：
 截止条件收窄为「只点名冻结层」（v0.45.556 实现选择，已写进协议 §13.11）：同时点名输入层的边界（如 v0.45.445 新闻换源）
 改的是输入，冻结层代码不变、自证照样应当成立；若它其实也夹带了冻结层改动，自证会直接失配变红——宽口径不会漏，窄口径不会误停。
 
+桥接核对（v0.45.583，根治阶段 2）
+---------------------------------
+上面的自证证明「归档通道 × 冻结合成层 = 生产分」；但通道值本身仍是生产代码算的。阶段 2 加了冻结**通道层**
+（`buzz_v1_channels`：原始观测 → 7 个通道，逐字抄窗口起点代码），`bridge()` 逐日核对：
+  ① 每只票由原始观测（`observation_links` + `observation_archive` 的 payload）重算的通道值，与当天入档的 `buzz.comp.*`
+     **逐位相等**（情绪 4 个、行情 3 个分两组核；行情另核三个原始字段 `price.*`）；
+  ② 两组都完整、都相等的行，再用冻结通道走完整个 buzz_v1，与生产 `dimension_scores.sentiment` 逐位相等。
+一天的一组算「通过」= 当天每只票该组观测都齐、且全部相等；有一只不齐 ⇒「不全」（不计入、不算失败）；有一只不等 ⇒「失败」
+（生产通道代码与冻结版对不上，或有没存下来的隐藏输入——必须查清）。用户 10-20 定：两组各**至少 10 个通过日、0 个失败日**
+才进阶段 4（协议修订 3）。情绪组从 2026-10-20 起有观测，行情组从 10-21 起（v0.45.580）。
+
 用法
 ----
     /usr/local/bin/python3 buzz_v1.py                 # 自证（生产库只读）
     /usr/local/bin/python3 buzz_v1.py --json
+    /usr/local/bin/python3 buzz_v1.py --bridge        # 桥接核对（生产库 + 观测档案只读）
 """
 from __future__ import annotations
 
@@ -316,12 +328,191 @@ def self_proof(db_path: Optional[str] = None, end: Optional[str] = None,
             "mismatched": mism[:max_examples], "missing": miss[:max_examples]}
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# 桥接核对（阶段 2）
+# ────────────────────────────────────────────────────────────────────────────
+
+#: 进阶段 4 之前每组至少要这么多个通过日（用户 2026-10-20 定），且 0 个失败日
+BRIDGE_REQUIRED_DAYS = 10
+_PRICE_SCALARS = ("momentum_5d", "volume_ratio", "volatility_20d")
+#: 逐位核对的原始字段：量比 / 波动率入档自 BuzzBee 自己的 details；动量入档自 ScoutBee（同一份共享行情，但 10-05 同日重扫那天
+#: 两只蜂的动量末位不同过，v0.45.562）⇒ 动量不拿 Scout 那份当判据——Buzz 自己的动量由连续值的动量通道逐位核到
+_PRICE_SCALARS_STRICT = ("volume_ratio", "volatility_20d")
+_NO_PRICE_BLOCK = "溯源块里没有 price"
+_GROUP_NAMES = {"sentiment": "情绪", "price": "行情"}
+
+
+def _same(a, b) -> bool:
+    """逐位相等；None / NaN / 归档里没有（非有限值不入档）视为同一件事。"""
+    def _blank(x):
+        return x is None or (isinstance(x, float) and x != x)
+    if _blank(a) or _blank(b):
+        return _blank(a) and _blank(b)
+    return float(a) == float(b)
+
+
+def bridge(db_path: Optional[str] = None, archive_base: Optional[str] = None, end: Optional[str] = None,
+           max_examples: int = 10) -> Dict:
+    """逐日核对冻结通道层（见模块说明「桥接核对」）。只读；读库 / 档案失败 ⇒ ok=False 并带 `error`（不当作通过）。"""
+    import observation_archive as oa
+    import buzz_v1_channels as fc
+    db = Path(db_path) if db_path else _db_path()
+    base = Path(archive_base) if archive_base else oa.root()
+    hi = end or dt.date.today().isoformat()
+    groups = {"sentiment": fc.SENTIMENT_CHANNELS, "price": fc.PRICE_CHANNELS}
+    out: Dict = {"ok": True, "end": hi, "required_days": BRIDGE_REQUIRED_DAYS,
+                 "groups": {g: {"days": [], "n_pass": 0, "n_fail": 0, "n_incomplete": 0} for g in groups},
+                 "score": {"n": 0, "n_match": 0}, "mismatches": [], "incomplete_examples": [], "errors": []}
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            try:
+                dates = [r[0] for r in con.execute(
+                    f"SELECT DISTINCT date FROM {oa.LINKS_TABLE} WHERE consumer=? AND date <= ? ORDER BY date",
+                    (oa.CONSUMER_BUZZ, hi))]
+            except sqlite3.OperationalError:
+                dates = []          # 表还没建（还没有任何一轮扫描带溯源块）
+            if not dates:
+                out["note"] = "还没有带原始观测溯源的扫描日"
+                return out
+            names = _COMP + tuple(f"price.{k}" for k in _PRICE_SCALARS)
+            arch: Dict[Tuple[str, str], Dict[str, float]] = defaultdict(dict)
+            for d, t, sig, v in con.execute(
+                    f"SELECT date, ticker, signal, value FROM {_TABLE} WHERE date >= ? AND date <= ? "
+                    f"AND signal IN ({','.join('?' * len(names))})", (dates[0], hi) + names):
+                arch[(d, t)][sig] = v
+            prod: Dict[Tuple[str, str], float] = {}
+            for d, t, ds in con.execute("SELECT date, ticker, dimension_scores FROM predictions "
+                                        "WHERE date >= ? AND date <= ? AND dimension_scores IS NOT NULL",
+                                        (dates[0], hi + "~")):
+                try:
+                    v = (json.loads(ds) or {}).get("sentiment")
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    v = None
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    prod[(d[:10], t)] = float(v)
+            inp = ArchiveInputs(con, dates[0], hi)
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        return {**out, "ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def load(sha):
+        return oa.load(sha, base)
+
+    for d in dates:
+        links = oa.load_links(db, d)
+        tally = {g: {"n": 0, "complete": 0, "match": 0, "no_block": 0, "fail": False} for g in groups}
+        for t, blk in sorted(links.items()):
+            try:
+                rec = fc.channels_from_observations(t, blk, load)
+            except Exception as e:  # noqa: BLE001 —— 冻结层在真实 payload 上抛 = 要查的事，不能吞
+                out["errors"].append(f"{d} {t}: {type(e).__name__}: {e}")
+                for g in groups:
+                    tally[g]["n"] += 1
+                    tally[g]["fail"] = True
+                continue
+            a = arch.get((d, t), {})
+            for g, chans in groups.items():
+                tally[g]["n"] += 1
+                r = rec[g]
+                if "incomplete" in r:
+                    if r["incomplete"].startswith(_NO_PRICE_BLOCK):
+                        tally[g]["no_block"] += 1
+                    elif len(out["incomplete_examples"]) < max_examples:
+                        out["incomplete_examples"].append({"date": d, "ticker": t, "group": g, "why": r["incomplete"]})
+                    continue
+                tally[g]["complete"] += 1
+                diffs = [(c, r[c], a.get(f"buzz.comp.{c}")) for c in chans if not _same(r[c], a.get(f"buzz.comp.{c}"))]
+                if g == "price":
+                    diffs += [(f"price.{k}", r[k], a.get(f"price.{k}")) for k in _PRICE_SCALARS_STRICT
+                              if f"price.{k}" in a and not _same(r[k], a.get(f"price.{k}"))]
+                if diffs:
+                    tally[g]["fail"] = True
+                    if len(out["mismatches"]) < max_examples:
+                        out["mismatches"].append({"date": d, "ticker": t, "group": g,
+                                                  "diffs": [{"field": f, "frozen": x, "archived": y} for f, x, y in diffs]})
+                else:
+                    tally[g]["match"] += 1
+            # ② 两组都完整且都相等 ⇒ 冻结通道走完整个 buzz_v1，对生产分
+            s, pr = rec.get("sentiment", {}), rec.get("price", {})
+            if ("incomplete" not in s and "incomplete" not in pr and (d, t) in prod
+                    and all(_same(s[c], a.get(f"buzz.comp.{c}")) for c in fc.SENTIMENT_CHANNELS)
+                    and all(_same(pr[c], a.get(f"buzz.comp.{c}")) for c in fc.PRICE_CHANNELS)):
+                ch = {**{c: s[c] for c in fc.SENTIMENT_CHANNELS}, **{c: pr[c] for c in fc.PRICE_CHANNELS}}
+                _r, ref_pct, why = inp.ref(d, t)
+                if why is None:
+                    out["score"]["n"] += 1
+                    got = score(ch, pr["momentum_5d"], ref_pct)["score"]
+                    if got == prod[(d, t)]:
+                        out["score"]["n_match"] += 1
+                    elif len(out["mismatches"]) < max_examples:
+                        out["mismatches"].append({"date": d, "ticker": t, "group": "score",
+                                                  "diffs": [{"field": "score", "frozen": got, "archived": prod[(d, t)]}]})
+        for g in groups:
+            tl = tally[g]
+            if tl["n"] and tl["no_block"] == tl["n"]:
+                st = "not_archived"                       # 那天的扫描还没存这一组的观测（如 10-20 的行情）
+            elif tl["fail"]:
+                st = "fail"
+            elif tl["n"] and tl["complete"] == tl["n"]:
+                st = "pass"
+            else:
+                st = "incomplete"
+            G = out["groups"][g]
+            G["days"].append({"date": d, "status": st, "n": tl["n"], "complete": tl["complete"], "match": tl["match"]})
+            if st == "pass":
+                G["n_pass"] += 1
+            elif st == "fail":
+                G["n_fail"] += 1
+            elif st == "incomplete":
+                G["n_incomplete"] += 1
+    score_fail = out["score"]["n"] != out["score"]["n_match"]
+    for g, G in out["groups"].items():
+        G["ready"] = G["n_pass"] >= BRIDGE_REQUIRED_DAYS and G["n_fail"] == 0
+        G["first_fail"] = next((x["date"] for x in G["days"] if x["status"] == "fail"), None)
+    out["ok"] = not out["errors"] and not score_fail and all(G["n_fail"] == 0 for G in out["groups"].values())
+    out["ready"] = out["ok"] and all(G["ready"] for G in out["groups"].values())
+    return out
+
+
+def bridge_line(res: Dict) -> str:
+    if res.get("error"):
+        return f"⚠️ 桥接核对算不出：{res['error']}"
+    if res.get("note"):
+        return f"⏳ 桥接核对：{res['note']}"
+    parts = [f"{_GROUP_NAMES[g]} {G['n_pass']}/{res['required_days']} 天通过"
+             + (f"、失败 {G['n_fail']}" if G["n_fail"] else "") + (f"、不全 {G['n_incomplete']}" if G["n_incomplete"] else "")
+             for g, G in res["groups"].items()]
+    sc = res["score"]
+    head = "✅" if res.get("ready") else ("⏳" if res.get("ok") else "⚠️")
+    return (f"{head} 桥接核对（截至 {res['end']}）：{'；'.join(parts)}；整分逐位 {sc['n_match']}/{sc['n']}"
+            + (f"；冻结层报错 {len(res['errors'])} 次" if res.get("errors") else ""))
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="buzz_v1 自证（生产库只读）")
+    ap = argparse.ArgumentParser(description="buzz_v1 自证 / 桥接核对（生产库与观测档案只读）")
     ap.add_argument("--db", default=None)
     ap.add_argument("--end", default=None)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--bridge", action="store_true", help="桥接核对：冻结通道层 vs 入档通道（阶段 2）")
+    ap.add_argument("--archive", default=None, help="观测档案根目录（缺省 PATHS.observation_archive）")
     args = ap.parse_args()
+    if args.bridge:
+        res = bridge(args.db, args.archive, args.end)
+        if args.json:
+            print(json.dumps(res, indent=2, ensure_ascii=False, default=str))
+        else:
+            print(bridge_line(res))
+            for g, G in res.get("groups", {}).items():
+                print(f"   {g}: " + "  ".join(f"{x['date']}={x['status']}({x['match']}/{x['n']})" for x in G["days"]))
+            for x in res.get("mismatches", []):
+                print(f"   失配 {x['date']} {x['ticker']} [{x['group']}]: {x['diffs']}")
+            for x in res.get("incomplete_examples", []):
+                print(f"   不全 {x['date']} {x['ticker']} [{x['group']}]: {x['why']}")
+            for x in res.get("errors", []):
+                print(f"   报错 {x}")
+        return 0 if res.get("ok") else 1
     res = self_proof(args.db, args.end)
     if args.json:
         print(json.dumps(res, indent=2, ensure_ascii=False))

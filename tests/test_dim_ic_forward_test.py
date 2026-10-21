@@ -64,11 +64,21 @@ _SP_OK = {"ok": True, "window": ["2026-09-28", "2026-12-31"], "n": 450, "n_match
 _REAL_SELF_PROOF = fx.buzz_v1_self_proof
 
 
+#: v0.45.583：桥接核对摘要（通过、尚未满 10 天）
+_BR_OK = {"ok": True, "ready": False, "end": "2026-10-21", "required_days": 10,
+          "groups": {"sentiment": {"n_pass": 2, "n_fail": 0, "n_incomplete": 0, "ready": False, "first_fail": None},
+                     "price": {"n_pass": 1, "n_fail": 0, "n_incomplete": 0, "ready": False, "first_fail": None}},
+          "score": {"n": 30, "n_match": 30}, "n_errors": 0}
+_REAL_BRIDGE = fx.buzz_v1_bridge
+
+
 @pytest.fixture(autouse=True)
 def _self_proof_ok(monkeypatch):
     """合成库里没有 signal_archive，真跑自证必然「算不出」。本文件测执行器的算术——默认把自证摘要固定为通过；
-    自证本身由 tests/test_buzz_v1.py 钉，接线由下面 TestBuzzV1SelfProofWiring 用注入的摘要测。"""
+    自证本身由 tests/test_buzz_v1.py 钉，接线由下面 TestBuzzV1SelfProofWiring 用注入的摘要测。
+    v0.45.583：桥接核对同理固定为通过（桥接本身由 tests/test_buzz_v1_channels.py 钉，接线见 TestBridgeWiring）。"""
     monkeypatch.setattr(fx, "buzz_v1_self_proof", lambda db, today: dict(_SP_OK))
+    monkeypatch.setattr(fx, "buzz_v1_bridge", lambda db, today: dict(_BR_OK))
 
 
 DIMS = ("signal", "catalyst", "sentiment", "odds", "risk_adj")
@@ -76,7 +86,8 @@ _TOP_KEYS_ALWAYS = {"forward_start", "today", "status", "h1_weeks", "next_look_a
                     "verdicts", "truncation", "weight_change", "stale", "h1_anchor",
                     "forward_test_excluded_days",   # 修订 2（v0.45.484）：只是日期列表，不含效应量
                     "input_code_guard",             # v0.45.554：单元名与指纹状态，不含效应量
-                    "buzz_v1_self_proof"}           # v0.45.556：自证计数与窗口，不含效应量
+                    "buzz_v1_self_proof",           # v0.45.556：自证计数与窗口，不含效应量
+                    "buzz_v1_bridge"}               # v0.45.583：桥接核对计数与状态，不含效应量
 
 #: 窗口首日（周一）。窗口内的夹具日期一律相对它写——修订 1 把起点从 09-28 挪到 10-12 时，
 #: 写死的日期整批落到窗口前，测试红的原因变成「夹具过期」而不是「执行器错了」
@@ -689,7 +700,7 @@ class TestBuzzV1SelfProofWiring:
     def test_passing_self_proof_adds_nothing(self, tmp_path):
         res = fx.run(db_path=str(_make_db(tmp_path, [])), today=_d(-3), repo_root=self._repo(tmp_path),
                      history=[], self_proof=dict(_SP_OK))
-        assert "buzz_v1" not in fx.status_line(res)
+        assert "自证" not in fx.status_line(res)
 
     @pytest.mark.parametrize("status", ["in_progress", "concluded"])
     def test_at_a_look_a_failed_self_proof_blocks_verdicts(self, status):
