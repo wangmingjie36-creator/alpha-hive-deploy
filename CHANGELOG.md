@@ -9,7 +9,56 @@
 
 ## [0.45.587] — 2026-10-21 — 占位（进行中：读同伴边双向对账守卫补两个盲区——模块清单改由 swarm_agents/*.py 推出、别名读板 `b = self.board` 要红）
 
-## [0.45.586] — 2026-10-21 — 占位（进行中：影子宽跨记录——按 experiments/straddle_strangle_shadow_prereg.md §10；信号行记 25Δ 宽跨报价、账本开 / 平仓抄影子记录、`straddle_strangle_shadow.py`（PREREG / progress / run_once）、跨式页只显示计数）
+## [0.45.586] — 2026-10-21 — Added：影子宽跨记录 + 预注册检验 `straddle_strangle_shadow.py`（协议 v1：影子宽跨 vs 账本跨式，只记录、不开仓、不进任何判断）
+
+起因：用户看过 v0.45.584 的对比卡与预注册草案后确认三点——**度量含定仓杠杆、部署日前入场的 8 笔全部排除、只检验空头**——要求按草案 §10 实现影子记录。
+协议全文 `experiments/straddle_strangle_shadow_prereg.md`（v0 草案升 v1，同日登记；§0 如实披露起草人已看过 T 的结果）。
+
+### Added
+
+- `straddle_strangle_shadow.py`（核心模块；记录函数是纯函数，定仓函数由调用方注入，**不 import** 账本 / 信号 / alphabot）：
+  - 记录：`quote_record`（信号行 `strangle_quote`）、`entry_record`（持仓 `shadow_strangle`，按账本 `size_contracts` 与 `nav_for_sizing` 算假想张数）、
+    `exit_record`（平仓同一天：`cboe_mid` 再报价空头按 ask 买回 / `intrinsic` 沿用账本到期那场的收盘 / 其余 `unpriced`）。
+  - 检验：`units`（每笔平仓一个状态：`ok` / `before_start` / `no_record` / `long_side` / `entry_*` / `exit_*` / …）、`progress`（**只有计数**）、
+    `block_signflip_test`（块 = 财报 ISO 周共用一个符号；块数 ≤ 16 枚举 2^b，否则随机 20000 次，seed 20261021；双侧 α = 0.05）、
+    `run_once`（就绪 ≥ 30 个空头单位且 ≥ 8 个块后只跑一次，`os.link` 先到者赢，写临时文件走 `ledger_io.write_json`）、CLI `--run-once`。
+  - 度量 `d = (宽跨盈亏 − 跨式盈亏) ÷ nav_for_sizing`（各按账本定仓规则的张数，含杠杆）。
+- 三处只记录的挂接点（都在「不得影响主流程」的 try 里）：
+  - `earnings_vol_signal._scan_with_info`：`compute_signal` 返回**之后**挂 `sig["strangle_quote"]`（同 `gex_ctx` / `shadow_event`）；
+  - `options_paper_leg._attach_shadow_entry`：账本真正开仓时抄成持仓的 `shadow_strangle`；
+  - `options_paper_leg._attach_shadow_exit`：账本平仓的同一天，对影子两个符号再报价一次（用账本同一个 `quotes_fn`），写进平仓记录。
+  `StraddlePosition` / `ClosedStraddle` 各加一个可空字段；值为 None 时序列化**整键省略**，登记前的持仓逐字节不变。
+- **失败在源头登记**（「这个失败，下游怎么知道？」）：`note()` → `stats()`（`errors` 只数故障 `signal_error / entry_error / exit_error`；不可成交 /
+  没有信号记录 / 平仓无价是数据，如实计数、不报警）→ `scan_timing.counters()["strangle_shadow"]` → `alert_manager._check_strangle_shadow`
+  （`errors > 0` ⇒ P2；计数缺失 ⇒ `checks_skipped`）。`note()` 对未登记的事件种类抛 `KeyError`。
+- `hive_logger.PATHS.straddle_strangle_shadow_result`（冻结结果 `options_paper_state/straddle_strangle_shadow_result.json`，调用时求值，不建目录）；
+  `tests/conftest.py::_isolate_straddle_strangle_shadow_result`（防线①：缺省位置在沙箱内 + 每条测试前后清零故障计数）。
+- Alpha Bot 跨式页：「影子宽跨记录」面板（只显示计数与就绪闸，冻结前不显示任何一笔的影子盈亏）；帮助页补一节；`/api/method` 带协议常量。
+
+### 相对 v0 草案的实现层调整（登记前、零数据；已写进协议 §2）
+
+- 某腿平仓日没有 ask：v0 写「取内在价值」，实现发现账本的 `cboe_mid` 平仓路径手上没有平仓日标的价 ⇒ 改为 `unpriced`（该单位不进检验、单列计数）。
+- 入场新增两个状态 `no_signal_record`（信号行没带记录，如部署当天先于新代码落盘的信号）与 `no_size`（定仓给不出张数）。
+
+### 测试
+
+- `tests/test_straddle_strangle_shadow.py`（66 条）：记录手算（含内在价值 / 多头）、与账本约定对拍（成交价 / 张数 / 点时点特征对拍对比卡）、
+  **不影响账本的行为差分**（有 / 无记录两次跑出的开仓 / 平仓 / 现金 / 净值 / meta 逐项相同；钩子抛了 / 影子报价抛了账本不变；旧持仓逐字节不变）、
+  AST 读者白名单（含种病灶自证）、故障登记到 P2 的整条链、检验对拍暴力枚举且「块」有牙、冻结只一次（含竞态与坏文件）、Alpha Bot 接口键名遍历。
+- 既有测试的同步改动：`test_scan_timing`（计数器多一项）、`test_persistent_writes_have_readers`（登记新冻结文件的写者与读者）。
+  冻结写入走 `ledger_io.write_json` 而不是手写 `json.dump`，所以**没有**给 `test_ledger_writes_go_through_ledger_io` 的「待迁移」债务加条目。
+- 变异自检 20 个全杀（成交方向、盈亏符号、点时点、start_date、多头、NAV 归一、按块翻符号、并列、就绪闸、内在价值、故障登记、钩子外抛 / 不调用 / 不登记、序列化、
+  planted 读取、报警、计数、信号钩子登记），脚本每轮从备份还原。
+- **全量测试 11164 passed、2 xfailed、0 failed（999 秒）**；ruff 通过。真实数据根上只读核对了跨式页新面板（COST / JNJ 两笔已平仓都标「登记前入场（排除）」，进度 0/30、0/8）。
+
+### 没改
+
+账本的开仓 / 平仓判断、定仓规则、信号标签与阈值、评分、对冲——全部不动；影子记录对它们是只写的。
+
+### 生效时机
+
+合入 main 后，下一个扫描日克隆快进、扫描跑新代码起开始记录；**此前入场的 8 笔不进检验**（协议 §0）。Alpha Bot 要重启才看到新面板。
+进度：`/usr/local/bin/python3 straddle_strangle_shadow.py`。
 
 ## [0.45.585] — 2026-10-21 — Fixed：v0.45.579 / 582 二次检查——监视器缓存 `gdp.pages` 是坏值时连 `--force` 仍崩（579 的自愈漏了这一层）；GuardBee 测试与仪表盘的 `get_next_event` 解耦；`fomc_vote_days` docstring 去掉会过期的证据快照；GuardBee「权重 0.15」的过时说明
 

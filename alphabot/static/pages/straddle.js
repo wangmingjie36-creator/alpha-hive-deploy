@@ -218,6 +218,28 @@ function shadowPanel(s, rules) {
     h("div", { class: "small muted" }, `按状态：${Object.entries(s.by_status || {}).map(([k, v]) => `${k} ${v}`).join("、") || "—"}`));
 }
 
+// 影子宽跨记录（v0.45.586，协议 experiments/straddle_strangle_shadow_prereg.md）：**只显示计数**——任何一笔的影子盈亏、
+// 与跨式盈亏的差都不在这一页（盲期：自己拼起来按结构比较就是偷看）。
+const SS_STATUS = { ok: "进检验", no_record: "没有影子记录", before_start: "登记前入场（排除）", long_side: "多头（只描述）",
+  entry_unquotable: "入场时宽跨不可成交", entry_no_signal_record: "信号行没带记录", entry_no_size: "定仓给不出张数",
+  exit_unpriced: "平仓日无价", exit_error: "平仓记录出错", exit_not_applicable: "不适用", unusable: "数据不全" };
+
+function strangleShadowPanel(s, rules) {
+  const pre = rules?.strangle_prereg || {};
+  if (!s?.available) {
+    return panel("影子宽跨记录", { sub: "攒样本中 · 冻结前只给计数" }, h("p", { class: "small muted" }, `进度不可得：${s?.reason || "—"}`));
+  }
+  const need = s.need || {};
+  const byStatus = Object.entries(s.by_status || {}).map(([k, v]) => `${SS_STATUS[k] || k} ${v}`).join("、") || "—";
+  const openBy = Object.entries(s.open_by_status || {}).map(([k, v]) => `${k} ${v}`).join("、") || "—";
+  return panel("影子宽跨记录", { sub: s.frozen ? "检验已冻结" : (s.ready ? "已就绪，等待运行一次" : "攒样本中 · 冻结前只给计数") },
+    h("p", { class: "small" }, `每笔被账本开仓的跨式，同一天、同一份快照里再记一份假想的 25Δ 宽跨（只记录、不开仓）。自 ${s.start_date} 起入场的：持仓中带记录 ${s.n_open_recorded} 笔（${openBy}）；已平仓 ${s.n_closed} 笔，其中进检验 ${s.n_units} 笔（只检验空头）。`),
+    gate("进检验的空头单位", s.n_units, need.min_units),
+    gate("财报周（块）", s.n_blocks, need.min_blocks),
+    h("p", { class: "callout lock" }, `盲期：检验冻结前，页面不显示任何一笔的影子盈亏，也不把它和跨式盈亏放在一起；自己拼起来比较就是偷看，会作废这次检验。协议 v${pre.version ?? "—"}：${pre.doc || "experiments/straddle_strangle_shadow_prereg.md"}。`),
+    h("div", { class: "small muted" }, `已平仓按状态：${byStatus}`));
+}
+
 export async function renderStraddle(root, alive) {
   const d = await api("/api/straddle");
   if (!alive()) return;
@@ -330,6 +352,8 @@ export async function renderStraddle(root, alive) {
         (d.calibration || []).length ? calEl : h("div", { class: "empty" }, "还没有已结算的财报事件。"),
         h("p", { class: "note" }, `横轴：信号日的「隐含 ÷ 历史中位」（≥ ${num(rules.rich_ratio, 2)} 卖、≤ ${num(rules.cheap_ratio, 2)} 买）；纵轴：财报后「实际 ÷ 隐含」，< 1 说明期权给贵了（利好卖跨式）。点少时只能看个大概，不足以下结论。`)),
       shadowPanel(d.shadow, rules)),
+    h("div", { style: { height: "16px" } }),
+    strangleShadowPanel(d.strangle_shadow, rules),
     h("div", { style: { height: "16px" } }),
     panel(`今日信号（${sig.as_of || "—"}）`, { sub: `${sig.n_rows ?? 0} 只标的，合格 ${(sig.eligible || []).length} 只` },
       (sig.eligible || []).length ? table(sigCols, sig.eligible) : h("div", { class: "empty" }, "今天没有合格信号。"),

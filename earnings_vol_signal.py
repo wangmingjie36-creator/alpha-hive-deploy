@@ -567,6 +567,26 @@ def gex_ctx(gex_fn: Optional[Callable[[str], Optional[dict]]], ticker: str, as_o
             **{k: (st.get(k) if ok else None) for k in _GEX_CTX_FIELDS}}
 
 
+def strangle_quote(qs, stats, ticker: str, as_of: str) -> Optional[dict]:
+    """影子宽跨记录（v0.45.586，协议 experiments/straddle_strangle_shadow_prereg.md 的输入）：当日快照里 25Δ 两腿
+    （与跨式同一到期日）的报价 + 点时点的历史涨跌，原样抄下。**只记录**：本模块的合格 / 标签 / 可交易判断与
+    options_paper_leg 的开平仓判断都不读它（tests/test_straddle_strangle_shadow.py：AST 读者白名单 + 开 / 关记录两次跑出的
+    信号与开单逐项相同）。失败只登记（`straddle_strangle_shadow.note` → scan_timing → alert_manager P2）、不拖垮信号。"""
+    try:
+        import straddle_strangle_shadow as sss
+        rec = sss.quote_record(qs, as_of, stats.get("moves") if isinstance(stats, dict) else None)
+        sss.note("signal_recorded")
+        return rec
+    except Exception as exc:  # noqa: BLE001 - 影子记录失败不能拖垮信号，但必须在源头登记
+        _log.warning("[%s] 影子宽跨报价记录失败: %s", ticker, exc, exc_info=True)
+        try:
+            import straddle_strangle_shadow as sss
+            sss.note("signal_error", ticker, f"{type(exc).__name__}: {exc}")
+        except Exception:  # noqa: BLE001 - 连登记都失败（模块导入不了）：上面的 WARNING 已留痕
+            pass
+        return None
+
+
 def shadow_summary(signals: List[dict], as_of: str) -> dict:
     """本轮影子记录的可得情况（日报日志用，v0.45.428）：行数、可用行数（`_usable_capture`）、不可用原因计数。
     只数个数，不碰任何结果字段。"""
@@ -705,6 +725,7 @@ def _scan_with_info(as_of: str, cache_dir, earnings_cache_dir,
         # 判断全部做完之后才挂影子记录：它在 compute_signal 之外，结构上就进不了任何判断
         sig["gex_ctx"] = gex_ctx(gex_fn, ticker, as_of, captured_on, captured_at)
         sig["shadow_event"] = event_shadow(sig, snap.get("iv_term_structure"))
+        sig["strangle_quote"] = strangle_quote(qs, stats, ticker, as_of)
         signals.append(sig)
 
     all_rows = load_signals()

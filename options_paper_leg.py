@@ -210,9 +210,16 @@ class StraddlePosition:
     # reason = 最近一次的原因（人读的一句话）。只反映**最近一次运行**：没再延期（结了 / 不再该结）就清空。
     settle_deferred_since: Optional[str] = None
     settle_deferred_reason: Optional[str] = None
+    # v0.45.586：影子宽跨记录（入场时点；experiments/straddle_strangle_shadow_prereg.md）。**只记录**：本模块的开 / 平仓判断
+    # 都不读它（`_attach_shadow_entry` 是唯一写者，tests/test_straddle_strangle_shadow.py 的 AST 读者白名单 + 开 / 关记录的
+    # 行为差分钉住）。None（登记前入场 / 记录失败）⇒ 序列化时整键省略，旧记录逐字节不变。
+    shadow_strangle: Optional[Dict] = None
 
     def to_dict(self) -> Dict:
-        return asdict(self)
+        d = asdict(self)
+        if d.get("shadow_strangle") is None:
+            d.pop("shadow_strangle", None)
+        return d
 
     @classmethod
     def from_record(cls, d: Dict) -> "StraddlePosition":
@@ -250,9 +257,14 @@ class ClosedStraddle:
     holding_days: Optional[int]     # 已按 expiry 钳过：一张合约不可能被持有到它到期之后
     rationale: str = ""
     settled_late_days: Optional[int] = None   # 平仓日晚于到期日的天数（正常为 None）
+    # v0.45.586：影子宽跨记录（入场记录 + 平仓当天的假想盈亏）。只记录、不进任何判断（见 StraddlePosition 同名字段）。
+    shadow_strangle: Optional[Dict] = None
 
     def to_dict(self) -> Dict:
-        return asdict(self)
+        d = asdict(self)
+        if d.get("shadow_strangle") is None:
+            d.pop("shadow_strangle", None)
+        return d
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -547,6 +559,61 @@ def _open_from_signal(sig: Dict, nav: float, as_of: str) -> Tuple[Optional[Strad
     ), None
 
 
+def _attach_shadow_entry(pos: StraddlePosition, sig: Dict, nav: float) -> None:
+    """影子宽跨记录·入场（v0.45.586）：把信号行的 `strangle_quote` 抄成持仓的 `shadow_strangle`，并按**本账本自己的**
+    `size_contracts` 与当时的 `nav_for_sizing` 算出假想张数。**只记录**：不改 `pos` 的任何其他字段、不影响开仓与否；
+    失败 ⇒ 持仓照开、`shadow_strangle` 留 None，在源头登记（straddle_strangle_shadow.note → scan_timing → P2）。"""
+    try:
+        import straddle_strangle_shadow as sss
+        q = sig.get("quote") or {}
+        rec = sss.entry_record(
+            sig.get("strangle_quote"), pos.side, nav, size_contracts,
+            {"call": q.get("call"), "put": q.get("put"), "premium": pos.entry_premium, "contracts": pos.contracts,
+             "underlying": pos.entry_underlying}, as_of=pos.entry_date)
+        pos.shadow_strangle = rec
+        sss.note({"ok": "entry_ok", "unquotable": "entry_unquotable", "no_signal_record": "entry_no_signal_record",
+                  "no_size": "entry_no_size"}[rec["status"]], pos.ticker)
+    except Exception as exc:  # noqa: BLE001 - 影子记录失败不能影响开仓，但必须在源头登记
+        _log.warning("[OptionsPaperLeg] %s 影子宽跨入场记录失败（持仓照开、不带影子记录）: %s", pos.ticker, exc, exc_info=True)
+        pos.shadow_strangle = None
+        _note_shadow_error("entry_error", pos.ticker, exc)
+
+
+def _attach_shadow_exit(rec: "ClosedStraddle", pos: StraddlePosition,
+                        quotes_fn: Callable[[str, List[str]], Dict[str, Optional[dict]]]) -> None:
+    """影子宽跨记录·平仓（v0.45.586）：账本平仓的**同一天**，对影子宽跨的两个符号重新报价（`cboe_mid` 平仓）或按账本的
+    内在价值结算（`intrinsic`），把假想盈亏写进平仓记录的 `shadow_strangle`。入场时没有记录（登记前入场 / 记录失败）⇒ 什么都不做。
+    **只记录**：只读 `rec` / `pos`、只写 `rec.shadow_strangle`；任何失败都不影响这笔平仓与现金，在源头登记。"""
+    entry = pos.shadow_strangle
+    if not isinstance(entry, dict):
+        return
+    try:
+        import straddle_strangle_shadow as sss
+        quotes = None
+        if rec.mark_source == "cboe_mid" and entry.get("status") == "ok":
+            quotes = quotes_fn(pos.ticker, [entry["call"]["symbol"], entry["put"]["symbol"]]) or {}
+        out = sss.exit_record(entry, exit_date=rec.exit_date, basis=rec.mark_source, quotes=quotes,
+                              underlying=rec.exit_underlying)
+        rec.shadow_strangle = out
+        st = (out.get("exit") or {}).get("status")
+        if st == "ok":
+            sss.note("exit_ok", pos.ticker)
+        elif st == "unpriced":
+            sss.note("exit_unpriced", pos.ticker)
+    except Exception as exc:  # noqa: BLE001 - 影子记录失败不能影响平仓，但必须在源头登记
+        _log.warning("[OptionsPaperLeg] %s 影子宽跨平仓记录失败（平仓照常、记录标 error）: %s", pos.ticker, exc, exc_info=True)
+        rec.shadow_strangle = {**entry, "exit": {"status": "error", "reason": type(exc).__name__, "exit_date": rec.exit_date}}
+        _note_shadow_error("exit_error", pos.ticker, exc)
+
+
+def _note_shadow_error(kind: str, ticker: str, exc: BaseException) -> None:
+    try:
+        import straddle_strangle_shadow as sss
+        sss.note(kind, ticker, f"{type(exc).__name__}: {exc}")
+    except Exception as exc2:  # noqa: BLE001 - 连登记都失败（模块导入不了）：上面的 WARNING 已留痕
+        _log.error("[OptionsPaperLeg] 影子宽跨故障登记失败（%s）: %s", kind, exc2)
+
+
 def _close(pos: StraddlePosition, exit_call: Optional[float], exit_put: Optional[float],
            exit_premium: float, as_of: str, reason: str, mark_source: str,
            exit_underlying: Optional[float], note: str = "") -> Tuple[ClosedStraddle, float]:
@@ -745,6 +812,7 @@ def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
             remaining.append(pos)
             continue
         cash += delta
+        _attach_shadow_exit(rec, pos, quotes_fn)
         d = rec.to_dict()
         _append_jsonl(CLOSED_FILE, d)
         closed.append(d)
@@ -797,6 +865,7 @@ def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
             skipped.append({"ticker": tk, "reason": "non-finite fill"})
             continue
         cash += -pos.size_usd if pos.side == "long" else pos.size_usd
+        _attach_shadow_entry(pos, sig, nav_for_sizing)
         positions.append(pos)
         open_tix.add(tk)
         opened.append(pos.to_dict())

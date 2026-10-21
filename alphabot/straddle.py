@@ -503,9 +503,10 @@ def calibration_points(by_event: Dict[Tuple[str, str], List[dict]], traded: set)
 
 
 def build_overview(led: dict, *, now_et: datetime, rules: Optional[dict] = None,
-                   shadow: Optional[dict] = None) -> dict:
-    """页面要的全部数据。`rules`：阈值 / 账本配置（服务层从代码里取的那一份）；`shadow`：GEX 影子记录进度
-    （只有计数）。缺目录 ⇒ `data_available=False` 且说清是哪个目录，**不**当成「空账本」。"""
+                   shadow: Optional[dict] = None, strangle_shadow: Optional[dict] = None) -> dict:
+    """页面要的全部数据。`rules`：阈值 / 账本配置（服务层从代码里取的那一份）；`shadow`：GEX 影子记录进度、
+    `strangle_shadow`：影子宽跨记录进度（v0.45.586）——两者**都只有计数**。缺目录 ⇒ `data_available=False` 且说清是哪个目录，
+    **不**当成「空账本」。"""
     base = {"source": led.get("source"), "rules": rules or {}, "now_et": now_et.isoformat(timespec="seconds"),
             "state_dir": {"path": led.get("ledger_dir"), "exists": bool(led.get("exists"))}}
     if not led.get("exists"):
@@ -555,6 +556,7 @@ def build_overview(led: dict, *, now_et: datetime, rules: Optional[dict] = None,
                                        meta.get("skipped_entries") or []),
         "calibration": calibration_points(by_event, traded),
         "shadow": shadow or {"available": False, "reason": "not_computed"},
+        "strangle_shadow": strangle_shadow or {"available": False, "reason": "not_computed"},
         "bad_lines": led.get("bad_lines") or {}, "meta_error": led.get("meta_error"),
     }
 

@@ -1304,6 +1304,24 @@ def _isolate_straddle_prereg_result(_isolate_env, tmp_path):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_straddle_strangle_shadow_result(_isolate_env, tmp_path):
+    """影子宽跨预注册的冻结结果（v0.45.586，`straddle_strangle_shadow.run_once`）防线①：同上一个夹具——
+    `PATHS.straddle_strangle_shadow_result` 此刻是绝对路径且在本测试沙箱里（只写一次、永不覆盖，误写进真身会永久冻住协议）。
+    防线②（真身指纹）由仓库根默认拒绝总闸与真实数据根总闸兜住。另清零本进程的影子记录计数（故障登记是进程级全局状态，
+    不清的话上一条测试造的故障会让下一条测试的 `stats()["errors"]` 非零）。"""
+    import hive_logger
+    import straddle_strangle_shadow
+
+    p = pathlib.Path(hive_logger.PATHS.straddle_strangle_shadow_result)
+    assert p.is_absolute(), f"PATHS.straddle_strangle_shadow_result 解析成了相对路径 {p}：生产从仓库根跑会写穿仓库根"
+    assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+        f"PATHS.straddle_strangle_shadow_result = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？")
+    straddle_strangle_shadow.reset_stats()
+    yield
+    straddle_strangle_shadow.reset_stats()
+
+
 @pytest.fixture
 def sell_strike_state_sandbox_check():
     """把 `_assert_sell_strike_state_in_sandbox` 暴露给它的有牙自证（同 `default_path_sandbox_check`）。"""

@@ -323,6 +323,7 @@ class AlertAnalyzer:
         self._check_portfolio_greeks_prices(status)
         self._check_paper_portfolio_run(status)
         self._check_ledger_io_failures(status)
+        self._check_strangle_shadow(status)
         self._check_history_fill(status)
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
@@ -998,6 +999,37 @@ class AlertAnalyzer:
                         "的上游（不要在写入端把它改成 null 了事）；LedgerLockTimeout ⇒ 查是否有别的写者卡住",
             },
             ["ledger_io", "data_quality"]
+        ))
+
+    def _check_strangle_shadow(self, status: Dict) -> None:
+        """影子宽跨记录没写成（v0.45.586；`straddle_strangle_shadow.stats()` 经 scan_timing 进来）。
+
+        三处只记录的挂接点（信号行的影子宽跨报价 / 账本开仓的影子记录 / 账本平仓的假想盈亏）都被包在「不得影响主流程」的
+        except 里——账本照开照平、扫描照跑，所以记录丢了没人会知道，而预注册检验的样本就这样悄悄少一笔。`errors`（记录没写成的
+        次数）> 0 ⇒ P2；不可成交 / 没有信号记录 / 平仓无价是**数据**（协议 §4 如实报告），不在这里报警；计数缺失 ⇒ checks_skipped。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        ss = (st.get("counters") or {}).get("strangle_shadow")
+        if not isinstance(ss, dict):
+            self.checks_skipped.append("影子宽跨记录检查（scan_timing 无 strangle_shadow 计数）")
+            return
+        if not ss.get("errors"):
+            return
+        items = ss.get("items") or []
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】影子宽跨记录没写成 {ss['errors']} 次：预注册检验（experiments/straddle_strangle_shadow_prereg.md）"
+            f"的样本少了对应的单位",
+            {
+                "明细": "；".join(f"{i.get('kind')} {i.get('ticker') or '—'}：{i.get('detail')}" for i in items[:5])
+                        + (f"（另 {ss['errors'] - 5} 次略）" if ss["errors"] > 5 else ""),
+                "影响": "账本本身不受影响（开仓、平仓、现金都照常）；受影响的那笔没有影子记录，不进检验",
+                "建议": "看 alpha_hive.log 里「影子宽跨」的 WARNING（带堆栈）；signal_error ⇒ 信号行没带影子宽跨报价，"
+                        "entry_error / exit_error ⇒ 那笔持仓 / 平仓记录的影子记录缺失或标 error。"
+                        "修好后已丢的记录补不回（入场时点的报价没了），如实在检验里按 no_record 计数",
+            },
+            ["strangle_shadow", "data_quality"]
         ))
 
     def _check_history_fill(self, status: Dict) -> None:

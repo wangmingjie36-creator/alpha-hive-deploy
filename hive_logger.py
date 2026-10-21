@@ -265,6 +265,17 @@ class _HivePaths:
         return self.home / "options_paper_state" / "straddle_gex_prereg_result.json"
 
     @property
+    def straddle_strangle_shadow_result(self) -> Path:
+        """影子宽跨 vs 账本跨式预注册检验的冻结结果（v0.45.586，`straddle_strangle_shadow.run_once`）。
+
+        写：只有 `run_once()`，就绪后**只写一次**（`os.link` 先到者赢，永不覆盖）；读：`read_result()` / Alpha Bot 跨式页的进度。
+        放在跨式账本目录 `options_paper_state/` 里，随它进数据备份。
+        ⚠️ 与 `straddle_prereg_result` 同理：误写进真实数据根的文件会把协议**永久冻住**——必须调用时求值，
+        conftest 的 `_isolate_straddle_strangle_shadow_result` 核它在沙箱里。不建目录。
+        """
+        return self.home / "options_paper_state" / "straddle_strangle_shadow_result.json"
+
+    @property
     def data_backup_repo(self) -> Path:
         """数据备份仓库的工作区（`data_backup/run_backup.py`，编排器 Step 14 每个扫描日提交一次）（v0.45.408）。
 
