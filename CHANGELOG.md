@@ -34,6 +34,7 @@
 - `hive_logger.PATHS.straddle_strangle_shadow_result`（冻结结果 `options_paper_state/straddle_strangle_shadow_result.json`，调用时求值，不建目录）；
   `tests/conftest.py::_isolate_straddle_strangle_shadow_result`（防线①：缺省位置在沙箱内 + 每条测试前后清零故障计数）。
 - Alpha Bot 跨式页：「影子宽跨记录」面板（只显示计数与就绪闸，冻结前不显示任何一笔的影子盈亏）；帮助页补一节；`/api/method` 带协议常量。
+- 项目 `CLAUDE.md`「核心组件指针」补两条：对比卡（只并排事实、无推荐字段）与影子宽跨记录（只记录、盲期纪律：冻结前不得把某笔影子盈亏与跨式盈亏拼在一起看）。
 
 ### 相对 v0 草案的实现层调整（登记前、零数据；已写进协议 §2）
 
