@@ -221,6 +221,10 @@ harness 的不变式「拨整个世界、不拨一只钟」与已知漏点见 `t
 「生产在哪」的守卫用——别把这个沙箱挪进 session 夹具（太晚，收集期冻住的常量会指向生产）。
 那个「生产在哪」也只从 `resolve_data_root` 来（v0.45.488：测试闸曾自己 expanduser，在 `~` / 相对值上与生产分岔；非绝对值改守缺省并在报告头说明），测试层只经 `tests/_root_data_guard.py::production_data_root` 一处推导（真实数据根闸与 paper_portfolio 真身夹具共用，v0.45.498）；把 `ALPHA_HIVE_HOME` 变成路径的只许 hive_logger，生产代码里每个写出这个键的地方双向登记在 `tests/test_data_root_default.py::ENV_KEY_SITES`（认常量本身、不认调用形状，v0.45.498）。
 
+**测试会话内核写沙箱（v0.45.573）**：macOS 上 `pytest_configure`（收集前）给测试进程树套 `sandbox_init` 禁写真实数据根（子进程继承），
+真实数据根闸改判「统一日志里的写拒绝」；Alpha Bot 盘中采样 / 每日扫描在沙箱外照写、**不再让全量末尾报 teardown ERROR**。
+沙箱里 exec 不了 setuid 程序（`/bin/ps` 用 `pgrep` 代替）、`log show` 跑不了（查日志助手在套沙箱前起）。设计与陷阱见 `tests/_write_sandbox.py`，守卫 `tests/test_write_sandbox.py`。
+
 **真实数据根闸的豁免只认断言、不认注释（v0.45.427）**：`PATHS` 落在闸豁免区（`logs/`、`db_backups/`、`_` 元目录）的属性必须恰好是
 `tests/test_root_data_guard.py::PATHS_IN_EXEMPT_AREAS_OK` 里写明「谁负责隔离」的几个——新增属性落进 `_` 目录会红，让它受闸
 （`DATA_ROOT_WATCHED_META`），别往白名单加。测试写夹具**别经被测的路径属性写**（目标自己按沙箱算、写前断言属性指向它）：

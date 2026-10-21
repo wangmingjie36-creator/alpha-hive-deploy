@@ -352,7 +352,8 @@ def test_data_root_benign_activity_is_not_a_write(data_root):
 def _make_fake_checkout(root: Path, test_body: str) -> Path:
     (root / "tests").mkdir(parents=True)
     shutil.copy2(_TESTS / "conftest.py", root / "tests" / "conftest.py")
-    shutil.copy2(_TESTS / "_root_data_guard.py", root / "tests" / "_root_data_guard.py")
+    for helper in _TESTS.glob("_*.py"):   # conftest import 的辅助模块全带上（v0.45.573：写死清单每加一个就坏一次）
+        shutil.copy2(helper, root / "tests" / helper.name)
     (root / "probability_scorecard_state").mkdir()
     (root / "probability_scorecard_state/published.jsonl").write_bytes(b"{}\n")
     (root / "report_snapshots").mkdir()

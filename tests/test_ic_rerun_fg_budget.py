@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -67,9 +68,11 @@ def _kill_if_ours(pid: int, marker: str) -> None:
     """`pid` 还活着且命令行里带 `marker`（本条测试的代码副本路径）⇒ KILL。核命令行防 pid 被复用后误杀别人。"""
     if pid <= 0:
         return
-    # -ww：环境里有 COLUMNS 时 procps 按它截管道输出（CI 上会截），marker 是长临时路径 ⇒ 可能被截掉、静默不收尸
-    r = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
-    if marker in r.stdout:
+    # v0.45.573：用 pgrep（非 setuid）——测试会话的内核写沙箱里 exec 不了 setuid 的 /bin/ps；pgrep -f 按完整命令行匹配，
+    # 没有 ps 管道输出被 COLUMNS 截断的问题。marker 是路径，先把 ERE 元字符转义。
+    pattern = re.sub(r"([.^$*+?()\[\]{}|\\])", r"\\\1", marker)
+    r = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
+    if str(pid) in r.stdout.split():
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:

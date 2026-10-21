@@ -114,7 +114,8 @@ def _run_inner(tmp_path: Path, *, first_import: str, writes: str):
     root = tmp_path / "checkout"
     (root / "tests").mkdir(parents=True)
     shutil.copy2(_TESTS / "conftest.py", root / "tests" / "conftest.py")          # 原样拷贝
-    shutil.copy2(_TESTS / "_root_data_guard.py", root / "tests" / "_root_data_guard.py")
+    for helper in _TESTS.glob("_*.py"):   # conftest import 的辅助模块全带上（v0.45.573：写死清单每加一个就坏一次）
+        shutil.copy2(helper, root / "tests" / helper.name)
     (root / "conftest.py").write_text(_PROBE_CONFTEST, encoding="utf-8")
     header = _IN_FIXTURE_HEADER if first_import == "in_fixture" else _AT_COLLECTION_HEADER
     body = _WRITE_SANDBOX if writes == "sandbox" else _WRITE_REAL

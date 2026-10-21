@@ -1402,6 +1402,12 @@ def paper_portfolio_real_dir_fn():
 
 
 @pytest.fixture
+def write_sandbox_guard_fn():
+    """把写沙箱生效时的判定 `_guard_by_write_sandbox` 暴露给 `tests/test_write_sandbox.py`（`conftest` 不可直接 import）。"""
+    return _guard_by_write_sandbox
+
+
+@pytest.fixture
 def data_root_session_facts(pytestconfig):
     """会话级数据根接线的事实，给 `tests/test_data_root_default.py` 自证（同上：`conftest` 不可直接 import）。
 
@@ -1430,6 +1436,7 @@ def data_root_session_facts(pytestconfig):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _root_data_guard  # noqa: E402
+import _write_sandbox  # noqa: E402
 
 _ROOT_FP_BEFORE = pytest.StashKey[dict]()
 
@@ -1482,9 +1489,17 @@ def pytest_report_header(config):
     root, fp = config.stash.get(_DATA_ROOT_BEFORE, (None, None))
     note = _root_data_guard.nonabsolute_env_note(getattr(config, "_alpha_hive_invocation_env", {}) or {})
     tail = f"；{note}" if note else ""                  # v0.45.488：环境值没被采用要说出来，不能静默改守别处
+    sb = getattr(config, "_alpha_hive_write_sandbox", None) or {}
+    if sb.get("active"):
+        sb_line = (f"write sandbox: ACTIVE（内核禁写 {sb['root']}{'，继承自外层会话' if sb.get('inherited') else ''}；"
+                   "数据根变化只说明、不报红，测试写入的拒绝记录才报红）")
+    else:
+        sb_line = f"write sandbox: INACTIVE（{sb.get('reason') or '未尝试'}）——真实数据根闸按指纹比对判红"
+    # 返回单个字符串（两行用换行连）：既有测试按子串读报告头（`'active on …' in header`）
     if root is None:
-        return f"real-data-root guard: INACTIVE（此机器上没有真实数据根；CI / 干净克隆都是这样，牙只靠合成测试证明）{tail}"
-    return f"real-data-root guard: active on {root}（{len(fp)} 个受闸条目）{tail}"
+        return (f"real-data-root guard: INACTIVE（此机器上没有真实数据根；CI / 干净克隆都是这样，牙只靠合成测试证明）{tail}\n"
+                + sb_line)
+    return f"real-data-root guard: active on {root}（{len(fp)} 个受闸条目）{tail}\n" + sb_line
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -1534,6 +1549,9 @@ def _guard_real_data_root(request):
 
     ⚠️ 与仓库根闸同样是 session 级：红在整轮末尾、记在最后一条测试名下；逐文件写入时刻落在哪条测试期间
     见报错（v0.45.455，只是时间重合），确认法见仓库根闸。
+    ⭐ **v0.45.573 起，写沙箱生效时（macOS + 本机有真实数据根）判据换了**：测试进程树被内核禁写真实数据根，
+    红的是「统一日志里有对它的写拒绝」（逐条定位到测试）或「核对不了」，指纹差异只可能来自沙箱外的写入者 ⇒ 只在终端摘要说明。
+    下面这段「扫描 / Alpha Bot 在写时会红」只在沙箱**未生效**时成立。见 `_guard_by_write_sandbox` 与 `tests/_write_sandbox.py`。
     ⚠️ **机器上正在跑每日扫描 / 周任务时它会红**（扫描写 `cache/`、`report_snapshots/`、`paper_portfolio_state/`…）——
     那不是假警报，是「测试与生产写同一批文件的时间窗真实存在」；平日 14:00–15:00 与周日 09:07 前后别跑全套。
     ⚠️ 没有真实数据根的机器上（CI / 干净克隆）本闸不做任何事（`pytest_report_header` 会说明）；它的牙由
@@ -1547,6 +1565,10 @@ def _guard_real_data_root(request):
         return
     after = _root_data_guard.fingerprint(root, _root_data_guard.data_root_excluded_reason)
     changes = _root_data_guard.diff(before, after)
+    sb = getattr(request.config, "_alpha_hive_write_sandbox", None) or {}
+    if sb.get("active"):
+        _guard_by_write_sandbox(request.config, sb, root, changes)
+        return
     if not changes:
         return
     started, baseline = request.config.stash.get(_DATA_ROOT_ALPHABOT, (None, {}))
@@ -1560,6 +1582,39 @@ def _guard_real_data_root(request):
     started_wall, timeline = _gate_timeline(request.config)
     assert not changes, _real_data_root_message(root, changes, v) + "\n\n" + _root_data_guard.timeline_section(
         root, changes, after, timeline, started_wall)
+
+
+def _guard_by_write_sandbox(config, sb: dict, root: str, changes: dict) -> None:
+    """沙箱生效时的判据（v0.45.573）：测试进程树**写不进**真实数据根（内核拒），所以——
+    ① 统一日志里有对它的写拒绝 ⇒ 有测试 / 被测代码试图写生产（哪怕被 `except OSError` 吞了）⇒ 红，逐条定位到测试；
+    ② 查不了日志 ⇒ 红（核对失败不能当「没有」；生产数据本身有内核护着，红的是「没核对」）；
+    ③ 指纹有差异但没有拒绝 ⇒ 只能是沙箱外的写入者（Alpha Bot 盘中采样 / 每日扫描 / 别的会话）⇒ 说明，不红。"""
+    if not sb.get("check_log"):
+        # 继承外层沙箱的内层会话：生产照样被内核护着；它期间的拒绝落在外层会话的查询窗里，由外层核对
+        if changes:
+            config._alpha_hive_external_writes = changes
+        return
+    found, err = _write_sandbox.denials(sb)
+    _write_sandbox.close(sb)
+    assert err is None, (
+        f"写沙箱生效中（{root} 由内核禁写，生产数据未受损），但核对「有没有测试试图写它」失败：{err}\n"
+        "核对失败不能当没有。重跑；若持续失败，临时用 ALPHA_HIVE_TEST_WRITE_SANDBOX=0 退回指纹闸并查明原因。")
+    if found:
+        started_wall, timeline = _gate_timeline(config)
+        rows = "\n".join(
+            f"    {d['path']}\n      {d['op']} by {d['proc']}({d['pid']}) @ {d['ts']} → "
+            f"{_root_data_guard.locate(_write_sandbox.ts_epoch(d['ts']), timeline, started_wall, lag=_write_sandbox.LOG_TS_LAG)}"
+            for d in found[:50])
+        more = f"\n    …另有 {len(found) - 50} 条" if len(found) > 50 else ""
+        raise AssertionError(
+            f"本轮有测试（或被测代码、或它起的子进程）试图写**真实数据根**（{root}），被内核写沙箱拒绝了 {len(found)} 次——"
+            "生产数据未受损，但被测代码绕过了 `ALPHA_HIVE_HOME` 隔离：\n"
+            f"{rows}{more}\n\n"
+            "这些拒绝只可能来自本测试进程树（沙箱外的 Alpha Bot / 扫描从不被拒），时间定位见每条末尾（会话级闸，"
+            "pytest 把它记在最后一条测试头上，那条测试名与原因无关）。若当时测试没红，是被测代码吞了 PermissionError——"
+            "那正是要修的：改成调用时读 `PATHS.*`。**不要**往豁免里加路径。")
+    if changes:
+        config._alpha_hive_external_writes = changes
 
 
 def _real_data_root_message(root, changes: dict, v: dict) -> str:
@@ -1625,6 +1680,19 @@ def _hive_log_watch_paths(*roots):
                    for r in roots if r for n in _HIVE_LOG_FILES})
 
 
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """写沙箱生效时，真实数据根的变化来自沙箱外——只在这里说一声，不报红（v0.45.573）。"""
+    changes = getattr(config, "_alpha_hive_external_writes", None)
+    if not changes:
+        return
+    sb = getattr(config, "_alpha_hive_write_sandbox", {}) or {}
+    terminalreporter.write_sep("-", "真实数据根：沙箱外的写入（说明，不报红）")
+    terminalreporter.write_line(
+        f"写沙箱生效中，本测试进程树写不进 {sb.get('root')}，以下变化来自沙箱外的写入者"
+        "（Alpha Bot 盘中采样 / 每日扫描 / 别的会话）：")
+    terminalreporter.write_line(_root_data_guard.format_diff(changes))
+
+
 @pytest.hookimpl(trylast=True)  # 晚于 tmpdir 插件的 pytest_configure（它才建 _tmp_path_factory）
 def pytest_configure(config):
     """⓪：会话级 `ALPHA_HIVE_LOGS_DIR` 缺省（逐条测试由 `_isolate_env` 覆盖）；顺带取 ③ 的「之前」快照。
@@ -1651,6 +1719,12 @@ def pytest_configure(config):
     # 要的是「生产在哪」，不是这个沙箱——拿沙箱推真身正是 v0.45.303 那种守卫盯着自己的失明。
     config._alpha_hive_invocation_env = {
         k: os.environ[k] for k in ("ALPHA_HIVE_HOME", "HOME") if k in os.environ}
+    # v0.45.573：内核写沙箱——收集之前就让本进程及其子进程**写不进**真实数据根（由内核保证，不再靠事后比指纹去猜）。
+    # 真实数据根与 `pytest_sessionstart` 的闸同一推导；套不上 / 金丝雀没被拒 ⇒ `active=False`，闸回到指纹比对。
+    # 原因与设计见 `tests/_write_sandbox.py`。
+    _invoked = config._alpha_hive_invocation_env
+    config._alpha_hive_write_sandbox = _write_sandbox.apply(_root_data_guard.real_data_root(
+        _invoked, _invoked.get("HOME") or os.path.expanduser("~"), _REPO_ROOT_FOR_GUARD))
     h = config._tmp_path_factory.mktemp("hive_home_outside_tests", numbered=False)
     config._alpha_hive_session_home = str(h)
     os.environ["ALPHA_HIVE_HOME"] = str(h)

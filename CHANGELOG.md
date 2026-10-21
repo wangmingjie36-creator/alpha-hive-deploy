@@ -7,7 +7,53 @@
 
 ## [0.45.574] — 2026-10-21 — 占位（进行中：经济日历监视器 GDP 加读 BEA 次年日程页 /news/schedule/next-year，与滚动页取并集）
 
-## [0.45.573] — 2026-10-21 — 占位（进行中：测试会话用内核沙箱禁写真实数据根——统一日志查被吞的拒绝、沙箱生效时指纹比对降级为说明、金丝雀自证、适配两处 ps）
+
+## [0.45.573] — 2026-10-21 — Changed：测试会话用**内核写沙箱**禁写真实数据根——Alpha Bot 盘中采样 / 每日扫描不再让全量末尾报 teardown ERROR；被吞掉的写入照样报红并定位到测试
+
+用户决定（2026-10-21）：「按这个方案做：测试会话收集前用内核沙箱禁写真实数据根，统一日志查被吞掉的拒绝，沙箱生效时指纹比对降级为说明，
+配金丝雀自证，并适配两处 ps」。起因：全量末尾反复出现 `ERROR at teardown of test_zero_weight_invariant::…test_reads_live_config_when_not_injected`。
+
+### 根因（2026-10-21 复核）
+真实数据根闸靠「会话前后数据根有没有变」**倒推**「测试写没写」。机器上还有合法的并发写入者，倒推必然误报：
+本会话五次全量里出 ERROR 的两次结束于 10-19 08:01 / 08:13 PDT（盘中），两段窗口里 Alpha Bot 各恰好追加一批 5 条 `cboe_intraday` 快照
+（07:54:22–07:55:09、08:04:49–08:05:34）；收盘后三次 + 10-21 02:10 的对照轮（Alpha Bot 开着、另两个会话并发跑 pytest）全无。
+会话级闸被 pytest 记在收集序最后一条测试头上，所以测试名与原因无关。加豁免会盖住真写穿、按进程号放行是放宽闸——都不是根治。
+
+### Changed
+- 新增 `tests/_write_sandbox.py`；`tests/conftest.py::pytest_configure`（收集之前）调 `sandbox_init` 给 pytest 进程套
+  `(deny file-write* (subpath <真实数据根>))`——内核强制、**子进程继承**（实测 Python 子进程 / `sh` / `env -i` / `sqlite3` CLI 全被拒），
+  Alpha Bot / 扫描在沙箱外照写。真实数据根与原闸同一推导（`_root_data_guard.real_data_root`）。
+- **金丝雀自证**：同一份规则里多保护一个 scratch 目录，套上后立刻试写，被内核拒才算生效——从不往生产目录真写。
+- **被吞掉的写**：生产代码 `except OSError` 吞掉的写入，内核仍记进统一日志（`Sandbox: <进程>(<pid>) deny(1) file-write-… <路径>`）；
+  会话末尾按「写操作 + 真实数据根路径前缀」捞出来报红，逐条用 `_root_data_guard.locate` 定位到测试（日志时刻有毫秒级偏差，放宽 50 ms、相邻阶段一并列）。
+  ⚠️ `log show` 在沙箱里拒绝运行（「Cannot run while sandboxed」）⇒ **套沙箱之前**起一个只跑 `log show` 的常驻助手，末尾经 stdin/stdout 代查；
+  ⚠️ zsh 的 `log` 是内建命令，一律 `/usr/bin/log` 全路径。核对失败（助手退出 / 查询失败）⇒ 红，不当「没有拒绝」。
+- 沙箱生效时**指纹差异降级为说明**（终端摘要「真实数据根：沙箱外的写入」），不再报红。进程内再跑 pytest 的内层会话继承外层沙箱
+  （环境变量记根与金丝雀，内层用金丝雀再验一次），不查日志——它期间的拒绝落在外层会话的查询窗里。
+- 沙箱不可用（非 macOS / 没有真实数据根 / `libsandbox` 缺失 / 已在别的沙箱 / `ALPHA_HIVE_TEST_WRITE_SANDBOX=0`）⇒ 闸回到原指纹比对；
+  报告头新增一行 `write sandbox: ACTIVE / INACTIVE（原因）`，不静默。
+- **两处 `ps` → `pgrep`**（沙箱里 exec 不了 setuid 的 `/bin/ps`，连 `(allow default)` 也拒）：`alphabot/launcher.window_owner`
+  （`/usr/bin/pgrep -f alphabot\.launcher` 再核 pid；顺带根除 v0.45.412 那次 ps 管道输出被 `COLUMNS` 截断的问题）、
+  `tests/test_ic_rerun_fg_budget._kill_if_ours`（标记里的 ERE 元字符先转义）。启动器的 `COLUMNS` 截断测试改为真进程（标记在 80 列外 + `COLUMNS=80`）并核对确实问的是 pgrep。
+- 两处把 conftest 拷进假 checkout 的测试（`test_root_data_guard` / `test_paper_portfolio_guard_identity`）改为按 `tests/_*.py` 通配拷全部辅助模块
+  （写死清单每给 conftest 加一个模块就坏一次——本版就撞了两回）。
+
+### 证据
+- **端到端（新进程、假「真实数据根」，不碰生产）**：A 测试往假根写、进程内与子进程 `bash` 都吞掉 `PermissionError` ⇒ 测试本身绿、
+  会话末尾报红「被内核写沙箱拒绝了 2 次」，各带进程 / pid / 时刻并定位到那条测试，假根里一个文件都没写进去；B 沙箱外进程在会话中往假根写 ⇒
+  不报红，终端摘要列出那两个文件。
+- **变异 5/5 红**：规则不写 deny（4 条红）、解析不查路径前缀（3 条）、查询失败当没有（1 条）、判定不因查询失败报红（1 条）、
+  助手改到套沙箱之后起（1 条 + 会话闸本身也红）。
+- 全量（02:51–03:00 PDT，收盘后、沙箱 ACTIVE）：沙箱没拦下任何测试的写入、末尾无 teardown ERROR；失败的 6 条里 4 条是假 checkout 漏拷新模块、
+  1 条是合成路径用了家目录前缀（均已修）、1 条是已知的经济日历（已由 v0.45.572 修）。
+
+### Added
+- `tests/test_write_sandbox.py`（11 条）：规则文本 / 日志解析边界（读拒绝、兄弟目录、金丝雀、根本身）/ 查询失败报错（纯逻辑）；判定四路（有拒绝红并定位、
+  查不了红、只有外部变化只说明、内层会话不查）；本机实测三条（macOS + 有真实数据根时沙箱**必须**生效、子进程写金丝雀被拒、助手查得到本会话的拒绝）。
+
+### 没做的 / 已知局限
+- 只禁写不禁读（读生产库的检测另议）。`sandbox_init` 是苹果标为废弃的接口（本机 macOS 26.0.1 实测可用）；哪天没了会自动退回指纹闸并在报告头写明。
+- 已在沙箱里的进程不能再套一层 ⇒「写真实数据根会被拒」在测试里只能靠同一份规则的金丝雀证明。
 
 ## [0.45.572] — 2026-10-21 — Changed：经济日历抄入 2027 官方日程——CPI 12 条、NFP 12 条、GDP 初值 4 条，三表 `verified_through` 上移；`TestCoverageHorizon` 转绿。另查明 BEA 的 2027 日程其实早在 `next-year` 页，此前几次核对（含监视器）都看错了页
 
