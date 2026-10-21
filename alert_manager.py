@@ -1011,7 +1011,7 @@ class AlertDispatcher:
         # 明令只进日志的那一类；告警本身已由 `main()` 写入 alerts-*.json 与日志。
         # 编排器 Step 6 不带 `--dispatch`，故生产此前未走到这里；堵的是手动那条路。
         if self.config.get('slack_enabled', False):
-            _log.info("ALERT_CONFIG.slack_enabled 被忽略：Slack 只许发 LLM 模式确认与富文本日报"
+            _log.info("ALERT_CONFIG.slack_enabled 被忽略：Bot 不发任何 Slack 消息"
                       "（CLAUDE.md「Slack 通知精简规则」），告警只写 alerts-*.json 与日志")
 
         if self.config.get('email_enabled', False):

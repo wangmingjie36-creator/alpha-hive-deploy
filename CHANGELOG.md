@@ -92,6 +92,14 @@
   （日志「脚本不存在，跳过」）⇒ 落到原 `skipped_manual` 分支，`status.json` 与删前同值。第二个扫描日起新编排器执行，`step7_push_report` 键消失。
 - 核验（第二个扫描日后）：`grep -c "Step 7" ~/.claude/logs/orchestrator-<日期>.log` = 0；当天 `status.json` 的 `steps_result` 无 `step7_push_report`。
 
+### 二次检查（2026-10-21，独立审阅 + 自查）
+- 无功能性 bug：编排器 `set -u` 下无残留 `STEP7_*` 引用；部署副本的 `run_step` 对缺失脚本确实返回 2；格式化器读过的 6 类文件（日报 JSON / fear_greed / `.swarm_results` /
+  analysis ML JSON / `{T}_raw.json` / `data_cache/social_*`·`short_*`）都仍有别的读者，**没有因本版新增死链**。
+- 修 4 处过期文字（只文案）：`alert_manager` 忽略 `slack_enabled` 时的 INFO 日志、`alpha_hive_daily_report` 两处注释仍写「Bot 只发两类」；
+  `tests/test_ledger_writes_go_through_ledger_io.py` 的 `{T}_raw.json` 登记说明仍写「Slack 读回」。
+- 补覆盖：原「白名单模块」用例顺带证明缺省 `allowed=None` 真读 `ALLOWED_SENDERS`，名单变空后这条接线没人测——新增 `test_default_whitelist_is_wired`
+  （临时登记一个合成模块；变异 `allowed = allowed or {}` 实测变红）。
+
 ## [0.45.570] — 2026-10-21 — Removed：ML 模型的缺省落盘路径 `ml_model.json`——`train_model()` 训完不再存盘，`save_model` / `load_model` 的路径必填（v0.45.543 读者登记表最后一条文件类 PENDING_DEAD，上限 3 → 2）
 
 用户决定（2026-10-21）：选「删掉缺省落盘」（另两个选项：只停 `train_model` 的自动存盘、保留缺省路径；或改登记为 FORENSIC）。

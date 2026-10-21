@@ -91,7 +91,7 @@ WRITERS: dict = {
     "alpha_hive_daily_report.py::AlphaHiveDailyReporter._fallback_dashboard_data": (ARTIFACT, _NA + " 降级仪表盘数据（report_deployer 读 _generated_at）"),
     "generate_ml_report.py::MLEnhancedReportGenerator._write_file_async": (ARTIFACT, _NA + " 异步写 ML 分析 JSON"),
     "dashboard_renderer.py::render_dashboard_html": (ARTIFACT, _NA + " 网站 dashboard-data.json（report_deployer 读 _generated_at）"),
-    "collect_data.py::main": (ARTIFACT, _NA + " 精简原始数据 {T}_raw.json（generate_ml_report / Slack 读回）"),
+    "collect_data.py::main": (ARTIFACT, _NA + " 精简原始数据 {T}_raw.json（generate_ml_report 读回；Slack 读者 v0.45.571 删）"),
     "ml_predictor.py::HGBModel.save_model": (ARTIFACT, _NA + " 模型持久化（读坏 ⇒ 重训）"),
     "ml_predictor.py::SGDMLModel.save_model": (ARTIFACT, _NA + " 模型持久化（读坏 ⇒ 重训）"),
     "ml_predictor.py::SimpleMLModel.save_model": (ARTIFACT, _NA + " 模型持久化（读坏 ⇒ 重训）"),

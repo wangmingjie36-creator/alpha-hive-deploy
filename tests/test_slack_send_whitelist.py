@@ -577,6 +577,14 @@ class TestScannerHasTeeth:
         assert _scan_source(src, rel, specs, allowed={})
         assert _scan_source(src, rel, specs)      # 真白名单为空 ⇒ 缺省就红
 
+    def test_default_whitelist_is_wired(self, specs, monkeypatch):
+        """缺省 `allowed=None` 真的读 `ALLOWED_SENDERS`（原「白名单模块」用例覆盖这条接线，v0.45.571 名单变空后
+        改成临时登记）：将来名单重新有成员时，缺省路径要豁免它。
+        变红的变异：`_scan_source` 里 `allowed = ALLOWED_SENDERS if allowed is None else allowed` 改成 `allowed = allowed or {}`。"""
+        rel, src = ("sender_x.py", "requests.post('https://slack.com/api/chat.postMessage', json={})\n")
+        monkeypatch.setitem(ALLOWED_SENDERS, rel, "合成")
+        assert not _scan_source(src, rel, specs)
+
     @pytest.mark.parametrize("rel, anchor, block", [
         ("resilience.py",
          '                        self.name, self._failure_count,\n                    )\n',
