@@ -7,7 +7,69 @@
 
 ## [0.45.579] — 2026-10-21 — 占位（进行中：经济日历 572/574 二次检查余项——更正县级 GDP 日期的错误结论、监视器缓存损坏自愈、次年页表头须晚于滚动页、陈旧措辞与编造的夹具日期）
 
-## [0.45.578] — 2026-10-21 — 占位（进行中：v0.45.569 二次检查——partial 运行（标的丢失 / 步骤超时）现在零告警且报 healthy，补告警与 partial 兜底；删 ALERT_CONFIG 里退役闸的死配置；更正 569 两处说法）
+## [0.45.578] — 2026-10-21 — Fixed：v0.45.569 二次检查——partial 运行（标的丢失 / 完整性判不了、步骤超时）在 alert_manager 里零告警，569 拿掉恒真性能 P1 后会报「system healthy」；补具体 P1 与 partial 兜底 P1，删 `ALERT_CONFIG` 里退役闸的死配置，更正 569 两处说法
+
+### Fixed
+
+- 二次检查（独立审查）发现：569 的 docstring 与 CHANGELOG 写「全流程总耗时不再是判据（…其余各步有自己的超时与失败告警）」——**不实**。
+  `AlertAnalyzer` 的步骤循环只认 `status == 'failed'`（外加 Step 2 的 `success_with_warning`），而编排器在这几种情况下置
+  `status=partial` 却不写 failed：标的丢失 `ticker_completeness.status = incomplete`、判不了 `unknown`、Step 3 超时
+  `step3_ml_report.status = timeout`。此前每个跑到 Step 6 的扫描日都带那条恒真性能 P1，这些日子碰巧不会被渲染成健康；
+  569 之后复现（10-20 生产形状改成 partial + 产出 23/30）：569 版 `alerts = []`、日志「No alerts detected - system healthy」，
+  569 之前的版本是 `['⚠️ 【P1 高】性能异常']`。缺口比 569 早，**生产上尚未发生过**（09-21…10-20 窗口里 Step 3 超时只有
+  09-21 一次、当天已是 failed；无标的丢失日），但 569 拿掉了唯一碰巧遮住它的那条。
+- 补三条：
+  - 步骤 `status == 'timeout'` ⇒ P1「步骤超时」。
+  - `_check_ticker_completeness`：`ticker_completeness` 不等于 `complete` 就报 P1（「标的丢失：产出 a/i 只」/「标的完整性无法判定」）。
+    判据是「不等于正常令牌」而不是逐个列坏取值 ⇒ 编排器将来新加的取值默认会红。Step 2 跑了却没有这一项 ⇒ `checks_skipped`。
+  - `_check_partial_explained`（`analyze()` 的最后一个检查，AST 测试钉住）：`status = partial` 而本轮没有任何 P0 / P1 ⇒ 兜底 P1，
+    列出非正常结局的步骤。接的是「编排器新加了一个置 partial 的分支、本类还不认识」那一类。
+- 删 `config.ALERT_CONFIG` 的 `performance_baseline_seconds`（5.0）/ `performance_degradation_threshold`（1.5）：描述 569 退役的闸、
+  全仓零读者；留着就是一份能被接回来的说明书。
+
+### 更正 v0.45.569 的说法（569 条目已进 main，不改写，更正记在这里）
+
+- 「其余各步有自己的超时与失败告警」：不实，见上；`_check_step2_budget` 的 docstring 已改。
+- 「现行预算下告警线 4050 秒 ≈ 正常日最慢那天（2661 秒）的 1.5 倍」：2661 秒是 09-24，而 569 自己的表把 09-24 单列（429 风暴）、
+  不算正常日。准确说法：不该响的日子里最慢的 09-24 的 1.52 倍；16 个正常日里最慢的 09-22（2435 秒）的 1.66 倍；跑完的日子里
+  最慢的 10-12（3122 秒，按它当天的 3600 秒预算会响）的 1.30 倍。
+- 「性能下降」区间：569 的代码注释与测试 docstring 写的「20000%」是宽下界，实为 24460–76300%（569 CHANGELOG 正文的「约 24000–76000%」本来就对）。
+
+### 二次检查里核过、没有问题的（569）
+
+- 每条到达 Step 6 的路径读到的 `step2_budget` 都是本轮数：`STEP2_TIMEOUT` 无条件计算、早退 heredoc 都在 Step 6 前 `exit`、
+  价格闸重试重置 `STEP2_START`、两次 `write_status` 都在 Step 2 之后。
+- 读写契约（bash 整数、`${VAR:-null}` → None → `checks_skipped`）；部署副本早已写这一段、生产克隆与 origin 0/0 ⇒ 没有兼容轮。
+- 全仓没有别的 `perf_baseline` / `performance` 标签 / 旧文案读者；Step 6 不带 `--dispatch`。
+- 真实 10-20 status.json 喂新代码：无性能告警、无 `checks_skipped`（沙箱数据根，未写生产日志）。最新 main（含 571 / 573 / 574）上 569 相关 163 条全过。
+
+### 已知、未处理（待验证）
+
+- 名单 ≤10 只时预算落在 1800 秒下限、告警线 1350 秒，而预取 / 部署等固定开销不随只数缩放（30 只日预取 264–572 秒）⇒
+  小名单可能在没出事的日子报 P1。现 WATCHLIST = 30，不触发；预取是否随只数缩放待验证。按定义它报的是「离超时只剩 <25%」，
+  不算误报，紧的是 1800 秒下限本身。
+- `run_step` 看门狗是 `sleep $timeout`，macOS 系统睡眠期间可能不计时（待验证），而 `STEP2_DURATION` 是墙钟 ⇒ 合盖跨过睡眠的扫描
+  可能跑完且「用掉 1xx%」并报 P1。罕见。
+
+### 测试
+
+- 新增 `tests/test_alert_partial_runs.py`（16 条）：健康日零 P1（正对照，带完整健康 scan_timing）；标的丢失复现、完整性四种坏形状、
+  缺这一项记 skipped / Step 2 没跑不记；Step 2 / Step 3 超时；兜底（无解释的 partial 响、只列有 status 的非正常步骤、success 不响、
+  已有具体 P1 不叠）；兜底必须是最后一个检查（AST）；编排器的 `complete` 令牌与 Step 3 `timeout` 写法（写入者对账）。
+- `tests/test_alert_step_interp.py::_pre_b_step_alerts` 的期望加上 timeout（刻意新增，docstring 注明）；`test_production_sync`
+  健康一轮补 `ticker_completeness`；`test_alert_step2_budget` 加 `ALERT_CONFIG` 墓碑。
+- 变异 9 个全部打红、每轮 passed+failed = 77：M0 改动前的真实文件（12 红，含标的丢失复现）、删 timeout 分支、改成逐个列坏取值、
+  不调兜底、兜底挪到最前、兜底不看已有 P1、缺项不记 skipped、加回 `performance_baseline_seconds`、兜底列出无 status 的片段。
+  clockshift +7 / +45 天 0 新红。
+
+### 同一轮二次检查顺带：v0.45.572 / v0.45.574（两个日历会话写的；本版不改日历代码）
+
+- 572 的 28 个 2027 日期逐个对官方页核对，全部正确；`verified_through` 与各表末条一致。
+- 其余发现转给日历会话（它持有 576）：v0.45.576（`41c7c698`，已在 main）已覆盖 GDP 来源改指次年页、2027 日期回归钉（本轮的
+  两个日期变异现在会红）、删掉恒真测试、次年页真实「尚未发布」形态（无表头、只有一句 "See the Next Year tab…"，否则每年约
+  12 月下旬起到次年 8–10 月 GDP 恒报「无法判定」）按未发布处理、`(Advance|Initial) Estimate` 变体；其余由该会话下一版处理——
+  572 CHANGELOG 与 memory 里「BEA 网页与 ICS 县级 GDP 不一致（网页 12-08）」不实（网页同为 12-02，12-08 是下一行的日期，
+  HTML 侧行错位）、陈旧措辞、BLS 夹具里的假日期、坏缓存文件不再自愈、次年页年份须晚于滚动页、memory 里「01-01 起」应为约 12-20~27 起。
 
 ## [0.45.577] — 2026-10-21 — Fixed：v0.45.573 写沙箱二次检查——并发测试会话互相误报写拒绝、扫描时段逐条 paper_portfolio 夹具仍报 ERROR、残留继承标记让沙箱静默失效、金丝雀目录每会话漏一个，另补两处小漏
 

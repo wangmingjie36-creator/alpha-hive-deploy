@@ -879,9 +879,8 @@ ALERT_CONFIG = {
         "credentials_file": PATHS.google_credentials
     },
 
-    # 告警阈值
-    "performance_baseline_seconds": 5.0,  # 性能基线
-    "performance_degradation_threshold": 1.5,  # 150% = 高于基线 50% 触发告警
+    # v0.45.578：删掉 performance_baseline_seconds（5.0）/ performance_degradation_threshold（1.5）——描述的是
+    # v0.45.569 退役的恒真性能闸，全仓零读者。性能告警线现在是 alert_manager.STEP2_BUDGET_USED_P1（按 Step 2 预算比例）。
 
     # 告警规则
     "alert_rules": {

@@ -108,9 +108,15 @@ class TestNonDictEntry:
 
 
 def _pre_b_step_alerts(steps_result):
-    """B 之前 P1 循环的全部行为（逐字）：status == 'failed' ⇒ 一条 HIGH「步骤失败」，别的什么都不出。"""
-    return [(am.AlertLevel.HIGH, f"⚠️ 【P1 高】步骤失败：{n}", ["step_failure", n])
-            for n, r in steps_result.items() if r.get("status") == "failed"]
+    """B 之前 P1 循环的全部行为（逐字）：status == 'failed' ⇒ 一条 HIGH「步骤失败」——外加 v0.45.578 **刻意**新增的
+    status == 'timeout' ⇒ 一条 HIGH「步骤超时」（此前超时那轮零步骤告警，靠恒真的性能 P1 碰巧遮住）。按步骤顺序。"""
+    out = []
+    for n, r in steps_result.items():
+        if r.get("status") == "failed":
+            out.append((am.AlertLevel.HIGH, f"⚠️ 【P1 高】步骤失败：{n}", ["step_failure", n]))
+        elif r.get("status") == "timeout":
+            out.append((am.AlertLevel.HIGH, f"⚠️ 【P1 高】步骤超时：{n}", ["step_failure", n]))
+    return out
 
 
 class TestPreBStatusUnchanged:

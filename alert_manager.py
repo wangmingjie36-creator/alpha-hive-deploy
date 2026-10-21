@@ -36,13 +36,16 @@ NEWS_MIN_KNOWN = 10
 #: v0.45.569：Step 2 用掉**它自己的超时预算**的这个比例即 P1「性能异常」（= 余量 < 25%）。预算是编排器按只数算的
 #: `STEP2_TIMEOUT`，经 status.json 的 `step2_budget` 进来 ⇒ 告警线随预算 / 名单长度移动，**不是秒数常数**。
 #: 此前是 `total_duration_seconds > perf_baseline_seconds(缺省 5.0，没有任何调用方传过) × 1.5`，而真实扫描 1200–3800 秒
-#: ⇒ 每个跑完的扫描日都报「性能下降 20000–76000%」（恒真闸，把人训练成忽略 P1）。
+#: ⇒ 每个跑完的扫描日都报「性能下降 24000–76000%」（恒真闸，把人训练成忽略 P1）。
 #: 为什么以预算为尺：Step 2 超时 = 全有或全无、无同日重试，整天永久丢失（09-21 / 09-23）；用掉的比例就是「离丢一天还差多远」。
 #: 标定（编排器日志「Step 2 预算余量」，09-22…10-20 共 20 个 30 只扫描日，各按当天预算）：正常日用掉 17–68%
 #: （3600s 预算时代多在 55–68%，5400s 起 36%）；09-24（yfinance 429 风暴）74% 不响；10-12（余量 13%，唯一擦边）87% 响；
 #: 09-23（CBOE 陈旧级联）外推 ≈4900/5400 = 91% 响。⚠️ 75% 是主观取值、未经前向检验。
 #: 守卫 `tests/test_alert_step2_budget.py`：真实日回放 + 正常日离告警线 ≥1.25 倍 + 告警线低于超时本身（两头都钉）。
 STEP2_BUDGET_USED_P1 = 0.75
+
+#: v0.45.578：partial 兜底告警列「非正常结局的步骤」时视为正常的取值（只影响展示，不影响是否报警）。
+_STEP_OK_STATUSES = frozenset({"success", "complete", "skipped", "skipped_builtin", "skipped_manual"})
 
 
 def _finite_number(x) -> bool:
@@ -208,6 +211,19 @@ class AlertAnalyzer:
                     },
                     ["step_failure", step_name]
                 ))
+            elif step_result.get('status') == 'timeout':
+                # v0.45.578：编排器对 Step 3 rc=124 记 timeout 并置 partial（Step 2 超时同样有 timeout 这个取值），
+                # 此前只认 failed ⇒ 超时那轮零告警；v0.45.569 删掉恒真的性能 P1 之后会报「system healthy」。
+                self.alerts.append(Alert(
+                    AlertLevel.HIGH,
+                    f"⚠️ 【P1 高】步骤超时：{step_name}",
+                    {
+                        "步骤": step_name,
+                        "耗时": f"{step_result.get('duration_seconds', 'N/A')}秒",
+                        "状态": "超时被杀",
+                    },
+                    ["step_failure", step_name]
+                ))
             elif step_name == 'step2_hive_analysis' and step_result.get('status') == 'success_with_warning':
                 # v0.45.386（编排器 B2）：rc=1 但主流程确实跑完 ⇒ 解释器记 success_with_warning（此前是 failed，
                 # 且 step4_dashboard 也记 failed，共两条 P1）。这是 rc=1 跑完的日子（09-24 / 09-25；09-25 是 ML 近常数，
@@ -324,7 +340,71 @@ class AlertAnalyzer:
         # 12. 检测 P2: H1 原始观测溯源不全（v0.45.568，buzz_v1 根治阶段 1）
         self._check_observation_archive(status)
 
+        # 13. 检测 P1: 标的丢失 / 完整性判不了（v0.45.578）
+        self._check_ticker_completeness(status)
+
+        # 14. 兜底 P1: status=partial 却没有任何 P0 / P1 说明原因（v0.45.578）——必须排在所有检查之后
+        self._check_partial_explained(status)
+
         return self.alerts
+
+    def _check_ticker_completeness(self, status: Dict) -> None:
+        """编排器标的完整性闸的结局（`steps_result.ticker_completeness`，v0.45.4 起写）→ 告警（v0.45.578）。
+
+        此前本类不读它：丢了几只（incomplete）/ 判不了（unknown）时编排器置 partial、只打 ERROR 日志，alerts 里一条
+        都没有——一直被恒真的性能 P1 碰巧遮住，v0.45.569 删掉那条后会报「system healthy」。
+        判据是「不等于 complete 就报」，不是逐个列坏取值：编排器将来加的新取值默认会红。零产出写 failed 并置
+        status=failed ⇒ 上面 P0 先返回，到不了这里。Step 2 跑了却没有这一项 ⇒ checks_skipped。
+        """
+        steps = status.get("steps_result")
+        if not isinstance(steps, dict):
+            return
+        tc = steps.get("ticker_completeness")
+        if tc is None:
+            if "step2_hive_analysis" in steps:
+                self.checks_skipped.append("标的完整性检查（steps_result 缺 ticker_completeness）")
+            return
+        state = tc.get("status") if isinstance(tc, dict) else None
+        if state == "complete":
+            return
+        if state == "incomplete":
+            title = f"⚠️ 【P1 高】标的丢失：产出 {tc.get('actual', '?')}/{tc.get('intended', '?')} 只"
+        else:
+            title = f"⚠️ 【P1 高】标的完整性无法判定（{state if state else tc!r}）"[:120]
+        self.alerts.append(Alert(
+            AlertLevel.HIGH,
+            title,
+            {"结局": tc if isinstance(tc, dict) else repr(tc),
+             "影响": "缺的标的这一天没有预测 / 快照 / T+7 观测（永久缺口）",
+             "建议": "编排器日志「标的丢失」行列出缺哪几只；查 alpha_hive.log 带调用栈的「并行分析失败」"},
+            ["ticker_completeness", "data_quality"]
+        ))
+
+    def _check_partial_explained(self, status: Dict) -> None:
+        """兜底：status=partial 但本轮分析没产出任何 P0 / P1 ⇒ P1（v0.45.578）。
+
+        partial 只由编排器在某一步出问题时置（Step 2 rc≠0、标的丢失 / 判不了、Step 3 超时 / 失败 / 无产出、gh-pages
+        失败……）。上面各条按步骤认得出的都会报；这条只接「编排器新加了一个置 partial 的分支、本类还不认识」——
+        否则那一轮就是「整体 partial + alerts 为空 + 日志写 system healthy」。
+        """
+        if status.get("status") != "partial":
+            return
+        if any(a.level in (AlertLevel.CRITICAL, AlertLevel.HIGH) for a in self.alerts):
+            return
+        steps = status.get("steps_result")
+        odd = {}
+        if isinstance(steps, dict):
+            # 没有 status 键的片段（如 step2_price_gate 的 attempts / refused）是附带信息，不列
+            odd = {k: (v.get("status") if isinstance(v, dict) else repr(v)) for k, v in steps.items()
+                   if not isinstance(v, dict) or ("status" in v and v.get("status") not in _STEP_OK_STATUSES)}
+        self.alerts.append(Alert(
+            AlertLevel.HIGH,
+            "⚠️ 【P1 高】整体状态 partial，但没有任何具体告警说明原因",
+            {"非正常结局的步骤": odd or "无（steps_result 里每一步都正常——编排器在别处置了 partial）",
+             "影响": "本类不认识的那种 partial：先查编排器日志里的 ERROR / set_status partial 来自哪一步",
+             "建议": "定位后在 alert_manager 给那一步补一条具体告警，本条兜底才不会再响"},
+            ["partial_unexplained", "observability"]
+        ))
 
     def _check_step2_budget(self, status: Dict) -> None:
         """Step 2 用掉了自己超时预算的多少（v0.45.569，`status.step2_budget`，写入者编排器 `write_status`）。
@@ -332,7 +412,9 @@ class AlertAnalyzer:
         v0.45.569 前这里比的是 `total_duration_seconds > perf_baseline_seconds × 1.5`，基线缺省 5.0 秒、没有调用方传过；
         09-22 起每个跑完的扫描日都出这条 P1（10-05…10-20 的 alerts-*.json 全有，「性能下降」20000–76000%）。
         现在的判据只有一个：Step 2 耗时 ÷ 它的超时预算 ≥ `STEP2_BUDGET_USED_P1`。全流程总耗时不再是判据——
-        非 Step 2 部分 10-20 只有 27 秒，其余各步有自己的超时与失败告警。
+        非 Step 2 部分 10-20 只有 27 秒。⚠️ v0.45.569 这里原写「其余各步有自己的超时与失败告警」，**不实**：当时只认
+        failed，Step 3 超时 / 标的丢失置 partial 却零告警，此前全靠恒真的本条碰巧遮住；v0.45.578 补了 timeout、
+        `_check_ticker_completeness` 与 partial 兜底 `_check_partial_explained`。
 
         - 预算字段可用 ⇒ 照判（不看 Step 2 成没成功：跑到一半崩掉时耗时同样说明问题；超时被杀且零产出那轮
           status=failed，上面 P0 先返回，没走到 P0 的超时余量≈0，在这里响）。

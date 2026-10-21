@@ -2,7 +2,7 @@
 
 事故：`AlertAnalyzer.__init__(perf_baseline_seconds=5.0)`，生产 `alert_manager.main()` 不传参 ⇒ 缺省值就是生产值；
 判据 `total_duration_seconds > 5.0 × 1.5`，而真实扫描 1200–3800 秒 ⇒ 09-22 起每个跑完的扫描日都出
-「⚠️ 【P1 高】性能异常」（10-05…10-20 的 alerts-*.json 全有，「性能下降」20000–76000%）。天天红等于没人红：
+「⚠️ 【P1 高】性能异常」（10-05…10-20 的 alerts-*.json 全有，「性能下降」24000–76000%）。天天红等于没人红：
 恒真闸把人训练成忽略 P1，真出事那天的 P1 也会被一起忽略。
 
 本文件四组，各堵一个方向：
@@ -187,6 +187,11 @@ class TestNoConstantBaselineEverAgain:
         assert not numeric, numeric
         assert not [n for n in sig.parameters if "baseline" in n]
         assert not hasattr(am.AlertAnalyzer(), "perf_baseline")
+
+    def test_retired_gate_config_is_gone(self):
+        """v0.45.578：`config.ALERT_CONFIG` 里描述退役闸的两项（5.0 / 1.5）已删——留着就是一份能被接回来的说明书。"""
+        import config
+        assert not [k for k in config.ALERT_CONFIG if k.startswith("performance_")], list(config.ALERT_CONFIG)
 
     def test_threshold_is_a_fraction(self):
         assert 0 < am.STEP2_BUDGET_USED_P1 < 1
