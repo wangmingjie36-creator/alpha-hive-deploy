@@ -390,7 +390,9 @@ def load_links(db_path: Path, date: str, consumer: str = CONSUMER_BUZZ) -> Dict[
         try:
             rows = con.execute(f"SELECT ticker, refs FROM {LINKS_TABLE} WHERE date=? AND consumer=?",
                                (date, consumer)).fetchall()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower():
+                raise                    # v0.45.588：锁住 / 坏库不是「没有链接」——照抛，别让读错误渲染成「这天没溯源」
             return {}
     finally:
         con.close()

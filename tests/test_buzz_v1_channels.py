@@ -509,7 +509,7 @@ class TestBridge:
         _seed_day(db, "2026-10-21", _write_obs())
         r = B.bridge(str(db), end="2026-10-21")
         assert r["ok"] and [g["days"][0]["status"] for g in r["groups"].values()] == ["pass", "pass"]
-        assert r["score"] == {"n": 1, "n_match": 1}
+        assert r["score"] == {"n": 1, "n_match": 1, "n_skipped": 0}
 
     @pytest.mark.parametrize("tweak, group", [({"news_signal": 61.0}, "sentiment"), ({"volatility_signal": 40}, "price")])
     def test_a_different_channel_fails_its_group(self, on, tmp_path, tweak, group):
@@ -534,7 +534,7 @@ class TestBridge:
         db = tmp_path / "p.db"
         _seed_day(db, "2026-10-21", _write_obs(), score_tweak=0.01)
         r = B.bridge(str(db), end="2026-10-21")
-        assert not r["ok"] and r["score"] == {"n": 1, "n_match": 0}
+        assert not r["ok"] and r["score"] == {"n": 1, "n_match": 0, "n_skipped": 0}
 
     def test_missing_payload_is_incomplete_not_fail(self, on, tmp_path):
         db = tmp_path / "p.db"
@@ -601,6 +601,121 @@ class TestBridge:
         monkeypatch.setattr(fc, "channels_from_observations", boom)
         r = B.bridge(str(db), end="2026-10-21")
         assert not r["ok"] and r["errors"] and r["groups"]["sentiment"]["n_fail"] == 1
+
+
+class TestBridgeSecondCheck:
+    """v0.45.588 二次检查补的四处：覆盖自己核、空转不算通过、入档缺项按隔离分、读错误不当「没有数据」。"""
+
+    def _prod_only(self, db, date, ticker, sentiment=5.0):
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE IF NOT EXISTS predictions (date TEXT, ticker TEXT, dimension_scores TEXT)")
+        con.execute("INSERT INTO predictions VALUES (?,?,?)", (date, ticker, json.dumps({"sentiment": sentiment})))
+        con.commit()
+        con.close()
+
+    def test_scored_ticker_without_links_makes_the_day_incomplete(self, on, tmp_path):
+        """NVDA 有溯源、AMD 生产有分却没写进溯源表 ⇒ 那天两组都「不全」，不能只看 NVDA 就判通过。"""
+        db = tmp_path / "p.db"
+        _seed_day(db, "2026-10-21", _write_obs())
+        self._prod_only(db, "2026-10-21", "AMD")
+        r = B.bridge(str(db), end="2026-10-21")
+        assert [g["days"][0]["status"] for g in r["groups"].values()] == ["incomplete", "incomplete"]
+        assert any(x["ticker"] == "AMD" and "没有溯源块" in x["why"] for x in r["incomplete_examples"])
+
+    def test_archived_channels_without_links_also_count(self, on, tmp_path):
+        """AMD 入档了通道（`buzz.comp.*`）却没有溯源块、也没有生产分（如预测写库失败那天）⇒ 照样记「不全」。"""
+        db = tmp_path / "p.db"
+        _seed_day(db, "2026-10-21", _write_obs())
+        con = sqlite3.connect(db)
+        con.execute("INSERT INTO signal_archive (date, ticker, signal, value) VALUES ('2026-10-21', 'AMD', "
+                    "'buzz.comp.news_signal', 55.0)")
+        con.commit()
+        con.close()
+        r = B.bridge(str(db), end="2026-10-21")
+        assert r["groups"]["sentiment"]["days"][0]["status"] == "incomplete"
+        assert any(x["ticker"] == "AMD" for x in r["incomplete_examples"])
+
+    def test_a_scan_day_with_no_links_at_all_shows_up(self, on, tmp_path):
+        """第一个有溯源的扫描日之后，某天生产有分、溯源表一行都没有（如开档没接上）⇒ 那天照样出现、记「不全」，不是消失。"""
+        db = tmp_path / "p.db"
+        _seed_day(db, "2026-10-21", _write_obs())
+        self._prod_only(db, "2026-10-22", "NVDA")
+        r = B.bridge(str(db), end="2026-10-22")
+        days = r["groups"]["sentiment"]["days"]
+        assert [x["date"] for x in days] == ["2026-10-21", "2026-10-22"] and days[1]["status"] == "incomplete"
+
+    def test_a_day_with_nothing_observed_is_vacuous(self, on, tmp_path):
+        """整天数据源全挂：四个情绪通道都不该有观测、都回中性 ⇒ 冻结层与生产都是 50、全等，但什么也没核到 ⇒「空转」不计入通过日。"""
+        db = tmp_path / "p.db"
+        blk = _write_obs()
+        for ch in ("reddit", "news", "yahoo", "fear_greed"):
+            blk[ch] = {"expected": False, "ref": None}
+        _seed_day(db, "2026-10-21", blk)
+        r = B.bridge(str(db), end="2026-10-21")
+        g = r["groups"]["sentiment"]
+        assert g["days"][0]["status"] == "vacuous" and g["n_pass"] == 0 and g["n_vacuous"] == 1
+        assert r["groups"]["price"]["days"][0]["status"] == "pass", "前提：行情组照常有观测可核"
+
+    def test_archived_scalar_missing_without_quarantine_is_a_mismatch(self, on, tmp_path):
+        """入档没有量比、冻结层算出了一个值：没登记隔离 ⇒ 不等（此前只在入档有值时才比，量比同档时漏）。"""
+        db = tmp_path / "p.db"
+        _seed_day(db, "2026-10-21", _write_obs())
+        con = sqlite3.connect(db)
+        con.execute("DELETE FROM signal_archive WHERE signal = 'price.volume_ratio'")
+        con.commit()
+        con.close()
+        r = B.bridge(str(db), end="2026-10-21")
+        assert r["groups"]["price"]["n_fail"] == 1
+        assert r["mismatches"][0]["diffs"][0]["field"] == "price.volume_ratio"
+
+    def test_quarantined_cells_are_skipped_not_failed(self, on, tmp_path, monkeypatch):
+        import signal_archive
+        db = tmp_path / "p.db"
+        _seed_day(db, "2026-10-21", _write_obs())
+        con = sqlite3.connect(db)
+        con.execute("DELETE FROM signal_archive WHERE signal IN ('price.volume_ratio', 'buzz.comp.news_signal')")
+        con.commit()
+        con.close()
+        monkeypatch.setattr(signal_archive, "QUARANTINE", [
+            {"date": "2026-10-21", "signals": ["price.volume_ratio", "buzz.comp.news_signal"], "tickers": ["NVDA"],
+             "reason": "test"}])
+        r = B.bridge(str(db), end="2026-10-21")
+        assert r["groups"]["price"]["days"][0]["status"] == "pass", "隔离的原始字段跳过"
+        assert r["groups"]["sentiment"]["days"][0]["status"] == "incomplete", "隔离的通道没法对 ⇒ 不全，不算失败"
+        assert "已登记隔离" in r["incomplete_examples"][0]["why"]
+
+    def test_read_error_is_an_error_not_no_data(self, on, tmp_path):
+        """溯源表在、但读不出（这里用缺列模拟坏库）⇒ 报 error；只有「表还没建」才是「还没有带溯源的扫描日」。"""
+        db = tmp_path / "p.db"
+        con = sqlite3.connect(db)
+        con.execute(f"CREATE TABLE {oa.LINKS_TABLE} (date TEXT, ticker TEXT, consumer TEXT)")
+        con.commit()
+        con.close()
+        r = B.bridge(str(db), end=D)
+        assert r["ok"] is False and "refs" in r["error"] and "note" not in r
+        with pytest.raises(sqlite3.OperationalError):
+            oa.load_links(db, D)
+
+    def test_corrupt_link_json_is_an_error(self, on, tmp_path):
+        db = tmp_path / "p.db"
+        _seed_day(db, "2026-10-21", _write_obs())
+        con = sqlite3.connect(db)
+        con.execute(f"UPDATE {oa.LINKS_TABLE} SET refs = '{{not json'")
+        con.commit()
+        con.close()
+        r = B.bridge(str(db), end="2026-10-21")
+        assert r["ok"] is False and r["error"].startswith("JSONDecodeError")
+
+    def test_score_rows_skipped_for_a_missing_reference_are_counted(self, on, tmp_path):
+        """参照日（≥ 锚点）有 sentiment.pct 却没有通道 ⇒ 整分对不了；照实计 `n_skipped`，不静默少一行。"""
+        db = tmp_path / "p.db"
+        _seed_day(db, "2026-10-21", _write_obs())
+        con = sqlite3.connect(db)
+        con.execute("INSERT INTO signal_archive (date, ticker, signal, value) VALUES ('2026-10-16', 'NVDA', 'sentiment.pct', 55)")
+        con.commit()
+        con.close()
+        r = B.bridge(str(db), end="2026-10-21")
+        assert r["score"] == {"n": 0, "n_match": 0, "n_skipped": 1}
 
 
 class TestBridgeWiring:

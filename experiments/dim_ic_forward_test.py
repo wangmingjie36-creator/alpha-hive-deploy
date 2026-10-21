@@ -582,7 +582,7 @@ def buzz_v1_self_proof(db: Path, today: str) -> Dict:
 
 #: 桥接核对摘要（v0.45.583，根治阶段 2）只留计数与状态——不含任何收益 / 效应量
 _BRIDGE_KEYS = ("ok", "ready", "end", "required_days", "error", "note")
-_BRIDGE_GROUP_KEYS = ("n_pass", "n_fail", "n_incomplete", "ready", "first_fail")
+_BRIDGE_GROUP_KEYS = ("n_pass", "n_fail", "n_incomplete", "n_vacuous", "ready", "first_fail")
 
 
 def buzz_v1_bridge(db: Path, today: str) -> Dict:
