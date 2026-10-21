@@ -10,6 +10,29 @@ from swarm_agents.utils import (
 )
 
 
+#: FOMC 临近票的窗口（天，含当天）：参考日起 0~N 天内有 FOMC 声明日 ⇒ risk_off +1
+FOMC_VOTE_WINDOW_DAYS = 3
+
+
+def fomc_vote_days(ref_date=None):
+    """参考日起 `FOMC_VOTE_WINDOW_DAYS` 天内最近一次 FOMC 还有几天；窗口内没有 ⇒ None。
+
+    v0.45.582：看窗口内**全部**事件，不只看最近的一个。此前用 `get_next_event()`（只给最近一个宏观事件）
+    再判它是不是 FOMC ⇒ 窗口里若有别的事件排在 FOMC **之前**，这张票就被遮住。BLS 把 2027 年 9 月 CPI
+    排在 09-14、FOMC 是 09-15 ⇒ 09-12~09-14 三个参考日（扫描日 09-13 周一、09-14 周二）都不会投票。
+    同一天的平局本来就由 FOMC 赢（`get_upcoming_events` 先扫 `_FOMC`、排序稳定）。
+    与旧规则的差别**只在被遮的那几天**：逐日比对 2025-01-01~2028-01-26 只差上述三天；economic_calendar 历来
+    11 个版本在各自在用期间都没有被遮的日子（生产存档 2026-09-14/15/16 的 fomc_days = 2/1/0 也印证）⇒
+    已累积的样本一条不变。守卫 `tests/test_guard_fomc_vote.py`。
+    仪表盘倒计时仍用 `get_next_event()`——它要的就是「下一个事件」。
+    """
+    from economic_calendar import get_upcoming_events
+    for e in get_upcoming_events(days=FOMC_VOTE_WINDOW_DAYS, ref_date=ref_date):
+        if e.get("type") == "fomc":
+            return e["days_until"]
+    return None
+
+
 class GuardBeeSentinel(BeeAgent):
     """交叉验证与风险评估蜂 - 共振检测 + 拥挤度折扣 + 风险调整
     对应维度：RiskAdj (权重 0.15)
@@ -406,19 +429,20 @@ class GuardBeeSentinel(BeeAgent):
 
         # ===== 2. FOMC 临近 =====
         try:
-            from economic_calendar import get_next_event, get_calendar_health
+            from economic_calendar import get_calendar_health
             # v0.45.366：补跑按 D 数「距 FOMC 几天」（旧：恒按运行当天，补跑 08-27 时数的是 09-xx 的距离）
             _cal_ref = None
             if _ref_date:
                 import datetime as _dt_cal
                 _cal_ref = _dt_cal.date.fromisoformat(_ref_date)
-            nxt = get_next_event(ref_date=_cal_ref)
-            if nxt and nxt.get("days_until", 99) <= 3 and nxt.get("type") == "fomc":
+            # v0.45.582：看 3 天内全部事件（见 `fomc_vote_days`），不再只看最近一个——别的事件排在前面会遮住这张票
+            _fomc_days = fomc_vote_days(ref_date=_cal_ref)
+            if _fomc_days is not None:
                 regime_votes["risk_off"] += 1
-                signals.append(f"FOMC {nxt['days_until']}天后")
-                details["fomc_days"] = nxt["days_until"]
+                signals.append(f"FOMC {_fomc_days}天后")
+                details["fomc_days"] = _fomc_days
             # v0.45.65：日历是硬编码的、会过期的资产。表被日期走完后
-            # get_next_event() 返回 None，与「未来 60 天真的没有宏观事件」完全同形——
+            # 窗口里查不到 FOMC，与「近几天真的没有 FOMC」完全同形——
             # risk_off 票就此少一张，而结果里不留任何痕迹。
             # 把体检结论落进 details，让降级在 analysis JSON 里可见（不影响评分口径）。
             _cal = get_calendar_health(ref_date=_cal_ref)   # 体检口径与上面的查询同一天
