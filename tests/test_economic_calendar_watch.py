@@ -38,6 +38,7 @@ FOMC_HTML_WITH_NOTATION = """
 </body></html>
 """
 
+# v0.45.579：日期照抄 bls.gov cpi.htm 2027 日程（此前 07-14 / 10-14 两行被写成 07-13 / 10-13，与官方不符）
 BLS_HTML = """
 <html><body>
 <h1>Schedule of Releases for the Consumer Price Index</h1>
@@ -49,10 +50,10 @@ BLS_HTML = """
 <tr><td>March 2027</td><td>Apr. 13, 2027</td><td>08:30 AM</td></tr>
 <tr><td>April 2027</td><td>May 12, 2027</td><td>08:30 AM</td></tr>
 <tr><td>May 2027</td><td>Jun. 10, 2027</td><td>08:30 AM</td></tr>
-<tr><td>June 2027</td><td>Jul. 13, 2027</td><td>08:30 AM</td></tr>
+<tr><td>June 2027</td><td>Jul. 14, 2027</td><td>08:30 AM</td></tr>
 <tr><td>July 2027</td><td>Aug. 11, 2027</td><td>08:30 AM</td></tr>
 <tr><td>August 2027</td><td>Sep. 14, 2027</td><td>08:30 AM</td></tr>
-<tr><td>September 2027</td><td>Oct. 13, 2027</td><td>08:30 AM</td></tr>
+<tr><td>September 2027</td><td>Oct. 14, 2027</td><td>08:30 AM</td></tr>
 <tr><td>October 2027</td><td>Nov. 10, 2027</td><td>08:30 AM</td></tr>
 <tr><td>November 2027</td><td>Dec. 10, 2027</td><td>08:30 AM</td></tr>
 </table>
@@ -888,3 +889,96 @@ class TestBeaEstimateLabels:
         """真实页面上出现过的后续估计 / 非估计行（2026-10-21 抓取的滚动页与全年页原文）不触发绊线"""
         from economic_calendar_watch import parse_bea_advance_quarters
         assert parse_bea_advance_quarters(self._with_row(title)) == ([(2026, 3)], None)
+
+
+class TestMalformedCacheSelfRepairs:
+    """v0.45.579（574 二次检查）：节流缓存容器形状不对 ⇒ 当没有缓存、联网重查、整份重写。
+
+    574 起 `check()` 在节流判断**之前**就对 `state["upstream"]["gdp"]` 取 `.get` ⇒ 坏缓存在 8 种（节流 × --force）
+    组合里全崩，连 `--force` 都救不回，只能手删缓存文件。574 前只有节流那两种崩、`--force` 能自愈。
+    """
+
+    TODAY = date(2026, 8, 29)
+
+    @pytest.mark.parametrize("state", [
+        [1, 2],                                                    # 顶层不是对象
+        {"last_checked_at": "2026-08-28T09:00:00", "upstream": [1, 2]},
+        {"last_checked_at": "2026-08-28T09:00:00", "upstream": {"gdp": "oops"}},
+    ], ids=["top-level-list", "upstream-list", "gdp-entry-string"])
+    @pytest.mark.parametrize("force", [False, True], ids=["throttle-eligible", "forced"])
+    def test_bad_shape_rechecks_and_rewrites(self, monkeypatch, tmp_state, state, force):
+        import economic_calendar_watch as w
+        pages = _quiet_non_gdp_pages()
+        pages["bea.gov"] = BEA_ROLLING_HTML
+        pages["next-year"] = BEA_NEXT_YEAR_NOT_POSTED_HTML
+        monkeypatch.setattr(w, "_fetch", _stub_fetch(pages))
+        tmp_state.write_text(json.dumps(state), encoding="utf-8")
+        res = w.check(force=force, state_path=tmp_state, today=self.TODAY)
+        assert res["cache_problem"], "坏缓存必须在结果里写明，不能悄悄换掉"
+        assert res["network_checked_this_run"] is True and res["throttled"] is False
+        assert res["upstream_conclusive"] is True
+        saved = json.loads(tmp_state.read_text(encoding="utf-8"))
+        assert isinstance(saved, dict) and isinstance(saved["upstream"]["gdp"], dict), "没有整份重写 ⇒ 下一轮照样坏"
+        assert w._cache_shape_problem(saved) is None
+        assert "节流缓存形状不对" in w._render(res)
+
+    def test_good_cache_has_no_problem_and_still_throttles(self, monkeypatch, tmp_state):
+        """对照：形状对的缓存照常节流、`cache_problem` 为 None——上一条红的理由只能是形状"""
+        import economic_calendar_watch as w
+        monkeypatch.setattr(w, "_fetch", _stub_fetch({}))
+        tmp_state.write_text(json.dumps({
+            "last_checked_at": "2026-08-28T09:00:00", "action_required": False,
+            "upstream": {"gdp": {"source": "x", "determinable": True, "new_available": False,
+                                 "reason": None, "pages": {"rolling": {}, "next_year": {}}}}}), encoding="utf-8")
+        res = w.check(state_path=tmp_state, today=self.TODAY)
+        assert res["cache_problem"] is None and res["throttled"] is True
+
+
+class TestRedirectIsAFetchFailure:
+    """v0.45.579（574 二次检查）：urllib 静默跟随跳转。次年页若被跳回滚动页，两页同一张表结构、照样解析得通，
+    次年的空缺会被读成「上游无新」⇒ 跳到别的路径按抓取失败记。"""
+
+    class _Resp:
+        def __init__(self, final, body=b"<html></html>"):
+            self._final, self._body = final, body
+
+        def read(self):
+            return self._body
+
+        def geturl(self):
+            return self._final
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _fetch_landing_on(self, monkeypatch, final):
+        import urllib.request
+        import economic_calendar_watch as w
+        monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: self._Resp(final))
+        return w._fetch(NEXT_YEAR_URL, 5, "ua")
+
+    def test_redirect_to_another_path_raises_fetch_error(self, monkeypatch):
+        import economic_calendar_watch as w
+        with pytest.raises(w._FETCH_ERRORS, match="被跳转到"):
+            self._fetch_landing_on(monkeypatch, "https://www.bea.gov/news/schedule")
+
+    @pytest.mark.parametrize("final", [NEXT_YEAR_URL, NEXT_YEAR_URL + "/", "http://www.bea.gov/news/schedule/next-year"])
+    def test_same_path_is_not_a_redirect(self, monkeypatch, final):
+        assert self._fetch_landing_on(monkeypatch, final) == "<html></html>"
+
+    def test_redirected_next_year_page_makes_gdp_undeterminable(self, monkeypatch, tmp_state):
+        import economic_calendar_watch as w
+        stub = _stub_fetch({**_quiet_non_gdp_pages(), "bea.gov": BEA_ROLLING_HTML})
+
+        def _fetch(url, timeout, ua):
+            if "next-year" in url:
+                raise w._Redirected(f"{url} 被跳转到 https://www.bea.gov/news/schedule")
+            return stub(url, timeout, ua)
+        monkeypatch.setattr(w, "_fetch", _fetch)
+        res = w.check(force=True, state_path=tmp_state, today=date(2026, 8, 29))
+        g = res["upstream"]["gdp"]
+        assert g["determinable"] is False and "被跳转到" in g["reason"]
+        assert w._exit_code(res) == 3

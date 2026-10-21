@@ -5,7 +5,42 @@
 
 ---
 
-## [0.45.579] — 2026-10-21 — 占位（进行中：经济日历 572/574 二次检查余项——更正县级 GDP 日期的错误结论、监视器缓存损坏自愈、次年页表头须晚于滚动页、陈旧措辞与编造的夹具日期）
+## [0.45.579] — 2026-10-21 — Fixed：经济日历 572 / 574 二次检查余项——更正 572 的「BEA 网页与 ICS 不一致、以网页为准」（是核对脚本把标题配成了下一行的日期）；监视器坏缓存自愈（574 起连 `--force` 都崩）；`_fetch` 被跳转到别的路径按抓取失败记；陈旧措辞与编造的夹具日期
+
+由启动本会话的会话（用户让它复查当天更新）与一位独立复查者的两份二次检查转来；已被 v0.45.576 覆盖的项（GDP source、2027 回归钉、恒空测试、
+次年页空视图、`(Initial Estimate)`）不重复。
+
+### Fixed
+
+- **更正 [0.45.572] 的一条错误结论**（该条目原文已就地划掉并注明）：572 写「BEA 的 ICS 与网页不一致（县级 GDP：网页 12-08、ICS 12-02）⇒ 以网页为准」。
+  错在核对脚本：BEA 日程表每行是**日期在前、标题在后**，脚本取的是标题**后面**那个日期 = 下一行的日期。按 `<tr>` 重新配对，网页上县级 GDP 就是 12-02
+  （12-08 属于下一行 U.S. International Trade），与 ICS 一致。同一个错位也作用在 572 的「GDP 初值 4/4 与 ICS 一致」上——吻合是巧合：2027 每个初值行后面
+  都紧跟一条**同日**的 Personal Income 行。按 `<tr>` 重配仍是 01-28 / 04-29 / 07-29 / 10-28，ICS 按事件配对本就独立 ⇒ **表里日期无误，错的是核对方法与那条结论**。
+  仓库代码不按日期配对 BEA 行（监视器只读标题里的季度，`_BEA_DATE_CELL_RE` 只用来计数），不受影响。auto-memory 里同一条错误规则一并更正。
+- `economic_calendar_watch.check`：节流缓存的**容器形状**不对（顶层 / `upstream` / 某张表的结论不是对象）⇒ 当没有缓存、本轮联网重查、整份重写（自愈），
+  结果里 `cache_problem` 写明、渲染打一行。574 起 `check()` 在节流判断**之前**就对 `state["upstream"]["gdp"]` 取 `.get` ⇒ 坏缓存在全部 8 种（节流 × `--force`）
+  组合里 AttributeError，连 `--force` 都救不回，只能手删 `cache/economic_calendar_watch.json`（574 前只有节流那两种崩、`--force` 能自愈）。
+  字段级坏值（如 `new_items` 是整数）仍在节流读缓存时崩（退出码 3 + 错误外壳，响亮），`--force` 或过了节流窗口的那一轮会整份重写。
+- `economic_calendar_watch._fetch`：urllib 会**静默**跟随跳转。最终 URL 的路径（忽略协议 / 主机 / 末尾斜杠）与请求的不同 ⇒ 抛 `_Redirected`（`ValueError`，
+  ∈ `_FETCH_ERRORS`）⇒ 该表「无法判定」。要防的是次年页被跳回滚动页：两页同一张表结构、照样解析得通，次年的空缺会被读成「上游无新」。10-21 实测五个源都不跳转。
+- `economic_calendar.get_calendar_health` docstring 的「FOMC 已经排到 2028，CPI/NFP/GDP 只到 2026-12」改成不随时间失真的说法。
+- `[0.45.572]` 的「今天起三表不再 stale」补注：指 main；生产克隆 `~/alpha-hive-prod` 要等下一个扫描日 `production_sync` 快进后才用上。
+
+### 没采用
+
+- 「次年页表头年份须晚于滚动页」（复查者对跳转风险的建议）：Wayback 显示 BEA 两页表头换年**不同步**——2025-01-20 滚动页表头还是 Year 2024 却列着 2025 的季度；
+  2025-12-27 滚动页已换 Year 2026，次年页 12-01 还有内容、12-30 才清空。按表头比会在换年窗口误报 3；改为上面的传输层跳转检查，只认真跳转。
+- 2026-01-01 那天滚动页本身也是无表头的「Note: BEA Updating Release Schedule」空态 ⇒ 当天 GDP 报 3。一天的过渡态、响亮，未特判。
+
+### Changed（测试）
+
+- `tests/test_economic_calendar_watch.py`：`BLS_HTML` 夹具里编造的 `Jul. 13, 2027` / `Oct. 13, 2027` 换成官方的 07-14 / 10-14（现与 `_CPI` 2027 逐条相同）。
+  新增 `TestMalformedCacheSelfRepairs`（三种坏形状 × 是否 `--force` = 6 条 + 好缓存照常节流的对照）、`TestRedirectIsAFetchFailure`（跳到别的路径抛错 /
+  同路径三种写法不算跳转 / 次年页被跳转 ⇒ GDP 退出码 3，共 5 条）。
+- `tests/test_step_contract_producers.py::TestEconomicCalendarWatch::test_crash_is_3_with_error_envelope`：崩溃触发从「`upstream` 是列表」（现自愈、不再崩）
+  改为字段级坏值（`new_items` 是整数 ⇒ attention 渲染 TypeError），仍验证未捕获异常 ⇒ 退出码 3 + 错误外壳。
+- 变异（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、`--maxfail=1000`，每轮 147 条全计）：发现坏缓存但不清空 ⇒ 6 红；形状检查恒放行 ⇒ 6 红；
+  不查跳转 ⇒ 1 红；路径不去末尾斜杠 ⇒ 1 红。
 
 ## [0.45.578] — 2026-10-21 — Fixed：v0.45.569 二次检查——partial 运行（标的丢失 / 完整性判不了、步骤超时）在 alert_manager 里零告警，569 拿掉恒真性能 P1 后会报「system healthy」；补具体 P1 与 partial 兜底 P1，删 `ALERT_CONFIG` 里退役闸的死配置，更正 569 两处说法
 
@@ -281,10 +316,12 @@ v0.45.572 抄 2027 时查明的结构性盲区（见该条「查明」一节）�
     源 `empsit.htm`，对照同一年度总表 12/12。
   - `_GDP` 2027（四条均为「GDP (Advance Estimate)」）：01-28 = 4Q26 / 04-29 = 1Q27 / 07-29 = 2Q27 / 10-28 = 3Q27。
     源 `bea.gov/news/schedule/next-year`（「Year 2027」区块），对照 BEA 官方订阅源 `…/schedule/ics/online-calendar-subscription.ics` 4/4。
+    （**v0.45.579 注**：网页一侧的核对脚本当时按「标题后面那个日期」配对，而 BEA 每行是**日期在前、标题在后**——配上的是下一行的日期。
+    4/4 吻合是巧合：2027 每个初值行后面都紧跟一条同日的 Personal Income 行。按 `<tr>` 重新配对仍是这四天、ICS 按事件配对本就独立，**日期无误，核对方法有误**。）
   - `verified_through`：cpi 2026-12-10 → **2027-12-10**、nfp 2026-12-04 → **2027-12-03**、gdp 2026-10-29 → **2027-10-28**；fomc 不变（官方 2028 仍只有 01-26 一次）。
     `pending` 改写为下一段未发布范围（BLS 2028 年度总表 404；BEA 4Q27 初值未排），均标「待验证」。
   - 2026 尾巴（CPI 11-10 / 12-10、NFP 11-06 / 12-04）在今天的官方页上仍是原值，未变。
-- **生产影响**：今天起三表不再 stale；GDP 原定 10-30 起 exhausted（宏观日历只剩 FOMC / CPI / NFP、GuardBee 体检字段报 `exhausted`）的那一刻不会到来。
+- **生产影响**：今天起三表不再 stale（**v0.45.579 注**：指 main；生产克隆 `~/alpha-hive-prod` 要等下一个扫描日 `production_sync` 快进后才用上）；GDP 原定 10-30 起 exhausted（宏观日历只剩 FOMC / CPI / NFP、GuardBee 体检字段报 `exhausted`）的那一刻不会到来。
   下次变红：fomc 2027-07-31、nfp 2027-09-05、cpi 2027-09-12、gdp 2027-09-29（按 `get_calendar_health` 逐日算，非心算）。
 
 ### 查明：BEA 的 2027 日程不在 `/news/schedule`
@@ -292,7 +329,7 @@ v0.45.572 抄 2027 时查明的结构性盲区（见该条「查明」一节）�
 - BEA 的次年日程在 **`/news/schedule/next-year`**（日程页导航里的「2027 Schedule」标签）；`/news/schedule` 只列滚动窗口内的近期发布、`/full` 只多了当年已过去的。
   10-04 的两次手工核对和 `economic_calendar_watch` 都只看这两页 ⇒ 记成「BEA 2027 未发布」。**那是看错了页，不能据此推断 BEA 当时发没发**。
 - 监视器的 GDP 检查因此有结构性盲区：要等新一年的初值滚进「近期」窗口才看得见（实测今天 `/news/schedule` 最新初值仍是 3Q26）。本次**未改监视器**（另起一项）。
-- 顺带：BEA 的 ICS 与网页在一条无关发布上不一致（县级 GDP：网页 12-08、ICS 12-02）⇒ 以网页为准、ICS 只作交叉核对；BLS 的 `bls.ics` 今天仍无任何 2027 条目（滞后于网页）。
+- 顺带：~~BEA 的 ICS 与网页在一条无关发布上不一致（县级 GDP：网页 12-08、ICS 12-02）⇒ 以网页为准、ICS 只作交叉核对~~（**v0.45.579 更正：此结论是错的**——同上，是核对脚本把标题配成了下一行的日期；县级 GDP 那行在网页上就是 12-02，12-08 属于下一行「U.S. International Trade」，网页与 ICS 一致）；BLS 的 `bls.ics` 今天仍无任何 2027 条目（滞后于网页）。
 
 ### Changed（测试）
 

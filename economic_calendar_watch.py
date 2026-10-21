@@ -86,6 +86,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date, datetime
 from html import unescape
@@ -161,7 +162,21 @@ def _fetch(url: str, timeout: int, ua: str) -> str:
     })
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read()
+        final = resp.geturl()
+    # v0.45.579：urllib 会**静默**跟随跳转。跳到别的路径 = 读到的不是要读的那页——最要命的是次年页被跳回
+    # 滚动页：两页同一张表结构，照样解析得通，次年的空缺会被读成「上游无新」。按抓取失败记（ValueError ∈
+    # `_FETCH_ERRORS`）⇒ 该表「无法判定」。只比路径（忽略协议 / 主机 / 末尾斜杠）；10-21 实测五个源都不跳转。
+    if _url_path(final) != _url_path(url):
+        raise _Redirected(f"{url} 被跳转到 {final}，读到的不是要读的那页")
     return raw.decode("utf-8", errors="replace")
+
+
+class _Redirected(ValueError):
+    """抓取被跳转到别的路径（v0.45.579）。"""
+
+
+def _url_path(u: str) -> str:
+    return urllib.parse.urlsplit(u).path.rstrip("/")
 
 
 def _visible_lines(html: str) -> List[str]:
@@ -400,6 +415,25 @@ def _load_state(path: Path) -> Dict[str, Any]:
         return {}
 
 
+def _cache_shape_problem(state: Any) -> Optional[str]:
+    """节流缓存的形状对不对（v0.45.579）。对 ⇒ None；不对 ⇒ 一句原因。
+
+    只核 `check()` 会去 `.get` 的那几层：顶层是对象、`upstream`（若有）是对象、其中每个表的结论（若有）是对象。
+    读坏的 JSON 早已由 `_load_state` 变成 `{}`（= 从未查过），这里管的是「能解析、形状不对」。
+    """
+    if not isinstance(state, dict):
+        return f"状态文件顶层是 {type(state).__name__}，不是对象"
+    upstream = state.get("upstream")
+    if upstream is None:
+        return None
+    if not isinstance(upstream, dict):
+        return f"状态文件的 upstream 是 {type(upstream).__name__}，不是对象"
+    for key, entry in upstream.items():
+        if not isinstance(entry, dict):
+            return f"状态文件的 upstream.{key} 是 {type(entry).__name__}，不是对象"
+    return None
+
+
 def _save_state(path: Path, state: Dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -613,6 +647,11 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
     health = get_calendar_health(ref_date=today)
     _b = health["per_table"][health["binding_table"]]
     state = _load_state(state_path)
+    # v0.45.579：缓存形状不可信 ⇒ 当没有缓存（本轮联网重查、整份重写 = 自愈），并在结果里写明。
+    # 此前下面几行对它 `.get` 会 AttributeError：574 起连 --force 也在节流判断前就崩，只能手删缓存文件。
+    cache_problem = _cache_shape_problem(state)
+    if cache_problem:
+        state = {}
     age = _days_since(state.get("last_checked_at"), today)
 
     prev_action = bool(state.get("action_required"))
@@ -647,6 +686,7 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
 
     res: Dict[str, Any] = {
         "checked_at": today.isoformat(),
+        "cache_problem": cache_problem,
         "network_checked_this_run": checked_now,
         "throttled": throttled,
         "days_since_last_check": age,
@@ -696,6 +736,8 @@ def _render(res: Dict[str, Any]) -> str:
         out.append(f"          地平线最短的是 {h['shortest_table']} 表："
                    f"覆盖到 {h['shortest_last_date']}，还剩 "
                    f"{h['shortest_horizon_days']} 天（阈值更宽松，故不是它先报警）")
+    if res.get("cache_problem"):
+        out.append(f"⚠️ 节流缓存形状不对，已当作没有缓存、本轮联网重查并整份重写：{res['cache_problem']}")
     if res["throttled"]:
         out.append(f"上游：本次未联网（{res['days_since_last_check']} 天前查过，"
                    f"节流窗口 {res['max_age_days']} 天），下方为上次结果")
