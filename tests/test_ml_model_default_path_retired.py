@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 from pathlib import Path
 
 import pytest
@@ -43,9 +44,12 @@ def _mentions(facts: dict, name: str) -> set:
     """作用域里以**完整文件名**出现的字符串（不含 docstring；f-string 占位已渲染）。
 
     比完整文件名而非片段：片段 `ml_model` 会误中 `ml_model_cache.json`、`ml_model_history`、`ml_model_guard`。
+    文件名前不许紧挨着标识符字符（挡 `xml_model.json`），其余前缀都算——`/`、`\\`、f-string 占位渲染出的 `{}`
+    （`f"{root}ml_model.json"`）；只认「=== 或 以 `/` 结尾」会放过后两种（二次检查补）。
     """
+    pat = re.compile(r"(?<![\w.])" + re.escape(name) + r"$")
     return {f"{rel}::{q}" for rel, ff in facts.items() for q, s in ff.scopes.items()
-            if any(t == name or t.endswith("/" + name) for t in s["texts"])}
+            if any(pat.search(t) for t in s["texts"])}
 
 
 def _training_records(n: int = 8) -> list:
@@ -126,10 +130,14 @@ class TestTombstoneHasTeeth:
                '    open(PATHS.home / "ml_model.json", "w")\n'
                'def save2(home):\n'
                '    open(f"{home}/ml_model.json", "w")\n'
+               'def save3(root):\n'
+               '    open(f"{root}ml_model.json", "w")\n'
+               'def save4():\n'
+               '    open("C:\\\\data\\\\ml_model.json", "w")\n'
                'def other():\n'
-               '    return "ml_model_cache.json"\n')
+               '    return "ml_model_cache.json", "xml_model.json", "my.ml_model.json"\n')
         facts = {"x.py": S.scan_source(src, "x.py")}
-        assert _mentions(facts, RETIRED_NAME) == {"x.py::save", "x.py::save2"}
+        assert _mentions(facts, RETIRED_NAME) == {"x.py::save", "x.py::save2", "x.py::save3", "x.py::save4"}
 
     def test_mentions_sees_the_live_sibling_in_the_real_repo(self):
         # 正对照：仍在写的取证副本，在真仓库上认得出来（判据不是对着空气恒绿）

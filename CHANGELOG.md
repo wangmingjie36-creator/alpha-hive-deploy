@@ -49,6 +49,17 @@
 ### 剩下的已知死链（2 条）
 `agent_memory`、`barrier_outcomes`（两张表，政策 / 用户暂缓）。
 
+### 二次检查（同日，用户要求）
+- **墓碑的文件名判据有漏**：只认「整串等于 `ml_model.json`」或「以 `/ml_model.json` 结尾」，放过 f-string 占位前缀
+  （`f"{root}ml_model.json"` 渲染成 `{}ml_model.json`）与反斜杠路径。改为正则「文件名前不紧挨标识符字符 / 点」，
+  自检补这两种正例与 `xml_model.json` / `my.ml_model.json` 负例（旧判据在新正例上会红）。真仓库命中仍只有备份排除键与迁移清单两处。
+- `ml_model_guard._snapshot_disabled` docstring 仍以现在时说「`save_model` 默认值是相对路径」（v0.45.149 起就不对了）——补注「当年实测、非现状」，
+  并写明为什么闸仍要关（显式传路径的测试照样触发快照）。
+- 核过、无需改：全仓（含非 .py）无任何 `save_model()` / `load_model()` 无参或 `filename=None` 调用；备份仓里已跟踪的旧 `ml_model.json`
+  按 `run_backup.foreign_entries` 的定义是「已跟踪、本轮未导出的正常陈旧文件」，不会让 Step 14 报外来条目；`restore` 只恢复清单里的根文件，不受影响；
+  `ml_model_history/ml_model-*.json`（31 份、892 KB）此后不再有同名保存、按 stem 的轮转不会再清它们——定量、不再增长，留着；
+  当日快照闸 `snapshot_present` 现只剩 cache 那份可满足——`_save_model_to_disk` 失败的日子会如实显示「无快照」（此前被同内容的 `ml_model-*` 快照遮住）。
+
 ## [0.45.569] — 2026-10-21 — 占位（进行中：alert_manager 性能 P1 恒真闸——5 秒常数基线对 ~2000 秒的真实扫描天天报警，改成只在真变慢时响）
 
 ## [0.45.568] — 2026-10-20 — Added：H1 原始观测档案 `observation_archive`（buzz_v1 根治阶段 1）——喂 Buzz 四个情绪通道的原始取数（Reddit 两张榜 / 新闻条目 / 热搜表 / F&G）在取数那一刻内容寻址落档，每个分数都能指出它用的是哪一份；只存、不改任何值
