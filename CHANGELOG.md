@@ -74,7 +74,66 @@
 
 ⚠️ 生效时机：Alpha Bot 跑的是 `~/alpha-hive-prod`，合入 main 后要等下一个扫描日克隆快进、再**重启 Alpha Bot** 才用上。
 
-## [0.45.580] — 2026-10-21 — 占位（进行中：buzz_v1 根治阶段 1b——行情原始日线入档，按版本化观测层结构写）
+## [0.45.580] — 2026-10-21 — Added：观测层 `observation_layer`（buzz_v1 根治阶段 1b）——行情三字段主路径的原始输入（yfinance 日线 + 判末根用的交易所时钟）在取数处原样落档，`data_pipeline` 三条路径登记各自用了哪几份；只存、不改任何值
+
+用户 10-21：「按调整后的路线来，从 1b 开始」。
+
+### 为什么
+
+568 存了四个情绪通道的原始取数，但三个行情通道（动量 / 量比 / 波动率）用的是生产行情代码算好的三个数——生产改行情代码，buzz_v1 的输入就跟着变，
+维度 IC 窗口期内这块已改 5 次（505 / 557 / 562 / 564 / 566），每次都要人确认归类。1b 把这三个数的原始输入也落档，阶段 2 的冻结层就能自己按窗口规则
+算、不再吃生产算好的数；还能顺手校验「末根是不是扫描日」，10-14 BILI 动量取错日那种以后由冻结层机械拒收。
+有时效：没存的日子补不回来（yfinance 的复权价事后会被改写），行情这条桥接也从开存那天起算。
+
+### Added
+
+- `observation_layer.py`（新）：「取数与解释分家」的第一块（终点见用户 10-20 定的「观测层版本化」：buzz_v1 固定用某一版观测层，生产改取数只能发新版本）。
+  - `yf_history(ticker, **request)`：`yf.Ticker(t).history(**request)` → `(DataFrame, 观测地址)`，**返回的就是 yfinance 给的那个对象**；异常照抛、先记失败事件。
+  - `spy_last_minute()`：交易所时钟（SPY 最后一根分钟线），`data_pipeline._exchange_now` 唯一的取数处；取不到也是一份观测（`{"spy_last_minute": null}`）。
+  - `clock_ref(ts)`：某次判断实际用到的时钟值登记成观测（整进程同一个值 ⇒ 内容寻址后同一份）。
+  - `frame_payload` / `frame_from_payload`：DataFrame 逐位往返（列、逐列 dtype、带时区时间戳及其分辨率、NaN 记 null）。
+- `observation_archive`：登记两种新 kind（`yfinance.daily` / `exchange.clock`）；`LAYER_VERSION = "obs-1"`，每条取数事件与溯源块都记它；
+  `buzz_refs` 新增必填参数 `price`（漏传直接报错），溯源块多一项 `price` 与 `_layer`；行情观测有缺口时 `gaps` 点名缺哪份，`summarize` 计缺失并在示例里写出来。
+- `data_pipeline`：`StockData.observations`（进 `to_dict`）由**算出三个字段的那条路径自己登记**——CBOE 胜出 / yfinance 源 = `yf_daily` + `exchange_clock`
+  （时钟只在 `_drop_forming_bar` 真看过它时登记，不为登记多发 SPY 请求）；`--date` 补跑 = `yf_daily`（补跑不看时钟），云端快照拼接那一支另登 `snapshot_close: None`；
+  出口回落补上的字段登记 `price_index` / `td_unadjusted` / `td_adjusted` 为 None（用了但没存，下一步补）。登记缺口一律换新 dict：StockData 在缓存路径上是浅拷贝。
+- BuzzBee：溯源块传入行情字典（`price=stock`），写在合成之后，`buzz.channels` 指纹未变。
+
+### 协议（维度 IC）
+
+`price.fields` 指纹 → `ec921fd7cee79071`，追加 `no_value_change`（用户 10-21 在对话里选「按 no_value_change 登记」）；`observation_layer.py` 整份并入该单元
+（它不提字段名、按名字认不出，但决定三个字段的原始输入）。§13.10 记一条。不登记边界、协议规则未改。
+
+### 取证：改动前后值逐位不变
+
+`data_pipeline` 改动前（origin/main 原文）与改动后在同一批随机输入上逐字段比对（随机根数 0–23、NaN 收盘、整列 NaN 成交量、int / float 成交量、
+时钟在当天盘中 / 收盘 / 提前收盘 / 前一天 / 取不到；去掉新增的观测键再比）：CBOE 胜出时的 `_fetch_history_metrics` 800 例、`YFinanceSource.fetch` 800 例
+（含 `session_close`）、`--date` 补跑 300 例（含云端快照拼接那一支）、`MultiSourceFetcher` 出口回落 200 例（含 `history_fill` 计数）——档案关 / 开两遍全部相同；
+档案开的那遍写了 1374 份 payload、1900 条事件、0 失败。（比对脚本的相等函数起初不认元组里的 NaN，报了一条两边都是 NaN 的假差异——脚本的错。）
+
+### 真实数据核对（不花钱）
+
+10-21 盘中（时钟 10:33 / 10:50 ET，末根正在形成、被丢弃）在临时数据根里真取 NVDA / TSLA / BRK-B 的日线与 SPY 时钟，再用档案替身网络重跑
+`_fetch_history_metrics` 与 `YFinanceSource.fetch`：33 项逐位相同。每只票每天约 3 KB。
+
+### 测试
+
+- `tests/test_price_observations.py`（新，29 条）：往返五种形状（含整列 NaN——靠记下的 dtype 才还原得对）；观测层返回原对象、异常照抛并记事件、时钟取到 /
+  取不到都是观测、`_exchange_now` 走观测层；三条路径各自登记、回落补上的登缺口、缺口不经浅拷贝串到别的对象、不足 3 根不多发 SPY 请求；
+  **存下的内容足够重算**（收盘后 / 盘中末根在形成 / 提前收盘日收盘后 / 提前收盘日盘中 + yfinance 源 + 补跑）；开不开档值相同；溯源块与完整性统计（含不信上游的半截 ref）。
+- `tests/test_observation_archive.py` 随接口更新（`price` 必填、`_layer`、kind 登记处覆盖观测层的 `KIND_*`）。
+- 变异测试（真跑，17/17 被杀；首轮 15/17：两条还原 dtype 的特判其实多余、已删成一条通用还原；完整性统计补了「半截 ref」的用例）。
+
+### 核对
+
+- 全量（不带 -x）：10984 passed、5 failed——5 条全是 `price.fields` 尚未登记确认（指纹守卫 + 维度 IC 执行器跑同一个守卫），登记后这 5 个文件 230 条全过。
+- 六个指纹单元与最后一条确认一致；拨钟审计（新测试 +7 / +45 天）新红 0；ruff 全绿。
+
+### 下一步
+
+- 回落链的原始输入（Twelve Data 未复权 / 复权日线、自攒索引序列、CBOE 核实收盘、云端快照收盘、`_latest_closed_session` 的判定）：补上之前，用到回落的标的在溯源块里记缺口，
+  那天计入不全。
+- 阶段 2（冻结通道层）照计划；「观测层版本化」时把 Reddit / 新闻 / 热搜 / F&G 的取数一起搬进 `observation_layer`。
 
 ## [0.45.579] — 2026-10-21 — Fixed：经济日历 572 / 574 二次检查余项——更正 572 的「BEA 网页与 ICS 不一致、以网页为准」（是核对脚本把标题配成了下一行的日期）；监视器坏缓存自愈（574 起连 `--force` 都崩）；`_fetch` 被跳转到别的路径按抓取失败记；陈旧措辞与编造的夹具日期
 

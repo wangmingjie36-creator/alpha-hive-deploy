@@ -282,7 +282,8 @@ class BuzzBeeWhisper(BeeAgent):
             # 刻意写在合成之后：合成之前的语句与模块级函数都在输入层指纹（buzz.channels）里——这里只多存、不改任何值。
             # news_ext / yt 在各自的 try 里赋值，取数抛异常时未绑定 ⇒ 经 locals() 取（拿不到 = 该通道无观测）
             _observations = _obs_archive.buzz_refs(reddit=reddit_data, news=locals().get("news_ext"),
-                                                   yahoo=locals().get("yt"), fear_greed=fg)
+                                                   yahoo=locals().get("yt"), fear_greed=fg,
+                                                   price=stock)   # v0.45.580：行情三字段用到的日线 + 时钟
 
             return AgentResult(
                 score=round(score, 2),

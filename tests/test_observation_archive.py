@@ -84,6 +84,12 @@ class TestAddress:
             used |= set(re.findall(r'_obs\.(?:observe|reuse|fetch_failed)\(\s*"([a-z_.]+)"', src))
             if 'f"news.{primary}"' in src:
                 used |= {"news.massive", "news.alpha_vantage"}
+        # v0.45.580：观测层的取数用常量 KIND_* 写 kind
+        import observation_layer as ol
+        src = (root / "observation_layer.py").read_text(encoding="utf-8")
+        consts = set(re.findall(r'_archive\.(?:observe|reuse|fetch_failed)\(\s*(KIND_[A-Z]+)', src))
+        assert consts, "前提：观测层确实经 KIND_* 常量调档案"
+        used |= {getattr(ol, c) for c in consts}
         assert used == set(oa.KINDS), (used ^ set(oa.KINDS))
 
 
@@ -462,7 +468,7 @@ class TestFearGreed:
 # 3. BuzzBee 溯源块
 # ══════════════════════════════════════════════════════════════════════════
 
-_SHA = {k: oa.address("yahoo.trending", {"symbols": [k]}) for k in ("a", "w", "n", "y", "f")}
+_SHA = {k: oa.address("yahoo.trending", {"symbols": [k]}) for k in ("a", "w", "n", "y", "f", "d", "c")}
 
 
 @pytest.fixture
@@ -492,7 +498,13 @@ def buzz(all_agents, monkeypatch):
         {"is_real_data": True, "sentiment_score": 3.2, "value": 32, "classification": "Fear", "source": "cnn"},
         _SHA["f"]))
     stock = {"price": 100.0, "momentum_5d": 1.2345, "volume_ratio": 1.2, "volatility_20d": 30.0}
-    monkeypatch.setattr(_cache, "_fetch_stock_data", lambda t, target_date=None: dict(stock))
+
+    def fetch_stock(t, target_date=None):
+        out = dict(stock)
+        if box["with_refs"]:
+            out["observations"] = {"yf_daily": _SHA["d"], "exchange_clock": _SHA["c"]}
+        return out
+    monkeypatch.setattr(_cache, "_fetch_stock_data", fetch_stock)
     b = all_agents["buzz"]
     b._prefetched_stock = {}
     b._target_date = D
@@ -502,10 +514,12 @@ def buzz(all_agents, monkeypatch):
 class TestBuzzDetails:
     def test_observations_block(self, buzz):
         obs = buzz.bee.analyze("NVDA")["details"]["observations"]
-        assert obs == {"reddit": {"expected": True, "ref": {"all-stocks": _SHA["a"], "wallstreetbets": _SHA["w"]}},
+        assert obs == {"_layer": oa.LAYER_VERSION,
+                       "reddit": {"expected": True, "ref": {"all-stocks": _SHA["a"], "wallstreetbets": _SHA["w"]}},
                        "news": {"expected": True, "ref": _SHA["n"]},
                        "yahoo": {"expected": True, "ref": _SHA["y"]},
-                       "fear_greed": {"expected": True, "ref": _SHA["f"]}}
+                       "fear_greed": {"expected": True, "ref": _SHA["f"]},
+                       "price": {"expected": True, "ref": {"yf_daily": _SHA["d"], "exchange_clock": _SHA["c"]}}}
 
     def test_addresses_do_not_change_any_value(self, buzz):
         """有没有溯源键，分数 / 方向 / 通道值 / 其余 details 逐位相同——本版只多存、不改值。"""
@@ -516,18 +530,20 @@ class TestBuzzDetails:
         da, db_ = dict(a["details"]), dict(b["details"])
         oa_, ob_ = da.pop("observations"), db_.pop("observations")
         assert da == db_
+        ob_.pop("_layer")
         assert all(v["ref"] is None and v["expected"] for v in ob_.values()), "没地址 ⇒ 记成缺失，不是不该有"
+        assert ob_["price"]["gaps"] == ["<无观测登记>"]
 
     def test_reddit_needs_both_list_addresses(self):
         """只有一张榜有地址 ⇒ 记成缺失（重算 Reddit 通道两张榜都要），不是「有一张就够」。"""
         r = oa.buzz_refs(reddit={oa.REF_KEY: {"all-stocks": _SHA["a"], "wallstreetbets": None}},
-                         news=None, yahoo=None, fear_greed=None)
+                         news=None, yahoo=None, fear_greed=None, price=None)
         assert r["reddit"] == {"expected": True, "ref": None}
 
     @pytest.mark.parametrize("ch", ["news", "yahoo", "fear_greed"])
     def test_fallback_result_is_not_expected_even_with_an_address(self, ch):
         """不是真实数据 ⇒ 通道就是中性 50，重算用不着观测：expected=False、也不抄地址（兜底结果里的地址不是它用的）。"""
-        kw = {"reddit": None, "news": None, "yahoo": None, "fear_greed": None,
+        kw = {"reddit": None, "news": None, "yahoo": None, "fear_greed": None, "price": None,
               ch: {"is_real_data": False, oa.REF_KEY: _SHA["n"]}}
         assert oa.buzz_refs(**kw)[ch] == {"expected": False, "ref": None}
 
