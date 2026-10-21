@@ -38,6 +38,9 @@ Slack 频道推送只走 Claude Code Slack MCP（月度自诊断在用）；每�
   `_load_json` 是泛名，`alpha_hive_mcp` 有自己的同名函数，首版按它认误红过）。
 - 文档：CLAUDE.md「Slack 推送规则」改为「仓库里没有任何 Slack 发送代码」；两份过时指南的顶部提示同步；`agent_toolbox` / `alpha_hive_daily_report` / `resilience` 注释同步。
 
+### 用户决定（同日）
+- 每日 Slack 日报：**现在不需要推送**（不恢复）。CLAUDE.md「Slack 推送规则」已记，后续会话勿再提议。
+
 ### 上线
 - 纯 Python、不碰编排器：生产克隆下一个扫描日快进后即生效。扫描主流程本来就不 import 该模块（v0.45.339 起），`run_daily_scan.py` 是手动工具。
 
