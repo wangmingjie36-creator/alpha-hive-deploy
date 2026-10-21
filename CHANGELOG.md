@@ -9,7 +9,54 @@
 
 ## [0.45.577] — 2026-10-21 — 占位（进行中：v0.45.573 二次检查——并发测试会话互相误报写拒绝、paper_portfolio 逐条守卫在扫描时段仍误报、残留继承标记让沙箱失效、金丝雀目录泄漏）
 
-## [0.45.576] — 2026-10-21 — 占位（进行中：经济日历 572/574 二次检查修复——GDP 来源指向次年页、监视器总时限、滚动页改版绊线、2027 日期回归钉）
+## [0.45.576] — 2026-10-21 — Fixed：v0.45.572 / 574 二次检查——GDP 表的「去哪抄」改指 BEA 次年页；监视器五页并行抓、共用 75 秒墙钟截止（Step 13 超时 120 秒，此前慢源会让整个监视器被杀、四表结论全丢）；GDP 估计行加类型标签绊线并认 `(Initial Estimate)` 与旧写法；**次年页「还没发」改认真实的无表头空视图**（574 每年 1~9 月 GDP 会恒报无法判定）；2027 日期加回归钉、撤掉已恒空的 2027 守卫
+
+### Fixed
+
+- `economic_calendar._TABLE_SPECS["gdp"]["source"]`：`/news/schedule` → **`/news/schedule/next-year`**。这个字段出现在过期告警
+  （「请去 … 抄取新日程」）与 `TestCoverageHorizon` 的失败文案里，而要续的永远是次年；滚动页看不到次年——v0.45.572 记下了
+  「10-04 是去错了页」，却没改这个把人带去那页的字段。模块 docstring 与 `pending` 同步。
+- `economic_calendar_watch`：抓取改为 `_fetch_all` **并行**（daemon 线程）+ **墙钟总时限** `_FETCH_BUDGET_S = 75`。编排器 Step 13 是
+  `run_step --timeout 120`；`urlopen(timeout=20)` 是**单次 socket 操作**的超时、管不住墙钟，v0.45.574 起 5 页串行，最坏远超 120 ⇒ 进程被杀、
+  `--out` 不写、一周四表结论全丢（10-21 实测 bls.gov 就有一次 20 秒握手超时）。现在到点没回来的页记 `_FetchDeadline`（`TimeoutError` 子类 ⇒
+  走 `_FETCH_ERRORS` 原路），只让它那张表「无法判定」（退出码 3）；`_FETCH_ERRORS` 以外的异常仍原样抛出（不改写失败性质）。
+  实测 5 页并行 4.7 秒。
+- GDP 估计行**类型标签绊线**（`_read_bea_page`，滚动页与次年页共用）：GDP 行里 `(X Estimate)` 的 X 不在 Advance / Initial / Second / Third / Updated
+  ⇒ 该页「看不懂」⇒ GDP 无法判定。原因：BEA 改过一次名（3Q25 的首次估计以 `Gross Domestic Product, 3rd Quarter 2025 (Initial Estimate)` 发布、
+  取代原定的 advance estimate），而 574 的滚动页「有表头、0 条初值」是合法读数，改名后的首次估计行会被静默跳过。
+  同版把「季度在前、标签在后」的首次估计读出季度：`(Initial Estimate)`（与 `economic_calendar._GDP` 记 2025-12-23 的口径一致）
+  与 `(Advance Estimate)`——后者是 ~2025-12 之前 BEA 的标题写法（`Gross Domestic Product, 4th Quarter and Year 2024 (Advance Estimate)`），
+  574 判它「读不出季度」（会响、不静默）。2026-10-21 抓取的滚动页 / 全年页 / 次年页三张真实页面零误报。
+- **次年页「还没发」的判据改认真实形状**（`parse_bea_next_year`；574 二次检查由并行会话用 Wayback 查出、交给本版修，本版复核了
+  2026-01-02 / 2026-08-08 两张快照）：BEA 未发布次年日程时，次年页是 Drupal 空视图——**没有表头、没有日期格**，只有一句
+  `See the Next Year tab for upcoming releases.`（2025-02 ~ 2026-08 全部未发布快照同形）。574 约定的「有表头的空表 = 还没发」从未观测到，
+  真实空视图因无表头被判「看不懂」⇒ **每年 1 月起到 BEA 挂出次年日程（约 9~10 月）GDP 每周退出码 3**；今年 2027 已挂出所以眼下没发作，
+  **2027-01-01 起会发作**。现在：那句提示 + 全页零日期格 + 无初值 / 无可疑 GDP 行 ⇒「还没发」（可判定，贡献 0 个季度）；
+  「有表头的空表」改判看不懂（未观测过的形状不当「还没发」——574 正是这样猜错的）。全页日期格另计（`date_cells_anywhere`：
+  原 `dated_rows` 只数表头之后，没表头时恒 0）。渲染在无表头时写「BEA 尚未挂出次年日程」，不印「Year None」。
+  Wayback 复核：2025-01-04 滚动页（旧写法）读出 2024Q4–2025Q3；2025-12-29 滚动页已换成 Year 2026（年底无空视图，滚动页规则不放宽）；
+  2024-12-31 那张 21KB 的异常页照旧判看不懂。
+
+### Changed（测试）
+
+- `TestPublishedDates::test_2027_dates_are_the_published_ones`：逐条钉 2027 年 CPI 12 / NFP 12 / GDP 4 个日期（有序 / 去重 / verified_through
+  三条都只看形状，挡不住「按规律」改值）。取代 `test_bls_tables_have_no_unpublished_2027_entries`——三表 verified_through 越过 2027-01-01 后
+  它对每张表都 `continue`、一条断言都不执行；「没发布就别填」的通则仍由 `test_no_dates_beyond_verified_through` 守。
+- `TestPublishedDates::test_gdp_source_is_the_next_year_page`：GDP `source` 与监视器 `_BEA_NEXT_YEAR` 对账。
+- `TestFetchBudget`（4 条）：截止 + 30 秒余量 ≤ 编排器 Step 13 超时（经 `tests/_orchestrator.py` 读仓库编排器原文）；五页同时在途
+  （`threading.Barrier`，不靠墙钟断言）；挂住的源到点返回、只坏它自己那张表；意外异常照旧上抛。
+- `TestBeaEstimateLabels`（6 条）：改名的首次估计 ⇒ 退出码 3；`(Initial Estimate)` ⇒ 新季度退出码 1；真实页面上的后续估计 / 非估计行不触发。
+- 次年页：夹具 `BEA_NEXT_YEAR_NOT_POSTED_HTML` 换成照抄 Wayback 快照的真实空视图标记，原「有表头的空表」夹具改名
+  `BEA_NEXT_YEAR_HEADER_EMPTY_HTML` 并改判看不懂；新增空视图 = 还没发、空视图 + 日期格 / 可疑 GDP 行 ≠ 还没发、季度在前的两种首次估计写法、
+  无表头时的渲染（共 7 条）。
+- 变异（`PYTHONDONTWRITEBYTECODE=1`、每轮清 `__pycache__`、`--maxfail=1000`，每轮 94 条全计）：source 回滚动页 / CPI 04-13→04-14 / 串行抓取 /
+  不设截止 / 拿掉标签绊线 / 不认 Initial / 总时限 100 秒——七个变异各恰好打红对应那一条；次年页空视图的五个变异（不认空视图 / 不查日期格 /
+  有表头空表又当还没发 / 不认季度在前的 Advance / 渲染不分无表头）同样各自打红（每轮 100 条全计）。
+
+### 刻意未改（用户 10-21 定：记录为待决）
+
+- GuardBee 在 2027-09-13 / 09-14 两天丢 FOMC 票（CPI 09-14 在 FOMC 09-15 前一天，`get_next_event` 只给最近一个事件）——改它会改评分。
+- 每年 10 月末 Q3 初值发布后、BEA 挂出次年日程前，GDP 两页并集为空 ⇒ 退出码 3（「还没发」被报成「看不懂」）。BEA 是否总在 10 月末前挂出次年日程**待验证**。
 
 ## [0.45.575] — 2026-10-21 — Removed：整个 `slack_report_notifier.py`（连同 `resilience.slack_breaker` / `"slack"` 会话超时、`config.SLACK_CHANNEL_ID`）——v0.45.571 后零生产调用方；仓库里从此没有任何 Slack 发送代码
 

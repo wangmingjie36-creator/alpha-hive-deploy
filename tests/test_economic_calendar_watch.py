@@ -112,9 +112,18 @@ BEA_NEXT_YEAR_HTML = """
 </tbody></table></body></html>
 """
 
-# BEA 还没发次年日程：表头在、表里一条发布都没有。⚠️ 未发布时真实页面长什么样**没观测过**——
-# 这是本版的约定（见 parse_bea_next_year）：有表头的空表 = 还没发；没表头 = 看不懂
+# BEA 还没发次年日程时次年页的**真实**样子（v0.45.576；照抄 Wayback 2026-01-02 / 2026-08-08 快照的标记）：
+# Drupal 空视图，没有表头、没有日期格，只有一句提示。2025-02 ~ 2026-08 的全部未发布快照同形。
 BEA_NEXT_YEAR_NOT_POSTED_HTML = """
+<html><body><div class="views-element-container">
+<div class="btn btn-default legend-item" type="button" data-filter=""> Clear </div>
+            <div class="view-empty">
+            <p>See the Next Year tab for upcoming releases.</p>
+</div></div></body></html>
+"""
+
+# v0.45.574 当时约定的「还没发」形状：有表头、表是空的。**从未在真实页面上观测到**（v0.45.576 起判看不懂）
+BEA_NEXT_YEAR_HEADER_EMPTY_HTML = """
 <html><body><table id="release-schedule-table">
 <thead><tr><th>Year 2027</th><th></th><th>Release</th></tr></thead><tbody></tbody>
 </table></body></html>
@@ -212,12 +221,37 @@ class TestParsers:
         assert parse_bea_next_year(BEA_NEXT_YEAR_HTML) == (
             2027, [(2026, 4), (2027, 1), (2027, 2), (2027, 3)], None)
 
-    def test_bea_next_year_header_with_empty_table_means_not_posted_yet(self):
+    def test_bea_next_year_observed_empty_view_means_not_posted_yet(self):
+        """🔴 回归（v0.45.576）：BEA 未发布时次年页是**无表头**的空视图。574 把它判成「看不懂」⇒
+        每年 1 月起到 BEA 挂出次年日程（约 9~10 月）GDP 每周退出码 3"""
         from economic_calendar_watch import parse_bea_next_year
-        assert parse_bea_next_year(BEA_NEXT_YEAR_NOT_POSTED_HTML) == (2027, [], None)
+        assert parse_bea_next_year(BEA_NEXT_YEAR_NOT_POSTED_HTML) == (None, [], None)
+
+    @pytest.mark.parametrize("html", [
+        # 空视图提示还在，但页上又出现了日期格 / 认不出的 GDP 行 ⇒ 不是那个「还没发」的形状
+        BEA_NEXT_YEAR_NOT_POSTED_HTML.replace(
+            "</div></div>", '<div class="release-date">January 28</div></div></div>'),
+        BEA_NEXT_YEAR_NOT_POSTED_HTML.replace(
+            "</div></div>", "<p>GDP (Preliminary Estimate), 4th Quarter 2026</p></div></div>"),
+    ], ids=["notice-plus-date-cells", "notice-plus-odd-gdp-row"])
+    def test_bea_next_year_empty_notice_alone_is_not_enough(self, html):
+        from economic_calendar_watch import parse_bea_next_year
+        _, quarters, err = parse_bea_next_year(html)
+        assert quarters == [] and err
+
+    @pytest.mark.parametrize("title", [
+        "Gross Domestic Product, 4th Quarter and Year 2024 (Advance Estimate)",   # ~2025-12 前的写法（Wayback 2025-01-04）
+        "Gross Domestic Product, 3rd Quarter 2025 (Initial Estimate) and Corporate Profits (Preliminary)",  # 2025-12-01
+    ])
+    def test_bea_trailing_label_first_estimates_are_read(self, title):
+        """季度在前、标签在后的首次估计写法（真实页面原文）读得出季度，不判「读不出」"""
+        from economic_calendar_watch import parse_bea_advance_quarters
+        quarters, err = parse_bea_advance_quarters(f"<table><tr><td>{title}</td></tr></table>")
+        assert err is None and len(quarters) == 1
 
     @pytest.mark.parametrize("html,fragment", [
         (REDESIGNED_HTML, "表头"),
+        (BEA_NEXT_YEAR_HEADER_EMPTY_HTML, "从未观测过"),
         (BEA_NEXT_YEAR_NO_GDP_HTML, "没有一条 GDP 初值行"),
         (BEA_NEXT_YEAR_UNREADABLE_HTML, "读不出参考季度"),
     ])
@@ -685,6 +719,13 @@ class TestBeaNextYear:
         text = w._render(res)
         assert "次年页 Year 2027" in text and NEXT_YEAR_URL in text
 
+    def test_render_says_not_posted_without_inventing_a_year(self, monkeypatch, tmp_state):
+        """未发布空视图没有表头 ⇒ 渲染说「尚未挂出」，不印出「Year None」（v0.45.576）"""
+        import economic_calendar_watch as w
+        res, rc = self._check(monkeypatch, tmp_state, BEA_ROLLING_HTML, BEA_NEXT_YEAR_NOT_POSTED_HTML)
+        text = w._render(res)
+        assert rc == 0 and "BEA 尚未挂出次年日程" in text and "Year None" not in text
+
 
 class TestGdpCacheFromBeforeNextYear:
     """v0.45.574：节流缓存里的 GDP 结论若出自只读滚动页的旧版，它的「无新」正是盲区本身 ⇒ 不节流，立即重查"""
@@ -712,3 +753,138 @@ class TestGdpCacheFromBeforeNextYear:
                                 "reason": None, "pages": {"rolling": {}, "next_year": {}}})
         res = w.check(state_path=tmp_state, today=date(2026, 8, 29))
         assert res["throttled"] is True and res["network_checked_this_run"] is False
+
+
+class TestFetchBudget:
+    """v0.45.576 二次检查：五页抓取共用一个墙钟截止，且截止落在编排器 Step 13 的超时之内。
+
+    编排器以 `run_step --timeout N` 跑本脚本，超时整个进程被杀、连 `--out` 都不写 ⇒ 四张表一周的结论全丢。
+    `urlopen(timeout=)` 是单次 socket 操作的超时、管不住墙钟；v0.45.574 起 5 页串行，最坏远超 N。
+    """
+
+    #: 截止之外留给解释器启动 + import + 本地体检 + 写 `--out` 的余量（秒）
+    STARTUP_MARGIN_S = 30
+
+    def test_budget_leaves_margin_under_step13_timeout(self):
+        import re
+        import economic_calendar_watch as w
+        from tests._orchestrator import repo_orchestrator_text
+        hits = re.findall(r'run_step --timeout (\d+) "\$\{PROJECT_DIR\}/economic_calendar_watch\.py"',
+                          repo_orchestrator_text())
+        assert len(hits) == 1, f"编排器里找不到唯一的 Step 13 调用（{hits}）——改了调用形状就同步本测试"
+        step_timeout = int(hits[0])
+        assert w._FETCH_BUDGET_S + self.STARTUP_MARGIN_S <= step_timeout, (
+            f"抓取总时限 {w._FETCH_BUDGET_S}s + 余量 {self.STARTUP_MARGIN_S}s 超过了 Step 13 的 "
+            f"{step_timeout}s：慢源会让编排器整个杀掉监视器，四表结论全丢")
+
+    def _gdp_quiet(self):
+        pages = _quiet_non_gdp_pages()
+        pages["bea.gov"] = BEA_ROLLING_HTML
+        pages["next-year"] = BEA_NEXT_YEAR_NOT_POSTED_HTML
+        return pages
+
+    def test_all_pages_are_fetched_concurrently(self, monkeypatch, tmp_state):
+        """五页同时在途：串行实现里第一页就会卡在栅栏上等不到另外四页（BrokenBarrierError 向上抛）"""
+        import threading
+        import economic_calendar_watch as w
+        n = len(w._SOURCES) + 1
+        barrier = threading.Barrier(n, timeout=5)
+        stub = _stub_fetch(self._gdp_quiet())
+
+        def _fetch(url, timeout, ua):
+            barrier.wait()
+            return stub(url, timeout, ua)
+        monkeypatch.setattr(w, "_fetch", _fetch)
+        res = w.check(force=True, state_path=tmp_state, today=date(2026, 8, 29))
+        assert res["undeterminable_tables"] == [] and res["upstream_conclusive"] is True
+
+    def test_hung_source_costs_only_its_own_table(self, monkeypatch, tmp_state):
+        """一个源挂住：到截止就返回，只有它那张表「无法判定」，其余三张照常给结论"""
+        import threading
+        import time
+        import economic_calendar_watch as w
+        release = threading.Event()
+        stub = _stub_fetch(self._gdp_quiet())
+
+        def _fetch(url, timeout, ua):
+            if "fomccalendars" in url:
+                release.wait(10)                    # 挂住；测试结束时放开，不留长命线程
+            return stub(url, timeout, ua)
+        monkeypatch.setattr(w, "_fetch", _fetch)
+        monkeypatch.setattr(w, "_FETCH_BUDGET_S", 0.3)
+        t0 = time.monotonic()
+        try:
+            res = w.check(force=True, state_path=tmp_state, today=date(2026, 8, 29))
+        finally:
+            release.set()
+        assert time.monotonic() - t0 < 5, "没有按总时限返回——挂住的源拖住了整个监视器"
+        assert res["undeterminable_tables"] == ["fomc"]
+        assert "总时限" in res["upstream"]["fomc"]["reason"]
+        for k in ("cpi", "nfp", "gdp"):
+            assert res["upstream"][k]["determinable"] is True, k
+        assert w._exit_code(res) == 3
+
+    def test_unexpected_fetch_exception_still_propagates(self, monkeypatch, tmp_state):
+        """并行化不改变失败的性质：`_FETCH_ERRORS` 之外的异常（程序错误）照旧向上抛 ⇒ run_tool 的崩溃外壳，
+        不被改写成某张表的「抓取失败」"""
+        import economic_calendar_watch as w
+        stub = _stub_fetch(self._gdp_quiet())
+
+        def _fetch(url, timeout, ua):
+            if "cpi.htm" in url:
+                raise RuntimeError("bug in fetch")
+            return stub(url, timeout, ua)
+        monkeypatch.setattr(w, "_fetch", _fetch)
+        with pytest.raises(RuntimeError, match="bug in fetch"):
+            w.check(force=True, state_path=tmp_state, today=date(2026, 8, 29))
+
+
+class TestBeaEstimateLabels:
+    """v0.45.576 二次检查：GDP 估计行的类型标签绊线。
+
+    BEA 改过一次名：3Q25 的首次估计以 `(Initial Estimate)` 发布、取代原定的 advance estimate。
+    旧解析只认 `GDP (Advance Estimate)`，改名后的首次估计行既不算初值、也不触发「读不出季度」——
+    滚动页 0 条初值又是合法读数 ⇒ 无声。冻结日历下我们 GDP 核到 2026Q3。
+    """
+
+    TODAY = date(2026, 8, 29)
+
+    def _check(self, monkeypatch, tmp_state, rolling):
+        import economic_calendar_watch as w
+        pages = _quiet_non_gdp_pages()
+        pages["bea.gov"] = rolling
+        pages["next-year"] = BEA_NEXT_YEAR_NOT_POSTED_HTML      # 次年页还没发 ⇒ 结论只看滚动页
+        monkeypatch.setattr(w, "_fetch", _stub_fetch(pages))
+        res = w.check(force=True, state_path=tmp_state, today=self.TODAY)
+        return res, w._exit_code(res)
+
+    @staticmethod
+    def _with_row(title):
+        return BEA_ROLLING_HTML.replace(
+            "</tbody>", f'<tr><td><div class="release-date">January 28</div></td><td>{title}</td></tr>\n</tbody>')
+
+    def test_renamed_first_estimate_is_undeterminable_not_absent(self, monkeypatch, tmp_state):
+        """🔴 新季度的首次估计换了个不认识的标签 ⇒ GDP 无法判定（退出码 3），不能报「上游无新」（退出码 0）"""
+        res, rc = self._check(monkeypatch, tmp_state,
+                              self._with_row("GDP (Preliminary Estimate), 4th Quarter 2026"))
+        g = res["upstream"]["gdp"]
+        assert g["determinable"] is False and "类型标签不认识" in g["reason"]
+        assert rc == 3
+
+    def test_initial_estimate_counts_as_first_estimate(self, monkeypatch, tmp_state):
+        """2025 年真实出现过的写法（季度在前、标签在后）读作首次估计 ⇒ 新季度要人动手"""
+        res, rc = self._check(monkeypatch, tmp_state,
+                              self._with_row("Gross Domestic Product, 4th Quarter 2026 (Initial Estimate)"))
+        g = res["upstream"]["gdp"]
+        assert g["new_items"] == ["2026Q4"] and rc == 1
+
+    @pytest.mark.parametrize("title", [
+        "GDP (Second Estimate) and Corporate Profits, 3rd Quarter 2026",
+        "GDP (Third Estimate), Industries, Corporate Profits, State GDP, and State Personal Income, 3rd Quarter 2026",
+        "Gross Domestic Product, 3rd Quarter 2025 (Updated Estimate), GDP by Industry, and Corporate Profits (Revised)",
+        "GDP by County and Personal Income by County, 2025",
+    ])
+    def test_known_non_first_rows_do_not_trip(self, title):
+        """真实页面上出现过的后续估计 / 非估计行（2026-10-21 抓取的滚动页与全年页原文）不触发绊线"""
+        from economic_calendar_watch import parse_bea_advance_quarters
+        assert parse_bea_advance_quarters(self._with_row(title)) == ([(2026, 3)], None)

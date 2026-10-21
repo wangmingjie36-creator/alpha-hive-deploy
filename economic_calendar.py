@@ -6,9 +6,11 @@
 - FOMC: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
 - CPI:  https://www.bls.gov/schedule/news_release/cpi.htm
 - NFP:  https://www.bls.gov/schedule/news_release/empsit.htm
-- GDP:  https://www.bea.gov/news/schedule
-        （次年日程在 https://www.bea.gov/news/schedule/next-year ——`/news/schedule` 只列滚动
-        窗口里的近期发布，次年的条目不在那里，v0.45.572 前几次核对因此误判「BEA 未发布」）
+- GDP:  https://www.bea.gov/news/schedule/next-year （次年日程）
+        + https://www.bea.gov/news/schedule （当年剩下的发布）
+        `/news/schedule` 只列当年剩下的发布，次年的条目不在那里，v0.45.572 前几次核对因此误判
+        「BEA 未发布」。表要续的永远是次年，所以 `_TABLE_SPECS["gdp"]["source"]` 指向 next-year 页
+        （v0.45.576：此前仍指滚动页，过期告警会把人带回那张看不到次年的页面）。
 已过去的日期以**实际发布**为准（v0.45.405 起），不以当初的日程为准——停摆会
 推迟或取消发布，日程页事后还会被改写。判定**按参考期**：该期后来发布了（推迟，
 含改名）⇒ 记实际发布日；该期始终没有发布（取消）⇒ 删，不找替身日期。
@@ -203,10 +205,13 @@ _TABLE_SPECS: Dict[str, Dict[str, Any]] = {
     },
     "gdp": {
         "dates": _GDP,
-        "source": "https://www.bea.gov/news/schedule",
+        # v0.45.576：指向次年页——告警与 TestCoverageHorizon 的失败文案都让人「去这里抄」，
+        # 而要续的永远是次年；滚动页 /news/schedule 看不到次年（10-04 正是去错了那页）。
+        # 与 economic_calendar_watch._BEA_NEXT_YEAR 同值，守卫 TestDateProvenance。
+        "source": "https://www.bea.gov/news/schedule/next-year",
         "verified_through": "2027-10-28",
         "pending": "4Q27 初值（2028 年初）BEA 尚未发布（2026-10-21 核对：/news/schedule/next-year "
-                   "只到 2027-12-22）→ 待验证",
+                   "只到 2027-12-22；当年剩下的发布见 /news/schedule）→ 待验证",
     },
 }
 

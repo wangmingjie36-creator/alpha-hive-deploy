@@ -41,6 +41,12 @@ next-year 页上，而监视器与 10-04 两次手工核对都记成「BEA 2027 
 合法状态（滚动页过了 10 月末的 Q3 初值就一条都没有；次年页在 BEA 发布前没有内容），所以单页只要求**页面结构
 可信**——判据见 `parse_bea_advance_quarters` / `parse_bea_next_year`；「≥ 1」的下限落在两页并集上。
 
+## 抓取时限（v0.45.576）
+
+五页并行抓、共用一个墙钟截止 `_FETCH_BUDGET_S`（编排器 Step 13 的 `run_step --timeout` 之内留余量，守卫
+`TestFetchBudget`）。到点没回来的页只让它那张表「无法判定」——不能让一个慢源拖到编排器把整个进程杀掉、四表结论全丢。
+`--timeout` 仍是单个源的 socket 超时。
+
 ## 退出码（沿用 Step 10/11/12 约定）
 
 - 0 = 日历健康，且上游无新日程
@@ -77,6 +83,8 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import date, datetime
@@ -244,6 +252,24 @@ def parse_bls_schedule(html: str) -> Tuple[List[date], Optional[str]]:
 #: 要求 `Quarter 2026` 紧挨着，**每年的 Q4 初值行都读不到**（10-21 次年页 4 行只认出 3 行），且无声。
 _BEA_ADVANCE_RE = re.compile(
     r"GDP \(Advance Estimate\).*?(\d)(?:st|nd|rd|th) Quarter(?: and Year)? (20\d\d)")
+#: 首次估计的「季度在前、标签在后」写法（v0.45.576）。两种都在真实页面上出现过（Wayback 实测）：
+#: - `Gross Domestic Product, 4th Quarter and Year 2024 (Advance Estimate)`：~2025-12 之前 BEA 的标题写法；
+#: - `Gross Domestic Product, 3rd Quarter 2025 (Initial Estimate)`：停摆后 3Q25 的首次估计改名发布（原文写明它取代
+#:   原定 10-30 的 advance estimate；`economic_calendar._GDP` 记它为该季首次估计 2025-12-23）。
+_BEA_TRAILING_FIRST_RE = re.compile(
+    r"(?:GDP|Gross Domestic Product)\b.*?(\d)(?:st|nd|rd|th) Quarter(?: and Year)? (20\d\d)"
+    r" \((?:Advance|Initial) Estimate\)")
+#: BEA 未发布次年日程时次年页的样子（Wayback 2025-02 ~ 2026-08 全部未发布快照同形）：Drupal 空视图，
+#: **没有表头、没有日期格**，只有这一句（有时包在 <p> 里）。v0.45.574 当时约定的「有表头的空表」从未观测到。
+_BEA_NEXT_YEAR_EMPTY_RE = re.compile(r"(?i)see the next year tab for upcoming releases\.?")
+#: GDP 估计行的类型标签 `(X Estimate)`（大小写不敏感，取出后首字母大写比对）
+_BEA_ESTIMATE_LABEL_RE = re.compile(r"(?i)\((\w+) estimate\)")
+#: 认识的标签。Advance / Initial = 首次估计（必须读出季度）；其余是同一季度的后续修订，与表无关。
+#: **不认识的标签 ⇒ 看不懂**（v0.45.576 二次检查）：BEA 改过一次名（Advance → Initial），再改一次的话，
+#: 改名后的首次估计行会被当成「不是初值」静默跳过——而滚动页 0 条初值本是合法读数，次年页又只在
+#: 「有发布却没有 GDP 初值」时才报警，改名就此无声。实测页面上出现过的五种都在这里。
+_BEA_FIRST_LABELS = frozenset({"Advance", "Initial"})
+_BEA_KNOWN_LABELS = _BEA_FIRST_LABELS | {"Second", "Third", "Updated"}
 #: BEA 日程表的表头单元格（`<th>Year 2027</th>`）
 _BEA_YEAR_HEADER_RE = re.compile(r"Year (20\d\d)")
 #: 发布日期单元格（`<div class="release-date">January 28</div>`，不带年份）
@@ -261,26 +287,40 @@ def _read_bea_page(html: str) -> Dict[str, Any]:
     lines = _visible_lines(html)
     quarters: List[Tuple[int, int]] = []
     unreadable: List[str] = []
+    unknown_label: List[str] = []
     for ln in lines:
-        m = _BEA_ADVANCE_RE.search(ln)
+        m = _BEA_ADVANCE_RE.search(ln) or _BEA_TRAILING_FIRST_RE.search(ln)
         if m:
             quarters.append((int(m.group(2)), int(m.group(1))))
-        elif re.search(r"(?i)\badvance\b", ln) and re.search(r"(?i)\bGDP\b|gross domestic product", ln):
-            unreadable.append(ln)
+            continue
+        if not re.search(r"(?i)\bGDP\b|gross domestic product", ln):
+            continue
+        labels = {lb.capitalize() for lb in _BEA_ESTIMATE_LABEL_RE.findall(ln)}
+        if re.search(r"(?i)\badvance\b", ln) or labels & _BEA_FIRST_LABELS:
+            unreadable.append(ln)           # 像首次估计，却读不出参考季度
+        elif labels - _BEA_KNOWN_LABELS:
+            unknown_label.append(ln)        # GDP 估计行，类型标签不认识（可能是首次估计改了名）
     header_at = [n for n, ln in enumerate(lines) if _BEA_YEAR_HEADER_RE.fullmatch(ln)]
     years = [int(_BEA_YEAR_HEADER_RE.fullmatch(lines[n]).group(1)) for n in header_at]
     dated = (sum(1 for ln in lines[header_at[0]:] if _BEA_DATE_CELL_RE.fullmatch(ln))
              if header_at else 0)
     return {"quarters": sorted(set(quarters)), "unreadable": unreadable,
-            "year_headers": years, "dated_rows": dated}
+            "unknown_label": unknown_label, "year_headers": years, "dated_rows": dated,
+            # v0.45.576：未发布空视图的判据要看**全页**（没有表头时 dated_rows 恒 0，等于没看）
+            "date_cells_anywhere": sum(1 for ln in lines if _BEA_DATE_CELL_RE.fullmatch(ln)),
+            "empty_notice": any(_BEA_NEXT_YEAR_EMPTY_RE.fullmatch(ln) for ln in lines)}
 
 
 def _unreadable_reason(page: Dict[str, Any], what: str) -> Optional[str]:
     rows = page["unreadable"]
-    if not rows:
-        return None
-    return (f"{what}有 {len(rows)} 行像 GDP 初值却读不出参考季度（如 {rows[0]!r}），疑为改版——"
-            f"读不出来的初值行不能当它不存在")
+    if rows:
+        return (f"{what}有 {len(rows)} 行像 GDP 初值却读不出参考季度（如 {rows[0]!r}），疑为改版——"
+                f"读不出来的初值行不能当它不存在")
+    odd = page["unknown_label"]
+    if odd:
+        return (f"{what}有 {len(odd)} 行 GDP 估计的类型标签不认识（如 {odd[0]!r}；认识的是 "
+                f"{'/'.join(sorted(_BEA_KNOWN_LABELS))}），疑为改名——可能是首次估计换了叫法，不能当它不是初值")
+    return None
 
 
 def parse_bea_advance_quarters(html: str) -> Tuple[List[Tuple[int, int]], Optional[str]]:
@@ -309,24 +349,33 @@ def parse_bea_next_year(html: str) -> Tuple[Optional[int], List[Tuple[int, int]]
 
     与滚动页同一张表的结构（10-21 实测表头 `Year 2027`，Q4 2026 + Q1–Q3 2027 四行初值）。
 
-    这页**早期合法地为空**：BEA 还没发次年日程。要把「还没发」和「看不懂」分开，唯一可靠的抓手是表头：
-    - 找不到 `Year YYYY` 表头 ⇒ **无法判定**。没有表头，空页面既可能是还没发、也可能是改版，分不开。
-      （若哪天 BEA 未发布时干脆连表头都不给，这里会连续报无法判定——那时人去看一眼确认是「还没发」，
-      再决定怎么放宽；别为了让它闭嘴而放宽。）
-    - 有表头、表里一条有日期的发布都没有 ⇒ **还没发**（可判定，贡献 0 个季度）。
+    这页**一年里大半时间合法地为空**：BEA 每年约 9~10 月才挂出次年日程（Wayback：2026 日程在 2025-08-28~11-01 之间、
+    2027 日程在 2026-08-08~10-07 之间挂出）。「还没发」只认**观测到的那个形状**，别的空都判看不懂：
+    - **未发布空视图** ⇒ **还没发**（可判定，贡献 0 个季度）：`See the Next Year tab for upcoming releases.` 那句提示，
+      全页没有日期格、没有初值行、没有可疑的 GDP 行（v0.45.576 修：574 当时约定「有表头的空表 = 还没发」，
+      而真实的未发布页**没有表头** ⇒ 每年 1 月起到 BEA 挂出次年前，GDP 每周报「无法判定」）。
+    - 找不到 `Year YYYY` 表头、也不是上面那个空视图 ⇒ **无法判定**（改版 / 抓到错误页）。
+    - 有表头、表里一条有日期的发布都没有 ⇒ **无法判定**：从未观测过的形状，不当「还没发」（574 正是这样猜错的）。
     - 有表头、列了有日期的发布却一条 GDP 初值都没有 ⇒ **无法判定**：BEA 次年日程是整年一起挂的，
       GDP 是它的头号发布，「别的都排了、唯独没 GDP」更像标题改版。
-    - 有「像初值」却读不出季度的行 ⇒ **无法判定**（同滚动页）。
+    - 有「像初值」却读不出季度、或 GDP 估计标签不认识的行 ⇒ **无法判定**（同滚动页）。
     """
     page = _read_bea_page(html)
     if not page["year_headers"]:
-        return None, [], ("次年页找不到「Year YYYY」表头，疑为改版——没有表头就分不清"
-                          "「BEA 还没发次年日程」与「页面看不懂」")
+        err = _unreadable_reason(page, "次年页")
+        if (page["empty_notice"] and not err and not page["quarters"]
+                and page["date_cells_anywhere"] == 0):
+            return None, [], None                        # BEA 还没挂出次年日程（观测到的形状）
+        return None, [], err or ("次年页找不到「Year YYYY」表头，也不是「还没发」时的空视图，疑为改版——"
+                                 "分不清「BEA 还没发次年日程」与「页面看不懂」")
     year = max(page["year_headers"])
     err = _unreadable_reason(page, f"次年页（Year {year}）")
     if err:
         return year, [], err
-    if page["dated_rows"] and not page["quarters"]:
+    if not page["dated_rows"]:
+        return year, [], (f"次年页有表头（Year {year}）却一条有日期的发布都没有——从未观测过的形状"
+                          f"（BEA 未发布时是无表头的空视图），疑为改版")
+    if not page["quarters"]:
         return year, [], (f"次年页（Year {year}）列了 {page['dated_rows']} 条有日期的发布，"
                           f"却没有一条 GDP 初值行，疑为改版")
     return year, page["quarters"], None
@@ -372,12 +421,60 @@ def _days_since(iso: Optional[str], today: date) -> Optional[int]:
 
 _FETCH_ERRORS = (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError)
 
+#: 全部抓取共用的**墙钟**总时限（秒，v0.45.576）。编排器 Step 13 以 `run_step --timeout 120` 跑本脚本，
+#: 超时整个进程被杀、连 `--out` 都不写 ⇒ 四张表一周的结论全丢，只因为一个源慢。`urlopen(timeout=)` 管不住
+#: 墙钟：它是**单次 socket 操作**的超时（连接、握手、每次读各算一次），v0.45.574 起 5 页串行抓，最坏远超 120。
+#: 所以各页并行抓、统一截止：到点还没回来的页按「抓取失败」记，只让它自己那张表「无法判定」（退出码 3，会响）。
+#: 与编排器那个数的余量由 tests/test_economic_calendar_watch.py::TestFetchBudget 守。
+_FETCH_BUDGET_S = 75.0
+
+
+class _FetchDeadline(TimeoutError):
+    """到总时限还没取回（是 OSError ⇒ 落进 `_FETCH_ERRORS`，与其它抓取失败同一条路）。"""
+
+
+def _fetch_all(urls: List[str], timeout: int, ua: str,
+               budget: Optional[float] = None) -> Dict[str, Tuple[Optional[str], Optional[BaseException]]]:
+    """并行抓 `urls`，在 `budget` 秒（缺省 `_FETCH_BUDGET_S`，调用时求值）内收齐。
+
+    返回 {url: (html, None) | (None, 异常)}。线程是 daemon：到点没回来的就丢下不等，进程照常退出。
+    `_fetch` 抛出的**任何** Exception 都原样带回，由调用方按原规矩处理（`_FETCH_ERRORS` 记无法判定，
+    其余照旧向上抛 ⇒ run_tool 的崩溃外壳），不在这里改写失败的性质。
+    """
+    budget = _FETCH_BUDGET_S if budget is None else budget
+    got: Dict[str, Tuple[Optional[str], Optional[BaseException]]] = {}
+
+    def _one(u: str) -> None:
+        try:
+            got[u] = (_fetch(u, timeout, ua), None)
+        except Exception as e:  # noqa: BLE001 —— 带回主线程按原规矩分流
+            got[u] = (None, e)
+
+    threads = [threading.Thread(target=_one, args=(u,), daemon=True,
+                                name=f"calendar-watch-fetch-{n}") for n, u in enumerate(urls)]
+    deadline = time.monotonic() + budget
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    snapshot = dict(got)          # 截止之后才回来的线程写不进本次结论
+    return {u: snapshot.get(u) or (None, _FetchDeadline(f"超出抓取总时限 {budget:g}s，未取回"))
+            for u in urls}
+
+
+def _take(fetched: Dict[str, Tuple[Optional[str], Optional[BaseException]]], url: str) -> str:
+    """取 `_fetch_all` 的结果：成功给 html，失败把当时的异常原样抛出（调用方的 except 分流不变）。"""
+    html, err = fetched[url]
+    if err is not None:
+        raise err
+    return html
+
 
 def _fmt_q(q: Tuple[int, int]) -> str:
     return f"{q[0]}Q{q[1]}"
 
 
-def _check_gdp(ours: date, timeout: int, ua: str) -> Dict[str, Any]:
+def _check_gdp(ours: date, fetched: Dict[str, Tuple[Optional[str], Optional[BaseException]]]) -> Dict[str, Any]:
     """GDP：抓滚动页 + 次年页，初值季度取并集，再与 `verified_through` 反推出的参考季度比（v0.45.574）。
 
     返回要 `update` 进该表 entry 的字段。**任一页抓不到 / 看不懂 ⇒ 整个 GDP 判无法判定**——哪怕另一页已经
@@ -391,7 +488,7 @@ def _check_gdp(ours: date, timeout: int, ua: str) -> Dict[str, Any]:
         page: Dict[str, Any] = {"source": url}
         pages[name] = page
         try:
-            html = _fetch(url, timeout, ua)
+            html = _take(fetched, url)
         except _FETCH_ERRORS as e:
             page["reason"] = f"抓取失败: {type(e).__name__}: {e}"
         else:
@@ -447,6 +544,8 @@ def check_upstream(timeout: int = 20, ua: Optional[str] = None) -> Dict[str, Any
 
     ua = ua or _user_agent()
     result: Dict[str, Dict[str, Any]] = {}
+    # v0.45.576：五页一起抓、共用一个墙钟截止（见 `_FETCH_BUDGET_S`）
+    fetched = _fetch_all(list(_SOURCES.values()) + [_BEA_NEXT_YEAR], timeout, ua)
 
     for key, url in _SOURCES.items():
         spec = _TABLE_SPECS[key]
@@ -459,11 +558,11 @@ def check_upstream(timeout: int = 20, ua: Optional[str] = None) -> Dict[str, Any
             "reason": None,
         }
         if key == "gdp":
-            entry.update(_check_gdp(ours, timeout, ua))
+            entry.update(_check_gdp(ours, fetched))
             result[key] = entry
             continue
         try:
-            html = _fetch(url, timeout, ua)
+            html = _take(fetched, url)
         except _FETCH_ERRORS as e:
             entry["reason"] = f"抓取失败: {type(e).__name__}: {e}"
             result[key] = entry
@@ -609,8 +708,11 @@ def _render(res: Dict[str, Any]) -> str:
             cur = f"上游最新参考季度 {v['upstream_latest_quarter']}（我们 {v['our_latest_quarter']}）"
             ny = (v.get("pages") or {}).get("next_year") or {}
             if "quarters" in ny:
-                cur += (f"；次年页 Year {ny.get('year_header')}："
-                        + ("、".join(ny["quarters"]) if ny["quarters"] else "BEA 尚未列出任何发布"))
+                if ny.get("year_header") is None:      # 未发布空视图没有表头（v0.45.576）
+                    cur += "；次年页：BEA 尚未挂出次年日程"
+                else:
+                    cur += (f"；次年页 Year {ny['year_header']}："
+                            + ("、".join(ny["quarters"]) if ny["quarters"] else "BEA 尚未列出任何发布"))
         else:
             cur = f"上游最新 {v['upstream_latest']}（我们已核对到 {v['our_verified_through']}）"
         if v["new_available"]:
