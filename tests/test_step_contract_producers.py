@@ -359,6 +359,8 @@ class TestEconomicCalendarWatch:
             up[k] = {"source": url, "our_verified_through": _TABLE_SPECS[k]["verified_through"],
                      "determinable": True, "new_available": bool(new.get(k)),
                      "new_items": list(new.get(k, [])), "reason": None}
+        # 现行监视器写的 GDP 缓存带两页读数（v0.45.574）；不带 = 出自只读滚动页的旧版 ⇒ 不节流、立即联网重查
+        up["gdp"]["pages"] = {"rolling": {"quarters": []}, "next_year": {"quarters": []}}
         return up
 
     def _run_state(self, tmp_path, today: date, state):

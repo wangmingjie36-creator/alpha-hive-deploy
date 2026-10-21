@@ -27,8 +27,19 @@ v0.45.65 修的那个 bug，本质是「用规律推算代替抄写」。如果�
 一个静默失败的监视器，就是它要治的那个 bug 本身升了一级：页面改版 → 解析器抓到
 0 条 → 报告「无新日程」→ 一切正常 → 直到日历见底。
 
-所以每个源都要求**解析出足够多的条目**（CPI/NFP ≥ 12、FOMC ≥ 8、GDP ≥ 1），
+所以每个源都要求**解析出足够多的条目**（CPI/NFP ≥ 12、FOMC ≥ 8、GDP 两页合计 ≥ 1），
 达不到就报 `undetermined`（退出码 3），绝不报「健康」。
+
+## GDP 读两页（v0.45.574）
+
+BEA 的 `/news/schedule`（Upcoming Releases）只列**当年**剩下的发布（10-21 实测表头 `Year 2026`、末条 12-23），
+**次年整年只在 `/news/schedule/next-year`**。v0.45.574 之前只读前一页 ⇒ BEA 发了次年日程，监视器也要等
+次年初值滚进「近期」窗口才看得见，其间对 GDP 报的「上游无新」（退出码 0）不可信——10-21 才查明 2027 早挂在
+next-year 页上，而监视器与 10-04 两次手工核对都记成「BEA 2027 未发布」。
+
+现在两页的初值季度取并集再比 `verified_through`；**两页都得查通**，GDP 才可判定。单页「0 条初值行」本身是
+合法状态（滚动页过了 10 月末的 Q3 初值就一条都没有；次年页在 BEA 发布前没有内容），所以单页只要求**页面结构
+可信**——判据见 `parse_bea_advance_quarters` / `parse_bea_next_year`；「≥ 1」的下限落在两页并集上。
 
 ## 退出码（沿用 Step 10/11/12 约定）
 
@@ -115,6 +126,15 @@ _SOURCES = {
     "nfp": "https://www.bls.gov/schedule/news_release/empsit.htm",
     "gdp": "https://www.bea.gov/news/schedule",
 }
+
+#: GDP 的第二页：BEA 次年日程（v0.45.574，见模块 docstring「GDP 读两页」）。不放进 `_SOURCES`：
+#: 那张表的键是日历表名，一张表一个结论；这一页只是 gdp 那个结论的另一半证据。
+_BEA_NEXT_YEAR = "https://www.bea.gov/news/schedule/next-year"
+
+
+def _source_label(key: str) -> str:
+    """一个表的结论出自哪些页面。GDP 是两页，其余一页。"""
+    return f"{_SOURCES[key]} + {_BEA_NEXT_YEAR}" if key == "gdp" else _SOURCES[key]
 
 
 # ──────────────────────────── 抓取与文本化 ────────────────────────────
@@ -220,22 +240,96 @@ def parse_bls_schedule(html: str) -> Tuple[List[date], Optional[str]]:
     return sorted(set(out)), None
 
 
+#: 初值行标题。⚠️ Q4 那行写作 `4th Quarter and Year 2026`（该季初值连带发全年数）——v0.45.574 前的正则
+#: 要求 `Quarter 2026` 紧挨着，**每年的 Q4 初值行都读不到**（10-21 次年页 4 行只认出 3 行），且无声。
+_BEA_ADVANCE_RE = re.compile(
+    r"GDP \(Advance Estimate\).*?(\d)(?:st|nd|rd|th) Quarter(?: and Year)? (20\d\d)")
+#: BEA 日程表的表头单元格（`<th>Year 2027</th>`）
+_BEA_YEAR_HEADER_RE = re.compile(r"Year (20\d\d)")
+#: 发布日期单元格（`<div class="release-date">January 28</div>`，不带年份）
+_BEA_DATE_CELL_RE = re.compile(
+    r"(January|February|March|April|May|June|July|August|September|October|November|December)"
+    r" \d{1,2}")
+
+
+def _read_bea_page(html: str) -> Dict[str, Any]:
+    """BEA 日程页的原始读数：初值季度、读不出季度的「像初值」行、表头年份、表头之后的日期格数。
+
+    「像初值」= 同时提到 GDP（或 Gross Domestic Product）与 advance。这种行读不出季度时**不能当它不存在**：
+    v0.45.574 前 Q4 那行正是这样被静默漏掉的。
+    """
+    lines = _visible_lines(html)
+    quarters: List[Tuple[int, int]] = []
+    unreadable: List[str] = []
+    for ln in lines:
+        m = _BEA_ADVANCE_RE.search(ln)
+        if m:
+            quarters.append((int(m.group(2)), int(m.group(1))))
+        elif re.search(r"(?i)\badvance\b", ln) and re.search(r"(?i)\bGDP\b|gross domestic product", ln):
+            unreadable.append(ln)
+    header_at = [n for n, ln in enumerate(lines) if _BEA_YEAR_HEADER_RE.fullmatch(ln)]
+    years = [int(_BEA_YEAR_HEADER_RE.fullmatch(lines[n]).group(1)) for n in header_at]
+    dated = (sum(1 for ln in lines[header_at[0]:] if _BEA_DATE_CELL_RE.fullmatch(ln))
+             if header_at else 0)
+    return {"quarters": sorted(set(quarters)), "unreadable": unreadable,
+            "year_headers": years, "dated_rows": dated}
+
+
+def _unreadable_reason(page: Dict[str, Any], what: str) -> Optional[str]:
+    rows = page["unreadable"]
+    if not rows:
+        return None
+    return (f"{what}有 {len(rows)} 行像 GDP 初值却读不出参考季度（如 {rows[0]!r}），疑为改版——"
+            f"读不出来的初值行不能当它不存在")
+
+
 def parse_bea_advance_quarters(html: str) -> Tuple[List[Tuple[int, int]], Optional[str]]:
-    """BEA 日程页：行标题形如 `GDP (Advance Estimate), 3rd Quarter 2026`。
+    """BEA 滚动日程页（`/news/schedule`）：行标题形如 `GDP (Advance Estimate), 3rd Quarter 2026`。
 
     这里比对的是**参考季度**而不是发布日期 —— BEA 的日期单元格是
     `<div class="release-date">October 29</div>`，**不带年份**（年份只在区块标题里），
     跨年时会歧义；而标题里的季度自带年份，无歧义。
+
+    **0 条初值行是合法读数**（v0.45.574）：这页只列当年剩下的发布，10 月末的 Q3 初值一过就一条都没有。
+    但只有页面证明自己还是那张日程表（找得到 `Year YYYY` 表头）时才信它；表头和初值行都没有 ⇒ 判改版。
+    「至少一条」的下限改由 `check_upstream` 落在两页并集上。
     """
-    lines = _visible_lines(html)
-    out: List[Tuple[int, int]] = []
-    for ln in lines:
-        m = re.search(r"GDP \(Advance Estimate\).*?(\d)(?:st|nd|rd|th) Quarter (20\d\d)", ln)
-        if m:
-            out.append((int(m.group(2)), int(m.group(1))))
-    if not out:
-        return [], "页面找不到任何「GDP (Advance Estimate), Nth Quarter YYYY」行，疑为改版"
-    return sorted(set(out)), None
+    page = _read_bea_page(html)
+    err = _unreadable_reason(page, "")
+    if err:
+        return [], err
+    if not page["quarters"] and not page["year_headers"]:
+        return [], ("页面找不到任何「GDP (Advance Estimate), Nth Quarter YYYY」行，"
+                    "也找不到「Year YYYY」表头，疑为改版")
+    return page["quarters"], None
+
+
+def parse_bea_next_year(html: str) -> Tuple[Optional[int], List[Tuple[int, int]], Optional[str]]:
+    """BEA 次年日程页（`/news/schedule/next-year`）→ (表头年份, 初值季度, 错误)。
+
+    与滚动页同一张表的结构（10-21 实测表头 `Year 2027`，Q4 2026 + Q1–Q3 2027 四行初值）。
+
+    这页**早期合法地为空**：BEA 还没发次年日程。要把「还没发」和「看不懂」分开，唯一可靠的抓手是表头：
+    - 找不到 `Year YYYY` 表头 ⇒ **无法判定**。没有表头，空页面既可能是还没发、也可能是改版，分不开。
+      （若哪天 BEA 未发布时干脆连表头都不给，这里会连续报无法判定——那时人去看一眼确认是「还没发」，
+      再决定怎么放宽；别为了让它闭嘴而放宽。）
+    - 有表头、表里一条有日期的发布都没有 ⇒ **还没发**（可判定，贡献 0 个季度）。
+    - 有表头、列了有日期的发布却一条 GDP 初值都没有 ⇒ **无法判定**：BEA 次年日程是整年一起挂的，
+      GDP 是它的头号发布，「别的都排了、唯独没 GDP」更像标题改版。
+    - 有「像初值」却读不出季度的行 ⇒ **无法判定**（同滚动页）。
+    """
+    page = _read_bea_page(html)
+    if not page["year_headers"]:
+        return None, [], ("次年页找不到「Year YYYY」表头，疑为改版——没有表头就分不清"
+                          "「BEA 还没发次年日程」与「页面看不懂」")
+    year = max(page["year_headers"])
+    err = _unreadable_reason(page, f"次年页（Year {year}）")
+    if err:
+        return year, [], err
+    if page["dated_rows"] and not page["quarters"]:
+        return year, [], (f"次年页（Year {year}）列了 {page['dated_rows']} 条有日期的发布，"
+                          f"却没有一条 GDP 初值行，疑为改版")
+    return year, page["quarters"], None
 
 
 def _release_date_to_quarter(d: date) -> Optional[Tuple[int, int]]:
@@ -276,8 +370,79 @@ def _days_since(iso: Optional[str], today: date) -> Optional[int]:
         return None
 
 
+_FETCH_ERRORS = (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError)
+
+
+def _fmt_q(q: Tuple[int, int]) -> str:
+    return f"{q[0]}Q{q[1]}"
+
+
+def _check_gdp(ours: date, timeout: int, ua: str) -> Dict[str, Any]:
+    """GDP：抓滚动页 + 次年页，初值季度取并集，再与 `verified_through` 反推出的参考季度比（v0.45.574）。
+
+    返回要 `update` 进该表 entry 的字段。**任一页抓不到 / 看不懂 ⇒ 整个 GDP 判无法判定**——哪怕另一页已经
+    显示有新季度：只看半边证据下结论，正是本版要治的那个盲区；人反正要去源站，`pages` 里留着各页读数。
+    """
+    pages: Dict[str, Dict[str, Any]] = {}
+    union: set = set()
+    problems: List[str] = []
+    for name, label, url in (("rolling", "滚动页", _SOURCES["gdp"]),
+                             ("next_year", "次年页", _BEA_NEXT_YEAR)):
+        page: Dict[str, Any] = {"source": url}
+        pages[name] = page
+        try:
+            html = _fetch(url, timeout, ua)
+        except _FETCH_ERRORS as e:
+            page["reason"] = f"抓取失败: {type(e).__name__}: {e}"
+        else:
+            try:
+                if name == "next_year":
+                    year, quarters, err = parse_bea_next_year(html)
+                    page["year_header"] = year
+                else:
+                    quarters, err = parse_bea_advance_quarters(html)
+            except Exception as e:  # noqa: BLE001
+                quarters, err = [], f"解析异常: {type(e).__name__}: {e}"
+            page["reason"] = err
+            if not err:
+                page["quarters"] = [_fmt_q(q) for q in quarters]
+                union.update(quarters)
+        if page["reason"]:
+            problems.append(f"{label} {url}: {page['reason']}")
+
+    out: Dict[str, Any] = {"pages": pages, "source": _source_label("gdp")}
+    if problems:
+        out["reason"] = "；".join(problems)
+        return out
+    out["parsed_count"] = len(union)
+    if len(union) < _MIN_PARSED["gdp"]:
+        out["reason"] = (f"滚动页与次年页合计只解析出 {len(union)} 条初值行，低于下限 "
+                         f"{_MIN_PARSED['gdp']}，判为无法判定")
+        return out
+    our_q = _release_date_to_quarter(ours)
+    if our_q is None:
+        out["reason"] = (f"本地最后一条 GDP 日期 {ours} 的发布月不在 1/4/7/10，"
+                         f"无法反推参考季度")
+        return out
+    newer = sorted(q for q in union if q > our_q)
+    new_items = [_fmt_q(q) for q in newer]
+    if new_items:
+        # `source` 只在有新条目时被人读（渲染 / attention / 编排器 Step 13 摘要）⇒ 指向新条目所在的页。
+        # 10-04 的手工核对正是去错了页。
+        out["source"] = " + ".join(p["source"] for p in pages.values()
+                                   if set(p.get("quarters") or ()) & set(new_items))
+    out.update({
+        "determinable": True,
+        "our_latest_quarter": _fmt_q(our_q),
+        "upstream_latest_quarter": _fmt_q(max(union)),
+        "new_available": bool(newer),
+        "new_items": new_items,
+    })
+    return out
+
+
 def check_upstream(timeout: int = 20, ua: Optional[str] = None) -> Dict[str, Any]:
-    """抓四个源，逐表判断上游是否已超出我们的 verified_through"""
+    """抓各源，逐表判断上游是否已超出我们的 verified_through（GDP 两页，见 `_check_gdp`）"""
     from economic_calendar import _TABLE_SPECS
 
     ua = ua or _user_agent()
@@ -293,9 +458,13 @@ def check_upstream(timeout: int = 20, ua: Optional[str] = None) -> Dict[str, Any
             "new_available": False,
             "reason": None,
         }
+        if key == "gdp":
+            entry.update(_check_gdp(ours, timeout, ua))
+            result[key] = entry
+            continue
         try:
             html = _fetch(url, timeout, ua)
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as e:
+        except _FETCH_ERRORS as e:
             entry["reason"] = f"抓取失败: {type(e).__name__}: {e}"
             result[key] = entry
             continue
@@ -303,11 +472,8 @@ def check_upstream(timeout: int = 20, ua: Optional[str] = None) -> Dict[str, Any
         try:
             if key == "fomc":
                 dates, err = parse_fomc(html)
-            elif key in ("cpi", "nfp"):
-                dates, err = parse_bls_schedule(html)
             else:
-                quarters, err = parse_bea_advance_quarters(html)
-                dates = []
+                dates, err = parse_bls_schedule(html)
         except Exception as e:  # noqa: BLE001
             entry["reason"] = f"解析异常: {type(e).__name__}: {e}"
             result[key] = entry
@@ -318,40 +484,19 @@ def check_upstream(timeout: int = 20, ua: Optional[str] = None) -> Dict[str, Any
             result[key] = entry
             continue
 
-        if key == "gdp":
-            entry["parsed_count"] = len(quarters)
-            if len(quarters) < _MIN_PARSED["gdp"]:
-                entry["reason"] = f"只解析出 {len(quarters)} 条初值行，低于下限，判为无法判定"
-                result[key] = entry
-                continue
-            our_q = _release_date_to_quarter(ours)
-            if our_q is None:
-                entry["reason"] = (f"本地最后一条 GDP 日期 {ours} 的发布月不在 1/4/7/10，"
-                                   f"无法反推参考季度")
-                result[key] = entry
-                continue
-            newer = [q for q in quarters if q > our_q]
-            entry.update({
-                "determinable": True,
-                "our_latest_quarter": f"{our_q[0]}Q{our_q[1]}",
-                "upstream_latest_quarter": f"{max(quarters)[0]}Q{max(quarters)[1]}",
-                "new_available": bool(newer),
-                "new_items": [f"{y}Q{q}" for y, q in newer],
-            })
-        else:
-            entry["parsed_count"] = len(dates)
-            if len(dates) < _MIN_PARSED[key]:
-                entry["reason"] = (f"只解析出 {len(dates)} 个日期，低于下限 "
-                                   f"{_MIN_PARSED[key]}，判为无法判定（疑为页面改版）")
-                result[key] = entry
-                continue
-            newer = [d for d in dates if d > ours]
-            entry.update({
-                "determinable": True,
-                "upstream_latest": max(dates).isoformat(),
-                "new_available": bool(newer),
-                "new_items": [d.isoformat() for d in newer],
-            })
+        entry["parsed_count"] = len(dates)
+        if len(dates) < _MIN_PARSED[key]:
+            entry["reason"] = (f"只解析出 {len(dates)} 个日期，低于下限 "
+                               f"{_MIN_PARSED[key]}，判为无法判定（疑为页面改版）")
+            result[key] = entry
+            continue
+        newer = [d for d in dates if d > ours]
+        entry.update({
+            "determinable": True,
+            "upstream_latest": max(dates).isoformat(),
+            "new_available": bool(newer),
+            "new_items": [d.isoformat() for d in newer],
+        })
 
         result[key] = entry
 
@@ -372,9 +517,12 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
     age = _days_since(state.get("last_checked_at"), today)
 
     prev_action = bool(state.get("action_required"))
-    # 上次查出「有新日程可抄」而人还没抄 → 不节流，天天提醒
+    # v0.45.574：缓存里的 GDP 结论若出自只读滚动页的旧版，它的「无新」正是本版要治的盲区，不能再拿来用
+    _cached_gdp = (state.get("upstream") or {}).get("gdp")
+    gdp_cache_predates_next_year = bool(_cached_gdp) and "next_year" not in (_cached_gdp.get("pages") or {})
+    # 上次查出「有新日程可抄」而人还没抄 → 不节流，天天提醒；GDP 缓存出自旧版 → 不节流，立即重查
     throttled = (not force and age is not None and age < max_age_days
-                 and not prev_action)
+                 and not prev_action and not gdp_cache_predates_next_year)
 
     if throttled:
         upstream = dict(state.get("upstream") or {})
@@ -382,10 +530,10 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
         # 旧实现直接用缓存的空 dict —— 于是「从未成功检查过任何源」被算成
         # undeterminable=[]、new=[]，一路报「✅ 上游无新日程」。
         # 监视器自己犯了它要治的那个静默失败。
-        for _k, _url in _SOURCES.items():
+        for _k in _SOURCES:
             if not upstream.get(_k):
                 upstream[_k] = {
-                    "source": _url,
+                    "source": _source_label(_k),
                     "determinable": False,
                     "new_available": False,
                     "reason": "节流窗口内且无缓存结果 —— 此源从未被成功检查过",
@@ -459,6 +607,10 @@ def _render(res: Dict[str, Any]) -> str:
             continue
         if key == "gdp":
             cur = f"上游最新参考季度 {v['upstream_latest_quarter']}（我们 {v['our_latest_quarter']}）"
+            ny = (v.get("pages") or {}).get("next_year") or {}
+            if "quarters" in ny:
+                cur += (f"；次年页 Year {ny.get('year_header')}："
+                        + ("、".join(ny["quarters"]) if ny["quarters"] else "BEA 尚未列出任何发布"))
         else:
             cur = f"上游最新 {v['upstream_latest']}（我们已核对到 {v['our_verified_through']}）"
         if v["new_available"]:
