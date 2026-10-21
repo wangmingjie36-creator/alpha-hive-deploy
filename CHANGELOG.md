@@ -7,7 +7,23 @@
 
 ## [0.45.588] — 2026-10-21 — 占位（进行中：v0.45.580 / 583 二次检查——桥接核对补覆盖、读错误、空转通过日、原始字段不对称）
 
-## [0.45.587] — 2026-10-21 — 占位（进行中：读同伴边双向对账守卫补两个盲区——模块清单改由 swarm_agents/*.py 推出、别名读板 `b = self.board` 要红）
+## [0.45.587] — 2026-10-21 — Fixed：读同伴边双向对账守卫（v0.45.561）的两个盲区——扫描的模块清单改由 `swarm_agents/*.py` 推出、排除项写明理由并核实；`self.board` 赋给别名 / 外传会红；删一个无用变量
+
+> 用户 10-21 要求二次检查 v0.45.561 / 565。生产代码与世代起点没有 bug（各项复核见下）；守卫本身有两个盲区，两个都实测过「本该红却绿」。**只改测试文件**，不改任何生产代码、依赖边或世代边界。
+
+### Fixed — `tests/test_signal_archive_generations.py::TestPeerReadEdgesMatchCode`
+- **模块清单是手写的 7 个名字**：新加一个读同伴的 `swarm_agents` 模块（实测：新建 `zz_probe_bee.py` 读 Scout 方向），守卫照样全绿。现改为由 `swarm_agents/*.py` 推出，不扫的模块逐个登记在 `_NOT_BEE_MODULES`（理由 + 是否允许出现 `board`）：`__init__` / `_config` / `cache` / `utils` / `sentiment` 不碰 board（源码里确实没有，由新测试核）；`base`（读板机制本身）与 `queen_distiller`（汇总层，读板只进 ALWAYS_SLICED 的 `final_score`）允许。新增 `test_module_inventory_is_complete`。
+- **别名读板看不见**：`b = self.board; b.get_live_signals(t)`（实测：Rival 里这样读普查，AST 守卫全绿，只有 Rival 自己的行为差分测试碰巧挡住）。新增 `_escaped_board_uses`：`self.board` 只许出现在 `self.board.<属性>`、`getattr(self.board, …)`、直接传给已登记的读板函数、真假判断、赋值这几处，其余（赋给别名、传给别的函数、放进容器）一律报出来。现有代码 0 处命中。新增正反对照 `test_alias_board_use_is_flagged`。
+- 删 `_entry_reads` 里从未被读的 `details_direct`。
+
+### 验证
+- 新盲区变异 **5/5 变红**（新蜂模块读同伴 / Rival 经别名读普查 / Guard 把 board 传给未登记函数 / 声称不碰 board 的模块出现 board / 排除项写了不存在的模块），v0.45.561 原有 13 个变异仍 **13/13 变红**；文件逐字节还原。
+
+### 二次检查已核、无问题（v0.45.561 / 565）
+- 换基到 v0.45.586 后相关 7 个测试文件 472 条通过；其间 568 / 583 对 `signal_archive.py` / `ic_rerun_readiness.py` 的改动与本两版不相交。
+- 拨钟审计（`tools/clockshift/audit.py --days 7 --days 45`，两个相关测试文件）：+7 / +45 天新红 0 条——+45 天已越过 565 的复检日 11-03，证实复检提醒在测试里不读真实钟。
+- 561 的前提「Rival 方向自 09-07 起定义未变」用生产记录核：09-07 起 870 条 Rival 记录 confidence 全为 0.8（ML 路径从未回落到技术指标方向）⇒ 538 删掉那条回落路径不改任何已记录的方向。
+- `get_real_crowding_metrics` 只经 `get_bullish_agents_detail` 读板，守卫的字段来源覆盖了它；attention 没有按 id 白名单消费的下游，新 warn 只把外壳 status 置为 attention（同其他「要人看」项）。
 
 ## [0.45.586] — 2026-10-21 — Added：影子宽跨记录 + 预注册检验 `straddle_strangle_shadow.py`（协议 v1：影子宽跨 vs 账本跨式，只记录、不开仓、不进任何判断）
 
