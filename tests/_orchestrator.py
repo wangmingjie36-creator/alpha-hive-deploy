@@ -69,3 +69,22 @@ def orch_literal(orch_text, name):
         return None
     m = re.search(rf'{ASSIGN_PREFIX}{name}="([^"$`\\]+)"[ \t]*(?:#.*)?$', code, flags=re.M)
     return m.group(1) if m else None
+
+
+def step2_budget_formula(orch_text: str):
+    """编排器 Step 2 超时预算公式 → (每只秒数, 下限秒数, 日志里写的每只秒数)；任何一项找不到或不唯一都抛，不猜。
+
+    （v0.45.569 从 test_pheromone_expiry_exceeds_scan_budget.py 挪来，与 test_alert_step2_budget.py 共用：
+    信息素板过期线与性能告警线都按这份预算算。）"""
+    code = "\n".join(ln for ln in orch_text.splitlines() if not ln.lstrip().startswith("#"))
+    coef = re.findall(r"^STEP2_TIMEOUT=\$\(\( TICKER_COUNT \* (\d+) \)\)\s*$", code, re.M)
+    floor = re.findall(r'^\[ "\$STEP2_TIMEOUT" -lt (\d+) \] && STEP2_TIMEOUT=(\d+)\s*$', code, re.M)
+    logged = re.findall(r"× (\d+)s/只，下限 (\d+)s", code)
+    assert len(coef) == 1, f"STEP2_TIMEOUT 的『按只数算』公式找不到或不唯一：{coef}"
+    assert len(floor) == 1 and floor[0][0] == floor[0][1], f"STEP2_TIMEOUT 下限行找不到或不自洽：{floor}"
+    assert len(logged) == 1, f"超时限制日志行找不到或不唯一：{logged}"
+    return int(coef[0]), int(floor[0][0]), int(logged[0][0])
+
+
+def step2_budget(n_tickers: int, coef: int, floor: int) -> int:
+    return max(n_tickers * coef, floor)

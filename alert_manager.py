@@ -5,6 +5,7 @@
 """
 
 import json
+import math
 import os
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,22 @@ _log = get_logger("alerts")
 NEWS_NON_PRIMARY_P1_SHARE = 0.20
 #: 已知来源的标的少于这个数就不判（Buzz 大面积报错时比例没有意义），改报 P2「无法判定」。
 NEWS_MIN_KNOWN = 10
+
+#: v0.45.569：Step 2 用掉**它自己的超时预算**的这个比例即 P1「性能异常」（= 余量 < 25%）。预算是编排器按只数算的
+#: `STEP2_TIMEOUT`，经 status.json 的 `step2_budget` 进来 ⇒ 告警线随预算 / 名单长度移动，**不是秒数常数**。
+#: 此前是 `total_duration_seconds > perf_baseline_seconds(缺省 5.0，没有任何调用方传过) × 1.5`，而真实扫描 1200–3800 秒
+#: ⇒ 每个跑完的扫描日都报「性能下降 20000–76000%」（恒真闸，把人训练成忽略 P1）。
+#: 为什么以预算为尺：Step 2 超时 = 全有或全无、无同日重试，整天永久丢失（09-21 / 09-23）；用掉的比例就是「离丢一天还差多远」。
+#: 标定（编排器日志「Step 2 预算余量」，09-22…10-20 共 20 个 30 只扫描日，各按当天预算）：正常日用掉 17–68%
+#: （3600s 预算时代多在 55–68%，5400s 起 36%）；09-24（yfinance 429 风暴）74% 不响；10-12（余量 13%，唯一擦边）87% 响；
+#: 09-23（CBOE 陈旧级联）外推 ≈4900/5400 = 91% 响。⚠️ 75% 是主观取值、未经前向检验。
+#: 守卫 `tests/test_alert_step2_budget.py`：真实日回放 + 正常日离告警线 ≥1.25 倍 + 告警线低于超时本身（两头都钉）。
+STEP2_BUDGET_USED_P1 = 0.75
+
+
+def _finite_number(x) -> bool:
+    """int / float、非 bool、有限值。JSON 里的 null / 字符串 / NaN 都不算。"""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 
 
 def _ran_from_production_clone(scan_timing: Dict) -> bool:
@@ -119,9 +136,10 @@ class Alert:
 class AlertAnalyzer:
     """告警分析引擎"""
 
-    def __init__(self, report_dir: Path = None, perf_baseline_seconds: float = 5.0):
+    def __init__(self, report_dir: Path = None):
+        # v0.45.569：删掉 `perf_baseline_seconds=5.0`——性能告警线改由 status.json 的 Step 2 预算导出
+        # （见 `STEP2_BUDGET_USED_P1`）。别再加秒数常数基线：没有调用方会传，缺省值就是生产值。
         self.report_dir = report_dir or PATHS.home
-        self.perf_baseline = perf_baseline_seconds
         self.alerts: List[Alert] = []
         # v0.45.47：记录**哪些检查没能执行**。
         # 「零告警」有两种完全不同的成因——「查过了，没问题」与「根本没查成」，
@@ -223,20 +241,8 @@ class AlertAnalyzer:
                     ["step_interp_fallback", step_name]
                 ))
 
-        # 3. 检测 P1: 性能异常 (>150% baseline)
-        total_duration = status.get('total_duration_seconds', 0)
-        if total_duration > self.perf_baseline * 1.5:
-            self.alerts.append(Alert(
-                AlertLevel.HIGH,
-                "⚠️ 【P1 高】性能异常",
-                {
-                    "实际耗时": f"{total_duration}秒",
-                    "基线耗时": f"{self.perf_baseline}秒",
-                    "性能下降": f"{(total_duration / self.perf_baseline - 1) * 100:.1f}%",
-                    "建议": "检查系统负载，优化缓慢的步骤"
-                },
-                ["performance"]
-            ))
+        # 3. 检测 P1: 性能异常——Step 2 逼近它自己的超时预算（v0.45.569；此前 5 秒常数基线比总耗时，恒真）
+        self._check_step2_budget(status)
 
         # 4. 检测 P1: 数据异常 (无报告生成)
         report_file = self.report_dir / f"alpha-hive-daily-{datetime.now().strftime('%Y-%m-%d')}.md"
@@ -319,6 +325,48 @@ class AlertAnalyzer:
         self._check_observation_archive(status)
 
         return self.alerts
+
+    def _check_step2_budget(self, status: Dict) -> None:
+        """Step 2 用掉了自己超时预算的多少（v0.45.569，`status.step2_budget`，写入者编排器 `write_status`）。
+
+        v0.45.569 前这里比的是 `total_duration_seconds > perf_baseline_seconds × 1.5`，基线缺省 5.0 秒、没有调用方传过；
+        09-22 起每个跑完的扫描日都出这条 P1（10-05…10-20 的 alerts-*.json 全有，「性能下降」20000–76000%）。
+        现在的判据只有一个：Step 2 耗时 ÷ 它的超时预算 ≥ `STEP2_BUDGET_USED_P1`。全流程总耗时不再是判据——
+        非 Step 2 部分 10-20 只有 27 秒，其余各步有自己的超时与失败告警。
+
+        - 预算字段可用 ⇒ 照判（不看 Step 2 成没成功：跑到一半崩掉时耗时同样说明问题；超时被杀且零产出那轮
+          status=failed，上面 P0 先返回，没走到 P0 的超时余量≈0，在这里响）。
+        - Step 2 记在 steps_result 里、预算字段却缺 / 不是有限数 / 预算 ≤0 ⇒ checks_skipped（没查成，不是没问题）。
+        - Step 2 根本没跑（steps_result 里没有它）且无预算 ⇒ 无可判，不记。
+        """
+        b = status.get("step2_budget")
+        timeout = b.get("timeout_seconds") if isinstance(b, dict) else None
+        used = b.get("duration_seconds") if isinstance(b, dict) else None
+        if not (_finite_number(timeout) and _finite_number(used) and timeout > 0 and used >= 0):
+            steps = status.get("steps_result")
+            if isinstance(steps, dict) and "step2_hive_analysis" in steps:
+                self.checks_skipped.append(f"Step 2 预算余量检查（status.json 的 step2_budget 不可用：{b!r}）"[:240])
+                _log.warning("step2_budget 不可用（%r）—— **性能（Step 2 预算余量）检查未执行**", b)
+            return
+        frac = used / timeout
+        if frac < STEP2_BUDGET_USED_P1:
+            return
+        tickers = status.get("tickers")
+        n = len(tickers) if isinstance(tickers, list) else "?"
+        self.alerts.append(Alert(
+            AlertLevel.HIGH,
+            f"⚠️ 【P1 高】性能异常：Step 2 用掉超时预算的 {frac:.0%}（告警线 {STEP2_BUDGET_USED_P1:.0%}）",
+            {
+                "Step 2 耗时": f"{used:.0f}秒",
+                "超时预算": f"{timeout:.0f}秒（{n} 只）",
+                "余量": f"{timeout - used:.0f}秒",
+                "全流程耗时": f"{status.get('total_duration_seconds', 'N/A')}秒",
+                "后果": "Step 2 超时 = 全有或全无、无同日重试，整天永久丢失（09-21 / 09-23 先例）",
+                "建议": "看 status.json 的 scan_timing.phases 哪段变长；查 counters.yfinance.rate_limited（429）与 "
+                        "counters.cboe.stale（09-23 CBOE 陈旧级联、09-24 / 10-12 429 风暴）",
+            },
+            ["performance"]
+        ))
 
     def _check_observation_archive(self, status: Dict) -> None:
         """BuzzBee 四个情绪通道的原始观测溯源是否完整（v0.45.568，`scan_timing.extra.observation_archive`，写入者
