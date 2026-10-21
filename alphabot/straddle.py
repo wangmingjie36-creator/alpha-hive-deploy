@@ -150,6 +150,60 @@ def load_positions(root=None) -> List[dict]:
     return rows
 
 
+EARNINGS_CACHE_DIRNAME = "earnings_cache"
+
+
+def _cache_dir(root) -> Path:
+    """每日快照所在目录。`root` 给定（测试 / 非缺省数据根）⇒ `<root>/cache`；否则同写入方的 `PATHS.cache_dir_unmade()`
+    （认 `ALPHA_HIVE_CACHE_DIR`，且**不建目录**——数据根找错时一读就凭空造出空目录是只读页的老坑）。"""
+    return Path(root) / "cache" if root is not None else PATHS.cache_dir_unmade()
+
+
+def load_quote_set(ticker: str, as_of: str, root=None) -> Tuple[Optional[dict], Optional[str]]:
+    """某天的 `options_snapshot_<票>_<日>.json` 里的 `quote_set`（~30 DTE 四合约：ATM 两腿 + 25Δ 两腿）。
+    返回 (quote_set, 原因码)；只读。`ticker` / `as_of` 由调用方（服务层）先校验过格式。"""
+    p = _cache_dir(root) / f"options_snapshot_{ticker}_{as_of}.json"
+    if not p.is_file():
+        return None, "snapshot_missing"
+    try:
+        snap = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        _log.warning("期权快照读取失败 %s: %s", p.name, exc)
+        return None, "snapshot_unreadable"
+    qs = snap.get("quote_set") if isinstance(snap, dict) else None
+    return (qs, None) if isinstance(qs, dict) else (None, "quote_set_unavailable")
+
+
+def load_hist_moves(ticker: str, root=None) -> Tuple[Optional[list], Optional[str]]:
+    """`earnings_cache/<票>_moves.json` 的 `moves`（过去财报的 2 日涨跌，账本信号的分母就出自它）。只读；
+    不 import `earnings_history`（它 import 即冻路径、取不到还会联网写缓存）。返回 (moves, 原因码)。"""
+    home = Path(root) if root is not None else PATHS.home
+    p = home / EARNINGS_CACHE_DIRNAME / f"{ticker}_moves.json"
+    if not p.is_file():
+        return None, "no_history"
+    obj, err = read_json(p)
+    if err or not isinstance(obj.get("moves"), list):
+        return None, "history_unreadable"
+    return obj["moves"], None
+
+
+def pick_signal_and_nav(signals: List[dict], equity: List[dict], ticker: str,
+                        as_of: str) -> Tuple[Optional[dict], Optional[float]]:
+    """某票某天的信号行（没有 ⇒ None）与「当时的 NAV」（净值曲线里日期 ≤ as_of 的最近一行；定仓用，近似账本口径）。纯函数。"""
+    sig = next((s for s in signals or [] if s.get("ticker") == ticker and s.get("as_of") == as_of), None)
+    prior = [e for e in equity or [] if str(e.get("date") or "") <= as_of and _pos(e.get("nav")) is not None]
+    nav = _pos(max(prior, key=lambda e: str(e["date"]))["nav"]) if prior else None
+    return sig, nav
+
+
+def load_signal_and_nav(ticker: str, as_of: str, root=None) -> Tuple[Optional[dict], Optional[float]]:
+    """`pick_signal_and_nav` 的读文件版：只读信号与净值两个文件，不重读整本账本。"""
+    ld = (Path(root) if root is not None else PATHS.home) / LEDGER_DIRNAME
+    sigs, _ = read_jsonl(ld / "earnings_signals.jsonl")
+    eq, _ = read_jsonl(ld / "equity_curve.jsonl")
+    return pick_signal_and_nav(sigs, eq, ticker, as_of)
+
+
 def ledger_as_of(led: dict) -> Optional[str]:
     meta = led.get("meta") or {}
     if meta.get("last_run_date"):

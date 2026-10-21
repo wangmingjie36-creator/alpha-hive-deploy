@@ -31,6 +31,7 @@ from alphabot import hedge as HG
 from alphabot import howto as HW
 from alphabot import premium as PM
 from alphabot import straddle as SD
+from alphabot import strangle_compare as SC
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("alphabot")
@@ -414,6 +415,42 @@ class AlphaBotService:
                 _log.warning("[%s] 跨式盘中报价不可得：%s", t, res.get("reason"))
             self._straddle_cache[key] = (self.clock(), res)
             return {**res, "cache_age_sec": 0.0}
+
+    def straddle_compare(self, ticker, as_of=None) -> dict:
+        """「跨式 vs 宽跨」并排对比卡（v0.45.584）。**只读、只并排事实、不给结论**（见 `alphabot.strangle_compare`）。
+        数据全部来自本机已有文件：当天快照里的 `quote_set`（ATM 两腿 + 25Δ 两腿）、`earnings_cache/<票>_moves.json`
+        （历史财报涨跌）、跨式账本的信号行与净值——不联网。`as_of` 缺省 = 账本最近一个扫描日；给持仓的入场日即「入场时的对比」。
+        定仓用账本自己的 `options_paper_leg.size_contracts`（懒 import；取不到就写明原因、张数留空）。"""
+        t = norm_ticker(ticker)
+        now = self.now_fn()
+        if self.demo:
+            from alphabot import synthetic as syn
+            led = self._straddle_ledger(now)
+            day = norm_date(as_of) if as_of else (SD.ledger_as_of(led) or now.date().isoformat())
+            qs, raw = syn.demo_compare_inputs(t, day)
+            qs_err = hist_err = None
+            sig, nav = SD.pick_signal_and_nav(led.get("signals"), led.get("equity"), t, day)
+        else:
+            root = self.straddle_root
+            if as_of:
+                day = norm_date(as_of)
+            else:
+                meta, _ = SD.read_json((Path(root) if root is not None else PATHS.home) / SD.LEDGER_DIRNAME / "meta.json")
+                day = str((meta or {}).get("last_run_date") or SD.expected_ledger_date(now)[0])
+            qs, qs_err = SD.load_quote_set(t, day, root)
+            raw, hist_err = SD.load_hist_moves(t, root)
+            sig, nav = SD.load_signal_and_nav(t, day, root)
+
+        def size_fn(premium, nav_):
+            try:
+                import options_paper_leg as opl
+                return opl.size_contracts("short", premium, nav_)
+            except Exception as exc:  # noqa: BLE001 - 定仓函数取不到：张数留空并说明，不编一个
+                return 0, f"sizing unavailable: {type(exc).__name__}"
+        res = clean_json(SC.compare(t, day, qs=qs, qs_error=qs_err, raw_moves=raw, hist_error=hist_err, signal=sig,
+                                    nav=nav, size_fn=size_fn, max_spread_frac=self.straddle_rules().get("max_spread_pct")))
+        res["demo"] = self.demo
+        return res
 
     # ── 溢价（v0.45.492，只读）：单票全链按 IV ÷ 期限匹配 RV 排序
     def _premium_deps(self) -> "PM.Deps":
