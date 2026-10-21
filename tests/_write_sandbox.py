@@ -25,6 +25,17 @@ alpha-hive-data-root-migration）。豁免路径会盖住真写穿、按进程�
 ⚠️ `log show` 在沙箱里拒绝运行（「Cannot run while sandboxed」，实测）——而沙箱之后起的子进程全都继承沙箱。
    所以**套沙箱之前**先起一个常驻的查日志助手（`_HELPER`，只会跑 `log show`、不跑测试代码），会话末尾经它的 stdin/stdout 代查。
    进程内再跑 pytest 的内层会话起不了不受限的助手 ⇒ 内层不查（`check_log=False`），它期间的拒绝落在外层会话的查询窗里，由外层核对。
+
+**并发会话归属（v0.45.577）。** 两个测试会话护同一个根时规则相同，`log show` 对谁都一样——内核那行只有
+`进程名(pid)`，没有父进程、没有会话（实测 ndjson 全字段）。只按路径筛，X 会话的写会让无辜的 Y 会话也红（实测复现）。
+所以每个会话在 `REGISTRY_DIR` 登记自己（pid / 根 / 起止 / 是否已核对），并经 `subprocess.Popen` 与 `os.register_at_fork`
+钩子把**自己起的进程号**追加进 `<会话>.pids`。会话末尾 `attribute()` 分三类：
+- 本会话的进程号 ⇒ 红；
+- 另一个**同时段、护同一个根**的会话登记过的进程号，且它还活着或已核对完 ⇒ 不红，由它自己报（终端摘要说明）；
+  它已结束却没核对 ⇒ 本会话照样报红（总得有人红）；
+- 谁都没登记（孙进程、`os.system` 起的 shell……）⇒ **照样红**，有并发会话时如实写「可能是它的」——
+  宁可两边都红并说明归属不明，也不让两边都以为是对方的。
+登记目录不可用 ⇒ 退回「全算本会话」（即 v0.45.573 的行为），报告里写明。
 """
 from __future__ import annotations
 
@@ -32,7 +43,10 @@ import ctypes
 import datetime
 import json
 import os
+import functools
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -47,6 +61,11 @@ OPT_OUT_ENV = "ALPHA_HIVE_TEST_WRITE_SANDBOX"      # 设成 "0" ⇒ 不套（调
 #: 外层会话套好后写进环境：`<真实数据根>\n<金丝雀>`。进程内再跑 pytest（再调一次 pytest_configure）时据此认出
 #: 「已继承」——不能再套一层（内核拒），但要用金丝雀再验一次，不凭这个变量就信。
 ACTIVE_ENV = "ALPHA_HIVE_TEST_WRITE_SANDBOX_ACTIVE"
+#: 会话登记目录。固定在 /tmp 而不跟 $TMPDIR：Claude Code / 终端里起的会话 TMPDIR 可能不同，登记必须彼此看得见。
+REGISTRY_DIR = f"/tmp/alpha-hive-write-sandbox-{os.getuid()}"
+CANARY_PREFIX = "alpha_hive_write_sandbox_canary_"
+#: 结束这么久的登记 / 这么久没动的空金丝雀目录，下个会话开始时清掉（金丝雀 v0.45.573 起每会话漏一个，10-21 已积 186 个）
+PRUNE_AFTER_S = 2 * 86400
 
 #: `Sandbox: Python(44562) deny(1) file-write-create /Users/igg/alpha-hive-data/x.json`
 #: 查日志助手：在**套沙箱之前**起（之后起的进程都继承沙箱，跑不了 `log show`）。一行请求 → 一行 JSON 回答；stdin 关闭即退出。
@@ -102,11 +121,25 @@ def apply(root: str | None) -> dict:
         return st
     real_root = os.path.realpath(root)
     inherited = (os.environ.get(ACTIVE_ENV) or "").split("\n")
-    if len(inherited) == 2 and inherited[0] == real_root:
+    if len(inherited) >= 2 and inherited[0] == real_root:
         st.update(root=real_root, canary=inherited[1], inherited=True)
-        return _verify_canary(st, inherited[1])
-    canary = os.path.realpath(tempfile.mkdtemp(prefix="alpha_hive_write_sandbox_canary_"))
-    st.update(root=real_root, canary=canary)
+        if _verify_canary(st, inherited[1])["active"]:
+            pids_file = inherited[2] if len(inherited) > 2 and inherited[2] else None
+            if pids_file:
+                _record_pid(pids_file, os.getpid())
+                _install_pid_hooks(pids_file)
+            return st
+        # v0.45.577：标记是残留 / 外来的（本进程其实不在沙箱里）⇒ 不信它，照常自己套。只凭环境变量就跳过会让沙箱静默失效。
+        stale = st["reason"]
+        st.update(active=False, canary=None, inherited=False, reason="")
+        os.environ.pop(ACTIVE_ENV, None)
+    else:
+        stale = None
+    _prune_old_canaries(tempfile.gettempdir())
+    canary = os.path.realpath(tempfile.mkdtemp(prefix=CANARY_PREFIX))
+    st.update(root=real_root, canary=canary, owns_canary=True)
+    if stale:
+        st["stale_marker"] = f"环境里的 {ACTIVE_ENV} 指向同一个根，但金丝雀验不过（{stale}）——按残留标记处理，已重新套"
     try:   # 必须在 sandbox_init 之前起：之后起的进程继承沙箱，`log show` 拒绝运行
         st["helper"] = subprocess.Popen([sys.executable, "-I", "-c", _HELPER], stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, text=True)
@@ -122,11 +155,197 @@ def apply(root: str | None) -> dict:
         return st
     _verify_canary(st, canary)
     if st["active"]:
-        os.environ[ACTIVE_ENV] = f"{real_root}\n{canary}"
+        _register(st)
+        os.environ[ACTIVE_ENV] = f"{real_root}\n{canary}\n{st.get('pids_file') or ''}"
     else:
         close(st)
         st["check_log"] = False
     return st
+
+
+# ---------------- 并发会话登记与归属（v0.45.577） ----------------
+
+_PID_HOOK = {"file": None, "installed": False, "failures": 0}
+
+
+def _registry_dir(d: str) -> str:
+    """建（或认）本用户私有的登记目录；/tmp 共享 ⇒ 必须是本用户的真目录，不是别人放的符号链接。"""
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    s = os.lstat(d)
+    if not stat.S_ISDIR(s.st_mode) or s.st_uid != os.getuid():
+        raise OSError(f"{d} 不是本用户的目录")
+    return d
+
+
+def _write_json(path: str, obj: dict) -> None:
+    tmp = f"{path}.tmp-{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
+
+def _record_pid(pids_file: str, pid: int) -> None:
+    try:
+        with open(pids_file, "a") as f:
+            f.write(f"{pid}\n")
+    except OSError:
+        _PID_HOOK["failures"] += 1          # 记不上 ⇒ 这些进程的拒绝落进「谁都没登记」⇒ 照样红，不会漏
+
+
+def _install_pid_hooks(pids_file: str) -> None:
+    """把本会话起的进程号记进 `pids_file`：Popen（含 asyncio 子进程）+ fork（multiprocessing）。只装一次。"""
+    _PID_HOOK["file"] = pids_file
+    if _PID_HOOK["installed"]:
+        return
+    orig = subprocess.Popen.__init__
+
+    @functools.wraps(orig)
+    def __init__(self, *a, **k):
+        orig(self, *a, **k)
+        if _PID_HOOK["file"]:
+            _record_pid(_PID_HOOK["file"], self.pid)
+
+    subprocess.Popen.__init__ = __init__
+    os.register_at_fork(after_in_child=lambda: _PID_HOOK["file"] and _record_pid(_PID_HOOK["file"], os.getpid()))
+    _PID_HOOK["installed"] = True
+
+
+def _register(st: dict, registry_dir: str | None = None) -> None:
+    d = registry_dir or REGISTRY_DIR
+    sid = f"{os.getpid()}-{int(st['started_epoch'] * 1000)}"
+    try:
+        _registry_dir(d)
+        _prune_registry(d)
+        st.update(registry=d, session_id=sid, pids_file=os.path.join(d, f"{sid}.pids"))
+        _write_json(os.path.join(d, f"{sid}.json"), {
+            "pid": os.getpid(), "root": st["root"], "started": st["started_epoch"], "ended": None, "checked": False})
+        _record_pid(st["pids_file"], os.getpid())
+        _install_pid_hooks(st["pids_file"])
+    except OSError as e:
+        st.update(registry=None, pids_file=None, registry_error=f"会话登记不可用（{e}）——并发会话的拒绝分不清归属，一律按本会话报")
+
+
+def mark(st: dict, **fields) -> None:
+    """更新本会话的登记（`checked=True` / `ended=…`）。失败不抛：最坏是别的会话把它当「没核对」替它报红。"""
+    if not st.get("registry"):
+        return
+    path = os.path.join(st["registry"], f"{st['session_id']}.json")
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+        rec.update(fields)
+        _write_json(path, rec)
+    except (OSError, ValueError):
+        pass
+
+
+def _read_pids(path: str) -> set[int]:
+    try:
+        with open(path) as f:
+            return {int(x) for x in f.read().split() if x.isdigit()}
+    except OSError:
+        return set()
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def sessions(st: dict, now: float | None = None) -> list[dict]:
+    """登记目录里**其他**、护同一个根、与本会话时段重叠的会话。"""
+    d = st.get("registry")
+    if not d:
+        return []
+    now = time.time() if now is None else now
+    out = []
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".json") or name[:-5] == st.get("session_id"):
+            continue
+        try:
+            with open(os.path.join(d, name)) as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if rec.get("root") != st["root"] or rec.get("started", now + 1) > now:
+            continue
+        if rec.get("ended") is not None and rec["ended"] < st["started_epoch"]:
+            continue
+        rec["id"] = name[:-5]
+        rec["pids"] = _read_pids(os.path.join(d, f"{rec['id']}.pids")) | {rec.get("pid")}
+        rec["alive"] = rec.get("ended") is None and _alive(rec.get("pid") or 0)
+        out.append(rec)
+    return out
+
+
+def attribute(st: dict, found: list[dict], now: float | None = None) -> tuple[list[dict], list[dict]]:
+    """拒绝分成（本会话报红的, 另一个会话自己会报的）。每条加 `who`：给人看的归属说明。"""
+    others = sessions(st, now)
+    own = {os.getpid()} | (_read_pids(st["pids_file"]) if st.get("pids_file") else set())
+    mine, foreign = [], []
+    for d in found:
+        d = dict(d)
+        hit = [o for o in others if d["pid"] in o["pids"]]
+        if d["pid"] in own or not st.get("registry"):
+            d["who"] = "本会话" if st.get("registry") else st.get("registry_error", "会话登记不可用")
+            mine.append(d)
+        elif hit and all(o["alive"] or o.get("checked") for o in hit):
+            d["who"] = "另一个测试会话 " + "、".join(f"pid {o['pid']}" for o in hit) + "（它自己会报）"
+            foreign.append(d)
+        elif hit:
+            d["who"] = ("另一个测试会话 " + "、".join(f"pid {o['pid']}" for o in hit)
+                        + " 的进程，但那个会话已结束且没完成核对——由本会话代报")
+            mine.append(d)
+        else:
+            d["who"] = ("进程号不属于任何已登记会话（孙进程 / os.system 起的 shell 等）"
+                        + (f"；同时段还有会话 {'、'.join(str(o['pid']) for o in others)} 在护同一个根，可能是它的"
+                           if others else ""))
+            mine.append(d)
+    return mine, foreign
+
+
+def _prune_registry(d: str, now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    for name in os.listdir(d):
+        if not name.endswith(".json"):
+            continue
+        p = os.path.join(d, name)
+        try:
+            with open(p) as f:
+                rec = json.load(f)
+            last = rec.get("ended") or os.path.getmtime(p)
+            if now - last < PRUNE_AFTER_S or (rec.get("ended") is None and _alive(rec.get("pid") or 0)):
+                continue
+        except (OSError, ValueError):
+            continue
+        for q in (p, p[:-5] + ".pids"):
+            try:
+                os.unlink(q)
+            except OSError:
+                pass
+
+
+def _prune_old_canaries(tmp: str, now: float | None = None) -> None:
+    """清掉很久没动的**空**金丝雀目录（rmdir 只删空目录：活会话的、或里面有东西的都不碰）。"""
+    now = time.time() if now is None else now
+    try:
+        names = os.listdir(tmp)
+    except OSError:
+        return
+    for n in names:
+        if not n.startswith(CANARY_PREFIX):
+            continue
+        p = os.path.join(tmp, n)
+        try:
+            if now - os.path.getmtime(p) >= PRUNE_AFTER_S:
+                os.rmdir(p)
+        except OSError:
+            pass
 
 
 def _verify_canary(st: dict, canary: str) -> dict:
@@ -141,6 +360,10 @@ def _verify_canary(st: dict, canary: str) -> dict:
     except OSError as e:
         st["reason"] = f"金丝雀试写出了别的错（{type(e).__name__}: {e}），判不了沙箱是否生效"
         return st
+    try:          # v0.45.577：写进去的探针是自己的（那里并不受保护）——留着会让空目录清理永远清不掉它
+        os.unlink(probe)
+    except OSError:
+        pass
     st["reason"] = "规则已装上，但金丝雀试写**成功**了——沙箱没生效（按未生效处理，闸回到指纹比对）"
     return st
 
@@ -194,18 +417,45 @@ def denials(st: dict, *, ask=None) -> tuple[list[dict], str | None]:
         return [], f"代查 {LOG} show 失败：{type(e).__name__}: {e}"
     if r.get("rc") != 0:
         return [], f"{LOG} show 失败（rc={r.get('rc')}）：{(r.get('stderr') or '').strip()[:300]}"
-    return parse_denials(r.get("stdout") or "", st["root"], st.get("canary")), None
+    found = parse_denials(r.get("stdout") or "", st["root"], st.get("canary"))
+    # v0.45.577：`--start` 只到秒 ⇒ 窗口最多早开 1 秒，会捞到本会话开始前（上一个会话末尾）的拒绝。按毫秒级时刻剔掉。
+    t0 = st.get("started_epoch")
+    if t0 is not None:
+        found = [d for d in found if (ts_epoch(d["ts"]) is None or ts_epoch(d["ts"]) >= t0 - LOG_TS_LAG)]
+    return found, None
 
 
 def close(st: dict) -> None:
-    """会话收尾：关掉查日志助手（stdin 关闭它就退出）。"""
+    """会话收尾：删本会话的金丝雀目录（v0.45.577：此前每会话漏一个）、关掉查日志助手（stdin 关闭它就退出）、登记结束时刻。
+
+    金丝雀在本进程的沙箱里不可写（连删除也是 `file-write-unlink`）⇒ 沙箱生效时经沙箱外的助手删；没生效时本进程直接删。"""
     helper = st.get("helper")
+    canary = st.get("canary")
+    if st.get("owns_canary") and canary and os.path.basename(canary).startswith(CANARY_PREFIX):
+        if helper is not None and helper.poll() is None:
+            try:
+                r = _ask_helper(helper, ["/bin/rm", "-rf", canary])
+                st["canary_removed"] = r.get("rc") == 0 and not os.path.exists(canary)
+            except (OSError, ValueError):
+                st["canary_removed"] = False
+        else:
+            shutil.rmtree(canary, ignore_errors=True)
+            st["canary_removed"] = not os.path.exists(canary)
+    mark(st, ended=time.time())
     if helper is not None and helper.poll() is None:
         try:
             helper.stdin.close()
             helper.wait(timeout=5)
         except (OSError, subprocess.TimeoutExpired):
             helper.kill()
+
+
+def covers(st: dict | None, path) -> bool:
+    """沙箱生效、且 `path` 落在被禁写的根下 ⇒ 测试进程树写不进它（逐条指纹闸可以让位给内核）。"""
+    if not st or not st.get("active") or not st.get("root"):
+        return False
+    p = os.path.realpath(str(path))
+    return p == st["root"] or p.startswith(st["root"].rstrip("/") + "/")
 
 
 def ts_epoch(ts: str | None) -> float | None:

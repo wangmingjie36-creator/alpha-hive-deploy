@@ -727,7 +727,7 @@ def _paper_portfolio_real_dir(invocation_env) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_paper_portfolio_state(tmp_path, monkeypatch, _real_paper_portfolio_state_dir):
+def _isolate_paper_portfolio_state(tmp_path, monkeypatch, _real_paper_portfolio_state_dir, pytestconfig):
     """把 paper_portfolio 的四个状态文件 + SNAPSHOT_DIR 全局重绑到 tmp，并核对状态文件真身没被动过。
 
     v0.45.104。事故：一个只想验「run_for_date 入口会拒绝错模式」的测试，
@@ -762,6 +762,10 @@ def _isolate_paper_portfolio_state(tmp_path, monkeypatch, _real_paper_portfolio_
     `ALPHA_HIVE_HOME` 指向 tmp），它会被冻成沙箱路径，`real` 与下面的 `sandbox` 成了同一个目录——
     守卫盯着沙箱自己，单条测试写沙箱被误报为写穿生产，真写穿生产反而看不见。
     ⚠️ 别改回 `_pp.STATE_DIR`：回归测试 `tests/test_paper_portfolio_guard_identity.py` 会红。
+
+    v0.45.577：写沙箱生效且真身落在被禁写的根下时，②（teardown 指纹比对）**不再判红**——测试进程树写不进去
+    （内核拒，被吞的写由会话级 `_guard_by_write_sandbox` 从统一日志里逐条定位报红），指纹变化只可能来自沙箱外的写入者：
+    14:00 每日扫描收尾就写这四个文件，v0.45.573 漏改这里 ⇒ 扫描时段全量里会有一串逐条 ERROR。①（全局重绑）照旧。
     """
     try:
         import paper_portfolio as _pp
@@ -792,6 +796,8 @@ def _isolate_paper_portfolio_state(tmp_path, monkeypatch, _real_paper_portfolio_
 
     yield
 
+    if _write_sandbox.covers(getattr(pytestconfig, "_alpha_hive_write_sandbox", None), _real_paper_portfolio_state_dir):
+        return          # 内核护着：变化只可能来自沙箱外（会话末尾的终端摘要会列出数据根变化）
     touched = [n for n, p in real.items() if _pp_state_digest(p) != before[n]]
     assert not touched, (
         f"测试写到了**生产** paper_portfolio_state/：{touched}。"
@@ -1334,6 +1340,14 @@ def write_sandbox_guard_fn():
 
 
 @pytest.fixture
+def paper_portfolio_isolation_fn():
+    """把逐条夹具 `_isolate_paper_portfolio_state` 的原函数（生成器）暴露给 `tests/test_write_sandbox.py`，验 v0.45.577 的让位。"""
+    fx = _isolate_paper_portfolio_state
+    getter = getattr(fx, "_get_wrapped_function", None)       # pytest ≥ 8.4
+    return getter() if getter else getattr(fx, "__wrapped__", fx)
+
+
+@pytest.fixture
 def data_root_session_facts(pytestconfig):
     """会话级数据根接线的事实，给 `tests/test_data_root_default.py` 自证（同上：`conftest` 不可直接 import）。
 
@@ -1419,6 +1433,9 @@ def pytest_report_header(config):
     if sb.get("active"):
         sb_line = (f"write sandbox: ACTIVE（内核禁写 {sb['root']}{'，继承自外层会话' if sb.get('inherited') else ''}；"
                    "数据根变化只说明、不报红，测试写入的拒绝记录才报红）")
+        for k in ("stale_marker", "registry_error"):     # v0.45.577：说清楚，不静默
+            if sb.get(k):
+                sb_line += f"\n  ⚠️ {sb[k]}"
     else:
         sb_line = f"write sandbox: INACTIVE（{sb.get('reason') or '未尝试'}）——真实数据根闸按指纹比对判红"
     # 返回单个字符串（两行用换行连）：既有测试按子串读报告头（`'active on …' in header`）
@@ -1521,7 +1538,11 @@ def _guard_by_write_sandbox(config, sb: dict, root: str, changes: dict) -> None:
             config._alpha_hive_external_writes = changes
         return
     found, err = _write_sandbox.denials(sb)
+    found, foreign = _write_sandbox.attribute(sb, found)      # v0.45.577：并发会话各报各的
+    _write_sandbox.mark(sb, checked=err is None)
     _write_sandbox.close(sb)
+    if foreign:
+        config._alpha_hive_foreign_denials = foreign
     assert err is None, (
         f"写沙箱生效中（{root} 由内核禁写，生产数据未受损），但核对「有没有测试试图写它」失败：{err}\n"
         "核对失败不能当没有。重跑；若持续失败，临时用 ALPHA_HIVE_TEST_WRITE_SANDBOX=0 退回指纹闸并查明原因。")
@@ -1530,13 +1551,15 @@ def _guard_by_write_sandbox(config, sb: dict, root: str, changes: dict) -> None:
         rows = "\n".join(
             f"    {d['path']}\n      {d['op']} by {d['proc']}({d['pid']}) @ {d['ts']} → "
             f"{_root_data_guard.locate(_write_sandbox.ts_epoch(d['ts']), timeline, started_wall, lag=_write_sandbox.LOG_TS_LAG)}"
+            + (f"\n      归属：{d['who']}" if d.get("who") and d["who"] != "本会话" else "")
             for d in found[:50])
         more = f"\n    …另有 {len(found) - 50} 条" if len(found) > 50 else ""
         raise AssertionError(
             f"本轮有测试（或被测代码、或它起的子进程）试图写**真实数据根**（{root}），被内核写沙箱拒绝了 {len(found)} 次——"
             "生产数据未受损，但被测代码绕过了 `ALPHA_HIVE_HOME` 隔离：\n"
             f"{rows}{more}\n\n"
-            "这些拒绝只可能来自本测试进程树（沙箱外的 Alpha Bot / 扫描从不被拒），时间定位见每条末尾（会话级闸，"
+            "这些拒绝只可能来自受沙箱约束的测试进程树（沙箱外的 Alpha Bot / 扫描从不被拒；另一个同时在跑的测试会话"
+            "登记过的进程已剔除，归属不明的照样列出并注明），时间定位见每条末尾（会话级闸，"
             "pytest 把它记在最后一条测试头上，那条测试名与原因无关）。若当时测试没红，是被测代码吞了 PermissionError——"
             "那正是要修的：改成调用时读 `PATHS.*`。**不要**往豁免里加路径。")
     if changes:
@@ -1608,6 +1631,11 @@ def _hive_log_watch_paths(*roots):
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     """写沙箱生效时，真实数据根的变化来自沙箱外——只在这里说一声，不报红（v0.45.573）。"""
+    foreign = getattr(config, "_alpha_hive_foreign_denials", None)
+    if foreign:          # v0.45.577
+        terminalreporter.write_sep("-", "真实数据根：另一个测试会话的写拒绝（由它自己报，不在这里报红）")
+        for d in foreign[:20]:
+            terminalreporter.write_line(f"  {d['path']}  {d['op']} by {d['proc']}({d['pid']}) @ {d['ts']}  —— {d['who']}")
     changes = getattr(config, "_alpha_hive_external_writes", None)
     if not changes:
         return

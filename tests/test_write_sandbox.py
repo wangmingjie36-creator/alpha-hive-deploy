@@ -67,6 +67,14 @@ class TestPureLogic:
         found, err = WS.denials(st, ask=lambda c: {"rc": 0, "stdout": LOG_TEXT, "stderr": ""})
         assert err is None and len(found) == 3
 
+    def test_denials_before_session_start_are_dropped(self):
+        """`--start` 只到秒：同一秒里、本会话开始之前的拒绝（上一个会话的）不能算到本会话头上（v0.45.577）。"""
+        import datetime as _dt
+        t0 = _dt.datetime(2026, 10, 21, 2, 46, 27, 917000).timestamp()      # 减去 LOG_TS_LAG 后落在 .864 与 .870 之间
+        st = {"started_local": _dt.datetime(2026, 10, 21, 2, 46, 27), "started_epoch": t0, "root": ROOT, "canary": CANARY}
+        found, err = WS.denials(st, ask=lambda c: {"rc": 0, "stdout": LOG_TEXT, "stderr": ""})
+        assert err is None and [d["path"] for d in found] == [f"{ROOT}/cache/x y.json", ROOT]
+
     def test_log_command_uses_full_path_and_session_start(self):
         st = {"started_local": __import__("datetime").datetime(2026, 10, 21, 2, 10, 52)}
         cmd = WS.log_command(st)
@@ -167,3 +175,211 @@ class TestLiveOnThisMac:
                 break
             time.sleep(0.5)
         assert any(d["path"] == target for d in found), f"助手查不到本会话刚发生的拒绝：{found[-3:]}"
+
+
+# ---------------- v0.45.577 二次检查 ----------------
+
+class _FakeLib:
+    """代替 libsandbox：记下 sandbox_init 有没有被调、返回给定值。测试进程已在沙箱里，真调会被拒（也不该真套）。"""
+
+    def __init__(self, rc):
+        self.calls = []
+        lib = self
+
+        def sandbox_init(profile, flags, err):
+            lib.calls.append(profile)
+            return rc
+        self.sandbox_init = sandbox_init
+
+
+def _registry(tmp_path, root=ROOT):
+    """一份临时登记目录 + 本会话状态（不碰真 REGISTRY_DIR）。"""
+    reg = tmp_path / "registry"
+    st = {"root": root, "started_epoch": 1000.0, "registry": str(reg), "session_id": "me",
+          "pids_file": str(reg / "me.pids")}
+    reg.mkdir(parents=True)
+    (reg / "me.json").write_text('{"pid": 1, "root": "%s", "started": 1000.0, "ended": null}' % root)
+    return reg, st
+
+
+def _other(reg, sid, pid, *, root=ROOT, started=900.0, ended=None, checked=False, pids=()):
+    import json
+    (reg / f"{sid}.json").write_text(json.dumps(
+        {"pid": pid, "root": root, "started": started, "ended": ended, "checked": checked}))
+    (reg / f"{sid}.pids").write_text("".join(f"{p}\n" for p in pids))
+
+
+def _den(pid, path=f"{ROOT}/x.json"):
+    return {"proc": "Python", "pid": pid, "op": "file-write-create", "path": path, "ts": "2026-10-21 10:00:00.000"}
+
+
+class TestConcurrentSessionAttribution:
+    """B1：两个会话护同一个根，X 的写曾让无辜的 Y 也红（实测复现）。现在按登记的进程号分归属。"""
+
+    DEAD = 2 ** 22 + 12345           # 远超 pid_max：kill(pid, 0) 必是 ProcessLookupError
+
+    def test_other_live_sessions_pid_is_theirs(self, tmp_path):
+        reg, st = _registry(tmp_path)
+        _other(reg, "x", os.getpid(), pids=[4242])          # 「活着」的另一个会话（借本进程号证明 alive）
+        mine, foreign = WS.attribute(st, [_den(4242)], now=2000.0)
+        assert not mine and [d["pid"] for d in foreign] == [4242] and "它自己会报" in foreign[0]["who"]
+
+    def test_own_pid_is_mine_even_if_other_also_lists_it(self, tmp_path):
+        reg, st = _registry(tmp_path)
+        (reg / "me.pids").write_text("4242\n")
+        _other(reg, "x", os.getpid(), pids=[4242])          # 进程号复用：两边都登记过 ⇒ 保守算自己的
+        mine, foreign = WS.attribute(st, [_den(4242)], now=2000.0)
+        assert [d["who"] for d in mine] == ["本会话"] and not foreign
+
+    def test_dead_unchecked_other_is_reported_here(self, tmp_path):
+        reg, st = _registry(tmp_path)
+        _other(reg, "x", self.DEAD, ended=None, checked=False, pids=[4242])
+        mine, foreign = WS.attribute(st, [_den(4242)], now=2000.0)
+        assert not foreign and "代报" in mine[0]["who"], "对方死了没核对 ⇒ 总得有人红"
+
+    def test_finished_and_checked_other_is_theirs(self, tmp_path):
+        reg, st = _registry(tmp_path)
+        _other(reg, "x", self.DEAD, ended=1500.0, checked=True, pids=[4242])
+        mine, foreign = WS.attribute(st, [_den(4242)], now=2000.0)
+        assert not mine and len(foreign) == 1
+
+    def test_unknown_pid_stays_red_and_says_ambiguous(self, tmp_path):
+        reg, st = _registry(tmp_path)
+        _other(reg, "x", os.getpid(), pids=[4242])
+        mine, foreign = WS.attribute(st, [_den(5151)], now=2000.0)
+        assert not foreign and "可能是它的" in mine[0]["who"] and str(os.getpid()) in mine[0]["who"]
+        reg2, st2 = _registry(tmp_path / "alone")
+        mine, _ = WS.attribute(st2, [_den(5151)], now=2000.0)
+        assert "可能是它的" not in mine[0]["who"], "没有并发会话时不该暗示「可能是别人的」"
+
+    def test_non_overlapping_or_other_root_sessions_are_ignored(self, tmp_path):
+        reg, st = _registry(tmp_path)
+        _other(reg, "old", self.DEAD, ended=999.0, checked=True, pids=[4242])          # 在本会话开始前就结束了
+        _other(reg, "elsewhere", os.getpid(), root="/nonexistent/other-root", pids=[4343])
+        assert WS.sessions(st, now=2000.0) == []
+        mine, foreign = WS.attribute(st, [_den(4242), _den(4343)], now=2000.0)
+        assert len(mine) == 2 and not foreign
+
+    def test_no_registry_means_everything_is_mine(self):
+        st = {"root": ROOT, "started_epoch": 1000.0, "registry": None, "registry_error": "会话登记不可用（测试）"}
+        mine, foreign = WS.attribute(st, [_den(4242)], now=2000.0)
+        assert not foreign and mine[0]["who"] == "会话登记不可用（测试）"
+
+    def test_guard_notes_foreign_and_stays_green(self, write_sandbox_guard_fn, monkeypatch, tmp_path):
+        reg, st = _registry(tmp_path)
+        _other(reg, "x", os.getpid(), pids=[4242])
+        monkeypatch.setattr(WS, "denials", lambda s: ([_den(4242)], None))
+        monkeypatch.setattr(WS, "close", lambda s: None)
+        cfg = types.SimpleNamespace(stash={})
+        write_sandbox_guard_fn(cfg, {**st, "check_log": True}, ROOT, {})          # 不抛
+        assert [d["pid"] for d in cfg._alpha_hive_foreign_denials] == [4242]
+        import json
+        assert json.loads((reg / "me.json").read_text())["checked"] is True, "核对完要登记，别的会话才敢把它的拒绝留给它"
+
+    def test_pid_hook_records_children(self, tmp_path, monkeypatch):
+        """Popen 钩子真的把子进程号写进登记（本会话已装好钩子；临时把落点换到 tmp）。"""
+        if not WS._PID_HOOK["installed"]:
+            pytest.skip("本会话没装进程号钩子（写沙箱未生效 / 登记不可用，报告头已说明）")
+        f = tmp_path / "pids"
+        monkeypatch.setitem(WS._PID_HOOK, "file", str(f))
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        assert str(p.pid) in f.read_text().split()
+
+
+class TestStaleMarker:
+    """B3：环境里残留 / 外来的 ACTIVE 标记曾让 apply() 直接信它、根本不调 sandbox_init ⇒ 沙箱静默失效。"""
+
+    def test_failed_inherited_canary_falls_through_to_apply(self, tmp_path, monkeypatch):
+        root = os.path.realpath(tmp_path / "root")
+        os.makedirs(root)
+        not_protected = tmp_path / "old_canary"
+        not_protected.mkdir()                                   # 写得进 ⇒ 标记是假的
+        monkeypatch.setenv(WS.ACTIVE_ENV, f"{root}\n{not_protected}\n")
+        monkeypatch.delenv(WS.OPT_OUT_ENV, raising=False)
+        fake = _FakeLib(rc=-1)
+        monkeypatch.setattr(WS.ctypes, "CDLL", lambda path: fake)
+        st = WS.apply(root)
+        assert fake.calls, "标记验不过就得自己套（旧代码在这里直接返回，从不调 sandbox_init）"
+        assert st["stale_marker"] and not st["inherited"] and not st["active"]
+        assert WS.ACTIVE_ENV not in os.environ
+        assert st["canary"] and not os.path.exists(st["canary"]), "B4：套失败时 close() 也要删掉自己的金丝雀"
+        assert os.listdir(not_protected) == [], "验标记时写进去的探针要删掉，否则那个目录永远不空、清不掉"
+
+
+class TestCanaryCleanup:
+    """B4：金丝雀目录每会话漏一个（10-21 实测 186 个）。"""
+
+    def test_close_removes_own_canary_without_helper(self, tmp_path):
+        c = tmp_path / f"{WS.CANARY_PREFIX}x"
+        c.mkdir()
+        WS.close({"canary": str(c), "owns_canary": True, "helper": None})
+        assert not c.exists()
+
+    def test_close_never_removes_what_it_does_not_own(self, tmp_path):
+        inherited = tmp_path / f"{WS.CANARY_PREFIX}outer"
+        inherited.mkdir()
+        WS.close({"canary": str(inherited), "owns_canary": False, "helper": None})
+        odd = tmp_path / "not_a_canary"
+        odd.mkdir()
+        WS.close({"canary": str(odd), "owns_canary": True, "helper": None})
+        assert inherited.exists() and odd.exists()
+
+    def test_prune_only_old_empty_canaries(self, tmp_path):
+        old, new, full, other = (tmp_path / f"{WS.CANARY_PREFIX}old", tmp_path / f"{WS.CANARY_PREFIX}new",
+                                 tmp_path / f"{WS.CANARY_PREFIX}full", tmp_path / "unrelated_old")
+        for d in (old, new, full, other):
+            d.mkdir()
+        (full / "f").write_text("x")
+        t = 1_000_000.0
+        for d in (old, full, other):
+            os.utime(d, (t, t))
+        os.utime(new, (t + WS.PRUNE_AFTER_S, t + WS.PRUNE_AFTER_S))
+        WS._prune_old_canaries(str(tmp_path), now=t + WS.PRUNE_AFTER_S + 1)
+        assert not old.exists() and new.exists() and full.exists() and other.exists()
+
+
+class TestPaperPortfolioGuardDefers:
+    """B2：逐条夹具 `_isolate_paper_portfolio_state` 的指纹比对在 573 没改——14:00 扫描写这四个文件时全量照样一串 ERROR。"""
+
+    @staticmethod
+    def _run(fn, tmp_path, monkeypatch, real_dir, sb):
+        cfg = types.SimpleNamespace(_alpha_hive_write_sandbox=sb)
+        gen = fn(tmp_path / "t", monkeypatch, real_dir, cfg)
+        (tmp_path / "t").mkdir(exist_ok=True)
+        next(gen)
+        (real_dir / "meta.json").write_text('{"changed": "by the scan"}')     # 沙箱外写入者
+        try:
+            next(gen)
+        except StopIteration:
+            return
+
+    def test_defers_when_sandbox_covers_it(self, paper_portfolio_isolation_fn, tmp_path, monkeypatch):
+        root = tmp_path / "root"
+        real = root / "paper_portfolio_state"
+        real.mkdir(parents=True)
+        sb = {"active": True, "root": os.path.realpath(root)}
+        self._run(paper_portfolio_isolation_fn, tmp_path, monkeypatch, real, sb)        # 不抛
+
+    def test_positive_control_still_red_without_sandbox(self, paper_portfolio_isolation_fn, tmp_path, monkeypatch):
+        """正对照：同一份写入在沙箱未生效 / 不覆盖时必须红——否则上一条的「不抛」可能只是夹具根本没在比。"""
+        real = tmp_path / "root" / "paper_portfolio_state"
+        real.mkdir(parents=True)
+        for sb in ({"active": False, "root": os.path.realpath(tmp_path / "root")},
+                   {"active": True, "root": "/nonexistent/elsewhere"}):
+            (real / "meta.json").unlink(missing_ok=True)
+            with pytest.raises(AssertionError, match="生产"):
+                self._run(paper_portfolio_isolation_fn, tmp_path, monkeypatch, real, sb)
+
+    def test_covers(self):
+        sb = {"active": True, "root": ROOT}
+        assert WS.covers(sb, f"{ROOT}/paper_portfolio_state") and WS.covers(sb, ROOT)
+        assert not WS.covers(sb, f"{ROOT}-other/paper_portfolio_state")
+        assert not WS.covers({**sb, "active": False}, ROOT) and not WS.covers(None, ROOT)
+
+    def test_live_real_dir_is_covered(self, pytestconfig, _real_paper_portfolio_state_dir):
+        """本机实测：生产真身确实落在被禁写的根下——否则让位条件在真实环境里恒假，B2 等于没修。"""
+        st = _live(pytestconfig)
+        if not st.get("active"):
+            pytest.fail(f"写沙箱没生效：{st.get('reason')}")
+        assert WS.covers(st, _real_paper_portfolio_state_dir), (st["root"], _real_paper_portfolio_state_dir)
