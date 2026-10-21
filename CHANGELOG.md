@@ -7,7 +7,42 @@
 
 ## [0.45.582] — 2026-10-21 — 占位（进行中：GuardBee FOMC 临近票改看 3 天内全部事件——CPI 2027-09-14 排在 FOMC 前一天会遮住这张票）
 
-## [0.45.581] — 2026-10-21 — 占位（进行中：Alpha Bot 跨式页盘中参考——卖跨式某腿 bid=0 时立即平仓价仍按 ask 给出、Greeks 不整套丢掉）
+## [0.45.581] — 2026-10-21 — Changed：Alpha Bot 跨式页盘中参考——卖跨式某腿 bid=0 时立即平仓价仍按 ask 给出，Greeks 在 IV 正常时不再整套丢掉
+
+起因：用户在跨式页看到 T（卖跨式，K 24.50，39 张，财报日 10-21）的盘中参考整块是「—」，问「为什么盘中拉取失败了」。
+**不是拉取失败**：CBOE 09:49 的数据取到了、现价 22.365 也在；是 24.50 call 腿 bid=0（财报后股价从 23.42 跌到 22.4，call 变深度虚值，delta 0.05），
+被 `quote_ok`（双边 bid>0）判为不可报价 ⇒ mid、立即平仓价、整套 Greeks 一起变「—」（`call:no_quote`）。可那条腿的 ask 是真实的买回价
+（实测 0.10 → 0.02 → 0.02），IV 0.2955、gamma 0.0842 也不是全零占位。卖跨式平仓本来就只看 ask。
+
+### Changed
+
+- `alphabot/straddle.py::live_view`：`quote_ok` 一个标志同时担了「能当 mid 用」和「这条腿能不能出现」两个意思，现按用途分别判——
+  - **mid / `mark_mid`**：仍要两腿 `quote_ok`（bid=0 的 mid 只是 ask 的一半，不是市价）。
+  - **立即平仓**：卖跨式在两腿 `_ask_ok`（ask 有限且 >0、bid 有限且 ≥0、ask ≥ bid，不接受倒挂）时给出，`exit_now_basis="ask_only"`；
+    买跨式按 bid 卖出，bid=0 即无买盘，**仍不给**（本次未碰）。
+  - **Greeks**：bid=0 的腿在 `_greeks_usable`（有真实 ask、四个 Greeks 有限、`iv>0`）时照用；`iv` 缺 / ≤0 是 CBOE 对没成交合约给的全零占位，不当观测值
+    （同 `cboe_options.select_quote_set` 不把 delta=0 当观测值）。`position_greeks` 本身不动，仍与 `portfolio_greeks.option_exposures` 逐项对拍。
+  - 新增三个只增不改的字段：`exit_now_basis`（`bid_ask` / `ask_only` / None）、`bid_zero_legs`、`greeks.degraded_legs`。
+- `alphabot/static/pages/straddle.js`：说明句按情形分开讲（bid=0 卖跨式按 ask 给 / bid=0 买跨式无买盘 / 另一腿也没 ask / 真缺报价沿用原话）；
+  标签在 `ask_only` 时写「按 ask」；Greeks 含 bid=0 腿时加一行「CBOE 模型值，仅供参考」。`help.js` 盘中参考一节补一条。
+
+### 没改，以及已知差异
+
+- `cboe_options._qs_contract` 的 `quote_ok` 口径：随快照落盘、卖权账本共用，不动。
+- `portfolio_greeks.option_exposures`：账本侧 Greeks 与 delta 对冲仍按严格 `quote_ok`，**所以同一条腿盘中页有数、当晚账本可能仍缺报价**
+  （页面上已标注）。要不要让对冲侧也放宽是另一个决定——它影响对冲决策，没顺手改。
+- 「39 张按 ask 全量买回」是假设：CBOE payload 没有挂单量，沿用账本现有的出场成交约定。
+
+### 测试
+
+- `tests/test_alphabot_straddle.py::TestLiveBidZeroLeg`（新增 13 条，整文件 39 条）：实测 T 腿形状的夹具；卖跨式 `exit_now_usd` 手算对拍；买跨式不放行；
+  两腿都 bid=0；正常报价不变；**对照组**：ask=0 / ask 缺失 / 倒挂 / 负 bid / iv=0 全零 / iv 缺失 / 某 Greek 缺失都不放行；前后端字段名双向核对。
+- 变异自检 9 个全杀（去掉 ask_only 分支、买跨式也放行、`_ask_ok` 放宽 / 不拒倒挂 / 不拒负 bid、`_greeks_usable` 不查 iv / 恒真、mid 在 bid=0 时也给、不标 degraded_legs），
+  脚本每轮从备份还原。alphabot 相关 511 条全绿，ruff 过。
+- 真实数据（只读）：T 的 call 腿 bid=0 / ask=0.02、put 1.93/2.53 ⇒ 立即平仓价 2.55、浮亏 −$3,783，Greeks 完整并标 `degraded_legs=["call"]`；
+  合成账本四种情形（bid=0 卖 / bid=0 买 / 死腿 / 正常）在浏览器里逐一核过文案。
+
+⚠️ 生效时机：Alpha Bot 跑的是 `~/alpha-hive-prod`，合入 main 后要等下一个扫描日克隆快进、再**重启 Alpha Bot** 才用上。
 
 ## [0.45.580] — 2026-10-21 — 占位（进行中：buzz_v1 根治阶段 1b——行情原始日线入档，按版本化观测层结构写）
 

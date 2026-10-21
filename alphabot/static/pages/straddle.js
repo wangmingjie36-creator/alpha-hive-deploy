@@ -63,7 +63,21 @@ function greeksGrid(g, warnAt) {
     g.directional ? h("p", { class: "callout warn" },
       `已明显带方向：每份跨式净 Δ ${num(g.net_delta_per_straddle, 2)}（入场时约为 0，提示阈值 ${num(warnAt, 2)}）。账本不做 delta 对冲，这一笔现在相当于持有 ${shares}。`) : null,
     !g.complete ? h("div", { class: "small muted" }, `Greeks 不全：${(g.missing || []).join("、")}`) : null,
+    g.degraded_legs?.length ? h("div", { class: "small muted" },
+      `Greeks 含 ${g.degraded_legs.join("、")} 腿（bid=0）的 CBOE 模型值，仅供参考；账本侧仍按严格报价口径，当晚可能显示缺报价。`) : null,
   ];
+}
+
+// 为什么 mid / 立即平仓价不可得：bid=0 的腿（卖跨式仍可按 ask 买回）与真缺报价要分开说
+function quoteNote(r, side) {
+  if (r.quote_ok) return null;
+  const zero = r.bid_zero_legs || [];
+  if (!zero.length) return "两腿报价不全，mid 与立即平仓价不可得。";
+  const names = zero.join("、");
+  if (isNum(r.exit_now_usd)) return `${names} 腿 bid=0：mid 不可得；立即平仓价按 ask 给出（卖跨式买回只看 ask）。`;
+  return side === "long"
+    ? `${names} 腿 bid=0（无买盘）：mid 不可得；买跨式按 bid 卖出，立即平仓价不可得。`
+    : `${names} 腿 bid=0：mid 不可得；另一条腿没有可用的 ask，立即平仓价也不可得。`;
 }
 
 function levelsLine(lv, be) {
@@ -85,8 +99,8 @@ function renderLive(el, r, p, warnAt) {
     h("div", { class: "sd-k" }, `盘中参考 · ${PX_SRC[r.underlying_price_source] || r.underlying_price_source || "—"} · 最后成交 ${when || "—"}${r.cache_age_sec ? ` · ${Math.round(r.cache_age_sec)} 秒前` : ""}${r.demo ? " · 演示" : ""}`),
     h("div", { class: "sd-row" }, `现价 `, h("b", {}, num(r.underlying_price)), ` · mark（mid）`, h("b", {}, num(r.mark_mid)),
       ` → `, h("b", { class: tone(r.unrealized_mid_usd) }, `${sMoney(r.unrealized_mid_usd)}（${signedPct(r.unrealized_mid_pct)}）`),
-      ` · 立即平仓（付点差）`, h("b", { class: tone(r.exit_now_usd) }, sMoney(r.exit_now_usd))),
-    r.quote_ok ? null : h("div", { class: "small muted" }, "两腿报价不全，mid 与立即平仓价不可得。"),
+      ` · 立即平仓（${r.exit_now_basis === "ask_only" ? "按 ask" : "付点差"}）`, h("b", { class: tone(r.exit_now_usd) }, sMoney(r.exit_now_usd))),
+    quoteNote(r, p.side) ? h("div", { class: "small muted" }, quoteNote(r, p.side)) : null,
     h("div", { class: "sd-row" }, bandText(p.side, r.band)),
     greeksGrid(r.greeks, warnAt),
     levelsLine(r.levels, r.breakeven),

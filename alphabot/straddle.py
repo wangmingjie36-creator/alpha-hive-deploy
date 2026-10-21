@@ -17,6 +17,8 @@
     $Delta = qty·delta·S    $Gamma(1%) = ½·qty·gamma·(0.01·S)²    $Vega/点 = qty·vega    $Theta/日 = qty·theta
 **S 用与账本 mark 同一份 CBOE 快照里的现价**（当天信号行的 `underlying_price`），不用 greeks 文件里的 `price`：
 那个价曾比期权报价晚一天（v0.45.423）。任一腿缺任一项 ⇒ 对应合计为 None，不把缺的当 0。
+**盘中参考**（`live_view`，v0.45.581）比账本侧宽一档：bid = 0 但 ask 真实、IV 正常的腿，Greeks 照用并标 `degraded_legs`
+（账本 / 对冲侧 `portfolio_greeks` 仍按严格 `quote_ok`，所以同一条腿盘中页可能有数、当晚账本却缺报价）。
 
 盲期（检验协议：experiments/straddle_gex_prereg.md）
 ---------------------------------------------------
@@ -520,9 +522,34 @@ def levels_brief(detail: Optional[dict], view: str = "le_45dte") -> dict:
             "call_side_extreme": mj.get("call_side_extreme_strike"), "put_side_extreme": mj.get("put_side_extreme_strike")}
 
 
+def _ask_ok(leg) -> bool:
+    """这条腿有没有一口**真实可买回**的 ask：ask 有限且 > 0、bid 有限且 ≥ 0、ask ≥ bid（不接受倒挂）。
+    与 `quote_ok`（双边 bid > 0，mid 的前提）是两个问题：bid = 0 的深度虚值腿没有 mid，但 ask 是真实的买回价。"""
+    if not isinstance(leg, dict):
+        return False
+    bid, ask = _num(leg.get("bid")), _num(leg.get("ask"))
+    return bid is not None and ask is not None and bid >= 0 and ask > 0 and ask >= bid
+
+
+def _greeks_usable(leg) -> bool:
+    """bid = 0 的腿，CBOE 逐合约 Greeks 还能不能拿来用：有真实的 ask、四个 Greeks 都有限、且 iv > 0。
+    iv 缺 / ≤ 0 时 CBOE 给的是全零占位，不是观测值（`cboe_options.select_quote_set` 同样不把 delta = 0 当观测值）。"""
+    if not _ask_ok(leg):
+        return False
+    iv = _num(leg.get("iv"))
+    return iv is not None and iv > 0 and all(_num(leg.get(k)) is not None for k in GREEK_KEYS)
+
+
 def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
     """一笔持仓的盘中参考：两腿现报（mid 盯市 + 按可成交价立即平仓）、净 Greeks、现价相对盈亏带的位置、当天水平。
-    **只读、不写账本**；报价拿不到就如实不可得，**不**拿账本 mark 顶上。"""
+    **只读、不写账本**；报价拿不到就如实不可得，**不**拿账本 mark 顶上。
+
+    bid = 0 的腿（财报后被打穿的深度虚值腿最常见，v0.45.581）按用途分别判，不再整条腿一刀切：
+      · mid / `mark_mid`：仍要两腿 `quote_ok`（bid = 0 的 mid 只是 ask 的一半，不是市价）；
+      · 立即平仓：卖跨式是按 ask 买回，两腿 ask 都真实（`_ask_ok`）就给，`exit_now_basis="ask_only"`；
+        买跨式按 bid 卖出，bid = 0 即无买盘，仍不给；
+      · Greeks：`_greeks_usable` 的腿照用，`greeks.degraded_legs` 标明哪几条是 bid = 0 的模型值，仅供参考。
+    账本侧（`portfolio_greeks.option_exposures`）与卖权账本共用的 `quote_ok` 口径**不动**，对冲决策仍按严格口径。"""
     side = str(p.get("side") or "")
     n = _pos(p.get("contracts"))
     quotes = (q or {}).get("quotes") or {}
@@ -530,12 +557,25 @@ def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
     ok = [isinstance(x, dict) and bool(x.get("quote_ok")) for x in (qc, qp)]
     mark = (qc["mid"] + qp["mid"]) if all(ok) else None
     # 立即平仓：买跨式按 bid 卖出、卖跨式按 ask 买回（与账本的出场成交约定相同）
-    exit_px = None
+    exit_px, exit_basis = None, None
     if all(ok):
         exit_px = (qc["bid"] + qp["bid"]) if side == "long" else (qc["ask"] + qp["ask"])
+        exit_basis = "bid_ask"
+    elif side == "short" and all(_ask_ok(x) for x in (qc, qp)):
+        exit_px, exit_basis = qc["ask"] + qp["ask"], "ask_only"
+    bid_zero = [name for name, leg, leg_ok in zip(("call", "put"), (qc, qp), ok)
+                if not leg_ok and _ask_ok(leg) and _num(leg.get("bid")) == 0]
     S = _pos((q or {}).get("underlying_price"))
     band = breakeven(side, p.get("strike"), p.get("entry_premium"))
-    legs = [qc if ok[0] else None, qp if ok[1] else None]
+    legs, degraded = [], []
+    for name, leg, leg_ok in zip(("call", "put"), (qc, qp), ok):
+        if leg_ok:
+            legs.append(leg)
+        elif _greeks_usable(leg):
+            legs.append(leg)
+            degraded.append(name)
+        else:
+            legs.append(None)
     pnl_mid = unrealized(side, p.get("entry_premium"), mark, n)
     size = _pos(p.get("size_usd"))
     return {
@@ -548,7 +588,9 @@ def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
         "mark_mid": mark, "unrealized_mid_usd": pnl_mid,
         "unrealized_mid_pct": (pnl_mid / size * 100.0) if (pnl_mid is not None and size) else None,
         "exit_now_premium": exit_px, "exit_now_usd": unrealized(side, p.get("entry_premium"), exit_px, n),
-        "greeks": position_greeks(legs, side, n, S), "band": band_position(S, band), "breakeven": band,
+        "exit_now_basis": exit_basis, "bid_zero_legs": bid_zero,
+        "greeks": {**position_greeks(legs, side, n, S), "degraded_legs": degraded},
+        "band": band_position(S, band), "breakeven": band,
         "levels": levels,
         "same_payload": (levels.get("payload_last_trade_time") == (q or {}).get("payload_last_trade_time"))
         if levels.get("available") and (q or {}).get("available") else None,
