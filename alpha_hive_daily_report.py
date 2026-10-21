@@ -50,7 +50,7 @@ except ImportError:
     CodeExecutorAgent = None
     CODE_EXECUTION_CONFIG = {"enabled": False}
 
-# v0.45.339：此处不再 import SlackReportNotifier —— 本模块唯一的 Slack 发送是
+# v0.45.339：此处不再 import SlackReportNotifier（该模块 v0.45.575 已删）—— 本模块唯一的 Slack 发送是
 # 财报更新通知（CLAUDE.md「Slack 通知精简规则」白名单之外），已改为只写日志。
 EarningsWatcher = optional_import("earnings_watcher", "EarningsWatcher")
 

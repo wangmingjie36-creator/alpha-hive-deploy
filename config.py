@@ -80,10 +80,8 @@ API_KEYS = {
 
 # ==================== 服务配置（避免硬编码散落各模块） ====================
 
-# Slack 频道 ID（#alpha-hive）
-SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "C0AGUUWJXJS")
-# v0.45.343：删掉了 SLACK_DM_FALLBACK（「Bot 不在频道 ⇒ 自动改发私信」）——它让频道推送静默变成私信、
-# 调用方照记「已推送到 #alpha-hive」。理由见 slack_report_notifier._send_via_api 的 docstring。
+# v0.45.575：SLACK_CHANNEL_ID 随 slack_report_notifier（唯一读者）删除——Bot 不发任何 Slack 消息；
+# 频道推送只走 Claude Code Slack MCP（频道 ID 见 CLAUDE.md）。v0.45.343 删过的 SLACK_DM_FALLBACK 同理勿恢复。
 
 # SEC EDGAR 要求的 User-Agent（SEC 政策要求包含联系方式）
 SEC_USER_AGENT = os.environ.get(

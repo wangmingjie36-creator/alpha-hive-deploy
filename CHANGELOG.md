@@ -11,7 +11,35 @@
 
 ## [0.45.576] — 2026-10-21 — 占位（进行中：经济日历 572/574 二次检查修复——GDP 来源指向次年页、监视器总时限、滚动页改版绊线、2027 日期回归钉）
 
-## [0.45.575] — 2026-10-21 — 占位（进行中：删整个 slack_report_notifier.py——v0.45.571 后零生产调用方）
+## [0.45.575] — 2026-10-21 — Removed：整个 `slack_report_notifier.py`（连同 `resilience.slack_breaker` / `"slack"` 会话超时、`config.SLACK_CHANNEL_ID`）——v0.45.571 后零生产调用方；仓库里从此没有任何 Slack 发送代码
+
+用户决定（2026-10-21）：「也删了」（v0.45.571 二次检查后留给用户的待决项：通知器只剩发送原语与配置探测、零生产调用方）。
+Slack 频道推送只走 Claude Code Slack MCP（月度自诊断在用）；每日日报目前没有自动推送（v0.45.571 已记，待用户决定）。
+
+### Removed
+- `slack_report_notifier.py`（整个模块）。删前逐字节冻结为 `tests/fixtures/slack_report_notifier.py.frozen`，只作 Slack 白名单守卫的真代码正对照（不是 `.py`，不被 import、不被全仓扫描当源码）。
+- `resilience.slack_breaker` 与 `_SOURCE_TIMEOUTS["slack"]`：唯一使用者是该模块。
+- `config.SLACK_CHANNEL_ID`：唯一读者是该模块（`#alpha-hive` 的频道 ID 仍在 CLAUDE.md，供 Slack MCP 用）。`config._SECRET_REGISTRY` 的三条 Slack 凭证登记**保留**——通用凭证表，`scan_secrets` 泄密扫描也按凭证路径认。
+- `run_daily_scan.py --dry-run` 的「Slack 连通性」检查与模块导入检查项。
+- 测试：`tests/test_slack_notifier.py`（整文件，测的就是该模块）、`tests/test_utilities.py::TestSlackWebhookEnvVar`、conftest autouse `_block_slack`
+  （它打桩的对象不存在了；出网由 `_offline_transport` 在传输层兜底）。
+
+### Changed（守卫）
+- `tests/test_slack_send_whitelist.py`：
+  - `SENDER_LIBS` 变空；`slack_report_notifier` 进 `RETIRED_SENDER_MODULES`（导入它 / 引用类名即红，文件回来也红），剩下三个发送方法
+    `send_plain_text` / `_send_via_api` / `_send_slack_message_payload` 进 `RETIRED_SEND_METHODS`。
+  - 真代码正对照改用冻结副本：原样放回仓库根必须命中 R3 + R4 + R6（变异：R4 改判 `"slackX"` 实测变红）；推导集合在冻结副本上核，并断言推出的每个发送方法都在墓碑里。
+  - 类体豁免机制改用合成库测（`test_library_class_body_is_exempt_only_inside`；变异 `_exempt` 恒 False 实测变红）。
+  - 「只读状态」用例（当年 `run_daily_scan --dry-run` 的形状）从「不该红」移到「该红」——现在导入已删模块本身就是违规。
+  - 行为组 `armed_slack` 改为把 `resilience.get_session("slack")` 换成记录器（原来武装的是通知器）；财报用例的旧接线改挂替身；
+    死锁回归改用名为 `"slack"` 的探针熔断器实例（全局 `slack_breaker` 已删）。
+- `tests/test_breaker_isolation.py`：第二个模块级熔断器从 `slack_breaker` 换成 `reddit_breaker`。
+- `tests/test_step7_push_report_retired.py`：格式化成员检查改为「全仓非测试 Python 里没有同名函数定义」（只认两个独特名字；
+  `_load_json` 是泛名，`alpha_hive_mcp` 有自己的同名函数，首版按它认误红过）。
+- 文档：CLAUDE.md「Slack 推送规则」改为「仓库里没有任何 Slack 发送代码」；两份过时指南的顶部提示同步；`agent_toolbox` / `alpha_hive_daily_report` / `resilience` 注释同步。
+
+### 上线
+- 纯 Python、不碰编排器：生产克隆下一个扫描日快进后即生效。扫描主流程本来就不 import 该模块（v0.45.339 起），`run_daily_scan.py` 是手动工具。
 
 ## [0.45.574] — 2026-10-21 — Fixed：经济日历监视器的 GDP 检查加读 BEA 次年日程页 `/news/schedule/next-year`，与滚动页的初值季度取并集——此前 BEA 发了次年日程，监视器照样对 GDP 报「上游无新」（退出码 0）；顺带修好每年 Q4 初值行读不到、滚动页 10 月末后恒「无法判定」两处
 

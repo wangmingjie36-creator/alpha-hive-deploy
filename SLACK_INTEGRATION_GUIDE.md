@@ -5,7 +5,7 @@
 > （原第二类「扫描前 LLM 模式确认」`pre_scan_notify.py` 已于 v0.45.510 停用、v0.45.514 删除。）
 > 文中的 `send_risk_alert` / `send_opportunity_alert` / `send_scan_progress` / `send_x_thread` /
 > `send_daily_report` / `test_connection` 与 `slack_notifier.py` 已于 v0.45.341 删除（零生产调用方）。
-> 看配置状态：`/usr/local/bin/python3 slack_report_notifier.py`（只打印，不发消息）。
+> 文中的 `slack_report_notifier.py` / `SlackReportNotifier` 也已于 v0.45.575 整个删除（仓库里不再有任何 Slack 发送代码），下文所有代码示例都跑不起来。
 
 **完成时间**: 2026-02-24 21:00 UTC
 **状态**: ✅ 完全集成 & 验证通过

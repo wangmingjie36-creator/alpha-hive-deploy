@@ -22,7 +22,8 @@ from tests._orchestrator import extract_function, repo_orchestrator_text
 from tests._repo_files import own_python_files
 
 REPO_ROOT = Path(__file__).resolve().parent.parent   # 指向**代码**，故用 __file__
-_RETIRED_MEMBERS = {"send_rich_daily_report", "_format_rich_daily_mrkdwn", "_load_json"}
+#: 只认独特名字：同删的 `_load_json` 是泛名（alpha_hive_mcp 等也有自己的同名函数），按名字认会误红
+_RETIRED_MEMBERS = {"send_rich_daily_report", "_format_rich_daily_mrkdwn"}
 
 
 def _code_lines(text: str) -> list[str]:
@@ -64,11 +65,26 @@ class TestStep7StaysRetired:
         assert any("alert_manager.py" in ln for ln in run_lines)   # 正对照：同一解析认得出仍在跑的步骤
 
     def test_formatter_members_are_gone(self):
-        tree = _ast_cache.parse_file(REPO_ROOT / "slack_report_notifier.py")
-        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SlackReportNotifier")
-        members = {f.name for f in cls.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))}
-        assert "send_plain_text" in members                      # 正对照：解析的确实是那个类
-        assert not (_RETIRED_MEMBERS & members), sorted(_RETIRED_MEMBERS & members)
+        """v0.45.575 起整个 `slack_report_notifier.py` 都删了（冻结副本在 tests/fixtures）；这里只核格式化成员没回到任何
+        非测试 Python 里（按函数定义名认，正对照：冻结副本里认得出）。"""
+        frozen = _ast_cache.parse(
+            (REPO_ROOT / "tests" / "fixtures" / "slack_report_notifier.py.frozen").read_text(encoding="utf-8"))
+        assert not (REPO_ROOT / "slack_report_notifier.py").exists()
+        defs = {n.name for n in ast.walk(frozen) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        assert "send_plain_text" in defs and not (_RETIRED_MEMBERS & defs)   # 冻结的是 571 之后的版本
+        files, _how = own_python_files(REPO_ROOT)
+        back = []
+        for f in files:
+            rel = f.relative_to(REPO_ROOT).as_posix()
+            if rel.startswith("tests/"):
+                continue
+            try:
+                tree = _ast_cache.parse_file(f, errors="replace")
+            except SyntaxError:
+                continue
+            back += [f"{rel}:{n.lineno} {n.name}" for n in ast.walk(tree)
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in _RETIRED_MEMBERS]
+        assert not back, back
 
     def test_nobody_calls_the_script(self):
         files, _how = own_python_files(REPO_ROOT)
