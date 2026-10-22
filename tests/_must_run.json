@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "commit": "525b250e0b3e7ba9f5599b440682aeab52927070",
+  "commit": "44a3b027a869791ae26aa7ebabeec5602af8f093",
   "reads_all_tests": [
     "tests/test_agent_weight_manager_retired.py",
     "tests/test_bare_env_children_pin_data_root.py",
@@ -33,6 +33,8 @@
   },
   "nonpy_readers": {
     ".claude/settings.json": ["tests/test_dev_checkout_sync.py"],
+    ".github/workflows/clockshift.yml": ["tests/test_persistent_writes_have_readers.py"],
+    ".github/workflows/tests.yml": ["tests/test_persistent_writes_have_readers.py"],
     ".gitignore": ["tests/test_data_migrations.py", "tests/test_ml_model_guard.py", "tests/test_replay_ohlc_store.py", "tests/test_samples_only_mode_retired.py"],
     "ALPHA_BOT_GUIDE.md": ["tests/test_alphabot.py", "tests/test_alphabot_launcher.py"],
     "CHANGELOG.md": ["tests/test_changelog_entry_integrity.py", "tests/test_code_version.py", "tests/test_options_paper_leg.py", "tests/test_options_paper_leg_settle_close.py", "tests/test_production_clone.py", "tests/test_production_sync.py", "tests/test_quarantine_1014_prev_session.py", "tests/test_quarantine_prev_window_0915_0925.py", "tests/test_scan_timing.py", "tests/test_straddle_gex_shadow.py", "tests/test_straddle_strangle_shadow.py"],
@@ -56,6 +58,7 @@
     "alphabot/static/pages/straddle.js": ["tests/test_alphabot.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_straddle.py", "tests/test_alphabot_strangle_compare.py", "tests/test_straddle_strangle_shadow.py"],
     "alphabot/static/pages/ticker.js": ["tests/test_alphabot.py", "tests/test_alphabot_howto.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_premium.py", "tests/test_alphabot_unquotable.py"],
     "alphabot/static/vendor/echarts.min.js": ["tests/test_alphabot.py"],
+    "constraints.txt": ["tests/test_requirements_match_installed.py"],
     "experiments/dim_ic_preregistration.md": ["tests/test_day_health.py", "tests/test_dim_ic_protocol.py"],
     "experiments/fg_gate_forward_seed/SEED_SOURCE.json": ["tests/test_fg_exposure_gate_forward_test.py"],
     "experiments/fg_gate_forward_seed/anchors/2026-09-16/closed_trades.jsonl": ["tests/test_fg_exposure_gate_forward_test.py"],

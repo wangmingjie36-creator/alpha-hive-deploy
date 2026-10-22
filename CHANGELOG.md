@@ -85,7 +85,8 @@
   `git add` 后 `test_paths_not_frozen_at_import` 报出 `ROOT`，登记后 11 个元守卫文件 1154 passed。
 - 完全照 CI 新命令建的干净 venv（`pip install -r requirements.txt -c constraints.txt pytest pytest-timeout ruff`）：`pip check` 无冲突，装出来的就是约束版本，venv 里 `check()` 为空；整套（开跑前等别的会话整套跑完）第一轮 **1 failed** / 11669 passed——`test_persistent_writes_have_readers` 要求给 `constraints.txt` 的写入登记读者（上面那 11 个手挑的元守卫里没有它，整套才抓到）；登记后该守卫 18 passed，扫全仓的元守卫 11 个文件 1136 passed。
 - 二次检查（同日）：用生产的 ruff 0.13.3 跑全仓 `ruff check .` 通过；extras 跟进经变异核实（关掉 extras 求值 ⇒ 闭包里正好少了经 `pyjwt[crypto]` 进来的 cryptography）；更正本条两处措辞（9 个只在 macOS 的包不全是 pyobjc；补上 CI 原 ruff / pytest 的具体版本）。
-- CI：推送后核对，结果补在本条末尾。
+- CI（`76e4586e`，run 39846489110）**判失败**：Linux 上按约束文件安装成功（77 个钉死的版本都装上了）、lint（ruff 0.13.3）通过、整套测试 **11717 passed / 0 failed** / 22 skipped；**红的是其后的「选测登记表漂移检查」**（`select_tests.py --check-drift`，exit 4）：本版新引入的三处非代码读没进 `tests/_must_run.json`（v0.45.615 的选测登记表）——`test_persistent_writes_have_readers` 读两个工作流文件（本版把它们登记成 `constraints.txt` 的读者）、`test_requirements_match_installed` 读 `constraints.txt`。⚠️ 我本地手挑的元守卫与整套都没带审计插件，看不到这一步；后台等 CI 的任务结束时我也没打开它的输出，是发起会话转告的。
+- 修（同日追补）：登记表只并进这三条读。**没收** `select_tests.py --update` 的另一处改动——它把 `test_persistent_writes_have_readers` 归进「读全部测试文件」：部分更新时门槛按这次只收集到的 2 个文件算（0.5 × 2 = 1），读 1 个别的测试文件就被判成读全部（v0.45.618 已记这个误判、另开任务）。本地复现 CI 判定（读记录的收集数换成全仓 375 个测试文件）：新登记表通过；用改前的登记表核同一份读记录，原样复现 CI 那两行报错（正对照）。
 
 ### 遗留
 - Alpha Bot 帮助页 / 弹窗里教人「换解释器先 `pip install -r requirements.txt`」（`alphabot/macos_app.py`）还没带 `-c constraints.txt`：照它装，传递依赖会是最新版——
