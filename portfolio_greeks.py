@@ -107,6 +107,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import delta_hedge as dh
 import ledger_io
+from cboe_options import bid_zero_greeks_usable
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("portfolio_greeks")
@@ -575,21 +576,6 @@ def _default_quotes(ticker: str, symbols: List[str]) -> Dict[str, Optional[dict]
     return {s: ({**q, "underlying": und} if isinstance(q, dict) else q) for s, q in quotes.items()}
 
 
-def _bid_zero_greeks_usable(q) -> bool:
-    """`quote_ok` 为假、但 CBOE 的逐合约 Greeks 仍可用的那一类：**bid = 0**（深度虚值腿最常见）、
-    ask 有限且 > 0、四个 Greeks 与 iv 都有限、iv > 0（iv 缺 / ≤ 0 时 CBOE 给的是全零占位，不是观测值）。
-    mid 在这里依旧是 None——bid = 0 的「中间价」只是 ask 的一半，不是市价；但 Greeks 与 mid 无关，
-    让这样一张腿把整个组合的 β·$Delta 变成 unknown（v0.45.609 之前的行为）等于为了 0.03 的 ask 停掉对冲。
-    判据与 Alpha Bot 跨式页盘中参考（`straddle._greeks_usable`，v0.45.581）一致；这里不 import 它（依赖方向）。"""
-    if not isinstance(q, dict):
-        return False
-    bid, ask = _num(q.get("bid")), _num(q.get("ask"))
-    if bid is None or ask is None or bid != 0 or ask <= 0:
-        return False
-    iv = _num(q.get("iv"))
-    return iv is not None and iv > 0 and all(_num(q.get(k)) is not None for k in ("delta", "gamma", "vega", "theta"))
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 逐行暴露
 # ══════════════════════════════════════════════════════════════════════════════
@@ -666,7 +652,7 @@ def option_exposures(as_of: str, positions: Optional[List[Dict]] = None,
         $Vega/pt    = qty × vega                          —— CBOE vega 已是每 vol 点
         $Theta/日   = qty × theta                         —— CBOE theta 每日历日、多头为负
     报价缺失 → 该行 quote_missing、Greeks None（不沿用 last_mark 的任何东西）。
-    例外（v0.45.609）：bid = 0 但 ask 真实、Greeks 与 iv 齐全的腿（`_bid_zero_greeks_usable`）**不算缺**——
+    例外（v0.45.609）：bid = 0 但 ask 真实、Greeks 与 iv 齐全的腿（`cboe_options.bid_zero_greeks_usable`）**不算缺**——
     Greeks 照进汇总、行上标 `bid_zero=True`、`mid` 仍为 None（压力表因缺 mid 单独剔这一行并说明原因）。
     S（v0.45.423）取自与报价**同一份** CBOE payload（`_default_quotes` 附在报价里的 "underlying"），
     与期权报价同一时刻；报价里没有它（注入的 quotes_fn）才退回 closes_fn。payload 属于别的场次
@@ -723,7 +709,7 @@ def option_exposures(as_of: str, positions: Optional[List[Dict]] = None,
                 row["quote_session"] = und.get("session")
                 q = None                    # 别的场次的报价：不进 Greeks 汇总（同缺报价）
             ok = isinstance(q, dict) and bool(q.get("quote_ok"))
-            bid_zero = (not ok) and _bid_zero_greeks_usable(q)
+            bid_zero = (not ok) and bid_zero_greeks_usable(q)
             g = {k: _num(q.get(k)) for k in ("mid", "iv", "delta", "gamma", "vega", "theta")} if (ok or bid_zero) else {}
             if not (ok or bid_zero) or any(g.get(k) is None
                                           for k in (("mid",) if ok else ()) + ("delta", "gamma", "vega", "theta")):
@@ -1103,7 +1089,7 @@ def aggregate(rows: List[Dict], nav: Optional[float]) -> Dict:
     nav = _pos(nav)
     sums = {k: 0.0 for k in _GREEK_KEYS}
     n_price = n_stale = n_quote = n_beta = n_incomplete_bdd = 0
-    n_with_beta = 0
+    n_with_beta = n_bid_zero = 0
     for r in rows:
         for k in _GREEK_KEYS:
             v = _num(r.get(k))
@@ -1112,13 +1098,14 @@ def aggregate(rows: List[Dict], nav: Optional[float]) -> Dict:
         n_price += bool(r.get("price_missing"))
         n_stale += bool(r.get("price_stale"))
         n_quote += bool(r.get("quote_missing"))
+        n_bid_zero += bool(r.get("bid_zero"))
         n_beta += bool(r.get("beta_missing"))
         n_with_beta += _num(r.get("beta")) is not None
         n_incomplete_bdd += _num(r.get("beta_dollar_delta")) is None
     n_rows = len(rows)
     pct = {k: (round(sums[k] / nav * 100.0, 4) if nav else None) for k in _GREEK_KEYS}
     coverage = {"n_rows": n_rows, "n_price_missing": n_price, "n_price_stale": n_stale,
-                "n_quote_missing": n_quote,
+                "n_quote_missing": n_quote, "n_bid_zero": n_bid_zero,
                 "n_beta_missing": n_beta, "n_beta_dd_incomplete": n_incomplete_bdd,
                 "beta_coverage": (round(n_with_beta / n_rows, 4) if n_rows else None)}
     partial = bool(n_price or n_quote or n_beta)
@@ -2173,6 +2160,8 @@ def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
                 + f" / 缺报价 {cov.get('n_quote_missing', 0)} / "
                 f"缺 β {cov.get('n_beta_missing', 0)}，β 覆盖率 "
                 + (f"{(cov.get('beta_coverage') or 0) * 100:.0f}%" if cov.get("beta_coverage") is not None else "—"))
+    if cov.get("n_bid_zero"):
+        cov_line += f"；含 {cov['n_bid_zero']} 张买价为 0 的腿（CBOE 模型 Greeks、无 mid，已计入带位）"
     if agg.get("partial"):
         cov_line += " —— **部分数据，结论不完整，不据此对冲**"
     L += ["", cov_line]

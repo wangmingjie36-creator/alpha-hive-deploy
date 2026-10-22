@@ -1518,6 +1518,26 @@ def _qs_contract(row: dict, *, role: str, cp: str, strike: float,
     }
 
 
+def bid_zero_greeks_usable(q) -> bool:
+    """`quote_ok` 为假、但这张合约的逐合约 Greeks 仍可用的那一类：**bid = 0**（深度虚值腿最常见）、
+    ask 有限且 > 0、delta / gamma / vega / theta 与 iv 都有限、iv > 0。`q` 是 `_qs_contract` 整理出的报价 dict。
+
+    iv 缺 / ≤ 0 时 CBOE 给的是全零占位，不是观测值（2026-10-22 实测 T / VZ / AMZN 三条链上 bid = 0 且 ask > 0 的
+    578 张里，iv ≤ 0 的 3 张 delta 全是 0）。mid 对这类腿依旧是 None——bid = 0 的「中间价」只是 ask 的一半，不是市价，
+    所以 `quote_ok` 本身**不动**（卖权账本 / 跨式入场的 25% 点差口径都建在它上面）；放宽的只是「Greeks 能不能用」。
+
+    **唯一定义**（v0.45.620）：`portfolio_greeks.option_exposures`（对冲账本 Greeks 汇总）与 `alphabot/straddle.py`
+    （跨式页的盘中参考与账本视图）共用这一个，不各抄一份。纯函数、不读时钟。"""
+    if not isinstance(q, dict):
+        return False
+    bid, ask = _qs_num(q.get("bid")), _qs_num(q.get("ask"))
+    if bid is None or ask is None or bid != 0 or ask <= 0:
+        return False
+    iv = _qs_num(q.get("iv"))
+    return iv is not None and iv > 0 and all(_qs_num(q.get(k)) is not None
+                                              for k in ("delta", "gamma", "vega", "theta"))
+
+
 def _qs_pick_row(rows: List[dict]) -> dict:
     """同 (到期日, 方向, 行权价) 理论上只有一行；万一重复，取 OI 最大的那行。"""
     return max(rows, key=lambda r: _qs_num(r.get("open_interest")) or 0.0)

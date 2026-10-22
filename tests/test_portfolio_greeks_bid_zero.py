@@ -5,15 +5,20 @@ Greeks 全丢 ⇒ 汇总里 1 行 β·$Delta 缺 ⇒ band_status="unknown" ⇒ �
 修法只放宽**对冲 Greeks 汇总**这一处：bid = 0、ask 真实、iv > 0、四个 Greeks 齐全 ⇒ Greeks 照进汇总、行上标
 `bid_zero`、mid 仍为 None。卖权账本 / 跨式入场用的 `quote_ok`（25% 点差上限等）一个字不碰——下面有断言。
 
+v0.45.620（二次检查 v0.45.609）：判据收到 `cboe_options.bid_zero_greeks_usable` 一处，对冲账本与 Alpha Bot 跨式页共用；
+跨式页账本视图也标 `degraded_legs`；对冲页 / 覆盖行显示 bid_zero 腿数；「只许自用」守卫改为递归扫全仓。
+
 全部离线：价格 / 报价 / β 一律注入。"""
 
 import ast
-import inspect
+import pathlib
 
 import pytest
 
 import cboe_options
 import portfolio_greeks as pg
+from alphabot import hedge as hedge_page
+from alphabot import straddle as sd
 from greeks_engine import calculate_single
 
 AS_OF = "2026-09-03"
@@ -116,11 +121,6 @@ class TestStillMissingWhenGreeksCannotBeTrusted:
         c = _call(_rows(_bid_zero(**over)))
         assert c["quote_missing"] is True and c["dollar_delta"] is None and "bid_zero" not in c
 
-    def test_quote_ok_false_for_non_bid_zero_reason_stays_missing(self):
-        """quote_ok=False 但 bid>0（比如上游另有原因判不合格）——不是 bid=0 那一类，不放宽。"""
-        c = _call(_rows(_bid_zero(bid=0.01, ask=0.03)))
-        assert c["quote_missing"] is True
-
     def test_none_quote_stays_missing(self):
         assert _call(_rows(None))["quote_missing"] is True
 
@@ -134,19 +134,135 @@ class TestStrictQuoteOkRuleUntouched:
                                       expiry="2026-10-30", dte=8)
         assert q["quote_ok"] is False and q["mid"] is None and q["spread_pct"] is None
 
-    def test_helper_lives_only_in_portfolio_greeks(self):
-        """放宽的判据不许被别的账本顺手 import（那会把预注册口径悄悄放松）。"""
-        import pathlib
-        root = pathlib.Path(pg.__file__).resolve().parent
-        users = []
-        for path in root.glob("*.py"):
-            if path.name == "portfolio_greeks.py":
-                continue
-            if "_bid_zero_greeks_usable" in path.read_text(encoding="utf-8", errors="ignore"):
-                users.append(path.name)
-        assert users == []
+    def test_predicate_has_one_definition_in_cboe_options(self):
+        """判据只有一份：cboe_options 里定义，portfolio_greeks / alphabot.straddle 用的是同一个函数对象。"""
+        assert pg.bid_zero_greeks_usable is cboe_options.bid_zero_greeks_usable
+        assert sd.bid_zero_greeks_usable is cboe_options.bid_zero_greeks_usable
+        assert not hasattr(pg, "_bid_zero_greeks_usable")
 
-    def test_helper_is_pure_and_not_importing_alphabot(self):
-        src = inspect.getsource(pg._bid_zero_greeks_usable)
-        tree = ast.parse(src.lstrip())
-        assert not [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
+    def test_no_second_copy_of_the_predicate_anywhere(self):
+        """递归扫全仓（含 alphabot/ 等子目录）：除 cboe_options 外，没有别处再定义 / 复制这个判据。
+        上一版只 glob 顶层 *.py，alphabot/ 里复制一份它也是绿的。"""
+        defs, importers = {}, {}
+        for path in _repo_py_files():
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            rel = str(path.relative_to(_ROOT))
+            for n in ast.walk(tree):
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and "bid_zero_greeks_usable" in n.name:
+                    defs.setdefault(rel, []).append(n.name)
+                if isinstance(n, ast.ImportFrom) and n.module == "cboe_options" and \
+                        any(a.name == "bid_zero_greeks_usable" for a in n.names):
+                    importers[rel] = n.lineno
+        assert set(defs) == {"cboe_options.py"}, defs
+        assert set(importers) == {"portfolio_greeks.py", "alphabot/straddle.py"}, importers
+
+    def test_scan_actually_sees_subpackages(self):
+        """守卫自证：扫描列表里要有 alphabot/ 下的文件（上一版的盲区），否则上面那条是假绿。"""
+        rels = {str(p.relative_to(_ROOT)) for p in _repo_py_files()}
+        assert "alphabot/straddle.py" in rels and "portfolio_greeks.py" in rels
+
+
+class TestSharedPredicate:
+    """cboe_options.bid_zero_greeks_usable 本身（原先在 portfolio_greeks 里，判据逐字不变）。"""
+
+    def test_accepts_the_incident_shape(self):
+        assert cboe_options.bid_zero_greeks_usable(_bid_zero()) is True
+
+    def test_rejects_non_dict_and_positive_bid(self):
+        assert cboe_options.bid_zero_greeks_usable(None) is False
+        assert cboe_options.bid_zero_greeks_usable(_good("call")) is False      # bid>0：走严格口径，不在这类里
+
+    def test_straddle_page_uses_it_unchanged(self):
+        for over in ({}, {"iv": 0.0}, {"ask": 0.0}, {"delta": None}, {"bid": 0.02}):
+            q = _bid_zero(**over)
+            assert sd._greeks_usable(q) == cboe_options.bid_zero_greeks_usable(q)
+
+
+class TestLedgerViewMarksDegradedLeg:
+    """跨式页账本视图（v0.45.620）：hedge_state/greeks_<日期>.json 里 bid_zero 的腿照进合计，并标 degraded_legs。"""
+
+    def _view(self, call_row, put_row):
+        pos = _position("short", 39)
+        legs = {CALL: call_row, PUT: put_row}
+        return sd.position_view(pos, as_of=AS_OF, today=AS_OF, sig_today={"underlying_price": S, "as_of": AS_OF},
+                                sig_entry=None, greek_legs=legs)
+
+    def _rows(self, call_quote):
+        rows = _rows(call_quote)
+        return sd._greek_legs({"rows": rows})
+
+    def test_greek_legs_carry_bid_zero_marker(self):
+        legs = self._rows(_bid_zero())
+        assert legs[CALL]["bid_zero"] is True and legs[PUT].get("bid_zero") is None
+
+    def test_degraded_leg_named_when_its_numbers_are_used(self):
+        legs = self._rows(_bid_zero())
+        g = self._view(legs[CALL], legs[PUT])["greeks"]
+        assert g["complete"] is True and g["degraded_legs"] == ["call"]
+        assert g["dollar_delta"] is not None
+
+    def test_no_degraded_note_for_normal_legs(self):
+        legs = self._rows(_good("call"))
+        assert self._view(legs[CALL], legs[PUT])["greeks"]["degraded_legs"] == []
+
+    def test_no_degraded_note_when_other_leg_missing(self):
+        """另一条腿缺 ⇒ 合计全 None ⇒ 页面不许再声称「含 call 腿的模型值」（与盘中页同一规则）。"""
+        legs = self._rows(_bid_zero())
+        g = self._view(legs[CALL], {**legs[PUT], "quote_missing": True})["greeks"]
+        assert g["dollar_delta"] is None and g["degraded_legs"] == []
+
+    def test_live_view_and_ledger_view_agree_on_the_same_leg(self):
+        q = {"available": True, "quotes": {CALL: _bid_zero(), PUT: _good("put")}, "underlying_price": S}
+        live = sd.live_view(_position("short", 39), q, {}, now_et=sd.datetime(2026, 9, 3, 12, 0))["greeks"]
+        legs = self._rows(_bid_zero())
+        led = self._view(legs[CALL], legs[PUT])["greeks"]
+        assert live["degraded_legs"] == led["degraded_legs"] == ["call"]
+
+
+class TestCoverageAndHedgePage:
+    def test_aggregate_coverage_counts_bid_zero_legs(self):
+        agg = pg.aggregate(_rows(_bid_zero()), nav=150_000.0)
+        assert agg["coverage"]["n_bid_zero"] == 1
+        assert pg.aggregate(_rows(_good("call")), nav=150_000.0)["coverage"]["n_bid_zero"] == 0
+
+    def test_hedge_page_brief_carries_the_count_and_names(self):
+        rows = _rows(_bid_zero())
+        agg = pg.aggregate(rows, nav=150_000.0)
+        rec = pg.hedge_recommendation(agg, 700.0, 150_000.0)
+        chk = pg._price_check(AS_OF, rows, {"price": 700.0}, rec)
+        b = hedge_page.audit_brief(AS_OF, {"aggregate": agg, "price_check": chk, "recommendation": rec})
+        assert b["price_check"]["n_bid_zero"] == 1 and b["price_check"]["bid_zero"] == [CALL]
+        # 老审计文件（没有这两个键）读出来是 0 / []，不崩
+        old = hedge_page.audit_brief(AS_OF, {"aggregate": {}, "price_check": {"n_stale": 0, "gaps": []}})
+        assert old["price_check"]["n_bid_zero"] == 0 and old["price_check"]["bid_zero"] == []
+
+    def test_hedge_page_script_shows_the_notice(self):
+        js = (_ROOT / "alphabot" / "static" / "pages" / "hedge.js").read_text(encoding="utf-8")
+        import re
+        # 条件与动作要连在一起：只查字符串存在，`if (false)` 照样过
+        assert re.search(r"if \(pc\.n_bid_zero\)\s*warns\.push\([^;]*买价为 0 的腿", js), "hedge.js 缺 bid_zero 提示"
+
+    def test_markdown_coverage_line_mentions_bid_zero_legs(self):
+        rows = _rows(_bid_zero())
+        agg = pg.aggregate(rows, nav=150_000.0)
+        res = {"as_of": AS_OF, "aggregate": agg, "rows": rows,
+               "recommendation": pg.hedge_recommendation(agg, 700.0, 150_000.0),
+               "stress": pg.stress_table(rows), "executed": False}
+        text = pg.render_markdown(AS_OF, res)
+        assert "买价为 0 的腿" in text
+
+
+_ROOT = pathlib.Path(pg.__file__).resolve().parent
+_SKIP_PARTS = {".git", ".claude", "node_modules", "__pycache__", "_retired_pre_phase5", "tests", "venv", ".venv"}
+
+
+def _repo_py_files():
+    """仓库里所有生产 .py（递归；不含 tests/ 与 worktree / 隐藏目录）。"""
+    for path in sorted(_ROOT.rglob("*.py")):
+        parts = path.relative_to(_ROOT).parts
+        if any(p in _SKIP_PARTS or p.startswith(".") for p in parts[:-1]):
+            continue
+        yield path

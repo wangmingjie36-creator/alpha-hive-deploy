@@ -18,7 +18,8 @@
 **S 用与账本 mark 同一份 CBOE 快照里的现价**（当天信号行的 `underlying_price`），不用 greeks 文件里的 `price`：
 那个价曾比期权报价晚一天（v0.45.423）。任一腿缺任一项 ⇒ 对应合计为 None，不把缺的当 0。
 **盘中参考**（`live_view`，v0.45.581）比账本侧宽一档：bid = 0 但 ask 真实、IV 正常的腿，Greeks 照用并标 `degraded_legs`
-（对冲侧 `portfolio_greeks` 自 v0.45.609 起对同一类腿的 Greeks 也照用并标 `bid_zero`，判据同口径；mid / 压力表仍要严格 `quote_ok`）。
+（对冲侧 `portfolio_greeks` 自 v0.45.609 起对同一类腿的 Greeks 也照用并标 `bid_zero`——判据只有一份，`cboe_options.bid_zero_greeks_usable`；
+账本视图 `position_view` 同样标 `degraded_legs`；mid / 压力表仍要严格 `quote_ok`）。
 
 盲期（检验协议：experiments/straddle_gex_prereg.md）
 ---------------------------------------------------
@@ -34,6 +35,7 @@ from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from cboe_options import bid_zero_greeks_usable
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("alphabot.straddle")
@@ -448,7 +450,7 @@ def _greek_legs(greeks: Optional[dict]) -> Dict[str, dict]:
     out = {}
     for r in (greeks or {}).get("rows") or []:
         if isinstance(r, dict) and r.get("kind") == "option" and r.get("symbol"):
-            out[str(r["symbol"])] = {k: r.get(k) for k in (*GREEK_KEYS, "iv", "mid", "quote_missing")}
+            out[str(r["symbol"])] = {k: r.get(k) for k in (*GREEK_KEYS, "iv", "mid", "quote_missing", "bid_zero")}
     return out
 
 
@@ -462,7 +464,10 @@ def position_view(p: dict, *, as_of: Optional[str], today: Optional[str], sig_to
     band = breakeven(side, p.get("strike"), p.get("entry_premium"))
     legs = [greek_legs.get(str(p.get("call_symbol"))), greek_legs.get(str(p.get("put_symbol")))]
     legs = [None if (not leg or leg.get("quote_missing")) else leg for leg in legs]
+    # 账本里 bid = 0 的腿（v0.45.609 起 portfolio_greeks 放行）：Greeks 是 CBOE 模型值、没有 mid，与盘中页同样标出来
+    degraded = [name for name, leg in zip(("call", "put"), legs) if leg and leg.get("bid_zero")]
     g = position_greeks(legs, side, n, S)
+    g["degraded_legs"] = _degraded_if_used(g, degraded)
     g["source"] = f"hedge_state/greeks_{as_of}.json" if (as_of and greek_legs) else None
     return {
         **{k: p.get(k) for k in ("ticker", "side", "label", "entry_date", "expiry", "strike", "call_symbol",
@@ -674,12 +679,17 @@ def _ask_ok(leg) -> bool:
 
 
 def _greeks_usable(leg) -> bool:
-    """bid = 0 的腿，CBOE 逐合约 Greeks 还能不能拿来用：有真实的 ask、四个 Greeks 都有限、且 iv > 0。
-    iv 缺 / ≤ 0 时 CBOE 给的是全零占位，不是观测值（`cboe_options.select_quote_set` 同样不把 delta = 0 当观测值）。"""
-    if not _ask_ok(leg):
-        return False
-    iv = _num(leg.get("iv"))
-    return iv is not None and iv > 0 and all(_num(leg.get(k)) is not None for k in GREEK_KEYS)
+    """bid = 0 的腿，CBOE 逐合约 Greeks 还能不能拿来用。判据只有一份：`cboe_options.bid_zero_greeks_usable`
+    （v0.45.620 起对冲账本 `portfolio_greeks` 与本页共用，不再各抄一份）。"""
+    return bid_zero_greeks_usable(leg)
+
+
+def _degraded_if_used(greeks: dict, degraded: List[str]) -> List[str]:
+    """降级腿只有在它的数真的进了某个合计时才说出来：另一条腿缺（合计全是 None）时页面不许再声称「含 call 腿的模型值」
+    ——那句话旁边会是一排「—」（v0.45.593 二次检查）。合计需要两条腿都有数，所以「有任一合计」⇔「降级腿的数被用上了」。"""
+    used = any(greeks.get(k) is not None for k in ("delta_shares", "dollar_delta", "gamma_dollar_per_1pct",
+                                                   "vega_dollar_per_pt", "theta_dollar_per_day"))
+    return degraded if used else []
 
 
 def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
@@ -693,7 +703,7 @@ def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
       · Greeks：`_greeks_usable` 的腿照用，`greeks.degraded_legs` 标明哪几条是 bid = 0 的模型值，仅供参考
         （另一条腿缺、合计全是 None 时不给：没有任何一格用到它）。
     `quote_ok` 本身（卖权账本 / 跨式入场共用）**不动**；`portfolio_greeks.option_exposures` 自 v0.45.609 起对 Greeks 汇总
-    也放行同一类 bid = 0 腿（自带判据 `_bid_zero_greeks_usable`、不 import 本模块），mid 仍不给。"""
+    也放行同一类 bid = 0 腿，判据与本页共用 `cboe_options.bid_zero_greeks_usable`（v0.45.620），mid 仍不给。"""
     side = str(p.get("side") or "")
     n = _pos(p.get("contracts"))
     quotes = (q or {}).get("quotes") or {}
@@ -723,10 +733,6 @@ def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
     pnl_mid = unrealized(side, p.get("entry_premium"), mark, n)
     size = _pos(p.get("size_usd"))
     greeks = position_greeks(legs, side, n, S)
-    # 降级腿只有在它的数真的进了某个合计时才说出来：另一条腿缺（合计全是 None）时页面不许再声称「含 call 腿的模型值」
-    # ——那句话旁边会是一排「—」（v0.45.593 二次检查）。合计需要两条腿都有数，所以「有任一合计」⇔「降级腿的数被用上了」
-    used = any(greeks[k] is not None for k in ("delta_shares", "dollar_delta", "gamma_dollar_per_1pct",
-                                               "vega_dollar_per_pt", "theta_dollar_per_day"))
     return {
         "ticker": p.get("ticker"), "fetched_at_et": now_et.isoformat(timespec="seconds"),
         "available": bool((q or {}).get("available")), "reason": (q or {}).get("reason"),
@@ -738,7 +744,7 @@ def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
         "unrealized_mid_pct": (pnl_mid / size * 100.0) if (pnl_mid is not None and size) else None,
         "exit_now_premium": exit_px, "exit_now_usd": unrealized(side, p.get("entry_premium"), exit_px, n),
         "exit_now_basis": exit_basis, "bid_zero_legs": bid_zero,
-        "greeks": {**greeks, "degraded_legs": degraded if used else []},
+        "greeks": {**greeks, "degraded_legs": _degraded_if_used(greeks, degraded)},
         "band": band_position(S, band), "breakeven": band,
         "levels": levels,
         "same_payload": (levels.get("payload_last_trade_time") == (q or {}).get("payload_last_trade_time"))

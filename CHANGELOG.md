@@ -22,7 +22,26 @@
 - `tests/test_alphabot_straddle.py::TestFrozenMarkEstimate`（源码形状钉 4 条）；变异 8 处全杀（先 mid 后 ask 的顺序与失败路径一开始没杀到，改成逐字钉条件、补上 available / 无估算两条后全杀）。
 - 真实账本浏览器核对：T 卡（账本 mark 10-20 → +$351）并排出现估算 −$877（mid 1.805 vs 入场 1.58 × 39 张，10-22 收盘快照），与 `/api/straddle/live/T` 手算一致。
 
-## [0.45.620] — 2026-10-22 — 占位（进行中：v0.45.609 二次检查——跨式页账本带 bid_zero、守卫递归扫描、判据收到 cboe_options 共用、对冲页显示 bid_zero 腿数）
+## [0.45.620] — 2026-10-22 — Fixed：v0.45.609 二次检查——跨式页账本带 bid_zero、守卫递归扫全仓、判据收到 `cboe_options` 共用、对冲页显示 bid_zero 腿数
+
+对 v0.45.609 跑了已装的 code-review 技能（high）加手工核对：核心逻辑没发现会算错的 bug，查出 5 处，全修。
+
+### Fixed
+- **跨式页账本视图丢了 bid_zero 标记**（`alphabot/straddle.py`）：`_greek_legs` 只拷 `quote_missing`，609 起这类腿不再 quote_missing ⇒ 以前显示「—」、现在带着 CBOE 模型值进净 Greeks 且页面没有任何说明，而盘中页对同类腿会标 `degraded_legs`。现在 `_greek_legs` 带上 `bid_zero`，`position_view` 标 `greeks.degraded_legs`；「只有数真的进了合计才说」的规则抽成 `_degraded_if_used`，盘中页与账本视图共用。前端 `straddle.js` 文案去掉已不成立的「账本侧仍按严格口径」。
+- **判据两份各抄**：`portfolio_greeks._bid_zero_greeks_usable` 与 `straddle._greeks_usable` 是同一判据的两份手抄，之间没有任何测试对账。现收成 `cboe_options.bid_zero_greeks_usable` 一处（与 `quote_ok` 同文件；`quote_ok` 本身仍不动），两边 import；`portfolio_greeks` 里的私有版删除。2026-10-22 实测 T / VZ / AMZN 三条链上 bid=0 且 ask>0 的 578 张里 iv ≤ 0 的 3 张 delta 全是 0，印证 iv>0 门槛。
+- **bid_zero 腿对决策可见**：`aggregate().coverage` 纯新增 `n_bid_zero`；日报小节覆盖行写「含 N 张买价为 0 的腿（CBOE 模型 Greeks、无 mid，已计入带位）」；Alpha Bot 对冲页 `audit_brief` 带 `n_bid_zero` / `bid_zero`（老审计文件读出 0 / []），`hedge.js` 加一条提示、点名合约。仍**不进 `gaps`、不触发告警**（不是缺，是用了模型值）。
+- **「只许自用」守卫是个漏洞**：原 `test_helper_lives_only_in_portfolio_greeks` 只 glob 顶层 `*.py`，在 `alphabot/` 里复制或 import 它照样绿，而 CLAUDE.md 说它被守住。改为递归扫全仓：除 `cboe_options.py` 外不许再定义；只允许 `portfolio_greeks.py` / `alphabot/straddle.py` 从 `cboe_options` import；另加「扫描列表里确实有 `alphabot/straddle.py`」的自证。
+- 删掉与参数化用例重复的一条测试。
+
+### Changed（登记表）
+- `tests/_must_run.json`：新测试读了 `alphabot/static/pages/hedge.js`，登记表过期（选测脚本退出码 4），按提示 `--update` 并入。
+
+### 验证
+- `tests/test_portfolio_greeks_bid_zero.py` 19 → 31 条；变异 10 处（跨式页不带标记 / 不标 degraded / alphabot 里复制判据 / 对冲页不带计数 / 覆盖计数 / 日报覆盖行 / 跨式页判据恒真 / 前端提示恒假 / 去掉 iv>0 / 去掉「用上了才说」）全红——其中**前端提示那一条第一版没抓到**（只查字符串存在，`if (false)` 照过），改成匹配 `if (pc.n_bid_zero) warns.push(…)` 整个结构后红。
+- 相关 1073 条通过；拨钟审计（+7 / +45 天）0 条新红；ruff 过；整套 11763 passed、0 failed。
+
+### 没改
+- `quote_ok`、卖权 25% 点差规则、压力表仍剔 bid=0 腿（缺 mid，不编）；10-21 的历史审计不重跑。
 
 ## [0.45.619] — 2026-10-22 — Fixed：选测脚本「读全部测试文件」的分母——`--update` / `--run` 曾按本轮收集数算（部分收集时小到 1），把只读一个测试文件的测试误判成元守卫；改用仓库测试文件总数，三处判定共用一个谓词
 

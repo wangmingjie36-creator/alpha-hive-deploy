@@ -72,7 +72,9 @@ def audit_brief(day: str, a: dict) -> dict:
         # 审计文件里的 price_check 没有 error 键：异常中断的那一轮根本不写审计（审计最后写），页面靠「最近审计不是
         # 账本最后一天」/ 陈旧来报它（v0.45.459 二次检查：初版读一个永远不存在的 error，那条黄条恒不亮）
         # stale / unpriced 点名到标的（v0.45.526）：此前页面只说「1 price missing」，不说是哪一只
+        # bid_zero（v0.45.620）：买价为 0 的腿用的是 CBOE 模型 Greeks、没有 mid，已计入带位——不是缺，但要让人看得见
         "price_check": {"n_stale": pc.get("n_stale"), "gaps": pc.get("gaps") or [],
+                        "n_bid_zero": pc.get("n_bid_zero") or 0, "bid_zero": list(pc.get("bid_zero") or []),
                         "hedge_undecided": pc.get("hedge_undecided"),
                         "stale": [{k: x.get(k) for k in ("ticker", "kind", "seen_price", "session", "source")}
                                   for x in pc.get("stale") or [] if isinstance(x, dict)],
