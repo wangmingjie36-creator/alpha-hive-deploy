@@ -268,6 +268,35 @@ function ssOpenLabel(k) {
   return own(SS_STATUS, key) ? SS_STATUS[key] : ssLabel(k);
 }
 
+// 检验**冻结之后**才有（服务端在未冻结 / 冻结文件坏了时根本不给 `revealed`）：冻结的结果 + 每个进检验的空头单位的配对。
+// 冻结前这个函数不会被调用，也没有它的数据。d = (宽跨假想盈亏 − 跨式盈亏) ÷ 定仓 NAV（含定仓杠杆，协议 §3）。
+const RV_DECISION = { reject_h0: "拒绝 H0：两种结构的盈亏有系统差异", fail_to_reject_h0: "没能拒绝 H0：这个样本量下没看出差异（不等于两者一样）" };
+const RV_DIRECTION = { strangle_higher: "宽跨更高", straddle_higher: "跨式更高", none: "无方向" };
+
+function revealedBlock(rv) {
+  const r = rv?.result || {};
+  const pairs = rv?.pairs || [];
+  const pct = (v) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}${num(Math.abs(v) * 100, 2)}%` : "—");
+  const head = r.testable === false
+    ? h("p", { class: "small" }, `冻结时无法检验：${r.reason || "—"}。`)
+    : h("p", { class: "small" }, `${RV_DECISION[r.decision] || r.decision || "—"}；p = ${isNum(r.p_value) ? num(r.p_value, 4) : "—"}（${r.mode === "enumerate" ? "枚举" : "随机置换"}），`,
+      `方向：${RV_DIRECTION[r.direction] || r.direction || "—"}，D = 平均 d = ${pct(r.observed)}（占定仓 NAV）。${r.n_units ?? "—"} 个单位 / ${r.n_blocks ?? "—"} 个财报周，${r.ready_date || "—"} 冻结。`);
+  const cols = [
+    { label: "票", render: (p) => p.ticker },
+    { label: "财报日", render: (p) => p.earnings_date || "—" },
+    { label: "入场 → 平仓", render: (p) => `${p.entry_date || "—"} → ${p.exit_date || "—"}` },
+    { label: "跨式", cls: "r", render: (p) => h("span", { class: tone(p.straddle_usd) }, `${p.straddle_contracts ?? "—"} 张 · ${sMoney(p.straddle_usd)}`) },
+    { label: "宽跨（假想）", cls: "r", render: (p) => h("span", { class: tone(p.strangle_usd) }, `${p.strangle_contracts ?? "—"} 张 · ${sMoney(p.strangle_usd)}`) },
+    { label: "d（占 NAV）", cls: "r", render: (p) => h("span", { class: tone(p.d) }, pct(p.d)) },
+    { label: "冻结的检验", render: (p) => (p.in_frozen_test ? "在" : "之后平仓，只描述") },
+  ];
+  return h("div", {},
+    h("h3", {}, "冻结结果与每笔配对"),
+    head,
+    pairs.length ? table(cols, pairs) : h("p", { class: "small muted" }, "没有进检验的单位。"),
+    h("p", { class: "small muted" }, "盲期已结束（检验已冻结）。配对只是描述：判定只看冻结的那次检验；宽跨张数按账本的权利金定仓，是跨式的数倍，所以盈亏金额不能直接比大小。"));
+}
+
 function strangleShadowPanel(s, rules) {
   const pre = rules?.strangle_prereg || {};
   if (!s?.available) {
@@ -284,8 +313,10 @@ function strangleShadowPanel(s, rules) {
     h("p", { class: "small" }, `每笔被账本开仓的跨式，同一天、同一份快照里再记一份假想的 25Δ 宽跨（只记录、不开仓）。持仓中自 ${s.start_date} 起入场且带记录的 ${s.n_open_recorded} 笔（${openBy}）；${closedText}`),
     gate("进检验的空头单位", s.n_units, need.min_units),
     gate("财报周（块）", s.n_blocks, need.min_blocks),
-    h("p", { class: "callout lock" }, `盲期：检验冻结前，页面不显示任何一笔的影子盈亏，也不把它和跨式盈亏放在一起；自己拼起来比较就是偷看，会作废这次检验。协议 v${pre.version ?? "—"}：${pre.doc || "experiments/straddle_strangle_shadow_prereg.md"}。`),
-    h("div", { class: "small muted" }, `已平仓按状态：${byStatus}`));
+    s.revealed ? null
+      : h("p", { class: "callout lock" }, `盲期：检验冻结前，页面不显示任何一笔的影子盈亏，也不把它和跨式盈亏放在一起；自己拼起来比较就是偷看，会作废这次检验。检验冻结后这里自动解锁每笔配对。协议 v${pre.version ?? "—"}：${pre.doc || "experiments/straddle_strangle_shadow_prereg.md"}。`),
+    h("div", { class: "small muted" }, `已平仓按状态：${byStatus}`),
+    s.revealed ? revealedBlock(s.revealed) : null);
 }
 
 export async function renderStraddle(root, alive) {

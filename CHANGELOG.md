@@ -5,6 +5,24 @@
 
 ---
 
+## [0.45.601] — 2026-10-22 — 占位（进行中：修 GitHub Actions 上 main 剩余的 CI 专属红——buzz_v1 价格差分、anthropic 未装、写沙箱 Linux 分支、step3 后置条件拨钟炸弹）
+
+## [0.45.600] — 2026-10-22 — 占位（进行中：v0.45.597 二次检查——跑生成器的解释器改按确定规则选（不看当时环境），修壳里弹窗文字被生成时环境冻住）
+
+## [0.45.599] — 2026-10-22 — Added：影子宽跨检验**冻结后自动解锁**「冻结结果 + 每笔配对」显示（Alpha Bot 影子面板 + `/api/straddle`），冻结前仍只有计数
+
+> 用户 2026-10-22 问「页面和接口里加上影子盈亏对照看」；我建议不在冻结前加（协议 §7：冻结前拼着看 = 偷看，会作废预注册检验），用户选「冻结后自动解锁」。
+
+- `straddle_strangle_shadow.reveal(closed, root=)`：**钥匙只有一把——冻结文件存在且完好**（与 `run_once` 同一把）；没冻结 / 文件读不了 / 不是对象 ⇒ `None`。解锁后返回冻结的结果
+  （decision / direction / p_value / observed / mode / n_units / n_blocks / ready_date，**不含** `unit_keys` 与进度）+ 每个 `ok` 单位的配对（跨式与假想宽跨的张数、盈亏、`d`、`nav_for_sizing`、
+  `in_frozen_test`——冻结之后才平仓的单位只描述、不改判定）。只读，不写任何东西。
+- `alphabot/service.py::_strangle_shadow`：`reveal` 非 `None` 才加 `revealed` 键，**冻结前接口里没有这个键**；`straddle.js`：`revealedBlock`（在盲期面板函数**之外**，面板那段「不含盈亏字眼」的守卫照旧有意义）
+  只经 `s.revealed` 进页面，解锁后「盲期」提示换成冻结结果与配对表，并写明「配对只是描述、判定只看冻结的那次；宽跨张数是跨式的数倍，金额不能直接比大小」。帮助页与协议 §7 / §11、CLAUDE.md 同步。
+- 不是协议变更（盲期本来就到冻结为止），`PREREG["version"]` 不变。
+- 测试 `TestRevealAfterFreeze`（8 条，手算配对）：就绪但没冻结 ⇒ 不给；冻结后的配对与结果；冻结后才平仓的单位 `in_frozen_test=False`；非 `ok` 单位不出现；冻结文件损坏（`null` / `[]` / 坏 JSON / 空）不解锁；
+  Alpha Bot 走真接口：冻结前没有 `revealed`、冻结后有且不含原始 `shadow_strangle`；前端只经 `s.revealed` 一条路。变异自检 6 个全杀（不看冻结 / 不看损坏 / 恒标在检验里 / 漏出非 ok 单位 / 服务恒解锁 / 前端恒显示）。
+  演示服务在浏览器里核过（冻结后面板显示结果与配对，d 手算一致，控制台无报错）。
+
 ## [0.45.598] — 2026-10-22 — Added：日健康判定——同一数据源族 ≥2 个字段同时低于覆盖线判 `source_outage`，alert_manager 按源出 P1；前瞻检验加载器只显示故障日、不改口径
 
 起因：v0.45.421 / 429 收尾时留给用户的三个问题（异常流是否单独限速、A2「降级时不再混入 5.0」、异常流降级是否升 P1）。用户 2026-10-22 要求分析「有没有必要升」：
@@ -71,7 +89,7 @@
   - `test_reads_own_checkout.py::test_no_home_directory_paths` 原报第 64 / 65 / 77 行的 `/Users/x/...` ⇒ 改 `/nonexistent/` 前缀；
   - `test_tests_use_running_interpreter.py::test_no_test_hardcodes_the_mac_interpreter` 原报第 63 / 77 行的 `/usr/local/bin/python3`（CI 上不存在）⇒ 改 `sys.executable`。
   - `test_label_and_program` 的期望改成 `[self.PY, self.SCRIPT]`（不是只改输入）。
-- 顺带收紧 `test_logs_outside_repo`：`endswith(文件名)` → 与 `str(Path(LOG_DIR) / 文件名)` 全等。原写法下 `render_plist` 完全不理 `log_dir`、把日志写进代码目录也照样绿，测试名守的那件事没被测到。
+- 顺带收紧 `test_logs_outside_repo`：`endswith(文件名)` → 与 `str(Path(LOG_DIR) / 文件名)` 全等。原写法下 `render_plist` 完全不理 `log_dir`、把日志写进代码目录也照样绿。⚠️ 这只钉住「`render_plist` 用传入的 `log_dir`」这一层；「CLI 给的日志目录在代码克隆之外」见下方「二次检查」。
 
 ### 验证
 - 三个相关文件 84 passed；ruff 无告警。
@@ -80,8 +98,18 @@
 - 整套：**11400 通过 / 0 失败 / 2 xfail（82 deselected），645 s**；开跑时没有并发整套（`pgrep` 空、报告头无 `concurrency:`）。v0.45.593 记的那两条红在本版之后消失。
 
 ### 教训
-- 同一形状第二次（第一次 v0.45.439 `test_alphabot_launcher.py`）：新测试只跑了本文件，扫全仓测试文件的元守卫（`test_reads_own_checkout` / `test_tests_use_running_interpreter` / `test_no_invisible_prod_data_skips` / `test_pytestmark_placement`，加 ruff 的 `test_no_undefined_names`）没跑。
+- 同一形状至少第三次（v0.45.390、v0.45.439 都是 `test_alphabot_launcher.py` 写死解释器：前者记「CI pytest 红」，后者 main 红、被别的会话全量抓到）。v0.45.592 的验证段只记了三个相关测试文件、没有整套记录；扫全仓测试文件的元守卫（`test_reads_own_checkout` / `test_tests_use_running_interpreter` / `test_no_invisible_prod_data_skips` / `test_pytestmark_placement`，加 ruff 的 `test_no_undefined_names`）没跑。
   「开发期只跑相关测试」时，**改了测试文件，这几条就是相关测试**。
+
+### 二次检查（同日追补）
+- 更正本条两处说法：「同一形状第二次」→ 至少第三次（初版漏看 v0.45.390）；「新测试只跑了本文件」是推断，改照 v0.45.592 条目原文写。
+- `test_print_plist_cli_targets_the_production_clone` 加断言：`--print-plist` 生成的两条日志路径不在代码克隆（脚本所在目录）之下。初版只钉住了 `render_plist` 那层，CLI 传的日志目录没人测。
+  变异：CLI 的 `log_dir` 改成克隆根 / 克隆下 `logs/` ⇒ 都红这一条（每轮 6 条 = 基线，模块按 sha256 还原）。
+- CI 核实（`2f4ea67c`，已含本版）：两条守卫与本文件 37 条在 CI 上 PASSED；`tests` 工作流失败从上一轮跑完的 5 条（`4d91997c`）降到 3 条。剩下 3 条**本机全过、与本版无关**（CI 上已红至少两轮）：
+  `test_buzz_v1_channels.py::TestDifferentialPrice::test_live_paths`（`volatility_20d` 3681.35 vs 3529.04）、
+  `test_llm_service_5_5_models.py::TestCounters::test_rate_limit_exhausted_counted`（CI 没装 `anthropic`）、
+  `test_write_sandbox.py::TestStaleMarker::test_failed_inherited_canary_falls_through_to_apply`（Linux 上 `sandbox_init` 没被调）。
+  clockshift 另报拨钟专属新红：`test_orchestrator_step_postconditions.py::TestRealStepBlocks::test_step3_exit0_with_a_ticker_still_missing…`（+7 / +45 / +400 天都红 ⇒ 一周内真实钟上就会红）、`TestCoverageHorizon`（只 +400 天，按设计定期红）。本文件不在其中。本版未修这些。
 
 ## [0.45.595] — 2026-10-22 — Fixed：Sonnet 5.5 截断——真因是调用点 `max_tokens` 小于模型自然输出长度（与思考无关），Sonnet 档案的输出上限放宽到 `max(请求×3, 请求+2048)`
 

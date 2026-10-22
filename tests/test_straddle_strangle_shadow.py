@@ -927,6 +927,75 @@ class TestWiringProbe:
         assert not a.alerts
 
 
+class TestRevealAfterFreeze:
+    """v0.45.599：冻结后自动解锁每笔配对；冻结前（或冻结文件坏了）一个字都不给。钥匙只有一把——冻结文件存在且完好。"""
+
+    @pytest.fixture
+    def three(self, monkeypatch):
+        monkeypatch.setitem(SS.PREREG, "min_units", 3)
+        monkeypatch.setitem(SS.PREREG, "min_blocks", 3)
+        return [_closed_row(earnings_date=w, pnl=-100.0 * (i + 1), shadow_pnl=-100.0 * (i + 1) - 500.0 * (i + 1))
+                for i, w in enumerate(("2026-10-28", "2026-11-04", "2026-11-11"))]
+
+    def test_nothing_before_the_freeze_even_when_ready(self, tmp_path, three):
+        assert SS.progress(three, root=tmp_path)["ready"] is True, "正对照：已就绪但还没冻结"
+        assert SS.reveal(three, root=tmp_path) is None
+
+    def test_frozen_result_and_hand_computed_pairs(self, tmp_path, three):
+        SS.run_once(three, root=tmp_path, today="2026-12-01")
+        rv = SS.reveal(three, root=tmp_path)
+        assert rv["result"]["decision"] in ("reject_h0", "fail_to_reject_h0") and rv["result"]["n_units"] == 3
+        assert rv["result"]["direction"] == "straddle_higher" and rv["result"]["ready_date"] == "2026-12-01"
+        assert "unit_keys" not in rv["result"] and "progress" not in rv["result"]
+        p = rv["pairs"]
+        assert [x["earnings_date"] for x in p] == ["2026-10-28", "2026-11-04", "2026-11-11"]
+        assert (p[1]["straddle_usd"], p[1]["strangle_usd"]) == (-200.0, -1200.0)                 # 第 2 笔：−100·2 与 −200−1000
+        assert p[1]["d"] == pytest.approx((-1200.0 - -200.0) / 100_000.0) and p[1]["nav_for_sizing"] == 100_000.0
+        assert (p[1]["straddle_contracts"], p[1]["strangle_contracts"]) == (None, 30) and all(x["in_frozen_test"] for x in p)
+
+    def test_units_that_close_after_the_freeze_are_described_not_counted(self, tmp_path, three):
+        SS.run_once(three, root=tmp_path)
+        late = _closed_row(earnings_date="2026-11-18")
+        late["ticker"] = "LATE"
+        rv = SS.reveal(three + [late], root=tmp_path)
+        assert [x["in_frozen_test"] for x in rv["pairs"]] == [True, True, True, False]
+        assert rv["result"]["n_units"] == 3, "冻结的判定不因后来的单位改变"
+
+    def test_only_ok_units_appear(self, tmp_path, three):
+        SS.run_once(three, root=tmp_path)
+        junk = [_closed_row(side="long"), _closed_row(status="unquotable"), _closed_row(exit_date="2026-10-28")]
+        assert len(SS.reveal(three + junk, root=tmp_path)["pairs"]) == 3
+
+    @pytest.mark.parametrize("content", ["null", "[]", "{not json", ""])
+    def test_a_damaged_result_file_does_not_unlock(self, tmp_path, three, content):
+        p = SS._result_path(tmp_path)
+        p.parent.mkdir(parents=True)
+        p.write_text(content, encoding="utf-8")
+        assert SS.reveal(three, root=tmp_path) is None
+
+    def test_alpha_bot_unlocks_only_with_the_frozen_file(self, tmp_path, three):
+        from alphabot import synthetic as syn
+        from tests.test_alphabot_straddle import AS_OF as BOT_AS_OF, _client, _keys, _svc, _write_ledger
+        led = syn.demo_straddle_ledger(BOT_AS_OF)
+        led["closed"] = three
+        root = _write_ledger(tmp_path / "data", led)
+        before = _client(_svc(root)).get("/api/straddle").json()["strangle_shadow"]
+        assert before["ready"] is True and before["frozen"] is False and "revealed" not in before, "正对照：就绪但没冻结 ⇒ 不给"
+        SS.run_once(three, root=root, today="2026-12-01")
+        body = _client(_svc(root)).get("/api/straddle").json()
+        after = body["strangle_shadow"]
+        assert after["frozen"] is True and len(after["revealed"]["pairs"]) == 3 and after["revealed"]["result"]["n_units"] == 3
+        assert "shadow_strangle" not in set(_keys(body)), "解锁的是配对，不是原始影子记录"
+
+    def test_front_end_unlocks_only_on_the_revealed_key(self):
+        js = (REPO / "alphabot" / "static" / "pages" / "straddle.js").read_text(encoding="utf-8")
+        a, b = js.index("function strangleShadowPanel"), js.index("export async function renderStraddle")
+        panel = "\n".join(ln for ln in js[a:b].splitlines() if not ln.lstrip().startswith("//"))
+        assert "s.revealed ? revealedBlock(s.revealed) : null" in panel and "callout lock" in panel
+        assert panel.count("revealedBlock(") == 1, "配对块只能经 s.revealed 这一条路进页面"
+        assert "function revealedBlock" in js[:a], "配对块的代码在盲期面板之外（面板那段的『不含盈亏字眼』守卫才有意义）"
+
+
 class TestProtocolConstantsArePinned:
     """决策常量写在测试里：谁改 α / 种子 / 置换次数 / 就绪闸 / start_date，必须同时改这里，也就是必须按协议 §8 记修订。
     （读源码里的字面量，而不是运行时的 PREREG——这个文件的 autouse 夹具把 start_date 钉到了 2026-01-01。）"""

@@ -95,6 +95,9 @@ class TestPlist:
         assert dly.main(["--print-plist"]) == 0
         doc = plistlib.loads(capsys.readouterr().out.encode("utf-8"))
         assert doc["ProgramArguments"][1].endswith("/alpha-hive-prod/llm_shadow_daily.py")
+        clone = Path(doc["ProgramArguments"][1]).parent
+        for k in ("StandardOutPath", "StandardErrorPath"):              # 日志不落进代码克隆
+            assert clone not in Path(doc[k]).parents
 
 
 # ==================== production_state ====================
