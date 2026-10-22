@@ -10,6 +10,7 @@ import ast
 import os
 import plistlib
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
@@ -58,11 +59,15 @@ class TestDecide:
 # ==================== plist ====================
 
 class TestPlist:
+    # 合成参数：render_plist 只把它们原样写进 plist、不碰文件系统 ⇒ /nonexistent/ 前缀即可
+    # （家目录路径会被 test_reads_own_checkout 拦）；解释器用 sys.executable（CI 上没有 Mac 那份）
+    PY = sys.executable
+    SCRIPT = "/nonexistent/alpha-hive-prod/llm_shadow_daily.py"
+    LOG_DIR = "/nonexistent/.claude/logs"
+
     @pytest.fixture
     def doc(self):
-        return plistlib.loads(dly.render_plist(python="/usr/local/bin/python3",
-                                               script="/Users/x/alpha-hive-prod/llm_shadow_daily.py",
-                                               log_dir="/Users/x/.claude/logs"))
+        return plistlib.loads(dly.render_plist(python=self.PY, script=self.SCRIPT, log_dir=self.LOG_DIR))
 
     def test_schedule_is_weekdays_1445(self, doc):
         got = doc["StartCalendarInterval"]
@@ -74,7 +79,7 @@ class TestPlist:
 
     def test_label_and_program(self, doc):
         assert doc["Label"] == dly.LABEL == "com.alpha.hive.llmshadow"
-        assert doc["ProgramArguments"] == ["/usr/local/bin/python3", "/Users/x/alpha-hive-prod/llm_shadow_daily.py"]
+        assert doc["ProgramArguments"] == [self.PY, self.SCRIPT]
         assert all(os.path.isabs(a) for a in doc["ProgramArguments"])
 
     def test_does_not_carry_spend_or_data_root(self, doc):
@@ -83,8 +88,8 @@ class TestPlist:
         assert env["PATH"].startswith("/usr/local/bin")        # 内部 spawn 的子 python 也走 3.11
 
     def test_logs_outside_repo(self, doc):
-        assert doc["StandardOutPath"].endswith("llm_shadow_daily.out.log")
-        assert doc["StandardErrorPath"].endswith("llm_shadow_daily.err.log")
+        assert doc["StandardOutPath"] == str(Path(self.LOG_DIR) / "llm_shadow_daily.out.log")
+        assert doc["StandardErrorPath"] == str(Path(self.LOG_DIR) / "llm_shadow_daily.err.log")
 
     def test_print_plist_cli_targets_the_production_clone(self, capsys):
         assert dly.main(["--print-plist"]) == 0

@@ -7,7 +7,27 @@
 
 ## [0.45.597] — 2026-10-22 — 占位（进行中：v0.45.498 二次检查 #1 / #2——.app 过时提醒给的重新生成命令按现行规则核过、照抄跑得通）
 
-## [0.45.596] — 2026-10-22 — 占位（进行中：修 v0.45.592 新测试 test_llm_shadow_daily.py 写死家目录路径与 Mac 解释器引起的两条守卫红）
+## [0.45.596] — 2026-10-22 — Fixed：origin/main 两条元守卫红——v0.45.592 新测试 `tests/test_llm_shadow_daily.py` 的 plist 夹具写死了家目录路径与 Mac 解释器
+
+> 只改测试，不动 `llm_shadow_daily.py`（`render_plist` 只把参数原样写进 plist、不校验路径存在 ⇒ 合成路径不必是真文件）。生产与 launchd 计划不受影响。
+
+### Fixed
+- `tests/test_llm_shadow_daily.py::TestPlist`：喂给 `render_plist(python=, script=, log_dir=)` 的合成参数提成类属性
+  `PY = sys.executable`、`SCRIPT = "/nonexistent/alpha-hive-prod/llm_shadow_daily.py"`、`LOG_DIR = "/nonexistent/.claude/logs"`，夹具与断言共用这一组：
+  - `test_reads_own_checkout.py::test_no_home_directory_paths` 原报第 64 / 65 / 77 行的 `/Users/x/...` ⇒ 改 `/nonexistent/` 前缀；
+  - `test_tests_use_running_interpreter.py::test_no_test_hardcodes_the_mac_interpreter` 原报第 63 / 77 行的 `/usr/local/bin/python3`（CI 上不存在）⇒ 改 `sys.executable`。
+  - `test_label_and_program` 的期望改成 `[self.PY, self.SCRIPT]`（不是只改输入）。
+- 顺带收紧 `test_logs_outside_repo`：`endswith(文件名)` → 与 `str(Path(LOG_DIR) / 文件名)` 全等。原写法下 `render_plist` 完全不理 `log_dir`、把日志写进代码目录也照样绿，测试名守的那件事没被测到。
+
+### 验证
+- 三个相关文件 84 passed；ruff 无告警。
+- 变异（`PYTHONDONTWRITEBYTECODE=1`、`--maxfail=1000`、每轮 6 条 = 基线条数，`llm_shadow_daily.py` 按 sha256 还原）对照**改动前的真实测试文件**（`git show HEAD:`）：
+  M1「日志忽略 `log_dir`、落进代码目录」新测试红 `test_logs_outside_repo`、**旧测试全绿**；M2「`ProgramArguments` 换解释器」新旧都红 `test_label_and_program`（等值断言没被改松）。
+- 整套：**11400 通过 / 0 失败 / 2 xfail（82 deselected），645 s**；开跑时没有并发整套（`pgrep` 空、报告头无 `concurrency:`）。v0.45.593 记的那两条红在本版之后消失。
+
+### 教训
+- 同一形状第二次（第一次 v0.45.439 `test_alphabot_launcher.py`）：新测试只跑了本文件，扫全仓测试文件的元守卫（`test_reads_own_checkout` / `test_tests_use_running_interpreter` / `test_no_invisible_prod_data_skips` / `test_pytestmark_placement`，加 ruff 的 `test_no_undefined_names`）没跑。
+  「开发期只跑相关测试」时，**改了测试文件，这几条就是相关测试**。
 
 ## [0.45.595] — 2026-10-22 — Fixed：Sonnet 5.5 截断——真因是调用点 `max_tokens` 小于模型自然输出长度（与思考无关），Sonnet 档案的输出上限放宽到 `max(请求×3, 请求+2048)`
 
