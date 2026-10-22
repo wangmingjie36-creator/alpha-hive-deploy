@@ -29,6 +29,14 @@
   扫描时算一次进 `scan_timing.extra.day_health`（→ status.json → `alert_manager._check_day_health` 出 P1）；前瞻检验加载器
   需要历史判定时直接对每个日期重算（`summarize_days`）。
 - 判不了（结果文件不在 / 不可解析）⇒ `available=False` + 原因，**不当成 ok**。
+
+## 前瞻检验的敏感性分析（修订 3，2026-10-22，用户决定：10-14 不排除、主分析不变）
+维度 IC 与共振加成两份预注册检验，检视时在主分析**之外**并列报告一份「去掉 `source_outage` 日」的结果（`sensitivity_plan` 给出
+哪些天去掉）。主分析的样本、判定、动作一概不变；敏感性不触发任何动作（协议 §7 的动作只看主分析）。
+**规则被冻结**：「`source_outage` 日」的定义 = 本模块 `VERSION=1` + `MIN_OUTAGE_FIELDS=2` + `scan_coverage_gate.FIELDS` 登记时的内容，
+其指纹 `definition_fingerprint()` 钉在 `REGISTERED_FINGERPRINT`。FIELDS 加 / 改 / 删字段、改阈值或分族 ⇒ 指纹变 ⇒ 执行器的敏感性块
+报「定义已变，不可比」（**看得见，不是静默照算**）、`tests/test_day_health.py::TestSensitivityRuleIsFrozen` 变红——
+要么新开一条修订，要么还原定义。⚠️ 指纹不覆盖闸的 `_present` / `_dig` 语义与结果文件布局，改它们同样要走修订。
 """
 from __future__ import annotations
 
@@ -47,12 +55,47 @@ VERSION = 1
 
 OK, DEGRADED, SOURCE_OUTAGE = "ok", "degraded", "source_outage"
 
+#: 修订 3（2026-10-22）登记的「`source_outage` 日」定义指纹（见模块 docstring）。改它 = 改预注册，必须新开修订；
+#: 同一个值另钉在 `tests/test_day_health.py` 与两份协议正文里——改这里而不改那两处，测试会红。
+REGISTERED_FINGERPRINT = "76bd554125c07a4e"
+
 
 def family(source: str) -> str:
     """`scan_coverage_gate.FIELDS[*]["source"]` 的第一个词：「yfinance 日K（hv_proxy 期）」→ `yfinance`。
     与闸里 `likely_network_layer` 的分族规则同一个（`r["source"].split()[0]`）。"""
     parts = str(source).split()
     return parts[0] if parts else "?"
+
+
+def definition_fingerprint() -> str:
+    """当前「`source_outage` 日」定义的指纹：判定版本 + 阈值 + 受监视字段（键 / 路径 / 记录键 / 覆盖线 / 源族）。"""
+    import hashlib
+    import scan_coverage_gate
+    spec = {"day_health_version": VERSION, "min_outage_fields": MIN_OUTAGE_FIELDS,
+            "fields": sorted([f["key"], f["path"], f.get("recorded_key"), f["min_coverage"], family(f["source"])]
+                             for f in scan_coverage_gate.FIELDS)}
+    return hashlib.sha256(json.dumps(spec, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def sensitivity_plan(summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """敏感性分析（修订 3）要去掉哪些天。输入 `summarize_days` 的结果。
+
+    `{"available": True, "days": [...], "undetermined": n}` 或 `{"available": False, "reason": ...}`。
+    判定不可得、或定义指纹与登记时不同 ⇒ 不可得 + 原因（**不静默退回照算**，也不静默当成「没有故障日」）。
+    判不了的日子（结果文件不在 / 不可解析）不去掉（保守：主分析里有它就留着），数量单列。
+    """
+    if not isinstance(summary, dict) or not summary.get("available"):
+        return {"available": False, "reason": f"日健康判定不可得：{(summary or {}).get('reason') if isinstance(summary, dict) else summary!r}"}
+    try:
+        fp = definition_fingerprint()
+    except Exception as e:  # noqa: BLE001 —— 算不出指纹也要说出来
+        return {"available": False, "reason": f"定义指纹算不出：{type(e).__name__}: {e}"}
+    if fp != REGISTERED_FINGERPRINT:
+        return {"available": False,
+                "reason": f"日健康定义与修订 3 登记时不同（现 {fp} ≠ 登记 {REGISTERED_FINGERPRINT}）——不可比，须新开修订"}
+    return {"available": True, "rule_version": VERSION,
+            "days": sorted(o["date"] for o in summary.get("outage") or []),
+            "undetermined": len(summary.get("undetermined") or [])}
 
 
 def classify(cov: Optional[Dict[str, Any]]) -> Dict[str, Any]:

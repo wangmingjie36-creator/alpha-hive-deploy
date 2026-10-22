@@ -247,7 +247,8 @@ class TestDimIcLoaderIsDisplayOnly:
         b = self._run(tmp_path, monkeypatch, name="w2", summary={"available": True, "version": 99, "n_days": 3,
                                                                   "outage": [], "degraded": [], "undetermined": []})
         assert a["day_health"] != b["day_health"]
-        assert {k: v for k, v in a.items() if k != "day_health"} == {k: v for k, v in b.items() if k != "day_health"}
+        _derived = {"day_health", "sensitivity_excl_outage_days"}      # 这两项本来就由判定派生；主分析的每个键必须逐字相同
+        assert {k: v for k, v in a.items() if k not in _derived} == {k: v for k, v in b.items() if k not in _derived}
 
     def test_excluded_day_list_unchanged(self, tmp_path, monkeypatch):
         """故障日不等于协议排除日：10-14 照样在样本里（排不排是协议修订，不在本版）。"""
@@ -280,7 +281,215 @@ class TestResonanceLoaderIsDisplayOnly:
         a = self._run(tmp_path, monkeypatch)
         assert a["n_reports"] == 2 and [o["date"] for o in a["day_health"]["outage"]] == ["2026-10-14"]
         b = self._run(tmp_path, monkeypatch, summary={"available": False, "reason": "x"})
-        assert {k: v for k, v in a.items() if k != "day_health"} == {k: v for k, v in b.items() if k != "day_health"}
+        _derived = {"day_health", "sensitivity_excl_outage_days"}
+        assert {k: v for k, v in a.items() if k not in _derived} == {k: v for k, v in b.items() if k not in _derived}
+
+
+# ── 3b. 敏感性分析（修订 3，2026-10-22）：主分析不变、并列报告「去掉 source_outage 日」 ──────────────
+
+_REGISTERED_FP = "76bd554125c07a4e"    # 与 day_health.REGISTERED_FINGERPRINT、两份协议正文里的同一个值：三处都要改才算改预注册
+_FORBIDDEN_NESTED = {"ic", "t", "p", "ci95", "se_nw", "t_iid", "descriptive", "verdicts", "result", "stats"}
+
+
+def _all_keys(x):
+    if isinstance(x, dict):
+        for k, v in x.items():
+            yield k
+            yield from _all_keys(v)
+    elif isinstance(x, (list, tuple)):
+        for v in x:
+            yield from _all_keys(v)
+
+
+class TestSensitivityRuleIsFrozen:
+    def test_fingerprint_is_pinned_in_three_places(self):
+        assert dh.REGISTERED_FINGERPRINT == _REGISTERED_FP
+        assert dh.definition_fingerprint() == _REGISTERED_FP, \
+            "「source_outage 日」的定义变了（FIELDS / 阈值 / 分族 / 判定版本）——这是改预注册：新开修订，或还原定义"
+        assert _REGISTERED_FP in (_ROOT / "experiments/dim_ic_preregistration.md").read_text(encoding="utf-8")
+        assert _REGISTERED_FP in (_ROOT / "experiments/resonance_boost_forward_test.py").read_text(encoding="utf-8")
+
+    def test_both_protocols_record_the_amendment(self):
+        doc = (_ROOT / "experiments/dim_ic_preregistration.md").read_text(encoding="utf-8")
+        assert "### 修订 3（2026-10-22" in doc and "不排除" in doc and "不触发任何动作" in doc
+        src = (_ROOT / "experiments/resonance_boost_forward_test.py").read_text(encoding="utf-8")
+        assert "修订 3（v0.45.605，2026-10-22" in src and "不触发任何动作" in src
+
+    @pytest.mark.parametrize("mutate", ["add_field", "threshold", "version", "family", "min_coverage"])
+    def test_any_definition_change_moves_the_fingerprint(self, monkeypatch, mutate):
+        """正对照：每一种「改定义」都必须让指纹变——否则冻结是假的。"""
+        if mutate == "add_field":
+            monkeypatch.setattr(G, "FIELDS", G.FIELDS + [{"key": "x", "path": "OracleBeeEcho.x", "min_coverage": 0.7,
+                                                           "source": "yfinance 新字段"}])
+        elif mutate == "threshold":
+            monkeypatch.setattr(dh, "MIN_OUTAGE_FIELDS", 3)
+        elif mutate == "version":
+            monkeypatch.setattr(dh, "VERSION", 2)
+        elif mutate == "family":
+            monkeypatch.setattr(G, "FIELDS", [{**f, "source": "CBOE 期权链"} if f["key"] == "rv_30d" else f for f in G.FIELDS])
+        else:
+            monkeypatch.setattr(G, "FIELDS", [{**f, "min_coverage": 0.5} if f["key"] == "catalysts" else f for f in G.FIELDS])
+        assert dh.definition_fingerprint() != _REGISTERED_FP
+
+    def test_cosmetic_changes_do_not_move_it(self, monkeypatch):
+        """注释 / note 文案不是定义：改了不该让敏感性作废。"""
+        monkeypatch.setattr(G, "FIELDS", [{**f, "note": "改个说法"} for f in G.FIELDS])
+        assert dh.definition_fingerprint() == _REGISTERED_FP
+
+    def test_plan_lists_days_and_counts_undetermined(self):
+        s = {"available": True, "outage": [{"date": "2026-10-16", "sources": {}}, {"date": "2026-10-14", "sources": {}}],
+             "degraded": ["2026-10-15"], "undetermined": [{"date": "2026-10-20", "reason": "x"}]}
+        assert dh.sensitivity_plan(s) == {"available": True, "rule_version": dh.VERSION,
+                                          "days": ["2026-10-14", "2026-10-16"], "undetermined": 1}
+
+    def test_plan_is_unavailable_never_silently_empty(self, monkeypatch):
+        assert dh.sensitivity_plan({"available": False, "reason": "boom"})["available"] is False
+        assert dh.sensitivity_plan(None)["available"] is False
+        monkeypatch.setattr(dh, "MIN_OUTAGE_FIELDS", 3)
+        p = dh.sensitivity_plan({"available": True, "outage": [], "degraded": [], "undetermined": []})
+        assert p["available"] is False and "不可比" in p["reason"] and "days" not in p
+
+
+class TestDimIcSensitivity:
+    def _run(self, tmp_path, monkeypatch, days, outage, name, today="2026-10-30"):
+        work = tmp_path / name
+        work.mkdir()
+        rows = [r for d in days for r in _day_rows(d)]
+        monkeypatch.setattr(G, "ROOT", work)
+        for d in days:
+            (work / f".swarm_results_{d}.json").write_text(
+                json.dumps(_results(broken=_OCT14 if d in outage else ())), encoding="utf-8")
+        repo = _config_repo(work, [("2026-09-09", dict(P.FROZEN_WEIGHTS))])
+        return fx.run(db_path=str(_make_db(work, rows)), today=today, repo_root=repo, history=[])
+
+    def test_sensitivity_equals_running_without_that_day(self, tmp_path, monkeypatch):
+        """端到端：敏感性块 = 在「根本没有 10-14」的库上跑同一条链。故障日被去掉的是行，不是别的什么。"""
+        days = ["2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15"]
+        with_day = self._run(tmp_path, monkeypatch, days, {"2026-10-14"}, "a")
+        without = self._run(tmp_path, monkeypatch, [d for d in days if d != "2026-10-14"], set(), "b")
+        sb = with_day["sensitivity_excl_outage_days"]
+        assert sb["available"] and sb["excluded_days"] == ["2026-10-14"] and sb["n_rows_removed"] == 25
+        assert (sb["h1_weeks"], sb["status"]) == (without["h1_weeks"], without["status"])
+        assert without["sensitivity_excl_outage_days"].get("same_as_primary") is True
+        # 主分析：含 10-14 的那次与「没有 10-14」的那次，h1 合格周数口径一致地由全样本决定（不被敏感性改写）
+        assert with_day["h1_weeks"] == self._run(tmp_path, monkeypatch, days, set(), "c")["h1_weeks"]
+
+    def test_primary_identical_whether_or_not_there_is_an_outage_day(self, tmp_path, monkeypatch):
+        """主分析不变的证明：同一份样本，仅「10-14 是不是故障日」不同 ⇒ 除两个派生键外逐字相同。"""
+        days = ["2026-10-12", "2026-10-13", "2026-10-14"]
+        a = self._run(tmp_path, monkeypatch, days, {"2026-10-14"}, "p1")
+        b = self._run(tmp_path, monkeypatch, days, set(), "p2")
+        _derived = {"day_health", "sensitivity_excl_outage_days"}
+        assert {k: v for k, v in a.items() if k not in _derived} == {k: v for k, v in b.items() if k not in _derived}
+        assert a["sensitivity_excl_outage_days"] != b["sensitivity_excl_outage_days"]
+
+    def test_primary_chain_gets_every_row_and_only_the_sensitivity_chain_drops_the_outage_day(self, tmp_path, monkeypatch):
+        """会咬人的探针：用桩替换判定链，让它返回「拿到了几个有效日」。主分析必须拿到 3 天，敏感性那条只拿到 2 天。
+        （直接比 `h1_weeks` 不行：10-19 是仓库登记的世代边界，窗口里只剩 W42 一个合格周，去掉一天不改周数——
+        「主分析被悄悄改成敏感性的样本」这类变异在周数口径下是看不出来的，这里看进链的行。）"""
+        seen = []
+
+        def _probe(h1_weeks, h2_weeks, P_, **k):
+            n_days = sum(d for _w, _v, d in h1_weeks)
+            seen.append(n_days)
+            return {"status": "not_ready", "h1_weeks": n_days, "next_look_at": 26, "looks_done": [], "verdicts": {}}
+        monkeypatch.setattr(fx, "decide", _probe)
+        # 日子要避开：10-12（协议排除日）、10-14（H1 的价格输入已按 §13.8 隔离、当天横截面宽度不足）、10-19 起（世代边界截断）
+        days = ["2026-10-13", "2026-10-15", "2026-10-16"]
+        res = self._run(tmp_path, monkeypatch, days, {"2026-10-16"}, "probe")
+        assert res["h1_weeks"] == 3, "主分析的链必须拿到全部 3 个有效日（含故障日）"
+        assert res["sensitivity_excl_outage_days"]["h1_weeks"] == 2, "敏感性的链只拿到去掉故障日后的 2 天"
+        assert seen == [3, 2], seen
+
+    def test_blinded_period_exposes_only_counts(self, tmp_path, monkeypatch):
+        res = self._run(tmp_path, monkeypatch, ["2026-10-12", "2026-10-13", "2026-10-14"], {"2026-10-14"}, "blind")
+        sb = res["sensitivity_excl_outage_days"]
+        assert res["verdicts"] == {} and "verdicts" not in sb
+        assert not (_FORBIDDEN_NESTED & set(_all_keys(sb))), sorted(_FORBIDDEN_NESTED & set(_all_keys(sb)))
+
+    def test_verdicts_revealed_only_when_primary_has_a_conclusion(self):
+        """用桩链单测露出规则：revealed=False 不带 verdicts；True 才带——盲化口径与主分析一致。"""
+        dhs = {"available": True, "outage": [{"date": "2026-10-14", "sources": {}}], "degraded": [], "undetermined": []}
+        rows = [{"date": "2026-10-13"}, {"date": "2026-10-14"}]
+        def stub(rs):
+            return {"h1_weeks": len(rs), "status": "concluded", "verdicts": {"H1": {"result": "x"}},
+                    "descriptive": {"signal": {}}}
+        hidden = fx.sensitivity_block(dhs, rows, stub, revealed=False)
+        shown = fx.sensitivity_block(dhs, rows, stub, revealed=True)
+        assert "verdicts" not in hidden and "descriptive" not in hidden and hidden["n_rows_removed"] == 1
+        assert shown["verdicts"] == {"H1": {"result": "x"}} and "descriptive" in shown
+
+    def test_broken_summary_or_frozen_definition_is_visible(self, monkeypatch):
+        rows = [{"date": "2026-10-14"}]
+        assert fx.sensitivity_block({"available": False, "reason": "boom"}, rows, lambda r: {}, revealed=False)["available"] is False
+        dhs = {"available": True, "outage": [{"date": "2026-10-14", "sources": {}}], "degraded": [], "undetermined": []}
+        monkeypatch.setattr(dh, "REGISTERED_FINGERPRINT", "0" * 16)
+        out = fx.sensitivity_block(dhs, rows, lambda r: {}, revealed=False)
+        assert out["available"] is False and "不可比" in out["reason"]
+
+    def test_chain_failure_is_reported_not_swallowed(self):
+        dhs = {"available": True, "outage": [{"date": "2026-10-14", "sources": {}}], "degraded": [], "undetermined": []}
+
+        def boom(_rs):
+            raise RuntimeError("chain broke")
+        out = fx.sensitivity_block(dhs, [{"date": "2026-10-14"}], boom, revealed=True)
+        assert out["available"] is False and "chain broke" in out["reason"]
+
+
+class TestResonanceSensitivity:
+    def _home(self, tmp_path, outage):
+        sr = {"ticker": "NVDA", "agent_details": {"ScoutBeeNova": {"score": 5.0}}, "data_quality": {"x": 1},
+              "base_score_before_resonance": 5.0, "gex_regime_mod": {}, "final_score": 5.0, "direction": "neutral"}
+        for d in ("2026-10-13", "2026-10-14", "2026-10-15"):
+            (tmp_path / f"analysis-NVDA-ml-{d}.json").write_text(json.dumps({"swarm_results": sr}), encoding="utf-8")
+            (tmp_path / f".swarm_results_{d}.json").write_text(
+                json.dumps(_results(broken=_OCT14 if d in outage else ())), encoding="utf-8")
+        (tmp_path / "p.db").write_text("", encoding="utf-8")
+        return tmp_path
+
+    def _run(self, tmp_path, monkeypatch, status="not_ready", outage=("2026-10-14",)):
+        home = self._home(tmp_path, set(outage))
+        monkeypatch.setattr(fwd, "load_excess_returns", lambda db: {})
+        seen = []
+
+        def _eval(rows, excess, **k):
+            seen.append(sorted(r["date"] for r in rows))
+            return {"status": status, "weeks": len(rows), "next_look_at": 26, "n_reports": len(rows),
+                    "stats": {"mean": 0.1, "p": 0.2}, "look": "中检", "alpha": 0.01}
+        monkeypatch.setattr(fwd, "evaluate", _eval)
+        return fwd.run(home=home, db_path=str(home / "p.db"), today="2026-10-30"), seen
+
+    def test_second_evaluation_runs_without_the_outage_day(self, tmp_path, monkeypatch):
+        res, seen = self._run(tmp_path, monkeypatch)
+        assert seen == [["2026-10-13", "2026-10-14", "2026-10-15"], ["2026-10-13", "2026-10-15"]]
+        sb = res["sensitivity_excl_outage_days"]
+        assert sb["available"] and sb["excluded_days"] == ["2026-10-14"] and sb["n_rows_removed"] == 1 and sb["n_reports"] == 2
+        assert res["n_reports"] == 3, "主分析仍含 10-14"
+
+    def test_blinded_until_primary_concludes(self, tmp_path, monkeypatch):
+        res, _ = self._run(tmp_path, monkeypatch, status="not_ready")
+        sb = res["sensitivity_excl_outage_days"]
+        assert "result" not in sb and not (_FORBIDDEN_NESTED & set(_all_keys(sb)))
+        (tmp_path / "x").mkdir()
+        res2, _ = self._run(tmp_path / "x", monkeypatch, status="confirmed")
+        assert res2["sensitivity_excl_outage_days"]["result"]["stats"] == {"mean": 0.1, "p": 0.2}
+
+    def test_no_outage_day_means_no_second_evaluation(self, tmp_path, monkeypatch):
+        res, seen = self._run(tmp_path, monkeypatch, outage=())
+        assert len(seen) == 1 and res["sensitivity_excl_outage_days"]["same_as_primary"] is True
+
+    def test_primary_unchanged_by_the_sensitivity(self, tmp_path, monkeypatch):
+        a, _ = self._run(tmp_path, monkeypatch, outage=("2026-10-14",))
+        (tmp_path / "y").mkdir()
+        b, _ = self._run(tmp_path / "y", monkeypatch, outage=())
+        _derived = {"day_health", "sensitivity_excl_outage_days"}
+        assert {k: v for k, v in a.items() if k not in _derived} == {k: v for k, v in b.items() if k not in _derived}
+
+    def test_insample_review_skips_it(self, tmp_path, monkeypatch):
+        home = self._home(tmp_path, {"2026-10-14"})
+        monkeypatch.setattr(fwd, "load_excess_returns", lambda db: {})
+        monkeypatch.setattr(fwd, "evaluate", lambda rows, excess, **k: {"status": "insample", "weeks": 0})
+        assert "sensitivity_excl_outage_days" not in fwd.run(home=home, db_path=str(home / "p.db"), insample=True)
 
 
 # ── 4. 扫描接线 ──────────────────────────────────────────────────────────────
