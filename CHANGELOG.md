@@ -21,8 +21,54 @@
 - 自查时发现一个存活变异体——入口清空旧 `stop_reason` 是多余的（只有拿到响应才会走到该日志，那时值刚被写过），连同那条测不出差别的测试一起删掉了。
 - **没做**：重试、改 Queen 提示词或 `max_tokens`（原因没查清前不动，也不改 LLM 臂的定义）；把失败原文落盘成文件（日志够用）。
 
+## [0.45.627] — 2026-10-22 — Fixed：v0.45.623 二次检查——对话 API 失败收成一个分类器（网关超时按可能计费记账、代理拒绝不记账、各类拒绝说对原因、半路失败写明已花）；影子 plist 代理变量补小写并对编排器逐项核对
 
-## [0.45.627] — 2026-10-22 — 占位（进行中：v0.45.623 二次检查——对话 API 失败收成一个分类器：网关超时按可能计费记账不重试、代理拒绝 CONNECT 不记账、首问 400 / 非 JSON 403 / 402 / 404 说对原因、中途失败写明前面已花；影子 plist 代理变量补小写并对编排器逐项核对）
+623 二次检查报 8 处，用户定「按根因修复，自己排序」。根因是第 8 处：一次 API 调用失败后「记不记账」「重不重发」「给人看的话」分在四个函数里各判一遍（`_not_sent` / `_maybe_billed` / `_retry_wait` / `_human_api_error`），每个都自己 import、自己按状态码分支——第 1、4 处正是两处判据对不上长出来的。先收口，其余几处落在收口后的那一个函数里。
+
+### Fixed
+- **失败分类收成一处**（`alphabot/chat.py::_classify`，第 8 处）：一次失败 ⇒ 四种结局之一，重试循环只看结局。
+  - 四种结局：`NOT_SENT`（不记账）、`MAYBE_BILLED`（不重发、按最坏情况记账）、`RETRY`（等一下再发）、`REJECTED`（不重发、不记账）。
+  - 判据写成一句：**只有 Anthropic 自己回的错误对象才算「它拒了、不计费」**；请求已发出却没拿到它的回答，一律可能已计费（宁多记、不漏记）。
+  - 话术全在 `_explain`：按结局出 `ChatNotSent` / `ChatMaybeBilled` / `ChatRejected`。原来的 `_maybe_billed` / `_human_api_error` 删除，`_retry_wait` 只剩算等几秒。
+- **网关超时按可能计费处理**（第 1 处）：504 / 524（Cloudflare 源站超时）、`timeout_error` 类型、以及回应不是 Anthropic 错误对象的 5xx 页，归 `MAYBE_BILLED`，不重发，按最坏情况记一笔（`error` 带状态码，如 `InternalServerError(504)`）。
+  - 此前按 5xx 重试两次，还说「没开始生成、不收费」：最坏付三次、一笔没记，当天 $3 的闸也看不见这些钱。
+  - 这类请求到底计不计费没有文档佐证（待验证），按本模块「宁多记、不漏记」处理。
+  - Anthropic 自己回的 500 / 529（带错误对象）照旧等一下再发。
+- **代理没建起隧道不记账**（第 4 处）：`httpx.ProxyError`（代理对 CONNECT 回了非 2xx：407 要认证、502 连不上上游…）与 `UnsupportedProtocol` 归 `NOT_SENT`，抽屉里写「代理没能建立连接…没计费」。
+  - 此前被当成「读回复时断线」，按最坏情况记约 $0.30 一笔，按十来次就把当天额度占满，一分钱没花——正是 618 为 ConnectError 修过的形状。
+  - 说明：Clash（mihomo）一般先回 200 再拨上游，上游失败表现为 TLS 阶段的 ConnectError，本来就分对了；这一处主要防别的代理 / 要认证的代理。
+- **首问 400 不再叫人开新对话**（第 2 处）：对话还没有历史时，400 / 413 只能是请求本身的写法（例如 beta 头没开通——Anthropic 文档：组织没开通的 beta 头回 400），抽屉里改说「开新对话也一样，把这条报错告诉开发者」并带原话。有历史时才提示「点新对话」（例如思考块绑定失效的 400，同一段历史重发永远被拒）。
+- **非 Anthropic 回应不按 Anthropic 的语义解读**（第 3 处）：4xx 的回应体不是 Anthropic 错误对象（防火墙 / 代理 / CDN 的 HTML 页）⇒ 说「多半是网络这一侧拦的，不一定是 key 的问题——看看 Clash 与当前节点」。
+  - 此前 HTML 的 403 说成「这个 key 没有权限做这件事（403 ）」，括号里还空着，正是 623 想消除的误导。
+  - `permission_error` 的 403 才归咎组织 / 工作区权限，指向 Console 并带原话（文档：地区等访问要求的 403「原话里会说怎么办」）。
+  - `forbidden`（地区拒绝）补一句「或 Clash 当前节点在受限地区，换一个节点」：此前只说「开着再问」，节点在香港时用户会原地打转。
+- **402 / 404 说怎么办**（第 6 处）：402 余额 / 付款问题 ⇒ 到 Anthropic Console 的结算页处理；404 ⇒ 找不到模型或这个组织用不了它（点名 `MODEL`）。此前两者都落到通用分支。
+- **半路失败写明前面已花多少**（第 5 处，`ChatEngine._turn`）：一问的工具循环在第 2、3 次调用失败（被拒 / 可能计费 / 超预算）时，前面调用的钱已花、已记账，这一问却整段作废。
+  - 现在统一在 `_turn` 一处给报错补上「这一问前面 N 次 API 调用已花 $x、已记账；那部分回答没保存，再问会重新付」，错误类型与状态码不变。
+  - 此前只说「被拒的请求不收费」，顶栏的「今天已花」却涨了，两处对不上。
+  - 工具循环本体挪进 `_run`，内容与缩进不变。
+- **影子 plist 代理变量补小写那套、对编排器逐项核对**（第 7 处，`llm_shadow_daily.PROXY_ENV`）：大小写两套（`HTTP(S)_PROXY` / `http(s)_proxy` / `NO_PROXY` / `no_proxy`）一个映射，与编排器探活通过后导出的那组逐项一致。
+  - 此前只写大写：libcurl（curl_cffi ⇒ yfinance）对 http:// 只读小写 `http_proxy`（httpoxy 防护），623 承诺的「curl_cffi 也走 Clash」只对 https 成立。
+  - 此前 `NO_PROXY` 是又一份抄写，守卫只核了子集。
+  - **已装 plist 同步更新**（用户本次要求修第 7 处，即批准）：备份 `~/Library/LaunchAgents/com.alpha.hive.llmshadow.plist.bak-pre-lowercase-proxy-20261022`；新内容 = 生成器输出（与原已装逐字对比，差异只有新增的三个小写变量）；`plutil -lint` 通过；`launchctl bootout` / `bootstrap gui/501` 重载。下一次运行是下个工作日 14:45。
+
+模块 docstring「重试只重不花钱的」一条按四种结局重写；帮助页「出错时怎么算钱」补「代理没能建立连接」「余额不足」「节点在受限地区」「网关超时」「半路失败会写明花了多少」。
+
+### 测试（全程不出网）
+- `tests/test_alphabot_chat.py`（真 SDK + httpx MockTransport）：
+  - `test_no_anthropic_answer_is_booked_not_retried`，6 组：504 / 524 / 502 的 HTML 页、504 + `timeout_error`、504 + `api_error`（只靠网关超时码判）、500 + `timeout_error`（只靠错误类型判）。各自断言：只发一次、记一笔 estimated（`error` 带状态码）、报错不说「不收费」、504。
+  - `test_not_sent_is_not_booked` 加 `ProxyError`。
+  - `test_first_ask_400_does_not_send_user_to_a_new_conversation`：首问说「开新对话也一样」并带原话；有历史时才说「点新对话」。
+  - `test_non_anthropic_rejection_is_not_blamed_on_the_key`：HTML 的 403 / 401 / 400 不归咎 key / 请求。
+  - `test_rejections_are_said_plainly` 改 / 加：403 地区要提节点、403 权限指向 Console、413、402、404。
+  - `test_failure_after_spending_says_what_was_spent`（第 2 次调用连续 529）与 `test_budget_stop_mid_turn_says_what_was_spent_too`（超预算）：写明前面已花的金额（与账本那一行逐分一致），类型 / 状态码不变，这一问不进历史。
+- `tests/test_llm_shadow_daily.py::TestPlist::test_carries_the_orchestrator_proxy`：从编排器原文取出探活通过那一支的全部 `export`，解析变量引用后，与 plist 的代理变量、`PROXY_ENV` 三方逐项相等；正对照：确实解析到了大小写两套。
+- 选测登记表 `--update`：只更新了提交号。
+
+### 验证
+- 变异 18 处全红：ProxyError 不算没发出、网关超时码 / `timeout_error` 不算可能计费（各一）、中间层 5xx 当可重试、可能计费的也重发、可能计费不记账、非 Anthropic 回应按 Anthropic 语义解读、首问也叫人开新对话、有历史也说没历史、402 / 404 不说怎么办、地区拒绝不提节点、半路失败不说已花 / 把类型换成通用错误、可能计费仍说不收费、plist 漏小写 / `NO_PROXY` 与编排器不同 / 不带代理。还原后 117 passed。
+- 全量 11798 passed、0 failed（2 xfailed；等别的整套都停了才开跑，报告头无 concurrency 提示）。
+- 仍未真调 API。
 
 ## [0.45.626] — 2026-10-22 — Fixed：v0.45.620 二次检查——bid_zero 守卫对 iCloud 重名副本不误报且按行为认重复、判据拒布尔、遍历剪枝、跨式页文案改准
 

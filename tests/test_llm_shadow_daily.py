@@ -89,13 +89,24 @@ class TestPlist:
 
     def test_carries_the_orchestrator_proxy(self, doc):
         """代理变量写进生成器（v0.45.623）：已装的 plist 10-22 经用户批准手改过，生成器不写，重新生成就把它们无声丢掉。
-        地址与编排器 `PROXY_URL` 的缺省同值——两处各抄一份会漂（编排器是唯一真相，经 tests/_orchestrator 读原文）。"""
+        名字与值都与编排器探活通过后导出的那组**逐项**一致（v0.45.627，623 二次检查 #7：此前只核了地址、只写大写那套——
+        curl_cffi 对 http:// 只读小写 `http_proxy`；`NO_PROXY` 是又一份抄写、只核了子集）。编排器是唯一真相，经
+        tests/_orchestrator 读原文。"""
         import re
         from tests._orchestrator import repo_orchestrator_text
-        m = re.search(r'^PROXY_URL="\$\{ALPHA_HIVE_PROXY:-([^}"]+)\}"', repo_orchestrator_text(), re.M)
+        text = repo_orchestrator_text()
+        m = re.search(r'^PROXY_URL="\$\{ALPHA_HIVE_PROXY:-([^}"]+)\}"', text, re.M)
         assert m, "编排器 PROXY_URL 的写法变了：重看这条守卫"
-        env = doc["EnvironmentVariables"]
-        assert env["HTTPS_PROXY"] == env["HTTP_PROXY"] == dly.PROXY_URL == m.group(1)
+        block = re.search(r'^if \[ "\$_proxy_ok" = "1" \]; then\n(.*?)^else\n', text, re.M | re.S)
+        assert block, "编排器探活通过那一支的写法变了：重看这条守卫"
+        exported = dict(kv for line in block.group(1).splitlines() if line.strip().startswith("export ")
+                        for kv in re.findall(r'(\w+)="([^"]*)"', line))
+        refs = {"$PROXY_URL": m.group(1), "$NO_PROXY": exported.get("NO_PROXY")}
+        want = {k: refs.get(v, v) for k, v in exported.items()}
+        assert {"HTTP_PROXY", "https_proxy", "NO_PROXY", "no_proxy"} <= set(want), want     # 正对照：真解析到了那组导出
+        env = dict(doc["EnvironmentVariables"])
+        assert env.pop("PATH").startswith("/usr/local/bin")
+        assert env == want == dly.PROXY_ENV, (env, want)
         assert {"localhost", "127.0.0.1", "::1"} <= set(env["NO_PROXY"].split(","))     # 回环请求不送去代理
 
     def test_logs_outside_repo(self, doc):

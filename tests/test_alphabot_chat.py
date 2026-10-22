@@ -494,10 +494,11 @@ class TestTimeoutIsNotRetried:
                                      http_client=httpx.Client(transport=httpx.MockTransport(handler)))
         return C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: T0, sleep_fn=sleeps.append)
 
-    @pytest.mark.parametrize("err", ["ConnectError", "ConnectTimeout"])
+    @pytest.mark.parametrize("err", ["ConnectError", "ConnectTimeout", "ProxyError"])
     def test_not_sent_is_not_booked(self, svc, err):
         """连接阶段就失败 ⇒ 请求没发出去、不可能计费（v0.45.618，616 二次检查 #2）：此前断网时每按一次发送都按最坏情况
-        记一笔，几次就把当天额度占满，一分钱没花。"""
+        记一笔，几次就把当天额度占满，一分钱没花。`ProxyError` = 代理对 CONNECT 回了非 2xx、隧道没建起来（v0.45.627，
+        623 二次检查 #4：此前按「读回复时断线」记了最坏情况）。"""
         import httpx
         calls = []
 
@@ -546,13 +547,14 @@ class TestTimeoutIsNotRetried:
         assert spend_lines(svc) == [] and sleeps == [], "400 是请求本身错了，重试没用"
 
     @pytest.mark.parametrize("code, kind, said, must", [
-        (403, "forbidden", "Request not allowed", "Clash"),
-        (403, "permission_error", "no access", "没有权限"),
+        (403, "forbidden", "Request not allowed", "换一个节点"),
+        (403, "permission_error", "no access", "没有权限做这件事（403 permission_error）：到 Anthropic Console"),
         (401, "authentication_error", "invalid x-api-key", "API key 无效"),
         (429, "rate_limit_error", "slow down", "限流（429），重试 2 次"),
         (500, "api_error", "oops", "服务端出错（500），重试 2 次"),
-        (413, "request_too_large", "too big", "新对话"),
-        (404, "not_found_error", "model: x", "原话：model: x"),
+        (413, "request_too_large", "too big", "超过了大小上限（413）"),
+        (404, "not_found_error", "model: x", f"找不到模型 {C.MODEL}，或这个组织用不了它（404）。原话：model: x"),
+        (402, "billing_error", "credit balance too low", "余额或付款有问题（402）：到 Anthropic Console 的结算页"),
     ])
     def test_rejections_are_said_plainly(self, svc, code, kind, said, must):
         """带状态码的拒绝说人话（v0.45.623）：原因、扣没扣钱（都不收费）、该怎么办。此前抽屉里是 SDK 原文
@@ -567,6 +569,94 @@ class TestTimeoutIsNotRetried:
         assert ".anthropic_api_key" not in msg, "CLAUDE.md：不提示创建 / 去找 key 文件"
         assert spend_lines(svc) == []
 
+
+    @pytest.mark.parametrize("code, body", [
+        (504, "<html>Gateway Timeout</html>"),
+        (524, "<html>A timeout occurred</html>"),
+        (502, "<html>Bad gateway</html>"),
+        (504, {"type": "error", "error": {"type": "timeout_error", "message": "took too long"}}),
+        (504, {"type": "error", "error": {"type": "api_error", "message": "gateway"}}),        # 只靠网关超时码判
+        (500, {"type": "error", "error": {"type": "timeout_error", "message": "took too long"}}),  # 只靠错误类型判
+    ])
+    def test_no_anthropic_answer_is_booked_not_retried(self, svc, code, body):
+        """网关超时 / 中间层回的 5xx 页：请求已到、没拿到 Anthropic 自己的回答 ⇒ 可能已计费，与读超时同类（v0.45.627，
+        623 二次检查 #1）。此前按 5xx 重试两次、还说「不收费」：最坏付三次、一笔没记。"""
+        import httpx
+        calls, sleeps = [], []
+
+        def handler(request):
+            calls.append(1)
+            return httpx.Response(code, json=body) if isinstance(body, dict) else httpx.Response(code, text=body)
+        eng = self._engine(svc, handler, sleeps)
+        with pytest.raises(C.ChatMaybeBilled, match="可能已在服务端完成并计费") as ei:
+            eng.send("x")
+        assert len(calls) == 1 and sleeps == [], "可能已计费的请求又重发了（重发 = 再付一次）"
+        (line,) = spend_lines(svc)
+        assert line["estimated"] is True and line["error"].endswith(f"({code})") and line["usd"] > 0.1
+        assert "不收费" not in str(ei.value) and ei.value.status == 504 and eng._inflight == pytest.approx(0.0)
+
+    def test_first_ask_400_does_not_send_user_to_a_new_conversation(self, svc):
+        """对话还没有历史时的 400 只能是请求本身的写法（如 beta 头没开通）——开新对话也一样，不该让人去点（v0.45.627，
+        623 二次检查 #2）；有历史时才可能是历史坏了，那时「新对话」才有用。"""
+        import httpx
+        beta = {"type": "error", "error": {"type": "invalid_request_error", "message":
+                "Unexpected value(s) `server-side-fallback-2026-07-01` for the `anthropic-beta` header."}}
+        eng = self._engine(svc, lambda r: httpx.Response(400, json=beta), [])
+        with pytest.raises(C.ChatRejected) as ei:
+            eng.send("第一问")
+        msg = str(ei.value)
+        assert "还没有历史" in msg and "开新对话也一样" in msg and "anthropic-beta" in msg, msg
+        assert "点「新对话」再问" not in msg, msg
+
+        bound = {"type": "error", "error": {"type": "invalid_request_error", "message": "bound to a different conversation"}}
+        replies = [httpx.Response(200, json=resp([text("一")])), httpx.Response(400, json=bound)]
+        eng = self._engine(svc, lambda r: replies.pop(0), [])
+        cid = eng.send("一？")["conversation_id"]
+        with pytest.raises(C.ChatRejected) as ei:
+            eng.send("二？", conversation_id=cid)
+        assert "点「新对话」再问" in str(ei.value) and "还没有历史" not in str(ei.value), str(ei.value)
+
+    @pytest.mark.parametrize("code", [403, 401, 400])
+    def test_non_anthropic_rejection_is_not_blamed_on_the_key(self, svc, code):
+        """回应不是 Anthropic 的错误格式（防火墙 / 代理的 HTML 页）⇒ 是中间层拦的，不按 Anthropic 的语义解读成 key / 请求的
+        问题（v0.45.627，623 二次检查 #3：此前 HTML 的 403 说成「这个 key 没有权限做这件事（403 ）」）。"""
+        import httpx
+        eng = self._engine(svc, lambda r: httpx.Response(code, text="<html>Access denied</html>"), [])
+        with pytest.raises(C.ChatRejected) as ei:
+            eng.send("x")
+        msg = str(ei.value)
+        assert "不是 Anthropic 的错误格式" in msg and "Clash" in msg, msg
+        assert "key 所在" not in msg and "无效" not in msg and "不合法" not in msg and spend_lines(svc) == [], msg
+
+    def test_failure_after_spending_says_what_was_spent(self, svc):
+        """一问半路失败：前面调用的钱已花、已记账，这一问却作废、再问要重付 ⇒ 报错里写明（v0.45.627，623 二次检查 #5：
+        此前只说「被拒的请求不收费」，顶栏的「今天已花」却涨了）。错误类型 / 状态码不变。"""
+        import httpx
+        first = resp([tool_use("get_rules", {}, "t1")], stop="tool_use")
+        n = []
+
+        def handler(request):
+            n.append(1)
+            if len(n) == 1:
+                return httpx.Response(200, json=first)
+            return httpx.Response(529, json={"type": "error", "error": {"type": "overloaded_error", "message": "busy"}})
+        eng = self._engine(svc, handler, [])
+        with pytest.raises(C.ChatRejected) as ei:
+            eng.send("x")
+        (line,) = spend_lines(svc)
+        msg = str(ei.value)
+        assert ei.value.status == 502 and f"前面 1 次 API 调用已花 ${line['usd']:.3f}、已记账" in msg, msg
+        assert len(n) == 1 + C.RETRY_STATUS_TRIES + 1
+        assert all(c["messages"] == [] for c in eng._convs.values()), "失败的一问写进了历史"
+
+    def test_budget_stop_mid_turn_says_what_was_spent_too(self, svc):
+        """同一处统一说（`_turn`），不靠每个抛错点各自记得：工具循环中途撞上额度同样写明前面花了多少。"""
+        eng, _ = engine(svc, resp([tool_use("get_rules", {}, "t1")], stop="tool_use",
+                                  usage={"input_tokens": 10, "output_tokens": 200_000}), resp([text("不该到这")]))
+        with pytest.raises(C.BudgetExceeded) as ei:
+            eng.send("x")
+        (line,) = spend_lines(svc)
+        assert ei.value.status == 429 and f"前面 1 次 API 调用已花 ${line['usd']:.3f}" in str(ei.value), str(ei.value)
 
 class TestDrawer:
     """抽屉的输入框只建一次（重建会丢焦点）、Esc 收起、从顶栏下沿开始（v0.45.616，614 二次检查 #9）。行为在 node 里用

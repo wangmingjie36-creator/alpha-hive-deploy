@@ -18,10 +18,12 @@
   绑定在先前的对话上，改历史会让它失效（新账号直接 400）。页面上下文（在看哪页、哪只票）与日期随每条用户消息带上，
   不进系统提示。一问失败（API 报错 / 超预算 / 超时）⇒ 这一问整段不写进历史，下次从上一问结束处接着；截断 / 拒答
   停在工具调用上 ⇒ 补一条「没执行」的 tool_result 再存（历史里 tool_use 必须紧跟结果，否则之后每问 400）。
-- **重试只重不花钱的**：SDK 一律不重试（`max_retries=0`）。读回复时超时 / 断线 ⇒ 请求可能已计费，重发 = 再付一次且
-  第一次的用量永远拿不到 ⇒ 不重试、按最坏情况记账（`estimated`）并如实报错（v0.45.616）；连接阶段就失败 ⇒ 请求没发出去，
-  不记账（v0.45.618）；带状态码的 429 / 5xx（含过载 529）⇒ 服务端拒了、没计费 ⇒ 自己等一下再发，最多 `RETRY_STATUS_TRIES` 次
-  （v0.45.618）。
+- **重试只重不花钱的**：SDK 一律不重试（`max_retries=0`）；失败怎么处置只由 `_classify` 一处定（v0.45.627），四种结局：
+  连接阶段就失败、代理没建起隧道 ⇒ 请求没发出去，不记账（v0.45.618 / 627）；请求已发出却没拿到 Anthropic 自己的回答（读超时、
+  断线、网关超时、中间层回的 5xx 页）⇒ 可能已计费，重发 = 再付一次且第一次的用量永远拿不到 ⇒ 不重试、按最坏情况记账
+  （`estimated`，v0.45.616 / 627）；被限流 / Anthropic 自己回的 5xx（含过载 529）⇒ 没计费 ⇒ 等一下再发，最多
+  `RETRY_STATUS_TRIES` 次（v0.45.618）；别的拒绝 ⇒ 没计费、不重发。报错一律说清原因、扣没扣钱、怎么办（`_explain`）；
+  一问半路失败时另写明前面几次调用已花多少（`_turn`）。
 - **拒答回落**：`fallbacks: "default"`（Anthropic 按拒答类别选替补模型）；回落那次按替补模型计价（未登记的按最贵价）。
 
 守卫 `tests/test_alphabot_chat.py`。
@@ -97,51 +99,25 @@ class ChatNotSent(ChatError):
 
 
 class ChatRejected(ChatError):
-    """Anthropic 带状态码拒了这次请求（限流 / 过载 / key / 地区 / 请求不合法…）：没开始生成，不计费。"""
+    """请求被拒、没给出回答（限流 / 过载 / key / 余额 / 地区 / 请求不合法…）：不计费。"""
     status = 502
 
 
-def _human_api_error(exc: BaseException, retries: int) -> Optional[ChatError]:
-    """带状态码的 API 错误 ⇒ 给人看的一句话：原因、扣没扣钱、该怎么办（v0.45.623）。此前抽屉里直接是 SDK 原文
-    （`OverloadedError: Error code: 529 - {...}`），看不出扣没扣钱；Clash 没开时的 403 还像是 key 出了问题。
-    不是带状态码的 API 错误 ⇒ None（照原样往上抛）。"""
-    try:
-        import anthropic
-    except ImportError:
-        return None
-    if not isinstance(exc, anthropic.APIStatusError):
-        return None
-    code = exc.status_code
-    body = exc.body if isinstance(getattr(exc, "body", None), dict) else {}
-    err = body.get("error") if isinstance(body.get("error"), dict) else {}
-    kind, said = err.get("type") or "", str(err.get("message") or "")[:200]
-    tried = f"，重试 {retries} 次仍不行" if retries else ""
-    if code == 403 and (kind == "forbidden" or "not allowed" in said.lower()):
-        why = "Anthropic 拒绝了这台机器的请求（403）：多半是没走代理、被按地区拒绝——看看 Clash 开着没有，开着再问"
-    elif code == 403:
-        why = f"这个 key 没有权限做这件事（403 {kind}）"
-    elif code == 401:
-        why = "API key 无效或已失效（401）：Anthropic 不认它"
-    elif code == 429:
-        why = f"被 Anthropic 限流（429）{tried}：过一两分钟再问"
-    elif code == 529 or kind == "overloaded_error":
-        why = f"Claude 那边过载（{code}）{tried}：稍后再问"
-    elif code >= 500:
-        why = f"Anthropic 服务端出错（{code}）{tried}：稍后再问"
-    elif code == 413:
-        why = "这场对话太长，超过了请求上限（413）：点「新对话」再问"
-    elif code == 400:
-        why = f"请求被判为不合法（400）：多半是对话历史出了问题，点「新对话」再问；还不行就把这条报错告诉开发者。原话：{said}"
-    else:
-        why = f"Anthropic 拒绝了这次请求（{code} {kind}）。原话：{said}"
-    return ChatRejected(f"{why}。被拒的请求没开始生成，不收费、没记账。")
+#: 一次 API 调用失败的四种结局（v0.45.627 收成一个分类器 `_classify`）。此前「记不记账」「重不重试」「给人看的话」分在
+#: 四个函数里各判一遍：加一类失败要同步改三处，改漏了就是「说不收费却记了账」或「说可能已计费却又重发」
+NOT_SENT = "not_sent"            # 请求没到 Anthropic ⇒ 不可能计费：不记账
+MAYBE_BILLED = "maybe_billed"    # 请求已到、没拿到 Anthropic 的回答 ⇒ 可能已计费：不重发、按最坏情况记账
+RETRY = "retry"                  # 被限流 / Anthropic 自己回的 5xx ⇒ 没计费：等一下再发
+REJECTED = "rejected"            # 别的拒绝 ⇒ 没计费，重发也没用
 
-
-#: 带状态码、服务端没开始生成（不计费）、可以等一下再试的错误：限流 429、5xx（含过载 529）。v0.45.618 前 max_retries=0
-#: 连它们也不重试了，高峰期一个 529 就让这一问失败（工具循环中途的话，前面的钱已经花了）
+#: `RETRY` 类最多再发几次。v0.45.618 前 max_retries=0 连它们也不重试了，高峰期一个 529 就让这一问失败（工具循环中途的话，
+#: 前面的钱已经花了）
 RETRY_STATUS_TRIES = 2
 RETRY_BACKOFF_SEC = (2.0, 5.0)
 RETRY_AFTER_CAP_SEC = 30.0
+#: 网关超时（524 是 Cloudflare 的「源站超时」）：中间层等不及了，Anthropic 那头可能还在生成、照样计费——与读超时同类
+#: （v0.45.627；此前按 5xx 重试两次、还说「不收费」：最坏付三次、一笔没记）
+GATEWAY_TIMEOUT_STATUS = frozenset({504, 524})
 
 
 def _transport_cause(exc: BaseException):
@@ -157,43 +133,103 @@ def _transport_cause(exc: BaseException):
 
 
 def _not_sent(exc: BaseException) -> bool:
-    """连接阶段就失败（DNS / 拒绝连接 / 连接超时 / 连接池超时）或请求体没写完 ⇒ 服务端收不到完整请求，不可能计费。"""
+    """连接阶段就失败（DNS / 拒绝连接 / 连接超时 / 连接池超时 / 代理没建起隧道）或请求体没写完 ⇒ 服务端收不到完整请求，
+    不可能计费。`ProxyError`（v0.45.627）= 代理对 CONNECT 回了非 2xx（407 要认证、502 连不上上游…），此前被当成「读回复时
+    断线」按最坏情况记账——一分钱没花、按几次就把当天额度占满，正是 618 为 ConnectError 修过的那个形状。"""
     try:
         import httpx
     except ImportError:
         return False
     cause = _transport_cause(exc)
     return isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteError,
-                              httpx.WriteTimeout))
+                              httpx.WriteTimeout, httpx.ProxyError, httpx.UnsupportedProtocol))
 
 
-def _maybe_billed(exc: BaseException) -> bool:
-    """这个失败可能已经花了钱吗？请求已发出、读回复时超时 / 断线 ⇒ 可能：服务端也许已经跑完（宁多记、不漏记）。
-    连接阶段就失败（`_not_sent`）⇒ 不可能（v0.45.618：此前断网时每按一次发送都按最坏情况记一笔，几次就把当天额度
-    占满，一分钱没花）。带状态码的 API 错误 ⇒ 服务端已拒，不计费。"""
+def _anthropic_error(exc: BaseException) -> Optional[dict]:
+    """响应体里 Anthropic 自己的错误对象（`{"error": {"type": …, "message": …}}`）。不是（HTML 页、空体——中间层在说话）⇒ None。"""
+    body = getattr(exc, "body", None)
+    err = body.get("error") if isinstance(body, dict) else None
+    return err if isinstance(err, dict) and isinstance(err.get("type"), str) else None
+
+
+def _classify(exc: BaseException) -> Optional[str]:
+    """一次 API 调用失败 ⇒ `NOT_SENT` / `MAYBE_BILLED` / `RETRY` / `REJECTED`；不是 API 失败 ⇒ None（照原样往上抛）。
+
+    判据（宁多记、不漏记）：请求已发出、却没拿到 **Anthropic 自己的**回答——读超时、断线、网关超时、中间层回的 5xx 页——
+    一律可能已计费；Anthropic 回了它的错误对象 ⇒ 它拒了，不计费。中间层回的 4xx（防火墙 / 代理拦下）没到 Anthropic，不计费。"""
     try:
         import anthropic
     except ImportError:
-        return False
-    return isinstance(exc, anthropic.APIConnectionError) and not _not_sent(exc)
+        return None
+    if isinstance(exc, anthropic.APIConnectionError):         # 含 APITimeoutError
+        return NOT_SENT if _not_sent(exc) else MAYBE_BILLED
+    if not isinstance(exc, anthropic.APIStatusError):
+        return None
+    code, err = exc.status_code, _anthropic_error(exc)
+    if code in GATEWAY_TIMEOUT_STATUS or (err or {}).get("type") == "timeout_error":
+        return MAYBE_BILLED
+    if code >= 500:
+        return RETRY if err else MAYBE_BILLED
+    return RETRY if code == 429 else REJECTED
 
 
-def _retry_wait(exc: BaseException, attempt: int) -> Optional[float]:
-    """可以等一下再试的错误 ⇒ 等几秒；不该重试 ⇒ None。只认带状态码的 429 / 5xx（服务端拒了、没计费）；
-    超时 / 断线一律不重试（可能已计费，见 `_maybe_billed`）。遵守 retry-after（封顶），没有就按退避表。"""
-    try:
-        import anthropic
-    except ImportError:
-        return None
-    if attempt >= RETRY_STATUS_TRIES or not isinstance(exc, anthropic.APIStatusError):
-        return None
-    if exc.status_code != 429 and exc.status_code < 500:
-        return None
+def _retry_wait(exc: BaseException, attempt: int) -> float:
+    """`RETRY` 类等几秒再发：遵守 retry-after（封顶），没有就按退避表。"""
     try:
         wait = float(exc.response.headers.get("retry-after"))
     except (TypeError, ValueError, AttributeError):
         wait = RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)]
     return max(0.0, min(wait, RETRY_AFTER_CAP_SEC))
+
+
+def _explain(exc: BaseException, outcome: str, *, retries: int = 0, fresh: bool = False,
+             booked: float = 0.0) -> ChatError:
+    """失败 ⇒ 给人看的一句话：原因、扣没扣钱、该怎么办（v0.45.623 起；627 按分类器的结局出话）。此前抽屉里直接是 SDK 原文
+    （`OverloadedError: Error code: 529 - {...}`），看不出扣没扣钱。`fresh`：这场对话还没有历史（400 / 413 就不是历史的
+    问题，开新对话没用）；`booked`：`MAYBE_BILLED` 按最坏情况记下的钱。只按 Anthropic 的语义解读它自己回的错误——
+    中间层回的 4xx 不当成 key / 请求的问题。"""
+    if outcome == NOT_SENT:
+        cause = _transport_cause(exc)
+        what = "代理没能建立连接" if type(cause).__name__ == "ProxyError" else "连不上 Claude API"
+        return ChatNotSent(f"{what}（{type(cause).__name__}）：请求没发出去，没计费。检查网络与 Clash 后再问")
+    code = getattr(exc, "status_code", None)
+    if outcome == MAYBE_BILLED:
+        what = (f"请求超时或断线（{type(exc).__name__}）" if code is None else
+                f"没拿到 Anthropic 的回答（{code}{'，网关超时' if code in GATEWAY_TIMEOUT_STATUS else ''}）")
+        return ChatMaybeBilled(f"{what}：可能已在服务端完成并计费，拿不到用量，已按最坏情况记 ${booked:.2f}。"
+                               "这一问没写进对话历史，可以再问一次")
+    err = _anthropic_error(exc)
+    kind, said = (err or {}).get("type") or "", str((err or {}).get("message") or "")[:200]
+    quote = f"。原话：{said}" if said else ""
+    tried = f"，重试 {retries} 次仍不行" if retries else ""
+    if code == 429:
+        why = f"被限流（429）{tried}：过一两分钟再问"
+    elif code >= 500:
+        why = (f"Claude 那边过载（{code}）" if code == 529 or kind == "overloaded_error" else
+               f"Anthropic 服务端出错（{code}）") + f"{tried}：稍后再问"
+    elif err is None:
+        why = (f"请求被拦下（{code}），回应不是 Anthropic 的错误格式：多半是网络这一侧（代理 / 防火墙 / 地区）拦的，"
+               "不一定是 key 的问题——看看 Clash 开着没有、当前节点是否在受限地区，再问")
+    elif code == 403 and (kind == "forbidden" or "not allowed" in said.lower()):
+        why = ("Anthropic 拒绝了这台机器的请求（403）：多半是按地区拒绝——没走代理，或 Clash 当前节点在受限地区。"
+               "看看 Clash 开着没有、换一个节点再问")
+    elif code == 403:
+        why = f"这个 key 所在的组织 / 工作区没有权限做这件事（403 {kind}）：到 Anthropic Console 查权限设置{quote}"
+    elif code == 401:
+        why = "API key 无效或已失效（401）：Anthropic 不认它"
+    elif code == 402:
+        why = f"Anthropic 账户的余额或付款有问题（402）：到 Anthropic Console 的结算页处理后再问{quote}"
+    elif code == 404:
+        why = f"Anthropic 找不到模型 {MODEL}，或这个组织用不了它（404）{quote}"
+    elif code in (400, 413):
+        what = "请求被判为不合法（400）" if code == 400 else "请求超过了大小上限（413）"
+        why = what + ("：这场对话还没有历史，问题出在请求本身的写法（例如 beta 功能没开通、参数不被接受）——开新对话也一样，"
+                      "把这条报错告诉开发者" if fresh else
+                      "：多半是对话历史出了问题（同一段历史重发也会被拒），点「新对话」再问；新对话还不行就把这条报错告诉开发者"
+                      ) + quote
+    else:
+        why = f"Anthropic 拒绝了这次请求（{code} {kind}）{quote}"
+    return ChatRejected(f"{why}。被拒的请求没有给出回答，不收费、没记账。")
 
 
 def _text_groups(content: list) -> List[str]:
@@ -566,6 +602,18 @@ class ChatEngine:
         messages = history + [{"role": "user", "content": [
             {"type": "text", "text": f"[{today_et}（美东）· 用户正在看：{page_context(page)}]\n{message}"}]}]
         turn = {"cost_usd": 0.0, "searches": 0, "tools": [], "notes": [reset_note] if reset_note else [], "calls": 0}
+        try:
+            return self._run(client, conversation_id, messages, turn, fresh=not history, reset=bool(reset_note))
+        except ChatError as exc:
+            # 一问半路失败（超预算 / 被拒 / 超时…）：前面几次调用的钱已经花了、记了，这一问却整段作废、不进历史，再问要重付。
+            # 在这一处统一说出来（v0.45.627）：此前只说「被拒的请求不收费」，顶栏的「今天已花」却涨了，两处对不上
+            if not turn["calls"]:
+                raise
+            raise type(exc)(f"{exc}（这一问前面 {turn['calls']} 次 API 调用已花 ${turn['cost_usd']:.3f}、已记账；"
+                            "那部分回答没保存，再问会重新付）") from exc
+
+    def _run(self, client, conversation_id: str, messages: list, turn: dict, *, fresh: bool, reset: bool) -> dict:
+        """一问的工具循环。`fresh`：这场对话还没有历史（报错时用来判断开新对话有没有用）。"""
         replies: List[str] = []         # 每次 API 响应一段
         sources: Dict[str, str] = {}
         scrub = _scrubber(self.svc)
@@ -594,24 +642,21 @@ class ChatEngine:
                         resp = self._call(client, messages)
                         break
                     except Exception as exc:
-                        if _maybe_billed(exc):
-                            self._record(conversation_id, reserve, estimated=True, error=type(exc).__name__)
-                            raise ChatMaybeBilled(
-                                f"请求超时或断线（{type(exc).__name__}）：可能已在服务端完成并计费，拿不到用量，"
-                                f"已按最坏情况记 ${reserve:.2f}。这一问没写进对话历史，可以再问一次") from exc
-                        if _not_sent(exc):
-                            raise ChatNotSent(f"连不上 Claude API（{type(_transport_cause(exc)).__name__}）："
-                                              "请求没发出去，没计费。检查网络后再问") from exc
-                        wait = _retry_wait(exc, attempt)
-                        if wait is None:
-                            human = _human_api_error(exc, attempt)
-                            if human is not None:
-                                raise human from exc
+                        outcome = _classify(exc)          # 记不记账、重不重发、怎么说，只在这一处定（v0.45.627）
+                        if outcome is None:
                             raise
-                        # 限流 / 过载：服务端拒了、没计费 ⇒ 等一下再发；预留一直占着（这期间没花钱，不用重新预检）
-                        _log.info("对话请求被拒（%s），%.1f 秒后重试", getattr(exc, "status_code", "?"), wait)
-                        self._sleep(wait)
-                        attempt += 1
+                        if outcome == RETRY and attempt < RETRY_STATUS_TRIES:
+                            # 限流 / 过载：服务端拒了、没计费 ⇒ 等一下再发；预留一直占着（这期间没花钱，不用重新预检）
+                            wait = _retry_wait(exc, attempt)
+                            _log.info("对话请求被拒（%s），%.1f 秒后重试", exc.status_code, wait)
+                            self._sleep(wait)
+                            attempt += 1
+                            continue
+                        if outcome == MAYBE_BILLED:
+                            code = getattr(exc, "status_code", None)
+                            self._record(conversation_id, reserve, estimated=True,
+                                         error=type(exc).__name__ + (f"({code})" if code is not None else ""))
+                        raise _explain(exc, outcome, retries=attempt, fresh=fresh, booked=reserve) from exc
                 turn["calls"] += 1
                 cost = call_cost(resp)
                 # 先记账、再释放预留（finally）：中间不留「预留已撤、花费未记」的空档，并发的另一问预检才看得到这笔
@@ -677,7 +722,7 @@ class ChatEngine:
                 if conversation_id in self._convs:
                     self._convs[conversation_id]["messages"] = messages
         served_by = resp.get("model")
-        return {"conversation_id": conversation_id, "conversation_reset": bool(reset_note),
+        return {"conversation_id": conversation_id, "conversation_reset": reset,
                 "reply": "\n\n".join(replies),
                 "sources": [{"url": u, "title": t} for u, t in list(sources.items())[:10]],
                 "tools": turn["tools"], "searches": turn["searches"], "api_calls": turn["calls"],

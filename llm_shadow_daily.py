@@ -26,7 +26,7 @@
 跑哪份代码：`~/alpha-hive-prod`（生产克隆，不在 Desktop 里，launchd 无 TCC 限制；它由每个扫描日的 production_sync 快进，
 代码随 main 自动更新）。数据根缺省 `$HOME/alpha-hive-data`（`hive_logger.resolve_data_root`），所以 plist 不设
 `ALPHA_HIVE_HOME`。API Key 走 `~/.anthropic_api_key`（0600；launchd 不读 shell 环境）。
-plist 写上代理环境变量（v0.45.623，`PROXY_URL`）：curl_cffi（yfinance）这类不读 macOS 系统代理的客户端也走 Clash。
+plist 写上代理环境变量（v0.45.623，`PROXY_ENV`；627 补小写那套）：curl_cffi（yfinance）这类不读 macOS 系统代理的客户端也走 Clash。
 
 用法
 ----
@@ -71,6 +71,11 @@ EXIT_SKIPPED = 4
 #: ⚠️ 与编排器不同，这里**不探活**：Clash 没开时这类请求连不上（Anthropic 那头此时本来也会被按地区拒绝）。
 PROXY_URL = "http://127.0.0.1:7897"
 NO_PROXY = "localhost,127.0.0.1,::1,.local"
+#: 写进 plist 的代理变量：与编排器探活通过后导出的那组逐项一致（名字与值都由守卫按编排器原文核对）。大小写两套都要：
+#: libcurl（curl_cffi ⇒ yfinance）对 http:// 只读小写 `http_proxy`（httpoxy 防护），只写大写那套时 http 请求仍直连
+#: （v0.45.627，623 二次检查 #7）
+PROXY_ENV = {"HTTP_PROXY": PROXY_URL, "HTTPS_PROXY": PROXY_URL, "http_proxy": PROXY_URL, "https_proxy": PROXY_URL,
+             "NO_PROXY": NO_PROXY, "no_proxy": NO_PROXY}
 
 ACTION_RUN, ACTION_WAIT, ACTION_SKIP = "run", "wait", "skip"
 
@@ -108,8 +113,7 @@ def render_plist(*, python: str, script: str, log_dir: str) -> bytes:
         "StartCalendarInterval": [
             {"Weekday": d, "Hour": TRIGGER_HOUR, "Minute": TRIGGER_MINUTE} for d in WEEKDAYS],
         "RunAtLoad": False,
-        "EnvironmentVariables": {"PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-                                 "HTTPS_PROXY": PROXY_URL, "HTTP_PROXY": PROXY_URL, "NO_PROXY": NO_PROXY},
+        "EnvironmentVariables": {"PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", **PROXY_ENV},
         "WorkingDirectory": str(Path(script).parent),
         "StandardOutPath": str(Path(log_dir) / "llm_shadow_daily.out.log"),
         "StandardErrorPath": str(Path(log_dir) / "llm_shadow_daily.err.log"),
