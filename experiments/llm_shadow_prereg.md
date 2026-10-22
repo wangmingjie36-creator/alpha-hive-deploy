@@ -7,7 +7,7 @@
 CRCL 02-26 一笔 +28%、04-26 ScoutBee 重平衡，**不能**据此说 LLM 有效。
 
 ## 两条臂
-- **LLM 臂**：`llm_shadow_scan.py --run` 的 `final_score` / `direction`（Opus 5.5 低 effort + 精简 Oracle 提示词，蜂层面与 Queen 层面的 LLM 都开）。
+- **LLM 臂**：`llm_shadow_scan.py --run` 的 `final_score` / `direction`（当前代：Sonnet 5.5 + 精简 Oracle 提示词，蜂层面与 Queen 层面的 LLM 都开；代的定义见「代」一节）。
 - **规则臂**：**生产当天自己的规则引擎结果**——生产库 `predictions` 里同日同标的的 `final_score` / `direction`（生产永远 `--no-llm`）。
   生产收盘后 14:00 才跑，影子扫描紧随其后：价格静止，影子根的 `cache/` 也已被生产更新过，两边输入一致。
 - ⚠️ 影子 `swarm_results` 里的 `rule_score` **不是**规则臂。它由各蜂的维度分算出，而蜂在 LLM 模式下已把 LLM 混进自己的分数
@@ -37,9 +37,18 @@ CRCL 02-26 一笔 +28%、04-26 ScoutBee 重平衡，**不能**据此说 LLM 有�
 
 ## 停止与改动
 - 提示词 / 模型 / `max_tokens` / 精简规则任何一项改动 ⇒ 新的一代，**重新计数**，旧样本不与新样本合并。
-- 当前这一代的定义（`llm_shadow_scan.py` + `llm_service.py`，v0.45.555）：模型 `claude-opus-5-5`、`effort=low`、
-  `max_tokens = max(请求×3, 请求+1024)`、Oracle 提示词按 `_compact_options_for_llm` 精简（溢价前 8 ∪ 成交量前 5 ∪ vol/OI 前 5）。
-- 每日硬上限 $3，按日期轮换覆盖约 22/30 只；覆盖名单逐日记在状态文件里，检验只用实际覆盖到的标的日。
+- 每日硬上限 $3；覆盖名单逐日记在状态文件里，检验只用实际覆盖到的标的日。
+
+## 代（generation）
+状态文件带 `generation` 字段；`llm_shadow_report` 只数**最新一代**的天，旧代的天如实报出个数、不与新代合并。
+- **g1（`legacy:claude-opus-5-5`，v0.45.555）**：Opus 5.5、`effort=low`、22/30 按日期轮换、`max_tokens = max(请求×3, 请求+1024)`、
+  Oracle 提示词按 `_compact_options_for_llm` 精简（溢价前 8 ∪ 成交量前 5 ∪ vol/OI 前 5）。**只跑了 2026-10-21 一天**
+  （22 只、$2.74、健康），不入当前计数。
+- **g2（`g2-sonnet-5-5`，v0.45.592，2026-10-22 起）**：模型换 `claude-sonnet-5-5`（思考 `between_tools`，无 `effort`）、
+  **30 只全跑**（不再轮换）、其余同 g1（`max_tokens` 规则、精简规则不变）。换代原因：用户 2026-10-22 定，更便宜（≈ 一半单价），
+  使 30 只都进得了每日 $3 上限。每日由 launchd 在生产扫描写完后自动跑（`llm_shadow_daily.py`），见该文件 docstring。
+- ⚠️ 换模型本身就是处理变化：g2 的结论**只对 Sonnet 5.5** 成立，不外推到 Opus。
+- 报告同时列出「生产有扫描、这一代却没有 LLM 记录的日子」——自动任务没跑成会让样本悄悄变少，不能靠看日志发现。
 - **一天只许付费跑一次**：$3 上限在进程内计，跨进程靠 `shadow_status/<日期>.json` 是否存在来挡（v0.45.560）；
   `--control` 写 `<日期>.control.json`，与付费记录分文件，互不覆盖。
 
@@ -49,4 +58,10 @@ CRCL 02-26 一笔 +28%、04-26 ScoutBee 重平衡，**不能**据此说 LLM 有�
    并在 `llm_shadow_report` 的描述里和 LLM 臂的分差对照。
 2. 同一提示词重复跑，LLM 输出有随机性（最小样本里分数 / 方向一致、`signal_type` 文案三次互异）。
 3. 精简后的两条大 Oracle 提示词从未与原版对照过。
-4. 每日硬上限 $3 只够约 22/30 只，覆盖名单按日轮换；检验只用实际覆盖到的标的日。
+4. （g1）每日硬上限 $3 只够约 22/30 只，覆盖名单按日轮换；g2 起 30 只全跑，该局限不再适用。
+5. **历史类比成分**：LLM 模式下，当天分数前 3 的标的若影子 Chroma 命中 ≥5 条，会多一次 LLM「历史类比」并给 `final_score` 加减最多 0.5
+   （**只改分、不改方向**，主检验不受影响；描述性分差 / Queen 层分解里会掺进这一块）。实测 g1 第一天 AMZN 触发（−0.15）。
+   事后可从 `swarm_results-<日期>.json` 的 `historical_analogy.score_adjustment_applied` 核算剔除。该功能读的 `agent_memory`
+   回填历史有「后一轮覆盖前一轮」的已知缺陷（v0.45.527，历史未重建）。
+6. **Sonnet 5.5 的截断率未实测**：10-19 试跑里 Sonnet 在**未放宽** `max_tokens` 时 11/18 次截断；g2 沿用放宽规则（Opus 放宽后 0/15），
+   但 Sonnet 放宽后的真实截断率要看 g2 头几天的 `truncation_rate`（> 10% 整天不入比较）。

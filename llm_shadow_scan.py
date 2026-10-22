@@ -36,8 +36,10 @@
 1. 缺省是 `--plan`：只打印计划（标的、预计费用、路径），不拷贝、不扫描、不花钱。
 2. `--run` 才会调 LLM，且必须同时设环境变量 `ALPHA_HIVE_LLM_SHADOW_SPEND=1`（防误触；定时任务同样要显式设）。
 3. 每日硬上限 `--daily-cap`（缺省 $3）：`llm_service` 调用前按「输入估算 + max_tokens×输出单价」预检并预留在途费用，
-   超了就拒绝（该蜂回落规则引擎）并计入 `budget_refusals`。**30 只跑不满**：精简后 Opus 5.5 低 effort 约 $0.118/只
-   （2026-10-19 实测分项），$3 约够 22 只 ⇒ 每天轮换覆盖一个子集，不让上限在当天中途随机截掉后几只。
+   超了就拒绝（该蜂回落规则引擎）并计入 `budget_refusals`。**第 2 代（Sonnet 5.5，2026-10-22 起）30 只全跑**：
+   第 1 代 Opus 5.5 低 effort 实测 $0.124/只（10-21，22 只花 $2.74）；Sonnet 5.5 单价是 Opus 的一半，同样的 token 量约
+   $0.064/只 ⇒ 30 只 ≈ $1.9/天（估算，**待验证**：Sonnet 的输出 token 数未实测）。`PER_TICKER_USD` 留约 40% 余量，
+   `max_tickers` 据此算出 ≥ 30，即全名单；`--tickers N` / 更低的 `--daily-cap` 时才按日期轮换取子集。
 
 `--control`：LLM 关闭、其余同 `--run`，免费；用来核对影子根的输入复现度（它的 `final_score` 应与同日生产一致；
 须在生产 14:00 扫描**之后**跑，否则没有同日生产值可比）。
@@ -63,10 +65,14 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
 
-MODEL = "claude-opus-5-5"
+MODEL = "claude-sonnet-5-5"
+# 「代」：提示词 / 模型 / max_tokens / 精简规则 / 覆盖范围任一改动 ⇒ 新一代、重新计数（预注册）。写进每个状态文件，
+# 报告只数最新一代的天。g1 = Opus 5.5 低 effort、22/30 轮换（只跑了 2026-10-21 一天）；g2 = Sonnet 5.5、30 只全跑。
+GENERATION = "g2-sonnet-5-5"
 DAILY_CAP_USD = 3.0
-# 精简后 Opus 5.5 低 effort 每只约 $0.117（2026-10-19：输入 11.6K×$4/MTok + 输出 3.5K×$20/MTok），留约 15% 余量
-PER_TICKER_USD = 0.135
+# Sonnet 5.5 每只估约 $0.064（把 10-21 Opus 实测的 12.7K 输入 + 3.8K 输出 token/只按 $2 / $10 每 MTok 重算；
+# Sonnet 的实际输出 token 数未测，待验证），留约 40% 余量。30 × 0.09 = $2.70 ≤ 每日上限 $3。
+PER_TICKER_USD = 0.09
 SPEND_ENV = "ALPHA_HIVE_LLM_SHADOW_SPEND"
 SHADOW_DIRNAME = "alpha-hive-llm-shadow"
 STATUS_DIRNAME = "shadow_status"
@@ -181,6 +187,7 @@ def build_status(*, day: date, mode: str, model: Optional[str], cap: float, requ
         "date": day.isoformat(),
         "mode": mode,
         "model": model if llm_on else None,
+        "generation": GENERATION if llm_on else None,
         "daily_cap_usd": cap,
         "tickers_requested": list(requested),
         "tickers_scanned": scanned,
@@ -244,7 +251,8 @@ def started_stub(*, day: date, mode: str, cap: float, requested: Sequence[str]) 
     而不是「什么都没有」——后者会让同一天可以再付一次费（每日硬上限只在进程内计，跨进程要靠这个文件）。"""
     return {
         "schema": 1, "date": day.isoformat(), "mode": mode, "state": "started",
-        "model": MODEL if mode == "run" else None, "daily_cap_usd": cap,
+        "model": MODEL if mode == "run" else None,
+        "generation": GENERATION if mode == "run" else None, "daily_cap_usd": cap,
         "tickers_requested": list(requested), "tickers_scanned": [], "elapsed_sec": None,
         "usage": {},      # 子进程没写完 ⇒ 花费未知（报告的累计花费会偏低）
         "quality": {"healthy": False, "llm_on": mode == "run",
@@ -403,7 +411,7 @@ def run_shadow(args: argparse.Namespace, *, environ: Optional[Dict[str, str]] = 
     tickers = pick_tickers(universe, day, k)
     est = len(tickers) * PER_TICKER_USD
 
-    print(f"模式 {mode} | 日期 {day} | 模型 {MODEL if mode == 'run' else '（LLM 关）'}")
+    print(f"模式 {mode} | 日期 {day} | 模型 {MODEL if mode == 'run' else '（LLM 关）'} | 代 {GENERATION}")
     print(f"生产根 {prod_root}（只读）→ 影子根 {shadow_root}")
     print(f"标的 {len(tickers)}/{len(universe)}：{' '.join(tickers)}")
     print(f"每日硬上限 ${args.daily_cap:.2f} | 预计 ≈ ${est:.2f}（{PER_TICKER_USD}/只 × {len(tickers)}）")

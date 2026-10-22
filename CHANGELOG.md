@@ -5,7 +5,26 @@
 
 ---
 
-## [0.45.592] — 2026-10-22 — 占位（进行中：LLM 影子 A/B 换 Sonnet 5.5、30 只全跑、接 launchd 每日自动跑（用户 10-22 定）；报告按「代」过滤 + 补跑缺口）
+## [0.45.592] — 2026-10-22 — Changed：LLM 影子 A/B 第 2 代——模型换 Sonnet 5.5、30 只全跑；Added：每日自动入口 `llm_shadow_daily.py` + launchd 计划；报告按「代」过滤、列出没跑成的日子
+
+> 用户 2026-10-22 定：「换成 sonnet5.5，接成每天自动跑，30 只都要跑」。每日硬上限仍 $3。**本版是花钱的自动化**：预计 ≈ $1.9/天
+> （把 10-21 Opus 实测 token 量按 Sonnet 单价重算：输入 12.7K + 输出 3.8K 每只 × $2 / $10 每 MTok ≈ $0.064/只 × 30；
+> **输出 token 数 Sonnet 未实测，待验证**），月度上限 ≈ 22 × $3 = $66。生产扫描仍 `--no-llm`，**没接编排器**（独立 launchd 任务）。
+
+### Changed
+- `llm_shadow_scan.py`：`MODEL` → `claude-sonnet-5-5`；`PER_TICKER_USD` 0.135 → 0.09（估 $0.064 + 约 40% 余量）⇒ `max_tickers($3)` = 33 ≥ 30，缺省就是全名单、不再轮换（`--tickers N` / 更低上限时才轮换）；新增 `GENERATION = "g2-sonnet-5-5"`，写进每个 run 状态文件与占位（control 为 None）。
+- `llm_shadow_report.py`：只数**最新一代**的天（预注册：模型改动 ⇒ 新一代、重新计数）；没有 `generation` 字段的旧文件按模型名记成 `legacy:<model>`（即 10-21 那一天，g1 = Opus 5.5 / 22 只）。旧代天数如实报出。
+- `experiments/llm_shadow_prereg.md`：加「代」一节（g1 / g2 定义）与三条已知局限（历史类比成分、Sonnet 截断率未实测、换模型即换处理）。
+
+### Added
+- `llm_shadow_daily.py`：launchd 每个工作日 14:45 触发 → 轮询「生产今天写完了没有」（今天有 predictions 行 + `.swarm_results_<今天>.json` 5 分钟没再改 + 没有扫描进程）→ 跑一次 `llm_shadow_scan.py --run`。等不到最多 3 小时 / 生产写完已超 2 小时 / 影子根里有 `DISABLED` 文件 ⇒ **跳过、不花钱、退出码 4**。跑的是生产克隆 `~/alpha-hive-prod` 里的脚本（不在 Desktop，launchd 无 TCC 限制），数据根走缺省 `~/alpha-hive-data`，API Key 走 `~/.anthropic_api_key`。`--print-plist` 打印 plist（`RunAtLoad=false`：装上不会立刻花钱；plist 里不带 `ALPHA_HIVE_LLM_SHADOW_SPEND`），`--once` 只判定现状。**全仓只有它替用户设 `ALPHA_HIVE_LLM_SHADOW_SPEND=1`**（AST 守卫钉住）。
+- `llm_shadow_report.py`：`missing_run_days`——生产有扫描、这一代却没有 LLM 记录的日子（不含今天）。自动任务没跑成会让样本悄悄变少，只看日志发现不了。
+
+### 验证
+- 新增 `tests/test_llm_shadow_daily.py`（37）；`test_llm_shadow_scan.py` +4、`test_llm_shadow_report.py` +10。全部假探针 / 假子进程 / 假时钟，**零 API 调用**。
+- **变异验证 11/11 变红、文件逐字节还原**：关停开关失效 / plist RunAtLoad / 子进程不带花钱闸变量 / 去掉「太晚」保护 / 「生产写完」判据只看行数 / 去掉等待超时 / plist 含周六 / `--once` 真跑 / 各代合并 / 今天被算成缺失 / 状态不记代。
+- **未做**：Sonnet 5.5 放宽 `max_tokens` 后的真实截断率没有实测（10-19 试跑是在未放宽时 11/18 截断）；首次 g2 真跑是自动任务本身。不健康的一天整天不入比较（截断率 > 10% 等），代价是那天的约 $1.9。
+
 
 ## [0.45.591] — 2026-10-22 — 占位（进行中：观测层版本化第一块——新闻 / F&G / 单票 Reddit 缓存改存原始观测，非入档进程预填缓存不再让当天桥接日作废）
 

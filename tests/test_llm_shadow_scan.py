@@ -28,9 +28,36 @@ _REPO = Path(__file__).resolve().parent.parent
 # ==================== 纯函数 ====================
 
 class TestMaxTickers:
-    @pytest.mark.parametrize("cap,expected", [(3.0, 22), (0.135, 1), (0.134, 0), (0, 0), (-1, 0), (10.0, 74)])
+    @pytest.mark.parametrize("cap,expected", [(3.0, 33), (0.09, 1), (0.089, 0), (0, 0), (-1, 0), (10.0, 111)])
     def test_cases(self, cap, expected):
         assert sh.max_tickers(cap) == expected
+
+
+class TestGenerationTwoDefinition:
+    """第 2 代（v0.45.592）：Sonnet 5.5、30 只全跑、每日上限 $3。改任何一项 ⇒ 新一代。"""
+
+    def test_model_is_sonnet_5_5_and_registered(self):
+        import llm_service
+        assert sh.MODEL == "claude-sonnet-5-5"
+        assert sh.MODEL in llm_service._PRICING and sh.MODEL in llm_service._MODEL_PROFILES
+
+    def test_full_watchlist_fits_under_the_daily_cap_by_the_stated_estimate(self):
+        import config
+        n = len(config.WATCHLIST)
+        assert sh.max_tickers(sh.DAILY_CAP_USD) >= n          # 缺省就是全名单，不轮换
+        assert n * sh.PER_TICKER_USD <= sh.DAILY_CAP_USD      # 估算不超上限（--plan 不会打出「预计超上限」警告）
+
+    def test_status_and_stub_carry_the_generation(self):
+        st = sh.build_status(day=date(2026, 10, 22), mode="run", model=sh.MODEL, cap=3.0, requested=["A"],
+                             usage=_usage(), per_ticker=_tickers(1), elapsed=1.0, error=None)
+        assert st["generation"] == sh.GENERATION == "g2-sonnet-5-5"
+        stub = sh.started_stub(day=date(2026, 10, 22), mode="run", cap=3.0, requested=["A"])
+        assert stub["generation"] == sh.GENERATION
+
+    def test_control_status_has_no_generation(self):
+        st = sh.build_status(day=date(2026, 10, 22), mode="control", model=sh.MODEL, cap=3.0, requested=["A"],
+                             usage=_usage(), per_ticker=_tickers(1), elapsed=1.0, error=None)
+        assert st["generation"] is None and st["model"] is None
 
 
 class TestPickTickers:
@@ -351,7 +378,7 @@ class TestRunShadowParent:
         assert rc == 0 and spawn.calls == []
         assert not (tmp_path / sh.SHADOW_DIRNAME).exists()
         out = capsys.readouterr().out
-        assert "标的 22/" in out and "$3.00" in out
+        assert "标的 30/30" in out and "$3.00" in out
 
     def test_run_without_spend_env_refused_and_nothing_copied(self, prod_env, tmp_path):
         spawn = _Spawn()
@@ -634,7 +661,7 @@ class TestCliSmoke:
         r = subprocess.run([sys.executable, str(_REPO / "llm_shadow_scan.py"), "--plan"],
                            env=env, capture_output=True, text=True, cwd=str(_REPO), timeout=60)
         assert r.returncode == 0, r.stderr[-800:]
-        assert "标的 22/" in r.stdout
+        assert "标的 30/30" in r.stdout
         assert not (tmp_path / sh.SHADOW_DIRNAME).exists()
 
     def test_run_without_env_refused_via_subprocess(self, tmp_path):

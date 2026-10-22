@@ -31,6 +31,7 @@ import argparse
 import math
 import sqlite3
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -55,6 +56,33 @@ def load_days(shadow_root: Path, mode: str = "run") -> List[Dict]:
         if doc.get("mode") == mode:
             out.append(doc)
     return out
+
+
+def generation_of(doc: Dict) -> str:
+    """状态文件属于哪一「代」。v0.45.592 前的文件没有这个字段 ⇒ 按模型名记成 `legacy:<model>`（即第 1 代）。"""
+    return doc.get("generation") or f"legacy:{doc.get('model')}"
+
+
+def current_generation(days: Sequence[Dict]) -> Optional[str]:
+    """最新一天所属的代（`days` 按日期升序）。没有 LLM 日 ⇒ None。"""
+    return generation_of(days[-1]) if days else None
+
+
+def missing_run_days(prod_db: Path, run_dates: Sequence[str], since: Optional[str], today: str) -> List[str]:
+    """生产有扫描、但这一代没有 LLM 日记录的日子（`since` 起，不含 `today`——今天的还在路上）。
+
+    自动跑起来之后，「哪天没跑成」不能只靠看日志：launchd 没触发 / 等生产超时 / 休眠错过，都会让样本悄悄变少。
+    """
+    if not since or not Path(prod_db).exists():
+        return []
+    con = sqlite3.connect(f"file:{prod_db}?mode=ro", uri=True)
+    try:
+        dates = [r[0] for r in con.execute(
+            "SELECT DISTINCT date FROM predictions WHERE date >= ? AND date < ? ORDER BY date", (since, today))]
+    finally:
+        con.close()
+    have = set(run_dates)
+    return [d for d in dates if d not in have]
 
 
 def _num(x) -> Optional[float]:
@@ -167,8 +195,11 @@ def score_discordant(pairs: Sequence[Dict]) -> Dict:
             "ambiguous_excluded": ambiguous, "mcnemar_p": round(mcnemar_exact_p(llm_only, rule_only), 6)}
 
 
-def build_report(shadow_root: Path, prod_db: Path) -> Dict:
-    days = load_days(shadow_root)
+def build_report(shadow_root: Path, prod_db: Path, today: Optional[str] = None) -> Dict:
+    all_days = load_days(shadow_root)
+    gen = current_generation(all_days)
+    # 预注册：提示词 / 模型 / max_tokens / 精简规则 / 覆盖范围任一改动 ⇒ 新一代、重新计数，旧代不与新代合并
+    days = [d for d in all_days if generation_of(d) == gen]
     rows = llm_rows(days)
     pairs, missing = join_production(prod_db, rows) if (rows and Path(prod_db).exists()) else ([], len(rows))
     desc = describe(days, pairs, missing)
@@ -177,6 +208,11 @@ def build_report(shadow_root: Path, prod_db: Path) -> Dict:
     cdays = load_days(shadow_root, "control")
     cpairs, _cmiss = join_production(prod_db, llm_rows(cdays)) if (cdays and Path(prod_db).exists()) else ([], 0)
     cdiffs = [abs(p["llm_score"] - p["prod_score"]) for p in cpairs]
+    desc["generation"] = gen
+    desc["other_generation_days"] = len(all_days) - len(days)
+    desc["missing_run_days"] = missing_run_days(
+        prod_db, [d["date"] for d in days], days[0]["date"] if days else None,
+        today or date.today().isoformat())
     desc["noise_control_days"] = len(cdays)
     desc["noise_control_pairs"] = len(cpairs)
     desc["noise_mean_abs_score_diff"] = round(sum(cdiffs) / len(cdiffs), 4) if cdiffs else None
@@ -202,8 +238,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     rep = build_report(root, Path(hive_logger.PATHS.db))
     d = rep["describe"]
     print(f"影子根 {root}")
+    print(f"当前代 {d['generation']}（另有 {d['other_generation_days']} 个旧代 LLM 日不计入）")
     print(f"LLM 日 {d['run_days']}（健康 {d['healthy_days']} / 不健康 {d['unhealthy_days']}）| 成对标的日 {d['pairs']} | "
           f"累计花费 ${d['spend_usd']:.2f}")
+    if d["missing_run_days"]:
+        print(f"⚠️ 生产有扫描、这一代却没有 LLM 记录的日子（{len(d['missing_run_days'])}）："
+              f"{' '.join(d['missing_run_days'])}——自动任务没跑成？")
     print(f"生产里找不到的标的日 {d['missing_in_production']}")
     print(f"分差（LLM−生产规则）均值 {d['mean_score_diff']} | 均绝对值 {d['mean_abs_score_diff']} | 方向翻转率 {d['direction_flip_rate']}")
     print(f"输入噪声基线（--control 与生产，{d['noise_control_days']} 天 {d['noise_control_pairs']} 对）："
