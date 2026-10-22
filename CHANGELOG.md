@@ -5,7 +5,25 @@
 
 ---
 
-## [0.45.607] — 2026-10-22 — 占位（进行中：v0.45.600 二次检查——「谁跑生成器」的规则收进 Makefile（命令行 PYTHON 可用就由它跑），帮助页 / 克隆丢失弹窗随之跑得通）
+## [0.45.607] — 2026-10-22 — Fixed：v0.45.600 二次检查——「谁跑生成器」的规则收进 Makefile（命令行 `PYTHON` 是可用的绝对路径就由它跑，否则退回缺省），提示 / 帮助页只写 `PYTHON=X` 就都跑得通；「生产克隆丢了」弹窗的重建命令也用 .app 记下的解释器；更正 600 两处说过头的话
+
+600 把「换解释器时生成器也由它跑」写进了 `regen_hint` 的提示文字（`PYTHON=X ALPHABOT_GEN_PY=X`），规则于是只活在那几句话里：程序内帮助页「换了 Python 或要重新生成 .app」仍只教加 `PYTHON=/绝对路径`，缺省解释器坏了照做照样失败（597 / 600 在提示里修掉的同一个失败）；Makefile 注释、终端打印也都得各自记得加。根因是规则放错了层——所有入口都经过的是 Makefile。
+
+### Fixed
+- **规则收进 Makefile**（`Makefile`）：命令行上的 `PYTHON` 是绝对路径且是可执行文件 ⇒ 由它跑生成器；否则用 `ALPHABOT_GEN_PY`（缺省 `/usr/local/bin/python3`）。「可执行文件」逐字就是 .app 壳里双击时的 `SHELL_PY_USABLE`（守卫逐字核对，不另写一份）。v0.45.458 的宽容不变：`PYTHON` 还没装好（不存在 / 是目录）⇒ 退回缺省 runner、照样生成并警告。环境变量里的 `PYTHON` 与相对路径都不当 runner（前者连 `--python` 都不是，后者生成器照旧拒）。
+- **提示只写 `PYTHON=X`**（`alphabot/macos_app.py`）：`regen_hint` 推荐入口去掉 `ALPHABOT_GEN_PY=`；直跑形式没有 make 可依，命令开头仍写记下的解释器。帮助页、Makefile 注释原本就只写 `PYTHON=`，现在照做即跑得通，不用改。
+- **「生产克隆丢了」弹窗**（`_repo_unusable_hint`）：重建命令 `… production_clone.py setup` 原写死缺省解释器，换解释器正是因为缺省坏了时照做第一步就失败——改用 .app 记下的那个（`_runner_word`：合现行规则就是它，否则占位）。缺省解释器的 .app 这句不变。
+- **更正 600 两处说过头的话**：① docstring 与 CHANGELOG 说「头注释与『代码目录挪了』——壳先查过 PY 能执行，所以记下的是缺省时见到提示那刻缺省必然可用」：壳只核过 PY 是**可执行文件**（`SHELL_PY_USABLE`），不保证真能运行——缺省文件在却跑不起来、同时代码目录又挪了，直跑那句会失败（两件同时坏，极少见，不为它加分支，改成照实写）；② 600 说「已装 .app 会提醒一次」——600 从没进过生产（生产克隆停在 10-21），本版又把弹窗文字改回 600 之前的样子，**已装 .app 只读核对 `installed_drift` 为空，不会提醒**。
+- **「能跑启动器的解释器就能跑生成器」写成会红的守卫**：`test_generator_imports_only_stdlib_and_repo_modules`——生成器相关文件（`GENERATOR_FILES`）的模块顶层 import 只许标准库与仓库模块（函数体内按需 import 的 AppKit / numpy 不在生成路径上）。
+
+### Added / Changed（测试，`tests/test_alphabot_launcher.py`）
+- `TestCanonicalMakeEntry`：判据逐字 = `SHELL_PY_USABLE`；可用的命令行 `PYTHON` 在缺省 runner 已坏时照样由它跑（包装脚本留调用记录为证）；`PYTHON` 不存在 / 是目录 ⇒ 退回缺省照样生成并警告；环境变量 `PYTHON` 不当 runner；相对路径即便按 make 的 cwd 恰好指到解释器也不拿来跑。
+- `TestRegenCommandRuns`：推荐入口断言回到只有 `PYTHON=`；冻结弹窗端到端的负对照改为「PYTHON 指向还没装的解释器 ⇒ 退回坏掉的缺省 runner ⇒ 失败」；新增克隆丢失弹窗的重建命令用记下的解释器（缺省 / 带空格 / 裸名 ⇒ 占位）；确定性测试只打桩 `interpreter_problem`（600 那条还把进程全局的 `os.path.exists` 改成恒假，范围过大）。
+- `TestShellDrift` 推荐入口端到端：命令只有 `PYTHON=`。
+
+### 验证
+- 变异 10 处全红（Makefile 恒用缺省 runner、判据只看 -x、接受相对路径当 runner、拿环境变量 PYTHON 当 runner、runner 不加引号；克隆丢失弹窗仍写死缺省、`_runner_word` 不核规则、直跑仍用缺省、提示又写回 `ALPHABOT_GEN_PY`（600 形状）、生成器 import 期引入第三方）；每个变异体独立 pyc 前缀，还原后 178 passed。
+- 全量 11529 passed、0 failed（开跑前 `pgrep` 确认无别的整套 / 拨钟审计在跑）。
 
 ## [0.45.606] — 2026-10-22 — Added：Alpha Bot 跨式页读者侧标记「事件前被平」+ KPI 单列（账本一个字不改）
 
