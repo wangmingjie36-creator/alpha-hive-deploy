@@ -194,6 +194,16 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "v0.45.591：observation_layer.py 整份在本单元里，这次只新增取数缓存的 cache_path / cache_read / cache_write / _cache_doc_ok 与两个常量"
      "（情绪通道用）；行情日线 / 交易所时钟的 7 个函数 AST 逐个比对一字未改，行情路径不调用新函数。"
      "**用户 2026-10-22 在对话里选「四个都按 no_value_change」**；不登记边界"),
+    # v0.45.601（修 CI 专属红：buzz_v1 价格差分对拍）：data_pipeline 三处 `pct_change()` 写明 `fill_method=None`
+    ("price.fields",    "e512d9978a3c1a91", "no_value_change",
+     "v0.45.601：_fetch_history_metrics / YFinanceSource.fetch / --date 补跑 _fetch_historical_stock_data 三处 hist['Close'].pct_change() "
+     "写明 fill_method=None。生产解释器 /usr/local/bin/python3（编排器 PYTHON3 即它）的 pandas 是 3.0.1（pandas-3.0.1.dist-info 的 "
+     "METADATA mtime 2026-02-24 22:27，早于 H1 窗口起点 2026-10-12），该版本 inspect.signature(pd.Series.pct_change) 的缺省就是 "
+     "fill_method=None ⇒ 显式化在生产上是空操作。改动前（origin/main 原文）与改动后在同一批随机日线上逐字段比对：实时 800 份日线（108 份含 NaN 收盘）"
+     "各过 _fetch_history_metrics 与 YFinanceSource.fetch、补跑 300 份（40 份含 NaN 收盘），共 1900 次比对，pandas 3.0.1 下全部相同；同一比对在 pandas 2.3.3 下出差异"
+     "（正对照：2.x 缺省先前向填充，NaN 那天收益记 0）。冻结通道层 buzz_v1_channels.price_fields 本就按不填充定义；"
+     "CI 照 requirements.txt 装 pandas<3，差分对拍在那里红的就是这个。"
+     "**用户 2026-10-22 在对话里选「按 no_value_change 登记」**（经发起本会话的会话转述原话）；不登记边界"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change"})

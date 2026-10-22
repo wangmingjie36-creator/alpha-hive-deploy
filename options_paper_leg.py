@@ -971,6 +971,36 @@ def _kpi_block(trades: List[Dict]) -> Dict:
     }
 
 
+def event_missed(trade: Dict) -> Optional[bool]:
+    """这笔平仓单**没测到事件**吗？平仓日 ≤ 财报日 ⇒ True；平仓日晚于财报日 ⇒ False；任一日期缺 / 解析不了 ⇒ None。
+
+    **读者侧标记，账本不存它**（v0.45.606；起因 TSLA 2026-10-21：财报日 = 到期日 − 2，当晚就按 expiry_buffer 强平，
+    事件还没进报价——入场闸 v0.45.602 之后不再产生，存量单靠这里认出来）。判据与账本自己的 `post_event`
+    （`as_of > earnings_date`）同向，也与影子宽跨检验的 `exit_before_event`（平仓日 ≤ 财报日）同一条；
+    只看日期，不看 `exit_reason`（强平发生在财报日**之后**的不算：事件测到了）。
+    日期取前 10 位再解析（信号存原始财报日，可能带时间戳）。缺 / 坏 ⇒ None，**不**猜成 False：调用方单列「未知」。"""
+    ex, ed = _iso_day(str(trade.get("exit_date") or "")[:10]), _iso_day(str(trade.get("earnings_date") or "")[:10])
+    if ex is None or ed is None:
+        return None
+    return ex <= ed
+
+
+def split_by_event(trades: List[Dict]) -> Dict:
+    """已平仓单按「测到事件 / 事件前被平 / 未知」拆开单列的 KPI（读者侧；三块的 n 之和 = 总 n）。
+    只有 `saw_event` 带 by_side / by_label——信号质量（rich / cheap 胜率）该看的是测到事件的那批。"""
+    saw, miss, unk = [], [], []
+    for t in trades:
+        m = event_missed(t)
+        (unk if m is None else miss if m else saw).append(t)
+    by_side, by_label = defaultdict(list), defaultdict(list)
+    for t in saw:
+        by_side[t.get("side") or "?"].append(t)
+        by_label[t.get("label") or "?"].append(t)
+    return {"saw_event": {**_kpi_block(saw), "by_side": {k: _kpi_block(v) for k, v in by_side.items()},
+                          "by_label": {k: _kpi_block(v) for k, v in by_label.items()}},
+            "event_missed": _kpi_block(miss), "event_unknown": _kpi_block(unk)}
+
+
 def compute_kpis() -> Dict:
     closed = _load_jsonl(CLOSED_FILE)
     positions = _load_jsonl(POSITIONS_FILE)
@@ -988,6 +1018,7 @@ def compute_kpis() -> Dict:
         # H3(c)（v0.45.104）：核销与冻结 mark 必须单独可见，否则读者会把一个早就
         # 死掉的仓位的入场日价格当成活报价读。
         "written_off_exits": sum(1 for t in closed if t.get("mark_source") == "written_off"),
+        "event_split": split_by_event(closed),
         "stale_positions": sum(1 for p in positions if p.get("mark_source") != "cboe_mid"),
         "open_positions": len(positions),
         "nav": equity[-1].get("nav") if equity else CONFIG["starting_capital"],
@@ -1072,6 +1103,12 @@ def render_markdown(as_of: str) -> str:
                   f"{tail}。"]
     for k, v in sorted(kpis.get("by_side", {}).items()):
         lines.append(f"- {k}: {v['n']} 笔，胜率 {_fmt(v['win_rate'], 1, '%')}，均值 {_fmt(v['avg_pnl_pct'], 2, '%')}")
+    es = kpis.get("event_split") or {}
+    if (es.get("event_missed") or {}).get("n") or (es.get("event_unknown") or {}).get("n"):
+        sv, ms, un = es["saw_event"], es["event_missed"], es["event_unknown"]
+        lines.append(f"- 其中测到事件 {sv['n']} 笔（胜率 {_fmt(sv['win_rate'], 1, '%')}，累计 ${sv['total_pnl_usd']:+,.0f}）；"
+                     f"**事件前被平 {ms['n']} 笔**（平仓日 ≤ 财报日，没测到事件，累计 ${ms['total_pnl_usd']:+,.0f}）"
+                     + (f"；日期缺失无法判断 {un['n']} 笔" if un["n"] else "") + "。")
     lines += ["",
               "> 成交约定：long 按 ask 买 / bid 卖，short 按 bid 卖 / ask 买回（付点差）；盯市用 CBOE mid。",
               "> 隐含事件波动 = √(跨式² − 0.8σ√T 扩散²)，`raw_straddle` 口径未扣扩散、偏高。",

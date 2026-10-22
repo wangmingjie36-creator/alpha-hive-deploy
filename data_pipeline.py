@@ -523,7 +523,7 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
             data.volume_ratio = None
 
         if len(hist) >= 19:   # v0.45.564：20 → 19，同 `_fetch_history_metrics`（理由见那里）
-            returns = hist["Close"].pct_change().dropna()
+            returns = hist["Close"].pct_change(fill_method=None).dropna()   # v0.45.601：写明不填充（理由见 `_fetch_history_metrics`）
             if len(returns) >= 2:
                 vol = float(returns.std() * (252 ** 0.5) * 100)
                 if not (math.isnan(vol) or math.isinf(vol)):
@@ -598,8 +598,11 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
         # 马丁路德金日、3 月上中旬接 2 月总统日、6 / 7 月接六月节 / 独立日），门槛 20 让那些天**所有**标的整天缺波动率
         # （2026-03-10/13、06-22、07-06 归档全是旧缺值哨兵 0.0）。19 根 = 18 个收益，同一个估计量少一个观测；只有这些天从
         # 缺变有值，其余日子逐位不变。仍不覆盖的：极少数窗口只有 18 根（2020~2035 共 5 天，如 2024-01-22；维度 IC 窗口内没有）。
+        # v0.45.601：`fill_method=None` 写明——生产（pandas 3.x）的缺省就是它：Close 为 NaN 的那根连同后一根的收益一起丢掉。
+        # pandas 2.x 的缺省是先前向填充（NaN 那天收益记 0）⇒ 同一份日线算出另一个波动率；requirements.txt 仍钉 <3，照它装的
+        # 环境（CI、新机器）会无声换口径。冻结通道层 `buzz_v1_channels.price_fields` 按不填充定义。
         if len(hist) >= 19:
-            returns = hist["Close"].pct_change().dropna()
+            returns = hist["Close"].pct_change(fill_method=None).dropna()
             if len(returns) >= 2:
                 vol = float(returns.std() * (252 ** 0.5) * 100)
                 if not (math.isnan(vol) or math.isinf(vol)):
@@ -1019,7 +1022,7 @@ class YFinanceSource:
                 data.volume_source = "yfinance"
 
             if len(hist) >= 19:   # v0.45.564：20 → 19，同 `_fetch_history_metrics`（理由见那里）
-                returns = hist["Close"].pct_change().dropna()
+                returns = hist["Close"].pct_change(fill_method=None).dropna()   # v0.45.601：写明不填充（理由见 `_fetch_history_metrics`）
                 if len(returns) >= 2:
                     vol = float(returns.std() * (252 ** 0.5) * 100)
                     if not (math.isnan(vol) or math.isinf(vol)):

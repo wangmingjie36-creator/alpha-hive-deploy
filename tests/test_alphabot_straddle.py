@@ -150,7 +150,7 @@ class TestSameNumbersAsTheLedger:
             monkeypatch.setattr(opl, attr, f)
         ref, mine = opl.compute_kpis(), SD.kpis(led["closed"])
         for k in ("n", "win_rate", "avg_pnl_pct", "total_pnl_usd", "by_side", "by_label", "intrinsic_exits",
-                  "written_off_exits"):
+                  "written_off_exits", "event_split"):
             assert mine[k] == ref[k], k
 
     @pytest.mark.parametrize("side", ["long", "short"])
@@ -574,3 +574,30 @@ class TestStraddleHelp:
         for k in ("rich_ratio", "cheap_ratio", "max_spread_pct", "max_open", "directional_delta_warn"):
             assert m.get(k) is not None, (k, m)
         assert m["prereg"]["min_units"] > 0
+
+
+class TestEventMissedMarker:
+    """v0.45.606：页面标出「事件前被平」，KPI 单列；分类与账本模块同一处（`options_paper_leg.event_missed`）。"""
+
+    def _row(self, exit_d, ed, **kw):
+        return {"ticker": "TSLA", "side": "long", "label": "cheap", "entry_date": "2026-09-22", "exit_date": exit_d,
+                "earnings_date": ed, "pnl_usd": -1825.0, "pnl_pct": -45.9, "exit_reason": "expiry_buffer", **kw}
+
+    def test_closed_view_carries_the_marker_three_valued(self):
+        for exit_d, ed, want in (("2026-10-21", "2026-10-21", True), ("2026-10-21", "2026-10-20", False),
+                                 ("2026-10-21", None, None)):
+            assert SD.closed_view(self._row(exit_d, ed), sig_entry=None, event_rows=[])["event_missed"] is want
+
+    def test_kpis_split_matches_the_ledger_module(self):
+        import options_paper_leg as opl
+        rows = [self._row("2026-10-21", "2026-10-21"), self._row("2026-10-21", "2026-10-20", pnl_usd=-664.0)]
+        k = SD.kpis(rows)
+        assert k["event_split"] == opl.split_by_event(rows)
+        assert k["n"] == 2 and k["event_split"]["event_missed"]["n"] == 1
+
+    def test_page_wires_marker_and_kpi_tiles(self):
+        """前端接线别被改没：行上的标记、两块 KPI 都得在（变异：删掉任一处 ⇒ 红）。"""
+        js = (Path(SD.__file__).parent / "static" / "pages" / "straddle.js").read_text(encoding="utf-8")
+        assert "r.event_missed === true" in js and "事件前被平" in js
+        assert 'kpi("其中测到事件"' in js and "event_split" in js
+        assert "es.saw_event.by_side" in js, "「按方向」表要只含测到事件的那批，否则事件前被平的会拉低买跨式胜率"
