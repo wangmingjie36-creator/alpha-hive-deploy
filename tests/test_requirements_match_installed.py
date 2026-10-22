@@ -14,16 +14,28 @@ numpy 2.4.2 / yfinance 1.2.0。CI 照文件装 ⇒ 八个月里 CI 测的都不�
 - 另守一件事：直接依赖一律 `==`（不许再写范围；范围正是这次漂了八个月的原因）。
 
 `problems()` 是纯函数（文本 + 取版本函数 → 问题列表），下面的「有牙」组用合成文本证明每种漂移都会报。
+
+v0.45.617：传递依赖也锁了（`constraints.txt`，由 `tools/constraints_lock.py` 用生产解释器生成）。
+`TestConstraints` 按**本平台**核对：依赖闭包里的每个包都要锁、钉的 = 装着的；两份文件不许打架；过时条目要清。
+生产 Mac 上核的是生产；CI 上能抓住「只在 Linux 冒出来、却没锁的传递依赖」（此前 python-dateutil 3.0 就这样多拉进 tzdata）。
 """
 from __future__ import annotations
 
+import importlib.util
+import types
 from importlib import metadata
 from pathlib import Path
 from typing import Callable, List, Optional
 
 from packaging.requirements import Requirement
 
-REQUIREMENTS = Path(__file__).resolve().parent.parent / "requirements.txt"
+REPO = Path(__file__).resolve().parent.parent
+REQUIREMENTS = REPO / "requirements.txt"
+CONSTRAINTS = REPO / "constraints.txt"
+
+_spec = importlib.util.spec_from_file_location("constraints_lock", REPO / "tools" / "constraints_lock.py")
+CL = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(CL)
 
 
 def _installed(name: str) -> Optional[str]:
@@ -90,3 +102,76 @@ class TestHasTeeth:
 
     def test_trailing_comment_is_ignored(self):
         assert problems("numpy==2.4.2  # 数值计算\n", self._env(numpy="2.4.2")) == []
+
+
+# ==================== v0.45.617：传递依赖的约束文件 ====================
+
+def test_constraints_match_this_interpreter():
+    found = CL.check(REQUIREMENTS.read_text(encoding="utf-8"), CONSTRAINTS.read_text(encoding="utf-8"))
+    assert not found, "\n".join(found)
+
+
+class TestConstraintsHaveTeeth:
+    """合成依赖图：app → lib →（只在 Linux）leaf；lib[fast] → speedup。每种漂移都要报，不该报的不报。"""
+
+    TOOLING_PINS = "".join(f"{t}==1.0\n" for t in CL.TOOLING)
+
+    @staticmethod
+    def _universe(**pkgs):
+        """{名: (版本, [requires…])} → 假的 `metadata.distribution`。测试工具当叶子包一并装上。"""
+        pkgs = {**{t: ("1.0", []) for t in CL.TOOLING}, **pkgs}
+        table = {CL.canon(k): (k, v) for k, v in pkgs.items()}
+
+        def dist(name):
+            if CL.canon(name) not in table:
+                raise metadata.PackageNotFoundError(name)
+            real, (ver, reqs) = table[CL.canon(name)]
+            return types.SimpleNamespace(metadata={"Name": real}, version=ver, requires=reqs)
+        return dist
+
+    def _check(self, constraints, *, platform="linux", req="app==1.0\n", **pkgs):
+        base = {"app": ("1.0", ["lib>=1"]), "lib": ("1.0", ["leaf; sys_platform == 'linux'"]), "leaf": ("1.0", [])}
+        return CL.check(req, self.TOOLING_PINS + constraints, CL._env(platform), self._universe(**{**base, **pkgs}))
+
+    def test_clean(self):
+        assert self._check("app==1.0\nlib==1.0\nleaf==1.0\n") == []
+
+    def test_unpinned_transitive_dep(self):
+        (p,) = self._check("app==1.0\nlib==1.0\n")
+        assert "leaf==1.0" in p and "没锁" in p
+
+    def test_version_drift(self):
+        (p,) = self._check("app==1.0\nlib==1.0\nleaf==0.9\n")
+        assert "钉 0.9" in p and "装的是 1.0" in p
+
+    def test_range_is_rejected(self):
+        assert any("没有钉死" in p for p in self._check("app==1.0\nlib>=1\nleaf==1.0\n"))
+
+    def test_marker_false_here_is_not_required_and_not_stale(self):
+        """leaf 只在 Linux 用到：在 macOS 上不要求锁，锁了也不算过时（v0.45.617 自查补的边界）。"""
+        assert self._check("app==1.0\nlib==1.0\n", platform="darwin") == []
+        assert self._check("app==1.0\nlib==1.0\nleaf==1.0\n", platform="darwin") == []
+
+    def test_stale_entry_installed_but_unreachable(self):
+        (p,) = self._check("app==1.0\nlib==1.0\nleaf==1.0\nold==1.0\n", old=("1.0", []))
+        assert "old==1.0" in p and "过时" in p
+
+    def test_stale_entry_not_installed_here_is_ignored(self):
+        """如 Linux 上的 pyobjc：约束里有、本平台没装也用不到 ⇒ 不归本平台管。"""
+        assert self._check("app==1.0\nlib==1.0\nleaf==1.0\npyobjc-core==1.0\n") == []
+
+    def test_requirements_and_constraints_disagree(self):
+        found = self._check("app==2.0\nlib==1.0\nleaf==1.0\n")
+        assert any("两份文件不一致" in p for p in found) and any("钉 2.0" in p for p in found)
+
+    def test_extras_are_followed(self):
+        found = self._check("app==1.0\nlib==1.0\nleaf==1.0\n",
+                            app=("1.0", ["lib[fast]>=1"]),
+                            lib=("1.0", ["leaf; sys_platform == 'linux'", "speedup; extra == 'fast'"]),
+                            speedup=("2.0", []))
+        (p,) = found
+        assert "speedup==2.0" in p and "没锁" in p
+
+    def test_required_but_not_installed(self):
+        found = self._check("app==1.0\nlib==1.0\n", lib=("1.0", ["ghost"]))
+        assert any("ghost" in p and "没装" in p for p in found)

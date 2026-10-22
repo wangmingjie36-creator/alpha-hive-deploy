@@ -89,7 +89,7 @@ CODE_EXTS = frozenset({
 CODE_TOP_DIRS = frozenset({"templates", "prompts", ".github"})
 CODE_ROOT_FILES = frozenset({
     "CHANGELOG.md", "CLAUDE.md", "README.md",
-    "requirements.txt", ".gitignore", ".dockerignore", "Dockerfile", "Makefile", "Procfile",
+    "requirements.txt", "constraints.txt", ".gitignore", ".dockerignore", "Dockerfile", "Makefile", "Procfile",
 })
 
 

@@ -7,7 +7,46 @@
 
 ## [0.45.618] — 2026-10-22 — 占位（进行中：v0.45.616 二次检查——对话七处：输入区 hidden 被 display 盖掉、没发出去的请求也记账、限流 / 过载不再重试、隔着搜索的文字被粘连等）
 
-## [0.45.617] — 2026-10-22 — 占位（进行中：传递依赖也按生产锁住——由生产解释器推出 requirements.txt 的传递闭包生成约束文件，CI 安装时用它，漂移守卫扩展到这份文件）
+## [0.45.617] — 2026-10-22 — Added：传递依赖也按生产锁住——`constraints.txt`（由生产解释器推出的完整依赖闭包，77 个包）+ 生成器 `tools/constraints_lock.py`；CI 安装改用 `-c constraints.txt`；漂移守卫扩展到约束文件
+
+> 用户 2026-10-22 定（接 v0.45.610）。只动依赖文件、CI 安装命令与测试；生产代码零改动。
+
+### 为什么
+- v0.45.610 只钉了直接依赖，传递依赖由 pip 每次现解析 ⇒ CI 一直往前漂。10-22 实测（CI run 39825990514 对生产解释器）：52 个传递依赖里
+  37 个版本不同，跨大版本的有 python-dateutil 2.9 → 3.0（还因此多拉进 tzdata）、protobuf 5 → 7、soupsieve 2 → 3、cryptography 46 → 50 等；
+  测试工具也在漂（上一轮 CI 装的是 ruff 0.17.1 / pytest 9.1.1，生产是 0.13.3 / 9.0.2；ruff 升级会改 lint 结果）。同一个提交过几周可能在 CI 上无故变红，而这种漂移没有任何东西会红。
+
+### Added
+- `tools/constraints_lock.py`：根 = `requirements.txt` 有效行 + CI 测试工具（pytest / pytest-timeout / ruff）；沿已装发行版的元数据走（按环境标记与 extras 取舍），
+  macOS（生产）与 Linux（CI）两种标记各走一遍取并集，版本一律取本解释器上装着的（= 生产）。只在 Linux 上需要、生产没装的包无法按生产钉 ⇒ 报缺失、拒绝写（现在没有这种包）。
+  `/usr/local/bin/python3 tools/constraints_lock.py` 只比对，`--write` 重写。`check()` 是纯函数，守卫与人工核对共用。
+- `constraints.txt`：77 个包，全部 `==` 生产版本（含只在 macOS 用到的 9 个：pywebview 及其依赖 pyobjc-* / bottle / proxy-tools，Linux 上 pip 会忽略）。
+- `tests/test_requirements_match_installed.py` 扩展：`test_constraints_match_this_interpreter` 按**本平台**核对——闭包里每个包都要锁、钉的 = 装着的、
+  一律 `==`、与 `requirements.txt` 不打架、装着却在任何平台闭包里都走不到的条目（过时）要清。生产 Mac 上核的是生产；CI 上能抓住「只在 Linux 冒出来、却没锁的传递依赖」。
+  `TestConstraintsHaveTeeth` 10 条合成依赖图（没锁 / 漂移 / 范围 / 只在别的平台用到不算过时 / 过时 / 本平台没装的条目不管 / 两份文件打架 / extras / 必需却没装）。
+
+### Changed
+- `.github/workflows/tests.yml`：pytest job 安装 `pip install -r requirements.txt -c constraints.txt pytest pytest-timeout ruff`；lint job `pip install -c constraints.txt ruff`；
+  顺带更正注释「用户 Mac 上是 Homebrew 3.11.1」（是 python.org 的 3.11.1）。`.github/workflows/clockshift.yml` 同样加 `-c constraints.txt`。
+  ⚠️ 后果：CI 的 lint 从 ruff 0.17.1 退回 0.13.3，0.14～0.17 新加的规则 CI 不再查——与本机（一直是 0.13.3）一致；用 0.13.3 跑全仓 `ruff check .` 通过。
+- `tests/_root_data_guard.py`：`constraints.txt` 登记进 `CODE_ROOT_FILES`。
+- `tests/test_paths_not_frozen_at_import.py`：`tools/constraints_lock.py::ROOT` 登记进 `KNOWN` 与 `MUST_STAY_FILE_ANCHORED`（指向仓库根的依赖清单 = 代码同址，`__file__` 是对的）。
+- `tests/test_persistent_writes_have_readers.py`：写入落点 `tools/constraints_lock.py::main` → 产物 `constraints.txt`（READ，读者是两个工作流文件的 `pip install -c constraints.txt`）。
+
+### 验证
+- 新增 / 扩展守卫 18 条全过；ruff 无告警。正对照（真解释器）：约束文件删掉 python-dateutil、把 scipy 改成 1.16.0 ⇒ 分别报「没锁」与漂移。
+  变异：去掉「任一平台可达才算不过时」⇒ `test_marker_false_here_is_not_required_and_not_stale` 红。
+- 扫全仓的元守卫：**新文件 `git add` 之前跑是假绿**（`own_python_files` 走 `git ls-files`，没扫到 `tools/constraints_lock.py`——记忆里早有这条，v0.45.214）；
+  `git add` 后 `test_paths_not_frozen_at_import` 报出 `ROOT`，登记后 11 个元守卫文件 1154 passed。
+- 完全照 CI 新命令建的干净 venv（`pip install -r requirements.txt -c constraints.txt pytest pytest-timeout ruff`）：`pip check` 无冲突，装出来的就是约束版本，venv 里 `check()` 为空；整套（开跑前等别的会话整套跑完）第一轮 **1 failed** / 11669 passed——`test_persistent_writes_have_readers` 要求给 `constraints.txt` 的写入登记读者（上面那 11 个手挑的元守卫里没有它，整套才抓到）；登记后该守卫 18 passed，扫全仓的元守卫 11 个文件 1136 passed。
+- 二次检查（同日）：用生产的 ruff 0.13.3 跑全仓 `ruff check .` 通过；extras 跟进经变异核实（关掉 extras 求值 ⇒ 闭包里正好少了经 `pyjwt[crypto]` 进来的 cryptography）；更正本条两处措辞（9 个只在 macOS 的包不全是 pyobjc；补上 CI 原 ruff / pytest 的具体版本）。
+- CI：推送后核对，结果补在本条末尾。
+
+### 遗留
+- Alpha Bot 帮助页 / 弹窗里教人「换解释器先 `pip install -r requirements.txt`」（`alphabot/macos_app.py`）还没带 `-c constraints.txt`：照它装，传递依赖会是最新版——
+  新守卫会在那台解释器上红（不是无声的）。另一会话（0.45.611）正在改那批「给人抄的命令」，本版刻意没碰，避免撞文件。
+- CI 与生产的平台差（Linux / macOS：BLAS 后端、时区库来源、文件系统时间精度）锁不住；权威检查仍是生产解释器上的本机整套。
+- 观察（不是本版改出来的）：`tests/test_alphabot_chat.py:351`（v0.45.614）用 `importorskip("anthropic")`——CI 不装 anthropic ⇒ 这条在 CI 上恒 skip、只在本机跑；同仓的做法是往 `sys.modules` 放假模块（v0.45.601）。
 
 ## [0.45.616] — 2026-10-22 — Fixed：v0.45.614 二次检查——对话九处：截断留下悬空工具调用、引用块被拼碎、报错漏本机路径、超时重试漏记账、对话失效不说、预留先撤后记、搜索词约束、回落边界缺字段、抽屉输入体验
 

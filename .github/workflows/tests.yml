@@ -41,7 +41,8 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - run: pip install ruff
+      # ruff 版本钉在 constraints.txt（= 生产 Mac 上那版）：新版 ruff 会加规则、改判定，不钉 lint 结果会自己漂（v0.45.617）
+      - run: pip install -c constraints.txt ruff
       - name: Ruff lint (全量规则，配置在 pyproject.toml)
         run: ruff check .
 
@@ -57,7 +58,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          # 与生产扫描一致（用户 Mac 上是 Homebrew 3.11.1）。
+          # 与生产扫描一致（用户 Mac 上是 python.org 的 3.11.1，不是 Homebrew）。
           # 3.9 会直接崩：本仓库用了 PEP604 的 `X | None` 注解。
           python-version: '3.11'
           cache: pip
@@ -72,7 +73,10 @@ jobs:
           # 存在前的状态（"本仓库早已装好并配置了 ruff，只是没人跑"）。
           # F821 守卫治的是「异常分支里的 NameError」这类只在生产触发的 bug，
           # 在 CI 里跳过它等于把这个守卫又关回去。
-          pip install -r requirements.txt pytest pytest-timeout ruff
+          #
+          # -c constraints.txt：传递依赖与测试工具也按生产 Mac 的版本装（v0.45.617，由
+          # tools/constraints_lock.py 生成）；不加的话 pip 每次现解析，CI 会一直往前漂。
+          pip install -r requirements.txt -c constraints.txt pytest pytest-timeout ruff
 
       - name: Run offline-deterministic tests
         env:

@@ -54,7 +54,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # 与 tests.yml 同一套依赖（pytest 系是纯测试依赖，刻意不进 requirements.txt）
-          pip install -r requirements.txt pytest pytest-timeout ruff
+          pip install -r requirements.txt -c constraints.txt pytest pytest-timeout ruff
 
       - name: Clock-shift audit (+${{ matrix.days }} days)
         run: |
