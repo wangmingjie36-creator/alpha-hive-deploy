@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.610] — 2026-10-22 — 占位（进行中：requirements.txt 对齐到生产 Mac 的精确版本——CI 一直装 pandas 2 / numpy 1 / yfinance 0.2，生产是 3 / 2 / 1.2）
+
 ## [0.45.609] — 2026-10-22 — Fixed：对冲 Greeks 汇总——买价为 0 的深度虚值腿不再让整个组合 β·$Delta 变 unknown
 
 对冲账本页 10-21 报「数据不全：partial data — no hedge on partial data (1 quote missing)」。查到的缺口是 T 跨式里的 `T261030C00024500`（空头看涨，行权价 24.5、现价 21.91，bid 0.00 / ask 0.03）：`cboe_options` 的 `quote_ok` 要求 `bid > 0`，这张腿判假 ⇒ `option_exposures` 把整行当缺报价、连 CBOE 给的 delta 0.05 也丢掉 ⇒ 汇总里 1 行 β·$Delta 缺 ⇒ `band_status="unknown"` ⇒ 当天整个组合不对冲、逐票对冲里 T 也「option_delta_unknown」。`quote_ok` 为了 mid 才要 bid > 0（bid=0 的 mid 只是 ask 的一半），但 Greeks 与 mid 无关。
