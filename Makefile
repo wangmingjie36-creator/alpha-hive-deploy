@@ -1,4 +1,4 @@
-.PHONY: test test-cov test-fast lint scan docker-build docker-run clean alphabot alphabot-demo alphabot-app alphabot-stop
+.PHONY: test test-cov test-fast test-select test-changed lint scan docker-build docker-run clean alphabot alphabot-demo alphabot-app alphabot-stop
 
 # ==================== 测试 ====================
 test:
@@ -9,6 +9,13 @@ test-cov:
 
 test-fast:
 	python3 -m pytest tests/ -x -q --timeout=10
+
+# 开发期选测（v0.45.615，tools/select_tests）：按改了哪些文件选测试。**只是快检，收尾 / CI 仍整套**（`make test`）。
+test-select:
+	/usr/local/bin/python3 tools/select_tests/select_tests.py
+
+test-changed:
+	/usr/local/bin/python3 tools/select_tests/select_tests.py --run
 
 # ==================== 代码质量 ====================
 lint:

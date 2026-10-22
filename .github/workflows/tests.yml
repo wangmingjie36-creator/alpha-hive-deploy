@@ -75,6 +75,11 @@ jobs:
           pip install -r requirements.txt pytest pytest-timeout ruff
 
       - name: Run offline-deterministic tests
+        env:
+          # 选测登记表的「读审计」（tools/select_tests，v0.45.615）：整套顺带记下每个测试文件打开过哪些文件，
+          # 下一步与 tests/_must_run.json 比对。插件只观察（sys.addaudithook），不改任何测试的行为。
+          PYTHONPATH: ${{ github.workspace }}/tools/select_tests
+          SELECT_TESTS_OUT: ${{ runner.temp }}/select_tests_dump.json
         run: |
           # --maxfail=0 覆盖 pyproject addopts 里的 `-x`：CI 要一次看全所有失败，
           # 而不是撞到第一个就停（本地开发才需要 `-x` 的快速反馈）。
@@ -82,4 +87,14 @@ jobs:
           # -rs 在摘要里列出每条 skip 及**原因**：addopts 只有 `-v`，日志里 skip 只有
           # 「SKIPPED」一个词、看不到为什么。依赖仓库外文件（编排器脚本、launchd plist）
           # 的那批测试在 CI 里恒 skip，不靠 -rs 就没人知道它们为什么没跑、跑了多少。
-          pytest -m "not integration and not network" --maxfail=0 -rs
+          pytest -m "not integration and not network" --maxfail=0 -rs -p audit_plugin
+
+      - name: 选测登记表漂移检查
+        # pytest 红时也要跑：dump 在 pytest 收尾（sessionfinish）时写，红了照样有。
+        # 红 = 整套里有测试读了登记表（tests/_must_run.json）没有的文件 ⇒ 开发期选测会漏选。
+        # 只查「多出来的读」：CI 上有的测试会 skip，观测到的比登记表少是正常的。
+        # 修法与解读见 tools/select_tests/select_tests.py 的模块文档。
+        if: always()
+        env:
+          SELECT_TESTS_OUT: ${{ runner.temp }}/select_tests_dump.json
+        run: python tools/select_tests/select_tests.py --check-drift "$SELECT_TESTS_OUT"
