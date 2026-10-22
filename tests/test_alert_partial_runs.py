@@ -64,6 +64,8 @@ def _healthy_scan_timing():
                                "unresolved_tickers": [], "legacy_source": 0, "max_unresolved": 0},
             "observation_archive": {"available": True, "ok": True, "enabled": True, "missing_refs": {},
                                     "missing_payloads": 0},
+            "day_health": {"available": True, "version": 1, "verdict": "ok", "min_outage_fields": 2,
+                           "degraded_fields": [], "outage_sources": {}},
         },
         "counters": {
             "portfolio_greeks": {"n_stale": 0, "stale": [], "n_quote_stale": 0, "spy": {"stale": False},

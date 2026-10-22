@@ -87,7 +87,8 @@ _TOP_KEYS_ALWAYS = {"forward_start", "today", "status", "h1_weeks", "next_look_a
                     "forward_test_excluded_days",   # 修订 2（v0.45.484）：只是日期列表，不含效应量
                     "input_code_guard",             # v0.45.554：单元名与指纹状态，不含效应量
                     "buzz_v1_self_proof",           # v0.45.556：自证计数与窗口，不含效应量
-                    "buzz_v1_bridge"}               # v0.45.583：桥接核对计数与状态，不含效应量
+                    "buzz_v1_bridge",               # v0.45.583：桥接核对计数与状态，不含效应量
+                    "day_health"}                   # v0.45.598：窗口内数据源故障日的日期与字段名，不含效应量
 
 #: 窗口首日（周一）。窗口内的夹具日期一律相对它写——修订 1 把起点从 09-28 挪到 10-12 时，
 #: 写死的日期整批落到窗口前，测试红的原因变成「夹具过期」而不是「执行器错了」

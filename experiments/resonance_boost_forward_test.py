@@ -527,6 +527,9 @@ def run(home: Optional[Path] = None, db_path: Optional[str] = None, insample: bo
             return {"status": "cannot_judge", "reason": f"找不到数据库 {db_path}", "skipped": dict(loaded["skipped"])}
         res = evaluate(rows, load_excess_returns(db_path), insample=insample)
     res["skipped_files"] = dict(loaded["skipped"])
+    # v0.45.598：窗口内哪些日子是「数据源整体降级的故障日」——**只显示**：样本与判定都已在上面算完，这里不回头改。
+    import day_health
+    res["day_health"] = day_health.summarize_days({r["date"] for r in rows}, home=home)
     return res
 
 
@@ -571,6 +574,9 @@ def _print_human(res: Dict) -> None:
     print("━" * 72)
     print(f"  报告份数 {res.get('n_reports')}｜自证 {res.get('selfproof')}｜跳过文件 {res.get('skipped_files')}"
           f"｜GEX 链（修订 1）{res.get('gex_chain')}")
+    if res.get("day_health"):
+        import day_health
+        print("  " + day_health.describe(res["day_health"]))
     for ex in res.get("fail_examples") or []:
         print(f"    不一致样例：{ex}")
     s = res.get("status")

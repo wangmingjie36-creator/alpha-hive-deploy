@@ -2845,13 +2845,25 @@ def main():
         _log.warning("原始观测完整性统计失败（不影响扫描）: %s", _e_ob)
         _observation_archive = {"available": False, "reason": f"{type(_e_ob).__name__}: {_e_ob}"}
 
+    # v0.45.598：日健康判定（同一数据源族 ≥2 个字段同时低于覆盖线 ⇒ source_outage）→ status.json → alert_manager 按源出 P1。
+    # Step 6（alert_manager）在 Step 12（覆盖率闸）之前跑，读不到 Step 12 的结果——10-14 yfinance 0/30 那天 alerts 里一个字没提；
+    # 所以由扫描进程用同一套判据（`scan_coverage_gate.check`）在这里算一次。算不出来也写一条带原因的记录。
+    try:
+        import day_health as _day_health_mod
+        _day_health = _day_health_mod.assess(reporter.date_str,
+                                             reporter.report_dir / f".swarm_results_{reporter.date_str}.json")
+    except Exception as _e_dh:  # noqa: BLE001 —— 观测点自身失败只记原因，不拖垮扫描
+        _log.warning("日健康判定失败（不影响扫描）: %s", _e_dh)
+        _day_health = {"available": False, "reason": f"{type(_e_dh).__name__}: {_e_dh}"}
+
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
     _timing.write(reporter.date_str, extra={"gh_pages": _timing.gh_pages_summary(_gh_pages),
                                             "news_sources": _news_sources,
                                             "cloud_snapshots": _cloud_snapshots,
                                             "outcomes_backlog": _outcomes_backlog,
                                             "earnings_dates": _earnings_dates,
-                                            "observation_archive": _observation_archive})
+                                            "observation_archive": _observation_archive,
+                                            "day_health": _day_health})
     return report
 
 

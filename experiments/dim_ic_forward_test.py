@@ -76,6 +76,7 @@ from scipy import stats as _scipy_stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 代码锚点：import 仓内模块
 
+import day_health  # noqa: E402
 import ic_diagnostics  # noqa: E402
 import signal_archive  # noqa: E402
 
@@ -689,6 +690,9 @@ def run(db_path: Optional[str] = None, today: Optional[str] = None,
     out = apply_self_proof(out, self_proof if self_proof is not None else buzz_v1_self_proof(db, today))
     # v0.45.583：桥接核对只是进度（阶段 4 前 H1 仍读入档通道），无论上面判成什么都附上
     out["buzz_v1_bridge"] = bridge if bridge is not None else buzz_v1_bridge(db, today)
+    # v0.45.598：窗口内哪些日子是「数据源整体降级的故障日」——**只显示**：rows / series / decide 都在上面算完了，
+    # 这里不回头改任何一行样本，也不影响 status / verdicts（口径变更要走协议修订，不能顺手做）。
+    out["day_health"] = day_health.summarize_days({r["date"] for r in rows})
     return out
 
 
@@ -754,6 +758,8 @@ def _print_report(res: Dict) -> None:
     print(status_line(res))
     if res.get("status") == "cannot_judge":
         return
+    if res.get("day_health"):
+        print("  " + day_health.describe(res["day_health"]))
     for h, v in res.get("verdicts", {}).items():
         print(f"\n  【{h}】{v['result']}（{v.get('look')}检视）")
         if "ic" in v:

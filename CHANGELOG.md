@@ -5,7 +5,43 @@
 
 ---
 
-## [0.45.598] — 2026-10-22 — 占位（进行中：日健康判定——Step 12 同源 ≥2 字段同时降级判 source_outage，落盘 + alert_manager 按源出 P1，前瞻检验加载器只显示不改口径）
+## [0.45.598] — 2026-10-22 — Added：日健康判定——同一数据源族 ≥2 个字段同时低于覆盖线判 `source_outage`，alert_manager 按源出 P1；前瞻检验加载器只显示故障日、不改口径
+
+起因：v0.45.421 / 429 收尾时留给用户的三个问题（异常流是否单独限速、A2「降级时不再混入 5.0」、异常流降级是否升 P1）。用户 2026-10-22 要求分析「有没有必要升」：
+**单独把异常流升 P1 没有必要，真缺口在别处。** 2026-10-14 的实证：14:00:10 代理探活失败 ⇒ 直连 ⇒ 14:00:27 yfinance 第一个请求就 429（`yf_gate` 14:10:38 才装，
+与 Oracle 的请求量无关，v0.45.429 的限速对这一天不相干）⇒ `iv_rank` / `unusual_flow` / `analyst_targets` / `catalysts` 同日 0/30。
+**Step 12 抓到了**（`scan_coverage-2026-10-14.json` `healthy=false`、退出码 1），但：① Step 6 的 alert_manager 在 Step 12 **之前**跑，读不到它，
+`alerts-2026-10-14.json` 四条里一个字没提数据源故障；② 两份前瞻检验把这天当普通日子收进去，报告里没有任何一处说「这一天是故障日」。
+同一个根因一次打掉四个字段，只给其中一个字段升级，下次换个字段又漏。
+
+### Added
+- `day_health.py`：`classify(覆盖率结果)` / `assess(日期)` / `summarize_days(日期集)` / `describe`。判据：**同一数据源族（`scan_coverage_gate.FIELDS[*].source` 的第一个词：yfinance / CBOE）里 ≥ `MIN_OUTAGE_FIELDS`（2）个字段同时低于各自覆盖线 ⇒ 该源 `source_outage`**；有降级字段但没有源达线 ⇒ `degraded`；否则 `ok`；结果文件判不了 ⇒ `available=False` + 原因（**不当 ok**）。纯函数，只读 `.swarm_results_<日期>.json`，走覆盖率闸同一套判据。CLI：`/usr/local/bin/python3 day_health.py --all | --date D`（只读）。
+- `alpha_hive_daily_report.main`：扫描末尾算一次，写进 `scan_timing.extra.day_health`（→ status.json）；算不出来也写一条带原因的记录。
+- `alert_manager._check_day_health`（排在兜底 `_check_partial_explained` 之前）：`source_outage` ⇒ **每个故障源一条 P1**（不按字段出，一次故障不叠四条），内容含各字段有数/总数、yfinance 本轮 `calls` / `rate_limited`、按源的排查建议；`ok` / `degraded` 不报；**没统计 / 键不在 / 取值不认识 ⇒ P2 且进 `checks_skipped`**（默认会红，不是默认放过）。
+- 两份前瞻检验（`experiments/dim_ic_forward_test.py`、`experiments/resonance_boost_forward_test.py`）的 `run()` 结果加 `day_health`，报告头加一行「窗口里有几个数据源故障日、是哪几天」。**只显示**：在样本、`series`、`decide` / `evaluate` 全部算完之后才附上，不回头改任何一行样本，不影响 `status` / `verdicts`。
+
+### Changed
+- 测试夹具：`tests/test_production_sync.py`、`tests/test_alert_partial_runs.py` 的健康基线补 `day_health`（新字段进检查后「健康」基线必须带它，否则恒出 P2）；`test_production_sync` 的 `extra` 键集合加 `day_health`；`tests/test_dim_ic_forward_test.py` 的盲化键白名单 `_TOP_KEYS_ALWAYS` 加 `day_health`（内容是故障日的日期与字段名，不含效应量；「禁止出现 ic / t / p …」那条断言原样保留且仍过）。
+
+### 回测（诚实边界）
+`/usr/local/bin/python3 day_health.py --all`（`.swarm_results_*.json` 现存 128 个可判的日子 × 当前 FIELDS；另 2 个空文件判不了）：
+- 共 29 天命中 `source_outage`。**近 4 周（09-22 起）命中 3 天：09-24 / 09-25 / 10-14，都是已知故障日**（10-12 已被整日重放补算，存档里是好数据），其余日子 0 误报。
+- 更早 26 天：2026-03 那批（2 字段）多半是当时代码还不写这些字段（**待验证**）；06~08 月的 4~5 字段日多半是 yfinance 限流日（**待验证**）。
+- **频率不低**：近 4 周约每 7 个扫描日 1 个故障日。每一个都是真故障，但若之后出现「P1 天天响」，要回来看门槛是不是太低（性能 P1 天天响、v0.45.569 才删的前科）。
+- 字段不独立：`rv_30d` / `iv_rank` / `iv_rv_spread` 同出一次 yfinance 日 K 取数，日 K 单独挂就够 3 个字段——这仍是「yfinance 日 K 在 ≥30% 标的上取不到」，判故障日是对的，但字段数不要读成独立故障数。
+- 跨源各一个字段（yfinance 一个 + CBOE 一个）只算 `degraded`，不算故障日。
+
+### 守卫（`tests/test_day_health.py`，28 条）
+- 判定：健康日 / 10-14 形状（4 字段 0/30，正对照）/ 单字段只是 degraded / 跨源各一个 / 阈值边界 / 日 K 派生三字段 / 09-24 两源 / 旧代码没写的字段不算降级 / 判不了不是 ok / 受监视的源族已知（新增源族会红，逼你补建议文案）。
+- 告警：每源一条 P1、两源两条、ok 与 degraded 静默、三种「没统计」都是 P2、不认识的取值默认红；**生产者真跑闸 + 判定的产出直接喂 alert_manager**（字段名两头对得上，不是对着手写 dict 绿）。
+- 加载器只显示：把判定换成「没有故障日」的另一份，除 `day_health` 外每个键逐字相同（对照组必须是无故障日——初版两边都带故障日，「有故障日就改口径」的变异存活，已修）；判定自己坏了写原因、不写成「0 个故障日」；故障日不等于协议排除日（10-14 仍在样本里）。
+- 变异 13 个全红（阈值 1 / 3、分族用整句、判不了当 ok、summarize 失败写成 0 故障日、告警不调用 / P1 降 P2 / 未统计静默 / 不认识的取值静默 / 按字段出告警、扫描不写键、两份加载器各一个「回头改口径」）；`PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。拨钟审计 +7 / +45 天新红 0；ruff 通过。
+
+### 注意
+- **与原方案的一处偏离**：方案写的是「判定落盘到数据根 `day_health/<日期>.json`」。实现改为**不新增落盘产物**：判定是 `.swarm_results_<日期>.json` 的纯函数，重放整天改写那份文件后判定自动跟着变，落一份副本会和它分叉；扫描时的那一份已随 `scan_timing.extra` 进 status.json。需要历史判定的读者（前瞻检验）直接重算。真要一份历史台账（如给 Alpha Bot 看）再加，要走 `PATHS` + `ledger_io` + 备份范围 + conftest 两道防线那一整套。
+- **没做**：① A2（降级时不再混入 5.0）——仍不建议，会改降级日分数、要先登记世代边界，且判定落地后读者可以按判定过滤，不需要改分数；② 异常流单字段 / `degraded` 不升 P1（常态太多，`analyst_targets` 单独 0/30 出现过 8 天）；③ 不改评分、不改任何检验口径。
+- **10-14 要不要排出前瞻检验——本版不做、留给用户**。故障日 ≠ 协议排除日（`FORWARD_TEST_EXCLUDED_DAYS` 只收「整天由事后重放补算」的日子，协议口径是「系统当天实际产出什么就算什么」）。登记须在该日 T+7 结果出现之前：照 v0.45.484 登记 10-12 的算法（10-12 的 T+7 ≥ 10-21），10-14 的 T+7 ≥ 2026-10-23（推算，未核回填表）；晚了就是看过结果再排除。
+- 生产上线时机：合入 main 后，下一个扫描日开跑前 `production_sync` 快进 `~/alpha-hive-prod`，**那一轮起**才有 `scan_timing.extra.day_health`；Step 6 与扫描同一份代码，不存在「键还没写、检查先上线」的窗口。首个有数据的判定看那天的 `alerts-<日期>.json` 与 status.json。
 
 ## [0.45.597] — 2026-10-22 — Fixed：v0.45.498 二次检查 #1 / #2——.app 过时提醒（及壳里两处）给的「重新生成」命令按现行规则核过、照抄跑得通：记下的解释器不合规则就给占位，缺省解释器不可用时跑生成器的也换成可用的那个
 
