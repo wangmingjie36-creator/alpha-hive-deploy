@@ -5,7 +5,41 @@
 
 ---
 
-## [0.45.612] — 2026-10-22 — 占位（进行中：停止服务页与 ALPHA_BOT_GUIDE.md 里给人抄的 make 命令带上 -C、指南对齐帮助页现行说法）
+## [0.45.612] — 2026-10-22 — Fixed：给人抄的 make 命令带上 `-C`（停止服务页、ALPHA_BOT_GUIDE.md）；指南「怎么启动」「排错」两节对齐现行说法
+
+611 之后分析「Makefile 的 `alphabot` / `alphabot-demo` / `alphabot-stop` 要不要跟着 `PYTHON` 走」，结论是不必：
+- 只有「缺省解释器坏了 + 改用别的 + 又用 make 起服务」同时成立才碰得到。缺省坏了时每日扫描、MCP、编排器一起停，该修的是缺省。
+- .app 双击不经过这三个目标。
+- 把 `PYTHON` 的整套规则搬过去，要么抄三份、要么抽宏，还会混用「写进 .app 的解释器」这层含义。
+
+核对这些目标的引用时，发现同一个「照抄跑不通」的毛病：
+- 停止服务后的页面写「在终端运行 make alphabot」，不带 `-C`。不在代码目录里敲就报 `make: *** No rule to make target 'alphabot'.  Stop.`（实测）。
+- `ALPHA_BOT_GUIDE.md` 有六处同样不带 `-C`。
+- 指南里还有几处 436 之前的说法：「换 Python 或仓库挪位置才需重跑」「`git pull` 更新代码不需要重新生成」；「首次运行会问是否允许访问桌面」，而生产克隆不在桌面；`python -m alphabot --port 9000` 用的是裸 `python`；装依赖写死 `/usr/local/bin/python3`；`-m alphabot…` 没先 `cd`。
+
+### Fixed
+- **`macos_app.clone_make(target)`**：给人抄的「在生产克隆上跑 make 目标」只从这里出，带 `-C`；`canonical_entry` 复用它。
+- **停止服务页**（`static/app.js`）：改成 `make -C ~/alpha-hive-prod alphabot`。
+- **`ALPHA_BOT_GUIDE.md`**：只重写第 2 节「怎么启动」与第 7 节「排错」，页面导览各节没动（开头已说明以程序内帮助为准）。
+  - make 命令一律带 `-C ~/alpha-hive-prod`；`-m alphabot…` 一律先 `cd ~/alpha-hive-prod`。
+  - 换 Python 的写法同帮助页：只认命令行上的 `PYTHON`，须是绝对路径。
+  - 代码更新不用重新生成：扫描日自动快进，重启即用；启动壳变了会提醒。
+  - 访问授权只在 `--repo` 指向桌面 / 文稿时才问。
+  - 装依赖写明装进 .app 用的解释器，帮助页给出按本机实际解释器的整条命令。
+  - 新增「生产克隆丢了」一行。
+
+### Added（测试，`tests/test_alphabot_launcher.py`）
+- `TestMakeCommandsNameTheirDirectory`：
+  - 扫人会照抄的地方：静态页、指南、`alphabot/` 的字符串字面量（docstring 除外）。不带 `-C` 的 `make <目标>` 一律红；扫到的 `make -C` 少于 5 处也红，防扫描空转。
+  - 停止服务页与指南抄的就是 `clone_make(…)` 的结果。目标名后面不许再接名字字符，`alphabot` 不能靠 `alphabot-app` 蒙混过关。
+
+### 验证
+- 变异 5 处全红：停止服务页、指南命令表回到不带 `-C`；`clone_make` 去掉 `-C`；生成器字符串里出现不带 `-C` 的 make；指南漏抄演示目标。还原后 5 passed。
+- `make -n -C ~/alpha-hive-prod alphabot alphabot-demo alphabot-stop` 在别的目录里敲，三个目标都解析到。`-n` 只打印、不执行，生产克隆里不写任何东西。
+- 全量 11616 passed、0 failed（开跑前确认没有别的整套 / 拨钟审计在跑）。
+
+### 不在本版
+- 指南第 3、8 节的页面清单仍停在 407（如「标的（五个子页）」「前端六个页面」）。开头已说明逐页细节以程序内帮助为准，没有一并重写。
 
 ## [0.45.611] — 2026-10-22 — Fixed：v0.45.607 二次检查——给人抄的命令不再写死缺省解释器、也不再假设人站在代码目录里；「生成器只需标准库」改成关掉 site-packages 真跑核对；Makefile 退回缺省 runner 时说出来、优先级写明
 
