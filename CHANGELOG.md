@@ -5,7 +5,20 @@
 
 ---
 
-## [0.45.603] — 2026-10-22 — 占位（进行中：Alpha Bot 的 NVDL 盘中拉取 CBOE 文件陈旧时改用 yfinance 备用源）
+## [0.45.603] — 2026-10-22 — Added：Alpha Bot 的 NVDL 盘中拉取在 CBOE 文件陈旧时改用 yfinance 备用源（`alphabot/yf_chain.py`）
+
+> 起因：用户 10-22 截图问「为什么 NVDL 拉取盘中失败」。实测（美东 11:03）：CBOE 给 NVDL 的文件停在昨天 15:59:59、今天一张合约都没成交过，
+> 同一轮里 NVDA / TSLA / META / AMZN 都是新的；yfinance 同一时刻有 10:50 ET 的成交。Alpha Bot 的 vintage 校验把旧文件拒了（`stale_vintage`），行为正确；用户要求「换 yfinance 试一下」。
+> 为什么 CBOE 不更新 NVDL、是否稍后才刷新：**待验证**（以前没有 NVDL 快照可对照）。
+
+- `alphabot/yf_chain.py`（新）：`fetch_yf_raw_contracts(ticker, as_of=, now_et=, yf_module=)` 把 yfinance 期权链转成与 CBOE 原始合约取数函数**同形**的原始合约（键集对拍）：合约 / 到期 / 行权价 / DTE / IV / OI / 成交量 / bid / ask / 最后成交（美东墙钟），
+  标的价取最近一根 1 分钟线收盘，来源标签 `yfinance_intraday`；没有 Greeks（置 None，水平引擎对 None 本来就按 IV 用 BS 现算）；Yahoo 的 IV 求解失败值（`yahoo_iv.is_placeholder_iv`：减半阶梯 / 1e-05 地板）当缺失；
+  只取 ≤120 天、最多 10 个到期日（限流由 `yf_gate` 管，一次约 25 秒）；**陈旧照样拒**（最新成交的美东日期 < 此刻应有交易日 ⇒ `stale_vintage`）；永不抛，失败带原因（`yf_no_expiries` / `yf_price_unavailable` / `yf_no_contracts` / `yf_exception:<类名>`）。
+- `alphabot/service.py::_chain_fetch`：**只有** CBOE 报 `stale_vintage` **且**票在 `YF_FALLBACK_TICKERS`（目前 `{"NVDL"}`）里才走 yfinance——CBOE 好的时候、名单外的票、注入的取数函数都不受影响，CBOE 一恢复自动改回，不是永久换源；
+  `stats.yf_fallback_used / yf_fallback_failed` 计数，失败写 WARNING 并把原因带到页面。**只用于现算页（盘中 / 标的 / 总览）**；溢价页、卖权账本（预注册检验）、日报仍只认 CBOE（`tests/test_alphabot_premium.py` 钉住溢价页取数函数身份不变）。
+- 页面：`lib.js` 报价来源标签加「Yahoo 备用源」；帮助页排错表加一行。
+- 实测：真实服务 `live("NVDL")` → 可用，来源 `yfinance_intraday`，最后成交 10:58:48，月度 / 周度两档都 `recorded`；NVDA 照走 CBOE。NVDL 这一次耗时约 26 秒（12 个请求 × 限流）。
+- 测试 `tests/test_alphabot_yf_chain.py`（21 条，假 yfinance 模块、时钟全注入）：手算合约解析、与 CBOE 合约键集同形、IV 失败值 / NaN / 坏行、每种失败有名字的原因、远期 / 已过期到期日不拉、收盘后丢当天到期、`as_of` 不符拒绝、水平引擎端到端、服务层的触发条件与计数。变异自检 10 个全杀。
 
 ## [0.45.602] — 2026-10-22 — 占位（进行中：财报跨式入场闸——到期日必须在财报日之后留够 expiry_buffer，否则不开仓；修 TSLA 10-21 那种财报前被到期强平抢先的单）
 

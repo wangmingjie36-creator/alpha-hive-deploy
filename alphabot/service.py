@@ -45,6 +45,10 @@ DEFAULT_FOCUS = ("NVDA", "TSLA", "MSFT", "META", "AMZN")
 DEFAULT_INTERVAL_MIN = 10
 #: 快照里逐行权价 GEX 只存现价 ±这么多（热力图 / 回看点够用；不存原始链）
 SNAPSHOT_STRIKE_BAND = 0.12
+#: CBOE 报 `stale_vintage`（文件还停在上一交易日）时，这些票改拉 yfinance（`alphabot.yf_chain`，v0.45.603）。
+#: 2026-10-22 起只有 NVDL：它的 CBOE 文件整个上午不更新，同一时刻 yfinance 有 15 分钟延迟的成交。要加票改这里；
+#: **只对 Alpha Bot 的页面生效**——卖权账本 / 日报仍只认 CBOE。CBOE 一恢复就自动改回 CBOE。
+YF_FALLBACK_TICKERS = frozenset({"NVDL"})
 _TICKER_RE = re.compile(r"^[A-Z_][A-Z0-9.\-]{0,9}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -180,7 +184,7 @@ class AlphaBotService:
         self._settings_lock = threading.Lock()
         self.stats = {"live_computed": 0, "live_cache_hits": 0, "live_failures": 0,
                       "premium_computed": 0, "premium_cache_hits": 0, "premium_failures": 0,
-                      "howto_failures": 0}
+                      "howto_failures": 0, "yf_fallback_used": 0, "yf_fallback_failed": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -202,7 +206,7 @@ class AlphaBotService:
             if hit is not None and not force:
                 self.stats["live_cache_hits"] += 1
                 return self._stamp(hit)
-            res = clean_json(R.compute_live_detail(t, fetch_fn=self.fetch_fn, state_dir=self.ledger_dir))
+            res = clean_json(R.compute_live_detail(t, fetch_fn=self._chain_fetch(invalidate=True), state_dir=self.ledger_dir))
             ok = bool(res.get("data_available"))
             if ok:
                 res["howto"] = self._howto(t, res)
@@ -522,6 +526,30 @@ class AlphaBotService:
         """溢价页取链的唯一入口。生产 = `sell_strike_ledger._default_fetch`（与卖权页同一个取数函数），
         **不清进程缓存**：页面先走过 live()（它清缓存再拉一份），这里命中同一份 payload，不多发请求。"""
         return self.fetch_fn or R.LG._default_fetch
+
+    def _chain_fetch(self, *, invalidate: bool):
+        """Alpha Bot 取链的唯一入口：注入的取数函数（演示 / 测试）原样用；生产 = CBOE（与卖权页同一个取数函数），
+        CBOE 报 `stale_vintage` 且该票在 `YF_FALLBACK_TICKERS` 里 ⇒ 改拉 yfinance（`alphabot.yf_chain`）。
+        `invalidate`：先清该票的进程内 CBOE 缓存（`compute_live_detail` 缺省取数的行为：不清会拿 4 小时内的旧链重算）。
+        失败如实带原因返回（页面显示「现算不可得：…」+ `stats.yf_fallback_failed`），不吞。"""
+        if self.fetch_fn is not None:
+            return self.fetch_fn
+
+        def fetch(ticker, *, as_of=None):
+            t = norm_ticker(ticker)
+            if invalidate:
+                R._invalidate_cached_payload(t)
+            raw, reason = R.LG._default_fetch(t, as_of=as_of)
+            if raw is None and reason == "stale_vintage" and t in YF_FALLBACK_TICKERS:
+                from alphabot import yf_chain
+                raw, reason = yf_chain.fetch_yf_raw_contracts(t, as_of=as_of)
+                self.stats["yf_fallback_used" if raw is not None else "yf_fallback_failed"] += 1
+                if raw is None:
+                    _log.warning("[%s] CBOE 陈旧、yfinance 备用源也取不到：%s", t, reason)
+                else:
+                    _log.info("[%s] CBOE 文件陈旧（stale_vintage），本次改用 yfinance 备用源", t)
+            return raw, reason
+        return fetch
 
     def _premium_earnings(self, t: str, as_of: str, deps) -> dict:
         """财报日 ← 卖权账本（日报钩子按本轮 ChronosBee 写进每行的 earnings_date）里该票最近一次有信息的观测。
