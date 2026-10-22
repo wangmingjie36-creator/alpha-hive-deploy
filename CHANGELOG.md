@@ -121,7 +121,9 @@
 - #4：`tools/clockshift/audit.py --days 7 --days 45 -- tests/test_orchestrator_step_postconditions.py` 两档新红都是 0 条；+400 天 32 passed。变异「不钉钟」⇒ 红（写出的是真实今天、期望 `2026-03-02`）。
 - 整套（`-m "not integration and not network"`，等别的会话的整套跑完才开跑，报告头无 `concurrency:`）：**11430 通过 / 0 失败 / 2 xfail（85 deselected），614 s**。
 - 二次检查（同日）：上游在本版开工后只改了 CHANGELOG（指纹单元文件都没动，rebase 后 `e512d997` 仍成立）；CI 日志核实装的就是 pandas 2.3.3 / numpy 1.26.4；生产与 CI 都没装 bottleneck（实测）；pandas 2.3.3 下显式 `fill_method=None` 不发 FutureWarning；venv 里四处修复相关 198 条全过，改前的 5_5 测试文件在 venv（真没装 anthropic）里原样复现 CI 报错。更正初稿一处：「148 份含 NaN」原挂在补跑组上，按组重跑后为实时 108 + 补跑 40。
-- CI：推送后核对，结果补在本条末尾。
+- CI（`75777e06`）：`tests` 工作流 run 39806014054 **success**——四条在 Linux 上全部 PASSED（写沙箱那条此前只在 macOS 上模拟过 Linux，这次是真机），整轮 11480 passed / 0 failed / 19 skipped / 2 xfailed。main 上 `tests` 自此前连续 40 多轮失败后首次全绿。
+  `clockshift` 两轮包含本提交的 push 运行（39806014040、39807773820）都在基线阶段被后续推送取消（push 运行的并发组 `cancel-in-progress`），还没有 CI 上的拨钟结论；本机审计见上。下一次不被推送取消的是 2026-10-23 14:00 UTC 的定时运行（并发组按事件区分）。
+  旁注：main 推送频繁的日子，push 触发的 clockshift 基本跑不完（本次连续 6 轮 cancelled），拨钟审计实际只靠每日定时那一轮。
 
 ### 遗留（未修）
 - `requirements.txt`（pandas<3、numpy<2）与生产（3.0.1 / 2.4.2）不一致 ⇒ CI 测的不是生产用的库。仓里另有十几处 `pct_change()`（`risk_engine` / `crowding_detector` /
