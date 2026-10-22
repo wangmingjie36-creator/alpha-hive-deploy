@@ -147,23 +147,15 @@ class RedditSentimentClient:
             sources: [str]
         }
         """
-        # 缓存 10 分钟
-        cache_path = _cache_dir() / f"{ticker}_sentiment.json"
-        if cache_path.exists():
-            age = time.time() - cache_path.stat().st_mtime
-            if age < 600:
-                try:
-                    with open(cache_path) as f:
-                        return json.load(f)
-                except (json.JSONDecodeError, OSError) as exc:
-                    _log.debug("Reddit sentiment 缓存读取失败 (%s): %s", ticker, exc)
-
+        # v0.45.591：不再有单票派生缓存（原 `<票>_sentiment.json`，10 分钟）。它存的是算好的结果 + 两张榜的地址、不存榜，
+        # 没开档的进程（MCP 等）填了它、随后的扫描命中 ⇒ 档案里没有那两张榜、当天桥接作废。现在每次都从两张榜算：
+        # 榜单缓存本身就是原始内容（内存 / 磁盘两级），下面的 `reuse` 让被用到的那两张一定在档。查票 + 加减分很便宜。
         ticker_upper = ticker.upper()
 
         # 从多个子版获取数据
         all_stocks = self._fetch_ranking("all-stocks")
         wsb = self._fetch_ranking("wallstreetbets")
-        # v0.45.568：本次评分实际用的两张榜（缓存命中也算）的观测地址——结果的 `observation` 键随派生缓存一起存。
+        # v0.45.568：本次评分实际用的两张榜（缓存命中也算）的观测地址，随结果的 `observation` 键走。
         # 空榜（取数失败）也是一份观测：它决定了下面走安静 / 兜底分支
         _refs = {"all-stocks": _obs.reuse("apewisdom.ranking", {"filter": "all-stocks", "results": all_stocks}),
                  "wallstreetbets": _obs.reuse("apewisdom.ranking", {"filter": "wallstreetbets", "results": wsb})}
@@ -291,12 +283,6 @@ class RedditSentimentClient:
             "timestamp": datetime.now().isoformat(),
             _obs.REF_KEY: _refs,
         }
-
-        try:
-            atomic_json_write(cache_path, result)
-        except (OSError, TypeError) as exc:
-            _log.debug("Reddit sentiment 缓存写入失败 (%s): %s", ticker, exc)
-
         return result
 
     def _find_ticker(self, rankings: List[Dict], ticker: str) -> Optional[Dict]:

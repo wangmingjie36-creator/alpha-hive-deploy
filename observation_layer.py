@@ -30,16 +30,38 @@ v0.45.568 把喂 H1 情绪通道的原始取数落了档（`observation_archive`
 - 时钟：`{"spy_last_minute": 带时区 ISO 时间戳 或 null}`（null = 当时没取到，`_drop_forming_bar` 因此原样返回）。
 
 Reddit / 新闻 / 热搜 / F&G 的取数目前仍在各自模块里调 `observation_archive.observe`（v0.45.568），「观测层版本化」时一起搬进来。
+
+取数缓存（v0.45.591，观测层版本化第一块）
+-----------------------------------------
+新闻与 F&G 的缓存原先存**解释之后的结果**（分数 + 观测地址），不存原始内容。没开档的进程（MCP、手动开发跑）先把它
+填了、随后的扫描命中 ⇒ 链接里有地址、档案里没有那份 payload ⇒ 当天桥接核对 incomplete、白白浪费一个桥接日。
+现在缓存存的是**这次取数的结局**：用了哪种观测（`kind`）、原始内容（`payload`）、取数时刻、调用方要的附带记录
+（新闻：主源那一步的结局）。命中时调用方用与新取数**同一个**解释函数重算，`cache_read` 顺手 `reuse` 补档。
+⇒ 缓存命中与新取数走同一条解释路径，档案里一定有被用到的那份观测，不论缓存是谁填的。
+
+- 文件名带观测层版本（`cache_path`）：别的版本、以及 v0.45.591 之前的派生缓存写的文件，这一版读不到；还在跑旧代码的
+  长驻进程（MCP / Alpha Bot 在扫描日快进之前起的）也读不到新格式——两边互不误读。
+- 读到形状不对、版本不对、过期的文件 ⇒ 当没命中（重新取数），与 `read_json_cache` 对坏 JSON 的处理同一语义：
+  缓存只省网络请求，丢了不丢观测。
+- `kind=None` = 这次整条取数链都没拿到内容（兜底结果）：照旧缓存这个结局（与改前缓存兜底结果同一 TTL），不记观测。
 """
 from __future__ import annotations
 
+import logging as _logging
 import math
+from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 import observation_archive as _archive
 
+_log = _logging.getLogger("alpha_hive.observation_layer")
+
 KIND_DAILY = "yfinance.daily"
 KIND_CLOCK = "exchange.clock"
+
+#: 取数函数把「这次用到的原始观测」随结果交给调用方的键：``{"kind", "payload"}``。调用方写缓存前取走（`pop`），
+#: 不进返回给评分代码的结果、不进缓存的结果层
+CARRIER_KEY = "_observed"
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -163,3 +185,49 @@ def clock_ref(ts) -> Optional[str]:
     （没开档时）也会在这里补档。
     """
     return _archive.reuse(KIND_CLOCK, _clock_payload(ts))
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 取数缓存：存原始观测，不存解释（v0.45.591，见模块说明「取数缓存」）
+# ────────────────────────────────────────────────────────────────────────────
+
+def cache_path(directory, stem: str) -> Path:
+    """缓存文件路径：``<directory>/<stem>.<观测层版本>.json``（调用时求值，`directory` 由调用方按 `PATHS` 解析）。"""
+    return Path(directory) / f"{stem}.{_archive.LAYER_VERSION}.json"
+
+
+def cache_write(path, *, kind: Optional[str], payload: Any, fetched_at: Any,
+                meta: Optional[Mapping[str, Any]] = None) -> None:
+    """把一次取数的结局写进缓存。写不进只记 debug：下次重新取数，观测照样落档，不丢任何东西（与改前缓存写失败同一语义）。"""
+    from hive_logger import atomic_json_write
+    doc = {"layer": _archive.LAYER_VERSION, "fetched_at": fetched_at, "kind": kind,
+           "payload": payload if kind is not None else None, "meta": dict(meta or {})}
+    try:
+        atomic_json_write(path, doc)
+    except (OSError, TypeError, ValueError) as e:
+        _log.debug("取数缓存写入失败 (%s): %s", path, e)
+
+
+def _cache_doc_ok(doc: Any) -> bool:
+    if not isinstance(doc, dict) or doc.get("layer") != _archive.LAYER_VERSION:
+        return False
+    if not isinstance(doc.get("fetched_at"), str) or not isinstance(doc.get("meta"), dict):
+        return False
+    kind = doc.get("kind")
+    if kind is None:
+        return doc.get("payload") is None
+    return kind in _archive.KINDS and "payload" in doc
+
+
+def cache_read(path, ttl: float) -> Optional[Dict[str, Any]]:
+    """读一份没过期、本版本写的取数缓存：``{"kind", "payload", "fetched_at", "meta", "ref"}``；否则 None（当没命中）。
+
+    命中且有观测 ⇒ `reuse`：扫描进程里确保那份 payload 在档（缓存可能是没开档的进程填的），`ref` 是它的地址。
+    """
+    from hive_logger import read_json_cache
+    doc = read_json_cache(path, ttl)
+    if not _cache_doc_ok(doc):
+        return None
+    kind = doc["kind"]
+    ref = _archive.reuse(kind, doc["payload"]) if kind is not None else None
+    return {"kind": kind, "payload": doc["payload"], "fetched_at": doc["fetched_at"], "meta": doc["meta"], "ref": ref}

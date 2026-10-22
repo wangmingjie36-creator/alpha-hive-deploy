@@ -46,8 +46,40 @@
 - **变异验证 11/11 变红、文件逐字节还原**：关停开关失效 / plist RunAtLoad / 子进程不带花钱闸变量 / 去掉「太晚」保护 / 「生产写完」判据只看行数 / 去掉等待超时 / plist 含周六 / `--once` 真跑 / 各代合并 / 今天被算成缺失 / 状态不记代。
 - **未做**：Sonnet 5.5 放宽 `max_tokens` 后的真实截断率没有实测（10-19 试跑是在未放宽时 11/18 截断）；首次 g2 真跑是自动任务本身。不健康的一天整天不入比较（截断率 > 10% 等），代价是那天的约 $1.9。
 
+## [0.45.591] — 2026-10-22 — Fixed：观测层版本化第一块——新闻 / F&G 取数缓存改存原始观测、Reddit 单票派生缓存删除：没开档的进程（MCP / 手动跑）先填了缓存，扫描命中时档案照样完整，不再白丢桥接日
 
-## [0.45.591] — 2026-10-22 — 占位（进行中：观测层版本化第一块——新闻 / F&G / 单票 Reddit 缓存改存原始观测，非入档进程预填缓存不再让当天桥接日作废）
+**问题**（v0.45.588 二次检查记下、还没发生过）：新闻 / F&G / 单票 Reddit 三种缓存存的是**算好的结果 + 观测地址**，不存原始内容。
+原始观测只在扫描进程里落档（`observation_archive.enable()`）；别的进程先填了缓存、随后的扫描命中 ⇒ 链接里有地址、档案里没有那份观测 ⇒
+`summarize` 记缺失（P2）、当天桥接核对 incomplete，两组各需 10 个通过日的进度白白少一天。热搜表与 Reddit 两张榜的缓存本来就是原始内容
+（命中时 `reuse` 补档），不受影响。
+
+### Fixed
+- `observation_layer.py`：新增取数缓存 `cache_path` / `cache_write` / `cache_read`。缓存存「取数结局」——观测种类、原始内容、取数时刻、
+  调用方附带记录；文件名带观测层版本（`<名>.obs-1.json`），别的版本与 591 之前的派生缓存互不误读（还在跑旧代码的长驻进程也读不到新格式）；
+  形状 / 版本 / 种类不对或过期 ⇒ 当没命中、重新取数；命中且有观测 ⇒ `reuse` 补档。
+- `fear_greed.py`：换算拆成 `_from_cnn` / `_from_alternative_me`，新取数与缓存命中共用；缓存改存取数结局（`cache/fear_greed.obs-1.json`），
+  命中时 `timestamp` 沿用取数时刻（BuzzBee 记成 `fetched_at`）；两源都挂的兜底结局照旧缓存。缓存内容解释不了 ⇒ 警告、重新取数。
+- `newsapi_client.py`：Massive / AV / Yahoo 三段解释拆成 `_from_massive` / `_from_alpha_vantage` / `_from_yahoo`；缓存改存取数结局 + 主源结局
+  （`cache/news/<票>_news.obs-1.json`），命中时重算、还原时间戳与主源结局；删 `_safe_cache`。
+- `reddit_sentiment.py`：删单票派生缓存 `<票>_sentiment.json`（每次从两张榜算，榜单缓存本身就是原始内容）。
+
+### 不改值（四个输入层指纹单元按 no_value_change 确认，用户 10-22 定）
+- 旧 / 新代码对拍：随机输入 2400 例（F&G / 新闻 / Reddit 各 800，含限速、拒绝、空结果、解析失败、主源降级；新取数与缓存命中两条路都比，
+  命中前把时钟拨快）逐字段相同，新闻主源结局计数相同；对拍脚本自身有牙（4 个时间戳 / 主源结局变异全抓到）。
+- 生产档案 10-20/21 真实观测重放：Massive 54 份、CNN 2 份、Reddit 两张榜 4×4 组合 × 30 只票 480 例，旧 / 新逐字段相同，新代码算出的观测地址
+  与档案里那份一致（生产档案只读，文件数前后 106）。
+- 唯一可见差别：Reddit 结果的 `timestamp` 在跨进程命中时是这次算的时刻（旧代码是当初那次），没有读者。
+- `price.fields` 变只因为整份 `observation_layer.py` 在单元里：行情 7 个函数 AST 逐个比对一字未改。
+
+### Tests
+- `tests/test_observation_archive.py`：`TestCacheFilledByAnotherProcess`（没开档的进程先填四个缓存 → 扫描命中 → 每个通道的观测都在档、
+  结果逐字段同首调；**在旧代码上红**，缺档的恰是新闻 / F&G / Reddit 三个通道）、新闻 / F&G 缓存格式与各种「当没命中」、观测层缓存函数、
+  `test_sentiment_modules_only_cache_raw_content`（四个情绪模块的落盘写入只许是两处原始内容缓存，其余经 `cache_write`）。变异 17/17 抓到。
+- `tests/test_persistent_writes_have_readers.py`：写入点 / 产物登记随改。
+
+### 文档
+- `observation_archive.py` 模块说明「何时落盘」段、`observation_layer.py` 模块说明「取数缓存」段、CLAUDE.md 观测层指针、
+  `experiments/dim_ic_preregistration.md` §13.11 补 591 一段（实现，不改规则）。
 
 ## [0.45.590] — 2026-10-21 — Added：整套测试开跑时提示「同时还有别的大测试会话在跑」（`tests/_concurrency_hint.py`，只提示、不阻塞、不报红）+ CLAUDE.md「整套测试怎么跑」规则
 

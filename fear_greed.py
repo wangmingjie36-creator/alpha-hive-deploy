@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import observation_archive as _obs
-from hive_logger import atomic_json_write, read_json_cache
+import observation_layer as _obs_layer
 from resilience import get_session, NETWORK_ERRORS
 
 _log = _logging.getLogger("alpha_hive.fear_greed")
@@ -45,7 +45,8 @@ def _cache_path() -> Path:
     if _CACHE_PATH is not None:
         return Path(_CACHE_PATH)
     from hive_logger import PATHS
-    return Path(PATHS.cache_dir) / "fear_greed.json"
+    # v0.45.591：缓存存原始观测（`observation_layer.cache_*`），文件名带观测层版本 ⇒ 不再是旧的 fear_greed.json
+    return _obs_layer.cache_path(PATHS.cache_dir, "fear_greed")
 _CACHE_TTL = 3600  # 1 小时（指数每天更新）
 _lock = threading.Lock()
 
@@ -65,9 +66,14 @@ def get_fear_greed() -> Dict:
     }
     """
     with _lock:
-        cached = read_json_cache(_cache_path(), _CACHE_TTL)
-        if cached is not None:
-            return cached
+        # v0.45.591：缓存里是上次取数的结局（原始观测 + 取数时刻），命中时用同一个解释函数重算、顺手补档——
+        # 没开档的进程（MCP 等）填的缓存被扫描用上时，档案里照样有那份观测
+        hit = _obs_layer.cache_read(_cache_path(), _CACHE_TTL)
+        if hit is not None:
+            try:
+                return _from_cache(hit)
+            except (KeyError, TypeError, ValueError, AttributeError) as e:
+                _log.warning("F&G 缓存内容解释不了，重新取数: %s", e)
 
         if _req is None:
             return _default_result()
@@ -84,12 +90,22 @@ def get_fear_greed() -> Dict:
         if result is None:
             result = _default_result()
 
-        try:
-            atomic_json_write(_cache_path(), result)
-        except (OSError, TypeError):
-            pass
-
+        observed = result.pop(_obs_layer.CARRIER_KEY, None) or {}
+        _obs_layer.cache_write(_cache_path(), kind=observed.get("kind"), payload=observed.get("payload"),
+                               fetched_at=result.get("timestamp"))
         return result
+
+
+def _from_cache(hit: Dict) -> Dict:
+    """缓存里的取数结局 → 结果：与新取数同一个解释函数；时间戳沿用当初取数的时刻（BuzzBee 把它记成 fetched_at）。"""
+    kind = hit["kind"]
+    if kind is None:
+        result = _default_result()
+        result["timestamp"] = hit["fetched_at"]
+        return result
+    result = _INTERPRET[kind](hit["payload"], hit["fetched_at"])
+    result[_obs.REF_KEY] = hit["ref"]
+    return result
 
 
 _CNN_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
@@ -112,36 +128,16 @@ def _fetch_cnn_fg() -> Optional[Dict]:
             return None
 
         fg = resp.json().get("fear_and_greed", {})
-        raw_score = fg.get("score")
-        if raw_score is None:
+        if fg.get("score") is None:
             return None
-
-        value = int(round(float(raw_score)))
-        rating = fg.get("rating", "")
+        payload = {"fear_and_greed": fg}
+        # v0.45.591：解释拆成 `_from_cnn`（缓存命中走同一个函数）；解释得了才落档（解释不了 = 这次没拿到，走备用源）
+        result = _from_cnn(payload, datetime.now().isoformat())
         # v0.45.568：CNN 的 fear_and_greed 对象原样进观测档案（graphdata 其余是历史序列，不是今天的观测）
-        _ref = _obs.observe("fear_greed.cnn", {"fear_and_greed": fg}, request={"url": _CNN_URL})
-
-        # 统一 classification 命名
-        _cls_map = {
-            "extreme fear":  "Extreme Fear",
-            "fear":          "Fear",
-            "neutral":       "Neutral",
-            "greed":         "Greed",
-            "extreme greed": "Extreme Greed",
-        }
-        classification = _cls_map.get(rating.lower(), _classify(value))
-        sentiment_score = round(max(1.0, min(10.0, value / 10.0)), 1)
-
-        _log.info("CNN F&G: %d (%s)", value, classification)
-        return {
-            "value": value,
-            "classification": classification,
-            "sentiment_score": sentiment_score,
-            "is_real_data": True,
-            "source": "cnn",
-            "timestamp": datetime.now().isoformat(),
-            _obs.REF_KEY: _ref,
-        }
+        result[_obs.REF_KEY] = _obs.observe("fear_greed.cnn", payload, request={"url": _CNN_URL})
+        result[_obs_layer.CARRIER_KEY] = {"kind": "fear_greed.cnn", "payload": payload}
+        _log.info("CNN F&G: %d (%s)", result["value"], result["classification"])
+        return result
     except NETWORK_ERRORS as e:
         _log.debug("CNN F&G 获取失败: %s", e)
         return None
@@ -162,24 +158,61 @@ def _fetch_alternative_me() -> Optional[Dict]:
             return None
 
         data = resp.json().get("data", [{}])[0]
-        value = int(data.get("value", 50))
-        _ref = _obs.observe("fear_greed.alternative_me", {"data": data}, request={"url": _ALT_URL})
-        classification = data.get("value_classification", "Neutral")
-        sentiment_score = round(max(1.0, min(10.0, value / 10.0)), 1)
-
-        _log.info("Alternative.me F&G (crypto备用): %d (%s)", value, classification)
-        return {
-            "value": value,
-            "classification": classification,
-            "sentiment_score": sentiment_score,
-            "is_real_data": True,
-            "source": "alternative_me",
-            "timestamp": datetime.now().isoformat(),
-            _obs.REF_KEY: _ref,
-        }
+        payload = {"data": data}
+        result = _from_alternative_me(payload, datetime.now().isoformat())
+        result[_obs.REF_KEY] = _obs.observe("fear_greed.alternative_me", payload, request={"url": _ALT_URL})
+        result[_obs_layer.CARRIER_KEY] = {"kind": "fear_greed.alternative_me", "payload": payload}
+        _log.info("Alternative.me F&G (crypto备用): %d (%s)", result["value"], result["classification"])
+        return result
     except NETWORK_ERRORS as e:
         _log.debug("Alternative.me F&G 获取失败: %s", e)
         return None
+
+
+# ── 解释：原始观测 → 结果（新取数与缓存命中共用；`timestamp` = 取数时刻，由调用方给）──────────────
+
+_CLS_MAP = {
+    "extreme fear":  "Extreme Fear",
+    "fear":          "Fear",
+    "neutral":       "Neutral",
+    "greed":         "Greed",
+    "extreme greed": "Extreme Greed",
+}
+
+
+def _from_cnn(payload: Dict, fetched_at: str) -> Dict:
+    fg = payload["fear_and_greed"]
+    value = int(round(float(fg.get("score"))))
+    rating = fg.get("rating", "")
+    # 统一 classification 命名
+    classification = _CLS_MAP.get(rating.lower(), _classify(value))
+    sentiment_score = round(max(1.0, min(10.0, value / 10.0)), 1)
+    return {
+        "value": value,
+        "classification": classification,
+        "sentiment_score": sentiment_score,
+        "is_real_data": True,
+        "source": "cnn",
+        "timestamp": fetched_at,
+    }
+
+
+def _from_alternative_me(payload: Dict, fetched_at: str) -> Dict:
+    data = payload["data"]
+    value = int(data.get("value", 50))
+    classification = data.get("value_classification", "Neutral")
+    sentiment_score = round(max(1.0, min(10.0, value / 10.0)), 1)
+    return {
+        "value": value,
+        "classification": classification,
+        "sentiment_score": sentiment_score,
+        "is_real_data": True,
+        "source": "alternative_me",
+        "timestamp": fetched_at,
+    }
+
+
+_INTERPRET = {"fear_greed.cnn": _from_cnn, "fear_greed.alternative_me": _from_alternative_me}
 
 
 def _classify(value: int) -> str:
