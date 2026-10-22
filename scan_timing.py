@@ -95,7 +95,8 @@ def counters() -> Dict[str, Optional[dict]]:
 
     `history_fill`（v0.45.473）：`data_pipeline.MultiSourceFetcher` 唯一出口的历史字段回落——按出口
     （哪个源胜出 / 过期缓存 / CBOE 盘中陈旧价 / 全源失败）数缺了几项、回落补上几项，外加最近一次仍缺的标的。
-    此前三个出口直接把 None 交出去，连「今天走了哪个出口」都只在 warning 日志里。
+    此前三个出口直接把 None 交出去，连「今天走了哪个出口」都只在 warning 日志里。v0.45.625 起另带 `at_scoring`：
+    评分用的那份行情取完那一刻（扫描预取结束）的同一组统计——告警与摘要行按它判，评分之后的重取另列。
 
     `cboe_raw`（v0.45.333）：卖权行权价账本取原始链（`fetch_cboe_raw_contracts`）各出口的次数——
     ok / snapshot_mode / stale_vintage / payload_unavailable / vintage_mismatch / vintage_unverifiable /
@@ -159,7 +160,8 @@ def counters() -> Dict[str, Optional[dict]]:
     try:
         import data_pipeline
         # v0.45.473：取数出口的 momentum_5d / volume_ratio 回落（各出口缺几项、补上几项、仍缺哪些标的）；
-        # 本进程没解析过任何标的 ⇒ None。still_missing 非空 ⇒ alert_manager P2
+        # 本进程没解析过任何标的 ⇒ None。v0.45.625：评分那一刻的快照 at_scoring.still_missing 非空 ⇒ alert_manager P2，
+        # 之后的重取才缺的 ⇒ INFO
         out["history_fill"] = data_pipeline.history_fill_stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("history_fill stats 不可得: %s", e)
@@ -381,10 +383,18 @@ def summary_line(snap: dict) -> str:
         where = ",".join(dict.fromkeys(Path(str(i.get("path"))).name for i in lf.get("items") or []))
         pg_s += f" | 账本读写失败 {lf['n']} 次({where})"
     hf = c.get("history_fill")
-    sm = (hf or {}).get("still_missing") or {}
+    # v0.45.625：按评分用的那份行情取完那一刻的快照报（`at_scoring`）；之后的重取（报告阶段等）另写，不混进来
+    scored = (hf or {}).get("at_scoring")
+    sm = ((scored if isinstance(scored, dict) else hf) or {}).get("still_missing") or {}
     if sm.get("momentum") or sm.get("volume") or sm.get("volatility"):  # v0.45.473；波动率 v0.45.557
         pg_s += (f" | 回落后仍缺 动量 {len(sm.get('momentum') or [])} 只"
                  f"/量比 {len(sm.get('volume') or [])} 只"
                  f"/波动率 {len(sm.get('volatility') or [])} 只")
+    if isinstance(scored, dict):
+        after = (hf or {}).get("still_missing") or {}
+        later = {f: set(after.get(f) or []) - set(sm.get(f) or []) for f in ("momentum", "volume", "volatility")}
+        if any(later.values()):
+            pg_s += (f" | 评分后重取仍缺 动量 {len(later['momentum'])} 只"
+                     f"/量比 {len(later['volume'])} 只/波动率 {len(later['volatility'])} 只")
     return ("耗时 " + " | ".join(parts) +
             f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s + pg_s)

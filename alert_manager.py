@@ -1133,8 +1133,14 @@ class AlertAnalyzer:
 
         前两项是 BuzzBee 动量 / 量能通道、ScoutBee 背离、BearBee、RivalBee ML 特征的输入；volatility_20d 是 Buzz
         波动率通道与纸面组合波动率目标仓位的输入。三项也是 `signal_archive` 的 `price.*`（维度 IC 协议 H1 输入）。
-        缺了下游各自按中性 / 不可用处理、不报错——所以在这里红。`still_missing` 非空 ⇒ P2；计数缺失 ⇒ checks_skipped
-        （`--date` 补跑走历史取数、不经 fetcher，本就没有这项）。"""
+        缺了下游各自按中性 / 不可用处理、不报错——所以在这里红。计数缺失 ⇒ checks_skipped
+        （`--date` 补跑走历史取数、不经 fetcher，本就没有这项）。
+
+        v0.45.625：「仍缺」按**评分用的那份行情取完那一刻**的快照判（`at_scoring`，扫描预取结束时拍）⇒ P2。进程内
+        「最近一次」会被评分之后的重取改写：10-22 生成 ML 报告时 12 只票再取一轮撞上断网，把评分阶段完整的 10 只盖成
+        「仍缺」，P2 说「signal_archive 缺 price.* 行」而入档 30/30 齐全。比快照多出来的（评分完整、之后的重取才缺）
+        另列一条 INFO——照样看得见，不冒充 H1 输入缺失。没有快照（旧代码 / 扫描没走到预取结束）⇒ 退回进程口径并注明。
+        """
         st = status.get("scan_timing")
         if not isinstance(st, dict):
             return
@@ -1142,30 +1148,33 @@ class AlertAnalyzer:
         if not isinstance(hf, dict):
             self.checks_skipped.append("历史字段回落检查（scan_timing 无 history_fill 计数）")
             return
-        missing = hf.get("still_missing") or {}
-        mom, vol = list(missing.get("momentum") or []), list(missing.get("volume") or [])
-        vlt = list(missing.get("volatility") or [])
-        if not (mom or vol or vlt):
-            return
+        scored = hf.get("at_scoring")
+        has_scored = isinstance(scored, dict)
+        base = scored if has_scored else hf
+
+        def _missing(d):
+            sm = d.get("still_missing") or {}
+            return {f: list(sm.get(f) or []) for f in ("momentum", "volume", "volatility")}
 
         def _names(ts):
             return "、".join(ts[:10]) + (f" 等 {len(ts)} 只" if len(ts) > 10 else "")
-        paths = "；".join(
-            f"{p}：{v.get('n', 0)} 次"
-            + "".join(f"，{f} 缺 {v[f]['needed']} 补上 {v[f]['filled']}"
-                      + (f" 出错 {v[f]['errors']}" if v[f].get("errors") else "")
-                      for f in ("momentum", "volume", "volatility")
-                      if isinstance(v.get(f), dict) and v[f].get("needed"))
-            for p, v in sorted((hf.get("by_path") or {}).items()))
-        self.alerts.append(Alert(
-            AlertLevel.MEDIUM,
-            f"📊 【P2 中】历史字段回落后仍缺：momentum_5d {len(mom)} 只、volume_ratio {len(vol)} 只、"
-            f"volatility_20d {len(vlt)} 只",
-            {
-                "momentum_5d": _names(mom) if mom else "无",
-                "volume_ratio": _names(vol) if vol else "无",
-                "volatility_20d": _names(vlt) if vlt else "无",
-                "各出口": paths or "无",
+
+        def _paths(by_path):
+            return "；".join(
+                f"{p}：{v.get('n', 0)} 次"
+                + "".join(f"，{f} 缺 {v[f]['needed']} 补上 {v[f]['filled']}"
+                          + (f" 出错 {v[f]['errors']}" if v[f].get("errors") else "")
+                          for f in ("momentum", "volume", "volatility")
+                          if isinstance(v.get(f), dict) and v[f].get("needed"))
+                for p, v in sorted((by_path or {}).items()))
+
+        miss = _missing(base)
+        if any(miss.values()):
+            details = {
+                "momentum_5d": _names(miss["momentum"]) if miss["momentum"] else "无",
+                "volume_ratio": _names(miss["volume"]) if miss["volume"] else "无",
+                "volatility_20d": _names(miss["volatility"]) if miss["volatility"] else "无",
+                "各出口": _paths(base.get("by_path")) or "无",
                 "影响": "这些标的的动量 / 量能 / 波动率通道按中性处理，signal_archive 当天缺对应的 price.* 行；"
                         "缺波动率的纸面组合退回分档仓位",
                 "建议": "出错 > 0 ⇒ 看 alpha_hive.log「出口回落出错」；momentum 缺 ⇒ 查自攒价格索引覆盖"
@@ -1174,6 +1183,47 @@ class AlertAnalyzer:
                         "窗口只有 18 个交易日，主路径门槛 19 根，2020~2035 共 5 天；看「窗口…只有 N 个交易日」WARNING），"
                         "否则看「波动率回落拒收」WARNING（多半是 CBOE 当场收盘没核实）与 Twelve Data 失败原因"
                         "（status.json twelve_data.failed，复权请求带 adjust=all: 前缀）",
+            }
+            if not has_scored:
+                details["口径"] = ("没有评分时的快照（at_scoring；旧代码或扫描没走到预取结束）——按进程内最后一次取数判，"
+                                 "可能把评分之后的重取失败算进来，「影响」一条未必成立：先对 signal_archive 当天的 price.* 行")
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】历史字段回落后仍缺：momentum_5d {len(miss['momentum'])} 只、volume_ratio {len(miss['volume'])} 只、"
+                f"volatility_20d {len(miss['volatility'])} 只",
+                details,
+                ["history_fill", "data_quality"]
+            ))
+
+        if not has_scored:
+            return
+        after = _missing(hf)
+        later = {f: sorted(set(after[f]) - set(miss[f])) for f in after}
+        if not any(later.values()):
+            return
+        before_paths = scored.get("by_path") or {}
+        delta = {}
+        for p, v in (hf.get("by_path") or {}).items():
+            b = before_paths.get(p) or {}
+            d = {"n": v.get("n", 0) - b.get("n", 0)}
+            for f in ("momentum", "volume", "volatility"):
+                if isinstance(v.get(f), dict):
+                    bf = b.get(f) or {}
+                    d[f] = {k: v[f].get(k, 0) - bf.get(k, 0) for k in ("needed", "filled", "errors")}
+            if d["n"]:
+                delta[p] = d
+        self.alerts.append(Alert(
+            AlertLevel.INFO,
+            f"ℹ️ 评分之后的重取历史字段仍缺（评分用的数据不受影响）：momentum_5d {len(later['momentum'])} 只、"
+            f"volume_ratio {len(later['volume'])} 只、volatility_20d {len(later['volatility'])} 只",
+            {
+                "momentum_5d": _names(later["momentum"]) if later["momentum"] else "无",
+                "volume_ratio": _names(later["volume"]) if later["volume"] else "无",
+                "volatility_20d": _names(later["volatility"]) if later["volatility"] else "无",
+                "各出口（评分之后的增量）": _paths(delta) or "无",
+                "影响": "评分时这些票的字段是齐的（signal_archive 的 price.* 不受影响）；缺的是预取之后又单独取数的用途"
+                        "（v0.45.625 起 ML 报告已改用预取那份——再出现说明有别的步骤在评分后重新取数）",
+                "建议": "看 alpha_hive.log 同时段的取数失败（断网 / 限流）；若是新出现的重取方，考虑让它读评分时的预取行情",
             },
             ["history_fill", "data_quality"]
         ))
@@ -1198,6 +1248,8 @@ class AlertAnalyzer:
             "critical_count": len(self.get_critical_alerts()),
             "high_count": len(self.get_high_alerts()),
             "medium_count": len(self.get_medium_alerts()),
+            # v0.45.625：第一个 INFO 级告警（评分之后的重取历史字段仍缺）上线——只有 INFO 的那天别显示成 0/0/0
+            "info_count": len([a for a in self.alerts if a.level == AlertLevel.INFO]),
             "alerts": [a.to_dict() for a in self.alerts],
             # v0.45.543：无告警也写本文件 ⇒「没告警」与「检查没跑全」要能从文件里分开
             "checks_skipped": list(getattr(self, "checks_skipped", []) or []),
@@ -1300,6 +1352,7 @@ def main():
     _log.info("   Critical: %d", len(analyzer.get_critical_alerts()))
     _log.info("   High: %d", len(analyzer.get_high_alerts()))
     _log.info("   Medium: %d", len(analyzer.get_medium_alerts()))
+    _log.info("   Info: %d", len([a for a in analyzer.alerts if a.level == AlertLevel.INFO]))
 
     # 3. 分发告警（可选）
     if args.dispatch:

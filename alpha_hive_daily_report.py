@@ -606,6 +606,14 @@ class AlphaHiveDailyReporter:
         # 该日期真实收盘价；未传 --date 时 self.date_str=当日，行为不变
         prefetched = prefetch_shared_data(targets, retriever, target_date=self.date_str)
         inject_prefetched(all_agents, prefetched)
+        # v0.45.625：评分用的那份行情此刻取完（蜂读的就是它）。① 给历史字段回落统计拍快照——告警只按这一刻判
+        # 「评分数据缺」，之后的重取不再冒充它；② 留给 ML 报告用同一份价格 / 动量，不在扫描末尾再联网一轮
+        self._prefetched_stock = prefetched.get("stock_data") or {}
+        try:
+            import data_pipeline as _dp_hf
+            _dp_hf.mark_history_fill_scoring()
+        except Exception as _e_hf:  # noqa: BLE001 —— 没拍成 ⇒ at_scoring 为 None，告警退回进程口径并注明
+            _log.warning("历史字段回落统计快照失败（告警将按进程内最后一次取数判）: %s", _e_hf)
         prefetch_elapsed = time.time() - start_time
         _timing.record("prefetch", prefetch_elapsed)
         _log.info("预取完成 (%.1fs) | 开始并行分析", prefetch_elapsed)
@@ -1980,17 +1988,28 @@ class AlphaHiveDailyReporter:
                 # 写进 analysis-*.json 污染仪表板（7/7 夜扫 NVDA/MSFT/TSLA 复发）。
                 # 现走 CBOE 起头的多源链；全部失败置 0.0（哨兵，下游注入会跳过）。
                 real_price, real_change = 0.0, 0.0
-                try:
-                    from data_pipeline import fetch_stock_data as _fsd
-                    # v0.43.28: 补跑历史交易日时必须锚定日期，否则这条兜底路径
-                    # 会把今天的实时价写进 analysis-*.json（与 v0.41.6 建立的
-                    # 历史通道口径不一致，正是 7/21 补跑价格对不上的同类问题）
-                    _sd = _fsd(ticker, as_of_date=self.date_str)
-                    if _sd.get("price", 0) > 0:
-                        real_price = float(_sd["price"])
-                        real_change = float(_sd.get("momentum_5d") or 0.0)
-                except Exception as _yfe:
-                    _log.warning("多源价格获取失败 %s: %s（current_price 置 0 哨兵）", ticker, _yfe)
+                # v0.45.625：先用评分时预取的那份（`_init_scan_context`，蜂读的就是它）——报告里的价格 / 动量与评分
+                # 是同一份数。此前这里每只都重新走完整取数出口：离预取已过半小时、5 分钟内存缓存早失效 ⇒ 12 只全部重新
+                # 联网，回落还为本报告不用的量比 / 波动率去请求 Twelve Data；10-22 那一轮撞上断网，把评分阶段完整的
+                # 10 只在回落统计里盖成「仍缺」、触发了一条说「signal_archive 缺 price.* 行」的假 P2。
+                _pre = (getattr(self, "_prefetched_stock", None) or {}).get(ticker) or {}
+                if isinstance(_pre.get("price"), (int, float)) and _pre["price"] > 0:
+                    real_price = float(_pre["price"])
+                    real_change = float(_pre.get("momentum_5d") or 0.0)
+                else:
+                    # 没有预取行情（不经蜂群预取的调用 / 这只票预取就没取到价）才单独取
+                    _log.info("ML 报告：%s 没有评分时的预取行情，单独取数", ticker)
+                    try:
+                        from data_pipeline import fetch_stock_data as _fsd
+                        # v0.43.28: 补跑历史交易日时必须锚定日期，否则这条兜底路径
+                        # 会把今天的实时价写进 analysis-*.json（与 v0.41.6 建立的
+                        # 历史通道口径不一致，正是 7/21 补跑价格对不上的同类问题）
+                        _sd = _fsd(ticker, as_of_date=self.date_str)
+                        if _sd.get("price", 0) > 0:
+                            real_price = float(_sd["price"])
+                            real_change = float(_sd.get("momentum_5d") or 0.0)
+                    except Exception as _yfe:
+                        _log.warning("多源价格获取失败 %s: %s（current_price 置 0 哨兵）", ticker, _yfe)
 
                 ticker_data = {
                     "ticker": ticker,

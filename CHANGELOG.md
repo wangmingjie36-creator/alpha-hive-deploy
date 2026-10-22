@@ -26,7 +26,42 @@
 
 ## [0.45.626] — 2026-10-22 — 占位（进行中：v0.45.620 二次检查——bid_zero 守卫对 iCloud 副本不误报且按行为认重复、判据拒 bool、遍历剪枝、跨式页文案）
 
-## [0.45.625] — 2026-10-22 — 占位（进行中：历史字段回落 P2 只按扫描评分那次取数判、扫描后重取另列；ML 报告复用评分时的价格 / 动量不再重取）
+## [0.45.625] — 2026-10-22 — Fixed：历史字段回落 P2 只按评分用的那份行情判（评分之后的重取另列 INFO）；ML 报告复用评分时的预取价格 / 动量、不再在扫描末尾为 12 只票重新联网
+
+**问题**（10-22 扫描）：P2「历史字段回落后仍缺：volume_ratio 10 只、volatility_20d 9 只」，正文说「signal_archive 当天缺对应的
+price.* 行」——实际入档 30/30 齐全，H1 价格输入完整。机制：`data_pipeline.history_fill_stats()["still_missing"]` 记每只票
+**最近一次**取数出口后的状态；评分用的数据 14:00–14:03 预取时完整，14:39–14:41 `_generate_ml_reports._gen_one` 为分数最高的
+12 只重新走完整取数出口（离预取已过半小时、5 分钟内存缓存早失效；它只用价格与 momentum_5d，回落却为量比 / 波动率去请求
+Twelve Data），恰逢 14:23–14:45 全机对外 HTTPS 断（Massive / SEC / ApeWisdom / Twelve Data / CBOE / git 推 GitHub 都报 TLS 错，
+yfinance `401 Invalid Crumb` → `TypeError`），把评分阶段完整的 10 只盖成「仍缺」。各字段回落当时：momentum 10/10 由自攒价格
+索引补上；volume 0/10——收盘后 Twelve Data 当日那根是临时值、按设计丢弃 ⇒ 末根是前一场、拒收（v0.45.505，**收盘后结构上补不上**，
+本版不动）；volatility 1/10——Twelve Data 复权请求 9 只撞 TLS 错误。
+
+### Fixed
+- `data_pipeline.py`：新增 `mark_history_fill_scoring()`——评分用的那份行情取完那一刻给回落统计拍快照；`history_fill_stats()`
+  多带 `at_scoring`（没标记 ⇒ None；标记时还没解析过 ⇒ 全零），之后的出口记录改不动它；`reset_history_fill_stats()` 一并清。
+- `alpha_hive_daily_report._init_scan_context`：预取之后（输入闸之前）标记快照，并留下 `self._prefetched_stock`（蜂读的就是它）。
+- `alert_manager._check_history_fill`：P2 按 `at_scoring` 判（「影响」那句因此成立）；评分时齐、之后的重取才缺的另列一条 **INFO**
+  （带「评分之后的增量」各出口计数，不冒充 H1 输入缺失）；没有快照（旧代码 / 扫描没走到预取结束）⇒ 退回进程口径并在 `口径` 里注明。
+- `alpha_hive_daily_report._generate_ml_reports`：有预取价就用预取那份的价格 / momentum_5d（报告与评分同一份数），没有才单独取（仍锚定报告日期）。
+- `scan_timing.summary_line`：同口径；评分之后的重取另写「评分后重取仍缺 …」。
+- `alert_manager.save_alerts` 补 `info_count`、`main()` 补打 Info 计数：这是第一个 INFO 级告警，只有它的那天此前会显示成 0/0/0。
+- `data_pipeline.py` / `scan_timing.py` 里「still_missing ⇒ P2」的注释改成按快照判的现行说法。
+
+### Tests
+- 新增 `tests/test_history_fill_at_scoring.py`（16 条）：快照语义（之后改不动 / 是副本 / 没标记 None vs 全零 / reset 清）、告警
+  （10-22 形状 ⇒ 无 P2 + 一条 INFO；评分时缺 ⇒ P2 只列它、其余进 INFO；无快照 ⇒ 注明口径；旧计数照旧；干净 ⇒ 静默）、摘要行、
+  扫描接线（快照在预取之后、输入闸之前）、ML 报告有预取不联网 / 没有才按报告日取、只有 INFO 的那天各级计数加起来等于总数；
+  10-22 形状的计数与生产 scan_timing 逐项一致（cboe 41 + yfinance 1、名单同）。变异 14/14 抓到；全量 11800 passed、0 failed
+  （补改后再跑引用 alert_manager 的 37 个文件 1352 passed）。
+- 另一会话独立二次检查：未发现正确性 bug，其 12 处变异全红；clockshift +7/+45/+400 天无新红；六个指纹单元未变（price.fields
+  `e512d9978a3c1a91`）；快照时点核过（蜂只读预取、`_init_scan_context` 单一调用点、`risk_engine` 只经 generate_deep_v2、
+  `unusual_options` 只在传入价 ≤0 时自取、纸面组合波动率读 signal_archive ⇒ 降成 INFO 不藏真实影响）。上面三处补改出自它的建议。
+
+### 记下、没改
+- 收盘后量比回落结构上补不上（Twelve Data 当日那根是临时值）：v0.45.505 的设计，评分阶段 yfinance 正常时不需要它。
+- 10-22 断网对评分阶段的实际影响：ENPH / NEE / NFLX / SNOW（14:23–14:26 扫到）新闻通道回中性 50、历史 HV 落样本 ⇒ iv_rank 置 None，
+  两项都已如实记成降级；Reddit 未受影响；日健康判定 ok。断网成因（代理 / VPN / 网络）日志看不出，待验证。
 
 ## [0.45.624] — 2026-10-22 — 占位（进行中：选测审计插件的 import 过滤从不生效——改成只按调用栈判断（最近的仓库帧 vs frozen importlib 帧），补真插件正对照）
 
