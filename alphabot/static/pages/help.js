@@ -11,6 +11,9 @@ const lock = (...kids) => h("p", { class: "callout lock" }, ...kids);
 const kv = (rows, c1 = "项", c2 = "说明", c3) => table(
   [{ label: c1, render: (r) => b(r[0]) }, { label: c2, render: (r) => r[1] }, ...(c3 ? [{ label: c3, render: (r) => r[2] }] : [])], rows);
 const link = (id, text) => h("a", { href: `#/help/${id}` }, text);
+// 「程序类」里给人抄的命令取自 /api/method 的 app.*：先进代码目录、再用运行本服务的解释器（v0.45.611），不写死解释器
+const appCmd = (m, key, tail = "") =>
+  (m.app && m.app[key]) ? `${m.app[key]}${tail}` : `（命令取不到：/api/method 没给 app.${key}）`;
 
 // 每节 = [id, 标题, 一句话概括, (m) => 内容节点数组]。顺序即侧栏顺序。
 export const SECTIONS = [
@@ -513,10 +516,10 @@ export const SECTIONS = [
       ["加不进第 6 只关注", "上限 5 只：每只每拍约 1.5MB、串行 4–7 秒。"]], "现象", "原因 / 处理"),
     h("h3", {}, "程序类（桌面 .app）"),
     kv([
-      ["双击后弹「服务启动失败」", "弹窗附日志尾巴；日志在 ~/Library/Logs/Alpha Bot/。常见是缺依赖（starlette / uvicorn），装进 /usr/local/bin/python3。"],
+      ["双击后弹「服务启动失败」", `弹窗附日志尾巴；日志在 ~/Library/Logs/Alpha Bot/。常见是缺依赖（starlette / uvicorn），装进运行 Alpha Bot 的解释器：${appCmd(m, "pip_install")}（命令里的解释器是此刻运行本服务的那个，从 .app 打开时就是 .app 用的那个）。`],
       ["提示端口被占", "8765 上是别的程序，弹窗会给 lsof 命令。"],
-      ["关窗后服务还在", "升级前起的服务不带 --from-app，关窗不会停它：终端执行一次 make alphabot-stop，之后按新规则走。"],
-      ["想换数据根", "终端执行 /usr/local/bin/python3 -m alphabot.launcher --reset，再双击 .app 重新选。"],
+      ["关窗后服务还在", `升级前起的服务不带 --from-app，关窗不会停它：终端执行一次 ${appCmd(m, "launcher", " --stop")}，之后按新规则走。`],
+      ["想换数据根", `终端执行 ${appCmd(m, "launcher", " --reset")}，再双击 .app 重新选。`],
       ["怎么拿到新版本", ".app 跑的是生产克隆 ~/alpha-hive-prod，每个扫描日扫描前自动更新；关掉 Alpha Bot 再打开即用上。只有 .app 自己的启动壳变了才要重新生成——那时打开 Alpha Bot 会弹一次提醒并给出命令（同一处变化只提醒一次）。"],
       ["换了 Python 或要重新生成 .app", "终端执行 make -C ~/alpha-hive-prod alphabot-app（用生产克隆自己的代码生成；换 Python 就在这条命令后面写 PYTHON=/绝对路径——只认命令行上写的，环境变量里的 PYTHON 会被忽略；相对路径或只写名字会被拒）。"]], "现象", "处理"),
   ]],

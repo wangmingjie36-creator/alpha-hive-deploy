@@ -481,6 +481,18 @@ class TestHelpPage:
                   "eligible_earnings_status", "excluded_underlying_price_sources"):
             assert k in m["prereg"], k
 
+    def test_app_commands_come_from_the_server(self):
+        """「程序类」给人抄的命令（装依赖 / 停服务 / 换数据根）取自 /api/method 的 app.*：进代码目录、用运行本服务的
+        解释器（v0.45.611，607 二次检查 #1）。此前写死 /usr/local/bin/python3、且不 cd——自定义解释器的人装错地方，
+        不在代码目录里敲就 No module named alphabot。写死与否的全仓扫描在 test_alphabot_launcher.py。"""
+        from alphabot import macos_app as MA
+        m = _client(_demo_service()).get("/api/method").json()
+        assert m["app"] == {"launcher": MA.here_command("-m alphabot.launcher"),
+                            "pip_install": MA.here_command("-m pip install -r requirements.txt")}, m.get("app")
+        txt = self.HELP.read_text(encoding="utf-8")
+        for call in ('appCmd(m, "pip_install")', 'appCmd(m, "launcher", " --stop")', 'appCmd(m, "launcher", " --reset")'):
+            assert call in txt, call
+
     def test_contract_count_is_never_labelled_as_zhang(self):
         """「N 张合约」会被读成持仓 / 成交张数（券商 App 里 NVDA 单个到期日就有 10 万张）；页面数的是合约系列个数，
         单位只许写「个」。v0.45.411：用户拿 1276 对照券商 App 的持仓数，以为少了几个数量级。"""

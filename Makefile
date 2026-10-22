@@ -59,6 +59,8 @@ alphabot-demo:
 # 否则用 ALPHABOT_GEN_PY（缺省 /usr/local/bin/python3；测试换它）——PYTHON 还没装好也照样生成、只警告（v0.45.458 的宽容）。
 # 「可执行文件」与 .app 壳里双击时同一判据（macos_app.SHELL_PY_USABLE，守卫逐字核对）。规则只在这里：提示 / 帮助页
 # 只写 PYTHON=X 就都跑得通——v0.45.600 把 ALPHABOT_GEN_PY=X 写进提示文字，帮助页那处就漏了。路径可带空格（全程加引号）
+# ALPHABOT_GEN_PY 只是「缺省 runner」：PYTHON 可用时它就不用，即便也写在命令行上（v0.45.611 写明）。给了 PYTHON 却
+# 退回缺省时打印一行（v0.45.611）：否则缺省也坏时只见报错里的缺省路径，看不出为什么没用自己给的 PYTHON
 # PYTHON 只认**命令行上**给的（$(origin) = command line）：make 会把同名环境变量导入成 make 变量，而 PYTHON 是常见
 # 环境变量（node-gyp 等要求 export PYTHON=python3）——v0.45.456 起它会因「须绝对路径」让推荐入口无故失败（v0.45.458）。
 # 「命令行」含外层 make 的命令行：在 `make X PYTHON=…` 的配方里再调本目标，PYTHON 经 MAKEFLAGS 传下来、origin 也是
@@ -68,6 +70,8 @@ alphabot-app:
 	$(if $(filter environment%,$(origin PYTHON)),$(info 忽略环境变量 PYTHON=$(PYTHON)：.app 用的解释器只认这条命令行上的 PYTHON=/绝对路径))
 	@PY=$(if $(filter command line,$(origin PYTHON)),"$(PYTHON)",""); GEN="$(ALPHABOT_GEN_PY)"; \
 	case "$$PY" in /*) if [ -f "$$PY" ] && [ -x "$$PY" ]; then GEN="$$PY"; fi;; esac; \
+	if [ -n "$$PY" ] && [ "$$GEN" != "$$PY" ]; then \
+	  echo "PYTHON=$$PY 现在不能拿来跑生成器（须是可执行文件的绝对路径）⇒ 生成器改由 $$GEN 跑" >&2; fi; \
 	"$$GEN" -m alphabot.macos_app $(if $(filter command line,$(origin PYTHON)),--python "$(PYTHON)",)
 
 alphabot-stop:

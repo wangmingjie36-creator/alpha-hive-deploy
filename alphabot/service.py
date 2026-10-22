@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 import sell_strike_report as R
 from alphabot import hedge as HG
 from alphabot import howto as HW
+from alphabot import macos_app as MA
 from alphabot import premium as PM
 from alphabot import straddle as SD
 from alphabot import strangle_compare as SC
@@ -302,6 +303,10 @@ class AlphaBotService:
             "hedge": self.hedge_rules(),
             "premium": self.premium_rules(),
             "howto": HW.public_rules(),
+            # 帮助页「程序类」里给人抄的命令：进本代码目录、用运行本服务的解释器（从 .app 打开时就是 .app 记下的那个），
+            # 不写死缺省、不假设人站在代码目录里（v0.45.611）
+            "app": {"launcher": MA.here_command("-m alphabot.launcher"),
+                    "pip_install": MA.here_command("-m pip install -r requirements.txt")},
         })
 
     # ── 财报跨式账本（v0.45.424，只读）

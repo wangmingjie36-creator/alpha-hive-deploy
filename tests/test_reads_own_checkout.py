@@ -145,6 +145,8 @@ LITERAL_TILDE_INPUTS = {
         "报告头说明「~ 值没被采用」（v0.45.488）：假 config 上的字符串，不碰文件系统",
     ("test_data_root_default.py", "TestOneDerivationOfProduction::test_both_guards_land_on_the_same_root"):
         "两个守卫对字面 ~ 落在同一根上（v0.45.498）：HOME 指向 tmp，纯函数不碰本机家目录",
+    ("test_alphabot_launcher.py", "TestHintsNeverHardcodeTheDefaultInterpreter::test_here_command_runs_from_any_directory"):
+        "给人抄的命令在家目录下写成字面 ~/…、由 shell 展开（v0.45.611）：HOME 由 home 夹具指向 tmp，代码目录是 tmp 里的软链",
 }
 
 
