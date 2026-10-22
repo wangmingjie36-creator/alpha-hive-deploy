@@ -96,6 +96,47 @@ class ChatNotSent(ChatError):
     status = 503
 
 
+class ChatRejected(ChatError):
+    """Anthropic 带状态码拒了这次请求（限流 / 过载 / key / 地区 / 请求不合法…）：没开始生成，不计费。"""
+    status = 502
+
+
+def _human_api_error(exc: BaseException, retries: int) -> Optional[ChatError]:
+    """带状态码的 API 错误 ⇒ 给人看的一句话：原因、扣没扣钱、该怎么办（v0.45.623）。此前抽屉里直接是 SDK 原文
+    （`OverloadedError: Error code: 529 - {...}`），看不出扣没扣钱；Clash 没开时的 403 还像是 key 出了问题。
+    不是带状态码的 API 错误 ⇒ None（照原样往上抛）。"""
+    try:
+        import anthropic
+    except ImportError:
+        return None
+    if not isinstance(exc, anthropic.APIStatusError):
+        return None
+    code = exc.status_code
+    body = exc.body if isinstance(getattr(exc, "body", None), dict) else {}
+    err = body.get("error") if isinstance(body.get("error"), dict) else {}
+    kind, said = err.get("type") or "", str(err.get("message") or "")[:200]
+    tried = f"，重试 {retries} 次仍不行" if retries else ""
+    if code == 403 and (kind == "forbidden" or "not allowed" in said.lower()):
+        why = "Anthropic 拒绝了这台机器的请求（403）：多半是没走代理、被按地区拒绝——看看 Clash 开着没有，开着再问"
+    elif code == 403:
+        why = f"这个 key 没有权限做这件事（403 {kind}）"
+    elif code == 401:
+        why = "API key 无效或已失效（401）：Anthropic 不认它"
+    elif code == 429:
+        why = f"被 Anthropic 限流（429）{tried}：过一两分钟再问"
+    elif code == 529 or kind == "overloaded_error":
+        why = f"Claude 那边过载（{code}）{tried}：稍后再问"
+    elif code >= 500:
+        why = f"Anthropic 服务端出错（{code}）{tried}：稍后再问"
+    elif code == 413:
+        why = "这场对话太长，超过了请求上限（413）：点「新对话」再问"
+    elif code == 400:
+        why = f"请求被判为不合法（400）：多半是对话历史出了问题，点「新对话」再问；还不行就把这条报错告诉开发者。原话：{said}"
+    else:
+        why = f"Anthropic 拒绝了这次请求（{code} {kind}）。原话：{said}"
+    return ChatRejected(f"{why}。被拒的请求没开始生成，不收费、没记账。")
+
+
 #: 带状态码、服务端没开始生成（不计费）、可以等一下再试的错误：限流 429、5xx（含过载 529）。v0.45.618 前 max_retries=0
 #: 连它们也不重试了，高峰期一个 529 就让这一问失败（工具循环中途的话，前面的钱已经花了）
 RETRY_STATUS_TRIES = 2
@@ -563,6 +604,9 @@ class ChatEngine:
                                               "请求没发出去，没计费。检查网络后再问") from exc
                         wait = _retry_wait(exc, attempt)
                         if wait is None:
+                            human = _human_api_error(exc, attempt)
+                            if human is not None:
+                                raise human from exc
                             raise
                         # 限流 / 过载：服务端拒了、没计费 ⇒ 等一下再发；预留一直占着（这期间没花钱，不用重新预检）
                         _log.info("对话请求被拒（%s），%.1f 秒后重试", getattr(exc, "status_code", "?"), wait)

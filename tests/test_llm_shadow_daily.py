@@ -87,6 +87,17 @@ class TestPlist:
         assert sh.SPEND_ENV not in env and "ALPHA_HIVE_HOME" not in env
         assert env["PATH"].startswith("/usr/local/bin")        # 内部 spawn 的子 python 也走 3.11
 
+    def test_carries_the_orchestrator_proxy(self, doc):
+        """代理变量写进生成器（v0.45.623）：已装的 plist 10-22 经用户批准手改过，生成器不写，重新生成就把它们无声丢掉。
+        地址与编排器 `PROXY_URL` 的缺省同值——两处各抄一份会漂（编排器是唯一真相，经 tests/_orchestrator 读原文）。"""
+        import re
+        from tests._orchestrator import repo_orchestrator_text
+        m = re.search(r'^PROXY_URL="\$\{ALPHA_HIVE_PROXY:-([^}"]+)\}"', repo_orchestrator_text(), re.M)
+        assert m, "编排器 PROXY_URL 的写法变了：重看这条守卫"
+        env = doc["EnvironmentVariables"]
+        assert env["HTTPS_PROXY"] == env["HTTP_PROXY"] == dly.PROXY_URL == m.group(1)
+        assert {"localhost", "127.0.0.1", "::1"} <= set(env["NO_PROXY"].split(","))     # 回环请求不送去代理
+
     def test_logs_outside_repo(self, doc):
         assert doc["StandardOutPath"] == str(Path(self.LOG_DIR) / "llm_shadow_daily.out.log")
         assert doc["StandardErrorPath"] == str(Path(self.LOG_DIR) / "llm_shadow_daily.err.log")

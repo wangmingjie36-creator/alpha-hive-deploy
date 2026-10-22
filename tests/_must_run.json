@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "commit": "44a3b027a869791ae26aa7ebabeec5602af8f093",
+  "commit": "9a52a4ec5c61fd6ef5dd4a24099d2915eb07030c",
   "reads_all_tests": [
     "tests/test_agent_weight_manager_retired.py",
     "tests/test_bare_env_children_pin_data_root.py",

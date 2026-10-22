@@ -520,7 +520,6 @@ class TestTimeoutIsNotRetried:
         assert sleeps == [3.0] and len(spend_lines(svc)) == 1
 
     def test_status_retries_are_bounded_and_unbooked(self, svc):
-        anthropic = pytest.importorskip("anthropic")
         import httpx
         calls, sleeps = [], []
 
@@ -528,7 +527,7 @@ class TestTimeoutIsNotRetried:
             calls.append(1)
             return httpx.Response(529, json={"type": "error", "error": {"type": "overloaded_error", "message": "busy"}})
         eng = self._engine(svc, handler, sleeps)
-        with pytest.raises(anthropic.APIStatusError):
+        with pytest.raises(C.ChatRejected, match=f"过载（529），重试 {C.RETRY_STATUS_TRIES} 次仍不行.*不收费"):
             eng.send("x")
         assert len(calls) == C.RETRY_STATUS_TRIES + 1 and sleeps == list(C.RETRY_BACKOFF_SEC[:C.RETRY_STATUS_TRIES])
         assert spend_lines(svc) == [] and eng._inflight == pytest.approx(0.0)
@@ -542,9 +541,31 @@ class TestTimeoutIsNotRetried:
                 "type": "invalid_request_error", "message": "bad"}}))))
         sleeps = []
         eng = C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: T0, sleep_fn=sleeps.append)
-        with pytest.raises(anthropic.BadRequestError):
+        with pytest.raises(C.ChatRejected, match="不合法（400）.*原话：bad"):
             eng.send("x")
         assert spend_lines(svc) == [] and sleeps == [], "400 是请求本身错了，重试没用"
+
+    @pytest.mark.parametrize("code, kind, said, must", [
+        (403, "forbidden", "Request not allowed", "Clash"),
+        (403, "permission_error", "no access", "没有权限"),
+        (401, "authentication_error", "invalid x-api-key", "API key 无效"),
+        (429, "rate_limit_error", "slow down", "限流（429），重试 2 次"),
+        (500, "api_error", "oops", "服务端出错（500），重试 2 次"),
+        (413, "request_too_large", "too big", "新对话"),
+        (404, "not_found_error", "model: x", "原话：model: x"),
+    ])
+    def test_rejections_are_said_plainly(self, svc, code, kind, said, must):
+        """带状态码的拒绝说人话（v0.45.623）：原因、扣没扣钱（都不收费）、该怎么办。此前抽屉里是 SDK 原文
+        （`OverloadedError: Error code: 529 - {...}`）；Clash 没开时的 403 看着像 key 出了问题。"""
+        import httpx
+        reply = {"type": "error", "error": {"type": kind, "message": said}}
+        eng = self._engine(svc, lambda r: httpx.Response(code, json=reply), [])
+        with pytest.raises(C.ChatRejected) as ei:
+            eng.send("x")
+        msg = str(ei.value)
+        assert must in msg and msg.endswith("不收费、没记账。") and ei.value.status == 502, msg
+        assert ".anthropic_api_key" not in msg, "CLAUDE.md：不提示创建 / 去找 key 文件"
+        assert spend_lines(svc) == []
 
 
 class TestDrawer:

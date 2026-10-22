@@ -26,6 +26,7 @@
 跑哪份代码：`~/alpha-hive-prod`（生产克隆，不在 Desktop 里，launchd 无 TCC 限制；它由每个扫描日的 production_sync 快进，
 代码随 main 自动更新）。数据根缺省 `$HOME/alpha-hive-data`（`hive_logger.resolve_data_root`），所以 plist 不设
 `ALPHA_HIVE_HOME`。API Key 走 `~/.anthropic_api_key`（0600；launchd 不读 shell 环境）。
+plist 写上代理环境变量（v0.45.623，`PROXY_URL`）：curl_cffi（yfinance）这类不读 macOS 系统代理的客户端也走 Clash。
 
 用法
 ----
@@ -64,6 +65,12 @@ DISABLE_FILENAME = "DISABLED"
 SPEND_ENV = "ALPHA_HIVE_LLM_SHADOW_SPEND"      # 与 llm_shadow_scan.SPEND_ENV 同值（测试钉住）
 PROD_CLONE = "alpha-hive-prod"
 EXIT_SKIPPED = 4
+#: plist 里写上的代理（v0.45.623，用户 10-22 定）。与编排器 `PROXY_URL` 的缺省同值（守卫核对）。Python 的
+#: urllib / requests / httpx 本来就经 macOS 系统代理（`_scproxy`）走它；写成环境变量后，不读系统代理的客户端
+#: （curl_cffi ⇒ yfinance）也走它——此前它们在 launchd 里直连、易被限流（auto-memory environment-facts）。
+#: ⚠️ 与编排器不同，这里**不探活**：Clash 没开时这类请求连不上（Anthropic 那头此时本来也会被按地区拒绝）。
+PROXY_URL = "http://127.0.0.1:7897"
+NO_PROXY = "localhost,127.0.0.1,::1,.local"
 
 ACTION_RUN, ACTION_WAIT, ACTION_SKIP = "run", "wait", "skip"
 
@@ -93,14 +100,16 @@ def decide(state: Dict, waited_sec: float, *, disabled: bool) -> Tuple[str, str]
 
 
 def render_plist(*, python: str, script: str, log_dir: str) -> bytes:
-    """launchd plist（XML）。`RunAtLoad=False`：装上 / 重启登录不会立刻花钱；不带 SPEND / 数据根环境变量。"""
+    """launchd plist（XML）。`RunAtLoad=False`：装上 / 重启登录不会立刻花钱；不带 SPEND / 数据根环境变量。
+    带代理变量（v0.45.623）：10-22 用户批准先手改了已装的 plist，这里同步写上，否则重新生成会把它们无声丢掉。"""
     doc = {
         "Label": LABEL,
         "ProgramArguments": [python, script],
         "StartCalendarInterval": [
             {"Weekday": d, "Hour": TRIGGER_HOUR, "Minute": TRIGGER_MINUTE} for d in WEEKDAYS],
         "RunAtLoad": False,
-        "EnvironmentVariables": {"PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"},
+        "EnvironmentVariables": {"PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                                 "HTTPS_PROXY": PROXY_URL, "HTTP_PROXY": PROXY_URL, "NO_PROXY": NO_PROXY},
         "WorkingDirectory": str(Path(script).parent),
         "StandardOutPath": str(Path(log_dir) / "llm_shadow_daily.out.log"),
         "StandardErrorPath": str(Path(log_dir) / "llm_shadow_daily.err.log"),
