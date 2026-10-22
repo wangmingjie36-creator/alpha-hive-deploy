@@ -1699,6 +1699,42 @@ _apply_step_interp 15 step15_backup_continuity "${STEP15_RC}" "${STEP15_DURATION
     --json "${BACKUP_CONTINUITY_JSON}" --run-start "${STEP15_START}" --timeout-seconds "${STEP15_TIMEOUT}"
 
 
+# ================================================================
+# Step 16：对冲决定补跑（v0.45.629）
+# ----------------------------------------------------------------
+# 2026-10-22 14:38 扫描内那次组合 Greeks 取 SPY 收盘时，CBOE 连接被断（SSL EOF，三次重试几秒内耗尽），
+# Twelve Data 当晚只有临时值被丢 ⇒ 当天的对冲决定整天做不出来，直到人发现、手动补跑。
+# 瞬断几分钟后通常已恢复：这一步放在所有体检之后，只在审计文件显示「决定做不出来」时才让
+# portfolio_greeks.py 再跑一轮（--retry-undecided；决定已做出则零网络退出，同日重跑幂等）。
+#
+# 刻意**不动 OVERALL_STATUS**、不改 steps_result（同 Step 10/12/14 的先例）：补跑是对第一次的补救，
+# 第一次失败本身已经在 Step 6 的告警里（P2）。本步只回读当天审计文件，把补跑结局写进日志。
+# ================================================================
+log "INFO" ""
+log "INFO" "【Step 16】对冲决定补跑 - 启动"
+
+PGR_AUDIT="${DATA_DIR}/hedge_state/greeks_${DATE_STR}.json"
+run_step --timeout 1500 "${PROJECT_DIR}/portfolio_greeks.py" \
+         --retry-undecided --date "${DATE_STR}" >> "${LOGFILE}" 2>&1
+STEP16_RC=$?
+# 回读当天审计文件（Python 每次跑完都按日期重写它）：退出码 0 ≠ 决定做出来了
+PGR_WHY=""
+PGR_AUDIT_OK=0
+if [ -f "${PGR_AUDIT}" ] && jq -e '.price_check' "${PGR_AUDIT}" >/dev/null 2>&1; then
+    PGR_AUDIT_OK=1
+    PGR_WHY=$(jq -r '.price_check.hedge_undecided // empty' "${PGR_AUDIT}" 2>/dev/null)
+fi
+if [ "${PGR_AUDIT_OK}" -ne 1 ]; then
+    log "WARN" "⚠️ Step 16：当天审计文件缺失或读不出来（rc=${STEP16_RC}）——对冲覆盖层今天没有可核的结果：${PGR_AUDIT}"
+elif [ -n "${PGR_WHY}" ]; then
+    log "WARN" "⚠️ Step 16：对冲决定仍做不出来（rc=${STEP16_RC}）：${PGR_WHY}"
+elif [ "${STEP16_RC}" -ne 0 ]; then
+    log "WARN" "⚠️ Step 16：补跑退出码 ${STEP16_RC}，但审计文件显示对冲决定已做出"
+else
+    log "INFO" "✅ Step 16：对冲决定已做出（无需补跑，或补跑后已恢复）"
+fi
+
+
 log "INFO" ""
 log "INFO" "【Final】写入系统状态"
 

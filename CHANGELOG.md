@@ -5,7 +5,37 @@
 
 ---
 
-## [0.45.629] — 2026-10-22 — 占位（进行中：SPY / 标的同日收盘价取不到的兜底——第三个同日收盘来源（Finnhub，凭时间戳认证）+ 当日晚些时候对冲补跑入口）
+## [0.45.629] — 2026-10-22 — Fixed：标的同日收盘价取不到时的兜底——Finnhub 作第三个同日收盘来源（时间戳自证）+ 编排器 Step 16 对「对冲决定做不出来」的那天晚些时候补跑
+
+2026-10-22 对冲页又报「数据不全，对冲决定做不出来（1 price missing，SPY 价属于 10-21）」。与当天早上修的 v0.45.609（bid=0 腿）不是同一个成因。
+
+### 事故
+- 14:38 PDT（17:38 ET，收盘后）扫描内组合 Greeks 取 SPY 收盘：CBOE `EOF occurred in violation of protocol`（三次重试几秒内耗尽）；Twelve Data 当日那根按设计被丢（当晚是临时值，v0.45.438）⇒ 只剩 10-21 的价 ⇒ SPY 判陈旧 ⇒ NAV 缺、`hedge_undecided`，当天不对冲。
+- 补跑那一刻 CBOE 已恢复（SPY 763.96）。已手动 `portfolio_greeks.py --date 2026-10-22` 补跑：成交 -101 SPY @ 763.96（β·Δ +67.5% NAV 出带，持仓 +66 → -35）；10-21 也是 unknown 没对冲，敞口一直累积到今天才一次拉回。
+
+### Added
+- **`portfolio_greeks._finnhub_close_mark`**：第三个同日收盘来源。`_default_mark` 取价顺序 CBOE → Twelve Data 过美东午夜的那根 → **Finnhub `/quote`** → 判陈旧。Finnhub 的 `c` 当且仅当自证是那一场的收盘才认：该场已收盘、`t` 的美东日期 = 那一场、`t` 落在收盘时刻前 60s ~ 后 120s（盘后成交会把 `t` 推出窗口，不认）；`source="finnhub_close"`、`at_close=True`，降级到它时 WARNING。CBOE 给盘中陈旧文件时它也能顶上。2026-10-22 实测 10 只票 `c` 与 CBOE 官方收盘逐分相等、`t` 全是 16:00:00——**只有一个交易日的样本**。
+- **`portfolio_greeks.retry_if_undecided` / `--retry-undecided [--attempts N --interval S]`**：只在审计文件 `price_check.hedge_undecided` 为真时补跑（缺省 2 次、隔 180s；决定已做出 ⇒ 零网络退出）。outcome：`not_needed` / `no_audit` / `session_open` / `recovered` / `still_undecided` / `error`；退出码 0 / 0 / 0 / 0 / 1 / 3。**审计文件缺失 ⇒ `no_audit` 不补跑**：那是整次扫描没跑出结果，账本今天没更新，在旧账本上补一笔对冲会占掉「今天已成交」，之后完整补跑反而不再对冲。
+- **编排器 Step 16**（`scripts/alpha-hive-orchestrator.sh`，Step 15 之后）：调上面的入口，回读当天 `greeks_<日期>.json`（`PGR_AUDIT`）把结局写日志；不动 OVERALL_STATUS、不改 steps_result（同 Step 10/12/14）。登记在 `tests/test_orchestrator_step_postconditions.py::STEP_OUTPUTS`（READ_BACK）。
+- `tests/test_portfolio_greeks_finnhub_close.py`（43 条）：认证条件逐条配反例（窗口三边界、别的场次、盘中、半日市、畸形报价、取数抛异常、连字符写法）、`_default_mark` 链里的位置（含 10-22 整条复现：CBOE 取不到 ⇒ 现在能成交且成交记录过 `load_history` 放行闸；对照：Finnhub 也没有 ⇒ 仍是老样子）、补跑各 outcome / CLI 退出码。
+
+### Fixed
+- **二次检查查出的三处**：① `alphabot/static/pages/hedge.js` 的价格来源标签缺 `finnhub_close`（会显示裸字符串），`tests/test_alphabot_hedge.py::test_price_source_labels_match_the_writer` 改成「写入方每个字面来源名都得有标签」；② 上面 `no_audit` 那条；③ `--interval` 给负数会让 sleep 抛异常，加下限 0。
+
+### Changed
+- `tests/test_portfolio_greeks_price_session.py::world` 夹具补 Finnhub 桩（`w.finnhub`，缺省取不到）——否则离线闸会拦下 `_default_mark` 里的真外网调用。
+- `tests/test_data_backup.py::_STEP15_END`：Step 15 片段的终点从 `【Final】` 改成 `【Step 16】`（Step 16 紧接其后，原来被一并抽进 Step 15 的沙箱里，9 条派发测试因 `DATA_DIR` 未定义而红）。
+- `tests/_must_run.json`：并入新测试文件对 `test_portfolio_greeks_price_session.py` 的 import 读（`select_tests.py --update`，CI 漂移检查否则退出码 4）。
+- 模块 docstring「已知局限」两处改写。
+
+### 验证
+- 变异检验 22 处全红（窗口三条边、会话已收盘闸、连字符映射、异常静默、取价链位置 / 顺序、补跑各分支、CLI 退出码、`no_audit`、interval 下限、JS 标签；多余的布尔判断那一处是等价变异，已删除该判断）。
+- 整套 11818 passed；9 条 Step 15 派发测试红，修后 `test_data_backup.py` 150 条、编排器相关 892 条重跑通过；clockshift +7 / +45 天新红 0；选测漂移检查通过。
+
+### 生效时间与未做
+- Finnhub 兜底是 Python，合入后**下一个扫描日**起生效；Step 16 要等新编排器部署后的**第二个**扫描日才执行（部署那一轮跑的仍是旧编排器）。
+- 未做：`cboe_options` 自己的重试仍是几秒内三次，没拉长退避。决定长期做不出来（如 β 连续缺）的日子，Step 16 每天会多花约 10 分钟、多拉一轮 Twelve Data 日线，未限制。
+
 
 ## [0.45.628] — 2026-10-22 — Added：`llm_service.call_json` 解析失败时记 stop_reason、内容块类型和回复前 300 字符（此前只记长度）
 

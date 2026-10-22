@@ -12,7 +12,7 @@ const BAND = { inside: "带内", above: "出带（偏多）", below: "出带（�
 const ACTION = { hold: "不动", sell_spy: "卖出 SPY", buy_spy: "买入 SPY" };
 const SIDE_SHORT = { sell_spy: "卖出", buy_spy: "买入" };
 // 来源键取自 portfolio_greeks._default_mark：cboe_close / cboe_intraday / twelve_data_bar / <src>_bar（v0.45.459 二次检查：初版写成 twelve_data_close，从不匹配）
-const PX_SRC = { cboe_close: "CBOE 收盘", cboe_intraday: "CBOE 盘中", twelve_data_bar: "Twelve Data 日线收盘", demo: "演示数据" };
+const PX_SRC = { cboe_close: "CBOE 收盘", cboe_intraday: "CBOE 盘中", twelve_data_bar: "Twelve Data 日线收盘", finnhub_close: "Finnhub 收盘（CBOE 取不到时的第三来源）", demo: "演示数据" };
 const pxSrc = (s) => PX_SRC[s] || (String(s || "").endsWith("_bar") ? `${String(s).slice(0, -4)} 日线收盘` : (s || "—"));
 const REASON = {
   no_provenance: "记录不自证定价场次（v0.45.423 之前的格式）", not_its_session_close: "证明说价不是那一场的收盘",

@@ -120,6 +120,12 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(co, "_fetch_cboe_payload", fetch_payload)
     monkeypatch.setattr(co, "_SNAPSHOT_PROVIDER", None)
 
+    # 第三来源 Finnhub（v0.45.629）：缺省「取不到」（None），测试要它给价就往 w.finnhub 里放
+    # {ticker: {"last": 价, "ts": unix 秒}}。桩在 fred_macro._finnhub_quote 这一层，认证逻辑用真的。
+    import fred_macro
+    w.finnhub = {}
+    monkeypatch.setattr(fred_macro, "_finnhub_quote", lambda sym: w.finnhub.get(sym))
+
     def fetch_rows(ticker, days, end_date=None):
         rows = [dict(r, close=w.overrides.get((ticker, r["date"]), r["close"]))
                 for r in _series(ticker, w.bars_end) if end_date is None or r["date"] <= end_date]

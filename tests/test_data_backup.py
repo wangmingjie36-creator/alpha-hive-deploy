@@ -1717,7 +1717,7 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
 
 
 _STEP15_START = 'log "INFO" "【Step 15】'
-_STEP15_END = 'log "INFO" "【Final】写入系统状态"'
+_STEP15_END = 'log "INFO" "【Step 16】'     # Step 16（v0.45.629）紧接在 Step 15 之后；这里只抽 Step 15 自己
 
 
 class TestOrchestratorStep15Dispatch:

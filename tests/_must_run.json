@@ -28,6 +28,7 @@
     "tests/test_orchestrator_step_interp.py": ["tests/test_orchestrator_steps.py"],
     "tests/test_persistent_writes_have_readers.py": ["tests/test_ledger_writes_go_through_ledger_io.py"],
     "tests/test_portfolio_greeks_delta_hedge.py": ["tests/test_portfolio_greeks.py"],
+    "tests/test_portfolio_greeks_finnhub_close.py": ["tests/test_portfolio_greeks_price_session.py"],
     "tests/test_replay_ohlc_pit.py": ["tests/test_replay_ohlc_store.py", "tests/test_replay_ohlc_window.py"],
     "tests/test_sell_strike_integration.py": ["tests/test_sell_strike_ledger.py"]
   },

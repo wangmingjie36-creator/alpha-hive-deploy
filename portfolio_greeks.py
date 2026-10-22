@@ -63,7 +63,8 @@ v0.45.103~422 用 Twelve Data 日线「≤ as_of、5 个日历日内最后一根
 所以收盘后同日跑，as_of 的官方收盘**只有 CBOE 给得出**。）本模块这边：
 - **期权行**的 S 取自与该合约报价**同一份** CBOE payload（`cboe_options.quote_contracts_with_underlying`）。
 - **股票行 / SPY** 取 `_default_mark`：CBOE 官方收盘（last_trade 贴收盘）或盘中实时价；不行再要
-  Twelve Data 上日期**恰为** as_of 的那根（已收完才算）；都不行就是**陈旧**。
+  Twelve Data 上日期**恰为** as_of 的那根（已收完才算）；再不行要 Finnhub `/quote`（v0.45.629，时间戳钉在收盘时刻
+  才算，见 `_finnhub_close_mark`）；都不行就是**陈旧**。
 - 陈旧价不进 $Delta / 净值 / 成交：行标 `price_stale`（看到的价留在 `stale_price` 供审计）、计入
   `coverage.n_price_stale` → partial → band unknown → 不对冲；ERROR 日志、日报小节、审计文件 `price_check`、
   `scan_timing.counters()["portfolio_greeks"]` → status.json → alert_manager 都会响。
@@ -88,8 +89,11 @@ v0.45.103~422 用 Twelve Data 日线「≤ as_of、5 个日历日内最后一根
   该行判陈旧、当天不对冲，不退到 yfinance——本模块不碰 yfinance 限流）。
 - β 的 60 日 OLS 仍用 Twelve Data 日线：同日跑窗口止于前一交易日（当日那根当晚是临时值、被丢；少最后一个收益，
   对 β 无实质影响）；过了美东午夜补跑才含 as_of 那根。
-- CBOE 文件是盘中陈旧的那几天（`cboe_options.close_verdict` 判 STALE_INTRADAY），股票行收盘后同日跑**没有**第二个 as_of 官方收盘来源
-  ⇒ 判陈旧、当天不对冲、P2。这是诚实的代价：Twelve Data 当晚只有临时值，旧实现在这里静默用的是前一交易日。
+- CBOE 取不到 / 文件是盘中陈旧的那几天（`cboe_options.close_verdict` 判 STALE_INTRADAY），股票行收盘后同日跑 v0.45.629 前
+  **没有**第二个 as_of 官方收盘来源 ⇒ 判陈旧、当天不对冲、P2（2026-10-22 14:38 SPY 的 CBOE 拉取 SSL 断连三次重试耗尽，
+  Twelve Data 当晚只有临时值被丢，对冲决定整天做不出来）。v0.45.629 起第三来源 Finnhub 在它的时间戳钉在收盘时刻时认作
+  官方收盘（10-22 实测 10 只 × 与 CBOE 收盘逐分相等，**只有一个交易日的样本**）；它也取不到才走回老路：判陈旧、不对冲。
+  另外 `retry_if_undecided`（`--retry-undecided`，编排器 Step 16）在当日晚些时候对「对冲决定做不出来」的那天再跑一次。
 - 压力网格里期权的 (0,0) 格不是 0：BS 价 − 市场 mid 的模型基差按合约单列在 `bs_vs_mid_gap`，
   不强行归零——那是模型诊断，不是 P&L。
 """
@@ -376,6 +380,53 @@ def _session_closed(day: str, now_et: Optional[datetime] = None) -> bool:
         return False
 
 
+# Finnhub /quote 的 `t` 认证窗口（相对收盘时刻，秒）。收盘后它把 `t` 钉在收盘时刻（2026-10-22 实测 10 只全是 16:00:00，
+# `c` 与 CBOE 官方收盘逐分相等）；盘后成交会把 `t` 推到收盘之后——超出窗口 ⇒ `c` 可能是盘后价，不认。
+_FINNHUB_CLOSE_WINDOW_S = (-60, 120)
+
+
+def _finnhub_close_mark(ticker: str, want: str, quote_fn: Optional[Callable] = None,
+                        now_et: Optional[datetime] = None) -> Optional[Dict]:
+    """第三个同日收盘来源（v0.45.629）：Finnhub `/quote` 的 `c`，当且仅当它**自证是 `want` 那一场的收盘**。
+
+    自证 = ① `want` 那一场按交易所钟表已收盘；② `t` 的美东日期 == `want`，且落在收盘时刻的
+    `_FINNHUB_CLOSE_WINDOW_S` 窗口里。任一不满足 ⇒ None（不猜）。只给**收盘**，不给盘中价
+    （盘中 CBOE 自己给实时价）。Finnhub 只给最新报价、给不了历史某日，所以补跑历史日时 ② 必然不满足——
+    那条路径仍归 Twelve Data 过了美东午夜的那根。
+
+    `quote_fn` 缺省 `fred_macro._finnhub_quote`（走全局 HTTPS 闸门，key 取不到 / 失败 ⇒ None，绝不返回 0.0）。
+    BRK-B 一类带连字符的写成点号（Finnhub 的写法）。返回形状同 `_default_mark`，`source="finnhub_close"`。"""
+    if not _session_closed(want, now_et):
+        return None
+    try:
+        if quote_fn is None:
+            from fred_macro import _finnhub_quote as quote_fn
+        q = quote_fn(str(ticker).replace("-", "."))
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("[%s] Finnhub 收盘价获取失败: %s", ticker, exc)
+        return None
+    if not isinstance(q, dict):
+        return None
+    px, ts = _pos(q.get("last")), q.get("ts")
+    if px is None or not isinstance(ts, (int, float)) or ts <= 0:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        from is_trading_day import session_close_et
+        d = datetime.strptime(want, "%Y-%m-%d").date()
+        stamp = datetime.fromtimestamp(ts, ZoneInfo(_ET_TZ_NAME)).replace(tzinfo=None)
+        close_dt = datetime.combine(d, session_close_et(d))
+    except Exception:  # noqa: BLE001 - 判不了就不认
+        _log.debug("Finnhub 时间戳无法与收盘时刻比对", exc_info=True)
+        return None
+    lo, hi = _FINNHUB_CLOSE_WINDOW_S
+    if not (close_dt + timedelta(seconds=lo) <= stamp <= close_dt + timedelta(seconds=hi)):
+        return None
+    return {"price": px, "source": "finnhub_close", "session": want, "at_close": True, "live": False,
+            "last_trade_time": stamp.isoformat()}
+
+
 def _default_mark(ticker: str, as_of: str) -> Dict:
     """标的在 as_of 那一场的价，**自报场次**。默认的 `closes_fn`。
 
@@ -391,6 +442,8 @@ def _default_mark(ticker: str, as_of: str) -> Dict:
          **过了美东午夜**才跑的补跑 / 回填里走得到——那时 CBOE 场次已翻页，靠的就是它；收盘后同日跑走不到②，
          CBOE 拿不到 / 文件是盘中陈旧的那几只判陈旧（③）。本地价格索引不算（`src` 不是 twelve_data：
          快照价 / price_at_predict 分不清盘中还是收盘）。
+      ②′ Finnhub `/quote`（v0.45.629，`_finnhub_close_mark`）：收盘后同日跑里 ② 走不到，CBOE 又取不到时（10-22 SPY
+         SSL 断连）它是唯一的同日来源；时间戳钉在收盘时刻才认。CBOE 给了盘中陈旧文件时它也能顶上。
       ③ 都不是 → 返回看到的最好那个，带它**真实的**场次，由 `_resolve_mark` 判陈旧、标红。
 
     日线**照旧先取**，哪怕①用不上它：`_default_beta` 靠 `_bars_in_memory` 判「重算 β 要不要网络」，
@@ -412,6 +465,11 @@ def _default_mark(ticker: str, as_of: str) -> Dict:
     if bar is not None and bar.get("src") == "twelve_data" and _session_closed(want):
         return {"price": bar["close"], "source": "twelve_data_bar", "session": want,
                 "at_close": True, "live": False}
+    fh = _finnhub_close_mark(ticker, want)
+    if fh is not None:
+        _log.warning("[%s] CBOE 没给出 %s 的官方收盘（%s），改用 Finnhub 收盘价 %.2f（时间戳 %s，贴着收盘）",
+                     ticker, want, (cboe or {}).get("source") or "取数失败", fh["price"], fh["last_trade_time"])
+        return fh
     if cboe and _pos(cboe.get("price")) is not None:
         return cboe                                    # 场次不对 / 不是收盘：原样交出去判陈旧
     if bars:
@@ -2228,14 +2286,88 @@ def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
 # CLI
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _undecided_reason(as_of: str) -> Optional[str]:
+    """`as_of` 那天对冲决定是否「做不出来」→ 原因；做得出来 ⇒ None。读 `run_for_date` 写的审计文件
+    （`price_check.hedge_undecided`，与告警 / 日报同一份）；审计文件不在 / 读不出来 ⇒ 也算（覆盖层今天没跑出结果）。"""
+    audit = _load_audit(as_of)
+    if not isinstance(audit, dict):
+        return "审计文件缺失或读不出来（覆盖层今天没跑出结果）"
+    chk = audit.get("price_check")
+    if not isinstance(chk, dict):
+        return "审计文件没有 price_check（版本过旧或写入不完整）"
+    why = chk.get("hedge_undecided")
+    return str(why) if why else None
+
+
+def retry_if_undecided(as_of: str, *, attempts: int = 2, interval_s: float = 180.0,
+                       run: Optional[Callable] = None, sleep: Optional[Callable] = None) -> Dict:
+    """当日晚些时候对「对冲决定做不出来」的那天再跑一次（v0.45.629，编排器 Step 16 调它）。
+
+    起因：2026-10-22 14:38 扫描内那次取 SPY 收盘时 CBOE 连接被断（SSL EOF，三次重试在几秒内耗尽），当天的
+    对冲决定整天做不出来，直到人发现、手动补跑。瞬断几分钟后通常已恢复，所以隔一会儿再来一次。
+
+    不需要 ⇒ 不动：审计文件显示决定已做出（含「决定不对冲」）⇒ `not_needed`，零网络；`as_of` 那一场还没收盘 ⇒
+    `session_open`（现在补跑也拿不到官方收盘）；**审计文件不在 / 读不出来 ⇒ `no_audit`、不补跑**：那说明第一次根本没跑出结果
+    （多半是整次扫描失败，账本今天没更新），这时在旧账本上补一笔对冲会占掉「今天已成交」，之后完整补跑反而不再对冲。需要 ⇒ 最多 `attempts` 次 `run_for_date`（每次之间隔 `interval_s`），
+    每次后重读审计文件判。同日重跑幂等（成交 / 净值 / 审计都按日期去重，今天已成交过不再成交），所以补跑是安全的。
+
+    返回 `{"as_of", "outcome", "reason_before", "reason_after", "attempts_made", "errors"}`；
+    outcome ∈ not_needed / no_audit / session_open / recovered / still_undecided / error（一次都没跑成功且全是异常）。"""
+    run = run or run_for_date
+    if sleep is None:
+        import time as _time
+        sleep = _time.sleep
+    out = {"as_of": as_of, "outcome": "not_needed", "reason_before": None, "reason_after": None,
+           "attempts_made": 0, "errors": []}
+    if _load_audit(as_of) is None:
+        out["outcome"] = "no_audit"
+        return out
+    before = _undecided_reason(as_of)
+    if before is None:
+        return out
+    out["reason_before"] = out["reason_after"] = before
+    if not _session_closed(_expected_session(as_of)):
+        out["outcome"] = "session_open"
+        return out
+    ran = 0
+    for i in range(max(1, int(attempts))):
+        if i:
+            sleep(max(0.0, float(interval_s)))
+        out["attempts_made"] = i + 1
+        try:
+            run(as_of)
+            ran += 1
+        except Exception as exc:  # noqa: BLE001 - 记进返回值与日志，下一次再试
+            out["errors"].append(f"{type(exc).__name__}: {exc}"[:300])
+            _log.error("[PortfolioGreeks] %s 补跑第 %d 次异常：%s", as_of, i + 1, exc)
+            continue
+        out["reason_after"] = _undecided_reason(as_of)
+        if out["reason_after"] is None:
+            out["outcome"] = "recovered"
+            return out
+    out["outcome"] = "still_undecided" if ran else "error"
+    return out
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     from hive_logger import pdt_today
     ap = argparse.ArgumentParser(description="组合 Greeks 聚合 + β·Delta 带状对冲（纸面 SPY 覆盖）")
     ap.add_argument("--date", default=None, help="业务日 YYYY-MM-DD（默认 PDT 今天）")
     ap.add_argument("--dry-run", action="store_true", help="只算不写账本（β 缓存除外）")
     ap.add_argument("--json", action="store_true", help="输出完整 JSON（不含逐行）")
+    ap.add_argument("--retry-undecided", action="store_true",
+                    help="仅当 --date 当天对冲决定做不出来时补跑（编排器 Step 16；决定已做出则零网络退出）。"
+                         "退出码：0 不需要 / 已恢复，1 补跑后仍做不出来，3 无法判定（审计文件缺失 / 补跑全部异常）")
+    ap.add_argument("--attempts", type=int, default=2, help="--retry-undecided 最多补跑几次（默认 2）")
+    ap.add_argument("--interval", type=float, default=180.0, help="--retry-undecided 两次之间隔几秒（默认 180）")
     args = ap.parse_args(argv)
     as_of = args.date or pdt_today()
+    if args.retry_undecided:
+        if args.dry_run:
+            ap.error("--retry-undecided 要写账本，不能与 --dry-run 同用")
+        res = retry_if_undecided(as_of, attempts=args.attempts, interval_s=args.interval)
+        print(json.dumps(res, ensure_ascii=False))
+        return {"not_needed": 0, "session_open": 0, "recovered": 0, "still_undecided": 1}.get(res["outcome"], 3)  # no_audit / error ⇒ 3
     res = run_for_date(as_of, execute=not args.dry_run)
     if args.json:
         out = {k: v for k, v in res.items() if k != "rows"}
