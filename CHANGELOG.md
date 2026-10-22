@@ -101,7 +101,8 @@
 - 新守卫 7 passed；ruff 无告警。正对照：改前的 `requirements.txt` 喂给它 ⇒ 19 条全报「没钉死」；把 pandas / starlette 改成 CI 原来的版本 ⇒ 两条都报漂移。
 - 照新文件建的干净 venv（不带用户 site，同 CI；含 pywebview）：`pip check` 无冲突；整套（`-m "not integration and not network"`，开跑前无并发整套）
   **11599 通过 / 0 失败 / 0 跳过 / 2 xfail，650 s**。
-- CI：推送后核对，结果补在本条末尾。
+- CI（`af16bb72` 之后第一轮跑完的是 `52869d7f`）：`tests` 工作流 run 39825990514 **success**——CI 装的正是钉的版本（pandas 3.0.1 / numpy 2.4.2 / yfinance 1.2.0 / starlette 0.52.1 / mcp 1.26.0 …，plotly / seaborn / schedule / pywebview 没装），**11591 passed / 0 failed** / 19 skipped / 2 xfailed；新守卫在 Linux 上 7 条全过。CI 第一次换到 pandas 3 / numpy 2 / yfinance 1.2，没有冒出 Linux 专属的新红。
+  `clockshift` run 39825990664：三个 job 的真实钟基线都是 11591 passed / 0 failed（v0.45.601 修掉的三条不再出现在「基线已红」里），拨钟阶段跑到一半被后续推送取消 ⇒ 拨钟结论（含 v0.45.601 第 4 条）仍待 2026-10-23 14:00 UTC 的定时运行。
 
 ### 遗留
 - 传递依赖没钉：CI 与生产在传递依赖上仍可能有小版本差（「本机全过、CI 红」时先查这个）。要连传递依赖一起锁，得另做一份 lock 文件。
