@@ -387,6 +387,7 @@
   **11599 通过 / 0 失败 / 0 跳过 / 2 xfail，650 s**。
 - CI（`af16bb72` 之后第一轮跑完的是 `52869d7f`）：`tests` 工作流 run 39825990514 **success**——CI 装的正是钉的版本（pandas 3.0.1 / numpy 2.4.2 / yfinance 1.2.0 / starlette 0.52.1 / mcp 1.26.0 …，plotly / seaborn / schedule / pywebview 没装），**11591 passed / 0 failed** / 19 skipped / 2 xfailed；新守卫在 Linux 上 7 条全过。CI 第一次换到 pandas 3 / numpy 2 / yfinance 1.2，没有冒出 Linux 专属的新红。
   `clockshift` run 39825990664：三个 job 的真实钟基线都是 11591 passed / 0 failed（v0.45.601 修掉的三条不再出现在「基线已红」里），拨钟阶段跑到一半被后续推送取消 ⇒ 拨钟结论（含 v0.45.601 第 4 条）仍待 2026-10-23 14:00 UTC 的定时运行。
+  **定时 clockshift 核实（同日）**：run 39830616670（定时 cron 14:00 UTC、GitHub 实际 18:21 UTC 才触发；提交 `7e9ea352`，含 v0.45.601 与 v0.45.610）——三个 job 的真实钟基线 11594 passed、**已红 0 条**；+7 / +45 天**新红 0 条**（Step 3 后置条件那条不再红）；+400 天只有 `TestCoverageHorizon`（设计内定期红）。
 
 ### 遗留
 - 传递依赖没钉：CI 与生产在传递依赖上仍可能有小版本差（「本机全过、CI 红」时先查这个）。要连传递依赖一起锁，得另做一份 lock 文件。
@@ -629,6 +630,7 @@
 - 二次检查（同日）：上游在本版开工后只改了 CHANGELOG（指纹单元文件都没动，rebase 后 `e512d997` 仍成立）；CI 日志核实装的就是 pandas 2.3.3 / numpy 1.26.4；生产与 CI 都没装 bottleneck（实测）；pandas 2.3.3 下显式 `fill_method=None` 不发 FutureWarning；venv 里四处修复相关 198 条全过，改前的 5_5 测试文件在 venv（真没装 anthropic）里原样复现 CI 报错。更正初稿一处：「148 份含 NaN」原挂在补跑组上，按组重跑后为实时 108 + 补跑 40。
 - CI（`75777e06`）：`tests` 工作流 run 39806014054 **success**——四条在 Linux 上全部 PASSED（写沙箱那条此前只在 macOS 上模拟过 Linux，这次是真机），整轮 11480 passed / 0 failed / 19 skipped / 2 xfailed。main 上 `tests` 自此前连续 40 多轮失败后首次全绿。
   `clockshift` 两轮包含本提交的 push 运行（39806014040、39807773820）都在基线阶段被后续推送取消（push 运行的并发组 `cancel-in-progress`），还没有 CI 上的拨钟结论；本机审计见上。下一次不被推送取消的是 2026-10-23 14:00 UTC 的定时运行（并发组按事件区分）。
+  **定时 clockshift 核实（同日）**：run 39830616670（定时 cron 14:00 UTC、GitHub 实际 18:21 UTC 才触发；提交 `7e9ea352`，含 v0.45.601 与 v0.45.610）——三个 job 的真实钟基线 11594 passed、**已红 0 条**；+7 / +45 天**新红 0 条**（Step 3 后置条件那条不再红）；+400 天只有 `TestCoverageHorizon`（设计内定期红）。
   旁注：main 推送频繁的日子，push 触发的 clockshift 基本跑不完（本次连续 6 轮 cancelled），拨钟审计实际只靠每日定时那一轮。
 
 ### 遗留（未修）
