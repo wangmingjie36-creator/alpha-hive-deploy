@@ -2,6 +2,7 @@
 
 import json
 import math
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -285,16 +286,20 @@ class TestExits:
         assert len(r["positions"]) == 1 and r["positions"][0]["stale_days"] == 21   # 09-03 → 09-24
         _state_files_finite()
 
-    def test_expiry_buffer_exit(self):
-        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap", earnings="2026-10-01")])
+    def test_expiry_buffer_exit(self, monkeypatch):
+        # v0.45.602：财报日贴着到期日的信号入口已拒（见 TestEntryExpiryBufferGate），不能再靠它屏蔽 post_event——
+        # 显式关掉 exit_after_event，单独验证到期强平这一条。
+        monkeypatch.setitem(opl.CONFIG, "exit_after_event", False)
+        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])
         r = opl.run_for_date("2026-09-29", quotes_fn=_quotes_fn({CALL: _q(0.9, 1.1), PUT: _q(0.9, 1.1)}), signals=[])
         assert len(r["positions"]) == 1                     # 3 天：不动
         r = opl.run_for_date("2026-09-30", quotes_fn=_quotes_fn({CALL: _q(0.9, 1.1), PUT: _q(0.9, 1.1)}), signals=[])
         assert r["positions"] == [] and r["closed_today"][0]["exit_reason"] == "expiry_buffer"
         assert r["closed_today"][0]["exit_premium"] == pytest.approx(1.8)
 
-    def test_expired_without_quotes_settles_intrinsic_immediately(self):
-        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap", earnings="2026-10-01")])
+    def test_expired_without_quotes_settles_intrinsic_immediately(self, monkeypatch):
+        monkeypatch.setitem(opl.CONFIG, "exit_after_event", False)   # 同上：不靠贴着到期日的财报日屏蔽 post_event
+        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])
         r = opl.run_for_date("2026-10-02", quotes_fn=_none_quotes, signals=[], closes_fn=lambda tk, d: 95.0)
         t = r["closed_today"][0]
         assert t["mark_source"] == "intrinsic" and t["exit_premium"] == pytest.approx(5.0)
@@ -604,3 +609,49 @@ class TestQuoteHeld:
         monkeypatch.setattr(co, "_SNAPSHOT_PROVIDER", lambda tk: {})
         monkeypatch.setattr(co, "_fetch_cboe_payload", lambda *a, **k: pytest.fail("快照模式不该取数"))
         assert co.quote_held("XYZ", [CALL])["reason"] == "snapshot_mode"
+
+
+class TestEntryExpiryBufferGate:
+    """v0.45.602：财报日当晚的扫描就触发 expiry_buffer 强平（`as_of > earnings_date` 的 post_event 还没到），
+    这种单在事件之前被平、只剩时间损耗（TSLA 2026-10-21 / 到期 10-23 的实例）⇒ 账本入口拒开。
+    信号的 `eligible` 不动（GEX 预注册检验的样本定义，事件照样量得到实际波动）。"""
+
+    def _opened(self, earnings):
+        r = opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap", earnings=earnings)])
+        return r
+
+    def test_earnings_on_the_buffer_edge_is_refused(self):
+        buf = opl.CONFIG["expiry_buffer_days"]
+        edge = (datetime.strptime(EXPIRY, "%Y-%m-%d") - timedelta(days=buf)).strftime("%Y-%m-%d")
+        r = self._opened(edge)
+        assert r["positions"] == [] and r["opened_today"] == []
+        (sk,) = [x for x in r["skipped"] if x["ticker"] == "XYZ"]
+        assert "within expiry buffer" in sk["reason"], sk
+
+    @pytest.mark.parametrize("k", [0, 1, 2])
+    def test_anything_closer_to_expiry_is_refused_too(self, k):
+        d = (datetime.strptime(EXPIRY, "%Y-%m-%d") - timedelta(days=k)).strftime("%Y-%m-%d")
+        assert self._opened(d)["positions"] == []
+
+    def test_one_day_earlier_is_accepted_and_the_event_is_captured(self):
+        """边界内侧（expiry − buffer − 1）开得了，并且真的以 post_event 平——闸放行的单必须测得到事件。"""
+        buf = opl.CONFIG["expiry_buffer_days"]
+        ok_ed = (datetime.strptime(EXPIRY, "%Y-%m-%d") - timedelta(days=buf + 1)).strftime("%Y-%m-%d")
+        assert len(self._opened(ok_ed)["positions"]) == 1
+        qf = _quotes_fn({CALL: _q(0.9, 1.1), PUT: _q(0.9, 1.1)})
+        assert opl.run_for_date(ok_ed, quotes_fn=qf, signals=[])["closed_today"] == [], "财报日当天不平"
+        nxt = (datetime.strptime(ok_ed, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        (t,) = opl.run_for_date(nxt, quotes_fn=qf, signals=[])["closed_today"]
+        assert t["exit_reason"] == "post_event"
+
+    @pytest.mark.parametrize("k", range(0, 10))
+    def test_gate_and_exit_share_one_predicate_both_ways(self, k):
+        """入口闸与出场强平用同一个 `expiry_buffer_hit`：开得了 ⇔ 财报日当天不触发强平（逐日扫过，不挑边界点）。"""
+        ed = (datetime.strptime(EXPIRY, "%Y-%m-%d") - timedelta(days=k)).strftime("%Y-%m-%d")
+        assert ed > AS_OF, "夹具日期漂了：扫描范围内的财报日都得晚于入场日，否则这条测的不是缓冲闸"
+        opened = bool(self._opened(ed)["positions"])
+        assert opened is (not opl.expiry_buffer_hit(ed, EXPIRY)), (k, ed)
+
+    def test_unparseable_or_missing_earnings_date_is_not_judged_here(self):
+        """判不了财报日就不在这道闸拒（原行为不变；财报日缺失本来就过不了信号的 eligible）。"""
+        assert len(self._opened(None)["positions"]) == 1

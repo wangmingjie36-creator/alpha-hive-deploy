@@ -20,7 +20,30 @@
 - 实测：真实服务 `live("NVDL")` → 可用，来源 `yfinance_intraday`，最后成交 10:58:48，月度 / 周度两档都 `recorded`；NVDA 照走 CBOE。NVDL 这一次耗时约 26 秒（12 个请求 × 限流）。
 - 测试 `tests/test_alphabot_yf_chain.py`（21 条，假 yfinance 模块、时钟全注入）：手算合约解析、与 CBOE 合约键集同形、IV 失败值 / NaN / 坏行、每种失败有名字的原因、远期 / 已过期到期日不拉、收盘后丢当天到期、`as_of` 不符拒绝、水平引擎端到端、服务层的触发条件与计数。变异自检 10 个全杀。
 
-## [0.45.602] — 2026-10-22 — 占位（进行中：财报跨式入场闸——到期日必须在财报日之后留够 expiry_buffer，否则不开仓；修 TSLA 10-21 那种财报前被到期强平抢先的单）
+## [0.45.602] — 2026-10-22 — Fixed：财报跨式账本入口拒开「财报日贴着到期日」的单（财报日当晚就被 `expiry_buffer` 强平、事件前被平掉）
+
+**起因**：Alpha Bot 跨式页里 TSLA（买跨式，2026-09-22 → 10-21，−$1,825 / −45.9%）的出场原因是「到期前强平」、事件波动栏「未结算」，
+而 NFLX 同批是「财报后平仓」。财报 10-21（盘后）、到期 10-23、`expiry_buffer_days = 2`：10-21 当晚的扫描距到期 = 2 天 ≤ 2 ⇒ 强平，
+而 `post_event` 要 `as_of > earnings_date`（10-22）——事件还没进报价就被平了，这笔只测到时间损耗。财报时段未观测，账本一律按盘后算。
+
+**根因**：差一天。v0.45.104 的 M1 闸（`earnings_vol_signal` 合格条件 `ed ≤ expiry − buffer`）想挡的就是这类单，
+但把 `ed == expiry − buffer` 放行了，而这一天正是账本强平的第一天；它的回归测试还把「正好 expiry − buffer 仍然合格」钉成了正确行为。
+
+**Changed**
+- `options_paper_leg.py`：新增 `expiry_buffer_hit(as_of, expiry)`（出场强平判定抽出来，**出场与入场闸共用这一处**）；
+  `_open_from_signal` 在入口拒开 `expiry_buffer_hit(财报日, 到期日)` 的单（skipped 原因 `earnings … within expiry buffer of …`）。
+  与旧行为的差别只有一类：财报日 ∈ {到期日 − buffer, …, 到期日} 的信号不再开仓（财报日 ≤ 到期日 − buffer − 1 一律照旧）。
+
+**有意不动**：信号的 `eligible`（`earnings_vol_signal`）**不改**。先试过收紧它，发现它同时是 GEX 预注册检验的样本定义
+（`experiments/straddle_gex_prereg.md` §3「只看 eligible 行」）——事件本身照样量得到实际波动，收紧会无声改掉冻结协议的样本。
+所以闸放在账本入口。`straddle_strangle_shadow` 的 `exit_before_event` 排除规则保留（存量单 / 手工记录仍可能走到）。
+
+**影响面**：当前账本无已开仓位落在这个窗口（核过 positions / closed：仅 TSLA 这一笔 gap ≤ 2，已平）。TSLA 这笔历史记录**不改**。
+**Tests**：`tests/test_options_paper_leg.py::TestEntryExpiryBufferGate`（边界 / 逐日双向对账 / 放行的单真的以 post_event 平）；
+旧的 `test_expiry_buffer_exit`、`test_expired_without_quotes_settles_intrinsic_immediately` 靠「财报日 = 到期日 − 1」屏蔽 post_event，
+改成显式关 `exit_after_event`；`test_straddle_strangle_shadow.py` 那条改为先合格入场再改写落盘持仓模拟存量单。
+变异：去掉入口闸 8 红 / 谓词 `<=`→`<` 4 红 / 出场不走共享谓词 2 红，全部还原后 171 passed。
+相关 10+ 个测试文件（含扫全仓的元守卫）504 + 354 passed；**未跑整套**（别的会话正在跑整套，按约定错开）。
 
 ## [0.45.601] — 2026-10-22 — 占位（进行中：修 GitHub Actions 上 main 剩余的 CI 专属红——buzz_v1 价格差分、anthropic 未装、写沙箱 Linux 分支、step3 后置条件拨钟炸弹）
 

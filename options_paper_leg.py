@@ -175,6 +175,16 @@ def _days_between(d1: str, d2: str) -> Optional[int]:
         return None
 
 
+def expiry_buffer_hit(as_of: str, expiry: str) -> bool:
+    """`as_of` 这天账本会不会因为「距到期 ≤ expiry_buffer_days」强平（出场判定与入场闸**共用这一处**）。
+
+    入场闸（`earnings_vol_signal._precheck`）靠它保证：财报日当天的扫描不会触发强平，
+    于是 `as_of > earnings_date` 的 `post_event` 才有机会先发生（v0.45.602：TSLA 财报日 = 到期日 − 2，
+    10-21 当晚按 expiry_buffer 强平，事件还没发生）。判不了到期（日期坏）⇒ False，与原行为一致。"""
+    to_expiry = _days_between(as_of, expiry)
+    return to_expiry is not None and to_expiry <= CONFIG["expiry_buffer_days"]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 数据结构
 # ══════════════════════════════════════════════════════════════════════════════
@@ -540,6 +550,14 @@ def _open_from_signal(sig: Dict, nav: float, as_of: str) -> Tuple[Optional[Strad
         # v0.45.450：到期日是「判到期 / 算核销期限 / 选结算场次」三件事的唯一锚；解析不了的仓位一旦进账，
         # 报价取不到时既不会结算也不会核销，只能永远挂着——在入口拒掉，而不是事后兜底。
         return None, f"expiry unparseable: {expiry!r}"
+    ed = sig.get("earnings_date")
+    if _iso_day(ed) is not None and expiry_buffer_hit(_iso_day(ed), expiry):
+        # v0.45.602：财报日当晚的扫描就会触发 expiry_buffer 强平，而 post_event 要等 as_of > earnings_date
+        # （财报时段未观测，一律按盘后算）⇒ 这笔会在它要测的事件**之前**被平掉，只剩时间损耗
+        # （TSLA 2026-09-22 → 10-21：财报 10-21、到期 10-23，−45.9%，事件波动「未结算」）。
+        # 只在账本入口拒，不动信号的 `eligible`——后者是 GEX 预注册检验的样本定义（事件本身照样能量到实际波动）。
+        return None, (f"earnings {_iso_day(ed)} within expiry buffer of {expiry} "
+                      f"(ledger force-exits on the earnings date, before post_event)")
     mid_c, mid_p = _pos(call.get("mid")), _pos(put.get("mid"))
     mark = (mid_c + mid_p) if (mid_c is not None and mid_p is not None) else premium
     ratio = _num(sig.get("ratio"))
@@ -742,7 +760,7 @@ def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
             _log.error("[OptionsPaperLeg] ⚠️ %s %s 的到期日 %r 无法解析：判不了到期、算不出核销期限，"
                        "报价取不到时不会自动了结——需人工核对该持仓记录", pos.ticker, pos.side, pos.expiry)
             invalid_expiry.append({"ticker": pos.ticker, "side": pos.side, "expiry": pos.expiry})
-        near_expiry = to_expiry is not None and to_expiry <= CONFIG["expiry_buffer_days"]
+        near_expiry = expiry_buffer_hit(as_of, pos.expiry)
         if not (post_event or near_expiry):
             remaining.append(pos)
             continue

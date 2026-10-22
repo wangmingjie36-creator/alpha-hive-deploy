@@ -766,13 +766,24 @@ class TestExitBeforeEvent:
         assert pr["by_status"] == {"exit_before_event": 1} and pr["n_units"] == 0 and pr["ready"] is False
 
     def test_ledger_buffer_exit_on_the_earnings_date_is_excluded(self, tmp_path, monkeypatch):
-        """真实账本路径：财报日 = 到期日 − 2 的盘后财报，账本在财报当晚按 expiry_buffer 强平（审查里复现过的形状）。"""
+        """真实账本路径：财报日 = 到期日 − 2 的盘后财报，账本在财报当晚按 expiry_buffer 强平（审查里复现过的形状）。
+
+        v0.45.602 起账本入口不再开这种单（`test_options_paper_leg.py::TestEntryExpiryBufferGate`），所以夹具先按
+        合格的 09-29 开仓，再把落盘持仓的 `earnings_date` 改回 09-30——模拟闸之前入场的存量单
+        （TSLA 2026-10-21 那笔）。排除规则仍要守着它们。"""
         _paths(tmp_path, monkeypatch, "buffer")
         qs, stats = _qs(d25_spread=0.1667), {**_stats(), "moves": MOVES}
-        sig = evs.compute_signal("XYZ", AS_OF, qs, {"earnings_date": "2026-09-30", "earnings_time": "AMC"}, stats, None)
+        late = evs.compute_signal("XYZ", AS_OF, qs, {"earnings_date": "2026-09-30", "earnings_time": "AMC"}, stats, None)
+        assert late["eligible"] and late["tradeable"]
+        assert _run(AS_OF, [late])["opened_today"] == [], "账本入口得拦下 财报日 = 到期日 − 2（否则下面又回到验证旧行为）"
+        sig = evs.compute_signal("XYZ", AS_OF, qs, {"earnings_date": "2026-09-29", "earnings_time": "AMC"}, stats, None)
         assert sig["eligible"] and sig["tradeable"], "夹具得是账本会开仓的信号，否则下面什么也没验证"
         sig["strangle_quote"] = evs.strangle_quote(qs, stats, "XYZ", AS_OF)
         _run(AS_OF, [sig])
+        rows = _read_jsonl(opl.POSITIONS_FILE)
+        assert len(rows) == 1 and rows[0]["earnings_date"] == "2026-09-29"
+        rows[0]["earnings_date"] = "2026-09-30"               # 存量单：入场时闸还没有
+        opl.POSITIONS_FILE.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
         _run("2026-09-30", [], quotes_fn=exit_quotes())
         (c,) = _closed_rows()
         assert c["exit_reason"] == "expiry_buffer" and c["exit_date"] == c["earnings_date"] == "2026-09-30"
