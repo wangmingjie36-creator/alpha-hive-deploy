@@ -550,14 +550,17 @@ def _open_from_signal(sig: Dict, nav: float, as_of: str) -> Tuple[Optional[Strad
         # v0.45.450：到期日是「判到期 / 算核销期限 / 选结算场次」三件事的唯一锚；解析不了的仓位一旦进账，
         # 报价取不到时既不会结算也不会核销，只能永远挂着——在入口拒掉，而不是事后兜底。
         return None, f"expiry unparseable: {expiry!r}"
-    ed = sig.get("earnings_date")
-    if _iso_day(ed) is not None and expiry_buffer_hit(_iso_day(ed), expiry):
+    # 财报日取前 10 位再解析：信号里存的是原始值，资格判定（`earnings_vol_signal._iso_date`）本来就宽松取前 10 位，
+    # 带时间戳的值能过资格；这里若用严格的 `_iso_day(ed)` 会返回 None 而静默绕过本闸（v0.45.604）。
+    ed_raw = sig.get("earnings_date")
+    ed_day = _iso_day(ed_raw[:10]) if isinstance(ed_raw, str) else None
+    if ed_day is not None and expiry_buffer_hit(ed_day, expiry):
         # v0.45.602：财报日当晚的扫描就会触发 expiry_buffer 强平，而 post_event 要等 as_of > earnings_date
         # （财报时段未观测，一律按盘后算）⇒ 这笔会在它要测的事件**之前**被平掉，只剩时间损耗
         # （TSLA 2026-09-22 → 10-21：财报 10-21、到期 10-23，−45.9%，事件波动「未结算」）。
         # 只在账本入口拒，不动信号的 `eligible`——后者是 GEX 预注册检验的样本定义（事件本身照样能量到实际波动）。
-        return None, (f"earnings {_iso_day(ed)} within expiry buffer of {expiry} "
-                      f"(ledger force-exits on the earnings date, before post_event)")
+        # 原因串会原样显示在 Alpha Bot 状态列（`跳过：…`），保持短。
+        return None, f"earnings {ed_day} within expiry buffer of {expiry}: forced exit before event"
     mid_c, mid_p = _pos(call.get("mid")), _pos(put.get("mid"))
     mark = (mid_c + mid_p) if (mid_c is not None and mid_p is not None) else premium
     ratio = _num(sig.get("ratio"))

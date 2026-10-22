@@ -652,6 +652,21 @@ class TestEntryExpiryBufferGate:
         opened = bool(self._opened(ed)["positions"])
         assert opened is (not opl.expiry_buffer_hit(ed, EXPIRY)), (k, ed)
 
+    @pytest.mark.parametrize("suffix", ["T00:00:00", " 00:00:00", "T16:30:00-04:00"])
+    def test_timestamped_earnings_date_does_not_bypass_the_gate(self, suffix):
+        """信号存的是原始财报日，资格判定取前 10 位——带时间戳的值能过资格，闸不能因此认不出它（v0.45.604）。
+        变异：把闸里的 `[:10]` 去掉 ⇒ `_iso_day` 返回 None ⇒ 静默放行。"""
+        edge = (datetime.strptime(EXPIRY, "%Y-%m-%d") - timedelta(days=opl.CONFIG["expiry_buffer_days"])).strftime("%Y-%m-%d")
+        r = self._opened(edge + suffix)
+        assert r["positions"] == []
+        (sk,) = [x for x in r["skipped"] if x["ticker"] == "XYZ"]
+        assert "within expiry buffer" in sk["reason"] and edge in sk["reason"], sk
+
+    def test_skip_reason_stays_short_for_the_status_column(self):
+        r = self._opened(EXPIRY)
+        (sk,) = [x for x in r["skipped"] if x["ticker"] == "XYZ"]
+        assert len(sk["reason"]) <= 90, sk["reason"]
+
     def test_unparseable_or_missing_earnings_date_is_not_judged_here(self):
         """判不了财报日就不在这道闸拒（原行为不变；财报日缺失本来就过不了信号的 eligible）。"""
         assert len(self._opened(None)["positions"]) == 1
