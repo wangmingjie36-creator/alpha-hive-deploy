@@ -24,6 +24,7 @@
 盲期：冻结之前，产品出口（Alpha Bot 接口 / `progress`）和每日运行的返回值 / CLI 回显都不带任何一笔的影子盈亏
 （`BLINDED_KEYS` 不出现在 `progress` 里；`options_paper_leg.run_for_date` 返回的平仓记录不带 `shadow_strangle`，测试钉住）。
 信息论上盲不了：两个盈亏都在落盘的平仓记录（`closed_trades.jsonl`）里，`units()` 的 `d` 也是两者的函数——自己拼起来看 = 偷看 = 协议变更。
+**唯一的出口是 `reveal()`**：冻结文件存在且完好才返回每笔配对 + 冻结的检验结果（用户 2026-10-22 定；Alpha Bot 的面板据此解锁），否则 `None`。
 
 ⚠️ 本模块**不 import** `options_paper_leg` / `earnings_vol_signal` / `alphabot`：定仓函数由调用方注入（`size_fn`），
 这样记录函数是纯的，依赖只有一个方向（账本 → 本模块）。
@@ -386,6 +387,35 @@ def block_signflip_test(us: List[dict], *, n_perm: int, seed: int, enum_max_bloc
     return {"testable": True, "mode": mode, "observed": obs, "p_value": p, "n_units": n, "n_blocks": len(S),
             "decision": "reject_h0" if p <= PREREG["alpha"] else "fail_to_reject_h0",
             "direction": ("strangle_higher" if obs > 0 else "straddle_higher" if obs < 0 else "none")}
+
+
+#: 冻结结果里给页面显示的字段（盲期结束后才读；不含 `unit_keys` / 进度）
+REVEAL_RESULT_KEYS = ("decision", "direction", "p_value", "observed", "mode", "testable", "reason", "n_units", "n_blocks",
+                      "ready_date", "prereg_version")
+
+
+def reveal(closed: List[dict], *, root=None) -> Optional[dict]:
+    """**冻结之后才有**的配对显示（v0.45.599，用户 2026-10-22 定：冻结后自动解锁，冻结前仍只有计数）。
+
+    未冻结 / 冻结文件读不了 / 不是对象 ⇒ `None`（调用方一个字都不许显示）——盲期以「冻结文件存在且完好」为唯一钥匙，
+    和 `run_once` 同一把。冻结后返回：冻结的检验结果（`REVEAL_RESULT_KEYS`）+ 每个 `ok` 单位的配对
+    （跨式 / 宽跨假想的张数与盈亏、`d`、是否在冻结的那次检验里——冻结后才平仓的单位只描述、不改判定）。
+    只读平仓记录；不写任何东西。"""
+    res = read_result(root)
+    if res is None or "error" in res:
+        return None
+    frozen_keys = {tuple(k) for k in res.get("unit_keys") or [] if isinstance(k, (list, tuple))}
+    pairs = []
+    for c, u in zip(closed or [], units(closed)):
+        if u["status"] != "ok":
+            continue
+        sh = c["shadow_strangle"]
+        pairs.append({"ticker": c.get("ticker"), "earnings_date": c.get("earnings_date"), "entry_date": c.get("entry_date"),
+                      "exit_date": c.get("exit_date"), "straddle_contracts": c.get("contracts"),
+                      "strangle_contracts": sh.get("contracts"), "straddle_usd": c.get("pnl_usd"),
+                      "strangle_usd": (sh.get("exit") or {}).get("pnl_usd"), "nav_for_sizing": sh.get("nav_for_sizing"),
+                      "d": u["d"], "in_frozen_test": (u["ticker"], u["earnings_date"], u["entry_date"]) in frozen_keys})
+    return {"result": {k: res.get(k) for k in REVEAL_RESULT_KEYS}, "pairs": pairs}
 
 
 def _result_path(root=None) -> Path:

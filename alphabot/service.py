@@ -348,13 +348,19 @@ class AlphaBotService:
             return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
 
     def _strangle_shadow(self, led: dict) -> dict:
-        """影子宽跨记录的进度（v0.45.586，**只有计数**，见 straddle_strangle_shadow 的盲期规则：任何一笔的影子盈亏 /
-        与跨式盈亏的差都不出现在这里）。"""
+        """影子宽跨记录的进度（v0.45.586，**冻结前只有计数**，见 straddle_strangle_shadow 的盲期规则：任何一笔的影子盈亏 /
+        与跨式盈亏的差都不出现在这里）；检验冻结之后多一键 `revealed`（每笔配对 + 冻结的结果，v0.45.599）。"""
         if self.demo:
             return {"available": False, "reason": "演示模式没有影子记录"}
         try:
             import straddle_strangle_shadow as SS
-            return SS.progress(led.get("closed") or [], led.get("positions") or [], root=self.straddle_root)
+            closed = led.get("closed") or []
+            out = SS.progress(closed, led.get("positions") or [], root=self.straddle_root)
+            # 冻结之后才有（v0.45.599）：`reveal` 在未冻结 / 冻结文件坏了时返回 None ⇒ 这一键不出现
+            revealed = SS.reveal(closed, root=self.straddle_root)
+            if revealed is not None:
+                out["revealed"] = revealed
+            return out
         except Exception as exc:  # noqa: BLE001 - 进度算不出来如实说，不当成「0 个单位」
             _log.warning("影子宽跨记录进度不可得：%s: %s", type(exc).__name__, exc)
             return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}

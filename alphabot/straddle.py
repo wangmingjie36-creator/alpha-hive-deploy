@@ -577,7 +577,7 @@ def calibration_points(by_event: Dict[Tuple[str, str], List[dict]], traded: set)
 def build_overview(led: dict, *, now_et: datetime, rules: Optional[dict] = None,
                    shadow: Optional[dict] = None, strangle_shadow: Optional[dict] = None) -> dict:
     """页面要的全部数据。`rules`：阈值 / 账本配置（服务层从代码里取的那一份）；`shadow`：GEX 影子记录进度、
-    `strangle_shadow`：影子宽跨记录进度（v0.45.586）——两者**都只有计数**。缺目录 ⇒ `data_available=False` 且说清是哪个目录，
+    `strangle_shadow`：影子宽跨记录进度（v0.45.586）——两者**冻结前都只有计数**（影子宽跨检验冻结后多一键 `revealed`，v0.45.599）。缺目录 ⇒ `data_available=False` 且说清是哪个目录，
     **不**当成「空账本」。"""
     base = {"source": led.get("source"), "rules": rules or {}, "now_et": now_et.isoformat(timespec="seconds"),
             "state_dir": {"path": led.get("ledger_dir"), "exists": bool(led.get("exists"))}}
