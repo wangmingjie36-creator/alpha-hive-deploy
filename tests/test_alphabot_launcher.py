@@ -609,6 +609,23 @@ class TestDefaultRepoIsProductionClone:
         assert "production_clone.py" in needed and "alphabot/launcher.py" in needed, needed   # 扫描本身没失明
         assert needed <= set(MA.GENERATOR_FILES), needed - set(MA.GENERATOR_FILES)
 
+    def test_generator_imports_only_stdlib_and_repo_modules(self):
+        """生成器在 import 期只用标准库与仓库模块（v0.45.607）：提示让 .app 记下的解释器去跑生成器，「能跑启动器的解释器
+        就能跑生成器」靠的就是这条。函数体内按需 import 的第三方（启动器的 AppKit、hive_logger 的 numpy）不在生成路径上。"""
+        import ast
+        repo_mods = {Path(rel).parts[0].removesuffix(".py") for rel in MA.GENERATOR_FILES}
+        assert {"alphabot", "production_clone", "hive_logger"} <= repo_mods, repo_mods
+        bad = {}
+        for rel in MA.GENERATOR_FILES:
+            for node in ast.parse((REPO / rel).read_text(encoding="utf-8")).body:
+                names = ([a.name for a in node.names] if isinstance(node, ast.Import) else
+                         [node.module] if isinstance(node, ast.ImportFrom) and node.level == 0 else [])
+                for n in names:
+                    top = n.split(".")[0]
+                    if top != "__future__" and top not in sys.stdlib_module_names and top not in repo_mods:
+                        bad.setdefault(rel, []).append(n)
+        assert not bad, bad
+
     @pytest.mark.parametrize("kw, msg", [({"repo": ""}, "repo 给了空值"), ({"repo": "  "}, "repo 给了空值"),
                                          ({"python": ""}, "绝对路径"), ({"python": "python3"}, "绝对路径")])
     def test_build_app_enforces_the_input_rules_itself(self, tmp_path, monkeypatch, kw, msg):
@@ -717,6 +734,47 @@ class TestCanonicalMakeEntry:
         r = self._make(home, "PYTHON=./venv/bin/python3")
         assert r.returncode != 0 and "绝对路径" in r.stderr, r.stderr
         assert not (home / "Applications").exists()
+
+    # 谁跑生成器（v0.45.607）：命令行 PYTHON 是可用的绝对路径 ⇒ 它；否则 ALPHABOT_GEN_PY。规则只在 Makefile，提示 / 帮助页只写
+    # PYTHON=X 就都跑得通（600 把 ALPHABOT_GEN_PY=X 写进提示文字，帮助页那处就漏了）。
+
+    def test_runner_choice_uses_the_shell_rule(self):
+        """「PYTHON 能不能跑生成器」与 .app 壳里双击时同一判据：Makefile 里逐字就是 `SHELL_PY_USABLE`。"""
+        assert MA.SHELL_PY_USABLE.replace("$", "$$") in (REPO / "Makefile").read_text(encoding="utf-8")
+
+    def test_command_line_python_runs_the_generator(self, home, tmp_path):
+        """可用的 PYTHON ⇒ 生成器由它跑：缺省 runner 坏着也照样成——换解释器常常正是因为缺省坏了。"""
+        custom, marker = TestRegenCommandRuns._wrapper(tmp_path)
+        (home / "alpha-hive-prod").symlink_to(REPO, target_is_directory=True)
+        r = TestRegenCommandRuns._make_with_broken_default(home, f"PYTHON={custom}")
+        assert r.returncode == 0, r.stderr
+        assert "-m alphabot.macos_app" in marker.read_text(encoding="utf-8")
+        assert self._py_in_app(home) == custom
+
+    @pytest.mark.parametrize("kind", ["missing", "directory"])
+    def test_python_not_usable_yet_still_generates_with_the_fallback_runner(self, home, tmp_path, kind):
+        """458 的宽容不变：PYTHON 还没装好（不存在 / 是目录）⇒ 退回 ALPHABOT_GEN_PY 跑生成器，照样生成并警告。"""
+        target = tmp_path / ("py-dir" if kind == "directory" else "nowhere/python3")
+        if kind == "directory":
+            target.mkdir()
+        r = self._make(home, f"PYTHON={target}")
+        assert r.returncode == 0, r.stderr
+        assert self._py_in_app(home) == str(target)
+        assert "现在不能执行" in r.stderr, r.stderr
+
+    def test_environment_python_never_picks_the_runner(self, home, tmp_path):
+        """环境变量里的 PYTHON（node-gyp 等会 export）连 `--python` 都不是（458），更不当 runner。"""
+        custom, marker = TestRegenCommandRuns._wrapper(tmp_path)
+        r = self._make(home, env_extra={"PYTHON": custom})
+        assert r.returncode == 0, r.stderr
+        assert not marker.exists(), "环境变量里的 PYTHON 被拿去跑了生成器"
+
+    def test_relative_python_never_runs_the_generator(self, home, tmp_path):
+        """相对路径的 PYTHON 即便按 make 的 cwd 恰好指到一个解释器，也不拿来跑：生成器照旧以「须绝对路径」拒。"""
+        custom, marker = TestRegenCommandRuns._wrapper(tmp_path)
+        r = self._make(home, f"PYTHON={os.path.relpath(custom, REPO)}")    # make -C REPO ⇒ 按 cwd 解析就是它
+        assert r.returncode != 0 and "绝对路径" in r.stderr, r.stderr
+        assert not marker.exists(), "相对路径的 PYTHON 被拿去跑了生成器"
 
 
 class TestLaunchScriptHints:
@@ -933,7 +991,7 @@ class TestShellDrift:
         self._launch(ui)
         cmd = self._command_in(ui.calls[0][1])
         assert cmd[:4] == MA.canonical_entry().split() and cmd[4] == f"PYTHON={custom}", cmd
-        assert cmd[5:] == [f"ALPHABOT_GEN_PY={custom}"], cmd            # 生成器也由它跑（v0.45.600）
+        assert cmd[5:] == [], cmd                    # 谁跑生成器由 Makefile 按 PYTHON 定（v0.45.607），提示只写 PYTHON
         r = TestCanonicalMakeEntry._make(home, *cmd[4:])
         assert r.returncode == 0, r.stderr
         assert TestCanonicalMakeEntry._py_in_app(home) == custom
@@ -1089,7 +1147,8 @@ class TestRegenCommandRuns:
     ① 456 之前的生成器把 `python3` 这类裸名字原样写进过壳，沿用 ⇒ `PYTHON=python3` 被生成器以「须绝对路径」拒；
     ② 跑生成器的恒是缺省解释器——换解释器常常正是因为缺省坏了，照抄第一步就失败。
     v0.45.600：②改为**确定规则**（写进 .app 的不是缺省 ⇒ 生成器也用它）。597 看「缺省此刻能不能用」，而这些文字有一半在
-    生成时就写进了壳、出事那天才被看见——生成时缺省好好的，弹窗里就不带 runner。本类不钉任何环境。"""
+    生成时就写进了壳、出事那天才被看见——生成时缺省好好的，弹窗里就不带 runner。本类不钉任何环境。
+    v0.45.607：推荐入口的 runner 由 Makefile 按 `PYTHON` 定，提示只写 `PYTHON=X`（600 写在提示里，帮助页漏了）。"""
 
     @staticmethod
     def _clone(home):
@@ -1147,7 +1206,7 @@ class TestRegenCommandRuns:
         custom, marker = self._wrapper(tmp_path)
         cmd = self._command(MA.regen_hint(home / "alpha-hive-prod", "python3"))
         assert cmd[:4] == MA.canonical_entry().split(), cmd
-        assert cmd[4:] == [f"PYTHON={MA.PLACEHOLDER_PY}", f"ALPHABOT_GEN_PY={MA.PLACEHOLDER_PY}"], cmd
+        assert cmd[4:] == [f"PYTHON={MA.PLACEHOLDER_PY}"], cmd
         r = self._make_with_broken_default(home, *[a.replace(MA.PLACEHOLDER_PY, custom) for a in cmd[4:]])
         assert r.returncode == 0, r.stderr
         assert "-m alphabot.macos_app" in marker.read_text(encoding="utf-8")
@@ -1156,29 +1215,28 @@ class TestRegenCommandRuns:
     def test_alert_frozen_in_the_shell_runs_after_the_default_is_gone(self, home, tmp_path):
         """597 二次检查 #1 / #5 的回归：「找不到可执行的 PY」弹窗的文字是**生成时**写进壳的，弹出来时缺省可能已经没了。
         生成一份缺省解释器的 .app → 从壳里取那句弹窗的命令 → 填占位 → 在「缺省 runner 已坏」的 make 下照抄 ⇒ 必须成功；
-        负对照：同一条命令去掉 `ALPHABOT_GEN_PY`（597 生成的就是这样）⇒ 失败——证明模拟真的咬住了。"""
+        负对照：PYTHON 指向还没装的解释器 ⇒ 退回那个坏掉的缺省 runner ⇒ 失败——证明模拟真的咬住了。"""
         self._clone(home)
         bundle = MA.build_app(home / "Applications", repo=home / "alpha-hive-prod", python=MA.DEFAULT_PYTHON)
         script = (bundle / "Contents" / "MacOS" / MA.EXECUTABLE).read_text(encoding="utf-8")
         alert = next(ln for ln in script.splitlines() if "找不到可执行的" in ln)
         cmd = shlex.split(alert.split("执行 ", 1)[1].split("（没装依赖", 1)[0])
-        assert cmd[:4] == MA.canonical_entry().split(), cmd
+        assert cmd[:4] == MA.canonical_entry().split() and cmd[4:] == [f"PYTHON={MA.PLACEHOLDER_PY}"], cmd
         custom, marker = self._wrapper(tmp_path)
-        filled = [a.replace(MA.PLACEHOLDER_PY, custom) for a in cmd[4:]]
-        r = self._make_with_broken_default(home, *[a for a in filled if not a.startswith("ALPHABOT_GEN_PY=")])
+        r = self._make_with_broken_default(home, f"PYTHON={tmp_path / 'not-installed' / 'python3'}")
         assert r.returncode != 0, "负对照没失败：模拟的「缺省 runner 已坏」没生效，本条证明不了什么"
-        r = self._make_with_broken_default(home, *filled)
+        r = self._make_with_broken_default(home, *[a.replace(MA.PLACEHOLDER_PY, custom) for a in cmd[4:]])
         assert r.returncode == 0, r.stderr
         assert "-m alphabot.macos_app" in marker.read_text(encoding="utf-8")
         assert TestCanonicalMakeEntry._py_in_app(home) == custom
 
     def test_custom_interpreter_also_runs_the_generator_canonical_entry(self, home, tmp_path):
-        """推荐入口：带上 `ALPHABOT_GEN_PY=<记下的>`；真跑 make（缺省 runner 坏着也行）：生成器确实由它跑（包装器留了
-        记录），路径带空格也行（Makefile 给 `$(ALPHABOT_GEN_PY)` 加了引号）。"""
+        """推荐入口：提示只写 `PYTHON=<记下的>`；真跑 make（缺省 runner 坏着也行）：生成器确实由它跑（包装器留了
+        记录，Makefile 按 PYTHON 选 runner），路径带空格也行。"""
         self._clone(home)
         custom, marker = self._wrapper(tmp_path)
         cmd = self._command(MA.regen_hint(home / "alpha-hive-prod", custom))
-        assert cmd[4:] == [f"PYTHON={custom}", f"ALPHABOT_GEN_PY={custom}"], cmd
+        assert cmd[4:] == [f"PYTHON={custom}"], cmd
         r = self._make_with_broken_default(home, *cmd[4:])
         assert r.returncode == 0, r.stderr
         assert "-m alphabot.macos_app" in marker.read_text(encoding="utf-8"), "生成器不是由记下的解释器跑的"
@@ -1201,7 +1259,7 @@ class TestRegenCommandRuns:
         repo = self._clone(home) if form == "clone" else _fake_code_dir(tmp_path / "dev")
         cmd = self._command(MA._python_fix_hint(repo).split("（没装依赖", 1)[0])
         if form == "clone":
-            assert cmd[4:] == [f"PYTHON={MA.PLACEHOLDER_PY}", f"ALPHABOT_GEN_PY={MA.PLACEHOLDER_PY}"], cmd
+            assert cmd[4:] == [f"PYTHON={MA.PLACEHOLDER_PY}"], cmd      # runner 由 Makefile 按 PYTHON 定
         else:
             assert cmd == [MA.PLACEHOLDER_PY, "-m", "alphabot.macos_app", "--repo", ".", "--python", MA.PLACEHOLDER_PY]
 
@@ -1214,6 +1272,15 @@ class TestRegenCommandRuns:
         dev = self._command(MA.regen_hint(_fake_code_dir(tmp_path / "dev"), MA.DEFAULT_PYTHON))
         assert dev == [MA.DEFAULT_PYTHON, "-m", "alphabot.macos_app", "--repo", "."], dev
 
+    @pytest.mark.parametrize("recorded, runner", [(MA.DEFAULT_PYTHON, MA.DEFAULT_PYTHON),
+                                                  ("/opt/my py/bin/python3", shlex.quote("/opt/my py/bin/python3")),
+                                                  ("python3", MA.PLACEHOLDER_PY)])
+    def test_clone_missing_alert_runs_setup_with_the_recorded_interpreter(self, home, recorded, runner):
+        """「生产克隆丢了」弹窗的重建命令也用 .app 记下的解释器（v0.45.607；600 二次检查 #1：此前写死缺省，换解释器正是因为
+        缺省坏了时照做第一步就失败）；记下的不合规则 ⇒ 占位。"""
+        hint = MA._repo_unusable_hint(self._clone(home), recorded)
+        assert f"跑 {runner} production_clone.py setup" in hint, hint
+
     @pytest.mark.parametrize("recorded", [MA.DEFAULT_PYTHON, "/opt/my py/bin/python3", "/nonexistent/python3", "python3"])
     def test_command_does_not_depend_on_the_machine_state(self, home, tmp_path, monkeypatch, recorded):
         """确定规则：同一输入，不管此刻哪个解释器能不能执行，给的命令一字不差（v0.45.600）——597 看当时环境，冻进壳里的
@@ -1222,7 +1289,6 @@ class TestRegenCommandRuns:
         dev = _fake_code_dir(tmp_path / "dev")
         before = [MA.regen_hint(home / "alpha-hive-prod", recorded), MA.regen_hint(dev, recorded)]
         monkeypatch.setattr(MA, "interpreter_problem", lambda p: "不存在")
-        monkeypatch.setattr(MA.os.path, "exists", lambda p: False)
         assert [MA.regen_hint(home / "alpha-hive-prod", recorded), MA.regen_hint(dev, recorded)] == before
 
 

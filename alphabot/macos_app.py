@@ -184,6 +184,11 @@ def _cmd_word(s: str) -> str:
     return s if _PLAIN_WORD.fullmatch(s) else shlex.quote(s)
 
 
+def _runner_word(python: str) -> str:
+    """给人抄的命令里「用哪个解释器跑」：合现行规则就是 .app 记下的那个（按需加引号），否则占位（v0.45.607）。"""
+    return PLACEHOLDER_PY if python_rule_problem(python) else _cmd_word(python)
+
+
 def python_rule_problem(python: str) -> Optional[str]:
     """`python` 现在能不能作为 .app 的解释器写进壳、写进给人抄的命令 ⇒ 问题描述；能 ⇒ None。
 
@@ -214,15 +219,19 @@ def regen_hint(repo: Path, python: str) -> str:
     给出的命令**照抄要跑得通**（v0.45.597，498 二次检查 #1 / #2）——此前只管「沿用」，没核「今天还跑不跑得通」：
     - 记下的解释器不合现行规则（`python_rule_problem`：456 之前的生成器把 `python3` 这类裸名字原样写进过壳）⇒ 沿用就被
       生成器拒 ⇒ 改给占位 `PLACEHOLDER_PY`，前面说明一句；那个值本身不嵌进来（可能带 shell 特殊字符，结果要进双引号）。
-    - **跑生成器**的解释器 = 要写进 .app 的那个（缺省 ⇒ 命令里都不写）。推荐入口经 make 的 `ALPHABOT_GEN_PY`，直跑写在
-      命令开头。此前恒为缺省：换解释器常常正是因为缺省坏了，照抄第一步就失败。
+    - **跑生成器**的解释器 = 要写进 .app 的那个。推荐入口**不在提示里写**：Makefile 自己定——命令行上的 `PYTHON` 是可用的
+      绝对路径就由它跑，否则退回缺省（v0.45.607）；所以帮助页、Makefile 注释、任何教人换解释器的地方只写 `PYTHON=X` 就
+      都跑得通（600 把 `ALPHABOT_GEN_PY=X` 写进提示文字，帮助页那处就漏了）。直跑没有 make 可依，命令开头写它。此前恒为
+      缺省：换解释器常常正是因为缺省坏了，照抄第一步就失败。
 
-    ⚠️ 这条是**确定规则**，不看「缺省此刻能不能用」（v0.45.600）：本函数的结果有一半是在**生成 .app 时**写进壳里的文字
-    （头注释、两处弹窗），要到以后出事那天才被人看见——597 按生成那一刻的环境选，生成时缺省好好的，弹窗里就不带 runner，
-    等缺省坏了弹出来照做照样失败；同一份代码在两台机器 / 两个时刻还会生成不同的壳（过时提醒误报、CI 要钉环境）。
-    确定规则在每个出现场景里都跑得通：启动器的过时提醒——记下的解释器正跑着启动器，必然在；「找不到 / 执行失败」弹窗——
-    传的是占位，同一句已先教人用新解释器装依赖；头注释与「代码目录挪了」——壳先查过 PY 能执行才走到这里。所以记下的是
-    缺省时，见到提示的那一刻缺省必然可用；不可用时人看到的是占位那句（其中 PYTHON 与 runner 都是新解释器）。
+    ⚠️ 确定规则，不看「缺省此刻能不能用」（v0.45.600）：本函数的结果有一半是在**生成 .app 时**写进壳里的文字（头注释、
+    两处弹窗），要到以后出事那天才被人看见——按生成那一刻的环境选（597），生成时缺省好好的、弹窗里就不带 runner，等缺省
+    坏了照做照样失败；同一份代码在两台机器 / 两个时刻还会生成不同的壳。各出现场景：启动器的过时提醒——记下的解释器正跑着
+    启动器，必然能跑；「找不到 / 执行失败」弹窗——传的是占位（新解释器，同一句已先教人用它装依赖）；头注释与「代码目录
+    挪了」——壳只核过 PY 是**可执行文件**（`SHELL_PY_USABLE`，不保证真能运行），记下的是缺省而它文件在、却跑不起来，同时
+    代码目录又挪了，直跑那句会失败（两件同时坏，极少见，不为它加分支）。生成器在 import 期只用标准库与仓库模块、启动器自己
+    也 import 它（守卫 `TestDefaultRepoIsProductionClone::test_generator_imports_only_stdlib_and_repo_modules`），
+    能跑启动器的解释器就能跑生成器。
     """
     note = ""
     if python_rule_problem(python):
@@ -230,7 +239,7 @@ def regen_hint(repo: Path, python: str) -> str:
         note = "（.app 里记的解释器不合现行规则：须是不含引号等特殊字符的绝对路径，把命令里的占位换成实际要用的解释器）"
     py = "" if python == DEFAULT_PYTHON else _cmd_word(python)
     if _is_default_clone(repo):
-        return f"{note}在终端执行 {canonical_entry()}" + (f" PYTHON={py} ALPHABOT_GEN_PY={py}" if py else "")
+        return f"{note}在终端执行 {canonical_entry()}" + (f" PYTHON={py}" if py else "")
     return (f"{note}在那份代码目录里执行 {py or DEFAULT_PYTHON} -m alphabot.macos_app --repo ."
             + (f" --python {py}" if py else ""))
 
@@ -242,7 +251,7 @@ def _repo_unusable_hint(repo: Path, python: str) -> str:
     make alphabot-app」：前者与克隆无关，后者在克隆丢了时只会报错（v0.45.439 二次检查）。
     """
     if _is_default_clone(repo):
-        hint = (f"生产克隆丢了或不完整：在开发检出里跑 {DEFAULT_PYTHON} production_clone.py setup 重建它"
+        hint = (f"生产克隆丢了或不完整：在开发检出里跑 {_runner_word(python)} production_clone.py setup 重建它"
                 "（每日扫描也靠它，丢了扫描同样停），重建后不用重新生成 .app。")
     else:
         hint = f"代码目录挪了位置就到新位置重新生成（{regen_hint(repo, python)}）。"
