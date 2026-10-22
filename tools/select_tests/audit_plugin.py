@@ -15,8 +15,10 @@
 **盲区（写在这里，别让人以为它全知）**：
 1. 子进程里的读（测试起 `ruff` / CLI）钩子看不到——`test_no_undefined_names` 靠 `select_tests.EXTRA_ALWAYS` 手工补；
 2. C 层直接读（sqlite 等）不触发 Python 的 `open` 事件；
-3. import 机制读 `.py`（栈里有 `<frozen importlib…>`）被过滤——它是「依赖」不是「当数据读」，且 `sys.modules` 只让第一个导入者触发，
-   本来也记不准；import 耦合由第二步用静态 import 反查补；
+3. import 机制读 `.py`（栈里有 `<frozen importlib…>`）**本意**要过滤——它是「依赖」不是「当数据读」，且 `sys.modules` 只让第一个导入者触发，
+   本来也记不准；import 耦合由第二步用静态 import 反查补。⚠️ **实测（v0.45.619）这条过滤从不生效**：`open` 审计事件报的是 FileIO 的
+   原始模式，`'rb'` 也报成 `'r'`，`"b" in mode` 恒假 ⇒ import 读全被记下（`prod_py` 含全部传递 import；`other_test` 含这一轮里
+   第一个 import 某测试模块的文件，记不记得下取决于收集了谁）。第二档要用 `prod_py` 前先修它；详见 CHANGELOG 0.45.619；
 4. 归属是「当前跑的测试文件」：后台线程的读会算到当时正在跑的那个文件头上（只会多记，不会漏）。
 """
 from __future__ import annotations

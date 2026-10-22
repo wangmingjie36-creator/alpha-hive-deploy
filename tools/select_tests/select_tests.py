@@ -29,7 +29,8 @@ v0.45.439、v0.45.592→596 都因此让 main 变红。所以选测不能按 imp
 `--run` 拉起的 pytest 自带 `audit_plugin`，顺带看被改的测试文件**现在**读了什么，与登记表对比：多出登记表没有的读 ⇒ 打印「登记表过期」
 并以退出码 4 结束（测试本身红时退出码仍是 pytest 的）。`--update` 把这些读并进登记表（只并不删：偏保守）。
 CI 在整套命令上加同一个插件，`--check-drift` 比对——**dump 里有登记表没有的读就红**（比登记表少不算：CI 上有的测试会 skip）。
-`--build` 用整套的 dump 全量重建（按「读了 ≥ 一半测试文件」认「读全部」那一类）。
+`--build` 用整套的 dump 全量重建（按「读了 ≥ 一半测试文件」认「读全部」那一类；三处判定共用 `counts_as_read_all`，
+分母是仓库测试文件总数——不是这一轮收集了几个，`--update` 只收集被改的文件，见 `counts_as_read_all`）。
 
 登记表不存「测试文件清单」：新增一个不读别的文件的测试，不需要改登记表（并行 session 各加测试时不会撞同一个文件）。
 """
@@ -57,6 +58,7 @@ EXTRA_ALWAYS = ("tests/test_no_undefined_names.py",)
 #: 登记表自己的守卫测试（改登记表 ⇒ 只跑它）。
 REGISTRY_GUARD_TEST = "tests/test_select_tests.py"
 #: 读了 ≥ 这个比例的测试文件，就归入「读全部测试文件」那一类（实测：这一类读 372/373，其余最多读 3 个）。
+#: 分母是**仓库里的测试文件总数**（`repo_test_count`），不是 dump 的 `n_collected_files`——见 `counts_as_read_all`。
 READ_ALL_FRACTION = 0.5
 
 #: 影响面不可圈的核心文件（整份回退整套）。
@@ -119,8 +121,25 @@ def save_registry(path: Path, reg: dict) -> None:
     os.replace(tmp, path)
 
 
-def build_registry(dump: dict, commit: str = "") -> dict:
-    """由「整套 + 审计插件」的 dump 全量重建。"""
+def repo_test_count(repo: Path = REPO) -> int:
+    """仓库里的测试文件总数（`tests/test_*.py`，与 `read_test_texts` 同一个 glob）——「读全部测试文件」的分母。"""
+    return sum(1 for _ in (Path(repo) / "tests").glob("test_*.py"))
+
+
+def counts_as_read_all(n_read: int, n_tests: int) -> bool:
+    """读了 `n_read` 个别的测试文件，算不算「读全部测试文件」的元守卫。`n_tests` = 仓库测试文件总数（`repo_test_count`）。
+
+    **分母不能取 dump 的 `n_collected_files`**（v0.45.619）：`--update` / `--run` 只收集被改 / 被选的几个文件，
+    那个数小到 1，只读了一个别的测试文件的测试（`test_alphabot_chat` 读 `test_alphabot`）就被当成元守卫、
+    挪出 `reads_tests`。被读的文件是从磁盘上读的，与这一轮收集了谁无关，所以分母也只能是磁盘上有多少。
+    分母 ≤ 0 只可能是仓库路径错了：抛，不当成「谁都不算读全部」（那会把真元守卫降成窄读者，改新测试时漏选它）。"""
+    if n_tests <= 0:
+        raise ValueError(f"测试文件总数 = {n_tests}——分母不对（仓库路径错了？），不能判「读全部测试文件」")
+    return n_read >= READ_ALL_FRACTION * n_tests
+
+
+def build_registry(dump: dict, commit: str = "", *, n_tests: int) -> dict:
+    """由「整套 + 审计插件」的 dump 全量重建。`n_tests` = 仓库测试文件总数（`repo_test_count`）。"""
     by_file = dump.get("by_file", {})
     n = int(dump.get("n_collected_files") or 0)
     if n <= 0 or not by_file:
@@ -131,7 +150,7 @@ def build_registry(dump: dict, commit: str = "") -> dict:
         if not (f.startswith("tests/test_") and f.endswith(".py")):
             continue
         others = kinds.get("other_test", [])
-        if len(others) >= READ_ALL_FRACTION * n:
+        if counts_as_read_all(len(others), n_tests):
             reg["reads_all_tests"].append(f)
         elif others:
             reg["reads_tests"][f] = sorted(others)
@@ -150,10 +169,9 @@ def _registry_view(reg: dict, f: str):
     return reads_all, others, nonpy
 
 
-def observed_gaps(reg: dict, dump: dict, files=None) -> list[str]:
+def observed_gaps(reg: dict, dump: dict, files=None, *, n_tests: int) -> list[str]:
     """dump 里观测到、登记表里没有的读（只看 `files`，缺省全部）。空 = 登记表覆盖了这次观测。
-    只查「多出来的」：CI 上有些测试会 skip，观测到的比登记表少是正常的。"""
-    n = int(dump.get("n_collected_files") or 0)
+    只查「多出来的」：CI 上有些测试会 skip，观测到的比登记表少是正常的。`n_tests` 同 `counts_as_read_all`。"""
     out = []
     for f, kinds in sorted(dump.get("by_file", {}).items()):
         if files is not None and f not in files:
@@ -163,7 +181,7 @@ def observed_gaps(reg: dict, dump: dict, files=None) -> list[str]:
         reads_all, others, nonpy = _registry_view(reg, f)
         obs_others = set(kinds.get("other_test", ()))
         if not reads_all:
-            if n and len(obs_others) >= READ_ALL_FRACTION * n:
+            if counts_as_read_all(len(obs_others), n_tests):
                 out.append(f"{f}：现在读了 {len(obs_others)} 个测试文件（≥ 一半），应归入 reads_all_tests（改任何测试文件都要跑它）")
             else:
                 extra = sorted(obs_others - others)
@@ -175,9 +193,8 @@ def observed_gaps(reg: dict, dump: dict, files=None) -> list[str]:
     return out
 
 
-def merge_observation(reg: dict, dump: dict, files=None) -> dict:
-    """把 dump 里（`files` 范围内）观测到的读**并进**登记表。只并不删——偏保守。"""
-    n = int(dump.get("n_collected_files") or 0)
+def merge_observation(reg: dict, dump: dict, files=None, *, n_tests: int) -> dict:
+    """把 dump 里（`files` 范围内）观测到的读**并进**登记表。只并不删——偏保守。`n_tests` 同 `counts_as_read_all`。"""
     out = json.loads(json.dumps(reg))
     for f, kinds in dump.get("by_file", {}).items():
         if files is not None and f not in files:
@@ -187,7 +204,7 @@ def merge_observation(reg: dict, dump: dict, files=None) -> dict:
         others = set(kinds.get("other_test", ()))
         if f in out["reads_all_tests"]:
             pass
-        elif n and len(others) >= READ_ALL_FRACTION * n:
+        elif counts_as_read_all(len(others), n_tests):
             out["reads_all_tests"] = sorted(set(out["reads_all_tests"]) | {f})
             out["reads_tests"].pop(f, None)
         elif others:
@@ -362,7 +379,7 @@ def registry_path(args) -> Path:
 def cmd_build(args) -> int:
     dump = json.loads(Path(args.build).read_text(encoding="utf-8"))
     commit = git("rev-parse", "HEAD", check=False).strip()
-    reg = build_registry(dump, commit)
+    reg = build_registry(dump, commit, n_tests=repo_test_count())
     save_registry(registry_path(args), reg)
     print(f"[select_tests] 登记表已重建：{len(reg['reads_all_tests'])} 个读全部测试文件的元守卫、"
           f"{len(reg['reads_tests'])} 个窄读者、{len(reg['nonpy_readers'])} 个被读的非代码文件 → {REGISTRY_REL}")
@@ -375,7 +392,7 @@ def cmd_check_drift(args) -> int:
     if not dump.get("by_file"):
         print("[select_tests] ❌ dump 是空的——测量没生效，不能当「没有漂移」", file=sys.stderr)
         return EXIT_USAGE
-    gaps = observed_gaps(reg, dump)
+    gaps = observed_gaps(reg, dump, n_tests=repo_test_count())
     if gaps:
         print(f"[select_tests] ❌ 登记表过期：{len(gaps)} 处读没有被登记（修法：本地整套带插件跑一次后 --build，或 --update）")
         for g in gaps:
@@ -419,7 +436,8 @@ def cmd_select(args) -> int:
         gaps = []
         if os.path.exists(dump):
             d = json.loads(Path(dump).read_text(encoding="utf-8"))
-            gaps = observed_gaps(reg, d, files=set(plan.changed_tests) if plan.mode == "subset" else None)
+            gaps = observed_gaps(reg, d, files=set(plan.changed_tests) if plan.mode == "subset" else None,
+                                 n_tests=repo_test_count())
         else:
             print("[select_tests] ⚠️ 审计插件没有产出 dump——这次没能随跑测量", file=sys.stderr)
     if gaps:
@@ -446,7 +464,7 @@ def cmd_update(args) -> int:
             print(f"[select_tests] ❌ 被改的测试没跑绿（rc={rc}），不并入登记表", file=sys.stderr)
             return rc
         d = json.loads(Path(dump).read_text(encoding="utf-8"))
-    new = merge_observation(reg, d, files=set(files))
+    new = merge_observation(reg, d, files=set(files), n_tests=repo_test_count())
     new["commit"] = git("rev-parse", "HEAD", check=False).strip()
     save_registry(registry_path(args), new)
     print(f"[select_tests] 已测量 {len(files)} 个测试文件并并入 {REGISTRY_REL}（只并不删）。请把它一起提交。")
