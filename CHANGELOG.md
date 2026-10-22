@@ -66,7 +66,44 @@
 变异：去掉入口闸 8 红 / 谓词 `<=`→`<` 4 红 / 出场不走共享谓词 2 红，全部还原后 171 passed。
 相关 10+ 个测试文件（含扫全仓的元守卫）504 + 354 passed；**未跑整套**（别的会话正在跑整套，按约定错开）。
 
-## [0.45.601] — 2026-10-22 — 占位（进行中：修 GitHub Actions 上 main 剩余的 CI 专属红——buzz_v1 价格差分、anthropic 未装、写沙箱 Linux 分支、step3 后置条件拨钟炸弹）
+## [0.45.601] — 2026-10-22 — Fixed：main 上 CI 专属的 3 条红 + 1 条拨钟红——buzz_v1 价格差分（CI 装的 pandas<3 让 `pct_change` 换义）、`anthropic` 未装、写沙箱平台闸、Step 3 后置条件读两只钟
+
+> 四条本机全过、CI 红，根因各不相同。只有第 1 条动了生产代码，生产值逐位不变。
+
+### Fixed
+1. `tests/test_buzz_v1_channels.py::TestDifferentialPrice::test_live_paths`（CI：`volatility_20d` 3681.35 vs 3529.04）
+   - 根因：**CI 与生产不是同一个 pandas**。`requirements.txt` 钉 `pandas>=2.1,<3` / `numpy<2`，CI 照装（同版本 venv 实测 2.3.3 / 1.26.4）；生产解释器 `/usr/local/bin/python3`
+     从 2026-02-24 起是 pandas 3.0.1 / numpy 2.4.2。`Series.pct_change()` 的缺省在 2.x 是 `fill_method='pad'`（先前向填充：NaN 收盘那天收益记 0、后一天对前一个有效收盘算），
+     3.x 是不填充（NaN 那根连同后一根的收益被 `dropna` 一起丢掉）。约 15% 的夹具日线含一根 NaN 收盘 ⇒ CI 上生产路径 ≠ 冻结通道层（它按不填充定义）。
+     CI 日志里那两条 `FutureWarning: The default fill_method='pad'`（`data_pipeline.py:602` / `:1022`）指的就是它。
+   - 修法：`data_pipeline.py` 三处（`_fetch_history_metrics` / `YFinanceSource.fetch` / `--date` 补跑 `_fetch_historical_stock_data`）写明 `pct_change(fill_method=None)`。
+     生产的缺省就是它，值不变；照 `requirements.txt` 装出来的环境（CI、新机器）不再无声换口径。没放宽容差。
+   - `price.fields` 指纹 `ee56f994…` → `e512d997…`，`signal_code_fingerprints.ACKS` 追加一条 `no_value_change`：**用户 2026-10-22 选「按 no_value_change 登记」**（经发起会话转述原话）——
+     生产 pandas 3.0.1（2026-02-24 起）缺省就是 `fill_method=None`，显式化在生产上是空操作；不登记边界、不截断 H1。
+   - 没改：`swarm_agents/cache.py::_fetch_stock_data` 里同样的 `pct_change()`——只在 `import data_pipeline` 失败时才走到，生产不可达。
+2. `tests/test_llm_service_5_5_models.py::TestCounters::test_rate_limit_exhausted_counted`（CI：`No module named 'anthropic'`）：SDK 是可选依赖（`requirements.txt` 里注释掉了），
+   CI 不装；`llm_service` 只拿它认 `RateLimitError`。改成往 `sys.modules` 放假模块，与 `tests/test_llm_service.py::TestRateLimitRetry` 同法。不往 requirements 加：生产恒 `--no-llm`。
+3. `tests/test_write_sandbox.py::TestStaleMarker::test_failed_inherited_canary_falls_through_to_apply`（CI：`sandbox_init` 没被调）：`apply()` 第一道闸是 `sys.platform != "darwin"` 就返回，
+   Linux 上走不到被测分支。测试本来就用 `_FakeLib` 假了库，现在把平台闸一并骗过（只换 `_write_sandbox` 看到的 `sys`，不动全局 `sys.platform`）。这条纯逻辑测试现在两个平台都真跑。
+4. `tests/test_orchestrator_step_postconditions.py::TestRealStepBlocks::test_step3_exit0_with_a_ticker_still_missing_is_partial`（clockshift +7 / +45 / +400 天红）：
+   期望文件名读的是 Python 的 `date.today()`，被测的 Step 3 块读的是 bash 的 `date +%Y-%m-%d`——两只钟。拨钟 harness 拨不到 bash `date`（`tools/clockshift/clockshift.py` 记的已知漏点）⇒ 拨钟恒红。
+   ⚠️ **更正 v0.45.596「二次检查」的「一周内真实钟上就会红」**：真实钟下两只钟一致，不会到期就红；真实风险只是零点前后两次读钟分岔（偶发）。
+   修法：bash 的 `date +%Y-%m-%d` 用函数钉成固定日（其它格式照走真 `date`），期望用同一个字面量；删掉不再用的 `from datetime import date`。
+
+### 验证
+- 相关 6 个文件 249 passed；ruff 无告警。
+- #1：同版本 venv（照 `requirements.txt` 装，去掉 macOS 专属的 pywebview；pandas 2.3.3 / numpy 1.26.4）里 `test_buzz_v1_channels.py` 51 passed。
+  改动前（origin/main 原文）后逐字段比对：实时 800 份随机日线（108 份含 NaN 收盘）各过 `_fetch_history_metrics` 与 `YFinanceSource.fetch`、补跑 300 份（40 份含 NaN），共 1900 次比对——pandas 3.0.1 全同；pandas 2.3.3 出差异（正对照）。
+- #2：子进程里 `sys.modules["anthropic"] = None` 复现 CI 的 ImportError，`TestCounters` 11 passed。
+- #3：子进程里 `sys.platform = "linux"` 模拟 CI：改前复现 `assert []`，改后 passed。
+- #4：`tools/clockshift/audit.py --days 7 --days 45 -- tests/test_orchestrator_step_postconditions.py` 两档新红都是 0 条；+400 天 32 passed。变异「不钉钟」⇒ 红（写出的是真实今天、期望 `2026-03-02`）。
+- 整套（`-m "not integration and not network"`，等别的会话的整套跑完才开跑，报告头无 `concurrency:`）：**11430 通过 / 0 失败 / 2 xfail（85 deselected），614 s**。
+- 二次检查（同日）：上游在本版开工后只改了 CHANGELOG（指纹单元文件都没动，rebase 后 `e512d997` 仍成立）；CI 日志核实装的就是 pandas 2.3.3 / numpy 1.26.4；生产与 CI 都没装 bottleneck（实测）；pandas 2.3.3 下显式 `fill_method=None` 不发 FutureWarning；venv 里四处修复相关 198 条全过，改前的 5_5 测试文件在 venv（真没装 anthropic）里原样复现 CI 报错。更正初稿一处：「148 份含 NaN」原挂在补跑组上，按组重跑后为实时 108 + 补跑 40。
+- CI：推送后核对，结果补在本条末尾。
+
+### 遗留（未修）
+- `requirements.txt`（pandas<3、numpy<2）与生产（3.0.1 / 2.4.2）不一致 ⇒ CI 测的不是生产用的库。仓里另有十几处 `pct_change()`（`risk_engine` / `crowding_detector` /
+  `options_analyzer` / `ic_diagnostics` / `signal_archive` …）在 2.x 下同样换义，CI 测的是另一个口径。要不要把 `requirements.txt` 对齐到生产，**用户还没决定**；本版刻意没动它。
 
 ## [0.45.600] — 2026-10-22 — Fixed：v0.45.597 二次检查——「跑生成器用哪个解释器」改按确定规则（写进 .app 的不是缺省 ⇒ 生成器也用它），不再看当时环境；修壳里「找不到解释器」弹窗的命令被生成时环境冻住、缺省真坏了照做仍失败
 

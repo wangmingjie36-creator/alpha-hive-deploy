@@ -34,7 +34,6 @@ import os
 import re
 import subprocess
 import sys
-from datetime import date
 from pathlib import Path
 
 import pytest
@@ -213,19 +212,26 @@ def _stub_run_step(write: str) -> str:
     return f'run_step() {{ {write or ":"}; return ${{STUB_RC:-0}}; }}\n'
 
 
+#: Step 3 整块认「今天」只读 bash 的 `date +%Y-%m-%d`（DATE_STR 与块内跨零点判据 `_NOW_DATE`）⇒ 把这一只钟钉成固定日，
+#: 期望文件名用同一个字面量。v0.45.601 前期望值读的是 Python 的 `date.today()`——两只钟：拨钟 harness 拨不到 bash `date`
+#: （已知漏点）⇒ +7 / +45 / +400 天恒红；真实钟下零点前后也会分岔。其它格式（`date +%s` 记耗时）照走真 `date`。
+_STEP3_DAY = "2026-03-02"
+_PIN_STEP3_DAY = ('date() { if [ "$#" -eq 1 ] && [ "$1" = "+%Y-%m-%d" ]; then echo ' + _STEP3_DAY
+                  + '; else command date "$@"; fi; }\n')
+
+
 class TestRealStepBlocks:
     """Step 3 / 6 整块从仓库编排器抽出来真跑：接没接上、整体状态口径对不对，只有真跑看得出。"""
 
     def _step3(self, orch, tmp, write, rc=0):
         block = _block(orch, "# Step 3: ML 增强报告生成", "# Step 4/5:")
-        pre = 'TICKERS=(AAA BBB)\nDATE_STR="$(date +%Y-%m-%d)"\nALPHA_HIVE_ML_REPORT_MAX=12\n'
+        pre = _PIN_STEP3_DAY + 'TICKERS=(AAA BBB)\nDATE_STR="$(date +%Y-%m-%d)"\nALPHA_HIVE_ML_REPORT_MAX=12\n'
         return _bash(_funcs(orch) + _stub_run_step(write) + f"STUB_RC={rc}\n" + pre + block, tmp=tmp)
 
     def test_step3_exit0_with_a_ticker_still_missing_is_partial(self, orch, tmp_path):
         r = self._step3(orch, tmp_path, ': > "$DATA_DIR/alpha-hive-AAA-ml-enhanced-${DATE_STR}.html"')
         s3 = r["steps"]["step3_ml_report"]
-        today = date.today().isoformat()
-        assert s3["status"] == "failed" and s3["missing"] == [f"alpha-hive-BBB-ml-enhanced-{today}.html"], r
+        assert s3["status"] == "failed" and s3["missing"] == [f"alpha-hive-BBB-ml-enhanced-{_STEP3_DAY}.html"], r
         assert r["status"] == "partial", "Step 3 的 rc≠0 支整体 partial，no_output 同口径"
 
     def test_step3_all_written_is_success(self, orch, tmp_path):

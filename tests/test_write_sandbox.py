@@ -299,6 +299,8 @@ class TestStaleMarker:
         monkeypatch.delenv(WS.OPT_OUT_ENV, raising=False)
         fake = _FakeLib(rc=-1)
         monkeypatch.setattr(WS.ctypes, "CDLL", lambda path: fake)
+        # 库是假的 ⇒ 平台闸也得骗过（只换 WS 看到的 sys）：否则 Linux CI 在 `sys.platform != "darwin"` 就返回、根本到不了这里。
+        monkeypatch.setattr(WS, "sys", types.SimpleNamespace(platform="darwin", executable=sys.executable))
         st = WS.apply(root)
         assert fake.calls, "标记验不过就得自己套（旧代码在这里直接返回，从不调 sandbox_init）"
         assert st["stale_marker"] and not st["inherited"] and not st["active"]

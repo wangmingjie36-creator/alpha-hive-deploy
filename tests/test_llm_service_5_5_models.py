@@ -248,11 +248,18 @@ class TestCounters:
         assert llm_service.get_usage()["failed_calls"] == 1
 
     def test_rate_limit_exhausted_counted(self, monkeypatch):
-        import anthropic
+        # 假 anthropic 模块（同 test_llm_service.TestRateLimitRetry）：SDK 是可选依赖、CI 不装，`llm_service` 只拿它认 RateLimitError
+        import sys
+        import types
+
+        class _RateLimitError(Exception):
+            pass
+        fake = types.ModuleType("anthropic")
+        fake.RateLimitError = _RateLimitError
+        monkeypatch.setitem(sys.modules, "anthropic", fake)
         monkeypatch.setattr(llm_service, "_RATE_LIMIT_RETRY_DELAYS", ())
         monkeypatch.setattr(llm_service.time, "sleep", lambda s: None)
-        err = anthropic.RateLimitError.__new__(anthropic.RateLimitError)
-        _install(monkeypatch, _FakeClient(raises=err))
+        _install(monkeypatch, _FakeClient(raises=_RateLimitError("429")))
         assert llm_service.call("hi") is None
         assert llm_service.get_usage()["failed_calls"] == 1
 
