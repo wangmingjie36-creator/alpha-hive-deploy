@@ -176,8 +176,32 @@ _PLAIN_WORD = re.compile(r"[^\s'\"$`\\;&|<>()*?\[\]{}!#~]+")
 PY_UNSAFE_CHARS = "\"$`\\'\n"
 
 
+#: 记下的解释器不能沿用、或要教人换解释器时，命令里放的占位（给人改成实际路径；不含要引号的字符，原样进壳）
+PLACEHOLDER_PY = "/新解释器的绝对路径"
+
+
 def _cmd_word(s: str) -> str:
     return s if _PLAIN_WORD.fullmatch(s) else shlex.quote(s)
+
+
+def python_rule_problem(python: str) -> Optional[str]:
+    """`python` 现在能不能作为 .app 的解释器写进壳、写进给人抄的命令 ⇒ 问题描述；能 ⇒ None。
+
+    **现行**规则只此一份（v0.45.597）：生成时 `build_app` 拒、提示时 `regen_hint` 判沿不沿用，都经这里——此前提示照搬
+    壳里记下的值，而 456 之前的生成器把裸名字 / 相对路径原样写进过壳，照抄就被生成器自己拒掉。不核对存在与否
+    （那是 `interpreter_problem`：缺省解释器在 CI 上本来就不存在，人也可能之后才装）。
+    """
+    if not os.path.isabs(python):
+        return "不是绝对路径"
+    bad = sorted({c for c in python if c in PY_UNSAFE_CHARS}, key=PY_UNSAFE_CHARS.index)
+    if bad:
+        return f"含 shell 会解释或截断的字符 {bad!r}"
+    return None
+
+
+def _default_python_usable() -> bool:
+    """缺省解释器此刻能不能跑生成器——与壳里双击时同一判据 `interpreter_problem`。单独成函数：测试据此钉住环境。"""
+    return interpreter_problem(DEFAULT_PYTHON) is None
 
 
 def regen_hint(repo: Path, python: str) -> str:
@@ -191,11 +215,26 @@ def regen_hint(repo: Path, python: str) -> str:
     `python` **必填**（v0.45.498）：重新生成要沿用 .app 记下的那个解释器——等于缺省就不写（缺省命令生成的就是它），
     否则带上 `PYTHON=` / `--python`。此前它可省、省了就等于「用缺省」：487 的过时提醒、壳头注释、「代码目录挪了」那句
     都没传，照抄就把自定义解释器悄悄换回 `/usr/local/bin/python3`。要教人**换**解释器的那句传占位（`_python_fix_hint`）。
+
+    给出的命令**照抄要跑得通**（v0.45.597，498 二次检查 #1 / #2）——此前只管「沿用」，没核「今天还跑不跑得通」：
+    - 记下的解释器不合现行规则（`python_rule_problem`：456 之前的生成器把 `python3` 这类裸名字原样写进过壳）⇒ 沿用就被
+      生成器拒 ⇒ 改给占位 `PLACEHOLDER_PY`，前面说明一句；那个值本身不嵌进来（可能带 shell 特殊字符，结果要进双引号）。
+    - **跑生成器**的解释器：缺省可用就是它（命令里不写）；不可用 ⇒ 用要写进 .app 的那个（它可用时），否则占位。推荐入口
+      经 make 的 `ALPHABOT_GEN_PY` 指定，直跑写在命令开头。此前恒为缺省：换解释器常常正是因为缺省坏了，照抄第一步就失败。
+      「可用」与壳里双击时同一判据 `interpreter_problem`，不另写一份。
     """
+    note = ""
+    if python_rule_problem(python):
+        python = PLACEHOLDER_PY
+        note = "（.app 里记的解释器不合现行规则：须是不含引号等特殊字符的绝对路径，把命令里的占位换成实际要用的解释器）"
+    runner = None
+    if not _default_python_usable():
+        runner = python if python != PLACEHOLDER_PY and interpreter_problem(python) is None else PLACEHOLDER_PY
     py = "" if python == DEFAULT_PYTHON else _cmd_word(python)
     if _is_default_clone(repo):
-        return f"在终端执行 {canonical_entry()}" + (f" PYTHON={py}" if py else "")
-    return (f"在那份代码目录里执行 {DEFAULT_PYTHON} -m alphabot.macos_app --repo ."
+        return (f"{note}在终端执行 {canonical_entry()}" + (f" PYTHON={py}" if py else "")
+                + (f" ALPHABOT_GEN_PY={_cmd_word(runner)}" if runner else ""))
+    return (f"{note}在那份代码目录里执行 {_cmd_word(runner or DEFAULT_PYTHON)} -m alphabot.macos_app --repo ."
             + (f" --python {py}" if py else ""))
 
 
@@ -284,7 +323,7 @@ exit 126
 def _python_fix_hint(repo: Path) -> str:
     """解释器找不到 / 执行失败时的处理办法（两处弹窗共用）。"""
     return ("装回它即可；要换解释器：先用新解释器 -m pip install -r requirements.txt，再"
-            f"{regen_hint(repo, python='/新解释器的绝对路径')}（没装依赖的解释器起不了服务）")
+            f"{regen_hint(repo, python=PLACEHOLDER_PY)}（没装依赖的解释器起不了服务）")
 
 
 def _is_ours(bundle: Path) -> bool:
@@ -308,9 +347,9 @@ def build_app(dest_dir: Path, *, repo: Optional[Path] = None, python: str = DEFA
     dest_dir = Path(dest_dir).expanduser()
     repo = _repo_root() if _given(repo, "repo") is None else Path(repo).resolve()
     python = _must_be_absolute(python, "python")
-    bad = sorted({c for c in python if c in PY_UNSAFE_CHARS}, key=PY_UNSAFE_CHARS.index)
-    if bad:
-        raise BuildError(f"解释器路径 {python!r} 含 {bad!r}：它要进 .app 里的提示与给人抄的重新生成命令，在那里会被 shell "
+    rule = python_rule_problem(python)          # 与提示判「能不能沿用」同一条（v0.45.597）
+    if rule:
+        raise BuildError(f"解释器路径 {python!r} {rule}：它要进 .app 里的提示与给人抄的重新生成命令，在那里会被 shell "
                          "解释或截断。换一个不含这些字符的路径（指过去的软链即可）")
     problem = generator_dir_problem(repo)
     if problem:
