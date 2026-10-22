@@ -112,14 +112,19 @@ _PRICING = {
 # 模型档案：Sonnet 5.5 / Opus 5.5 不接受非默认采样参数（temperature 会 400），思考的开关也不同：
 #   Sonnet 5.5 关思考用 {"type": "between_tools"}（"disabled" 会 400）；
 #   Opus 5.5 关不掉思考，只能压 effort（output_config.effort="low"）。
-# 思考 token 计入 max_tokens，所以这两个模型的 max_tokens 要放宽：max(请求值×mult, 请求值+add)
-# （2026-10-19 实测 Opus 加 1024 余量后 0/15 截断；Sonnet 不放宽时 11/18 截断）。
+# max_tokens 要放宽：max(请求值×mult, 请求值+add)。
+# ⚠️ 截断的真因是**调用点的 max_tokens 小于模型的自然输出长度**，不是思考：10-19 试跑里 Sonnet 的回复块全是 text（没有 thinking
+#   块）；Haiku 18/18、Sonnet 11/18 都在原始上限（256 / 300 / 400 / 800）处被截断，截断点落在 JSON 字段中间。Opus 放宽后
+#   的自然长度（text，不含思考）实测：蜂的单次评估 150~440 token，但 BearBee 的空头论述 1096 / 1215、Queen 蒸馏 1105 token
+#   （调用点只给 400 / 800）。Sonnet 回复的 JSON 长度与 Opus 同量级，另有偶发的代码块围栏和 JSON 之后的补充说明（约占字符 4%）。
+#   ⇒ Opus +1024 余量够用（0/15 截断，最长 1215 vs 上限 1424，余量薄）；Sonnet 用 +2048（最长 1215 对上限 2448，约 2×）。
+#   放宽上限不增加实际费用（费用按实际输出计），只抬高预算预检里的最坏情况预留。
 # SDK 版本较旧（0.84.0）未必认识这些字段，故统一走 extra_body。
 _MODEL_PROFILES = {
     "claude-sonnet-5-5": {
         "sampling": False,
         "extra_body": {"thinking": {"type": "between_tools"}},
-        "max_tokens_mult": 3, "max_tokens_add": 1024,
+        "max_tokens_mult": 3, "max_tokens_add": 2048,
     },
     "claude-opus-5-5": {
         "sampling": False,
