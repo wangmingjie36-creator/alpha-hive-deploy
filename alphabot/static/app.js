@@ -10,6 +10,7 @@ import { renderHedge } from "./pages/hedge.js";
 import { renderResults } from "./pages/results.js";
 import { renderMethod } from "./pages/method.js";
 import { renderHelp } from "./pages/help.js";
+import { initChat } from "./chat.js";
 
 export const state = { meta: null };
 const app = document.getElementById("app");
@@ -104,4 +105,5 @@ async function route() {
 
 window.addEventListener("hashchange", route);
 const metaTimer = setInterval(() => { refreshMeta().catch(() => {}); }, 60000);
+initChat();
 route();

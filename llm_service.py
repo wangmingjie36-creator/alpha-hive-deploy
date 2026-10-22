@@ -107,7 +107,16 @@ _PRICING = {
     "claude-sonnet-4-6": {"input": 3.0 / 1_000_000, "output": 15.0 / 1_000_000},
     "claude-sonnet-5-5": {"input": 2.0 / 1_000_000, "output": 10.0 / 1_000_000},
     "claude-opus-5-5": {"input": 4.0 / 1_000_000, "output": 20.0 / 1_000_000, "cache_read_mult": 0.05},
+    # Opus 5.5 拒答时 `fallbacks: "default"` 可能落到这两个（v0.45.614，Alpha Bot 对话按尝试记账用）；
+    # 价目页 2026-10-22 核：$5 / $25，缓存读 $0.50（= 0.10×）
+    "claude-opus-5": {"input": 5.0 / 1_000_000, "output": 25.0 / 1_000_000},
+    "claude-opus-4-8": {"input": 5.0 / 1_000_000, "output": 25.0 / 1_000_000},
 }
+# 没登记的模型要记账时（如拒答回落到了新模型）按这个算，宁多勿少：价目页最贵的一档（Fable 5.1 / Mythos 5.1，
+# 2026-10-22 核 $10 / $50）。只用于记账，不放行调用——call() 照旧拒绝未登记的模型。
+_CEILING_PRICING = {"input": 10.0 / 1_000_000, "output": 50.0 / 1_000_000}
+# 服务端工具按次计费（美元 / 次），token 另计。价目页 2026-10-22 核：web search $10 / 1,000 次（出错的那次不收）。
+SERVER_TOOL_PRICES = {"web_search_requests": 10.0 / 1000}
 
 # 模型档案：Sonnet 5.5 / Opus 5.5 不接受非默认采样参数（temperature 会 400），思考的开关也不同：
 #   Sonnet 5.5 关思考用 {"type": "between_tools"}（"disabled" 会 400）；
@@ -225,6 +234,44 @@ def is_available() -> bool:
     if _disabled:
         return False
     return _get_client() is not None
+
+
+def get_client():
+    """Anthropic 客户端（取不到 ⇒ None）：密钥来源与 call() 同一套，不另找。给自己管请求的调用方（Alpha Bot 对话）用。"""
+    return _get_client()
+
+
+def price_of(model: str) -> Optional[Dict]:
+    """登记过的单价（美元 / token）；没登记 ⇒ None。"""
+    return _PRICING.get(model)
+
+
+def _cost_with(pricing: Dict, usage) -> float:
+    """按一套单价算一次调用的 token 费用。`usage` 是 SDK 对象或原始 JSON 的 dict 都行。
+
+    ⚠️ usage.input_tokens 是**未缓存**的输入 token，不含缓存写入 / 读取：总输入 =
+    input_tokens + cache_creation + cache_read（2026-10-19 用 count_tokens 实测：
+    2318 = 1505 + 812 + 0）。v0.45.555 前这里写成 input − 缓存写 − 缓存读，
+    于是缓存部分少收了全价、缓存读多时甚至会出现负的「未缓存」输入。
+    """
+    def g(k):
+        v = usage.get(k) if isinstance(usage, dict) else getattr(usage, k, None)
+        return v or 0
+    return (g("input_tokens") * pricing["input"]
+            + g("cache_creation_input_tokens") * pricing["input"] * 1.25                         # 缓存写入 1.25x
+            + g("cache_read_input_tokens") * pricing["input"] * pricing.get("cache_read_mult", 0.10)  # 缓存读取
+            + g("output_tokens") * pricing["output"])
+
+
+def usage_cost(model: str, usage) -> Optional[float]:
+    """一次调用的 token 费用（美元）；模型没登记 ⇒ None（调用方决定怎么办，别按别的模型的价算）。"""
+    pricing = _PRICING.get(model)
+    return None if pricing is None else _cost_with(pricing, usage)
+
+
+def usage_cost_ceiling(usage) -> float:
+    """按最贵一档单价算的 token 费用：给没登记的模型记账用（宁多勿少）。"""
+    return _cost_with(_CEILING_PRICING, usage)
 
 
 def get_usage() -> Dict:
@@ -381,22 +428,12 @@ def _do_request(client, prompt: str, system: str, model: str, max_tokens: int,
             if hasattr(block, "text"):
                 text += block.text
 
-        # 追踪用量（含 prompt caching 计费），pricing 已在预算预检处定义
-        #
-        # ⚠️ usage.input_tokens 是**未缓存**的输入 token，不含缓存写入 / 读取：总输入 =
-        # input_tokens + cache_creation + cache_read（2026-10-19 用 count_tokens 实测：
-        # 2318 = 1505 + 812 + 0）。v0.45.555 前这里写成 input − 缓存写 − 缓存读，
-        # 于是缓存部分少收了全价、缓存读多时甚至会出现负的「未缓存」输入。
+        # 追踪用量（含 prompt caching 计费），pricing 已在预算预检处定义；公式只在 _cost_with 一处（v0.45.614）
         usage = response.usage
         cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
         cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
         uncached_input = usage.input_tokens
-        cost = (
-            uncached_input * pricing["input"]
-            + cache_create * pricing["input"] * 1.25                                  # 缓存写入 1.25x
-            + cache_read * pricing["input"] * pricing.get("cache_read_mult", 0.10)    # 缓存读取
-            + usage.output_tokens * pricing["output"]
-        )
+        cost = _cost_with(pricing, usage)
 
         with _lock:
             _token_usage["input_tokens"] += uncached_input + cache_create + cache_read

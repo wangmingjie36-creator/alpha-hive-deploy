@@ -27,6 +27,7 @@ from typing import Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import sell_strike_report as R
+from alphabot import chat as CH
 from alphabot import hedge as HG
 from alphabot import howto as HW
 from alphabot import macos_app as MA
@@ -307,6 +308,7 @@ class AlphaBotService:
             # 不写死缺省、不假设人站在代码目录里（v0.45.611）
             "app": {"launcher": MA.here_command("-m alphabot.launcher"),
                     "pip_install": MA.here_command("-m pip install -r requirements.txt")},
+            "chat": CH.public_rules(),
         })
 
     # ── 财报跨式账本（v0.45.424，只读）
@@ -667,8 +669,9 @@ class AlphaBotService:
         return self.state_dir() / "settings.json"
 
     def settings(self) -> dict:
+        # chat_enabled 缺省关（v0.45.614）：对话每问都花 API 费用，只能由人在抽屉里点开（CLAUDE.md：不许「有 key 就自动开」）
         base = {"favorites": [], "focus": list(DEFAULT_FOCUS), "interval_min": DEFAULT_INTERVAL_MIN,
-                "poll_enabled": True}
+                "poll_enabled": True, "chat_enabled": False}
         p = self._settings_path()
         if p.is_file():
             try:
@@ -704,6 +707,10 @@ class AlphaBotService:
                 cur["interval_min"] = iv
             if "poll_enabled" in patch:
                 cur["poll_enabled"] = bool(patch["poll_enabled"])
+            if "chat_enabled" in patch:
+                if not isinstance(patch["chat_enabled"], bool):     # "false" 经 bool() 是 True：花钱的开关只认真布尔
+                    raise BadRequest("chat_enabled 须为 true / false")
+                cur["chat_enabled"] = patch["chat_enabled"]
             _atomic_write_json(self._settings_path(), cur)
             return cur
 

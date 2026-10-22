@@ -33,7 +33,9 @@
     <datalist id="ticker-list"></datalist>
   </form>
   <div class="session" id="session" aria-live="polite"></div>
+  <button class="btn chat-toggle" id="chat-toggle" type="button" aria-controls="chat-drawer" aria-expanded="false">对话</button>
 </header>
+<aside class="chat-drawer" id="chat-drawer" aria-label="对话" hidden></aside>
 <div class="demo-banner" id="demo-banner" hidden>演示模式 · 合成期权链，不是行情；不读账本、不写真实状态目录</div>
 <main id="app" class="app" tabindex="-1"></main>
 <footer class="foot" id="foot"></footer>
