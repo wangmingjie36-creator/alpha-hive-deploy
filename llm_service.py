@@ -71,6 +71,12 @@ _token_usage = {
 _budget_date: Optional[date] = None  # 当前预算对应的日期
 _inflight_cost: float = 0.0  # 已通过预检、尚未返回的调用的最坏情况费用（并行蜂共用同一预算）
 
+# 本线程最近一次 call() 的响应形状（stop_reason / 块类型）：call_json 解析失败时拿来写日志。
+# 线程局部：并行蜂各自的 call → call_json 在同一线程里先后发生，互不串。只有拿到响应（text 非 None）才会走到
+# 解析失败的日志，而那时本线程的值刚被这次响应写过，所以不需要入口清空。
+_last_call = threading.local()
+_FAIL_PREVIEW_CHARS = 300
+
 
 def _bump(key: str, n: int = 1) -> None:
     """给 _token_usage 的计数器加一（线程安全；字典里没有这个键就当 0 起算）。"""
@@ -427,6 +433,8 @@ def _do_request(client, prompt: str, system: str, model: str, max_tokens: int,
         for block in response.content:
             if hasattr(block, "text"):
                 text += block.text
+        _last_call.stop_reason = getattr(response, "stop_reason", None)
+        _last_call.block_types = [getattr(b, "type", "?") for b in response.content]
 
         # 追踪用量（含 prompt caching 计费），pricing 已在预算预检处定义；公式只在 _cost_with 一处（v0.45.614）
         usage = response.usage
@@ -502,7 +510,12 @@ def call_json(
     # 拿到了文本却解析不出 JSON（多半是被 max_tokens 截断）⇒ 调用方随即回落规则引擎。
     # 以前这里无声返回 None，没有任何地方看得出「LLM 臂其实没在工作」。
     _bump("json_parse_failures")
-    _log.warning("LLM 返回无法解析为 JSON（%d 字符），调用方将回落规则引擎", len(text))
+    # v0.45.628：只记长度查不出原因（影子 A/B 第 2 代首日 Queen 蒸馏 3 次失败，回复仅 291~463 字符、非截断）。
+    # 现在连同 stop_reason、块类型和回复前 300 字符一起记（%r：换行转义成 \n，一行一条好 grep）。
+    _log.warning(
+        "LLM 返回无法解析为 JSON（%d 字符）stop_reason=%s 块=%s 前%d字符=%r，调用方将回落规则引擎",
+        len(text), getattr(_last_call, "stop_reason", None), getattr(_last_call, "block_types", None),
+        _FAIL_PREVIEW_CHARS, text[:_FAIL_PREVIEW_CHARS])
     return None
 
 
