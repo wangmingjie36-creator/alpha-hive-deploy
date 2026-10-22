@@ -60,6 +60,102 @@ class TestGenerationTwoDefinition:
         assert st["generation"] is None and st["model"] is None
 
 
+class TestHistoricalAnalogyDisabledInShadow:
+    """第 2 代起影子里关掉「历史类比」（agent_memory 的唯一读者；只改分不改方向）。关闭要真生效，且失效会红。"""
+
+    @pytest.fixture
+    def qd(self, monkeypatch):
+        from swarm_agents.queen_distiller import QueenDistiller
+        monkeypatch.setattr(QueenDistiller, "enrich_with_historical_analogy",
+                            QueenDistiller.enrich_with_historical_analogy)      # 登记原值，测试结束自动还原
+        return QueenDistiller
+
+    class _Boom:
+        """任何访问都炸：证明关闭后既不碰向量记忆也不碰 agent_memory。"""
+        enabled = True
+
+        def __getattr__(self, name):
+            raise AssertionError(f"关闭后不该访问 {name}")
+
+    def test_patched_function_is_a_noop_that_touches_nothing(self, qd, monkeypatch):
+        import llm_service
+        monkeypatch.setattr(llm_service, "find_historical_analogy",
+                            lambda **kw: (_ for _ in ()).throw(AssertionError("不该调 LLM")))
+        sh.disable_historical_analogy()
+        d = {"final_score": 6.0, "direction": "bullish"}
+        out = qd.enrich_with_historical_analogy(types.SimpleNamespace(enable_llm=True), "AAA", d,
+                                                vector_memory=self._Boom(), memory_store=self._Boom())
+        assert out is d and d["final_score"] == 6.0 and d["direction"] == "bullish"
+        assert d["historical_analogy"] is None
+
+    def test_positive_control_original_would_adjust_the_score(self, qd, monkeypatch):
+        """有牙：没打补丁时，同样的入参会读 agent_memory、调 LLM、改分——证明上面那条「没动」是补丁的功劳。"""
+        import llm_service
+        calls = []
+
+        class VM:
+            enabled = True
+            def search(self, **kw):
+                return [{"x": i} for i in range(6)]            # 命中 ≥5 ⇒ 过门槛
+
+        class MS:
+            def get_recent_memories(self, **kw):
+                calls.append("agent_memory")
+                return []
+        monkeypatch.setattr(llm_service, "find_historical_analogy",
+                            lambda **kw: {"analogy_found": True, "confidence_adjustment": -0.03})
+        d = {"final_score": 6.0, "direction": "bullish"}
+        qd.enrich_with_historical_analogy(types.SimpleNamespace(enable_llm=True), "AAA", d,
+                                          vector_memory=VM(), memory_store=MS())
+        assert calls == ["agent_memory"] and d["final_score"] != 6.0
+
+    def test_default_scan_applies_the_patch_before_scanning(self, qd, monkeypatch):
+        import alpha_hive_daily_report as adr
+        seen = {}
+
+        class _Stop(Exception):
+            pass
+
+        class FakeReporter:
+            date_str = "2026-10-22"
+
+            def run_swarm_scan(self, focus_tickers=None):
+                seen["fn"] = qd.enrich_with_historical_analogy.__name__
+                raise _Stop()
+        monkeypatch.setattr(adr, "AlphaHiveDailyReporter", FakeReporter)
+        with pytest.raises(_Stop):
+            sh.default_scan(["AAA"])
+        assert seen["fn"] == "_skipped"
+
+    def test_run_child_does_not_patch_when_scan_is_injected(self, child_env, tmp_path):
+        """补丁只在真实扫描入口（default_scan）里打：run_child 注入假扫描时不污染进程里的真类。"""
+        from swarm_agents.queen_distiller import QueenDistiller
+        before = QueenDistiller.enrich_with_historical_analogy
+        sh.run_child(_child_args(child_env, tmp_path, "--control"), scan=lambda t: {}, now=date(2026, 10, 22))
+        assert QueenDistiller.enrich_with_historical_analogy is before
+
+    def test_fired_analogy_makes_the_day_unhealthy(self):
+        pt = _tickers(10)
+        pt["T3"]["analogy_fired"] = True
+        q = sh.quality_report(_usage(), pt, llm_on=True)
+        assert q["healthy"] is False and any("历史类比被触发（T3）" in r for r in q["reasons"])
+
+    def test_control_mode_ignores_it(self):
+        pt = _tickers(10)
+        pt["T3"]["analogy_fired"] = True
+        assert sh.quality_report(_usage(), pt, llm_on=False)["healthy"] is True
+
+    @pytest.mark.parametrize("val,expected", [(None, False), ({}, False), ({"analogy_found": False}, True),
+                                              ({"analogy_found": True, "score_adjustment_applied": -0.15}, True)])
+    def test_per_ticker_records_whether_it_fired(self, val, expected):
+        sr = {"AAA": {"final_score": 6.0, "direction": "bullish", "historical_analogy": val}}
+        assert sh.per_ticker_from_swarm_results(sr, ["AAA"])["AAA"]["analogy_fired"] is expected
+
+    def test_missing_key_means_not_fired(self):
+        sr = {"AAA": {"final_score": 6.0, "direction": "bullish"}}
+        assert sh.per_ticker_from_swarm_results(sr, ["AAA"])["AAA"]["analogy_fired"] is False
+
+
 class TestPickTickers:
     U = [f"T{i:02d}" for i in range(30)]
 

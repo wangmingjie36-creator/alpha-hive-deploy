@@ -131,6 +131,7 @@ def quality_report(usage: Dict, per_ticker: Dict[str, Dict], *, llm_on: bool) ->
     attempts = calls + failed
     n_t = len(per_ticker)
     queen_llm = sum(1 for v in per_ticker.values() if v.get("distill_mode") == "llm_enhanced")
+    analogy = sorted(tk for tk, v in per_ticker.items() if v.get("analogy_fired"))
     rates = {
         "truncation_rate": round(trunc / calls, 4) if calls else None,
         "json_parse_failure_rate": round(jfail / calls, 4) if calls else None,
@@ -152,6 +153,8 @@ def quality_report(usage: Dict, per_ticker: Dict[str, Dict], *, llm_on: bool) ->
         if rates["failed_call_rate"] is not None and rates["failed_call_rate"] > MAX_FAIL_RATE:
             reasons.append(f"failed_call_rate={rates['failed_call_rate']:.0%} > {MAX_FAIL_RATE:.0%}"
                            f"（{failed} 次请求没拿到响应，对应的蜂回落规则引擎）")
+        if analogy:
+            reasons.append(f"历史类比被触发（{' '.join(analogy)}）——第 2 代在影子里应已关闭，LLM 臂多出了预注册里没有的成分")
         if rates["queen_llm_rate"] is not None and rates["queen_llm_rate"] < MIN_QUEEN_LLM_RATE:
             reasons.append(f"queen_llm_rate={rates['queen_llm_rate']:.0%} < {MIN_QUEEN_LLM_RATE:.0%}（蒸馏没走 LLM）")
     return {**rates, "healthy": not reasons, "reasons": reasons, "llm_on": llm_on}
@@ -174,6 +177,8 @@ def per_ticker_from_swarm_results(swarm_results: Dict, tickers: Sequence[str]) -
             "distill_mode": v.get("distill_mode"),
             "llm_confidence": v.get("llm_confidence"),
             "data_real_pct": v.get("data_real_pct"),
+            # 第 2 代起历史类比在影子里关闭；这里记「它有没有被触发」，让关闭失效（函数改名 / 补丁没生效）会红
+            "analogy_fired": bool(v.get("historical_analogy")),
         }
     return out
 
@@ -279,10 +284,27 @@ def write_status(shadow_root: Path, status: Dict) -> Path:
     return path
 
 
+def disable_historical_analogy() -> None:
+    """在**本进程**里把 QueenDistiller 的「历史类比」换成空操作（只在影子子进程的真实扫描里调用，生产不碰）。
+
+    为什么关：它是 `agent_memory` 表的唯一读者，只在 LLM 模式下对当天前 3 名标的多调一次 LLM、给 `final_score` 加减最多 0.5
+    （**只改分、不改方向**）。第 1 代首日 AMZN 触发过一次，模型自己说「无实际回报数据可验证」，类比对象还是前一天影子 control
+    存进影子 Chroma 的记录（不是生产历史）。留着就让 LLM 臂多出一个预注册里没有的成分，描述性分差 / Queen 层分解里会掺进去，
+    而它吃的输入（`agent_memory` 的回报列）有已知缺陷。用户 2026-10-22 定：只关这一个读者，表和写入都不动。
+    """
+    from swarm_agents.queen_distiller import QueenDistiller
+
+    def _skipped(self, ticker, distilled, *args, **kwargs):
+        distilled["historical_analogy"] = None       # 与原函数「门槛没过」时的取值一致
+        return distilled
+    QueenDistiller.enrich_with_historical_analogy = _skipped
+
+
 def default_scan(tickers: List[str]) -> Dict:
     """真正跑蜂群（只在子进程里调用：此时 ALPHA_HIVE_HOME 已指向影子根）。返回 `.swarm_results_<日期>.json` 的内容。"""
     from alpha_hive_daily_report import AlphaHiveDailyReporter
     from hive_logger import PATHS
+    disable_historical_analogy()
     reporter = AlphaHiveDailyReporter()
     reporter.run_swarm_scan(focus_tickers=tickers)
     path = Path(PATHS.home) / f".swarm_results_{reporter.date_str}.json"

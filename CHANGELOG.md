@@ -5,7 +5,24 @@
 
 ---
 
-## [0.45.594] — 2026-10-22 — 占位（进行中：LLM 影子 A/B 第 2 代在影子里关掉历史类比——它是 agent_memory 的唯一读者且只改分不改方向，留着会让臂的定义多出一个成分；用户 10-22 定「只做第 1 步」）
+## [0.45.594] — 2026-10-22 — Changed：LLM 影子 A/B 第 2 代在影子里关掉「历史类比」（`agent_memory` 的唯一读者）；关闭失效会让当天判不健康
+
+> 用户 2026-10-22 问「`agent_memory` 能删吗」，分析结论是生产无读者、信息在 `.swarm_results_*.json` 的 `agent_details` 里有更全的副本，建议分三步（影子里关读者 → 停写并退役读者 → 备份后 drop）；用户定**只做第 1 步**。表、写入、回填、清理、备份**都不动**，生产扫描（`--no-llm`）完全不受影响。**没有 LLM 调用**。
+
+### 为什么关
+- 历史类比（`QueenDistiller.enrich_with_historical_analogy`）只在 LLM 模式、只对当天前 3 名标的、Chroma 命中 ≥5 时触发：多调一次 LLM，读 `agent_memory`（最近 90 天最多 50 行）并给 `final_score` 加减最多 0.5，**只改分、不改方向**。
+- 第 1 代首日（10-21）AMZN 触发了一次（−0.15）：模型自己写「历史类比无实际回报数据可验证」，类比对象是前一天影子 `--control` 存进影子 Chroma 的记录，不是生产历史；它吃的 `agent_memory` 回报列有 v0.45.527 的已知缺陷（t1 / t7 / t30 非空只有 23% / 32% / 48%）。
+- 留着会让第 2 代的 LLM 臂多出一个预注册里没有的成分，描述性分差 / Queen 层分解里掺进去；而且第 2 代 10-22 才开始，现在关不浪费任何已攒样本。
+
+### Changed
+- `llm_shadow_scan.py`：新增 `disable_historical_analogy()`，把该方法换成空操作（置 `historical_analogy=None`，与原函数「门槛没过」时一致，不调 LLM、不碰向量记忆和 `agent_memory`）；**只在真实扫描入口 `default_scan` 里打补丁**，`run_child` 注入假扫描时不污染进程里的真类，生产路径不 import 这个模块。
+- 逐只记录加 `analogy_fired`（`historical_analogy` 非空即真）；`quality_report` 在 LLM 模式下若有标的触发 ⇒ **当天不健康**（原因写明标的名）。关闭失效（函数改名 / 补丁没生效）因此会红，不会悄悄把成分放回来。
+- `experiments/llm_shadow_prereg.md`：g2 定义加「关闭历史类比」，局限 5 改写；`CLAUDE.md` 指针同步。代标识仍是 `g2-sonnet-5-5`（g2 尚无任何一天，不需要新一代）。
+
+### 验证
+- `tests/test_llm_shadow_scan.py` +9：补丁后的函数不访问向量记忆 / `agent_memory`、不调 LLM；**正对照**（没补丁时同样入参会读 `agent_memory`、调 LLM、改分）；`default_scan` 先打补丁再扫描；`run_child` 不打补丁；触发 ⇒ 不健康 / control 不看；逐只记录各取值。**变异验证 6/6 变红、文件逐字节还原**。
+- **没做**：`agent_memory` 的停写 / 退役读者 / drop 表（第 2、3 步，用户暂不做）；`PENDING_DEAD` 登记不变。
+
 
 ## [0.45.593] — 2026-10-22 — 占位（进行中：v0.45.581 / 584 / 586 二次检查——对比卡定仓张数、影子面板措辞、每日运行返回值剥影子盈亏、宽跨报价整批不可得告警等）
 
