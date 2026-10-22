@@ -157,10 +157,16 @@ def _home_tilde(p: Path) -> str:
         return str(p)
 
 
+def clone_make(target: str) -> str:
+    """给人抄的「在生产克隆上跑 make 目标」：带 `-C`，在哪个目录敲都找得到 Makefile（v0.45.612：停止服务页曾写
+    不带 `-C` 的 `make alphabot`，不在代码目录里敲就 No rule to make target）。静态页抄它，守卫 `TestMakeCommandsNameTheirDirectory`。"""
+    import production_clone
+    return f"make -C {_home_tilde(production_clone.default_dest())} {target}"
+
+
 def canonical_entry() -> str:
     """推荐入口：重新生成指向生产克隆的 .app。帮助页抄的就是它（守卫 `TestRegenHints`）。"""
-    import production_clone
-    return f"make -C {_home_tilde(production_clone.default_dest())} alphabot-app"
+    return clone_make("alphabot-app")
 
 
 def _is_default_clone(repo: Path) -> bool:

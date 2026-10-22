@@ -44,7 +44,7 @@ async function stopServer() {
   disposeAll();
   fill(app, h("div", { class: "panel stopped" },
     h("h2", {}, "服务已停止"),
-    h("p", {}, "可以关掉这个页面。再次使用：双击 Alpha Bot.app，或在终端运行 make alphabot。")));
+    h("p", {}, "可以关掉这个页面。再次使用：双击 Alpha Bot.app，或在终端运行 make -C ~/alpha-hive-prod alphabot。")));
   fill(document.getElementById("foot"));
   fill(document.getElementById("session"));
 }

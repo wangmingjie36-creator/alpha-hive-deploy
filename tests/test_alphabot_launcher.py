@@ -1169,6 +1169,48 @@ class TestRegenHints:
         assert hint.endswith("-m alphabot.macos_app --repo . --python /x/python3") and "make" not in hint, hint
 
 
+class TestMakeCommandsNameTheirDirectory:
+    """给人抄的 make 命令必须带 `-C`（v0.45.612）：停止服务页写「make alphabot」、ALPHA_BOT_GUIDE.md 六处不带 `-C`——
+    不在代码目录里敲就 `No rule to make target`（实测）。扫人会照抄的地方：静态页、指南、alphabot/ 的字符串字面量
+    （docstring 除外：那是给读代码的人看的历史说明）。"""
+
+    @staticmethod
+    def _texts():
+        import ast
+        out = []
+        for p in sorted((REPO / "alphabot" / "static").rglob("*")):
+            if p.suffix in (".js", ".html") and "vendor" not in p.parts:
+                out += [(p, n, ln) for n, ln in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)]
+        guide = REPO / "ALPHA_BOT_GUIDE.md"
+        out += [(guide, n, ln) for n, ln in enumerate(guide.read_text(encoding="utf-8").splitlines(), 1)]
+        for p in sorted((REPO / "alphabot").rglob("*.py")):
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+            docs = {id(n.body[0].value) for n in ast.walk(tree)
+                    if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and n.body
+                    and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}
+            out += [(p, n.lineno, n.value) for n in ast.walk(tree)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs]
+        return out
+
+    def test_no_make_command_without_a_directory(self):
+        import re
+        texts = self._texts()
+        assert sum("make -C" in t for *_, t in texts) >= 5, "扫到的 make 命令太少——扫描范围坏了，这条在空转"
+        bare = re.compile(r"\bmake\s+(?!-C\s)[a-z][\w-]*")
+        bad = [(p.relative_to(REPO).as_posix(), n, m.group(0)) for p, n, t in texts for m in bare.finditer(t)]
+        assert not bad, f"不带 -C 的 make 命令（不在代码目录里敲就找不到 Makefile）：{bad}"
+
+    def test_pages_and_guide_copy_the_clone_command(self, home):
+        """静态页、指南取不到 Python 常量：在这里核对它们抄的就是 `clone_make`（改了克隆位置而忘了它们 ⇒ 红）。
+        目标名后面不许再接名字字符：`alphabot` 不能靠 `alphabot-app` 蒙混过关。"""
+        import re
+        app_js = (REPO / "alphabot" / "static" / "app.js").read_text(encoding="utf-8")
+        guide = (REPO / "ALPHA_BOT_GUIDE.md").read_text(encoding="utf-8")
+        for text, targets in ((app_js, ("alphabot",)), (guide, ("alphabot-app", "alphabot", "alphabot-demo", "alphabot-stop"))):
+            for target in targets:
+                assert re.search(re.escape(MA.clone_make(target)) + r"(?![\w-])", text), target
+
+
 class TestRegenCommandRuns:
     """提示给的命令**照抄要跑得通**（v0.45.597，498 二次检查 #1 / #2）。498 只管「沿用记下的解释器」，没核今天还跑不跑得通：
     ① 456 之前的生成器把 `python3` 这类裸名字原样写进过壳，沿用 ⇒ `PYTHON=python3` 被生成器以「须绝对路径」拒；

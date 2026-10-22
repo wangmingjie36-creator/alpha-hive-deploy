@@ -1,6 +1,7 @@
 # Alpha Bot 使用说明与功能简介
 
-> 适用版本：v0.45.407（原生窗口版）。本文写的是代码里**实际存在**的行为；页面上的数值口径、冻结规则常量以「口径」页为准（它直接读代码里那一份，不在前端抄第二份）。
+> 适用版本：v0.45.407（原生窗口版）；第 2 节「怎么启动」与第 7 节「排错」按 v0.45.612 重新核对过（生产克隆、给人抄的命令）。本文写的是代码里**实际存在**的行为；页面上的数值口径、冻结规则常量以「口径」页为准（它直接读代码里那一份，不在前端抄第二份）。
+> 下面的命令都带 `make -C ~/alpha-hive-prod` 或先 `cd ~/alpha-hive-prod`：在哪个目录敲都能跑（守卫 `tests/test_alphabot_launcher.py::TestMakeCommandsNameTheirDirectory`）。
 > ⚠️ 与 `alpha_hive_bot/`（Telegram）、Slack 里的「Alpha Hive Bot」**无关**。
 
 ---
@@ -32,11 +33,15 @@ Alpha Bot 是 **卖权行权价选择器的本机前端**，对标 GEXBot Classi
 
 ### 方式 A：桌面程序（推荐日常使用）
 
-首次生成（只需一次；换 Python 或仓库挪位置才需重跑）：
+首次生成（只需一次）：
 
 ```bash
-make alphabot-app
+make -C ~/alpha-hive-prod alphabot-app                        # 用生产克隆自己的代码生成
+make -C ~/alpha-hive-prod alphabot-app PYTHON=/绝对路径        # 换 .app 用的 Python 时
 ```
+
+`PYTHON` 只认命令行上写的（环境变量里的会被忽略），相对路径或只写名字会被拒。.app 跑的是生产克隆 `~/alpha-hive-prod`：
+每个扫描日扫描前自动更新，关掉 Alpha Bot 再打开即用上新代码，**代码更新不用重新生成**。只有 .app 自己的启动壳变了才要重跑——那时打开 Alpha Bot 会弹一次提醒并给出命令。
 
 生成 `~/Applications/Alpha Bot.app`，双击即用：
 
@@ -47,21 +52,20 @@ make alphabot-app
 4. **关窗口（或 ⌘Q）= 停掉由 .app 起的服务**。终端里起的服务关窗不会停。
 5. 没有装 pywebview 时自动退回浏览器（原因写进日志）。
 
-首次运行 macOS 会问一次是否允许访问「桌面」文件夹（仓库在那里），选允许。
+缺省的代码目录（生产克隆）与数据根都不在「桌面」/「文稿」下，macOS 不会为它们弹访问授权；只有开发时用 `--repo` 把 .app 指到桌面上的检出，首次运行才会问一次，选允许。
 
 ### 方式 B：终端
 
 ```bash
-export ALPHA_HIVE_HOME=~/alpha-hive-data   # 与编排器 / MCP 同一个值
-make alphabot                               # 等价于 /usr/local/bin/python3 -m alphabot --open
+make -C ~/alpha-hive-prod alphabot          # 等价于在该目录里 /usr/local/bin/python3 -m alphabot --open
 ```
 
-没设 `ALPHA_HIVE_HOME` 时读缺省数据根 `~/alpha-hive-data`（v0.45.422 起；与编排器同址，就是生产数据），启动时 stderr 会说读的是哪个目录；数据根在别处才需要设。
+没设 `ALPHA_HIVE_HOME` 时读缺省数据根 `~/alpha-hive-data`（v0.45.422 起；与编排器同址，就是生产数据），启动时 stderr 会说读的是哪个目录；数据根在别处才需要先 `export ALPHA_HIVE_HOME=<数据根>`（与编排器 / MCP 同一个值）。
 
 ### 方式 C：演示模式（不依赖真实数据）
 
 ```bash
-make alphabot-demo
+make -C ~/alpha-hive-prod alphabot-demo
 ```
 
 用合成期权链，**不读账本、不写真实状态目录**，页面顶部有「演示模式」横幅。适合第一次熟悉界面、或休市时看看长什么样。
@@ -70,12 +74,13 @@ make alphabot-demo
 
 | 目的 | 命令 |
 |---|---|
-| 停止服务 | `make alphabot-stop`（或页脚「停止服务」按钮） |
-| 忘掉已选的数据根 | `/usr/local/bin/python3 -m alphabot.launcher --reset` |
-| 换端口 / 不跑盘中定时快照 | `python -m alphabot --port 9000` / `--no-poll` |
+| 停止服务 | 页脚「停止服务」按钮，或 `make -C ~/alpha-hive-prod alphabot-stop` |
+| 忘掉已选的数据根 | `cd ~/alpha-hive-prod && /usr/local/bin/python3 -m alphabot.launcher --reset` |
+| 换端口 / 不跑盘中定时快照 | `cd ~/alpha-hive-prod && /usr/local/bin/python3 -m alphabot --port 9000`（加 `--no-poll` 不跑定时快照） |
 | 日志 | `~/Library/Logs/Alpha Bot/launcher.log`、`server.log`（>5MB 轮转） |
 
-> 解释器一律用 `/usr/local/bin/python3`，不要用裸 `python3`。
+> 解释器一律用 `/usr/local/bin/python3`，不要用裸 `python3`。.app 换过解释器的，以 .app 用的那个为准——程序内帮助页「排错」里的命令自动写成运行中的那个。
+> `-m alphabot…` 要在代码目录里跑：不先 `cd` 就是 `No module named alphabot`。
 
 ---
 
@@ -196,13 +201,15 @@ make alphabot-demo
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| 双击后弹「服务启动失败」 | 看弹窗里的日志尾巴；日志在 `~/Library/Logs/Alpha Bot/`。常见：缺依赖（`starlette` / `uvicorn`，装进 `/usr/local/bin/python3`） |
+| 双击后弹「服务启动失败」 | 看弹窗里的日志尾巴；日志在 `~/Library/Logs/Alpha Bot/`。常见：缺依赖（`starlette` / `uvicorn`），装进 .app 用的解释器：`cd ~/alpha-hive-prod && /usr/local/bin/python3 -m pip install -r requirements.txt`（换过解释器就换成那个；帮助页「排错」给出按本机实际解释器的整条命令） |
 | 提示端口被占 | 8765 上是别的程序，弹窗会给 `lsof` 命令 |
 | 总览 / 账本 / 结果显示「没找到卖权账本目录」 | 数据根选错了。`--reset` 后重选（启动器不核对所选目录里有没有账本） |
-| 关窗后服务还在 | 升级到 v0.45.407 之前起的服务不带 `--from-app`，关窗不会停它；`make alphabot-stop` 停一次，之后双击起的就按新规则走 |
+| 关窗后服务还在 | 升级到 v0.45.407 之前起的服务不带 `--from-app`，关窗不会停它；页脚「停止服务」或 `make -C ~/alpha-hive-prod alphabot-stop` 停一次，之后双击起的就按新规则走 |
 | 「价格」页日线不可得 | 没配 Twelve Data key；设计如此，不换源 |
 | 某标的「现在拿不到期权链」 | 页面会写具体原因（CBOE 取数失败等）；点「重新拉取」重试 |
-| 改了仓库位置或 Python | 重跑 `make alphabot-app`（`git pull` 更新代码不需要重新生成） |
+| 换了 Python | `make -C ~/alpha-hive-prod alphabot-app PYTHON=/绝对路径`（先用新解释器装好依赖，见第一行） |
+| 代码更新了要不要重新生成 | 不用：.app 跑生产克隆，扫描日扫描前自动更新，关掉 Alpha Bot 再打开即用上；只有启动壳变了，打开时会弹一次提醒并给出命令 |
+| 弹窗说「生产克隆丢了或不完整」 | 照弹窗在开发检出里跑 `production_clone.py setup` 重建它（每日扫描也靠它）；重建后不用重新生成 .app |
 | 想知道服务版本 / 要停服务 | 页脚显示版本号与「停止服务」按钮；盘中快照最近一轮的结果见盘中页底部说明与 `/api/meta` |
 
 ---
