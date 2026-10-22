@@ -56,6 +56,7 @@ async function send() {
     if (status) status.spent_today = r.spent_today;
   } catch (e) {
     log.pop(); log.push({ role: "err", text: e.message });
+    if (!ta.value) ta.value = text;      // 失败了把问题放回输入框：报错常说「可以再问一次」，别让人重打（v0.45.618）
     loadStatus();
   }
   busy = false;

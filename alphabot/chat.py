@@ -18,8 +18,10 @@
   绑定在先前的对话上，改历史会让它失效（新账号直接 400）。页面上下文（在看哪页、哪只票）与日期随每条用户消息带上，
   不进系统提示。一问失败（API 报错 / 超预算 / 超时）⇒ 这一问整段不写进历史，下次从上一问结束处接着；截断 / 拒答
   停在工具调用上 ⇒ 补一条「没执行」的 tool_result 再存（历史里 tool_use 必须紧跟结果，否则之后每问 400）。
-- **不自动重试**：超时 / 断线时请求可能已计费，重发 = 再付一次且第一次的用量永远拿不到 ⇒ `max_retries=0`，
-  这类失败按最坏情况记账（`estimated`）并如实报错（v0.45.616）。
+- **重试只重不花钱的**：SDK 一律不重试（`max_retries=0`）。读回复时超时 / 断线 ⇒ 请求可能已计费，重发 = 再付一次且
+  第一次的用量永远拿不到 ⇒ 不重试、按最坏情况记账（`estimated`）并如实报错（v0.45.616）；连接阶段就失败 ⇒ 请求没发出去，
+  不记账（v0.45.618）；带状态码的 429 / 5xx（含过载 529）⇒ 服务端拒了、没计费 ⇒ 自己等一下再发，最多 `RETRY_STATUS_TRIES` 次
+  （v0.45.618）。
 - **拒答回落**：`fallbacks: "default"`（Anthropic 按拒答类别选替补模型）；回落那次按替补模型计价（未登记的按最贵价）。
 
 守卫 `tests/test_alphabot_chat.py`。
@@ -89,14 +91,85 @@ class ChatMaybeBilled(ChatError):
     status = 504
 
 
+class ChatNotSent(ChatError):
+    """连不上：请求根本没发出去 ⇒ 没计费、不记账。"""
+    status = 503
+
+
+#: 带状态码、服务端没开始生成（不计费）、可以等一下再试的错误：限流 429、5xx（含过载 529）。v0.45.618 前 max_retries=0
+#: 连它们也不重试了，高峰期一个 529 就让这一问失败（工具循环中途的话，前面的钱已经花了）
+RETRY_STATUS_TRIES = 2
+RETRY_BACKOFF_SEC = (2.0, 5.0)
+RETRY_AFTER_CAP_SEC = 30.0
+
+
+def _transport_cause(exc: BaseException):
+    """SDK 把 httpx 的原始异常挂在 `__cause__` 上（0.84：`raise APITimeoutError(...) from err`）。"""
+    seen = set()
+    e = exc.__cause__ or exc.__context__
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if type(e).__module__.split(".")[0] == "httpx":
+            return e
+        e = e.__cause__ or e.__context__
+    return None
+
+
+def _not_sent(exc: BaseException) -> bool:
+    """连接阶段就失败（DNS / 拒绝连接 / 连接超时 / 连接池超时）或请求体没写完 ⇒ 服务端收不到完整请求，不可能计费。"""
+    try:
+        import httpx
+    except ImportError:
+        return False
+    cause = _transport_cause(exc)
+    return isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteError,
+                              httpx.WriteTimeout))
+
+
 def _maybe_billed(exc: BaseException) -> bool:
-    """这个失败可能已经花了钱吗？超时 / 断线（`APIConnectionError`，超时是它的子类）⇒ 可能：请求也许已在服务端跑完。
-    带状态码的 API 错误（4xx / 5xx）⇒ 服务端已拒，不计费。连不上也归前一类——宁多记、不漏记。"""
+    """这个失败可能已经花了钱吗？请求已发出、读回复时超时 / 断线 ⇒ 可能：服务端也许已经跑完（宁多记、不漏记）。
+    连接阶段就失败（`_not_sent`）⇒ 不可能（v0.45.618：此前断网时每按一次发送都按最坏情况记一笔，几次就把当天额度
+    占满，一分钱没花）。带状态码的 API 错误 ⇒ 服务端已拒，不计费。"""
     try:
         import anthropic
     except ImportError:
         return False
-    return isinstance(exc, anthropic.APIConnectionError)
+    return isinstance(exc, anthropic.APIConnectionError) and not _not_sent(exc)
+
+
+def _retry_wait(exc: BaseException, attempt: int) -> Optional[float]:
+    """可以等一下再试的错误 ⇒ 等几秒；不该重试 ⇒ None。只认带状态码的 429 / 5xx（服务端拒了、没计费）；
+    超时 / 断线一律不重试（可能已计费，见 `_maybe_billed`）。遵守 retry-after（封顶），没有就按退避表。"""
+    try:
+        import anthropic
+    except ImportError:
+        return None
+    if attempt >= RETRY_STATUS_TRIES or not isinstance(exc, anthropic.APIStatusError):
+        return None
+    if exc.status_code != 429 and exc.status_code < 500:
+        return None
+    try:
+        wait = float(exc.response.headers.get("retry-after"))
+    except (TypeError, ValueError, AttributeError):
+        wait = RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)]
+    return max(0.0, min(wait, RETRY_AFTER_CAP_SEC))
+
+
+def _text_groups(content: list) -> List[str]:
+    """回复里的文字段落：相邻的 text 块首尾相接（引用会在边界把一句话拆成好几块，拆出来的总是相邻的），
+    中间隔了别的块（服务端搜索、思考块）就另起一段（v0.45.618：此前整次响应一律首尾相接，搜索前的一句说明会和
+    搜索后的正文粘成一句）。"""
+    groups, cur = [], []
+    for b in content:
+        if b.get("type") == "text" and isinstance(b.get("text"), str):
+            cur.append(b["text"])
+            continue
+        if cur:
+            groups.append("".join(cur))
+            cur = []
+    if cur:
+        groups.append("".join(cur))
+    return [g.strip() for g in groups if g.strip()]
 
 
 SYSTEM_PROMPT = """你是 Alpha Bot 里的助手。Alpha Bot 是用户本机运行的卖权行权价选择器：从 CBOE 期权链（15 分钟延迟快照 + 前一交易日 OI）算出 GEX 环境（Zero Gamma、净 Major、DEX、Vanna、Charm），按 delta 梯子列卖权候选，给六种结构的报价，按冻结的「环境路由」规则提示该取哪一档；另有财报跨式与组合对冲两本纸面账本（只读）。
@@ -336,10 +409,11 @@ class ChatEngine:
     """一个 Alpha Bot 进程一个。`client_fn` / `now_fn` 只给测试换。"""
 
     def __init__(self, svc, *, client_fn: Optional[Callable] = None, now_fn: Optional[Callable] = None,
-                 cap_usd: float = DAILY_CAP_USD):
+                 cap_usd: float = DAILY_CAP_USD, sleep_fn: Optional[Callable[[float], None]] = None):
         self.svc = svc
         self._client_fn = client_fn or llm_service.get_client
         self._now = now_fn or time.time
+        self._sleep = sleep_fn or time.sleep
         self.cap_usd = cap_usd
         self._lock = threading.Lock()
         self._inflight = 0.0
@@ -473,15 +547,27 @@ class ChatEngine:
                         "超了——明天再问，或开新对话（历史越长预留越多）")
                 self._inflight += reserve
             try:
-                try:
-                    resp = self._call(client, messages)
-                except Exception as exc:
-                    if _maybe_billed(exc):
-                        self._record(conversation_id, reserve, estimated=True, error=type(exc).__name__)
-                        raise ChatMaybeBilled(
-                            f"请求超时或断线（{type(exc).__name__}）：可能已在服务端完成并计费，拿不到用量，"
-                            f"已按最坏情况记 ${reserve:.2f}。这一问没写进对话历史，可以再问一次") from exc
-                    raise
+                attempt = 0
+                while True:
+                    try:
+                        resp = self._call(client, messages)
+                        break
+                    except Exception as exc:
+                        if _maybe_billed(exc):
+                            self._record(conversation_id, reserve, estimated=True, error=type(exc).__name__)
+                            raise ChatMaybeBilled(
+                                f"请求超时或断线（{type(exc).__name__}）：可能已在服务端完成并计费，拿不到用量，"
+                                f"已按最坏情况记 ${reserve:.2f}。这一问没写进对话历史，可以再问一次") from exc
+                        if _not_sent(exc):
+                            raise ChatNotSent(f"连不上 Claude API（{type(_transport_cause(exc)).__name__}）："
+                                              "请求没发出去，没计费。检查网络后再问") from exc
+                        wait = _retry_wait(exc, attempt)
+                        if wait is None:
+                            raise
+                        # 限流 / 过载：服务端拒了、没计费 ⇒ 等一下再发；预留一直占着（这期间没花钱，不用重新预检）
+                        _log.info("对话请求被拒（%s），%.1f 秒后重试", getattr(exc, "status_code", "?"), wait)
+                        self._sleep(wait)
+                        attempt += 1
                 turn["calls"] += 1
                 cost = call_cost(resp)
                 # 先记账、再释放预留（finally）：中间不留「预留已撤、花费未记」的空档，并发的另一问预检才看得到这笔
@@ -494,10 +580,7 @@ class ChatEngine:
             if cost["ceiling_priced"]:
                 turn["notes"].append(f"有一次尝试由未登记价格的模型完成（{cost['models']}），按最贵单价记账")
             content = _echo_content([b for b in resp.get("content") or [] if isinstance(b, dict)])
-            # 带引用的回答会在每个引用边界把一句话拆成好几个 text 块：同一次响应里首尾相接，不同响应之间才分段
-            piece = "".join(b["text"] for b in content if b.get("type") == "text" and isinstance(b.get("text"), str))
-            if piece.strip():
-                replies.append(piece.strip())
+            replies.extend(_text_groups(content))
             for b in content:
                 if b.get("type") == "web_search_tool_result" and isinstance(b.get("content"), list):
                     for r in b["content"]:
@@ -522,6 +605,11 @@ class ChatEngine:
                     results.append({"type": "tool_result", "tool_use_id": b.get("id"), "content": out,
                                     **({} if ok else {"is_error": True})})
                     turn["tools"].append({"name": name, "input": inp, "ok": ok})
+                if not results:
+                    # 停在 tool_use、可放回历史的内容里却没有工具调用（回落边界之前的被丢了）：发一条空的用户消息会被
+                    # API 拒（400）⇒ 到此为止；历史里没有悬空的 tool_use，照常保存
+                    turn["notes"].append("模型要调工具，却没留下可执行的调用（拒答回落的边界上），这一问到此为止")
+                    break
                 messages.append({"role": "user", "content": results})
                 continue
             if stop == "max_tokens":

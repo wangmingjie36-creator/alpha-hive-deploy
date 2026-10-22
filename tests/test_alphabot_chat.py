@@ -246,6 +246,25 @@ class TestToolLoop:
                               text("。")]))
         assert eng.send("x")["reply"] == "先查一下\n\n据报道，NVDA 将于 11 月 19 日发财报。"
 
+    def test_text_separated_by_a_search_is_a_new_paragraph(self, svc):
+        """服务端搜索在同一次响应里完成：隔着搜索的两段文字要分段，只有相邻的（引用拆出来的）才首尾相接
+        （v0.45.618，616 二次检查 #4）。"""
+        search = [{"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "NVDA"}},
+                  {"type": "web_search_tool_result", "tool_use_id": "s1", "content": []}]
+        eng, _ = engine(svc, resp([text("我先查一下。"), *search, text("据报道，"), text("NVDA 11 月 19 日发财报"), text("。")]))
+        assert eng.send("x")["reply"] == "我先查一下。\n\n据报道，NVDA 11 月 19 日发财报。"
+
+    def test_tool_use_stop_with_nothing_left_to_run(self, svc):
+        """停在 tool_use，可放回历史的内容里却没有工具调用（回落边界之前的被丢了）：不发空的用户消息（API 会 400），
+        到此为止并说明（v0.45.618，616 二次检查 #6）。"""
+        content = [tool_use("get_rules", {}, "t0"), {"type": "fallback", "from": {"model": "a"}, "to": {"model": "b"}},
+                   text("换个模型答")]
+        eng, client = engine(svc, resp(content, stop="tool_use"), resp([text("二")]))
+        out = eng.send("一")
+        assert out["api_calls"] == 1 and any("没留下可执行的调用" in n for n in out["notes"])
+        eng.send("二", conversation_id=out["conversation_id"])
+        assert all(m["content"] for m in client.requests[1]["messages"]), "历史里出现了空内容的消息"
+
 
 class TestHistoryIsAppendOnly:
     def test_second_turn_replays_the_first_verbatim(self, svc):
@@ -467,6 +486,53 @@ class TestTimeoutIsNotRetried:
         assert eng._inflight == pytest.approx(0.0)
         assert all(c["messages"] == [] for c in eng._convs.values()), "超时的一问写进了历史"
 
+    @staticmethod
+    def _engine(svc, handler, sleeps):
+        anthropic = pytest.importorskip("anthropic")
+        import httpx
+        client = anthropic.Anthropic(api_key="sk-test-offline", max_retries=2,
+                                     http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+        return C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: T0, sleep_fn=sleeps.append)
+
+    @pytest.mark.parametrize("err", ["ConnectError", "ConnectTimeout"])
+    def test_not_sent_is_not_booked(self, svc, err):
+        """连接阶段就失败 ⇒ 请求没发出去、不可能计费（v0.45.618，616 二次检查 #2）：此前断网时每按一次发送都按最坏情况
+        记一笔，几次就把当天额度占满，一分钱没花。"""
+        import httpx
+        calls = []
+
+        def handler(request):
+            calls.append(1)
+            raise getattr(httpx, err)("simulated", request=request)
+        eng = self._engine(svc, handler, [])
+        with pytest.raises(C.ChatNotSent, match="没发出去，没计费") as ei:
+            eng.send("x")
+        assert ei.value.status == 503 and len(calls) == 1 and spend_lines(svc) == []
+
+    def test_overload_is_retried_after_retry_after(self, svc):
+        """限流 / 过载（带状态码、服务端拒了、没计费）⇒ 等一下再发（v0.45.618，616 二次检查 #3）；遵守 retry-after。"""
+        import httpx
+        replies = [httpx.Response(529, headers={"retry-after": "3"}, json={"type": "error", "error": {
+            "type": "overloaded_error", "message": "busy"}}), httpx.Response(200, json=resp([text("好")]))]
+        sleeps = []
+        eng = self._engine(svc, lambda r: replies.pop(0), sleeps)
+        assert eng.send("x")["reply"] == "好"
+        assert sleeps == [3.0] and len(spend_lines(svc)) == 1
+
+    def test_status_retries_are_bounded_and_unbooked(self, svc):
+        anthropic = pytest.importorskip("anthropic")
+        import httpx
+        calls, sleeps = [], []
+
+        def handler(request):
+            calls.append(1)
+            return httpx.Response(529, json={"type": "error", "error": {"type": "overloaded_error", "message": "busy"}})
+        eng = self._engine(svc, handler, sleeps)
+        with pytest.raises(anthropic.APIStatusError):
+            eng.send("x")
+        assert len(calls) == C.RETRY_STATUS_TRIES + 1 and sleeps == list(C.RETRY_BACKOFF_SEC[:C.RETRY_STATUS_TRIES])
+        assert spend_lines(svc) == [] and eng._inflight == pytest.approx(0.0)
+
     def test_rejected_requests_are_not_booked(self, svc):
         """带状态码的 API 错误（服务端已拒）不计费、也不记账。"""
         anthropic = pytest.importorskip("anthropic")
@@ -474,10 +540,11 @@ class TestTimeoutIsNotRetried:
         client = anthropic.Anthropic(api_key="sk-test-offline", max_retries=0, http_client=httpx.Client(
             transport=httpx.MockTransport(lambda r: httpx.Response(400, json={"type": "error", "error": {
                 "type": "invalid_request_error", "message": "bad"}}))))
-        eng = C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: T0)
+        sleeps = []
+        eng = C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: T0, sleep_fn=sleeps.append)
         with pytest.raises(anthropic.BadRequestError):
             eng.send("x")
-        assert spend_lines(svc) == []
+        assert spend_lines(svc) == [] and sleeps == [], "400 是请求本身错了，重试没用"
 
 
 class TestDrawer:
@@ -489,6 +556,17 @@ class TestDrawer:
         init = src.index("export function initChat")
         assert src.count('h("textarea"') == 1 and src.index('h("textarea"') > init
         assert '"Escape"' in src[init:] and "ta.focus()" in src and "placeBelowTopbar" in src
+        assert "if (!ta.value) ta.value = text;" in src, "发送失败没把问题放回输入框（616 二次检查 #5）"
+
+    def test_hidden_really_hides(self):
+        """抽屉靠 hidden 属性收起输入区；作者样式里的 display 会盖过浏览器对 [hidden] 的缺省隐藏（v0.45.616 的输入区就在
+        「没开启」时照样显示，DOM 桩不解析 CSS、没看出来）。全局兜底规则必须在、且带 !important（v0.45.618，616 二次检查 #1 / #7）。"""
+        import re
+        css = (REPO / "alphabot" / "static" / "alphabot.css").read_text(encoding="utf-8")
+        assert re.search(r"^\[hidden\]\s*\{\s*display:\s*none\s*!important;\s*\}", css, re.M), "缺全局 [hidden] 兜底"
+        js = (REPO / "alphabot" / "static" / "chat.js").read_text(encoding="utf-8")
+        assert "formEl.hidden" in js and re.search(r"\.chat-form\s*\{[^}]*display:\s*flex", css), \
+            "前提变了（不再用 hidden 收输入区，或输入区不再设 display）：重看这条守卫还该不该在"
 
 
 class TestServer:

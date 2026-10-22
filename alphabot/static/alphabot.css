@@ -32,6 +32,9 @@
 }
 
 * { box-sizing: border-box; }
+/* hidden 属性必须真的隐藏：作者样式里的 display（flex / grid …）会盖过浏览器对 [hidden] 的缺省隐藏。v0.45.616 的对话输入区
+   就因 .chat-form { display: flex } 在「没开启」时照样显示（v0.45.618 改成这一条全局兜底，守卫 tests/test_alphabot_chat.py） */
+[hidden] { display: none !important; }
 html { background: var(--paper); }
 body {
   margin: 0; background: var(--paper); color: var(--ink);
@@ -284,7 +287,6 @@ td .reason.warn, td.reason.warn { color: var(--warn); }
   display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--line);
   box-shadow: -8px 0 24px rgba(20, 20, 19, .08);
 }
-.chat-drawer[hidden] { display: none; }
 .chat-head { display: flex; align-items: baseline; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--line); }
 .chat-head strong { font: 600 15px/1.2 var(--sans); }
 .chat-head .muted { font-size: 12.5px; margin-right: auto; }

@@ -38,7 +38,7 @@
     "CHANGELOG.md": ["tests/test_changelog_entry_integrity.py", "tests/test_code_version.py", "tests/test_options_paper_leg.py", "tests/test_options_paper_leg_settle_close.py", "tests/test_production_clone.py", "tests/test_production_sync.py", "tests/test_quarantine_1014_prev_session.py", "tests/test_quarantine_prev_window_0915_0925.py", "tests/test_scan_timing.py", "tests/test_straddle_gex_shadow.py", "tests/test_straddle_strangle_shadow.py"],
     "Makefile": ["tests/test_alphabot_launcher.py"],
     "alphabot/macos/AlphaBot.icns": ["tests/test_alphabot_launcher.py"],
-    "alphabot/static/alphabot.css": ["tests/test_alphabot_hedge.py"],
+    "alphabot/static/alphabot.css": ["tests/test_alphabot_chat.py", "tests/test_alphabot_hedge.py"],
     "alphabot/static/app.js": ["tests/test_alphabot.py", "tests/test_alphabot_hedge.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_straddle.py"],
     "alphabot/static/charts.js": ["tests/test_alphabot.py", "tests/test_alphabot_launcher.py"],
     "alphabot/static/chat.js": ["tests/test_alphabot.py", "tests/test_alphabot_chat.py", "tests/test_alphabot_launcher.py"],
