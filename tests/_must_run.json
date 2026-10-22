@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "commit": "3b3878a71b06e5e0599081ad71b91c2b06ef02a1",
+  "commit": "1be32aa97a7263e944da1e3a1bc00ad8e55ca843",
   "reads_all_tests": [
     "tests/test_agent_weight_manager_retired.py",
     "tests/test_bare_env_children_pin_data_root.py",
@@ -16,6 +16,7 @@
     "tests/test_tests_use_running_interpreter.py"
   ],
   "reads_tests": {
+    "tests/test_alphabot_chat.py": ["tests/test_alphabot.py"],
     "tests/test_ast_cache.py": ["tests/test_no_invisible_prod_data_skips.py"],
     "tests/test_cloud_snapshot_freshness.py": ["tests/test_cloud_snapshot_loader.py"],
     "tests/test_day_health.py": ["tests/test_dim_ic_forward_test.py"],
@@ -25,6 +26,7 @@
     "tests/test_ml_model_default_path_retired.py": ["tests/test_ledger_writes_go_through_ledger_io.py"],
     "tests/test_oi_staleness_consumers.py": ["tests/test_options_iv_unavailable.py", "tests/test_yahoo_iv_placeholders.py", "tests/test_yfinance_oi_stale.py"],
     "tests/test_orchestrator_step_interp.py": ["tests/test_orchestrator_steps.py"],
+    "tests/test_persistent_writes_have_readers.py": ["tests/test_ledger_writes_go_through_ledger_io.py"],
     "tests/test_portfolio_greeks_delta_hedge.py": ["tests/test_portfolio_greeks.py"],
     "tests/test_replay_ohlc_pit.py": ["tests/test_replay_ohlc_store.py", "tests/test_replay_ohlc_window.py"],
     "tests/test_sell_strike_integration.py": ["tests/test_sell_strike_ledger.py"]

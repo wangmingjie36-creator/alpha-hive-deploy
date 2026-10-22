@@ -355,6 +355,7 @@ def print_plan(plan: Plan, files_cmd: list[str]) -> None:
 # ---------------------------------------------------------------- 命令 -------
 
 def registry_path(args) -> Path:
+    """登记表路径：`--registry` 优先，缺省 `tests/_must_run.json`（所有读写登记表的命令都从这里取）。"""
     return Path(args.registry) if args.registry else REPO / REGISTRY_REL
 
 

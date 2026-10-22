@@ -244,6 +244,8 @@ SITE_ARTIFACTS: dict = {
     'thesis_breaks.py::ThesisBreakMonitor.save_to_json': ('thesis_breaks_<T>.json (cwd)',),
     'tools/clockshift/audit.py::main': ('$GITHUB_STEP_SUMMARY',),
     'tools/clockshift/audit.py::run_pytest': ('clockshift --log-dir/{label}.log',),
+    'tools/select_tests/audit_plugin.py::pytest_sessionfinish': ('select_tests 读审计 dump JSON',),
+    'tools/select_tests/select_tests.py::save_registry': ('tests/_must_run.json',),
     'vix_term_structure.py::get_vix_term_structure': ('cache/vix_term_structure.json',),
     'vrp_signal.py::_write_jsonl': ('vrp_state/vrp_signals.jsonl',),
     'vrp_signal.py::main': ('vrp_signal --out JSON',),
@@ -257,6 +259,10 @@ SITE_ARTIFACTS: dict = {
 #: 产物 → (类别, [(读者, 令牌) 或 (读者, 令牌, SELF)], 说明)
 ARTIFACTS: dict = {
     # ── READ
+    'select_tests 读审计 dump JSON': (READ, [('tools/select_tests/select_tests.py::cmd_select', 'dump.json')],
+        '随跑测量：--run 拉起的 pytest（带 audit_plugin）收尾时写，同一次 cmd_select 读回，与登记表比对「被改测试现在读了什么」；临时目录里，用完即删'),
+    'tests/_must_run.json': (READ, [('tools/select_tests/select_tests.py::registry_path', '_must_run.json')],
+        '开发期选测登记表（v0.45.615）：select_tests.py 每次选测都读（load_registry）；--build / --update 写；CI 漂移检查对它比对'),
     '.swarm_results_*.json': (READ, [('scan_coverage_gate.py::check', '.swarm_results_'), ('earnings_calendar.py::_DiskObservations.results', '.swarm_results_'), ('orchestrator_steps.py::_step2_rc1_evidence', '.swarm_results_')],
         '文件不存在时从 opportunities 合成的回退版蜂群结果；与主写入者同一产物'),
     'Alpha Bot launcher.json': (READ, [('alphabot/launcher.py::config_path', 'launcher.json')],
