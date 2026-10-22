@@ -5,7 +5,23 @@
 
 ---
 
-## [0.45.597] — 2026-10-22 — 占位（进行中：v0.45.498 二次检查 #1 / #2——.app 过时提醒给的重新生成命令按现行规则核过、照抄跑得通）
+## [0.45.597] — 2026-10-22 — Fixed：v0.45.498 二次检查 #1 / #2——.app 过时提醒（及壳里两处）给的「重新生成」命令按现行规则核过、照抄跑得通：记下的解释器不合规则就给占位，缺省解释器不可用时跑生成器的也换成可用的那个
+
+498 让提示「沿用 .app 记下的解释器」，但没核这条命令今天还跑不跑得通。用户决定 #1、#2 一起修，#3–#5 不在本版。
+
+### Fixed
+- **#1 记下的值会被生成器自己拒**（`alphabot/macos_app.py`）：456 之前的生成器把 `python3` 这类裸名字 / 相对路径原样写进过壳；498 照搬 ⇒ 提示给 `make … PYTHON=python3`，被现行「须绝对路径」规则拒（498 之前只给 `make …`，反而能跑）。根因是「能不能写进 .app」的规则只活在 `build_app` 里，提示不经它。抽出 `python_rule_problem`（不是绝对路径 / 含 shell 特殊字符 ⇒ 问题描述），`build_app` 拒与 `regen_hint` 判沿不沿用都经它；不合规则 ⇒ 命令里放占位 `PLACEHOLDER_PY`、前面说明一句，那个值本身不嵌进来（可能带 shell 特殊字符，结果要进壳里的双引号）。
+- **#2 跑生成器的恒是缺省解释器**（`alphabot/macos_app.py`、`Makefile`）：换解释器常常正是因为 `/usr/local/bin/python3` 坏了，照抄第一步就失败。现在缺省可用就照旧（命令里不写）；不可用 ⇒ 用要写进 .app 的那个（它可用时），否则占位。推荐入口经 make 的 `ALPHABOT_GEN_PY` 指定（Makefile 给它加了引号，路径可带空格；注释同步），生成器直跑写在命令开头。「可用」与壳里双击时同一判据 `interpreter_problem`（`_default_python_usable` 只是它的一层包装）。
+- 缺省可用（本机常态）时命令与 498 一字不差：已装 .app（`PY=/usr/local/bin/python3`）只读核对 `installed_drift` 仍为空，不会为这次修复多提醒一次。
+
+### Added（测试，`tests/test_alphabot_launcher.py`）
+- `TestRegenCommandRuns`：规则与 `build_app` 收拒逐样本一致（8 个：绝对 / 带空格 / 裸名 / 相对 ×2 / `$` / `'` / `"`）；不合规则的记录值变占位且不嵌入；**端到端**——旧壳记 `python3`，把占位换成真实路径照抄跑 make 成功、壳里就是它；缺省不可用时推荐入口真跑 make、直跑真跑生成器，均由记下的解释器执行（包装脚本留调用记录为证，路径带空格）；记下的也跑不了 ⇒ runner 给占位；缺省可用 ⇒ 不加任何东西。
+- `TestInterpreterCheck::test_default_python_usable_is_the_same_verdict`：「缺省能不能跑生成器」只问 `interpreter_problem`。
+- 环境钉住：CI（Ubuntu）上没有 `/usr/local/bin/python3`。纯函数类（`TestLaunchScriptHints` / `TestRegenHints` / `TestRegenCommandRuns`）autouse 钉成可用、不可用一支显式钉；`TestShellDrift` 两条端到端两边都用真实环境、断言放宽到不依赖它（跑生成器的是缺省或记下的那个；`ALPHABOT_GEN_PY` 有无皆可）。双引号安全性样本补「不合规则的记录值」×「缺省不可用」。本机用插件把 `_default_python_usable` 恒置 False 模拟 CI：168 passed（只排除要起真 make 子进程的 10 条——子进程读真实环境、模拟不到）。
+
+### 验证
+- 变异 10 处全红（不核现行规则、缺省不可用也不换 runner、跑不了的记录值也当 runner、Makefile 不加引号、build_app 不经同一规则、规则不查绝对路径、占位不加说明、推荐入口丢 runner、直跑丢 runner、缺省可用判据另写一份）；每个变异体独立 pyc 前缀，还原后 181 passed。
+- 全量 11428 passed、2 failed，均与本版无关：两条都是 `tests/test_llm_shadow_daily.py`（v0.45.592 新测试）写死家目录路径与 Mac 解释器，被 `test_no_home_directory_paths` / `test_no_test_hardcodes_the_mac_interpreter` 抓到——另一会话已占 0.45.596 在修。
 
 ## [0.45.596] — 2026-10-22 — Fixed：origin/main 两条元守卫红——v0.45.592 新测试 `tests/test_llm_shadow_daily.py` 的 plist 夹具写死了家目录路径与 Mac 解释器
 
