@@ -7,7 +7,44 @@
 
 ## [0.45.624] — 2026-10-22 — 占位（进行中：选测审计插件的 import 过滤从不生效——改成只按调用栈判断（最近的仓库帧 vs frozen importlib 帧），补真插件正对照）
 
-## [0.45.623] — 2026-10-22 — 占位（进行中：对话的 API 报错说人话（扣没扣钱、怎么办）；影子任务 plist 生成器写上代理变量）
+## [0.45.623] — 2026-10-22 — Fixed：对话的 API 报错说人话（原因、扣没扣钱、怎么办）；影子任务 plist 生成器写上代理变量
+
+618 二次检查后用户定：保留 10-22 手改的影子任务 plist（加了代理变量），报错改成说人话，生成器同步写上代理。
+
+### Fixed
+- **对话报错说人话**（`alphabot/chat.py::_human_api_error`，`ChatRejected` 502）：带状态码的 API 错误（不重试的、或重试用尽的）不再把 SDK 原文（`OverloadedError: Error code: 529 - {...}`）直接甩给人，一律说明「被拒的请求没开始生成，不收费、没记账」，并按情况给原因和办法：
+  - **403 地区拒绝**（`forbidden` / 「Request not allowed」）：多半是没走代理，看看 Clash 开着没有。此前像 key 出了问题。
+  - **其他 403**：key 没有权限。
+  - **401**：key 无效或已失效。按 CLAUDE.md，不提示创建 / 去找 key 文件。
+  - **429 / 529（过载）/ 5xx**：写明重试了几次，稍后再问。
+  - **413**：对话太长，开新对话。
+  - **400**：多半是对话历史出了问题，开新对话；带上 API 的原话（截到 200 字），方便排查。
+  - **其他状态码**：带原话。
+- **影子任务 plist 生成器写上代理变量**（`llm_shadow_daily.render_plist`）：`HTTPS_PROXY` / `HTTP_PROXY` = `PROXY_URL`（与编排器 `PROXY_URL` 的缺省 `http://127.0.0.1:7897` 同值），`NO_PROXY` 含回环。此前只有 `PATH`：10-22 经用户批准手改了已装的 plist，生成器不写，重新生成会把它们无声丢掉。
+  - 只读核对：已装 plist 与生成器输出逐项一致。
+  - Python 本来就经 macOS 系统代理走 Clash；写成环境变量后，不读系统代理的 curl_cffi（yfinance）也走它。
+  - 与编排器不同，这里不探活：Clash 没开时这类请求连不上。
+
+帮助页「对话」一章补一句：被 Anthropic 拒绝的请求都不收费，抽屉里写明原因和怎么办。
+
+### 背景：618 二次检查里的误判（已更正）
+用 curl `--noproxy` 测到直连 Anthropic 403，就断言 .app / launchd 里的 Python 也会 403，报了「对话从 .app 打开必然失败」「影子任务今天会全部 403」两条。实测推翻：
+- macOS 上 Python 的 urllib / requests / httpx 在没有代理环境变量时会经 `_scproxy` 读系统代理，照样走 Clash（精简环境下未带 key 访问 `/v1/models` 得 401；只有 `trust_env=False` 才 403）。
+- auto-memory environment-facts 10-13 早有记载。
+- plist 改动是据此请用户批准的，实际对 Anthropic 调用无影响；用户看过更正后决定保留。
+
+### 测试（全程不出网）
+- `tests/test_alphabot_chat.py`：重试用尽 / 400 改为断言人话。新增参数化 7 种拒绝（403 地区 / 403 权限 / 401 / 429 / 500 / 413 / 404），各自断言：
+  - 原因与办法都写了，并以「不收费、没记账。」结尾；
+  - 状态码 502；不提 key 文件；不记账。
+  - 真 SDK + httpx MockTransport。
+- `tests/test_llm_shadow_daily.py::TestPlist::test_carries_the_orchestrator_proxy`：生成器带三个代理变量；地址与编排器原文里 `PROXY_URL` 的缺省值一致（经 `tests/_orchestrator`）；`NO_PROXY` 含回环。
+- 选测登记表：`--update`（v0.45.619 修好了分母）只更新了提交号，没有新读入、没有误判。
+
+### 验证
+- 变异 8 处全红：不翻译、403 地区当没权限、不说重试次数、不说不收费、400 不带原话、生成器不写代理、代理地址与编排器不同、`NO_PROXY` 漏回环。还原后 103 passed。
+- 全量 11784 passed、0 failed（开跑前确认没有别的整套在跑）。
+- 仍未真调 API。
 
 ## [0.45.622] — 2026-10-22 — 占位（进行中：跨式账本盯市 / 事后平仓对卖跨式的 bid=0 腿改按 ask 口径——T 财报后 call 腿 bid=0，账本冻结 mark、不平仓、浮盈亏失真）
 
