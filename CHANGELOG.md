@@ -5,7 +5,41 @@
 
 ---
 
-## [0.45.611] — 2026-10-22 — 占位（进行中：v0.45.607 二次检查——给人抄的命令不再写死缺省解释器、生成器只需标准库改成真跑核对、Makefile 退回缺省时说出来）
+## [0.45.611] — 2026-10-22 — Fixed：v0.45.607 二次检查——给人抄的命令不再写死缺省解释器、也不再假设人站在代码目录里；「生成器只需标准库」改成关掉 site-packages 真跑核对；Makefile 退回缺省 runner 时说出来、优先级写明
+
+607 只改了「生产克隆丢了」弹窗那一句。同一个毛病还留在好几处：给人抄的命令写死 `/usr/local/bin/python3`，而换解释器常常正是因为缺省坏了。剩下的有生成器的「克隆不在」报错、演示模式与生成后两句「换数据根」、帮助页「程序类」的装依赖 / 停服务 / 换数据根三行。607 说「帮助页照做即跑得通，不用改」，只对了 `PYTHON=` 那一行。顺带发现：「换数据根」那几句是 `… -m alphabot.launcher --reset`，不在代码目录里敲就报 `No module named alphabot`（实测），从来就跑不通。
+
+### Fixed
+- **给人抄的命令按场景取解释器，不写死缺省**（`alphabot/macos_app.py`）：
+  - 冻进壳里的用 .app 记下的（`_runner_word`，607 起）。
+  - 生成时打印的用此刻跑生成器的那个（新 `running_python_word` = `sys.executable`，此刻必然能跑）：「生产克隆不在」报错里的 `production_clone.py setup`、演示模式与生成后的两句 `--reset`。
+- **在哪个目录照抄都跑得通**（新 `here_command`）：先 `cd` 进本代码目录再跑。家目录下写成 `~/…`；带空格就退回引号括起的绝对路径（引号里 `~` 不展开）。两句 `--reset` 都经它。
+- **帮助页**（`static/pages/help.js`，`/api/method` 新增 `app.launcher` / `app.pip_install`）：装依赖、停服务、换数据根三行改用服务端给的命令——进代码目录、用运行本服务的解释器（从 .app 打开时就是 .app 记下的那个）。停服务原来教 `make alphabot-stop`，那个目标同样写死缺省。取不到就写明取不到，不回退成字面量。
+- **Makefile 退回缺省 runner 时说出来**：给了 `PYTHON` 却不能拿来跑生成器（还没装好 / 是目录 / 相对路径）⇒ 打印一行，点名改由谁跑。此前（607 加了 `@`）缺省也坏时，只见报错里的缺省路径，看不出为什么没用自己给的 `PYTHON`。
+- **优先级写明**：`ALPHABOT_GEN_PY` 只是「缺省 runner」，可用的 `PYTHON` 胜过它，即便它也写在命令行上。行为 607 起就是这样；此前注释没写这一点，测试辅助 `_make` 的说明写的是「runner 换成当前解释器」，与实际不符。
+- **`regen_hint` 改用 `_runner_word`**：占位规则只在一处（607 各写了一遍）。
+
+### Added / Changed（测试）
+- `TestHintsNeverHardcodeTheDefaultInterpreter`（`tests/test_alphabot_launcher.py`）：
+  - AST 扫 `alphabot/` 全部 `.py`：f-string 插 `DEFAULT_PYTHON`，或字符串字面量含它的值（docstring 与定义本身除外），只许在 `--python` 的 argparse 帮助里出现、恰好一处（那里描述的就是缺省）。白名单那处找得到，即证明扫描没失明。
+  - 静态页不许出现解释器路径。
+  - `here_command` 在临时目录里经 `/bin/sh` 真跑，代码目录分三种：在仓库、在家目录下、带空格。负对照：不 `cd` ⇒ `No module named alphabot`。
+  - 生成器真的打印出这句命令。
+- `TestHelpPage::test_app_commands_come_from_the_server`（`tests/test_alphabot.py`）：`/api/method` 的 `app.*` 就是 `here_command` 的结果，帮助页三行都经 `appCmd` 取。
+- `test_generator_runs_with_only_the_standard_library` 取代 607 的 AST import 扫描：`-S -s` 关掉 site-packages，从缺省代码目录 = 生产克隆那条路完整生成一次。607 那条只看各文件顶层直接写的 import，漏掉三类：顶层 `if` / `try` 里的、相对 import、生成路径上函数体内按需 import 的。
+- `TestCanonicalMakeEntry`：
+  - 判据核对只看 `alphabot-app` 的配方行（注释里有原文不算）。
+  - 退回缺省时那句提示，含缺省 runner 也坏的情形。
+  - 可用的 `PYTHON` 胜过命令行上的 `ALPHABOT_GEN_PY`。
+- `tests/test_reads_own_checkout.py`：把新测试登记进 `LITERAL_TILDE_INPUTS`（附理由）——它的期望输出本身就是字面 `~/…`，由 shell 展开，HOME 指向 tmp。
+
+### 验证
+- 变异 14 处全红：克隆不在的报错、生成后与演示模式的 `--reset` 写回缺省；帮助页写回字面量；`/api/method` 不给 `app`；`here_command` 不 cd / 带空格也写 `~/` / 恒写绝对路径；Makefile 退回缺省不说；命令行 `ALPHABOT_GEN_PY` 盖过 `PYTHON`；生成路径上函数体内 import 第三方；顶层 `if` 里 import 第三方（607 的 AST 扫描看不到这一类）；配方判据换掉、只在注释留原文；直跑形式 runner 用错。每个变异体独立 pyc 前缀，还原后 194 passed。
+- 全量（开跑前等另一会话的整套跑完、确认没有并发）：1 failed、11603 passed。红的是元守卫 `test_reads_own_checkout`：新测试的期望输出 `~/alpha-hive-prod` 是字面家目录路径。按该守卫的规矩登记进 `LITERAL_TILDE_INPUTS`（附理由，不拆字符串躲扫描）后，该守卫与新测试类重跑 50 passed。
+- 帮助页渲染：预览工具只读主检出的 `.claude/launch.json`，没有为此改共享检出。改为在 node 里用桩 DOM 加载真 help.js，喂真 `/api/method`（隔离数据根），渲染「排错」一节。三行出的是 `cd … && /usr/local/bin/python3 -m …`；接口不给 `app` 时显示「命令取不到」。
+
+### 不在本版
+- Makefile 的 `alphabot` / `alphabot-demo` / `alphabot-stop` 目标仍用缺省解释器：它们是命令本身、不是提示，要不要跟着 `PYTHON` 走是另一个决定。帮助页已不再教人用 `make alphabot-stop`。
 
 ## [0.45.610] — 2026-10-22 — Changed：`requirements.txt` 对齐到生产 Mac 的精确版本（直接依赖一律 `==`）——此前 CI 装 pandas 2 / numpy 1 / yfinance 0.2，生产是 3 / 2 / 1.2；Added：漂移守卫
 
