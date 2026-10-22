@@ -599,8 +599,8 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
         # （2026-03-10/13、06-22、07-06 归档全是旧缺值哨兵 0.0）。19 根 = 18 个收益，同一个估计量少一个观测；只有这些天从
         # 缺变有值，其余日子逐位不变。仍不覆盖的：极少数窗口只有 18 根（2020~2035 共 5 天，如 2024-01-22；维度 IC 窗口内没有）。
         # v0.45.601：`fill_method=None` 写明——生产（pandas 3.x）的缺省就是它：Close 为 NaN 的那根连同后一根的收益一起丢掉。
-        # pandas 2.x 的缺省是先前向填充（NaN 那天收益记 0）⇒ 同一份日线算出另一个波动率；requirements.txt 仍钉 <3，照它装的
-        # 环境（CI、新机器）会无声换口径。冻结通道层 `buzz_v1_channels.price_fields` 按不填充定义。
+        # pandas 2.x 的缺省是先前向填充（NaN 那天收益记 0）⇒ 同一份日线算出另一个波动率；v0.45.610 前 requirements.txt 钉 <3，
+        # 照它装的环境（CI、新机器）曾无声换口径。写明后与 pandas 版本无关。冻结通道层 `buzz_v1_channels.price_fields` 按不填充定义。
         if len(hist) >= 19:
             returns = hist["Close"].pct_change(fill_method=None).dropna()
             if len(returns) >= 2:

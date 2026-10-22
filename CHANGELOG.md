@@ -7,7 +7,34 @@
 
 ## [0.45.611] — 2026-10-22 — 占位（进行中：v0.45.607 二次检查——给人抄的命令不再写死缺省解释器、生成器只需标准库改成真跑核对、Makefile 退回缺省时说出来）
 
-## [0.45.610] — 2026-10-22 — 占位（进行中：requirements.txt 对齐到生产 Mac 的精确版本——CI 一直装 pandas 2 / numpy 1 / yfinance 0.2，生产是 3 / 2 / 1.2）
+## [0.45.610] — 2026-10-22 — Changed：`requirements.txt` 对齐到生产 Mac 的精确版本（直接依赖一律 `==`）——此前 CI 装 pandas 2 / numpy 1 / yfinance 0.2，生产是 3 / 2 / 1.2；Added：漂移守卫
+
+> 用户 2026-10-22 选方案 A（对齐到生产精确版本）。只动依赖文件与测试；生产代码只改了一句注释。
+
+### Changed
+- `requirements.txt`：直接依赖全部 `==` 生产解释器 `/usr/local/bin/python3` 上实际装的版本（逐个 `pip show` 核对）：
+  yfinance 1.2.0、requests 2.32.5、pandas 3.0.1、pytz 2025.2、matplotlib 3.10.8、numpy 2.4.2、beautifulsoup4 4.14.3、jinja2 3.1.6、
+  scikit-learn 1.8.0、python-telegram-bot 21.11.1、httpx 0.28.1、mcp 1.26.0、pydantic 2.12.5、starlette 0.52.1、uvicorn 0.40.0、
+  pywebview 6.2.1（仍只在 macOS 装）。传递依赖不钉。
+  - 起因：旧文件写范围（`pandas<3`、`numpy<2`、`yfinance<0.3`……，2026-03-01 `32c40eb1` 写下时生产**已经**是 pandas 3.0.1）⇒ CI 一直测另一套库
+    （v0.45.601 的 buzz_v1 差分对拍就是这样只在 CI 红）；反过来照文件装（新机器、换解释器——Alpha Bot 的报错弹窗就这么教）会把生产无声降级。
+  - 删掉 `plotly` / `seaborn` / `schedule`：仓里没有真正的 import（plotly / seaborn 只出现在 `code_generator.py` 生成的代码字符串里），生产从没装过。
+  - `anthropic` 仍注释掉（注明生产装的是 0.84.0）：CI 刻意不装，测试一律用假模块（v0.45.601）。
+  - 改正过时注释：Telegram bot 自 2026-06-16 起经仓库根 `Dockerfile` 部署到 Railway，依赖写在 Dockerfile 里、**不读本文件**——本次改动碰不到它。
+- `data_pipeline.py::_fetch_history_metrics` 那段注释同步改说法（只是注释，`price.fields` 指纹不变，仍 `e512d997`）。
+
+### Added
+- `tests/test_requirements_match_installed.py`：在跑测试的解释器上逐条核对「钉的版本 = 装着的版本」，并要求直接依赖一律 `==`。
+  生产 Mac 上有人升级了包、没同步改文件 ⇒ 本机整套红（报包名、钉几、装几）；CI / 照文件建的 venv 上恒绿（那里不会漂）。纯函数 `problems()` + 「有牙」组（漂移 / 没装 / 范围 / 环境标记 / 行尾注释）。
+
+### 验证
+- 新守卫 7 passed；ruff 无告警。正对照：改前的 `requirements.txt` 喂给它 ⇒ 19 条全报「没钉死」；把 pandas / starlette 改成 CI 原来的版本 ⇒ 两条都报漂移。
+- 照新文件建的干净 venv（不带用户 site，同 CI；含 pywebview）：`pip check` 无冲突；整套（`-m "not integration and not network"`，开跑前无并发整套）
+  **11599 通过 / 0 失败 / 0 跳过 / 2 xfail，650 s**。
+- CI：推送后核对，结果补在本条末尾。
+
+### 遗留
+- 传递依赖没钉：CI 与生产在传递依赖上仍可能有小版本差（「本机全过、CI 红」时先查这个）。要连传递依赖一起锁，得另做一份 lock 文件。
 
 ## [0.45.609] — 2026-10-22 — Fixed：对冲 Greeks 汇总——买价为 0 的深度虚值腿不再让整个组合 β·$Delta 变 unknown
 
