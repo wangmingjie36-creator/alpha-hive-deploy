@@ -63,7 +63,23 @@ yfinance `401 Invalid Crumb` → `TypeError`），把评分阶段完整的 10 �
 - 10-22 断网对评分阶段的实际影响：ENPH / NEE / NFLX / SNOW（14:23–14:26 扫到）新闻通道回中性 50、历史 HV 落样本 ⇒ iv_rank 置 None，
   两项都已如实记成降级；Reddit 未受影响；日健康判定 ok。断网成因（代理 / VPN / 网络）日志看不出，待验证。
 
-## [0.45.624] — 2026-10-22 — 占位（进行中：选测审计插件的 import 过滤从不生效——改成只按调用栈判断（最近的仓库帧 vs frozen importlib 帧），补真插件正对照）
+## [0.45.624] — 2026-10-22 — Fixed：选测审计插件的 import 过滤从不生效——改成只按调用栈判（最近的决定性帧）；连带把静态 import 反查补全（`from tests import X` + 间接 import），否则修好过滤后有 5 条已知耦合只剩登记表一个来源
+
+起因：v0.45.619 顺带发现 `tools/select_tests/audit_plugin.py` 的 import 过滤（`rel.endswith(".py") and "b" in mode and _via_importlib()`）是死代码——`open` 审计事件报的是 FileIO 的原始模式，`'rb'` 也报成 `'r'`，`"b" in mode` 恒假。于是 import 读全被当成「当数据读」记下：`prod_py` 含全部 import（`test_delta_hedge` 只按文本读 `delta_hedge.py` 一个，却记了 25 个），`other_test` 含「这一轮里第一个 import 某测试模块的文件」（pytest 断言改写在 `exec_module` 里经 `Path.read_bytes` 读源码），记不记得下取决于这一轮收集了谁 ⇒ 部分跑会报出整套登记表里没有的「新读」。v0.45.619 那次 `--update` 误判的读（`test_alphabot_chat` → `test_alphabot`）正是这一类。
+
+**为什么不是简单删掉 `"b" in mode`**：旧的 `_via_importlib` 问的是「栈里**有没有** importlib 帧」。测试模块在模块级 / 类体里 `SRC = (REPO / "x.py").read_text()`，执行时栈底就是 importlib（模块正在被 import）——只删 `'b'` 判据会把这类数据读整个丢掉；在模块级逐个读测试文件的元守卫就从测量里消失，`--build` 后改测试文件时漏选它（**漏选，危险方向**）。
+
+- `tools/select_tests/audit_plugin.py`：`_via_importlib` → `_opened_by_import_machinery`，从调 `open` 的那一帧往上走，跳过标准库 / 第三方帧，**最近的决定性帧说了算**：先碰到 `<frozen importlib…>` ⇒ import 机制自己在读（loader 读源码；pytest 断言改写经 `pathlib` 读源码，再往上就是 `_load_unlocked`）⇒ 不记；先碰到仓库里的代码 ⇒ 测试 / 生产代码自己在读，哪怕正处在某次 import 当中 ⇒ 照记；两样都没碰到（pytest 报告位置经 linecache 读源码、仓库外代码起的线程）⇒ 照记（多记不漏记）。不再看 `mode`。dump 新增 `import_opens_skipped`（被过滤掉的读数），正对照靠它确认过滤真在起作用；`select_tests.py` 不读这个键，登记表格式不变。模块文档盲区 3 改写。
+- **连带修 `select_tests.static_importers`（第一档本来就承诺「静态 import 它的测试」要选）**：修好过滤后拿整套 dump 对登记表，17 条窄读者条目都是 import 读留下的、此后不会再被测到；其中 **5 条静态反查认不出**——原正则只认直接 import 的两种写法：漏了 `from tests import X`（`test_replay_ohlc_pit` → `test_replay_ohlc_window`）与间接 import（经测试模块：`test_ic_rerun_fg_budget` → `test_step_contract_ic_rerun` → `test_ic_rerun_readiness`、`test_oi_staleness_consumers` → `test_yahoo_iv_placeholders` → `test_options_iv_unavailable`；经帮手：`test_persistent_writes_have_readers` / `test_ml_model_default_path_retired` → `tests/_persistent_io_scan.py` → `test_ledger_writes_go_through_ledger_io`）。**死过滤一直在替它补这 5 条**；过滤修好后它们只剩登记表一个来源（今天还在，因为登记表只并不删），下次 `--build` 就丢、新出现的同形耦合 `--update` 也不再登记 ⇒ 无声漏选。现改为 AST 解析（`_imported_tests_modules`：各种 import 写法、函数体里的 import、相对 import；注释 / 文档字符串里的字样不算；语法错 ⇒ 按字样从宽认，选上了它的语法错就在这次跑里直接红）+ 反向 import 图（`reverse_import_graph`，`read_test_texts` 现在连 `tests/_*.py` 帮手一起读，帮手只当中转点、不会被选中）+ 传递闭包（`static_importers`，环会停）。全仓 385 个文件解析约 0.5 秒，每次选测建一次图。
+- `tests/test_select_tests.py`（60 → 70 条）：**真插件正对照**——在 `tmp_path` 里搭一个合成 git 仓库（`SELECT_TESTS_REPO` 指过去），真起 pytest、真加载插件，每一种读各用一个文件：模块级 import（`helper_mod`）/ 测试函数里 import（`late_mod`）/ import 另一个测试模块（`test_c`，经 pytest 断言改写）⇒ 都不记；模块级按文本读（`data_mod.py`，栈底是 importlib）/ 运行期按文本读另一个测试文件（`test_b.py`）/ 仓库外代码在线程里读（`thread_data.py`，栈上既无仓库帧也无 importlib）⇒ 都记，且 `import_opens_skipped ≥ 3`；已有的真仓库正对照加 `import_opens_skipped > 0`。静态反查：六种 import 写法（参数化）、经测试模块 / 经帮手的间接 import、注释与字符串不算、环会停、语法错从宽认；**真登记表**：每一条窄读者条目都必须另有来源——静态 import 图认得出，或读者源码点了被读文件的名字（按文件名读的数据读，如 `test_ast_cache`）——哪条两样都不是，登记表就是它唯一的来源、重建即漏选 ⇒ 红。
+
+**变异检查**（逐个变异，都红在预期的断言上，还原后绿）：插件——原样退回 v0.45.619 版（2 条红）/ 过滤永不生效（2 条红：`test_c`、`helper_mod`、`late_mod` 被记上）/ 只问「栈里有没有 importlib」（1 条红：`data_mod.py` 被丢——危险方向那一个）/ 栈上两样都没有时当成 import（1 条红：`thread_data.py` 被丢）；对照：同一帧里两个判断换序（等价改动）⇒ 仍绿，测试没有绑死写法。静态反查——只认直接 import（3 条红，含真登记表）/ 忘了 `from tests import X`（3 条红，含真登记表）/ 不读帮手（真登记表红）/ 只看模块顶层 import（2 条红，**含真登记表**——本仓真有函数体里的测试模块 import）/ 语法错当空集（1 条红）/ 帮手当测试返回（1 条红）。
+
+**真仓库实测**：单文件跑——`test_delta_hedge` 的 `prod_py` 25 个 → 只剩 `delta_hedge.py`（过滤 29 次）；`test_alphabot_chat` 不再记 `tests/test_alphabot.py`，只剩它真用 `ast.parse(read_text())` 读的 `alphabot/chat.py`、`server.py` 与两个静态文件；`test_earnings_event_shadow` 的 204 个 `prod_py` 来自 `own_python_files` 逐个读全仓 `.py`（真数据读，保留）。整套带新插件（11777 passed / 0 失败 / 606s）的 dump 对登记表：漂移 0 处；过滤 436 次；**12 个元守卫全都仍读 374 个测试文件、仍判「读全部」**（没有哪个是靠 import 而非按文本「读」测试文件的——那会在 `--build` 后被降级）；17 条窄读者不再被测到，修后全部被静态反查或「按名字读」覆盖（即上面的真登记表测试）。
+
+**登记表没动**：只并不删，留着的 17 条与静态反查重合、不改变任何选择；下次有人 `--build` 时它们自然消失，覆盖由静态反查接手。
+
+**整套核对**：① 只修插件时带新插件整套（保留 dump 做上面的对照）：11777 passed / 0 失败 / 606s。② 补完静态反查后经 `select_tests.py --run`：**1 失败** / 11785 passed——`tests/test_replay_ohlc_window.py::TestScopeIsCleared` 按字样扫全部非测试源码里的 `replay_ohlc_window`（防生产代码开始用回放窗口），我在 `static_importers` 的文档字符串里拿 `test_replay_ohlc_pit` → `test_replay_ohlc_window` 当例子写进去了，正中这条守卫。改成不点名（逐条留在本条 CHANGELOG），并在文档里写明「别在本文件里写具体测试模块的名字当例子」。随即用修好的插件自己的 dump 圈出**按文本读 `tools/select_tests/*.py` 的 40 个测试**（扫全仓源码的守卫）+ `test_select_tests.py` 重跑：1331 passed。③ 最终代码再整套（经 `select_tests.py --run`，错开了别的会话的整套）：**11786 passed / 0 失败 / 579s**，退出码 0、漂移检查无过期。
 
 ## [0.45.623] — 2026-10-22 — Fixed：对话的 API 报错说人话（原因、扣没扣钱、怎么办）；影子任务 plist 生成器写上代理变量
 
