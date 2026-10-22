@@ -1395,6 +1395,7 @@ def data_root_session_facts(pytestconfig):
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _root_data_guard  # noqa: E402
 import _write_sandbox  # noqa: E402
+import _concurrency_hint  # noqa: E402
 
 _ROOT_FP_BEFORE = pytest.StashKey[dict]()
 
@@ -1461,6 +1462,14 @@ def pytest_report_header(config):
         return (f"real-data-root guard: INACTIVE（此机器上没有真实数据根；CI / 干净克隆都是这样，牙只靠合成测试证明）{tail}\n"
                 + sb_line)
     return f"real-data-root guard: active on {root}（{len(fp)} 个受闸条目）{tail}\n" + sb_line
+
+
+def pytest_report_collectionfinish(config, items):
+    """收集结束、条数已知：把本会话登记为「N 条」，并看有没有别的大会话同时在跑（v0.45.590，只提示）。
+
+    ⚠️ 必须在这个钩子里算，不能拆成 `pytest_collection_finish` 存 stash、这里再读：终端报告器自己的
+    `pytest_collection_finish` 就是在里面调本钩子的，顺序不保证在别的 conftest 之后——读到的会是空（实测：拆开时 `-q` 下什么都不打）。"""
+    return _concurrency_hint.session_lines(getattr(config, "_alpha_hive_write_sandbox", None), len(items))
 
 
 @pytest.fixture(scope="session", autouse=True)

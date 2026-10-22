@@ -65,6 +65,12 @@
 - ⚠️ **pre-commit 管不到 `git rebase --continue`**（实测只触发 post-rewrite）——解 CHANGELOG 冲突后兜底的是 pre-push，别以为提交成功就代表检查过。
 - `.git/hooks` 不被跟踪：重新 clone 或清过之后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。
 
+## 整套测试怎么跑（2026-10-21 起）
+
+- **开发期只跑改动相关的测试**（`/usr/local/bin/python3 -m pytest tests/test_xxx.py`），**整套留到收尾跑一次**。
+- **跑整套前先看有没有别的整套 / clockshift 审计在跑**：`pgrep -fl pytest`、`pgrep -fl audit.py`；有就错开。整套是单进程纯 CPU，并发时同一套会慢到近两倍（机制与实测在 auto-memory `alpha-hive-test-suite-speed.md`）——**两轮并发时段不同的整套耗时不可比，别拿它当回归 / 提速证据**。
+- 整套开跑时报告头会自动打一行 `concurrency:`（`tests/_concurrency_hint.py`）：选中条数 ≥ `BIG_RUN_ITEMS` 且同时还有别的大会话（含 clockshift 拨钟的子会话）在跑，或登记不可用而无法判断。**只提示，不阻塞、不报红**；⚠️ **不要改成排队锁**——会让一个会话无声卡住，与「失败要可见」冲突，也会和靠真睡 / 靠超时的测试互相干扰（理由全文在该模块 docstring）。守卫 `tests/test_concurrency_hint.py`。
+
 ## 历史改动查询指针
 
 历史改动**不在本文件维护**（v0.40.3 清理了此前 ~75 行 v0.10-0.19 时代的实现细节清单）：
