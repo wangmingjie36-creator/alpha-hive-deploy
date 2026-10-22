@@ -24,7 +24,23 @@
 
 ## [0.45.620] — 2026-10-22 — 占位（进行中：v0.45.609 二次检查——跨式页账本带 bid_zero、守卫递归扫描、判据收到 cboe_options 共用、对冲页显示 bid_zero 腿数）
 
-## [0.45.619] — 2026-10-22 — 占位（进行中：选测脚本 --update / 漂移检查的「读全部测试文件」阈值分母误用本轮收集数，部分收集时把只读一个测试文件的测试误判成元守卫）
+## [0.45.619] — 2026-10-22 — Fixed：选测脚本「读全部测试文件」的分母——`--update` / `--run` 曾按本轮收集数算（部分收集时小到 1），把只读一个测试文件的测试误判成元守卫；改用仓库测试文件总数，三处判定共用一个谓词
+
+起因：2026-10-22 改 `tests/test_alphabot_chat.py` 后跑 `select_tests.py --update`，diff 把它从 `reads_tests`（读 `tests/test_alphabot.py`）挪进了 `reads_all_tests`。那份 diff 没有提交（当时只经工具自己的 `load_registry` / `save_registry` 手工登记了真正新增的 `alphabot/static/alphabot.css` 读者）。
+
+**根因**：`build_registry` / `observed_gaps` / `merge_observation` 都拿 dump 的 `n_collected_files` 当「读 ≥ 一半测试文件」的分母。整套 dump（`--build`、CI `--check-drift`）里它≈仓库测试文件数，所以一直没露馅；`--update` 只收集被改的文件（n=1 ⇒ 读 1 个就 ≥ 0.5），`--run` 只收集被选的几个（假 pytest 场景里 3 个 ⇒ 读 2 个就 ≥ 1.5）。被读的文件是从**磁盘**上读的、与这一轮收集了谁无关，分母只能是磁盘上有多少。
+
+**后果（如实）**：误判方向是**多选**不是漏选——被挪进 `reads_all_tests` 的测试改任何测试文件都会被跑（白跑），它的窄读者条目被删但被「读全部」覆盖；`--run` 的提示会把普通的漏登说成「应归入 reads_all_tests」，引人用 `--update` 把错的登记表提交进去。已核：提交过的登记表 `reads_all_tests` 自 v0.45.615 建表以来 12 条未变，没被污染。
+
+- `tools/select_tests/select_tests.py`：新增 `repo_test_count()`（`tests/test_*.py` 磁盘计数，与 `read_test_texts` 同一个 glob）与 `counts_as_read_all(n_read, n_tests)`（三处判定共用，取代三份各写各的 `len(...) >= READ_ALL_FRACTION * n`）；三个函数的 `n_tests` 是**必填关键字参数**（漏传 ⇒ `TypeError`，不会静默回到错的分母），四个入口（`--build` / `--check-drift` / `--run` / `--update`）都传 `repo_test_count()`。`n_collected_files` 只剩「这是不是一次有效测量」那道检查。分母 ≤ 0 ⇒ 抛 `ValueError`：若答「不算读全部」，真元守卫会被降成窄读者，改新测试文件时漏选它（危险方向）。
+- `tests/test_select_tests.py`（53 → 60 条）：`TestReadAllDenominator`——2026-10-22 那份部分 dump 原样并入 ⇒ 进 `reads_tests`、漂移提示是窄读；反方向：部分收集时真元守卫照样认得出；分母 ≤ 0 抛；`repo_test_count` = 磁盘计数。`--update` 的假 pytest 测试改用真实的 `n=1`——**原来写 100，恰好绕开了这个 bug**；`--run` 补「收集 3 个、读 2 个测试文件」场景（读 1 个按旧分母也不 ≥ 1.5，测不出来）。**真复现**：真 `--update`（真插件、真子 pytest）只收集 `tests/test_ast_cache.py`（它按文件名读 `test_no_invisible_prod_data_skips.py`，确定性的数据读）⇒ 留在 `reads_tests`。
+- `tools/select_tests/audit_plugin.py`：只改模块文档（见下「顺带发现」），行为不变。
+
+**变异检查**（逐处把分母换回收集数，全红，还原后绿）：`merge_observation`（4 条红，含真复现）/ `observed_gaps`（2 条红）/ `cmd_update` 入口（2 条红，含真复现）/ `cmd_select` 入口（1 条红）/ 分母 ≤ 0 答 `False`（1 条红）。另用**真登记表副本**复跑 2026-10-22 那次 `--files tests/test_alphabot_chat.py --update`：只有 `commit` 字段变化。
+
+**顺带发现（未修，已记下）**：`audit_plugin` 的 import 过滤（`rel.endswith(".py") and "b" in mode and _via_importlib()`）**从不生效**——`open` 审计事件报的是 FileIO 的原始模式，`'rb'` 也报成 `'r'`（本机实测：普通 import、`Path.read_bytes`、`open(..., 'rb')` 都是 `'r'`）。所以 import 读其实全被记下：`prod_py` 含全部 import（`test_delta_hedge` 只按文本读 `delta_hedge.py` 一个，却记了 25 个生产 `.py`——其余 24 个是 import，且多数来自 `conftest.py` 自动夹具里的 import〔`twelve_data`、`swarm_agents/*`〕，栈里有 `<frozen importlib>`，算到当时在跑的测试文件头上）；`other_test` 含「这一轮里第一个 import 某测试模块的文件」（pytest 断言改写经 `Path.read_bytes` 读源码）。影响：① 插件模块文档盲区 3 与 v0.45.615 条目「import 读被过滤」的说法不成立（文档已改正）；② 测试模块之间的 import 耦合记不记得下取决于这一轮收集了谁——整套里被 import 的测试模块多半已先被收集、进了 `sys.modules`，部分跑里没有 ⇒ 部分跑会报出整套登记表里没有的「新读」（本机：单跑 `test_earnings_event_shadow` 记下 `test_straddle_gex_shadow.py`，登记表里没有）。本条之前这正是触发误判的那类读；修完分母后它只会落进 `reads_tests`（多选、安全方向）。**第二档要用 `prod_py` 前必须先修这道过滤。**
+
+**整套核对**：经本工具自己的 `select_tests.py --run`（改了核心文件 ⇒ 回退整套、带审计插件做漂移检查），rebase 前基线 `44a3b027`：**11750 passed / 0 失败 / 2 xfailed / 610s**（另一个会话同时在跑单文件变异循环，耗时不可比）。漂移检查报了 2 处非代码读未登记（`constraints.txt`、两个工作流 `.yml`）——来自 v0.45.617、与本条无关，`origin/main` 已由 `f4e43828` 并进登记表（那次同样撞上了本条的误判、手工只收了真读）；rebase 后无需再改登记表。整套里**没有一处**被新分母判成「应归入 reads_all_tests」。
 
 ## [0.45.618] — 2026-10-22 — Fixed：v0.45.616 二次检查——对话七处：输入区 `hidden` 被 `display` 盖掉、没发出去的请求也记账、限流 / 过载不再重试、隔着搜索的文字被粘连、失败后要重打问题、空工具结果、CSS 守卫
 
