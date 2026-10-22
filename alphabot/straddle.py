@@ -18,7 +18,7 @@
 **S 用与账本 mark 同一份 CBOE 快照里的现价**（当天信号行的 `underlying_price`），不用 greeks 文件里的 `price`：
 那个价曾比期权报价晚一天（v0.45.423）。任一腿缺任一项 ⇒ 对应合计为 None，不把缺的当 0。
 **盘中参考**（`live_view`，v0.45.581）比账本侧宽一档：bid = 0 但 ask 真实、IV 正常的腿，Greeks 照用并标 `degraded_legs`
-（账本 / 对冲侧 `portfolio_greeks` 仍按严格 `quote_ok`，所以同一条腿盘中页可能有数、当晚账本却缺报价）。
+（对冲侧 `portfolio_greeks` 自 v0.45.609 起对同一类腿的 Greeks 也照用并标 `bid_zero`，判据同口径；mid / 压力表仍要严格 `quote_ok`）。
 
 盲期（检验协议：experiments/straddle_gex_prereg.md）
 ---------------------------------------------------
@@ -692,7 +692,8 @@ def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
         买跨式按 bid 卖出，bid = 0 即无买盘，仍不给；
       · Greeks：`_greeks_usable` 的腿照用，`greeks.degraded_legs` 标明哪几条是 bid = 0 的模型值，仅供参考
         （另一条腿缺、合计全是 None 时不给：没有任何一格用到它）。
-    账本侧（`portfolio_greeks.option_exposures`）与卖权账本共用的 `quote_ok` 口径**不动**，对冲决策仍按严格口径。"""
+    `quote_ok` 本身（卖权账本 / 跨式入场共用）**不动**；`portfolio_greeks.option_exposures` 自 v0.45.609 起对 Greeks 汇总
+    也放行同一类 bid = 0 腿（自带判据 `_bid_zero_greeks_usable`、不 import 本模块），mid 仍不给。"""
     side = str(p.get("side") or "")
     n = _pos(p.get("contracts"))
     quotes = (q or {}).get("quotes") or {}

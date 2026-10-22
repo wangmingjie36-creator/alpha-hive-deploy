@@ -5,7 +5,24 @@
 
 ---
 
-## [0.45.609] — 2026-10-22 — 占位（进行中：对冲 Greeks 汇总——买价为 0 的深度虚值腿不再让整个组合变 unknown）
+## [0.45.609] — 2026-10-22 — Fixed：对冲 Greeks 汇总——买价为 0 的深度虚值腿不再让整个组合 β·$Delta 变 unknown
+
+对冲账本页 10-21 报「数据不全：partial data — no hedge on partial data (1 quote missing)」。查到的缺口是 T 跨式里的 `T261030C00024500`（空头看涨，行权价 24.5、现价 21.91，bid 0.00 / ask 0.03）：`cboe_options` 的 `quote_ok` 要求 `bid > 0`，这张腿判假 ⇒ `option_exposures` 把整行当缺报价、连 CBOE 给的 delta 0.05 也丢掉 ⇒ 汇总里 1 行 β·$Delta 缺 ⇒ `band_status="unknown"` ⇒ 当天整个组合不对冲、逐票对冲里 T 也「option_delta_unknown」。`quote_ok` 为了 mid 才要 bid > 0（bid=0 的 mid 只是 ask 的一半），但 Greeks 与 mid 无关。
+
+### Fixed
+- **`portfolio_greeks.py`**：新增 `_bid_zero_greeks_usable`（bid = 0、ask 有限 > 0、iv > 0、delta/gamma/vega/theta 有限；iv ≤ 0 是 CBOE 全零占位，不放行）。`option_exposures` 对这类腿 Greeks 照进汇总、行上标 `bid_zero=True`、`mid` 仍为 None（不编市价）；只在这类行上出现 `bid_zero` 键。其余不合格报价（倒挂、bid > 0 但被判假、缺 Greeks、iv ≤ 0、整张缺）照旧判缺报价。
+- **压力表**基准价是 mid，bid=0 腿没有 ⇒ 仍剔这一行（网格 partial，不编 mid），但剔除标签写明 `mid(bid=0)`，且规模按已知的 $Delta 毛额记账（此前记成「规模未知」）。
+- **`price_check`** 纯新增 `n_bid_zero` / `bid_zero`（信息项，**不进 `gaps`**、不触发告警）。
+
+### Changed
+- `alphabot/straddle.py` 两处注释更正：原写「对冲侧仍按严格 `quote_ok`」，现与盘中页同口径（判据各自实现，不互相 import）。`CLAUDE.md` 对冲页一节加一条不变式。
+
+### 不变
+- `cboe_options._qs_contract` / `quote_ok` 与卖权 25% 点差预注册规则、跨式入场闸**一个字没动**（`TestStrictQuoteOkRuleUntouched` 钉住；放宽判据只许 `portfolio_greeks` 自用）。
+- 10-21 的落盘审计 / 对冲页那一天仍显示「数据不全」——历史账本不改、不重跑；修复从下一个扫描日起生效。⚠️ 未能核实 10-21 收盘时那张腿的 CBOE `iv` 是否 > 0（落盘里没有原始报价）：若当时 iv 是 0 占位，同样的事仍会再发生一次，那时审计里会看到 quote_missing 而不是 bid_zero。
+
+### Added（测试）
+- `tests/test_portfolio_greeks_bid_zero.py`（19 条）：T 腿事故形状 ⇒ 不缺报价且 $Delta/Vega/Theta/Gamma 与 CBOE 值逐项相等、汇总含这一腿、band 不再 unknown、`price_check` 记账不进 gaps、压力表剔除标签与规模；9 种「Greeks 不可信」变体仍判缺；`quote_ok` 严格口径与判据只许 `portfolio_greeks` 自用的 AST/文本守卫。变异 5 处（判据恒假 / 去掉 iv>0 / 放宽到任意 bid / 不打标记 / 还原压力标签）全红。相关 369 条通过。
 
 ## [0.45.608] — 2026-10-22 — Fixed：v0.45.598 / 605 二次检查——敏感性块在盲化期泄露 `status` 并让共振报告打印崩溃、全部判不了时误报「与主分析相同」、小样本日被判故障日（定义补 `MIN_TICKERS` 勘误）、告警沉默分支
 

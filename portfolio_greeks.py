@@ -575,6 +575,21 @@ def _default_quotes(ticker: str, symbols: List[str]) -> Dict[str, Optional[dict]
     return {s: ({**q, "underlying": und} if isinstance(q, dict) else q) for s, q in quotes.items()}
 
 
+def _bid_zero_greeks_usable(q) -> bool:
+    """`quote_ok` 为假、但 CBOE 的逐合约 Greeks 仍可用的那一类：**bid = 0**（深度虚值腿最常见）、
+    ask 有限且 > 0、四个 Greeks 与 iv 都有限、iv > 0（iv 缺 / ≤ 0 时 CBOE 给的是全零占位，不是观测值）。
+    mid 在这里依旧是 None——bid = 0 的「中间价」只是 ask 的一半，不是市价；但 Greeks 与 mid 无关，
+    让这样一张腿把整个组合的 β·$Delta 变成 unknown（v0.45.609 之前的行为）等于为了 0.03 的 ask 停掉对冲。
+    判据与 Alpha Bot 跨式页盘中参考（`straddle._greeks_usable`，v0.45.581）一致；这里不 import 它（依赖方向）。"""
+    if not isinstance(q, dict):
+        return False
+    bid, ask = _num(q.get("bid")), _num(q.get("ask"))
+    if bid is None or ask is None or bid != 0 or ask <= 0:
+        return False
+    iv = _num(q.get("iv"))
+    return iv is not None and iv > 0 and all(_num(q.get(k)) is not None for k in ("delta", "gamma", "vega", "theta"))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 逐行暴露
 # ══════════════════════════════════════════════════════════════════════════════
@@ -651,6 +666,8 @@ def option_exposures(as_of: str, positions: Optional[List[Dict]] = None,
         $Vega/pt    = qty × vega                          —— CBOE vega 已是每 vol 点
         $Theta/日   = qty × theta                         —— CBOE theta 每日历日、多头为负
     报价缺失 → 该行 quote_missing、Greeks None（不沿用 last_mark 的任何东西）。
+    例外（v0.45.609）：bid = 0 但 ask 真实、Greeks 与 iv 齐全的腿（`_bid_zero_greeks_usable`）**不算缺**——
+    Greeks 照进汇总、行上标 `bid_zero=True`、`mid` 仍为 None（压力表因缺 mid 单独剔这一行并说明原因）。
     S（v0.45.423）取自与报价**同一份** CBOE payload（`_default_quotes` 附在报价里的 "underlying"），
     与期权报价同一时刻；报价里没有它（注入的 quotes_fn）才退回 closes_fn。payload 属于别的场次
     （补跑历史日时拉到的是今天的链）⇒ 报价本身也不是 as_of 的：quote_missing + quote_stale，Greeks 不进汇总。"""
@@ -706,13 +723,17 @@ def option_exposures(as_of: str, positions: Optional[List[Dict]] = None,
                 row["quote_session"] = und.get("session")
                 q = None                    # 别的场次的报价：不进 Greeks 汇总（同缺报价）
             ok = isinstance(q, dict) and bool(q.get("quote_ok"))
-            g = {k: _num(q.get(k)) for k in ("mid", "iv", "delta", "gamma", "vega", "theta")} if ok else {}
-            if not ok or any(g.get(k) is None for k in ("mid", "delta", "gamma", "vega", "theta")):
+            bid_zero = (not ok) and _bid_zero_greeks_usable(q)
+            g = {k: _num(q.get(k)) for k in ("mid", "iv", "delta", "gamma", "vega", "theta")} if (ok or bid_zero) else {}
+            if not (ok or bid_zero) or any(g.get(k) is None
+                                          for k in (("mid",) if ok else ()) + ("delta", "gamma", "vega", "theta")):
                 row["quote_missing"] = True
                 _apply_beta(row, beta_fn, as_of)
                 rows.append(row)
                 continue
             row.update(g)
+            if bid_zero:
+                row["bid_zero"] = True          # 买价为 0：Greeks 是 CBOE 模型值、mid 不给（None）；只在这类行上出现
             qty = row["qty"]
             row["vega_dollar_per_pt"] = round(qty * g["vega"], 2)
             row["theta_dollar_per_day"] = round(qty * g["theta"], 2)
@@ -1335,7 +1356,8 @@ def stress_table(rows: List[Dict], spy_price: Optional[float] = None) -> Dict:
             need = {k: _num(row.get(k)) for k in ("qty", "price", "strike", "iv", "mid", "beta")}
             dte = _num(row.get("dte"))     # 过 _num：NaN 的 dte 躲得过 `is None`，却会让 int() 直接崩
             if any(v is None for v in need.values()) or dte is None or row.get("cp") not in ("call", "put"):
-                miss = [k for k, v in need.items() if v is None] + (["dte"] if dte is None else [])
+                miss = [("mid(bid=0)" if (k == "mid" and row.get("bid_zero")) else k)
+                        for k, v in need.items() if v is None] + (["dte"] if dte is None else [])
                 _exclude(row, f"{row.get('symbol') or row.get('ticker')}(option:{','.join(miss) or 'cp'})")
                 continue
             if dte <= 0:
@@ -1474,6 +1496,7 @@ def _price_check(as_of: str, rows: List[Dict], spy_mark: Dict, rec: Optional[Dic
                 for r in rows if r.get("price_missing") and not r.get("price_stale")]
     quote_stale = sorted({str(r.get("symbol") or r.get("ticker")) for r in rows if r.get("quote_stale")})
     quote_missing = _ids(lambda r: r.get("quote_missing") and not r.get("quote_stale"))
+    bid_zero = _ids(lambda r: r.get("bid_zero"))
     beta_missing = list(dict.fromkeys(str(r.get("ticker")) for r in rows if r.get("beta_missing")))
     chk = {"as_of": as_of, "expected_session": _expected_session(as_of), "version": _VERSION,
             "n_rows": len(rows), "n_priced": sum(1 for r in rows if _pos(r.get("price")) is not None),
@@ -1481,6 +1504,7 @@ def _price_check(as_of: str, rows: List[Dict], spy_mark: Dict, rec: Optional[Dic
             "n_quote_stale": len(quote_stale), "quote_stale": quote_stale[:_PRICE_CHECK_LIST_MAX],
             "n_unpriced": len(unpriced), "unpriced": unpriced[:_PRICE_CHECK_LIST_MAX],
             "n_quote_missing": len(quote_missing), "quote_missing": quote_missing[:_PRICE_CHECK_LIST_MAX],
+            "n_bid_zero": len(bid_zero), "bid_zero": bid_zero[:_PRICE_CHECK_LIST_MAX],
             "n_beta_missing": sum(1 for r in rows if r.get("beta_missing")),
             "beta_missing": beta_missing[:_PRICE_CHECK_LIST_MAX],
             "nav_missing": list(nav_missing or []),
