@@ -15,10 +15,10 @@
 **盲区（写在这里，别让人以为它全知）**：
 1. 子进程里的读（测试起 `ruff` / CLI）钩子看不到——`test_no_undefined_names` 靠 `select_tests.EXTRA_ALWAYS` 手工补；
 2. C 层直接读（sqlite 等）不触发 Python 的 `open` 事件；
-3. import 机制读 `.py`（栈里有 `<frozen importlib…>`）**本意**要过滤——它是「依赖」不是「当数据读」，且 `sys.modules` 只让第一个导入者触发，
-   本来也记不准；import 耦合由第二步用静态 import 反查补。⚠️ **实测（v0.45.619）这条过滤从不生效**：`open` 审计事件报的是 FileIO 的
-   原始模式，`'rb'` 也报成 `'r'`，`"b" in mode` 恒假 ⇒ import 读全被记下（`prod_py` 含全部传递 import；`other_test` 含这一轮里
-   第一个 import 某测试模块的文件，记不记得下取决于收集了谁）。第二档要用 `prod_py` 前先修它；详见 CHANGELOG 0.45.619；
+3. import 机制自己读 `.py`（loader 读源码、pytest 断言改写在 `exec_module` 里读测试模块源码）**不记**——它是「依赖」不是「当数据读」，
+   且 `sys.modules` 只让第一个导入者触发，记下来也取决于这一轮收集了谁；import 耦合由 `select_tests.static_importers` 静态反查补。
+   判法见 `_opened_by_import_machinery`（**只看调用栈、按最近的帧**；v0.45.624 前按 `"b" in mode` 判，而审计事件报的是 FileIO 的
+   原始模式，`'rb'` 也是 `'r'` ⇒ 过滤从不生效、import 读全被记下）；
 4. 归属是「当前跑的测试文件」：后台线程的读会算到当时正在跑的那个文件头上（只会多记，不会漏）。
 """
 from __future__ import annotations
@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 REPO = os.path.realpath(os.environ.get("SELECT_TESTS_REPO") or Path(__file__).resolve().parents[2])
+_REPO_PREFIX = REPO + "/"
 OUT = os.environ.get("SELECT_TESTS_OUT")
 if not OUT:
     # 加载了插件却没说往哪写 ⇒ 这次测量必然是空的，当场报出来，不要跑完一整套才发现没有产物
@@ -60,11 +61,23 @@ def _norm(p):
     return p if os.path.isabs(p) else os.path.abspath(p)
 
 
-def _via_importlib() -> bool:
-    f = sys._getframe(2)
+def _opened_by_import_machinery() -> bool:
+    """这次 open 是不是 import 机制自己发起的。从发起 open 的那一帧往上走，跳过标准库 / 第三方的帧，**最近的**决定性帧说了算：
+
+    * 先碰到 `<frozen importlib…>` ⇒ 是（loader 读源码；pytest 断言改写经 `pathlib` 读源码，再往上就是 `_load_unlocked`）；
+    * 先碰到仓库里的代码 ⇒ 不是——测试 / 生产代码自己在读，**哪怕正处在某次 import 当中**（测试模块在模块级或类体里
+      `SRC = (REPO / "x.py").read_text()`，执行时栈底下就是 importlib）。⚠️ 只问「栈里有没有 importlib」会把这类读整个丢掉：
+      在模块级逐个读测试文件的元守卫就从测量里消失 ⇒ 改测试文件时漏选它（危险方向）；
+    * 两样都没碰到（pytest 报告位置时经 linecache 读源码、仓库外代码起的线程……）⇒ 不是（多记不漏记）。
+
+    不看 `mode`：审计事件报的是 FileIO 的原始模式，`'rb'` 也是 `'r'`（v0.45.624 前正是按 `"b" in mode` 判，过滤从不生效）。"""
+    f = sys._getframe(2)                    # 0 = 本函数，1 = _hook，2 = 调 open 的那一帧
     while f is not None:
-        if f.f_code.co_filename.startswith("<frozen importlib"):
+        fn = f.f_code.co_filename
+        if fn.startswith("<frozen importlib"):
             return True
+        if fn.startswith(_REPO_PREFIX):
+            return False
         f = f.f_back
     return False
 
@@ -91,8 +104,7 @@ def _hook(event, args):
     who = cur["who"]
     if rel == who:
         return
-    mode = args[1] if len(args) > 1 and isinstance(args[1], str) else "r"
-    if rel.endswith(".py") and "b" in mode and _via_importlib():
+    if rel.endswith(".py") and _opened_by_import_machinery():
         stats["import_open_skipped"] += 1
         return
     if rel.startswith("tests/"):
@@ -139,6 +151,7 @@ def pytest_sessionfinish(session, exitstatus):
     by_file = {w: {k: sorted(v) for k, v in d.items()} for w, d in data.items() if w != "<session>"}
     tmp = f"{OUT}.tmp-{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
+        # import_opens_skipped：被 import 过滤掉的读——正对照靠它确认过滤真的在起作用（恒 0 = 过滤又死了）
         json.dump({"version": 1, "repo": REPO, "n_collected_files": stats["collected_files"],
-                   "by_file": by_file}, f, ensure_ascii=False)
+                   "import_opens_skipped": stats["import_open_skipped"], "by_file": by_file}, f, ensure_ascii=False)
     os.replace(tmp, OUT)
