@@ -497,7 +497,18 @@ class AlertAnalyzer:
                         "再看 counters.yfinance.rate_limited 与 Step 12 的限流诊断；单个字段的取数链见 CHANGELOG v0.45.421 / 429",
             "CBOE": "看 counters.cboe（陈旧 / 失败）：09-24 是 CBOE 源站整源停更，09-25 是本机 DNS 解析失败",
         }
-        for fam, fields in sorted((dh.get("outage_sources") or {}).items()):
+        srcs = dh.get("outage_sources")
+        if not isinstance(srcs, dict) or not srcs:
+            # 判定说「有故障源」却没说是哪个：自相矛盾的记录，循环会零次迭代、什么都不报——默认要红
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】日健康判定为 source_outage，但没有给出故障源（outage_sources 缺失 / 为空）",
+                {"影响": "无法说明是哪个数据源整体降级", "原始记录": json.dumps(dh, ensure_ascii=False)[:300],
+                 "建议": "查 day_health.classify 的返回结构与 status.json 里 scan_timing.extra.day_health 是否被截断"},
+                ["day_health", "observability"]
+            ))
+            return
+        for fam, fields in sorted(srcs.items()):
             fields = fields if isinstance(fields, list) else []
             names = [f.get("field") for f in fields if isinstance(f, dict)]
             self.alerts.append(Alert(

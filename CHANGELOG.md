@@ -5,7 +5,43 @@
 
 ---
 
-## [0.45.608] — 2026-10-22 — 占位（进行中：v0.45.598 / 605 二次检查——敏感性块盲化期泄露 status + 打印崩溃、全部判不了时误报「无故障日」、小样本误判故障日、告警沉默分支）
+## [0.45.608] — 2026-10-22 — Fixed：v0.45.598 / 605 二次检查——敏感性块在盲化期泄露 `status` 并让共振报告打印崩溃、全部判不了时误报「与主分析相同」、小样本日被判故障日（定义补 `MIN_TICKERS` 勘误）、告警沉默分支
+
+用户要求二次检查 v0.45.598 / 605。按「先用装好的工具」跑了已装的 code-review 技能（high，8 个角度）：报 9 条，7 条已修、1 条不修（效率）、1 条是测试缺口（已补）。其中前四条是真缺陷，都已**实际复现**再修。
+
+### Fixed
+1. **盲化旁路 + 报告崩溃**（`experiments/resonance_boost_forward_test.py`、`experiments/dim_ic_forward_test.py`）。敏感性块在主分析**未出结论**时仍带 `status`，而 `status` 本身就是检视结论
+   （共振 confirmed / not_confirmed，维度 IC concluded）。复现：主分析 `not_ready`、敏感性子样本过界 ⇒ 块里 `status: 'confirmed'`；同一场景下 `_print_human` 对没有 `look` 的块调 `status_line` ⇒ `KeyError: 'look'`，
+   人读报告在那一行中断。现在 `status` / `result` / `verdicts` / `descriptive` 一律只在主分析本次已出结论时露出，盲化期只剩计数；打印改走 `day_health.describe_sensitivity`，不碰 `status_line`。
+2. **把「没检查」渲染成「没问题」**：窗口里每一天都判不了（数据根与库不一致、swarm 文件被清）时，块是 `same_as_primary=True` + `n_undetermined_days=10`，报告印「窗口内没有 source_outage 日，与主分析相同」。
+   现在 `same_as_primary` 只在**没有故障日且没有判不了的日子**时成立；有判不了的日子印「未发现故障日，另有 N/M 天判不了……不能说与主分析相同」。
+3. **小样本日被判故障日**（`day_health.classify`）：只有 1 只标的的结果文件里，`analyst_targets`（无分析师覆盖）与 `catalysts`（暂无催化剂）合法缺失即 0/1 ⇒ `source_outage` ⇒ 扫描写 P1、加载器误剔一天。覆盖线 0.70 是按约 30 只设计的。
+   补 `MIN_TICKERS = 10`：标的数不足 ⇒ `available=False` + 原因（不当 ok，也不当故障日）。
+4. **告警沉默分支**（`alert_manager._check_day_health`）：`verdict == "source_outage"` 而 `outage_sources` 为空 / 不是 dict ⇒ `for` 零次迭代，什么都不报，也不进 `checks_skipped`。现在出一条 P2「判定为 source_outage，但没有给出故障源」。
+
+### Changed
+- `day_health.sensitivity_block` / `describe_sensitivity`：两份检验各抄了一份的敏感性块与打印分支并成一份（`counts` 盲化期可露、`reveal` 仅主分析出结论后）；两个执行器的 `sensitivity_block` 只是薄包装（签名不变）。
+- `scan_coverage_gate.py`：`check()` 与 `contract_attention()` 里两处内联的 `source.split()[0]` 改用 `day_health.family`，源族切分只有一份实现。
+
+### ⚠️ 勘误：「真实日子判定不变」那句我写错了（同日更正）
+补 `MIN_TICKERS` 改变了冻结的定义，指纹由 `76bd554125c07a4e` 变为 `38f150222c6a81d7`（已同步改常量、测试、两份协议正文）。登记时点没变坏：登记后数小时、10-14 的 T+7 仍不存在、没看任何收益。
+**我最初在勘误里写「真实 30 只的日子判定不变（现存 128 天逐日对照相同）」，没有先核，是错的。** 实测（对 130 个 `.swarm_results_*.json` 逐日对照新旧定义）：
+- **窗口内（2026-10-12 起）每天都是 30 只，判定不变，仍只有 2026-10-14 命中。**
+- 历史上有 **12 天**标的数 <10，新定义下判不了；其中 **3 天（2026-06-15、07-28、07-30）原判 `source_outage`**，回测命中数由 29 降为 **26**。（这 3 天原来被算进「06~08 月 4~5 字段日多半是 yfinance 限流日」，现在看至少这 3 天是小样本，不是限流证据——**待验证**其余是否也是。）
+已在 `day_health.py` 文档、`experiments/dim_ic_preregistration.md` §13.12、`experiments/resonance_boost_forward_test.py` 的修订 3 三处更正，并注明初版说错了。CHANGELOG v0.45.598 / 605 条目里的「29 天」「76bd…」是当时的记录，保留不改。
+
+### 守卫（`tests/test_day_health.py`，由 50 条增到 68 条）
+- 小样本（1 / 5 / 9 只 ⇒ 不可用；恰好 10 只 ⇒ 可判）、`MIN_TICKERS` 并入指纹、告警沉默分支（`{}` / None / `[]` / 字符串）、`TestUndeterminedDaysAreNotReportedAsClean`（两个执行器 × 全部判不了 / 没有故障日 / 有故障日又有判不了）、
+  **敏感性比主分析先过界**（维度 IC 桩链 + 共振端到端：块里没有 `status` / `result`、`_print_human` 不抛、不多打「状态未知」「已到」）、已出结论时才打印 `status_line`、闸只有一份源族实现。
+- 指纹钉在协议正文里改为必须出现在**登记定义那一句**（`定义指纹 \`…\``）：初版只查「文件里出现过」，勘误段也提到它，删掉登记那句测试照绿——变异存活后收紧。
+- 变异：写回旧 bug 的 10 个（盲化期带 status ×2、打印走 `status_line(sb)`、判不了也算相同、小样本下限置 0、指纹不含 `min_tickers`、告警沉默分支、闸内联切分、`describe` 总说相同、不看 `revealed`）+ 原有 20 个按新代码重做锚点，**全红**；
+  期间 2 个先存活（打印走 `status_line(sb)` 因 status 已不在块里而不崩、只多打一行，测试没断言；协议正文指纹被勘误段掩护），都已补测试并重跑全红。
+  `PYTHONDONTWRITEBYTECODE=1`、每次清 `__pycache__`、还原后 sha256 核对一致。拨钟审计 +7 / +45 天新红 0；ruff 通过。
+  全量（`-m "not integration"`，worktree）**11573 passed / 0 failed / 2 xfailed**（9 分 39 秒）。
+
+### 注意
+- **不修的一条**：`summarize_days` 每次重新解析窗口内所有 swarm JSON（效率）。现在窗口只有 ~8 天，要缓存得处理失效（replay 会改写文件），暂不值得；窗口长到 ~120 天、检验变慢时再做（按「日期 + mtime + 定义指纹」缓存）。
+- 教训（已记入 memory）：① 盲化块里 `status` 本身就是检视结论，不能放进「计数」；② **写进协议正文的事实性句子，先对真数据核**；③ 验证「没被改写」的变异要确认**基线先绿**。
 
 ## [0.45.607] — 2026-10-22 — Fixed：v0.45.600 二次检查——「谁跑生成器」的规则收进 Makefile（命令行 `PYTHON` 是可用的绝对路径就由它跑，否则退回缺省），提示 / 帮助页只写 `PYTHON=X` 就都跑得通；「生产克隆丢了」弹窗的重建命令也用 .app 记下的解释器；更正 600 两处说过头的话
 

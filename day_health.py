@@ -19,8 +19,8 @@
 「yfinance 日 K 在 ≥30% 的标的上取不到」，判 `source_outage` 是对的，但不要把字段数读成「独立故障数」。
 
 回测（`/usr/local/bin/python3 day_health.py --all`，用 `.swarm_results_*.json` 现存 128 个可判的日子 × 当前 FIELDS；另 2 个空文件判不了）：
-共 29 天命中。近 4 周（09-22 起）命中 3 天：09-24 / 09-25 / 10-14——都是已知故障日（10-12 已被整日重放补算，存档里是好数据），其余日子 0 误报。
-更早 26 天命中里，2026-03 那批（2 字段）多半是当时代码还不写这些字段，**待验证**；06~08 月的 4~5 字段日多半是 yfinance 限流日，**待验证**。
+v0.45.608 补 `MIN_TICKERS=10` 后共 26 天命中（补之前 29 天，其中 3 天是标的数 <10 的小样本，见下勘误）。近 4 周（09-22 起）命中 3 天：09-24 / 09-25 / 10-14——都是已知故障日（10-12 已被整日重放补算，存档里是好数据），其余日子 0 误报。
+更早 23 天命中里，2026-03 那批（2 字段）多半是当时代码还不写这些字段，**待验证**；06~08 月的 4~5 字段日多半是 yfinance 限流日，**待验证**。
 近 4 周约每 7 个扫描日 1 个故障日——每一个都是真故障，但频率不低；若之后出现「P1 天天响」要回来看是不是门槛太低。
 
 ## 不是什么
@@ -37,6 +37,8 @@
 其指纹 `definition_fingerprint()` 钉在 `REGISTERED_FINGERPRINT`。FIELDS 加 / 改 / 删字段、改阈值或分族 ⇒ 指纹变 ⇒ 执行器的敏感性块
 报「定义已变，不可比」（**看得见，不是静默照算**）、`tests/test_day_health.py::TestSensitivityRuleIsFrozen` 变红——
 要么新开一条修订，要么还原定义。⚠️ 指纹不覆盖闸的 `_present` / `_dig` 语义与结果文件布局，改它们同样要走修订。
+**同日勘误（v0.45.608，2026-10-22，登记后数小时、10-14 结果仍不存在）**：二次检查发现定义漏了小样本下限——只有 1 只标的的结果文件里，
+两个合法缺失的字段（无分析师覆盖 / 暂无催化剂）就是 0/1，被判 `source_outage`。补 `MIN_TICKERS=10`（并入指纹：`76bd554125c07a4e` → `38f150222c6a81d7`）。真实日子的影响（对 `.swarm_results_*.json` 现存 130 个文件逐日对照新旧定义）：**窗口内（2026-10-12 起）每天都是 30 只，判定不变，仍只有 2026-10-14 命中**；历史上有 12 天标的数 <10，新定义下判不了——其中 3 天（2026-06-15、07-28、07-30）原判 `source_outage`，回测命中数由 29 降为 26。（此处初版写成「现存 128 天逐日对照相同」，是错的，v0.45.608 当日更正。）
 """
 from __future__ import annotations
 
@@ -46,10 +48,13 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 #: 同一数据源族里降级字段数达到这个值 ⇒ 该源 `source_outage`
 MIN_OUTAGE_FIELDS = 2
+#: 判定所需的最少标的数。覆盖线 0.70 是按约 30 只设计的（「30 只里超过 9 只同时失败，只可能是上游整体挂了」）；
+#: 样本太小时一次合法缺失（无分析师覆盖 / 暂无催化剂）就是 0/1，会把正常日判成故障日。（v0.45.608 二次检查补）
+MIN_TICKERS = 10
 #: 判定口径版本：改 `MIN_OUTAGE_FIELDS` / 分族规则 / 判定名即加一（读者据此知道历史判定是哪一版算的）
 VERSION = 1
 
@@ -57,7 +62,7 @@ OK, DEGRADED, SOURCE_OUTAGE = "ok", "degraded", "source_outage"
 
 #: 修订 3（2026-10-22）登记的「`source_outage` 日」定义指纹（见模块 docstring）。改它 = 改预注册，必须新开修订；
 #: 同一个值另钉在 `tests/test_day_health.py` 与两份协议正文里——改这里而不改那两处，测试会红。
-REGISTERED_FINGERPRINT = "76bd554125c07a4e"
+REGISTERED_FINGERPRINT = "38f150222c6a81d7"
 
 
 def family(source: str) -> str:
@@ -71,7 +76,7 @@ def definition_fingerprint() -> str:
     """当前「`source_outage` 日」定义的指纹：判定版本 + 阈值 + 受监视字段（键 / 路径 / 记录键 / 覆盖线 / 源族）。"""
     import hashlib
     import scan_coverage_gate
-    spec = {"day_health_version": VERSION, "min_outage_fields": MIN_OUTAGE_FIELDS,
+    spec = {"day_health_version": VERSION, "min_outage_fields": MIN_OUTAGE_FIELDS, "min_tickers": MIN_TICKERS,
             "fields": sorted([f["key"], f["path"], f.get("recorded_key"), f["min_coverage"], family(f["source"])]
                              for f in scan_coverage_gate.FIELDS)}
     return hashlib.sha256(json.dumps(spec, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
@@ -93,9 +98,59 @@ def sensitivity_plan(summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if fp != REGISTERED_FINGERPRINT:
         return {"available": False,
                 "reason": f"日健康定义与修订 3 登记时不同（现 {fp} ≠ 登记 {REGISTERED_FINGERPRINT}）——不可比，须新开修订"}
-    return {"available": True, "rule_version": VERSION,
+    return {"available": True, "rule_version": VERSION, "n_days": summary.get("n_days"),
             "days": sorted(o["date"] for o in summary.get("outage") or []),
             "undetermined": len(summary.get("undetermined") or [])}
+
+
+def sensitivity_block(dh: Optional[Dict[str, Any]], rows: List[Dict[str, Any]], run_on: Callable[[List[Dict[str, Any]]], Dict[str, Any]],
+                      *, revealed: bool, counts: Callable[[Dict[str, Any], List[Dict[str, Any]]], Dict[str, Any]],
+                      reveal: Callable[[Dict[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
+    """修订 3 的敏感性分析（两份前瞻检验共用的一份实现）：同一条判定链跑在「去掉 `source_outage` 日」的样本上，并列放在主分析旁边。
+
+    `run_on(rows)`：执行器自己的判定链。`counts(结果, 子样本)`：**盲化期也可露出**的计数型键（不含任何检视结论）；
+    `reveal(结果)`：只在主分析本次已给出结论（`revealed`）时才露出的键——**包括 `status`**：status 本身就是检视结论
+    （confirmed / concluded），未露出时放进去等于盲化旁路（v0.45.608 二次检查）。
+    **不改主分析、不触发任何动作。** 规则不可得 / 链抛异常 ⇒ `available=False` + 原因，看得见。
+    窗口里没有故障日**且**没有判不了的日子才算 `same_as_primary`；有判不了的日子时不能说「相同」。
+    """
+    plan = sensitivity_plan(dh)
+    if not plan["available"]:
+        return plan
+    days = set(plan["days"])
+    base = {"available": True, "rule_version": plan["rule_version"], "excluded_days": plan["days"],
+            "n_days": plan["n_days"], "n_undetermined_days": plan["undetermined"]}
+    if not days:
+        return {**base, "n_rows_removed": 0, "same_as_primary": plan["undetermined"] == 0}
+    kept = [r for r in rows if r["date"] not in days]
+    try:
+        res_s = run_on(kept)
+        out = {**base, "n_rows_removed": len(rows) - len(kept), **counts(res_s, kept)}
+        if revealed:
+            out.update(reveal(res_s))
+    except Exception as e:  # noqa: BLE001 —— 敏感性自己坏了写原因，不拖垮主分析
+        return {"available": False, "reason": f"敏感性分析自身失败：{type(e).__name__}: {e}"}
+    return out
+
+
+def describe_sensitivity(sb: Optional[Dict[str, Any]]) -> List[str]:
+    """敏感性块的人读行（两份报告共用）。结论行（verdicts / status_line）由各执行器自己接在后面。"""
+    if not sb:
+        return []
+    if not sb.get("available"):
+        return [f"敏感性分析（修订 3）不可得：{sb.get('reason')}"]
+    n_u, n_d = sb.get("n_undetermined_days") or 0, sb.get("n_days")
+    note = f"；另有 {n_u}/{n_d if n_d is not None else '?'} 天判不了（结果文件不在 / 不可解析），不在去掉之列" if n_u else ""
+    if not sb.get("excluded_days"):
+        if sb.get("same_as_primary"):
+            return ["敏感性分析（修订 3）：窗口内没有 source_outage 日，与主分析相同"]
+        return [f"敏感性分析（修订 3）：未发现 source_outage 日{note}——不能说与主分析相同"]
+    bits = [f"少 {sb.get('n_rows_removed')} 行"]
+    if "h1_weeks" in sb:
+        bits.append(f"H1 合格周 {sb['h1_weeks']}")
+    if "weeks" in sb:
+        bits.append(f"合格周 {sb['weeks']}/{sb.get('next_look_at')}")
+    return [f"敏感性分析（修订 3，去掉 {', '.join(sb['excluded_days'])}；{'，'.join(bits)}，不触发任何动作）{note}"]
 
 
 def classify(cov: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -106,6 +161,10 @@ def classify(cov: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     rows = cov.get("fields")
     if not isinstance(rows, list):
         return {"available": False, "reason": "覆盖率结果缺 fields 列表"}
+    n = cov.get("tickers")
+    if not isinstance(n, int) or n < MIN_TICKERS:
+        return {"available": False,
+                "reason": f"标的数 {n!r} < {MIN_TICKERS}：覆盖线按约 30 只设计，样本太小判不了（不当 ok，也不当故障日）"}
 
     degraded = [r for r in rows if isinstance(r, dict) and r.get("degraded")]
     by_source: Dict[str, List[Dict[str, Any]]] = {}

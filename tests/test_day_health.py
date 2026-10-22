@@ -121,6 +121,16 @@ class TestClassify:
         assert dh.classify(None)["available"] is False
         assert dh.classify({"determinable": True, "fields": "x"})["available"] is False
 
+    @pytest.mark.parametrize("n", [1, 5, 9])
+    def test_too_few_tickers_is_unavailable_not_an_outage(self, tmp_path, n):
+        """二次检查：1 只标的的结果文件里两个合法缺失的字段就是 0/1，曾被判 source_outage（P1 / 敏感性误剔一天）。"""
+        v = _assess(tmp_path, n=n, broken={"analyst_targets", "catalysts"})
+        assert v["available"] is False and "样本太小" in v["reason"]
+
+    def test_floor_is_inclusive(self, tmp_path):
+        assert _assess(tmp_path, n=dh.MIN_TICKERS, broken={"analyst_targets", "catalysts"})["verdict"] == dh.SOURCE_OUTAGE
+        assert dh.classify({"determinable": True, "fields": [], "tickers": None})["available"] is False
+
     def test_every_monitored_source_family_is_known(self):
         """新增受监视字段带来新的数据源族时，这条红会逼你去 alert_manager._check_day_health 补建议文案，并想清楚它算不算「同源」。"""
         fams = {dh.family(s["source"]) for s in G.FIELDS}
@@ -179,6 +189,14 @@ class TestAlert:
         hit = _tagged(alerts, "day_health")
         assert len(hit) == 1 and "不认识" in hit[0].message
 
+    @pytest.mark.parametrize("srcs", [{}, None, [], "x"])
+    def test_source_outage_without_sources_is_not_silent(self, tmp_path, srcs):
+        """二次检查：verdict 是 source_outage 而 outage_sources 空 / 坏——循环零次迭代曾什么都不报。"""
+        rec = {"available": True, "version": 1, "verdict": "source_outage", "min_outage_fields": 2, "outage_sources": srcs}
+        _a, alerts = _analyze(tmp_path, _status_with(rec))
+        hit = _tagged(alerts, "day_health")
+        assert len(hit) == 1 and hit[0].level == am.AlertLevel.MEDIUM and "没有给出故障源" in hit[0].message
+
     def test_producer_output_reaches_consumer(self, tmp_path):
         """生产者（真跑闸 + 判定）的产出直接喂 alert_manager——两头字段名对得上，而不是各自对着手写 dict 绿。"""
         v = _outage(tmp_path, broken=_OCT14)
@@ -199,6 +217,43 @@ def _load(name, rel):
 fx = _load("dim_ic_forward_test_dh", "experiments/dim_ic_forward_test.py")
 P = _load("dim_ic_protocol_dh", "experiments/dim_ic_protocol.py")
 fwd = _load("resonance_boost_forward_test_dh", "experiments/resonance_boost_forward_test.py")
+
+
+class TestUndeterminedDaysAreNotReportedAsClean:
+    """二次检查：窗口里每一天都「判不了」时，旧实现仍打印「没有 source_outage 日，与主分析相同」（把没检查渲染成没问题）。"""
+
+    @staticmethod
+    def _dhs(n_undetermined, outage=()):
+        return {"available": True, "n_days": 10, "outage": [{"date": d, "sources": {}} for d in outage], "degraded": [],
+                "undetermined": [{"date": f"2026-10-{i:02d}", "reason": "x"} for i in range(n_undetermined)]}
+
+    @pytest.mark.parametrize("module", ["dim", "res"])
+    def test_all_undetermined_is_not_same_as_primary(self, module):
+        blk = (fx if module == "dim" else fwd).sensitivity_block(self._dhs(10), [{"date": "2026-10-13"}], lambda r: {}, revealed=False)
+        assert blk["available"] and blk["same_as_primary"] is False and blk["n_undetermined_days"] == 10
+        text = "\n".join(dh.describe_sensitivity(blk))
+        assert "与主分析相同" not in text.replace("不能说与主分析相同", "") and "判不了" in text
+
+    def test_clean_window_is_still_reported_as_same(self):
+        blk = fx.sensitivity_block(self._dhs(0), [{"date": "2026-10-13"}], lambda r: {}, revealed=False)
+        assert blk["same_as_primary"] is True
+        assert dh.describe_sensitivity(blk) == ["敏感性分析（修订 3）：窗口内没有 source_outage 日，与主分析相同"]
+
+    def test_outage_days_plus_undetermined_note(self):
+        blk = fx.sensitivity_block(self._dhs(2, outage=["2026-10-14"]), [{"date": "2026-10-13"}, {"date": "2026-10-14"}],
+                                   lambda r: {"h1_weeks": 1, "status": "x", "verdicts": {}}, revealed=False)
+        assert "另有 2/10 天判不了" in dh.describe_sensitivity(blk)[0]
+
+
+class TestFamilyHasOneImplementation:
+    def test_gate_uses_day_health_family(self):
+        src = (_ROOT / "scan_coverage_gate.py").read_text(encoding="utf-8")
+        assert ".split()[0]" not in src and "from day_health import family" in src
+
+    def test_gate_network_layer_flag_follows_the_shared_family(self, tmp_path):
+        p = tmp_path / ".swarm_results_2026-10-14.json"
+        p.write_text(json.dumps(_results(broken={"analyst_targets", "put_call_ratio"})), encoding="utf-8")
+        assert G.check("2026-10-14", p)["likely_network_layer"] is True       # yfinance + CBOE 两族同时降级
 
 
 class TestSummarize:
@@ -287,7 +342,7 @@ class TestResonanceLoaderIsDisplayOnly:
 
 # ── 3b. 敏感性分析（修订 3，2026-10-22）：主分析不变、并列报告「去掉 source_outage 日」 ──────────────
 
-_REGISTERED_FP = "76bd554125c07a4e"    # 与 day_health.REGISTERED_FINGERPRINT、两份协议正文里的同一个值：三处都要改才算改预注册
+_REGISTERED_FP = "38f150222c6a81d7"    # 与 day_health.REGISTERED_FINGERPRINT、两份协议正文里的同一个值：三处都要改才算改预注册
 _FORBIDDEN_NESTED = {"ic", "t", "p", "ci95", "se_nw", "t_iid", "descriptive", "verdicts", "result", "stats"}
 
 
@@ -306,8 +361,9 @@ class TestSensitivityRuleIsFrozen:
         assert dh.REGISTERED_FINGERPRINT == _REGISTERED_FP
         assert dh.definition_fingerprint() == _REGISTERED_FP, \
             "「source_outage 日」的定义变了（FIELDS / 阈值 / 分族 / 判定版本）——这是改预注册：新开修订，或还原定义"
-        assert _REGISTERED_FP in (_ROOT / "experiments/dim_ic_preregistration.md").read_text(encoding="utf-8")
-        assert _REGISTERED_FP in (_ROOT / "experiments/resonance_boost_forward_test.py").read_text(encoding="utf-8")
+        # 必须出现在「登记的定义」那一句里，而不是随便哪里（勘误段也会提到它，只查「出现过」会被勘误段掩护）
+        for rel in ("experiments/dim_ic_preregistration.md", "experiments/resonance_boost_forward_test.py"):
+            assert f"定义指纹 `{_REGISTERED_FP}`" in (_ROOT / rel).read_text(encoding="utf-8"), rel
 
     def test_both_protocols_record_the_amendment(self):
         doc = (_ROOT / "experiments/dim_ic_preregistration.md").read_text(encoding="utf-8")
@@ -315,7 +371,7 @@ class TestSensitivityRuleIsFrozen:
         src = (_ROOT / "experiments/resonance_boost_forward_test.py").read_text(encoding="utf-8")
         assert "修订 3（v0.45.605，2026-10-22" in src and "不触发任何动作" in src
 
-    @pytest.mark.parametrize("mutate", ["add_field", "threshold", "version", "family", "min_coverage"])
+    @pytest.mark.parametrize("mutate", ["add_field", "threshold", "version", "family", "min_coverage", "min_tickers"])
     def test_any_definition_change_moves_the_fingerprint(self, monkeypatch, mutate):
         """正对照：每一种「改定义」都必须让指纹变——否则冻结是假的。"""
         if mutate == "add_field":
@@ -323,6 +379,8 @@ class TestSensitivityRuleIsFrozen:
                                                            "source": "yfinance 新字段"}])
         elif mutate == "threshold":
             monkeypatch.setattr(dh, "MIN_OUTAGE_FIELDS", 3)
+        elif mutate == "min_tickers":
+            monkeypatch.setattr(dh, "MIN_TICKERS", 5)
         elif mutate == "version":
             monkeypatch.setattr(dh, "VERSION", 2)
         elif mutate == "family":
@@ -339,7 +397,7 @@ class TestSensitivityRuleIsFrozen:
     def test_plan_lists_days_and_counts_undetermined(self):
         s = {"available": True, "outage": [{"date": "2026-10-16", "sources": {}}, {"date": "2026-10-14", "sources": {}}],
              "degraded": ["2026-10-15"], "undetermined": [{"date": "2026-10-20", "reason": "x"}]}
-        assert dh.sensitivity_plan(s) == {"available": True, "rule_version": dh.VERSION,
+        assert dh.sensitivity_plan(s) == {"available": True, "rule_version": dh.VERSION, "n_days": None,
                                           "days": ["2026-10-14", "2026-10-16"], "undetermined": 1}
 
     def test_plan_is_unavailable_never_silently_empty(self, monkeypatch):
@@ -369,7 +427,8 @@ class TestDimIcSensitivity:
         without = self._run(tmp_path, monkeypatch, [d for d in days if d != "2026-10-14"], set(), "b")
         sb = with_day["sensitivity_excl_outage_days"]
         assert sb["available"] and sb["excluded_days"] == ["2026-10-14"] and sb["n_rows_removed"] == 25
-        assert (sb["h1_weeks"], sb["status"]) == (without["h1_weeks"], without["status"])
+        assert sb["h1_weeks"] == without["h1_weeks"]
+        assert "status" not in sb, "盲化期敏感性块不得带 status（它本身就是检视结论）"
         assert without["sensitivity_excl_outage_days"].get("same_as_primary") is True
         # 主分析：含 10-14 的那次与「没有 10-14」的那次，h1 合格周数口径一致地由全样本决定（不被敏感性改写）
         assert with_day["h1_weeks"] == self._run(tmp_path, monkeypatch, days, set(), "c")["h1_weeks"]
@@ -418,6 +477,19 @@ class TestDimIcSensitivity:
         shown = fx.sensitivity_block(dhs, rows, stub, revealed=True)
         assert "verdicts" not in hidden and "descriptive" not in hidden and hidden["n_rows_removed"] == 1
         assert shown["verdicts"] == {"H1": {"result": "x"}} and "descriptive" in shown
+
+    def test_status_does_not_leak_while_primary_is_blind(self):
+        """二次检查：敏感性链先于主分析出结论（interim 检视里它被拒、主分析没拒）时，status=concluded 本身就是盲化旁路。"""
+        dhs = {"available": True, "n_days": 3, "outage": [{"date": "2026-10-14", "sources": {}}], "degraded": [],
+               "undetermined": []}
+        rows = [{"date": "2026-10-13"}, {"date": "2026-10-14"}]
+
+        def stub(rs):
+            return {"h1_weeks": 26, "status": "concluded", "verdicts": {"H1": {"result": "rejected"}}}
+        hidden = fx.sensitivity_block(dhs, rows, stub, revealed=False)
+        assert {"status", "verdicts", "descriptive", "result"}.isdisjoint(hidden) and hidden["h1_weeks"] == 26
+        shown = fx.sensitivity_block(dhs, rows, stub, revealed=True)
+        assert shown["status"] == "concluded" and shown["verdicts"]
 
     def test_broken_summary_or_frozen_definition_is_visible(self, monkeypatch):
         rows = [{"date": "2026-10-14"}]
@@ -473,6 +545,42 @@ class TestResonanceSensitivity:
         (tmp_path / "x").mkdir()
         res2, _ = self._run(tmp_path / "x", monkeypatch, status="confirmed")
         assert res2["sensitivity_excl_outage_days"]["result"]["stats"] == {"mean": 0.1, "p": 0.2}
+
+    def test_sensitivity_confirming_first_neither_leaks_nor_crashes_the_report(self, tmp_path, monkeypatch, capsys):
+        """二次检查复现：主分析 not_ready、敏感性链 confirmed——旧实现把 status 放进未露出的块，
+        既泄露检视结论，又让 `_print_human` 取 `res['look']` 抛 KeyError，整份报告在这一行中断。"""
+        home = self._home(tmp_path, {"2026-10-14"})
+        monkeypatch.setattr(fwd, "load_excess_returns", lambda db: {})
+        calls = []
+
+        def _eval(rows, excess, **k):
+            calls.append(len(rows))
+            if len(calls) == 1:
+                return {"status": "not_ready", "weeks": 3, "next_look_at": 26, "n_reports": len(rows)}
+            return {"status": "confirmed", "weeks": 26, "next_look_at": 26, "n_reports": len(rows),
+                    "look": "中检", "alpha": 0.01, "stats": {"n": 26, "mean": 0.1, "t": 3.0, "p": 0.001}}
+        monkeypatch.setattr(fwd, "evaluate", _eval)
+        res = fwd.run(home=home, db_path=str(home / "p.db"), today="2026-10-30")
+        sb = res["sensitivity_excl_outage_days"]
+        assert res["status"] == "not_ready"
+        assert {"status", "result", "stats"}.isdisjoint(sb) and not (_FORBIDDEN_NESTED & set(_all_keys(sb)))
+        assert sb["weeks"] == 26                              # 计数可露
+        fwd._print_human(res)                                  # 不得抛
+        out = capsys.readouterr().out
+        assert "已到" not in out and "确认" not in out and "敏感性分析（修订 3" in out
+        assert "状态未知" not in out, "盲化期不该为敏感性块多打一行 status_line 的「状态未知：None」"
+
+    def test_revealed_sensitivity_prints_its_status_line(self, tmp_path, monkeypatch, capsys):
+        home = self._home(tmp_path, {"2026-10-14"})
+        monkeypatch.setattr(fwd, "load_excess_returns", lambda db: {})
+        full = {"status": "confirmed", "weeks": 26, "next_look_at": 26, "look": "中检", "alpha": 0.01,
+                "stats": {"n": 26, "mean": 0.1, "t": 3.0, "p": 0.001}, "pooled_delta_by_rows": 0.1,
+                "mean_ic_b0": 0.0, "mean_ic_b3": 0.1, "gate_changes": 0, "cohort_boundaries_during_test": []}
+        monkeypatch.setattr(fwd, "evaluate", lambda rows, excess, **k: {**full, "n_reports": len(rows)})
+        res = fwd.run(home=home, db_path=str(home / "p.db"), today="2026-10-30")
+        assert res["sensitivity_excl_outage_days"]["status"] == "confirmed"
+        fwd._print_human(res)
+        assert "共振加成前瞻检验已到" in capsys.readouterr().out
 
     def test_no_outage_day_means_no_second_evaluation(self, tmp_path, monkeypatch):
         res, seen = self._run(tmp_path, monkeypatch, outage=())

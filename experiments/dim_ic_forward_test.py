@@ -640,31 +640,18 @@ def apply_self_proof(res: Dict, sp: Dict) -> Dict:
 # ────────────────────────────────────────────────────────────────────────────
 
 def sensitivity_block(dh: Dict, rows: List[Dict], decide_on: Callable[[List[Dict]], Dict], *, revealed: bool) -> Dict:
-    """修订 3 的敏感性分析：同一条判定链跑在「去掉 `source_outage` 日」的样本上，结果并列放在主分析旁边。
+    """修订 3 的敏感性分析：同一条判定链跑在「去掉 `source_outage` 日」的样本上（实现在 `day_health.sensitivity_block`，两份检验共用）。
 
-    **不改主分析、不触发任何动作**（协议 §7 的动作只看主分析）。`revealed` = 主分析本次已给出结论：
-    没给出结论时只露计数（去掉哪几天、少几行、H1 合格周数），不露任何 IC / p / 判定——避免敏感性成为盲化期的旁路。
-    规则不可得（判定坏了 / 定义指纹变了）或这条链自己抛异常 ⇒ `available=False` + 原因，看得见。
+    **不改主分析、不触发任何动作**。盲化期只露计数（去掉哪几天、少几行、H1 合格周数）；`status` / `verdicts` / `descriptive`
+    都只在 `revealed`（主分析本次已给出结论）时露出——`status` 本身就是检视结论（concluded），未露出时放进去是盲化旁路。
     """
-    plan = day_health.sensitivity_plan(dh)
-    if not plan["available"]:
-        return plan
-    days = set(plan["days"])
-    base = {"available": True, "rule_version": plan["rule_version"], "excluded_days": plan["days"],
-            "n_undetermined_days": plan["undetermined"]}
-    if not days:
-        return {**base, "n_rows_removed": 0, "same_as_primary": True}
-    kept = [r for r in rows if r["date"] not in days]
-    try:
-        res_s = decide_on(kept)
-    except Exception as e:  # noqa: BLE001 —— 敏感性自己坏了写原因，不拖垮主分析
-        return {"available": False, "reason": f"敏感性分析自身失败：{type(e).__name__}: {e}"}
-    out = {**base, "n_rows_removed": len(rows) - len(kept), "h1_weeks": res_s["h1_weeks"], "status": res_s["status"]}
-    if revealed:
-        out["verdicts"] = res_s["verdicts"]
-        if "descriptive" in res_s:
-            out["descriptive"] = res_s["descriptive"]
-    return out
+    def _reveal(r: Dict) -> Dict:
+        out = {"status": r["status"], "verdicts": r["verdicts"]}
+        if "descriptive" in r:
+            out["descriptive"] = r["descriptive"]
+        return out
+    return day_health.sensitivity_block(dh, rows, decide_on, revealed=revealed,
+                                        counts=lambda r, kept: {"h1_weeks": r["h1_weeks"]}, reveal=_reveal)
 
 
 def run(db_path: Optional[str] = None, today: Optional[str] = None,
@@ -797,17 +784,11 @@ def _print_report(res: Dict) -> None:
     if res.get("day_health"):
         print("  " + day_health.describe(res["day_health"]))
     sb = res.get("sensitivity_excl_outage_days")
-    if sb:
-        if not sb.get("available"):
-            print(f"  敏感性分析（修订 3）不可得：{sb.get('reason')}")
-        elif sb.get("same_as_primary"):
-            print("  敏感性分析（修订 3）：窗口内没有 source_outage 日，与主分析相同")
-        else:
-            print(f"  敏感性分析（修订 3，去掉 {', '.join(sb['excluded_days'])}；少 {sb['n_rows_removed']} 行，"
-                  f"H1 合格周 {sb['h1_weeks']}，不触发任何动作）")
-            for h, v in (sb.get("verdicts") or {}).items():
-                ic = f"  IC {v['ic']:+.4f}  p={v['p']:.4f}" if "ic" in v else ""
-                print(f"    【{h}】{v['result']}（{v.get('look')}检视）{ic}")
+    for line in day_health.describe_sensitivity(sb):
+        print("  " + line)
+    for h, v in ((sb or {}).get("verdicts") or {}).items():
+        ic = f"  IC {v['ic']:+.4f}  p={v['p']:.4f}" if "ic" in v else ""
+        print(f"    【{h}】{v['result']}（{v.get('look')}检视）{ic}")
     for h, v in res.get("verdicts", {}).items():
         print(f"\n  【{h}】{v['result']}（{v.get('look')}检视）")
         if "ic" in v:
