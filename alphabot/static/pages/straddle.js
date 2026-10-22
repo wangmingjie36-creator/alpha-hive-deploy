@@ -174,13 +174,35 @@ function renderLive(el, r, p, warnAt) {
     r.same_payload === false ? h("div", { class: "small muted" }, "注意：水平与报价来自不同时刻的两份 CBOE 文件。") : null);
 }
 
+// 账本 mark 冻结（某条腿报价不合账本口径）时，卡片上的「账本浮动盈亏」是旧价：标的在 mark 之后走了多远它都不知道。
+// 这里并排给一个按当前报价算的估算（只读、不写账本、与账本数字分开标注）：优先 mid；mid 不可得（bid=0）时，
+// 卖跨式按 ask 买回的价（立即平仓价，保守）。拿不到报价就如实说，不拿账本 mark 顶替。
+function estimateOf(r, p) {
+  if (isNum(r.unrealized_mid_usd)) return { usd: r.unrealized_mid_usd, basis: "mid" };
+  if (isNum(r.exit_now_usd)) return { usd: r.exit_now_usd, basis: r.exit_now_basis === "ask_only" ? "按 ask 买回" : "付点差平仓" };
+  return null;
+}
+
+function renderEst(el, r, p) {
+  if (!r) { fill(el, `账本 mark 停在 ${p.last_mark_date || "—"}（冻结 ${p.stale_days ?? "?"} 天），浮动盈亏是旧价。当前报价估算：未拉取。`); return; }
+  if (r.error) { fill(el, `账本 mark 已冻结，浮动盈亏是旧价。当前报价估算拉取失败：${r.error}`); return; }
+  if (!r.available) { fill(el, `账本 mark 已冻结，浮动盈亏是旧价。当前报价估算不可得：${r.reason || "—"}。`); return; }
+  const e = estimateOf(r, p);
+  if (!e) { fill(el, "账本 mark 已冻结，浮动盈亏是旧价。当前报价估算不可得：两腿报价都不全。"); return; }
+  const diff = isNum(p.unrealized_usd) ? e.usd - p.unrealized_usd : null;
+  fill(el, "账本 mark 已冻结，上面的浮动盈亏是旧价。按当前报价估算 ", h("b", { class: tone(e.usd) }, sMoney(e.usd)),
+    `（${e.basis}，非账本数字${isNum(diff) ? `；比账本低估 / 高估 ${sMoney(diff)}` : ""}）。`);
+}
+
 function positionCard(p, d, liveEls) {
   const warnAt = d.rules?.directional_delta_warn;
   const g = p.greeks, es = p.entry_signal || {};
   const liveEl = h("div", { class: "sd-live" });
-  liveEls[p.ticker] = { el: liveEl, p, warnAt };
-  renderLive(liveEl, null, p, warnAt);
   const stale = p.mark_source !== "cboe_mid";
+  const estEl = stale ? h("div", { class: "callout warn sd-est" }) : null;
+  liveEls[p.ticker] = { el: liveEl, p, warnAt, estEl };
+  renderLive(liveEl, null, p, warnAt);
+  if (estEl) renderEst(estEl, null, p);
   // 入场时的对比：展开才读（只读本机快照与缓存文件，不联网）。对比卡整张是卖方视角（收 bid、买回按 ask、按空头定仓规则），
   // 买跨式持仓不展示它（不编买方数）。懒加载标志 dataset.loaded 只在**拿到可用的卡**之后才置位：失败 / 不可得时
   // 再展开会重新请求（loadCompare 的失败文案里还有「重试」）；dataset.busy 防止加载中重复展开发出并发请求。
@@ -207,6 +229,7 @@ function positionCard(p, d, liveEls) {
       h("div", { class: "small muted", style: { textAlign: "right" } },
         isNum(p.days?.to_earnings) ? (p.days.to_earnings >= 0 ? `距财报 ${p.days.to_earnings} 天` : `财报已过 ${-p.days.to_earnings} 天`) : "财报日未知",
         h("br"), isNum(p.days?.to_expiry) ? `距到期 ${p.days.to_expiry} 天` : "")),
+    estEl,
     timeline(p, d.today_et),
     h("div", {}, h("div", { class: "sd-k" }, "到期盈亏平衡带（K ± 入场权利金）"), bandBar(p.side, p.breakeven, p.underlying?.price),
       h("div", { class: "sd-row" }, bandText(p.side, p.band))),
@@ -358,6 +381,16 @@ export async function renderStraddle(root, alive) {
   const status = h("span", { class: "small muted" }, "盘中参考报价：未拉取");
   let auto = false, busy = false;
   const sessionLive = () => !!state.meta?.session?.live;
+  // 拉一只、写回它的卡（盘中参考块 + 冻结 mark 的估算行）；返回这只有没有拿到可用报价
+  async function pullOne(t, force) {
+    try { live[t] = await api(`/api/straddle/live/${encodeURIComponent(t)}${force ? "?force=1" : ""}`); }
+    catch (e) { live[t] = { error: e.message || String(e) }; }
+    if (!alive()) return false;
+    const x = liveEls[t];
+    renderLive(x.el, live[t], x.p, x.warnAt);
+    if (x.estEl) renderEst(x.estEl, live[t], x.p);
+    return !!live[t].available;
+  }
   async function pullAll(force) {
     if (busy) return;
     busy = true; pullBtn.disabled = true;
@@ -366,10 +399,8 @@ export async function renderStraddle(root, alive) {
     for (const [i, t] of tickers.entries()) {
       if (!alive()) return;
       fill(status, `正在拉 ${t}（${i + 1}/${tickers.length}）…`);
-      try { live[t] = await api(`/api/straddle/live/${encodeURIComponent(t)}${force ? "?force=1" : ""}`); if (live[t].available) ok += 1; }
-      catch (e) { live[t] = { error: e.message || String(e) }; }
+      if (await pullOne(t, force)) ok += 1;
       if (!alive()) return;
-      const x = liveEls[t]; renderLive(x.el, live[t], x.p, x.warnAt);
     }
     const now = new Date().toLocaleTimeString("zh-CN", { timeZone: "America/New_York", hour12: false });
     fill(status, `上次拉取 ${now} ET · ${ok}/${tickers.length} 只可得${sessionLive() ? "" : " · 现在不在交易时段，报价是最近一次收盘后的"}`);
@@ -384,6 +415,13 @@ export async function renderStraddle(root, alive) {
   const timer = setInterval(() => { if (!alive()) { clearInterval(timer); return; } if (auto && sessionLive()) pullAll(true); }, AUTO_MS);
 
   const cards = h("div", { class: "sd-cards" }, (d.positions || []).map((p) => positionCard(p, d, liveEls)));
+  // 账本 mark 冻结的那几只：进页面就拉一次（只读，串行；其余仍等你点「拉一次盘中报价」），否则页上只有旧价
+  (async () => {
+    for (const t of Object.keys(liveEls).filter((k) => liveEls[k].estEl)) {
+      if (!alive() || busy) return;
+      await pullOne(t, false);
+    }
+  })();
   const eqEl = h("div", { class: "chart short" });
   const calEl = h("div", { class: "chart short" });
   const sig = d.signals_today || {};

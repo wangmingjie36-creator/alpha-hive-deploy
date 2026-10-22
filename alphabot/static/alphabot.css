@@ -208,6 +208,7 @@ tr.sel td { background: var(--tint-strong); }
 .sd-greeks .k { font: 500 11.5px/1.3 var(--sans); color: var(--ink-3); }
 .sd-greeks .v { font: 500 15px/1.3 var(--data); font-variant-numeric: tabular-nums; }
 .sd-live { border-top: 1px dashed var(--line-strong); padding-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.sd-est { margin: 0; font-size: 13px; }
 details.sd-why summary { cursor: pointer; font-size: 13px; color: var(--ink-3); }
 details.sd-why p { font-size: 13px; color: var(--ink-2); margin: 6px 0 0; }
 /* 跨式 vs 宽跨 并排对比卡（只并排事实） */

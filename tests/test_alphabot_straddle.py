@@ -438,6 +438,42 @@ def _body(fn: str) -> str:
     return _fn_src(_straddle_js(), fn)
 
 
+class TestFrozenMarkEstimate:
+    """账本 mark 冻结时，持仓卡并排给「按当前报价估算」的盈亏（v0.45.621）。源码形状钉，每条对应一个会真出错的方向。"""
+
+    def test_estimate_prefers_mid_then_ask_only_and_never_the_ledger_mark(self):
+        import re
+        fn = _body("estimateOf")
+        ifs = re.findall(r"^\s*if \((.*?)\) return", fn, re.M)
+        # 条件逐字钉：多加一个 `&& …`（把 mid 路径整个短路掉）也算红
+        assert ifs == ["isNum(r.unrealized_mid_usd)", "isNum(r.exit_now_usd)"], "先 mid，mid 不可得才退到立即平仓价"
+        assert "ask_only" in fn
+        # 估算只许来自当前报价：不得出现账本 mark / 账本盈亏顶替
+        for banned in ("last_mark", "p.unrealized_usd", "unrealized_pct"):
+            assert banned not in fn, banned
+
+    def test_estimate_is_labelled_not_ledger_and_says_when_unavailable(self):
+        fn = _body("renderEst")
+        assert "非账本数字" in fn and "旧价" in fn
+        import re
+        for why in ("r.error", "!r.available", "!e"):
+            assert re.search(r"^\s*if \(" + re.escape(why) + r"\) \{ fill\(", fn, re.M), f"{why} 这条失败路径必须有话说，不能留着旧价当没事"
+
+    def test_only_frozen_positions_get_an_estimate_row_and_an_auto_pull(self):
+        card = _body("positionCard")
+        assert 'const stale = p.mark_source !== "cboe_mid"' in card
+        assert "const estEl = stale ?" in card, "没冻结的持仓不该多出这一行"
+        render = _body("renderStraddle")
+        assert "liveEls[k].estEl" in render, "进页面自动拉的只有冻结的那几只"
+
+    def test_pull_one_updates_both_live_block_and_estimate(self):
+        fn = _body("renderStraddle")
+        one = fn[fn.index("async function pullOne"):fn.index("async function pullAll")]
+        assert "renderLive(" in one and "renderEst(" in one
+        # 手动 / 自动拉全部也走同一条路径，不另写一份（两份会各自漏掉一边）
+        assert "pullOne(t, force)" in fn
+
+
 class TestPageFrontEndContracts:
     """前端源码形状钉（读 straddle.js / help.js，去 // 注释行）。每条对应一个已确认的显示缺陷。"""
 
