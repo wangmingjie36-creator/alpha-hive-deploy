@@ -1518,6 +1518,12 @@ def _qs_contract(row: dict, *, role: str, cp: str, strike: float,
     }
 
 
+def _qs_real(v) -> Optional[float]:
+    """`_qs_num` 加一条：布尔值不算数（`float(False)` 是 0.0，一个 `bid: false` 会被读成「买价为 0」）。
+    `bid_zero_greeks_usable` 的前身（`portfolio_greeks` / `straddle` 各自的 `_num`）本来就拒布尔，收成一份时不能丢。"""
+    return None if isinstance(v, bool) else _qs_num(v)
+
+
 def bid_zero_greeks_usable(q) -> bool:
     """`quote_ok` 为假、但这张合约的逐合约 Greeks 仍可用的那一类：**bid = 0**（深度虚值腿最常见）、
     ask 有限且 > 0、delta / gamma / vega / theta 与 iv 都有限、iv > 0。`q` 是 `_qs_contract` 整理出的报价 dict。
@@ -1530,11 +1536,11 @@ def bid_zero_greeks_usable(q) -> bool:
     （跨式页的盘中参考与账本视图）共用这一个，不各抄一份。纯函数、不读时钟。"""
     if not isinstance(q, dict):
         return False
-    bid, ask = _qs_num(q.get("bid")), _qs_num(q.get("ask"))
+    bid, ask = _qs_real(q.get("bid")), _qs_real(q.get("ask"))
     if bid is None or ask is None or bid != 0 or ask <= 0:
         return False
-    iv = _qs_num(q.get("iv"))
-    return iv is not None and iv > 0 and all(_qs_num(q.get(k)) is not None
+    iv = _qs_real(q.get("iv"))
+    return iv is not None and iv > 0 and all(_qs_real(q.get(k)) is not None
                                               for k in ("delta", "gamma", "vega", "theta"))
 
 

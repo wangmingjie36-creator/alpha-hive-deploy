@@ -24,7 +24,24 @@
 
 ## [0.45.627] — 2026-10-22 — 占位（进行中：v0.45.623 二次检查——对话 API 失败收成一个分类器：网关超时按可能计费记账不重试、代理拒绝 CONNECT 不记账、首问 400 / 非 JSON 403 / 402 / 404 说对原因、中途失败写明前面已花；影子 plist 代理变量补小写并对编排器逐项核对）
 
-## [0.45.626] — 2026-10-22 — 占位（进行中：v0.45.620 二次检查——bid_zero 守卫对 iCloud 副本不误报且按行为认重复、判据拒 bool、遍历剪枝、跨式页文案）
+## [0.45.626] — 2026-10-22 — Fixed：v0.45.620 二次检查——bid_zero 守卫对 iCloud 重名副本不误报且按行为认重复、判据拒布尔、遍历剪枝、跨式页文案改准
+
+对 v0.45.620 再跑一轮已装的 code-review 技能（high）：核心逻辑没发现会算错的 bug，查出 6 处小问题，全修。
+
+### Fixed
+- **守卫对 iCloud 重名副本误报**（`tests/test_portfolio_greeks_bid_zero.py`）：「只有两个 importer」用精确集合相等，扫的是整个开发检出，而 `~/Desktop` 会持续产生 `xxx 2.py` 副本（仓库里已有一个）——`portfolio_greeks 2.py` 一出现，守卫就在开发检出里红、理由与它守的不变式无关。`_repo_py_files` 现在跳过 ` N.py` 副本，并有专门的自证测试（含「`portfolio_greeks 2.py` 不算 importer」）。
+- **按函数名认重复，漏掉改名的拷贝**：最初那份重复恰恰是改了名的。新增按**读了哪几个字段**认的静态指纹——生产代码里同一个函数同时读 `bid` / `ask` / `iv` 三个字符串键就必须用 `cboe_options.bid_zero_greeks_usable` 或登记进 `_QUOTE_FIELD_READERS`（现 10 条，每条写明为什么合法；登记过却不再存在也红，清单只许与现实一致）。拆成两个函数的拷贝（straddle 当年的 `_ask_ok` + `_greeks_usable`）静态指纹抓不到，所以另加**行为对拍** `TestConsumersAgreeOnEveryQuote`：5×4×4×4 = 320 张原始 CBOE 行经真正的 `_qs_contract` 整理后，喂给判据本身、跨式页 `_greeks_usable`、对冲账本 `option_exposures` 三处，结论必须一致（含 `bid_zero` 标记）。
+- **判据丢了对布尔值的拒绝**（`cboe_options.py`）：收成一份时换成 `_qs_num`，`float(False)` 是 0.0，一个 `bid: false` 会被读成「买价为 0」；前身各自的 `_num` 本来就拒布尔。新增 `_qs_real`（`_qs_num` 加一条拒布尔）给判据用，`_qs_num` 本身不动。说明：真实管线里 `_qs_contract` 已先把值转成数，布尔到不了判据；这条只补直接调用时的校验。
+- **遍历先 rglob 再过滤**：`_repo_py_files` 先走完 `.git` 和每个 worktree（约 4.2 万个 .py、2.9 GB）再丢掉。改成 `os.walk` 遍历时剪枝；自证测试用 `os.walk` 间谍确认被剪的目录从未进入（去掉剪枝那版变异测试从 5 秒涨到 62 秒）。
+- **跨式页文案**（`alphabot/static/pages/straddle.js`）：原文提到本页没有的「压力表」，改为「这条腿没有中间价（买价为 0），盯市价不会拿它的模型值去算」，对盘中页与账本视图都成立。
+- **CHANGELOG 如实**：v0.45.620 条目里的「整套 11763 passed」是 rebase 之前跑的，改成写明这一点。
+
+### 验证
+- `tests/test_portfolio_greeks_bid_zero.py` 31 → 43 条；变异 8 处（判据收回 `_qs_num`、去掉剪枝、不跳过 iCloud 副本、alphabot 里加改名拷贝、跨式页判据放宽、对冲账本判据放宽、清单里多一条幽灵登记、清单里少一条）全红。拨钟审计（+7 / +45 天）0 条新红；ruff 过；选测登记表无漂移（退出码 0）。
+- 整套（在本版的树上、开跑前确认没有别的 pytest / 审计在跑）：11798 passed、82 deselected、2 xfailed、0 failed，653 s。
+
+### 没改
+- 判据本身（bid = 0、ask > 0、iv > 0、四个 Greeks 有限）与 `quote_ok` 口径；10-21 的历史审计不重跑。
 
 ## [0.45.625] — 2026-10-22 — Fixed：历史字段回落 P2 只按评分用的那份行情判（评分之后的重取另列 INFO）；ML 报告复用评分时的预取价格 / 动量、不再在扫描末尾为 12 只票重新联网
 
@@ -161,7 +178,7 @@ yfinance `401 Invalid Crumb` → `TypeError`），把评分阶段完整的 10 �
 
 ### 验证
 - `tests/test_portfolio_greeks_bid_zero.py` 19 → 31 条；变异 10 处（跨式页不带标记 / 不标 degraded / alphabot 里复制判据 / 对冲页不带计数 / 覆盖计数 / 日报覆盖行 / 跨式页判据恒真 / 前端提示恒假 / 去掉 iv>0 / 去掉「用上了才说」）全红——其中**前端提示那一条第一版没抓到**（只查字符串存在，`if (false)` 照过），改成匹配 `if (pc.n_bid_zero) warns.push(…)` 整个结构后红。
-- 相关 1073 条通过；拨钟审计（+7 / +45 天）0 条新红；ruff 过；整套 11763 passed、0 failed。
+- 相关 1073 条通过；拨钟审计（+7 / +45 天）0 条新红；ruff 过。整套 11763 passed、0 failed——⚠️ **这是在 rebase 之前、0.45.620 自己的代码上跑的**；之后两次 rebase 到更新的 main 只重跑了 1156 条相关测试 + 选测登记表漂移检查，**没有再跑整套**（v0.45.626 二次检查时指出，整套在 0.45.626 的树上重跑）。
 
 ### 没改
 - `quote_ok`、卖权 25% 点差规则、压力表仍剔 bid=0 腿（缺 mid，不编）；10-21 的历史审计不重跑。
