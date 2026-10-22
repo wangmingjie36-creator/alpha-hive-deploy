@@ -199,11 +199,6 @@ def python_rule_problem(python: str) -> Optional[str]:
     return None
 
 
-def _default_python_usable() -> bool:
-    """缺省解释器此刻能不能跑生成器——与壳里双击时同一判据 `interpreter_problem`。单独成函数：测试据此钉住环境。"""
-    return interpreter_problem(DEFAULT_PYTHON) is None
-
-
 def regen_hint(repo: Path, python: str) -> str:
     """「怎么重新生成 cd 进 `repo`、用 `python` 跑的那个 .app」——给人的命令**只从这里出**（v0.45.461）。
 
@@ -219,22 +214,24 @@ def regen_hint(repo: Path, python: str) -> str:
     给出的命令**照抄要跑得通**（v0.45.597，498 二次检查 #1 / #2）——此前只管「沿用」，没核「今天还跑不跑得通」：
     - 记下的解释器不合现行规则（`python_rule_problem`：456 之前的生成器把 `python3` 这类裸名字原样写进过壳）⇒ 沿用就被
       生成器拒 ⇒ 改给占位 `PLACEHOLDER_PY`，前面说明一句；那个值本身不嵌进来（可能带 shell 特殊字符，结果要进双引号）。
-    - **跑生成器**的解释器：缺省可用就是它（命令里不写）；不可用 ⇒ 用要写进 .app 的那个（它可用时），否则占位。推荐入口
-      经 make 的 `ALPHABOT_GEN_PY` 指定，直跑写在命令开头。此前恒为缺省：换解释器常常正是因为缺省坏了，照抄第一步就失败。
-      「可用」与壳里双击时同一判据 `interpreter_problem`，不另写一份。
+    - **跑生成器**的解释器 = 要写进 .app 的那个（缺省 ⇒ 命令里都不写）。推荐入口经 make 的 `ALPHABOT_GEN_PY`，直跑写在
+      命令开头。此前恒为缺省：换解释器常常正是因为缺省坏了，照抄第一步就失败。
+
+    ⚠️ 这条是**确定规则**，不看「缺省此刻能不能用」（v0.45.600）：本函数的结果有一半是在**生成 .app 时**写进壳里的文字
+    （头注释、两处弹窗），要到以后出事那天才被人看见——597 按生成那一刻的环境选，生成时缺省好好的，弹窗里就不带 runner，
+    等缺省坏了弹出来照做照样失败；同一份代码在两台机器 / 两个时刻还会生成不同的壳（过时提醒误报、CI 要钉环境）。
+    确定规则在每个出现场景里都跑得通：启动器的过时提醒——记下的解释器正跑着启动器，必然在；「找不到 / 执行失败」弹窗——
+    传的是占位，同一句已先教人用新解释器装依赖；头注释与「代码目录挪了」——壳先查过 PY 能执行才走到这里。所以记下的是
+    缺省时，见到提示的那一刻缺省必然可用；不可用时人看到的是占位那句（其中 PYTHON 与 runner 都是新解释器）。
     """
     note = ""
     if python_rule_problem(python):
         python = PLACEHOLDER_PY
         note = "（.app 里记的解释器不合现行规则：须是不含引号等特殊字符的绝对路径，把命令里的占位换成实际要用的解释器）"
-    runner = None
-    if not _default_python_usable():
-        runner = python if python != PLACEHOLDER_PY and interpreter_problem(python) is None else PLACEHOLDER_PY
     py = "" if python == DEFAULT_PYTHON else _cmd_word(python)
     if _is_default_clone(repo):
-        return (f"{note}在终端执行 {canonical_entry()}" + (f" PYTHON={py}" if py else "")
-                + (f" ALPHABOT_GEN_PY={_cmd_word(runner)}" if runner else ""))
-    return (f"{note}在那份代码目录里执行 {_cmd_word(runner or DEFAULT_PYTHON)} -m alphabot.macos_app --repo ."
+        return f"{note}在终端执行 {canonical_entry()}" + (f" PYTHON={py} ALPHABOT_GEN_PY={py}" if py else "")
+    return (f"{note}在那份代码目录里执行 {py or DEFAULT_PYTHON} -m alphabot.macos_app --repo ."
             + (f" --python {py}" if py else ""))
 
 
