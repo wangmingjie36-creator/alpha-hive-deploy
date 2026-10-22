@@ -1,6 +1,7 @@
 // 对话抽屉（v0.45.614）：每页右侧，Claude Opus 5.5 + 只读 Alpha Bot 工具 + 联网搜索。规则在 alphabot/chat.py。
 // 默认关：开启要人点确认（每问都花 API 费用、数据会发给 Anthropic）。回答一律当纯文本显示（不当 HTML）；
 // 搜索来源只显示网址文字、不做成链接——在桌面程序的窗口里点外链会把整个窗口带离 Alpha Bot。
+// 抽屉的三块（头 / 消息 / 输入）只建一次（v0.45.616）：每次重建输入框会丢焦点，发完一问还得再点一下才能接着打字。
 import { api, h, fill, money } from "./lib.js";
 
 const drawer = document.getElementById("chat-drawer");
@@ -9,7 +10,7 @@ let status = null;        // GET /api/chat
 let convId = null;        // 当前对话（历史存在服务端，关掉 Alpha Bot 就没了）
 let log = [];             // 抽屉里显示的消息
 let busy = false;
-let draft = "";
+let headEl, bodyEl, formEl, ta, sendBtn;
 
 // 当前页面 ⇒ 随消息发给服务端的上下文（服务端只认登记过的页面名与合规代码）
 function pageContext() {
@@ -19,10 +20,13 @@ function pageContext() {
   return { page: p };
 }
 
+const canAsk = () => status && !status.error && !status.demo && status.enabled && status.available !== false;
+
 async function loadStatus() {
   try { status = await api("/api/chat"); }
   catch (e) { status = { error: e.message }; }
   render();
+  if (!drawer.hidden && canAsk()) ta.focus();
 }
 
 async function setEnabled(on) {
@@ -40,9 +44,9 @@ async function setEnabled(on) {
 }
 
 async function send() {
-  const text = draft.trim();
+  const text = ta.value.trim();
   if (!text || busy) return;
-  busy = true; draft = "";
+  busy = true; ta.value = "";
   log.push({ role: "user", text }, { role: "pending" });
   render();
   try {
@@ -56,9 +60,10 @@ async function send() {
   }
   busy = false;
   render();
+  if (!drawer.hidden) ta.focus();
 }
 
-function newConversation() { convId = null; log = []; render(); }
+function newConversation() { convId = null; log = []; render(); ta.focus(); }
 
 function botMessage(r) {
   const meta = [`本问 ${money(r.cost_usd, 3)}`, `API ${r.api_calls} 次`];
@@ -100,43 +105,46 @@ function body() {
   return msgs;
 }
 
-function form() {
-  const s = status;
-  if (!s || s.error || s.demo || !s.enabled || s.available === false) return null;
-  const ta = h("textarea", { "aria-label": "给 Claude 的消息", placeholder: "问点什么…（⌘ / Ctrl + Enter 发送）", maxlength: "4000" });
-  ta.value = draft;
-  ta.disabled = busy;
-  ta.addEventListener("input", () => { draft = ta.value; });
-  ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); send(); } });
-  const btn = h("button", { class: "btn primary", type: "button", onclick: send }, busy ? "等待回答…" : "发送");
-  btn.disabled = busy;
-  return h("div", { class: "chat-form" }, ta,
-    h("div", { class: "row" },
-      h("button", { class: "link-btn", type: "button", onclick: () => setEnabled(false) }, "关闭对话"), btn));
-}
-
 function render() {
   const s = status || {};
   const spent = s.enabled ? `今天 ${s.spent_today == null ? "—" : money(s.spent_today, 2)} / ${money(s.cap_usd, 2)}` : "";
-  fill(drawer,
-    h("div", { class: "chat-head" },
-      h("strong", {}, "对话"),
-      h("span", { class: "muted" }, spent),
-      s.enabled && !s.demo ? h("button", { class: "link-btn", type: "button", onclick: newConversation }, "新对话") : null,
-      h("button", { class: "link-btn", type: "button", "aria-label": "关闭对话抽屉", onclick: () => open(false) }, "收起")),
-    h("div", { class: "chat-body" }, ...body()),
-    form());
-  const b = drawer.querySelector(".chat-body");
-  if (b) b.scrollTop = b.scrollHeight;
+  fill(headEl,
+    h("strong", {}, "对话"),
+    h("span", { class: "muted" }, spent),
+    canAsk() ? h("button", { class: "link-btn", type: "button", onclick: newConversation }, "新对话") : null,
+    h("button", { class: "link-btn", type: "button", "aria-label": "收起对话抽屉（Esc）", onclick: () => open(false) }, "收起"));
+  fill(bodyEl, ...body());
+  bodyEl.scrollTop = bodyEl.scrollHeight;
+  formEl.hidden = !canAsk();
+  ta.disabled = busy;
+  sendBtn.disabled = busy;
+  sendBtn.textContent = busy ? "等待回答…" : "发送";
+}
+
+// 抽屉从顶栏下沿开始（顶栏是 sticky，下沿固定）：不盖住顶栏右侧的「对话」按钮
+function placeBelowTopbar() {
+  const tb = document.querySelector(".topbar");
+  drawer.style.top = tb ? `${Math.round(tb.getBoundingClientRect().bottom)}px` : "0px";
 }
 
 function open(on) {
   drawer.hidden = !on;
   toggle.setAttribute("aria-expanded", on ? "true" : "false");
-  if (on) { render(); loadStatus(); }
+  if (on) { placeBelowTopbar(); render(); loadStatus(); }
+  else toggle.focus();
 }
 
 export function initChat() {
   if (!drawer || !toggle) return;
+  headEl = h("div", { class: "chat-head" });
+  bodyEl = h("div", { class: "chat-body" });
+  ta = h("textarea", { "aria-label": "给 Claude 的消息", placeholder: "问点什么…（⌘ / Ctrl + Enter 发送）", maxlength: "4000" });
+  ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); send(); } });
+  sendBtn = h("button", { class: "btn primary", type: "button", onclick: send }, "发送");
+  formEl = h("div", { class: "chat-form" }, ta,
+    h("div", { class: "row" }, h("button", { class: "link-btn", type: "button", onclick: () => setEnabled(false) }, "关闭对话"), sendBtn));
+  fill(drawer, headEl, bodyEl, formEl);
+  drawer.addEventListener("keydown", (e) => { if (e.key === "Escape" && !e.isComposing) { e.preventDefault(); open(false); } });
+  window.addEventListener("resize", () => { if (!drawer.hidden) placeBelowTopbar(); });
   toggle.addEventListener("click", () => open(drawer.hidden));
 }
