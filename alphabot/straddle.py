@@ -187,21 +187,93 @@ def load_hist_moves(ticker: str, root=None) -> Tuple[Optional[list], Optional[st
     return obj["moves"], None
 
 
-def pick_signal_and_nav(signals: List[dict], equity: List[dict], ticker: str,
-                        as_of: str) -> Tuple[Optional[dict], Optional[float]]:
-    """某票某天的信号行（没有 ⇒ None）与「当时的 NAV」（净值曲线里日期 ≤ as_of 的最近一行；定仓用，近似账本口径）。纯函数。"""
+def entries_on(day: str, *record_lists) -> List[dict]:
+    """账本里 `entry_date == day` 的记录（持仓 + 已平仓）——也就是**那天新开的仓**。纯函数。"""
+    return [r for rows in record_lists for r in rows or [] if isinstance(r, dict) and str(r.get("entry_date") or "") == day]
+
+
+def _open_slippage_usd(rec: dict, sig: Optional[dict]) -> Optional[float]:
+    """一笔那天新开的仓，**开仓瞬间**对 NAV 的影响（≤ 0 美元：卖跨式按 bid 入账、买跨式按 ask 付出，随后都按 mid 盯市）。
+    = 账本 `_unrealized` 在入场时的值 = (入场 mark − 入场价) × 100 × 张数 × 方向，入场 mark = 信号行两腿 mid 之和
+    （两腿缺 mid 时账本用入场价本身 ⇒ 0，`options_paper_leg._open_from_signal` 同一条回退）。
+    信号行 / `quote` / 张数 / 入场价任一取不到 ⇒ None（还原不了，调用方要说出来，不当 0）。"""
+    sign = SIDE_SIGN.get(str(rec.get("side")))
+    n, e = _pos(rec.get("contracts")), _pos(rec.get("entry_premium"))
+    q = sig.get("quote") if isinstance(sig, dict) else None
+    if sign is None or n is None or e is None or not isinstance(q, dict):
+        return None
+    mc, mp = _pos((q.get("call") or {}).get("mid")), _pos((q.get("put") or {}).get("mid"))
+    mark = (mc + mp) if (mc is not None and mp is not None) else e
+    return (mark - e) * 100.0 * n * sign
+
+
+def sizing_nav(signals: List[dict], equity: List[dict], opened: Optional[List[dict]], as_of: str) -> dict:
+    """账本在 `as_of` 这天**定仓用的 NAV**，和它是怎么来的。纯函数。
+
+    账本（`options_paper_leg.run_for_date`）每天先盯市 / 平仓，再算 `nav_for_sizing = cash + 持仓市值`，
+    **然后才开仓**，最后写净值行。所以 `as_of` 当天那行净值是开仓**之后**的：新开的卖跨式按 bid 入账、按 mid 盯市，
+    净值立刻少「半个点差 × 100 × 张数」（买跨式按 ask 付、按 mid 盯市，同样只会更低）。直接拿那行定仓，
+    入场日会系统性少 1 张（真实账本 T 2026-09-29：账本 39 张、那行 NAV 只够 38 张，v0.45.593 二次检查）。
+    规则：
+      · `as_of` 当天有净值行 ⇒ 把当天新开的仓的入场滑点加回去（`opened` = 当天 entry_date 的持仓 + 平仓记录，
+        每笔的滑点见 `_open_slippage_usd`），得到开仓前 NAV，与账本的 `nav_for_sizing` 同口径（`basis="pre_open"`；
+        当天没开仓则那行本身就是开仓前 NAV，加回 0）；
+      · 当天没有净值行 ⇒ 取日期 < as_of 的最近一行（`basis="latest_on_or_before"`，近似）；
+      · 当天有开仓但还原不了（缺信号行 / 报价 / 张数，或净值行的 `opened_today` 与找到的开仓数对不上）⇒ 退回那行
+        原值（`basis="post_open_unadjusted"`），并写明原因——此时张数可能比账本少 1 张；
+      · 一行可用的净值都没有 ⇒ `nav=None`（`basis="none"`）。
+    净值行本身四舍五入到 0.01，入场价 / mark 到 0.0001，所以还原有约 $1 的取整误差。"""
+    info = {"nav": None, "basis": "none", "nav_date": None, "row_nav": None, "adjust_usd": 0.0,
+            "opened": [], "reason": None}
+    rows = [e for e in equity or [] if str(e.get("date") or "") <= as_of and _pos(e.get("nav")) is not None]
+    if not rows:
+        info["reason"] = "no_equity_row"
+        return info
+    row = max(rows, key=lambda e: str(e["date"]))
+    nav, d = _pos(row["nav"]), str(row["date"])
+    info.update(nav=nav, row_nav=nav, nav_date=d, basis="latest_on_or_before")
+    if d != as_of:
+        return info
+    opened = list(opened or [])
+    info["opened"] = [str(r.get("ticker")) for r in opened]
+    flag = row.get("opened_today")
+    if isinstance(flag, int) and not isinstance(flag, bool) and flag != len(opened):
+        info.update(basis="post_open_unadjusted", reason=f"opened_today_mismatch:{flag}!={len(opened)}")
+        return info
+    slip = 0.0
+    for rec in opened:
+        sig = next((s for s in signals or [] if s.get("ticker") == rec.get("ticker") and s.get("as_of") == as_of), None)
+        v = _open_slippage_usd(rec, sig)
+        if v is None:
+            info.update(basis="post_open_unadjusted", reason=f"cannot_restore:{rec.get('ticker')}")
+            return info
+        slip += v
+    pre = _pos(nav - slip)
+    if pre is None:
+        info.update(basis="post_open_unadjusted", reason="restored_nav_not_positive")
+        return info
+    info.update(nav=round(pre, 2), basis="pre_open", adjust_usd=round(-slip, 2))
+    return info
+
+
+def pick_signal_and_nav(signals: List[dict], equity: List[dict], ticker: str, as_of: str,
+                        opened: Optional[List[dict]] = None) -> Tuple[Optional[dict], Optional[float], dict]:
+    """某票某天的 (信号行（没有 ⇒ None）, 账本当天定仓用的 NAV, 该 NAV 的来源说明)。规则与理由见 `sizing_nav`。
+    `opened` = 当天新开的仓（`entries_on` 的结果）；不给 ⇒ 当作当天没开仓。纯函数。"""
     sig = next((s for s in signals or [] if s.get("ticker") == ticker and s.get("as_of") == as_of), None)
-    prior = [e for e in equity or [] if str(e.get("date") or "") <= as_of and _pos(e.get("nav")) is not None]
-    nav = _pos(max(prior, key=lambda e: str(e["date"]))["nav"]) if prior else None
-    return sig, nav
+    info = sizing_nav(signals, equity, opened, as_of)
+    return sig, info["nav"], info
 
 
-def load_signal_and_nav(ticker: str, as_of: str, root=None) -> Tuple[Optional[dict], Optional[float]]:
-    """`pick_signal_and_nav` 的读文件版：只读信号与净值两个文件，不重读整本账本。"""
+def load_signal_and_nav(ticker: str, as_of: str, root=None) -> Tuple[Optional[dict], Optional[float], dict]:
+    """`pick_signal_and_nav` 的读文件版：只读信号 / 净值 / 持仓 / 平仓四个文件（后两个只为找出当天新开的仓），
+    不重读整本账本。"""
     ld = (Path(root) if root is not None else PATHS.home) / LEDGER_DIRNAME
     sigs, _ = read_jsonl(ld / "earnings_signals.jsonl")
     eq, _ = read_jsonl(ld / "equity_curve.jsonl")
-    return pick_signal_and_nav(sigs, eq, ticker, as_of)
+    pos, _ = read_jsonl(ld / "positions.jsonl")
+    closed, _ = read_jsonl(ld / "closed_trades.jsonl")
+    return pick_signal_and_nav(sigs, eq, ticker, as_of, entries_on(as_of, pos, closed))
 
 
 def ledger_as_of(led: dict) -> Optional[str]:
@@ -604,7 +676,8 @@ def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
       · mid / `mark_mid`：仍要两腿 `quote_ok`（bid = 0 的 mid 只是 ask 的一半，不是市价）；
       · 立即平仓：卖跨式是按 ask 买回，两腿 ask 都真实（`_ask_ok`）就给，`exit_now_basis="ask_only"`；
         买跨式按 bid 卖出，bid = 0 即无买盘，仍不给；
-      · Greeks：`_greeks_usable` 的腿照用，`greeks.degraded_legs` 标明哪几条是 bid = 0 的模型值，仅供参考。
+      · Greeks：`_greeks_usable` 的腿照用，`greeks.degraded_legs` 标明哪几条是 bid = 0 的模型值，仅供参考
+        （另一条腿缺、合计全是 None 时不给：没有任何一格用到它）。
     账本侧（`portfolio_greeks.option_exposures`）与卖权账本共用的 `quote_ok` 口径**不动**，对冲决策仍按严格口径。"""
     side = str(p.get("side") or "")
     n = _pos(p.get("contracts"))
@@ -634,6 +707,11 @@ def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
             legs.append(None)
     pnl_mid = unrealized(side, p.get("entry_premium"), mark, n)
     size = _pos(p.get("size_usd"))
+    greeks = position_greeks(legs, side, n, S)
+    # 降级腿只有在它的数真的进了某个合计时才说出来：另一条腿缺（合计全是 None）时页面不许再声称「含 call 腿的模型值」
+    # ——那句话旁边会是一排「—」（v0.45.593 二次检查）。合计需要两条腿都有数，所以「有任一合计」⇔「降级腿的数被用上了」
+    used = any(greeks[k] is not None for k in ("delta_shares", "dollar_delta", "gamma_dollar_per_1pct",
+                                               "vega_dollar_per_pt", "theta_dollar_per_day"))
     return {
         "ticker": p.get("ticker"), "fetched_at_et": now_et.isoformat(timespec="seconds"),
         "available": bool((q or {}).get("available")), "reason": (q or {}).get("reason"),
@@ -645,7 +723,7 @@ def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
         "unrealized_mid_pct": (pnl_mid / size * 100.0) if (pnl_mid is not None and size) else None,
         "exit_now_premium": exit_px, "exit_now_usd": unrealized(side, p.get("entry_premium"), exit_px, n),
         "exit_now_basis": exit_basis, "bid_zero_legs": bid_zero,
-        "greeks": {**position_greeks(legs, side, n, S), "degraded_legs": degraded},
+        "greeks": {**greeks, "degraded_legs": degraded if used else []},
         "band": band_position(S, band), "breakeven": band,
         "levels": levels,
         "same_payload": (levels.get("payload_last_trade_time") == (q or {}).get("payload_last_trade_time"))

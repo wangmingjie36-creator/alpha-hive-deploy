@@ -227,7 +227,11 @@ def demo_straddle_ledger(as_of: Optional[str] = None) -> dict:
                           "rationale": f"演示：{label} ratio={ratio}"})
         implied = round(4.0 * ratio, 4)
         for day in (entry_date, iso()):
-            signals.append({"ticker": t, "as_of": day, "eligible": True, "label": label, "raw_label": label,
+            # 入场日的信号行带两腿 mid（形状同真账本的 `quote`；mid 取入场价，演示里不造入场滑点）：
+            # 对比卡据此还原「开仓前 NAV」（`straddle.sizing_nav`），演示数据也走真实路径
+            quote = ({"quote": {"call": {"mid": round(entry * 0.5, 4)}, "put": {"mid": round(entry * 0.5, 4)}}}
+                     if day == entry_date else {})
+            signals.append({"ticker": t, "as_of": day, "eligible": True, "label": label, "raw_label": label, **quote,
                             "tradeable": True, "earnings_date": ed, "selected_expiry": exp, "ratio": ratio,
                             "implied_event_move_pct": implied, "hist_median_abs_move_pct": 4.0, "hist_n": 8,
                             "max_leg_spread_pct": 0.04, "event_move_basis": "straddle_minus_diffusion_plus_window",

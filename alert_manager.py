@@ -1006,7 +1006,11 @@ class AlertAnalyzer:
 
         三处只记录的挂接点（信号行的影子宽跨报价 / 账本开仓的影子记录 / 账本平仓的假想盈亏）都被包在「不得影响主流程」的
         except 里——账本照开照平、扫描照跑，所以记录丢了没人会知道，而预注册检验的样本就这样悄悄少一笔。`errors`（记录没写成的
-        次数）> 0 ⇒ P2；不可成交 / 没有信号记录 / 平仓无价是**数据**（协议 §4 如实报告），不在这里报警；计数缺失 ⇒ checks_skipped。"""
+        次数）> 0 ⇒ P2；不可成交 / 没有信号记录 / 平仓无价是**数据**（协议 §4 如实报告），不在这里报警；计数缺失 ⇒ checks_skipped。
+
+        第二条（v0.45.593）：接线整批断了。快照在、但 25Δ 两腿一个都取不到（上游角色名漂移 / 快照形状变 / CBOE 链整体没有 delta）
+        与「这票的 25Δ 腿真的不可成交」在记录里同形、都只是数据，`errors` 恒为 0——所以源头另数「取到 / 缺腿」两个数，
+        一整轮缺腿的标的 ≥ 5 个且一个都没取到（`wiring_suspect`）⇒ P2，对标 GEX 影子的「0/N 可用」告警（v0.45.428）。"""
         st = status.get("scan_timing")
         if not isinstance(st, dict):
             return
@@ -1014,6 +1018,20 @@ class AlertAnalyzer:
         if not isinstance(ss, dict):
             self.checks_skipped.append("影子宽跨记录检查（scan_timing 无 strangle_shadow 计数）")
             return
+        if ss.get("wiring_suspect"):
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】影子宽跨报价整批取不到：本轮 {ss.get('signal_missing_leg')} 个标的快照在、但 25Δ 两腿缺，"
+                f"一个都没取到（预注册检验攒不到单位）",
+                {
+                    "明细": f"signal_recorded={ss.get('signal_recorded')} signal_available={ss.get('signal_available')} "
+                            f"signal_missing_leg={ss.get('signal_missing_leg')}",
+                    "影响": "账本本身不受影响；这些信号行的 25Δ 报价是空的，之后开的仓都会记成入场不可成交，检验永远攒不够",
+                    "建议": "先看 cboe_options.select_quote_set 的 contracts 键（c25 / p25）还在不在、CBOE 链有没有 delta"
+                            "（`missing_reasons`），再看当天信号行里影子宽跨报价的 reason。丢掉的入场时点报价补不回",
+                },
+                ["strangle_shadow", "data_quality"]
+            ))
         if not ss.get("errors"):
             return
         items = ss.get("items") or []
@@ -1025,9 +1043,10 @@ class AlertAnalyzer:
                 "明细": "；".join(f"{i.get('kind')} {i.get('ticker') or '—'}：{i.get('detail')}" for i in items[:5])
                         + (f"（另 {ss['errors'] - 5} 次略）" if ss["errors"] > 5 else ""),
                 "影响": "账本本身不受影响（开仓、平仓、现金都照常）；受影响的那笔没有影子记录，不进检验",
-                "建议": "看 alpha_hive.log 里「影子宽跨」的 WARNING（带堆栈）；signal_error ⇒ 信号行没带影子宽跨报价，"
-                        "entry_error / exit_error ⇒ 那笔持仓 / 平仓记录的影子记录缺失或标 error。"
-                        "修好后已丢的记录补不回（入场时点的报价没了），如实在检验里按 no_record 计数",
+                "建议": "看 alpha_hive.log 里「影子宽跨」的 WARNING（带堆栈）。signal_error ⇒ 该标的这一天的信号行没带影子宽跨报价，"
+                        "之后若开了仓，单位记成 entry_no_signal_record；entry_error ⇒ 持仓缺影子记录，单位记成 no_record；"
+                        "exit_error ⇒ 平仓记录里影子平仓项标 error，单位记成 exit_error。三类都不进检验，"
+                        "且入场 / 平仓时点的报价丢了补不回",
             },
             ["strangle_shadow", "data_quality"]
         ))

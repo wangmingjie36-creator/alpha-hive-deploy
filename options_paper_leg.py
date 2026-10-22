@@ -606,6 +606,15 @@ def _attach_shadow_exit(rec: "ClosedStraddle", pos: StraddlePosition,
         _note_shadow_error("exit_error", pos.ticker, exc)
 
 
+def _public_closed(d: Dict) -> Dict:
+    """`run_for_date` 返回值（也是本模块 CLI 回显）里的平仓记录：不带 `shadow_strangle`。
+
+    盲期（experiments/straddle_strangle_shadow_prereg.md §7）：手动补跑平仓日的 CLI 会把返回值整个打到终端——平仓记录里
+    同时躺着跨式盈亏和影子宽跨盈亏，等于代人把一对数字摆在一起（v0.45.593 二次检查）。落盘的 `closed_trades.jsonl`
+    照旧保留完整记录（检验读它）；返回值只是回显，不丢信息。"""
+    return {k: v for k, v in d.items() if k != "shadow_strangle"}
+
+
 def _note_shadow_error(kind: str, ticker: str, exc: BaseException) -> None:
     try:
         import straddle_strangle_shadow as sss
@@ -915,7 +924,7 @@ def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
     return {
         "as_of": as_of, "nav": nav, "cash": cash,
         "positions": [p.to_dict() for p in positions],
-        "opened_today": opened, "closed_today": closed_today,
+        "opened_today": opened, "closed_today": [_public_closed(c) for c in closed_today],
         "skipped": skipped, "equity_snapshot": snapshot,
         "settle_deferred": deferred,
         "invalid_expiry": invalid_expiry,

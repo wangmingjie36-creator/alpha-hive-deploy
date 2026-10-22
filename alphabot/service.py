@@ -438,7 +438,8 @@ class AlphaBotService:
         """「跨式 vs 宽跨」并排对比卡（v0.45.584）。**只读、只并排事实、不给结论**（见 `alphabot.strangle_compare`）。
         数据全部来自本机已有文件：当天快照里的 `quote_set`（ATM 两腿 + 25Δ 两腿）、`earnings_cache/<票>_moves.json`
         （历史财报涨跌）、跨式账本的信号行与净值——不联网。`as_of` 缺省 = 账本最近一个扫描日；给持仓的入场日即「入场时的对比」。
-        定仓用账本自己的 `options_paper_leg.size_contracts`（懒 import；取不到就写明原因、张数留空）。"""
+        定仓用账本自己的 `options_paper_leg.size_contracts`（懒 import；取不到就写明原因、张数留空）；NAV 取账本当日
+        **开仓前**的净值（`SD.sizing_nav`，v0.45.593：入场日那行净值是开仓之后写的，直接用会少 1 张）。"""
         t = norm_ticker(ticker)
         now = self.now_fn()
         if self.demo:
@@ -447,7 +448,8 @@ class AlphaBotService:
             day = norm_date(as_of) if as_of else (SD.ledger_as_of(led) or now.date().isoformat())
             qs, raw = syn.demo_compare_inputs(t, day)
             qs_err = hist_err = None
-            sig, nav = SD.pick_signal_and_nav(led.get("signals"), led.get("equity"), t, day)
+            sig, nav, nav_info = SD.pick_signal_and_nav(led.get("signals"), led.get("equity"), t, day,
+                                                        SD.entries_on(day, led.get("positions"), led.get("closed")))
         else:
             root = self.straddle_root
             if as_of:
@@ -457,7 +459,7 @@ class AlphaBotService:
                 day = str((meta or {}).get("last_run_date") or SD.expected_ledger_date(now)[0])
             qs, qs_err = SD.load_quote_set(t, day, root)
             raw, hist_err = SD.load_hist_moves(t, root)
-            sig, nav = SD.load_signal_and_nav(t, day, root)
+            sig, nav, nav_info = SD.load_signal_and_nav(t, day, root)
 
         def size_fn(premium, nav_):
             try:
@@ -466,7 +468,8 @@ class AlphaBotService:
             except Exception as exc:  # noqa: BLE001 - 定仓函数取不到：张数留空并说明，不编一个
                 return 0, f"sizing unavailable: {type(exc).__name__}"
         res = clean_json(SC.compare(t, day, qs=qs, qs_error=qs_err, raw_moves=raw, hist_error=hist_err, signal=sig,
-                                    nav=nav, size_fn=size_fn, max_spread_frac=self.straddle_rules().get("max_spread_pct")))
+                                    nav=nav, nav_info=nav_info, size_fn=size_fn,
+                                    max_spread_frac=self.straddle_rules().get("max_spread_pct")))
         res["demo"] = self.demo
         return res
 

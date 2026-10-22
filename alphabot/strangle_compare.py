@@ -25,6 +25,8 @@
     混进「事前的历史」）落在带外的次数 `k / n` + Wilson 95% 区间；与账本的 `earnings_move_stats` 同一份 `moves` 数据；
   · 定仓：同一条账本规则 `size_contracts`（张数 = floor(风险预算 ÷ (权利金 × 100))）。权利金少的结构张数多——
     **名义风险不一定更小**，这条联动是切换结构时最容易漏掉的，所以并排给出张数与对应股数。
+    定仓用的 NAV = 账本当日**开仓前**的净值（由 `straddle.sizing_nav` 从净值曲线还原，来源写在 `nav_basis`）；
+    直接取入场日那行净值会少 1 张（那行是开仓之后才写的）。整张卡是**卖方视角**（`seller_view`），不换算买方。
   · 单位：`*_pct`（价格涨跌）= 百分点（5.0 表示 5%）；`*_frac`（点差 / 占比）= 小数（0.15 表示 15%）。
 
 只读、判不了的一律是 None + 原因码（`REASONS`），不是 0。
@@ -63,10 +65,12 @@ FLAGS: Dict[str, str] = {
     "wide_spread": "有腿的点差超过账本对 ATM 腿的可交易闸门（同一把尺，宽跨腿也套）：按可成交价难以成交",
 }
 CAVEATS: Dict[str, str] = {
-    "after_hours": "快照是收盘后的报价，点差系统性偏宽（实测约为盘中的 2–3 倍），宽跨的可成交性按它看偏悲观",
+    "after_hours": "快照是收盘后的报价，点差通常比盘中宽，宽跨的可成交性按它看可能偏悲观；宽多少没有统计——手上只有一个样本"
+                   "（2026-09-03 同日 COST 25Δ：盘后 27.6% vs 盘中 9.6%），倍数待验证，不要拿它折算",
     "band_is_expiry": "盈亏平衡带是到期口径，历史涨跌是财报前后 2 日的收盘到收盘——账本是财报后平仓、不是持有到期，只能粗略对照",
     "small_sample": "单只票的历史最多 8 次，「落在带外 k/n」只是描述，不是预测；区间很宽",
     "no_verdict": "本页只并排事实、不给「选哪个」：系统里已结算事件极少，任何选择规则目前都是在拟合；检验在影子记录里攒样本",
+    "seller_view": "整张卡是卖方视角：权利金按 bid 收、买回按 ask，张数按空头的账本定仓规则；买入跨式的成本在 ask 一侧，这里没有换算",
 }
 
 
@@ -93,6 +97,30 @@ def _num(v) -> Optional[float]:
 def _pos(v) -> Optional[float]:
     f = _num(v)
     return f if (f is not None and f > 0) else None
+
+
+def nav_basis(info) -> Optional[dict]:
+    """定仓 NAV 的来源说明（服务层从 `straddle.sizing_nav` 的结果传进来；本模块不 import 它）。
+    `{"kind", "label", "text", "nav_date", "adjust_usd"}`；没给 `info` ⇒ None。文案只在这里写一份，前端不抄。"""
+    if not isinstance(info, dict):
+        return None
+    kind, d = str(info.get("basis") or "none"), info.get("nav_date")
+    adj = _num(info.get("adjust_usd")) or 0.0
+    if kind == "pre_open":
+        label = "当日开仓前 NAV"
+        text = ("账本定仓用的是当日开仓前的 NAV（先盯市、再开仓、最后才写净值行）；"
+                + (f"这里由 {d} 那行净值加回当日新开仓的入场滑点 ${adj:,.0f} 还原，与账本的 nav_for_sizing 同口径，约有 $1 的取整误差。"
+                   if adj else f"当日没有新开仓，{d} 那行净值即开仓前 NAV，与账本的 nav_for_sizing 同口径。"))
+    elif kind == "latest_on_or_before":
+        label = "最近一行 NAV"
+        text = (f"这一天账本没有净值行，用 {d} 的收盘 NAV 近似；账本实际定仓用的是当日开仓前的 NAV，可能差 1 张。")
+    elif kind == "post_open_unadjusted":
+        label = "当日收盘 NAV（未还原）"
+        text = (f"当日有新开仓但还原不了开仓前的 NAV（{info.get('reason') or '—'}），用 {d} 的收盘 NAV；"
+                "它比账本定仓用的低「半个点差 × 张数」，张数可能比账本少 1 张。")
+    else:
+        label, text = None, "没有可用的净值行，定仓张数不给。"
+    return {"kind": kind, "label": label, "text": text, "nav_date": d, "adjust_usd": adj}
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> Optional[List[float]]:
@@ -177,13 +205,14 @@ def _structure(name: str, contracts: dict, S: float, moves: List[dict], nav,
 def compare(ticker: str, as_of: str, *, qs: Optional[dict], qs_error: Optional[str] = None,
             raw_moves=None, hist_error: Optional[str] = None, signal: Optional[dict] = None,
             nav=None, size_fn: Callable = lambda premium, nav: (0, "sizing unavailable"),
-            max_spread_frac: Optional[float] = None) -> dict:
+            max_spread_frac: Optional[float] = None, nav_info: Optional[dict] = None) -> dict:
     """一张对比卡的全部数据。`qs` = 快照里的 `quote_set`（取不到就给 `qs_error`）；`raw_moves` = 历史财报涨跌原始行
     （`earnings_cache/<T>_moves.json` 的 `moves`）；`signal` = 当天的信号行（只取白名单字段）；
-    `size_fn(premium, nav) -> (张数, 原因)` 由服务层注入账本自己的定仓函数（本模块不 import 它）。"""
+    `size_fn(premium, nav) -> (张数, 原因)` 由服务层注入账本自己的定仓函数（本模块不 import 它）；`nav_info` = 该 NAV
+    的来源说明（`straddle.sizing_nav` 的结果，只用来写 `nav_basis`，不参与计算）。"""
     base = {"ticker": ticker, "as_of": as_of, "available": False, "reason": None, "reason_zh": None,
             "underlying_price": None, "selected_expiry": None, "dte": None, "market_open": None, "fetched_at": None,
-            "nav": _pos(nav), "signal": {k: (signal or {}).get(k) for k in SIGNAL_FIELDS} if signal else None,
+            "nav": _pos(nav), "nav_basis": nav_basis(nav_info), "signal": {k: (signal or {}).get(k) for k in SIGNAL_FIELDS} if signal else None,
             "hist": None, "hist_reason": None, "hist_reason_zh": None, "structures": None,
             "premium_ratio": None, "contracts_ratio": None, "caveats": [], "rules": {"max_spread_frac": max_spread_frac}}
     if not isinstance(qs, dict):
@@ -206,11 +235,14 @@ def compare(ticker: str, as_of: str, *, qs: Optional[dict], qs_error: Optional[s
     p_ratio = (b["premium"] / a["premium"]) if (a["available"] and b["available"]) else None
     ca, cb = (a["sizing"] or {}).get("contracts"), (b["sizing"] or {}).get("contracts")
     c_ratio = (cb / ca) if (ca and cb) else None
-    caveats = ["band_is_expiry", "small_sample", "no_verdict"]
+    caveats = ["band_is_expiry", "small_sample", "seller_view", "no_verdict"]
     if qs.get("market_open") is False:
         caveats.insert(0, "after_hours")
+    notes = [{"code": c, "text": CAVEATS[c]} for c in caveats]
+    if base["nav_basis"] is not None:                       # 张数是怎么定的（动态文案，不进静态表）
+        notes.append({"code": "nav_basis", "text": base["nav_basis"]["text"]})
     return {**base, "available": True, "underlying_price": S, "selected_expiry": qs.get("selected_expiry"),
             "dte": qs.get("selected_dte"), "market_open": qs.get("market_open"), "fetched_at": qs.get("fetched_at"),
             "hist": _hist_block(moves) if moves else None, "hist_reason": hist_reason,
             "hist_reason_zh": reason_zh(hist_reason), "structures": structs, "premium_ratio": p_ratio,
-            "contracts_ratio": c_ratio, "caveats": [{"code": c, "text": CAVEATS[c]} for c in caveats]}
+            "contracts_ratio": c_ratio, "caveats": notes}

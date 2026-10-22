@@ -64,6 +64,26 @@ def _fingerprint(root: Path):
     return {str(p.relative_to(root)): (p.stat().st_size, p.stat().st_mtime_ns) for p in sorted(root.rglob("*"))}
 
 
+def _straddle_js() -> str:
+    """straddle.js 去掉 // 注释行（注释里讨论某句话不等于对用户说了它——本仓「文本探针」老坑）。"""
+    return "\n".join(ln for ln in (STATIC / "pages" / "straddle.js").read_text(encoding="utf-8").splitlines()
+                     if not ln.lstrip().startswith("//"))
+
+
+def _fn_src(js: str, name: str) -> str:
+    """JS 里 `function name` / `async function name` 的函数体源码（按大括号配对；模板串里的 ${} 是配对的）。"""
+    import re
+    m = re.search(rf"(?:async\s+)?function {name}\b", js)
+    assert m, f"找不到函数 {name}"
+    i = js.index("{", js.index(")", m.end()))                                             # 参数表之后的第一个 {
+    depth = 0
+    for j in range(i, len(js)):
+        depth += (js[j] == "{") - (js[j] == "}")
+        if depth == 0:
+            return js[m.start():j + 1]
+    raise AssertionError(f"{name} 的大括号没配上")
+
+
 def _keys(obj):
     if isinstance(obj, dict):
         for k, v in obj.items():
@@ -239,15 +259,18 @@ def _book(side):
     return next(p for p in syn.demo_straddle_ledger(AS_OF)["positions"] if p["side"] == side)
 
 
-def _live_with(root, p, *, call=None, put=None):
-    """演示报价上改写某条腿再走一遍真实的 `straddle_live`（服务层 + live_view）。返回 (结果, 未改写的报价)。"""
+def _live_with(root, p, *, call=None, put=None, drop=()):
+    """演示报价上改写某条腿再走一遍真实的 `straddle_live`（服务层 + live_view）。返回 (结果, 未改写的报价)。
+    `drop=("put",)` = 那条腿在 payload 里根本没有（quotes[符号] = None）。"""
     base = syn.demo_quote_held(p["ticker"], [p["call_symbol"], p["put_symbol"]], AS_OF)["quotes"]
 
     def fn(t, syms):
         q = syn.demo_quote_held(t, syms, AS_OF)
-        for sym, over in ((p["call_symbol"], call), (p["put_symbol"], put)):
+        for name, sym, over in (("call", p["call_symbol"], call), ("put", p["put_symbol"], put)):
             if over is not None:
                 q["quotes"][sym] = {**q["quotes"][sym], **over}
+            if name in drop:
+                q["quotes"][sym] = None
         return q
     return _svc(root, straddle_quote_fn=fn).straddle_live(p["ticker"], force=True), base
 
@@ -328,6 +351,175 @@ class TestLiveBidZeroLeg:
                        if not ln.lstrip().startswith("//"))
         for n in names:
             assert n in js, f"前端没读 {n}"
+
+
+#: 手写的逐腿 per-share Greeks（金额 = 张数 × 100 × 方向 × …，见 straddle.py 模块头；卖跨式方向 −1）
+CALL_G = {"delta": 0.0511, "gamma": 0.0842, "vega": 0.0038, "theta": -0.0065}
+PUT_G = {"delta": -0.4812, "gamma": 0.0911, "vega": 0.0049, "theta": -0.0071}
+GOOD_PUT = {"bid": 0.85, "ask": 0.95, "mid": 0.90, "spread_pct": 0.11, "iv": 0.31, "quote_ok": True, **PUT_G}
+GOOD_CALL = {"bid": 0.40, "ask": 0.50, "mid": 0.45, "spread_pct": 0.22, "iv": 0.30, "quote_ok": True, **CALL_G}
+BID_ZERO_PUT = {"bid": 0.0, "ask": 0.05, "mid": None, "spread_pct": None, "iv": 0.33, "quote_ok": False, **PUT_G}
+
+
+class TestLiveGreeksNumbersAndGating:
+    """二次检查 [15] [1]：此前 bid=0 腿的 Greeks 只断言「不是 None」，put 腿作为 bid=0 腿时一个数都没核；
+    另一条腿缺时 `degraded_legs` 仍被填上，页面同时写「含 call 腿的模型值」和一排「—」。数值全部手算（卖跨式：张数 × 100 × −1）。"""
+
+    @staticmethod
+    def _expect(n, S, c, p):
+        q = -n * 100.0
+        return {"dollar_delta": q * (c["delta"] + p["delta"]) * S,
+                "gamma_dollar_per_1pct": 0.5 * q * (c["gamma"] + p["gamma"]) * (0.01 * S) ** 2,
+                "vega_dollar_per_pt": q * (c["vega"] + p["vega"]),
+                "theta_dollar_per_day": q * (c["theta"] + p["theta"])}
+
+    def test_call_leg_degraded_numbers_by_hand(self, root):
+        p = _book("short")
+        r, _ = _live_with(root, p, call=BID_ZERO_CALL, put=GOOD_PUT)
+        g, want = r["greeks"], self._expect(p["contracts"], r["underlying_price"], CALL_G, PUT_G)
+        assert g["degraded_legs"] == ["call"] and g["complete"] is True
+        for k, v in want.items():
+            assert g[k] == pytest.approx(v), k
+        assert g["dollar_delta"] > 0 and g["gamma_dollar_per_1pct"] < 0 and g["theta_dollar_per_day"] > 0   # 卖跨式：净 Δ 由 put 腿的负 delta 反号、Γ 空头、θ 收租
+
+    def test_put_leg_degraded_numbers_by_hand(self, root):
+        """put 是唯一 bid=0 腿：它的 Greeks 一样要进合计、并被标出（此前整条路径没有任何数值断言）。"""
+        p = _book("short")
+        r, base = _live_with(root, p, call=GOOD_CALL, put=BID_ZERO_PUT)
+        g, want = r["greeks"], self._expect(p["contracts"], r["underlying_price"], CALL_G, PUT_G)
+        assert g["degraded_legs"] == ["put"] and r["bid_zero_legs"] == ["put"] and g["complete"] is True
+        for k, v in want.items():
+            assert g[k] == pytest.approx(v), k
+        assert r["exit_now_basis"] == "ask_only" and r["exit_now_premium"] == pytest.approx(0.50 + 0.05)   # 买回 = 两腿 ask 之和
+
+    def test_both_legs_degraded_numbers_by_hand(self, root):
+        p = _book("short")
+        r, _ = _live_with(root, p, call=BID_ZERO_CALL, put=BID_ZERO_PUT)
+        g, want = r["greeks"], self._expect(p["contracts"], r["underlying_price"], CALL_G, PUT_G)
+        assert g["degraded_legs"] == ["call", "put"]
+        for k, v in want.items():
+            assert g[k] == pytest.approx(v), k
+
+    @pytest.mark.parametrize("name,put", [
+        ("put 腿 ask 为 0", {"bid": 0.0, "ask": 0.0}),
+        ("put 腿倒挂", {"bid": 0.50, "ask": 0.10}),
+        ("put 腿 ask 缺失", {"bid": 0.0, "ask": None}),
+    ])
+    def test_a_dead_put_blocks_the_exit_price_even_when_the_call_has_a_real_ask(self, root, name, put):
+        """卖跨式买回要两条腿都有真实 ask；只查 call 腿会凭空少付 put 的买回成本（exit = 0.02 + 0）。"""
+        p = _book("short")
+        r, _ = _live_with(root, p, call=BID_ZERO_CALL, put=put)
+        assert r["exit_now_premium"] is None and r["exit_now_usd"] is None and r["exit_now_basis"] is None, name
+
+    @pytest.mark.parametrize("name,kw", [
+        ("put 腿在 payload 里根本没有", {"drop": ("put",)}),
+        ("put 腿 bid 与 ask 都是 0（没有任何盘口）", {"put": {"bid": 0.0, "ask": 0.0, "mid": None, "quote_ok": False}}),
+    ])
+    def test_degraded_leg_is_not_announced_when_the_other_leg_is_missing(self, root, name, kw):
+        """另一条腿缺 ⇒ 四个合计全是 None ⇒ 没有任何一格用到 call 腿的模型值 ⇒ 不许告诉页面「含 call 腿的模型值」。"""
+        p = _book("short")
+        r, _ = _live_with(root, p, call=BID_ZERO_CALL, **kw)
+        g = r["greeks"]
+        assert g["complete"] is False and g["missing"] == ["put:no_quote"], name
+        assert all(g[k] is None for k in ("dollar_delta", "gamma_dollar_per_1pct", "theta_dollar_per_day", "vega_dollar_per_pt")), name
+        assert g["degraded_legs"] == [], name
+        assert r["bid_zero_legs"] == ["call"]                                            # bid=0 这件事本身仍如实给出
+
+    def test_partial_totals_still_name_the_degraded_leg(self, root):
+        """put 只缺 gamma：Δ / vega / θ 的合计仍用到了 call 腿的模型值 ⇒ 仍要标出（所以判据是「有合计」不是「complete」）。"""
+        p = _book("short")
+        r, _ = _live_with(root, p, call=BID_ZERO_CALL, put={"gamma": None})
+        g = r["greeks"]
+        assert g["complete"] is False and "put:gamma" in g["missing"] and g["gamma_dollar_per_1pct"] is None
+        assert g["vega_dollar_per_pt"] is not None and g["degraded_legs"] == ["call"]
+
+
+def _body(fn: str) -> str:
+    return _fn_src(_straddle_js(), fn)
+
+
+class TestPageFrontEndContracts:
+    """前端源码形状钉（读 straddle.js / help.js，去 // 注释行）。每条对应一个已确认的显示缺陷。"""
+
+    def test_degraded_note_needs_a_total_that_actually_exists(self):
+        import re
+        js = _straddle_js()
+        totals = re.search(r"const GREEK_TOTALS = \[(.*?)\];", js, re.S).group(1)
+        names = set(re.findall(r'"(\w+)"', totals))
+        sent = SD.position_greeks([GOOD_CALL, GOOD_PUT], "short", 1, 100.0)
+        assert names == {"dollar_delta", "gamma_dollar_per_1pct", "theta_dollar_per_day", "vega_dollar_per_pt"} <= set(sent)
+        grid = _body("greeksGrid")
+        note = grid[grid.index("g.degraded_legs"):]
+        assert "GREEK_TOTALS.some" in note[:note.index("仅供参考")], "降级腿那句话必须以「合计里有数」为前提"
+
+    def test_closed_count_is_split_into_since_start_and_before_start(self):
+        panel = _body("strangleShadowPanel")
+        assert "自 ${s.start_date} 起入场的" not in panel, "n_closed 含登记前入场的，不能挂在「自 start_date 起入场」下"
+        assert "by_status?.before_start" in panel and "s.n_closed" in panel
+        assert "登记前入场" in panel and "登记后入场" in panel
+        assert "进检验 ${s.n_units}" in panel
+        # 只给个数：这个函数里不许出现任何盈亏字段
+        for banned in ("pnl", "profit", "盈亏 ", "d_mean", "mean_d"):
+            assert banned not in panel, banned
+
+    def test_status_label_table_matches_what_units_can_produce(self):
+        import re
+        import straddle_strangle_shadow as SS
+        block = re.search(r"const SS_STATUS = \{(.*?)\};", _straddle_js(), re.S).group(1)
+        keys = set(re.findall(r"(\w+): \"", block))
+        # 用真实的 units() 造出每一种可达状态，逐个核对都有中文
+        qs = {"schema_version": SS.PREREG["quote_schema"], "available": True, "underlying_price": 24.48, "hist_moves": [],
+              "call": {"symbol": "C", "strike": 26.0, "bid": 0.24, "ask": 0.28, "mid": 0.26, "quote_ok": True},
+              "put": {"symbol": "P", "strike": 23.0, "bid": 0.17, "ask": 0.47, "mid": 0.32, "quote_ok": True}}
+        straddle = {"call": None, "put": None, "premium": None, "contracts": 39, "underlying": 24.48}
+        ok = SS.entry_record(qs, "short", 100000.0, lambda s, p, n: (3, None), straddle, as_of="2026-10-22")
+        entries = {"ok": ok,
+                   "no_size": SS.entry_record(qs, "short", 100000.0, lambda s, p, n: (0, "too big"), straddle, as_of="2026-10-22"),
+                   "no_signal_record": SS.entry_record(None, "short", 100000.0, lambda s, p, n: (3, None), straddle, as_of="2026-10-22"),
+                   "unquotable": SS.entry_record({**qs, "available": False, "reason": "x"}, "short", 100000.0,
+                                                 lambda s, p, n: (3, None), straddle, as_of="2026-10-22")}
+        assert {k: v["status"] for k, v in entries.items()} == {k: k for k in entries}, "夹具没造出这四种入场状态"
+        start = SS.PREREG["start_date"]
+        rows = [{"ticker": "A", "side": "short", "entry_date": "2000-01-01", "earnings_date": "2026-10-21", "shadow_strangle": None}]
+        for name, e in entries.items():
+            rows.append({"ticker": "A", "side": "short", "entry_date": start, "earnings_date": "2026-10-21", "pnl_usd": 1.0,
+                         "shadow_strangle": e})
+        for ex in (None, {"status": "unpriced"}, {"status": "error"}):                    # exit_missing / exit_unpriced / exit_error
+            rows.append({"ticker": "A", "side": "short", "entry_date": start, "earnings_date": "2026-10-21", "pnl_usd": 1.0,
+                         "shadow_strangle": {**ok, "exit": ex}})
+        for xd in ("2026-10-23", "2026-10-21"):                                          # 平仓日晚于 / 不晚于财报日 ⇒ ok / exit_before_event
+            rows.append({"ticker": "A", "side": "short", "entry_date": start, "earnings_date": "2026-10-21", "pnl_usd": 3.0,
+                         "exit_date": xd, "shadow_strangle": {**ok, "exit": {"status": "ok", "pnl_usd": 5.0}}})
+        rows.append({"ticker": "A", "side": "long", "entry_date": start, "earnings_date": "2026-10-21", "shadow_strangle": ok})
+        rows.append({"ticker": "A", "side": "short", "entry_date": start, "earnings_date": "2026-10-21", "shadow_strangle": {**ok, "schema_version": 0}})
+        reachable = {u["status"] for u in SS.units(rows)}
+        assert {"before_start", "ok", "long_side", "exit_missing", "exit_unpriced", "exit_error", "exit_before_event",
+                "entry_no_size", "entry_unquotable", "entry_no_signal_record"} <= reachable
+        for st in reachable:
+            if st.startswith("schema:"):
+                continue                                                                 # 版本号不固定：ssLabel 用前缀规则翻
+            assert st in keys, f"状态 {st} 没有中文"
+        assert {"exit_missing", "exit_before_event"} <= keys, "新增 / 补登记的状态"
+        assert "exit_not_applicable" not in keys, "units() 里不可达（入场不是 ok 的单位到不了平仓那一步），表里不留死条目"
+        assert "exit_not_applicable" not in reachable
+        # 持仓中那一行：入场状态四种都得翻成中文（ok 单独处理，其余走 entry_ 前缀），未登记的原样显示不留空
+        for k in ("unquotable", "no_signal_record", "no_size"):
+            assert f"entry_{k}" in keys, k
+        open_label, label = _body("ssOpenLabel"), _body("ssLabel")
+        assert '"入场可成交"' in open_label and "entry_${k}" in open_label
+        assert re.search(r":\s*String\(k\);\s*}\s*$", label) and "schema:" in label        # 兜底：未登记的状态码原样显示、不留空
+
+    def test_open_row_uses_the_label_functions_not_raw_keys(self):
+        panel = _body("strangleShadowPanel")
+        assert "ssOpenLabel(k)" in panel and "ssLabel(k)" in panel
+        assert "`${k} ${v}`" not in panel, "括号里不许再直接拼英文状态码"
+
+    def test_help_page_says_the_ledger_marks_and_exits_stay_strict(self):
+        txt = (STATIC / "pages" / "help.js").read_text(encoding="utf-8")
+        i = txt.index("账本自己的盯市和财报后平仓同样仍是严格口径")
+        seg = txt[i:i + 400]
+        assert "冻结 mark" in seg and "不会驱动账本" in seg and "不平仓" in seg
+        assert "开仓前" in txt and "卖方视角" in txt                                       # 对比卡的 NAV 规则与视角也写进帮助页
 
 
 class TestDemoDates:

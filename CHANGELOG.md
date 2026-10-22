@@ -25,8 +25,57 @@
 - `tests/test_llm_shadow_scan.py` +9：补丁后的函数不访问向量记忆 / `agent_memory`、不调 LLM；**正对照**（没补丁时同样入参会读 `agent_memory`、调 LLM、改分）；`default_scan` 先打补丁再扫描；`run_child` 不打补丁；触发 ⇒ 不健康 / control 不看；逐只记录各取值。**变异验证 6/6 变红、文件逐字节还原**。
 - **没做**：`agent_memory` 的停写 / 退役读者 / drop 表（第 2、3 步，用户暂不做）；`PENDING_DEAD` 登记不变。
 
+## [0.45.593] — 2026-10-22 — Fixed：v0.45.581 / 584 / 586 二次检查——对比卡定仓张数少 1 张、影子面板首句说错、每日运行返回值把一对盈亏摆在一起、宽跨报价整批取不到没人红、协议补「平仓不晚于财报日」一类（修订 2）
 
-## [0.45.593] — 2026-10-22 — 占位（进行中：v0.45.581 / 584 / 586 二次检查——对比卡定仓张数、影子面板措辞、每日运行返回值剥影子盈亏、宽跨报价整批不可得告警等）
+> 用户 10-22 要求「二次检查以上更新有没有 bug」。做法：10 个维度的只读审查员（影子盈亏口径 / 账本隔离 / 统计引擎 / 协议对账与盲期 / 581 盘中页 / 584 对比卡后端 / 前端 JS / 故障链 /
+> 测试与时间炸弹 / 真实数据端到端）+ 完整性评审，每条发现再由两位独立验证员（读代码反驳 + 写脚本复现）复核；第一轮撞上会话额度中断，缺的审查与验证续跑补齐。
+> **审查员没发现缺陷的部分**：影子盈亏口径与账本逐位一致（300 局随机多空 × 两种平仓口径，差 ≤ 0.011）；块符号翻转对拍暴力枚举 3000 组随机样本 0 处不一致；
+> 有 / 无钩子的账本逐项相同；三处钩子故障都走到 P2、数据类状态不误报；全部新测试离线（带 canary 自证的 socket 探针）；clockshift +1…+400 天 0 条新红；真实 2136 份快照逐份跑记录函数 0 崩溃、0 NaN。
+> **不动记录结构**：生产在 10-21 已带着新代码开了 NVDA / XOM 两笔带影子记录的空头，本版不改 `shadow_schema` / `quote_schema`，已记的记录继续有效。
+
+**更正我之前说错的数**：对比卡 / 0.45.584 的 CHANGELOG / 协议 §1 / memory 里写的「T 09-29 跨式 38 张、宽跨 150 张（3.9 倍）」——**账本实际开了 39 张**（宽跨 150 张不变），倍数约 3.85。
+原因见下「对比卡定仓 NAV」。0.45.584 那条历史记录不改写，在这里更正。
+
+### Fixed
+- **对比卡「账本定仓」张数入场日少 1 张**（`alphabot/straddle.py` `sizing_nav` / `entries_on` / `pick_signal_and_nav` / `load_signal_and_nav`）：账本每天先盯市 / 平仓、算 `nav_for_sizing`、**然后才开仓**、最后写净值行，
+  所以入场日那行净值是开仓之后的——新开的卖跨式按 bid 入账、按 mid 盯市，净值立刻少「半个点差 × 100 × 张数」。对比卡直接拿那行定仓，真实账本 4 笔空头里 2 笔对不上（T：账本 39、卡 38）。
+  现把当天新开仓的入场滑点（信号行两腿 mid 之和 − 入场价）加回去，还原开仓前 NAV；当天没有净值行取最近一行并注明是近似；还原不了（缺信号行 / 报价 / 张数，或 `opened_today` 对不上）退回原值并写明原因（`nav_basis`）。
+  `pick_signal_and_nav` / `load_signal_and_nav` 现在返回三元组（多一个 `nav_info`），旧调用方会立刻报错而不是悄悄少 1 张。**真实账本只读核对：10 笔（含已平）入场日卡上的跨式张数全部等于账本记录**（T 39、VZ 24、COST 1、JNJ 3、TSLA 1、NFLX 8 ……；T 开仓前 NAV 102,995）。
+- **影子面板首句说错**（`straddle.js`）：把「已平仓 N 笔」说成「自 start_date 起入场的」，实际 N 是全部已平仓（含登记前入场的 4 笔）——真实账本上首屏就是错话。改为「已平仓共 N 笔，其中登记后入场 M 笔（其余 K 笔是登记前入场、不进检验）」；
+  持仓中的英文状态码（ok / unquotable / no_signal_record）改用同一张中文标签表，未知状态原样显示代码、不留空。
+- **每日运行的返回值 / `options_paper_leg.py` CLI 回显把同一笔的跨式盈亏和影子宽跨盈亏摆在一个对象里**（`options_paper_leg.py` `_public_closed`）：协议 §7 写的「没有任何代码路径把同一笔的两个盈亏放进同一个返回值」对 `run_for_date` 不成立——
+  手动补跑平仓日（扫描没跑、由 CLI 来平）会把一对数字打在同一屏。现返回的 `closed_today` 剥掉 `shadow_strangle`（落盘的 `closed_trades.jsonl` 保留完整记录；自动路径本来只读 `nav` / `settle_deferred`，不受影响）。
+  协议 §7 与模块文档的措辞随之收窄（信息论上盲不了的部分——落盘记录与 `units()` 的 `d`——本来就写明了）。
+- **宽跨报价整批取不到没有任何东西会红**（`straddle_strangle_shadow.py` / `earnings_vol_signal.py` / `alert_manager.py`）：上游角色名漂移、快照形状变、CBOE 链整体没有 delta，都只会变成每个标的的 `available=False` + `entry_unquotable`（被登记为「数据」），`errors` 恒为 0，
+  GEX 影子在 v0.45.428 为同一形状专门加了「0/N 可用」告警，宽跨没有。现源头另数「取到 / 缺腿」，一整轮 ≥ 5 个标的缺腿且一个都没取到（`stats()["wiring_suspect"]`）⇒ P2；新增真 `select_quote_set` 输出 → `quote_record` 与三份角色名对账的测试。
+- **快照腿里一个 NaN 会拖垮整个信号文件的写入**（`leg_brief`）：影子报价原样抄快照腿字段，账本严格序列化拒 NaN，`scan()` 会抛 `LedgerWriteError`、当天信号与后面的开平仓一起丢。现行快照生产者已把非有限值清成 None，今天不可达，但这是新钩子违反自己「只记录、不拖垮信号」约定的潜伏缺口；现把非有限浮点清成 None。
+- **冻结结果文件「合法 JSON 但不是对象」**（`read_result` / `run_once` / `progress` / `main`）：`null` 被当成「还没冻结」（`--run-once` 永远冻不出来也不报错），`[]` / `0` / `"x"` 让 `run_once` 抛 `TypeError`，CLI 对读不了的文件退出码仍为 0。现与「读不了」同一条路径：不重算、不覆盖、不抛，`progress` 多一个 `frozen_error`，CLI 非零。
+- 盘中页：另一条腿缺、Greeks 合计全是「—」时不再写「Greeks 含 call 腿（bid=0）的模型值」（`degraded_legs` 只在有合计时给）。对比卡：迟到的旧响应不再盖掉新选的票（每个面板一个请求令牌）、卡片标题写明票名与快照日、失败有「重试」、持仓卡懒加载失败可再展开重试、
+  买入跨式持仓不再展示卖方视角的对比（改一行说明；整张卡标明「卖方视角」）、`after_hours` 注释不再把「约 2–3 倍」当普遍事实（只有一个 COST 样本，倍数待验证）、帮助页补「账本自己的盯市与财报后平仓仍是严格口径」。
+- 协议文字（`experiments/straddle_strangle_shadow_prereg.md`）：§4 状态表去掉走不到的 `exit_not_applicable`、补上漏列的 `exit_missing`；§12 的「CBOE 缓存 120 秒」更正为自 v0.45.123 起按业务日 vintage（上限 4 小时）；
+  约 4% 的快照是盘中生成的陈旧文件（`cboe_stale_intraday`，可按 `(ticker, 入场日)` 回连快照文件分层，记录里不单列——加字段 = 改结构版本）写进已知局限。
+
+### Changed — 协议修订 2（`PREREG["version"]` 1 → 2；协议 §4 / §14）
+- **新增排除 `exit_before_event`：账本平仓日 ≤ 财报日的单位不进检验。** 账本合格窗口含等号（`as_of < 财报日 ≤ 到期日 − 2`，v0.45.104 起、测试钉住），财报日 = 到期日 − 2 的盘后（财报时段**未观测，一律按 AMC 假设**）财报会在财报当晚被 `expiry_buffer` 强平——
+  那一笔的跨式与影子宽跨测到的都是没有事件的纯时间价值，却会以 `ok` 计入。真实数据里同形的 TSLA（多头，所以本来就不进检验）；可交易 rich / cheap 信号行里约 4/66 ≈ 6% 是这个形状（一次性普查，**待验证**）。
+  BMO 的同形单位也被一并排除（保守）。**改动前没有看过任何结果**：登记以来没有一笔 `ok` 单位平仓；不截断任何已计单位（`n_units = 0`）。账本合格窗口含等号本身没动（另案）。
+- 这是对你预注册的协议加了一类排除，属协议变更（§8）；已按 §8 在协议 §14 记修订。**如不同意，回退这一条只需删 `units()` 里的 `exit_before_event` 分支并把 `PREREG["version"]` 调回 1**（测试 `TestExitBeforeEvent` 会提醒）。
+
+### 审查后未改的（有意）
+- 记录里不加 `underlying_price_source`（审查员提议）：加字段 = 改 `quote_schema`（§8，生产已有记录），而来源可按 `(ticker, 入场日)` 回连保留的快照文件取，且不影响配对；仅在 §12 写明。
+- 账本合格窗口含等号（`earnings_vol_signal._precheck`）：v0.45.104 起有意为之、测试钉住，另案。
+- `cboe_stale_intraday` 快照不拒收：账本与影子同一份、不影响配对。
+
+### 测试
+- 新增 / 加强：`tests/test_straddle_strangle_shadow.py` 66 → 98 条（`TestRunForDateIsBlind` / `TestExitBeforeEvent`（含走真实账本的 AMC 强平复现）/ `TestFrozenResultNotAnObject` / `TestRecordedLegsAreFinite`（含带 NaN 快照走 `scan` 落盘）/ `TestWiringProbe`（含走 `analyze()` 真入口、真 `select_quote_set` 对账）/ `TestProtocolConstantsArePinned`（读源码字面量）/ `TestPointInTimeBoundaries`；
+  原先读 `closed_today[0]` 里影子盈亏的用例改读落盘文件）；`tests/test_alphabot_strangle_compare.py`（`TestSizingNav` 10 条手算、`TestLoaders` 加载层、`TestBoundaries`、`TestCompareCardFrontEnd`）；`tests/test_alphabot_straddle.py`（`TestLiveGreeksNumbersAndGating` 手算 Greeks、`TestPageFrontEndContracts` 含「标签表 = `units()` 真能产出的状态」）。
+- 变异自检：影子 / 账本 / 告警侧 18 个变异全杀（返回值不剥、`exit_before_event` 分支删除 / 差一天、缺平仓日不算 unusable、读结果文件不拦非对象、CLI 退出码、`frozen_error`、NaN 不清、两个计数不记、探针阈值 / 不看取到数、告警分支删除、`analyze` 不调检查、α / 种子被改、事件日算历史、块用日历年）；
+  前端 / 对比卡侧 47 个变异最终无存活（首轮 1 个存活，已加强测试再跑）。
+- 前端测试是**源码形状探针**，不执行 JS（仓库没有 JS 运行器）；行为在演示服务的浏览器里核过（乱序点击、失败重试、长仓说明、影子面板新措辞、控制台无报错）。
+- 整套（`--ignore-glob="* 2.py"` 排开 iCloud 重名副本）：**11339 通过 / 3 失败 / 2 xfail，669 s**。3 条失败**都不是本版引入**：
+  `tests/test_reads_own_checkout.py::test_no_home_directory_paths` 与 `tests/test_tests_use_running_interpreter.py::test_no_test_hardcodes_the_mac_interpreter`
+  是 origin/main 上 v0.45.592 的 `tests/test_llm_shadow_daily.py` 写死了 `/Users/x/...` 路径与 `/usr/local/bin/python3`（另一个会话同时的整套也在同一条上停下）；
+  `tests/test_fear_greed.py::test_sentiment_score_range` 单独跑 10 条全过——它把缓存写在固定的 `/tmp/_fg_test_<v>.json`，并发的两个整套会话共用这些文件，读到对方留下的别种形状（本次未改，列在这里备查）。
 
 ## [0.45.592] — 2026-10-22 — Changed：LLM 影子 A/B 第 2 代——模型换 Sonnet 5.5、30 只全跑；Added：每日自动入口 `llm_shadow_daily.py` + launchd 计划；报告按「代」过滤、列出没跑成的日子
 
