@@ -45,7 +45,31 @@
 **没做（刻意）**：跨会话排队锁——让一个会话无声卡住，与「失败要可见」冲突，也会和靠真睡 / 靠超时的测试互相干扰；给 clockshift 审计降优先级（`taskpolicy -c background`）——推测里的效率核未证实，先不动。
 
 
-## [0.45.589] — 2026-10-21 — 占位（进行中：sentiment.pct 复检到期时在 ic_rerun_readiness --quiet 摘要行末尾追加提醒，让周报看得到；更正 565「周度任务读 attention」的错误说法）
+## [0.45.589] — 2026-10-21 — Fixed：sentiment.pct 复检到期提醒原先**周报里看不到**——到期时在 `ic_rerun_readiness --quiet` 摘要行末尾追加一段 ⏰（只在到期时出现）；更正 v0.45.565 「周度任务读 attention」的错误说法
+
+> 用户 10-21 问「复检会在哪里提醒我」。顺着链路核：周度任务（`alpha-hive-weekly-optimizer` SKILL）只跑 `ic_rerun_readiness.py --quiet`、把那一行写进周报，**不读** `--out` / `--json` 的 `attention[]`（`tests/test_step_contract_ic_rerun.py` 文件头早写明）；`attention[]` 只经每日扫描 Step 11 进日志与 status.json，健康巡检已停用、本仓已无 Slack 推送 ⇒ 565 的提醒实际上没有人会看到。565 在 CHANGELOG / 代码注释 / memory 里写的「周度任务经 attention 看得到」是没核就写的。
+
+### Fixed — `ic_rerun_readiness.py`
+- 到了 `signal_archive.DELIBERATELY_POOLED` 的复检日，`--quiet` 摘要行**末尾**追加一段 `⏰ 刻意池化复检到期：<信号> …`（登记表读不到 ⇒ `⚠️ 刻意池化复检核对不了（…）`）；没到期不加段（同 🚨 段「只在要人看时出现」）。按业务日 `--today`（缺省 `business_today`）判，不读真实钟。周度任务 SKILL 已规定「⏳ 以外的图标一律在周报显著标出并附原文」⇒ **SKILL 不用改**；刻意不复用 🚨（SKILL 对 🚨 的处置是去追加世代边界更正条目，会把人引错方向）。
+- 判定抽成 `_pooled_recheck_due` / `_pooled_recheck_text`，`attention[]` 与 `--quiet` 两个出口共用。
+
+### Changed — 契约与说法
+- `tests/test_dim_ic_forward_test.py::_check_quiet_segments`：已知四段之后的追加段由「只许 🚨」改为登记表 `_QUIET_TRAILING`（🚨 边界核对 / 刻意池化复检段），复检段**恒为最后一段**；`⏰` 进已知图标。规则测试补三个变异（⏰ 但不是复检段 / 复检段不在最后 / 🚨 后再接复检段合法）。
+- `tests/test_ic_rerun_readiness.py` 世代边界那几条用例的 `--today` 在 2099 年（早过复检日），数段前先剥掉复检段（`_strip_pooled_recheck`，只剥末尾这一种）。
+- 更正：`signal_archive.DELIBERATELY_POOLED` 上方注释改写成三处出口的真实情况；CHANGELOG 0.45.565 那句原地加「⚠️ v0.45.589 更正」（不删原句）；memory `alpha-hive-signal-upstream-edges` 同步。
+
+### 验证
+- 新增：`TestOkPath::test_deliberately_pooled_recheck_reaches_the_quiet_line`（端到端：`--today` 前一天无、当天末尾多一段且前面各段不变）、`TestDeliberatelyPooled` 两条（到期才出 / 不传日期不判 / 读不到登记表出 ⚠️ 段）。
+- 变异 **6/6 变红**（`--quiet` 不追加 / 偷读真实钟 / 没到期也出段 / 复用 🚨 / 读不到时静默 / `--quiet` 传错日期），文件逐字节还原。
+- 拨钟审计（5 个相关测试文件）+7 / +45 天新红 0 条。
+
+### Fixed — 二次检查补（v0.45.587 守卫的三个漏洞 + 589 的一个潜在问题，同版修入、未单独占号）
+`tests/test_signal_archive_generations.py`，只改测试，四处都先实测过「本该红却绿」：
+- **`b = self.board or None` 看不见**：`_escaped_board_uses` 原先只要父节点是 `and` / `or` 就放行。现改为沿 `and` / `or` / `not` 往上找，只有落在判断位置上（`if` / `while` / 条件表达式 / `assert` 的条件、推导式的过滤条件）才放行；放在赋值右边、列表里等位置照样报。
+- **`getattr(self, "board")` 看不见**：它绕开了属性写法，取到的是同一个板对象。现在一律报出。
+- **iCloud 重名副本误报**：`swarm_agents/rival_bee 2.py` 这类文件 import 不了、生产也不会跑，却被当成新蜂，守卫报「登记新读点」，建议是错的。现在不是合法模块名的 `.py` 不扫，改由 `test_module_inventory_is_complete` 单独报出，指向 iCloud 清理须知（清理前先读 environment-facts，别无脑 rm）；其余对账测试跳过它照常运行。
+- **记录字段含「｜」会把复检段拆成两截**（目前没有，属潜在问题）：`DELIBERATELY_POOLED` 的字符串字段禁止出现「｜」（它是 `--quiet` 的段分隔符），由 `test_record_is_well_formed` 守住。
+- 验证：新变异 **7/7 变红**（Rival 用 `or` 别名读普查 / Guard `getattr(self, "board")` / 记录含「｜」/ 守卫退回三种 / 出现 iCloud 副本时**只有**清单那条红）；v0.45.561 的 13 个与 v0.45.587 的 5 个变异仍全部变红；文件逐字节还原。
 
 ## [0.45.588] — 2026-10-21 — Fixed：v0.45.580 / 583 二次检查——桥接核对补四处：覆盖改为自己核（生产有分却没溯源的票 / 整天没写溯源，此前看不见、还可能少几只照判通过）、读错误不再当「还没有数据」、空转的一天不算通过日、入档缺项按隔离区分
 
@@ -1055,7 +1079,7 @@ Yahoo / CNN 拿东西）和**解释**（算成通道分）写在同一段代码�
 - `SIGNAL_LEAVES` 里 `sentiment.pct`、`COHORT_SIGNAL_SCOPE["v0.45.445"]` 各加注释：不是真叶子、刻意不点名、复检决定切时的结构修法（`Edge("buzz.comp.*", "self")`）。
 
 ### Changed — `ic_rerun_readiness.py`
-- `build_attention(..., today=None)` 新增 `_pooled_recheck_attention`：外壳业务日 ≥ `recheck_on_or_after` ⇒ 每条一个 warn（id `ic_rerun.deliberately_pooled.<信号>`），周度任务经 `attention[]` 看得到。按传入的 `--today` 判、**不读真实钟**（`today=None` ⇒ 不判）——否则就是拨钟审计专抓的「今天绿、某天红」。`main()` 两处调用都传业务日。读不到登记表（本工具有只带 `step_contract` 的最小运行环境）⇒ 一条 warn `ic_rerun.deliberately_pooled.unavailable`，不抛——初版直接 `import` 让 `test_ic_rerun_fg_budget.py` 的 8 条真进程树用例里整个工具退出码 3，全套测试抓到后改。
+- `build_attention(..., today=None)` 新增 `_pooled_recheck_attention`：外壳业务日 ≥ `recheck_on_or_after` ⇒ 每条一个 warn（id `ic_rerun.deliberately_pooled.<信号>`），周度任务经 `attention[]` 看得到。**⚠️ v0.45.589 更正：这句是错的**——周度任务只跑 `--quiet`、不读 `attention[]`；attention 只进每日扫描 Step 11 的日志与 status.json（无推送）。周报看得到的出口是 589 在 `--quiet` 摘要行末尾加的 ⏰ 段。按传入的 `--today` 判、**不读真实钟**（`today=None` ⇒ 不判）——否则就是拨钟审计专抓的「今天绿、某天红」。`main()` 两处调用都传业务日。读不到登记表（本工具有只带 `step_contract` 的最小运行环境）⇒ 一条 warn `ic_rerun.deliberately_pooled.unavailable`，不抛——初版直接 `import` 让 `test_ic_rerun_fg_budget.py` 的 8 条真进程树用例里整个工具退出码 3，全套测试抓到后改。
 
 ### 验证
 - 新增 `TestDeliberatelyPooled`（6 条：登记表读不到时只出 warn 不抛 / 记录完整 / 边界确实点名了 `changed_via` 且它确是 pct 的输入（读 buzz_bee 源码）/ 确实没被切 / attention 只在复检日及之后出 / 报告点名）+ `test_step_contract_ic_rerun.py::TestOkPath::test_deliberately_pooled_recheck_reaches_the_envelope`（端到端：`--today` 前一天无、当天有）。

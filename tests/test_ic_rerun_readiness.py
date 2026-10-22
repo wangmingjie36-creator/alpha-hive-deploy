@@ -737,6 +737,15 @@ def tq_boundary(monkeypatch):
     return _TQ_BOUNDARY
 
 
+def _strip_pooled_recheck(segs):
+    """世代边界那几条用例的 `--today` 在 2099 年，早过了刻意池化的复检日——v0.45.589 起那时摘要行末尾恒有一段
+    ⏰（登记表读不到则 ⚠️）。它们只管世代边界那一段，把复检段剥掉再数；复检段自己的契约在
+    `tests/test_dim_ic_forward_test.py::_check_quiet_segments` 与 `test_step_contract_ic_rerun.py`。"""
+    if segs and segs[-1].startswith(("⏰ 刻意池化复检到期：", "⚠️ 刻意池化复检核对不了")):
+        return segs[:-1]
+    return segs
+
+
 class TestBoundaryEvidenceReachesAutomatedCallers:
     """`cohort_boundary_evidence()` 是 v0.45.334 那条 09-28 边界「推送晚了」时唯一会红的观测点，
     但此前只有人读模式调用它：`--json` / `--quiet` 在它之前 return，`--out` 的 JSON 里也没有。
@@ -760,7 +769,7 @@ class TestBoundaryEvidenceReachesAutomatedCallers:
         out = capsys.readouterr().out
         lines = [ln for ln in out.splitlines() if ln.strip()]
         assert len(lines) == 1, f"--quiet 必须只打一行（周度任务原样抄那一行）：{lines}"
-        return rc, lines[0].split("｜")
+        return rc, _strip_pooled_recheck(lines[0].split("｜"))
 
     def test_quiet_flags_marker_later_than_boundary(self, monkeypatch, capsys, db, tq_boundary):
         """推送晚了一天：边界日是旧口径、次日才见印记 ⇒ 第五段以 🚨 开头。
@@ -988,7 +997,7 @@ class TestSameDayWorstVerdictDrivesTopLevel:
         rc = self._main(monkeypatch, ["--db", str(p), "--today", _TQ_TODAY, "--quiet"])
         lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
         assert rc == 1 and len(lines) == 1, (rc, lines)
-        seg = lines[0].split("｜")
+        seg = _strip_pooled_recheck(lines[0].split("｜"))
         assert len(seg) == 5 and seg[4].startswith("🚨") and "vBUZZ" in seg[4], seg
 
         out_file = tmp_path / "readiness_out.json"
@@ -1035,7 +1044,7 @@ class TestSameDayWorstVerdictDrivesTopLevel:
         for token in ("vGEX=no_marker", "vBUZZ=matches", "vORA=matches"):
             assert token in ev["line"], ev["line"]
         rc = self._main(monkeypatch, ["--db", str(p), "--today", _TQ_TODAY, "--quiet"])
-        seg = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][0].split("｜")
+        seg = _strip_pooled_recheck([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][0].split("｜"))
         assert rc == 1 and len(seg) == 4, f"不报警时不许追加第五段：{seg[4:]}"
 
     def test_single_entry_keeps_its_own_line(self, db, tq_boundary):
