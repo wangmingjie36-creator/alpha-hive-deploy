@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "commit": "1be32aa97a7263e944da1e3a1bc00ad8e55ca843",
+  "commit": "735d4685c6ffbb740c0965ab777daf6e62c44cca",
   "reads_all_tests": [
     "tests/test_agent_weight_manager_retired.py",
     "tests/test_bare_env_children_pin_data_root.py",
@@ -41,6 +41,7 @@
     "alphabot/static/alphabot.css": ["tests/test_alphabot_hedge.py"],
     "alphabot/static/app.js": ["tests/test_alphabot.py", "tests/test_alphabot_hedge.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_straddle.py"],
     "alphabot/static/charts.js": ["tests/test_alphabot.py", "tests/test_alphabot_launcher.py"],
+    "alphabot/static/chat.js": ["tests/test_alphabot.py", "tests/test_alphabot_launcher.py"],
     "alphabot/static/index.html": ["tests/test_alphabot.py", "tests/test_alphabot_hedge.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_straddle.py"],
     "alphabot/static/lib.js": ["tests/test_alphabot.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_unquotable.py"],
     "alphabot/static/pages/hedge.js": ["tests/test_alphabot.py", "tests/test_alphabot_hedge.py", "tests/test_alphabot_hedge_delta.py", "tests/test_alphabot_launcher.py"],

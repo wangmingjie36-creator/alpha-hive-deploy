@@ -121,6 +121,8 @@ WRITERS: dict = {
     "alphabot/straddle.py::read_jsonl": (HUMAN, "只读展示：坏行计数随结果返回并显示在页面上（不吞、也不因外部损坏让整页崩）"),
     # ── 代码与部署（不是 JSON 数据）
     "alphabot/launcher.py::_open_server_log": (CODE, "Alpha Bot 服务日志（追加 + 轮转），只给人看"),
+    "tools/select_tests/select_tests.py::save_registry": (CODE, "开发期选测登记表 tests/_must_run.json：随代码提交的工具数据（原子替换写，写前自检 JSON），不是运行时账本（v0.45.615）"),
+    "tools/select_tests/audit_plugin.py::pytest_sessionfinish": (CODE, "选测的读审计 dump：临时文件，同一次 cmd_select / CI 漂移检查读回比对，不进数据根（v0.45.615）"),
     "alphabot/macos_app.py::build_app": (CODE, "替换 macOS app 包"),
     "deploy_orchestrator.py::deploy": (CODE, "部署编排器脚本"),
     "production_clone.py::_write_hook": (CODE, "安装生产克隆 git 钩子"),

@@ -73,6 +73,9 @@
 
 **整套核对**：用新工具自己的 `select_tests.py --run`（因改了核心文件回退整套、带审计插件做漂移检查）跑：**11672 passed / 0 失败 / 563s**。**这一跑当场抓到一处真实的登记表过期**——我自己新写的 `tests/test_select_tests.py` 里随跑测量的测试在进程内调用 `cmd_select`，它会 `read_test_texts()` 打开全部 373 个测试文件（找静态 import），按判据归入「读全部」那一类；退出码 4 提示后 `--update` 登记（`reads_all_tests` 11 → 12，它本身只花 4 秒），再提交。即：漂移检查在第一次真实使用里就起了作用，不是纸上设计。随后又走了一遍真实子集 `--run`（改 `CHANGELOG.md` ⇒ 选 11 个文件 / 401 条 / 49s，对比整套 563s）。登记表 `reads_all_tests` 也改成每个元素一行，并行 session 各加一个读者时 git 可按行合并。
 
+**二次检查（整套第二轮，文件已被 `git add` 之后）**：第一轮整套能过，是因为 `tools/select_tests/` 与 `tests/_must_run.json` 当时还**没被跟踪**（几个全仓扫描守卫只认被跟踪的文件）——跟踪后第二轮红 2 条 + 登记表过期：① `test_persistent_writes_have_readers`（rebase 后即红）：登记两处新落盘写入（登记表、审计 dump）及其读者（`cmd_select` 读 dump、`registry_path` 读登记表；读者令牌要是**字符串字面量**，函数体里只有名字 `REGISTRY_REL` 不算，已给 `registry_path` 加了带文件名的 docstring）；② `test_ledger_writes_go_through_ledger_io`：两处手写写入登记进 `WRITERS`（类别「代码与部署」：登记表是随代码提交的工具数据、dump 是临时文件，都不是运行时账本，不占「待迁移」上限）；③ `test_paths_not_frozen_at_import`：`REPO = Path(__file__)…` 两处代码锚点登记进 `KNOWN`，`select_tests.py` 的再进 `MUST_STAY_FILE_ANCHORED`（`audit_plugin.py` 不进 MUST_STAY——那条参数化测试要 import 它，而 import 即装审计钩子且要求 `SELECT_TESTS_OUT`，与 `tools/clockshift/clockshift.py` 同理）。**教训：新文件先 `git add` 再跑整套**（auto-memory `alpha-hive-strangle-compare.md` 里写过一次，这次又犯）。④ 随后 `--update` 并入主干同期新进来的 4 处读（`test_alphabot_chat` 读 `test_alphabot`、`test_persistent_writes_have_readers` 读 `test_ledger_writes_go_through_ledger_io`、`test_alphabot` / `test_alphabot_launcher` 读新文件 `alphabot/static/chat.js`）。
+⚠️ **第 ④ 点是个值得知道的摩擦**：CI 漂移检查对「新增一个被现有测试读的非代码文件」也会红（即便没改任何测试——比如这次的 `chat.js`），因为登记表不知道有人读它、之后改它就会漏选读者。修法同样是 `--update`（`--files <读它的测试> --update`）并提交登记表。若觉得对非代码文件太吵，可改成只警告——这是策略选择，没改。
+
 ## [0.45.614] — 2026-10-22 — Added：Alpha Bot 对话抽屉——Claude Opus 5.5 + 只读 Alpha Bot 工具 + 联网搜索；默认关、每天上限 $3
 
 用户要求「在 Alpha Bot 里加入和 LLM 对话的功能，通过 Claude API」，开工前问了四项（2026-10-22 用户定）：
