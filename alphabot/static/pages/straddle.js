@@ -337,11 +337,20 @@ export async function renderStraddle(root, alive) {
   for (const [f, n] of Object.entries(d.bad_lines || {})) warns.push(`${f} 有 ${n} 行解析失败，没计入。`);
   if (d.meta_error) warns.push(`meta.json 读不了：${d.meta_error}`);
 
+  const es = k.event_split;
+  const sideSrc = es ? (es.saw_event.by_side || {}) : (k.by_side || {});
+  const nExcl = es ? (es.event_missed.n || 0) + (es.event_unknown.n || 0) : 0;
+  const sideSub = es && nExcl ? `已平仓 · 只含测到事件的 ${es.saw_event.n} 笔（不含事件前被平 ${es.event_missed.n} 笔${es.event_unknown.n ? `、日期缺失 ${es.event_unknown.n} 笔` : ""}）` : "已平仓";
   const kpis = h("div", { class: "kpis" },
     kpi("NAV", money(a.nav, 0)), kpi("累计", `${sMoney(isNum(a.nav) && isNum(a.starting_capital) ? a.nav - a.starting_capital : null)}（${signedPct(a.return_pct, 2)}）`, tone(a.return_pct)),
     kpi("已实现", sMoney(a.realized_usd), tone(a.realized_usd)), kpi("浮动", sMoney(a.unrealized_usd), tone(a.unrealized_usd)),
     kpi("在险权利金", money(a.open_premium_at_risk, 0)), kpi("持仓", `${a.positions ?? 0} / ${a.max_open ?? "—"}`),
-    kpi("已平仓", `${k.n ?? 0} 笔${isNum(k.win_rate) ? ` · 胜率 ${pctPts(k.win_rate, 0)}` : ""}`));
+    kpi("已平仓", `${k.n ?? 0} 笔${isNum(k.win_rate) ? ` · 胜率 ${pctPts(k.win_rate, 0)}` : ""}`),
+    // v0.45.606：测到事件 / 事件前被平拆开单列（平仓日 ≤ 财报日 = 没测到事件；读者侧判定，账本不存）。三块 n 之和 = 已平仓。
+    ...(((k.event_split?.event_missed?.n || 0) + (k.event_split?.event_unknown?.n || 0)) > 0 ? [
+      kpi("其中测到事件", `${k.event_split.saw_event.n} 笔${isNum(k.event_split.saw_event.win_rate) ? ` · 胜率 ${pctPts(k.event_split.saw_event.win_rate, 0)}` : ""} · ${sMoney(k.event_split.saw_event.total_pnl_usd)}`, tone(k.event_split.saw_event.total_pnl_usd)),
+      kpi("事件前被平", `${k.event_split.event_missed.n} 笔 · ${sMoney(k.event_split.event_missed.total_pnl_usd)}${k.event_split.event_unknown.n ? ` · 另有 ${k.event_split.event_unknown.n} 笔日期缺失` : ""}`, tone(k.event_split.event_missed.total_pnl_usd)),
+    ] : []));
 
   // 盘中参考报价（第二期）：按持仓逐只拉（服务端串行取数，每只约 4–7 秒，60 秒内走缓存）
   const liveEls = {};
@@ -381,7 +390,8 @@ export async function renderStraddle(root, alive) {
   const closedCols = [
     { label: "代码", render: (r) => h("b", {}, r.ticker) },
     { label: "方向", render: (r) => h("span", {}, SIDE[r.side] || r.side, h("span", { class: "sub" }, LABEL[r.label] || "")) },
-    { label: "开仓 → 平仓", render: (r) => h("span", {}, `${r.entry_date} → ${r.exit_date}`, h("span", { class: "sub" }, `持有 ${r.holding_days ?? "—"} 天 · ${EXIT[r.exit_reason] || r.exit_reason || "—"}`)) },
+    { label: "开仓 → 平仓", render: (r) => h("span", {}, `${r.entry_date} → ${r.exit_date}`, h("span", { class: "sub" }, `持有 ${r.holding_days ?? "—"} 天 · ${EXIT[r.exit_reason] || r.exit_reason || "—"}`),
+      r.event_missed === true ? h("span", { class: "chip warn", title: "平仓日不晚于财报日：财报行情发生之前就平了，这笔测到的是时间损耗，不是事件" }, "事件前被平") : null) },
     { label: "张数", cls: "r", render: (r) => r.contracts },
     { label: "权利金 入场 → 出场", cls: "r", render: (r) => `${num(r.entry_premium)} → ${num(r.exit_premium)}` },
     { label: "盈亏", cls: "r", render: (r) => h("span", { class: tone(r.pnl_usd) }, sMoney(r.pnl_usd), h("span", { class: "sub" }, signedPct(r.pnl_pct))) },
@@ -417,11 +427,12 @@ export async function renderStraddle(root, alive) {
     h("div", { style: { height: "16px" } }),
     h("div", { class: "grid halves" },
       panel("累计盈亏", { sub: "实线 = 累计（已实现 + 浮动），虚线 = 其中已实现；同一根 $ 轴" }, (d.equity || []).length ? eqEl : h("div", { class: "empty" }, "还没有净值记录。")),
-      panel("按方向", { sub: "已平仓" }, table([
+      // v0.45.606：只看测到事件的那批（事件前被平的是时间损耗，混进来会拉低「买跨式」胜率）；剔了几笔在副标题里说清
+      panel("按方向", { sub: sideSub }, table([
         { label: "方向", render: (r) => SIDE[r[0]] || r[0] }, { label: "笔数", cls: "r", render: (r) => r[1].n },
         { label: "胜率", cls: "r", render: (r) => pctPts(r[1].win_rate, 0) }, { label: "平均", cls: "r", render: (r) => signedPct(r[1].avg_pnl_pct) },
         { label: "合计", cls: "r", render: (r) => h("span", { class: tone(r[1].total_pnl_usd) }, sMoney(r[1].total_pnl_usd)) }],
-      Object.entries(k.by_side || {})),
+      Object.entries(sideSrc)),
       h("p", { class: "note" }, `内在价值平仓 ${k.intrinsic_exits ?? 0} 笔 · 核销 ${k.written_off_exits ?? 0} 笔。样本太小时胜率没有意义，看「隐含 vs 实际」更有用。`))),
     h("div", { style: { height: "16px" } }),
     panel("已平仓", { sub: `${(d.closed || []).length} 笔` }, (d.closed || []).length ? table(closedCols, d.closed) : h("div", { class: "empty" }, "还没有平仓。")),

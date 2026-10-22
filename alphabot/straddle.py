@@ -392,6 +392,16 @@ def _kpi_block(trades: List[dict]) -> dict:
     return opl._kpi_block(trades)
 
 
+def _split_by_event(trades: List[dict]) -> dict:
+    import options_paper_leg as opl
+    return opl.split_by_event(trades)
+
+
+def _event_missed(trade: dict) -> Optional[bool]:
+    import options_paper_leg as opl
+    return opl.event_missed(trade)
+
+
 def kpis(closed: List[dict]) -> dict:
     by_side: Dict[str, List[dict]] = {}
     by_label: Dict[str, List[dict]] = {}
@@ -402,7 +412,9 @@ def kpis(closed: List[dict]) -> dict:
     out.update({"by_side": {k: _kpi_block(v) for k, v in by_side.items()},
                 "by_label": {k: _kpi_block(v) for k, v in by_label.items()},
                 "intrinsic_exits": sum(1 for t in closed if t.get("mark_source") == "intrinsic"),
-                "written_off_exits": sum(1 for t in closed if t.get("mark_source") == "written_off")})
+                "written_off_exits": sum(1 for t in closed if t.get("mark_source") == "written_off"),
+                # v0.45.606：测到事件 / 事件前被平 / 未知 三块拆开单列（读者侧，账本不存；分类只在账本模块一处）
+                "event_split": _split_by_event(closed)})
     return out
 
 
@@ -486,6 +498,8 @@ def closed_view(c: dict, *, sig_entry: Optional[dict], event_rows: List[dict]) -
         "realized_abs_move_pct": realized,
         "realized_move_pct": _num((st or {}).get("realized_move_pct")),
         "realized_vs_implied": (realized / implied) if (realized is not None and implied) else None,
+        # 平仓日 ≤ 财报日（True）= 没测到事件；None = 日期缺 / 坏，判不了（v0.45.606，只读标记、账本不存）
+        "event_missed": _event_missed(c),
         "entry_signal": _entry_brief(sig_entry),
     }
 

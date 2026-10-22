@@ -5,7 +5,25 @@
 
 ---
 
-## [0.45.606] — 2026-10-22 — 占位（进行中：Alpha Bot 跨式页读者侧标记「事件前被平」、KPI 单列；账本不改）
+## [0.45.606] — 2026-10-22 — Added：Alpha Bot 跨式页读者侧标记「事件前被平」+ KPI 单列（账本一个字不改）
+
+**起因**：TSLA 2026-09-22 → 10-21（财报日 = 到期日 − 2，当晚按 `expiry_buffer` 强平，事件没发生）−$1,825 躺在「买跨式」胜率与合计里，
+拉低的正是该看的信号质量。入场闸（v0.45.602 / 604）只防以后，存量单要在读者侧认出来。
+
+**Added**
+- `options_paper_leg.event_missed(trade)`：平仓日 ≤ 财报日 ⇒ True；晚于 ⇒ False；任一日期缺 / 解析不了 ⇒ **None**（不猜成 False）。
+  只看日期、不看 `exit_reason`（强平发生在财报日**之后**的不算，事件测到了）；日期取前 10 位。与账本 `post_event`（`as_of > earnings_date`）、
+  影子宽跨检验 `exit_before_event` 同一条判据。**读者侧，不写账本**（测试钉住：`closed_trades.jsonl` 字节不变、不含该字段）。
+- `options_paper_leg.split_by_event(trades)`：`saw_event`（带 by_side / by_label）/ `event_missed` / `event_unknown` 三块，n 之和 = 总 n。
+  `compute_kpis()["event_split"]`、日报小节一行（仅当有事件前被平 / 日期缺失时才出）、Alpha Bot `kpis()["event_split"]` 共用这一处。
+- Alpha Bot 跨式页：已平仓表那一行加「事件前被平」标记（悬停说明）；顶部 KPI 加「其中测到事件」「事件前被平」两块；
+  「按方向」表改为**只含测到事件的那批**，副标题写明剔了几笔。`closed_view` 多一个 `event_missed`（三值）。
+
+**不变**：顶层 KPI（`n` / `win_rate` / `total_pnl_usd`）与账户已实现仍按**全部**已平仓单——账目恒等式 NAV = 起始 + 已实现 + 浮动不受影响
+（实测 4 笔合计 −$781 = 账户已实现）。TSLA 的账本记录不改。
+**实测**（真实账本，临时实例 :8799 `--no-poll`，已关）：已平仓 4 笔 = 测到事件 3（+$1,044）+ 事件前被平 1（−$1,825）；「买跨式」由 2 笔 −$2,489 变 1 笔 −$664；控制台无报错。
+**Tests**：`TestEventMissedReaderMarker`（11 种日期组合 / 只认日期 / 三块划分与信号质量隔离 / 账本字节不变 / 日报行）、`TestEventMissedMarker`（页面数据 + 前端接线）；
+变异 8 处全红（`<=`→`<`、分类对调、不出拆分、缺日期猜 False、财报日不取前 10 位、closed_view 不带标记、前端不显示、前端 KPI 改名），还原后 138 passed。相关 49 个测试文件（含 alphabot 全部、元守卫）2404 passed；帮助页「已平仓」说明同步一句。**未跑整套**（别的会话在跑整套时错开）。
 
 ## [0.45.605] — 2026-10-22 — 占位（进行中：两份前瞻检验登记「去掉 source_outage 日」敏感性分析（事后修订，用户 10-22 决定：10-14 不排除，主分析不变）；检视时并列报告）
 
