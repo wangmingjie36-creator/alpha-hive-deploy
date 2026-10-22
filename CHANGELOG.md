@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.613] — 2026-10-22 — 占位（进行中：ALPHA_BOT_GUIDE.md 瘦身——页面导览 / 概念 / 盲期 / 建议 / 文件地图改成指向程序内帮助页，顶栏页面表加守卫）
+
 ## [0.45.612] — 2026-10-22 — Fixed：给人抄的 make 命令带上 `-C`（停止服务页、ALPHA_BOT_GUIDE.md）；指南「怎么启动」「排错」两节对齐现行说法
 
 611 之后分析「Makefile 的 `alphabot` / `alphabot-demo` / `alphabot-stop` 要不要跟着 `PYTHON` 走」，结论是不必：
