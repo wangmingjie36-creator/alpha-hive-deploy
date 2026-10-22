@@ -424,6 +424,34 @@ class TestOkPath:
         key = "ic_rerun.deliberately_pooled.sentiment.pct"
         assert key not in got[before] and key in got[due], got
 
+    def test_deliberately_pooled_recheck_reaches_the_quiet_line(self, monkeypatch, tmp_path, capsys):
+        """v0.45.589：周度任务只跑 `--quiet`、不读 attention——到了复检日，摘要行**末尾**多一段 ⏰（前一天没有）。
+        变红的变异：`--quiet` 分支不追加这段（v0.45.565 的状态：提醒只进 attention，周报里看不到）。"""
+        import datetime as _dt
+        import signal_archive
+        for fn, name in (("resonance_forward_status", "共振加成前瞻检验"),
+                         ("fg_exposure_gate_forward_status", "F&G 敞口门前瞻检验")):
+            monkeypatch.setattr(rr, fn, lambda *a, _n=name, **k: {"status": "not_ready", "line": f"⏳ {_n}：桩"})
+        monkeypatch.setattr(rr, "dim_ic_forward_status", lambda *a, **k: {
+            "status": "not_ready", "line": "⏳ 维度 IC 协议：桩", rr._DETAIL_KEY: dict(_DIM_BASE)})
+        due = signal_archive.DELIBERATELY_POOLED["sentiment.pct"]["recheck_on_or_after"]
+        before = (_dt.date.fromisoformat(due) - _dt.timedelta(days=1)).isoformat()
+        db = _make_db(tmp_path / "home", _weekly_rows(2))
+        lines = {}
+        for today in (before, due):
+            monkeypatch.setattr(sys, "argv", [TOOL, "--db", str(db), "--today", today, "--quiet"])
+            rr.main()
+            out = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+            assert len(out) == 1, out          # 周度任务的约定：只有一行
+            lines[today] = out[0]
+        assert "⏰" not in lines[before], lines[before]
+        last = lines[due].split("｜")[-1]
+        assert last.startswith("⏰ 刻意池化复检到期：sentiment.pct"), lines[due]
+        # 前面各段原样（第一段的 ETA 随 --today 平移一天，只比段名与个数）
+        pre, cur = lines[before].split("｜"), lines[due].split("｜")
+        assert len(cur) == len(pre) + 1 and [x.split("：")[0] for x in cur[:-1]] == [x.split("：")[0] for x in pre], (
+            "提醒段只许追加在末尾，前面各段不变", pre, cur)
+
     def test_nothing_to_look_at_is_ok_and_exit_1(self, monkeypatch, tmp_path):
         for fn, name in (("resonance_forward_status", "共振加成前瞻检验"),
                          ("fg_exposure_gate_forward_status", "F&G 敞口门前瞻检验")):

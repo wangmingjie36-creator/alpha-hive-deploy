@@ -18,7 +18,8 @@
 **S 用与账本 mark 同一份 CBOE 快照里的现价**（当天信号行的 `underlying_price`），不用 greeks 文件里的 `price`：
 那个价曾比期权报价晚一天（v0.45.423）。任一腿缺任一项 ⇒ 对应合计为 None，不把缺的当 0。
 **盘中参考**（`live_view`，v0.45.581）比账本侧宽一档：bid = 0 但 ask 真实、IV 正常的腿，Greeks 照用并标 `degraded_legs`
-（账本 / 对冲侧 `portfolio_greeks` 仍按严格 `quote_ok`，所以同一条腿盘中页可能有数、当晚账本却缺报价）。
+（对冲侧 `portfolio_greeks` 自 v0.45.609 起对同一类腿的 Greeks 也照用并标 `bid_zero`——判据只有一份，`cboe_options.bid_zero_greeks_usable`；
+账本视图 `position_view` 同样标 `degraded_legs`；mid / 压力表仍要严格 `quote_ok`）。
 
 盲期（检验协议：experiments/straddle_gex_prereg.md）
 ---------------------------------------------------
@@ -34,6 +35,7 @@ from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from cboe_options import bid_zero_greeks_usable
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("alphabot.straddle")
@@ -187,21 +189,93 @@ def load_hist_moves(ticker: str, root=None) -> Tuple[Optional[list], Optional[st
     return obj["moves"], None
 
 
-def pick_signal_and_nav(signals: List[dict], equity: List[dict], ticker: str,
-                        as_of: str) -> Tuple[Optional[dict], Optional[float]]:
-    """某票某天的信号行（没有 ⇒ None）与「当时的 NAV」（净值曲线里日期 ≤ as_of 的最近一行；定仓用，近似账本口径）。纯函数。"""
+def entries_on(day: str, *record_lists) -> List[dict]:
+    """账本里 `entry_date == day` 的记录（持仓 + 已平仓）——也就是**那天新开的仓**。纯函数。"""
+    return [r for rows in record_lists for r in rows or [] if isinstance(r, dict) and str(r.get("entry_date") or "") == day]
+
+
+def _open_slippage_usd(rec: dict, sig: Optional[dict]) -> Optional[float]:
+    """一笔那天新开的仓，**开仓瞬间**对 NAV 的影响（≤ 0 美元：卖跨式按 bid 入账、买跨式按 ask 付出，随后都按 mid 盯市）。
+    = 账本 `_unrealized` 在入场时的值 = (入场 mark − 入场价) × 100 × 张数 × 方向，入场 mark = 信号行两腿 mid 之和
+    （两腿缺 mid 时账本用入场价本身 ⇒ 0，`options_paper_leg._open_from_signal` 同一条回退）。
+    信号行 / `quote` / 张数 / 入场价任一取不到 ⇒ None（还原不了，调用方要说出来，不当 0）。"""
+    sign = SIDE_SIGN.get(str(rec.get("side")))
+    n, e = _pos(rec.get("contracts")), _pos(rec.get("entry_premium"))
+    q = sig.get("quote") if isinstance(sig, dict) else None
+    if sign is None or n is None or e is None or not isinstance(q, dict):
+        return None
+    mc, mp = _pos((q.get("call") or {}).get("mid")), _pos((q.get("put") or {}).get("mid"))
+    mark = (mc + mp) if (mc is not None and mp is not None) else e
+    return (mark - e) * 100.0 * n * sign
+
+
+def sizing_nav(signals: List[dict], equity: List[dict], opened: Optional[List[dict]], as_of: str) -> dict:
+    """账本在 `as_of` 这天**定仓用的 NAV**，和它是怎么来的。纯函数。
+
+    账本（`options_paper_leg.run_for_date`）每天先盯市 / 平仓，再算 `nav_for_sizing = cash + 持仓市值`，
+    **然后才开仓**，最后写净值行。所以 `as_of` 当天那行净值是开仓**之后**的：新开的卖跨式按 bid 入账、按 mid 盯市，
+    净值立刻少「半个点差 × 100 × 张数」（买跨式按 ask 付、按 mid 盯市，同样只会更低）。直接拿那行定仓，
+    入场日会系统性少 1 张（真实账本 T 2026-09-29：账本 39 张、那行 NAV 只够 38 张，v0.45.593 二次检查）。
+    规则：
+      · `as_of` 当天有净值行 ⇒ 把当天新开的仓的入场滑点加回去（`opened` = 当天 entry_date 的持仓 + 平仓记录，
+        每笔的滑点见 `_open_slippage_usd`），得到开仓前 NAV，与账本的 `nav_for_sizing` 同口径（`basis="pre_open"`；
+        当天没开仓则那行本身就是开仓前 NAV，加回 0）；
+      · 当天没有净值行 ⇒ 取日期 < as_of 的最近一行（`basis="latest_on_or_before"`，近似）；
+      · 当天有开仓但还原不了（缺信号行 / 报价 / 张数，或净值行的 `opened_today` 与找到的开仓数对不上）⇒ 退回那行
+        原值（`basis="post_open_unadjusted"`），并写明原因——此时张数可能比账本少 1 张；
+      · 一行可用的净值都没有 ⇒ `nav=None`（`basis="none"`）。
+    净值行本身四舍五入到 0.01，入场价 / mark 到 0.0001，所以还原有约 $1 的取整误差。"""
+    info = {"nav": None, "basis": "none", "nav_date": None, "row_nav": None, "adjust_usd": 0.0,
+            "opened": [], "reason": None}
+    rows = [e for e in equity or [] if str(e.get("date") or "") <= as_of and _pos(e.get("nav")) is not None]
+    if not rows:
+        info["reason"] = "no_equity_row"
+        return info
+    row = max(rows, key=lambda e: str(e["date"]))
+    nav, d = _pos(row["nav"]), str(row["date"])
+    info.update(nav=nav, row_nav=nav, nav_date=d, basis="latest_on_or_before")
+    if d != as_of:
+        return info
+    opened = list(opened or [])
+    info["opened"] = [str(r.get("ticker")) for r in opened]
+    flag = row.get("opened_today")
+    if isinstance(flag, int) and not isinstance(flag, bool) and flag != len(opened):
+        info.update(basis="post_open_unadjusted", reason=f"opened_today_mismatch:{flag}!={len(opened)}")
+        return info
+    slip = 0.0
+    for rec in opened:
+        sig = next((s for s in signals or [] if s.get("ticker") == rec.get("ticker") and s.get("as_of") == as_of), None)
+        v = _open_slippage_usd(rec, sig)
+        if v is None:
+            info.update(basis="post_open_unadjusted", reason=f"cannot_restore:{rec.get('ticker')}")
+            return info
+        slip += v
+    pre = _pos(nav - slip)
+    if pre is None:
+        info.update(basis="post_open_unadjusted", reason="restored_nav_not_positive")
+        return info
+    info.update(nav=round(pre, 2), basis="pre_open", adjust_usd=round(-slip, 2))
+    return info
+
+
+def pick_signal_and_nav(signals: List[dict], equity: List[dict], ticker: str, as_of: str,
+                        opened: Optional[List[dict]] = None) -> Tuple[Optional[dict], Optional[float], dict]:
+    """某票某天的 (信号行（没有 ⇒ None）, 账本当天定仓用的 NAV, 该 NAV 的来源说明)。规则与理由见 `sizing_nav`。
+    `opened` = 当天新开的仓（`entries_on` 的结果）；不给 ⇒ 当作当天没开仓。纯函数。"""
     sig = next((s for s in signals or [] if s.get("ticker") == ticker and s.get("as_of") == as_of), None)
-    prior = [e for e in equity or [] if str(e.get("date") or "") <= as_of and _pos(e.get("nav")) is not None]
-    nav = _pos(max(prior, key=lambda e: str(e["date"]))["nav"]) if prior else None
-    return sig, nav
+    info = sizing_nav(signals, equity, opened, as_of)
+    return sig, info["nav"], info
 
 
-def load_signal_and_nav(ticker: str, as_of: str, root=None) -> Tuple[Optional[dict], Optional[float]]:
-    """`pick_signal_and_nav` 的读文件版：只读信号与净值两个文件，不重读整本账本。"""
+def load_signal_and_nav(ticker: str, as_of: str, root=None) -> Tuple[Optional[dict], Optional[float], dict]:
+    """`pick_signal_and_nav` 的读文件版：只读信号 / 净值 / 持仓 / 平仓四个文件（后两个只为找出当天新开的仓），
+    不重读整本账本。"""
     ld = (Path(root) if root is not None else PATHS.home) / LEDGER_DIRNAME
     sigs, _ = read_jsonl(ld / "earnings_signals.jsonl")
     eq, _ = read_jsonl(ld / "equity_curve.jsonl")
-    return pick_signal_and_nav(sigs, eq, ticker, as_of)
+    pos, _ = read_jsonl(ld / "positions.jsonl")
+    closed, _ = read_jsonl(ld / "closed_trades.jsonl")
+    return pick_signal_and_nav(sigs, eq, ticker, as_of, entries_on(as_of, pos, closed))
 
 
 def ledger_as_of(led: dict) -> Optional[str]:
@@ -320,6 +394,16 @@ def _kpi_block(trades: List[dict]) -> dict:
     return opl._kpi_block(trades)
 
 
+def _split_by_event(trades: List[dict]) -> dict:
+    import options_paper_leg as opl
+    return opl.split_by_event(trades)
+
+
+def _event_missed(trade: dict) -> Optional[bool]:
+    import options_paper_leg as opl
+    return opl.event_missed(trade)
+
+
 def kpis(closed: List[dict]) -> dict:
     by_side: Dict[str, List[dict]] = {}
     by_label: Dict[str, List[dict]] = {}
@@ -330,7 +414,9 @@ def kpis(closed: List[dict]) -> dict:
     out.update({"by_side": {k: _kpi_block(v) for k, v in by_side.items()},
                 "by_label": {k: _kpi_block(v) for k, v in by_label.items()},
                 "intrinsic_exits": sum(1 for t in closed if t.get("mark_source") == "intrinsic"),
-                "written_off_exits": sum(1 for t in closed if t.get("mark_source") == "written_off")})
+                "written_off_exits": sum(1 for t in closed if t.get("mark_source") == "written_off"),
+                # v0.45.606：测到事件 / 事件前被平 / 未知 三块拆开单列（读者侧，账本不存；分类只在账本模块一处）
+                "event_split": _split_by_event(closed)})
     return out
 
 
@@ -364,7 +450,7 @@ def _greek_legs(greeks: Optional[dict]) -> Dict[str, dict]:
     out = {}
     for r in (greeks or {}).get("rows") or []:
         if isinstance(r, dict) and r.get("kind") == "option" and r.get("symbol"):
-            out[str(r["symbol"])] = {k: r.get(k) for k in (*GREEK_KEYS, "iv", "mid", "quote_missing")}
+            out[str(r["symbol"])] = {k: r.get(k) for k in (*GREEK_KEYS, "iv", "mid", "quote_missing", "bid_zero")}
     return out
 
 
@@ -378,7 +464,10 @@ def position_view(p: dict, *, as_of: Optional[str], today: Optional[str], sig_to
     band = breakeven(side, p.get("strike"), p.get("entry_premium"))
     legs = [greek_legs.get(str(p.get("call_symbol"))), greek_legs.get(str(p.get("put_symbol")))]
     legs = [None if (not leg or leg.get("quote_missing")) else leg for leg in legs]
+    # 账本里 bid = 0 的腿（v0.45.609 起 portfolio_greeks 放行）：Greeks 是 CBOE 模型值、没有 mid，与盘中页同样标出来
+    degraded = [name for name, leg in zip(("call", "put"), legs) if leg and leg.get("bid_zero")]
     g = position_greeks(legs, side, n, S)
+    g["degraded_legs"] = _degraded_if_used(g, degraded)
     g["source"] = f"hedge_state/greeks_{as_of}.json" if (as_of and greek_legs) else None
     return {
         **{k: p.get(k) for k in ("ticker", "side", "label", "entry_date", "expiry", "strike", "call_symbol",
@@ -414,6 +503,8 @@ def closed_view(c: dict, *, sig_entry: Optional[dict], event_rows: List[dict]) -
         "realized_abs_move_pct": realized,
         "realized_move_pct": _num((st or {}).get("realized_move_pct")),
         "realized_vs_implied": (realized / implied) if (realized is not None and implied) else None,
+        # 平仓日 ≤ 财报日（True）= 没测到事件；None = 日期缺 / 坏，判不了（v0.45.606，只读标记、账本不存）
+        "event_missed": _event_missed(c),
         "entry_signal": _entry_brief(sig_entry),
     }
 
@@ -505,7 +596,7 @@ def calibration_points(by_event: Dict[Tuple[str, str], List[dict]], traded: set)
 def build_overview(led: dict, *, now_et: datetime, rules: Optional[dict] = None,
                    shadow: Optional[dict] = None, strangle_shadow: Optional[dict] = None) -> dict:
     """页面要的全部数据。`rules`：阈值 / 账本配置（服务层从代码里取的那一份）；`shadow`：GEX 影子记录进度、
-    `strangle_shadow`：影子宽跨记录进度（v0.45.586）——两者**都只有计数**。缺目录 ⇒ `data_available=False` 且说清是哪个目录，
+    `strangle_shadow`：影子宽跨记录进度（v0.45.586）——两者**冻结前都只有计数**（影子宽跨检验冻结后多一键 `revealed`，v0.45.599）。缺目录 ⇒ `data_available=False` 且说清是哪个目录，
     **不**当成「空账本」。"""
     base = {"source": led.get("source"), "rules": rules or {}, "now_et": now_et.isoformat(timespec="seconds"),
             "state_dir": {"path": led.get("ledger_dir"), "exists": bool(led.get("exists"))}}
@@ -588,12 +679,17 @@ def _ask_ok(leg) -> bool:
 
 
 def _greeks_usable(leg) -> bool:
-    """bid = 0 的腿，CBOE 逐合约 Greeks 还能不能拿来用：有真实的 ask、四个 Greeks 都有限、且 iv > 0。
-    iv 缺 / ≤ 0 时 CBOE 给的是全零占位，不是观测值（`cboe_options.select_quote_set` 同样不把 delta = 0 当观测值）。"""
-    if not _ask_ok(leg):
-        return False
-    iv = _num(leg.get("iv"))
-    return iv is not None and iv > 0 and all(_num(leg.get(k)) is not None for k in GREEK_KEYS)
+    """bid = 0 的腿，CBOE 逐合约 Greeks 还能不能拿来用。判据只有一份：`cboe_options.bid_zero_greeks_usable`
+    （v0.45.620 起对冲账本 `portfolio_greeks` 与本页共用，不再各抄一份）。"""
+    return bid_zero_greeks_usable(leg)
+
+
+def _degraded_if_used(greeks: dict, degraded: List[str]) -> List[str]:
+    """降级腿只有在它的数真的进了某个合计时才说出来：另一条腿缺（合计全是 None）时页面不许再声称「含 call 腿的模型值」
+    ——那句话旁边会是一排「—」（v0.45.593 二次检查）。合计需要两条腿都有数，所以「有任一合计」⇔「降级腿的数被用上了」。"""
+    used = any(greeks.get(k) is not None for k in ("delta_shares", "dollar_delta", "gamma_dollar_per_1pct",
+                                                   "vega_dollar_per_pt", "theta_dollar_per_day"))
+    return degraded if used else []
 
 
 def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
@@ -604,8 +700,10 @@ def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
       · mid / `mark_mid`：仍要两腿 `quote_ok`（bid = 0 的 mid 只是 ask 的一半，不是市价）；
       · 立即平仓：卖跨式是按 ask 买回，两腿 ask 都真实（`_ask_ok`）就给，`exit_now_basis="ask_only"`；
         买跨式按 bid 卖出，bid = 0 即无买盘，仍不给；
-      · Greeks：`_greeks_usable` 的腿照用，`greeks.degraded_legs` 标明哪几条是 bid = 0 的模型值，仅供参考。
-    账本侧（`portfolio_greeks.option_exposures`）与卖权账本共用的 `quote_ok` 口径**不动**，对冲决策仍按严格口径。"""
+      · Greeks：`_greeks_usable` 的腿照用，`greeks.degraded_legs` 标明哪几条是 bid = 0 的模型值，仅供参考
+        （另一条腿缺、合计全是 None 时不给：没有任何一格用到它）。
+    `quote_ok` 本身（卖权账本 / 跨式入场共用）**不动**；`portfolio_greeks.option_exposures` 自 v0.45.609 起对 Greeks 汇总
+    也放行同一类 bid = 0 腿，判据与本页共用 `cboe_options.bid_zero_greeks_usable`（v0.45.620），mid 仍不给。"""
     side = str(p.get("side") or "")
     n = _pos(p.get("contracts"))
     quotes = (q or {}).get("quotes") or {}
@@ -634,6 +732,7 @@ def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
             legs.append(None)
     pnl_mid = unrealized(side, p.get("entry_premium"), mark, n)
     size = _pos(p.get("size_usd"))
+    greeks = position_greeks(legs, side, n, S)
     return {
         "ticker": p.get("ticker"), "fetched_at_et": now_et.isoformat(timespec="seconds"),
         "available": bool((q or {}).get("available")), "reason": (q or {}).get("reason"),
@@ -645,7 +744,7 @@ def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
         "unrealized_mid_pct": (pnl_mid / size * 100.0) if (pnl_mid is not None and size) else None,
         "exit_now_premium": exit_px, "exit_now_usd": unrealized(side, p.get("entry_premium"), exit_px, n),
         "exit_now_basis": exit_basis, "bid_zero_legs": bid_zero,
-        "greeks": {**position_greeks(legs, side, n, S), "degraded_legs": degraded},
+        "greeks": {**greeks, "degraded_legs": _degraded_if_used(greeks, degraded)},
         "band": band_position(S, band), "breakeven": band,
         "levels": levels,
         "same_payload": (levels.get("payload_last_trade_time") == (q or {}).get("payload_last_trade_time"))

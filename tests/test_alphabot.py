@@ -444,6 +444,19 @@ class TestHelpPage:
         bad = [(f, i) for f, i in refs if i not in ids]
         assert not bad, f"指向不存在的帮助章节：{bad}"
 
+    def test_guide_page_table_matches_the_nav(self):
+        """ALPHA_BOT_GUIDE.md 第 3 节只剩一张顶栏页面表（v0.45.613 瘦身：此前那几节是本页的旧副本，停在 407、漏了
+        跨式 / 对冲 / 溢价）。两头都核：顶栏每个页面都在表里（加了页面忘了写 ⇒ 红），表里没有顶栏已没有的页面（删了
+        页面忘了删 ⇒ 红）；指南里的 `#/help/<id>` 都是登记过的章节。"""
+        guide = (REPO / "ALPHA_BOT_GUIDE.md").read_text(encoding="utf-8")
+        sec3 = guide.split("## 3. 页面导览", 1)[1].split("\n## ", 1)[0]
+        nav = re.findall(r'data-nav="[a-z]+">([^<]+)</a>', (STATIC / "index.html").read_text(encoding="utf-8"))
+        rows = [r for r in re.findall(r"^\| ([^|]+?) \|", sec3, re.M) if r not in ("页面", "---")]
+        assert len(nav) >= 9 and rows, (nav, rows)                  # 两边的解析都没失明
+        assert sorted(rows) == sorted(nav), {"表里缺": set(nav) - set(rows), "表里多": set(rows) - set(nav)}
+        refs = re.findall(r"#/help/([a-z]+)", guide)
+        assert len(refs) >= 10 and not set(refs) - set(self._section_ids()), set(refs) - set(self._section_ids())
+
     def test_ticker_pages_all_have_a_help_target(self):
         """六个子页各有去处：新增子页忘了登记 TAB_HELP，会退回「水平」说明而没人发现。"""
         txt = (STATIC / "pages" / "ticker.js").read_text(encoding="utf-8")
@@ -480,6 +493,18 @@ class TestHelpPage:
         for k in ("min_independent_per_tenor", "min_distinct_expiries", "min_per_group", "alpha_each", "n_perm",
                   "eligible_earnings_status", "excluded_underlying_price_sources"):
             assert k in m["prereg"], k
+
+    def test_app_commands_come_from_the_server(self):
+        """「程序类」给人抄的命令（装依赖 / 停服务 / 换数据根）取自 /api/method 的 app.*：进代码目录、用运行本服务的
+        解释器（v0.45.611，607 二次检查 #1）。此前写死 /usr/local/bin/python3、且不 cd——自定义解释器的人装错地方，
+        不在代码目录里敲就 No module named alphabot。写死与否的全仓扫描在 test_alphabot_launcher.py。"""
+        from alphabot import macos_app as MA
+        m = _client(_demo_service()).get("/api/method").json()
+        assert m["app"] == {"launcher": MA.here_command("-m alphabot.launcher"),
+                            "pip_install": MA.here_command("-m pip install -r requirements.txt")}, m.get("app")
+        txt = self.HELP.read_text(encoding="utf-8")
+        for call in ('appCmd(m, "pip_install")', 'appCmd(m, "launcher", " --stop")', 'appCmd(m, "launcher", " --reset")'):
+            assert call in txt, call
 
     def test_contract_count_is_never_labelled_as_zhang(self):
         """「N 张合约」会被读成持仓 / 成交张数（券商 App 里 NVDA 单个到期日就有 10 万张）；页面数的是合约系列个数，

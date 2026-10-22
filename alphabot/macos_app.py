@@ -60,7 +60,7 @@ def default_repo() -> Path:
     problem = generator_dir_problem(clone)
     if problem:
         raise BuildError(f"生产克隆 {clone} {problem}。先在开发检出里跑 "
-                         f"{DEFAULT_PYTHON} production_clone.py setup 建好它；确实要让 .app 跑别的检出，显式给 --repo")
+                         f"{running_python_word()} production_clone.py setup 建好它；确实要让 .app 跑别的检出，显式给 --repo")
     return clone
 
 
@@ -157,10 +157,16 @@ def _home_tilde(p: Path) -> str:
         return str(p)
 
 
+def clone_make(target: str) -> str:
+    """给人抄的「在生产克隆上跑 make 目标」：带 `-C`，在哪个目录敲都找得到 Makefile（v0.45.612：停止服务页曾写
+    不带 `-C` 的 `make alphabot`，不在代码目录里敲就 No rule to make target）。静态页抄它，守卫 `TestMakeCommandsNameTheirDirectory`。"""
+    import production_clone
+    return f"make -C {_home_tilde(production_clone.default_dest())} {target}"
+
+
 def canonical_entry() -> str:
     """推荐入口：重新生成指向生产克隆的 .app。帮助页抄的就是它（守卫 `TestRegenHints`）。"""
-    import production_clone
-    return f"make -C {_home_tilde(production_clone.default_dest())} alphabot-app"
+    return clone_make("alphabot-app")
 
 
 def _is_default_clone(repo: Path) -> bool:
@@ -176,8 +182,50 @@ _PLAIN_WORD = re.compile(r"[^\s'\"$`\\;&|<>()*?\[\]{}!#~]+")
 PY_UNSAFE_CHARS = "\"$`\\'\n"
 
 
+#: 记下的解释器不能沿用、或要教人换解释器时，命令里放的占位（给人改成实际路径；不含要引号的字符，原样进壳）
+PLACEHOLDER_PY = "/新解释器的绝对路径"
+
+
 def _cmd_word(s: str) -> str:
     return s if _PLAIN_WORD.fullmatch(s) else shlex.quote(s)
+
+
+def _runner_word(python: str) -> str:
+    """给人抄的命令里「用 .app 记下的解释器跑」：合现行规则就是它（按需加引号），否则占位（v0.45.607）。
+    `regen_hint` 与「生产克隆丢了」弹窗共用，占位规则只在这里。"""
+    return PLACEHOLDER_PY if python_rule_problem(python) else _cmd_word(python)
+
+
+def running_python_word() -> str:
+    """给人抄的命令里「用此刻这个解释器跑」= 正在跑本进程的那个（此刻必然能跑），按需加引号（v0.45.611）。
+
+    生成时打印的提示（克隆不在、换数据根）与帮助页（经 `/api/method`）用它：此前写死缺省解释器，换解释器常常正是
+    因为缺省坏了，照抄就失败。冻进壳里的文字不用它（那是生成时的环境），用 `_runner_word`（记下的那个）。
+    守卫 `TestHintsNeverHardcodeTheDefaultInterpreter`。"""
+    return _cmd_word(sys.executable)
+
+
+def here_command(args: str) -> str:
+    """在哪个目录照抄都跑得通的命令：先进本代码目录（`-m alphabot…` / `-r requirements.txt` 都要从那里跑），再用此刻的
+    解释器（v0.45.611）。此前「换数据根」只写 `… -m alphabot.launcher --reset`：不在代码目录里敲就 No module named alphabot。"""
+    d = _home_tilde(_repo_root())
+    d = d if d.startswith("~/") and _PLAIN_WORD.fullmatch(d[2:]) else shlex.quote(str(_repo_root()))
+    return f"cd {d} && {running_python_word()} {args}"
+
+
+def python_rule_problem(python: str) -> Optional[str]:
+    """`python` 现在能不能作为 .app 的解释器写进壳、写进给人抄的命令 ⇒ 问题描述；能 ⇒ None。
+
+    **现行**规则只此一份（v0.45.597）：生成时 `build_app` 拒、提示时 `regen_hint` 判沿不沿用，都经这里——此前提示照搬
+    壳里记下的值，而 456 之前的生成器把裸名字 / 相对路径原样写进过壳，照抄就被生成器自己拒掉。不核对存在与否
+    （那是 `interpreter_problem`：缺省解释器在 CI 上本来就不存在，人也可能之后才装）。
+    """
+    if not os.path.isabs(python):
+        return "不是绝对路径"
+    bad = sorted({c for c in python if c in PY_UNSAFE_CHARS}, key=PY_UNSAFE_CHARS.index)
+    if bad:
+        return f"含 shell 会解释或截断的字符 {bad!r}"
+    return None
 
 
 def regen_hint(repo: Path, python: str) -> str:
@@ -191,11 +239,31 @@ def regen_hint(repo: Path, python: str) -> str:
     `python` **必填**（v0.45.498）：重新生成要沿用 .app 记下的那个解释器——等于缺省就不写（缺省命令生成的就是它），
     否则带上 `PYTHON=` / `--python`。此前它可省、省了就等于「用缺省」：487 的过时提醒、壳头注释、「代码目录挪了」那句
     都没传，照抄就把自定义解释器悄悄换回 `/usr/local/bin/python3`。要教人**换**解释器的那句传占位（`_python_fix_hint`）。
+
+    给出的命令**照抄要跑得通**（v0.45.597，498 二次检查 #1 / #2）——此前只管「沿用」，没核「今天还跑不跑得通」：
+    - 记下的解释器不合现行规则（`python_rule_problem`：456 之前的生成器把 `python3` 这类裸名字原样写进过壳）⇒ 沿用就被
+      生成器拒 ⇒ 改给占位 `PLACEHOLDER_PY`，前面说明一句；那个值本身不嵌进来（可能带 shell 特殊字符，结果要进双引号）。
+    - **跑生成器**的解释器 = 要写进 .app 的那个。推荐入口**不在提示里写**：Makefile 自己定——命令行上的 `PYTHON` 是可用的
+      绝对路径就由它跑，否则退回缺省（v0.45.607）；所以帮助页、Makefile 注释、任何教人换解释器的地方只写 `PYTHON=X` 就
+      都跑得通（600 把 `ALPHABOT_GEN_PY=X` 写进提示文字，帮助页那处就漏了）。直跑没有 make 可依，命令开头写它。此前恒为
+      缺省：换解释器常常正是因为缺省坏了，照抄第一步就失败。
+
+    ⚠️ 确定规则，不看「缺省此刻能不能用」（v0.45.600）：本函数的结果有一半是在**生成 .app 时**写进壳里的文字（头注释、
+    两处弹窗），要到以后出事那天才被人看见——按生成那一刻的环境选（597），生成时缺省好好的、弹窗里就不带 runner，等缺省
+    坏了照做照样失败；同一份代码在两台机器 / 两个时刻还会生成不同的壳。各出现场景：启动器的过时提醒——记下的解释器正跑着
+    启动器，必然能跑；「找不到 / 执行失败」弹窗——传的是占位（新解释器，同一句已先教人用它装依赖）；头注释与「代码目录
+    挪了」——壳只核过 PY 是**可执行文件**（`SHELL_PY_USABLE`，不保证真能运行），记下的是缺省而它文件在、却跑不起来，同时
+    代码目录又挪了，直跑那句会失败（两件同时坏，极少见，不为它加分支）。生成器在 import 期只用标准库与仓库模块、启动器自己
+    也 import 它（守卫 `TestDefaultRepoIsProductionClone::test_generator_runs_with_only_the_standard_library`，
+    关掉 site-packages 真跑一次生成），能跑启动器的解释器就能跑生成器。
     """
-    py = "" if python == DEFAULT_PYTHON else _cmd_word(python)
+    note = ("（.app 里记的解释器不合现行规则：须是不含引号等特殊字符的绝对路径，把命令里的占位换成实际要用的解释器）"
+            if python_rule_problem(python) else "")
+    runner = _runner_word(python)
+    py = "" if runner == DEFAULT_PYTHON else runner
     if _is_default_clone(repo):
-        return f"在终端执行 {canonical_entry()}" + (f" PYTHON={py}" if py else "")
-    return (f"在那份代码目录里执行 {DEFAULT_PYTHON} -m alphabot.macos_app --repo ."
+        return f"{note}在终端执行 {canonical_entry()}" + (f" PYTHON={py}" if py else "")
+    return (f"{note}在那份代码目录里执行 {runner} -m alphabot.macos_app --repo ."
             + (f" --python {py}" if py else ""))
 
 
@@ -206,7 +274,7 @@ def _repo_unusable_hint(repo: Path, python: str) -> str:
     make alphabot-app」：前者与克隆无关，后者在克隆丢了时只会报错（v0.45.439 二次检查）。
     """
     if _is_default_clone(repo):
-        hint = (f"生产克隆丢了或不完整：在开发检出里跑 {DEFAULT_PYTHON} production_clone.py setup 重建它"
+        hint = (f"生产克隆丢了或不完整：在开发检出里跑 {_runner_word(python)} production_clone.py setup 重建它"
                 "（每日扫描也靠它，丢了扫描同样停），重建后不用重新生成 .app。")
     else:
         hint = f"代码目录挪了位置就到新位置重新生成（{regen_hint(repo, python)}）。"
@@ -284,7 +352,7 @@ exit 126
 def _python_fix_hint(repo: Path) -> str:
     """解释器找不到 / 执行失败时的处理办法（两处弹窗共用）。"""
     return ("装回它即可；要换解释器：先用新解释器 -m pip install -r requirements.txt，再"
-            f"{regen_hint(repo, python='/新解释器的绝对路径')}（没装依赖的解释器起不了服务）")
+            f"{regen_hint(repo, python=PLACEHOLDER_PY)}（没装依赖的解释器起不了服务）")
 
 
 def _is_ours(bundle: Path) -> bool:
@@ -308,9 +376,9 @@ def build_app(dest_dir: Path, *, repo: Optional[Path] = None, python: str = DEFA
     dest_dir = Path(dest_dir).expanduser()
     repo = _repo_root() if _given(repo, "repo") is None else Path(repo).resolve()
     python = _must_be_absolute(python, "python")
-    bad = sorted({c for c in python if c in PY_UNSAFE_CHARS}, key=PY_UNSAFE_CHARS.index)
-    if bad:
-        raise BuildError(f"解释器路径 {python!r} 含 {bad!r}：它要进 .app 里的提示与给人抄的重新生成命令，在那里会被 shell "
+    rule = python_rule_problem(python)          # 与提示判「能不能沿用」同一条（v0.45.597）
+    if rule:
+        raise BuildError(f"解释器路径 {python!r} {rule}：它要进 .app 里的提示与给人抄的重新生成命令，在那里会被 shell "
                          "解释或截断。换一个不含这些字符的路径（指过去的软链即可）")
     problem = generator_dir_problem(repo)
     if problem:
@@ -519,7 +587,7 @@ def _record_data_root(explicit_home: Optional[Path]) -> int:
 
     print({
         "home": f"沿用启动器配置里的数据根 {home}",
-        "demo": f"启动器配置是演示模式（demo: true）：双击直接进演示；换真实数据先 {DEFAULT_PYTHON} -m alphabot.launcher --reset",
+        "demo": f"启动器配置是演示模式（demo: true）：双击直接进演示；换真实数据先 {here_command('-m alphabot.launcher --reset')}",
         "stale": f"⚠️ 启动器配置里的数据根 {home} 不存在了：双击时会要你重选（或用 --home 指定）",
         "first": "启动器配置里还没有数据根：首次双击时会让你选一次（或用 --home 给绝对路径）",
     }[state])
@@ -594,7 +662,7 @@ def main(argv=None) -> int:
     if sys.platform != "darwin":
         print("（当前不是 macOS：.app 生成了，但只能在 Mac 上双击运行）", file=sys.stderr)
     print("用法：双击打开；拖到 Dock 常驻。停止服务：页面底部「停止服务」。换数据根："
-          f"{DEFAULT_PYTHON} -m alphabot.launcher --reset")
+          f"{here_command('-m alphabot.launcher --reset')}")
     return rc
 
 

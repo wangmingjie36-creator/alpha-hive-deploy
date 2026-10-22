@@ -2451,29 +2451,50 @@ def _boundary_attention(bev: Dict, dim: Dict) -> List[Dict]:
     return out
 
 
-def _pooled_recheck_attention(today: Optional[str]) -> List[Dict]:
-    """`signal_archive.DELIBERATELY_POOLED` 里到了复检日的条目 ⇒ 每条一个 warn（v0.45.565）。
+def _pooled_recheck_due(today: Optional[str]):
+    """`signal_archive.DELIBERATELY_POOLED` 里到了复检日的条目 ⇒ `([(信号, 记录), …], 读不到时的原因 | None)`（v0.45.565）。
 
-    刻意池化是「已知某条边界改了这个信号、先不切」的取舍，到期没人复检它就永远池化下去——这条就是「谁会红」。
-    按外壳的业务日 `today` 判（不读真实钟：测试传固定 `--today`，拨钟审计看不到它）；`today=None` ⇒ 不判。
+    刻意池化是「已知某条边界改了这个信号、先不切」的取舍，到期没人复检它就永远池化下去——这里就是「谁会红」。
+    按业务日 `today` 判（不读真实钟：测试传固定 `--today`，拨钟审计看不到它）；`today=None` ⇒ 不判。
+    读不到登记表不抛（本工具有只带 step_contract 的最小运行环境），原因交给两个出口各自显示。
     """
     if not today:
-        return []
+        return [], None
     try:
         import signal_archive
         pooled = dict(signal_archive.DELIBERATELY_POOLED)
     except Exception as e:  # noqa: BLE001 —— 核不了就说核不了（同本文件各前瞻检验段），不让整个工具退出码 3
-        return [step_contract.attention_item(
-            "ic_rerun.deliberately_pooled.unavailable", "warn",
-            f"刻意池化复检核对不了（signal_archive.DELIBERATELY_POOLED 读不到：{type(e).__name__}: {e}）")]
-    out = []
-    for sig, rec in sorted(pooled.items()):
-        if today >= rec["recheck_on_or_after"]:
-            out.append(step_contract.attention_item(
-                f"ic_rerun.deliberately_pooled.{sig}", "warn",
-                f"{sig} 跨 {rec['boundary']} 刻意池化，已到复检日 {rec['recheck_on_or_after']}：先核条件「{rec['recheck_when']}」"
-                f"是否满足，再按 signal_archive.DELIBERATELY_POOLED 的 how 复检、决定维持还是切（结论记进 CHANGELOG）"))
-    return out
+        return [], f"signal_archive.DELIBERATELY_POOLED 读不到：{type(e).__name__}: {e}"
+    return [(sig, rec) for sig, rec in sorted(pooled.items()) if today >= rec["recheck_on_or_after"]], None
+
+
+def _pooled_recheck_text(sig: str, rec: Dict) -> str:
+    return (f"{sig} 跨 {rec['boundary']} 刻意池化，已到复检日 {rec['recheck_on_or_after']}：先核条件「{rec['recheck_when']}」"
+            f"是否满足，再按 signal_archive.DELIBERATELY_POOLED 的 how 复检、决定维持还是切（结论记进 CHANGELOG）")
+
+
+def _pooled_recheck_attention(today: Optional[str]) -> List[Dict]:
+    """到期条目 ⇒ 外壳 `attention[]` 每条一个 warn（每日扫描 Step 11 经 `--out` 读，进日志与 status.json 的 Step 11 片段）。"""
+    due, err = _pooled_recheck_due(today)
+    if err:
+        return [step_contract.attention_item("ic_rerun.deliberately_pooled.unavailable", "warn",
+                                             f"刻意池化复检核对不了（{err}）")]
+    return [step_contract.attention_item(f"ic_rerun.deliberately_pooled.{sig}", "warn", _pooled_recheck_text(sig, rec))
+            for sig, rec in due]
+
+
+def _pooled_recheck_segment(today: Optional[str]) -> Optional[str]:
+    """到期条目 ⇒ `--quiet` 摘要行末尾的一段（v0.45.589）；没到期 ⇒ None（不加段，同 🚨 段「只在要人看时出现」）。
+
+    周度任务只跑 `--quiet`、不读 `attention[]`——v0.45.565 声称「周度任务经 attention 看得到」是错的，这一段才是它看得到的出口。
+    以 ⏰ 开头：周度任务 SKILL 规定 ⏳ 以外的图标一律在周报里显著标出并附原文。
+    """
+    due, err = _pooled_recheck_due(today)
+    if err:
+        return f"⚠️ 刻意池化复检核对不了（{err}）"
+    if not due:
+        return None
+    return "⏰ 刻意池化复检到期：" + "；".join(_pooled_recheck_text(sig, rec) for sig, rec in due)
 
 
 def build_attention(res: Dict, bev: Dict, fwd: Dict, fg: Dict, dim: Dict,
@@ -2616,6 +2637,10 @@ def main() -> int:
         line = summary_line(res) + "｜" + fwd["line"] + "｜" + fg_fwd["line"] + "｜" + dim_fwd["line"]
         if bev["alarm"]:
             line += "｜" + bev["line"]
+        # 第六段（v0.45.589）= 刻意池化到了复检日，**只在到期时出现**，以 ⏰ 开头；按业务日 `date` 判（同外壳）
+        pooled = _pooled_recheck_segment(date)
+        if pooled:
+            line += "｜" + pooled
         print(line)
         return 0 if res["ready"] else 1
 

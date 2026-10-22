@@ -2,6 +2,7 @@
 
 import json
 import math
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -285,16 +286,20 @@ class TestExits:
         assert len(r["positions"]) == 1 and r["positions"][0]["stale_days"] == 21   # 09-03 → 09-24
         _state_files_finite()
 
-    def test_expiry_buffer_exit(self):
-        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap", earnings="2026-10-01")])
+    def test_expiry_buffer_exit(self, monkeypatch):
+        # v0.45.602：财报日贴着到期日的信号入口已拒（见 TestEntryExpiryBufferGate），不能再靠它屏蔽 post_event——
+        # 显式关掉 exit_after_event，单独验证到期强平这一条。
+        monkeypatch.setitem(opl.CONFIG, "exit_after_event", False)
+        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])
         r = opl.run_for_date("2026-09-29", quotes_fn=_quotes_fn({CALL: _q(0.9, 1.1), PUT: _q(0.9, 1.1)}), signals=[])
         assert len(r["positions"]) == 1                     # 3 天：不动
         r = opl.run_for_date("2026-09-30", quotes_fn=_quotes_fn({CALL: _q(0.9, 1.1), PUT: _q(0.9, 1.1)}), signals=[])
         assert r["positions"] == [] and r["closed_today"][0]["exit_reason"] == "expiry_buffer"
         assert r["closed_today"][0]["exit_premium"] == pytest.approx(1.8)
 
-    def test_expired_without_quotes_settles_intrinsic_immediately(self):
-        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap", earnings="2026-10-01")])
+    def test_expired_without_quotes_settles_intrinsic_immediately(self, monkeypatch):
+        monkeypatch.setitem(opl.CONFIG, "exit_after_event", False)   # 同上：不靠贴着到期日的财报日屏蔽 post_event
+        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])
         r = opl.run_for_date("2026-10-02", quotes_fn=_none_quotes, signals=[], closes_fn=lambda tk, d: 95.0)
         t = r["closed_today"][0]
         assert t["mark_source"] == "intrinsic" and t["exit_premium"] == pytest.approx(5.0)
@@ -604,3 +609,124 @@ class TestQuoteHeld:
         monkeypatch.setattr(co, "_SNAPSHOT_PROVIDER", lambda tk: {})
         monkeypatch.setattr(co, "_fetch_cboe_payload", lambda *a, **k: pytest.fail("快照模式不该取数"))
         assert co.quote_held("XYZ", [CALL])["reason"] == "snapshot_mode"
+
+
+class TestEntryExpiryBufferGate:
+    """v0.45.602：财报日当晚的扫描就触发 expiry_buffer 强平（`as_of > earnings_date` 的 post_event 还没到），
+    这种单在事件之前被平、只剩时间损耗（TSLA 2026-10-21 / 到期 10-23 的实例）⇒ 账本入口拒开。
+    信号的 `eligible` 不动（GEX 预注册检验的样本定义，事件照样量得到实际波动）。"""
+
+    def _opened(self, earnings):
+        r = opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap", earnings=earnings)])
+        return r
+
+    def test_earnings_on_the_buffer_edge_is_refused(self):
+        buf = opl.CONFIG["expiry_buffer_days"]
+        edge = (datetime.strptime(EXPIRY, "%Y-%m-%d") - timedelta(days=buf)).strftime("%Y-%m-%d")
+        r = self._opened(edge)
+        assert r["positions"] == [] and r["opened_today"] == []
+        (sk,) = [x for x in r["skipped"] if x["ticker"] == "XYZ"]
+        assert "within expiry buffer" in sk["reason"], sk
+
+    @pytest.mark.parametrize("k", [0, 1, 2])
+    def test_anything_closer_to_expiry_is_refused_too(self, k):
+        d = (datetime.strptime(EXPIRY, "%Y-%m-%d") - timedelta(days=k)).strftime("%Y-%m-%d")
+        assert self._opened(d)["positions"] == []
+
+    def test_one_day_earlier_is_accepted_and_the_event_is_captured(self):
+        """边界内侧（expiry − buffer − 1）开得了，并且真的以 post_event 平——闸放行的单必须测得到事件。"""
+        buf = opl.CONFIG["expiry_buffer_days"]
+        ok_ed = (datetime.strptime(EXPIRY, "%Y-%m-%d") - timedelta(days=buf + 1)).strftime("%Y-%m-%d")
+        assert len(self._opened(ok_ed)["positions"]) == 1
+        qf = _quotes_fn({CALL: _q(0.9, 1.1), PUT: _q(0.9, 1.1)})
+        assert opl.run_for_date(ok_ed, quotes_fn=qf, signals=[])["closed_today"] == [], "财报日当天不平"
+        nxt = (datetime.strptime(ok_ed, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        (t,) = opl.run_for_date(nxt, quotes_fn=qf, signals=[])["closed_today"]
+        assert t["exit_reason"] == "post_event"
+
+    @pytest.mark.parametrize("k", range(0, 10))
+    def test_gate_and_exit_share_one_predicate_both_ways(self, k):
+        """入口闸与出场强平用同一个 `expiry_buffer_hit`：开得了 ⇔ 财报日当天不触发强平（逐日扫过，不挑边界点）。"""
+        ed = (datetime.strptime(EXPIRY, "%Y-%m-%d") - timedelta(days=k)).strftime("%Y-%m-%d")
+        assert ed > AS_OF, "夹具日期漂了：扫描范围内的财报日都得晚于入场日，否则这条测的不是缓冲闸"
+        opened = bool(self._opened(ed)["positions"])
+        assert opened is (not opl.expiry_buffer_hit(ed, EXPIRY)), (k, ed)
+
+    @pytest.mark.parametrize("suffix", ["T00:00:00", " 00:00:00", "T16:30:00-04:00"])
+    def test_timestamped_earnings_date_does_not_bypass_the_gate(self, suffix):
+        """信号存的是原始财报日，资格判定取前 10 位——带时间戳的值能过资格，闸不能因此认不出它（v0.45.604）。
+        变异：把闸里的 `[:10]` 去掉 ⇒ `_iso_day` 返回 None ⇒ 静默放行。"""
+        edge = (datetime.strptime(EXPIRY, "%Y-%m-%d") - timedelta(days=opl.CONFIG["expiry_buffer_days"])).strftime("%Y-%m-%d")
+        r = self._opened(edge + suffix)
+        assert r["positions"] == []
+        (sk,) = [x for x in r["skipped"] if x["ticker"] == "XYZ"]
+        assert "within expiry buffer" in sk["reason"] and edge in sk["reason"], sk
+
+    def test_skip_reason_stays_short_for_the_status_column(self):
+        r = self._opened(EXPIRY)
+        (sk,) = [x for x in r["skipped"] if x["ticker"] == "XYZ"]
+        assert len(sk["reason"]) <= 90, sk["reason"]
+
+    def test_unparseable_or_missing_earnings_date_is_not_judged_here(self):
+        """判不了财报日就不在这道闸拒（原行为不变；财报日缺失本来就过不了信号的 eligible）。"""
+        assert len(self._opened(None)["positions"]) == 1
+
+
+def _trade(exit_date, earnings, pnl=-100.0, side="long", label="cheap", reason="expiry_buffer"):
+    return {"ticker": "XYZ", "side": side, "label": label, "entry_date": "2026-09-22", "exit_date": exit_date,
+            "earnings_date": earnings, "pnl_usd": pnl, "pnl_pct": pnl / 10.0, "exit_reason": reason, "mark_source": "cboe_mid"}
+
+
+class TestEventMissedReaderMarker:
+    """v0.45.606：「事件前被平」是**读者侧**标记（平仓日 ≤ 财报日），账本不存、不改；KPI 把它们单列。
+    起因 TSLA 2026-10-21（财报日 = 到期日 − 2，当晚按 expiry_buffer 强平）。"""
+
+    @pytest.mark.parametrize("exit_d,ed,want", [
+        ("2026-10-21", "2026-10-21", True),      # TSLA：平仓日 == 财报日（盘后财报还没发生）
+        ("2026-10-20", "2026-10-21", True),
+        ("2026-10-22", "2026-10-21", False),     # 财报后第一天 = 账本自己的 post_event
+        ("2026-10-21", "2026-10-20", False),     # NFLX
+        ("2026-10-21", "2026-10-21T00:00:00", True),   # 财报日带时间戳也认
+        ("2026-10-22", "2026-10-21 16:30:00", False),
+        ("2026-10-21", None, None), (None, "2026-10-21", None), ("", "2026-10-21", None),
+        ("2026-10-21", "garbage", None), ("10/21/2026", "2026-10-21", None),
+    ])
+    def test_classification(self, exit_d, ed, want):
+        assert opl.event_missed(_trade(exit_d, ed)) is want
+
+    def test_only_dates_decide_not_exit_reason(self):
+        """强平发生在财报日**之后**：事件测到了，不算被抢平；post_event 标签但日期不晚于财报日（脏数据）也按日期判。"""
+        assert opl.event_missed(_trade("2026-10-22", "2026-10-21", reason="expiry_buffer")) is False
+        assert opl.event_missed(_trade("2026-10-21", "2026-10-21", reason="post_event")) is True
+
+    def test_split_partitions_and_isolates_signal_quality(self):
+        rows = [_trade("2026-10-21", "2026-10-21", pnl=-1825.0),                 # 事件前被平
+                _trade("2026-10-21", "2026-10-20", pnl=-664.0),                  # 测到
+                _trade("2026-10-22", "2026-10-21", pnl=300.0, label="rich", side="short"),
+                _trade("2026-10-21", None, pnl=50.0)]                            # 未知
+        sp = opl.split_by_event(rows)
+        assert (sp["saw_event"]["n"], sp["event_missed"]["n"], sp["event_unknown"]["n"]) == (2, 1, 1)
+        assert sp["event_missed"]["total_pnl_usd"] == pytest.approx(-1825.0)
+        assert sp["saw_event"]["total_pnl_usd"] == pytest.approx(-364.0)
+        assert sp["saw_event"]["by_label"]["cheap"]["n"] == 1, "事件前被平的那笔不进信号质量的 cheap 胜率"
+        total = sum(sp[k]["n"] for k in ("saw_event", "event_missed", "event_unknown"))
+        assert total == len(rows)
+
+    def test_compute_kpis_adds_split_and_leaves_headline_and_files_untouched(self):
+        rows = [_trade("2026-10-21", "2026-10-21", pnl=-1825.0), _trade("2026-10-21", "2026-10-20", pnl=-664.0)]
+        opl.CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        opl.CLOSED_FILE.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+        before = opl.CLOSED_FILE.read_bytes()
+        k = opl.compute_kpis()
+        assert k["n"] == 2 and k["total_pnl_usd"] == pytest.approx(-2489.0), "总口径照旧：与账户已实现对得上"
+        assert k["event_split"]["event_missed"]["n"] == 1
+        assert opl.CLOSED_FILE.read_bytes() == before, "读者侧标记不许写账本"
+        assert "event_missed" not in opl.CLOSED_FILE.read_text(encoding="utf-8")
+
+    def test_markdown_lists_them_apart_only_when_there_are_any(self):
+        opl.CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        opl.CLOSED_FILE.write_text(json.dumps(_trade("2026-10-21", "2026-10-20")) + "\n", encoding="utf-8")
+        assert "事件前被平" not in opl.render_markdown(AS_OF)
+        opl.CLOSED_FILE.write_text(json.dumps(_trade("2026-10-21", "2026-10-21", pnl=-1825.0)) + "\n", encoding="utf-8")
+        md = opl.render_markdown(AS_OF)
+        assert "**事件前被平 1 笔**" in md and "-1,825" in md

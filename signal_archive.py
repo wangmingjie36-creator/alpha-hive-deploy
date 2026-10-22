@@ -2450,9 +2450,10 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
 
 #: 刻意池化（v0.45.565 起）：某条边界**确实**改了这个信号的值，但用户决定暂不切、先保留跨世代样本，
 #: 到复检条件满足时再定。与 v0.45.256「实测没换 ⇒ 照证据不列」不同：这里**已知换了**，不切是取舍，不是证据。
-#: `analyze()` 的世代报告逐条列出（到了复检日标 ⏰）；到了复检日 `ic_rerun_readiness` 的 `attention[]` 出一条 warn
-#: （周度任务读它）。`tests/test_signal_archive_generations.py::TestDeliberatelyPooled` 钉住「边界确实改了它、确实没切、
-#: 报告与 attention 到期会出声」。复检后：维持 ⇒ 更新 `recheck_on_or_after` 并在 CHANGELOG 记结论；
+#: 到了复检日，三处出声：① `ic_rerun_readiness --quiet` 摘要行末尾的 ⏰ 段（v0.45.589）——**周度任务只读这一行**，
+#: SKILL 规定 ⏳ 以外的图标在周报里显著标出；② 同一工具外壳 `attention[]` 的 warn（每日扫描 Step 11 经 `--out` 读，
+#: 进日志与 status.json，没有推送）；③ `analyze()` 世代报告标 ⏰。（v0.45.565 原注释写「周度任务读 attention」，是错的。）
+#: `tests/test_signal_archive_generations.py::TestDeliberatelyPooled` 钉住「边界确实改了它、确实没切、三处到期都出声」。复检后：维持 ⇒ 更新 `recheck_on_or_after` 并在 CHANGELOG 记结论；
 #: 切 ⇒ 删本条，按 `SIGNAL_LEAVES` 里 sentiment.pct 那段注释的结构修法改。
 DELIBERATELY_POOLED: Dict[str, Dict[str, str]] = {
     "sentiment.pct": {

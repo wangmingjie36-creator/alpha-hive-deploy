@@ -155,6 +155,8 @@ export async function renderHedge(root, alive) {
     warns.push(`${L.date} 数据不全，对冲决定做不出来：${pc.hedge_undecided}${who.length ? `——缺价的是：${who.join("；")}` : ""}`);
   }
   if ((pc.gaps || []).length) warns.push(`${L.date} 另缺：${pc.gaps.join("；")}`);
+  // 买价为 0 的腿不是「缺」：Greeks 取 CBOE 模型值（没有 mid）、已计入带位——说出来，别让它悄悄进决定
+  if (pc.n_bid_zero) warns.push(`${L.date} 带位含 ${pc.n_bid_zero} 张买价为 0 的腿（${(pc.bid_zero || []).join("、")}）：用的是 CBOE 模型 Greeks，没有中间价；这些腿没有进压力表。`);
   // 被排除的标的不是「没有敞口」：点名 + 估算额，让它变大时看得见（v0.45.545）
   for (const x of L?.excluded_from_hedge || []) {
     warns.push(`${L.date} ${x.ticker} 不进对冲计算（配置里排除）：股票 ${x.n_stock_positions} 笔` +

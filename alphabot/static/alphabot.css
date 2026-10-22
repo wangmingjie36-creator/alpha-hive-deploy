@@ -32,6 +32,9 @@
 }
 
 * { box-sizing: border-box; }
+/* hidden 属性必须真的隐藏：作者样式里的 display（flex / grid …）会盖过浏览器对 [hidden] 的缺省隐藏。v0.45.616 的对话输入区
+   就因 .chat-form { display: flex } 在「没开启」时照样显示（v0.45.618 改成这一条全局兜底，守卫 tests/test_alphabot_chat.py） */
+[hidden] { display: none !important; }
 html { background: var(--paper); }
 body {
   margin: 0; background: var(--paper); color: var(--ink);
@@ -205,6 +208,7 @@ tr.sel td { background: var(--tint-strong); }
 .sd-greeks .k { font: 500 11.5px/1.3 var(--sans); color: var(--ink-3); }
 .sd-greeks .v { font: 500 15px/1.3 var(--data); font-variant-numeric: tabular-nums; }
 .sd-live { border-top: 1px dashed var(--line-strong); padding-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.sd-est { margin: 0; font-size: 13px; }
 details.sd-why summary { cursor: pointer; font-size: 13px; color: var(--ink-3); }
 details.sd-why p { font-size: 13px; color: var(--ink-2); margin: 6px 0 0; }
 /* 跨式 vs 宽跨 并排对比卡（只并排事实） */
@@ -275,3 +279,32 @@ tr.spot-row td { background: var(--sunk); font-weight: 600; }
 td .sub.reason { color: var(--ink-2); }
 td .sub.reason.warn { color: var(--warn); }
 td .reason.warn, td.reason.warn { color: var(--warn); }
+
+/* 对话抽屉（v0.45.614）：盖在页面右侧，不挤压正文；窄屏占满宽度 */
+.chat-toggle { flex: none; }
+.chat-toggle[aria-expanded="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.chat-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100vw); z-index: 50;
+  display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--line);
+  box-shadow: -8px 0 24px rgba(20, 20, 19, .08);
+}
+.chat-head { display: flex; align-items: baseline; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--line); }
+.chat-head strong { font: 600 15px/1.2 var(--sans); }
+.chat-head .muted { font-size: 12.5px; margin-right: auto; }
+.chat-body { flex: 1; overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.chat-body p { margin: 0; }
+.chat-msg { border-radius: var(--radius); padding: 10px 12px; font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-msg.user { background: var(--sunk); align-self: flex-end; max-width: 90%; }
+.chat-msg.bot { background: var(--paper); border: 1px solid var(--line); }
+.chat-msg.err { background: var(--warn-soft); color: var(--warn); }
+.chat-note { margin-top: 8px; font-size: 12.5px; color: var(--warn); white-space: normal; }
+.chat-meta { margin-top: 8px; font-size: 12px; color: var(--ink-3); white-space: normal; }
+.chat-sources { margin: 8px 0 0; padding-left: 18px; font-size: 12px; color: var(--ink-3); white-space: normal; }
+.chat-url { user-select: all; overflow-wrap: anywhere; }
+.chat-form { border-top: 1px solid var(--line); padding: 12px 18px 16px; display: flex; flex-direction: column; gap: 8px; }
+.chat-form textarea {
+  width: 100%; min-height: 76px; resize: vertical; padding: 8px 10px; border: 1px solid var(--line-strong);
+  border-radius: 8px; background: var(--paper); color: var(--ink); font: 14px/1.5 var(--data);
+}
+.chat-form textarea:focus { outline: 2px solid var(--clay); outline-offset: 1px; }
+.chat-form .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }

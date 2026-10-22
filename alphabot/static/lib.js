@@ -116,6 +116,7 @@ export const TENOR_LABEL = { monthly: "月度 21–45 天", weekly: "周度 7–
 export const EARN_LABEL = { none: "无", after_expiry: "到期后", before_expiry: "到期前 ⚠", unknown: "未知" };
 export const SOURCE_LABEL = {
   cboe_close: "收盘后快照", cboe_intraday: "盘中（15 分钟延迟）", cboe_stale_intraday: "收盘后仍是盘中文件",
+  yfinance_intraday: "Yahoo 备用源（约 15 分钟延迟；CBOE 文件陈旧时才用，无交易所 Greeks）",
   demo: "演示数据",
 };
 

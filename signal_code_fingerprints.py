@@ -173,6 +173,37 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "YFinanceSource.fetch 800 例（含 session_close）、--date 补跑 300 例（含云端快照拼接那一支）、MultiSourceFetcher 出口回落 200 例（含 "
      "history_fill 计数），档案关 / 开两遍全部相同；真实 yfinance 数据（10-21 盘中、末根正在形成、被丢弃）用档案里的日线 + 时钟重跑 33 项全同。"
      "**用户 2026-10-21 在对话里选「按 no_value_change 登记」**；不登记边界"),
+    # v0.45.591（观测层版本化第一块，取数缓存存原始观测）：新闻 / F&G 的缓存改存「取数结局」（种类 + 原始内容 + 取数时刻 + 新闻主源结局），
+    # 命中时用与新取数同一个解释函数重算并补档；Reddit 单票派生缓存删除；缓存读写收进 observation_layer。证据同一份，四条各写一遍
+    ("buzz.reddit",     "620b3abcf7ca477e", "no_value_change",
+     "v0.45.591：删掉单票派生缓存（<票>_sentiment.json，10 分钟），每次都从两张榜（本就是原始内容的内存 / 磁盘缓存）算；评分算式一字未动。"
+     "旧 / 新代码在同一批随机榜单上首调 800 组、新实例二次调用 800 组（每组 4 只票）除 timestamp 外逐字段相同；生产档案 10-20/21 真实榜单 4×4 组合 × 30 只票 "
+     "480 例全同、新代码的地址与档案一致。唯一差别：跨进程命中时 timestamp 变成这次算的时刻（无读者）；另一进程先算过的票若榜单缓存已过期，"
+     "新代码重取榜（取的是哪一份，不是怎么算），桥接按链接的那份重算、不受影响。**用户 2026-10-22 在对话里选「四个都按 no_value_change」**；不登记边界"),
+    ("buzz.news",       "e345ed268cf41cd6", "no_value_change",
+     "v0.45.591：Massive / AV / Yahoo 三段解释拆成 _from_massive / _from_alpha_vantage / _from_yahoo（新取数与缓存命中共用），缓存改存取数结局"
+     "（cache/news/<票>_news.obs-1.json），命中时重算、还原当初的 timestamp 与主源结局。旧 / 新代码在 800 例随机输入（含限速 / 拒绝 / 空 feed / "
+     "去重 / 三种主源 / 解析失败，时钟在命中前拨快）上新取数、缓存命中、主源结局计数三项逐字段全同；生产档案 54 份真实 Massive 结果重放全同、地址一致。"
+     "**用户 2026-10-22 在对话里选「四个都按 no_value_change」**；不登记边界"),
+    ("buzz.fear_greed", "e0989b9da49b66f7", "no_value_change",
+     "v0.45.591：CNN / alternative.me 的换算拆成 _from_cnn / _from_alternative_me（新取数与缓存命中共用），缓存改存取数结局"
+     "（cache/fear_greed.obs-1.json），命中时重算、timestamp 沿用取数时刻（BuzzBee 记成 fetched_at）。取值、取整、兜底顺序不变；"
+     "旧 / 新代码 800 例随机读数（含解析失败 / CNN 挂 / 双挂 / 空 data）新取数与命中逐字段全同，生产档案 2 份真实 CNN 重放全同、地址一致。"
+     "**用户 2026-10-22 在对话里选「四个都按 no_value_change」**；不登记边界"),
+    ("price.fields",    "ee56f994493ebb89", "no_value_change",
+     "v0.45.591：observation_layer.py 整份在本单元里，这次只新增取数缓存的 cache_path / cache_read / cache_write / _cache_doc_ok 与两个常量"
+     "（情绪通道用）；行情日线 / 交易所时钟的 7 个函数 AST 逐个比对一字未改，行情路径不调用新函数。"
+     "**用户 2026-10-22 在对话里选「四个都按 no_value_change」**；不登记边界"),
+    # v0.45.601（修 CI 专属红：buzz_v1 价格差分对拍）：data_pipeline 三处 `pct_change()` 写明 `fill_method=None`
+    ("price.fields",    "e512d9978a3c1a91", "no_value_change",
+     "v0.45.601：_fetch_history_metrics / YFinanceSource.fetch / --date 补跑 _fetch_historical_stock_data 三处 hist['Close'].pct_change() "
+     "写明 fill_method=None。生产解释器 /usr/local/bin/python3（编排器 PYTHON3 即它）的 pandas 是 3.0.1（pandas-3.0.1.dist-info 的 "
+     "METADATA mtime 2026-02-24 22:27，早于 H1 窗口起点 2026-10-12），该版本 inspect.signature(pd.Series.pct_change) 的缺省就是 "
+     "fill_method=None ⇒ 显式化在生产上是空操作。改动前（origin/main 原文）与改动后在同一批随机日线上逐字段比对：实时 800 份日线（108 份含 NaN 收盘）"
+     "各过 _fetch_history_metrics 与 YFinanceSource.fetch、补跑 300 份（40 份含 NaN 收盘），共 1900 次比对，pandas 3.0.1 下全部相同；同一比对在 pandas 2.3.3 下出差异"
+     "（正对照：2.x 缺省先前向填充，NaN 那天收益记 0）。冻结通道层 buzz_v1_channels.price_fields 本就按不填充定义；"
+     "CI 照 requirements.txt 装 pandas<3，差分对拍在那里红的就是这个。"
+     "**用户 2026-10-22 在对话里选「按 no_value_change 登记」**（经发起本会话的会话转述原话）；不登记边界"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change"})

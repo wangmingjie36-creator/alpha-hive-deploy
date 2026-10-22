@@ -21,8 +21,10 @@
   · `units(closed)` / `progress(closed, positions)`：就绪度——**只有计数**，不返回任何盈亏、不算任何效应量；
   · `run_once(closed)`：就绪后跑**一次**分块符号翻转检验并冻结到 `PATHS.straddle_strangle_shadow_result`（`os.link` 先到者赢）。
 
-盲期：冻结之前，任何代码路径都不把同一笔的影子宽跨盈亏与跨式盈亏放进同一个返回值（`BLINDED_KEYS` 不出现在 `progress` 里，
-测试钉住）。信息论上盲不了（两个盈亏都在平仓记录里）——自己拼起来看 = 偷看 = 协议变更。
+盲期：冻结之前，产品出口（Alpha Bot 接口 / `progress`）和每日运行的返回值 / CLI 回显都不带任何一笔的影子盈亏
+（`BLINDED_KEYS` 不出现在 `progress` 里；`options_paper_leg.run_for_date` 返回的平仓记录不带 `shadow_strangle`，测试钉住）。
+信息论上盲不了：两个盈亏都在落盘的平仓记录（`closed_trades.jsonl`）里，`units()` 的 `d` 也是两者的函数——自己拼起来看 = 偷看 = 协议变更。
+**唯一的出口是 `reveal()`**：冻结文件存在且完好才返回每笔配对 + 冻结的检验结果（用户 2026-10-22 定；Alpha Bot 的面板据此解锁），否则 `None`。
 
 ⚠️ 本模块**不 import** `options_paper_leg` / `earnings_vol_signal` / `alphabot`：定仓函数由调用方注入（`size_fn`），
 这样记录函数是纯的，依赖只有一个方向（账本 → 本模块）。
@@ -45,7 +47,7 @@ _log = get_logger("straddle_strangle_shadow")
 
 #: 协议常量。本文件与 experiments/straddle_strangle_shadow_prereg.md 不一致时以这里为准，并按协议 §8 记修订。
 PREREG = {
-    "version": 1,
+    "version": 2,                    # 修订 2（2026-10-22，v0.45.593）：单位定义加「平仓不晚于财报日」一类（协议 §4、§14）
     "registered": "2026-10-21",
     "doc": "experiments/straddle_strangle_shadow_prereg.md",
     #: 只有 `entry_date >= start_date` 且入场当天带着影子记录的单位才进检验（协议 §0：登记前入场的 8 笔一律排除）
@@ -96,11 +98,15 @@ def _pos(v) -> Optional[float]:
 
 _LOCK = threading.Lock()
 _ITEMS_MAX = 20
-_ZERO = {"signal_recorded": 0, "signal_error": 0, "entry_ok": 0, "entry_unquotable": 0, "entry_no_signal_record": 0,
+_ZERO = {"signal_recorded": 0, "signal_error": 0, "signal_available": 0, "signal_missing_leg": 0,
+         "entry_ok": 0, "entry_unquotable": 0, "entry_no_signal_record": 0,
          "entry_no_size": 0, "entry_error": 0, "exit_ok": 0, "exit_unpriced": 0, "exit_error": 0}
 _STATS: Dict = {**_ZERO, "items": []}
 #: 这几类是**故障**（记录没写成），alert_manager 报 P2；其余是数据（不可成交 / 没有信号记录 / 平仓无价）——如实计数、不报警
 ERROR_KINDS = ("signal_error", "entry_error", "exit_error")
+#: 接线整批断了的探针（v0.45.593）：快照在、但 25Δ 两腿取不到（`signal_missing_leg`）远多于取到的（`signal_available`）。
+#: 单个标的取不到是数据；一整轮 ≥ 这个数个标的都取不到、且一个都没取到 ⇒ 上游角色名 / 快照形状 / delta 整体缺失，alert_manager 报 P2
+WIRING_MIN_MISSING = 5
 
 
 def note(kind: str, ticker: Optional[str] = None, detail: Optional[str] = None) -> None:
@@ -119,6 +125,7 @@ def stats() -> dict:
         out = {k: _STATS[k] for k in _ZERO}
         out["items"] = list(_STATS["items"])
     out["errors"] = sum(out[k] for k in ERROR_KINDS)
+    out["wiring_suspect"] = out["signal_missing_leg"] >= WIRING_MIN_MISSING and out["signal_available"] == 0
     return out
 
 
@@ -130,8 +137,14 @@ def reset_stats() -> None:
 
 # ═══════════════════════════════ 记录（纯函数）
 
+def _finite_or_none(v):
+    """非有限浮点（NaN / ±inf）⇒ None，其余原样：这份记录随信号行落盘，账本的严格序列化（拒 NaN）会让一个 NaN 拖垮整个信号文件
+    的写入（v0.45.593 二次检查；现行快照生产者已把非有限值清成 None，这里不再依赖上游）。"""
+    return None if (isinstance(v, float) and not math.isfinite(v)) else v
+
+
 def leg_brief(c) -> Optional[dict]:
-    return {k: c.get(k) for k in LEG_FIELDS} if isinstance(c, dict) else None
+    return {k: _finite_or_none(c.get(k)) for k in LEG_FIELDS} if isinstance(c, dict) else None
 
 
 def prior_moves(raw_moves, as_of: str) -> List[dict]:
@@ -284,12 +297,15 @@ def _block(earnings_date) -> Optional[str]:
 
 def units(closed: List[dict]) -> List[dict]:
     """协议 §4：每笔平仓一个单位，`status` 说明为什么进 / 不进检验。`d` 是结果——调用方在冻结前只许数个数。
-    进检验 = `ok`：入场日 ≥ `start_date`、带着 schema 对的影子记录、空头、入场可成交、定得出张数、平仓有价。"""
+    进检验 = `ok`：入场日 ≥ `start_date`、带着 schema 对的影子记录、空头、入场可成交、定得出张数、平仓有价、
+    平仓日晚于财报日（修订 2：账本在 `财报日 == 到期日 − 2` 且盘后报告时，会在财报当晚就按 `expiry_buffer` 强平——
+    那一笔测到的是没有事件的纯时间价值；财报时段未观测，故一律按账本自己的 `as_of > earnings_date` 才算事后来判）。"""
     out = []
     for c in closed or []:
         sh = c.get("shadow_strangle")
         u = {"ticker": c.get("ticker"), "earnings_date": c.get("earnings_date"), "entry_date": c.get("entry_date"),
              "side": c.get("side"), "block": _block(c.get("earnings_date")), "d": None}
+        ed, xd = str(c.get("earnings_date") or "")[:10], str(c.get("exit_date") or "")[:10]
         if str(c.get("entry_date") or "") < PREREG["start_date"]:
             u["status"] = "before_start"
         elif not isinstance(sh, dict):
@@ -306,8 +322,10 @@ def units(closed: List[dict]) -> List[dict]:
             a, b = _num(ex.get("pnl_usd")), _num(c.get("pnl_usd"))
             if ex.get("status") != "ok":
                 u["status"] = f"exit_{ex.get('status') or 'missing'}"
-            elif None in (a, b) or nav is None or u["block"] is None:
+            elif None in (a, b) or nav is None or u["block"] is None or not xd:
                 u["status"] = "unusable"
+            elif xd <= ed:
+                u["status"] = "exit_before_event"
             else:
                 u["status"], u["d"] = "ok", (a - b) / nav
         out.append(u)
@@ -332,6 +350,7 @@ def progress(closed: List[dict], positions: Optional[List[dict]] = None, *, root
     frozen = read_result(root)
     return {"available": True, "prereg_version": PREREG["version"], "start_date": PREREG["start_date"],
             "ready": len(ok) >= need["min_units"] and len(blocks) >= need["min_blocks"], "frozen": frozen is not None,
+            "frozen_error": bool(frozen is not None and "error" in frozen),
             "n_closed": len(us), "by_status": by_status, "n_open_recorded": len(open_rec), "open_by_status": open_by,
             "n_units": len(ok), "n_blocks": len(blocks), "need": need}
 
@@ -370,6 +389,35 @@ def block_signflip_test(us: List[dict], *, n_perm: int, seed: int, enum_max_bloc
             "direction": ("strangle_higher" if obs > 0 else "straddle_higher" if obs < 0 else "none")}
 
 
+#: 冻结结果里给页面显示的字段（盲期结束后才读；不含 `unit_keys` / 进度）
+REVEAL_RESULT_KEYS = ("decision", "direction", "p_value", "observed", "mode", "testable", "reason", "n_units", "n_blocks",
+                      "ready_date", "prereg_version")
+
+
+def reveal(closed: List[dict], *, root=None) -> Optional[dict]:
+    """**冻结之后才有**的配对显示（v0.45.599，用户 2026-10-22 定：冻结后自动解锁，冻结前仍只有计数）。
+
+    未冻结 / 冻结文件读不了 / 不是对象 ⇒ `None`（调用方一个字都不许显示）——盲期以「冻结文件存在且完好」为唯一钥匙，
+    和 `run_once` 同一把。冻结后返回：冻结的检验结果（`REVEAL_RESULT_KEYS`）+ 每个 `ok` 单位的配对
+    （跨式 / 宽跨假想的张数与盈亏、`d`、是否在冻结的那次检验里——冻结后才平仓的单位只描述、不改判定）。
+    只读平仓记录；不写任何东西。"""
+    res = read_result(root)
+    if res is None or "error" in res:
+        return None
+    frozen_keys = {tuple(k) for k in res.get("unit_keys") or [] if isinstance(k, (list, tuple))}
+    pairs = []
+    for c, u in zip(closed or [], units(closed)):
+        if u["status"] != "ok":
+            continue
+        sh = c["shadow_strangle"]
+        pairs.append({"ticker": c.get("ticker"), "earnings_date": c.get("earnings_date"), "entry_date": c.get("entry_date"),
+                      "exit_date": c.get("exit_date"), "straddle_contracts": c.get("contracts"),
+                      "strangle_contracts": sh.get("contracts"), "straddle_usd": c.get("pnl_usd"),
+                      "strangle_usd": (sh.get("exit") or {}).get("pnl_usd"), "nav_for_sizing": sh.get("nav_for_sizing"),
+                      "d": u["d"], "in_frozen_test": (u["ticker"], u["earnings_date"], u["entry_date"]) in frozen_keys})
+    return {"result": {k: res.get(k) for k in REVEAL_RESULT_KEYS}, "pairs": pairs}
+
+
 def _result_path(root=None) -> Path:
     """缺省 = `PATHS.straddle_strangle_shadow_result`（调用时求值）；`root` 只给测试 / 指定数据根用。"""
     if root is None:
@@ -382,10 +430,16 @@ def read_result(root=None) -> Optional[dict]:
     if not p.is_file():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        obj = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         _log.error("影子宽跨冻结结果文件读不了（不重算、不覆盖，须人工处理）：%s", exc)
         return {"error": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(obj, dict):
+        # 合法 JSON 但不是对象（null / [] / 0 ……）：程序自己写不出，只会是手改或坏备份。和「读不了」同一条路径——
+        # 否则 null 会被当成「还没冻结」、列表会让 run_once 抛 TypeError，三处判定互相矛盾（v0.45.593 二次检查）
+        _log.error("影子宽跨冻结结果文件不是 JSON 对象（%s）（不重算、不覆盖，须人工处理）", type(obj).__name__)
+        return {"error": f"NotAnObject: {type(obj).__name__}"}
+    return obj
 
 
 def run_once(closed: List[dict], positions: Optional[List[dict]] = None, *, root=None, today: Optional[str] = None) -> dict:
@@ -434,7 +488,7 @@ def main(argv=None) -> int:
     from hive_logger import pdt_today
     res = run_once(closed, positions, today=pdt_today())
     print(json.dumps({k: v for k, v in res.items() if k != "unit_keys"}, ensure_ascii=False, indent=1))
-    return 0 if res.get("ran", True) else 1
+    return 0 if (res.get("ran", True) and "error" not in res) else 1
 
 
 if __name__ == "__main__":

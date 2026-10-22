@@ -1,42 +1,45 @@
-# Alpha Hive - 核心依赖（版本已锁定上限，防止破坏性更新）
-yfinance>=0.2.40,<0.3
-requests>=2.31.0,<3
-schedule>=1.2.0,<2
-pandas>=2.1.0,<3
-pytz>=2024.1
+# Alpha Hive - 依赖（v0.45.610 起：直接依赖一律 == 生产 Mac 的精确版本）
+#
+# 生产 = `/usr/local/bin/python3`（3.11.1）上实际装着的版本，2026-10-22 逐个 `pip show` 核对。
+# 为什么钉死而不是给范围：CI（tests.yml / clockshift.yml）照本文件装。此前这里写 `pandas<3`、`numpy<2`、`yfinance<0.3`，
+# 而生产从 2026-02 起就是 pandas 3 / numpy 2、yfinance 1.2 ⇒ CI 测的一直不是生产（v0.45.601：`pct_change` 缺省换义让
+# buzz_v1 差分对拍只在 CI 红）；反过来照本文件装（新机器、换解释器）还会把生产无声降级。
+# 升级生产上的包 ⇒ 同一提交改这里；`tests/test_requirements_match_installed.py` 在生产解释器上逐个核对，漂了就红。
+# 传递依赖不钉（pip 自己解析）；只钉本仓直接 import 的包。`schedule` 已删：仓里没有任何 import，生产也没装。
+yfinance==1.2.0
+requests==2.32.5
+pandas==3.0.1
+pytz==2025.2
 
-# 可视化
-matplotlib>=3.8.0,<4
-plotly>=5.17.0,<6
-seaborn>=0.13.0,<1
+# 可视化（plotly / seaborn 已删：仓里只在 code_generator 生成的代码字符串里出现，生产从没装过）
+matplotlib==3.10.8
 
 # 数值计算
-numpy>=1.24.0,<2
+numpy==2.4.2
 
 # HTML 解析（SEC EDGAR）
-beautifulsoup4>=4.12.0,<5
+beautifulsoup4==4.14.3
 
 # 仪表板 HTML 模板渲染（dashboard_renderer.py，每次扫描生成 index.html）
-jinja2>=3.1.0,<4
+jinja2==3.1.6
 
 # ========== 可选依赖 ==========
-# LLM 服务（Claude API）
-# anthropic>=0.25.0,<1
+# LLM 服务（Claude API）：生产 Mac 装着 0.84.0（LLM 影子 A/B 用）；CI 刻意不装——测试一律用假模块（v0.45.601）
+# anthropic==0.84.0
 
 
 # 向量数据库（长期记忆）
 # chromadb>=0.4.0
 
-# Google Calendar 集成
-
 # ML 预测（SGDClassifier 在线学习）
-scikit-learn>=1.3.0
-# joblib>=1.3.0  # sklearn 已内置 joblib
+scikit-learn==1.8.0
+# joblib  # sklearn 已内置 joblib
 
 # ========== Alpha Hive Bot (alpha_hive_bot/) ==========
-# 对外 Telegram 订阅机器人 v0.1.0；主扫描进程不依赖此组，但 Railway 部署 bot 时需要
-python-telegram-bot>=21.0,<22.0
-httpx>=0.25.0
+# 对外 Telegram 订阅机器人；主扫描进程不依赖此组，测试会 import。
+# Railway 部署走仓库根的 Dockerfile（2026-06-16 起），依赖写在 Dockerfile 里、不读本文件。
+python-telegram-bot==21.11.1
+httpx==0.28.1
 
 # ========== Alpha Hive MCP Server (alpha_hive_mcp.py) ==========
 # 供 Claude Desktop 通过 Model Context Protocol 调用；主扫描进程不依赖此组，
@@ -44,11 +47,11 @@ httpx>=0.25.0
 # import 本模块（AST 枚举自动发现 `_hive_dir` 这个路径解析器）验证它跟随
 # ALPHA_HIVE_HOME——CI 若缺这两个包，该用例会因 ModuleNotFoundError 而非真正
 # 验证路径解析行为失败，且与用户本机（已手动装好两者）的实际表现不一致。
-mcp>=1.26.0,<2
-pydantic>=2.12.0,<3
+mcp==1.26.0
+pydantic==2.12.5
 # ========== Alpha Bot 本机前端（alphabot/，v0.45.388） ==========
 # mcp 已经依赖这两个；显式写出，别让前端靠传递依赖活着
-starlette>=0.27,<2
-uvicorn>=0.23,<1
+starlette==0.52.1
+uvicorn==0.40.0
 # Alpha Bot.app 的原生窗口（v0.45.407）；只在 macOS 装。没有它启动器退回浏览器（原因进 launcher.log）
-pywebview>=6.2,<7; sys_platform == "darwin"
+pywebview==6.2.1; sys_platform == "darwin"

@@ -81,6 +81,29 @@
 为什么不可能受结果影响  登记时该日 T+7 未到期（最早 10-21），本窗口此前到期的样本里没有这一天。
 守卫  `tests/test_forward_test_excluded_days.py::TestResonanceSkips`（含清空名单的对照）。
 
+──────────────────────────────────────────────────────────────────�
+修订 3（v0.45.605，2026-10-22，事后修订；只加敏感性分析，主分析不变）
+──────────────────────────────────────────────────────────────────�
+2026-10-14 生产扫描 14:00:10 代理探活失败 ⇒ 整轮直连 ⇒ yfinance 从第一个请求起 429：`iv_rank` / `unusual_flow` / `analyst_targets` /
+`catalysts` 四个字段同日 0/30，新闻通道 10/30 只退到 Yahoo。当天的分数是在降级值上算的，12 份 `analysis-*-ml-2026-10-14.json` 会进本检验。
+用户 2026-10-22 决定：**10-14 不排除**，主分析保持预注册口径（系统当天实际产出什么就算什么；该日没有被事后重放，与修订 2 的 10-12 不同）。
+另登记一条只做敏感性分析的规则。
+改了什么（只加不改）  `run()` 输出多一个 `sensitivity_excl_outage_days`：同一条 `evaluate` 链（一字未改）跑在「去掉 `source_outage` 日」的
+      样本上，并列放在主分析旁边。「`source_outage` 日」的定义被冻结：`day_health` 判定版本 1 + `MIN_OUTAGE_FIELDS=2` +
+      `scan_coverage_gate.FIELDS` 登记时的字段表，定义指纹 `38f150222c6a81d7`（`day_health.REGISTERED_FINGERPRINT`）；
+      字段表 / 阈值变了 ⇒ 指纹变 ⇒ 报「定义已变，不可比」（看得见），要继续须新开修订。判定对每一天由 `.swarm_results_<日期>.json` 重算；
+      判不了的日子不去掉、数量单列。窗口内当前只有 2026-10-14 一天命中；之后的故障日自动适用。
+盲化  主分析未出结论（confirmed / not_confirmed 之外）时敏感性块只露计数（去掉哪几天、少几份、合格周数），不露 ΔIC / p / 判定；
+      主分析出结论的那次才并列露出敏感性的结果。敏感性**不触发任何动作**：「按预注册删分数加成」只看主分析。方向不一致只是报告里的事实。
+登记时点  登记于 2026-10-22；10-14 的 T+7 目标日（NYSE 交易日）是 10-23，登记时 `close_t7` / `spy_return_t7` 30 行全空（只数了填没填，没读数值）；
+      但 10-15 至 10-22 的 6 个交易日收盘价当时已公开。登记者没有查看任何收益。主分析一字未动，所以该时点不影响主分析的有效性；
+      敏感性是辅助描述，**不能用来确认或推翻主分析**。
+守卫  `tests/test_day_health.py::TestSensitivityRuleIsFrozen` / `TestResonanceSensitivity`。
+同日勘误  v0.45.608（2026-10-22，登记后数小时、10-14 结果仍不存在、未看任何收益）：定义漏了小样本下限（1 只标的的结果文件里两个合法缺失的字段就是 0/1，
+      被判 source_outage），补 `MIN_TICKERS=10` 并入指纹 `76bd554125c07a4e` → `38f150222c6a81d7`；真实日子的影响（对 `.swarm_results_*.json` 现存 130 个文件逐日对照新旧定义）：**窗口内（2026-10-12 起）每天都是 30 只，判定不变，仍只有 2026-10-14 命中**；历史上有 12 天标的数 <10，新定义下判不了——其中 3 天（2026-06-15、07-28、07-30）原判 `source_outage`，回测命中数由 29 降为 26（初版写成「判定不变」未区分历史小样本日，同日更正）；窗口内仍只有 2026-10-14 命中。
+      同时修了两处实现缺陷：敏感性块在主分析未出结论时不再带 `status`（confirmed / not_confirmed 本身就是检视结论）；
+      窗口内有判不了的日子时不再声称「与主分析相同」。
+
 样本内复核：`--insample` 在 FORWARD_START 之前的样本上，用**现行权重**重算加权分后跑同一条链
 （加权分自证：用当时记录的权重应能复现当时记录的基础分）。它就是生成假设的那份数据，
 **只供复核报告数字，不能拿来确认。**
@@ -525,9 +548,35 @@ def run(home: Optional[Path] = None, db_path: Optional[str] = None, insample: bo
     else:
         if not Path(db_path).exists():
             return {"status": "cannot_judge", "reason": f"找不到数据库 {db_path}", "skipped": dict(loaded["skipped"])}
-        res = evaluate(rows, load_excess_returns(db_path), insample=insample)
+        excess = load_excess_returns(db_path)
+        res = evaluate(rows, excess, insample=insample)
     res["skipped_files"] = dict(loaded["skipped"])
+    # v0.45.598：窗口内哪些日子是「数据源整体降级的故障日」——**只显示**：样本与判定都已在上面算完，这里不回头改。
+    import day_health
+    res["day_health"] = day_health.summarize_days({r["date"] for r in rows}, home=home)
+    # 修订 3（2026-10-22）：敏感性分析——并列报告「去掉 source_outage 日」的结果；主分析（上面的 `res`）不动。样本内复核不做。
+    if not insample:
+        res["sensitivity_excl_outage_days"] = sensitivity_block(
+            res["day_health"], rows, lambda rs: evaluate(rs, excess, insample=False),
+            revealed=res.get("status") in ("confirmed", "not_confirmed")) if rows else {
+            "available": True, "excluded_days": [], "n_rows_removed": 0, "same_as_primary": True}
     return res
+
+
+def sensitivity_block(dh: Dict, rows: List[Dict], evaluate_on: Callable[[List[Dict]], Dict], *, revealed: bool) -> Dict:
+    """修订 3 的敏感性分析：同一条 `evaluate` 链跑在「去掉 `source_outage` 日」的样本上（实现在 `day_health.sensitivity_block`，两份检验共用）。
+
+    **不改主分析、不触发任何动作**。盲化期只露计数（去掉哪几天、少几份、合格周数）；`status`（confirmed / not_confirmed 本身就是检视结论）
+    与整份结果都只在 `revealed`（主分析本次已出结论）时露出。
+    """
+    import day_health
+
+    def _counts(r: Dict, kept: List[Dict]) -> Dict:
+        return {"n_reports": len(kept), **{k: r[k] for k in ("weeks", "next_look_at") if k in r}}
+
+    def _reveal(r: Dict) -> Dict:
+        return {"status": r.get("status"), "result": {k: v for k, v in r.items() if k not in ("skipped_files", "day_health")}}
+    return day_health.sensitivity_block(dh, rows, evaluate_on, revealed=revealed, counts=_counts, reveal=_reveal)
 
 
 def status_line(res: Dict) -> str:
@@ -571,6 +620,16 @@ def _print_human(res: Dict) -> None:
     print("━" * 72)
     print(f"  报告份数 {res.get('n_reports')}｜自证 {res.get('selfproof')}｜跳过文件 {res.get('skipped_files')}"
           f"｜GEX 链（修订 1）{res.get('gex_chain')}")
+    if res.get("day_health"):
+        import day_health
+        print("  " + day_health.describe(res["day_health"]))
+    sb = res.get("sensitivity_excl_outage_days")
+    if sb:
+        import day_health
+        for line in day_health.describe_sensitivity(sb):
+            print("  " + line)
+        if sb.get("result"):          # 只有主分析已出结论时才有；盲化期没有 result，不碰 status_line（它要 look / stats）
+            print("    " + status_line(sb["result"]))
     for ex in res.get("fail_examples") or []:
         print(f"    不一致样例：{ex}")
     s = res.get("status")

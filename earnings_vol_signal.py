@@ -576,6 +576,12 @@ def strangle_quote(qs, stats, ticker: str, as_of: str) -> Optional[dict]:
         import straddle_strangle_shadow as sss
         rec = sss.quote_record(qs, as_of, stats.get("moves") if isinstance(stats, dict) else None)
         sss.note("signal_recorded")
+        # 接线整批断了（上游角色名 / 快照形状 / delta 整体缺失）与「这票的 25Δ 腿真的取不到」在记录里同形，
+        # 所以在源头多数两个数：快照在而 25Δ 腿缺的 / 取到的（stats() 的 wiring_suspect ⇒ alert_manager P2；v0.45.593）
+        if rec.get("available"):
+            sss.note("signal_available")
+        elif str(rec.get("reason") or "").startswith("missing_leg"):
+            sss.note("signal_missing_leg")
         return rec
     except Exception as exc:  # noqa: BLE001 - 影子记录失败不能拖垮信号，但必须在源头登记
         _log.warning("[%s] 影子宽跨报价记录失败: %s", ticker, exc, exc_info=True)

@@ -16,7 +16,6 @@ P4: 免费新闻全文/摘要获取客户端
 from __future__ import annotations
 
 import collections
-import json
 import math
 import os
 import threading
@@ -26,7 +25,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import observation_archive as _obs
-from hive_logger import PATHS, atomic_json_write, get_logger, pdt_today
+import observation_layer as _obs_layer
+from hive_logger import PATHS, get_logger, pdt_today
 
 _log = get_logger("newsapi")
 
@@ -356,17 +356,17 @@ def get_ticker_news(ticker: str, max_articles: int = 10) -> Dict:
         data_quality: {issues: [...], cleaned_fields: [...]}
     }
     """
-    cache_path = _CACHE_DIR / f"{ticker}_news.json"
+    # v0.45.591：缓存里是上次取数的结局（所用原始观测 + 主源那一步的结局 + 取数时刻），不是算好的结果。命中时用与新取数
+    # 同一个解释函数重算、顺手补档——没开档的进程（MCP 等）填的缓存被扫描用上时，档案里照样有那份观测
+    cache_path = _obs_layer.cache_path(_CACHE_DIR, f"{ticker}_news")
 
     with _lock:
-        if cache_path.exists():
-            age = time.time() - cache_path.stat().st_mtime
-            if age < _CACHE_TTL:
-                try:
-                    with open(cache_path) as f:
-                        return json.load(f)
-                except (json.JSONDecodeError, OSError):
-                    pass
+        hit = _obs_layer.cache_read(cache_path, _CACHE_TTL)
+    if hit is not None:
+        try:
+            return _from_cache(ticker, hit)
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            _log.warning("新闻缓存内容解释不了，重新取数 (%s): %s", ticker, e)
 
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -403,7 +403,7 @@ def get_ticker_news(ticker: str, max_articles: int = 10) -> Dict:
         _record_primary_attempt(attempt["status"], attempt.get("message"))
         if result.get("is_real_data"):
             result["primary_attempt"] = attempt
-            _safe_cache(cache_path, result)
+            _cache_outcome(cache_path, result)
             return result
     if attempt["status"] in ("no_key", "no_requests", "unknown_primary"):
         _record_primary_attempt(attempt["status"])
@@ -413,15 +413,31 @@ def get_ticker_news(ticker: str, max_articles: int = 10) -> Dict:
     if _obs.REF_KEY not in result:
         _obs.fetch_failed("news.yahoo_finance", "no_data")
     result["primary_attempt"] = attempt
-    _safe_cache(cache_path, result)
+    _cache_outcome(cache_path, result)
     return result
 
 
-def _safe_cache(path: Path, data: Dict):
-    try:
-        atomic_json_write(path, data)
-    except (OSError, TypeError):
-        pass
+def _cache_outcome(path: Path, result: Dict) -> None:
+    """这次取数的结局写进缓存（v0.45.591）：取走结果里的原始观测载体，连同主源结局、取数时刻一起存。"""
+    observed = result.pop(_obs_layer.CARRIER_KEY, None) or {}
+    _obs_layer.cache_write(path, kind=observed.get("kind"), payload=observed.get("payload"),
+                           fetched_at=result.get("timestamp"),
+                           meta={"primary_attempt": result.get("primary_attempt")})
+
+
+def _from_cache(ticker: str, hit: Dict) -> Dict:
+    """缓存里的取数结局 → 结果：与新取数同一个解释函数；时间戳沿用当初取数的时刻，主源结局照当时的记录。"""
+    kind = hit["kind"]
+    if kind is None:
+        result = _fallback(ticker)
+    else:
+        result = _INTERPRET[kind](hit["payload"])
+        result[_obs.REF_KEY] = hit["ref"]
+    result["timestamp"] = hit["fetched_at"]
+    attempt = hit["meta"].get("primary_attempt")
+    if attempt is not None:
+        result["primary_attempt"] = attempt
+    return result
 
 
 def summarize_news_sources(swarm_results: Dict) -> Dict:
@@ -498,29 +514,12 @@ def _fetch_yf_news(ticker: str, max_articles: int = 10) -> Dict:
         news_items = resp.json().get("news", [])
         if not news_items:
             return _fallback(ticker)
-        # v0.45.568：原始条目进观测档案（只存、不改值）；地址随结果的 `observation` 键走、进派生缓存
-        _ref = _obs.observe("news.yahoo_finance",
-                            {"ticker": ticker, "max_articles": max_articles, "news": news_items},
-                            request={"url": _YF_NEWS_URL, "params": params})
-
-        raw_articles = []
-        for item in news_items[:max_articles]:
-            ts = item.get("providerPublishTime", 0)
-            raw_articles.append({
-                "title": item.get("title", ""),
-                "publisher": item.get("publisher", ""),
-                "summary": item.get("summary", item.get("title", ""))[:300],
-                "published_at": (
-                    datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-                    if ts else ""
-                ),
-                "link": item.get("link", ""),
-                "sentiment_label": "neutral",
-            })
-
-        raw_articles = _label_sentiment(raw_articles)
-        result = _build_result(ticker, raw_articles, source="yahoo_finance")
+        # v0.45.568：原始条目进观测档案（只存、不改值）；地址随结果的 `observation` 键走
+        payload = {"ticker": ticker, "max_articles": max_articles, "news": news_items}
+        _ref = _obs.observe("news.yahoo_finance", payload, request={"url": _YF_NEWS_URL, "params": params})
+        result = _from_yahoo(payload)
         result[_obs.REF_KEY] = _ref
+        result[_obs_layer.CARRIER_KEY] = {"kind": "news.yahoo_finance", "payload": payload}
         return result
 
     except NETWORK_ERRORS as e:
@@ -579,47 +578,15 @@ def _fetch_av_news(ticker: str, api_key: str, max_articles: int = 10) -> Dict:
         if not feed:
             return _primary_fail(ticker, "empty_feed")
         # v0.45.568：原始 feed 进观测档案；请求参数去掉 apikey（`_redact` 另有一道按键名的兜底）
-        _ref = _obs.observe("news.alpha_vantage", {"ticker": ticker, "max_articles": max_articles, "feed": feed},
+        payload = {"ticker": ticker, "max_articles": max_articles, "feed": feed}
+        _ref = _obs.observe("news.alpha_vantage", payload,
                             request={"url": _AV_NEWS_URL,
                                      "params": {k: v for k, v in params.items() if k != "apikey"}})
-
-        raw_articles = []
-        for item in feed[:max_articles]:
-            # 提取当前 ticker 的情绪评分（AV 按 ticker 分别提供）
-            ticker_sent = next(
-                (s for s in item.get("ticker_sentiment", [])
-                 if s.get("ticker") == ticker),
-                {}
-            )
-            try:
-                sent_val = float(ticker_sent.get("ticker_sentiment_score", "0"))
-            except (ValueError, TypeError):
-                sent_val = 0.0
-
-            # AV 官方阈值判断
-            if math.isnan(sent_val) or math.isinf(sent_val):
-                sent_val = 0.0
-            if sent_val > _AV_BULL_THRESHOLD:
-                label = "bullish"
-            elif sent_val < _AV_BEAR_THRESHOLD:
-                label = "bearish"
-            else:
-                label = "neutral"
-
-            raw_articles.append({
-                "title": item.get("title", ""),
-                "publisher": item.get("source", ""),
-                "summary": item.get("summary", "")[:300],
-                "published_at": item.get("time_published", "")[:16],
-                "link": item.get("url", ""),
-                "sentiment_label": label,
-                "sentiment_score_raw": round(sent_val, 4),
-            })
-
+        result = _from_alpha_vantage(payload)
         if _news_breaker:
             _news_breaker.record_success()
-        result = _build_result(ticker, raw_articles, source="alpha_vantage")
         result[_obs.REF_KEY] = _ref
+        result[_obs_layer.CARRIER_KEY] = {"kind": "news.alpha_vantage", "payload": payload}
         return result
 
     except NETWORK_ERRORS as e:
@@ -628,6 +595,44 @@ def _fetch_av_news(ticker: str, api_key: str, max_articles: int = 10) -> Dict:
             _news_breaker.record_failure()
         # 异常文本里可能带完整 URL（含 apikey 参数）⇒ 去 key 后才落进记录
         return _primary_fail(ticker, "network_error", _redact(f"{type(e).__name__}: {e}", api_key))
+
+
+def _from_alpha_vantage(payload: Dict) -> Dict:
+    """AV 原始 feed → 结果（新取数与缓存命中共用）。"""
+    ticker, max_articles, feed = payload["ticker"], payload["max_articles"], payload["feed"]
+    raw_articles = []
+    for item in feed[:max_articles]:
+        # 提取当前 ticker 的情绪评分（AV 按 ticker 分别提供）
+        ticker_sent = next(
+            (s for s in item.get("ticker_sentiment", [])
+             if s.get("ticker") == ticker),
+            {}
+        )
+        try:
+            sent_val = float(ticker_sent.get("ticker_sentiment_score", "0"))
+        except (ValueError, TypeError):
+            sent_val = 0.0
+
+        # AV 官方阈值判断
+        if math.isnan(sent_val) or math.isinf(sent_val):
+            sent_val = 0.0
+        if sent_val > _AV_BULL_THRESHOLD:
+            label = "bullish"
+        elif sent_val < _AV_BEAR_THRESHOLD:
+            label = "bearish"
+        else:
+            label = "neutral"
+
+        raw_articles.append({
+            "title": item.get("title", ""),
+            "publisher": item.get("source", ""),
+            "summary": item.get("summary", "")[:300],
+            "published_at": item.get("time_published", "")[:16],
+            "link": item.get("url", ""),
+            "sentiment_label": label,
+            "sentiment_score_raw": round(sent_val, 4),
+        })
+    return _build_result(ticker, raw_articles, source="alpha_vantage")
 
 
 # ==================== Massive（原 Polygon.io）====================
@@ -678,10 +683,18 @@ def _fetch_massive_news(ticker: str, api_key: str, max_articles: int = 10) -> Di
     if not results:
         return _primary_fail(ticker, "empty_feed")
     # v0.45.568：原始 results 进观测档案（key 在请求头里，不在 params）
-    _ref = _obs.observe("news.massive", {"ticker": ticker, "symbol": sym, "max_articles": max_articles,
-                                         "results": results},
-                        request={"url": _MASSIVE_NEWS_URL, "params": params})
+    payload = {"ticker": ticker, "symbol": sym, "max_articles": max_articles, "results": results}
+    _ref = _obs.observe("news.massive", payload, request={"url": _MASSIVE_NEWS_URL, "params": params})
+    result = _from_massive(payload)
+    result[_obs.REF_KEY] = _ref
+    result[_obs_layer.CARRIER_KEY] = {"kind": "news.massive", "payload": payload}
+    return result
 
+
+def _from_massive(payload: Dict) -> Dict:
+    """Massive 原始 results → 结果（新取数与缓存命中共用）。"""
+    ticker, sym, max_articles, results = (payload["ticker"], payload["symbol"], payload["max_articles"],
+                                          payload["results"])
     raw_articles = []
     no_insight = 0
     for item in results[:max_articles]:
@@ -700,8 +713,34 @@ def _fetch_massive_news(ticker: str, api_key: str, max_articles: int = 10) -> Di
         })
     result = _build_result(ticker, raw_articles, source="massive")
     result["massive_no_insight"] = no_insight
-    result[_obs.REF_KEY] = _ref
     return result
+
+
+def _from_yahoo(payload: Dict) -> Dict:
+    """Yahoo 原始 news 条目 → 结果（新取数与缓存命中共用）。"""
+    ticker, max_articles, news_items = payload["ticker"], payload["max_articles"], payload["news"]
+    raw_articles = []
+    for item in news_items[:max_articles]:
+        ts = item.get("providerPublishTime", 0)
+        raw_articles.append({
+            "title": item.get("title", ""),
+            "publisher": item.get("publisher", ""),
+            "summary": item.get("summary", item.get("title", ""))[:300],
+            "published_at": (
+                datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+                if ts else ""
+            ),
+            "link": item.get("link", ""),
+            "sentiment_label": "neutral",
+        })
+
+    raw_articles = _label_sentiment(raw_articles)
+    return _build_result(ticker, raw_articles, source="yahoo_finance")
+
+
+#: 观测种类 → 解释函数（v0.45.591：缓存命中按 kind 选，与新取数走同一个）
+_INTERPRET = {"news.massive": _from_massive, "news.alpha_vantage": _from_alpha_vantage,
+              "news.yahoo_finance": _from_yahoo}
 
 
 # ==================== 情绪标注 ====================

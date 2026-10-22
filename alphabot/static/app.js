@@ -10,6 +10,7 @@ import { renderHedge } from "./pages/hedge.js";
 import { renderResults } from "./pages/results.js";
 import { renderMethod } from "./pages/method.js";
 import { renderHelp } from "./pages/help.js";
+import { initChat } from "./chat.js";
 
 export const state = { meta: null };
 const app = document.getElementById("app");
@@ -44,7 +45,7 @@ async function stopServer() {
   disposeAll();
   fill(app, h("div", { class: "panel stopped" },
     h("h2", {}, "服务已停止"),
-    h("p", {}, "可以关掉这个页面。再次使用：双击 Alpha Bot.app，或在终端运行 make alphabot。")));
+    h("p", {}, "可以关掉这个页面。再次使用：双击 Alpha Bot.app，或在终端运行 make -C ~/alpha-hive-prod alphabot。")));
   fill(document.getElementById("foot"));
   fill(document.getElementById("session"));
 }
@@ -104,4 +105,5 @@ async function route() {
 
 window.addEventListener("hashchange", route);
 const metaTimer = setInterval(() => { refreshMeta().catch(() => {}); }, 60000);
+initChat();
 route();

@@ -87,7 +87,9 @@ _TOP_KEYS_ALWAYS = {"forward_start", "today", "status", "h1_weeks", "next_look_a
                     "forward_test_excluded_days",   # 修订 2（v0.45.484）：只是日期列表，不含效应量
                     "input_code_guard",             # v0.45.554：单元名与指纹状态，不含效应量
                     "buzz_v1_self_proof",           # v0.45.556：自证计数与窗口，不含效应量
-                    "buzz_v1_bridge"}               # v0.45.583：桥接核对计数与状态，不含效应量
+                    "buzz_v1_bridge",               # v0.45.583：桥接核对计数与状态，不含效应量
+                    "day_health",                   # v0.45.598：窗口内数据源故障日的日期与字段名，不含效应量
+                    "sensitivity_excl_outage_days"}  # v0.45.605（修订 3）：未出结论时只有计数，结论只在主分析也出结论时露出
 
 #: 窗口首日（周一）。窗口内的夹具日期一律相对它写——修订 1 把起点从 09-28 挪到 10-12 时，
 #: 写死的日期整批落到窗口前，测试红的原因变成「夹具过期」而不是「执行器错了」
@@ -813,10 +815,16 @@ class TestStaticGuards:
 # ── 8. 接线：就绪度闸 ────────────────────────────────────────────────────────
 
 #: `ic_rerun_readiness --quiet` 已知各段的名字（段首图标后面紧跟的文字），**按文档顺序**。
-#: 新段只许追加在末尾（且以 🚨 开头）——要在这里加名字，就是在改周度任务读的格式。
+#: 新段只许追加在末尾（且是下面 `_QUIET_TRAILING` 登记过的那几种）——要在这里加名字，就是在改周度任务读的格式。
 _QUIET_SEGMENT_NAMES = ("IC 重跑", "共振加成前瞻检验", "F&G 敞口门前瞻检验", "维度 IC 协议")
 #: 段首状态图标（与 `ic_rerun_readiness` / 三个执行器 `status_line` 的图标约定一致）
-_QUIET_ICONS = ("⏳", "✅", "⚠️", "🔔", "🚨")
+_QUIET_ICONS = ("⏳", "✅", "⚠️", "🔔", "🚨", "⏰")
+#: 已知段之后、只在要人看时才出现的追加段（段首前缀），按出现顺序：
+#:   · 🚨 世代边界数据核对未通过（v0.45.334）；
+#:   · 刻意池化到了复检日（v0.45.589，`signal_archive.DELIBERATELY_POOLED`）——到期 ⏰、登记表读不到 ⚠️，**恒为最后一段**。
+#: 周度任务 SKILL 规定 ⏳ 以外的图标一律在周报显著标出，所以 ⏰ 不必改 SKILL；但别复用 🚨（SKILL 对 🚨 有专门处置：去追加更正条目）。
+_QUIET_TRAILING = ("🚨 ", "⏰ 刻意池化复检到期：", "⚠️ 刻意池化复检核对不了")
+_QUIET_POOLED = _QUIET_TRAILING[1:]
 
 
 def _check_quiet_segments(segs):
@@ -830,9 +838,12 @@ def _check_quiet_segments(segs):
     for i, name in enumerate(_QUIET_SEGMENT_NAMES):
         if i < len(segs) and not segs[i].split(" ", 1)[-1].startswith(name):
             problems.append(f"第 {i + 1} 段应为「{name}」，实为 {segs[i][:30]!r}（已知段挪位或被删）")
-    for j, seg in enumerate(segs[len(_QUIET_SEGMENT_NAMES):], start=len(_QUIET_SEGMENT_NAMES) + 1):
-        if not seg.startswith("🚨 "):
-            problems.append(f"第 {j} 段是已知段之后的追加段，只许以 🚨 开头：{seg[:30]!r}")
+    tail = segs[len(_QUIET_SEGMENT_NAMES):]
+    for j, seg in enumerate(tail, start=len(_QUIET_SEGMENT_NAMES) + 1):
+        if not seg.startswith(_QUIET_TRAILING):
+            problems.append(f"第 {j} 段是已知段之后的追加段，只许是 {_QUIET_TRAILING} 之一：{seg[:30]!r}")
+        elif seg.startswith(_QUIET_POOLED) and j != len(segs):
+            problems.append(f"第 {j} 段是刻意池化复检段，只许是最后一段：{seg[:30]!r}")
     return problems
 
 
@@ -856,7 +867,7 @@ class TestCarriedByReadiness:
         不再按「第三段 = F&G」，也写明「段数会随版本变，不要按段号解析」。所以这里不钉 `len(segs) == 4`——
         那样每加一段（例如 v0.45.334 的 🚨 第五段）都要回来改测试，而改测试的人最容易顺手把真正的契约也放掉。
         钉的是 `_check_quiet_segments` 的三条：已知段按文档顺序出现（不许挪位、不许删）、每段以已知状态图标开头、
-        已知段之后只许**追加**、且追加段以 🚨 开头。
+        已知段之后只许**追加**、且追加段是登记过的那几种（🚨 / 刻意池化复检段，后者恒为最后一段）。
         """
         import sys
         import ic_rerun_readiness as rr
@@ -876,7 +887,9 @@ class TestCarriedByReadiness:
         (lambda s: [s[0], s[1], s[3]], "删掉 F&G 段"),
         (lambda s: s[:3], "删掉末段（维度 IC）"),
         (lambda s: [s[0], s[1], s[2], "🚨 插队", s[3]], "新段插在已知段中间"),
-        (lambda s: s + ["⏳ 新段不许用非 🚨 图标追加"], "追加段不以 🚨 开头"),
+        (lambda s: s + ["⏳ 新段不许用非 🚨 图标追加"], "追加段不是登记过的那几种"),
+        (lambda s: s + ["⏰ 别的到期提醒"], "⏰ 开头但不是刻意池化段"),
+        (lambda s: s + ["⏰ 刻意池化复检到期：x", "🚨 世代边界"], "刻意池化段不在最后"),
         (lambda s: [s[0].split(" ", 1)[1]] + s[1:], "段首丢了状态图标"),
     ])
     def test_segment_rule_has_teeth(self, mutate, why):
@@ -885,6 +898,8 @@ class TestCarriedByReadiness:
                 "⏳ 维度 IC 协议（v0.45.320 预注册·修订 1）：…"]
         assert _check_quiet_segments(segs) == []
         assert _check_quiet_segments(segs + ["🚨 世代边界 vX / 2099-01-01 数据核对未通过"]) == [], "末尾追加 🚨 段是合法的"
+        assert _check_quiet_segments(segs + ["🚨 世代边界 vX", "⏰ 刻意池化复检到期：sentiment.pct …"]) == [], (
+            "🚨 之后再追加刻意池化段是合法的")
         assert _check_quiet_segments(mutate(list(segs))), f"{why} 却没被判出来"
 
     def test_json_payload_has_dim_key(self, monkeypatch, tmp_path, capsys):

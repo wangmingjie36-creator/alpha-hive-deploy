@@ -534,8 +534,11 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("health_check.py", "PROJECT"),               # git -C <仓库>
         ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
         ("collect_data.py", "_SCRIPT_DIR"),           # 运行环境探测
+        ("tools/constraints_lock.py", "ROOT"),        # 仓库根：读写 requirements.txt / constraints.txt（代码同址，v0.45.617）
         ("tools/clockshift/audit.py", "HERE"),        # harness 自己的目录：拨钟轮把它插到子 pytest 的 PYTHONPATH 首位（sitecustomize / `-p clockshift` 从这里加载），v0.45.495
         ("tools/clockshift/clockshift.py", "HERE"),   # 同上：补进拨钟下每个子进程的 PYTHONPATH；不进 MUST_STAY——那条参数化测试要 import 它，而 import 即安装（模块名不同 ⇒ `INSTALLED` 是另一份 ⇒ 审计轮里二次拨钟）。指错由 `test_clockshift_harness` 的子进程用例接住
+        ("tools/select_tests/audit_plugin.py", "REPO"),   # 代码锚点：审计插件要扫的就是「本仓库」（git ls-files / 相对路径归属），v0.45.615；不进 MUST_STAY——那条参数化测试要 import 它，而 import 即装审计钩子且要求 SELECT_TESTS_OUT
+        ("tools/select_tests/select_tests.py", "REPO"),   # 代码锚点：git -C <仓库>、tests/ 目录、给子 pytest 的 PYTHONPATH（v0.45.615）
         ("alphabot/macos_app.py", "_DELEGATE"),       # 不是路径：委托子进程的源码文本，其中 `m.__file__` 在子进程里核对 import 到的生成器确实在目标代码目录下（「代码在哪」，v0.45.451）
         # ── B. 仓库内随代码发布的**只读**配置/文档 ──
         ("thesis_breaks.py", "_CONFIG_JSON_PATH"),    # thesis_breaks_config.json，生产只读
@@ -735,7 +738,9 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("health_check.py", "PROJECT"),               # git -C <仓库>
         ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
         ("collect_data.py", "_SCRIPT_DIR"),           # 运行环境探测
+        ("tools/constraints_lock.py", "ROOT"),        # 依赖清单在仓库根（v0.45.617；改成 PATHS.home ⇒ 去数据根找 requirements.txt）
         ("tools/clockshift/audit.py", "HERE"),        # 拨钟子进程的 PYTHONPATH（v0.45.495；改成 PATHS.home ⇒ 拨钟轮加载不到 harness）
+        ("tools/select_tests/select_tests.py", "REPO"),   # git -C <仓库> / tests/ 目录 / 子 pytest 的 PYTHONPATH（v0.45.615）
         # 仓库内随代码发布的**只读**配置/文档
         ("thesis_breaks.py", "_CONFIG_JSON_PATH"),
         ("market_intelligence.py", "_BASE"),

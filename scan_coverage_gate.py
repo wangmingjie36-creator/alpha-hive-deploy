@@ -194,7 +194,8 @@ def check(date: str, results_path: Optional[Path] = None) -> Dict[str, Any]:
 
     degraded = [r for r in rows if r["degraded"]]
     # 多个**不同数据源**同时降级 ⇒ 大概率是网络/闸门层，不是某个源挂了
-    srcs = {r["source"].split()[0] for r in degraded}
+    from day_health import family as _family      # 源族切分只有一份实现（v0.45.608：此前与 day_health.family 各写一份）
+    srcs = {_family(r["source"]) for r in degraded}
     return {
         "date": date, "determinable": True, "tickers": n,
         "ticker_names": sorted(results),    # v0.45.360：账本核对要知道「该有哪些」
@@ -622,7 +623,8 @@ def contract_attention(res: Dict[str, Any]) -> List[Dict[str, Any]]:
                            f"（闸 {f['min_coverage']:.0%}，{f['source']}）" for f in bad)
                        + " —— 本次报告里这些指标会显示「—」"))
         if res.get("likely_network_layer"):
-            srcs = sorted({f["source"].split()[0] for f in bad})
+            from day_health import family as _family
+            srcs = sorted({_family(f["source"]) for f in bad})
             items.append(A(f"{_TOOL}.likely_network_layer", "warn",
                            f"多个不同数据源同时降级（{'、'.join(srcs)}）⇒ 疑为网络/闸门层，"
                            f"而非单一数据源不可用"))

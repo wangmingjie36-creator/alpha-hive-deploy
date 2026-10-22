@@ -50,6 +50,9 @@ function bandText(side, band) {
   return `${where}，${edge}。${verdict}（${side === "short" ? "卖跨式要价格留在带内" : "买跨式要价格冲出带外"}）。`;
 }
 
+// 合计里只要有一格有数，就说明两条腿的数都被用上了（合计需要两条腿）；全是「—」时不许再声称「含某腿的模型值」
+const GREEK_TOTALS = ["dollar_delta", "gamma_dollar_per_1pct", "theta_dollar_per_day", "vega_dollar_per_pt"];
+
 function greeksGrid(g, warnAt) {
   if (!g) return null;
   const cell = (k, v) => h("div", {}, h("div", { class: "k" }, k), h("div", { class: "v" }, v));
@@ -63,8 +66,8 @@ function greeksGrid(g, warnAt) {
     g.directional ? h("p", { class: "callout warn" },
       `已明显带方向：每份跨式净 Δ ${num(g.net_delta_per_straddle, 2)}（入场时约为 0，提示阈值 ${num(warnAt, 2)}）。账本不做 delta 对冲，这一笔现在相当于持有 ${shares}。`) : null,
     !g.complete ? h("div", { class: "small muted" }, `Greeks 不全：${(g.missing || []).join("、")}`) : null,
-    g.degraded_legs?.length ? h("div", { class: "small muted" },
-      `Greeks 含 ${g.degraded_legs.join("、")} 腿（bid=0）的 CBOE 模型值，仅供参考；账本侧仍按严格报价口径，当晚可能显示缺报价。`) : null,
+    g.degraded_legs?.length && GREEK_TOTALS.some((k) => isNum(g[k])) ? h("div", { class: "small muted" },
+      `Greeks 含 ${g.degraded_legs.join("、")} 腿（bid=0）的 CBOE 模型值，仅供参考；这条腿没有 mid，盯市价与压力表仍按严格报价口径。`) : null,
   ];
 }
 
@@ -90,8 +93,8 @@ function levelsLine(lv, be) {
 // ── 跨式 vs 宽跨 并排对比卡（v0.45.584）：只并排事实，不给「选哪个」（没有推荐 / 综合分字段，守卫钉住）
 const CMP_NAME = { straddle: "跨式（ATM）", strangle: "宽跨（25Δ）" };
 
-function compareCard(r) {
-  if (!r.available) return h("p", { class: "small muted" }, `对比不可得：${r.reason_zh || r.reason || "—"}`);
+function compareCard(r, opts = {}) {
+  if (!r.available) return h("p", { class: "small muted" }, `${r.ticker || ""} ${r.as_of || ""} 对比不可得：${r.reason_zh || r.reason || "—"}`);
   const A = r.structures.straddle, B = r.structures.strangle;
   const cell = (s, render) => (s.available ? h("td", {}, render(s)) : h("td", { class: "na" }, "—"));
   const sub = (t) => h("span", { class: "sub" }, t);
@@ -105,7 +108,7 @@ function compareCard(r) {
     ["到期盈亏平衡带", (s) => `${num(s.band.lo)} – ${num(s.band.hi)}`, (s) => sub(`相对现价 ${signedPct(s.band.lo_pct)} … ${signedPct(s.band.hi_pct)}`)],
     ["历史涨跌落在带外", (s) => (s.hist_outside.n ? `${s.hist_outside.k} / ${s.hist_outside.n}` : "—"),
       (s) => (s.hist_outside.ci95 ? sub(`95% 区间 ${pctPts(s.hist_outside.ci95[0] * 100, 0)}–${pctPts(s.hist_outside.ci95[1] * 100, 0)}（样本很小）`) : null)],
-    [`账本定仓${isNum(r.nav) ? `（按 NAV ${money(r.nav, 0)} 估算）` : ""}`, (s) => (s.sizing.contracts ? `${s.sizing.contracts} 张` : "—"),
+    [`账本定仓${isNum(r.nav) ? `（按${r.nav_basis?.label || " NAV"} ${money(r.nav, 0)}）` : ""}`, (s) => (s.sizing.contracts ? `${s.sizing.contracts} 张` : "—"),
       (s) => (s.sizing.contracts ? sub(`${num(s.sizing.shares, 0)} 股 · 名义 ${money(s.sizing.notional_usd, 0)}`) : sub(String(s.sizing.reason || "")))],
   ];
   const head = h("thead", {}, h("tr", {}, h("th", { scope: "col" }, ""), h("th", { scope: "col" }, CMP_NAME.straddle), h("th", { scope: "col" }, CMP_NAME.strangle)));
@@ -114,8 +117,11 @@ function compareCard(r) {
       : cell(s, (x) => h("span", {}, main(x), extra ? extra(x) : null)))))));
   const sig = r.signal || {};
   const hist = r.hist;
+  // 持仓卡里传入账本实际张数：对比卡按还原的 NAV 估算，两者不一致（取整误差）就直说，不让同一张卡上出现两个张数还不解释
+  const real = opts.ledgerContracts, est = A.sizing?.contracts;
+  const mismatch = isNum(real) && A.available && isNum(est) && real !== est;
   return h("div", { class: "cmp" },
-    h("div", { class: "cmp-head" }, `快照 ${r.as_of}（${r.market_open === false ? "收盘后" : r.market_open ? "盘中" : "时段未知"}）· 标的 ${num(r.underlying_price)} · 到期 ${r.selected_expiry || "—"}${isNum(r.dte) ? `（${r.dte} 天）` : ""}${sig.earnings_date ? ` · 财报 ${sig.earnings_date}` : ""}`),
+    h("div", { class: "cmp-head" }, h("b", {}, r.ticker || "—"), ` · 快照 ${r.as_of}（${r.market_open === false ? "收盘后" : r.market_open ? "盘中" : "时段未知"}）· 标的 ${num(r.underlying_price)} · 到期 ${r.selected_expiry || "—"}${isNum(r.dte) ? `（${r.dte} 天）` : ""}${sig.earnings_date ? ` · 财报 ${sig.earnings_date}` : ""}`),
     h("div", { class: "cmp-scroll" }, h("table", { class: "cmp-grid" }, head, body)),
     isNum(r.premium_ratio) ? h("div", { class: "sd-row" }, `宽跨权利金是跨式的 ${pctPts(r.premium_ratio * 100, 0)}`,
       isNum(r.contracts_ratio) ? `；同一风险预算下张数是跨式的 ${num(r.contracts_ratio, 1)} 倍——名义风险不一定更小。` : "。") : null,
@@ -124,16 +130,27 @@ function compareCard(r) {
       `；中位 |涨跌| ${pctPts(hist.median_abs_pct, 2)}、最大 ${pctPts(hist.max_abs_pct, 2)}`,
       isNum(sig.implied_event_move_pct) ? `；信号日的隐含事件波动 ${pctPts(sig.implied_event_move_pct, 2)}` : "")
       : h("div", { class: "small muted" }, `历史财报涨跌不可得：${r.hist_reason_zh || "—"}`),
+    mismatch ? h("div", { class: "small muted" }, `账本实际开了 ${real} 张；本卡按上面的 NAV 与这份快照的报价估算为 ${est} 张。差异可能来自 NAV 还原的取整，或账本当时用的报价 / 风险比例与现在不同——以账本的张数为准。`) : null,
     h("ul", { class: "small muted cmp-notes" }, (r.caveats || []).map((c) => h("li", {}, c.text))));
 }
 
-async function loadCompare(el, ticker, asOf) {
-  fill(el, h("div", { class: "small muted" }, `正在读 ${ticker} ${asOf} 的快照…`));
+// 同一个容器（「今日信号」共用的 cmpHost）可以被连点：每次请求领一个递增令牌（el.dataset.cmpSeq），回来时令牌已不是最新的
+// （或容器已不在页面上）就丢弃——迟到的旧响应、失败的旧请求都不许盖掉新卡。返回结局：ok / unavailable / error / stale。
+async function loadCompare(el, ticker, asOf, opts = {}) {
+  const seq = String((Number(el.dataset.cmpSeq) || 0) + 1);
+  el.dataset.cmpSeq = seq;
+  const current = () => el.dataset.cmpSeq === seq && el.isConnected;
+  fill(el, h("div", { class: "small muted" }, `正在读 ${ticker} ${asOf || ""} 的快照…`));
   try {
     const r = await api(`/api/straddle/compare/${encodeURIComponent(ticker)}${asOf ? `?as_of=${encodeURIComponent(asOf)}` : ""}`);
-    if (el.isConnected) fill(el, compareCard(r));
+    if (!current()) return "stale";
+    fill(el, compareCard(r, opts));
+    return r.available ? "ok" : "unavailable";
   } catch (e) {
-    if (el.isConnected) fill(el, h("div", { class: "small err" }, `对比拉取失败：${e.message || e}`));
+    if (!current()) return "stale";
+    fill(el, h("div", { class: "small err" }, `${ticker} 对比拉取失败：${e.message || e}　`,
+      h("button", { class: "btn", type: "button", onclick: () => loadCompare(el, ticker, asOf, opts) }, "重试")));
+    return "error";
   }
 }
 
@@ -157,18 +174,48 @@ function renderLive(el, r, p, warnAt) {
     r.same_payload === false ? h("div", { class: "small muted" }, "注意：水平与报价来自不同时刻的两份 CBOE 文件。") : null);
 }
 
+// 账本 mark 冻结（某条腿报价不合账本口径）时，卡片上的「账本浮动盈亏」是旧价：标的在 mark 之后走了多远它都不知道。
+// 这里并排给一个按当前报价算的估算（只读、不写账本、与账本数字分开标注）：优先 mid；mid 不可得（bid=0）时，
+// 卖跨式按 ask 买回的价（立即平仓价，保守）。拿不到报价就如实说，不拿账本 mark 顶替。
+function estimateOf(r, p) {
+  if (isNum(r.unrealized_mid_usd)) return { usd: r.unrealized_mid_usd, basis: "mid" };
+  if (isNum(r.exit_now_usd)) return { usd: r.exit_now_usd, basis: r.exit_now_basis === "ask_only" ? "按 ask 买回" : "付点差平仓" };
+  return null;
+}
+
+function renderEst(el, r, p) {
+  if (!r) { fill(el, `账本 mark 停在 ${p.last_mark_date || "—"}（冻结 ${p.stale_days ?? "?"} 天），浮动盈亏是旧价。当前报价估算：未拉取。`); return; }
+  if (r.error) { fill(el, `账本 mark 已冻结，浮动盈亏是旧价。当前报价估算拉取失败：${r.error}`); return; }
+  if (!r.available) { fill(el, `账本 mark 已冻结，浮动盈亏是旧价。当前报价估算不可得：${r.reason || "—"}。`); return; }
+  const e = estimateOf(r, p);
+  if (!e) { fill(el, "账本 mark 已冻结，浮动盈亏是旧价。当前报价估算不可得：两腿报价都不全。"); return; }
+  const diff = isNum(p.unrealized_usd) ? e.usd - p.unrealized_usd : null;
+  fill(el, "账本 mark 已冻结，上面的浮动盈亏是旧价。按当前报价估算 ", h("b", { class: tone(e.usd) }, sMoney(e.usd)),
+    `（${e.basis}，非账本数字${isNum(diff) ? `；比账本低估 / 高估 ${sMoney(diff)}` : ""}）。`);
+}
+
 function positionCard(p, d, liveEls) {
   const warnAt = d.rules?.directional_delta_warn;
   const g = p.greeks, es = p.entry_signal || {};
   const liveEl = h("div", { class: "sd-live" });
-  liveEls[p.ticker] = { el: liveEl, p, warnAt };
-  renderLive(liveEl, null, p, warnAt);
   const stale = p.mark_source !== "cboe_mid";
-  // 入场时的对比：展开才读（只读本机快照与缓存文件，不联网）
+  const estEl = stale ? h("div", { class: "callout warn sd-est" }) : null;
+  liveEls[p.ticker] = { el: liveEl, p, warnAt, estEl };
+  renderLive(liveEl, null, p, warnAt);
+  if (estEl) renderEst(estEl, null, p);
+  // 入场时的对比：展开才读（只读本机快照与缓存文件，不联网）。对比卡整张是卖方视角（收 bid、买回按 ask、按空头定仓规则），
+  // 买跨式持仓不展示它（不编买方数）。懒加载标志 dataset.loaded 只在**拿到可用的卡**之后才置位：失败 / 不可得时
+  // 再展开会重新请求（loadCompare 的失败文案里还有「重试」）；dataset.busy 防止加载中重复展开发出并发请求。
   const cmpBody = h("div", { class: "cmp" }, h("div", { class: "small muted" }, "展开时才读入场日的快照。"));
-  const cmpDet = h("details", { class: "sd-why", ontoggle: () => {
-    if (cmpDet.open && !cmpDet.dataset.loaded) { cmpDet.dataset.loaded = "1"; loadCompare(cmpBody, p.ticker, p.entry_date); }
-  } }, h("summary", {}, "入场时：跨式 vs 宽跨（只并排事实）"), cmpBody);
+  const cmpDet = p.side === "long"
+    ? h("p", { class: "small muted cmp-long-note" }, "买入跨式：对比卡只按卖方视角给出，此处不展示。")
+    : h("details", { class: "sd-why", ontoggle: async () => {
+      if (!cmpDet.open || cmpDet.dataset.loaded === "1" || cmpDet.dataset.busy === "1") return;
+      cmpDet.dataset.busy = "1";
+      const out = await loadCompare(cmpBody, p.ticker, p.entry_date, { ledgerContracts: p.contracts });
+      delete cmpDet.dataset.busy;
+      if (out === "ok") cmpDet.dataset.loaded = "1";
+    } }, h("summary", {}, "入场时：跨式 vs 宽跨（只并排事实，卖方视角）"), cmpBody);
   return h("article", { class: "sd-card", "aria-label": `${p.ticker} ${SIDE[p.side] || p.side}` },
     h("div", { class: "sd-head" },
       h("span", { class: "tk" }, p.ticker), h("span", { class: "chip" }, SIDE[p.side] || p.side),
@@ -182,6 +229,7 @@ function positionCard(p, d, liveEls) {
       h("div", { class: "small muted", style: { textAlign: "right" } },
         isNum(p.days?.to_earnings) ? (p.days.to_earnings >= 0 ? `距财报 ${p.days.to_earnings} 天` : `财报已过 ${-p.days.to_earnings} 天`) : "财报日未知",
         h("br"), isNum(p.days?.to_expiry) ? `距到期 ${p.days.to_expiry} 天` : "")),
+    estEl,
     timeline(p, d.today_et),
     h("div", {}, h("div", { class: "sd-k" }, "到期盈亏平衡带（K ± 入场权利金）"), bandBar(p.side, p.breakeven, p.underlying?.price),
       h("div", { class: "sd-row" }, bandText(p.side, p.band))),
@@ -220,9 +268,57 @@ function shadowPanel(s, rules) {
 
 // 影子宽跨记录（v0.45.586，协议 experiments/straddle_strangle_shadow_prereg.md）：**只显示计数**——任何一笔的影子盈亏、
 // 与跨式盈亏的差都不在这一页（盲期：自己拼起来按结构比较就是偷看）。
+// 单位状态 → 中文。键与 straddle_strangle_shadow.units() 能产出的状态一一对应；`exit_not_applicable` 在 units() 里不可达
+// （入场不是 ok 的单位到不了平仓那一步）所以不登记。未登记的状态（以后新增的）原样显示代码，不留空（ssLabel）。
 const SS_STATUS = { ok: "进检验", no_record: "没有影子记录", before_start: "登记前入场（排除）", long_side: "多头（只描述）",
   entry_unquotable: "入场时宽跨不可成交", entry_no_signal_record: "信号行没带记录", entry_no_size: "定仓给不出张数",
-  exit_unpriced: "平仓日无价", exit_error: "平仓记录出错", exit_not_applicable: "不适用", unusable: "数据不全" };
+  exit_unpriced: "平仓日无价", exit_error: "平仓记录出错", exit_missing: "平仓记录缺影子平仓项",
+  exit_before_event: "平仓日不晚于财报日（事件前就平了，排除）", unusable: "数据不全" };
+
+const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);   // 状态码来自后端：'constructor' 之类不许查到原型上的东西
+
+function ssLabel(k) {
+  if (own(SS_STATUS, k)) return SS_STATUS[k];
+  const m = /^schema:(.*)$/.exec(String(k));
+  return m ? `影子记录版本 ${m[1]} 不符` : String(k);
+}
+
+// 持仓中的 open_by_status 键是**入场**状态（ok / unquotable / no_signal_record / no_size），与已平仓单位共用同一张表：
+// ok = 入场时两腿能成交（平仓后才会进检验），其余补 entry_ 前缀查同一张表；查不到再原样显示。
+function ssOpenLabel(k) {
+  if (k === "ok") return "入场可成交";
+  const key = `entry_${k}`;
+  return own(SS_STATUS, key) ? SS_STATUS[key] : ssLabel(k);
+}
+
+// 检验**冻结之后**才有（服务端在未冻结 / 冻结文件坏了时根本不给 `revealed`）：冻结的结果 + 每个进检验的空头单位的配对。
+// 冻结前这个函数不会被调用，也没有它的数据。d = (宽跨假想盈亏 − 跨式盈亏) ÷ 定仓 NAV（含定仓杠杆，协议 §3）。
+const RV_DECISION = { reject_h0: "拒绝 H0：两种结构的盈亏有系统差异", fail_to_reject_h0: "没能拒绝 H0：这个样本量下没看出差异（不等于两者一样）" };
+const RV_DIRECTION = { strangle_higher: "宽跨更高", straddle_higher: "跨式更高", none: "无方向" };
+
+function revealedBlock(rv) {
+  const r = rv?.result || {};
+  const pairs = rv?.pairs || [];
+  const pct = (v) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}${num(Math.abs(v) * 100, 2)}%` : "—");
+  const head = r.testable === false
+    ? h("p", { class: "small" }, `冻结时无法检验：${r.reason || "—"}。`)
+    : h("p", { class: "small" }, `${RV_DECISION[r.decision] || r.decision || "—"}；p = ${isNum(r.p_value) ? num(r.p_value, 4) : "—"}（${r.mode === "enumerate" ? "枚举" : "随机置换"}），`,
+      `方向：${RV_DIRECTION[r.direction] || r.direction || "—"}，D = 平均 d = ${pct(r.observed)}（占定仓 NAV）。${r.n_units ?? "—"} 个单位 / ${r.n_blocks ?? "—"} 个财报周，${r.ready_date || "—"} 冻结。`);
+  const cols = [
+    { label: "票", render: (p) => p.ticker },
+    { label: "财报日", render: (p) => p.earnings_date || "—" },
+    { label: "入场 → 平仓", render: (p) => `${p.entry_date || "—"} → ${p.exit_date || "—"}` },
+    { label: "跨式", cls: "r", render: (p) => h("span", { class: tone(p.straddle_usd) }, `${p.straddle_contracts ?? "—"} 张 · ${sMoney(p.straddle_usd)}`) },
+    { label: "宽跨（假想）", cls: "r", render: (p) => h("span", { class: tone(p.strangle_usd) }, `${p.strangle_contracts ?? "—"} 张 · ${sMoney(p.strangle_usd)}`) },
+    { label: "d（占 NAV）", cls: "r", render: (p) => h("span", { class: tone(p.d) }, pct(p.d)) },
+    { label: "冻结的检验", render: (p) => (p.in_frozen_test ? "在" : "之后平仓，只描述") },
+  ];
+  return h("div", {},
+    h("h3", {}, "冻结结果与每笔配对"),
+    head,
+    pairs.length ? table(cols, pairs) : h("p", { class: "small muted" }, "没有进检验的单位。"),
+    h("p", { class: "small muted" }, "盲期已结束（检验已冻结）。配对只是描述：判定只看冻结的那次检验；宽跨张数按账本的权利金定仓，是跨式的数倍，所以盈亏金额不能直接比大小。"));
+}
 
 function strangleShadowPanel(s, rules) {
   const pre = rules?.strangle_prereg || {};
@@ -230,14 +326,20 @@ function strangleShadowPanel(s, rules) {
     return panel("影子宽跨记录", { sub: "攒样本中 · 冻结前只给计数" }, h("p", { class: "small muted" }, `进度不可得：${s?.reason || "—"}`));
   }
   const need = s.need || {};
-  const byStatus = Object.entries(s.by_status || {}).map(([k, v]) => `${SS_STATUS[k] || k} ${v}`).join("、") || "—";
-  const openBy = Object.entries(s.open_by_status || {}).map(([k, v]) => `${k} ${v}`).join("、") || "—";
+  const byStatus = Object.entries(s.by_status || {}).map(([k, v]) => `${ssLabel(k)} ${v}`).join("、") || "—";
+  const openBy = Object.entries(s.open_by_status || {}).map(([k, v]) => `${ssOpenLabel(k)} ${v}`).join("、") || "—";
+  // n_closed 是**全部**已平仓单位（含登记前入场、状态 before_start 的），不是「自 start_date 起入场的」——拆开说，只给个数
+  const nClosed = isNum(s.n_closed) ? s.n_closed : 0;
+  const nBefore = Number(s.by_status?.before_start) || 0;
+  const closedText = `已平仓共 ${nClosed} 笔，其中登记后入场 ${nClosed - nBefore} 笔${nBefore ? `（其余 ${nBefore} 笔是登记前入场、不进检验）` : ""}，进检验 ${s.n_units} 笔（只检验空头）。`;
   return panel("影子宽跨记录", { sub: s.frozen ? "检验已冻结" : (s.ready ? "已就绪，等待运行一次" : "攒样本中 · 冻结前只给计数") },
-    h("p", { class: "small" }, `每笔被账本开仓的跨式，同一天、同一份快照里再记一份假想的 25Δ 宽跨（只记录、不开仓）。自 ${s.start_date} 起入场的：持仓中带记录 ${s.n_open_recorded} 笔（${openBy}）；已平仓 ${s.n_closed} 笔，其中进检验 ${s.n_units} 笔（只检验空头）。`),
+    h("p", { class: "small" }, `每笔被账本开仓的跨式，同一天、同一份快照里再记一份假想的 25Δ 宽跨（只记录、不开仓）。持仓中自 ${s.start_date} 起入场且带记录的 ${s.n_open_recorded} 笔（${openBy}）；${closedText}`),
     gate("进检验的空头单位", s.n_units, need.min_units),
     gate("财报周（块）", s.n_blocks, need.min_blocks),
-    h("p", { class: "callout lock" }, `盲期：检验冻结前，页面不显示任何一笔的影子盈亏，也不把它和跨式盈亏放在一起；自己拼起来比较就是偷看，会作废这次检验。协议 v${pre.version ?? "—"}：${pre.doc || "experiments/straddle_strangle_shadow_prereg.md"}。`),
-    h("div", { class: "small muted" }, `已平仓按状态：${byStatus}`));
+    s.revealed ? null
+      : h("p", { class: "callout lock" }, `盲期：检验冻结前，页面不显示任何一笔的影子盈亏，也不把它和跨式盈亏放在一起；自己拼起来比较就是偷看，会作废这次检验。检验冻结后这里自动解锁每笔配对。协议 v${pre.version ?? "—"}：${pre.doc || "experiments/straddle_strangle_shadow_prereg.md"}。`),
+    h("div", { class: "small muted" }, `已平仓按状态：${byStatus}`),
+    s.revealed ? revealedBlock(s.revealed) : null);
 }
 
 export async function renderStraddle(root, alive) {
@@ -258,11 +360,20 @@ export async function renderStraddle(root, alive) {
   for (const [f, n] of Object.entries(d.bad_lines || {})) warns.push(`${f} 有 ${n} 行解析失败，没计入。`);
   if (d.meta_error) warns.push(`meta.json 读不了：${d.meta_error}`);
 
+  const es = k.event_split;
+  const sideSrc = es ? (es.saw_event.by_side || {}) : (k.by_side || {});
+  const nExcl = es ? (es.event_missed.n || 0) + (es.event_unknown.n || 0) : 0;
+  const sideSub = es && nExcl ? `已平仓 · 只含测到事件的 ${es.saw_event.n} 笔（不含事件前被平 ${es.event_missed.n} 笔${es.event_unknown.n ? `、日期缺失 ${es.event_unknown.n} 笔` : ""}）` : "已平仓";
   const kpis = h("div", { class: "kpis" },
     kpi("NAV", money(a.nav, 0)), kpi("累计", `${sMoney(isNum(a.nav) && isNum(a.starting_capital) ? a.nav - a.starting_capital : null)}（${signedPct(a.return_pct, 2)}）`, tone(a.return_pct)),
     kpi("已实现", sMoney(a.realized_usd), tone(a.realized_usd)), kpi("浮动", sMoney(a.unrealized_usd), tone(a.unrealized_usd)),
     kpi("在险权利金", money(a.open_premium_at_risk, 0)), kpi("持仓", `${a.positions ?? 0} / ${a.max_open ?? "—"}`),
-    kpi("已平仓", `${k.n ?? 0} 笔${isNum(k.win_rate) ? ` · 胜率 ${pctPts(k.win_rate, 0)}` : ""}`));
+    kpi("已平仓", `${k.n ?? 0} 笔${isNum(k.win_rate) ? ` · 胜率 ${pctPts(k.win_rate, 0)}` : ""}`),
+    // v0.45.606：测到事件 / 事件前被平拆开单列（平仓日 ≤ 财报日 = 没测到事件；读者侧判定，账本不存）。三块 n 之和 = 已平仓。
+    ...(((k.event_split?.event_missed?.n || 0) + (k.event_split?.event_unknown?.n || 0)) > 0 ? [
+      kpi("其中测到事件", `${k.event_split.saw_event.n} 笔${isNum(k.event_split.saw_event.win_rate) ? ` · 胜率 ${pctPts(k.event_split.saw_event.win_rate, 0)}` : ""} · ${sMoney(k.event_split.saw_event.total_pnl_usd)}`, tone(k.event_split.saw_event.total_pnl_usd)),
+      kpi("事件前被平", `${k.event_split.event_missed.n} 笔 · ${sMoney(k.event_split.event_missed.total_pnl_usd)}${k.event_split.event_unknown.n ? ` · 另有 ${k.event_split.event_unknown.n} 笔日期缺失` : ""}`, tone(k.event_split.event_missed.total_pnl_usd)),
+    ] : []));
 
   // 盘中参考报价（第二期）：按持仓逐只拉（服务端串行取数，每只约 4–7 秒，60 秒内走缓存）
   const liveEls = {};
@@ -270,6 +381,16 @@ export async function renderStraddle(root, alive) {
   const status = h("span", { class: "small muted" }, "盘中参考报价：未拉取");
   let auto = false, busy = false;
   const sessionLive = () => !!state.meta?.session?.live;
+  // 拉一只、写回它的卡（盘中参考块 + 冻结 mark 的估算行）；返回这只有没有拿到可用报价
+  async function pullOne(t, force) {
+    try { live[t] = await api(`/api/straddle/live/${encodeURIComponent(t)}${force ? "?force=1" : ""}`); }
+    catch (e) { live[t] = { error: e.message || String(e) }; }
+    if (!alive()) return false;
+    const x = liveEls[t];
+    renderLive(x.el, live[t], x.p, x.warnAt);
+    if (x.estEl) renderEst(x.estEl, live[t], x.p);
+    return !!live[t].available;
+  }
   async function pullAll(force) {
     if (busy) return;
     busy = true; pullBtn.disabled = true;
@@ -278,10 +399,8 @@ export async function renderStraddle(root, alive) {
     for (const [i, t] of tickers.entries()) {
       if (!alive()) return;
       fill(status, `正在拉 ${t}（${i + 1}/${tickers.length}）…`);
-      try { live[t] = await api(`/api/straddle/live/${encodeURIComponent(t)}${force ? "?force=1" : ""}`); if (live[t].available) ok += 1; }
-      catch (e) { live[t] = { error: e.message || String(e) }; }
+      if (await pullOne(t, force)) ok += 1;
       if (!alive()) return;
-      const x = liveEls[t]; renderLive(x.el, live[t], x.p, x.warnAt);
     }
     const now = new Date().toLocaleTimeString("zh-CN", { timeZone: "America/New_York", hour12: false });
     fill(status, `上次拉取 ${now} ET · ${ok}/${tickers.length} 只可得${sessionLive() ? "" : " · 现在不在交易时段，报价是最近一次收盘后的"}`);
@@ -296,13 +415,21 @@ export async function renderStraddle(root, alive) {
   const timer = setInterval(() => { if (!alive()) { clearInterval(timer); return; } if (auto && sessionLive()) pullAll(true); }, AUTO_MS);
 
   const cards = h("div", { class: "sd-cards" }, (d.positions || []).map((p) => positionCard(p, d, liveEls)));
+  // 账本 mark 冻结的那几只：进页面就拉一次（只读，串行；其余仍等你点「拉一次盘中报价」），否则页上只有旧价
+  (async () => {
+    for (const t of Object.keys(liveEls).filter((k) => liveEls[k].estEl)) {
+      if (!alive() || busy) return;
+      await pullOne(t, false);
+    }
+  })();
   const eqEl = h("div", { class: "chart short" });
   const calEl = h("div", { class: "chart short" });
   const sig = d.signals_today || {};
   const closedCols = [
     { label: "代码", render: (r) => h("b", {}, r.ticker) },
     { label: "方向", render: (r) => h("span", {}, SIDE[r.side] || r.side, h("span", { class: "sub" }, LABEL[r.label] || "")) },
-    { label: "开仓 → 平仓", render: (r) => h("span", {}, `${r.entry_date} → ${r.exit_date}`, h("span", { class: "sub" }, `持有 ${r.holding_days ?? "—"} 天 · ${EXIT[r.exit_reason] || r.exit_reason || "—"}`)) },
+    { label: "开仓 → 平仓", render: (r) => h("span", {}, `${r.entry_date} → ${r.exit_date}`, h("span", { class: "sub" }, `持有 ${r.holding_days ?? "—"} 天 · ${EXIT[r.exit_reason] || r.exit_reason || "—"}`),
+      r.event_missed === true ? h("span", { class: "chip warn", title: "平仓日不晚于财报日：财报行情发生之前就平了，这笔测到的是时间损耗，不是事件" }, "事件前被平") : null) },
     { label: "张数", cls: "r", render: (r) => r.contracts },
     { label: "权利金 入场 → 出场", cls: "r", render: (r) => `${num(r.entry_premium)} → ${num(r.exit_premium)}` },
     { label: "盈亏", cls: "r", render: (r) => h("span", { class: tone(r.pnl_usd) }, sMoney(r.pnl_usd), h("span", { class: "sub" }, signedPct(r.pnl_pct))) },
@@ -327,7 +454,7 @@ export async function renderStraddle(root, alive) {
     } }, `看 ${r.ticker} 对比`) },
   ];
   const cmpHost = h("div", { class: "cmp" }, h("div", { class: "small muted" }, "点上面「今日信号」某一行的按钮，这里并排显示这只票的 ATM 跨式与 25Δ 宽跨；只读本机快照与缓存，不联网。"));
-  const cmpPanel = panel("跨式 vs 宽跨", { sub: "只并排事实，不给「选哪个」：系统里已结算事件还很少，任何选择规则目前都是在拟合" }, cmpHost);
+  const cmpPanel = panel("跨式 vs 宽跨", { sub: "卖方视角，只并排事实，不给「选哪个」：系统里已结算事件还很少，任何选择规则目前都是在拟合" }, cmpHost);
 
   fill(root, head,
     warns.map((w) => h("p", { class: "callout warn" }, w)),
@@ -338,11 +465,12 @@ export async function renderStraddle(root, alive) {
     h("div", { style: { height: "16px" } }),
     h("div", { class: "grid halves" },
       panel("累计盈亏", { sub: "实线 = 累计（已实现 + 浮动），虚线 = 其中已实现；同一根 $ 轴" }, (d.equity || []).length ? eqEl : h("div", { class: "empty" }, "还没有净值记录。")),
-      panel("按方向", { sub: "已平仓" }, table([
+      // v0.45.606：只看测到事件的那批（事件前被平的是时间损耗，混进来会拉低「买跨式」胜率）；剔了几笔在副标题里说清
+      panel("按方向", { sub: sideSub }, table([
         { label: "方向", render: (r) => SIDE[r[0]] || r[0] }, { label: "笔数", cls: "r", render: (r) => r[1].n },
         { label: "胜率", cls: "r", render: (r) => pctPts(r[1].win_rate, 0) }, { label: "平均", cls: "r", render: (r) => signedPct(r[1].avg_pnl_pct) },
         { label: "合计", cls: "r", render: (r) => h("span", { class: tone(r[1].total_pnl_usd) }, sMoney(r[1].total_pnl_usd)) }],
-      Object.entries(k.by_side || {})),
+      Object.entries(sideSrc)),
       h("p", { class: "note" }, `内在价值平仓 ${k.intrinsic_exits ?? 0} 笔 · 核销 ${k.written_off_exits ?? 0} 笔。样本太小时胜率没有意义，看「隐含 vs 实际」更有用。`))),
     h("div", { style: { height: "16px" } }),
     panel("已平仓", { sub: `${(d.closed || []).length} 笔` }, (d.closed || []).length ? table(closedCols, d.closed) : h("div", { class: "empty" }, "还没有平仓。")),

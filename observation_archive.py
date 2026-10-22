@@ -29,17 +29,19 @@ buzz_v1，第 3 块原本要回答的「这条边界是不是只动了冻结层�
 溯源（为什么不能只在网络层抓）
 ------------------------------
 四个模块各有 5–60 分钟的缓存，同一轮扫描里不同标的可能用到不同快照 ⇒ 光有「这一天取到过什么」不够，每个分数要能指出
-**它用的是哪一份**。做法：取数模块把所用观测的地址放进返回结果的 `observation` 键（`REF_KEY`；派生缓存里一起存，缓存命中
-也带着）；BuzzBee 在合成之后把四个通道的地址写进 ``details["observations"]``（`buzz_refs`）；`signal_archive.archive` 在写
+**它用的是哪一份**。做法：取数模块把所用观测的地址放进返回结果的 `observation` 键（`REF_KEY`；缓存命中也带着）；
+BuzzBee 在合成之后把四个通道的地址写进 ``details["observations"]``（`buzz_refs`）；`signal_archive.archive` 在写
 `buzz.comp.*` 的同一事务里把它写进 `observation_links` 表（`link_rows` + `write_links`）——与通道值同一轮扫描、同一套覆盖语义
 （同日重扫后者覆盖前者，两边一致）。
 
 何时落盘
 --------
 只在扫描进程 `enable()` 之后（`alpha_hive_daily_report.main` 开扫前调）。其余进程（MCP、Alpha Bot、云端快照例程、测试）
-照样算地址、**不写盘**：它们填的派生缓存若被随后的扫描用上，链接里就有地址、档案里却没有那份 payload——`summarize` 数成
-`missing_payloads`、进 P2（缺了看得见，不会被当成「没缺」）。Reddit 榜单与热搜表的缓存本身就是原始内容 ⇒ 命中时
-`reuse()` 顺手补档，这两种不会缺。
+照样算地址、**不写盘**——它们填的缓存被随后的扫描命中时，靠缓存里存的是**原始内容**、命中时 `reuse()` 补档：
+Reddit 榜单与热搜表的缓存本来就是原始内容；新闻与 F&G 的缓存 v0.45.591 起存「取数结局」（原始观测 + 取数时刻，
+`observation_layer.cache_*`），Reddit 的单票派生缓存同版删除。v0.45.591 之前这三种缓存存的是算好的结果 + 地址，
+被扫描命中 ⇒ 链接有、payload 不在档 ⇒ 当天桥接 incomplete（`tests/test_observation_archive.py::TestCacheFilledByAnotherProcess`
+在旧代码上红）。`summarize` 仍逐票核对 `missing_payloads` 进 P2——兜底的观测点留着，不靠「现在不会缺了」。
 
 失败观测（「谁会红？」）
 ------------------------

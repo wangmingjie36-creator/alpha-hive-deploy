@@ -27,8 +27,10 @@ from typing import Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import sell_strike_report as R
+from alphabot import chat as CH
 from alphabot import hedge as HG
 from alphabot import howto as HW
+from alphabot import macos_app as MA
 from alphabot import premium as PM
 from alphabot import straddle as SD
 from alphabot import strangle_compare as SC
@@ -45,6 +47,10 @@ DEFAULT_FOCUS = ("NVDA", "TSLA", "MSFT", "META", "AMZN")
 DEFAULT_INTERVAL_MIN = 10
 #: 快照里逐行权价 GEX 只存现价 ±这么多（热力图 / 回看点够用；不存原始链）
 SNAPSHOT_STRIKE_BAND = 0.12
+#: CBOE 报 `stale_vintage`（文件还停在上一交易日）时，这些票改拉 yfinance（`alphabot.yf_chain`，v0.45.603）。
+#: 2026-10-22 起只有 NVDL：它的 CBOE 文件整个上午不更新，同一时刻 yfinance 有 15 分钟延迟的成交。要加票改这里；
+#: **只对 Alpha Bot 的页面生效**——卖权账本 / 日报仍只认 CBOE。CBOE 一恢复就自动改回 CBOE。
+YF_FALLBACK_TICKERS = frozenset({"NVDL"})
 _TICKER_RE = re.compile(r"^[A-Z_][A-Z0-9.\-]{0,9}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -180,7 +186,7 @@ class AlphaBotService:
         self._settings_lock = threading.Lock()
         self.stats = {"live_computed": 0, "live_cache_hits": 0, "live_failures": 0,
                       "premium_computed": 0, "premium_cache_hits": 0, "premium_failures": 0,
-                      "howto_failures": 0}
+                      "howto_failures": 0, "yf_fallback_used": 0, "yf_fallback_failed": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -202,7 +208,7 @@ class AlphaBotService:
             if hit is not None and not force:
                 self.stats["live_cache_hits"] += 1
                 return self._stamp(hit)
-            res = clean_json(R.compute_live_detail(t, fetch_fn=self.fetch_fn, state_dir=self.ledger_dir))
+            res = clean_json(R.compute_live_detail(t, fetch_fn=self._chain_fetch(invalidate=True), state_dir=self.ledger_dir))
             ok = bool(res.get("data_available"))
             if ok:
                 res["howto"] = self._howto(t, res)
@@ -298,6 +304,11 @@ class AlphaBotService:
             "hedge": self.hedge_rules(),
             "premium": self.premium_rules(),
             "howto": HW.public_rules(),
+            # 帮助页「程序类」里给人抄的命令：进本代码目录、用运行本服务的解释器（从 .app 打开时就是 .app 记下的那个），
+            # 不写死缺省、不假设人站在代码目录里（v0.45.611）
+            "app": {"launcher": MA.here_command("-m alphabot.launcher"),
+                    "pip_install": MA.here_command("-m pip install -r requirements.txt")},
+            "chat": CH.public_rules(),
         })
 
     # ── 财报跨式账本（v0.45.424，只读）
@@ -348,13 +359,19 @@ class AlphaBotService:
             return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
 
     def _strangle_shadow(self, led: dict) -> dict:
-        """影子宽跨记录的进度（v0.45.586，**只有计数**，见 straddle_strangle_shadow 的盲期规则：任何一笔的影子盈亏 /
-        与跨式盈亏的差都不出现在这里）。"""
+        """影子宽跨记录的进度（v0.45.586，**冻结前只有计数**，见 straddle_strangle_shadow 的盲期规则：任何一笔的影子盈亏 /
+        与跨式盈亏的差都不出现在这里）；检验冻结之后多一键 `revealed`（每笔配对 + 冻结的结果，v0.45.599）。"""
         if self.demo:
             return {"available": False, "reason": "演示模式没有影子记录"}
         try:
             import straddle_strangle_shadow as SS
-            return SS.progress(led.get("closed") or [], led.get("positions") or [], root=self.straddle_root)
+            closed = led.get("closed") or []
+            out = SS.progress(closed, led.get("positions") or [], root=self.straddle_root)
+            # 冻结之后才有（v0.45.599）：`reveal` 在未冻结 / 冻结文件坏了时返回 None ⇒ 这一键不出现
+            revealed = SS.reveal(closed, root=self.straddle_root)
+            if revealed is not None:
+                out["revealed"] = revealed
+            return out
         except Exception as exc:  # noqa: BLE001 - 进度算不出来如实说，不当成「0 个单位」
             _log.warning("影子宽跨记录进度不可得：%s: %s", type(exc).__name__, exc)
             return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
@@ -438,7 +455,8 @@ class AlphaBotService:
         """「跨式 vs 宽跨」并排对比卡（v0.45.584）。**只读、只并排事实、不给结论**（见 `alphabot.strangle_compare`）。
         数据全部来自本机已有文件：当天快照里的 `quote_set`（ATM 两腿 + 25Δ 两腿）、`earnings_cache/<票>_moves.json`
         （历史财报涨跌）、跨式账本的信号行与净值——不联网。`as_of` 缺省 = 账本最近一个扫描日；给持仓的入场日即「入场时的对比」。
-        定仓用账本自己的 `options_paper_leg.size_contracts`（懒 import；取不到就写明原因、张数留空）。"""
+        定仓用账本自己的 `options_paper_leg.size_contracts`（懒 import；取不到就写明原因、张数留空）；NAV 取账本当日
+        **开仓前**的净值（`SD.sizing_nav`，v0.45.593：入场日那行净值是开仓之后写的，直接用会少 1 张）。"""
         t = norm_ticker(ticker)
         now = self.now_fn()
         if self.demo:
@@ -447,7 +465,8 @@ class AlphaBotService:
             day = norm_date(as_of) if as_of else (SD.ledger_as_of(led) or now.date().isoformat())
             qs, raw = syn.demo_compare_inputs(t, day)
             qs_err = hist_err = None
-            sig, nav = SD.pick_signal_and_nav(led.get("signals"), led.get("equity"), t, day)
+            sig, nav, nav_info = SD.pick_signal_and_nav(led.get("signals"), led.get("equity"), t, day,
+                                                        SD.entries_on(day, led.get("positions"), led.get("closed")))
         else:
             root = self.straddle_root
             if as_of:
@@ -457,7 +476,7 @@ class AlphaBotService:
                 day = str((meta or {}).get("last_run_date") or SD.expected_ledger_date(now)[0])
             qs, qs_err = SD.load_quote_set(t, day, root)
             raw, hist_err = SD.load_hist_moves(t, root)
-            sig, nav = SD.load_signal_and_nav(t, day, root)
+            sig, nav, nav_info = SD.load_signal_and_nav(t, day, root)
 
         def size_fn(premium, nav_):
             try:
@@ -466,7 +485,8 @@ class AlphaBotService:
             except Exception as exc:  # noqa: BLE001 - 定仓函数取不到：张数留空并说明，不编一个
                 return 0, f"sizing unavailable: {type(exc).__name__}"
         res = clean_json(SC.compare(t, day, qs=qs, qs_error=qs_err, raw_moves=raw, hist_error=hist_err, signal=sig,
-                                    nav=nav, size_fn=size_fn, max_spread_frac=self.straddle_rules().get("max_spread_pct")))
+                                    nav=nav, nav_info=nav_info, size_fn=size_fn,
+                                    max_spread_frac=self.straddle_rules().get("max_spread_pct")))
         res["demo"] = self.demo
         return res
 
@@ -513,6 +533,30 @@ class AlphaBotService:
         """溢价页取链的唯一入口。生产 = `sell_strike_ledger._default_fetch`（与卖权页同一个取数函数），
         **不清进程缓存**：页面先走过 live()（它清缓存再拉一份），这里命中同一份 payload，不多发请求。"""
         return self.fetch_fn or R.LG._default_fetch
+
+    def _chain_fetch(self, *, invalidate: bool):
+        """Alpha Bot 取链的唯一入口：注入的取数函数（演示 / 测试）原样用；生产 = CBOE（与卖权页同一个取数函数），
+        CBOE 报 `stale_vintage` 且该票在 `YF_FALLBACK_TICKERS` 里 ⇒ 改拉 yfinance（`alphabot.yf_chain`）。
+        `invalidate`：先清该票的进程内 CBOE 缓存（`compute_live_detail` 缺省取数的行为：不清会拿 4 小时内的旧链重算）。
+        失败如实带原因返回（页面显示「现算不可得：…」+ `stats.yf_fallback_failed`），不吞。"""
+        if self.fetch_fn is not None:
+            return self.fetch_fn
+
+        def fetch(ticker, *, as_of=None):
+            t = norm_ticker(ticker)
+            if invalidate:
+                R._invalidate_cached_payload(t)
+            raw, reason = R.LG._default_fetch(t, as_of=as_of)
+            if raw is None and reason == "stale_vintage" and t in YF_FALLBACK_TICKERS:
+                from alphabot import yf_chain
+                raw, reason = yf_chain.fetch_yf_raw_contracts(t, as_of=as_of)
+                self.stats["yf_fallback_used" if raw is not None else "yf_fallback_failed"] += 1
+                if raw is None:
+                    _log.warning("[%s] CBOE 陈旧、yfinance 备用源也取不到：%s", t, reason)
+                else:
+                    _log.info("[%s] CBOE 文件陈旧（stale_vintage），本次改用 yfinance 备用源", t)
+            return raw, reason
+        return fetch
 
     def _premium_earnings(self, t: str, as_of: str, deps) -> dict:
         """财报日 ← 卖权账本（日报钩子按本轮 ChronosBee 写进每行的 earnings_date）里该票最近一次有信息的观测。
@@ -625,8 +669,9 @@ class AlphaBotService:
         return self.state_dir() / "settings.json"
 
     def settings(self) -> dict:
+        # chat_enabled 缺省关（v0.45.614）：对话每问都花 API 费用，只能由人在抽屉里点开（CLAUDE.md：不许「有 key 就自动开」）
         base = {"favorites": [], "focus": list(DEFAULT_FOCUS), "interval_min": DEFAULT_INTERVAL_MIN,
-                "poll_enabled": True}
+                "poll_enabled": True, "chat_enabled": False}
         p = self._settings_path()
         if p.is_file():
             try:
@@ -662,6 +707,10 @@ class AlphaBotService:
                 cur["interval_min"] = iv
             if "poll_enabled" in patch:
                 cur["poll_enabled"] = bool(patch["poll_enabled"])
+            if "chat_enabled" in patch:
+                if not isinstance(patch["chat_enabled"], bool):     # "false" 经 bool() 是 True：花钱的开关只认真布尔
+                    raise BadRequest("chat_enabled 须为 true / false")
+                cur["chat_enabled"] = patch["chat_enabled"]
             _atomic_write_json(self._settings_path(), cur)
             return cur
 

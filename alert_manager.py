@@ -341,6 +341,9 @@ class AlertAnalyzer:
         # 12. 检测 P2: H1 原始观测溯源不全（v0.45.568，buzz_v1 根治阶段 1）
         self._check_observation_archive(status)
 
+        # 12b. 检测 P1: 数据源整体降级的故障日（v0.45.598）
+        self._check_day_health(status)
+
         # 13. 检测 P1: 标的丢失 / 完整性判不了（v0.45.578）
         self._check_ticker_completeness(status)
 
@@ -450,6 +453,79 @@ class AlertAnalyzer:
             },
             ["performance"]
         ))
+
+    def _check_day_health(self, status: Dict) -> None:
+        """日健康判定（v0.45.598，`scan_timing.extra.day_health`，写入者 `alpha_hive_daily_report.main`，判据 `day_health.classify`）。
+
+        同一数据源族里 ≥2 个字段同时低于覆盖线 ⇒ 该源 `source_outage` ⇒ **每个源一条 P1**（不按字段出，避免一次故障四条告警）。
+        起因 2026-10-14：代理探活失败 ⇒ 直连 ⇒ yfinance 从第一个请求起 429，`iv_rank` / `unusual_flow` / `analyst_targets` /
+        `catalysts` 同日 0/30。Step 12 抓到了，但 Step 6（本类）在 Step 12 之前跑、读不到它，alerts 里一个字没提。
+        单字段降级（`degraded`）不在这里报——那是 Step 12 的 warn，常态太多（`analyst_targets` 单独 0/30 出现过 8 天）。
+        判定取值「不等于 ok / degraded 就报」：将来加的新取值默认会红，不会被静默放过。
+        """
+        if not self._swarm_scan_actually_ran(status):
+            return
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        dh = (st.get("extra") or {}).get("day_health")
+        if not isinstance(dh, dict) or not dh.get("available"):
+            self.checks_skipped.append("日健康判定检查（scan_timing 无可用 day_health）")
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】日健康判定未统计——本轮有没有数据源整体降级未知",
+                {"原因": (dh or {}).get("reason") if isinstance(dh, dict) else "scan_timing.extra 无 day_health",
+                 "影响": "不是「检查了没故障」，是「没检查」；Step 12 的覆盖率报告仍可看逐字段情况"},
+                ["day_health", "observability"]
+            ))
+            return
+        verdict = dh.get("verdict")
+        if verdict in ("ok", "degraded"):
+            return
+        if verdict != "source_outage":
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】日健康判定出现不认识的取值：{verdict!r}",
+                {"影响": "无法判断本轮有没有数据源整体降级", "建议": "查 day_health.py 的判定名与本检查是否同步"},
+                ["day_health", "observability"]
+            ))
+            return
+        yf = (st.get("counters") or {}).get("yfinance")
+        yf = yf if isinstance(yf, dict) else {}
+        hints = {
+            "yfinance": "先看编排器日志开头的代理探活（失败 ⇒ 直连 ⇒ yfinance 从第一个请求起 429，10-14 先例），"
+                        "再看 counters.yfinance.rate_limited 与 Step 12 的限流诊断；单个字段的取数链见 CHANGELOG v0.45.421 / 429",
+            "CBOE": "看 counters.cboe（陈旧 / 失败）：09-24 是 CBOE 源站整源停更，09-25 是本机 DNS 解析失败",
+        }
+        srcs = dh.get("outage_sources")
+        if not isinstance(srcs, dict) or not srcs:
+            # 判定说「有故障源」却没说是哪个：自相矛盾的记录，循环会零次迭代、什么都不报——默认要红
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】日健康判定为 source_outage，但没有给出故障源（outage_sources 缺失 / 为空）",
+                {"影响": "无法说明是哪个数据源整体降级", "原始记录": json.dumps(dh, ensure_ascii=False)[:300],
+                 "建议": "查 day_health.classify 的返回结构与 status.json 里 scan_timing.extra.day_health 是否被截断"},
+                ["day_health", "observability"]
+            ))
+            return
+        for fam, fields in sorted(srcs.items()):
+            fields = fields if isinstance(fields, list) else []
+            names = [f.get("field") for f in fields if isinstance(f, dict)]
+            self.alerts.append(Alert(
+                AlertLevel.HIGH,
+                f"⚠️ 【P1 高】{fam} 整源降级：{len(names)} 个字段同时低于覆盖线",
+                {
+                    "字段（有数/总数）": ", ".join(f"{f.get('field')} {f.get('have')}/{f.get('total')}"
+                                              for f in fields if isinstance(f, dict)),
+                    "判据": f"同一数据源族 ≥{dh.get('min_outage_fields')} 个字段同时降级（day_health v{dh.get('version')}）",
+                    "影响": "这些字段当天是缺失/兜底值：Oracle / Chronos / Buzz 的分数不与正常日同口径"
+                            "（异常流取数失败时 Oracle 仍按 5.0 中性混入，v0.45.421）；今天的横截面不要与正常日直接比较",
+                    "yfinance 本轮计数": ({"calls": yf.get("calls"), "rate_limited": yf.get("rate_limited")}
+                                      if fam == "yfinance" and yf else "（无）"),
+                    "建议": hints.get(fam, "看 Step 12 的逐字段覆盖率与对应数据源的日志"),
+                },
+                ["day_health", "data_quality"]
+            ))
 
     def _check_observation_archive(self, status: Dict) -> None:
         """BuzzBee 四个情绪通道的原始观测溯源是否完整（v0.45.568，`scan_timing.extra.observation_archive`，写入者
@@ -1006,7 +1082,11 @@ class AlertAnalyzer:
 
         三处只记录的挂接点（信号行的影子宽跨报价 / 账本开仓的影子记录 / 账本平仓的假想盈亏）都被包在「不得影响主流程」的
         except 里——账本照开照平、扫描照跑，所以记录丢了没人会知道，而预注册检验的样本就这样悄悄少一笔。`errors`（记录没写成的
-        次数）> 0 ⇒ P2；不可成交 / 没有信号记录 / 平仓无价是**数据**（协议 §4 如实报告），不在这里报警；计数缺失 ⇒ checks_skipped。"""
+        次数）> 0 ⇒ P2；不可成交 / 没有信号记录 / 平仓无价是**数据**（协议 §4 如实报告），不在这里报警；计数缺失 ⇒ checks_skipped。
+
+        第二条（v0.45.593）：接线整批断了。快照在、但 25Δ 两腿一个都取不到（上游角色名漂移 / 快照形状变 / CBOE 链整体没有 delta）
+        与「这票的 25Δ 腿真的不可成交」在记录里同形、都只是数据，`errors` 恒为 0——所以源头另数「取到 / 缺腿」两个数，
+        一整轮缺腿的标的 ≥ 5 个且一个都没取到（`wiring_suspect`）⇒ P2，对标 GEX 影子的「0/N 可用」告警（v0.45.428）。"""
         st = status.get("scan_timing")
         if not isinstance(st, dict):
             return
@@ -1014,6 +1094,20 @@ class AlertAnalyzer:
         if not isinstance(ss, dict):
             self.checks_skipped.append("影子宽跨记录检查（scan_timing 无 strangle_shadow 计数）")
             return
+        if ss.get("wiring_suspect"):
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】影子宽跨报价整批取不到：本轮 {ss.get('signal_missing_leg')} 个标的快照在、但 25Δ 两腿缺，"
+                f"一个都没取到（预注册检验攒不到单位）",
+                {
+                    "明细": f"signal_recorded={ss.get('signal_recorded')} signal_available={ss.get('signal_available')} "
+                            f"signal_missing_leg={ss.get('signal_missing_leg')}",
+                    "影响": "账本本身不受影响；这些信号行的 25Δ 报价是空的，之后开的仓都会记成入场不可成交，检验永远攒不够",
+                    "建议": "先看 cboe_options.select_quote_set 的 contracts 键（c25 / p25）还在不在、CBOE 链有没有 delta"
+                            "（`missing_reasons`），再看当天信号行里影子宽跨报价的 reason。丢掉的入场时点报价补不回",
+                },
+                ["strangle_shadow", "data_quality"]
+            ))
         if not ss.get("errors"):
             return
         items = ss.get("items") or []
@@ -1025,9 +1119,10 @@ class AlertAnalyzer:
                 "明细": "；".join(f"{i.get('kind')} {i.get('ticker') or '—'}：{i.get('detail')}" for i in items[:5])
                         + (f"（另 {ss['errors'] - 5} 次略）" if ss["errors"] > 5 else ""),
                 "影响": "账本本身不受影响（开仓、平仓、现金都照常）；受影响的那笔没有影子记录，不进检验",
-                "建议": "看 alpha_hive.log 里「影子宽跨」的 WARNING（带堆栈）；signal_error ⇒ 信号行没带影子宽跨报价，"
-                        "entry_error / exit_error ⇒ 那笔持仓 / 平仓记录的影子记录缺失或标 error。"
-                        "修好后已丢的记录补不回（入场时点的报价没了），如实在检验里按 no_record 计数",
+                "建议": "看 alpha_hive.log 里「影子宽跨」的 WARNING（带堆栈）。signal_error ⇒ 该标的这一天的信号行没带影子宽跨报价，"
+                        "之后若开了仓，单位记成 entry_no_signal_record；entry_error ⇒ 持仓缺影子记录，单位记成 no_record；"
+                        "exit_error ⇒ 平仓记录里影子平仓项标 error，单位记成 exit_error。三类都不进检验，"
+                        "且入场 / 平仓时点的报价丢了补不回",
             },
             ["strangle_shadow", "data_quality"]
         ))

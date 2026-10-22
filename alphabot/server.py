@@ -22,8 +22,12 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from alphabot import __version__
+from alphabot.chat import ChatEngine, ChatError
 from alphabot.service import (AlphaBotService, BadRequest, IntradayPoller, MAX_FOCUS, clean_json,
                               market_session)
+from hive_logger import get_logger
+
+_log = get_logger("alphabot.server")
 
 # 静态前端随代码发布 ⇒ `__file__` 锚定才对（CLAUDE.md「指向代码还是数据」那张表）
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -41,12 +45,15 @@ def _json(obj, status: int = 200) -> Response:
 
 def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[IntradayPoller] = None,
                port: int = 8765, start_poller: bool = False,
-               on_shutdown: Optional[Callable[[], None]] = None, from_app: bool = False) -> Starlette:
+               on_shutdown: Optional[Callable[[], None]] = None, from_app: bool = False,
+               chat: Optional[ChatEngine] = None) -> Starlette:
     """`on_shutdown`：页面「停止服务」调它（`alphabot.__main__` 传入 uvicorn 的退出开关）；
     不传 ⇒ `/api/shutdown` 答 400，页面也不显示该按钮。
     `from_app`：由 Alpha Bot.app 起的（`--from-app`）——`/api/ping` 报出来，启动器据此决定关窗时停不停它；
-    终端里起的服务关窗不停。"""
+    终端里起的服务关窗不停。
+    `chat`：对话引擎（v0.45.614），只给测试换（配假的 API 客户端）；缺省按本服务建一个。"""
     svc = service or AlphaBotService()
+    chat = chat or ChatEngine(svc)
     allowed_hosts = {f"{h}:{port}" for h in LOOPBACK_HOSTS} | set(LOOPBACK_HOSTS)
 
     def _q(request: Request, name: str) -> Optional[str]:
@@ -169,6 +176,26 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         except BadRequest as exc:
             return _json({"error": str(exc)}, 400)
 
+    async def chat_api(request: Request):
+        """GET = 状态（开没开、今天花了多少、上限）；POST = 问一句（同步调 API，可能要一两分钟——放线程池）。"""
+        from starlette.concurrency import run_in_threadpool
+        if request.method == "GET":
+            return _json(await run_in_threadpool(chat.status))
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return _json({"error": "请求体须为 JSON"}, 400)
+        if not isinstance(body, dict):
+            return _json({"error": "请求体须为 JSON 对象"}, 400)
+        try:
+            return _json(await run_in_threadpool(chat.send, body.get("message"), body.get("conversation_id"),
+                                                 body.get("page")))
+        except ChatError as exc:
+            return _json({"error": str(exc)}, exc.status)
+        except Exception as exc:  # noqa: BLE001 - API 报错 / 网络 / 记账失败：原样说出类型与原因，不吞
+            _log.warning("对话失败：%s: %s", type(exc).__name__, exc)
+            return _json({"error": f"对话失败：{type(exc).__name__}: {exc}"}, 502)
+
     def snap_now(request: Request):
         if svc.demo:
             return _json({"error": "演示模式不写快照"}, 400)
@@ -203,6 +230,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/straddle/live/{ticker}", straddle_live),
         Route("/api/straddle/compare/{ticker}", straddle_compare),
         Route("/api/settings", settings, methods=["GET", "PUT"]),
+        Route("/api/chat", chat_api, methods=["GET", "POST"]),
         Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
     ]
 

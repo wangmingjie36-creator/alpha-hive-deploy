@@ -122,11 +122,37 @@ class TestModelProfiles:
         kw = c.calls[0]
         assert "temperature" not in kw             # 传了会 400
         assert kw["extra_body"] == extra
-        assert kw["max_tokens"] == 1280            # max(256*3, 256+1024)
+        # Opus：max(256*3, 256+1024) = 1280；Sonnet：max(256*3, 256+2048) = 2304（v0.45.595 放宽）
+        assert kw["max_tokens"] == {"claude-sonnet-5-5": 2304, "claude-opus-5-5": 1280}[model]
 
     @pytest.mark.parametrize("requested,expected", [(256, 1280), (400, 1424), (800, 2400)])
     def test_max_tokens_headroom(self, requested, expected):
         assert llm_service._effective_max_tokens("claude-opus-5-5", requested) == expected
+
+    @pytest.mark.parametrize("requested,expected", [(150, 2198), (256, 2304), (300, 2348), (400, 2448), (800, 2848)])
+    def test_sonnet_max_tokens_headroom(self, requested, expected):
+        assert llm_service._effective_max_tokens("claude-sonnet-5-5", requested) == expected
+
+    # 10-19 试跑实测的自然输出长度（Opus 放宽后的 text token）：蜂单次评估 ≤ 440、BearBee 空头论述最长 1215、Queen 蒸馏 1105
+    _LONGEST_NATURAL_OUTPUT = 1215
+
+    def test_sonnet_cap_is_at_least_1_5x_the_longest_measured_output_for_every_call_site(self):
+        """Sonnet 11/18 次截断的真因是调用点上限（256~800）< 自然输出长度。每个调用点放宽后的上限都要 ≥ 1.5 × 实测最长。"""
+        import ast
+        from pathlib import Path
+        tree = ast.parse((Path(llm_service.__file__)).read_text(encoding="utf-8"))
+        sites = sorted({kw.value.value for n in ast.walk(tree) if isinstance(n, ast.Call)
+                        for kw in n.keywords if kw.arg == "max_tokens" and isinstance(kw.value, ast.Constant)
+                        and isinstance(kw.value.value, int)})
+        assert len(sites) >= 4, sites                      # 解析器没解析到调用点就不算数
+        for req in sites:
+            eff = llm_service._effective_max_tokens("claude-sonnet-5-5", req)
+            assert eff >= 1.5 * self._LONGEST_NATURAL_OUTPUT, (req, eff)
+
+    def test_the_guard_has_teeth_old_sonnet_profile_would_fail(self):
+        """正对照：旧档案（+1024）下 BearBee 的 400 只给 1424 < 1.5 × 1215，这条判据会红。"""
+        old = max(int(400 * 3), 400 + 1024)
+        assert old < 1.5 * self._LONGEST_NATURAL_OUTPUT
 
     def test_default_profile_no_headroom(self):
         assert llm_service._effective_max_tokens("claude-haiku-4-5-20251001", 256) == 256
@@ -222,11 +248,18 @@ class TestCounters:
         assert llm_service.get_usage()["failed_calls"] == 1
 
     def test_rate_limit_exhausted_counted(self, monkeypatch):
-        import anthropic
+        # 假 anthropic 模块（同 test_llm_service.TestRateLimitRetry）：SDK 是可选依赖、CI 不装，`llm_service` 只拿它认 RateLimitError
+        import sys
+        import types
+
+        class _RateLimitError(Exception):
+            pass
+        fake = types.ModuleType("anthropic")
+        fake.RateLimitError = _RateLimitError
+        monkeypatch.setitem(sys.modules, "anthropic", fake)
         monkeypatch.setattr(llm_service, "_RATE_LIMIT_RETRY_DELAYS", ())
         monkeypatch.setattr(llm_service.time, "sleep", lambda s: None)
-        err = anthropic.RateLimitError.__new__(anthropic.RateLimitError)
-        _install(monkeypatch, _FakeClient(raises=err))
+        _install(monkeypatch, _FakeClient(raises=_RateLimitError("429")))
         assert llm_service.call("hi") is None
         assert llm_service.get_usage()["failed_calls"] == 1
 

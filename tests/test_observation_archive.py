@@ -231,23 +231,27 @@ class TestReddit:
         assert sorted(e["status"] for e in _events()) == ["network_error", "ok"]
 
     def test_cache_filled_by_a_non_scan_process_is_archived_on_use(self, reddit):
-        """MCP 等进程（没开档）先填了榜单缓存；随后扫描进程命中缓存 ⇒ 地址相同、payload 补进档案。"""
-        c = reddit.mod.RedditSentimentClient()
-        c.get_ticker_sentiment("NVDA")
+        """MCP 等进程（没开档）先算过这只票；随后扫描进程（新实例，只剩磁盘缓存）命中 ⇒ 地址相同、两张榜补进档案。
+
+        v0.45.591 之前这里要先手动删掉单票派生缓存 `<票>_sentiment.json` 才成立——不删，命中的是派生结果、
+        两张榜不进档（当天桥接 incomplete）。现在没有那个缓存了，不删也成立。
+        """
+        reddit.mod.RedditSentimentClient().get_ticker_sentiment("NVDA")
         assert not oa.root().exists()
-        for f in reddit.cache.glob("*_sentiment.json"):
-            f.unlink()                      # 只留榜单缓存，逼它重算这只票
         oa.enable(D, "live")
         n_calls = len(reddit.calls)
-        r = c.get_ticker_sentiment("NVDA")
+        r = reddit.mod.RedditSentimentClient().get_ticker_sentiment("NVDA")
         assert len(reddit.calls) == n_calls, "前提：命中缓存，没再取数"
         for sha in r[oa.REF_KEY].values():
             assert oa.load(sha) is not None
         assert _events() == []
 
-    def test_per_ticker_cache_hit_returns_the_same_addresses(self, reddit, on):
+    def test_no_per_ticker_derived_cache(self, reddit, on):
+        """v0.45.591：单票结果不落缓存（派生结果不存）；同一进程再问一次，地址照旧相同（都来自同两张榜）。"""
         c = reddit.mod.RedditSentimentClient()
         assert c.get_ticker_sentiment("NVDA")[oa.REF_KEY] == c.get_ticker_sentiment("NVDA")[oa.REF_KEY]
+        assert sorted(f.name for f in reddit.cache.iterdir()) == ["ranking_all-stocks.json",
+                                                                  "ranking_wallstreetbets.json"]
 
     @pytest.mark.parametrize("ticker", ["NVDA", "TSLA", "AMD", "ZZZZ"])
     def test_archived_payloads_suffice_to_recompute(self, reddit, on, tmp_path, monkeypatch, ticker):
@@ -462,6 +466,218 @@ class TestFearGreed:
             fg.box["alt"] = _resp({"data": [doc["payload"]["data"]]})
         again = fg.mod.get_fear_greed()
         assert _strip(again) == _strip(first)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2b. 取数缓存存原始观测（v0.45.591）：缓存是谁填的都不影响档案完整
+# ══════════════════════════════════════════════════════════════════════════
+
+_LAYER = oa.LAYER_VERSION
+
+
+def _cache_doc(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+class TestCacheFilledByAnotherProcess:
+    """10-21 二次检查记下的漏洞：新闻 / F&G / 单票 Reddit 的缓存存的是算好的结果 + 地址、不存原始内容。
+    没开档的进程（MCP、手动开发跑）先填了缓存、随后的扫描命中 ⇒ 链接里有地址、档案里没有 payload ⇒ 当天桥接
+    incomplete、白白浪费一个桥接日。本组在 v0.45.591 之前的代码上红（新闻 / F&G / Reddit 三个通道 `load` 为 None）。"""
+
+    def test_every_channel_a_scan_uses_is_in_the_archive(self, reddit, news, trending, fg):
+        def run():
+            return {"reddit": reddit.mod.RedditSentimentClient().get_ticker_sentiment("NVDA"),
+                    "news": news.mod.get_ticker_news("NVDA"),
+                    "yahoo": trending.mod.get_ticker_attention("NVDA"),
+                    "fear_greed": fg.mod.get_fear_greed()}
+
+        first = run()                                   # 没开档的进程：只填缓存
+        assert not oa.root().exists()
+        oa.enable(D, "live")
+        n = len(reddit.calls)
+        news.bodies.update(massive=None, av=None, yf=None)   # 再去取数就炸：证明下面全是缓存命中
+        trending.box["resp"] = None
+        fg.box.update(cnn=None, alt=None)
+        again = run()
+        assert len(reddit.calls) == n
+
+        refs = oa.buzz_refs(**again, price=None)
+        for ch in ("reddit", "news", "yahoo", "fear_greed"):
+            assert refs[ch]["expected"] and refs[ch]["ref"], ch
+            for sha in oa._shas(ch, refs[ch]["ref"]):
+                assert oa.load(sha) is not None, f"{ch}：扫描用到的观测不在档"
+        assert _events() == [], "缓存命中不是一次取数"
+        # 命中走与新取数同一个解释函数：结果逐字段相同；新闻 / F&G 连时间戳（= 当初取数的时刻）都相同
+        assert again["news"] == first["news"] and again["fear_greed"] == first["fear_greed"]
+        assert _strip(again["reddit"]) == _strip(first["reddit"])
+        assert again["reddit"][oa.REF_KEY] == first["reddit"][oa.REF_KEY]
+
+
+class TestNewsCacheHoldsTheObservation:
+    def _path(self, news, t="NVDA"):
+        import observation_layer as ol
+        return ol.cache_path(news.cache, f"{t}_news")
+
+    def test_cache_file_is_the_raw_outcome_not_the_result(self, news, on):
+        r = news.mod.get_ticker_news("NVDA")
+        doc = _cache_doc(self._path(news))
+        assert set(doc) == {"layer", "fetched_at", "kind", "payload", "meta"}
+        assert doc["layer"] == _LAYER and doc["kind"] == "news.massive"
+        assert doc["payload"] == oa.load(r[oa.REF_KEY])["payload"]
+        assert doc["fetched_at"] == r["timestamp"]
+        assert doc["meta"] == {"primary_attempt": {"source": "massive", "status": "ok"}}
+        assert "_observed" not in r, "载体键不进返回给评分代码的结果"
+
+    def test_fallback_to_yahoo_is_cached_with_the_primary_outcome(self, news, on):
+        news.bodies["massive"] = _resp({"status": "ERROR", "error": "plan"}, ok=False, status_code=429)
+        first = news.mod.get_ticker_news("NVDA")
+        news.bodies.update(massive=None, yf=None)
+        again = news.mod.get_ticker_news("NVDA")
+        assert again == first and again["source"] == "yahoo_finance"
+        assert again["primary_attempt"]["status"] == "server_refused"
+        assert _cache_doc(self._path(news))["kind"] == "news.yahoo_finance"
+
+    def test_nothing_anywhere_is_cached_as_no_observation(self, news, on):
+        news.bodies["massive"] = _resp({"status": "OK", "results": []})
+        news.bodies["yf"] = _resp({"news": []})
+        first = news.mod.get_ticker_news("NVDA")
+        doc = _cache_doc(self._path(news))
+        assert doc["kind"] is None and doc["payload"] is None
+        news.bodies.update(massive=None, yf=None)
+        again = news.mod.get_ticker_news("NVDA")
+        assert again == first and not again["is_real_data"] and oa.REF_KEY not in again
+
+    @pytest.mark.parametrize("doc", [
+        "old_result",                                     # v0.45.591 之前的派生结果
+        {"layer": "obs-0", "fetched_at": "t", "kind": None, "payload": None, "meta": {}},  # 别的观测层版本
+        {"layer": _LAYER, "fetched_at": "t", "kind": "news.nope", "payload": {}, "meta": {}},  # 未登记的种类
+        {"layer": _LAYER, "fetched_at": "t", "kind": None, "payload": {"x": 1}, "meta": {}},  # 没观测却带内容
+        {"layer": _LAYER, "fetched_at": "t", "kind": "news.massive", "payload": {"results": []}, "meta": {}},  # 解释不了
+    ], ids=["old_result", "other_layer", "unknown_kind", "payload_without_kind", "uninterpretable"])
+    def test_anything_else_in_the_file_is_a_miss(self, news, on, doc):
+        """读到不是本版本写的、形状不对、解释不了的缓存 ⇒ 当没命中、重新取数（缓存只省请求，丢了不丢观测）。"""
+        if doc == "old_result":
+            doc = {"ticker": "NVDA", "is_real_data": True, "sentiment_score": 9.9, "source": "massive",
+                   oa.REF_KEY: "0" * 64}
+        path = self._path(news)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        r = news.mod.get_ticker_news("NVDA")
+        assert r["source"] == "massive" and r["sentiment_score"] != 9.9
+        assert oa.load(r[oa.REF_KEY]) is not None
+        assert [e["status"] for e in _events()] == ["ok"], "重新取了一次"
+
+    def test_old_cache_name_is_never_read(self, news, on):
+        """旧文件名 `<票>_news.json`（还在跑旧代码的长驻进程会继续写它）这一版不读。"""
+        old = news.cache / "NVDA_news.json"
+        old.parent.mkdir(parents=True, exist_ok=True)
+        old.write_text(json.dumps({"ticker": "NVDA", "is_real_data": True, "sentiment_score": 9.9}),
+                       encoding="utf-8")
+        assert news.mod.get_ticker_news("NVDA")["sentiment_score"] != 9.9
+
+
+class TestFearGreedCacheHoldsTheObservation:
+    def test_cache_file_is_the_raw_outcome_not_the_result(self, fg, on):
+        r = fg.mod.get_fear_greed()
+        doc = _cache_doc(fg.mod._cache_path())
+        assert set(doc) == {"layer", "fetched_at", "kind", "payload", "meta"}
+        assert (doc["layer"], doc["kind"]) == (_LAYER, "fear_greed.cnn")
+        assert doc["payload"] == {"fear_and_greed": _CNN["fear_and_greed"]}
+        assert doc["fetched_at"] == r["timestamp"]
+        assert "_observed" not in r
+
+    def test_hit_keeps_the_fetch_time(self, fg, on, monkeypatch):
+        """BuzzBee 把 F&G 的 timestamp 记成 fetched_at：命中重算时必须是当初取数的时刻，不是命中的时刻。"""
+        doc = {"layer": _LAYER, "fetched_at": "2026-10-21T13:05:00.000001", "kind": "fear_greed.cnn",
+               "payload": {"fear_and_greed": _CNN["fear_and_greed"]}, "meta": {}}
+        path = fg.mod._cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        fg.box.update(cnn=None, alt=None)
+        r = fg.mod.get_fear_greed()
+        assert r["timestamp"] == "2026-10-21T13:05:00.000001"
+        assert (r["value"], r["classification"], r["sentiment_score"]) == (32, "Fear", 3.2)
+        assert oa.load(r[oa.REF_KEY])["payload"] == doc["payload"]
+
+    def test_both_down_is_cached_as_no_observation(self, fg, on):
+        fg.box["cnn"] = fg.box["alt"] = _resp({}, ok=False, status_code=500)
+        first = fg.mod.get_fear_greed()
+        assert _cache_doc(fg.mod._cache_path())["kind"] is None
+        fg.box.update(cnn=None, alt=None)
+        assert fg.mod.get_fear_greed() == first and not first["is_real_data"]
+
+    def test_crypto_fallback_is_cached_as_its_own_kind(self, fg, on):
+        fg.box["cnn"] = _resp({}, ok=False, status_code=500)
+        first = fg.mod.get_fear_greed()
+        fg.box.update(cnn=None, alt=None)
+        again = fg.mod.get_fear_greed()
+        assert again == first and again["source"] == "alternative_me"
+
+    def test_uninterpretable_cache_refetches(self, fg, on):
+        path = fg.mod._cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"layer": _LAYER, "fetched_at": "t", "kind": "fear_greed.cnn",
+                                    "payload": {"fear_and_greed": {"score": "abc"}}, "meta": {}}),
+                        encoding="utf-8")
+        r = fg.mod.get_fear_greed()
+        assert r["source"] == "cnn" and r["value"] == 32
+        assert [e["status"] for e in _events()] == ["ok"]
+
+
+class TestCacheHelpers:
+    def test_path_carries_the_layer_version(self, tmp_path):
+        import observation_layer as ol
+        assert ol.cache_path(tmp_path, "X_news").name == f"X_news.{_LAYER}.json"
+
+    def test_expired_is_a_miss(self, tmp_path):
+        import os
+        import observation_layer as ol
+        p = tmp_path / "c.json"
+        ol.cache_write(p, kind="yahoo.trending", payload={"symbols": ["A"]}, fetched_at="t")
+        assert ol.cache_read(p, 60)["payload"] == {"symbols": ["A"]}
+        old = p.stat().st_mtime - 120
+        os.utime(p, (old, old))
+        assert ol.cache_read(p, 60) is None
+
+    def test_hit_archives_in_the_scan_process_only(self, tmp_path, monkeypatch):
+        import observation_layer as ol
+        p = tmp_path / "c.json"
+        ol.cache_write(p, kind="yahoo.trending", payload={"symbols": ["A"]}, fetched_at="t")
+        hit = ol.cache_read(p, 60)
+        assert hit["ref"] == oa.address("yahoo.trending", {"symbols": ["A"]}) and not oa.root().exists()
+        oa.enable(D, "live")
+        assert oa.load(ol.cache_read(p, 60)["ref"]) is not None
+
+    def test_unknown_kind_is_a_miss_not_an_archive_failure(self, tmp_path, on):
+        """不认识的种类在读缓存这一步就当没命中——交给 `reuse` 会算不出地址、记一次档案失败 ⇒ 扫描里一条假 P2。"""
+        import observation_layer as ol
+        p = tmp_path / "c.json"
+        p.write_text(json.dumps({"layer": _LAYER, "fetched_at": "t", "kind": "news.nope", "payload": {}, "meta": {}}),
+                     encoding="utf-8")
+        assert ol.cache_read(p, 60) is None
+        assert oa.stats()["failures"] == 0
+
+    def test_write_failure_is_swallowed(self, tmp_path):
+        import observation_layer as ol
+        p = tmp_path / "not_a_dir"
+        p.write_text("x", encoding="utf-8")
+        ol.cache_write(p / "c.json", kind=None, payload=None, fetched_at="t")   # 不抛：下次重新取数
+        assert not (p / "c.json").exists()
+
+
+def test_sentiment_modules_only_cache_raw_content():
+    """四个情绪取数模块的落盘写入只有两处原样存原始内容的（Reddit 榜单、热搜代码表），其余一律经
+    `observation_layer.cache_write`。新加一处缓存写入 = 先回答「存的是原始观测还是算好的结果？」——
+    存结果就是 v0.45.591 修掉的那个洞（没开档的进程填了、扫描命中、档案缺那份观测）。"""
+    from pathlib import Path
+    import _persistent_io_scan as S
+    root = Path(oa.__file__).parent
+    sites = set()
+    for fn in ("reddit_sentiment.py", "newsapi_client.py", "yahoo_trending.py", "fear_greed.py"):
+        facts = S.scan_source((root / fn).read_text(encoding="utf-8"), fn)
+        sites |= {f"{fn}::{q}" for q, sc in facts.scopes.items() if sc["write_kinds"]}
+    assert sites == {"reddit_sentiment.py::RedditSentimentClient._fetch_ranking",
+                     "yahoo_trending.py::get_trending_tickers"}, sites
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -339,8 +339,11 @@ _NOT_BEE_MODULES = {
     "queen_distiller": ("汇总层：读板结果（共振、快照）只进 composite.final_score——ALWAYS_SLICED、受全部边界约束，"
                         "不产生依赖边", True),
 }
+#: 名字不是合法 Python 模块名的 .py（典型是 iCloud 的「xxx 2.py」重名副本）import 不了、生产不会跑 ⇒ 不扫，
+#: 由 `test_module_inventory_is_complete` 单独报出来（v0.45.589；此前它会被当成新蜂、误报「登记新读点」）。
+_UNIMPORTABLE = sorted(p.name for p in (_REPO / "swarm_agents").glob("*.py") if not p.stem.isidentifier())
 _BEE_MODULES = {p.stem: p for p in sorted((_REPO / "swarm_agents").glob("*.py"))
-                if p.stem not in _NOT_BEE_MODULES}
+                if p.stem not in _NOT_BEE_MODULES and p.stem.isidentifier()}
 #: 不在 swarm_agents/ 里的 Phase-1 蜂（`_PHASE1` 里的 CodeExecutorAgent）
 _BEE_MODULES["code_executor_agent"] = _REPO / "code_executor_agent.py"
 
@@ -529,13 +532,32 @@ def _escaped_board_uses(fn) -> list:
     """`self.board` 出现在 AST 追不到读法的位置 ⇒ 每处一条问题（v0.45.587）。
 
     认得的用法只有：`self.board.<属性>`、`getattr(self.board, "<名>")`、直接作为参数交给已登记的读板函数
-    （`_BOARD_FUNCS`）、真假判断（`if self.board` / `and` / `not` / `is None`）、以及给它赋值。
+    （`_BOARD_FUNCS`）、真假判断（`if` / `while` / 条件表达式 / `assert` / 推导式过滤条件的**判断位置**上，可经
+    `and` / `or` / `not` 套几层）、`is None` 比较、以及给它赋值。
     其余——赋给别名（`b = self.board; b.get_live_signals(t)`）、当参数传给别的函数、放进容器——读法都看不见，
     此前一律静默绿（实测：Rival 里经别名读普查，本守卫全绿）。
+    v0.45.589 补两处（二次检查实测漏）：`and` / `or` 原先在任何位置都放行 ⇒ `b = self.board or None` 是别名却不报；
+    `getattr(self, "board")` 绕过属性写法取到同一个对象。
     """
     parent = {c: p for p in ast.walk(fn) for c in ast.iter_child_nodes(p)}
+
+    def truthiness(node) -> bool:
+        cur = node
+        while True:
+            p = parent.get(cur)
+            if isinstance(p, ast.BoolOp) or (isinstance(p, ast.UnaryOp) and isinstance(p.op, ast.Not)):
+                cur = p
+                continue
+            if isinstance(p, (ast.If, ast.IfExp, ast.While, ast.Assert)) and p.test is cur:
+                return True
+            return isinstance(p, ast.comprehension) and cur in p.ifs
+
     out = []
     for n in ast.walk(fn):
+        if (isinstance(n, ast.Call) and _call_name(n) == "getattr" and len(n.args) >= 2
+                and isinstance(n.args[0], ast.Name) and n.args[0].id == "self"
+                and isinstance(n.args[1], ast.Constant) and n.args[1].value == "board"):
+            out.append(f"第 {n.lineno} 行 `getattr(self, \"board\")` 取到了板对象，AST 追不到之后读了谁——改成直接 `self.board.<方法>`")
         if not _is_self_board(n) or isinstance(n.ctx, ast.Store):
             continue
         p = parent.get(n)
@@ -544,9 +566,7 @@ def _escaped_board_uses(fn) -> list:
               or (isinstance(p, ast.Call) and _call_name(p) in _BOARD_FUNCS and n in p.args)
               or (isinstance(p, ast.keyword) and isinstance(parent.get(p), ast.Call)
                   and _call_name(parent[p]) in _BOARD_FUNCS)
-              or (isinstance(p, (ast.If, ast.IfExp, ast.While)) and p.test is n)
-              or isinstance(p, ast.BoolOp)
-              or (isinstance(p, ast.UnaryOp) and isinstance(p.op, ast.Not))
+              or truthiness(n)
               or (isinstance(p, ast.Compare) and all(isinstance(o, (ast.Is, ast.IsNot)) for o in p.ops)))
         if not ok:
             out.append(f"第 {n.lineno} 行 `self.board` 被赋给别名 / 外传（{type(p).__name__}），"
@@ -711,7 +731,11 @@ class TestPeerReadEdgesMatchCode:
     def test_module_inventory_is_complete(self):
         """扫哪些模块由 swarm_agents/*.py 推出；排除项必须真实存在，声称「不碰 board」的源码里确实没有 board。
         变红的变异：新建一个读同伴的 swarm_agents 模块（被扫 ⇒ 位点没登记而红）；排除项里写一个不存在的模块名。"""
-        stems = {p.stem for p in (_REPO / "swarm_agents").glob("*.py")}
+        assert not _UNIMPORTABLE, (
+            f"swarm_agents/ 里有不是合法模块名的 .py：{_UNIMPORTABLE} —— 多半是 iCloud「桌面与文稿」同步造的重名副本"
+            "（import 不了、生产不会跑，其余守卫已跳过它）。清理前先读 auto-memory alpha-hive-environment-facts.md"
+            "（副本可能含未提交内容，别无脑 rm）；见 CLAUDE.md「环境：~/Desktop 在 iCloud 同步下会造重名副本」")
+        stems = {p.stem for p in (_REPO / "swarm_agents").glob("*.py") if p.stem.isidentifier()}
         assert set(_NOT_BEE_MODULES) <= stems, f"排除项里有不存在的模块：{sorted(set(_NOT_BEE_MODULES) - stems)}"
         assert stems - set(_NOT_BEE_MODULES) == set(_BEE_MODULES) - {"code_executor_agent"}
         touching = [m for m, (_why, may) in _NOT_BEE_MODULES.items()
@@ -727,6 +751,17 @@ class TestPeerReadEdgesMatchCode:
                          "        return self.board.get_live_signals(t)\n").body[0]
         assert len(_escaped_board_uses(bad)) == 1, _escaped_board_uses(bad)
         assert _escaped_board_uses(good) == [], _escaped_board_uses(good)
+        # v0.45.589：`or` 在赋值右边是别名；在判断位置上（经 not / and 套几层）不是
+        for src in ("def f(self, t):\n    b = self.board or None\n    return b.get_live_signals(t)\n",
+                    "def f(self, t):\n    b = getattr(self, 'board')\n    return b.get_live_signals(t)\n",
+                    "def f(self, t):\n    return [self.board or 1]\n"):
+            assert _escaped_board_uses(ast.parse(src).body[0]), src
+        for src in ("def f(self, t):\n    if not (self.board and t):\n        return None\n",
+                    "def f(self, t):\n    while self.board or t:\n        break\n",
+                    "def f(self, t):\n    assert self.board\n",
+                    "def f(self, xs):\n    return [x for x in xs if self.board]\n",
+                    "def f(self, t):\n    return 1 if self.board else 0\n"):
+            assert _escaped_board_uses(ast.parse(src).body[0]) == [], src
 
     def test_every_board_read_site_is_registered(self):
         """位点多一个少一个都红：新加一处 `_read_peer` / 普查却没登记数据流 ⇒ 依赖表无从对账。"""
@@ -998,6 +1033,9 @@ class TestDeliberatelyPooled:
                 history[rec["boundary"]]), rec
             for k in ("why", "known_counter_evidence", "recheck_when", "how"):
                 assert rec[k].strip(), (sig, k)
+            # 记录会拼进 `ic_rerun_readiness --quiet` 那一行，「｜」是段分隔符——出现就把复检段拆成两截（v0.45.589）
+            bad = [k for k, v in rec.items() if isinstance(v, str) and "｜" in v]
+            assert not bad, f"{sig} 的 {bad} 含「｜」（--quiet 的段分隔符），换成别的标点"
 
     def test_boundary_really_changed_the_signal_input(self):
         """「刻意不切」的前提是边界真的改了它——边界必须直接点名 `changed_via`，且它确实是本信号的输入。"""
@@ -1032,6 +1070,19 @@ class TestDeliberatelyPooled:
         items = irr._pooled_recheck_attention("2099-01-01")
         assert [a["id"] for a in items] == ["ic_rerun.deliberately_pooled.unavailable"], items
         assert items[0]["level"] == "warn", items
+
+    def test_quiet_segment_only_when_due(self):
+        """`--quiet` 那一段：到期才有、以 ⏰ 开头；不传业务日不判；登记表读不到 ⇒ ⚠️ 段（不是静默没有）。"""
+        due = datetime.date.fromisoformat(sa.DELIBERATELY_POOLED["sentiment.pct"]["recheck_on_or_after"])
+        assert irr._pooled_recheck_segment((due - datetime.timedelta(days=1)).isoformat()) is None
+        assert irr._pooled_recheck_segment(None) is None
+        seg = irr._pooled_recheck_segment(due.isoformat())
+        assert seg and seg.startswith("⏰") and "sentiment.pct" in seg and "｜" not in seg, seg
+
+    def test_quiet_segment_survives_unimportable_registry(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "signal_archive", None)
+        seg = irr._pooled_recheck_segment("2099-01-01")
+        assert seg and seg.startswith("⚠️ 刻意池化复检核对不了"), seg
 
     def test_report_names_the_pooled_signal(self, capsys):
         gens = {"signals": {"sentiment.pct": {"gen_start": None, "gen_version": None, "n_total": 10,

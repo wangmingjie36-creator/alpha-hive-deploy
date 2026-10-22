@@ -76,6 +76,7 @@ from scipy import stats as _scipy_stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 代码锚点：import 仓内模块
 
+import day_health  # noqa: E402
 import ic_diagnostics  # noqa: E402
 import signal_archive  # noqa: E402
 
@@ -638,6 +639,21 @@ def apply_self_proof(res: Dict, sp: Dict) -> Dict:
 # 编排
 # ────────────────────────────────────────────────────────────────────────────
 
+def sensitivity_block(dh: Dict, rows: List[Dict], decide_on: Callable[[List[Dict]], Dict], *, revealed: bool) -> Dict:
+    """修订 3 的敏感性分析：同一条判定链跑在「去掉 `source_outage` 日」的样本上（实现在 `day_health.sensitivity_block`，两份检验共用）。
+
+    **不改主分析、不触发任何动作**。盲化期只露计数（去掉哪几天、少几行、H1 合格周数）；`status` / `verdicts` / `descriptive`
+    都只在 `revealed`（主分析本次已给出结论）时露出——`status` 本身就是检视结论（concluded），未露出时放进去是盲化旁路。
+    """
+    def _reveal(r: Dict) -> Dict:
+        out = {"status": r["status"], "verdicts": r["verdicts"]}
+        if "descriptive" in r:
+            out["descriptive"] = r["descriptive"]
+        return out
+    return day_health.sensitivity_block(dh, rows, decide_on, revealed=revealed,
+                                        counts=lambda r, kept: {"h1_weeks": r["h1_weeks"]}, reveal=_reveal)
+
+
 def run(db_path: Optional[str] = None, today: Optional[str] = None,
         repo_root: Optional[Path] = None, history: Optional[list] = None,
         code_guard: Optional[Dict] = None, self_proof: Optional[Dict] = None,
@@ -666,21 +682,25 @@ def run(db_path: Optional[str] = None, today: Optional[str] = None,
     h2_cut_dates = [d for d in ((trunc[h2] or {}).get("date"), wchg.get("date")) if d]
     h2_cut = min(h2_cut_dates) if h2_cut_dates else None
 
-    prefix = set(settled_prefix(rows, today))
-    series = {}
-    for k, v in its.items():
-        cut = h2_cut if k == h2 else (trunc[k] or {}).get("date")
-        series[k] = [w for w in weekly_series(rows, v["value"], v["signals"], P, cut) if w[0] in prefix]
+    def _decide_on(rows_: List[Dict]) -> Dict:
+        """同一条判定链跑在给定样本上。主分析用全部 `rows`；敏感性分析（修订 3）用去掉故障日后的子集——链本身一字不改。"""
+        prefix = set(settled_prefix(rows_, today))
+        series = {}
+        for k, v in its.items():
+            cut = h2_cut if k == h2 else (trunc[k] or {}).get("date")
+            series[k] = [w for w in weekly_series(rows_, v["value"], v["signals"], P, cut) if w[0] in prefix]
 
-    h1_cut = (trunc[h1] or {}).get("date")
-    h1_capacity = None
-    if h1_cut:
-        h1_capacity = len({_iso_week(r["date"]) for r in rows if r["date"] < h1_cut})
+        h1_cut = (trunc[h1] or {}).get("date")
+        h1_capacity = None
+        if h1_cut:
+            h1_capacity = len({_iso_week(r["date"]) for r in rows_ if r["date"] < h1_cut})
 
-    res = decide(series[h1], series[h2], P, h1_capacity=h1_capacity,
-                 h2_truncated=h2_cut is not None,
-                 h2_unknown=(f"权重历史无法判定：{wchg['unknown']}" if "unknown" in wchg else None),
-                 descriptive={d: series[d] for d in P.DESCRIPTIVE_DIMS})
+        return decide(series[h1], series[h2], P, h1_capacity=h1_capacity,
+                      h2_truncated=h2_cut is not None,
+                      h2_unknown=(f"权重历史无法判定：{wchg['unknown']}" if "unknown" in wchg else None),
+                      descriptive={d: series[d] for d in P.DESCRIPTIVE_DIMS})
+
+    res = _decide_on(rows)
     stale = (not rows and (dt.date.fromisoformat(today) - dt.date.fromisoformat(P.FORWARD_START)).days
              >= STALE_DAYS)
     out = {**base, **res, "truncation": {h1: trunc[h1], h2: trunc[h2]},
@@ -689,6 +709,13 @@ def run(db_path: Optional[str] = None, today: Optional[str] = None,
     out = apply_self_proof(out, self_proof if self_proof is not None else buzz_v1_self_proof(db, today))
     # v0.45.583：桥接核对只是进度（阶段 4 前 H1 仍读入档通道），无论上面判成什么都附上
     out["buzz_v1_bridge"] = bridge if bridge is not None else buzz_v1_bridge(db, today)
+    # v0.45.598：窗口内哪些日子是「数据源整体降级的故障日」——**只显示**：rows / series / decide 都在上面算完了，
+    # 这里不回头改任何一行样本，也不影响 status / verdicts（口径变更要走协议修订，不能顺手做）。
+    out["day_health"] = day_health.summarize_days({r["date"] for r in rows})
+    # 修订 3（2026-10-22）：敏感性分析——并列报告「去掉 source_outage 日」的结果。主分析（上面的 `out`）不动；
+    # 结论只在主分析也给出结论（`verdicts` 非空）时才露出，盲化口径与主分析一致。
+    out["sensitivity_excl_outage_days"] = sensitivity_block(out["day_health"], rows, _decide_on,
+                                                            revealed=bool(out.get("verdicts")))
     return out
 
 
@@ -754,6 +781,14 @@ def _print_report(res: Dict) -> None:
     print(status_line(res))
     if res.get("status") == "cannot_judge":
         return
+    if res.get("day_health"):
+        print("  " + day_health.describe(res["day_health"]))
+    sb = res.get("sensitivity_excl_outage_days")
+    for line in day_health.describe_sensitivity(sb):
+        print("  " + line)
+    for h, v in ((sb or {}).get("verdicts") or {}).items():
+        ic = f"  IC {v['ic']:+.4f}  p={v['p']:.4f}" if "ic" in v else ""
+        print(f"    【{h}】{v['result']}（{v.get('look')}检视）{ic}")
     for h, v in res.get("verdicts", {}).items():
         print(f"\n  【{h}】{v['result']}（{v.get('look')}检视）")
         if "ic" in v:

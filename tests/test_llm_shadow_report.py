@@ -20,7 +20,14 @@ import llm_shadow_report as rep
 
 # ==================== 夹具 ====================
 
-def _status(day, per_ticker, *, healthy=True, mode="run", cost=0.5):
+def _status(day, per_ticker, *, healthy=True, mode="run", cost=0.5, generation=None):
+    doc = _status_base(day, per_ticker, healthy=healthy, mode=mode, cost=cost)
+    if generation is not None:
+        doc["generation"] = generation
+    return doc
+
+
+def _status_base(day, per_ticker, *, healthy=True, mode="run", cost=0.5):
     return {"schema": 1, "date": day, "mode": mode, "model": "claude-opus-5-5",
             "usage": {"total_cost_usd": cost},
             "quality": {"healthy": healthy, "reasons": [] if healthy else ["x"]},
@@ -266,6 +273,62 @@ class TestGating:
     def test_empty_shadow_root(self, tmp_path):
         r = rep.build_report(tmp_path / "nope", tmp_path / "absent.db")
         assert r["describe"]["run_days"] == 0 and r["ready"] is False
+
+
+class TestGenerations:
+    """第 2 代换了模型：旧代的天不与新代合并（预注册），也不被悄悄丢掉（如实报出有几天）。"""
+
+    def test_legacy_file_without_field_is_its_own_generation(self):
+        assert rep.generation_of(_status("2026-10-21", {})) == "legacy:claude-opus-5-5"
+        assert rep.generation_of(_status("2026-10-22", {}, generation="g2-sonnet-5-5")) == "g2-sonnet-5-5"
+
+    def test_only_latest_generation_counts_and_old_ones_are_reported(self, tmp_path):
+        _write(tmp_path, _status("2026-10-21", {"A": _pt(6.0, "bullish")}))
+        _write(tmp_path, _status("2026-10-22", {"A": _pt(6.0, "bullish")}, generation="g2"))
+        _write(tmp_path, _status("2026-10-23", {"A": _pt(6.0, "bullish")}, generation="g2"))
+        d = rep.build_report(tmp_path, tmp_path / "absent.db", today="2026-10-24")["describe"]
+        assert d["generation"] == "g2" and d["run_days"] == 2 and d["healthy_days"] == 2
+        assert d["other_generation_days"] == 1
+
+    def test_old_generation_days_never_reach_the_threshold(self, tmp_path):
+        for i in range(25):                                   # 25 个旧代健康日 + 1 个新代日
+            _write(tmp_path, _status((date(2026, 9, 1) + timedelta(days=i)).isoformat(), {}))
+        _write(tmp_path, _status("2026-10-22", {}, generation="g2"))
+        r = rep.build_report(tmp_path, tmp_path / "absent.db", today="2026-10-23")
+        assert r["describe"]["healthy_days"] == 1 and r["ready"] is False
+
+    def test_no_run_days_means_no_generation(self, tmp_path):
+        d = rep.build_report(tmp_path / "nope", tmp_path / "absent.db", today="2026-10-23")["describe"]
+        assert d["generation"] is None and d["other_generation_days"] == 0
+
+
+class TestMissingRunDays:
+    def _db(self, tmp_path, dates):
+        return _prod_db(tmp_path / "p.db", [(d, "A", 6.0, "bullish", 100.0, 101.0) for d in dates])
+
+    def test_lists_production_days_without_a_run(self, tmp_path):
+        db = self._db(tmp_path, ["2026-10-22", "2026-10-23", "2026-10-26", "2026-10-27"])
+        got = rep.missing_run_days(db, ["2026-10-22", "2026-10-26"], "2026-10-22", "2026-10-28")
+        assert got == ["2026-10-23", "2026-10-27"]
+
+    def test_today_is_not_missing_yet(self, tmp_path):
+        db = self._db(tmp_path, ["2026-10-22", "2026-10-23"])
+        assert rep.missing_run_days(db, ["2026-10-22"], "2026-10-22", "2026-10-23") == []
+
+    def test_days_before_first_run_are_not_missing(self, tmp_path):
+        db = self._db(tmp_path, ["2026-10-20", "2026-10-21", "2026-10-22"])
+        assert rep.missing_run_days(db, ["2026-10-22"], "2026-10-22", "2026-10-30") == []
+
+    def test_no_runs_or_no_db_is_empty_not_an_error(self, tmp_path):
+        assert rep.missing_run_days(tmp_path / "absent.db", ["2026-10-22"], "2026-10-22", "2026-10-30") == []
+        assert rep.missing_run_days(self._db(tmp_path, ["2026-10-22"]), [], None, "2026-10-30") == []
+
+    def test_report_surfaces_missing_days(self, tmp_path):
+        root = tmp_path / "shadow"
+        _write(root, _status("2026-10-22", {"A": _pt(6.0, "bullish")}, generation="g2"))
+        db = self._db(tmp_path, ["2026-10-22", "2026-10-23"])
+        d = rep.build_report(root, db, today="2026-10-24")["describe"]
+        assert d["missing_run_days"] == ["2026-10-23"]
 
 
 class TestNoiseBaseline:
