@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.631] — 2026-10-23 — 占位（进行中：test_outcomes_backlog_starvation 的时间炸弹——_bdays 只跳周末不跳 NYSE 假日，拨 +45 天落在感恩节即红）
+
 ## [0.45.630] — 2026-10-23 — Fixed：v0.45.624 让 main 的 CI 变红——真插件正对照的 `import_opens_skipped > 0` 依赖「本机不写字节码」；子 pytest 改为不找、不写字节码缓存
 
 **现象**：v0.45.624（`ffb6d830`）推上 main 后 `tests` 与 `clockshift`（+400 天那步）两个工作流都红在同一条：`tests/test_select_tests.py::TestRealAuditPlugin::test_plugin_sees_a_meta_guard_reading_every_test_file_and_a_plain_test_reading_none` 的 `assert d["import_opens_skipped"] > 0`（实得 0）。其后 626（`38808932`）/ 627（`ddfd711e`）的 CI 红都只是被它连坐（逐个看过：各自 1 failed，就是这一条）；629 那轮被后来的推送取消、没跑完。本机整套是绿的（11786 passed），所以收尾时没发现。
