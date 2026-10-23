@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.632] — 2026-10-23 — 占位（进行中：v0.45.627 二次检查——分类器给出判决对象、话术不再重推；CDN 连不上源站的 5xx 不记账可重试；记账失败说明已计费；timeout_error / UnsupportedProtocol 说对原因；补无错误对象的 429 重试测试）
+
 ## [0.45.631] — 2026-10-23 — Fixed：`tests/test_outcomes_backlog_starvation.py` 的时间炸弹——夹具的 `_bdays` 只跳周末、不跳 NYSE 假日；改用被测代码同一个交易日历 `is_trading_day`
 
 **现象**：拨钟 CI（`clockshift`，2026-10-23 起每天）+45 天红在 `test_rate_limit_streak_stops_network_but_not_local`；本机复现 +44 绿、+45 红。v0.45.630 那轮核 CI 时发现，与 630 / 624 无关（它们只动 `tests/test_select_tests.py`）。
