@@ -397,12 +397,23 @@ class TestRunRideAlongMeasurement:
         assert code == 1 and reg.read_text() == before
 
 
+def _no_cached_bytecode(tmp_path) -> dict:
+    """子 pytest 找不到、也不写字节码缓存 ⇒ 每次 import 都得读 `.py` 源码，import 过滤才有东西可滤。
+    v0.45.630：不钉它，`import_opens_skipped` 取决于环境——本机 `PYTHONDONTWRITEBYTECODE=1` 时 import 总读源码（> 0），
+    CI 写字节码、前面的测试已留下 `.pyc` ⇒ import 只读 `.pyc`（插件按扩展名先跳过）、一次 `.py` 都不开 ⇒ 恒 0，main 的 CI 因此红过。
+    两样都要：`PYTHONPYCACHEPREFIX` 指向一个不存在的目录 ⇒ 不去 `__pycache__` 里找现成的 `.pyc`（光禁写挡不住读旧缓存）；
+    `PYTHONDONTWRITEBYTECODE` ⇒ 什么都不写（只设前缀会把 `.pyc` 写进 `tmp_path`，而子会话的 conftest 把继承来的 `ALPHA_HIVE_HOME`
+    当真实数据根守着，`tmp_path` 在它下面 ⇒ 子会话的数据根闸红）。"""
+    return {"PYTHONPYCACHEPREFIX": str(tmp_path / "no_pycache"), "PYTHONDONTWRITEBYTECODE": "1"}
+
+
 class TestRealAuditPlugin:
     """**正对照**：真起 pytest、真加载插件。没有它，上面的一切都是在假设插件看得见读。"""
 
     def _run(self, tmp_path, *targets):
         out = tmp_path / "dump.json"
-        env = dict(os.environ, SELECT_TESTS_OUT=str(out), PYTHONPATH=os.pathsep.join([str(_TOOLS), os.environ.get("PYTHONPATH", "")]))
+        env = dict(os.environ, SELECT_TESTS_OUT=str(out), PYTHONPATH=os.pathsep.join([str(_TOOLS), os.environ.get("PYTHONPATH", "")]),
+                   **_no_cached_bytecode(tmp_path))
         r = subprocess.run([sys.executable, "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider", "-o", "addopts=",
                             "-p", "audit_plugin", *targets], cwd=_REPO, env=env, capture_output=True, text=True, timeout=240)
         assert r.returncode == 0, r.stdout + r.stderr
@@ -458,7 +469,8 @@ class TestRealAuditPlugin:
         subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
         out = tmp_path / "dump.json"
         env = dict(os.environ, SELECT_TESTS_OUT=str(out), SELECT_TESTS_REPO=str(repo),
-                   PYTHONPATH=os.pathsep.join([str(_TOOLS), str(outside), str(repo), os.environ.get("PYTHONPATH", "")]))
+                   PYTHONPATH=os.pathsep.join([str(_TOOLS), str(outside), str(repo), os.environ.get("PYTHONPATH", "")]),
+                   **_no_cached_bytecode(tmp_path))
         r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "audit_plugin", "tests"],
                            cwd=repo, env=env, capture_output=True, text=True, timeout=120)
         assert r.returncode == 0, r.stdout + r.stderr

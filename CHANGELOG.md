@@ -5,7 +5,17 @@
 
 ---
 
-## [0.45.630] — 2026-10-23 — 占位（进行中：v0.45.624 让 main 的 CI 变红——真插件正对照里 import_opens_skipped > 0 依赖本机不写字节码；CI 有 pyc 缓存时 import 不读源码、计数恒 0）
+## [0.45.630] — 2026-10-23 — Fixed：v0.45.624 让 main 的 CI 变红——真插件正对照的 `import_opens_skipped > 0` 依赖「本机不写字节码」；子 pytest 改为不找、不写字节码缓存
+
+**现象**：v0.45.624（`ffb6d830`）推上 main 后 `tests` 与 `clockshift`（+400 天那步）两个工作流都红在同一条：`tests/test_select_tests.py::TestRealAuditPlugin::test_plugin_sees_a_meta_guard_reading_every_test_file_and_a_plain_test_reading_none` 的 `assert d["import_opens_skipped"] > 0`（实得 0）。其后 626（`38808932`）/ 627（`ddfd711e`）的 CI 红都只是被它连坐（逐个看过：各自 1 failed，就是这一条）；629 那轮被后来的推送取消、没跑完。本机整套是绿的（11786 passed），所以收尾时没发现。
+
+**根因（测试的毛病，插件没错）**：本机环境有 `PYTHONDONTWRITEBYTECODE=1` ⇒ import 每次都读 `.py` 源码 ⇒ import 过滤有东西可滤（> 0）。CI 写字节码，整套跑到这条时前面的测试早已留下 `.pyc` ⇒ 子 pytest 的 import 只读 `.pyc`（插件按扩展名在过滤之前就跳过）、一个 `.py` 都不开 ⇒ 过滤无物可滤、计数恒 0。合成仓库那条正对照在 CI 上是绿的——`tmp_path` 里从没有 `.pyc`。本机复现：`env -u PYTHONDONTWRITEBYTECODE` 连跑两次即红。
+
+- `tests/test_select_tests.py`：新增 `_no_cached_bytecode(tmp_path)`，两条真插件测试的子 pytest 都带上——`PYTHONPYCACHEPREFIX` 指向一个不存在的目录（不去 `__pycache__` 找现成 `.pyc`；光禁写挡不住读旧缓存）+ `PYTHONDONTWRITEBYTECODE=1`（什么都不写）。⚠️ 只设前缀不行（实测）：`.pyc` 会写进 `tmp_path`，而子会话的 conftest 把继承来的 `ALPHA_HIVE_HOME` 当真实数据根守着、`tmp_path` 在它下面 ⇒ 子会话的数据根闸红（700+ 个 `.pyc`）。
+
+**核对**：两种字节码设置（`env -u PYTHONDONTWRITEBYTECODE` 模拟 CI / `PYTHONDONTWRITEBYTECODE=1` 本机）下 `test_select_tests.py` 70 条全绿；**变异**「过滤永不生效」在两种设置下都让两条真插件测试红（牙还在）；`select_tests.py --run`（改测试文件 ⇒ 12 个元守卫 + 本文件等 13 个）1019 passed、登记表不过期；拨钟审计 +7 / +45 / +400 天新红 0 条。整套交给 CI（失败的正是 Linux 上那一轮，本机整套抓不到这一类）。
+
+**教训**：本机 `PYTHONDONTWRITEBYTECODE=1`、CI 写字节码——**断言「某个 import 读了源码」的测试在两边行为不同**；凡是数 `.py` 打开次数的断言，要自己钉住字节码设置。
 
 ## [0.45.629] — 2026-10-22 — Fixed：标的同日收盘价取不到时的兜底——Finnhub 作第三个同日收盘来源（时间戳自证）+ 编排器 Step 16 对「对冲决定做不出来」的那天晚些时候补跑
 
@@ -175,6 +185,8 @@ yfinance `401 Invalid Crumb` → `TypeError`），把评分阶段完整的 10 �
 **登记表没动**：只并不删，留着的 17 条与静态反查重合、不改变任何选择；下次有人 `--build` 时它们自然消失，覆盖由静态反查接手。
 
 **整套核对**：① 只修插件时带新插件整套（保留 dump 做上面的对照）：11777 passed / 0 失败 / 606s。② 补完静态反查后经 `select_tests.py --run`：**1 失败** / 11785 passed——`tests/test_replay_ohlc_window.py::TestScopeIsCleared` 按字样扫全部非测试源码里的 `replay_ohlc_window`（防生产代码开始用回放窗口），我在 `static_importers` 的文档字符串里拿 `test_replay_ohlc_pit` → `test_replay_ohlc_window` 当例子写进去了，正中这条守卫。改成不点名（逐条留在本条 CHANGELOG），并在文档里写明「别在本文件里写具体测试模块的名字当例子」。随即用修好的插件自己的 dump 圈出**按文本读 `tools/select_tests/*.py` 的 40 个测试**（扫全仓源码的守卫）+ `test_select_tests.py` 重跑：1331 passed。③ 最终代码再整套（经 `select_tests.py --run`，错开了别的会话的整套）：**11786 passed / 0 失败 / 579s**，退出码 0、漂移检查无过期。
+
+⚠️ **勘误（v0.45.630）**：上面「整套 0 失败」只在本机成立——推上 main 后 CI 红在本条加的 `import_opens_skipped > 0`（CI 写字节码、import 不读源码 ⇒ 恒 0），原因与修法见 0.45.630。
 
 ## [0.45.623] — 2026-10-22 — Fixed：对话的 API 报错说人话（原因、扣没扣钱、怎么办）；影子任务 plist 生成器写上代理变量
 
