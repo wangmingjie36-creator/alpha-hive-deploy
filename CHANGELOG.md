@@ -5,7 +5,49 @@
 
 ---
 
-## [0.45.632] — 2026-10-23 — 占位（进行中：v0.45.627 二次检查——分类器给出判决对象、话术不再重推；CDN 连不上源站的 5xx 不记账可重试；记账失败说明已计费；timeout_error / UnsupportedProtocol 说对原因；补无错误对象的 429 重试测试）
+## [0.45.632] — 2026-10-23 — Fixed：v0.45.627 二次检查——对话失败的分类器给出判决对象（话术与记账只读它）；网关连不上源站不记账可重试；200 读不懂 / 记账失败都说清扣没扣钱且额度闸照算；timeout_error 与配置错说对原因
+
+627 二次检查报 6 处，用户定「按根因修复，自己排序」。根因是第 6 处：627 把「记不记账 / 重不重发」收进 `_classify`，话术 `_explain` 却又调了一遍 `_anthropic_error` / `_transport_cause`、按类名认 ProxyError，判据仍有两份。第 1、4、5 处都落在这一层。第 2 处是分类器管不到的另一半：调用**成功**之后的记账。
+
+### Fixed
+- **判决对象**（`alphabot/chat.py::_Verdict`，第 6 处）：`_classify` 返回结局 + 原因键 + 证据（状态码、Anthropic 错误对象、传输层异常类名）。记账（`error` 字段 = `_Verdict.label`）与话术（`_explain(v, …)`）只读它；原因只在 `_classify` 里定。`_not_sent` 换成 `_not_sent_reason`，按 isinstance 给出 proxy / protocol / connect。
+- **网关连不上源站：不记账、可重试**（第 1 处）：新增 `ORIGIN_UNREACHABLE_STATUS` = Cloudflare 521 / 522 / 523 / 525 / 526 / 530（且回应不是 Anthropic 错误对象）⇒ `RETRY`（原因 `origin_unreachable`）。
+  - 按定义请求没到 Anthropic。重试用尽时说「Anthropic 前面的网关连不上它的服务器（522），重试 2 次仍不行：请求没到 Anthropic」。
+  - 此前与别的「无错误对象的 5xx」一起按可能计费记最坏情况、不重试：故障时按十来次就占满当天额度、一分钱没花，即 618 / 627 修过的形状。
+  - 码义出自 Cloudflare 公开文档；Anthropic 实际会不会回这些码待验证。502 / 503 / 520（请求可能已到源站）仍按可能计费。
+- **200 却读不懂：可能计费**（第 2 处的一半）：`_call` 校验回复是带 `usage` 的消息对象，不是 JSON / 不是消息对象 / 没有 usage ⇒ `_UnreadableReply` ⇒ `MAYBE_BILLED`（原因 `unreadable`）：按最坏情况记一笔、不重发，抽屉里说「拿到了成功回应却读不懂（…）」。
+  - 此前 `json.loads` 的异常绕过分类器，抽屉里是「对话失败：JSONDecodeError…」，没说扣没扣钱。
+  - 此前缺 usage 的回复会按 0 元记账。
+- **成功调用的记账收进 `ChatEngine._book`**（第 2 处的另一半）：
+  - 用量读不懂（`call_cost` 抛错）⇒ 按预留额记一笔 `estimated`（`error="usage_unreadable"`），这一问照常返回并加注「用量读不懂，按最坏情况记了 $x」。
+  - 记账本身失败（`ledger_io` 写不进）⇒ 抛 `ChatBookkeepingFailed`（500）：「这次调用已经成功、已计费（约 $x），但记账失败（…）：今天的花费记录少了这一笔」。这笔按费用累进 `ChatEngine._unbooked`，Alpha Bot 重启之前额度闸照算（`spent_today() + _unbooked`）。
+  - 此前原样抛出：人会以为没花钱又问一遍，闸也少算一笔。`ledger_io` 的源头登记（⇒ P2）不变。
+  - `turn["calls"]` 改为记上账之后才加：半路失败时「前面 N 次 API 调用已花 $x、已记账」只数真记上了的。
+- **Anthropic 自己的 timeout_error 不再说成「没拿到它的回答」**（第 4 处）：`MAYBE_BILLED` 按原因分四种说法，并带原话：
+  - `transport`：请求超时或断线；
+  - `gateway_timeout`：网关超时，中间层没等到 Anthropic 的回答；
+  - `timeout_error`：Anthropic 回报处理超时；
+  - `no_answer`：没拿到 Anthropic 的回答，回应不是它的错误格式。
+- **`UnsupportedProtocol` 说成配置错**（第 5 处）：「请求地址的协议不对：多半是 API 地址配置有误（例如环境变量 ANTHROPIC_BASE_URL 漏了 https://），不是网络问题」，不再叫人「检查网络与 Clash」。
+
+模块 docstring「重试只重不花钱的」按判决对象重写，新增「成功了也要记上账」一条；帮助页「出错时怎么算钱」补上「网关连不上它的服务器时自动再试」「拿到成功回应却读不懂」「记账失败会写明并照算额度」。
+
+### 测试（全程不出网）
+- `tests/test_alphabot_chat.py`（真 SDK + httpx MockTransport / 假客户端）：
+  - `test_origin_unreachable_is_retried_not_booked` 6 个码：重试用尽、不记账、措辞。`test_origin_unreachable_then_ok`：522 后成功。
+  - `test_non_anthropic_429_is_retried_too`（第 3 处）：CDN 的 HTML 429 也等一下再发。此前没有用例，改成「只重试 Anthropic 自己的 429」全绿，已实测。
+  - `test_maybe_billed_says_who_answered` 三种：500 + timeout_error、504 HTML、502 HTML，各说各的、不串。
+  - `test_unreadable_success_is_booked_as_maybe_billed` 三种 200：HTML、非消息 JSON、缺 usage 的消息。
+  - `test_not_sent_is_not_booked` 加 `UnsupportedProtocol`，并按原因断言措辞；协议错不提 Clash。
+  - `TestBookkeeping`：记账失败说「已计费」且下一问被额度闸拦下（请求没发出）；半路记账失败只数记上了账的调用；用量读不懂按最坏情况记并加注。
+- 实测（本机假代理，只连 127.0.0.1）：代理回 200 后断开 / 握手中途坏 / 端口没人听 ⇒ `connect`；回 502 / 407 ⇒ `proxy`；`base_url` 漏协议 ⇒ `protocol`，措辞如上。均为真 httpx + 真 SDK。
+
+### 验证
+- 变异 14 处全红：码表清空、连不上源站仍按可能计费、只重试 Anthropic 的 429、timeout_error 说成没拿到回答、读不懂的 200 不归分类器、不校验回复形状、记账失败原样抛、额度闸不算没记上账的钱、不累计 `_unbooked`、调用数在记账前就加、用量读不懂不按最坏情况记、协议错归成连不上、协议错也叫人查 Clash、记账 `error` 不带状态码。
+- 627 的关键变异按新代码重新落点 6 处也全红：可能计费也重发、可能计费不记账、非 Anthropic 回应按其语义解读、半路失败不说已花、首问也叫人开新对话、ProxyError 不算没发出。
+- 还原后 97 passed。
+- 全量 11904 passed、0 failed（2 xfailed；等别的整套都停了才开跑，报告头无 concurrency 提示）。
+- 仍未真调 API。
 
 ## [0.45.631] — 2026-10-23 — Fixed：`tests/test_outcomes_backlog_starvation.py` 的时间炸弹——夹具的 `_bdays` 只跳周末、不跳 NYSE 假日；改用被测代码同一个交易日历 `is_trading_day`
 
