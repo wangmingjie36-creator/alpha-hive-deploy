@@ -494,10 +494,15 @@ class TestTimeoutIsNotRetried:
                                      http_client=httpx.Client(transport=httpx.MockTransport(handler)))
         return C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: T0, sleep_fn=sleeps.append)
 
-    @pytest.mark.parametrize("err", ["ConnectError", "ConnectTimeout"])
-    def test_not_sent_is_not_booked(self, svc, err):
+    @pytest.mark.parametrize("err, must", [
+        ("ConnectError", "检查网络与 Clash"), ("ConnectTimeout", "检查网络与 Clash"),
+        ("ProxyError", "代理没能建立连接"),
+        ("UnsupportedProtocol", "API 地址配置有误"),     # 配置错，不是网络问题（v0.45.632，627 二次检查 #5）
+    ])
+    def test_not_sent_is_not_booked(self, svc, err, must):
         """连接阶段就失败 ⇒ 请求没发出去、不可能计费（v0.45.618，616 二次检查 #2）：此前断网时每按一次发送都按最坏情况
-        记一笔，几次就把当天额度占满，一分钱没花。"""
+        记一笔，几次就把当天额度占满，一分钱没花。`ProxyError` = 代理对 CONNECT 回了非 2xx、隧道没建起来（v0.45.627，
+        623 二次检查 #4：此前按「读回复时断线」记了最坏情况）。"""
         import httpx
         calls = []
 
@@ -508,6 +513,9 @@ class TestTimeoutIsNotRetried:
         with pytest.raises(C.ChatNotSent, match="没发出去，没计费") as ei:
             eng.send("x")
         assert ei.value.status == 503 and len(calls) == 1 and spend_lines(svc) == []
+        assert must in str(ei.value), str(ei.value)
+        if err == "UnsupportedProtocol":
+            assert "Clash" not in str(ei.value), "配置错误被说成网络问题"
 
     def test_overload_is_retried_after_retry_after(self, svc):
         """限流 / 过载（带状态码、服务端拒了、没计费）⇒ 等一下再发（v0.45.618，616 二次检查 #3）；遵守 retry-after。"""
@@ -520,7 +528,6 @@ class TestTimeoutIsNotRetried:
         assert sleeps == [3.0] and len(spend_lines(svc)) == 1
 
     def test_status_retries_are_bounded_and_unbooked(self, svc):
-        anthropic = pytest.importorskip("anthropic")
         import httpx
         calls, sleeps = [], []
 
@@ -528,7 +535,7 @@ class TestTimeoutIsNotRetried:
             calls.append(1)
             return httpx.Response(529, json={"type": "error", "error": {"type": "overloaded_error", "message": "busy"}})
         eng = self._engine(svc, handler, sleeps)
-        with pytest.raises(anthropic.APIStatusError):
+        with pytest.raises(C.ChatRejected, match=f"过载（529），重试 {C.RETRY_STATUS_TRIES} 次仍不行.*不收费"):
             eng.send("x")
         assert len(calls) == C.RETRY_STATUS_TRIES + 1 and sleeps == list(C.RETRY_BACKOFF_SEC[:C.RETRY_STATUS_TRIES])
         assert spend_lines(svc) == [] and eng._inflight == pytest.approx(0.0)
@@ -542,10 +549,243 @@ class TestTimeoutIsNotRetried:
                 "type": "invalid_request_error", "message": "bad"}}))))
         sleeps = []
         eng = C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: T0, sleep_fn=sleeps.append)
-        with pytest.raises(anthropic.BadRequestError):
+        with pytest.raises(C.ChatRejected, match="不合法（400）.*原话：bad"):
             eng.send("x")
         assert spend_lines(svc) == [] and sleeps == [], "400 是请求本身错了，重试没用"
 
+    @pytest.mark.parametrize("code, kind, said, must", [
+        (403, "forbidden", "Request not allowed", "换一个节点"),
+        (403, "permission_error", "no access", "没有权限做这件事（403 permission_error）：到 Anthropic Console"),
+        (401, "authentication_error", "invalid x-api-key", "API key 无效"),
+        (429, "rate_limit_error", "slow down", "限流（429），重试 2 次"),
+        (500, "api_error", "oops", "服务端出错（500），重试 2 次"),
+        (413, "request_too_large", "too big", "超过了大小上限（413）"),
+        (404, "not_found_error", "model: x", f"找不到模型 {C.MODEL}，或这个组织用不了它（404）。原话：model: x"),
+        (402, "billing_error", "credit balance too low", "余额或付款有问题（402）：到 Anthropic Console 的结算页"),
+    ])
+    def test_rejections_are_said_plainly(self, svc, code, kind, said, must):
+        """带状态码的拒绝说人话（v0.45.623）：原因、扣没扣钱（都不收费）、该怎么办。此前抽屉里是 SDK 原文
+        （`OverloadedError: Error code: 529 - {...}`）；Clash 没开时的 403 看着像 key 出了问题。"""
+        import httpx
+        reply = {"type": "error", "error": {"type": kind, "message": said}}
+        eng = self._engine(svc, lambda r: httpx.Response(code, json=reply), [])
+        with pytest.raises(C.ChatRejected) as ei:
+            eng.send("x")
+        msg = str(ei.value)
+        assert must in msg and msg.endswith("不收费、没记账。") and ei.value.status == 502, msg
+        assert ".anthropic_api_key" not in msg, "CLAUDE.md：不提示创建 / 去找 key 文件"
+        assert spend_lines(svc) == []
+
+
+    @pytest.mark.parametrize("code, body", [
+        (504, "<html>Gateway Timeout</html>"),
+        (524, "<html>A timeout occurred</html>"),
+        (502, "<html>Bad gateway</html>"),
+        (504, {"type": "error", "error": {"type": "timeout_error", "message": "took too long"}}),
+        (504, {"type": "error", "error": {"type": "api_error", "message": "gateway"}}),        # 只靠网关超时码判
+        (500, {"type": "error", "error": {"type": "timeout_error", "message": "took too long"}}),  # 只靠错误类型判
+    ])
+    def test_no_anthropic_answer_is_booked_not_retried(self, svc, code, body):
+        """网关超时 / 中间层回的 5xx 页：请求已到、没拿到 Anthropic 自己的回答 ⇒ 可能已计费，与读超时同类（v0.45.627，
+        623 二次检查 #1）。此前按 5xx 重试两次、还说「不收费」：最坏付三次、一笔没记。"""
+        import httpx
+        calls, sleeps = [], []
+
+        def handler(request):
+            calls.append(1)
+            return httpx.Response(code, json=body) if isinstance(body, dict) else httpx.Response(code, text=body)
+        eng = self._engine(svc, handler, sleeps)
+        with pytest.raises(C.ChatMaybeBilled, match="可能已在服务端完成并计费") as ei:
+            eng.send("x")
+        assert len(calls) == 1 and sleeps == [], "可能已计费的请求又重发了（重发 = 再付一次）"
+        (line,) = spend_lines(svc)
+        assert line["estimated"] is True and line["error"].endswith(f"({code})") and line["usd"] > 0.1
+        assert "不收费" not in str(ei.value) and ei.value.status == 504 and eng._inflight == pytest.approx(0.0)
+
+    def test_first_ask_400_does_not_send_user_to_a_new_conversation(self, svc):
+        """对话还没有历史时的 400 只能是请求本身的写法（如 beta 头没开通）——开新对话也一样，不该让人去点（v0.45.627，
+        623 二次检查 #2）；有历史时才可能是历史坏了，那时「新对话」才有用。"""
+        import httpx
+        beta = {"type": "error", "error": {"type": "invalid_request_error", "message":
+                "Unexpected value(s) `server-side-fallback-2026-07-01` for the `anthropic-beta` header."}}
+        eng = self._engine(svc, lambda r: httpx.Response(400, json=beta), [])
+        with pytest.raises(C.ChatRejected) as ei:
+            eng.send("第一问")
+        msg = str(ei.value)
+        assert "还没有历史" in msg and "开新对话也一样" in msg and "anthropic-beta" in msg, msg
+        assert "点「新对话」再问" not in msg, msg
+
+        bound = {"type": "error", "error": {"type": "invalid_request_error", "message": "bound to a different conversation"}}
+        replies = [httpx.Response(200, json=resp([text("一")])), httpx.Response(400, json=bound)]
+        eng = self._engine(svc, lambda r: replies.pop(0), [])
+        cid = eng.send("一？")["conversation_id"]
+        with pytest.raises(C.ChatRejected) as ei:
+            eng.send("二？", conversation_id=cid)
+        assert "点「新对话」再问" in str(ei.value) and "还没有历史" not in str(ei.value), str(ei.value)
+
+    @pytest.mark.parametrize("code", [403, 401, 400])
+    def test_non_anthropic_rejection_is_not_blamed_on_the_key(self, svc, code):
+        """回应不是 Anthropic 的错误格式（防火墙 / 代理的 HTML 页）⇒ 是中间层拦的，不按 Anthropic 的语义解读成 key / 请求的
+        问题（v0.45.627，623 二次检查 #3：此前 HTML 的 403 说成「这个 key 没有权限做这件事（403 ）」）。"""
+        import httpx
+        eng = self._engine(svc, lambda r: httpx.Response(code, text="<html>Access denied</html>"), [])
+        with pytest.raises(C.ChatRejected) as ei:
+            eng.send("x")
+        msg = str(ei.value)
+        assert "不是 Anthropic 的错误格式" in msg and "Clash" in msg, msg
+        assert "key 所在" not in msg and "无效" not in msg and "不合法" not in msg and spend_lines(svc) == [], msg
+
+    def test_failure_after_spending_says_what_was_spent(self, svc):
+        """一问半路失败：前面调用的钱已花、已记账，这一问却作废、再问要重付 ⇒ 报错里写明（v0.45.627，623 二次检查 #5：
+        此前只说「被拒的请求不收费」，顶栏的「今天已花」却涨了）。错误类型 / 状态码不变。"""
+        import httpx
+        first = resp([tool_use("get_rules", {}, "t1")], stop="tool_use")
+        n = []
+
+        def handler(request):
+            n.append(1)
+            if len(n) == 1:
+                return httpx.Response(200, json=first)
+            return httpx.Response(529, json={"type": "error", "error": {"type": "overloaded_error", "message": "busy"}})
+        eng = self._engine(svc, handler, [])
+        with pytest.raises(C.ChatRejected) as ei:
+            eng.send("x")
+        (line,) = spend_lines(svc)
+        msg = str(ei.value)
+        assert ei.value.status == 502 and f"前面 1 次 API 调用已花 ${line['usd']:.3f}、已记账" in msg, msg
+        assert len(n) == 1 + C.RETRY_STATUS_TRIES + 1
+        assert all(c["messages"] == [] for c in eng._convs.values()), "失败的一问写进了历史"
+
+    def test_budget_stop_mid_turn_says_what_was_spent_too(self, svc):
+        """同一处统一说（`_turn`），不靠每个抛错点各自记得：工具循环中途撞上额度同样写明前面花了多少。"""
+        eng, _ = engine(svc, resp([tool_use("get_rules", {}, "t1")], stop="tool_use",
+                                  usage={"input_tokens": 10, "output_tokens": 200_000}), resp([text("不该到这")]))
+        with pytest.raises(C.BudgetExceeded) as ei:
+            eng.send("x")
+        (line,) = spend_lines(svc)
+        assert ei.value.status == 429 and f"前面 1 次 API 调用已花 ${line['usd']:.3f}" in str(ei.value), str(ei.value)
+
+    @pytest.mark.parametrize("code", sorted(C.ORIGIN_UNREACHABLE_STATUS))
+    def test_origin_unreachable_is_retried_not_booked(self, svc, code):
+        """网关连不上源站（Cloudflare 521/522/523/525/526/530）：按定义请求没到 Anthropic ⇒ 不记账、可以等一下再发
+        （v0.45.632，627 二次检查 #1：此前与别的「无错误对象的 5xx」一起按可能计费记最坏情况、不重试）。"""
+        import httpx
+        calls, sleeps = [], []
+
+        def handler(request):
+            calls.append(1)
+            return httpx.Response(code, text="<html>origin unreachable</html>")
+        eng = self._engine(svc, handler, sleeps)
+        with pytest.raises(C.ChatRejected) as ei:
+            eng.send("x")
+        msg = str(ei.value)
+        assert f"网关连不上它的服务器（{code}），重试 {C.RETRY_STATUS_TRIES} 次仍不行" in msg and "没记账" in msg, msg
+        assert len(calls) == C.RETRY_STATUS_TRIES + 1 and spend_lines(svc) == [] and eng._inflight == pytest.approx(0.0)
+
+    def test_origin_unreachable_then_ok(self, svc):
+        import httpx
+        replies = [httpx.Response(522, text="<html>timed out</html>"), httpx.Response(200, json=resp([text("好")]))]
+        sleeps = []
+        eng = self._engine(svc, lambda r: replies.pop(0), sleeps)
+        assert eng.send("x")["reply"] == "好" and sleeps == [C.RETRY_BACKOFF_SEC[0]] and len(spend_lines(svc)) == 1
+
+    def test_non_anthropic_429_is_retried_too(self, svc):
+        """限流的请求没被处理，不论回应是不是 Anthropic 的错误格式（CDN / 网关的 429 页）都等一下再发（v0.45.632，
+        627 二次检查 #3：此前没有用例，把它改成「只重试 Anthropic 自己的 429」全绿）。"""
+        import httpx
+        replies = [httpx.Response(429, text="<html>Too Many Requests</html>"), httpx.Response(200, json=resp([text("好")]))]
+        sleeps = []
+        eng = self._engine(svc, lambda r: replies.pop(0), sleeps)
+        assert eng.send("x")["reply"] == "好" and sleeps == [C.RETRY_BACKOFF_SEC[0]] and len(spend_lines(svc)) == 1
+
+    @pytest.mark.parametrize("code, body, must, must_not", [
+        (500, {"type": "error", "error": {"type": "timeout_error", "message": "took too long"}},
+         "Anthropic 回报处理超时（500 timeout_error）", "没拿到"),
+        (504, "<html>Gateway Timeout</html>", "网关超时（504）：中间层没等到 Anthropic 的回答", "回报处理超时"),
+        (502, "<html>Bad gateway</html>", "没拿到 Anthropic 的回答（502，回应不是它的错误格式）", "网关超时"),
+    ])
+    def test_maybe_billed_says_who_answered(self, svc, code, body, must, must_not):
+        """可能计费的几种情形措辞各说各的（v0.45.632，627 二次检查 #4）：Anthropic 自己回了 timeout_error 时它是答复了的，
+        此前却写「没拿到 Anthropic 的回答」，会把人引去查网络。"""
+        import httpx
+        eng = self._engine(svc, lambda r: httpx.Response(code, json=body) if isinstance(body, dict)
+                           else httpx.Response(code, text=body), [])
+        with pytest.raises(C.ChatMaybeBilled) as ei:
+            eng.send("x")
+        msg = str(ei.value)
+        assert must in msg and must_not not in msg, msg
+        if isinstance(body, dict):
+            assert "原话：took too long" in msg, msg
+
+    @pytest.mark.parametrize("reply", ["<html>captive portal</html>", '{"ok": true}', '{"type": "message", "content": []}'])
+    def test_unreadable_success_is_booked_as_maybe_billed(self, svc, reply):
+        """200 却读不懂（不是 JSON / 不是消息对象 / 没有 usage）：对方说成功了 ⇒ 可能已计费，按最坏情况记、不重发、
+        说清楚（v0.45.632，627 二次检查 #2：此前 json.loads 的异常绕过分类器，抽屉里是「对话失败：JSONDecodeError…」）。"""
+        import httpx
+        calls = []
+
+        def handler(request):
+            calls.append(1)
+            return httpx.Response(200, text=reply, headers={"content-type": "application/json"})
+        eng = self._engine(svc, handler, [])
+        with pytest.raises(C.ChatMaybeBilled, match="拿到了成功回应却读不懂") as ei:
+            eng.send("x")
+        (line,) = spend_lines(svc)
+        assert len(calls) == 1 and line["estimated"] is True and line["error"] == "_UnreadableReply", line
+        assert "可能已在服务端完成并计费" in str(ei.value)
+
+
+class TestBookkeeping:
+    """调用成功（已计费）之后的记账（v0.45.632，627 二次检查 #2）：记不上账要说出来、额度闸照算；用量读不懂按最坏情况记。"""
+
+    def test_failed_booking_is_said_and_still_counted(self, svc, monkeypatch):
+        # 这一笔约占当天上限的 95%：下一问的最坏情况预留（含 MAX_TOKENS 的输出）一定放不下
+        out_tokens = int(0.95 * C.DAILY_CAP_USD / llm_service.price_of(C.MODEL)["output"])
+        big = {"input_tokens": 10, "output_tokens": out_tokens}
+        eng, client = engine(svc, resp([text("一")], usage=big), resp([text("二")]))
+
+        def boom(*a, **k):
+            raise ledger_io.LedgerError("simulated: disk full")
+        monkeypatch.setattr(eng, "_record_response", boom)
+        with pytest.raises(C.ChatBookkeepingFailed) as ei:
+            eng.send("x")
+        cost = C.call_cost(resp([text("一")], usage=big))["usd"]
+        msg = str(ei.value)
+        assert ei.value.status == 500 and f"已经成功、已计费（约 ${cost:.3f}）" in msg and "LedgerError" in msg, msg
+        assert spend_lines(svc) == [] and eng._unbooked == pytest.approx(cost) and eng._inflight == pytest.approx(0.0)
+        # 额度闸把没记上账的那笔照算进去：下一问的预检看得见它
+        monkeypatch.undo()
+        with pytest.raises(C.BudgetExceeded, match=f"今天已花 \\${cost:.2f}"):
+            eng.send("y")
+        assert len(client.requests) == 1, "额度闸没算上记账失败的那笔，又发出了请求"
+
+    def test_failed_booking_mid_turn_counts_only_booked_calls(self, svc, monkeypatch):
+        """半路记账失败：「前面 N 次已花 $x、已记账」只数真记上了账的调用（失败那次的钱在本条报错里另说）。"""
+        eng, _ = engine(svc, resp([tool_use("get_rules", {}, "t1")], stop="tool_use"), resp([text("二")]))
+        real, n = eng._record_response, []
+
+        def second_fails(*a, **k):
+            n.append(1)
+            if len(n) == 2:
+                raise ledger_io.LedgerError("simulated")
+            return real(*a, **k)
+        monkeypatch.setattr(eng, "_record_response", second_fails)
+        with pytest.raises(C.ChatBookkeepingFailed) as ei:
+            eng.send("x")
+        (line,) = spend_lines(svc)
+        assert f"前面 1 次 API 调用已花 ${line['usd']:.3f}、已记账" in str(ei.value), str(ei.value)
+
+    def test_unreadable_usage_is_booked_at_worst_case(self, svc, monkeypatch):
+        eng, _ = engine(svc, resp([text("好")]))
+
+        def bad(*a, **k):
+            raise TypeError("usage shape")
+        monkeypatch.setattr(C, "call_cost", bad)
+        out = eng.send("x")
+        (line,) = spend_lines(svc)
+        assert out["reply"] == "好" and line["estimated"] is True and line["error"] == "usage_unreadable"
+        assert line["usd"] > 0.1 and out["cost_usd"] == pytest.approx(line["usd"], abs=1e-4)
+        assert any("用量读不懂" in n for n in out["notes"]), out["notes"]
 
 class TestDrawer:
     """抽屉的输入框只建一次（重建会丢焦点）、Esc 收起、从顶栏下沿开始（v0.45.616，614 二次检查 #9）。行为在 node 里用

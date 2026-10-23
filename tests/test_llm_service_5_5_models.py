@@ -35,6 +35,8 @@ def _reset_llm_state(monkeypatch):
 
 
 class _Block:
+    type = "text"                      # 真实 SDK 的内容块都有 .type（text / thinking / ...）
+
     def __init__(self, text):
         self.text = text
 
@@ -215,6 +217,41 @@ class TestCounters:
         assert llm_service.call_json("hi") is None
         u = llm_service.get_usage()
         assert u["json_parse_failures"] == 1 and u["truncated_calls"] == 1
+
+    def test_json_failure_log_carries_stop_reason_blocks_and_text_preview(self, monkeypatch, caplog):
+        """v0.45.628：只记长度查不出为什么失败。现在连 stop_reason / 块类型 / 前 300 字符一起记。"""
+        text = "我注意到这里的数据存在几处矛盾，需要先确认一下：\n1. 情绪与价格背离\n" + "x" * 400
+        _install(monkeypatch, _FakeClient(resp=_Resp(text=text, stop="end_turn")))
+        with caplog.at_level("WARNING", logger=llm_service._log.name):
+            assert llm_service.call_json("hi") is None
+        (rec,) = [r for r in caplog.records if "无法解析为 JSON" in r.getMessage()]
+        msg = rec.getMessage()
+        assert f"（{len(text)} 字符）" in msg and "stop_reason=end_turn" in msg and "块=['text']" in msg
+        assert "我注意到这里的数据存在几处矛盾" in msg
+        assert "\\n1. 情绪与价格背离" in msg               # 换行被 %r 转义成 \n，一行一条
+        assert ("x" * 100) in msg
+        assert ("x" * 400) not in msg                      # 只截前 300 字符，不把整篇回复灌进日志
+
+    def test_stop_reason_is_thread_local(self, monkeypatch):
+        import threading
+        out = {}
+
+        def worker(name, stop):
+            c = _FakeClient(resp=_Resp(text="not json", stop=stop))
+            monkeypatch.setattr(llm_service, "_get_client", lambda c=c: c)
+            llm_service.call("x")
+            out[name] = llm_service._last_call.stop_reason
+        t1 = threading.Thread(target=worker, args=("a", "end_turn"))
+        t1.start(); t1.join()
+        llm_service._last_call.stop_reason = "main-thread"
+        t2 = threading.Thread(target=worker, args=("b", "max_tokens"))
+        t2.start(); t2.join()
+        assert out == {"a": "end_turn", "b": "max_tokens"} and llm_service._last_call.stop_reason == "main-thread"
+
+    def test_json_failure_count_unchanged_by_logging(self, monkeypatch):
+        _install(monkeypatch, _FakeClient(resp=_Resp(text="not json")))
+        llm_service.call_json("x")
+        assert llm_service.get_usage()["json_parse_failures"] == 1
 
     def test_valid_json_not_counted(self, monkeypatch):
         _install(monkeypatch, _FakeClient(_Resp(text='{"x": 1}')))

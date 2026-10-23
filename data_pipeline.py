@@ -22,6 +22,7 @@ Alpha Hive 升级 — Phase 1.1: 多源数据降级链
       return _fetcher.fetch(ticker)
 """
 
+import copy
 import os
 import time
 import math
@@ -726,7 +727,7 @@ def _fill_volume_from_twelvedata(ticker: str, out: Optional[Dict]) -> Optional[D
     当晚是临时值、被 `twelve_data._drop_forming_bar` 规则 ① 丢掉（**那条规则是对的，勿改**），所以收盘后的生产
     扫描（~17:15 ET）里它的比值止于 D-1，而 yfinance 主路径含 D。旧行为把 D-1 的比值当 D 的收下：2026-09-15
     NVDA 报 1.01（D-1 1.0132），当天实际 0.676——一个 0.68× 的缩量日被说成量能正常。对不上 ⇒ 拒收（WARNING
-    点名标的 / 末根 / 应有场次），volume_ratio 留 None ⇒ `still_missing` ⇒ P2。盘中 / 盘前 / 周末跑时应有场次是
+    点名标的 / 末根 / 应有场次），volume_ratio 留 None ⇒ `still_missing`（评分那次取数缺 ⇒ P2，见 `at_scoring`）。盘中 / 盘前 / 周末跑时应有场次是
     前一交易日，与 Twelve Data 末根一致，照收。收下时结果带 `volume_as_of`。
     没有免费源能在扫描时给出 D 的定稿成交量（CBOE 收盘后偏低中位 19%、Massive 免费档 19:00 ET 前 403、
     Tiingo 21:00 ET 前仍在改），所以这里是「宁缺」，不是去别处补。
@@ -798,7 +799,7 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
       前面的复权价**（待验证）。拆股没计入会造出 −50% / −90% 的假收益，所以接上的那一天变动 > 30% 就拒收（v0.45.562；
       真有 > 30% 的单日行情也只是这天缺值，与回落之前一样）。
     - 其余一律**拒收**（WARNING 点名标的 / TD 末根 / 应有场次 / 有无核实收盘），volatility_20d 留 None ⇒
-      `still_missing` ⇒ P2；判不了场次也拒收，不猜。
+      `still_missing`（评分那次取数缺 ⇒ P2，见 `at_scoring`）；判不了场次也拒收，不猜。
 
     影子对比（10-19 扫描后，归档 926 行）：正常日 742 行跨档 0、中位差 0、最大 0.062（VZ / T 的复权因子略异）。
     ⚠️ 已知分歧（都只落在 yfinance 故障的那几天）：
@@ -841,7 +842,7 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
         _log.warning("[%s] Twelve Data 复权日线不可用: %s: %s", ticker, type(e).__name__, e)
         return out
     if not rows:
-        return out   # 未配 key / 接口失败（原因已记进 bars_cache_stats）⇒ 诚实缺数据，still_missing 会报
+        return out   # 未配 key / 接口失败（原因已记进 bars_cache_stats）⇒ 诚实缺数据，still_missing 会报（评分那次 ⇒ P2，之后的重取 ⇒ INFO）
     series = [(r["date"], float(r["close"])) for r in rows]
     last = series[-1][0]
     if last == want:
@@ -1161,6 +1162,8 @@ _history_lock = threading.Lock()
 # 本进程还没解析过任何标的 ⇒ None（scan_timing 约定：None 是「没跑」，不是「零次」）
 _history_stats: Optional[Dict] = None
 _history_last: Dict[str, Dict[str, bool]] = {}   # ticker → {字段: 最近一次出口后仍缺}
+# v0.45.625：评分用的那份行情取完那一刻的快照（`mark_history_fill_scoring`）；没标记过 ⇒ None
+_history_at_scoring: Optional[Dict] = None
 
 
 def _record_history_fill(ticker: str, path: str, outcome: Dict[str, str],
@@ -1196,28 +1199,52 @@ def history_fill_stats() -> Optional[Dict]:
       过出口，所以 `cache_expired` 只会在有人绕过 `_emit` 写缓存时出现（v0.45.477 更正：473 写成会计）。
       「这一轮用了几次过期缓存」看 `[DataPipeline] … 使用过期缓存` 日志与 `get_all_metrics()["fetch_stats"]["stale"]`。
     - `window_behind_session`：回落给了 momentum，但窗口末端早于该源核实的那一场收盘（值滞后）。
-    - `still_missing`：各字段（momentum / volume / volatility，后者 v0.45.557 起）在**最近一次**出口后仍为 None 的标的
-      ⇒ alert_manager P2。
+    - `still_missing`：各字段（momentum / volume / volatility，后者 v0.45.557 起）在**最近一次**出口后仍为 None 的标的。
+    - `at_scoring`（v0.45.625）：评分用的那份行情取完那一刻（扫描预取结束，`mark_history_fill_scoring`）的同一组统计；
+      没标记过 ⇒ None。⚠️ 「最近一次」会被评分之后的重取改写——10-22 生成 ML 报告时为 12 只票再取一轮、撞上断网，
+      把评分阶段完整的 10 只盖成「仍缺」，P2 却说「signal_archive 缺 price.* 行」（入档其实 30/30 齐全）。
+      ⇒ alert_manager 按 `at_scoring` 判「评分数据缺」（P2），比它多出来的另列（评分之后的重取，INFO）。
     本进程没解析过任何标的 ⇒ None。
     """
     with _history_lock:
         if _history_stats is None:
             return None
-        out = {
-            "resolutions": _history_stats["resolutions"],
-            "window_behind_session": _history_stats["window_behind_session"],
-            "by_path": {k: {kk: (dict(vv) if isinstance(vv, dict) else vv) for kk, vv in v.items()}
-                        for k, v in _history_stats["by_path"].items()},
-        }
-        out["still_missing"] = {f: sorted(t for t, m in _history_last.items() if m.get(f))
-                                for f in _HISTORY_FIELDS}
+        out = _history_stats_locked()
+        out["at_scoring"] = copy.deepcopy(_history_at_scoring)
         return out
 
 
+def _history_stats_locked() -> Dict:
+    """当前统计的副本（调用方持锁、且 `_history_stats` 非 None）。"""
+    out = {
+        "resolutions": _history_stats["resolutions"],
+        "window_behind_session": _history_stats["window_behind_session"],
+        "by_path": {k: {kk: (dict(vv) if isinstance(vv, dict) else vv) for kk, vv in v.items()}
+                    for k, v in _history_stats["by_path"].items()},
+    }
+    out["still_missing"] = {f: sorted(t for t, m in _history_last.items() if m.get(f))
+                            for f in _HISTORY_FIELDS}
+    return out
+
+
+def mark_history_fill_scoring() -> None:
+    """评分用的那份行情此刻取完（扫描预取结束，`alpha_hive_daily_report._init_scan_context` 调）：给回落统计拍快照，
+    之后的取数（报告阶段的重取等）不再改写它。本进程还没解析过任何标的 ⇒ 记一份全零（标记过、什么都没缺），
+    与「没标记过」（None）分开。"""
+    global _history_at_scoring
+    with _history_lock:
+        if _history_stats is None:
+            _history_at_scoring = {"resolutions": 0, "window_behind_session": 0, "by_path": {},
+                                   "still_missing": {f: [] for f in _HISTORY_FIELDS}}
+        else:
+            _history_at_scoring = _history_stats_locked()
+
+
 def reset_history_fill_stats() -> None:
-    global _history_stats
+    global _history_stats, _history_at_scoring
     with _history_lock:
         _history_stats = None
+        _history_at_scoring = None
         _history_last.clear()
 
 

@@ -16,7 +16,7 @@ v0.45.439、v0.45.592→596 都因此让 main 变红。所以选测不能按 imp
 ────────────────────────────
 | 改动 | 选什么 | 退出码 |
 |---|---|---|
-| `tests/test_*.py` | 读全部测试文件的元守卫 ∪ `EXTRA_ALWAYS` ∪ 被改文件自己 ∪ 读过它的「窄读者」∪ 静态 import 它的测试 | 0 |
+| `tests/test_*.py` | 读全部测试文件的元守卫 ∪ `EXTRA_ALWAYS` ∪ 被改文件自己 ∪ 读过它的「窄读者」∪ 直接或间接 import 它的测试（AST，含经 `tests/_*` 帮手中转） | 0 |
 | 被跟踪的非代码文件（CHANGELOG / 脚本 / 文档…） | 登记表里打开过它的测试（没人打开过 ⇒ 不选，并说明子进程里的读看不到） | 0 |
 | `tests/_must_run.json`（登记表自己） | `tests/test_select_tests.py` | 0 |
 | 核心文件（`conftest.py`、`tests/_*`、`config.py`、`hive_logger.py`、pytest 配置、`.github/`、`tools/clockshift|select_tests/`…） | **回退整套** | 10 |
@@ -37,6 +37,7 @@ CI 在整套命令上加同一个插件，`--check-drift` 比对——**dump 里
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -122,7 +123,7 @@ def save_registry(path: Path, reg: dict) -> None:
 
 
 def repo_test_count(repo: Path = REPO) -> int:
-    """仓库里的测试文件总数（`tests/test_*.py`，与 `read_test_texts` 同一个 glob）——「读全部测试文件」的分母。"""
+    """仓库里的测试文件总数（`tests/test_*.py`，与审计插件认「别的测试文件」同一个范围）——「读全部测试文件」的分母。"""
     return sum(1 for _ in (Path(repo) / "tests").glob("test_*.py"))
 
 
@@ -243,14 +244,60 @@ class Plan:
         return {"full": EXIT_FULL, "uncovered": EXIT_UNCOVERED}.get(self.mode, EXIT_OK)
 
 
-def static_importers(test_texts: dict[str, str], module: str) -> set[str]:
-    """哪些测试文件 `import <module>` / `from <module> import` / `from tests.<module> import`（模块名 = 被改测试文件的 stem）。"""
-    pat = re.compile(rf"^\s*(?:from|import)\s+(?:tests\.)?{re.escape(module)}\b", re.M)
-    return {p for p, t in test_texts.items() if pat.search(t)}
+def _imported_tests_modules(text: str) -> set[str]:
+    """一份源码 import 了 `tests/` 下哪些模块（模块名）：`import tests.X` / `import X` / `from tests.X import …` / `from X import …` /
+    `from tests import X, Y` / 相对 import，函数体里的 import 也算（AST，注释与文档字符串里的字样不算）。
+    语法错 ⇒ 按字样从宽认（出现过的 `test_*` / `_*` 名字都算）：多选不漏选，选上了它的语法错就在这次跑里直接红。"""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set(re.findall(r"\b(test_\w+|_\w+)\b", text))
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                parts = a.name.split(".")
+                out.add(parts[1] if parts[0] == "tests" and len(parts) > 1 else parts[0])
+        elif isinstance(node, ast.ImportFrom):
+            parts = node.module.split(".") if node.module else []
+            if parts[:1] == ["tests"] and parts[1:]:                   # from tests.X(.y) import …
+                out.add(parts[1])
+            elif parts == ["tests"] or (node.level and not parts):     # from tests import X / from . import X
+                out.update(a.name for a in node.names)
+            elif parts:                                                # from X(.y) import … / from .X(.y) import …
+                out.add(parts[0])
+    return out
+
+
+def reverse_import_graph(test_texts: dict[str, str]) -> dict[str, set[str]]:
+    """{`tests/<模块>.py`: 直接 import 它的文件}。`test_texts` 含 `tests/_*.py` 帮手（间接 import 常经它们中转）。"""
+    rev: dict[str, set[str]] = {}
+    for p, t in test_texts.items():
+        for m in _imported_tests_modules(t):
+            if m.startswith(("test_", "_")):
+                rev.setdefault(f"tests/{m}.py", set()).add(p)
+    return rev
+
+
+def static_importers(rev: dict[str, set[str]], path: str) -> set[str]:
+    """**直接或间接** import 了 `path` 的测试文件（只返回 `tests/test_*.py`，帮手只当中转点）。`rev` = `reverse_import_graph(...)`。
+
+    v0.45.624 前只认直接 import 的两种正则写法，漏了 `from tests import X` 与间接 import（经别的测试模块、经 `tests/_*` 帮手）。
+    那时审计插件的 import 过滤从不生效，测到的 import 读被登进登记表，碰巧替它补上了 5 条（逐条见 CHANGELOG 0.45.624）；
+    过滤修好后登记表不再记 import 读，这里必须自己认全。⚠️ 别在本文件里写具体测试模块的名字当例子：有守卫按字样扫全部非测试源码。"""
+    seen: set[str] = set()
+    todo = [path]
+    while todo:
+        for imp in rev.get(todo.pop(), ()):
+            if imp not in seen:
+                seen.add(imp)
+                todo.append(imp)
+    return {p for p in seen if Path(p).name.startswith("test_") and p != path}
 
 
 def make_plan(changes: list[tuple[str, str]], reg: dict, *, exists, test_texts: dict[str, str]) -> Plan:
-    """纯函数：`changes` = [(状态, 路径)]，`exists(path)` 问工作区里还在不在，`test_texts` = {测试文件: 源码}（只用来找静态 import）。"""
+    """纯函数：`changes` = [(状态, 路径)]，`exists(path)` 问工作区里还在不在，
+    `test_texts` = {tests/ 下的测试文件与 `_*.py` 帮手: 源码}（只用来建 import 图，见 `static_importers`）。"""
     plan = Plan()
     core, prod, tests, nonpy, registry = [], [], [], [], []
     for status, path in changes:
@@ -266,6 +313,7 @@ def make_plan(changes: list[tuple[str, str]], reg: dict, *, exists, test_texts: 
         return plan
 
     sel: set[str] = set()
+    rev = reverse_import_graph(test_texts) if tests else {}
     if tests:
         sel |= set(reg["reads_all_tests"]) | set(EXTRA_ALWAYS)
         plan.reasons.append(f"改了 {len(tests)} 个测试文件 ⇒ 读全部测试文件的 {len(reg['reads_all_tests'])} 个元守卫 + "
@@ -275,11 +323,11 @@ def make_plan(changes: list[tuple[str, str]], reg: dict, *, exists, test_texts: 
             sel.add(path)
             plan.changed_tests.append(path)
         readers = {r for r, read in reg["reads_tests"].items() if path in read}
-        imps = static_importers(test_texts, Path(path).stem) - {path}
+        imps = static_importers(rev, path)
         if readers:
             plan.reasons.append(f"{path}：被 {', '.join(Path(r).name for r in sorted(readers))} 读过")
         if imps:
-            plan.reasons.append(f"{path}：被 {', '.join(Path(r).name for r in sorted(imps))} import")
+            plan.reasons.append(f"{path}：被 {', '.join(Path(r).name for r in sorted(imps))} import（含间接）")
         sel |= readers | imps
     for _, path in nonpy:
         readers = set(reg["nonpy_readers"].get(path, ()))
@@ -342,8 +390,10 @@ def child_env(dump_path: str | None = None) -> dict:
 
 
 def read_test_texts() -> dict[str, str]:
+    """tests/ 下测试文件与 `_*.py` 帮手的源码——只用来建 import 图（帮手是间接 import 的中转点，自己不会被选中）。"""
     out = {}
-    for p in sorted((REPO / "tests").glob("test_*.py")):
+    tests_dir = REPO / "tests"
+    for p in sorted([*tests_dir.glob("test_*.py"), *tests_dir.glob("_*.py")]):
         try:
             out[f"tests/{p.name}"] = p.read_text(encoding="utf-8")
         except OSError:

@@ -126,6 +126,38 @@ class TestPlan:
     def test_core_wins_over_prod(self):
         assert _plan([("M", "pheromone_board.py"), ("M", "config.py")]).mode == "full"
 
+    @pytest.mark.parametrize("src", [
+        "from tests import test_target as t\n",                 # v0.45.624 前正则认不出（test_replay_ohlc_pit 的写法）
+        "from tests import os_helpers, test_target\n",
+        "import tests.test_target as t\n",
+        "from test_target import x\n",
+        "from .test_target import x\n",
+        "def f():\n    from tests.test_target import x\n",      # 函数体里的 import
+    ])
+    def test_every_import_form_selects_the_importer(self, src):
+        p = _plan([("M", "tests/test_target.py")], texts={"tests/test_user.py": src})
+        assert "tests/test_user.py" in p.selected, src
+
+    def test_indirect_imports_through_tests_and_helpers_select_the_far_importer(self):
+        """v0.45.624 前漏的两条路：经另一个测试模块（`test_ic_rerun_fg_budget` → `test_step_contract_ic_rerun` → `test_ic_rerun_readiness`）、
+        经 `tests/_*` 帮手（`test_persistent_writes_have_readers` → `_persistent_io_scan` → `test_ledger_writes_go_through_ledger_io`）。"""
+        texts = {"tests/test_mid.py": "from tests.test_target import x\n",
+                 "tests/test_top.py": "from tests.test_mid import x\n",
+                 "tests/_helper.py": "from test_target import y\n",
+                 "tests/test_via_helper.py": "import _helper\n"}
+        p = _plan([("M", "tests/test_target.py")], texts=texts)
+        assert {"tests/test_mid.py", "tests/test_top.py", "tests/test_via_helper.py"} <= set(p.selected)
+        assert "tests/_helper.py" not in p.selected, "帮手只当中转点，不是可跑的测试"
+
+    def test_mentions_are_not_imports_and_cycles_terminate(self):
+        texts = {"tests/test_doc.py": '"""from tests.test_target import x"""\n# import test_target\nX = "test_target"\n',
+                 "tests/test_a.py": "import test_b\nimport test_target\n", "tests/test_b.py": "import test_a\n",
+                 "tests/test_broken.py": "from tests.test_target import (\n"}
+        p = _plan([("M", "tests/test_target.py")], texts=texts)
+        assert "tests/test_doc.py" not in p.selected, "文档字符串 / 注释 / 字符串里的字样不是 import"
+        assert {"tests/test_a.py", "tests/test_b.py"} <= set(p.selected), "环要走完、要停"
+        assert "tests/test_broken.py" in p.selected, "解析不了的文件按字样从宽认：选上它，它的语法错才会在这次跑里红"
+
     def test_registry_reference_to_missing_file_is_skipped_with_a_note(self):
         reg = _reg(reads_all_tests=["tests/test_meta_a.py", "tests/test_vanished.py"])
         p = _plan([("M", "tests/test_x.py")], reg=reg, gone={"tests/test_vanished.py"})
@@ -365,12 +397,23 @@ class TestRunRideAlongMeasurement:
         assert code == 1 and reg.read_text() == before
 
 
+def _no_cached_bytecode(tmp_path) -> dict:
+    """子 pytest 找不到、也不写字节码缓存 ⇒ 每次 import 都得读 `.py` 源码，import 过滤才有东西可滤。
+    v0.45.630：不钉它，`import_opens_skipped` 取决于环境——本机 `PYTHONDONTWRITEBYTECODE=1` 时 import 总读源码（> 0），
+    CI 写字节码、前面的测试已留下 `.pyc` ⇒ import 只读 `.pyc`（插件按扩展名先跳过）、一次 `.py` 都不开 ⇒ 恒 0，main 的 CI 因此红过。
+    两样都要：`PYTHONPYCACHEPREFIX` 指向一个不存在的目录 ⇒ 不去 `__pycache__` 里找现成的 `.pyc`（光禁写挡不住读旧缓存）；
+    `PYTHONDONTWRITEBYTECODE` ⇒ 什么都不写（只设前缀会把 `.pyc` 写进 `tmp_path`，而子会话的 conftest 把继承来的 `ALPHA_HIVE_HOME`
+    当真实数据根守着，`tmp_path` 在它下面 ⇒ 子会话的数据根闸红）。"""
+    return {"PYTHONPYCACHEPREFIX": str(tmp_path / "no_pycache"), "PYTHONDONTWRITEBYTECODE": "1"}
+
+
 class TestRealAuditPlugin:
     """**正对照**：真起 pytest、真加载插件。没有它，上面的一切都是在假设插件看得见读。"""
 
     def _run(self, tmp_path, *targets):
         out = tmp_path / "dump.json"
-        env = dict(os.environ, SELECT_TESTS_OUT=str(out), PYTHONPATH=os.pathsep.join([str(_TOOLS), os.environ.get("PYTHONPATH", "")]))
+        env = dict(os.environ, SELECT_TESTS_OUT=str(out), PYTHONPATH=os.pathsep.join([str(_TOOLS), os.environ.get("PYTHONPATH", "")]),
+                   **_no_cached_bytecode(tmp_path))
         r = subprocess.run([sys.executable, "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider", "-o", "addopts=",
                             "-p", "audit_plugin", *targets], cwd=_REPO, env=env, capture_output=True, text=True, timeout=240)
         assert r.returncode == 0, r.stdout + r.stderr
@@ -384,6 +427,58 @@ class TestRealAuditPlugin:
         plain = d["by_file"].get("tests/test_concurrency_hint.py", {})
         assert not plain.get("other_test"), "纯逻辑测试不读别的测试文件：插件不能凭空多记"
         assert d["n_collected_files"] == 2 and "tests/test_tests_use_running_interpreter.py" not in guard["other_test"]
+        assert d["import_opens_skipped"] > 0, "import 过滤一次都没起作用——又成了死代码（v0.45.624 前就是）"
+
+    #: 合成仓库：每一种读各用一个文件，判错哪一种就多 / 少哪一个
+    _MINI_REPO = {
+        "pytest.ini": "[pytest]\n",
+        "helper_mod.py": "X = 1\n",                         # 只在模块级 import ⇒ 不记
+        "late_mod.py": "X = 1\n",                           # 只在测试函数里 import ⇒ 不记
+        "data_mod.py": "X = 1\n",                           # 被模块级按文本读（执行时栈底是 importlib）⇒ 记
+        "thread_data.py": "X = 1\n",                        # 被仓库外代码在线程里读（栈上既无仓库帧也无 importlib）⇒ 记
+        "tests/test_b.py": "def test_b():\n    assert True\n",                  # 被运行期按文本读 ⇒ 记
+        "tests/test_c.py": "VALUE = 3\n\n\ndef test_c():\n    assert VALUE == 3\n",   # 只被 import（pytest 断言改写读源码）⇒ 不记
+        "tests/test_a.py": (
+            "import threading\nfrom pathlib import Path\n\n"
+            "import helper_mod\nimport outside_reader\nimport test_c\n\n"
+            "ROOT = Path(__file__).resolve().parent.parent\n"
+            "SRC = (ROOT / 'data_mod.py').read_text()\n\n\n"
+            "def test_a():\n"
+            "    import late_mod\n"
+            "    assert late_mod.X == helper_mod.X == 1 and test_c.VALUE == 3 and SRC\n"
+            "    assert 'def' in (ROOT / 'tests' / 'test_b.py').read_text()\n"
+            "    out = []\n"
+            "    t = threading.Thread(target=outside_reader.read, args=(str(ROOT / 'thread_data.py'), out))\n"
+            "    t.start()\n"
+            "    t.join()\n"
+            "    assert out == ['X = 1\\n']\n"),
+    }
+
+    def test_import_filter_drops_import_reads_and_keeps_data_reads_even_inside_an_import(self, tmp_path):
+        """**正对照（v0.45.624）**：真插件、真 pytest、合成 git 仓库（`SELECT_TESTS_REPO` 指过去）——import 机制的读不记，数据读全记。
+        三个方向各钉一个：只认 `mode` 里的 `'b'`（旧写法，过滤从不生效）⇒ helper / late / test_c 被记；只问「栈里有没有 importlib」
+        ⇒ 模块级的 `data_mod.py` 被丢（元守卫在模块级逐个读测试文件时就漏了，危险方向）；栈上两样都没有时当成 import ⇒ `thread_data.py` 被丢。"""
+        repo, outside = tmp_path / "repo", tmp_path / "outside"
+        for rel, text in self._MINI_REPO.items():
+            (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (repo / rel).write_text(text, encoding="utf-8")
+        outside.mkdir()
+        (outside / "outside_reader.py").write_text("def read(path, out):\n    with open(path) as f:\n        out.append(f.read())\n",
+                                                  encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        out = tmp_path / "dump.json"
+        env = dict(os.environ, SELECT_TESTS_OUT=str(out), SELECT_TESTS_REPO=str(repo),
+                   PYTHONPATH=os.pathsep.join([str(_TOOLS), str(outside), str(repo), os.environ.get("PYTHONPATH", "")]),
+                   **_no_cached_bytecode(tmp_path))
+        r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "audit_plugin", "tests"],
+                           cwd=repo, env=env, capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, r.stdout + r.stderr
+        d = json.loads(out.read_text())
+        a = d["by_file"]["tests/test_a.py"]
+        assert a.get("other_test") == ["tests/test_b.py"], a
+        assert a.get("prod_py") == ["data_mod.py", "thread_data.py"], a
+        assert d["import_opens_skipped"] >= 3, d
 
     def test_real_update_of_one_narrow_reader_keeps_it_narrow(self, tmp_path):
         """v0.45.619 事故的真复现：真 `--update`（真插件、真子 pytest）只收集一个文件 ⇒ dump 的 `n_collected_files` = 1。
@@ -421,6 +516,17 @@ class TestRealRegistry:
         assert p.mode == "subset" and set(INCIDENT_GUARDS) <= set(p.selected)
         assert ST.make_plan([("A", "tests/test_llm_shadow_daily.py"), ("M", "llm_shadow_daily.py")], reg,
                             exists=lambda x: True, test_texts={}).mode == "uncovered"
+
+    def test_every_registered_narrow_coupling_is_also_found_statically_or_by_name(self):
+        """v0.45.624：审计插件不再记 import 读，登记表里由 import 读留下的窄读者条目以后不会再被测到（`--build` 会丢掉它们）。
+        所以每一条已知的窄耦合都必须另有来源：要么静态 import 图（含间接）认得出，要么读者源码里点了被读文件的名字（按文件名读的数据读，
+        如 `test_ast_cache` 读 `test_no_invisible_prod_data_skips.py`）。哪条两样都不是 ⇒ 登记表是它唯一的来源，重建即漏选。"""
+        reg = ST.load_registry(_REPO / ST.REGISTRY_REL)
+        texts = ST.read_test_texts()
+        rev = ST.reverse_import_graph(texts)
+        orphans = [(reader, read) for reader, reads in sorted(reg["reads_tests"].items()) for read in reads
+                   if reader not in ST.static_importers(rev, read) and Path(read).name not in texts.get(reader, "")]
+        assert reg["reads_tests"] and not orphans, orphans
 
     def test_registry_is_saved_in_the_canonical_one_key_per_line_form(self, tmp_path):
         reg = ST.load_registry(_REPO / ST.REGISTRY_REL)

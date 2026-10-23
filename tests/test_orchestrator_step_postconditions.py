@@ -59,6 +59,7 @@ STEP_OUTPUTS = {
     "economic_calendar_watch.py": (INTERPRETER, "13"),
     "run_data_backup.py": (READ_BACK, "BACKUP_STATUS_JSON"),  # backup_status.json 按 stage + 今天的日期核
     "backup_continuity.py": (INTERPRETER, "15"),
+    "portfolio_greeks.py": (READ_BACK, "PGR_AUDIT"),         # Step 16：回读当天 greeks_<日期>.json 的 price_check
     "orchestrator_steps.py": (READ_BACK, "_line"),            # 解释器自己：输出经 jq 形状校验，不合格退回按退出码
 }
 

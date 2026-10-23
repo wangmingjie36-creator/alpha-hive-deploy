@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import re
 import json
 from datetime import datetime
 from pathlib import Path
@@ -273,6 +274,11 @@ class TestSecondCheck:
         src = inspect.getsource(pg._default_mark)
         assert '"twelve_data_bar"' in src and "twelve_data_bar:" in js and "twelve_data_close:" not in js
         assert "cboe_close:" in js and "cboe_intraday:" in js
+        # v0.45.629：写入方的每个字面来源名（`"source": "…"`）都得有标签——Finnhub 第三来源曾漏标，页面显示成裸字符串
+        written = set(re.findall(r'"source":\s*"(\w+)"', inspect.getsource(pg._default_mark)
+                                 + inspect.getsource(pg._finnhub_close_mark)))
+        assert "finnhub_close" in written, "前提：新来源在被扫的函数里"
+        assert not [w for w in written if f"{w}:" not in js], f"hedge.js 缺这些来源的标签：{sorted(written)}"
 
     def test_static_assets_are_revalidated_not_heuristically_cached(self, root):
         """升级后新 index.html + 旧缓存 app.js ⇒ 新页面「没有这个页面」（浏览器里实际复现过）。/static/ 必须 no-cache。"""

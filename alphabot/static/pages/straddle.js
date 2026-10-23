@@ -67,7 +67,7 @@ function greeksGrid(g, warnAt) {
       `已明显带方向：每份跨式净 Δ ${num(g.net_delta_per_straddle, 2)}（入场时约为 0，提示阈值 ${num(warnAt, 2)}）。账本不做 delta 对冲，这一笔现在相当于持有 ${shares}。`) : null,
     !g.complete ? h("div", { class: "small muted" }, `Greeks 不全：${(g.missing || []).join("、")}`) : null,
     g.degraded_legs?.length && GREEK_TOTALS.some((k) => isNum(g[k])) ? h("div", { class: "small muted" },
-      `Greeks 含 ${g.degraded_legs.join("、")} 腿（bid=0）的 CBOE 模型值，仅供参考；这条腿没有 mid，盯市价与压力表仍按严格报价口径。`) : null,
+      `Greeks 含 ${g.degraded_legs.join("、")} 腿（bid=0）的 CBOE 模型值，仅供参考；这条腿没有中间价（买价为 0），盯市价不会拿它的模型值去算。`) : null,
   ];
 }
 

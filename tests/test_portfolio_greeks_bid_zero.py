@@ -11,7 +11,11 @@ v0.45.620（二次检查 v0.45.609）：判据收到 `cboe_options.bid_zero_gree
 全部离线：价格 / 报价 / β 一律注入。"""
 
 import ast
+import itertools
+import math
+import os
 import pathlib
+import re
 
 import pytest
 
@@ -142,7 +146,7 @@ class TestStrictQuoteOkRuleUntouched:
 
     def test_no_second_copy_of_the_predicate_anywhere(self):
         """递归扫全仓（含 alphabot/ 等子目录）：除 cboe_options 外，没有别处再定义 / 复制这个判据。
-        上一版只 glob 顶层 *.py，alphabot/ 里复制一份它也是绿的。"""
+        上一版只 glob 顶层 *.py，alphabot/ 里复制一份它也是绿的。iCloud 重名副本（`xxx 2.py`）不计。"""
         defs, importers = {}, {}
         for path in _repo_py_files():
             try:
@@ -159,10 +163,74 @@ class TestStrictQuoteOkRuleUntouched:
         assert set(defs) == {"cboe_options.py"}, defs
         assert set(importers) == {"portfolio_greeks.py", "alphabot/straddle.py"}, importers
 
+    def test_no_renamed_copy_reads_the_same_quote_fields(self):
+        """按**读了哪几个字段**认，不按名字认：生产代码里任何一个函数同时读 bid / ask / iv 三个字符串键，就是在
+        重新解释一张期权报价——要么用 `bid_zero_greeks_usable`，要么登记在 `_QUOTE_FIELD_READERS`（写明它为什么合法）。
+        上一版按函数名认，而最初那份重复恰恰是改了名的副本。
+        ⚠️ 这是静态指纹，只抓「同一个函数里读齐三个键」的拷贝；拆成两个函数的拷贝（straddle 当年的 `_ask_ok` +
+        `_greeks_usable`）靠下面 `TestConsumersAgreeOnEveryQuote` 的行为对拍抓。"""
+        found = set()
+        for path in _repo_py_files():
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            rel = str(path.relative_to(_ROOT))
+            for n in ast.walk(tree):
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    consts = {c.value for c in ast.walk(n) if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+                    if {"bid", "ask", "iv"} <= consts:
+                        found.add(f"{rel}::{n.name}")
+        new = sorted(found - set(_QUOTE_FIELD_READERS))
+        assert not new, (f"新的报价字段读者 {new}：若是在重新判断「这张腿的 Greeks 能不能用」，改用 "
+                         "cboe_options.bid_zero_greeks_usable；否则登记进 _QUOTE_FIELD_READERS 并写明理由")
+        stale = sorted(set(_QUOTE_FIELD_READERS) - found)
+        assert not stale, f"登记过但已不存在 / 不再读这三个键：{stale}（清单只许与现实一致）"
+
     def test_scan_actually_sees_subpackages(self):
         """守卫自证：扫描列表里要有 alphabot/ 下的文件（上一版的盲区），否则上面那条是假绿。"""
         rels = {str(p.relative_to(_ROOT)) for p in _repo_py_files()}
         assert "alphabot/straddle.py" in rels and "portfolio_greeks.py" in rels
+
+
+class TestRepoWalk:
+    """`_repo_py_files` 本身：剪枝（不进 .git / .claude 等目录）、不计 iCloud 重名副本。"""
+
+    def _tree(self, tmp_path):
+        for rel in ("a.py", "pkg/b.py", "pkg/b 2.py", "c 13.py", ".claude/worktrees/w/d.py", ".git/e.py",
+                    "tests/f.py", "node_modules/g.py", "__pycache__/h.py", "_retired_pre_phase5/i.py",
+                    "pkg/.hidden/j.py", "data 2/k.py"):
+            f = tmp_path / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("x = 1\n", encoding="utf-8")
+        return tmp_path
+
+    def test_skips_copies_hidden_and_vendored_dirs(self, tmp_path):
+        got = {str(p.relative_to(tmp_path)) for p in _repo_py_files(self._tree(tmp_path))}
+        assert got == {"a.py", "pkg/b.py", "data 2/k.py"}
+
+    def test_pruned_directories_are_never_entered(self, tmp_path, monkeypatch):
+        """剪枝要发生在遍历时：先全量 rglob 再过滤的写法会把 .git 和每个 worktree 都走一遍（本机约 4.2 万个 .py）。"""
+        root = self._tree(tmp_path)
+        visited = []
+        real_walk = os.walk
+
+        def spy(top, *a, **k):
+            for dp, dn, fn in real_walk(top, *a, **k):
+                visited.append(os.path.relpath(dp, top))
+                yield dp, dn, fn
+
+        monkeypatch.setattr(os, "walk", spy)
+        list(_repo_py_files(root))
+        bad = [v for v in visited if v.split(os.sep)[0] in {".git", ".claude", "node_modules", "__pycache__",
+                                                             "_retired_pre_phase5", "tests"} or ".hidden" in v]
+        assert not bad, bad
+
+    def test_icloud_copy_of_a_guarded_module_does_not_trip_the_guard(self, tmp_path):
+        """`portfolio_greeks 2.py` 之类的副本：不进扫描列表 ⇒ 不会把「只有两个 importer」判成三个。"""
+        (tmp_path / "portfolio_greeks.py").write_text("x = 1\n", encoding="utf-8")
+        (tmp_path / "portfolio_greeks 2.py").write_text("x = 1\n", encoding="utf-8")
+        assert [p.name for p in _repo_py_files(tmp_path)] == ["portfolio_greeks.py"]
 
 
 class TestSharedPredicate:
@@ -179,6 +247,45 @@ class TestSharedPredicate:
         for over in ({}, {"iv": 0.0}, {"ask": 0.0}, {"delta": None}, {"bid": 0.02}):
             q = _bid_zero(**over)
             assert sd._greeks_usable(q) == cboe_options.bid_zero_greeks_usable(q)
+
+    @pytest.mark.parametrize("over", [{"bid": False}, {"ask": True}, {"iv": True}, {"delta": True},
+                                      {"gamma": False}, {"vega": True}, {"theta": False}])
+    def test_booleans_are_not_numbers(self, over):
+        """`float(False)` 是 0.0：`bid: false` 不能被读成「买价为 0」。前身（各自的 `_num`）本来就拒布尔，
+        收成一份时一度丢了（v0.45.620 二次检查）。"""
+        assert cboe_options.bid_zero_greeks_usable(_bid_zero(**over)) is False
+        assert sd._greeks_usable(_bid_zero(**over)) is False
+
+
+class TestConsumersAgreeOnEveryQuote:
+    """行为对拍：同一张报价喂给三处——判据本身、跨式页 `_greeks_usable`、对冲账本 `option_exposures`——结论必须一致。
+    原始 CBOE 行经真正的 `_qs_contract` 整理（含 `quote_ok`），不手写报价形状。拆成两个函数的拷贝、或哪天某处
+    悄悄放宽 / 收紧一个条件，静态指纹抓不到，这里抓。"""
+
+    BIDS = (0.0, 0.01, None, "x", -0.0)
+    ASKS = (0.03, 0.0, None, float("nan"))
+    IVS = (0.3, 0.0, None, -1.0)
+    DELTAS = (0.05, None, float("nan"), 0.0)
+
+    def _quote(self, bid, ask, iv, delta):
+        raw = {"option": CALL, "bid": bid, "ask": ask, "iv": iv, "delta": delta, "gamma": 0.09, "vega": 0.004,
+               "theta": -0.007, "open_interest": 100, "volume": 1}
+        return cboe_options._qs_contract(raw, role="held", cp="C", strike=K, expiry=EXPIRY, dte=29)
+
+    def test_grid(self):
+        n = 0
+        for bid, ask, iv, delta in itertools.product(self.BIDS, self.ASKS, self.IVS, self.DELTAS):
+            q = self._quote(bid, ask, iv, delta)
+            shared = cboe_options.bid_zero_greeks_usable(q)
+            assert sd._greeks_usable(q) == shared, (bid, ask, iv, delta)
+            greeks_ok = all(isinstance(q.get(k), float) and math.isfinite(q[k])
+                            for k in ("delta", "gamma", "vega", "theta"))
+            strict_ok = bool(q["quote_ok"]) and q["mid"] is not None and greeks_ok
+            row = _call(_rows(q))
+            assert (not row["quote_missing"]) == (strict_ok or shared), (bid, ask, iv, delta, row["quote_missing"])
+            assert bool(row.get("bid_zero")) == (shared and not q["quote_ok"]), (bid, ask, iv, delta)
+            n += 1
+        assert n == len(self.BIDS) * len(self.ASKS) * len(self.IVS) * len(self.DELTAS)
 
 
 class TestLedgerViewMarksDegradedLeg:
@@ -256,13 +363,30 @@ class TestCoverageAndHedgePage:
 
 
 _ROOT = pathlib.Path(pg.__file__).resolve().parent
-_SKIP_PARTS = {".git", ".claude", "node_modules", "__pycache__", "_retired_pre_phase5", "tests", "venv", ".venv"}
+#: 同一个函数里同时读 bid / ask / iv 三个键的生产函数——都是在**解析或构造**报价（不是在判「Greeks 能不能用」）。
+#: 新增一个要先问：它是不是在重新实现 `cboe_options.bid_zero_greeks_usable`？
+_QUOTE_FIELD_READERS = {
+    "cboe_options.py::fetch_cboe_raw_contracts": "CBOE payload → 原始合约行",
+    "cboe_options.py::fetch_cboe_chain": "CBOE payload → 链结构",
+    "cboe_options.py::_qs_contract": "原始行 → 持久化报价形状（quote_ok 的定义处）",
+    "cboe_options.py::bid_zero_greeks_usable": "判据本身",
+    "earnings_vol_signal.py::_leg": "财报跨式信号的腿报价整理（点差口径）",
+    "sell_strike_candidates.py::_leg": "卖权候选的腿报价整理（25% 点差预注册口径）",
+    "alphabot/synthetic.py::demo_payload": "演示用合成 payload",
+    "alphabot/synthetic.py::_held": "演示用合成持仓报价",
+    "alphabot/yf_chain.py::_rows": "yfinance 备用源 → 原始行",
+    "alphabot/premium.py::_contract_row": "溢价页的合约行整理",
+}
+_SKIP_DIRS = {"node_modules", "__pycache__", "_retired_pre_phase5", "tests", "venv"}
+_ICLOUD_COPY = re.compile(r" \d+\.py$")
 
 
-def _repo_py_files():
-    """仓库里所有生产 .py（递归；不含 tests/ 与 worktree / 隐藏目录）。"""
-    for path in sorted(_ROOT.rglob("*.py")):
-        parts = path.relative_to(_ROOT).parts
-        if any(p in _SKIP_PARTS or p.startswith(".") for p in parts[:-1]):
-            continue
-        yield path
+def _repo_py_files(root=None):
+    """仓库里的生产 .py：递归、**遍历时剪枝**（不进隐藏目录 / .claude/worktrees / .git / tests / 第三方目录；
+    先 rglob 再过滤会把它们全走一遍），并跳过 iCloud 重名副本（`xxx 2.py`，CLAUDE.md「环境」一节）。"""
+    root = pathlib.Path(root or _ROOT)
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS and not d.startswith("."))
+        out += [pathlib.Path(dirpath) / f for f in filenames if f.endswith(".py") and not _ICLOUD_COPY.search(f)]
+    return sorted(out)
