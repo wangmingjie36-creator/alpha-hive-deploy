@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import outcomes_fetcher as of
+from is_trading_day import is_trading_day
 from outcomes_fetcher import OutcomesFetcher, backlog_summary
 
 TICKERS = ["ABBV", "AMC", "AMZN", "BILI", "BRK-B", "COST", "CRCL", "CRM", "CVX", "DE", "DELL", "ENPH",
@@ -23,9 +24,12 @@ TICKERS = ["ABBV", "AMC", "AMZN", "BILI", "BRK-B", "COST", "CRCL", "CRM", "CVX",
 
 
 def _bdays(start: date, n: int):
+    """从 `start`（含）起的 n 个 NYSE 交易日——与被测代码同一个日历（`outcomes_fetcher` 的 T+N 走 `add_trading_days`，
+    它逐日问 `is_trading_day`）。v0.45.631 前只跳周末：夹具日期落在感恩节前后时（拨钟 +45 天，2026-11-25 / 11-26），
+    「下一个工作日」是休市日，被测代码的 T+1 却是 11-27 ⇒ 本地快照对不上、测试红。"""
     out, d = [], start
     while len(out) < n:
-        if d.weekday() < 5:
+        if is_trading_day(d)[0]:
             out.append(d)
         d += timedelta(days=1)
     return out
