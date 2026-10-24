@@ -264,6 +264,7 @@ class TestFrontendWiring:
         sect = help_js[start:help_js.index("什么时候不对冲", start)]
         assert "r.delta_hedge_cost_bps" in sect and "不进决策、不扣现金" in sect and "不是点差 / 冲击模型" in sect
         assert not re.search(r"\b5\s*bps", sect), "成本假设写成了字面量"
+        assert "样本很小" in sect and "不是结论" in sect, "头几个扫描日的回放不能写成定论"
 
     def test_help_constants_come_from_the_server_not_literals(self):
         help_js = (STATIC / "pages" / "help.js").read_text(encoding="utf-8")

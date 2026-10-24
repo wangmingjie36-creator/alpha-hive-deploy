@@ -191,7 +191,7 @@ function renderEst(el, r, p) {
   if (!e) { fill(el, "账本 mark 已冻结，浮动盈亏是旧价。当前报价估算不可得：两腿报价都不全。"); return; }
   const diff = isNum(p.unrealized_usd) ? e.usd - p.unrealized_usd : null;
   fill(el, "账本 mark 已冻结，上面的浮动盈亏是旧价。按当前报价估算 ", h("b", { class: tone(e.usd) }, sMoney(e.usd)),
-    `（${e.basis}，非账本数字${isNum(diff) ? `；比账本低估 / 高估 ${sMoney(diff)}` : ""}）。`);
+    `（${e.basis}，非账本数字${isNum(diff) ? `；与账本数字相差 ${sMoney(diff)}（估算 − 账本，负 = 比账本多亏）` : ""}）。`);
 }
 
 function positionCard(p, d, liveEls) {
