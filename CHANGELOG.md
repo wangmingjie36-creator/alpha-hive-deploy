@@ -9,7 +9,55 @@
 
 ## [0.45.638] — 2026-10-24 — 占位（进行中：逐票 Delta 对冲加成本模型——`delta_hedge_cost_bps`（缺省 5、主观未检验），审计与对冲页记估算成本 / 成交名义 / 笔数，缺省仍 shadow、带宽与拉回不动）
 
-## [0.45.637] — 2026-10-24 — 占位（进行中：v0.45.635 二次检查——记账报错后按 request_id 回读账本防重复计入；抽屉显示 spend_error；冒烟合计金额按账本更正）
+## [0.45.637] — 2026-10-24 — Fixed：v0.45.635 二次检查——spend.jsonl 收成一个记账出口（估算也照样防漏记、报错后回读防重复计入）；抽屉显示 spend_error、取状态失败不盖掉对话；冒烟合计按账本更正
+
+635 二次检查报 3 处，用户定「按根因修复，自己排序」。修完、提交前又做了一轮二次检查，找出 2 处（下面标「本版二次检查」），用户定「要修」，一并进本版。
+
+### Fixed
+- **记账报错但行已落盘：不重复计入**（`alphabot/chat.py::ChatEngine._book` / `_landed`，第 1 处）：
+  - 问题：`ledger_io.atomic_write_text` 有「写入已生效仍抛」的情形（`os.replace` 之后的目录 fsync 失败、读回比对不一致）。此前 `_book` 一律当成没记上，记进 `_unbooked`，同一笔算两遍，注记还说「花费记录少了这一笔」。
+  - 现在每次记账生成自己的 `booking_id`（uuid）写进那一行；报错后按它回读账本：
+    - 已在 ⇒ 不计入 `_unbooked`，注明「记账时报错（…），但这一笔已经写进花费记录、没少记；存放花费记录的磁盘可能有问题」；
+    - 不在 / 读不了 ⇒ 仍按没记上处理（宁多记）。
+  - 为什么不认 API 的消息 id：唯一性是别人的承诺。实测测试夹具里每个响应都叫 `msg_test`，按消息 id 认会把第二次调用的记账失败误判成「已落盘」，现有用例当场红了。
+- **spend.jsonl 只有一个记账出口**（`ChatEngine._write_spend`，本版二次检查 #1）：
+  - 问题：「可能已计费」的估算记录直接调 `_record`，没经上面的处理。写不进时原样抛 LedgerError，抽屉显示「对话失败：LedgerWriteError…」，那笔可能已花的钱（最坏约 $0.3）`_unbooked` 与 `spent_today` 都没算。离线探针实测。
+  - 现在成功调用（`_book`）与估算都交给 `_write_spend(write, usd)`：生成 `booking_id`、写行、报错后回读，没落盘就记进今天的 `_unbooked`，**不抛**。
+  - 估算那条照样抛 `ChatMaybeBilled`，话术按记账结局分三种：记上了 / 报错但已写入 / 「按最坏情况算 $x，但记账失败（…）：花费记录里没有这一笔，今天的额度照样把它算进去」。
+  - AST 守卫 `test_spend_rows_have_one_exit`：`self._record(` / `self._record_response(` 只许出现在交给 `_write_spend` 的 lambda 里（或 `_record_response` 自己体内），新增写入点绕过出口就红。
+- **抽屉显示 spend_error**（`alphabot/static/chat.js`，第 2 处）：花费记录读不了时，服务端 `status` 给的那句「花费记录读不了……为防超支先不发请求」放在对话区最上面（红字）。
+  - 此前这个字段自 614 起没人读，顶栏只显示「今天 — / $3.00」，要发一问被拒才知道原因。
+  - 发送成功后改为重取状态（`loadStatus()`），今天已花与 spend_error 只认服务端那一处。此前只抄回 `spent_today`，`spend_error` 会留旧值。
+- **取状态失败不盖掉对话**（`chat.js::loadStatus`，本版二次检查 #2）：
+  - 问题：此前取状态一失败就把 `status` 整个换成 `{error}`，`body()` 只显示「读不到对话状态」、输入框隐藏。上一条加了发送成功后重取，这个形状被带到成功路径上：重取失败时刚付钱的回答与输入框一起消失。node DOM 桩实测；失败路径自 618 起就有。
+  - 现在已有能用的状态就保留，加一条「对话状态暂时取不到（…）：上面的『今天已花』可能不是最新的」；一开始就取不到才整个显示错误。
+- **冒烟合计按账本更正**（第 3 处，`CHANGELOG.md` 0.45.635 条与 auto-memory）：三次冒烟的账本六行逐笔相加 $0.16234（≈ $0.1623）。此前写的 $0.1624 是三个四舍五入后的小计再相加，与同处「逐笔一致」的说法矛盾。auto-memory 索引行里第一次冒烟的旧数 $0.11 也同步。
+
+模块 docstring「成功了也要记上账」一条补上唯一记账出口与回读。
+
+### 测试（全程不出网）
+- `tests/test_alphabot_chat.py`：
+  - `test_booking_error_after_the_row_landed_is_not_counted_twice`：真写入后再抛 `LedgerWriteError` ⇒ `_unbooked` 为空，今天已花 = 账本那一行，注记说没少记。
+  - `test_each_booking_has_its_own_id`：两次调用的行各有不同的 `booking_id`。
+  - `test_maybe_billed_estimate_that_fails_to_write`（没落盘 / 已落盘两种）：照样 ChatMaybeBilled、话术注明；没落盘的算进今天，已落盘的不重复。
+  - `test_spend_rows_have_one_exit`：AST 守卫，正对照找到至少 4 处写入调用。
+  - `TestDrawer::test_status_refetch_failure_keeps_the_conversation`：静态核对。
+  - `TestDrawer::test_spend_error_is_shown_and_status_is_refetched`：静态核对。
+  - `test_reservation_is_held_until_the_call_is_booked` 的桩改为接受关键字参数。它的桩 `lambda *a` 接不住新的 `booking_id=`，抛出的 TypeError 被 `_book` 如实当成记账失败注明了，没有被吞掉。
+- 前端在 node DOM 桩里跑真的 chat.js：
+  - spend_error 显示、顶栏「—」；发送成功后重取状态、旧错误消失、顶栏变为新值。
+  - 发送成功后重取状态失败：回答仍在、输入框仍在、显示「对话状态暂时取不到」，没有整片「读不到对话状态」。
+  - 616 的抽屉回归脚本（焦点、输入框不重建、Esc、失败放回问题、未开启时隐藏输入区）全部照旧。
+- 选测登记表 `--update`：只有提交号变，未提交。
+
+### 验证
+- 变异 14 处全红：
+  - 回读恒判没落盘 / 恒判已落盘、行里不写 `booking_id`、回读改认 API 消息 id、已落盘不注明；
+  - 估算记账绕过出口、出口写失败原样抛、出口不回读、没记上不进今天额度、估算话术不管记账结局；
+  - 抽屉不显示 spend_error、发送成功只抄回 `spent_today`、取状态失败整个换成错误、不显示取状态失败提示。
+- 最后一个起初存活：静态测试只核了字段名 `s.status_error`，被模板串里的同名引用骗过，已改为核显示语句本身。还原后 107 passed。
+- 全量 11962 passed、0 failed（2 xfailed；等别的整套都停了才开跑，报告头无 concurrency 提示）。
+- 本版没有真调 API。
 
 ## [0.45.636] — 2026-10-24 — Fixed：`test_earnings_calendar` 的 `_prod_files` 改成遍历时剪枝并排除 `.venv` / `site-packages`（整套里唯一压在 60 s 超时线上的测试）
 
@@ -71,7 +119,7 @@ v0.45.634 在最终树上跑整套时红了 `tests/test_earnings_calendar.py::Te
 - **10-24 再补：思考块跨问放回已验证**（用户「换一道必须推理的题」批准，估 $0.05–0.10、上限 $0.50）：
   - 做法：第一问换成真假话逻辑题，程序先确认回复里真有 thinking 块（签名 1120 字符）才问第二问。
   - 结果：第二问把带思考块的历史原样放回，被接受、答对，没出现 400。
-  - 花费 $0.0073（$0.0047 + $0.0026，缓存仍热，按官方价手算逐笔一致）。三次冒烟合计 $0.1624。
+  - 花费 $0.0073（$0.0047 + $0.0026，缓存仍热，按官方价手算逐笔一致）。三次冒烟合计 $0.1623（账本六行逐笔相加 $0.16234；v0.45.637 更正：此前写的 $0.1624 是三个四舍五入后的小计再相加）。
 
 ## [0.45.634] — 2026-10-24 — Fixed：v0.45.626 二次检查——bid_zero 守卫跳过 iCloud 重名目录、登记清单区分同名函数、三条扫描测试共用一次遍历、对拍网格去重补负买价、CHANGELOG 整套结果如实
 

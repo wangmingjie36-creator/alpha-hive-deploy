@@ -26,7 +26,9 @@
   （Cloudflare 52x，请求没到 Anthropic）⇒ 没计费 ⇒ 等一下再发，最多 `RETRY_STATUS_TRIES` 次（v0.45.618 / 632）；别的拒绝 ⇒
   没计费、不重发。报错一律说清原因、扣没扣钱、怎么办；一问半路失败时另写明前面几次调用已花多少（`_turn`）。
 - **成功了也要记上账**：调用成功（已计费）后用量读不懂 ⇒ 按最坏情况记；记账本身失败 ⇒ 照常交回答、注明「已计费但没记上账」，
-  这笔按日期记在本进程里（`_unbooked`，v0.45.632 / 635）。**今天已花只有一个口径** `spent_today()`：账本里今天的 + 今天没记上
+  这笔按日期记在本进程里（`_unbooked`，v0.45.632 / 635）。**spend.jsonl 只有一个记账出口** `_write_spend`：成功调用与
+  「可能已计费」的估算都经它（守卫 `test_spend_rows_have_one_exit`）；报错前行其实已落盘的（写后读回 / 目录 fsync 失败），
+  按本次记账自己的 `booking_id` 回读认出来、不重复计入（v0.45.637）。**今天已花只有一个口径** `spent_today()`：账本里今天的 + 今天没记上
   账的；额度闸、顶栏、每问结果都读它。读不了花费记录 ⇒ `ChatSpendUnreadable`，为防超支先不发请求（v0.45.635）。
 - **拒答回落**：`fallbacks: "default"`（Anthropic 按拒答类别选替补模型）；回落那次按替补模型计价（未登记的按最贵价）。
 
@@ -246,10 +248,11 @@ def _retry_wait(exc: BaseException, attempt: int) -> float:
 
 
 def _explain(v: _Verdict, *, retries: int = 0, fresh: bool = False, booked: float = 0.0,
-             detail: str = "") -> ChatError:
+             booking: Optional[dict] = None, detail: str = "") -> ChatError:
     """判决 ⇒ 给人看的一句话：原因、扣没扣钱、该怎么办（v0.45.623 起；632 只读判决，不再重推）。此前抽屉里直接是 SDK 原文
     （`OverloadedError: Error code: 529 - {...}`），看不出扣没扣钱。`fresh`：这场对话还没有历史（400 / 413 就不是历史的
-    问题，开新对话没用）；`booked`：`MAYBE_BILLED` 按最坏情况记下的钱；`detail`：读不懂的回复长什么样。"""
+    问题，开新对话没用）；`booked`：`MAYBE_BILLED` 按最坏情况记下的钱；`booking`：那笔估算的记账结局（`_write_spend` 的
+    返回，None = 记上了）；`detail`：读不懂的回复长什么样。"""
     kind, said = (v.err or {}).get("type") or "", str((v.err or {}).get("message") or "")[:200]
     quote = f"。原话：{said}" if said else ""
     if v.outcome == NOT_SENT:
@@ -267,7 +270,14 @@ def _explain(v: _Verdict, *, retries: int = 0, fresh: bool = False, booked: floa
             "no_answer": f"没拿到 Anthropic 的回答（{v.code}，回应不是它的错误格式）",
             "unreadable": f"拿到了成功回应却读不懂（{detail or v.name}）",
         }[v.reason]
-        return ChatMaybeBilled(f"{what}：可能已在服务端完成并计费，拿不到用量，已按最坏情况记 ${booked:.2f}。"
+        if booking is None:
+            booked_note = f"已按最坏情况记 ${booked:.2f}。"
+        elif booking["landed"]:
+            booked_note = f"已按最坏情况记 ${booked:.2f}（记账时报错：{booking['why']}，但这一笔已写进花费记录）。"
+        else:
+            booked_note = (f"按最坏情况算 ${booked:.2f}，但记账失败（{booking['why']}）：花费记录里没有这一笔，"
+                           "今天的额度照样把它算进去（Alpha Bot 重启后就不再算）。")
+        return ChatMaybeBilled(f"{what}：可能已在服务端完成并计费，拿不到用量，{booked_note}"
                                f"这一问没写进对话历史，可以再问一次{quote}")
     tried = f"，重试 {retries} 次仍不行" if retries else ""
     if v.reason == "rate_limited":
@@ -617,13 +627,14 @@ class ChatEngine:
             "ts": datetime.fromtimestamp(self._now()).isoformat(timespec="seconds"), "date": self._today(),
             "conversation": conv_id, "usd": round(usd, 6), **fields})
 
-    def _record_response(self, conv_id: str, resp: dict, cost: dict) -> None:
+    def _record_response(self, conv_id: str, resp: dict, cost: dict, booking_id: Optional[str] = None) -> None:
         usage = resp.get("usage") or {}
         self._record(conv_id, cost["usd"], searches=cost["searches"], models=cost["models"],
                      ceiling_priced=cost["ceiling_priced"], stop_reason=resp.get("stop_reason"),
                      input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
                      cache_read_input_tokens=usage.get("cache_read_input_tokens"),
-                     cache_creation_input_tokens=usage.get("cache_creation_input_tokens"), request_id=resp.get("id"))
+                     cache_creation_input_tokens=usage.get("cache_creation_input_tokens"), request_id=resp.get("id"),
+                     booking_id=booking_id)
 
     def _book(self, conv_id: str, resp: dict, reserve: float) -> dict:
         """一次成功（已计费）调用的记账，返回本次费用（v0.45.632）。用量读不懂 ⇒ 按最坏情况记 `estimated`（宁多记）。
@@ -635,18 +646,44 @@ class ChatEngine:
         except Exception as exc:  # noqa: BLE001 - 用量读不懂不等于没花钱
             _log.warning("对话响应的用量读不懂（%s: %s），按最坏情况记账", type(exc).__name__, exc)
             cost = {"usd": reserve, "searches": 0, "ceiling_priced": True, "models": [MODEL], "estimated": True}
+        if cost.get("estimated"):
+            trouble = self._write_spend(lambda bid: self._record(
+                conv_id, reserve, estimated=True, error="usage_unreadable", request_id=resp.get("id"), booking_id=bid),
+                reserve)
+        else:
+            trouble = self._write_spend(lambda bid: self._record_response(conv_id, resp, cost, booking_id=bid), cost["usd"])
+        if trouble is not None:
+            cost = {**cost, ("landed_despite_error" if trouble["landed"] else "unbooked_error"): trouble["why"]}
+        return cost
+
+    def _write_spend(self, write: Callable[[str], None], usd: float) -> Optional[dict]:
+        """spend.jsonl 的唯一记账出口（v0.45.637）：成功调用（`_book`）与「可能已计费」的估算都经它，失败处理只有一份——
+        637 二次检查时估算那条直接调 `_record`，写不进就原样抛 LedgerError、那笔可能已花的钱哪里都没算。
+        `write(booking_id)` 真正写行（行里带本次生成的 `booking_id`）。写成 ⇒ None。报错 ⇒ 按 `booking_id` 回读：已落盘
+        （`atomic_write_text` 在 os.replace 之后的目录 fsync / 读回比对失败会抛）⇒ 不重复计入；没落盘 / 读不了 ⇒ 这笔记进
+        今天的 `_unbooked`（`spent_today` 并进去，宁多记）。返回 {landed, why} 给调用方注明。**不抛**。"""
+        booking_id = uuid.uuid4().hex
         try:
-            if cost.get("estimated"):
-                self._record(conv_id, reserve, estimated=True, error="usage_unreadable", request_id=resp.get("id"))
-            else:
-                self._record_response(conv_id, resp, cost)
-        except Exception as exc:  # noqa: BLE001 - 已计费的调用记不上账：照常交回答、注明，今天的额度照算
-            _log.error("对话记账失败（已计费约 $%.4f）：%s: %s", cost["usd"], type(exc).__name__, exc)
+            write(booking_id)
+            return None
+        except Exception as exc:  # noqa: BLE001 - 记不上账也要说出来、额度照算，不能让记账失败盖掉原本要说的事
+            why = f"{type(exc).__name__}: {exc}"
+            if self._landed(booking_id):
+                _log.warning("对话记账报错，但这一行已在账本里（不重复计入）：%s", why)
+                return {"landed": True, "why": why}
+            _log.error("对话记账失败（约 $%.4f 没记上，已算进今天的额度）：%s", usd, why)
             today = self._today()
             with self._lock:
-                self._unbooked[today] = self._unbooked.get(today, 0.0) + max(cost["usd"], 0.0)
-            cost = {**cost, "unbooked_error": f"{type(exc).__name__}: {exc}"}
-        return cost
+                self._unbooked[today] = self._unbooked.get(today, 0.0) + max(usd, 0.0)
+            return {"landed": False, "why": why}
+
+    def _landed(self, booking_id: str) -> bool:
+        """记账报错后回读：这次记账的那一行其实已经在账本里了吗。认 `_write_spend` 本次生成的 `booking_id`，不认 API 的消息 id
+        （唯一性是别人的承诺）。读不了账本 ⇒ False，按没记上处理（宁多记）。"""
+        try:
+            return any(r.get("booking_id") == booking_id for r in ledger_io.load_jsonl(self._spend_path()))
+        except (ledger_io.LedgerError, OSError, ValueError):
+            return False
 
     def _call(self, client, messages: list) -> dict:
         raw = client.with_options(timeout=REQUEST_TIMEOUT_SEC, max_retries=0).messages.with_raw_response.create(
@@ -763,9 +800,11 @@ class ChatEngine:
                             self._sleep(wait)
                             attempt += 1
                             continue
+                        booking = None
                         if v.outcome == MAYBE_BILLED:
-                            self._record(conversation_id, reserve, estimated=True, error=v.label)
-                        raise _explain(v, retries=attempt, fresh=fresh, booked=reserve,
+                            booking = self._write_spend(lambda bid: self._record(
+                                conversation_id, reserve, estimated=True, error=v.label, booking_id=bid), reserve)
+                        raise _explain(v, retries=attempt, fresh=fresh, booked=reserve, booking=booking,
                                        detail=str(exc) if v.reason == "unreadable" else "") from exc
                 # 先记账、再释放预留（finally）：中间不留「预留已撤、花费未记」的空档，并发的另一问预检才看得到这笔
                 cost = self._book(conversation_id, resp, reserve)
@@ -775,6 +814,9 @@ class ChatEngine:
                     self._inflight -= reserve
             turn["cost_usd"] += cost["usd"]
             turn["searches"] += cost["searches"]
+            if cost.get("landed_despite_error"):
+                turn["notes"].append(f"记账时报错（{cost['landed_despite_error']}），但这一笔已经写进花费记录、没少记；"
+                                     "存放花费记录的磁盘可能有问题，留意一下")
             if cost.get("unbooked_error"):
                 turn["notes"].append(
                     f"这次调用已计费（约 ${cost['usd']:.3f}），但记账失败（{cost['unbooked_error']}）：花费记录少了这一笔，"
