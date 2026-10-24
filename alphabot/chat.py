@@ -25,8 +25,9 @@
   不重试、按最坏情况记账（`estimated`，v0.45.616 / 627 / 632）；被限流、Anthropic 自己回的 5xx（含过载 529）、网关连不上源站
   （Cloudflare 52x，请求没到 Anthropic）⇒ 没计费 ⇒ 等一下再发，最多 `RETRY_STATUS_TRIES` 次（v0.45.618 / 632）；别的拒绝 ⇒
   没计费、不重发。报错一律说清原因、扣没扣钱、怎么办；一问半路失败时另写明前面几次调用已花多少（`_turn`）。
-- **成功了也要记上账**：调用成功（已计费）后用量读不懂 ⇒ 按最坏情况记；记账本身失败 ⇒ 说「已计费但没记上账」，这笔在本进程
-  内照样算进额度闸（`_book` / `_unbooked`，v0.45.632）。
+- **成功了也要记上账**：调用成功（已计费）后用量读不懂 ⇒ 按最坏情况记；记账本身失败 ⇒ 照常交回答、注明「已计费但没记上账」，
+  这笔按日期记在本进程里（`_unbooked`，v0.45.632 / 635）。**今天已花只有一个口径** `spent_today()`：账本里今天的 + 今天没记上
+  账的；额度闸、顶栏、每问结果都读它。读不了花费记录 ⇒ `ChatSpendUnreadable`，为防超支先不发请求（v0.45.635）。
 - **拒答回落**：`fallbacks: "default"`（Anthropic 按拒答类别选替补模型）；回落那次按替补模型计价（未登记的按最贵价）。
 
 守卫 `tests/test_alphabot_chat.py`。
@@ -107,9 +108,10 @@ class ChatRejected(ChatError):
     status = 502
 
 
-class ChatBookkeepingFailed(ChatError):
-    """调用已成功（已计费）、记账却失败：钱花了、账没记上 ⇒ 说出来，本进程的额度闸继续把它算进去（v0.45.632）。"""
-    status = 500
+class ChatSpendUnreadable(ChatError):
+    """花费记录读不了：今天已花多少不知道 ⇒ 为防超支先不发请求（v0.45.635；此前原样抛 LedgerCorrupt，抽屉里是一串内部
+    异常，半路撞上时前面已花的钱也不提）。"""
+    status = 503
 
 
 #: 一次 API 调用失败的四种结局（v0.45.627 收成一个分类器 `_classify`）。此前「记不记账」「重不重试」「给人看的话」分在
@@ -563,7 +565,7 @@ class ChatEngine:
         self.cap_usd = cap_usd
         self._lock = threading.Lock()
         self._inflight = 0.0
-        self._unbooked = 0.0          # 已花、记账失败的钱（本进程内照样算进额度闸，v0.45.632）
+        self._unbooked: Dict[str, float] = {}   # 日期 ⇒ 已花、记账失败的钱（并进 spent_today，v0.45.632 / 635）
         self._convs: Dict[str, dict] = {}
 
     # ── 状态
@@ -574,9 +576,18 @@ class ChatEngine:
         return date.fromtimestamp(self._now()).isoformat()
 
     def spent_today(self) -> float:
+        """今天已花的唯一口径（v0.45.635）：账本里今天的 + 今天已花、记账失败的（`_unbooked`，只认今天这个日期）。
+        额度闸、顶栏、每问结果都读它——632 只把未记账额加在闸里、且不分日期：顶栏显示 $0、闸却拦着，过了零点还按那笔拦，
+        直到重启。读不了账本 ⇒ `ChatSpendUnreadable`。"""
         today = self._today()
-        return sum(float(r.get("usd") or 0.0) for r in ledger_io.load_jsonl(self._spend_path())
-                   if r.get("date") == today)
+        try:
+            booked = sum(float(r.get("usd") or 0.0) for r in ledger_io.load_jsonl(self._spend_path())
+                         if r.get("date") == today)
+        except (ledger_io.LedgerError, OSError, ValueError, TypeError) as exc:
+            raise ChatSpendUnreadable(
+                f"花费记录读不了（{type(exc).__name__}: {exc}）：不知道今天已花多少，为防超支先不发请求、没计费。"
+                "修好 Alpha Bot 状态目录里的 chat/spend.jsonl 再问") from exc
+        return booked + self._unbooked.get(today, 0.0)
 
     def enabled(self) -> bool:
         return bool(self.svc.settings().get("chat_enabled")) and not self.svc.demo
@@ -587,8 +598,8 @@ class ChatEngine:
                "tools": [t["name"] for t in TOOL_DEFS]}
         try:
             out["spent_today"] = round(self.spent_today(), 4)
-        except ledger_io.LedgerError as exc:
-            out["spent_today"], out["spend_error"] = None, f"{type(exc).__name__}: {exc}"
+        except ChatSpendUnreadable as exc:
+            out["spent_today"], out["spend_error"] = None, str(exc)
         out["available"] = (self._client_fn() is not None) if out["enabled"] else None
         return out
 
@@ -615,9 +626,10 @@ class ChatEngine:
                      cache_creation_input_tokens=usage.get("cache_creation_input_tokens"), request_id=resp.get("id"))
 
     def _book(self, conv_id: str, resp: dict, reserve: float) -> dict:
-        """一次成功（已计费）调用的记账，返回本次费用（v0.45.632）。用量读不懂 ⇒ 按最坏情况记 `estimated`（宁多记）；
-        记账本身失败 ⇒ 钱已花、账没记上：这笔按预留额算进本进程的额度闸（`_unbooked`），抛 `ChatBookkeepingFailed`
-        说出来。此前记账失败原样抛出，抽屉里只有「对话失败：LedgerError…」，人会以为没花钱又问一遍，闸也少算一笔。"""
+        """一次成功（已计费）调用的记账，返回本次费用（v0.45.632）。用量读不懂 ⇒ 按最坏情况记 `estimated`（宁多记）。
+        记账本身失败 ⇒ 钱已花、账没记上：这笔按**实际费用**记进今天的 `_unbooked`（`spent_today` 并进去），返回的费用带
+        `unbooked_error`，由调用方注明——**不抛**：回答已经付了钱，丢掉它换不来任何保护（v0.45.635；632 抛
+        `ChatBookkeepingFailed` 让这一问作废，等于钱白花）。"""
         try:
             cost = call_cost(resp)
         except Exception as exc:  # noqa: BLE001 - 用量读不懂不等于没花钱
@@ -628,13 +640,12 @@ class ChatEngine:
                 self._record(conv_id, reserve, estimated=True, error="usage_unreadable", request_id=resp.get("id"))
             else:
                 self._record_response(conv_id, resp, cost)
-        except Exception as exc:  # noqa: BLE001 - 已计费的调用记不上账：说出来，额度闸照算
+        except Exception as exc:  # noqa: BLE001 - 已计费的调用记不上账：照常交回答、注明，今天的额度照算
+            _log.error("对话记账失败（已计费约 $%.4f）：%s: %s", cost["usd"], type(exc).__name__, exc)
+            today = self._today()
             with self._lock:
-                self._unbooked += max(cost["usd"], 0.0)
-            raise ChatBookkeepingFailed(
-                f"这次调用已经成功、已计费（约 ${cost['usd']:.3f}），但记账失败（{type(exc).__name__}: {exc}）：今天的花费记录"
-                "少了这一笔。在 Alpha Bot 重启之前额度闸照样把它算进去；先别急着再问，修好 Alpha Bot 状态目录里的"
-                " chat/spend.jsonl 再用") from exc
+                self._unbooked[today] = self._unbooked.get(today, 0.0) + max(cost["usd"], 0.0)
+            cost = {**cost, "unbooked_error": f"{type(exc).__name__}: {exc}"}
         return cost
 
     def _call(self, client, messages: list) -> dict:
@@ -729,7 +740,7 @@ class ChatEngine:
                 break
             reserve = self._reserve(messages)
             with self._lock:
-                spent = self.spent_today() + self._unbooked
+                spent = self.spent_today()
                 if spent + self._inflight + reserve > self.cap_usd:
                     raise BudgetExceeded(
                         f"今天已花 ${spent:.2f}，上限 ${self.cap_usd:.2f}；这次请求按最坏情况要预留 ${reserve:.2f}，"
@@ -764,6 +775,10 @@ class ChatEngine:
                     self._inflight -= reserve
             turn["cost_usd"] += cost["usd"]
             turn["searches"] += cost["searches"]
+            if cost.get("unbooked_error"):
+                turn["notes"].append(
+                    f"这次调用已计费（约 ${cost['usd']:.3f}），但记账失败（{cost['unbooked_error']}）：花费记录少了这一笔，"
+                    "今天的额度照样把它算进去（Alpha Bot 重启后就不再算）。请修好 Alpha Bot 状态目录里的 chat/spend.jsonl")
             if cost.get("estimated"):
                 turn["notes"].append(f"有一次调用的用量读不懂，按最坏情况记了 ${cost['usd']:.2f}")
             elif cost["ceiling_priced"]:
@@ -822,10 +837,15 @@ class ChatEngine:
                 if conversation_id in self._convs:
                     self._convs[conversation_id]["messages"] = messages
         served_by = resp.get("model")
+        try:
+            spent = round(self.spent_today(), 4)
+        except ChatSpendUnreadable as exc:     # 回答已经付了钱：照常交出，今天已花暂时显示不了
+            spent = None
+            turn["notes"].append(f"花费记录读不了（{exc.__cause__}），今天已花多少暂时显示不了；下一问会先停下")
         return {"conversation_id": conversation_id, "conversation_reset": reset,
                 "reply": "\n\n".join(replies),
                 "sources": [{"url": u, "title": t} for u, t in list(sources.items())[:10]],
                 "tools": turn["tools"], "searches": turn["searches"], "api_calls": turn["calls"],
-                "cost_usd": round(turn["cost_usd"], 4), "spent_today": round(self.spent_today(), 4),
+                "cost_usd": round(turn["cost_usd"], 4), "spent_today": spent,
                 "cap_usd": self.cap_usd, "stop_reason": resp.get("stop_reason"), "notes": turn["notes"],
                 "served_by": served_by if served_by and served_by != MODEL else None}

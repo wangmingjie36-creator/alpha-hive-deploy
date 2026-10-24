@@ -738,29 +738,43 @@ class TestTimeoutIsNotRetried:
 class TestBookkeeping:
     """调用成功（已计费）之后的记账（v0.45.632，627 二次检查 #2）：记不上账要说出来、额度闸照算；用量读不懂按最坏情况记。"""
 
-    def test_failed_booking_is_said_and_still_counted(self, svc, monkeypatch):
-        # 这一笔约占当天上限的 95%：下一问的最坏情况预留（含 MAX_TOKENS 的输出）一定放不下
+    @staticmethod
+    def _clocked(svc, *script):
+        """可拨的钟：跨天用例要让 `_today()` 换日期。"""
+        clock = [T0]
+        client = FakeClient(*script)
+        return C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: clock[0]), client, clock
+
+    def test_failed_booking_still_answers_and_counts_today_only(self, svc, monkeypatch):
+        """记账失败（v0.45.635，632 二次检查 #1 #2）：照常交回答并注明「已计费但没记上账」；这笔并进今天的
+        `spent_today`——额度闸、顶栏（status）、每问结果是同一个数；过了今天就不再算（632：顶栏 $0、闸却拦着，跨天照拦）。"""
+        # 这一笔约占当天上限的 95%：当天下一问的最坏情况预留（含 MAX_TOKENS 的输出）一定放不下
         out_tokens = int(0.95 * C.DAILY_CAP_USD / llm_service.price_of(C.MODEL)["output"])
         big = {"input_tokens": 10, "output_tokens": out_tokens}
-        eng, client = engine(svc, resp([text("一")], usage=big), resp([text("二")]))
+        eng, client, clock = self._clocked(svc, resp([text("一")], usage=big), resp([text("后天")]))
+        cost = C.call_cost(resp([text("一")], usage=big))["usd"]
 
         def boom(*a, **k):
             raise ledger_io.LedgerError("simulated: disk full")
         monkeypatch.setattr(eng, "_record_response", boom)
-        with pytest.raises(C.ChatBookkeepingFailed) as ei:
-            eng.send("x")
-        cost = C.call_cost(resp([text("一")], usage=big))["usd"]
-        msg = str(ei.value)
-        assert ei.value.status == 500 and f"已经成功、已计费（约 ${cost:.3f}）" in msg and "LedgerError" in msg, msg
-        assert spend_lines(svc) == [] and eng._unbooked == pytest.approx(cost) and eng._inflight == pytest.approx(0.0)
-        # 额度闸把没记上账的那笔照算进去：下一问的预检看得见它
+        out = eng.send("x")
+        assert out["reply"] == "一", "已付钱的回答被丢掉了"
+        assert any(f"已计费（约 ${cost:.3f}），但记账失败（LedgerError" in n for n in out["notes"]), out["notes"]
+        assert spend_lines(svc) == [] and eng._inflight == pytest.approx(0.0)
+        # 今天已花只有一个口径：每问结果 = 顶栏 = 闸
+        assert out["spent_today"] == pytest.approx(cost, abs=1e-4)
+        assert eng.status()["spent_today"] == pytest.approx(cost, abs=1e-4)
         monkeypatch.undo()
         with pytest.raises(C.BudgetExceeded, match=f"今天已花 \\${cost:.2f}"):
             eng.send("y")
         assert len(client.requests) == 1, "额度闸没算上记账失败的那笔，又发出了请求"
+        # 两天后：那笔不属于「今天」了
+        clock[0] += 2 * 86400
+        assert eng.status()["spent_today"] == 0
+        assert eng.send("z")["reply"] == "后天" and len(client.requests) == 2
 
-    def test_failed_booking_mid_turn_counts_only_booked_calls(self, svc, monkeypatch):
-        """半路记账失败：「前面 N 次已花 $x、已记账」只数真记上了账的调用（失败那次的钱在本条报错里另说）。"""
+    def test_failed_booking_mid_turn_keeps_going(self, svc, monkeypatch):
+        """工具循环第二次调用记账失败：这一问照常答完，注明那一笔；费用照计进本问与今天。"""
         eng, _ = engine(svc, resp([tool_use("get_rules", {}, "t1")], stop="tool_use"), resp([text("二")]))
         real, n = eng._record_response, []
 
@@ -770,10 +784,55 @@ class TestBookkeeping:
                 raise ledger_io.LedgerError("simulated")
             return real(*a, **k)
         monkeypatch.setattr(eng, "_record_response", second_fails)
-        with pytest.raises(C.ChatBookkeepingFailed) as ei:
-            eng.send("x")
+        out = eng.send("x")
         (line,) = spend_lines(svc)
-        assert f"前面 1 次 API 调用已花 ${line['usd']:.3f}、已记账" in str(ei.value), str(ei.value)
+        second = C.call_cost(resp([text("二")]))["usd"]
+        assert out["reply"] == "二" and out["api_calls"] == 2 and any("记账失败" in x for x in out["notes"]), out
+        assert out["cost_usd"] == pytest.approx(line["usd"] + second, abs=1e-4)
+        assert out["spent_today"] == pytest.approx(line["usd"] + second, abs=1e-4)
+
+    def test_unreadable_spend_record_stops_before_sending(self, svc):
+        """花费记录读不了 ⇒ 不知道今天花了多少，为防超支先不发请求，说人话（v0.45.635，632 二次检查 #3：此前原样抛
+        LedgerCorrupt）；顶栏同一句。"""
+        path = Path(svc.state_dir()) / "chat" / "spend.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json\n", encoding="utf-8")
+        eng, client = engine(svc, resp([text("不该到这")]))
+        with pytest.raises(C.ChatSpendUnreadable, match="花费记录读不了（LedgerCorrupt") as ei:
+            eng.send("x")
+        assert ei.value.status == 503 and "为防超支先不发请求" in str(ei.value) and client.requests == []
+        st = eng.status()
+        assert st["spent_today"] is None and "花费记录读不了" in st["spend_error"]
+
+    def test_spend_record_breaks_mid_turn_says_what_was_spent(self, svc, monkeypatch):
+        """工具循环中途花费记录坏了：第二次预检停下，并写明这一问前面已花多少（经 `_turn` 那一处）。"""
+        eng, client = engine(svc, resp([tool_use("get_rules", {}, "t1")], stop="tool_use"), resp([text("不该到这")]))
+        real = eng._record_response
+        path = Path(svc.state_dir()) / "chat" / "spend.jsonl"
+
+        def then_corrupt(*a, **k):
+            real(*a, **k)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write("{not json\n")
+        monkeypatch.setattr(eng, "_record_response", then_corrupt)
+        with pytest.raises(C.ChatSpendUnreadable) as ei:
+            eng.send("x")
+        msg = str(ei.value)
+        assert "花费记录读不了" in msg and "这一问前面 1 次 API 调用已花 $" in msg and len(client.requests) == 1, msg
+
+    def test_answer_survives_unreadable_spend_record_at_the_end(self, svc, monkeypatch):
+        """最后一次调用之后花费记录才读不了：回答已经付了钱，照常交出，`spent_today` 为 None 并注明。"""
+        eng, _ = engine(svc, resp([text("好")]))
+        path = Path(svc.state_dir()) / "chat" / "spend.jsonl"
+
+        def corrupt_and_fail(*a, **k):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{not json\n", encoding="utf-8")
+            raise ledger_io.LedgerError("simulated")
+        monkeypatch.setattr(eng, "_record_response", corrupt_and_fail)
+        out = eng.send("x")
+        assert out["reply"] == "好" and out["spent_today"] is None
+        assert any("今天已花多少暂时显示不了" in n for n in out["notes"]), out["notes"]
 
     def test_unreadable_usage_is_booked_at_worst_case(self, svc, monkeypatch):
         eng, _ = engine(svc, resp([text("好")]))
