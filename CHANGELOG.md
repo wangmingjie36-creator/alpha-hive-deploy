@@ -5,7 +5,23 @@
 
 ---
 
-## [0.45.634] — 2026-10-24 — 占位（进行中：v0.45.626 二次检查——bid_zero 守卫跳过 iCloud 重名目录、登记清单区分同名函数、共用一次遍历、对拍网格去重补负买价、CHANGELOG 整套结果如实）
+## [0.45.634] — 2026-10-24 — Fixed：v0.45.626 二次检查——bid_zero 守卫跳过 iCloud 重名目录、登记清单区分同名函数、三条扫描测试共用一次遍历、对拍网格去重补负买价、CHANGELOG 整套结果如实
+
+对 v0.45.626 再跑一轮已装的 code-review 技能（high）：判据、拒布尔、跨式页文案没发现会算错的 bug，查出 5 处小问题（都在 CHANGELOG 措辞与新守卫的覆盖上），全修。
+
+### Fixed
+- **CHANGELOG 整套结果如实**：v0.45.626 条目写整套「在本版的树上」跑的，但之后又 rebase 到更新的 main、只重跑了相关测试——与它自己在 v0.45.620 条目里更正的是同一个毛病。已改成写明「rebase 之前、本版自己的代码上跑的」。**这次做法改了**：先 rebase 到最新 main，**再**在最终树上跑整套，结果才写进条目（见下「验证」）。
+- **iCloud 重名目录副本仍被扫到**（`tests/test_portfolio_greeks_bid_zero.py`）：626 只跳过 `xxx 2.py` 文件，而 iCloud 冲突也会复制**目录**（`alphabot 2/straddle.py`）——实测它会让「只有两个 importer」判成三个而误报红，测试甚至把 `data 2/k.py` 写成预期会被包含。`_ICLOUD_COPY` 现在同时匹配 ` N.py` 与 ` N`（目录名）并在遍历时剪掉；测试预期改正，另加端到端自证（`alphabot/` 与 `alphabot 2/` 各放一份导入判据的文件，只剩前者）。真实仓库里放一个 `alphabot 2/` 副本，守卫仍是绿的。
+- **登记清单被同名函数合并**：`_QUOTE_FIELD_READERS` 原按「文件::裸函数名」建键进集合，已登记 `_leg` 的文件里再加一个读 bid/ask/iv 的 `Shadow._leg` 会被吞掉。键改成**限定名**（`Class.method` / `outer.<locals>.inner`，同一文件里重名再加 `#2`），新增 `TestQuoteFieldFingerprint` 钉住「不同作用域的同名函数键不同」「已登记文件里的同名新函数被报出」「只读两个键的不算读者」。现有 10 条登记全是顶层函数，键不变。
+- **三条扫描测试各走一遍全仓**：新增 `_parsed_repo()`（`lru_cache`，整个会话只遍历 + 解析一次），三条测试共用，并有 `is` 自证。
+- **对拍网格**：`BIDS` 里的 `-0.0` 与 `0.0` 等价（64 个重复点、「320 张」的数字有水分），换成 `-1.0`——负买价两处都必须拒；320 个点仍是 5×4×4×4 个互不相同的输入。类 docstring 写明布尔进不了这张网格（`_qs_contract` 整理时已把 `False` 转成 0.0），布尔拒绝由 `test_booleans_are_not_numbers` 直接调用判据来守。
+
+### 验证
+- `tests/test_portfolio_greeks_bid_zero.py` 43 → 48 条；变异 6 处（目录副本不跳过 / 限定名退回裸名 / 去掉缓存 / 跨式页接受负买价 / 已登记文件里加同名方法 / 新文件里加改名拷贝）全红，其中去掉缓存让该文件从 5 秒涨到 14 秒；拨钟审计（+7 / +45 天）0 条新红；ruff 过；选测登记表无漂移（退出码 0）。
+- 整套：**在最终树上**（提交 449a2166，rebase 到 origin/main 之后；开跑前确认没有别的 pytest / 审计在跑，origin 无新提交）：11951 passed、1 failed、82 deselected、2 xfailed，1319 s。**唯一红** = `tests/test_earnings_calendar.py::TestSingleEntry::test_get_earnings_date_only_in_watcher`（pytest-timeout 60 s）：它 `REPO.rglob("*.py")` 扫全仓、解析本检出里约 1.5 万个 `mcp-servers/maverick-mcp/.venv/…/site-packages` 第三方文件（`_prod_files` 只在 rglob 之后才过滤，且没排除 `.venv`；该虚拟环境 9-11 就在），单独跑它也要 59–65 s，刚好压在超时线上；这轮整套 1319 s（比 653 s 慢一倍，机器当时偏慢）才越线。**与本版无关**：本版只改 `tests/test_portfolio_greeks_bid_zero.py` 与 CHANGELOG，该测试跳过 `tests/` 且不读 CHANGELOG，被解析的 15389 个文件在本版前后一样；本版**没动它**，留作单独一条（把 `_prod_files` 改成遍历时剪枝并排除 `.venv` / `site-packages`，与本版对 `_repo_py_files` 做的是同一类修法）。
+
+### 没改
+- 判据本身与 `quote_ok` 口径；其余 626 的内容。
 
 ## [0.45.633] — 2026-10-24 — Fixed：LLM 影子 A/B 每日入口补两个缺口——开跑前探活网络、「一天只许付费跑一次」改成只锁花过钱 / 花费未知的日子
 
@@ -204,7 +220,7 @@
 
 ### 验证
 - `tests/test_portfolio_greeks_bid_zero.py` 31 → 43 条；变异 8 处（判据收回 `_qs_num`、去掉剪枝、不跳过 iCloud 副本、alphabot 里加改名拷贝、跨式页判据放宽、对冲账本判据放宽、清单里多一条幽灵登记、清单里少一条）全红。拨钟审计（+7 / +45 天）0 条新红；ruff 过；选测登记表无漂移（退出码 0）。
-- 整套（在本版的树上、开跑前确认没有别的 pytest / 审计在跑）：11798 passed、82 deselected、2 xfailed、0 failed，653 s。
+- 整套（开跑前确认没有别的 pytest / 审计在跑）：11798 passed、82 deselected、2 xfailed、0 failed，653 s——⚠️ **这是在 rebase 之前、本版自己的代码上跑的**；之后 rebase 到 origin 上更新的 8 个提交，只重跑了 1116 条相关测试 + 选测登记表漂移检查，**没有再跑整套**（v0.45.634 二次检查时指出，整套在 0.45.634 的最终树上重跑）。
 
 ### 没改
 - 判据本身（bid = 0、ask > 0、iv > 0、四个 Greeks 有限）与 `quote_ok` 口径；10-21 的历史审计不重跑。

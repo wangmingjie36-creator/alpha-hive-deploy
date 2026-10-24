@@ -11,6 +11,8 @@ v0.45.620（二次检查 v0.45.609）：判据收到 `cboe_options.bid_zero_gree
 全部离线：价格 / 报价 / β 一律注入。"""
 
 import ast
+import collections
+import functools
 import itertools
 import math
 import os
@@ -146,14 +148,9 @@ class TestStrictQuoteOkRuleUntouched:
 
     def test_no_second_copy_of_the_predicate_anywhere(self):
         """递归扫全仓（含 alphabot/ 等子目录）：除 cboe_options 外，没有别处再定义 / 复制这个判据。
-        上一版只 glob 顶层 *.py，alphabot/ 里复制一份它也是绿的。iCloud 重名副本（`xxx 2.py`）不计。"""
+        上一版只 glob 顶层 *.py，alphabot/ 里复制一份它也是绿的。iCloud 重名副本（`xxx 2.py` / `xxx 2/`）不计。"""
         defs, importers = {}, {}
-        for path in _repo_py_files():
-            try:
-                tree = ast.parse(path.read_text(encoding="utf-8"))
-            except (SyntaxError, UnicodeDecodeError):
-                continue
-            rel = str(path.relative_to(_ROOT))
+        for rel, tree in _parsed_repo():
             for n in ast.walk(tree):
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and "bid_zero_greeks_usable" in n.name:
                     defs.setdefault(rel, []).append(n.name)
@@ -166,21 +163,11 @@ class TestStrictQuoteOkRuleUntouched:
     def test_no_renamed_copy_reads_the_same_quote_fields(self):
         """按**读了哪几个字段**认，不按名字认：生产代码里任何一个函数同时读 bid / ask / iv 三个字符串键，就是在
         重新解释一张期权报价——要么用 `bid_zero_greeks_usable`，要么登记在 `_QUOTE_FIELD_READERS`（写明它为什么合法）。
-        上一版按函数名认，而最初那份重复恰恰是改了名的副本。
+        上一版按函数名认，而最初那份重复恰恰是改了名的副本。键是**限定名**（`Class.method` / `outer.<locals>.inner`，
+        同一文件里重名再加 `#2`），否则已登记文件里的同名新函数会被合并掉。
         ⚠️ 这是静态指纹，只抓「同一个函数里读齐三个键」的拷贝；拆成两个函数的拷贝（straddle 当年的 `_ask_ok` +
         `_greeks_usable`）靠下面 `TestConsumersAgreeOnEveryQuote` 的行为对拍抓。"""
-        found = set()
-        for path in _repo_py_files():
-            try:
-                tree = ast.parse(path.read_text(encoding="utf-8"))
-            except (SyntaxError, UnicodeDecodeError):
-                continue
-            rel = str(path.relative_to(_ROOT))
-            for n in ast.walk(tree):
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    consts = {c.value for c in ast.walk(n) if isinstance(c, ast.Constant) and isinstance(c.value, str)}
-                    if {"bid", "ask", "iv"} <= consts:
-                        found.add(f"{rel}::{n.name}")
+        found = {f"{rel}::{q}" for rel, tree in _parsed_repo() for q in _quote_field_readers(tree)}
         new = sorted(found - set(_QUOTE_FIELD_READERS))
         assert not new, (f"新的报价字段读者 {new}：若是在重新判断「这张腿的 Greeks 能不能用」，改用 "
                          "cboe_options.bid_zero_greeks_usable；否则登记进 _QUOTE_FIELD_READERS 并写明理由")
@@ -189,8 +176,36 @@ class TestStrictQuoteOkRuleUntouched:
 
     def test_scan_actually_sees_subpackages(self):
         """守卫自证：扫描列表里要有 alphabot/ 下的文件（上一版的盲区），否则上面那条是假绿。"""
-        rels = {str(p.relative_to(_ROOT)) for p in _repo_py_files()}
+        rels = {rel for rel, _ in _parsed_repo()}
         assert "alphabot/straddle.py" in rels and "portfolio_greeks.py" in rels
+
+
+class TestQuoteFieldFingerprint:
+    """指纹本身（`_qualified_functions` / `_quote_field_readers`）：同名函数不许被合并。"""
+
+    SRC = (
+        "def _leg(q):\n    return q['bid'], q['ask'], q['iv']\n"
+        "class A:\n    def _leg(self, q):\n        return q['bid'], q['ask'], q['iv']\n"
+        "class B:\n    def _leg(self, q):\n        return q['bid'], q['ask'], q['iv']\n"
+        "def outer():\n    def inner(q):\n        return q['bid'], q['ask'], q['iv']\n    return inner\n"
+        "def _leg(q):\n    return q['bid'], q['ask'], q['iv']\n"
+        "def unrelated(q):\n    return q['bid']\n"
+    )
+
+    def test_same_name_in_different_scopes_gets_distinct_keys(self):
+        got = _quote_field_readers(ast.parse(self.SRC))
+        assert got == ["_leg", "A._leg", "B._leg", "outer", "outer.<locals>.inner", "_leg#2"], got
+
+    def test_a_new_same_named_function_in_a_registered_file_is_reported(self):
+        """已登记 `_leg` 的文件里再加一个 `Shadow._leg`：以前按裸函数名建键、被合并掉，现在是新键。"""
+        registered = {"x.py::_leg"}
+        found = {f"x.py::{q}" for q in _quote_field_readers(ast.parse(
+            "def _leg(q):\n    return q['bid'], q['ask'], q['iv']\n"
+            "class Shadow:\n    def _leg(self, q):\n        return q['bid'], q['ask'], q['iv']\n"))}
+        assert found - registered == {"x.py::Shadow._leg"}
+
+    def test_a_function_missing_one_of_the_three_keys_is_not_a_reader(self):
+        assert _quote_field_readers(ast.parse("def f(q):\n    return q['bid'], q['ask']\n")) == []
 
 
 class TestRepoWalk:
@@ -199,15 +214,16 @@ class TestRepoWalk:
     def _tree(self, tmp_path):
         for rel in ("a.py", "pkg/b.py", "pkg/b 2.py", "c 13.py", ".claude/worktrees/w/d.py", ".git/e.py",
                     "tests/f.py", "node_modules/g.py", "__pycache__/h.py", "_retired_pre_phase5/i.py",
-                    "pkg/.hidden/j.py", "data 2/k.py"):
+                    "pkg/.hidden/j.py", "data 2/k.py", "alphabot 2/straddle.py", "pkg/sub 13/m.py"):
             f = tmp_path / rel
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text("x = 1\n", encoding="utf-8")
         return tmp_path
 
     def test_skips_copies_hidden_and_vendored_dirs(self, tmp_path):
+        """iCloud 冲突既复制文件（`b 2.py`）也复制**目录**（`alphabot 2/`）：两种都不进扫描列表。"""
         got = {str(p.relative_to(tmp_path)) for p in _repo_py_files(self._tree(tmp_path))}
-        assert got == {"a.py", "pkg/b.py", "data 2/k.py"}
+        assert got == {"a.py", "pkg/b.py"}
 
     def test_pruned_directories_are_never_entered(self, tmp_path, monkeypatch):
         """剪枝要发生在遍历时：先全量 rglob 再过滤的写法会把 .git 和每个 worktree 都走一遍（本机约 4.2 万个 .py）。"""
@@ -231,6 +247,19 @@ class TestRepoWalk:
         (tmp_path / "portfolio_greeks.py").write_text("x = 1\n", encoding="utf-8")
         (tmp_path / "portfolio_greeks 2.py").write_text("x = 1\n", encoding="utf-8")
         assert [p.name for p in _repo_py_files(tmp_path)] == ["portfolio_greeks.py"]
+
+    def test_icloud_copy_of_a_guarded_package_does_not_trip_the_guard(self, tmp_path):
+        """`alphabot 2/straddle.py`（整个目录的副本）：同样不进扫描列表——上一版只认文件、目录副本仍被扫到，
+        「只有两个 importer」会被判成三个。"""
+        for rel in ("alphabot/straddle.py", "alphabot 2/straddle.py"):
+            f = tmp_path / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("from cboe_options import bid_zero_greeks_usable\n", encoding="utf-8")
+        assert [str(p.relative_to(tmp_path)) for p in _repo_py_files(tmp_path)] == ["alphabot/straddle.py"]
+
+    def test_parse_is_shared_between_the_scan_tests(self):
+        """三条扫描测试共用一次遍历 + 解析（`_parsed_repo` 缓存），不各走一遍全仓。"""
+        assert _parsed_repo() is _parsed_repo()
 
 
 class TestSharedPredicate:
@@ -260,9 +289,11 @@ class TestSharedPredicate:
 class TestConsumersAgreeOnEveryQuote:
     """行为对拍：同一张报价喂给三处——判据本身、跨式页 `_greeks_usable`、对冲账本 `option_exposures`——结论必须一致。
     原始 CBOE 行经真正的 `_qs_contract` 整理（含 `quote_ok`），不手写报价形状。拆成两个函数的拷贝、或哪天某处
-    悄悄放宽 / 收紧一个条件，静态指纹抓不到，这里抓。"""
+    悄悄放宽 / 收紧一个条件，静态指纹抓不到，这里抓。
+    ⚠️ 布尔值进不了这张网格：`_qs_contract` 在整理时已把 `False` 转成 0.0，下游两处看到的都是数。布尔拒绝只能在
+    判据被**直接调用**时出现，由 `TestSharedPredicate.test_booleans_are_not_numbers` 守。"""
 
-    BIDS = (0.0, 0.01, None, "x", -0.0)
+    BIDS = (0.0, 0.01, -1.0, None, "x")      # -0.0 与 0.0 等价、不算新点；负买价必须两处都拒
     ASKS = (0.03, 0.0, None, float("nan"))
     IVS = (0.3, 0.0, None, -1.0)
     DELTAS = (0.05, None, float("nan"), 0.0)
@@ -364,6 +395,7 @@ class TestCoverageAndHedgePage:
 
 _ROOT = pathlib.Path(pg.__file__).resolve().parent
 #: 同一个函数里同时读 bid / ask / iv 三个键的生产函数——都是在**解析或构造**报价（不是在判「Greeks 能不能用」）。
+#: 键 = `相对路径::限定名`（`Class.method` / `outer.<locals>.inner`，同文件重名加 `#2`）。
 #: 新增一个要先问：它是不是在重新实现 `cboe_options.bid_zero_greeks_usable`？
 _QUOTE_FIELD_READERS = {
     "cboe_options.py::fetch_cboe_raw_contracts": "CBOE payload → 原始合约行",
@@ -378,15 +410,56 @@ _QUOTE_FIELD_READERS = {
     "alphabot/premium.py::_contract_row": "溢价页的合约行整理",
 }
 _SKIP_DIRS = {"node_modules", "__pycache__", "_retired_pre_phase5", "tests", "venv"}
-_ICLOUD_COPY = re.compile(r" \d+\.py$")
+#: iCloud 冲突副本：文件 `name 2.py` 与**目录** `name 2`（CLAUDE.md「环境」一节）
+_ICLOUD_COPY = re.compile(r" \d+(\.py)?$")
 
 
 def _repo_py_files(root=None):
     """仓库里的生产 .py：递归、**遍历时剪枝**（不进隐藏目录 / .claude/worktrees / .git / tests / 第三方目录；
-    先 rglob 再过滤会把它们全走一遍），并跳过 iCloud 重名副本（`xxx 2.py`，CLAUDE.md「环境」一节）。"""
+    先 rglob 再过滤会把它们全走一遍），并跳过 iCloud 重名副本——文件（`xxx 2.py`）和目录（`xxx 2/`）都跳。"""
     root = pathlib.Path(root or _ROOT)
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS and not d.startswith("."))
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in _SKIP_DIRS and not d.startswith(".") and not _ICLOUD_COPY.search(d))
         out += [pathlib.Path(dirpath) / f for f in filenames if f.endswith(".py") and not _ICLOUD_COPY.search(f)]
     return sorted(out)
+
+
+@functools.lru_cache(maxsize=1)
+def _parsed_repo():
+    """`[(相对路径, 语法树)]`——整个测试会话只遍历、解析一次，三条扫描测试共用。"""
+    out = []
+    for path in _repo_py_files():
+        try:
+            out.append((path.relative_to(_ROOT).as_posix(), ast.parse(path.read_text(encoding="utf-8"))))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+    return tuple(out)
+
+
+def _qualified_functions(tree):
+    """`[(限定名, 节点)]`：类方法 `A.m`、嵌套函数 `f.<locals>.g`；同一文件里限定名重复的加 `#2` / `#3`。"""
+    out, seen = [], collections.Counter()
+
+    def visit(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                q = prefix + child.name
+                seen[q] += 1
+                out.append((q if seen[q] == 1 else f"{q}#{seen[q]}", child))
+                visit(child, q + ".<locals>.")
+            elif isinstance(child, ast.ClassDef):
+                visit(child, prefix + child.name + ".")
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
+    return out
+
+
+def _quote_field_readers(tree):
+    """语法树里同时读 `bid` / `ask` / `iv` 三个字符串键的函数的限定名。"""
+    return [q for q, n in _qualified_functions(tree)
+            if {"bid", "ask", "iv"} <= {c.value for c in ast.walk(n)
+                                        if isinstance(c, ast.Constant) and isinstance(c.value, str)}]
