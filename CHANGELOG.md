@@ -11,7 +11,26 @@
 
 ## [0.45.637] — 2026-10-24 — 占位（进行中：v0.45.635 二次检查——记账报错后按 request_id 回读账本防重复计入；抽屉显示 spend_error；冒烟合计金额按账本更正）
 
-## [0.45.636] — 2026-10-24 — 占位（进行中：test_earnings_calendar 的 _prod_files 改成遍历时剪枝并排除 .venv / site-packages——整套里唯一压在 60s 超时线上的测试；同类守卫只盘点）
+## [0.45.636] — 2026-10-24 — Fixed：`test_earnings_calendar` 的 `_prod_files` 改成遍历时剪枝并排除 `.venv` / `site-packages`（整套里唯一压在 60 s 超时线上的测试）
+
+v0.45.634 在最终树上跑整套时红了 `tests/test_earnings_calendar.py::TestSingleEntry::test_get_earnings_date_only_in_watcher`（pytest-timeout 60 s）。它与 634 无关（634 只动一个测试文件和 CHANGELOG），本条把它修掉。
+
+### Fixed
+- **`tests/test_earnings_calendar.py::_prod_files`**：旧写法 `REPO.rglob("*.py")` 之后再过滤，且只看 `rel.parts[0].startswith(".")`（第一段）。开发检出里 `mcp-servers/maverick-mcp/.venv/` 是个 1.5 万文件的第三方环境（9-11 就在，在 git 子模块里），`.venv` 在第三段，漏过过滤，于是 `_refs` 把约 1.5 万个第三方 .py 逐个 `ast.parse`：这条**单独跑 59–65 s**，机器偏慢（634 那轮整套 1319 s，平时约 650 s）就越线。改成 `os.walk` **遍历时剪枝**：`tests` / `experiments` / `_archive`、`tests/_repo_files.py::VENDORED`（node_modules / site-packages / vendor / third_party）、任何点号开头目录（`.git` / `.claude` / `.venv` …）都不进入；口径取自共享件 `_repo_files`，不再自抄一份。改后扫描 15389 → 501 个文件；**被排除的 14888 个实测全部来自 `mcp-servers` 下的 `.venv` / `site-packages`，我们自己的一个没少、也没多**；这条测试单独跑 59–65 s → 约 4 s。
+- 语义差异（如实记）：旧写法只排除**顶层**点号目录，嵌套的 `pkg/.hidden/` 会被扫；新写法与 `_repo_files._is_ours` 同口径，嵌套点号目录也排除。当前仓库里没有这样的目录，被排除的文件集合已核对。
+
+### Added（测试，`tests/test_earnings_calendar.py::TestProdFilesWalk`）
+- 只剩我们自己的生产文件（含 `mcp-servers/m/server.py`，排除 `.venv/site-packages`、`libs/site-packages`、`node_modules`、`vendor`、`third_party`、`tests`、`experiments`、`_archive`、`.git`、`.claude`、嵌套点号目录、顶层 `.x.py`）；被排除目录**一个都不许被 `os.walk` 走进去**（间谍测试——「先 walk 再过滤」也会在这里红）；按路径排序；真实仓库扫描列表里没有任何 `.venv` / `site-packages` / `node_modules` 下的文件且核心文件都在。
+- 变异 5 处（退回旧 `rglob` 写法 / 去掉 `VENDORED` / 去掉点号目录剪枝 / 改成先 walk 再过滤 / 不再跳过 tests·experiments）全红；拨钟审计（+7 / +45 天）0 条新红；ruff 过；选测登记表无漂移（退出码 0）。
+
+### 盘点（只读，没改）——其它「rglob 之后再过滤」的全仓守卫
+- `tests/test_momentum_window_alignment.py::_scan`：`REPO_ROOT.rglob("*.py")`，只排除顶层 `tests` / `experiments` / `.claude` 与含 `worktrees` 的路径，**没有排除 `mcp-servers` / `.venv`**——两条测试各读一遍约 1.5 万个第三方文件做正则（约 4 s + 2 s）。除慢之外还有误报面：第三方包里碰巧出现那条正则就会算成「生产公式」。
+- `tests/test_trading_calendar_nyse.py::test_no_other_trading_day_arithmetic`：rglob 后用 `"site-packages" in rel.parts` 过滤（约 5 s），`.venv` 下不含 site-packages 的 .py（如 `bin/`）仍会被解析。
+- `tests/test_scout_consensus_excluded.py::_calls_with_peer_census_false`：rglob 后按顶层目录排除 `mcp-servers`（约 3 s），只贵在遍历。
+- 三条都离 60 s 线很远，本条不动；若要统一，应改走 `_repo_files.own_python_files`（git 清单，但不含未提交的新文件）或照本条的遍历时剪枝。另：`tests/test_portfolio_greeks_bid_zero.py::_repo_py_files`（v0.45.620/626/634）与共享件 `_repo_files` 口径并存——它**有意**扫工作树（能抓到尚未提交的新拷贝），代价是多一份实现。
+
+### 验证
+- 整套：**在最终树上**（提交 d7c6ea59，rebase 到当时的 origin/main 之后；开跑前连续 45 s 没有别的 pytest / 审计，origin 无新提交）：**11960 passed、0 failed**、82 deselected、2 xfailed，1222 s（机器偏慢，负载约 3；比 634 那轮 1319 s 略快，仍约为平时的两倍）。跑的这段时间 origin 又前进了 2 个提交（0.45.638 / 0.45.639 的占号，**只改 CHANGELOG、没有代码或测试改动**），之后只 rebase 到它们之上并重跑了 CHANGELOG 完整性测试，**没有为这两个纯占位提交再跑整套**。v0.45.634 记的那条唯一红（`test_get_earnings_date_only_in_watcher` 超时）在本轮整套里通过。
 
 ## [0.45.635] — 2026-10-24 — Fixed：v0.45.632 二次检查——「今天已花」收成 `spent_today()` 一个口径（未记账额按日期并进去）；记账失败照常交回答；读不了花费记录说人话；冒烟记录的说过头处更正
 

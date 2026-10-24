@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import sys
 import types
 from datetime import date, datetime, timedelta
@@ -24,6 +25,7 @@ import pytest
 import earnings_calendar as EC
 import sell_strike_candidates as SC
 from tests import _ast_cache
+from tests._repo_files import VENDORED
 
 REPO = Path(__file__).resolve().parent.parent
 AS_OF = "2026-10-13"
@@ -303,12 +305,26 @@ class TestNeverLooserThanLegacy:
 
 # ═════════════════════════════════════════ 4 · 唯一入口（AST）
 
-def _prod_files():
-    skip = {"tests", ".claude", "experiments", "_archive", "node_modules", ".git"}
-    for p in sorted(REPO.rglob("*.py")):
-        rel = p.relative_to(REPO)
-        if not skip & set(rel.parts[:-1]) and not rel.parts[0].startswith("."):
-            yield rel.as_posix(), p
+#: 守卫不扫的目录：测试、实验、归档。第三方（`VENDORED`：node_modules / site-packages / vendor / third_party）与
+#: 点号开头的目录（`.git` / `.claude` / `.venv` …）的口径取自 `tests/_repo_files.py` 的 `_is_ours`——唯一实现。
+_PROD_SKIP_DIRS = frozenset({"tests", "experiments", "_archive"})
+
+
+def _prod_files(root=None):
+    """本仓自己的生产 .py（`(相对路径, 绝对路径)`，按路径排序）。
+
+    **遍历时剪枝**，不是 `rglob` 之后再过滤（v0.45.636）：开发检出里 `mcp-servers/maverick-mcp/.venv/` 是个 1.5 万
+    文件的第三方环境，旧写法先把它们全 rglob 出来、再靠 `rel.parts[0].startswith(".")`（只看第一段，`.venv` 在第三段）
+    漏过去，于是 `_refs` 逐个解析：这一条单独跑 59–65 s，压在 pytest-timeout 的 60 s 线上，机器偏慢整套就红。
+    现在 `.venv` / `site-packages` 等目录根本不进入；被排除的 14888 个文件实测全部来自该虚拟环境，我们自己的一个没少。"""
+    root = REPO if root is None else Path(root)
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in _PROD_SKIP_DIRS and d not in VENDORED and not d.startswith(".")]
+        out += [Path(dirpath) / f for f in filenames if f.endswith(".py") and not f.startswith(".")]
+    for p in sorted(out):
+        yield p.relative_to(root).as_posix(), p
 
 
 def _refs(pred):
@@ -360,6 +376,58 @@ class TestSingleEntry:
         bad = ast.parse('w = EarningsWatcher()\nw.get_earnings_date("X")\np = f"{t}_date.json"\n')
         assert sum(_named("get_earnings_date")(n) for n in ast.walk(bad)) == 1
         assert sum(_date_json_literal(n) for n in ast.walk(bad)) == 1
+
+
+class TestProdFilesWalk:
+    """`_prod_files` 本身（v0.45.636）：遍历时剪枝。旧写法 `rglob` 之后再过滤，第三方环境照样被整个走一遍、
+    逐个解析，这条守卫单独跑 59–65 s，压在 60 s 超时线上。"""
+
+    @staticmethod
+    def _tree(tmp_path):
+        for rel in ("a.py", "pkg/b.py", "pkg/deep/c.py",
+                    "tests/t.py", "experiments/e.py", "_archive/x.py",
+                    ".git/g.py", ".claude/worktrees/w/d.py",
+                    "mcp-servers/m/.venv/lib/python3.12/site-packages/dep.py",
+                    "mcp-servers/m/server.py",
+                    "libs/site-packages/lib.py", "node_modules/n.py", "vendor/v.py", "third_party/t.py",
+                    "pkg/.hidden/h.py", ".hidden_top.py"):
+            f = tmp_path / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("x = 1\n", encoding="utf-8")
+        return tmp_path
+
+    def test_only_our_production_files_survive(self, tmp_path):
+        got = [rel for rel, _ in _prod_files(self._tree(tmp_path))]
+        assert got == ["a.py", "mcp-servers/m/server.py", "pkg/b.py", "pkg/deep/c.py"]
+
+    def test_third_party_and_hidden_dirs_are_never_entered(self, tmp_path, monkeypatch):
+        """剪枝要发生在遍历时：被排除的目录一个都不许被 `os.walk` 走进去（走进去再丢，就是旧写法的 60 s）。"""
+        root = self._tree(tmp_path)
+        visited = []
+        real_walk = os.walk
+
+        def spy(top, *a, **k):
+            for dp, dn, fn in real_walk(top, *a, **k):
+                visited.append(Path(dp).relative_to(top).as_posix())
+                yield dp, dn, fn
+
+        monkeypatch.setattr(os, "walk", spy)
+        list(_prod_files(root))
+        pruned = {"tests", "experiments", "_archive", ".git", ".claude", "node_modules", "vendor", "third_party"}
+        bad = [v for v in visited if set(v.split("/")) & (pruned | {".venv", "site-packages", ".hidden"})]
+        assert not bad, bad
+
+    def test_yields_in_path_order(self, tmp_path):
+        got = [rel for rel, _ in _prod_files(self._tree(tmp_path))]
+        assert got == sorted(got)
+
+    def test_real_repo_scan_contains_no_third_party_files(self):
+        """真实仓库：扫描列表里没有任何 `.venv` / `site-packages` 下的文件，且我们自己的核心文件都在。
+        （开发检出里 `mcp-servers/maverick-mcp/.venv/` 有约 1.5 万个第三方 .py。）"""
+        rels = [rel for rel, _ in _prod_files()]
+        bad = [r for r in rels if {".venv", "site-packages", "node_modules"} & set(r.split("/"))]
+        assert not bad, bad[:5]
+        assert {"earnings_watcher.py", "earnings_calendar.py", "alphabot/service.py"} <= set(rels)
 
 
 # ═════════════════════════════════════════ 5 · 观测点
