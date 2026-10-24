@@ -40,6 +40,12 @@ plist 写上代理环境变量（v0.45.623，`PROXY_ENV`；627 补小写那套�
   launchctl bootout   gui/$(id -u)/com.alpha.hive.llmshadow
 plist 里 `RunAtLoad=false`：装上不会立刻花钱。
 
+开跑前探活网络（v0.45.633）：生产写完后不立刻开跑，先对 3 个数据源做 HTTPS 握手探测（CBOE / Yahoo / Finnhub，
+≥2 个通才算通；任何 HTTP 状态码都算通——要测的是握手不是授权）。10-23 全站 TLS EOF（`_ssl.c:992`）时，扫描白耗 18 分钟预取、
+30/30 只取不到现价被输入闸拦下、丢了一天；现在网络不通就每分钟重探，通了再跑，直到「生产写完已超 2 小时」或「等了 3 小时」才跳过
+（退出码 4，原因写明是网络）。探活走的是和扫描同一条路（urllib：环境代理 / macOS 系统代理）。⚠️ 它只管开跑那一刻；
+扫描中途才断仍会被扫描的输入闸拦下，那种日子零花费、状态文件不再锁死当天（见 `llm_shadow_scan.day_lock`），但不会自动重跑。
+
 退出码：0 跑完且健康；2 用法 / 子进程拒绝；3 扫描异常；4 跳过（关停开关 / 等不到生产 / 太晚）；5 跑完但 LLM 臂不健康。
 （2 / 3 / 5 原样透传 `llm_shadow_scan` 的退出码。）
 """
@@ -77,6 +83,11 @@ NO_PROXY = "localhost,127.0.0.1,::1,.local"
 PROXY_ENV = {"HTTP_PROXY": PROXY_URL, "HTTPS_PROXY": PROXY_URL, "http_proxy": PROXY_URL, "https_proxy": PROXY_URL,
              "NO_PROXY": NO_PROXY, "no_proxy": NO_PROXY}
 
+#: 开跑前的网络探活（v0.45.633）：三个扫描真正依赖的数据源，TLS 握手能通 ≥ NET_PROBE_MIN_OK 个才算网络可用。
+NET_PROBE_URLS = ("https://cdn.cboe.com/", "https://query1.finance.yahoo.com/", "https://finnhub.io/")
+NET_PROBE_TIMEOUT = 10
+NET_PROBE_MIN_OK = 2
+
 ACTION_RUN, ACTION_WAIT, ACTION_SKIP = "run", "wait", "skip"
 
 
@@ -94,6 +105,10 @@ def decide(state: Dict, waited_sec: float, *, disabled: bool) -> Tuple[str, str]
         if age > MAX_LAG_SEC:
             return ACTION_SKIP, (f"生产写完已 {age / 3600:.1f} 小时（> {MAX_LAG_SEC / 3600:.0f}h）——"
                                  f"输入不再与生产同口径，今天不跑")
+        if state.get("net_ok") is False:
+            if waited_sec >= WAIT_MAX_SEC:
+                return ACTION_SKIP, f"等了 {waited_sec / 3600:.1f} 小时，网络探活一直不通：{state.get('net_detail')}"
+            return ACTION_WAIT, f"生产已写完，但网络探活不通，稍后重探：{state.get('net_detail')}"
         return ACTION_RUN, f"生产今天已写完（{rows} 行，swarm_results 已 {age / 60:.0f} 分钟没再改）"
     if waited_sec >= WAIT_MAX_SEC:
         why = ("生产扫描进程仍在跑" if state.get("running") else
@@ -102,6 +117,33 @@ def decide(state: Dict, waited_sec: float, *, disabled: bool) -> Tuple[str, str]
                f"swarm_results 才 {age:.0f}s 没再改（< {STABLE_SEC}s）")
         return ACTION_SKIP, f"等了 {waited_sec / 3600:.1f} 小时仍不满足：{why}"
     return ACTION_WAIT, "生产还没写完"
+
+
+def production_done(state: Dict) -> bool:
+    """生产今天写完了没有（与 `decide` 里的判据同一份，只是不含网络）。"""
+    age = state.get("file_age")
+    return int(state.get("rows") or 0) >= 1 and age is not None and not state.get("running") and age >= STABLE_SEC
+
+
+def probe_network(urls: Sequence[str] = NET_PROBE_URLS, *, timeout: float = NET_PROBE_TIMEOUT,
+                  min_ok: int = NET_PROBE_MIN_OK, opener: Optional[Callable] = None) -> Tuple[bool, str]:
+    """对几个数据源做 HTTPS 探测，返回 (通?, 明细)。**拿到任何 HTTP 响应（含 4xx / 5xx）都算通**——测的是 TLS 握手 / 连接，
+    不是授权（Yahoo 常给 429）；超时 / 握手失败 / 连接被拒才算不通。`opener` 仅供测试注入。"""
+    import urllib.error
+    import urllib.request
+    open_fn = opener or (lambda u, t: urllib.request.urlopen(urllib.request.Request(u, method="GET"), timeout=t))
+    ok, bad = [], []
+    for u in urls:
+        host = u.split("//", 1)[-1].split("/", 1)[0]
+        try:
+            open_fn(u, timeout)
+            ok.append(host)
+        except urllib.error.HTTPError:
+            ok.append(host)                                   # 有响应 = 握手通了
+        except Exception as e:  # noqa: BLE001 —— URLError / ssl.SSLError / socket.timeout / OSError 都算不通，明细写进日志
+            bad.append(f"{host}: {type(e).__name__}: {str(e)[:80]}")
+    detail = f"通 {len(ok)}/{len(urls)}" + (f"；不通 {'; '.join(bad)}" if bad else "")
+    return len(ok) >= min_ok, detail
 
 
 def render_plist(*, python: str, script: str, log_dir: str) -> bytes:
@@ -155,7 +197,8 @@ def run_daily(*, once: bool = False, environ: Optional[Dict[str, str]] = None,
               clock: Callable[[], float] = time.monotonic,
               probe: Optional[Callable[[], Dict]] = None,
               spawn: Callable[..., "subprocess.CompletedProcess"] = subprocess.run,
-              disabled_probe: Optional[Callable[[], bool]] = None) -> int:
+              disabled_probe: Optional[Callable[[], bool]] = None,
+              net_probe: Optional[Callable[[], Tuple[bool, str]]] = None) -> int:
     """等生产写完 → 跑一次 `--run`。`once=True`：只判定一次、不等、不跑（给人看现状）。"""
     env = dict(os.environ if environ is None else environ)
     import hive_logger
@@ -170,9 +213,12 @@ def run_daily(*, once: bool = False, environ: Optional[Dict[str, str]] = None,
         def disabled_probe() -> bool:
             return (shadow_root / DISABLE_FILENAME).exists()
 
+    net = net_probe or probe_network
     t0 = clock()
     while True:
         state = probe()
+        if production_done(state):                    # 生产没写完就不探网络（不必每分钟打外网）
+            state["net_ok"], state["net_detail"] = net()
         action, why = decide(state, clock() - t0, disabled=disabled_probe())
         if once:
             _log(f"[--once] {today}: {action} — {why} | 状态 {state}")
@@ -182,6 +228,8 @@ def run_daily(*, once: bool = False, environ: Optional[Dict[str, str]] = None,
             return EXIT_SKIPPED
         if action == ACTION_RUN:
             break
+        if state.get("net_ok") is False:
+            _log(f"{today}: {why}")                  # 等网络的每一轮都留痕：事后能看出断了多久
         sleep(POLL_SEC)
 
     _log(f"{today}: 开跑 — {why}")

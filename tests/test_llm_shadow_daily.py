@@ -188,17 +188,22 @@ def prod_env(tmp_path, monkeypatch):
     return prod
 
 
-def _run(prod_env, probes, spawn, clock=None, disabled=False, once=False):
+def _net_up():
+    return True, "通 3/3"
+
+
+def _run(prod_env, probes, spawn, clock=None, disabled=False, once=False, net_probe=None):
     clock = clock or _Clock()
     it = iter(probes)
     last = {}
 
     def probe():
         nonlocal last
-        last = next(it, last)
+        last = dict(next(it, last))
         return last
+    # 一律注入探活：测试里绝不真的打外网
     return dly.run_daily(once=once, environ=dict(os.environ), sleep=clock.sleep, clock=clock.now, probe=probe,
-                         spawn=spawn, disabled_probe=lambda: disabled), clock
+                         spawn=spawn, disabled_probe=lambda: disabled, net_probe=net_probe or _net_up), clock
 
 
 class TestRunDaily:
@@ -254,6 +259,112 @@ class TestRunDaily:
     def test_kill_switch_path_is_inside_the_shadow_root(self, prod_env):
         """DISABLED 文件在影子根里：用户 touch 一下就停，不用动 launchd。"""
         assert (sh.default_shadow_root(prod_env) / dly.DISABLE_FILENAME).parent.name == sh.SHADOW_DIRNAME
+
+
+# ==================== 开跑前探活网络（v0.45.633） ====================
+
+class TestDecideWithNetwork:
+    def test_done_but_network_down_waits(self):
+        act, why = dly.decide({**_state(), "net_ok": False, "net_detail": "通 0/3"}, 100, disabled=False)
+        assert act == dly.ACTION_WAIT and "探活不通" in why and "通 0/3" in why
+
+    def test_done_and_network_up_runs(self):
+        assert dly.decide({**_state(), "net_ok": True}, 0, disabled=False)[0] == dly.ACTION_RUN
+
+    def test_network_not_probed_yet_is_not_a_block(self):
+        """net_ok 缺省（生产还没写完时不探）——不能把「没探」当「不通」。"""
+        assert dly.decide(_state(), 0, disabled=False)[0] == dly.ACTION_RUN
+
+    def test_network_down_until_timeout_skips_and_says_network(self):
+        act, why = dly.decide({**_state(), "net_ok": False, "net_detail": "通 0/3"}, dly.WAIT_MAX_SEC, disabled=False)
+        assert act == dly.ACTION_SKIP and "网络探活一直不通" in why
+
+    def test_too_late_still_skips_before_network_is_considered(self):
+        act, why = dly.decide({**_state(age=dly.MAX_LAG_SEC + 60), "net_ok": False}, 0, disabled=False)
+        assert act == dly.ACTION_SKIP and "不再与生产同口径" in why
+
+    def test_production_done_helper_matches_decide(self):
+        assert dly.production_done(_state()) is True
+        for st in (_state(rows=0), _state(age=None), _state(running=True), _state(age=299.0)):
+            assert dly.production_done(st) is False
+
+
+class TestProbeNetwork:
+    def _opener(self, behaviour):
+        def op(url, timeout):
+            r = behaviour[url.split("//")[1].split("/")[0]]
+            if isinstance(r, Exception):
+                raise r
+            return r
+        return op
+
+    URLS = ("https://a.example/", "https://b.example/", "https://c.example/")
+
+    def test_all_up(self):
+        ok, det = dly.probe_network(self.URLS, opener=self._opener({"a.example": 1, "b.example": 1, "c.example": 1}))
+        assert ok is True and "通 3/3" in det
+
+    def test_http_error_counts_as_reachable(self):
+        """Yahoo 常给 429：有响应说明握手通了。"""
+        import urllib.error
+        e = urllib.error.HTTPError("u", 429, "Too Many", {}, None)
+        ok, _ = dly.probe_network(self.URLS, opener=self._opener({"a.example": e, "b.example": e, "c.example": e}))
+        assert ok is True
+
+    def test_tls_eof_on_all_hosts_is_down(self):
+        """10-23 的形状：所有数据源同时 `EOF occurred in violation of protocol`。"""
+        import ssl
+        e = ssl.SSLEOFError(8, "EOF occurred in violation of protocol (_ssl.c:992)")
+        ok, det = dly.probe_network(self.URLS, opener=self._opener({"a.example": e, "b.example": e, "c.example": e}))
+        assert ok is False and "SSLEOFError" in det and "通 0/3" in det
+
+    def test_two_of_three_is_enough_one_is_not(self):
+        e = OSError("timed out")
+        assert dly.probe_network(self.URLS, opener=self._opener({"a.example": 1, "b.example": 1, "c.example": e}))[0] is True
+        assert dly.probe_network(self.URLS, opener=self._opener({"a.example": 1, "b.example": e, "c.example": e}))[0] is False
+
+    def test_timeout_and_refused_count_as_down(self):
+        import socket
+        ok, _ = dly.probe_network(self.URLS, opener=self._opener(
+            {"a.example": socket.timeout("t"), "b.example": ConnectionRefusedError("r"), "c.example": 1}))
+        assert ok is False
+
+    def test_default_urls_are_the_three_scan_dependencies(self):
+        hosts = {u.split("//")[1].split("/")[0] for u in dly.NET_PROBE_URLS}
+        assert hosts == {"cdn.cboe.com", "query1.finance.yahoo.com", "finnhub.io"} and dly.NET_PROBE_MIN_OK == 2
+
+
+class TestRunDailyWithNetwork:
+    def test_waits_for_network_then_runs_once(self, prod_env):
+        answers = iter([(False, "通 0/3；不通 x"), (False, "通 0/3；不通 x"), (True, "通 3/3")])
+        spawn = _Spawn(rc=0)
+        rc, clk = _run(prod_env, [_state()], spawn, net_probe=lambda: next(answers))
+        assert rc == 0 and len(spawn.calls) == 1 and clk.sleeps == [dly.POLL_SEC, dly.POLL_SEC]
+
+    def test_network_never_up_skips_without_spawn_and_without_spend(self, prod_env):
+        spawn = _Spawn()
+        rc, clk = _run(prod_env, [_state()], spawn, net_probe=lambda: (False, "通 0/3"))
+        assert rc == dly.EXIT_SKIPPED and spawn.calls == []
+        assert sum(clk.sleeps) >= dly.WAIT_MAX_SEC - dly.POLL_SEC
+
+    def test_network_not_probed_while_production_is_still_running(self, prod_env):
+        calls = []
+
+        def net():
+            calls.append(1)
+            return True, "通 3/3"
+        _run(prod_env, [_state(running=True), _state(rows=0, age=None), _state()], _Spawn(), net_probe=net)
+        assert calls == [1]                                  # 只有最后一轮（生产写完）才探
+
+    def test_every_network_wait_round_is_logged(self, prod_env, capsys):
+        answers = iter([(False, "通 0/3；不通 a: SSLEOFError"), (True, "通 3/3")])
+        _run(prod_env, [_state()], _Spawn(), net_probe=lambda: next(answers))
+        out = capsys.readouterr().out
+        assert "探活不通" in out and "SSLEOFError" in out
+
+    def test_once_reports_network_state_without_spawning(self, prod_env, capsys):
+        rc, clk = _run(prod_env, [_state()], _Spawn(), once=True, net_probe=lambda: (False, "通 0/3"))
+        assert rc == 0 and clk.sleeps == [] and "wait" in capsys.readouterr().out
 
 
 # ==================== 花钱闸的归属 ====================
