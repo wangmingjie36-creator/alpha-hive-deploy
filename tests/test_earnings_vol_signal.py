@@ -4,7 +4,9 @@ import json
 import logging
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -15,6 +17,9 @@ ROOT = Path(__file__).resolve().parent.parent
 AS_OF = "2026-09-03"
 EXPIRY = "2026-10-02"     # 29 DTE
 EARN = "2026-09-20"
+#: 记录时刻（美东）：AS_OF 当天收盘后。`scan` 给每一行的 `gex_ctx` 盖 `captured_at`（精确到秒的墙钟，
+#: earnings_vol_signal.gex_ctx）——不钉住，任何「跑两次比字节」的测试都会在撞秒边界时偶发红（v0.45.644 之前的偶发）。
+POST_CLOSE = datetime(2026, 9, 3, 18, 0, 0, tzinfo=ZoneInfo("America/New_York"))
 
 
 def _leg(sym, cp, strike, bid, ask, quote_ok=True, spread_pct=None):
@@ -342,6 +347,9 @@ def state(tmp_path, monkeypatch):
     sd = tmp_path / "options_paper_state"
     monkeypatch.setattr(evs, "STATE_DIR", sd)
     monkeypatch.setattr(evs, "SIGNALS_FILE", sd / "earnings_signals.jsonl")
+    # 两只墙钟都钉死（`scan` 每次起头各读一次）：记录日 / 记录时刻进账本的每一行，测试结果不许随跑测试的时钟变
+    monkeypatch.setattr(evs, "_today_pdt", lambda: AS_OF)
+    monkeypatch.setattr(evs, "_now_et", lambda: POST_CLOSE)
     cache = tmp_path / "cache"
     cache.mkdir()
     return cache
@@ -550,7 +558,8 @@ class TestScanNeverDeletesRowsItDidNotRecompute:
         msg = _warnings(caplog)
         assert "XYZ" in msg and "DEF" in msg and "已结算：XYZ" in msg
 
-        # upsert 仍幂等：同样的快照再跑一次，账本字节不变
+        # upsert 仍幂等：同样的快照、**同一个记录时刻**（`state` 夹具钉住）再跑一次，账本字节不变。
+        # 记录时刻不同则只有 `gex_ctx.captured_at` 会变，见 TestRerunAcrossASecondBoundary
         after_first = evs.SIGNALS_FILE.read_bytes()
         evs.scan(AS_OF, cache_dir=state, stats_fn=lambda tk: _stats(), upcoming_fn=lambda tk: UP)
         assert evs.SIGNALS_FILE.read_bytes() == after_first
@@ -610,6 +619,61 @@ class TestScanNeverDeletesRowsItDidNotRecompute:
         # 对「不出现」，钉行反而放过「假提示挪到另一条 WARNING」。本夹具（空目录）里只有这一条告警。
         msg = _warnings(caplog)
         assert "ALPHA_HIVE_HOME" not in msg and "代码目录" not in msg, msg
+
+
+class TestRerunAcrossASecondBoundary:
+    """原来的偶发红：`test_partial_rerun_keeps_rows_it_did_not_recompute` 里两次 `scan` 之间的墙钟恰好跨了一秒，
+    每行 `gex_ctx.captured_at`（精确到秒）不同 ⇒ 账本字节不同 ⇒ 断言红（失败日志里两次 WARNING 是 10:43:17 与 10:43:18）。
+    下面把「跨秒」做成**确定性**场景：钟每读一次走一秒，证明重跑只改记录时刻、不改任何别的东西。"""
+
+    def _ticking(self, monkeypatch):
+        n = {"i": -1}
+
+        def tick():
+            n["i"] += 1
+            return POST_CLOSE + timedelta(seconds=n["i"])
+        monkeypatch.setattr(evs, "_now_et", tick)
+
+    @staticmethod
+    def _rows(path):
+        return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+    @staticmethod
+    def _without_stamp(rows):
+        out = []
+        for r in rows:
+            r = json.loads(json.dumps(r))
+            (r.get("gex_ctx") or {}).pop("captured_at", None)
+            out.append(r)
+        return out
+
+    def test_state_fixture_pins_both_wall_clocks(self, state):
+        assert evs._now_et() == POST_CLOSE and evs._today_pdt() == AS_OF
+
+    def test_rerun_with_the_clock_one_second_later_changes_only_the_record_stamp(self, state, monkeypatch):
+        _seed_ledger()
+        _write_snap(state, "ABC", AS_OF, _qs(), rv=20.0)
+        self._ticking(monkeypatch)
+        evs.scan(AS_OF, cache_dir=state, stats_fn=lambda tk: _stats(), upcoming_fn=lambda tk: UP)
+        first_bytes, first_rows = evs.SIGNALS_FILE.read_bytes(), self._rows(evs.SIGNALS_FILE)
+        evs.scan(AS_OF, cache_dir=state, stats_fn=lambda tk: _stats(), upcoming_fn=lambda tk: UP)
+        second_bytes, second_rows = evs.SIGNALS_FILE.read_bytes(), self._rows(evs.SIGNALS_FILE)
+        # 场景自证：这就是原来偶发红的那个形状——字节确实不同
+        assert second_bytes != first_bytes, "钟走了一秒而字节没变——这条测试没有复现原来的场景"
+        # 不同之处只有记录时刻：去掉 captured_at 之后逐行逐字段相同
+        assert self._without_stamp(second_rows) == self._without_stamp(first_rows)
+        stamps = {r["ticker"]: (r.get("gex_ctx") or {}).get("captured_at") for r in second_rows if r["ticker"] == "ABC"}
+        assert stamps["ABC"] and stamps["ABC"] != (next(r for r in first_rows if r["ticker"] == "ABC")["gex_ctx"]["captured_at"])
+
+    def test_rows_it_did_not_recompute_do_not_get_a_new_stamp(self, state, monkeypatch):
+        """没有被本次重算的行（已结算的 XYZ、DEF）原样保留，连 `captured_at` 也不许被新的时钟盖掉。"""
+        seeded = _seed_ledger()
+        _write_snap(state, "ABC", AS_OF, _qs(), rv=20.0)
+        self._ticking(monkeypatch)
+        evs.scan(AS_OF, cache_dir=state, stats_fn=lambda tk: _stats(), upcoming_fn=lambda tk: UP)
+        rows = {(r["ticker"], r["as_of"]): r for r in self._rows(evs.SIGNALS_FILE)}
+        assert rows[("XYZ", AS_OF)] == seeded[("XYZ", AS_OF)]
+        assert rows[("DEF", AS_OF)] == seeded[("DEF", AS_OF)]
 
 
 class TestMainExitCodes:

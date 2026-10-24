@@ -7,7 +7,26 @@
 
 ## [0.45.645] — 2026-10-24 — 占位（进行中：根治 yfinance 分红空行污染行情三字段——生产取数与维度 IC 冻结通道层同改，看结果前登记协议修订）
 
-## [0.45.644] — 2026-10-24 — 占位（进行中：test_earnings_vol_signal 撞秒偶发红——比较两次 scan 账本字节的测试被 captured_at 的秒级墙钟搞成偶发；钉住时钟并查同文件同类写法）
+## [0.45.644] — 2026-10-24 — Fixed：`test_earnings_vol_signal` 撞秒偶发红——`state` 夹具钉住 `_now_et` / `_today_pdt`，并把「跨秒重跑」做成确定性测试
+
+v0.45.642 在最终树上第一轮整套红了 `tests/test_earnings_vol_signal.py::TestScanNeverDeletesRowsItDidNotRecompute::test_partial_rerun_keeps_rows_it_did_not_recompute`（第二轮整套没复现，单独重复跑 6 次全过）。与 642 无关，本条修掉。
+
+### Fixed
+- **偶发的机理**：`scan` 给每一行的 `gex_ctx` 盖 `captured_at`（`_now_et().isoformat(timespec="seconds")`，精确到秒的墙钟；没有 `gex_fn` 时 `gex_ctx` 也存在，只是 `available=False`），同一次 `scan` 内部读钟一次所以一致，但**两次** `scan` 之间的墙钟恰好跨了一秒时，两行的 `captured_at` 不同 ⇒ 账本字节不同 ⇒ 那条「同样的快照再跑一次，账本字节不变」断言红。失败日志里两次 WARNING 的时间戳是 10:43:17 与 10:43:18，字节差在偏移 5963 处的秒位（`'8' != '7'`）。概率 ≈「两次 scan 之间的耗时 / 1 s」，机器忙时更高。
+- **修法**（`tests/test_earnings_vol_signal.py`，生产代码未动）：模块本来就有两个注入缝 `evs._now_et` / `evs._today_pdt`（兄弟文件 `test_straddle_gex_shadow.py` 一直在用它们钉时钟，这个文件没有）。在 `state` 夹具里把两只墙钟都钉死（记录日 = `AS_OF`，记录时刻 = `AS_OF` 当天收盘后的美东时刻 `POST_CLOSE`），用 `state` 的每条测试都不再依赖跑测试的时钟；原来那条断言的语义写明为「同样的快照、**同一个记录时刻**再跑一次，字节不变」。`_today_pdt` 一并钉住，防止同类测试在 PDT 午夜前后跨日。
+- **同文件同类写法的核查**：该文件里「账本字节再比」共 4 处：零快照（3 个参数化）、全部计算失败、CLI 退出码 3，这三处都是**没有写入**的场景，账本字节只能等于种子，与时钟无关；真正「两次写入再比」的只有被修的这一条。相邻的 `tests/test_vrp_signal.py::test_…幂等`（同形：`after_first` 再跑一次比字节）核对过：`vrp_signal` 没有任何墙钟字段（`datetime.now` / `isoformat` / `captured_at` 都没有），安全，未改。
+
+### Added（`TestRerunAcrossASecondBoundary`，3 条）
+- `state` 夹具确实钉住了两只墙钟（取消钉住会红）。
+- **把原来的偶发做成确定性场景**：钟每读一次走一秒，两次 `scan` 之间字节**确实不同**（场景自证——钟不走则红），且去掉 `gex_ctx.captured_at` 后逐行逐字段相同，即重跑只改记录时刻、不改别的。
+- 没有被本次重算的行（已结算的 XYZ、DEF）连 `captured_at` 也不被新钟盖掉。
+- 变异 5 处全红：不钉 `_now_et` / 不钉 `_today_pdt` / 夹具里的钟不走（场景自证）/ 给每行再盖一个**独立的**时间戳字段（`scanned_at`，被「只有 captured_at 变」抓到）；另一处是我第一版写成无害的多读一次钟的变异，不算数，已换掉。拨钟审计（+7 / +45 天，含 `test_straddle_gex_shadow`）0 条新红；ruff 过；选测登记表无漂移（退出码 0）。
+
+### 验证
+- 整套：**在最终树上**（提交 8def0ca2，rebase 到当时的 origin/main 之后；开跑前连续 45 s 没有别的 pytest / 审计，origin 无新提交）：**12103 passed、0 failed**、82 deselected、2 xfailed，625 s（负载约 2.8）。跑的这段时间 origin 又前进了 1 个提交（0.45.645 的占号，**只改 CHANGELOG**），之后只 rebase 到它之上并重跑了 CHANGELOG 完整性测试，没有为这条纯占位提交再跑整套。这一轮整套里 `test_partial_rerun_keeps_rows_it_did_not_recompute` 通过；它是撞秒偶发，所以「通过」本身不能证明修好——证明修好的是上面的确定性测试（钟每读一次走一秒，字节确实不同、去掉 `captured_at` 后相同）与变异。
+
+### 没改
+- `earnings_vol_signal.py`（`captured_at` 精确到秒是协议要求的记录时刻，不是 bug）；该测试以外的任何文件。
 
 ## [0.45.643] — 2026-10-24 — 占位（进行中：Alpha Bot 对冲页新增只读「SPY 认沽后比例价差尾部对冲」分析面板，不写账本）
 
