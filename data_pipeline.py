@@ -32,6 +32,8 @@ import weakref
 from typing import Dict, Optional, List, Tuple
 from collections import deque
 
+import price_metrics   # v0.45.639：行情三字段公式的唯一实现（只依赖 math，不反向 import 本模块）
+
 
 def _get_secret(name: str) -> str:
     """取集中管理的 key。config 不可用时退回环境变量——
@@ -507,29 +509,22 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
             fetch_timestamp=time.time(),
             observations={"yf_daily": _ref_daily},   # v0.45.580
         )
-        if len(hist) >= 5:
-            data.momentum_5d = float((hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100)
+        # v0.45.639：三个字段的公式只在 `price_metrics.history_price_metrics`（此前这里是四份副本之一，理由见该模块 docstring）
+        _m = price_metrics.history_price_metrics(hist)
+        if _m["momentum_5d"] is not None:
+            data.momentum_5d = _m["momentum_5d"]
             data.momentum_source = "5d_real"
         else:
             data.momentum_5d = None
             data.momentum_source = "unavailable"
-
-        recent_vol = float(hist["Volume"].iloc[-1])
-        avg_vol = (float(hist["Volume"].iloc[-20:].mean()) if len(hist) >= 20
-                   else float(hist["Volume"].mean()))
-        if avg_vol and avg_vol > 0 and not math.isnan(avg_vol):
-            data.avg_volume = int(avg_vol)
-            data.volume_ratio = recent_vol / avg_vol
+        if _m["avg_volume"] is not None:
+            data.avg_volume = _m["avg_volume"]
+            data.volume_ratio = _m["volume_ratio"]
         else:
             data.volume_ratio = None
-
-        if len(hist) >= 19:   # v0.45.564：20 → 19，同 `_fetch_history_metrics`（理由见那里）
-            returns = hist["Close"].pct_change(fill_method=None).dropna()   # v0.45.601：写明不填充（理由见 `_fetch_history_metrics`）
-            if len(returns) >= 2:
-                vol = float(returns.std() * (252 ** 0.5) * 100)
-                if not (math.isnan(vol) or math.isinf(vol)):
-                    data.volatility_20d = vol
-                    data.volatility_source = "yfinance"
+        if _m["volatility_20d"] is not None:
+            data.volatility_20d = _m["volatility_20d"]
+            data.volatility_source = "yfinance"
 
         result = data.to_dict()
         result["_as_of_date"] = as_of_date
@@ -575,39 +570,17 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
         if hist.empty or len(hist) < 2:
             return None
 
+        # v0.45.639：公式只在 `price_metrics.history_price_metrics`（19 根门槛、`fill_method=None`、均量不可得置 None 的理由都搬过去了）
+        _m = price_metrics.history_price_metrics(hist)
         out: Dict = {}
-        if len(hist) >= 5:
-            out["momentum_5d"] = float(
-                (hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100
-            )
-
-        recent_vol = float(hist["Volume"].iloc[-1])
-        avg_vol = (float(hist["Volume"].iloc[-20:].mean()) if len(hist) >= 20
-                   else float(hist["Volume"].mean()))
-        # v0.45.54：兜底 1.0 会让 avg_volume = **1 股**（任何流动性检查都判
-        # 极端不可交易），且 volume_ratio = recent_vol/1 变成千万量级
-        # （读作「成交量是均量的 5000 万倍」）。不可得就置 None。
-        if math.isnan(avg_vol) or avg_vol <= 0:
+        if _m["momentum_5d"] is not None:
+            out["momentum_5d"] = _m["momentum_5d"]
+        if _m["avg_volume"] is None:
             _log.warning("%s 20 日均量不可得，avg_volume/volume_ratio 置 None", ticker)
-            out["avg_volume"] = None
-            out["volume_ratio"] = None
-        else:
-            out["avg_volume"] = int(avg_vol)
-            out["volume_ratio"] = recent_vol / avg_vol
-
-        # v0.45.564（用户 10-20 定）：门槛 20 → 19 根。`period="1mo"` 的窗口有时只有 19 个交易日（约每年 15 天：1 月新年 +
-        # 马丁路德金日、3 月上中旬接 2 月总统日、6 / 7 月接六月节 / 独立日），门槛 20 让那些天**所有**标的整天缺波动率
-        # （2026-03-10/13、06-22、07-06 归档全是旧缺值哨兵 0.0）。19 根 = 18 个收益，同一个估计量少一个观测；只有这些天从
-        # 缺变有值，其余日子逐位不变。仍不覆盖的：极少数窗口只有 18 根（2020~2035 共 5 天，如 2024-01-22；维度 IC 窗口内没有）。
-        # v0.45.601：`fill_method=None` 写明——生产（pandas 3.x）的缺省就是它：Close 为 NaN 的那根连同后一根的收益一起丢掉。
-        # pandas 2.x 的缺省是先前向填充（NaN 那天收益记 0）⇒ 同一份日线算出另一个波动率；v0.45.610 前 requirements.txt 钉 <3，
-        # 照它装的环境（CI、新机器）曾无声换口径。写明后与 pandas 版本无关。冻结通道层 `buzz_v1_channels.price_fields` 按不填充定义。
-        if len(hist) >= 19:
-            returns = hist["Close"].pct_change(fill_method=None).dropna()
-            if len(returns) >= 2:
-                vol = float(returns.std() * (252 ** 0.5) * 100)
-                if not (math.isnan(vol) or math.isinf(vol)):
-                    out["volatility_20d"] = vol
+        out["avg_volume"] = _m["avg_volume"]
+        out["volume_ratio"] = _m["volume_ratio"]
+        if _m["volatility_20d"] is not None:
+            out["volatility_20d"] = _m["volatility_20d"]
 
         out["_price_from_hist"] = float(hist["Close"].iloc[-1])
         out["momentum_source"] = "yfinance"
@@ -831,7 +804,7 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
         _log.warning("[%s] 数不了窗口 (%s, %s] 的交易日: %s: %s —— 波动率回落拒收，volatility_20d 留 None",
                      ticker, lo, want, type(e).__name__, e)
         return out
-    if n_sessions < 19:
+    if n_sessions < price_metrics.VOLATILITY_MIN_BARS:
         _log.warning("[%s] 窗口 (%s, %s] 只有 %d 个交易日（< 19）：yfinance 主路径同样不出值（日历性缺口，2020~2035 共 5 天）"
                      "—— 不发请求，volatility_20d 留 None", ticker, lo, want, n_sessions)
         return out
@@ -864,13 +837,11 @@ def _fill_volatility_from_twelvedata(ticker: str, out: Optional[Dict],
         return out
 
     closes = [c for day_, c in series if lo < day_ <= want]
-    if len(closes) < 19:
+    if len(closes) < price_metrics.VOLATILITY_MIN_BARS:
         _log.warning("[%s] Twelve Data 复权日线窗口 (%s, %s] 只有 %d 根（需 ≥ 19）—— 波动率回落拒收，volatility_20d 留 None",
                      ticker, lo, want, len(closes))
         return out
-    rets = [b / a - 1 for a, b in zip(closes[:-1], closes[1:])]
-    mean = sum(rets) / len(rets)
-    vol = math.sqrt(sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)) * math.sqrt(252) * 100
+    vol = price_metrics.volatility_20d_from_closes(closes)   # v0.45.639：公式搬进唯一实现（表达式逐字未变）
     if not math.isfinite(vol):
         _log.warning("[%s] Twelve Data 复权日线算出的波动率不是有限数（%r）—— 拒收", ticker, vol)
         return out
@@ -1007,28 +978,21 @@ class YFinanceSource:
             # v0.45.477：判不了就不给（见 `_completed_bar_close`），盘中价不许进索引窗口。
             data.session_close = _completed_bar_close(hist)
 
-            if len(hist) >= 5:
-                data.momentum_5d = (hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100
+            # v0.45.639：公式只在 `price_metrics.history_price_metrics`。此前这里是四份副本之一——v0.45.473 修的
+            # 「均量兜底 1.0」就是 `_fetch_history_metrics` 在 v0.45.54 修过、这份一直漏着的同一个 bug。均量不可得 ⇒ 不设，交给出口回落
+            _m = price_metrics.history_price_metrics(hist)
+            if _m["momentum_5d"] is not None:
+                data.momentum_5d = _m["momentum_5d"]
                 data.momentum_source = "5d_real"
             else:
                 data.momentum_source = "unavailable"
-
-            recent_vol = float(hist["Volume"].iloc[-1])
-            avg_vol = float(hist["Volume"].iloc[-20:].mean()) if len(hist) >= 20 else float(hist["Volume"].mean())
-            # v0.45.473：原兜底 avg_vol=1.0 ⇒ avg_volume=1 股、volume_ratio=当日成交量本身（千万量级）——
-            # `_fetch_history_metrics` 在 v0.45.54 已改成 None，这里一直漏着。置 None，交给出口回落。
-            if not (math.isnan(avg_vol) or avg_vol <= 0):
-                data.avg_volume = int(avg_vol)
-                data.volume_ratio = recent_vol / avg_vol
+            if _m["avg_volume"] is not None:
+                data.avg_volume = _m["avg_volume"]
+                data.volume_ratio = _m["volume_ratio"]
                 data.volume_source = "yfinance"
-
-            if len(hist) >= 19:   # v0.45.564：20 → 19，同 `_fetch_history_metrics`（理由见那里）
-                returns = hist["Close"].pct_change(fill_method=None).dropna()   # v0.45.601：写明不填充（理由见 `_fetch_history_metrics`）
-                if len(returns) >= 2:
-                    vol = float(returns.std() * (252 ** 0.5) * 100)
-                    if not (math.isnan(vol) or math.isinf(vol)):
-                        data.volatility_20d = vol
-                        data.volatility_source = "yfinance"
+            if _m["volatility_20d"] is not None:
+                data.volatility_20d = _m["volatility_20d"]
+                data.volatility_source = "yfinance"
 
             data.observations = _history_observations(_ref_daily, _n_raw)   # v0.45.580
             self.breaker.record_success()

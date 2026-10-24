@@ -41,8 +41,71 @@
 - 对冲页决策表没有逐名的估算成本列（审计里有 `trade_notional_usd` / `est_cost_usd`，页面只给合计和换手表）——paper 开账后再看要不要加。
 - 隐含换手在漏扫的日子里把两天的变化算成「一个换日」，会略微高估日均（周末不受影响，因为按审计日相邻算）。
 
+## [0.45.639] — 2026-10-24 — Fixed：行情三字段公式收成唯一实现 `price_metrics`（根治同一个「均量兜底 1.0」bug 修了三次），`swarm_agents/cache.py` 旧回落不再伪造量比、被走到会报 P1；BearBee 的 options 数据质量标签照抄 OracleBee 的判定
 
-## [0.45.639] — 2026-10-24 — 占位（进行中：swarm_agents/cache.py 旧回落 avg_vol=1.0 伪造量比 + BearBee options 标签不随 Oracle 降级；先盘点可达性与影响面，登记待用户定）
+用户 10-24：cache.py 旧回落「修假值 + 掉进旧路径要会红」并从根因解决；指纹按 `measurement_fix`、BearBee 按「边界 10-19 + 等价判据」登记。
+
+### Fixed：行情三字段公式唯一实现（`price_metrics.py`，新）
+
+- **根因**：`momentum_5d / volume_ratio / volatility_20d`（外加 avg_volume）的公式抄了四份——`data_pipeline` 的 `YFinanceSource.fetch`、
+  `_fetch_history_metrics`、`_fetch_historical_stock_data`，和 `swarm_agents/cache.py` 在 data_pipeline 不可用时的旧回落。修 bug 只修眼前那份：
+  均量 NaN / ≤0 时以 1.0 作分母（⇒ avg_volume = 1、volume_ratio = 当天原始成交量，几千万，Buzz 读成「巨量」）v0.45.54 修了一份、
+  v0.45.473 修了第二份、本版才发现 cache.py 第三份；v0.45.601 的 `fill_method=None` 也只进了 data_pipeline 三份。
+- `price_metrics.history_price_metrics(hist)`（DataFrame）与 `volatility_20d_from_closes(closes)`（列表，v0.45.557 Twelve Data 回落用）是唯一实现，
+  `VOLATILITY_MIN_BARS = 19` 一处定义；四个调用方只管「拿哪段日线」与「缺了怎么标」。只依赖 math、不 import data_pipeline（旧回落正是 data_pipeline
+  坏了才跑）。**主路径逐位不变**：origin/main 原文 data_pipeline 与改后真函数对拍（随机日线含 NaN 收盘 / NaN 成交量 / 零成交量）——
+  `_fetch_history_metrics` 800、`YFinanceSource.fetch` 800、补跑 300，共 1900 次全同；列表版 500 组全同；测试另以冻结旧公式随机对拍 3000 组。
+- ⚠️ 刻意没动：主路径与冻结通道层 `buzz_v1_channels.price_fields` 都让 NaN 照传（末根成交量 NaN ⇒ 量比 NaN ⇒ Buzz 量能通道落最低档 20；
+  收盘 NaN ⇒ 动量 NaN ⇒ 被夹成 +10%、满分看多）。全史 Buzz details 三字段 NaN 0 次；改它须连冻结层一起走协议修订（见下「待定」）。冻结层是刻意不共用的副本。
+
+### Fixed：cache.py 旧回落（`swarm_agents/cache.py::_fetch_stock_data`）
+
+- 改用 `price_metrics`：均量算不出 ⇒ 量比 / 均量留缺失（不再是分母 1.0）；补上 `fill_method=None`；不足 2 根不算。
+- **走到它会红**：此前一个 `except ImportError: pass` 同时包住 `from data_pipeline import …` 与取数调用，导入期缺依赖、取数途中延迟 import 失败
+  （目前只有 `observation_layer`）都悄悄改走旧回落、不留一行日志，而且一旦走到 30 只全走（无未完成 K 线护栏、无出口回落链、不进 `history_fill`）。
+  现在两种分开接、各自登记（`legacy_fallback_stats()`：次数 / 阶段 / 标的 / 原因，同一原因只打一条 ERROR）⇒ `scan_timing` 计数 `stock_fetch_legacy`
+  + 摘要行 ⇒ `alert_manager._check_stock_fetch_legacy`：count > 0 ⇒ **P1**，计数缺失 ⇒ checks_skipped。
+- 可达性（只读核）：生产没有模块在顶层 import data_pipeline；运行期能抛 ImportError 的只有 `observation_layer`；全史 Buzz details 里量比 > 1000
+  （分母 1.0 的痕迹）0 次——未见走过，但此前走了也不留痕。
+
+### Fixed：BearBee options 标签照抄 Oracle（`swarm_agents/oracle_bee.py` / `bear_bee.py`）
+
+- Oracle 在板上带 `options_dq`（与它的 data_quality.options 同一个变量，抛异常 result={} 时也带）；Bear 读到条目照抄（认不出 ⇒ unavailable），
+  回落分支 `if result:` ⇒ 改用 `_options_data_usable`（同 v0.45.369）。此前 Bear 读到条目就一律记 real。
+- 影响：只进 Queen `data_real_pct` 与 Bear 自己的 confidence（Bear 不计票、不在 5 维里、confidence 不归档）。全史 2354 行只有 10-14 一行会变，
+  data_real_pct 92.5 → 91.2、0 行跌破 80 ⇒ 任何分数不变。标签写成字面量条件式（DQ 标签 AST 扫描器要看得到全部取值）。
+
+### 登记
+
+- `signal_code_fingerprints`：`price_metrics.py` 并入 `UNITS["price.fields"]`；指纹 e512d9978a3c1a91 → 8cb89155e80aae09，ACK `measurement_fix`
+  （用户 10-24）；协议 §13.10 记一条。不登记边界、不截断 H1。
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-10-19", "v0.45.639", …)`（BearBee 标签；与 537 / 538 / 559 同日，边际作废 0 条）：
+  `_BOUNDARY_EQUIVALENCE`（Oracle options 是 real，或 Bear 带 error / 不在本行；10-19 ~ 10-23 150 行全部成立，负对照 10-14 29/30）、
+  `_BOUNDARY_MARKERS`（Bear `details.options_dq_from_oracle` 字面量 True，成功路径 + 日报合成回退）。生产数据当前判定 `no_evidence_yet`，
+  首个扫描日（10-26）后预期 `matches`。`signal_archive.COHORT_SIGNAL_SCOPE["v0.45.639"] = ()`（实测不截断 H1 / H2）；ML 估计量世代 10-19 扩标签。
+
+### Tests
+
+- `tests/test_price_metrics.py`（新）：冻结旧公式随机对拍 3000 组（含分支覆盖自证）、列表版 500 组、均量不可得两项都缺、19 根门槛、
+  AST「data_pipeline / cache.py 不得再出现公式碎片」（带正对照）、调用点计数、`price.fields` 指纹登记且改公式会变。
+- `tests/test_stock_fetch_legacy_fallback.py`（新）：import / call 两种走法都走到并登记、ERROR 不刷屏、健康时不走；旧回落均量不可得 ⇒ 缺失、
+  值等于共用公式、1 根不算；scan_timing 计数与摘要；告警 P1 / 0 不报 / 缺计数 checks_skipped。
+- `tests/test_bear_options_dq_from_oracle.py`（新）：真实 Oracle 三种情形上板标签 = 自己的 data_quality；真实 Oracle → 板 → 真实 Bear 端到端一致；
+  认不出 ⇒ unavailable；回落分支；取值集合一致；边界登记 / 空范围 / 不截断 / 印记（成功路径 AST + 合成回退）/ 等价判据（含真实 Queen 的出错行形状）/
+  判定器三态。
+- 跟随更新：`test_bear_bee_census_eviction` / `test_gex_oracle_bear_neutralized` 的手写 Oracle 板上条目补 `options_dq`（生产形状）；
+  `test_momentum_window_alignment` 扫描器活性检查改认 `price_metrics.py`；`test_signal_code_fingerprints` 灵敏度用例改变异共用公式并加旧回落接线；
+  `test_scan_timing` 计数键加 `stock_fetch_legacy`。
+- 变异：分母 1.0 回来、一个 except 吞两种、告警没接上、Bear 读到就 real、Bear 回落 `if result:`、Oracle 上板挪进 `if result:`、删等价登记、删范围声明、
+  判据去 error 分支、判据恒真、印记不写——11 个全部被杀。
+
+### 已知 / 待定（查明未改）
+
+- 主路径 + 冻结层的 NaN 照传（见上）：要不要改、怎么走协议修订，待用户定。
+- `crowding_detector.py`（拥挤度兜底取数）与 `risk_engine.py`（风险引擎自取数）各有一份自用的同类公式，带 `volume_ratio … else 1.0`、
+  `momentum_5d … else 0.0`、`volatility_20d = 0.0` 默认与 20 根门槛、无 `fill_method`——同一形状的假值，改它们会碰拥挤度 / 风险口径，另议。
+- 二次对拍脚本（一次性、未进仓库）在 10-24 10:06–10:07 往生产 `alpha_hive.log` 写了几行以假代码 `T` 署名的「20 日均量不可得」与「[历史补跑] T @ 2026-10-16」
+  日志（没写任何数据 / 账本）；`T` 恰是 AT&T 的真实代码，查 10-24 日志时请忽略这几行。
 
 ## [0.45.638] — 2026-10-24 — Added：逐票 Delta 对冲的成本估算——`delta_hedge_cost_bps`（缺省 5，主观、未检验），审计与对冲页记估算成本 / 成交名义 / 笔数 / 隐含换手；缺省仍 shadow，带宽与拉回不动
 

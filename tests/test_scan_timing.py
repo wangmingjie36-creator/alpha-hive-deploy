@@ -63,7 +63,8 @@ class TestCounters:
 
         def _imp(name, *a, **k):
             if name in ("yf_gate", "twelve_data", "cboe_options", "options_analyzer", "portfolio_greeks",
-                        "paper_portfolio", "ledger_io", "data_pipeline", "straddle_strangle_shadow"):
+                        "paper_portfolio", "ledger_io", "data_pipeline", "straddle_strangle_shadow",
+                        "swarm_agents"):
                 raise ImportError(name)
             return real_import(name, *a, **k)
 
@@ -79,7 +80,8 @@ class TestCounters:
                      "paper_portfolio": None,   # v0.45.448 纸面组合这一轮的结局
                      "ledger_io": None,         # v0.45.452 账本读写失败（源头登记）
                      "history_fill": None,      # v0.45.473 取数出口的历史字段回落
-                     "strangle_shadow": None}   # v0.45.586 影子宽跨记录的故障登记
+                     "strangle_shadow": None,   # v0.45.586 影子宽跨记录的故障登记
+                     "stock_fetch_legacy": None}   # v0.45.639 行情改走 cache.py 旧回落
         line = st.summary_line({"phases": {}, "counters": c})
         assert "—" in line and "0次" not in line
 
@@ -193,7 +195,7 @@ class TestWrite:
         assert set(d["counters"]) == {"yfinance", "twelve_data", "cboe",
                                       "cboe_chain", "gex_view", "cboe_raw", "options_snapshot", "hv_gap",
                                       "portfolio_greeks", "paper_portfolio", "ledger_io", "history_fill",
-                                      "strangle_shadow"}
+                                      "strangle_shadow", "stock_fetch_legacy"}
         assert d["extra"] == {"note": "x"}
         assert not (tmp_path / "t.json.tmp").exists(), "临时文件必须被 os.replace 掉"
 

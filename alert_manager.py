@@ -325,6 +325,7 @@ class AlertAnalyzer:
         self._check_ledger_io_failures(status)
         self._check_strangle_shadow(status)
         self._check_history_fill(status)
+        self._check_stock_fetch_legacy(status)   # v0.45.639：P1 行情改走 cache.py 旧回落
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
         self._check_news_sources(status)
@@ -1226,6 +1227,38 @@ class AlertAnalyzer:
                 "建议": "看 alpha_hive.log 同时段的取数失败（断网 / 限流）；若是新出现的重取方，考虑让它读评分时的预取行情",
             },
             ["history_fill", "data_quality"]
+        ))
+
+    def _check_stock_fetch_legacy(self, status: Dict) -> None:
+        """行情取数改走了 `swarm_agents/cache.py` 的旧回落（v0.45.639；`cache.legacy_fallback_stats()` 经 scan_timing 进来）。
+
+        只在 data_pipeline 不可用时走到：导入期缺依赖（`import`），或导入成功、取数途中延迟 import 失败（`call`）。两种此前都被一个
+        `except ImportError: pass` 吞掉、不留一行日志，而一旦走到，当天**全部**标的绕开 data_pipeline（没有未完成 K 线护栏、没有
+        出口回落链、不进 `history_fill` 计数）——上面那条历史字段告警也就看不见它。count > 0 ⇒ P1；计数缺失 ⇒ checks_skipped。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        lg = (st.get("counters") or {}).get("stock_fetch_legacy")
+        if not isinstance(lg, dict):
+            self.checks_skipped.append("行情旧回落检查（scan_timing 无 stock_fetch_legacy 计数）")
+            return
+        if not lg.get("count"):
+            return
+        tickers = list(lg.get("tickers") or [])
+        self.alerts.append(Alert(
+            AlertLevel.HIGH,
+            f"⚠️ 【P1 高】data_pipeline 不可用，行情改走 cache.py 旧回落 {lg['count']} 次（{len(tickers)} 只）",
+            {
+                "阶段": "、".join(f"{k}×{v}" for k, v in sorted((lg.get("stages") or {}).items())) or "—",
+                "原因": "；".join(lg.get("errors") or []) or "—",
+                "标的": "、".join(tickers[:10]) + (f" 等 {len(tickers)} 只" if len(tickers) > 10 else ""),
+                "影响": "这些标的的价格 / 动量 / 量比 / 波动率只来自 yfinance 一个月日线：没有未完成 K 线护栏（盘中跑会把形成中的那根"
+                        "当收盘）、没有自攒索引 / Twelve Data 回落、不进 history_fill 计数；公式与主路径同一份（price_metrics），"
+                        "但取数链不同 ⇒ 当天 signal_archive 的 price.* 与评分都来自降级取数",
+                "建议": "import ⇒ data_pipeline 自己或它的顶层依赖导入失败（看「原因」里的模块名，多半是改名 / 删函数没改全）；"
+                        "call ⇒ 取数途中的延迟 import 失败（目前只有 observation_layer）。修好后当天可按补跑流程重扫",
+            },
+            ["stock_fetch_legacy", "data_quality"]
         ))
 
     def get_critical_alerts(self) -> List[Alert]:

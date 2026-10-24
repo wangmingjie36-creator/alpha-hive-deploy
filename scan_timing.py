@@ -98,6 +98,10 @@ def counters() -> Dict[str, Optional[dict]]:
     此前三个出口直接把 None 交出去，连「今天走了哪个出口」都只在 warning 日志里。v0.45.625 起另带 `at_scoring`：
     评分用的那份行情取完那一刻（扫描预取结束）的同一组统计——告警与摘要行按它判，评分之后的重取另列。
 
+    `stock_fetch_legacy`（v0.45.639）：`swarm_agents.cache._fetch_stock_data` 因 data_pipeline 不可用（导入期 / 取数途中的
+    ImportError）改走旧回落的次数、阶段、标的与原因。走到它 = 当天行情全部绕开 data_pipeline（无未完成 K 线护栏、无出口回落链、
+    不进上面的 `history_fill`）；此前不留一行日志。count > 0 ⇒ alert_manager P1。
+
     `cboe_raw`（v0.45.333）：卖权行权价账本取原始链（`fetch_cboe_raw_contracts`）各出口的次数——
     ok / snapshot_mode / stale_vintage / payload_unavailable / vintage_mismatch / vintage_unverifiable /
     price_unavailable / no_parseable_contracts 分开数，不折叠。此前这组计数只有 cboe_options 自己和
@@ -109,7 +113,7 @@ def counters() -> Dict[str, Optional[dict]]:
                                       "options_snapshot": None, "hv_gap": None,
                                       "portfolio_greeks": None, "paper_portfolio": None,
                                       "ledger_io": None, "history_fill": None,
-                                      "strangle_shadow": None}
+                                      "strangle_shadow": None, "stock_fetch_legacy": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -172,6 +176,13 @@ def counters() -> Dict[str, Optional[dict]]:
         out["strangle_shadow"] = straddle_strangle_shadow.stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("strangle_shadow stats 不可得: %s", e)
+    try:
+        from swarm_agents import cache as _swarm_cache
+        # v0.45.639：data_pipeline 坏了时取数改走 cache.py 旧回落的次数（此前一个 `except ImportError: pass` 吞掉、不留痕）；
+        # count > 0 ⇒ alert_manager P1。不可导入 ⇒ None（不写 {}：空 dict 会被读成「零次」）
+        out["stock_fetch_legacy"] = _swarm_cache.legacy_fallback_stats()
+    except Exception as e:  # noqa: BLE001
+        _log.debug("stock_fetch_legacy stats 不可得: %s", e)
     return out
 
 
@@ -396,5 +407,8 @@ def summary_line(snap: dict) -> str:
         if any(later.values()):
             pg_s += (f" | 评分后重取仍缺 动量 {len(later['momentum'])} 只"
                      f"/量比 {len(later['volume'])} 只/波动率 {len(later['volatility'])} 只")
+    lg = c.get("stock_fetch_legacy")
+    if lg and lg.get("count"):                                          # v0.45.639
+        pg_s += f" | 行情走 cache.py 旧回落 {lg['count']} 次({len(lg.get('tickers') or [])} 只; data_pipeline 不可用)"
     return ("耗时 " + " | ".join(parts) +
             f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s + pg_s)

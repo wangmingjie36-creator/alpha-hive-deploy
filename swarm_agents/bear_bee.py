@@ -12,6 +12,8 @@ from swarm_agents.utils import (
     clamp_score, append_context, make_error_result,
     AGENT_ERRORS, LLM_ERRORS,
 )
+# v0.45.639：Oracle 的期权数据质量判定（板上的键、取值集合、「算不算取到」）只有一份实现，Bear 照用、不另写
+from swarm_agents.oracle_bee import OPTIONS_DQ_BOARD_KEY, _options_data_usable
 
 
 class BearBeeContrarian(BeeAgent):
@@ -108,8 +110,14 @@ class BearBeeContrarian(BeeAgent):
         oracle_entry = self._read_peer(ticker, "OracleBeeEcho")
         if oracle_entry and oracle_entry.discovery:
             disc = oracle_entry.discovery
-            data_sources["options"] = "real"
             _od = getattr(oracle_entry, 'details', {}) or {}
+            # v0.45.639：照抄 Oracle 自己发到板上的判定。此前读到条目就记 "real"——Oracle 走样本链早退（自己标 unavailable）
+            # 或 OptionsAgent 抛异常（fallback）时，同一条记录里两只蜂对同一份期权数据一个说降级、一个说真实（10-14 一行实测），
+            # 而这个标签进 Queen 的 data_real_pct 与本蜂 confidence 的「real 源数」项。板上没有这个键 / 认不出 ⇒ 判不了 ⇒ unavailable
+            # 逐值映射写成字面量（DQ 标签扫描器要看得到取值）；取值集合与 Oracle 的 `OPTIONS_DQ_LABELS` 一致由测试钉住
+            _odq = _od.get(OPTIONS_DQ_BOARD_KEY)
+            data_sources["options"] = ("real" if _odq == "real"
+                                       else "fallback" if _odq == "fallback" else "unavailable")
             if "pc_ratio" in _od:
                 pc_ratio = _od.get("pc_ratio")
                 iv_rank = _od.get("iv_rank")
@@ -170,7 +178,9 @@ class BearBeeContrarian(BeeAgent):
                 opt = OptionsAgent()
                 result = opt.analyze(ticker, stock_price=price if price > 0 else None)
                 if result:
-                    data_sources["options"] = "options_api"
+                    # v0.45.639：同 Oracle（v0.45.369）——样本链早退返回的是**非空** dict（data_quality "unavailable"、指标全 None），
+                    # `if result:` 判不出来，此前照记 "options_api"（REAL_SOURCES）
+                    data_sources["options"] = "options_api" if _options_data_usable(result) else "unavailable"
                     # P0-1: 样本链早退后 put_call_ratio/iv_rank 可能为 None（不可信数据）→ 中性默认
                     pc_ratio = result.get("put_call_ratio") or 1.0
                     iv_rank = result.get("iv_rank")
@@ -673,6 +683,9 @@ class BearBeeContrarian(BeeAgent):
                     "short_int_bear": round(short_bear, 1),
                     "short_interest": si_data,
                     "data_sources": data_sources,
+                    # v0.45.639：世代边界印记（字面量 True）——data_sources.options 自本版起照抄 Oracle 板上的判定。
+                    # 读者 = `ic_rerun_readiness._marker_bear_options_dq_from_oracle`；此前的 details 没有这个键。勿改成 False / 勿删
+                    "options_dq_from_oracle": True,
                 },
                 extras={
                     "llm_thesis": llm_thesis,

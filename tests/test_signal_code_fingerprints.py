@@ -88,10 +88,15 @@ class TestSensitivity:
         ("buzz.channels", "swarm_agents/cache.py", "return max(lo, min(hi, f))", "return max(lo, min(hi, f * 1.0001))"),
         # 三个行情字段的公式
         ("price.fields", "price_history.py", "def momentum_5d_detail(", "def momentum_5d_detail_x("),
+        # v0.45.639：三个字段的公式收进 price_metrics（此前这里变异的是 cache.py 旧回落里的那份副本）
+        ("price.fields", "price_metrics.py",
+         'out["momentum_5d"] = float((hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100)',
+         'out["momentum_5d"] = float((hist["Close"].iloc[-1] / hist["Close"].iloc[-6] - 1) * 100)'),
         ("price.fields", "swarm_agents/cache.py",
-         'data["momentum_5d"] = (hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100',
-         'data["momentum_5d"] = (hist["Close"].iloc[-1] / hist["Close"].iloc[-6] - 1) * 100'),
-    ], ids=["动量映射", "量比档位", "波动率档位", "量比阈值", "_safe_score", "动量回落函数改名", "兜底动量窗口"])
+         'data["volume_ratio"] = _m["volume_ratio"]',
+         'data["volume_ratio"] = _m["volume_ratio"] or 1.0'),
+    ], ids=["动量映射", "量比档位", "波动率档位", "量比阈值", "_safe_score", "动量回落函数改名", "共用动量窗口",
+            "旧回落量比接线"])
     def test_formula_change_changes_the_fingerprint(self, unit, rel, old, new):
         assert _fp(unit, _mutated(rel, old, new)) != _fp(unit)
 

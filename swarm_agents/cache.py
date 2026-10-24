@@ -151,6 +151,45 @@ def check_ticker_validity(ticker: str) -> Dict:
     return result
 
 
+#: v0.45.639：下面旧回落被走到的次数 / 阶段 / 原因。走到 = data_pipeline 坏了（`import` 期缺依赖，或取数途中延迟 import
+#: 失败——此前两种都被一个 `except ImportError: pass` 吞掉、不留一行日志），而且坏的时候 30 只会**全部**改走这条只用 yfinance
+#: 的路（没有未完成 K 线护栏、没有出口回落链、不进 `history_fill_stats`）。读者：`legacy_fallback_stats()` ⇒ scan_timing 的
+#: `stock_fetch_legacy` ⇒ `alert_manager._check_stock_fetch_legacy` 非零即 P1。
+_legacy_lock = _threading.Lock()
+_LEGACY_MAX_ERRORS = 5
+_legacy_stats: Dict = {"count": 0, "stages": {}, "tickers": [], "errors": []}
+
+
+def _record_legacy_fallback(ticker: str, stage: str, exc: BaseException) -> None:
+    """登记一次旧回落。stage：``import``（data_pipeline 导入就失败）/ ``call``（导入成功、取数途中抛 ImportError）。
+    每种不同的原因只打一条 ERROR（30 只同一个原因不刷屏），次数照数。"""
+    msg = f"{stage}: {type(exc).__name__}: {exc}"
+    with _legacy_lock:
+        _legacy_stats["count"] += 1
+        _legacy_stats["stages"][stage] = _legacy_stats["stages"].get(stage, 0) + 1
+        if ticker not in _legacy_stats["tickers"]:
+            _legacy_stats["tickers"].append(ticker)
+        new_msg = msg not in _legacy_stats["errors"]
+        if new_msg and len(_legacy_stats["errors"]) < _LEGACY_MAX_ERRORS:
+            _legacy_stats["errors"].append(msg)
+    if new_msg:
+        _log.error("[%s] data_pipeline 不可用（%s）—— 改走 cache.py 旧回落（只用 yfinance，无未完成 K 线护栏 / 出口回落链）；"
+                   "本进程第 %d 次", ticker, msg, _legacy_stats["count"])
+
+
+def legacy_fallback_stats() -> Dict:
+    """旧回落计数的副本：``{"count", "stages", "tickers", "errors"}``。count == 0 = 本进程一次都没走过（正常）。"""
+    with _legacy_lock:
+        return {"count": _legacy_stats["count"], "stages": dict(_legacy_stats["stages"]),
+                "tickers": list(_legacy_stats["tickers"]), "errors": list(_legacy_stats["errors"])}
+
+
+def _reset_legacy_fallback_stats() -> None:
+    """测试用：清零计数（模块级状态跨测试残留会互相污染）。"""
+    with _legacy_lock:
+        _legacy_stats.update({"count": 0, "stages": {}, "tickers": [], "errors": []})
+
+
 def _fetch_stock_data(ticker: str, target_date: Optional[str] = None) -> Dict:
     """
     多源数据降级链：yfinance → Alpha Vantage → Finnhub → 陈旧缓存 → 安全默认值
@@ -162,11 +201,16 @@ def _fetch_stock_data(ticker: str, target_date: Optional[str] = None) -> Dict:
     v0.41.6: target_date 透传给 data_pipeline，非当日时锚定该日期真实收盘价
     （`--date` 补跑历史交易日场景），None 或等于当日时行为不变。
     """
+    # v0.45.639：导入与调用分开接，两种都登记（此前一个 `except ImportError: pass` 包住两者、不留痕）
     try:
         from data_pipeline import fetch_stock_data as _dp_fetch
-        return _dp_fetch(ticker, as_of_date=target_date)
-    except ImportError:
-        pass
+    except ImportError as e:
+        _record_legacy_fallback(ticker, "import", e)
+    else:
+        try:
+            return _dp_fetch(ticker, as_of_date=target_date)
+        except ImportError as e:
+            _record_legacy_fallback(ticker, "call", e)
 
     # data_pipeline 不可用时的保守 fallback（只用 yfinance，失败返回 price=0）
     with _yf_lock:
@@ -192,6 +236,13 @@ def _fetch_stock_data(ticker: str, target_date: Optional[str] = None) -> Dict:
         "data_source": "fallback",
     }
 
+    try:
+        import price_metrics   # 只依赖 math；data_pipeline 坏了它照样能导入
+    except ImportError as e:
+        _log.error("[%s] 旧回落也算不了：price_metrics 不可导入（%s: %s）", ticker, type(e).__name__, e)
+        data["_data_unavailable"] = True
+        return data
+
     if not yfinance_breaker.allow_request():
         data["_data_unavailable"] = True
         return data
@@ -212,23 +263,17 @@ def _fetch_stock_data(ticker: str, target_date: Optional[str] = None) -> Dict:
             if len(hist) >= 1:
                 data["price"] = float(hist["Close"].iloc[-1])
 
-            if len(hist) >= 5:
-                data["momentum_5d"] = (hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100
-
+            # v0.45.639：公式改用唯一实现 `price_metrics.history_price_metrics`（同 data_pipeline 三处）。此前这里是第四份副本：
+            # 均量 NaN / ≤ 0 时把分母换成 1.0 ⇒ avg_volume = 1、volume_ratio = 当天原始成交量（几千万，Buzz 读成「巨量」）——
+            # 主路径 v0.45.54 / 473 修过的同一个 bug；且漏了 v0.45.601 的 `fill_method=None`。现在均量算不出 ⇒ 两个都留 None。
+            # 不足 2 根不算（同 data_pipeline 主路径：1 根时「均量」就是它自己，量比恒 1.0）。
             if len(hist) >= 2:
-                recent_vol = float(hist["Volume"].iloc[-1])
-                avg_vol = float(hist["Volume"].iloc[-20:].mean()) if len(hist) >= 20 else float(hist["Volume"].mean())
-                if math.isnan(avg_vol) or avg_vol <= 0:
-                    avg_vol = 1.0
-                data["avg_volume"] = int(avg_vol)
-                data["volume_ratio"] = recent_vol / avg_vol if avg_vol > 0 else 1.0
-
-            if len(hist) >= 19:   # v0.45.564：20 → 19，同 data_pipeline._fetch_history_metrics（一个月有时只有 19 个交易日）
-                returns = hist["Close"].pct_change().dropna()
-                if len(returns) >= 2:
-                    _vol = float(returns.std() * (252 ** 0.5) * 100)
-                    if not (math.isnan(_vol) or math.isinf(_vol)):
-                        data["volatility_20d"] = _vol
+                _m = price_metrics.history_price_metrics(hist)
+                data["momentum_5d"] = _m["momentum_5d"]
+                if _m["avg_volume"] is not None:
+                    data["avg_volume"] = _m["avg_volume"]
+                    data["volume_ratio"] = _m["volume_ratio"]
+                data["volatility_20d"] = _m["volatility_20d"]
 
             data["data_source"] = "real"
             # 写入缓存（O(1) LRU 淘汰）

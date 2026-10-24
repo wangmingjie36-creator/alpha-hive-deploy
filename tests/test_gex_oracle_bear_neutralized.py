@@ -313,7 +313,8 @@ class TestOracleMarkerOnEveryPath:
 # ════════════════════════════════════════════════════════════════════════════
 
 def _publish_oracle(board, gex, direction="neutral"):
-    details = {"pc_ratio": 0.9, "iv_rank": 40.0, "iv_skew": 1.0}   # 三项都不触发看空档
+    details = {"pc_ratio": 0.9, "iv_rank": 40.0, "iv_skew": 1.0,   # 三项都不触发看空档
+               "options_dq": "real"}   # v0.45.639：生产形状——Oracle 的板上条目自带期权数据质量判定，Bear 照抄
     if gex is not None:
         details["gex"] = gex
     board.publish(PheromoneEntry(agent_id="OracleBeeEcho", ticker=TICKER, discovery="Oracle 合成",

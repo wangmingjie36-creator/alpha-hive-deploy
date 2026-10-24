@@ -1042,6 +1042,27 @@ _COHORT_HISTORY = [
      "**都不截断**（实测 `dim_ic_forward_test.truncation_point` 对空范围边界返回 None）。共振加成前瞻检验：重放读记录的 data_quality ⇒ "
      "新旧记录都能复现，检验期内边界条数 +1（附带项）。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签"
      "（`final_score` / `direction_encoded` / `agent_agreement` 特征只在缺波动率行可能变）。"),
+    ("2026-10-19", "v0.45.639",
+     "BearBee 的 `data_quality[\"options\"]` 改为照抄 OracleBee 发到信息素板的判定（用户 2026-10-24 选「边界 10-19 + 等价判据」）。"
+     "此前 Oracle 的板上条目不带自己的期权数据质量判定，Bear 读到条目就一律记 \"real\"——Oracle 走样本链早退（自己标 unavailable）"
+     "或 OptionsAgent 抛异常（fallback）时，同一条记录里两只蜂对同一份期权数据一个说降级、一个说真实；Bear 回落分支也是 `if result:` "
+     "⇒ \"options_api\"，判不出样本链早退的非空 dict（Oracle 在 v0.45.369 修掉的同一形状）。现在 Oracle 在板上带 `options_dq`"
+     "（与它的 data_quality.options 同一个变量），Bear 照抄（认不出 ⇒ unavailable），回落分支改用 `oracle_bee._options_data_usable`。"
+     "**口径变化只在蜂后层**：Bear 不计票（v0.45.212）、不在 5 个评分维度里、分与方向不变；它的标签进 `_apply_triple_penalty` 的 "
+     "`data_real_pct`（< 80 才压缩 rule_score）、它的 confidence 含「real 源数」项（confidence 不进任何维度 / 票重 / 归档信号）。"
+     "**幅度**（只读重放 `.swarm_results_*.json` 全史 2354 行带 Bear options 标签）：Oracle 降级而 Bear 标 real 的只有 10-14 一行，"
+     "data_real_pct 92.5 → 91.2（−1.2pp），0 行跌破 80 ⇒ rule_score 全史不变；另 170 行走 Bear 回落分支（options_api）而同日 Oracle 为 real，"
+     "按判据不变。（09-24 / 25 那 60 行在 v0.45.369 之前 Oracle 自己也标 real，存档两边都是 real。）"
+     "**为什么日期写 10-19 而新代码 10-26 才上线**（同 v0.45.369 / 559 的处置）：10-19 ~ 10-23 五个扫描日 150 行等价判据全部成立"
+     "（只读实测；负对照 10-14 为 29/30），与 v0.45.537 / 538 / 559 同日扩展同一标签、不新开空分区，**边际作废 0 条**。"
+     "等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.639\"]`（Oracle data_quality.options 是 real，或 Bear 带 error / 不在本行——认 error 而非"
+     "「没有 details」，v0.45.567 的教训）。印记 `_BOUNDARY_MARKERS[\"v0.45.639\"]`：Bear `details.options_dq_from_oracle` 字面量 True"
+     "（成功路径 + 日报合成回退），实时行。预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.639\"]` = `()`（同 v0.45.209 / 314 / 315 / 369 / 559）：不改任何归档蜂信号——"
+     "`bear.*` 与 `agent.BearBeeContrarian.*` 读的是分数 / 方向，没变。前瞻检验：维度 IC 协议 H1 / H2 都不读 Bear ⇒ 不截断。"
+     "⚠️ 同版另有一项**不在本边界内**：`price_metrics` 收拢行情三字段公式（data_pipeline 三份 + cache.py 旧回落），按 `measurement_fix` 登记在 "
+     "`signal_code_fingerprints.ACKS`（主路径 1900 次对拍逐位不变，值只在旧回落上变）。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1477,6 +1498,35 @@ def _equiv_buzz_volatility_present(d: dict) -> bool:
     return "volatility_20d" in det and det["volatility_20d"] is not None
 
 
+def _bear_row_has_options_dq_marker(d: dict) -> bool:
+    """这行是 v0.45.639 之后的代码写的吗：BearBee `details.options_dq_from_oracle` 为字面量 `True`
+    （成功路径与日报合成回退都写；Bear 走异常兜底时 details 是 `{}`，等价判据接住）。只认 `is True`：此前的记录没有这个键。"""
+    b = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("BearBeeContrarian")
+    det = b.get("details") if isinstance(b, dict) else None
+    return isinstance(det, dict) and det.get("options_dq_from_oracle") is True
+
+
+def _marker_bear_options_dq_from_oracle(d: dict) -> bool:
+    """v0.45.639 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.559）。"""
+    return _bear_row_has_options_dq_marker(d) and not _is_backfill_row(d)
+
+
+def _equiv_bear_options_dq(d: dict) -> bool:
+    """v0.45.639 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？
+
+    本版只改 BearBee 的 `data_sources["options"]`（= data_quality.options）：读到 Oracle 板上条目 ⇒ 照抄 Oracle 的判定（旧：一律 real）；
+    回落分支 ⇒ 样本链早退记 unavailable（旧：options_api）。分 / 方向不变；变的是 Queen 的 data_real_pct 与 Bear 自己的 confidence。
+      · Oracle 的 `data_quality.options` 是 "real" ⇒ 读板路径新旧都是 real；回落路径同一进程取的是同一条链（取到了）⇒ 新旧都是 options_api ⇒ 等价；
+      · Bear 带 `error`（`make_error_result` 的 data_quality 是 {"source": "error", …}，归档里 details 是 `{}`——v0.45.567 的教训：认 error，
+        别认「没有 details」）、或本行没有 Bear ⇒ 两版同一条路 ⇒ 等价；
+      · 其余（Oracle 降级 / 缺 Oracle 标签）⇒ 证不出（举证责任在放宽一侧）。"""
+    sr = d.get("swarm_results") or {}
+    b = (sr.get("agent_details") or {}).get("BearBeeContrarian")
+    if not isinstance(b, dict) or b.get("error"):
+        return True
+    return ((sr.get("data_quality") or {}).get("OracleBeeEcho") or {}).get("options") == "real"
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1512,6 +1562,8 @@ _BOUNDARY_MARKERS = {
                   _marker_rival_ml_adjustment_retired),
     "v0.45.559": ("agent_details.BuzzBeeWhisper.details.volatility_dq_from_value is True",
                   _marker_buzz_volatility_dq_from_value),
+    "v0.45.639": ("agent_details.BearBeeContrarian.details.options_dq_from_oracle is True",
+                  _marker_bear_options_dq_from_oracle),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1541,6 +1593,8 @@ _BOUNDARY_EQUIVALENCE = {
                   _equiv_td_session_bar, _oracle_row_has_td_session_marker),
     "v0.45.559": ("BuzzBee details.volatility_20d 不是 None（或 Buzz 出错 / 不在本行 / 没有 details）⇒ 本版改动是空操作",
                   _equiv_buzz_volatility_present, _buzz_row_has_volatility_dq_marker),
+    "v0.45.639": ("OracleBeeEcho data_quality.options 是 real（或 Bear 出错 / 不在本行）⇒ 本版改动是空操作",
+                  _equiv_bear_options_dq, _bear_row_has_options_dq_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
