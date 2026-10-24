@@ -5,7 +5,30 @@
 
 ---
 
-## [0.45.642] — 2026-10-24 — 占位（进行中：v0.45.636 二次检查——剪枝遍历收进 tests/_repo_files.py（iCloud 副本 / onerror / 清单对账）、_prod_files 与 _repo_py_files 共用、文件列表缓存）
+## [0.45.642] — 2026-10-24 — Fixed：v0.45.636 二次检查——剪枝遍历收进 `tests/_repo_files.py`（iCloud 副本 / onerror / 清单对账）、`_prod_files` 与 `_repo_py_files` 共用、文件列表缓存
+
+对 v0.45.636 跑已装的 code-review 技能（high）：剪枝本身没发现会算错的 bug，查出 6 处小问题，其中 1 条（iCloud 副本让守卫误报）实测复现，全修。
+
+### Fixed
+- **iCloud 副本让 `test_earnings_calendar` 误报**：把 `earnings_watcher.py` 复制成 `earnings_watcher 2.py`，「`get_earnings_date` 只在 watcher」就红（实测）——与 v0.45.626/634 在 bid_zero 守卫里修的是同一个开发检出专属的误报，当时没一起修这个兄弟守卫。
+- **三份各自手写的「本仓生产 .py」**：`tests/_repo_files.py`（自称唯一实现，但回退分支是 rglob 后再过滤）、`test_earnings_calendar._prod_files`、`test_portfolio_greeks_bid_zero._repo_py_files`。现在新增 `walk_own_python_files(root, skip_dirs)`（**只新增**，既有 `own_python_files` / `_is_ours` 行为不变）：遍历时剪枝，排除 `skip_dirs`、`VENDORED`、点号目录与文件、iCloud 冲突副本（文件 ` N.py` **与目录** ` N`，共享常量 `ICLOUD_COPY`）；返回 `WalkResult(files, errors, pruned)`。两条守卫都改用它，各自不再带排除规则。与 `own_python_files` 的区别：读工作树、不是 git 清单（未提交的新文件也扫得到）。
+- **`os.walk` 吞读取错误**：默认 `onerror=None`，读不了的目录（权限 / iCloud 占位）里的文件无声消失，而自证测试只查 5 个别处的哨兵文件，守卫照绿。现在 `onerror` 接上、错误进 `WalkResult.errors`；两条守卫在 `errors` 非空时**断言失败**。
+- **没有下限**：`_prod_file_list()` 断言文件数 ≥ `_PROD_MIN_FILES`（200，约为现状 501 的 2/5，另有测试要求实际数 ≥ 下限的两倍，防止下限被抬到贴着现状）——一大片目录被误剪时守卫不能在几乎什么都没扫到的情况下通过。
+- **按名字剪枝的覆盖洞**：vendor / third_party / 点号目录 / iCloud 名按**目录名**在任何深度生效，将来有人把第一方 .py 放进 `vendor/` 就会无声失明。新 `tests/test_repo_files_walk.py` 对**独立的 git 清单**（`git ls-files '*.py'`，取不到就红、不 skip）对账：① 没有已跟踪的 .py 会被名字规则排除；② 每个被剪掉的目录里没有已跟踪的 .py；③ 每个已跟踪的第一方 .py 都在遍历结果里（超出的是未提交的新文件，允许）。
+- **每次调用都重新遍历全仓**：`_prod_file_list()` 用 `lru_cache`，整个会话一次；`test_portfolio_greeks_bid_zero._parsed_repo` 已有。
+- **docstring 去掉写死的一次性数字**（14888 / 59–65 s / 具体 venv 路径），只留规则；测量在 CHANGELOG（v0.45.636 条目）。
+
+### Added / Changed（测试）
+- `tests/test_repo_files_walk.py`（15 条）：合成树规则、`skip_dirs` 由调用方定、iCloud 文件 + 目录、`pruned` 带原因、被剪目录一个都不进入（间谍）、读不了的目录以 `errors` 形式出来（用间谍直接触发 `onerror`，不靠 chmod——root 用户 / 某些文件系统上 chmod 000 读得了，测试会恒绿）、对 git 清单三向对账、两条守卫没有自己的真遍历。
+- `tests/test_earnings_calendar.py::TestProdFilesWalk`：合成树加 iCloud 副本；缓存；读不了 ⇒ 断言失败；文件数低于下限 ⇒ 断言失败；下限远低于实际规模。
+- `tests/_must_run.json`：新测试读了另外两个测试文件，登记表过期（退出码 4），`--update` 并入。
+- 变异 9 处（去掉 `onerror` / iCloud 只认文件 / 不剪枝 / 不断言 errors / 不断言下限 / 去掉缓存 / 不剪 vendored / 不记录 pruned / 按名字误剪第一方目录 `alphabot`）全红；拨钟审计（+7 / +45 天）0 条新红；ruff 过。
+
+### 验证
+- 整套：**在最终树上**（提交 9983a6f9，rebase 到当时的 origin/main 之后；开跑前连续 45 s 没有别的 pytest / 审计，origin 无新提交）：**12099 passed、0 failed**、82 deselected、2 xfailed，576 s（负载约 1.5，机器恢复正常速度）。**同一版本的前一轮**（提交 eabc0022，早两个 origin 提交）整套是 12034 passed、**1 failed**：`tests/test_earnings_vol_signal.py::TestScanNeverDeletesRowsItDidNotRecompute::test_partial_rerun_keeps_rows_it_did_not_recompute`。它与本版无关（本版没碰 `earnings_vol_signal` 与该测试，且该测试最后一次改动在 10-16）：它比较两次 `scan` 写出的账本字节，而每行带 `captured_at`（`now.isoformat(timespec="seconds")`，`earnings_vol_signal.py` 554 行附近，精确到秒的墙钟），两次扫描正好跨了一秒时字节就不同——失败日志里两次 WARNING 的时间戳是 10:43:17 与 10:43:18。单独重复跑该类 6 次全过，第二轮整套也没复现，属撞秒边界的**偶发**，**未修**（要修的话是把时钟钉住或比较时去掉 `captured_at`，另起一条）。
+
+### 没改
+- `own_python_files`（git 清单版）与 `_is_ours` 的既有行为；其它 rglob 后再过滤的守卫（`test_momentum_window_alignment` / `test_trading_calendar_nyse` / `test_scout_consensus_excluded`，v0.45.636 已盘点）。
 
 ## [0.45.641] — 2026-10-24 — Fixed：v0.45.633 二次检查——影子每日入口四处（读生产状态抛异常会丢一天、扫描子进程挂死会让此后每天被 launchd 跳过、停启动脚本会漏掉子进程、探活响应没关）
 

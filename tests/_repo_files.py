@@ -44,7 +44,10 @@ v0.45.176 那条「生产代码不许传 adapted_weights」的守卫，报的是
 """
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
+from typing import List, NamedTuple, Tuple
 
 #: 第三方代码的目录名。**注意**：`node_modules` 在这里和「点号开头」那道过滤
 #: 里各出现一次，看似冗余，其实拦的是不同样本（`libs/site-packages/` 不以点号
@@ -96,3 +99,71 @@ def own_python_files(root) -> tuple[list[Path], str]:
         if _is_ours(p.relative_to(root)):
             files.append(p)
     return files, "rglob"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 遍历时剪枝（v0.45.642）
+# ══════════════════════════════════════════════════════════════════════════════
+
+#: iCloud 冲突副本：文件 `name 2.py` 与**目录** `name 2`（CLAUDE.md「环境」一节）。副本与原件内容相同，
+#: 算进扫描会让「只有这几处」类的精确断言在开发检出里无缘无故变红。
+ICLOUD_COPY = re.compile(r" \d+(\.py)?$")
+
+
+class WalkResult(NamedTuple):
+    """`walk_own_python_files` 的结果。三样都要看，不能只拿 files：
+
+    * `files`   —— 排序后的绝对路径。
+    * `errors`  —— `os.walk` 读不了的目录（权限 / iCloud 占位 …）。**默认的 `os.walk` 会吞掉它们**，被吞的目录里
+                   的文件就从守卫的视野里无声消失；守卫要断言它是空的。
+    * `pruned`  —— `(相对路径, 原因)`：每一个**没有走进去**的目录。原因是 skip / vendored / hidden / icloud。
+                   用来断言「被剪掉的里面没有第一方源码」（见 `tests/test_repo_files_walk.py`）。
+    """
+    files: List[Path]
+    errors: List[str]
+    pruned: List[Tuple[str, str]]
+
+
+def _prune_reason(name: str, skip) -> str:
+    if name in skip:
+        return "skip"
+    if name in VENDORED:
+        return "vendored"
+    if name.startswith("."):
+        return "hidden"
+    if ICLOUD_COPY.search(name):
+        return "icloud"
+    return ""
+
+
+def walk_own_python_files(root, skip_dirs=()) -> WalkResult:
+    """本仓自己的 .py，**遍历时剪枝**：被排除的目录根本不进入。
+
+    为什么不是 `root.rglob("*.py")` 之后再过滤（`own_python_files` 回退分支就是那样）：开发检出里
+    `mcp-servers/*/.venv/` 是个第三方环境（上万个 .py），先全部枚举 / 解析再丢掉，会把一条全仓守卫拖过
+    pytest-timeout（v0.45.636 实测）。
+
+    排除：`skip_dirs`（调用方按守卫的目的给，如 tests / experiments）、`VENDORED`、点号开头的目录与文件、
+    iCloud 冲突副本（文件与目录）。与 `_is_ours` 同口径，另加 iCloud 与 `skip_dirs`。
+    与 `own_python_files` 的区别：读**工作树**而不是 git 清单——没提交的新文件也扫得到。"""
+    root = Path(root)
+    skip = frozenset(skip_dirs)
+    files: List[Path] = []
+    errors: List[str] = []
+    pruned: List[Tuple[str, str]] = []
+
+    def _onerror(exc: OSError) -> None:
+        errors.append(f"{getattr(exc, 'filename', None)}: {getattr(exc, 'strerror', None) or exc}")
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_onerror):
+        keep = []
+        for d in dirnames:
+            why = _prune_reason(d, skip)
+            if why:
+                pruned.append(((Path(dirpath) / d).relative_to(root).as_posix(), why))
+            else:
+                keep.append(d)
+        dirnames[:] = sorted(keep)
+        files += [Path(dirpath) / f for f in filenames
+                  if f.endswith(".py") and not f.startswith(".") and not ICLOUD_COPY.search(f)]
+    return WalkResult(sorted(files), errors, sorted(pruned))

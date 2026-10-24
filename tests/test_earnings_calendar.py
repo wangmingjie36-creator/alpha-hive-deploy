@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import json
 import os
 import sys
@@ -25,7 +26,7 @@ import pytest
 import earnings_calendar as EC
 import sell_strike_candidates as SC
 from tests import _ast_cache
-from tests._repo_files import VENDORED
+from tests._repo_files import walk_own_python_files
 
 REPO = Path(__file__).resolve().parent.parent
 AS_OF = "2026-10-13"
@@ -305,25 +306,35 @@ class TestNeverLooserThanLegacy:
 
 # ═════════════════════════════════════════ 4 · 唯一入口（AST）
 
-#: 守卫不扫的目录：测试、实验、归档。第三方（`VENDORED`：node_modules / site-packages / vendor / third_party）与
-#: 点号开头的目录（`.git` / `.claude` / `.venv` …）的口径取自 `tests/_repo_files.py` 的 `_is_ours`——唯一实现。
+#: 这条守卫不扫的目录：测试、实验、归档。第三方 / 点号目录 / iCloud 冲突副本的排除口径在共享件
+#: `tests/_repo_files.py::walk_own_python_files`——唯一实现，这里不再自抄。
 _PROD_SKIP_DIRS = frozenset({"tests", "experiments", "_archive"})
+#: 扫描文件数的下限：远低于实际规模的一半就说明有一大片目录悄悄不见了（读不了 / 被误剪），守卫会在「什么都没扫到」时
+#: 照样绿。不取贴着现状的数字，免得每增删几个文件就红。
+_PROD_MIN_FILES = 200
+
+
+@functools.lru_cache(maxsize=1)
+def _prod_file_list():
+    """默认根（本仓）的生产文件清单：整个会话只遍历一次（本模块多条测试、多次 `_refs` 共用）。
+    读不了的目录或文件数低于下限 ⇒ 直接断言失败，不让守卫在缺了覆盖的情况下静默通过。"""
+    res = walk_own_python_files(REPO, skip_dirs=_PROD_SKIP_DIRS)
+    assert not res.errors, f"遍历读不了这些目录，守卫的覆盖不完整：{res.errors[:5]}"
+    assert len(res.files) >= _PROD_MIN_FILES, \
+        f"只扫到 {len(res.files)} 个生产文件（下限 {_PROD_MIN_FILES}）——是不是有一大片目录被误剪了？"
+    return tuple((p.relative_to(REPO).as_posix(), p) for p in res.files)
 
 
 def _prod_files(root=None):
     """本仓自己的生产 .py（`(相对路径, 绝对路径)`，按路径排序）。
 
-    **遍历时剪枝**，不是 `rglob` 之后再过滤（v0.45.636）：开发检出里 `mcp-servers/maverick-mcp/.venv/` 是个 1.5 万
-    文件的第三方环境，旧写法先把它们全 rglob 出来、再靠 `rel.parts[0].startswith(".")`（只看第一段，`.venv` 在第三段）
-    漏过去，于是 `_refs` 逐个解析：这一条单独跑 59–65 s，压在 pytest-timeout 的 60 s 线上，机器偏慢整套就红。
-    现在 `.venv` / `site-packages` 等目录根本不进入；被排除的 14888 个文件实测全部来自该虚拟环境，我们自己的一个没少。"""
-    root = REPO if root is None else Path(root)
-    out = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames
-                       if d not in _PROD_SKIP_DIRS and d not in VENDORED and not d.startswith(".")]
-        out += [Path(dirpath) / f for f in filenames if f.endswith(".py") and not f.startswith(".")]
-    for p in sorted(out):
+    遍历时剪枝，不是 `rglob` 之后再过滤：第三方环境整个不进入（旧写法把它们全解析一遍，这条守卫曾压在
+    pytest-timeout 线上，见 CHANGELOG v0.45.636）。`root` 仅给自证测试搭合成树用；默认根走缓存与下限断言。"""
+    if root is None:
+        yield from _prod_file_list()
+        return
+    root = Path(root)
+    for p in walk_own_python_files(root, skip_dirs=_PROD_SKIP_DIRS).files:
         yield p.relative_to(root).as_posix(), p
 
 
@@ -390,7 +401,8 @@ class TestProdFilesWalk:
                     "mcp-servers/m/.venv/lib/python3.12/site-packages/dep.py",
                     "mcp-servers/m/server.py",
                     "libs/site-packages/lib.py", "node_modules/n.py", "vendor/v.py", "third_party/t.py",
-                    "pkg/.hidden/h.py", ".hidden_top.py"):
+                    "pkg/.hidden/h.py", ".hidden_top.py",
+                    "earnings_watcher 2.py", "alphabot 2/service.py", "pkg/sub 13/m.py"):
             f = tmp_path / rel
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text("x = 1\n", encoding="utf-8")
@@ -416,6 +428,46 @@ class TestProdFilesWalk:
         pruned = {"tests", "experiments", "_archive", ".git", ".claude", "node_modules", "vendor", "third_party"}
         bad = [v for v in visited if set(v.split("/")) & (pruned | {".venv", "site-packages", ".hidden"})]
         assert not bad, bad
+
+    def test_icloud_copy_of_a_production_file_does_not_trip_the_single_entry_guard(self, tmp_path):
+        """`earnings_watcher 2.py`（iCloud 冲突副本，文件或整个目录）不进扫描列表——否则「`get_earnings_date` 只在
+        watcher」会在开发检出里因为一份副本而红（v0.45.642 前实测会）。"""
+        got = [rel for rel, _ in _prod_files(self._tree(tmp_path))]
+        assert not [g for g in got if " 2" in g or " 13" in g], got
+
+    def test_default_scan_is_cached_for_the_whole_session(self):
+        assert _prod_file_list() is _prod_file_list()
+        assert [r for r, _ in _prod_files()] == [r for r, _ in _prod_files()]
+
+    def test_unreadable_directories_make_the_guard_fail_loudly(self, monkeypatch):
+        """遍历读不了的目录 ⇒ 断言失败，而不是少扫一块、守卫照绿。"""
+        from tests._repo_files import WalkResult
+        monkeypatch.setattr(sys.modules[__name__], "walk_own_python_files",
+                            lambda *a, **k: WalkResult([REPO / "x.py"] * 500, ["/locked: Permission denied"], []))
+        _prod_file_list.cache_clear()
+        try:
+            with pytest.raises(AssertionError, match="读不了"):
+                _prod_file_list()
+        finally:
+            monkeypatch.undo()
+            _prod_file_list.cache_clear()
+
+    def test_far_too_few_files_make_the_guard_fail_loudly(self, monkeypatch):
+        """扫到的文件数低于下限（一大片目录被误剪）⇒ 断言失败，不在「几乎什么都没扫到」时静默通过。"""
+        from tests._repo_files import WalkResult
+        monkeypatch.setattr(sys.modules[__name__], "walk_own_python_files",
+                            lambda *a, **k: WalkResult([REPO / "x.py"] * (_PROD_MIN_FILES - 1), [], []))
+        _prod_file_list.cache_clear()
+        try:
+            with pytest.raises(AssertionError, match="下限"):
+                _prod_file_list()
+        finally:
+            monkeypatch.undo()
+            _prod_file_list.cache_clear()
+
+    def test_floor_is_well_below_the_real_size(self):
+        """下限不能贴着现状（每增删几个文件就红）：实际文件数至少是下限的两倍。"""
+        assert len(_prod_file_list()) >= 2 * _PROD_MIN_FILES
 
     def test_yields_in_path_order(self, tmp_path):
         got = [rel for rel, _ in _prod_files(self._tree(tmp_path))]

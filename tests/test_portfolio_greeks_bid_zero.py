@@ -17,12 +17,12 @@ import itertools
 import math
 import os
 import pathlib
-import re
 
 import pytest
 
 import cboe_options
 import portfolio_greeks as pg
+from tests._repo_files import walk_own_python_files
 from alphabot import hedge as hedge_page
 from alphabot import straddle as sd
 from greeks_engine import calculate_single
@@ -409,28 +409,22 @@ _QUOTE_FIELD_READERS = {
     "alphabot/yf_chain.py::_rows": "yfinance 备用源 → 原始行",
     "alphabot/premium.py::_contract_row": "溢价页的合约行整理",
 }
-_SKIP_DIRS = {"node_modules", "__pycache__", "_retired_pre_phase5", "tests", "venv"}
-#: iCloud 冲突副本：文件 `name 2.py` 与**目录** `name 2`（CLAUDE.md「环境」一节）
-_ICLOUD_COPY = re.compile(r" \d+(\.py)?$")
+#: 这条守卫额外不扫的目录（第三方 / 点号目录 / iCloud 副本的口径在共享件 `tests/_repo_files.py`，不自抄）
+_SKIP_DIRS = frozenset({"__pycache__", "_retired_pre_phase5", "tests", "venv"})
 
 
 def _repo_py_files(root=None):
-    """仓库里的生产 .py：递归、**遍历时剪枝**（不进隐藏目录 / .claude/worktrees / .git / tests / 第三方目录；
-    先 rglob 再过滤会把它们全走一遍），并跳过 iCloud 重名副本——文件（`xxx 2.py`）和目录（`xxx 2/`）都跳。"""
-    root = pathlib.Path(root or _ROOT)
-    out = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames
-                             if d not in _SKIP_DIRS and not d.startswith(".") and not _ICLOUD_COPY.search(d))
-        out += [pathlib.Path(dirpath) / f for f in filenames if f.endswith(".py") and not _ICLOUD_COPY.search(f)]
-    return sorted(out)
+    """仓库里的生产 .py（遍历时剪枝，见 `tests/_repo_files.py::walk_own_python_files`）。"""
+    return walk_own_python_files(root or _ROOT, skip_dirs=_SKIP_DIRS).files
 
 
 @functools.lru_cache(maxsize=1)
 def _parsed_repo():
-    """`[(相对路径, 语法树)]`——整个测试会话只遍历、解析一次，三条扫描测试共用。"""
+    """`[(相对路径, 语法树)]`——整个测试会话只遍历、解析一次，三条扫描测试共用。读不了的目录 ⇒ 断言失败。"""
+    res = walk_own_python_files(_ROOT, skip_dirs=_SKIP_DIRS)
+    assert not res.errors, f"遍历读不了这些目录，守卫的覆盖不完整：{res.errors[:5]}"
     out = []
-    for path in _repo_py_files():
+    for path in res.files:
         try:
             out.append((path.relative_to(_ROOT).as_posix(), ast.parse(path.read_text(encoding="utf-8"))))
         except (SyntaxError, UnicodeDecodeError):
