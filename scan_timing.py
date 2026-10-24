@@ -99,8 +99,9 @@ def counters() -> Dict[str, Optional[dict]]:
     评分用的那份行情取完那一刻（扫描预取结束）的同一组统计——告警与摘要行按它判，评分之后的重取另列。
 
     `stock_fetch_legacy`（v0.45.639）：`swarm_agents.cache._fetch_stock_data` 因 data_pipeline 不可用（导入期 / 取数途中的
-    ImportError）改走旧回落的次数、阶段、标的与原因。走到它 = 当天行情全部绕开 data_pipeline（无未完成 K 线护栏、无出口回落链、
-    不进上面的 `history_fill`）；此前不留一行日志。count > 0 ⇒ alert_manager P1。
+    ImportError）改走旧回落的次数、阶段、标的与原因，外加评分那一刻的快照 `at_scoring`（同 `history_fill`）。走到它 = 那些标的的行情
+    绕开 data_pipeline（无未完成 K 线护栏、无出口回落链、不进上面的 `history_fill`）；此前不留一行日志。count > 0 ⇒ alert_manager P1，
+    影响按 `at_scoring` 写（评分用的是不是降级取数）。
 
     `cboe_raw`（v0.45.333）：卖权行权价账本取原始链（`fetch_cboe_raw_contracts`）各出口的次数——
     ok / snapshot_mode / stale_vintage / payload_unavailable / vintage_mismatch / vintage_unverifiable /
@@ -409,6 +410,8 @@ def summary_line(snap: dict) -> str:
                      f"/量比 {len(later['volume'])} 只/波动率 {len(later['volatility'])} 只")
     lg = c.get("stock_fetch_legacy")
     if lg and lg.get("count"):                                          # v0.45.639
-        pg_s += f" | 行情走 cache.py 旧回落 {lg['count']} 次({len(lg.get('tickers') or [])} 只; data_pipeline 不可用)"
+        _sc = lg.get("at_scoring")
+        _sc_s = f"评分时 {_sc.get('count', 0)} 次" if isinstance(_sc, dict) else "评分时未知"
+        pg_s += f" | 行情走 cache.py 旧回落 {lg['count']} 次({len(lg.get('tickers') or [])} 只; {_sc_s}; data_pipeline 不可用)"
     return ("耗时 " + " | ".join(parts) +
             f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s + pg_s)

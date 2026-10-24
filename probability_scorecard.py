@@ -270,8 +270,8 @@ _ML_ESTIMATOR_GENERATIONS = [
      "全史 153 行缺波动率行重放：0 行跌破 80、现行代码 0 行跨 S5 0.55 线；10-19 30/30 有波动率，新旧逐字节相同"
      "（见 `ic_rerun_readiness` 同版条目）。同样**没有重放 Δprobability**。"
      "【v0.45.639】（同日零代价；改名时 10-19 已有 5 天报告，归属不变——仍是同一代，只换标签）：BearBee 的 data_quality.options 照抄 Oracle "
-     "板上判定 ⇒ Oracle 降级那几行 Queen 的 `data_real_pct`（< 80 才压缩 `final_score`）可能变；Bear 不计票 ⇒ `direction_encoded` / "
-     "`agent_agreement` 不受影响。全史只有 10-14 一行会变、0 行跌破 80；10-19 ~ 10-23 150 行新旧逐字节相同（见 `ic_rerun_readiness` 同版条目）。"
+     "板上判定 ⇒ Oracle 降级那几行 Queen 的 `data_real_pct`（< 80 才压缩 `final_score`）可能变；Bear 不计票、自己的方向也没变 ⇒ "
+     "蜂群方向与各蜂方向都照旧，`direction_encoded` / `agent_agreement` 两个方向特征的值逐行相同。全史只有 10-14 一行会变、0 行跌破 80；10-19 ~ 10-23 150 行新旧逐字节相同（见 `ic_rerun_readiness` 同版条目）。"
      "同样**没有重放 Δprobability**。"),
 ]
 

@@ -111,7 +111,7 @@ class TestLegacyUsesTheOneFormula:
         _break_import(monkeypatch)
         legacy_env(_hist(vols=vols))
         d = cache._fetch_stock_data("AAA")
-        assert d["volume_ratio"] is None and d["avg_volume"] == 0
+        assert d["volume_ratio"] is None and d["avg_volume"] is None   # 二次检查：初始 0（「0 股」）也是伪造，与主路径一样留 None
         assert d["momentum_5d"] is not None and d["volatility_20d"] is not None   # 只降级缺的那一项
 
     def test_values_equal_the_shared_formula(self, legacy_env, monkeypatch):
@@ -130,6 +130,31 @@ class TestLegacyUsesTheOneFormula:
         assert d["price"] > 0 and d["volume_ratio"] is None and d["momentum_5d"] is None
 
 
+class TestScoringSnapshot:
+    """评分那一刻的快照（同 v0.45.625 的 at_scoring）：区分「评分用的就是降级取数」与「评分之后才走到」。"""
+
+    def test_snapshot_freezes_the_count_at_scoring(self, legacy_env, monkeypatch):
+        _break_import(monkeypatch)
+        cache._fetch_stock_data("AAA")
+        cache.mark_legacy_fallback_scoring()
+        cache._fetch_stock_data("BBB")
+        st = cache.legacy_fallback_stats()
+        assert st["count"] == 2 and st["at_scoring"] == {"count": 1, "tickers": ["AAA"]}
+
+    def test_daily_report_marks_right_after_history_fill_snapshot(self):
+        """挂在 `mark_history_fill_scoring` 同一处、各自 try（data_pipeline 坏了时那个 import 也失败）。
+        变红的变异：删掉这次调用（at_scoring 恒 None ⇒ 告警永远只能按进程口径报）。"""
+        import ast
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / "alpha_hive_daily_report.py").read_text(encoding="utf-8")
+        calls = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr in ("mark_history_fill_scoring", "mark_legacy_fallback_scoring")]
+        names = sorted(c.func.attr for c in calls)
+        assert names == ["mark_history_fill_scoring", "mark_legacy_fallback_scoring"], names
+        lines = {c.func.attr: c.lineno for c in calls}
+        assert 0 < lines["mark_legacy_fallback_scoring"] - lines["mark_history_fill_scoring"] < 12
+
+
 class TestScanTimingCarriesIt:
 
     def test_counter_present_and_summarised(self, legacy_env, monkeypatch):
@@ -138,11 +163,13 @@ class TestScanTimingCarriesIt:
         c = stt.counters()
         assert c["stock_fetch_legacy"]["count"] == 1
         line = stt.summary_line({"phases": {}, "counters": c})
-        assert "旧回落 1 次" in line
+        assert "旧回落 1 次" in line and "评分时未知" in line
+        cache.mark_legacy_fallback_scoring()
+        assert "评分时 1 次" in stt.summary_line({"phases": {}, "counters": stt.counters()})
 
     def test_zero_is_silent_in_summary(self, legacy_env):
         c = stt.counters()
-        assert c["stock_fetch_legacy"] == {"count": 0, "stages": {}, "tickers": [], "errors": []}
+        assert c["stock_fetch_legacy"] == {"count": 0, "stages": {}, "tickers": [], "errors": [], "at_scoring": None}
         assert "旧回落" not in stt.summary_line({"phases": {}, "counters": c})
 
 
@@ -168,6 +195,18 @@ class TestAlert:
         (h,) = hits
         assert h.level == am.AlertLevel.HIGH and "30 次" in h.message
         assert "observation_layer" in h.details["原因"] and "等 30 只" in h.details["标的"]
+
+    @pytest.mark.parametrize("scored,needle", [
+        ({"count": 30, "tickers": ["T0"]}, "评分用的行情里 30 次来自旧回落"),
+        ({"count": 0, "tickers": []}, "评分时还没走到"),
+        (None, "没有评分时的快照"),
+    ], ids=["at_scoring", "after_scoring", "no_snapshot"])
+    def test_impact_follows_the_scoring_snapshot(self, tmp_path, scored, needle):
+        """二次检查：只有评分之后的取数走到旧回落时，不能说「评分来自降级取数」。三种情形都还是 P1（data_pipeline 坏了）。"""
+        hits, _ = _analyze(tmp_path, {"count": 3, "stages": {"call": 3}, "tickers": ["A", "B", "C"],
+                                      "errors": ["call: ImportError: x"], "at_scoring": scored})
+        (h,) = hits
+        assert h.level == am.AlertLevel.HIGH and needle in h.details["影响"], h.details["影响"]
 
     def test_zero_is_silent(self, tmp_path):
         hits, a = _analyze(tmp_path, {"count": 0, "stages": {}, "tickers": [], "errors": []})

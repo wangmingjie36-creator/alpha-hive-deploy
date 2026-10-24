@@ -207,7 +207,7 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "（正对照：2.x 缺省先前向填充，NaN 那天收益记 0）。冻结通道层 buzz_v1_channels.price_fields 本就按不填充定义；"
      "CI 照 requirements.txt 装 pandas<3，差分对拍在那里红的就是这个。"
      "**用户 2026-10-22 在对话里选「按 no_value_change 登记」**（经发起本会话的会话转述原话）；不登记边界"),
-    ("price.fields",    "8cb89155e80aae09", "measurement_fix",
+    ("price.fields",    "100be9b271010efa", "measurement_fix",
      "v0.45.639：三个字段的公式收成唯一实现 price_metrics.py（并入本单元）。此前 data_pipeline 三份（YFinanceSource.fetch / "
      "_fetch_history_metrics / _fetch_historical_stock_data）+ swarm_agents/cache.py 旧回落一份副本，Twelve Data 回落的列表版公式也逐字搬过去。"
      "主路径逐位不变：origin/main 原文的 data_pipeline 与改后在同一批随机日线（含 NaN 收盘 / NaN 成交量 / 零成交量）上真函数对拍——"
@@ -215,6 +215,7 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "值只在 cache.py 旧回落（data_pipeline 不可用时才走）上变：均量 NaN / ≤0 时不再以 1.0 作分母（此前 volume_ratio = 当天原始成交量、"
      "avg_volume = 1——主路径 v0.45.54 / 473 修过的同一个 bug）、补上 fill_method=None——都是测量误差修正，且生产全史 Buzz details 里"
      "量比 > 1000 / 三字段 NaN 均 0 次（旧回落未见走过的痕迹）。主路径的 NaN 行为刻意未动（冻结层 buzz_v1_channels 原样复刻它）。"
+     "二次检查同版补两处（仍只在旧回落上）：初始 avg_volume 0（「0 股」）→ None 与主路径一致；旧回落计数加评分时快照（不进公式）。"
      "**用户 2026-10-24 在对话里选「measurement_fix」**；不登记边界"),
 ]
 

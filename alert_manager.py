@@ -1245,6 +1245,18 @@ class AlertAnalyzer:
         if not lg.get("count"):
             return
         tickers = list(lg.get("tickers") or [])
+        # 评分那一刻的快照（同 v0.45.625 历史字段回落的 at_scoring）：区分「评分用的就是降级取数」与「评分之后才走到」
+        scored = lg.get("at_scoring")
+        if isinstance(scored, dict) and scored.get("count"):
+            impact = (f"评分用的行情里 {scored['count']} 次来自旧回落（{len(scored.get('tickers') or [])} 只）：只用 yfinance 一个月日线，"
+                      "没有未完成 K 线护栏（盘中跑会把形成中的那根当收盘）、没有自攒索引 / Twelve Data 回落、不进 history_fill 计数；"
+                      "公式与主路径同一份（price_metrics），但取数链不同 ⇒ 这些标的当天 signal_archive 的 price.* 与评分都来自降级取数")
+        elif isinstance(scored, dict):
+            impact = ("评分时还没走到（评分用的行情全部经 data_pipeline）；之后的取数才改走旧回落——评分不受影响，"
+                      "但 data_pipeline 在本进程里坏了（取数途中的延迟 import 失败），下一轮扫描大概率一开始就走旧回落")
+        else:
+            impact = ("没有评分时的快照（at_scoring；旧代码或扫描没走到预取结束）——按进程口径报，分不清评分用的行情是否受影响："
+                      "先对 signal_archive 当天的 price.* 行。走到旧回落的标的只用 yfinance 一个月日线（无未完成 K 线护栏 / 回落链）")
         self.alerts.append(Alert(
             AlertLevel.HIGH,
             f"⚠️ 【P1 高】data_pipeline 不可用，行情改走 cache.py 旧回落 {lg['count']} 次（{len(tickers)} 只）",
@@ -1252,11 +1264,10 @@ class AlertAnalyzer:
                 "阶段": "、".join(f"{k}×{v}" for k, v in sorted((lg.get("stages") or {}).items())) or "—",
                 "原因": "；".join(lg.get("errors") or []) or "—",
                 "标的": "、".join(tickers[:10]) + (f" 等 {len(tickers)} 只" if len(tickers) > 10 else ""),
-                "影响": "这些标的的价格 / 动量 / 量比 / 波动率只来自 yfinance 一个月日线：没有未完成 K 线护栏（盘中跑会把形成中的那根"
-                        "当收盘）、没有自攒索引 / Twelve Data 回落、不进 history_fill 计数；公式与主路径同一份（price_metrics），"
-                        "但取数链不同 ⇒ 当天 signal_archive 的 price.* 与评分都来自降级取数",
+                "影响": impact,
                 "建议": "import ⇒ data_pipeline 自己或它的顶层依赖导入失败（看「原因」里的模块名，多半是改名 / 删函数没改全）；"
-                        "call ⇒ 取数途中的延迟 import 失败（目前只有 observation_layer）。修好后当天可按补跑流程重扫",
+                        "call ⇒ 取数途中有 ImportError 冒出来——data_pipeline 自身未接住的延迟 import 只有 observation_layer，"
+                        "它调用的其他模块内部的延迟 import 也会走到这里（未逐一审计）。修好后当天可按补跑流程重扫",
             },
             ["stock_fetch_legacy", "data_quality"]
         ))

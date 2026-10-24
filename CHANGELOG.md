@@ -62,10 +62,10 @@
 
 - 改用 `price_metrics`：均量算不出 ⇒ 量比 / 均量留缺失（不再是分母 1.0）；补上 `fill_method=None`；不足 2 根不算。
 - **走到它会红**：此前一个 `except ImportError: pass` 同时包住 `from data_pipeline import …` 与取数调用，导入期缺依赖、取数途中延迟 import 失败
-  （目前只有 `observation_layer`）都悄悄改走旧回落、不留一行日志，而且一旦走到 30 只全走（无未完成 K 线护栏、无出口回落链、不进 `history_fill`）。
+  （data_pipeline 自身未接住的只有 `observation_layer`，它调用的模块内部未逐一审计）都悄悄改走旧回落、不留一行日志，而且一旦走到 30 只全走（无未完成 K 线护栏、无出口回落链、不进 `history_fill`）。
   现在两种分开接、各自登记（`legacy_fallback_stats()`：次数 / 阶段 / 标的 / 原因，同一原因只打一条 ERROR）⇒ `scan_timing` 计数 `stock_fetch_legacy`
   + 摘要行 ⇒ `alert_manager._check_stock_fetch_legacy`：count > 0 ⇒ **P1**，计数缺失 ⇒ checks_skipped。
-- 可达性（只读核）：生产没有模块在顶层 import data_pipeline；运行期能抛 ImportError 的只有 `observation_layer`；全史 Buzz details 里量比 > 1000
+- 可达性（只读核）：生产没有模块在顶层 import data_pipeline；data_pipeline 自身函数里没被接住的延迟 import 只有 `observation_layer`（它调用的其他模块内部的延迟 import 未逐一审计，冒出来的 ImportError 同样走旧回落、同样登记）；全史 Buzz details 里量比 > 1000
   （分母 1.0 的痕迹）0 次——未见走过，但此前走了也不留痕。
 
 ### Fixed：BearBee options 标签照抄 Oracle（`swarm_agents/oracle_bee.py` / `bear_bee.py`）
@@ -77,7 +77,7 @@
 
 ### 登记
 
-- `signal_code_fingerprints`：`price_metrics.py` 并入 `UNITS["price.fields"]`；指纹 e512d9978a3c1a91 → 8cb89155e80aae09，ACK `measurement_fix`
+- `signal_code_fingerprints`：`price_metrics.py` 并入 `UNITS["price.fields"]`；指纹 e512d9978a3c1a91 → 100be9b271010efa，ACK `measurement_fix`
   （用户 10-24）；协议 §13.10 记一条。不登记边界、不截断 H1。
 - `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-10-19", "v0.45.639", …)`（BearBee 标签；与 537 / 538 / 559 同日，边际作废 0 条）：
   `_BOUNDARY_EQUIVALENCE`（Oracle options 是 real，或 Bear 带 error / 不在本行；10-19 ~ 10-23 150 行全部成立，负对照 10-14 29/30）、
@@ -98,6 +98,20 @@
   `test_scan_timing` 计数键加 `stock_fetch_legacy`。
 - 变异：分母 1.0 回来、一个 except 吞两种、告警没接上、Bear 读到就 real、Bear 回落 `if result:`、Oracle 上板挪进 `if result:`、删等价登记、删范围声明、
   判据去 error 分支、判据恒真、印记不写——11 个全部被杀。
+
+### 二次检查（同版修正，推送前）
+
+- **旧回落计数不分评分前后**：v0.45.625 刚把历史字段回落分成「评分时 / 评分后」，旧回落计数却是进程累计——只有评分之后的取数走到时，
+  P1 却说「评分来自降级取数」。现加 `at_scoring` 快照（`cache.mark_legacy_fallback_scoring`，日报里紧挨 `mark_history_fill_scoring`、各自 try），
+  告警「影响」按它分三种写（评分时走到 / 评分后才走到 / 没有快照）；摘要行带「评分时 N 次」。三种都仍是 P1（data_pipeline 坏了）。
+- **测试顺序污染**：已有三处测试（`test_volatility_fallback`、`test_silent_failure_guards`）会把 data_pipeline 弄成不可导入、触发旧回落，
+  而计数是进程级全局状态 ⇒ conftest 加 autouse 夹具每条测试前后清零（只在模块已导入时清，不改变首次导入位置；同影子宽跨计数的先例）。
+- **旧回落初始 avg_volume = 0**（「0 股」）也是伪造，且我的测试把它写成了期望值 ⇒ 改 None，与主路径 `StockData.avg_volume` 缺省一致
+  （生产没有 avg_volume 的读者，行为零变化）。指纹随之 → 100be9b271010efa，确认条目原地更新（此前那条未推送过）。
+- **过度断言**：「运行期能抛 ImportError 的只有 observation_layer」只审了 data_pipeline 自身——它调用的模块内部未审，告警建议与本条已改措辞。
+- **ML 世代说明撞守卫**：追加段写了「…不受影响。」，`test_queen_ml_feedback_disabled` 专门禁这个短语（v0.45.540 曾误写）；意思不变，改写措辞。
+- 核过、没问题的：合成回退的 Bear 条目多了 `details`（只含印记）——读者全用 `.get("bear_score", 0)` 默认值，渲染不变；
+  `price_metrics` 对空日线会抛 IndexError，但四个调用方都先保证至少 1~2 根；均量为 inf 时 `int()` 抛 OverflowError 与旧代码同样。
 
 ### 已知 / 待定（查明未改）
 

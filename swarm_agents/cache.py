@@ -158,6 +158,9 @@ def check_ticker_validity(ticker: str) -> Dict:
 _legacy_lock = _threading.Lock()
 _LEGACY_MAX_ERRORS = 5
 _legacy_stats: Dict = {"count": 0, "stages": {}, "tickers": [], "errors": []}
+#: 评分用的那份行情取完那一刻的快照（`mark_legacy_fallback_scoring`，与 data_pipeline 的 `mark_history_fill_scoring` 同一时点）；
+#: 没标记过 ⇒ None。告警据此区分「评分用的就是降级取数」与「评分之后的取数才走到」——同 v0.45.625 对历史字段回落的处置
+_legacy_at_scoring: Optional[Dict] = None
 
 
 def _record_legacy_fallback(ticker: str, stage: str, exc: BaseException) -> None:
@@ -178,16 +181,28 @@ def _record_legacy_fallback(ticker: str, stage: str, exc: BaseException) -> None
 
 
 def legacy_fallback_stats() -> Dict:
-    """旧回落计数的副本：``{"count", "stages", "tickers", "errors"}``。count == 0 = 本进程一次都没走过（正常）。"""
+    """旧回落计数的副本：``{"count", "stages", "tickers", "errors", "at_scoring"}``。count == 0 = 本进程一次都没走过（正常）。
+    `at_scoring` = 评分那一刻的 ``{"count", "tickers"}``（没标记过 ⇒ None）。"""
     with _legacy_lock:
         return {"count": _legacy_stats["count"], "stages": dict(_legacy_stats["stages"]),
-                "tickers": list(_legacy_stats["tickers"]), "errors": list(_legacy_stats["errors"])}
+                "tickers": list(_legacy_stats["tickers"]), "errors": list(_legacy_stats["errors"]),
+                "at_scoring": None if _legacy_at_scoring is None else
+                {"count": _legacy_at_scoring["count"], "tickers": list(_legacy_at_scoring["tickers"])}}
+
+
+def mark_legacy_fallback_scoring() -> None:
+    """评分用的那份行情此刻取完（`alpha_hive_daily_report._init_scan_context`，紧挨 `mark_history_fill_scoring`）：拍快照。"""
+    global _legacy_at_scoring
+    with _legacy_lock:
+        _legacy_at_scoring = {"count": _legacy_stats["count"], "tickers": list(_legacy_stats["tickers"])}
 
 
 def _reset_legacy_fallback_stats() -> None:
-    """测试用：清零计数（模块级状态跨测试残留会互相污染）。"""
+    """测试用：清零计数与快照（模块级状态跨测试残留会互相污染；conftest 每条测试前后都清）。"""
+    global _legacy_at_scoring
     with _legacy_lock:
         _legacy_stats.update({"count": 0, "stages": {}, "tickers": [], "errors": []})
+        _legacy_at_scoring = None
 
 
 def _fetch_stock_data(ticker: str, target_date: Optional[str] = None) -> Dict:
@@ -226,7 +241,8 @@ def _fetch_stock_data(ticker: str, target_date: Optional[str] = None) -> Dict:
         # 下游完全无法区分"真持平"和"没数据"。data_pipeline 的契约（P0-2, v0.38.0）
         # 本就是 None=诚实缺数据，这里对齐。
         "momentum_5d": None,
-        "avg_volume": 0,
+        # v0.45.639：0 → None（「0 股」同样是伪造；data_pipeline 的 StockData.avg_volume 缺省就是 None，与之一致）
+        "avg_volume": None,
         # v0.45.3: 与 momentum_5d 同一形状的伪造。
         # volume_ratio=1.0 会被下游当"正常量"消费（data_pipeline.py:533 早有此注释）；
         # volatility_20d=0.0 更危险——σ=0 在风险引擎里等于"零风险"，

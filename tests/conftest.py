@@ -1322,6 +1322,20 @@ def _isolate_straddle_strangle_shadow_result(_isolate_env, tmp_path):
     straddle_strangle_shadow.reset_stats()
 
 
+@pytest.fixture(autouse=True)
+def _reset_stock_fetch_legacy_stats():
+    """v0.45.639：`swarm_agents.cache` 的「行情改走旧回落」计数是进程级全局状态（同上一条的影子宽跨计数）。已有测试会把 data_pipeline
+    弄成不可导入来测旧回落（test_volatility_fallback / test_silent_failure_guards），不清的话后面读实时计数（scan_timing.counters()）的
+    测试会带着非零值跑、结果随顺序变。只在模块已导入时清——不在这里触发导入，免得改变首次导入的位置。"""
+    mod = sys.modules.get("swarm_agents.cache")
+    if mod is not None:
+        mod._reset_legacy_fallback_stats()
+    yield
+    mod = sys.modules.get("swarm_agents.cache")
+    if mod is not None:
+        mod._reset_legacy_fallback_stats()
+
+
 @pytest.fixture
 def sell_strike_state_sandbox_check():
     """把 `_assert_sell_strike_state_in_sandbox` 暴露给它的有牙自证（同 `default_path_sandbox_check`）。"""
