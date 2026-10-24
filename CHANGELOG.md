@@ -421,7 +421,8 @@ yfinance `401 Invalid Crumb` → `TypeError`），把评分阶段完整的 10 �
 - 二次检查（同日）：用生产的 ruff 0.13.3 跑全仓 `ruff check .` 通过；extras 跟进经变异核实（关掉 extras 求值 ⇒ 闭包里正好少了经 `pyjwt[crypto]` 进来的 cryptography）；更正本条两处措辞（9 个只在 macOS 的包不全是 pyobjc；补上 CI 原 ruff / pytest 的具体版本）。
 - CI（`76e4586e`，run 39846489110）**判失败**：Linux 上按约束文件安装成功（77 个钉死的版本都装上了）、lint（ruff 0.13.3）通过、整套测试 **11717 passed / 0 failed** / 22 skipped；**红的是其后的「选测登记表漂移检查」**（`select_tests.py --check-drift`，exit 4）：本版新引入的三处非代码读没进 `tests/_must_run.json`（v0.45.615 的选测登记表）——`test_persistent_writes_have_readers` 读两个工作流文件（本版把它们登记成 `constraints.txt` 的读者）、`test_requirements_match_installed` 读 `constraints.txt`。⚠️ 我本地手挑的元守卫与整套都没带审计插件，看不到这一步；后台等 CI 的任务结束时我也没打开它的输出，是发起会话转告的。
 - 修（同日追补）：登记表只并进这三条读。**没收** `select_tests.py --update` 的另一处改动——它把 `test_persistent_writes_have_readers` 归进「读全部测试文件」：部分更新时门槛按这次只收集到的 2 个文件算（0.5 × 2 = 1），读 1 个别的测试文件就被判成读全部（v0.45.618 已记这个误判、另开任务）。本地复现 CI 判定（读记录的收集数换成全仓 375 个测试文件）：新登记表通过；用改前的登记表核同一份读记录，原样复现 CI 那两行报错（正对照）。
-  修复后 CI（run 39851630127，`bc4902c2`，含 `f4e43828`）**每一步都 success**：安装 / lint / 整套 11733 passed / 0 failed / 26 skipped / 选测登记表漂移检查「✅ 登记表覆盖本次整套观测（234 个测试文件有读记录）」。clockshift 的拨钟结论仍待 2026-10-23 14:00 UTC 定时运行。
+  修复后 CI（run 39851630127，`bc4902c2`，含 `f4e43828`）**每一步都 success**：安装 / lint / 整套 11733 passed / 0 failed / 26 skipped / 选测登记表漂移检查「✅ 登记表覆盖本次整套观测（234 个测试文件有读记录）」。clockshift 的拨钟结论见下。
+  **定时 clockshift 核实（10-23）**：run 40000799290（GitHub 实际 18:08 UTC 触发；提交 `bcc2367a`，含 `76e4586e` 与 `f4e43828`）——三个 job 都按约束文件安装成功；真实钟基线 11836 passed、已红 0 条；+7 天新红 0 条；+400 天只有设计内的 `TestCoverageHorizon`；+45 天新红 1 条 `test_outcomes_backlog_starvation.py::test_rate_limit_streak_stops_network_but_not_local`——与本版无关，是夹具 `_bdays` 只跳周末不跳假日的时间炸弹，已由 v0.45.631（`cd25dcc6`，晚于该轮所跑的提交）修掉；当前 main 本机拨钟审计 +7 / +45 天该文件与 Step 3 后置条件测试新红 0 条。
 
 ### 遗留
 - Alpha Bot 帮助页 / 弹窗里教人「换解释器先 `pip install -r requirements.txt`」（`alphabot/macos_app.py`）还没带 `-c constraints.txt`：照它装，传递依赖会是最新版——
