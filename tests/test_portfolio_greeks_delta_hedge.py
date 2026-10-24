@@ -48,6 +48,7 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setitem(pg.CONFIG, "delta_hedge_mode", "shadow")
     monkeypatch.setitem(pg.CONFIG, "delta_hedge_band_pct", 3.0)
     monkeypatch.setitem(pg.CONFIG, "delta_hedge_rebalance_to", "center")
+    monkeypatch.setitem(pg.CONFIG, "delta_hedge_cost_bps", 5.0)
     pg._BARS_CACHE.clear()
     return tmp_path
 
@@ -468,6 +469,72 @@ class TestReadSide:
         assert len(run_check({"mode": "paper", "n_undecided": 0, "undecided": [], "n_blocked": 1, "blocked": {"X": "y"}})) == 1
         assert run_check({"mode": "shadow", "n_undecided": 1, "undecided": und, "n_blocked": 0, "blocked": {}}) == []
         assert run_check({"mode": "paper", "n_undecided": 0, "undecided": [], "n_blocked": 0, "blocked": {}}) == []
+
+
+class TestCostEstimate:
+    """v0.45.638：审计里的成本估算只加字段、不改决策、不写账本、不扣现金。"""
+
+    def test_default_is_five_bps_and_is_a_public_rule(self):
+        assert pg.CONFIG["delta_hedge_cost_bps"] == 5.0 and "delta_hedge_cost_bps" in pg.PUBLIC_RULE_KEYS
+
+    def test_shadow_audit_carries_cost_fields_without_touching_ledgers(self, state):
+        st, q, px = _long_x()
+        _seed(st)
+        r = _run(_closes(px), q)
+        sec, d = r["delta_hedge"], _names(r)["XYZ"]
+        assert sec["cost_bps"] == 5.0 and sec["n_trades"] == 1
+        assert d["trade_notional_usd"] == pytest.approx(20_000.0) and d["est_cost_usd"] == pytest.approx(10.0)   # 200 股 × 100 × 5 bps
+        assert sec["trade_notional_usd"] == pytest.approx(20_000.0) and sec["est_cost_usd"] == pytest.approx(10.0)
+        assert sec["trade_notional_pct_nav"] == pytest.approx(10.0) and sec["est_cost_bps_nav"] == pytest.approx(0.5)
+        assert not {p.name for p in pg.STATE_DIR.glob("delta_*")}               # 仍是一个逐票账本文件都没有
+        audit = json.loads((pg.STATE_DIR / f"greeks_{AS_OF}.json").read_text(encoding="utf-8"))
+        assert audit["delta_hedge"]["est_cost_usd"] == pytest.approx(10.0)
+
+    def test_the_cost_assumption_never_changes_a_decision_or_the_spy_side(self, state):
+        st, q, px = _long_x()
+        _seed(st)
+        outs = []
+        for bps in (0.0, 5.0, 500.0):
+            pg.CONFIG["delta_hedge_cost_bps"] = bps
+            r = _run(_closes(px), q, execute=False)
+            d = _names(r)["XYZ"]
+            outs.append((d["status"], d["trade_shares"], d["target_shares"], d["net_dd"],
+                         json.dumps(r["aggregate"], sort_keys=True, default=str),
+                         json.dumps(r["recommendation"], sort_keys=True, default=str)))
+        assert outs[0] == outs[1] == outs[2]
+
+    def test_paper_books_no_cost_into_cash_and_records_executed_totals(self, state):
+        pg.CONFIG["delta_hedge_mode"] = "paper"
+        st, q, px = _long_x()
+        _seed(st)
+        r = _run(_closes(px), q)
+        meta = json.loads((pg.STATE_DIR / "delta_meta.json").read_text(encoding="utf-8"))
+        assert meta["cash"] == pytest.approx(20_000.0)                          # 没有任何成本被扣：只估算、不记账
+        sec = r["delta_hedge"]
+        assert sec["executed_notional_usd"] == pytest.approx(20_000.0) and sec["executed_est_cost_usd"] == pytest.approx(10.0)
+
+    def test_paper_same_day_rerun_keeps_the_cost_fields_byte_identical(self, state):
+        pg.CONFIG["delta_hedge_mode"] = "paper"
+        st, q, px = _long_x()
+        _seed(st)
+        _run(_closes(px), q)
+        first = (pg.STATE_DIR / f"greeks_{AS_OF}.json").read_text(encoding="utf-8")
+        _run(_closes(px), q)
+        assert (pg.STATE_DIR / f"greeks_{AS_OF}.json").read_text(encoding="utf-8") == first
+
+    @pytest.mark.parametrize("bad", [-1.0, float("nan"), None, "5"])
+    def test_a_bad_cost_assumption_raises_instead_of_reading_as_free(self, state, bad):
+        st, q, px = _long_x()
+        _seed(st)
+        pg.CONFIG["delta_hedge_cost_bps"] = bad
+        with pytest.raises(ValueError):
+            _run(_closes(px), q)
+
+    def test_markdown_states_it_is_a_fixed_bps_estimate(self, state):
+        st, q, px = _long_x()
+        _seed(st)
+        md = pg.render_markdown(AS_OF, _run(_closes(px), q))
+        assert "成本估算（固定 5.0 bps，主观假设）" in md and "上界" in md and "固定 bps 的估算" in md
 
 
 class TestFailsLoud:

@@ -4,7 +4,8 @@
   · 规则算术：带 / 拉回 0 / 拉回带边 / 整股取整，用手工数字独立复算（`TestRules`）；
   · 跨式没了清仓、缺数据逐标的判、坏持仓不当 0（`TestExitAndUnknown`）；
   · 原因码唯一一张表：写出的每个码都登记、表里无死键（AST 双向，`TestReasonTable`）；
-  · 纯函数：不 import 对冲引擎、不读写文件、不联网（`TestPurity`）。
+  · 纯函数：不 import 对冲引擎、不读写文件、不联网（`TestPurity`）；
+  · 成本估算（v0.45.638）：只加字段、不改任何决策；坏 bps 当场红；未决 / 带内 / 无仓不算「免费成交」（`TestCosts`）。
 """
 from __future__ import annotations
 
@@ -119,6 +120,58 @@ class TestExitAndUnknown:
         s = D.summarize(out)
         assert (s["n_hedge"], s["n_inside"], s["n_undecided"]) == (2, 1, 1)        # A 要对冲 + OLD 清仓
         assert s["undecided"][0]["ticker"] == "C" and s["undecided"][0]["detail"] == D.REASONS["option_delta_unknown"]
+
+
+class TestCosts:
+    def _dec(self):
+        return D.decide({"A": _st(20_000.0), "B": _st(2_000.0), "C": _st(None, "option_delta_unknown")}, {"OLD": 5.0},
+                        {"A": _mark(100.0), "B": _mark(100.0), "C": _mark(100.0), "OLD": _mark(10.0)}, nav=NAV, band_pct=3.0)
+
+    def test_notional_and_cost_for_hedge_and_exit_only(self):
+        out = D.with_costs(self._dec(), 5.0)
+        by = {d["ticker"]: d for d in out}
+        assert by["A"]["trade_notional_usd"] == 20_000.0 and by["A"]["est_cost_usd"] == 10.0      # 200 股 × 100 × 5 bps
+        assert by["OLD"]["status"] == "exit" and by["OLD"]["trade_notional_usd"] == 50.0 and by["OLD"]["est_cost_usd"] == 0.03
+        for t in ("B", "C"):                                          # 带内 / 未决：没有成交 ⇒ 名义 0，不是「免费成交」
+            assert by[t]["trade_notional_usd"] == 0.0 and by[t]["est_cost_usd"] == 0.0
+
+    def test_only_the_status_decides_whether_a_trade_counts(self):
+        """决策里就算带着非零 trade_shares，只要 status 不是 hedge / exit（带内 / 未决 / 无仓）就不算成交——名义由 status 把关，
+        不靠「这些状态的 trade_shares 碰巧是 0」。"""
+        fake = [{"ticker": t, "status": st, "trade_shares": 7, "price": 10.0} for t, st in
+                (("I", "inside"), ("U", "unknown"), ("F", "flat"), ("H", "hedge"), ("E", "exit"))]
+        by = {d["ticker"]: d["trade_notional_usd"] for d in D.with_costs(fake, 5.0)}
+        assert by == {"I": 0.0, "U": 0.0, "F": 0.0, "H": 70.0, "E": 70.0}
+
+    def test_costs_never_change_a_decision(self):
+        plain = self._dec()
+        costed = D.with_costs(self._dec(), 500.0)
+        def strip(ds):
+            return [{k: v for k, v in d.items() if k not in ("trade_notional_usd", "est_cost_usd")} for d in ds]
+        assert strip(costed) == plain
+
+    def test_summarize_totals_and_percent_of_nav(self):
+        s = D.summarize(D.with_costs(self._dec(), 5.0), nav=NAV)
+        assert s["n_trades"] == 2 and s["trade_notional_usd"] == 20_050.0 and s["est_cost_usd"] == 10.03
+        assert s["trade_notional_pct_nav"] == pytest.approx(10.025) and s["est_cost_bps_nav"] == pytest.approx(0.5015)
+        assert D.summarize(D.with_costs(self._dec(), 5.0))["trade_notional_pct_nav"] is None     # 没给 NAV ⇒ None，不拿 0 顶
+
+    def test_summarize_without_costs_keeps_the_old_shape(self):
+        assert "est_cost_usd" not in D.summarize(self._dec()) and "n_trades" not in D.summarize(self._dec())
+
+    def test_zero_bps_is_zero_cost_but_not_zero_notional(self):
+        s = D.summarize(D.with_costs(self._dec(), 0.0), nav=NAV)
+        assert s["est_cost_usd"] == 0.0 and s["trade_notional_usd"] == 20_050.0
+
+    @pytest.mark.parametrize("bad", [None, "5", float("nan"), float("inf"), -1.0, True])
+    def test_bad_cost_bps_raises(self, bad):
+        with pytest.raises(ValueError):
+            D.check_cost_bps(bad)
+        with pytest.raises(ValueError):
+            D.with_costs(self._dec(), bad)
+
+    def test_zero_is_accepted(self):
+        assert D.check_cost_bps(0) == 0.0 and D.check_cost_bps(5) == 5.0
 
 
 class TestReasonTable:

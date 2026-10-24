@@ -50,6 +50,37 @@ function latestPanel(L, rules) {
     rec.reason ? h("p", { class: "small" }, h("span", { class: "muted" }, "规则给出的理由："), rec.reason) : null);
 }
 
+// 成本估算（v0.45.638）：固定 bps 的主观假设，不是点差 / 冲击模型；不进决策、不扣现金。数字全由服务端算好（前端只排版）。
+// shadow 没有持仓账：逐日「若每天都拉回 0」的隐含换手才是日常口径；决策表里那一天的合计是「若从空仓开始」的上界。
+function costBlock(D, mode) {
+  const T = D.turnover || {};
+  const bps = isNum(D.cost_bps) ? D.cost_bps : T.cost_bps;
+  const bits = [];
+  if (isNum(D.trade_notional_usd)) {
+    bits.push(h("p", { class: "small" }, `${D.latest_date} 的决策：${D.n_trades ?? 0} 笔，成交名义 ${money(D.trade_notional_usd, 0)}`
+      + (isNum(D.trade_notional_pct_nav) ? `（${num(D.trade_notional_pct_nav, 1)}% NAV）` : "")
+      + `，估算成本 ${money(D.est_cost_usd, 2)}`
+      + (mode === "shadow" ? "。shadow 没有持仓账，这是「若今天从空仓开始对冲」的上界，不是日常换手。" : "。")
+      + (isNum(D.executed_notional_usd) ? ` 其中真成交名义 ${money(D.executed_notional_usd, 0)}、估算成本 ${money(D.executed_est_cost_usd, 2)}。` : "")));
+  }
+  const rows = (T.rows || []);
+  if (rows.length) {
+    const cols = [
+      { label: "日期", render: (r) => r.date },
+      { label: "口径", render: (r) => (r.kind === "build" ? "建仓（不进日均）" : "相邻两日目标变化") },
+      { label: "只数", cls: "r", render: (r) => r.n_names + (r.n_skipped ? `（另 ${r.n_skipped} 只判不了）` : "") },
+      { label: "成交名义", cls: "r", render: (r) => money(r.notional_usd, 0) },
+      { label: "% NAV", cls: "r", render: (r) => (isNum(r.notional_pct_nav) ? `${num(r.notional_pct_nav, 1)}%` : "—") },
+      { label: "估算成本", cls: "r", render: (r) => money(r.est_cost_usd, 2) },
+      { label: "bps NAV", cls: "r", render: (r) => (isNum(r.est_cost_bps_nav) ? num(r.est_cost_bps_nav, 2) : "—") }];
+    bits.push(h("h3", {}, "估算成本与隐含换手"),
+      h("p", { class: "small muted" }, `按每笔成交 ${isNum(bps) ? num(bps, 1) : "—"} bps 估算（主观假设，没有校准）。「隐含换手」= 若每天都把每只标的拉回目标股数，相邻两个扫描日之间要成交的名义；`
+        + `日均 ${isNum(T.avg_notional_pct_nav) ? `${num(T.avg_notional_pct_nav, 1)}% NAV` : "—"}、约 ${isNum(T.avg_est_cost_bps_nav) ? `${num(T.avg_est_cost_bps_nav, 2)} bps NAV` : "—"}/天（${T.n_rebalance_days ?? 0} 个换日）。`),
+      table(cols, rows));
+  }
+  return bits;
+}
+
 function deltaPanel(D, rules) {
   if (!D) return null;
   const mode = D.mode || rules.delta_hedge_mode;
@@ -102,8 +133,8 @@ function deltaPanel(D, rules) {
       (D.trades || []).length ? table(tradeCols, D.trades) : h("div", { class: "empty" }, "放行的记录里还没有成交。")]
     : [];
   return panel("逐票 Delta 对冲", { sub }, ...lastBits,
-    names.length ? table(nameCols, names) : h("div", { class: "empty" }, "跨式账本里没有持仓。"), ...account,
-    h("p", { class: "note small muted" }, "没有点差 / 冲击成本模型（单只股票比 SPY 贵）；只对冲 Delta，Gamma / Vega 不对冲；带与拉回方式是 v1 主观常数，不是校准结果，也没有证据说明逐票对冲后更好。"));
+    names.length ? table(nameCols, names) : h("div", { class: "empty" }, "跨式账本里没有持仓。"), ...costBlock(D, mode), ...account,
+    h("p", { class: "note small muted" }, "没有点差 / 冲击成本模型（单只股票比 SPY 贵；上面的成本只是固定 bps 的估算）；只对冲 Delta，Gamma / Vega 不对冲；带与拉回方式是 v1 主观常数，不是校准结果，也没有证据说明逐票对冲后更好。"));
 }
 
 function gatePanel(g) {

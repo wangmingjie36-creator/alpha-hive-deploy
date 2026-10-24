@@ -137,6 +137,7 @@ CONFIG = {
     "delta_hedge_mode": "shadow",    # off | shadow（只算不成交，缺省）| paper（纸面成交，改这一行单独提交）
     "delta_hedge_band_pct": 3.0,     # 每只标的 |跨式腿净 $Delta + 对冲市值| 超过 NAV 的这么多 % 才动手（v1 主观常数）
     "delta_hedge_rebalance_to": "center",   # center = 回 0 | edge = 只拉回带边
+    "delta_hedge_cost_bps": 5.0,     # 逐票成交的估算成本（单边 bps，v0.45.638）。**主观、未检验**，只用于估算显示，不进决策、不扣现金
 }
 
 BASE_DIR = PATHS.home
@@ -897,6 +898,10 @@ def _delta_mode() -> str:
     return mode
 
 
+def _delta_cost_bps() -> float:
+    return dh.check_cost_bps(CONFIG.get("delta_hedge_cost_bps"))   # 拼错 / 负数当场红，不静默当 0
+
+
 def _delta_paths() -> Dict[str, Path]:
     return {"positions": STATE_DIR / "delta_positions.jsonl", "trades": STATE_DIR / "delta_trades.jsonl",
             "equity": STATE_DIR / "delta_equity_curve.jsonl", "meta": STATE_DIR / "delta_meta.json"}
@@ -954,15 +959,17 @@ def delta_hedge_day(as_of: str, option_rows: List[Dict], nav: Optional[float], c
     marks = {tk: _mark_from(closes_fn, tk, as_of) for tk in names}
     decisions = dh.decide(straddle, held, marks, nav=nav, band_pct=float(CONFIG["delta_hedge_band_pct"]),
                           rebalance_to=str(CONFIG["delta_hedge_rebalance_to"]))
+    cost_bps = _delta_cost_bps()
+    dh.with_costs(decisions, cost_bps)          # 只加估算字段：不改任何决策，带 / 拉回不看它
     traded: Dict[str, float] = {}
     for t in today:
         traded[str(t.get("ticker"))] = traded.get(str(t.get("ticker")), 0.0) + (_num(t.get("shares")) or 0.0)
     for d in decisions:
         d["traded_today"] = traded.get(d["ticker"], 0.0)
     out = {"mode": mode, "band_pct": float(CONFIG["delta_hedge_band_pct"]),
-           "rebalance_to": str(CONFIG["delta_hedge_rebalance_to"]), "nav": _pos(nav),
+           "rebalance_to": str(CONFIG["delta_hedge_rebalance_to"]), "nav": _pos(nav), "cost_bps": cost_bps,
            "names": decisions, "executed": [], "blocked": {}}
-    out.update(dh.summarize(decisions))
+    out.update(dh.summarize(decisions, nav=nav))
     return out
 
 
@@ -1766,6 +1773,11 @@ def _run_for_date(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None, exec
             for d in delta["names"]:
                 if d["ticker"] == t["ticker"]:
                     d["traded_today"] = (d.get("traded_today") or 0.0) + t["shares"]
+        # 真成交的名义与估算成本（与上面决策层的「若成交」合计分开记：价非收盘 / 记账被拒的不在这里）
+        ex = delta["executed"]
+        ex_notional = round(sum(abs(_num(t.get("shares")) or 0.0) * (_num(t.get("price")) or 0.0) for t in ex), 2)
+        delta["executed_notional_usd"] = ex_notional
+        delta["executed_est_cost_usd"] = round(ex_notional * float(delta.get("cost_bps") or 0.0) / 1e4, 2)
         res["price_check"]["delta_hedge"] = _delta_price_check(delta)
         for tk, why in blocked.items():
             _log.warning("[PortfolioGreeks] %s 逐票对冲 %s 未执行：%s", as_of, tk, why)
@@ -2034,7 +2046,7 @@ def _fmt_pct(v, nd=2) -> str:
 #: 对外展示的规则常量（Alpha Bot 对冲页 / 帮助页取这一份，不在前端另抄）
 PUBLIC_RULE_KEYS = ("beta_delta_band_pct", "beta_delta_target_pct", "rebalance_to", "hedge_instrument",
                     "vega_alert_pct", "gamma_alert_pct", "beta_window",
-                    "delta_hedge_mode", "delta_hedge_band_pct", "delta_hedge_rebalance_to")
+                    "delta_hedge_mode", "delta_hedge_band_pct", "delta_hedge_rebalance_to", "delta_hedge_cost_bps")
 
 
 def ledger_view(root=None) -> Dict:
@@ -2167,7 +2179,13 @@ def _delta_markdown(sec: Optional[Dict]) -> List[str]:
                  + "；".join(f"{u['ticker']}（{u['detail']}）" for u in sec.get("undecided") or []))
     if sec.get("blocked"):
         L.append("未执行：" + "；".join(sec["blocked"].values()))
-    L.append("> 没有点差 / 冲击成本模型（单只股票比 SPY 贵）；只对冲 Delta，Gamma / Vega 不对冲；"
+    if sec.get("trade_notional_usd") is not None:
+        pct = sec.get("trade_notional_pct_nav")
+        L.append(f"成本估算（固定 {sec.get('cost_bps')} bps，主观假设）：{sec.get('n_trades', 0)} 笔，成交名义 "
+                 f"{_fmt_usd(sec.get('trade_notional_usd'))}"
+                 + (f"（{pct:.1f}% NAV）" if pct is not None else "") + f"，约 {_fmt_usd(sec.get('est_cost_usd'))}"
+                 + ("；shadow 没有持仓账，这是「若今天从空仓开始」的上界，不是日常换手。" if mode == "shadow" else "。"))
+    L.append("> 没有点差 / 冲击成本**模型**（单只股票比 SPY 贵，上面只是固定 bps 的估算）；只对冲 Delta，Gamma / Vega 不对冲；"
              "带与拉回方式是 v1 主观常数，不是校准结果，也没有证据说明逐票对冲后更好。")
     return L
 

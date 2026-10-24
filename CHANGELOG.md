@@ -7,7 +7,23 @@
 
 ## [0.45.639] — 2026-10-24 — 占位（进行中：swarm_agents/cache.py 旧回落 avg_vol=1.0 伪造量比 + BearBee options 标签不随 Oracle 降级；先盘点可达性与影响面，登记待用户定）
 
-## [0.45.638] — 2026-10-24 — 占位（进行中：逐票 Delta 对冲加成本模型——`delta_hedge_cost_bps`（缺省 5、主观未检验），审计与对冲页记估算成本 / 成交名义 / 笔数，缺省仍 shadow、带宽与拉回不动）
+## [0.45.638] — 2026-10-24 — Added：逐票 Delta 对冲的成本估算——`delta_hedge_cost_bps`（缺省 5，主观、未检验），审计与对冲页记估算成本 / 成交名义 / 笔数 / 隐含换手；缺省仍 shadow，带宽与拉回不动
+
+**起因**：用 10-19~10-23 五个扫描日的 shadow 审计回放纸面成交：带宽从 3% 放到 8%，日均成交只从 48% 降到 44% NAV（成交量由卖跨式的 Gamma 漂移决定，不是由触发次数决定）；拉回带边能降到 24~32%，代价是对冲后残余 |Δ| 从 3% 涨到 22~31% NAV。结论是放宽带宽不是省成本的旋钮，缺的是成本这一栏本身，所以先只补成本估算。
+
+### Added
+- `delta_hedge.py`：`check_cost_bps`（只收有限非负数；字符串 / NaN / 负数 / bool 当场抛）、`with_costs`（给 status 为 hedge / exit 的决策补 `trade_notional_usd` / `est_cost_usd`，其余恒 0；只加字段、不改任何决策）；`summarize(decisions, nav=None)` 在决策带成本时多给 `n_trades` / `trade_notional_usd` / `est_cost_usd` / `trade_notional_pct_nav` / `est_cost_bps_nav`（无 NAV ⇒ None，不拿 0 顶）。
+- `portfolio_greeks.py`：`CONFIG["delta_hedge_cost_bps"] = 5.0`（进 `PUBLIC_RULE_KEYS`）；`delta_hedge_day` 审计一节带 `cost_bps` 与上述合计；paper 另记真成交的 `executed_notional_usd` / `executed_est_cost_usd`；日报小节多一行成本估算并说明 shadow 的名义是「若从空仓开始」的上界。
+- `alphabot/hedge.py`：`implied_turnover(audits, cost_bps)`——**隐含换手**：相邻两个审计日之间，若每天都把每只标的拉回目标股数要成交多少名义（新出现 = 建仓、消失 = 清仓、未决不猜计入 `n_skipped`、首份审计标 `build` 不进日均）；`delta_overview` 带成本字段与 `turnover`；旧审计没有成本字段 ⇒ None（不是 0）。
+- `alphabot/static/pages/hedge.js`：「估算成本与隐含换手」块（数字全由服务端算，前端只排版）；`help.js` 逐票对冲一节多一行「估算成本」（bps 取自 `/api/method`，无字面量）。
+
+### 没动
+- 带宽（3%）、拉回方式（center）、缺省 shadow、任何决策；成本**不进决策、不扣现金**（paper 的现金账与此前逐位相同，单独的「paper 扣成本」是另一个提交）。⚠️ 5 bps 是我给的主观假设，没有校准；仍没有点差 / 冲击成本**模型**。
+
+### 验证
+- 三个测试文件新增 `TestCosts` / `TestCostEstimate` / `TestImpliedTurnover` + 前端 / 帮助页形状钉；变异 20 处全杀（第一轮活了 1 处「带内也算名义」——生产里 inside 的 trade_shares 恒为 0 所以是等价变异，补了手工喂「带着非零股数的带内 / 未决」的测试把 status 把关钉死）。
+- 真实审计只读：10-23 的决策套 `with_costs`，决策逐位不变，合计 4 笔 / $142,343（98.3% NAV）/ 估算 $71.17（4.91 bps NAV，这是「若从空仓」的上界）；`implied_turnover` 对 5 个审计日给出日均 44.4% NAV / 2.22 bps/天，与回放的 44~48% 吻合；浏览器里对冲页成本块渲染正确、无控制台报错（真实审计是旧版，决策日那行要等下个扫描日有成本字段才出现）。
+
 
 ## [0.45.637] — 2026-10-24 — Fixed：v0.45.635 二次检查——spend.jsonl 收成一个记账出口（估算也照样防漏记、报错后回读防重复计入）；抽屉显示 spend_error、取状态失败不盖掉对话；冒烟合计按账本更正
 

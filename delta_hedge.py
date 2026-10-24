@@ -16,8 +16,12 @@ TSLA β=2.76 把 −8.2% 的原始 Delta 放大成 −22.8%，T / VZ 的 β 为�
   · 缺数据**逐标的**判：这只缺价 / 缺报价 / 缺 NAV，只有这只不对冲、写明原因，别的照做。
 
 ⚠️ 这些数字（3% 带、拉回 0）是 v1 的主观常数，**不是校准结果**；没有任何证据说明逐票对冲后更好——它是执行层选择，
-不是已验证的优势。没有点差 / 冲击成本模型（单只股票比 SPY 贵）；只对冲 Delta，Gamma / Vega 不对冲
+不是已验证的优势。没有点差 / 冲击成本**模型**（单只股票比 SPY 贵）；只对冲 Delta，Gamma / Vega 不对冲
 （卖出跨式是负 Gamma，Delta 会反复漂移，靠带控制调仓频率）。
+
+成本估算（v0.45.638，`with_costs`）：**只是一个固定 bps 的主观估算**（`delta_hedge_cost_bps`，缺省 5），不是点差 / 冲击模型，
+不进决策（带与拉回完全不看它）、不扣现金。用 2026-10-19~23 的 shadow 审计回放：带宽从 3% 放到 8%，日均成交只从 48% NAV
+降到 44%——成交量由卖跨式的 Gamma 漂移决定，不由触发次数决定——所以成本要单独看，不能靠调带宽省。
 
 输出 `decide()` 的每个标的一条：
   status  hedge（要成交）/ inside（带内或四舍五入成 0 股，不动）/ exit（跨式没了，清仓）/ flat（无跨式、无持仓，略过）/
@@ -56,6 +60,14 @@ def _num(v) -> Optional[float]:
 def _pos(v) -> Optional[float]:
     f = _num(v)
     return f if (f is not None and f > 0) else None
+
+
+def check_cost_bps(v) -> float:
+    """成本假设（bps）只接受有限的非负数；拼错 / 负数 / NaN 当场红，不静默当 0（0 会让成本一栏看起来「免费」）。"""
+    f = None if isinstance(v, str) else _num(v)          # 字符串 "5" 也拒：配置写成字符串是写错了，不替它悄悄转换
+    if f is None or f < 0:
+        raise ValueError(f"delta_hedge_cost_bps 只接受有限的非负数，收到 {v!r}")
+    return f
 
 
 def round_away(x: float) -> int:
@@ -167,13 +179,39 @@ def decide(straddle: Mapping[str, dict], held: Mapping[str, float], marks: Mappi
     return out
 
 
-def summarize(decisions: List[Mapping[str, Any]]) -> dict:
-    """计数 + 未决清单（进审计 / price_check / 告警的就是这一份）。"""
+def with_costs(decisions: List[dict], cost_bps: float) -> List[dict]:
+    """给每条决策补**估算**成交名义与成本（原地写、同时返回）。
+
+    只有 status 为 hedge / exit、且有成交股数与价的才有名义：|成交股数| × 价；成本 = 名义 × bps / 1e4。
+    其余（带内 / 未决 / 无跨式无持仓）恒为 0——不拿「没决定」当「免费」之外的任何东西。
+    shadow 模式没有持仓账，`trade_shares` 是「若今天从空仓开始」的量，名义也是那个口径（上界，不是日常换手）。"""
+    bps = check_cost_bps(cost_bps)
+    for d in decisions:
+        sh, px = _num(d.get("trade_shares")), _pos(d.get("price"))
+        notional = abs(sh) * px if (d.get("status") in ("hedge", "exit") and sh and px) else 0.0
+        d["trade_notional_usd"] = round(notional, 2)
+        d["est_cost_usd"] = round(notional * bps / 1e4, 2)
+    return decisions
+
+
+def summarize(decisions: List[Mapping[str, Any]], nav: Optional[float] = None) -> dict:
+    """计数 + 未决清单（进审计 / price_check / 告警的就是这一份）。
+    决策带 `trade_notional_usd` / `est_cost_usd`（`with_costs`）时，再给成交笔数、名义与估算成本的合计；
+    给了 NAV 才算占比（None ⇒ None，不拿 0 顶）。"""
     by: Dict[str, int] = {}
     for d in decisions:
         by[d["status"]] = by.get(d["status"], 0) + 1
     undecided = [{"ticker": d["ticker"], "reason": d["reason"], "detail": REASONS.get(d["reason"] or "", d["reason"])}
                  for d in decisions if d["status"] == "unknown"]
-    return {"n_names": sum(n for s, n in by.items() if s != "flat"), "by_status": by,
-            "n_hedge": by.get("hedge", 0) + by.get("exit", 0), "n_inside": by.get("inside", 0),
-            "n_undecided": len(undecided), "undecided": undecided}
+    out = {"n_names": sum(n for s, n in by.items() if s != "flat"), "by_status": by,
+           "n_hedge": by.get("hedge", 0) + by.get("exit", 0), "n_inside": by.get("inside", 0),
+           "n_undecided": len(undecided), "undecided": undecided}
+    if any("trade_notional_usd" in d for d in decisions):
+        notional = round(sum(_num(d.get("trade_notional_usd")) or 0.0 for d in decisions), 2)
+        cost = round(sum(_num(d.get("est_cost_usd")) or 0.0 for d in decisions), 2)
+        nv = _pos(nav)
+        out.update(n_trades=sum(1 for d in decisions if (_num(d.get("trade_notional_usd")) or 0.0) > 0),
+                   trade_notional_usd=notional, est_cost_usd=cost,
+                   trade_notional_pct_nav=round(notional / nv * 100.0, 4) if nv else None,
+                   est_cost_bps_nav=round(cost / nv * 1e4, 4) if nv else None)
+    return out
