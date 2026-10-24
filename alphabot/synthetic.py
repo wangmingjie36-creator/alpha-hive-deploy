@@ -124,6 +124,16 @@ def demo_fetch(ticker: str, *, as_of: Optional[str] = None):
     return demo_payload(ticker, as_of), None
 
 
+def demo_spy_chain(as_of: Optional[str] = None) -> dict:
+    """尾部对冲演示用的 SPY 合成链：在 `demo_payload` 上补 CBOE 才有的 vega / theta（合成链默认没有）。确定性、零网络。"""
+    chain = demo_payload("SPY", as_of)
+    for c in chain["contracts"]:
+        iv = c.get("iv")
+        if iv and c.get("dte"):
+            c["vega"], c["theta"] = _vega_theta(chain["underlying_price"], c["strike"], max(c["dte"], 0.5) / 365.0, iv, c["cp"])
+    return chain
+
+
 def _vega_theta(S: float, K: float, T: float, iv: float, cp: str) -> Tuple[float, float]:
     """(每 1 个波动率点的 vega, 每日历日的 theta)——与 CBOE 报价的单位相同（portfolio_greeks 模块头）。"""
     vt = iv * math.sqrt(T)
@@ -308,6 +318,18 @@ def demo_bars(ticker: str, as_of: Optional[str] = None, days: int = 120) -> List
     return list(reversed(out))
 
 
+def _demo_stress(pn: dict, nav: float, spots=(-10, -5, 0, 5, 10), ivs=(-10, 0, 10, 20)) -> dict:
+    """合成压力网格，形状同 `portfolio_greeks.stress_table`：Delta + Gamma（现货²）+ Vega（IV 点）三项二阶展开。
+    只给演示与测试用，数字不代表任何真实组合。"""
+    cells = [{"spot_pct": sp, "iv_pts": ivp, "partial": False, "iv_clamped": False,
+              "pnl": round(nav * (pn["beta_dollar_delta"] / 100.0 * sp / 100.0 + pn["gamma_dollar_per_1pct"] / 100.0 * sp * sp
+                                  + pn["vega_dollar_per_pt"] / 100.0 * ivp), 2)}
+             for sp in spots for ivp in ivs]
+    worst = min(cells, key=lambda c: c["pnl"])
+    return {"spot_pct": list(spots), "iv_pts": list(ivs), "cells": cells, "worst_cell": dict(worst),
+            "partial": False, "excluded": [], "n_used": 24}
+
+
 def demo_hedge_view(as_of: Optional[str] = None, days: int = 12) -> dict:
     """合成的对冲账本视图，形状同 `portfolio_greeks.ledger_view()`（演示与测试用，零网络、确定性）。
 
@@ -377,6 +399,7 @@ def demo_hedge_view(as_of: Optional[str] = None, days: int = 12) -> dict:
                                "reason": trade["reason"] if trade else f"β·Δ {pct:+.2f}% NAV inside band → hold"},
             "executed": executed, "executed_trade": trade, "execution_blocked": None,
             "price_check": {"n_stale": 0, "gaps": [], "error": None, "hedge_undecided": None},
+            "stress": _demo_stress(pn, port_nav),
         }
     old = [(cal[0] - timedelta(days=k)).isoformat() for k in (7, 6, 5)]
     return {

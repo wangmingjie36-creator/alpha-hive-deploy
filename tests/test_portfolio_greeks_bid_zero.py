@@ -408,6 +408,7 @@ _QUOTE_FIELD_READERS = {
     "alphabot/synthetic.py::_held": "演示用合成持仓报价",
     "alphabot/yf_chain.py::_rows": "yfinance 备用源 → 原始行",
     "alphabot/premium.py::_contract_row": "溢价页的合约行整理",
+    "alphabot/tail_hedge.py::_leg": "尾部对冲候选的腿整理：bid/ask 只用来算成交成本（卖 bid 买 ask）与点差，不判 Greeks 能不能用",
 }
 #: 这条守卫额外不扫的目录（第三方 / 点号目录 / iCloud 副本的口径在共享件 `tests/_repo_files.py`，不自抄）
 _SKIP_DIRS = frozenset({"__pycache__", "_retired_pre_phase5", "tests", "venv"})

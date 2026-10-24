@@ -30,7 +30,38 @@ v0.45.642 在最终树上第一轮整套红了 `tests/test_earnings_vol_signal.p
 ### 没改
 - `earnings_vol_signal.py`（`captured_at` 精确到秒是协议要求的记录时刻，不是 bug）；该测试以外的任何文件。
 
-## [0.45.643] — 2026-10-24 — 占位（进行中：Alpha Bot 对冲页新增只读「SPY 认沽后比例价差尾部对冲」分析面板，不写账本）
+## [0.45.643] — 2026-10-24 — Added：Alpha Bot 对冲页「尾部对冲候选」——SPY 认沽后比例价差叠到组合压力网格上的只读分析面板（Phase A，不写账本、不成交、没有推荐）
+
+起因：用户问 Alpha Bot 能不能分析比例价差对冲期权，再定「想用比例价差去对冲持仓」。查代码：之前**没有**（卖权工作台只有六种固定结构，每条腿隐含一张；逐票对冲只管跨式腿 Delta；SPY 覆盖只管 β·Delta）。
+2026-10-23 审计的最差压力格是「现货 −10% + IV +20 点」≈ −23% NAV，SPY 股票对冲管不到它（只管 Delta）。**后比例**（卖 1 张较近、买 2 张更远的认沽）在下跌里净多 Gamma / Vega，正对着这个角落；**前比例**（卖多买少）是收权利金的卖波动率结构，在这里只会加重亏损——页面与文档里都把两者分开说。
+
+### Added
+- `alphabot/tail_hedge.py`（纯函数；只 import `math` / `dataclasses` / `typing`，外部函数经 `Deps` 注入）：审计基线（最近一份**放行**的审计的 `stress` / `pct_nav` / NAV）× SPY 当前链 → 6 个候选（卖 Δ0.30 / 0.20 × 买 2×Δ0.15 / 0.10 / 0.05）。每个候选给：成交价口径成本（卖 bid 买 ask、跨点差单列）、到期盈亏（精确解的最大亏损点与盈亏平衡点 + 曲线）、组合 Greeks 前后（占 NAV %）、**逐格的压力网格前后对比**（含候选自己亏的格）、规模与已抵消比例。
+- **规模只对「下行侧最差格」定**（认沽管不到上行）、两道上限（未平仓量 2%、卖出腿名义额 ≤ 100% NAV）、`offset_achieved` 永远给。**实测教训（2026-10-23 真实数据）**：审计当天已成交 SPY 卖单，基线最差格从下行移到了「上涨 +10% + IV +20」；初版规则按全网格最差格定规模，把 −21.8% 放大成 −128% NAV（47 组、卖出腿名义额 > 3 倍 NAV）。改成下行侧 + 名义额上限后，1 单位（卖出腿 ≈ 51% NAV）只抵消下行最差格亏损的约 6%–13%，Δ0.05 的远端腿在 −10% 时根本不赚钱——这是读数，不是 bug：这个规模的账户用 SPY 期权做尾部对冲，单位太大。
+- 审计当天已成交的 SPY 折进基线压力格（`baseline.adjusted_for_trade`，Greeks 取 `aggregate_after`，与审计自己的「交易后」同口径）；基线最差格在上行一侧 ⇒ `worst_cell_uncovered` 明说。
+- `AlphaBotService.tail_hedge()` + `GET /api/hedge/tail[?force=1]`（进程内缓存，同 `live_ttl`）；取链失败 / 计算出错如实带原因返回（`chain_reason` / `exception:<类>`），不吞成「没有候选」；演示模式用合成 SPY 链（补 vega / theta）与合成压力网格。
+- `alphabot/static/pages/hedge_tail.js`：对冲页新面板（异步加载，不阻塞本页）——基线条、候选表（点行切换）、压力网格前后对比（◎ = 定规模的目标格）、到期盈亏图、Greeks 变化、两条腿报价、提醒清单。原因 / 旗标 / 提醒文案取自服务端 `meta`，前端不另抄；候选不在浏览器里排序。
+- 帮助页「对冲账本」节补「尾部对冲候选」一段（前比例 vs 后比例、规模只对下行侧、已抵消永远给、亏损谷、全部主观常数）。
+- `tests/test_alphabot_tail_hedge.py`（71 条）：到期盈亏 / 成本 / 压力格 / Greeks 全部整数手算（替身 BS = 内在价值）；基线折成交与下行侧最差格；规模各分支（含「按上行最差格会被放大」的有牙用例）；候选顺序在效果相反的基线下不变；无推荐 / 综合分字段；原因码与旗标表双向对账（AST + 正则，带「没抓到就红」的牙）；服务层真实账本夹具（只读指纹不变、缓存与 force、取链失败、没有审计、构建崩溃、路由、演示）；模块纯度；前端不抄文案、不按效果排序。
+
+### Changed
+- `alphabot/synthetic.py`：`demo_spy_chain`（补 vega / theta）、`_demo_stress`（合成压力网格）、演示审计带 `stress`。
+- `alphabot/service.py` / `alphabot/server.py`：接线（只读；方法体不出现任何账本写函数——测试扫源码）。
+
+### 没改
+- 账本、`portfolio_greeks`（压力表与对冲决定）、`delta_hedge`、卖权 / 跨式预注册规则、评分——一个都没碰。
+- **没有推翻** `portfolio_greeks` 模块头「v1 不用指数认沽」那条决定：这页是只读分析，不成交；真要做纸面成交（Phase C）要先写预注册、再改那条决定。
+
+### 没验证 / 待验证
+- 行权价档位、1:2 比例、45 天到期窗口、50% 抵消目标、2% 未平仓量与 100% NAV 名义额上限全是主观常数，**没有任何前向证据**；压力网格把 IV 逐合约平行平移、不建模 skew（下跌时远端认沽 IV 通常涨得更多，后比例的价值可能被低估，方向推断、幅度待验证）、不走时间、不建保证金；SPY 期权是美式，提前指派未建模。
+- 真实链上 SPY 新到期日的未平仓量为 0（交易所 d+1 才发布）⇒ 流动性上限当天套不上，页面标「未平仓量未知」。
+- 只在 2026-10-23 一天的真实数据上实测过；小账户的 XSP（小合约）能否让规模可用，没有查，待验证。
+
+### 验证
+- 整套（worktree，树 = 4e42c99e + 本版改动，开跑前等别的会话的整套结束并连续安静 45 s）：**12168 passed、4 failed**、82 deselected、2 xfailed，583 s。4 个失败：
+  - 本版造成、已修并**单独重跑确认**（`test_alphabot` + `test_portfolio_greeks_bid_zero` + 新测试共 179 条全绿）：① 帮助页写了「每张合约」，撞 `test_contract_count_is_never_labelled_as_zhang`（合约个数不许叫「张」）→ 改「每个合约」，面板里的「N 张认沽」也改「N 个认沽（行权价）」；② `test_no_renamed_copy_reads_the_same_quote_fields`：新模块 `alphabot/tail_hedge.py::_leg` 读 bid/ask，登记进 `_QUOTE_FIELD_READERS` 并写明理由（只算成本与点差，不判 Greeks 能不能用）。
+  - **与本版无关、worktree 里必红**（0.45.642 加的两条）：`test_repo_files_walk::…::test_real_repo_walk_reads_everything_and_enters_no_third_party_tree`（worktree 的 `.git` 是文件不是目录，「连 .git 都没剪」断言不成立）、`test_earnings_calendar::TestProdFilesWalk::test_floor_is_well_below_the_real_size`（worktree / 干净克隆只有 git 跟踪的 ≈206 个生产 .py，而断言要 ≥ 2×200）。后一条在干净克隆（含 CI）里大概率同样红——**待验证**，没有改它。
+- 修完两处之后**没有**再跑一遍整套，也**没有**在 rebase 到最新 origin/main 之后重跑（rebase 带进来的是 0.45.644 / 0.45.645 的占号与一处 earnings_vol_signal 测试修复，不碰本版文件）。
 
 ## [0.45.642] — 2026-10-24 — Fixed：v0.45.636 二次检查——剪枝遍历收进 `tests/_repo_files.py`（iCloud 副本 / onerror / 清单对账）、`_prod_files` 与 `_repo_py_files` 共用、文件列表缓存
 
