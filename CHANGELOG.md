@@ -5,7 +5,28 @@
 
 ---
 
-## [0.45.650] — 2026-10-25 — 占位（进行中：v0.45.648 二次检查——钉钟闸门补洞、按调用 scan 的测试文件自动圈、几处文档与测试细节）
+## [0.45.650] — 2026-10-25 — Fixed：v0.45.648 二次检查——钉钟两道闸补盲区（按名字解析读钟、按 AST 自动圈调用 scan 的测试文件）及几处测试 / 文档细节
+
+对 v0.45.648 跑已装的 code-review 技能（high）：没发现会让生产或测试结果算错的 bug，查出 8 条覆盖面 / 文档细节问题，全修。生产代码（`earnings_vol_signal.py`）未动。
+
+### Fixed
+- **闸 2 只守写死的三个文件、只认一种钉法**：现在按 AST **自动圈**「在进程内调用 `earnings_vol_signal.scan` / `main` / `_scan_with_info` 的测试文件」（按名字解析 import，不看文件名），圈到 4 个（`test_earnings_vol_signal`、`test_straddle_gex_shadow`、`test_straddle_strangle_shadow`，以及此前不在名单里的 `test_earnings_event_shadow`——它的夹具原本没钉钟，比较时恰好去掉了 `gex_ctx` 才不会偶发，现在也走共享辅助）。手写钉钟的判法放宽到：`setattr` / `setitem` / `patch.object` / `patch` 的前两个实参里出现 `_now_et` 或 `_today_pdt`，含字符串路径 `"earnings_vol_signal._now_et"` 和**只钉一只**；自动圈带「已知 4 个必须在」的下限，圈法坏了会红。
+- **闸 1 的盲区**：第一版只认 `datetime.now()` 这种「模块.函数」调用，认不出 `datetime.datetime.now()`、`import datetime as dt`、`from datetime import datetime as D`、`from hive_logger import pdt_today as p`、不带括号的 `default_factory=datetime.now`；还把整个 `main` 豁免。现改为**按名字解析**（`import` 绑定 → 完整限定名）、认**引用**而不只认调用；登记表改成 (函数, 时钟) 对，`main` 只放它「没给日期就用今天」那一个 `pdt_today()`，再多一个就红；登记表双向对账（登记了却不存在也红）。不误报 `from datetime import time as _t; _t(16, 0)`（构造时刻）、局部变量 `datetime`、`strptime`、`time.sleep`。
+- **「用了共享辅助」只是源码子串检查**：名字出现在 import 行或注释里也能过。改成 AST：文件里必须有一个**调用**解析到 `tests._scan_clock.pin_scan_clock` / `tick_scan_clock`。
+- **`_lines` 用字典按 (ticker, as_of) 存行，重复行被无声折叠**：现在同键多行都留（值是列表），第三条测试额外断言两次 scan 之间每个键下的行数不变、被保留的键下恰好 1 行；`_lines` 自己有牙测试（同键两行必须是两条）。
+- **docstring 写死「偏移 5963 / 6328 字节」**：`tests/_scan_clock.py` 与 `TestRerunAcrossASecondBoundary` 的 docstring 里去掉（那是种子账本内容的函数，夹具一改就失真），指向本 CHANGELOG 648 条目；历史条目里的实测数字保留（那是当时的记录）。
+- **gex_shadow 里还留着一处手写 `_today_pdt` 钉法**（`test_backfill_capture_does_not_count`）：改成 `pin_scan_clock(monkeypatch, evs, "2026-09-20")`，效果相同（记录时刻仍是夹具的 `POST_CLOSE`），「钉钟只有一份实现」现在成立，且闸 2 看得见任何回退。
+- **`test_the_two_instants_mean_what_their_names_say` 日历读不了时只报 `is False`**：`session_live_at` 在交易日历抛错 / 过期时返回 `None`。现先断言非 `None` 并点明「是交易日历问题、不是钉钟辅助的问题」；另加一条证明话术的前提（日历抛错 ⇒ `None`）。
+
+### 验证
+- `tests/test_scan_clock.py`：10 → 39 条（闸 1 的写法 / 误报样本参数化、闸 2 的钉法 / 圈法探针、辅助、日历前提）；5 个相关测试文件共 279 条全过。
+- **变异 11 处全红**：`scan` 里加别名写法的读钟 / `main` 里再加一个 `pdt_today()` / gex_shadow 的手写钉法回来 / event_shadow 夹具不钉钟 / 在 scan 测试里加字符串路径钉法 / 新增一个不钉钟的 scan 测试文件 / `_lines` 又折叠重复行 / 走秒不走 / 登记表加一个不存在的读钟点 / 辅助只钉一只钟 / `INTRADAY` 不再是盘中。
+- 拨钟审计（+7 / +45 天，5 个文件）0 条新红；ruff 过；`tests/_must_run.json` 已更新（`test_scan_clock.py` 现在遍历全部测试文件，归入「读全部测试」的元守卫）。
+- 整套：**在最终树上**（提交 `96a27182`，已含 648 的全部改动；开跑前连续 45 s 没有别的 pytest / 审计，开跑时 origin 无新提交，负载约 1.9）：**12238 passed、0 failed**、82 deselected、2 xfailed，627 s。比 648 那轮的 12208 多 30 条，正是 `test_scan_clock.py` 与 `test_earnings_vol_signal.py` 新增的条数。跑完后再查 origin 仍无新提交，推送前未改动任何文件（本行写入除外，只改 CHANGELOG）。
+
+### 没改
+- `earnings_vol_signal.py`：`main` 里「没给日期就用今天」的 `pdt_today()` 保留（登记为唯一例外，测试一律显式传日期）。
+- `scan` 调到的别的模块里的读钟（`ledger_io` 等）、计时用的 `time.monotonic` / `perf_counter`：闸 1 只管这个模块自己的墙钟读取。
 
 ## [0.45.649] — 2026-10-25 — 占位（进行中：组合尾部预算——压力最差格告警 + 逐标的 / 板块尾部贡献表 + 卖跨式「若按预算会不会跳过」影子记录，不真跳过）
 
@@ -27,7 +48,7 @@
 - 变异 6 处（钉钟漏掉 `_today_pdt` / 走秒不走 / `scan` 之外新增直接读钟 / 手写 `_now_et` 钉钟回来 / 把没重算的行盖上新时间 / `INTRADAY` 不再是盘中）全红；拨钟审计（+7 / +45 天）0 条新红；ruff 过；`tests/_must_run.json` 因新测试读了另外 3 个测试文件而过期（退出码 4），`--update` 并入后无漂移。
 
 ### 验证
-- 整套：__SUITE__
+- 整套：在 rebase **之前**的树 `af578a31` 上跑过一次：**12208 passed、0 failed**、82 deselected、2 xfailed，792.57 s（开跑前连续 45 s 没有别的 pytest / 审计，负载约 2.7；报告头显示当时 origin 只多 1 个提交，是 0.45.649 的占号，只改 CHANGELOG）。之后 origin 又前进了 0.45.650 的占号（同样只改 CHANGELOG），本条变基到它们之上，只重跑了 CHANGELOG 完整性测试；**含 648 全部改动的最终树整套见 0.45.650**。
 
 ### 没改
 - `earnings_vol_signal.py` 与它的 `captured_at` 语义；`test_earnings_event_shadow.py`（只跑一次 `scan`、不做跨次比较，不钉钟也不会偶发，未改）。

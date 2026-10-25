@@ -619,19 +619,20 @@ class TestScanNeverDeletesRowsItDidNotRecompute:
 class TestRerunAcrossASecondBoundary:
     """原来的偶发红：`test_partial_rerun_keeps_rows_it_did_not_recompute` 里两次 `scan` 之间的墙钟恰好跨了一秒，
     每行 `gex_ctx.captured_at`（精确到秒）不同 ⇒ 账本字节不同 ⇒ 断言红（失败日志里两次 WARNING 是 10:43:17 与 10:43:18）。
-    v0.45.648 用不钉钟、只让第二次 scan 的钟走一秒**实测复现**：账本 6328 字节里恰好 1 个字节不同，偏移 5963
-    ——与原来失败报告的偏移一致——落在 `captured_at` 值的区间内，是秒的个位（`0→1`；原来 `7→8`）。
+    v0.45.648 用不钉钟、只让第二次 scan 的钟走一秒**实测复现**：账本里恰好 1 个字节不同，落在 `captured_at` 值里、
+    是秒的个位（具体偏移 / 字节数取决于种子账本，不抄在这里，见 CHANGELOG 0.45.648）。
     下面把「跨秒」做成**确定性**场景：钟每读一次走一秒，证明重跑只改记录时刻、不改任何别的东西。
     （钉钟与走秒的唯一实现在 `tests/_scan_clock.py`。）"""
 
     @staticmethod
     def _lines(path):
-        """账本里每一行的原始文本，按 (ticker, as_of) 索引。"""
+        """账本里每一行的原始文本，按 (ticker, as_of) 索引——**同键多行都留着**（值是列表），
+        不让「重跑多追加了一行同键的行」被字典折叠掉。"""
         out = {}
         for ln in path.read_text(encoding="utf-8").splitlines():
             if ln.strip():
                 r = json.loads(ln)
-                out[(r["ticker"], r["as_of"])] = ln
+                out.setdefault((r["ticker"], r["as_of"]), []).append(ln)
         return out
 
     @staticmethod
@@ -683,13 +684,24 @@ class TestRerunAcrossASecondBoundary:
         `captured_at`——钟已经走了一秒，若它们被新钟盖过，原始行就会不同。上一版只跑一次 scan，钟走不走都一样，
         分不出「原样保留」与「被覆盖」。"""
         seeded, ((_, _, first), (_, _, second)) = self._scan_twice(state, monkeypatch)
+        # 两次之间行的集合与每个键下的行数都不变（重跑不许多追加 / 少一行）
+        assert {k: len(v) for k, v in first.items()} == {k: len(v) for k, v in second.items()}
         kept = [("XYZ", AS_OF), ("DEF", AS_OF), ("XYZ", D_OTHER)]
         for key in kept:
+            assert len(first[key]) == 1, f"{key} 下有 {len(first[key])} 行"
             assert first[key] == second[key], f"{key} 在两次 scan 之间被改写了"
-            assert "captured_at" not in first[key], f"{key} 被盖上了记录时刻"
-            assert json.loads(first[key]) == seeded[key], f"{key} 与种子不同"
+            assert "captured_at" not in first[key][0], f"{key} 被盖上了记录时刻"
+            assert json.loads(first[key][0]) == seeded[key], f"{key} 与种子不同"
         # 场景自证：被重算的 ABC 在两次之间确实变了（否则钟没走，上面的相同证明不了什么）
         assert first[("ABC", AS_OF)] != second[("ABC", AS_OF)]
+
+    def test_lines_helper_keeps_duplicate_rows_instead_of_collapsing_them(self, tmp_path):
+        """`_lines` 的牙：同键两行必须是两条，否则「重跑多追加一行」会被藏起来。"""
+        f = tmp_path / "l.jsonl"
+        a = json.dumps({"ticker": "ABC", "as_of": AS_OF, "n": 1})
+        b = json.dumps({"ticker": "ABC", "as_of": AS_OF, "n": 2})
+        f.write_text(a + "\n" + b + "\n", encoding="utf-8")
+        assert self._lines(f) == {("ABC", AS_OF): [a, b]}
 
 
 class TestMainExitCodes:

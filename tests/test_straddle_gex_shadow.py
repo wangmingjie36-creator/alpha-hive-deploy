@@ -233,7 +233,7 @@ class TestSameDayCapture:
             assert evs._usable_capture(v, AS_OF) is (SP._ctx_problem(v) is None), v
 
     def test_backfill_capture_does_not_count(self, state, monkeypatch):
-        monkeypatch.setattr(evs, "_today_pdt", lambda: "2026-09-20")      # 补跑：记录日 ≠ 信号日
+        pin_scan_clock(monkeypatch, evs, "2026-09-20")      # 补跑：记录日 ≠ 信号日（记录时刻仍是信号日收盘后）
         _write_snap(state, "XYZ", AS_OF, _qs(), rv=20.0)
         row = _scan(state, lambda t: POS_STATE)[0]
         assert row["gex_ctx"]["captured_on"] == "2026-09-20" and not SP._ctx_ok(row["gex_ctx"])
