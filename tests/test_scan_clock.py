@@ -7,13 +7,21 @@
 pdt_today as p` 都认得出，且不把 `from datetime import time as _t; _t(16, 0)`（构造时刻，不是读钟）误报。
 闸 2：凡是在进程内调用 `earnings_vol_signal.scan` / `main` / `_scan_with_info` 的测试文件（按 AST 自动圈，不是写死的名单）
 不许再手写钉这两只钟——不论是 `setattr(evs, "_now_et", …)`、字符串路径 `setattr("earnings_vol_signal._now_et", …)`、
-`patch.object` 还是只钉 `_today_pdt`——并且必须真的调用共享辅助。同一个钉法写几份，哪天多出第三只钟，漏改的那份就是下一颗偶发。
+`patch.object` 还是只钉 `_today_pdt`——并且**每一条会跑到 scan 的测试**（沿同文件的调用链推：测试 → helper → scan）都必须
+被钉住：测试体或它调的 helper 里调用共享辅助，或请求了（沿夹具链）调用共享辅助的夹具 / `usefixtures` / autouse 夹具。
+按**测试**判，不按文件判——一个文件里别的测试钉了钟，不能替这一条作证（v0.45.650 实测：往已用辅助的文件里加一条不钉钟、
+连跑两次 scan 比字节的测试，旧的按文件判的闸照绿）。同一个钉法写几份，哪天多出第三只钟，漏改的那份就是下一颗偶发。
+兜底：静态推不到的间接调用（`getattr` 取 scan、别的测试模块的 helper……）由 `tests/_scan_clock_guard.py` 的运行时断言在调用那一刻判。
 
 不管的东西：`scan` 调到的别的模块（`ledger_io` 等）里的读钟——那不是这两个缝；计时用的 `time.monotonic` / `perf_counter`
 （量时长，不是盖时间戳）。
 """
 
 import ast
+import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -21,6 +29,7 @@ import pytest
 import earnings_vol_signal as evs
 from tests import _repo_files as RF
 from tests import _scan_clock as SC
+from tests import _scan_clock_guard as G
 
 ROOT = Path(__file__).resolve().parent.parent
 TESTS = ROOT / "tests"
@@ -130,6 +139,92 @@ def _uses_helper(tree):
     return any(isinstance(n, ast.Call) and _qualified(n.func, bind) & HELPER_NAMES for n in ast.walk(tree))
 
 
+def _per_test_pinning(tree):
+    """`[(测试名, 行号, 会不会跑到 scan, 钉没钉)]`，每个 `test*` 函数一条（同名的不同类各一条）。
+
+    会不会跑到 scan：沿**同文件**的调用链（`f()` / `self.f()` / `X.f()` 都按简单名 `f` 匹配同名函数，宁多勿漏）推，
+    链上任一函数直接调用了 scan / main / _scan_with_info。钉没钉：链上任一函数调用了共享辅助，或测试请求了钉钟的夹具
+    （形参名、`usefixtures`，含类上的；夹具自己调辅助或再请求钉钟的夹具），或文件里有钉钟的 autouse 夹具。
+    推不到的（`getattr` 取 scan、别的模块的 helper、从别的测试模块 import 来的夹具）静态判不了——运行时断言兜。"""
+    bind = _bindings(tree)
+    fdefs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    by_name = {}
+    for f in fdefs:
+        by_name.setdefault(f.name, []).append(f)
+    enclosing = {}
+    for c in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+        for m in c.body:
+            if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                enclosing[id(m)] = c
+
+    def facts(f):
+        callees, entry, helper = set(), False, False
+        for n in ast.walk(f):
+            if isinstance(n, ast.Call):
+                q = _qualified(n.func, bind)
+                entry |= bool(q & SCAN_ENTRY_POINTS)
+                helper |= bool(q & HELPER_NAMES)
+                fn = n.func
+                name = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else None
+                if name:
+                    callees.add(name)
+        return callees, entry, helper
+
+    facts_of = {id(f): facts(f) for f in fdefs}
+
+    def closure(f):
+        seen, stack, out = set(), [f], []
+        while stack:
+            g = stack.pop()
+            if id(g) in seen:
+                continue
+            seen.add(id(g))
+            out.append(g)
+            for name in facts_of[id(g)][0]:
+                stack.extend(by_name.get(name, []))
+        return out
+
+    def params(f):
+        return [a.arg for a in f.args.posonlyargs + f.args.args + f.args.kwonlyargs if a.arg not in ("self", "cls")]
+
+    def fixture_deco(f):
+        for d in f.decorator_list:
+            text = ast.unparse(d)
+            if text == "pytest.fixture" or text.startswith("pytest.fixture(") or text.startswith("fixture"):
+                return text
+        return None
+
+    fixtures = {f.name: f for f in fdefs if fixture_deco(f)}
+
+    def pinning_fixture(name, seen=()):
+        f = fixtures.get(name)
+        if f is None or name in seen:
+            return False
+        if any(facts_of[id(g)][2] for g in closure(f)):
+            return True
+        return any(pinning_fixture(p, seen + (name,)) for p in params(f))
+
+    autouse_pins = any(pinning_fixture(n) and "autouse=True" in fixture_deco(f) for n, f in fixtures.items())
+
+    def usefixtures(node):
+        out = []
+        for d in getattr(node, "decorator_list", []):
+            if isinstance(d, ast.Call) and ast.unparse(d.func).endswith("usefixtures"):
+                out += [a.value for a in d.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+        return out
+
+    out = []
+    for f in fdefs:
+        if not f.name.startswith("test"):
+            continue
+        chain = closure(f)
+        reaches = any(facts_of[id(g)][1] for g in chain)
+        requested = params(f) + usefixtures(f) + usefixtures(enclosing.get(id(f)))
+        pinned = autouse_pins or any(facts_of[id(g)][2] for g in chain) or any(pinning_fixture(n) for n in requested)
+        out.append((f.name, f.lineno, reaches, pinned))
+    return out
+
+
 @pytest.fixture(scope="module")
 def scan_test_files():
     """`{文件名: 解析后的 AST}`：tests/ 下所有在进程内调用 scan / main / _scan_with_info 的文件。
@@ -140,6 +235,8 @@ def scan_test_files():
     assert len(res.files) >= 100, "tests/ 下的文件数少得不正常——遍历坏了"
     out = {}
     for p in res.files:
+        if p.name == Path(__file__).name:       # 本文件为了测运行时断言会调 scan，且探针源码里有钉法字面量
+            continue
         src = p.read_text(encoding="utf-8")
         if "earnings_vol_signal" not in src:
             continue
@@ -212,10 +309,20 @@ class TestNoHandWrittenClockPins:
         bad = {n: _hand_written_pins(t) for n, t in scan_test_files.items() if _hand_written_pins(t)}
         assert bad == {}, f"这些文件手写了钉钟（行号）：{bad}——改用 tests/_scan_clock.pin_scan_clock"
 
-    def test_every_scan_test_calls_the_shared_helper(self, scan_test_files):
-        bad = sorted(n for n, t in scan_test_files.items() if not _uses_helper(t))
-        assert bad == [], (f"这些文件在进程内跑 scan / main 却没有调用 pin_scan_clock / tick_scan_clock：{bad}——"
-                           "不钉钟，跨秒 / 跨 PDT 午夜时结果会随真实时钟变")
+    def test_every_test_that_reaches_scan_is_pinned(self, scan_test_files):
+        """按**测试**判：别的测试钉了钟，不能替这一条作证。"""
+        bad = {n: [(name, ln) for name, ln, reaches, pinned in _per_test_pinning(t) if reaches and not pinned]
+               for n, t in scan_test_files.items()}
+        bad = {n: v for n, v in bad.items() if v}
+        assert bad == {}, (f"这些测试会跑到 scan / main 却没有钉钟（文件: [(测试, 行号)]）：{bad}——"
+                           "不钉钟，跨秒 / 跨 PDT 午夜时结果会随真实时钟变；用 tests/_scan_clock.pin_scan_clock")
+
+    def test_the_call_graph_actually_finds_the_scan_tests(self, scan_test_files):
+        """图推坏了会让上一条恒真（一条都推不到 ⇒ 没有可判的）。下限按已知文件各自给。"""
+        floor = {"test_earnings_vol_signal.py": 10, "test_straddle_gex_shadow.py": 4,
+                 "test_straddle_strangle_shadow.py": 2, "test_earnings_event_shadow.py": 3}
+        got = {n: sum(1 for _, _, reaches, _ in _per_test_pinning(scan_test_files[n]) if reaches) for n in floor}
+        assert all(got[n] >= floor[n] for n in floor), (got, floor)
 
     @pytest.mark.parametrize("src, lines", [
         ('monkeypatch.setattr(evs, "_now_et", lambda: X)\n', [1]),
@@ -247,6 +354,76 @@ class TestNoHandWrittenClockPins:
         assert _calls_scan(ast.parse("import earnings_vol_signal\ndef t():\n    earnings_vol_signal.main(['x'])\n"))
         assert not _calls_scan(ast.parse("import earnings_vol_signal as evs\ndef t():\n    evs.compute_signal(1)\n"))
         assert not _calls_scan(ast.parse("def t(evs):\n    evs.scan('x')\n"))
+
+
+_PIN = "from tests._scan_clock import pin_scan_clock\n"
+_EVS = "import earnings_vol_signal as evs\nimport pytest\n" + _PIN
+
+
+def _verdicts(src):
+    return {name: (reaches, pinned) for name, _, reaches, pinned in _per_test_pinning(ast.parse(src))}
+
+
+class TestPerTestProbe:
+    """按测试判的牙：每一种「会漏」或「会误报」的形状各一条。"""
+
+    def test_a_pinned_neighbour_cannot_vouch_for_an_unpinned_test(self):
+        """v0.45.650 实测放过的形状：文件里别处用了辅助，这一条没钉。"""
+        v = _verdicts(_EVS + "def test_a(m):\n    pin_scan_clock(m, evs)\n    evs.scan('x')\n"
+                      "def test_b():\n    evs.scan('x')\n    evs.scan('x')\n")
+        assert v["test_a"] == (True, True) and v["test_b"] == (True, False)
+
+    def test_pin_inside_the_helper_the_test_calls_counts(self):
+        v = _verdicts(_EVS + "def _run(m):\n    pin_scan_clock(m, evs)\n    evs.scan('x')\n"
+                      "def test_a(m):\n    _run(m)\n")
+        assert v["test_a"] == (True, True)
+
+    def test_scan_through_a_same_file_wrapper_is_still_found(self):
+        v = _verdicts(_EVS + "def _run():\n    return evs.scan('x')\nclass TestX:\n"
+                      "    def _go(self):\n        return _run()\n    def test_a(self):\n        self._go()\n")
+        assert v["test_a"] == (True, False)
+
+    def test_requesting_a_pinning_fixture_counts_and_a_plain_one_does_not(self):
+        src = (_EVS + "@pytest.fixture\ndef state(monkeypatch):\n    pin_scan_clock(monkeypatch, evs)\n"
+               "@pytest.fixture\ndef plain(tmp_path):\n    return tmp_path\n"
+               "def test_a(state):\n    evs.scan('x')\n"
+               "def test_b(plain):\n    evs.scan('x')\n")
+        v = _verdicts(src)
+        assert v["test_a"] == (True, True) and v["test_b"] == (True, False)
+
+    def test_a_fixture_that_requests_a_pinning_fixture_counts(self):
+        src = (_EVS + "@pytest.fixture\ndef base(monkeypatch):\n    pin_scan_clock(monkeypatch, evs)\n"
+               "@pytest.fixture\ndef derived(base):\n    return 1\n"
+               "def test_a(derived):\n    evs.scan('x')\n")
+        assert _verdicts(src)["test_a"] == (True, True)
+
+    def test_usefixtures_on_the_test_or_the_class_counts(self):
+        src = (_EVS + "@pytest.fixture\ndef state(monkeypatch):\n    pin_scan_clock(monkeypatch, evs)\n"
+               "@pytest.mark.usefixtures('state')\ndef test_a():\n    evs.scan('x')\n"
+               "@pytest.mark.usefixtures('state')\nclass TestC:\n    def test_b(self):\n        evs.scan('x')\n"
+               "def test_c():\n    evs.scan('x')\n")
+        v = _verdicts(src)
+        assert v["test_a"] == (True, True) and v["test_b"] == (True, True) and v["test_c"] == (True, False)
+
+    def test_an_autouse_pinning_fixture_covers_every_test_in_the_file(self):
+        src = (_EVS + "@pytest.fixture(autouse=True)\ndef _pin(monkeypatch):\n    pin_scan_clock(monkeypatch, evs)\n"
+               "def test_a():\n    evs.scan('x')\n")
+        assert _verdicts(src)["test_a"] == (True, True)
+
+    def test_an_autouse_fixture_that_does_not_pin_covers_nothing(self):
+        src = (_EVS + "@pytest.fixture(autouse=True)\ndef _other():\n    return 1\n"
+               "def test_a():\n    evs.scan('x')\n")
+        assert _verdicts(src)["test_a"] == (True, False)
+
+    def test_a_test_that_never_reaches_scan_is_not_judged(self):
+        v = _verdicts(_EVS + "def test_a():\n    evs.compute_signal(1)\n")
+        assert v["test_a"] == (False, False)
+
+    def test_same_name_in_two_classes_gives_two_verdicts(self):
+        src = (_EVS + "class A:\n    def test_x(self, m):\n        pin_scan_clock(m, evs)\n        evs.scan('x')\n"
+               "class B:\n    def test_x(self):\n        evs.scan('x')\n")
+        got = sorted((ln, reaches, pinned) for _, ln, reaches, pinned in _per_test_pinning(ast.parse(src)))
+        assert [(r, p) for _, r, p in got] == [(True, True), (True, False)]
 
 
 class TestHelper:
@@ -283,3 +460,128 @@ class TestHelper:
             raise RuntimeError("no calendar")
         monkeypatch.setattr(itd, "is_trading_day", boom)
         assert evs.session_live_at(SC.POST_CLOSE) is None and evs.session_live_at(SC.INTRADAY) is None
+
+
+# ───────────── 运行时断言：静态推不到的间接调用在调用那一刻判 ─────────────
+
+def _scan_once(tmp_path, monkeypatch):
+    """跑一次 scan（无快照 ⇒ 不改账本），账本路径指到 tmp。"""
+    monkeypatch.setattr(evs, "STATE_DIR", tmp_path / "s")
+    monkeypatch.setattr(evs, "SIGNALS_FILE", tmp_path / "s" / "a.jsonl")
+    return evs.scan(SC.SCAN_AS_OF, cache_dir=tmp_path / "no_cache", upcoming_fn=lambda t: None)
+
+
+class TestRuntimeGuard:
+    """守卫自己的单元测试。每条把违规读出来之后 `G.clear()`——否则本条测试自己的 teardown 会判它红。"""
+
+    def test_the_guard_is_wired_into_this_session(self, request):
+        """conftest 里没 import 夹具 ⇒ 整个运行时断言无声失效，其余测试照绿。"""
+        assert "_scan_clock_must_be_pinned" in request.fixturenames and "_scan_clock_guard_installed" in request.fixturenames
+        assert getattr(evs._scan_with_info, G.MARK, False), "scan 本体没有被包装"
+
+    def test_unpinned_call_is_recorded_with_both_seam_names(self, tmp_path, monkeypatch):
+        _scan_once(tmp_path, monkeypatch)
+        assert G.violations() == [["_now_et", "_today_pdt"]]
+        G.clear()
+
+    def test_pinned_call_records_nothing(self, tmp_path, monkeypatch):
+        SC.pin_scan_clock(monkeypatch, evs)
+        _scan_once(tmp_path, monkeypatch)
+        assert G.violations() == []
+
+    def test_a_half_pinned_call_names_the_seam_that_is_still_real(self, tmp_path, monkeypatch):
+        real_now = evs._now_et
+        SC.pin_scan_clock(monkeypatch, evs)
+        monkeypatch.setattr(evs, "_now_et", real_now)           # 只把 _now_et 放回真的
+        _scan_once(tmp_path, monkeypatch)
+        assert G.violations() == [["_now_et"]]
+        G.clear()
+
+    def test_main_goes_through_the_guard_too(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(evs, "STATE_DIR", tmp_path / "s")
+        monkeypatch.setattr(evs, "SIGNALS_FILE", tmp_path / "s" / "a.jsonl")
+        monkeypatch.chdir(tmp_path)
+        evs.main([SC.SCAN_AS_OF])
+        assert G.violations() == [["_now_et", "_today_pdt"]]
+        G.clear()
+
+    def test_a_violation_survives_a_caller_that_swallows_the_exception(self, tmp_path, monkeypatch):
+        """违规在调用进入时就记下，调用方 `except Exception: pass` 吞不掉。"""
+        monkeypatch.setattr(evs, "STATE_DIR", tmp_path / "s")
+        monkeypatch.setattr(evs, "SIGNALS_FILE", tmp_path / "s" / "a.jsonl")
+        try:
+            evs.scan(SC.SCAN_AS_OF, cache_dir=tmp_path / "x", upcoming_fn=lambda t: (_ for _ in ()).throw(RuntimeError("boom")))
+        except Exception:  # noqa: BLE001
+            pass
+        assert G.violations() == [["_now_et", "_today_pdt"]]
+        G.clear()
+
+    def test_install_is_idempotent_and_keeps_the_ledger_lock_marker(self):
+        before = evs._scan_with_info
+        G.install()
+        G.install()
+        assert evs._scan_with_info is before
+        assert not getattr(before.__wrapped__, G.MARK, False), "被包装了两层"
+        assert getattr(before, "__ledger_locked__", False), "包装吃掉了 locked_by 留下的标记（test_ledger_io_v2 在断言它）"
+
+    def test_the_explicit_exemption_fixture_lets_a_real_clock_test_through(self, tmp_path, monkeypatch, allow_real_scan_clock):
+        _scan_once(tmp_path, monkeypatch)
+        assert G.violations() == [["_now_et", "_today_pdt"]]        # 照记，只是 teardown 不判
+        G.clear()
+
+    def test_message_names_the_test_the_seams_and_the_fix(self, tmp_path, monkeypatch):
+        _scan_once(tmp_path, monkeypatch)
+        text = G.message("tests/x.py::t")
+        G.clear()
+        assert "tests/x.py::t" in text and "_now_et" in text and "_today_pdt" in text
+        assert "pin_scan_clock" in text and "allow_real_scan_clock" in text
+
+
+_INNER = textwrap.dedent("""
+    import earnings_vol_signal as evs
+    from tests._scan_clock import pin_scan_clock
+
+    def _run(tmp_path, monkeypatch):
+        monkeypatch.setattr(evs, "STATE_DIR", tmp_path / "s")
+        monkeypatch.setattr(evs, "SIGNALS_FILE", tmp_path / "s" / "a.jsonl")
+        evs.scan("2026-09-03", cache_dir=tmp_path / "no_cache", upcoming_fn=lambda t: None)
+
+    def test_unpinned(tmp_path, monkeypatch):
+        _run(tmp_path, monkeypatch)
+
+    def test_pinned(tmp_path, monkeypatch):
+        pin_scan_clock(monkeypatch, evs)
+        _run(tmp_path, monkeypatch)
+
+    def test_exempt(tmp_path, monkeypatch, allow_real_scan_clock):
+        _run(tmp_path, monkeypatch)
+
+    def test_unpinned_and_swallowed(tmp_path, monkeypatch):
+        try:
+            _run(tmp_path, monkeypatch)
+            raise RuntimeError("the caller swallows everything")
+        except Exception:
+            pass
+""")
+
+
+class TestEndToEndInAFreshPytest:
+    """真起一个 pytest 子进程（只加载这个守卫模块当插件、不带仓库 conftest），确认：没钉钟的测试在 teardown 变 ERROR，
+    钉了的、请求了豁免夹具的通过，调用方吞异常也不放过。"""
+
+    def test_fresh_session_errors_exactly_the_unpinned_tests(self, tmp_path):
+        (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+        (tmp_path / "test_inner.py").write_text(_INNER, encoding="utf-8")
+        r = subprocess.run([sys.executable, "-m", "pytest", str(tmp_path / "test_inner.py"), "-p", "tests._scan_clock_guard",
+                            "-p", "no:cacheprovider", "-rA", "-q", "--rootdir", str(tmp_path), "-c", str(tmp_path / "pytest.ini")],
+                           cwd=str(ROOT), capture_output=True, text=True, timeout=120, env=dict(os.environ))
+        out = r.stdout
+        status = {}
+        for line in out.splitlines():
+            for word in ("PASSED", "ERROR", "FAILED"):
+                if line.startswith(word + " ") and "::" in line:
+                    status.setdefault(line.split("::")[1].split(" ")[0], set()).add(word)
+        assert status.get("test_unpinned") == {"PASSED", "ERROR"}, out[-1500:]      # 测试体通过，teardown 判红
+        assert status.get("test_unpinned_and_swallowed") == {"PASSED", "ERROR"}, out[-1500:]
+        assert status.get("test_pinned") == {"PASSED"} and status.get("test_exempt") == {"PASSED"}, out[-1500:]
+        assert "pin_scan_clock" in out and "allow_real_scan_clock" in out, "teardown 的失败话术要告诉人怎么改"

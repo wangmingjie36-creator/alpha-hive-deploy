@@ -7,7 +7,31 @@
 
 ## [0.45.652] — 2026-10-25 — 占位（进行中：yfinance 日线唯一取数入口 yf_daily——645 之外的日线读者统一去掉公司行动空行 + AST 守卫 + 板块轮动登边界 10-19）
 
-## [0.45.651] — 2026-10-25 — 占位（进行中：v0.45.650 二次检查——钉钟闸 2 改按测试判、加运行时断言兜住间接调用）
+## [0.45.651] — 2026-10-25 — Fixed：v0.45.650 二次检查——钉钟闸 2 改按测试判、加运行时断言兜住静态推不到的间接调用
+
+对 v0.45.650 跑已装的 code-review 技能（high）：没发现生产或测试结果会算错的 bug，查出 4 条覆盖面问题，修前 2 条（后 2 条见「没改」）。生产代码（`earnings_vol_signal.py`）未动。两条都有实测：
+- **闸 2 按文件判会放过新测试**：往 `test_straddle_strangle_shadow.py`（文件里别处用了辅助）临时加一条不钉钟、连跑两次 `scan` 比字节的测试，`test_scan_clock.py` 仍 39 条全过。
+- **静态推不到的间接调用**：运行时探针（包一层 `_scan_with_info`，记录调用时两只钟有没有被钉）跑 18 个提到 `earnings_vol_signal` 的测试文件，44 次 scan 调用里 1 次没钉钟——`test_ledger_io_v2` 按参数化的模块名 `getattr` 调 `scan`。它不比字节、当下无害，但证明 AST 路线看不到动态调用。
+
+### Fixed
+- **闸 2 改成按测试判**（`tests/test_scan_clock.py::_per_test_pinning`）：沿**同文件**调用链（测试 → helper → scan，`f()` / `self.f()` 按简单名匹配，宁多勿漏）推「这条测试会不会跑到 scan / main / _scan_with_info」；会跑到的必须被钉住——测试体或链上 helper 调用共享辅助，或请求了（沿夹具链）调用辅助的夹具、`usefixtures`（含类上的）、autouse 夹具。别的测试钉了钟不能替这一条作证。静态推导与运行时探针对 4 个文件**逐条一致**（会跑到 scan 的测试数 15 / 5 / 2 / 3，名字一一对上）；另有「图推坏了会让闸恒真」的下限断言。
+- **运行时钟断言**（新 `tests/_scan_clock_guard.py`，夹具在 `tests/conftest.py` import 进来）：`earnings_vol_signal._scan_with_info`（`scan` / `main` 都经过它）被包一层，进入时 `_now_et` / `_today_pdt` 若仍是模块原来的函数就记一条违规，**每条测试 teardown 判 ERROR**。设计点：① 记录 + teardown 失败而不是在调用处抛——日报路径、`try/except Exception: pass` 会吞异常，抛了也红不了；② 不改 scan 行为，`functools.wraps` 保住 `locked_by` 留下的 `__ledger_locked__`；③ 真要读真实时钟的测试请求夹具 `allow_real_scan_clock`，是显式、grep 得到的例外。
+- **`test_ledger_io_v2.py::test_read_modify_write_entrypoints_hold_the_lock`**：钉住两只钟（运行时断言查出来的那一条）。
+
+### Added（`tests/test_scan_clock.py`，39 → 60 条）
+- 按测试判的探针 10 条：邻居钉了不能替这条作证 / helper 里钉 / 同文件包装函数 / 夹具与夹具链 / `usefixtures`（测试与类）/ autouse 钉钟与不钉钟的 autouse / 不跑 scan 的不判 / 同名不同类各判各的。
+- 运行时断言 9 条：接进了本会话（conftest 漏 import 会无声失效，专门钉）、两只都没钉被记录、钉了不记、只钉一只会指出另一只、`main` 也经过它、调用方吞异常也躲不掉、`install` 幂等且不吃 `__ledger_locked__`、豁免夹具、失败话术含测试名 / 钟名 / 改法。
+- 端到端 1 条：真起一个只加载守卫模块的 pytest 子进程，确认没钉钟的测试在 teardown 变 ERROR、钉了的和请求豁免夹具的通过、调用方吞异常的也 ERROR。
+
+### 验证
+- 变异 11 处全红：conftest 不再 import 夹具 / 守卫不记录 / teardown 不判 / 豁免被忽略 / `test_ledger_io_v2` 去掉钉钟（运行时断言变 ERROR）/ 静态闸退回按文件判 / 在已用辅助的文件里新增不钉钟的 scan 测试（静态闸与运行时断言**各自**都红）/ 包装不用 `functools.wraps` / 守卫只看 `_now_et` / `install` 重复包装 / 调用图忽略 `self.xxx()`。
+- 拨钟审计（+7 / +45 天，6 个文件）0 条新红；ruff 过；`tests/_must_run.json` 已更新（只换了 commit 字段）。
+- 整套：**在最终树上**（提交 `2429d6b0`，已变基到含 0.45.645 修复与 0.45.652 占号的 origin/main；开跑前连续 45 s 没有别的 pytest / 审计，开跑时 origin 无新提交，负载约 3.2）：**12302 passed、0 failed、0 error**、82 deselected、2 xfailed，733 s。比上一轮的 12238 多出的条数，含本条 `test_scan_clock.py` 新增的 21 条与变基带入的 645 的测试（这里没有逐条拆分）。conftest 新增了全局 autouse 夹具，整套里没有任何测试被它误伤成 ERROR。跑完后再查 origin 仍无新提交，推送前除本行外未改动任何文件。
+
+### 没改
+- **手写钉法匹配器只认前两个实参里的字符串字面量**：`SEAM = "_now_et"; setattr(evs, SEAM, fn)`、关键字实参写法认不出。运行时断言兜得住（那种写法照样把钟换了，但换掉后 `scan` 是「被钉住」的，它判的是结果而非写法）；没有再加一层静态匹配。
+- **import 名字解析（`_bindings` / `_qualified`）没有抽到共享模块**：`tests/` 里别的 AST 扫描器各有一份，只有本文件这份认别名。等第二个需要它的守卫出现时再抽，现在抽是为抽而抽。
+- 运行时断言只管**进程内**的调用；子进程里跑 `earnings_vol_signal.py`（CLI）它看不到，也钉不了。`importlib.reload(earnings_vol_signal)` 会丢掉包装（测试里没有这么做的）。
 
 ## [0.45.650] — 2026-10-25 — Fixed：v0.45.648 二次检查——钉钟两道闸补盲区（按名字解析读钟、按 AST 自动圈调用 scan 的测试文件）及几处测试 / 文档细节
 

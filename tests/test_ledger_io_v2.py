@@ -310,6 +310,10 @@ class TestMigratedLedgers:
                                              ("earnings_vol_signal", "settle_signals")])
     def test_read_modify_write_entrypoints_hold_the_lock(self, monkeypatch, tmp_path, modname, fn):
         import importlib
+
+        import earnings_vol_signal as evs
+        from tests._scan_clock import pin_scan_clock
+        pin_scan_clock(monkeypatch, evs)       # 这里按参数化的模块名 getattr 调 scan，静态闸看不到；运行时钟断言要求钉住
         mod = importlib.import_module(modname)
         sig = tmp_path / "state" / "signals.jsonl"
         monkeypatch.setattr(mod, "SIGNALS_FILE", sig)

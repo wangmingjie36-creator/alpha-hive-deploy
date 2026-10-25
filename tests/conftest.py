@@ -1422,6 +1422,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _root_data_guard  # noqa: E402
 import _write_sandbox  # noqa: E402
 import _concurrency_hint  # noqa: E402
+# v0.45.651：财报信号 scan 的运行时钟断言（夹具定义在该模块，这里 import 进来才会被 pytest 注册；用包路径 import，
+# 守卫自己的测试读的是同一份模块状态）。说明见 tests/_scan_clock_guard.py。
+from tests._scan_clock_guard import (  # noqa: E402,F401
+    _scan_clock_guard_installed, _scan_clock_must_be_pinned, allow_real_scan_clock)
 
 _ROOT_FP_BEFORE = pytest.StashKey[dict]()
 
