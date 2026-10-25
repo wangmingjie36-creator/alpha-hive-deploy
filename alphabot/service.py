@@ -424,12 +424,14 @@ class AlphaBotService:
         from greeks_engine import bs_price
         return TH.Deps(bs_price=bs_price, risk_free=float(pg.CONFIG["risk_free"]), max_spread_pct=R.C.MAX_SPREAD_PCT)
 
-    def _tail_chain(self, day: str):
-        """SPY 全链。演示 = 合成链（补上 vega / theta）；生产 = Alpha Bot 的取链入口，**不清**进程缓存（只读页面不多发请求）。"""
+    def _tail_chain(self, day: str, spot=None, *, force: bool = False):
+        """SPY 全链。演示 = 合成链（补上 vega / theta，现货取审计里的 SPY 价，免得演示永远带「现货有差」）；
+        生产 = Alpha Bot 的取链入口。`force`（页面「重新拉取」）**清 SPY 的 CBOE 进程缓存再拉**：该缓存同一 vintage 日内
+        最长新鲜 4 小时，不清的话「重新拉取」会原样命中几小时前的 bid/ask（独立审查实测）；平常的打开 / 轮询不清、不多发请求。"""
         if self.demo:
             from alphabot import synthetic as syn
-            return syn.demo_spy_chain(day), None
-        return self._chain_fetch(invalidate=False)("SPY", as_of=None)
+            return syn.demo_spy_chain(day, spot=spot), None
+        return self._chain_fetch(invalidate=force)("SPY", as_of=None)
 
     def tail_hedge(self, force: bool = False) -> dict:
         """「尾部对冲候选」：对冲账本**最近一份放行的审计**（压力网格 / Greeks / NAV）× SPY 当前期权链。
@@ -438,6 +440,12 @@ class AlphaBotService:
         view = self._hedge_view(now)
         audits = ((view.get("history") or {}).get("audits")) or {}
         day = max(audits) if audits else None
+        if day is None and view.get("errors"):
+            # 账本读不了 ≠ 还没有记录（`_hedge_view` 自己的注释：读不了不能当成空账本）；不去取链、不缓存
+            res = clean_json(TH.unavailable("ledger_unreadable", ledger_errors={k: str(v) for k, v in view["errors"].items()}))
+            res["demo"] = self.demo
+            res["meta"] = TH.public_rules()
+            return res
         key = ("tail", day)
         with self._lock_for("tail"):
             ent = self._tail_cache.get(key)
@@ -446,7 +454,7 @@ class AlphaBotService:
             chain, reason = None, None
             if day is not None:
                 try:
-                    chain, reason = self._tail_chain(day)
+                    chain, reason = self._tail_chain(day, (audits.get(day) or {}).get("spy_price"), force=force)
                 except Exception as exc:  # noqa: BLE001 - 取链失败如实说，不吞成「没有候选」
                     reason = f"exception:{type(exc).__name__}"
                     _log.warning("尾部对冲：SPY 期权链取不到：%s: %s", type(exc).__name__, exc)

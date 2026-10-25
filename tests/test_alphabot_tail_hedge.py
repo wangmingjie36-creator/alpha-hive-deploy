@@ -562,8 +562,117 @@ class TestService:
             assert forbidden not in body, forbidden
 
 
+def _cells(*triples):
+    return [{"spot_pct": sp, "iv_pts": ivp, "pnl": p} for sp, ivp, p in triples]
+
+
+class TestSecondReviewFixes:
+    """二次检查（独立审查者 + 自查）发现的问题。每条在旧实现上都会红；对应的变异在审查时存活过。"""
+
+    def test_gamma_dollars_use_the_real_spot_not_the_degenerate_one(self):
+        """旧测试 S=100 时 (0.01·S)² 恒为 1，把平方写成一次方也绿。S=600 才分得出。"""
+        s = TH._leg("short", put(95, -0.30, 3.0, 3.2, gamma=0.02, vega=0.15, theta=-0.05), -1)
+        l = TH._leg("long", put(85, -0.14, 1.0, 1.1, gamma=0.012, vega=0.10, theta=-0.03), 2)
+        g, _ = TH.greeks_dollars([s, l], 600.0)
+        assert g["gamma_dollar_per_1pct"] == pytest.approx(0.5 * -100 * 0.02 * 36.0 + 0.5 * 200 * 0.012 * 36.0)   # −36 + 43.2
+        assert g["dollar_delta"] == pytest.approx(-100 * -0.30 * 600 + 200 * -0.14 * 600)                          # +1200
+
+    def test_flat_spot_column_is_inside_the_covered_side(self):
+        """现货 0%、IV +20 点是纯波动率冲击：后比例净多 Vega，帮得上——不许标「认沽覆盖不到」，也要拿它定规模。"""
+        cells = _cells((-10, 0, -1000.0), (0, 20, -9000.0), (10, 0, -500.0))
+        res = build(a=audit(cells))
+        assert "worst_cell_uncovered" not in res["flags"]
+        s = cand(res, "30x15")["sizing"]
+        assert s["target_cell"]["spot_pct"] == 0 and s["target_cell"]["iv_pts"] == 20
+        e = cand(res, "30x15")["effect"]                       # 「前 → 后」两端都要在同一类格子里比
+        assert e["downside_worst_before"]["spot_pct"] == 0 and e["downside_worst_after"]["spot_pct"] == 0
+        assert "worst_cell_uncovered" in build(a=audit(_cells((-10, 0, -1000.0), (10, 20, -9000.0))))["flags"]
+
+    def test_no_cell_at_or_below_zero_means_unsized_not_an_upside_target(self):
+        """网格里没有现货 ≤ 0 的格：不许退回去按上行最差格放大（实测旧实现 n=10，上一轮修过的同一类错）。"""
+        res = build(a=audit(_cells((5, 0, -500.0), (10, 0, -2000.0), (10, 20, -9000.0))))
+        for c in res["candidates"]:
+            if not c["available"]:
+                continue
+            s = c["sizing"]
+            assert s["basis"] == "one_unit_fallback" and s["reason"] == "no_downside_cells" and s["n_units"] == 1
+            assert s["target_cell"]["spot_pct"] is None and s["offset_achieved"] is None
+            assert c["effect"]["downside_worst_before"] is None and "unsized" in c["flags"] and s["reason_zh"]
+        assert "worst_cell_uncovered" in res["flags"]
+
+    def test_size_is_at_least_one_unit_when_the_loss_is_tiny(self):
+        c = cand(build(a=audit(_cells((-30, 0, -10.0), (0, 0, 0.0)))), "30x15")
+        assert c["sizing"]["basis"] == "offset_target" and c["sizing"]["n_units"] == 1      # round(0.5×10/580) = 0 ⇒ 抬到 1
+
+    def test_open_interest_cap_rounds_down(self):
+        """买入腿 399 张：2% × 399 / 2 = 3.99 ⇒ 3 单位（向上取整会得到 4，超过上限）。"""
+        puts = chain()["contracts"]
+        puts[2] = put(85, -0.15, 1.0, 1.1, oi=399.0)
+        c = cand(build(c=chain(puts)), "30x15")
+        assert c["sizing"]["n_units"] == 3 and c["sizing"]["capped"] is True
+
+    def test_one_unit_already_over_the_open_interest_cap_is_flagged(self):
+        puts = chain()["contracts"]
+        puts[2] = put(85, -0.15, 1.0, 1.1, oi=2.0)                 # 2% × 2 / 2 = 0.02 ⇒ 上限 0 单位
+        c = cand(build(c=chain(puts)), "30x15")
+        assert c["sizing"]["n_units"] == 1 and "oi_over_cap" in c["flags"]
+        assert "oi_over_cap" not in cand(build(), "30x15")["flags"]
+
+    @pytest.mark.parametrize("dte,inside", [(20, False), (21, True), (90, True), (91, False)])
+    def test_expiry_window_is_inclusive_on_both_ends(self, dte, inside):
+        got = TH.pick_expiry([put(95, -0.3, 1, 1.1, dte=dte, expiry="E")])
+        assert (got == ("E", dte)) is inside and (got is None) is (not inside)
+
+    def test_trade_is_only_folded_in_when_the_audit_says_it_executed(self):
+        a = audit(executed=False, trade={"shares": -4, "price": 100.0}, after_pct={"beta_dollar_delta": 1.0})
+        b, _ = TH.baseline_from_audit("d", a)
+        assert b["adjusted_for_trade"] is False and {c["spot_pct"]: c["pnl"] for c in b["cells"]}[-30] == -9000.0
+        assert b["pct_nav"]["beta_dollar_delta"] == 5.0
+
+    def test_equal_delta_gap_picks_the_higher_strike(self):
+        # 0.75 / 0.25 离 0.5 都恰好差 0.25（二进制精确，不靠浮点噪声碰巧）：并列取更高的行权价（更近平值）
+        book = [put(80, -0.25, 1.0, 1.1), put(90, -0.75, 2.0, 2.1)]
+        assert TH.pick_put(book, 0.5, 0.30)["strike"] == 90.0
+        assert TH.pick_put(list(reversed(book)), 0.5, 0.30)["strike"] == 90.0          # 与书里的顺序无关
+
+    def test_unsized_flag_marks_every_fallback_and_only_those(self):
+        sized = cand(build(), "30x15")
+        assert sized["sizing"]["basis"] == "offset_target" and "unsized" not in sized["flags"]
+        valley = cand(build(a=audit(_cells((-10, 0, -9000.0), (0, 0, 0.0)))), "30x15")
+        assert valley["sizing"]["reason"] == "no_help_at_worst_cell" and "unsized" in valley["flags"]
+
+    def test_chain_brief_carries_the_quote_time(self):
+        ch = {**chain(), "payload_last_trade_time": "2026-10-23T16:15:00", "fetched_at": "2026-10-25T09:00:00-04:00"}
+        b = build(c=ch)["chain"]
+        assert b["quote_time"] == "2026-10-23T16:15:00" and b["fetched_at"] == "2026-10-25T09:00:00-04:00"
+
+    def test_unreadable_ledger_is_not_reported_as_no_records(self, tmp_path):
+        n = []
+        svc = _svc(tmp_path, lambda t, *, as_of=None: (n.append(1), (_spy_chain(), None))[1])
+        svc._hedge_view = lambda now: {"errors": {"history": "LedgerCorrupt: bad line"}, "history": None}
+        r = svc.tail_hedge()
+        assert r["available"] is False and r["reason"] == "ledger_unreadable" and r["reason_zh"]
+        assert r["ledger_errors"] == {"history": "LedgerCorrupt: bad line"} and n == []         # 没去取链
+
+    def test_force_clears_the_cboe_process_cache_and_a_plain_call_does_not(self, root_with_stress, monkeypatch):
+        """旧实现：force 只绕过本层 60 秒缓存，底层 CBOE 进程缓存（最长 4 小时）原样命中，页面却写「刚拉取」。"""
+        import sell_strike_report as R
+        cleared, fetched = [], []
+        monkeypatch.setattr(R, "_invalidate_cached_payload", lambda t: cleared.append(t))
+        monkeypatch.setattr(R.LG, "_default_fetch", lambda t, as_of=None: (fetched.append(t), (_spy_chain(), None))[1])
+        svc = AlphaBotService(straddle_root=root_with_stress, now_fn=lambda: NOW)         # 没有注入 fetch_fn：走生产取链入口
+        assert svc.tail_hedge()["available"] is True
+        assert cleared == [] and fetched == ["SPY"]
+        svc.tail_hedge(force=True)
+        assert cleared == ["SPY"] and fetched == ["SPY", "SPY"]
+
+    def test_demo_chain_spot_matches_the_demo_audit_so_no_permanent_spot_gap(self, tmp_path):
+        r = AlphaBotService(fetch_fn=syn.demo_fetch, demo=True, state_dir=tmp_path, now_fn=lambda: NOW).tail_hedge()
+        assert "spot_gap" not in r["flags"] and abs(r["chain"]["spot_vs_audit_pct"]) < 0.01
+
+
 class TestFrontend:
-    HEDGE = (STATIC / "pages" / "hedge.js").read_text(encoding="utf-8")
+    HEDGE =(STATIC / "pages" / "hedge.js").read_text(encoding="utf-8")
     TAIL = (STATIC / "pages" / "hedge_tail.js").read_text(encoding="utf-8")
 
     def test_hedge_page_mounts_the_panel_without_blocking_on_it(self):
@@ -586,3 +695,15 @@ class TestFrontend:
 
     def test_panel_says_it_is_not_a_recommendation(self):
         assert "不是推荐" in self.TAIL and "不写账本" in self.TAIL
+
+    def test_switching_candidates_releases_the_previous_chart(self):
+        """旧实现每点一行新建一个 echarts 实例，旧的留在 live 里直到换页（每次窗口缩放都白白 resize）。"""
+        charts = (STATIC / "charts.js").read_text(encoding="utf-8")
+        assert re.search(r"export function release\(", charts) and "live.delete(ch)" in charts
+        assert "release(chart)" in self.TAIL and "chart = d._after()" in self.TAIL
+
+    def test_a_render_error_does_not_leave_the_panel_stuck_on_loading(self):
+        assert re.search(r"try \{\s*renderTailBody\(host, alive, t\);\s*\} catch \(e\) \{\s*fill\(host, panel\(TITLE, \{\}, errorBox\(e\)", self.TAIL)
+
+    def test_ledger_read_errors_and_quote_time_are_shown(self):
+        assert "ledger_errors" in self.TAIL and "quote_time" in self.TAIL

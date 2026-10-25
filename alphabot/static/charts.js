@@ -44,6 +44,8 @@ export function mount(el, option) {
   return chart;
 }
 export function disposeAll() { live.forEach((ch) => ch.dispose()); live.clear(); }
+// 单张图换掉时释放（同页重建子视图时用）：不释放的话旧实例留在 live 里，每次窗口缩放都要白白 resize 一个已脱离页面的图
+export function release(ch) { if (ch) { live.delete(ch); try { ch.dispose(); } catch { /* 已释放 */ } } }
 
 function hline(value, label, color, type = "dashed", width = 1, position = "insideEndTop") {
   return { yAxis: value, lineStyle: { color, type, width },

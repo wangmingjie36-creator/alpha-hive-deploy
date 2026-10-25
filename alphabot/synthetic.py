@@ -124,9 +124,10 @@ def demo_fetch(ticker: str, *, as_of: Optional[str] = None):
     return demo_payload(ticker, as_of), None
 
 
-def demo_spy_chain(as_of: Optional[str] = None) -> dict:
-    """尾部对冲演示用的 SPY 合成链：在 `demo_payload` 上补 CBOE 才有的 vega / theta（合成链默认没有）。确定性、零网络。"""
-    chain = demo_payload("SPY", as_of)
+def demo_spy_chain(as_of: Optional[str] = None, spot: Optional[float] = None) -> dict:
+    """尾部对冲演示用的 SPY 合成链：在 `demo_payload` 上补 CBOE 才有的 vega / theta（合成链默认没有）。确定性、零网络。
+    `spot`：演示审计里的 SPY 价——合成链的现货与之一致，页面才不会永远带「现货有差」提示。"""
+    chain = demo_payload("SPY", as_of, spot=spot)
     for c in chain["contracts"]:
         iv = c.get("iv")
         if iv and c.get("dte"):

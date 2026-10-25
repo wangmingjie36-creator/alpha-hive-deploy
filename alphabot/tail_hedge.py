@@ -29,13 +29,14 @@ Greeks** 各变了多少，以及到期盈亏图与成本。
     IV 冲击是**每张合约自己的 IV 平行平移**，T = dte/365，**瞬时冲击（不走时间）**。候选单格 P&L =
     Σ 张数 × 100 × (BS(冲击后) − 成交价)，所以 (0,0) 格不是 0：它是「成交价 vs BS 价」的模型基差（点差 + 模型差）。
   · **到期盈亏**：Σ 张数 × 100 × max(K − S, 0) − 成交成本，分段线性，最大亏损点与盈亏平衡点是精确解（不是数值扫描）。
-  · **规模**：认沽结构只能覆盖**下行侧**，所以只对基线的「下行侧最差格」（现货冲击 < 0 的格里最差的）定规模：
+  · **规模**：认沽结构只能覆盖**下行与平盘侧**，所以只对基线的「下行侧最差格」（现货冲击 ≤ 0 的格里最差的；0% 那一列是纯 IV 冲击，
+    后比例净多 Vega、帮得上）定规模：
     使候选在该格的盈亏 ≈ 抵消那格亏损的 `RULES["offset_target"]`，四舍五入到整数单位（1 单位 = 卖 1 张 + 买 `ratio` 张）。
     该格候选不赚钱（`no_help_at_worst_cell`）或下行侧本来没亏损 ⇒ 不定规模、按 1 单位显示（`sizing.basis =
     "one_unit_fallback"`）。两道上限：张数 ≤ 该腿未平仓量的 `max_contracts_pct_oi`（未平仓量缺失 / 为 0 ⇒ 视为未知、不套）；
     卖出腿名义额 ≤ NAV 的 `max_short_notional_pct_nav`%。**`sizing.offset_achieved` 永远给**：定完规模、套完上限后，
     候选在目标格实际抵消了多少（可以远低于目标——小账户的 SPY 期权单位太大，这本身就是读数）。
-  · **基线最差格在上行一侧**（`worst_cell_uncovered`）：本组合的做空 Gamma / Vega 是双向的——大幅上涨 + IV 上升同样亏；
+  · **基线最差格在上行一侧**（现货冲击 > 0，`worst_cell_uncovered`）：本组合的做空 Gamma / Vega 是双向的——大幅上涨 + IV 上升同样亏；
     认沽结构对那一侧没有帮助，页面把它与下行侧并列，不把「最差格改善了」说成「尾部覆盖了」。
   · Greeks 来自 CBOE（每股）：$Delta = qty×delta×S；$Gamma(1%) = ½·qty·gamma·(0.01·S)²；$Vega/点 = qty×vega；
     $Theta/日 = qty×theta。对冲后 = 基线占 NAV 的 % + 候选 $ ÷ NAV。
@@ -87,12 +88,16 @@ REASONS: Dict[str, str] = {
     "no_help_at_worst_cell": "候选在基线最差格里不赚钱，没法按「抵消比例」定规模（按 1 单位显示）",
     "baseline_has_no_loss": "基线网格里没有亏损格，没法定规模（按 1 单位显示）",
     "exception": "计算时出错（详情在 Alpha Bot 日志）",
+    "ledger_unreadable": "对冲账本读不了（不是「还没有记录」）：原因见页面上的账本读取错误",
+    "no_downside_cells": "基线网格里没有现货冲击 ≤ 0 的格，认沽结构没法定规模（按 1 单位显示）",
 }
 FLAGS: Dict[str, str] = {
     "wide_spread": "有腿的点差超过账本的可交易闸门（与卖权 / 跨式同一把尺）：按可成交价难以成交",
     "size_capped": "张数被该腿未平仓量的比例上限截住了",
     "notional_capped": "张数被卖出腿名义额上限（NAV 的百分比）截住了：实际抵消比例低于目标",
     "notional_over_cap": "1 单位的卖出腿名义额就已超过上限：按 1 单位显示，仅供看形状，不代表账户扛得住",
+    "oi_over_cap": "1 单位的张数就已超过该腿未平仓量的比例上限（腿太冷门）：按 1 单位显示，实际成交可能很难",
+    "unsized": "没有定规模（见详情里的原因）：表里的「1 组」只是 1 单位的示意，不是按抵消目标算出来的",
     "worst_cell_uncovered": "基线最差格在上行一侧（现货上涨 + IV 上升）：认沽结构覆盖不到它，这里只对下行侧最差格定规模",
     "oi_unknown": "有腿的未平仓量缺失或为 0（交易所 d+1 才发布新到期日的未平仓量），流动性上限没法套",
     "chain_not_audit_session": "期权链不是审计那一场的收盘链（盘中或日期不同）：基线是审计日收盘、候选是现在的报价，只能粗看",
@@ -102,7 +107,8 @@ FLAGS: Dict[str, str] = {
 #: 候选表「说明」列用的短标签（完整文案在 `FLAGS`，悬停显示）
 FLAGS_SHORT: Dict[str, str] = {
     "wide_spread": "点差宽", "size_capped": "受未平仓量限", "notional_capped": "受名义额限", "notional_over_cap": "名义额超限",
-    "oi_unknown": "未平仓量未知", "chain_not_audit_session": "链非审计场次", "spot_gap": "现货有差",
+    "oi_unknown": "未平仓量未知", "oi_over_cap": "张数超未平仓量限", "unsized": "未定规模",
+    "chain_not_audit_session": "链非审计场次", "spot_gap": "现货有差",
     "baseline_partial": "基线不全", "worst_cell_uncovered": "最差格在上行",
 }
 CAVEATS: Dict[str, str] = {
@@ -199,7 +205,7 @@ def baseline_from_audit(day: Optional[str], audit: Optional[dict]) -> Tuple[Opti
     src = (audit.get("aggregate_after") if adjusted and audit.get("aggregate_after") else agg) or {}
     pct = {k: _num((src.get("pct_nav") or {}).get(k)) for k in GREEK_KEYS}
     worst = min(cells, key=lambda c: c["pnl"])
-    down = [c for c in cells if c["spot_pct"] < 0]
+    down = [c for c in cells if c["spot_pct"] <= 0]        # 下行 + 平盘（0% 列是纯 IV 冲击，后比例净多 Vega 帮得上）
     down_worst = min(down, key=lambda c: c["pnl"]) if down else None
     return {"date": day, "nav": nav, "spy_price": spy, "cells": cells,
             "spots": sorted({c["spot_pct"] for c in cells}), "ivs": sorted({c["iv_pts"] for c in cells}),
@@ -327,21 +333,34 @@ def unit_cells(legs: Sequence[dict], S: float, dte: float, deps: Deps, spots: Se
 
 # ── 规模 ────────────────────────────────────────────────────────────────────────────
 
-def size_units(target: dict, unit_at_target: Optional[float], legs: Sequence[dict], nav: float,
+def size_units(target: Optional[dict], unit_at_target: Optional[float], legs: Sequence[dict], nav: float,
                rules: Optional[dict] = None) -> dict:
     """规模：在目标格（基线下行侧最差格）使候选盈亏 ≈ 抵消那格亏损的 `offset_target`，整数单位，≥ 1；再套两道上限。
-    不能定 ⇒ 1 单位 + 原因（`basis = one_unit_fallback`）。`offset_achieved` 在 `_candidate` 里补（要用最终单位数）。"""
+    不能定 ⇒ 1 单位 + 原因（`basis = one_unit_fallback`）。`target` 为 None（基线没有现货 ≤ 0 的格）⇒ 不定规模——
+    **不许退回去用上行格**（认沽管不到上行；那样会按错的格放大，见 CHANGELOG 0.45.643）。
+    `offset_achieved` 在 `_candidate` 里补（要用最终单位数）。"""
     r = rules or RULES
-    w = _num(target.get("pnl"))
     short = next(l for l in legs if l["role"] == "short")
     unit_notional = abs(short["qty_shares"]) * short["strike"]
+    w = _num((target or {}).get("pnl"))
     out = {"basis": "one_unit_fallback", "n_units": 1, "reason": None, "capped": False, "oi_unknown": False,
-           "notional_capped": False, "notional_over_cap": False,
-           "target_cell": {"spot_pct": target.get("spot_pct"), "iv_pts": target.get("iv_pts"), "base_pnl": _r(w)},
+           "oi_over_cap": False, "notional_capped": False, "notional_over_cap": False,
+           "target_cell": {"spot_pct": (target or {}).get("spot_pct"), "iv_pts": (target or {}).get("iv_pts"),
+                           "base_pnl": _r(w)},
            "offset_target": r["offset_target"]}
     n_cap_notional = int(math.floor(r["max_short_notional_pct_nav"] / 100.0 * nav / unit_notional))
-    if n_cap_notional < 1:
-        out["notional_over_cap"] = True
+    caps = []
+    for l in legs:
+        if l["oi"] is None or l["oi"] <= 0:
+            out["oi_unknown"] = True
+            continue
+        caps.append(int(math.floor(r["max_contracts_pct_oi"] * l["oi"] / abs(l["qty_contracts"]))))
+    n_cap_oi = min(caps) if caps else None
+    out["notional_over_cap"] = n_cap_notional < 1
+    out["oi_over_cap"] = n_cap_oi is not None and n_cap_oi < 1
+    if target is None:
+        out["reason"] = "no_downside_cells"
+        return out
     if w is None or w >= 0:
         out["reason"] = "baseline_has_no_loss"
         return out
@@ -350,15 +369,9 @@ def size_units(target: dict, unit_at_target: Optional[float], legs: Sequence[dic
         return out
     n = max(1, int(round(r["offset_target"] * abs(w) / unit_at_target)))
     out.update(basis="offset_target", n_units=n)
-    caps = []
-    for l in legs:
-        if l["oi"] is None or l["oi"] <= 0:
-            out["oi_unknown"] = True
-            continue
-        caps.append(int(math.floor(r["max_contracts_pct_oi"] * l["oi"] / abs(l["qty_contracts"]))))
-    if caps and n > min(caps):
+    if n_cap_oi is not None and n > n_cap_oi:
         out["capped"] = True
-        out["n_units"] = n = max(1, min(caps))
+        out["n_units"] = n = max(1, n_cap_oi)
     if n > max(n_cap_notional, 1):
         out["notional_capped"] = True
         out["n_units"] = max(n_cap_notional, 1)
@@ -384,14 +397,17 @@ def _candidate(cid: str, short_level: float, long_level: float, c_short: dict, c
     cost = unit_cost(legs)
     pay = expiry_payoff(legs, cost["executable"], S)
     cells_u = unit_cells(legs, S, dte, deps, base["spots"], base["ivs"], cost["executable"])
-    target = base["downside_worst_cell"] or base["worst_cell"]
-    sizing = size_units(target, cells_u.get((target["spot_pct"], target["iv_pts"])), legs, base["nav"], rules)
+    target = base["downside_worst_cell"]            # 没有现货 ≤ 0 的格 ⇒ None：不定规模，不退回用上行格
+    sizing = size_units(target, cells_u.get((target["spot_pct"], target["iv_pts"])) if target else None, legs,
+                        base["nav"], rules)
     n = sizing["n_units"]
-    for key, flag in (("capped", "size_capped"), ("oi_unknown", "oi_unknown"), ("notional_capped", "notional_capped"),
-                      ("notional_over_cap", "notional_over_cap")):
+    for key, flag in (("capped", "size_capped"), ("oi_unknown", "oi_unknown"), ("oi_over_cap", "oi_over_cap"),
+                      ("notional_capped", "notional_capped"), ("notional_over_cap", "notional_over_cap")):
         if sizing[key]:
             flags.append(flag)
-    tw = _num(target["pnl"])
+    if sizing["basis"] == "one_unit_fallback":
+        flags.append("unsized")
+    tw = _num(target["pnl"]) if target else None
     achieved = (n * cells_u[(target["spot_pct"], target["iv_pts"])] / abs(tw)) if tw and tw < 0 else None
     short_notional = n * abs(legs[0]["qty_shares"]) * legs[0]["strike"]
     nav = base["nav"]
@@ -402,7 +418,7 @@ def _candidate(cid: str, short_level: float, long_level: float, c_short: dict, c
                       "after": _r(c["pnl"] + hedge)})
     worst_after = min(cells, key=lambda c: c["after"])
     worst_hedge = min(cells, key=lambda c: c["hedge"])
-    down_cells = [c for c in cells if c["spot_pct"] < 0]
+    down_cells = [c for c in cells if c["spot_pct"] <= 0]
     down_after = min(down_cells, key=lambda c: c["after"]) if down_cells else None
     g_unit, g_reason = greeks_dollars(legs, S)
     greeks = None
@@ -433,7 +449,7 @@ def _candidate(cid: str, short_level: float, long_level: float, c_short: dict, c
                    "downside_worst_after": (({k: down_after[k] for k in ("spot_pct", "iv_pts")} | {"pnl": down_after["after"]})
                                             if down_after else None),
                    "downside_worst_before": (({k: target[k] for k in ("spot_pct", "iv_pts")} | {"pnl": _r(target["pnl"])})
-                                             if base["downside_worst_cell"] else None),
+                                             if target else None),
                    "n_cells_worse": sum(1 for c in cells if c["hedge"] < 0), "n_cells": len(cells),
                    "worst_after_pct_nav": _r(worst_after["after"] / nav * 100.0, 2),
                    "worst_before_pct_nav": _r(base["worst_cell"]["pnl"] / nav * 100.0, 2)},
@@ -471,7 +487,7 @@ def build(day: Optional[str], audit: Optional[dict], chain: Optional[dict], deps
             flags.append("spot_gap")
     if base["partial"]:
         flags.append("baseline_partial")
-    if base["worst_cell"]["spot_pct"] >= 0:
+    if base["worst_cell"]["spot_pct"] > 0:
         flags.append("worst_cell_uncovered")
     cands: List[dict] = []
     tol = float(r["delta_tolerance"])
@@ -497,6 +513,7 @@ def build(day: Optional[str], audit: Optional[dict], chain: Optional[dict], deps
             "baseline": _baseline_brief(base),
             "chain": {"underlying": "SPY", "spot": _r(S), "vintage_date": chain.get("vintage_date"),
                       "session_live": bool(chain.get("session_live")), "expiry": expiry, "dte": dte,
+                      "quote_time": chain.get("payload_last_trade_time"), "fetched_at": chain.get("fetched_at"),
                       "spot_vs_audit_pct": _r(gap, 3), "n_puts_in_expiry": len(book)},
             "grid": {"spot_pct": base["spots"], "iv_pts": base["ivs"]},
             "flags": flags, "candidates": cands, "rules": public_rules()["rules"]}

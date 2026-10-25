@@ -1,7 +1,7 @@
 // 对冲页的「尾部对冲候选」面板（v0.45.643）：SPY 认沽后比例价差叠到组合压力网格上。全部只读，不写账本、不成交。
 // 数字全由服务端算好（alphabot/tail_hedge.py），这里只排版；原因 / 旗标 / 提醒的文案取自服务端 meta，前端不另抄。
 import { api, h, num, money, panel, table, isNum, fill, loading, errorBox } from "../lib.js";
-import { lines, C } from "../charts.js";
+import { lines, release, C } from "../charts.js";
 
 const sMoney = (v, dp = 0) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}$${num(Math.abs(v), dp)}` : "—");
 // 四舍五入成 0 的数不带符号（"−0%" 读起来像「变差了」，其实是「没变」）
@@ -37,9 +37,10 @@ function baselineStrip(b, chain) {
   const dw = b.downside_worst_cell;
   return h("div", { class: "kpis" },
     kpi("基线最差格", h("span", { class: "down" }, sPct(b.worst_cell?.pct_nav, 1)), `${cellName(b.worst_cell)} · ${sMoney(b.worst_cell?.pnl)}`),
-    kpi("下行侧最差格（对它定规模）", h("span", { class: "down" }, sPct(dw?.pct_nav, 1)), dw ? `${cellName(dw)} · ${sMoney(dw.pnl)}` : "—"),
+    kpi("下行 / 平盘侧最差格（对它定规模）", h("span", { class: "down" }, sPct(dw?.pct_nav, 1)), dw ? `${cellName(dw)} · ${sMoney(dw.pnl)}` : "—"),
     kpi("审计日 / NAV", b.date, `NAV ${money(b.nav, 0)} · SPY ${money(b.spy_price)}${b.adjusted_for_trade ? " · 已含当日 SPY 成交" : ""}`),
-    kpi("期权链", `${chain?.expiry || "—"}（${chain?.dte ?? "—"} 天）`, `SPY ${money(chain?.spot)} · ${chain?.n_puts_in_expiry ?? "—"} 个认沽（行权价）`));
+    kpi("期权链", `${chain?.expiry || "—"}（${chain?.dte ?? "—"} 天）`,
+      `SPY ${money(chain?.spot)} · ${chain?.n_puts_in_expiry ?? "—"} 个认沽（行权价）· 报价时间 ${chain?.quote_time || "未知"}${chain?.session_live ? "（盘中）" : ""}`));
 }
 
 function candTable(t, selId, onPick) {
@@ -51,7 +52,7 @@ function candTable(t, selId, onPick) {
       ? h("span", { class: c.unit.is_credit ? "up" : "" }, `${c.unit.is_credit ? "收 " : "付 "}${money(Math.abs(c.sizing.net_cost_usd), 0)}`,
         h("span", { class: "sub" }, `${num(Math.abs(c.sizing.net_cost_pct_nav), 2)}% NAV`)) : "—") },
     { label: "卖出腿名义额", cls: "r", render: (c) => (c.available ? `${num(c.sizing.short_notional_pct_nav, 0)}% NAV` : "—") },
-    { label: "下行最差格 前 → 后", cls: "r", render: (c) => (c.available && c.effect.downside_worst_before
+    { label: "下行 / 平盘最差格 前 → 后", cls: "r", render: (c) => (c.available && c.effect.downside_worst_before
       ? h("span", {}, `${sMoney(c.effect.downside_worst_before.pnl)} → `, h("b", {}, sMoney(c.effect.downside_worst_after?.pnl))) : "—") },
     { label: "已抵消（目标格）", cls: "r", render: (c) => (c.available && isNum(c.sizing.offset_achieved)
       ? h("span", { class: tone(c.sizing.offset_achieved) }, sPct(c.sizing.offset_achieved * 100, 0).replace(/^\+/, ""),
@@ -112,7 +113,7 @@ function detail(t, c) {
   const target = c.sizing.target_cell;
   const node = h("div", {},
     h("p", { class: "small" }, `规模：${c.sizing.basis === "offset_target"
-      ? `在下行侧最差格（${cellName(target)}）抵消 ${num(c.sizing.offset_target * 100, 0)}% 亏损所需的整数单位`
+      ? `在下行 / 平盘侧最差格（${cellName(target)}）抵消 ${num(c.sizing.offset_target * 100, 0)}% 亏损所需的整数单位`
       : `按 1 单位显示——${c.sizing.reason_zh || "定不了规模"}`}。`
       + `实际抵消 ${isNum(c.sizing.offset_achieved) ? num(c.sizing.offset_achieved * 100, 0) + "%" : "—"}；`
       + `全网格最差 ${sPct(e.worst_before_pct_nav, 1)} → ${sPct(e.worst_after_pct_nav, 1)} NAV（${cellName(e.worst_after)}）；`
@@ -133,7 +134,7 @@ function detail(t, c) {
     legsTable(c));
   node._after = () => {
     const col = C();
-    lines(curveEl, { x: x.curve.map((p) => `${p.spot_pct}%`), yFmt: (v) => sMoney(v),
+    return lines(curveEl, { x: x.curve.map((p) => `${p.spot_pct}%`), yFmt: (v) => sMoney(v),
       series: [{ name: "到期盈亏", data: x.curve.map((p) => p.pnl), color: col.ink, width: 2 }],
       hmarks: [{ value: 0, label: "", color: col.lineStrong, type: "solid" }] });
   };
@@ -148,6 +149,14 @@ export async function renderTailHedge(host, alive, force = false) {
     return;
   }
   if (!alive()) return;
+  try {
+    renderTailBody(host, alive, t);
+  } catch (e) {
+    fill(host, panel(TITLE, {}, errorBox(e), h("p", { class: "small muted" }, "返回的数据形状没认出来；其余对冲页内容不受影响。")));
+  }
+}
+
+function renderTailBody(host, alive, t) {
   const reload = h("button", { type: "button", class: "btn", onclick: () => renderTailHedge(host, alive, true) }, "重新拉取");
   const meta = t.meta || { reasons: {}, flags: {}, caveats: {} };
   t.meta = meta;
@@ -157,19 +166,23 @@ export async function renderTailHedge(host, alive, force = false) {
   if (!t.available) {
     fill(host, panel(TITLE, { right: reload }, lede,
       h("p", { class: "callout warn" }, `现在算不出来：${t.reason_zh || say(meta.reasons, t.reason)}${t.chain_reason ? `（取链：${t.chain_reason}）` : ""}`),
+      Object.entries(t.ledger_errors || {}).map(([k, v]) => h("p", { class: "small muted" }, `账本读取错误 · ${k}：${v}`)),
       t.baseline ? baselineStrip(t.baseline, null) : null));
     return;
   }
   let sel = (t.candidates.find((c) => c.available) || {}).id || null;
   const detailHost = h("div");
   const listHost = h("div");
+  let chart = null;
   const draw = () => {
+    release(chart);
+    chart = null;
     fill(listHost, candTable(t, sel, (id) => { sel = id; draw(); }));
     const c = t.candidates.find((x) => x.id === sel);
     if (!c) { fill(detailHost, h("div", { class: "empty" }, "没有可用候选。")); return; }
     const d = detail(t, c);
     fill(detailHost, panel(`${candName(c)} · ${strikes(c)}`, { sub: "点上面的行切换候选" }, d));
-    d._after();
+    chart = d._after();
   };
   fill(host, panel(TITLE, { right: reload, sub: `审计日 ${t.baseline.date} · ${t.cache_age_sec > 1 ? `缓存 ${num(t.cache_age_sec, 0)} 秒前` : "刚拉取"}` },
     lede,
