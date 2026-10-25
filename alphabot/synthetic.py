@@ -331,6 +331,42 @@ def _demo_stress(pn: dict, nav: float, spots=(-10, -5, 0, 5, 10), ivs=(-10, 0, 1
             "partial": False, "excluded": [], "n_used": 24}
 
 
+_DEMO_TAIL_NAMES = (("NVDA", "Technology", -0.068), ("XOM", "Energy", -0.055), ("CVX", "Energy", -0.048),
+                    ("AMZN", "Technology", -0.040), ("VZ", "Communication", -0.020), ("AMC", "Communication", -0.015))
+
+
+def _demo_tail(nav: float, k: int, entries: Optional[List[dict]] = None) -> dict:
+    """合成的 `tail` 一节（形状同 `tail_budget.build`）：6 个跨式名按固定比例 ×（1 + 0.03·k）缩放，演示曲线会慢慢爬升过告警线。
+    只给演示与测试用，数字不代表任何真实组合。"""
+    scale = 0.55 + 0.07 * k
+    rows = [{"ticker": tk, "sector": sec, "n_rows": 2, "at_worst": round(nav * f * scale, 2),
+             "at_worst_pct": round(f * scale * 100, 2), "at_downside": round(nav * f * scale, 2),
+             "at_downside_pct": round(f * scale * 100, 2),
+             "own_worst": {"spot_pct": -10.0, "iv_pts": 20.0, "pnl": round(nav * f * scale, 2), "pct_nav": round(f * scale * 100, 2)},
+             "by_kind": {"option": {"at_worst": round(nav * f * scale, 2), "at_downside": round(nav * f * scale, 2)}}}
+            for tk, sec, f in _DEMO_TAIL_NAMES]
+    total = round(sum(r["at_worst"] for r in rows), 2)
+    sectors = {}
+    for r in rows:
+        x = sectors.setdefault(r["sector"], {"sector": r["sector"], "tickers": [], "at_worst": 0.0})
+        x["tickers"].append(r["ticker"])
+        x["at_worst"] += r["at_worst"]
+    by_sector = sorted(({**x, "at_worst": round(x["at_worst"], 2), "at_worst_pct": round(x["at_worst"] / nav * 100, 2),
+                         "at_downside": round(x["at_worst"], 2), "at_downside_pct": round(x["at_worst"] / nav * 100, 2)}
+                        for x in sectors.values()), key=lambda x: x["at_worst"])
+    loss = round(-total / nav * 100, 2)
+    worst = {"spot_pct": -10.0, "iv_pts": 20.0, "pnl": total, "pct_nav": -loss}
+    gate = {"version": "tail_budget_v1", "budgets_pct": ["15", "20"], "entries": entries or [], "n_entries": len(entries or []),
+            "n_unevaluated": 0, "n_would_skip": {b: sum(1 for e in entries or [] if e["would_skip"][b]) for b in ("15", "20")},
+            "basis": "当天收盘标记价下的实际账（演示数据）"}
+    return {"version": "tail_budget_v1", "available": True, "reason": None, "nav": nav, "worst": worst, "downside_worst": worst,
+            "loss_pct_nav": loss, "partial": False, "excluded": [], "by_ticker": rows, "by_sector": by_sector,
+            "residual_usd": 0.0, "alert_pct": 20.0, "gate_shadow": gate, "as_of": None,
+            "brief": {"available": True, "alert_pct": 20.0, "loss_pct_nav": loss, "breach": loss > 20.0, "worst": worst,
+                      "partial": False, "top": [], "top_sectors": [], "gate_n_would_skip": gate["n_would_skip"],
+                      "gate_n_entries": gate["n_entries"]}}
+
+
 def demo_hedge_view(as_of: Optional[str] = None, days: int = 12) -> dict:
     """合成的对冲账本视图，形状同 `portfolio_greeks.ledger_view()`（演示与测试用，零网络、确定性）。
 
@@ -402,6 +438,11 @@ def demo_hedge_view(as_of: Optional[str] = None, days: int = 12) -> dict:
             "price_check": {"n_stale": 0, "gaps": [], "error": None, "hedge_undecided": None},
             "stress": _demo_stress(pn, port_nav),
         }
+        if i >= days - 5:                                  # 最近 5 天带尾部一节；更早的没有（形如上线之前的真实审计）
+            ents = [{"ticker": "XOM", "sector": "Energy", "side": "short", "entry_date": iso, "applies": True,
+                     "evaluable": True, "reason": None, "loss_before_pct": 16.3, "loss_after_pct": 22.4, "marginal_pct": 6.1,
+                     "would_skip": {"15": True, "20": True}}] if i == days - 3 else []
+            audits[iso]["tail"] = _demo_tail(port_nav, i - (days - 5), ents)
     old = [(cal[0] - timedelta(days=k)).isoformat() for k in (7, 6, 5)]
     return {
         "source": "demo", "state_dir": "(演示数据)", "exists": True, "opened": True, "errors": {},

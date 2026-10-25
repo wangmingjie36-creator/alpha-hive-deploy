@@ -246,6 +246,48 @@ def _identity_reason(acct: dict, errors: dict, opened: bool) -> Optional[str]:
     return f"找不到 {acct.get('mark_date')} 的放行净值行"
 
 
+#: 尾部预算（v0.45.649）给页面的字段：审计文件 `tail` 一节的子集（逐格全表不给）
+TAIL_KEYS = ("date", "nav", "worst", "downside_worst", "loss_pct_nav", "alert_pct", "partial", "excluded",
+             "by_ticker", "by_sector", "residual_usd")
+TAIL_BY_TICKER_SHOWN = 14
+TAIL_GATE_SHOWN = 60
+TAIL_SERIES_SHOWN = 90
+
+
+def tail_overview(audits: dict) -> dict:
+    """尾部预算（`tail_budget`，v0.45.649）→ 页面数据。纯函数，只读放行的审计（`load_history` 的 `audits`）。
+
+    · `latest`：最近一份**带 `tail` 一节**且可得的审计（此前的审计没有这一节，不是「没有尾部」——`n_audits_without_tail` 如实数出来）；
+    · `series`：每天的全组合压力最差格损失（% NAV），页面画曲线与告警线；
+    · `gate_log`：影子闸记录——每笔新开的卖跨式，按当天实际的账加上它之后最差格损失超没超各档预算。**只记录，没有真跳过**；
+      新的在前。评估用的是入场当天收盘后的标记价（不是入场那一刻的报价），也不是反事实（见 `tail_budget` 模块头）。
+    """
+    series, gate_log, latest, last_gate = [], [], None, {}
+    n_without = 0
+    for day in sorted(audits or {}):
+        t = (audits[day] or {}).get("tail")
+        if not isinstance(t, dict):
+            n_without += 1
+            continue
+        if not t.get("available"):
+            series.append({"date": day, "loss_pct_nav": None, "reason": t.get("reason")})
+            continue
+        series.append({"date": day, "loss_pct_nav": _num(t.get("loss_pct_nav")), "breach": bool((t.get("brief") or {}).get("breach")),
+                       "partial": bool(t.get("partial"))})
+        latest = {"date": day, **{k: t.get(k) for k in TAIL_KEYS if k != "date"}}
+        last_gate = t.get("gate_shadow") or last_gate
+        for e in (t.get("gate_shadow") or {}).get("entries") or []:
+            if isinstance(e, dict):
+                gate_log.append({"date": day, **{k: e.get(k) for k in (
+                    "ticker", "sector", "side", "applies", "evaluable", "reason", "reason_zh", "loss_before_pct",
+                    "loss_after_pct", "marginal_pct", "would_skip")}})
+    if latest is not None:
+        latest["by_ticker"] = [x for x in (latest.get("by_ticker") or []) if isinstance(x, dict)][:TAIL_BY_TICKER_SHOWN]
+    return {"latest": latest, "series": series[-TAIL_SERIES_SHOWN:], "n_audits_without_tail": n_without,
+            "gate_log": list(reversed(gate_log))[:TAIL_GATE_SHOWN], "n_gate_entries": len(gate_log),
+            "budgets_pct": last_gate.get("budgets_pct") or [], "gate_basis": last_gate.get("basis")}
+
+
 def build_overview(view: dict, *, now_et: datetime) -> dict:
     """`portfolio_greeks.ledger_view()`（或演示数据，同形）→ 页面数据。纯函数。"""
     base = {"source": view.get("source", "ledger"), "now_et": now_et.isoformat(timespec="seconds"),
@@ -279,6 +321,7 @@ def build_overview(view: dict, *, now_et: datetime) -> dict:
         "latest_is_as_of": (days[-1]["date"] == as_of) if (days and as_of) else None,
         "days": days,
         "delta": delta_overview(view, audits),
+        "tail": tail_overview(audits),
         "equity": [{k: e.get(k) for k in ("date", "nav", "cash", "market_value", "spy_shares", "spy_price",
                                           "trades_today", "band_status")} for e in equity],
         "trades": [{k: t.get(k) for k in TRADE_KEYS} for t in reversed(trades)],      # 新的在前

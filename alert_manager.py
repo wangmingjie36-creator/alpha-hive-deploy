@@ -321,6 +321,7 @@ class AlertAnalyzer:
 
         # 7. 检测 P2: 组合 Greeks 用到了不属于当天那一场的标的价 / 因此拒绝成交（v0.45.423）
         self._check_portfolio_greeks_prices(status)
+        self._check_portfolio_tail(status)       # v0.45.649：压力最差格 > 告警线 / 尾部预算算不出来
         self._check_paper_portfolio_run(status)
         self._check_ledger_io_failures(status)
         self._check_strangle_shadow(status)
@@ -901,6 +902,57 @@ class AlertAnalyzer:
             },
             ["portfolio_greeks", "data_quality"]
         ))
+
+    def _check_portfolio_tail(self, status: Dict) -> None:
+        """组合尾部预算（v0.45.649，`tail_budget` → `portfolio_greeks.compute_day` → `price_check.tail` → scan_timing）。
+
+        为什么要有：2026-10-23 组合压力最差格约 −23% NAV（现货 −10%、IV +20 点），几乎全来自 6 笔卖跨式；而 Gamma / Vega 告警
+        按「1% 移动」标度（gamma 线 0.5% NAV / 1%），损失随移动幅度平方放大——10% 移动要损失约 50% NAV 才响，当天两条都静音。
+        这里直接看压力格：最差格损失 > 告警线（`tail_budget.CONFIG["alert_pct"]`，主观常数）⇒ P2。**只观测、不改任何交易行为。**
+        ⚠️ 当前真实组合就在线之上，所以它会**每个扫描日都响**，直到跨式仓位或告警线变化——这是设计内的（要的就是别再静音）。
+        另一条：尾部预算**算不出来**（`exception:<类>`）⇒ P2，不把「没算出来」当成「没有尾部」。NAV 缺 / 压力表空是数据不全，
+        已由 `_check_portfolio_greeks_prices` 的「数据不全」覆盖，这里不重复。旧版扫描的计数没有 `tail` 键 ⇒ 不报（不猜）。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        pg = (st.get("counters") or {}).get("portfolio_greeks")
+        if not isinstance(pg, dict) or pg.get("error"):
+            return                      # 整轮没跑到 / 异常中断：`_check_portfolio_greeks_prices` 已报
+        tail = pg.get("tail")
+        if not isinstance(tail, dict):
+            return
+        if not tail.get("available"):
+            if str(tail.get("reason") or "").startswith("exception"):
+                self.alerts.append(Alert(
+                    AlertLevel.MEDIUM,
+                    f"📊 【P2 中】组合尾部预算：{pg.get('as_of')} 算不出来（{tail.get('reason')}），压力最差格告警与影子闸这一天没有记录",
+                    {"原因": str(tail.get("reason")),
+                     "影响": "尾部告警这一天是盲的；连续几天都这样 = 尾部观测整段停摆",
+                     "建议": "看 alpha_hive.log 里「尾部预算算不出来」那一行的异常；审计文件 hedge_state/greeks_<日期>.json 的 tail 一节"},
+                    ["portfolio_greeks", "tail_budget"]))
+            return
+        if not tail.get("breach"):
+            return
+        w = tail.get("worst") or {}
+        top = "；".join(f"{t.get('ticker')} {t.get('at_worst_pct'):+.1f}%（{t.get('sector')}）" for t in tail.get("top") or []) or "—"
+        sec = "；".join(f"{t.get('sector')} {t.get('at_worst_pct'):+.1f}%" for t in tail.get("top_sectors") or []) or "—"
+        skip = tail.get("gate_n_would_skip") or {}
+        gate = (f"今天新开 {tail.get('gate_n_entries', 0)} 笔，按 " + " / ".join(f"{k}%" for k in skip)
+                + " 预算会跳过 " + " / ".join(str(v) for v in skip.values()) + " 笔（影子记录，没有真跳过）") if skip else "—"
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】组合尾部：压力最差格（现货 {w.get('spot_pct', 0):+g}%、IV {w.get('iv_pts', 0):+g} 点）损失 "
+            f"{tail.get('loss_pct_nav')}% NAV，超过告警线 {tail.get('alert_pct'):g}%",
+            {
+                "最差格": f"{w.get('pnl')} 美元（{w.get('pct_nav')}% NAV）",
+                "主要来源": top,
+                "板块": sec,
+                "影子闸": gate,
+                "压力表": "有行被剔除，实际损失可能更大" if tail.get("partial") else "完整",
+                "影响": "只观测：不改任何交易行为。这是净空 Gamma / Vega 的跨式账的尾部，SPY 股票对冲管不到它",
+                "建议": "看 Alpha Bot「对冲」页的尾部贡献表；要不要拦截新开仓是另一个决定（先看影子闸攒的记录）",
+            },
+            ["portfolio_greeks", "tail_budget"]))
 
     def _check_news_sources(self, status: Dict) -> None:
         """新闻通道的实际来源（v0.45.444，`scan_timing.extra.news_sources`，写入者 `alpha_hive_daily_report.main`）。

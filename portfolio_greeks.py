@@ -111,6 +111,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import delta_hedge as dh
 import ledger_io
+import tail_budget as tb
 from cboe_options import bid_zero_greeks_usable
 from hive_logger import PATHS, get_logger
 
@@ -1595,6 +1596,37 @@ def _data_gaps(chk: Dict) -> List[str]:
     return out
 
 
+def _sector_of(ticker: str) -> Optional[str]:
+    """板块取自 `config.WATCHLIST`（唯一的标的名单）；不在名单里 ⇒ None（尾部表里记「未分类」，不猜）。"""
+    try:
+        import config
+        return (config.WATCHLIST.get(ticker) or {}).get("sector")
+    except Exception:  # noqa: BLE001 - 板块只是分组标签；取不到就是未分类，不影响数字
+        return None
+
+
+def _tail_section(as_of: str, rows: List[Dict], spy_price: Optional[float], nav: Optional[float]) -> Dict:
+    """组合尾部预算（v0.45.649，`tail_budget`）：压力最差格告警简报 + 逐标的 / 板块贡献 + 卖跨式影子闸。**只观测**。
+    算出来异常 ⇒ ERROR 日志 + 简报 `available=False, reason=exception:<类>`（alert_manager 报 P2）：不把「没算出来」改写成「没有尾部」。"""
+    try:
+        import options_paper_leg as opl
+        positions = _load_jsonl(opl.POSITIONS_FILE)          # 与 `option_exposures` 同一个读法；文件顺序 = 开仓顺序
+        sec = tb.build(rows, spy_price, nav, stress_table, _sector_of, positions, as_of)
+    except Exception as exc:  # noqa: BLE001
+        _log.error("[PortfolioGreeks] %s 尾部预算算不出来：%s: %s", as_of, type(exc).__name__, exc)
+        reason = f"exception:{type(exc).__name__}"
+        return {"version": tb.VERSION, "available": False, "reason": reason, "alert_pct": tb.CONFIG["alert_pct"],
+                "brief": {"available": False, "reason": reason, "alert_pct": tb.CONFIG["alert_pct"], "breach": False}}
+    b = sec.get("brief") or {}
+    if b.get("breach"):
+        w = b.get("worst") or {}
+        _log.warning("[PortfolioGreeks] %s 尾部压力：最差格（现货 %+g%%、IV %+g 点）损失 %.1f%% NAV，超过告警线 %.0f%%；"
+                     "主要来自 %s%s", as_of, w.get("spot_pct", 0), w.get("iv_pts", 0), b.get("loss_pct_nav", 0.0),
+                     b.get("alert_pct", 0.0), "、".join(f"{t['ticker']} {t['at_worst_pct']:+.1f}%" for t in b.get("top") or []) or "—",
+                     "（压力表有行被剔除，实际可能更大）" if b.get("partial") else "")
+    return sec
+
+
 def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dict:
     """只读：暴露行 + 聚合 + 建议 + 压力表。不写任何账本文件（β 缓存除外——那是缓存）。
     v0.45.423：每个标的价都要是 as_of 那一场的（`_resolve_mark`）；不是的行判陈旧、不进 $Delta，
@@ -1641,7 +1673,9 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     agg = aggregate(rows, nav_d["nav"])
     rec = hedge_recommendation(agg, spy_price, nav_d["nav"])
     stress = stress_table(rows, spy_price)
+    tail = _tail_section(as_of, rows, spy_price, nav_d["nav"])
     chk = _price_check(as_of, rows, spy_mark, rec, nav_d.get("missing"))
+    chk["tail"] = tail.get("brief")               # 小简报 → scan_timing → alert_manager；完整表在审计文件的 `tail` 一节
     gaps = chk["gaps"]
     if chk["n_stale"] or chk["n_quote_stale"] or spy_mark["stale"]:
         bits = []
@@ -1668,7 +1702,7 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     return {"as_of": as_of, "version": _VERSION, "spy_price": spy_price, "spy_mark": spy_mark,
             "nav": nav_d, "rows": rows, "aggregate": agg, "recommendation": rec, "stress": stress,
             "today_trade": today_trade, "price_check": chk, "delta_hedge": delta_section,
-            "excluded_from_hedge": excluded}
+            "excluded_from_hedge": excluded, "tail": tail}
 
 
 def _execute_trade(as_of: str, rec: Dict, agg: Dict, nav: Optional[float],
