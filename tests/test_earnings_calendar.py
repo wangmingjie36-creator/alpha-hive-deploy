@@ -26,6 +26,7 @@ import pytest
 import earnings_calendar as EC
 import sell_strike_candidates as SC
 from tests import _ast_cache
+from tests import _repo_files
 from tests._repo_files import walk_own_python_files
 
 REPO = Path(__file__).resolve().parent.parent
@@ -309,9 +310,39 @@ class TestNeverLooserThanLegacy:
 #: 这条守卫不扫的目录：测试、实验、归档。第三方 / 点号目录 / iCloud 冲突副本的排除口径在共享件
 #: `tests/_repo_files.py::walk_own_python_files`——唯一实现，这里不再自抄。
 _PROD_SKIP_DIRS = frozenset({"tests", "experiments", "_archive"})
-#: 扫描文件数的下限：远低于实际规模的一半就说明有一大片目录悄悄不见了（读不了 / 被误剪），守卫会在「什么都没扫到」时
-#: 照样绿。不取贴着现状的数字，免得每增删几个文件就红。
-_PROD_MIN_FILES = 200
+#: 扫描文件数的下限 = **git 跟踪的生产 .py 数**的这一比例（现状的 2/5）：远低于实际规模就说明有一大片目录悄悄不见了
+#: （读不了 / 被误剪），守卫会在「什么都没扫到」时照样绿。
+#: 为什么不写死一个数（v0.45.646）：原先写死 200，而开发检出里生产文件 ~500（含未跟踪目录）、git worktree / CI
+#: 干净克隆里只有 ~205——200 在干净克隆里只差 5 个就红，「下限至少是实际的一半」那条自证更是在 CI 上必红。
+#: 按**独立的 git 清单**算，下限就跟着环境和仓库规模走，且仍与遍历自己的名字规则无关（清单只套同一份排除口径）。
+_PROD_MIN_FRACTION = 0.4
+#: 清单本身的健全下限：读出来的数低于它，说明对账的另一端是空的（不是仓库、clone 被浅化 …），比例下限就不作数。
+_MANIFEST_SANITY_MIN = 100
+
+
+@functools.lru_cache(maxsize=1)
+def _tracked_prod_count():
+    """git 跟踪的生产 .py 数——与 `walk_own_python_files(skip_dirs=_PROD_SKIP_DIRS)` 同口径的**独立**清单。
+    取不到清单就是红，不 skip：开发检出 / worktree / CI 干净克隆都在 git 仓库里。"""
+    import subprocess
+    r = subprocess.run(["git", "ls-files", "-z", "*.py"], cwd=str(REPO), capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, f"git ls-files 失败（{r.returncode}）：{r.stderr[:200]}"
+    n = 0
+    for x in r.stdout.split("\x00"):
+        if not x:
+            continue
+        rel = Path(x)
+        if not _repo_files._is_ours(rel) or _repo_files.ICLOUD_COPY.search(rel.name) \
+                or any(_repo_files.ICLOUD_COPY.search(d) for d in rel.parts[:-1]) \
+                or _PROD_SKIP_DIRS & set(rel.parts[:-1]):
+            continue
+        n += 1
+    assert n >= _MANIFEST_SANITY_MIN, f"git 清单只读出 {n} 个生产 .py——对账的另一端是空的，下限不作数"
+    return n
+
+
+def _prod_min_files():
+    return int(_tracked_prod_count() * _PROD_MIN_FRACTION)
 
 
 @functools.lru_cache(maxsize=1)
@@ -320,8 +351,9 @@ def _prod_file_list():
     读不了的目录或文件数低于下限 ⇒ 直接断言失败，不让守卫在缺了覆盖的情况下静默通过。"""
     res = walk_own_python_files(REPO, skip_dirs=_PROD_SKIP_DIRS)
     assert not res.errors, f"遍历读不了这些目录，守卫的覆盖不完整：{res.errors[:5]}"
-    assert len(res.files) >= _PROD_MIN_FILES, \
-        f"只扫到 {len(res.files)} 个生产文件（下限 {_PROD_MIN_FILES}）——是不是有一大片目录被误剪了？"
+    floor = _prod_min_files()
+    assert len(res.files) >= floor, \
+        f"只扫到 {len(res.files)} 个生产文件（下限 {floor}，git 跟踪 {_tracked_prod_count()} 个）——是不是有一大片目录被误剪了？"
     return tuple((p.relative_to(REPO).as_posix(), p) for p in res.files)
 
 
@@ -456,7 +488,7 @@ class TestProdFilesWalk:
         """扫到的文件数低于下限（一大片目录被误剪）⇒ 断言失败，不在「几乎什么都没扫到」时静默通过。"""
         from tests._repo_files import WalkResult
         monkeypatch.setattr(sys.modules[__name__], "walk_own_python_files",
-                            lambda *a, **k: WalkResult([REPO / "x.py"] * (_PROD_MIN_FILES - 1), [], []))
+                            lambda *a, **k: WalkResult([REPO / "x.py"] * (_prod_min_files() - 1), [], []))
         _prod_file_list.cache_clear()
         try:
             with pytest.raises(AssertionError, match="下限"):
@@ -466,8 +498,18 @@ class TestProdFilesWalk:
             _prod_file_list.cache_clear()
 
     def test_floor_is_well_below_the_real_size(self):
-        """下限不能贴着现状（每增删几个文件就红）：实际文件数至少是下限的两倍。"""
-        assert len(_prod_file_list()) >= 2 * _PROD_MIN_FILES
+        """下限不能贴着现状（每增删几个文件就红）：实际文件数至少是下限的两倍。
+        在任何环境里都成立——下限按该环境的 git 清单算，不是写死的数（v0.45.646：写死 200 时，worktree / CI 干净克隆的
+        ~205 个文件让这条恒红）。"""
+        assert len(_prod_file_list()) >= 2 * _prod_min_files()
+
+    def test_floor_is_derived_from_the_git_manifest_and_is_not_toothless(self):
+        """下限既不是脱离清单的常数，也不能低到形同虚设：占 git 跟踪数的 [1/4, 1/2]。
+        （比例改成 0 ⇒ 「文件太少」自证测试没有可喂的退化数据、这条也红；改成 0.9 ⇒ 上面「远低于现状」那条红。）"""
+        tracked = _tracked_prod_count()
+        floor = _prod_min_files()
+        assert floor == int(tracked * _PROD_MIN_FRACTION)
+        assert tracked / 4 <= floor <= tracked / 2, (floor, tracked)
 
     def test_yields_in_path_order(self, tmp_path):
         got = [rel for rel, _ in _prod_files(self._tree(tmp_path))]

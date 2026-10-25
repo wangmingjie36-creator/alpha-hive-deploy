@@ -5,7 +5,14 @@
 
 ---
 
-## [0.45.646] — 2026-10-25 — 占位（进行中：v0.45.642 全仓遍历守卫在 git worktree / 干净克隆里的两条误红——只动测试 / 测试辅助）
+## [0.45.646] — 2026-10-25 — Fixed：v0.45.642 全仓遍历守卫的两条测试在 git worktree / CI 干净克隆里误红——「剪枝自证」与「文件数下限」改按环境实际算（只动测试）
+
+v0.45.643 的整套测试在 worktree 里实测出 2 条与该改动无关的红，都来自 v0.45.642 新增的 `tests/_repo_files.py::walk_own_python_files` 及其两处调用方。两条**都是测试写死了「只在开发检出里成立」的前提**，生产代码一行没动。干净克隆（= CI 的 `actions/checkout`）实测只红其中一条（见下）。
+
+### Fixed
+- **`tests/test_repo_files_walk.py::TestAgainstTheGitManifest::test_real_repo_walk_reads_everything_and_enters_no_third_party_tree`**：断言 `(".git", "hidden") in res.pruned`。git worktree 里 `.git` 是一个**文件**（`gitdir: …`），不在 `os.walk` 的 `dirnames` 里，「连 .git 都没剪」是误报；开发检出 / 干净克隆里 `.git` 是目录所以一直绿。改为：枚举仓库根下**实际存在**的点号目录（`os.scandir`），要求它们**全部**以 `hidden` 进了 `pruned`；先断言该集合非空（`.github` / `.claude` 是被跟踪的目录，任何环境都有；空集合会让包含断言恒真）。「剪枝规则确实生效」这层自证保留且更严：不再只看 `.git` 一个。
+- **`tests/test_earnings_calendar.py::TestProdFilesWalk::test_floor_is_well_below_the_real_size`**：断言 `len(_prod_file_list()) >= 2 * 200`。实测（`git clone` 到临时目录）干净克隆里遍历得 **205** 个生产 .py（开发检出 ~501 含未跟踪目录），所以这条在 worktree 与 CI 上**恒红**；而同文件写死的下限 `_PROD_MIN_FILES = 200` 在干净克隆里只差 5 个文件就会让真守卫红（删几个文件即触发）——「不要贴着现状」恰好在 CI 环境被违反。改为：下限 = **git 跟踪的生产 .py 数**（`git ls-files '*.py'` 套与遍历同一份排除口径：`_is_ours` / iCloud 副本 / `_PROD_SKIP_DIRS`）× `_PROD_MIN_FRACTION`（0.4，即现状的 2/5）；清单读不出或低于健全下限 100 ⇒ 红，不 skip。新增 `test_floor_is_derived_from_the_git_manifest_and_is_not_toothless`（下限须占清单的 [1/4, 1/2]，防比例被调成 0 或贴着现状）。
+- 变异检查（均实测会红）：关掉点号目录剪枝 ⇒ `test_real_repo_walk_…` 报「这些点号目录存在却没被剪：['.claude', '.github']」；`_PROD_MIN_FRACTION` 0.0 ⇒ 「文件太少」自证红、0.1 ⇒ 新增那条红、0.9 ⇒ `test_floor_is_well_below_the_real_size` 红；清单健全下限调到 10 万 ⇒ 守卫红。
 
 ## [0.45.645] — 2026-10-24 — 占位（进行中：根治 yfinance 分红空行污染行情三字段——生产取数与维度 IC 冻结通道层同改，看结果前登记协议修订）
 
