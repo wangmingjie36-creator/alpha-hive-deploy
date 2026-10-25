@@ -343,7 +343,9 @@ def _demo_tail(nav: float, k: int, entries: Optional[List[dict]] = None) -> dict
              "at_worst_pct": round(f * scale * 100, 2), "at_downside": round(nav * f * scale, 2),
              "at_downside_pct": round(f * scale * 100, 2),
              "own_worst": {"spot_pct": -10.0, "iv_pts": 20.0, "pnl": round(nav * f * scale, 2), "pct_nav": round(f * scale * 100, 2)},
-             "by_kind": {"option": {"at_worst": round(nav * f * scale, 2), "at_downside": round(nav * f * scale, 2)}}}
+             "by_kind": {"option": {"at_worst": round(nav * f * scale, 2), "at_downside": round(nav * f * scale, 2)}},
+             "slot": {"loss_pct": round(-f * scale * 100, 2), "cap_pct": 3.33, "over_cap": -f * scale * 100 > 3.33,
+                      "multiple": round(-f * scale * 100 / 3.33, 2)}}
             for tk, sec, f in _DEMO_TAIL_NAMES]
     total = round(sum(r["at_worst"] for r in rows), 2)
     sectors = {}
@@ -359,7 +361,9 @@ def _demo_tail(nav: float, k: int, entries: Optional[List[dict]] = None) -> dict
     gate = {"version": "tail_budget_v1", "budgets_pct": ["15", "20"], "entries": entries or [], "n_entries": len(entries or []),
             "n_unevaluated": 0, "n_would_skip": {b: sum(1 for e in entries or [] if e["would_skip"][b]) for b in ("15", "20")},
             "basis": "当天收盘标记价下的实际账（演示数据）"}
+    over = [r["ticker"] for r in rows if r["slot"]["over_cap"]]
     return {"version": "tail_budget_v1", "available": True, "reason": None, "nav": nav, "worst": worst, "downside_worst": worst,
+            "slot_cap_pct": 3.33, "max_open": 6, "n_over_cap": len(over), "over_cap_tickers": over,
             "loss_pct_nav": loss, "partial": False, "excluded": [], "by_ticker": rows, "by_sector": by_sector,
             "residual_usd": 0.0, "alert_pct": 20.0, "gate_shadow": gate, "as_of": None,
             "brief": {"available": True, "alert_pct": 20.0, "loss_pct_nav": loss, "breach": loss > 20.0, "worst": worst,
@@ -452,7 +456,7 @@ def demo_hedge_view(as_of: Optional[str] = None, days: int = 12) -> dict:
         "meta": {"version": "demo", "starting_date": cal[0].isoformat(), "cash": round(cash, 4),
                  "last_run_date": cal[-1].isoformat()},
         "rules": {"beta_delta_band_pct": band, "beta_delta_target_pct": 0.0, "rebalance_to": "edge",
-                  "hedge_instrument": "SPY", "vega_alert_pct": 1.0, "gamma_alert_pct": 0.5, "beta_window": 60},
+                  "hedge_instrument": "SPY", "vega_alert_pct": 0.5, "gamma_alert_pct": 0.1, "alert_lines_source": "derived", "tail_alert_pct": 20.0, "beta_window": 60},
         "measurement_start": cal[0].isoformat(),
         "history": {
             "trades": trades, "equity": equity, "audits": audits,

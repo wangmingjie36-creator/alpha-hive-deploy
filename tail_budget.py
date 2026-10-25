@@ -33,14 +33,17 @@
 from __future__ import annotations
 
 import math
+from datetime import date
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 VERSION = "tail_budget_v1"
 
-#: 全是**主观常数、未经检验**。改任何一项 ⇒ 告警 / 影子记录的含义变了，CHANGELOG 要写；影子记录按 `version` 分代。
+#: **`alert_pct` 是用户的风险承受度，不是统计量**（2026-10-25 用户定：纸面跨式账在一次「现货 −10%、IV +20 点」里最多允许亏 20% NAV）。
+#: 其余几项（影子闸的另一档 15%、点名个数）是我定的主观常数、未经检验。改任何一项 ⇒ 告警 / 影子记录的含义变了，CHANGELOG 要写；
+#: 影子记录按 `version` 分代。**Gamma / Vega 告警线与单仓上限都从 `alert_pct` 推出来**（见 `derived_greek_lines` / `slot_cap_pct`），不另设常数。
 CONFIG: Dict[str, object] = {
-    "alert_pct": 20.0,                      # 全组合压力最差格损失 > 它（% NAV）⇒ 告警（P2）
-    "shadow_budgets_pct": (15.0, 20.0),     # 影子闸的两档预算（% NAV）
+    "alert_pct": 20.0,                      # 一次压力冲击里最多允许的损失（% NAV）：全组合最差格损失 > 它 ⇒ 告警（P2）
+    "shadow_budgets_pct": (15.0, 20.0),     # 影子闸的两档预算（% NAV）：20 = 上面的承受度，15 = 更严的一档
     "top_n": 3,                             # 告警简报里点名的标的个数
 }
 UNCLASSIFIED = "未分类"
@@ -54,6 +57,29 @@ REASONS: Dict[str, str] = {
     "no_grid_for_ticker": "这只标的的跨式腿没有进压力表（缺价 / 缺报价 / 已到期被剔除），没法试算",
     "not_in_book_order": "这只标的不在今天的跨式持仓里（持仓文件与审计行对不上）",
 }
+
+
+def derived_greek_lines(alert_pct: float, spot_pct: float, iv_pts: float) -> Dict[str, float]:
+    """Gamma / Vega 告警线（% NAV）从尾部预算推出来，不另设常数。
+
+    压力冲击（现货 `spot_pct`%、IV `iv_pts` 点）下的损失，二阶近似：`Gamma(1%)·spot² + Vega·iv`（Delta 项在市场中性的
+    账里可忽略，且符号不定）。把预算 `alert_pct` **对半**分给两项：
+        gamma 线 = alert_pct/2 ÷ spot²        （alert 20、spot 10 ⇒ 0.10% NAV / 1%）
+        vega  线 = alert_pct/2 ÷ iv           （alert 20、iv 20  ⇒ 0.50% NAV / 点）
+    两项都顶到线时，损失正好等于预算。**对半分是约定，不是校准**；这两条线只做早期预警与归因（页面上的 ⚠️ 标记，没有
+    alert_manager 路径），真正的告警仍是压力网格那条——二阶近似不含 Delta / skew，跟压力表差几个百分点是常态
+    （2026-10-23：近似 22.4% vs 压力表 23.1%）。"""
+    a, sp, iv = _num(alert_pct), _num(spot_pct), _num(iv_pts)
+    if not a or not sp or not iv or a <= 0 or sp <= 0 or iv <= 0:
+        raise ValueError(f"推导 Gamma / Vega 线需要正的预算与冲击幅度，收到 {alert_pct!r} / {spot_pct!r} / {iv_pts!r}")
+    return {"gamma_alert_pct": a / 2.0 / (sp * sp), "vega_alert_pct": a / 2.0 / iv}
+
+
+def slot_cap_pct(alert_pct: float, max_open: Optional[int]) -> Optional[float]:
+    """单仓上限（% NAV）：预算平分给跨式账的每个名额（`max_open`），`alert_pct ÷ max_open`。
+    是规则、不是调出来的：6 个名额各分 20% ÷ 6 ≈ 3.33%。单笔超过它 ⇒ 这一笔一个人就吃掉了不止一个名额的预算。"""
+    a, n = _num(alert_pct), _num(max_open)
+    return a / n if (a and n and n > 0) else None
 
 
 def _num(v) -> Optional[float]:
@@ -108,6 +134,15 @@ def _cell(k: Optional[Tuple[float, float]], pnl: Optional[float], nav: float) ->
     return {"spot_pct": k[0], "iv_pts": k[1], "pnl": _r(pnl), "pct_nav": _r(pnl / nav * 100.0, 2)}
 
 
+def _slot(cells: Optional[Dict], nav: float, cap: Optional[float]) -> Optional[dict]:
+    """这个标的的**跨式腿单独**最差格损失（% NAV）与单仓上限的对比；没有跨式腿 / 没有上限 ⇒ None。"""
+    if not cells or cap is None:
+        return None
+    loss = _loss_pct(cells, nav)
+    return {"loss_pct": _r(loss, 2), "cap_pct": _r(cap, 2), "over_cap": bool(loss > cap),
+            "multiple": _r(loss / cap, 2) if cap else None}
+
+
 def _bucket_key(r: dict) -> Tuple[str, str]:
     kind = str(r.get("kind") or "")
     return str(r.get("ticker") or "?"), kind
@@ -115,7 +150,7 @@ def _bucket_key(r: dict) -> Tuple[str, str]:
 
 def attribution(rows: Sequence[dict], spy_price: Optional[float], nav: Optional[float],
                 stress_fn: Callable[[List[dict], Optional[float]], dict],
-                sector_of: Callable[[str], Optional[str]]) -> dict:
+                sector_of: Callable[[str], Optional[str]], max_open: Optional[int] = None) -> dict:
     """全组合压力最差格 + 逐标的 / 板块的贡献。`stress_fn(rows, spy_price)` ⇒ `stress_table` 形状的 dict。
 
     每个 (标的, 种类) 桶各算一次压力表再按格相加——压力表逐行独立，所以各桶之和 = 全组合；
@@ -143,6 +178,7 @@ def attribution(rows: Sequence[dict], spy_price: Optional[float], nav: Optional[
         ent["by_kind"][kind] = {"at_worst": _r(c.get(w[0], 0.0)), "at_downside": _r(c.get(wd[0], 0.0)) if wd else None}
         ent["n_rows"] += len(sub)
     out_t: List[dict] = []
+    cap = slot_cap_pct(CONFIG["alert_pct"], max_open)
     for tk, ent in by_ticker.items():
         cc = ent["cells"]
         ow = _worst(cc)
@@ -155,6 +191,7 @@ def attribution(rows: Sequence[dict], spy_price: Optional[float], nav: Optional[
             "at_downside": _r(at_d), "at_downside_pct": _r(at_d / nav_f * 100.0, 2) if at_d is not None else None,
             "own_worst": _cell(ow[0], ow[1], nav_f) if ow else None,
             "by_kind": ent["by_kind"],
+            "slot": _slot(option_cells.get(tk), nav_f, cap),
         })
     out_t.sort(key=lambda x: (x["at_worst"], x["ticker"]))
     sectors: Dict[str, dict] = {}
@@ -167,7 +204,9 @@ def attribution(rows: Sequence[dict], spy_price: Optional[float], nav: Optional[
                      "at_downside": _r(s["at_downside"]), "at_downside_pct": _r(s["at_downside"] / nav_f * 100.0, 2)}
                     for s in sectors.values()), key=lambda s: (s["at_worst"], s["sector"]))
     residual = w[1] - sum(t["at_worst"] or 0.0 for t in out_t)
+    over = [t["ticker"] for t in out_t if (t.get("slot") or {}).get("over_cap")]
     return {"available": True, "reason": None, "version": VERSION, "nav": _r(nav_f),
+            "slot_cap_pct": _r(cap, 2), "max_open": max_open, "n_over_cap": len(over), "over_cap_tickers": over,
             "worst": _cell(w[0], w[1], nav_f), "downside_worst": _cell(wd[0], wd[1], nav_f) if wd else None,
             "loss_pct_nav": _r(_loss_pct(total, nav_f), 2),
             "partial": bool(total_t.get("partial")), "excluded": list(total_t.get("excluded") or [])[:8],
@@ -228,7 +267,10 @@ def brief(attr: dict, gate: Optional[dict], alert_pct: Optional[float] = None) -
     top = [{"ticker": t["ticker"], "sector": t["sector"], "at_worst_pct": t["at_worst_pct"]}
            for t in attr["by_ticker"][:int(CONFIG["top_n"])] if (t["at_worst"] or 0.0) < 0]
     sec = [{"sector": s["sector"], "at_worst_pct": s["at_worst_pct"]} for s in attr["by_sector"][:2] if (s["at_worst"] or 0.0) < 0]
+    over = [{"ticker": t["ticker"], "loss_pct": t["slot"]["loss_pct"], "multiple": t["slot"]["multiple"]}
+            for t in attr["by_ticker"] if (t.get("slot") or {}).get("over_cap")]
     return {"available": True, "alert_pct": alert_pct, "loss_pct_nav": loss, "breach": bool(loss > alert_pct),
+            "slot_cap_pct": attr.get("slot_cap_pct"), "n_over_cap": len(over), "over_cap": over,
             "worst": attr["worst"], "partial": attr["partial"], "top": top, "top_sectors": sec,
             "gate_n_would_skip": (gate or {}).get("n_would_skip") or {}, "gate_n_entries": (gate or {}).get("n_entries", 0)}
 
@@ -240,11 +282,12 @@ def public(attr: dict) -> dict:
 
 def build(rows: Sequence[dict], spy_price: Optional[float], nav: Optional[float],
           stress_fn: Callable[[List[dict], Optional[float]], dict],
-          sector_of: Callable[[str], Optional[str]], positions: Sequence[dict], as_of: str) -> dict:
+          sector_of: Callable[[str], Optional[str]], positions: Sequence[dict], as_of: str,
+          max_open: Optional[int] = None) -> dict:
     """主入口：归因 + 告警简报 + 影子闸。永远返回 dict（不可得时 `available=False` + 原因码）。
 
-    `positions`：跨式账持仓（按文件顺序，字段 `ticker` / `side` / `entry_date`）。"""
-    attr = attribution(rows, spy_price, nav, stress_fn, sector_of)
+    `positions`：跨式账持仓（按文件顺序，字段 `ticker` / `side` / `entry_date`）；`max_open`：跨式账的名额数（单仓上限 = 预算 ÷ 它）。"""
+    attr = attribution(rows, spy_price, nav, stress_fn, sector_of, max_open)
     if not attr.get("available"):
         return {"version": VERSION, "available": False, "reason": attr["reason"], "reason_zh": attr["reason_zh"],
                 "alert_pct": CONFIG["alert_pct"], "brief": brief(attr, None)}
@@ -262,3 +305,168 @@ def build(rows: Sequence[dict], spy_price: Optional[float], nav: Optional[float]
     out["brief"] = brief(attr, gate)
     out["as_of"] = as_of
     return out
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 压力模型 vs 实际净值（v0.45.655）
+# ════════════════════════════════════════════════════════════════════════
+#: 不比的原因（唯一一张表；`tests/test_tail_budget.py` 双向核对）
+CHECK_SKIPS: Dict[str, str] = {
+    "gap_too_long": "两份审计隔得太久（超过 5 个日历日），中间的变化不是「一天的冲击」",
+    "no_options": "有一天没有跨式腿的明细行",
+    "composition_changed": "两天的跨式持仓不一样（有开仓 / 平仓 / 张数变化）：净值变化里混着进出，不是价格冲击",
+    "row_incomplete": "有跨式腿缺 mid / 价 / Greeks / IV（报价缺失或买价为 0），没法重估",
+}
+#: 页面与文档照抄的口径说明
+CHECK_NOTES: Dict[str, str] = {
+    "scope": "只比跨式腿（尾部的来源）、只比相邻两份审计之间持仓组成不变的那些天；股票账几乎天天有进出，没法干净比",
+    "actual_ledger": "实际 · 账本净值变化 = 跨式账净值曲线的差（账本的标记来自扫描时刻的 CBOE 中间价）",
+    "actual_audit": "实际 · 同报价重估 = Σ 张数×100×(今 mid − 昨 mid)，用的是审计自己的报价，和两个预测同一份报价。"
+                    "两个口径是否一致看 `summary.ledger_audit_max_diff_usd`：差大 ⇒ 账本标记与审计报价不是同一份",
+    "pred_grid": "预测 · 压力网格 = 网格在「SPY 当天涨跌、IV 变化（Vega 加权）」处的插值 − 网格 (0,0) 的模型基差 + θ×日历天数。"
+                 "它只建模 β×大盘冲击，抓不到单名自己的跳空（财报跳空正是这类仓位的尾部）",
+    "pred_greeks": "预测 · Greeks 展开 = 每条腿用昨天的 delta / gamma / vega / theta 与自己标的的真实涨跌、自己的真实 IV 变化做二阶展开。"
+                   "它检验的是「Gamma / Vega → 损失」这层近似本身，不受大盘β假设影响",
+    "small_n": "样本只有几对，只是描述，不是检验",
+}
+
+
+def _lagrange(xs: Sequence[float], ys: Sequence[float], x: float) -> float:
+    tot = 0.0
+    for i, (xi, yi) in enumerate(zip(xs, ys)):
+        w = 1.0
+        for j, xj in enumerate(xs):
+            if j != i:
+                w *= (x - xj) / (xi - xj)
+        tot += yi * w
+    return tot
+
+
+def interp_cell(cells: Dict[Tuple[float, float], float], spot: float, iv: float) -> Optional[float]:
+    """压力网格上取 (spot, iv) 处的值：现货方向用最近的三个结点做**二次**插值（网格里的损益对现货是凸 / 凹的，线性插值会把
+    Gamma 项放大一个量级），IV 方向在相邻两列之间线性。落在网格之外 ⇒ None（不外推）。"""
+    spots = sorted({k[0] for k in cells})
+    ivs = sorted({k[1] for k in cells})
+    if len(spots) < 3 or len(ivs) < 2 or not (spots[0] <= spot <= spots[-1]) or not (ivs[0] <= iv <= ivs[-1]):
+        return None
+    # 三个连续结点 = 离 spot 最近的三个（spot 落在哪个区间、靠哪一头；边上取靠里的三个）
+    left = next(k for k in range(len(spots) - 1) if spots[k] <= spot <= spots[k + 1])
+    i = max(0, min(len(spots) - 3, left - (1 if (spot - spots[left]) < (spots[left + 1] - spot) else 0)))
+    xs = spots[i:i + 3]
+    j = next(k for k in range(len(ivs) - 1) if ivs[k] <= iv <= ivs[k + 1])
+    vals = []
+    for ivn in (ivs[j], ivs[j + 1]):
+        try:
+            vals.append(_lagrange(xs, [cells[(x, ivn)] for x in xs], spot))
+        except KeyError:
+            return None
+    t = (iv - ivs[j]) / (ivs[j + 1] - ivs[j])
+    return vals[0] * (1.0 - t) + vals[1] * t
+
+
+def _days_between(d0: str, d1: str) -> Optional[int]:
+    try:
+        return (date.fromisoformat(str(d1)) - date.fromisoformat(str(d0))).days
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_rows(a: Optional[dict]) -> List[dict]:
+    return [r for r in ((a or {}).get("rows") or []) if isinstance(r, dict) and r.get("kind") == "option"]
+
+
+def _check_pair(d0: str, a0: dict, d1: str, a1: dict, stress_fn, max_gap_days: int) -> dict:
+    rec: dict = {"from": d0, "to": d1, "status": "skipped", "reason": None, "reason_zh": None}
+
+    def skip(code: str) -> dict:
+        rec.update(reason=code, reason_zh=CHECK_SKIPS[code])
+        return rec
+
+    gap = _days_between(d0, d1)
+    if gap is None or gap <= 0 or gap > max_gap_days:
+        return skip("gap_too_long")
+    o0, o1 = _opt_rows(a0), _opt_rows(a1)
+    if not o0 or not o1:
+        return skip("no_options")
+    if sorted((str(r.get("symbol")), _num(r.get("qty"))) for r in o0) != sorted((str(r.get("symbol")), _num(r.get("qty"))) for r in o1):
+        return skip("composition_changed")
+    m1 = {str(r.get("symbol")): r for r in o1}
+    need0 = ("qty", "price", "delta", "gamma", "vega", "theta", "mid", "iv")
+    legs = []
+    for r in o0:
+        q = m1.get(str(r.get("symbol"))) or {}
+        v0 = {k: _num(r.get(k)) for k in need0}
+        v1 = {k: _num(q.get(k)) for k in ("price", "mid", "iv")}
+        if any(v is None for v in v0.values()) or any(v is None for v in v1.values()):
+            return skip("row_incomplete")
+        legs.append((r, v0, v1))
+    actual_audit = sum(v0["qty"] * (v1["mid"] - v0["mid"]) for _, v0, v1 in legs)
+    pred_greeks = 0.0
+    wsum = wdiv = 0.0
+    for r, v0, v1 in legs:
+        d_s = v1["price"] - v0["price"]
+        d_iv = (v1["iv"] - v0["iv"]) * 100.0                      # 点
+        pred_greeks += v0["qty"] * (v0["delta"] * d_s + 0.5 * v0["gamma"] * d_s * d_s + v0["vega"] * d_iv + v0["theta"] * gap)
+        w = abs(_num(r.get("vega_dollar_per_pt")) if _num(r.get("vega_dollar_per_pt")) is not None else v0["qty"] * v0["vega"])
+        wsum += w
+        wdiv += w * d_iv
+    iv_shift = wdiv / wsum if wsum else 0.0
+    spy0, spy1 = _num((a0 or {}).get("spy_price")), _num((a1 or {}).get("spy_price"))
+    spot = (spy1 / spy0 - 1.0) * 100.0 if spy0 and spy1 else None
+    pred_grid = None
+    grid_note = None
+    if stress_fn is not None and spot is not None:
+        cells = _cells(stress_fn([r for r, _, _ in legs], spy0))
+        f, f0 = interp_cell(cells, spot, iv_shift), interp_cell(cells, 0.0, 0.0)
+        if f is None or f0 is None:
+            grid_note = "冲击落在压力网格之外（不外推）"
+        else:
+            pred_grid = f - f0 + sum(v0["qty"] * v0["theta"] for _, v0, _ in legs) * gap
+    elif stress_fn is None:
+        grid_note = "没有压力函数"
+    else:
+        grid_note = "缺 SPY 价"
+    n0 = _num((((a0 or {}).get("nav") or {}).get("components") or {}).get("straddle_leg"))
+    n1 = _num((((a1 or {}).get("nav") or {}).get("components") or {}).get("straddle_leg"))
+    nav0 = _num(((a0 or {}).get("nav") or {}).get("nav"))
+    rec.update(status="ok", reason=None, reason_zh=None, days=gap, spot_pct=_r(spot, 2), iv_shift_pts=_r(iv_shift, 2),
+               n_legs=len(legs), nav=_r(nav0),
+               actual_ledger=_r(n1 - n0) if (n0 is not None and n1 is not None) else None,
+               actual_audit=_r(actual_audit), pred_grid=_r(pred_grid), pred_greeks=_r(pred_greeks), grid_note=grid_note)
+    return rec
+
+
+def _stats(pairs: List[dict], pred: str, actual: str) -> Optional[dict]:
+    xs = [(p[pred], p[actual], p.get("nav")) for p in pairs if p.get(pred) is not None and p.get(actual) is not None]
+    if not xs:
+        return None
+    n = len(xs)
+    err = [a - b for a, b, _ in xs]
+    act = [b for _, b, _ in xs]
+    mean_act = sum(act) / n
+    sst = sum((v - mean_act) ** 2 for v in act)
+    mae = sum(abs(e) for e in err) / n
+    navs = [c for _, _, c in xs if c]
+    return {"n": n, "mean_error_usd": _r(sum(err) / n), "mean_abs_error_usd": _r(mae),
+            "mean_abs_actual_usd": _r(sum(abs(v) for v in act) / n),
+            "mean_abs_error_pct_nav": _r(mae / (sum(navs) / len(navs)) * 100.0, 3) if navs else None,
+            "r2": _r(1.0 - sum(e * e for e in err) / sst, 3) if (n >= 3 and sst > 0) else None}
+
+
+def model_check(audits: Dict[str, dict], stress_fn: Optional[Callable] = None, max_gap_days: int = 5) -> dict:
+    """压力模型 vs 实际净值（只看跨式腿）。纯函数，输入 = 放行的审计（日期 → 审计，须带 `rows` / `nav` / `spy_price`）。
+
+    相邻两份审计、跨式持仓**完全一样**的才比；误差 = 预测 − 实际（正 = 模型比实际乐观）。两个预测、两个实际见 `CHECK_NOTES`。
+    `stress_fn`（`portfolio_greeks.stress_table`）缺省 ⇒ 不给压力网格那个预测。样本少是常态，`summary` 只是描述。"""
+    days = sorted(audits or {})
+    pairs = [_check_pair(d0, audits[d0], d1, audits[d1], stress_fn, max_gap_days) for d0, d1 in zip(days, days[1:])]
+    used = [p for p in pairs if p["status"] == "ok"]
+    skipped: Dict[str, int] = {}
+    for p in pairs:
+        if p["status"] != "ok":
+            skipped[p["reason"]] = skipped.get(p["reason"], 0) + 1
+    summary = {f"{m}_vs_{a}": _stats(used, f"pred_{m}", f"actual_{a}") for m in ("grid", "greeks") for a in ("ledger", "audit")}
+    diffs = [abs(p["actual_ledger"] - p["actual_audit"]) for p in used if p.get("actual_ledger") is not None]
+    summary["ledger_audit_max_diff_usd"] = _r(max(diffs)) if diffs else None
+    return {"version": VERSION, "n_pairs": len(pairs), "n_used": len(used), "skipped_by_reason": skipped,
+            "pairs": pairs[-60:], "summary": summary, "notes": dict(CHECK_NOTES), "skip_reasons": dict(CHECK_SKIPS)}

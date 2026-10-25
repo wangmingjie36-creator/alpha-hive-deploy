@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional
 
+import tail_budget as TB
 from alphabot import straddle as SD
 
 #: 审计文件里给页面的字段（逐行明细 `rows` 不给：页面只看组合层）
@@ -248,13 +249,13 @@ def _identity_reason(acct: dict, errors: dict, opened: bool) -> Optional[str]:
 
 #: 尾部预算（v0.45.649）给页面的字段：审计文件 `tail` 一节的子集（逐格全表不给）
 TAIL_KEYS = ("date", "nav", "worst", "downside_worst", "loss_pct_nav", "alert_pct", "partial", "excluded",
-             "by_ticker", "by_sector", "residual_usd")
+             "by_ticker", "by_sector", "residual_usd", "slot_cap_pct", "max_open", "n_over_cap", "over_cap_tickers")
 TAIL_BY_TICKER_SHOWN = 14
 TAIL_GATE_SHOWN = 60
 TAIL_SERIES_SHOWN = 90
 
 
-def tail_overview(audits: dict) -> dict:
+def tail_overview(audits: dict, stress_fn=None) -> dict:
     """尾部预算（`tail_budget`，v0.45.649）→ 页面数据。纯函数，只读放行的审计（`load_history` 的 `audits`）。
 
     · `latest`：最近一份**带 `tail` 一节**且可得的审计（此前的审计没有这一节，不是「没有尾部」——`n_audits_without_tail` 如实数出来）；
@@ -284,11 +285,12 @@ def tail_overview(audits: dict) -> dict:
     if latest is not None:
         latest["by_ticker"] = [x for x in (latest.get("by_ticker") or []) if isinstance(x, dict)][:TAIL_BY_TICKER_SHOWN]
     return {"latest": latest, "series": series[-TAIL_SERIES_SHOWN:], "n_audits_without_tail": n_without,
+            "model_check": TB.model_check(audits or {}, stress_fn),
             "gate_log": list(reversed(gate_log))[:TAIL_GATE_SHOWN], "n_gate_entries": len(gate_log),
             "budgets_pct": last_gate.get("budgets_pct") or [], "gate_basis": last_gate.get("basis")}
 
 
-def build_overview(view: dict, *, now_et: datetime) -> dict:
+def build_overview(view: dict, *, now_et: datetime, stress_fn=None) -> dict:
     """`portfolio_greeks.ledger_view()`（或演示数据，同形）→ 页面数据。纯函数。"""
     base = {"source": view.get("source", "ledger"), "now_et": now_et.isoformat(timespec="seconds"),
             "state_dir": {"path": view.get("state_dir"), "exists": bool(view.get("exists"))},
@@ -321,7 +323,7 @@ def build_overview(view: dict, *, now_et: datetime) -> dict:
         "latest_is_as_of": (days[-1]["date"] == as_of) if (days and as_of) else None,
         "days": days,
         "delta": delta_overview(view, audits),
-        "tail": tail_overview(audits),
+        "tail": tail_overview(audits, stress_fn),
         "equity": [{k: e.get(k) for k in ("date", "nav", "cash", "market_value", "spy_shares", "spy_price",
                                           "trades_today", "band_status")} for e in equity],
         "trades": [{k: t.get(k) for k in TRADE_KEYS} for t in reversed(trades)],      # 新的在前

@@ -404,13 +404,23 @@ class AlphaBotService:
         """对冲页与帮助页用的规则常量——取 `portfolio_greeks.CONFIG` 那一份，不在前端另抄。"""
         try:
             import portfolio_greeks as pg
-            return {k: pg.CONFIG.get(k) for k in pg.PUBLIC_RULE_KEYS} | {"measurement_start": pg.MEASUREMENT_START}
+            return pg.public_rules() | {"measurement_start": pg.MEASUREMENT_START}
         except Exception as exc:  # noqa: BLE001
             return {"rules_error": f"{type(exc).__name__}: {exc}"}
 
+    def _stress_fn(self):
+        """压力表函数（`portfolio_greeks.stress_table`，纯函数）：「压力模型 vs 实际净值」要用它对跨式腿重算网格。
+        取不到就是 None——那一栏只缺压力网格那个预测，别的照给。"""
+        try:
+            import portfolio_greeks as pg
+            return pg.stress_table
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("压力表函数不可得，模型检验缺压力网格预测：%s: %s", type(exc).__name__, exc)
+            return None
+
     def hedge(self) -> dict:
         now = self.now_fn()
-        return clean_json(HG.build_overview(self._hedge_view(now), now_et=now))
+        return clean_json(HG.build_overview(self._hedge_view(now), now_et=now, stress_fn=self._stress_fn()))
 
     # ── 尾部对冲候选（v0.45.643，只读）：SPY 认沽后比例价差叠到组合压力网格上
     def tail_hedge_rules(self) -> dict:

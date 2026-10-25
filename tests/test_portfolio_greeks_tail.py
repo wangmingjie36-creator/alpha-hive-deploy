@@ -172,6 +172,98 @@ class TestFailureIsVisible:
         assert "超过告警线" in msg and ("NVDA" in msg or "XOM" in msg)
 
 
+class TestAlertLines:
+    """Gamma / Vega 告警线随尾部预算推导（v0.45.655）：预算对半分给两项、除以压力网格最大冲击。"""
+
+    def test_defaults_are_derived_not_hand_picked(self):
+        assert pg.CONFIG["gamma_alert_pct"] is None and pg.CONFIG["vega_alert_pct"] is None
+        assert pg.alert_lines() == {"gamma_alert_pct": 0.1, "vega_alert_pct": 0.5, "source": "derived"}
+
+    def test_lines_follow_the_budget(self, monkeypatch):
+        monkeypatch.setitem(tb.CONFIG, "alert_pct", 40.0)
+        assert pg.alert_lines()["gamma_alert_pct"] == pytest.approx(0.2) and pg.alert_lines()["vega_alert_pct"] == pytest.approx(1.0)
+
+    def test_lines_follow_the_stress_grid_extent(self, monkeypatch):
+        """有牙：线是「预算 ÷ 网格角点冲击」；网格改小，线必须跟着变（不是写死的 0.1 / 0.5）。"""
+        monkeypatch.setitem(pg.CONFIG, "stress_spot_pct", [-5, 0, 5])
+        monkeypatch.setitem(pg.CONFIG, "stress_iv_pts", [-10, 0, 10])
+        assert pg.alert_lines()["gamma_alert_pct"] == pytest.approx(0.4) and pg.alert_lines()["vega_alert_pct"] == pytest.approx(1.0)
+
+    def test_an_explicit_number_overrides_and_a_half_override_is_labelled_mixed(self, monkeypatch):
+        monkeypatch.setitem(pg.CONFIG, "gamma_alert_pct", 0.3)
+        assert pg.alert_lines() == {"gamma_alert_pct": 0.3, "vega_alert_pct": 0.5, "source": "mixed"}
+        monkeypatch.setitem(pg.CONFIG, "vega_alert_pct", 2.0)
+        assert pg.alert_lines() == {"gamma_alert_pct": 0.3, "vega_alert_pct": 2.0, "source": "explicit"}
+
+    def test_the_two_lines_together_equal_the_budget_at_the_corner_shock(self):
+        ln = pg.alert_lines()
+        assert ln["gamma_alert_pct"] * 10 ** 2 + ln["vega_alert_pct"] * 20 == pytest.approx(tb.CONFIG["alert_pct"])
+
+    def test_aggregate_flags_use_the_effective_lines(self, state, monkeypatch):
+        res = _day(state)
+        g = abs(res["aggregate"]["pct_nav"]["gamma_dollar_per_1pct"])
+        v = abs(res["aggregate"]["pct_nav"]["vega_dollar_per_pt"])
+        assert g > 0 and v > 0
+        agg = lambda: pg.aggregate(res["rows"], res["nav"]["nav"])            # noqa: E731
+        assert agg()["gamma_alert"] is (g > 0.1) and agg()["vega_alert"] is (v > 0.5)        # 派生线
+        monkeypatch.setitem(pg.CONFIG, "gamma_alert_pct", g - 1e-6)
+        monkeypatch.setitem(pg.CONFIG, "vega_alert_pct", v - 1e-6)
+        assert agg()["gamma_alert"] is True and agg()["vega_alert"] is True       # 显式线刚好压在读数之下
+        monkeypatch.setitem(pg.CONFIG, "gamma_alert_pct", g + 1e-6)
+        monkeypatch.setitem(pg.CONFIG, "vega_alert_pct", v + 1e-6)
+        assert agg()["gamma_alert"] is False and agg()["vega_alert"] is False     # 压在读数之上
+
+    def test_the_old_constants_were_blind_to_the_tail(self, state):
+        """这一条就是改它的理由：二阶近似的损失 ≈ Gamma×10² + Vega×20；旧线（0.5 / 1.0）对应的损失远超预算。"""
+        old_loss = 0.5 * 10 ** 2 + 1.0 * 20
+        assert old_loss == 70.0 and old_loss > 3 * tb.CONFIG["alert_pct"]
+        ln = pg.alert_lines()
+        assert ln["gamma_alert_pct"] * 100 + ln["vega_alert_pct"] * 20 == pytest.approx(tb.CONFIG["alert_pct"])
+
+    def test_public_rules_and_the_ledger_view_show_effective_numbers_not_none(self, tmp_path):
+        r = pg.public_rules()
+        assert r["gamma_alert_pct"] == 0.1 and r["vega_alert_pct"] == 0.5 and r["alert_lines_source"] == "derived"
+        assert r["tail_alert_pct"] == tb.CONFIG["alert_pct"] and all(r[k] is not None for k in pg.PUBLIC_RULE_KEYS)
+        v = pg.ledger_view(tmp_path / "nope")                                  # 状态目录不存在时规则也在
+        assert v["rules"]["gamma_alert_pct"] == 0.1 and v["rules"]["alert_lines_source"] == "derived"
+
+    def test_markdown_names_the_effective_line_when_flagged(self, state, monkeypatch):
+        monkeypatch.setitem(pg.CONFIG, "gamma_alert_pct", 0.0001)
+        monkeypatch.setitem(pg.CONFIG, "vega_alert_pct", 0.0001)
+        md = pg.render_markdown(AS_OF, _day(state))
+        assert "⚠️ 超 0.0001%" in md and "None" not in md
+
+
+class TestSlotCaps:
+    """单仓上限 = 尾部预算 ÷ 跨式账名额数（v0.45.655）。"""
+
+    def test_cap_is_the_budget_over_the_ledgers_slot_count(self, state):
+        t = _day(state)["tail"]
+        assert t["max_open"] == opl.CONFIG["max_open"] and t["slot_cap_pct"] == round(tb.CONFIG["alert_pct"] / opl.CONFIG["max_open"], 2)
+
+    def test_each_straddle_has_a_slot_equal_to_its_own_worst_cell_loss(self, state):
+        t = _day(state)["tail"]
+        by = {x["ticker"]: x for x in t["by_ticker"]}
+        for tk in ("NVDA", "XOM"):
+            assert by[tk]["slot"]["loss_pct"] == pytest.approx(-by[tk]["own_worst"]["pct_nav"], abs=0.01)
+            assert by[tk]["slot"]["over_cap"] is (by[tk]["slot"]["loss_pct"] > t["slot_cap_pct"])
+        assert by["AAA"]["slot"] is None                                        # 只有股票腿：没有「单仓」
+
+    def test_cap_follows_the_slot_count(self, state, monkeypatch):
+        monkeypatch.setitem(opl.CONFIG, "max_open", 2)
+        t = _day(state)["tail"]
+        assert t["slot_cap_pct"] == 10.0 and t["max_open"] == 2
+        assert t["n_over_cap"] == len(t["over_cap_tickers"])
+
+    def test_brief_and_alert_carry_the_over_cap_names(self, state, monkeypatch):
+        monkeypatch.setitem(opl.CONFIG, "max_open", 200)                        # 上限 0.1%：两笔都必超
+        res = _day(state)
+        b = res["tail"]["brief"]
+        assert b["n_over_cap"] == 2 and {o["ticker"] for o in b["over_cap"]} == {"NVDA", "XOM"} and b["slot_cap_pct"] == 0.1
+        assert all(o["loss_pct"] > 0.1 and o["multiple"] > 1 for o in b["over_cap"])
+        assert res["price_check"]["tail"] == b
+
+
 class TestAlert:
     BASE = {"as_of": AS_OF, "n_stale": 0, "n_quote_stale": 0, "spy": {}, "hedge_undecided": None, "gaps": [],
             "execution_blocked": None}
@@ -198,6 +290,14 @@ class TestAlert:
         assert "NVDA -6.8%" in a.details["主要来源"] and "XOM" in a.details["主要来源"]
         assert "没有真跳过" in a.details["影子闸"] and "15% / 20%" in a.details["影子闸"] and a.details["压力表"] == "完整"
         assert "只观测" in a.details["影响"]
+
+    def test_over_cap_positions_are_named_with_their_multiple(self):
+        (a,) = self.run({**self.BREACH, "slot_cap_pct": 3.33, "n_over_cap": 2,
+                         "over_cap": [{"ticker": "NVDA", "loss_pct": 6.9, "multiple": 2.1},
+                                      {"ticker": "XOM", "loss_pct": 6.1, "multiple": 1.8}]})
+        assert "2 笔超过单仓上限 3.33%" in a.details["单仓上限"] and "NVDA 6.9%（2.1×）" in a.details["单仓上限"]
+        (b,) = self.run({**self.BREACH, "slot_cap_pct": 3.33, "n_over_cap": 0, "over_cap": []})
+        assert b.details["单仓上限"] == "—"
 
     def test_partial_stress_is_said_in_the_alert(self):
         (a,) = self.run({**self.BREACH, "partial": True})

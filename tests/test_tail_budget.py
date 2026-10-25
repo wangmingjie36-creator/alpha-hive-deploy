@@ -256,6 +256,204 @@ class TestBuild:
         assert out["gate_shadow"]["entries"] == []
 
 
+class TestDerivedLines:
+    def test_budget_is_split_in_half_between_gamma_and_vega(self):
+        d = TB.derived_greek_lines(20.0, 10.0, 20.0)
+        assert d == {"gamma_alert_pct": 0.1, "vega_alert_pct": 0.5}
+        # 两条线同时顶到 ⇒ 二阶近似的损失正好等于预算
+        assert d["gamma_alert_pct"] * 10.0 ** 2 + d["vega_alert_pct"] * 20.0 == pytest.approx(20.0)
+
+    @pytest.mark.parametrize("alert,spot,iv,gamma,vega", [(10.0, 10.0, 20.0, 0.05, 0.25), (20.0, 5.0, 20.0, 0.4, 0.5),
+                                                          (20.0, 10.0, 10.0, 0.1, 1.0), (30.0, 10.0, 20.0, 0.15, 0.75)])
+    def test_lines_follow_the_budget_and_the_shock_size(self, alert, spot, iv, gamma, vega):
+        d = TB.derived_greek_lines(alert, spot, iv)
+        assert d["gamma_alert_pct"] == pytest.approx(gamma) and d["vega_alert_pct"] == pytest.approx(vega)
+
+    @pytest.mark.parametrize("args", [(0, 10, 20), (20, 0, 20), (20, 10, 0), (-1, 10, 20), (None, 10, 20), (20, "x", 20)])
+    def test_unusable_inputs_raise_instead_of_dividing_by_zero(self, args):
+        with pytest.raises(ValueError):
+            TB.derived_greek_lines(*args)
+
+
+class TestSlotCap:
+    def test_budget_divided_by_the_slots(self):
+        assert TB.slot_cap_pct(20.0, 6) == pytest.approx(20.0 / 6)
+        assert TB.slot_cap_pct(20.0, 4) == 5.0
+        assert TB.slot_cap_pct(20.0, None) is None and TB.slot_cap_pct(20.0, 0) is None
+
+    def test_each_straddle_is_compared_with_its_own_cap_strictly(self, monkeypatch):
+        a = TB.attribution(ROWS, None, NAV, stress_fn, sector_of, max_open=6)
+        by = {t["ticker"]: t for t in a["by_ticker"]}
+        # A 跨式腿单独最差格 −6000（6.0% NAV）、B −5000（5.0%）；上限 20/6 = 3.33%
+        assert by["A"]["slot"] == {"loss_pct": 6.0, "cap_pct": 3.33, "over_cap": True, "multiple": 1.8}
+        assert by["B"]["slot"]["over_cap"] is True and by["B"]["slot"]["multiple"] == 1.5
+        assert a["slot_cap_pct"] == 3.33 and a["max_open"] == 6 and a["n_over_cap"] == 2 and a["over_cap_tickers"] == ["B", "A"]
+        # 没有跨式腿的标的没有单仓这回事
+        assert by["C"]["slot"] is None and by["SPY"]["slot"] is None
+        # 边界：上限抬到 5.0%（预算 30 ÷ 6），B 恰好 5.0% ⇒ 不算超（严格大于），A 仍超
+        monkeypatch.setitem(TB.CONFIG, "alert_pct", 30.0)
+        a2 = TB.attribution(ROWS, None, NAV, stress_fn, sector_of, max_open=6)
+        by2 = {t["ticker"]: t for t in a2["by_ticker"]}
+        assert by2["B"]["slot"]["over_cap"] is False and by2["A"]["slot"]["over_cap"] is True and a2["over_cap_tickers"] == ["A"]
+
+    def test_unknown_slot_count_gives_no_cap_not_a_zero_cap(self):
+        a = TB.attribution(ROWS, None, NAV, stress_fn, sector_of)
+        assert a["slot_cap_pct"] is None and a["n_over_cap"] == 0
+        assert all(t["slot"] is None for t in a["by_ticker"])
+
+    def test_brief_names_the_over_cap_positions(self):
+        b = TB.brief(TB.attribution(ROWS, None, NAV, stress_fn, sector_of, max_open=6), None, alert_pct=1.0)
+        assert b["slot_cap_pct"] == 3.33 and b["n_over_cap"] == 2
+        assert [(o["ticker"], o["loss_pct"], o["multiple"]) for o in b["over_cap"]] == [("B", 5.0, 1.5), ("A", 6.0, 1.8)]
+
+    def test_build_passes_the_slot_count_through(self):
+        out = TB.build(ROWS, None, NAV, stress_fn, sector_of, TestBuild.POS, "2026-10-22", max_open=6)
+        assert out["slot_cap_pct"] == 3.33 and out["brief"]["n_over_cap"] == 2
+
+
+def _audit(spy, nav, leg, rows):
+    return {"spy_price": spy, "nav": {"nav": nav, "components": {"straddle_leg": leg}}, "rows": rows}
+
+
+def opt(symbol="X", qty=-100.0, price=100.0, mid=5.0, iv=0.30, delta=0.5, gamma=0.02, vega=0.10, theta=-0.05):
+    return {"kind": "option", "symbol": symbol, "qty": qty, "price": price, "mid": mid, "iv": iv, "delta": delta, "gamma": gamma,
+            "vega": vega, "theta": theta, "vega_dollar_per_pt": qty * vega}
+
+
+def quad_stress(rows, spy):
+    """f(s, iv) = −4s + 0.5s² − 2·iv + 7（7 = 模型基差）——对现货二次、对 IV 线性，插值应当**精确**。"""
+    cells = [{"spot_pct": s_, "iv_pts": iv, "pnl": -4.0 * s_ + 0.5 * s_ * s_ - 2.0 * iv + 7.0}
+             for s_ in (-10, -5, 0, 5, 10) for iv in (-10, 0, 10, 20)]
+    return {"cells": cells, "partial": False, "excluded": []}
+
+
+class TestInterpolation:
+    CELLS = {(s_, iv): -4.0 * s_ + 0.5 * s_ * s_ - 2.0 * iv + 7.0 for s_ in (-10, -5, 0, 5, 10) for iv in (-10, 0, 10, 20)}
+
+    @pytest.mark.parametrize("s_,iv", [(1.0, 1.0), (-3.7, 4.2), (9.0, 19.0), (-9.5, -9.5), (0, 0), (5, 10), (2.4, -7.3)])
+    def test_exact_for_a_quadratic_in_spot_and_linear_in_iv(self, s_, iv):
+        want = -4.0 * s_ + 0.5 * s_ * s_ - 2.0 * iv + 7.0
+        assert TB.interp_cell(self.CELLS, s_, iv) == pytest.approx(want, abs=1e-9)
+
+    def test_outside_the_grid_is_none_not_an_extrapolation(self):
+        assert TB.interp_cell(self.CELLS, 10.5, 0) is None and TB.interp_cell(self.CELLS, 0, 21) is None
+        assert TB.interp_cell(self.CELLS, -10.1, 0) is None and TB.interp_cell(self.CELLS, 0, -10.5) is None
+
+    def test_linear_interpolation_would_be_wrong_here(self):
+        """有牙：现货方向若退化成 [0, 5] 两点线性，f(1,0) 会得 5.5（真值 −4+0.5+7 = 3.5）——Gamma 项被放大 5 倍。"""
+        assert TB.interp_cell(self.CELLS, 1.0, 0.0) == pytest.approx(3.5)
+
+
+class TestModelCheck:
+    """一条卖出 call：delta 0.5 / gamma 0.02 / vega 0.10 / theta −0.05（每股）、1 张（−100 股）。
+    昨天 S=100 mid 5.0 IV 30%，今天 S=102 mid 6.2 IV 31%，SPY +1%，隔 1 个日历日。"""
+
+    D0, D1 = "2026-10-15", "2026-10-16"
+
+    def pair(self, **kw):
+        a0 = _audit(600.0, 100_000.0, 1000.0, [opt()])
+        a1 = _audit(kw.pop("spy1", 606.0), 99_000.0, 880.0, [opt(**{"price": 102.0, "mid": 6.2, "iv": 0.31, **kw})])
+        return {self.D0: a0, self.D1: a1}
+
+    def test_the_two_actuals_and_the_greeks_prediction_by_hand(self):
+        (p,) = TB.model_check(self.pair(), quad_stress)["pairs"]
+        assert p["status"] == "ok" and p["days"] == 1 and p["n_legs"] == 1
+        assert p["actual_audit"] == -120.0                       # −100 × (6.2 − 5.0)
+        assert p["actual_ledger"] == -120.0                      # 1000 → 880
+        # −100 × (0.5×2 + 0.5×0.02×2² + 0.10×1 + (−0.05)×1) = −100 × 1.09
+        assert p["pred_greeks"] == pytest.approx(-109.0)
+        assert p["spot_pct"] == pytest.approx(1.0) and p["iv_shift_pts"] == pytest.approx(1.0)
+
+    def test_the_grid_prediction_by_hand_removes_the_basis_and_adds_theta(self):
+        (p,) = TB.model_check(self.pair(), quad_stress)["pairs"]
+        # f(1,1) = −4 + 0.5 − 2 + 7 = 1.5；f(0,0) = 7（模型基差）；θ：−100 × (−0.05) × 1 = +5 ⇒ 1.5 − 7 + 5
+        assert p["pred_grid"] == pytest.approx(-0.5)
+
+    def test_theta_scales_with_the_calendar_days_between_the_audits(self):
+        p0 = self.pair()
+        a = {"2026-10-16": p0[self.D0], "2026-10-19": p0[self.D1]}        # 周五 → 下周一：3 个日历日
+        (p,) = TB.model_check(a, quad_stress)["pairs"]
+        assert p["days"] == 3 and p["pred_greeks"] == pytest.approx(-100 * (1 + 0.04 + 0.10 - 0.05 * 3))
+
+    def test_summary_errors_are_prediction_minus_actual(self):
+        sm = TB.model_check(self.pair(), quad_stress)["summary"]
+        assert sm["grid_vs_ledger"]["mean_error_usd"] == pytest.approx(-0.5 - -120.0)
+        assert sm["greeks_vs_ledger"]["mean_error_usd"] == pytest.approx(-109.0 - -120.0)
+        assert sm["greeks_vs_audit"]["n"] == 1 and sm["greeks_vs_ledger"]["r2"] is None          # 1 对没有 R²
+        assert sm["ledger_audit_max_diff_usd"] == 0.0
+
+    def test_ledger_and_audit_actuals_can_disagree_and_the_gap_is_reported(self):
+        a = self.pair()
+        a[self.D1]["nav"]["components"]["straddle_leg"] = 850.0
+        mc = TB.model_check(a, quad_stress)
+        assert mc["pairs"][0]["actual_ledger"] == -150.0 and mc["summary"]["ledger_audit_max_diff_usd"] == 30.0
+
+    def test_missing_ledger_nav_leaves_only_that_actual_empty(self):
+        a = self.pair()
+        a[self.D1]["nav"]["components"]["straddle_leg"] = None
+        (p,) = TB.model_check(a, quad_stress)["pairs"]
+        assert p["actual_ledger"] is None and p["actual_audit"] == -120.0
+        assert TB.model_check(a, quad_stress)["summary"]["grid_vs_ledger"] is None
+
+    @pytest.mark.parametrize("mutate,code", [
+        (lambda a: a[TestModelCheck.D1].update(rows=[opt(qty=-200.0)]), "composition_changed"),
+        (lambda a: a[TestModelCheck.D1].update(rows=[opt(symbol="Y")]), "composition_changed"),
+        (lambda a: a[TestModelCheck.D1].update(rows=[]), "no_options"),
+        (lambda a: a[TestModelCheck.D0].update(rows=[{"kind": "stock", "ticker": "A"}]), "no_options"),
+        (lambda a: a[TestModelCheck.D1].update(rows=[{**opt(), "mid": None}]), "row_incomplete"),
+        (lambda a: a[TestModelCheck.D0].update(rows=[{**opt(), "gamma": None}]), "row_incomplete"),
+        (lambda a: a[TestModelCheck.D1].update(rows=[{**opt(), "iv": None}]), "row_incomplete"),
+    ])
+    def test_a_pair_that_is_not_a_clean_price_shock_is_skipped_with_its_reason(self, mutate, code):
+        a = {self.D0: _audit(600.0, 1e5, 1000.0, [opt()]), self.D1: _audit(606.0, 1e5, 880.0, [opt(price=102.0, mid=6.2, iv=0.31)])}
+        mutate(a)
+        mc = TB.model_check(a, quad_stress)
+        p = mc["pairs"][0]
+        assert p["status"] == "skipped" and p["reason"] == code and p["reason_zh"] and "pred_greeks" not in p
+        assert mc["n_used"] == 0 and mc["skipped_by_reason"] == {code: 1} and mc["summary"]["greeks_vs_ledger"] is None
+
+    @pytest.mark.parametrize("d1,ok", [("2026-10-20", True), ("2026-10-21", False), ("2026-12-01", False)])
+    def test_a_gap_over_five_calendar_days_is_skipped(self, d1, ok):
+        a = {self.D0: _audit(600.0, 1e5, 1000.0, [opt()]), d1: _audit(606.0, 1e5, 880.0, [opt(price=102.0, mid=6.2, iv=0.31)])}
+        p = TB.model_check(a, quad_stress)["pairs"][0]
+        assert (p["status"] == "ok") is ok and (ok or p["reason"] == "gap_too_long")
+
+    def test_a_shock_outside_the_grid_drops_only_the_grid_prediction(self):
+        (p,) = TB.model_check(self.pair(spy1=700.0), quad_stress)["pairs"]        # SPY +16.7%
+        assert p["status"] == "ok" and p["pred_grid"] is None and "网格之外" in p["grid_note"]
+        assert p["pred_greeks"] is not None
+
+    def test_without_a_stress_function_there_is_no_grid_prediction_but_the_rest_stays(self):
+        (p,) = TB.model_check(self.pair(), None)["pairs"]
+        assert p["pred_grid"] is None and p["grid_note"] == "没有压力函数" and p["pred_greeks"] == pytest.approx(-109.0)
+
+    def test_iv_shift_is_vega_weighted_across_legs(self):
+        a0 = _audit(600.0, 1e5, 1000.0, [opt("X", vega=0.10), opt("Y", vega=0.30, mid=2.0)])
+        a1 = _audit(606.0, 1e5, 880.0, [opt("X", price=102.0, mid=6.2, iv=0.31), opt("Y", price=102.0, mid=2.5, iv=0.33)])
+        (p,) = TB.model_check({self.D0: a0, self.D1: a1}, quad_stress)["pairs"]
+        # X：|−100×0.10| = 10 权重、+1 点；Y：|−100×0.30| = 30 权重、+3 点 ⇒ (10×1 + 30×3) / 40 = 2.5
+        assert p["iv_shift_pts"] == pytest.approx(2.5)
+
+    def test_r2_and_mean_errors_by_hand(self):
+        pairs = [{"nav": 1e5, "pred_greeks": a_ + 10.0, "actual_ledger": a_} for a_ in (-100.0, 50.0, 200.0)]
+        st = TB._stats(pairs, "pred_greeks", "actual_ledger")
+        # 误差恒 +10；SST = 150² + 0 + 150² = 45000；R² = 1 − 300/45000
+        assert st["n"] == 3 and st["mean_error_usd"] == 10.0 and st["mean_abs_error_usd"] == 10.0
+        assert st["r2"] == pytest.approx(0.993, abs=1e-3) and st["mean_abs_actual_usd"] == pytest.approx(350.0 / 3, abs=0.01)
+
+    def test_two_pairs_still_have_no_r2(self):
+        """有牙：1 对时 SST = 0 会掩盖「n ≥ 3 才给 R²」这条下限；2 对（SST ≠ 0）才分得出。"""
+        pairs = [{"nav": 1e5, "pred_greeks": a_ + 5.0, "actual_ledger": a_} for a_ in (-100.0, 200.0)]
+        st = TB._stats(pairs, "pred_greeks", "actual_ledger")
+        assert st["n"] == 2 and st["r2"] is None and st["mean_error_usd"] == 5.0
+
+    def test_result_is_strict_json_and_documents_itself(self):
+        mc = TB.model_check(self.pair(), quad_stress)
+        json.dumps(mc, allow_nan=False)
+        assert {"scope", "actual_ledger", "actual_audit", "pred_grid", "pred_greeks", "small_n"} <= set(mc["notes"])
+        assert "单名自己的跳空" in mc["notes"]["pred_grid"] and "只有几对" in mc["notes"]["small_n"]
+
+
 class TestTables:
     SRC = MODULE.read_text(encoding="utf-8")
 
@@ -269,13 +467,24 @@ class TestTables:
             assert len(uses) >= 2, f"{k}：登记之外没被用过（死码）"
 
 
+class TestSkipTable:
+    SRC = MODULE.read_text(encoding="utf-8")
+
+    def test_every_skip_code_written_is_registered_and_every_registered_one_is_used(self):
+        written = set(re.findall(r'skip\("([a-z_]+)"\)', self.SRC))
+        assert {"gap_too_long", "no_options", "composition_changed", "row_incomplete"} <= written, written
+        assert written == set(TB.CHECK_SKIPS), written ^ set(TB.CHECK_SKIPS)
+
+
 class TestPurity:
     def test_module_imports_only_math_and_typing(self):
         tree = ast.parse(MODULE.read_text(encoding="utf-8"))
         imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
         imported |= {(n.module or "").split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
-        assert imported <= {"__future__", "math", "typing"}, imported
+        assert imported <= {"__future__", "math", "typing", "datetime"}, imported
         assert not [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id in {"open", "print", "exec", "eval"}]
+        # datetime 只许做日期差（`date.fromisoformat`）：读钟（today / now）会让同一份审计在不同日子算出不同结果
+        assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in {"today", "now", "utcnow", "time"}]
 
     def test_config_is_documented_as_subjective_and_budgets_are_ordered(self):
         assert "主观" in MODULE.read_text(encoding="utf-8")

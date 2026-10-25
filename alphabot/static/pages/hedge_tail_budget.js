@@ -29,6 +29,10 @@ function tickerTable(rows) {
     { label: "板块", render: (r) => r.sector },
     { label: "最差格贡献", cls: "r", render: (r) => h("span", { class: tone(r.at_worst) }, sMoney(r.at_worst), h("span", { class: "sub" }, sPct(r.at_worst_pct))) },
     { label: "下行 / 平盘格", cls: "r", render: (r) => h("span", { class: tone(r.at_downside) }, sPct(r.at_downside_pct)) },
+    { label: "跨式腿 / 单仓上限", cls: "r", render: (r) => (r.slot
+      ? h("span", {}, `${num(r.slot.loss_pct, 1)}% / ${num(r.slot.cap_pct, 1)}%`,
+        r.slot.over_cap ? h("span", { class: "chip warn", style: { marginLeft: "6px" } }, `${num(r.slot.multiple, 1)}×`) : null)
+      : h("span", { class: "small muted" }, "—")) },
     { label: "其中（最差格）", render: (r) => h("span", { class: "small muted" }, kinds(r.by_kind)) },
   ], rows);
 }
@@ -39,6 +43,51 @@ function sectorTable(rows) {
     { label: "标的", render: (r) => h("span", { class: "small" }, (r.tickers || []).join("、")) },
     { label: "最差格贡献", cls: "r", render: (r) => h("span", { class: tone(r.at_worst) }, sMoney(r.at_worst), h("span", { class: "sub" }, sPct(r.at_worst_pct))) },
   ], rows);
+}
+
+const FMT_ERR = (pred, actual) => (isNum(pred) && isNum(actual) ? sMoney(pred - actual) : "—");
+
+function modelCheckBlock(M) {
+  if (!M) return null;
+  const used = (M.pairs || []).filter((p) => p.status === "ok");
+  const skipped = Object.entries(M.skipped_by_reason || {}).map(([k, n]) => `${(M.skip_reasons || {})[k] || k} × ${n}`);
+  const N = M.notes || {};
+  const sum = M.summary || {};
+  const head = [h("h3", { class: "small" }, `压力模型 vs 实际净值（跨式腿；相邻审计 ${M.n_pairs ?? 0} 对，可比 ${M.n_used ?? 0} 对）`),
+    h("p", { class: "small muted" }, N.scope || "")];
+  if (!used.length) {
+    return h("div", {}, ...head, h("div", { class: "empty" }, "还没有「持仓组成不变」的相邻审计日可比。"),
+      skipped.length ? h("p", { class: "small muted" }, `跳过：${skipped.join("；")}`) : null);
+  }
+  const pairs = table([
+    { label: "区间", render: (p) => h("span", {}, `${p.from.slice(5)} → ${p.to.slice(5)}`, p.days > 1 ? h("span", { class: "sub" }, `${p.days} 天`) : null) },
+    { label: "SPY", cls: "r", render: (p) => sPct(p.spot_pct, 2) },
+    { label: "IV 变化", cls: "r", render: (p) => (isNum(p.iv_shift_pts) ? `${p.iv_shift_pts > 0 ? "+" : ""}${num(p.iv_shift_pts, 1)} 点` : "—") },
+    { label: "实际（账本净值）", cls: "r", render: (p) => h("b", { class: tone(p.actual_ledger ?? p.actual_audit) }, sMoney(p.actual_ledger ?? p.actual_audit)) },
+    { label: "预测·压力网格", cls: "r", render: (p) => (isNum(p.pred_grid) ? sMoney(p.pred_grid) : h("span", { class: "small muted", title: p.grid_note || "" }, "—")) },
+    { label: "误差（预测−实际）", cls: "r", render: (p) => h("span", { class: "small" }, FMT_ERR(p.pred_grid, p.actual_ledger ?? p.actual_audit)) },
+    { label: "预测·Greeks 展开", cls: "r", render: (p) => sMoney(p.pred_greeks) },
+    { label: "误差（预测−实际）", cls: "r", render: (p) => h("span", { class: "small" }, FMT_ERR(p.pred_greeks, p.actual_ledger ?? p.actual_audit)) },
+  ], used);
+  const row = (name, k) => {
+    const x = sum[k];
+    return x ? { name, ...x } : { name, n: 0 };
+  };
+  const stats = table([
+    { label: "预测", render: (r) => r.name },
+    { label: "对数", cls: "r", render: (r) => r.n },
+    { label: "平均误差（正 = 模型比实际乐观）", cls: "r", render: (r) => sMoney(r.mean_error_usd) },
+    { label: "平均绝对误差", cls: "r", render: (r) => (isNum(r.mean_abs_error_usd) ? `${money(r.mean_abs_error_usd, 0)}（${num(r.mean_abs_error_pct_nav, 2)}% NAV）` : "—") },
+    { label: "实际的平均绝对值", cls: "r", render: (r) => money(r.mean_abs_actual_usd, 0) },
+    { label: "R²", cls: "r", render: (r) => (isNum(r.r2) ? num(r.r2, 2) : "—") },
+  ], [row("压力网格（β×大盘冲击）", "grid_vs_ledger"), row("Greeks 展开（各名真实移动）", "greeks_vs_ledger")]);
+  const diff = sum.ledger_audit_max_diff_usd;
+  return h("div", {}, ...head, pairs, h("div", { style: { height: "8px" } }), stats,
+    skipped.length ? h("p", { class: "small muted" }, `跳过：${skipped.join("；")}`) : null,
+    h("p", { class: "small muted" }, N.pred_grid || ""), h("p", { class: "small muted" }, N.pred_greeks || ""),
+    h("p", { class: "small muted" }, N.actual_ledger || "",
+      isNum(diff) ? ` 本页这几对里，账本净值变化与「同报价重估」的最大差 ${money(diff, 2)}${diff < 1 ? "（一致）" : "——差得多，说明账本标记与审计报价不是同一份"}。` : ""),
+    h("p", { class: "callout" }, N.small_n || ""));
 }
 
 function gateTable(T) {
@@ -63,8 +112,10 @@ export function tailBudgetPanel(T) {
   const node = h("div");
   const L = T?.latest;
   if (!L) {
+    // 模型检验只读审计里本来就有的 rows / nav / spy_price，不依赖 `tail` 一节——所以空状态下也照样给
     node.append(panel(TITLE, { sub: "只读观测" }, h("div", { class: "empty" },
-      `还没有带尾部预算的审计记录${T?.n_audits_without_tail ? `（现有 ${T.n_audits_without_tail} 份审计是该功能上线之前的，没有这一节）` : ""}；下一个扫描日起自动出现。`)));
+      `还没有带尾部预算的审计记录${T?.n_audits_without_tail ? `（现有 ${T.n_audits_without_tail} 份审计是该功能上线之前的，没有这一节）` : ""}；下一个扫描日起自动出现。`),
+    T?.model_check ? h("div", { style: { height: "12px" } }) : null, modelCheckBlock(T?.model_check)));
     return node;
   }
   const chartEl = h("div", { class: "chart short" });
@@ -80,11 +131,15 @@ export function tailBudgetPanel(T) {
       kpi("全组合最差格", h("span", { class: "down" }, sPct(-L.loss_pct_nav, 1)), `${cellName(L.worst)} · ${sMoney(L.worst?.pnl)}`),
       kpi("告警线", `${num(L.alert_pct, 0)}% NAV`, breach ? "已超线（每个扫描日 P2）" : "线内"),
       kpi("下行 / 平盘侧最差格", h("span", { class: "down" }, sPct(L.downside_worst?.pct_nav, 1)), cellName(L.downside_worst)),
+      kpi("单仓上限", isNum(L.slot_cap_pct) ? `${num(L.slot_cap_pct, 1)}% NAV` : "—",
+        isNum(L.slot_cap_pct) ? `= 告警线 ${num(L.alert_pct, 0)}% ÷ ${L.max_open} 个名额；${L.n_over_cap || 0} 笔超限${(L.over_cap_tickers || []).length ? `（${L.over_cap_tickers.join("、")}）` : ""}` : "名额数不可得"),
       kpi("账目核对", `残差 ${sMoney(L.residual_usd, 2)}`, "各标的贡献之和与全组合最差格的差")),
     series.length > 1 ? chartEl : null,
     h("h3", { class: "small" }, "逐标的贡献（最差格；负 = 亏）"), tickerTable(L.by_ticker || []),
     h("div", { style: { height: "12px" } }),
     h("h3", { class: "small" }, "按板块"), sectorTable(L.by_sector || []),
+    h("div", { style: { height: "12px" } }),
+    modelCheckBlock(T.model_check),
     h("div", { style: { height: "12px" } }),
     h("h3", { class: "small" }, `影子闸记录（预算 ${budgets.map((b) => `${b}%`).join(" / ") || "—"} NAV；${T.n_gate_entries || 0} 笔）`),
     (T.gate_log || []).length ? gateTable(T) : h("div", { class: "empty" }, "上线以来还没有新开的跨式（只在入场当天评估）。"),

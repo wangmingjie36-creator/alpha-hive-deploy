@@ -19,6 +19,9 @@ from alphabot import hedge as HG
 from alphabot import synthetic as syn
 from alphabot.service import AlphaBotService
 from tests.test_alphabot_hedge import DIRNAME, NOW, _client, _fingerprint, _svc, _write
+from tests.test_tail_budget import _audit as _mc_audit
+from tests.test_tail_budget import opt as _mc_opt
+from tests.test_tail_budget import quad_stress
 
 STATIC = Path(__file__).resolve().parent.parent / "alphabot" / "static" / "pages"
 
@@ -129,6 +132,42 @@ class TestService:
         assert sum(x["at_worst"] for x in t["latest"]["by_ticker"]) == pytest.approx(t["latest"]["worst"]["pnl"], abs=0.1)
 
 
+class TestModelCheckView:
+    def pair_audits(self):
+        return {"2026-10-15": _mc_audit(600.0, 1e5, 1000.0, [_mc_opt()]),
+                "2026-10-16": _mc_audit(606.0, 99e3, 880.0, [_mc_opt(price=102.0, mid=6.2, iv=0.31)])}
+
+    def test_tail_overview_carries_the_model_check_with_the_stress_function_it_is_given(self):
+        t = HG.tail_overview(self.pair_audits(), quad_stress)
+        mc = t["model_check"]
+        assert mc["n_used"] == 1 and mc["pairs"][0]["pred_grid"] == pytest.approx(-0.5)
+        assert t["latest"] is None                       # 这些审计没有 tail 一节：模型检验不依赖它（rows / nav / spy_price 本来就在审计里）
+        assert HG.tail_overview(self.pair_audits())["model_check"]["pairs"][0]["pred_grid"] is None     # 没传压力函数：只缺这一项
+
+    def test_overview_threads_the_stress_function_through(self):
+        view = {"exists": True, "history": {"audits": self.pair_audits(), "equity": [], "trades": []}, "meta": {}, "opened": True}
+        d = HG.build_overview(view, now_et=NOW, stress_fn=quad_stress)
+        assert d["tail"]["model_check"]["pairs"][0]["pred_grid"] == pytest.approx(-0.5)
+
+    def test_the_service_hands_over_the_real_stress_table(self, root_with_tail):
+        import portfolio_greeks as pg
+        assert _svc(root_with_tail)._stress_fn() is pg.stress_table
+
+    def test_endpoint_reports_why_pairs_were_skipped(self, root_with_tail):
+        mc = _svc(root_with_tail).hedge()["tail"]["model_check"]
+        assert mc["n_pairs"] == 1 and mc["n_used"] == 0 and mc["skipped_by_reason"] == {"no_options": 1}
+        assert mc["skip_reasons"]["no_options"] and "scope" in mc["notes"]
+
+    def test_hedge_rules_show_the_derived_alert_lines(self, root_with_tail):
+        r = _svc(root_with_tail).hedge_rules()
+        assert r["gamma_alert_pct"] == 0.1 and r["vega_alert_pct"] == 0.5 and r["alert_lines_source"] == "derived"
+
+    def test_demo_tail_has_slot_caps(self, tmp_path):
+        t = AlphaBotService(fetch_fn=syn.demo_fetch, demo=True, state_dir=tmp_path, now_fn=lambda: NOW).hedge()["tail"]["latest"]
+        assert t["slot_cap_pct"] == 3.33 and t["max_open"] == 6 and t["n_over_cap"] == len(t["over_cap_tickers"]) > 0
+        assert all(x["slot"]["over_cap"] is (x["slot"]["loss_pct"] > x["slot"]["cap_pct"]) for x in t["by_ticker"])
+
+
 class TestFrontend:
     BUDGET = (STATIC / "hedge_tail_budget.js").read_text(encoding="utf-8")
     HEDGE = (STATIC / "hedge.js").read_text(encoding="utf-8")
@@ -147,6 +186,20 @@ class TestFrontend:
 
     def test_unevaluable_entries_show_the_servers_reason_not_a_blank_or_a_zero(self):
         assert "r.reason_zh" in self.BUDGET and "不适用（买入）" in self.BUDGET
+
+    def test_slot_cap_and_model_check_are_on_the_page(self):
+        for sn in ("单仓上限", "跨式腿 / 单仓上限", "压力模型 vs 实际净值", "预测·压力网格", "预测·Greeks 展开", "R²", "误差（预测−实际）",
+                   "正 = 模型比实际乐观"):
+            assert sn in self.BUDGET, sn
+        assert "modelCheckBlock(T.model_check)" in self.BUDGET and "N.small_n" in self.BUDGET and "N.pred_grid" in self.BUDGET
+
+    def test_model_check_is_shown_even_before_any_audit_carries_a_tail_section(self):
+        """有牙：真实数据上线当天所有审计都没有 `tail`——模型检验若跟着空状态一起藏掉，就白做了（浏览器里实测踩到过）。"""
+        empty = self.BUDGET[self.BUDGET.index("if (!L) {"):self.BUDGET.index("const chartEl")]
+        assert "modelCheckBlock(T?.model_check)" in empty and "return node" in empty
+
+    def test_the_two_actual_columns_agree_note_is_computed_not_asserted(self):
+        assert "ledger_audit_max_diff_usd" in self.BUDGET and "（一致）" in self.BUDGET
 
     def test_empty_state_names_the_pre_feature_audits(self):
         assert "n_audits_without_tail" in self.BUDGET and "上线之前" in self.BUDGET

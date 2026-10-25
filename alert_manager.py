@@ -939,6 +939,9 @@ class AlertAnalyzer:
         skip = tail.get("gate_n_would_skip") or {}
         gate = (f"今天新开 {tail.get('gate_n_entries', 0)} 笔，按 " + " / ".join(f"{k}%" for k in skip)
                 + " 预算会跳过 " + " / ".join(str(v) for v in skip.values()) + " 笔（影子记录，没有真跳过）") if skip else "—"
+        over, cap = tail.get("over_cap") or [], tail.get("slot_cap_pct")
+        slot = (f"{len(over)} 笔超过单仓上限 {cap}% NAV / 笔（= 告警线 ÷ 名额数）："
+                + "；".join(f"{o.get('ticker')} {o.get('loss_pct')}%（{o.get('multiple')}×）" for o in over)) if (over and cap) else "—"
         self.alerts.append(Alert(
             AlertLevel.MEDIUM,
             f"📊 【P2 中】组合尾部：压力最差格（现货 {w.get('spot_pct', 0):+g}%、IV {w.get('iv_pts', 0):+g} 点）损失 "
@@ -947,6 +950,7 @@ class AlertAnalyzer:
                 "最差格": f"{w.get('pnl')} 美元（{w.get('pct_nav')}% NAV）",
                 "主要来源": top,
                 "板块": sec,
+                "单仓上限": slot,
                 "影子闸": gate,
                 "压力表": "有行被剔除，实际损失可能更大" if tail.get("partial") else "完整",
                 "影响": "只观测：不改任何交易行为。这是净空 Gamma / Vega 的跨式账的尾部，SPY 股票对冲管不到它",
