@@ -142,15 +142,17 @@ class TestAgainstTheGitManifest:
         assert missing == [], missing[:10]
 
     def test_real_repo_walk_reads_everything_and_enters_no_third_party_tree(self):
+        # 点号目录的快照取在遍历**之前**，对账时只认「遍历后仍存在」的：别的进程在两者之间新建 / 删掉
+        # `.ruff_cache` 之类的缓存目录，不该让这条偶发红。
+        before = sorted(e.name for e in os.scandir(_ROOT) if e.is_dir(follow_symlinks=False) and e.name.startswith("."))
         res = RF.walk_own_python_files(_ROOT)
         assert res.errors == [], res.errors[:5]
         # 「点号目录确实被剪了」的自证，按**这个环境里实际存在**的点号目录算：`.git` 在开发检出 / 干净克隆里是目录、
         # 在 git worktree 里是一个文件（`gitdir: …`，不在 `os.walk` 的 dirnames 里），写死 `.git` 在 worktree 里恒红
         # （v0.45.646）。`.github` / `.claude` 是被跟踪的目录，任何环境都有，所以集合不会是空的——空集合会让
         # 下面的包含断言恒真，故先断言非空。
-        hidden_dirs = sorted(e.name for e in os.scandir(_ROOT) if e.is_dir(follow_symlinks=False) and e.name.startswith("."))
-        assert hidden_dirs, "仓库根下一个点号目录都没有——剪枝自证没有可对照的样本（.github / .claude 是被跟踪的）"
-        missing = [d for d in hidden_dirs if (d, "hidden") not in res.pruned]
+        assert before, "仓库根下一个点号目录都没有——剪枝自证没有可对照的样本（.github / .claude 是被跟踪的）"
+        missing = [d for d in before if (_ROOT / d).is_dir() and (d, "hidden") not in res.pruned]
         assert not missing, f"这些点号目录存在却没被剪——剪枝规则没生效：{missing}"
         assert all(why in {"skip", "vendored", "hidden", "icloud"} for _, why in res.pruned)
         bad = [p.relative_to(_ROOT).as_posix() for p in res.files
