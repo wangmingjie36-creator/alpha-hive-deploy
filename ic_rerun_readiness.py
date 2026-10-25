@@ -1063,6 +1063,31 @@ _COHORT_HISTORY = [
      "⚠️ 同版另有一项**不在本边界内**：`price_metrics` 收拢行情三字段公式（data_pipeline 三份 + cache.py 旧回落），按 `measurement_fix` 登记在 "
      "`signal_code_fingerprints.ACKS`（主路径 1900 次对拍逐位不变，值只在旧回落上变）。"
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
+    ("2026-10-19", "v0.45.652",
+     "行情三字段以外的 yfinance 日线读者收进唯一取数入口 `yf_daily`（取到即去掉「公司行动空行」：开高低收全空、量 0、分红 / 拆股非零；"
+     "用户 2026-10-25 定「按根因修、边界 10-19 + 等价判据」）。v0.45.645 只修了 H1 三字段的四条路径，其余十几个调用点各自直调 "
+     "`Ticker.history()`，吃不吃得到全凭写法；守卫 `tests/test_yf_daily.py::TestSingleEntry` 钉住「别处不许直调」。"
+     "**进评分的只有两条，都只在出现空行的日子才变**：① 板块轮动（`fred_macro._fetch_sector_rotation`，`period=\"5d\"`、"
+     "`Close.iloc[0]` 当起点）：首行空行让那只 ETF 被丢——11 只 SPDR 同一天除息（最近 2025-12-22 / 2026-03-23 / 06-22 / 09-21，"
+     "10-25 逐只核过）⇒ 一漏就是整表空 ⇒ Guard 宏观票少一票 ⇒ `macro_regime` 经 `RegimeWeightAdjuster` 改维度权重 ⇒ final_score。"
+     "新代码把被丢的 ETF 加回来；② Rival 直连回退（预取包缺票时）：首行空行逐位不变，末行空行（最近那根缺了）改成返回空表、"
+     "Rival 回中性（此前 MACD 多衰减一步、BB 回 0.5）——要事件日期晚于末根 K 线，14:00 PDT 收盘后的生产扫描碰不到。"
+     "HV（Oracle → H2 输入）首行 / 末行都逐位不变（差分测试），不在本边界内。宏观报价（449）/ 补跑 `_asof_history` 的末行空行"
+     "此前也落到「没取到」（NaN 收盘），结局相同。"
+     "**为什么日期写 10-19 而新代码 10-27 才推送**（同 v0.45.369 / 559 / 639 的处置）：10-19 ~ 10-26 六个旧代码扫描日 180 行等价判据全部成立"
+     "（冻结证据 `experiments/macro_rotation_equivalence_20261019.json`：10-19 ~ 10-23 每天轮动表 11 只齐全、预取包 35/35；10-26 是 yfinance 限流"
+     "故障日（day_health source_outage），整轮 `yf_gate` calls=5 全部 429、冷却挡下 781 次 ⇒ 一份日线都没到手、不可能有空行，"
+     "状态 `equivalent_no_yfinance_data`——`scan_timing.json` 每天被覆盖，10-27 扫描前冻结），与 537 / 538 / 559 / 639 "
+     "同日扩展同一标签，**边际作废 0 条**。等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.652\"]`；印记 `_BOUNDARY_MARKERS[\"v0.45.652\"]`："
+     "Guard `details.macro_event_rows_checked` 字面量 True（成功路径无条件写），实时行。预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.652\"]` = `agent.GuardBeeSentinel.*`（本来就从 10-19 起 ⇒ 0 个信号后移）。"
+     "**`guard.macro_adj` 与 Rival 刻意不点名**（同 v0.45.256「实测没换 ⇒ 照证据不列」）：点名会把 `guard.macro_adj` 的当代起点从 09-28 "
+     "后移到 10-19、Rival 方向从 09-07 后移，而 09-28 ~ 10-26 归档里没有一天受空行影响——证据文件里 17 天 equivalent、10-26 无 yfinance 数据；不是的三天："
+     "10-05 轮动表 9 只（部分缺失，同日除息的空行只会 11 只一起丢）、10-14 0 只（数据源故障日，5 日窗口边界日 10-07 不是除息日）、"
+     "10-12 预取包 0/35（Rival 走了直连，首行空行逐位不变、14:18 PDT 收盘后碰不到末行）。唯一一次 5 日窗口边界正好落在除息日的扫描"
+     "（09-28，边界 09-21）11 只照样齐全。前瞻检验：维度 IC 协议 H1（buzz_v1 输入层 + 冻结层）/ H2（Chronos / Buzz / Oracle 分 + 冻结权重，"
+     "Queen 调整之前）都不读 Guard 宏观票与 Rival ⇒ 不截断。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签"
+     "（final_score 是 ML 特征，只在空行日变）。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1527,6 +1552,53 @@ def _equiv_bear_options_dq(d: dict) -> bool:
     return ((sr.get("data_quality") or {}).get("OracleBeeEcho") or {}).get("options") == "real"
 
 
+def _guard_row_has_event_rows_marker(d: dict) -> bool:
+    """这行是 v0.45.652 之后的代码写的吗：GuardBeeSentinel `details.macro_event_rows_checked` 为字面量 `True`
+    （成功路径无条件写；Guard 走异常兜底时 details 是 `{}`，等价判据接住）。只认 `is True`：此前的记录没有这个键。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    return isinstance(det, dict) and det.get("macro_event_rows_checked") is True
+
+
+def _marker_guard_macro_event_rows(d: dict) -> bool:
+    """v0.45.652 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383）。"""
+    return _guard_row_has_event_rows_marker(d) and not _is_backfill_row(d)
+
+
+_MACRO_ROTATION_EVIDENCE_PATH = (Path(__file__).resolve().parent / "experiments"
+                                 / "macro_rotation_equivalence_20261019.json")
+#: 证据里算「新旧代码输出相同」的状态：轮动表 11 只齐全且预取包全覆盖 / 整轮 yfinance 0 次成功响应（没有日线到手就没有空行）
+_MACRO_ROTATION_EQUIV_STATUSES = frozenset({"equivalent", "equivalent_no_yfinance_data"})
+
+
+def _load_macro_rotation_evidence() -> Dict[str, str]:
+    """{日期: 状态}。读不出 / 结构不对 ⇒ 空（**证不出等价就不算等价**）。每次现读（同 `_load_hv_gap_evidence`）。"""
+    try:
+        with open(_MACRO_ROTATION_EVIDENCE_PATH, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return {day: rec.get("status") for day, rec in (doc.get("days") or {}).items()}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _equiv_macro_event_rows(d: dict) -> bool:
+    """v0.45.652 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？
+
+    本版把行情三字段以外的 yfinance 日线读者收进 `yf_daily`（取到即去掉公司行动空行）。进评分的只有两条，都要证明碰不到：
+      ① 板块轮动（Guard 宏观票）：新代码只在「首行空行让 ETF 被丢」的日子改输出；11 只 SPDR 同日除息 ⇒ 一漏就是整表空。
+         当天轮动表 11 只齐全 ⇒ 没有 ETF 被丢 ⇒ 不变；
+      ② Rival 直连回退：只在预取包缺票时走，且只有末行空行会变 ⇒ 当天每轮预取包全覆盖 ⇒ 不变。
+    旧代码的逐票记录里没有「轮动表几只」——只在当天报告里 ⇒ 读**冻结的外部证据**（`experiments/macro_rotation_equivalence_audit.py`
+    生成），按 `_date` 查：状态 `equivalent`，或 `equivalent_no_yfinance_data`（当天整轮 yfinance 0 次成功响应——`yf_gate`
+    计数 `calls == rate_limited`，没有日线到手就不可能有空行；10-26 限流故障日即此）⇒ True。Guard 与 Rival 都不在本行 / 都出错 ⇒ 两版同一条路 ⇒ True。
+    其余 ⇒ False（举证责任在放宽一侧）。HV（Oracle）首行 / 末行都逐位不变，不需要证据（`tests/test_yf_daily.py` 对拍）。"""
+    agents = (d.get("swarm_results") or {}).get("agent_details") or {}
+    touched = [agents.get(k) for k in ("GuardBeeSentinel", "RivalBeeVanguard")]
+    if all(not isinstance(a, dict) or a.get("error") for a in touched):
+        return True
+    return _load_macro_rotation_evidence().get(d.get("_date")) in _MACRO_ROTATION_EQUIV_STATUSES
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1564,6 +1636,8 @@ _BOUNDARY_MARKERS = {
                   _marker_buzz_volatility_dq_from_value),
     "v0.45.639": ("agent_details.BearBeeContrarian.details.options_dq_from_oracle is True",
                   _marker_bear_options_dq_from_oracle),
+    "v0.45.652": ("agent_details.GuardBeeSentinel.details.macro_event_rows_checked is True",
+                  _marker_guard_macro_event_rows),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1595,6 +1669,9 @@ _BOUNDARY_EQUIVALENCE = {
                   _equiv_buzz_volatility_present, _buzz_row_has_volatility_dq_marker),
     "v0.45.639": ("OracleBeeEcho data_quality.options 是 real（或 Bear 出错 / 不在本行）⇒ 本版改动是空操作",
                   _equiv_bear_options_dq, _bear_row_has_options_dq_marker),
+    "v0.45.652": ("冻结证据 experiments/macro_rotation_equivalence_20261019.json：当天板块轮动表 11 只齐全且预取包全覆盖，"
+                  "或整轮 yfinance 0 次成功响应（或 Guard 与 Rival 都不在本行 / 都出错）⇒ 本版改动是空操作",
+                  _equiv_macro_event_rows, _guard_row_has_event_rows_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。

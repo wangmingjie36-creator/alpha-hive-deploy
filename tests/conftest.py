@@ -1348,6 +1348,18 @@ def _reset_event_row_stats():
         mod._reset_event_row_stats()
 
 
+@pytest.fixture(autouse=True)
+def _reset_yf_daily_stats():
+    """v0.45.652：`yf_daily` 唯一入口的公司行动空行计数是进程级全局状态（同上一条）。只在模块已导入时清——不在这里触发导入。"""
+    mod = sys.modules.get("yf_daily")
+    if mod is not None:
+        mod._reset_stats()
+    yield
+    mod = sys.modules.get("yf_daily")
+    if mod is not None:
+        mod._reset_stats()
+
+
 @pytest.fixture
 def sell_strike_state_sandbox_check():
     """把 `_assert_sell_strike_state_in_sandbox` 暴露给它的有牙自证（同 `default_path_sandbox_check`）。"""

@@ -773,9 +773,11 @@ async def alphahive_get_price_history(params: PriceHistoryInput) -> str:
     """
     try:
         def _fetch():
-            return yf.Ticker(params.ticker).history(
-                period=params.period, interval=params.interval
-            )
+            # v0.45.652：经唯一入口取，公司行动空行（开高低收全空的一行）不再变成一根 NaN 蜡烛。
+            # 末行空行也照去：蜡烛自带日期，剩下的末根就是它自己那天，不会冒充今天
+            import yf_daily
+            return yf_daily.history(yf.Ticker(params.ticker), source="mcp_price_history",
+                                    period=params.period, interval=params.interval)[0]
 
         hist = await asyncio.to_thread(_fetch)
         if hist.empty:

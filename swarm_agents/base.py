@@ -165,7 +165,10 @@ class BeeAgent(ABC):
     def _yf_history(self, ticker: str, period: str = "3mo"):
         """`yf.Ticker(ticker).history(period=)`。预取包按 `MARKET_HISTORY_PERIOD`
         下载，请求更短的 period 时按日历日切尾巴（yfinance 的 `period="Nd"` 就是
-        从现在往回数 N 个日历日）。请求比预取包更长 → 不猜，回退直连。"""
+        从现在往回数 N 个日历日）。请求比预取包更长 → 不猜，回退直连。
+
+        v0.45.652：直连回退经 `yf_daily` 取（预取包是 `yf.download`，yfinance 自己就不留公司行动空行）。
+        末行是空行 = 最近那根缺了 ⇒ 返回空表（调用方按「取不到」走中性默认值），不拿前一场冒充今天。"""
         hist = self._market().get("history", {})
         df = hist.get(ticker)
         if df is not None:
@@ -173,7 +176,11 @@ class BeeAgent(ABC):
             if sliced is not None:
                 return sliced
         import yfinance as yf
-        return yf.Ticker(ticker).history(period=period)
+        import yf_daily
+        out, last_blank = yf_daily.history(yf.Ticker(ticker), source="rival_fallback", period=period)
+        if last_blank:
+            return out.iloc[0:0]
+        return out
 
     def _yf_close_panel(self, symbols: List[str], period: str):
         """`yf.download(symbols, period=)["Close"]` 的等价物：列 = symbol 的收盘价面板。

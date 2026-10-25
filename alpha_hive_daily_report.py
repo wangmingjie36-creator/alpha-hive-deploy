@@ -1167,10 +1167,19 @@ class AlphaHiveDailyReporter:
                         _snap.entry_price = 0.0
                     if not _snap.entry_price:
                         try:
+                            import yf_daily
                             from data_pipeline import _drop_forming_bar as _dfb
-                            _hist = _dfb(_yf_fb.Ticker(_tk).history(period="5d"))  # v0.29.4 盘中护栏
-                            if not _hist.empty:
-                                _snap.entry_price = float(_hist["Close"].iloc[-1])
+                            # v0.45.652：经唯一入口取（先去公司行动空行，再过 v0.29.4 盘中护栏——护栏的「≥3 根」数的是真 K 线）；
+                            # 末行空行 = 今天那根缺了 ⇒ 不给价（剩下的末根是前一场）
+                            _hist, _last_blank = yf_daily.history(_yf_fb.Ticker(_tk), source="snapshot_entry_price",
+                                                                  period="5d")
+                            _hist = _dfb(_hist)
+                            if not _last_blank and not _hist.empty:
+                                _px_fb = float(_hist["Close"].iloc[-1])
+                                # v0.45.652：回退取到的收盘同样可能是 NaN（2026-08-28 型「量在、收盘缺」）——上面那道 isfinite
+                                # 只管侦察蜂价，这里补上，否则 NaN 照样落进快照
+                                if math.isfinite(_px_fb) and _px_fb > 0:
+                                    _snap.entry_price = _px_fb
                         except Exception as _e_price:  # noqa: BLE001 - 取价失败不阻断快照
                             _log.debug("Snapshot 入场价获取失败 (%s): %s", _tk, _e_price)
                     _snap.save_to_json(_snap_dir)
@@ -2239,9 +2248,13 @@ class AlphaHiveDailyReporter:
             _scout_details = {"consensus_in_score": False}
             try:
                 import yfinance as _yf_sr
+                import yf_daily
                 from data_pipeline import _drop_forming_bar as _dfb
-                _h_sr = _dfb(_yf_sr.Ticker(_tk).history(period="5d"))  # v0.29.4 盘中护栏
-                if not _h_sr.empty:
+                # v0.45.652：经唯一入口取（首行公司行动空行曾让 5 日动量的 iloc[0] 成 NaN），再过 v0.29.4 盘中护栏；
+                # 末行空行 = 今天那根缺了 ⇒ 价格 / 动量都不给
+                _h_sr, _last_blank_sr = yf_daily.history(_yf_sr.Ticker(_tk), source="synthetic_swarm", period="5d")
+                _h_sr = _dfb(_h_sr)
+                if not _last_blank_sr and not _h_sr.empty:
                     _scout_details["price"] = float(_h_sr["Close"].iloc[-1])
                     if len(_h_sr) >= 2:
                         _scout_details["momentum_5d"] = round(

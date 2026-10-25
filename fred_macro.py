@@ -138,12 +138,20 @@ def _asof_history(yf, sym: str, as_of: str):
 
     用 start/end 而不是 `period="5d"` —— 后者永远是**最近** 5 天。
     多要 12 个自然日的余量以跨过周末与假期。
+
+    v0.45.652：经 `yf_daily` 取。末行是公司行动空行 = 有事件、却没有那天的 K 线（D 那根缺了）⇒ 返回 None：
+    剩下的末根是更早的一场，拿它当 D 就是冒充（此前末行收盘是 NaN，两处调用方也都落到「没取到」，结局相同，现在多一行日志）。
     """
     import datetime as _dt
+    import yf_daily
     d = _dt.date.fromisoformat(as_of)
-    hist = yf.Ticker(sym).history(start=(d - _dt.timedelta(days=12)).isoformat(),
-                                  end=(d + _dt.timedelta(days=1)).isoformat(),
-                                  interval="1d")
+    hist, last_blank = yf_daily.history(yf.Ticker(sym), source="macro_asof",
+                                        start=(d - _dt.timedelta(days=12)).isoformat(),
+                                        end=(d + _dt.timedelta(days=1)).isoformat(),
+                                        interval="1d")
+    if last_blank:
+        _log.warning("补跑宏观 %s @ %s：末行是公司行动空行（那天没有 K 线），按没取到处理", sym, as_of)
+        return None
     if hist is None or hist.empty:
         return None
     # end 是开区间，但时区/夏令时偶尔会多带一根；显式截断到 as_of 当日为止
@@ -445,8 +453,12 @@ def _fetch_macro_data() -> Dict:
                     if hist is None:
                         continue
                 else:
-                    t = yf.Ticker(sym)
-                    hist = t.history(period="5d", interval="1d")
+                    import yf_daily
+                    # v0.45.652：经唯一入口取。末行空行 = 今天那根缺了 ⇒ 当没取到（剩下的末根是前一场）
+                    hist, _last_blank = yf_daily.history(yf.Ticker(sym), source="macro_quotes",
+                                                         period="5d", interval="1d")
+                    if _last_blank:
+                        continue
                 if hist is not None and not hist.empty:
                     _last = float(hist["Close"].iloc[-1])
                     _prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else _last
@@ -1039,9 +1051,12 @@ def _fetch_sector_rotation(yf_module=None, as_of: Optional[str] = None) -> Dict:
                     first_close = float(hist["Close"].iloc[-min(5, len(hist))])
                     last_close = float(hist["Close"].iloc[-1])
                 else:
-                    t = yf.Ticker(etf)
-                    hist = t.history(period="5d", interval="1d")
-                    if hist is None or len(hist) < 2:
+                    import yf_daily
+                    # v0.45.652：经唯一入口取。首行空行（窗口外边界日的分红）此前让 iloc[0] 成 NaN、整只 ETF 被丢——
+                    # 11 只 SPDR 同一天除息，一漏就是整张轮动表空；末行空行 = 今天那根缺了 ⇒ 这只不计（同此前 NaN 的结局）
+                    hist, _last_blank = yf_daily.history(yf.Ticker(etf), source="sector_rotation",
+                                                         period="5d", interval="1d")
+                    if _last_blank or hist is None or len(hist) < 2:
                         return None
                     first_close = float(hist["Close"].iloc[0])
                     last_close = float(hist["Close"].iloc[-1])

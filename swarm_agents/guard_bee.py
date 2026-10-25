@@ -257,6 +257,9 @@ class GuardBeeSentinel(BeeAgent):
                     "macro_regime": macro_result.get("regime", "unknown"),
                     "macro_signals": macro_result.get("signals", []),
                     "macro_regime_votes": macro_result.get("regime_votes", {}),
+                    # v0.45.652 世代印记（无条件写，不在 if 里）：宏观票读的 yfinance 日线（板块轮动 / 宏观报价 / 补跑）经
+                    # `yf_daily` 去掉公司行动空行。判别器按它认新代码（`ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.652"]`）
+                    "macro_event_rows_checked": True,
                     # ③ 时间周期
                     "cycle_context": cycle_ctx,
                     # ④ 市场政体

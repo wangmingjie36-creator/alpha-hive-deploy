@@ -679,8 +679,11 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
                 pass
 
             import yfinance as _yf
-            _h = _yf.Ticker(ticker).history(period="5d")
-            if not _h.empty:
+            import yf_daily
+            # v0.45.652：经唯一入口取（首行公司行动空行曾让 5 日动量的 iloc[0] 成 NaN）；
+            # 末行空行 = 今天那根缺了 ⇒ 不给回退价（剩下的末根是前一场）
+            _h, _last_blank = yf_daily.history(_yf.Ticker(ticker), source="dashboard_price", period="5d")
+            if not _last_blank and not _h.empty:
                 _price_raw = float(_h["Close"].iloc[-1])
                 if len(_h) >= 2 and _momentum_raw is None:
                     _momentum_raw = (_h["Close"].iloc[-1] / _h["Close"].iloc[0] - 1) * 100

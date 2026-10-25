@@ -2448,6 +2448,10 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 10-19（v0.45.639，新代码 10-26 上线，等价论证见 ic_rerun_readiness 同版条目）：BearBee data_quality.options 照抄 Oracle 板上判定 ——
     # 只改标签与 Bear confidence，Bear 分 / 方向不变；`bear.*`、`agent.BearBeeContrarian.*` 读分与方向 ⇒ 只动蜂后层 ⇒ 只切 composite.final_score
     "v0.45.639": (),
+    # 10-19（v0.45.652，新代码 10-27 推送，等价论证见 ic_rerun_readiness 同版条目）：行情三字段以外的 yfinance 日线读者收进 `yf_daily`
+    # （去掉公司行动空行）。进分的是板块轮动（Guard 宏观票 → 权重路由）与 Rival 直连回退，都只在空行日变 ⇒ 点名 Guard
+    # （本来就从 10-19 起，0 个信号后移）；`guard.macro_adj` / Rival 刻意不点名：09-28 起归档里没有一天受空行影响（证据见该条目）
+    "v0.45.652": ("agent.GuardBeeSentinel.*",),
 }
 
 

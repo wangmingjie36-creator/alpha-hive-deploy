@@ -96,8 +96,11 @@ def check_ticker_validity(ticker: str) -> Dict:
 
     try:
         import yfinance as _yf
+        import yf_daily
         t = _yf.Ticker(ticker)
-        hist = t.history(period="5d")
+        # v0.45.652：经唯一入口取（公司行动空行先去掉）。末行空行不另判：这里只问「有没有成交 / 价格是不是极低」，
+        # 最近一根真实 K 线就是答案，不当作今天的值用
+        hist, _last_blank = yf_daily.history(t, source="ticker_validity", period="5d")
 
         # 无交易数据 → 退市/停牌
         if hist.empty:

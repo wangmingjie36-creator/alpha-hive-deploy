@@ -145,7 +145,9 @@ def _fetch_daily_returns(ticker: str, period: str = "3mo") -> np.ndarray:
     """从 yfinance 获取日收益率序列（小数形式）"""
     try:
         import yfinance as yf
-        hist = yf.Ticker(ticker).history(period=period)
+        import yf_daily
+        # v0.45.652：经唯一入口取（公司行动空行先去掉）；收益序列按日期用整段，末行空行不另判
+        hist, _last_blank = yf_daily.history(yf.Ticker(ticker), source="risk_engine_cli", period=period)
         if hist.empty or len(hist) < 10:
             return np.array([])
         returns = hist["Close"].pct_change().dropna().values.astype(float)
@@ -228,7 +230,9 @@ def historical_var(
             # 直接计算真实 T日持有期收益（避免 sqrt(T) 低估厚尾）
             try:
                 import yfinance as yf
-                hist = yf.Ticker(ticker).history(period="1y")
+                import yf_daily
+                # v0.45.652：经唯一入口取（公司行动空行的 NaN 收盘会让滚动收益整段 NaN）；滚动收益按日期用整段，末行空行不另判
+                hist, _last_blank = yf_daily.history(yf.Ticker(ticker), source="risk_engine_cli", period="1y")
                 if not hist.empty and len(hist) > horizon_days + 5:
                     closes = hist["Close"].values.astype(float)
                     # 滚动 T日收益：r_t = (P_{t+T} / P_t) - 1
@@ -829,7 +833,11 @@ def run_full_risk_analysis(
     if not stock_data or float(stock_data.get("price", 0)) <= 0:
         try:
             import yfinance as yf
-            hist = yf.Ticker(ticker).history(period="1mo")
+            import yf_daily
+            # v0.45.652：经唯一入口取；末行空行 = 今天那根缺了 ⇒ 走取不到分支（下面用末根当现价）
+            hist, _last_blank = yf_daily.history(yf.Ticker(ticker), source="risk_engine_cli", period="1mo")
+            if _last_blank:
+                raise ValueError("last row is a corporate-action blank row (today's bar missing)")
             if hist.empty:
                 raise ValueError("empty history")
             price = float(hist["Close"].iloc[-1])
