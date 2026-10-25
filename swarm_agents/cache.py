@@ -269,6 +269,13 @@ def _fetch_stock_data(ticker: str, target_date: Optional[str] = None) -> Dict:
             import yfinance as yf
             t = yf.Ticker(ticker)
             hist = t.history(period="1mo")
+            # v0.45.645：公司行动空行不是 K 线，第一步去掉（同 data_pipeline 三处，理由见 price_metrics）；末行是空行 ⇒ 当天 K 线缺了，
+            # 不拿前一场冒充今天，标不可用（同主路径）
+            hist, _tail_event = price_metrics.drop_event_only_rows(hist, ticker)
+            if _tail_event:
+                _log.warning("[%s] 旧回落：yfinance 日线末行是公司行动空行（当天没有 K 线）—— 标不可用", ticker)
+                data["_data_unavailable"] = True
+                return data
             if hist.empty:
                 if attempt < _YF_MAX_RETRIES:
                     _time.sleep(1.0 * (2 ** attempt))

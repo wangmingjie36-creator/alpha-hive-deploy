@@ -326,6 +326,7 @@ class AlertAnalyzer:
         self._check_strangle_shadow(status)
         self._check_history_fill(status)
         self._check_stock_fetch_legacy(status)   # v0.45.639：P1 行情改走 cache.py 旧回落
+        self._check_event_rows(status)           # v0.45.645：P2 日线公司行动空行不在首行（某个交易日的价格缺了）
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
         self._check_news_sources(status)
@@ -1271,6 +1272,67 @@ class AlertAnalyzer:
             },
             ["stock_fetch_legacy", "data_quality"]
         ))
+
+    def _check_event_rows(self, status: Dict) -> None:
+        """yfinance 日线里的公司行动空行（开高低收全空、量 0、有分红 / 拆股）**不在首行**（v0.45.645；`price_metrics.event_row_stats()`
+        经 scan_timing 进来）。
+
+        首行的空行是 `period="1mo"` 窗口外的边界日漏进来的分红（实测唯一一例 META 09-21 就是这种），去掉后窗口恰好是请求的
+        (D−1 月, D]——正常，只计数。yfinance 只给越界事件补空行，所以不在首行实际就是**末行**（事件日期晚于末根 K 线：当天没有 K 线，
+        或盘前跑、今天还没开盘）——那一路行情已整体当取不到、交给出口回落；窗口中间的位置是防御（yfinance 换版本才可能，去掉后是「缺一根」、
+        值照样进评分）。都从没见过，所以要红。按评分那一刻的快照判 P2；评分之后的取数才遇到的另列 INFO；计数缺失 ⇒ checks_skipped。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        ev = (st.get("counters") or {}).get("event_rows")
+        if not isinstance(ev, dict):
+            self.checks_skipped.append("日线公司行动空行检查（scan_timing 无 event_rows 计数）")
+            return
+        scored = ev.get("at_scoring")
+        has_scored = isinstance(scored, dict)
+        base_d = scored if has_scored else ev
+
+        def _total(d):
+            return int(d.get("elsewhere_total", len(d.get("elsewhere") or [])) or 0)
+
+        def _items(xs, total):
+            shown = "；".join(f"{x.get('ticker')} {x.get('date')}（第 {x.get('pos')} 行 / 共 {x.get('n')} 行"
+                             + ("，末行" if x.get("last") else "") + "）" for x in xs[:10])
+            return shown + (f" 等共 {total} 条" if total > min(len(xs), 10) else "")
+
+        n_base = _total(base_d)
+        if n_base:
+            items = list(base_d.get("elsewhere") or [])
+            details = {
+                "明细": _items(items, n_base),
+                "影响": "末行的：事件日期晚于末根 K 线（当天没有 K 线，或盘前跑），那一路行情已整体当取不到、交给出口回落"
+                        "（不拿前一场冒充今天），回落也没有就是缺失；窗口中间的（yfinance 1.2.0 不会产生，出现 = yfinance 行为变了）："
+                        "那只票少了一根真实 K 线（动量的 5 根窗口多跨一个交易日、20 日均量少一天），值照样进评分与 signal_archive 的 price.*",
+                "建议": "末行的：看是不是当天 Yahoo 迟发 K 线 / 盘前跑；窗口中间的：先查 yfinance 版本与 utils.safe_merge_dfs 是否改了，"
+                        "再按维度 IC 协议 §3 判断是否把当天受影响的 price.* 登进 signal_archive.QUARANTINE（须用户定）",
+            }
+            if not has_scored:
+                details["口径"] = "没有评分时的快照（at_scoring）——按进程口径报，可能含评分之后的取数"
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】yfinance 日线有 {n_base} 行公司行动空行不在首行（某个交易日只有分红、没有价格）",
+                details,
+                ["event_rows", "data_quality"]
+            ))
+        if not has_scored:
+            return
+        n_later = _total(ev) - n_base
+        if n_later > 0:
+            seen = {(x.get("ticker"), x.get("date"), x.get("pos"), x.get("n")) for x in scored.get("elsewhere") or []}
+            later = [x for x in ev.get("elsewhere") or []
+                     if (x.get("ticker"), x.get("date"), x.get("pos"), x.get("n")) not in seen]
+            self.alerts.append(Alert(
+                AlertLevel.INFO,
+                f"ℹ️ 评分之后的取数遇到 {n_later} 行不在首行的公司行动空行",
+                {"明细": _items(later, n_later) or f"明细已满 {len(ev.get('elsewhere') or [])} 条上限，共 {n_later} 条",
+                 "影响": "评分用的行情不受影响；之后单独取日线的用途（报告阶段等）少了一根 K 线或那一路取不到"},
+                ["event_rows", "data_quality"]
+            ))
 
     def get_critical_alerts(self) -> List[Alert]:
         """获取 P0 级别告警"""

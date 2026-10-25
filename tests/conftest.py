@@ -1336,6 +1336,18 @@ def _reset_stock_fetch_legacy_stats():
         mod._reset_legacy_fallback_stats()
 
 
+@pytest.fixture(autouse=True)
+def _reset_event_row_stats():
+    """v0.45.645：`price_metrics` 的「日线公司行动空行」计数是进程级全局状态（同上一条）。只在模块已导入时清——不在这里触发导入。"""
+    mod = sys.modules.get("price_metrics")
+    if mod is not None:
+        mod._reset_event_row_stats()
+    yield
+    mod = sys.modules.get("price_metrics")
+    if mod is not None:
+        mod._reset_event_row_stats()
+
+
 @pytest.fixture
 def sell_strike_state_sandbox_check():
     """把 `_assert_sell_strike_state_in_sandbox` 暴露给它的有牙自证（同 `default_path_sandbox_check`）。"""

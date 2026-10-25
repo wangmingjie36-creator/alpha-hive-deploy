@@ -92,8 +92,9 @@ UNITS: Dict[str, Dict] = {
                  # 但它决定三个字段的原始输入；「观测层版本化」接上双版本之前，改它一律要确认
                  ("observation_layer.py", "module"),
                  # v0.45.639：三个字段的公式收成唯一实现（此前 data_pipeline 三份 + cache.py 一份副本），搬出去就必须跟进来，
-                 # 否则改公式不会红
-                 ("price_metrics.py", "mentions_price_fields")),
+                 # 否则改公式不会红。v0.45.645：改为整份——公司行动空行的判据 `event_only_positions` / `drop_event_only_rows`
+                 # 决定公式吃哪几根日线，却不提字段名，按名字认不出（同 observation_layer）
+                 ("price_metrics.py", "module")),
         "signals": ("price.momentum_5d", "price.volume_ratio", "price.volatility_20d",
                     "buzz.comp.momentum_signal", "buzz.comp.volume_signal", "buzz.comp.volatility_signal"),
     },
@@ -217,6 +218,19 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "量比 > 1000 / 三字段 NaN 均 0 次（旧回落未见走过的痕迹）。主路径的 NaN 行为刻意未动（冻结层 buzz_v1_channels 原样复刻它）。"
      "二次检查同版补两处（仍只在旧回落上）：初始 avg_volume 0（「0 股」）→ None 与主路径一致；旧回落计数加评分时快照（不进公式）。"
      "**用户 2026-10-24 在对话里选「measurement_fix」**；不登记边界"),
+    ("price.fields",    "495b08209ae1f8f1", "measurement_fix",
+     "v0.45.645：yfinance 公司行动空行（开高低收全空、成交量 0、Dividends / Stock Splits 非零——yfinance 把分红并进日线、那天却没有价格 K 线时"
+     "单独出的一行）在四个取数调用方（_fetch_history_metrics / YFinanceSource.fetch / --date 补跑 / cache.py 旧回落）取到日线后第一步去掉，唯一实现 "
+     "price_metrics.drop_event_only_rows；冻结通道层 buzz_v1_channels.daily_rows 同判据、同位置；本单元里 price_metrics.py 的定位改为整份"
+     "（判据不提字段名）。这行不是 K 线：落在末根 / 倒数第 5 根 ⇒ 动量 NaN ⇒ Buzz 动量通道 100；落在最近 20 根 ⇒ 成交量 0 进均量、量比偏高约 5%。"
+     "末行是空行（当天没有 K 线）⇒ 实时三条路径整段当取不到、交给出口回落，不拿前一场冒充今天（用户 10-25 选，代码评审 #1），冻结层同判「不全」；"
+     "补跑由既有「末行不是目标日」那一支接住。"
+     "唯一实例 META 2026-09-21（10-21 收盘后 period=1mo，窗口 (09-21, 10-21] 外的边界日分红漏成第 0 行；生产档案 95 份日线里另 18 行分红都带价格）。"
+     "窗口内受影响 0 行：首行空行只在一个月窗口仅 19 根真 K 线时进 20 日均量（窗口内首个 2027-01-04），10-12~10-23 每天 21–22 根；动量 NaN 全史 0 次。"
+     "改动前（origin/main 11492828）与改后：无空行随机日线 1000 例 9000 项全同、生产档案 95 份真实日线 950 项全同（含 META 那份），有空行的 500 例只在空行处变"
+     "（末行空行的 105 例整段变不给值）；"
+     "改后冻结层桥接行情 3/3 天 30/30、整分 90/90，buzz_v1 自证 570/570。同 v0.45.505 / 563 / 564 先例（判哪几根是真 K 线属取数细节）按测量误差修正。"
+     "**用户 2026-10-24 在对话里选「measurement_fix + §13.10 追加」**；不登记边界、无行可隔离"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change"})

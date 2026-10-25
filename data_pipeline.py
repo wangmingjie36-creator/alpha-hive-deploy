@@ -32,7 +32,7 @@ import weakref
 from typing import Dict, Optional, List, Tuple
 from collections import deque
 
-import price_metrics   # v0.45.639：行情三字段公式的唯一实现（只依赖 math，不反向 import 本模块）
+import price_metrics   # v0.45.639：行情三字段公式的唯一实现（只依赖 math / threading，不反向 import 本模块）
 
 
 def _get_secret(name: str) -> str:
@@ -404,6 +404,10 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
         end = as_of + timedelta(days=1)  # yfinance end 是开区间，+1 天才含 as_of 当天
         # v0.45.580：取到即原样落档（补跑不看交易所时钟，只有日线这一份）
         hist, _ref_daily = _obs_layer.yf_history(ticker, start=start.isoformat(), end=end.isoformat())
+        # v0.45.645：公司行动空行（开高低收全空、量 0、有分红 / 拆股）不是 K 线，第一步去掉（档案里存原样；理由见 price_metrics）。
+        # 补跑下面丢 NaN 收盘本就会丢它，这里去掉是为了与实时路径同一个入口、同一份计数。末行是空行（目标日只有分红）⇒ 由下面
+        # 「末行不是目标日」那一支接住（改问云端快照 / 标不可用），不用第二个返回值
+        hist, _ = price_metrics.drop_event_only_rows(hist, ticker)
         if hist.empty:
             fb = StockData(data_source=DataQuality.FALLBACK).to_dict()
             fb["_data_unavailable"] = True
@@ -563,6 +567,12 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
     try:
         import observation_layer as _obs_layer
         hist, _ref_daily = _obs_layer.yf_history(ticker, period="1mo")   # v0.45.580：取到即原样落档，返回内容不变
+        # v0.45.645：公司行动空行不是 K 线，判空 / 末根判断之前去掉（档案里存原样；理由见 price_metrics）。末行是空行 ⇒ 当天 K 线缺了，
+        # 剩下的末根是前一场——不拿它冒充今天，整段当取不到（三个字段交给出口回落；用户 10-25 定）
+        hist, _tail_event = price_metrics.drop_event_only_rows(hist, ticker)
+        if _tail_event:
+            _log.warning("%s yfinance 日线末行是公司行动空行（当天只有分红 / 拆股、没有 K 线）—— 不拿前一场冒充今天，历史字段交给出口回落", ticker)
+            return None
         if hist.empty or len(hist) < 2:
             return None
         _n_raw = len(hist)
@@ -955,6 +965,13 @@ class YFinanceSource:
         try:
             import observation_layer as _obs_layer
             hist, _ref_daily = _obs_layer.yf_history(ticker, period="1mo")   # v0.45.580：取到即原样落档
+            # v0.45.645：公司行动空行不是 K 线，判空 / 末根判断之前去掉（档案里存原样；理由见 price_metrics）。末行是空行 ⇒ 当天 K 线缺了，
+            # 不拿前一场的收盘冒充今天的现价——本源这只票当取不到（同空日线），交给下一个源 / 出口回落（用户 10-25 定）
+            hist, _tail_event = price_metrics.drop_event_only_rows(hist, ticker)
+            if _tail_event:
+                self.breaker.record_failure("event_row_last")
+                _log.warning("[yfinance] %s 日线末行是公司行动空行（当天没有 K 线）—— 本源不给这只票的行情", ticker)
+                return None
             if hist.empty or len(hist) < 2:
                 self.breaker.record_failure("empty_history")
                 return None

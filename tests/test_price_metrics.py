@@ -170,7 +170,23 @@ class TestWatchedByH1Fingerprint:
 
     def test_registered_in_price_fields_unit(self):
         import signal_code_fingerprints as scf
-        assert ("price_metrics.py", "mentions_price_fields") in scf.UNITS["price.fields"]["code"]
+        # v0.45.645：整份（公司行动空行的判据不提字段名，按名字认不出）
+        assert ("price_metrics.py", "module") in scf.UNITS["price.fields"]["code"]
+
+    def test_changing_the_event_row_rule_changes_the_fingerprint(self):
+        """v0.45.645：判据决定公式吃哪几根日线——改它必须让 price.fields 指纹变（按 mentions_price_fields 定位时不会变）。"""
+        import signal_code_fingerprints as scf
+
+        def read(rel, patch=False):
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            if patch and rel == "price_metrics.py":
+                assert 'EVENT_ROW_EVENT_COLUMNS = ("Dividends", "Stock Splits")' in text
+                text = text.replace('EVENT_ROW_EVENT_COLUMNS = ("Dividends", "Stock Splits")',
+                                    'EVENT_ROW_EVENT_COLUMNS = ("Dividends",)')
+            return text
+
+        assert scf.unit_fingerprint("price.fields", read=read) != scf.unit_fingerprint(
+            "price.fields", read=lambda rel: read(rel, patch=True))
 
     def test_changing_the_formula_changes_the_fingerprint(self):
         """改公式必须让 price.fields 指纹变——否则搬出来的公式就逃出了 H1 守卫。"""
