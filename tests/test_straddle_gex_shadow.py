@@ -15,19 +15,16 @@ import math
 import random
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pytest
 
 import earnings_vol_signal as evs
 import straddle_gex_prereg as SP
 from tests._repo_files import own_python_files
+from tests._scan_clock import ET, INTRADAY, POST_CLOSE, pin_scan_clock
 from tests.test_earnings_vol_signal import AS_OF, EARN, _qs, _stats, _write_snap
 
 REPO = Path(__file__).resolve().parent.parent
-ET = ZoneInfo("America/New_York")
-POST_CLOSE = datetime(2026, 9, 3, 18, 0, tzinfo=ET)      # 2026-09-03 周四，收盘后（生产扫描的时刻）
-INTRADAY = datetime(2026, 9, 3, 11, 0, tzinfo=ET)        # 同一天盘中（有人手动跑日报）
 POS_STATE = {"schema_version": 1, "available": True, "reason": None, "regime": "positive_gex", "total_gex": 12.5,
              "gex_flip": 95.0, "largest_call_wall": 110.0, "largest_put_wall": 90.0, "gex_normalized_pct": 0.8,
              "stock_price": 100.0, "chain_view": "cboe_full_expiries", "n_expiries": 9, "routing_applied": True}
@@ -38,8 +35,7 @@ def state(tmp_path, monkeypatch):
     sd = tmp_path / "options_paper_state"
     monkeypatch.setattr(evs, "STATE_DIR", sd)
     monkeypatch.setattr(evs, "SIGNALS_FILE", sd / "earnings_signals.jsonl")
-    monkeypatch.setattr(evs, "_today_pdt", lambda: AS_OF)
-    monkeypatch.setattr(evs, "_now_et", lambda: POST_CLOSE)     # 钉死记录时刻：结果不能随跑测试的时钟变
+    pin_scan_clock(monkeypatch, evs, AS_OF)         # 钉死记录日 / 记录时刻：结果不能随跑测试的时钟变
     cache = tmp_path / "cache"
     cache.mkdir()
     return cache
@@ -219,10 +215,10 @@ class TestSameDayCapture:
         """修订 1：盘中手动跑先记了一条，收盘后的生产扫描必须能替换它；之后再重跑，以第一条收盘后记录为准。"""
         _write_snap(state, "XYZ", AS_OF, _qs(), rv=20.0)
         neg = {**POS_STATE, "regime": "negative_gex"}
-        monkeypatch.setattr(evs, "_now_et", lambda: INTRADAY)
+        pin_scan_clock(monkeypatch, evs, AS_OF, INTRADAY)
         first = _scan(state, lambda t: POS_STATE)[0]["gex_ctx"]
         assert first["session_live"] is True and SP._ctx_problem(first) == "intraday_capture"
-        monkeypatch.setattr(evs, "_now_et", lambda: POST_CLOSE)
+        pin_scan_clock(monkeypatch, evs, AS_OF, POST_CLOSE)
         _scan(state, lambda t: neg)
         assert evs.load_signals()[0]["gex_ctx"]["regime"] == "negative_gex", "盘中记录锁住了当天政体"
         _scan(state, lambda t: POS_STATE)

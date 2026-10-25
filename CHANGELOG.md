@@ -9,7 +9,28 @@
 
 ## [0.45.649] — 2026-10-25 — 占位（进行中：组合尾部预算——压力最差格告警 + 逐标的 / 板块尾部贡献表 + 卖跨式「若按预算会不会跳过」影子记录，不真跳过）
 
-## [0.45.648] — 2026-10-25 — 占位（进行中：v0.45.644 二次检查——钉钟收成共用辅助、第三条测试改真测两次 scan、CHANGELOG 变异计数与偏移/概率如实）
+## [0.45.648] — 2026-10-25 — Fixed：v0.45.644 二次检查——钉钟收成共用辅助 `tests/_scan_clock.py`、第三条测试改成真测两次 scan、CHANGELOG 变异计数与偏移 / 概率如实
+
+对 v0.45.644 跑已装的 code-review 技能（high）：没发现会让测试或生产算错的 bug，查出 5 处小问题，全修。
+
+### Fixed
+- **CHANGELOG 变异计数多报一处**：644 条目写「变异 5 处全红」，实际 4 处变异变红、第 5 处（第一版写成无害的多读一次钟）是绿的、已丢弃。已在 644 条目里原地更正为 4 处并写明。
+- **「偏移 5963 就是 captured_at 的秒位」是推断，写成了事实**：现已**实测验证**——不钉钟、只让第二次 scan 的钟走一秒复现原场景：账本 6328 字节里**恰好 1 个字节**不同，偏移正是 **5963**（与原来失败报告的偏移一致），落在 `captured_at` 值的区间 5929–5971 内，是秒的个位（`T18:00:00-04:00` → `T18:00:01-04:00`；原来 `7→8`）。644 条目里那句已改成「推断，已在 648 验证」，「概率 ≈ 耗时 / 1 s」改写为**估计**（没测过）。
+- **同一个钉钟写了三份**：`test_earnings_vol_signal` 的 `state` 夹具、`test_straddle_gex_shadow` 的夹具、`test_straddle_strangle_shadow` 里两处内联（含同一个 `datetime(2026, 9, 3, 18, 0, …)` 字面量）。新增 `tests/_scan_clock.py`：`pin_scan_clock(monkeypatch, evs, as_of, now)`（同时钉 `_today_pdt` / `_now_et`）、`tick_scan_clock(monkeypatch, evs, start, step_seconds)`（钟每读一次走一步，把「跨秒」做成确定性场景）、共享常量 `SCAN_AS_OF` / `POST_CLOSE` / `INTRADAY` / `ET`。三个测试文件全部改用，`test_straddle_gex_shadow` 里重新钉成 `INTRADAY` / `POST_CLOSE` 的两处也走辅助；`ZoneInfo` / 本地 `datetime` 导入随之删掉。
+- **第三条测试没测它声称的事**：`test_rows_it_did_not_recompute_do_not_get_a_new_stamp` 只跑一次 scan，钟走不走都一样，断言还与 `test_partial_rerun_keeps_rows_it_did_not_recompute` 重复。改成**两次 scan**（钟每读一次走一秒）后比：没被重算的 XYZ（已结算）、DEF、别的日期的 XYZ 在两次之间**逐字节相同**、不含任何 `captured_at`、且与种子一致；场景自证——被重算的 ABC 在两次之间确实变了。
+- **第二条测试的末尾断言绕**：一个 ticker 却建字典再 `next(...)["gex_ctx"][...]`，行或字段缺了是 KeyError。换成 `_stamp_of(rows, ticker)`：缺行 / 缺字段给出读得懂的失败信息。
+
+### Added（`tests/test_scan_clock.py`，10 条）
+- **闸 1**：`earnings_vol_signal.py` 里每一次直接读墙钟（`datetime.now` / `date.today` / `time.time` / `pdt_today`）都必须在 `_today_pdt` / `_now_et`（或 `main` 的缺省日期）里——将来有人在 `scan` 里直接读钟，所有钉了 `_now_et` 的测试都钉不住它，而偶发红只在撞秒时才出现，这道闸让它在写下的那一刻就红（带探针自证）。
+- **闸 2**：三个用 `scan` 的测试文件里不许再有手写的 `setattr(…, "_now_et", …)`，且必须用共享辅助（带探针自证）。
+- 辅助自身：同时钉两只钟、可显式指定日与时刻、走秒按步长、`POST_CLOSE` 的 `session_live` 为 False 而 `INTRADAY` 为 True。
+- 变异 6 处（钉钟漏掉 `_today_pdt` / 走秒不走 / `scan` 之外新增直接读钟 / 手写 `_now_et` 钉钟回来 / 把没重算的行盖上新时间 / `INTRADAY` 不再是盘中）全红；拨钟审计（+7 / +45 天）0 条新红；ruff 过；`tests/_must_run.json` 因新测试读了另外 3 个测试文件而过期（退出码 4），`--update` 并入后无漂移。
+
+### 验证
+- 整套：__SUITE__
+
+### 没改
+- `earnings_vol_signal.py` 与它的 `captured_at` 语义；`test_earnings_event_shadow.py`（只跑一次 `scan`、不做跨次比较，不钉钟也不会偶发，未改）。
 
 ## [0.45.647] — 2026-10-25 — Fixed：v0.45.643 尾部对冲候选二次检查——「重新拉取」清不掉 4 小时的 CBOE 进程缓存、账本读不了被说成「没有记录」、没有下行格时按上行格定规模、纯 IV 冲击格被误标「覆盖不到」，及一批改坏也不红的测试
 
@@ -55,7 +76,7 @@ v0.45.643 的整套测试在 worktree 里实测出 2 条与该改动无关的红
 v0.45.642 在最终树上第一轮整套红了 `tests/test_earnings_vol_signal.py::TestScanNeverDeletesRowsItDidNotRecompute::test_partial_rerun_keeps_rows_it_did_not_recompute`（第二轮整套没复现，单独重复跑 6 次全过）。与 642 无关，本条修掉。
 
 ### Fixed
-- **偶发的机理**：`scan` 给每一行的 `gex_ctx` 盖 `captured_at`（`_now_et().isoformat(timespec="seconds")`，精确到秒的墙钟；没有 `gex_fn` 时 `gex_ctx` 也存在，只是 `available=False`），同一次 `scan` 内部读钟一次所以一致，但**两次** `scan` 之间的墙钟恰好跨了一秒时，两行的 `captured_at` 不同 ⇒ 账本字节不同 ⇒ 那条「同样的快照再跑一次，账本字节不变」断言红。失败日志里两次 WARNING 的时间戳是 10:43:17 与 10:43:18，字节差在偏移 5963 处的秒位（`'8' != '7'`）。概率 ≈「两次 scan 之间的耗时 / 1 s」，机器忙时更高。
+- **偶发的机理**：`scan` 给每一行的 `gex_ctx` 盖 `captured_at`（`_now_et().isoformat(timespec="seconds")`，精确到秒的墙钟；没有 `gex_fn` 时 `gex_ctx` 也存在，只是 `available=False`），同一次 `scan` 内部读钟一次所以一致，但**两次** `scan` 之间的墙钟恰好跨了一秒时，两行的 `captured_at` 不同 ⇒ 账本字节不同 ⇒ 那条「同样的快照再跑一次，账本字节不变」断言红。失败日志里两次 WARNING 的时间戳是 10:43:17 与 10:43:18，pytest 报字节差在偏移 5963（`'8' != '7'`）——**「偏移 5963 就是 `captured_at` 的秒位」当时是从日志时间戳推断的、没核对过字节**，已在 v0.45.648 实测验证（见该条）。「概率 ≈ 两次 scan 之间的耗时 / 1 s」是**估计**，没有测过。
 - **修法**（`tests/test_earnings_vol_signal.py`，生产代码未动）：模块本来就有两个注入缝 `evs._now_et` / `evs._today_pdt`（兄弟文件 `test_straddle_gex_shadow.py` 一直在用它们钉时钟，这个文件没有）。在 `state` 夹具里把两只墙钟都钉死（记录日 = `AS_OF`，记录时刻 = `AS_OF` 当天收盘后的美东时刻 `POST_CLOSE`），用 `state` 的每条测试都不再依赖跑测试的时钟；原来那条断言的语义写明为「同样的快照、**同一个记录时刻**再跑一次，字节不变」。`_today_pdt` 一并钉住，防止同类测试在 PDT 午夜前后跨日。
 - **同文件同类写法的核查**：该文件里「账本字节再比」共 4 处：零快照（3 个参数化）、全部计算失败、CLI 退出码 3，这三处都是**没有写入**的场景，账本字节只能等于种子，与时钟无关；真正「两次写入再比」的只有被修的这一条。相邻的 `tests/test_vrp_signal.py::test_…幂等`（同形：`after_first` 再跑一次比字节）核对过：`vrp_signal` 没有任何墙钟字段（`datetime.now` / `isoformat` / `captured_at` 都没有），安全，未改。
 
@@ -63,7 +84,7 @@ v0.45.642 在最终树上第一轮整套红了 `tests/test_earnings_vol_signal.p
 - `state` 夹具确实钉住了两只墙钟（取消钉住会红）。
 - **把原来的偶发做成确定性场景**：钟每读一次走一秒，两次 `scan` 之间字节**确实不同**（场景自证——钟不走则红），且去掉 `gex_ctx.captured_at` 后逐行逐字段相同，即重跑只改记录时刻、不改别的。
 - 没有被本次重算的行（已结算的 XYZ、DEF）连 `captured_at` 也不被新钟盖掉。
-- 变异 5 处全红：不钉 `_now_et` / 不钉 `_today_pdt` / 夹具里的钟不走（场景自证）/ 给每行再盖一个**独立的**时间戳字段（`scanned_at`，被「只有 captured_at 变」抓到）；另一处是我第一版写成无害的多读一次钟的变异，不算数，已换掉。拨钟审计（+7 / +45 天，含 `test_straddle_gex_shadow`）0 条新红；ruff 过；选测登记表无漂移（退出码 0）。
+- 变异 **4 处**全红：不钉 `_now_et` / 不钉 `_today_pdt` / 夹具里的钟不走（场景自证）/ 给每行再盖一个**独立的**时间戳字段（`scanned_at`，被「只有 captured_at 变」抓到）。另有一处第一版写成无害的「多读一次钟」的变异，**跑完仍是绿的**（63 passed）、不算数，已换掉——原先写成「5 处全红」多报了一处（v0.45.648 更正）。拨钟审计（+7 / +45 天，含 `test_straddle_gex_shadow`）0 条新红；ruff 过；选测登记表无漂移（退出码 0）。
 
 ### 验证
 - 整套：**在最终树上**（提交 8def0ca2，rebase 到当时的 origin/main 之后；开跑前连续 45 s 没有别的 pytest / 审计，origin 无新提交）：**12103 passed、0 failed**、82 deselected、2 xfailed，625 s（负载约 2.8）。跑的这段时间 origin 又前进了 1 个提交（0.45.645 的占号，**只改 CHANGELOG**），之后只 rebase 到它之上并重跑了 CHANGELOG 完整性测试，没有为这条纯占位提交再跑整套。这一轮整套里 `test_partial_rerun_keeps_rows_it_did_not_recompute` 通过；它是撞秒偶发，所以「通过」本身不能证明修好——证明修好的是上面的确定性测试（钟每读一次走一秒，字节确实不同、去掉 `captured_at` 后相同）与变异。
