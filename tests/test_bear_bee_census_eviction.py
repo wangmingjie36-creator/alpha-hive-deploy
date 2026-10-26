@@ -143,7 +143,8 @@ CASES = [
      {"insider_sold_usd": 2_000_000, "insider_bought_usd": 100_000}, "insider", 8.0, "sec"),
     # 方向 bearish + 数值都温和：读板路径靠「Oracle 方向」规则给 5.5，回落路径给 0 —— 生产里 +5.67 的那种
     ("options", "OracleBeeEcho", "bearish", 3.8,
-     {"pc_ratio": 0.9, "iv_rank": 40.0, "iv_skew": 1.0, "gex": 100.0}, "options", 5.5, "options"),
+     # v0.45.639：Oracle 的板上条目自带期权数据质量判定（`options_dq`），Bear 照抄——生产形状，取到链时是 "real"
+     {"pc_ratio": 0.9, "iv_rank": 40.0, "iv_skew": 1.0, "gex": 100.0, "options_dq": "real"}, "options", 5.5, "options"),
     ("news", "BuzzBeeWhisper", "bearish", 3.9,
      {"sentiment_score": 25}, "news", 7.5, "news"),
     ("catalyst", "ChronosBeeHorizon", "neutral", 4.5,

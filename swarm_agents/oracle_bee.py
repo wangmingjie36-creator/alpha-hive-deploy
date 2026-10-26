@@ -71,6 +71,12 @@ def _unusual_flow_ok(flow):
     return True if _unusual_flow_status(flow)["status"] in ("ok", "partial") else None
 
 
+#: v0.45.639：Oracle 发到信息素板的条目里，自己的期权数据质量判定放在这个键下（取值同 data_quality.options）。读者 = BearBee
+OPTIONS_DQ_BOARD_KEY = "options_dq"
+#: 它可能的取值（BearBee 只认这几个，认不出按 "unavailable" 记）
+OPTIONS_DQ_LABELS = frozenset({"real", "unavailable", "fallback"})
+
+
 def _options_data_usable(result) -> bool:
     """OptionsAgent 的结果算不算「取到了期权数据」。v0.45.369。
 
@@ -484,11 +490,17 @@ class OracleBeeEcho(BeeAgent):
                         })
                 if _ua:
                     _pub_details["unusual_activity"] = _ua[:15]  # 最多保留15条
+            # v0.45.369：「可用」按 OptionsAgent 自己的 data_quality 判（样本链早退的非空结果不算）
+            _opts_ok = _options_data_usable(result)
+            # v0.45.639：同一个标签上板（不在 `if result:` 里——OptionsAgent 抛异常时 result={} 也要带上）。BearBee 读 Oracle 的条目时
+            # 照抄它当自己的 data_quality.options；此前板上没有这个判定，Bear 读到条目就一律记 "real"（10-14 一行实测）
+            # 取到链 ⇒ real；样本链早退 ⇒ unavailable；OptionsAgent 抛异常（result 为空）⇒ fallback。写成字面量条件式：
+            # `tests/test_dq_label_classification.py` 的扫描器要看得到全部取值（藏进函数调用它就只能记「不透明」）
+            _options_dq = "real" if _opts_ok else ("unavailable" if result else "fallback")
+            _pub_details[OPTIONS_DQ_BOARD_KEY] = _options_dq
             self._publish(ticker, discovery, "options", score, direction, details=_pub_details)
 
             # Phase 2: confidence = 期权数据可用 + LLM 加成
-            # v0.45.369：「可用」按 OptionsAgent 自己的 data_quality 判（样本链早退的非空结果不算）
-            _opts_ok = _options_data_usable(result)
             confidence = build_confidence(0.4, [
                 (_opts_ok, 0.3),
                 (bool(llm_options), 0.2),
@@ -503,8 +515,8 @@ class OracleBeeEcho(BeeAgent):
                 dimension="odds",
                 data_quality={
                     # v0.45.369：样本链早退 ⇒ "unavailable"（与 "fallback" 同在 Queen 的 PROXY_SOURCES）；
-                    # OptionsAgent 抛异常（result={}）⇒ "fallback"，同旧
-                    "options": "real" if _opts_ok else ("unavailable" if result else "fallback"),
+                    # OptionsAgent 抛异常（result={}）⇒ "fallback"，同旧。v0.45.639：与板上那份同一个变量
+                    "options": _options_dq,
                 },
                 details={**(result or {}), "term_structure": term_structure,
                          "deep_skew": deep_skew, "max_pain": max_pain,

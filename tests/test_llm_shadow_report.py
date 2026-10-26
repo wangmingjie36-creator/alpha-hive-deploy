@@ -302,6 +302,21 @@ class TestGenerations:
         assert d["generation"] is None and d["other_generation_days"] == 0
 
 
+class TestRetriedDays:
+    def test_counts_days_with_previous_attempts(self, tmp_path):
+        a = _status("2026-10-22", {"A": _pt(6.0, "bullish")}, generation="g2")
+        b = _status("2026-10-23", {"A": _pt(6.0, "bullish")}, generation="g2")
+        b["previous_attempts"] = [{"error": "ScanInputsUnavailable", "spent_usd": 0.0}]
+        _write(tmp_path, a)
+        _write(tmp_path, b)
+        d = rep.build_report(tmp_path, tmp_path / "absent.db", today="2026-10-24")["describe"]
+        assert d["retried_days"] == 1
+
+    def test_no_retries_is_zero(self, tmp_path):
+        _write(tmp_path, _status("2026-10-22", {}, generation="g2"))
+        assert rep.build_report(tmp_path, tmp_path / "absent.db", today="2026-10-24")["describe"]["retried_days"] == 0
+
+
 class TestMissingRunDays:
     def _db(self, tmp_path, dates):
         return _prod_db(tmp_path / "p.db", [(d, "A", 6.0, "bullish", 100.0, 101.0) for d in dates])

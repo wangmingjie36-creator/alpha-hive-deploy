@@ -106,6 +106,12 @@ class TestConstantsMatchProduction:
             assert fc._window_lo(d) == dp._volatility_20d_window_lo(d), d
             d += dt.timedelta(days=1)
 
+    def test_event_row_columns(self):
+        """v0.45.645 公司行动空行的判据列（逐例行为由下面的差分对拍与 tests/test_event_only_rows.py 钉住）。"""
+        import price_metrics as pm
+        assert (fc.EVENT_ROW_PRICE_COLUMNS, fc.EVENT_ROW_EVENT_COLUMNS) == (pm.EVENT_ROW_PRICE_COLUMNS,
+                                                                            pm.EVENT_ROW_EVENT_COLUMNS)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 3. 数值复刻
@@ -354,6 +360,31 @@ def _frame(R, last, n):
     if len(df) and R.random() < 0.08:
         df["Volume"] = df["Volume"].astype("float64")
         df.iloc[R.randrange(len(df)), 4] = np.nan
+    return _with_event_rows(R, df)
+
+
+def _with_event_rows(R, df):
+    """v0.45.645：随机掺进 yfinance 公司行动空行（开高低收全空、量 0、分红 / 拆股非零）——首行外的边界日、窗口中间 / 末根把真 K 线
+    换掉——以及形似而不是的行（没有事件 / 量不为 0 / 只缺收盘），生产与冻结层必须逐例同判。"""
+    if not len(df):
+        return df
+    px = ["Open", "High", "Low", "Close"]
+    if R.random() < 0.15:          # 窗口外边界日的分红漏进来（实测 META 09-21 的形状）
+        row = pd.DataFrame({c: [np.nan] for c in px} | {"Volume": [0], "Dividends": [R.choice([0.21, 0.525, 1.05])],
+                                                         "Stock Splits": [0.0]},
+                           index=pd.DatetimeIndex([df.index[0] - pd.Timedelta(days=1)], name="Date"))
+        df = pd.concat([row.astype(df.dtypes.to_dict()), df])
+    for _ in range(R.choice([0, 0, 0, 1, 2])):
+        i = R.randrange(len(df))
+        kind = R.choice(["div", "div", "split", "no_event", "volume", "close_only", "div_nan"])
+        df.iloc[i, [df.columns.get_loc(c) for c in (px if kind != "close_only" else ["Close"])]] = np.nan
+        df.iloc[i, df.columns.get_loc("Volume")] = R.randint(1, 9) if kind == "volume" else 0
+        if kind in ("div", "volume", "close_only"):
+            df.iloc[i, df.columns.get_loc("Dividends")] = R.choice([0.21, 0.525, 1.05])
+        elif kind == "split":
+            df.iloc[i, df.columns.get_loc("Stock Splits")] = R.choice([2.0, 0.5])
+        elif kind == "div_nan":     # 事件列是 NaN：不算事件（两层都按「有限非零」判）
+            df.iloc[i, df.columns.get_loc("Dividends")] = np.nan
     return df
 
 
@@ -375,11 +406,18 @@ def yfstub(monkeypatch):
 class TestDifferentialPrice:
     def test_live_paths(self, yfstub, on, monkeypatch):
         import data_pipeline as dp
+        import price_metrics as pm
         R = random.Random(9)
         n = 0
+        cover = {"event_first": 0, "event_tail": 0, "lookalike": 0}   # v0.45.645：公司行动空行真的被对拍到了
         for _ in range(500):
             last = R.choice(trading_days(dt.date(2026, 6, 1), dt.date(2026, 12, 31)))
             yfstub["frame"] = _frame(R, last, R.choice([3, 4, 5, 6, 18, 19, 20, 21, 22, 23]))
+            _f = yfstub["frame"]
+            _pos = pm.event_only_positions(_f)
+            cover["event_first"] += 0 in _pos
+            cover["event_tail"] += any(p >= len(_f) - 20 and p > 0 for p in _pos)
+            cover["lookalike"] += int(_f["Close"].isna().sum()) > len(_pos)
             d = last if R.random() < 0.8 else last - dt.timedelta(days=1)
             clock = R.choice([None, pd.Timestamp(dt.datetime.combine(d, dt.time(*R.choice(
                 [(9, 45), (11, 30), (12, 59), (13, 0), (15, 30), (15, 59)]))), tz="America/New_York")])
@@ -399,6 +437,7 @@ class TestDifferentialPrice:
                         (math.isnan(a) and math.isnan(b)) or a == b)), (k, a, b)
                 n += 1
         assert n > 600
+        assert min(cover.values()) >= 30, cover
 
     def test_backfill_path(self, yfstub, on, monkeypatch):
         import data_pipeline as dp

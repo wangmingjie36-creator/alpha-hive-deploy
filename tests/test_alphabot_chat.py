@@ -336,7 +336,7 @@ class TestSpend:
         eng, _ = engine(svc, resp([text("x")]))
         seen = []
         real = eng._record_response
-        monkeypatch.setattr(eng, "_record_response", lambda *a: (seen.append(eng._inflight), real(*a)))
+        monkeypatch.setattr(eng, "_record_response", lambda *a, **k: (seen.append(eng._inflight), real(*a, **k)))
         eng.send("x")
         assert seen and seen[0] > 0, "记账时预留已经释放了"
         assert eng._inflight == pytest.approx(0.0)
@@ -665,6 +665,35 @@ class TestTimeoutIsNotRetried:
         (line,) = spend_lines(svc)
         assert ei.value.status == 429 and f"前面 1 次 API 调用已花 ${line['usd']:.3f}" in str(ei.value), str(ei.value)
 
+    @pytest.mark.parametrize("landed", [False, True])
+    def test_maybe_billed_estimate_that_fails_to_write(self, svc, monkeypatch, landed):
+        """「可能已计费」的估算也经唯一记账出口（v0.45.637 二次检查 #1：此前直接调 `_record`，写不进就原样抛 LedgerError，
+        那笔可能已花的钱哪里都没算）。没写进 ⇒ 照样是 ChatMaybeBilled、注明没记上、今天的额度照算；写进了才报错 ⇒ 不重复计入。"""
+        import httpx
+
+        def handler(request):
+            raise httpx.ReadTimeout("simulated", request=request)
+        eng = self._engine(svc, handler, [])
+        real = eng._record
+
+        def broken(*a, **k):
+            if landed:
+                real(*a, **k)
+            raise ledger_io.LedgerWriteError("simulated: disk full")
+        monkeypatch.setattr(eng, "_record", broken)
+        with pytest.raises(C.ChatMaybeBilled, match="可能已在服务端完成并计费") as ei:
+            eng.send("x")
+        msg = str(ei.value)
+        monkeypatch.undo()
+        if landed:
+            (line,) = spend_lines(svc)
+            assert "已写进花费记录" in msg and eng._unbooked == {}, msg
+            assert eng.spent_today() == pytest.approx(line["usd"]), "已落盘的估算又按没记上算了一遍"
+        else:
+            assert spend_lines(svc) == [] and "但记账失败（LedgerWriteError" in msg, msg
+            assert "今天的额度照样把它算进去" in msg and eng.spent_today() > 0.1, "可能已花的钱没算进今天的额度"
+        assert eng._inflight == pytest.approx(0.0)
+
     @pytest.mark.parametrize("code", sorted(C.ORIGIN_UNREACHABLE_STATUS))
     def test_origin_unreachable_is_retried_not_booked(self, svc, code):
         """网关连不上源站（Cloudflare 521/522/523/525/526/530）：按定义请求没到 Anthropic ⇒ 不记账、可以等一下再发
@@ -738,29 +767,43 @@ class TestTimeoutIsNotRetried:
 class TestBookkeeping:
     """调用成功（已计费）之后的记账（v0.45.632，627 二次检查 #2）：记不上账要说出来、额度闸照算；用量读不懂按最坏情况记。"""
 
-    def test_failed_booking_is_said_and_still_counted(self, svc, monkeypatch):
-        # 这一笔约占当天上限的 95%：下一问的最坏情况预留（含 MAX_TOKENS 的输出）一定放不下
+    @staticmethod
+    def _clocked(svc, *script):
+        """可拨的钟：跨天用例要让 `_today()` 换日期。"""
+        clock = [T0]
+        client = FakeClient(*script)
+        return C.ChatEngine(svc, client_fn=lambda: client, now_fn=lambda: clock[0]), client, clock
+
+    def test_failed_booking_still_answers_and_counts_today_only(self, svc, monkeypatch):
+        """记账失败（v0.45.635，632 二次检查 #1 #2）：照常交回答并注明「已计费但没记上账」；这笔并进今天的
+        `spent_today`——额度闸、顶栏（status）、每问结果是同一个数；过了今天就不再算（632：顶栏 $0、闸却拦着，跨天照拦）。"""
+        # 这一笔约占当天上限的 95%：当天下一问的最坏情况预留（含 MAX_TOKENS 的输出）一定放不下
         out_tokens = int(0.95 * C.DAILY_CAP_USD / llm_service.price_of(C.MODEL)["output"])
         big = {"input_tokens": 10, "output_tokens": out_tokens}
-        eng, client = engine(svc, resp([text("一")], usage=big), resp([text("二")]))
+        eng, client, clock = self._clocked(svc, resp([text("一")], usage=big), resp([text("后天")]))
+        cost = C.call_cost(resp([text("一")], usage=big))["usd"]
 
         def boom(*a, **k):
             raise ledger_io.LedgerError("simulated: disk full")
         monkeypatch.setattr(eng, "_record_response", boom)
-        with pytest.raises(C.ChatBookkeepingFailed) as ei:
-            eng.send("x")
-        cost = C.call_cost(resp([text("一")], usage=big))["usd"]
-        msg = str(ei.value)
-        assert ei.value.status == 500 and f"已经成功、已计费（约 ${cost:.3f}）" in msg and "LedgerError" in msg, msg
-        assert spend_lines(svc) == [] and eng._unbooked == pytest.approx(cost) and eng._inflight == pytest.approx(0.0)
-        # 额度闸把没记上账的那笔照算进去：下一问的预检看得见它
+        out = eng.send("x")
+        assert out["reply"] == "一", "已付钱的回答被丢掉了"
+        assert any(f"已计费（约 ${cost:.3f}），但记账失败（LedgerError" in n for n in out["notes"]), out["notes"]
+        assert spend_lines(svc) == [] and eng._inflight == pytest.approx(0.0)
+        # 今天已花只有一个口径：每问结果 = 顶栏 = 闸
+        assert out["spent_today"] == pytest.approx(cost, abs=1e-4)
+        assert eng.status()["spent_today"] == pytest.approx(cost, abs=1e-4)
         monkeypatch.undo()
         with pytest.raises(C.BudgetExceeded, match=f"今天已花 \\${cost:.2f}"):
             eng.send("y")
         assert len(client.requests) == 1, "额度闸没算上记账失败的那笔，又发出了请求"
+        # 两天后：那笔不属于「今天」了
+        clock[0] += 2 * 86400
+        assert eng.status()["spent_today"] == 0
+        assert eng.send("z")["reply"] == "后天" and len(client.requests) == 2
 
-    def test_failed_booking_mid_turn_counts_only_booked_calls(self, svc, monkeypatch):
-        """半路记账失败：「前面 N 次已花 $x、已记账」只数真记上了账的调用（失败那次的钱在本条报错里另说）。"""
+    def test_failed_booking_mid_turn_keeps_going(self, svc, monkeypatch):
+        """工具循环第二次调用记账失败：这一问照常答完，注明那一笔；费用照计进本问与今天。"""
         eng, _ = engine(svc, resp([tool_use("get_rules", {}, "t1")], stop="tool_use"), resp([text("二")]))
         real, n = eng._record_response, []
 
@@ -770,10 +813,111 @@ class TestBookkeeping:
                 raise ledger_io.LedgerError("simulated")
             return real(*a, **k)
         monkeypatch.setattr(eng, "_record_response", second_fails)
-        with pytest.raises(C.ChatBookkeepingFailed) as ei:
-            eng.send("x")
+        out = eng.send("x")
         (line,) = spend_lines(svc)
-        assert f"前面 1 次 API 调用已花 ${line['usd']:.3f}、已记账" in str(ei.value), str(ei.value)
+        second = C.call_cost(resp([text("二")]))["usd"]
+        assert out["reply"] == "二" and out["api_calls"] == 2 and any("记账失败" in x for x in out["notes"]), out
+        assert out["cost_usd"] == pytest.approx(line["usd"] + second, abs=1e-4)
+        assert out["spent_today"] == pytest.approx(line["usd"] + second, abs=1e-4)
+
+    def test_unreadable_spend_record_stops_before_sending(self, svc):
+        """花费记录读不了 ⇒ 不知道今天花了多少，为防超支先不发请求，说人话（v0.45.635，632 二次检查 #3：此前原样抛
+        LedgerCorrupt）；顶栏同一句。"""
+        path = Path(svc.state_dir()) / "chat" / "spend.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json\n", encoding="utf-8")
+        eng, client = engine(svc, resp([text("不该到这")]))
+        with pytest.raises(C.ChatSpendUnreadable, match="花费记录读不了（LedgerCorrupt") as ei:
+            eng.send("x")
+        assert ei.value.status == 503 and "为防超支先不发请求" in str(ei.value) and client.requests == []
+        st = eng.status()
+        assert st["spent_today"] is None and "花费记录读不了" in st["spend_error"]
+
+    def test_spend_record_breaks_mid_turn_says_what_was_spent(self, svc, monkeypatch):
+        """工具循环中途花费记录坏了：第二次预检停下，并写明这一问前面已花多少（经 `_turn` 那一处）。"""
+        eng, client = engine(svc, resp([tool_use("get_rules", {}, "t1")], stop="tool_use"), resp([text("不该到这")]))
+        real = eng._record_response
+        path = Path(svc.state_dir()) / "chat" / "spend.jsonl"
+
+        def then_corrupt(*a, **k):
+            real(*a, **k)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write("{not json\n")
+        monkeypatch.setattr(eng, "_record_response", then_corrupt)
+        with pytest.raises(C.ChatSpendUnreadable) as ei:
+            eng.send("x")
+        msg = str(ei.value)
+        assert "花费记录读不了" in msg and "这一问前面 1 次 API 调用已花 $" in msg and len(client.requests) == 1, msg
+
+    def test_answer_survives_unreadable_spend_record_at_the_end(self, svc, monkeypatch):
+        """最后一次调用之后花费记录才读不了：回答已经付了钱，照常交出，`spent_today` 为 None 并注明。"""
+        eng, _ = engine(svc, resp([text("好")]))
+        path = Path(svc.state_dir()) / "chat" / "spend.jsonl"
+
+        def corrupt_and_fail(*a, **k):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{not json\n", encoding="utf-8")
+            raise ledger_io.LedgerError("simulated")
+        monkeypatch.setattr(eng, "_record_response", corrupt_and_fail)
+        out = eng.send("x")
+        assert out["reply"] == "好" and out["spent_today"] is None
+        assert any("今天已花多少暂时显示不了" in n for n in out["notes"]), out["notes"]
+
+    def test_booking_error_after_the_row_landed_is_not_counted_twice(self, svc, monkeypatch):
+        """写入其实已落盘、之后才报错（`atomic_write_text` 在 os.replace 之后的目录 fsync / 读回比对失败会抛）：按本次记账的
+        `booking_id` 回读到了那一行 ⇒ 不再记进 `_unbooked`，注明没少记（v0.45.637，635 二次检查 #1：此前算两遍、还说少记）。"""
+        eng, _ = engine(svc, resp([text("好")]))
+        real = eng._record_response
+
+        def write_then_raise(*a, **k):
+            real(*a, **k)
+            raise ledger_io.LedgerWriteError("simulated: 读回比对不一致")
+        monkeypatch.setattr(eng, "_record_response", write_then_raise)
+        out = eng.send("x")
+        (line,) = spend_lines(svc)
+        assert out["reply"] == "好" and eng._unbooked == {}
+        assert out["spent_today"] == pytest.approx(line["usd"], abs=1e-4), "已落盘的那笔又按没记上算了一遍"
+        assert any("已经写进花费记录、没少记" in n for n in out["notes"]), out["notes"]
+        assert not any("花费记录少了这一笔" in n for n in out["notes"]), out["notes"]
+
+    def test_each_booking_has_its_own_id(self, svc):
+        """回读认本地生成的 booking_id，不认 API 的消息 id——测试夹具里每个响应都叫 msg_test，按消息 id 认就会把第二次调用的
+        记账失败误判成「已落盘」（v0.45.637 实测）。"""
+        eng, _ = engine(svc, resp([tool_use("get_rules", {}, "t1")], stop="tool_use"), resp([text("二")]))
+        eng.send("x")
+        ids = [ln.get("booking_id") for ln in spend_lines(svc)]
+        assert len(ids) == 2 and all(ids) and len(set(ids)) == 2, ids
+
+    def test_spend_rows_have_one_exit(self):
+        """spend.jsonl 只经 `_write_spend` 写（v0.45.637 二次检查 #1）：`self._record(` / `self._record_response(` 的每个调用
+        要么在交给 `_write_spend` 的 lambda 里，要么在 `_record_response` 自己体内。新加的写入点绕过出口 ⇒ 红。"""
+        import ast
+        tree = ast.parse((REPO / "alphabot" / "chat.py").read_text(encoding="utf-8"))
+        parents = {}
+        for node in ast.walk(tree):
+            for ch in ast.iter_child_nodes(node):
+                parents[ch] = node
+        bad, seen = [], 0
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("_record", "_record_response")
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "self"):
+                continue
+            seen += 1
+            up, ok = parents.get(node), False
+            while up is not None:
+                if isinstance(up, ast.Lambda):
+                    call = parents.get(up)
+                    ok = isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "_write_spend"
+                    break
+                if isinstance(up, ast.FunctionDef):
+                    ok = up.name == "_record_response" and node.func.attr == "_record"
+                    break
+                up = parents.get(up)
+            if not ok:
+                bad.append(node.lineno)
+        assert seen >= 4, f"正对照：应找到至少 4 处写入调用，实际 {seen}"
+        assert not bad, f"绕过 _write_spend 的记账写入：行 {bad}"
 
     def test_unreadable_usage_is_booked_at_worst_case(self, svc, monkeypatch):
         eng, _ = engine(svc, resp([text("好")]))
@@ -807,6 +951,24 @@ class TestDrawer:
         js = (REPO / "alphabot" / "static" / "chat.js").read_text(encoding="utf-8")
         assert "formEl.hidden" in js and re.search(r"\.chat-form\s*\{[^}]*display:\s*flex", css), \
             "前提变了（不再用 hidden 收输入区，或输入区不再设 display）：重看这条守卫还该不该在"
+
+
+    def test_status_refetch_failure_keeps_the_conversation(self):
+        """取状态失败时，已有能用的状态就保留、只加一条提示（v0.45.637 二次检查 #2：发送成功后重取失败，刚付钱的回答与输入框
+        会一起被「读不到对话状态」盖掉）。node DOM 桩里实跑过；这里钉住结构。"""
+        js = (REPO / "alphabot" / "static" / "chat.js").read_text(encoding="utf-8")
+        load = js[js.index("async function loadStatus()"):js.index("async function setEnabled(")]
+        assert "status && !status.error ? { ...status, status_error: e.message } : { error: e.message }" in load
+        assert "if (s.status_error) msgs.unshift(" in js, "取状态失败的提示没显示出来（只核字段名会被模板串里的同名引用骗过）"
+
+    def test_spend_error_is_shown_and_status_is_refetched(self):
+        """花费记录读不了时顶栏只能显示「—」：抽屉把服务端的 spend_error 放在最上面（v0.45.637，635 二次检查 #2：614 起
+        这个字段从没人读）；发送成功后重取状态，今天已花 / spend_error 只认服务端那一处（此前只抄回 spent_today）。"""
+        js = (REPO / "alphabot" / "static" / "chat.js").read_text(encoding="utf-8")
+        assert "s.spend_error" in js and 'h("p", { class: "chat-msg err" }, s.spend_error)' in js
+        assert "status.spent_today = r.spent_today" not in js, "又只抄回 spent_today 了（spend_error 会留旧值）"
+        ok = js.index('log.pop(); log.push({ role: "bot", r });')
+        assert "loadStatus();" in js[ok:ok + 200], "发送成功后没有重取状态"
 
 
 class TestServer:

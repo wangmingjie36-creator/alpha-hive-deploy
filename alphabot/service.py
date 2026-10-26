@@ -34,6 +34,7 @@ from alphabot import macos_app as MA
 from alphabot import premium as PM
 from alphabot import straddle as SD
 from alphabot import strangle_compare as SC
+from alphabot import tail_hedge as TH
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("alphabot")
@@ -178,6 +179,7 @@ class AlphaBotService:
         # 溢价页（v0.45.492）读的 IV 历史索引 / VRP 账本的数据根；None ⇒ 调用时的 PATHS.home（财报日读卖权账本 ledger_dir）
         self.premium_root = premium_root
         self._premium_cache: Dict[str, tuple] = {}
+        self._tail_cache: Dict[tuple, tuple] = {}
         self._premium_rules_cache: Optional[dict] = None     # 规则常量与文案表进程内不变：算一次
         self._cache: Dict[str, tuple] = {}
         self._bars_cache: Dict[tuple, dict] = {}
@@ -409,6 +411,65 @@ class AlphaBotService:
     def hedge(self) -> dict:
         now = self.now_fn()
         return clean_json(HG.build_overview(self._hedge_view(now), now_et=now))
+
+    # ── 尾部对冲候选（v0.45.643，只读）：SPY 认沽后比例价差叠到组合压力网格上
+    def tail_hedge_rules(self) -> dict:
+        """规则常量与文案表（取自 `alphabot.tail_hedge`，前端不另抄）。"""
+        return TH.public_rules()
+
+    def _tail_deps(self) -> "TH.Deps":
+        """利率取 `portfolio_greeks.CONFIG`（与基线压力表同一个）、BS 价取 `greeks_engine`（压力表重定价用的同一个）、
+        点差闸门取卖权 / 跨式用的同一把尺——候选的数与基线对得上。懒 import：环境没设好不连坐整个 Alpha Bot。"""
+        import portfolio_greeks as pg
+        from greeks_engine import bs_price
+        return TH.Deps(bs_price=bs_price, risk_free=float(pg.CONFIG["risk_free"]), max_spread_pct=R.C.MAX_SPREAD_PCT)
+
+    def _tail_chain(self, day: str, spot=None, *, force: bool = False):
+        """SPY 全链。演示 = 合成链（补上 vega / theta，现货取审计里的 SPY 价，免得演示永远带「现货有差」）；
+        生产 = Alpha Bot 的取链入口。`force`（页面「重新拉取」）**清 SPY 的 CBOE 进程缓存再拉**：该缓存同一 vintage 日内
+        最长新鲜 4 小时，不清的话「重新拉取」会原样命中几小时前的 bid/ask（独立审查实测）；平常的打开 / 轮询不清、不多发请求。"""
+        if self.demo:
+            from alphabot import synthetic as syn
+            return syn.demo_spy_chain(day, spot=spot), None
+        return self._chain_fetch(invalidate=force)("SPY", as_of=None)
+
+    def tail_hedge(self, force: bool = False) -> dict:
+        """「尾部对冲候选」：对冲账本**最近一份放行的审计**（压力网格 / Greeks / NAV）× SPY 当前期权链。
+        **只读、不写账本、没有推荐**（见 `alphabot.tail_hedge`）。取链失败如实带原因返回，不拿旧链顶上。"""
+        now = self.now_fn()
+        view = self._hedge_view(now)
+        audits = ((view.get("history") or {}).get("audits")) or {}
+        day = max(audits) if audits else None
+        if day is None and view.get("errors"):
+            # 账本读不了 ≠ 还没有记录（`_hedge_view` 自己的注释：读不了不能当成空账本）；不去取链、不缓存
+            res = clean_json(TH.unavailable("ledger_unreadable", ledger_errors={k: str(v) for k, v in view["errors"].items()}))
+            res["demo"] = self.demo
+            res["meta"] = TH.public_rules()
+            return res
+        key = ("tail", day)
+        with self._lock_for("tail"):
+            ent = self._tail_cache.get(key)
+            if ent is not None and not force and (self.clock() - ent[0]) < self.live_ttl:
+                return {**ent[1], "cache_age_sec": round(self.clock() - ent[0], 1)}
+            chain, reason = None, None
+            if day is not None:
+                try:
+                    chain, reason = self._tail_chain(day, (audits.get(day) or {}).get("spy_price"), force=force)
+                except Exception as exc:  # noqa: BLE001 - 取链失败如实说，不吞成「没有候选」
+                    reason = f"exception:{type(exc).__name__}"
+                    _log.warning("尾部对冲：SPY 期权链取不到：%s: %s", type(exc).__name__, exc)
+            try:
+                res = TH.build(day, audits.get(day), chain, self._tail_deps())
+            except Exception as exc:  # noqa: BLE001 - 算不出就写明原因；页面其余部分不受影响
+                _log.warning("尾部对冲：候选计算失败：%s: %s", type(exc).__name__, exc)
+                res = TH.unavailable(f"exception:{type(exc).__name__}")
+            if not res.get("available") and chain is None and reason:
+                res["chain_reason"] = reason
+            res = clean_json(res)
+            res["demo"] = self.demo
+            res["meta"] = TH.public_rules()          # 原因 / 旗标 / 提醒文案：前端只查这张表，不另抄
+            self._tail_cache[key] = (self.clock(), res)
+            return {**res, "cache_age_sec": 0.0}
 
     def _straddle_quote(self, t: str, symbols: List[str]) -> dict:
         if self.straddle_quote_fn is not None:

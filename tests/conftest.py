@@ -1322,6 +1322,32 @@ def _isolate_straddle_strangle_shadow_result(_isolate_env, tmp_path):
     straddle_strangle_shadow.reset_stats()
 
 
+@pytest.fixture(autouse=True)
+def _reset_stock_fetch_legacy_stats():
+    """v0.45.639：`swarm_agents.cache` 的「行情改走旧回落」计数是进程级全局状态（同上一条的影子宽跨计数）。已有测试会把 data_pipeline
+    弄成不可导入来测旧回落（test_volatility_fallback / test_silent_failure_guards），不清的话后面读实时计数（scan_timing.counters()）的
+    测试会带着非零值跑、结果随顺序变。只在模块已导入时清——不在这里触发导入，免得改变首次导入的位置。"""
+    mod = sys.modules.get("swarm_agents.cache")
+    if mod is not None:
+        mod._reset_legacy_fallback_stats()
+    yield
+    mod = sys.modules.get("swarm_agents.cache")
+    if mod is not None:
+        mod._reset_legacy_fallback_stats()
+
+
+@pytest.fixture(autouse=True)
+def _reset_event_row_stats():
+    """v0.45.645：`price_metrics` 的「日线公司行动空行」计数是进程级全局状态（同上一条）。只在模块已导入时清——不在这里触发导入。"""
+    mod = sys.modules.get("price_metrics")
+    if mod is not None:
+        mod._reset_event_row_stats()
+    yield
+    mod = sys.modules.get("price_metrics")
+    if mod is not None:
+        mod._reset_event_row_stats()
+
+
 @pytest.fixture
 def sell_strike_state_sandbox_check():
     """把 `_assert_sell_strike_state_in_sandbox` 暴露给它的有牙自证（同 `default_path_sandbox_check`）。"""
@@ -1396,6 +1422,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _root_data_guard  # noqa: E402
 import _write_sandbox  # noqa: E402
 import _concurrency_hint  # noqa: E402
+# v0.45.651：财报信号 scan 的运行时钟断言（夹具定义在该模块，这里 import 进来才会被 pytest 注册；用包路径 import，
+# 守卫自己的测试读的是同一份模块状态）。说明见 tests/_scan_clock_guard.py。
+from tests._scan_clock_guard import (  # noqa: E402,F401
+    _scan_clock_guard_installed, _scan_clock_must_be_pinned, allow_real_scan_clock)
 
 _ROOT_FP_BEFORE = pytest.StashKey[dict]()
 

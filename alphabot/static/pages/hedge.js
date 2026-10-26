@@ -2,6 +2,7 @@
 // 历史只显示能自证定价场次的记录（服务端经 portfolio_greeks.load_history 放行）；被拦下的只给条数与日期范围。
 import { api, h, helpLink, num, money, pctPts, panel, table, isNum, fill } from "../lib.js";
 import { lines, C } from "../charts.js";
+import { renderTailHedge } from "./hedge_tail.js";
 
 const sMoney = (v, dp = 0) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}$${num(Math.abs(v), dp)}` : "—");
 const sPct = (v, dp = 2) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}${num(Math.abs(v), dp)}%` : "—");
@@ -48,6 +49,37 @@ function latestPanel(L, rules) {
     h("p", { class: "small muted" }, `以上都是占合并 NAV 的百分比。覆盖 ${cov.n_rows ?? "—"} 行：缺价 ${cov.n_price_missing ?? "—"} · 缺报价 ${cov.n_quote_missing ?? "—"} · 缺 β ${cov.n_beta_missing ?? "—"}`
       + `${a.partial ? " · 数据不全（不全时一律不对冲）" : ""}${a.vega_alert ? " · vega 超告警线" : ""}${a.gamma_alert ? " · gamma 超告警线" : ""}`),
     rec.reason ? h("p", { class: "small" }, h("span", { class: "muted" }, "规则给出的理由："), rec.reason) : null);
+}
+
+// 成本估算（v0.45.638）：固定 bps 的主观假设，不是点差 / 冲击模型；不进决策、不扣现金。数字全由服务端算好（前端只排版）。
+// shadow 没有持仓账：逐日「若每天都拉回 0」的隐含换手才是日常口径；决策表里那一天的合计是「若从空仓开始」的上界。
+function costBlock(D, mode) {
+  const T = D.turnover || {};
+  const bps = isNum(D.cost_bps) ? D.cost_bps : T.cost_bps;
+  const bits = [];
+  if (isNum(D.trade_notional_usd)) {
+    bits.push(h("p", { class: "small" }, `${D.latest_date} 的决策：${D.n_trades ?? 0} 笔，成交名义 ${money(D.trade_notional_usd, 0)}`
+      + (isNum(D.trade_notional_pct_nav) ? `（${num(D.trade_notional_pct_nav, 1)}% NAV）` : "")
+      + `，估算成本 ${money(D.est_cost_usd, 2)}`
+      + (mode === "shadow" ? "。shadow 没有持仓账，这是「若今天从空仓开始对冲」的上界，不是日常换手。" : "。")
+      + (isNum(D.executed_notional_usd) ? ` 其中真成交名义 ${money(D.executed_notional_usd, 0)}、估算成本 ${money(D.executed_est_cost_usd, 2)}。` : "")));
+  }
+  const rows = (T.rows || []);
+  if (rows.length) {
+    const cols = [
+      { label: "日期", render: (r) => r.date },
+      { label: "口径", render: (r) => (r.kind === "build" ? "建仓（不进日均）" : "相邻两日目标变化") },
+      { label: "只数", cls: "r", render: (r) => r.n_names + (r.n_skipped ? `（另 ${r.n_skipped} 只判不了）` : "") },
+      { label: "成交名义", cls: "r", render: (r) => money(r.notional_usd, 0) },
+      { label: "% NAV", cls: "r", render: (r) => (isNum(r.notional_pct_nav) ? `${num(r.notional_pct_nav, 1)}%` : "—") },
+      { label: "估算成本", cls: "r", render: (r) => money(r.est_cost_usd, 2) },
+      { label: "bps NAV", cls: "r", render: (r) => (isNum(r.est_cost_bps_nav) ? num(r.est_cost_bps_nav, 2) : "—") }];
+    bits.push(h("h3", {}, "估算成本与隐含换手"),
+      h("p", { class: "small muted" }, `按每笔成交 ${isNum(bps) ? num(bps, 1) : "—"} bps 估算（主观假设，没有校准）。「隐含换手」= 若每天都把每只标的拉回目标股数，相邻两个扫描日之间要成交的名义；`
+        + `日均 ${isNum(T.avg_notional_pct_nav) ? `${num(T.avg_notional_pct_nav, 1)}% NAV` : "—"}、约 ${isNum(T.avg_est_cost_bps_nav) ? `${num(T.avg_est_cost_bps_nav, 2)} bps NAV` : "—"}/天（${T.n_rebalance_days ?? 0} 个换日）。`),
+      table(cols, rows));
+  }
+  return bits;
 }
 
 function deltaPanel(D, rules) {
@@ -102,8 +134,8 @@ function deltaPanel(D, rules) {
       (D.trades || []).length ? table(tradeCols, D.trades) : h("div", { class: "empty" }, "放行的记录里还没有成交。")]
     : [];
   return panel("逐票 Delta 对冲", { sub }, ...lastBits,
-    names.length ? table(nameCols, names) : h("div", { class: "empty" }, "跨式账本里没有持仓。"), ...account,
-    h("p", { class: "note small muted" }, "没有点差 / 冲击成本模型（单只股票比 SPY 贵）；只对冲 Delta，Gamma / Vega 不对冲；带与拉回方式是 v1 主观常数，不是校准结果，也没有证据说明逐票对冲后更好。"));
+    names.length ? table(nameCols, names) : h("div", { class: "empty" }, "跨式账本里没有持仓。"), ...costBlock(D, mode), ...account,
+    h("p", { class: "note small muted" }, "没有点差 / 冲击成本模型（单只股票比 SPY 贵；上面的成本只是固定 bps 的估算）；只对冲 Delta，Gamma / Vega 不对冲；带与拉回方式是 v1 主观常数，不是校准结果，也没有证据说明逐票对冲后更好。"));
 }
 
 function gatePanel(g) {
@@ -172,6 +204,7 @@ export async function renderHedge(root, alive) {
     kpi("累计盈亏（= 净值）", sMoney(a.nav), tone(a.nav)),
     kpi("浮动", sMoney(a.unrealized_usd), tone(a.unrealized_usd)), kpi("已实现", sMoney(a.realized_usd), tone(a.realized_usd)));
 
+  const tailHost = h("div");     // 尾部对冲候选（v0.45.643）：另一个接口、要现拉 SPY 期权链，不阻塞本页其余部分
   const bandEl = h("div", { class: "chart short" });
   const eqEl = h("div", { class: "chart short" });
   const days = d.days || [];
@@ -208,6 +241,8 @@ export async function renderHedge(root, alive) {
     h("div", { style: { height: "16px" } }),
     deltaPanel(d.delta, rules),
     h("div", { style: { height: "16px" } }),
+    tailHost,
+    h("div", { style: { height: "16px" } }),
     panel("成交", { sub: `${(d.trades || []).length} 笔（放行的）· 按收盘价成交，SPY 点差约 1bp 未建模 · 「拉回到」是占合并 NAV 的带边 · 鼠标停在日期上看规则原文` },
       (d.trades || []).length ? table(tradeCols, d.trades) : h("div", { class: "empty" }, "放行的记录里还没有成交。")),
     h("div", { style: { height: "16px" } }),
@@ -216,6 +251,7 @@ export async function renderHedge(root, alive) {
     gatePanel(g),
     h("p", { class: "note small muted", style: { marginTop: "14px" } }, `对冲只看 β·Delta：vega 超 ${num(rules.vega_alert_pct, 1)}% / gamma 超 ${num(rules.gamma_alert_pct, 1)}% NAV 只告警、不对冲；缺价 / 缺 β / 缺报价时一律不对冲。观察项：不进评分、不进股票纸面组合、不构成投资建议。`));
 
+  renderTailHedge(tailHost, alive);
   const c = C();
   if (days.length) {
     const bw = rules.beta_delta_band_pct;

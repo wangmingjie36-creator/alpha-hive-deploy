@@ -20,6 +20,7 @@ import pytest
 
 import earnings_vol_signal as evs
 from tests._repo_files import own_python_files
+from tests._scan_clock import pin_scan_clock
 from tests.test_earnings_vol_signal import AS_OF, UP, _qs, _stats
 
 REPO = Path(__file__).resolve().parent.parent
@@ -30,6 +31,7 @@ def state(tmp_path, monkeypatch):
     sd = tmp_path / "options_paper_state"
     monkeypatch.setattr(evs, "STATE_DIR", sd)
     monkeypatch.setattr(evs, "SIGNALS_FILE", sd / "earnings_signals.jsonl")
+    pin_scan_clock(monkeypatch, evs, AS_OF)
     cache = tmp_path / "cache"
     cache.mkdir()
     return cache

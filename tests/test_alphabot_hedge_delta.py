@@ -143,6 +143,74 @@ class TestDeltaOverview:
         assert d["data_available"] is True and "delta" in d
 
 
+def _nm(tk, tgt, px, status="hedge"):
+    return {"ticker": tk, "status": status, "target_shares": tgt, "price": px}
+
+
+def _day_audits(days):
+    """days = {日期: (nav, [name, ...])}"""
+    return {d: {"delta_hedge": {"mode": "shadow", "nav": nav, "cost_bps": 5.0, "names": names}} for d, (nav, names) in days.items()}
+
+
+class TestImpliedTurnover:
+    """v0.45.638：shadow 没有持仓账，换手只能从相邻审计日的目标股数变化里算。手工数字独立复算。"""
+
+    def test_build_then_rebalance_exit_and_new(self):
+        au = _day_audits({
+            "2026-10-19": (100_000.0, [_nm("A", 100, 10.0), _nm("B", -50, 20.0)]),
+            "2026-10-20": (100_000.0, [_nm("A", 130, 11.0), _nm("C", 20, 5.0)])})     # A 变 +30 股；B 没了（清 50 股 @ 昨日价 20）；C 新建
+        r = HG.implied_turnover(au, 5.0)
+        b, d = r["rows"]
+        assert b["kind"] == "build" and b["notional_usd"] == 100 * 10.0 + 50 * 20.0
+        assert d["kind"] == "rebalance" and d["notional_usd"] == pytest.approx(30 * 11.0 + 50 * 20.0 + 20 * 5.0)
+        assert d["notional_pct_nav"] == pytest.approx(1.43) and d["est_cost_usd"] == pytest.approx(0.715, abs=0.01)
+        assert d["est_cost_bps_nav"] == pytest.approx(0.0715, abs=0.001)
+
+    def test_first_audit_day_is_not_in_the_average(self):
+        au = _day_audits({"2026-10-19": (100_000.0, [_nm("A", 1000, 100.0)]),
+                          "2026-10-20": (100_000.0, [_nm("A", 1010, 100.0)])})
+        r = HG.implied_turnover(au, 5.0)
+        assert r["n_rebalance_days"] == 1 and r["avg_notional_pct_nav"] == pytest.approx(1.0)   # 建仓那 100% 不进日均
+
+    def test_unknown_names_are_skipped_not_guessed(self):
+        au = _day_audits({"2026-10-19": (100_000.0, [_nm("A", 100, 10.0), _nm("U", None, 10.0, "unknown")]),
+                          "2026-10-20": (100_000.0, [_nm("A", 100, 10.0), _nm("U", 50, 10.0)])})
+        d = HG.implied_turnover(au, 5.0)["rows"][1]
+        assert d["n_skipped"] == 1 and d["notional_usd"] == 0.0 and d["n_names"] == 1      # U 昨天未决 ⇒ 不拿 0 当昨天
+
+    def test_flat_names_and_audits_without_the_section_are_ignored(self):
+        au = _day_audits({"2026-10-19": (100_000.0, [_nm("A", 10, 10.0), _nm("F", 0, 10.0, "flat")])})
+        au["2026-10-18"] = {"nav": {}}                                                      # 旧审计没有这一节
+        assert [r["date"] for r in HG.implied_turnover(au, 5.0)["rows"]] == ["2026-10-19"]
+
+    def test_missing_nav_or_bps_gives_none_not_zero(self):
+        au = _day_audits({"2026-10-19": (None, [_nm("A", 10, 10.0)]), "2026-10-20": (None, [_nm("A", 20, 10.0)])})
+        r = HG.implied_turnover(au, 5.0)
+        assert r["rows"][1]["notional_pct_nav"] is None and r["avg_notional_pct_nav"] is None
+        r0 = HG.implied_turnover(_day_audits({"2026-10-19": (100_000.0, [_nm("A", 10, 10.0)])}), None)
+        assert r0["rows"][0]["est_cost_usd"] is None
+
+    def test_only_the_most_recent_days_are_shown(self):
+        au = _day_audits({f"2026-10-{d:02d}": (100_000.0, [_nm("A", d, 10.0)]) for d in range(1, 21)})
+        assert len(HG.implied_turnover(au, 5.0)["rows"]) == HG.DELTA_TURNOVER_SHOWN
+
+    def test_overview_carries_cost_fields_and_the_turnover_block(self, tmp_path):
+        sec = _section(cost_bps=5.0, n_trades=1, trade_notional_usd=4000.0, trade_notional_pct_nav=2.7, est_cost_usd=2.0,
+                       est_cost_bps_nav=0.13)
+        root = _write(tmp_path / "d", {"2026-10-14": _audit("2026-10-14", delta=_section(names=[NAME_T])),
+                                       "2026-10-15": _audit("2026-10-15", delta=sec)})
+        D = _svc(root).hedge()["delta"]
+        assert D["cost_bps"] == 5.0 and D["n_trades"] == 1 and D["est_cost_usd"] == 2.0
+        assert D["turnover"]["rows"] and D["turnover"]["cost_bps"] == 5.0
+        assert {"trade_notional_usd", "est_cost_usd"} <= set(HG.DELTA_NAME_KEYS)
+
+    def test_old_audit_without_cost_fields_shows_none_not_zero(self, tmp_path):
+        root = _write(tmp_path / "d", {"2026-10-15": _audit("2026-10-15", delta=_section())})
+        D = _svc(root).hedge()["delta"]
+        assert D["est_cost_usd"] is None and D["n_trades"] is None
+        assert D["cost_bps"] == pg.CONFIG["delta_hedge_cost_bps"]            # 旧审计没写假设 ⇒ 用当前公开规则，不编
+
+
 class TestNamesTheCulprit:
     def test_stale_and_unpriced_names_reach_the_page_data(self, tmp_path):
         stale = [{"ticker": "BILI", "kind": "stock", "symbol": None, "seen_price": 14.3201, "session": "2026-10-15",
@@ -183,6 +251,21 @@ class TestFrontendWiring:
         panel_src = self.JS[self.JS.index("function deltaPanel"):self.JS.index("function gatePanel")]
         assert "/ D.nav" not in panel_src and "* 100" not in panel_src, "% NAV 在服务端算（option_pct_nav），前端不写公式"
 
+    def test_cost_block_is_server_numbers_only_and_says_it_is_an_assumption(self):
+        blk = self.JS[self.JS.index("function costBlock"):self.JS.index("function deltaPanel")]
+        assert "/ D.nav" not in blk and "* 100" not in blk and "* bps" not in blk and "* D.cost" not in blk, "成本 / 占比由服务端算"
+        assert "主观假设" in blk and "没有校准" in blk and "上界" in blk and "不是日常换手" in blk
+        assert "...costBlock(D, mode)" in self.JS, "成本块没挂进面板"
+        assert "r.kind === \"build\"" in blk and "不进日均" in blk
+
+    def test_help_cost_line_reads_the_bps_from_the_server_and_says_it_is_not_a_model(self):
+        help_js = (STATIC / "pages" / "help.js").read_text(encoding="utf-8")
+        start = help_js.index("逐票 Delta 对冲（跨式腿）")
+        sect = help_js[start:help_js.index("什么时候不对冲", start)]
+        assert "r.delta_hedge_cost_bps" in sect and "不进决策、不扣现金" in sect and "不是点差 / 冲击模型" in sect
+        assert not re.search(r"\b5\s*bps", sect), "成本假设写成了字面量"
+        assert "样本很小" in sect and "不是结论" in sect, "头几个扫描日的回放不能写成定论"
+
     def test_help_constants_come_from_the_server_not_literals(self):
         help_js = (STATIC / "pages" / "help.js").read_text(encoding="utf-8")
         start = help_js.index("逐票 Delta 对冲（跨式腿）")
@@ -194,5 +277,5 @@ class TestFrontendWiring:
 
     def test_rules_reach_the_page_from_the_engine_config(self):
         v = pg.ledger_view(Path("/nonexistent-root-for-test"))
-        assert {"delta_hedge_mode", "delta_hedge_band_pct", "delta_hedge_rebalance_to"} <= set(v["rules"])
+        assert {"delta_hedge_mode", "delta_hedge_band_pct", "delta_hedge_rebalance_to", "delta_hedge_cost_bps"} <= set(v["rules"])
         assert HG.build_overview({**v, "exists": False}, now_et=NOW)["data_available"] is False

@@ -28,7 +28,7 @@ TRADE_KEYS = ("date", "action", "shares", "price", "price_source", "price_sessio
 #: 逐票 Delta 对冲（v0.45.526）给页面的字段
 DELTA_NAME_KEYS = ("ticker", "status", "reason", "option_dd", "held_shares", "target_shares", "trade_shares", "action",
                    "net_dd", "net_pct_nav", "price", "price_session", "price_source", "price_at_close", "breach",
-                   "traded_today")
+                   "traded_today", "trade_notional_usd", "est_cost_usd")
 DELTA_TRADE_KEYS = ("date", "ticker", "shares", "price", "action", "reason", "shares_after", "net_dd_before",
                     "target_shares", "price_source", "price_session", "fill")
 DELTA_TRADES_SHOWN = 60
@@ -88,6 +88,71 @@ def _pct_nav(dd, nav) -> Optional[float]:
     return round(d / n * 100.0, 4) if (d is not None and n) else None
 
 
+#: 换手回放最多给最近这么多个扫描日
+DELTA_TURNOVER_SHOWN = 10
+
+
+def implied_turnover(audits: dict, cost_bps) -> dict:
+    """逐票对冲的**隐含换手**（v0.45.638）：相邻两个有 `delta_hedge` 一节的审计日之间，若每天都把每只标的拉回目标股数，
+    要成交多少名义。纯函数，只读审计（shadow 没有持仓账，这是它能给出的唯一「日常换手」口径）。
+
+    · 两天都有目标的标的：|今日目标 − 昨日目标| × 今日价；今天新出现的：整份目标（建仓）；昨天有今天没有的（跨式平了）：
+      昨日目标 × 昨日价（清仓）；这只在任一天是未决（目标 None）⇒ 不猜、计入 `n_skipped`；
+    · 第一份审计没有「昨天」：标成 `build`（从空仓起步），**不进日均**；
+    · 这是「每天都拉回 0」的上界：带 / 拉回方式只会让成交更少或更稀（回放里 3% 带与它差不多，带宽放宽也几乎不降，原因见 delta_hedge 模块头）。
+    成本 = 名义 × bps：固定 bps 的主观估算，不是点差 / 冲击模型。"""
+    bps = _num(cost_bps)
+    rows, prev = [], None
+    for day in sorted(audits or {}):
+        sec = (audits[day] or {}).get("delta_hedge")
+        if not isinstance(sec, dict):
+            continue
+        cur = {n["ticker"]: n for n in sec.get("names") or []
+               if isinstance(n, dict) and n.get("ticker") and n.get("status") != "flat"}
+        nav = _num(sec.get("nav"))
+        notional, skipped, n_names = 0.0, 0, 0
+        for tk, n in cur.items():
+            tgt, px = _num(n.get("target_shares")), _num(n.get("price"))
+            if tgt is None or not px or px <= 0:
+                skipped += 1
+                continue
+            n_names += 1
+            if prev is None:
+                notional += abs(tgt) * px
+                continue
+            p = prev.get(tk)
+            ptgt = _num((p or {}).get("target_shares"))
+            if p is None:
+                notional += abs(tgt) * px                    # 新出现：建仓
+            elif ptgt is None:
+                skipped += 1                                  # 昨天未决：判不了变化量
+                n_names -= 1
+            else:
+                notional += abs(tgt - ptgt) * px
+        if prev is not None:
+            for tk, p in prev.items():
+                if tk in cur:
+                    continue
+                ptgt, ppx = _num(p.get("target_shares")), _num(p.get("price"))
+                if ptgt is None or not ppx or ppx <= 0:
+                    skipped += 1
+                else:
+                    notional += abs(ptgt) * ppx              # 跨式平了：清仓
+        cost = notional * bps / 1e4 if bps is not None else None
+        rows.append({"date": day, "kind": "build" if prev is None else "rebalance", "n_names": n_names,
+                     "n_skipped": skipped, "notional_usd": round(notional, 2),
+                     "notional_pct_nav": round(notional / nav * 100.0, 2) if nav else None,
+                     "est_cost_usd": round(cost, 2) if cost is not None else None,
+                     "est_cost_bps_nav": round(cost / nav * 1e4, 3) if (cost is not None and nav) else None})
+        prev = cur
+    rows = rows[-DELTA_TURNOVER_SHOWN:]
+    reb = [r for r in rows if r["kind"] == "rebalance" and r["notional_pct_nav"] is not None]
+    avg = (lambda k: round(sum(r[k] for r in reb) / len(reb), 2)) if reb else (lambda k: None)
+    return {"cost_bps": bps, "rows": rows, "n_rebalance_days": len(reb),
+            "avg_notional_pct_nav": avg("notional_pct_nav"),
+            "avg_est_cost_bps_nav": avg("est_cost_bps_nav") if all(r["est_cost_bps_nav"] is not None for r in reb) else None}
+
+
 def delta_overview(view: dict, audits: dict) -> dict:
     """逐票 Delta 对冲面板的数据（v0.45.526）。纯函数，只读。
     决策取**最近一份放行审计**里的 `delta_hedge` 一节（shadow 下这就是全部：没有持仓账）；
@@ -116,6 +181,14 @@ def delta_overview(view: dict, audits: dict) -> dict:
         "n_hedge": (sec or {}).get("n_hedge"), "n_inside": (sec or {}).get("n_inside"),
         "n_undecided": (sec or {}).get("n_undecided"), "undecided": (sec or {}).get("undecided") or [],
         "blocked": (sec or {}).get("blocked") or {},
+        # 成本估算（v0.45.638）：固定 bps 的主观假设；决策层「若成交」的合计 + paper 真成交的合计；旧审计没有这几项 ⇒ None
+        "cost_bps": (sec or {}).get("cost_bps", rules.get("delta_hedge_cost_bps")),
+        "n_trades": (sec or {}).get("n_trades"), "trade_notional_usd": (sec or {}).get("trade_notional_usd"),
+        "trade_notional_pct_nav": (sec or {}).get("trade_notional_pct_nav"), "est_cost_usd": (sec or {}).get("est_cost_usd"),
+        "est_cost_bps_nav": (sec or {}).get("est_cost_bps_nav"),
+        "executed_notional_usd": (sec or {}).get("executed_notional_usd"),
+        "executed_est_cost_usd": (sec or {}).get("executed_est_cost_usd"),
+        "turnover": implied_turnover(audits, (sec or {}).get("cost_bps", rules.get("delta_hedge_cost_bps"))),
         "opened": bool(view.get("delta_opened")),
         "cash": _num((meta or {}).get("cash")), "starting_date": (meta or {}).get("starting_date"),
         "positions": [{k: p.get(k) for k in ("ticker", "shares", "avg_price", "last_price", "last_mark_date",

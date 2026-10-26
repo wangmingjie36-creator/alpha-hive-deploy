@@ -9,10 +9,11 @@ from pathlib import Path
 import pytest
 
 import earnings_vol_signal as evs
+from tests._scan_clock import POST_CLOSE, SCAN_AS_OF, pin_scan_clock, tick_scan_clock
 
 ROOT = Path(__file__).resolve().parent.parent
 
-AS_OF = "2026-09-03"
+AS_OF = SCAN_AS_OF
 EXPIRY = "2026-10-02"     # 29 DTE
 EARN = "2026-09-20"
 
@@ -342,6 +343,8 @@ def state(tmp_path, monkeypatch):
     sd = tmp_path / "options_paper_state"
     monkeypatch.setattr(evs, "STATE_DIR", sd)
     monkeypatch.setattr(evs, "SIGNALS_FILE", sd / "earnings_signals.jsonl")
+    # 两只墙钟都钉死（`scan` 每次起头各读一次）：记录日 / 记录时刻进账本的每一行，测试结果不许随跑测试的时钟变
+    pin_scan_clock(monkeypatch, evs, AS_OF)
     cache = tmp_path / "cache"
     cache.mkdir()
     return cache
@@ -550,7 +553,8 @@ class TestScanNeverDeletesRowsItDidNotRecompute:
         msg = _warnings(caplog)
         assert "XYZ" in msg and "DEF" in msg and "已结算：XYZ" in msg
 
-        # upsert 仍幂等：同样的快照再跑一次，账本字节不变
+        # upsert 仍幂等：同样的快照、**同一个记录时刻**（`state` 夹具钉住）再跑一次，账本字节不变。
+        # 记录时刻不同则只有 `gex_ctx.captured_at` 会变，见 TestRerunAcrossASecondBoundary
         after_first = evs.SIGNALS_FILE.read_bytes()
         evs.scan(AS_OF, cache_dir=state, stats_fn=lambda tk: _stats(), upcoming_fn=lambda tk: UP)
         assert evs.SIGNALS_FILE.read_bytes() == after_first
@@ -610,6 +614,94 @@ class TestScanNeverDeletesRowsItDidNotRecompute:
         # 对「不出现」，钉行反而放过「假提示挪到另一条 WARNING」。本夹具（空目录）里只有这一条告警。
         msg = _warnings(caplog)
         assert "ALPHA_HIVE_HOME" not in msg and "代码目录" not in msg, msg
+
+
+class TestRerunAcrossASecondBoundary:
+    """原来的偶发红：`test_partial_rerun_keeps_rows_it_did_not_recompute` 里两次 `scan` 之间的墙钟恰好跨了一秒，
+    每行 `gex_ctx.captured_at`（精确到秒）不同 ⇒ 账本字节不同 ⇒ 断言红（失败日志里两次 WARNING 是 10:43:17 与 10:43:18）。
+    v0.45.648 用不钉钟、只让第二次 scan 的钟走一秒**实测复现**：账本里恰好 1 个字节不同，落在 `captured_at` 值里、
+    是秒的个位（具体偏移 / 字节数取决于种子账本，不抄在这里，见 CHANGELOG 0.45.648）。
+    下面把「跨秒」做成**确定性**场景：钟每读一次走一秒，证明重跑只改记录时刻、不改任何别的东西。
+    （钉钟与走秒的唯一实现在 `tests/_scan_clock.py`。）"""
+
+    @staticmethod
+    def _lines(path):
+        """账本里每一行的原始文本，按 (ticker, as_of) 索引——**同键多行都留着**（值是列表），
+        不让「重跑多追加了一行同键的行」被字典折叠掉。"""
+        out = {}
+        for ln in path.read_text(encoding="utf-8").splitlines():
+            if ln.strip():
+                r = json.loads(ln)
+                out.setdefault((r["ticker"], r["as_of"]), []).append(ln)
+        return out
+
+    @staticmethod
+    def _rows(path):
+        return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+    @staticmethod
+    def _without_stamp(rows):
+        out = []
+        for r in rows:
+            r = json.loads(json.dumps(r))
+            (r.get("gex_ctx") or {}).pop("captured_at", None)
+            out.append(r)
+        return out
+
+    @staticmethod
+    def _stamp_of(rows, ticker):
+        """`ticker` 行的 `gex_ctx.captured_at`；行或字段不在就给出读得懂的失败，不抛 KeyError / StopIteration。"""
+        row = next((r for r in rows if r["ticker"] == ticker), None)
+        assert row is not None, f"账本里没有 {ticker} 行：{[r['ticker'] for r in rows]}"
+        stamp = (row.get("gex_ctx") or {}).get("captured_at")
+        assert stamp, f"{ticker} 行没有 gex_ctx.captured_at：{row.get('gex_ctx')}"
+        return stamp
+
+    def _scan_twice(self, state, monkeypatch):
+        """同样的快照、钟每读一次走一秒，连跑两次 `scan`。返回两次之后的账本（字节, 行, 原始行索引）。"""
+        seeded = _seed_ledger()
+        _write_snap(state, "ABC", AS_OF, _qs(), rv=20.0)
+        tick_scan_clock(monkeypatch, evs)
+        snaps = []
+        for _ in range(2):
+            evs.scan(AS_OF, cache_dir=state, stats_fn=lambda tk: _stats(), upcoming_fn=lambda tk: UP)
+            snaps.append((evs.SIGNALS_FILE.read_bytes(), self._rows(evs.SIGNALS_FILE), self._lines(evs.SIGNALS_FILE)))
+        return seeded, snaps
+
+    def test_state_fixture_pins_both_wall_clocks(self, state):
+        assert evs._now_et() == POST_CLOSE and evs._today_pdt() == AS_OF
+
+    def test_rerun_with_the_clock_one_second_later_changes_only_the_record_stamp(self, state, monkeypatch):
+        _, ((first_bytes, first_rows, _), (second_bytes, second_rows, _)) = self._scan_twice(state, monkeypatch)
+        # 场景自证：这就是原来偶发红的那个形状——字节确实不同
+        assert second_bytes != first_bytes, "钟走了一秒而字节没变——这条测试没有复现原来的场景"
+        # 不同之处只有记录时刻：去掉 captured_at 之后逐行逐字段相同
+        assert self._without_stamp(second_rows) == self._without_stamp(first_rows)
+        assert self._stamp_of(second_rows, "ABC") != self._stamp_of(first_rows, "ABC")
+
+    def test_rows_it_did_not_recompute_are_byte_identical_across_the_two_scans(self, state, monkeypatch):
+        """没有被本次重算的行（已结算的 XYZ、DEF，以及别的日期的 XYZ）在**两次** scan 之间逐字节相同，且没有被盖上任何
+        `captured_at`——钟已经走了一秒，若它们被新钟盖过，原始行就会不同。上一版只跑一次 scan，钟走不走都一样，
+        分不出「原样保留」与「被覆盖」。"""
+        seeded, ((_, _, first), (_, _, second)) = self._scan_twice(state, monkeypatch)
+        # 两次之间行的集合与每个键下的行数都不变（重跑不许多追加 / 少一行）
+        assert {k: len(v) for k, v in first.items()} == {k: len(v) for k, v in second.items()}
+        kept = [("XYZ", AS_OF), ("DEF", AS_OF), ("XYZ", D_OTHER)]
+        for key in kept:
+            assert len(first[key]) == 1, f"{key} 下有 {len(first[key])} 行"
+            assert first[key] == second[key], f"{key} 在两次 scan 之间被改写了"
+            assert "captured_at" not in first[key][0], f"{key} 被盖上了记录时刻"
+            assert json.loads(first[key][0]) == seeded[key], f"{key} 与种子不同"
+        # 场景自证：被重算的 ABC 在两次之间确实变了（否则钟没走，上面的相同证明不了什么）
+        assert first[("ABC", AS_OF)] != second[("ABC", AS_OF)]
+
+    def test_lines_helper_keeps_duplicate_rows_instead_of_collapsing_them(self, tmp_path):
+        """`_lines` 的牙：同键两行必须是两条，否则「重跑多追加一行」会被藏起来。"""
+        f = tmp_path / "l.jsonl"
+        a = json.dumps({"ticker": "ABC", "as_of": AS_OF, "n": 1})
+        b = json.dumps({"ticker": "ABC", "as_of": AS_OF, "n": 2})
+        f.write_text(a + "\n" + b + "\n", encoding="utf-8")
+        assert self._lines(f) == {("ABC", AS_OF): [a, b]}
 
 
 class TestMainExitCodes:

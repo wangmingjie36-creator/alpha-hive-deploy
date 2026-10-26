@@ -455,6 +455,8 @@ class TestFrozenMarkEstimate:
     def test_estimate_is_labelled_not_ledger_and_says_when_unavailable(self):
         fn = _body("renderEst")
         assert "非账本数字" in fn and "旧价" in fn
+        # 差额必须说清符号方向：「低估 / 高估」看不出 −$1,228 是谁比谁少（v0.45.640 二次检查）
+        assert "低估" not in fn and "高估" not in fn and "估算 − 账本" in fn
         import re
         for why in ("r.error", "!r.available", "!e"):
             assert re.search(r"^\s*if \(" + re.escape(why) + r"\) \{ fill\(", fn, re.M), f"{why} 这条失败路径必须有话说，不能留着旧价当没事"

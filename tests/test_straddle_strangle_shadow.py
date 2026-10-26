@@ -30,6 +30,7 @@ import options_paper_leg as opl
 import straddle_strangle_shadow as SS
 from alphabot import strangle_compare as SC
 from tests._repo_files import own_python_files
+from tests._scan_clock import pin_scan_clock
 from tests.test_earnings_vol_signal import AS_OF, EARN, EXPIRY, UP, _qs, _stats, _write_snap
 
 REPO = Path(__file__).resolve().parent.parent
@@ -248,12 +249,9 @@ class TestConventionsMatchLedger:
 
 class TestShadowChangesNothing:
     def test_signals_identical_except_the_shadow_key(self, tmp_path, monkeypatch):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
         monkeypatch.setattr(evs, "STATE_DIR", tmp_path / "s")
         monkeypatch.setattr(evs, "SIGNALS_FILE", tmp_path / "s" / "a.jsonl")
-        monkeypatch.setattr(evs, "_today_pdt", lambda: AS_OF)
-        monkeypatch.setattr(evs, "_now_et", lambda: datetime(2026, 9, 3, 18, 0, tzinfo=ZoneInfo("America/New_York")))
+        pin_scan_clock(monkeypatch, evs, AS_OF)
         cache = tmp_path / "cache"
         cache.mkdir()
         _write_snap(cache, "XYZ", AS_OF, _qs(d25_spread=0.1667), rv=20.0)
@@ -840,12 +838,9 @@ class TestRecordedLegsAreFinite:
     def test_a_nan_in_the_snapshot_cannot_stop_the_signal_file_from_being_written(self, tmp_path, monkeypatch):
         """账本对信号文件做严格序列化（拒 NaN）。影子报价原样抄快照腿字段时，一个 NaN 会让整个文件写不进去、
         当天所有信号和账本一起丢（审查里复现过）。现行快照生产者清洗过非有限值，这里不再依赖上游。"""
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
         monkeypatch.setattr(evs, "STATE_DIR", tmp_path / "s")
         monkeypatch.setattr(evs, "SIGNALS_FILE", tmp_path / "s" / "a.jsonl")
-        monkeypatch.setattr(evs, "_today_pdt", lambda: AS_OF)
-        monkeypatch.setattr(evs, "_now_et", lambda: datetime(2026, 9, 3, 18, 0, tzinfo=ZoneInfo("America/New_York")))
+        pin_scan_clock(monkeypatch, evs, AS_OF)
         cache = tmp_path / "cache"
         cache.mkdir()
         qs = _qs(d25_spread=0.1667)

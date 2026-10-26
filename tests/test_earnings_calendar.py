@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import ast
+import functools
 import json
+import os
 import sys
 import types
 from datetime import date, datetime, timedelta
@@ -24,6 +26,8 @@ import pytest
 import earnings_calendar as EC
 import sell_strike_candidates as SC
 from tests import _ast_cache
+from tests import _repo_files
+from tests._repo_files import walk_own_python_files
 
 REPO = Path(__file__).resolve().parent.parent
 AS_OF = "2026-10-13"
@@ -303,12 +307,67 @@ class TestNeverLooserThanLegacy:
 
 # ═════════════════════════════════════════ 4 · 唯一入口（AST）
 
-def _prod_files():
-    skip = {"tests", ".claude", "experiments", "_archive", "node_modules", ".git"}
-    for p in sorted(REPO.rglob("*.py")):
-        rel = p.relative_to(REPO)
-        if not skip & set(rel.parts[:-1]) and not rel.parts[0].startswith("."):
-            yield rel.as_posix(), p
+#: 这条守卫不扫的目录：测试、实验、归档。第三方 / 点号目录 / iCloud 冲突副本的排除口径在共享件
+#: `tests/_repo_files.py::walk_own_python_files`——唯一实现，这里不再自抄。
+_PROD_SKIP_DIRS = frozenset({"tests", "experiments", "_archive"})
+#: 扫描文件数的下限 = **git 跟踪的生产 .py 数**的这一比例（现状的 2/5）：远低于实际规模就说明有一大片目录悄悄不见了
+#: （读不了 / 被误剪），守卫会在「什么都没扫到」时照样绿。
+#: 为什么不写死一个数（v0.45.646）：原先写死 200，而开发检出里生产文件 ~500（含未跟踪目录）、git worktree / CI
+#: 干净克隆里只有 ~205——200 在干净克隆里只差 5 个就红，「下限至少是实际的一半」那条自证更是在 CI 上必红。
+#: 按**独立的 git 清单**算，下限就跟着环境和仓库规模走，且仍与遍历自己的名字规则无关（清单只套同一份排除口径）。
+_PROD_MIN_FRACTION = 0.4
+#: 清单本身的健全下限：读出来的数低于它，说明对账的另一端是空的（不是仓库、clone 被浅化 …），比例下限就不作数。
+_MANIFEST_SANITY_MIN = 100
+
+
+@functools.lru_cache(maxsize=1)
+def _tracked_prod_count():
+    """git 跟踪的生产 .py 数——与 `walk_own_python_files(skip_dirs=_PROD_SKIP_DIRS)` 同口径的**独立**清单。
+    取不到清单就是红，不 skip：开发检出 / worktree / CI 干净克隆都在 git 仓库里。"""
+    import subprocess
+    r = subprocess.run(["git", "ls-files", "-z", "*.py"], cwd=str(REPO), capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, f"git ls-files 失败（{r.returncode}）：{r.stderr[:200]}"
+    n = 0
+    for x in r.stdout.split("\x00"):
+        if not x:
+            continue
+        rel = Path(x)
+        if not _repo_files._is_ours(rel) or _repo_files.ICLOUD_COPY.search(rel.name) \
+                or any(_repo_files.ICLOUD_COPY.search(d) for d in rel.parts[:-1]) \
+                or _PROD_SKIP_DIRS & set(rel.parts[:-1]):
+            continue
+        n += 1
+    assert n >= _MANIFEST_SANITY_MIN, f"git 清单只读出 {n} 个生产 .py——对账的另一端是空的，下限不作数"
+    return n
+
+
+def _prod_min_files():
+    return int(_tracked_prod_count() * _PROD_MIN_FRACTION)
+
+
+@functools.lru_cache(maxsize=1)
+def _prod_file_list():
+    """默认根（本仓）的生产文件清单：整个会话只遍历一次（本模块多条测试、多次 `_refs` 共用）。
+    读不了的目录或文件数低于下限 ⇒ 直接断言失败，不让守卫在缺了覆盖的情况下静默通过。"""
+    res = walk_own_python_files(REPO, skip_dirs=_PROD_SKIP_DIRS)
+    assert not res.errors, f"遍历读不了这些目录，守卫的覆盖不完整：{res.errors[:5]}"
+    floor = _prod_min_files()
+    assert len(res.files) >= floor, \
+        f"只扫到 {len(res.files)} 个生产文件（下限 {floor}，git 跟踪 {_tracked_prod_count()} 个）——是不是有一大片目录被误剪了？"
+    return tuple((p.relative_to(REPO).as_posix(), p) for p in res.files)
+
+
+def _prod_files(root=None):
+    """本仓自己的生产 .py（`(相对路径, 绝对路径)`，按路径排序）。
+
+    遍历时剪枝，不是 `rglob` 之后再过滤：第三方环境整个不进入（旧写法把它们全解析一遍，这条守卫曾压在
+    pytest-timeout 线上，见 CHANGELOG v0.45.636）。`root` 仅给自证测试搭合成树用；默认根走缓存与下限断言。"""
+    if root is None:
+        yield from _prod_file_list()
+        return
+    root = Path(root)
+    for p in walk_own_python_files(root, skip_dirs=_PROD_SKIP_DIRS).files:
+        yield p.relative_to(root).as_posix(), p
 
 
 def _refs(pred):
@@ -360,6 +419,109 @@ class TestSingleEntry:
         bad = ast.parse('w = EarningsWatcher()\nw.get_earnings_date("X")\np = f"{t}_date.json"\n')
         assert sum(_named("get_earnings_date")(n) for n in ast.walk(bad)) == 1
         assert sum(_date_json_literal(n) for n in ast.walk(bad)) == 1
+
+
+class TestProdFilesWalk:
+    """`_prod_files` 本身（v0.45.636）：遍历时剪枝。旧写法 `rglob` 之后再过滤，第三方环境照样被整个走一遍、
+    逐个解析，这条守卫单独跑 59–65 s，压在 60 s 超时线上。"""
+
+    @staticmethod
+    def _tree(tmp_path):
+        for rel in ("a.py", "pkg/b.py", "pkg/deep/c.py",
+                    "tests/t.py", "experiments/e.py", "_archive/x.py",
+                    ".git/g.py", ".claude/worktrees/w/d.py",
+                    "mcp-servers/m/.venv/lib/python3.12/site-packages/dep.py",
+                    "mcp-servers/m/server.py",
+                    "libs/site-packages/lib.py", "node_modules/n.py", "vendor/v.py", "third_party/t.py",
+                    "pkg/.hidden/h.py", ".hidden_top.py",
+                    "earnings_watcher 2.py", "alphabot 2/service.py", "pkg/sub 13/m.py"):
+            f = tmp_path / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("x = 1\n", encoding="utf-8")
+        return tmp_path
+
+    def test_only_our_production_files_survive(self, tmp_path):
+        got = [rel for rel, _ in _prod_files(self._tree(tmp_path))]
+        assert got == ["a.py", "mcp-servers/m/server.py", "pkg/b.py", "pkg/deep/c.py"]
+
+    def test_third_party_and_hidden_dirs_are_never_entered(self, tmp_path, monkeypatch):
+        """剪枝要发生在遍历时：被排除的目录一个都不许被 `os.walk` 走进去（走进去再丢，就是旧写法的 60 s）。"""
+        root = self._tree(tmp_path)
+        visited = []
+        real_walk = os.walk
+
+        def spy(top, *a, **k):
+            for dp, dn, fn in real_walk(top, *a, **k):
+                visited.append(Path(dp).relative_to(top).as_posix())
+                yield dp, dn, fn
+
+        monkeypatch.setattr(os, "walk", spy)
+        list(_prod_files(root))
+        pruned = {"tests", "experiments", "_archive", ".git", ".claude", "node_modules", "vendor", "third_party"}
+        bad = [v for v in visited if set(v.split("/")) & (pruned | {".venv", "site-packages", ".hidden"})]
+        assert not bad, bad
+
+    def test_icloud_copy_of_a_production_file_does_not_trip_the_single_entry_guard(self, tmp_path):
+        """`earnings_watcher 2.py`（iCloud 冲突副本，文件或整个目录）不进扫描列表——否则「`get_earnings_date` 只在
+        watcher」会在开发检出里因为一份副本而红（v0.45.642 前实测会）。"""
+        got = [rel for rel, _ in _prod_files(self._tree(tmp_path))]
+        assert not [g for g in got if " 2" in g or " 13" in g], got
+
+    def test_default_scan_is_cached_for_the_whole_session(self):
+        assert _prod_file_list() is _prod_file_list()
+        assert [r for r, _ in _prod_files()] == [r for r, _ in _prod_files()]
+
+    def test_unreadable_directories_make_the_guard_fail_loudly(self, monkeypatch):
+        """遍历读不了的目录 ⇒ 断言失败，而不是少扫一块、守卫照绿。"""
+        from tests._repo_files import WalkResult
+        monkeypatch.setattr(sys.modules[__name__], "walk_own_python_files",
+                            lambda *a, **k: WalkResult([REPO / "x.py"] * 500, ["/locked: Permission denied"], []))
+        _prod_file_list.cache_clear()
+        try:
+            with pytest.raises(AssertionError, match="读不了"):
+                _prod_file_list()
+        finally:
+            monkeypatch.undo()
+            _prod_file_list.cache_clear()
+
+    def test_far_too_few_files_make_the_guard_fail_loudly(self, monkeypatch):
+        """扫到的文件数低于下限（一大片目录被误剪）⇒ 断言失败，不在「几乎什么都没扫到」时静默通过。"""
+        from tests._repo_files import WalkResult
+        monkeypatch.setattr(sys.modules[__name__], "walk_own_python_files",
+                            lambda *a, **k: WalkResult([REPO / "x.py"] * (_prod_min_files() - 1), [], []))
+        _prod_file_list.cache_clear()
+        try:
+            with pytest.raises(AssertionError, match="下限"):
+                _prod_file_list()
+        finally:
+            monkeypatch.undo()
+            _prod_file_list.cache_clear()
+
+    def test_floor_is_well_below_the_real_size(self):
+        """下限不能贴着现状（每增删几个文件就红）：实际文件数至少是下限的两倍。
+        在任何环境里都成立——下限按该环境的 git 清单算，不是写死的数（v0.45.646：写死 200 时，worktree / CI 干净克隆的
+        ~205 个文件让这条恒红）。"""
+        assert len(_prod_file_list()) >= 2 * _prod_min_files()
+
+    def test_floor_is_derived_from_the_git_manifest_and_is_not_toothless(self):
+        """下限既不是脱离清单的常数，也不能低到形同虚设：占 git 跟踪数的 [1/4, 1/2]。
+        （比例改成 0 ⇒ 「文件太少」自证测试没有可喂的退化数据、这条也红；改成 0.9 ⇒ 上面「远低于现状」那条红。）"""
+        tracked = _tracked_prod_count()
+        floor = _prod_min_files()
+        assert floor == int(tracked * _PROD_MIN_FRACTION)
+        assert tracked / 4 <= floor <= tracked / 2, (floor, tracked)
+
+    def test_yields_in_path_order(self, tmp_path):
+        got = [rel for rel, _ in _prod_files(self._tree(tmp_path))]
+        assert got == sorted(got)
+
+    def test_real_repo_scan_contains_no_third_party_files(self):
+        """真实仓库：扫描列表里没有任何 `.venv` / `site-packages` 下的文件，且我们自己的核心文件都在。
+        （开发检出里 `mcp-servers/maverick-mcp/.venv/` 有约 1.5 万个第三方 .py。）"""
+        rels = [rel for rel, _ in _prod_files()]
+        bad = [r for r in rels if {".venv", "site-packages", "node_modules"} & set(r.split("/"))]
+        assert not bad, bad[:5]
+        assert {"earnings_watcher.py", "earnings_calendar.py", "alphabot/service.py"} <= set(rels)
 
 
 # ═════════════════════════════════════════ 5 · 观测点

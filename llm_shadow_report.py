@@ -150,6 +150,7 @@ def describe(days: Sequence[Dict], pairs: Sequence[Dict], n_missing: int) -> Dic
         "run_days": len(days),
         "healthy_days": len(good),
         "unhealthy_days": len(days) - len(good),
+        "retried_days": sum(1 for d in days if d.get("previous_attempts")),     # 前面有过零花费失败、同日重跑成功的天
         "pairs": n,
         "missing_in_production": n_missing,
         "mean_score_diff": _mean(diffs),
@@ -241,6 +242,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"当前代 {d['generation']}（另有 {d['other_generation_days']} 个旧代 LLM 日不计入）")
     print(f"LLM 日 {d['run_days']}（健康 {d['healthy_days']} / 不健康 {d['unhealthy_days']}）| 成对标的日 {d['pairs']} | "
           f"累计花费 ${d['spend_usd']:.2f}")
+    if d["retried_days"]:
+        print(f"ℹ️ 有 {d['retried_days']} 天先失败（零花费）后同日重跑，旧记录在该日状态的 previous_attempts 里")
     if d["missing_run_days"]:
         print(f"⚠️ 生产有扫描、这一代却没有 LLM 记录的日子（{len(d['missing_run_days'])}）："
               f"{' '.join(d['missing_run_days'])}——自动任务没跑成？")

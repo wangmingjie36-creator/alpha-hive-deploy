@@ -614,6 +614,18 @@ class AlphaHiveDailyReporter:
             _dp_hf.mark_history_fill_scoring()
         except Exception as _e_hf:  # noqa: BLE001 —— 没拍成 ⇒ at_scoring 为 None，告警退回进程口径并注明
             _log.warning("历史字段回落统计快照失败（告警将按进程内最后一次取数判）: %s", _e_hf)
+        try:
+            # v0.45.639：同一时点给「行情改走 cache.py 旧回落」的计数拍快照（data_pipeline 坏了时上面那个 import 也会失败，所以分开 try）
+            from swarm_agents import cache as _swarm_cache_mark
+            _swarm_cache_mark.mark_legacy_fallback_scoring()
+        except Exception as _e_lg:  # noqa: BLE001 —— 没拍成 ⇒ at_scoring 为 None，告警按进程口径判并注明
+            _log.warning("旧回落计数快照失败（告警将按进程口径判）: %s", _e_lg)
+        try:
+            # v0.45.645：同一时点给「日线公司行动空行」的计数拍快照（price_metrics 只依赖标准库，单独 try）
+            import price_metrics as _pm_mark
+            _pm_mark.mark_event_row_scoring()
+        except Exception as _e_ev:  # noqa: BLE001 —— 没拍成 ⇒ at_scoring 为 None，告警按进程口径判并注明
+            _log.warning("公司行动空行计数快照失败（告警将按进程口径判）: %s", _e_ev)
         prefetch_elapsed = time.time() - start_time
         _timing.record("prefetch", prefetch_elapsed)
         _log.info("预取完成 (%.1fs) | 开始并行分析", prefetch_elapsed)
@@ -2268,6 +2280,9 @@ class AlphaHiveDailyReporter:
                     "BearBeeContrarian": {
                         "score": 5.0,
                         "discovery": "",
+                        # v0.45.639 世代印记（与 BearBee 成功路径同一字面量）：本回退不贴 data_quality 标签，
+                        # 但缺键会被判别器读成旧代码 ⇒ 同 v0.45.559 的 Buzz 印记，无条件写
+                        "details": {"options_dq_from_oracle": True},
                     },
                 },
                 "data_real_pct": 0,

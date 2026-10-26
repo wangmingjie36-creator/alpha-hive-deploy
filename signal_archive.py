@@ -2445,6 +2445,9 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # volatility_20d 是否为 None 上报 —— 只改标签，Buzz 分 / 方向 / 通道不变；没有归档信号读 data_quality ⇒ 只动蜂后层
     # （data_real_pct 压缩线、S5 冲突 DQ 票重）⇒ 只动 composite.final_score（ALWAYS_SLICED）。同 v0.45.209 / 369
     "v0.45.559": (),
+    # 10-19（v0.45.639，新代码 10-26 上线，等价论证见 ic_rerun_readiness 同版条目）：BearBee data_quality.options 照抄 Oracle 板上判定 ——
+    # 只改标签与 Bear confidence，Bear 分 / 方向不变；`bear.*`、`agent.BearBeeContrarian.*` 读分与方向 ⇒ 只动蜂后层 ⇒ 只切 composite.final_score
+    "v0.45.639": (),
 }
 
 

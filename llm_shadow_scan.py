@@ -49,6 +49,9 @@
 
 一天只许付费跑一次（v0.45.560）：每日硬上限只在 `llm_service` 进程内计，同一天再起一个 `--run` 就是第二份预算。
 所以 `--run` 起飞前先写占位 `shadow_status/<日期>.json`（子进程崩了它就留在那儿、按不健康日计），已有该文件即拒绝；
+**锁的是「花过钱或花费未知」，不是「文件存在」**（v0.45.633）：上一次是完整写完的状态、花费 / 调用数全是 0（比如 10-23 全站
+TLS EOF、输入闸拦下）⇒ 没花钱，允许同一天重跑，旧的失败记录并进新状态的 `previous_attempts`；占位（崩溃，花费未知）、
+读不了、有任何花费或调用 ⇒ 仍锁；
 `--control` 写 `<日期>.control.json` 与 `swarm_results-<日期>.control.json`，不会覆盖付过费的记录。
 """
 from __future__ import annotations
@@ -63,7 +66,7 @@ import sys
 import time
 from datetime import date, datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 MODEL = "claude-sonnet-5-5"
 # 「代」：提示词 / 模型 / max_tokens / 精简规则 / 覆盖范围任一改动 ⇒ 新一代、重新计数（预注册）。写进每个状态文件，
@@ -251,7 +254,8 @@ def swarm_results_path(shadow_root: Path, day_iso: str, mode: str) -> Path:
     return Path(shadow_root) / STATUS_DIRNAME / f"swarm_results-{day_iso}{suffix}"
 
 
-def started_stub(*, day: date, mode: str, cap: float, requested: Sequence[str]) -> Dict:
+def started_stub(*, day: date, mode: str, cap: float, requested: Sequence[str],
+                 previous_attempts: Optional[List[Dict]] = None) -> Dict:
     """子进程起飞前先落的占位记录：子进程若中途崩溃 / 被杀，这一天留下的是「不健康、已开始」，
     而不是「什么都没有」——后者会让同一天可以再付一次费（每日硬上限只在进程内计，跨进程要靠这个文件）。"""
     return {
@@ -263,7 +267,43 @@ def started_stub(*, day: date, mode: str, cap: float, requested: Sequence[str]) 
         "quality": {"healthy": False, "llm_on": mode == "run",
                     "reasons": ["子进程没有写完状态（崩溃 / 被中断）——按已开始、无可用数据计"]},
         "per_ticker": {}, "error": None, "written_at": datetime.now().isoformat(timespec="seconds"),
+        **({"previous_attempts": list(previous_attempts)} if previous_attempts else {}),
     }
+
+
+#: 这些计数里任何一个非零 ⇒ 上一次可能已经花过钱（失败的请求也可能被计费，所以连 failed_calls 都算）
+_SPEND_SIGNS = ("total_cost_usd", "call_count", "failed_calls", "truncated_calls", "json_parse_failures",
+                "budget_refusals", "unpriced_refusals")
+
+
+def day_lock(path: Path) -> Tuple[bool, str, List[Dict]]:
+    """今天的付费跑能不能再来一次。返回 (锁住?, 原因, 要并进下一次状态的 previous_attempts)。
+
+    只锁「花过钱或花费未知」：状态文件不存在 ⇒ 不锁；占位（子进程崩溃，花费未知）/ 读不了 / 花费字段缺失 / 任何花费或调用迹象
+    ⇒ 锁；完整写完、花费与调用数全是 0 的失败（输入闸拦下、网络全断）⇒ 不锁，旧记录摘要带进下一次。
+    """
+    path = Path(path)
+    if not path.exists():
+        return False, "", []
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True, "状态文件读不了（按花费未知处理）", []
+    if not isinstance(doc, dict):
+        return True, "状态文件格式不对（按花费未知处理）", []
+    if doc.get("state") == "started":
+        return True, "上一次中途崩溃、只留下占位（花费未知）", []
+    usage = doc.get("usage")
+    if not isinstance(usage, dict) or usage.get("total_cost_usd") is None:
+        return True, "状态里没有花费记录（按花费未知处理）", []
+    signs = {k: usage.get(k) for k in _SPEND_SIGNS if usage.get(k)}
+    if signs:
+        return True, f"已有付费记录（{signs}）", []
+    q = doc.get("quality") if isinstance(doc.get("quality"), dict) else {}
+    summary = {"written_at": doc.get("written_at"), "error": doc.get("error"),
+               "reasons": q.get("reasons"), "elapsed_sec": doc.get("elapsed_sec"), "spent_usd": 0.0}
+    prior = doc.get("previous_attempts") if isinstance(doc.get("previous_attempts"), list) else []
+    return False, "上一次零花费失败，允许同日重跑", [*prior, summary]
 
 
 def drop_stub(path: Path) -> None:
@@ -349,6 +389,16 @@ def frozen_prod_paths(config_module, prod_root: Path) -> List[str]:
     return bad
 
 
+def _carried_attempts(path: Path) -> List[Dict]:
+    """父进程写的占位里带着的 previous_attempts（没有 / 读不了 ⇒ 空）。"""
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    prior = doc.get("previous_attempts") if isinstance(doc, dict) else None
+    return list(prior) if isinstance(prior, list) else []
+
+
 def run_child(args: argparse.Namespace, *, scan: Callable[[List[str]], Dict] = default_scan,
               now: Optional[date] = None) -> int:
     """子进程：此时环境已指向影子根。核对隔离 → 扫描 → 写状态。"""
@@ -396,6 +446,9 @@ def run_child(args: argparse.Namespace, *, scan: Callable[[List[str]], Dict] = d
     per_ticker = per_ticker_from_swarm_results(swarm_results, tickers)
     status = build_status(day=day, mode=mode, model=MODEL, cap=args.daily_cap, requested=tickers,
                           usage=usage, per_ticker=per_ticker, elapsed=time.time() - t0, error=error)
+    carried = _carried_attempts(status_path(shadow_root, day.isoformat(), mode))
+    if carried:
+        status["previous_attempts"] = carried       # 同日重跑时，前面零花费失败的摘要不能被这次覆盖掉
     path = write_status(shadow_root, status)
     if swarm_results:
         import ledger_io
@@ -450,16 +503,23 @@ def run_shadow(args: argparse.Namespace, *, environ: Optional[Dict[str, str]] = 
         return EXIT_USAGE
 
     sp = status_path(shadow_root, day.isoformat(), mode)
-    if mode == "run" and sp.exists():
+    attempts: List[Dict] = []
+    if mode == "run":
         # 每日硬上限由 llm_service 在**进程内**计；同一天再起一个进程就是第二份预算（$3 变 $6）。
-        # 所以跨进程的「今天花过没有」只能由这个文件回答——有了就拒绝（删它要人手动，且看得见）。
-        print(f"❌ 拒绝：{day} 已有付费记录 {sp}（含子进程中途崩溃留下的占位）。再跑一次会重复花钱并覆盖它；"
-              f"确认要重跑请先人工移走该文件。")
-        return EXIT_USAGE
+        # 所以跨进程的「今天花过没有」只能由这个文件回答：花过钱 / 花费未知（含崩溃占位）⇒ 拒绝（移走它要人手动，且看得见）；
+        # 上一次零花费失败（v0.45.633）⇒ 放行，旧记录并进新状态的 previous_attempts。
+        locked, why, attempts = day_lock(sp)
+        if locked:
+            print(f"❌ 拒绝：{day} 已有付费记录 / 花费未知 {sp}——{why}。再跑一次可能重复花钱并覆盖它；"
+                  f"确认要重跑请先人工移走该文件。")
+            return EXIT_USAGE
+        if attempts:
+            print(f"ℹ️ {day} {why}（第 {len(attempts) + 1} 次尝试）：{attempts[-1].get('error')}")
 
     seed_shadow_root(src_db, src_cache, shadow_root)
     if mode == "run":
-        write_status(shadow_root, started_stub(day=day, mode=mode, cap=args.daily_cap, requested=tickers))
+        write_status(shadow_root, started_stub(day=day, mode=mode, cap=args.daily_cap, requested=tickers,
+                                               previous_attempts=attempts))
     cmd = [sys.executable, str(Path(__file__).resolve()), "--child", "--run" if mode == "run" else "--control",
            "--daily-cap", repr(float(args.daily_cap)), "--shadow-root", str(shadow_root),
            "--prod-root", str(prod_root), "--child-tickers", ",".join(tickers),

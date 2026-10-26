@@ -40,7 +40,18 @@ plist 写上代理环境变量（v0.45.623，`PROXY_ENV`；627 补小写那套�
   launchctl bootout   gui/$(id -u)/com.alpha.hive.llmshadow
 plist 里 `RunAtLoad=false`：装上不会立刻花钱。
 
-退出码：0 跑完且健康；2 用法 / 子进程拒绝；3 扫描异常；4 跳过（关停开关 / 等不到生产 / 太晚）；5 跑完但 LLM 臂不健康。
+开跑前探活网络（v0.45.633）：生产写完后不立刻开跑，先对 3 个数据源做 HTTPS 握手探测（CBOE / Yahoo / Finnhub，
+≥2 个通才算通；任何 HTTP 状态码都算通——要测的是握手不是授权）。10-23 全站 TLS EOF（`_ssl.c:992`）时，扫描白耗 18 分钟预取、
+30/30 只取不到现价被输入闸拦下、丢了一天；现在网络不通就每分钟重探，通了再跑，直到「生产写完已超 2 小时」或「等了 3 小时」才跳过
+（退出码 4，原因写明是网络）。探活走的是和扫描同一条路（urllib：环境代理 / macOS 系统代理）。⚠️ 它只管开跑那一刻；
+扫描中途才断仍会被扫描的输入闸拦下，那种日子零花费、状态文件不再锁死当天（见 `llm_shadow_scan.day_lock`），但不会自动重跑。
+
+子进程超时（v0.45.641）：扫描最长跑 2 小时，超时就杀掉整个进程组（`llm_shadow_scan` 父进程 + 它起的 `--child` 扫描进程），
+退出码 6。此前没有超时：扫描挂死会让这个启动脚本一直不退出，而 launchd 在上一个实例未退出时不会再起新实例，等于此后每个交易日
+都被无声跳过。占位状态文件还在（花费未知 ⇒ 锁住当天），下一个交易日照常。
+
+退出码：0 跑完且健康；2 用法 / 子进程拒绝；3 扫描异常；4 跳过（关停开关 / 等不到生产 / 网络一直不通 / 太晚）；
+5 跑完但 LLM 臂不健康；6 子进程超时被杀。
 （2 / 3 / 5 原样透传 `llm_shadow_scan` 的退出码。）
 """
 from __future__ import annotations
@@ -65,6 +76,10 @@ DISABLE_FILENAME = "DISABLED"
 SPEND_ENV = "ALPHA_HIVE_LLM_SHADOW_SPEND"      # 与 llm_shadow_scan.SPEND_ENV 同值（测试钉住）
 PROD_CLONE = "alpha-hive-prod"
 EXIT_SKIPPED = 4
+EXIT_CHILD_TIMEOUT = 6
+#: 子进程（llm_shadow_scan --run → --child 扫描）最长跑多久。实测一次约 20~25 分钟；留到 2 小时。
+#: 为什么必须有：launchd 的同一标签在上一个实例还没退出时**不会**再起新实例——子进程挂死 = 此后每天都被无声跳过，直到有人发现。
+CHILD_TIMEOUT_SEC = 2 * 3600
 #: plist 里写上的代理（v0.45.623，用户 10-22 定）。与编排器 `PROXY_URL` 的缺省同值（守卫核对）。Python 的
 #: urllib / requests / httpx 本来就经 macOS 系统代理（`_scproxy`）走它；写成环境变量后，不读系统代理的客户端
 #: （curl_cffi ⇒ yfinance）也走它——此前它们在 launchd 里直连、易被限流（auto-memory environment-facts）。
@@ -76,6 +91,11 @@ NO_PROXY = "localhost,127.0.0.1,::1,.local"
 #: （v0.45.627，623 二次检查 #7）
 PROXY_ENV = {"HTTP_PROXY": PROXY_URL, "HTTPS_PROXY": PROXY_URL, "http_proxy": PROXY_URL, "https_proxy": PROXY_URL,
              "NO_PROXY": NO_PROXY, "no_proxy": NO_PROXY}
+
+#: 开跑前的网络探活（v0.45.633）：三个扫描真正依赖的数据源，TLS 握手能通 ≥ NET_PROBE_MIN_OK 个才算网络可用。
+NET_PROBE_URLS = ("https://cdn.cboe.com/", "https://query1.finance.yahoo.com/", "https://finnhub.io/")
+NET_PROBE_TIMEOUT = 10
+NET_PROBE_MIN_OK = 2
 
 ACTION_RUN, ACTION_WAIT, ACTION_SKIP = "run", "wait", "skip"
 
@@ -94,14 +114,50 @@ def decide(state: Dict, waited_sec: float, *, disabled: bool) -> Tuple[str, str]
         if age > MAX_LAG_SEC:
             return ACTION_SKIP, (f"生产写完已 {age / 3600:.1f} 小时（> {MAX_LAG_SEC / 3600:.0f}h）——"
                                  f"输入不再与生产同口径，今天不跑")
+        if state.get("net_ok") is False:
+            if waited_sec >= WAIT_MAX_SEC:
+                return ACTION_SKIP, f"等了 {waited_sec / 3600:.1f} 小时，网络探活一直不通：{state.get('net_detail')}"
+            return ACTION_WAIT, f"生产已写完，但网络探活不通，稍后重探：{state.get('net_detail')}"
         return ACTION_RUN, f"生产今天已写完（{rows} 行，swarm_results 已 {age / 60:.0f} 分钟没再改）"
     if waited_sec >= WAIT_MAX_SEC:
-        why = ("生产扫描进程仍在跑" if state.get("running") else
+        why = (f"读生产状态一直失败：{state['probe_error']}" if state.get("probe_error") else
+               "生产扫描进程仍在跑" if state.get("running") else
                "生产今天没有 predictions 行（节假日 / 没开机 / 生产崩了？）" if rows < 1 else
                "没有今天的 swarm_results 文件" if age is None else
                f"swarm_results 才 {age:.0f}s 没再改（< {STABLE_SEC}s）")
         return ACTION_SKIP, f"等了 {waited_sec / 3600:.1f} 小时仍不满足：{why}"
     return ACTION_WAIT, "生产还没写完"
+
+
+def production_done(state: Dict) -> bool:
+    """生产今天写完了没有（与 `decide` 里的判据同一份，只是不含网络）。"""
+    age = state.get("file_age")
+    return int(state.get("rows") or 0) >= 1 and age is not None and not state.get("running") and age >= STABLE_SEC
+
+
+def probe_network(urls: Sequence[str] = NET_PROBE_URLS, *, timeout: float = NET_PROBE_TIMEOUT,
+                  min_ok: int = NET_PROBE_MIN_OK, opener: Optional[Callable] = None) -> Tuple[bool, str]:
+    """对几个数据源做 HTTPS 探测，返回 (通?, 明细)。**拿到任何 HTTP 响应（含 4xx / 5xx）都算通**——测的是 TLS 握手 / 连接，
+    不是授权（Yahoo 常给 429）；超时 / 握手失败 / 连接被拒才算不通。`opener` 仅供测试注入。"""
+    import urllib.error
+    import urllib.request
+    def _real_open(u: str, t: float):
+        with urllib.request.urlopen(urllib.request.Request(u, method="GET"), timeout=t):
+            return None                                           # 只要握手 / 有响应；用 with 立即关连接，别等 GC
+
+    open_fn = opener or _real_open
+    ok, bad = [], []
+    for u in urls:
+        host = u.split("//", 1)[-1].split("/", 1)[0]
+        try:
+            open_fn(u, timeout)
+            ok.append(host)
+        except urllib.error.HTTPError:
+            ok.append(host)                                   # 有响应 = 握手通了
+        except Exception as e:  # noqa: BLE001 —— URLError / ssl.SSLError / socket.timeout / OSError 都算不通，明细写进日志
+            bad.append(f"{host}: {type(e).__name__}: {str(e)[:80]}")
+    detail = f"通 {len(ok)}/{len(urls)}" + (f"；不通 {'; '.join(bad)}" if bad else "")
+    return len(ok) >= min_ok, detail
 
 
 def render_plist(*, python: str, script: str, log_dir: str) -> bytes:
@@ -140,6 +196,51 @@ def production_state(*, prod_db: Path, home: Path, today: str, now: Optional[flo
     return {"rows": rows, "file_age": age, "running": running}
 
 
+class _Done:
+    """`run_child_with_deadline` 的返回：与 `subprocess.CompletedProcess` 一样有 `returncode`。"""
+
+    def __init__(self, returncode: int, timed_out: bool = False):
+        self.returncode, self.timed_out = returncode, timed_out
+
+
+def run_child_with_deadline(cmd: Sequence[str], *, env: Dict[str, str], cwd: str,
+                            timeout: float = CHILD_TIMEOUT_SEC, grace: float = 30.0) -> _Done:
+    """跑子进程，超时就杀**整个进程组**（`llm_shadow_scan` 还会再起 `--child` 扫描进程，只杀直接子进程会留下孤儿继续花钱）。
+    先 SIGTERM，`grace` 秒后还在就 SIGKILL。"""
+    import signal
+    proc = subprocess.Popen(list(cmd), env=env, cwd=cwd, start_new_session=True)   # 新会话 ⇒ pid 即进程组号
+
+    # 子进程在新会话里，launchd 停本脚本（`launchctl bootout` / 关机）时杀不到它——会留下一个继续花钱的孤儿。
+    # 所以本脚本收到 SIGTERM 时先把子进程组一并 SIGTERM，再按 143（128+SIGTERM）退出。
+    def _forward_term(signum, frame):
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        raise SystemExit(128 + signal.SIGTERM)
+    try:
+        prev = signal.signal(signal.SIGTERM, _forward_term)
+    except ValueError:                                       # 不在主线程（只有测试会这样）：没法装处理器，跳过
+        prev = None
+    try:
+        return _Done(proc.wait(timeout=timeout))
+    except subprocess.TimeoutExpired:
+        for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 10.0)):
+            try:
+                os.killpg(proc.pid, sig)
+            except ProcessLookupError:
+                break
+            try:
+                proc.wait(timeout=wait)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        return _Done(EXIT_CHILD_TIMEOUT, timed_out=True)
+    finally:
+        if prev is not None:
+            signal.signal(signal.SIGTERM, prev)
+
+
 def _scan_running() -> bool:
     r = subprocess.run(["pgrep", "-f", "alpha_hive_daily_report.py|alpha-hive-orchestrator"],
                        capture_output=True, text=True)
@@ -154,8 +255,9 @@ def run_daily(*, once: bool = False, environ: Optional[Dict[str, str]] = None,
               sleep: Callable[[float], None] = time.sleep,
               clock: Callable[[], float] = time.monotonic,
               probe: Optional[Callable[[], Dict]] = None,
-              spawn: Callable[..., "subprocess.CompletedProcess"] = subprocess.run,
-              disabled_probe: Optional[Callable[[], bool]] = None) -> int:
+              spawn: Optional[Callable[..., object]] = None,
+              disabled_probe: Optional[Callable[[], bool]] = None,
+              net_probe: Optional[Callable[[], Tuple[bool, str]]] = None) -> int:
     """等生产写完 → 跑一次 `--run`。`once=True`：只判定一次、不等、不跑（给人看现状）。"""
     env = dict(os.environ if environ is None else environ)
     import hive_logger
@@ -170,9 +272,16 @@ def run_daily(*, once: bool = False, environ: Optional[Dict[str, str]] = None,
         def disabled_probe() -> bool:
             return (shadow_root / DISABLE_FILENAME).exists()
 
+    net = net_probe or probe_network
     t0 = clock()
     while True:
-        state = probe()
+        try:
+            state = probe()
+        except Exception as e:  # noqa: BLE001 —— 读生产库 / 看文件偶发失败（库正被备份、文件系统忙）不该让启动脚本崩掉、丢一天
+            state = {"rows": 0, "file_age": None, "running": False, "probe_error": f"{type(e).__name__}: {str(e)[:120]}"}
+            _log(f"{today}: 读生产状态失败，下一轮重试 — {state['probe_error']}")
+        if production_done(state):                    # 生产没写完就不探网络（不必每分钟打外网）
+            state["net_ok"], state["net_detail"] = net()
         action, why = decide(state, clock() - t0, disabled=disabled_probe())
         if once:
             _log(f"[--once] {today}: {action} — {why} | 状态 {state}")
@@ -182,15 +291,22 @@ def run_daily(*, once: bool = False, environ: Optional[Dict[str, str]] = None,
             return EXIT_SKIPPED
         if action == ACTION_RUN:
             break
+        if state.get("net_ok") is False:
+            _log(f"{today}: {why}")                  # 等网络的每一轮都留痕：事后能看出断了多久
         sleep(POLL_SEC)
 
     _log(f"{today}: 开跑 — {why}")
     child_env = dict(env)
     child_env[SPEND_ENV] = "1"          # 全仓唯一替用户设这个变量的地方（用户 2026-10-22 批准每日自动跑）
     cmd = [sys.executable, str(Path(__file__).resolve().parent / "llm_shadow_scan.py"), "--run"]
-    proc = spawn(cmd, env=child_env, cwd=str(Path(__file__).resolve().parent))
+    cwd = str(Path(__file__).resolve().parent)
+    proc = spawn(cmd, env=child_env, cwd=cwd) if spawn is not None else run_child_with_deadline(cmd, env=child_env, cwd=cwd)
     rc = int(proc.returncode)
-    _log(f"{today}: llm_shadow_scan 退出码 {rc}")
+    if getattr(proc, "timed_out", False):
+        _log(f"{today}: ⚠️ llm_shadow_scan 超过 {CHILD_TIMEOUT_SEC / 3600:.0f} 小时仍未结束，已杀掉整个进程组（退出码 {rc}）；"
+             f"占位状态文件还在（花费未知 ⇒ 锁住当天），下一个交易日照常")
+    else:
+        _log(f"{today}: llm_shadow_scan 退出码 {rc}")
     return rc
 
 

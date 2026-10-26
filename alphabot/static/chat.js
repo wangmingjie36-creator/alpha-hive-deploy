@@ -24,7 +24,11 @@ const canAsk = () => status && !status.error && !status.demo && status.enabled &
 
 async function loadStatus() {
   try { status = await api("/api/chat"); }
-  catch (e) { status = { error: e.message }; }
+  catch (e) {
+    // 已有能用的状态（对话进行中）⇒ 保留它、只加一条提示，不把整个对话区换成错误——发送成功后重取失败时，刚付钱的回答与
+    // 输入框会一起消失（v0.45.637 二次检查 #2）；一开始就取不到才整个显示错误
+    status = status && !status.error ? { ...status, status_error: e.message } : { error: e.message };
+  }
   render();
   if (!drawer.hidden && canAsk()) ta.focus();
 }
@@ -53,7 +57,7 @@ async function send() {
     const r = await api("/api/chat", { method: "POST", body: { message: text, conversation_id: convId, page: pageContext() } });
     convId = r.conversation_id;
     log.pop(); log.push({ role: "bot", r });
-    if (status) status.spent_today = r.spent_today;
+    loadStatus();          // 今天已花 / spend_error 只认服务端那一处（v0.45.637；此前只抄回 spent_today，spend_error 留旧值）
   } catch (e) {
     log.pop(); log.push({ role: "err", text: e.message });
     if (!ta.value) ta.value = text;      // 失败了把问题放回输入框：报错常说「可以再问一次」，别让人重打（v0.45.618）
@@ -103,6 +107,9 @@ function body() {
     return botMessage(m.r);
   });
   if (!msgs.length) msgs.push(h("p", { class: "muted" }, "例如：「NVDA 现在是什么 gamma 环境？月度路由为什么退到远档？」"));
+  // 花费记录读不了：顶栏只能显示「—」，原因（与发送时被拒的那句相同）放在最上面（v0.45.637，635 二次检查 #2）
+  if (s.spend_error) msgs.unshift(h("p", { class: "chat-msg err" }, s.spend_error));
+  if (s.status_error) msgs.unshift(h("p", { class: "chat-msg err" }, `对话状态暂时取不到（${s.status_error}）：上面的「今天已花」可能不是最新的。`));
   return msgs;
 }
 

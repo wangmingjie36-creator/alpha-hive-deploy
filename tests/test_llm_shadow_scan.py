@@ -669,6 +669,114 @@ class TestRunAndControlDoNotCollide:
         assert sh.swarm_results_path(tmp_path, "2026-10-19", "control").name == "swarm_results-2026-10-19.control.json"
 
 
+class TestDayLockIsSpendAware:
+    """v0.45.633：锁的是「花过钱或花费未知」，不是「文件存在」。10-23 全站 TLS EOF、$0 的失败不该把当天锁死。"""
+
+    def _doc(self, **over):
+        d = {"schema": 1, "date": "2026-10-23", "mode": "run", "model": sh.MODEL, "generation": sh.GENERATION,
+             "usage": {k: 0 for k in sh._SPEND_SIGNS}, "quality": {"healthy": False, "reasons": ["call_count=0"]},
+             "per_ticker": {}, "error": "ScanInputsUnavailable: 30/30 只标的取不到可用现价", "elapsed_sec": 1068.4,
+             "written_at": "2026-10-23T15:02:50"}
+        d.update(over)
+        return d
+
+    def _write(self, tmp_path, doc):
+        p = tmp_path / "2026-10-23.json"
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        return p
+
+    def test_no_file_not_locked(self, tmp_path):
+        assert sh.day_lock(tmp_path / "nope.json") == (False, "", [])
+
+    def test_zero_spend_failure_is_not_locked_and_summarised(self, tmp_path):
+        locked, why, attempts = sh.day_lock(self._write(tmp_path, self._doc()))
+        assert locked is False and "零花费" in why
+        (a,) = attempts
+        assert a["error"].startswith("ScanInputsUnavailable") and a["spent_usd"] == 0.0 and a["elapsed_sec"] == 1068.4
+
+    def test_earlier_attempts_are_carried_forward(self, tmp_path):
+        doc = self._doc(previous_attempts=[{"error": "first", "spent_usd": 0.0}])
+        _, _, attempts = sh.day_lock(self._write(tmp_path, doc))
+        assert [a["error"] for a in attempts][0] == "first" and len(attempts) == 2
+
+    @pytest.mark.parametrize("sign", list(sh._SPEND_SIGNS))
+    def test_any_spend_sign_locks(self, tmp_path, sign):
+        usage = {k: 0 for k in sh._SPEND_SIGNS}
+        usage[sign] = 0.01 if sign == "total_cost_usd" else 1
+        locked, why, _ = sh.day_lock(self._write(tmp_path, self._doc(usage=usage)))
+        assert locked is True and "付费记录" in why
+
+    def test_crash_stub_locks(self, tmp_path):
+        stub = sh.started_stub(day=date(2026, 10, 23), mode="run", cap=3.0, requested=["A"])
+        locked, why, _ = sh.day_lock(self._write(tmp_path, stub))
+        assert locked is True and "占位" in why
+
+    @pytest.mark.parametrize("bad", ["{not json", "[]", '"x"'])
+    def test_unreadable_or_odd_file_locks(self, tmp_path, bad):
+        p = tmp_path / "2026-10-23.json"
+        p.write_text(bad, encoding="utf-8")
+        assert sh.day_lock(p)[0] is True
+
+    @pytest.mark.parametrize("usage", [{}, {"call_count": 0}, None, "x", {"total_cost_usd": None}])
+    def test_missing_or_unknown_spend_locks(self, tmp_path, usage):
+        """花费字段缺失 = 花费未知，不能当成 $0。"""
+        locked, _, _ = sh.day_lock(self._write(tmp_path, self._doc(usage=usage)))
+        assert locked is True
+
+
+class TestRerunAfterZeroSpendFailure:
+    @pytest.fixture
+    def failed_day(self, prod_env, tmp_path, monkeypatch):
+        monkeypatch.setenv(sh.SPEND_ENV, "1")
+        shadow = tmp_path / sh.SHADOW_DIRNAME
+
+        def spawn_fail(cmd, env=None, cwd=None):
+            sh.write_status(shadow, sh.build_status(
+                day=date(2026, 10, 23), mode="run", model=sh.MODEL, cap=3.0, requested=["A"], usage=_usage(
+                    call_count=0, total_cost_usd=0.0, failed_calls=0), per_ticker={}, elapsed=1068.4,
+                error="ScanInputsUnavailable: 30/30 只标的取不到可用现价"))
+            return types.SimpleNamespace(returncode=sh.EXIT_SCAN_ERROR)
+        assert sh.run_shadow(sh.parse_args(["--run", "--tickers", "2"]), spawn=spawn_fail,
+                             now=date(2026, 10, 23)) == sh.EXIT_SCAN_ERROR
+        return shadow
+
+    def test_second_run_allowed_and_old_failure_moves_into_the_stub(self, failed_day, tmp_path, monkeypatch):
+        seen = {}
+
+        def spawn(cmd, env=None, cwd=None):
+            seen["stub"] = json.loads((failed_day / sh.STATUS_DIRNAME / "2026-10-23.json").read_text(encoding="utf-8"))
+            return types.SimpleNamespace(returncode=0)
+        assert sh.run_shadow(sh.parse_args(["--run", "--tickers", "2"]), spawn=spawn, now=date(2026, 10, 23)) == 0
+        assert seen["stub"]["state"] == "started"
+        (a,) = seen["stub"]["previous_attempts"]
+        assert "ScanInputsUnavailable" in a["error"]
+
+    def test_second_run_after_a_paid_day_is_still_refused(self, prod_env, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv(sh.SPEND_ENV, "1")
+        shadow = tmp_path / sh.SHADOW_DIRNAME
+
+        def spawn_paid(cmd, env=None, cwd=None):
+            sh.write_status(shadow, sh.build_status(
+                day=date(2026, 10, 23), mode="run", model=sh.MODEL, cap=3.0, requested=["A"],
+                usage=_usage(total_cost_usd=1.9, call_count=200), per_ticker=_tickers(1), elapsed=1.0, error=None))
+            return types.SimpleNamespace(returncode=0)
+        sh.run_shadow(sh.parse_args(["--run", "--tickers", "2"]), spawn=spawn_paid, now=date(2026, 10, 23))
+        spawn2 = _Spawn()
+        assert sh.run_shadow(sh.parse_args(["--run", "--tickers", "2"]), spawn=spawn2, now=date(2026, 10, 23)) == sh.EXIT_USAGE
+        assert spawn2.calls == [] and "付费记录" in capsys.readouterr().out
+
+    def test_child_run_final_status_carries_attempts(self, child_env, tmp_path, monkeypatch):
+        import llm_service
+        monkeypatch.setattr(llm_service, "_get_client", lambda: object())
+        monkeypatch.setattr(llm_service, "get_usage", lambda: _usage(total_cost_usd=0.9))
+        day = date(2026, 10, 23)
+        sh.write_status(child_env, sh.started_stub(day=day, mode="run", cap=3.0, requested=["AAA", "BBB"],
+                                                   previous_attempts=[{"error": "boom", "spent_usd": 0.0}]))
+        sh.run_child(_child_args(child_env, tmp_path, "--run"), scan=lambda t: _fake_results(), now=day)
+        final = json.loads((child_env / sh.STATUS_DIRNAME / "2026-10-23.json").read_text(encoding="utf-8"))
+        assert final.get("state") is None and final["previous_attempts"][0]["error"] == "boom"
+
+
 class TestSameDayRerunGuard:
     """每日硬上限只在进程内计；同一天再起一个 --run 就是第二份预算。跨进程靠状态文件挡。"""
 

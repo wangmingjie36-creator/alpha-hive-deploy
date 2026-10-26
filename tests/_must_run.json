@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "commit": "64acb0622b7f3ff4cb53e5b33f877e04fc14b5fa",
+  "commit": "f6f93d76f9853d2c332e72aea0f80dd530330d78",
   "reads_all_tests": [
     "tests/test_agent_weight_manager_retired.py",
     "tests/test_bare_env_children_pin_data_root.py",
@@ -11,6 +11,7 @@
     "tests/test_pytestmark_placement.py",
     "tests/test_reads_own_checkout.py",
     "tests/test_rival_ml_adjustment_retired.py",
+    "tests/test_scan_clock.py",
     "tests/test_select_tests.py",
     "tests/test_slack_send_whitelist.py",
     "tests/test_tests_use_running_interpreter.py"
@@ -30,6 +31,7 @@
     "tests/test_portfolio_greeks_delta_hedge.py": ["tests/test_portfolio_greeks.py"],
     "tests/test_portfolio_greeks_finnhub_close.py": ["tests/test_portfolio_greeks_price_session.py"],
     "tests/test_replay_ohlc_pit.py": ["tests/test_replay_ohlc_store.py", "tests/test_replay_ohlc_window.py"],
+    "tests/test_repo_files_walk.py": ["tests/test_earnings_calendar.py", "tests/test_portfolio_greeks_bid_zero.py"],
     "tests/test_sell_strike_integration.py": ["tests/test_sell_strike_ledger.py"]
   },
   "nonpy_readers": {

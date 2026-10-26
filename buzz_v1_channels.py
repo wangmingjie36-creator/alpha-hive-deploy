@@ -13,7 +13,7 @@
 定义锚在代码
 ------------
 逐字抄自 **H1 窗口起点 2026-10-12 实际运行的代码**（`0993efde`，生产日志 `alpha_hive.code_version` 核实）加上窗口内**已登记确认**的
-测量修正（行情：v0.45.505 / 557 / 562 / 563 / 564 / 566，`signal_code_fingerprints.ACKS`）。逐段出处：
+测量修正（行情：v0.45.505 / 557 / 562 / 563 / 564 / 566 / 645，`signal_code_fingerprints.ACKS`）。逐段出处：
 - Reddit：`reddit_sentiment.RedditSentimentClient.get_ticker_sentiment` 的评分（查票、三态 24h 基线、加减分、clamp、round 1 位）；
 - 新闻：`newsapi_client` 三个取数函数里「条目 → 文章」那段、`_label_sentiment`（Yahoo 关键词打标）、`_build_result`
   （清洗、标题 Jaccard 去重、按标签计数算分）；关键词表 / 去重阈值抄自 `config.SENTIMENT_KEYWORDS` / `NEWS_FILTER_CONFIG`
@@ -32,7 +32,8 @@
   「看多篇数 / 总篇数」。本模块直接写成后者（行为逐位相同）。
 - 关键词表里的多词短语（"record high" 等）永远匹配不上（按空格切词后比集合）。
 - F&G 取不到 CNN 时兜底的是 alternative.me 的**加密市场** F&G；动量 NaN 时 `max(-10, min(10, nan))` 得 10 ⇒ 动量通道 100；
-  量比 NaN 时通道落到最低档 20。
+  量比 NaN 时通道落到最低档 20。（v0.45.645 去掉的是 yfinance 的**公司行动空行**——那不是 K 线；真实交易日收盘 / 成交量为 NaN 的
+  这两条照旧。）
 
 数值（逐位相同的前提）
 ----------------------
@@ -79,6 +80,10 @@ VOLATILITY_STEPS = ((60, 25), (40, 40), (20, 60))
 VOLATILITY_FLOOR = 75
 VOL_MIN_BARS = 19          # v0.45.564（窗口内已确认的测量修正）
 NEUTRAL = 50.0
+#: 公司行动空行（v0.45.645，窗口内已确认的测量修正；生产 `price_metrics.EVENT_ROW_*`）：四个价格列都不是有限数、成交量恰为 0、
+#: 任一事件列是有限非零数 ⇒ 不是 K 线，读日线时第一步去掉
+EVENT_ROW_PRICE_COLUMNS = ("Open", "High", "Low", "Close")
+EVENT_ROW_EVENT_COLUMNS = ("Dividends", "Stock Splits")
 
 SENTIMENT_CHANNELS = ("reddit_signal", "news_signal", "yahoo_signal", "fear_greed_signal")
 PRICE_CHANNELS = ("momentum_signal", "volume_signal", "volatility_signal")
@@ -358,11 +363,33 @@ def session_last_minute(d: dt.date) -> dt.time:
     return (dt.datetime.combine(d, close) - dt.timedelta(minutes=1)).time()
 
 
+def _finite(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def event_only_positions(payload: Mapping) -> List[int]:
+    """`price_metrics.event_only_positions`（v0.45.645）：公司行动空行的行号。缺任一价格列 / 成交量列、或一个事件列都没有 ⇒ 空。
+    按列名取（入档日线的列顺序会变）；格子里的 null = 生产里的 NaN / ±inf（`observation_layer._cell`）。"""
+    cols = list(payload["columns"])
+    if any(c not in cols for c in EVENT_ROW_PRICE_COLUMNS + ("Volume",)):
+        return []
+    evs = [cols.index(c) for c in EVENT_ROW_EVENT_COLUMNS if c in cols]
+    if not evs:
+        return []
+    ps = [cols.index(c) for c in EVENT_ROW_PRICE_COLUMNS]
+    iv = cols.index("Volume")
+    return [i for i, row in enumerate(payload["data"])
+            if not any(_finite(row[j]) for j in ps) and _finite(row[iv]) and row[iv] == 0
+            and any(_finite(row[j]) and row[j] != 0 for j in evs)]
+
+
 def daily_rows(payload: Mapping) -> List[Tuple[str, Optional[float], Optional[float]]]:
-    """yfinance 日线观测 → [(交易所日期 ISO, 收盘, 成交量)]（null = NaN）。"""
+    """yfinance 日线观测 → [(交易所日期 ISO, 收盘, 成交量)]（null = NaN），公司行动空行已去掉（v0.45.645，生产在取到日线后第一步做）。"""
     cols = list(payload["columns"])
     ic, iv = cols.index("Close"), cols.index("Volume")
-    return [(ts[:10], row[ic], row[iv]) for ts, row in zip(payload["index"], payload["data"])]
+    gone = set(event_only_positions(payload))
+    return [(ts[:10], row[ic], row[iv]) for i, (ts, row) in enumerate(zip(payload["index"], payload["data"]))
+            if i not in gone]
 
 
 def drop_forming_bar(rows: List[Tuple], clock_iso: Optional[str]) -> List[Tuple]:
@@ -425,6 +452,9 @@ def price_fields_from_daily(payload: Mapping, clock_iso: Optional[str], has_cloc
     rows = daily_rows(payload)
     req = payload.get("request") or {}
     if "period" in req:
+        _ev = event_only_positions(payload)
+        if _ev and _ev[-1] == len(payload["data"]) - 1:   # v0.45.645：末行是公司行动空行
+            raise IncompleteObservations("末行是公司行动空行（当天没有 K 线，生产此时不给这一路的值、走回落）")
         if len(rows) < 2:
             raise IncompleteObservations("日线不足 2 根（生产此时走回落，应登记缺口）")
         if len(rows) >= 3 and not has_clock:

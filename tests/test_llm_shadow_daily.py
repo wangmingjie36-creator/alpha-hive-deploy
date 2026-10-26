@@ -188,17 +188,22 @@ def prod_env(tmp_path, monkeypatch):
     return prod
 
 
-def _run(prod_env, probes, spawn, clock=None, disabled=False, once=False):
+def _net_up():
+    return True, "通 3/3"
+
+
+def _run(prod_env, probes, spawn, clock=None, disabled=False, once=False, net_probe=None):
     clock = clock or _Clock()
     it = iter(probes)
     last = {}
 
     def probe():
         nonlocal last
-        last = next(it, last)
+        last = dict(next(it, last))
         return last
+    # 一律注入探活：测试里绝不真的打外网
     return dly.run_daily(once=once, environ=dict(os.environ), sleep=clock.sleep, clock=clock.now, probe=probe,
-                         spawn=spawn, disabled_probe=lambda: disabled), clock
+                         spawn=spawn, disabled_probe=lambda: disabled, net_probe=net_probe or _net_up), clock
 
 
 class TestRunDaily:
@@ -254,6 +259,256 @@ class TestRunDaily:
     def test_kill_switch_path_is_inside_the_shadow_root(self, prod_env):
         """DISABLED 文件在影子根里：用户 touch 一下就停，不用动 launchd。"""
         assert (sh.default_shadow_root(prod_env) / dly.DISABLE_FILENAME).parent.name == sh.SHADOW_DIRNAME
+
+
+# ==================== 开跑前探活网络（v0.45.633） ====================
+
+class TestDecideWithNetwork:
+    def test_done_but_network_down_waits(self):
+        act, why = dly.decide({**_state(), "net_ok": False, "net_detail": "通 0/3"}, 100, disabled=False)
+        assert act == dly.ACTION_WAIT and "探活不通" in why and "通 0/3" in why
+
+    def test_done_and_network_up_runs(self):
+        assert dly.decide({**_state(), "net_ok": True}, 0, disabled=False)[0] == dly.ACTION_RUN
+
+    def test_network_not_probed_yet_is_not_a_block(self):
+        """net_ok 缺省（生产还没写完时不探）——不能把「没探」当「不通」。"""
+        assert dly.decide(_state(), 0, disabled=False)[0] == dly.ACTION_RUN
+
+    def test_network_down_until_timeout_skips_and_says_network(self):
+        act, why = dly.decide({**_state(), "net_ok": False, "net_detail": "通 0/3"}, dly.WAIT_MAX_SEC, disabled=False)
+        assert act == dly.ACTION_SKIP and "网络探活一直不通" in why
+
+    def test_too_late_still_skips_before_network_is_considered(self):
+        act, why = dly.decide({**_state(age=dly.MAX_LAG_SEC + 60), "net_ok": False}, 0, disabled=False)
+        assert act == dly.ACTION_SKIP and "不再与生产同口径" in why
+
+    def test_production_done_helper_matches_decide(self):
+        assert dly.production_done(_state()) is True
+        for st in (_state(rows=0), _state(age=None), _state(running=True), _state(age=299.0)):
+            assert dly.production_done(st) is False
+
+
+class TestProbeNetwork:
+    def _opener(self, behaviour):
+        def op(url, timeout):
+            r = behaviour[url.split("//")[1].split("/")[0]]
+            if isinstance(r, Exception):
+                raise r
+            return r
+        return op
+
+    URLS = ("https://a.example/", "https://b.example/", "https://c.example/")
+
+    def test_all_up(self):
+        ok, det = dly.probe_network(self.URLS, opener=self._opener({"a.example": 1, "b.example": 1, "c.example": 1}))
+        assert ok is True and "通 3/3" in det
+
+    def test_http_error_counts_as_reachable(self):
+        """Yahoo 常给 429：有响应说明握手通了。"""
+        import urllib.error
+        e = urllib.error.HTTPError("u", 429, "Too Many", {}, None)
+        ok, _ = dly.probe_network(self.URLS, opener=self._opener({"a.example": e, "b.example": e, "c.example": e}))
+        assert ok is True
+
+    def test_tls_eof_on_all_hosts_is_down(self):
+        """10-23 的形状：所有数据源同时 `EOF occurred in violation of protocol`。"""
+        import ssl
+        e = ssl.SSLEOFError(8, "EOF occurred in violation of protocol (_ssl.c:992)")
+        ok, det = dly.probe_network(self.URLS, opener=self._opener({"a.example": e, "b.example": e, "c.example": e}))
+        assert ok is False and "SSLEOFError" in det and "通 0/3" in det
+
+    def test_two_of_three_is_enough_one_is_not(self):
+        e = OSError("timed out")
+        assert dly.probe_network(self.URLS, opener=self._opener({"a.example": 1, "b.example": 1, "c.example": e}))[0] is True
+        assert dly.probe_network(self.URLS, opener=self._opener({"a.example": 1, "b.example": e, "c.example": e}))[0] is False
+
+    def test_timeout_and_refused_count_as_down(self):
+        import socket
+        ok, _ = dly.probe_network(self.URLS, opener=self._opener(
+            {"a.example": socket.timeout("t"), "b.example": ConnectionRefusedError("r"), "c.example": 1}))
+        assert ok is False
+
+    def test_default_urls_are_the_three_scan_dependencies(self):
+        hosts = {u.split("//")[1].split("/")[0] for u in dly.NET_PROBE_URLS}
+        assert hosts == {"cdn.cboe.com", "query1.finance.yahoo.com", "finnhub.io"} and dly.NET_PROBE_MIN_OK == 2
+
+
+class TestRunDailyWithNetwork:
+    def test_waits_for_network_then_runs_once(self, prod_env):
+        answers = iter([(False, "通 0/3；不通 x"), (False, "通 0/3；不通 x"), (True, "通 3/3")])
+        spawn = _Spawn(rc=0)
+        rc, clk = _run(prod_env, [_state()], spawn, net_probe=lambda: next(answers))
+        assert rc == 0 and len(spawn.calls) == 1 and clk.sleeps == [dly.POLL_SEC, dly.POLL_SEC]
+
+    def test_network_never_up_skips_without_spawn_and_without_spend(self, prod_env):
+        spawn = _Spawn()
+        rc, clk = _run(prod_env, [_state()], spawn, net_probe=lambda: (False, "通 0/3"))
+        assert rc == dly.EXIT_SKIPPED and spawn.calls == []
+        assert sum(clk.sleeps) >= dly.WAIT_MAX_SEC - dly.POLL_SEC
+
+    def test_network_not_probed_while_production_is_still_running(self, prod_env):
+        calls = []
+
+        def net():
+            calls.append(1)
+            return True, "通 3/3"
+        _run(prod_env, [_state(running=True), _state(rows=0, age=None), _state()], _Spawn(), net_probe=net)
+        assert calls == [1]                                  # 只有最后一轮（生产写完）才探
+
+    def test_every_network_wait_round_is_logged(self, prod_env, capsys):
+        answers = iter([(False, "通 0/3；不通 a: SSLEOFError"), (True, "通 3/3")])
+        _run(prod_env, [_state()], _Spawn(), net_probe=lambda: next(answers))
+        out = capsys.readouterr().out
+        assert "探活不通" in out and "SSLEOFError" in out
+
+    def test_once_reports_network_state_without_spawning(self, prod_env, capsys):
+        rc, clk = _run(prod_env, [_state()], _Spawn(), once=True, net_probe=lambda: (False, "通 0/3"))
+        assert rc == 0 and clk.sleeps == [] and "wait" in capsys.readouterr().out
+
+
+# ==================== 二次检查补的三处（v0.45.641） ====================
+
+class TestProbeErrorsDoNotKillTheLauncher:
+    """读生产状态偶发失败（库正被备份、文件系统忙）不该让启动脚本崩掉、丢一天——和 10-23 同形状。"""
+
+    def _run_with_probe(self, prod_env, probe_fn, spawn=None, clock=None):
+        clock = clock or _Clock()
+        return dly.run_daily(once=False, environ=dict(os.environ), sleep=clock.sleep, clock=clock.now, probe=probe_fn,
+                             spawn=spawn or _Spawn(), disabled_probe=lambda: False, net_probe=_net_up), clock
+
+    def test_transient_probe_error_is_retried_then_runs(self, prod_env, capsys):
+        answers = iter([RuntimeError("database is locked"), OSError("busy"), _state()])
+
+        def probe():
+            a = next(answers)
+            if isinstance(a, Exception):
+                raise a
+            return a
+        spawn = _Spawn(rc=0)
+        rc, clk = self._run_with_probe(prod_env, probe, spawn)
+        assert rc == 0 and len(spawn.calls) == 1 and clk.sleeps == [dly.POLL_SEC, dly.POLL_SEC]
+        out = capsys.readouterr().out
+        assert "读生产状态失败" in out and "database is locked" in out        # 每次失败都留痕
+
+    def test_probe_that_never_recovers_skips_and_names_the_error(self, prod_env, capsys):
+        def probe():
+            raise RuntimeError("unable to open database file")
+        spawn = _Spawn()
+        rc, _ = self._run_with_probe(prod_env, probe, spawn)
+        assert rc == dly.EXIT_SKIPPED and spawn.calls == []
+        assert "读生产状态一直失败" in capsys.readouterr().out
+
+    def test_skip_reason_mentions_probe_error(self):
+        st = {"rows": 0, "file_age": None, "running": False, "probe_error": "RuntimeError: boom"}
+        act, why = dly.decide(st, dly.WAIT_MAX_SEC, disabled=False)
+        assert act == dly.ACTION_SKIP and "读生产状态一直失败" in why and "boom" in why
+
+
+class TestChildDeadline:
+    """启动脚本必须有子进程超时：launchd 在上一个实例未退出时不会再起新实例，挂死 = 此后每天被无声跳过。"""
+
+    def test_normal_child_returns_its_exit_code(self):
+        import sys
+        d = dly.run_child_with_deadline([sys.executable, "-c", "import sys; sys.exit(5)"], env=dict(os.environ),
+                                        cwd=str(_REPO), timeout=30)
+        assert d.returncode == 5 and d.timed_out is False
+
+    def test_hung_child_is_killed_with_its_grandchild(self, tmp_path):
+        """真进程：子进程再起一个孙进程（像 llm_shadow_scan --run 起 --child），超时后两个都必须死——不然孙进程继续花钱。"""
+        import sys
+        import time as _t
+        pidfile = tmp_path / "grandchild.pid"
+        code = (
+            "import subprocess, sys, time, pathlib\n"
+            f"g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+            f"pathlib.Path({str(pidfile)!r}).write_text(str(g.pid))\n"
+            "time.sleep(600)\n")
+        t0 = _t.time()
+        d = dly.run_child_with_deadline([sys.executable, "-c", code], env=dict(os.environ), cwd=str(_REPO),
+                                        timeout=2.0, grace=5.0)
+        assert d.timed_out is True and d.returncode == dly.EXIT_CHILD_TIMEOUT and _t.time() - t0 < 30
+        gpid = int(pidfile.read_text())
+        for _ in range(50):                                      # 给内核一点时间回收
+            try:
+                os.kill(gpid, 0)
+            except ProcessLookupError:
+                break
+            _t.sleep(0.1)
+        else:
+            os.kill(gpid, 9)                                     # 清理，别留孤儿
+            raise AssertionError("孙进程在超时后仍活着——进程组没杀干净")
+
+    def test_stopping_the_launcher_takes_the_scan_children_with_it(self, tmp_path):
+        """`launchctl bootout` 给启动脚本发 SIGTERM；子进程在新会话里不会跟着死——必须由启动脚本转发，否则留下继续花钱的孤儿。"""
+        import signal as _sig
+        import subprocess as _sp
+        import sys
+        import time as _t
+        pidfile, ready = tmp_path / "child.pid", tmp_path / "ready"
+        child_code = (f"import os, pathlib, time; pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid())); "
+                      f"pathlib.Path({str(ready)!r}).write_text('1'); time.sleep(600)")
+        launcher = (f"import sys; sys.path.insert(0, {str(_REPO)!r}); import os, llm_shadow_daily as d\n"
+                    f"d.run_child_with_deadline([sys.executable, '-c', {child_code!r}], env=dict(os.environ), cwd={str(_REPO)!r}, timeout=600)\n")
+        lp = _sp.Popen([sys.executable, "-c", launcher])
+        try:
+            for _ in range(100):
+                if ready.exists():
+                    break
+                _t.sleep(0.1)
+            assert ready.exists(), "子进程没起来"
+            cpid = int(pidfile.read_text())
+            lp.send_signal(_sig.SIGTERM)
+            assert lp.wait(timeout=20) == 128 + _sig.SIGTERM
+            for _ in range(50):
+                try:
+                    os.kill(cpid, 0)
+                except ProcessLookupError:
+                    break
+                _t.sleep(0.1)
+            else:
+                os.kill(cpid, 9)
+                raise AssertionError("启动脚本被 SIGTERM 后，扫描子进程仍活着")
+        finally:
+            if lp.poll() is None:
+                lp.kill()
+
+    def test_run_daily_uses_the_deadline_runner_by_default_and_reports_timeout(self, prod_env, monkeypatch, capsys):
+        seen = {}
+
+        def fake_runner(cmd, *, env, cwd, **kw):
+            seen["cmd"], seen["env"] = cmd, env
+            return dly._Done(dly.EXIT_CHILD_TIMEOUT, timed_out=True)
+        monkeypatch.setattr(dly, "run_child_with_deadline", fake_runner)
+        clock = _Clock()
+        rc = dly.run_daily(once=False, environ=dict(os.environ), sleep=clock.sleep, clock=clock.now,
+                           probe=lambda: _state(), spawn=None, disabled_probe=lambda: False, net_probe=_net_up)
+        assert rc == dly.EXIT_CHILD_TIMEOUT
+        assert seen["env"][sh.SPEND_ENV] == "1" and seen["cmd"][-1] == "--run"
+        out = capsys.readouterr().out
+        assert "已杀掉整个进程组" in out and "下一个交易日照常" in out
+
+    def test_deadline_constant_is_comfortably_above_a_normal_run(self):
+        assert dly.CHILD_TIMEOUT_SEC >= 3600 * 1.5          # 实测一次约 25 分钟（10-22）；10-23 的网络全断预取也只有 18 分钟
+
+
+class TestProbeClosesItsConnections:
+    def test_default_opener_uses_a_context_manager(self, monkeypatch):
+        """握手探测不读响应体，用 with 立即关连接；每分钟 3 个 × 3 小时不能靠 GC 回收 sockets。"""
+        import urllib.request
+        events = []
+
+        class Resp:
+            def __enter__(self):
+                events.append("enter")
+                return self
+
+            def __exit__(self, *a):
+                events.append("exit")
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: Resp())
+        ok, _ = dly.probe_network(("https://a.example/", "https://b.example/"), min_ok=2)
+        assert ok is True and events == ["enter", "exit", "enter", "exit"]
 
 
 # ==================== 花钱闸的归属 ====================
