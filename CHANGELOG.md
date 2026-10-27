@@ -5,6 +5,36 @@
 
 ---
 
+## [0.45.662] — 2026-10-27 — Added：BILI 加进 Alpha Bot 的 yfinance 备用名单，并给备用源每一张链加 OI 陈旧判据（Yahoo 的 OI 不是这一场的 ⇒ 整份拒收，不拿 OI=0 照用）
+
+起因：用户问卖权账本里的「不可得原因」（`stale_vintage 15`、`fetch_skipped_breaker 27` ……）是否已解决，随后问 BILI 能否像 NVDL 一样换 yfinance、并要求设计上避开 yfinance 链上它自己出过的坏数据。查实：
+- 账本里 `stale_vintage` 的 15 条**全是 BILI**（周度 / 月度各 15，9-28 起几乎每个扫描日一条）；`fetch_skipped_breaker` 27 条**全是 10-12 一天**（3 次 `payload_unavailable` 后熔断，其余 27 只没取）；
+- BILI 与 NVDL **不是同一种陈旧**：2026-10-27 12:47 ET 实测 NVDA / BABA / PDD 的 CBOE 文件落后约 15 分钟、NVDL 约 1 小时 40 分，**BILI 的文件是昨天 23:22 ET 生成的、最后成交 10-26 15:59:59**——盘中根本不更新、夜里才刷新一次（具体几点刷新**待验证**，只有一个时点的观测）。
+
+### Added
+- `alphabot/yf_chain.py`：备用源对每一张链先过全仓唯一判据 `oi_staleness.assess_frames`（过滤之前、全部到期日合起来判）。判陈旧 ⇒ `(None, "yf_oi_stale")`；最近有成交的合约不足 `MIN_RECENT` ⇒ `(None, "yf_oi_unjudgeable")`——**都拒绝整份链**而不是「OI 当 0 照用」：水平引擎吃 OI，OI 成片为 0 时不报错、只会画一张看着正常的错图（2026-10-12 Yahoo 全市场 OI 清零，BILI 当天 put/call 被算成 298.46）。结果带 `oi_check`（判据明细）与 `n_iv_missing`（占位 IV 置空后没有可用 IV 的合约数）。
+- `alphabot/static/pages/help.js`：「Yahoo 备用源报 yf_oi_stale / yf_oi_unjudgeable」条，写明原因、怎么办、已知盲区。
+- `tests/test_alphabot_yf_chain.py`：`TestOiGuard`（10 条，每条配「OI 正常的同一夹具照常通过」的对照）+ 服务层 5 条（BILI 走备用 / 不进溢价页与账本 / 脏链带原因失败并计数 / 备用成功时日志带 OI 占比与无 IV 合约数）。变异 8 个全被杀（删判据、stale 不拒、判不了放行、只判最后一个到期日、判据只看过滤之后的表、`n_iv_missing` 恒 0、忽略 `stale_vintage`、NaT 修复回退）。
+
+### Fixed（二次检查查出，独立审查员 + 实测）
+- **`yf_chain._et_naive_iso` 对 `pd.NaT` 返回字符串 `"NaT"`**（自 v0.45.603 就在）：`"NaT" > "2026-…"`（N 比数字大），一个从没成交过的合约就能把 `newest` 顶成 `"NaT"`、`vintage < expected` 恒为假——**一条昨天的链被当成新鲜放行**，vintage 记成 `'NaT'`。实测复现（昨天的链 + 一个 NaT 合约 ⇒ 通过；去掉 NaT ⇒ 正确拒 `stale_vintage`）。修：缺失（None / NaT / NaN）⇒ None。**真实链里目前没有 NaT**（BILI 202 个、NVDL 344 个合约 0 个，也没有 1970 类占位），所以是潜伏缺陷、没触发过；`oi_staleness.rows_from_frame` 本来就吞 NaT，不受影响。
+- 一条测试名不副实：`test_oi_is_judged_before_the_expiring_today_filter` 在判据放过滤前 / 后得到同一结果，抓不到变异。换成真能区分的夹具（只有 DTE=0 的到期日 OI 正常、其余为 0：吃原始表 ⇒ 放行，吃过滤后的表 ⇒ 陈旧），旧用例改名为 `test_zeroed_oi_after_the_close_is_still_refused`；`yf_chain` docstring 里「所以放在 DTE=0 过滤之前」那个空的因果句改成「判据吃未过滤的原始表」。
+- `oi_check` / `n_iv_missing` 原先没有任何读者（docstring 却说「页面 / 日志看得到」）：现在进 `service._chain_fetch` 备用成功的 info 日志（OI 占比、无可用 IV 的合约数），docstring 如实写「页面不显示」。
+- 文档措辞：BILI 的「CBOE 文件盘中不更新」只有一个时点的实测，CLAUDE.md / `service.py` 注释 / 帮助页改成带条件的说法，帮助页去掉没证据的「Yahoo 通常盘前发布 OI」。
+
+### Changed
+- `alphabot/service.py`：`YF_FALLBACK_TICKERS` 由 `{"NVDL"}` 改 `{"NVDL", "BILI"}`，注释写明两票各自的缘由。**只对现算页生效**。
+- `tests/test_alphabot_yf_chain.py`：两条旧用例原来用单个到期日（10 个合约）的假链，现在会被判「判不了」——改用三个到期日、只动其中一个。**同样的判据现在也套在 NVDL 上**（实测 NVDL 近期成交 383 个、OI>0 占 0.99，照常通过）。
+
+### 实测（2026-10-27 盘中，真实链，只读）
+- BILI：近期成交合约 43–66 个、OI>0 占 0.95–0.98 ⇒ 可判、不陈旧、放行；与 CBOE 同合约 OI 对账 202 个里 172 个一致，30 个有差异（多为小幅，另有几个 Yahoo 记 0 而 CBOE 记 13 / 57）；一条链里 202 个合约有 36 个（18%）IV 是占位值——这条在更早版本里就已置 None。
+- 水平引擎端到端：BILI `monthly` recorded、`weekly` unavailable（BILI 没有 7–20 天的周权，与账本里的 `no_expiry_in_window` 同源，不是备用源的问题）。
+
+### 没动 / 局限
+- **卖权账本、溢价页、日报仍只认 CBOE**——BILI 在账本里仍会常记 `stale_vintage`，这是预注册的数据源，不换；要解决只能等 CBOE 刷新时间对上扫描时刻，或把 BILI 移出账本名单（动预注册样本，要用户定）。
+- 判据是**整条链一起判**的，抓不到个别合约 Yahoo 漏记 OI（上面那几个 0 对 13 / 57）；页面口径里如实写。
+- BILI 的 CBOE 文件几点刷新**待验证**——只在 12:47 ET 看过一次。
+
 ## [0.45.655] — 2026-10-25 — Added：尾部预算收口——Gamma / Vega 告警线随预算推导、每个仓位的单仓上限显示、「压力模型 vs 实际净值」对比（用户定：一次「现货 −10%、IV +20 点」最多允许亏 20% NAV）
 
 起因：0.45.649 留下两个尾巴——既有 Gamma / Vega 告警线没重标、预算与告警线是主观常数。用户回答了那个只能由他回答的问题：**纸面跨式账在一次压力冲击里最多允许亏 20% NAV**。据此：线从预算推导、单仓上限从预算平分、并用真实审计检验压力模型本身。⚠️ 本版建立在 0.45.649（本地提交、**尚未推送**）之上，两者需按顺序一起推。

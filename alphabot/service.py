@@ -49,9 +49,13 @@ DEFAULT_INTERVAL_MIN = 10
 #: 快照里逐行权价 GEX 只存现价 ±这么多（热力图 / 回看点够用；不存原始链）
 SNAPSHOT_STRIKE_BAND = 0.12
 #: CBOE 报 `stale_vintage`（文件还停在上一交易日）时，这些票改拉 yfinance（`alphabot.yf_chain`，v0.45.603）。
-#: 2026-10-22 起只有 NVDL：它的 CBOE 文件整个上午不更新，同一时刻 yfinance 有 15 分钟延迟的成交。要加票改这里；
-#: **只对 Alpha Bot 的页面生效**——卖权账本 / 日报仍只认 CBOE。CBOE 一恢复就自动改回 CBOE。
-YF_FALLBACK_TICKERS = frozenset({"NVDL"})
+#: NVDL（2026-10-22）：它的 CBOE 文件整个上午不更新，同一时刻 yfinance 有 15 分钟延迟的成交。
+#: BILI（2026-10-27）：CBOE 文件盘中不更新（一个时点实测：12:47 ET 时文件还是昨天 23:22 ET 生成的；刷新时刻待验证），
+#: 卖权账本约 20 个扫描日里 15 个记 `stale_vintage`。⚠️ BILI 的 Yahoo 链出过坏数据（10-12 OI 清零、put/call 298.46），
+#: 所以备用源对**每一张**链先过 `oi_staleness`、OI 陈旧 / 判不了就拒收（见 `yf_chain` docstring）。要加票改这里；
+#: **只对 Alpha Bot 的页面生效**——卖权账本 / 溢价页 / 日报仍只认 CBOE（BILI 在账本里仍会记不可得，这是预注册的数据源，不换）。
+#: CBOE 一恢复就自动改回 CBOE。
+YF_FALLBACK_TICKERS = frozenset({"NVDL", "BILI"})
 _TICKER_RE = re.compile(r"^[A-Z_][A-Z0-9.\-]{0,9}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -625,7 +629,9 @@ class AlphaBotService:
                 if raw is None:
                     _log.warning("[%s] CBOE 陈旧、yfinance 备用源也取不到：%s", t, reason)
                 else:
-                    _log.info("[%s] CBOE 文件陈旧（stale_vintage），本次改用 yfinance 备用源", t)
+                    chk = raw.get("oi_check") or {}
+                    _log.info("[%s] CBOE 文件陈旧（stale_vintage），本次改用 yfinance 备用源（OI 占比 %s，%s / %s 个合约无可用 IV）",
+                              t, chk.get("ratio"), raw.get("n_iv_missing"), len(raw.get("contracts") or []))
             return raw, reason
         return fetch
 

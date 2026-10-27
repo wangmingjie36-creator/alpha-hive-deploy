@@ -14,6 +14,19 @@
   · 没有 `iv30`（None）；标的价取最近一根 1 分钟线的收盘（约 15 分钟延迟），来源标签 `yfinance_intraday`；
   · 一次要发「1 + 每个到期日 1」个请求（只取 ≤ 120 天、最多 10 个到期日），限流由 `yf_gate` 管。
 陈旧判据与 CBOE 同一条：最新成交的美东日期 < 此刻应有的交易日 ⇒ `stale_vintage`，不拿旧数据冒充盘中。
+
+v0.45.662 加 BILI 时补的两道护栏（BILI 的 CBOE 文件盘中不更新、夜里才刷新一次；yfinance 一侧它却是本仓出过坏数据的票）：
+  · **OI 是不是这一场的**——过全仓唯一判据 `oi_staleness`（v0.45.512 / 542 / 544：2026-10-12 Yahoo 全市场 OI 几乎清零，
+    BILI 当天 put/call 算成 298.46）。判陈旧 ⇒ `yf_oi_stale`；这条链最近有成交的合约不足以判 ⇒ `yf_oi_unjudgeable`。
+    两者都**拒绝整份链**而不是「OI 当 0 照用」：水平引擎吃 OI（GEX / 主要水平），OI 成片为 0 时它不报错、只会给出
+    一张看起来正常的错图。备用源本来就是兜底，宁可页面写「现算不可得：<原因>」也不拿坏数凑数。判据吃的是**未过滤**的
+    全部到期日的原始表（单个到期日会误判，见 `oi_staleness` docstring；收盘后丢掉的 DTE=0 到期日也算在内——
+    `test_the_oi_judge_sees_the_unfiltered_expiries` 钉住这一点）。
+  · Yahoo 的 IV 求解失败值（`yahoo_iv.is_placeholder_iv`）早就置 None；现在把置 None 的合约数记进 `n_iv_missing`
+    （BILI 实测一条链里约 18% 是占位值）。`n_iv_missing` 与 `oi_check` **页面不显示**，只进
+    `service._chain_fetch` 的 info 日志（OI 占比、无可用 IV 的合约数）和返回值，供排查。
+  实测（2026-10-27 盘中，BILI）：判据 66 个近期成交合约、OI>0 占 0.98、可判、不陈旧；与 CBOE 同合约 OI 对账 172 / 202
+  一致，其余多为小幅差异，另有几个 Yahoo 记 0 而 CBOE 记 13 / 57（单合约漏记，判据是链级的，抓不到这种，页面口径里如实写）。
 """
 from __future__ import annotations
 
@@ -37,7 +50,13 @@ def _num(v) -> Optional[float]:
 
 
 def _et_naive_iso(ts) -> Optional[str]:
-    """pandas / datetime 时间戳 → 美东墙钟的 ISO 字符串（同 CBOE `last_trade_time` 的写法，不带时区）。"""
+    """pandas / datetime 时间戳 → 美东墙钟的 ISO 字符串（同 CBOE `last_trade_time` 的写法，不带时区）。
+
+    缺失（None / NaT / NaN）⇒ None。⚠️ `pd.NaT.isoformat()` 返回字符串 `"NaT"`，而 `"NaT" > "2026-…"`（N 比数字大）：
+    一个从没成交过的合约就能把 `newest` 顶成 `"NaT"`、让 `vintage < expected` 恒为假——一条昨天的链被当成新鲜放行
+    （v0.45.662 二次检查实测，自 v0.45.603 就在）。"""
+    if ts is None or ts != ts:                       # NaT / NaN 都不等于自己
+        return None
     try:
         dt = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
         if dt.tzinfo is not None:
@@ -70,9 +89,10 @@ def fetch_yf_raw_contracts(ticker: str, *, as_of: Optional[str] = None, now_et: 
                            yf_module=None) -> Tuple[Optional[dict], Optional[str]]:
     """返回 `(结果, None)` 或 `(None, 原因)`——与 CBOE 那个取数函数同一契约，永不抛。
     原因：`stale_vintage` / `vintage_mismatch` / `yf_no_expiries` / `yf_price_unavailable` / `yf_no_contracts` /
-    `yf_exception:<类名>`。`yf_module` 只给测试注入。"""
+    `yf_oi_stale` / `yf_oi_unjudgeable` / `yf_exception:<类名>`。`yf_module` 只给测试注入。"""
     try:
         import cboe_options as CB
+        import oi_staleness
         from yahoo_iv import is_placeholder_iv
         _ensure = lambda: None  # noqa: E731
         if yf_module is None:                      # 真取数才装限流闸门（测试注入假模块时不碰全局）
@@ -121,6 +141,11 @@ def fetch_yf_raw_contracts(ticker: str, *, as_of: Optional[str] = None, now_et: 
             return None, "stale_vintage"
         if as_of is not None and vintage != as_of:
             return None, "vintage_mismatch"
+        oi_check = oi_staleness.assess_frames([df for _, calls, puts in frames for df in (calls, puts)])
+        if not oi_check["judgeable"]:
+            return None, "yf_oi_unjudgeable"
+        if oi_check["stale"]:
+            return None, "yf_oi_stale"
         session_live = CB._raw_session_live(vintage, now)
         kept = [c for c in contracts if not (c["dte"] == 0 and not session_live)]
         if not kept:
@@ -130,7 +155,8 @@ def fetch_yf_raw_contracts(ticker: str, *, as_of: Optional[str] = None, now_et: 
             "underlying_price_source": SOURCE, "session_live": session_live, "fetched_at": now.isoformat(),
             "payload_last_trade_time": newest, "iv30": None, "contracts": kept, "n_raw": len(contracts),
             "n_dropped_unparseable": 0, "n_expired_excluded": 0, "n_expiring_today_excluded": len(contracts) - len(kept),
-            "data_source": "yfinance",
+            "data_source": "yfinance", "oi_check": oi_check,
+            "n_iv_missing": sum(1 for c in kept if c["iv"] is None),
         }, None
     except Exception as exc:  # noqa: BLE001 - 取数层的任何异常都是「这次取不到」，如实报原因
         return None, f"yf_exception:{type(exc).__name__}"
