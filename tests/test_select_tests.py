@@ -103,9 +103,18 @@ class TestPlan:
         assert p.selected == ["tests/test_changelog_x.py"]
         assert p.changed_tests == [] and p.mode == "subset"
 
-    def test_nonpy_with_no_known_reader_selects_nothing_and_says_why(self):
-        p = _plan([("M", "docs/unread.md")])
-        assert p.mode == "none" and p.selected == [] and any("子进程里的读看不到" in n for n in p.notes)
+    def test_nonpy_with_no_known_reader_falls_back_to_full(self):
+        """v0.45.661：读者未知（新文件 / 漏登 / 只在子进程里读）⇒ 整套，不再「什么都不选」——CI 对非代码漏登只警告靠的就是这一条。"""
+        for status in ("A", "M", "D"):
+            p = _plan([(status, "docs/unread.md")])
+            assert p.mode == "full" and p.exit_code == ST.EXIT_FULL and p.selected == [], status
+            assert any("docs/unread.md" in r and "读者未知" in r for r in p.reasons), p.reasons
+
+    def test_one_unknown_nonpy_file_sends_the_whole_change_to_full(self):
+        """混着一个有读者的、一个没读者的：不能只选有读者那份的读者——整份回退。"""
+        p = _plan([("M", "CHANGELOG.md"), ("A", "alphabot/static/pages/new_page.js"), ("M", "tests/test_target.py")])
+        assert p.mode == "full" and p.selected == []
+        assert [r for r in p.reasons if "读者未知" in r] and not [r for r in p.reasons if "CHANGELOG.md" in r]
 
     def test_test_plus_changelog_is_the_realistic_commit(self):
         p = _plan([("M", "CHANGELOG.md"), ("A", "tests/test_brand_new.py")])
@@ -217,16 +226,16 @@ class TestBuildMergeDrift:
 
     def test_gaps_flag_new_reads_but_not_fewer_reads(self):
         d = _dump({"tests/test_narrow.py": {"other_test": ["tests/test_target.py", "tests/test_new.py"]}})
-        assert any("tests/test_new.py" in g for g in ST.observed_gaps(REG, d, n_tests=N_TESTS))
+        assert any("tests/test_new.py" in g.text and g.kind == "other_test" and g.blocking for g in ST.observed_gaps(REG, d, n_tests=N_TESTS))
         fewer = _dump({"tests/test_narrow.py": {"other_test": []}, "tests/test_meta_a.py": {"other_test": ["tests/test_x.py"]}})
         assert ST.observed_gaps(REG, fewer, n_tests=N_TESTS) == [], "CI 上有的测试 skip ⇒ 观测到的比登记表少是正常的，不算漂移"
 
     def test_gaps_flag_a_new_readall_and_new_nonpy_reads(self):
         many = [f"tests/test_{i}.py" for i in range(60)]
         d = _dump({"tests/test_new_meta.py": {"other_test": many}})
-        assert any("reads_all_tests" in g for g in ST.observed_gaps(REG, d, n_tests=N_TESTS))
+        assert any("reads_all_tests" in g.text and g.kind == "reads_all" and g.blocking for g in ST.observed_gaps(REG, d, n_tests=N_TESTS))
         d2 = _dump({"tests/test_plain.py": {"nonpy": ["docs/new.md"]}})
-        assert any("docs/new.md" in g for g in ST.observed_gaps(REG, d2, n_tests=N_TESTS))
+        assert any("docs/new.md" in g.text and g.kind == "nonpy" and not g.blocking for g in ST.observed_gaps(REG, d2, n_tests=N_TESTS))
 
     def test_gaps_respect_the_files_filter(self):
         d = _dump({"tests/test_narrow.py": {"other_test": ["tests/test_new.py"]}})
@@ -258,14 +267,14 @@ class TestReadAllDenominator:
 
     def test_partial_dump_gap_is_reported_as_a_narrow_read(self):
         gaps = ST.observed_gaps(ST.empty_registry(), self.PARTIAL, n_tests=375)
-        assert len(gaps) == 1 and "tests/test_alphabot.py" in gaps[0] and "reads_all_tests" not in gaps[0], gaps
+        assert len(gaps) == 1 and "tests/test_alphabot.py" in gaps[0].text and gaps[0].kind == "other_test", gaps
 
     def test_a_real_meta_guard_still_promotes_in_a_partial_run(self):
         """反方向：元守卫读的是磁盘上的全部测试文件，与这一轮收集了几个无关——部分收集时照样认得出。"""
         d = {"version": 1, "n_collected_files": 1,
              "by_file": {"tests/test_meta.py": {"other_test": [f"tests/test_{i}.py" for i in range(374)]}}}
         assert "tests/test_meta.py" in ST.merge_observation(ST.empty_registry(), d, n_tests=375)["reads_all_tests"]
-        assert any("reads_all_tests" in g for g in ST.observed_gaps(ST.empty_registry(), d, n_tests=375))
+        assert any(g.kind == "reads_all" for g in ST.observed_gaps(ST.empty_registry(), d, n_tests=375))
 
     def test_nonpositive_denominator_raises_instead_of_demoting_meta_guards(self):
         """分母 ≤ 0 时若答「不算读全部」，真元守卫会被降成窄读者 ⇒ 改新测试文件时漏选它。只能抛。"""
@@ -281,9 +290,15 @@ class TestReadAllDenominator:
         assert ST.repo_test_count(_REPO / "no_such_dir") == 0
 
 
-def _run_cli(*args, cwd=_REPO, timeout=None):
+def _run_cli(*args, cwd=_REPO, timeout=None, github_actions=None):
+    """`github_actions`：None ⇒ 继承；True / False ⇒ 钉住 `GITHUB_ACTIONS`（CI 上它是 true，注记相关断言不能随跑在哪变）。"""
+    env = dict(os.environ)
+    if github_actions is not None:
+        env.pop("GITHUB_ACTIONS", None)
+        if github_actions:
+            env["GITHUB_ACTIONS"] = "true"
     return subprocess.run([sys.executable, str(_TOOLS / "select_tests.py"), *args], cwd=cwd, capture_output=True, text=True,
-                          timeout=timeout)
+                          timeout=timeout, env=env)
 
 
 class TestCli:
@@ -313,6 +328,27 @@ class TestCli:
         assert r.returncode == ST.EXIT_STALE and "test_unregistered" in r.stdout
         assert _run_cli("--registry", str(reg), "--check-drift", str(empty)).returncode == ST.EXIT_USAGE, \
             "空 dump 不能当「没有漂移」——测量没生效"
+
+    def test_check_drift_grades_nonpy_gaps_as_warnings_and_test_gaps_as_red(self, tmp_path):
+        """v0.45.661 分级：只有非代码文件漏登 ⇒ 退出码 0、照样列出 + 给修法（Actions 里另打 ::warning 注记）；
+        测试读测试的漏登（含新元守卫）⇒ 照旧退出码 4。混着两种 ⇒ 4，两种都列出。"""
+        reg = tmp_path / "reg.json"
+        ST.save_registry(reg, REG)
+        nonpy_only, mixed, new_meta = tmp_path / "np.json", tmp_path / "mixed.json", tmp_path / "meta.json"
+        nonpy_only.write_text(json.dumps(_dump({"tests/test_plain.py": {"nonpy": ["alphabot/static/pages/new_page.js"]}})))
+        mixed.write_text(json.dumps(_dump({"tests/test_plain.py": {"nonpy": ["alphabot/static/pages/new_page.js"]},
+                                           "tests/test_narrow.py": {"other_test": ["tests/test_unregistered.py"]}})))
+        # CLI 的分母是真仓库的测试文件数（`repo_test_count`），合成元守卫得读够这么多才算「读全部」
+        new_meta.write_text(json.dumps(_dump({"tests/test_new_meta.py": {"other_test": [f"tests/test_{i}.py" for i in range(ST.repo_test_count())]}})))
+        r = _run_cli("--registry", str(reg), "--check-drift", str(nonpy_only), github_actions=False)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "只警告" in r.stdout and "new_page.js" in r.stdout and "--update" in r.stdout and "::warning" not in r.stdout
+        r = _run_cli("--registry", str(reg), "--check-drift", str(nonpy_only), github_actions=True)
+        assert r.returncode == 0 and "::warning title=" in r.stdout and "new_page.js" in r.stdout.split("::warning", 1)[1]
+        r = _run_cli("--registry", str(reg), "--check-drift", str(mixed), github_actions=False)
+        assert r.returncode == ST.EXIT_STALE and "test_unregistered" in r.stdout and "new_page.js" in r.stdout
+        r = _run_cli("--registry", str(reg), "--check-drift", str(new_meta), github_actions=False)
+        assert r.returncode == ST.EXIT_STALE and "reads_all_tests" in r.stdout
 
     def test_build_writes_a_loadable_registry(self, tmp_path):
         dump = tmp_path / "dump.json"
@@ -362,6 +398,14 @@ class TestRunRideAlongMeasurement:
         go, _ = setup
         code, _ = go(0, _dump({"tests/test_concurrency_hint.py": {"other_test": ["tests/test_new_victim.py"]}}))
         assert code == ST.EXIT_STALE and "登记表过期" in capsys.readouterr().out
+
+    def test_changed_test_that_now_reads_an_unregistered_nonpy_file_only_warns(self, setup, capsys, monkeypatch):
+        """`--run` 的随跑测量与 CI 同一分级：只多出非代码文件的读 ⇒ 列出 + 修法，但退出码 0。"""
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+        go, _ = setup
+        code, _ = go(0, _dump({"tests/test_concurrency_hint.py": {"nonpy": ["docs/newly_read.md"]}}, n=3))
+        out = capsys.readouterr().out
+        assert code == 0 and "只警告" in out and "docs/newly_read.md" in out and "登记表过期" not in out, out
 
     def test_red_tests_are_not_masked_by_the_stale_code(self, setup):
         go, _ = setup
