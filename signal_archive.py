@@ -2467,6 +2467,10 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 可能变的只有 refuse 读者（预取包 → Rival / Scout、政体均线 → Guard、供应链 → Scout），且只在「最近一场缺了」的日子 ⇒ 点名 Guard
     # （本来就从 10-19 起，0 个信号后移）；Rival / Scout 刻意不点名：证据窗口里没有一天受影响（见 ic_rerun_readiness 同版条目）
     "v0.45.658": ("agent.GuardBeeSentinel.*",),
+    # 10-19（v0.45.663，等价论证见 ic_rerun_readiness 同版条目）：`fred_macro` 读 Yahoo 日线按日期配对、缺值不再顶数 ⇒ 经 Guard 的
+    # 板块冷热 / 黄金趋势 / 曲线 10Y 只在「缺一根」或「缺一项」的日子变；10-19 起旧代码扫描日冻结证据逐日核过一天都没有 ⇒ 同 654 / 657 / 660
+    # 只点名 Guard（0 个信号后移），`guard.macro_adj` 不点名
+    "v0.45.663": ("agent.GuardBeeSentinel.*",),
 }
 
 

@@ -18,7 +18,7 @@ FOMC_VOTE_WINDOW_DAYS = 3
 #: 在世代边界判定（`ic_rerun_readiness._equivalence_scan`）里会被当成旧代码、去查只覆盖旧代码日子的冻结证据 ⇒ 假「边界写早了」。
 #: 守卫：成功路径字面量里值为字面量 `True` 的键与本表双向一致（`tests/test_yf_daily.py::TestGuardGenerationMarks`）。
 GENERATION_MARKS = ("macro_event_rows_checked", "macro_quote_dates_checked", "macro_fred_vintage_checked",
-                    "macro_fred_series_isolated", "yf_daily_download_checked")
+                    "macro_fred_series_isolated", "yf_daily_download_checked", "macro_bars_dated_checked")
 
 
 def _with_generation_marks(result: Dict) -> Dict:
@@ -294,6 +294,9 @@ class GuardBeeSentinel(BeeAgent):
                     # 末段按「最近一场已收盘」判（预取包里的 Rival / Scout、市场政体均线、供应链）。判别器
                     # `ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.658"]`。出错路径由 `_with_generation_marks` 补写
                     "yf_daily_download_checked": True,
+                    # v0.45.663 世代印记（同上，无条件写）：`fred_macro` 读 Yahoo 日线按日期配对（宏观报价 / 板块轮动，不再数第几根），
+                    # 缺值不再顶数（10Y 4.5 / 涨跌 0.0 ⇒ None / "unknown"）。判别器 `ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.663"]`
+                    "macro_bars_dated_checked": True,
                     # ③ 时间周期
                     "cycle_context": cycle_ctx,
                     # ④ 市场政体

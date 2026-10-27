@@ -1159,6 +1159,23 @@ _COHORT_HISTORY = [
      "（同 652「实测没换 ⇒ 照证据不列」：证据窗口里没有一天受影响）。前瞻检验：维度 IC H1（`price_metrics.py` 只改计数分档与共用的"
      "按行号删、值逐位不变 ⇒ `price.fields` 登 no_value_change）/ H2（Oracle 的 IV-RV 读者 ignore、逐位不变；HV 未动）不截断。"
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
+    ("2026-10-19", "v0.45.663",
+     "宏观报价与板块轮动的日线按日期配对、缺值不再顶数（用户 2026-10-27「按根因修」，登记方式同 654 / 657 / 660）。"
+     "`fred_macro` 读 Yahoo 日线此前是**数第几根**：宏观报价末根当这一场、倒数第二根当前一场（654 只核了末根是 D、实时那支连末根都不核），"
+     "板块轮动 `iloc[0]` / `iloc[-min(5, len)]` 当四场前 ⇒ Yahoo 缺一根就整体错位一格、不报错。现在一律经 `bars_integrity.session_change`"
+     "（这一场 = 补跑 D / 实时 `_realtime_as_of()`）：这一场那根缺 ⇒ 当没取到；只缺基准 ⇒ 水平照用、涨跌 None；点名进 `quote_gaps` / `gaps` + WARNING。"
+     "缺值不再顶数：10Y 4.5 / 涨跌 0.0（含财政部恒写的 0.0、Finnhub 缺前收盘的 0.0）⇒ None / \"unknown\"；板块轮动 ±50% 不再归零照排。"
+     "**经 Guard 的**：板块冷热三只（每天走 Yahoo）、黄金趋势（GLD 涨跌）、曲线要的 10Y 水平 ⇒ 宏观票 → `RegimeWeightAdjuster` 权重 ⇒ `final_score`。"
+     "**历史**（第 0 步只读实测：当时日报存档 × 10-27 重拉的 Yahoo）：08-31 补跑大盘涨跌 −0.58% = 08-31 / 08-27（当时缺 08-28），按日期 −0.33%"
+     "（Guard 不读大盘）；09-02 起 36 个实时日板块轮动逐只等于按日期重算、冷热全同；10-19 起宏观报价全走财政部 / Finnhub。"
+     "**为什么日期写 10-19**（同 654 / 657 / 660）：10-19 起每个旧代码扫描日等价判据都成立（冻结证据 "
+     "`experiments/macro_bars_dated_equivalence_20261019.json`：10-19 ~ 10-23 每天 11 只存档涨跌 = 按日期重算、冷热三只相同，黄金 Finnhub、"
+     "10Y 当天财政部、VIX CBOE；10-26 轮动表为空且整轮 yfinance 0 次成功响应），**边际作废 0 条**。"
+     "等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.663\"]`；印记 `_BOUNDARY_MARKERS[\"v0.45.663\"]`：Guard `details.macro_bars_dated_checked` 字面量 True"
+     "（成功与出错路径都写，`guard_bee.GENERATION_MARKS`），实时行。预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.663\"]` = `agent.GuardBeeSentinel.*`（0 个信号后移）；`guard.macro_adj` 不点名（同 654 / 657 / 660）。"
+     "维度 IC 协议 H1 / H2 不读 Guard 宏观票 ⇒ 不截断（新函数放在 `bars_integrity`，不进 `price.fields` 指纹单元）。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1829,6 +1846,57 @@ def _equiv_fred_series_isolated(d: dict) -> bool:
     return src == "fallback" or _treasury_curve_proven(d, src)
 
 
+_MACRO_BARS_DATED_EVIDENCE_PATH = (Path(__file__).resolve().parent / "experiments"
+                                  / "macro_bars_dated_equivalence_20261019.json")
+#: 证据里算「新旧代码输出相同」的状态：11 只板块涨跌存档 = 按日期重算且冷热相同 / 轮动表为空且整轮 yfinance 0 次成功响应
+#: （两者都要求黄金 Finnhub、10Y 当天财政部、VIX CBOE、实时口径）
+_MACRO_BARS_DATED_EQUIV_STATUSES = frozenset({"equivalent", "equivalent_no_yfinance_data"})
+
+
+def _load_macro_bars_dated_evidence() -> Dict[str, dict]:
+    """{日期: 证据记录}。读不出 / 结构不对 ⇒ 空（**证不出等价就不算等价**）。每次现读。"""
+    try:
+        with open(_MACRO_BARS_DATED_EVIDENCE_PATH, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return {day: rec for day, rec in (doc.get("days") or {}).items() if isinstance(rec, dict)}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _guard_row_has_bars_dated_marker(d: dict) -> bool:
+    """这行是 v0.45.663 之后的代码写的吗：GuardBeeSentinel `details.macro_bars_dated_checked` 为字面量 `True`
+    （成功与出错路径都写，`guard_bee.GENERATION_MARKS`）。只认 `is True`：此前的记录没有这个键。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    return isinstance(det, dict) and det.get("macro_bars_dated_checked") is True
+
+
+def _marker_guard_bars_dated(d: dict) -> bool:
+    """v0.45.663 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383）。"""
+    return _guard_row_has_bars_dated_marker(d) and not _is_backfill_row(d)
+
+
+def _equiv_macro_bars_dated(d: dict) -> bool:
+    """v0.45.663 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？
+
+    本版改了 `fred_macro` 读 Yahoo 日线的方式（按日期配对）与缺值的写法（不顶数）。经 Guard 的三样：板块冷热三只、黄金趋势、曲线的 10Y。
+    旧代码的逐票记录里没有「每根日线是哪天的」⇒ 读**冻结的外部证据**（`experiments/macro_bars_dated_equivalence_audit.py`），按 `_date` 查：
+      · Guard 不在本行 / 出错 ⇒ 两版同一条路 ⇒ True（认 `error`，不认「没有 details」——v0.45.567 的教训）；
+      · 宏观细节（归档键名 `vix_term_structure`）读不出 / 不是实时行 / VIX 不是 CBOE ⇒ 证不出 ⇒ False
+        （补跑行的宏观报价走 Yahoo，记录里没有各符号的日期）；
+      · 本行的宏观来源与当天日报不一致（证据记下的 `data_source`）⇒ False：不是证据核过的那一份宏观；
+      · 证据状态 `equivalent` / `equivalent_no_yfinance_data` ⇒ True；其余 ⇒ False（举证责任在放宽一侧）。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    if not isinstance(g, dict) or g.get("error"):
+        return True
+    vt = (g.get("details") or {}).get("vix_term_structure")
+    if not isinstance(vt, dict) or vt.get("macro_as_of_mode") != "realtime" or vt.get("vix_source") != "cboe":
+        return False
+    rec = _load_macro_bars_dated_evidence().get(d.get("_date")) or {}
+    return (rec.get("status") in _MACRO_BARS_DATED_EQUIV_STATUSES
+            and isinstance(rec.get("data_source"), str) and vt.get("macro_data_source") == rec["data_source"])
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1876,6 +1944,8 @@ _BOUNDARY_MARKERS = {
                   _marker_guard_fred_isolated),
     "v0.45.658": ("agent_details.GuardBeeSentinel.details.yf_daily_download_checked is True",
                   _marker_guard_yf_download),
+    "v0.45.663": ("agent_details.GuardBeeSentinel.details.macro_bars_dated_checked is True",
+                  _marker_guard_bars_dated),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1919,6 +1989,10 @@ _BOUNDARY_EQUIVALENCE = {
     "v0.45.658": ("冻结证据 experiments/yf_daily_download_equivalence_20261019.json：当天 refuse 读者宇宙里没有公司行动，或有的那几只"
                   "扫描记下的现价就是当天收盘（或 Guard、Rival、Scout 都不在本行 / 都出错）⇒ 本版改动是空操作",
                   _equiv_yf_download, _guard_row_has_download_marker),
+    "v0.45.663": ("冻结证据 experiments/macro_bars_dated_equivalence_20261019.json：当天 11 只板块涨跌存档 = 按日期重算且冷热相同"
+                  "（或轮动表为空且整轮 yfinance 0 次成功响应），黄金 Finnhub、10Y 当天财政部、VIX CBOE，本行宏观来源与当天日报一致"
+                  "（或 Guard 不在本行 / 出错）⇒ 本版改动是空操作",
+                  _equiv_macro_bars_dated, _guard_row_has_bars_dated_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。

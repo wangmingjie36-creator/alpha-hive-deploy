@@ -515,7 +515,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
     与 `TestSpeciesDoesNotSpread` 一样是**子集**语义：清掉存量不会变红，新增必红。
     """
 
-    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**；v0.45.230 +1 `weekly_optimizer._CODE_DIR`；v0.45.289 +1 `backup_continuity.ALPHAHIVE_DIR`；v0.45.383 +1 `ic_rerun_readiness._HV_GAP_EVIDENCE_PATH`；v0.45.451 +1 `alphabot/macos_app._DELEGATE`；v0.45.652 +1 `ic_rerun_readiness._MACRO_ROTATION_EVIDENCE_PATH`；v0.45.658 +1 `ic_rerun_readiness._YF_DOWNLOAD_EVIDENCE_PATH`）。清掉一处就从这里删一行。
+    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**；v0.45.230 +1 `weekly_optimizer._CODE_DIR`；v0.45.289 +1 `backup_continuity.ALPHAHIVE_DIR`；v0.45.383 +1 `ic_rerun_readiness._HV_GAP_EVIDENCE_PATH`；v0.45.451 +1 `alphabot/macos_app._DELEGATE`；v0.45.652 +1 `ic_rerun_readiness._MACRO_ROTATION_EVIDENCE_PATH`；v0.45.658 +1 `ic_rerun_readiness._YF_DOWNLOAD_EVIDENCE_PATH`；v0.45.663 +1 `ic_rerun_readiness._MACRO_BARS_DATED_EVIDENCE_PATH`）。清掉一处就从这里删一行。
     # ⚠️ 子集语义的副作用：**清干净了也不会变红**，过期项会悄悄留下。
     #    定期对账：`KNOWN - _scan(marker="__file__")` 非空即是过期项
     #    （本版就这么揪出 2 条已清却还挂着的）。
@@ -547,6 +547,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("ic_rerun_readiness.py", "_HV_GAP_EVIDENCE_PATH"),  # experiments/hv_gap_equivalence_20260928.json，v0.45.383 冻结的等价证据，随代码发布、判定时只读
         ("ic_rerun_readiness.py", "_MACRO_ROTATION_EVIDENCE_PATH"),  # experiments/macro_rotation_equivalence_20261019.json，v0.45.652 冻结的等价证据，同上
         ("ic_rerun_readiness.py", "_YF_DOWNLOAD_EVIDENCE_PATH"),  # experiments/yf_daily_download_equivalence_20261019.json，v0.45.658 冻结的等价证据，同上
+        ("ic_rerun_readiness.py", "_MACRO_BARS_DATED_EVIDENCE_PATH"),  # experiments/macro_bars_dated_equivalence_20261019.json，v0.45.663 冻结的等价证据，同上
         # ── C. 已读 `ALPHA_HIVE_HOME`、`__file__` 只作兜底（另一个子物种，冻在 import 期）──
         # v0.45.198: ("agent_toolbox.py", "ALLOWED_ROOTS") 已摘除 —— `FilesystemTool`
         # 零读者被删，`ALLOWED_ROOTS` 随之消失。⚠️ 摘它**不是**因为有测试变红：
@@ -750,6 +751,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("ic_rerun_readiness.py", "_HV_GAP_EVIDENCE_PATH"),  # v0.45.383：冻结证据，判定时只读；指向代码同址的文件、不是数据
         ("ic_rerun_readiness.py", "_MACRO_ROTATION_EVIDENCE_PATH"),  # v0.45.652：同上（板块轮动等价证据）
         ("ic_rerun_readiness.py", "_YF_DOWNLOAD_EVIDENCE_PATH"),  # v0.45.658：同上（yf.download 读者等价证据）
+        ("ic_rerun_readiness.py", "_MACRO_BARS_DATED_EVIDENCE_PATH"),  # v0.45.663：同上（宏观日线按日期配对等价证据）
     }
 
     def test_code_anchored_paths_were_not_wrongly_converted(self):

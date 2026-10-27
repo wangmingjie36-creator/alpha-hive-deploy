@@ -481,6 +481,8 @@ class TestSectorRotation:
     def rotation(self, monkeypatch):
         import fred_macro as fm
         monkeypatch.setattr(fm, "_etf_cache", {})
+        # v0.45.663：板块轮动按日期配对、锚定「这一场」——钉在夹具末根那天（否则跟着真实钟走、配不上）
+        monkeypatch.setattr(fm, "_realtime_as_of", lambda: DAYS[-1])
         d5 = DAYS[-5:]
         frames = {e: _frame(d5, seed=i) for i, e in enumerate(fm._SECTOR_ETFS)}
 

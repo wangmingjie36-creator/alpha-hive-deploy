@@ -37,7 +37,8 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Dict, List, Optional, Sequence
+import math
+from typing import Any, Dict, List, Optional, Sequence
 
 # 20 日滚动窗口的当前值依赖「最后 21 根」（21 根 ⇒ 20 个日收益）
 DEFAULT_CRITICAL_BARS = 21
@@ -78,6 +79,77 @@ def trading_days(start: dt.date, end: dt.date) -> List[dt.date]:
             out.append(d)
         d += dt.timedelta(days=1)
     return out
+
+
+def sessions_before(anchor: dt.date, n: int) -> dt.date:
+    """`anchor` 往前数第 `n` 个交易日（`anchor` 本身不算，`n` ≥ 1；含 `AD_HOC_CLOSURES`）。"""
+    if n < 1:
+        raise ValueError(f"sessions_before: n 必须 ≥ 1（收到 {n}）")
+    from is_trading_day import is_trading_day
+    d, k = anchor, 0
+    for _ in range(7 * n + 15):              # 每个交易日之间最多隔几天休市，15 天兜底同 previous_completed_session
+        d -= dt.timedelta(days=1)
+        if d not in AD_HOC_CLOSURES and is_trading_day(d)[0]:
+            k += 1
+            if k == n:
+                return d
+    raise ValueError(f"sessions_before: {anchor} 往前 {n} 个交易日没找到")  # pragma: no cover - 不可达
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v0.45.663：按日期配对的涨跌（宏观报价 / 板块轮动）
+# ─────────────────────────────────────────────────────────────────────────────
+# 此前 `fred_macro` 读日线是**数第几根**：末根当「这一场」、倒数第二根当前一场、`iloc[0]` / `iloc[-5]` 当四场前。
+# 这要求 Yahoo 一根不缺——缺一根，后面整体错位一格，不报错。第 0 步只读实测（2026-10-27，拿当时存档对今天的 Yahoo）：
+#   · 08-31 补跑存的大盘涨跌 −0.58% = 08-31 / 08-27——当时 Yahoo 缺 08-28 那根（同一天日志里 NVDA 也报缺 08-28），按日期是 −0.33%；
+#   · ^VIX 在 2026-09-07（劳动节）多出一根 ⇒ 按位置，09-08 的「前一场」是假日那根。
+# 今天再取 08-28 已被补齐——事后看不见，只能靠当时存下的值反推（同模块开头 09-22 那根）。
+# 所以只认日期：锚定日那根缺 ⇒ 什么都不给；只缺基准那根 ⇒ 水平照给、涨跌给 None（不拿更早一根顶替）。
+
+
+def closes_by_session(hist) -> Dict[dt.date, float]:
+    """日线 → ``{日期: 收盘}``。只收有限、为正的收盘；同一天出现不止一行 ⇒ 那天不收（分不清哪根是真的）。
+
+    只用 ``hist.index.date`` 与 ``hist["Close"]`` 的迭代（真 pandas 与测试替身同一接口）。"""
+    if hist is None or len(hist) == 0:
+        return {}
+    days = list(hist.index.date)
+    seen: Dict[dt.date, int] = {}
+    for d in days:
+        seen[d] = seen.get(d, 0) + 1
+    out: Dict[dt.date, float] = {}
+    for d, c in zip(days, hist["Close"]):
+        if seen[d] > 1:
+            continue
+        try:
+            v = float(c)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(v) and v > 0:
+            out[d] = v
+    return out
+
+
+def session_change(hist, anchor: dt.date, sessions_back: int) -> Dict[str, Any]:
+    """`anchor` 那根收盘对它往前第 `sessions_back` 个交易日那根收盘的涨跌（%），**按日期配对**。
+
+    → ``{"last", "prev", "change_pct", "base", "missing"}``（`base` 是基准日）：
+
+    · 锚定日那根没有（或不是有限正数）⇒ last / prev / change_pct 全 None，``missing = "anchor_missing:<日期>"``；
+    · 只缺基准那根 ⇒ last 照给，prev / change_pct 为 None，``missing = "base_missing:<日期>"``；
+    · 都在 ⇒ ``missing = None``，``change_pct = (last / prev − 1) × 100``（与旧代码同一表达式：同一对收盘逐位相同）。
+    """
+    base = sessions_before(anchor, sessions_back)
+    closes = closes_by_session(hist)
+    last = closes.get(anchor)
+    if last is None:
+        return {"last": None, "prev": None, "change_pct": None, "base": base,
+                "missing": f"anchor_missing:{anchor.isoformat()}"}
+    prev = closes.get(base)
+    if prev is None:
+        return {"last": last, "prev": None, "change_pct": None, "base": base,
+                "missing": f"base_missing:{base.isoformat()}"}
+    return {"last": last, "prev": prev, "change_pct": (last / prev - 1) * 100, "base": base, "missing": None}
 
 
 def find_gaps(dates: Sequence[str], *, today: Optional[dt.date] = None,

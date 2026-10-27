@@ -27,8 +27,27 @@ def _clear_fred_cache():
     fred_macro._etf_cache = {}
 
 
+#: v0.45.663：宏观报价 / 板块轮动按日期配对、锚定「这一场」（实时 = `_realtime_as_of()`）。下面的假日线
+#: 是止于 ANCHOR 的连续交易日，用到它们的类钉 `_anchored`（只这一只钟：`_realtime_as_of` 读 cboe_options._et_now）
+ANCHOR = "2026-09-04"   # 周五；08-31 ~ 09-04 都是交易日（`test_anchor_window_is_five_sessions` 断言，不心算）
+_SESSIONS = ["2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04"]
+
+
+@pytest.fixture
+def _anchored(monkeypatch):
+    import fred_macro
+    monkeypatch.setattr(fred_macro, "_realtime_as_of", lambda: ANCHOR)
+
+
+def test_anchor_window_is_five_sessions():
+    import datetime as dt
+    import bars_integrity
+    assert bars_integrity.trading_days(dt.date(2026, 8, 29), dt.date(2026, 9, 4)) == [
+        dt.date.fromisoformat(d) for d in _SESSIONS]
+
+
 def _mock_yf_ticker(symbol, close_values):
-    """创建模拟 yfinance Ticker 对象"""
+    """创建模拟 yfinance Ticker 对象（日线取 _SESSIONS 末 N 天，止于 ANCHOR）"""
     mock = MagicMock()
     df = pd.DataFrame({
         "Close": close_values,
@@ -36,7 +55,7 @@ def _mock_yf_ticker(symbol, close_values):
         "High": [v * 1.01 for v in close_values],
         "Low": [v * 0.99 for v in close_values],
         "Volume": [1000000] * len(close_values),
-    })
+    }, index=pd.DatetimeIndex([pd.Timestamp(d, tz="America/New_York") for d in _SESSIONS[-len(close_values):]]))
     mock.history.return_value = df
     return mock
 
@@ -113,6 +132,7 @@ class TestMacroRiskAdjustment:
             assert -2.0 <= adj <= 1.5, f"adj={adj} out of range for {case}"
 
 
+@pytest.mark.usefixtures("_anchored")
 class TestYieldCurve:
     """收益率曲线计算测试"""
 
@@ -176,6 +196,7 @@ class TestYieldCurve:
         assert result["yield_spread"] > 20
 
 
+@pytest.mark.usefixtures("_anchored")
 class TestGoldTrend:
     """黄金趋势计算测试"""
 
@@ -296,6 +317,7 @@ class TestGoldTrend:
         assert "黄金" not in all_winds
 
 
+@pytest.mark.usefixtures("_anchored")
 class TestSectorRotation:
     """板块轮动测试"""
 
