@@ -1138,6 +1138,27 @@ _COHORT_HISTORY = [
      "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.660\"]` = `agent.GuardBeeSentinel.*`（0 个信号后移）；`guard.macro_adj` 不点名（同 654 / 657）。"
      "CPI / 失业率 / 联邦基金利率 / HY 只进 fred_macro 自己的 `macro_score` 与顺逆风文案（展示）。维度 IC 协议 H1 / H2 不读 Guard 宏观票 ⇒ 不截断。"
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
+    ("2026-10-19", "v0.45.658",
+     "v0.45.652 二次检查（用户 2026-10-27「都按推荐的来，按根因修复」）。`yf_daily` 收进 `yf.download` 读者（16 处）与带日期窗口的 "
+     "`history()` 读者（11 处，此前的「dated_window」例外），末段空行改按「最近一场**已收盘**的交易日是不是缺了」判（`yf_daily.latest_completed_session`）。"
+     "**按日期用的读者（末行策略 ignore）逐位不变**：`yf_daily.download` 内部 actions=True 取、去掉空行后还原成 actions=False 的形状"
+     "（真 yfinance 代码路径对拍逐位相同）；带日期窗口的 history 读者只在窗口里真有空行时少一行 NaN 行。"
+     "**可能进评分的只有 refuse 的读者、且只在「最近一场缺了」的日子**：预取包（此前裸 `yf.download`，末行空行被 yfinance 一声不吭删掉 ⇒ "
+     "前一场冒充今天）→ Rival 技术面 / Scout 相对强度；`_yf_close_panel` 直连 → Scout；`market_intelligence._get_ma` → Guard 市场政体；"
+     "供应链 → Scout。收盘后扫描里「最近一场缺了」要求某只标的在扫描日 D 有公司行动、D 那根却缺。"
+     "盘前口径的变化（除息日今天、今天那场未收 ⇒ 照用前一场，与没有事件的日子一样；652 是一律当取不到）只影响收盘前的手动跑，"
+     "生产 14:00 PDT 收盘后碰不到。"
+     "**为什么日期写 10-19**（同 652 / 654 / 657）：10-19 起每个旧代码扫描日等价判据都成立（冻结证据 "
+     "`experiments/yf_daily_download_equivalence_20261019.json`：refuse 读者宇宙 46 只标的的事件日历里只有 DELL 10-20 除息落在扫描日，"
+     "当天扫描记下的 DELL 现价 461.56 = 10-20 收盘、≠ 10-19 的 455.44 ⇒ 10-20 那根在、分红并进它、不成空行），与同日标签一起扩展，"
+     "**边际作废 0 条**。等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.658\"]`；印记 `_BOUNDARY_MARKERS[\"v0.45.658\"]`：Guard "
+     "`details.yf_daily_download_checked` 字面量 True——**成功与出错路径都写**（`guard_bee.GENERATION_MARKS` / `_with_generation_marks`；"
+     "652 二次检查 #3：此前印记只在成功路径，新代码出错的行会被当成旧代码、去查只覆盖旧日子的证据），实时行（`_is_backfill_row` 同版也认出错行 "
+     "details 顶层的 `macro_as_of_mode`）。预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.658\"]` = `agent.GuardBeeSentinel.*`（0 个信号后移）；Rival / Scout 刻意不点名"
+     "（同 652「实测没换 ⇒ 照证据不列」：证据窗口里没有一天受影响）。前瞻检验：维度 IC H1（`price_metrics.py` 只改计数分档与共用的"
+     "按行号删、值逐位不变 ⇒ `price.fields` 登 no_value_change）/ H2（Oracle 的 IV-RV 读者 ignore、逐位不变；HV 未动）不截断。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1381,11 +1402,16 @@ def _oracle_row_is_new_code(d: dict) -> bool:
 
 def _is_backfill_row(d: dict) -> bool:
     """这行是补跑（`--date D`）产的吗：Guard 宏观细节 `macro_as_of_mode == "backfill"`（v0.45.366 起两种口径都写）。
-    只认**显式** backfill，缺键照实时算（同 v0.45.373 对 357 时代归档的处理）。"""
+    只认**显式** backfill，缺键照实时算（同 v0.45.373 对 357 时代归档的处理）。
+
+    v0.45.658：Guard 出错的行（新代码起也写世代印记，`guard_bee._with_generation_marks`）没有宏观细节，口径写在 details **顶层**
+    的 `macro_as_of_mode`——同样认，否则新代码补跑时出错的那一行会被当成实时行、把印记首见日拉早。"""
     g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
     det = g.get("details") if isinstance(g, dict) else None
-    vt = det.get("vix_term_structure") if isinstance(det, dict) else None
-    return isinstance(vt, dict) and vt.get("macro_as_of_mode") == "backfill"
+    if not isinstance(det, dict):
+        return False
+    vt = det.get("vix_term_structure")
+    return (isinstance(vt, dict) and vt.get("macro_as_of_mode") == "backfill") or det.get("macro_as_of_mode") == "backfill"
 
 
 def _marker_oracle_options_dq_from_agent(d: dict) -> bool:
@@ -1659,6 +1685,50 @@ _TREASURY_FULL_CURVE_DAYS = frozenset({"2026-10-19", "2026-10-20", "2026-10-21",
 def _treasury_curve_proven(d: dict, src: str) -> bool:
     """来源含 treasury **且**这一天在 `_TREASURY_FULL_CURVE_DAYS` 里（10Y / 2Y 逐期限核过是财政部的）。"""
     return "treasury" in src.split("@")[0].split("+") and d.get("_date") in _TREASURY_FULL_CURVE_DAYS
+def _guard_row_has_download_marker(d: dict) -> bool:
+    """这行是 v0.45.658 之后的代码写的吗：GuardBeeSentinel `details.yf_daily_download_checked` 为字面量 `True`。
+    成功路径无条件写，**出错路径也写**（`guard_bee._with_generation_marks`——652 二次检查 #3：只写在成功路径时，新代码出错的
+    那一行在等价扫描里被当成旧代码、去查只覆盖旧代码日子的证据 ⇒ 假「边界写早了」）。只认 `is True`：此前的记录没有这个键。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    return isinstance(det, dict) and det.get("yf_daily_download_checked") is True
+
+
+def _marker_guard_yf_download(d: dict) -> bool:
+    """v0.45.658 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383）。"""
+    return _guard_row_has_download_marker(d) and not _is_backfill_row(d)
+
+
+_YF_DOWNLOAD_EVIDENCE_PATH = (Path(__file__).resolve().parent / "experiments"
+                              / "yf_daily_download_equivalence_20261019.json")
+#: 证据里算「新旧代码输出相同」的状态：读者宇宙里当天没有任何公司行动 / 有的那几只扫描记下的现价就是 D 的收盘（D 那根在）
+_YF_DOWNLOAD_EQUIV_STATUSES = frozenset({"equivalent", "equivalent_bar_present"})
+
+
+def _load_yf_download_evidence() -> Dict[str, str]:
+    """{日期: 状态}。读不出 / 结构不对 ⇒ 空（**证不出等价就不算等价**）。每次现读。"""
+    try:
+        with open(_YF_DOWNLOAD_EVIDENCE_PATH, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return {day: rec.get("status") for day, rec in (doc.get("days") or {}).items()}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _equiv_yf_download(d: dict) -> bool:
+    """v0.45.658 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？
+
+    按日期用的读者（ignore）拿到的帧与改前逐位相同（`yf_daily.download` 还原成 actions=False 的形状，真 yfinance 代码路径对拍）；
+    只有末行策略 refuse 的读者在「最近一场已收盘的 K 线缺了」时改口：预取包 / 收盘价面板（Rival 技术面、Scout 相对强度）、
+    市场政体均线（Guard）、供应链（Scout）。收盘后扫描里「最近一场缺了」要求某只标的在扫描日 D 有公司行动而 D 那根缺 ⇒
+    读**冻结的外部证据**（`experiments/yf_daily_download_equivalence_audit.py`：事件日历 + 扫描记下的现价），按 `_date` 查：
+    `equivalent` / `equivalent_bar_present` ⇒ True。Guard、Rival、Scout 都不在本行 / 都出错 ⇒ 两版同一条路 ⇒ True。
+    其余 ⇒ False（举证责任在放宽一侧）。"""
+    agents = (d.get("swarm_results") or {}).get("agent_details") or {}
+    touched = [agents.get(k) for k in ("GuardBeeSentinel", "RivalBeeVanguard", "ScoutBeeNova")]
+    if all(not isinstance(a, dict) or a.get("error") for a in touched):
+        return True
+    return _load_yf_download_evidence().get(d.get("_date")) in _YF_DOWNLOAD_EQUIV_STATUSES
 
 
 def _guard_row_has_quote_dates_marker(d: dict) -> bool:
@@ -1804,6 +1874,8 @@ _BOUNDARY_MARKERS = {
                   _marker_guard_fred_vintage),
     "v0.45.660": ("agent_details.GuardBeeSentinel.details.macro_fred_series_isolated is True",
                   _marker_guard_fred_isolated),
+    "v0.45.658": ("agent_details.GuardBeeSentinel.details.yf_daily_download_checked is True",
+                  _marker_guard_yf_download),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1844,6 +1916,9 @@ _BOUNDARY_EQUIVALENCE = {
                   _equiv_fred_vintage, _guard_row_has_fred_vintage_marker),
     "v0.45.660": ("Guard 出错 / 不在本行，或宏观来源是 fallback / 含 treasury 且当天 2Y 核过是财政部的（`_TREASURY_FULL_CURVE_DAYS`，FRED 到不了 Guard）⇒ 本版改动是空操作",
                   _equiv_fred_series_isolated, _guard_row_has_fred_isolated_marker),
+    "v0.45.658": ("冻结证据 experiments/yf_daily_download_equivalence_20261019.json：当天 refuse 读者宇宙里没有公司行动，或有的那几只"
+                  "扫描记下的现价就是当天收盘（或 Guard、Rival、Scout 都不在本行 / 都出错）⇒ 本版改动是空操作",
+                  _equiv_yf_download, _guard_row_has_download_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。

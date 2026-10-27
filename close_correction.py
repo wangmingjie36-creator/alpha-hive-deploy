@@ -207,8 +207,10 @@ def official_closes(tickers: List[str], lo: str, hi: str) -> Dict[Tuple[str, str
         start = (dt.date.fromisoformat(lo) - dt.timedelta(days=10)).isoformat()
         end = (dt.date.fromisoformat(hi) + dt.timedelta(days=1)).isoformat()
         try:
-            h = yf.download(sorted(set(tickers)), start=start, end=end,
-                            progress=False, auto_adjust=False)["Close"]
+            import yf_daily
+            # v0.45.658：经唯一入口（按日期核对：帧与 actions=False 时逐位相同）
+            h = yf_daily.download(yf, sorted(set(tickers)), source="close_correction", start=start, end=end,
+                                  progress=False, auto_adjust=False)[0]["Close"]
         except Exception as e:  # noqa: BLE001 - 拿不到就交给下面 Twelve Data 补，不在这里 return
             _log.error("yfinance 批量下载失败：%s: %s", type(e).__name__, e)
         else:

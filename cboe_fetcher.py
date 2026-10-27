@@ -622,8 +622,10 @@ class CBOEDailyFetcher:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
 
-                data = yf.download(f'^{symbol}', period='1d', progress=False)
-                if not data.empty:
+                import yf_daily
+                # v0.45.658：经唯一入口（指数没有分红，实际吃不到空行；入口照过）。最近一场缺了 ⇒ 当没取到
+                data, _missing = yf_daily.download(yf, f'^{symbol}', source="index_level", period='1d', progress=False)
+                if not any(_missing.values()) and not data.empty:
                     result[value_key] = _last_close(data)
                     result['source'] = 'yfinance'
                     result['signal'] = classify(result[value_key])

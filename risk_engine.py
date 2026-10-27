@@ -163,8 +163,10 @@ def _fetch_multi_returns(tickers: List[str],
     try:
         import yfinance as yf
         import pandas as pd
-        raw = yf.download(tickers, period=period,
-                          auto_adjust=True, progress=False)
+        import yf_daily
+        # v0.45.658：经唯一入口（收益序列按日期对齐，末行不另判）
+        raw = yf_daily.download(yf, tickers, source="risk_engine_cli", period=period,
+                                auto_adjust=True, progress=False)[0]
         if raw.empty:
             raise ValueError("empty")
         close = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
@@ -610,8 +612,10 @@ def _estimate_beta(ticker: str, benchmark: str = "SPY",
     try:
         import yfinance as yf
         import pandas as pd
-        raw = yf.download([ticker, benchmark], period="3mo",
-                          auto_adjust=True, progress=False)
+        import yf_daily
+        # v0.45.658：经唯一入口（β 用收益序列按日期对齐，末行不另判）
+        raw = yf_daily.download(yf, [ticker, benchmark], source="risk_engine_cli", period="3mo",
+                                auto_adjust=True, progress=False)[0]
         close = raw["Close"]
         if isinstance(close.columns, pd.MultiIndex):
             # yfinance 多标的返回 MultiIndex

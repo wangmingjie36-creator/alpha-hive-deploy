@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "commit": "5a9015c4fa085c67b27836499156995d66ccac33",
+  "commit": "e7bbcb8aea6d85ff97d49984b30538ada1c26886",
   "reads_all_tests": [
     "tests/test_agent_weight_manager_retired.py",
     "tests/test_bare_env_children_pin_data_root.py",
@@ -95,6 +95,7 @@
     "experiments/signal_ic_sweep_report.md": ["tests/test_experiments_pooled_guard.py"],
     "experiments/straddle_strangle_shadow_prereg.md": ["tests/test_straddle_strangle_shadow.py"],
     "experiments/strategy_edge_prereg.md": ["tests/test_strategy_edge_test.py"],
+    "experiments/yf_daily_download_equivalence_20261019.json": ["tests/test_yf_daily.py"],
     "prompts/news_sentiment_analyst.md": ["tests/test_llm_injection_guard.py", "tests/test_llm_service.py", "tests/test_prompt_loader.py"],
     "prompts/options_strategist.md": ["tests/test_deep_report_no_fabrication.py", "tests/test_prompt_loader.py"],
     "prompts/step1_analysis_engine.md": ["tests/test_deep_report_no_fabrication.py", "tests/test_prompt_loader.py"],

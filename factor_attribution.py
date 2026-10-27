@@ -202,7 +202,9 @@ def load_ff6_factors(start: pd.Timestamp, end: pd.Timestamp,
 def _get_stock_returns(ticker: str, start: pd.Timestamp,
                        end: pd.Timestamp) -> pd.Series:
     """从 yfinance 获取日收益率（小数），index 为 pd.Timestamp。"""
-    hist = yf.Ticker(ticker).history(start=start.date(), end=end.date(), auto_adjust=True)
+    import yf_daily
+    # v0.45.658：经唯一入口（带日期窗口、按日期用；此前是「dated_window」例外——结构上只核得到 start=，「末行碰不到」核不了）
+    hist = yf_daily.history(yf.Ticker(ticker), source="factor_attribution", start=start.date(), end=end.date(), auto_adjust=True)[0]
     if hist.empty or len(hist) < 20:
         raise ValueError(f"yfinance 数据不足：{ticker} ({len(hist)} 行)")
     prices = hist["Close"].astype(float)

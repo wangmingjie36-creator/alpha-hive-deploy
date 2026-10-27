@@ -130,7 +130,9 @@ def _compute_post_earnings_drift(
         earliest = min(earnings_dates)
         start = (datetime.strptime(earliest, "%Y-%m-%d") - timedelta(days=3)).strftime("%Y-%m-%d")
         end = datetime.now().strftime("%Y-%m-%d")
-        hist = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
+        import yf_daily
+        # v0.45.658：经唯一入口（按财报日取价：帧与 actions=False 时逐位相同）
+        hist = yf_daily.download(yf, ticker, source="pead", start=start, end=end, progress=False, auto_adjust=True)[0]
         if hist.empty:
             return []
         # 兼容新版 yfinance 单票下载返回 MultiIndex 列名（如 ('Close','NVDA')），

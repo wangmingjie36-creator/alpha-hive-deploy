@@ -108,9 +108,10 @@ def counters() -> Dict[str, Optional[dict]]:
     不在首行的总数与前 20 条明细（yfinance 只给越界事件补空行 ⇒ 实际是末行；中间位置是防御，见 `price_metrics` 模块说明）。外加评分那一刻的快照 `at_scoring`（同 `history_fill`）。
     不在首行 ⇒ alert_manager P2。
 
-    `yf_daily`（v0.45.652）：行情三字段以外的 yfinance 日线读者经唯一入口 `yf_daily.history` 去掉的公司行动空行——调了几次、
-    去掉几行、首行（窗口外边界日，正常）/ 末行（最近那根缺了，调用方按各自语义当取不到）/ 中间（yfinance 1.2.0 不会产生）、
-    末行 + 中间的总数与前 20 条明细（带调用点名 `source`）、逐调用点计数。末行 / 中间 ⇒ alert_manager P2。
+    `yf_daily`（v0.45.652；v0.45.658 起含 `yf.download` 读者）：行情三字段以外的 yfinance 日线读者经唯一入口去掉的公司行动空行——
+    调了几次、看过几份单票日线、去掉几行、首段（窗口外边界日，正常）/ 末段分两种：「最近一场已收盘的 K 线缺了」（`last_row`，
+    refuse 的调用方当取不到）与「今天那场还没收」（`last_row_pending`，盘前跑，照用）/ 中间（yfinance 1.2.0 不会产生）、
+    日历判不了的份数、「缺了」+ 中间的总数与前 20 条明细（带调用点名 `source`）、逐调用点计数。缺了 / 中间 ⇒ alert_manager P2。
 
     `price_nonfinite`（v0.45.653）：`price_metrics.history_price_metrics` 把算出非有限数的动量 / 量比改成 None 的次数与明细（真 K 线缺收盘 /
     缺量，2026-08-28 型；值交给出口回落）。外加评分那一刻的快照 `at_scoring`。评分时就有 ⇒ alert_manager P2。
@@ -452,7 +453,8 @@ def summary_line(snap: dict) -> str:
     yd = c.get("yf_daily")
     if yd and yd.get("dropped"):                                        # v0.45.652
         pg_s += (f" | 其他日线读者去掉公司行动空行 {yd['dropped']} 行"
-                 f"(首行 {yd.get('first_row', 0)}, 末行 {yd.get('last_row', 0)}, 中间 {yd.get('middle', 0)})")
+                 f"(首段 {yd.get('first_row', 0)}, 最近一场缺了 {yd.get('last_row', 0)} 份"
+                 f", 今天未收 {yd.get('last_row_pending', 0)} 份, 中间 {yd.get('middle', 0)})")
     nf = c.get("price_nonfinite")
     if nf and (nf.get("momentum_5d") or nf.get("volume_ratio")):        # v0.45.653
         pg_s += f" | 行情非有限改缺失 动量 {nf.get('momentum_5d', 0)} 次/量比 {nf.get('volume_ratio', 0)} 次"

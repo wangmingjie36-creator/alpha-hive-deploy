@@ -434,8 +434,10 @@ def _close_panel(yf, tickers: List[str], start: str, end: str):
     DataFrame（memory `alpha-hive-yfinance-multiindex`）—— 重试路径逐只下载两种都会遇到，
     拍成同一形状。
     """
-    px = yf.download(list(tickers), start=start, end=end,
-                     progress=False, auto_adjust=True)["Close"]
+    import yf_daily
+    # v0.45.658：经唯一入口（按日期用：帧与 actions=False 时逐位相同）
+    px = yf_daily.download(yf, list(tickers), source="ic_diagnostics", start=start, end=end,
+                           progress=False, auto_adjust=True)[0]["Close"]
     if not hasattr(px, "columns"):
         px = px.to_frame(name=tickers[0])
     return px
