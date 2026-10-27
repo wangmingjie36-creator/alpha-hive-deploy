@@ -263,6 +263,9 @@ class GuardBeeSentinel(BeeAgent):
                     # v0.45.654 世代印记（同上，无条件写；与 652 那条分开）：`fred_macro` 补跑宏观报价核对末根是 D、
                     # 收益率曲线只用观测到的 10Y。判别器按它认新代码（`ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.654"]`）
                     "macro_quote_dates_checked": True,
+                    # v0.45.657 世代印记（同上，无条件写；与 652 / 654 分开）：`fred_macro` 补跑时 FRED 序列按 D 的时点取
+                    # （2Y 经曲线进本票）。判别器按它认新代码（`ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.657"]`）
+                    "macro_fred_vintage_checked": True,
                     # ③ 时间周期
                     "cycle_context": cycle_ctx,
                     # ④ 市场政体

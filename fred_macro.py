@@ -695,7 +695,8 @@ def _fetch_macro_data() -> Dict:
         fred_data = {}
         fred_key = _load_fred_key()
         if fred_key:
-            fred_data = _fetch_fred_series(fred_key)
+            # v0.45.657：补跑按 D 的时点取（见 `_fetch_fred_series`）；旧代码补跑也取运行当天的最新值
+            fred_data = _fetch_fred_series(fred_key, vintage=_as_of)
             # FRED 精确 2Y 覆盖 5Y 近似 —— 但**不覆盖财政部**：
             # FRED 转发的就是财政部的数，且晚一天（实测 08-26 vs 08-27）。
             # 用它盖掉更新的同源数据是纯粹的倒退。
@@ -921,10 +922,21 @@ def _fetch_macro_data() -> Dict:
         return base
 
 
-def _fetch_fred_series(api_key: str) -> Dict:
+#: `_fetch_fred_series` 产出的观测键（补跑时缺哪个就点名哪个）
+_FRED_FIELDS = ("cpi_yoy", "unemployment", "fed_funds_rate", "treasury_2y", "hy_spread_bp")
+
+
+def _fetch_fred_series(api_key: str, vintage: Optional[str] = None) -> Dict:
     """从 FRED API 获取 CPI（同比）、失业率等月度数据（使用 requests 解决 macOS SSL 问题）
 
     已集成弹性层：CircuitBreaker 熔断 + get_session 连接池复用。
+
+    v0.45.657：`vintage=D`（补跑）⇒ 每条请求带 `realtime_start=realtime_end=D`，取 FRED **在 D 那天的样子**
+    （ALFRED 时点数据）。旧代码补跑也取「运行当天的最新值」：补跑晚几周跑，2Y 就是几周后的（Treasury 缺 D 行时
+    经曲线进 Guard 宏观票），CPI 还会拿到 D 之后才发布的月份与修订值。不用 `observation_end=D`：CPI 的观测日是
+    月初、发布在次月中，按观测日截照样看得到未来。时点口径下 2Y / 联邦基金利率是 D 当天已发布的最新一场
+    （通常 D−1，与 D 那天实时扫描从 FRED 拿到的相同）；HY 利差可能已含 D 当晚发布的 D 值（≤ D，只进展示）。
+    时点请求失败 ⇒ 该项没取到、WARNING 点名，**不回落最新值**；结果带 `vintage` 键（全缺时不带，免得空结果被当成「有 FRED」）。
     """
     # 熔断检查
     if _fred_breaker and not _fred_breaker.allow_request():
@@ -932,6 +944,7 @@ def _fetch_fred_series(api_key: str) -> Dict:
         return {}
 
     result = {}
+    _pit = {"realtime_start": vintage, "realtime_end": vintage} if vintage else {}
     try:
         import requests as _req
         _session = get_session("fred") if _RESILIENCE_OK else _req
@@ -940,7 +953,7 @@ def _fetch_fred_series(api_key: str) -> Dict:
         # CPI 同比：取最近 13 个月做真正 YoY（而非月环比年化）
         r = _session.get(base, params={
             "series_id": "CPIAUCSL", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "13"
+            "file_type": "json", "sort_order": "desc", "limit": "13", **_pit
         }, timeout=8)
         if r.ok:
             obs = r.json().get("observations", [])
@@ -953,7 +966,7 @@ def _fetch_fred_series(api_key: str) -> Dict:
         # 失业率：最新值
         r2 = _session.get(base, params={
             "series_id": "UNRATE", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "1"
+            "file_type": "json", "sort_order": "desc", "limit": "1", **_pit
         }, timeout=8)
         if r2.ok:
             obs2 = r2.json().get("observations", [])
@@ -964,27 +977,29 @@ def _fetch_fred_series(api_key: str) -> Dict:
         # 联邦基金利率（实际有效利率）
         r3 = _session.get(base, params={
             "series_id": "DFF", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "1"
+            "file_type": "json", "sort_order": "desc", "limit": "1", **_pit
         }, timeout=8)
         if r3.ok:
             obs3 = r3.json().get("observations", [])
             if obs3:
                 result["fed_funds_rate"] = float(obs3[0]["value"])
+                result["fed_funds_rate_date"] = obs3[0]["date"]
 
         # 2Y 国债收益率（收益率曲线精确数据）
         r4 = _session.get(base, params={
             "series_id": "DGS2", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "1"
+            "file_type": "json", "sort_order": "desc", "limit": "1", **_pit
         }, timeout=8)
         if r4.ok:
             obs4 = r4.json().get("observations", [])
             if obs4 and obs4[0].get("value", ".") != ".":
                 result["treasury_2y"] = float(obs4[0]["value"])
+                result["treasury_2y_date"] = obs4[0]["date"]
 
         # HY 信用利差（ICE BofA US HY OAS，单位: 百分点 → 转换为 bp）
         r5 = _session.get(base, params={
             "series_id": "BAMLH0A0HYM2", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "2"
+            "file_type": "json", "sort_order": "desc", "limit": "2", **_pit
         }, timeout=8)
         if r5.ok:
             obs5 = r5.json().get("observations", [])
@@ -1006,6 +1021,13 @@ def _fetch_fred_series(api_key: str) -> Dict:
         _log.debug("FRED API 调用失败: %s", e)
         if _fred_breaker:
             _fred_breaker.record_failure()
+    if vintage:
+        _missing = [k for k in _FRED_FIELDS if result.get(k) is None]
+        if _missing:
+            _log.warning("补跑 FRED 时点数据 %s：%d 项没取到，按没取到处理、不回落最新值（%s）",
+                         vintage, len(_missing), ", ".join(_missing))
+        if result:
+            result["vintage"] = vintage
     return result
 
 

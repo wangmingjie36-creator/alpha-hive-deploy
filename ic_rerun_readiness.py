@@ -1106,6 +1106,21 @@ _COHORT_HISTORY = [
      "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.654\"]` = `agent.GuardBeeSentinel.*`（本来就从 10-19 起 ⇒ 0 个信号后移）；"
      "`guard.macro_adj` 刻意不点名（同 652「实测没换 ⇒ 照证据不列」：09-28 起归档里没有一行受影响，见上）。"
      "前瞻检验：维度 IC 协议 H1 / H2 都不读 Guard 宏观票 ⇒ 不截断。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
+    ("2026-10-19", "v0.45.657",
+     "补跑时 FRED 序列按 D 的时点取（用户 2026-10-27 选「同 654：并进 10-19 同日标签 + 等价判据」）。"
+     "`fred_macro._fetch_fred_series(key, vintage=D)`：补跑（`--date D`）每条请求带 `realtime_start=realtime_end=D`（ALFRED 时点数据）。"
+     "旧代码补跑也取**运行当天的最新值**：财政部缺 D 行（债市假日 / 取数失败）时进曲线的 FRED 2Y ⇒ Guard 宏观票（→ `RegimeWeightAdjuster` 权重 ⇒ "
+     "`final_score`）是补跑那天的、不是 D 那天的；CPI / 失业率 / 联邦基金利率 / HY 利差只进展示（`macro_score` / 顺逆风文案），同样改。"
+     "**只在补跑行变**，实时口径请求逐字不变（`vintage=None` ⇒ 不带时点参数；`fred_extras` 只纯新增 `treasury_2y_date` / `fed_funds_rate_date`，Guard 不读）。"
+     "**历史 0 次**：补跑只有 08-27 / 28 / 31 与 10-12 四天，其中 2Y 走 FRED 进曲线的是 08-27（4.19@08-26）与 10-12（4.75@10-08，哥伦布日债市休市）；"
+     "10-27 实拉时点数据逐项重取：四天的 2Y / CPI / 失业率 / 联邦基金利率 4/4 与记录相同（补跑都跑得及时，「最新值」恰好就是 D 那天的样子），"
+     "只有 HY 利差 3 天不同（旧值早于 D、新值是 D 当天的），档位都没变（< 300 仍 +0.3、300 ~ 400 仍 −0.3），且只进展示。"
+     "**为什么日期写 10-19**（同 654）：10-19 ~ 10-26 六个旧代码扫描日全是实时行 ⇒ 等价判据全部成立，与同日标签一起扩展，**边际作废 0 条**。"
+     "等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.657\"]` 逐行判（实时行 ⇒ 空操作；补跑行记录里没有 FRED 取数时刻 ⇒ 证不出）；"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.657\"]`：Guard `details.macro_fred_vintage_checked` 字面量 True（成功路径无条件写；与 652 / 654 的键分开），实时行。"
+     "预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.657\"]` = `agent.GuardBeeSentinel.*`（0 个信号后移）；`guard.macro_adj` 不点名（同 654：归档里没有一行受影响）。"
+     "前瞻检验：维度 IC 协议 H1 / H2 都不读 Guard 宏观票 ⇒ 不截断。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1652,6 +1667,35 @@ def _equiv_macro_quote_dates(d: dict) -> bool:
     return src == "fallback" or "treasury" in src.split("@")[0].split("+")
 
 
+def _guard_row_has_fred_vintage_marker(d: dict) -> bool:
+    """这行是 v0.45.657 之后的代码写的吗：GuardBeeSentinel `details.macro_fred_vintage_checked` 为字面量 `True`
+    （成功路径无条件写；与 652 / 654 的键分开）。只认 `is True`：此前的记录没有这个键。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    return isinstance(det, dict) and det.get("macro_fred_vintage_checked") is True
+
+
+def _marker_guard_fred_vintage(d: dict) -> bool:
+    """v0.45.657 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383）。"""
+    return _guard_row_has_fred_vintage_marker(d) and not _is_backfill_row(d)
+
+
+def _equiv_fred_vintage(d: dict) -> bool:
+    """v0.45.657 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？逐行判，不需要冻结证据。
+
+    本版只让补跑（`vintage=D`）的 FRED 请求带时点参数；实时口径请求逐字不变。
+      · Guard 不在本行 / 出错 ⇒ 两版同一条路 ⇒ True（认 `error`，不认「没有 details」——v0.45.567 的教训）；
+      · 宏观细节（归档键名 `vix_term_structure`）读不出 ⇒ 证不出 ⇒ False；
+      · `macro_as_of_mode == "realtime"` ⇒ True；
+      · 补跑行 ⇒ False：记录里没有 FRED 取数时刻，分不出「运行时最新值」是不是 D 那天的样子；
+      · 没有 `macro_as_of_mode`（v0.45.366 之前）或其它值 ⇒ False（举证责任在放宽一侧）。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    if not isinstance(g, dict) or g.get("error"):
+        return True
+    vt = (g.get("details") or {}).get("vix_term_structure")
+    return isinstance(vt, dict) and vt.get("macro_as_of_mode") == "realtime"
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1693,6 +1737,8 @@ _BOUNDARY_MARKERS = {
                   _marker_guard_macro_event_rows),
     "v0.45.654": ("agent_details.GuardBeeSentinel.details.macro_quote_dates_checked is True",
                   _marker_guard_macro_quote_dates),
+    "v0.45.657": ("agent_details.GuardBeeSentinel.details.macro_fred_vintage_checked is True",
+                  _marker_guard_fred_vintage),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1729,6 +1775,8 @@ _BOUNDARY_EQUIVALENCE = {
                   _equiv_macro_event_rows, _guard_row_has_event_rows_marker),
     "v0.45.654": ("Guard 出错 / 不在本行，或实时行且宏观来源是 fallback / 含 treasury（10Y 是财政部观测值）⇒ 本版改动是空操作",
                   _equiv_macro_quote_dates, _guard_row_has_quote_dates_marker),
+    "v0.45.657": ("Guard 出错 / 不在本行，或实时行（`macro_as_of_mode == \"realtime\"`：FRED 请求逐字不变）⇒ 本版改动是空操作",
+                  _equiv_fred_vintage, _guard_row_has_fred_vintage_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。

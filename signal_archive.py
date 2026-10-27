@@ -2455,6 +2455,9 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 10-19（v0.45.654，等价论证见 ic_rerun_readiness 同版条目）：补跑宏观报价末根须是 D + 曲线只用观测到的 10Y ⇒ Guard 宏观票的输入。
     # 只在「补跑且 Yahoo 缺 D」/「没整份降级而 10Y 缺」的日子变，09-28 起归档里 0 行 ⇒ 同 652 只点名 Guard（0 个信号后移），`guard.macro_adj` 不点名
     "v0.45.654": ("agent.GuardBeeSentinel.*",),
+    # 10-19（v0.45.657，等价论证见 ic_rerun_readiness 同版条目）：补跑时 FRED 序列按 D 的时点取 ⇒ 2Y 经曲线进 Guard 宏观票。
+    # 只在补跑行变，四个历史补跑日重取逐项相同 ⇒ 同 654 只点名 Guard（0 个信号后移），`guard.macro_adj` 不点名
+    "v0.45.657": ("agent.GuardBeeSentinel.*",),
 }
 
 
