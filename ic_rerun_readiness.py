@@ -1121,6 +1121,23 @@ _COHORT_HISTORY = [
      "预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
      "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.657\"]` = `agent.GuardBeeSentinel.*`（0 个信号后移）；`guard.macro_adj` 不点名（同 654：归档里没有一行受影响）。"
      "前瞻检验：维度 IC 协议 H1 / H2 都不读 Guard 宏观票 ⇒ 不截断。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
+    ("2026-10-19", "v0.45.660",
+     "FRED 序列逐个解析（同 654 / 657：并进 10-19 同日标签 + 等价判据；用户 2026-10-27「修吧，赶在 11-10 前」）。"
+     "`fred_macro._fetch_fred_series`：旧代码五段解析写在同一个 try 里，任何一个值是 \".\"（FRED 缺值）都抛 ValueError、被外层以 debug 吞掉，"
+     "排在它后面的序列一起丢——含财政部缺 2Y 时进曲线的 FRED 2Y（⇒ Guard 宏观票 → `RegimeWeightAdjuster` 权重 ⇒ `final_score`）。"
+     "现在每个序列单独解析（失败 ⇒ 只丢它自己 + WARNING），CPI 同比按日期配对一年前同月（不按位置），缺月 ⇒ 本项缺失、不拿相邻月份顶替；"
+     "连接错误照旧整段中止、记熔断。**两种口径都生效**。"
+     "**会真撞上的日子**：10-27 实拉 CPIAUCSL / UNRATE 的 2025-10-01 是 \".\"（停摆没发布），DFF 1027 天 0 个、DGS2 / HY 的 \".\" 只在假日且早有判断；"
+     "11-10 发布 2026-10 那期 CPI 起，一年前同月正是 2025-10 ⇒ 旧代码到 12-10 下一期为止每轮整段 FRED 落空。"
+     "**历史 0 次**：这个缺月此前从没落在旧代码读的两个位置上；10-27 用旧 / 新代码对实时与 08-27 / 28 / 31、10-12、10-26 的时点数据各取一次，6/6 逐键相同。"
+     "**为什么日期写 10-19**（同 654 / 657）：等价判据对 10-19 ~ 10-26 全部成立，**边际作废 0 条**。"
+     "等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.660\"]` 逐行判：Guard 不在本行 / 出错，或宏观来源是 fallback（不算曲线）/ 含 treasury"
+     "（2Y 出自财政部、FRED 的 2Y 不覆盖它；归档 36/36 天含 treasury 的 2Y 都是 `treasury_gov`）⇒ 本版改动碰不到 Guard——补跑行同样成立；"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.660\"]`：Guard `details.macro_fred_series_isolated` 字面量 True（与 652 / 654 / 657 的键分开），实时行。"
+     "预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.660\"]` = `agent.GuardBeeSentinel.*`（0 个信号后移）；`guard.macro_adj` 不点名（同 654 / 657）。"
+     "CPI / 失业率 / 联邦基金利率 / HY 只进 fred_macro 自己的 `macro_score` 与顺逆风文案（展示）。维度 IC 协议 H1 / H2 不读 Guard 宏观票 ⇒ 不截断。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1632,6 +1649,18 @@ def _equiv_macro_event_rows(d: dict) -> bool:
     return _load_macro_rotation_evidence().get(d.get("_date")) in _MACRO_ROTATION_EQUIV_STATUSES
 
 
+#: 「宏观来源含 treasury」只说明**某个**期限出自财政部（`fred_macro._compose_data_source` 看任一字段；`treasury_yields._parse`
+#: 保留缺期限的行），证明不了 10Y（v0.45.654）/ 2Y（v0.45.660）就是财政部的——Guard 的归档里没有逐字段来源。
+#: v0.45.660 二次检查（独立审查揪出）：这几天 2026-10-27 只读逐日核过——当天日报 `macro_context.field_sources` 的 TNX 与 TWO
+#: 都是 `treasury_gov@当天`，且 30 行 Guard 的 `macro_data_source` 与日报一字不差。别的日子 ⇒ 证不出（不扩这个表就不放宽）。
+_TREASURY_FULL_CURVE_DAYS = frozenset({"2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23", "2026-10-26"})
+
+
+def _treasury_curve_proven(d: dict, src: str) -> bool:
+    """来源含 treasury **且**这一天在 `_TREASURY_FULL_CURVE_DAYS` 里（10Y / 2Y 逐期限核过是财政部的）。"""
+    return "treasury" in src.split("@")[0].split("+") and d.get("_date") in _TREASURY_FULL_CURVE_DAYS
+
+
 def _guard_row_has_quote_dates_marker(d: dict) -> bool:
     """这行是 v0.45.654 之后的代码写的吗：GuardBeeSentinel `details.macro_quote_dates_checked` 为字面量 `True`
     （成功路径无条件写；与 652 的 `macro_event_rows_checked` 是两个键）。只认 `is True`：此前的记录没有这个键。"""
@@ -1653,7 +1682,8 @@ def _equiv_macro_quote_dates(d: dict) -> bool:
       · 宏观细节（归档键名 `vix_term_structure`）读不出 ⇒ 证不出 ⇒ False；
       · 补跑行 ⇒ False：① 可能生效，而记录里没有各符号的末根日期；
       · 实时行、`macro_data_source == "fallback"` ⇒ True（整份 / 部分降级路径不调 `_set_curve`）；
-      · 实时行、来源含 `treasury` ⇒ True：财政部日度曲线的 10Y 与 2Y 出自同一行 ⇒ 10Y 是观测值 ⇒ ② 是空操作；
+      · 实时行、来源含 `treasury` **且这天 10Y 逐期限核过是财政部的**（`_treasury_curve_proven`）⇒ True：10Y 是观测值 ⇒ ② 是空操作；
+        （v0.45.660 二次检查前只看「来源含 treasury」——财政部行缺 10Y 时也带这个标签，证不出。）
       · 其余（10Y 走 yfinance 或缺失，记录里分不出）⇒ False（举证责任在放宽一侧）。"""
     g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
     if not isinstance(g, dict) or g.get("error"):
@@ -1664,7 +1694,7 @@ def _equiv_macro_quote_dates(d: dict) -> bool:
     src = vt.get("macro_data_source")
     if not isinstance(src, str):
         return False
-    return src == "fallback" or "treasury" in src.split("@")[0].split("+")
+    return src == "fallback" or _treasury_curve_proven(d, src)
 
 
 def _guard_row_has_fred_vintage_marker(d: dict) -> bool:
@@ -1694,6 +1724,39 @@ def _equiv_fred_vintage(d: dict) -> bool:
         return True
     vt = (g.get("details") or {}).get("vix_term_structure")
     return isinstance(vt, dict) and vt.get("macro_as_of_mode") == "realtime"
+
+
+def _guard_row_has_fred_isolated_marker(d: dict) -> bool:
+    """这行是 v0.45.660 之后的代码写的吗：GuardBeeSentinel `details.macro_fred_series_isolated` 为字面量 `True`
+    （成功路径无条件写；与 652 / 654 / 657 的键分开）。只认 `is True`：此前的记录没有这个键。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    return isinstance(det, dict) and det.get("macro_fred_series_isolated") is True
+
+
+def _marker_guard_fred_isolated(d: dict) -> bool:
+    """v0.45.660 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383）。"""
+    return _guard_row_has_fred_isolated_marker(d) and not _is_backfill_row(d)
+
+
+def _equiv_fred_series_isolated(d: dict) -> bool:
+    """v0.45.660 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？逐行判，不需要冻结证据。
+
+    本版只在「旧代码某个 FRED 值解析失败、整段落空」时改输出；经 Guard 的只有 2Y（经曲线）。
+      · Guard 不在本行 / 出错 ⇒ 两版同一条路 ⇒ True（认 `error`，不认「没有 details」——v0.45.567 的教训）；
+      · 宏观细节（归档键名 `vix_term_structure`）读不出 / 没有来源 ⇒ 证不出 ⇒ False；
+      · 来源是 `fallback` ⇒ True（整份降级的路径不取 FRED、不算曲线）；
+      · 来源含 `treasury` **且这天 2Y 逐期限核过是财政部的**（`_treasury_curve_proven`）⇒ True：FRED 的 2Y 不覆盖财政部的
+        （`_fetch_macro_data`）⇒ FRED 怎么变都到不了 Guard。补跑行同样成立（不排补跑）。只看「来源含 treasury」不够：财政部行缺 2Y 时也带这个标签；
+      · 其余 ⇒ False（举证责任在放宽一侧）。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    if not isinstance(g, dict) or g.get("error"):
+        return True
+    vt = (g.get("details") or {}).get("vix_term_structure")
+    src = vt.get("macro_data_source") if isinstance(vt, dict) else None
+    if not isinstance(src, str):
+        return False
+    return src == "fallback" or _treasury_curve_proven(d, src)
 
 
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
@@ -1739,6 +1802,8 @@ _BOUNDARY_MARKERS = {
                   _marker_guard_macro_quote_dates),
     "v0.45.657": ("agent_details.GuardBeeSentinel.details.macro_fred_vintage_checked is True",
                   _marker_guard_fred_vintage),
+    "v0.45.660": ("agent_details.GuardBeeSentinel.details.macro_fred_series_isolated is True",
+                  _marker_guard_fred_isolated),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1773,10 +1838,12 @@ _BOUNDARY_EQUIVALENCE = {
     "v0.45.652": ("冻结证据 experiments/macro_rotation_equivalence_20261019.json：当天板块轮动表 11 只齐全且预取包全覆盖，"
                   "或整轮 yfinance 0 次成功响应（或 Guard 与 Rival 都不在本行 / 都出错）⇒ 本版改动是空操作",
                   _equiv_macro_event_rows, _guard_row_has_event_rows_marker),
-    "v0.45.654": ("Guard 出错 / 不在本行，或实时行且宏观来源是 fallback / 含 treasury（10Y 是财政部观测值）⇒ 本版改动是空操作",
+    "v0.45.654": ("Guard 出错 / 不在本行，或实时行且宏观来源是 fallback / 含 treasury 且当天 10Y 核过是财政部的（`_TREASURY_FULL_CURVE_DAYS`）⇒ 本版改动是空操作",
                   _equiv_macro_quote_dates, _guard_row_has_quote_dates_marker),
     "v0.45.657": ("Guard 出错 / 不在本行，或实时行（`macro_as_of_mode == \"realtime\"`：FRED 请求逐字不变）⇒ 本版改动是空操作",
                   _equiv_fred_vintage, _guard_row_has_fred_vintage_marker),
+    "v0.45.660": ("Guard 出错 / 不在本行，或宏观来源是 fallback / 含 treasury 且当天 2Y 核过是财政部的（`_TREASURY_FULL_CURVE_DAYS`，FRED 到不了 Guard）⇒ 本版改动是空操作",
+                  _equiv_fred_series_isolated, _guard_row_has_fred_isolated_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。

@@ -266,6 +266,9 @@ class GuardBeeSentinel(BeeAgent):
                     # v0.45.657 世代印记（同上，无条件写；与 652 / 654 分开）：`fred_macro` 补跑时 FRED 序列按 D 的时点取
                     # （2Y 经曲线进本票）。判别器按它认新代码（`ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.657"]`）
                     "macro_fred_vintage_checked": True,
+                    # v0.45.660 世代印记（同上，无条件写；与 652 / 654 / 657 分开）：`fred_macro` 的 FRED 序列逐个解析，
+                    # 一个值是 "." 不再连带丢掉其余（含进曲线的 2Y）。判别器按它认新代码（`ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.660"]`）
+                    "macro_fred_series_isolated": True,
                     # ③ 时间周期
                     "cycle_context": cycle_ctx,
                     # ④ 市场政体

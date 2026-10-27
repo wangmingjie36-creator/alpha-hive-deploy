@@ -926,6 +926,62 @@ def _fetch_macro_data() -> Dict:
 _FRED_FIELDS = ("cpi_yoy", "unemployment", "fed_funds_rate", "treasury_2y", "hy_spread_bp")
 
 
+def _fred_value(o: Dict) -> float:
+    """一条 FRED 观测的数值。`"."` 是 FRED 的缺值（假日、停摆没发布的月份）⇒ 抛 ValueError 并写明是哪天。"""
+    v = o["value"]
+    if v == ".":
+        raise ValueError(f"{o['date']} 的值是 \".\"（FRED 缺值）")
+    return float(v)
+
+
+def _parse_cpi(obs: list) -> Dict:
+    """CPI 同比：最新一个月 ÷ 一年前**同一月份**（按日期配对，不按位置）。
+
+    v0.45.660：2025-10 因美国政府停摆没有发布（FRED 那一行的值是 "."），2026-10 那期（11-10 发布）起的一个月里
+    一年前同月正是它 ⇒ 算不出同比 ⇒ 抛出、本项缺失（不拿相邻月份顶替）。"""
+    if not obs:
+        return {}
+    d = obs[0]["date"]
+    year_ago = f"{int(d[:4]) - 1}{d[4:]}"
+    prev = next((o for o in obs if o.get("date") == year_ago), None)
+    if prev is None:
+        raise ValueError(f"CPI {d} 的一年前同月 {year_ago} 不在返回的观测里")
+    return {"cpi_yoy": round((_fred_value(obs[0]) / _fred_value(prev) - 1) * 100, 2), "cpi_date": d}
+
+
+def _parse_latest(value_key: str, date_key: str):
+    def _parse(obs: list) -> Dict:
+        return {value_key: _fred_value(obs[0]), date_key: obs[0]["date"]} if obs else {}
+    return _parse
+
+
+def _parse_dgs2(obs: list) -> Dict:
+    """债市假日那一行是 "."：照旧不取（不报警，那是常态）。"""
+    if not obs or obs[0].get("value", ".") == ".":
+        return {}
+    return {"treasury_2y": _fred_value(obs[0]), "treasury_2y_date": obs[0]["date"]}
+
+
+def _parse_hy(obs: list) -> Dict:
+    """ICE BofA US HY OAS，FRED 给百分点（3.50）⇒ ×100 成 bp；带日环比。假日 "." 照旧不取。"""
+    if not obs or obs[0].get("value", ".") == ".":
+        return {}
+    out = {"hy_spread_bp": round(_fred_value(obs[0]) * 100, 0), "hy_spread_date": obs[0]["date"]}
+    if len(obs) >= 2 and obs[1].get("value", ".") != ".":
+        out["hy_spread_chg_bp"] = round(out["hy_spread_bp"] - _fred_value(obs[1]) * 100, 1)
+    return out
+
+
+#: (序列, 取几条, 解析) —— 逐个解析、互不连带（v0.45.660）
+_FRED_PARSERS = (
+    ("CPIAUCSL", 13, _parse_cpi),
+    ("UNRATE", 1, _parse_latest("unemployment", "unemployment_date")),
+    ("DFF", 1, _parse_latest("fed_funds_rate", "fed_funds_rate_date")),
+    ("DGS2", 1, _parse_dgs2),
+    ("BAMLH0A0HYM2", 2, _parse_hy),
+)
+
+
 def _fetch_fred_series(api_key: str, vintage: Optional[str] = None) -> Dict:
     """从 FRED API 获取 CPI（同比）、失业率等月度数据（使用 requests 解决 macOS SSL 问题）
 
@@ -950,68 +1006,24 @@ def _fetch_fred_series(api_key: str, vintage: Optional[str] = None) -> Dict:
         _session = get_session("fred") if _RESILIENCE_OK else _req
         base = "https://api.stlouisfed.org/fred/series/observations"
 
-        # CPI 同比：取最近 13 个月做真正 YoY（而非月环比年化）
-        r = _session.get(base, params={
-            "series_id": "CPIAUCSL", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "13", **_pit
-        }, timeout=8)
-        if r.ok:
-            obs = r.json().get("observations", [])
-            if len(obs) >= 13:
-                v_now = float(obs[0]["value"])
-                v_year_ago = float(obs[12]["value"])
-                result["cpi_yoy"] = round((v_now / v_year_ago - 1) * 100, 2)
-                result["cpi_date"] = obs[0]["date"]
-
-        # 失业率：最新值
-        r2 = _session.get(base, params={
-            "series_id": "UNRATE", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "1", **_pit
-        }, timeout=8)
-        if r2.ok:
-            obs2 = r2.json().get("observations", [])
-            if obs2:
-                result["unemployment"] = float(obs2[0]["value"])
-                result["unemployment_date"] = obs2[0]["date"]
-
-        # 联邦基金利率（实际有效利率）
-        r3 = _session.get(base, params={
-            "series_id": "DFF", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "1", **_pit
-        }, timeout=8)
-        if r3.ok:
-            obs3 = r3.json().get("observations", [])
-            if obs3:
-                result["fed_funds_rate"] = float(obs3[0]["value"])
-                result["fed_funds_rate_date"] = obs3[0]["date"]
-
-        # 2Y 国债收益率（收益率曲线精确数据）
-        r4 = _session.get(base, params={
-            "series_id": "DGS2", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "1", **_pit
-        }, timeout=8)
-        if r4.ok:
-            obs4 = r4.json().get("observations", [])
-            if obs4 and obs4[0].get("value", ".") != ".":
-                result["treasury_2y"] = float(obs4[0]["value"])
-                result["treasury_2y_date"] = obs4[0]["date"]
-
-        # HY 信用利差（ICE BofA US HY OAS，单位: 百分点 → 转换为 bp）
-        r5 = _session.get(base, params={
-            "series_id": "BAMLH0A0HYM2", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "2", **_pit
-        }, timeout=8)
-        if r5.ok:
-            obs5 = r5.json().get("observations", [])
-            if obs5 and obs5[0].get("value", ".") != ".":
-                # FRED 返回百分点（e.g. 3.50），乘以 100 → bp（350bp）
-                result["hy_spread_bp"] = round(float(obs5[0]["value"]) * 100, 0)
-                result["hy_spread_date"] = obs5[0]["date"]
-                # 日环比变动（bp）
-                if len(obs5) >= 2 and obs5[1].get("value", ".") != ".":
-                    prev_bp = float(obs5[1]["value"]) * 100
-                    result["hy_spread_chg_bp"] = round(
-                        result["hy_spread_bp"] - prev_bp, 1)
+        # v0.45.660：逐个序列解析、互不连带。旧代码五段解析写在同一个 try 里，任何一个值是 "."（FRED 的缺值）
+        # 都抛 ValueError、被外层 except 以 debug 吞掉，排在它后面的序列（含进曲线的 2Y）一起丢、熔断器还记一次失败。
+        # 取数失败（网络 / 超时）照旧整段中止并记熔断——那是 FRED 不通，逐个重试只会把超时乘五。
+        for series_id, limit, parse in _FRED_PARSERS:
+            try:
+                r = _session.get(base, params={
+                    "series_id": series_id, "api_key": api_key,
+                    "file_type": "json", "sort_order": "desc", "limit": str(limit), **_pit
+                }, timeout=8)
+                if not r.ok:
+                    continue
+                result.update(parse(r.json().get("observations", [])))
+            except _req.RequestException:
+                # 取数失败照旧整段中止、记熔断。requests 里有几种同时继承 ValueError（代理 / URL 配置错、FRED 回了非 JSON 的页面），
+                # 不先放走会被下面当成「解析失败」逐个吞掉，熔断器永远不跳（v0.45.660 二次检查，独立审查揪出）
+                raise
+            except (ValueError, KeyError, TypeError, ZeroDivisionError) as e:
+                _log.warning("FRED %s 解析失败，本项按没取到处理（其余序列照常）：%s", series_id, e)
 
         # 至少有一个成功响应 → 记录成功
         if _fred_breaker and result:

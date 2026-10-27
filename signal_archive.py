@@ -2458,6 +2458,9 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 10-19（v0.45.657，等价论证见 ic_rerun_readiness 同版条目）：补跑时 FRED 序列按 D 的时点取 ⇒ 2Y 经曲线进 Guard 宏观票。
     # 只在补跑行变，四个历史补跑日重取逐项相同 ⇒ 同 654 只点名 Guard（0 个信号后移），`guard.macro_adj` 不点名
     "v0.45.657": ("agent.GuardBeeSentinel.*",),
+    # 10-19（v0.45.660，等价论证见 ic_rerun_readiness 同版条目）：FRED 序列逐个解析 ⇒ 一个 "." 不再连带丢掉进曲线的 2Y。
+    # 历史 0 次（缺月 11-10 起才落到旧代码读的位置）⇒ 同 654 / 657 只点名 Guard（0 个信号后移），`guard.macro_adj` 不点名
+    "v0.45.660": ("agent.GuardBeeSentinel.*",),
 }
 
 

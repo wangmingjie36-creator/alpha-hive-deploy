@@ -7,7 +7,68 @@
 
 ## [0.45.661] — 2026-10-27 — 占位（进行中：选测漂移检查只对非代码文件漏登发警告、测试文件 / 元守卫漏登仍报红；选测遇到没有登记读者的非代码文件回退整套）
 
-## [0.45.660] — 2026-10-27 — 占位（进行中：FRED 序列逐个解析——一个值是 "." 不再连带丢掉其余序列；CPI 同比在 11-10 起会撞上 2025-10 缺月）
+## [0.45.660] — 2026-10-27 — Fixed：FRED 序列逐个解析——一个值是 "."（FRED 缺值）不再连带丢掉其余序列（含进曲线的 2Y）；CPI 同比按日期配对一年前同月，11-10 起撞上 2025-10 缺月时只缺 CPI；登边界 10-19（同 654 / 657：并进同日标签、等价判据，作废 0 条）
+
+v0.45.657 收尾时发现、用户 10-27 定「修吧，赶在 11-10 前」。`_fetch_fred_series` 的五段解析写在同一个 try 里：任何一个值是 `"."`
+都抛 `ValueError`、被外层 `except` 以 **debug** 吞掉，排在它后面的序列一起丢，熔断器还记一次失败——没人会红。
+
+### 盘点（10-27 实拉 FRED，决定修不修）
+- DFF 1027 天 **0 个** `"."`（657 里点名的「DFF 那一型」本身不会发生）；DGS2 365 天 15 个、HY 371 天 2 个，都在假日、代码早就判过；UNRATE 只读最新值。
+- **会真撞上的是 CPI**：CPIAUCSL（与 UNRATE）的 **2025-10-01 是 `"."`**（政府停摆没发布）。旧代码同比取 `obs[0]` 与 `obs[12]`：
+  **11-10**（`economic_calendar` 的官方日程）发布 2026-10 那期起，`obs[12]` 正是 2025-10 ⇒ CPI 是第一个请求 ⇒ **整段 FRED 落空**，到 **12-10** 下一期为止每轮都这样。
+  影响：财政部缺 2Y 那天进曲线的 FRED 2Y 也没了（Guard 曲线票）；CPI / HY / 失业率 / 联邦基金利率从宏观段消失（只进展示与 fred_macro 自己的 `macro_score`）；`data_source` 掉 `+fred`。
+  财政部近 21 个扫描日 20 天供上了 2Y ⇒ 评分侧影响小，主要是无声丢展示。
+
+### Fixed
+- **`fred_macro._fetch_fred_series`**：按 `_FRED_PARSERS`（序列, 取几条, 解析）逐个取、逐个解析；解析失败（`ValueError` / `KeyError` / `TypeError` / `ZeroDivisionError`）
+  ⇒ 只丢这一个序列 + WARNING「FRED <序列> 解析失败，本项按没取到处理（其余序列照常）：<原因>」，不记熔断（FRED 是通的）。
+  **连接错误照旧整段中止、记熔断**（FRED 不通时逐个重试只会把 8 秒超时乘五）。
+- 解析拆成纯函数：`_fred_value`（`"."` ⇒ 抛出并写明哪天）、`_parse_cpi`、`_parse_latest`（失业率 / 联邦基金利率）、`_parse_dgs2`、`_parse_hy`。
+- **CPI 同比按日期配对**一年前同月（旧：按位置 `obs[12]`，中间整行缺一个月就配错月）；一年前同月是 `"."` / 不在返回里 ⇒ 本项缺失，**不拿相邻月份顶替**。
+- DGS2 / HY 的假日 `"."` 照旧静默不取（一年十几次的常态，不报警）。
+- 等价核对：旧 / 新代码对实时与 08-27 / 28 / 31、10-12、10-26 的时点数据各取一次，**6/6 逐键相同**（缺月还没落到旧代码读的位置）。
+
+### 世代边界（同 654 / 657：并进 10-19 同日标签 + 等价判据）
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-10-19", "v0.45.660", …)`：`cohort_start()` 仍 10-19 ⇒ **作废 0 条**。
+- 等价判据 `_equiv_fred_series_isolated`（逐行判）：Guard 不在本行 / 出错 ⇒ 等价；宏观来源是 `fallback`（不取 FRED、不算曲线）或含 `treasury`
+  （2Y 出自财政部，FRED 的 2Y 不覆盖它 ⇒ FRED 怎么变都到不了 Guard；归档 **36/36** 天来源含 treasury 的 `treasury_2y_source` 都是 `treasury_gov`）⇒ 等价，
+  **补跑行同样成立**（不排补跑）；其余 ⇒ 证不出。
+- 印记 `_BOUNDARY_MARKERS["v0.45.660"]`：Guard 成功路径无条件写 `details.macro_fred_series_isolated = True`（与 652 / 654 / 657 分开），只认实时行。
+  推送前对生产数据根只读跑判别器：`no_evidence_yet`、`unmarked_after_boundary=[]`、`equivalent_before_marker` = 10-19 / 20 / 21 / 22 / 23 / 26。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.660"] = ("agent.GuardBeeSentinel.*",)`（**0 个信号后移**）；`guard.macro_adj` 不点名。维度 IC 协议 H1 / H2 不读 Guard 宏观票 ⇒ 不截断。
+- `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代标签扩为 `…+v0.45.657+v0.45.660`。
+
+### 二次检查（独立审查代理复核 654 / 657 / 660，用户 10-27 要求；两处已修、一处留作已知）
+- **等价判据的举证缺口（654 与 660 两条判据，已修）**：「宏观来源含 `treasury`」只说明**某个**期限出自财政部——`_compose_data_source` 看任一字段、
+  `treasury_yields._parse` 保留缺期限的行——证明不了 10Y（654）/ 2Y（660）就是财政部的，Guard 的归档里又没有逐字段来源。审查者用旧 / 新代码对拍复现：
+  财政部行缺 10Y 且 yfinance 全灭 ⇒ 旧 −25bp inverted、新 unknown，判据却说等价；缺 2Y 且 CPI 撞缺月 ⇒ 旧 5Y 近似 +55bp normal、新 FRED 2Y +5bp flat（Guard risk_off +1），判据同样说等价。
+  修法：新增 `ic_rerun_readiness._TREASURY_FULL_CURVE_DAYS`（10-19 / 20 / 21 / 22 / 23 / 26——10-27 逐日核过当天日报 `field_sources` 的 TNX 与 TWO 都是 `treasury_gov@当天`、
+  30 行 Guard 的宏观来源与日报一字不差）与 `_treasury_curve_proven`，两条判据「含 treasury」只在这些日子成立，其余 ⇒ 证不出。
+  **实际判定不变**：三条边界对生产数据根只读重跑仍是 `no_evidence_yet`、6 天全等价；只是以后再出现旧代码日子时不会被误放过（会报 `boundary_too_early`）。
+- **requests 里继承 ValueError 的取数异常（660 自身，已修）**：`InvalidProxyURL` / `InvalidURL` / `MissingSchema` / `JSONDecodeError`（FRED 回了 HTML 维护页）…
+  同时是 `RequestException` 与 `ValueError`。逐个解析的 `except` 会把它们当「解析失败」吞掉：五个请求都发、熔断器永远不跳（旧代码第一个就中止并记失败）。
+  修法：先 `except _req.RequestException: raise`（照旧整段中止、记熔断），再接解析错误。
+- **留作已知（审查者评为 nit，没改）**：`_fetch_macro_data` 两个异常出口（`except ImportError` / `except Exception`）返回 `base` 时不带 `not_on_as_of`；
+  这两条是整块宏观崩掉的路径（WARNING「宏观数据获取失败」+ `data_source=fallback`），丢的只是一份不完整的名单。654 条目写的「三条返回路径」指三条正常出口。
+- 审查者核过没问题的：实时口径 FRED 请求参数逐字不变；时点请求失败不回落最新值；CPI 按日期配对（缺行 / "." 月）；DGS2 / HY 假日 "."；`_dt` 局部名不被遮蔽；
+  `get_macro_context` 缓存由 `set_macro_snapshot` 清；同日多条边界由 `main()` 逐条评估。
+
+### 没改 / 待办
+- 11-10 ~ 12-10 那一个月宏观段**不会有 CPI 同比**（WARNING 每轮点名 2025-10-01），这是数据本身缺、不是 bug；12-10 发布 2026-11 那期后自动恢复。
+- 654 的两条展示类待办照旧（只核末根不核前一根；缺 TNX 时 `treasury_10y` / `rate_environment` 仍是 4.5 / high）。
+
+### 测试
+- `tests/test_backfill_macro_asof.py`：
+  - I 节（新）：11-10 起的真实形状（一年前同月是 `"."`）⇒ 只缺 CPI、其余四个照取、WARNING 点名 2025-10-01、熔断记成功；同比按日期配对（中间整行缺一月）；
+    五个序列逐个塞坏值 ⇒ 只丢自己；DGS2 / HY 假日 `"."` 不报警；FRED 不通 ⇒ 照旧整段中止、只发两次请求、记熔断失败；requests 里继承 ValueError 的取数异常（坏代理 / HTML 页）⇒ 第一个就中止、记熔断失败。
+    正对照：同一批测试对**旧代码**跑，7 条红（全是 bug 形状）、3 条绿（假日 / 断网，旧行为不变）。
+  - J 节（边界登记，同 H 节）：条目 / 作用域 / 印记 / 判据；作废 0 条；0 个信号后移；不截断 H1 / H2；ML 标签；Guard 字面量无条件写印记（AST）；
+    判据 10 种形状（含补跑但 2Y 出自财政部 ⇒ 等价、10-12 形状 ⇒ 证不出）+ 未逐日核过的日子「含 treasury」也证不出（654 / 660 各一条）；印记只认实时新行、不认 657 的键；判定三态。
+- 变异：代码 8 处全红（恢复同一个 try / CPI 按位置取 / 缺月拿相邻月顶替 / 逐个 except 也接住连接错误 / 假日 `"."` 也报警 / 解析失败也记熔断 /
+  WARNING 降成 debug / `"."` 不点名哪天）+ 二次检查 3 处全红（判据只看「含 treasury」/ 核过日子表多塞 10-27 / 删掉 RequestException 放行）；登记 12 处全红（删等价判据 / 作用域加 `guard.macro_adj` / 日期写 10-28 / 判据恒真 / 不认 treasury / 不认 fallback /
+  补跑一律不等价 / 宏观细节缺时当等价 / 印记不排补跑 / 印记认 657 的键 / Guard 不写印记 / ML 标签不扩）。ruff 过。
+- 拨钟审计（+7 / +45 天，后者已过 11-10）本文件 0 条新红（二次检查前 137 条、后 143 条）。`tests/_must_run.json` 经 `select_tests --update` 并入。
+- 整套：二次检查前 **12650 passed / 0 failed**；二次检查后 **12656 passed / 0 failed**（82 deselected、2 xfailed）；推送前对生产数据根只读重跑三条边界（654 / 657 / 660）：都 `no_evidence_yet`、6 天全等价。
 
 ## [0.45.659] — 2026-10-27 — Fixed：选测登记表补登尾部预算页的三处新读（`alphabot/static/pages/hedge_tail_budget.js`、`hedge.js`）——main 的 `tests` 工作流自 2026-10-27 13:51 UTC 起每轮红在「选测登记表漂移检查」（exit 4），测试本身全过
 
