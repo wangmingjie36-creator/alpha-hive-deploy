@@ -603,7 +603,6 @@ class TestPrefetchBundle:
 
     def test_close_panel_drops_the_missing_column_without_refetching(self, bundle, monkeypatch):
         """Scout 相对强度拿末根当今天：缺列走它原有的「取不到」分支。变红的变异：`_yf_close_panel` 不看 `history_missing`。"""
-        import yfinance
         b, calls = bundle
         bee = _BundleBee.make(b)
         panel = bee._yf_close_panel(["NVDA", "ZZMS"], "25d")
