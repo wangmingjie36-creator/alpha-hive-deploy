@@ -250,6 +250,99 @@ class TestLive:
         assert calls == [t, t]
 
 
+def _stale_q(syms, *, last="2026-10-26T15:59:59", vintage="2026-10-26", expected="2026-10-27"):
+    """`cboe_options.quote_held` 在 stale_vintage 时的返回形状（v0.45.656）。"""
+    return {"available": False, "reason": "stale_vintage", "underlying_price": None, "underlying_price_source": None,
+            "session_live": None, "vintage_date": vintage, "payload_last_trade_time": last, "expected_date": expected,
+            "quotes": {s: None for s in syms}}
+
+
+def _et(hh, mm, day=27):
+    return datetime(2026, 10, day, hh, mm, tzinfo=ET)
+
+
+class TestStaleVintageWording:
+    """v0.45.656：stale_vintage 翻成人话。2026-10-27 09:43 ET 打开页面，持仓票全部只显示原因码，看不出是
+    「开盘才十几分钟、延迟文件还没滚到今天」（等一下就好）还是「这只票的文件卡住了」（AMC 停在盘前 06:11 的文件）。
+    每条都配反面：窗口边界两侧、非陈旧原因、报价没给时刻时水平那行不借用。"""
+
+    def test_open_lag_inside_window(self):
+        n = SD.stale_note(_stale_q(["C"]), now_et=_et(9, 43))
+        assert n["kind"] == "open_lag" and n["minutes_since_open"] == 13
+        assert "开盘才 13 分钟" in n["text"] and "2026-10-26 15:59" in n["text"] and "卡住" not in n["text"]
+
+    def test_window_boundary(self):
+        last_in = SD.stale_note(_stale_q(["C"]), now_et=_et(9, 30 + SD.OPEN_LAG_MIN - 1))
+        first_out = SD.stale_note(_stale_q(["C"]), now_et=_et(9, 30 + SD.OPEN_LAG_MIN))
+        assert last_in["kind"] == "open_lag" and first_out["kind"] == "file_stuck"
+        assert f"开盘已过 {SD.OPEN_LAG_MIN} 分钟" in first_out["text"]
+
+    def test_stuck_names_the_files_last_trade(self):
+        n = SD.stale_note(_stale_q(["C"]), now_et=_et(10, 30))
+        assert n["kind"] == "file_stuck" and n["minutes_since_open"] == 60
+        assert "该票 CBOE 文件卡住" in n["text"] and "2026-10-26 15:59" in n["text"] and "应为 2026-10-27" in n["text"]
+
+    def test_before_open_an_older_file_is_stuck_without_minutes(self):
+        """盘前应有日期是上一交易日；文件比它还旧 ⇒ 卡住，不报「开盘几分钟」。"""
+        q = _stale_q(["C"], last="2026-10-23T15:59:59", vintage="2026-10-23", expected="2026-10-26")
+        n = SD.stale_note(q, now_et=_et(8, 0))
+        assert n["kind"] == "file_stuck" and n["minutes_since_open"] is None
+        assert "开盘" not in n["text"] and "2026-10-23 15:59" in n["text"] and "应为 2026-10-26" in n["text"]
+
+    def test_missing_trade_time_is_said_not_invented(self):
+        n = SD.stale_note(_stale_q(["C"], last=None, vintage=None), now_et=_et(10, 30))
+        assert "未取到" in n["text"]
+
+    def test_other_reasons_are_left_alone(self):
+        assert SD.stale_note({"reason": "payload_unavailable"}, now_et=_et(10, 0)) is None
+        assert SD.stale_note(None, now_et=_et(10, 0)) is None
+
+    def test_session_open_matches_the_stale_judgement(self):
+        """窗口从哪一刻起算必须与 cboe_options 把「应有日期」翻到今天的那一刻相同，否则分钟数对不上。"""
+        import cboe_options
+        assert SD.SESSION_OPEN_ET == cboe_options._ET_OPEN
+
+    def test_service_fills_both_lines(self, root):
+        """走真实 `straddle_live`：报价与水平都 stale ⇒ 两行用同一句人话；原因码照留给机器读。"""
+        p = syn.demo_straddle_ledger(AS_OF)["positions"][0]
+        svc = AlphaBotService(straddle_root=root, now_fn=lambda: _et(9, 40),
+                              fetch_fn=lambda t, as_of=None: (None, "stale_vintage"),
+                              straddle_quote_fn=lambda t, syms: _stale_q(syms))
+        r = svc.straddle_live(p["ticker"])
+        assert r["available"] is False and r["reason"] == "stale_vintage" and r["stale"]["kind"] == "open_lag"
+        assert r["levels"]["reason"] == "stale_vintage" and r["levels"]["reason_zh"] == r["reason_zh"]
+        assert r["mark_mid"] is None                                     # 仍然不编价
+
+    def test_levels_stale_alone_gets_the_generic_line(self, root):
+        """报价那次已滚到今天、只有水平那次陈旧：不能借用报价那份文件的时刻。"""
+        p = syn.demo_straddle_ledger(AS_OF)["positions"][0]
+        svc = _svc(root, fetch_fn=lambda t, as_of=None: (None, "stale_vintage"))
+        r = svc.straddle_live(p["ticker"])
+        assert r["available"] is True and r["reason_zh"] is None and r["stale"] is None
+        assert r["levels"]["reason_zh"] == SD.STALE_LEVELS_GENERIC
+
+    def test_non_stale_levels_get_no_wording(self, root):
+        p = syn.demo_straddle_ledger(AS_OF)["positions"][0]
+        r = _svc(root, fetch_fn=lambda t, as_of=None: (None, "payload_unavailable")).straddle_live(p["ticker"])
+        assert "reason_zh" not in r["levels"]
+
+    def test_wording_names_this_pages_button(self):
+        """「重新拉取」是溢价页的按钮；跨式页的按钮叫「拉一次盘中报价」（首版写错过）。"""
+        texts = [SD.stale_note(_stale_q(["C"]), now_et=_et(9, 40))["text"], SD.STALE_LEVELS_GENERIC]
+        assert '"拉一次盘中报价"' in _straddle_js()
+        for t in texts:
+            assert "「拉一次盘中报价」" in t and "重新拉取" not in t, t
+
+    def test_page_prefers_the_wording(self):
+        assert "r.reason_zh || r.reason" in _body("renderLive")
+        assert "lv?.reason_zh || lv?.reason" in _body("levelsLine")
+
+    def test_help_takes_the_window_from_the_server(self, root):
+        txt = (STATIC / "pages" / "help.js").read_text(encoding="utf-8")
+        assert "s.open_lag_min" in txt and "开盘不足 15 分钟" not in txt
+        assert _svc(root).straddle_rules()["open_lag_min"] == SD.OPEN_LAG_MIN
+
+
 #: 2026-10-21 财报日实测的 T 24.50 call 腿：股价跌到 22.4 后变深度虚值，bid=0、ask 真实、IV 与 Greeks 正常（v0.45.581）
 BID_ZERO_CALL = {"bid": 0.0, "ask": 0.02, "mid": None, "spread_pct": None, "iv": 0.2955, "delta": 0.0511,
                  "gamma": 0.0842, "vega": 0.0038, "theta": -0.0065, "quote_ok": False}

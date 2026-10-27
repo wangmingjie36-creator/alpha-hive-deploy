@@ -141,6 +141,9 @@ def _asof_history(yf, sym: str, as_of: str):
 
     v0.45.652：经 `yf_daily` 取。末行是公司行动空行 = 有事件、却没有那天的 K 线（D 那根缺了）⇒ 返回 None：
     剩下的末根是更早的一场，拿它当 D 就是冒充（此前末行收盘是 NaN，两处调用方也都落到「没取到」，结局相同，现在多一行日志）。
+
+    ⚠️ 只保证「到 D 为止」，**不保证末根是 D**：Yahoo 整根缺 D 又没有事件时照样返回止于更早一场的日线。
+    调用方必须自己核 `hist.index.date[-1] == D`（板块轮动 v0.45.366、宏观报价 v0.45.654 都核，并点名进 `not_on_as_of`）。
     """
     import datetime as _dt
     import yf_daily
@@ -444,6 +447,14 @@ def _fetch_macro_data() -> Dict:
                       len(data), _as_of or "当日",
                       ", ".join(f"{k}={v}" for k, v in sorted(_src_map.items())))
 
+        # v0.45.654：补跑的末根必须**正是 D**（同板块轮动那支，v0.45.366）。`_asof_history` 只截到「D 为止」——
+        # Yahoo 整根缺 D 又没有分红事件（不产生空行）时，它返回止于更早一场的日线，旧代码拿那场收盘冒充 D，
+        # 经曲线 / 黄金进 Guard 的宏观票与 `macro_regime`，没人会红。缺 D ⇒ 该符号当没取到、点名进 `not_on_as_of` + WARNING。
+        _not_on_as_of: list = []
+        if _as_of:
+            import datetime as _dt
+            _as_of_d = _dt.date.fromisoformat(_as_of)
+
         for name, sym in symbols.items():
             if name in data:          # 已由当日源供上，不再打 yfinance
                 continue
@@ -451,6 +462,9 @@ def _fetch_macro_data() -> Dict:
                 if _as_of:
                     hist = _asof_history(yf, sym, _as_of)
                     if hist is None:
+                        continue
+                    if hist.index.date[-1] != _as_of_d:
+                        _not_on_as_of.append(name)
                         continue
                 else:
                     import yf_daily
@@ -475,6 +489,11 @@ def _fetch_macro_data() -> Dict:
                         }
             except Exception as e:
                 _log.debug("宏观数据获取失败 %s: %s", sym, e)
+        # 补跑口径才带这个键（同板块轮动；实时口径输出不变）。三条返回路径都带：符号全被挡下时正是降级成 fallback 的那条
+        _asof_keys = {"not_on_as_of": sorted(_not_on_as_of)} if _as_of else {}
+        if _not_on_as_of:
+            _log.warning("补跑宏观 %s：%d 个符号没有该日日K，按没取到处理（%s）", _as_of, len(_not_on_as_of),
+                         ", ".join(f"{n}={symbols[n]}" for n in sorted(_not_on_as_of)))
 
         # ---- VIX：CBOE 优先（v0.43.24 Step 2）----
         # 原先直接用 yfinance 的 ^VIX，绕过了项目既定的 CBOE 优先链。宏观数据在
@@ -566,8 +585,9 @@ def _fetch_macro_data() -> Dict:
                 _partial["vix_change_pct"] = _vix_change_pct(_cboe_vix, _vix_prev_close)
                 _partial.update(_vix_obs_fields(_vix_obs))
                 _partial["summary"] = f"宏观数据不可用（VIX {_cboe_vix:.1f} 来自 CBOE，其余降级）"
+                _partial.update(_asof_keys)
                 return _partial
-            return base
+            return {**base, **_asof_keys}
 
         # ---- VIX 分析 ----
         if _cboe_vix is not None:
@@ -639,16 +659,22 @@ def _fetch_macro_data() -> Dict:
         yield_spread = None
         yield_curve = "unknown"
         _2y_source = ""
+        # v0.45.654：利差要一个**观测到的** 10Y。缺 TNX 时上面的 `tnx` 是兜底常量 4.5，拿它减真 2Y 会造出假倒挂 / 假趋平
+        # （10-12 补跑实况 10Y 5.24、2Y 4.75 ⇒ +49bp normal；换成 4.5 是 −25bp inverted ⇒ Guard risk_off +2）。
+        # 135 份日报里只在整份降级（fallback，Guard 本就不看曲线）时缺过 TNX；补跑「末根不是 D ⇒ 当没取到」让它够得着了。
+        _tnx_seen = "TNX" in data
 
         def _set_curve(y2: float, src: str):
             """同一段判定逻辑此前抄了三遍（近似 / FRED / 本次新增财政部）。
             抄三遍就有三处会漂移 —— 收敛成一处。"""
             nonlocal treasury_2y, yield_spread, yield_curve, _2y_source
             treasury_2y = round(y2, 3)
+            _2y_source = src
+            if not _tnx_seen:                               # 2Y 照记；利差 / 曲线留 None / unknown
+                return
             yield_spread = round((tnx - y2) * 100, 1)     # bp
             yield_curve = ("inverted" if yield_spread < -10
                            else "flat" if yield_spread < 20 else "normal")
-            _2y_source = src
 
         # v0.45.60：财政部日度曲线直接给真 2Y —— 优先于下面的 5Y 近似。
         #
@@ -669,7 +695,8 @@ def _fetch_macro_data() -> Dict:
         fred_data = {}
         fred_key = _load_fred_key()
         if fred_key:
-            fred_data = _fetch_fred_series(fred_key)
+            # v0.45.657：补跑按 D 的时点取（见 `_fetch_fred_series`）；旧代码补跑也取运行当天的最新值
+            fred_data = _fetch_fred_series(fred_key, vintage=_as_of)
             # FRED 精确 2Y 覆盖 5Y 近似 —— 但**不覆盖财政部**：
             # FRED 转发的就是财政部的数，且晚一天（实测 08-26 vs 08-27）。
             # 用它盖掉更新的同源数据是纯粹的倒退。
@@ -884,6 +911,7 @@ def _fetch_macro_data() -> Dict:
             # 所以只改输出，并用 `as_of_mode` 显式承载原先靠 None 表达的区分。
             "as_of": _as_of or _realtime_as_of(),
             "as_of_mode": "backfill" if _as_of else "realtime",
+            **_asof_keys,
         }
 
     except ImportError:
@@ -894,10 +922,77 @@ def _fetch_macro_data() -> Dict:
         return base
 
 
-def _fetch_fred_series(api_key: str) -> Dict:
+#: `_fetch_fred_series` 产出的观测键（补跑时缺哪个就点名哪个）
+_FRED_FIELDS = ("cpi_yoy", "unemployment", "fed_funds_rate", "treasury_2y", "hy_spread_bp")
+
+
+def _fred_value(o: Dict) -> float:
+    """一条 FRED 观测的数值。`"."` 是 FRED 的缺值（假日、停摆没发布的月份）⇒ 抛 ValueError 并写明是哪天。"""
+    v = o["value"]
+    if v == ".":
+        raise ValueError(f"{o['date']} 的值是 \".\"（FRED 缺值）")
+    return float(v)
+
+
+def _parse_cpi(obs: list) -> Dict:
+    """CPI 同比：最新一个月 ÷ 一年前**同一月份**（按日期配对，不按位置）。
+
+    v0.45.660：2025-10 因美国政府停摆没有发布（FRED 那一行的值是 "."），2026-10 那期（11-10 发布）起的一个月里
+    一年前同月正是它 ⇒ 算不出同比 ⇒ 抛出、本项缺失（不拿相邻月份顶替）。"""
+    if not obs:
+        return {}
+    d = obs[0]["date"]
+    year_ago = f"{int(d[:4]) - 1}{d[4:]}"
+    prev = next((o for o in obs if o.get("date") == year_ago), None)
+    if prev is None:
+        raise ValueError(f"CPI {d} 的一年前同月 {year_ago} 不在返回的观测里")
+    return {"cpi_yoy": round((_fred_value(obs[0]) / _fred_value(prev) - 1) * 100, 2), "cpi_date": d}
+
+
+def _parse_latest(value_key: str, date_key: str):
+    def _parse(obs: list) -> Dict:
+        return {value_key: _fred_value(obs[0]), date_key: obs[0]["date"]} if obs else {}
+    return _parse
+
+
+def _parse_dgs2(obs: list) -> Dict:
+    """债市假日那一行是 "."：照旧不取（不报警，那是常态）。"""
+    if not obs or obs[0].get("value", ".") == ".":
+        return {}
+    return {"treasury_2y": _fred_value(obs[0]), "treasury_2y_date": obs[0]["date"]}
+
+
+def _parse_hy(obs: list) -> Dict:
+    """ICE BofA US HY OAS，FRED 给百分点（3.50）⇒ ×100 成 bp；带日环比。假日 "." 照旧不取。"""
+    if not obs or obs[0].get("value", ".") == ".":
+        return {}
+    out = {"hy_spread_bp": round(_fred_value(obs[0]) * 100, 0), "hy_spread_date": obs[0]["date"]}
+    if len(obs) >= 2 and obs[1].get("value", ".") != ".":
+        out["hy_spread_chg_bp"] = round(out["hy_spread_bp"] - _fred_value(obs[1]) * 100, 1)
+    return out
+
+
+#: (序列, 取几条, 解析) —— 逐个解析、互不连带（v0.45.660）
+_FRED_PARSERS = (
+    ("CPIAUCSL", 13, _parse_cpi),
+    ("UNRATE", 1, _parse_latest("unemployment", "unemployment_date")),
+    ("DFF", 1, _parse_latest("fed_funds_rate", "fed_funds_rate_date")),
+    ("DGS2", 1, _parse_dgs2),
+    ("BAMLH0A0HYM2", 2, _parse_hy),
+)
+
+
+def _fetch_fred_series(api_key: str, vintage: Optional[str] = None) -> Dict:
     """从 FRED API 获取 CPI（同比）、失业率等月度数据（使用 requests 解决 macOS SSL 问题）
 
     已集成弹性层：CircuitBreaker 熔断 + get_session 连接池复用。
+
+    v0.45.657：`vintage=D`（补跑）⇒ 每条请求带 `realtime_start=realtime_end=D`，取 FRED **在 D 那天的样子**
+    （ALFRED 时点数据）。旧代码补跑也取「运行当天的最新值」：补跑晚几周跑，2Y 就是几周后的（Treasury 缺 D 行时
+    经曲线进 Guard 宏观票），CPI 还会拿到 D 之后才发布的月份与修订值。不用 `observation_end=D`：CPI 的观测日是
+    月初、发布在次月中，按观测日截照样看得到未来。时点口径下 2Y / 联邦基金利率是 D 当天已发布的最新一场
+    （通常 D−1，与 D 那天实时扫描从 FRED 拿到的相同）；HY 利差可能已含 D 当晚发布的 D 值（≤ D，只进展示）。
+    时点请求失败 ⇒ 该项没取到、WARNING 点名，**不回落最新值**；结果带 `vintage` 键（全缺时不带，免得空结果被当成「有 FRED」）。
     """
     # 熔断检查
     if _fred_breaker and not _fred_breaker.allow_request():
@@ -905,71 +1000,30 @@ def _fetch_fred_series(api_key: str) -> Dict:
         return {}
 
     result = {}
+    _pit = {"realtime_start": vintage, "realtime_end": vintage} if vintage else {}
     try:
         import requests as _req
         _session = get_session("fred") if _RESILIENCE_OK else _req
         base = "https://api.stlouisfed.org/fred/series/observations"
 
-        # CPI 同比：取最近 13 个月做真正 YoY（而非月环比年化）
-        r = _session.get(base, params={
-            "series_id": "CPIAUCSL", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "13"
-        }, timeout=8)
-        if r.ok:
-            obs = r.json().get("observations", [])
-            if len(obs) >= 13:
-                v_now = float(obs[0]["value"])
-                v_year_ago = float(obs[12]["value"])
-                result["cpi_yoy"] = round((v_now / v_year_ago - 1) * 100, 2)
-                result["cpi_date"] = obs[0]["date"]
-
-        # 失业率：最新值
-        r2 = _session.get(base, params={
-            "series_id": "UNRATE", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "1"
-        }, timeout=8)
-        if r2.ok:
-            obs2 = r2.json().get("observations", [])
-            if obs2:
-                result["unemployment"] = float(obs2[0]["value"])
-                result["unemployment_date"] = obs2[0]["date"]
-
-        # 联邦基金利率（实际有效利率）
-        r3 = _session.get(base, params={
-            "series_id": "DFF", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "1"
-        }, timeout=8)
-        if r3.ok:
-            obs3 = r3.json().get("observations", [])
-            if obs3:
-                result["fed_funds_rate"] = float(obs3[0]["value"])
-
-        # 2Y 国债收益率（收益率曲线精确数据）
-        r4 = _session.get(base, params={
-            "series_id": "DGS2", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "1"
-        }, timeout=8)
-        if r4.ok:
-            obs4 = r4.json().get("observations", [])
-            if obs4 and obs4[0].get("value", ".") != ".":
-                result["treasury_2y"] = float(obs4[0]["value"])
-
-        # HY 信用利差（ICE BofA US HY OAS，单位: 百分点 → 转换为 bp）
-        r5 = _session.get(base, params={
-            "series_id": "BAMLH0A0HYM2", "api_key": api_key,
-            "file_type": "json", "sort_order": "desc", "limit": "2"
-        }, timeout=8)
-        if r5.ok:
-            obs5 = r5.json().get("observations", [])
-            if obs5 and obs5[0].get("value", ".") != ".":
-                # FRED 返回百分点（e.g. 3.50），乘以 100 → bp（350bp）
-                result["hy_spread_bp"] = round(float(obs5[0]["value"]) * 100, 0)
-                result["hy_spread_date"] = obs5[0]["date"]
-                # 日环比变动（bp）
-                if len(obs5) >= 2 and obs5[1].get("value", ".") != ".":
-                    prev_bp = float(obs5[1]["value"]) * 100
-                    result["hy_spread_chg_bp"] = round(
-                        result["hy_spread_bp"] - prev_bp, 1)
+        # v0.45.660：逐个序列解析、互不连带。旧代码五段解析写在同一个 try 里，任何一个值是 "."（FRED 的缺值）
+        # 都抛 ValueError、被外层 except 以 debug 吞掉，排在它后面的序列（含进曲线的 2Y）一起丢、熔断器还记一次失败。
+        # 取数失败（网络 / 超时）照旧整段中止并记熔断——那是 FRED 不通，逐个重试只会把超时乘五。
+        for series_id, limit, parse in _FRED_PARSERS:
+            try:
+                r = _session.get(base, params={
+                    "series_id": series_id, "api_key": api_key,
+                    "file_type": "json", "sort_order": "desc", "limit": str(limit), **_pit
+                }, timeout=8)
+                if not r.ok:
+                    continue
+                result.update(parse(r.json().get("observations", [])))
+            except _req.RequestException:
+                # 取数失败照旧整段中止、记熔断。requests 里有几种同时继承 ValueError（代理 / URL 配置错、FRED 回了非 JSON 的页面），
+                # 不先放走会被下面当成「解析失败」逐个吞掉，熔断器永远不跳（v0.45.660 二次检查，独立审查揪出）
+                raise
+            except (ValueError, KeyError, TypeError, ZeroDivisionError) as e:
+                _log.warning("FRED %s 解析失败，本项按没取到处理（其余序列照常）：%s", series_id, e)
 
         # 至少有一个成功响应 → 记录成功
         if _fred_breaker and result:
@@ -979,6 +1033,13 @@ def _fetch_fred_series(api_key: str) -> Dict:
         _log.debug("FRED API 调用失败: %s", e)
         if _fred_breaker:
             _fred_breaker.record_failure()
+    if vintage:
+        _missing = [k for k in _FRED_FIELDS if result.get(k) is None]
+        if _missing:
+            _log.warning("补跑 FRED 时点数据 %s：%d 项没取到，按没取到处理、不回落最新值（%s）",
+                         vintage, len(_missing), ", ".join(_missing))
+        if result:
+            result["vintage"] = vintage
     return result
 
 

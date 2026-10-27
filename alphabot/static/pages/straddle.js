@@ -83,8 +83,9 @@ function quoteNote(r, side) {
     : `${names} 腿 bid=0：mid 不可得；另一条腿没有可用的 ask，立即平仓价也不可得。`;
 }
 
+// 不可得时优先显示服务端翻好的人话（`reason_zh`，v0.45.656：stale_vintage 分「开盘不久」与「该票文件卡住」），没有才露原因码
 function levelsLine(lv, be) {
-  if (!lv?.available) return h("div", { class: "small muted" }, `当天 GEX 水平不可得：${lv?.reason || "—"}`);
+  if (!lv?.available) return h("div", { class: "small muted" }, `当天 GEX 水平不可得：${lv?.reason_zh || lv?.reason || "—"}`);
   const rel = (x) => (!isNum(x) || !be?.available ? "" : x < be.lo ? "（带下方）" : x > be.hi ? "（带上方）" : "（带内）");
   return h("div", { class: "sd-row" }, h("span", { class: "grade", title: "证据等级：Zero Gamma C、Major D" }, "C/D"), " 当天 GEX（≤45 天视图）：现价处 ", signChip(lv.sign_at_spot),
     ` · 最近零点 ${num(lv.zg_nearest)}${rel(lv.zg_nearest)} · 净 Major+ ${num(lv.net_major_pos, 0)}${rel(lv.net_major_pos)} · 净 Major− ${num(lv.net_major_neg, 0)}${rel(lv.net_major_neg)}`);
@@ -158,7 +159,7 @@ function renderLive(el, r, p, warnAt) {
   if (!r) { fill(el, h("div", { class: "small muted" }, "盘中参考：未拉取。")); return; }
   if (r.error) { fill(el, h("div", { class: "small err" }, `盘中参考拉取失败：${r.error}`)); return; }
   if (!r.available) {
-    fill(el, h("div", { class: "small muted" }, `盘中参考不可得：${r.reason || "—"}（不拿账本 mark 顶替）`), levelsLine(r.levels, r.breakeven));
+    fill(el, h("div", { class: "small muted" }, `盘中参考不可得：${r.reason_zh || r.reason || "—"}（不拿账本 mark 顶替）`), levelsLine(r.levels, r.breakeven));
     return;
   }
   const when = (r.payload_last_trade_time || "").replace("T", " ").slice(0, 16);
