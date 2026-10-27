@@ -380,10 +380,12 @@ class OutcomesFetcher:
 
         try:
             stock = _yf.Ticker(ticker)
-            hist = stock.history(
+            import yf_daily
+            # v0.45.658：经唯一入口（带日期窗口、按日期用；此前是「dated_window」例外——结构上只核得到 start=，「末行碰不到」核不了）
+            hist = yf_daily.history(stock, source="outcomes",
                 start=target_date.strftime("%Y-%m-%d"),
                 end=end_date.strftime("%Y-%m-%d"),
-            )
+            )[0]
 
             if hist.empty:
                 return None

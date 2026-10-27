@@ -111,6 +111,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import delta_hedge as dh
 import ledger_io
+import tail_budget as tb
 from cboe_options import bid_zero_greeks_usable
 from hive_logger import PATHS, get_logger
 
@@ -119,8 +120,12 @@ _log = get_logger("portfolio_greeks")
 CONFIG = {
     "beta_delta_band_pct": 15.0,     # β·$Delta 允许偏离 target 的带宽（% NAV）
     "beta_delta_target_pct": 0.0,    # 带中心（% NAV）；0 = 市场中性
-    "vega_alert_pct": 1.0,           # |$Vega/pt| 超过 NAV 的 1% → 告警（不对冲）
-    "gamma_alert_pct": 0.5,          # |$Gamma(1%)| 超过 NAV 的 0.5% → 告警（不对冲）
+    # Gamma / Vega 告警线（v0.45.655）：None = **随尾部预算推导**（`tail_budget.derived_greek_lines`：预算对半分给
+    # Gamma 与 Vega，除以压力网格最大冲击幅度）。此前的 1.0 / 0.5 是按「1% 移动」拍的数，对尾部是盲的：损失随移动平方放大，
+    # 10% 移动要损失 ~50% NAV 才响（2026-10-23 实测 −23% 时两条都静音）。写一个数 = 显式覆盖（测试用，也是回退口）。
+    # 这两条线只是审计 / 对冲页上的 ⚠️ 标记（没有 alert_manager 路径）；真正的告警是压力最差格那条。
+    "vega_alert_pct": None,          # |$Vega/pt| 超过 NAV 的这个 % → 标记（不对冲）
+    "gamma_alert_pct": None,         # |$Gamma(1%)| 超过 NAV 的这个 % → 标记（不对冲）
     "hedge_instrument": "SPY",
     "rebalance_to": "edge",          # edge = 拉回最近带边 | center = 拉回带中心
     "stress_spot_pct": [-10, -5, 0, 5, 10],
@@ -1180,10 +1185,11 @@ def aggregate(rows: List[Dict], nav: Optional[float]) -> Dict:
     else:
         p = pct["beta_dollar_delta"]
         status = "above" if p > target + band else ("below" if p < target - band else "inside")
+    lines = alert_lines()
     vega_alert = (nav is not None and pct["vega_dollar_per_pt"] is not None
-                  and abs(pct["vega_dollar_per_pt"]) > CONFIG["vega_alert_pct"])
+                  and abs(pct["vega_dollar_per_pt"]) > lines["vega_alert_pct"])
     gamma_alert = (nav is not None and pct["gamma_dollar_per_1pct"] is not None
-                   and abs(pct["gamma_dollar_per_1pct"]) > CONFIG["gamma_alert_pct"])
+                   and abs(pct["gamma_dollar_per_1pct"]) > lines["gamma_alert_pct"])
     return {
         "nav": nav,
         "sums": {k: round(v, 2) for k, v in sums.items()},
@@ -1595,6 +1601,60 @@ def _data_gaps(chk: Dict) -> List[str]:
     return out
 
 
+def alert_lines() -> Dict:
+    """Gamma / Vega 告警线（% NAV）的**有效值**：CONFIG 写了数 ⇒ 显式覆盖；`None` ⇒ 从尾部预算推导
+    （`tail_budget.derived_greek_lines(alert_pct, 压力网格最大现货冲击, 最大 IV 冲击)`）。`source` 说明是哪种。"""
+    g, v = CONFIG.get("gamma_alert_pct"), CONFIG.get("vega_alert_pct")
+    if g is not None and v is not None:
+        return {"gamma_alert_pct": float(g), "vega_alert_pct": float(v), "source": "explicit"}
+    d = tb.derived_greek_lines(tb.CONFIG["alert_pct"], max(abs(x) for x in CONFIG["stress_spot_pct"]),
+                               max(abs(x) for x in CONFIG["stress_iv_pts"]))
+    return {"gamma_alert_pct": float(g) if g is not None else d["gamma_alert_pct"],
+            "vega_alert_pct": float(v) if v is not None else d["vega_alert_pct"],
+            "source": "derived" if (g is None and v is None) else "mixed"}
+
+
+def public_rules() -> Dict:
+    """页面 / 帮助页用的规则常量（`PUBLIC_RULE_KEYS`），Gamma / Vega 线用**有效值**（派生时 CONFIG 里是 None）。"""
+    out = {k: CONFIG.get(k) for k in PUBLIC_RULE_KEYS}
+    lines = alert_lines()
+    out["gamma_alert_pct"], out["vega_alert_pct"] = lines["gamma_alert_pct"], lines["vega_alert_pct"]
+    out["alert_lines_source"] = lines["source"]
+    out["tail_alert_pct"] = tb.CONFIG["alert_pct"]
+    return out
+
+
+def _sector_of(ticker: str) -> Optional[str]:
+    """板块取自 `config.WATCHLIST`（唯一的标的名单）；不在名单里 ⇒ None（尾部表里记「未分类」，不猜）。"""
+    try:
+        import config
+        return (config.WATCHLIST.get(ticker) or {}).get("sector")
+    except Exception:  # noqa: BLE001 - 板块只是分组标签；取不到就是未分类，不影响数字
+        return None
+
+
+def _tail_section(as_of: str, rows: List[Dict], spy_price: Optional[float], nav: Optional[float]) -> Dict:
+    """组合尾部预算（v0.45.649，`tail_budget`）：压力最差格告警简报 + 逐标的 / 板块贡献 + 卖跨式影子闸。**只观测**。
+    算出来异常 ⇒ ERROR 日志 + 简报 `available=False, reason=exception:<类>`（alert_manager 报 P2）：不把「没算出来」改写成「没有尾部」。"""
+    try:
+        import options_paper_leg as opl
+        positions = _load_jsonl(opl.POSITIONS_FILE)          # 与 `option_exposures` 同一个读法；文件顺序 = 开仓顺序
+        sec = tb.build(rows, spy_price, nav, stress_table, _sector_of, positions, as_of, max_open=opl.CONFIG["max_open"])
+    except Exception as exc:  # noqa: BLE001
+        _log.error("[PortfolioGreeks] %s 尾部预算算不出来：%s: %s", as_of, type(exc).__name__, exc)
+        reason = f"exception:{type(exc).__name__}"
+        return {"version": tb.VERSION, "available": False, "reason": reason, "alert_pct": tb.CONFIG["alert_pct"],
+                "brief": {"available": False, "reason": reason, "alert_pct": tb.CONFIG["alert_pct"], "breach": False}}
+    b = sec.get("brief") or {}
+    if b.get("breach"):
+        w = b.get("worst") or {}
+        _log.warning("[PortfolioGreeks] %s 尾部压力：最差格（现货 %+g%%、IV %+g 点）损失 %.1f%% NAV，超过告警线 %.0f%%；"
+                     "主要来自 %s%s", as_of, w.get("spot_pct", 0), w.get("iv_pts", 0), b.get("loss_pct_nav", 0.0),
+                     b.get("alert_pct", 0.0), "、".join(f"{t['ticker']} {t['at_worst_pct']:+.1f}%" for t in b.get("top") or []) or "—",
+                     "（压力表有行被剔除，实际可能更大）" if b.get("partial") else "")
+    return sec
+
+
 def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dict:
     """只读：暴露行 + 聚合 + 建议 + 压力表。不写任何账本文件（β 缓存除外——那是缓存）。
     v0.45.423：每个标的价都要是 as_of 那一场的（`_resolve_mark`）；不是的行判陈旧、不进 $Delta，
@@ -1641,7 +1701,9 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     agg = aggregate(rows, nav_d["nav"])
     rec = hedge_recommendation(agg, spy_price, nav_d["nav"])
     stress = stress_table(rows, spy_price)
+    tail = _tail_section(as_of, rows, spy_price, nav_d["nav"])
     chk = _price_check(as_of, rows, spy_mark, rec, nav_d.get("missing"))
+    chk["tail"] = tail.get("brief")               # 小简报 → scan_timing → alert_manager；完整表在审计文件的 `tail` 一节
     gaps = chk["gaps"]
     if chk["n_stale"] or chk["n_quote_stale"] or spy_mark["stale"]:
         bits = []
@@ -1668,7 +1730,7 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     return {"as_of": as_of, "version": _VERSION, "spy_price": spy_price, "spy_mark": spy_mark,
             "nav": nav_d, "rows": rows, "aggregate": agg, "recommendation": rec, "stress": stress,
             "today_trade": today_trade, "price_check": chk, "delta_hedge": delta_section,
-            "excluded_from_hedge": excluded}
+            "excluded_from_hedge": excluded, "tail": tail}
 
 
 def _execute_trade(as_of: str, rec: Dict, agg: Dict, nav: Optional[float],
@@ -2060,7 +2122,7 @@ def ledger_view(root=None) -> Dict:
     不写任何文件。"""
     d = Path(root if root is not None else PATHS.home) / "hedge_state"
     out: Dict = {"state_dir": str(d), "exists": d.is_dir(), "opened": False, "positions": None, "meta": None, "errors": {},
-                 "history": None, "rules": {k: CONFIG.get(k) for k in PUBLIC_RULE_KEYS},
+                 "history": None, "rules": public_rules(),
                  "measurement_start": MEASUREMENT_START,
                  "delta_opened": False, "delta_positions": None, "delta_meta": None}   # v0.45.526：状态目录不存在时键也在
     if not out["exists"]:
@@ -2226,9 +2288,9 @@ def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
     L.append(f"| β·$Delta | {_fmt_usd(s.get('beta_dollar_delta'))} | {_fmt_pct(p.get('beta_dollar_delta'))} | "
              f"带 [{band.get('lower_pct', 0):+.0f}%, {band.get('upper_pct', 0):+.0f}%] → **{agg.get('band_status')}** |")
     L.append(f"| $Gamma (1% 移动) | {_fmt_usd(s.get('gamma_dollar_per_1pct'))} | {_fmt_pct(p.get('gamma_dollar_per_1pct'), 3)} | "
-             f"{'⚠️ 超 ' + str(CONFIG['gamma_alert_pct']) + '%' if agg.get('gamma_alert') else '凸性项'} |")
+             f"{'⚠️ 超 ' + format(alert_lines()['gamma_alert_pct'], 'g') + '%' if agg.get('gamma_alert') else '凸性项'} |")
     L.append(f"| $Vega / vol 点 | {_fmt_usd(s.get('vega_dollar_per_pt'))} | {_fmt_pct(p.get('vega_dollar_per_pt'), 3)} | "
-             f"{'⚠️ 超 ' + str(CONFIG['vega_alert_pct']) + '%' if agg.get('vega_alert') else 'IV 每变 1 点'} |")
+             f"{'⚠️ 超 ' + format(alert_lines()['vega_alert_pct'], 'g') + '%' if agg.get('vega_alert') else 'IV 每变 1 点'} |")
     L.append(f"| $Theta / 日 | {_fmt_usd(s.get('theta_dollar_per_day'))} | {_fmt_pct(p.get('theta_dollar_per_day'), 3)} | 日历日 |")
     cov = agg.get("coverage") or {}
     cov_line = (f"覆盖：{cov.get('n_rows', 0)} 行，缺价 {cov.get('n_price_missing', 0)}"

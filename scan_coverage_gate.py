@@ -362,9 +362,11 @@ def check_prices(date: str, db_path: Optional[str] = None) -> Dict[str, Any]:
         from datetime import date as _d, timedelta as _td
         _s = _d.fromisoformat(date) - _td(days=4)
         _e = _d.fromisoformat(date) + _td(days=2)
-        hist = yf.download(sorted(db), start=_s.isoformat(), end=_e.isoformat(),
-                           interval="1d", progress=False, auto_adjust=False,
-                           group_by="column")
+        import yf_daily
+        # v0.45.658：经唯一入口（按日期取 D 那行：帧与 actions=False 时逐位相同）
+        hist = yf_daily.download(yf, sorted(db), source="coverage_gate", start=_s.isoformat(), end=_e.isoformat(),
+                                 interval="1d", progress=False, auto_adjust=False,
+                                 group_by="column")[0]
         cl = hist["Close"]
         idx = [d for d in cl.index if str(d)[:10] == date]
         if not idx:

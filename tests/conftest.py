@@ -1338,14 +1338,29 @@ def _reset_stock_fetch_legacy_stats():
 
 @pytest.fixture(autouse=True)
 def _reset_event_row_stats():
-    """v0.45.645：`price_metrics` 的「日线公司行动空行」计数是进程级全局状态（同上一条）。只在模块已导入时清——不在这里触发导入。"""
+    """v0.45.645：`price_metrics` 的「日线公司行动空行」计数是进程级全局状态（同上一条）；v0.45.653 起同一夹具也清「行情非有限改缺失」计数。
+    只在模块已导入时清——不在这里触发导入。"""
     mod = sys.modules.get("price_metrics")
     if mod is not None:
         mod._reset_event_row_stats()
+        mod._reset_nonfinite_stats()
     yield
     mod = sys.modules.get("price_metrics")
     if mod is not None:
         mod._reset_event_row_stats()
+        mod._reset_nonfinite_stats()
+
+
+@pytest.fixture(autouse=True)
+def _reset_yf_daily_stats():
+    """v0.45.652：`yf_daily` 唯一入口的公司行动空行计数是进程级全局状态（同上一条）。只在模块已导入时清——不在这里触发导入。"""
+    mod = sys.modules.get("yf_daily")
+    if mod is not None:
+        mod._reset_stats()
+    yield
+    mod = sys.modules.get("yf_daily")
+    if mod is not None:
+        mod._reset_stats()
 
 
 @pytest.fixture

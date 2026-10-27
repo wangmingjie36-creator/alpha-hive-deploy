@@ -680,8 +680,10 @@ def _build_macro(macro_context) -> List[str]:
         _vnote += "（⚠️ 陈旧，未计入宏观投票）"
     _mrow("VIX", "vix", ".1f", "", "vix_regime", _vnote)
     _mrow("10Y利率", "treasury_10y", ".2f", "%", "rate_environment")
-    _mrow("大盘(5日)", "spx_change_pct", "+.2f", "%", "market_trend")
-    md.append(f"| 美元 | — | {macro_context.get('dollar_trend', '')} |")
+    # v0.45.663：这一格一直是较前一交易日的 1 日涨跌（fred_macro 的 change_pct），旧标签写「5日」是错的
+    _mrow("大盘(1日)", "spx_change_pct", "+.2f", "%", "market_trend")
+    _dollar = macro_context.get('dollar_trend', '')
+    md.append(f"| 美元 | — | {'不可得' if _dollar == 'unknown' else _dollar} |")
     md.append("")
     headwinds = macro_context.get("macro_headwinds", [])
     tailwinds = macro_context.get("macro_tailwinds", [])

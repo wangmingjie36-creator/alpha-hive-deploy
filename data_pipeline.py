@@ -514,7 +514,7 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
             observations={"yf_daily": _ref_daily},   # v0.45.580
         )
         # v0.45.639：三个字段的公式只在 `price_metrics.history_price_metrics`（此前这里是四份副本之一，理由见该模块 docstring）
-        _m = price_metrics.history_price_metrics(hist)
+        _m = price_metrics.history_price_metrics(hist, ticker)
         if _m["momentum_5d"] is not None:
             data.momentum_5d = _m["momentum_5d"]
             data.momentum_source = "5d_real"
@@ -581,7 +581,7 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
             return None
 
         # v0.45.639：公式只在 `price_metrics.history_price_metrics`（19 根门槛、`fill_method=None`、均量不可得置 None 的理由都搬过去了）
-        _m = price_metrics.history_price_metrics(hist)
+        _m = price_metrics.history_price_metrics(hist, ticker)
         out: Dict = {}
         if _m["momentum_5d"] is not None:
             out["momentum_5d"] = _m["momentum_5d"]
@@ -997,7 +997,7 @@ class YFinanceSource:
 
             # v0.45.639：公式只在 `price_metrics.history_price_metrics`。此前这里是四份副本之一——v0.45.473 修的
             # 「均量兜底 1.0」就是 `_fetch_history_metrics` 在 v0.45.54 修过、这份一直漏着的同一个 bug。均量不可得 ⇒ 不设，交给出口回落
-            _m = price_metrics.history_price_metrics(hist)
+            _m = price_metrics.history_price_metrics(hist, ticker)
             if _m["momentum_5d"] is not None:
                 data.momentum_5d = _m["momentum_5d"]
                 data.momentum_source = "5d_real"
@@ -1006,7 +1006,8 @@ class YFinanceSource:
             if _m["avg_volume"] is not None:
                 data.avg_volume = _m["avg_volume"]
                 data.volume_ratio = _m["volume_ratio"]
-                data.volume_source = "yfinance"
+                # v0.45.653：均量有、末根成交量缺时量比是 None（交给出口回落）——这时不标 yfinance（同 CBOE 那一支的写法）
+                data.volume_source = "yfinance" if data.volume_ratio is not None else None
             if _m["volatility_20d"] is not None:
                 data.volatility_20d = _m["volatility_20d"]
                 data.volatility_source = "yfinance"

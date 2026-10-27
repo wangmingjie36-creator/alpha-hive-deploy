@@ -434,7 +434,9 @@ def prefetch_ohlc(tickers: List[str], start: str, end: str) -> None:
         if tk in _OHLC_FULL:
             continue
         try:
-            hist = yf.Ticker(tk).history(start=start, end=end, auto_adjust=False)
+            import yf_daily
+            # v0.45.658：经唯一入口（带日期窗口、按日期用；此前是「dated_window」例外——结构上只核得到 start=，「末行碰不到」核不了）
+            hist = yf_daily.history(yf.Ticker(tk), source="paper_prefetch", start=start, end=end, auto_adjust=False)[0]
             out = {}
             for idx, row in hist.iterrows():
                 out[idx.strftime("%Y-%m-%d")] = {
@@ -656,7 +658,9 @@ class _ReplayOhlcWindow:
             import yfinance as yf
             # 与直连路径逐参数相同：只换 start/end。不许换成 yf.download（默认参数不同、MultiIndex）
             # 或加 repair=True（会改值）。v0.45.410：有行情库时 start 可能是已落定段末尾往前 OVERLAP_DAYS 天。
-            hist = yf.Ticker(ticker).history(start=fstart, end=self.end, auto_adjust=False)
+            import yf_daily
+            # v0.45.658：经唯一入口（带日期窗口、按日期用；此前是「dated_window」例外——结构上只核得到 start=，「末行碰不到」核不了）
+            hist = yf_daily.history(yf.Ticker(ticker), source="paper_replay", start=fstart, end=self.end, auto_adjust=False)[0]
             if hist is None or len(hist) == 0:
                 reason = "空结果"
             else:
@@ -849,7 +853,9 @@ def _fetch_ohlc_direct(ticker: str, start: str, end: str) -> Dict[str, Dict]:
     try:
         import yfinance as yf
         tkr = yf.Ticker(ticker)
-        hist = tkr.history(start=start, end=end, auto_adjust=False)
+        import yf_daily
+        # v0.45.658：经唯一入口（带日期窗口、按日期用；此前是「dated_window」例外——结构上只核得到 start=，「末行碰不到」核不了）
+        hist = yf_daily.history(tkr, source="paper_direct", start=start, end=end, auto_adjust=False)[0]
         if hist is None or len(hist) == 0:
             _PRICE_CACHE[key] = {}
             _note_ohlc(ticker, True)

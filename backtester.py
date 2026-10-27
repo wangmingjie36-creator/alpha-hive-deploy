@@ -924,15 +924,19 @@ class Backtester:
 
         symbols = sorted(tickers)
         try:
-            raw = yf.download(
+            import yf_daily
+            # v0.45.658：经唯一入口（按日期切片：帧与 actions=False 时逐位相同）
+            raw = yf_daily.download(
+                yf,
                 tickers=symbols,
+                source="backtest_prefetch",
                 start=start_date.strftime("%Y-%m-%d"),
                 end=end_date.strftime("%Y-%m-%d"),
                 group_by="ticker",
                 auto_adjust=True,      # 与 Ticker.history() 的默认一致
                 progress=False,
                 threads=False,         # 顺序打 Yahoo，不用 30 并发去撞 429
-            )
+            )[0]
         except Exception as e:  # noqa: BLE001 - 批量失败只回退，不阻断回测
             _log.warning("回测批量取价失败（%s: %s），本轮回退逐票取价",
                          type(e).__name__, e)
@@ -971,7 +975,9 @@ class Backtester:
                 return _slice_by_date(df, s, e)
         if stats is not None:
             stats["fallback_history"] += 1
-        return yf.Ticker(ticker).history(start=start, end=end)
+        import yf_daily
+        # v0.45.658：经唯一入口（带日期窗口、按日期用；此前是「dated_window」例外——结构上只核得到 start=，「末行碰不到」核不了）
+        return yf_daily.history(yf.Ticker(ticker), source="backtester_history", start=start, end=end)[0]
 
     def _get_spy_entry_price(self, predict_date: str) -> Optional[float]:
         """获取 SPY 在 predict_date 的收盘价（作为 benchmark 入场价），带缓存。"""

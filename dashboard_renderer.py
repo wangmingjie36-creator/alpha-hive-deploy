@@ -679,8 +679,11 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
                 pass
 
             import yfinance as _yf
-            _h = _yf.Ticker(ticker).history(period="5d")
-            if not _h.empty:
+            import yf_daily
+            # v0.45.652：经唯一入口取（首行公司行动空行曾让 5 日动量的 iloc[0] 成 NaN）；
+            # 末行空行 = 今天那根缺了 ⇒ 不给回退价（剩下的末根是前一场）
+            _h, _last_blank = yf_daily.history(_yf.Ticker(ticker), source="dashboard_price", period="5d")
+            if not _last_blank and not _h.empty:
                 _price_raw = float(_h["Close"].iloc[-1])
                 if len(_h) >= 2 and _momentum_raw is None:
                     _momentum_raw = (_h["Close"].iloc[-1] / _h["Close"].iloc[0] - 1) * 100
@@ -2559,7 +2562,7 @@ def render_dashboard_html(report: Dict, date_str: str,
             # 黄金指标。v0.45.352（重做 v0.45.78）：主值固定显示价格，涨跌幅挪到独立的
             # 涨跌小字里。旧逻辑靠 gold_trend 二选一——走势明显时只显示涨跌幅、看不到价格，
             # 平稳时只显示价格、看不到涨跌。价格缺失时仍按旧规则兜底显示涨跌幅（门槛
-            # 保留：GLD 没取到时 gold_change_pct 是默认 0.0，trend 门槛恰好挡住它）。
+            # 保留：v0.45.663 起 GLD 没取到时 gold_change_pct 是 None、trend 是 "unknown"，两道都挡；此前是默认 0.0 被 trend 门槛挡住）。
             _gld_trend = _mctx.get("gold_trend", "stable")
             _gld_chg = _mctx.get("gold_change_pct")
             _gld_price = _mctx.get("gold_price")

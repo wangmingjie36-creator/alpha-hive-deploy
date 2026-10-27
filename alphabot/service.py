@@ -49,9 +49,13 @@ DEFAULT_INTERVAL_MIN = 10
 #: 快照里逐行权价 GEX 只存现价 ±这么多（热力图 / 回看点够用；不存原始链）
 SNAPSHOT_STRIKE_BAND = 0.12
 #: CBOE 报 `stale_vintage`（文件还停在上一交易日）时，这些票改拉 yfinance（`alphabot.yf_chain`，v0.45.603）。
-#: 2026-10-22 起只有 NVDL：它的 CBOE 文件整个上午不更新，同一时刻 yfinance 有 15 分钟延迟的成交。要加票改这里；
-#: **只对 Alpha Bot 的页面生效**——卖权账本 / 日报仍只认 CBOE。CBOE 一恢复就自动改回 CBOE。
-YF_FALLBACK_TICKERS = frozenset({"NVDL"})
+#: NVDL（2026-10-22）：它的 CBOE 文件整个上午不更新，同一时刻 yfinance 有 15 分钟延迟的成交。
+#: BILI（2026-10-27）：CBOE 文件盘中不更新（一个时点实测：12:47 ET 时文件还是昨天 23:22 ET 生成的；刷新时刻待验证），
+#: 卖权账本约 20 个扫描日里 15 个记 `stale_vintage`。⚠️ BILI 的 Yahoo 链出过坏数据（10-12 OI 清零、put/call 298.46），
+#: 所以备用源对**每一张**链先过 `oi_staleness`、OI 陈旧 / 判不了就拒收（见 `yf_chain` docstring）。要加票改这里；
+#: **只对 Alpha Bot 的页面生效**——卖权账本 / 溢价页 / 日报仍只认 CBOE（BILI 在账本里仍会记不可得，这是预注册的数据源，不换）。
+#: CBOE 一恢复就自动改回 CBOE。
+YF_FALLBACK_TICKERS = frozenset({"NVDL", "BILI"})
 _TICKER_RE = re.compile(r"^[A-Z_][A-Z0-9.\-]{0,9}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -318,7 +322,8 @@ class AlphaBotService:
         """跨式账本页与帮助页用的规则常量——取代码里那一份，不在前端另抄。
         懒 import + 兜底：这两个模块 import 时就求值数据根，环境没设好时不能连坐整个 Alpha Bot；取不到就写明原因。"""
         out = {"directional_delta_warn": SD.DIRECTIONAL_DELTA_WARN,
-               "ledger_ready_et": SD.LEDGER_READY_ET.isoformat(timespec="minutes")}
+               "ledger_ready_et": SD.LEDGER_READY_ET.isoformat(timespec="minutes"),
+               "open_lag_min": SD.OPEN_LAG_MIN}
         try:
             import earnings_vol_signal as evs
             out.update({k: evs.CONFIG.get(k) for k in ("rich_ratio", "cheap_ratio", "max_spread_pct",
@@ -404,13 +409,23 @@ class AlphaBotService:
         """对冲页与帮助页用的规则常量——取 `portfolio_greeks.CONFIG` 那一份，不在前端另抄。"""
         try:
             import portfolio_greeks as pg
-            return {k: pg.CONFIG.get(k) for k in pg.PUBLIC_RULE_KEYS} | {"measurement_start": pg.MEASUREMENT_START}
+            return pg.public_rules() | {"measurement_start": pg.MEASUREMENT_START}
         except Exception as exc:  # noqa: BLE001
             return {"rules_error": f"{type(exc).__name__}: {exc}"}
 
+    def _stress_fn(self):
+        """压力表函数（`portfolio_greeks.stress_table`，纯函数）：「压力模型 vs 实际净值」要用它对跨式腿重算网格。
+        取不到就是 None——那一栏只缺压力网格那个预测，别的照给。"""
+        try:
+            import portfolio_greeks as pg
+            return pg.stress_table
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("压力表函数不可得，模型检验缺压力网格预测：%s: %s", type(exc).__name__, exc)
+            return None
+
     def hedge(self) -> dict:
         now = self.now_fn()
-        return clean_json(HG.build_overview(self._hedge_view(now), now_et=now))
+        return clean_json(HG.build_overview(self._hedge_view(now), now_et=now, stress_fn=self._stress_fn()))
 
     # ── 尾部对冲候选（v0.45.643，只读）：SPY 认沽后比例价差叠到组合压力网格上
     def tail_hedge_rules(self) -> dict:
@@ -615,7 +630,9 @@ class AlphaBotService:
                 if raw is None:
                     _log.warning("[%s] CBOE 陈旧、yfinance 备用源也取不到：%s", t, reason)
                 else:
-                    _log.info("[%s] CBOE 文件陈旧（stale_vintage），本次改用 yfinance 备用源", t)
+                    chk = raw.get("oi_check") or {}
+                    _log.info("[%s] CBOE 文件陈旧（stale_vintage），本次改用 yfinance 备用源（OI 占比 %s，%s / %s 个合约无可用 IV）",
+                              t, chk.get("ratio"), raw.get("n_iv_missing"), len(raw.get("contracts") or []))
             return raw, reason
         return fetch
 

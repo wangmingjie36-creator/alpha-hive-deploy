@@ -2058,8 +2058,10 @@ def _forward_realized_vol(tickers: List[str], dates: List[str],
         import yfinance as yf
         start = (datetime.date.fromisoformat(dates[0]) - datetime.timedelta(days=20)).isoformat()
         end = (datetime.date.fromisoformat(dates[-1]) + datetime.timedelta(days=fwd_days * 3 + 20)).isoformat()
-        px = yf.download(list(tickers), start=start, end=end,
-                         progress=False, auto_adjust=True)["Close"]
+        import yf_daily
+        # v0.45.658：经唯一入口（前瞻波动率按日期用：帧与 actions=False 时逐位相同）
+        px = yf_daily.download(yf, list(tickers), source="forward_vol", start=start, end=end,
+                               progress=False, auto_adjust=True)[0]["Close"]
         if isinstance(px, pd.Series):
             px = px.to_frame(tickers[0])
         rets = px.pct_change()
@@ -2448,6 +2450,27 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 10-19（v0.45.639，新代码 10-26 上线，等价论证见 ic_rerun_readiness 同版条目）：BearBee data_quality.options 照抄 Oracle 板上判定 ——
     # 只改标签与 Bear confidence，Bear 分 / 方向不变；`bear.*`、`agent.BearBeeContrarian.*` 读分与方向 ⇒ 只动蜂后层 ⇒ 只切 composite.final_score
     "v0.45.639": (),
+    # 10-19（v0.45.652，新代码 10-27 推送，等价论证见 ic_rerun_readiness 同版条目）：行情三字段以外的 yfinance 日线读者收进 `yf_daily`
+    # （去掉公司行动空行）。进分的是板块轮动（Guard 宏观票 → 权重路由）与 Rival 直连回退，都只在空行日变 ⇒ 点名 Guard
+    # （本来就从 10-19 起，0 个信号后移）；`guard.macro_adj` / Rival 刻意不点名：09-28 起归档里没有一天受空行影响（证据见该条目）
+    "v0.45.652": ("agent.GuardBeeSentinel.*",),
+    # 10-19（v0.45.654，等价论证见 ic_rerun_readiness 同版条目）：补跑宏观报价末根须是 D + 曲线只用观测到的 10Y ⇒ Guard 宏观票的输入。
+    # 只在「补跑且 Yahoo 缺 D」/「没整份降级而 10Y 缺」的日子变，09-28 起归档里 0 行 ⇒ 同 652 只点名 Guard（0 个信号后移），`guard.macro_adj` 不点名
+    "v0.45.654": ("agent.GuardBeeSentinel.*",),
+    # 10-19（v0.45.657，等价论证见 ic_rerun_readiness 同版条目）：补跑时 FRED 序列按 D 的时点取 ⇒ 2Y 经曲线进 Guard 宏观票。
+    # 只在补跑行变，四个历史补跑日重取逐项相同 ⇒ 同 654 只点名 Guard（0 个信号后移），`guard.macro_adj` 不点名
+    "v0.45.657": ("agent.GuardBeeSentinel.*",),
+    # 10-19（v0.45.660，等价论证见 ic_rerun_readiness 同版条目）：FRED 序列逐个解析 ⇒ 一个 "." 不再连带丢掉进曲线的 2Y。
+    # 历史 0 次（缺月 11-10 起才落到旧代码读的位置）⇒ 同 654 / 657 只点名 Guard（0 个信号后移），`guard.macro_adj` 不点名
+    "v0.45.660": ("agent.GuardBeeSentinel.*",),
+    # 10-19（v0.45.658，652 二次检查）：`yf.download` 读者与带日期窗口的 history 读者也收进 `yf_daily`，末段按「最近一场已收盘」判。
+    # 可能变的只有 refuse 读者（预取包 → Rival / Scout、政体均线 → Guard、供应链 → Scout），且只在「最近一场缺了」的日子 ⇒ 点名 Guard
+    # （本来就从 10-19 起，0 个信号后移）；Rival / Scout 刻意不点名：证据窗口里没有一天受影响（见 ic_rerun_readiness 同版条目）
+    "v0.45.658": ("agent.GuardBeeSentinel.*",),
+    # 10-19（v0.45.663，等价论证见 ic_rerun_readiness 同版条目）：`fred_macro` 读 Yahoo 日线按日期配对、缺值不再顶数 ⇒ 经 Guard 的
+    # 板块冷热 / 黄金趋势 / 曲线 10Y 只在「缺一根」或「缺一项」的日子变；10-19 起旧代码扫描日冻结证据逐日核过一天都没有 ⇒ 同 654 / 657 / 660
+    # 只点名 Guard（0 个信号后移），`guard.macro_adj` 不点名
+    "v0.45.663": ("agent.GuardBeeSentinel.*",),
 }
 
 

@@ -250,7 +250,7 @@ _ML_ESTIMATOR_GENERATIONS = [
      "同日落地的第二批【v0.45.445】（两批合并为一代，同 09-06 / 09-07 的先例；`ic_rerun_readiness._COHORT_HISTORY` 里仍是两条同日边界）："
      "新闻主源 AV → Massive：BuzzBee news 通道换了逐文章标签的分类器 ⇒ sentiment 维分 ⇒ `final_score` 特征的上游定义变"
      "（`_prepare_ml_input` 一行没动）；Buzz 方向随之变 ⇒ `agent_agreement` 跟着变。幅度与校准见 `ic_rerun_readiness` 同版条目"
-     "（Massive 同票对 AV 时代均值 +1.5 / 中位 −1.0，Yahoo −27.1）。按 v0.45.334 条「估计量的定义变了就登记」登记，**没有重放 Δprobability**。"),    ("2026-10-19", "v0.45.537+v0.45.538+v0.45.559+v0.45.639",
+     "（Massive 同票对 AV 时代均值 +1.5 / 中位 −1.0，Yahoo −27.1）。按 v0.45.334 条「估计量的定义变了就登记」登记，**没有重放 Δprobability**。"),    ("2026-10-19", "v0.45.537+v0.45.538+v0.45.559+v0.45.639+v0.45.652+v0.45.654+v0.45.657+v0.45.658+v0.45.660+v0.45.663",
      "蜂后 ML 反馈停用（维度权重乘数与方向票重缩放都不再施加，只记影子）。`_prepare_ml_input` 一行没动；"
      "`final_score` 这个特征的**上游定义**变了：基础分改用 config 原样权重、方向票不再按 ML 乘数缩放"
      "（离线重放 09-10 → 10-16 共 750 行：最终分 |Δ| 均值 0.086、最大 1.0，方向约 9.5% 改变）。"
@@ -272,6 +272,27 @@ _ML_ESTIMATOR_GENERATIONS = [
      "【v0.45.639】（同日零代价；改名时 10-19 已有 5 天报告，归属不变——仍是同一代，只换标签）：BearBee 的 data_quality.options 照抄 Oracle "
      "板上判定 ⇒ Oracle 降级那几行 Queen 的 `data_real_pct`（< 80 才压缩 `final_score`）可能变；Bear 不计票、自己的方向也没变 ⇒ "
      "蜂群方向与各蜂方向都照旧，`direction_encoded` / `agent_agreement` 两个方向特征的值逐行相同。全史只有 10-14 一行会变、0 行跌破 80；10-19 ~ 10-23 150 行新旧逐字节相同（见 `ic_rerun_readiness` 同版条目）。"
+     "同样**没有重放 Δprobability**。"
+     "【v0.45.652】（同日零代价；改名时 10-19 已有 6 天报告，归属不变——仍是同一代，只换标签）：行情三字段以外的 yfinance 日线读者收进 "
+     "`yf_daily`、去掉公司行动空行 ⇒ 板块轮动（Guard 宏观票 → `RegimeWeightAdjuster` 权重 ⇒ `final_score`）与 Rival 直连回退"
+     "（→ Rival 方向 ⇒ `agent_agreement`）只在出现空行的日子变；09-28 ~ 10-26 归档里没有一天受影响，10-19 ~ 10-26 等价判据全部成立"
+     "（见 `ic_rerun_readiness` 同版条目）。同样**没有重放 Δprobability**。"
+     "【v0.45.654】（同日零代价；改名时 10-19 已有 6 天报告，归属不变——仍是同一代，只换标签）：补跑宏观报价末根须是 D、收益率曲线只用观测到的 10Y "
+     "⇒ Guard 宏观票（→ `RegimeWeightAdjuster` 权重 ⇒ `final_score`）只在「补跑且 Yahoo 缺 D 那根」/「宏观没整份降级而 10Y 缺」的日子变；"
+     "09-28 起归档里 0 行受影响，10-19 ~ 10-26 等价判据 180/180 行成立（见 `ic_rerun_readiness` 同版条目）。同样**没有重放 Δprobability**。"
+     "【v0.45.657】（同日零代价；改名时 10-19 已有 6 天报告，归属不变——仍是同一代，只换标签）：补跑时 FRED 序列按 D 的时点取 "
+     "⇒ 财政部缺 D 行时进曲线的 2Y（→ Guard 宏观票 → `RegimeWeightAdjuster` 权重 ⇒ `final_score`）只在补跑行变；实时口径请求逐字不变，"
+     "四个历史补跑日重取逐项相同，10-19 ~ 10-26 全是实时行（见 `ic_rerun_readiness` 同版条目）。同样**没有重放 Δprobability**。"
+     "【v0.45.660】（同日零代价；改名时 10-19 已有 6 天报告，归属不变——仍是同一代，只换标签）：FRED 序列逐个解析 ⇒ 一个值是 \".\" "
+     "不再连带丢掉进曲线的 FRED 2Y（→ Guard 宏观票 → `RegimeWeightAdjuster` 权重 ⇒ `final_score`）；历史 0 次（2025-10 缺月 11-10 起才落到旧代码读的位置），"
+     "10-19 ~ 10-26 宏观来源都含财政部（2Y 不走 FRED）⇒ 等价判据全部成立（见 `ic_rerun_readiness` 同版条目）。同样**没有重放 Δprobability**。"
+     "【v0.45.658】（同日零代价，归属不变——仍是同一代，只换标签）：652 二次检查——`yf.download` 读者与带日期窗口的 history 读者也收进 "
+     "`yf_daily`，末段按「最近一场已收盘」判。预取包里的 Rival 技术面 / Scout 相对强度（→ 方向 ⇒ `agent_agreement` / `direction_encoded`）、"
+     "Guard 市场政体均线只在「扫描日某只标的有公司行动、当天那根却缺」时变；10-19 起旧代码扫描日一天都没有（DELL 10-20 除息、那根在），"
+     "见 `ic_rerun_readiness` 同版条目。同样**没有重放 Δprobability**。"
+     "【v0.45.663】（同日零代价，归属不变——仍是同一代，只换标签）：`fred_macro` 读 Yahoo 日线按日期配对（不再数第几根）、缺值不再顶数"
+     "（10Y 4.5 / 涨跌 0.0 ⇒ None / unknown）。经 Guard 宏观票的板块冷热 / 黄金趋势 / 曲线 10Y 只在「Yahoo 缺一根」或「缺一项」的日子变；"
+     "10-19 起旧代码扫描日冻结证据逐日核过：板块涨跌存档 = 按日期重算、黄金与 10Y 不经 Yahoo（见 `ic_rerun_readiness` 同版条目）。"
      "同样**没有重放 Δprobability**。"),
 ]
 

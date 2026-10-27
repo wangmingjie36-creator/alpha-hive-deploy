@@ -236,7 +236,8 @@ class TestConsequencesGone:
         yf_stub["frame"] = _event_at(_frame().iloc[1:], -5)
         want = pm.history_price_metrics(pm.drop_event_only_rows(yf_stub["frame"])[0])
         assert math.isfinite(want["momentum_5d"])
-        assert math.isnan(pm.history_price_metrics(yf_stub["frame"])["momentum_5d"]), "正对照：不去掉就是 NaN"
+        assert pm.history_price_metrics(yf_stub["frame"])["momentum_5d"] is None, \
+            "正对照：不去掉就算不出（v0.45.653 起非有限改 None；之前是 NaN、通道 100）"
         assert fc.momentum_channel(float("nan")) == 100.0, "正对照：NaN 进动量通道就是满分"
 
         out = dp._fetch_history_metrics("META")

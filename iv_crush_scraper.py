@@ -91,7 +91,10 @@ def get_iv_crush_data(ticker: str, lookback: int = 8) -> Dict:
             )
 
         # ── 2. 历史财报日价格变动 ─────────────────────────────────────────
-        hist = stock.history(period="3y", interval="1d")
+        # v0.45.652：经唯一入口取（公司行动空行先去掉）。末行空行不另判：财报涨跌按日期取前后两根，
+        # 下面的 current_price 只用来挑平值行权价，最近一根真实收盘足够
+        import yf_daily
+        hist, _last_blank = yf_daily.history(stock, source="iv_crush", period="3y", interval="1d")
         if hist.empty:
             return {**result, "source": "yfinance:no_price_history"}
 

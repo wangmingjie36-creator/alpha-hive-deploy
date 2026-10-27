@@ -1,0 +1,209 @@
+{
+  "days": {
+    "2026-09-28": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-09-29": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-09-30": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-01": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-02": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-05": {
+      "prefetch_bundle": [
+        "35/35",
+        "35/35"
+      ],
+      "reason": "轮动表 9 只（不是 11）",
+      "sector_rotation_full": 9,
+      "status": "not_proven",
+      "yfinance_gate": null
+    },
+    "2026-10-06": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-07": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-08": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-09": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-12": {
+      "prefetch_bundle": [
+        "0/35"
+      ],
+      "reason": "预取包没有全覆盖：['0/35']",
+      "sector_rotation_full": 11,
+      "status": "not_proven",
+      "yfinance_gate": null
+    },
+    "2026-10-13": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-14": {
+      "prefetch_bundle": [
+        "0/35"
+      ],
+      "reason": "轮动表 0 只（不是 11）",
+      "sector_rotation_full": 0,
+      "status": "not_proven",
+      "yfinance_gate": null
+    },
+    "2026-10-15": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-16": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-19": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-20": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-21": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-22": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-23": {
+      "prefetch_bundle": [
+        "35/35"
+      ],
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-26": {
+      "prefetch_bundle": [
+        "0/35"
+      ],
+      "reason": "yfinance 整轮 0 次成功响应（calls=5 = rate_limited；冷却挡下 781 次）⇒ 没有日线到手",
+      "sector_rotation_full": 0,
+      "status": "equivalent_no_yfinance_data",
+      "yfinance_gate": {
+        "blocked_by_cooldown": 781,
+        "calls": 5,
+        "in_cooldown": 0.0,
+        "rate_limited": 5
+      }
+    }
+  },
+  "generated_at": "2026-10-27T03:27:45",
+  "generator": "experiments/macro_rotation_equivalence_audit.py",
+  "n_sector_etfs": 11,
+  "spdr_ex_dates": [
+    "2025-12-22",
+    "2026-03-23",
+    "2026-06-22",
+    "2026-09-21"
+  ],
+  "version": "v0.45.652"
+}

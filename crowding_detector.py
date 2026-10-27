@@ -503,9 +503,14 @@ def get_crowding_metrics(ticker: str, board=None) -> Dict:
     # 获取 yfinance 基础数据
     try:
         import yfinance as yf
+        import yf_daily
         from data_pipeline import _drop_forming_bar as _dfb
         t = yf.Ticker(ticker)
-        hist = _dfb(t.history(period="1mo"))  # v0.29.4 盘中护栏
+        # v0.45.652：经唯一入口取（先去公司行动空行，再过 v0.29.4 盘中护栏）；末行空行 = 今天那根缺了 ⇒ 走下面的取不到分支
+        hist, _last_blank = yf_daily.history(t, source="crowding_cli", period="1mo")
+        if _last_blank:
+            raise ValueError("末行是公司行动空行（今天那根 K 线缺了）")
+        hist = _dfb(hist)
         stock_data = {
             "price": float(hist["Close"].iloc[-1]) if not hist.empty else 0.0,  # v0.40.1: 0 哨兵替代假价 100（下游 crowding 不用 price）
             "momentum_5d": (float(hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100) if len(hist) >= 5 else 0.0,

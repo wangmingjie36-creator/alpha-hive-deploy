@@ -23,6 +23,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,9 +93,51 @@ def _online(repo, bare):
 
 @pytest.fixture
 def no_sleep(monkeypatch):
+    """推送退避不真等，并按顺序记下每次退避多久。**只替换退避接缝 `rd._retry_sleep`，不碰全局 `time.sleep`**（v0.45.664）：
+    全局替换会把别处的 sleep 也记进来（`subprocess.run(timeout=…)` 收子进程时的忙等、别的测试遗留的后台线程），
+    CI 机器忙时偶发 ⇒ 「== [2.0]」多出几项、「第 2 次退避时网络恢复」提前触发。见 `stray_sleeps`。"""
     calls = []
-    monkeypatch.setattr(time, "sleep", lambda s: calls.append(s))
+    monkeypatch.setattr(rd, "_retry_sleep", calls.append)
     return calls
+
+
+@pytest.fixture(params=["quiet", "subprocess_busy_wait", "background_thread"])
+def stray_sleeps(request, monkeypatch):
+    """别处对**全局** `time.sleep` 的调用——数退避次数的测试必须不受它们影响（v0.45.664）。
+
+    * `subprocess_busy_wait`：`subprocess.run(..., timeout=…)` 收子进程时，若子进程还没被回收，`Popen._wait` 会忙等
+      `time.sleep(0.001…0.05)`。这里让每个 Popen 第一次非阻塞轮询都报「还没退出」，确定性地逼出一次——CI 机器忙时自然发生；
+    * `background_thread`：别的测试遗留的后台线程在跑 `time.sleep`（整套里才有，单跑没有）。
+    两条都只在 CI 上偶发（本机空闲 / 压 CPU 各 30 次 0 红），所以用确定性注入钉住；注入器自己要证明真的触发过，免得空过。"""
+    fired = []
+    if request.param == "subprocess_busy_wait":
+        real_try_wait = subprocess.Popen._try_wait
+
+        def first_poll_not_ready(self, wait_flags):
+            if wait_flags == os.WNOHANG and id(self) not in fired:
+                fired.append(id(self))
+                return (0, 0)
+            return real_try_wait(self, wait_flags)
+
+        monkeypatch.setattr(subprocess.Popen, "_try_wait", first_poll_not_ready)
+        yield request.param
+    elif request.param == "background_thread":
+        stop = threading.Event()
+
+        def ticker():
+            while not stop.wait(0.002):
+                fired.append(1)
+                time.sleep(0)                 # 调用时查找 time.sleep——测试若替换了全局 sleep，就会被它记进去
+
+        t = threading.Thread(target=ticker, name="stray_sleep_ticker", daemon=True)
+        t.start()
+        yield request.param
+        stop.set()
+        t.join(2)
+    else:
+        yield request.param
+    if request.param != "quiet":
+        assert fired, f"注入器 {request.param} 一次都没触发——这条用例没有测到它声称的情形"
 
 
 @pytest.fixture
@@ -134,7 +177,7 @@ class TestIncidentSequence:
         # 每次 attempt 的父提交都是 c0（没有「拿自己的未推送提交当父」）
         assert r["parent"] == d.c0 and r["tree_unchanged"] is False
 
-    def test_two_attempts_exactly_as_logged(self, deployed, tmp_path):
+    def test_two_attempts_exactly_as_logged(self, deployed, tmp_path, stray_sleeps):
         """与日志逐字对应的 max_attempts=2 版本：attempt 2 的结局必须是失败。"""
         d = deployed
         _offline(d.repo, tmp_path)
@@ -176,7 +219,7 @@ class TestIncidentSequence:
 
 class TestRecovery:
 
-    def test_network_returns_mid_retry_and_deploy_really_lands(self, deployed, tmp_path, monkeypatch):
+    def test_network_returns_mid_retry_and_deploy_really_lands(self, deployed, tmp_path, monkeypatch, stray_sleeps):
         """attempt 1、2 断网，第 2 次退避期间网络恢复 ⇒ attempt 3 fetch 校验 ⇒ 推送送达。
         旧代码在 attempt 2 就假成功返回，远端永远停在 c0。"""
         d = deployed
@@ -189,7 +232,9 @@ class TestRecovery:
             if len(sleeps) == 2:
                 _online(d.repo, d.bare)
 
-        monkeypatch.setattr(time, "sleep", _sleep)
+        # 只数推送退避（接缝 `rd._retry_sleep`）：替换全局 time.sleep 会把子进程忙等 / 后台线程的 sleep 也数进来，
+        # CI 上偶发「第 1 次退避时就恢复网络」⇒ attempts == 2（v0.45.664，见 stray_sleeps）
+        monkeypatch.setattr(rd, "_retry_sleep", _sleep)
         r = rd.commit_and_push_gh_pages(str(d.repo), tree1, lambda n: "day1")
 
         assert r["success"] and r["attempts"] == 3, r

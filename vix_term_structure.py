@@ -170,8 +170,10 @@ def _get_spot_vix() -> Optional[float]:
     """从 yfinance 获取 ^VIX 现货"""
     try:
         import yfinance as yf
-        hist = yf.Ticker("^VIX").history(period="2d")
-        if not hist.empty:
+        import yf_daily
+        # v0.45.652：经唯一入口取（指数没有分红，实际吃不到空行；入口照过，守卫不留例外）
+        hist, last_blank = yf_daily.history(yf.Ticker("^VIX"), source="spot_vix", period="2d")
+        if not last_blank and not hist.empty:
             return round(float(hist["Close"].iloc[-1]), 2)
     except Exception as e:
         _log.debug("VIX spot error: %s", e)

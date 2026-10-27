@@ -321,12 +321,15 @@ class AlertAnalyzer:
 
         # 7. 检测 P2: 组合 Greeks 用到了不属于当天那一场的标的价 / 因此拒绝成交（v0.45.423）
         self._check_portfolio_greeks_prices(status)
+        self._check_portfolio_tail(status)       # v0.45.649：压力最差格 > 告警线 / 尾部预算算不出来
         self._check_paper_portfolio_run(status)
         self._check_ledger_io_failures(status)
         self._check_strangle_shadow(status)
         self._check_history_fill(status)
         self._check_stock_fetch_legacy(status)   # v0.45.639：P1 行情改走 cache.py 旧回落
         self._check_event_rows(status)           # v0.45.645：P2 日线公司行动空行不在首行（某个交易日的价格缺了）
+        self._check_yf_daily_event_rows(status)  # v0.45.652：P2 其他日线读者（yf_daily 入口）最近一场缺了 / 中间的公司行动空行
+        self._check_price_nonfinite(status)      # v0.45.653：P2 行情三字段算出非有限数、已改缺失（真 K 线缺收盘 / 缺量）
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
         self._check_news_sources(status)
@@ -900,6 +903,61 @@ class AlertAnalyzer:
             ["portfolio_greeks", "data_quality"]
         ))
 
+    def _check_portfolio_tail(self, status: Dict) -> None:
+        """组合尾部预算（v0.45.649，`tail_budget` → `portfolio_greeks.compute_day` → `price_check.tail` → scan_timing）。
+
+        为什么要有：2026-10-23 组合压力最差格约 −23% NAV（现货 −10%、IV +20 点），几乎全来自 6 笔卖跨式；而 Gamma / Vega 告警
+        按「1% 移动」标度（gamma 线 0.5% NAV / 1%），损失随移动幅度平方放大——10% 移动要损失约 50% NAV 才响，当天两条都静音。
+        这里直接看压力格：最差格损失 > 告警线（`tail_budget.CONFIG["alert_pct"]`，主观常数）⇒ P2。**只观测、不改任何交易行为。**
+        ⚠️ 当前真实组合就在线之上，所以它会**每个扫描日都响**，直到跨式仓位或告警线变化——这是设计内的（要的就是别再静音）。
+        另一条：尾部预算**算不出来**（`exception:<类>`）⇒ P2，不把「没算出来」当成「没有尾部」。NAV 缺 / 压力表空是数据不全，
+        已由 `_check_portfolio_greeks_prices` 的「数据不全」覆盖，这里不重复。旧版扫描的计数没有 `tail` 键 ⇒ 不报（不猜）。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        pg = (st.get("counters") or {}).get("portfolio_greeks")
+        if not isinstance(pg, dict) or pg.get("error"):
+            return                      # 整轮没跑到 / 异常中断：`_check_portfolio_greeks_prices` 已报
+        tail = pg.get("tail")
+        if not isinstance(tail, dict):
+            return
+        if not tail.get("available"):
+            if str(tail.get("reason") or "").startswith("exception"):
+                self.alerts.append(Alert(
+                    AlertLevel.MEDIUM,
+                    f"📊 【P2 中】组合尾部预算：{pg.get('as_of')} 算不出来（{tail.get('reason')}），压力最差格告警与影子闸这一天没有记录",
+                    {"原因": str(tail.get("reason")),
+                     "影响": "尾部告警这一天是盲的；连续几天都这样 = 尾部观测整段停摆",
+                     "建议": "看 alpha_hive.log 里「尾部预算算不出来」那一行的异常；审计文件 hedge_state/greeks_<日期>.json 的 tail 一节"},
+                    ["portfolio_greeks", "tail_budget"]))
+            return
+        if not tail.get("breach"):
+            return
+        w = tail.get("worst") or {}
+        top = "；".join(f"{t.get('ticker')} {t.get('at_worst_pct'):+.1f}%（{t.get('sector')}）" for t in tail.get("top") or []) or "—"
+        sec = "；".join(f"{t.get('sector')} {t.get('at_worst_pct'):+.1f}%" for t in tail.get("top_sectors") or []) or "—"
+        skip = tail.get("gate_n_would_skip") or {}
+        gate = (f"今天新开 {tail.get('gate_n_entries', 0)} 笔，按 " + " / ".join(f"{k}%" for k in skip)
+                + " 预算会跳过 " + " / ".join(str(v) for v in skip.values()) + " 笔（影子记录，没有真跳过）") if skip else "—"
+        over, cap = tail.get("over_cap") or [], tail.get("slot_cap_pct")
+        slot = (f"{len(over)} 笔超过单仓上限 {cap}% NAV / 笔（= 告警线 ÷ 名额数）："
+                + "；".join(f"{o.get('ticker')} {o.get('loss_pct')}%（{o.get('multiple')}×）" for o in over)) if (over and cap) else "—"
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】组合尾部：压力最差格（现货 {w.get('spot_pct', 0):+g}%、IV {w.get('iv_pts', 0):+g} 点）损失 "
+            f"{tail.get('loss_pct_nav')}% NAV，超过告警线 {tail.get('alert_pct'):g}%",
+            {
+                "最差格": f"{w.get('pnl')} 美元（{w.get('pct_nav')}% NAV）",
+                "主要来源": top,
+                "板块": sec,
+                "单仓上限": slot,
+                "影子闸": gate,
+                "压力表": "有行被剔除，实际损失可能更大" if tail.get("partial") else "完整",
+                "影响": "只观测：不改任何交易行为。这是净空 Gamma / Vega 的跨式账的尾部，SPY 股票对冲管不到它",
+                "建议": "看 Alpha Bot「对冲」页的尾部贡献表；要不要拦截新开仓是另一个决定（先看影子闸攒的记录）",
+            },
+            ["portfolio_greeks", "tail_budget"]))
+
     def _check_news_sources(self, status: Dict) -> None:
         """新闻通道的实际来源（v0.45.444，`scan_timing.extra.news_sources`，写入者 `alpha_hive_daily_report.main`）。
 
@@ -1332,6 +1390,104 @@ class AlertAnalyzer:
                 {"明细": _items(later, n_later) or f"明细已满 {len(ev.get('elsewhere') or [])} 条上限，共 {n_later} 条",
                  "影响": "评分用的行情不受影响；之后单独取日线的用途（报告阶段等）少了一根 K 线或那一路取不到"},
                 ["event_rows", "data_quality"]
+            ))
+
+    def _check_yf_daily_event_rows(self, status: Dict) -> None:
+        """行情三字段以外的 yfinance 日线读者经唯一入口 `yf_daily`（`history` / `download`）遇到「**最近一场已收盘的 K 线缺了**」
+        或**窗口中间**的公司行动空行（v0.45.652；v0.45.658 起按「这一路要哪天」判末段；`yf_daily.stats()` 经 scan_timing 进来）。
+
+        首段（窗口外边界日漏进来的事件）去掉即恢复成请求的窗口，正常、只计数（摘要行可见）。末段空行且剩下的末根早于最近一场已收盘的
+        交易日 = 那一场的 K 线缺了：末行策略登记为 refuse 的调用点（`tests/test_yf_daily.py::POLICY`）（板块轮动 / 宏观报价 / 预取包里的 Rival / Scout / 快照入场价 …）
+        已把那一路当取不到，ignore 的（HV 走缺口链、IV-RV 窗口、回测 / 回填按日期用）照用去掉后的日线。末段空行而末根就是最近一场
+        （盘前跑、今天那场还没收）不报。中间：yfinance 1.2.0 不会产生，出现 = yfinance 行为变了。都从没见过，所以要红。计数缺失 ⇒ checks_skipped。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        yd = (st.get("counters") or {}).get("yf_daily")
+        if not isinstance(yd, dict):
+            # 措辞刻意不含「公司行动空行」：645 那条检查的测试按这个子串认它自己的跳过记录
+            self.checks_skipped.append("yf_daily 入口的日线空行检查（scan_timing 无 yf_daily 计数）")
+            return
+        total = int(yd.get("items_total", len(yd.get("items") or [])) or 0)
+        if not total:
+            return
+        items = list(yd.get("items") or [])
+        shown = "；".join(f"{x.get('source')} · {x.get('ticker')} {x.get('date')}（第 {x.get('pos')} 行 / 共 {x.get('n')} 行"
+                         + ("，末行" if x.get("last") else "，窗口中间") + "）" for x in items[:10])
+        if total > min(len(items), 10):
+            shown += f" 等共 {total} 条"
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】yfinance 日线（行情三字段以外的读者）有 {total} 处公司行动空行意味着缺 K 线"
+            f"（最近一场缺了 {int(yd.get('last_row', 0) or 0)} 份、中间 {int(yd.get('middle', 0) or 0)} 行"
+            + (f"、其中日历判不了按缺了算 {int(yd.get('calendar_unavailable', 0) or 0)} 份"
+               if yd.get("calendar_unavailable") else "") + "）",
+            {
+                "明细": shown,
+                "影响": "最近一场缺了的：用末根当今天的调用点（末行策略 refuse，登记在 tests/test_yf_daily.py::POLICY）已把那一路当取不到（板块轮动少这只 ETF、宏观报价缺这个符号、"
+                        "预取包里这只票的 Rival 技术面 / Scout 相对强度回到中性、快照入场价不走回退），没有拿前一场冒充今天；"
+                        "按日期用的（ignore）照用；窗口中间的（yfinance 1.2.0 不会产生）：那一路少了一根真实 K 线",
+                "建议": "末行的：看是不是 Yahoo 当天迟发 K 线 / 盘前跑；窗口中间的：先查 yfinance 版本与 utils.safe_merge_dfs 是否改了。"
+                        "调用点名见 yf_daily.SOURCES",
+            },
+            ["yf_daily", "data_quality"]
+        ))
+
+    def _check_price_nonfinite(self, status: Dict) -> None:
+        """动量 / 量比算出非有限数、已改成缺失（v0.45.653；`price_metrics.nonfinite_stats()` 经 scan_timing 进来）。
+
+        成因是 yfinance 给了真 K 线却缺收盘或成交量（2026-08-28 那种：当天成交了、Yahoo 还没填收盘）落在末根 / 倒数第 5 根。值已经交给出口回落
+        （自攒索引 / Twelve Data），此前会变成动量通道满分 100 / 量能通道最低档 20 进评分。从没在实时扫描里见过，所以要红：评分那一刻的快照里有 ⇒ P2，
+        评分之后的取数才遇到 ⇒ INFO，计数缺失 ⇒ checks_skipped。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        nf = (st.get("counters") or {}).get("price_nonfinite")
+        if not isinstance(nf, dict):
+            self.checks_skipped.append("行情非有限检查（scan_timing 无 price_nonfinite 计数）")
+            return
+        scored = nf.get("at_scoring")
+        has_scored = isinstance(scored, dict)
+        base_d = scored if has_scored else nf
+
+        def _n(d):
+            return int(d.get("momentum_5d") or 0) + int(d.get("volume_ratio") or 0)
+
+        def _items(xs, total):
+            shown = "；".join(f"{x.get('ticker')} {x.get('field')}（末根 {x.get('last_bar')}"
+                             + ("，末根收盘缺" if x.get("close_last") is False else "")
+                             + ("，倒数第 5 根收盘缺" if x.get("close_5th_last") is False else "")
+                             + ("，末根成交量缺" if x.get("volume_last") is False else "") + "）" for x in xs[:10])
+            return shown + (f" 等共 {total} 条" if total > min(len(xs), 10) else "")
+
+        n_base = _n(base_d)
+        if n_base:
+            details = {
+                "明细": _items(list(base_d.get("items") or []), n_base),
+                "影响": "这些标的的动量 / 量比没用 yfinance 算出的 NaN（此前会让动量通道满分 100 / 量能通道最低档 20），改由出口回落补"
+                        "（看 history_fill：补上 ⇒ 来源 price_index / twelvedata；补不上 ⇒ 缺失、通道中性 50）",
+                "建议": "对照 Yahoo 网页看那根 K 线是不是收盘 / 成交量还没出（收盘后不久取数、或周末取当周五）；连续出现 ⇒ 查 yfinance 版本与取数时刻",
+            }
+            if not has_scored:
+                details["口径"] = "没有评分时的快照（at_scoring）——按进程口径报，可能含评分之后的取数"
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】行情三字段算出非有限数、已改缺失：动量 {int(base_d.get('momentum_5d') or 0)} 次、"
+                f"量比 {int(base_d.get('volume_ratio') or 0)} 次（yfinance 真 K 线缺收盘 / 成交量）",
+                details,
+                ["price_nonfinite", "data_quality"]
+            ))
+        if not has_scored:
+            return
+        n_later = _n(nf) - n_base
+        if n_later > 0:
+            later = list(nf.get("items") or [])[len(scored.get("items") or []):]
+            self.alerts.append(Alert(
+                AlertLevel.INFO,
+                f"ℹ️ 评分之后的取数遇到 {n_later} 次行情非有限（已改缺失）",
+                {"明细": _items(later, n_later) or f"明细已满 {len(nf.get('items') or [])} 条上限，共 {n_later} 次",
+                 "影响": "评分用的行情不受影响；之后单独取日线的用途（报告阶段等）那一项缺失或走了回落"},
+                ["price_nonfinite", "data_quality"]
             ))
 
     def get_critical_alerts(self) -> List[Alert]:

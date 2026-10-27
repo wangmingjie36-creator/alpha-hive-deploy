@@ -110,8 +110,10 @@ def _fetch_closes(tickers: list[str], start: str, end: str) -> dict:
             # 库里 price_at_predict / price_t7 存的也是真实成交价。
             # 用 auto_adjust=True 会把分红也复权掉，高股息标的在除息日附近
             # 凭空多出 0.5~2% 的偏离（实测自校验失败率 8.8% → 12.3%）。
-            df = yf.download(chunk, start=start, end=end,
-                             progress=False, auto_adjust=False, threads=False)
+            import yf_daily
+            # v0.45.658：经唯一入口（按日期用：去掉的空行与 actions=False 时逐位相同）
+            df = yf_daily.download(yf, chunk, source="dir_accuracy_backfill", start=start, end=end,
+                                   progress=False, auto_adjust=False, threads=False)[0]
         except Exception as exc:                       # noqa: BLE001
             _log.warning("批量取价失败 %s: %s", chunk, exc)
             continue

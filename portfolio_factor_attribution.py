@@ -171,9 +171,11 @@ def _load_etf_factors(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     data = {}
     for name, ticker in etfs.items():
         try:
-            hist = yf.Ticker(ticker).history(
+            import yf_daily
+            # v0.45.658：经唯一入口（带日期窗口、按日期用；此前是「dated_window」例外——结构上只核得到 start=，「末行碰不到」核不了）
+            hist = yf_daily.history(yf.Ticker(ticker), source="etf_factors",
                 start=start.date(), end=end.date(), auto_adjust=True
-            )
+            )[0]
             if hist.empty:
                 _log.warning(f"ETF {ticker} 无数据")
                 continue

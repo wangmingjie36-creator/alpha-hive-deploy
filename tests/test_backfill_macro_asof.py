@@ -10,7 +10,12 @@
 
 用户决定（2026-09-28）：修法 (a) 取 CSV 的 D 行、补跑 VIX 照实时口径计票、同形泄漏同版修。
 本文件守：值属于 D、Guard 照常计票、每条退路都不回落实时、实时口径逐票不变。
+
+v0.45.654：宏观报价（^TNX / ^FVX / DX-Y.NYB / ^GSPC / TLT / GLD，及 CBOE 全缺时的 ^VIX）补齐板块轮动早有的
+「末根必须正是 D」——Yahoo 整根缺 D 又没有事件时 `_asof_history` 返回止于更早一场的日线，旧代码拿那场冒充 D。
+同版：缺 10Y 时不再拿兜底常量 4.5 去减真 2Y 算曲线（否则「当没取到」会把几 bp 的错放大成假倒挂）。
 """
+import ast
 from datetime import date, datetime
 from unittest.mock import patch
 
@@ -57,6 +62,17 @@ def _after_close_clock(monkeypatch):
     """钟拨到运行当天收盘后 —— 此刻若有人走实时报价路径，报价桩会被调到。"""
     import cboe_options
     monkeypatch.setattr(cboe_options, "_et_now", lambda: datetime(2026, 9, 28, 17, 10))
+
+
+def _bars(*rows):
+    """真 pandas 日线（`_fetch_macro_data` 要 `.empty` / `.index.date` / `["Close"].iloc`）。"""
+    import pandas as pd
+    return pd.DataFrame({"Close": [c for _d, c in rows]},
+                        index=pd.DatetimeIndex([pd.Timestamp(d) for d, _c in rows]))
+
+
+ON_D = (("2026-08-26", 400.0), (D, 402.0))                # 末根是 D：+0.5% ⇒ 黄金 rising
+OFF_D = (("2026-08-25", 400.0), ("2026-08-26", 412.0))    # Yahoo 整根缺 D：止于 08-26（冒充成 D 就是 +3%「飙升」）
 
 
 def test_calendar_preconditions():
@@ -219,11 +235,119 @@ class TestFredMacroBackfill:
         fm.get_macro_context()
         assert seen == [D, None]
 
+    # ── v0.45.654：宏观报价的末根必须正是 D（同板块轮动那支） ──
+
+    def _quotes(self, monkeypatch, per_sym):
+        seen = []
+        monkeypatch.setattr(fm, "_asof_history",
+                            lambda yf, sym, as_of: (seen.append((sym, as_of)), per_sym(sym))[1])
+        return seen
+
+    def test_quote_with_bar_on_d_is_used(self, monkeypatch):
+        """正对照：末根是 D ⇒ 照用（last = D 收盘、prev = 前一根），`not_on_as_of` 为空。"""
+        self._data(monkeypatch)
+        _csv(monkeypatch, CSV_LATER)
+        seen = self._quotes(monkeypatch, lambda s: _bars(*ON_D) if s == "GLD" else None)
+        fm.set_macro_snapshot(D, MARKET_827)
+        r = fm.get_macro_context()
+        assert ("GLD", D) in seen
+        assert (r["gold_price"], r["gold_change_pct"], r["gold_trend"]) == (402.0, 0.5, "rising")
+        assert r["not_on_as_of"] == []
+
+    def test_quote_without_bar_on_d_is_missing_not_backdated(self, monkeypatch, caplog):
+        """Yahoo 整根缺 D 又没有事件（不产生空行）⇒ `_asof_history` 返回止于 08-26 的日线。
+        旧代码拿 08-26 收盘冒充 D：+3% ⇒ 黄金「飙升」⇒ Guard risk_off +2。现在当没取到、点名、WARNING。
+        v0.45.663 起按日期配对（`bars_integrity.session_change`）：缺 D ⇒ `quote_gaps` 记 anchor_missing，趋势「unknown」（不再顶成 stable）。
+        变红的变异：改回按位置取（末根当 D）。"""
+        self._data(monkeypatch)
+        _csv(monkeypatch, CSV_LATER)
+        self._quotes(monkeypatch, lambda s: _bars(*OFF_D) if s == "GLD" else None)
+        fm.set_macro_snapshot(D, MARKET_827)
+        with caplog.at_level("WARNING", logger="alpha_hive.fred_macro"):
+            r = fm.get_macro_context()
+        assert (r["gold_price"], r["gold_trend"]) == (None, "unknown")
+        assert r["not_on_as_of"] == ["GLD"] and r["quote_gaps"]["GLD"] == f"anchor_missing:{D}"
+        assert any(D in m and "GLD=GLD" in m for m in caplog.messages), caplog.messages
+
+    @pytest.mark.parametrize("market,csv_rows,vix", [
+        (MARKET_827, CSV_LATER, 14.51),   # CBOE 给得出 D 的 VIX ⇒ 部分降级路径
+        ({"cboe": {}}, [], 20.0),         # VIX 也没有 ⇒ 整份兜底
+    ], ids=["partial", "base"])
+    def test_every_symbol_off_d_is_named_on_the_degraded_paths(self, monkeypatch, market, csv_rows, vix):
+        """符号全被挡下 ⇒ data 空 ⇒ 降级成 fallback —— 正是这时最需要知道为什么。
+        变红的变异：去掉日期核对（不降级）；部分降级 / 兜底两条返回路径之一不带 `not_on_as_of`（参数化各红一条）。"""
+        self._data(monkeypatch, empty=True)
+        _csv(monkeypatch, csv_rows)
+        self._quotes(monkeypatch, lambda s: _bars(*OFF_D))
+        fm.set_macro_snapshot(D, market)
+        r = fm.get_macro_context()
+        assert (r["data_source"], r["vix"]) == ("fallback", vix)
+        assert r["not_on_as_of"] == sorted(["VIX", "TNX", "FVX", "DXY", "SPX", "TLT", "GLD"])
+
+    def test_realtime_output_has_no_such_key(self, monkeypatch):
+        """实时口径输出不变（同板块轮动：`not_on_as_of` 只在补跑带）。变红的变异：不看 `_as_of` 恒带。"""
+        self._data(monkeypatch)
+        fm.set_macro_snapshot(None)
+        assert "not_on_as_of" not in fm.get_macro_context()
+
+    @pytest.mark.parametrize("tnx_bars,curve,spread", [
+        ((("2026-08-26", 5.20), (D, 5.24)), "normal", 49.0),                   # 10Y 有 D 那根：5.24 − 4.75
+        ((("2026-08-25", 5.22), ("2026-08-26", 5.24)), "unknown", None),       # 缺 D ⇒ 没有 10Y
+    ], ids=["tnx_on_d", "tnx_off_d"])
+    def test_curve_needs_an_observed_10y(self, monkeypatch, tnx_bars, curve, spread):
+        """10-12 补跑的形状：财政部在债市假日没有 D 行 ⇒ 10Y 走 yfinance ^TNX、2Y 走 FRED。
+        ^TNX 缺 D 被当没取到后，`tnx` 落到兜底常量 4.5 ⇒ 4.5 − 4.75 = −25bp「倒挂」⇒ Guard risk_off +2。
+        2Y 是真观测，照记。变红的变异：去掉 `_set_curve` 里的 `_tnx_seen` 一判（tnx_off_d 会得到 inverted）。"""
+        self._data(monkeypatch, empty=True)           # 财政部没有 D 行
+        _csv(monkeypatch, CSV_LATER)
+        bars = {"^TNX": tnx_bars, "GLD": ON_D}        # GLD 只为让 data 非空（否则走整份降级，曲线键都没有）
+        self._quotes(monkeypatch, lambda s: _bars(*bars[s]) if s in bars else None)
+        monkeypatch.setattr(fm, "_load_fred_key", lambda: "k")
+        monkeypatch.setattr(fm, "_fetch_fred_series", lambda key, vintage=None: {"treasury_2y": 4.75})
+        fm.set_macro_snapshot(D, MARKET_827)
+        r = fm.get_macro_context()
+        assert (r["yield_curve"], r["yield_spread"]) == (curve, spread)
+        assert (r["treasury_2y"], r["treasury_2y_source"]) == (4.75, "fred")
+
+    # ── v0.45.657：FRED 按 D 的时点取（迷你 ALFRED 见 G 节） ──
+
+    def _holiday_d12(self, monkeypatch, fake):
+        """10-12 补跑的形状：财政部没有 D 行；^TNX 有 D 那根 5.24；2Y 只能走 FRED。"""
+        self._data(monkeypatch, empty=True)
+        _csv(monkeypatch, CSV_LATER)
+        bars = {"^TNX": (("2026-10-09", 5.20), (D12, 5.24)), "GLD": (("2026-10-09", 400.0), (D12, 402.0))}
+        self._quotes(monkeypatch, lambda s: _bars(*bars[s]) if s in bars else None)
+        monkeypatch.setattr(fm, "_load_fred_key", lambda: "k")
+        _plug_fred(monkeypatch, fake)
+
+    def test_fred_2y_on_the_curve_is_as_of_d(self, monkeypatch):
+        """进曲线（⇒ Guard 宏观票）的 FRED 2Y 是 D 那天已发布的 4.75@10-08，不是补跑运行时的最新值。
+        旧代码晚跑会拿到 5.40 ⇒ −16bp 倒挂 ⇒ Guard risk_off +2。变红的变异：调 `_fetch_fred_series` 不带 `vintage`。"""
+        fake = _FakeFred()
+        self._holiday_d12(monkeypatch, fake)
+        fm.set_macro_snapshot(D12, MARKET_827)
+        r = fm.get_macro_context()
+        assert (r["treasury_2y"], r["treasury_2y_source"]) == (4.75, "fred")
+        assert (r["yield_spread"], r["yield_curve"]) == (49.0, "normal")
+        assert (r["fred_extras"]["vintage"], r["fred_extras"]["treasury_2y_date"]) == (D12, "2026-10-08")
+        assert fake.calls and all(_pinned(c, D12) for c in fake.calls), fake.calls
+
+    def test_realtime_fred_is_not_pinned(self, monkeypatch):
+        """实时口径照取最新（变红的变异：实时也传一个日期，如 `vintage=_as_of or _realtime_as_of()`）。"""
+        fake = _FakeFred()
+        self._data(monkeypatch)
+        monkeypatch.setattr(fm, "_load_fred_key", lambda: "k")
+        _plug_fred(monkeypatch, fake)
+        fm.set_macro_snapshot(None)
+        r = fm.get_macro_context()
+        assert fake.calls and not any("realtime_end" in c for c in fake.calls), fake.calls
+        assert "vintage" not in r["fred_extras"]
+
 
 # ────────── C. 板块轮动对齐 D ──────────
 
 class _Hist:
-    """最小 DataFrame 替身：`len` / `.index.date`（numpy 数组，同真 pandas）/ `["Close"].iloc`。"""
+    """最小 DataFrame 替身：`len` / `.index.date`（numpy 数组，同真 pandas）/ `["Close"]`（可迭代，另带 `.iloc`）。"""
 
     def __init__(self, rows):
         import numpy as np
@@ -236,7 +360,7 @@ class _Hist:
     def __getitem__(self, k):
         assert k == "Close"
         closes = [c for _, c in self._rows]
-        return type("S", (), {"iloc": closes})()
+        return type("S", (list,), {"iloc": closes})(closes)
 
 
 def _days(*ds):
@@ -271,15 +395,15 @@ class TestSectorRotationAsOf:
         return seen
 
     def test_uses_last_five_bars_ending_on_d(self, monkeypatch):
-        """窗口取末 5 根（同实时 `period="5d"` 的宽度）：08-21 → 08-27。
-        变红的变异：用 `iloc[0]`（整段 7 根的首根 08-19）。"""
+        """D 对往前第 4 个交易日（同实时 `period="5d"` 的首尾）：08-21 → 08-27。
+        v0.45.663 起按日期配对。变红的变异：按位置取整段首根（08-19）。"""
         closes = [100, 101, 102, 103, 104, 105, 110]
         seen = self._asof(monkeypatch, lambda s: _Hist(list(zip(self.WINDOW, closes))))
         r = fm._fetch_sector_rotation(self._NoLiveYF, as_of=D)
         assert {a for _s, a in seen} == {D} and len(seen) == len(fm._SECTOR_ETFS)
         chg = {etf: c for etf, (_n, c) in r["full"].items()}
         assert set(chg.values()) == {round((110 / 102 - 1) * 100, 2)}
-        assert r["as_of"] == D and r["not_on_as_of"] == []
+        assert r["as_of"] == D and r["not_on_as_of"] == [] and r["gaps"] == {}
 
     def test_etf_without_bar_on_d_is_left_out_not_backdated(self, monkeypatch):
         """末根是 D 之前的 ⇒ 不计入、点名。变红的变异：去掉末根 == D 的检查。"""
@@ -291,6 +415,7 @@ class TestSectorRotationAsOf:
         self._asof(monkeypatch, per)
         r = fm._fetch_sector_rotation(self._NoLiveYF, as_of=D)
         assert stale_etf not in r["full"] and r["not_on_as_of"] == [stale_etf]
+        assert r["gaps"] == {stale_etf: f"anchor_missing:{D}"}
 
     def test_backfill_neither_reads_nor_writes_the_etf_cache(self, monkeypatch):
         """单 ETF 缓存只按 ETF 键。变红的变异：补跑口径读缓存（会拿到 99.0）/ 写缓存（实时之后读到 D 的值）。"""
@@ -355,6 +480,24 @@ class TestGuardBackfill:
         fm._CACHE, fm._CACHE_TS = {}, 0.0
         assert r["details"]["vix"] == 14.51 and r["details"]["vix_as_of"] == D
         assert r["regime_votes"]["risk_on"] >= 1
+
+    def test_end_to_end_gold_bar_missing_d_does_not_vote(self, monkeypatch, stub_fred):
+        """真 fred_macro → 真 Guard（v0.45.654）：GLD 缺 D 那根、止于 08-26（+3%）。
+        旧代码判「黄金飙升」⇒ risk_off +2，压过 D 的 VIX 那张 risk_on ⇒ regime risk_off、macro_adj −1.0；
+        现在黄金不投票 ⇒ risk_on、+0.5（v0.45.663 起记成「unknown」，与 stable 一样不投票）。
+        变红的变异：`_fetch_macro_data` 改回按位置取（末根当 D）。"""
+        fm._CACHE, fm._CACHE_TS = {}, 0.0
+        monkeypatch.setattr(fm, "_asof_history", lambda yf, sym, as_of: _bars(*OFF_D) if sym == "GLD" else None)
+        monkeypatch.setattr(fm, "_fetch_sector_rotation", lambda *a, **k: {"hot": [], "cold": [], "full": {}})
+        monkeypatch.setattr(fm, "_same_day_macro_data", lambda as_of=None: (
+            {"TWO": {"last": 4.2, "prev": 4.2, "change_pct": 0.0}}, {"TWO": f"treasury_gov@{D}"}))
+        _csv(monkeypatch, CSV_LATER)
+        fm.set_macro_snapshot(D, MARKET_827)
+        from swarm_agents.guard_bee import GuardBeeSentinel
+        r = GuardBeeSentinel.__new__(GuardBeeSentinel)._calc_macro_adjustment("AMC")
+        fm._CACHE, fm._CACHE_TS = {}, 0.0
+        assert r["details"]["gold_trend"] == "unknown" and r["regime_votes"]["risk_off"] == 0
+        assert (r["regime"], r["score_adj"]) == ("risk_on", 0.5)
 
     def test_snapshot_vix_without_a_date_still_casts_no_vote(self):
         """退路（CSV 缺 D 行）的快照值没有观测日 ⇒ 照旧不计票。"""
@@ -503,3 +646,881 @@ class TestBoundaryMarker:
             _guard_body({"vix_feed": None, "macro_as_of_mode": "realtime"})), encoding="utf-8")
         ev = rr.cohort_boundary_evidence(tmp_path, version="v0.45.366")
         assert ev["verdict"] == "matches" and ev["marker_first_seen"] == b, ev
+
+
+# ────────── F. 世代边界登记（v0.45.654：并进 10-19 同日标签 + 等价判据） ──────────
+
+_V654 = "v0.45.654"
+_MARK654 = "macro_quote_dates_checked"
+_LIVE_SRC = "treasury+finnhub+yfinance+fred"      # 10-19 ~ 10-26 实况
+
+
+def _row654(*, new=False, guard="ok", mode="realtime", source=_LIVE_SRC):
+    """`.swarm_results` 里一只票的最小形状（Guard 宏观细节的归档键名是 `vix_term_structure`）。"""
+    if guard == "absent":
+        return {"agent_details": {}}
+    if guard == "errored":
+        return {"agent_details": {"GuardBeeSentinel": {"score": 5.0, "details": {}, "error": "TypeError: boom"}}}
+    det = {"macro_adj": 0.0}
+    if guard == "ok":
+        det["vix_term_structure"] = {"macro_as_of_mode": mode, "macro_data_source": source}
+    if new:
+        det[_MARK654] = True
+    return {"agent_details": {"GuardBeeSentinel": {"score": 5.0, "details": det}}}
+
+
+def _write654(root, day, rows):
+    import json as _json
+    (root / f".swarm_results_{day}.json").write_text(_json.dumps(rows), encoding="utf-8")
+    for tk, r in rows.items():
+        (root / f"analysis-{tk}-ml-{day}.json").write_text(_json.dumps({"swarm_results": r}), encoding="utf-8")
+
+
+class TestBoundary654Registered:
+
+    def test_entry_scope_marker_equivalence(self):
+        import ic_rerun_readiness as rr
+        import signal_archive as sa
+        assert [d for d, v, _r in rr._COHORT_HISTORY if v == _V654] == ["2026-10-19"]
+        assert sa.COHORT_SIGNAL_SCOPE[_V654] == ("agent.GuardBeeSentinel.*",)
+        assert _V654 in rr._BOUNDARY_MARKERS and _V654 in rr._BOUNDARY_EQUIVALENCE
+        assert rr._BOUNDARY_MARKERS[_V654][1] is not rr._BOUNDARY_MARKERS["v0.45.652"][1]
+
+    def test_invalidates_no_rows(self):
+        """「作废 0 条」：`assess()` 只按末条边界的日期切 ⇒ 加这条前后切点相同（10-19）。
+        变红的变异：条目日期写成新代码上线日（10-28 ⇒ 10-19 ~ 10-27 的样本被作废）。"""
+        import ic_rerun_readiness as rr
+        without = [e for e in rr._COHORT_HISTORY if e[1] != _V654]
+        assert rr.cohort_start()["date"] == without[-1][0] == "2026-10-19"
+
+    def test_moves_no_signal_generation(self):
+        """「0 个信号后移」：加这条前后，归档全部信号的当代起点逐个相同（同 v0.45.652）。
+        变红的变异：作用域里加上 `guard.macro_adj`（09-28 → 10-19）。"""
+        import signal_archive as sa
+        hist = sa._cohort_history()
+        assert any(v == _V654 for _d, v, _r in hist)
+        sigs = set(sa.SIGNAL_EXTRACTORS) | set(sa.UNARCHIVED_NODES)
+        without = [e for e in hist if e[1] != _V654]
+        before, after = sa.generation_boundaries(sigs, without), sa.generation_boundaries(sigs, hist)
+        moved = {s for s in sigs if (before.get(s) or {}).get("date") != (after.get(s) or {}).get("date")}
+        assert moved == set(), moved
+
+    def test_does_not_truncate_dim_ic_h1_or_h2(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+        import dim_ic_forward_test as F
+        import dim_ic_protocol as P
+        import ic_rerun_readiness as rr
+        entry = next(e for e in rr._COHORT_HISTORY if e[1] == _V654)
+        for name, _obj, sigs in P.HYPOTHESES:
+            assert F.truncation_point(sigs, P, [entry]) is None, name
+
+    def test_ml_estimator_generation_label_extended(self):
+        import probability_scorecard as ps
+        assert any(d == "2026-10-19" and _V654 in v.split("+") for d, v, _t in ps._ML_ESTIMATOR_GENERATIONS)
+
+    def test_guard_success_path_writes_the_marker_unconditionally(self):
+        """GuardBee 的 `AgentResult(details={...})` 字面量里无条件写着印记。变红的变异：删掉那一行 / 挪进 if。"""
+        found = _guard_details_literals(_MARK654)
+        assert len(found) == 1 and isinstance(found[0], ast.Constant) and found[0].value is True, found
+
+
+def _guard_details_literals(key):
+    """GuardBee 源码里所有 `AgentResult(details={...})` 字面量中 `key` 对应的值节点。"""
+    from pathlib import Path
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "swarm_agents" / "guard_bee.py").read_text(encoding="utf-8"))
+    found = []
+    for call in ast.walk(tree):
+        if isinstance(call, ast.Call) and getattr(call.func, "id", None) == "AgentResult":
+            for kw in call.keywords:
+                if kw.arg == "details" and isinstance(kw.value, ast.Dict):
+                    found += [v for k, v in zip(kw.value.keys, kw.value.values)
+                              if isinstance(k, ast.Constant) and k.value == key]
+    return found
+
+
+class TestMarkerAndJudge654:
+
+    @pytest.mark.parametrize("d", [{}, {"swarm_results": _row654()},
+                                   {"swarm_results": _row654(new=True, mode="backfill")},
+                                   {"swarm_results": _row654(guard="errored")}],
+                             ids=["empty", "old_code", "backfill", "errored"])
+    def test_marker_only_on_live_new_rows(self, d):
+        """变红的变异：日期印记不排补跑行；认 652 的键。"""
+        import ic_rerun_readiness as rr
+        assert rr._marker_guard_macro_quote_dates(d) is False
+        assert rr._marker_guard_macro_quote_dates({"swarm_results": _row654(new=True)}) is True
+        old652 = _row654()
+        old652["agent_details"]["GuardBeeSentinel"]["details"]["macro_event_rows_checked"] = True
+        assert rr._marker_guard_macro_quote_dates({"swarm_results": old652}) is False
+
+    @pytest.mark.parametrize("row,expect", [
+        (_row654(), True),                                              # 10-19 ~ 10-26 实况
+        (_row654(source="treasury+finnhub+fred"), True),                # 10-14 / 10-26 形状（yfinance 全灭）
+        (_row654(source="fallback"), True),                             # 整份降级：不调 _set_curve
+        (_row654(source="yfinance+fred"), False),                       # 10Y 走 yfinance 或缺失，分不出
+        (_row654(source="finnhub+yfinance"), False),
+        (_row654(mode="backfill", source=f"cloud_snapshot+treasury+yfinance+fred@{D}"), False),   # 补跑：① 可能生效
+        (_row654(guard="no_macro"), False),                             # 宏观细节读不出
+        (_row654(source=None), False),
+        (_row654(guard="errored"), True),
+        (_row654(guard="absent"), True),
+    ], ids=["live_treasury", "live_treasury_no_yf", "live_fallback", "live_no_treasury", "live_finnhub_yf",
+            "backfill", "no_macro_details", "no_source", "guard_errored", "guard_absent"])
+    def test_judge(self, row, expect):
+        """变红的变异：判据恒真 / 不排补跑 / 不认 fallback / 不认 treasury / 宏观细节缺时当等价。"""
+        import ic_rerun_readiness as rr
+        assert rr._equiv_macro_quote_dates({"swarm_results": row, "_date": "2026-10-21", "_ticker": "AAA"}) is expect
+
+    def test_real_old_code_rows_from_10_19_are_all_equivalent(self):
+        """生产 10-19 ~ 10-26 六个旧代码扫描日的真实形状（10-27 只读实测：180/180 行实时、来源含 treasury）——
+        判据对这几种字面值都成立。⚠️ 这里抄的是**字面值**，不读生产库（测试不碰数据根）。"""
+        import ic_rerun_readiness as rr
+        for day in sorted(rr._TREASURY_FULL_CURVE_DAYS):
+            for src in ("treasury+finnhub+yfinance+fred", "treasury+finnhub+fred", "treasury+finnhub+yfinance"):
+                assert rr._equiv_macro_quote_dates({"swarm_results": _row654(source=src), "_date": day}) is True, (day, src)
+
+    def test_treasury_label_alone_is_not_proof(self):
+        """独立审查揪出：「来源含 treasury」只说明某个期限出自财政部（财政部行缺 10Y 时照样带这个标签，`treasury_yields._parse` 保留缺期限的行）。
+        没在 `_TREASURY_FULL_CURVE_DAYS` 里逐期限核过的日子 ⇒ 证不出。变红的变异：判据只看「来源含 treasury」。"""
+        import ic_rerun_readiness as rr
+        assert rr._TREASURY_FULL_CURVE_DAYS == {"2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23", "2026-10-26"}
+        for day in ("2026-10-27", None):
+            assert rr._equiv_macro_quote_dates({"swarm_results": _row654(), "_date": day}) is False, day
+
+
+class TestBoundaryVerdict654:
+
+    def test_before_deploy_is_no_evidence_yet(self, tmp_path):
+        import ic_rerun_readiness as rr
+        _write654(tmp_path, "2026-10-19", {"AAA": _row654(), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-26", {"AAA": _row654(source="treasury+finnhub+fred"), "BBB": _row654(guard="errored")})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V654)
+        assert ev["verdict"] == "no_evidence_yet" and ev["unmarked_after_boundary"] == [], ev
+
+    def test_marker_on_deploy_day_matches(self, tmp_path):
+        """变红的变异：删掉 `_BOUNDARY_EQUIVALENCE["v0.45.654"]`（⇒ boundary_too_early）。"""
+        import ic_rerun_readiness as rr
+        _write654(tmp_path, "2026-10-19", {"AAA": _row654(), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-26", {"AAA": _row654(), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-28", {"AAA": _row654(new=True), "BBB": _row654(new=True)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V654)
+        assert ev["verdict"] == "matches" and ev["marker_first_seen"] == "2026-10-28", ev
+
+    def test_old_code_on_an_unproven_day_is_too_early(self, tmp_path):
+        """新代码没赶上某个扫描日、那天财政部又没供上（10Y 来源分不出）⇒ 报出来，不当作等价。"""
+        import ic_rerun_readiness as rr
+        _write654(tmp_path, "2026-10-19", {"AAA": _row654(), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-27", {"AAA": _row654(source="yfinance+fred"), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-28", {"AAA": _row654(new=True), "BBB": _row654(new=True)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V654)
+        assert ev["verdict"] == "boundary_too_early" and ev["unmarked_after_boundary"] == ["2026-10-27"], ev
+
+
+# ────────── G. FRED 补跑按 D 的时点取（v0.45.657） ──────────
+#
+# 旧代码补跑也取「运行当天的最新值」：四个历史补跑日都跑得及时，最新值恰好就是 D 那天的样子（10-27 实拉逐项核过，
+# 2Y / CPI / 失业率 / 联邦基金利率 4/4 相同，只有只进展示的 HY 利差偏早）；补跑晚跑几周，Treasury 缺 D 行时
+# 进曲线的 2Y 就是几周后的，CPI 还会是 D 之后才发布的月份。修法：每条请求带 realtime_start=realtime_end=D。
+
+D12 = "2026-10-12"   # 哥伦布日：债市休市、股市开 ⇒ 财政部没有 D 行，2Y 走 FRED（10-12 补跑实况）
+
+
+def _cpi_rows():
+    """CPIAUCSL：月初观测、次月 15 日发布（发布日是示意）。2025-08 / 2026-08 两个值是 10-27 实拉的
+    （同比 3.35 = 10-12 补跑记录值）；其余月份与 2026-09 那条（D 之后才发布）是虚构的。"""
+    real = {"2025-08": "323.291", "2026-08": "334.131", "2026-09": "338.0"}   # 末项虚构
+    rows, y, m = [], 2025, 8
+    for _ in range(14):                                                      # 2025-08 … 2026-09
+        ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
+        rows.append((f"{y}-{m:02d}-01", real.get(f"{y}-{m:02d}", "330.0"), f"{ny}-{nm:02d}-15"))
+        y, m = ny, nm
+    return rows
+
+
+#: 迷你 ALFRED：{序列: [(观测日, 值, 首次发布日)]}。D12 那天已发布的部分取自 10-27 实拉的时点查询
+#: （`realtime_start=realtime_end=2026-10-12`：2Y 4.75@10-08、DFF 3.88@10-08、HY 3.11@10-12 / 3.11@10-09、失业率 4.2@09-01）；
+#: 发布日是示意，只保证「D12 时点查询看到的最新一条」与实拉一致。标「虚构」的是 D 之后才发布的值——
+#: 晚跑的补跑在旧代码下会拿到它们（2Y 5.40 ⇒ 5.24 − 5.40 = −16bp 倒挂，Guard risk_off +2）。
+_ALFRED = {
+    "CPIAUCSL": _cpi_rows(),
+    "UNRATE": [("2026-09-01", "4.2", "2026-10-02"), ("2026-10-01", "4.4", "2026-11-06")],          # 后者虚构
+    "DFF": [("2026-10-07", "3.88", "2026-10-08"), ("2026-10-08", "3.88", "2026-10-09"),
+            ("2026-11-05", "3.63", "2026-11-06")],                                                   # 后者虚构
+    "DGS2": [("2026-10-07", "4.77", "2026-10-08"), ("2026-10-08", "4.75", "2026-10-09"),
+             ("2026-10-09", "4.8", "2026-10-13"), ("2026-10-12", ".", "2026-10-13"),
+             ("2026-11-05", "5.40", "2026-11-06")],                                                  # 后者虚构
+    "BAMLH0A0HYM2": [("2026-10-08", "3.15", "2026-10-08"), ("2026-10-09", "3.11", "2026-10-09"),
+                     ("2026-10-12", "3.11", "2026-10-12"), ("2026-11-05", "3.38", "2026-11-05")],    # 后者虚构
+}
+_FRED_SERIES = sorted(_ALFRED)
+
+
+class _FredResp:
+    def __init__(self, ok, obs=()):
+        self.ok, self._obs = ok, list(obs)
+
+    def json(self):
+        return {"observations": self._obs}
+
+
+class _FakeFred:
+    """`get_session("fred")` 的替身。带 `realtime_end` ⇒ 只给那天已发布的观测；不带 ⇒ 「今天」，全都发布了。
+    `down` 里的序列回非 2xx。每次请求的参数都记下来。"""
+
+    def __init__(self, down=()):
+        self.calls, self.down = [], set(down)
+
+    def get(self, url, params=None, timeout=None):
+        assert url == "https://api.stlouisfed.org/fred/series/observations"
+        self.calls.append(dict(params))
+        sid = params["series_id"]
+        if sid in self.down:
+            return _FredResp(False)
+        rt = params.get("realtime_end")
+        assert params.get("realtime_start") == rt, "时点查询只用单日（start = end）"
+        rows = sorted((r for r in _ALFRED[sid] if rt is None or r[2] <= rt), key=lambda r: r[0], reverse=True)
+        return _FredResp(True, [{"date": d, "value": v} for d, v, _p in rows[:int(params["limit"])]])
+
+
+def _plug_fred(monkeypatch, fake):
+    monkeypatch.setattr(fm, "_RESILIENCE_OK", True)
+    monkeypatch.setattr(fm, "get_session", lambda name: fake, raising=False)
+    monkeypatch.setattr(fm, "_fred_breaker", None)       # 不碰进程级熔断器的状态
+
+
+def _pinned(call, day):
+    return call.get("realtime_start") == day and call.get("realtime_end") == day
+
+
+class TestFredVintage:
+
+    def test_backfill_asks_every_series_as_of_d(self, monkeypatch):
+        """五个序列都按 D 的时点取；拿到的都是 D 那天已发布的值，观测日都 ≤ D。
+        变红的变异：任何一条请求不带 `**_pit`（那条拿到 D 之后的值）。"""
+        fake = _FakeFred()
+        _plug_fred(monkeypatch, fake)
+        r = fm._fetch_fred_series("k", vintage=D12)
+        assert sorted(c["series_id"] for c in fake.calls) == _FRED_SERIES
+        assert all(_pinned(c, D12) for c in fake.calls), fake.calls
+        assert (r["treasury_2y"], r["treasury_2y_date"]) == (4.75, "2026-10-08")
+        assert (r["cpi_yoy"], r["cpi_date"]) == (3.35, "2026-08-01")
+        assert (r["unemployment"], r["unemployment_date"]) == (4.2, "2026-09-01")
+        assert (r["fed_funds_rate"], r["fed_funds_rate_date"]) == (3.88, "2026-10-08")
+        assert (r["hy_spread_bp"], r["hy_spread_chg_bp"], r["hy_spread_date"]) == (311.0, 0.0, D12)
+        assert r["vintage"] == D12
+        assert all(r[k] <= D12 for k in r if k.endswith("_date"))
+
+    def test_realtime_is_latest_and_unpinned(self, monkeypatch):
+        """实时口径不变：不带时点参数、取最新、结果没有 `vintage`。变红的变异：实时也钉一个日期。"""
+        fake = _FakeFred()
+        _plug_fred(monkeypatch, fake)
+        r = fm._fetch_fred_series("k")
+        assert len(fake.calls) == 5
+        assert not any("realtime_start" in c or "realtime_end" in c for c in fake.calls), fake.calls
+        assert (r["treasury_2y"], r["treasury_2y_date"]) == (5.40, "2026-11-05")
+        assert "vintage" not in r
+
+    def test_failed_series_is_missing_named_and_not_retried_as_latest(self, monkeypatch, caplog):
+        """时点请求失败 ⇒ 那项没取到、WARNING 点名，**不回落最新值**（回落就又是晚跑拿到未来的值）。
+        变红的变异：删掉 WARNING；失败后不带时点重取一次。"""
+        fake = _FakeFred(down={"DGS2"})
+        _plug_fred(monkeypatch, fake)
+        with caplog.at_level("WARNING", logger="alpha_hive.fred_macro"):
+            r = fm._fetch_fred_series("k", vintage=D12)
+        assert "treasury_2y" not in r and r["cpi_yoy"] == 3.35 and r["vintage"] == D12
+        assert len(fake.calls) == 5 and all(_pinned(c, D12) for c in fake.calls), fake.calls
+        assert any(D12 in m and "treasury_2y" in m for m in caplog.messages), caplog.messages
+
+    def test_all_failed_is_empty_without_vintage_key(self, monkeypatch, caplog):
+        """全没取到 ⇒ `{}`。带着 `vintage` 的「空结果」会被当成有 FRED（`data_source` 写成 `+fred`）。
+        变红的变异：不论有没有取到都写 `vintage`。"""
+        _plug_fred(monkeypatch, _FakeFred(down=set(_ALFRED)))
+        with caplog.at_level("WARNING", logger="alpha_hive.fred_macro"):
+            r = fm._fetch_fred_series("k", vintage=D12)
+        assert r == {}
+        assert any(D12 in m and all(k in m for k in fm._FRED_FIELDS) for m in caplog.messages), caplog.messages
+
+    def test_realtime_failure_log_is_unchanged(self, monkeypatch, caplog):
+        """实时口径的日志不变（此前缺一项不报 WARNING，本版不加噪音）。变红的变异：缺项 WARNING 不看 `vintage`。"""
+        _plug_fred(monkeypatch, _FakeFred(down={"DGS2"}))
+        with caplog.at_level("WARNING", logger="alpha_hive.fred_macro"):
+            fm._fetch_fred_series("k")
+        assert not [m for m in caplog.messages if "FRED" in m], caplog.messages
+
+
+# ────────── H. 世代边界登记（v0.45.657：同 654，并进 10-19 同日标签 + 等价判据） ──────────
+
+_V657 = "v0.45.657"
+_MARK657 = "macro_fred_vintage_checked"
+
+
+def _row657(*, new=False, **kw):
+    """同 `_row654`；新代码同时写 654 与 657 两个印记。"""
+    r = _row654(new=new, **kw)
+    if new:
+        r["agent_details"]["GuardBeeSentinel"]["details"][_MARK657] = True
+    return r
+
+
+class TestBoundary657Registered:
+
+    def test_entry_scope_marker_equivalence(self):
+        import ic_rerun_readiness as rr
+        import signal_archive as sa
+        assert [d for d, v, _r in rr._COHORT_HISTORY if v == _V657] == ["2026-10-19"]
+        assert sa.COHORT_SIGNAL_SCOPE[_V657] == ("agent.GuardBeeSentinel.*",)
+        assert _V657 in rr._BOUNDARY_MARKERS and _V657 in rr._BOUNDARY_EQUIVALENCE
+        others = {rr._BOUNDARY_MARKERS[v][1] for v in ("v0.45.652", "v0.45.654")}
+        assert rr._BOUNDARY_MARKERS[_V657][1] not in others
+
+    def test_invalidates_no_rows(self):
+        """「作废 0 条」：加这条前后 `assess()` 的切点相同（10-19）。变红的变异：条目日期写成新代码上线日。"""
+        import ic_rerun_readiness as rr
+        without = [e for e in rr._COHORT_HISTORY if e[1] != _V657]
+        assert rr.cohort_start()["date"] == without[-1][0] == "2026-10-19"
+
+    def test_moves_no_signal_generation(self):
+        """「0 个信号后移」。变红的变异：作用域里加上 `guard.macro_adj`。"""
+        import signal_archive as sa
+        hist = sa._cohort_history()
+        assert any(v == _V657 for _d, v, _r in hist)
+        sigs = set(sa.SIGNAL_EXTRACTORS) | set(sa.UNARCHIVED_NODES)
+        without = [e for e in hist if e[1] != _V657]
+        before, after = sa.generation_boundaries(sigs, without), sa.generation_boundaries(sigs, hist)
+        moved = {s for s in sigs if (before.get(s) or {}).get("date") != (after.get(s) or {}).get("date")}
+        assert moved == set(), moved
+
+    def test_does_not_truncate_dim_ic_h1_or_h2(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+        import dim_ic_forward_test as F
+        import dim_ic_protocol as P
+        import ic_rerun_readiness as rr
+        entry = next(e for e in rr._COHORT_HISTORY if e[1] == _V657)
+        for name, _obj, sigs in P.HYPOTHESES:
+            assert F.truncation_point(sigs, P, [entry]) is None, name
+
+    def test_ml_estimator_generation_label_extended(self):
+        import probability_scorecard as ps
+        assert any(d == "2026-10-19" and _V657 in v.split("+") for d, v, _t in ps._ML_ESTIMATOR_GENERATIONS)
+
+    def test_guard_success_path_writes_the_marker_unconditionally(self):
+        """变红的变异：删掉那一行 / 挪进 if。"""
+        found = _guard_details_literals(_MARK657)
+        assert len(found) == 1 and isinstance(found[0], ast.Constant) and found[0].value is True, found
+
+
+class TestMarkerAndJudge657:
+
+    @pytest.mark.parametrize("d", [{}, {"swarm_results": _row654()},
+                                   {"swarm_results": _row654(new=True)},
+                                   {"swarm_results": _row657(new=True, mode="backfill")},
+                                   {"swarm_results": _row654(guard="errored")}],
+                             ids=["empty", "old_code", "only_654_marker", "backfill", "errored"])
+    def test_marker_only_on_live_new_rows(self, d):
+        """变红的变异：日期印记不排补跑行；认 654 的键。"""
+        import ic_rerun_readiness as rr
+        assert rr._marker_guard_fred_vintage(d) is False
+        assert rr._marker_guard_fred_vintage({"swarm_results": _row657(new=True)}) is True
+
+    @pytest.mark.parametrize("row,expect", [
+        (_row654(), True),                                                   # 10-19 ~ 10-26 实况
+        (_row654(source="yfinance+fred"), True),                             # 实时行：FRED 请求逐字不变，与来源无关
+        (_row654(source="fallback"), True),
+        (_row654(mode="backfill", source=f"cloud_snapshot+yfinance+fred@{D12}"), False),   # 补跑：可能变
+        (_row654(mode=None), False),                                         # v0.45.366 之前没有这个键 ⇒ 证不出
+        (_row654(guard="no_macro"), False),
+        (_row654(guard="errored"), True),
+        (_row654(guard="absent"), True),
+    ], ids=["live", "live_no_treasury", "live_fallback", "backfill", "no_mode", "no_macro_details",
+            "guard_errored", "guard_absent"])
+    def test_judge(self, row, expect):
+        """变红的变异：判据恒真 / 不排补跑 / 缺口径键当实时 / 宏观细节缺时当等价 / 不认实时行。"""
+        import ic_rerun_readiness as rr
+        assert rr._equiv_fred_vintage({"swarm_results": row, "_date": "2026-10-21", "_ticker": "AAA"}) is expect
+
+
+class TestBoundaryVerdict657:
+
+    def test_before_deploy_is_no_evidence_yet(self, tmp_path):
+        import ic_rerun_readiness as rr
+        _write654(tmp_path, "2026-10-19", {"AAA": _row654(), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-26", {"AAA": _row654(source="treasury+finnhub+fred"), "BBB": _row654(guard="errored")})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V657)
+        assert ev["verdict"] == "no_evidence_yet" and ev["unmarked_after_boundary"] == [], ev
+
+    def test_marker_on_deploy_day_matches(self, tmp_path):
+        """变红的变异：删掉 `_BOUNDARY_EQUIVALENCE["v0.45.657"]`（⇒ boundary_too_early）。"""
+        import ic_rerun_readiness as rr
+        _write654(tmp_path, "2026-10-19", {"AAA": _row654(), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-27", {"AAA": _row654(new=True), "BBB": _row654(new=True)})   # 654 上线、657 还没
+        _write654(tmp_path, "2026-10-28", {"AAA": _row657(new=True), "BBB": _row657(new=True)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V657)
+        assert ev["verdict"] == "matches" and ev["marker_first_seen"] == "2026-10-28", ev
+
+    def test_old_code_backfill_after_boundary_is_too_early(self, tmp_path):
+        """旧代码补跑了边界之后的某天 ⇒ 那几行可能用了运行时的 FRED 最新值 ⇒ 报出来，不当作等价。"""
+        import ic_rerun_readiness as rr
+        _write654(tmp_path, "2026-10-19", {"AAA": _row654(), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-27", {"AAA": _row654(mode="backfill"), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-28", {"AAA": _row657(new=True), "BBB": _row657(new=True)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V657)
+        assert ev["verdict"] == "boundary_too_early" and ev["unmarked_after_boundary"] == ["2026-10-27"], ev
+
+
+# ────────── I. FRED 序列逐个解析（v0.45.660） ──────────
+#
+# 旧代码五段解析写在同一个 try 里：任何一个值是 "."（FRED 缺值）都抛 ValueError、被外层以 debug 吞掉，
+# 排在它后面的序列（含进曲线的 2Y）一起丢。10-27 实拉：CPIAUCSL / UNRATE 的 2025-10-01 是 "."（停摆没发布），
+# DFF 1027 天 0 个、DGS2 / HY 的 "." 只在假日且早有判断。会真撞上的是 CPI 同比：11-10 发布 2026-10 那期起，
+# 一年前同月正是 2025-10 ⇒ 旧代码一个月里每轮整段 FRED 落空。实时口径，与补跑无关。
+
+def _monthly(first, n, *, dots=(), skip=(), value="330.0"):
+    """n 个月的月度观测（月初），发布日 = 次月 15 日；`dots` 里的月份值为 "."、`skip` 里的月份整行没有。"""
+    rows, y, m = [], int(first[:4]), int(first[5:7])
+    for _ in range(n):
+        ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
+        d = f"{y}-{m:02d}-01"
+        if d not in skip:
+            rows.append((d, "." if d in dots else value, f"{ny}-{nm:02d}-15"))
+        y, m = ny, nm
+    return rows
+
+
+#: 11-10 之后的形状：最新 2026-10、一年前同月 2025-10 是 "."（数值虚构，只有 "." 的位置是实拉的）
+CPI_AFTER_1110 = _monthly("2025-09", 14, dots={"2025-10-01"})
+
+
+class _Breaker:
+    def __init__(self):
+        self.calls = []
+
+    def allow_request(self):
+        return True
+
+    def record_success(self):
+        self.calls.append("success")
+
+    def record_failure(self):
+        self.calls.append("failure")
+
+
+class _DownFred(_FakeFred):
+    """第 `at` 个序列的请求抛连接错误（FRED 不通）。"""
+
+    def __init__(self, at):
+        super().__init__()
+        self.at = at
+
+    def get(self, url, params=None, timeout=None):
+        if params["series_id"] == self.at:
+            self.calls.append(dict(params))
+            raise ConnectionError("simulated: FRED unreachable")
+        return super().get(url, params, timeout)
+
+
+class TestFredSeriesIsolated:
+
+    @pytest.fixture(autouse=True)
+    def _breaker(self, monkeypatch):
+        self.fake = _FakeFred()
+        _plug_fred(monkeypatch, self.fake)
+        self.breaker = _Breaker()
+        monkeypatch.setattr(fm, "_fred_breaker", self.breaker)
+
+    def test_cpi_year_ago_missing_month_only_drops_cpi(self, monkeypatch, caplog):
+        """11-10 起的真实形状：CPI 同比算不出 ⇒ 只有 CPI 缺；失业率 / 联邦基金 / 2Y / HY 照取；WARNING 点名缺的那个月。
+        旧代码：CPI 是第一个请求 ⇒ 抛出后整段落空（返回 `{}`）、熔断器记一次失败。
+        变红的变异：恢复同一个 try（解析失败整段中止）；CPI 拿相邻月份顶替。"""
+        monkeypatch.setitem(_ALFRED, "CPIAUCSL", CPI_AFTER_1110)
+        with caplog.at_level("WARNING", logger="alpha_hive.fred_macro"):
+            r = fm._fetch_fred_series("k")
+        assert "cpi_yoy" not in r and "cpi_date" not in r
+        assert (r["unemployment"], r["fed_funds_rate"], r["treasury_2y"], r["hy_spread_bp"]) == (4.4, 3.63, 5.40, 338.0)
+        assert len(self.fake.calls) == 5
+        assert any("CPIAUCSL" in m and "2025-10-01" in m for m in caplog.messages), caplog.messages
+        assert self.breaker.calls == ["success"]          # 解析失败不是 FRED 不通
+
+    def test_cpi_yoy_pairs_the_same_month_by_date(self, monkeypatch):
+        """同比按日期配对：中间整行缺一个月（13 条跨 14 个月）时，第 13 条是 13 个月前，按位置取就错了。
+        变红的变异：恢复 `obs[12]` 按位置取。"""
+        rows = _monthly("2025-09", 14, skip={"2026-03-01"})
+        rows = [(d, "300.0" if d == "2025-10-01" else ("306.0" if d == "2026-10-01" else v), p) for d, v, p in rows]
+        monkeypatch.setitem(_ALFRED, "CPIAUCSL", rows)
+        r = fm._fetch_fred_series("k")
+        assert (r["cpi_yoy"], r["cpi_date"]) == (2.0, "2026-10-01")       # 306 / 300（不是 306 / 330）
+
+    @pytest.mark.parametrize("sid,lost", [
+        ("CPIAUCSL", {"cpi_yoy", "cpi_date"}),
+        ("UNRATE", {"unemployment", "unemployment_date"}),
+        ("DFF", {"fed_funds_rate", "fed_funds_rate_date"}),
+        ("DGS2", {"treasury_2y", "treasury_2y_date"}),
+        ("BAMLH0A0HYM2", {"hy_spread_bp", "hy_spread_date", "hy_spread_chg_bp"}),
+    ])
+    def test_a_bad_value_drops_only_its_own_series(self, monkeypatch, caplog, sid, lost):
+        """哪个序列的最新值坏了，就只丢那一个（DFF 的 "." 就是这一型）。坏值用 "n/a"：DGS2 / HY 的 "." 是假日常态、另有一条。
+        变红的变异：恢复同一个 try。"""
+        rows = list(_ALFRED[sid])
+        latest = max(rows, key=lambda r: r[0])
+        monkeypatch.setitem(_ALFRED, sid, [(d, "n/a" if (d, v, p) == latest else v, p) for d, v, p in rows])
+        with caplog.at_level("WARNING", logger="alpha_hive.fred_macro"):
+            r = fm._fetch_fred_series("k")
+        everything = {"cpi_yoy", "cpi_date", "unemployment", "unemployment_date", "fed_funds_rate",
+                      "fed_funds_rate_date", "treasury_2y", "treasury_2y_date", "hy_spread_bp", "hy_spread_date",
+                      "hy_spread_chg_bp"}
+        assert set(r) == everything - lost, set(r) ^ (everything - lost)
+        assert any(sid in m and "解析失败" in m for m in caplog.messages), caplog.messages
+        assert self.breaker.calls == ["success"]
+
+    @pytest.mark.parametrize("sid,key", [("DGS2", "treasury_2y"), ("BAMLH0A0HYM2", "hy_spread_bp")])
+    def test_holiday_dot_stays_quiet(self, monkeypatch, caplog, sid, key):
+        """债市假日那一行是 "."：照旧不取、不报警（一年十几次的常态）。变红的变异：把假日 "." 也当解析失败报 WARNING。"""
+        monkeypatch.setitem(_ALFRED, sid, list(_ALFRED[sid]) + [("2026-11-26", ".", "2026-11-27")])
+        with caplog.at_level("WARNING", logger="alpha_hive.fred_macro"):
+            r = fm._fetch_fred_series("k")
+        assert key not in r and r["cpi_yoy"] is not None
+        assert not [m for m in caplog.messages if "FRED" in m], caplog.messages
+
+    @pytest.mark.parametrize("make_exc", [
+        lambda: __import__("requests").exceptions.InvalidProxyURL("bad proxy"),
+        lambda: __import__("requests").exceptions.JSONDecodeError("Expecting value", "<html>maintenance</html>", 0),
+    ], ids=["invalid_proxy", "html_page"])
+    def test_requests_errors_that_are_also_valueerror_still_abort(self, monkeypatch, make_exc):
+        """独立审查揪出：requests 的 InvalidProxyURL / InvalidURL / JSONDecodeError … 同时继承 ValueError。
+        不先放走就会被当成「解析失败」逐个吞掉：五个请求都发、熔断器永远不跳。现在照旧第一个就整段中止、记熔断失败。
+        变红的变异：删掉 `except _req.RequestException: raise`。"""
+        calls = []
+
+        class _Bad:
+            def get(self, url, params=None, timeout=None):
+                calls.append(params["series_id"])
+                raise make_exc()
+        _plug_fred(monkeypatch, _Bad())
+        monkeypatch.setattr(fm, "_fred_breaker", self.breaker)
+        assert fm._fetch_fred_series("k") == {}
+        assert calls == ["CPIAUCSL"] and self.breaker.calls == ["failure"]
+
+    def test_unreachable_fred_still_aborts_and_trips_the_breaker(self, monkeypatch):
+        """FRED 不通（连接错误）照旧整段中止、记熔断，不逐个重试（否则一次断网要等五个超时）。
+        变红的变异：逐个序列的 except 也接住连接错误。"""
+        fake = _DownFred("UNRATE")
+        _plug_fred(monkeypatch, fake)
+        monkeypatch.setattr(fm, "_fred_breaker", self.breaker)
+        r = fm._fetch_fred_series("k")
+        assert [c["series_id"] for c in fake.calls] == ["CPIAUCSL", "UNRATE"]
+        assert set(r) == {"cpi_yoy", "cpi_date"}
+        assert self.breaker.calls == ["failure"]
+
+
+# ────────── J. 世代边界登记（v0.45.660：同 654 / 657，并进 10-19 同日标签 + 等价判据） ──────────
+
+_V660 = "v0.45.660"
+_MARK660 = "macro_fred_series_isolated"
+
+
+def _row660(*, new=False, **kw):
+    """同 `_row657`；新代码另写 660 的印记。"""
+    r = _row657(new=new, **kw)
+    if new:
+        r["agent_details"]["GuardBeeSentinel"]["details"][_MARK660] = True
+    return r
+
+
+class TestBoundary660Registered:
+
+    def test_entry_scope_marker_equivalence(self):
+        import ic_rerun_readiness as rr
+        import signal_archive as sa
+        assert [d for d, v, _r in rr._COHORT_HISTORY if v == _V660] == ["2026-10-19"]
+        assert sa.COHORT_SIGNAL_SCOPE[_V660] == ("agent.GuardBeeSentinel.*",)
+        assert _V660 in rr._BOUNDARY_MARKERS and _V660 in rr._BOUNDARY_EQUIVALENCE
+        others = {rr._BOUNDARY_MARKERS[v][1] for v in ("v0.45.652", "v0.45.654", "v0.45.657")}
+        assert rr._BOUNDARY_MARKERS[_V660][1] not in others
+
+    def test_invalidates_no_rows(self):
+        """「作废 0 条」：加这条前后 `assess()` 的切点相同（10-19）。变红的变异：条目日期写成新代码上线日。"""
+        import ic_rerun_readiness as rr
+        without = [e for e in rr._COHORT_HISTORY if e[1] != _V660]
+        assert rr.cohort_start()["date"] == without[-1][0] == "2026-10-19"
+
+    def test_moves_no_signal_generation(self):
+        """「0 个信号后移」。变红的变异：作用域里加上 `guard.macro_adj`。"""
+        import signal_archive as sa
+        hist = sa._cohort_history()
+        assert any(v == _V660 for _d, v, _r in hist)
+        sigs = set(sa.SIGNAL_EXTRACTORS) | set(sa.UNARCHIVED_NODES)
+        without = [e for e in hist if e[1] != _V660]
+        before, after = sa.generation_boundaries(sigs, without), sa.generation_boundaries(sigs, hist)
+        moved = {s for s in sigs if (before.get(s) or {}).get("date") != (after.get(s) or {}).get("date")}
+        assert moved == set(), moved
+
+    def test_does_not_truncate_dim_ic_h1_or_h2(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+        import dim_ic_forward_test as F
+        import dim_ic_protocol as P
+        import ic_rerun_readiness as rr
+        entry = next(e for e in rr._COHORT_HISTORY if e[1] == _V660)
+        for name, _obj, sigs in P.HYPOTHESES:
+            assert F.truncation_point(sigs, P, [entry]) is None, name
+
+    def test_ml_estimator_generation_label_extended(self):
+        import probability_scorecard as ps
+        assert any(d == "2026-10-19" and _V660 in v.split("+") for d, v, _t in ps._ML_ESTIMATOR_GENERATIONS)
+
+    def test_guard_success_path_writes_the_marker_unconditionally(self):
+        """变红的变异：删掉那一行 / 挪进 if。"""
+        found = _guard_details_literals(_MARK660)
+        assert len(found) == 1 and isinstance(found[0], ast.Constant) and found[0].value is True, found
+
+
+class TestMarkerAndJudge660:
+
+    @pytest.mark.parametrize("d", [{}, {"swarm_results": _row654()},
+                                   {"swarm_results": _row657(new=True)},
+                                   {"swarm_results": _row660(new=True, mode="backfill")},
+                                   {"swarm_results": _row654(guard="errored")}],
+                             ids=["empty", "old_code", "only_657_marker", "backfill", "errored"])
+    def test_marker_only_on_live_new_rows(self, d):
+        """变红的变异：日期印记不排补跑行；认 657 的键。"""
+        import ic_rerun_readiness as rr
+        assert rr._marker_guard_fred_isolated(d) is False
+        assert rr._marker_guard_fred_isolated({"swarm_results": _row660(new=True)}) is True
+
+    @pytest.mark.parametrize("row,expect", [
+        (_row654(), True),                                                          # 10-19 ~ 10-26 实况
+        (_row654(source="treasury+finnhub+fred"), True),
+        (_row654(source="fallback"), True),                                         # 整份降级：不取 FRED、不算曲线
+        (_row654(mode="backfill", source="cloud_snapshot+treasury+yfinance+fred@2026-08-28"), True),   # 补跑但 2Y 出自财政部
+        (_row654(mode="backfill", source=f"cloud_snapshot+yfinance+fred@{D12}"), False),             # 10-12 形状：2Y 走 FRED
+        (_row654(source="yfinance+fred"), False),
+        (_row654(source=None), False),
+        (_row654(guard="no_macro"), False),
+        (_row654(guard="errored"), True),
+        (_row654(guard="absent"), True),
+    ], ids=["live_treasury", "live_treasury_no_yf", "fallback", "backfill_treasury", "backfill_fred_2y",
+            "live_no_treasury", "no_source", "no_macro_details", "guard_errored", "guard_absent"])
+    def test_judge(self, row, expect):
+        """变红的变异：判据恒真 / 不认 treasury / 不认 fallback / 补跑一律当不等价 / 宏观细节缺时当等价 / Guard 出错不当等价。"""
+        import ic_rerun_readiness as rr
+        assert rr._equiv_fred_series_isolated({"swarm_results": row, "_date": "2026-10-21", "_ticker": "AAA"}) is expect
+
+    @pytest.mark.parametrize("day", ["2026-10-27", None])
+    def test_treasury_label_alone_is_not_proof(self, day):
+        """财政部行缺 2Y 时来源照样含 treasury ⇒ 只认逐期限核过的日子。变红的变异：判据只看「来源含 treasury」。"""
+        import ic_rerun_readiness as rr
+        assert rr._equiv_fred_series_isolated({"swarm_results": _row654(), "_date": day}) is False
+
+
+class TestBoundaryVerdict660:
+
+    def test_before_deploy_is_no_evidence_yet(self, tmp_path):
+        import ic_rerun_readiness as rr
+        _write654(tmp_path, "2026-10-19", {"AAA": _row654(), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-26", {"AAA": _row654(source="treasury+finnhub+fred"), "BBB": _row654(guard="errored")})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V660)
+        assert ev["verdict"] == "no_evidence_yet" and ev["unmarked_after_boundary"] == [], ev
+
+    def test_marker_on_deploy_day_matches(self, tmp_path):
+        """变红的变异：删掉 `_BOUNDARY_EQUIVALENCE["v0.45.660"]`（⇒ boundary_too_early）。"""
+        import ic_rerun_readiness as rr
+        _write654(tmp_path, "2026-10-19", {"AAA": _row654(), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-26", {"AAA": _row654(), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-28", {"AAA": _row660(new=True), "BBB": _row660(new=True)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V660)
+        assert ev["verdict"] == "matches" and ev["marker_first_seen"] == "2026-10-28", ev
+
+    def test_old_code_on_an_unverified_day_is_too_early_even_with_treasury(self, tmp_path):
+        """660 没赶上 10-27 那轮（只有 657 的印记）：来源含 treasury 也证不出 2Y 是财政部的 ⇒ 报出来。"""
+        import ic_rerun_readiness as rr
+        _write654(tmp_path, "2026-10-19", {"AAA": _row654(), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-27", {"AAA": _row657(new=True), "BBB": _row657(new=True)})
+        _write654(tmp_path, "2026-10-28", {"AAA": _row660(new=True), "BBB": _row660(new=True)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V660)
+        assert ev["verdict"] == "boundary_too_early" and ev["unmarked_after_boundary"] == ["2026-10-27"], ev
+
+    def test_old_code_without_treasury_after_boundary_is_too_early(self, tmp_path):
+        """新代码没赶上某个扫描日、那天财政部又没供上 2Y（来源不含 treasury）⇒ 报出来，不当作等价。"""
+        import ic_rerun_readiness as rr
+        _write654(tmp_path, "2026-10-19", {"AAA": _row654(), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-27", {"AAA": _row654(source="yfinance+fred"), "BBB": _row654()})
+        _write654(tmp_path, "2026-10-28", {"AAA": _row660(new=True), "BBB": _row660(new=True)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V660)
+        assert ev["verdict"] == "boundary_too_early" and ev["unmarked_after_boundary"] == ["2026-10-27"], ev
+
+
+# ────────── K. 世代边界登记（v0.45.663：同 654 / 657 / 660，并进 10-19 同日标签 + 冻结证据） ──────────
+
+_V663 = "v0.45.663"
+_MARK663 = "macro_bars_dated_checked"
+_EVIDENCE663 = "experiments/macro_bars_dated_equivalence_20261019.json"
+
+
+def _row663(*, new=False, vix_source="cboe", **kw):
+    """同 `_row654`，宏观细节另带 `vix_source`；新代码另写 663 的印记。"""
+    r = _row654(new=new, **kw)
+    g = r["agent_details"].get("GuardBeeSentinel") or {}
+    vt = (g.get("details") or {}).get("vix_term_structure")
+    if isinstance(vt, dict):
+        vt["vix_source"] = vix_source
+    if new and g:
+        g["details"][_MARK663] = True
+    return r
+
+
+@pytest.fixture
+def evidence663(tmp_path, monkeypatch):
+    """合成证据（判据 / 判定的测试不依赖真实文件里哪天是什么状态）。"""
+    import json as _json
+    import ic_rerun_readiness as rr
+
+    def write(days):
+        p = tmp_path / "ev663.json"
+        p.write_text(_json.dumps({"days": days}), encoding="utf-8")
+        monkeypatch.setattr(rr, "_MACRO_BARS_DATED_EVIDENCE_PATH", p)
+    write({"2026-10-19": {"status": "equivalent", "data_source": _LIVE_SRC},
+           "2026-10-21": {"status": "equivalent", "data_source": _LIVE_SRC},
+           "2026-10-26": {"status": "equivalent_no_yfinance_data", "data_source": "treasury+finnhub+fred"},
+           "2026-10-14": {"status": "not_proven", "data_source": "treasury+finnhub+fred"}})
+    return write
+
+
+class TestBoundary663Registered:
+
+    def test_entry_scope_marker_equivalence(self):
+        import ic_rerun_readiness as rr
+        import signal_archive as sa
+        from swarm_agents.guard_bee import GENERATION_MARKS
+        assert [d for d, v, _r in rr._COHORT_HISTORY if v == _V663] == ["2026-10-19"]
+        assert sa.COHORT_SIGNAL_SCOPE[_V663] == ("agent.GuardBeeSentinel.*",)
+        assert _V663 in rr._BOUNDARY_MARKERS and _V663 in rr._BOUNDARY_EQUIVALENCE
+        others = {rr._BOUNDARY_MARKERS[v][1] for v in ("v0.45.652", "v0.45.654", "v0.45.657", "v0.45.658", "v0.45.660")}
+        assert rr._BOUNDARY_MARKERS[_V663][1] not in others
+        assert _MARK663 in GENERATION_MARKS          # 出错路径也写（`_with_generation_marks`）
+
+    def test_invalidates_no_rows(self):
+        """「作废 0 条」：加这条前后 `assess()` 的切点相同（10-19）。变红的变异：条目日期写成新代码上线日。"""
+        import ic_rerun_readiness as rr
+        without = [e for e in rr._COHORT_HISTORY if e[1] != _V663]
+        assert rr.cohort_start()["date"] == without[-1][0] == "2026-10-19"
+
+    def test_moves_no_signal_generation(self):
+        """「0 个信号后移」。变红的变异：作用域里加上 `guard.macro_adj`。"""
+        import signal_archive as sa
+        hist = sa._cohort_history()
+        assert any(v == _V663 for _d, v, _r in hist)
+        sigs = set(sa.SIGNAL_EXTRACTORS) | set(sa.UNARCHIVED_NODES)
+        without = [e for e in hist if e[1] != _V663]
+        before, after = sa.generation_boundaries(sigs, without), sa.generation_boundaries(sigs, hist)
+        moved = {s for s in sigs if (before.get(s) or {}).get("date") != (after.get(s) or {}).get("date")}
+        assert moved == set(), moved
+
+    def test_does_not_truncate_dim_ic_h1_or_h2(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+        import dim_ic_forward_test as F
+        import dim_ic_protocol as P
+        import ic_rerun_readiness as rr
+        entry = next(e for e in rr._COHORT_HISTORY if e[1] == _V663)
+        for name, _obj, sigs in P.HYPOTHESES:
+            assert F.truncation_point(sigs, P, [entry]) is None, name
+
+    def test_ml_estimator_generation_label_extended(self):
+        import probability_scorecard as ps
+        assert any(d == "2026-10-19" and _V663 in v.split("+") for d, v, _t in ps._ML_ESTIMATOR_GENERATIONS)
+
+    def test_guard_success_path_writes_the_marker_unconditionally(self):
+        """变红的变异：删掉那一行 / 挪进 if。"""
+        found = _guard_details_literals(_MARK663)
+        assert len(found) == 1 and isinstance(found[0], ast.Constant) and found[0].value is True, found
+
+    def test_frozen_evidence_says_what_the_entry_claims(self):
+        """真实证据文件：10-19 ~ 10-23 每天 11 只存档涨跌 = 按日期重算（0 处对不上）、黄金 Finnhub / 10Y 当天财政部 / VIX CBOE；
+        10-26（旧代码的最后一轮）轮动表为空且整轮 yfinance 0 次成功响应；负对照 10-05（9 只）/ 10-12（补跑）/ 10-14（0 只、证不出限流）不算。
+        等价窗口 10-19 起的每个旧代码扫描日都必须证得出。"""
+        import json as _json
+        from pathlib import Path
+        import ic_rerun_readiness as rr
+        root = Path(__file__).resolve().parents[1]
+        doc = _json.loads((root / _EVIDENCE663).read_text(encoding="utf-8"))
+        days = doc["days"]
+        for d in ("2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23"):
+            v = days[d]
+            assert v["status"] == "equivalent" and v["sector_rotation_full"] == 11 and v["mismatches"] == {}, d
+            assert v["quote_sources"] == {"GLD": "finnhub:GLD", "TNX": f"treasury_gov@{d}", "VIX": "cboe"}, d
+            assert isinstance(v["data_source"], str) and v["data_source"].startswith("treasury+finnhub"), d
+        gate = days["2026-10-26"]["yfinance_gate"]
+        assert days["2026-10-26"]["status"] == "equivalent_no_yfinance_data" and gate["calls"] == gate["rate_limited"] > 0
+        assert {d: v["status"] for d, v in days.items() if v["status"] not in rr._MACRO_BARS_DATED_EQUIV_STATUSES} == {
+            "2026-10-05": "not_proven", "2026-10-12": "not_proven", "2026-10-14": "not_proven"}
+        assert all(v["status"] in rr._MACRO_BARS_DATED_EQUIV_STATUSES for d, v in days.items() if d >= "2026-10-19")
+        assert (root / doc["generator"]).exists() and doc["version"] == _V663
+
+
+class TestMarkerAndJudge663:
+
+    @pytest.mark.parametrize("d", [{}, {"swarm_results": _row654()},
+                                   {"swarm_results": _row660(new=True)},
+                                   {"swarm_results": _row663(new=True, mode="backfill")}],
+                             ids=["empty", "old_code", "only_660_marker", "backfill"])
+    def test_marker_only_on_live_new_rows(self, d):
+        """变红的变异：日期印记不排补跑行；认 660 的键。"""
+        import ic_rerun_readiness as rr
+        assert rr._marker_guard_bars_dated(d) is False
+        assert rr._marker_guard_bars_dated({"swarm_results": _row663(new=True)}) is True
+
+    @pytest.mark.parametrize("row,day,expect", [
+        (_row663(), "2026-10-19", True),                                            # 10-19 ~ 10-23 实况
+        (_row663(source="treasury+finnhub+fred"), "2026-10-26", True),               # 10-26：整轮 yfinance 没响应
+        (_row663(), "2026-10-14", False),                                           # 证据说证不出
+        (_row663(), "2026-10-27", False),                                           # 证据里没有这天
+        (_row663(source="treasury+finnhub+fred"), "2026-10-19", False),             # 本行宏观不是证据核过的那一份
+        (_row663(vix_source="cloud_snapshot_cboe"), "2026-10-19", False),
+        (_row663(mode="backfill"), "2026-10-19", False),
+        (_row663(guard="no_macro"), "2026-10-19", False),
+        (_row663(guard="errored"), "2026-10-27", True),
+        (_row663(guard="absent"), "2026-10-27", True),
+    ], ids=["live_equivalent", "no_yfinance_day", "not_proven_day", "day_not_in_evidence", "data_source_differs",
+            "vix_not_cboe", "backfill", "no_macro_details", "guard_errored", "guard_absent"])
+    def test_judge(self, evidence663, row, day, expect):
+        """变红的变异：判据恒真 / 不认 no_yfinance / 不核 VIX 来源 / 不核宏观来源一致 / 补跑当等价 / 宏观细节缺时当等价 / Guard 出错不当等价。"""
+        import ic_rerun_readiness as rr
+        assert rr._equiv_macro_bars_dated({"swarm_results": row, "_date": day, "_ticker": "AAA"}) is expect
+
+    def test_unreadable_evidence_proves_nothing(self, tmp_path, monkeypatch):
+        import ic_rerun_readiness as rr
+        monkeypatch.setattr(rr, "_MACRO_BARS_DATED_EVIDENCE_PATH", tmp_path / "missing.json")
+        assert rr._equiv_macro_bars_dated({"swarm_results": _row663(), "_date": "2026-10-19"}) is False
+
+
+class TestBoundaryVerdict663:
+
+    def test_before_deploy_is_no_evidence_yet(self, tmp_path, evidence663):
+        import ic_rerun_readiness as rr
+        _write654(tmp_path, "2026-10-19", {"AAA": _row663(), "BBB": _row663()})
+        _write654(tmp_path, "2026-10-26", {"AAA": _row663(source="treasury+finnhub+fred"), "BBB": _row663(guard="errored")})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V663)
+        assert ev["verdict"] == "no_evidence_yet" and ev["unmarked_after_boundary"] == [], ev
+
+    def test_marker_on_deploy_day_matches(self, tmp_path, evidence663):
+        """变红的变异：删掉 `_BOUNDARY_EQUIVALENCE["v0.45.663"]`（⇒ boundary_too_early）。"""
+        import ic_rerun_readiness as rr
+        _write654(tmp_path, "2026-10-19", {"AAA": _row663(), "BBB": _row663()})
+        _write654(tmp_path, "2026-10-26", {"AAA": _row663(source="treasury+finnhub+fred"), "BBB": _row663(source="treasury+finnhub+fred")})
+        _write654(tmp_path, "2026-10-28", {"AAA": _row663(new=True), "BBB": _row663(new=True)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V663)
+        assert ev["verdict"] == "matches" and ev["marker_first_seen"] == "2026-10-28", ev
+
+    def test_old_code_on_a_day_without_evidence_is_too_early(self, tmp_path, evidence663):
+        """新代码没赶上某个扫描日（证据里没有那天）⇒ 报出来，不当作等价。"""
+        import ic_rerun_readiness as rr
+        _write654(tmp_path, "2026-10-19", {"AAA": _row663(), "BBB": _row663()})
+        _write654(tmp_path, "2026-10-27", {"AAA": _row663(), "BBB": _row663()})
+        _write654(tmp_path, "2026-10-28", {"AAA": _row663(new=True), "BBB": _row663(new=True)})
+        ev = rr.cohort_boundary_evidence(tmp_path, version=_V663)
+        assert ev["verdict"] == "boundary_too_early" and ev["unmarked_after_boundary"] == ["2026-10-27"], ev

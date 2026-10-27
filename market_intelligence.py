@@ -213,9 +213,12 @@ def detect_market_regime(ticker: str = "NVDA") -> Dict[str, Any]:
             校验不通过返回 `(nan, nan)` → 调用方走「个股政体数据不可用」，
             诚实缺失好过安静地用别人的数据。
             """
-            hist = yf.download(sym, period=f"{window+20}d", interval="1d",
-                               progress=False, auto_adjust=True)
-            if hist.empty or len(hist) < period:
+            import yf_daily
+            # v0.45.658：经唯一入口。用末根当现价 ⇒ 最近一场已收盘的 K 线缺了（末行是公司行动空行）就当不可用，
+            # 不拿前一场冒充（此前 actions=False 让 yfinance 一声不吭删掉那行）
+            hist, _missing = yf_daily.download(yf, sym, source="market_regime_ma", period=f"{window+20}d",
+                                               interval="1d", progress=False, auto_adjust=True)
+            if any(_missing.values()) or hist.empty or len(hist) < period:
                 return float("nan"), float("nan")
             if getattr(hist.columns, "nlevels", 1) > 1:
                 got = {str(x).upper() for x in hist.columns.get_level_values(-1)}
@@ -508,9 +511,11 @@ def get_supply_chain_signals(ticker: str = "NVDA", lookback_days: int = 5) -> Di
 
         for sym in syms:
             try:
-                hist = yf.download(sym, period=period_str, interval="1d",
-                                   progress=False, auto_adjust=True)
-                if hist.empty or len(hist) < 2:
+                import yf_daily
+                # v0.45.658：经唯一入口。5 日涨跌用末根当今天 ⇒ 最近一场缺了就跳过这只（不拿前一场冒充）
+                hist, _missing = yf_daily.download(yf, sym, source="supply_chain", period=period_str, interval="1d",
+                                                   progress=False, auto_adjust=True)
+                if any(_missing.values()) or hist.empty or len(hist) < 2:
                     continue
                 closes = hist["Close"].dropna().values.flatten()
                 n = min(lookback_days, len(closes) - 1)
@@ -996,8 +1001,11 @@ def calculate_iv_rv_spread(
         for _attempt in range(3):
             try:
                 with https_gate():
-                    hist = yf.download(ticker, period=f"{lookback_days + 10}d", interval="1d",
-                                       progress=False, auto_adjust=True)
+                    import yf_daily
+                    # v0.45.658：经唯一入口。按日期用（窗口统计，取最近 N 根）：帧与 actions=False 时逐位相同——
+                    # Oracle IV-RV 是维度 IC H2 的输入，刻意不改它的取数口径（见 yf_daily.SOURCES["iv_rv_spread"]）
+                    hist = yf_daily.download(yf, ticker, source="iv_rv_spread", period=f"{lookback_days + 10}d",
+                                             interval="1d", progress=False, auto_adjust=True)[0]
                 if hist is not None and not hist.empty:
                     break
             except Exception as _e_dl:  # noqa: BLE001 — 瞬时 SSL 错开即恢复

@@ -1,0 +1,321 @@
+{
+  "days": {
+    "2026-09-28": {
+      "base_session": "2026-09-22",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-09-28",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-09-29": {
+      "base_session": "2026-09-23",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-09-29",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-09-30": {
+      "base_session": "2026-09-24",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-09-30",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-01": {
+      "base_session": "2026-09-25",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-01",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-02": {
+      "base_session": "2026-09-28",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-02",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-05": {
+      "base_session": "2026-09-29",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-05",
+        "VIX": "cboe"
+      },
+      "reason": "轮动表 9 只（不是 11，也证不出整轮 yfinance 没有响应）",
+      "sector_rotation_full": 9,
+      "status": "not_proven",
+      "yfinance_gate": null
+    },
+    "2026-10-06": {
+      "base_session": "2026-09-30",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-06",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-07": {
+      "base_session": "2026-10-01",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-07",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-08": {
+      "base_session": "2026-10-02",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-08",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-09": {
+      "base_session": "2026-10-05",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-09",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-12": {
+      "base_session": "2026-10-06",
+      "data_source": "cloud_snapshot+yfinance+fred@2026-10-12",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": null,
+        "TNX": null,
+        "VIX": "cboe"
+      },
+      "reason": "as_of_mode='backfill'（不是实时口径）；GLD 来源 None（不是 Finnhub ⇒ 黄金走了 Yahoo 日线）；TNX 来源 None（不是当天财政部 ⇒ 10Y 走了 Yahoo 或缺）",
+      "sector_rotation_full": 11,
+      "status": "not_proven",
+      "yfinance_gate": null
+    },
+    "2026-10-13": {
+      "base_session": "2026-10-07",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-13",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-14": {
+      "base_session": "2026-10-08",
+      "data_source": "treasury+finnhub+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-14",
+        "VIX": "cboe"
+      },
+      "reason": "轮动表 0 只（不是 11，也证不出整轮 yfinance 没有响应）",
+      "sector_rotation_full": 0,
+      "status": "not_proven",
+      "yfinance_gate": null
+    },
+    "2026-10-15": {
+      "base_session": "2026-10-09",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-15",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-16": {
+      "base_session": "2026-10-12",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-16",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-19": {
+      "base_session": "2026-10-13",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-19",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-20": {
+      "base_session": "2026-10-14",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-20",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-21": {
+      "base_session": "2026-10-15",
+      "data_source": "treasury+finnhub+yfinance",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-21",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-22": {
+      "base_session": "2026-10-16",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-22",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-23": {
+      "base_session": "2026-10-19",
+      "data_source": "treasury+finnhub+yfinance+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-23",
+        "VIX": "cboe"
+      },
+      "reason": "",
+      "sector_rotation_full": 11,
+      "status": "equivalent",
+      "yfinance_gate": null
+    },
+    "2026-10-26": {
+      "base_session": "2026-10-20",
+      "data_source": "treasury+finnhub+fred",
+      "mismatches": {},
+      "quote_sources": {
+        "GLD": "finnhub:GLD",
+        "TNX": "treasury_gov@2026-10-26",
+        "VIX": "cboe"
+      },
+      "reason": "轮动表为空且 yfinance 整轮 0 次成功响应（calls=5 = rate_limited）",
+      "sector_rotation_full": 0,
+      "status": "equivalent_no_yfinance_data",
+      "yfinance_gate": {
+        "blocked_by_cooldown": 781,
+        "calls": 5,
+        "in_cooldown": 0.0,
+        "rate_limited": 5
+      }
+    }
+  },
+  "generated_at": "2026-10-27T11:25:18",
+  "generator": "experiments/macro_bars_dated_equivalence_audit.py",
+  "sector_etfs": [
+    "XLK",
+    "XLV",
+    "XLE",
+    "XLF",
+    "XLI",
+    "XLY",
+    "XLP",
+    "XLU",
+    "XLRE",
+    "XLC",
+    "XLB"
+  ],
+  "sessions_back": 4,
+  "version": "v0.45.663",
+  "yahoo_fetched_at": "2026-10-27T11:25:18"
+}

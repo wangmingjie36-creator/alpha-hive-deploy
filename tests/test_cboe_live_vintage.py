@@ -222,6 +222,18 @@ def test_on_stale_raise_surfaces_dates(monkeypatch):
     assert ei.value.ticker == "TMO"
     assert ei.value.vintage_date == "2026-08-24"
     assert ei.value.expected_date == "2026-08-26"
+    assert ei.value.last_trade_time == "2026-08-24T15:59:59"     # v0.45.656：页面要写明文件停在哪一刻
+
+
+def test_quote_held_stale_reports_the_stale_file(monkeypatch):
+    """v0.45.656：`quote_held` 陈旧时仍不可得、不给报价，但交出那份陈旧文件的时刻与应有日期（页面据此说人话）。"""
+    monkeypatch.setattr(co, "_expected_vintage_date", lambda: "2026-08-26")
+    _patch_net(monkeypatch, _raw("2026-08-24T15:59:59"))
+    q = co.quote_held("TMO", ["TMO260918C00450000"])
+    assert q["available"] is False and q["reason"] == "stale_vintage"
+    assert q["quotes"] == {"TMO260918C00450000": None} and q["underlying_price"] is None
+    assert (q["vintage_date"], q["payload_last_trade_time"], q["expected_date"]) == \
+        ("2026-08-24", "2026-08-24T15:59:59", "2026-08-26")
 
 
 def test_on_stale_raise_not_swallowed_by_retry_loop(monkeypatch):

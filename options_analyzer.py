@@ -15,6 +15,7 @@ import threading
 
 from hive_logger import PATHS, get_logger, atomic_json_write
 import ledger_io
+import yf_daily
 
 _log = get_logger("options")
 
@@ -605,7 +606,9 @@ class OptionsDataFetcher:
                 except Exception:               # pragma: no cover - 闸门不可得不阻断
                     pass
 
-                hist = stock.history(period="1y")
+                # v0.45.652：经唯一入口取，公司行动空行先去掉。末行空行（最近那根缺了）不用另判：
+                # `_check_bars_gaps` 按日期找缺口，那天会被当成缺口走重取 / 第二源 / 置空，与之前同一结局
+                hist, _last_blank = yf_daily.history(stock, source="options_hv", period="1y")
 
                 if hist.empty:
                     _log.warning("%s 历史数据不可用，使用样本数据", ticker)

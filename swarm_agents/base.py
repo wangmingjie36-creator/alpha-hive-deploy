@@ -165,7 +165,15 @@ class BeeAgent(ABC):
     def _yf_history(self, ticker: str, period: str = "3mo"):
         """`yf.Ticker(ticker).history(period=)`。预取包按 `MARKET_HISTORY_PERIOD`
         下载，请求更短的 period 时按日历日切尾巴（yfinance 的 `period="Nd"` 就是
-        从现在往回数 N 个日历日）。请求比预取包更长 → 不猜，回退直连。"""
+        从现在往回数 N 个日历日）。请求比预取包更长 → 不猜，回退直连。
+
+        v0.45.652：直连回退经 `yf_daily` 取。最近一场已收盘的 K 线缺了（末行是公司行动空行）⇒ 返回空表（调用方按「取不到」
+        走中性默认值），不拿前一场冒充今天。v0.45.658：预取包也经 `yf_daily.download` 取、同一判据——此前它是裸 `yf.download`
+        （`actions=False`），那行被 yfinance 一声不吭删掉，主路径照样冒充；现在包里记下这些票（`history_missing`），
+        这里直接给空表（不再直连重取一遍同样缺的数据）。"""
+        if ticker in (self._market().get("history_missing") or ()):
+            import pandas as _pd
+            return _pd.DataFrame()
         hist = self._market().get("history", {})
         df = hist.get(ticker)
         if df is not None:
@@ -173,14 +181,24 @@ class BeeAgent(ABC):
             if sliced is not None:
                 return sliced
         import yfinance as yf
-        return yf.Ticker(ticker).history(period=period)
+        import yf_daily
+        out, last_blank = yf_daily.history(yf.Ticker(ticker), source="rival_fallback", period=period)
+        if last_blank:
+            return out.iloc[0:0]
+        return out
 
     def _yf_close_panel(self, symbols: List[str], period: str):
         """`yf.download(symbols, period=)["Close"]` 的等价物：列 = symbol 的收盘价面板。
-        任一 symbol 不在预取包里 → 整个面板回退直连（不拼一半预取一半实时）。"""
+        任一 symbol 不在预取包里 → 整个面板回退直连（不拼一半预取一半实时）。
+
+        v0.45.658：最近一场已收盘的 K 线缺了的 symbol（预取包的 `history_missing`，或直连时 `yf_daily.download` 的标志）
+        **不给这一列**——调用方（Scout 相对强度）拿末根当今天，缺列走它原有的「取不到」分支，不拿前一场冒充。"""
         hist = self._market().get("history", {})
+        gone = set(self._market().get("history_missing") or ())
         frames = {}
         for s in symbols:
+            if s in gone:
+                continue
             df = hist.get(s)
             sliced = (_slice_history_period(df, period, self._market().get("history_period"))
                       if df is not None else None)
@@ -188,12 +206,16 @@ class BeeAgent(ABC):
                 frames = None
                 break
             frames[s] = sliced["Close"]
-        if frames:
+        if frames is not None and (frames or gone & set(symbols)):
             import pandas as _pd
             return _pd.DataFrame(frames)
         import yfinance as yf
-        return yf.download(list(symbols), period=period, interval="1d",
-                           progress=False, auto_adjust=True)["Close"]
+        import yf_daily
+        raw, missing = yf_daily.download(yf, list(symbols), source="close_panel", period=period, interval="1d",
+                                         progress=False, auto_adjust=True)
+        panel = raw["Close"]
+        drop = [s for s, m in missing.items() if m and s in getattr(panel, "columns", ())]
+        return panel.drop(columns=drop) if drop else panel
 
     def _get_history_context(self, ticker: str) -> str:
         """获取历史上下文（优先预取缓存，回退到实时查询）"""
@@ -376,7 +398,8 @@ def prefetch_market_bundle(tickers: list) -> Dict[str, Dict]:
     行为与没预取时完全一致。返回的 `history_period` 告诉访问器帧有多长。
     """
     bundle: Dict[str, Dict] = {"history": {}, "info": {}, "calendar": {},
-                               "analyst_targets": {}, "history_period": MARKET_HISTORY_PERIOD}
+                               "analyst_targets": {}, "history_period": MARKET_HISTORY_PERIOD,
+                               "history_missing": []}
     if not tickers:
         return bundle
     try:
@@ -388,9 +411,15 @@ def prefetch_market_bundle(tickers: list) -> Dict[str, Dict]:
     symbols = sorted(set(tickers) | set(_sector_etfs_for(tickers)))
     try:
         from backtester import _split_download_frame
-        raw = yf.download(tickers=symbols, period=MARKET_HISTORY_PERIOD, interval="1d",
-                          group_by="ticker", auto_adjust=True, progress=False, threads=False)
-        bundle["history"] = _split_download_frame(raw, symbols)
+        import yf_daily
+        # v0.45.658：经唯一入口取（帧与此前 actions=False 逐位相同）。最近一场已收盘的 K 线缺了（末行是公司行动空行）的票
+        # 不进包、记进 `history_missing`：访问器据此当取不到（Rival / Scout 都拿末根当今天），不再静默冒充
+        raw, missing = yf_daily.download(yf, tickers=symbols, source="prefetch_bundle", period=MARKET_HISTORY_PERIOD,
+                                         interval="1d", group_by="ticker", auto_adjust=True, progress=False,
+                                         threads=False)
+        frames = _split_download_frame(raw, symbols)
+        bundle["history_missing"] = sorted(s for s, m in missing.items() if m)
+        bundle["history"] = {s: f for s, f in frames.items() if s not in bundle["history_missing"]}
     except Exception as e:  # noqa: BLE001
         _log.warning("市场数据包：日线批量下载失败（各蜂回退直连）: %s", e)
 
@@ -428,6 +457,9 @@ def prefetch_market_bundle(tickers: list) -> Dict[str, Dict]:
     _log.info("市场数据包：日线 %d/%d 只 | info %d | calendar %d | analyst_targets %d",
               len(bundle["history"]), len(symbols), len(bundle["info"]),
               len(bundle["calendar"]), len(bundle["analyst_targets"]))
+    if bundle["history_missing"]:
+        _log.warning("市场数据包：%d 只最近一场已收盘的 K 线缺了（末行是公司行动空行），按取不到处理：%s",
+                     len(bundle["history_missing"]), ", ".join(bundle["history_missing"]))
     return bundle
 
 
