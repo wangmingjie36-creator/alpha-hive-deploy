@@ -5,7 +5,23 @@
 
 ---
 
-## [0.45.664] — 2026-10-27 — 占位（进行中：test_gh_pages_unverified_parent 的「网络在重试中途恢复」测试时序不稳——CI 上第 2 次就成功、断言要第 3 次）
+## [0.45.664] — 2026-10-27 — Fixed：`tests/test_gh_pages_unverified_parent.py` 的「网络在重试中途恢复」测试时序不稳——数退避的测试改替换退避接缝 `rd._retry_sleep`，不再替换全局 `time.sleep`；新增确定性注入两种干扰
+
+**现象**：`TestRecovery::test_network_returns_mid_retry_and_deploy_really_lands` 今天在 CI 红两次（`81c1964d`、`eb0defda`），中间四轮绿：`assert r["success"] and r["attempts"] == 3` 实得 `attempts == 2`——日志里只有一次「push 被拒 (attempt 1/4) …2s 后重新 fetch」就成功了。
+
+**根因（测试的毛病，部署代码没错）**：测试把**全局** `time.sleep` 换成计数器，第 2 次被调用时恢复网络，意图是「第 2 次**退避**时恢复」。但全局替换会把别处的 sleep 也数进来：
+1. `report_deployer._run_git_network` 用 `subprocess.run(..., timeout=…)`；子进程输出读完时若还没被回收，`Popen._wait` 会忙等 `time.sleep(0.001…0.05)`——调用时查找 `time.sleep`，正好落进计数器。CI 机器忙时才出现；
+2. 整套里别的测试遗留的后台线程若在跑 `time.sleep`，同样被数进来（单跑没有）。
+任一种在 attempt 1 期间多一次 ⇒ 第 1 次退避时就恢复网络 ⇒ attempt 2 成功。`test_two_attempts_exactly_as_logged` 的 `d.sleeps == [2.0]` 是同一个洞（会多出几项）。部署代码自 v0.45.524 起就有专用接缝 `_retry_sleep`（「推送重试测试点名替换本函数」），这两条测试没跟上。
+
+- **复现**：本机空闲循环 30 次 0 红、压 CPU（20 个 `yes`）30 次 0 红——macOS 回收子进程够快，自然复现不出来。改为**确定性注入**：新夹具 `stray_sleeps` 三档——`quiet` / `subprocess_busy_wait`（让每个 Popen 第一次非阻塞轮询报「还没退出」，逼出一次标准库忙等 sleep）/ `background_thread`（每 2ms 调一次 `time.sleep(0)` 的后台线程）。用旧写法：两档注入下两条测试**次次红**，其中 `subprocess_busy_wait` 的失败与 CI 一字不差（`'attempts': 2` / `assert (True and 2 == 3)`、同一句「Could not read from remote」）。注入器自证：没触发过就在收尾报错，免得空过。
+- **修法**（`tests/test_gh_pages_unverified_parent.py`）：`no_sleep` 夹具与恢复测试改替换 `rd._retry_sleep`——只数退避、不碰全局 `time.sleep`；两条数退避的测试挂上 `stray_sleeps`（36 → 40 条）。不动 `report_deployer.py`。
+
+**变异检查**（4 个，全红，还原后绿）：`no_sleep` 退回全局 sleep ⇒ `== [2.0]` 两档注入红 / 恢复测试退回全局 sleep ⇒ 三档全红（`no_sleep` 已占住接缝，全局 sleep 收不到退避）/ 忙等注入器失效 ⇒ 收尾自证报错 / 后台线程不跑 ⇒ 收尾自证报错。
+
+**核对**：本文件 40 passed；`select_tests.py --run`（改测试文件 ⇒ 13 个元守卫 + 本文件等 15 个）1159 passed、登记表不过期；拨钟审计 +7 / +45 / +400 天新红 0 条。整套交给 CI。
+
+**顺带查过（未改）**：全仓另一处替换全局 `time.sleep` 的只有 `tests/test_retry_backoff_seams.py::test_seam_delegates_to_time_sleep`——只包住一次直接调用 `_retry_sleep(1.4)`、不起子进程，只剩「恰好那一瞬有后台线程 sleep」的极小窗口，不改。
 
 ## [0.45.663] — 2026-10-27 — 占位（进行中：宏观报价与板块轮动的日线按日期配对、不再按位置取；缺值不再用 4.5 / 0 顶替）
 
