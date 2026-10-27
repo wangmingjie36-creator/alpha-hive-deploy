@@ -1088,6 +1088,24 @@ _COHORT_HISTORY = [
      "（09-28，边界 09-21）11 只照样齐全。前瞻检验：维度 IC 协议 H1（buzz_v1 输入层 + 冻结层）/ H2（Chronos / Buzz / Oracle 分 + 冻结权重，"
      "Queen 调整之前）都不读 Guard 宏观票与 Rival ⇒ 不截断。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签"
      "（final_score 是 ML 特征，只在空行日变）。"),
+    ("2026-10-19", "v0.45.654",
+     "补跑宏观报价核对「末根正是 D」+ 收益率曲线只用观测到的 10Y（用户 2026-10-27 选「并进 10-19 同日标签 + 等价判据」，同 v0.45.652）。"
+     "① `fred_macro._fetch_macro_data` 补跑分支（`--date D`）：^TNX / ^FVX / DX-Y.NYB / ^GSPC / TLT / GLD（CBOE CSV 与快照都给不出 VIX 时还有 ^VIX）"
+     "末根不是 D ⇒ 当没取到、点名进 `not_on_as_of`（同 v0.45.366 板块轮动那支）。旧代码拿更早一场收盘冒充 D——`_asof_history` 只截到「D 为止」，"
+     "Yahoo 整根缺 D 又没有事件（不产生空行）时照样返回止于前一场的日线——经黄金趋势 / 曲线进 Guard 宏观票。"
+     "② **两种口径**：缺 TNX 时不再拿兜底常量 4.5 减真 2Y 算曲线（10-12 量级 10Y 5.24、2Y 4.75：+49bp normal 会变 −25bp inverted ⇒ Guard risk_off +2）；"
+     "① 会把缺 D 的 ^TNX 变成「没取到」，不配 ② 就成了放大器。2Y 照记，利差 / 曲线留 None / unknown。"
+     "**只在两种日子才变**：补跑且 Yahoo 缺 D 那根 / 宏观没整份降级而 10Y 缺。**历史 0 次**：补跑只有 08-27 / 28 / 31 与 10-12 四天，"
+     "10-27 逐个重取 4 天 × 7 个符号 28/28 末根是 D、记录值对得上 D 的收盘；135 份日报里 10Y 落兜底 4.5 只在 15 个整份降级日（Guard 本不看曲线）；"
+     "09-28 起 21 个扫描日 10Y 都是观测值（20 天财政部、10-12 是 ^TNX 的 D 那根）。"
+     "**为什么日期写 10-19**（同 369 / 559 / 639 / 652）：10-19 ~ 10-26 六个旧代码扫描日 180 行等价判据全部成立（全是实时行、宏观来源含财政部），"
+     "与 537 / 538 / 559 / 639 / 652 同日扩展同一标签，**边际作废 0 条**。等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.654\"]` 逐行判、不需要冻结证据"
+     "（宏观来源与口径都在 Guard 的归档细节里）；印记 `_BOUNDARY_MARKERS[\"v0.45.654\"]`：Guard `details.macro_quote_dates_checked` 字面量 True"
+     "（成功路径无条件写；与 652 的 `macro_event_rows_checked` 分开——10-27 那轮已带 652 的），实时行。预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "推送若晚于某个扫描日，那天的旧代码行由同一判据核：财政部那天没供上就证不出 ⇒ `boundary_too_early`，届时追加更正条目。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.654\"]` = `agent.GuardBeeSentinel.*`（本来就从 10-19 起 ⇒ 0 个信号后移）；"
+     "`guard.macro_adj` 刻意不点名（同 652「实测没换 ⇒ 照证据不列」：09-28 起归档里没有一行受影响，见上）。"
+     "前瞻检验：维度 IC 协议 H1 / H2 都不读 Guard 宏观票 ⇒ 不截断。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1599,6 +1617,41 @@ def _equiv_macro_event_rows(d: dict) -> bool:
     return _load_macro_rotation_evidence().get(d.get("_date")) in _MACRO_ROTATION_EQUIV_STATUSES
 
 
+def _guard_row_has_quote_dates_marker(d: dict) -> bool:
+    """这行是 v0.45.654 之后的代码写的吗：GuardBeeSentinel `details.macro_quote_dates_checked` 为字面量 `True`
+    （成功路径无条件写；与 652 的 `macro_event_rows_checked` 是两个键）。只认 `is True`：此前的记录没有这个键。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    return isinstance(det, dict) and det.get("macro_quote_dates_checked") is True
+
+
+def _marker_guard_macro_quote_dates(d: dict) -> bool:
+    """v0.45.654 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383）。"""
+    return _guard_row_has_quote_dates_marker(d) and not _is_backfill_row(d)
+
+
+def _equiv_macro_quote_dates(d: dict) -> bool:
+    """v0.45.654 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？逐行判，不需要冻结证据。
+
+    本版两处：① 补跑口径宏观报价末根须是 D（实时行碰不到）；② 收益率曲线只用观测到的 10Y（缺 TNX 才变，整份降级的路径本就不算曲线）。
+      · Guard 不在本行 / 出错 ⇒ 两版同一条路 ⇒ True（认 `error`，不认「没有 details」——v0.45.567 的教训）；
+      · 宏观细节（归档键名 `vix_term_structure`）读不出 ⇒ 证不出 ⇒ False；
+      · 补跑行 ⇒ False：① 可能生效，而记录里没有各符号的末根日期；
+      · 实时行、`macro_data_source == "fallback"` ⇒ True（整份 / 部分降级路径不调 `_set_curve`）；
+      · 实时行、来源含 `treasury` ⇒ True：财政部日度曲线的 10Y 与 2Y 出自同一行 ⇒ 10Y 是观测值 ⇒ ② 是空操作；
+      · 其余（10Y 走 yfinance 或缺失，记录里分不出）⇒ False（举证责任在放宽一侧）。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    if not isinstance(g, dict) or g.get("error"):
+        return True
+    vt = (g.get("details") or {}).get("vix_term_structure")
+    if not isinstance(vt, dict) or vt.get("macro_as_of_mode") == "backfill":
+        return False
+    src = vt.get("macro_data_source")
+    if not isinstance(src, str):
+        return False
+    return src == "fallback" or "treasury" in src.split("@")[0].split("+")
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1638,6 +1691,8 @@ _BOUNDARY_MARKERS = {
                   _marker_bear_options_dq_from_oracle),
     "v0.45.652": ("agent_details.GuardBeeSentinel.details.macro_event_rows_checked is True",
                   _marker_guard_macro_event_rows),
+    "v0.45.654": ("agent_details.GuardBeeSentinel.details.macro_quote_dates_checked is True",
+                  _marker_guard_macro_quote_dates),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1672,6 +1727,8 @@ _BOUNDARY_EQUIVALENCE = {
     "v0.45.652": ("冻结证据 experiments/macro_rotation_equivalence_20261019.json：当天板块轮动表 11 只齐全且预取包全覆盖，"
                   "或整轮 yfinance 0 次成功响应（或 Guard 与 Rival 都不在本行 / 都出错）⇒ 本版改动是空操作",
                   _equiv_macro_event_rows, _guard_row_has_event_rows_marker),
+    "v0.45.654": ("Guard 出错 / 不在本行，或实时行且宏观来源是 fallback / 含 treasury（10Y 是财政部观测值）⇒ 本版改动是空操作",
+                  _equiv_macro_quote_dates, _guard_row_has_quote_dates_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。

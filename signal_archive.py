@@ -2452,6 +2452,9 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # （去掉公司行动空行）。进分的是板块轮动（Guard 宏观票 → 权重路由）与 Rival 直连回退，都只在空行日变 ⇒ 点名 Guard
     # （本来就从 10-19 起，0 个信号后移）；`guard.macro_adj` / Rival 刻意不点名：09-28 起归档里没有一天受空行影响（证据见该条目）
     "v0.45.652": ("agent.GuardBeeSentinel.*",),
+    # 10-19（v0.45.654，等价论证见 ic_rerun_readiness 同版条目）：补跑宏观报价末根须是 D + 曲线只用观测到的 10Y ⇒ Guard 宏观票的输入。
+    # 只在「补跑且 Yahoo 缺 D」/「没整份降级而 10Y 缺」的日子变，09-28 起归档里 0 行 ⇒ 同 652 只点名 Guard（0 个信号后移），`guard.macro_adj` 不点名
+    "v0.45.654": ("agent.GuardBeeSentinel.*",),
 }
 
 

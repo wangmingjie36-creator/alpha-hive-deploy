@@ -42,7 +42,61 @@
 - 版本号：本版开工时按 0.45.651 写；第一次 rebase 发现别的会话已占 0.45.651 / 0.45.652，改 0.45.653；推送前再 rebase 又发现 0.45.653 / 0.45.654 也被占了，最终 **0.45.655**（条目、代码注释、CLAUDE.md、memory 一并改过；本版与 0.45.649 一起推送）。
 - rebase 到最新 origin/main（带进 0.45.651 的钉钟闸修复与 0.45.645 的 yfinance 改动）之后**没有重跑整套**；相关套件 507 passed（含 CHANGELOG 完整性、`test_scan_clock`、尾部三件套、portfolio_greeks 全部）。
 
-## [0.45.654] — 2026-10-27 — 占位（进行中：补跑宏观报价核对末根是 D——缺 D 那根不拿前一场冒充）
+## [0.45.654] — 2026-10-27 — Fixed：补跑宏观报价核对「末根正是 D」——Yahoo 缺 D 那根时不再拿前一场收盘冒充 D；缺 10Y 时不再拿兜底常量 4.5 算曲线；登边界 10-19（并进同日标签、等价判据，作废 0 条）
+
+v0.45.652 审计顺带发现的既有缺口（与空行无关）：补跑（`--date D`，云端快照模式）里，板块轮动那支自 v0.45.366 起要求末根正是 D，
+宏观报价那支（^TNX / ^FVX / DX-Y.NYB / ^GSPC / TLT / GLD，CBOE CSV 与快照都给不出 VIX 时还有 ^VIX）却直接拿 `hist["Close"].iloc[-1]` 当 D 的收盘。
+`_asof_history` 只截到「D 为止」：末行是公司行动空行时 652 起返回 None，但 Yahoo **整根缺 D 又没有事件**时它照样返回止于更早一场的日线 ⇒
+前一场收盘冒充 D，经黄金趋势 / 收益率曲线进 Guard 的宏观票（`guard.macro_adj` / Guard 政体 → `RegimeWeightAdjuster`），没人会红。
+
+### Fixed
+- **`fred_macro._fetch_macro_data`** 补跑分支：`hist.index.date[-1] != D` ⇒ 该符号当没取到（同板块轮动口径），点名进 `not_on_as_of` + WARNING
+  「补跑宏观 D：N 个符号没有该日日K，按没取到处理（GLD=GLD, …）」。`not_on_as_of` 只在补跑口径带（实时输出不变），三条返回路径（完整 / CBOE-VIX 部分降级 /
+  整份兜底）都带——符号全被挡下时正是降级成 fallback 的那条，最需要知道为什么。
+- **同版：收益率曲线只用观测到的 10Y**（`_set_curve` 一处，三种 2Y 来源共用）。缺 TNX 时 `tnx` 是兜底常量 4.5，旧代码照样拿它减真 2Y：
+  10-12 补跑实况 10Y 5.24、2Y 4.75 ⇒ +49bp normal；换成 4.5 ⇒ −25bp **inverted ⇒ Guard risk_off +2**。上一条把「缺 D 的 ^TNX」变成「没取到」，
+  不配这条就会把几 bp 的错放大成假倒挂。现在 2Y 照记（真观测），利差 / 曲线留 None / unknown（Guard 不投曲线票）。**两种口径都生效**。
+- `_asof_history` docstring 写明「只保证到 D 为止，不保证末根是 D，调用方必须自己核」。
+
+### 盘点（只读）
+- 生产历史上的补跑只有 4 天：08-27 / 08-28 / 08-31（旧代码）与 10-12（v0.45.484 重放，哥伦布日：财政部没有 D 行 ⇒ ^TNX / ^FVX 也走 yfinance）。
+  今天用 `_asof_history` 逐个重取 4 天 × 7 个符号：**28/28 末根都是 D**；记录值与 D 的收盘对得上（10-12：10Y 5.24 = ^TNX 10-12、黄金 382.15 = GLD 10-12、
+  大盘 −0.06% = ^GSPC 10-12/10-09；08-27/28/31 的黄金与 08-27 的 10Y 同样对得上）⇒ **本缺口历史上 0 次触发**（以今天 Yahoo 的数据为准；当时 Yahoo 若缺过、事后已补上，无从回看）。
+- 曲线那条：135 份日报里 10Y = 兜底 4.5 只出现在 15 个整份降级（`fallback`）日——那时 Guard 本就不看曲线；09-28 起 21 个扫描日 10Y 全是观测值
+  （20 天财政部、10-12 是 ^TNX 的 D 那根）⇒ **记录过的每一行在新代码下输出不变**。
+
+### 世代边界（用户 10-27 选 B：并进 10-19 同日标签 + 等价判据，同 v0.45.652）
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-10-19", "v0.45.654", …)`：与 537 / 538 / 559 / 639 / 652 同日扩展同一标签，`assess()` 切点不变 ⇒ **作废 0 条**。
+- 等价判据 `_equiv_macro_quote_dates`（逐行判，不需要冻结证据）：Guard 出错 / 不在本行 ⇒ 等价；补跑行 ⇒ 证不出（记录里没有各符号的末根日期）；
+  实时行且宏观来源是 `fallback`（不调 `_set_curve`）或含 `treasury`（财政部日度曲线 10Y 与 2Y 同一行 ⇒ 10Y 是观测值）⇒ 等价；其余 ⇒ 证不出。
+  生产 10-19 ~ 10-26 六个旧代码扫描日 **180/180 行成立**。
+- 印记 `_BOUNDARY_MARKERS["v0.45.654"]`：Guard 成功路径无条件写 `details.macro_quote_dates_checked = True`（与 652 的 `macro_event_rows_checked` 分开——
+  10-27 那轮已带 652 的），只认实时行。推送前对生产数据根只读跑 `cohort_boundary_evidence(…, version="v0.45.654")`：`no_evidence_yet`、
+  `unmarked_after_boundary=[]`、`equivalent_before_marker` = 10-19 / 20 / 21 / 22 / 23 / 26。预期新代码首跑后 `matches`。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.654"] = ("agent.GuardBeeSentinel.*",)`（本来就从 10-19 起 ⇒ **0 个信号后移**）；`guard.macro_adj` 刻意不点名
+  （同 652「实测没换 ⇒ 照证据不列」：09-28 起归档里 0 行受影响）。维度 IC 协议 H1 / H2 不读 Guard 宏观票 ⇒ 不截断。
+- `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代标签扩为 `…+v0.45.652+v0.45.654`（同日零代价，归属不变）。
+
+### 没改 / 待办
+- **补跑时 FRED（2Y / CPI / 联邦基金 / HY 利差）取的是最新值**（`sort_order=desc, limit=1`，没有 `observation_end`），不按 D 对齐；
+  财政部缺 D 行时 FRED 的 2Y 会进曲线 ⇒ Guard 票（10-12 记录的 2Y 4.75 与财政部 10-08 的值相同、不是 10-09 的 4.80 ⇒ 疑似落后两场，待验证；
+  当天利差 49 vs 44bp 都是 normal，票不变）。另一个 as-of 缺口。
+- **中间缺一根**：只核末根是 D，不核前一根是 D 的前一个交易日。08-31 补跑记录的大盘 −0.58% = 08-31 / **08-27**（真值 08-31 / 08-28 = −0.33%）⇒
+  当时 Yahoo 缺 08-28 那根（待验证：今天已补齐）。那天是 bear vs neutral，只进展示用的 `market_trend` / `macro_score`，Guard 不投这一项。
+- 缺 TNX 时 `treasury_10y` / `rate_environment` 仍是兜底常量 4.5 / "high"（只进展示与 fred_macro 自己的 `macro_score`，不进 Guard 票）。
+
+### 测试
+- `tests/test_backfill_macro_asof.py`：
+  - B 节（fred_macro）：末根是 D 照用（正对照）；缺 D ⇒ 缺失 + 点名 + WARNING；7 个符号全缺 D ⇒ 部分降级 / 整份兜底两条路径都点名；实时输出不带新键；
+    曲线要观测到的 10Y（10-12 形状：财政部无 D 行、2Y 走 FRED）。
+  - D 节：真 fred_macro → 真 Guard 端到端（缺 D 的 GLD +3%：旧代码 ⇒ risk_off、−1.0；新 ⇒ risk_on、+0.5）。
+  - F 节（边界登记）：条目 / 作用域 / 印记 / 判据都在；作废 0 条（`cohort_start()` 切点同 652）；0 个信号后移；不截断 H1 / H2；ML 标签扩了；
+    Guard 字面量无条件写印记（AST）；判据 10 种形状；印记只认实时新行、不认 652 的键；判定三态（首跑前 no_evidence_yet / 首跑 matches / 旧代码日证不出 ⇒ boundary_too_early）。
+- 变异：代码 6 处全红（去掉末根 == D 核对【5 条红，含端到端】/ 部分降级不带键 / 兜底不带键 / 实时也带键 / 曲线不要求观测到的 10Y / 不打 WARNING）；
+  登记 12 处全红（删等价判据 / 作用域加 `guard.macro_adj` / 日期写成上线日 / 判据恒真 / 不排补跑 / 不认 fallback / 不认 treasury / 宏观细节缺时当等价 /
+  日期印记不排补跑 / 印记认 652 的键 / Guard 不写印记 / ML 标签不扩）。ruff 过。
+- 拨钟审计（+7 / +45 天）本文件 0 条新红（74 条）。`tests/_must_run.json` 经 `select_tests --update` 并入。
+- 整套：代码改动后 **12394 passed / 0 failed**；加上登记后 **12418 passed / 0 failed**；rebase 到 v0.45.649 / 655 之上（只 CHANGELOG 冲突，行首锚定解）再跑 **12570 passed / 0 failed**；推送前对生产数据根只读跑判别器：`no_evidence_yet`、旧代码 6 天全等价。
 
 ## [0.45.653] — 2026-10-27 — Fixed：行情三字段算出非有限数（真 K 线缺收盘 / 缺量，2026-08-28 型）不再进评分——动量 / 量比当取不到交给回落，生产与冻结通道层同改（`price.fields` → measurement_fix，§13.10 追加）
 

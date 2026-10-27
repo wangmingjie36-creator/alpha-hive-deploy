@@ -141,6 +141,9 @@ def _asof_history(yf, sym: str, as_of: str):
 
     v0.45.652：经 `yf_daily` 取。末行是公司行动空行 = 有事件、却没有那天的 K 线（D 那根缺了）⇒ 返回 None：
     剩下的末根是更早的一场，拿它当 D 就是冒充（此前末行收盘是 NaN，两处调用方也都落到「没取到」，结局相同，现在多一行日志）。
+
+    ⚠️ 只保证「到 D 为止」，**不保证末根是 D**：Yahoo 整根缺 D 又没有事件时照样返回止于更早一场的日线。
+    调用方必须自己核 `hist.index.date[-1] == D`（板块轮动 v0.45.366、宏观报价 v0.45.654 都核，并点名进 `not_on_as_of`）。
     """
     import datetime as _dt
     import yf_daily
@@ -444,6 +447,14 @@ def _fetch_macro_data() -> Dict:
                       len(data), _as_of or "当日",
                       ", ".join(f"{k}={v}" for k, v in sorted(_src_map.items())))
 
+        # v0.45.654：补跑的末根必须**正是 D**（同板块轮动那支，v0.45.366）。`_asof_history` 只截到「D 为止」——
+        # Yahoo 整根缺 D 又没有分红事件（不产生空行）时，它返回止于更早一场的日线，旧代码拿那场收盘冒充 D，
+        # 经曲线 / 黄金进 Guard 的宏观票与 `macro_regime`，没人会红。缺 D ⇒ 该符号当没取到、点名进 `not_on_as_of` + WARNING。
+        _not_on_as_of: list = []
+        if _as_of:
+            import datetime as _dt
+            _as_of_d = _dt.date.fromisoformat(_as_of)
+
         for name, sym in symbols.items():
             if name in data:          # 已由当日源供上，不再打 yfinance
                 continue
@@ -451,6 +462,9 @@ def _fetch_macro_data() -> Dict:
                 if _as_of:
                     hist = _asof_history(yf, sym, _as_of)
                     if hist is None:
+                        continue
+                    if hist.index.date[-1] != _as_of_d:
+                        _not_on_as_of.append(name)
                         continue
                 else:
                     import yf_daily
@@ -475,6 +489,11 @@ def _fetch_macro_data() -> Dict:
                         }
             except Exception as e:
                 _log.debug("宏观数据获取失败 %s: %s", sym, e)
+        # 补跑口径才带这个键（同板块轮动；实时口径输出不变）。三条返回路径都带：符号全被挡下时正是降级成 fallback 的那条
+        _asof_keys = {"not_on_as_of": sorted(_not_on_as_of)} if _as_of else {}
+        if _not_on_as_of:
+            _log.warning("补跑宏观 %s：%d 个符号没有该日日K，按没取到处理（%s）", _as_of, len(_not_on_as_of),
+                         ", ".join(f"{n}={symbols[n]}" for n in sorted(_not_on_as_of)))
 
         # ---- VIX：CBOE 优先（v0.43.24 Step 2）----
         # 原先直接用 yfinance 的 ^VIX，绕过了项目既定的 CBOE 优先链。宏观数据在
@@ -566,8 +585,9 @@ def _fetch_macro_data() -> Dict:
                 _partial["vix_change_pct"] = _vix_change_pct(_cboe_vix, _vix_prev_close)
                 _partial.update(_vix_obs_fields(_vix_obs))
                 _partial["summary"] = f"宏观数据不可用（VIX {_cboe_vix:.1f} 来自 CBOE，其余降级）"
+                _partial.update(_asof_keys)
                 return _partial
-            return base
+            return {**base, **_asof_keys}
 
         # ---- VIX 分析 ----
         if _cboe_vix is not None:
@@ -639,16 +659,22 @@ def _fetch_macro_data() -> Dict:
         yield_spread = None
         yield_curve = "unknown"
         _2y_source = ""
+        # v0.45.654：利差要一个**观测到的** 10Y。缺 TNX 时上面的 `tnx` 是兜底常量 4.5，拿它减真 2Y 会造出假倒挂 / 假趋平
+        # （10-12 补跑实况 10Y 5.24、2Y 4.75 ⇒ +49bp normal；换成 4.5 是 −25bp inverted ⇒ Guard risk_off +2）。
+        # 135 份日报里只在整份降级（fallback，Guard 本就不看曲线）时缺过 TNX；补跑「末根不是 D ⇒ 当没取到」让它够得着了。
+        _tnx_seen = "TNX" in data
 
         def _set_curve(y2: float, src: str):
             """同一段判定逻辑此前抄了三遍（近似 / FRED / 本次新增财政部）。
             抄三遍就有三处会漂移 —— 收敛成一处。"""
             nonlocal treasury_2y, yield_spread, yield_curve, _2y_source
             treasury_2y = round(y2, 3)
+            _2y_source = src
+            if not _tnx_seen:                               # 2Y 照记；利差 / 曲线留 None / unknown
+                return
             yield_spread = round((tnx - y2) * 100, 1)     # bp
             yield_curve = ("inverted" if yield_spread < -10
                            else "flat" if yield_spread < 20 else "normal")
-            _2y_source = src
 
         # v0.45.60：财政部日度曲线直接给真 2Y —— 优先于下面的 5Y 近似。
         #
@@ -884,6 +910,7 @@ def _fetch_macro_data() -> Dict:
             # 所以只改输出，并用 `as_of_mode` 显式承载原先靠 None 表达的区分。
             "as_of": _as_of or _realtime_as_of(),
             "as_of_mode": "backfill" if _as_of else "realtime",
+            **_asof_keys,
         }
 
     except ImportError:
