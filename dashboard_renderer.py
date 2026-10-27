@@ -2562,7 +2562,7 @@ def render_dashboard_html(report: Dict, date_str: str,
             # 黄金指标。v0.45.352（重做 v0.45.78）：主值固定显示价格，涨跌幅挪到独立的
             # 涨跌小字里。旧逻辑靠 gold_trend 二选一——走势明显时只显示涨跌幅、看不到价格，
             # 平稳时只显示价格、看不到涨跌。价格缺失时仍按旧规则兜底显示涨跌幅（门槛
-            # 保留：GLD 没取到时 gold_change_pct 是默认 0.0，trend 门槛恰好挡住它）。
+            # 保留：v0.45.663 起 GLD 没取到时 gold_change_pct 是 None、trend 是 "unknown"，两道都挡；此前是默认 0.0 被 trend 门槛挡住）。
             _gld_trend = _mctx.get("gold_trend", "stable")
             _gld_chg = _mctx.get("gold_change_pct")
             _gld_price = _mctx.get("gold_price")

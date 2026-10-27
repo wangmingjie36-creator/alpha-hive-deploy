@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import math
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 #: v0.45.564（用户 10-20 定）：`period="1mo"` 的窗口有时只有 19 个交易日，门槛 20 会让那些天所有标的整天缺波动率
 VOLATILITY_MIN_BARS = 19
@@ -68,14 +68,17 @@ def _finite(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
-def event_only_positions(hist) -> List[int]:
-    """公司行动空行在 `hist` 里的行号（0 起）。缺任一价格列 / 成交量列、或一个事件列都没有 ⇒ 认不出，返回空。"""
+def event_only_positions(hist, event_columns: Sequence[str] = EVENT_ROW_EVENT_COLUMNS) -> List[int]:
+    """公司行动空行在 `hist` 里的行号（0 起）。缺任一价格列 / 成交量列、或一个事件列都没有 ⇒ 认不出，返回空。
+
+    `event_columns` 缺省是 H1 的那一组（行情三字段只读个股，个股没有 `Capital Gains` 列）；`yf_daily` 传带 `Capital Gains` 的一组
+    （基金 / ETF 的资本利得分配同样会单独成行，v0.45.658）。"""
     if hist is None or len(hist) == 0:
         return []
     cols = set(hist.columns)
     if any(c not in cols for c in EVENT_ROW_PRICE_COLUMNS + ("Volume",)):
         return []
-    events = [c for c in EVENT_ROW_EVENT_COLUMNS if c in cols]
+    events = [c for c in event_columns if c in cols]
     if not events:
         return []
     prices = [hist[c].tolist() for c in EVENT_ROW_PRICE_COLUMNS]
@@ -86,31 +89,55 @@ def event_only_positions(hist) -> List[int]:
             and any(_finite(e[i]) and e[i] != 0 for e in evs)]
 
 
+def event_row_layout(hist, event_columns: Sequence[str] = EVENT_ROW_EVENT_COLUMNS) -> Tuple[List[int], int, int]:
+    """``(空行行号, 首段长度, 末段长度)``（v0.45.658，`drop_event_only_rows` 与 `yf_daily` 共用这一份）。
+
+    首段 = 从第 0 行起**连续**的空行（窗口外边界日漏进来的事件，可能不止一个：同一个边界区间里既有分红又有拆股）；末段 = 到末行为止
+    连续的空行（事件日期晚于末根 K 线）。此前只认「第 0 行」与「第 n−1 行」，连着两行时里面那行被当成「窗口中间」⇒ 误报「yfinance
+    行为变了 / 真缺一根」。整份都是空行（一根 K 线都没有）⇒ 首段 0、末段 n（按「最近那根缺了」算，与此前单行空行的口径一致）。"""
+    pos = event_only_positions(hist, event_columns)
+    if not pos:
+        return [], 0, 0
+    n = len(hist)
+    if len(pos) == n:
+        return pos, 0, n
+    lead = 0
+    while lead < len(pos) and pos[lead] == lead:
+        lead += 1
+    trail = 0
+    while trail < len(pos) and pos[-1 - trail] == n - 1 - trail:
+        trail += 1
+    return pos, lead, trail
+
+
+def drop_positions(hist, pos: Sequence[int]):
+    """按**行号**去掉（不按索引标签：空行与真 K 线同一时间戳时按标签会连真的一起删）；`pos` 空 ⇒ 原对象。"""
+    if not pos:
+        return hist
+    gone = set(pos)
+    return hist.iloc[[i for i in range(len(hist)) if i not in gone]]
+
+
 def drop_event_only_rows(hist, ticker: str = "?"):
     """去掉公司行动空行（见模块说明）并登记计数，返回 ``(日线, 末行是不是空行)``；没有空行时第一项就是传进来的同一个对象。
 
     调用方在取到日线后、任何判空 / 末根判断之前调（冻结层在同一位置去掉，「≥ 3 根才看交易所时钟」数的是去掉之后的根数）。
     第二项为真 ⇒ 当天那根 K 线缺了：实时路径不许拿剩下的末根（前一场）当今天，整段当取不到（见模块说明）。
     按行号去掉，不按索引标签（空行与真 K 线同一时间戳时按标签会连真的一起删）。"""
-    pos = event_only_positions(hist)
-    last = bool(pos) and pos[-1] == len(hist) - 1
+    pos, lead, trail = event_row_layout(hist)
+    last = trail > 0
     with _event_lock:
         if hist is not None:
             _event_stats["frames"] += 1
         _event_stats["dropped"] += len(pos)
         _event_stats["last_row"] += int(last)
-        for i in pos:
-            if i == 0 and len(hist) > 1:
-                _event_stats["first_row"] += 1
-                continue
+        _event_stats["first_row"] += lead          # v0.45.658：首段整段算首行（此前只认第 0 行）
+        for i in pos[lead:]:
             _event_stats["elsewhere_total"] += 1
             if len(_event_stats["elsewhere"]) < _EVENT_MAX_ITEMS:
                 _event_stats["elsewhere"].append({"ticker": ticker, "date": str(hist.index[i])[:10],
                                                   "pos": i, "n": len(hist), "last": i == len(hist) - 1})
-    if not pos:
-        return hist, False
-    gone = set(pos)
-    return hist.iloc[[i for i in range(len(hist)) if i not in gone]], last
+    return drop_positions(hist, pos), last
 
 
 def _copy_stats(d: Dict[str, Any]) -> Dict[str, Any]:

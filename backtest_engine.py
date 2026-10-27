@@ -148,8 +148,10 @@ class PriceBackfiller:
             start = target - timedelta(days=5)
             end = target + timedelta(days=5)
 
-            hist = t.history(start=start.strftime("%Y-%m-%d"),
-                           end=end.strftime("%Y-%m-%d"))
+            import yf_daily
+            # v0.45.658：经唯一入口（带日期窗口、按日期用；此前是「dated_window」例外——结构上只核得到 start=，「末行碰不到」核不了）
+            hist = yf_daily.history(t, source="backtest_engine", start=start.strftime("%Y-%m-%d"),
+                           end=end.strftime("%Y-%m-%d"))[0]
             if hist.empty:
                 return None
 

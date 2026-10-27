@@ -328,7 +328,7 @@ class AlertAnalyzer:
         self._check_history_fill(status)
         self._check_stock_fetch_legacy(status)   # v0.45.639：P1 行情改走 cache.py 旧回落
         self._check_event_rows(status)           # v0.45.645：P2 日线公司行动空行不在首行（某个交易日的价格缺了）
-        self._check_yf_daily_event_rows(status)  # v0.45.652：P2 其他日线读者（yf_daily 入口）遇到末行 / 中间的公司行动空行
+        self._check_yf_daily_event_rows(status)  # v0.45.652：P2 其他日线读者（yf_daily 入口）最近一场缺了 / 中间的公司行动空行
         self._check_price_nonfinite(status)      # v0.45.653：P2 行情三字段算出非有限数、已改缺失（真 K 线缺收盘 / 缺量）
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
@@ -1393,13 +1393,13 @@ class AlertAnalyzer:
             ))
 
     def _check_yf_daily_event_rows(self, status: Dict) -> None:
-        """行情三字段以外的 yfinance 日线读者经唯一入口 `yf_daily.history` 遇到**末行 / 窗口中间**的公司行动空行（v0.45.652；
-        `yf_daily.stats()` 经 scan_timing 进来）。
+        """行情三字段以外的 yfinance 日线读者经唯一入口 `yf_daily`（`history` / `download`）遇到「**最近一场已收盘的 K 线缺了**」
+        或**窗口中间**的公司行动空行（v0.45.652；v0.45.658 起按「这一路要哪天」判末段；`yf_daily.stats()` 经 scan_timing 进来）。
 
-        首行（窗口外边界日漏进来的事件）去掉即恢复成请求的窗口，正常、只计数（摘要行可见）。末行 = 事件日期晚于末根 K 线（当天
-        没有 K 线，或盘前跑）：用末根当今天的调用点（板块轮动 / 宏观报价 / Rival 回退 / 快照入场价 …）已把那一路当取不到，按日期
-        用整段的（HV 走缺口链、MCP 蜡烛）照用去掉后的日线。中间：yfinance 1.2.0 不会产生，出现 = yfinance 行为变了。
-        都从没见过，所以要红。计数缺失 ⇒ checks_skipped。"""
+        首段（窗口外边界日漏进来的事件）去掉即恢复成请求的窗口，正常、只计数（摘要行可见）。末段空行且剩下的末根早于最近一场已收盘的
+        交易日 = 那一场的 K 线缺了：末行策略登记为 refuse 的调用点（`tests/test_yf_daily.py::POLICY`）（板块轮动 / 宏观报价 / 预取包里的 Rival / Scout / 快照入场价 …）
+        已把那一路当取不到，ignore 的（HV 走缺口链、IV-RV 窗口、回测 / 回填按日期用）照用去掉后的日线。末段空行而末根就是最近一场
+        （盘前跑、今天那场还没收）不报。中间：yfinance 1.2.0 不会产生，出现 = yfinance 行为变了。都从没见过，所以要红。计数缺失 ⇒ checks_skipped。"""
         st = status.get("scan_timing")
         if not isinstance(st, dict):
             return
@@ -1418,12 +1418,15 @@ class AlertAnalyzer:
             shown += f" 等共 {total} 条"
         self.alerts.append(Alert(
             AlertLevel.MEDIUM,
-            f"📊 【P2 中】yfinance 日线（行情三字段以外的读者）有 {total} 处公司行动空行不在首行"
-            f"（末行 {int(yd.get('last_row', 0) or 0)}、中间 {int(yd.get('middle', 0) or 0)}）",
+            f"📊 【P2 中】yfinance 日线（行情三字段以外的读者）有 {total} 处公司行动空行意味着缺 K 线"
+            f"（最近一场缺了 {int(yd.get('last_row', 0) or 0)} 份、中间 {int(yd.get('middle', 0) or 0)} 行"
+            + (f"、其中日历判不了按缺了算 {int(yd.get('calendar_unavailable', 0) or 0)} 份"
+               if yd.get("calendar_unavailable") else "") + "）",
             {
                 "明细": shown,
-                "影响": "末行的：最近那根 K 线缺了——用末根当今天的调用点已把那一路当取不到（板块轮动少这只 ETF、宏观报价缺这个符号、"
-                        "Rival 技术面回到中性、快照入场价不走回退），没有拿前一场冒充今天；窗口中间的（yfinance 1.2.0 不会产生）：那一路少了一根真实 K 线",
+                "影响": "最近一场缺了的：用末根当今天的调用点（末行策略 refuse，登记在 tests/test_yf_daily.py::POLICY）已把那一路当取不到（板块轮动少这只 ETF、宏观报价缺这个符号、"
+                        "预取包里这只票的 Rival 技术面 / Scout 相对强度回到中性、快照入场价不走回退），没有拿前一场冒充今天；"
+                        "按日期用的（ignore）照用；窗口中间的（yfinance 1.2.0 不会产生）：那一路少了一根真实 K 线",
                 "建议": "末行的：看是不是 Yahoo 当天迟发 K 线 / 盘前跑；窗口中间的：先查 yfinance 版本与 utils.safe_merge_dfs 是否改了。"
                         "调用点名见 yf_daily.SOURCES",
             },

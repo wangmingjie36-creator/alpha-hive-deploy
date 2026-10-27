@@ -241,6 +241,14 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "随机日线 1800 例（含 15% NaN 收盘 / 8% NaN 成交量、实时 / yfinance 源 / 补跑）所有差别都是「旧 NaN → 新 None」、意外 0，生产档案 95 份真实日线全同；"
      "改后冻结层桥接行情 3/3 天 30/30（10-26 整天 yfinance 限流、走回落 ⇒ 不全，与本条无关）、整分 90/90，buzz_v1 自证 600/600。"
      "**用户 2026-10-27 在对话里选「根治」**（对应我的方案 A：两层一起改、按 measurement_fix 登记）；不登记边界、无行可隔离"),
+    ("price.fields",    "a28fa1559af6b734", "no_value_change",
+     "v0.45.658（652 二次检查 #6 / #8）：price_metrics 抽出 event_row_layout（首段 / 末段连续空行）与 drop_positions（按行号删）两个共用函数，"
+     "drop_event_only_rows 改用它们；event_only_positions 多一个缺省参数 event_columns（缺省就是原来的 Dividends / Stock Splits，yf_daily 传带 "
+     "Capital Gains 的一组）。只改了 event_row_stats 的计数分档：连着两行以上的首段空行此前只有第 0 行算首行、其余算「不在首行」（误报 P2），"
+     "现在整段算首行；去掉哪几行、末行标志、三个字段的值都不变。改动前（origin/main e907cf47 的 price_metrics.py）与改后在 3000 份随机日线上对拍"
+     "（无空行 / 首段 1 行 / 首段 2 行 / 末段 1 行 / 末段 2 行 / 首末都有 / 整份空行 / 真 K 线缺收盘 / 空行与真 K 线同时间戳，每类 ≥ 300 份）："
+     "drop_event_only_rows 的帧与末行标志、event_only_positions、history_price_metrics 全部逐位相同。冻结通道层 buzz_v1_channels 没动。"
+     "**用户 2026-10-27 在对话里说「都按推荐的来，按根因修复」**（二次检查 8 条；#6 计数分档、#8 共用实现）；不登记边界"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change"})

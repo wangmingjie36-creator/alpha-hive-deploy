@@ -13,6 +13,27 @@ from swarm_agents.utils import (
 #: FOMC 临近票的窗口（天，含当天）：参考日起 0~N 天内有 FOMC 声明日 ⇒ risk_off +1
 FOMC_VOTE_WINDOW_DAYS = 3
 
+#: 世代印记：**代码版本**，不表示「这一项这次真查过」。成功路径的 details 字面量里逐条无条件写（判别器按字面量 True 认）；
+#: 出错 / 无效 ticker 的返回由 `_with_generation_marks` 补写（v0.45.658，652 二次检查 #3）——此前只写在成功路径，新代码出错的那一行
+#: 在世代边界判定（`ic_rerun_readiness._equivalence_scan`）里会被当成旧代码、去查只覆盖旧代码日子的冻结证据 ⇒ 假「边界写早了」。
+#: 守卫：成功路径字面量里值为字面量 `True` 的键与本表双向一致（`tests/test_yf_daily.py::TestGuardGenerationMarks`）。
+GENERATION_MARKS = ("macro_event_rows_checked", "macro_quote_dates_checked", "macro_fred_vintage_checked",
+                    "macro_fred_series_isolated", "yf_daily_download_checked", "macro_bars_dated_checked")
+
+
+def _with_generation_marks(result: Dict) -> Dict:
+    """出错 / 无效 ticker 的返回补上世代印记与补跑口径（`macro_as_of_mode` 写在 details 顶层，`ic_rerun_readiness._is_backfill_row`
+    认它——补跑行不算日期证据）。口径判不了按实时（与成功路径 `_analyze_macro` 同一取舍）。"""
+    mode = "realtime"
+    try:
+        from fred_macro import get_macro_snapshot
+        mode = "backfill" if (get_macro_snapshot() or {}).get("date") else "realtime"
+    except Exception as e:  # noqa: BLE001
+        _log.debug("宏观快照状态不可读，印记按实时口径: %s", e)
+    det = result.get("details") if isinstance(result.get("details"), dict) else {}
+    result["details"] = {**det, **{k: True for k in GENERATION_MARKS}, "macro_as_of_mode": mode}
+    return result
+
 
 def fomc_vote_days(ref_date=None):
     """参考日起 `FOMC_VOTE_WINDOW_DAYS` 天内最近一次 FOMC 还有几天；窗口内没有 ⇒ None。
@@ -39,7 +60,7 @@ class GuardBeeSentinel(BeeAgent):
     def analyze(self, ticker: str) -> Dict:
         _err = self._validate_ticker(ticker)
         if _err:
-            return _err
+            return _with_generation_marks(_err)
         try:
             ctx = self._get_history_context(ticker)
 
@@ -269,6 +290,13 @@ class GuardBeeSentinel(BeeAgent):
                     # v0.45.660 世代印记（同上，无条件写；与 652 / 654 / 657 分开）：`fred_macro` 的 FRED 序列逐个解析，
                     # 一个值是 "." 不再连带丢掉其余（含进曲线的 2Y）。判别器按它认新代码（`ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.660"]`）
                     "macro_fred_series_isolated": True,
+                    # v0.45.658 世代印记（同上，无条件写）：`yf.download` 读者与带日期窗口的 `history()` 读者也收进 `yf_daily`；
+                    # 末段按「最近一场已收盘」判（预取包里的 Rival / Scout、市场政体均线、供应链）。判别器
+                    # `ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.658"]`。出错路径由 `_with_generation_marks` 补写
+                    "yf_daily_download_checked": True,
+                    # v0.45.663 世代印记（同上，无条件写）：`fred_macro` 读 Yahoo 日线按日期配对（宏观报价 / 板块轮动，不再数第几根），
+                    # 缺值不再顶数（10Y 4.5 / 涨跌 0.0 ⇒ None / "unknown"）。判别器 `ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.663"]`
+                    "macro_bars_dated_checked": True,
                     # ③ 时间周期
                     "cycle_context": cycle_ctx,
                     # ④ 市场政体
@@ -280,7 +308,7 @@ class GuardBeeSentinel(BeeAgent):
 
         except AGENT_ERRORS as e:
             _log.error("GuardBeeSentinel failed for %s: %s", ticker, e, exc_info=True)
-            return make_error_result("GuardBeeSentinel", "risk_adj", e)
+            return _with_generation_marks(make_error_result("GuardBeeSentinel", "risk_adj", e))
 
     #: 回退路径的窗口宽度。旧版 board / 测试替身只有 `get_top_signals` 时用它，
     #: 取值与 `base.BeeAgent._PEER_LOOKUP_N` 一致（80 条上限的 30%），足以覆盖

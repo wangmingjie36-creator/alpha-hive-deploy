@@ -76,9 +76,11 @@ def _fetch_price_series(ticker: str, start: str, end: str) -> Dict[str, float]:
     try:
         start_dt = datetime.strptime(start, "%Y-%m-%d")
         end_dt = datetime.strptime(end, "%Y-%m-%d") + timedelta(days=2)
-        hist = yf.Ticker(ticker).history(
+        import yf_daily
+        # v0.45.658：经唯一入口（带日期窗口、按日期用；此前是「dated_window」例外——结构上只核得到 start=，「末行碰不到」核不了）
+        hist = yf_daily.history(yf.Ticker(ticker), source="dynamic_exit",
             start=start_dt.date(), end=end_dt.date(), auto_adjust=True
-        )
+        )[0]
         if hist.empty:
             return {}
         return {

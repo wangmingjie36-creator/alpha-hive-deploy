@@ -16,13 +16,14 @@
 - 设置环境变量 FRED_API_KEY 可解锁 CPI、PMI、2Y 国债收益率等
 """
 
-import math
+import datetime as _dt
 import os
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Optional, Tuple
 
+from bars_integrity import session_change
 from hive_logger import get_logger
 
 _log = get_logger("fred_macro")
@@ -64,7 +65,7 @@ except (ImportError, KeyError):
 _lock = threading.Lock()
 
 # 板块 ETF 单独缓存（复用 _CACHE_TTL 30min）
-_etf_cache: Dict[str, tuple] = {}   # etf -> (timestamp, (name, chg))
+_etf_cache: Dict[tuple, tuple] = {}   # (etf, 那一场) -> (timestamp, (name, chg))；v0.45.663 起按场次存
 _etf_lock = threading.Lock()
 
 
@@ -78,10 +79,11 @@ def get_macro_context() -> Dict:
             "macro_score": float (0-10, 10=极度风险偏好),
             "vix": float,
             "vix_regime": "low"/"elevated"/"high"/"spike",
-            "treasury_10y": float,
-            "rate_environment": "low"/"rising"/"high",
-            "dollar_trend": "strong"/"weak"/"neutral",
-            "market_trend": "bull"/"bear"/"neutral",
+            "treasury_10y": float | None,                       # v0.45.663：缺就是 None（旧兜底 4.5）
+            "rate_environment": "low"/"moderate"/"high"/"unknown",
+            "dollar_trend": "strong"/"weak"/"neutral"/"unknown",
+            "market_trend": "bull"/"bear"/"neutral"/"unknown",  # 较前一交易日（1 日）
+            "quote_gaps": {符号: 原因},                         # v0.45.663：Yahoo 日线按日期没配上的
             "macro_headwinds": list[str],
             "macro_tailwinds": list[str],
             "summary": str,
@@ -143,7 +145,8 @@ def _asof_history(yf, sym: str, as_of: str):
     剩下的末根是更早的一场，拿它当 D 就是冒充（此前末行收盘是 NaN，两处调用方也都落到「没取到」，结局相同，现在多一行日志）。
 
     ⚠️ 只保证「到 D 为止」，**不保证末根是 D**：Yahoo 整根缺 D 又没有事件时照样返回止于更早一场的日线。
-    调用方必须自己核 `hist.index.date[-1] == D`（板块轮动 v0.45.366、宏观报价 v0.45.654 都核，并点名进 `not_on_as_of`）。
+    调用方按日期配对（v0.45.663 起两处都用 `bars_integrity.session_change`：缺 D ⇒ anchor_missing，点名进 `quote_gaps` / `gaps`
+    与 654 的 `not_on_as_of`），不按位置取。
     """
     import datetime as _dt
     import yf_daily
@@ -218,10 +221,11 @@ def _finnhub_quote(symbol: str) -> Optional[Dict]:
         return None
     if last <= 0:
         return None
+    # v0.45.663：没有前收盘 ⇒ 涨跌未知（None），不再拿 last 当 prev、给 0.0 冒充「持平」
     return {
         "last": last,
-        "prev": prev if prev > 0 else last,
-        "change_pct": ((last / prev) - 1) * 100 if prev > 0 else 0.0,
+        "prev": prev if prev > 0 else None,
+        "change_pct": ((last / prev) - 1) * 100 if prev > 0 else None,
         "ts": q.get("t"),
     }
 
@@ -250,8 +254,10 @@ def _same_day_macro_data(as_of: Optional[str] = None) -> Tuple[Dict, Dict[str, s
             for name, k in (("TNX", "y10"), ("FVX", "y5"), ("TWO", "y2")):
                 v = cur.get(k)
                 if v is not None:
-                    # 口径注意：财政部给的是 par yield 本身，**不是** ^TNX 的 ×10
-                    data[name] = {"last": v, "prev": v, "change_pct": 0.0}
+                    # 口径注意：财政部给的是 par yield 本身，**不是** ^TNX 的 ×10。
+                    # v0.45.663：只取了这一天 ⇒ 涨跌未知（None）；旧写 prev=v、0.0 冒充「持平」，
+                    # 让「10Y 持续走高」那条逆风在实时日永远不可能触发
+                    data[name] = {"last": v, "prev": None, "change_pct": None}
                     sources[name] = f"treasury_gov@{cur['date']}"
     except Exception as e:  # noqa: BLE001
         _log.debug("财政部曲线不可用: %s", e)
@@ -447,53 +453,57 @@ def _fetch_macro_data() -> Dict:
                       len(data), _as_of or "当日",
                       ", ".join(f"{k}={v}" for k, v in sorted(_src_map.items())))
 
-        # v0.45.654：补跑的末根必须**正是 D**（同板块轮动那支，v0.45.366）。`_asof_history` 只截到「D 为止」——
-        # Yahoo 整根缺 D 又没有分红事件（不产生空行）时，它返回止于更早一场的日线，旧代码拿那场收盘冒充 D，
-        # 经曲线 / 黄金进 Guard 的宏观票与 `macro_regime`，没人会红。缺 D ⇒ 该符号当没取到、点名进 `not_on_as_of` + WARNING。
-        _not_on_as_of: list = []
-        if _as_of:
-            import datetime as _dt
-            _as_of_d = _dt.date.fromisoformat(_as_of)
+        # v0.45.663：这批宏观代表**哪一场**——补跑是 D，实时是 `_realtime_as_of()`（收盘后是今天，否则上一场）。
+        # 只算一次：输出的 `as_of` 与下面按日期配对的锚定日是同一天。
+        _session = _as_of or _realtime_as_of()
+        _session_d = _dt.date.fromisoformat(_session) if _session else None
 
+        # v0.45.663：按**日期**配对（`bars_integrity.session_change`），不再数第几根。
+        # 旧代码末根当这一场、倒数第二根当前一场：Yahoo 缺一根就整体错位一格、不报错——08-31 补跑的大盘涨跌
+        # −0.58% 就是 08-31 / 08-27（缺 08-28），按日期是 −0.33%。v0.45.654 只核了「末根是 D」，前一根照旧数位置；
+        # 实时那支连末根是不是今天都不核（Yahoo 还没出今天那根 ⇒ 昨天的收盘当今天）。现在：
+        #   锚定日那根缺 ⇒ 该符号当没取到；只缺前一场那根 ⇒ 水平照用（10Y 判利率环境 / 算曲线、黄金价格），涨跌为 None。
+        # 每个没配上的都点名进 `quote_gaps`（两种口径都带）+ 一条 WARNING；补跑另带 654 的 `not_on_as_of`（由它派生）。
+        # NaN 收盘（2026-08-28 那种：成交了、Yahoo 还没填收盘）在 `closes_by_session` 里同「没有那根」。
+        _quote_gaps: Dict[str, str] = {}
         for name, sym in symbols.items():
             if name in data:          # 已由当日源供上，不再打 yfinance
                 continue
             try:
+                if _session_d is None:
+                    _quote_gaps[name] = "no_session"        # 判不出这批代表哪天 ⇒ 不按位置猜
+                    continue
                 if _as_of:
                     hist = _asof_history(yf, sym, _as_of)
-                    if hist is None:
-                        continue
-                    if hist.index.date[-1] != _as_of_d:
-                        _not_on_as_of.append(name)
-                        continue
                 else:
                     import yf_daily
-                    # v0.45.652：经唯一入口取。末行空行 = 今天那根缺了 ⇒ 当没取到（剩下的末根是前一场）
+                    # v0.45.652：经唯一入口取。末行空行 = 最近那根缺了 ⇒ 当没取到（剩下的末根是前一场）
                     hist, _last_blank = yf_daily.history(yf.Ticker(sym), source="macro_quotes",
                                                          period="5d", interval="1d")
                     if _last_blank:
+                        _quote_gaps[name] = "last_row_blank"
                         continue
-                if hist is not None and not hist.empty:
-                    _last = float(hist["Close"].iloc[-1])
-                    _prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else _last
-                    # v0.45.7x：`!= 0` 挡不住 NaN（NaN != 0 恒 True）——2026-08-28
-                    # 那次 yfinance 返回的行 Volume 是真的、Close 却是 NaN，NaN 就
-                    # 这样算出 NaN 的 change_pct，被当成「取到了」写进 data[name]。
-                    # 收盘价不是有限数就当同「没取到」处理，不让 NaN 冒充数据
-                    # （同 CHANGELOG v0.45.69 的原则：拿不到就不冒充，不伪造）。
-                    if math.isfinite(_last) and math.isfinite(_prev):
-                        data[name] = {
-                            "last": _last,
-                            "prev": _prev,
-                            "change_pct": (_last / _prev - 1) * 100 if _prev != 0 else 0.0,
-                        }
+                if hist is None or len(hist) == 0:
+                    _quote_gaps[name] = "no_data"
+                    continue
+                q = session_change(hist, _session_d, 1)
+                if q["last"] is None:
+                    _quote_gaps[name] = q["missing"]
+                    continue
+                if q["missing"]:
+                    _quote_gaps[name] = q["missing"]        # 只缺前一场：水平照用、涨跌未知
+                data[name] = {"last": q["last"], "prev": q["prev"], "change_pct": q["change_pct"]}
             except Exception as e:
+                _quote_gaps[name] = f"error:{type(e).__name__}"
                 _log.debug("宏观数据获取失败 %s: %s", sym, e)
-        # 补跑口径才带这个键（同板块轮动；实时口径输出不变）。三条返回路径都带：符号全被挡下时正是降级成 fallback 的那条
-        _asof_keys = {"not_on_as_of": sorted(_not_on_as_of)} if _as_of else {}
-        if _not_on_as_of:
-            _log.warning("补跑宏观 %s：%d 个符号没有该日日K，按没取到处理（%s）", _as_of, len(_not_on_as_of),
-                         ", ".join(f"{n}={symbols[n]}" for n in sorted(_not_on_as_of)))
+        # 三条返回路径都带：符号全被挡下时正是降级成 fallback 的那条
+        _gap_keys: Dict = {"quote_gaps": dict(sorted(_quote_gaps.items()))}
+        if _as_of:
+            _gap_keys["not_on_as_of"] = sorted(n for n, r in _quote_gaps.items() if r.startswith("anchor_missing:"))
+        if _quote_gaps:
+            _log.warning("宏观报价 %s（%s）：%d 个符号按日期没配上——缺这一场的当没取到、只缺前一场的只用水平（%s）",
+                         _session, "补跑" if _as_of else "实时", len(_quote_gaps),
+                         ", ".join(f"{n}={symbols[n]}:{r}" for n, r in sorted(_quote_gaps.items())))
 
         # ---- VIX：CBOE 优先（v0.43.24 Step 2）----
         # 原先直接用 yfinance 的 ^VIX，绕过了项目既定的 CBOE 优先链。宏观数据在
@@ -585,9 +595,9 @@ def _fetch_macro_data() -> Dict:
                 _partial["vix_change_pct"] = _vix_change_pct(_cboe_vix, _vix_prev_close)
                 _partial.update(_vix_obs_fields(_vix_obs))
                 _partial["summary"] = f"宏观数据不可用（VIX {_cboe_vix:.1f} 来自 CBOE，其余降级）"
-                _partial.update(_asof_keys)
+                _partial.update(_gap_keys)
                 return _partial
-            return {**base, **_asof_keys}
+            return {**base, **_gap_keys}
 
         # ---- VIX 分析 ----
         if _cboe_vix is not None:
@@ -612,11 +622,18 @@ def _fetch_macro_data() -> Dict:
 
         vix_regime = _classify_vix(vix)
 
-        # ---- 10Y 利率分析 ----
-        tnx = data.get("TNX", {}).get("last", 4.5)
-        tnx_change = data.get("TNX", {}).get("change_pct", 0.0)
+        # v0.45.663：下面四项缺了就是缺（None / "unknown"，不加不减分），不再用看起来正常的数顶上——
+        # 旧缺 10Y 填 4.5（恰好落进 high ⇒ 宏观分 −1、报告印「10Y 4.50%」），缺涨跌填 0.0（报告印「持平」）。
+        # 2026-09 的静默降级审计确认过这条（`experiments/silent_degradation_audit_verified.json`，fred_macro / report_formatters 两项）。
+        # Guard 只读 `gold_trend`：「unknown」与「stable」一样不投票。
 
-        if tnx < 3.0:
+        # ---- 10Y 利率分析 ----
+        tnx = data.get("TNX", {}).get("last")
+        tnx_change = data.get("TNX", {}).get("change_pct")
+
+        if tnx is None:
+            rate_env = "unknown"
+        elif tnx < 3.0:
             rate_env = "low"
         elif tnx < 4.5:
             rate_env = "moderate"
@@ -624,17 +641,21 @@ def _fetch_macro_data() -> Dict:
             rate_env = "high"
 
         # ---- 美元趋势 ----
-        dxy_change = data.get("DXY", {}).get("change_pct", 0.0)
-        if dxy_change > 0.3:
+        dxy_change = data.get("DXY", {}).get("change_pct")
+        if dxy_change is None:
+            dollar_trend = "unknown"
+        elif dxy_change > 0.3:
             dollar_trend = "strong"
         elif dxy_change < -0.3:
             dollar_trend = "weak"
         else:
             dollar_trend = "neutral"
 
-        # ---- 大盘趋势（5日）----
-        spx_change = data.get("SPX", {}).get("change_pct", 0.0)
-        if spx_change > 0.5:
+        # ---- 大盘趋势（较前一交易日；旧注释与报告标签写「5日」，从来都是 1 日）----
+        spx_change = data.get("SPX", {}).get("change_pct")
+        if spx_change is None:
+            market_trend = "unknown"
+        elif spx_change > 0.5:
             market_trend = "bull"
         elif spx_change < -0.5:
             market_trend = "bear"
@@ -643,8 +664,10 @@ def _fetch_macro_data() -> Dict:
 
         # ---- 黄金趋势（避险指标）----
         gold_price = data.get("GLD", {}).get("last")
-        gold_change = data.get("GLD", {}).get("change_pct", 0.0)
-        if gold_change > 1.0:
+        gold_change = data.get("GLD", {}).get("change_pct")
+        if gold_change is None:
+            gold_trend = "unknown"
+        elif gold_change > 1.0:
             gold_trend = "surging"    # 避险需求强烈
         elif gold_change > 0.3:
             gold_trend = "rising"
@@ -682,13 +705,15 @@ def _fetch_macro_data() -> Dict:
         # 2026-08-27 实测 5Y=4.38 → 近似 2Y=4.53 → 10Y−2Y=+14bp 判成 "flat"；
         # 真 2Y=4.20 → 利差 +47bp，实际是 "normal"。差了一个档位。
         _tsy_2y = data.get("TWO", {}).get("last")
-        if _tsy_2y is not None and tnx > 0:
+        # v0.45.663：缺 10Y 时 `tnx` 是 None（旧为 4.5、恒过 `> 0`）——2Y 照记、利差留空（`_set_curve` 内判），行为不变
+        _tnx_ok = tnx is None or tnx > 0
+        if _tsy_2y is not None and _tnx_ok:
             _set_curve(_tsy_2y, "treasury_gov")
         else:
             # 退而求其次：5Y 近似。保留是因为财政部不可得时它总比 unknown 强，
             # 但必须标出来，否则读者无从知道这个 2Y 是推算的。
             fvx = data.get("FVX", {}).get("last")
-            if fvx is not None and tnx > 0:
+            if fvx is not None and _tnx_ok:
                 _set_curve(fvx + 0.15, "approx_from_5y")
 
         # ---- FRED API（提前获取以修正 2Y 曲线数据）----
@@ -773,7 +798,7 @@ def _fetch_macro_data() -> Dict:
         if vix_change is not None and vix_change > 10:
             _vspan = f"{_vix_prev_as_of}→{_vix_as_of}，" if _vix_as_of and _vix_prev_as_of else ""
             headwinds.append(f"VIX 单日飙升 {vix_change:+.1f}%（{_vspan}波动率冲击）")
-        if rate_env == "high" and tnx_change > 2:
+        if rate_env == "high" and tnx_change is not None and tnx_change > 2:
             headwinds.append(f"10Y 利率 {tnx:.2f}% 持续走高（压制成长估值）")
         if dollar_trend == "strong":
             headwinds.append(f"美元走强（新兴市场 + 大宗商品承压）")
@@ -846,8 +871,8 @@ def _fetch_macro_data() -> Dict:
 
         summary_parts = [
             f"VIX {vix:.1f}({vix_regime})",
-            f"10Y {tnx:.2f}%",
-            f"大盘{spx_change:+.1f}%",
+            f"10Y {tnx:.2f}%" if tnx is not None else "10Y —",
+            f"大盘{spx_change:+.1f}%" if spx_change is not None else "大盘—",
             f"宏观:{macro_regime}",
         ]
         if yield_curve != "unknown":
@@ -867,16 +892,16 @@ def _fetch_macro_data() -> Dict:
             "vix": round(vix, 2),
             "vix_change_pct": round(vix_change, 2) if vix_change is not None else None,
             "vix_regime": vix_regime,
-            "treasury_10y": round(tnx, 3),
+            "treasury_10y": round(tnx, 3) if tnx is not None else None,
             "treasury_2y": treasury_2y,
             "yield_spread": yield_spread,
             "yield_curve": yield_curve,
             "rate_environment": rate_env,
             "dollar_trend": dollar_trend,
             "market_trend": market_trend,
-            "spx_change_pct": round(spx_change, 2),
+            "spx_change_pct": round(spx_change, 2) if spx_change is not None else None,
             "gold_price": round(gold_price, 2) if gold_price else None,
-            "gold_change_pct": round(gold_change, 2),
+            "gold_change_pct": round(gold_change, 2) if gold_change is not None else None,
             "gold_trend": gold_trend,
             "sector_rotation": sector_rotation,
             "macro_headwinds": headwinds,
@@ -909,9 +934,9 @@ def _fetch_macro_data() -> Dict:
             # `_as_of` 本身**不能动** —— 它是控制流：非 None 会让上面走
             # `_asof_history` 对齐历史日，实时路径填了它会改变取数行为。
             # 所以只改输出，并用 `as_of_mode` 显式承载原先靠 None 表达的区分。
-            "as_of": _as_of or _realtime_as_of(),
+            "as_of": _session,               # v0.45.663：与按日期配对的锚定日同一次求值
             "as_of_mode": "backfill" if _as_of else "realtime",
-            **_asof_keys,
+            **_gap_keys,
         }
 
     except ImportError:
@@ -1062,23 +1087,34 @@ _SECTOR_TO_ETF = {
 }
 
 
+#: 板块轮动「5 日涨跌」= 这一场对往前第 4 个交易日（5 根日线首尾，与旧 `period="5d"` 的 `iloc[0]` 同一定义）
+SECTOR_ROTATION_SESSIONS_BACK = 4
+
+
 def _fetch_sector_rotation(yf_module=None, as_of: Optional[str] = None) -> Dict:
     """获取 11 个 SPDR 板块 ETF 的 5 日表现，返回板块轮动数据（并行 + 单 ETF 缓存）
 
     v0.45.366：`as_of`（补跑目标日）给定时对齐到该日 —— 此前恒 `period="5d"` 取**最近** 5 天，
     补跑时 GuardBee 的板块顺逆风票是运行当天的（同 v0.45.59 治过的国债/SPX 那类错位）。
-    补跑口径：`_asof_history` 取到 D 为止、窗口取末 5 根（与实时 `period="5d"` 同宽）、
-    末根必须**正是 D**（缺 D 那根就不算，不拿 D 之前的冒充）；不读也不写单 ETF 缓存
-    （缓存只按 ETF 键，读了会把实时值混进补跑，写了会把 D 的值混进之后的实时）。
-    结果多带 `as_of` 与 `not_on_as_of`（末根不是 D 的 ETF）两键；实时口径输出不变。
+    补跑不读也不写单 ETF 缓存（读了会把实时值混进补跑，写了会把 D 的值混进之后的实时）。
+
+    v0.45.663：涨跌按**日期**配对（`bars_integrity.session_change`：这一场对往前第
+    `SECTOR_ROTATION_SESSIONS_BACK` 个交易日），不再数第几根（旧：实时 `iloc[0]`、补跑 `iloc[-min(5, len)]`，
+    Yahoo 缺一根就错位一格、不报错）。这一场 = 补跑的 D / 实时的 `_realtime_as_of()`（Yahoo 还没出今天那根 ⇒
+    这只不计，不再拿昨天的窗口冒充今天）。没算进去的每一只都点名进 `gaps`（原因）+ 一条 WARNING——此前取数失败只打
+    debug，10-14 / 10-26 整张表为空、10-05 少两只，日志里一个字都没有。±50% 以上不再「归零」照排（0.0 冒充持平），
+    改为不计、点名 `implausible`。结果带 `as_of`（这批代表的那一场）与 `gaps` 两键（整段失败 ⇒ `gaps` 只有 `"*"` 一项）；
+    补跑另带 `not_on_as_of`（由 `gaps` 派生）。
+    实时缓存按（ETF, 那一场）存，跨过收盘不会把上一场的值当这一场用。
     """
     result = {"hot": [], "cold": [], "full": {}}
     _d = None
     if as_of:
-        import datetime as _dt
         _d = _dt.date.fromisoformat(as_of)
-        result["as_of"] = as_of
-        result["not_on_as_of"] = []
+    session = as_of or _realtime_as_of()
+    session_d = _dt.date.fromisoformat(session) if session else None
+    result["as_of"] = session
+    gaps: Dict[str, str] = {}
     try:
         yf = yf_module
         if yf is None:
@@ -1091,7 +1127,7 @@ def _fetch_sector_rotation(yf_module=None, as_of: Optional[str] = None) -> Dict:
         performances = []
         with _etf_lock:
             for etf in tickers:
-                cached = None if _d else _etf_cache.get(etf)
+                cached = None if _d else _etf_cache.get((etf, session))
                 if cached and (now - cached[0]) < _CACHE_TTL:
                     name, chg = cached[1]
                     performances.append((etf, name, chg))
@@ -1099,55 +1135,52 @@ def _fetch_sector_rotation(yf_module=None, as_of: Optional[str] = None) -> Dict:
                 else:
                     to_fetch.append(etf)
 
-        # 并行拉取缺失 ETF
+        # 并行拉取缺失 ETF → (etf, (etf, name, chg) 或 None, 没算进去的原因)
         def _fetch_one(etf):
             try:
+                if session_d is None:
+                    return etf, None, "no_session"          # 判不出这批代表哪天 ⇒ 不按位置猜
                 if _d is not None:
                     hist = _asof_history(yf, etf, as_of)
-                    if hist is None or len(hist) < 2:
-                        return None
-                    if hist.index.date[-1] != _d:
-                        result["not_on_as_of"].append(etf)
-                        return None
-                    first_close = float(hist["Close"].iloc[-min(5, len(hist))])
-                    last_close = float(hist["Close"].iloc[-1])
                 else:
                     import yf_daily
                     # v0.45.652：经唯一入口取。首行空行（窗口外边界日的分红）此前让 iloc[0] 成 NaN、整只 ETF 被丢——
-                    # 11 只 SPDR 同一天除息，一漏就是整张轮动表空；末行空行 = 今天那根缺了 ⇒ 这只不计（同此前 NaN 的结局）
+                    # 11 只 SPDR 同一天除息，一漏就是整张轮动表空；末行空行 = 最近那根缺了 ⇒ 这只不计（同此前 NaN 的结局）
                     hist, _last_blank = yf_daily.history(yf.Ticker(etf), source="sector_rotation",
                                                          period="5d", interval="1d")
-                    if _last_blank or hist is None or len(hist) < 2:
-                        return None
-                    first_close = float(hist["Close"].iloc[0])
-                    last_close = float(hist["Close"].iloc[-1])
-                # < 5 防 yfinance sample data ~1.0 哨兵值（ETF 真实价格均 > $5）；
-                # isfinite 防 NaN——first_close 正常、last_close 是 NaN 时
-                # `>= 5` 单独挡不住（NaN 只挡得住"分母"这一半）。
-                if (math.isfinite(first_close) and math.isfinite(last_close)
-                        and first_close >= 5):
-                    chg = round((last_close / first_close - 1) * 100, 2)
-                    # 5 日涨跌 ±50% 以上为数据异常，归零保守处理
-                    if abs(chg) > 50:
-                        chg = 0.0
-                    name = _SECTOR_ETFS[etf]
-                    return (etf, name, chg)
+                    if _last_blank:
+                        return etf, None, "last_row_blank"
+                if hist is None or len(hist) == 0:
+                    return etf, None, "no_data"
+                q = session_change(hist, session_d, SECTOR_ROTATION_SESSIONS_BACK)
+                if q["missing"]:
+                    return etf, None, q["missing"]
+                # < 5 防 yfinance sample data ~1.0 哨兵值（ETF 真实价格均 > $5）
+                if q["prev"] < 5:
+                    return etf, None, f"base_below_5:{q['prev']}"
+                chg = round(q["change_pct"], 2)
+                # 5 日涨跌 ±50% 以上为数据异常：不计、点名（旧「归零保守处理」= 拿 0.0 冒充持平照样排进冷热）
+                if abs(chg) > 50:
+                    return etf, None, f"implausible:{chg}"
+                return etf, (etf, _SECTOR_ETFS[etf], chg), None
             except Exception as e:
                 _log.debug("Sector ETF %s fetch failed: %s", etf, e)
-            return None
+                return etf, None, f"error:{type(e).__name__}"
 
         if to_fetch:
             with ThreadPoolExecutor(max_workers=4, thread_name_prefix="etf") as pool:
-                futures = {pool.submit(_fetch_one, etf): etf for etf in to_fetch}
+                futures = [pool.submit(_fetch_one, etf) for etf in to_fetch]
                 for fut in as_completed(futures):
-                    fetched = fut.result()
-                    if fetched:
-                        etf, name, chg = fetched
-                        performances.append(fetched)
-                        result["full"][etf] = (name, chg)
-                        if _d is None:          # 补跑口径不写缓存（见 docstring）
-                            with _etf_lock:
-                                _etf_cache[etf] = (time.time(), (name, chg))
+                    etf, fetched, why = fut.result()
+                    if fetched is None:
+                        gaps[etf] = why
+                        continue
+                    _etf, name, chg = fetched
+                    performances.append(fetched)
+                    result["full"][etf] = (name, chg)
+                    if _d is None:          # 补跑口径不写缓存（见 docstring）
+                        with _etf_lock:
+                            _etf_cache[(etf, session)] = (time.time(), (name, chg))
 
         if performances:
             performances.sort(key=lambda x: x[2], reverse=True)
@@ -1162,11 +1195,14 @@ def _fetch_sector_rotation(yf_module=None, as_of: Optional[str] = None) -> Dict:
                 result["hot"] = performances[:1]
                 result["cold"] = []
     except Exception as e:
-        _log.debug("板块轮动数据获取失败: %s", e)
-    if _d is not None and result["not_on_as_of"]:
-        result["not_on_as_of"].sort()
-        _log.warning("补跑板块轮动 %s：%d 只 ETF 没有该日日K，未计入（%s）",
-                     as_of, len(result["not_on_as_of"]), ", ".join(result["not_on_as_of"]))
+        _log.warning("板块轮动 %s：整段取数失败，整张表为空（%s: %s）", session, type(e).__name__, e)
+        gaps["*"] = f"error:{type(e).__name__}"
+    result["gaps"] = dict(sorted(gaps.items()))
+    if _d is not None:
+        result["not_on_as_of"] = sorted(e for e, r in gaps.items() if r.startswith("anchor_missing:"))
+    if gaps and "*" not in gaps:
+        _log.warning("板块轮动 %s（%s）：%d 只 ETF 没算进去（%s）", session, "补跑" if _d else "实时", len(gaps),
+                     ", ".join(f"{e}:{r}" for e, r in sorted(gaps.items())))
     return result
 
 

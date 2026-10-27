@@ -81,8 +81,10 @@ def analyze_concentration(
 
     try:
         import yfinance as yf
-        data = yf.download(tickers, period="1mo", interval="1d",
-                           auto_adjust=True, progress=False)
+        import yf_daily
+        # v0.45.658：经唯一入口（一个月收益相关性，按日期对齐：帧与 actions=False 时逐位相同）
+        data = yf_daily.download(yf, tickers, source="concentration", period="1mo", interval="1d",
+                                 auto_adjust=True, progress=False)[0]
         if not data.empty:
             # pandas DataFame: columns may be MultiIndex or single
             if hasattr(data.columns, "levels"):

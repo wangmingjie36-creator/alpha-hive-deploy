@@ -190,11 +190,13 @@ def load_verified_predictions(horizon: int = 7) -> List[Dict]:
                 min_date = min(p["date"] for p in preds if p.get("date"))
                 max_date = max(p["date"] for p in preds if p.get("date"))
                 _end_dt = _dt.strptime(max_date, "%Y-%m-%d") + _td(days=int(horizon * 1.6) + 5)
-                spy_hist = _yf.Ticker("SPY").history(
+                import yf_daily
+                # v0.45.658：经唯一入口（带日期窗口、按日期用；此前是「dated_window」例外——结构上只核得到 start=，「末行碰不到」核不了）
+                spy_hist = yf_daily.history(_yf.Ticker("SPY"), source="portfolio_backtest_preds",
                     start=_dt.strptime(min_date, "%Y-%m-%d").date(),
                     end=_end_dt.date(),
                     auto_adjust=True,
-                )
+                )[0]
                 spy_closes = {idx.strftime("%Y-%m-%d"): float(row["Close"])
                               for idx, row in spy_hist.iterrows()}
                 sorted_spy = sorted(spy_closes.keys())
@@ -310,8 +312,10 @@ def _fetch_spy_prices(start_date: str, end_date: str) -> Dict[str, float]:
         for _attempt in range(3):
             try:
                 with https_gate():
-                    hist = yf.Ticker("SPY").history(start=start_dt.strftime("%Y-%m-%d"),
-                                                    end=end_dt.strftime("%Y-%m-%d"))
+                    import yf_daily
+                    # v0.45.658：经唯一入口（带日期窗口、按日期用；此前是「dated_window」例外——结构上只核得到 start=，「末行碰不到」核不了）
+                    hist = yf_daily.history(yf.Ticker("SPY"), source="portfolio_backtest_spy", start=start_dt.strftime("%Y-%m-%d"),
+                                                    end=end_dt.strftime("%Y-%m-%d"))[0]
                 if hist is not None and not hist.empty:
                     break
             except Exception as _e:  # noqa: BLE001 — 瞬时 SSL/限流错开即恢复
