@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "commit": "81c1964d7d0b6a8e9d75e49f7a8857ad3ec28b9f",
+  "commit": "1c02ef3fe4f6c58b4fe69ca56240c8c70bc14c48",
   "reads_all_tests": [
     "tests/test_agent_weight_manager_retired.py",
     "tests/test_bare_env_children_pin_data_root.py",
@@ -49,8 +49,9 @@
     "alphabot/static/chat.js": ["tests/test_alphabot.py", "tests/test_alphabot_chat.py", "tests/test_alphabot_launcher.py"],
     "alphabot/static/index.html": ["tests/test_alphabot.py", "tests/test_alphabot_hedge.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_straddle.py"],
     "alphabot/static/lib.js": ["tests/test_alphabot.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_unquotable.py"],
-    "alphabot/static/pages/hedge.js": ["tests/test_alphabot.py", "tests/test_alphabot_hedge.py", "tests/test_alphabot_hedge_delta.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_tail_hedge.py", "tests/test_portfolio_greeks_bid_zero.py"],
+    "alphabot/static/pages/hedge.js": ["tests/test_alphabot.py", "tests/test_alphabot_hedge.py", "tests/test_alphabot_hedge_delta.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_tail_budget.py", "tests/test_alphabot_tail_hedge.py", "tests/test_portfolio_greeks_bid_zero.py"],
     "alphabot/static/pages/hedge_tail.js": ["tests/test_alphabot.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_tail_hedge.py"],
+    "alphabot/static/pages/hedge_tail_budget.js": ["tests/test_alphabot.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_tail_budget.py"],
     "alphabot/static/pages/help.js": ["tests/test_alphabot.py", "tests/test_alphabot_hedge.py", "tests/test_alphabot_hedge_delta.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_premium.py", "tests/test_alphabot_straddle.py", "tests/test_alphabot_unquotable.py"],
     "alphabot/static/pages/howto.js": ["tests/test_alphabot.py", "tests/test_alphabot_howto.py", "tests/test_alphabot_launcher.py", "tests/test_alphabot_unquotable.py"],
     "alphabot/static/pages/intraday.js": ["tests/test_alphabot.py", "tests/test_alphabot_launcher.py"],

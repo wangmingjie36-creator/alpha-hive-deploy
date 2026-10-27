@@ -7,7 +7,15 @@
 
 ## [0.45.660] — 2026-10-27 — 占位（进行中：FRED 序列逐个解析——一个值是 "." 不再连带丢掉其余序列；CPI 同比在 11-10 起会撞上 2025-10 缺月）
 
-## [0.45.659] — 2026-10-27 — 占位（进行中：选测登记表补登尾部预算页 hedge_tail_budget.js / hedge.js 的三处新读——main 的 CI 卡在漂移检查 exit 4）
+## [0.45.659] — 2026-10-27 — Fixed：选测登记表补登尾部预算页的三处新读（`alphabot/static/pages/hedge_tail_budget.js`、`hedge.js`）——main 的 `tests` 工作流自 2026-10-27 13:51 UTC 起每轮红在「选测登记表漂移检查」（exit 4），测试本身全过
+
+**现象**：`cb3adf4f` 起 main 每次 push 的 `tests` 都红，唯一失败的步骤是 `--check-drift`：`test_alphabot.py` / `test_alphabot_launcher.py` 读了 `hedge_tail_budget.js`，新测试 `test_alphabot_tail_budget.py` 读了它与 `hedge.js`，登记表都没有。尾部预算页（v0.45.649 一族）加了新的静态文件，没跟着跑 `--update`。同形的上一次：10-25 起 `hedge_tail.js` / `charts.js`（尾部对冲面板）同样红了约两天，后来有人补登才绿（`05ddc93c`）。
+
+- `tests/_must_run.json`：`select_tests.py --files tests/test_alphabot.py tests/test_alphabot_launcher.py tests/test_alphabot_tail_budget.py --update`（三个文件 274 passed 才并入）。diff 只有 CI 点名的那几处（`hedge_tail_budget.js` 三个读者、`hedge.js` 加 `test_alphabot_tail_budget.py`）+ `commit` 戳——没有被误升成 `reads_all_tests`、没有 import 留下的窄读者（619 / 624 的修复在起作用）。
+
+**核对**：同样三个文件带审计插件出 dump → `--check-drift` 对新登记表 ✅ 退出码 0；**对照**：同一份 dump 对 `origin/main` 的旧登记表 ⇒ 退出码 4、三条消息与 CI 一字不差（检查确实在起作用，不是空过）。`select_tests.py --run`（改登记表 ⇒ 它的守卫 `test_select_tests.py`，含真登记表的规范写法与「每条窄耦合另有来源」）70 passed。整套与漂移检查交给 CI。
+
+**摩擦（照旧未改，记一笔）**：两天里撞了两次同一件事——新增被现有测试读的静态文件，忘了 `--update`，main 就在漂移检查上红。v0.45.615 当时记过可选项「非代码文件漏登只警告、不报红」，这是策略取舍、由用户定；另一条路是让 `--run` 在改动里含新的非代码文件时直接提示要 `--update`。
 
 ## [0.45.658] — 2026-10-27 — 占位（进行中：v0.45.652 二次检查——末行按「这一路要哪天」判、yf.download 与带日期窗口的 history 也收进 yf_daily、边界判定 / 守卫 / 计数修正）
 
