@@ -95,7 +95,8 @@ jobs:
 
       - name: 选测登记表漂移检查
         # pytest 红时也要跑：dump 在 pytest 收尾（sessionfinish）时写，红了照样有。
-        # 红 = 整套里有测试读了登记表（tests/_must_run.json）没有的文件 ⇒ 开发期选测会漏选。
+        # 红 = 整套里有测试读了登记表（tests/_must_run.json）没有的**测试文件**（含新元守卫）⇒ 开发期选测会漏选元守卫。
+        # 非代码文件漏登只出 ::warning 注记、不红（v0.45.661）：选测对没有登记读者的非代码文件回退整套，漏登不会漏跑。
         # 只查「多出来的读」：CI 上有的测试会 skip，观测到的比登记表少是正常的。
         # 修法与解读见 tools/select_tests/select_tests.py 的模块文档。
         if: always()
