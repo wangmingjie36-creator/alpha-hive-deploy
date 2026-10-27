@@ -78,15 +78,24 @@ def _random_hist(rng, n):
 class TestBitIdenticalToFrozenMain:
 
     def test_random_histories(self):
+        """v0.45.653：有限的结果与旧公式逐位相同；旧公式算出非有限数的动量 / 量比（真 K 线缺收盘 / 缺量）现在是 None 并计数——
+        唯一允许的差别。变红的变异：去掉非有限检查（又是 NaN）/ 检查了却不计数。"""
         rng = random.Random(639)
-        cases = 0
+        cases = mapped = 0
         for _ in range(3000):
             hist = _random_hist(rng, rng.randint(1, 30))
             got, want = pm.history_price_metrics(hist), _frozen_main(hist)
+            for k in ("momentum_5d", "volume_ratio"):
+                if want[k] is not None and not math.isfinite(want[k]):
+                    want[k] = None
+                    mapped += 1
             for k in want:
                 assert _same(got[k], want[k]), (k, got[k], want[k], len(hist))
+                assert got[k] is None or math.isfinite(got[k]), (k, got[k])
             cases += 1
-        assert cases == 3000
+        assert cases == 3000 and mapped >= 100, mapped
+        st = pm.nonfinite_stats()
+        assert st["momentum_5d"] + st["volume_ratio"] == mapped
 
     def test_fixture_exercises_every_branch(self):
         """夹具自证：随机样本里每个分支都出现过——否则上一条的「相同」可能只在一条路径上成立。"""

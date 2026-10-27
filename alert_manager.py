@@ -328,6 +328,7 @@ class AlertAnalyzer:
         self._check_stock_fetch_legacy(status)   # v0.45.639：P1 行情改走 cache.py 旧回落
         self._check_event_rows(status)           # v0.45.645：P2 日线公司行动空行不在首行（某个交易日的价格缺了）
         self._check_yf_daily_event_rows(status)  # v0.45.652：P2 其他日线读者（yf_daily 入口）遇到末行 / 中间的公司行动空行
+        self._check_price_nonfinite(status)      # v0.45.653：P2 行情三字段算出非有限数、已改缺失（真 K 线缺收盘 / 缺量）
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
         self._check_news_sources(status)
@@ -1372,6 +1373,63 @@ class AlertAnalyzer:
             },
             ["yf_daily", "data_quality"]
         ))
+
+    def _check_price_nonfinite(self, status: Dict) -> None:
+        """动量 / 量比算出非有限数、已改成缺失（v0.45.653；`price_metrics.nonfinite_stats()` 经 scan_timing 进来）。
+
+        成因是 yfinance 给了真 K 线却缺收盘或成交量（2026-08-28 那种：当天成交了、Yahoo 还没填收盘）落在末根 / 倒数第 5 根。值已经交给出口回落
+        （自攒索引 / Twelve Data），此前会变成动量通道满分 100 / 量能通道最低档 20 进评分。从没在实时扫描里见过，所以要红：评分那一刻的快照里有 ⇒ P2，
+        评分之后的取数才遇到 ⇒ INFO，计数缺失 ⇒ checks_skipped。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        nf = (st.get("counters") or {}).get("price_nonfinite")
+        if not isinstance(nf, dict):
+            self.checks_skipped.append("行情非有限检查（scan_timing 无 price_nonfinite 计数）")
+            return
+        scored = nf.get("at_scoring")
+        has_scored = isinstance(scored, dict)
+        base_d = scored if has_scored else nf
+
+        def _n(d):
+            return int(d.get("momentum_5d") or 0) + int(d.get("volume_ratio") or 0)
+
+        def _items(xs, total):
+            shown = "；".join(f"{x.get('ticker')} {x.get('field')}（末根 {x.get('last_bar')}"
+                             + ("，末根收盘缺" if x.get("close_last") is False else "")
+                             + ("，倒数第 5 根收盘缺" if x.get("close_5th_last") is False else "")
+                             + ("，末根成交量缺" if x.get("volume_last") is False else "") + "）" for x in xs[:10])
+            return shown + (f" 等共 {total} 条" if total > min(len(xs), 10) else "")
+
+        n_base = _n(base_d)
+        if n_base:
+            details = {
+                "明细": _items(list(base_d.get("items") or []), n_base),
+                "影响": "这些标的的动量 / 量比没用 yfinance 算出的 NaN（此前会让动量通道满分 100 / 量能通道最低档 20），改由出口回落补"
+                        "（看 history_fill：补上 ⇒ 来源 price_index / twelvedata；补不上 ⇒ 缺失、通道中性 50）",
+                "建议": "对照 Yahoo 网页看那根 K 线是不是收盘 / 成交量还没出（收盘后不久取数、或周末取当周五）；连续出现 ⇒ 查 yfinance 版本与取数时刻",
+            }
+            if not has_scored:
+                details["口径"] = "没有评分时的快照（at_scoring）——按进程口径报，可能含评分之后的取数"
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】行情三字段算出非有限数、已改缺失：动量 {int(base_d.get('momentum_5d') or 0)} 次、"
+                f"量比 {int(base_d.get('volume_ratio') or 0)} 次（yfinance 真 K 线缺收盘 / 成交量）",
+                details,
+                ["price_nonfinite", "data_quality"]
+            ))
+        if not has_scored:
+            return
+        n_later = _n(nf) - n_base
+        if n_later > 0:
+            later = list(nf.get("items") or [])[len(scored.get("items") or []):]
+            self.alerts.append(Alert(
+                AlertLevel.INFO,
+                f"ℹ️ 评分之后的取数遇到 {n_later} 次行情非有限（已改缺失）",
+                {"明细": _items(later, n_later) or f"明细已满 {len(nf.get('items') or [])} 条上限，共 {n_later} 次",
+                 "影响": "评分用的行情不受影响；之后单独取日线的用途（报告阶段等）那一项缺失或走了回落"},
+                ["price_nonfinite", "data_quality"]
+            ))
 
     def get_critical_alerts(self) -> List[Alert]:
         """获取 P0 级别告警"""

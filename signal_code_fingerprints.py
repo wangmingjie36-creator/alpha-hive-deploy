@@ -231,6 +231,16 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "（末行空行的 105 例整段变不给值）；"
      "改后冻结层桥接行情 3/3 天 30/30、整分 90/90，buzz_v1 自证 570/570。同 v0.45.505 / 563 / 564 先例（判哪几根是真 K 线属取数细节）按测量误差修正。"
      "**用户 2026-10-24 在对话里选「measurement_fix + §13.10 追加」**；不登记边界、无行可隔离"),
+    ("price.fields",    "eaf43f33ae3f4cf4", "measurement_fix",
+     "v0.45.653：price_metrics.history_price_metrics 算出非有限的 momentum_5d / volume_ratio 改给 None（交给出口回落）并计数——成因是 yfinance 给了"
+     "真 K 线却缺收盘或成交量（2026-08-28 型：08-29 补跑时 08-28 那根成交量 1.94 亿、收盘 NaN），落在末根 / 倒数第 5 根时此前动量 NaN ⇒ Buzz 动量通道"
+     "夹成 100（满分看多、来源仍标 5d_real、出口回落只认 None 也绕过），末根成交量 NaN ⇒ 量比 NaN ⇒ 量能通道最低档 20。NaN 是缺失的观测、不是值，"
+     "与 v0.45.505 / 645 同类（值只从错值变回落值或缺失）。冻结通道层 buzz_v1_channels.price_fields 同口径（独立实现）。顺带同性质两处：均量为 ±inf 时"
+     "不再 int() 抛错（改不给）；YFinanceSource 量比缺时不再标 volume_source=yfinance；cache.py 旧回落末根收盘非有限 ⇒ 标不可用（此前把 NaN 当现价交出）。"
+     "窗口内受影响 0 行：生产全史 132 个结果文件 2348 行 Buzz 记录里「字段为 null、通道 ≠ 50」的 NaN 指纹 0 次。改动前（origin/main 109dcf16）与改后："
+     "随机日线 1800 例（含 15% NaN 收盘 / 8% NaN 成交量、实时 / yfinance 源 / 补跑）所有差别都是「旧 NaN → 新 None」、意外 0，生产档案 95 份真实日线全同；"
+     "改后冻结层桥接行情 3/3 天 30/30（10-26 整天 yfinance 限流、走回落 ⇒ 不全，与本条无关）、整分 90/90，buzz_v1 自证 600/600。"
+     "**用户 2026-10-27 在对话里选「根治」**（对应我的方案 A：两层一起改、按 measurement_fix 登记）；不登记边界、无行可隔离"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change"})

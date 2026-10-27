@@ -83,7 +83,8 @@ class TestCounters:
                      "strangle_shadow": None,   # v0.45.586 影子宽跨记录的故障登记
                      "stock_fetch_legacy": None,   # v0.45.639 行情改走 cache.py 旧回落
                      "event_rows": None,           # v0.45.645 日线公司行动空行
-                     "yf_daily": None}             # v0.45.652 其他日线读者（唯一入口）的公司行动空行
+                     "yf_daily": None,             # v0.45.652 其他日线读者（唯一入口）的公司行动空行
+                     "price_nonfinite": None}      # v0.45.653 行情三字段非有限改缺失
         line = st.summary_line({"phases": {}, "counters": c})
         assert "—" in line and "0次" not in line
 
@@ -198,7 +199,7 @@ class TestWrite:
                                       "cboe_chain", "gex_view", "cboe_raw", "options_snapshot", "hv_gap",
                                       "portfolio_greeks", "paper_portfolio", "ledger_io", "history_fill",
                                       "strangle_shadow", "stock_fetch_legacy", "event_rows",
-                                      "yf_daily"}
+                                      "yf_daily", "price_nonfinite"}
         assert d["extra"] == {"note": "x"}
         assert not (tmp_path / "t.json.tmp").exists(), "临时文件必须被 os.replace 掉"
 

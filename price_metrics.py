@@ -14,10 +14,12 @@
 所以这里只放「怎么算」，四个调用方各自负责「拿哪段日线」（未完成 K 线护栏、补跑窗口）与「缺了怎么标」（来源标签、日志）。
 **不 import data_pipeline**（只用标准库 math / threading 与传进来的 DataFrame 的方法）：cache.py 的旧回落正是在 data_pipeline 导入失败时才跑。
 
-口径：逐位复刻 v0.45.639 之前 data_pipeline 三份的运算（表达式与顺序相同 ⇒ 正常数据逐位相同，`tests/test_price_metrics.py`
-拿冻结的旧公式随机对拍）。⚠️ 刻意**不**在这里新增 NaN 守卫（当天成交量为 NaN ⇒ volume_ratio 为 NaN、收盘为 NaN ⇒ momentum 为 NaN）：
-维度 IC 协议的冻结通道层 `buzz_v1_channels.price_fields` 原样复刻的就是这套 NaN 行为，生产单方面改会让 buzz_v1 自证在那种日子对不上。
-要改须连冻结层一起走协议修订（v0.45.639 只读核过：生产全史 Buzz 的三个字段 NaN 0 次）。
+口径：逐位复刻 v0.45.639 之前 data_pipeline 三份的运算（表达式与顺序相同 ⇒ 有限的结果逐位相同，`tests/test_price_metrics.py`
+拿冻结的旧公式随机对拍）。**算出来不是有限数就当取不到（v0.45.653）**：真 K 线缺收盘（2026-08-28 那种：当天成交了、Yahoo 还没填收盘）落在
+末根 / 倒数第 5 根 ⇒ 动量 NaN，此前照传 ⇒ Buzz `max(-10, min(10, nan))` 夹成满分 100、来源还标 `5d_real`、出口回落只认 None 也绕过；
+末根成交量为 NaN ⇒ 量比 NaN ⇒ 量能通道落最低档 20。现在 momentum_5d / volume_ratio 非有限 ⇒ None（交给出口回落，`_fill_history_fields`），
+并在 `nonfinite_stats()` 计数（⇒ scan_timing `price_nonfinite` ⇒ P2）。冻结通道层 `buzz_v1_channels.price_fields` 同口径改（用户 10-27 选
+「根治」；此前 v0.45.639 / 645 都刻意没动它，因为冻结层原样复刻 NaN 行为、只改一边会让桥接核对在那种日子对不上）。生产全史 Buzz 三个字段 NaN 0 次。
 
 ⚠️ 冻结通道层 `buzz_v1_channels.price_fields` 是**刻意不共用**的副本（预注册检验的定义锚点，不得依赖生产代码），别改成调用本模块。
 
@@ -142,29 +144,90 @@ def _reset_event_row_stats() -> None:
         _event_at_scoring = None
 
 
-def history_price_metrics(hist) -> Dict[str, Optional[float]]:
+#: 进程级计数（v0.45.653）：`history_price_metrics` 把非有限的动量 / 量比当取不到的次数与明细（前 20 条）。`nonfinite_stats()` ⇒
+#: scan_timing 的 `price_nonfinite` ⇒ `alert_manager._check_price_nonfinite`（评分时就有 ⇒ P2）。快照时点同上
+_NONFINITE_ZERO: Dict[str, Any] = {"momentum_5d": 0, "volume_ratio": 0, "items": []}
+_nonfinite_stats: Dict[str, Any] = {**_NONFINITE_ZERO, "items": []}
+_nonfinite_at_scoring: Optional[Dict[str, Any]] = None
+
+
+def _note_nonfinite(field: str, ticker: str, hist) -> None:
+    """登记一次「算出非有限数、改给 None」：字段、标的、末根日期、两端收盘 / 末根成交量是不是有限数（只记有没有，不记数值）。"""
+    try:
+        last = str(hist.index[-1])[:10]
+        closes = hist["Close"].tolist()
+        flags = {"close_last": _finite(closes[-1]), "volume_last": _finite(hist["Volume"].tolist()[-1])}
+        if len(closes) >= 5:
+            flags["close_5th_last"] = _finite(closes[-5])
+    except Exception:  # noqa: BLE001 —— 记明细失败不影响计数
+        last, flags = "?", {}
+    with _event_lock:
+        _nonfinite_stats[field] += 1
+        if len(_nonfinite_stats["items"]) < _EVENT_MAX_ITEMS:
+            _nonfinite_stats["items"].append({"field": field, "ticker": ticker, "last_bar": last, **flags})
+
+
+def _copy_nonfinite(d: Dict[str, Any]) -> Dict[str, Any]:
+    return {**d, "items": [dict(x) for x in d["items"]]}
+
+
+def nonfinite_stats() -> Dict[str, Any]:
+    """计数副本：``{"momentum_5d", "volume_ratio", "items", "at_scoring"}``——两个字段各被改成 None 几次（总数，不封顶；同一只票走两条路径
+    会各算一次）、前 20 条明细、评分那一刻的同一组（没标记过 ⇒ None）。"""
+    with _event_lock:
+        out = _copy_nonfinite(_nonfinite_stats)
+        out["at_scoring"] = None if _nonfinite_at_scoring is None else _copy_nonfinite(_nonfinite_at_scoring)
+        return out
+
+
+def mark_nonfinite_scoring() -> None:
+    """评分用的那份行情此刻取完：给非有限计数拍快照（与 `mark_event_row_scoring` 同一处调）。"""
+    global _nonfinite_at_scoring
+    with _event_lock:
+        _nonfinite_at_scoring = _copy_nonfinite(_nonfinite_stats)
+
+
+def _reset_nonfinite_stats() -> None:
+    """测试用：清零计数与快照（conftest 每条测试前后都清）。"""
+    global _nonfinite_at_scoring
+    with _event_lock:
+        _nonfinite_stats.clear()
+        _nonfinite_stats.update({**_NONFINITE_ZERO, "items": []})
+        _nonfinite_at_scoring = None
+
+
+def history_price_metrics(hist, ticker: str = "?") -> Dict[str, Optional[float]]:
     """由一段**已准备好**的日线（调用方已去掉未完成 K 线 / 截好补跑窗口；至少 1 根）算四个字段。
 
-    返回 ``{"momentum_5d", "avg_volume", "volume_ratio", "volatility_20d"}``，算不出的是 None：
-      · momentum_5d：≥ 5 根时 `(末根收盘 / 倒数第 5 根收盘 − 1) × 100`；
-      · avg_volume / volume_ratio：均量（≥ 20 根取最近 20 根，否则全部）为 NaN 或 ≤ 0 ⇒ **两个都是 None**（不许拿 1.0 当分母）；
-        否则 avg_volume = int(均量)、volume_ratio = 末根成交量 / 均量；
+    返回 ``{"momentum_5d", "avg_volume", "volume_ratio", "volatility_20d"}``，算不出的是 None，**返回的数一定是有限数**：
+      · momentum_5d：≥ 5 根时 `(末根收盘 / 倒数第 5 根收盘 − 1) × 100`；结果非有限（两端收盘有一个缺 / 为 0）⇒ None 并计数；
+      · avg_volume / volume_ratio：均量（≥ 20 根取最近 20 根，否则全部）非有限或 ≤ 0 ⇒ **两个都是 None**（不许拿 1.0 当分母）；
+        否则 avg_volume = int(均量)、volume_ratio = 末根成交量 / 均量；量比非有限（末根成交量缺）⇒ volume_ratio = None 并计数，avg_volume 照给；
       · volatility_20d：≥ `VOLATILITY_MIN_BARS` 根时，逐日涨跌幅（`fill_method=None`：Close 为 NaN 的那根连同后一根的收益一起丢）
         的样本标准差 × √252 × 100；不足 2 个收益或结果非有限 ⇒ None。
 
-    调用方判「均量算不出」请看 ``avg_volume is None``（volume_ratio 在末根成交量为 NaN 时可以是 NaN，见模块 docstring）。
+    调用方判「均量算不出」请看 ``avg_volume is None``；量比另看 ``volume_ratio is None``（均量有、末根成交量缺时只有它是 None）。
+    `ticker` 只用于计数明细。
     """
     out: Dict[str, Optional[float]] = {"momentum_5d": None, "avg_volume": None,
                                        "volume_ratio": None, "volatility_20d": None}
     n = len(hist)
     if n >= 5:
-        out["momentum_5d"] = float((hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100)
+        mom = float((hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100)
+        if math.isfinite(mom):
+            out["momentum_5d"] = mom
+        else:
+            _note_nonfinite("momentum_5d", ticker, hist)
 
     recent_vol = float(hist["Volume"].iloc[-1])
     avg_vol = float(hist["Volume"].iloc[-20:].mean()) if n >= 20 else float(hist["Volume"].mean())
-    if not (math.isnan(avg_vol) or avg_vol <= 0):
+    if math.isfinite(avg_vol) and avg_vol > 0:
         out["avg_volume"] = int(avg_vol)
-        out["volume_ratio"] = recent_vol / avg_vol
+        ratio = recent_vol / avg_vol
+        if math.isfinite(ratio):
+            out["volume_ratio"] = ratio
+        else:
+            _note_nonfinite("volume_ratio", ticker, hist)
 
     if n >= VOLATILITY_MIN_BARS:
         returns = hist["Close"].pct_change(fill_method=None).dropna()

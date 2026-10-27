@@ -5,7 +5,49 @@
 
 ---
 
-## [0.45.653] — 2026-10-27 — 占位（进行中：行情三字段算出非有限数（真 K 线缺收盘 / 缺量，2026-08-28 型）不再进评分——动量 / 量比当取不到交给回落，生产与冻结通道层同改）
+## [0.45.653] — 2026-10-27 — Fixed：行情三字段算出非有限数（真 K 线缺收盘 / 缺量，2026-08-28 型）不再进评分——动量 / 量比当取不到交给回落，生产与冻结通道层同改（`price.fields` → measurement_fix，§13.10 追加）
+
+v0.45.639 / 645 都刻意留着的「NaN 照传」：yfinance 给了真 K 线却缺收盘或成交量（2026-08-29 周六补跑 08-28：那根 K 线成交量 1.94 亿、收盘 NaN——当天成交了，
+Yahoo 还没填收盘）。补跑路径 v0.45.69 起就接住了；**实时路径**末根 / 倒数第 5 根收盘缺 ⇒ 动量 NaN ⇒ BuzzBee `max(-10, min(10, nan))` = 10 ⇒ 动量通道满分 100
+（来源仍标 `5d_real`，出口回落只认 None 也绕过，不报警）；末根成交量缺 ⇒ 量比 NaN ⇒ 量能通道最低档 20。冻结通道层原样复刻，所以要两层一起改。用户 10-27 选「根治」。
+
+### Fixed
+- **`price_metrics.history_price_metrics`**：momentum_5d / volume_ratio 算出来不是有限数 ⇒ None（交给出口回落 `_fill_history_fields`：自攒索引 / Twelve Data），
+  返回的数一定是有限数或 None；均量照给（不含缺的那根）。均量为 ±inf 时不再 `int()` 抛错（改不给）。新增 `ticker` 参数只用于计数明细，四个调用方都传。
+- **冻结通道层 `buzz_v1_channels.price_fields`** 同口径（独立实现）；docstring 把这两条从「照抄不修」清单里拿出来、写明按测量误差修正登记。映射函数没动。
+- 同性质两处：`YFinanceSource` 量比缺时不再标 `volume_source="yfinance"`（同 CBOE 那一支）；cache.py 旧回落末根收盘非有限 ⇒ 标不可用（此前把 NaN 当现价交出，
+  能穿过下游所有 `price <= 0`——v0.45.69 记过的坑）。
+
+### Added（看得见）
+- `price_metrics.nonfinite_stats()`（两个字段各被改 None 几次、前 20 条明细：标的 / 末根日期 / 两端收盘与末根成交量是否有限，只记有没有、不记数值；评分时快照
+  `mark_nonfinite_scoring`）⇒ scan_timing `price_nonfinite` ⇒ 摘要行「行情非有限改缺失 动量 N 次/量比 M 次」⇒ `alert_manager._check_price_nonfinite`：
+  评分时就有 ⇒ P2，评分后才有 ⇒ INFO，计数缺失 ⇒ checks_skipped。conftest 同一夹具清零。
+
+### Changed（协议）
+- `price.fields` 指纹 `495b08209ae1f8f1` → `eaf43f33ae3f4cf4`，登记 **measurement_fix**（NaN 是没观测到、不是值；只从错值 100 / 20 变回落值或缺失，同 505 / 645 先例）。
+- §13.10 追加 v0.45.653 条；**规则一字未改、不登边界、无行可隔离**。条文登记前经用户 10-27 在对话里确认。
+- 同条附记：**v0.45.645 的「10-12 ~ 10-20 待验证」已核实**——按 yfinance 分红记录（只取日期）查七个扫描日的窗口边界日，只有 TMO 09-15 除息（10-15 那次第 0 行是空行），
+  那天 22 根真 K 线、空行在均量窗口外，三个字段不受影响；末行空行会留 NaN 指纹，实测 0 次。
+
+### 盘点（只读，没读任何收益 / IC）
+- 生产全史 132 个结果文件、2348 行 Buzz 记录（含 10-12 ~ 10-23）：「字段为 null、通道 ≠ 50」的 NaN 指纹 **0 次** ⇒ 窗口内受影响 0 行。
+- 顺带核实：10-26（645 上线后首个扫描日）30 只行情全走回落、量比 30/30 缺，是 yfinance 整天限流（档案 30 次 yfinance.daily 全是 `YFRateLimited`、在取数那一步、
+  早于去空行；`event_rows.frames=0`），与 645 / 本版无关。
+
+### 证据
+- 改动前（origin/main 109dcf16，`git archive` 到 scratch）与改后同输入对拍：随机日线 1800 例（15% 塞 NaN 收盘、8% 塞 NaN 成交量；实时 / yfinance 源 / 补跑）
+  **所有差别都是「旧 NaN → 新 None」、意外 0**；生产档案 95 份真实日线全同。
+- 改后冻结层对生产库只读跑：桥接行情 3/3 天 30/30（10-26 不全，原因见上）、整分 90/90；buzz_v1 自证 600/600、缺输入 0。
+
+### 测试
+- 新 `tests/test_price_nonfinite.py`：三种形状（末根收盘缺 / 倒数第 5 根收盘缺 / 末根成交量缺）各只让那一项变 None、其余不变；实时两条路径与旧回落；冻结层同判且映射到 50
+  （正对照：NaN 进映射就是 100 / 20）；计数 / 摘要 / P2 / INFO / checks_skipped / 快照时点。夹具用 645 的真实形状日线。
+- `tests/test_price_metrics.py`：对旧公式随机对拍改为「有限结果逐位相同、旧非有限 ⇒ 新 None」，并断言这种情形 ≥ 100 例且计数相符。
+- `tests/test_buzz_v1_channels.py`：差分对拍断言非有限分支真被对拍到（动量 52 次、量比 12 次）。`tests/test_event_only_rows.py` 的正对照改为「不去掉就算不出（None）」。
+- `tests/test_signal_code_fingerprints.py` 灵敏度用例跟着新写法改变异目标；`tests/test_scan_timing.py` 计数键清单登记 `price_nonfinite`；`tests/_must_run.json` 经 `select_tests --update` 并入。
+- 变异 14 处全红（动量 / 量比不判有限、不计数、连均量一起丢、冻结层两处、YFinanceSource 标签、旧回落 NaN 现价、scan_timing 不收、告警不调 / 忽略快照、不拍快照、conftest 不清零）。ruff 过。
+- 整套 **12317 passed / 0 failed**；rebase 到 v0.45.652 之上后（scan_timing / alert_manager / test_scan_timing 三处「两边各加一个计数」的冲突，全部两边都留）
+  再跑 **12386 passed / 0 failed**，组合后的 `price.fields` 指纹仍是本条登记的那个。拨钟审计（+7 / +45 天）六个改动的测试文件 0 条新红（174 条）。
 
 ## [0.45.652] — 2026-10-25 — Fixed：yfinance 日线收成唯一取数入口 `yf_daily`——行情三字段以外的读者统一去掉「公司行动空行」，AST 守卫让别处直调写不出来；板块轮动（进生产分）登边界 10-19（等价判据，作废 0 条）
 

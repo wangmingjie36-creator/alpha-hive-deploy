@@ -13,7 +13,7 @@
 定义锚在代码
 ------------
 逐字抄自 **H1 窗口起点 2026-10-12 实际运行的代码**（`0993efde`，生产日志 `alpha_hive.code_version` 核实）加上窗口内**已登记确认**的
-测量修正（行情：v0.45.505 / 557 / 562 / 563 / 564 / 566 / 645，`signal_code_fingerprints.ACKS`）。逐段出处：
+测量修正（行情：v0.45.505 / 557 / 562 / 563 / 564 / 566 / 645 / 653，`signal_code_fingerprints.ACKS`）。逐段出处：
 - Reddit：`reddit_sentiment.RedditSentimentClient.get_ticker_sentiment` 的评分（查票、三态 24h 基线、加减分、clamp、round 1 位）；
 - 新闻：`newsapi_client` 三个取数函数里「条目 → 文章」那段、`_label_sentiment`（Yahoo 关键词打标）、`_build_result`
   （清洗、标题 Jaccard 去重、按标签计数算分）；关键词表 / 去重阈值抄自 `config.SENTIMENT_KEYWORDS` / `NEWS_FILTER_CONFIG`
@@ -31,9 +31,10 @@
 - 新闻时效加权是死代码：`_build_result` 读文章的 `published` 键，而各取数函数写的是 `published_at` ⇒ 权重恒取不到 ⇒ 分数恒为
   「看多篇数 / 总篇数」。本模块直接写成后者（行为逐位相同）。
 - 关键词表里的多词短语（"record high" 等）永远匹配不上（按空格切词后比集合）。
-- F&G 取不到 CNN 时兜底的是 alternative.me 的**加密市场** F&G；动量 NaN 时 `max(-10, min(10, nan))` 得 10 ⇒ 动量通道 100；
-  量比 NaN 时通道落到最低档 20。（v0.45.645 去掉的是 yfinance 的**公司行动空行**——那不是 K 线；真实交易日收盘 / 成交量为 NaN 的
-  这两条照旧。）
+- F&G 取不到 CNN 时兜底的是 alternative.me 的**加密市场** F&G。
+- （已不在此列）窗口起点的「动量 NaN ⇒ `max(-10, min(10, nan))` 得 10 ⇒ 动量通道 100」「量比 NaN ⇒ 通道最低档 20」两条，v0.45.645 先去掉了
+  yfinance 的**公司行动空行**（那不是 K 线），v0.45.653 再把真 K 线缺收盘 / 缺量（2026-08-28 型）算出的非有限动量 / 量比改成取不到——
+  与生产同口径、按测量误差修正登记（`signal_code_fingerprints.ACKS`、协议 §13.10），映射函数 `momentum_channel` / `volume_channel` 本身没动。
 
 数值（逐位相同的前提）
 ----------------------
@@ -421,11 +422,13 @@ def price_fields(rows: List[Tuple]) -> Dict[str, Optional[float]]:
     vols = [r[2] for r in rows]
     out: Dict[str, Optional[float]] = {"momentum_5d": None, "volume_ratio": None, "volatility_20d": None}
     if len(rows) >= 5:
-        out["momentum_5d"] = float((_div(closes[-1], closes[-5]) - 1) * 100)
+        mom = float((_div(closes[-1], closes[-5]) - 1) * 100)
+        out["momentum_5d"] = mom if math.isfinite(mom) else None      # v0.45.653：非有限 ⇒ 取不到（生产交给回落）
     recent = _f(vols[-1])
     avg = _nanmean(vols[-20:]) if len(rows) >= 20 else _nanmean(vols)
-    if not (math.isnan(avg) or avg <= 0):
-        out["volume_ratio"] = _div(recent, avg)
+    if math.isfinite(avg) and avg > 0:
+        ratio = _div(recent, avg)
+        out["volume_ratio"] = ratio if math.isfinite(ratio) else None  # v0.45.653：同上
     if len(rows) >= VOL_MIN_BARS:
         rets = [_div(b, a) - 1 for a, b in zip(closes[:-1], closes[1:])]
         rets = [x for x in rets if not math.isnan(x)]

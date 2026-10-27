@@ -438,6 +438,8 @@ class TestDifferentialPrice:
                 n += 1
         assert n > 600
         assert min(cover.values()) >= 30, cover
+        nf = pm.nonfinite_stats()      # v0.45.653：真 K 线缺收盘 / 缺量 ⇒ 非有限改 None，两层同判的分支也真被对拍到了
+        assert nf["momentum_5d"] >= 30 and nf["volume_ratio"] >= 5, (nf["momentum_5d"], nf["volume_ratio"])
 
     def test_backfill_path(self, yfstub, on, monkeypatch):
         import data_pipeline as dp

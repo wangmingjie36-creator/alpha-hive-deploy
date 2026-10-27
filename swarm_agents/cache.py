@@ -287,14 +287,21 @@ def _fetch_stock_data(ticker: str, target_date: Optional[str] = None) -> Dict:
                 return data
 
             if len(hist) >= 1:
-                data["price"] = float(hist["Close"].iloc[-1])
+                # v0.45.653：末根收盘缺（2026-08-28 型：当天成交了、收盘还没填）⇒ 不给现价、标不可用。NaN 能穿过下游所有
+                # `if not price or price <= 0`（v0.45.69 记过），此前这里照样把 NaN 当现价交出去
+                _px = float(hist["Close"].iloc[-1])
+                if not (math.isfinite(_px) and _px > 0):
+                    _log.warning("[%s] 旧回落：yfinance 日线末根收盘不是有限正数 —— 标不可用", ticker)
+                    data["_data_unavailable"] = True
+                    return data
+                data["price"] = _px
 
             # v0.45.639：公式改用唯一实现 `price_metrics.history_price_metrics`（同 data_pipeline 三处）。此前这里是第四份副本：
             # 均量 NaN / ≤ 0 时把分母换成 1.0 ⇒ avg_volume = 1、volume_ratio = 当天原始成交量（几千万，Buzz 读成「巨量」）——
             # 主路径 v0.45.54 / 473 修过的同一个 bug；且漏了 v0.45.601 的 `fill_method=None`。现在均量算不出 ⇒ 两个都留 None。
             # 不足 2 根不算（同 data_pipeline 主路径：1 根时「均量」就是它自己，量比恒 1.0）。
             if len(hist) >= 2:
-                _m = price_metrics.history_price_metrics(hist)
+                _m = price_metrics.history_price_metrics(hist, ticker)
                 data["momentum_5d"] = _m["momentum_5d"]
                 if _m["avg_volume"] is not None:
                     data["avg_volume"] = _m["avg_volume"]
