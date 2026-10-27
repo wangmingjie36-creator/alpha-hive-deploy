@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.665] — 2026-10-27 — 占位（进行中：tests/test_yf_daily.py:606 的 Ruff F401（v0.45.658 留下的未用 import yfinance）——main 的 CI 卡在 Ruff 那一步）
+
 ## [0.45.664] — 2026-10-27 — Fixed：`tests/test_gh_pages_unverified_parent.py` 的「网络在重试中途恢复」测试时序不稳——数退避的测试改替换退避接缝 `rd._retry_sleep`，不再替换全局 `time.sleep`；新增确定性注入两种干扰
 
 **现象**：`TestRecovery::test_network_returns_mid_retry_and_deploy_really_lands` 今天在 CI 红两次（`81c1964d`、`eb0defda`），中间四轮绿：`assert r["success"] and r["attempts"] == 3` 实得 `attempts == 2`——日志里只有一次「push 被拒 (attempt 1/4) …2s 后重新 fetch」就成功了。
