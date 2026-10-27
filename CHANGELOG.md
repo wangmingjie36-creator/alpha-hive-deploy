@@ -7,7 +7,23 @@
 
 ## [0.45.657] — 2026-10-27 — 占位（进行中：补跑时 FRED 序列（DGS2 / CPI / DFF / HY）按 D 对齐，不再取最新值）
 
-## [0.45.656] — 2026-10-27 — 占位（进行中：Alpha Bot 跨式页 / GEX 行的 stale_vintage 翻成人话——开盘 15 分钟窗口 vs 单票文件卡住）
+## [0.45.656] — 2026-10-27 — Changed：Alpha Bot 跨式页「盘中参考 / 当天 GEX 水平不可得：stale_vintage」翻成人话——开盘不足 15 分钟（CBOE 延迟文件还没滚到今天）与「该票 CBOE 文件卡住」分开说，并写出文件里最后一笔成交的时刻
+
+起因：2026-10-27 09:42 ET 打开 Alpha Bot，跨式页 6 只持仓的两行全是 `stale_vintage`，看不出是坏了还是正常。实测原因有两种：① 开盘后 CBOE `delayed_quotes` 的文件约晚 15 分钟，09:43–09:44 ET 每只票的最近一笔成交都还是 10-26（约 09:45 起陆续滚到当天）——常态，等一下再拉就好；② AMC 的 CBOE 文件到 09:48 ET 还是盘前 06:11 生成的那份（同 NVDL / BILI 那类「单票文件卡住」），只能等 CBOE 刷新。判定本身没错（不拿昨天的数冒充盘中），缺的是告诉人是哪一种。
+
+### Changed
+- **`alphabot/straddle.py::stale_note`**（纯函数）：`stale_vintage` ⇒ `open_lag`（应有日期 = 今天、开盘不足 `OPEN_LAG_MIN` = 15 分钟）或 `file_stuck`（其余：开盘已过 15 分钟仍旧，或盘前文件比上一交易日还旧），文案带开盘分钟数、文件里最后成交时刻（取不到写「未取到」，不编）、应有日期。`live_view` 新增 `reason_zh` / `stale`，水平那行陈旧时 `levels.reason_zh` 用同一句；报价那次已不陈旧、只有水平陈旧时用通用句 `STALE_LEVELS_GENERIC`（不借用另一次取数的文件时刻）。**原因码 `reason` 不变**，只纯新增字段。
+- **`cboe_options.quote_held`** 陈旧时照实给出那份陈旧文件的 `vintage_date` / `payload_last_trade_time`，并新增 `expected_date`（其余情形为 None）；`available` 仍 False、quotes 仍全 None。`CboeStaleVintageError` 新增可选 `last_trade_time`（缺省 None，旧调用不受影响）。
+- `straddle.js` 两行先显示 `reason_zh`、没有才露原因码；帮助页「盘中参考报价」补一条说明两种情形，窗口分钟数经 `/api/method` 的 `straddle.open_lag_min` 取，不在前端抄字面量。
+- 窗口起点 `SESSION_OPEN_ET` = `cboe_options._ET_OPEN`（陈旧判据把应有日期翻到今天的那一刻），守卫钉住两者相等。
+
+### 没改
+- 陈旧判据、原因码、15 分钟窗口只决定**怎么说**，不改任何取数 / 降级行为；没给 AMC 加 yfinance 备用源。
+- 日志里那条 `CBOE vintage 陈旧率 >50% —— 疑似校验口径错误或 CBOE 大面积故障` 在开盘窗口里是必然触发的误报，本版未动。
+
+### 测试
+- `tests/test_alphabot_straddle.py::TestStaleVintageWording`（13 条）：窗口内 / 边界两侧（14 分钟 open_lag、15 分钟 file_stuck）/ 盘前更旧的文件 / 最后成交取不到 / 非陈旧原因不翻 / 窗口起点与 cboe 判据一致 / 走真实 `straddle_live` 两行同句 / 只有水平陈旧用通用句 / 非陈旧水平不加字段 / 前端优先显示 `reason_zh` / 文案点名本页按钮「拉一次盘中报价」（首版误写成溢价页的「重新拉取」）/ 帮助页窗口取自服务端。变异核对：把 `<` 改成 `<=`、前端去掉 `reason_zh` 各自转红。
+- `tests/test_cboe_live_vintage.py`：异常带 `last_trade_time`；`quote_held` 陈旧时交出陈旧文件的时刻与应有日期、仍不给报价。
 
 ## [0.45.655] — 2026-10-25 — Added：尾部预算收口——Gamma / Vega 告警线随预算推导、每个仓位的单仓上限显示、「压力模型 vs 实际净值」对比（用户定：一次「现货 −10%、IV +20 点」最多允许亏 20% NAV）
 

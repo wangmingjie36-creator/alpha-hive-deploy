@@ -318,7 +318,8 @@ class AlphaBotService:
         """跨式账本页与帮助页用的规则常量——取代码里那一份，不在前端另抄。
         懒 import + 兜底：这两个模块 import 时就求值数据根，环境没设好时不能连坐整个 Alpha Bot；取不到就写明原因。"""
         out = {"directional_delta_warn": SD.DIRECTIONAL_DELTA_WARN,
-               "ledger_ready_et": SD.LEDGER_READY_ET.isoformat(timespec="minutes")}
+               "ledger_ready_et": SD.LEDGER_READY_ET.isoformat(timespec="minutes"),
+               "open_lag_min": SD.OPEN_LAG_MIN}
         try:
             import earnings_vol_signal as evs
             out.update({k: evs.CONFIG.get(k) for k in ("rich_ratio", "cheap_ratio", "max_spread_pct",

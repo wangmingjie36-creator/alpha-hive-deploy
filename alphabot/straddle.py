@@ -669,6 +669,56 @@ def levels_brief(detail: Optional[dict], view: str = "le_45dte") -> dict:
             "call_side_extreme": mj.get("call_side_extreme_strike"), "put_side_extreme": mj.get("put_side_extreme_strike")}
 
 
+#: CBOE `delayed_quotes` 晚约 15 分钟：开盘后这段时间里文件中最近一笔成交仍是上一交易日，属常态
+#: （2026-10-27 实测：09:43–09:44 ET 持仓票全部 stale_vintage，约 09:45 起陆续滚到当天）。只决定页面怎么说，不改任何判定。
+OPEN_LAG_MIN = 15
+#: = `cboe_options._ET_OPEN`：陈旧判据（`session_date_at`）在这一刻把「应有日期」翻到今天（守卫钉住两者相等）
+SESSION_OPEN_ET = dtime(9, 30)
+
+
+def _fmt_trade_time(s) -> Optional[str]:
+    """CBOE `last_trade_time` 原文（美东、ISO）→「YYYY-MM-DD HH:MM」；解析不了原样返回。"""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).strip()).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return str(s)
+
+
+def stale_note(q: Optional[dict], *, now_et: datetime) -> Optional[dict]:
+    """`stale_vintage`（CBOE 文件停在更早的交易日）翻成人话（v0.45.656）。不是这个原因 ⇒ None。纯函数。
+
+    两种情形，只按「应有日期是不是今天、开盘过了多久」分，不猜 CBOE 什么时候刷新：
+      · `open_lag`：应有日期 = 今天、开盘不足 `OPEN_LAG_MIN` 分钟 ⇒ 延迟文件还没滚到今天，等一会儿再拉；
+      · `file_stuck`：其余（开盘已过 `OPEN_LAG_MIN` 分钟仍旧，或盘前文件比上一交易日还旧）⇒ 该票的 CBOE 文件卡住。
+    `now_et` 须是美东时刻（同 `live_view`）。最后成交时刻取不到时照说「未取到」，不编。"""
+    if (q or {}).get("reason") != "stale_vintage":
+        return None
+    exp = q.get("expected_date")
+    lt = _fmt_trade_time(q.get("payload_last_trade_time")) or q.get("vintage_date")
+    lt_s = lt or "未取到"
+    minutes = None
+    if exp and exp == now_et.date().isoformat():
+        opened = datetime.combine(now_et.date(), SESSION_OPEN_ET, tzinfo=now_et.tzinfo)
+        minutes = max(0, int((now_et - opened).total_seconds() // 60))
+    if minutes is not None and minutes < OPEN_LAG_MIN:
+        kind = "open_lag"
+        text = (f"开盘才 {minutes} 分钟，CBOE 的延迟文件（约晚 {OPEN_LAG_MIN} 分钟）还没滚到今天，文件里最后成交 {lt_s}。"
+                f"开盘 {OPEN_LAG_MIN} 分钟后再「拉一次盘中报价」")
+    else:
+        kind = "file_stuck"
+        since = f"开盘已过 {minutes} 分钟，" if minutes is not None else ""
+        text = (f"该票 CBOE 文件卡住：{since}文件里最后成交仍停在 {lt_s}"
+                f"{f'（应为 {exp} 的数据）' if exp else ''}，等 CBOE 刷新这只票")
+    return {"kind": kind, "last_trade_time": q.get("payload_last_trade_time"), "vintage_date": q.get("vintage_date"),
+            "expected_date": exp, "minutes_since_open": minutes, "text": text}
+
+
+#: 水平那一行也是 stale_vintage、但报价那一行没给出文件时刻时的说法（两者分属两次取数，报价那次可能已经滚到今天）
+STALE_LEVELS_GENERIC = "CBOE 文件还停在上一交易日（这次取水平时的文件时刻未记录），稍后再「拉一次盘中报价」"
+
+
 def _ask_ok(leg) -> bool:
     """这条腿有没有一口**真实可买回**的 ask：ask 有限且 > 0、bid 有限且 ≥ 0、ask ≥ bid（不接受倒挂）。
     与 `quote_ok`（双边 bid > 0，mid 的前提）是两个问题：bid = 0 的深度虚值腿没有 mid，但 ask 是真实的买回价。"""
@@ -733,9 +783,13 @@ def live_view(p: dict, q: dict, levels: dict, *, now_et: datetime) -> dict:
     pnl_mid = unrealized(side, p.get("entry_premium"), mark, n)
     size = _pos(p.get("size_usd"))
     greeks = position_greeks(legs, side, n, S)
+    stale = stale_note(q, now_et=now_et)
+    if not levels.get("available") and levels.get("reason") == "stale_vintage":
+        levels = {**levels, "reason_zh": stale["text"] if stale else STALE_LEVELS_GENERIC}
     return {
         "ticker": p.get("ticker"), "fetched_at_et": now_et.isoformat(timespec="seconds"),
         "available": bool((q or {}).get("available")), "reason": (q or {}).get("reason"),
+        "reason_zh": stale["text"] if stale else None, "stale": stale,
         "session_live": (q or {}).get("session_live"), "vintage_date": (q or {}).get("vintage_date"),
         "payload_last_trade_time": (q or {}).get("payload_last_trade_time"),
         "underlying_price": S, "underlying_price_source": (q or {}).get("underlying_price_source"),

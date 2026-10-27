@@ -227,12 +227,17 @@ class CboeStaleVintageError(RuntimeError):
     分流。信号被压平后那条分支成了死代码，08-28 BILI / 08-31 TMO / 09-01 BILI
     连着三次都以泛化 `RuntimeError: CBOE payload 为空` 落进普通失败，
     一次都没被补抓过。
+
+    `last_trade_time`（v0.45.656）：陈旧文件里 `last_trade_time` 原文，供页面写明「停在哪一刻」；
+    构造方没给时为 None。
     """
 
-    def __init__(self, ticker: str, vintage_date: str, expected_date: Optional[str]):
+    def __init__(self, ticker: str, vintage_date: str, expected_date: Optional[str],
+                 last_trade_time: Optional[str] = None):
         self.ticker = ticker
         self.vintage_date = vintage_date
         self.expected_date = expected_date
+        self.last_trade_time = last_trade_time
         super().__init__(f"CBOE {ticker} 数据陈旧：last_trade={vintage_date}，"
                          f"应为 {expected_date}")
 
@@ -843,7 +848,7 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,
                 with _cache_lock:
                     _payload_stats["stale"] += 1
                 if on_stale == "raise":
-                    raise CboeStaleVintageError(ticker, stale[0], stale[1])
+                    raise CboeStaleVintageError(ticker, stale[0], stale[1], data.get("last_trade_time"))
                 return None
             with _cache_lock:
                 _payload_cache[key] = (now, data)
@@ -1883,9 +1888,13 @@ def quote_held(ticker: str, symbols: List[str], *, timeout: int = 15,
     调用方**不得**拿账本里的旧 mark 顶上。payload 在、现价不在 ⇒ 报价照给，`reason="price_unavailable"`。
     快照模式（补跑历史日）一律不可得：那天的真实报价谁也拿不到。只读，不写任何文件；
     走 `_fetch_cboe_payload` 的进程缓存（同票刚拉过时零额外网络）。
+
+    `stale_vintage` 时（v0.45.656）`vintage_date` / `payload_last_trade_time` 照实给出**那份陈旧文件**的值，
+    另加 `expected_date`（此刻应有的数据日期）——页面据此区分「开盘不久、延迟文件还没滚到今天」与「该票文件卡住」；
+    `available` 仍为 False、quotes 仍全 None。其余情形 `expected_date` 为 None。
     """
     base = {"available": False, "reason": None, "underlying_price": None, "underlying_price_source": None,
-            "session_live": None, "vintage_date": None, "payload_last_trade_time": None,
+            "session_live": None, "vintage_date": None, "payload_last_trade_time": None, "expected_date": None,
             "quotes": {s: None for s in symbols}}
     if _SNAPSHOT_PROVIDER is not None:
         return {**base, "reason": "snapshot_mode"}
@@ -1893,8 +1902,9 @@ def quote_held(ticker: str, symbols: List[str], *, timeout: int = 15,
         return {**base, "reason": "no_symbols"}
     try:
         data = _fetch_cboe_payload(ticker, timeout, on_stale="raise")
-    except CboeStaleVintageError:
-        return {**base, "reason": "stale_vintage"}
+    except CboeStaleVintageError as e:
+        return {**base, "reason": "stale_vintage", "vintage_date": e.vintage_date,
+                "payload_last_trade_time": e.last_trade_time, "expected_date": e.expected_date}
     if not data or not data.get("options"):
         return {**base, "reason": "payload_unavailable"}
     vintage = _payload_vintage_date(data)
