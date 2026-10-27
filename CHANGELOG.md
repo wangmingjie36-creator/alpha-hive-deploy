@@ -5,7 +5,15 @@
 
 ---
 
-## [0.45.665] — 2026-10-27 — 占位（进行中：tests/test_yf_daily.py:606 的 Ruff F401（v0.45.658 留下的未用 import yfinance）——main 的 CI 卡在 Ruff 那一步）
+## [0.45.665] — 2026-10-27 — Fixed：删 `tests/test_yf_daily.py` 里未用的 `import yfinance`（Ruff F401）——main 的 `tests` 工作流自 `44fba87f`（v0.45.658）起每轮红在「Ruff lint」那一步
+
+**现象**：`44fba87f` 之后 main 每次 push 的 `tests` 都红，失败步骤是 `ruff check .`：`tests/test_yf_daily.py:606` `F401 yfinance imported but unused`（`TestPrefetchBundle::test_close_panel_drops_the_missing_column_without_refetching` 函数体里）。测试本身全过（`3c402ccb` 那轮 12693 passed / 0 failed）。
+
+**先确认它确实没被依赖再删**：① 函数体里 `yfinance` 再没出现；② 它是从紧挨着的 `test_history_accessor_refuses_without_refetching` 抄来的——那条要 `monkeypatch.setattr(yfinance, "Ticker", …)`，这条没有，**也不需要**：`bundle` 夹具已把 `yfinance.download` 换成计数的假实现、`yfinance.Ticker` 换成直接抛错，被测的 `_yf_close_panel` 直连回落走 `yf_daily.download(yf, …)` → `yfinance.download`（被计数，断言 `len(calls) == 1` 管着「不许重取」），且生产代码自己 `import yfinance`，测试里这句 import 没有任何副作用可依赖。
+
+- `tests/test_yf_daily.py`：删那一行。
+
+**核对**：`ruff check .` 全仓 All checks passed（这是唯一一处）；本文件 136 passed；该测试 docstring 点名的变异（`_yf_close_panel` 不看 `history_missing`）删后仍让它红——牙还在。整套交给 CI。
 
 ## [0.45.664] — 2026-10-27 — Fixed：`tests/test_gh_pages_unverified_parent.py` 的「网络在重试中途恢复」测试时序不稳——数退避的测试改替换退避接缝 `rd._retry_sleep`，不再替换全局 `time.sleep`；新增确定性注入两种干扰
 
