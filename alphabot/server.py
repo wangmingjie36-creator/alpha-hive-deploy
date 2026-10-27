@@ -160,6 +160,10 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         return svc.tail_hedge(force=_q(request, "force") == "1")
 
     @api
+    def hedge_beta(request):
+        return svc.beta_sensitivity(force=_q(request, "force") == "1")
+
+    @api
     def straddle_live(request):
         return svc.straddle_live(request.path_params["ticker"], force=_q(request, "force") == "1")
 
@@ -232,6 +236,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/straddle", straddle),
         Route("/api/hedge", hedge),
         Route("/api/hedge/tail", hedge_tail),
+        Route("/api/hedge/beta", hedge_beta),
         Route("/api/straddle/live/{ticker}", straddle_live),
         Route("/api/straddle/compare/{ticker}", straddle_compare),
         Route("/api/settings", settings, methods=["GET", "PUT"]),
