@@ -5,7 +5,13 @@
 
 ---
 
-## [0.45.670] — 2026-10-28 — 占位（进行中：667 二次检查——勘误的数更正为 15 / 11，CLAUDE.md 选测修法改成照提示打印的 --files 命令）
+## [0.45.670] — 2026-10-28 — Fixed：v0.45.667 二次检查——664 勘误自己又少数了一处（15 处、11 处只是不真等，不是 14 / 10）；`CLAUDE.md` 选测一条仍教裸 `--update`，改成照提示打印的 `--files <读者> --update`
+
+**二次检查结论**：667 的代码没有 bug——漏登只会出在 `tests/` 第一层的 `tests/test_*.py`（`<session>` 键被跳过、仓库没有测试子目录），所以打印的 `--files` 里不会有 `--update` 认不出、悄悄丢掉的文件；「该归入读全部」的元守卫跑 `--files <它> --update` 按 619 的分母照样升级；`report_gaps` / `Gap` 没有别的调用方；`csf` / `co` / `cb` / `ty` / `of` / `llm_service` 都是 `import time` 的模块（「替换的是全局函数」成立）。查出两处文字问题：
+
+- **勘误少数一处**（`CHANGELOG.md` 664 末尾的勘误与 667 条目第 2 点）：「另有 14 处、其余 10 处只是不真等」⇒ **15 处、11 处**。漏的是 `tests/test_ghpages_data_root_migration.py:254`：先 `import time as _time_mod` 再 `setattr(_time_mod, "sleep", …)`。667 改 grep `xxx.time` 仍是按**对象的写法**查，碰上别名照样漏——和 664 同一个错。这次按被替换的**属性名**查（`git grep -nE "['\"]sleep['\"]" -- tests`）：16 条 = 664 原句点名的 `test_retry_backoff_seams` 1 处 + 另外 15 处，再逐条核对象都是 `time` 模块。在数 sleep 的仍是那 4 处，结论不变。两处原文就地改并标明「670 更正」。
+- **`CLAUDE.md`「整套测试怎么跑」的选测一条**仍写「修法 `--update`」「加了被现有测试读的新静态文件照样建议 `--update`」——后一种正是裸 `--update` 什么都不量的情况（读者没改）。667 只改了工具的提示没同步这里，而每个会话开工都读它。改成：照提示打印的整条命令跑（`--files <漏登的读者> --update`），并写明裸 `--update` 为什么不行。
+
 
 ## [0.45.669] — 2026-10-28 — Fixed：宏观报价全部没取到时不再整份换成兜底常量（VIX 20 / 10Y 4.5 / 宏观分 5.0）——三条返回路径合一，缺的项本身是 None / unknown，宏观分只算观测到的分项；报价全空那天板块轮动与 FRED 照取；日报 / 仪表板逐格显示；登边界 10-19（同 654 / 657 / 660 / 663，作废 0 条）
 
@@ -114,7 +120,7 @@
 - `tools/select_tests/select_tests.py`：`Gap` 加 `file`（漏登的那个读者）；新增 `update_command(files)`，`report_gaps` 在列出漏登后打印 `修法：/usr/local/bin/python3 tools/select_tests/select_tests.py --files <全部漏登的读者> --update，并把 tests/_must_run.json 一起提交`（两类漏登都在内；`--check-drift` 另给「整套带插件后 `--build`」）；Actions 的 `::warning` 注记也带上该读者的命令。`cmd_update` 没有要量的测试文件时改说「什么都没量，登记表没动」并给出 `--files` 的用法（退出码仍 0：只改文档的提交跑它是正常的）。`--files` / `--update` / `--check-drift` 的 `--help` 同步（`--check-drift` 原写「dump 里有登记表没有的读 ⇒ 退出码 4」，661 后只有测试读测试漏登才是 4）。模块文档「随跑测量」一段同步。
 - `tests/test_select_tests.py`（73 → 76 条）：**照着打印出来的命令真跑一遍**（假 pytest 产出测量 dump）后再 `--check-drift` ⇒ ✅、没有修法行；只有非代码漏登（退出码 0）时同样给命令；没有可量的文件时明说什么都没量、登记表字节不变；Actions 注记里有命令。
 
-**2. 664 的 CHANGELOG 一句写错**——见 664 条末尾的勘误（`of.time` 就是全局 `time` 模块，另有 14 处替换、4 处在数 sleep）。
+**2. 664 的 CHANGELOG 一句写错**——见 664 条末尾的勘误（`of.time` 就是全局 `time` 模块，另有 15 处替换、4 处在数 sleep——670 更正，此处原写 14）。
 
 **3. `report_deployer._retry_sleep` 的 docstring 过期**：还写着 `test_gh_pages_unverified_parent` 替换全局 `time.sleep`「照样生效」——664 之后它已不这么做，而那正是 664 查出会偶发多数一次的写法。改成：要**数**退避的测试只能替换本函数，并写明原因（只改文档，生产行为不变）。
 
@@ -176,7 +182,7 @@
 
 **顺带查过（未改）**：全仓另一处替换全局 `time.sleep` 的只有 `tests/test_retry_backoff_seams.py::test_seam_delegates_to_time_sleep`——只包住一次直接调用 `_retry_sleep(1.4)`、不起子进程，只剩「恰好那一瞬有后台线程 sleep」的极小窗口，不改。
 
-**勘误（v0.45.667 二次检查）**：上一段说错了。`monkeypatch.setattr(of.time, "sleep", …)` 这种写法替换的也是全局 `time.sleep`（`of.time` 就是 `time` 模块）——当时 grep 只匹配了 `setattr(time, "sleep"` 的字样。全仓另有 14 处这样写，其中 4 处在**数** sleep（`tests/test_outcomes_backlog_starvation.py`、`tests/test_llm_service.py` 各 2 处；其余 10 处只是让它不真等）。它们的被测路径里不起子进程（碰不到本次 CI 失败的真实机制：收子进程时的忙等），只剩「别的测试遗留后台线程」那一条；没见它们红过，待验证，未改。
+**勘误（v0.45.667 二次检查）**：上一段说错了。`monkeypatch.setattr(of.time, "sleep", …)` 这种写法替换的也是全局 `time.sleep`（`of.time` 就是 `time` 模块）——当时 grep 只匹配了 `setattr(time, "sleep"` 的字样。全仓另有 **15 处**这样写（v0.45.670 更正：667 时数成 14 处，漏了 `tests/test_ghpages_data_root_migration.py` 先 `import time as _time_mod` 再 `setattr(_time_mod, "sleep", …)` 的别名写法——按对象写法 grep 又漏了一次；按属性名 `"sleep"` 查才全），其中 4 处在**数** sleep（`tests/test_outcomes_backlog_starvation.py`、`tests/test_llm_service.py` 各 2 处；其余 11 处只是让它不真等）。它们的被测路径里不起子进程（碰不到本次 CI 失败的真实机制：收子进程时的忙等），只剩「别的测试遗留后台线程」那一条；没见它们红过，待验证，未改。
 
 ## [0.45.663] — 2026-10-27 — Fixed：宏观报价与板块轮动的 Yahoo 日线按日期配对（不再数第几根）；缺值不再顶数（10Y 4.5 / 涨跌 0.0 ⇒ None / unknown）；没算进去的每一项点名 + WARNING；登边界 10-19（同 654 / 657 / 660：并进同日标签、冻结证据，作废 0 条）
 
