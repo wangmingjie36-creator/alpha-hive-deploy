@@ -36,7 +36,47 @@
 
 **核对**：`test_select_tests.py` 77 passed；`ruff check .` 全绿。整套经 `select_tests.py --run`（改了核心文件 ⇒ 回退整套、带插件做漂移检查）：**12978 passed / 0 失败**，退出码 0，漂移零处。
 
-## [0.45.671] — 2026-10-28 — 占位（进行中：输入层指纹的覆盖范围改为自动推导 + 双向登记——单元代码读的 config 项自动并入、引用的项目函数逐个登记；根因：新闻主源开关 NEWS_SOURCE_CONFIG 等不在任何单元里）
+## [0.45.671] — 2026-10-28 — Fixed：维度 IC 输入层指纹的覆盖范围改为自动推导（依赖闭包）——新闻主源开关、缓存时长、不提字段名的辅助函数、跨模块的收盘核实等此前都在守卫之外；窗口审计 12 个扫描日、6 个单元按 coverage 重新确认
+
+**问题**：`signal_code_fingerprints.UNITS` 每个单元盯哪些代码是**手写清单**（整个模块 / 某个函数 / 「提到三个行情字段名的顶层定义」/
+`AGENT_SCORING` 的两个子键），没有任何东西核对它全不全。查出：新闻主源开关 `config.NEWS_SOURCE_CONFIG["primary"]`（注释写着「回滚用」）改成
+alpha_vantage ⇒ **指纹不红、桥接照过**（冻结层三种新闻源都认），H1 的新闻通道却换了量纲（历史上 AV 被拒、改走 Yahoo 那次，新闻分系统性低约 21 分）。同类：`CACHE_CONFIG`
+的缓存时长、`price_history.MOMENTUM_LOOKBACK`（改成 5 指纹不变）、`data_pipeline._latest_closed_session`（决定 Twelve Data 量比收不收）、
+`cboe_options.close_verdict`、`models.clean_score`、观测层缓存函数（v0.45.591 新加，只算进了 price.fields）——模块说明「已知不管的」第一条
+就写着「取数细节不在指纹里」。
+
+### Fixed
+- `signal_code_fingerprints.py`：单元指纹 = 定位代码（算法逐字不变）+ **依赖闭包** `unit_dependencies`——从定位节点出发经 import 别名 / 转出口 /
+  相对 import 解析到别的模块与同文件顶层定义，跨文件传递；config 项**精确到读过的键**（`_CC["ttl"].get("reddit")` ⇒ `CACHE_CONFIG[ttl.reddit]`，
+  整体拿去用 ⇒ 整个对象；就地修改语句一并算；键不存在记 `<absent>`）；函数自己绑定的局部名字不算引用、`if __name__ == "__main__":` 不进；
+  **缺省一律算进去**（漏登记只多要一次确认、不会漏守），只有 `EXEMPT_DEPS` 写明理由的不算（6 条：观测档案只存不改值、原子写盘机制、LLM 路径、
+  F&G 模块里转给 GuardBee 的 VIX 期限结构、数据路径 PATHS、合成权重 buzz_weights——冻结层），`exemption_problems` 报理由太短 / 过期条目；
+  追到**守同一信号的另一个单元**就停（buzz.channels 调新闻模块 ⇒ 归 buzz.news；观测层缓存函数虽在 price.fields 的整份定位里，但它不守新闻 ⇒
+  buzz.news / buzz.fear_greed 照样算进去）；定位不到依赖的定义 ⇒ 抛 `FingerprintError`。
+- 手写的 `AGENT_SCORING` 子键定位器删掉（由闭包推出，口径相同）；新增确认方式 `coverage`（守卫自己的覆盖变了、生产代码没变，说明里写审计结论）；
+  `--deps <单元>` 列出单元盯着的全部依赖；失配提示补一句「改的可能在依赖里」。解析结果按内容全局缓存（指纹测试 83s → 16s）。
+
+### 窗口审计与重新确认（用户 10-28 定）
+- 新增 `experiments/fingerprint_coverage_audit.py`（证据冻结 `experiments/fingerprint_coverage_audit_20261028.json`）：在 10-12 起 12 个扫描日实际跑的
+  提交上（编排器日志反推）用现行定义逐日重算依赖。**配置项窗口内一处未变**；变化都归已有确认的版本（505 / 557 / 562 / 564 / 566 / 580 / 591 /
+  639 / 645），另两处此前没进确认表：563（只改依赖层；预注册 §13.10 早已按测量误差修正记录）与 **656**（`CboeStaleVintageError` 加可选属性，取价路径
+  一个值不动——用户定按 no_value_change）。10-27 扫描提交 → 本版基线之间依赖无变化。6 个单元各登记一条 `coverage`。
+- 各单元依赖数：buzz.channels 4 / reddit 12 / news 27 / yahoo 10 / fear_greed 15 / price.fields 180。
+
+### Tests
+- `tests/test_signal_code_fingerprints.py`：`TestDependencyClosure`（新闻主源开关只让 buzz.news 变；缓存时长只让读它的单元变、无关键谁都不变；
+  阈值键改名记 `<absent>`；同文件辅助函数与跨模块 `close_verdict` 会让 price.fields 变；三类豁免不变；停 / 不停的两条规则；缺口里点过名的依赖都在；
+  豁免表自检与两种毛病）、`TestResolver`（合成源码：键路径 + 转出口 + 相对 import、局部名 / `__main__` 不算、传递与第三方、定位不到即抛、非常量键取整体）；
+  「动量回落函数改名」改为 `MOMENTUM_LOOKBACK` 常数（旧守卫看不见）+ 「改名没改调用方」进抛错组。变异 14/14 抓到。
+- `tests/test_historical_path_window.py`：`_loc_mentions` 返回值改为 (文本, 节点, 归属名)。
+- `tests/test_paths_not_frozen_at_import.py`（顺带修的守卫误报，同一根因：按源码**子串**判）：「import 期冻结路径」扫描改按**标识符**认
+  `PATHS` / `__file__`，字符串常量里的字样不再算——`EXEMPT_DEPS` 的键 `"PATHS"` 被误报；同类前例 `alphabot/macos_app._DELEGATE`
+  （子进程源码文本，v0.45.451 只能进白名单）随之从 `__file__` 白名单摘除。全仓对拍：两种判据除这两条字符串误报外结果完全相同；补「字符串
+  不报」的断言（换回子串判据 3 条红）。
+- 验证：整套 12996 passed / 1 failed（即上条误报，修后该文件 108 passed）；补改后必跑清单 26 个文件 1636 passed。
+
+### 文档
+- 模块说明（「已知不管的」改写、确认方式加 `coverage`、用法）、预注册 §13.10 补一段（实现，不改规则）。
 
 ## [0.45.670] — 2026-10-28 — Fixed：v0.45.667 二次检查——664 勘误自己又少数了一处（15 处、11 处只是不真等，不是 14 / 10）；`CLAUDE.md` 选测一条仍教裸 `--update`，改成照提示打印的 `--files <读者> --update`
 

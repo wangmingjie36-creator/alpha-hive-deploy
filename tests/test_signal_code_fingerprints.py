@@ -86,8 +86,8 @@ class TestSensitivity:
         # 通道读的阈值（config）与缩放函数
         ("buzz.channels", "config.py", '"very_high": 2.0', '"very_high": 2.5'),
         ("buzz.channels", "swarm_agents/cache.py", "return max(lo, min(hi, f))", "return max(lo, min(hi, f * 1.0001))"),
-        # 三个行情字段的公式
-        ("price.fields", "price_history.py", "def momentum_5d_detail(", "def momentum_5d_detail_x("),
+        # 三个行情字段的公式。v0.45.671：动量回落的窗口常数不提字段名，此前改它指纹不变（依赖闭包补上）
+        ("price.fields", "price_history.py", "MOMENTUM_LOOKBACK = 4", "MOMENTUM_LOOKBACK = 5"),
         # v0.45.639：三个字段的公式收进 price_metrics（此前这里变异的是 cache.py 旧回落里的那份副本）
         ("price.fields", "price_metrics.py",
          'mom = float((hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100)',
@@ -95,7 +95,7 @@ class TestSensitivity:
         ("price.fields", "swarm_agents/cache.py",
          'data["volume_ratio"] = _m["volume_ratio"]',
          'data["volume_ratio"] = _m["volume_ratio"] or 1.0'),
-    ], ids=["动量映射", "量比档位", "波动率档位", "量比阈值", "_safe_score", "动量回落函数改名", "共用动量窗口",
+    ], ids=["动量映射", "量比档位", "波动率档位", "量比阈值", "_safe_score", "动量回落窗口常数", "共用动量窗口",
             "旧回落量比接线"])
     def test_formula_change_changes_the_fingerprint(self, unit, rel, old, new):
         assert _fp(unit, _mutated(rel, old, new)) != _fp(unit)
@@ -154,8 +154,9 @@ class TestStructureChangeIsLoud:
 
     @pytest.mark.parametrize("rel,old,new,unit", [
         ("swarm_agents/cache.py", "def _safe_score(", "def _safe_score_renamed(", "buzz.channels"),
-        ("config.py", '"volume_thresholds": {', '"volume_thresholds_x": {', "buzz.channels"),
-    ], ids=["被指名的函数改名", "阈值键改名"])
+        # v0.45.671：被调用的依赖改了名、调用方没跟——闭包定位不到它的定义 ⇒ 抛
+        ("price_history.py", "def momentum_5d_detail(", "def momentum_5d_detail_x(", "price.fields"),
+    ], ids=["被指名的函数改名", "被调用的依赖改名"])
     def test_named_target_gone_raises(self, rel, old, new, unit):
         """判别：定位不到时若静默给空串，第一次会因指纹变化而红，可一旦有人确认了，这个单元就**永远**
         不再跟踪那段代码——之后再怎么改都不红。所以必须抛。"""
@@ -184,6 +185,163 @@ class TestStructureChangeIsLoud:
                 raise F.FingerprintError("模拟：文件不见了")
             return _read(rel)
         assert F.check(read=read)["units"]["buzz.fear_greed"]["state"] == "error"
+
+
+# ── 3b. 依赖闭包（v0.45.671）：单元之外、单元代码却依赖的东西 ───────────────────
+
+_UNITS6 = ("buzz.channels", "buzz.reddit", "buzz.news", "buzz.yahoo", "buzz.fear_greed", "price.fields")
+
+
+_BASE_FPS: dict = {}
+
+
+def _changed(read):
+    if not _BASE_FPS:
+        _BASE_FPS.update({u: _fp(u) for u in _UNITS6})
+    return {u for u in _UNITS6 if _fp(u, read) != _BASE_FPS[u]}
+
+
+class TestDependencyClosure:
+    """根因：单元盯哪些代码曾是手写清单，没人核对它全不全。这一组在 v0.45.671 之前的代码上全部红（缺口本身）。"""
+
+    def test_the_gap_news_primary_switch(self):
+        """新闻主源开关（注释写着「回滚用」）改成 alpha_vantage——此前指纹不红、桥接照过，H1 新闻通道却换了量纲。"""
+        read = _mutated("config.py", '"primary": "massive",', '"primary": "alpha_vantage",')
+        assert _changed(read) == {"buzz.news"}
+
+    def test_config_is_tracked_down_to_the_key_actually_read(self):
+        """Reddit 缓存时长改了 ⇒ 只有 buzz.reddit 变；改一个 H1 谁都不读的缓存时长 ⇒ 谁都不变（不制造噪音）。"""
+        assert _changed(_mutated("config.py", '"reddit": 600,', '"reddit": 900,')) == {"buzz.reddit"}
+        assert _changed(_mutated("config.py", '"google_trends": 86400,', '"google_trends": 3600,')) == set()
+
+    def test_config_key_renamed_is_recorded_as_absent(self):
+        """代码按 `.get("volume_thresholds", {})` 读、键没了 ⇒ 记成「不存在」（这也是一个值，指纹变）。
+        以后代码改读新键，闭包跟着代码走——不会「确认一次就永远不再跟踪」。"""
+        read = _mutated("config.py", '"volume_thresholds": {', '"volume_thresholds_x": {')
+        assert _fp("buzz.channels", read) != _fp("buzz.channels")
+        deps = F.unit_dependencies("buzz.channels", read)
+        assert "volume_thresholds = <absent>" in deps["config.py::AGENT_SCORING[volatility_thresholds,volume_thresholds]"]
+
+    @pytest.mark.parametrize("rel,old,new", [
+        # 同文件、不提字段名的辅助函数：决定 Twelve Data 量比收不收
+        ("data_pipeline.py", "s = _expected_session((today - timedelta(days=1)).isoformat())",
+         "s = _expected_session((today - timedelta(days=2)).isoformat())"),
+        # 别的模块：CBOE 收盘核实
+        ("cboe_options.py", "session_end = datetime.combine(last_trade.date(), close_t)",
+         "session_end = datetime.combine(last_trade.date(), close_t) + timedelta(minutes=1)"),
+    ], ids=["同文件辅助函数 _latest_closed_session", "跨模块 close_verdict"])
+    def test_helpers_outside_the_located_code_are_tracked(self, rel, old, new):
+        src = _read(rel)
+        if src.count(old) != 1:     # CBOE 那句出现两次（close_verdict 与另一处）：只改 close_verdict 里的
+            start = src.index("def close_verdict(")
+            end = src.index("\ndef ", start + 1)
+            body = src[start:end]
+            assert body.count(old) == 1, "锚点漂了，更新本测试"
+            read = _transformed(rel, lambda t: t[:start] + body.replace(old, new) + t[end:])
+        else:
+            read = _mutated(rel, old, new)
+        assert "price.fields" in _changed(read)
+
+    @pytest.mark.parametrize("rel,old,new", [
+        ("observation_archive.py", '_event(kind, "ok", sha=sha, request=request)',
+         '_event(kind, "ok!", sha=sha, request=request)'),
+        ("llm_service.py", "def analyze_news_sentiment(", "def analyze_news_sentiment2("),
+        ("config.py", '"momentum": 0.20,\n        "volume": 0.10,', '"momentum": 0.30,\n        "volume": 0.10,'),
+    ], ids=["只存不改值的观测档案", "只在 LLM 模式生效", "合成权重（冻结层）"])
+    def test_exempted_dependencies_do_not(self, rel, old, new):
+        assert _changed(_mutated(rel, old, new)) == set()
+
+    def test_stops_at_another_unit_that_guards_the_same_signal(self):
+        """buzz.channels 调 get_ticker_news ⇒ 新闻模块的改动归 buzz.news 认领，buzz.channels 不重复要求确认。"""
+        read = _mutated("newsapi_client.py", '_MASSIVE_LABELS = {"positive": "bullish"',
+                        '_MASSIVE_LABELS = {"positive": "neutral"')
+        assert _changed(read) == {"buzz.news"}
+
+    def test_does_not_stop_when_the_owner_guards_other_signals(self):
+        """观测层缓存函数在 price.fields 的整份定位里，但 price.fields 不守新闻 / F&G ⇒ 两个情绪单元照样算进去。"""
+        read = _mutated("observation_layer.py", "if not _cache_doc_ok(doc):", "if not _cache_doc_ok(doc) or False:")
+        assert {"buzz.news", "buzz.fear_greed", "price.fields"} <= _changed(read)
+
+    def test_expected_dependencies_are_present(self):
+        """正对照：缺口里点过名的依赖确实在。"""
+        assert "config.py::NEWS_SOURCE_CONFIG" in F.unit_dependencies("buzz.news")
+        assert "config.py::CACHE_CONFIG[ttl.reddit,ttl.reddit_memory]" in F.unit_dependencies("buzz.reddit")
+        ch = F.unit_dependencies("buzz.channels")
+        assert "config.py::AGENT_SCORING[volatility_thresholds,volume_thresholds]" in ch, list(ch)
+        pf = F.unit_dependencies("price.fields")
+        for label in ("data_pipeline.py::_latest_closed_session", "cboe_options.py::close_verdict",
+                      "price_history.py::MOMENTUM_LOOKBACK", "is_trading_day.py::session_close_et"):
+            assert label in pf, label
+
+    def test_exemption_registry_is_clean(self):
+        assert F.exemption_problems() == []
+
+    @pytest.mark.parametrize("key,reason,needle", [
+        (("nonexistent_module.py", "*"), "x" * F.MIN_NOTE_CHARS, "过期条目"),
+        (("observation_archive.py", "*"), "太短", "没写凭什么"),
+    ], ids=["过期", "理由太短"])
+    def test_exemption_registry_problems_are_reported(self, monkeypatch, key, reason, needle):
+        monkeypatch.setitem(F.EXEMPT_DEPS, key, reason)
+        assert any(needle in p for p in F.exemption_problems())
+
+
+# ── 3c. 依赖解析器本身（合成源码，逐个规则有牙）────────────────────────────────
+
+def _synthetic(monkeypatch, files: dict, units: dict):
+    monkeypatch.setattr(F, "UNITS", units)
+    monkeypatch.setattr(F, "EXEMPT_DEPS", {})
+
+    def read(rel):
+        if rel not in files:
+            raise F.FingerprintError(f"没有 {rel}")
+        return files[rel]
+    return read
+
+
+_CFG = 'TTL = {"a": 1, "b": {"x": 2, "y": 3}}\nFLAG = True\nTTL["b"]["z"] = 9\n'
+
+
+class TestResolver:
+    def _unit(self, code):
+        return {"u": {"code": (("m.py", "def:f"),), "signals": ("s",)}}
+
+    def test_keypath_alias_reexport_and_relative_import(self, monkeypatch):
+        files = {"config.py": _CFG,
+                 "pkg/__init__.py": "",
+                 "pkg/conf.py": "from config import TTL as _T\n",
+                 "pkg/m.py": "from .conf import _T\n\ndef f():\n    return _T['b'].get('x', 0)\n"}
+        read = _synthetic(monkeypatch, files, {"u": {"code": (("pkg/m.py", "def:f"),), "signals": ("s",)}})
+        deps = F.unit_dependencies("u", read)
+        assert list(deps) == ["config.py::TTL[b.x]"]
+        assert deps["config.py::TTL[b.x]"].splitlines()[0] == "TTL.b.x = 2"
+        assert "TTL['b']['z'] = 9" in deps["config.py::TTL[b.x]"], "config 里对它的就地修改一并算进去"
+
+    def test_local_names_and_main_block_are_not_dependencies(self, monkeypatch):
+        files = {"m.py": "r = 1\nHELPER = 2\n\ndef f(x):\n    r = x + HELPER\n    return r\n\n"
+                         "if __name__ == '__main__':\n    HELPER = 3\n    tk = 'NVDA'\n",
+                 "config.py": _CFG}
+        read = _synthetic(monkeypatch, files, self._unit("m.py"))
+        deps = F.unit_dependencies("u", read)
+        assert list(deps) == ["m.py::HELPER"], "局部变量 r 不是对模块层 r 的引用"
+        assert deps["m.py::HELPER"] == "HELPER = 2", "脚本入口里的赋值不是可被 import 的定义"
+
+    def test_transitive_and_third_party(self, monkeypatch):
+        files = {"m.py": "import json\nfrom n import g\n\ndef f():\n    return g() + json.dumps(1).count('1')\n",
+                 "n.py": "import config\n\ndef g():\n    return h() if config.FLAG else 0\n\ndef h():\n    return 1\n",
+                 "config.py": _CFG}
+        read = _synthetic(monkeypatch, files, self._unit("m.py"))
+        assert list(F.unit_dependencies("u", read)) == ["config.py::FLAG", "n.py::g", "n.py::h"]
+
+    def test_missing_definition_is_loud(self, monkeypatch):
+        files = {"m.py": "from n import gone\n\ndef f():\n    return gone()\n", "n.py": "X = 1\n", "config.py": _CFG}
+        read = _synthetic(monkeypatch, files, self._unit("m.py"))
+        with pytest.raises(F.FingerprintError):
+            F.unit_dependencies("u", read)
+
+    def test_whole_object_when_not_read_by_constant_key(self, monkeypatch):
+        files = {"m.py": "from config import TTL\n\ndef f(k):\n    return TTL[k]\n", "config.py": _CFG}
+        read = _synthetic(monkeypatch, files, self._unit("m.py"))
+        assert list(F.unit_dependencies("u", read)) == ["config.py::TTL"]
 
 
 # ── 4. 登记表自洽（合成登记表证明检查有牙）─────────────────────────────────

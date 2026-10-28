@@ -78,7 +78,7 @@ class TestWindowStart:
         """名字带 `volatility_20d` ⇒ 输入层指纹守卫（price.fields）把它算进单元：以后改窗口规则会红。"""
         import signal_code_fingerprints as scf
         src = Path(dp.__file__).read_text(encoding="utf-8")
-        located = scf._loc_mentions(ast.parse(src), "data_pipeline.py", "")
+        located = scf._loc_mentions(ast.parse(src), "data_pipeline.py", "")[0]   # v0.45.671 起返回 (文本, 节点, 归属名)
         assert "def _volatility_20d_window_lo" in located
 
 
