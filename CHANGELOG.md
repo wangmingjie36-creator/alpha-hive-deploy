@@ -7,7 +7,21 @@
 
 ## [0.45.674] — 2026-10-28 — 占位（进行中：一轮扫描的宏观快照只取一次——在扫描预取里取、注入 Guard、日报与网站读同一份；根因：并发 4 线程各取一次 + 网站晚于 30 分钟缓存重取）
 
-## [0.45.673] — 2026-10-28 — 占位（进行中：LLM 影子——refusal 单独计数写进状态文件 + JSON 失败日志预览加长）
+## [0.45.673] — 2026-10-28 — Added：LLM 影子——模型拒答（`stop_reason=refusal`）单独计数并写进状态文件；JSON 失败日志预览 300 → 2000 字符并带上解析器的错误原因
+
+背景（10-27 的 run）：2 次 JSON 失败里，NFLX 的 Queen 是模型自己中途停笔（`stop_reason=refusal`，418 字符处断掉，内容无违规），MSFT 的 Bear 是 `end_turn` 的 1134 字符却解析不过，而日志只留 300 字符看不出坏在哪。拒答 / 截断 / 格式坏三种原因在 `json_parse_failures` 里分不开。
+
+### Added
+- `llm_service.py`：新计数 `model_refusals`（`stop_reason == "refusal"` 的调用数，进 `_EXTRA_COUNTERS`，每日重置）。**只计数**——调用返回值、重试、回落行为全不变；与 `budget_refusals` / `unpriced_refusals`（我们自己拒绝）无关，故不叫 `refusals`。
+- `llm_shadow_scan.py`：状态文件 `usage.model_refusals`，扫描结束的用量行加「模型拒答 N」。**不进健康判定、不进 `_SPEND_SIGNS`**（拒答的调用本来就计入 `call_count`；老状态文件没有这个键，`day_lock` 读它们不受影响）。
+
+### Changed
+- `llm_service.py`：JSON 解析失败的日志预览 `_FAIL_PREVIEW_CHARS` 300 → 2000（够看清 1134 字符的 Bear 回复，仍有上限，总长度另记在前面）；日志加 `解析错误=<原因>@<偏移>`（最后一次解析尝试的 `JSONDecodeError`，偏移相对被解析的片段）。
+
+### 测试 / 变异
+- `tests/test_llm_service_5_5_models.py`：拒答与截断 / 格式坏分开数且不改返回值、正常 stop_reason 不计、每日重置清零、预览有上限且够长、日志带解析错误与偏移；`tests/test_llm_shadow_scan.py`：状态文件带 `model_refusals` 且拒答再多也不影响健康。
+- 6 种人为破坏（去掉计数 / `max_tokens` 也算拒答 / 预览改回 300 / 日志不带错误 / 每日重置漏计数器 / 状态文件不带）全部让测试变红，文件已原样还原。相关 362 条通过。
+- 未做（待用户定）：对 `refusal` 重试——要花钱、会改调用行为，需新一代。NFLX 为什么被拒答仍待验证。
 
 ## [0.45.672] — 2026-10-28 — Fixed：v0.45.670 二次检查——「裸 `--update` 什么都不量」只说对一半：分支改了别的测试时它量那几个、提示「已并入」、退出码 0，看起来修好了、漏登还在；说法改准，并在这条成功路径上当场提醒
 

@@ -202,7 +202,8 @@ def build_status(*, day: date, mode: str, model: Optional[str], cap: float, requ
         "elapsed_sec": round(elapsed, 1),
         "usage": {k: usage.get(k) for k in (
             "total_cost_usd", "call_count", "input_tokens", "output_tokens",
-            "truncated_calls", "json_parse_failures", "budget_refusals", "unpriced_refusals", "failed_calls")},
+            "truncated_calls", "json_parse_failures", "budget_refusals", "unpriced_refusals", "failed_calls",
+            "model_refusals")},
         "quality": quality_report(usage, per_ticker, llm_on=llm_on),
         "per_ticker": per_ticker,
         "error": error,
@@ -458,7 +459,7 @@ def run_child(args: argparse.Namespace, *, scan: Callable[[List[str]], Dict] = d
     print(f"用量 ${usage.get('total_cost_usd', 0):.4f} / {usage.get('call_count', 0)} 次调用 | "
           f"截断 {usage.get('truncated_calls', 0)} | JSON 失败 {usage.get('json_parse_failures', 0)} | "
           f"预算拒绝 {usage.get('budget_refusals', 0)} | 定价拒绝 {usage.get('unpriced_refusals', 0)} | "
-          f"请求失败 {usage.get('failed_calls', 0)}")
+          f"请求失败 {usage.get('failed_calls', 0)} | 模型拒答 {usage.get('model_refusals', 0)}")
     print(f"健康 {q['healthy']} {q['reasons'] if q['reasons'] else ''}")
     if error:
         return EXIT_SCAN_ERROR

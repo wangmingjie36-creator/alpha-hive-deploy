@@ -242,6 +242,13 @@ class TestQualityFailedCalls:
         assert q["healthy"] is False and q["failed_call_rate"] == 1.0
         assert any("call_count=0" in r for r in q["reasons"])
 
+    def test_status_records_model_refusals_without_affecting_health(self):
+        """v0.45.673：拒答只记录、不进健康判定（NFLX 那种单只回落由 queen_llm_rate 兜）。"""
+        st = sh.build_status(day=date(2026, 10, 27), mode="run", model=sh.MODEL, cap=3.0, requested=["A"],
+                             usage=_usage(model_refusals=3), per_ticker=_tickers(1), elapsed=1.0, error=None)
+        assert st["usage"]["model_refusals"] == 3
+        assert sh.quality_report(_usage(model_refusals=50), _tickers(), llm_on=True)["healthy"] is True
+
     def test_status_records_failed_calls(self):
         st = sh.build_status(day=date(2026, 10, 19), mode="run", model=sh.MODEL, cap=3.0, requested=["A"],
                              usage=_usage(failed_calls=4), per_ticker=_tickers(1), elapsed=1.0, error=None)
