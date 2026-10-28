@@ -319,6 +319,35 @@ def demo_bars(ticker: str, as_of: Optional[str] = None, days: int = 120) -> List
     return list(reversed(out))
 
 
+#: 演示用的「60 日 β / 长窗口 β」：能源（XOM）两套符号相反，其余同号——演示里能直接看到「对照」的意义
+_DEMO_BETA_BASE = {"XOM": -1.05, "NVDA": 2.0, "AMZN": 1.6}
+_DEMO_BETA_LONG = {"XOM": 0.2, "NVDA": 1.85, "AMZN": 1.4}
+
+
+def demo_long_betas(tickers) -> dict:
+    """合成的长窗口 β（确定性、零网络）；不认识的票给 1.0。"""
+    return {t: _DEMO_BETA_LONG.get(t, 1.0) for t in tickers}
+
+
+def demo_beta_rows(spy_px: float) -> List[dict]:
+    """合成的审计逐行暴露（形状同 `portfolio_greeks` 的行，够 `stress_table` 重定价用）：SPY 空头覆盖 + 三个标的各一笔卖跨式（实值 / 平值）。
+    数字不代表任何真实组合。"""
+    from greeks_engine import bs_price
+    rows: List[dict] = [{"kind": "hedge", "ticker": "SPY", "qty": -60.0, "price": spy_px, "dollar_delta": round(-60.0 * spy_px, 2),
+                         "beta": 1.0, "beta_dollar_delta": round(-60.0 * spy_px, 2)}]
+    for tk, px, k, qty in (("XOM", 105.0, 100.0, 300), ("NVDA", 100.0, 100.0, 150), ("AMZN", 98.0, 100.0, 200)):
+        b = _DEMO_BETA_BASE[tk]
+        for cp in ("call", "put"):
+            mid = bs_price(px, k, 25 / 365.0, 0.04, 0.32, cp)
+            sign = 1.0 if cp == "call" else -1.0
+            delta = sign * 0.6 if (cp == "call") == (px > k) else sign * 0.4
+            dd = -qty * 100 * delta * px / 100.0
+            rows.append({"kind": "option", "ticker": tk, "cp": cp, "strike": k, "price": px, "dte": 25, "iv": 0.32,
+                         "mid": round(mid, 4), "qty": -float(qty), "beta": b, "dollar_delta": round(dd, 2),
+                         "beta_dollar_delta": round(dd * b, 2), "symbol": f"{tk}DEMO{cp[0].upper()}"})
+    return rows
+
+
 def _demo_stress(pn: dict, nav: float, spots=(-10, -5, 0, 5, 10), ivs=(-10, 0, 10, 20)) -> dict:
     """合成压力网格，形状同 `portfolio_greeks.stress_table`：Delta + Gamma（现货²）+ Vega（IV 点）三项二阶展开。
     只给演示与测试用，数字不代表任何真实组合。"""
@@ -447,6 +476,8 @@ def demo_hedge_view(as_of: Optional[str] = None, days: int = 12) -> dict:
                      "evaluable": True, "reason": None, "loss_before_pct": 16.3, "loss_after_pct": 22.4, "marginal_pct": 6.1,
                      "would_skip": {"15": True, "20": True}}] if i == days - 3 else []
             audits[iso]["tail"] = _demo_tail(port_nav, i - (days - 5), ents)
+        if i == days - 1:                                  # 只有最近一份带逐行暴露：「β 窗口对照」重算压力网格要用它
+            audits[iso]["rows"] = demo_beta_rows(px)
     old = [(cal[0] - timedelta(days=k)).isoformat() for k in (7, 6, 5)]
     return {
         "source": "demo", "state_dir": "(演示数据)", "exists": True, "opened": True, "errors": {},

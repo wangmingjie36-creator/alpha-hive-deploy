@@ -16,19 +16,24 @@ v0.45.330 的 `_buzz_scope_gaps` 只守一个方向：「点名了通道，必�
   · 确认 = ``measurement_fix``：修的是原始输入的**测量误差**（判据同 `signal_archive` 世代边界注释：改的不是
     「产生该值的函数」）；已知坏行走 `signal_archive.QUARANTINE`；
   · 确认 = ``no_value_change``：重构 / 清理，产出值逐位不变；
+  · 确认 = ``coverage``（v0.45.671）：**守卫自己的覆盖范围变了**、生产代码没变——说明里必须写窗口审计的结论
+    （新圈进来的东西在窗口里变过没有、变过的各归哪条确认 / 交谁判过）；
   · ``baseline``：每个单元的第一条，记窗口起点时的代码。
 
-两种非边界确认都必须写明凭什么，进 git 历史、可审。**判断交给人，守卫只保证「没人能忘了判断」。**
+非边界确认都必须写明凭什么，进 git 历史、可审。**判断交给人，守卫只保证「没人能忘了判断」。**
 
 指纹
 ----
 去掉 docstring 后 `ast.unparse` 的 sha256 前 16 位：注释、空行、docstring 不影响；任何代码改动都会变。
-单元的定位器见 `_LOCATORS`；定位不到（文件 / 函数 / 赋值不见了）⇒ 抛 `FingerprintError`，不当作「没变」。
+= 定位代码（`_LOCATORS`）+ **依赖闭包**（v0.45.671，`unit_dependencies`）：定位代码引用到的 config 项（精确到读过的键）、
+别的模块里的函数 / 常量、同文件不提字段名的辅助函数，跨文件传递，缺省一律算进去；只有 `EXEMPT_DEPS` 写明理由的不算。
+定位不到（文件 / 函数 / 赋值 / 依赖的定义不见了）⇒ 抛 `FingerprintError`，不当作「没变」。
+看某个单元现在盯着哪些依赖：`signal_code_fingerprints.py --deps <单元>`。
 
 ⚠️ 已知不管的（写在这里，免得被当成「守住了」）
 ----------------------------------------------
-- **取数细节**：行情的数据源优先级、重试、限流、forming-bar 护栏等不在指纹里——只有「提到三个行情字段的
-  定义 / 函数」在（`mentions_price_fields`）。那一层的改动按测量误差处理、坏日子走 QUARANTINE。
+- **推不出来的依赖**：动态访问（`getattr(obj, 变量)`、importlib）、经实例属性的方法调用（类本身被引用到才算）、
+  环境变量、数据 / 状态文件、第三方库版本（v0.45.671 前「取数细节不在指纹里」那条已由依赖闭包补上）。
 - **LLM 新闻增强**（`llm_service.analyze_news_sentiment`）：只在 LLM 可用时生效，生产恒 `--no-llm`；
   切模式不经代码改动，指纹管不到。
 - **数据本身**：上游 API 自己改了口径（如 F&G 源站改算法），代码没动，指纹也不会变。
@@ -43,13 +48,13 @@ v0.45.330 的 `_buzz_scope_gaps` 只守一个方向：「点名了通道，必�
 
 用法
 ----
-    /usr/local/bin/python3 signal_code_fingerprints.py          # 各单元当前指纹 vs 登记
+    /usr/local/bin/python3 signal_code_fingerprints.py                  # 各单元当前指纹 vs 登记
+    /usr/local/bin/python3 signal_code_fingerprints.py --deps buzz.news # 这个单元现在盯着哪些依赖
 """
 from __future__ import annotations
 
 import ast
 import hashlib
-import json
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -65,12 +70,11 @@ _BUZZ_CHANNELS: Tuple[str, ...] = (
 #: 单元名 → {"code": ((相对仓库根的文件, 定位器), …), "signals": 该单元决定的归档信号}
 #: 信号并集必须恰好等于维度 IC 协议的 `H1_INPUT_SIGNALS`（测试钉住：多了会误要求确认，少了会漏守）
 UNITS: Dict[str, Dict] = {
-    # Buzz 自己算通道的那段：analyze() 里合成之前的全部语句 + 模块级辅助函数；通道读的阈值；缩放用的 _safe_score
+    # Buzz 自己算通道的那段：analyze() 里合成之前的全部语句 + 模块级辅助函数；缩放用的 _safe_score。
+    # 通道读的阈值（AGENT_SCORING 的 volume_thresholds / volatility_thresholds）v0.45.671 起由依赖闭包自动推出，不再手写
     "buzz.channels": {
         "code": (("swarm_agents/buzz_bee.py", "buzz_channel_block"),
-                 ("swarm_agents/cache.py", "def:_safe_score"),
-                 ("config.py", "agent_scoring:volume_thresholds"),
-                 ("config.py", "agent_scoring:volatility_thresholds")),
+                 ("swarm_agents/cache.py", "def:_safe_score")),
         "signals": _BUZZ_CHANNELS,
     },
     "buzz.reddit": {"code": (("reddit_sentiment.py", "module"),),
@@ -249,9 +253,38 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "（无空行 / 首段 1 行 / 首段 2 行 / 末段 1 行 / 末段 2 行 / 首末都有 / 整份空行 / 真 K 线缺收盘 / 空行与真 K 线同时间戳，每类 ≥ 300 份）："
      "drop_event_only_rows 的帧与末行标志、event_only_positions、history_price_metrics 全部逐位相同。冻结通道层 buzz_v1_channels 没动。"
      "**用户 2026-10-27 在对话里说「都按推荐的来，按根因修复」**（二次检查 8 条；#6 计数分档、#8 共用实现）；不登记边界"),
+
+    # v0.45.671（守卫覆盖范围改为自动推导：单元指纹 = 定位代码 + 依赖闭包）：生产代码没变，守卫自己变了 ⇒ 6 个单元的指纹全变，
+    # 各登记一条 coverage。窗口审计 experiments/fingerprint_coverage_audit.py（证据冻结在 experiments/fingerprint_coverage_audit_20261028.json）：
+    # 在 10-12 起 12 个扫描日实际跑的提交上用现行定义逐日重算依赖，再比 10-27 扫描提交 ddc6229 → 本次基线 4104cd62（无变化）。
+    ("buzz.channels",   "3c9004a4b4899dce", "coverage",
+     "v0.45.671：依赖闭包推出 AGENT_SCORING 的 volume_thresholds / volatility_thresholds（取代手写的两个子键定位器，口径相同）、"
+     "_log / LLM_ERRORS；合成权重 buzz_weights 与 LLM 路径按 EXEMPT_DEPS 豁免。窗口审计：12 个扫描日依赖逐日未变。"
+     "**用户 2026-10-28 在对话里选「登记 6 条 coverage 确认」**"),
+    ("buzz.reddit",     "cca0a8864da65b6a", "coverage",
+     "v0.45.671：依赖闭包推出 CACHE_CONFIG.ttl.reddit / ttl.reddit_memory（缓存时长决定用哪一份榜单）、resilience 的会话 / 限流 / "
+     "熔断、hive_logger 的缓存读写。窗口审计：12 个扫描日依赖逐日未变（配置项一处未变）。**用户 2026-10-28 选「登记 6 条 coverage 确认」**"),
+    ("buzz.news",       "947adc478af66e8d", "coverage",
+     "v0.45.671：依赖闭包推出 config.NEWS_SOURCE_CONFIG（新闻主源开关——此前改成 alpha_vantage 指纹不红、桥接照过，正是本版要补的缺口）、"
+     "SENTIMENT_KEYWORDS / NEWS_FILTER_CONFIG 读到的键、get_secret、models.clean_score、观测层缓存函数、resilience。窗口审计：配置项窗口内"
+     "一处未变；唯一变化是 10-22 新增的观测层缓存函数（v0.45.591，本单元已按 no_value_change 确认）。**用户 2026-10-28 选「登记 6 条 coverage 确认」**"),
+    ("buzz.yahoo",      "df3b1e129af0c580", "coverage",
+     "v0.45.671：依赖闭包推出 CACHE_CONFIG.ttl.yahoo_trending、hive_logger 缓存读写、resilience。窗口审计：12 个扫描日依赖逐日未变。"
+     "**用户 2026-10-28 选「登记 6 条 coverage 确认」**"),
+    ("buzz.fear_greed", "6656f28f3fd0c2e3", "coverage",
+     "v0.45.671：依赖闭包推出观测层缓存函数、hive_logger 缓存读写、resilience；顺带转给 GuardBee 的 VIX 期限结构按 EXEMPT_DEPS 豁免。"
+     "窗口审计：唯一变化是 10-22 新增的观测层缓存函数（v0.45.591，本单元已按 no_value_change 确认）。**用户 2026-10-28 选「登记 6 条 coverage 确认」**"),
+    ("price.fields",    "2f0de0b3ce93c329", "coverage",
+     "v0.45.671：依赖闭包推出 180 项——同文件不提字段名的辅助函数（_latest_closed_session / _drop_forming_bar / _session_last_minute、"
+     "price_history.MOMENTUM_LOOKBACK 等）、CBOE 原始数据与收盘核实（_fetch_cboe_payload / close_verdict / official_price）、Twelve Data、"
+     "自攒价格索引、云端快照、交易日历、portfolio_greeks 的场次判断。窗口审计逐步对账：10-16（505）、10-20（557 / 562 / 564 / 566）、10-21（580）、"
+     "10-22（591 使观测层缓存函数可达）、10-26（639 / 645）均归已有确认；10-20 那步还含 v0.45.563（提前收盘日末根判据，只改依赖层、旧守卫看不见、"
+     "没进本表）——当时已按测量误差修正记入预注册 §13.10（用户 10-20 定，窗口内首个提前收盘日 11-27，已入窗样本值不变）；10-27 的 "
+     "v0.45.656（CboeStaleVintageError 加可选属性 last_trade_time、_fetch_cboe_payload 抛出时带上；抛不抛 / 返回值 / 报错文字不变，取价路径"
+     "一个值都不动）此前无人判过——**用户 2026-10-28 在对话里定按 no_value_change**。**同日用户选「登记 6 条 coverage 确认」**"),
 ]
 
-NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change"})
+NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change", "coverage"})
 MIN_NOTE_CHARS = 20
 
 
@@ -297,22 +330,25 @@ def _mentions_fields(node: ast.AST) -> bool:
     return False
 
 
-def _loc_module(tree: ast.Module, rel: str, _arg: str) -> str:
-    return ast.unparse(tree)
+# 每个定位器返回 (归一化文本, 定位到的语法节点, 归本单元所有的顶层名字)；"*" = 整个文件。
+# 节点交给依赖闭包（v0.45.671）去找它们引用了哪些单元之外的东西；文本的算法与此前逐字相同。
+
+def _loc_module(tree: ast.Module, rel: str, _arg: str):
+    return ast.unparse(tree), list(tree.body), {"*"}
 
 
-def _loc_def(tree: ast.Module, rel: str, name: str) -> str:
+def _loc_def(tree: ast.Module, rel: str, name: str):
     for n in _top_defs(tree):
         if n.name == name:
-            return ast.unparse(n)
+            return ast.unparse(n), [n], {name}
     raise FingerprintError(f"{rel} 里找不到顶层定义 {name}")
 
 
-def _loc_mentions(tree: ast.Module, rel: str, _arg: str) -> str:
+def _loc_mentions(tree: ast.Module, rel: str, _arg: str):
     hits = sorted((n for n in _top_defs(tree) if _mentions_fields(n)), key=lambda n: n.name)
     if not hits:
         raise FingerprintError(f"{rel} 里没有任何提到 {sorted(PRICE_FIELDS)} 的顶层定义——结构变了，守卫需要重新定位")
-    return "\n".join(f"# {n.name}\n{ast.unparse(n)}" for n in hits)
+    return "\n".join(f"# {n.name}\n{ast.unparse(n)}" for n in hits), hits, {n.name for n in hits}
 
 
 def _is_composite_assign(stmt: ast.stmt) -> bool:
@@ -320,7 +356,7 @@ def _is_composite_assign(stmt: ast.stmt) -> bool:
             and any(isinstance(t, ast.Name) and t.id == "sentiment_composite" for t in stmt.targets))
 
 
-def _loc_buzz_channels(tree: ast.Module, rel: str, _arg: str) -> str:
+def _loc_buzz_channels(tree: ast.Module, rel: str, _arg: str):
     """模块级辅助函数 + `BuzzBeeWhisper.analyze` 里 `sentiment_composite = …` 之前的全部语句
     （合成本身与之后的调整属于冻结层，不在这里——改它们不该要求输入层确认）。"""
     helpers = sorted((n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))),
@@ -347,27 +383,480 @@ def _loc_buzz_channels(tree: ast.Module, rel: str, _arg: str) -> str:
         raise FingerprintError(f"{rel}：analyze 里找不到 `sentiment_composite = …`——结构变了，守卫需要重新定位")
     parts = [f"# helper {n.name}\n{ast.unparse(n)}" for n in helpers]
     parts.append("# analyze before composite\n" + "\n".join(ast.unparse(s) for s in pre))
-    return "\n".join(parts)
+    return "\n".join(parts), helpers + pre, {n.name for n in helpers}
 
 
-def _loc_agent_scoring(tree: ast.Module, rel: str, key: str) -> str:
-    for n in tree.body:
-        if (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "AGENT_SCORING" for t in n.targets)
-                and isinstance(n.value, ast.Dict)):
-            for k, v in zip(n.value.keys, n.value.values):
-                if isinstance(k, ast.Constant) and k.value == key:
-                    try:
-                        return json.dumps(ast.literal_eval(v), sort_keys=True, ensure_ascii=False)
-                    except ValueError as e:
-                        raise FingerprintError(f"{rel}：AGENT_SCORING[{key!r}] 不是字面量（{e}）") from e
-            raise FingerprintError(f"{rel}：AGENT_SCORING 里没有 {key!r}")
-    raise FingerprintError(f"{rel} 里找不到字面量字典 AGENT_SCORING")
-
-
-_LOCATORS: Dict[str, Callable[[ast.Module, str, str], str]] = {
+_LOCATORS: Dict[str, Callable[[ast.Module, str, str], tuple]] = {
     "module": _loc_module, "def": _loc_def, "mentions_price_fields": _loc_mentions,
-    "buzz_channel_block": _loc_buzz_channels, "agent_scoring": _loc_agent_scoring,
+    "buzz_channel_block": _loc_buzz_channels,
 }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 依赖闭包（v0.45.671）：单元之外、单元代码却依赖的东西，自动推出、并进指纹
+# ────────────────────────────────────────────────────────────────────────────
+#
+# 为什么：v0.45.554 起每个单元盯哪些代码是 `UNITS` 里手写的定位器，没有任何东西核对它全不全。单元代码从 config 读的
+# 开关、从别的模块借的函数、同文件里不提字段名的辅助函数，都在守卫之外——2026-10-28 查出新闻主源开关
+# `config.NEWS_SOURCE_CONFIG["primary"]`（注释写着「回滚用」）改成 alpha_vantage 时**指纹不红、桥接照过**，
+# H1 的新闻通道却换了量纲；同类的还有缓存时长 `CACHE_CONFIG["ttl"]`、`data_pipeline._latest_closed_session`
+# （决定 Twelve Data 量比收不收，不提字段名）、`cboe_options.close_verdict` 等。
+#
+# 怎么推：从单元的定位节点出发，找它们引用的名字——经 import 别名解析到别的模块、或同文件的顶层定义——取那个定义
+# 并接着找它引用的名字（跨文件传递闭包）。
+#   · config 项精确到**实际读的那个键**：`_CC["ttl"].get("reddit")` ⇒ `CACHE_CONFIG.ttl.reddit`；整体拿去用 ⇒ 整个对象。
+#     config 里对它的就地修改语句（`X["k"] = …` / `X.update(…)`）一并算进去。
+#   · 缺省是**算进去**：漏了登记只会多要一次确认，不会漏守（与「拿不准就选 ①」同一方向）。
+#   · 只有 `EXEMPT_DEPS` 里写明理由的才不算（闭包在那里停）；登记了却没被任何单元碰到 ⇒ 过期条目，测试红。
+#   · 追到**另一个单元**的定位代码、且两边守的信号有交集 ⇒ 停：那段改动由它自己的单元认领、点名的信号也对
+#     （例：buzz.channels 调 `get_ticker_news` ⇒ 归 buzz.news）。没有交集就不停（例：buzz.news 用到的
+#     `observation_layer` 缓存函数在 price.fields 的整份定位里，但 price.fields 不守新闻 ⇒ buzz.news 照样把它们算进去）。
+#   · 定位不到定义 ⇒ 抛 `FingerprintError`，不当作「没变」。
+#
+# ⚠️ 推不出来的（写在这里，免得被当成「守住了」）：动态访问（`getattr(obj, 变量)`、importlib）、经实例属性的方法调用
+# （`self._x.fetch()`——类本身被引用到才算进去）、环境变量、数据 / 状态文件、第三方库（yfinance 版本）、Python 版本。
+
+#: 闭包在这里停、不进指纹的依赖。键 = (相对路径, 顶层名字)；名字 "*" = 整个文件；config 项可以带键路径
+#: （`("config.py", "AGENT_SCORING.buzz_weights")` 只豁免这一枝）。**每条都要写凭什么**；登记了却碰不到 ⇒ 过期，测试红。
+EXEMPT_DEPS: Dict[Tuple[str, str], str] = {
+    ("observation_archive.py", "*"):
+        "只存不改值：取数模块把原始内容交给它落档，它只返回内容地址、不改取数结果；四个情绪模块与行情取数的返回值逐位不变由 "
+        "tests/test_observation_archive.py 与 tests/test_price_observations.py 钉住（v0.45.568 / 580）",
+    ("ledger_io.py", "*"):
+        "原子写盘的机制（加锁、临时文件 + 原子替换、fsync、失败登记）——经 hive_logger.atomic_json_write 写原始内容缓存时被碰到；"
+        "写进去的内容由 atomic_json_write / SafeJSONEncoder 决定（它们照算），写法本身不改内容",
+    ("llm_service.py", "*"):
+        "只在 LLM 模式生效（BuzzBee 新闻的 LLM 语义增强）；生产恒 --no-llm（编排器守卫 tests/test_orchestrator_never_enables_llm.py），"
+        "本模块说明「已知不管的」那条",
+    ("vix_term_structure.py", "*"):
+        "fear_greed.get_vix_term_structure 只是转给 GuardBee 的代理函数，get_fear_greed（F&G 读数）不调它——F&G 通道与 "
+        "VIX 期限结构无关；它整份在 fear_greed.py 里才被闭包碰到",
+    ("hive_logger.py", "PATHS"):
+        "数据路径解析：只决定文件放在哪个目录，不决定取到 / 算出什么值；_HivePaths 随每个新产物加属性、改动频繁，算进来只会"
+        "让无关提交反复要求确认",
+    ("config.py", "AGENT_SCORING.buzz_weights"):
+        "七个通道的合成权重——属冻结层（buzz_v1 自带副本），改它不动任何通道值；_bw 那一句恰好写在合成之前、被定位进来"
+        "（tests TestSensitivity::test_frozen_layer_change_does_not_touch_the_input_layer 守的就是这条）",
+}
+
+_MUTATING_METHODS = frozenset({"update", "setdefault", "pop", "popitem", "clear", "append", "extend", "insert", "remove"})
+
+
+#: (相对路径, 源码哈希) → (去 docstring 的语法树, 父节点表)。按**内容**缓存：同一份源码不论经哪个读函数来都只解析一次
+#: （测试里成百次变异只重解析被改的那个文件）。树在这里之后只读，不被改写。
+_PARSE_CACHE: Dict[Tuple[str, str], Tuple[ast.Module, Dict[int, ast.AST]]] = {}
+
+
+class _Sources:
+    """一次指纹计算里共用的「读源码 + 解析 + 定位」缓存（`read` 缺省读本仓；历史审计时传 `git show`）。"""
+
+    def __init__(self, read: Optional[Callable[[str], str]] = None):
+        self.read = read or _default_read
+        self._text: Dict[str, str] = {}
+        self._exists: Dict[str, bool] = {}
+        self.located_cache: Dict[str, list] = {}
+        self.owners_cache: Optional[Dict[Tuple[str, str], List[str]]] = None
+
+    def _parsed(self, rel: str) -> Tuple[ast.Module, Dict[int, ast.AST]]:
+        if rel not in self._text:
+            self._text[rel] = self.read(rel)
+        key = (rel, hashlib.sha256(self._text[rel].encode("utf-8")).hexdigest())
+        if key not in _PARSE_CACHE:
+            tree = _parse(self._text[rel], rel)
+            par: Dict[int, ast.AST] = {}
+            for node in ast.walk(tree):
+                for ch in ast.iter_child_nodes(node):
+                    par[id(ch)] = node
+            _PARSE_CACHE[key] = (tree, par)
+        return _PARSE_CACHE[key]
+
+    def tree(self, rel: str) -> ast.Module:
+        return self._parsed(rel)[0]
+
+    def parents(self, rel: str) -> Dict[int, ast.AST]:
+        return self._parsed(rel)[1]
+
+    def exists(self, rel: str) -> bool:
+        if rel not in self._exists:
+            try:
+                self.read(rel)
+                self._exists[rel] = True
+            except (FingerprintError, OSError):     # 读函数可能是 git show（抛前者）或直接读盘（抛后者）
+                self._exists[rel] = False
+        return self._exists[rel]
+
+    def module_rel(self, dotted: str) -> Optional[str]:
+        """本仓模块的相对路径；不是本仓的（标准库 / 第三方）⇒ None。"""
+        base = dotted.replace(".", "/")
+        for cand in (f"{base}.py", f"{base}/__init__.py"):
+            if self.exists(cand):
+                return cand
+        return None
+
+
+def _is_main_guard(st: ast.stmt) -> bool:
+    t = st.test if isinstance(st, ast.If) else None
+    return (isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) and t.left.id == "__name__"
+            and any(isinstance(c, ast.Constant) and c.value == "__main__" for c in t.comparators))
+
+
+def _module_level(tree: ast.Module):
+    """模块层语句（钻进 if / try / with，不进函数与类；**不进 `if __name__ == "__main__":`**——脚本入口里的变量不是
+    可被 import 的定义，且常与函数局部变量同名，会造出假依赖）。"""
+    stack = list(reversed(tree.body))
+    while stack:
+        st = stack.pop()
+        if _is_main_guard(st):
+            continue
+        yield st
+        if isinstance(st, ast.If):
+            stack.extend(reversed(st.body + st.orelse))
+        elif isinstance(st, ast.Try):
+            stack.extend(reversed(st.body + [x for h in st.handlers for x in h.body] + st.orelse + st.finalbody))
+        elif isinstance(st, (ast.With, ast.AsyncWith)):
+            stack.extend(reversed(st.body))
+
+
+def _package(rel: str) -> str:
+    parts = rel[:-3].split("/")
+    return ".".join(parts[:-1]) if parts[-1] != "__init__" else ".".join(parts[:-1])
+
+
+def _import_target(node: ast.ImportFrom, rel: str) -> Optional[str]:
+    if node.level == 0:
+        return node.module
+    pkg = _package(rel).split(".") if _package(rel) else []
+    up = node.level - 1
+    if up > len(pkg):
+        return None
+    base = pkg[:len(pkg) - up] if up else pkg
+    return ".".join(base + ([node.module] if node.module else [])) or None
+
+
+def _aliases(src: "_Sources", rel: str, nodes) -> Dict[str, Tuple[str, Optional[str]]]:
+    """本地名 → (模块, 属性或 None=整个模块)。模块层的 import + 这些节点里（函数体内）的 import。"""
+    out: Dict[str, Tuple[str, Optional[str]]] = {}
+
+    def add(st):
+        if isinstance(st, ast.Import):
+            for a in st.names:
+                if a.asname:
+                    out[a.asname] = (a.name, None)
+                else:
+                    out[a.name.split(".")[0]] = (a.name.split(".")[0], None)
+        elif isinstance(st, ast.ImportFrom):
+            mod = _import_target(st, rel)
+            if mod is None:
+                return
+            for a in st.names:
+                local = a.asname or a.name
+                # `from pkg import submodule` ⇒ 整个子模块
+                out[local] = ((f"{mod}.{a.name}", None) if src.module_rel(f"{mod}.{a.name}") else (mod, a.name))
+    for st in _module_level(src.tree(rel)):
+        add(st)
+    for root in nodes:
+        for n in ast.walk(root):
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                add(n)
+    return out
+
+
+def _keypath(node: ast.AST, parents: Dict[int, ast.AST]) -> Tuple[str, ...]:
+    """引用处往外读常量键：`X["a"]["b"]` / `X.get("a")` / `X["a"].get("b", 0)` ⇒ ("a", "b")；别的用法 ⇒ 到此为止。"""
+    path: List[str] = []
+    cur = node
+    while True:
+        p = parents.get(id(cur))
+        if (isinstance(p, ast.Subscript) and p.value is cur and isinstance(p.slice, ast.Constant)
+                and isinstance(p.slice.value, str)):
+            path.append(p.slice.value)
+            cur = p
+            continue
+        if isinstance(p, ast.Attribute) and p.value is cur and p.attr == "get":
+            call = parents.get(id(p))
+            if (isinstance(call, ast.Call) and call.func is p and call.args and isinstance(call.args[0], ast.Constant)
+                    and isinstance(call.args[0].value, str)):
+                path.append(call.args[0].value)
+                cur = call
+                continue
+        return tuple(path)
+
+
+def _bound_names(fn: ast.AST) -> set:
+    """函数（含 lambda）自己绑定的名字：参数、赋值 / 循环 / with / except / 推导式目标；`global` 声明的除外。"""
+    out: set = set()
+    a = fn.args
+    for arg in a.posonlyargs + a.args + a.kwonlyargs + [x for x in (a.vararg, a.kwarg) if x]:
+        out.add(arg.arg)
+    glob: set = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            out.add(n.id)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            out.add(n.name)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            glob.update(n.names)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n is not fn:
+            out.add(n.name)
+    return out - glob
+
+
+def _references(src: "_Sources", rel: str, nodes, whole_file: bool):
+    """节点引用到的外部名字：[(目标模块, 名字, 键路径)] 与同文件顶层名字集合（整文件定位时不需要）。
+
+    函数里自己绑定的名字（参数、局部变量）不算引用——否则局部变量 `r` 会被认成同文件模块层的某个 `r`。
+    """
+    aliases = _aliases(src, rel, nodes)
+    par = src.parents(rel)
+    ext: List[Tuple[str, str, Tuple[str, ...]]] = []
+    bare: set = set()
+
+    def visit(n: ast.AST, local: frozenset):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            local = local | frozenset(_bound_names(n))
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and isinstance(n.ctx, ast.Load):
+            a = aliases.get(n.value.id)
+            if a and a[1] is None and n.value.id not in local:
+                ext.append((a[0], n.attr, _keypath(n, par)))
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr" and len(n.args) >= 2:
+            a = aliases.get(n.args[0].id) if isinstance(n.args[0], ast.Name) else None
+            if a and a[1] is None and isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str):
+                ext.append((a[0], n.args[1].value, _keypath(n, par)))
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id not in local:
+            a = aliases.get(n.id)
+            if a is not None:
+                if a[1] is not None:
+                    ext.append((a[0], a[1], _keypath(n, par)))
+            elif not whole_file:
+                bare.add(n.id)
+        for ch in ast.iter_child_nodes(n):
+            visit(ch, local)
+
+    for root in nodes:
+        visit(root, frozenset())
+    return ext, bare
+
+
+def _definition(src: "_Sources", rel: str, name: str):
+    """模块层里定义 `name` 的语句；或它是从别处 import 来的（转出口）⇒ ("reexport", 模块, 属性)。都没有 ⇒ None。"""
+    stmts = []
+    for st in _module_level(src.tree(rel)):
+        if isinstance(st, ast.ImportFrom):
+            for a in st.names:
+                if (a.asname or a.name) == name:
+                    mod = _import_target(st, rel)
+                    if mod:
+                        return ("reexport", mod, a.name)
+        elif isinstance(st, ast.Import):
+            for a in st.names:
+                if (a.asname or a.name.split(".")[0]) == name:
+                    return ("reexport_module", a.name if a.asname else a.name.split(".")[0], None)
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and st.name == name:
+            stmts.append(st)
+        elif isinstance(st, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = st.targets if isinstance(st, ast.Assign) else [st.target]
+            if any(isinstance(x, ast.Name) and x.id == name for t in targets for x in ast.walk(t)):
+                stmts.append(st)
+    return ("nodes", stmts) if stmts else None
+
+
+def _config_text(src: "_Sources", name: str, paths) -> str:
+    """config 项的归一化文本：精确到读过的键；导航不下去（不是字面量字典 / 键不存在）⇒ 整条赋值。"""
+    tree = src.tree("config.py")
+    defs = [st for st in _module_level(tree)
+            if (isinstance(st, (ast.FunctionDef, ast.ClassDef)) and st.name == name) or _binds_name(st, name)]
+    if not defs:
+        raise FingerprintError(f"config.py 里找不到 {name} 的定义（依赖闭包定位不到——不当作没变）")
+    # 就地修改：`NAME[...] = …` / `NAME.update(…)` 之类，一律整条算进去
+    muts = []
+    for st in _module_level(tree):
+        tgt_hit = isinstance(st, (ast.Assign, ast.AugAssign)) and any(
+            isinstance(t, (ast.Subscript, ast.Attribute)) and isinstance(_base_name(t), str) and _base_name(t) == name
+            for t in (st.targets if isinstance(st, ast.Assign) else [st.target]))
+        call_hit = (isinstance(st, ast.Expr) and isinstance(st.value, ast.Call) and isinstance(st.value.func, ast.Attribute)
+                    and st.value.func.attr in _MUTATING_METHODS and _base_name(st.value.func.value) == name)
+        if tgt_hit or call_hit:
+            muts.append(st)
+    parts = []
+    single = defs[0] if len(defs) == 1 and isinstance(defs[0], ast.Assign) and isinstance(defs[0].value, ast.Dict) else None
+    for path in sorted(paths):
+        if not path or single is None:
+            parts = [ast.unparse(d) for d in defs]
+            break
+        node = single.value
+        for k in path:
+            if not isinstance(node, ast.Dict):
+                node = None
+                break
+            node = next((v for kk, v in zip(node.keys, node.values)
+                         if isinstance(kk, ast.Constant) and kk.value == k), None)
+            if node is None:
+                break
+        if node is None:      # 键不在字面量里（被代码当缺省值处理）——记下「不存在」也是一种值
+            parts.append(f"{name}.{'.'.join(path)} = <absent>")
+        else:
+            parts.append(f"{name}.{'.'.join(path)} = {ast.unparse(node)}")
+    return "\n".join(parts + [ast.unparse(m) for m in muts])
+
+
+def _binds_name(st: ast.stmt, name: str) -> bool:
+    """赋值语句直接把 `name` 绑成新值（目标就是这个名字，或解包里的它）；`name[...] = …` 不算（那是就地修改）。"""
+    if not isinstance(st, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        return False
+    targets = st.targets if isinstance(st, ast.Assign) else [st.target]
+
+    def hit(t):
+        if isinstance(t, ast.Name):
+            return t.id == name
+        if isinstance(t, (ast.Tuple, ast.List)):
+            return any(hit(e) for e in t.elts)
+        if isinstance(t, ast.Starred):
+            return hit(t.value)
+        return False
+    return any(hit(t) for t in targets)
+
+
+def _base_name(node: ast.AST) -> Optional[str]:
+    while isinstance(node, (ast.Subscript, ast.Attribute)):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _located(unit: str, src: "_Sources"):
+    """单元的定位结果：[(rel, locator, 文本, 节点, 归属名字)]（同一次计算里缓存）。"""
+    if unit in src.located_cache:
+        return src.located_cache[unit]
+    out = []
+    for rel, locator in UNITS[unit]["code"]:
+        kind, _, arg = locator.partition(":")
+        if kind not in _LOCATORS:
+            raise FingerprintError(f"未知定位器 {locator!r}")
+        text, nodes, owned = _LOCATORS[kind](src.tree(rel), rel, arg)
+        out.append((rel, locator, text, nodes, owned))
+    src.located_cache[unit] = out
+    return out
+
+
+def _owners(src: "_Sources") -> Dict[Tuple[str, str], List[str]]:
+    """(rel, 名字或 "*") → 定位到它的单元们（用于「追到别的单元就停」）。"""
+    if src.owners_cache is not None:
+        return src.owners_cache
+    own: Dict[Tuple[str, str], List[str]] = {}
+    for unit in UNITS:
+        for rel, _loc, _t, _n, owned in _located(unit, src):
+            for name in owned:
+                own.setdefault((rel, name), []).append(unit)
+    src.owners_cache = own
+    return own
+
+
+def _exempt_key(rel: str, name: str, path: Tuple[str, ...]) -> Optional[Tuple[str, str]]:
+    if (rel, "*") in EXEMPT_DEPS:
+        return (rel, "*")
+    if rel == "config.py":
+        for i in range(len(path), -1, -1):
+            key = (rel, ".".join((name,) + path[:i]))
+            if key in EXEMPT_DEPS:
+                return key
+        return None
+    return (rel, name) if (rel, name) in EXEMPT_DEPS else None
+
+
+def unit_dependencies(unit: str, read: Optional[Callable[[str], str]] = None, _src: Optional["_Sources"] = None,
+                      _hits: Optional[set] = None) -> Dict[str, str]:
+    """单元依赖闭包：{标签: 归一化文本}，标签 `相对路径::名字`（config 带键路径）。定位不到 ⇒ 抛。
+
+    `_hits` 收集碰到的豁免键（过期检查用）。
+    """
+    src = _src or _Sources(read)
+    located = _located(unit, src)
+    own = _owners(src)
+    my_signals = set(UNITS[unit]["signals"])
+    mine = {(rel, n) for rel, _l, _t, _n, owned in located for n in owned}
+    deps: Dict[str, str] = {}
+    config_paths: Dict[str, set] = {}
+    seen: set = set()
+    work: List[Tuple[str, list, bool]] = [(rel, nodes, owned == {"*"}) for rel, _l, _t, nodes, owned in located
+                                          if rel != "config.py"]
+
+    def stop_at_other_unit(rel: str, name: str) -> bool:
+        for key in ((rel, "*"), (rel, name)):
+            for other in own.get(key, []):
+                if other != unit and my_signals & set(UNITS[other]["signals"]):
+                    return True
+        return False
+
+    def visit(rel: str, name: str, path: Tuple[str, ...], hops: int = 0):
+        if hops > 20:
+            raise FingerprintError(f"{rel}::{name} 的转出口链太长——疑似循环 import，守卫判不了")
+        ek = _exempt_key(rel, name, path)
+        if ek is not None:
+            if _hits is not None:
+                _hits.add(ek)
+            return
+        if (rel, "*") in mine or (rel, name) in mine or stop_at_other_unit(rel, name):
+            return
+        d = _definition(src, rel, name)
+        if d is None:
+            raise FingerprintError(f"{rel} 里找不到 {name} 的定义（依赖闭包定位不到——不当作没变）")
+        if d[0] in ("reexport", "reexport_module"):
+            target = src.module_rel(d[1])
+            if target is None:
+                return                                        # 转自标准库 / 第三方
+            if d[0] == "reexport_module":
+                return                                        # 整个模块对象被转出去：用到的属性在用处另行解析
+            return visit(target, d[2], path, hops + 1)
+        if rel == "config.py" and all(isinstance(st, (ast.Assign, ast.AnnAssign, ast.AugAssign)) for st in d[1]):
+            config_paths.setdefault(name, set()).add(path)
+            return
+        label = f"{rel}::{name}"
+        if label in seen:
+            return
+        seen.add(label)
+        deps[label] = "\n".join(ast.unparse(st) for st in d[1])
+        work.append((rel, d[1], False))
+
+    while work:
+        rel, nodes, whole = work.pop()
+        ext, bare = _references(src, rel, nodes, whole)
+        for mod, name, path in ext:
+            target = src.module_rel(mod)
+            if target is not None:
+                visit(target, name, path)
+        if not whole:
+            defined = {nm for st in _module_level(src.tree(rel)) for nm in _defined_names(st)}
+            for name in sorted(bare & defined):
+                visit(rel, name, ())
+    for name, paths in config_paths.items():
+        if () in paths:
+            paths = {()}
+        else:     # 去掉被更短前缀包含的
+            paths = {p for p in paths if not any(q != p and p[:len(q)] == q for q in paths)}
+        label = f"config.py::{name}" + ("" if paths == {()} else "[" + ",".join(".".join(p) for p in sorted(paths)) + "]")
+        deps[label] = _config_text(src, name, paths)
+    return dict(sorted(deps.items()))
+
+
+def _defined_names(st: ast.stmt):
+    if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        yield st.name
+    elif isinstance(st, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        for t in (st.targets if isinstance(st, ast.Assign) else [st.target]):
+            for x in ast.walk(t):
+                if isinstance(x, ast.Name):
+                    yield x.id
+
+
+def exemption_problems(read: Optional[Callable[[str], str]] = None) -> List[str]:
+    """`EXEMPT_DEPS` 的毛病：没写理由 / 登记了却没有任何单元碰到（过期条目是后门）。"""
+    src = _Sources(read)
+    hits: set = set()
+    for unit in UNITS:
+        unit_dependencies(unit, _src=src, _hits=hits)
+    out = [f"豁免 {k} 没写凭什么（≥{MIN_NOTE_CHARS} 字）" for k, v in EXEMPT_DEPS.items()
+           if len((v or "").strip()) < MIN_NOTE_CHARS]
+    out += [f"豁免 {k} 没有任何单元碰到——过期条目，删掉" for k in EXEMPT_DEPS if k not in hits]
+    return out
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -387,19 +876,18 @@ def _default_read(rel: str) -> str:
         raise FingerprintError(f"读不到 {path}：{e}") from e
 
 
-def unit_fingerprint(unit: str, read: Optional[Callable[[str], str]] = None) -> str:
-    """单元的指纹。`read(相对路径) -> 源码文本`，缺省读本仓文件（历史审计时传 `git show`）。"""
-    read = read or _default_read
-    parsed: Dict[str, ast.Module] = {}
+def unit_fingerprint(unit: str, read: Optional[Callable[[str], str]] = None,
+                     _src: Optional["_Sources"] = None) -> str:
+    """单元的指纹。`read(相对路径) -> 源码文本`，缺省读本仓文件（历史审计时传 `git show`）。
+
+    = 定位代码（算法与 v0.45.554 起逐字相同）+ 依赖闭包（v0.45.671，`unit_dependencies`）。
+    """
+    src = _src or _Sources(read)
     h = hashlib.sha256()
-    for rel, locator in UNITS[unit]["code"]:
-        kind, _, arg = locator.partition(":")
-        if kind not in _LOCATORS:
-            raise FingerprintError(f"未知定位器 {locator!r}")
-        if rel not in parsed:
-            parsed[rel] = _parse(read(rel), rel)
-        text = _LOCATORS[kind](parsed[rel], rel, arg)
+    for rel, locator, text, _nodes, _owned in _located(unit, src):
         h.update(f"{rel}::{locator}\n{text}\n\0".encode("utf-8"))
+    for label, text in unit_dependencies(unit, _src=src).items():
+        h.update(f"dep::{label}\n{text}\n\0".encode("utf-8"))
     return h.hexdigest()[:16]
 
 
@@ -414,10 +902,11 @@ def check(read: Optional[Callable[[str], str]] = None, acks: Optional[list] = No
     单元状态：`ok` / `unacknowledged`（代码变了、没有确认）/ `error`（算不出指纹——同样不是 ok）。
     """
     units: Dict[str, Dict] = {}
+    src = _Sources(read)
     for unit in UNITS:
         ack = last_ack(unit, acks)
         try:
-            fp = unit_fingerprint(unit, read)
+            fp = unit_fingerprint(unit, _src=src)
         except FingerprintError as e:
             units[unit] = {"state": "error", "error": str(e), "acknowledged": ack[1] if ack else None}
             continue
@@ -503,10 +992,20 @@ def how_to_acknowledge(unit: str, fp: str) -> str:
             f"signal_archive.COHORT_SIGNAL_SCOPE 点名上面至少一个信号（会截断维度 IC 协议的 H1）；确认方式 = 该 version\n"
             f"  ② 修的是原始输入的测量误差（不是换函数）⇒ 确认方式 = 'measurement_fix'，坏日子另走 QUARANTINE\n"
             f"  ③ 重构 / 清理，产出值逐位不变 ⇒ 确认方式 = 'no_value_change'\n"
-            f"②③ 要写清凭什么（≥{MIN_NOTE_CHARS} 字）。拿不准就选 ①——漏截断不可逆，多截断只损失样本。")
+            f"②③ 要写清凭什么（≥{MIN_NOTE_CHARS} 字）。拿不准就选 ①——漏截断不可逆，多截断只损失样本。\n"
+            f"（v0.45.671 起指纹含依赖闭包：改的可能不在单元自己的文件里，而在它引用的 config 项 / 别的模块——"
+            f"`signal_code_fingerprints.py --deps {unit}` 列出它盯着的全部依赖。）")
 
 
-def main() -> int:
+def main(argv: Optional[List[str]] = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description="输入层代码指纹：当前 vs 登记；--deps 列出单元的依赖闭包")
+    ap.add_argument("--deps", metavar="UNIT", choices=sorted(UNITS), default=None)
+    args = ap.parse_args(argv)
+    if args.deps:
+        for label in unit_dependencies(args.deps):
+            print(label)
+        return 0
     res = check()
     for unit, u in res["units"].items():
         if u["state"] == "error":

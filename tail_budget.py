@@ -56,6 +56,10 @@ REASONS: Dict[str, str] = {
     "stress_unavailable": "压力网格不可得（没有任何格子）",
     "no_grid_for_ticker": "这只标的的跨式腿没有进压力表（缺价 / 缺报价 / 已到期被剔除），没法试算",
     "not_in_book_order": "这只标的不在今天的跨式持仓里（持仓文件与审计行对不上）",
+    # β 窗口对照（v0.45.662）
+    "alt_beta_unavailable": "对照用的长窗口 β 一个都没取到（行情源不可得 / 样本不足）",
+    "no_rows": "审计里没有可对照的持仓行",
+    "base_unavailable": "现状（60 日 β）的压力表本身算不出来",
 }
 
 
@@ -278,6 +282,159 @@ def brief(attr: dict, gate: Optional[dict], alert_pct: Optional[float] = None) -
 def public(attr: dict) -> dict:
     """落盘 / 返回前去掉内部大字典（逐格全表只给计算用）。"""
     return {k: v for k, v in attr.items() if not k.startswith("_")}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# β 窗口对照（v0.45.662，**只展示**）
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# 起因（2026-10-27 只读查证）：压力网格每个标的的现货冲击 = β × 大盘冲击，β 取近 60 个交易日对 SPY 的 OLS。XOM / CVX 的 60 日 β 是
+# −1.1 / −0.9（250 日 −0.69 / −0.62，2 年 +0.17 / +0.28）⇒ 「现货 −10%」那一格把能源股推到**上涨** ~10%，下行格里这两笔的损失其实
+# 是股价涨造成的。**没有「哪个窗口才对」的真值**——所以不改网格的 β，只把另一套窗口的结果并排摆出来：全网格最差格、下行最差格（SPY 认沽
+# 面板的规模目标）、告警是否破线、β·$Delta 与带位（SPY 覆盖建议吃的那个量）、逐标的贡献。
+#
+# 纯函数：不联网、不读写文件；压力函数 / 板块函数由调用方注入；替代 β 由调用方取好传进来（取数在 `alphabot.beta_long`）。
+# **不进审计文件、不进告警、不进任何交易决定**——审计里的压力表、告警、SPY 覆盖账仍只用 60 日 β。
+
+#: 「差异明显」的两条判据：符号相反，或 |差| ≥ 这个值（只用来挑要列出来的标的，不进任何决定）
+BETA_GAP_MIN = 0.5
+BETA_SENS_TICKERS_SHOWN = 8
+
+
+def with_beta(rows: Sequence[dict], alt_betas: Optional[Dict[str, Optional[float]]]) -> Tuple[List[dict], List[str], List[str]]:
+    """每行换上替代 β，返回 `(新行, 换上了的标的, 沿用原 β 的标的)`；不改入参。
+
+    · 只换**本来就有 β 的**股票 / 期权 / 逐票对冲行：本来没 β 的行在压力表里被剔除，换不换都一样被剔除——不借替代 β 把它们「救回来」，
+      否则两套结果的 `partial` / `excluded` 对不上，比较就不是同一批行。
+    · SPY 覆盖行（`kind == "hedge"`）β 恒为 1，不动。
+    · 替代 β 缺（取不到）的标的沿用原 β，并单列在第三项里——结果是「混合口径」，调用方必须把它摆出来。
+    · `beta_dollar_delta` 跟着重算（= `dollar_delta` × β），这是 SPY 覆盖建议用的那个量。"""
+    out: List[dict] = []
+    used, kept = set(), set()
+    for r in rows:
+        r2 = dict(r)
+        out.append(r2)
+        tk = r.get("ticker")
+        if r.get("kind") == "hedge" or tk is None or _num(r.get("beta")) is None:
+            continue
+        b = _num((alt_betas or {}).get(tk))
+        if b is None:
+            kept.add(tk)
+            continue
+        used.add(tk)
+        r2["beta"] = b
+        dd = _num(r.get("dollar_delta"))
+        r2["beta_dollar_delta"] = dd * b if dd is not None else None
+    return out, sorted(used), sorted(kept - used)
+
+
+def _beta_dd(rows: Sequence[dict]) -> Optional[float]:
+    """组合 β·$Delta 合计（含 SPY 覆盖行；与审计 `aggregate.beta_dollar_delta` 同一个量）。没有任何行带值 ⇒ None。"""
+    vals = [_num(r.get("beta_dollar_delta")) for r in rows]
+    vals = [v for v in vals if v is not None]
+    return sum(vals) if vals else None
+
+
+def _band_status(pct: Optional[float], band_pct: Optional[float]) -> Optional[str]:
+    if pct is None or not band_pct:
+        return None
+    return "above" if pct > band_pct else "below" if pct < -band_pct else "inside"
+
+
+def _sens_side(rows: List[dict], spy_price, nav: float, stress_fn, sector_of, max_open, alert_pct: float,
+               band_pct: Optional[float]) -> Optional[dict]:
+    attr = attribution(rows, spy_price, nav, stress_fn, sector_of, max_open)
+    if not attr.get("available"):
+        return None
+    cells = _cells(stress_fn(list(rows), spy_price))
+    bd = _beta_dd(rows)
+    bd_pct = _r(bd / nav * 100.0, 2) if bd is not None else None
+    return {"loss_pct_nav": attr["loss_pct_nav"], "breach": bool(attr["loss_pct_nav"] > alert_pct),
+            "worst": attr["worst"], "downside_worst": attr["downside_worst"], "partial": attr["partial"],
+            "beta_dd_pct": bd_pct, "band_status": _band_status(bd_pct, band_pct),
+            "cells": [{"spot_pct": k[0], "iv_pts": k[1], "pnl": _r(v), "pct_nav": _r(v / nav * 100.0, 2)}
+                      for k, v in sorted(cells.items())],
+            "by_ticker": {t["ticker"]: {"at_worst_pct": t["at_worst_pct"], "at_downside_pct": t["at_downside_pct"]}
+                          for t in attr["by_ticker"]}}
+
+
+def beta_sensitivity(rows: Sequence[dict], alt_betas: Optional[Dict[str, Optional[float]]], spy_price: Optional[float],
+                     nav: Optional[float], stress_fn: Callable[[List[dict], Optional[float]], dict],
+                     sector_of: Callable[[str], Optional[str]], max_open: Optional[int] = None, *,
+                     base_label: str = "60 日", alt_label: str = "250 日", alert_pct: Optional[float] = None,
+                     band_pct: Optional[float] = None) -> dict:
+    """同一份审计行，用「原 β（审计里的，60 日）」与「替代 β（长窗口）」各算一遍压力网格 / 尾部归因，并排给出。
+
+    返回 `{available, reason, base, alt, downside_ratio, flips, by_ticker, missing, partial, ...}`：
+      · `base` / `alt`：`{loss_pct_nav, breach, worst, downside_worst, beta_dd_pct, band_status, cells, partial}`；
+      · `downside_ratio` = 替代 ÷ 现状 的下行最差格损益（SPY 认沽面板的规模目标按这个比例缩放，未触上限时）；
+      · `flips`：持仓标的里 β 符号相反或 |差| ≥ `BETA_GAP_MIN` 的，按持仓净 $Delta 的绝对值降序；
+      · `by_ticker`：逐标的两套贡献（%NAV），按两套里较大的 |最差格 / 下行最差| 降序，最多 `BETA_SENS_TICKERS_SHOWN` 个；
+      · `missing`：替代 β 缺、沿用原 β 的标的（混合口径，`partial` 为真）。
+    纯函数；算不出写原因码，不抛。**没有任何推荐 / 结论字段**——两套都是模型假设，没有哪套是真值。"""
+    alert = float(alert_pct if alert_pct is not None else CONFIG["alert_pct"])
+    nav_f = _num(nav)
+    if not nav_f or nav_f <= 0:
+        return _sens_unavailable("nav_unavailable", base_label, alt_label)
+    rows = [r for r in rows if isinstance(r, dict)]
+    if not rows:
+        return _sens_unavailable("no_rows", base_label, alt_label)
+    alt_rows, used, missing = with_beta(rows, alt_betas)
+    if not used:
+        return _sens_unavailable("alt_beta_unavailable", base_label, alt_label)
+    base = _sens_side(list(rows), spy_price, nav_f, stress_fn, sector_of, max_open, alert, band_pct)
+    if base is None:
+        return _sens_unavailable("base_unavailable", base_label, alt_label)
+    alt = _sens_side(alt_rows, spy_price, nav_f, stress_fn, sector_of, max_open, alert, band_pct)
+    if alt is None:
+        return _sens_unavailable("stress_unavailable", base_label, alt_label)
+    # 逐标的
+    net_dd: Dict[str, float] = {}
+    base_beta: Dict[str, float] = {}
+    for r in rows:
+        tk = r.get("ticker")
+        if tk is None or r.get("kind") == "hedge":
+            continue
+        net_dd[tk] = net_dd.get(tk, 0.0) + (_num(r.get("dollar_delta")) or 0.0)
+        if _num(r.get("beta")) is not None:
+            base_beta.setdefault(tk, _num(r.get("beta")))
+    flips = []
+    for tk in used:
+        b0, b1 = base_beta.get(tk), _num((alt_betas or {}).get(tk))
+        if b0 is None or b1 is None:
+            continue
+        sign_flip = (b0 < 0) != (b1 < 0) and min(abs(b0), abs(b1)) > 0.0
+        if sign_flip or abs(b0 - b1) >= BETA_GAP_MIN:
+            flips.append({"ticker": tk, "base_beta": _r(b0, 2), "alt_beta": _r(b1, 2), "sign_flip": bool(sign_flip),
+                          "net_dollar_delta_pct_nav": _r(net_dd.get(tk, 0.0) / nav_f * 100.0, 2)})
+    flips.sort(key=lambda f: (-abs(f["net_dollar_delta_pct_nav"] or 0.0), f["ticker"]))
+    names = sorted(set(base["by_ticker"]) | set(alt["by_ticker"]))
+    table = []
+    for tk in names:
+        b, a = base["by_ticker"].get(tk) or {}, alt["by_ticker"].get(tk) or {}
+        vals = [abs(x) for x in (b.get("at_worst_pct"), b.get("at_downside_pct"), a.get("at_worst_pct"), a.get("at_downside_pct"))
+                if x is not None]
+        table.append({"ticker": tk, "base_at_worst_pct": b.get("at_worst_pct"), "alt_at_worst_pct": a.get("at_worst_pct"),
+                      "base_at_downside_pct": b.get("at_downside_pct"), "alt_at_downside_pct": a.get("at_downside_pct"),
+                      "base_beta": _r(base_beta.get(tk), 2) if tk in base_beta else None,
+                      "alt_beta": _r(_num((alt_betas or {}).get(tk)), 2) if tk in used else None,
+                      "_key": max(vals) if vals else 0.0})
+    table.sort(key=lambda x: (-x["_key"], x["ticker"]))
+    for t in table:
+        t.pop("_key")
+    for side in (base, alt):
+        side.pop("by_ticker")
+    bd, ad = (base["downside_worst"] or {}).get("pnl"), (alt["downside_worst"] or {}).get("pnl")
+    return {"available": True, "reason": None, "version": VERSION, "base_label": base_label, "alt_label": alt_label,
+            "alert_pct": alert, "band_pct": band_pct, "base": base, "alt": alt,
+            "downside_ratio": _r(ad / bd, 2) if (bd and ad is not None) else None,
+            "flips": flips, "by_ticker": table[:BETA_SENS_TICKERS_SHOWN], "n_alt": len(used), "missing": missing,
+            "partial": bool(missing) or bool(base["partial"]) or bool(alt["partial"])}
+
+
+def _sens_unavailable(reason: str, base_label: str = "60 日", alt_label: str = "250 日") -> dict:
+    return {"available": False, "reason": reason, "reason_zh": REASONS.get(reason, reason), "version": VERSION,
+            "base_label": base_label, "alt_label": alt_label}
 
 
 def build(rows: Sequence[dict], spy_price: Optional[float], nav: Optional[float],

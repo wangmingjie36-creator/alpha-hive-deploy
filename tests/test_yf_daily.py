@@ -726,6 +726,7 @@ POLICY = {
     ("risk_engine.py", "_fetch_daily_returns"): "ignore",
     ("risk_engine.py", "historical_var"): "ignore",
     ("risk_engine.py", "run_full_risk_analysis"): "refuse",
+    ("alphabot/beta_long.py", "_fetch_closes"): "ignore",                          # 按日期对齐、只用 as_of 以前的收益；缺最近一根只是样本少一天
     # ── history：带日期窗口、按日期用（v0.45.658 迁入）──
     ("backtest_engine.py", "PriceBackfiller._get_price_on_date"): "ignore",
     ("backtester.py", "Backtester._history"): "ignore",

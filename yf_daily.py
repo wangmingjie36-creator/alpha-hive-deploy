@@ -66,6 +66,7 @@ SOURCES: Dict[str, str] = {
     "iv_crush": "iv_crush_scraper.get_iv_crush_data：历史财报涨跌（深度报告）",
     "crowding_cli": "crowding_detector.get_crowding_metrics：拥挤度示例（生产只被它自己的 __main__ 调用）",
     "risk_engine_cli": "risk_engine：收益序列 / 历史 VaR / 全量分析 / 多票收益 / β（生产只被它自己的 CLI 调用）",
+    "alphabot_beta_long": "alphabot.beta_long._fetch_closes：对冲页「β 窗口对照」的 250 日 β 日线（只展示，按日期对齐）",
     # ── Ticker.history()：带日期窗口、按日期用（v0.45.658 迁入；此前是「dated_window」例外）──
     "backtest_engine": "backtest_engine.PriceBackfiller._get_price_on_date：回测按日取价",
     "backtester_history": "backtester.Backtester._history：回测缓存未命中时的逐票取价",

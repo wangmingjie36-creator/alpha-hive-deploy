@@ -63,12 +63,16 @@ def _mock_yf_ticker(symbol, close_values):
 class TestGetMacroContextFallback:
     """yfinance 不可用时的降级行为"""
 
-    def test_fallback_when_yfinance_missing(self, monkeypatch):
-        """yfinance import 失败时返回 fallback"""
+    def test_fallback_when_yfinance_missing(self, monkeypatch, stub_cboe_vix):
+        """yfinance import 失败：只让 Yahoo 那几个符号算没取到，财政部照用、板块轮动报整段失败（v0.45.669）。
+        旧：整份换成兜底常量（VIX 20 / 10Y 4.5 / 宏观分 5.0 neutral），连财政部取到的 10Y 也扔掉。
+        变红的变异：恢复 `except ImportError: return base`。"""
         import fred_macro
         # 清除缓存
         fred_macro._CACHE = {}
         fred_macro._CACHE_TS = 0.0
+        monkeypatch.setattr(fred_macro, "_same_day_macro_data", lambda as_of=None: (
+            {"TNX": {"last": 4.9, "prev": None, "change_pct": None}}, {"TNX": "treasury_gov@2026-10-27"}))
 
         import builtins
         original_import = builtins.__import__
@@ -80,9 +84,10 @@ class TestGetMacroContextFallback:
 
         monkeypatch.setattr(builtins, "__import__", mock_import)
         result = fred_macro._fetch_macro_data()
-        assert result["data_source"] == "fallback"
-        assert result["macro_regime"] == "neutral"
-        assert result["macro_score"] == 5.0
+        assert "error" not in result and result["data_source"] == "treasury"
+        assert (result["treasury_10y"], result["rate_environment"]) == (4.9, "high")
+        assert result["quote_gaps"] == {n: "yfinance_unavailable" for n in ("DXY", "FVX", "GLD", "SPX", "TLT", "VIX")}
+        assert result["sector_rotation"]["gaps"] == {"*": "error:ImportError"}
 
 
 class TestMacroRiskAdjustment:

@@ -5,6 +5,295 @@
 
 ---
 
+## [0.45.674] — 2026-10-28 — Fixed：一轮扫描的宏观快照只取一次——扫描开头取、注入 Guard，日报宏观段与网站读同一份（此前 4 个并行线程各取一次、网站在 30 分钟缓存过期后再取一次，同一轮出现过三份宏观）；登边界 10-19（同 654 ~ 669，作废 0 条）
+
+用户 10-28「宏观缓存那条现在开工先给方案」⇒ 问「这个是按根因修复的方案吗」⇒「照建议的，先占号，从第 0 步开始」。
+**先更正 669 待办里我的诊断**：那条写的是「缓存 30 分钟比扫描短 ⇒ 同一次扫描里不同标的可能拿到两份宏观（09-24 29 + 1）」——主因不是这个。
+根因是「这一轮扫描用哪份宏观」没有主人：Guard / 日报宏观段 / 网站各调 `fred_macro.get_macro_context()`，靠 30 分钟进程缓存凑成「同一份」，
+而缓存只在查 / 写时加锁、**取数不在锁里**。第一版方案（单飞锁 + 扫描期间不过期）是给缓存打补丁，改成让扫描自己持有快照。
+
+### 第 0 步：只读实测
+- **并发各取一次（主因）**：生产日志每个扫描日在 Guard 阶段开头 **30 秒内取 4 次**（= 并行线程数 4），首批标的各用自己那份、其余用最后写进缓存的那份。
+  Guard 存档里有宏观来源记录的 44 天中 **4 天同一轮出现多份**：09-02（VIX 16.34 / 15.2，4 + 26）、09-15（1 行少了 Yahoo，1 + 29）、
+  09-24（29 fallback + 1 finnhub）、09-29（4 次取数各命中 5 / 5 / 2 / 7 个来源 ⇒ 27 + 2 + 1）；09-30 起 0 天（4 次结果碰巧都一样）。
+  （此前在核对脚本里我报过「132 天里 24 天」——读错了字段层级，以这里为准。）
+- **网站晚于缓存（次因）**：网站在 `save_report` 里渲染，比 Guard 取数晚 22–36 分钟。逐日对 gh-pages 上的页面：只有 **10-22** 晚了 35.9 分钟
+  ⇒ 渲染前重取，那次 CBOE 断连 ⇒ 网站 **VIX 16.7（前一天的值）、黄金「—」**，日报与 Guard 是 19.0。（09-24 / 25 / 10-12 网站整块「—」是 669 修的另一件事。）
+  日报宏观段一直在 20–28 分钟内命中缓存，余量很薄。
+- **补跑**：快照上下文退出时 `set_macro_snapshot(None)` 清缓存，`save_report` 在上下文之外 ⇒ 网站重取到运行当天的宏观（代码路径推出，没实跑）。
+- 板块轮动（世代边界判据看不到它）：10-19 ~ 10-27 同一 ETF 下各票冷热全同（XLY 只有 TSLA 一只，比不了）。
+- 读者普查：生产代码里调 `get_macro_context` 的只有 Guard、日报 P5、网站三处；`deep_analysis` / 实验脚本也走 `prefetch_shared_data`
+  ⇒ 快照**不放进** `prefetch_shared_data`，只在扫描主流程里取，那两处行为不变。
+
+### Fixed
+- `alpha_hive_daily_report.run_swarm_scan`：预取之后、注入之前 `prefetched["macro"] = self._scan_macro = _fetch_scan_macro()`——整轮只取这一次，
+  在快照上下文里 ⇒ 补跑取到的是 D 的。`_fetch_scan_macro` 取不到（`fred_macro` 导入失败；它自己的取数错误已收成带 `error` 的整份缺失）⇒
+  `{"data_source": "fallback", "error": …}` + WARNING，不留给读者各自再取。
+- `swarm_agents/base.py`：`BeeAgent._prefetched_macro`（缺省 None）+ 访问器 `_scan_macro()`；`inject_prefetched` 注入 `prefetched.get("macro")`
+  （没有这个键 ⇒ None）。
+- `swarm_agents/guard_bee._calc_macro_adjustment`：读 `self._scan_macro()`；None（没注入：单票 CLI / 测试 / 深度分析）才自己调，那条路逐字不变；
+  注入的是 {} 也不再取（空就是这一轮取到的结果）。
+- `_fetch_report_context`（日报宏观段）：用 `self._scan_macro`（Guard 读的同一个对象）；不经扫描调到这里才自己取。
+- `dashboard_renderer`：读 `report["macro_context"]`，**不再**调 `get_macro_context()`；缺这个键 ⇒ 宏观区块全「—」+ WARNING（不取运行当时的：那正是要修的错位）。
+- 单飞锁 / 「扫描期间不过期」都没做：扫描里不再有并发调用，缓存只留给扫描之外的进程。
+
+### Added（观测点：谁会红）
+- `fred_macro.stats()`（`calls` / `fetches`）→ `scan_timing.counters()["macro_context"]` → `alert_manager._check_macro_snapshot_calls`：
+  扫描跑完而 calls ≠ 1 ⇒ **P2**（有读者绕过快照自己取 / 这一轮没取）；计数缺失 ⇒ checks_skipped；早退 / Step 2 没跑完不报。摘要行只在 ≠ 1 时打。
+- `tests/conftest.py::_reset_fred_macro_stats`（autouse，同其他进程级计数）。
+
+### 世代边界（同 654 / 657 / 660 / 663 / 669：并进 10-19 同日标签）
+- **经 Guard 的只有一处**：几次并发取数结果不同的日子，首批标的的宏观票（VIX / 曲线 / 黄金 / 板块 ⇒ `macro_regime` → `RegimeWeightAdjuster` ⇒ `final_score`）
+  变成与其余标的同一份。取数时刻提前几分钟（Guard 阶段开头 ⇒ 扫描开头）不算口径变化：旧代码的取数时刻本就随扫描进度在 14:07–14:30 间漂。
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-10-19", "v0.45.674", …)`：`cohort_start()` 仍 10-19 ⇒ **作废 0 条**。
+- 等价判据 `_equiv_macro_scan_snapshot`：Guard 不在 / 出错 ⇒ 等价；当天全部 Guard 行的宏观记录（快照出的 10 个键，不含另一次独立取数的 `vix_term`）
+  读得出且是同一份 ⇒ 等价；两份以上 / 有一行读不出 / 没带当天全部行 ⇒ 证不出。判别器的逐行扫描为此多传 `_day`（当天全部标的），其余判据忽略它。
+  不需要冻结证据 ⇒ 今天 14:00 这轮若仍是旧代码也自动覆盖。
+- 印记 `_BOUNDARY_MARKERS["v0.45.674"]`：Guard `details.macro_scan_snapshot_checked = True`（`GENERATION_MARKS`，成功与出错路径都写），只认实时行。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.674"] = ("agent.GuardBeeSentinel.*",)`（**0 个信号后移**）；维度 IC H1 / H2 不读 Guard 宏观票 ⇒ 不截断；
+  `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代标签扩为 `…+v0.45.669+v0.45.674`。
+- 推送前对生产数据根只读跑判别器：652 ~ 663 仍 `matches`；669 / 674 `no_evidence_yet`、`unmarked_after_boundary=[]`；
+  不等价日只有 09-02 / 15 / 24 / 29 与 9 月前没有宏观细节记录的日子，10-19 起 0 天。
+
+### 测试
+- `tests/test_macro_scan_snapshot.py`（新，40 条）：A Guard 读注入快照（不调 / {} 也不调 / 没注入照旧调一次 / 注入键缺 ⇒ None / 4 线程 × 12 票同一份）；
+  B 扫描主流程（AST：`prefetched["macro"]` 在预取之后、注入之前由 `_fetch_scan_macro()` 填且同时给 `self._scan_macro`；取一次；取不到 ⇒ fallback + error；
+  日报宏观段用本轮快照 / 不经扫描照旧取）；C 网站（读报告不调、补跑卸载快照后仍显示 D 的、缺键 ⇒ 全「—」+ WARNING 不取）；
+  D 读者白名单（AST 双向：生产代码调 `get_macro_context` 的恰好三处 + 扫描器有牙两种写法）；E 计数 / scan_timing / P2 三态；
+  F 边界登记（条目 / 作用域 / 印记 / 作废 0 条 / 0 个信号后移 / 不截断 H1 H2 / ML 标签 / Guard 字面量 / 出错路径印记 / 判据 5 种形状 / 判定三态）。
+- 既有用例：`test_macro_bar_deltas` / `test_macro_single_path` 的网站渲染改为把宏观放进 `report["macro_context"]`（原来打桩 `get_macro_context`）；
+  `test_scan_timing` 计数键集合加 `macro_context`；`test_dashboard_renderer` 过期注释更正。
+- 变异：23 个全红、0 个幸存（Guard 忽略注入 / 注入空就重取 / 删取数行 / 挪到注入之后 / 日报宏观段重取 / 取不到返回 None / 网站重取 / 网站缺键回退重取 / 注入 `or {}` / 计数不数调用 / scan_timing 不带计数 / 告警没接 / 判据写成 ≤1 / 判别器不传 `_day` / 判据恒真 / 删等价登记 / 签名含 `vix_term` / 签名漏 VIX / 印记认补跑行 / 印记不进 GENERATION_MARKS / 删 Guard 字面量 / 作用域加 `guard.macro_adj` / 边界日期写上线日）；「网站恢复直接调用」白名单那条单独也红。
+- 拨钟审计：`test_macro_scan_snapshot` / `test_macro_bar_deltas` / `test_scan_timing` +7 / +45 天 0 条新红。
+- 整套：13014 passed、2 xfailed（与另外三个会话的整套错开后跑）；选测登记表按提示 `--files tests/test_macro_scan_snapshot.py --update`（新测试读网站模板，并入 4 个文件的读者清单）。
+
+### 没改 / 待办
+- `vix_term_structure.get_vix_term_structure`（另一次独立取数）每票各调一次：它自己持锁取数 + 30 分钟文件缓存，不会并发重复取，但同样不是「本轮快照」；本版没动。
+- 669 待办里「缓存 30 分钟比扫描短」那条已由本版更正（主因是并发），原文保留、加了指向本条的注。
+
+## [0.45.673] — 2026-10-28 — Added：LLM 影子——模型拒答（`stop_reason=refusal`）单独计数并写进状态文件；JSON 失败日志预览 300 → 2000 字符并带上解析器的错误原因
+
+背景（10-27 的 run）：2 次 JSON 失败里，NFLX 的 Queen 是模型自己中途停笔（`stop_reason=refusal`，418 字符处断掉，内容无违规），MSFT 的 Bear 是 `end_turn` 的 1134 字符却解析不过，而日志只留 300 字符看不出坏在哪。拒答 / 截断 / 格式坏三种原因在 `json_parse_failures` 里分不开。
+
+### Added
+- `llm_service.py`：新计数 `model_refusals`（`stop_reason == "refusal"` 的调用数，进 `_EXTRA_COUNTERS`，每日重置）。**只计数**——调用返回值、重试、回落行为全不变；与 `budget_refusals` / `unpriced_refusals`（我们自己拒绝）无关，故不叫 `refusals`。
+- `llm_shadow_scan.py`：状态文件 `usage.model_refusals`，扫描结束的用量行加「模型拒答 N」。**不进健康判定、不进 `_SPEND_SIGNS`**（拒答的调用本来就计入 `call_count`；老状态文件没有这个键，`day_lock` 读它们不受影响）。
+
+### Changed
+- `llm_service.py`：JSON 解析失败的日志预览 `_FAIL_PREVIEW_CHARS` 300 → 2000（够看清 1134 字符的 Bear 回复，仍有上限，总长度另记在前面）；日志加 `解析错误=<原因>@<偏移>`（最后一次解析尝试的 `JSONDecodeError`，偏移相对被解析的片段）。
+
+### 测试 / 变异
+- `tests/test_llm_service_5_5_models.py`：拒答与截断 / 格式坏分开数且不改返回值、正常 stop_reason 不计、每日重置清零、预览有上限且够长、日志带解析错误与偏移；`tests/test_llm_shadow_scan.py`：状态文件带 `model_refusals` 且拒答再多也不影响健康。
+- 6 种人为破坏（去掉计数 / `max_tokens` 也算拒答 / 预览改回 300 / 日志不带错误 / 每日重置漏计数器 / 状态文件不带）全部让测试变红，文件已原样还原。相关 362 条通过。
+- 未做（待用户定）：对 `refusal` 重试——要花钱、会改调用行为，需新一代。NFLX 为什么被拒答仍待验证。
+
+## [0.45.672] — 2026-10-28 — Fixed：v0.45.670 二次检查——「裸 `--update` 什么都不量」只说对一半：分支改了别的测试时它量那几个、提示「已并入」、退出码 0，看起来修好了、漏登还在；说法改准，并在这条成功路径上当场提醒
+
+**二次检查结论**：670 的数与事实都对——`co` / `cb`（返回 `cboe_options` 的夹具）补核过也是 `import time` 的模块；普查另按直接赋值 `xxx.sleep = …`、跨行 `patch(` 查过，没有新的，16 条就是全部。查出一处说法错，而且错在更危险的方向：
+
+- **现象**：667 / 670 在 `CLAUDE.md`、`update_command` docstring、模块文档、`cmd_update` 注释、667 的 CHANGELOG 里都写「读者没改 / 已在 main 上时裸 `--update` 什么都不量」。只对**分支一个测试都没改**成立（那条路 667 已改成明说「什么都没量」）。分支**改了别的测试**时，裸 `--update` 量那几个、打印「已测量 N 个测试文件并并入…请把它一起提交」、登记表也变了、退出码 0——没改过的读者根本不在量的范围里。实测（假 pytest 模拟）：这样做完再跑漂移检查，那条漏登原样还在。
+- `tools/select_tests/select_tests.py`：上面几处说法改成「量不到没改过的读者」并分开写两种情形；`cmd_update` 在**不带 `--files`** 的成功路径上加一行 `⚠️ 只量了相对 <base> 改过的这 N 个：<文件>。漂移检查 / 随跑测量点名的其他读者不在内——照那里打印的 --files … --update 命令补。`（带 `--files` 时量的就是点名的，不打）。
+- `CLAUDE.md` 选测一条、`CHANGELOG.md` 667 条第 1 点与 670 条的同一句：就地改并标明「672 更正」。
+- `tests/test_select_tests.py`（76 → 77 条）：分支改了别的测试时裸 `--update` 的成功提示必须说只量了哪几个、给 `--files`；`--files` 点名时不打。
+
+**变异检查**（4 个，全红在预期断言上，还原后绿）：M0 改动前的整份文件 / 不打提醒 / 点名时也打（红在「不打」那句）/ 提醒不列文件（红在「列出量了哪个」）。
+
+**核对**：`test_select_tests.py` 77 passed；`ruff check .` 全绿。整套经 `select_tests.py --run`（改了核心文件 ⇒ 回退整套、带插件做漂移检查）：**12978 passed / 0 失败**，退出码 0，漂移零处。
+
+## [0.45.671] — 2026-10-28 — Fixed：维度 IC 输入层指纹的覆盖范围改为自动推导（依赖闭包）——新闻主源开关、缓存时长、不提字段名的辅助函数、跨模块的收盘核实等此前都在守卫之外；窗口审计 12 个扫描日、6 个单元按 coverage 重新确认
+
+**问题**：`signal_code_fingerprints.UNITS` 每个单元盯哪些代码是**手写清单**（整个模块 / 某个函数 / 「提到三个行情字段名的顶层定义」/
+`AGENT_SCORING` 的两个子键），没有任何东西核对它全不全。查出：新闻主源开关 `config.NEWS_SOURCE_CONFIG["primary"]`（注释写着「回滚用」）改成
+alpha_vantage ⇒ **指纹不红、桥接照过**（冻结层三种新闻源都认），H1 的新闻通道却换了量纲（历史上 AV 被拒、改走 Yahoo 那次，新闻分系统性低约 21 分）。同类：`CACHE_CONFIG`
+的缓存时长、`price_history.MOMENTUM_LOOKBACK`（改成 5 指纹不变）、`data_pipeline._latest_closed_session`（决定 Twelve Data 量比收不收）、
+`cboe_options.close_verdict`、`models.clean_score`、观测层缓存函数（v0.45.591 新加，只算进了 price.fields）——模块说明「已知不管的」第一条
+就写着「取数细节不在指纹里」。
+
+### Fixed
+- `signal_code_fingerprints.py`：单元指纹 = 定位代码（算法逐字不变）+ **依赖闭包** `unit_dependencies`——从定位节点出发经 import 别名 / 转出口 /
+  相对 import 解析到别的模块与同文件顶层定义，跨文件传递；config 项**精确到读过的键**（`_CC["ttl"].get("reddit")` ⇒ `CACHE_CONFIG[ttl.reddit]`，
+  整体拿去用 ⇒ 整个对象；就地修改语句一并算；键不存在记 `<absent>`）；函数自己绑定的局部名字不算引用、`if __name__ == "__main__":` 不进；
+  **缺省一律算进去**（漏登记只多要一次确认、不会漏守），只有 `EXEMPT_DEPS` 写明理由的不算（6 条：观测档案只存不改值、原子写盘机制、LLM 路径、
+  F&G 模块里转给 GuardBee 的 VIX 期限结构、数据路径 PATHS、合成权重 buzz_weights——冻结层），`exemption_problems` 报理由太短 / 过期条目；
+  追到**守同一信号的另一个单元**就停（buzz.channels 调新闻模块 ⇒ 归 buzz.news；观测层缓存函数虽在 price.fields 的整份定位里，但它不守新闻 ⇒
+  buzz.news / buzz.fear_greed 照样算进去）；定位不到依赖的定义 ⇒ 抛 `FingerprintError`。
+- 手写的 `AGENT_SCORING` 子键定位器删掉（由闭包推出，口径相同）；新增确认方式 `coverage`（守卫自己的覆盖变了、生产代码没变，说明里写审计结论）；
+  `--deps <单元>` 列出单元盯着的全部依赖；失配提示补一句「改的可能在依赖里」。解析结果按内容全局缓存（指纹测试 83s → 16s）。
+
+### 窗口审计与重新确认（用户 10-28 定）
+- 新增 `experiments/fingerprint_coverage_audit.py`（证据冻结 `experiments/fingerprint_coverage_audit_20261028.json`）：在 10-12 起 12 个扫描日实际跑的
+  提交上（编排器日志反推）用现行定义逐日重算依赖。**配置项窗口内一处未变**；变化都归已有确认的版本（505 / 557 / 562 / 564 / 566 / 580 / 591 /
+  639 / 645），另两处此前没进确认表：563（只改依赖层；预注册 §13.10 早已按测量误差修正记录）与 **656**（`CboeStaleVintageError` 加可选属性，取价路径
+  一个值不动——用户定按 no_value_change）。10-27 扫描提交 → 本版基线之间依赖无变化。6 个单元各登记一条 `coverage`。
+- 各单元依赖数：buzz.channels 4 / reddit 12 / news 27 / yahoo 10 / fear_greed 15 / price.fields 180。
+
+### Tests
+- `tests/test_signal_code_fingerprints.py`：`TestDependencyClosure`（新闻主源开关只让 buzz.news 变；缓存时长只让读它的单元变、无关键谁都不变；
+  阈值键改名记 `<absent>`；同文件辅助函数与跨模块 `close_verdict` 会让 price.fields 变；三类豁免不变；停 / 不停的两条规则；缺口里点过名的依赖都在；
+  豁免表自检与两种毛病）、`TestResolver`（合成源码：键路径 + 转出口 + 相对 import、局部名 / `__main__` 不算、传递与第三方、定位不到即抛、非常量键取整体）；
+  「动量回落函数改名」改为 `MOMENTUM_LOOKBACK` 常数（旧守卫看不见）+ 「改名没改调用方」进抛错组。变异 14/14 抓到。
+- `tests/test_historical_path_window.py`：`_loc_mentions` 返回值改为 (文本, 节点, 归属名)。
+- `tests/test_paths_not_frozen_at_import.py`（顺带修的守卫误报，同一根因：按源码**子串**判）：「import 期冻结路径」扫描改按**标识符**认
+  `PATHS` / `__file__`，字符串常量里的字样不再算——`EXEMPT_DEPS` 的键 `"PATHS"` 被误报；同类前例 `alphabot/macos_app._DELEGATE`
+  （子进程源码文本，v0.45.451 只能进白名单）随之从 `__file__` 白名单摘除。全仓对拍：两种判据除这两条字符串误报外结果完全相同；补「字符串
+  不报」的断言（换回子串判据 3 条红）。
+- 验证：整套 12996 passed / 1 failed（即上条误报，修后该文件 108 passed）；补改后必跑清单 26 个文件 1636 passed。
+
+### 文档
+- 模块说明（「已知不管的」改写、确认方式加 `coverage`、用法）、预注册 §13.10 补一段（实现，不改规则）。
+
+## [0.45.670] — 2026-10-28 — Fixed：v0.45.667 二次检查——664 勘误自己又少数了一处（15 处、11 处只是不真等，不是 14 / 10）；`CLAUDE.md` 选测一条仍教裸 `--update`，改成照提示打印的 `--files <读者> --update`
+
+**二次检查结论**：667 的代码没有 bug——漏登只会出在 `tests/` 第一层的 `tests/test_*.py`（`<session>` 键被跳过、仓库没有测试子目录），所以打印的 `--files` 里不会有 `--update` 认不出、悄悄丢掉的文件；「该归入读全部」的元守卫跑 `--files <它> --update` 按 619 的分母照样升级；`report_gaps` / `Gap` 没有别的调用方；`csf` / `co` / `cb` / `ty` / `of` / `llm_service` 都是 `import time` 的模块（「替换的是全局函数」成立）。查出两处文字问题：
+
+- **勘误少数一处**（`CHANGELOG.md` 664 末尾的勘误与 667 条目第 2 点）：「另有 14 处、其余 10 处只是不真等」⇒ **15 处、11 处**。漏的是 `tests/test_ghpages_data_root_migration.py:254`：先 `import time as _time_mod` 再 `setattr(_time_mod, "sleep", …)`。667 改 grep `xxx.time` 仍是按**对象的写法**查，碰上别名照样漏——和 664 同一个错。这次按被替换的**属性名**查（`git grep -nE "['\"]sleep['\"]" -- tests`）：16 条 = 664 原句点名的 `test_retry_backoff_seams` 1 处 + 另外 15 处，再逐条核对象都是 `time` 模块。在数 sleep 的仍是那 4 处，结论不变。两处原文就地改并标明「670 更正」。
+- **`CLAUDE.md`「整套测试怎么跑」的选测一条**仍写「修法 `--update`」「加了被现有测试读的新静态文件照样建议 `--update`」——后一种正是裸 `--update` 量不到读者的情况（读者没改；v0.45.672 更正：此处原写「什么都不量」，分支改了别的测试时它会量那几个）。667 只改了工具的提示没同步这里，而每个会话开工都读它。改成：照提示打印的整条命令跑（`--files <漏登的读者> --update`），并写明裸 `--update` 为什么不行。
+
+**核对**：只动文档（`CHANGELOG.md`、`CLAUDE.md`）。`CLAUDE.md` 在登记表里没有读者 ⇒ 选测按 661 回退整套，照做：整套经 `select_tests.py --run`（等另一会话的整套跑完才开）**12938 passed / 0 失败**，退出码 0，漂移零处。
+
+
+## [0.45.669] — 2026-10-28 — Fixed：宏观报价全部没取到时不再整份换成兜底常量（VIX 20 / 10Y 4.5 / 宏观分 5.0）——三条返回路径合一，缺的项本身是 None / unknown，宏观分只算观测到的分项；报价全空那天板块轮动与 FRED 照取；日报 / 仪表板逐格显示；登边界 10-19（同 654 / 657 / 660 / 663，作废 0 条）
+
+用户 10-28「现在开工先给根因解决方案」⇒「照取，先占号，从第 0 步开始」（v0.45.663 的决定点 ①：整份降级的兜底常量单独做；唯一决定点「报价全空那天板块轮动照不照取」按建议照取）。
+根因：`fred_macro._fetch_macro_data` 有三条各自拼装的返回路径——报价（财政部 / Finnhub / Yahoo）一项都没有 ⇒ 提前返回兜底字典
+（VIX 20.0 elevated / 10Y 4.5 high / 美元·大盘 neutral / 黄金 stable、涨跌 0.0 / 宏观分 5.0 neutral）；CBOE 给了 VIX ⇒ 只把 VIX 换成真值、其余照抄兜底。
+「别信这些值」只靠一个旁路标记 `data_source == "fallback"`，每个读者自己记得查——Guard（v0.43.24）、日报（v0.45.54）、仪表板（v0.45.43）都是出过事才补上的；
+下一个新读者照样会漏。连带两处毛病：提前返回时**板块轮动（另一次独立的 Yahoo 取数）与 FRED 都不取** ⇒ 这些天 Guard 的板块票必缺；
+部分降级那天宏观分恒 5.0 neutral，连那个真 VIX 都没算进去。
+
+### 第 0 步：只读实测
+- 137 份日报里 **15 份**走过兜底：06-22 ~ 08-14 的 13 份整份常量（VIX 20.0 / 10Y 4.5 / 宏观分 5.0）；09-24 / 25 两份只有 CBOE VIX 14.21
+  （09-22 的陈旧收盘，Guard 不计票），10Y 4.5 / 宏观分 5.0 neutral 照旧是常量——按 `_classify_vix` 14.21 < 15 是 low，本该 +2 ⇒ 7.0 risk_on
+  （方案里我心算成「moderate +1」，测试按代码实测改正）。**09-26 起 0 份**；10-19 起每天 30/30 行 Guard 宏观来源都含财政部 / Finnhub。
+- 09-24 / 25 两天都是**网络故障**（结构化日志）：09-24 SSL 断连（EOF）+ Yahoo 限流冷却，09-25 DNS 解析失败；财政部重试 3 次都失败 ⇒ 当时照取板块轮动大概率也取不到。
+  那两天 `fred_macro` 自己**一条 WARNING 都没打**，只有仪表板打了「宏观区块将全部显示『—』」——还把 CBOE 那个真 VIX 一起藏了。
+- 现有读者：Guard 按标记跳过（VIX 按 `vix_source` 单独判）⇒ 评分从没吃到常量；日报整段不印；仪表板整块「—」；仪表板 10Y 涨跌只认带财政部日期的 ⇒ 安全；
+  ML 分析 JSON / MCP 不带宏观段（核过 `analysis-*-ml-*.json` 的键）。
+- 顺带看到（没改，见待办）：`get_macro_context` 缓存 30 分钟、扫描跑得更久 ⇒ 同一天不同标的可能拿到两份宏观（09-24：29 行 fallback、1 行 finnhub）。
+
+### Fixed（`fred_macro._fetch_macro_data`：一条路径）
+- 去掉两个提前返回（整份兜底 / 只换 VIX 的部分降级）：报价全空也照常走分析段（663 起它已逐项处理缺值），**板块轮动与 FRED 照取**；
+  源头打一条 WARNING「财政部 / Finnhub / Yahoo 一项都没供上——VIX …；板块轮动与 FRED 照取」，摘要以「宏观报价全部没取到」开头。
+  报价全空时 `data_source` 仍标 `"fallback"`（与旧整份降级同一个标签；不写成 `cloud_snapshot@D` / `fred`：Guard 据它不记曲线 / 黄金，这些天两者也必为 unknown；
+  `ic_rerun_readiness` 旧边界判据也按它认）——但它**不再承担「别信」**：值本身已是缺失。
+- 正常路径上「CBOE 与 Yahoo 都没给 VIX」：旧 `data.get("VIX", {}).get("last", 20.0)` + elevated ⇒ `vix=None`、`vix_regime="unknown"`（`vix_source` 仍是 fallback）。
+  `_classify_vix(None)` ⇒ "unknown"。663 登记的唯一数字兜底例外（这个 20.0）随之删掉，`ALLOWED_NUMERIC_DEFAULTS` 清空。
+- **宏观分只由观测到的分项算**：新增 `MACRO_SCORE_PARTS`（vix / rate / market / dollar / gold / curve / cpi / hy）与输出键 `macro_score_inputs` / `macro_score_missing`；
+  一项都没观测到 ⇒ `macro_score=None`；前六项一项都没有 ⇒ `macro_regime="unknown"`（政体仍由前六项定、cpi / hy 之后加减分——沿用旧次序，没改）。
+  正常日子逐位不变（没观测到的分项本来就不加不减）。宏观分只展示：Guard / Queen 不读它。
+- **兜底字典只剩取数代码自己出错的那个出口用**，且每个观测量是 None / "unknown"，并带 `error: "<类型>: <消息>"`；WARNING 写明「整份为缺失」。
+- yfinance 导入失败不再走整份出口：只让 Yahoo 那几个符号进 `quote_gaps`（`yfinance_unavailable`），财政部 / Finnhub / CBOE / FRED 照用，板块轮动自己报整段失败。
+
+### Changed（读者逐格判，不再按标记整块判）
+- `report_formatters._build_macro`：宏观表照印，缺的格「— / 不可得」，宏观分 None ⇒「评分：—」、政体 unknown ⇒「不可得」，报价全空时加一行 ⚠️ 提示。
+  **旧形状**（标 fallback 又没有 669 起才有的 `macro_score_inputs`，例如拿存档旧日报重渲染）里的值仍是那些常量 ⇒ 照旧整段不印。
+- `dashboard_renderer`：去掉「fallback ⇒ 整块『—』」，逐字段显示（报价全空、CBOE 有 VIX 的日子能看到真 VIX）；WARNING 改成「只显示取到的项」；两处过期注释同改。
+- Guard 的标记判定（`_macro_degraded`）**保留**作为多一层防护，不改投票。
+
+### 世代边界（同 654 / 657 / 660 / 663：并进 10-19 同日标签，逐行等价判据，不需要冻结证据）
+- **经 Guard 的只有一处**：报价全空那天板块轮动照取 ⇒ 板块票可能出现 ⇒ `macro_regime` → `RegimeWeightAdjuster` 权重 ⇒ `final_score`。VIX / 曲线 / 黄金票不变。
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-10-19", "v0.45.669", …)`：`cohort_start()` 仍 10-19 ⇒ **作废 0 条**。
+- 等价判据 `_equiv_macro_single_path`：Guard 不在本行 / 出错 ⇒ 等价；宏观细节读不出 ⇒ 证不出；来源是 `fallback` ⇒ 证不出（旧代码走了提前返回，或取数出错的整份出口——记录里分不出）；
+  其余来源（至少一项报价取到了）⇒ 等价（旧代码走的就是合并后的那条路径；这条路径上只改了「没有 VIX」与只展示的宏观分）。补跑行同样成立。
+- 印记 `_BOUNDARY_MARKERS["v0.45.669"]`：Guard `details.macro_single_path_checked = True`（`GENERATION_MARKS`，成功与出错路径都写），只认实时行。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.669"] = ("agent.GuardBeeSentinel.*",)`（**0 个信号后移**）；`guard.macro_adj` 不点名。维度 IC H1 / H2 不读 Guard 宏观票 ⇒ 不截断。
+- `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代标签扩为 `…+v0.45.663+v0.45.669`。
+- 推送前对生产数据根只读跑判别器：652 / 654 / 657 / 658 / 660 / 663 仍 `matches`；669 `no_evidence_yet`、`unmarked_after_boundary=[]`、10-19 ~ 10-27 七天全等价。
+
+### 测试
+- `tests/test_macro_single_path.py`（新）：A 报价全空（观测量全缺失、宏观分 None / 政体 unknown、板块轮动与 FRED 照取、CPI / HY 单独算分 4.7、只有 CBOE VIX ⇒ 7.0 risk_on、
+  源头 WARNING 与摘要、部分报价不误报）；B 正常路径没 VIX ⇒ None；C 出错出口（全缺失 + `error` + WARNING）；D Guard（报价全空那天板块票出现、曲线 / 黄金 / VIX 不记）；
+  E 日报照印「—」、显示真 VIX，仪表板显示真 VIX（整页渲染）；F AST 守卫（兜底字典里没有数字、状态只许 "unknown"；try 里只有一个 return、except 里一个）+ 守卫有牙的正对照。
+- `tests/test_backfill_macro_asof.py` L 节（登记）：条目 / 作用域 / 印记（含 GENERATION_MARKS）/ 判据 8 种形状 / 作废 0 条 / 0 个信号后移 / 不截断 H1 H2 / ML 标签 /
+  Guard 字面量无条件写印记 / 判定三态（含「边界之后旧代码报价全空的一天 ⇒ boundary_too_early」）。
+- 既有用例按新语义改：`test_every_symbol_off_d_is_named_on_the_degraded_paths[base]` VIX 20.0 ⇒ None；`test_fallback_when_yfinance_missing` 改断言财政部照用、
+  Yahoo 符号点名、轮动整段失败；`test_full_fallback_has_every_key_as_none` 观测量 None、取不到的原因照记（旧整份兜底把 `vix_feed_note` 也抹成 None）；
+  `test_report_formatters` 旧形状照旧不印 + 新形状逐格印。
+- **`tests/conftest.py::stub_fred` 改 autouse**（带 `network` / `integration` 标记的不钉）：报价全空也取 FRED 之后，任何没打桩就调 Guard / `get_macro_context` 的测试
+  都会伸手取 FRED（实测 `test_guard_census_eviction` 首个被离线闸点名）；同 `_block_same_day_macro` 的理由。
+- 变异：**24 处全红**——代码 15 处（恢复提前返回、兜底字典写回 20.0 / stable、正常路径没 VIX 用 20.0、全缺也给 5.0 / neutral、CPI 不记分项、WARNING 降 debug、出错出口不带 error、yfinance 导入失败整份出错、报价全空不标 fallback、日报整段不印 / 旧形状也印、仪表板整块跳过、conftest FRED 桩不 autouse）+ 登记 / 判据 9 处（印记不写 / 不进 GENERATION_MARKS、判据把 fallback 当等价 / 缺细节当等价、删等价登记、日期印记不排补跑、条目日期写成上线日、作用域加 `guard.macro_adj`、记分卡标签不扩）
+- 拨钟审计：（+7 / +45 天，6 个改动的测试文件 368 条）0 条新红
+- 整套：**12941 passed**（82 deselected、2 xfailed），带选测审计插件；漂移检查只报新测试读了仪表板模板（非代码、只警告），已 `select_tests --update --files tests/test_macro_single_path.py` 并入 `tests/_must_run.json`
+
+### 二次检查（用户 10-28「二次检查以上更新有没有 bug」）
+- 评分路径没查出问题：Guard 投票、等价判据（旧代码正常路径上只有「没 VIX」与只展示的宏观分变了，`vix_source=fallback` 时 Guard 本就不计）、
+  世代边界与印记；dashboard 去空白比对只剩预期改动；`get_macro_risk_adjustment` 生产无调用者、档位 unknown 走中性分支接得住 None。
+- 修了三处：① 取数代码自己出错的整份出口，日报 ⚠️ 与仪表板 WARNING 原先都说成「报价一项都没取到」⇒ 改写「宏观取数出错（错误）」
+  （新用例 `test_report_names_the_error_exit_as_an_error`）；② `guard_bee` 与 `tests/test_macro_degradation.py` 两处注释还在描述 fred_macro 产出 20.0 常量 ⇒ 注明 669 起不再产出、
+  那道判定只认旧形状；③ 本条变异计数原写「代码 14 + 登记 10」，实为 15 + 9。
+- 代价（记下、不改）：报价全空那天现在多取 FRED（5 个序列、每个 8 秒超时、取数异常即中止）与板块轮动（11 只并行），故障日扫描最多多二十来秒。
+- 宏观分会用陈旧的 CBOE VIX（09-24 / 25 形状）——与正常路径一贯的行为相同、只展示；Guard 照旧不计陈旧 VIX 的票。
+
+### 没改 / 待办
+- 实时 Finnhub 报价不核时间戳（`t`）是不是这一场；FRED HY 日变（`obs[0] − obs[1]`）仍按位置（只展示）。
+- `get_macro_context` 缓存 30 分钟比扫描短 ⇒ 同一次扫描里不同标的可能拿到两份宏观（09-24 实测 29 + 1）；本版没动。
+  （**v0.45.674 更正**：主因不是缓存时长，是 4 个并行线程同时看到空缓存、各取一次；30 分钟只影响晚渲染的网站。已在 674 修。）
+- 同一形状的兜底字典别处还有（`unusual_options` 的 5.0 / neutral、`swarm_agents/cache.py` 的 fallback 行情），不在本版范围。
+
+## [0.45.668] — 2026-10-28 — Added：整套测试开跑时提示「系统 load 已超订」+ `tools/burn_cpu.py`（负载进程自带寿命、清理失败会红）
+
+起因（2026-10-27/28，只读查证，见 memory `alpha-hive-environment-facts`）：有人问「整套测试之前不是优化过吗，怎么每次还要 20 分钟以上」。机器上有 20 个孤儿 `yes`（ppid=1）空转 40 分钟，load 124（10 核），整套 pytest 只拿到约 8% CPU。源头是另一个会话为复现 v0.45.664 的偶发失败手写的负载：`for … do yes > /dev/null & pids="$pids $!"; done; trap "kill $pids 2>/dev/null" EXIT`。清理无声失败，三处缺陷叠加才泄漏——① 本机 Bash 是 zsh，`$pids` 不按空格拆词，`kill` 报 `illegal pid`、一个都没杀；② `2>/dev/null` 吞了这条报错；③ 校验用的 `pgrep -c` 在 macOS 上不存在（打 usage、退出码非 0），`|| echo "none left"` 恒打印「已清理」。而 590 的开跑提示只数登记过的 pytest 会话，看不见非 pytest 的负载，所以当时一个字没提示。只在 memory 里记一条是提醒、不是修复（不会被执行），这里补两处结构性修法。
+
+### Added
+- `tests/_concurrency_hint.py`：`load_lines`（纯函数，load / 核数由调用方注入）+ `system_load_lines`（读真实 `os.getloadavg()` / `os.cpu_count()`，任何读取失败变成一行「无法读取系统 load」、绝不抛）。1 分钟 load ≥ 核数 ⇒ 报告头打 `concurrency: ⚠️ 系统 1 分钟 load N / M 核——机器已超订…`，并指给人 `ps -Ao pid,ppid,etime,pcpu,comm -r | head`（提示里写命令、不在测试进程里自己跑：写沙箱里 exec 不了 setuid 的 `/bin/ps`）。与既有提示同一道闸（选中 ≥ `BIG_RUN_ITEMS` 才说），**只提示、不阻塞、不报红**。阈值依据：590 那轮 load≈11（10 核）整套跑了 1339 秒（安静时 500–650 秒）。
+- `tests/conftest.py::pytest_report_collectionfinish`：在同一个钩子里把 `system_load_lines` 接在 `session_lines` 之后。**刻意不并进 `session_lines`**：合在一起的话，机器忙时那些断言 `session_lines(...) == []` 的现有测试会无故变红。
+- `tools/burn_cpu.py`：在一条命令运行期间加 CPU 负载。**负载进程自己负责死**——每个子进程带截止时刻、到点自己退出，并每隔一小段看一眼父进程还在不在（父进程没了 `getppid()` 变 1 ⇒ 退出）；清理仍做（进程组 SIGTERM→SIGKILL），但不信它：退出时逐个核对已死，有残留 ⇒ `BurnerLeak` / 命令行退出码 4 并点名 pid。没有「无期限负载」（`seconds` ∈ (0, 3600]）；进程由 `subprocess` 管，不在 shell 里拼 PID 列表。用法：`/usr/local/bin/python3 tools/burn_cpu.py --procs 20 --seconds 600 -- <命令>`。
+- 项目 `CLAUDE.md`「整套测试怎么跑」补两条：系统 load 提示是什么、给测试加负载一律用 `tools/burn_cpu.py` 别手写 `yes &`（让后来的会话找得到）。
+- `tests/test_burn_cpu.py`（14 条）：正常 / 异常退出都逐个核对零残留；**清理逻辑整个失效时负载仍会停**——到截止时刻自己退出（`seconds=1`），父进程不清理就死了也退出（截止设 60 秒、只等 20 秒，能过的只可能是父进程判据）；清理失败会红（`_signal_all` 打成空操作 ⇒ `BurnerLeak` 点名 pid / 命令行退出码 4）；拒绝无期限 / 0 进程；命令行原样返回被压命令的退出码、缺命令 / 坏参数是用法错误。失败路径里测试自己 SIGKILL 残留负载——测试不能成为下一次泄漏的来源。
+- `tests/test_concurrency_hint.py`（+14 条）：`load_lines` 的闸 / 阈值（含 590 那轮 load≈11）/ 读不到要说；`system_load_lines` 读失败不抛；接线 AST + **真起一个 `-q` 的 pytest 会话**（内层把 load 钉成 500）断言报告头里真的出现那一行。
+
+### 验证
+- 变异检验（各拆掉一处保护，对应测试必须红，还原后全绿）：去掉负载进程的父进程判据 ⇒ `test_children_exit_when_the_parent_dies` 红；`_cleanup` 谎报零残留 ⇒ `test_leak_after_cleanup_raises_with_the_pids` 红；conftest 不接 load 行 ⇒ `test_conftest_hook_also_calls_system_load_lines` 红；阈值改成永不触发 ⇒ `test_load_at_or_above_core_count_warns_…` 红。
+- 一个被抓到的测试自身错误：「到截止时刻自己退出」最初用 `os.kill(pid, 0)` 判死活，对本进程未回收的僵尸子进程恒为「还活着」；改用 `Popen.poll()`（会回收）。
+- 整套（带审计插件，与 CI 同款）：**12934 passed / 82 deselected / 2 xfailed，646.9 秒**（安静档；开跑时 load≈3.6、无别的 pytest）；选测登记表漂移检查通过。报告末尾「真实数据根：沙箱外的写入（说明，不报红）」列的 3 个文件是 Alpha Bot 盘中采样写的，与本改动无关。
+
+### 没动 / 局限
+- 阈值是「load ≥ 核数」，没有按「谁在占」细分；提示只指路、不自己查（写沙箱里 exec 不了 `/bin/ps`）。读到的是**开跑那一刻**的 1 分钟 load，开跑之后才起的负载看不见。
+- 没给整套加排队锁 / 自动跳过：理由同 590（会无声卡住、与「失败要可见」冲突）。
+- `tools/burn_cpu.py` 只能管它自己起的进程；别人手写的 `yes &` 它不管——所以 CLAUDE.md 里写明「一律用它」，并由上面的 load 提示兜住「万一又泄漏」。
+
+## [0.45.667] — 2026-10-28 — Fixed：659 / 661 / 664 / 665 二次检查——漏登提示给出照做就能修好的命令（点名读者的 `--files … --update`），裸 `--update` 什么都没量时明说；664 勘误；两处过期说明
+
+**二次检查结论**：四版里没有会让选测漏跑或判错的 bug（659 登记表 diff 只有 CI 点名的 4 处 + `commit` 戳；661 `make_plan` 的判定顺序、重命名拆成删旧 + 增新、`::warning` 转义都对；664 夹具拆卸顺序对、注入点打在 `Popen._wait` 的真实路径上、不再全局替换 sleep 后本文件没有真等；665 的回落路径与 CHANGELOG 所述一致）。查出下面四处。
+
+**1. 漏登的修法提示照做不起作用（661 让它变成唯一的修复途径）**：提示只写 `--update`，而裸 `--update` 只量**相对 `--base` 改过的**测试文件。漏登最常见的一类是现有测试按目录通读到新静态文件（661 统计的 15 处里 6 处），读者自己没改；CI 报出来时提交也已在 main 上、改动集是空的——两种情况照做都量不到读者、退出码 0（v0.45.672 更正：此处原写「都只打印『没有被改的测试文件，无需测量』、登记表不动」，只对分支一个测试都没改的情况成立；改了别的测试时它量那几个、提示「已并入」、登记表也变了——看起来修好了，漏登还在）。661 起非代码漏登只警告，于是**没有任何地方会红**。实测：干净的树上跑 `select_tests.py --update` 正是如此。659 我自己是用 `--files <三个读者> --update` 修的，提示里没写。
+- `tools/select_tests/select_tests.py`：`Gap` 加 `file`（漏登的那个读者）；新增 `update_command(files)`，`report_gaps` 在列出漏登后打印 `修法：/usr/local/bin/python3 tools/select_tests/select_tests.py --files <全部漏登的读者> --update，并把 tests/_must_run.json 一起提交`（两类漏登都在内；`--check-drift` 另给「整套带插件后 `--build`」）；Actions 的 `::warning` 注记也带上该读者的命令。`cmd_update` 没有要量的测试文件时改说「什么都没量，登记表没动」并给出 `--files` 的用法（退出码仍 0：只改文档的提交跑它是正常的）。`--files` / `--update` / `--check-drift` 的 `--help` 同步（`--check-drift` 原写「dump 里有登记表没有的读 ⇒ 退出码 4」，661 后只有测试读测试漏登才是 4）。模块文档「随跑测量」一段同步。
+- `tests/test_select_tests.py`（73 → 76 条）：**照着打印出来的命令真跑一遍**（假 pytest 产出测量 dump）后再 `--check-drift` ⇒ ✅、没有修法行；只有非代码漏登（退出码 0）时同样给命令；没有可量的文件时明说什么都没量、登记表字节不变；Actions 注记里有命令。
+
+**2. 664 的 CHANGELOG 一句写错**——见 664 条末尾的勘误（`of.time` 就是全局 `time` 模块，另有 15 处替换、4 处在数 sleep——670 更正，此处原写 14）。
+
+**3. `report_deployer._retry_sleep` 的 docstring 过期**：还写着 `test_gh_pages_unverified_parent` 替换全局 `time.sleep`「照样生效」——664 之后它已不这么做，而那正是 664 查出会偶发多数一次的写法。改成：要**数**退避的测试只能替换本函数，并写明原因（只改文档，生产行为不变）。
+
+**4. `--check-drift` 的 `--help` 过期**：并在第 1 条里改了。
+
+**没修（记一笔）**：`git_changes` 解析 `git diff --name-status` 时没加 `-z`，中文文件名会被 git 加引号转义（实测改 `marketing/03_雪球_文案.md` ⇒ 理由里显示成 `"marketing/03_\351…"`）。615 起就有；现在的后果只是理由文字难看——这类文件本来就没有登记读者，按 661 本来就回退整套，登记表里也没有中文路径，不会少选。
+
+**变异检查**（7 个，全红在预期断言上，还原后绿；字节码关掉跑）：M0 改动前的整份文件 ⇒ 4 条新 / 改断言全红；命令不带 `--files` / `Gap.file` 记成被读的文件 / 只有报红时才给修法 / 修法只点名非代码那类读者 / Actions 注记不带修法 / 无可测量时退回「无需测量」。
+
+**核对**：`test_select_tests.py` 76 passed；`test_retry_backoff_seams.py` + `test_gh_pages_unverified_parent.py` 51 passed；`ruff check .` 全绿。整套经 `select_tests.py --run`（改了核心文件 ⇒ 回退整套、带插件做漂移检查；等另一会话的整套跑完才开）：**12907 passed / 0 失败 / 644s**，退出码 0，漂移零处。
+
+## [0.45.666] — 2026-10-27 — Added：对冲页「压力网格的 β 窗口对照」——同一份审计用 60 日 β（现状）与 250 日 β 各算一遍压力网格 / 尾部归因，并排展示（只展示，不进审计 / 告警 / 任何成交）
+
+起因（2026-10-27 只读查证，见 memory `alpha-hive-tail-budget`）：压力网格每个标的的现货冲击 = β × 大盘冲击，β 是审计里近 60 个交易日对 SPY 的 OLS。XOM / CVX 的 60 日 β 是 −1.08 / −0.99（250 日 −0.69 / −0.62，2 年 +0.17 / +0.28）⇒ 「现货 −10%」那一格把能源股推到**上涨** ~10%，下行格里这两笔的损失其实是股价涨造成的。β 窗口一换：全网格最差格 −23.2% → −19.9%（20% 告警线破 / 不破）、SPY 认沽面板的规模目标（下行最差格）−18.5% → −14.1%（×0.76）、组合 β·$Delta −7.2%（带内）→ −17.1%（出 ±15% 带）——最后一项是 SPY 覆盖建议吃的那个量。**没有「哪个窗口是真值」**，所以不改网格，只把另一套并排摆出来。用户定：做低风险的那步（只展示，不改成交行为）。
+
+### Added
+- `tail_budget.py`（纯函数）：`with_beta`（换 β、重算 `beta_dollar_delta`、SPY 覆盖行不动、本来没 β 的行不「救回来」、缺替代 β 的标的沿用原值并单列）、`beta_sensitivity`（两套各算：全网格最差格 / 下行最差格 / 告警是否破线 / β·$Delta 与带位 / 逐格 / 逐标的贡献；`downside_ratio`、`flips`（符号相反或差 ≥ 0.5 的持仓标的）、`missing` / `partial`（混合口径）；**没有任何推荐 / 结论字段**）；`REASONS` +3（`alt_beta_unavailable` / `no_rows` / `base_unavailable`）。
+- `alphabot/beta_long.py`：250 日 β 取数——yfinance 复权日线（经全仓唯一入口 `yf_daily`，新登记调用点 `alphabot_beta_long`，末行策略 ignore）、限流闸 `yf_gate`、对 SPY 日收益做 OLS、只用 `as_of` 以前最近 250 个**两边都有**的收益、少于 200 个判不了（带原因，不拿短样本冒充）、单只失败不连坐、永不抛。
+- `alphabot/hedge.py`：`beta_audit` / `beta_tickers` / `beta_sensitivity`（最近一份带逐行暴露与压力表的放行审计；取不到的标的如实列出）。`alphabot/service.py`：`beta_sensitivity()`（按审计日缓存 6 小时、「重新取 β」跳过缓存、全失败不缓存、取数函数可注入 `beta_long_fn`）；`alphabot/server.py`：`GET /api/hedge/beta`（只读）。**单独一个接口**：现取 250 日 β 在限流下约半分钟，不能拖住对冲页。
+- `alphabot/static/pages/hedge_beta.js` + `hedge.js` 挂载（在「组合尾部预算」与「尾部对冲候选」之间）：汇总表（最差格 / 下行最差格 / β·$Delta 与带位）、β 差异明显的标的、逐标的两套贡献、两张压力网格、取数明细；`help.js` 新增一节。`alphabot/synthetic.py`：演示数据带逐行暴露与合成长窗口 β（XOM 两套符号相反）。
+- `yf_daily.SOURCES` 登记 `alphabot_beta_long`；`tests/test_yf_daily.py::POLICY` 登记该调用点（ignore：按日期对齐，缺最近一根只是样本少一天）。
+- `tests/test_beta_sensitivity.py`（55 条）：玩具账本（线性压力函数）手算核对每个数；取数（窗口 / `as_of` / 样本不足 / 坏点 / 末行空行 / 单只失败 / 基准缺失）；服务（真账本夹具、缓存、force、部分失败、全失败不缓存、只读目录指纹不变、演示、路由）；**只展示的边界**（`beta_sensitivity` 等名字只许出现在 `tail_budget.py` / `alphabot/{hedge,service,server,beta_long}.py` / `yf_daily.py` 注册表；`portfolio_greeks` 仍只算 60 日、审计里不写对照；`tail_budget` 仍纯）；前端。变异 15 个全被杀（含「as_of 之后的收益也用」——它最初存活，暴露出一条恒真的 `as_of` 测试，已重写）。
+
+### 实测（2026-10-27，真实对冲账本 + 真实 yfinance，只读）
+- 整条链路 50.6 秒（15 只标的 250 日 β 全取到、没有缺失）；数字与手算分析一致：现状 最差格 23.18% / 下行最差 −18.52% / β·$Delta −7.2%（带内）⇒ 250 日 19.86% / −14.08% / −17.14%（**下穿带**）；下行比值 0.76。第二次打开命中缓存。
+- 真实数据里「符号相反或差 ≥ 0.5」一栏是**空的**——XOM / CVX 在 250 日里仍是负的（−0.69 / −0.62），只是比 60 日小；空栏提示改成明说「两套都为负的标的不会列在这里，看逐标的表里的 β 一列」，免得把空栏读成「β 没问题」。
+
+### 没动 / 局限
+- **审计里的压力表、尾部告警、SPY 覆盖账仍只用 60 日 β**（`portfolio_greeks.CONFIG["beta_window"]` 没动，守卫钉住）。要不要换覆盖用的 β 窗口会改变纸面账的成交，是另一个要单独决定、写依据的事。
+- 对照**只针对最近一份审计**，不回填历史，也不落盘（所以没有「过去每天按 250 日 β 告警会不会响」的记录；要这个得另做并写进审计）。
+- 250 日 β 与审计里 60 日 β 来源不同（yfinance 复权收盘 vs Twelve Data / 本地索引收盘）：我重算的 60 日 β 与审计值多数差 <0.1，但个别（AMZN 1.85 对 1.48）差得多，**原因没查，待验证**；对照里「现状」永远用审计里的值，不用我重算的。
+- 每次打开现取（缓存 6 小时、进程内、重启即丢），限流下约半分钟；yfinance 不可得 ⇒ 页面写原因，不拿 60 日冒充对照。
+
 ## [0.45.665] — 2026-10-27 — Fixed：删 `tests/test_yf_daily.py` 里未用的 `import yfinance`（Ruff F401）——main 的 `tests` 工作流自 `44fba87f`（v0.45.658）起每轮红在「Ruff lint」那一步
 
 **现象**：`44fba87f` 之后 main 每次 push 的 `tests` 都红，失败步骤是 `ruff check .`：`tests/test_yf_daily.py:606` `F401 yfinance imported but unused`（`TestPrefetchBundle::test_close_panel_drops_the_missing_column_without_refetching` 函数体里）。测试本身全过（`3c402ccb` 那轮 12693 passed / 0 failed）。
@@ -32,6 +321,8 @@
 **核对**：本文件 40 passed；`select_tests.py --run`（改测试文件 ⇒ 13 个元守卫 + 本文件等 15 个）1159 passed、登记表不过期；拨钟审计 +7 / +45 / +400 天新红 0 条。整套交给 CI。
 
 **顺带查过（未改）**：全仓另一处替换全局 `time.sleep` 的只有 `tests/test_retry_backoff_seams.py::test_seam_delegates_to_time_sleep`——只包住一次直接调用 `_retry_sleep(1.4)`、不起子进程，只剩「恰好那一瞬有后台线程 sleep」的极小窗口，不改。
+
+**勘误（v0.45.667 二次检查）**：上一段说错了。`monkeypatch.setattr(of.time, "sleep", …)` 这种写法替换的也是全局 `time.sleep`（`of.time` 就是 `time` 模块）——当时 grep 只匹配了 `setattr(time, "sleep"` 的字样。全仓另有 **15 处**这样写（v0.45.670 更正：667 时数成 14 处，漏了 `tests/test_ghpages_data_root_migration.py` 先 `import time as _time_mod` 再 `setattr(_time_mod, "sleep", …)` 的别名写法——按对象写法 grep 又漏了一次；按属性名 `"sleep"` 查才全），其中 4 处在**数** sleep（`tests/test_outcomes_backlog_starvation.py`、`tests/test_llm_service.py` 各 2 处；其余 11 处只是让它不真等）。它们的被测路径里不起子进程（碰不到本次 CI 失败的真实机制：收子进程时的忙等），只剩「别的测试遗留后台线程」那一条；没见它们红过，待验证，未改。
 
 ## [0.45.663] — 2026-10-27 — Fixed：宏观报价与板块轮动的 Yahoo 日线按日期配对（不再数第几根）；缺值不再顶数（10Y 4.5 / 涨跌 0.0 ⇒ None / unknown）；没算进去的每一项点名 + WARNING；登边界 10-19（同 654 / 657 / 660：并进同日标签、冻结证据，作废 0 条）
 
@@ -936,9 +1227,10 @@ v0.45.642 在最终树上第一轮整套红了 `tests/test_earnings_vol_signal.p
 
 ### 已知 / 待定（查明未改）
 
-- 主路径 + 冻结层的 NaN 照传（见上）：要不要改、怎么走协议修订，待用户定。
+- 主路径 + 冻结层的 NaN 照传（见上）：要不要改、怎么走协议修订，待用户定。**进展（2026-10-28）**：用户 10-24 选「直接根治（协议修订）」，已由 v0.45.645（yfinance 公司行动空行，生产四条取数路径与冻结层一起处理）与 v0.45.653（三字段算出非有限数改为缺失，两层同改）完成。
 - `crowding_detector.py`（拥挤度兜底取数）与 `risk_engine.py`（风险引擎自取数）各有一份自用的同类公式，带 `volume_ratio … else 1.0`、
-  `momentum_5d … else 0.0`、`volatility_20d = 0.0` 默认与 20 根门槛、无 `fill_method`——同一形状的假值，改它们会碰拥挤度 / 风险口径，另议。
+  `momentum_5d … else 0.0`、`volatility_20d = 0.0` 默认与 20 根门槛、无 `fill_method`——同一形状的假值，~~改它们会碰拥挤度 / 风险口径，另议~~。
+  **订正（2026-10-28）**：两份在生产上都是死代码——`crowding_detector.get_crowding_metrics` 只被该文件自己的 `if __name__ == "__main__":` 示例调用（Scout / Guard 用的是 `CrowdingDetector` 类、喂主链数据），`risk_engine.run_full_risk_analysis` 只被 risk_engine 自己的命令行入口调用、生产无模块 import 它；假默认值只影响手动跑命令行，不碰任何评分。原句是没数读者就下的判断（10-24 只读核实后撤回）。
 - 二次对拍脚本（一次性、未进仓库）在 10-24 10:06–10:07 往生产 `alpha_hive.log` 写了几行以假代码 `T` 署名的「20 日均量不可得」与「[历史补跑] T @ 2026-10-16」
   日志（没写任何数据 / 账本）；`T` 恰是 AT&T 的真实代码，查 10-24 日志时请忽略这几行。
 

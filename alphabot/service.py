@@ -27,6 +27,7 @@ from typing import Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import sell_strike_report as R
+import tail_budget as TB
 from alphabot import chat as CH
 from alphabot import hedge as HG
 from alphabot import howto as HW
@@ -56,6 +57,9 @@ SNAPSHOT_STRIKE_BAND = 0.12
 #: **只对 Alpha Bot 的页面生效**——卖权账本 / 溢价页 / 日报仍只认 CBOE（BILI 在账本里仍会记不可得，这是预注册的数据源，不换）。
 #: CBOE 一恢复就自动改回 CBOE。
 YF_FALLBACK_TICKERS = frozenset({"NVDL", "BILI"})
+#: 「β 窗口对照」里 250 日 β 的进程内缓存时长（秒）：β 一天内几乎不变，取一次要十几个限流请求；「重新拉取」跳过缓存
+BETA_TTL_SEC = 6 * 3600.0
+_BETA_SENS_REASONS = {"ledger_unreadable": "对冲账本读不了，没法对照", "no_audit_rows": "还没有带逐行暴露的放行审计"}
 _TICKER_RE = re.compile(r"^[A-Z_][A-Z0-9.\-]{0,9}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -167,7 +171,7 @@ class AlphaBotService:
                  clock: Callable[[], float] = time.monotonic, demo: bool = False,
                  ledger_dir=None, live_ttl: float = LIVE_TTL_SEC, state_dir=None,
                  straddle_root=None, straddle_quote_fn=None, now_fn: Optional[Callable[[], datetime]] = None,
-                 premium_root=None):
+                 premium_root=None, beta_long_fn=None):
         self.fetch_fn = fetch_fn
         self.bars_fn = bars_fn or _default_bars
         self.clock = clock
@@ -184,6 +188,9 @@ class AlphaBotService:
         self.premium_root = premium_root
         self._premium_cache: Dict[str, tuple] = {}
         self._tail_cache: Dict[tuple, tuple] = {}
+        # 「β 窗口对照」（v0.45.662）：长窗口 β 取数函数（None ⇒ `alphabot.beta_long.fetch_long_betas`，yfinance）；按审计日缓存
+        self.beta_long_fn = beta_long_fn
+        self._beta_cache: Dict[str, tuple] = {}
         self._premium_rules_cache: Optional[dict] = None     # 规则常量与文案表进程内不变：算一次
         self._cache: Dict[str, tuple] = {}
         self._bars_cache: Dict[tuple, dict] = {}
@@ -192,7 +199,8 @@ class AlphaBotService:
         self._settings_lock = threading.Lock()
         self.stats = {"live_computed": 0, "live_cache_hits": 0, "live_failures": 0,
                       "premium_computed": 0, "premium_cache_hits": 0, "premium_failures": 0,
-                      "howto_failures": 0, "yf_fallback_used": 0, "yf_fallback_failed": 0}
+                      "howto_failures": 0, "yf_fallback_used": 0, "yf_fallback_failed": 0,
+                      "beta_sens_computed": 0, "beta_sens_failures": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -485,6 +493,61 @@ class AlphaBotService:
             res["meta"] = TH.public_rules()          # 原因 / 旗标 / 提醒文案：前端只查这张表，不另抄
             self._tail_cache[key] = (self.clock(), res)
             return {**res, "cache_age_sec": 0.0}
+
+    # ── β 窗口对照（v0.45.662，只展示）：压力网格的 60 日 β 与长窗口 β 并排
+    def beta_sensitivity(self, force: bool = False) -> dict:
+        """对冲账本**最近一份放行的审计**，用审计里的 60 日 β（现状）与 250 日 β 各算一遍压力网格 / 尾部归因（`alphabot.hedge.beta_sensitivity`）。
+        **只读、不写审计 / 账本、不进告警、不改任何成交**；250 日 β 现取（yfinance，按审计日缓存 `BETA_TTL_SEC`），所以单独一个接口——
+        取 β 慢（限流下约半分钟）不能拖住对冲页。取不到的标的沿用 60 日 β 并如实标出（混合口径），一个都取不到就写原因，不拿 60 日冒充对照。"""
+        now = self.now_fn()
+        view = self._hedge_view(now)
+        audits = ((view.get("history") or {}).get("audits")) or {}
+        day, audit = HG.beta_audit(audits)
+        if audit is None:
+            reason = "ledger_unreadable" if view.get("errors") else "no_audit_rows"
+            return clean_json({**TB._sens_unavailable(reason), "date": None, "demo": self.demo,
+                               "meta": self.beta_sens_meta(), "reason_zh": TB.REASONS.get(reason) or _BETA_SENS_REASONS.get(reason, reason)})
+        with self._lock_for("beta_sens"):
+            ent = self._beta_cache.get(day)
+            if ent is not None and not force and (self.clock() - ent[0]) < BETA_TTL_SEC:
+                betas, info, age = ent[1], ent[2], self.clock() - ent[0]
+            else:
+                betas, info = self._fetch_long_betas(day, HG.beta_tickers(audit))
+                if any(v is not None for v in betas.values()):         # 全失败的结果不缓存：下次打开再试
+                    self._beta_cache[day] = (self.clock(), betas, info)
+                age = 0.0
+            try:
+                res = HG.beta_sensitivity(audits, betas, self._stress_fn(), info=info)
+                self.stats["beta_sens_computed"] += 1
+            except Exception as exc:  # noqa: BLE001 - 算不出就写明原因，对冲页其余部分不受影响
+                self.stats["beta_sens_failures"] += 1
+                _log.warning("β 窗口对照：计算失败：%s: %s", type(exc).__name__, exc)
+                res = {**TB._sens_unavailable(f"exception:{type(exc).__name__}"), "date": day}
+            res = clean_json(res)
+            res["demo"] = self.demo
+            res["meta"] = self.beta_sens_meta()
+            res["cache_age_sec"] = round(age, 1)
+            return res
+
+    def _fetch_long_betas(self, day: str, tickers: List[str]):
+        """`(β 表, 明细)`。演示 = 合成；注入的函数原样用；生产 = `alphabot.beta_long.fetch_long_betas`。永不抛。"""
+        try:
+            if self.beta_long_fn is not None:
+                out = self.beta_long_fn(tickers, day)
+                return (out if isinstance(out, tuple) else (out, {}))
+            if self.demo:
+                from alphabot import synthetic as syn
+                return syn.demo_long_betas(tickers), {}
+            from alphabot import beta_long
+            return beta_long.fetch_long_betas(tickers, day)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["beta_sens_failures"] += 1
+            _log.warning("β 窗口对照：长窗口 β 取数失败：%s: %s", type(exc).__name__, exc)
+            return {t: None for t in tickers}, {t: {"n": 0, "reason": f"exception:{type(exc).__name__}"} for t in tickers}
+
+    def beta_sens_meta(self) -> dict:
+        """前端文案 / 常量（不在前端另抄）：窗口名、「差异明显」判据、原因码中文。"""
+        return {"alt_label": "250 日", "base_label": "60 日", "beta_gap_min": TB.BETA_GAP_MIN, "reasons": {**TB.REASONS, **_BETA_SENS_REASONS}}
 
     def _straddle_quote(self, t: str, symbols: List[str]) -> dict:
         if self.straddle_quote_fn is not None:

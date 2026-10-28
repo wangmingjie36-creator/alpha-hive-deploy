@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import tail_budget as TB
 from alphabot import straddle as SD
@@ -288,6 +288,50 @@ def tail_overview(audits: dict, stress_fn=None) -> dict:
             "model_check": TB.model_check(audits or {}, stress_fn),
             "gate_log": list(reversed(gate_log))[:TAIL_GATE_SHOWN], "n_gate_entries": len(gate_log),
             "budgets_pct": last_gate.get("budgets_pct") or [], "gate_basis": last_gate.get("basis")}
+
+
+#: β 窗口对照里「取数失败」最多点名几只（其余只给个数）
+BETA_FETCH_FAILED_SHOWN = 8
+
+
+def beta_audit(audits: Optional[dict]) -> Tuple[Optional[str], Optional[dict]]:
+    """最近一份带逐行暴露（`rows`）与压力表的放行审计 ⇒ `(日期, 审计)`；没有 ⇒ `(None, None)`。纯函数。"""
+    for day in sorted(audits or {}, reverse=True):
+        a = (audits or {}).get(day)
+        if isinstance(a, dict) and a.get("rows") and (a.get("stress") or {}).get("cells"):
+            return day, a
+    return None, None
+
+
+def beta_tickers(audit: Optional[dict]) -> List[str]:
+    """审计行里**本来就有 β** 的标的（股票 / 期权 / 逐票对冲；SPY 覆盖行不算）——要给它们取长窗口 β。"""
+    out = set()
+    for r in (audit or {}).get("rows") or []:
+        if isinstance(r, dict) and r.get("kind") != "hedge" and r.get("ticker") and _num(r.get("beta")) is not None:
+            out.add(r["ticker"])
+    return sorted(out)
+
+
+def beta_sensitivity(audits: Optional[dict], alt_betas: Optional[dict], stress_fn, *, info: Optional[dict] = None,
+                     alt_label: str = "250 日") -> dict:
+    """「β 窗口对照」：最近一份审计，用审计里的 60 日 β（现状）与长窗口 β 各算一遍压力网格 / 尾部归因，并排给页面（`tail_budget.beta_sensitivity`）。
+    **只展示**：不写审计、不进告警、不进 SPY 覆盖的任何决定。`info` = 取 β 的明细 `{ticker: {n, reason}}`，只用来如实报哪些没取到。"""
+    day, a = beta_audit(audits)
+    if a is None:
+        return {**TB._sens_unavailable("no_rows", alt_label=alt_label), "date": None}
+    if stress_fn is None:
+        return {**TB._sens_unavailable("stress_unavailable", alt_label=alt_label), "date": day}
+    agg = a.get("aggregate") or {}
+    nav = _num(agg.get("nav")) or _num((a.get("nav") or {}).get("nav") if isinstance(a.get("nav"), dict) else a.get("nav"))
+    band = _num((agg.get("band") or {}).get("band_pct"))
+    res = TB.beta_sensitivity(a.get("rows") or [], alt_betas, _num(a.get("spy_price")), nav, stress_fn, lambda t: None, None,
+                              alt_label=alt_label, band_pct=band)
+    res["date"] = day
+    want = beta_tickers(a)
+    failed = [{"ticker": t, "reason": ((info or {}).get(t) or {}).get("reason") or "no_value"}
+              for t in want if _num((alt_betas or {}).get(t)) is None]
+    res["fetch"] = {"n_requested": len(want), "n_ok": len(want) - len(failed), "failed": failed[:BETA_FETCH_FAILED_SHOWN]}
+    return res
 
 
 def build_overview(view: dict, *, now_et: datetime, stress_fn=None) -> dict:

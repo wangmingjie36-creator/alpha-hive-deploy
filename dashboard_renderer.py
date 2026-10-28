@@ -142,8 +142,8 @@ def _macro_deltas(mctx: dict, prev_mctx: Optional[dict], prev_report_date: Optio
       09-22 的上一份是 09-18）则是多日变化冒充日环比。三项的小字统一只表示「较前一交易日」。
       代价：债市休市而股市开市的日子（哥伦布日 / 退伍军人日）次日不显示，是少显示不是错显示。
     - 黄金：`gold_change_pct` 本身就是 GLD 的「现价 / 前收盘 − 1」（Finnhub `c`/`pc`
-      或 yfinance 最后两根日 K），不需要跨日报做差。只在有价格时才信它：GLD 没取到时
-      它是默认值 0.0，不是观测。
+      或 yfinance 按日期配对的两根日 K），不需要跨日报做差。只在有价格时才信它（GLD 没取到时它是 None；
+      v0.45.663 / 669 前的旧日报里是默认值 0.0，不是观测）。
     """
     def _finite(x):
         return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
@@ -2529,66 +2529,78 @@ def render_dashboard_html(report: Dict, date_str: str,
     _macro_gld_cls = ""
     _macro_sector_html = ""
     _macro_delta = {"vix": "", "10y": "", "gld": ""}
-    _mctx_ok = None   # 非兜底时的宏观 dict，供下面「涨跌」段用
+    _mctx_ok = None   # 取到的宏观 dict，供下面「涨跌」段用（v0.45.669 起报价全空也给：缺的项本身是 None）
     try:
-        from fred_macro import get_macro_context as _get_macro_ctx
-        _mctx = _get_macro_ctx()
-        if _mctx.get("data_source") == "fallback":
-            # 整块宏观被跳过（全显示「—」）。旧实现在这里**什么都不说**，
-            # 于是 8/26 网站宏观区块整块消失而日志里毫无痕迹。
+        # v0.45.674：读这份日报自己的宏观快照（`report["macro_context"]`：扫描开头取的那一份，Guard 与日报宏观段读的也是它），
+        # 不再自己调 `get_macro_context()`——网站在扫描末尾渲染，比取数晚 22–36 分钟，30 分钟缓存过期就重取：10-22 网站 VIX 16.7
+        # （重取时 CBOE 断连、拿到前一天的），日报与 Guard 是 19.0。补跑时更糟：快照上下文退出已清缓存，重取到的是运行当天的宏观。
+        # 没有这个键（不是扫描产出的 report）⇒ 区块全「—」并说明，**不**去取运行当时的（那正是要修的错位）。
+        _mctx = report.get("macro_context") if isinstance(report, dict) else None
+        if not isinstance(_mctx, dict):
             logging.getLogger("alpha_hive.dashboard").warning(
-                "宏观数据源降级为 fallback，dashboard 宏观区块将全部显示「—」")
-        else:
-            # v0.45.43：逐字段独立降级。
-            # 旧实现 `.get('vix', 0)` 在「键存在但值为 None」时返回 **None**
-            # （默认值不生效——本项目 MEMORY 记过的经典陷阱），随后
-            # f"{None:.1f}" 抛 TypeError，被外层 except 吞掉 →
-            # **一个字段缺失导致整块宏观消失**。现在各字段互不牵连。
-            # isinstance 挡不住 NaN——float('nan') 也是 float 实例，
-            # 格式化不报错、只吐出字面文本 "nan"，印成一行看起来正常的假数据
-            # （2026-08-28 首页「板块轮动」曾这样显示成 "科技+nan%"）。
-            def _finite(x):
-                return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+                "这份日报没有宏观快照（macro_context），dashboard 宏观区块全部显示「—」（不取运行当时的宏观：那不是这份日报那一轮的）")
+            _mctx = {}
+        if _mctx.get("data_source") == "fallback":
+            # 旧实现在这里**什么都不说**，于是 8/26 网站宏观区块整块消失而日志里毫无痕迹。
+            # v0.45.669：不再整块显示「—」——上游没取到的项本身就是 None / "unknown"，下面逐字段判；
+            # 取到的照样显示（09-24 / 25 那个 CBOE 的真 VIX 此前被一起藏了）。
+            if _mctx.get("error"):
+                logging.getLogger("alpha_hive.dashboard").warning(
+                    "宏观取数出错（%s），dashboard 宏观区块全部显示「—」", _mctx["error"])
+            else:
+                logging.getLogger("alpha_hive.dashboard").warning(
+                    "宏观报价一项都没取到（data_source=fallback），dashboard 宏观区块只显示取到的项")
+        # v0.45.669：以下原在 `else:` 里——逐字段降级对「报价一项都没取到」同样成立，不再整块跳过
+        # v0.45.43：逐字段独立降级。
+        # 旧实现 `.get('vix', 0)` 在「键存在但值为 None」时返回 **None**
+        # （默认值不生效——本项目 MEMORY 记过的经典陷阱），随后
+        # f"{None:.1f}" 抛 TypeError，被外层 except 吞掉 →
+        # **一个字段缺失导致整块宏观消失**。现在各字段互不牵连。
+        # isinstance 挡不住 NaN——float('nan') 也是 float 实例，
+        # 格式化不报错、只吐出字面文本 "nan"，印成一行看起来正常的假数据
+        # （2026-08-28 首页「板块轮动」曾这样显示成 "科技+nan%"）。
+        def _finite(x):
+            return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 
-            _v = _mctx.get("vix")
-            _macro_vix = f"{_v:.1f}" if _finite(_v) else "—"
-            _t = _mctx.get("treasury_10y")
-            _macro_10y = f"{_t:.2f}%" if _finite(_t) else "—"
-            _yc = _mctx.get("yield_curve", "unknown")
-            _yc_map = {"normal": "正常", "flat": "趋平", "inverted": "倒挂"}
-            _yc_cls_map = {"normal": "yc-ok", "flat": "yc-warn", "inverted": "yc-bad"}
-            _macro_yc = _yc_map.get(_yc, "—")
-            _macro_yc_cls = _yc_cls_map.get(_yc, "")
-            # 黄金指标。v0.45.352（重做 v0.45.78）：主值固定显示价格，涨跌幅挪到独立的
-            # 涨跌小字里。旧逻辑靠 gold_trend 二选一——走势明显时只显示涨跌幅、看不到价格，
-            # 平稳时只显示价格、看不到涨跌。价格缺失时仍按旧规则兜底显示涨跌幅（门槛
-            # 保留：v0.45.663 起 GLD 没取到时 gold_change_pct 是 None、trend 是 "unknown"，两道都挡；此前是默认 0.0 被 trend 门槛挡住）。
-            _gld_trend = _mctx.get("gold_trend", "stable")
-            _gld_chg = _mctx.get("gold_change_pct")
-            _gld_price = _mctx.get("gold_price")
-            if _finite(_gld_price):
-                _macro_gld = f"${_gld_price:.0f}"
-            elif _gld_trend in ("surging", "rising", "falling") and _finite(_gld_chg):
-                _macro_gld = f"{_gld_chg:+.1f}%"
-                _macro_gld_cls = "gld-up" if _gld_chg > 0 else "gld-dn"
-            _mctx_ok = _mctx
-            # 板块轮动 HTML
-            _sr = _mctx.get("sector_rotation", {})
-            if _sr.get("hot") or _sr.get("cold"):
-                _sec_parts = []
-                for etf, name, chg in _sr.get("hot", [])[:3]:
-                    if _finite(chg):
-                        _sec_parts.append(f'<span class="sec-hot">{name}{chg:+.1f}%</span>')
-                for etf, name, chg in _sr.get("cold", [])[-2:]:
-                    if _finite(chg):
-                        _sec_parts.append(f'<span class="sec-cold">{name}{chg:+.1f}%</span>')
-                if _sec_parts:
-                    _macro_sector_html = (
-                        '<div class="macro-sectors">'
-                        '<span class="sec-label">板块轮动(5日)</span> '
-                        + " ".join(_sec_parts)
-                        + '</div>'
-                    )
+        _v = _mctx.get("vix")
+        _macro_vix = f"{_v:.1f}" if _finite(_v) else "—"
+        _t = _mctx.get("treasury_10y")
+        _macro_10y = f"{_t:.2f}%" if _finite(_t) else "—"
+        _yc = _mctx.get("yield_curve", "unknown")
+        _yc_map = {"normal": "正常", "flat": "趋平", "inverted": "倒挂"}
+        _yc_cls_map = {"normal": "yc-ok", "flat": "yc-warn", "inverted": "yc-bad"}
+        _macro_yc = _yc_map.get(_yc, "—")
+        _macro_yc_cls = _yc_cls_map.get(_yc, "")
+        # 黄金指标。v0.45.352（重做 v0.45.78）：主值固定显示价格，涨跌幅挪到独立的
+        # 涨跌小字里。旧逻辑靠 gold_trend 二选一——走势明显时只显示涨跌幅、看不到价格，
+        # 平稳时只显示价格、看不到涨跌。价格缺失时仍按旧规则兜底显示涨跌幅（门槛
+        # 保留：v0.45.663 起 GLD 没取到时 gold_change_pct 是 None、trend 是 "unknown"，两道都挡；此前是默认 0.0 被 trend 门槛挡住）。
+        _gld_trend = _mctx.get("gold_trend", "stable")
+        _gld_chg = _mctx.get("gold_change_pct")
+        _gld_price = _mctx.get("gold_price")
+        if _finite(_gld_price):
+            _macro_gld = f"${_gld_price:.0f}"
+        elif _gld_trend in ("surging", "rising", "falling") and _finite(_gld_chg):
+            _macro_gld = f"{_gld_chg:+.1f}%"
+            _macro_gld_cls = "gld-up" if _gld_chg > 0 else "gld-dn"
+        _mctx_ok = _mctx
+        # 板块轮动 HTML
+        _sr = _mctx.get("sector_rotation", {})
+        if _sr.get("hot") or _sr.get("cold"):
+            _sec_parts = []
+            for etf, name, chg in _sr.get("hot", [])[:3]:
+                if _finite(chg):
+                    _sec_parts.append(f'<span class="sec-hot">{name}{chg:+.1f}%</span>')
+            for etf, name, chg in _sr.get("cold", [])[-2:]:
+                if _finite(chg):
+                    _sec_parts.append(f'<span class="sec-cold">{name}{chg:+.1f}%</span>')
+            if _sec_parts:
+                _macro_sector_html = (
+                    '<div class="macro-sectors">'
+                    '<span class="sec-label">板块轮动(5日)</span> '
+                    + " ".join(_sec_parts)
+                    + '</div>'
+                )
     except ImportError:
         pass
     except Exception as e:

@@ -4,6 +4,7 @@ import { api, h, helpLink, num, money, pctPts, panel, table, isNum, fill } from 
 import { lines, C } from "../charts.js";
 import { renderTailHedge } from "./hedge_tail.js";
 import { tailBudgetPanel } from "./hedge_tail_budget.js";
+import { renderBetaSens } from "./hedge_beta.js";
 
 const sMoney = (v, dp = 0) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}$${num(Math.abs(v), dp)}` : "—");
 const sPct = (v, dp = 2) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}${num(Math.abs(v), dp)}%` : "—");
@@ -206,6 +207,7 @@ export async function renderHedge(root, alive) {
     kpi("浮动", sMoney(a.unrealized_usd), tone(a.unrealized_usd)), kpi("已实现", sMoney(a.realized_usd), tone(a.realized_usd)));
 
   const tailBudgetEl = tailBudgetPanel(d.tail);     // 组合尾部预算（v0.45.649）：数据随 /api/hedge 来（审计文件的 tail 一节）
+  const betaHost = h("div");     // β 窗口对照（v0.45.662）：另一个接口、要现取 250 日 β（yfinance），不阻塞本页其余部分
   const tailHost = h("div");     // 尾部对冲候选（v0.45.643）：另一个接口、要现拉 SPY 期权链，不阻塞本页其余部分
   const bandEl = h("div", { class: "chart short" });
   const eqEl = h("div", { class: "chart short" });
@@ -245,6 +247,8 @@ export async function renderHedge(root, alive) {
     h("div", { style: { height: "16px" } }),
     tailBudgetEl,
     h("div", { style: { height: "16px" } }),
+    betaHost,
+    h("div", { style: { height: "16px" } }),
     tailHost,
     h("div", { style: { height: "16px" } }),
     panel("成交", { sub: `${(d.trades || []).length} 笔（放行的）· 按收盘价成交，SPY 点差约 1bp 未建模 · 「拉回到」是占合并 NAV 的带边 · 鼠标停在日期上看规则原文` },
@@ -256,6 +260,7 @@ export async function renderHedge(root, alive) {
     h("p", { class: "note small muted", style: { marginTop: "14px" } }, `对冲只看 β·Delta：vega 超 ${num(rules.vega_alert_pct, 1)}% / gamma 超 ${num(rules.gamma_alert_pct, 1)}% NAV 只告警、不对冲；缺价 / 缺 β / 缺报价时一律不对冲。观察项：不进评分、不进股票纸面组合、不构成投资建议。`));
 
   renderTailHedge(tailHost, alive);
+  renderBetaSens(betaHost, alive);
   tailBudgetEl._after?.();
   const c = C();
   if (days.length) {

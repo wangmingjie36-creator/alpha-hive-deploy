@@ -1176,6 +1176,38 @@ _COHORT_HISTORY = [
      "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.663\"]` = `agent.GuardBeeSentinel.*`（0 个信号后移）；`guard.macro_adj` 不点名（同 654 / 657 / 660）。"
      "维度 IC 协议 H1 / H2 不读 Guard 宏观票 ⇒ 不截断（新函数放在 `bars_integrity`，不进 `price.fields` 指纹单元）。"
      "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
+    ("2026-10-19", "v0.45.669",
+     "宏观报价全部没取到时不再整份换成兜底常量（用户 2026-10-28「照取」，登记方式同 654 / 657 / 660 / 663）。"
+     "`fred_macro._fetch_macro_data` 此前有三条各自拼装的返回路径：报价（财政部 / Finnhub / Yahoo）一项都没有 ⇒ 提前返回兜底字典"
+     "（VIX 20.0 / 10Y 4.5 / 宏观分 5.0 neutral，只靠 `data_source == \"fallback\"` 告诉读者别信），CBOE 给了 VIX ⇒ 只把 VIX 换成真值、"
+     "其余照抄兜底。现在合成一条：报价全空也照常走分析段，没取到的项本身是 None / \"unknown\"，宏观分只由观测到的分项算（一项都没有 ⇒ None）。"
+     "**经 Guard 的只有一处**：提前返回时板块轮动（另一次独立的 Yahoo 取数）与 FRED 都不取 ⇒ 这些天 Guard 的板块票必然缺；现在照取 ⇒ "
+     "可能出现板块票 ⇒ `macro_regime` → `RegimeWeightAdjuster` 权重 ⇒ `final_score`。VIX（按 `vix_source` 单独判）、曲线 / 黄金"
+     "（`data_source` 仍标 fallback ⇒ Guard 照旧不记，这些天两者也必为 unknown）票不变；宏观分只展示。"
+     "**历史**（第 0 步只读实测）：137 份日报里 15 份走过兜底（06-22 ~ 08-14 的 13 份整份常量；09-24 / 25 只有 CBOE VIX——"
+     "两天都是网络故障：09-24 SSL 断连 + Yahoo 限流，09-25 DNS 解析失败 ⇒ 当时照取板块轮动大概率也取不到）；09-26 起 0 份。"
+     "**为什么日期写 10-19**（同 654 / 657 / 660 / 663）：10-19 起每个旧代码扫描日 30/30 行宏观来源都不是 fallback ⇒ 旧代码走的就是"
+     "合并后的那条路径、Guard 读到的逐项相同（逐行判，不需要冻结证据），**边际作废 0 条**。"
+     "等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.669\"]`；印记 `_BOUNDARY_MARKERS[\"v0.45.669\"]`：Guard `details.macro_single_path_checked` 字面量 True"
+     "（成功与出错路径都写，`guard_bee.GENERATION_MARKS`），实时行。预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.669\"]` = `agent.GuardBeeSentinel.*`（0 个信号后移）；`guard.macro_adj` 不点名（同 654 / 657 / 660 / 663）。"
+     "维度 IC 协议 H1 / H2 不读 Guard 宏观票 ⇒ 不截断。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
+    ("2026-10-19", "v0.45.674",
+     "一轮扫描的宏观快照只取一次（用户 2026-10-28「照建议的」，登记方式同 654 / 657 / 660 / 663 / 669）。此前 Guard / 日报宏观段 / 网站"
+     "各调 `get_macro_context()`，靠 30 分钟进程缓存凑成「同一份」：缓存只在查 / 写时加锁、取数不在锁里 ⇒ 扫描 4 个并行线程在 Guard 阶段开头"
+     "同时看到空缓存、**各取一次**（日志每天 30 秒内 4 次），最先跑的几只标的各用自己那份、其余用最后写进缓存的那份。现在扫描开头"
+     "（`alpha_hive_daily_report._fetch_scan_macro`，快照上下文里）取一次，注入 Guard（`BeeAgent._scan_macro`）。"
+     "**经 Guard 的只有一处**：并发几次取数结果不同的日子，首批标的的宏观票（VIX / 曲线 / 黄金 / 板块 ⇒ `macro_regime` → "
+     "`RegimeWeightAdjuster` 权重 ⇒ `final_score`）会变成与其余标的同一份。**历史**（第 0 步只读实测）：Guard 存档有宏观来源记录的 44 天里"
+     "4 天同一轮出现多份（09-02 4+26、09-15 1+29、09-24 29+1、09-29 27+2+1），09-30 起 0 天。取数时刻提前几分钟（Guard 阶段开头 ⇒ 扫描开头）"
+     "不算口径变化：旧代码的取数时刻本就随扫描进度在 14:07–14:30 间漂。"
+     "**为什么日期写 10-19**（同 654 / 657 / 660 / 663 / 669）：10-19 起每个旧代码扫描日全部 Guard 行的宏观记录都是同一份 ⇒ 几次并发取数"
+     "结果相同、单次取数给出的就是它（逐行判、读当天全部 Guard 行，不需要冻结证据），**边际作废 0 条**。"
+     "⚠️ 板块轮动不逐份记录（每行只记自己 ETF 的冷热），判据看不到它；第 0 步按 ETF 分组补查：10-19 ~ 10-27 同一 ETF 下各票冷热全同（XLY 只有 TSLA 一只，比不了）。"
+     "等价判据 `_BOUNDARY_EQUIVALENCE[\"v0.45.674\"]`；印记 `_BOUNDARY_MARKERS[\"v0.45.674\"]`：Guard `details.macro_scan_snapshot_checked` 字面量 True"
+     "（成功与出错路径都写，`guard_bee.GENERATION_MARKS`），实时行。预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.674\"]` = `agent.GuardBeeSentinel.*`（0 个信号后移）；`guard.macro_adj` 不点名（同 654 ~ 669）。"
+     "维度 IC 协议 H1 / H2 不读 Guard 宏观票 ⇒ 不截断。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -1897,6 +1929,86 @@ def _equiv_macro_bars_dated(d: dict) -> bool:
             and isinstance(rec.get("data_source"), str) and vt.get("macro_data_source") == rec["data_source"])
 
 
+def _guard_row_has_single_path_marker(d: dict) -> bool:
+    """这行是 v0.45.669 之后的代码写的吗：GuardBeeSentinel `details.macro_single_path_checked` 为字面量 `True`
+    （成功与出错路径都写，`guard_bee.GENERATION_MARKS`）。只认 `is True`：此前的记录没有这个键。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    return isinstance(det, dict) and det.get("macro_single_path_checked") is True
+
+
+def _marker_guard_single_path(d: dict) -> bool:
+    """v0.45.669 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383）。"""
+    return _guard_row_has_single_path_marker(d) and not _is_backfill_row(d)
+
+
+def _equiv_macro_single_path(d: dict) -> bool:
+    """v0.45.669 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？逐行判，不需要冻结证据。
+
+    本版只改「报价一项都没取到」那条提前返回（旧：兜底字典，不取板块轮动与 FRED；新：照常走同一条路径）。
+      · Guard 不在本行 / 出错 ⇒ 两版同一条路 ⇒ True（认 `error`，不认「没有 details」——v0.45.567 的教训）；
+      · 宏观细节（归档键名 `vix_term_structure`）读不出 / 没有来源 ⇒ 证不出 ⇒ False；
+      · 来源是 `fallback` ⇒ False：旧代码走了提前返回（或取数出错的整份出口，记录里分不出）——新代码会去取板块轮动，票可能不同；
+      · 其余来源（至少一项报价取到了）⇒ True：旧代码走的就是合并后的那条路径；本版在那条路径上只改了
+        「没有 VIX」（20.0 ⇒ None，`vix_source=fallback` 时 Guard 本就不计票）与只展示的宏观分。补跑行同样成立（不排补跑）。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    if not isinstance(g, dict) or g.get("error"):
+        return True
+    vt = (g.get("details") or {}).get("vix_term_structure")
+    src = vt.get("macro_data_source") if isinstance(vt, dict) else None
+    return isinstance(src, str) and src != "fallback"
+
+
+def _guard_row_has_scan_snapshot_marker(d: dict) -> bool:
+    """这行是 v0.45.674 之后的代码写的吗：GuardBeeSentinel `details.macro_scan_snapshot_checked` 为字面量 `True`
+    （成功与出错路径都写，`guard_bee.GENERATION_MARKS`）。只认 `is True`：此前的记录没有这个键。"""
+    g = ((d.get("swarm_results") or {}).get("agent_details") or {}).get("GuardBeeSentinel")
+    det = g.get("details") if isinstance(g, dict) else None
+    return isinstance(det, dict) and det.get("macro_scan_snapshot_checked") is True
+
+
+def _marker_guard_scan_snapshot(d: dict) -> bool:
+    """v0.45.674 的**日期**印记：新代码写的、且是实时行（补跑行不算日期证据，同 v0.45.383）。"""
+    return _guard_row_has_scan_snapshot_marker(d) and not _is_backfill_row(d)
+
+
+#: Guard 归档宏观细节（键名 `vix_term_structure`）里**出自宏观快照**的键——同一份快照 ⇒ 这些值逐个相同。
+#: 不含 `vix_term` / `vix_term_source`（另一次独立取数，有自己的锁与文件缓存）、`fomc_days`（日历）。
+_MACRO_SNAPSHOT_SIG_KEYS = ("macro_as_of_mode", "macro_ref_date", "macro_data_source", "vix_source", "vix_feed",
+                            "vix_as_of", "vix_stale", "vix", "yield_curve", "gold_trend")
+
+
+def _guard_macro_signature(r) -> tuple:
+    """一只票的 Guard 用的是哪一份宏观：`("skip",)` = Guard 不在 / 出错（不读宏观，不参与比较）；
+    `("unreadable",)` = 宏观细节读不出；否则 `("sig", <快照键的值>)`。"""
+    g = ((r.get("agent_details") or {}).get("GuardBeeSentinel")) if isinstance(r, dict) else None
+    if not isinstance(g, dict) or g.get("error"):
+        return ("skip",)
+    vt = (g.get("details") or {}).get("vix_term_structure")
+    if not isinstance(vt, dict):
+        return ("unreadable",)
+    return ("sig", json.dumps([vt.get(k) for k in _MACRO_SNAPSHOT_SIG_KEYS], sort_keys=True, default=str))
+
+
+def _equiv_macro_scan_snapshot(d: dict) -> bool:
+    """v0.45.674 的**等价判据**：这份旧代码记录在本版改动下输出不变吗？逐行判、读当天全部 Guard 行（`_day`），不需要冻结证据。
+
+    本版只改「同一轮里谁去取宏观」（旧：每个并行线程各取一次、首批标的可能拿到不同的一份；新：扫描开头取一次、全部共用）。
+      · Guard 不在本行 / 出错 ⇒ 不读宏观 ⇒ True（认 `error`，不认「没有 details」——v0.45.567 的教训）；
+      · 本行宏观细节读不出 / 没有当天全部行（`_day`）⇒ 证不出 ⇒ False；
+      · 当天每一行（Guard 在且没出错的）宏观记录都读得出、且是**同一份** ⇒ True：几次并发取数结果相同 ⇒ 单次取数给出的就是它；
+      · 当天出现两份以上 / 有一行读不出 ⇒ False（09-29 那种：首批标的拿到另一份，新代码下会和其余标的一样）。
+    ⚠️ 判据看不到板块轮动（每行只记自己 ETF 的冷热）；补跑行同样适用（补跑也是 4 个线程各取一次）。"""
+    own = _guard_macro_signature(d.get("swarm_results") or {})
+    if own[0] == "skip":
+        return True
+    day = d.get("_day")
+    if own[0] != "sig" or not isinstance(day, dict):
+        return False
+    sigs = {_guard_macro_signature(r) for r in day.values() if isinstance(r, dict)} - {("skip",)}
+    return sigs == {own}
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -1946,6 +2058,10 @@ _BOUNDARY_MARKERS = {
                   _marker_guard_yf_download),
     "v0.45.663": ("agent_details.GuardBeeSentinel.details.macro_bars_dated_checked is True",
                   _marker_guard_bars_dated),
+    "v0.45.669": ("agent_details.GuardBeeSentinel.details.macro_single_path_checked is True",
+                  _marker_guard_single_path),
+    "v0.45.674": ("agent_details.GuardBeeSentinel.details.macro_scan_snapshot_checked is True",
+                  _marker_guard_scan_snapshot),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，
@@ -1993,6 +2109,10 @@ _BOUNDARY_EQUIVALENCE = {
                   "（或轮动表为空且整轮 yfinance 0 次成功响应），黄金 Finnhub、10Y 当天财政部、VIX CBOE，本行宏观来源与当天日报一致"
                   "（或 Guard 不在本行 / 出错）⇒ 本版改动是空操作",
                   _equiv_macro_bars_dated, _guard_row_has_bars_dated_marker),
+    "v0.45.669": ("Guard 出错 / 不在本行，或宏观来源不是 fallback（至少一项报价取到了 ⇒ 旧代码走的就是合并后的那条路径）⇒ 本版改动是空操作",
+                  _equiv_macro_single_path, _guard_row_has_single_path_marker),
+    "v0.45.674": ("Guard 出错 / 不在本行，或当天全部 Guard 行的宏观记录（快照出的那几个键）读得出且是同一份 ⇒ 本版改动是空操作",
+                  _equiv_macro_scan_snapshot, _guard_row_has_scan_snapshot_marker),
 }
 
 #: 只挪日期的更正条目 → 它更正的那条（按 `_COHORT_HISTORY` 的 version 键；用法见表头）。
@@ -2162,7 +2282,8 @@ def _equivalence_scan(root: Path, boundary: str, first: Optional[str], is_new, i
                 continue
             examined.add((date, _tk))
             # v0.45.383：判据要按（日期，标的）查冻结证据，故一并传入；其余判据只读 swarm_results，忽略这两个键
-            wrapped = {"swarm_results": r, "_date": date, "_ticker": _tk}
+            # v0.45.674：另带当天全部标的（`_day`）——「同一轮的 Guard 用的是不是同一份宏观」只能跨行判
+            wrapped = {"swarm_results": r, "_date": date, "_ticker": _tk, "_day": sr}
             if is_new(wrapped):
                 continue
             (ok if is_equiv(wrapped) else bad).add(date)

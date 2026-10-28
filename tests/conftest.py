@@ -500,9 +500,16 @@ def stub_http_gate(monkeypatch):
                         _raise_offline("http_gate.urlopen_gated"))
 
 
-@pytest.fixture
-def stub_fred(monkeypatch):
+@pytest.fixture(autouse=True)
+def stub_fred(request, monkeypatch):
     """`fred_macro._load_fred_key` → `""`（于是 FRED 整段被跳过）。
+
+    v0.45.669 起 **autouse**（同 `_block_same_day_macro`）：此前 FRED 只在「至少一项报价取到了」的正常路径上取，
+    测试默认离线 ⇒ 报价全空 ⇒ 提前返回兜底、碰不到 FRED，所以按需请求就够。现在报价全空也照常走同一条路径
+    （板块轮动、FRED 照取）⇒ 任何没打桩就调 Guard / `get_macro_context` 的测试都会伸手取 FRED（实测
+    `test_guard_census_eviction` 首个被离线闸点名）。要验证 FRED 的测试在用例里自己 `monkeypatch` 一个 key，会覆盖本桩；
+    带 `network` / `integration` 标记的不钉（`test_integration::TestFREDMacroIntegration` 靠真 key 判要不要跑——
+    钉了它就恒 skip）。
 
     契约：`_fetch_macro_data` 里写的就是 `if fred_key:` —— **没有 key 就不取
     FRED**，`fred_data` 保持 `{}`。所以这里钉的是"拿不到 key"，不是伪造一份
@@ -513,7 +520,12 @@ def stub_fred(monkeypatch):
     `FRED_API_KEY` 环境变量。于是同一条测试在有 key 的开发机上打 FRED、
     在 CI 上不打 —— 两台机器跑的是两条分支。钉死它顺带把这个环境依赖也去掉了。
     """
-    import fred_macro
+    if request.node.get_closest_marker("network") or request.node.get_closest_marker("integration"):
+        return
+    try:
+        import fred_macro
+    except Exception:  # pragma: no cover - 模块不可得时无需拦
+        return
     monkeypatch.setattr(fred_macro, "_load_fred_key", lambda: "")
 
 
@@ -1352,6 +1364,18 @@ def _reset_event_row_stats():
 
 
 @pytest.fixture(autouse=True)
+def _reset_fred_macro_stats():
+    """v0.45.674：`fred_macro` 的 `get_macro_context` 调用 / 取数计数是进程级全局状态（同上一条）。只在模块已导入时清——不在这里触发导入。"""
+    mod = sys.modules.get("fred_macro")
+    if mod is not None:
+        mod._reset_stats()
+    yield
+    mod = sys.modules.get("fred_macro")
+    if mod is not None:
+        mod._reset_stats()
+
+
+@pytest.fixture(autouse=True)
 def _reset_yf_daily_stats():
     """v0.45.652：`yf_daily` 唯一入口的公司行动空行计数是进程级全局状态（同上一条）。只在模块已导入时清——不在这里触发导入。"""
     mod = sys.modules.get("yf_daily")
@@ -1514,7 +1538,8 @@ def pytest_report_collectionfinish(config, items):
 
     ⚠️ 必须在这个钩子里算，不能拆成 `pytest_collection_finish` 存 stash、这里再读：终端报告器自己的
     `pytest_collection_finish` 就是在里面调本钩子的，顺序不保证在别的 conftest 之后——读到的会是空（实测：拆开时 `-q` 下什么都不打）。"""
-    return _concurrency_hint.session_lines(getattr(config, "_alpha_hive_write_sandbox", None), len(items))
+    return (_concurrency_hint.session_lines(getattr(config, "_alpha_hive_write_sandbox", None), len(items))
+            + _concurrency_hint.system_load_lines(len(items)))
 
 
 @pytest.fixture(scope="session", autouse=True)

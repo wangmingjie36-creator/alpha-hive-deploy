@@ -271,12 +271,16 @@ class TestFredMacroAlignment:
         assert r["vix_change_pct"] == round((14.21 / 14.87 - 1) * 100, 2)   # 旧：键都没有
 
     def test_full_fallback_has_every_key_as_none(self, monkeypatch):
+        """哪儿都没有 VIX：观测量全是 None（键都在）。v0.45.669 起与正常路径同一条：取不到的**原因**照记
+        （`vix_feed_note` 等；旧整份兜底把它们也抹成 None——正是最想知道为什么的时候）。"""
         _csv(monkeypatch, [])
         monkeypatch.setattr(fm, "_same_day_macro_data", lambda as_of=None: ({}, {}))
         r = fm.get_macro_context()
-        assert r["vix_source"] == "fallback"
-        for k in ("vix_change_pct", *fm._VIX_OBS_KEYS):
+        assert r["vix_source"] == "fallback" and r["vix"] is None and r["vix_regime"] == "unknown"
+        for k in ("vix_change_pct", "vix_as_of", "vix_prev_close", "vix_prev_as_of",
+                  "vix_feed", "vix_lag_sessions", "vix_stale"):
             assert k in r and r[k] is None, k
+        assert set(fm._VIX_OBS_KEYS) <= set(r) and isinstance(r["vix_feed_note"], str)
 
 
 # ────────── F. GuardBee：陈旧 VIX 不投票 ──────────

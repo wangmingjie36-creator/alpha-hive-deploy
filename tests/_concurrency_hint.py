@@ -11,8 +11,16 @@
 ——选中的条数 `items`（收集结束才知道）和是否在 clockshift 拨钟下 `shifted`。只数**条数 ≥ `BIG_RUN_ITEMS`** 的会话：
 别人跑单个文件不该让你收到提示。登记不可用（非 macOS / 沙箱没套上）⇒ 如实说「并发检测不可用」，不静默。
 
-纯函数（`lines`）不碰文件系统，测试直接喂登记记录。接线只在 `conftest.pytest_report_collectionfinish`
-（计算必须放在这个钩子里，不能拆成「收集结束钩子存 stash、报告钩子再读」，见 conftest 该钩子的注释）。
+**登记看不见的那一半：系统 load（v0.45.668）。** 上面只数「登记过的 pytest 会话」。10-27 一个会话为复现偶发失败起了
+20 个 `yes` 当负载、清理无声失败，空转 40 分钟，load 124，另一会话的整套被饿到约 8% CPU、跑了 21 分钟以上；
+当时开跑提示一个字没打，因为那 20 个进程不是 pytest。`load_lines` 补这一半：1 分钟 load ≥ 核数 ⇒ 打一行，
+指给人去看谁在占 CPU。阈值取「≥ 核数」有实测依据：590 那轮 load≈11（10 核）整套跑了 1339 秒（安静时 500–650 秒）。
+同样只提示不阻塞；读不到 load ⇒ 说「无法读取」而不是沉默。
+
+纯函数（`lines` / `load_lines`）不碰文件系统与系统调用，测试直接喂登记记录 / load 数。接线只在
+`conftest.pytest_report_collectionfinish`（计算必须放在这个钩子里，不能拆成「收集结束钩子存 stash、报告钩子再读」，
+见 conftest 该钩子的注释）。真实读取 load 的包装 `system_load_lines` 刻意与 `session_lines` 分开：合在一起的话，
+机器忙时那些断言 `session_lines(...) == []` 的测试会无故变红。
 """
 from __future__ import annotations
 
@@ -23,6 +31,12 @@ import _write_sandbox
 #: 选中条数达到它才算「整套」：本会话达到才提示，别的会话达到才算「大会话」。常量不分环境——整套约 1.1 万条，
 #: 日常跑的单个文件 / 单个类都在几十到几百条，两头隔得很开，取中间一个整数即可。
 BIG_RUN_ITEMS = 2000
+
+#: 1 分钟 load 达到「核数 × 它」就提示。1.0 = 可运行进程数已不少于核数：单进程整套拿不到一整个核。
+LOAD_WARN_PER_CORE = 1.0
+
+#: 提示里指给人的那条命令——**不在测试进程里自己跑**：本会话的写沙箱里 exec 不了 setuid 程序（`/bin/ps`）。
+WHO_IS_BUSY = "ps -Ao pid,ppid,etime,pcpu,comm -r | head"
 
 
 def _is_shifted() -> bool:
@@ -67,3 +81,32 @@ def session_lines(sb: dict | None, my_items: int) -> list[str]:
     except OSError as e:
         why = f"读会话登记失败：{e}"
     return lines(my_items, None, unavailable=why)
+
+
+def load_lines(my_items: int, load1: float | None, ncpu: int | None, *, unavailable: str | None = None,
+               threshold: int | None = None) -> list[str]:
+    """系统 load 过高时要打的提示行（空列表 = 不用说）。
+
+    `load1`：1 分钟 load average；`ncpu`：逻辑核数；`unavailable`：读不到它们的原因（有值 ⇒ 无法判断，说出来）。
+    与 `lines` 同一道闸：条数没到 `BIG_RUN_ITEMS` 的小会话不吵。"""
+    t = BIG_RUN_ITEMS if threshold is None else threshold
+    if my_items < t:
+        return []
+    if unavailable is None and (load1 is None or not ncpu or ncpu < 1):
+        unavailable = "load 或核数读到的值不可用"
+    if unavailable:
+        return [f"concurrency: 无法读取系统 load（{unavailable}）——整套慢得不对劲时先 uptime，再 {WHO_IS_BUSY}"]
+    if load1 < LOAD_WARN_PER_CORE * ncpu:
+        return []
+    return [f"concurrency: ⚠️ 系统 1 分钟 load {load1:.0f} / {ncpu} 核——机器已超订，单进程整套会明显变慢、耗时不可比"
+            f"（不影响结果）；谁在占 CPU：{WHO_IS_BUSY}（ppid=1 且 etime 很长的满载进程多半是泄漏的后台负载）"]
+
+
+def system_load_lines(my_items: int) -> list[str]:
+    """读真实的 load 与核数，交给 `load_lines`。任何读取失败都只会变成一行「无法读取」，绝不抛。"""
+    try:
+        load1 = os.getloadavg()[0]
+        ncpu = os.cpu_count()
+    except (OSError, AttributeError) as e:
+        return load_lines(my_items, None, None, unavailable=f"{type(e).__name__}: {e}")
+    return load_lines(my_items, load1, ncpu)

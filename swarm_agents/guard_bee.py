@@ -18,7 +18,8 @@ FOMC_VOTE_WINDOW_DAYS = 3
 #: 在世代边界判定（`ic_rerun_readiness._equivalence_scan`）里会被当成旧代码、去查只覆盖旧代码日子的冻结证据 ⇒ 假「边界写早了」。
 #: 守卫：成功路径字面量里值为字面量 `True` 的键与本表双向一致（`tests/test_yf_daily.py::TestGuardGenerationMarks`）。
 GENERATION_MARKS = ("macro_event_rows_checked", "macro_quote_dates_checked", "macro_fred_vintage_checked",
-                    "macro_fred_series_isolated", "yf_daily_download_checked", "macro_bars_dated_checked")
+                    "macro_fred_series_isolated", "yf_daily_download_checked", "macro_bars_dated_checked",
+                    "macro_single_path_checked", "macro_scan_snapshot_checked")
 
 
 def _with_generation_marks(result: Dict) -> Dict:
@@ -297,6 +298,12 @@ class GuardBeeSentinel(BeeAgent):
                     # v0.45.663 世代印记（同上，无条件写）：`fred_macro` 读 Yahoo 日线按日期配对（宏观报价 / 板块轮动，不再数第几根），
                     # 缺值不再顶数（10Y 4.5 / 涨跌 0.0 ⇒ None / "unknown"）。判别器 `ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.663"]`
                     "macro_bars_dated_checked": True,
+                    # v0.45.669 世代印记（同上，无条件写）：`fred_macro` 报价全部没取到也不再整份换成兜底常量、照常走同一条路径
+                    # （板块轮动与 FRED 照取 ⇒ 这些天的板块票可能出现）。判别器 `ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.669"]`
+                    "macro_single_path_checked": True,
+                    # v0.45.674 世代印记（同上，无条件写）：宏观读本轮扫描的快照（`_scan_macro()`，扫描开头取一次），不再自己调
+                    # `get_macro_context()`——此前 4 个并行线程各取一次、首批几只标的可能拿到不同的一份。判别器 `ic_rerun_readiness._BOUNDARY_MARKERS["v0.45.674"]`
+                    "macro_scan_snapshot_checked": True,
                     # ③ 时间周期
                     "cycle_context": cycle_ctx,
                     # ④ 市场政体
@@ -398,16 +405,21 @@ class GuardBeeSentinel(BeeAgent):
         details["macro_ref_date"] = _ref_date
 
         # ===== 1. FRED 宏观数据 =====
-        macro = {}
-        try:
-            from fred_macro import get_macro_context, get_sector_etf_for_ticker
-            macro = get_macro_context()
-        except (ImportError, Exception) as e:
-            _log.debug("fred_macro 不可用: %s", e)
+        # v0.45.674：扫描里读本轮快照（扫描开头取一次后注入，日报宏观段与网站读的是同一份）；没注入（单票 CLI / 测试 / 深度分析）
+        # 才自己取——那条路逐字等于改动前。别改成「注入的是空就自己再取」：空就是这一轮取到的结果，再取会让本票与别的票、与日报不是同一份。
+        macro = self._scan_macro()
+        if macro is None:
+            macro = {}
+            try:
+                from fred_macro import get_macro_context
+                macro = get_macro_context()
+            except (ImportError, Exception) as e:
+                _log.debug("fred_macro 不可用: %s", e)
 
-        # v0.43.24: fred_macro 在 7 个宏观标的全部抓取失败时返回 base 常量
+        # v0.43.24: fred_macro 当年在 7 个宏观标的全部抓取失败时返回 base 常量
         # （vix=20.0 / yield_curve="unknown" / gold_trend="stable"），并老实标注
-        # data_source="fallback"。此前本函数不看这个标记，于是 20.0 被当作观测值
+        # data_source="fallback"（v0.45.669 起不再产出这些常量：没取到的项本身是 None / "unknown"，
+        # 这道判定留作多一层防护、照旧认存档里的旧形状）。此前本函数不看这个标记，于是 20.0 被当作观测值
         # 写进 details["vix"] → 深度报告渲染成"VIX 20（偏高恐慌）"，与真实的
         # 14.6（极度平静）方向相反。实测 88 个扫描日里 13 天如此，8 月 9 天里占 5 天。
         # dashboard_renderer:2101 早就在判这个标记，这里是补齐缺口。
