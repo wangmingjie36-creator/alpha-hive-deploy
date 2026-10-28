@@ -75,10 +75,13 @@ def get_macro_context() -> Dict:
 
     Returns:
         {
-            "macro_regime": "risk_on"/"risk_off"/"neutral",
-            "macro_score": float (0-10, 10=极度风险偏好),
-            "vix": float,
-            "vix_regime": "low"/"elevated"/"high"/"spike",
+            # v0.45.669：没观测到就是 None / "unknown"——报价全部没取到、取数出错也一样（旧兜底 VIX 20.0 / 10Y 4.5 /
+            # 宏观分 5.0 neutral，只靠 data_source == "fallback" 告诉读者别信）。按字段判，别按标记整块判。
+            "macro_regime": "risk_on"/"risk_off"/"neutral"/"unknown",
+            "macro_score": float | None (0-10, 10=极度风险偏好；只由观测到的分项算，展示用),
+            "macro_score_inputs" / "macro_score_missing": list[str],   # MACRO_SCORE_PARTS 里算进去 / 没观测到的
+            "vix": float | None,
+            "vix_regime": "low"/"moderate"/"elevated"/"high"/"spike"/"unknown",
             "treasury_10y": float | None,                       # v0.45.663：缺就是 None（旧兜底 4.5）
             "rate_environment": "low"/"moderate"/"high"/"unknown",
             "dollar_trend": "strong"/"weak"/"neutral"/"unknown",
@@ -87,7 +90,8 @@ def get_macro_context() -> Dict:
             "macro_headwinds": list[str],
             "macro_tailwinds": list[str],
             "summary": str,
-            "data_source": str,
+            "data_source": str,                                 # 一个来源都没供上 ⇒ "fallback"（只是标签）
+            "error": str,                                       # 只在取数代码自己出错的整份出口出现
         }
     """
     global _CACHE, _CACHE_TS
@@ -339,11 +343,17 @@ def _compose_data_source(as_of, src_map: Dict[str, str], data: Dict,
     return f"{label}@{as_of}" if as_of else label
 
 
-def _classify_vix(vix: float) -> str:
-    """VIX 绝对水平分档。抽成函数是因为 v0.43.24 后有两条产出路径
-    （正常路径 / yfinance 全灭但 CBOE 可用的部分降级路径），
-    两边必须同口径，否则同一个 VIX 会得到不同 regime 标签。
-    与 cboe_vix.get_vix_regime 保持一致。"""
+#: 宏观分（`macro_score`，只展示：Guard / Queen 不读它）的分项。v0.45.669 起只由**观测到的**分项算，
+#: 结果带 `macro_score_inputs` / `macro_score_missing`；一项都没观测到 ⇒ 分数 None。前六项定 `macro_regime`
+#: （一项都没有 ⇒ "unknown"），cpi / hy 在定完政体之后才加减分（沿用旧次序，未改）。
+MACRO_SCORE_PARTS = ("vix", "rate", "market", "dollar", "gold", "curve", "cpi", "hy")
+
+
+def _classify_vix(vix: Optional[float]) -> str:
+    """VIX 绝对水平分档（没有 VIX ⇒ "unknown"）。v0.43.24 时抽成函数是因为有两条产出路径要同口径；
+    v0.45.669 起只剩一条，仍留作唯一的分档处。与 cboe_vix.get_vix_regime 保持一致。"""
+    if vix is None:
+        return "unknown"
     if vix < 15:
         return "low"
     if vix < 20:
@@ -382,24 +392,32 @@ def _vix_change_pct(vix, prev) -> Optional[float]:
 def _fetch_macro_data() -> Dict:
     """内部：实际拉取宏观数据"""
 
+    # v0.45.669：只剩取数出错（下面的 `except`）这一个出口用它，且**每个观测量都是缺失**（None / "unknown"）。
+    # 旧版这里是一份看起来正常的数——VIX 20.0（elevated）、10Y 4.5（恰好 high ⇒ 宏观分 −1）、美元 / 大盘 neutral、
+    # 黄金 stable / 涨跌 0.0、宏观分 5.0 / neutral——只靠 `data_source == "fallback"` 告诉读者「别信」；Guard、日报、仪表板
+    # 各自出过事才补上查这个标记（v0.43.24 / v0.45.54 / v0.45.43）。现在值本身就说「没有」，标记只是标签。
+    # 报价全部没取到不再走这里：照常走下面那一条路径（板块轮动、FRED 照取，宏观分只算观测到的分项）。
     base = {
-        "macro_regime": "neutral",
-        "macro_score": 5.0,
-        "vix": 20.0,
-        "vix_regime": "elevated",
-        "treasury_10y": 4.5,
-        "rate_environment": "high",
-        "dollar_trend": "neutral",
-        "market_trend": "neutral",
+        "macro_regime": "unknown",
+        "macro_score": None,
+        "macro_score_inputs": [],
+        "macro_score_missing": list(MACRO_SCORE_PARTS),
+        "vix": None,
+        "vix_regime": "unknown",
+        "treasury_10y": None,
+        "rate_environment": "unknown",
+        "dollar_trend": "unknown",
+        "market_trend": "unknown",
+        "spx_change_pct": None,
+        "yield_curve": "unknown",
         "gold_price": None,
-        "gold_change_pct": 0.0,
-        "gold_trend": "stable",
+        "gold_change_pct": None,
+        "gold_trend": "unknown",
         "macro_headwinds": [],
         "macro_tailwinds": [],
-        "summary": "宏观数据不可用（降级到默认值）",
+        "summary": "宏观数据不可用（取数出错，见 error）",
         "data_source": "fallback",
-        # v0.43.24: VIX 单独标源。它可以在 yfinance 全灭时仍由 CBOE 供上，
-        # 此时 data_source 仍是 fallback（其余字段确实降级了），但 VIX 是真的。
+        # v0.43.24: VIX 单独标源（CBOE 能在别的源全灭时供上）。「fallback」= 没有观测到的来源。
         "vix_source": "fallback",
         # v0.45.92：降级路径也要带这两个键，否则消费者拿到"键不存在"，
         # 与实时路径的"键在、值为 None"无法区分 —— 那正是本项目治过多次的
@@ -425,7 +443,13 @@ def _fetch_macro_data() -> Dict:
         except Exception:                       # pragma: no cover - 闸门不可得不阻断
             pass
 
-        import yfinance as yf
+        # v0.45.669：yfinance 导入失败只让 Yahoo 那几个符号算没取到（`quote_gaps` 记 `yfinance_unavailable`），
+        # 财政部 / Finnhub / CBOE / FRED 照用、板块轮动自己报整段失败——旧代码在这里整份换成兜底常量。
+        try:
+            import yfinance as yf
+        except ImportError as _e_yf:
+            yf = None
+            _log.warning("宏观：yfinance 不可导入（%s），Yahoo 那几个符号记为没取到，其余来源照用", _e_yf)
 
         symbols = {
             "VIX":    "^VIX",
@@ -470,6 +494,9 @@ def _fetch_macro_data() -> Dict:
             if name in data:          # 已由当日源供上，不再打 yfinance
                 continue
             try:
+                if yf is None:
+                    _quote_gaps[name] = "yfinance_unavailable"
+                    continue
                 if _session_d is None:
                     _quote_gaps[name] = "no_session"        # 判不出这批代表哪天 ⇒ 不按位置猜
                     continue
@@ -496,7 +523,6 @@ def _fetch_macro_data() -> Dict:
             except Exception as e:
                 _quote_gaps[name] = f"error:{type(e).__name__}"
                 _log.debug("宏观数据获取失败 %s: %s", sym, e)
-        # 三条返回路径都带：符号全被挡下时正是降级成 fallback 的那条
         _gap_keys: Dict = {"quote_gaps": dict(sorted(_quote_gaps.items()))}
         if _as_of:
             _gap_keys["not_on_as_of"] = sorted(n for n, r in _quote_gaps.items() if r.startswith("anchor_missing:"))
@@ -579,25 +605,16 @@ def _fetch_macro_data() -> Dict:
             except Exception as _e_cv:  # noqa: BLE001
                 _log.debug("CBOE VIX 不可用，回落 yfinance: %s", _e_cv)
 
-        if not data:
-            # yfinance 全灭。但 CBOE 若拿到真实 VIX，就不该让它跟着变成 20.0 ——
-            # 其余字段照旧降级，只把 VIX 这一项换成观测值并如实标源。
-            if _cboe_vix is not None:
-                _partial = dict(base)
-                _partial["vix"] = _cboe_vix
-                _partial["vix_regime"] = _classify_vix(_cboe_vix)
-                # v0.45.366：旧代码此处写死 "cboe" ⇒ 补跑时快照值（无观测日）在其余宏观全灭的日子
-                # 被冒标成实时观测、进 Guard 计票。标签与正常路径同一个来源判定。
-                _partial["vix_source"] = _vix_src_override or "cboe"
-                _partial["vix_as_of"] = _vix_as_of
-                _partial["vix_prev_close"] = _vix_prev_close
-                _partial["vix_prev_as_of"] = _vix_prev_as_of
-                _partial["vix_change_pct"] = _vix_change_pct(_cboe_vix, _vix_prev_close)
-                _partial.update(_vix_obs_fields(_vix_obs))
-                _partial["summary"] = f"宏观数据不可用（VIX {_cboe_vix:.1f} 来自 CBOE，其余降级）"
-                _partial.update(_gap_keys)
-                return _partial
-            return {**base, **_gap_keys}
+        # v0.45.669：报价一项都没取到（财政部 / Finnhub / Yahoo 全空）也**不提前返回**，照常走下面同一条路径——
+        # 旧代码在这里整份换成兜底常量（或只把 VIX 换成 CBOE 的真值、其余照抄兜底），于是：
+        #   · 板块轮动（另一次独立的 Yahoo 取数）与 FRED 都不取 ⇒ 这些天 Guard 的板块票必然缺（经 `RegimeWeightAdjuster` ⇒ final_score）；
+        #   · 宏观分恒 5.0 / neutral，连那个真 VIX 都没算进去（09-24 / 25：VIX 14.21 < 15 是 low，本该 +2 ⇒ 7.0 risk_on——那个 VIX 是 09-22 的陈旧收盘，Guard 不计票，宏观分只展示）。
+        # 这一次失败原先只有仪表板打一条 WARNING（09-24 / 25 实况），在这里补上源头那条。
+        _no_quotes = not data
+        if _no_quotes:
+            _log.warning("宏观报价 %s（%s）：财政部 / Finnhub / Yahoo 一项都没供上——VIX %s；板块轮动与 FRED 照取",
+                         _session, "补跑" if _as_of else "实时",
+                         f"{_cboe_vix:.2f}（{_vix_src_override or 'cboe'}）" if _cboe_vix is not None else "也没有")
 
         # ---- VIX 分析 ----
         if _cboe_vix is not None:
@@ -607,9 +624,13 @@ def _fetch_macro_data() -> Dict:
             # VIX 究竟属于哪一天 —— 正是 MEMORY 里「读 vix 前先看 vix_source」
             # 那条要防的事。
             _vix_source = _vix_src_override or "cboe"
+        elif "VIX" in data:
+            vix = data["VIX"]["last"]
+            _vix_source = "yfinance"
         else:
-            vix = data.get("VIX", {}).get("last", 20.0)
-            _vix_source = "yfinance" if "VIX" in data else "fallback"
+            # v0.45.669：CBOE 与 Yahoo 都没给 ⇒ 没有 VIX（旧兜底 20.0 / elevated，`vix_source=fallback` 时 Guard 本就不计票）
+            vix = None
+            _vix_source = "fallback"
         # v0.45.357：变动必须与 `vix` 出自**同一对**观测。旧写法恒取 yfinance 那条腿，
         # 而 `vix` 是 CBOE 的上一场收盘 ⇒ 错位一天（09-11：vix=17.84 是 09-10 收盘，
         # vix_change_pct=−11.21% 却是 09-11 当日），喂给下面的「VIX 单日飙升」逆风晚报一天。
@@ -781,8 +802,16 @@ def _fetch_macro_data() -> Dict:
 
         score = max(1.0, min(10.0, score))
 
+        # v0.45.669：哪些分项是**观测到的**。没观测到的分项上面本就不加不减（"unknown" 不进任何一档）——
+        # 但一项都没有时 5.0 / neutral 是凭空的「中性」（旧整份兜底恒为它），所以改成 None / "unknown"。
+        _score_inputs = [p for p, state in (("vix", vix_regime), ("rate", rate_env), ("market", market_trend),
+                                            ("dollar", dollar_trend), ("gold", gold_trend), ("curve", yield_curve))
+                         if state != "unknown"]
+
         # ---- 宏观政体判断 ----
-        if score >= 7:
+        if not _score_inputs:
+            macro_regime = "unknown"
+        elif score >= 7:
             macro_regime = "risk_on"
         elif score <= 4:
             macro_regime = "risk_off"
@@ -829,6 +858,7 @@ def _fetch_macro_data() -> Dict:
         # ---- FRED CPI/FFR 补充评分（FRED 数据已在 score 之前获取）----
         if fred_data:
             if fred_data.get("cpi_yoy") is not None:
+                _score_inputs.append("cpi")
                 cpi = fred_data["cpi_yoy"]
                 if cpi > 4.0:
                     headwinds.append(f"CPI同比 {cpi:.1f}%（通胀偏高，加息压力仍存）")
@@ -848,6 +878,7 @@ def _fetch_macro_data() -> Dict:
 
             # ---- HY 信用利差评分 ----
             if fred_data.get("hy_spread_bp") is not None:
+                _score_inputs.append("hy")
                 hy_bp = fred_data["hy_spread_bp"]
                 hy_chg = fred_data.get("hy_spread_chg_bp")
                 chg_str = f"({hy_chg:+.0f}bp日变)" if hy_chg is not None else ""
@@ -870,7 +901,10 @@ def _fetch_macro_data() -> Dict:
                 score = max(1.0, min(10.0, score))
 
         summary_parts = [
-            f"VIX {vix:.1f}({vix_regime})",
+            "宏观报价全部没取到",
+        ] if _no_quotes else []
+        summary_parts += [
+            f"VIX {vix:.1f}({vix_regime})" if vix is not None else "VIX —",
             f"10Y {tnx:.2f}%" if tnx is not None else "10Y —",
             f"大盘{spx_change:+.1f}%" if spx_change is not None else "大盘—",
             f"宏观:{macro_regime}",
@@ -888,8 +922,10 @@ def _fetch_macro_data() -> Dict:
 
         return {
             "macro_regime": macro_regime,
-            "macro_score": round(score, 1),
-            "vix": round(vix, 2),
+            "macro_score": round(score, 1) if _score_inputs else None,
+            "macro_score_inputs": [p for p in MACRO_SCORE_PARTS if p in _score_inputs],
+            "macro_score_missing": [p for p in MACRO_SCORE_PARTS if p not in _score_inputs],
+            "vix": round(vix, 2) if vix is not None else None,
             "vix_change_pct": round(vix_change, 2) if vix_change is not None else None,
             "vix_regime": vix_regime,
             "treasury_10y": round(tnx, 3) if tnx is not None else None,
@@ -919,7 +955,11 @@ def _fetch_macro_data() -> Dict:
             # v0.45.60：当日口径下 `data_source` 必须反映**实际**供数的源。
             # 财政部与 Finnhub 供上后仍写「yfinance」是假标签 —— 排查限流时
             # 会让人去查一个根本没被调用的源。
-            "data_source": _compose_data_source(_as_of, _src_map, data, bool(fred_data)),
+            # v0.45.669：报价一项都没有 ⇒ 仍标 "fallback"（与旧整份降级同一个标签，只是不再承担「别信这些值」——值本身已是缺失）。
+            # 不写成 `cloud_snapshot@D` / `fred`：Guard 据它不记曲线 / 黄金（这些天两者必为 unknown，票不变），
+            # `ic_rerun_readiness` 旧边界的判据也按它认整份降级；FRED 供没供上看 `fred_extras`。
+            "data_source": ("fallback" if _no_quotes
+                            else _compose_data_source(_as_of, _src_map, data, bool(fred_data))),
             "field_sources": dict(_src_map),   # 逐字段来源，空 = 该项走了 yfinance
             "treasury_2y_source": _2y_source,  # treasury_gov / fred / approx_from_5y
             "vix_source": _vix_source,
@@ -939,12 +979,11 @@ def _fetch_macro_data() -> Dict:
             **_gap_keys,
         }
 
-    except ImportError:
-        _log.warning("yfinance 不可用，宏观数据降级")
-        return base
     except Exception as e:
-        _log.warning("宏观数据获取失败: %s", e)
-        return base
+        # v0.45.669：只剩这一个整份出口（取数代码自己出错）；值全是缺失，并写明是什么错。
+        # yfinance 导入失败不再走这里（见上：只让 Yahoo 那几个符号算没取到）。
+        _log.warning("宏观数据获取失败（整份为缺失）: %s: %s", type(e).__name__, e)
+        return {**base, "error": f"{type(e).__name__}: {e}"}
 
 
 #: `_fetch_fred_series` 产出的观测键（补跑时缺哪个就点名哪个）

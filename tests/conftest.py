@@ -500,9 +500,16 @@ def stub_http_gate(monkeypatch):
                         _raise_offline("http_gate.urlopen_gated"))
 
 
-@pytest.fixture
-def stub_fred(monkeypatch):
+@pytest.fixture(autouse=True)
+def stub_fred(request, monkeypatch):
     """`fred_macro._load_fred_key` → `""`（于是 FRED 整段被跳过）。
+
+    v0.45.669 起 **autouse**（同 `_block_same_day_macro`）：此前 FRED 只在「至少一项报价取到了」的正常路径上取，
+    测试默认离线 ⇒ 报价全空 ⇒ 提前返回兜底、碰不到 FRED，所以按需请求就够。现在报价全空也照常走同一条路径
+    （板块轮动、FRED 照取）⇒ 任何没打桩就调 Guard / `get_macro_context` 的测试都会伸手取 FRED（实测
+    `test_guard_census_eviction` 首个被离线闸点名）。要验证 FRED 的测试在用例里自己 `monkeypatch` 一个 key，会覆盖本桩；
+    带 `network` / `integration` 标记的不钉（`test_integration::TestFREDMacroIntegration` 靠真 key 判要不要跑——
+    钉了它就恒 skip）。
 
     契约：`_fetch_macro_data` 里写的就是 `if fred_key:` —— **没有 key 就不取
     FRED**，`fred_data` 保持 `{}`。所以这里钉的是"拿不到 key"，不是伪造一份
@@ -513,7 +520,12 @@ def stub_fred(monkeypatch):
     `FRED_API_KEY` 环境变量。于是同一条测试在有 key 的开发机上打 FRED、
     在 CI 上不打 —— 两台机器跑的是两条分支。钉死它顺带把这个环境依赖也去掉了。
     """
-    import fred_macro
+    if request.node.get_closest_marker("network") or request.node.get_closest_marker("integration"):
+        return
+    try:
+        import fred_macro
+    except Exception:  # pragma: no cover - 模块不可得时无需拦
+        return
     monkeypatch.setattr(fred_macro, "_load_fred_key", lambda: "")
 
 

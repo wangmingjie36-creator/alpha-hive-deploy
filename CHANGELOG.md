@@ -5,7 +5,73 @@
 
 ---
 
-## [0.45.669] — 2026-10-28 — 占位（进行中：宏观整份降级不再用兜底常量顶数——三条返回路径合一、缺值 None / unknown、宏观分只算观测到的分项；降级日照取板块轮动，登边界 10-19）
+## [0.45.669] — 2026-10-28 — Fixed：宏观报价全部没取到时不再整份换成兜底常量（VIX 20 / 10Y 4.5 / 宏观分 5.0）——三条返回路径合一，缺的项本身是 None / unknown，宏观分只算观测到的分项；报价全空那天板块轮动与 FRED 照取；日报 / 仪表板逐格显示；登边界 10-19（同 654 / 657 / 660 / 663，作废 0 条）
+
+用户 10-28「现在开工先给根因解决方案」⇒「照取，先占号，从第 0 步开始」（v0.45.663 的决定点 ①：整份降级的兜底常量单独做；唯一决定点「报价全空那天板块轮动照不照取」按建议照取）。
+根因：`fred_macro._fetch_macro_data` 有三条各自拼装的返回路径——报价（财政部 / Finnhub / Yahoo）一项都没有 ⇒ 提前返回兜底字典
+（VIX 20.0 elevated / 10Y 4.5 high / 美元·大盘 neutral / 黄金 stable、涨跌 0.0 / 宏观分 5.0 neutral）；CBOE 给了 VIX ⇒ 只把 VIX 换成真值、其余照抄兜底。
+「别信这些值」只靠一个旁路标记 `data_source == "fallback"`，每个读者自己记得查——Guard（v0.43.24）、日报（v0.45.54）、仪表板（v0.45.43）都是出过事才补上的；
+下一个新读者照样会漏。连带两处毛病：提前返回时**板块轮动（另一次独立的 Yahoo 取数）与 FRED 都不取** ⇒ 这些天 Guard 的板块票必缺；
+部分降级那天宏观分恒 5.0 neutral，连那个真 VIX 都没算进去。
+
+### 第 0 步：只读实测
+- 137 份日报里 **15 份**走过兜底：06-22 ~ 08-14 的 13 份整份常量（VIX 20.0 / 10Y 4.5 / 宏观分 5.0）；09-24 / 25 两份只有 CBOE VIX 14.21
+  （09-22 的陈旧收盘，Guard 不计票），10Y 4.5 / 宏观分 5.0 neutral 照旧是常量——按 `_classify_vix` 14.21 < 15 是 low，本该 +2 ⇒ 7.0 risk_on
+  （方案里我心算成「moderate +1」，测试按代码实测改正）。**09-26 起 0 份**；10-19 起每天 30/30 行 Guard 宏观来源都含财政部 / Finnhub。
+- 09-24 / 25 两天都是**网络故障**（结构化日志）：09-24 SSL 断连（EOF）+ Yahoo 限流冷却，09-25 DNS 解析失败；财政部重试 3 次都失败 ⇒ 当时照取板块轮动大概率也取不到。
+  那两天 `fred_macro` 自己**一条 WARNING 都没打**，只有仪表板打了「宏观区块将全部显示『—』」——还把 CBOE 那个真 VIX 一起藏了。
+- 现有读者：Guard 按标记跳过（VIX 按 `vix_source` 单独判）⇒ 评分从没吃到常量；日报整段不印；仪表板整块「—」；仪表板 10Y 涨跌只认带财政部日期的 ⇒ 安全；
+  ML 分析 JSON / MCP 不带宏观段（核过 `analysis-*-ml-*.json` 的键）。
+- 顺带看到（没改，见待办）：`get_macro_context` 缓存 30 分钟、扫描跑得更久 ⇒ 同一天不同标的可能拿到两份宏观（09-24：29 行 fallback、1 行 finnhub）。
+
+### Fixed（`fred_macro._fetch_macro_data`：一条路径）
+- 去掉两个提前返回（整份兜底 / 只换 VIX 的部分降级）：报价全空也照常走分析段（663 起它已逐项处理缺值），**板块轮动与 FRED 照取**；
+  源头打一条 WARNING「财政部 / Finnhub / Yahoo 一项都没供上——VIX …；板块轮动与 FRED 照取」，摘要以「宏观报价全部没取到」开头。
+  报价全空时 `data_source` 仍标 `"fallback"`（与旧整份降级同一个标签；不写成 `cloud_snapshot@D` / `fred`：Guard 据它不记曲线 / 黄金，这些天两者也必为 unknown；
+  `ic_rerun_readiness` 旧边界判据也按它认）——但它**不再承担「别信」**：值本身已是缺失。
+- 正常路径上「CBOE 与 Yahoo 都没给 VIX」：旧 `data.get("VIX", {}).get("last", 20.0)` + elevated ⇒ `vix=None`、`vix_regime="unknown"`（`vix_source` 仍是 fallback）。
+  `_classify_vix(None)` ⇒ "unknown"。663 登记的唯一数字兜底例外（这个 20.0）随之删掉，`ALLOWED_NUMERIC_DEFAULTS` 清空。
+- **宏观分只由观测到的分项算**：新增 `MACRO_SCORE_PARTS`（vix / rate / market / dollar / gold / curve / cpi / hy）与输出键 `macro_score_inputs` / `macro_score_missing`；
+  一项都没观测到 ⇒ `macro_score=None`；前六项一项都没有 ⇒ `macro_regime="unknown"`（政体仍由前六项定、cpi / hy 之后加减分——沿用旧次序，没改）。
+  正常日子逐位不变（没观测到的分项本来就不加不减）。宏观分只展示：Guard / Queen 不读它。
+- **兜底字典只剩取数代码自己出错的那个出口用**，且每个观测量是 None / "unknown"，并带 `error: "<类型>: <消息>"`；WARNING 写明「整份为缺失」。
+- yfinance 导入失败不再走整份出口：只让 Yahoo 那几个符号进 `quote_gaps`（`yfinance_unavailable`），财政部 / Finnhub / CBOE / FRED 照用，板块轮动自己报整段失败。
+
+### Changed（读者逐格判，不再按标记整块判）
+- `report_formatters._build_macro`：宏观表照印，缺的格「— / 不可得」，宏观分 None ⇒「评分：—」、政体 unknown ⇒「不可得」，报价全空时加一行 ⚠️ 提示。
+  **旧形状**（标 fallback 又没有 669 起才有的 `macro_score_inputs`，例如拿存档旧日报重渲染）里的值仍是那些常量 ⇒ 照旧整段不印。
+- `dashboard_renderer`：去掉「fallback ⇒ 整块『—』」，逐字段显示（报价全空、CBOE 有 VIX 的日子能看到真 VIX）；WARNING 改成「只显示取到的项」；两处过期注释同改。
+- Guard 的标记判定（`_macro_degraded`）**保留**作为多一层防护，不改投票。
+
+### 世代边界（同 654 / 657 / 660 / 663：并进 10-19 同日标签，逐行等价判据，不需要冻结证据）
+- **经 Guard 的只有一处**：报价全空那天板块轮动照取 ⇒ 板块票可能出现 ⇒ `macro_regime` → `RegimeWeightAdjuster` 权重 ⇒ `final_score`。VIX / 曲线 / 黄金票不变。
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-10-19", "v0.45.669", …)`：`cohort_start()` 仍 10-19 ⇒ **作废 0 条**。
+- 等价判据 `_equiv_macro_single_path`：Guard 不在本行 / 出错 ⇒ 等价；宏观细节读不出 ⇒ 证不出；来源是 `fallback` ⇒ 证不出（旧代码走了提前返回，或取数出错的整份出口——记录里分不出）；
+  其余来源（至少一项报价取到了）⇒ 等价（旧代码走的就是合并后的那条路径；这条路径上只改了「没有 VIX」与只展示的宏观分）。补跑行同样成立。
+- 印记 `_BOUNDARY_MARKERS["v0.45.669"]`：Guard `details.macro_single_path_checked = True`（`GENERATION_MARKS`，成功与出错路径都写），只认实时行。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.669"] = ("agent.GuardBeeSentinel.*",)`（**0 个信号后移**）；`guard.macro_adj` 不点名。维度 IC H1 / H2 不读 Guard 宏观票 ⇒ 不截断。
+- `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代标签扩为 `…+v0.45.663+v0.45.669`。
+- 推送前对生产数据根只读跑判别器：652 / 654 / 657 / 658 / 660 / 663 仍 `matches`；669 `no_evidence_yet`、`unmarked_after_boundary=[]`、10-19 ~ 10-27 七天全等价。
+
+### 测试
+- `tests/test_macro_single_path.py`（新）：A 报价全空（观测量全缺失、宏观分 None / 政体 unknown、板块轮动与 FRED 照取、CPI / HY 单独算分 4.7、只有 CBOE VIX ⇒ 7.0 risk_on、
+  源头 WARNING 与摘要、部分报价不误报）；B 正常路径没 VIX ⇒ None；C 出错出口（全缺失 + `error` + WARNING）；D Guard（报价全空那天板块票出现、曲线 / 黄金 / VIX 不记）；
+  E 日报照印「—」、显示真 VIX，仪表板显示真 VIX（整页渲染）；F AST 守卫（兜底字典里没有数字、状态只许 "unknown"；try 里只有一个 return、except 里一个）+ 守卫有牙的正对照。
+- `tests/test_backfill_macro_asof.py` L 节（登记）：条目 / 作用域 / 印记（含 GENERATION_MARKS）/ 判据 8 种形状 / 作废 0 条 / 0 个信号后移 / 不截断 H1 H2 / ML 标签 /
+  Guard 字面量无条件写印记 / 判定三态（含「边界之后旧代码报价全空的一天 ⇒ boundary_too_early」）。
+- 既有用例按新语义改：`test_every_symbol_off_d_is_named_on_the_degraded_paths[base]` VIX 20.0 ⇒ None；`test_fallback_when_yfinance_missing` 改断言财政部照用、
+  Yahoo 符号点名、轮动整段失败；`test_full_fallback_has_every_key_as_none` 观测量 None、取不到的原因照记（旧整份兜底把 `vix_feed_note` 也抹成 None）；
+  `test_report_formatters` 旧形状照旧不印 + 新形状逐格印。
+- **`tests/conftest.py::stub_fred` 改 autouse**（带 `network` / `integration` 标记的不钉）：报价全空也取 FRED 之后，任何没打桩就调 Guard / `get_macro_context` 的测试
+  都会伸手取 FRED（实测 `test_guard_census_eviction` 首个被离线闸点名）；同 `_block_same_day_macro` 的理由。
+- 变异：**24 处全红**——代码 14 处（恢复提前返回、兜底字典写回 20.0 / stable、正常路径没 VIX 用 20.0、全缺也给 5.0 / neutral、CPI 不记分项、WARNING 降 debug、出错出口不带 error、yfinance 导入失败整份出错、报价全空不标 fallback、日报整段不印 / 旧形状也印、仪表板整块跳过、conftest FRED 桩不 autouse）+ 登记 / 判据 10 处（印记不写 / 不进 GENERATION_MARKS、判据把 fallback 当等价 / 缺细节当等价、删等价登记、日期印记不排补跑、条目日期写成上线日、作用域加 `guard.macro_adj`、记分卡标签不扩）
+- 拨钟审计：（+7 / +45 天，6 个改动的测试文件 368 条）0 条新红
+- 整套：**12941 passed**（82 deselected、2 xfailed），带选测审计插件；漂移检查只报新测试读了仪表板模板（非代码、只警告），已 `select_tests --update --files tests/test_macro_single_path.py` 并入 `tests/_must_run.json`
+
+### 没改 / 待办
+- 实时 Finnhub 报价不核时间戳（`t`）是不是这一场；FRED HY 日变（`obs[0] − obs[1]`）仍按位置（只展示）。
+- `get_macro_context` 缓存 30 分钟比扫描短 ⇒ 同一次扫描里不同标的可能拿到两份宏观（09-24 实测 29 + 1）；本版没动。
+- 同一形状的兜底字典别处还有（`unusual_options` 的 5.0 / neutral、`swarm_agents/cache.py` 的 fallback 行情），不在本版范围。
 
 ## [0.45.668] — 2026-10-28 — 占位（进行中：整套测试开跑时提示系统 load 过高 + 有寿命的压力负载工具 tools/burn_cpu.py）
 

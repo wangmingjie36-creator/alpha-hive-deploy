@@ -14,7 +14,7 @@
   B. 宏观报价（实时 + 补跑）：这一场那根缺 ⇒ 当没取到；只缺前一场 ⇒ 水平照用、涨跌 None；点名进 `quote_gaps` + WARNING；
   C. 板块轮动：同上；缓存按场次存；±50% 不再「归零」照排；逐只 / 整段失败都 WARNING（10-14 / 10-26 整表为空时一个字都没有）；
   D. 缺值不顶数：10Y / 大盘 / 美元 / 黄金缺了是 None / "unknown"；财政部与 Finnhub 不再写假 0.0；报告「大盘」标签是 1 日；
-  E. 守卫：`fred_macro.py` 里不许按位置读日线、不许给 last / prev / change_pct 数字兜底（VIX 20.0 是登记过的例外，只许减）。
+  E. 守卫：`fred_macro.py` 里不许按位置读日线、不许给 last / prev / change_pct 数字兜底（登记过的例外只许减；v0.45.669 已减到 0）。
 
 钟：实时口径的锚定日只读 `fred_macro._realtime_as_of`（它读 `cboe_options._et_now`）——用到实时的用例一律钉它。
 """
@@ -423,12 +423,9 @@ class TestMissingIsMissing:
 _SRC = ROOT / "fred_macro.py"
 _BAR_KEYS = {"last", "prev", "change_pct"}
 
-#: 登记过的例外（只许减）：(所在函数, 键, 兜底值, 理由)
-ALLOWED_NUMERIC_DEFAULTS = {
-    ("_fetch_macro_data", "last", 20.0):
-        "CBOE 与 Yahoo 都没给 VIX 时的兜底常量（`vix_source=fallback`，Guard 不计票）；"
-        "与整份降级的兜底常量一起留给下一版（用户 10-27 定：决定点 ①）",
-}
+#: 登记过的例外（只许减）：(所在函数, 键, 兜底值, 理由)。
+#: v0.45.669 清空：唯一一条（CBOE 与 Yahoo 都没给 VIX 时的 20.0）随整份降级的兜底常量一起改成 None。
+ALLOWED_NUMERIC_DEFAULTS: dict = {}
 
 
 def _is_num(n):

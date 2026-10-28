@@ -647,13 +647,25 @@ def _build_cross_ticker(cross_ticker) -> List[str]:
 def _build_macro(macro_context) -> List[str]:
     """版块 P5：宏观环境（可选）"""
     md: List[str] = []
-    if not macro_context or macro_context.get("data_source") == "fallback":
+    if not macro_context:
         return md
-    regime = macro_context.get("macro_regime", "neutral")
+    # v0.45.669：逐格判，不再按 `data_source == "fallback"` 整段不印——上游没取到的项本身就是 None / "unknown"
+    # （旧兜底 VIX 20.0 / 10Y 4.5 / 评分 5.0 只能整段藏起来，连 09-24 / 25 那个 CBOE 的真 VIX 也一起藏了）。
+    # 旧形状（标 fallback 又没有 669 起才有的 `macro_score_inputs`，例如拿存档旧日报重渲染）里的值仍是那些常量 ⇒ 照旧不印。
+    if macro_context.get("data_source") == "fallback" and "macro_score_inputs" not in macro_context:
+        return md
+    regime = macro_context.get("macro_regime") or "unknown"
     regime_emoji = {"risk_on": "🟢", "risk_off": "🔴", "neutral": "🟡"}.get(regime, "")
     md.append(f"## 🌐 宏观环境 {regime_emoji}")
     md.append("")
-    md.append(f"**宏观政体**：{regime.upper()} | **评分**：{macro_context.get('macro_score', 5):.1f}/10")
+    if macro_context.get("data_source") == "fallback":
+        md.append("> ⚠️ 宏观报价一项都没取到（财政部 / Finnhub / Yahoo），下表只有取到的项有值。")
+        md.append("")
+    _score = macro_context.get("macro_score")
+    _score_txt = (f"{_score:.1f}/10" if isinstance(_score, (int, float)) and not isinstance(_score, bool)
+                  and math.isfinite(_score) else "—")
+    _regime_txt = "不可得" if regime == "unknown" else regime.upper()
+    md.append(f"**宏观政体**：{_regime_txt} | **评分**：{_score_txt}")
     md.append("")
     md.append("| 指标 | 数值 | 状态 |")
     md.append("|------|------|------|")

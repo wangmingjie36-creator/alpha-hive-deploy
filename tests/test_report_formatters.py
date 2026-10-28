@@ -321,7 +321,14 @@ class TestBuildMacro:
         assert _build_macro(None) == []
 
     def test_macro_fallback_excluded(self):
-        assert _build_macro({"data_source": "fallback"}) == []
+        """旧形状（v0.45.669 前：标 fallback、值是兜底常量、没有 `macro_score_inputs`）照旧整段不印。"""
+        assert _build_macro({"data_source": "fallback", "vix": 20.0, "treasury_10y": 4.5, "macro_score": 5.0}) == []
+
+    def test_macro_fallback_new_shape_prints_per_field(self):
+        """v0.45.669 起报价全空也照常输出、缺的项本身是 None ⇒ 表照印，缺的格「—」。变红的变异：恢复按标记整段不印。"""
+        text = "\n".join(_build_macro({"data_source": "fallback", "macro_score_inputs": [], "macro_score": None,
+                                       "macro_regime": "unknown", "vix": None, "vix_regime": "unknown"}))
+        assert "宏观报价一项都没取到" in text and "| VIX | — | 不可得 |" in text and "**评分**：—" in text
 
     def test_macro_with_data(self):
         macro = {
