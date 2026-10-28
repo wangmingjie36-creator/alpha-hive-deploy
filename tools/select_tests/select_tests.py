@@ -28,7 +28,8 @@ v0.45.439、v0.45.592→596 都因此让 main 变红。所以选测不能按 imp
 随跑测量（登记表怎么不过期）
 ──────────────────────────
 `--run` 拉起的 pytest 自带 `audit_plugin`，顺带看被改的测试文件**现在**读了什么，与登记表对比：多出登记表没有的测试读测试 ⇒ 打印
-「登记表过期」并以退出码 4 结束（测试本身红时退出码仍是 pytest 的）；只多出非代码文件的读 ⇒ 只警告。`--update` 把这些读并进登记表（只并不删：偏保守）。
+「登记表过期」并以退出码 4 结束（测试本身红时退出码仍是 pytest 的）；只多出非代码文件的读 ⇒ 只警告。`--update` 把这些读并进登记表（只并不删：偏保守）；提示给的是点名读者的整条命令
+（`update_command`：读者没改过时裸 `--update` 什么都不量，v0.45.667）。
 CI 在整套命令上加同一个插件，`--check-drift` 比对——**测试读测试的漏登就红**（含该归入读全部的元守卫）；**非代码文件漏登只警告**
 （照样列出、给修法、在 Actions 里打 `::warning`，不挡 main——理由见 `Gap`，v0.45.661）。比登记表少不算：CI 上有的测试会 skip。
 `--run` 的随跑测量用同一分级（`report_gaps`）。
@@ -181,8 +182,11 @@ class Gap(NamedTuple):
     没跑元守卫，main 变红」的事故，且新元守卫少见、不造噪声。非代码文件漏登**只警告**：它几乎都是「加了被现有测试按目录通读的
     静态文件 / 新测试读文件、忘了 `--update`」，10-22 → 10-27 让 main 的 `tests` 有 48% 的红是它、真失败夹在其中；
     而 `make_plan` 对**没有登记读者**的非代码文件回退整套，漏登不会让新文件漏跑。剩下的小缺口：已有读者的文件又多了新读者
-    （新测试读 `hedge.js`），只改它时少选那个新读者——收尾 / CI 整套兜底。"""
+    （新测试读 `hedge.js`），只改它时少选那个新读者——收尾 / CI 整套兜底。
+
+    `file` = 漏登的那个读者（测试文件）：修法要点名它（`update_command`）。"""
     kind: str
+    file: str
     text: str
 
     @property
@@ -190,24 +194,34 @@ class Gap(NamedTuple):
         return self.kind != "nonpy"
 
 
-def report_gaps(gaps: list, *, hint: str) -> bool:
-    """打印漏登（`--check-drift` 与 `--run` 共用，本地与 CI 同一口径）；返回有没有要报红的。
+def update_command(files) -> str:
+    """把这几个测试文件现在的读并进登记表的命令——漏登的修法。**必须带 `--files` 点名**：裸 `--update` 只量相对 `--base`
+    改过的测试文件，而漏登最常见的一类是现有测试按目录通读到新文件（读者自己没改），CI 报出来时提交也已经在 main 上（改动集是空的）——
+    两种情况裸 `--update` 都什么也不量、退出码 0、登记表不动（v0.45.667 前提示里只写了 `--update`）。"""
+    return shlex.join(["/usr/local/bin/python3", "tools/select_tests/select_tests.py", "--files", *sorted(set(files)), "--update"])
+
+
+def report_gaps(gaps: list, *, alt: str = "") -> bool:
+    """打印漏登与一条照做就能修好的命令（`update_command`，点名全部漏登的读者；`--check-drift` 与 `--run` 共用，本地与 CI 同一口径）；
+    返回有没有要报红的。`alt` = 另一种修法（`--check-drift` 给「整套带插件后 `--build`」）。
     非代码文件漏登照样逐条列出、给修法，在 GitHub Actions 里另打 `::warning` 注记（出现在运行摘要里，不挡 main）。"""
     blocking = [g for g in gaps if g.blocking]
     advisory = [g for g in gaps if not g.blocking]
     if blocking:
-        print(f"[select_tests] ❌ 登记表过期：{len(blocking)} 处测试读测试没有被登记（{hint}）")
+        print(f"[select_tests] ❌ 登记表过期：{len(blocking)} 处测试读测试没有被登记")
         for g in blocking:
             print("  - " + g.text)
     if advisory:
-        print(f"[select_tests] ⚠️ 非代码文件漏登 {len(advisory)} 处——只警告、不报红"
-              f"（没有登记读者的非代码文件改动时选测回退整套；{hint}）")
+        print(f"[select_tests] ⚠️ 非代码文件漏登 {len(advisory)} 处——只警告、不报红（没有登记读者的非代码文件改动时选测回退整套）")
         for g in advisory:
             print("  - " + g.text)
-        if os.environ.get("GITHUB_ACTIONS") == "true":
-            for g in advisory:
-                msg = g.text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-                print(f"::warning title=选测登记表：非代码文件漏登::{msg}")
+    if gaps:
+        print(f"  修法：{update_command(g.file for g in gaps)}，并把 {REGISTRY_REL} 一起提交" + (f"；或{alt}" if alt else ""))
+    if advisory and os.environ.get("GITHUB_ACTIONS") == "true":
+        for g in advisory:
+            msg = f"{g.text}——修法：{update_command([g.file])}"
+            msg = msg.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+            print(f"::warning title=选测登记表：非代码文件漏登::{msg}")
     return bool(blocking)
 
 
@@ -225,15 +239,15 @@ def observed_gaps(reg: dict, dump: dict, files=None, *, n_tests: int) -> list[Ga
         obs_others = set(kinds.get("other_test", ()))
         if not reads_all:
             if counts_as_read_all(len(obs_others), n_tests):
-                out.append(Gap("reads_all", f"{f}：现在读了 {len(obs_others)} 个测试文件（≥ 一半），"
+                out.append(Gap("reads_all", f, f"{f}：现在读了 {len(obs_others)} 个测试文件（≥ 一半），"
                                             "应归入 reads_all_tests（改任何测试文件都要跑它）"))
             else:
                 extra = sorted(obs_others - others)
                 if extra:
-                    out.append(Gap("other_test", f"{f}：读了登记表没有的测试文件 {extra[:5]}{' …' if len(extra) > 5 else ''}"))
+                    out.append(Gap("other_test", f, f"{f}：读了登记表没有的测试文件 {extra[:5]}{' …' if len(extra) > 5 else ''}"))
         extra_np = sorted(set(kinds.get("nonpy", ())) - nonpy)
         if extra_np:
-            out.append(Gap("nonpy", f"{f}：读了登记表没有的非代码文件 {extra_np[:5]}{' …' if len(extra_np) > 5 else ''}"))
+            out.append(Gap("nonpy", f, f"{f}：读了登记表没有的非代码文件 {extra_np[:5]}{' …' if len(extra_np) > 5 else ''}"))
     return out
 
 
@@ -490,7 +504,7 @@ def cmd_check_drift(args) -> int:
         print("[select_tests] ❌ dump 是空的——测量没生效，不能当「没有漂移」", file=sys.stderr)
         return EXIT_USAGE
     gaps = observed_gaps(reg, dump, n_tests=repo_test_count())
-    if report_gaps(gaps, hint="修法：本地整套带插件跑一次后 --build，或 --update"):
+    if report_gaps(gaps, alt="本地整套带插件跑一次后 --build（全量重建）"):
         return EXIT_STALE
     print(f"[select_tests] ✅ 测试读测试的登记覆盖本次整套观测（{len(dump['by_file'])} 个测试文件有读记录）")
     return EXIT_OK
@@ -534,8 +548,7 @@ def cmd_select(args) -> int:
                                  n_tests=repo_test_count())
         else:
             print("[select_tests] ⚠️ 审计插件没有产出 dump——这次没能随跑测量", file=sys.stderr)
-    stale = report_gaps(gaps, hint="修法：/usr/local/bin/python3 tools/select_tests/select_tests.py --update，"
-                                   "并把 tests/_must_run.json 一起提交")
+    stale = report_gaps(gaps)
     if rc != 0:
         return rc
     return EXIT_STALE if stale else EXIT_OK
@@ -545,7 +558,10 @@ def cmd_update(args) -> int:
     changes = resolve_changes(args)
     files = sorted(p for s, p in changes if classify(p) == "test" and s != "D" and (REPO / p).exists())
     if not files:
-        print("[select_tests] 没有被改的测试文件，无需测量。")
+        # 不能只说「无需测量」：照着漏登提示敲裸 `--update` 的人会以为修好了（读者没改 / 已在 main 上时就落到这里）
+        print("[select_tests] 没有要测量的测试文件（不给 --files 时只量相对 --base 改过的 tests/test_*.py）——什么都没量，登记表没动。\n"
+              "  要并入没改过的测试的读（如漂移检查点名的读者），用 --files 点名："
+              "/usr/local/bin/python3 tools/select_tests/select_tests.py --files tests/test_x.py … --update")
         return EXIT_OK
     reg = load_registry(registry_path(args))
     with tempfile.TemporaryDirectory(prefix="select_tests_") as td:
@@ -565,12 +581,12 @@ def cmd_update(args) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="开发期选测（第一档）。收尾 / CI 仍整套。")
     ap.add_argument("--base", default="origin/main", help="改动的比较基线（缺省 origin/main）")
-    ap.add_argument("--files", nargs="*", help="直接给改动文件（当作 M），不读 git——回放 / 调试用")
+    ap.add_argument("--files", nargs="*", help="直接给改动文件（当作 M），不读 git——回放 / 调试用；配 --update = 量这几个测试文件（漏登的修法）")
     ap.add_argument("--registry", metavar="PATH", help="登记表路径（缺省 tests/_must_run.json；测试用）")
     ap.add_argument("--run", action="store_true", help="按方案执行（缺省只打印）")
-    ap.add_argument("--update", action="store_true", help="测量被改的测试文件并并入登记表")
+    ap.add_argument("--update", action="store_true", help="测量被改的测试文件并并入登记表（没改过的测试要用 --files 点名）")
     ap.add_argument("--build", metavar="DUMP", help="由整套 + 审计插件的 dump 重建登记表")
-    ap.add_argument("--check-drift", metavar="DUMP", help="CI：dump 里有登记表没有的读 ⇒ 退出码 4")
+    ap.add_argument("--check-drift", metavar="DUMP", help="CI：测试读测试漏登（含新元守卫）⇒ 退出码 4；只有非代码文件漏登 ⇒ 列出 + 修法 + ::warning、退出码 0")
     args = ap.parse_args(argv)
     try:
         if args.build:

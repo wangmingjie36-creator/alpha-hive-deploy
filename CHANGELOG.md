@@ -73,9 +73,47 @@
 - `get_macro_context` 缓存 30 分钟比扫描短 ⇒ 同一次扫描里不同标的可能拿到两份宏观（09-24 实测 29 + 1）；本版没动。
 - 同一形状的兜底字典别处还有（`unusual_options` 的 5.0 / neutral、`swarm_agents/cache.py` 的 fallback 行情），不在本版范围。
 
-## [0.45.668] — 2026-10-28 — 占位（进行中：整套测试开跑时提示系统 load 过高 + 有寿命的压力负载工具 tools/burn_cpu.py）
+## [0.45.668] — 2026-10-28 — Added：整套测试开跑时提示「系统 load 已超订」+ `tools/burn_cpu.py`（负载进程自带寿命、清理失败会红）
 
-## [0.45.667] — 2026-10-28 — 占位（进行中：659/661/664/665 二次检查——漏登修法给出可照做的 --files 命令、664 勘误、两处过期说明）
+起因（2026-10-27/28，只读查证，见 memory `alpha-hive-environment-facts`）：有人问「整套测试之前不是优化过吗，怎么每次还要 20 分钟以上」。机器上有 20 个孤儿 `yes`（ppid=1）空转 40 分钟，load 124（10 核），整套 pytest 只拿到约 8% CPU。源头是另一个会话为复现 v0.45.664 的偶发失败手写的负载：`for … do yes > /dev/null & pids="$pids $!"; done; trap "kill $pids 2>/dev/null" EXIT`。清理无声失败，三处缺陷叠加才泄漏——① 本机 Bash 是 zsh，`$pids` 不按空格拆词，`kill` 报 `illegal pid`、一个都没杀；② `2>/dev/null` 吞了这条报错；③ 校验用的 `pgrep -c` 在 macOS 上不存在（打 usage、退出码非 0），`|| echo "none left"` 恒打印「已清理」。而 590 的开跑提示只数登记过的 pytest 会话，看不见非 pytest 的负载，所以当时一个字没提示。只在 memory 里记一条是提醒、不是修复（不会被执行），这里补两处结构性修法。
+
+### Added
+- `tests/_concurrency_hint.py`：`load_lines`（纯函数，load / 核数由调用方注入）+ `system_load_lines`（读真实 `os.getloadavg()` / `os.cpu_count()`，任何读取失败变成一行「无法读取系统 load」、绝不抛）。1 分钟 load ≥ 核数 ⇒ 报告头打 `concurrency: ⚠️ 系统 1 分钟 load N / M 核——机器已超订…`，并指给人 `ps -Ao pid,ppid,etime,pcpu,comm -r | head`（提示里写命令、不在测试进程里自己跑：写沙箱里 exec 不了 setuid 的 `/bin/ps`）。与既有提示同一道闸（选中 ≥ `BIG_RUN_ITEMS` 才说），**只提示、不阻塞、不报红**。阈值依据：590 那轮 load≈11（10 核）整套跑了 1339 秒（安静时 500–650 秒）。
+- `tests/conftest.py::pytest_report_collectionfinish`：在同一个钩子里把 `system_load_lines` 接在 `session_lines` 之后。**刻意不并进 `session_lines`**：合在一起的话，机器忙时那些断言 `session_lines(...) == []` 的现有测试会无故变红。
+- `tools/burn_cpu.py`：在一条命令运行期间加 CPU 负载。**负载进程自己负责死**——每个子进程带截止时刻、到点自己退出，并每隔一小段看一眼父进程还在不在（父进程没了 `getppid()` 变 1 ⇒ 退出）；清理仍做（进程组 SIGTERM→SIGKILL），但不信它：退出时逐个核对已死，有残留 ⇒ `BurnerLeak` / 命令行退出码 4 并点名 pid。没有「无期限负载」（`seconds` ∈ (0, 3600]）；进程由 `subprocess` 管，不在 shell 里拼 PID 列表。用法：`/usr/local/bin/python3 tools/burn_cpu.py --procs 20 --seconds 600 -- <命令>`。
+- 项目 `CLAUDE.md`「整套测试怎么跑」补两条：系统 load 提示是什么、给测试加负载一律用 `tools/burn_cpu.py` 别手写 `yes &`（让后来的会话找得到）。
+- `tests/test_burn_cpu.py`（14 条）：正常 / 异常退出都逐个核对零残留；**清理逻辑整个失效时负载仍会停**——到截止时刻自己退出（`seconds=1`），父进程不清理就死了也退出（截止设 60 秒、只等 20 秒，能过的只可能是父进程判据）；清理失败会红（`_signal_all` 打成空操作 ⇒ `BurnerLeak` 点名 pid / 命令行退出码 4）；拒绝无期限 / 0 进程；命令行原样返回被压命令的退出码、缺命令 / 坏参数是用法错误。失败路径里测试自己 SIGKILL 残留负载——测试不能成为下一次泄漏的来源。
+- `tests/test_concurrency_hint.py`（+14 条）：`load_lines` 的闸 / 阈值（含 590 那轮 load≈11）/ 读不到要说；`system_load_lines` 读失败不抛；接线 AST + **真起一个 `-q` 的 pytest 会话**（内层把 load 钉成 500）断言报告头里真的出现那一行。
+
+### 验证
+- 变异检验（各拆掉一处保护，对应测试必须红，还原后全绿）：去掉负载进程的父进程判据 ⇒ `test_children_exit_when_the_parent_dies` 红；`_cleanup` 谎报零残留 ⇒ `test_leak_after_cleanup_raises_with_the_pids` 红；conftest 不接 load 行 ⇒ `test_conftest_hook_also_calls_system_load_lines` 红；阈值改成永不触发 ⇒ `test_load_at_or_above_core_count_warns_…` 红。
+- 一个被抓到的测试自身错误：「到截止时刻自己退出」最初用 `os.kill(pid, 0)` 判死活，对本进程未回收的僵尸子进程恒为「还活着」；改用 `Popen.poll()`（会回收）。
+- 整套（带审计插件，与 CI 同款）：**12934 passed / 82 deselected / 2 xfailed，646.9 秒**（安静档；开跑时 load≈3.6、无别的 pytest）；选测登记表漂移检查通过。报告末尾「真实数据根：沙箱外的写入（说明，不报红）」列的 3 个文件是 Alpha Bot 盘中采样写的，与本改动无关。
+
+### 没动 / 局限
+- 阈值是「load ≥ 核数」，没有按「谁在占」细分；提示只指路、不自己查（写沙箱里 exec 不了 `/bin/ps`）。读到的是**开跑那一刻**的 1 分钟 load，开跑之后才起的负载看不见。
+- 没给整套加排队锁 / 自动跳过：理由同 590（会无声卡住、与「失败要可见」冲突）。
+- `tools/burn_cpu.py` 只能管它自己起的进程；别人手写的 `yes &` 它不管——所以 CLAUDE.md 里写明「一律用它」，并由上面的 load 提示兜住「万一又泄漏」。
+
+## [0.45.667] — 2026-10-28 — Fixed：659 / 661 / 664 / 665 二次检查——漏登提示给出照做就能修好的命令（点名读者的 `--files … --update`），裸 `--update` 什么都没量时明说；664 勘误；两处过期说明
+
+**二次检查结论**：四版里没有会让选测漏跑或判错的 bug（659 登记表 diff 只有 CI 点名的 4 处 + `commit` 戳；661 `make_plan` 的判定顺序、重命名拆成删旧 + 增新、`::warning` 转义都对；664 夹具拆卸顺序对、注入点打在 `Popen._wait` 的真实路径上、不再全局替换 sleep 后本文件没有真等；665 的回落路径与 CHANGELOG 所述一致）。查出下面四处。
+
+**1. 漏登的修法提示照做不起作用（661 让它变成唯一的修复途径）**：提示只写 `--update`，而裸 `--update` 只量**相对 `--base` 改过的**测试文件。漏登最常见的一类是现有测试按目录通读到新静态文件（661 统计的 15 处里 6 处），读者自己没改；CI 报出来时提交也已在 main 上、改动集是空的——两种情况照做都只打印「没有被改的测试文件，无需测量」、退出码 0、登记表不动。661 起非代码漏登只警告，于是**没有任何地方会红**。实测：干净的树上跑 `select_tests.py --update` 正是如此。659 我自己是用 `--files <三个读者> --update` 修的，提示里没写。
+- `tools/select_tests/select_tests.py`：`Gap` 加 `file`（漏登的那个读者）；新增 `update_command(files)`，`report_gaps` 在列出漏登后打印 `修法：/usr/local/bin/python3 tools/select_tests/select_tests.py --files <全部漏登的读者> --update，并把 tests/_must_run.json 一起提交`（两类漏登都在内；`--check-drift` 另给「整套带插件后 `--build`」）；Actions 的 `::warning` 注记也带上该读者的命令。`cmd_update` 没有要量的测试文件时改说「什么都没量，登记表没动」并给出 `--files` 的用法（退出码仍 0：只改文档的提交跑它是正常的）。`--files` / `--update` / `--check-drift` 的 `--help` 同步（`--check-drift` 原写「dump 里有登记表没有的读 ⇒ 退出码 4」，661 后只有测试读测试漏登才是 4）。模块文档「随跑测量」一段同步。
+- `tests/test_select_tests.py`（73 → 76 条）：**照着打印出来的命令真跑一遍**（假 pytest 产出测量 dump）后再 `--check-drift` ⇒ ✅、没有修法行；只有非代码漏登（退出码 0）时同样给命令；没有可量的文件时明说什么都没量、登记表字节不变；Actions 注记里有命令。
+
+**2. 664 的 CHANGELOG 一句写错**——见 664 条末尾的勘误（`of.time` 就是全局 `time` 模块，另有 14 处替换、4 处在数 sleep）。
+
+**3. `report_deployer._retry_sleep` 的 docstring 过期**：还写着 `test_gh_pages_unverified_parent` 替换全局 `time.sleep`「照样生效」——664 之后它已不这么做，而那正是 664 查出会偶发多数一次的写法。改成：要**数**退避的测试只能替换本函数，并写明原因（只改文档，生产行为不变）。
+
+**4. `--check-drift` 的 `--help` 过期**：并在第 1 条里改了。
+
+**没修（记一笔）**：`git_changes` 解析 `git diff --name-status` 时没加 `-z`，中文文件名会被 git 加引号转义（实测改 `marketing/03_雪球_文案.md` ⇒ 理由里显示成 `"marketing/03_\351…"`）。615 起就有；现在的后果只是理由文字难看——这类文件本来就没有登记读者，按 661 本来就回退整套，登记表里也没有中文路径，不会少选。
+
+**变异检查**（7 个，全红在预期断言上，还原后绿；字节码关掉跑）：M0 改动前的整份文件 ⇒ 4 条新 / 改断言全红；命令不带 `--files` / `Gap.file` 记成被读的文件 / 只有报红时才给修法 / 修法只点名非代码那类读者 / Actions 注记不带修法 / 无可测量时退回「无需测量」。
+
+**核对**：`test_select_tests.py` 76 passed；`test_retry_backoff_seams.py` + `test_gh_pages_unverified_parent.py` 51 passed；`ruff check .` 全绿。整套经 `select_tests.py --run`（改了核心文件 ⇒ 回退整套、带插件做漂移检查；等另一会话的整套跑完才开）：**12907 passed / 0 失败 / 644s**，退出码 0，漂移零处。
 
 ## [0.45.666] — 2026-10-27 — Added：对冲页「压力网格的 β 窗口对照」——同一份审计用 60 日 β（现状）与 250 日 β 各算一遍压力网格 / 尾部归因，并排展示（只展示，不进审计 / 告警 / 任何成交）
 
@@ -126,6 +164,8 @@
 **核对**：本文件 40 passed；`select_tests.py --run`（改测试文件 ⇒ 13 个元守卫 + 本文件等 15 个）1159 passed、登记表不过期；拨钟审计 +7 / +45 / +400 天新红 0 条。整套交给 CI。
 
 **顺带查过（未改）**：全仓另一处替换全局 `time.sleep` 的只有 `tests/test_retry_backoff_seams.py::test_seam_delegates_to_time_sleep`——只包住一次直接调用 `_retry_sleep(1.4)`、不起子进程，只剩「恰好那一瞬有后台线程 sleep」的极小窗口，不改。
+
+**勘误（v0.45.667 二次检查）**：上一段说错了。`monkeypatch.setattr(of.time, "sleep", …)` 这种写法替换的也是全局 `time.sleep`（`of.time` 就是 `time` 模块）——当时 grep 只匹配了 `setattr(time, "sleep"` 的字样。全仓另有 14 处这样写，其中 4 处在**数** sleep（`tests/test_outcomes_backlog_starvation.py`、`tests/test_llm_service.py` 各 2 处；其余 10 处只是让它不真等）。它们的被测路径里不起子进程（碰不到本次 CI 失败的真实机制：收子进程时的忙等），只剩「别的测试遗留后台线程」那一条；没见它们红过，待验证，未改。
 
 ## [0.45.663] — 2026-10-27 — Fixed：宏观报价与板块轮动的 Yahoo 日线按日期配对（不再数第几根）；缺值不再顶数（10Y 4.5 / 涨跌 0.0 ⇒ None / unknown）；没算进去的每一项点名 + WARNING；登边界 10-19（同 654 / 657 / 660：并进同日标签、冻结证据，作废 0 条）
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -345,6 +346,7 @@ class TestCli:
         assert "只警告" in r.stdout and "new_page.js" in r.stdout and "--update" in r.stdout and "::warning" not in r.stdout
         r = _run_cli("--registry", str(reg), "--check-drift", str(nonpy_only), github_actions=True)
         assert r.returncode == 0 and "::warning title=" in r.stdout and "new_page.js" in r.stdout.split("::warning", 1)[1]
+        assert "--files tests/test_plain.py --update" in r.stdout.split("::warning", 1)[1], "Actions 注记里也要有照做就能修的命令"
         r = _run_cli("--registry", str(reg), "--check-drift", str(mixed), github_actions=False)
         assert r.returncode == ST.EXIT_STALE and "test_unregistered" in r.stdout and "new_page.js" in r.stdout
         r = _run_cli("--registry", str(reg), "--check-drift", str(new_meta), github_actions=False)
@@ -439,6 +441,64 @@ class TestRunRideAlongMeasurement:
         before = reg.read_text()
         code, _ = go(1, _dump({"tests/test_concurrency_hint.py": {"other_test": ["tests/test_new_victim.py"]}}), "--update")
         assert code == 1 and reg.read_text() == before
+
+
+def _printed_fix(out: str) -> list[str]:
+    """从输出里取「修法：」那条命令，返回 `select_tests.py` 之后的参数。"""
+    line = next(ln for ln in out.splitlines() if "修法：" in ln)
+    argv = shlex.split(line.split("修法：", 1)[1].split("，并把", 1)[0])
+    assert argv[1] == "tools/select_tests/select_tests.py", argv
+    return argv[2:]
+
+
+class TestPrintedFixActuallyFixes:
+    """v0.45.667：漏登提示原先只写「--update」。裸 `--update` 只量相对 `--base` 改过的测试文件——漏登最常见的一类是现有测试按目录
+    通读到新文件（读者自己没改），CI 报出来时提交也已在 main 上（改动集是空的）⇒ 照做什么都不量、退出码 0、登记表不动，
+    而非代码漏登 661 起只警告，没人会红。现在提示点名读者；这里**照着打印出来的命令真跑一遍**，看漂移是不是真的没了。"""
+
+    READERS = ["tests/test_concurrency_hint.py", "tests/test_write_sandbox.py"]     # 真仓库里存在的测试文件（--update 要求存在）
+
+    def test_following_the_printed_command_closes_the_gap(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+        reg = tmp_path / "reg.json"
+        ST.save_registry(reg, _reg(nonpy_readers={"alphabot/static/pages/hedge.js": [self.READERS[0]]}))
+        reads = {self.READERS[0]: {"nonpy": ["alphabot/static/pages/hedge.js", "alphabot/static/pages/new_page.js"]},
+                 self.READERS[1]: {"other_test": ["tests/test_new_victim.py"]}}
+        dump = tmp_path / "ci_dump.json"
+        dump.write_text(json.dumps(_dump(reads)))
+
+        assert ST.main(["--registry", str(reg), "--check-drift", str(dump)]) == ST.EXIT_STALE
+        argv = _printed_fix(capsys.readouterr().out)
+        assert argv == ["--files", *self.READERS, "--update"], "修法要点名全部漏登的读者（非代码与测试读测试两类都在内）"
+
+        fake = _FakePytest(subprocess.run, 0, _dump(reads, n=len(self.READERS)))
+        monkeypatch.setattr(ST.subprocess, "run", fake)
+        assert ST.main(["--registry", str(reg), *argv]) == 0
+        assert fake.calls and all(r in fake.calls[0] for r in self.READERS), "照做的命令没有去量漏登的读者"
+        capsys.readouterr()
+        assert ST.main(["--registry", str(reg), "--check-drift", str(dump)]) == 0
+        out = capsys.readouterr().out
+        assert "✅" in out and "修法" not in out and "⚠️" not in out, out
+
+    def test_nonpy_only_gap_prints_the_command_too(self, tmp_path, monkeypatch, capsys):
+        """只有非代码漏登（退出码 0、只警告）时同样给命令——这正是没人会红、只能靠照做提示修的那一类。"""
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+        reg = tmp_path / "reg.json"
+        ST.save_registry(reg, ST.empty_registry())
+        dump = tmp_path / "np.json"
+        dump.write_text(json.dumps(_dump({self.READERS[0]: {"nonpy": ["alphabot/static/pages/new_page.js"]}})))
+        assert ST.main(["--registry", str(reg), "--check-drift", str(dump)]) == 0
+        assert _printed_fix(capsys.readouterr().out) == ["--files", self.READERS[0], "--update"]
+
+    def test_bare_update_with_nothing_to_measure_says_it_did_nothing(self, tmp_path, capsys):
+        """没有要量的测试文件时不能只说「无需测量」——照旧提示敲裸 `--update` 的人会以为修好了。"""
+        reg = tmp_path / "reg.json"
+        ST.save_registry(reg, REG)
+        before = reg.read_text()
+        assert ST.main(["--registry", str(reg), "--files", "docs/only_a_doc.md", "--update"]) == 0
+        out = capsys.readouterr().out
+        assert "什么都没量" in out and "登记表没动" in out and "--files tests/" in out, out
+        assert reg.read_text() == before
 
 
 def _no_cached_bytecode(tmp_path) -> dict:

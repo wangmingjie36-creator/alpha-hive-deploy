@@ -13,9 +13,10 @@ from hive_logger import get_logger
 def _retry_sleep(seconds: float) -> None:
     """gh-pages 推送被拒后的退避等待——**测试注入接缝**（v0.45.524），生产行为不变。
 
-    生产就是 `time.sleep(seconds)`，在**调用时**查找 `time.sleep`，所以既有的
-    `monkeypatch.setattr(time, "sleep", …)`（`test_gh_pages_unverified_parent`）照样生效。
-    推送重试测试点名替换本函数，不再真等 2+4+8 秒；退避节奏由
+    生产就是 `time.sleep(seconds)`。推送重试测试点名替换本函数，不再真等 2+4+8 秒。
+    ⚠️ 要**数**退避的测试只能替换本函数，别替换全局 `time.sleep`：那会把别处的 sleep 也数进来
+    （`subprocess.run(timeout=…)` 收子进程时的忙等、别的测试遗留的后台线程），CI 上偶发多数一次
+    （v0.45.664，`test_gh_pages_unverified_parent` 的 `stray_sleeps` 确定性复现）。退避节奏由
     `tests/test_retry_backoff_seams.py` 与 `tests/test_pipeline.py` 在生产配置下钉住。
     """
     import time
