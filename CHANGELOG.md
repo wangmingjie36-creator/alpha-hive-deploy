@@ -71,18 +71,83 @@
 - `vix_term_structure.get_vix_term_structure`（另一次独立取数）每票各调一次：它自己持锁取数 + 30 分钟文件缓存，不会并发重复取，但同样不是「本轮快照」；本版没动。
 - 669 待办里「缓存 30 分钟比扫描短」那条已由本版更正（主因是并发），原文保留、加了指向本条的注。
 
-## [0.45.673] — 2026-10-28 — 占位（进行中：LLM 影子——refusal 单独计数写进状态文件 + JSON 失败日志预览加长）
+## [0.45.673] — 2026-10-28 — Added：LLM 影子——模型拒答（`stop_reason=refusal`）单独计数并写进状态文件；JSON 失败日志预览 300 → 2000 字符并带上解析器的错误原因
 
-## [0.45.672] — 2026-10-28 — 占位（进行中：670 二次检查——「裸 --update 什么都不量」改成准确说法：改了别的测试时它量那几个、提示已并入，看起来修好了其实没修）
+背景（10-27 的 run）：2 次 JSON 失败里，NFLX 的 Queen 是模型自己中途停笔（`stop_reason=refusal`，418 字符处断掉，内容无违规），MSFT 的 Bear 是 `end_turn` 的 1134 字符却解析不过，而日志只留 300 字符看不出坏在哪。拒答 / 截断 / 格式坏三种原因在 `json_parse_failures` 里分不开。
 
-## [0.45.671] — 2026-10-28 — 占位（进行中：输入层指纹的覆盖范围改为自动推导 + 双向登记——单元代码读的 config 项自动并入、引用的项目函数逐个登记；根因：新闻主源开关 NEWS_SOURCE_CONFIG 等不在任何单元里）
+### Added
+- `llm_service.py`：新计数 `model_refusals`（`stop_reason == "refusal"` 的调用数，进 `_EXTRA_COUNTERS`，每日重置）。**只计数**——调用返回值、重试、回落行为全不变；与 `budget_refusals` / `unpriced_refusals`（我们自己拒绝）无关，故不叫 `refusals`。
+- `llm_shadow_scan.py`：状态文件 `usage.model_refusals`，扫描结束的用量行加「模型拒答 N」。**不进健康判定、不进 `_SPEND_SIGNS`**（拒答的调用本来就计入 `call_count`；老状态文件没有这个键，`day_lock` 读它们不受影响）。
+
+### Changed
+- `llm_service.py`：JSON 解析失败的日志预览 `_FAIL_PREVIEW_CHARS` 300 → 2000（够看清 1134 字符的 Bear 回复，仍有上限，总长度另记在前面）；日志加 `解析错误=<原因>@<偏移>`（最后一次解析尝试的 `JSONDecodeError`，偏移相对被解析的片段）。
+
+### 测试 / 变异
+- `tests/test_llm_service_5_5_models.py`：拒答与截断 / 格式坏分开数且不改返回值、正常 stop_reason 不计、每日重置清零、预览有上限且够长、日志带解析错误与偏移；`tests/test_llm_shadow_scan.py`：状态文件带 `model_refusals` 且拒答再多也不影响健康。
+- 6 种人为破坏（去掉计数 / `max_tokens` 也算拒答 / 预览改回 300 / 日志不带错误 / 每日重置漏计数器 / 状态文件不带）全部让测试变红，文件已原样还原。相关 362 条通过。
+- 未做（待用户定）：对 `refusal` 重试——要花钱、会改调用行为，需新一代。NFLX 为什么被拒答仍待验证。
+
+## [0.45.672] — 2026-10-28 — Fixed：v0.45.670 二次检查——「裸 `--update` 什么都不量」只说对一半：分支改了别的测试时它量那几个、提示「已并入」、退出码 0，看起来修好了、漏登还在；说法改准，并在这条成功路径上当场提醒
+
+**二次检查结论**：670 的数与事实都对——`co` / `cb`（返回 `cboe_options` 的夹具）补核过也是 `import time` 的模块；普查另按直接赋值 `xxx.sleep = …`、跨行 `patch(` 查过，没有新的，16 条就是全部。查出一处说法错，而且错在更危险的方向：
+
+- **现象**：667 / 670 在 `CLAUDE.md`、`update_command` docstring、模块文档、`cmd_update` 注释、667 的 CHANGELOG 里都写「读者没改 / 已在 main 上时裸 `--update` 什么都不量」。只对**分支一个测试都没改**成立（那条路 667 已改成明说「什么都没量」）。分支**改了别的测试**时，裸 `--update` 量那几个、打印「已测量 N 个测试文件并并入…请把它一起提交」、登记表也变了、退出码 0——没改过的读者根本不在量的范围里。实测（假 pytest 模拟）：这样做完再跑漂移检查，那条漏登原样还在。
+- `tools/select_tests/select_tests.py`：上面几处说法改成「量不到没改过的读者」并分开写两种情形；`cmd_update` 在**不带 `--files`** 的成功路径上加一行 `⚠️ 只量了相对 <base> 改过的这 N 个：<文件>。漂移检查 / 随跑测量点名的其他读者不在内——照那里打印的 --files … --update 命令补。`（带 `--files` 时量的就是点名的，不打）。
+- `CLAUDE.md` 选测一条、`CHANGELOG.md` 667 条第 1 点与 670 条的同一句：就地改并标明「672 更正」。
+- `tests/test_select_tests.py`（76 → 77 条）：分支改了别的测试时裸 `--update` 的成功提示必须说只量了哪几个、给 `--files`；`--files` 点名时不打。
+
+**变异检查**（4 个，全红在预期断言上，还原后绿）：M0 改动前的整份文件 / 不打提醒 / 点名时也打（红在「不打」那句）/ 提醒不列文件（红在「列出量了哪个」）。
+
+**核对**：`test_select_tests.py` 77 passed；`ruff check .` 全绿。整套经 `select_tests.py --run`（改了核心文件 ⇒ 回退整套、带插件做漂移检查）：**12978 passed / 0 失败**，退出码 0，漂移零处。
+
+## [0.45.671] — 2026-10-28 — Fixed：维度 IC 输入层指纹的覆盖范围改为自动推导（依赖闭包）——新闻主源开关、缓存时长、不提字段名的辅助函数、跨模块的收盘核实等此前都在守卫之外；窗口审计 12 个扫描日、6 个单元按 coverage 重新确认
+
+**问题**：`signal_code_fingerprints.UNITS` 每个单元盯哪些代码是**手写清单**（整个模块 / 某个函数 / 「提到三个行情字段名的顶层定义」/
+`AGENT_SCORING` 的两个子键），没有任何东西核对它全不全。查出：新闻主源开关 `config.NEWS_SOURCE_CONFIG["primary"]`（注释写着「回滚用」）改成
+alpha_vantage ⇒ **指纹不红、桥接照过**（冻结层三种新闻源都认），H1 的新闻通道却换了量纲（历史上 AV 被拒、改走 Yahoo 那次，新闻分系统性低约 21 分）。同类：`CACHE_CONFIG`
+的缓存时长、`price_history.MOMENTUM_LOOKBACK`（改成 5 指纹不变）、`data_pipeline._latest_closed_session`（决定 Twelve Data 量比收不收）、
+`cboe_options.close_verdict`、`models.clean_score`、观测层缓存函数（v0.45.591 新加，只算进了 price.fields）——模块说明「已知不管的」第一条
+就写着「取数细节不在指纹里」。
+
+### Fixed
+- `signal_code_fingerprints.py`：单元指纹 = 定位代码（算法逐字不变）+ **依赖闭包** `unit_dependencies`——从定位节点出发经 import 别名 / 转出口 /
+  相对 import 解析到别的模块与同文件顶层定义，跨文件传递；config 项**精确到读过的键**（`_CC["ttl"].get("reddit")` ⇒ `CACHE_CONFIG[ttl.reddit]`，
+  整体拿去用 ⇒ 整个对象；就地修改语句一并算；键不存在记 `<absent>`）；函数自己绑定的局部名字不算引用、`if __name__ == "__main__":` 不进；
+  **缺省一律算进去**（漏登记只多要一次确认、不会漏守），只有 `EXEMPT_DEPS` 写明理由的不算（6 条：观测档案只存不改值、原子写盘机制、LLM 路径、
+  F&G 模块里转给 GuardBee 的 VIX 期限结构、数据路径 PATHS、合成权重 buzz_weights——冻结层），`exemption_problems` 报理由太短 / 过期条目；
+  追到**守同一信号的另一个单元**就停（buzz.channels 调新闻模块 ⇒ 归 buzz.news；观测层缓存函数虽在 price.fields 的整份定位里，但它不守新闻 ⇒
+  buzz.news / buzz.fear_greed 照样算进去）；定位不到依赖的定义 ⇒ 抛 `FingerprintError`。
+- 手写的 `AGENT_SCORING` 子键定位器删掉（由闭包推出，口径相同）；新增确认方式 `coverage`（守卫自己的覆盖变了、生产代码没变，说明里写审计结论）；
+  `--deps <单元>` 列出单元盯着的全部依赖；失配提示补一句「改的可能在依赖里」。解析结果按内容全局缓存（指纹测试 83s → 16s）。
+
+### 窗口审计与重新确认（用户 10-28 定）
+- 新增 `experiments/fingerprint_coverage_audit.py`（证据冻结 `experiments/fingerprint_coverage_audit_20261028.json`）：在 10-12 起 12 个扫描日实际跑的
+  提交上（编排器日志反推）用现行定义逐日重算依赖。**配置项窗口内一处未变**；变化都归已有确认的版本（505 / 557 / 562 / 564 / 566 / 580 / 591 /
+  639 / 645），另两处此前没进确认表：563（只改依赖层；预注册 §13.10 早已按测量误差修正记录）与 **656**（`CboeStaleVintageError` 加可选属性，取价路径
+  一个值不动——用户定按 no_value_change）。10-27 扫描提交 → 本版基线之间依赖无变化。6 个单元各登记一条 `coverage`。
+- 各单元依赖数：buzz.channels 4 / reddit 12 / news 27 / yahoo 10 / fear_greed 15 / price.fields 180。
+
+### Tests
+- `tests/test_signal_code_fingerprints.py`：`TestDependencyClosure`（新闻主源开关只让 buzz.news 变；缓存时长只让读它的单元变、无关键谁都不变；
+  阈值键改名记 `<absent>`；同文件辅助函数与跨模块 `close_verdict` 会让 price.fields 变；三类豁免不变；停 / 不停的两条规则；缺口里点过名的依赖都在；
+  豁免表自检与两种毛病）、`TestResolver`（合成源码：键路径 + 转出口 + 相对 import、局部名 / `__main__` 不算、传递与第三方、定位不到即抛、非常量键取整体）；
+  「动量回落函数改名」改为 `MOMENTUM_LOOKBACK` 常数（旧守卫看不见）+ 「改名没改调用方」进抛错组。变异 14/14 抓到。
+- `tests/test_historical_path_window.py`：`_loc_mentions` 返回值改为 (文本, 节点, 归属名)。
+- `tests/test_paths_not_frozen_at_import.py`（顺带修的守卫误报，同一根因：按源码**子串**判）：「import 期冻结路径」扫描改按**标识符**认
+  `PATHS` / `__file__`，字符串常量里的字样不再算——`EXEMPT_DEPS` 的键 `"PATHS"` 被误报；同类前例 `alphabot/macos_app._DELEGATE`
+  （子进程源码文本，v0.45.451 只能进白名单）随之从 `__file__` 白名单摘除。全仓对拍：两种判据除这两条字符串误报外结果完全相同；补「字符串
+  不报」的断言（换回子串判据 3 条红）。
+- 验证：整套 12996 passed / 1 failed（即上条误报，修后该文件 108 passed）；补改后必跑清单 26 个文件 1636 passed。
+
+### 文档
+- 模块说明（「已知不管的」改写、确认方式加 `coverage`、用法）、预注册 §13.10 补一段（实现，不改规则）。
 
 ## [0.45.670] — 2026-10-28 — Fixed：v0.45.667 二次检查——664 勘误自己又少数了一处（15 处、11 处只是不真等，不是 14 / 10）；`CLAUDE.md` 选测一条仍教裸 `--update`，改成照提示打印的 `--files <读者> --update`
 
 **二次检查结论**：667 的代码没有 bug——漏登只会出在 `tests/` 第一层的 `tests/test_*.py`（`<session>` 键被跳过、仓库没有测试子目录），所以打印的 `--files` 里不会有 `--update` 认不出、悄悄丢掉的文件；「该归入读全部」的元守卫跑 `--files <它> --update` 按 619 的分母照样升级；`report_gaps` / `Gap` 没有别的调用方；`csf` / `co` / `cb` / `ty` / `of` / `llm_service` 都是 `import time` 的模块（「替换的是全局函数」成立）。查出两处文字问题：
 
 - **勘误少数一处**（`CHANGELOG.md` 664 末尾的勘误与 667 条目第 2 点）：「另有 14 处、其余 10 处只是不真等」⇒ **15 处、11 处**。漏的是 `tests/test_ghpages_data_root_migration.py:254`：先 `import time as _time_mod` 再 `setattr(_time_mod, "sleep", …)`。667 改 grep `xxx.time` 仍是按**对象的写法**查，碰上别名照样漏——和 664 同一个错。这次按被替换的**属性名**查（`git grep -nE "['\"]sleep['\"]" -- tests`）：16 条 = 664 原句点名的 `test_retry_backoff_seams` 1 处 + 另外 15 处，再逐条核对象都是 `time` 模块。在数 sleep 的仍是那 4 处，结论不变。两处原文就地改并标明「670 更正」。
-- **`CLAUDE.md`「整套测试怎么跑」的选测一条**仍写「修法 `--update`」「加了被现有测试读的新静态文件照样建议 `--update`」——后一种正是裸 `--update` 什么都不量的情况（读者没改）。667 只改了工具的提示没同步这里，而每个会话开工都读它。改成：照提示打印的整条命令跑（`--files <漏登的读者> --update`），并写明裸 `--update` 为什么不行。
+- **`CLAUDE.md`「整套测试怎么跑」的选测一条**仍写「修法 `--update`」「加了被现有测试读的新静态文件照样建议 `--update`」——后一种正是裸 `--update` 量不到读者的情况（读者没改；v0.45.672 更正：此处原写「什么都不量」，分支改了别的测试时它会量那几个）。667 只改了工具的提示没同步这里，而每个会话开工都读它。改成：照提示打印的整条命令跑（`--files <漏登的读者> --update`），并写明裸 `--update` 为什么不行。
 
 **核对**：只动文档（`CHANGELOG.md`、`CLAUDE.md`）。`CLAUDE.md` 在登记表里没有读者 ⇒ 选测按 661 回退整套，照做：整套经 `select_tests.py --run`（等另一会话的整套跑完才开）**12938 passed / 0 失败**，退出码 0，漂移零处。
 
@@ -191,7 +256,7 @@
 
 **二次检查结论**：四版里没有会让选测漏跑或判错的 bug（659 登记表 diff 只有 CI 点名的 4 处 + `commit` 戳；661 `make_plan` 的判定顺序、重命名拆成删旧 + 增新、`::warning` 转义都对；664 夹具拆卸顺序对、注入点打在 `Popen._wait` 的真实路径上、不再全局替换 sleep 后本文件没有真等；665 的回落路径与 CHANGELOG 所述一致）。查出下面四处。
 
-**1. 漏登的修法提示照做不起作用（661 让它变成唯一的修复途径）**：提示只写 `--update`，而裸 `--update` 只量**相对 `--base` 改过的**测试文件。漏登最常见的一类是现有测试按目录通读到新静态文件（661 统计的 15 处里 6 处），读者自己没改；CI 报出来时提交也已在 main 上、改动集是空的——两种情况照做都只打印「没有被改的测试文件，无需测量」、退出码 0、登记表不动。661 起非代码漏登只警告，于是**没有任何地方会红**。实测：干净的树上跑 `select_tests.py --update` 正是如此。659 我自己是用 `--files <三个读者> --update` 修的，提示里没写。
+**1. 漏登的修法提示照做不起作用（661 让它变成唯一的修复途径）**：提示只写 `--update`，而裸 `--update` 只量**相对 `--base` 改过的**测试文件。漏登最常见的一类是现有测试按目录通读到新静态文件（661 统计的 15 处里 6 处），读者自己没改；CI 报出来时提交也已在 main 上、改动集是空的——两种情况照做都量不到读者、退出码 0（v0.45.672 更正：此处原写「都只打印『没有被改的测试文件，无需测量』、登记表不动」，只对分支一个测试都没改的情况成立；改了别的测试时它量那几个、提示「已并入」、登记表也变了——看起来修好了，漏登还在）。661 起非代码漏登只警告，于是**没有任何地方会红**。实测：干净的树上跑 `select_tests.py --update` 正是如此。659 我自己是用 `--files <三个读者> --update` 修的，提示里没写。
 - `tools/select_tests/select_tests.py`：`Gap` 加 `file`（漏登的那个读者）；新增 `update_command(files)`，`report_gaps` 在列出漏登后打印 `修法：/usr/local/bin/python3 tools/select_tests/select_tests.py --files <全部漏登的读者> --update，并把 tests/_must_run.json 一起提交`（两类漏登都在内；`--check-drift` 另给「整套带插件后 `--build`」）；Actions 的 `::warning` 注记也带上该读者的命令。`cmd_update` 没有要量的测试文件时改说「什么都没量，登记表没动」并给出 `--files` 的用法（退出码仍 0：只改文档的提交跑它是正常的）。`--files` / `--update` / `--check-drift` 的 `--help` 同步（`--check-drift` 原写「dump 里有登记表没有的读 ⇒ 退出码 4」，661 后只有测试读测试漏登才是 4）。模块文档「随跑测量」一段同步。
 - `tests/test_select_tests.py`（73 → 76 条）：**照着打印出来的命令真跑一遍**（假 pytest 产出测量 dump）后再 `--check-drift` ⇒ ✅、没有修法行；只有非代码漏登（退出码 0）时同样给命令；没有可量的文件时明说什么都没量、登记表字节不变；Actions 注记里有命令。
 

@@ -500,6 +500,21 @@ class TestPrintedFixActuallyFixes:
         assert "什么都没量" in out and "登记表没动" in out and "--files tests/" in out, out
         assert reg.read_text() == before
 
+    def test_bare_update_that_measured_other_tests_says_the_readers_are_not_covered(self, tmp_path, monkeypatch, capsys):
+        """v0.45.672：分支改了别的测试时，裸 `--update` 量那几个、提示「已并入」、登记表也变、退出码 0——看起来修好了，
+        没改过的读者却不在量的范围里（667 只管了「什么都没量」那条路）。成功提示要当场说清只量了哪几个、其余读者怎么补；
+        `--files` 点名时量的就是点名的，不打这句。"""
+        reg = tmp_path / "reg.json"
+        ST.save_registry(reg, ST.empty_registry())
+        changed = self.READERS[0]
+        monkeypatch.setattr(ST, "git_changes", lambda base: [("M", changed)])
+        monkeypatch.setattr(ST.subprocess, "run", _FakePytest(subprocess.run, 0, _dump({changed: {"nonpy": ["docs/x.md"]}}, n=1)))
+        assert ST.main(["--registry", str(reg), "--update"]) == 0
+        out = capsys.readouterr().out
+        assert "已测量 1 个" in out and "只量了" in out and changed in out and "--files" in out, out
+        assert ST.main(["--registry", str(reg), "--files", changed, "--update"]) == 0
+        assert "只量了" not in capsys.readouterr().out
+
 
 def _no_cached_bytecode(tmp_path) -> dict:
     """子 pytest 找不到、也不写字节码缓存 ⇒ 每次 import 都得读 `.py` 源码，import 过滤才有东西可滤。

@@ -29,7 +29,7 @@ v0.45.439、v0.45.592→596 都因此让 main 变红。所以选测不能按 imp
 ──────────────────────────
 `--run` 拉起的 pytest 自带 `audit_plugin`，顺带看被改的测试文件**现在**读了什么，与登记表对比：多出登记表没有的测试读测试 ⇒ 打印
 「登记表过期」并以退出码 4 结束（测试本身红时退出码仍是 pytest 的）；只多出非代码文件的读 ⇒ 只警告。`--update` 把这些读并进登记表（只并不删：偏保守）；提示给的是点名读者的整条命令
-（`update_command`：读者没改过时裸 `--update` 什么都不量，v0.45.667）。
+（`update_command`：裸 `--update` 只量相对 `--base` 改过的测试，量不到没改过的读者，v0.45.667 / 672）。
 CI 在整套命令上加同一个插件，`--check-drift` 比对——**测试读测试的漏登就红**（含该归入读全部的元守卫）；**非代码文件漏登只警告**
 （照样列出、给修法、在 Actions 里打 `::warning`，不挡 main——理由见 `Gap`，v0.45.661）。比登记表少不算：CI 上有的测试会 skip。
 `--run` 的随跑测量用同一分级（`report_gaps`）。
@@ -197,7 +197,9 @@ class Gap(NamedTuple):
 def update_command(files) -> str:
     """把这几个测试文件现在的读并进登记表的命令——漏登的修法。**必须带 `--files` 点名**：裸 `--update` 只量相对 `--base`
     改过的测试文件，而漏登最常见的一类是现有测试按目录通读到新文件（读者自己没改），CI 报出来时提交也已经在 main 上（改动集是空的）——
-    两种情况裸 `--update` 都什么也不量、退出码 0、登记表不动（v0.45.667 前提示里只写了 `--update`）。"""
+    两种情况裸 `--update` 都量不到读者：分支一个测试都没改 ⇒ 什么都不量；改了别的测试 ⇒ 只量那几个、照样提示「已并入」、
+    登记表也变了、退出码 0——**看起来修好了，漏登还在**（v0.45.667 前提示里只写了 `--update`；v0.45.672 更正：667 这里写成
+    「两种情况都什么也不量」，只对前一种成立）。"""
     return shlex.join(["/usr/local/bin/python3", "tools/select_tests/select_tests.py", "--files", *sorted(set(files)), "--update"])
 
 
@@ -558,7 +560,8 @@ def cmd_update(args) -> int:
     changes = resolve_changes(args)
     files = sorted(p for s, p in changes if classify(p) == "test" and s != "D" and (REPO / p).exists())
     if not files:
-        # 不能只说「无需测量」：照着漏登提示敲裸 `--update` 的人会以为修好了（读者没改 / 已在 main 上时就落到这里）
+        # 不能只说「无需测量」：照着旧提示敲裸 `--update` 的人会以为修好了（分支一个测试都没改 / 已在 main 上时落到这里；
+        # 改了别的测试时走下面的成功路径——那里另有提醒，见 v0.45.672）
         print("[select_tests] 没有要测量的测试文件（不给 --files 时只量相对 --base 改过的 tests/test_*.py）——什么都没量，登记表没动。\n"
               "  要并入没改过的测试的读（如漂移检查点名的读者），用 --files 点名："
               "/usr/local/bin/python3 tools/select_tests/select_tests.py --files tests/test_x.py … --update")
@@ -575,6 +578,10 @@ def cmd_update(args) -> int:
     new["commit"] = git("rev-parse", "HEAD", check=False).strip()
     save_registry(registry_path(args), new)
     print(f"[select_tests] 已测量 {len(files)} 个测试文件并并入 {REGISTRY_REL}（只并不删）。请把它一起提交。")
+    if not args.files:
+        # 裸 `--update` 的成功路径最会骗人：量了、并了、登记表变了、退出码 0，但没改过的读者根本不在量的范围里（v0.45.672）
+        print(f"  ⚠️ 只量了相对 {args.base} 改过的这 {len(files)} 个：{' '.join(files)}。漂移检查 / 随跑测量点名的其他读者不在内"
+              "——照那里打印的 --files … --update 命令补。")
     return EXIT_OK
 
 
