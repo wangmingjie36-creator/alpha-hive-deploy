@@ -1,5 +1,5 @@
-// Alpha Hive Service Worker - 20261027-1431
-var CACHE_NAME='alpha-hive-20261027-1431';
+// Alpha Hive Service Worker - 20261028-1425
+var CACHE_NAME='alpha-hive-20261028-1425';
 var PRECACHE_URLS=['./', 'index.html', 'manifest.json',
   "chart.umd.min.js"];  // v0.41.0: Chart.js 自托管（jsdelivr 大陆不可达）
 
