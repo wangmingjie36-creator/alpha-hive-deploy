@@ -15,6 +15,10 @@ TLT/GLD）**全部**抓取失败时返回 `base` 常量字典——`vix=20.0`、
 
 注意 `dashboard_renderer` 早就在判 `data_source != "fallback"`，本测试守的是
 GuardBee 这条此前缺失的路径。
+
+v0.45.669 起 `fred_macro` 不再产出这种形状（没取到的项本身是 None / "unknown"，见
+`tests/test_macro_single_path.py`）；本文件喂的是**旧形状**，守 Guard 那道标记判定照旧认得它
+（存档里的旧日报、以及任何仍带标记的输入）。
 """
 
 from unittest.mock import patch

@@ -2537,8 +2537,12 @@ def render_dashboard_html(report: Dict, date_str: str,
             # 旧实现在这里**什么都不说**，于是 8/26 网站宏观区块整块消失而日志里毫无痕迹。
             # v0.45.669：不再整块显示「—」——上游没取到的项本身就是 None / "unknown"，下面逐字段判；
             # 取到的照样显示（09-24 / 25 那个 CBOE 的真 VIX 此前被一起藏了）。
-            logging.getLogger("alpha_hive.dashboard").warning(
-                "宏观报价一项都没取到（data_source=fallback），dashboard 宏观区块只显示取到的项")
+            if _mctx.get("error"):
+                logging.getLogger("alpha_hive.dashboard").warning(
+                    "宏观取数出错（%s），dashboard 宏观区块全部显示「—」", _mctx["error"])
+            else:
+                logging.getLogger("alpha_hive.dashboard").warning(
+                    "宏观报价一项都没取到（data_source=fallback），dashboard 宏观区块只显示取到的项")
         # v0.45.669：以下原在 `else:` 里——逐字段降级对「报价一项都没取到」同样成立，不再整块跳过
         # v0.45.43：逐字段独立降级。
         # 旧实现 `.get('vix', 0)` 在「键存在但值为 None」时返回 **None**

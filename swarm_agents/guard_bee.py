@@ -409,9 +409,10 @@ class GuardBeeSentinel(BeeAgent):
         except (ImportError, Exception) as e:
             _log.debug("fred_macro 不可用: %s", e)
 
-        # v0.43.24: fred_macro 在 7 个宏观标的全部抓取失败时返回 base 常量
+        # v0.43.24: fred_macro 当年在 7 个宏观标的全部抓取失败时返回 base 常量
         # （vix=20.0 / yield_curve="unknown" / gold_trend="stable"），并老实标注
-        # data_source="fallback"。此前本函数不看这个标记，于是 20.0 被当作观测值
+        # data_source="fallback"（v0.45.669 起不再产出这些常量：没取到的项本身是 None / "unknown"，
+        # 这道判定留作多一层防护、照旧认存档里的旧形状）。此前本函数不看这个标记，于是 20.0 被当作观测值
         # 写进 details["vix"] → 深度报告渲染成"VIX 20（偏高恐慌）"，与真实的
         # 14.6（极度平静）方向相反。实测 88 个扫描日里 13 天如此，8 月 9 天里占 5 天。
         # dashboard_renderer:2101 早就在判这个标记，这里是补齐缺口。

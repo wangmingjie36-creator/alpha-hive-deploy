@@ -207,6 +207,19 @@ class TestReadersRenderPerField:
         assert "宏观报价一项都没取到" in md and "**宏观政体**：不可得 | **评分**：—" in md
         assert "| VIX | — | 不可得 |" in md and "| 10Y利率 | — | 不可得 |" in md
 
+    def test_report_names_the_error_exit_as_an_error(self, monkeypatch):
+        """取数代码自己出错 ≠ 报价没取到（二次检查补）：提示写「取数出错」并带错误。变红的变异：不分两种失败。"""
+        import report_formatters as rf
+        _vix_rows(monkeypatch, [])
+        _quotes(monkeypatch, {"TNX": {"last": 4.9, "prev": None, "change_pct": None}}, {"TNX": f"treasury_gov@{D}"})
+
+        def boom(*_a, **_k):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(fm, "_compose_data_source", boom)
+        md = "\n".join(rf._build_macro(fm.get_macro_context()))
+        assert "宏观取数出错（RuntimeError: boom）" in md and "一项都没取到" not in md
+        assert "| VIX | — | 不可得 |" in md and "**评分**：—" in md
+
     def test_report_shows_the_real_cboe_vix(self, monkeypatch):
         import report_formatters as rf
         _vix_rows(monkeypatch, [("2026-10-26", 15.0), ("2026-10-27", 14.21)])

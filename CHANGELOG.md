@@ -64,9 +64,18 @@
   `test_report_formatters` 旧形状照旧不印 + 新形状逐格印。
 - **`tests/conftest.py::stub_fred` 改 autouse**（带 `network` / `integration` 标记的不钉）：报价全空也取 FRED 之后，任何没打桩就调 Guard / `get_macro_context` 的测试
   都会伸手取 FRED（实测 `test_guard_census_eviction` 首个被离线闸点名）；同 `_block_same_day_macro` 的理由。
-- 变异：**24 处全红**——代码 14 处（恢复提前返回、兜底字典写回 20.0 / stable、正常路径没 VIX 用 20.0、全缺也给 5.0 / neutral、CPI 不记分项、WARNING 降 debug、出错出口不带 error、yfinance 导入失败整份出错、报价全空不标 fallback、日报整段不印 / 旧形状也印、仪表板整块跳过、conftest FRED 桩不 autouse）+ 登记 / 判据 10 处（印记不写 / 不进 GENERATION_MARKS、判据把 fallback 当等价 / 缺细节当等价、删等价登记、日期印记不排补跑、条目日期写成上线日、作用域加 `guard.macro_adj`、记分卡标签不扩）
+- 变异：**24 处全红**——代码 15 处（恢复提前返回、兜底字典写回 20.0 / stable、正常路径没 VIX 用 20.0、全缺也给 5.0 / neutral、CPI 不记分项、WARNING 降 debug、出错出口不带 error、yfinance 导入失败整份出错、报价全空不标 fallback、日报整段不印 / 旧形状也印、仪表板整块跳过、conftest FRED 桩不 autouse）+ 登记 / 判据 9 处（印记不写 / 不进 GENERATION_MARKS、判据把 fallback 当等价 / 缺细节当等价、删等价登记、日期印记不排补跑、条目日期写成上线日、作用域加 `guard.macro_adj`、记分卡标签不扩）
 - 拨钟审计：（+7 / +45 天，6 个改动的测试文件 368 条）0 条新红
 - 整套：**12941 passed**（82 deselected、2 xfailed），带选测审计插件；漂移检查只报新测试读了仪表板模板（非代码、只警告），已 `select_tests --update --files tests/test_macro_single_path.py` 并入 `tests/_must_run.json`
+
+### 二次检查（用户 10-28「二次检查以上更新有没有 bug」）
+- 评分路径没查出问题：Guard 投票、等价判据（旧代码正常路径上只有「没 VIX」与只展示的宏观分变了，`vix_source=fallback` 时 Guard 本就不计）、
+  世代边界与印记；dashboard 去空白比对只剩预期改动；`get_macro_risk_adjustment` 生产无调用者、档位 unknown 走中性分支接得住 None。
+- 修了三处：① 取数代码自己出错的整份出口，日报 ⚠️ 与仪表板 WARNING 原先都说成「报价一项都没取到」⇒ 改写「宏观取数出错（错误）」
+  （新用例 `test_report_names_the_error_exit_as_an_error`）；② `guard_bee` 与 `tests/test_macro_degradation.py` 两处注释还在描述 fred_macro 产出 20.0 常量 ⇒ 注明 669 起不再产出、
+  那道判定只认旧形状；③ 本条变异计数原写「代码 14 + 登记 10」，实为 15 + 9。
+- 代价（记下、不改）：报价全空那天现在多取 FRED（5 个序列、每个 8 秒超时、取数异常即中止）与板块轮动（11 只并行），故障日扫描最多多二十来秒。
+- 宏观分会用陈旧的 CBOE VIX（09-24 / 25 形状）——与正常路径一贯的行为相同、只展示；Guard 照旧不计陈旧 VIX 的票。
 
 ### 没改 / 待办
 - 实时 Finnhub 报价不核时间戳（`t`）是不是这一场；FRED HY 日变（`obs[0] − obs[1]`）仍按位置（只展示）。

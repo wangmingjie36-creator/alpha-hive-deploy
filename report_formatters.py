@@ -658,7 +658,11 @@ def _build_macro(macro_context) -> List[str]:
     regime_emoji = {"risk_on": "🟢", "risk_off": "🔴", "neutral": "🟡"}.get(regime, "")
     md.append(f"## 🌐 宏观环境 {regime_emoji}")
     md.append("")
-    if macro_context.get("data_source") == "fallback":
+    if macro_context.get("error"):
+        # 取数代码自己出错的整份出口（值全是缺失）——别说成「没取到」：那是另一种失败，修法不同
+        md.append(f"> ⚠️ 宏观取数出错（{macro_context['error']}），下表各项都不可得。")
+        md.append("")
+    elif macro_context.get("data_source") == "fallback":
         md.append("> ⚠️ 宏观报价一项都没取到（财政部 / Finnhub / Yahoo），下表只有取到的项有值。")
         md.append("")
     _score = macro_context.get("macro_score")
