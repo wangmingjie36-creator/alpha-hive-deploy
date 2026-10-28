@@ -7,7 +7,27 @@
 
 ## [0.45.669] — 2026-10-28 — 占位（进行中：宏观整份降级不再用兜底常量顶数——三条返回路径合一、缺值 None / unknown、宏观分只算观测到的分项；降级日照取板块轮动，登边界 10-19）
 
-## [0.45.668] — 2026-10-28 — 占位（进行中：整套测试开跑时提示系统 load 过高 + 有寿命的压力负载工具 tools/burn_cpu.py）
+## [0.45.668] — 2026-10-28 — Added：整套测试开跑时提示「系统 load 已超订」+ `tools/burn_cpu.py`（负载进程自带寿命、清理失败会红）
+
+起因（2026-10-27/28，只读查证，见 memory `alpha-hive-environment-facts`）：有人问「整套测试之前不是优化过吗，怎么每次还要 20 分钟以上」。机器上有 20 个孤儿 `yes`（ppid=1）空转 40 分钟，load 124（10 核），整套 pytest 只拿到约 8% CPU。源头是另一个会话为复现 v0.45.664 的偶发失败手写的负载：`for … do yes > /dev/null & pids="$pids $!"; done; trap "kill $pids 2>/dev/null" EXIT`。清理无声失败，三处缺陷叠加才泄漏——① 本机 Bash 是 zsh，`$pids` 不按空格拆词，`kill` 报 `illegal pid`、一个都没杀；② `2>/dev/null` 吞了这条报错；③ 校验用的 `pgrep -c` 在 macOS 上不存在（打 usage、退出码非 0），`|| echo "none left"` 恒打印「已清理」。而 590 的开跑提示只数登记过的 pytest 会话，看不见非 pytest 的负载，所以当时一个字没提示。只在 memory 里记一条是提醒、不是修复（不会被执行），这里补两处结构性修法。
+
+### Added
+- `tests/_concurrency_hint.py`：`load_lines`（纯函数，load / 核数由调用方注入）+ `system_load_lines`（读真实 `os.getloadavg()` / `os.cpu_count()`，任何读取失败变成一行「无法读取系统 load」、绝不抛）。1 分钟 load ≥ 核数 ⇒ 报告头打 `concurrency: ⚠️ 系统 1 分钟 load N / M 核——机器已超订…`，并指给人 `ps -Ao pid,ppid,etime,pcpu,comm -r | head`（提示里写命令、不在测试进程里自己跑：写沙箱里 exec 不了 setuid 的 `/bin/ps`）。与既有提示同一道闸（选中 ≥ `BIG_RUN_ITEMS` 才说），**只提示、不阻塞、不报红**。阈值依据：590 那轮 load≈11（10 核）整套跑了 1339 秒（安静时 500–650 秒）。
+- `tests/conftest.py::pytest_report_collectionfinish`：在同一个钩子里把 `system_load_lines` 接在 `session_lines` 之后。**刻意不并进 `session_lines`**：合在一起的话，机器忙时那些断言 `session_lines(...) == []` 的现有测试会无故变红。
+- `tools/burn_cpu.py`：在一条命令运行期间加 CPU 负载。**负载进程自己负责死**——每个子进程带截止时刻、到点自己退出，并每隔一小段看一眼父进程还在不在（父进程没了 `getppid()` 变 1 ⇒ 退出）；清理仍做（进程组 SIGTERM→SIGKILL），但不信它：退出时逐个核对已死，有残留 ⇒ `BurnerLeak` / 命令行退出码 4 并点名 pid。没有「无期限负载」（`seconds` ∈ (0, 3600]）；进程由 `subprocess` 管，不在 shell 里拼 PID 列表。用法：`/usr/local/bin/python3 tools/burn_cpu.py --procs 20 --seconds 600 -- <命令>`。
+- 项目 `CLAUDE.md`「整套测试怎么跑」补两条：系统 load 提示是什么、给测试加负载一律用 `tools/burn_cpu.py` 别手写 `yes &`（让后来的会话找得到）。
+- `tests/test_burn_cpu.py`（14 条）：正常 / 异常退出都逐个核对零残留；**清理逻辑整个失效时负载仍会停**——到截止时刻自己退出（`seconds=1`），父进程不清理就死了也退出（截止设 60 秒、只等 20 秒，能过的只可能是父进程判据）；清理失败会红（`_signal_all` 打成空操作 ⇒ `BurnerLeak` 点名 pid / 命令行退出码 4）；拒绝无期限 / 0 进程；命令行原样返回被压命令的退出码、缺命令 / 坏参数是用法错误。失败路径里测试自己 SIGKILL 残留负载——测试不能成为下一次泄漏的来源。
+- `tests/test_concurrency_hint.py`（+14 条）：`load_lines` 的闸 / 阈值（含 590 那轮 load≈11）/ 读不到要说；`system_load_lines` 读失败不抛；接线 AST + **真起一个 `-q` 的 pytest 会话**（内层把 load 钉成 500）断言报告头里真的出现那一行。
+
+### 验证
+- 变异检验（各拆掉一处保护，对应测试必须红，还原后全绿）：去掉负载进程的父进程判据 ⇒ `test_children_exit_when_the_parent_dies` 红；`_cleanup` 谎报零残留 ⇒ `test_leak_after_cleanup_raises_with_the_pids` 红；conftest 不接 load 行 ⇒ `test_conftest_hook_also_calls_system_load_lines` 红；阈值改成永不触发 ⇒ `test_load_at_or_above_core_count_warns_…` 红。
+- 一个被抓到的测试自身错误：「到截止时刻自己退出」最初用 `os.kill(pid, 0)` 判死活，对本进程未回收的僵尸子进程恒为「还活着」；改用 `Popen.poll()`（会回收）。
+- 整套（带审计插件，与 CI 同款）：**12934 passed / 82 deselected / 2 xfailed，646.9 秒**（安静档；开跑时 load≈3.6、无别的 pytest）；选测登记表漂移检查通过。报告末尾「真实数据根：沙箱外的写入（说明，不报红）」列的 3 个文件是 Alpha Bot 盘中采样写的，与本改动无关。
+
+### 没动 / 局限
+- 阈值是「load ≥ 核数」，没有按「谁在占」细分；提示只指路、不自己查（写沙箱里 exec 不了 `/bin/ps`）。读到的是**开跑那一刻**的 1 分钟 load，开跑之后才起的负载看不见。
+- 没给整套加排队锁 / 自动跳过：理由同 590（会无声卡住、与「失败要可见」冲突）。
+- `tools/burn_cpu.py` 只能管它自己起的进程；别人手写的 `yes &` 它不管——所以 CLAUDE.md 里写明「一律用它」，并由上面的 load 提示兜住「万一又泄漏」。
 
 ## [0.45.667] — 2026-10-28 — 占位（进行中：659/661/664/665 二次检查——漏登修法给出可照做的 --files 命令、664 勘误、两处过期说明）
 

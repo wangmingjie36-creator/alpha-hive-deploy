@@ -1514,7 +1514,8 @@ def pytest_report_collectionfinish(config, items):
 
     ⚠️ 必须在这个钩子里算，不能拆成 `pytest_collection_finish` 存 stash、这里再读：终端报告器自己的
     `pytest_collection_finish` 就是在里面调本钩子的，顺序不保证在别的 conftest 之后——读到的会是空（实测：拆开时 `-q` 下什么都不打）。"""
-    return _concurrency_hint.session_lines(getattr(config, "_alpha_hive_write_sandbox", None), len(items))
+    return (_concurrency_hint.session_lines(getattr(config, "_alpha_hive_write_sandbox", None), len(items))
+            + _concurrency_hint.system_load_lines(len(items)))
 
 
 @pytest.fixture(scope="session", autouse=True)
