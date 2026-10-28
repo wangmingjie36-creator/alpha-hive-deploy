@@ -29,7 +29,25 @@
 - 没给整套加排队锁 / 自动跳过：理由同 590（会无声卡住、与「失败要可见」冲突）。
 - `tools/burn_cpu.py` 只能管它自己起的进程；别人手写的 `yes &` 它不管——所以 CLAUDE.md 里写明「一律用它」，并由上面的 load 提示兜住「万一又泄漏」。
 
-## [0.45.667] — 2026-10-28 — 占位（进行中：659/661/664/665 二次检查——漏登修法给出可照做的 --files 命令、664 勘误、两处过期说明）
+## [0.45.667] — 2026-10-28 — Fixed：659 / 661 / 664 / 665 二次检查——漏登提示给出照做就能修好的命令（点名读者的 `--files … --update`），裸 `--update` 什么都没量时明说；664 勘误；两处过期说明
+
+**二次检查结论**：四版里没有会让选测漏跑或判错的 bug（659 登记表 diff 只有 CI 点名的 4 处 + `commit` 戳；661 `make_plan` 的判定顺序、重命名拆成删旧 + 增新、`::warning` 转义都对；664 夹具拆卸顺序对、注入点打在 `Popen._wait` 的真实路径上、不再全局替换 sleep 后本文件没有真等；665 的回落路径与 CHANGELOG 所述一致）。查出下面四处。
+
+**1. 漏登的修法提示照做不起作用（661 让它变成唯一的修复途径）**：提示只写 `--update`，而裸 `--update` 只量**相对 `--base` 改过的**测试文件。漏登最常见的一类是现有测试按目录通读到新静态文件（661 统计的 15 处里 6 处），读者自己没改；CI 报出来时提交也已在 main 上、改动集是空的——两种情况照做都只打印「没有被改的测试文件，无需测量」、退出码 0、登记表不动。661 起非代码漏登只警告，于是**没有任何地方会红**。实测：干净的树上跑 `select_tests.py --update` 正是如此。659 我自己是用 `--files <三个读者> --update` 修的，提示里没写。
+- `tools/select_tests/select_tests.py`：`Gap` 加 `file`（漏登的那个读者）；新增 `update_command(files)`，`report_gaps` 在列出漏登后打印 `修法：/usr/local/bin/python3 tools/select_tests/select_tests.py --files <全部漏登的读者> --update，并把 tests/_must_run.json 一起提交`（两类漏登都在内；`--check-drift` 另给「整套带插件后 `--build`」）；Actions 的 `::warning` 注记也带上该读者的命令。`cmd_update` 没有要量的测试文件时改说「什么都没量，登记表没动」并给出 `--files` 的用法（退出码仍 0：只改文档的提交跑它是正常的）。`--files` / `--update` / `--check-drift` 的 `--help` 同步（`--check-drift` 原写「dump 里有登记表没有的读 ⇒ 退出码 4」，661 后只有测试读测试漏登才是 4）。模块文档「随跑测量」一段同步。
+- `tests/test_select_tests.py`（73 → 76 条）：**照着打印出来的命令真跑一遍**（假 pytest 产出测量 dump）后再 `--check-drift` ⇒ ✅、没有修法行；只有非代码漏登（退出码 0）时同样给命令；没有可量的文件时明说什么都没量、登记表字节不变；Actions 注记里有命令。
+
+**2. 664 的 CHANGELOG 一句写错**——见 664 条末尾的勘误（`of.time` 就是全局 `time` 模块，另有 14 处替换、4 处在数 sleep）。
+
+**3. `report_deployer._retry_sleep` 的 docstring 过期**：还写着 `test_gh_pages_unverified_parent` 替换全局 `time.sleep`「照样生效」——664 之后它已不这么做，而那正是 664 查出会偶发多数一次的写法。改成：要**数**退避的测试只能替换本函数，并写明原因（只改文档，生产行为不变）。
+
+**4. `--check-drift` 的 `--help` 过期**：并在第 1 条里改了。
+
+**没修（记一笔）**：`git_changes` 解析 `git diff --name-status` 时没加 `-z`，中文文件名会被 git 加引号转义（实测改 `marketing/03_雪球_文案.md` ⇒ 理由里显示成 `"marketing/03_\351…"`）。615 起就有；现在的后果只是理由文字难看——这类文件本来就没有登记读者，按 661 本来就回退整套，登记表里也没有中文路径，不会少选。
+
+**变异检查**（7 个，全红在预期断言上，还原后绿；字节码关掉跑）：M0 改动前的整份文件 ⇒ 4 条新 / 改断言全红；命令不带 `--files` / `Gap.file` 记成被读的文件 / 只有报红时才给修法 / 修法只点名非代码那类读者 / Actions 注记不带修法 / 无可测量时退回「无需测量」。
+
+**核对**：`test_select_tests.py` 76 passed；`test_retry_backoff_seams.py` + `test_gh_pages_unverified_parent.py` 51 passed；`ruff check .` 全绿。整套经 `select_tests.py --run`（改了核心文件 ⇒ 回退整套、带插件做漂移检查；等另一会话的整套跑完才开）：**12907 passed / 0 失败 / 644s**，退出码 0，漂移零处。
 
 ## [0.45.666] — 2026-10-27 — Added：对冲页「压力网格的 β 窗口对照」——同一份审计用 60 日 β（现状）与 250 日 β 各算一遍压力网格 / 尾部归因，并排展示（只展示，不进审计 / 告警 / 任何成交）
 
@@ -80,6 +98,8 @@
 **核对**：本文件 40 passed；`select_tests.py --run`（改测试文件 ⇒ 13 个元守卫 + 本文件等 15 个）1159 passed、登记表不过期；拨钟审计 +7 / +45 / +400 天新红 0 条。整套交给 CI。
 
 **顺带查过（未改）**：全仓另一处替换全局 `time.sleep` 的只有 `tests/test_retry_backoff_seams.py::test_seam_delegates_to_time_sleep`——只包住一次直接调用 `_retry_sleep(1.4)`、不起子进程，只剩「恰好那一瞬有后台线程 sleep」的极小窗口，不改。
+
+**勘误（v0.45.667 二次检查）**：上一段说错了。`monkeypatch.setattr(of.time, "sleep", …)` 这种写法替换的也是全局 `time.sleep`（`of.time` 就是 `time` 模块）——当时 grep 只匹配了 `setattr(time, "sleep"` 的字样。全仓另有 14 处这样写，其中 4 处在**数** sleep（`tests/test_outcomes_backlog_starvation.py`、`tests/test_llm_service.py` 各 2 处；其余 10 处只是让它不真等）。它们的被测路径里不起子进程（碰不到本次 CI 失败的真实机制：收子进程时的忙等），只剩「别的测试遗留后台线程」那一条；没见它们红过，待验证，未改。
 
 ## [0.45.663] — 2026-10-27 — Fixed：宏观报价与板块轮动的 Yahoo 日线按日期配对（不再数第几根）；缺值不再顶数（10Y 4.5 / 涨跌 0.0 ⇒ None / unknown）；没算进去的每一项点名 + WARNING；登边界 10-19（同 654 / 657 / 660：并进同日标签、冻结证据，作废 0 条）
 
