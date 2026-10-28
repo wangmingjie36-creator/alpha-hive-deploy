@@ -232,10 +232,11 @@ class TestReadersRenderPerField:
         _vix_rows(monkeypatch, [("2026-10-26", 15.0), ("2026-10-27", 14.21)])
         macro = fm.get_macro_context()
         assert macro["data_source"] == "fallback"
-        monkeypatch.setattr(fm, "get_macro_context", lambda: macro)
+        # v0.45.674：网站读这份日报自己的宏观快照（`report["macro_context"]`），不再调 `get_macro_context()`
         report = {"opportunities": [{"ticker": "NVDA", "direction": "bullish", "score": 7.0, "confidence": 0.6,
                                      "dimension_scores": {}}],
-                  "swarm_metadata": {"tickers_analyzed": 1, "total_agents": 7, "resonances_detected": 0}}
+                  "swarm_metadata": {"tickers_analyzed": 1, "total_agents": 7, "resonances_detected": 0},
+                  "macro_context": macro}
         html = render_dashboard_html(report=report, date_str=D, report_dir=tmp_path,
                                      opportunities=report["opportunities"])
         assert "<li>VIX 14.2</li>" in html

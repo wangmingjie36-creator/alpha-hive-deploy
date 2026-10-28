@@ -330,6 +330,7 @@ class AlertAnalyzer:
         self._check_event_rows(status)           # v0.45.645：P2 日线公司行动空行不在首行（某个交易日的价格缺了）
         self._check_yf_daily_event_rows(status)  # v0.45.652：P2 其他日线读者（yf_daily 入口）最近一场缺了 / 中间的公司行动空行
         self._check_price_nonfinite(status)      # v0.45.653：P2 行情三字段算出非有限数、已改缺失（真 K 线缺收盘 / 缺量）
+        self._check_macro_snapshot_calls(status)  # v0.45.674：P2 一轮扫描的宏观快照没有恰好取一次（读者绕过快照自己取）
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
         self._check_news_sources(status)
@@ -1489,6 +1490,40 @@ class AlertAnalyzer:
                  "影响": "评分用的行情不受影响；之后单独取日线的用途（报告阶段等）那一项缺失或走了回落"},
                 ["price_nonfinite", "data_quality"]
             ))
+
+    def _check_macro_snapshot_calls(self, status: Dict) -> None:
+        """一轮扫描的宏观快照是不是只取了一次（v0.45.674；`fred_macro.stats()` 经 scan_timing 的 `counters.macro_context` 进来）。
+
+        扫描开头取一次本轮快照（`alpha_hive_daily_report._fetch_scan_macro`），Guard / 日报 / 网站都读那一份 ⇒ `calls` 恰为 1。
+        ≠ 1 ⇒ P2：有读者绕过快照自己调了 `get_macro_context()`（此前的形状：4 个并行线程各取一次，09-29 Guard 30 行分成三份；
+        网站在 30 分钟缓存过期后重取，10-22 网站 VIX 16.7、日报 19.0），或者这一轮压根没取（0）。计数缺失 ⇒ checks_skipped。"""
+        if not self._swarm_scan_actually_ran(status):
+            return
+        st = status.get("scan_timing")
+        if not isinstance(st, dict) or (st.get("extra") or {}).get("early_exit"):
+            return
+        mc = (st.get("counters") or {}).get("macro_context")
+        if not isinstance(mc, dict) or not isinstance(mc.get("calls"), int):
+            self.checks_skipped.append("宏观快照调用次数检查（scan_timing 无 macro_context 计数）")
+            return
+        calls = mc["calls"]
+        if calls == 1:
+            return
+        if calls == 0:
+            title = "📊 【P2 中】本轮扫描没有取宏观快照（get_macro_context 调用 0 次）"
+            impact = "Guard 的宏观票（VIX / 曲线 / 黄金 / 板块）与日报 / 网站的宏观区块这一轮都没有数据来源"
+            hint = "查 run_swarm_scan 里 `_fetch_scan_macro` 那一行是否还在、是否在 prefetch 之后被跳过"
+        else:
+            title = f"📊 【P2 中】本轮扫描调了 {calls} 次 get_macro_context（应为 1），取数 {mc.get('fetches')} 次"
+            impact = ("有读者绕过本轮快照自己取宏观 ⇒ 同一轮的 Guard 各票、日报、网站可能不是同一份宏观"
+                      "（并发线程各取一次 / 缓存过期后重取）")
+            hint = ("找扫描路径上新加的 `get_macro_context()` 直接调用（守卫 tests/test_macro_scan_snapshot.py 的读者白名单）；"
+                    "Guard 读 `self._scan_macro()`、日报宏观段读 `self._scan_macro`、网站读 `report[\"macro_context\"]`")
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM, title,
+            {"计数": f"calls={calls} fetches={mc.get('fetches')}", "影响": impact, "建议": hint},
+            ["macro_snapshot", "data_quality"]
+        ))
 
     def get_critical_alerts(self) -> List[Alert]:
         """获取 P0 级别告警"""

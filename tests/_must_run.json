@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "commit": "d216d788b65388ee11e9b6b241a952013e70fc7c",
+  "commit": "c19f9a25a9b25b82530cd6e785cd420e76019829",
   "reads_all_tests": [
     "tests/test_agent_weight_manager_retired.py",
     "tests/test_bare_env_children_pin_data_root.py",
@@ -104,10 +104,10 @@
     "pyproject.toml": ["tests/test_no_undefined_names.py"],
     "requirements.txt": ["tests/test_requirements_match_installed.py"],
     "scripts/alpha-hive-orchestrator.sh": ["tests/test_alert_partial_runs.py", "tests/test_alert_step2_budget.py", "tests/test_code_version.py", "tests/test_data_backup.py", "tests/test_data_migrations.py", "tests/test_dead_chains_batch1_retired.py", "tests/test_economic_calendar_watch.py", "tests/test_ic_rerun_fg_budget.py", "tests/test_llm_shadow_daily.py", "tests/test_orchestrator_autodeploy.py", "tests/test_orchestrator_braced_vars.py", "tests/test_orchestrator_direct_fallback.py", "tests/test_orchestrator_never_enables_llm.py", "tests/test_orchestrator_runs_production_clone.py", "tests/test_orchestrator_step5_gh_pages.py", "tests/test_orchestrator_step_interp.py", "tests/test_orchestrator_step_postconditions.py", "tests/test_orchestrator_steps.py", "tests/test_persistent_writes_have_readers.py", "tests/test_pheromone_expiry_exceeds_scan_budget.py", "tests/test_scan_catchup.py", "tests/test_scan_price_gate.py", "tests/test_scan_timing.py", "tests/test_silent_failure_guards.py", "tests/test_step1_data_fetcher_retired.py", "tests/test_step7_push_report_retired.py", "tests/test_watchlist_single_source.py"],
-    "templates/dashboard.css": ["tests/test_dashboard_chart_palette.py", "tests/test_dashboard_css_no_color_literals.py", "tests/test_dashboard_css_vars_defined.py", "tests/test_dashboard_dim_dq_missing.py", "tests/test_dashboard_renderer.py", "tests/test_macro_single_path.py", "tests/test_paths_not_frozen_at_import.py"],
-    "templates/dashboard.html": ["tests/test_chart_js_single_source_of_truth.py", "tests/test_dashboard_chart_palette.py", "tests/test_dashboard_contract.py", "tests/test_dashboard_css_vars_defined.py", "tests/test_dashboard_renderer.py", "tests/test_macro_bar_deltas.py", "tests/test_macro_single_path.py"],
-    "templates/dashboard.js": ["tests/test_chart_js_single_source_of_truth.py", "tests/test_dashboard_chart_palette.py", "tests/test_dashboard_contract.py", "tests/test_dashboard_css_vars_defined.py", "tests/test_dashboard_renderer.py", "tests/test_equity_curve_single_source.py", "tests/test_macro_bar_deltas.py", "tests/test_macro_single_path.py", "tests/test_missing_value_not_zero.py", "tests/test_persistent_writes_have_readers.py"],
-    "thesis_breaks_config.json": ["tests/test_dashboard_renderer.py", "tests/test_macro_single_path.py", "tests/test_thesis_break_evaluability.py", "tests/test_thesis_break_rendering.py", "tests/test_thesis_break_schema.py", "tests/test_thesis_breaks_config_authored_only.py"],
+    "templates/dashboard.css": ["tests/test_dashboard_chart_palette.py", "tests/test_dashboard_css_no_color_literals.py", "tests/test_dashboard_css_vars_defined.py", "tests/test_dashboard_dim_dq_missing.py", "tests/test_dashboard_renderer.py", "tests/test_macro_scan_snapshot.py", "tests/test_macro_single_path.py", "tests/test_paths_not_frozen_at_import.py"],
+    "templates/dashboard.html": ["tests/test_chart_js_single_source_of_truth.py", "tests/test_dashboard_chart_palette.py", "tests/test_dashboard_contract.py", "tests/test_dashboard_css_vars_defined.py", "tests/test_dashboard_renderer.py", "tests/test_macro_bar_deltas.py", "tests/test_macro_scan_snapshot.py", "tests/test_macro_single_path.py"],
+    "templates/dashboard.js": ["tests/test_chart_js_single_source_of_truth.py", "tests/test_dashboard_chart_palette.py", "tests/test_dashboard_contract.py", "tests/test_dashboard_css_vars_defined.py", "tests/test_dashboard_renderer.py", "tests/test_equity_curve_single_source.py", "tests/test_macro_bar_deltas.py", "tests/test_macro_scan_snapshot.py", "tests/test_macro_single_path.py", "tests/test_missing_value_not_zero.py", "tests/test_persistent_writes_have_readers.py"],
+    "thesis_breaks_config.json": ["tests/test_dashboard_renderer.py", "tests/test_macro_scan_snapshot.py", "tests/test_macro_single_path.py", "tests/test_thesis_break_evaluability.py", "tests/test_thesis_break_rendering.py", "tests/test_thesis_break_schema.py", "tests/test_thesis_breaks_config_authored_only.py"],
     "watchlist_events.md": ["tests/test_pipeline.py", "tests/test_report_formatters.py", "tests/test_watchlist_events.py"]
   }
 }

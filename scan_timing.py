@@ -116,6 +116,10 @@ def counters() -> Dict[str, Optional[dict]]:
     `price_nonfinite`（v0.45.653）：`price_metrics.history_price_metrics` 把算出非有限数的动量 / 量比改成 None 的次数与明细（真 K 线缺收盘 /
     缺量，2026-08-28 型；值交给出口回落）。外加评分那一刻的快照 `at_scoring`。评分时就有 ⇒ alert_manager P2。
 
+    `macro_context`（v0.45.674）：`fred_macro.stats()`——本进程调了几次 `get_macro_context`（`calls`）、其中几次真去取数（`fetches`）。
+    扫描只在开头取一次本轮快照（`alpha_hive_daily_report._fetch_scan_macro`），Guard / 日报 / 网站都读那一份 ⇒ calls 应恰为 1；
+    ≠ 1 ⇒ alert_manager P2（有读者绕过快照自己取 ⇒ 同一轮可能出现两份宏观，09-29 / 10-22 的形状）。
+
     `cboe_raw`（v0.45.333）：卖权行权价账本取原始链（`fetch_cboe_raw_contracts`）各出口的次数——
     ok / snapshot_mode / stale_vintage / payload_unavailable / vintage_mismatch / vintage_unverifiable /
     price_unavailable / no_parseable_contracts 分开数，不折叠。此前这组计数只有 cboe_options 自己和
@@ -129,7 +133,7 @@ def counters() -> Dict[str, Optional[dict]]:
                                       "ledger_io": None, "history_fill": None,
                                       "strangle_shadow": None, "stock_fetch_legacy": None,
                                       "event_rows": None, "yf_daily": None,
-                                      "price_nonfinite": None}
+                                      "price_nonfinite": None, "macro_context": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -217,6 +221,12 @@ def counters() -> Dict[str, Optional[dict]]:
         out["price_nonfinite"] = price_metrics.nonfinite_stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("price_nonfinite stats 不可得: %s", e)
+    try:
+        import fred_macro
+        # v0.45.674：一轮扫描调 get_macro_context 的次数（应恰为 1）；≠ 1 ⇒ alert_manager P2。不可导入 ⇒ None
+        out["macro_context"] = fred_macro.stats()
+    except Exception as e:  # noqa: BLE001
+        _log.debug("macro_context stats 不可得: %s", e)
     return out
 
 
@@ -458,5 +468,8 @@ def summary_line(snap: dict) -> str:
     nf = c.get("price_nonfinite")
     if nf and (nf.get("momentum_5d") or nf.get("volume_ratio")):        # v0.45.653
         pg_s += f" | 行情非有限改缺失 动量 {nf.get('momentum_5d', 0)} 次/量比 {nf.get('volume_ratio', 0)} 次"
+    mc = c.get("macro_context")
+    if mc and mc.get("calls", 1) != 1:                                  # v0.45.674：正常恰为 1，只在不是 1 时打
+        pg_s += f" | 宏观快照被调 {mc.get('calls')} 次(取数 {mc.get('fetches')} 次; 应为 1)"
     return ("耗时 " + " | ".join(parts) +
             f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}" + hg_s + pg_s)

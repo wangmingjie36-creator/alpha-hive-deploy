@@ -27,7 +27,8 @@ class TestRenderDashboard:
     # HTML（字符串非空、方向标签中文化、自定义 CSS 注入、能读 swarm_results
     # 文件），没有一条依赖实时行情。出网有两条腿，探针实测：
     #   · `render_dashboard_html:2381` → `fred_macro.get_macro_context()`
-    #     （只有本类第一条测试付代价，其余吃 `fred_macro._CACHE`）
+    #     （只有本类第一条测试付代价，其余吃 `fred_macro._CACHE`）——v0.45.674 起这条腿没了：
+    #     网站读 `report["macro_context"]`，不再自己取宏观
     #   · `render_dashboard_html` → `_detail()`（dashboard_renderer.py:548）
     #     → `yf_gate` → `yfinance.Ticker(...).history("5d")` 逐票补价，
     #     **每条测试都走**，一条测试里调 4 次

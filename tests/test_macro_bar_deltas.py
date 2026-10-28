@@ -264,11 +264,11 @@ class TestRenderedMacroBar:
         pass
 
     def _render(self, monkeypatch, tmp_path, mctx, prev=None):
-        monkeypatch.setattr(fm, "get_macro_context", lambda: mctx)
+        # v0.45.674：网站读这份日报自己的宏观快照（`report["macro_context"]`），不再调 `get_macro_context()`
         if prev is not None:
             (tmp_path / "alpha-hive-daily-2026-09-10.json").write_text(
                 json.dumps({"macro_context": prev}), encoding="utf-8")
-        html = dr.render_dashboard_html(report={"opportunities": []}, date_str="2026-09-11",
+        html = dr.render_dashboard_html(report={"opportunities": [], "macro_context": mctx}, date_str="2026-09-11",
                                         report_dir=tmp_path, opportunities=[])
         return html.split('<div class="ah-macro-track">', 1)[1].split('<ul class="sr-only', 1)[0]
 

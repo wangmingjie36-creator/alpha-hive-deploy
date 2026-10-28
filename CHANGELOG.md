@@ -5,7 +5,71 @@
 
 ---
 
-## [0.45.674] — 2026-10-28 — 占位（进行中：一轮扫描的宏观快照只取一次——在扫描预取里取、注入 Guard、日报与网站读同一份；根因：并发 4 线程各取一次 + 网站晚于 30 分钟缓存重取）
+## [0.45.674] — 2026-10-28 — Fixed：一轮扫描的宏观快照只取一次——扫描开头取、注入 Guard，日报宏观段与网站读同一份（此前 4 个并行线程各取一次、网站在 30 分钟缓存过期后再取一次，同一轮出现过三份宏观）；登边界 10-19（同 654 ~ 669，作废 0 条）
+
+用户 10-28「宏观缓存那条现在开工先给方案」⇒ 问「这个是按根因修复的方案吗」⇒「照建议的，先占号，从第 0 步开始」。
+**先更正 669 待办里我的诊断**：那条写的是「缓存 30 分钟比扫描短 ⇒ 同一次扫描里不同标的可能拿到两份宏观（09-24 29 + 1）」——主因不是这个。
+根因是「这一轮扫描用哪份宏观」没有主人：Guard / 日报宏观段 / 网站各调 `fred_macro.get_macro_context()`，靠 30 分钟进程缓存凑成「同一份」，
+而缓存只在查 / 写时加锁、**取数不在锁里**。第一版方案（单飞锁 + 扫描期间不过期）是给缓存打补丁，改成让扫描自己持有快照。
+
+### 第 0 步：只读实测
+- **并发各取一次（主因）**：生产日志每个扫描日在 Guard 阶段开头 **30 秒内取 4 次**（= 并行线程数 4），首批标的各用自己那份、其余用最后写进缓存的那份。
+  Guard 存档里有宏观来源记录的 44 天中 **4 天同一轮出现多份**：09-02（VIX 16.34 / 15.2，4 + 26）、09-15（1 行少了 Yahoo，1 + 29）、
+  09-24（29 fallback + 1 finnhub）、09-29（4 次取数各命中 5 / 5 / 2 / 7 个来源 ⇒ 27 + 2 + 1）；09-30 起 0 天（4 次结果碰巧都一样）。
+  （此前在核对脚本里我报过「132 天里 24 天」——读错了字段层级，以这里为准。）
+- **网站晚于缓存（次因）**：网站在 `save_report` 里渲染，比 Guard 取数晚 22–36 分钟。逐日对 gh-pages 上的页面：只有 **10-22** 晚了 35.9 分钟
+  ⇒ 渲染前重取，那次 CBOE 断连 ⇒ 网站 **VIX 16.7（前一天的值）、黄金「—」**，日报与 Guard 是 19.0。（09-24 / 25 / 10-12 网站整块「—」是 669 修的另一件事。）
+  日报宏观段一直在 20–28 分钟内命中缓存，余量很薄。
+- **补跑**：快照上下文退出时 `set_macro_snapshot(None)` 清缓存，`save_report` 在上下文之外 ⇒ 网站重取到运行当天的宏观（代码路径推出，没实跑）。
+- 板块轮动（世代边界判据看不到它）：10-19 ~ 10-27 同一 ETF 下各票冷热全同（XLY 只有 TSLA 一只，比不了）。
+- 读者普查：生产代码里调 `get_macro_context` 的只有 Guard、日报 P5、网站三处；`deep_analysis` / 实验脚本也走 `prefetch_shared_data`
+  ⇒ 快照**不放进** `prefetch_shared_data`，只在扫描主流程里取，那两处行为不变。
+
+### Fixed
+- `alpha_hive_daily_report.run_swarm_scan`：预取之后、注入之前 `prefetched["macro"] = self._scan_macro = _fetch_scan_macro()`——整轮只取这一次，
+  在快照上下文里 ⇒ 补跑取到的是 D 的。`_fetch_scan_macro` 取不到（`fred_macro` 导入失败；它自己的取数错误已收成带 `error` 的整份缺失）⇒
+  `{"data_source": "fallback", "error": …}` + WARNING，不留给读者各自再取。
+- `swarm_agents/base.py`：`BeeAgent._prefetched_macro`（缺省 None）+ 访问器 `_scan_macro()`；`inject_prefetched` 注入 `prefetched.get("macro")`
+  （没有这个键 ⇒ None）。
+- `swarm_agents/guard_bee._calc_macro_adjustment`：读 `self._scan_macro()`；None（没注入：单票 CLI / 测试 / 深度分析）才自己调，那条路逐字不变；
+  注入的是 {} 也不再取（空就是这一轮取到的结果）。
+- `_fetch_report_context`（日报宏观段）：用 `self._scan_macro`（Guard 读的同一个对象）；不经扫描调到这里才自己取。
+- `dashboard_renderer`：读 `report["macro_context"]`，**不再**调 `get_macro_context()`；缺这个键 ⇒ 宏观区块全「—」+ WARNING（不取运行当时的：那正是要修的错位）。
+- 单飞锁 / 「扫描期间不过期」都没做：扫描里不再有并发调用，缓存只留给扫描之外的进程。
+
+### Added（观测点：谁会红）
+- `fred_macro.stats()`（`calls` / `fetches`）→ `scan_timing.counters()["macro_context"]` → `alert_manager._check_macro_snapshot_calls`：
+  扫描跑完而 calls ≠ 1 ⇒ **P2**（有读者绕过快照自己取 / 这一轮没取）；计数缺失 ⇒ checks_skipped；早退 / Step 2 没跑完不报。摘要行只在 ≠ 1 时打。
+- `tests/conftest.py::_reset_fred_macro_stats`（autouse，同其他进程级计数）。
+
+### 世代边界（同 654 / 657 / 660 / 663 / 669：并进 10-19 同日标签）
+- **经 Guard 的只有一处**：几次并发取数结果不同的日子，首批标的的宏观票（VIX / 曲线 / 黄金 / 板块 ⇒ `macro_regime` → `RegimeWeightAdjuster` ⇒ `final_score`）
+  变成与其余标的同一份。取数时刻提前几分钟（Guard 阶段开头 ⇒ 扫描开头）不算口径变化：旧代码的取数时刻本就随扫描进度在 14:07–14:30 间漂。
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-10-19", "v0.45.674", …)`：`cohort_start()` 仍 10-19 ⇒ **作废 0 条**。
+- 等价判据 `_equiv_macro_scan_snapshot`：Guard 不在 / 出错 ⇒ 等价；当天全部 Guard 行的宏观记录（快照出的 10 个键，不含另一次独立取数的 `vix_term`）
+  读得出且是同一份 ⇒ 等价；两份以上 / 有一行读不出 / 没带当天全部行 ⇒ 证不出。判别器的逐行扫描为此多传 `_day`（当天全部标的），其余判据忽略它。
+  不需要冻结证据 ⇒ 今天 14:00 这轮若仍是旧代码也自动覆盖。
+- 印记 `_BOUNDARY_MARKERS["v0.45.674"]`：Guard `details.macro_scan_snapshot_checked = True`（`GENERATION_MARKS`，成功与出错路径都写），只认实时行。
+- `signal_archive.COHORT_SIGNAL_SCOPE["v0.45.674"] = ("agent.GuardBeeSentinel.*",)`（**0 个信号后移**）；维度 IC H1 / H2 不读 Guard 宏观票 ⇒ 不截断；
+  `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代标签扩为 `…+v0.45.669+v0.45.674`。
+- 推送前对生产数据根只读跑判别器：652 ~ 663 仍 `matches`；669 / 674 `no_evidence_yet`、`unmarked_after_boundary=[]`；
+  不等价日只有 09-02 / 15 / 24 / 29 与 9 月前没有宏观细节记录的日子，10-19 起 0 天。
+
+### 测试
+- `tests/test_macro_scan_snapshot.py`（新，40 条）：A Guard 读注入快照（不调 / {} 也不调 / 没注入照旧调一次 / 注入键缺 ⇒ None / 4 线程 × 12 票同一份）；
+  B 扫描主流程（AST：`prefetched["macro"]` 在预取之后、注入之前由 `_fetch_scan_macro()` 填且同时给 `self._scan_macro`；取一次；取不到 ⇒ fallback + error；
+  日报宏观段用本轮快照 / 不经扫描照旧取）；C 网站（读报告不调、补跑卸载快照后仍显示 D 的、缺键 ⇒ 全「—」+ WARNING 不取）；
+  D 读者白名单（AST 双向：生产代码调 `get_macro_context` 的恰好三处 + 扫描器有牙两种写法）；E 计数 / scan_timing / P2 三态；
+  F 边界登记（条目 / 作用域 / 印记 / 作废 0 条 / 0 个信号后移 / 不截断 H1 H2 / ML 标签 / Guard 字面量 / 出错路径印记 / 判据 5 种形状 / 判定三态）。
+- 既有用例：`test_macro_bar_deltas` / `test_macro_single_path` 的网站渲染改为把宏观放进 `report["macro_context"]`（原来打桩 `get_macro_context`）；
+  `test_scan_timing` 计数键集合加 `macro_context`；`test_dashboard_renderer` 过期注释更正。
+- 变异：23 个全红、0 个幸存（Guard 忽略注入 / 注入空就重取 / 删取数行 / 挪到注入之后 / 日报宏观段重取 / 取不到返回 None / 网站重取 / 网站缺键回退重取 / 注入 `or {}` / 计数不数调用 / scan_timing 不带计数 / 告警没接 / 判据写成 ≤1 / 判别器不传 `_day` / 判据恒真 / 删等价登记 / 签名含 `vix_term` / 签名漏 VIX / 印记认补跑行 / 印记不进 GENERATION_MARKS / 删 Guard 字面量 / 作用域加 `guard.macro_adj` / 边界日期写上线日）；「网站恢复直接调用」白名单那条单独也红。
+- 拨钟审计：`test_macro_scan_snapshot` / `test_macro_bar_deltas` / `test_scan_timing` +7 / +45 天 0 条新红。
+- 整套：13014 passed、2 xfailed（与另外三个会话的整套错开后跑）；选测登记表按提示 `--files tests/test_macro_scan_snapshot.py --update`（新测试读网站模板，并入 4 个文件的读者清单）。
+
+### 没改 / 待办
+- `vix_term_structure.get_vix_term_structure`（另一次独立取数）每票各调一次：它自己持锁取数 + 30 分钟文件缓存，不会并发重复取，但同样不是「本轮快照」；本版没动。
+- 669 待办里「缓存 30 分钟比扫描短」那条已由本版更正（主因是并发），原文保留、加了指向本条的注。
 
 ## [0.45.673] — 2026-10-28 — 占位（进行中：LLM 影子——refusal 单独计数写进状态文件 + JSON 失败日志预览加长）
 
@@ -98,6 +162,7 @@
 ### 没改 / 待办
 - 实时 Finnhub 报价不核时间戳（`t`）是不是这一场；FRED HY 日变（`obs[0] − obs[1]`）仍按位置（只展示）。
 - `get_macro_context` 缓存 30 分钟比扫描短 ⇒ 同一次扫描里不同标的可能拿到两份宏观（09-24 实测 29 + 1）；本版没动。
+  （**v0.45.674 更正**：主因不是缓存时长，是 4 个并行线程同时看到空缓存、各取一次；30 分钟只影响晚渲染的网站。已在 674 修。）
 - 同一形状的兜底字典别处还有（`unusual_options` 的 5.0 / neutral、`swarm_agents/cache.py` 的 fallback 行情），不在本版范围。
 
 ## [0.45.668] — 2026-10-28 — Added：整套测试开跑时提示「系统 load 已超订」+ `tools/burn_cpu.py`（负载进程自带寿命、清理失败会红）
