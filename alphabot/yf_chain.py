@@ -41,6 +41,15 @@ MAX_DTE = 120
 MAX_EXPIRIES = 10
 
 
+def _is_rate_limited(exc: BaseException) -> bool:
+    """Yahoo 限流（闸门冷却 / 真实 429）。闸门模块不可得 ⇒ 只认类名，不因此把别的异常误判成限流。"""
+    try:
+        import yf_gate
+        return yf_gate.is_rate_limited(exc)
+    except Exception:  # noqa: BLE001
+        return type(exc).__name__ in ("YFRateLimited", "YFRateLimitError")
+
+
 def _num(v) -> Optional[float]:
     try:
         f = float(v)
@@ -89,7 +98,11 @@ def fetch_yf_raw_contracts(ticker: str, *, as_of: Optional[str] = None, now_et: 
                            yf_module=None) -> Tuple[Optional[dict], Optional[str]]:
     """返回 `(结果, None)` 或 `(None, 原因)`——与 CBOE 那个取数函数同一契约，永不抛。
     原因：`stale_vintage` / `vintage_mismatch` / `yf_no_expiries` / `yf_price_unavailable` / `yf_no_contracts` /
-    `yf_oi_stale` / `yf_oi_unjudgeable` / `yf_exception:<类名>`。`yf_module` 只给测试注入。"""
+    `yf_oi_stale` / `yf_oi_unjudgeable` / `yf_rate_limited` / `yf_exception:<类名>`。`yf_module` 只给测试注入。
+
+    **`yf_rate_limited`**（v0.45.675）：Yahoo 限流——闸门冷却中的 `YFRateLimited`，或一次真实的 429。不是「取数坏了」：调用方
+    （`service._chain_fetch`）据此告诉页面「约 N 秒后再试」，并在日志里记下是第几次。Alpha Bot 在 2026-10-27 / 28 两个清晨的
+    NVDL 备用源全是它（16 次，每次都是轮询的第一个请求 `Ticker.options` 被 429）；同一时段新开的进程取同一条链是通的。"""
     try:
         import cboe_options as CB
         import oi_staleness
@@ -159,4 +172,6 @@ def fetch_yf_raw_contracts(ticker: str, *, as_of: Optional[str] = None, now_et: 
             "n_iv_missing": sum(1 for c in kept if c["iv"] is None),
         }, None
     except Exception as exc:  # noqa: BLE001 - 取数层的任何异常都是「这次取不到」，如实报原因
+        if _is_rate_limited(exc):
+            return None, "yf_rate_limited"
         return None, f"yf_exception:{type(exc).__name__}"

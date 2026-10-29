@@ -69,6 +69,17 @@ def _briefs_dir() -> Path:
         return Path(BRIEFS_DIR)
     return _data_dir() / "self_analysis_briefs"
 
+def _dim_ic_forward_start() -> str:
+    """维度 IC 预注册窗口起点（唯一真相 `experiments/dim_ic_protocol.FORWARD_START`）；取不到如实写「未知」。"""
+    try:
+        from experiments.dim_ic_protocol import FORWARD_START
+        return FORWARD_START
+    except Exception as e:  # noqa: BLE001
+        return f"（窗口起点未知：{type(e).__name__}）"
+
+
+_DIM_IC_FORWARD_START = _dim_ic_forward_start()
+
 # Agent 中文名映射
 AGENT_ZH = {
     "ScoutBeeNova":      "Scout（基本面）",
@@ -352,8 +363,14 @@ def format_briefing(stats: dict, patterns: dict,
                     wrong_contexts: list,
                     months_back: int,
                     ticker_filter: Optional[str],
-                    dimension_ic: Optional[dict] = None) -> str:
-    """生成给 Cowork Claude 阅读的结构化 Markdown briefing"""
+                    dimension_ic: Optional[dict] = None,
+                    data_quality: Optional[dict] = None,
+                    prereg_progress: Optional[list] = None) -> str:
+    """生成给 Cowork Claude 阅读的结构化 Markdown briefing
+
+    `data_quality` / `prereg_progress`（v0.45.678，「9 月中旬大复盘」重新定义后的常设两节）由
+    `monthly_review` 算好传进来；None ⇒ 不出这两节（`--ticker` 单票诊断与旧调用方）。
+    """
 
     now     = datetime.now().strftime("%Y-%m-%d %H:%M")
     scope   = f"最近 {months_back} 个月"
@@ -396,6 +413,8 @@ def format_briefing(stats: dict, patterns: dict,
             "",
             "> IC ≈ 0 表示该蜂原始分对 T+7 无区分度；|IC| > 0.05 才有微弱信号。",
             "> penalty_replay 已证明瓶颈在各蜂原始分——本表为 Track A 权重优化提供透明依据。",
+            f"> ⚠️ 窗口含 {_DIM_IC_FORWARD_START} 之后（维度 IC 预注册窗口）的数据：本表**不是协议证据**，"
+            "检视点前勿据此改评分 / 权重 / 通道（见 `experiments/dim_ic_preregistration.md`）。",
             "",
             "| 蜂 | 全窗口 IC | n | 近 1/3 窗口 IC | 趋势 |",
             "|-----|----------|---|---------------|------|",
@@ -467,6 +486,14 @@ def format_briefing(stats: dict, patterns: dict,
                 "",
             ]
 
+    # v0.45.678：常设两节（数据质量 / 预注册进度），放在推理任务之前
+    if data_quality is not None:
+        import monthly_review
+        lines += monthly_review.render_data_quality(data_quality)
+    if prereg_progress is not None:
+        import monthly_review
+        lines += monthly_review.render_progress(prereg_progress)
+
     # 给 Claude 的推理任务
     lines += [
         "---",
@@ -495,6 +522,16 @@ def format_briefing(stats: dict, patterns: dict,
         "### 任务 4：优先级排序",
         "综合改善效果与实现难度，给出一个「本月最值得实现的信号」建议。",
         "",
+    ]
+    if data_quality is not None or prereg_progress is not None:     # 单票诊断不出这两节，也就不派这项任务
+        lines += [
+            "### 任务 5：数据质量 → 修复待办（v0.45.678）",
+            "从「三.五、数据质量」里挑缺失（日·票）最多的 1–3 个字段 / 数据源：是已知问题（CHANGELOG 里有记录）还是新问题？",
+            "各给一句「该修什么」。漏扫日、判不了的日子、取不到的项要单独点名。",
+            "「三.六、预注册检验进度」只有计数：**不要从中推断任何效应**，也不要据它提评分改动。",
+            "",
+        ]
+    lines += [
         "---",
         "*本文件由 `self_analyst.py` 自动生成，推理由 Cowork Claude 完成，无需 API Key。*",
     ]
@@ -545,10 +582,21 @@ def main() -> None:
     if dimension_ic:
         print(f"   维度 IC: {len(dimension_ic)} 蜂已计算")
 
+    # 4.6 v0.45.678：数据质量（本月）+ 预注册检验进度（只计数）——单票诊断不出
+    dq = prereg = None
+    if not args.ticker:
+        import monthly_review
+        dq = monthly_review.data_quality()
+        print(f"   数据质量: {'不可得：' + dq['reason'] if not dq.get('available') else dq['start'] + ' ~ ' + dq['end']}")
+        prereg = monthly_review.prereg_progress()
+        _n_err = sum(1 for r in prereg if r["error"])
+        print(f"   预注册进度: {len(prereg)} 项" + (f"，⚠️ {_n_err} 项取不到" if _n_err else ""))
+
     # 5. 生成 briefing
     briefing = format_briefing(stats, patterns, wrong_contexts,
                                args.months, args.ticker,
-                               dimension_ic=dimension_ic)
+                               dimension_ic=dimension_ic,
+                               data_quality=dq, prereg_progress=prereg)
 
     # 6. 写文件
     if args.out:

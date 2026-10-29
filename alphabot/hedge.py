@@ -313,7 +313,7 @@ def beta_tickers(audit: Optional[dict]) -> List[str]:
 
 
 def beta_sensitivity(audits: Optional[dict], alt_betas: Optional[dict], stress_fn, *, info: Optional[dict] = None,
-                     alt_label: str = "250 日") -> dict:
+                     alt_label: str = "250 日", retry_after_sec: Optional[float] = None) -> dict:
     """「β 窗口对照」：最近一份审计，用审计里的 60 日 β（现状）与长窗口 β 各算一遍压力网格 / 尾部归因，并排给页面（`tail_budget.beta_sensitivity`）。
     **只展示**：不写审计、不进告警、不进 SPY 覆盖的任何决定。`info` = 取 β 的明细 `{ticker: {n, reason}}`，只用来如实报哪些没取到。"""
     day, a = beta_audit(audits)
@@ -331,6 +331,17 @@ def beta_sensitivity(audits: Optional[dict], alt_betas: Optional[dict], stress_f
     failed = [{"ticker": t, "reason": ((info or {}).get(t) or {}).get("reason") or "no_value"}
               for t in want if _num((alt_betas or {}).get(t)) is None]
     res["fetch"] = {"n_requested": len(want), "n_ok": len(want) - len(failed), "failed": failed[:BETA_FETCH_FAILED_SHOWN]}
+    # 有值、但**最近一次刷新失败**的标的：值照用（它自己的取数时刻页面照实显示），失败写出来——不让「刷新被拒」看起来像「刚取到」
+    stale = [{"ticker": t, "reason": ((info or {}).get(t) or {}).get("reason")} for t in want
+             if _num((alt_betas or {}).get(t)) is not None and ((info or {}).get(t) or {}).get("reason")]
+    res["fetch"]["refresh_failed"] = stale[:BETA_FETCH_FAILED_SHOWN]
+    limited = any(f["reason"] == "rate_limited" for f in failed) or any(f["reason"] == "rate_limited" for f in stale)
+    if limited:
+        res["fetch"]["rate_limited"] = True                    # Yahoo 限流：页面据此说「约 N 秒后再点重新取 β」，而不是笼统的取数失败
+        # 再试时间由调用方按**绝对时刻**折算后传入（缓存命中时也是「现在」的剩余，不是取数那一刻的数）；没传才退回明细里记的
+        waits = [_num(((info or {}).get(f["ticker"]) or {}).get("retry_after_sec")) for f in failed + stale if f["reason"] == "rate_limited"]
+        waits = [w for w in waits if w is not None]
+        res["fetch"]["retry_after_sec"] = (_num(retry_after_sec) if retry_after_sec is not None else (max(waits) if waits else None))
     return res
 
 

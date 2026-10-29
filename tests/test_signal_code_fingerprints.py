@@ -262,12 +262,69 @@ class TestDependencyClosure:
         read = _mutated("observation_layer.py", "if not _cache_doc_ok(doc):", "if not _cache_doc_ok(doc) or False:")
         assert {"buzz.news", "buzz.fear_greed", "price.fields"} <= _changed(read)
 
+    @pytest.mark.parametrize("rel,old,new", [
+        # BuzzBee 经 self._get_stock_data() 取行情（基类 BeeAgent）：补跑时不再透传目标日期
+        ("swarm_agents/base.py", 'data = _cache._fetch_stock_data(ticker, getattr(self, "_target_date", None))',
+         "data = _cache._fetch_stock_data(ticker)"),
+        # 经 self._validate_ticker() 判代码合不合法：正则收窄 ⇒ 某些标的整只不出通道
+        ("swarm_agents/_config.py", "_RE_TICKER = _re.compile(r'^[A-Z]{1,5}(?:[.-][A-Z])?$')",
+         "_RE_TICKER = _re.compile(r'^[A-Z]{1,4}(?:[.-][A-Z])?$')"),
+    ], ids=["基类方法 _get_stock_data", "基类方法用到的 _RE_TICKER"])
+    def test_methods_reached_through_self_are_tracked(self, rel, old, new):
+        """v0.45.676（671 二次检查）：`self.方法` 此前不解析，基类里的这两处改了指纹不红。"""
+        assert _changed(_mutated(rel, old, new)) == {"buzz.channels"}
+
+    def test_only_the_member_not_the_whole_base_class(self):
+        """精度：基类里 Buzz 不调的方法（v0.45.674 刚改过的宏观快照访问器）改了 ⇒ 谁都不变。"""
+        read = _mutated("swarm_agents/base.py", 'return getattr(self, "_prefetched_macro", None)',
+                        'return getattr(self, "_prefetched_macro", {})')
+        assert _changed(read) == set()
+
+    def test_instance_attribute_set_in_init_is_tracked(self):
+        """v0.45.679（676 二次检查）：`_get_stock_data` 读的 `self._prefetched_stock` 在 `__init__` 里赋缺省值——
+        类内赋值静态可解，676 把它当「推不出来」放过；改了只让 buzz.channels 变。"""
+        read = _mutated("swarm_agents/base.py", "self._prefetched_stock: Dict[str, Dict] = {}",
+                        "self._prefetched_stock: Dict[str, Dict] = dict(x={})")
+        assert _changed(read) == {"buzz.channels"}
+
+    def test_unused_instance_attribute_is_not(self):
+        """精度：`__init__` 里 Buzz 不读的属性（674 加的宏观快照）改了 ⇒ 谁都不变。"""
+        read = _mutated("swarm_agents/base.py", "self._prefetched_macro: Optional[Dict] = None",
+                        "self._prefetched_macro: Optional[Dict] = {}")
+        assert _changed(read) == set()
+
+    @pytest.mark.parametrize("old,new,expect", [
+        # 值改成引用另一个名字（基线），再改那个名字——两个变体之间只差 600 → 900
+        ('"reddit": 600,', '"reddit": _REDDIT_TTL,', {"buzz.reddit"}),
+        # 键是变量 ⇒ ttl 下哪个键都可能被改 ⇒ 读 ttl 下任何键的单元都算（保守）
+        ("def get_cache_ttl(", "for _k in ('reddit',):\n    CACHE_CONFIG['ttl'][_k] = 60\n\ndef get_cache_ttl(",
+         {"buzz.reddit", "buzz.yahoo"}),
+        # 常量键 ⇒ 只算给读这个键的单元（buzz.yahoo 读的 ttl.yahoo_trending 不受影响）
+        ("def get_cache_ttl(", "def _tune():\n    CACHE_CONFIG['ttl']['reddit'] = 60\n_tune()\n\ndef get_cache_ttl(",
+         {"buzz.reddit"}),
+    ], ids=["值里引用的名字", "模块层循环里就地改（变量键）", "函数里就地改、模块层调用（常量键）"])
+    def test_config_values_reached_indirectly_are_tracked(self, old, new, expect):
+        """v0.45.676：config 值里再引用的名字此前停在字面文本上；就地修改此前只认模块层直接语句。"""
+        if "_REDDIT_TTL" in new:
+            def variant(ttl):
+                return _transformed("config.py", lambda t: t.replace(old, new).replace(
+                    "CACHE_CONFIG = {", f"_REDDIT_TTL = {ttl}\nCACHE_CONFIG = {{", 1))
+            assert {u for u in _UNITS6 if _fp(u, variant(600)) != _fp(u, variant(900))} == expect
+        else:
+            assert _changed(_mutated("config.py", old, new)) == expect
+
     def test_expected_dependencies_are_present(self):
         """正对照：缺口里点过名的依赖确实在。"""
         assert "config.py::NEWS_SOURCE_CONFIG" in F.unit_dependencies("buzz.news")
         assert "config.py::CACHE_CONFIG[ttl.reddit,ttl.reddit_memory]" in F.unit_dependencies("buzz.reddit")
         ch = F.unit_dependencies("buzz.channels")
         assert "config.py::AGENT_SCORING[volatility_thresholds,volume_thresholds]" in ch, list(ch)
+        for label in ("swarm_agents/base.py::BeeAgent._get_stock_data", "swarm_agents/base.py::BeeAgent._validate_ticker",
+                      "swarm_agents/_config.py::_RE_TICKER"):
+            assert label in ch, label
+        assert not any(k.startswith("swarm_agents/base.py::BeeAgent._scan_macro") for k in ch), "只取用到的成员"
+        assert "swarm_agents/base.py::BeeAgent.__init__[self._prefetched_stock]" in ch
+        assert not any("_prefetched_macro" in k for k in ch), "只取用到的实例属性"
         pf = F.unit_dependencies("price.fields")
         for label in ("data_pipeline.py::_latest_closed_session", "cboe_options.py::close_verdict",
                       "price_history.py::MOMENTUM_LOOKBACK", "is_trading_day.py::session_close_et"):
@@ -314,7 +371,11 @@ class TestResolver:
         deps = F.unit_dependencies("u", read)
         assert list(deps) == ["config.py::TTL[b.x]"]
         assert deps["config.py::TTL[b.x]"].splitlines()[0] == "TTL.b.x = 2"
-        assert "TTL['b']['z'] = 9" in deps["config.py::TTL[b.x]"], "config 里对它的就地修改一并算进去"
+        assert "TTL['b']['z']" not in deps["config.py::TTL[b.x]"], "改的是兄弟键 b.z，读的 b.x 不受影响（v0.45.676 起按键分）"
+        files["config.py"] = _CFG + 'TTL["b"]["x"] = 7\nTTL["b"].update(q=1)\n'
+        read = _synthetic(monkeypatch, files, {"u": {"code": (("pkg/m.py", "def:f"),), "signals": ("s",)}})
+        text = F.unit_dependencies("u", read)["config.py::TTL[b.x]"]
+        assert "TTL['b']['x'] = 7" in text and "TTL['b'].update(q=1)" in text, "改到读过的键（或其上层）的就地修改一并算进去"
 
     def test_local_names_and_main_block_are_not_dependencies(self, monkeypatch):
         files = {"m.py": "r = 1\nHELPER = 2\n\ndef f(x):\n    r = x + HELPER\n    return r\n\n"
@@ -342,6 +403,106 @@ class TestResolver:
         files = {"m.py": "from config import TTL\n\ndef f(k):\n    return TTL[k]\n", "config.py": _CFG}
         read = _synthetic(monkeypatch, files, self._unit("m.py"))
         assert list(F.unit_dependencies("u", read)) == ["config.py::TTL"]
+
+    # ── v0.45.676：类成员 / 子模块链 / config 间接引用 ──
+
+    _BASE = ("import config\n\nclass Base:\n    K = config.FLAG\n\n    def get(self):\n        return self.norm(1)\n\n"
+             "    def norm(self, x):\n        return x\n\n    def unused(self):\n        return 0\n")
+
+    def test_self_member_resolves_through_the_base_class_and_only_that_member(self, monkeypatch):
+        files = {"base.py": self._BASE, "config.py": _CFG,
+                 "m.py": "from base import Base\n\nclass Sub(Base):\n    def run(self):\n        return self.get() + self.K\n"}
+        # 定位 Sub.run 的方法体（不含类本身）——与 buzz_channel_block 同形：类没被整个定位，基类不会经 bases 进来
+        monkeypatch.setitem(F._LOCATORS, "run_body", lambda tree, rel, _a: (
+            "x", list(tree.body[1].body[0].body), set()))
+        read = _synthetic(monkeypatch, files, {"u": {"code": (("m.py", "run_body"),), "signals": ("s",)}})
+        assert list(F.unit_dependencies("u", read)) == [
+            "base.py::Base.K", "base.py::Base.get", "base.py::Base.norm", "config.py::FLAG"], \
+            "get 里的 self.norm 接着追；unused 不进来；类属性 K 引用的 config 也追"
+
+    def test_subclass_override_wins_and_super_goes_to_the_base(self, monkeypatch):
+        files = {"base.py": self._BASE, "config.py": _CFG,
+                 "m.py": "from base import Base\n\nclass Sub(Base):\n    def norm(self, x):\n        return super().norm(x) + 1\n\n"
+                         "    def run(self):\n        return self.get()\n"}
+        monkeypatch.setitem(F._LOCATORS, "run_body", lambda tree, rel, _a: (
+            "x", list(tree.body[1].body[1].body), set()))
+        read = _synthetic(monkeypatch, files, {"u": {"code": (("m.py", "run_body"),), "signals": ("s",)}})
+        deps = F.unit_dependencies("u", read)
+        assert "m.py::Sub.norm" in deps, "基类 get 里的 self.norm 指的是子类覆盖的那个（实例是 Sub）"
+        assert "base.py::Base.norm" in deps, "super().norm 指基类的"
+
+    def test_injected_attributes_and_external_bases_are_not_errors(self, monkeypatch):
+        files = {"m.py": "import abc\n\nclass C(abc.ABC):\n    def __init__(self):\n        self.data = {}\n\n"
+                         "    def run(self):\n        return self.data.get('x'), self.injected, self.__class__.__name__\n",
+                 "config.py": _CFG}
+        monkeypatch.setitem(F._LOCATORS, "run_body", lambda tree, rel, _a: (
+            "x", list(tree.body[1].body[1].body), set()))
+        read = _synthetic(monkeypatch, files, {"u": {"code": (("m.py", "run_body"),), "signals": ("s",)}})
+        # v0.45.679 起类内赋值算进去（676 时这里断言为空）；从类外塞进来的 injected、外部基类 ABC 推不出来，不当错误
+        assert F.unit_dependencies("u", read) == {"m.py::C.__init__[self.data]": "self.data = {}"}
+
+    # ── v0.45.679：实例属性的类内赋值 / 泛型基类 / getattr(self, 常量) / 与处理顺序无关 ──
+
+    _ATTRS = ("import config\nlimit = config.FLAG\n\nclass Base:\n    def __init__(self, limit):\n"
+              "        self.limit = limit\n        if config.FLAG:\n            self.mode = 'a'\n"
+              "        setattr(self, 'tag', TAG)\n        self.other = 1\n\nTAG = 'x'\n")
+
+    def _run_unit(self, monkeypatch, files, method_index=0):
+        monkeypatch.setitem(F._LOCATORS, "run_body", lambda tree, rel, _a: (
+            "x", list(tree.body[1].body[method_index].body), set()))
+        read = _synthetic(monkeypatch, {"config.py": _CFG, **files},
+                          {"u": {"code": (("m.py", "run_body"),), "signals": ("s",)}})
+        return F.unit_dependencies("u", read)
+
+    def test_instance_attribute_sources_in_the_class(self, monkeypatch):
+        deps = self._run_unit(monkeypatch, {
+            "base.py": self._ATTRS,
+            "m.py": "from base import Base\n\nclass Sub(Base):\n    def run(self):\n"
+                    "        return self.limit, self.mode, self.tag\n"})
+        assert list(deps) == ["base.py::Base.__init__[self.limit]", "base.py::Base.__init__[self.mode]",
+                              "base.py::Base.__init__[self.tag]", "base.py::TAG", "config.py::FLAG"], list(deps)
+        assert "if config.FLAG" in deps["base.py::Base.__init__[self.mode]"], "取方法体里的顶层语句：条件也在里面"
+        assert deps["base.py::Base.__init__[self.limit]"] == "self.limit = limit", \
+            "参数 limit 不是模块层的 limit（只把语句拿出来追，没有方法的作用域）"
+
+    def test_generic_base_and_getattr_on_self(self, monkeypatch):
+        deps = self._run_unit(monkeypatch, {
+            "base.py": self._BASE,
+            "m.py": "from base import Base\n\nclass Sub(Base[int]):\n    def run(self):\n"
+                    "        return getattr(self, 'norm')(1)\n"})
+        assert list(deps) == ["base.py::Base.norm"]
+
+    def test_result_does_not_depend_on_which_is_reached_first(self, monkeypatch):
+        """先碰到成员 Base.get、后碰到整个 Base（get 里引用了类名）⇒ 只留整类。"""
+        base = self._BASE.replace("        return self.norm(1)\n", "        return Base.K\n")
+        deps = self._run_unit(monkeypatch, {
+            "base.py": base,
+            "m.py": "from base import Base\n\nclass Sub(Base):\n    def run(self):\n        return self.get()\n"})
+        assert "base.py::Base" in deps and "base.py::Base.get" not in deps, list(deps)
+
+    def test_submodule_attribute_chain(self, monkeypatch):
+        files = {"pkg/__init__.py": "", "pkg/sub.py": "def g():\n    return 1\n", "config.py": _CFG,
+                 "m.py": "import pkg.sub\n\ndef f():\n    return pkg.sub.g(), id(pkg.sub)\n"}
+        read = _synthetic(monkeypatch, files, self._unit("m.py"))
+        assert list(F.unit_dependencies("u", read)) == ["pkg/sub.py::g"], \
+            "顺着属性链走到子模块（此前报「pkg 里找不到 sub」）；子模块对象整个被拿去用不当错误"
+
+    @pytest.mark.parametrize("cfg,expect", [
+        ("T0 = 5\nTTL = {'a': T0}\n", ["config.py::T0", "config.py::TTL[a]"]),
+        ("TTL = {'a': 1}\nfor _k in ('a',):\n    TTL[_k] = 2\n", ["config.py::TTL[a]"]),
+        ("TTL = {'a': 1}\ndef _tune():\n    TTL['a'] = _V\n_V = 3\n_tune()\n", ["config.py::TTL[a]", "config.py::_V"]),
+        ("TTL = {'a': 1}\ndef _reset():\n    global TTL\n    TTL = {'a': 2}\n_reset()\n", ["config.py::TTL[a]"]),
+        # 变量键在前、常量键在后：改的是「任意键下的 x」，读的 a 也可能被改到（前缀到变量键为止，不能跳过它）
+        ("TTL = {'a': {'x': 1}}\nfor _k in ('a',):\n    TTL[_k]['x'] = 0\n", ["config.py::TTL[a]"]),
+    ], ids=["值里引用的名字", "循环里就地改", "函数里就地改（改成的值接着追）", "函数里 global 重新赋值",
+            "变量键之后的常量键"])
+    def test_config_indirection(self, monkeypatch, cfg, expect):
+        files = {"m.py": "from config import TTL\n\ndef f():\n    return TTL['a']\n", "config.py": cfg}
+        read = _synthetic(monkeypatch, files, self._unit("m.py"))
+        deps = F.unit_dependencies("u", read)
+        assert list(deps) == expect
+        if "for _k" in cfg or "_tune" in cfg or "_reset" in cfg:
+            assert "TTL" in deps["config.py::TTL[a]"].split("\n", 1)[1], "改动它的语句在文本里"
 
 
 # ── 4. 登记表自洽（合成登记表证明检查有牙）─────────────────────────────────

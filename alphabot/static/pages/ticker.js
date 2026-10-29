@@ -1,17 +1,29 @@
 // 标的页：水平 / 希腊值 / 期限 / 卖权 / 价格。一次现算（服务端 60 秒缓存）喂全部子页。
 import { api, h, helpLink, num, money, pct, pctPts, usdShort, signedPct, distPct, signChip, seg, table, panel, isNum,
   downloadCSV, pref, setPref, timeAgo, SIGN_LABEL, CURVE_LABEL, ROUTE_LABEL, STRUCT_LABEL, TENOR_LABEL,
-  EARN_LABEL, SOURCE_LABEL, fill, plain, reasonInfo } from "../lib.js";
+  EARN_LABEL, SOURCE_LABEL, fill, plain, reasonInfo, fetchReasonText } from "../lib.js";
 import { strikeBars, gammaCurve, lines, columns, payoff, C } from "../charts.js";
 import { premium } from "./premium.js";
 import { howtoPanel } from "./howto.js";
 import { state, tickers, refreshMeta } from "../app.js";
+import { createRetryGate } from "../retry_gate.js";
 
+const RETRY_NOTE = {
+  scheduled: "冷却一结束就会自动重试一次；也可以随时点「重新拉取」。",
+  tried: "已自动重试过一次、仍被限流；过一会儿再点「重新拉取」。（同一时段单独开的进程取同一条链往往是通的——是间歇限流，不是数据不可用。）",
+  manual: "过一会儿再点「重新拉取」。",
+  none: "",
+};
 const TABS = [["levels", "水平"], ["greeks", "希腊值"], ["term", "期限"], ["sell", "卖权"], ["premium", "溢价"], ["price", "价格"]];
 const TAB_HELP = { levels: "levels", greeks: "greeks", term: "greeks", sell: "sell", premium: "premium", price: "price" };
 const VIEWS = [["next_expiry", "下一到期"], ["le_45dte", "≤45 天（路由用）"], ["full", "全部到期"]];
 
+// Yahoo 限流时页面每一轮限流**自动重试一次**（等多久由服务端给的冷却剩余决定）：连着撞只会多挨几条 429，之后让用户自己点「重新拉取」。
+// 状态机在 retry_gate.js（无 DOM，tests 用 node 跑它）：新渲染先取消待触发的定时器、成功清记号、页面切走则作废。
+const retry = createRetryGate();
+
 export async function renderTicker(root, t, tab, alive, force = false) {
+  retry.begin(t);
   const d = await api(`/api/live/${encodeURIComponent(t)}${force ? "?force=1" : ""}`);
   if (!alive()) return;
   const main = h("div", {});
@@ -29,13 +41,18 @@ export async function renderTicker(root, t, tab, alive, force = false) {
   } }, "重新拉取");
 
   if (!d.data_available) {
+    const plan = retry.plan(t, { limited: d.reason === "yf_rate_limited", retryAfterSec: d.retry_after_sec, alive,
+      run: () => renderTicker(root, t, tab, alive, true) });
     fill(main, h("div", { class: "page-head" }, h("h1", {}, t), h("div", { class: "controls" }, favBtn, refresh)),
       panel(null, {}, h("div", { class: "empty" }, "这只标的现在拿不到期权链。"),
-        h("p", { class: "callout warn" }, `原因：${d.reason || "未知"}`),
-        h("p", { class: "small muted" }, "CBOE 延迟行情只覆盖挂牌期权的美股 / ETF；指数请用 CBOE 写法（如 _SPX）。")));
+        h("p", { class: "callout warn" }, `原因：${fetchReasonText(d.reason, d.retry_after_sec)}`),
+        d.reason === "yf_rate_limited"
+          ? h("p", { class: "small muted" }, RETRY_NOTE[plan])
+          : h("p", { class: "small muted" }, "CBOE 延迟行情只覆盖挂牌期权的美股 / ETF；指数请用 CBOE 写法（如 _SPX）。")));
     return;
   }
 
+  retry.ok(t);                       // 取到了：这一轮限流结束，下一轮重新有一次自动重试
   const zg = d.views?.le_45dte?.zero_gamma || {};
   const S = d.underlying_price;
   const head = h("div", { class: "page-head" },

@@ -2,8 +2,10 @@
 // **只展示**：不进审计、不进告警、不改 SPY 覆盖的任何决定。数字全由服务端算好（tail_budget.beta_sensitivity → alphabot/hedge.py →
 // GET /api/hedge/beta），这里只排版。250 日 β 现取（yfinance、限流下约半分钟），所以是单独的接口，不阻塞对冲页其余部分。
 import { api, h, num, panel, table, isNum, fill, loading, errorBox } from "../lib.js";
+import { createRetryGate } from "../retry_gate.js";
 
 const TITLE = "压力网格的 β 窗口对照（60 日 vs 250 日）";
+const retry = createRetryGate();     // 被 Yahoo 限流时每一轮自动再取一次（只补缺的）；状态机见 retry_gate.js
 // 四舍五入成 0 的数不带符号（同尾部预算面板）
 const sPct = (v, dp = 1) => {
   if (!isNum(v)) return "—";
@@ -84,36 +86,47 @@ function gridTable(S, title) {
 }
 
 export async function renderBetaSens(host, alive, force = false) {
-  fill(host, panel(TITLE, {}, loading("正在取 250 日 β 并重算压力网格（限流下约半分钟）…")));
+  retry.begin("beta");
+  fill(host, panel(TITLE, {}, loading("正在取 250 日 β 并重算压力网格（首次约半分钟；被限流时会立刻告诉你还要等多久）…")));
   let R;
   try { R = await api("/api/hedge/beta" + (force ? "?force=1" : "")); } catch (e) {
     if (alive()) fill(host, panel(TITLE, {}, errorBox(e)));
     return;
   }
   if (!alive()) return;
+  const plan = retry.plan("beta", { limited: !!R.fetch?.rate_limited, retryAfterSec: R.fetch?.retry_after_sec, alive,
+    run: () => renderBetaSens(host, alive, true) });
   try {
-    body(host, alive, R);
+    body(host, alive, R, plan);
   } catch (e) {
     fill(host, panel(TITLE, {}, errorBox(e), h("p", { class: "small muted" }, "返回的数据形状没认出来；其余对冲页内容不受影响。")));
   }
 }
 
-function body(host, alive, R) {
+function body(host, alive, R, plan) {
   const reload = h("button", { type: "button", class: "btn", onclick: () => renderBetaSens(host, alive, true) }, "重新取 β");
   const meta = R.meta || { reasons: {} };
   const lede = h("p", { class: "lede" },
     "压力网格里每个标的的现货冲击 = β × 大盘冲击，β 是审计里近 60 个交易日对 SPY 的回归。能源股（XOM / CVX）的 60 日 β 是负的，"
     + "网格在「SPY −10%」那一格里让它们上涨，下行格里的能源损失其实是股价涨造成的。这里用 250 日 β 把同一份审计再算一遍，并排摆出来。",
     h("b", {}, "没有哪个窗口是真值，两套都是模型假设；这里只展示，不进审计、不进告警、不改 SPY 覆盖的任何决定。"));
+  const wait = R.fetch?.retry_after_sec;
+  const waitText = !isNum(wait) ? "稍后" : wait <= 0 ? "现在就可以" : `约 ${num(wait, 0)} 秒后`;
+  const planText = { scheduled: `冷却一结束会自动再取一次（只补缺的）；也可以${waitText}点「重新取 β」。`,
+    tried: "已自动重试过一次、仍被限流；过一会儿再点「重新取 β」。", manual: `${waitText}再点「重新取 β」（只补缺的）。`, none: "" }[plan] || "";
+  const rl = R.fetch?.rate_limited ? h("p", { class: "callout warn" }, `Yahoo 正在限流：${planText}已经取到的标的不会重取。`) : null;
+  const stale = (R.fetch?.refresh_failed || []);
+  const rf = stale.length ? h("p", { class: "callout warn" },
+    `最近一次刷新失败（${stale.map((x) => `${x.ticker}：${x.reason}`).join("、")}）——下面用的是 ${R.cache_age_sec > 60 ? `${num(R.cache_age_sec / 60, 0)} 分钟前` : "之前"}取到的值，不是刚取的。`) : null;
   if (!R.available) {
-    fill(host, panel(TITLE, { right: reload }, lede,
+    fill(host, panel(TITLE, { right: reload }, lede, rl, rf,
       h("p", { class: "callout warn" }, `现在算不出来：${R.reason_zh || say(meta.reasons, R.reason)}`),
       (R.fetch?.failed || []).length ? h("p", { class: "small muted" }, `取 β 失败：${R.fetch.failed.map((f) => `${f.ticker}（${f.reason}）`).join("、")}`) : null));
     return;
   }
   const f = R.fetch || {};
   fill(host, panel(TITLE, { right: reload, sub: `审计日 ${R.date} · ${R.base_label} β = 审计里的值，${R.alt_label} β 现取（yfinance，${R.cache_age_sec > 1 ? `${num(R.cache_age_sec / 60, 0)} 分钟前取的` : "刚取的"}）${R.demo ? " · 演示数据" : ""}` },
-    lede,
+    lede, rl, rf,
     R.partial ? h("p", { class: "callout warn" }, `混合口径：${(R.missing || []).length ? `${R.missing.join("、")} 没有 ${R.alt_label} β，沿用了 ${R.base_label} 值；` : ""}`
       + `${R.base.partial || R.alt.partial ? "压力表有行被剔除，最差格可能被低估；" : ""}对照里这几只两套是同一个 β。`) : null,
     summaryTable(R),

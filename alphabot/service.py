@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 
 import sell_strike_report as R
 import tail_budget as TB
+from alphabot import beta_long as _BL
 from alphabot import chat as CH
 from alphabot import hedge as HG
 from alphabot import howto as HW
@@ -59,6 +60,13 @@ SNAPSHOT_STRIKE_BAND = 0.12
 YF_FALLBACK_TICKERS = frozenset({"NVDL", "BILI"})
 #: 「β 窗口对照」里 250 日 β 的进程内缓存时长（秒）：β 一天内几乎不变，取一次要十几个限流请求；「重新拉取」跳过缓存
 BETA_TTL_SEC = 6 * 3600.0
+#: 这些失败原因是「这只标的本身判不了」（历史不足 / 基准无波动），重取没用：不再重取
+PERMANENT_BETA_REASONS = _BL.PERMANENT_REASONS
+#: 取数失败但不是限流（网络抖动等）时，隔多久才值得再试（秒）：不让每次打开页面都为同一个失败干等十几秒
+BETA_FAIL_BACKOFF_SEC = 30.0
+#: Yahoo 限流时给页面的「再试」时刻 = 闸门冷却剩余 + 这点余量（秒）。**不设固定下限**：冷却一结束就能再试，别让人干等
+#: （闸门冷却期内任何请求都会被它当场拒绝，等多久完全由冷却决定；此前我加的 60 秒下限与 5 分钟缓存只是多等）
+YF_RETRY_MIN_SEC = 5.0
 _BETA_SENS_REASONS = {"ledger_unreadable": "对冲账本读不了，没法对照", "no_audit_rows": "还没有带逐行暴露的放行审计"}
 _TICKER_RE = re.compile(r"^[A-Z_][A-Z0-9.\-]{0,9}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -190,7 +198,9 @@ class AlphaBotService:
         self._tail_cache: Dict[tuple, tuple] = {}
         # 「β 窗口对照」（v0.45.662）：长窗口 β 取数函数（None ⇒ `alphabot.beta_long.fetch_long_betas`，yfinance）；按审计日缓存
         self.beta_long_fn = beta_long_fn
-        self._beta_cache: Dict[str, tuple] = {}
+        self._beta_cache: Dict[str, dict] = {}
+        # Yahoo 限流时各票「最早什么时候值得再试」（self.clock() 的时刻）：`live()` 把它折成 `retry_after_sec` 给页面
+        self._yf_retry_until: Dict[str, float] = {}
         self._premium_rules_cache: Optional[dict] = None     # 规则常量与文案表进程内不变：算一次
         self._cache: Dict[str, tuple] = {}
         self._bars_cache: Dict[tuple, dict] = {}
@@ -200,7 +210,7 @@ class AlphaBotService:
         self.stats = {"live_computed": 0, "live_cache_hits": 0, "live_failures": 0,
                       "premium_computed": 0, "premium_cache_hits": 0, "premium_failures": 0,
                       "howto_failures": 0, "yf_fallback_used": 0, "yf_fallback_failed": 0,
-                      "beta_sens_computed": 0, "beta_sens_failures": 0}
+                      "beta_sens_computed": 0, "beta_sens_failures": 0, "yf_rate_limited": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -224,6 +234,9 @@ class AlphaBotService:
                 return self._stamp(hit)
             res = clean_json(R.compute_live_detail(t, fetch_fn=self._chain_fetch(invalidate=True), state_dir=self.ledger_dir))
             ok = bool(res.get("data_available"))
+            ru = self._yf_retry_until.pop(t, None)
+            if not ok and res.get("reason") == "yf_rate_limited" and ru is not None:
+                res["retry_until_clock"] = ru                # `_stamp` 折成 retry_after_sec（缓存命中时也按「现在」重算）
             if ok:
                 res["howto"] = self._howto(t, res)
             self.stats["live_computed" if ok else "live_failures"] += 1
@@ -251,6 +264,9 @@ class AlphaBotService:
 
     def _stamp(self, ent) -> dict:
         out = dict(ent[1])
+        ru = out.pop("retry_until_clock", None)
+        if ru is not None:
+            out["retry_after_sec"] = round(max(0.0, ru - self.clock()), 0)
         out["cache_age_sec"] = round(max(0.0, self.clock() - ent[0]), 1)
         out["demo"] = self.demo
         if self.demo and "assess" in out:
@@ -508,16 +524,48 @@ class AlphaBotService:
             return clean_json({**TB._sens_unavailable(reason), "date": None, "demo": self.demo,
                                "meta": self.beta_sens_meta(), "reason_zh": TB.REASONS.get(reason) or _BETA_SENS_REASONS.get(reason, reason)})
         with self._lock_for("beta_sens"):
-            ent = self._beta_cache.get(day)
-            if ent is not None and not force and (self.clock() - ent[0]) < BETA_TTL_SEC:
-                betas, info, age = ent[1], ent[2], self.clock() - ent[0]
-            else:
-                betas, info = self._fetch_long_betas(day, HG.beta_tickers(audit))
-                if any(v is not None for v in betas.values()):         # 全失败的结果不缓存：下次打开再试
-                    self._beta_cache[day] = (self.clock(), betas, info)
-                age = 0.0
+            want = HG.beta_tickers(audit)
+            now = self.clock()
+            ent = self._beta_cache.setdefault(day, {"betas": {}, "info": {}, "at": {}, "retry_at": None})
+            # 缓存按**标的**记：值、取到的时刻、最近一次的明细（成功 reason=None / 失败写原因）、绝对的「最早再试时刻」。
+            # 谁要取：① 没值、且不是「永久取不到」（历史不足 / 基准无波动）；② 有值但已超过 BETA_TTL_SEC。
+            # 好值的寿命只看它自己的 `at`——别的标的被重取不会给它续命；永久失败的标的不再每次重取（也不会让 SPY 被多取一次）。
+            def _permanent(t):
+                return ((ent["info"].get(t) or {}).get("reason")) in PERMANENT_BETA_REASONS
+
+            def _due(t):
+                if ent["betas"].get(t) is not None:
+                    return now - ent["at"].get(t, now) >= BETA_TTL_SEC
+                return not _permanent(t)
+            todo = [t for t in want if _due(t)]
+            if force and not todo:
+                todo = [t for t in want if not _permanent(t)]             # 用户点「重新取 β」且什么都不缺：全部刷新
+            cooling = ent["retry_at"] is not None and now < ent["retry_at"]
+            if todo and not cooling:
+                new_betas, new_info = self._fetch_long_betas(day, todo)
+                new_info = new_info or {}
+                waits, transient = [], False
+                for t in todo:
+                    nb, ni = new_betas.get(t), (new_info.get(t) or {})
+                    if nb is not None:
+                        ent["betas"][t], ent["at"][t], ent["info"][t] = nb, now, ni or {"n": 0, "reason": None}
+                    else:
+                        # 刷新失败：**保留旧值**（和它自己的 `at`，页面照实显示「N 分钟前取的」），但把失败写进明细——不假装刚取到
+                        ent["betas"].setdefault(t, None)
+                        ent["info"][t] = ni or {"n": 0, "reason": "no_value"}
+                        reason = ent["info"][t].get("reason")
+                        if reason == "rate_limited":
+                            waits.append(float(ni.get("retry_after_sec") or YF_RETRY_MIN_SEC))
+                        elif reason not in PERMANENT_BETA_REASONS:
+                            transient = True
+                ent["retry_at"] = (now + max(waits) if waits else (now + BETA_FAIL_BACKOFF_SEC if transient else None))
+            betas = {t: ent["betas"].get(t) for t in want}
+            info = {t: ent["info"][t] for t in want if t in ent["info"]}
+            used_at = [ent["at"][t] for t in want if betas.get(t) is not None and t in ent["at"]]
+            age = max(0.0, now - min(used_at)) if used_at else 0.0           # 用到的值里**最老**的那个有多老
+            retry_after = max(0.0, ent["retry_at"] - now) if ent["retry_at"] is not None else None
             try:
-                res = HG.beta_sensitivity(audits, betas, self._stress_fn(), info=info)
+                res = HG.beta_sensitivity(audits, betas, self._stress_fn(), info=info, retry_after_sec=retry_after)
                 self.stats["beta_sens_computed"] += 1
             except Exception as exc:  # noqa: BLE001 - 算不出就写明原因，对冲页其余部分不受影响
                 self.stats["beta_sens_failures"] += 1
@@ -528,6 +576,15 @@ class AlphaBotService:
             res["meta"] = self.beta_sens_meta()
             res["cache_age_sec"] = round(age, 1)
             return res
+
+    @staticmethod
+    def _yf_wait_sec() -> float:
+        """Yahoo 限流后「最少等多久再试」：闸门冷却剩余，至少 `YF_RETRY_MIN_SEC`（冷却刚结束就再撞，大概率还是 429）。"""
+        try:
+            import yf_gate
+            return float(yf_gate.retry_after_sec(YF_RETRY_MIN_SEC))
+        except Exception:  # noqa: BLE001
+            return YF_RETRY_MIN_SEC
 
     def _fetch_long_betas(self, day: str, tickers: List[str]):
         """`(β 表, 明细)`。演示 = 合成；注入的函数原样用；生产 = `alphabot.beta_long.fetch_long_betas`。永不抛。"""
@@ -690,9 +747,17 @@ class AlphaBotService:
                 from alphabot import yf_chain
                 raw, reason = yf_chain.fetch_yf_raw_contracts(t, as_of=as_of)
                 self.stats["yf_fallback_used" if raw is not None else "yf_fallback_failed"] += 1
-                if raw is None:
+                if raw is None and reason == "yf_rate_limited":
+                    # 限流 ≠ 取数坏了：算出「最早什么时候值得再试」交给页面（自动重试 / 文案），并单独计数
+                    wait = self._yf_wait_sec()
+                    self.stats["yf_rate_limited"] += 1
+                    self._yf_retry_until[t] = self.clock() + wait
+                    _log.warning("[%s] CBOE 陈旧、yfinance 备用源被 Yahoo 限流，约 %.0f 秒后再试（本进程累计限流 %d 次）",
+                                 t, wait, self.stats["yf_rate_limited"])
+                elif raw is None:
                     _log.warning("[%s] CBOE 陈旧、yfinance 备用源也取不到：%s", t, reason)
                 else:
+                    self._yf_retry_until.pop(t, None)
                     chk = raw.get("oi_check") or {}
                     _log.info("[%s] CBOE 文件陈旧（stale_vintage），本次改用 yfinance 备用源（OI 占比 %s，%s / %s 个合约无可用 IV）",
                               t, chk.get("ratio"), raw.get("n_iv_missing"), len(raw.get("contracts") or []))

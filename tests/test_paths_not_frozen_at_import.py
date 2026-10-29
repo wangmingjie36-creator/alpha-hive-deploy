@@ -250,8 +250,18 @@ class TestSpeciesDoesNotSpread:
             # 子串判据会把字符串常量里的字样当成派生值：`alphabot/macos_app._DELEGATE`（子进程源码文本，v0.45.451 只能登记白名单）、
             # `signal_code_fingerprints.EXEMPT_DEPS`（豁免表的键 "PATHS"）。真正派生的值一定以标识符引用它们——全仓对拍：
             # 两种判据的结果除了这两条字符串误报外完全相同（PATHS 17 / __file__ 23）。
+            # v0.45.676（671 二次检查）：按名字取属性的写法也是标识符引用——`getattr(m, "__file__")`、
+            # `globals()["__file__"]`、`vars(m)["PATHS"]`；只认标识符会把它们漏掉（此前子串判据认得出）。
+            def by_name(n):
+                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr"
+                        and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)):
+                    return n.args[1].value == marker
+                return (isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and n.slice.value == marker
+                        and ((isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name)
+                              and n.value.func.id in ("globals", "vars", "locals"))
+                             or (isinstance(n.value, ast.Attribute) and n.value.attr == "__dict__")))
             return any((isinstance(n, ast.Name) and n.id == marker)
-                       or (isinstance(n, ast.Attribute) and n.attr == marker) for n in ast.walk(value))
+                       or (isinstance(n, ast.Attribute) and n.attr == marker) or by_name(n) for n in ast.walk(value))
 
         def walk(body, rel, depth=0):
             for s in body:
@@ -319,7 +329,10 @@ class TestSpeciesDoesNotSpread:
         (tmp_path / "offender.py").write_text(
             "from hive_logger import PATHS\nBAD_DIR = PATHS.home / 'x'\n"
             # v0.45.671：字符串常量里的字样不是派生值（豁免表的键、子进程源码文本），不许报
-            "LABELS = {('hive_logger.py', 'PATHS'): 'reason'}\nSRC = 'print(m.__file__)'\n", encoding="utf-8")
+            "LABELS = {('hive_logger.py', 'PATHS'): 'reason'}\nSRC = 'print(m.__file__)'\n"
+            # v0.45.676：按名字取属性的写法是真引用，要报
+            "import hive_logger\nVIA_GETATTR = getattr(hive_logger, 'PATHS').home\nVIA_GLOBALS = globals()['__file__']\n",
+            encoding="utf-8")
         (tmp_path / "broken_syntax.py").write_text("def (\n", encoding="utf-8")
 
         monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
@@ -335,6 +348,8 @@ class TestSpeciesDoesNotSpread:
             "坏文件之后的好文件没被扫到——一个坏文件带走了整轮扫描")
         assert ("offender.py", "LABELS") not in found, "字符串常量里的 PATHS 字样被当成了派生值（子串判据误报）"
         assert ("offender.py", "SRC") not in self._scan(marker="__file__"), "字符串里的 __file__ 被当成了派生值"
+        assert ("offender.py", "VIA_GETATTR") in found, "getattr(m, 'PATHS') 是真引用，漏报了"
+        assert ("offender.py", "VIA_GLOBALS") in self._scan(marker="__file__"), "globals()['__file__'] 是真引用，漏报了"
 
     def test_scanner_does_not_audit_vendored_code(self, tmp_path, monkeypatch):
         """vendored 第三方代码里的同款写法**不得**被报成本仓违规。

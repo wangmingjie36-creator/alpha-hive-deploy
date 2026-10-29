@@ -32,8 +32,11 @@ v0.45.330 的 `_buzz_scope_gaps` 只守一个方向：「点名了通道，必�
 
 ⚠️ 已知不管的（写在这里，免得被当成「守住了」）
 ----------------------------------------------
-- **推不出来的依赖**：动态访问（`getattr(obj, 变量)`、importlib）、经实例属性的方法调用（类本身被引用到才算）、
-  环境变量、数据 / 状态文件、第三方库版本（v0.45.671 前「取数细节不在指纹里」那条已由依赖闭包补上）。
+- **推不出来的依赖**：动态访问（`getattr(obj, 变量)`、importlib）、**从类外**塞进实例属性的值（如 `inject_prefetched` 写进
+  `self._prefetched_stock` 的预取包、`self._target_date`；类内方法里的 `self.x = …` v0.45.679 起算进去，见 `_attr_assignments`）、
+  经实例属性调的方法（`self._x.fetch()`——`_x` 是什么类型静态看不出）、`type(self).X`、
+  环境变量、数据 / 状态文件、第三方库版本（v0.45.671 前「取数细节不在指纹里」那条已由依赖闭包补上；
+  `self.方法` / `cls.X` / `super().X` 自 v0.45.676 起按类继承链静态解析，见 `_mro_lookup`）。
 - **LLM 新闻增强**（`llm_service.analyze_news_sentiment`）：只在 LLM 可用时生效，生产恒 `--no-llm`；
   切模式不经代码改动，指纹管不到。
 - **数据本身**：上游 API 自己改了口径（如 F&G 源站改算法），代码没动，指纹也不会变。
@@ -282,6 +285,20 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "没进本表）——当时已按测量误差修正记入预注册 §13.10（用户 10-20 定，窗口内首个提前收盘日 11-27，已入窗样本值不变）；10-27 的 "
      "v0.45.656（CboeStaleVintageError 加可选属性 last_trade_time、_fetch_cboe_payload 抛出时带上；抛不抛 / 返回值 / 报错文字不变，取价路径"
      "一个值都不动）此前无人判过——**用户 2026-10-28 在对话里定按 no_value_change**。**同日用户选「登记 6 条 coverage 确认」**"),
+    # v0.45.676（671 二次检查：`self.方法` 按继承链解析、config 值里的名字与任何位置的就地修改也追）：只有 buzz.channels 的指纹变，
+    # 其余五个单元逐位不变。窗口审计同一脚本补上 10-28（8c433b4），证据 experiments/fingerprint_coverage_audit_20261029.json
+    ("buzz.channels",   "e21f291816c41acf", "coverage",
+     "v0.45.676：依赖闭包新推出 BuzzBee 经 self 调用的基类成员 BeeAgent._get_stock_data（用预取包还是直连、价格无效时打标记）/ "
+     "_validate_ticker（及它用的 swarm_agents/_config._RE_TICKER）/ _get_history_context（及 hive_logger.pdt_today、_PDT_TZ）。"
+     "生产代码没改。窗口审计：这 6 项在 10-12 至 10-28 共 13 个扫描日逐日未变（v0.45.674 改的是 BeeAgent 的别的成员，只取用到的成员故不涉及）。"
+     "**用户 2026-10-29 在对话里选「登记 coverage」**"),
+    # v0.45.679（676 二次检查：实例属性的类内赋值也算依赖、泛型基类、getattr(self, 常量)、结果与处理顺序无关）：
+    # 只有 buzz.channels 变。窗口审计同一脚本重做（证据 experiments/fingerprint_coverage_audit_20261029b.json）
+    ("buzz.channels",   "ae2770c50c07ec45", "coverage",
+     "v0.45.679：依赖闭包新推出 BeeAgent.__init__ 里给 _prefetched_stock / _prefetched_context / retriever 赋值的 3 条语句"
+     "（_get_stock_data / _get_history_context 读这些实例属性）。生产代码没改。窗口审计：这 3 条在 10-12 至 10-28 共 13 个"
+     "扫描日逐日未变，10-28 扫描提交 8c433b4 → 本次基线也未变（v0.45.674 在 __init__ 里加的 _prefetched_macro Buzz 不读，不在内）。"
+     "**用户 2026-10-29 在对话里选「登记 coverage」**"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change", "coverage"})
@@ -405,7 +422,11 @@ _LOCATORS: Dict[str, Callable[[ast.Module, str, str], tuple]] = {
 # 怎么推：从单元的定位节点出发，找它们引用的名字——经 import 别名解析到别的模块、或同文件的顶层定义——取那个定义
 # 并接着找它引用的名字（跨文件传递闭包）。
 #   · config 项精确到**实际读的那个键**：`_CC["ttl"].get("reddit")` ⇒ `CACHE_CONFIG.ttl.reddit`；整体拿去用 ⇒ 整个对象。
-#     config 里对它的就地修改语句（`X["k"] = …` / `X.update(…)`）一并算进去。
+#     config 里对它的就地修改（`X["k"] = …` / `X.update(…)`，**不论写在模块层、循环里还是函数里**，v0.45.676）、且改到读过的键
+#     （改 `ttl.reddit` 不算给只读 `ttl.yahoo_trending` 的；键是变量 ⇒ 前缀下的读者都算）的，整条顶层语句一并算进去；选中的值里再引用别的名字（`"reddit": _REDDIT_TTL`）⇒ 接着追（v0.45.676，此前停在字面文本上）。
+#   · `self.方法` / `cls.X` / `super().X`（v0.45.676）：按类继承链（`_mro_lookup`）找到定义它的那个类成员，**只取那一个成员**
+#     （不是整个类——基类里别的方法改了不该要求确认）；接着追它的引用时 `self` 仍指原来那个实例的类（子类覆盖优先）。
+#     此前 BuzzBee 经 `self._get_stock_data()` 取行情、经 `self._validate_ticker()` 判代码合不合法，两者都在基类、都不在守卫里。
 #   · 缺省是**算进去**：漏了登记只会多要一次确认，不会漏守（与「拿不准就选 ①」同一方向）。
 #   · 只有 `EXEMPT_DEPS` 里写明理由的才不算（闭包在那里停）；登记了却没被任何单元碰到 ⇒ 过期条目，测试红。
 #   · 追到**另一个单元**的定位代码、且两边守的信号有交集 ⇒ 停：那段改动由它自己的单元认领、点名的信号也对
@@ -413,8 +434,11 @@ _LOCATORS: Dict[str, Callable[[ast.Module, str, str], tuple]] = {
 #     `observation_layer` 缓存函数在 price.fields 的整份定位里，但 price.fields 不守新闻 ⇒ buzz.news 照样把它们算进去）。
 #   · 定位不到定义 ⇒ 抛 `FingerprintError`，不当作「没变」。
 #
-# ⚠️ 推不出来的（写在这里，免得被当成「守住了」）：动态访问（`getattr(obj, 变量)`、importlib）、经实例属性的方法调用
-# （`self._x.fetch()`——类本身被引用到才算进去）、环境变量、数据 / 状态文件、第三方库（yfinance 版本）、Python 版本。
+# ⚠️ 推不出来的（写在这里，免得被当成「守住了」）：动态访问（`getattr(obj, 变量)`、importlib）、从类外塞进实例属性的值
+# （类内 `self.x = …` v0.45.679 起算）、经实例属性调的方法（`self._x.fetch()`——`_x` 是什么类型静态看不出；类本身被引用到
+# 才算进去）、`type(self).X`、经别名改 config
+# （`_t = X["ttl"]; _t["k"] = …`）、环境变量、数据 / 状态文件、
+# 第三方库（yfinance 版本）、Python 版本。继承链按「先自己、再按基类从左到右深度优先」近似 MRO（单继承时与 C3 相同）。
 
 #: 闭包在这里停、不进指纹的依赖。键 = (相对路径, 顶层名字)；名字 "*" = 整个文件；config 项可以带键路径
 #: （`("config.py", "AGENT_SCORING.buzz_weights")` 只豁免这一枝）。**每条都要写凭什么**；登记了却碰不到 ⇒ 过期，测试红。
@@ -601,27 +625,82 @@ def _bound_names(fn: ast.AST) -> set:
     return out - glob
 
 
-def _references(src: "_Sources", rel: str, nodes, whole_file: bool):
-    """节点引用到的外部名字：[(目标模块, 名字, 键路径)] 与同文件顶层名字集合（整文件定位时不需要）。
+#: 方法里指向实例 / 类自身的名字（第一个参数按惯例只叫这两个）
+_SELF_NAMES = frozenset({"self", "cls"})
+
+#: 类 = (相对路径, ClassDef 节点)
+_Cls = Tuple[str, ast.ClassDef]
+
+
+def _enclosing_class(node: ast.AST, par: Dict[int, ast.AST]) -> Optional[ast.ClassDef]:
+    cur = par.get(id(node))
+    while cur is not None and not isinstance(cur, ast.ClassDef):
+        cur = par.get(id(cur))
+    return cur
+
+
+def _as_module(src: "_Sources", mod: str, attr: str) -> Optional[str]:
+    """`mod.attr` 若本身是本仓的一个模块（包的子模块，或 mod 里 import 进来的模块）⇒ 它的点分名；否则 None。"""
+    mrel = src.module_rel(mod)
+    if mrel is None:
+        return None
+    if mrel.endswith("__init__.py") and src.module_rel(f"{mod}.{attr}"):
+        return f"{mod}.{attr}"
+    d = _definition(src, mrel, attr)
+    if d and d[0] == "reexport_module":
+        return d[1]
+    if d and d[0] == "reexport" and src.module_rel(f"{d[1]}.{d[2]}"):
+        return f"{d[1]}.{d[2]}"
+    return None
+
+
+def _references(src: "_Sources", rel: str, nodes, whole_file: bool, inst: Optional[_Cls] = None):
+    """节点引用到的外部名字：[(目标模块, 名字, 键路径)]、同文件顶层名字集合（整文件定位时不需要）、
+    经 `self.X` / `cls.X` / `super().X` 引用的类成员 [(实例的类, 代码所在的类, 名字, 是否 super)]（v0.45.676）。
 
     函数里自己绑定的名字（参数、局部变量）不算引用——否则局部变量 `r` 会被认成同文件模块层的某个 `r`。
+    `inst`：追基类成员时 `self` 仍指原来那个实例的类（子类覆盖优先）；缺省 = 代码所在的类。
     """
     aliases = _aliases(src, rel, nodes)
     par = src.parents(rel)
     ext: List[Tuple[str, str, Tuple[str, ...]]] = []
     bare: set = set()
+    members: List[Tuple[Optional[_Cls], _Cls, str, bool]] = []
 
-    def visit(n: ast.AST, local: frozenset):
+    def visit(n: ast.AST, local: frozenset, inst_c: Optional[_Cls], def_c: Optional[_Cls]):
+        if isinstance(n, ast.ClassDef):
+            inst_c = def_c = (rel, n)
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             local = local | frozenset(_bound_names(n))
-        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and isinstance(n.ctx, ast.Load):
+        if (isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load) and isinstance(n.value, ast.Name)
+                and n.value.id in _SELF_NAMES and def_c is not None):
+            members.append((inst_c, def_c, n.attr, False))
+        elif (isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load) and isinstance(n.value, ast.Call)
+              and isinstance(n.value.func, ast.Name) and n.value.func.id == "super" and def_c is not None):
+            members.append((inst_c, def_c, n.attr, True))
+        elif isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and isinstance(n.ctx, ast.Load):
             a = aliases.get(n.value.id)
             if a and a[1] is None and n.value.id not in local:
-                ext.append((a[0], n.attr, _keypath(n, par)))
+                # `pkg.sub.f` / `m.imported_module.f`：顺着属性链走到真正定义 f 的那个模块（此前停在 pkg 上、报「找不到 sub」）
+                mod, node = a[0], n
+                while True:
+                    p = par.get(id(node))
+                    if not (isinstance(p, ast.Attribute) and p.value is node):
+                        break
+                    sub = _as_module(src, mod, node.attr)
+                    if sub is None:
+                        break
+                    mod, node = sub, p
+                ext.append((mod, node.attr, _keypath(node, par)))
         elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr" and len(n.args) >= 2:
-            a = aliases.get(n.args[0].id) if isinstance(n.args[0], ast.Name) else None
-            if a and a[1] is None and isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str):
-                ext.append((a[0], n.args[1].value, _keypath(n, par)))
+            a0, a1 = n.args[0], n.args[1]
+            const = a1.value if isinstance(a1, ast.Constant) and isinstance(a1.value, str) else None
+            if isinstance(a0, ast.Name) and a0.id in _SELF_NAMES and def_c is not None and const is not None:
+                members.append((inst_c, def_c, const, False))      # `getattr(self, "x")` ≡ `self.x`（v0.45.679）
+            else:
+                a = aliases.get(a0.id) if isinstance(a0, ast.Name) else None
+                if a and a[1] is None and const is not None:
+                    ext.append((a[0], const, _keypath(n, par)))
         elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id not in local:
             a = aliases.get(n.id)
             if a is not None:
@@ -630,11 +709,13 @@ def _references(src: "_Sources", rel: str, nodes, whole_file: bool):
             elif not whole_file:
                 bare.add(n.id)
         for ch in ast.iter_child_nodes(n):
-            visit(ch, local)
+            visit(ch, local, inst_c, def_c)
 
     for root in nodes:
-        visit(root, frozenset())
-    return ext, bare
+        dc = _enclosing_class(root, par)
+        def_c = (rel, dc) if dc is not None else None
+        visit(root, frozenset(), inst or def_c, def_c)
+    return ext, bare, members
 
 
 def _definition(src: "_Sources", rel: str, name: str):
@@ -660,28 +741,175 @@ def _definition(src: "_Sources", rel: str, name: str):
     return ("nodes", stmts) if stmts else None
 
 
-def _config_text(src: "_Sources", name: str, paths) -> str:
-    """config 项的归一化文本：精确到读过的键；导航不下去（不是字面量字典 / 键不存在）⇒ 整条赋值。"""
+# ── 类成员（v0.45.676）：`self.X` / `cls.X` / `super().X` 按继承链找到定义它的那一个成员 ──
+
+def _class_node(src: "_Sources", rel: str, name: str, hops: int = 0) -> Optional[_Cls]:
+    """模块 `rel` 里叫 `name` 的类（顺着转出口找）；找不到 / 不是类 / 来自标准库或第三方 ⇒ None。"""
+    if hops > 20:
+        raise FingerprintError(f"{rel}::{name} 的转出口链太长——疑似循环 import，守卫判不了")
+    d = _definition(src, rel, name)
+    if d is None or d[0] == "reexport_module":
+        return None
+    if d[0] == "reexport":
+        target = src.module_rel(d[1])
+        return _class_node(src, target, d[2], hops + 1) if target else None
+    cls = [st for st in d[1] if isinstance(st, ast.ClassDef)]
+    return (rel, cls[-1]) if cls else None
+
+
+def _base_classes(src: "_Sources", rel: str, cls: ast.ClassDef) -> List[_Cls]:
+    """本仓里能静态认出的基类（`Base` / `模块.Base`），按书写顺序；`ABC` / `object` / 第三方的不在里面。"""
+    out: List[_Cls] = []
+    aliases = None
+    for b in cls.bases:
+        found = None
+        if isinstance(b, ast.Subscript):          # `Base[T]`（泛型基类）：取 Base（v0.45.679，此前整条认不出）
+            b = b.value
+        if isinstance(b, ast.Name):
+            found = _class_node(src, rel, b.id)
+        elif isinstance(b, ast.Attribute) and isinstance(b.value, ast.Name):
+            aliases = aliases if aliases is not None else _aliases(src, rel, [])
+            a = aliases.get(b.value.id)
+            target = src.module_rel(a[0]) if a is not None and a[1] is None else None
+            found = _class_node(src, target, b.attr) if target else None
+        if found is not None:
+            out.append(found)
+    return out
+
+
+def _class_members(cls: ast.ClassDef, attr: str) -> List[ast.stmt]:
+    """类体里定义 `attr` 的语句（方法 / 嵌套类 / 类属性；property 的 getter + setter 同名都算）。"""
+    return [st for st in cls.body
+            if (isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and st.name == attr)
+            or _binds_name(st, attr)]
+
+
+def _mro_classes(src: "_Sources", start: List[_Cls]):
+    """从 `start` 起「先自己、再基类从左到右深度优先」逐个给出本仓里的类（单继承时与 Python 的 MRO 相同）。"""
+    visited: set = set()
+    stack = list(reversed(start))
+    while stack:
+        rel, cls = stack.pop()
+        if id(cls) in visited:
+            continue
+        visited.add(id(cls))
+        yield rel, cls
+        stack.extend(reversed(_base_classes(src, rel, cls)))
+
+
+def _mro_lookup(src: "_Sources", start: List[_Cls], attr: str) -> Optional[Tuple[str, ast.ClassDef, List[ast.stmt]]]:
+    """继承链上第一个在类体里定义 `attr` 的类（方法 / 类属性）。都没有 ⇒ None：实例属性（见 `_attr_assignments`）
+    或外部基类（ABC / object / 第三方）的成员。"""
+    for rel, cls in _mro_classes(src, start):
+        found = _class_members(cls, attr)
+        if found:
+            return rel, cls, found
+    return None
+
+
+def _assigns_self_attr(st: ast.stmt, attr: str) -> bool:
+    """这条语句给 `self.attr` / `cls.attr` 赋值（含解包、`self.attr[...] = …`、`setattr(self, "attr", …)`）。"""
+    if isinstance(st, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        targets = st.targets if isinstance(st, ast.Assign) else [st.target]
+        return any(isinstance(x, ast.Attribute) and x.attr == attr and isinstance(x.value, ast.Name)
+                   and x.value.id in _SELF_NAMES for t in targets for x in ast.walk(t))
+    if isinstance(st, ast.Expr) and isinstance(st.value, ast.Call):
+        c = st.value
+        return (isinstance(c.func, ast.Name) and c.func.id == "setattr" and len(c.args) >= 2
+                and isinstance(c.args[0], ast.Name) and c.args[0].id in _SELF_NAMES
+                and isinstance(c.args[1], ast.Constant) and c.args[1].value == attr)
+    return False
+
+
+def _attr_assignments(src: "_Sources", start: List[_Cls], attr: str):
+    """实例属性的类内来源（v0.45.679）：继承链上各类的方法里给 `self.attr` 赋值的语句，按方法分组
+    [(rel, 类, 方法, [方法体里含这些赋值的顶层语句])]——取顶层语句而不是赋值本身，`if config.FLAG: self.x = 1` 的条件才在里面。
+    值写在 `__init__` 里（如 `self.x = config.Y`）同样决定读它的代码算出什么——676 把这类整个当「推不出来」放过；
+    真推不出来的只剩**从类外**塞进去的（`inject_prefetched` 写 `agent._prefetched_stock`）。"""
+    out = []
+    for rel, cls in _mro_classes(src, start):
+        for fn in cls.body:
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                stmts = [top for top in fn.body
+                         if any(isinstance(st, ast.stmt) and _assigns_self_attr(st, attr) for st in ast.walk(top))]
+                if stmts:
+                    out.append((rel, cls, fn, stmts))
+    return out
+
+
+# ── config 项 ──
+
+def _prune_paths(paths) -> set:
+    """去掉被更短前缀包含的键路径；读过整个对象（空路径）⇒ 只剩空路径。"""
+    if () in paths:
+        return {()}
+    return {p for p in paths if not any(q != p and p[:len(q)] == q for q in paths)}
+
+
+def _const_prefix(node: ast.AST) -> Tuple[str, ...]:
+    """`X["a"]["b"][k]["c"]` ⇒ ("a", "b")：从基名往外数常量键，到第一个非常量键 / 属性为止（之后的哪个键都可能）。"""
+    keys: List[Optional[str]] = []
+    while isinstance(node, (ast.Subscript, ast.Attribute)):
+        sl = node.slice if isinstance(node, ast.Subscript) else None
+        keys.append(sl.value if isinstance(sl, ast.Constant) and isinstance(sl.value, str) else None)
+        node = node.value
+    out: List[str] = []
+    for k in reversed(keys):
+        if k is None:
+            break
+        out.append(k)
+    return tuple(out)
+
+
+def _mutated_keys(node: ast.AST, name: str) -> List[Tuple[str, ...]]:
+    """这个语法节点就地改了 `name` 的哪些键：`name["a"]["b"] = …` ⇒ ("a", "b")；`name["a"].update(…)` ⇒ ("a",)；
+    `name[k] = …` / `name.update(…)` ⇒ ()（哪个键都可能）。没改 ⇒ []。"""
+    if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)):
+        targets = (node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target])
+        return [_const_prefix(t) for t in targets if isinstance(t, (ast.Subscript, ast.Attribute)) and _base_name(t) == name]
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _MUTATING_METHODS and _base_name(node.func.value) == name):
+        return [_const_prefix(node.func.value)]
+    return []
+
+
+def _config_mutations(tree: ast.Module, name: str, paths) -> List[ast.stmt]:
+    """config.py 里改动 `name`、且改到读过的键（`paths`；两边一个是另一个的前缀即算碰到）的语句：模块层直接写的取那一句；
+    写在循环 / 函数 / 类里的取整条（v0.45.676，此前只认前者——`for k in …: X[k] = …` 与「函数里改、模块层调用」都漏；
+    此前也不分键，改哪个键都算给全部读者）。函数里 `global name` 后重新赋值 = 整个对象都变。"""
+    def touches(m: Tuple[str, ...]) -> bool:
+        return any(m[:len(p)] == p[:len(m)] for p in paths)
+
+    out = []
+    for st in _module_level(tree):
+        if isinstance(st, (ast.If, ast.Try, ast.With, ast.AsyncWith)) or _binds_name(st, name):
+            continue      # 前者的子语句 _module_level 会单独给出；后者是定义本身，已在 defs 里
+        keys = [k for n in ast.walk(st) for k in _mutated_keys(n, name)]
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            declared = any(isinstance(g, ast.Global) and name in g.names for g in ast.walk(st))
+            if declared and any(isinstance(x, ast.Name) and x.id == name and isinstance(x.ctx, ast.Store)
+                                for x in ast.walk(st)):
+                keys.append(())
+        if any(touches(k) for k in keys):
+            out.append(st)
+    return out
+
+
+def _config_select(src: "_Sources", name: str, paths) -> Tuple[str, List[ast.AST]]:
+    """config 项的归一化文本 + 选中的语法节点（值里再引用的名字要接着追）：精确到读过的键；
+    导航不下去（不是字面量字典 / 键不存在）⇒ 整条赋值。改到读过的键的语句一并算进去（`_config_mutations`）。"""
     tree = src.tree("config.py")
     defs = [st for st in _module_level(tree)
             if (isinstance(st, (ast.FunctionDef, ast.ClassDef)) and st.name == name) or _binds_name(st, name)]
     if not defs:
         raise FingerprintError(f"config.py 里找不到 {name} 的定义（依赖闭包定位不到——不当作没变）")
-    # 就地修改：`NAME[...] = …` / `NAME.update(…)` 之类，一律整条算进去
-    muts = []
-    for st in _module_level(tree):
-        tgt_hit = isinstance(st, (ast.Assign, ast.AugAssign)) and any(
-            isinstance(t, (ast.Subscript, ast.Attribute)) and isinstance(_base_name(t), str) and _base_name(t) == name
-            for t in (st.targets if isinstance(st, ast.Assign) else [st.target]))
-        call_hit = (isinstance(st, ast.Expr) and isinstance(st.value, ast.Call) and isinstance(st.value.func, ast.Attribute)
-                    and st.value.func.attr in _MUTATING_METHODS and _base_name(st.value.func.value) == name)
-        if tgt_hit or call_hit:
-            muts.append(st)
-    parts = []
+    muts = _config_mutations(tree, name, paths)
+    parts: List[str] = []
+    nodes: List[ast.AST] = []
     single = defs[0] if len(defs) == 1 and isinstance(defs[0], ast.Assign) and isinstance(defs[0].value, ast.Dict) else None
     for path in sorted(paths):
         if not path or single is None:
-            parts = [ast.unparse(d) for d in defs]
+            parts, nodes = [ast.unparse(d) for d in defs], list(defs)
             break
         node = single.value
         for k in path:
@@ -696,7 +924,8 @@ def _config_text(src: "_Sources", name: str, paths) -> str:
             parts.append(f"{name}.{'.'.join(path)} = <absent>")
         else:
             parts.append(f"{name}.{'.'.join(path)} = {ast.unparse(node)}")
-    return "\n".join(parts + [ast.unparse(m) for m in muts])
+            nodes.append(node)
+    return "\n".join(parts + [ast.unparse(m) for m in muts]), nodes + muts
 
 
 def _binds_name(st: ast.stmt, name: str) -> bool:
@@ -776,28 +1005,35 @@ def unit_dependencies(unit: str, read: Optional[Callable[[str], str]] = None, _s
     deps: Dict[str, str] = {}
     config_paths: Dict[str, set] = {}
     seen: set = set()
-    work: List[Tuple[str, list, bool]] = [(rel, nodes, owned == {"*"}) for rel, _l, _t, nodes, owned in located
-                                          if rel != "config.py"]
+    # 工作项 = (文件, 节点, 是否整文件, `self` 指的实例类, 不追的同文件名字)
+    work: List[Tuple[str, list, bool, Optional[_Cls], frozenset]] = [
+        (rel, nodes, owned == {"*"}, None, frozenset()) for rel, _l, _t, nodes, owned in located if rel != "config.py"]
 
-    def stop_at_other_unit(rel: str, name: str) -> bool:
+    def guarded(rel: str, name: str) -> bool:
+        """已由本单元的定位代码、或守同一信号的另一个单元认领。"""
+        if (rel, "*") in mine or (rel, name) in mine:
+            return True
         for key in ((rel, "*"), (rel, name)):
             for other in own.get(key, []):
                 if other != unit and my_signals & set(UNITS[other]["signals"]):
                     return True
         return False
 
+    def exempted(*keys) -> bool:
+        ek = next((k for k in keys if k is not None), None)
+        if ek is not None and _hits is not None:
+            _hits.add(ek)
+        return ek is not None
+
     def visit(rel: str, name: str, path: Tuple[str, ...], hops: int = 0):
         if hops > 20:
             raise FingerprintError(f"{rel}::{name} 的转出口链太长——疑似循环 import，守卫判不了")
-        ek = _exempt_key(rel, name, path)
-        if ek is not None:
-            if _hits is not None:
-                _hits.add(ek)
-            return
-        if (rel, "*") in mine or (rel, name) in mine or stop_at_other_unit(rel, name):
+        if exempted(_exempt_key(rel, name, path)) or guarded(rel, name):
             return
         d = _definition(src, rel, name)
         if d is None:
+            if rel.endswith("__init__.py") and src.module_rel(f"{_package(rel)}.{name}"):
+                return                                        # 包的子模块对象整个被拿去用：用到的属性在用处另行解析
             raise FingerprintError(f"{rel} 里找不到 {name} 的定义（依赖闭包定位不到——不当作没变）")
         if d[0] in ("reexport", "reexport_module"):
             target = src.module_rel(d[1])
@@ -814,27 +1050,64 @@ def unit_dependencies(unit: str, read: Optional[Callable[[str], str]] = None, _s
             return
         seen.add(label)
         deps[label] = "\n".join(ast.unparse(st) for st in d[1])
-        work.append((rel, d[1], False))
+        work.append((rel, d[1], False, None, frozenset()))
 
-    while work:
-        rel, nodes, whole = work.pop()
-        ext, bare = _references(src, rel, nodes, whole)
-        for mod, name, path in ext:
-            target = src.module_rel(mod)
-            if target is not None:
-                visit(target, name, path)
-        if not whole:
-            defined = {nm for st in _module_level(src.tree(rel)) for nm in _defined_names(st)}
-            for name in sorted(bare & defined):
-                visit(rel, name, ())
+    def add_member(mrel: str, cls: ast.ClassDef, member: str, stmts: list, inst: _Cls, skip: frozenset):
+        if exempted(_exempt_key(mrel, cls.name, ()), _exempt_key(mrel, f"{cls.name}.{member.split('[')[0]}", ())):
+            return
+        if guarded(mrel, cls.name) or f"{mrel}::{cls.name}" in seen:
+            return            # 整个类已在本单元 / 守同一信号的别的单元 / 本闭包里
+        label = f"{mrel}::{cls.name}.{member}"
+        if label in seen:
+            return
+        seen.add(label)
+        deps[label] = "\n".join(ast.unparse(st) for st in stmts)
+        work.append((mrel, stmts, False, inst, skip))
+
+    def visit_member(inst: _Cls, def_c: _Cls, attr: str, via_super: bool):
+        hit = _mro_lookup(src, _base_classes(src, *def_c) if via_super else [inst], attr)
+        if hit is not None:
+            mrel, cls, stmts = hit
+            add_member(mrel, cls, attr, stmts, inst, frozenset())
+        elif not via_super:
+            # 实例属性：取类内给它赋值的语句（`super()` 拿不到实例属性）；从类外注入的推不出来（模块说明「已知不管的」）。
+            # 跳过方法自己的参数 / 局部名（只把那几条语句拿出来追，没有方法的作用域）
+            for arel, acls, fn, stmts in _attr_assignments(src, [inst], attr):
+                add_member(arel, acls, f"{fn.name}[self.{attr}]", stmts, inst, frozenset(_bound_names(fn)))
+
+    processed: Dict[str, frozenset] = {}
+    while True:
+        while work:
+            rel, nodes, whole, inst, skip = work.pop()
+            ext, bare, members = _references(src, rel, nodes, whole, inst)
+            for mod, name, path in ext:
+                target = src.module_rel(mod)
+                if target is not None:
+                    visit(target, name, path)
+            if not whole:
+                defined = {nm for st in _module_level(src.tree(rel)) for nm in _defined_names(st)}
+                for name in sorted((bare & defined) - skip):
+                    visit(rel, name, ())
+            for inst_c, def_c, attr, via_super in members:   # 放在最后：整类依赖先进 seen，成员就不再重复算
+                visit_member(inst_c, def_c, attr, via_super)
+        # config 项选中的值（与改动它的语句）里再引用的名字：接着追（`"reddit": _REDDIT_TTL`），直到不再长出新键
+        pending = sorted(n for n, ps in config_paths.items() if processed.get(n) != frozenset(ps))
+        if not pending:
+            break
+        for name in pending:
+            processed[name] = frozenset(config_paths[name])
+            nodes = _config_select(src, name, _prune_paths(config_paths[name]))[1]
+            work.append(("config.py", nodes, False, None, frozenset({name})))
     for name, paths in config_paths.items():
-        if () in paths:
-            paths = {()}
-        else:     # 去掉被更短前缀包含的
-            paths = {p for p in paths if not any(q != p and p[:len(q)] == q for q in paths)}
+        paths = _prune_paths(paths)
         label = f"config.py::{name}" + ("" if paths == {()} else "[" + ",".join(".".join(p) for p in sorted(paths)) + "]")
-        deps[label] = _config_text(src, name, paths)
-    return dict(sorted(deps.items()))
+        deps[label] = _config_select(src, name, paths)[0]
+    # 整个类已算进去 ⇒ 它的成员 / 属性赋值标签是其中一段、多余。先碰到成员还是先碰到整类取决于处理顺序，
+    # 这里统一去掉，结果与顺序无关（v0.45.679）
+    def covered(label: str) -> bool:
+        head, _, name = label.partition("::")
+        return head != "config.py" and "." in name and f"{head}::{name.split('.', 1)[0]}" in deps
+    return dict(sorted((k, v) for k, v in deps.items() if not covered(k)))
 
 
 def _defined_names(st: ast.stmt):

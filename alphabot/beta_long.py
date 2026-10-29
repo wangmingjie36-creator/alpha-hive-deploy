@@ -22,6 +22,10 @@ WINDOW = 250
 #: 样本少于这个数就判不了：窗口的 80%（250 → 200）。新上市 / 停牌多的票会落在这里，如实写原因
 MIN_OBS = 200
 BENCH = "SPY"
+#: 「这只标的本身判不了」的原因：重取没用（历史不足 / 基准无波动 / 非有限）。其余失败（限流、网络异常）都是可重试的
+PERMANENT_REASONS = frozenset({"insufficient_overlap", "zero_variance", "non_finite"})
+#: 被限流后给调用方的「再试」时间 = 闸门冷却剩余 + 这点余量（秒），不设固定下限
+RETRY_MARGIN_SEC = 5.0
 #: 一次要的日线跨度。250 个交易日 ≈ 1 年，多取半年给节假日 / 停牌留余量
 PERIOD = "2y"
 
@@ -83,10 +87,29 @@ def _fetch_closes(yf_module, ticker: str, ensure: Callable[[], None]) -> Dict[st
     return _closes_from_history(hist)
 
 
+def _rate_limited(exc: BaseException) -> bool:
+    try:
+        import yf_gate
+        return yf_gate.is_rate_limited(exc)
+    except Exception:  # noqa: BLE001
+        return type(exc).__name__ in ("YFRateLimited", "YFRateLimitError")
+
+
+def _retry_after() -> float:
+    """还要等多久才值得再试：闸门冷却剩余 + 一点余量（冷却期内任何请求都会被闸门当场拒绝，所以等多久完全由冷却决定，不另设下限）。"""
+    try:
+        import yf_gate
+        return round(yf_gate.retry_after_sec(RETRY_MARGIN_SEC), 0)
+    except Exception:  # noqa: BLE001
+        return RETRY_MARGIN_SEC
+
+
 def fetch_long_betas(tickers: Sequence[str], as_of: str, *, window: int = WINDOW, yf_module=None
                      ) -> Tuple[Dict[str, Optional[float]], Dict[str, dict]]:
     """各标的对 SPY 的 `window` 日 β。返回 `(β 表, 明细表)`；明细 `{ticker: {n, reason}}`，`reason` 为 None = 取到了。永不抛。
-    `yf_module` 只给测试注入（注入时不装限流闸）。SPY 自己取不到 ⇒ 全部写 `bench_unavailable`。"""
+    `yf_module` 只给测试注入（注入时不装限流闸）。SPY 自己取不到 ⇒ 全部写 `bench_unavailable`。
+    **被 Yahoo 限流（`rate_limited`）⇒ 本只与其后的标的都不再去撞**（每多撞一次只是多一条 429），统一记 `rate_limited` 与
+    `retry_after_sec`；已经取到的照常返回（调用方可以只补缺的几只）。"""
     betas: Dict[str, Optional[float]] = {}
     info: Dict[str, dict] = {}
     ensure: Callable[[], None] = lambda: None  # noqa: E731
@@ -98,19 +121,29 @@ def fetch_long_betas(tickers: Sequence[str], as_of: str, *, window: int = WINDOW
             except Exception:  # noqa: BLE001 - 闸门不可得不阻断（与 yf_chain 同）
                 pass
         want: List[str] = sorted({t for t in tickers if t and t != BENCH})
+        limited = False
         try:
             bench = returns_from_closes(_fetch_closes(yf_module, BENCH, ensure))
         except Exception as exc:  # noqa: BLE001
-            bench, why = {}, f"exception:{type(exc).__name__}"
+            bench = {}
+            limited = _rate_limited(exc)
+            why = "rate_limited" if limited else f"exception:{type(exc).__name__}"
         else:
             why = None if bench else "bench_unavailable"
         for t in want:
+            if limited:                                  # 已被限流：不再逐只去撞，统一记原因 + 多久后再试
+                betas[t], info[t] = None, {"n": 0, "reason": "rate_limited", "retry_after_sec": _retry_after()}
+                continue
             if why is not None or not bench:
                 betas[t], info[t] = None, {"n": 0, "reason": why or "bench_unavailable"}
                 continue
             try:
                 b, n, reason = ols_beta(returns_from_closes(_fetch_closes(yf_module, t, ensure)), bench, as_of, window)
             except Exception as exc:  # noqa: BLE001 - 单只取不到不连坐其余
+                if _rate_limited(exc):
+                    limited = True
+                    betas[t], info[t] = None, {"n": 0, "reason": "rate_limited", "retry_after_sec": _retry_after()}
+                    continue
                 b, n, reason = None, 0, f"exception:{type(exc).__name__}"
             betas[t], info[t] = b, {"n": n, "reason": reason}
     except Exception as exc:  # noqa: BLE001 - 最外层兜底：导入 yfinance 失败等
