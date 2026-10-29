@@ -35,7 +35,7 @@
 ### 测试
 - 变异：恢复分支 ⇒ 行为 3 条 + 静态 1 条红；只把停用开关加回 config ⇒ 配置那条红。
 - `test_bull_veto_retired` + `test_non_voting_agents` + `test_queen_distiller` 88 passed / 1 xfailed；输入层指纹 / 零权重 / 蜂后 ML 反馈守卫 107 passed（config 改动不触及 H1 单元）。ruff 过。
-- 整套：见下（`config.py` 是核心文件，选测回退整套）。
+- 整套（`config.py` 是核心文件，选测回退整套；与 676 的整套错开跑）：**13106 passed / 0 failed**（82 deselected、2 xfailed）。合并 v0.45.676（指纹依赖闭包补缺口）之后，交界处 6 个文件（输入层指纹 / 墓碑 / 非投票蜂 / 蜂后 / CHANGELOG 完整性 / 维度 IC 协议）231 passed。`select_tests --files tests/test_bull_veto_retired.py --update` 实测：新测试不读测试文件、不读非代码文件，登记表内容不变。
 
 ### 没改 / 待办
 - 「9 月中旬大复盘」其余三项的处置（① 被维度 IC 预注册取代、③ 已作废、④ 被策略层优势预注册取代）与新定义（并进月度自诊断：数据质量一节 + 预注册检验进度表）**待用户确认**，本版不含。
