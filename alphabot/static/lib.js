@@ -114,6 +114,28 @@ export function methodRules() {
 }
 export const TENOR_LABEL = { monthly: "月度 21–45 天", weekly: "周度 7–20 天" };
 export const EARN_LABEL = { none: "无", after_expiry: "到期后", before_expiry: "到期前 ⚠", unknown: "未知" };
+// 现拉期权链失败的原因码（`sell_strike_report.compute_live_detail` 的 `reason`）→ 人话。tests/test_yf_rate_limit_handling.py
+// 静态核对：`yf_chain` 能返回的每个 `yf_*` 码与 CBOE 取数的几个码都登记在这里；查不到的原样显示，不吞成空白。
+export const FETCH_REASON_LABEL = {
+  stale_vintage: "CBOE 的文件还停在上一个交易日（盘中没更新）",
+  vintage_mismatch: "取到的链不是要的那一天",
+  payload_unavailable: "CBOE 取数失败（网络不通或文件不可达）",
+  price_unavailable: "标的价取不到",
+  yf_rate_limited: "Yahoo 正在限流：这只票的 CBOE 文件陈旧，要靠 Yahoo 备用源，但它现在被拒绝了",
+  yf_oi_stale: "Yahoo 的未平仓量（OI）这一场没发布，整份链拒收（帮助页有说明）",
+  yf_oi_unjudgeable: "Yahoo 这条链最近成交的合约太少，判不了 OI 是否可靠，整份链拒收",
+  yf_no_expiries: "Yahoo 没有这只票的期权到期日",
+  yf_price_unavailable: "Yahoo 取不到这只票的现价",
+  yf_no_contracts: "Yahoo 的链里没有可用合约",
+};
+export function fetchReasonText(reason, retryAfterSec) {
+  const raw = String(reason ?? "");
+  let text = FETCH_REASON_LABEL[raw];
+  if (!text && raw.startsWith("yf_exception:")) text = `Yahoo 取数异常（${raw.slice("yf_exception:".length)}）`;
+  if (!text) text = raw || "未知";
+  if (raw === "yf_rate_limited" && isNum(retryAfterSec)) text += `；约 ${num(Math.max(retryAfterSec, 1), 0)} 秒后再试`;
+  return text;
+}
 export const SOURCE_LABEL = {
   cboe_close: "收盘后快照", cboe_intraday: "盘中（15 分钟延迟）", cboe_stale_intraday: "收盘后仍是盘中文件",
   yfinance_intraday: "Yahoo 备用源（约 15 分钟延迟；CBOE 文件陈旧时才用，无交易所 Greeks）",

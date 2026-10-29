@@ -395,7 +395,7 @@ class TestHedgeView:
                                  "aggregate": {"nav": NAV, "band": {"band_pct": 15.0}}}}
         r = HG.beta_sensitivity(audits, {"XOM": 0.2, "AAA": None}, lin_stress, info={"AAA": {"n": 80, "reason": "insufficient_overlap"}})
         assert r["date"] == "2026-10-26" and r["available"] is True
-        assert r["fetch"] == {"n_requested": 2, "n_ok": 1, "failed": [{"ticker": "AAA", "reason": "insufficient_overlap"}]}
+        assert r["fetch"] == {"n_requested": 2, "n_ok": 1, "failed": [{"ticker": "AAA", "reason": "insufficient_overlap"}], "refresh_failed": []}
         assert r["missing"] == ["AAA"] and r["partial"] is True and r["band_pct"] == 15.0
 
     def test_no_stress_function_is_a_named_unavailable(self):
@@ -445,14 +445,20 @@ class TestService:
         assert r["available"] is True and r["partial"] is True and r["missing"] == ["NVDA"]
         assert r["fetch"]["failed"] == [{"ticker": "NVDA", "reason": "exception:TimeoutError"}]
 
-    def test_nothing_fetched_is_unavailable_with_a_reason_and_is_not_cached(self, root_with_rows):
-        n = []
-        svc = _svc(root_with_rows, lambda t, d: (n.append(1) or {x: None for x in t}, {x: {"n": 0, "reason": "bench_unavailable"} for x in t}))
+    def test_nothing_fetched_is_unavailable_with_a_reason_and_retried_soon(self, root_with_rows):
+        """一个都没取到：不可用 + 原因；不缓存「失败」当结果——短暂退避后（不是干等很久）下次打开再试。"""
+        n, t = [], [0.0]
+        svc = AlphaBotService(fetch_fn=syn.demo_fetch, straddle_root=root_with_rows, now_fn=lambda: NOW, clock=lambda: t[0],
+                              beta_long_fn=lambda tk, d: (n.append(1) or {x: None for x in tk}, {x: {"n": 0, "reason": "bench_unavailable"} for x in tk}))
         r = svc.beta_sensitivity()
         assert r["available"] is False and r["reason"] == "alt_beta_unavailable" and r["reason_zh"]
         assert {f["reason"] for f in r["fetch"]["failed"]} == {"bench_unavailable"}
+        t[0] = 5.0
         svc.beta_sensitivity()
-        assert len(n) == 2, "全失败的结果不缓存：下次打开再试"
+        assert len(n) == 1, "刚失败 5 秒：退避中，不再撞"
+        t[0] = 40.0
+        svc.beta_sensitivity()
+        assert len(n) == 2, "退避（30 秒）一过就再试，不会一直失败下去"
 
     def test_a_throwing_fetch_function_is_a_named_failure_not_a_500(self, root_with_rows):
         def boom(t, d):

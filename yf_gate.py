@@ -55,6 +55,8 @@ AlphaVantage 各走各的……**加源之前先确认闸门覆盖它**」。同
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import time
 
@@ -80,8 +82,10 @@ _orig_download = None
 _orig_ticker = None
 
 # 观测计数：供覆盖率闸/日志核对「跑完了吗」，永远不看退出标语。
-_stats = {"calls": 0, "rate_limited": 0, "blocked_by_cooldown": 0}
+# ok / consecutive_429 / last_ok_at 只给日志与排查用（v0.45.672：谁、第几次连续 429、距上次成功多久），不参与任何决定。
+_stats = {"calls": 0, "rate_limited": 0, "blocked_by_cooldown": 0, "ok": 0, "consecutive_429": 0}
 _cooldown_until = 0.0
+_last_ok_at = 0.0          # time.monotonic()；0 = 本进程还没成功过
 
 
 class YFRateLimited(ConnectionError):
@@ -136,13 +140,41 @@ def is_rate_limit_error(exc: BaseException) -> bool:
     return "too many requests" in str(exc).lower() or "rate limited" in str(exc).lower()
 
 
+def _who() -> str:
+    """这条日志出自哪个进程：pid + 命令行前几段。日志文件是多进程共用的、本身没有 pid，
+    「谁在吃 Yahoo 的限流额度」（2026-10-28 查证）当时只能靠时间猜——这里让下一次直接看得出。"""
+    try:
+        script = "/".join(str(sys.argv[0]).split("/")[-2:])        # 绝对路径太长、前缀没信息量：留最后两段（如 alphabot/__main__.py）
+        return f"pid={os.getpid()} {script} {' '.join(sys.argv[1:3])}".strip()[:100]
+    except Exception:  # pragma: no cover - 取不到就不说，别让日志拖垮取数
+        return f"pid={os.getpid()}"
+
+
+def is_rate_limited(exc: BaseException) -> bool:
+    """这个异常是不是「Yahoo 限流」的任何一种表现：闸门自己抛的 `YFRateLimited`（冷却中 / 等令牌超时），或一次真实的 429。
+    调用方（Alpha Bot 的备用取数）据此把失败归成「限流」而不是笼统的 `exception:<类名>`，并给出重试时间。"""
+    return isinstance(exc, YFRateLimited) or type(exc).__name__ == "YFRateLimited" or is_rate_limit_error(exc)
+
+
+def retry_after_sec(minimum: float = 0.0) -> float:
+    """闸门冷却还剩多少秒（≥ `minimum`）。冷却已结束 / 没装闸门 ⇒ `minimum`。只读、不改任何状态。"""
+    with _lock:
+        rem = _cooldown_until - time.monotonic()
+    return max(float(minimum), rem)
+
+
 def _enter_cooldown(reason: str) -> None:
     global _cooldown_until
+    now = time.monotonic()
     with _lock:
-        _cooldown_until = time.monotonic() + RATE_LIMIT_COOLDOWN
+        _cooldown_until = now + RATE_LIMIT_COOLDOWN
         _stats["rate_limited"] += 1
-    _log.warning("yfinance 限流，进入 %.0fs 冷却（%s）；期间调用一律抛 YFRateLimited",
-                 RATE_LIMIT_COOLDOWN, reason)
+        _stats["consecutive_429"] += 1
+        n_calls, n_ok, consec, last_ok = _stats["calls"], _stats["ok"], _stats["consecutive_429"], _last_ok_at
+    since_ok = f"{now - last_ok:.0f}s 前" if last_ok else "本进程从未成功"
+    _log.warning("yfinance 限流，进入 %.0fs 冷却（%s）；期间调用一律抛 YFRateLimited"
+                 "［%s｜本进程已发 %d 次、成功 %d 次、连续第 %d 次 429、上次成功：%s］",
+                 RATE_LIMIT_COOLDOWN, reason, _who(), n_calls, n_ok, consec, since_ok)
 
 
 def _check_cooldown() -> None:
@@ -152,6 +184,15 @@ def _check_cooldown() -> None:
             _stats["blocked_by_cooldown"] += 1
     if remaining > 0:
         raise YFRateLimited(f"yfinance 限流冷却中，还剩 {remaining:.0f}s")
+
+
+def _note_ok() -> None:
+    """一次成功的调用：连续 429 计数清零、记下时刻（只为日志 / 排查）。"""
+    global _last_ok_at
+    with _lock:
+        _stats["ok"] += 1
+        _stats["consecutive_429"] = 0
+        _last_ok_at = time.monotonic()
 
 
 def _gated(fn, what: str):
@@ -164,12 +205,14 @@ def _gated(fn, what: str):
         with _lock:
             _stats["calls"] += 1
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
         except BaseException as e:
             if is_rate_limit_error(e):
                 _enter_cooldown(f"{what}: {e}")
                 raise YFRateLimited(str(e)) from e
             raise
+        _note_ok()
+        return result
     wrapper.__name__ = getattr(fn, "__name__", what)
     wrapper.__doc__ = getattr(fn, "__doc__", None)
     wrapper._yf_gate_wrapped = True          # 供测试断言「确实接上了」
@@ -253,8 +296,8 @@ def install() -> bool:
     with _lock:
         _installed = True
     _b = _limiter()
-    _log.info("yfinance 闸门已安装（%s req/s, burst %s, 429 冷却 %.0fs）",
-              getattr(_b, "_rate", "?"), getattr(_b, "_burst", "?"), RATE_LIMIT_COOLDOWN)
+    _log.info("yfinance 闸门已安装（%s req/s, burst %s, 429 冷却 %.0fs）［%s］",
+              getattr(_b, "_rate", "?"), getattr(_b, "_burst", "?"), RATE_LIMIT_COOLDOWN, _who())
     return True
 
 
@@ -296,8 +339,9 @@ def stats() -> dict:
 
 
 def reset_stats() -> None:
-    global _cooldown_until
+    global _cooldown_until, _last_ok_at
     with _lock:
         for k in _stats:
             _stats[k] = 0
         _cooldown_until = 0.0
+        _last_ok_at = 0.0
