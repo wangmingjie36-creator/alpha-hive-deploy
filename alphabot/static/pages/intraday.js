@@ -1,6 +1,6 @@
 // 盘中：关注列表定时快照 → 水平走势、GEX 热力图、回看、路由变动。只看单日（跨日拼接 = 历史路由叠其后价格）。
-import { api, h, helpLink, num, usdShort, seg, table, panel, isNum, pref, setPref, ROUTE_SHORT, fill } from "../lib.js";
-import { lines, heatmap, strikeBars, C } from "../charts.js";
+import { api, h, helpLink, num, usdShort, seg, table, panel, pref, setPref, ROUTE_SHORT, fill } from "../lib.js";
+import { lines, gammaTrace, strikeBars, release, C } from "../charts.js";
 import { state, refreshMeta } from "../app.js";
 import { sidebar } from "./ticker.js";
 
@@ -10,13 +10,18 @@ export async function renderIntraday(root, t, alive) {
   let date = (dates.dates || [])[0] || (meta.session?.date_et);
   let view = pref("idView", "le_45dte");
   let basis = "oi";
+  let mode = "level";
   let back = 3;
+  let charts = [];
   const main = h("div", {});
   fill(root, h("div", { class: "with-side" }, sidebar(t, "#/intraday/{T}"), main));
 
   async function draw() {
-    const d = await api(`/api/intraday/${encodeURIComponent(t)}${date ? `?date=${date}` : ""}`);
+    const q = date ? `date=${date}&` : "";
+    const [d, hm] = await Promise.all([api(`/api/intraday/${encodeURIComponent(t)}?${q}`),
+      api(`/api/intraday-heat/${encodeURIComponent(t)}?${q}view=${view}&basis=${basis}&mode=${mode}`)]);
     if (!alive()) return;
+    charts.forEach(release); charts = [];
     const snaps = d.snapshots || [];
     const head = h("div", { class: "page-head" },
       h("div", {}, h("h1", {}, `${t} 盘中`, h("span", { class: "sub" }, `${d.date} · ${snaps.length} 张快照`)),
@@ -38,17 +43,13 @@ export async function renderIntraday(root, t, alive) {
     const V = (s) => s.views?.[view] || {};
     const lvEl = h("div", { class: "chart" });
     const hmEl = h("div", { class: "chart tall" });
+    const hmHead = h("div", { class: "controls" },
+      seg([["oi", "按 OI"], ["volume", "按成交量"]], basis, (x) => { basis = x; draw(); }, "口径"),
+      seg([["level", "当前值"], ["delta", "逐拍变化"]], mode, (x) => { mode = x; draw(); }, "显示"));
     const totEl = h("div", { class: "chart short" });
     const lbEl = h("div", { class: "chart tall" });
 
-    // 热力图数据
     const idx = basis === "oi" ? 1 : 2;
-    const strikeSet = new Set();
-    snaps.forEach((s) => (V(s).strikes || []).forEach((r) => strikeSet.add(r[0])));
-    const strikes = [...strikeSet].sort((a, b) => a - b);
-    const sIdx = new Map(strikes.map((k, i) => [k, i]));
-    const cells = [];
-    snaps.forEach((s, ti) => (V(s).strikes || []).forEach((r) => { if (isNum(r[idx])) cells.push([ti, sIdx.get(r[0]), r[idx]]); }));
 
     // 回看
     const last = snaps[snaps.length - 1];
@@ -62,12 +63,12 @@ export async function renderIntraday(root, t, alive) {
     const changes = snaps.filter((s, i) => i === 0 || routeKey(s) !== routeKey(snaps[i - 1]));
 
     fill(main, head,
-      panel("现价与水平", { sub: "现价（实线）· 最近 Zero Gamma（虚线）· 净 Major+ / Major−" }, lvEl),
+      panel("净 GEX 热力图 · 价格路径", { sub: heatSub(hm), right: hmHead },
+        hm.available ? hmEl : h("div", { class: "empty" }, hm.reason_label || "—"),
+        heatNotes(hm)),
       h("div", { style: { height: "20px" } }),
       h("div", { class: "grid two" },
-        panel("净 GEX 热力图", { sub: "行权价 × 时间；蓝 = 正、橙 = 负、暖灰 = 接近 0",
-          right: seg([["oi", "按 OI"], ["volume", "按成交量"]], basis, (x) => { basis = x; draw(); }, "口径") },
-        cells.length ? hmEl : h("div", { class: "empty" }, "—")),
+        panel("现价与水平", { sub: "现价（实线）· 最近 Zero Gamma（虚线）· 净 Major+ / Major−" }, lvEl),
         panel("回看", { sub: `最新一拍 vs ${back} 拍前（${times[prevI]}）`,
           right: seg([[1, "1 拍"], [3, "3 拍"], [6, "6 拍"]], back, (x) => { back = x; draw(); }, "回看") },
         lbRows.length ? lbEl : h("div", { class: "empty" }, "—"))),
@@ -82,19 +83,39 @@ export async function renderIntraday(root, t, alive) {
           h("p", { class: "note" }, "盘中路由只供观察：预注册检验只用收盘后的账本行（盘中报价的行不进检验）。"))),
       h("div", { style: { height: "20px" } }), settingsPanel);
 
-    lines(lvEl, { x: times, yFmt: (x) => num(x, 0), series: [
+    charts.push(lines(lvEl, { x: times, yFmt: (x) => num(x, 0), series: [
       { name: "现价", data: snaps.map((s) => s.underlying_price), color: c.ink },
       { name: "Zero Gamma", data: snaps.map((s) => V(s).zero_gamma?.nearest ?? null), color: c.ink3, dash: true },
       { name: "Major+", data: snaps.map((s) => V(s).majors?.net_major_pos_strike ?? null), color: c.pos, width: 1.5, step: "end" },
-      { name: "Major−", data: snaps.map((s) => V(s).majors?.net_major_neg_strike ?? null), color: c.neg, width: 1.5, step: "end" }] });
-    if (cells.length) heatmap(hmEl, { times, strikes, cells });
-    lines(totEl, { x: times, yFmt: usdShort, hmarks: [{ value: 0, label: "0", color: c.lineStrong, type: "solid" }],
-      series: [{ name: "总净 GEX", data: snaps.map((s) => V(s).net_gex_total ?? null), color: c.ink2 }] });
-    if (lbRows.length) strikeBars(lbEl, { rows: lbRows, spot: last.underlying_price, series: [
+      { name: "Major−", data: snaps.map((s) => V(s).majors?.net_major_neg_strike ?? null), color: c.neg, width: 1.5, step: "end" }] }));
+    if (hm.available) charts.push(gammaTrace(hmEl, hm));
+    charts.push(lines(totEl, { x: times, yFmt: usdShort, hmarks: [{ value: 0, label: "0", color: c.lineStrong, type: "solid" }],
+      series: [{ name: "总净 GEX", data: snaps.map((s) => V(s).net_gex_total ?? null), color: c.ink2 }] }));
+    if (lbRows.length) charts.push(strikeBars(lbEl, { rows: lbRows, spot: last.underlying_price, series: [
       { name: "最新", value: (r) => r.now, lane: 0 },
-      { name: `${back} 拍前`, value: (r) => r.before, color: c.neutral, lane: 1 }] });
+      { name: `${back} 拍前`, value: (r) => r.before, color: c.neutral, lane: 1 }] }));
   }
   await draw();
+}
+
+// 热力图口径说明：数字只取服务端回传的 rules / clip（intraday_heat.py），这里不另写常量
+function heatSub(hm) {
+  const what = hm.mode === "delta" ? "这一拍减上一拍同一行权价" : "净 GEX（美元 / 现价每变动 1%）";
+  return `行权价 × 拍；${what}；蓝 = 正、橙 = 负。实线 = 现价，虚线 = 最近 Zero Gamma`;
+}
+function heatNotes(hm) {
+  if (!hm.available) return null;
+  const r = hm.rules || {};
+  const items = [
+    `颜色按 |值| 的 ${Math.round((r.clip_quantile ?? 0) * 100)}% 分位截断在 ±${usdShort(hm.clip)}（最大 ${usdShort(hm.max_abs)}，${hm.n_clipped} 格按截断色画，悬停看真值）。`,
+    `只存现价 ±${Math.round((r.strike_band ?? 0) * 100)}% 内的行权价，现价移动时边缘格子会空着（不是 0）。`,
+  ];
+  if (hm.mode === "delta") items.push(hm.basis === "oi"
+    ? "OI 盘中不变：OI 口径的逐拍变化只来自现价与 IV 的移动。"
+    : "成交量口径的逐拍变化 ≈ 这段时间新增成交带来的 GEX——没有买卖方向（延迟快照分不出主动买卖），不是 orderflow。");
+  if ((hm.gaps || []).length) items.push(`x 轴按拍排列、不等距：${hm.gaps.map((g) => `${hm.times[g.index]} 前隔了 ${g.minutes} 分钟`).join("、")}。`);
+  if (hm.n_bad_lines) items.push(`快照文件有 ${hm.n_bad_lines} 行读不了，已跳过。`);
+  return h("ul", { class: "note" }, items.map((x) => h("li", {}, x)));
 }
 
 function settingsBlock(t, rerender) {

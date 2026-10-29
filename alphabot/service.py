@@ -32,6 +32,7 @@ from alphabot import beta_long as _BL
 from alphabot import chat as CH
 from alphabot import hedge as HG
 from alphabot import howto as HW
+from alphabot import intraday_heat as IH
 from alphabot import macos_app as MA
 from alphabot import premium as PM
 from alphabot import straddle as SD
@@ -1002,6 +1003,18 @@ class AlphaBotService:
                 except ValueError:
                     bad += 1
         return {"ticker": t, "date": d, "snapshots": snaps, "n_bad_lines": bad}
+
+    def intraday_heat(self, ticker, date_et: Optional[str] = None, *, view: str = "le_45dte",
+                      basis: str = "oi", mode: str = "level") -> dict:
+        """盘中热力图（叠现价 / Zero Gamma）：同一份单日快照交给 `intraday_heat.build` 排，不另取数。"""
+        if view not in IH.VIEWS or basis not in IH.BASES or mode not in IH.MODES:
+            raise BadRequest(f"view / basis / mode 不认识：{view} / {basis} / {mode}")
+        day = self.intraday(ticker, date_et)
+        out = IH.build(day["snapshots"], view=view, basis=basis, mode=mode)
+        out["rules"]["strike_band"] = SNAPSHOT_STRIKE_BAND
+        out.update({"ticker": day["ticker"], "date": day["date"], "n_bad_lines": day.get("n_bad_lines", 0),
+                    "reason_label": IH.REASONS.get(out["reason"])})
+        return clean_json(out)
 
     def _demo_intraday(self, t: str, d: str) -> dict:
         """演示：用合成链在 09:30–16:00 每 10 分钟编一张快照（现价走一条确定性的小路径）。"""

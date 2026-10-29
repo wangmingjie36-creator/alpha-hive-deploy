@@ -166,7 +166,21 @@
 
 681 条目里对应的三句就地标了「685 更正」。
 
-## [0.45.684] — 2026-10-29 — 占位（进行中：Alpha Bot 盘中 GEX 热力图叠现价 / Zero Gamma 路径、逐拍变化视图、颜色按分位截断）
+## [0.45.684] — 2026-10-29 — Changed：Alpha Bot 盘中 GEX 热力图叠现价 / Zero Gamma 路径（对标 SpotGamma TRACE 的那张图），加「逐拍变化」视图，颜色按 |值| 的 95% 分位截断
+
+**起因**：用户问 Alpha Bot 和 GEXBot 一类软件差在哪，我答「盘中只显示最新一份」——**说错了**，盘中页早就有行权价 × 时间的净 GEX 热力图（只是 y 轴是类目轴，现价画不上去）。实际补的是三处：① 价格路径叠不上热力图（TRACE 的核心就是看现价穿过 gamma 带）；② 颜色按当天最大格定标，NVDA 10-28 成交量口径逐拍差最大格是 95% 分位的约 9 倍 ⇒ 其余格子几乎全灰；③ 只有水平没有变化。
+
+- 新增 `alphabot/intraday_heat.py`（纯函数，不 import 卖权模块、不做 IO，AST 守纯度）：`build(snaps, view=, basis=, mode=)` 把**已落盘的单日快照**排成 `[拍, 行权价, 真值, 上色用的截断值]` + 现价 / Zero Gamma 路径。`mode="delta"` = 这一拍减**上一拍同一行权价**，任一侧缺值 ⇒ 没有格子（不当 0、不拿更早的拍配）；截断 = |值| 最近秩 `CLIP_QUANTILE` 分位，只进上色列；相邻两拍间隔 > 中位间隔 `GAP_FACTOR` 倍记进 `gaps`（x 轴按拍、不等距）。原因码 `REASONS`（`no_snapshots` / `need_two_snapshots` / `no_values`）。
+- `alphabot/service.py`：`intraday_heat()` 只把 `intraday()` 的同一份快照交给 `build`（不另取数），补 `rules.strike_band`；坏参数 `BadRequest` ⇒ 400。`alphabot/server.py`：`GET /api/intraday-heat/{ticker}?date=&view=&basis=&mode=`。
+- `alphabot/static/charts.js`：`heatmap()`（两根类目轴）换成 `gammaTrace()`——y 为数值轴、格子用 custom series 画、visualMap 读截断列、提示框给真值，叠现价实线与 Zero Gamma 虚线。
+- `alphabot/static/pages/intraday.js`：热力图提到最上方整宽，右上「按 OI / 按成交量」×「当前值 / 逐拍变化」；图下说明里的截断分位 / 行权价窗口**只读服务端 `rules`**（页面不写死常量，测试钉住）；成交量口径逐拍变化写明「没有买卖方向、不是 orderflow」；同页重画时 `release` 旧图（此前每次切换都在 `live` 里留一个已脱离页面的实例）。「现价与水平」与「回看」并排。
+- `alphabot/static/pages/help.js`：盘中一节同步。
+
+**只展示**：不进评分、不写任何文件、不碰卖权账本 / 盲期；数据仍只来自盘中快照（现价 ±12% 内的行权价、OI 盘中不变、成交量无方向）。
+
+**变异检查**（7 个，全红；字节码关掉跑、还原后逐字节核对）：缺值当 0 / 逐拍差拿更早的拍配 / 不截断 / 截断取最大值 / 成交量口径读错列 / 不记间隔 / Zero Gamma 读错期限视图（首轮这条**绿**——补了「两个视图各有 Zero Gamma」的测试后红）。
+
+**核对**：新测试 26 passed；`tests/test_alphabot*.py` + `tests/test_sell_strike_integration.py` 972 passed；worktree 起 Alpha Bot（真实数据根、`--no-poll`）在浏览器里看过 NVDA 10-29 四种组合，控制台无报错、提示框真值正确。整套 13185 passed、2 xfailed（10:39，错开了同时段另一会话的整套）。
 
 ## [0.45.683] — 2026-10-29 — Fixed：LLM 影子 10-29 丢天复盘——Anthropic 连接 / 超时错误不再带崩整只标的 / P4b / 整次扫描；付费跑中途出错时救回已写的逐只结果；开跑前探活加必需主机 api.anthropic.com
 
