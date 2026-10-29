@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.686] — 2026-10-29 — 占位（进行中：677 / 678 二次检查——月报两节的 429 漏数、IC 重跑行 None/None、就绪度行盲化、晚跑丢月等）
+
 ## [0.45.685] — 2026-10-29 — Fixed：v0.45.681 二次检查——「本地命中不许 sleep」只认被测模块 `time.sleep` 这一种写法，经别名 / 别的模块睡会静默漏；改成只数**测试线程**的全局 sleep
 
 **起因**：681 为了不让别的线程的 sleep 被数进来，把 `tests/test_outcomes_backlog_starvation.py` 改成只换 `outcomes_fetcher` 模块里的 `time` 名字（`_ModuleTime` 代理）。这把 `test_one_run_drains_everything_locally_resolvable` 的 `sleeps == []`（本次 starvation 修复的核心：本地命中不 sleep）变成了只认一种写法——本地路径上经辅助模块、或本模块 `import time as _t` 睡的，代理既数不到也拦不住（会真睡），测试照绿。变异实测：本地命中时 `import time as _t; _t.sleep(0)` ⇒ 681 版本 **16 passed**；本地命中时经另一个模块 `sleep(0)` ⇒ 681 前的写法红（660 次全数到）、681 绿。现状没有这类 sleep（只读探针：跑这个文件时走到全局 `time.sleep` 的只有注入器那一次），是测试变弱、不是现网有病。
