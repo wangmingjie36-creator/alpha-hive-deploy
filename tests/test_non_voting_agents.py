@@ -133,19 +133,9 @@ class TestBearBeeDoesNotVote:
         dv2 = _vote(queen, _observers())
         assert dv2["vote_excluded_agents"] == [], "没出场的蜂不该出现在排除名单里"
 
-    def test_bull_veto_still_reads_bear(self, queen, monkeypatch):
-        """BearBee 的独立通道保留：BullVeto 打开时照旧读它的分数（它本身停用中）。
-
-        ⚠️ `queen` fixture 已先实例化 —— QueenDistiller.__init__ 会 reload(config)，
-        在实例化之前 patch 会静默失效（改写 test_arbitration_flip_direction 时实测踩中）。
-        """
-        import config
-        monkeypatch.setitem(config.BEAR_SCORING_CONFIG, "bull_veto_enabled", True)
-        monkeypatch.setitem(config.BEAR_SCORING_CONFIG, "bull_veto_bear_score", 7.0)
-        base = _observers(bull=4, bear=0, neutral=1, conf=0.8)
-        assert _vote(queen, base)["rule_direction"] == "bullish"
-        dv = _vote(queen, base + [_r(BEAR, "bearish", 0.9, score=8.0)])
-        assert dv["rule_direction"] == "neutral", "BullVeto 读不到 BearBee 了 —— 排除范围过宽"
+    # 原 `test_bull_veto_still_reads_bear`（BullVeto 打开时照旧读 BearBee 分数）随 BullVeto 于 v0.45.677 退役删除；
+    # 「排除范围不能过宽」现在只剩看空上限一条通道，由 tests/test_queen_distiller.py::test_bear_cap_limits_bullish
+    # 走完整 distill 守着。BullVeto 本身的墓碑在 tests/test_bull_veto_retired.py。
 
 
 class TestGuardBeeDoesNotVote:

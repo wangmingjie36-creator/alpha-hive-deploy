@@ -86,7 +86,7 @@ class QueenDistiller:
     }
 
     # 不进方向**计票**的蜂（v0.45.212）。只拿掉计票里那一票：报告的 agent_breakdown、
-    # 逐蜂方向、data_quality 汇总、BullVeto 读 BearBee 分数、bear_cap —— 照旧看全体。
+    # 逐蜂方向、data_quality 汇总、bear_cap —— 照旧看全体（BullVeto 读 BearBee 分数那条 v0.45.677 已退役删除）。
     #
     # BearBeeContrarian：本职是反方陈述，不是陪审员。实测（623 条有 T+7 超额收益的记录）
     #   90.5% 看空、看空命中 50.5%（19 周 p=0.63）；confidence = 0.3 + 0.1×信号数
@@ -817,23 +817,10 @@ class QueenDistiller:
                 "bearish_agents": bearish_count,
             }
 
-        # v0.37.0: Bear 强信号压制看多 —— BearBee score >= 阈值时 bullish 降级 neutral（不翻转）
-        # 回测（536 样本）：被拦截的 13 单看多均收益 -1.70% vs 全体看多 +3.09%
-        if (rule_direction == "bullish"
-                and _BSC4.get("bull_veto_enabled", False)):
-            _veto_th = _BSC4.get("bull_veto_bear_score", 7.0)
-            _bear_r = next((r for r in valid_results
-                            if r.get("source") == "BearBeeContrarian"), None)
-            if _bear_r is not None and (_bear_r.get("score") or 0) >= _veto_th:
-                rule_direction = "neutral"
-                conflict_info["bull_veto"] = {
-                    "bear_score": round(_bear_r.get("score", 0), 1),
-                    "threshold": _veto_th,
-                }
-                _log.info(
-                    "%s [BullVeto] BearBee %.1f >= %.1f，bullish 降级 neutral",
-                    ticker, _bear_r.get("score", 0), _veto_th,
-                )
+        # v0.45.677：BullVeto（v0.37.0「BearBee 分数 ≥ 阈值 ⇒ 看多降成中性」）已退役删除——v0.43.13 起停用
+        # （读的是反转后的吸引力分，上线以来 35 次触发全是反向误拦），停用后 0 次执行；它要读的 BearBee 分数
+        # 实测不带信息（见本类 `NON_VOTING_AGENTS` 注释）。⚠️ 勿重建：要类似机制先写预注册（它会改变开出哪些单，
+        # 截断策略层优势检验的样本）。守卫 `tests/test_bull_veto_retired.py`。
 
         per_agent_directions = {}
         for r in all_results:

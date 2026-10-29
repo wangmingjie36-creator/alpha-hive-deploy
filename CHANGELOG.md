@@ -5,7 +5,40 @@
 
 ---
 
-## [0.45.677] — 2026-10-29 — 占位（进行中：BullVeto 退役——删停用分支与两项配置 + 墓碑测试）
+## [0.45.677] — 2026-10-29 — Removed：BullVeto 退役——删掉 queen_distiller 里自 v0.43.13 起停用的「BearBee 分数 ≥ 阈值 ⇒ 看多降成中性」分支与 `BEAR_SCORING_CONFIG` 的两个开关键，加墓碑测试（生产行为零变化，不登世代边界）
+
+用户 10-29 定（「9 月中旬大复盘」重新定义时的 ②）：BullVeto **退役**，不做原定的「换字段 + 干净样本重校准」。
+
+### 为什么退役而不是重校准
+- **从没按设计生效**：v0.37.0 读的是 BearBee 反转后的吸引力分（`score = 10 − bear_score`），`score ≥ 7` 恰恰是「BearBee 确认看多」⇒ 上线以来 35 次触发全是反向误拦，v0.43.13（08-12）停用。
+- **它要读的量不带信息**：BearBee 看空单扣 SPY 命中 50.5%（19 个不重叠周，p=0.63），置信度是数据可得性（v0.45.212 让它退出计票的同一份证据）——换成正确字段也只是按一个无技能的分数去否决。
+- **重开有代价**：它会改变开出哪些单 ⇒ 截断策略层优势预注册（`experiments/strategy_edge_prereg.md`）的样本；真要类似机制得先写预注册。
+
+### 第 0 步：只读核实「删掉不改变行为」
+- 归档 `.swarm_results_*.json`（03-10 起 135 天）里 `conflict_info.bull_veto` 最后一次出现是 **08-11**（07-06 ~ 08-11 共 35 次），**08-12 起 0 次**；现存日志 0 条 `[BullVeto]`。
+- 全仓读者：只有 queen_distiller 那段分支读开关、写 `conflict_info["bull_veto"]`；没有任何报告 / 网站 / 重放脚本读这个键（`git grep`）。
+  ⇒ 删的是死分支，**不登世代边界**；`ic_rerun_readiness` 里两处提到 BullVeto 的是冻结的历史条目文本，不改。
+
+### Removed
+- `swarm_agents/queen_distiller._compute_direction_vote`：BullVeto 分支（17 行）换成一段退役注释；类注释「照旧看全体」的清单去掉 BullVeto。
+- `config.BEAR_SCORING_CONFIG`：`bull_veto_enabled` / `bull_veto_bear_score` 两键与上方 9 行停用说明删除，留 4 行退役注释。
+- `tests/test_non_voting_agents.py::test_bull_veto_still_reads_bear`（BullVeto 打开时照旧读 BearBee）随之删除；「排除范围不能过宽」现只剩看空上限一条通道，
+  由 `tests/test_queen_distiller.py::test_bear_cap_limits_bullish` 走完整 distill 守着（原处留了指针注释）。
+
+### Added
+- `tests/test_bull_veto_retired.py`（墓碑，12 条，不用 skip）：
+  - 行为：把两个旧开关原样塞回 config（启用、阈值 7.0），看多多数 + BearBee 分数 7 / 8 / 10 ⇒ 方向照旧看多、输出里没有 `bull_veto`；
+  - 配置：`BEAR_SCORING_CONFIG` 里不许再有 `bull_veto*` 键（「停用中、留着参照」的状态不许回来）；
+  - 静态：本仓自己的 .py（`tests/` 除外）字符串常量 / 名字 / 属性 / 函数与参数名都不许含 `bull_veto`（大小写不敏感；注释与 CamelCase 的历史叙述不算）；
+  - 自证：扫描清单含 queen_distiller 与 config；探测器对 5 种病灶写法会红、对历史叙述不红。
+
+### 测试
+- 变异：恢复分支 ⇒ 行为 3 条 + 静态 1 条红；只把停用开关加回 config ⇒ 配置那条红。
+- `test_bull_veto_retired` + `test_non_voting_agents` + `test_queen_distiller` 88 passed / 1 xfailed；输入层指纹 / 零权重 / 蜂后 ML 反馈守卫 107 passed（config 改动不触及 H1 单元）。ruff 过。
+- 整套：见下（`config.py` 是核心文件，选测回退整套）。
+
+### 没改 / 待办
+- 「9 月中旬大复盘」其余三项的处置（① 被维度 IC 预注册取代、③ 已作废、④ 被策略层优势预注册取代）与新定义（并进月度自诊断：数据质量一节 + 预注册检验进度表）**待用户确认**，本版不含。
 
 ## [0.45.676] — 2026-10-29 — 占位（进行中：v0.45.671 二次检查——指纹依赖闭包补上 self.方法 / config 值里的名字 / config 非直接语句的就地修改）
 
