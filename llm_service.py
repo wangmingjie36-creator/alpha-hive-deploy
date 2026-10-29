@@ -59,8 +59,10 @@ _lock = threading.Lock()
 #   unpriced_refusals    模型不在 _PRICING 里而被拒绝的调用数
 #   failed_calls         已发出请求却没拿到响应的调用数（429 重试耗尽 / 连接 / 超时 / API 报错）——
 #                        call_count 只数成功的，失败的以前完全看不见（v0.45.560）
+#   model_refusals       stop_reason == "refusal" 的调用数——模型自己中途停笔（输出被截成半截），
+#                        与上面「我们自己拒绝」的 budget/unpriced_refusals 无关。只计数，不改调用行为（v0.45.673）
 _EXTRA_COUNTERS = ("truncated_calls", "json_parse_failures", "budget_refusals", "unpriced_refusals",
-                   "failed_calls")
+                   "failed_calls", "model_refusals")
 _token_usage = {
     "input_tokens": 0,
     "output_tokens": 0,
@@ -75,7 +77,7 @@ _inflight_cost: float = 0.0  # 已通过预检、尚未返回的调用的最坏�
 # 线程局部：并行蜂各自的 call → call_json 在同一线程里先后发生，互不串。只有拿到响应（text 非 None）才会走到
 # 解析失败的日志，而那时本线程的值刚被这次响应写过，所以不需要入口清空。
 _last_call = threading.local()
-_FAIL_PREVIEW_CHARS = 300
+_FAIL_PREVIEW_CHARS = 2000   # v0.45.673：300 看不出 MSFT Bear 1134 字符的 JSON 坏在哪；覆盖到 Queen 常见长度
 
 
 def _bump(key: str, n: int = 1) -> None:
@@ -452,6 +454,10 @@ def _do_request(client, prompt: str, system: str, model: str, max_tokens: int,
         # 输出被 max_tokens 截断：调用方多半拿到半截文本 / 残缺 JSON 而回落规则引擎，必须看得见
         if getattr(response, "stop_reason", None) == "max_tokens":
             _bump("truncated_calls")
+        # 模型自己中途停笔（2026-10-27 NFLX Queen：418 字符处 stop_reason=refusal，内容并无违规）：
+        # 与截断、JSON 坏掉分开数，否则这三种在 json_parse_failures 里分不开
+        if getattr(response, "stop_reason", None) == "refusal":
+            _bump("model_refusals")
 
         return text
 
@@ -484,10 +490,11 @@ def call_json(
         return None
 
     # 尝试提取 JSON
+    err: Optional[json.JSONDecodeError] = None   # 最后一次解析错误，失败日志里用
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+    except json.JSONDecodeError as e:
+        err = e
 
     # 尝试从 markdown code block 中提取
     import re
@@ -495,8 +502,8 @@ def call_json(
     if match:
         try:
             return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            err = e
 
     # 尝试找到第一个 { 和最后一个 }
     start = text.find("{")
@@ -504,17 +511,19 @@ def call_json(
     if start >= 0 and end > start:
         try:
             return json.loads(text[start:end + 1])
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            err = e
 
     # 拿到了文本却解析不出 JSON（多半是被 max_tokens 截断）⇒ 调用方随即回落规则引擎。
     # 以前这里无声返回 None，没有任何地方看得出「LLM 臂其实没在工作」。
     _bump("json_parse_failures")
     # v0.45.628：只记长度查不出原因（影子 A/B 第 2 代首日 Queen 蒸馏 3 次失败，回复仅 291~463 字符、非截断）。
-    # 现在连同 stop_reason、块类型和回复前 300 字符一起记（%r：换行转义成 \n，一行一条好 grep）。
+    # 现在连同 stop_reason、块类型和回复前 _FAIL_PREVIEW_CHARS 字符一起记（%r：换行转义成 \n，一行一条好 grep）。
+    # v0.45.673：再带上解析器的错误（原因 + 在被解析片段里的偏移；片段 = 去掉 ```json 围栏 / 首尾花括号之外的部分）。
     _log.warning(
-        "LLM 返回无法解析为 JSON（%d 字符）stop_reason=%s 块=%s 前%d字符=%r，调用方将回落规则引擎",
+        "LLM 返回无法解析为 JSON（%d 字符）stop_reason=%s 块=%s 解析错误=%s@%s 前%d字符=%r，调用方将回落规则引擎",
         len(text), getattr(_last_call, "stop_reason", None), getattr(_last_call, "block_types", None),
+        err.msg if err else None, err.pos if err else None,
         _FAIL_PREVIEW_CHARS, text[:_FAIL_PREVIEW_CHARS])
     return None
 

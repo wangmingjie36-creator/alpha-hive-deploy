@@ -82,7 +82,7 @@ _orig_download = None
 _orig_ticker = None
 
 # 观测计数：供覆盖率闸/日志核对「跑完了吗」，永远不看退出标语。
-# ok / consecutive_429 / last_ok_at 只给日志与排查用（v0.45.672：谁、第几次连续 429、距上次成功多久），不参与任何决定。
+# ok / consecutive_429 / last_ok_at 只给日志与排查用（v0.45.675：谁、第几次连续 429、距上次成功多久），不参与任何决定。
 _stats = {"calls": 0, "rate_limited": 0, "blocked_by_cooldown": 0, "ok": 0, "consecutive_429": 0}
 _cooldown_until = 0.0
 _last_ok_at = 0.0          # time.monotonic()；0 = 本进程还没成功过

@@ -1364,6 +1364,18 @@ def _reset_event_row_stats():
 
 
 @pytest.fixture(autouse=True)
+def _reset_fred_macro_stats():
+    """v0.45.674：`fred_macro` 的 `get_macro_context` 调用 / 取数计数是进程级全局状态（同上一条）。只在模块已导入时清——不在这里触发导入。"""
+    mod = sys.modules.get("fred_macro")
+    if mod is not None:
+        mod._reset_stats()
+    yield
+    mod = sys.modules.get("fred_macro")
+    if mod is not None:
+        mod._reset_stats()
+
+
+@pytest.fixture(autouse=True)
 def _reset_yf_daily_stats():
     """v0.45.652：`yf_daily` 唯一入口的公司行动空行计数是进程级全局状态（同上一条）。只在模块已导入时清——不在这里触发导入。"""
     mod = sys.modules.get("yf_daily")

@@ -24,6 +24,9 @@ class BeeAgent(ABC):
         # analyst_targets），由 prefetch_market_bundle 一次取齐后注入。
         # 各蜂通过 _yf_* 访问器读，**不再自己 yf.Ticker / yf.download**。
         self._prefetched_market: Dict[str, Dict] = {}
+        # v0.45.674：这一轮扫描的宏观快照（`alpha_hive_daily_report._fetch_scan_macro` 取一次后注入）。
+        # None = 没注入（单票 CLI / 测试 / 深度分析）⇒ 读者照旧自己调 `get_macro_context()`；{} 也算注入了（取到的就是空）。
+        self._prefetched_macro: Optional[Dict] = None
 
     @abstractmethod
     def analyze(self, ticker: str) -> Dict:
@@ -137,6 +140,13 @@ class BeeAgent(ABC):
 
     def _market(self) -> Dict[str, Dict]:
         return getattr(self, "_prefetched_market", None) or {}
+
+    def _scan_macro(self) -> Optional[Dict]:
+        """本轮扫描的宏观快照（v0.45.674）；没注入返回 None ⇒ 调用方照旧 `get_macro_context()`（行为逐字等于改动前）。
+
+        扫描里 4 个线程并行跑标的：此前 Guard 各自调 `get_macro_context()`，4 个线程同时看到空缓存、各取一次，
+        最先跑的几只标的各用自己那份（09-29：30 行分成 27 + 2 + 1 三份）。注入后整轮只有一份。"""
+        return getattr(self, "_prefetched_macro", None)
 
     def _yf_info(self, ticker: str) -> Dict:
         """`yf.Ticker(ticker).info`。"""
@@ -472,3 +482,5 @@ def inject_prefetched(agents: list, prefetched: Dict):
         agent._target_date = prefetched.get("target_date")
         # v0.45.122: yfinance 市场数据包
         agent._prefetched_market = prefetched.get("market", {}) or {}
+        # v0.45.674: 本轮宏观快照（只有扫描主流程放进来；没有这个键 ⇒ None ⇒ 蜂照旧自己取）
+        agent._prefetched_macro = prefetched.get("macro")

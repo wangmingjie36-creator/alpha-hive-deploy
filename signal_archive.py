@@ -2475,6 +2475,10 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 板块轮动照取、Guard 的板块票可能出现；10-19 起旧代码扫描日一天都没有报价全空的 ⇒ 同 654 / 657 / 660 / 663 只点名 Guard
     # （0 个信号后移），`guard.macro_adj` 不点名
     "v0.45.669": ("agent.GuardBeeSentinel.*",),
+    # 10-19（v0.45.674，等价论证见 ic_rerun_readiness 同版条目）：一轮扫描的宏观快照只取一次、注入 Guard ⇒ 只在并发几次取数
+    # 结果不同的日子改首批标的的宏观票；10-19 起旧代码扫描日全部 Guard 行都是同一份 ⇒ 同 654 ~ 669 只点名 Guard（0 个信号后移），
+    # `guard.macro_adj` 不点名
+    "v0.45.674": ("agent.GuardBeeSentinel.*",),
 }
 
 

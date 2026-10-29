@@ -2531,8 +2531,15 @@ def render_dashboard_html(report: Dict, date_str: str,
     _macro_delta = {"vix": "", "10y": "", "gld": ""}
     _mctx_ok = None   # 取到的宏观 dict，供下面「涨跌」段用（v0.45.669 起报价全空也给：缺的项本身是 None）
     try:
-        from fred_macro import get_macro_context as _get_macro_ctx
-        _mctx = _get_macro_ctx()
+        # v0.45.674：读这份日报自己的宏观快照（`report["macro_context"]`：扫描开头取的那一份，Guard 与日报宏观段读的也是它），
+        # 不再自己调 `get_macro_context()`——网站在扫描末尾渲染，比取数晚 22–36 分钟，30 分钟缓存过期就重取：10-22 网站 VIX 16.7
+        # （重取时 CBOE 断连、拿到前一天的），日报与 Guard 是 19.0。补跑时更糟：快照上下文退出已清缓存，重取到的是运行当天的宏观。
+        # 没有这个键（不是扫描产出的 report）⇒ 区块全「—」并说明，**不**去取运行当时的（那正是要修的错位）。
+        _mctx = report.get("macro_context") if isinstance(report, dict) else None
+        if not isinstance(_mctx, dict):
+            logging.getLogger("alpha_hive.dashboard").warning(
+                "这份日报没有宏观快照（macro_context），dashboard 宏观区块全部显示「—」（不取运行当时的宏观：那不是这份日报那一轮的）")
+            _mctx = {}
         if _mctx.get("data_source") == "fallback":
             # 旧实现在这里**什么都不说**，于是 8/26 网站宏观区块整块消失而日志里毫无痕迹。
             # v0.45.669：不再整块显示「—」——上游没取到的项本身就是 None / "unknown"，下面逐字段判；

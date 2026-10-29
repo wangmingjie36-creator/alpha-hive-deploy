@@ -1,4 +1,4 @@
-"""Yahoo 限流的失败后处理（v0.45.672）：`yf_gate`（只加观测）+ `alphabot/yf_chain.py` + `alphabot/beta_long.py` +
+"""Yahoo 限流的失败后处理（v0.45.675）：`yf_gate`（只加观测）+ `alphabot/yf_chain.py` + `alphabot/beta_long.py` +
 `AlphaBotService`（重试提示、β 按标的缓存）+ 前端文案与重试状态机（node 真跑）。
 
 起因（2026-10-28 只读查证）：Alpha Bot 里 NVDL 的 Yahoo 备用源 10-27 失败 9 次、10-28 失败 7 次，**全是 `yf_exception:YFRateLimited`**——

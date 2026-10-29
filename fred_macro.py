@@ -68,10 +68,20 @@ _lock = threading.Lock()
 _etf_cache: Dict[tuple, tuple] = {}   # (etf, 那一场) -> (timestamp, (name, chg))；v0.45.663 起按场次存
 _etf_lock = threading.Lock()
 
+# v0.45.674：`get_macro_context` 被调了几次、其中几次真去取数（没命中缓存）。扫描进程只在开头取一次本轮快照、
+# 之后 Guard / 日报 / 网站都读那一份 ⇒ 一轮扫描恰好 calls == 1；≠ 1 ⇒ 有读者绕过快照自己取（scan_timing → alert_manager P2）。
+# 此前 4 个并行线程在 Guard 阶段开头同时看到空缓存、各取一次，网站又在缓存过期后重取一次——同一轮出现过三份不同的宏观。
+_STATS_ZERO = {"calls": 0, "fetches": 0}
+_stats: Dict[str, int] = dict(_STATS_ZERO)
+
 
 def get_macro_context() -> Dict:
     """
     获取当前宏观经济环境快照
+
+    ⚠️ 扫描进程里**只有** `alpha_hive_daily_report._fetch_scan_macro` 调它（v0.45.674）：本轮快照取一次，注入 Guard（`BeeAgent._scan_macro`）、
+    日报宏观段用同一个对象、网站读 `report["macro_context"]`。别在扫描路径上新加直接调用——30 分钟缓存不是「这一轮用哪份」的答案
+    （并发会各取一次、扫描跨过 TTL 会再取一次）。扫描之外（单票 CLI / 测试 / 深度分析）照旧直接调。
 
     Returns:
         {
@@ -97,8 +107,10 @@ def get_macro_context() -> Dict:
     global _CACHE, _CACHE_TS
 
     with _lock:
+        _stats["calls"] += 1
         if _CACHE and (time.time() - _CACHE_TS) < _CACHE_TTL:
             return _CACHE
+        _stats["fetches"] += 1
 
     result = _fetch_macro_data()
 
@@ -107,6 +119,20 @@ def get_macro_context() -> Dict:
         _CACHE_TS = time.time()
 
     return result
+
+
+def stats() -> Dict[str, int]:
+    """计数副本 `{"calls", "fetches"}`（v0.45.674）：本进程调了几次 `get_macro_context`、其中几次没命中缓存。
+    扫描进程只在 `alpha_hive_daily_report._fetch_scan_macro` 调一次 ⇒ calls 应恰为 1（`scan_timing.counters()` → alert_manager）。"""
+    with _lock:
+        return dict(_stats)
+
+
+def _reset_stats() -> None:
+    """测试用：清零计数（conftest 每条测试前后都清）。"""
+    with _lock:
+        _stats.clear()
+        _stats.update(_STATS_ZERO)
 
 
 # ══════════════════════════════════════════════════════════════════

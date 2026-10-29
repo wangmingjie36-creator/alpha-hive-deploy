@@ -1,4 +1,4 @@
-// Yahoo 限流后「自动重试一次」的状态机（v0.45.672）。**无 DOM、不 import 任何页面模块**——tests/test_yf_rate_limit_handling.py 用 node 直接跑它。
+// Yahoo 限流后「自动重试一次」的状态机（v0.45.675）。**无 DOM、不 import 任何页面模块**——tests/test_yf_rate_limit_handling.py 用 node 直接跑它。
 //
 // 规矩（都来自一次真实的审查：此前的实现是个只加不减的 Set，会在新一轮限流里说「已自动重试过一次」而其实没重试）：
 //   · 一轮限流（episode）= 从第一次看到限流到第一次成功（或换成别的失败原因）。**每一轮最多自动重试一次**：连着撞只会多挨几条 429；

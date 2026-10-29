@@ -28,7 +28,7 @@ def _reset_llm_state(monkeypatch):
     monkeypatch.setattr(llm_service, "_token_usage", {
         "input_tokens": 0, "output_tokens": 0, "total_cost_usd": 0.0, "call_count": 0,
         "truncated_calls": 0, "json_parse_failures": 0, "budget_refusals": 0, "unpriced_refusals": 0,
-        "failed_calls": 0,
+        "failed_calls": 0, "model_refusals": 0,
     })
     from datetime import date
     monkeypatch.setattr(llm_service, "_budget_date", date.today())
@@ -230,7 +230,52 @@ class TestCounters:
         assert "我注意到这里的数据存在几处矛盾" in msg
         assert "\\n1. 情绪与价格背离" in msg               # 换行被 %r 转义成 \n，一行一条
         assert ("x" * 100) in msg
-        assert ("x" * 400) not in msg                      # 只截前 300 字符，不把整篇回复灌进日志
+        assert ("x" * 400) in msg                          # v0.45.673：预览 300 → 2000，这篇 ~430 字符整篇都在
+
+    def test_json_failure_log_preview_is_capped_and_says_how_long(self, monkeypatch, caplog):
+        """预览有上限（不把整篇回复灌进日志），但上限必须够看清 1134 字符的 Bear 回复；总长度另行记在前面。"""
+        assert llm_service._FAIL_PREVIEW_CHARS >= 1500            # 10-27 MSFT Bear 是 1134 字符
+        text = "y" * (llm_service._FAIL_PREVIEW_CHARS + 500)
+        _install(monkeypatch, _FakeClient(resp=_Resp(text=text)))
+        with caplog.at_level("WARNING", logger=llm_service._log.name):
+            llm_service.call_json("hi")
+        (rec,) = [r for r in caplog.records if "无法解析为 JSON" in r.getMessage()]
+        msg = rec.getMessage()
+        assert f"（{len(text)} 字符）" in msg
+        assert ("y" * llm_service._FAIL_PREVIEW_CHARS) in msg
+        assert ("y" * (llm_service._FAIL_PREVIEW_CHARS + 1)) not in msg
+
+    def test_json_failure_log_carries_parser_error_and_offset(self, monkeypatch, caplog):
+        """围栏里的 JSON 在某处坏掉：日志要带解析器给的原因和偏移（相对被解析的片段），不用人肉数字符。"""
+        body = '{"bear_score": 6.2, "thesis": "他说"预期已满"然后"}'      # 值中间有未转义的双引号
+        text = "```json\n" + body + "\n```"
+        _install(monkeypatch, _FakeClient(resp=_Resp(text=text)))
+        with caplog.at_level("WARNING", logger=llm_service._log.name):
+            assert llm_service.call_json("hi") is None
+        (rec,) = [r for r in caplog.records if "无法解析为 JSON" in r.getMessage()]
+        try:
+            import json as _j
+            _j.loads(body)
+        except _j.JSONDecodeError as e:
+            want = f"解析错误={e.msg}@{e.pos}"
+        assert want in rec.getMessage()
+
+    def test_refusal_counted_separately_from_truncation_and_json_failure(self, monkeypatch):
+        """2026-10-27 NFLX Queen：stop_reason=refusal、418 字符处断掉。三种原因（拒答 / 截断 / 格式坏）在
+        json_parse_failures 里分不开，所以拒答单独数；不改调用行为（文本照原样返回）。"""
+        _install(monkeypatch, _FakeClient(_Resp(text='```json\n{"final_score": 5.4, "dir', stop="refusal")))
+        assert llm_service.call("hi") == '```json\n{"final_score": 5.4, "dir'
+        u = llm_service.get_usage()
+        assert u["model_refusals"] == 1 and u["truncated_calls"] == 0 and u["call_count"] == 1
+        assert llm_service.call_json("hi") is None
+        u = llm_service.get_usage()
+        assert u["model_refusals"] == 2 and u["json_parse_failures"] == 1 and u["truncated_calls"] == 0
+
+    def test_normal_stops_not_counted_as_refusal(self, monkeypatch):
+        for stop in ("end_turn", "max_tokens", "stop_sequence", None):
+            _install(monkeypatch, _FakeClient(_Resp(stop=stop)))
+            llm_service.call("hi")
+        assert llm_service.get_usage()["model_refusals"] == 0
 
     def test_stop_reason_is_thread_local(self, monkeypatch):
         import threading
@@ -312,9 +357,11 @@ class TestCounters:
         llm_service._token_usage["truncated_calls"] = 7
         llm_service._token_usage["json_parse_failures"] = 3
         llm_service._token_usage["failed_calls"] = 2
+        llm_service._token_usage["model_refusals"] = 4
         llm_service._maybe_reset_daily_budget()
         u = llm_service.get_usage()
         assert u["truncated_calls"] == 0 and u["json_parse_failures"] == 0 and u["failed_calls"] == 0
+        assert u["model_refusals"] == 0
 
 
 # ==================== 在途预留 ====================

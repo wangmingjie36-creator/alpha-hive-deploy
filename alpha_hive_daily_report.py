@@ -144,6 +144,20 @@ class _SwarmContext:
     checkpoint_file: object = None  # Path
 
 
+def _fetch_scan_macro() -> Dict:
+    """这一轮扫描的宏观快照：整轮只取这一次（v0.45.674）。
+
+    扫描进程里 `get_macro_context()` 只许在这里调（`fred_macro.stats()["calls"]` 应恰为 1，scan_timing → alert_manager P2）。
+    取不到（`fred_macro` 导入失败；它自己的取数错误已在里面收成带 `error` 的整份缺失）⇒ 同一个标签：`data_source = "fallback"` 加 `error`，
+    各观测量不写 = 读者按缺失处理。**不**留给读者各自再取：再取的那份不是 Guard 用的那份。"""
+    try:
+        from fred_macro import get_macro_context
+        return get_macro_context()
+    except Exception as e:  # noqa: BLE001 —— 宏观取不到不拖垮扫描；读者按缺失显示，WARNING 说明
+        _log.warning("本轮宏观快照取不到（Guard / 日报 / 网站都按缺失处理，不再各自重取）: %s: %s", type(e).__name__, e)
+        return {"data_source": "fallback", "error": f"{type(e).__name__}: {e}"}
+
+
 def _format_break_verdict(ev) -> str:
     """把一条求值明细渲染成跟在阈值后面的判定后缀（v0.45.62）。
 
@@ -605,6 +619,10 @@ class AlphaHiveDailyReporter:
         # v0.41.6: 传入本次报告的目标交易日——`--date` 补跑历史日期时价格锚定
         # 该日期真实收盘价；未传 --date 时 self.date_str=当日，行为不变
         prefetched = prefetch_shared_data(targets, retriever, target_date=self.date_str)
+        # v0.45.674：这一轮的宏观快照只取一次（在快照上下文里 ⇒ 补跑取到的是 D 的），注入 Guard、日报宏观段用同一个对象、
+        # 网站读 report["macro_context"]。此前三个读者各调 `get_macro_context()`：4 个并行线程各取一次（首批标的可能拿到不同的一份），
+        # 网站在 30 分钟缓存过期后又取一次（10-22 网站 VIX 16.7、日报与 Guard 19.0）。
+        prefetched["macro"] = self._scan_macro = _fetch_scan_macro()
         inject_prefetched(all_agents, prefetched)
         # v0.45.625：评分用的那份行情此刻取完（蜂读的就是它）。① 给历史字段回落统计拍快照——告警只按这一刻判
         # 「评分数据缺」，之后的重取不再冒充它；② 留给 ML 报告用同一份价格 / 动量，不在扫描末尾再联网一轮
@@ -1659,13 +1677,18 @@ class AlphaHiveDailyReporter:
         except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
             _log.debug("P4 portfolio_concentration 不可用: %s", e)
 
-        macro_snapshot = {}
-        try:
-            from fred_macro import get_macro_context
-            macro_snapshot = get_macro_context()
-            _log.info("P5 宏观环境：%s", macro_snapshot.get("summary", ""))
-        except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
-            _log.debug("P5 fred_macro 不可用: %s", e)
+        # v0.45.674：扫描里用本轮快照（Guard 读的就是它）；不经扫描调到这里（测试 / 重放）才自己取，那条路逐字等于改动前
+        macro_snapshot = getattr(self, "_scan_macro", None)
+        if macro_snapshot is not None:
+            _log.info("P5 宏观环境（本轮快照）：%s", macro_snapshot.get("summary", ""))
+        else:
+            macro_snapshot = {}
+            try:
+                from fred_macro import get_macro_context
+                macro_snapshot = get_macro_context()
+                _log.info("P5 宏观环境：%s", macro_snapshot.get("summary", ""))
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.debug("P5 fred_macro 不可用: %s", e)
 
         backtest_stats = {}
         try:

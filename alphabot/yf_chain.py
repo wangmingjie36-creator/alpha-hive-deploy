@@ -100,7 +100,7 @@ def fetch_yf_raw_contracts(ticker: str, *, as_of: Optional[str] = None, now_et: 
     原因：`stale_vintage` / `vintage_mismatch` / `yf_no_expiries` / `yf_price_unavailable` / `yf_no_contracts` /
     `yf_oi_stale` / `yf_oi_unjudgeable` / `yf_rate_limited` / `yf_exception:<类名>`。`yf_module` 只给测试注入。
 
-    **`yf_rate_limited`**（v0.45.672）：Yahoo 限流——闸门冷却中的 `YFRateLimited`，或一次真实的 429。不是「取数坏了」：调用方
+    **`yf_rate_limited`**（v0.45.675）：Yahoo 限流——闸门冷却中的 `YFRateLimited`，或一次真实的 429。不是「取数坏了」：调用方
     （`service._chain_fetch`）据此告诉页面「约 N 秒后再试」，并在日志里记下是第几次。Alpha Bot 在 2026-10-27 / 28 两个清晨的
     NVDL 备用源全是它（16 次，每次都是轮询的第一个请求 `Ticker.options` 被 429）；同一时段新开的进程取同一条链是通的。"""
     try:

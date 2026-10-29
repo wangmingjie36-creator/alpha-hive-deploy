@@ -245,10 +245,18 @@ class TestSpeciesDoesNotSpread:
             for h in getattr(s, "handlers", []) or []:
                 yield from h.body
 
+        def mentions(value):
+            # v0.45.671：按**标识符**认（名字 `PATHS` / `__file__`，或属性 `x.PATHS` / `m.__file__`），不按源码子串认。
+            # 子串判据会把字符串常量里的字样当成派生值：`alphabot/macos_app._DELEGATE`（子进程源码文本，v0.45.451 只能登记白名单）、
+            # `signal_code_fingerprints.EXEMPT_DEPS`（豁免表的键 "PATHS"）。真正派生的值一定以标识符引用它们——全仓对拍：
+            # 两种判据的结果除了这两条字符串误报外完全相同（PATHS 17 / __file__ 23）。
+            return any((isinstance(n, ast.Name) and n.id == marker)
+                       or (isinstance(n, ast.Attribute) and n.attr == marker) for n in ast.walk(value))
+
         def walk(body, rel, depth=0):
             for s in body:
                 if isinstance(s, (ast.Assign, ast.AnnAssign)) and s.value:
-                    if marker in ast.unparse(s.value):
+                    if mentions(s.value):
                         tgts = [s.target] if isinstance(s, ast.AnnAssign) else s.targets
                         for t in tgts:
                             if isinstance(t, ast.Name):
@@ -309,7 +317,9 @@ class TestSpeciesDoesNotSpread:
             b"# Traditional Chinese: \xa4@\xa8\xc7\xa4\xa4\xa4\xe5\n"
             b"X = 1\n")
         (tmp_path / "offender.py").write_text(
-            "from hive_logger import PATHS\nBAD_DIR = PATHS.home / 'x'\n", encoding="utf-8")
+            "from hive_logger import PATHS\nBAD_DIR = PATHS.home / 'x'\n"
+            # v0.45.671：字符串常量里的字样不是派生值（豁免表的键、子进程源码文本），不许报
+            "LABELS = {('hive_logger.py', 'PATHS'): 'reason'}\nSRC = 'print(m.__file__)'\n", encoding="utf-8")
         (tmp_path / "broken_syntax.py").write_text("def (\n", encoding="utf-8")
 
         monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
@@ -323,6 +333,8 @@ class TestSpeciesDoesNotSpread:
             f"语法错文件没被记账（实际 {stats.get('unparsable')}）")
         assert ("offender.py", "BAD_DIR") in found, (
             "坏文件之后的好文件没被扫到——一个坏文件带走了整轮扫描")
+        assert ("offender.py", "LABELS") not in found, "字符串常量里的 PATHS 字样被当成了派生值（子串判据误报）"
+        assert ("offender.py", "SRC") not in self._scan(marker="__file__"), "字符串里的 __file__ 被当成了派生值"
 
     def test_scanner_does_not_audit_vendored_code(self, tmp_path, monkeypatch):
         """vendored 第三方代码里的同款写法**不得**被报成本仓违规。
@@ -515,7 +527,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
     与 `TestSpeciesDoesNotSpread` 一样是**子集**语义：清掉存量不会变红，新增必红。
     """
 
-    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**；v0.45.230 +1 `weekly_optimizer._CODE_DIR`；v0.45.289 +1 `backup_continuity.ALPHAHIVE_DIR`；v0.45.383 +1 `ic_rerun_readiness._HV_GAP_EVIDENCE_PATH`；v0.45.451 +1 `alphabot/macos_app._DELEGATE`；v0.45.652 +1 `ic_rerun_readiness._MACRO_ROTATION_EVIDENCE_PATH`；v0.45.658 +1 `ic_rerun_readiness._YF_DOWNLOAD_EVIDENCE_PATH`；v0.45.663 +1 `ic_rerun_readiness._MACRO_BARS_DATED_EVIDENCE_PATH`）。清掉一处就从这里删一行。
+    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**；v0.45.230 +1 `weekly_optimizer._CODE_DIR`；v0.45.289 +1 `backup_continuity.ALPHAHIVE_DIR`；v0.45.383 +1 `ic_rerun_readiness._HV_GAP_EVIDENCE_PATH`；v0.45.451 +1 `alphabot/macos_app._DELEGATE`（v0.45.671 摘除：扫描改按标识符认，字符串里的 `__file__` 字样不再算）；v0.45.652 +1 `ic_rerun_readiness._MACRO_ROTATION_EVIDENCE_PATH`；v0.45.658 +1 `ic_rerun_readiness._YF_DOWNLOAD_EVIDENCE_PATH`；v0.45.663 +1 `ic_rerun_readiness._MACRO_BARS_DATED_EVIDENCE_PATH`）。清掉一处就从这里删一行。
     # ⚠️ 子集语义的副作用：**清干净了也不会变红**，过期项会悄悄留下。
     #    定期对账：`KNOWN - _scan(marker="__file__")` 非空即是过期项
     #    （本版就这么揪出 2 条已清却还挂着的）。
@@ -539,7 +551,6 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("tools/clockshift/clockshift.py", "HERE"),   # 同上：补进拨钟下每个子进程的 PYTHONPATH；不进 MUST_STAY——那条参数化测试要 import 它，而 import 即安装（模块名不同 ⇒ `INSTALLED` 是另一份 ⇒ 审计轮里二次拨钟）。指错由 `test_clockshift_harness` 的子进程用例接住
         ("tools/select_tests/audit_plugin.py", "REPO"),   # 代码锚点：审计插件要扫的就是「本仓库」（git ls-files / 相对路径归属），v0.45.615；不进 MUST_STAY——那条参数化测试要 import 它，而 import 即装审计钩子且要求 SELECT_TESTS_OUT
         ("tools/select_tests/select_tests.py", "REPO"),   # 代码锚点：git -C <仓库>、tests/ 目录、给子 pytest 的 PYTHONPATH（v0.45.615）
-        ("alphabot/macos_app.py", "_DELEGATE"),       # 不是路径：委托子进程的源码文本，其中 `m.__file__` 在子进程里核对 import 到的生成器确实在目标代码目录下（「代码在哪」，v0.45.451）
         # ── B. 仓库内随代码发布的**只读**配置/文档 ──
         ("thesis_breaks.py", "_CONFIG_JSON_PATH"),    # thesis_breaks_config.json，生产只读
         ("market_intelligence.py", "_BASE"),          # 同上
