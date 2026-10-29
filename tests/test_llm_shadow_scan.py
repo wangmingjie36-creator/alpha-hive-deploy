@@ -625,6 +625,84 @@ class TestRunChild:
         st = json.loads((child_env / sh.STATUS_DIRNAME / "2026-10-19.control.json").read_text(encoding="utf-8"))
         assert "CBOE 全挂" in st["error"]
 
+    # ---- v0.45.683：扫描中途出错时救回已写的结果（2026-10-29：27 只付费结果因 P4b 抛 API 超时而没进状态文件）----
+
+    def _salvage_run(self, child_env, tmp_path, monkeypatch, *, day, write_file=True, age=0.0, mode_flag="--run"):
+        import os
+        import time
+        import llm_service
+        monkeypatch.setattr(llm_service, "_get_client", lambda: object())
+        monkeypatch.setattr(llm_service, "get_usage", lambda: _usage(total_cost_usd=2.0, call_count=200))
+
+        def scan_then_boom(_):
+            if write_file:
+                f = child_env / f".swarm_results_{day.isoformat()}.json"
+                f.write_text(json.dumps(_fake_results()), encoding="utf-8")
+                if age:
+                    old = time.time() - age
+                    os.utime(f, (old, old))
+            raise TimeoutError("P4b 超时")
+        rc = sh.run_child(_child_args(child_env, tmp_path, mode_flag), scan=scan_then_boom, now=day)
+        suffix = ".control.json" if mode_flag == "--control" else ".json"
+        st = json.loads((child_env / sh.STATUS_DIRNAME / f"{day.isoformat()}{suffix}").read_text(encoding="utf-8"))
+        return rc, st
+
+    def test_paid_scan_error_after_results_were_written_salvages_them_but_stays_unhealthy(
+            self, child_env, tmp_path, monkeypatch):
+        day = date(2026, 10, 29)
+        rc, st = self._salvage_run(child_env, tmp_path, monkeypatch, day=day)
+        assert rc == sh.EXIT_SCAN_ERROR                                   # 仍然报扫描异常
+        assert "P4b 超时" in st["error"] and st["salvaged"] is True
+        assert st["tickers_scanned"] == ["AAA", "BBB"]                    # 已写的逐只结果记下来了
+        assert st["per_ticker"]["AAA"]["distill_mode"] == "llm_enhanced"
+        assert st["quality"]["healthy"] is False                          # ……但这天不入比较，是否纳入由人定
+        assert any(r.startswith("scan_error") for r in st["quality"]["reasons"])
+        assert (child_env / sh.STATUS_DIRNAME / f"swarm_results-{day.isoformat()}.json").exists()
+
+    def test_salvaged_day_would_be_healthy_without_the_scan_error_reason(self):
+        """守住「出错必须是不健康理由」：救回后逐只数据全是 LLM 蒸馏，别的指标都正常——只有 scan_error 把它挡在比较之外。"""
+        pt = {t: {"present": True, "distill_mode": "llm_enhanced"} for t in ("AAA", "BBB")}
+        assert sh.quality_report(_usage(), pt, llm_on=True)["healthy"] is True
+        q = sh.quality_report(_usage(), pt, llm_on=True, error="APITimeoutError: x")
+        assert q["healthy"] is False and q["reasons"][0].startswith("scan_error")
+
+    def test_scan_error_reason_is_not_added_in_control_mode(self):
+        pt = {"AAA": {"present": True, "distill_mode": "rule_engine"}}
+        assert sh.quality_report(_usage(), pt, llm_on=False, error="boom")["healthy"] is True
+
+    def test_no_file_written_means_nothing_to_salvage_and_the_reason_is_in_the_error(
+            self, child_env, tmp_path, monkeypatch):
+        rc, st = self._salvage_run(child_env, tmp_path, monkeypatch, day=date(2026, 10, 29), write_file=False)
+        assert rc == sh.EXIT_SCAN_ERROR and "salvaged" not in st
+        assert "没救回已写的结果" in st["error"] and "不存在" in st["error"]
+        assert st["tickers_scanned"] == []
+
+    def test_a_file_from_before_this_run_is_not_salvaged(self, child_env, tmp_path, monkeypatch):
+        """同日更早一次零花费失败留下的旧文件，不能当成这次付费跑的结果。"""
+        rc, st = self._salvage_run(child_env, tmp_path, monkeypatch, day=date(2026, 10, 29), age=3600.0)
+        assert "salvaged" not in st and "起跑之前" in st["error"] and st["tickers_scanned"] == []
+
+    def test_control_mode_does_not_salvage(self, child_env, tmp_path, monkeypatch):
+        """control 免费、可重跑；救回来只会把一份不完整的基线写进去。"""
+        rc, st = self._salvage_run(child_env, tmp_path, monkeypatch, day=date(2026, 10, 29), mode_flag="--control")
+        assert rc == sh.EXIT_SCAN_ERROR and "salvaged" not in st and st["tickers_scanned"] == []
+
+    def test_unreadable_file_does_not_raise_from_the_salvage_path(self, child_env, tmp_path):
+        day = date(2026, 10, 29)
+        (child_env / f".swarm_results_{day.isoformat()}.json").write_text("{坏的", encoding="utf-8")
+        got, why = sh.salvage_swarm_results(child_env, day, 0.0)
+        assert got == {} and "读" in why and "失败" in why
+        (child_env / f".swarm_results_{day.isoformat()}.json").write_text("[]", encoding="utf-8")
+        assert sh.salvage_swarm_results(child_env, day, 0.0)[0] == {}
+
+    def test_clean_run_has_no_salvaged_key(self, child_env, tmp_path, monkeypatch):
+        import llm_service
+        monkeypatch.setattr(llm_service, "_get_client", lambda: object())
+        monkeypatch.setattr(llm_service, "get_usage", lambda: _usage(total_cost_usd=0.9))
+        sh.run_child(_child_args(child_env, tmp_path, "--run"), scan=lambda t: _fake_results(), now=date(2026, 10, 30))
+        st = json.loads((child_env / sh.STATUS_DIRNAME / "2026-10-30.json").read_text(encoding="utf-8"))
+        assert "salvaged" not in st and st["error"] is None
+
     def test_run_without_api_key_exits_usage_without_scanning(self, child_env, tmp_path, monkeypatch):
         import llm_service
         monkeypatch.setattr(llm_service, "_get_client", lambda: None)
