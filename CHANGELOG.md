@@ -40,7 +40,45 @@
 ### 没改 / 待办
 - 「9 月中旬大复盘」其余三项的处置（① 被维度 IC 预注册取代、③ 已作废、④ 被策略层优势预注册取代）与新定义（并进月度自诊断：数据质量一节 + 预注册检验进度表）**待用户确认**，本版不含。
 
-## [0.45.676] — 2026-10-29 — 占位（进行中：v0.45.671 二次检查——指纹依赖闭包补上 self.方法 / config 值里的名字 / config 非直接语句的就地修改）
+## [0.45.676] — 2026-10-29 — Fixed：v0.45.671 二次检查——输入层指纹的依赖闭包补三处缺口：`self.方法` 不解析（BuzzBee 经基类取行情、判代码合法性都在守卫外）、config 值里再引用的名字不追、config 的就地修改只认模块层直接语句；buzz.channels 按 coverage 重新确认
+
+**问题**（逐个实测：改一处、看该红的单元红没红，五处全不红）：
+1. `self.方法` / `cls.X` / `super().X` 不解析。BuzzBee 合成前那段经 `self._get_stock_data()` 取行情（基类 `BeeAgent`：用预取包还是直连、补跑时透传
+   目标日期、价格无效时打 `_data_unavailable`）、经 `self._validate_ticker()` 判代码合不合法（`swarm_agents/_config._RE_TICKER`，正则收窄 ⇒ 某些标的整只
+   不出通道）——这两处改了 buzz.channels 指纹不变。671 的模块说明把它归进「经实例属性的方法调用」，但 `self.方法` 按继承链是静态可解的。
+2. config 值里再引用的名字停在字面文本上：`"reddit": 600` 写成 `"reddit": _REDDIT_TTL` 之后改 `_REDDIT_TTL`，buzz.reddit 不变。
+3. config 的就地修改只认模块层直接语句：模块层 `for` 循环里改、或模块层调用一个改值的函数，都不变。
+   ②③ 现行 config 里没有实例（属潜伏缺口）。另两处小毛病：`import 包.子模块` 后 `包.子模块.f()` 会报「包里找不到子模块」（守卫变「无法判定」，是误报）；
+   冻结路径守卫（671 改成按标识符认之后）漏认 `getattr(m, "__file__")` / `globals()["__file__"]` 这种按名字取的写法（仓里目前没有）。
+
+### Fixed
+- `signal_code_fingerprints.py`：
+  - `self.X` / `cls.X` / `super().X` 按继承链（`_mro_lookup`：先自己、再基类从左到右深度优先；单继承时与 Python 的 MRO 相同）找到定义它的**那一个成员**
+    （不取整个类——v0.45.674 刚改过的 `BeeAgent._scan_macro` 不该要求 Buzz 确认）；接着追成员的引用时 `self` 仍指原来那个实例的类（子类覆盖优先）、
+    `super()` 从代码所在类的基类找。实例属性（值在 `__init__` 里赋或外部注入）与外部基类（ABC / object）的成员找不到 ⇒ 不当错误（写进「已知不管的」）。
+  - config：选中的值（与改动它的语句）里再引用的名字接着追，直到不再长出新键；就地修改不论写在模块层、循环里还是函数里（含 `global` 后重新赋值）都认，
+    并按**改的键与读的键是否重叠**归属（改 `ttl.reddit` 不算给只读 `ttl.yahoo_trending` 的 buzz.yahoo；键是变量 ⇒ 前缀下的读者都算）——671 的直接修改
+    原本不分键、算给全部读者，一并收紧（现行 config 无实例，指纹不变）。
+  - 属性链顺着子模块走（`pkg.sub.f` ⇒ `pkg/sub.py::f`；`m.imported_module.f` 同）；包的子模块对象整个被拿去用不当错误。
+- 结果：只有 buzz.channels 多了 6 项依赖（`BeeAgent._get_stock_data` / `_validate_ticker` / `_get_history_context`、`_RE_TICKER`、`hive_logger.pdt_today` /
+  `_PDT_TZ`，4 → 10）；其余五个单元依赖与指纹逐位不变。预取包本身也是经 price.fields 认领的 `_cache._fetch_stock_data` 算的。
+- **仍不管的**（模块说明与预注册写明）：调用方一侧（谁调用单元代码、传什么参数——如 `prefetch_shared_data` 透传补跑目标日期）与实例属性里装的值
+  （`inject_prefetched` 注入的预取包）；闭包只顺着被调用方向追。
+
+### 窗口审计与重新确认（用户 10-29 定）
+- `experiments/fingerprint_coverage_audit.py` 补上 10-28 扫描日（8c433b4，含 671 / 674），用新定义重做（证据 `experiments/fingerprint_coverage_audit_20261029.json`）：
+  buzz.channels 新圈进来的 6 项在 10-12 至 10-28 共 13 个扫描日**逐日未变**；其余 40 处依赖变化与 671 的证据逐条相同；10-27 → 10-28 一步各单元依赖都没变。
+- buzz.channels 登记一条 `coverage`（`e21f291816c41acf`）。10-28 扫描（已含 671）Step 11 进度行无指纹告警，即 671 的定义在生产上是全绿的。
+
+### Tests
+- `tests/test_signal_code_fingerprints.py`：真仓变异——基类 `_get_stock_data` 与 `_RE_TICKER` 改了只让 buzz.channels 变；基类里 Buzz 不调的 `_scan_macro`
+  改了谁都不变；config 值里的名字 / 循环里变量键（reddit + yahoo 都变）/ 函数里常量键（只 reddit 变）；期望依赖里有三个基类成员、没有 `_scan_macro`。
+  合成源码——经基类、只取用到的成员、类属性引用的 config 也追；子类覆盖优先 + `super()` 到基类；实例属性 / 外部基类不报错；子模块属性链；config 间接
+  五种（值里的名字、循环、函数、`global` 重新赋值、变量键之后的常量键）；671 的键路径用例改为「兄弟键 b.z 的修改不算、b.x / b 上层的算」。
+  新规则变异 14/14 抓到，671 的旧变异集 14/14 仍抓到。
+- `tests/test_paths_not_frozen_at_import.py`：`getattr(m, "PATHS")` / `globals()["__file__"]` / `vars(m)[…]` / `x.__dict__[…]` 认作引用，补「要报」断言
+  （去掉新判据即红）；全仓结果不变。
+- 验证：整套 13110 passed / 0 失败。
 
 ## [0.45.675] — 2026-10-28 — Added：Yahoo 限流的失败后处理——限流单独成原因码、**失败后不干等**（等多久只由闸门冷却决定）、β 对照按标的缓存（永久取不到的不续命 / 强制刷新失败看得见 / 重试倒计时按现在重算）、「自动重试一次」抽成可测的状态机；`yf_gate` 日志带进程身份（只加观测，行为不变）
 
