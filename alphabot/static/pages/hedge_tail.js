@@ -31,7 +31,7 @@ const strikes = (c) => {
   return s && l ? `卖 ${num(s.strike, 0)} / 买 ${num(l.strike, 0)}` : "—";
 };
 
-function baselineStrip(b, chain) {
+function baselineStrip(b, chain, rules) {
   const kpi = (k, v, sub) => h("div", { class: "kpi" }, h("div", { class: "k" }, k), h("div", { class: "v" }, v),
     sub ? h("div", { class: "small muted" }, sub) : null);
   const dw = b.downside_worst_cell;
@@ -40,7 +40,9 @@ function baselineStrip(b, chain) {
     kpi("下行 / 平盘侧最差格（对它定规模）", h("span", { class: "down" }, sPct(dw?.pct_nav, 1)), dw ? `${cellName(dw)} · ${sMoney(dw.pnl)}` : "—"),
     kpi("审计日 / NAV", b.date, `NAV ${money(b.nav, 0)} · SPY ${money(b.spy_price)}${b.adjusted_for_trade ? " · 已含当日 SPY 成交" : ""}`),
     kpi("期权链", `${chain?.expiry || "—"}（${chain?.dte ?? "—"} 天）`,
-      `SPY ${money(chain?.spot)} · ${chain?.n_puts_in_expiry ?? "—"} 个认沽（行权价）· 报价时间 ${chain?.quote_time || "未知"}${chain?.session_live ? "（盘中）" : ""}`));
+      `SPY ${money(chain?.spot)} · ${chain?.n_puts_in_expiry ?? "—"} 个认沽（行权价）· ${chain?.candidates_usable ?? "—"}/${chain?.candidates_total ?? "—"} 个候选可算`
+      + (chain?.nearest_expiry ? ` · 离 ${rules?.target_dte ?? "目标"} 天最近的 ${chain.nearest_expiry}（${chain.nearest_expiry_dte} 天）只有 ${chain.nearest_candidates_usable}/${chain.candidates_total} 个候选可算，所以没选它` : "")
+      + ` · 报价时间 ${chain?.quote_time || "未知"}${chain?.session_live ? "（盘中）" : ""}`));
 }
 
 function candTable(t, selId, onPick) {
@@ -187,7 +189,7 @@ function renderTailBody(host, alive, t) {
   fill(host, panel(TITLE, { right: reload, sub: `审计日 ${t.baseline.date} · ${t.cache_age_sec > 1 ? `缓存 ${num(t.cache_age_sec, 0)} 秒前` : "刚拉取"}` },
     lede,
     (t.flags || []).map((f) => h("p", { class: "callout warn" }, say(meta.flags, f))),
-    baselineStrip(t.baseline, t.chain),
+    baselineStrip(t.baseline, t.chain, meta.rules),
     h("div", { style: { height: "12px" } }),
     listHost),
   h("div", { style: { height: "16px" } }),

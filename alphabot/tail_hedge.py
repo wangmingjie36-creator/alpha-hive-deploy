@@ -53,7 +53,7 @@ VERSION = "tail_hedge_v1"
 
 #: 全是**主观常数、未经前向检验**（页面与帮助页原样显示这一句）。改任何一项 ⇒ 候选的含义变了，CHANGELOG 要写。
 RULES: Dict[str, object] = {
-    "target_dte": 45,             # 到期日取离它最近的（落在 [min_dte, max_dte] 内）
+    "target_dte": 45,             # 到期日：落在 [min_dte, max_dte] 内、先看能出几个可用候选（多者优先），并列再取离它最近的
     "min_dte": 21,
     "max_dte": 90,
     "ratio": 2,                   # 买入张数 : 卖出张数 = ratio : 1（后比例，买多卖少）
@@ -219,8 +219,49 @@ def _is_put(c) -> bool:
     return str((c or {}).get("cp") or "").strip().upper() in ("P", "PUT")
 
 
+def _leg_problem(legs: Sequence[dict]) -> Optional[str]:
+    """两条腿能不能成候选：先查报价（bid > 0 且 ask ≥ bid），再查 IV；返回原因码，没问题 ⇒ None。
+    `_candidate` 与选到期日（`usable_pairs`）**共用这一处**——「凑得齐」必须等于「候选真能出来」。"""
+    bad = next((l for l in legs if not l["quote_ok"]), None)
+    if bad:
+        return f"quote_not_ok:{bad['role']}"
+    bad = next((l for l in legs if not l["iv"] or l["iv"] <= 0), None)
+    if bad:
+        return f"iv_missing:{bad['role']}"
+    return None
+
+
+def candidate_pairs(rules: Optional[dict] = None) -> List[Tuple[float, float]]:
+    """(卖出档, 买入档) 的全部组合（买入档必须比卖出档更虚）。"""
+    r = rules or RULES
+    return [(sl, ll) for sl in r["short_delta_levels"] for ll in r["long_delta_levels"] if ll < sl]
+
+
+def usable_pairs(book: Sequence[dict], rules: Optional[dict] = None) -> int:
+    """这个到期日的认沽实际能出几个可用候选：两条腿都找得到（`pick_put`，差不超过容差）、买入腿行权价更低、
+    两条腿都有可用报价与 IV（`_leg_problem`）。数的是**候选**不是档位——一个认沽可以同时是几个档位里最接近的那个，
+    但候选需要两条不同的腿。"""
+    r = rules or RULES
+    tol, ratio = float(r["delta_tolerance"]), int(r["ratio"])
+    n = 0
+    for sl, ll in candidate_pairs(r):
+        cs, cl = pick_put(book, sl, tol), pick_put(book, ll, tol)
+        if cs is None or cl is None or not _num(cl["strike"]) < _num(cs["strike"]):
+            continue
+        if _leg_problem([_leg("short", cs, -1), _leg("long", cl, ratio)]) is None:
+            n += 1
+    return n
+
+
 def pick_expiry(contracts: Sequence[dict], rules: Optional[dict] = None) -> Optional[Tuple[str, int]]:
-    """落在 [min_dte, max_dte] 内、离 target_dte 最近的到期日（并列取更近的）；窗口内没有 ⇒ None。"""
+    """落在 [min_dte, max_dte] 内的到期日里：**先**挑能出可用候选最多的（`usable_pairs`），**并列**再取离 target_dte
+    最近的（再并列取更近的）；窗口内没有 ⇒ None。
+
+    只看离 target_dte 的远近会选中行权价很少的周度合约（2026-10-29：SPY 12-11 只有 19 个认沽、最低行权价 725，
+    10Δ / 5Δ 的认沽根本不存在 ⇒ 6 个候选里 4 个「没有够近的认沽」，而 12-18 的 258 个认沽能出全部 6 个）。
+    ⚠️ 可用候选数是**唯一**的先手条件，**没有离 target_dte 的惩罚**：窗口边缘（21 / 90 天）的到期日只要多出一个可用候选，
+    就会胜过离 45 天最近的那个（审查实测）——这是取舍不是 bug，页面「期权链」卡片会写出没选哪个、为什么。
+    可用候选数相同时行为与旧规则一致。"""
     r = rules or RULES
     lo, hi, tgt = r["min_dte"], r["max_dte"], r["target_dte"]
     seen: Dict[str, int] = {}
@@ -230,7 +271,7 @@ def pick_expiry(contracts: Sequence[dict], rules: Optional[dict] = None) -> Opti
             seen[str(e)] = int(d)
     if not seen:
         return None
-    exp = min(seen, key=lambda e: (abs(seen[e] - tgt), seen[e]))
+    exp = min(seen, key=lambda e: (-usable_pairs(_put_book(contracts, e), r), abs(seen[e] - tgt), seen[e]))
     return exp, seen[exp]
 
 
@@ -386,12 +427,9 @@ def _candidate(cid: str, short_level: float, long_level: float, c_short: dict, c
     legs = [_leg("short", c_short, -1), _leg("long", c_long, ratio)]
     head = {"id": cid, "ratio": ratio, "short_level": short_level, "long_level": long_level,
             "legs": [{k: (_r(v, 4) if isinstance(v, float) else v) for k, v in l.items()} for l in legs]}
-    bad = next((l for l in legs if not l["quote_ok"]), None)
-    if bad:
-        return {**head, "available": False, "reason": f"quote_not_ok:{bad['role']}", "flags": []}
-    bad = next((l for l in legs if not l["iv"] or l["iv"] <= 0), None)
-    if bad:
-        return {**head, "available": False, "reason": f"iv_missing:{bad['role']}", "flags": []}
+    problem = _leg_problem(legs)
+    if problem:
+        return {**head, "available": False, "reason": problem, "flags": []}
     flags: List[str] = [f"wide_spread:{l['role']}" for l in legs
                         if l["spread_pct"] is not None and l["spread_pct"] > deps.max_spread_pct]
     cost = unit_cost(legs)
@@ -477,6 +515,12 @@ def build(day: Optional[str], audit: Optional[dict], chain: Optional[dict], deps
         return unavailable("no_expiry_in_window", baseline=_baseline_brief(base))
     expiry, dte = pick
     book = _put_book(contracts, expiry)
+    n_pairs = len(candidate_pairs(r))
+    # 离目标天数最近的那个到期日（没被选中时页面写明为什么换了）
+    nearest = min({str(c.get("expiry")): int(_num(c["dte"])) for c in contracts
+                   if _is_put(c) and c.get("expiry") and _num(c.get("dte")) is not None
+                   and r["min_dte"] <= _num(c["dte"]) <= r["max_dte"]}.items(),
+                  key=lambda kv: (abs(kv[1] - r["target_dte"]), kv[1]))
     flags: List[str] = []
     if chain.get("session_live") or str(chain.get("vintage_date") or "") != str(day):
         flags.append("chain_not_audit_session")
@@ -514,7 +558,12 @@ def build(day: Optional[str], audit: Optional[dict], chain: Optional[dict], deps
             "chain": {"underlying": "SPY", "spot": _r(S), "vintage_date": chain.get("vintage_date"),
                       "session_live": bool(chain.get("session_live")), "expiry": expiry, "dte": dte,
                       "quote_time": chain.get("payload_last_trade_time"), "fetched_at": chain.get("fetched_at"),
-                      "spot_vs_audit_pct": _r(gap, 3), "n_puts_in_expiry": len(book)},
+                      "spot_vs_audit_pct": _r(gap, 3), "n_puts_in_expiry": len(book),
+                      "candidates_usable": usable_pairs(book, r), "candidates_total": n_pairs,
+                      "nearest_expiry": nearest[0] if nearest[0] != expiry else None,
+                      "nearest_expiry_dte": nearest[1] if nearest[0] != expiry else None,
+                      "nearest_candidates_usable": (usable_pairs(_put_book(contracts, nearest[0]), r)
+                                                    if nearest[0] != expiry else None)},
             "grid": {"spot_pct": base["spots"], "iv_pts": base["ivs"]},
             "flags": flags, "candidates": cands, "rules": public_rules()["rules"]}
 

@@ -213,6 +213,134 @@ class TestPicking:
         assert c["available"] is False and c["reason"] == "strikes_not_ordered"
 
 
+class TestExpiryCoverage:
+    """选到期日先看「实际能出几个可用候选」（v0.45.682）。
+
+    2026-10-29 实测：离 45 天最近的 SPY 12-11 是周度合约，CBOE 只列了 19 个认沽（行权价 725–815，没有 10Δ / 5Δ），
+    6 个候选里 4 个「没有够近的认沽」；12-18（50 天）有 258 个认沽、6 个候选全可算。夹具用同一形状。
+    先版本数的是「目标档位」，独立审查指出两处不对：一个认沽可同时是 3 个档位里最接近的那个、`bid = 0` 的远端腿档位「凑得齐」
+    候选却出不来——所以改成直接数候选，并用差分测试钉住它与 `build` 的可用候选数恒等。"""
+
+    #: 5 个目标档（卖 0.30 / 0.20，买 0.15 / 0.10 / 0.05）各一个认沽
+    FULL = (-0.30, -0.20, -0.15, -0.10, -0.05)
+    #: 2026-10-29 的 12-11：最深只到 −0.178（容差 0.05 ⇒ 30x15 / 20x15 两个候选可算，其余 4 个买入腿不存在）
+    PARTIAL = (-0.30, -0.20, -0.178)
+
+    def book(self, expiry, dte, deltas, base=95, bid=1.0, ask=1.1, zero_bid_from=None):
+        """行权价随 |delta| 变小而降；`zero_bid_from=k` ⇒ 第 k 个起（含）bid = 0（深度虚值没人出价）。"""
+        out = []
+        for i, dlt in enumerate(deltas):
+            b = 0.0 if zero_bid_from is not None and i >= zero_bid_from else bid
+            out.append(put(base - 5 * i, dlt, b, ask, dte=dte, expiry=expiry))
+        return out
+
+    def usable(self, puts, expiry):
+        return TH.usable_pairs(TH._put_book(puts, expiry))
+
+    def test_full_book_makes_all_six_and_partial_makes_two(self):
+        assert self.usable(self.book("E", 40, self.FULL), "E") == 6 == len(TH.candidate_pairs())
+        assert self.usable(self.book("E", 40, self.PARTIAL), "E") == 2
+
+    def test_usable_candidates_beat_distance_to_target(self):
+        cs = self.book("E43", 43, self.PARTIAL) + self.book("E50", 50, self.FULL)
+        assert TH.pick_expiry(cs) == ("E50", 50)                    # E43 离 45 更近、但只能出 2 个候选
+
+    def test_equal_usable_keeps_the_distance_rule(self):
+        cs = self.book("E43", 43, self.FULL) + self.book("E50", 50, self.FULL)
+        assert TH.pick_expiry(cs) == ("E43", 43)
+        tie = self.book("E40", 40, self.FULL) + self.book("E50", 50, self.FULL)
+        assert TH.pick_expiry(tie) == ("E40", 40)                   # 候选数并列、距离也并列 ⇒ 取更近的到期日（旧行为）
+
+    def test_none_complete_picks_the_most_usable(self):
+        cs = self.book("E30", 30, self.FULL[:1]) + self.book("E60", 60, self.FULL[:3])
+        assert TH.pick_expiry(cs) == ("E60", 60)
+
+    def test_bid_zero_far_otm_legs_do_not_make_an_expiry_usable(self):
+        """审查反例：C 凑齐 5 档、但 0.15 / 0.10 / 0.05 的认沽 bid = 0（`_quote.ok` 要求 bid > 0）⇒ 一个候选也出不来。"""
+        c = self.book("C", 45, self.FULL, zero_bid_from=2)
+        d = self.book("D", 80, self.FULL)
+        assert self.usable(c, "C") == 0
+        assert TH.pick_expiry(c + d) == ("D", 80)
+        assert all(x["available"] for x in build(c=chain(c + d))["candidates"])
+
+    def test_one_put_cannot_be_both_legs(self):
+        """审查反例：A 只有一个 −0.15 的认沽（对 0.20 / 0.15 / 0.10 都在容差内，旧的「档位数」给它 3 分）；
+        B 有 −0.30 与 −0.20 两个认沽，能出 30x15 一个候选。A 一个候选也出不来。"""
+        a = self.book("A", 45, (-0.15,))
+        b = self.book("B", 80, (-0.30, -0.20))
+        assert self.usable(a, "A") == 0 and self.usable(b, "B") == 1
+        assert TH.pick_expiry(a + b) == ("B", 80)
+
+    def test_missing_iv_blocks_the_candidate_like_build_does(self):
+        puts = self.book("E", 40, self.FULL)
+        puts[0] = {**puts[0], "iv": None}                           # 0.30 的卖出腿没有 IV ⇒ 两个以它为卖出腿的候选出不来
+        assert self.usable(puts, "E") == 3
+        res = build(c=chain(puts))
+        assert sum(1 for x in res["candidates"] if x["available"]) == 3
+        assert {x["reason"] for x in res["candidates"] if not x["available"]} == {"iv_missing:short"}
+
+    def test_window_still_bounds_the_choice(self):
+        cs = self.book("E10", 10, self.FULL) + self.book("E40", 40, self.FULL[:1])
+        assert TH.pick_expiry(cs) == ("E40", 40)                    # 凑得齐也不许跳出 [min_dte, max_dte]
+
+    def test_no_distance_penalty_is_the_documented_behaviour(self):
+        """窗口边缘的到期日只要多出一个可用候选就胜过离 45 天最近的（审查实测；docstring / 帮助页 / CHANGELOG 都写明了）。"""
+        for edge in (21, 90):
+            cs = self.book("N", 45, self.PARTIAL) + self.book("X", edge, self.FULL)
+            assert TH.pick_expiry(cs) == ("X", edge)
+
+    def test_regression_narrow_weekly_no_longer_costs_four_candidates(self):
+        weekly = [put(745, -0.2829, 7.8, 7.93, dte=43, expiry="E43"), put(730, -0.1997, 5.49, 5.6, dte=43, expiry="E43"),
+                  put(725, -0.1784, 4.92, 5.02, dte=43, expiry="E43")]    # 2026-10-29 的 12-11：最深只到 −0.178
+        monthly = self.book("E50", 50, self.FULL, base=95)
+        old = build(c=chain(weekly))
+        assert sum(1 for x in old["candidates"] if x["available"]) == 2    # 只有窗口里这一个到期日时仍是那 2 个（诚实不变）
+        res = build(c=chain(weekly + monthly))
+        assert res["chain"]["expiry"] == "E50"
+        assert all(x["available"] for x in res["candidates"]) and len(res["candidates"]) == 6
+
+    def test_selection_count_equals_what_build_makes_available(self):
+        """差分：随机到期日（档位疏密 / bid = 0 / 缺 IV 随机）——`usable_pairs` 必须恒等于 `build` 实际产出的可用候选数。
+        两处各写一套判据时，这条就是会红的那把尺子。"""
+        import random
+        rng = random.Random(20261029)
+        n_zero = n_full = 0
+        for _ in range(300):
+            k = rng.randint(1, 9)
+            deltas = sorted((-round(rng.uniform(0.02, 0.50), 3) for _ in range(k)), reverse=True)
+            deltas = sorted(set(deltas), key=abs, reverse=True)
+            puts = []
+            for i, dlt in enumerate(deltas):
+                bid = 0.0 if rng.random() < 0.25 else round(rng.uniform(0.2, 5.0), 2)
+                iv = None if rng.random() < 0.1 else 0.2
+                puts.append(put(100 - 3 * i, dlt, bid, bid + 0.1, iv=iv, dte=45, expiry="E"))
+            res = build(c=chain(puts))
+            got = sum(1 for x in res["candidates"] if x["available"])
+            assert self.usable(puts, "E") == got == res["chain"]["candidates_usable"], (deltas, got)
+            n_zero += got == 0
+            n_full += got == len(res["candidates"])
+        assert n_zero > 10 and n_full > 10            # 夹具有牙：既出现过「一个都出不来」、也出现过「全部可算」
+
+    def test_chain_brief_says_what_it_skipped(self):
+        cs = self.book("E43", 43, self.PARTIAL) + self.book("E50", 50, self.FULL)
+        ch = build(c=chain(cs))["chain"]
+        assert (ch["expiry"], ch["candidates_usable"], ch["candidates_total"]) == ("E50", 6, 6)
+        assert (ch["nearest_expiry"], ch["nearest_expiry_dte"], ch["nearest_candidates_usable"]) == ("E43", 43, 2)
+        same = build()["chain"]                                        # 默认夹具只有一个到期日、全可算
+        assert same["nearest_expiry"] is None and same["nearest_candidates_usable"] is None
+        assert same["candidates_usable"] == same["candidates_total"] == 6
+
+    def test_page_reads_the_new_fields_and_the_target_from_the_rules(self):
+        """去掉注释再查：token 只出现在注释里不算数；「离 N 天」的 N 取规则常量、不抄 45。"""
+        js = (STATIC / "pages" / "hedge_tail.js").read_text(encoding="utf-8")
+        code = re.sub(r"/\*.*?\*/|//[^\n]*", "", js, flags=re.S)
+        for token in ("candidates_usable", "candidates_total", "nearest_expiry", "nearest_candidates_usable", "rules?.target_dte"):
+            assert token in code, token
+        assert "离 45 天" not in code
+        assert "baselineStrip(t.baseline, t.chain, meta.rules)" in code       # 规则真的传进去了（否则 N 退回写「目标」）
+        assert "levels_covered" not in code and "levels_covered" not in MODULE.read_text(encoding="utf-8")
+
+
 class TestBaseline:
     def test_cells_worst_and_downside_worst(self):
         b, why = TH.baseline_from_audit("2026-10-23", audit())
