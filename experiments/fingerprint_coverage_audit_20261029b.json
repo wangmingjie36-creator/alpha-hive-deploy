@@ -1,0 +1,524 @@
+{
+ "generated_by": "experiments/fingerprint_coverage_audit.py",
+ "scan_day_commits": {
+  "2026-10-12": "0993efd",
+  "2026-10-13": "c39baa2",
+  "2026-10-14": "fb3a8d4",
+  "2026-10-15": "fb3a8d4",
+  "2026-10-16": "54c3d41",
+  "2026-10-19": "4745d85",
+  "2026-10-20": "b362d55",
+  "2026-10-21": "58a9fe5",
+  "2026-10-22": "78af0d0",
+  "2026-10-23": "00d4f5b",
+  "2026-10-26": "07356f3",
+  "2026-10-27": "ddc6229",
+  "2026-10-28": "8c433b4"
+ },
+ "n_deps_last_day": {
+  "buzz.channels": 13,
+  "buzz.reddit": 12,
+  "buzz.news": 27,
+  "buzz.yahoo": 10,
+  "buzz.fear_greed": 15,
+  "price.fields": 180
+ },
+ "errors": {},
+ "changes": [
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-15",
+   "to_day": "2026-10-16",
+   "from": "fb3a8d4",
+   "to": "54c3d41",
+   "label": "data_pipeline.py::_latest_closed_session",
+   "kind": "added",
+   "commits": [
+    "f8429c1f fix: v0.45.505 Twelve Data 量比兜底只在末根 = 最近一场已收盘时采用（收盘后扫描止于 D-1 ⇒ 拒收 + WARNING + still_missing ⇒ P2）；fetch_volume_ratio 加 as_of、StockData/to_dict 加 volume"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-15",
+   "to_day": "2026-10-16",
+   "from": "fb3a8d4",
+   "to": "54c3d41",
+   "label": "portfolio_greeks.py::_ET_TZ_NAME",
+   "kind": "added",
+   "commits": []
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-15",
+   "to_day": "2026-10-16",
+   "from": "fb3a8d4",
+   "to": "54c3d41",
+   "label": "portfolio_greeks.py::_et_now",
+   "kind": "added",
+   "commits": []
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-15",
+   "to_day": "2026-10-16",
+   "from": "fb3a8d4",
+   "to": "54c3d41",
+   "label": "portfolio_greeks.py::_expected_session",
+   "kind": "added",
+   "commits": []
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-15",
+   "to_day": "2026-10-16",
+   "from": "fb3a8d4",
+   "to": "54c3d41",
+   "label": "portfolio_greeks.py::_log",
+   "kind": "added",
+   "commits": []
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-15",
+   "to_day": "2026-10-16",
+   "from": "fb3a8d4",
+   "to": "54c3d41",
+   "label": "portfolio_greeks.py::_session_closed",
+   "kind": "added",
+   "commits": []
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-19",
+   "to_day": "2026-10-20",
+   "from": "4745d85",
+   "to": "b362d55",
+   "label": "data_pipeline.py::_HISTORY_FIELDS",
+   "kind": "changed",
+   "commits": [
+    "e2a097ee fix: --date 补跑路径的行情字段改用与实时扫描同一个一个月窗口（此前波动率按 60 天约 40 根算），窗口左端抽成唯一实现（v0.45.566）",
+    "1adec172 feat: volatility_20d 门槛 20 → 19 根 + buzz_v1 自证跳过协议排除日（用户 10-20 两项决定，v0.45.564）",
+    "0814ab9f fix: 提前收盘日「末根还在形成」按日历收盘时刻判——四处写死的 15:59 收成唯一实现 _session_last_minute（v0.45.563）",
+    "afa30a75 fix: 556/557 二次检查——自证窗口止于 H1 窗口起点前时不算通过；波动率回落日历预检 + 拆股护栏 + 口径进指纹（v0.45.562）",
+    "185733f5 feat: 波动率兜底——yfinance 缺 volatility_20d 时用 Twelve Data 复权日线（adjust=all）+ 核实收盘按同口径补上，缺了现在会红（v0.45.557）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-19",
+   "to_day": "2026-10-20",
+   "from": "4745d85",
+   "to": "b362d55",
+   "label": "data_pipeline.py::_completed_bar_close",
+   "kind": "changed",
+   "commits": [
+    "e2a097ee fix: --date 补跑路径的行情字段改用与实时扫描同一个一个月窗口（此前波动率按 60 天约 40 根算），窗口左端抽成唯一实现（v0.45.566）",
+    "1adec172 feat: volatility_20d 门槛 20 → 19 根 + buzz_v1 自证跳过协议排除日（用户 10-20 两项决定，v0.45.564）",
+    "0814ab9f fix: 提前收盘日「末根还在形成」按日历收盘时刻判——四处写死的 15:59 收成唯一实现 _session_last_minute（v0.45.563）",
+    "afa30a75 fix: 556/557 二次检查——自证窗口止于 H1 窗口起点前时不算通过；波动率回落日历预检 + 拆股护栏 + 口径进指纹（v0.45.562）",
+    "185733f5 feat: 波动率兜底——yfinance 缺 volatility_20d 时用 Twelve Data 复权日线（adjust=all）+ 核实收盘按同口径补上，缺了现在会红（v0.45.557）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-19",
+   "to_day": "2026-10-20",
+   "from": "4745d85",
+   "to": "b362d55",
+   "label": "data_pipeline.py::_drop_forming_bar",
+   "kind": "changed",
+   "commits": [
+    "e2a097ee fix: --date 补跑路径的行情字段改用与实时扫描同一个一个月窗口（此前波动率按 60 天约 40 根算），窗口左端抽成唯一实现（v0.45.566）",
+    "1adec172 feat: volatility_20d 门槛 20 → 19 根 + buzz_v1 自证跳过协议排除日（用户 10-20 两项决定，v0.45.564）",
+    "0814ab9f fix: 提前收盘日「末根还在形成」按日历收盘时刻判——四处写死的 15:59 收成唯一实现 _session_last_minute（v0.45.563）",
+    "afa30a75 fix: 556/557 二次检查——自证窗口止于 H1 窗口起点前时不算通过；波动率回落日历预检 + 拆股护栏 + 口径进指纹（v0.45.562）",
+    "185733f5 feat: 波动率兜底——yfinance 缺 volatility_20d 时用 Twelve Data 复权日线（adjust=all）+ 核实收盘按同口径补上，缺了现在会红（v0.45.557）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-19",
+   "to_day": "2026-10-20",
+   "from": "4745d85",
+   "to": "b362d55",
+   "label": "data_pipeline.py::_previous_session",
+   "kind": "added",
+   "commits": [
+    "e2a097ee fix: --date 补跑路径的行情字段改用与实时扫描同一个一个月窗口（此前波动率按 60 天约 40 根算），窗口左端抽成唯一实现（v0.45.566）",
+    "1adec172 feat: volatility_20d 门槛 20 → 19 根 + buzz_v1 自证跳过协议排除日（用户 10-20 两项决定，v0.45.564）",
+    "0814ab9f fix: 提前收盘日「末根还在形成」按日历收盘时刻判——四处写死的 15:59 收成唯一实现 _session_last_minute（v0.45.563）",
+    "afa30a75 fix: 556/557 二次检查——自证窗口止于 H1 窗口起点前时不算通过；波动率回落日历预检 + 拆股护栏 + 口径进指纹（v0.45.562）",
+    "185733f5 feat: 波动率兜底——yfinance 缺 volatility_20d 时用 Twelve Data 复权日线（adjust=all）+ 核实收盘按同口径补上，缺了现在会红（v0.45.557）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-19",
+   "to_day": "2026-10-20",
+   "from": "4745d85",
+   "to": "b362d55",
+   "label": "data_pipeline.py::_session_last_minute",
+   "kind": "added",
+   "commits": [
+    "e2a097ee fix: --date 补跑路径的行情字段改用与实时扫描同一个一个月窗口（此前波动率按 60 天约 40 根算），窗口左端抽成唯一实现（v0.45.566）",
+    "1adec172 feat: volatility_20d 门槛 20 → 19 根 + buzz_v1 自证跳过协议排除日（用户 10-20 两项决定，v0.45.564）",
+    "0814ab9f fix: 提前收盘日「末根还在形成」按日历收盘时刻判——四处写死的 15:59 收成唯一实现 _session_last_minute（v0.45.563）",
+    "afa30a75 fix: 556/557 二次检查——自证窗口止于 H1 窗口起点前时不算通过；波动率回落日历预检 + 拆股护栏 + 口径进指纹（v0.45.562）",
+    "185733f5 feat: 波动率兜底——yfinance 缺 volatility_20d 时用 Twelve Data 复权日线（adjust=all）+ 核实收盘按同口径补上，缺了现在会红（v0.45.557）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-19",
+   "to_day": "2026-10-20",
+   "from": "4745d85",
+   "to": "b362d55",
+   "label": "twelve_data.py::ADJUSTED_WINDOW",
+   "kind": "added",
+   "commits": [
+    "afa30a75 fix: 556/557 二次检查——自证窗口止于 H1 窗口起点前时不算通过；波动率回落日历预检 + 拆股护栏 + 口径进指纹（v0.45.562）",
+    "185733f5 feat: 波动率兜底——yfinance 缺 volatility_20d 时用 Twelve Data 复权日线（adjust=all）+ 核实收盘按同口径补上，缺了现在会红（v0.45.557）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-19",
+   "to_day": "2026-10-20",
+   "from": "4745d85",
+   "to": "b362d55",
+   "label": "twelve_data.py::_ADJ_CACHE",
+   "kind": "added",
+   "commits": [
+    "afa30a75 fix: 556/557 二次检查——自证窗口止于 H1 窗口起点前时不算通过；波动率回落日历预检 + 拆股护栏 + 口径进指纹（v0.45.562）",
+    "185733f5 feat: 波动率兜底——yfinance 缺 volatility_20d 时用 Twelve Data 复权日线（adjust=all）+ 核实收盘按同口径补上，缺了现在会红（v0.45.557）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-19",
+   "to_day": "2026-10-20",
+   "from": "4745d85",
+   "to": "b362d55",
+   "label": "twelve_data.py::_adj_stats",
+   "kind": "added",
+   "commits": [
+    "afa30a75 fix: 556/557 二次检查——自证窗口止于 H1 窗口起点前时不算通过；波动率回落日历预检 + 拆股护栏 + 口径进指纹（v0.45.562）",
+    "185733f5 feat: 波动率兜底——yfinance 缺 volatility_20d 时用 Twelve Data 复权日线（adjust=all）+ 核实收盘按同口径补上，缺了现在会红（v0.45.557）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-19",
+   "to_day": "2026-10-20",
+   "from": "4745d85",
+   "to": "b362d55",
+   "label": "twelve_data.py::_fetch_rows",
+   "kind": "changed",
+   "commits": [
+    "afa30a75 fix: 556/557 二次检查——自证窗口止于 H1 窗口起点前时不算通过；波动率回落日历预检 + 拆股护栏 + 口径进指纹（v0.45.562）",
+    "185733f5 feat: 波动率兜底——yfinance 缺 volatility_20d 时用 Twelve Data 复权日线（adjust=all）+ 核实收盘按同口径补上，缺了现在会红（v0.45.557）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-19",
+   "to_day": "2026-10-20",
+   "from": "4745d85",
+   "to": "b362d55",
+   "label": "twelve_data.py::fetch_adjusted_bars",
+   "kind": "added",
+   "commits": [
+    "afa30a75 fix: 556/557 二次检查——自证窗口止于 H1 窗口起点前时不算通过；波动率回落日历预检 + 拆股护栏 + 口径进指纹（v0.45.562）",
+    "185733f5 feat: 波动率兜底——yfinance 缺 volatility_20d 时用 Twelve Data 复权日线（adjust=all）+ 核实收盘按同口径补上，缺了现在会红（v0.45.557）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-20",
+   "to_day": "2026-10-21",
+   "from": "b362d55",
+   "to": "58a9fe5",
+   "label": "data_pipeline.py::_exchange_now",
+   "kind": "changed",
+   "commits": [
+    "a9dfdb21 feat: 观测层 observation_layer——行情三字段主路径的原始输入（yfinance 日线 + 交易所时钟）在取数处原样落档、data_pipeline 三条路径登记用了哪几份（buzz_v1 根治阶段 1b，只存不改值，v0.45.580）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-20",
+   "to_day": "2026-10-21",
+   "from": "b362d55",
+   "to": "58a9fe5",
+   "label": "data_pipeline.py::_history_observations",
+   "kind": "added",
+   "commits": [
+    "a9dfdb21 feat: 观测层 observation_layer——行情三字段主路径的原始输入（yfinance 日线 + 交易所时钟）在取数处原样落档、data_pipeline 三条路径登记用了哪几份（buzz_v1 根治阶段 1b，只存不改值，v0.45.580）"
+   ]
+  },
+  {
+   "unit": "buzz.news",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "hive_logger.py::read_json_cache",
+   "kind": "added",
+   "commits": []
+  },
+  {
+   "unit": "buzz.news",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "observation_layer.py::CARRIER_KEY",
+   "kind": "added",
+   "commits": [
+    "47cc36f7 fix: 观测层版本化第一块——新闻 / F&G 取数缓存改存原始观测、Reddit 单票派生缓存删除：没开档的进程先填了缓存，扫描命中时档案照样完整，不再白丢桥接日（v0.45.591）"
+   ]
+  },
+  {
+   "unit": "buzz.news",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "observation_layer.py::_cache_doc_ok",
+   "kind": "added",
+   "commits": [
+    "47cc36f7 fix: 观测层版本化第一块——新闻 / F&G 取数缓存改存原始观测、Reddit 单票派生缓存删除：没开档的进程先填了缓存，扫描命中时档案照样完整，不再白丢桥接日（v0.45.591）"
+   ]
+  },
+  {
+   "unit": "buzz.news",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "observation_layer.py::_log",
+   "kind": "added",
+   "commits": [
+    "47cc36f7 fix: 观测层版本化第一块——新闻 / F&G 取数缓存改存原始观测、Reddit 单票派生缓存删除：没开档的进程先填了缓存，扫描命中时档案照样完整，不再白丢桥接日（v0.45.591）"
+   ]
+  },
+  {
+   "unit": "buzz.news",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "observation_layer.py::cache_path",
+   "kind": "added",
+   "commits": [
+    "47cc36f7 fix: 观测层版本化第一块——新闻 / F&G 取数缓存改存原始观测、Reddit 单票派生缓存删除：没开档的进程先填了缓存，扫描命中时档案照样完整，不再白丢桥接日（v0.45.591）"
+   ]
+  },
+  {
+   "unit": "buzz.news",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "observation_layer.py::cache_read",
+   "kind": "added",
+   "commits": [
+    "47cc36f7 fix: 观测层版本化第一块——新闻 / F&G 取数缓存改存原始观测、Reddit 单票派生缓存删除：没开档的进程先填了缓存，扫描命中时档案照样完整，不再白丢桥接日（v0.45.591）"
+   ]
+  },
+  {
+   "unit": "buzz.news",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "observation_layer.py::cache_write",
+   "kind": "added",
+   "commits": [
+    "47cc36f7 fix: 观测层版本化第一块——新闻 / F&G 取数缓存改存原始观测、Reddit 单票派生缓存删除：没开档的进程先填了缓存，扫描命中时档案照样完整，不再白丢桥接日（v0.45.591）"
+   ]
+  },
+  {
+   "unit": "buzz.fear_greed",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "observation_layer.py::CARRIER_KEY",
+   "kind": "added",
+   "commits": [
+    "47cc36f7 fix: 观测层版本化第一块——新闻 / F&G 取数缓存改存原始观测、Reddit 单票派生缓存删除：没开档的进程先填了缓存，扫描命中时档案照样完整，不再白丢桥接日（v0.45.591）"
+   ]
+  },
+  {
+   "unit": "buzz.fear_greed",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "observation_layer.py::_cache_doc_ok",
+   "kind": "added",
+   "commits": [
+    "47cc36f7 fix: 观测层版本化第一块——新闻 / F&G 取数缓存改存原始观测、Reddit 单票派生缓存删除：没开档的进程先填了缓存，扫描命中时档案照样完整，不再白丢桥接日（v0.45.591）"
+   ]
+  },
+  {
+   "unit": "buzz.fear_greed",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "observation_layer.py::_log",
+   "kind": "added",
+   "commits": [
+    "47cc36f7 fix: 观测层版本化第一块——新闻 / F&G 取数缓存改存原始观测、Reddit 单票派生缓存删除：没开档的进程先填了缓存，扫描命中时档案照样完整，不再白丢桥接日（v0.45.591）"
+   ]
+  },
+  {
+   "unit": "buzz.fear_greed",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "observation_layer.py::cache_path",
+   "kind": "added",
+   "commits": [
+    "47cc36f7 fix: 观测层版本化第一块——新闻 / F&G 取数缓存改存原始观测、Reddit 单票派生缓存删除：没开档的进程先填了缓存，扫描命中时档案照样完整，不再白丢桥接日（v0.45.591）"
+   ]
+  },
+  {
+   "unit": "buzz.fear_greed",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "observation_layer.py::cache_read",
+   "kind": "added",
+   "commits": [
+    "47cc36f7 fix: 观测层版本化第一块——新闻 / F&G 取数缓存改存原始观测、Reddit 单票派生缓存删除：没开档的进程先填了缓存，扫描命中时档案照样完整，不再白丢桥接日（v0.45.591）"
+   ]
+  },
+  {
+   "unit": "buzz.fear_greed",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "observation_layer.py::cache_write",
+   "kind": "added",
+   "commits": [
+    "47cc36f7 fix: 观测层版本化第一块——新闻 / F&G 取数缓存改存原始观测、Reddit 单票派生缓存删除：没开档的进程先填了缓存，扫描命中时档案照样完整，不再白丢桥接日（v0.45.591）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "hive_logger.py::SafeJSONEncoder",
+   "kind": "added",
+   "commits": []
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "hive_logger.py::atomic_json_write",
+   "kind": "added",
+   "commits": []
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-21",
+   "to_day": "2026-10-22",
+   "from": "58a9fe5",
+   "to": "78af0d0",
+   "label": "hive_logger.py::read_json_cache",
+   "kind": "added",
+   "commits": []
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-23",
+   "to_day": "2026-10-26",
+   "from": "00d4f5b",
+   "to": "07356f3",
+   "label": "swarm_agents/cache.py::_LEGACY_MAX_ERRORS",
+   "kind": "added",
+   "commits": [
+    "f0bf326d fix: v0.45.645 yfinance 公司行动空行不再污染行情三字段——生产四条取数路径与维度 IC 冻结通道层同口径去掉（price.fields → measurement_fix，§13.10 追加）",
+    "7d6121d8 fix: v0.45.639 二次检查——旧回落计数加评分时快照（告警影响分三种写）、conftest 每条测试清零计数、旧回落 avg_volume 0→None、去掉「只有 observation_layer」的过度断言、ML 世代说明措辞",
+    "0728b82b fix: v0.45.639 行情三字段公式收成唯一实现 price_metrics（根治均量兜底 1.0 修了三次）+ cache.py 旧回落不再伪造量比、走到即 P1；BearBee options 标签照抄 Oracle 判定（边界 10-19 + 等价判据 + 印记）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-23",
+   "to_day": "2026-10-26",
+   "from": "00d4f5b",
+   "to": "07356f3",
+   "label": "swarm_agents/cache.py::_legacy_lock",
+   "kind": "added",
+   "commits": [
+    "f0bf326d fix: v0.45.645 yfinance 公司行动空行不再污染行情三字段——生产四条取数路径与维度 IC 冻结通道层同口径去掉（price.fields → measurement_fix，§13.10 追加）",
+    "7d6121d8 fix: v0.45.639 二次检查——旧回落计数加评分时快照（告警影响分三种写）、conftest 每条测试清零计数、旧回落 avg_volume 0→None、去掉「只有 observation_layer」的过度断言、ML 世代说明措辞",
+    "0728b82b fix: v0.45.639 行情三字段公式收成唯一实现 price_metrics（根治均量兜底 1.0 修了三次）+ cache.py 旧回落不再伪造量比、走到即 P1；BearBee options 标签照抄 Oracle 判定（边界 10-19 + 等价判据 + 印记）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-23",
+   "to_day": "2026-10-26",
+   "from": "00d4f5b",
+   "to": "07356f3",
+   "label": "swarm_agents/cache.py::_legacy_stats",
+   "kind": "added",
+   "commits": [
+    "f0bf326d fix: v0.45.645 yfinance 公司行动空行不再污染行情三字段——生产四条取数路径与维度 IC 冻结通道层同口径去掉（price.fields → measurement_fix，§13.10 追加）",
+    "7d6121d8 fix: v0.45.639 二次检查——旧回落计数加评分时快照（告警影响分三种写）、conftest 每条测试清零计数、旧回落 avg_volume 0→None、去掉「只有 observation_layer」的过度断言、ML 世代说明措辞",
+    "0728b82b fix: v0.45.639 行情三字段公式收成唯一实现 price_metrics（根治均量兜底 1.0 修了三次）+ cache.py 旧回落不再伪造量比、走到即 P1；BearBee options 标签照抄 Oracle 判定（边界 10-19 + 等价判据 + 印记）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-23",
+   "to_day": "2026-10-26",
+   "from": "00d4f5b",
+   "to": "07356f3",
+   "label": "swarm_agents/cache.py::_record_legacy_fallback",
+   "kind": "added",
+   "commits": [
+    "f0bf326d fix: v0.45.645 yfinance 公司行动空行不再污染行情三字段——生产四条取数路径与维度 IC 冻结通道层同口径去掉（price.fields → measurement_fix，§13.10 追加）",
+    "7d6121d8 fix: v0.45.639 二次检查——旧回落计数加评分时快照（告警影响分三种写）、conftest 每条测试清零计数、旧回落 avg_volume 0→None、去掉「只有 observation_layer」的过度断言、ML 世代说明措辞",
+    "0728b82b fix: v0.45.639 行情三字段公式收成唯一实现 price_metrics（根治均量兜底 1.0 修了三次）+ cache.py 旧回落不再伪造量比、走到即 P1；BearBee options 标签照抄 Oracle 判定（边界 10-19 + 等价判据 + 印记）"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-26",
+   "to_day": "2026-10-27",
+   "from": "07356f3",
+   "to": "ddc6229",
+   "label": "cboe_options.py::CboeStaleVintageError",
+   "kind": "changed",
+   "commits": [
+    "9574d49a feat: v0.45.656 Alpha Bot 跨式页 stale_vintage 翻成人话——开盘不足 15 分钟（CBOE 延迟文件还没滚到今天）与「该票文件卡住」分开说，写出文件最后成交时刻"
+   ]
+  },
+  {
+   "unit": "price.fields",
+   "from_day": "2026-10-26",
+   "to_day": "2026-10-27",
+   "from": "07356f3",
+   "to": "ddc6229",
+   "label": "cboe_options.py::_fetch_cboe_payload",
+   "kind": "changed",
+   "commits": [
+    "9574d49a feat: v0.45.656 Alpha Bot 跨式页 stale_vintage 翻成人话——开盘不足 15 分钟（CBOE 延迟文件还没滚到今天）与「该票文件卡住」分开说，写出文件最后成交时刻"
+   ]
+  }
+ ]
+}
