@@ -7,7 +7,20 @@
 
 ## [0.45.682] — 2026-10-29 — 占位（进行中：尾部对冲候选面板选到期日——离 45 天最近的可能是行权价很少的周度合约（SPY 12-11 只有 19 个认沽、最低 725），6 个候选里 4 个「没有够近的认沽」；改成先看能凑齐几个目标档位）
 
-## [0.45.681] — 2026-10-29 — 占位（进行中：test_outcomes_backlog_starvation 数退避的测试不再替换全局 time.sleep，改只数被测模块自己的 sleep）
+## [0.45.681] — 2026-10-29 — Fixed：`tests/test_outcomes_backlog_starvation.py` 数 sleep 的测试不再替换全局 `time.sleep`，改只数被测模块自己的 sleep；新增确定性注入「别的线程 sleep」
+
+**起因（2026-10-29 验证「4 条数全局 sleep 的测试」那项待验证）**：这个文件 3 处 `monkeypatch.setattr(of.time, "sleep", …)`——`of.time` **就是**全局 `time` 模块，换掉的是所有人的 `sleep`（同 v0.45.664 的形状）。其中两条在数：`test_one_run_drains_everything_locally_resolvable`（`sleeps == []`）、`test_network_budget_caps_only_network_and_defers_the_rest`（`len(sleeps) == 3`）。注入一个每 2ms `time.sleep(0)` 的遗留线程 ⇒ 两条**次次红**（`[0, 0, …] == []`、`6 == 3`）。整套里目前不会发生——只读探针实测它们跑的时候没有别的线程，唯一常驻的遗留线程（chromadb 带起的 posthog 消费线程）在 pytest 下被禁用、从不 sleep——但只要以后有测试在它们前面漏下一个会 sleep 的线程，就会偶发红。
+
+- `tests/test_outcomes_backlog_starvation.py`：
+  - 新增 `_ModuleTime`：被测模块自己看到的 `time`，只把 `sleep` 换成记录器、其余原样转给真 `time`（拨钟 harness 的补丁照样生效）。3 处都改成 `monkeypatch.setattr(of, "time", _ModuleTime(…))`——只换 `outcomes_fetcher` 模块里那个名字，**不改生产代码**：生产那行 `time.sleep(self.rate_limit)` 照旧被直接验证（没另造接缝：造了就得再证明接缝真在睡，见 `tests/test_retry_backoff_seams.py`）。
+  - 新增夹具 `stray_sleeps`（`quiet` / `other_thread`）：`other_thread` 在每次 `OutcomesFetcher.run` 开跑时另起线程调一次全局 `time.sleep(0)` 并等它结束——**确定性**落在计数窗口里（靠真时间的定时线程撞不撞得上看测试多快，`test_network_budget…` 只跑几毫秒）；没触发就收尾报错。挂在两条数 sleep 的测试上（14 → 16 条）。
+  - `len(sleeps) == 3` 收紧为 `sleeps == [0.5] * 3`：顺带钉住等的秒数就是 `rate_limit`。
+
+**变异检查**（6 个，全红在预期断言上，还原后绿；字节码关掉跑）：退回替换全局 `time.sleep`（保留注入器）⇒ 只红两条 `other_thread`——正是本次要防的情形 / 注入器不起线程 ⇒ 收尾自证报错 / 代理不拦 `sleep` ⇒ 红 / 生产出网后不再等 ⇒ 红 / 生产本地命中也 sleep ⇒ 红 / 生产等的秒数不是 `rate_limit` ⇒ 红（旧的 `len == 3` 抓不到这个）。
+
+**核对**：本文件 16 passed；拨钟审计 +7 / +45 / +400 新红 0 条；`select_tests.py --run`（13 个元守卫 + 本文件等 15 个文件）1149 passed、登记表不过期。整套交给 CI。
+
+**没改**：`tests/test_llm_service.py` 也有 2 条数全局 sleep（`len(slept) == 1 / 0`）——测试体只跑几微秒，同样的注入实测撞不上；要改照本条的做法。
 
 ## [0.45.680] — 2026-10-29 — Fixed：v0.45.673 二次检查——JSON 失败日志里的解析偏移是相对「被解析的那一段」、不是相对回复原文（读的人会数错位置），改成相对原文 + 附出错处前后各 60 字符；失败日志再记 `stop_details`（API 给了就记）
 

@@ -9,6 +9,8 @@
 import json
 import os
 import sys
+import threading
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -33,6 +35,43 @@ def _bdays(start: date, n: int):
             out.append(d)
         d += timedelta(days=1)
     return out
+
+
+class _ModuleTime:
+    """被测模块自己看到的 `time`：只把 `sleep` 换成记录器，其余原样转给真 `time` 模块（拨钟 harness 装上的补丁也照样生效）。
+
+    v0.45.681：数 sleep 的测试原先 `monkeypatch.setattr(of.time, "sleep", …)`——`of.time` **就是**全局 `time` 模块，换掉的是所有人的
+    `sleep`，别的线程（整套里遗留的后台线程）在测试窗口里 sleep 一次就被数进来，`sleeps == []` / `len(sleeps) == 3` 偶发红
+    （2026-10-29 注入实测次次红；同形见 v0.45.664）。这里只换 `outcomes_fetcher` 模块里那个名字，生产那行 `time.sleep(self.rate_limit)`
+    照旧被直接验证，别人的 sleep 碰不到它。"""
+
+    def __init__(self, sleep):
+        self.sleep = sleep
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+@pytest.fixture(params=["quiet", "other_thread"])
+def stray_sleeps(request, monkeypatch):
+    """别的线程对**全局** `time.sleep` 的调用——数 sleep 的测试必须不受它影响（v0.45.681，同 v0.45.664 的 `stray_sleeps`）。
+
+    `other_thread`：每次 `OutcomesFetcher.run` 开跑时另起一个线程调一次全局 `time.sleep(0)`、等它结束——确定性地落在测试计数的窗口里
+    （整套里遗留的后台线程就是这个形状；靠真时间的定时线程撞不撞得上要看测试多快，这里不靠运气）。注入器没触发就在收尾报错，免得空过。"""
+    fired = []
+    if request.param == "other_thread":
+        real_run = OutcomesFetcher.run
+
+        def run_with_a_foreign_sleep(self, *a, **k):
+            t = threading.Thread(target=lambda: (time.sleep(0), fired.append(1)), name="stray_sleep")
+            t.start()
+            t.join(5)
+            return real_run(self, *a, **k)
+
+        monkeypatch.setattr(OutcomesFetcher, "run", run_with_a_foreign_sleep)
+    yield request.param
+    if request.param != "quiet":
+        assert fired, f"注入器 {request.param} 一次都没触发——这条用例没有测到它声称的情形"
 
 
 def _write(d, ticker, day, price, t1=None, t7=None, t30=None):
@@ -68,10 +107,10 @@ def test_fixture_reproduces_the_overload(universe):
     assert {"ABBV", "XOM"} <= tks
 
 
-def test_one_run_drains_everything_locally_resolvable(universe, monkeypatch):
+def test_one_run_drains_everything_locally_resolvable(universe, monkeypatch, stray_sleeps):
     """核心回归：一轮之内本地能查到的全部补上——包括字母序最后的 XOM；本地命中不 sleep、不占出网配额。"""
     sleeps = []
-    monkeypatch.setattr(of.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(of, "time", _ModuleTime(sleeps.append))      # 只数被测模块自己的 sleep（见 `_ModuleTime`）
     f = OutcomesFetcher(str(universe), rate_limit=0.5, max_network_fetches=50)
     stats = f.run()
 
@@ -129,15 +168,15 @@ def _network_only_world(tmp_path, n):
     return d
 
 
-def test_network_budget_caps_only_network_and_defers_the_rest(tmp_path, monkeypatch):
+def test_network_budget_caps_only_network_and_defers_the_rest(tmp_path, monkeypatch, stray_sleeps):
     fake = _FakeYF()
     monkeypatch.setattr(of, "_yf", fake)
     sleeps = []
-    monkeypatch.setattr(of.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(of, "time", _ModuleTime(sleeps.append))      # 只数被测模块自己的 sleep（见 `_ModuleTime`）
     d = _network_only_world(tmp_path, 8)
     stats = OutcomesFetcher(str(d), rate_limit=0.5, max_network_fetches=3).run()
     assert fake.calls == 3 and stats["network_fetches"] == 3 and stats["network_deferred"] == 5
-    assert len(sleeps) == 3                     # sleep 只跟在出网请求后面
+    assert sleeps == [0.5] * 3                  # sleep 只跟在出网请求后面，按 rate_limit 等
     # 被推迟的是较新的；下一轮最老的先上
     left = [os.path.basename(p) for p, _, _ in OutcomesFetcher(str(d))._scan_pending()]
     assert len(left) == 5 and left == sorted(left, key=lambda n: n.split("_")[1])
@@ -146,7 +185,7 @@ def test_network_budget_caps_only_network_and_defers_the_rest(tmp_path, monkeypa
 def test_rate_limit_streak_stops_network_but_not_local(tmp_path, monkeypatch):
     fake = _FakeYF(rate_limited_first=10)
     monkeypatch.setattr(of, "_yf", fake)
-    monkeypatch.setattr(of.time, "sleep", lambda s: None)
+    monkeypatch.setattr(of, "time", _ModuleTime(lambda s: None))
     d = _network_only_world(tmp_path, 6)
     # 再放一份本地能查到的：DDD 有当天快照 + 次日快照
     day0 = _bdays(date.today() - timedelta(days=12), 2)
