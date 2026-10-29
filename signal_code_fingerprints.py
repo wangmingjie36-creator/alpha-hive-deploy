@@ -32,8 +32,9 @@ v0.45.330 的 `_buzz_scope_gaps` 只守一个方向：「点名了通道，必�
 
 ⚠️ 已知不管的（写在这里，免得被当成「守住了」）
 ----------------------------------------------
-- **推不出来的依赖**：动态访问（`getattr(obj, 变量)`、importlib）、实例属性**里装的值**（`__init__` 赋的 / 外部注入的，
-  如 `inject_prefetched` 塞进 `self._prefetched_stock` 的预取包）和经它调的方法（`self._x.fetch()`）、`type(self).X`、
+- **推不出来的依赖**：动态访问（`getattr(obj, 变量)`、importlib）、**从类外**塞进实例属性的值（如 `inject_prefetched` 写进
+  `self._prefetched_stock` 的预取包、`self._target_date`；类内方法里的 `self.x = …` v0.45.679 起算进去，见 `_attr_assignments`）、
+  经实例属性调的方法（`self._x.fetch()`——`_x` 是什么类型静态看不出）、`type(self).X`、
   环境变量、数据 / 状态文件、第三方库版本（v0.45.671 前「取数细节不在指纹里」那条已由依赖闭包补上；
   `self.方法` / `cls.X` / `super().X` 自 v0.45.676 起按类继承链静态解析，见 `_mro_lookup`）。
 - **LLM 新闻增强**（`llm_service.analyze_news_sentiment`）：只在 LLM 可用时生效，生产恒 `--no-llm`；
@@ -291,6 +292,13 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "_validate_ticker（及它用的 swarm_agents/_config._RE_TICKER）/ _get_history_context（及 hive_logger.pdt_today、_PDT_TZ）。"
      "生产代码没改。窗口审计：这 6 项在 10-12 至 10-28 共 13 个扫描日逐日未变（v0.45.674 改的是 BeeAgent 的别的成员，只取用到的成员故不涉及）。"
      "**用户 2026-10-29 在对话里选「登记 coverage」**"),
+    # v0.45.679（676 二次检查：实例属性的类内赋值也算依赖、泛型基类、getattr(self, 常量)、结果与处理顺序无关）：
+    # 只有 buzz.channels 变。窗口审计同一脚本重做（证据 experiments/fingerprint_coverage_audit_20261029b.json）
+    ("buzz.channels",   "ae2770c50c07ec45", "coverage",
+     "v0.45.679：依赖闭包新推出 BeeAgent.__init__ 里给 _prefetched_stock / _prefetched_context / retriever 赋值的 3 条语句"
+     "（_get_stock_data / _get_history_context 读这些实例属性）。生产代码没改。窗口审计：这 3 条在 10-12 至 10-28 共 13 个"
+     "扫描日逐日未变，10-28 扫描提交 8c433b4 → 本次基线也未变（v0.45.674 在 __init__ 里加的 _prefetched_macro Buzz 不读，不在内）。"
+     "**用户 2026-10-29 在对话里选「登记 coverage」**"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change", "coverage"})
@@ -426,8 +434,9 @@ _LOCATORS: Dict[str, Callable[[ast.Module, str, str], tuple]] = {
 #     `observation_layer` 缓存函数在 price.fields 的整份定位里，但 price.fields 不守新闻 ⇒ buzz.news 照样把它们算进去）。
 #   · 定位不到定义 ⇒ 抛 `FingerprintError`，不当作「没变」。
 #
-# ⚠️ 推不出来的（写在这里，免得被当成「守住了」）：动态访问（`getattr(obj, 变量)`、importlib）、实例属性里装的值与经它调的
-# 方法（`self._x.fetch()`——`_x` 是什么类型静态看不出；类本身被引用到才算进去）、`type(self).X`、经别名改 config
+# ⚠️ 推不出来的（写在这里，免得被当成「守住了」）：动态访问（`getattr(obj, 变量)`、importlib）、从类外塞进实例属性的值
+# （类内 `self.x = …` v0.45.679 起算）、经实例属性调的方法（`self._x.fetch()`——`_x` 是什么类型静态看不出；类本身被引用到
+# 才算进去）、`type(self).X`、经别名改 config
 # （`_t = X["ttl"]; _t["k"] = …`）、环境变量、数据 / 状态文件、
 # 第三方库（yfinance 版本）、Python 版本。继承链按「先自己、再按基类从左到右深度优先」近似 MRO（单继承时与 C3 相同）。
 
@@ -684,9 +693,14 @@ def _references(src: "_Sources", rel: str, nodes, whole_file: bool, inst: Option
                     mod, node = sub, p
                 ext.append((mod, node.attr, _keypath(node, par)))
         elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr" and len(n.args) >= 2:
-            a = aliases.get(n.args[0].id) if isinstance(n.args[0], ast.Name) else None
-            if a and a[1] is None and isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str):
-                ext.append((a[0], n.args[1].value, _keypath(n, par)))
+            a0, a1 = n.args[0], n.args[1]
+            const = a1.value if isinstance(a1, ast.Constant) and isinstance(a1.value, str) else None
+            if isinstance(a0, ast.Name) and a0.id in _SELF_NAMES and def_c is not None and const is not None:
+                members.append((inst_c, def_c, const, False))      # `getattr(self, "x")` ≡ `self.x`（v0.45.679）
+            else:
+                a = aliases.get(a0.id) if isinstance(a0, ast.Name) else None
+                if a and a[1] is None and const is not None:
+                    ext.append((a[0], const, _keypath(n, par)))
         elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id not in local:
             a = aliases.get(n.id)
             if a is not None:
@@ -749,6 +763,8 @@ def _base_classes(src: "_Sources", rel: str, cls: ast.ClassDef) -> List[_Cls]:
     aliases = None
     for b in cls.bases:
         found = None
+        if isinstance(b, ast.Subscript):          # `Base[T]`（泛型基类）：取 Base（v0.45.679，此前整条认不出）
+            b = b.value
         if isinstance(b, ast.Name):
             found = _class_node(src, rel, b.id)
         elif isinstance(b, ast.Attribute) and isinstance(b.value, ast.Name):
@@ -768,9 +784,8 @@ def _class_members(cls: ast.ClassDef, attr: str) -> List[ast.stmt]:
             or _binds_name(st, attr)]
 
 
-def _mro_lookup(src: "_Sources", start: List[_Cls], attr: str) -> Optional[Tuple[str, ast.ClassDef, List[ast.stmt]]]:
-    """从 `start` 起按「先自己、再基类从左到右深度优先」找第一个定义 `attr` 的类（单继承时与 Python 的 MRO 相同）。
-    都没有 ⇒ None：实例属性（值在 `__init__` 里赋或从外部注入）或外部基类的成员——推不出来，见模块说明。"""
+def _mro_classes(src: "_Sources", start: List[_Cls]):
+    """从 `start` 起「先自己、再基类从左到右深度优先」逐个给出本仓里的类（单继承时与 Python 的 MRO 相同）。"""
     visited: set = set()
     stack = list(reversed(start))
     while stack:
@@ -778,11 +793,48 @@ def _mro_lookup(src: "_Sources", start: List[_Cls], attr: str) -> Optional[Tuple
         if id(cls) in visited:
             continue
         visited.add(id(cls))
+        yield rel, cls
+        stack.extend(reversed(_base_classes(src, rel, cls)))
+
+
+def _mro_lookup(src: "_Sources", start: List[_Cls], attr: str) -> Optional[Tuple[str, ast.ClassDef, List[ast.stmt]]]:
+    """继承链上第一个在类体里定义 `attr` 的类（方法 / 类属性）。都没有 ⇒ None：实例属性（见 `_attr_assignments`）
+    或外部基类（ABC / object / 第三方）的成员。"""
+    for rel, cls in _mro_classes(src, start):
         found = _class_members(cls, attr)
         if found:
             return rel, cls, found
-        stack.extend(reversed(_base_classes(src, rel, cls)))
     return None
+
+
+def _assigns_self_attr(st: ast.stmt, attr: str) -> bool:
+    """这条语句给 `self.attr` / `cls.attr` 赋值（含解包、`self.attr[...] = …`、`setattr(self, "attr", …)`）。"""
+    if isinstance(st, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        targets = st.targets if isinstance(st, ast.Assign) else [st.target]
+        return any(isinstance(x, ast.Attribute) and x.attr == attr and isinstance(x.value, ast.Name)
+                   and x.value.id in _SELF_NAMES for t in targets for x in ast.walk(t))
+    if isinstance(st, ast.Expr) and isinstance(st.value, ast.Call):
+        c = st.value
+        return (isinstance(c.func, ast.Name) and c.func.id == "setattr" and len(c.args) >= 2
+                and isinstance(c.args[0], ast.Name) and c.args[0].id in _SELF_NAMES
+                and isinstance(c.args[1], ast.Constant) and c.args[1].value == attr)
+    return False
+
+
+def _attr_assignments(src: "_Sources", start: List[_Cls], attr: str):
+    """实例属性的类内来源（v0.45.679）：继承链上各类的方法里给 `self.attr` 赋值的语句，按方法分组
+    [(rel, 类, 方法, [方法体里含这些赋值的顶层语句])]——取顶层语句而不是赋值本身，`if config.FLAG: self.x = 1` 的条件才在里面。
+    值写在 `__init__` 里（如 `self.x = config.Y`）同样决定读它的代码算出什么——676 把这类整个当「推不出来」放过；
+    真推不出来的只剩**从类外**塞进去的（`inject_prefetched` 写 `agent._prefetched_stock`）。"""
+    out = []
+    for rel, cls in _mro_classes(src, start):
+        for fn in cls.body:
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                stmts = [top for top in fn.body
+                         if any(isinstance(st, ast.stmt) and _assigns_self_attr(st, attr) for st in ast.walk(top))]
+                if stmts:
+                    out.append((rel, cls, fn, stmts))
+    return out
 
 
 # ── config 项 ──
@@ -1000,21 +1052,28 @@ def unit_dependencies(unit: str, read: Optional[Callable[[str], str]] = None, _s
         deps[label] = "\n".join(ast.unparse(st) for st in d[1])
         work.append((rel, d[1], False, None, frozenset()))
 
-    def visit_member(inst: _Cls, def_c: _Cls, attr: str, via_super: bool):
-        hit = _mro_lookup(src, _base_classes(src, *def_c) if via_super else [inst], attr)
-        if hit is None:
-            return            # 实例属性 / 外部基类的成员：推不出来（模块说明「已知不管的」）
-        mrel, cls, stmts = hit
-        if exempted(_exempt_key(mrel, cls.name, ()), _exempt_key(mrel, f"{cls.name}.{attr}", ())):
+    def add_member(mrel: str, cls: ast.ClassDef, member: str, stmts: list, inst: _Cls, skip: frozenset):
+        if exempted(_exempt_key(mrel, cls.name, ()), _exempt_key(mrel, f"{cls.name}.{member.split('[')[0]}", ())):
             return
         if guarded(mrel, cls.name) or f"{mrel}::{cls.name}" in seen:
             return            # 整个类已在本单元 / 守同一信号的别的单元 / 本闭包里
-        label = f"{mrel}::{cls.name}.{attr}"
+        label = f"{mrel}::{cls.name}.{member}"
         if label in seen:
             return
         seen.add(label)
         deps[label] = "\n".join(ast.unparse(st) for st in stmts)
-        work.append((mrel, stmts, False, inst, frozenset()))
+        work.append((mrel, stmts, False, inst, skip))
+
+    def visit_member(inst: _Cls, def_c: _Cls, attr: str, via_super: bool):
+        hit = _mro_lookup(src, _base_classes(src, *def_c) if via_super else [inst], attr)
+        if hit is not None:
+            mrel, cls, stmts = hit
+            add_member(mrel, cls, attr, stmts, inst, frozenset())
+        elif not via_super:
+            # 实例属性：取类内给它赋值的语句（`super()` 拿不到实例属性）；从类外注入的推不出来（模块说明「已知不管的」）。
+            # 跳过方法自己的参数 / 局部名（只把那几条语句拿出来追，没有方法的作用域）
+            for arel, acls, fn, stmts in _attr_assignments(src, [inst], attr):
+                add_member(arel, acls, f"{fn.name}[self.{attr}]", stmts, inst, frozenset(_bound_names(fn)))
 
     processed: Dict[str, frozenset] = {}
     while True:
@@ -1043,7 +1102,12 @@ def unit_dependencies(unit: str, read: Optional[Callable[[str], str]] = None, _s
         paths = _prune_paths(paths)
         label = f"config.py::{name}" + ("" if paths == {()} else "[" + ",".join(".".join(p) for p in sorted(paths)) + "]")
         deps[label] = _config_select(src, name, paths)[0]
-    return dict(sorted(deps.items()))
+    # 整个类已算进去 ⇒ 它的成员 / 属性赋值标签是其中一段、多余。先碰到成员还是先碰到整类取决于处理顺序，
+    # 这里统一去掉，结果与顺序无关（v0.45.679）
+    def covered(label: str) -> bool:
+        head, _, name = label.partition("::")
+        return head != "config.py" and "." in name and f"{head}::{name.split('.', 1)[0]}" in deps
+    return dict(sorted((k, v) for k, v in deps.items() if not covered(k)))
 
 
 def _defined_names(st: ast.stmt):
