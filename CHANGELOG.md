@@ -5,7 +5,20 @@
 
 ---
 
-## [0.45.685] — 2026-10-29 — 占位（进行中：681 二次检查——「本地命中不许 sleep」只数本模块写法会静默漏，改只数测试线程的 sleep）
+## [0.45.685] — 2026-10-29 — Fixed：v0.45.681 二次检查——「本地命中不许 sleep」只认被测模块 `time.sleep` 这一种写法，经别名 / 别的模块睡会静默漏；改成只数**测试线程**的全局 sleep
+
+**起因**：681 为了不让别的线程的 sleep 被数进来，把 `tests/test_outcomes_backlog_starvation.py` 改成只换 `outcomes_fetcher` 模块里的 `time` 名字（`_ModuleTime` 代理）。这把 `test_one_run_drains_everything_locally_resolvable` 的 `sleeps == []`（本次 starvation 修复的核心：本地命中不 sleep）变成了只认一种写法——本地路径上经辅助模块、或本模块 `import time as _t` 睡的，代理既数不到也拦不住（会真睡），测试照绿。变异实测：本地命中时 `import time as _t; _t.sleep(0)` ⇒ 681 版本 **16 passed**；本地命中时经另一个模块 `sleep(0)` ⇒ 681 前的写法红（660 次全数到）、681 绿。现状没有这类 sleep（只读探针：跑这个文件时走到全局 `time.sleep` 的只有注入器那一次），是测试变弱、不是现网有病。
+
+⭐ **缩小观测范围对两类断言后果相反**：「必须发生」（`== [0.5] * 3`）漏数 ⇒ 变红、看得见；「不许发生」（`== []`）漏数 ⇒ 静默绿。681 把两类一起缩了。要排除的干扰是「别的线程」，就该按线程排除，而不是按写法排除——后者顺带把同一线程上的合法观测也排除了。
+
+- `tests/test_outcomes_backlog_starvation.py`：删 `_ModuleTime`，新增 `_this_thread_sleeps(monkeypatch)`——替换全局 `time.sleep`，**本测试线程**的调用只记秒数、不真等（不论出自哪个模块、怎么写），别的线程照常真睡、不数。3 处都改用它（第三处只为不真等）。`stray_sleeps` 的 `other_thread` 注入照旧，现在靠线程过滤排除它。生产代码不动。
+- 代价（写在辅助函数 docstring 里）：本线程上别处的附带 sleep 也会被数，如 v0.45.664 的 `subprocess.run(timeout=…)` 收子进程忙等——这条路径不起子进程，将来有了是变红、不是静默；生产若把取数挪到别的线程，它的 sleep 不再被数 ⇒ 出网那条同样变红。
+
+**变异检查**（字节码关掉跑，还原后 16 passed）：本地命中经别名 sleep ⇒ drain 两条红 / 本地命中经别的模块 sleep ⇒ drain 两条红 / 本地命中 `time.sleep` ⇒ 红 / 出网后不再等 ⇒ 出网两条红 / 等的秒数不是 `rate_limit` ⇒ 红 / 去掉按线程过滤 ⇒ **只**红两条 `other_thread` / 注入器不起线程 ⇒ 两条收尾自证报错。另一条**单独不红**：退回 681 的「只换本模块名字」——现状生产代码里没有别处的 sleep，两种写法在当前代码上等价，只有叠上前两条变异才分得开，这正是 681 的盲区所在。
+
+**核对**：本文件 16 passed；`ruff` 全绿；拨钟审计 +7 / +45 / +400 新红 0 条；`select_tests.py --run`（本文件 + `CHANGELOG.md` ⇒ 26 个文件）1549 passed、退出码 0、无漏登。整套交给 CI。顺带补 681 的一处漏跑：681 本地选测只按测试文件选（15 个文件），没带上 `CHANGELOG.md` 的 11 个读者（CI 整套跑过）；本次复查补跑 401 passed。
+
+681 条目里对应的三句就地标了「685 更正」。
 
 ## [0.45.684] — 2026-10-29 — 占位（进行中：Alpha Bot 盘中 GEX 热力图叠现价 / Zero Gamma 路径、逐拍变化视图、颜色按分位截断）
 
@@ -31,15 +44,15 @@
 **起因（2026-10-29 验证「4 条数全局 sleep 的测试」那项待验证）**：这个文件 3 处 `monkeypatch.setattr(of.time, "sleep", …)`——`of.time` **就是**全局 `time` 模块，换掉的是所有人的 `sleep`（同 v0.45.664 的形状）。其中两条在数：`test_one_run_drains_everything_locally_resolvable`（`sleeps == []`）、`test_network_budget_caps_only_network_and_defers_the_rest`（`len(sleeps) == 3`）。注入一个每 2ms `time.sleep(0)` 的遗留线程 ⇒ 两条**次次红**（`[0, 0, …] == []`、`6 == 3`）。整套里目前不会发生——只读探针实测它们跑的时候没有别的线程，唯一常驻的遗留线程（chromadb 带起的 posthog 消费线程）在 pytest 下被禁用、从不 sleep——但只要以后有测试在它们前面漏下一个会 sleep 的线程，就会偶发红。
 
 - `tests/test_outcomes_backlog_starvation.py`：
-  - 新增 `_ModuleTime`：被测模块自己看到的 `time`，只把 `sleep` 换成记录器、其余原样转给真 `time`（拨钟 harness 的补丁照样生效）。3 处都改成 `monkeypatch.setattr(of, "time", _ModuleTime(…))`——只换 `outcomes_fetcher` 模块里那个名字，**不改生产代码**：生产那行 `time.sleep(self.rate_limit)` 照旧被直接验证（没另造接缝：造了就得再证明接缝真在睡，见 `tests/test_retry_backoff_seams.py`）。
+  - 新增 `_ModuleTime`：被测模块自己看到的 `time`，只把 `sleep` 换成记录器、其余原样转给真 `time`（拨钟 harness 的补丁照样生效）。3 处都改成 `monkeypatch.setattr(of, "time", _ModuleTime(…))`——只换 `outcomes_fetcher` 模块里那个名字，**不改生产代码**：生产那行 `time.sleep(self.rate_limit)` 照旧被直接验证（没另造接缝：造了就得再证明接缝真在睡，见 `tests/test_retry_backoff_seams.py`）。（**685 更正**：这样一来 `sleeps == []` 只认本模块 `time.sleep` 这一种写法，本地路径上经别名 / 别的模块睡的会静默漏；`_ModuleTime` 已删，改成只数测试线程的全局 sleep，见 v0.45.685。）
   - 新增夹具 `stray_sleeps`（`quiet` / `other_thread`）：`other_thread` 在每次 `OutcomesFetcher.run` 开跑时另起线程调一次全局 `time.sleep(0)` 并等它结束——**确定性**落在计数窗口里（靠真时间的定时线程撞不撞得上看测试多快，`test_network_budget…` 只跑几毫秒）；没触发就收尾报错。挂在两条数 sleep 的测试上（14 → 16 条）。
   - `len(sleeps) == 3` 收紧为 `sleeps == [0.5] * 3`：顺带钉住等的秒数就是 `rate_limit`。
 
-**变异检查**（6 个，全红在预期断言上，还原后绿；字节码关掉跑）：退回替换全局 `time.sleep`（保留注入器）⇒ 只红两条 `other_thread`——正是本次要防的情形 / 注入器不起线程 ⇒ 收尾自证报错 / 代理不拦 `sleep` ⇒ 红 / 生产出网后不再等 ⇒ 红 / 生产本地命中也 sleep ⇒ 红 / 生产等的秒数不是 `rate_limit` ⇒ 红（旧的 `len == 3` 抓不到这个）。
+**变异检查**（6 个，全红在预期断言上，还原后绿；字节码关掉跑）：退回替换全局 `time.sleep`（保留注入器）⇒ 只红两条 `other_thread`——正是本次要防的情形 / 注入器不起线程 ⇒ 收尾自证报错 / 代理不拦 `sleep` ⇒ 红 / 生产出网后不再等 ⇒ 红 / 生产本地命中也 sleep ⇒ 红（685 更正：只对写成本模块 `time.sleep` 的成立，写成别名 / 经别的模块睡的 681 版本照绿）/ 生产等的秒数不是 `rate_limit` ⇒ 红（旧的 `len == 3` 抓不到这个）。
 
 **核对**：本文件 16 passed；拨钟审计 +7 / +45 / +400 新红 0 条；`select_tests.py --run`（13 个元守卫 + 本文件等 15 个文件）1149 passed、登记表不过期。整套交给 CI。
 
-**没改**：`tests/test_llm_service.py` 也有 2 条数全局 sleep（`len(slept) == 1 / 0`）——测试体只跑几微秒，同样的注入实测撞不上；要改照本条的做法。
+**没改**：`tests/test_llm_service.py` 也有 2 条数全局 sleep（`len(slept) == 1 / 0`）——测试体只跑几微秒，同样的注入实测撞不上；要改照本条的做法（685 更正：照 v0.45.685 按线程过滤的做法，不要用本条的只换模块名字）。
 
 ## [0.45.680] — 2026-10-29 — Fixed：v0.45.673 二次检查——JSON 失败日志里的解析偏移是相对「被解析的那一段」、不是相对回复原文（读的人会数错位置），改成相对原文 + 附出错处前后各 60 字符；失败日志再记 `stop_details`（API 给了就记）
 

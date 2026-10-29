@@ -37,24 +37,32 @@ def _bdays(start: date, n: int):
     return out
 
 
-class _ModuleTime:
-    """被测模块自己看到的 `time`：只把 `sleep` 换成记录器，其余原样转给真 `time` 模块（拨钟 harness 装上的补丁也照样生效）。
+def _this_thread_sleeps(monkeypatch):
+    """替换全局 `time.sleep`：**本测试线程**的调用只记下秒数、不真等（不论出自哪个模块、怎么写）；别的线程照常真睡、不数。
 
-    v0.45.681：数 sleep 的测试原先 `monkeypatch.setattr(of.time, "sleep", …)`——`of.time` **就是**全局 `time` 模块，换掉的是所有人的
-    `sleep`，别的线程（整套里遗留的后台线程）在测试窗口里 sleep 一次就被数进来，`sleeps == []` / `len(sleeps) == 3` 偶发红
-    （2026-10-29 注入实测次次红；同形见 v0.45.664）。这里只换 `outcomes_fetcher` 模块里那个名字，生产那行 `time.sleep(self.rate_limit)`
-    照旧被直接验证，别人的 sleep 碰不到它。"""
+    v0.45.681：原先 `monkeypatch.setattr(of.time, "sleep", …)`——`of.time` **就是**全局 `time` 模块，别的线程（整套里遗留的后台线程）
+    在测试窗口里 sleep 一次就被数进来，`sleeps == []` / `len(sleeps) == 3` 偶发红（2026-10-29 注入实测次次红；同形见 v0.45.664）。
+    v0.45.685：681 改成只换 `outcomes_fetcher` 模块里的 `time` 名字，又把「本地命中不许 sleep」变成了只认一种写法——经辅助模块、
+    `import time as _t` 睡的既数不到也拦不住（会真睡），`sleeps == []` 照绿（变异实测：681 前红、681 绿）。缩小观测范围对「必须发生」
+    （`== [0.5] * 3`，漏数 ⇒ 红）无害，对「不许发生」（`== []`，漏数 ⇒ 静默绿）有害。要排除的干扰是「别的线程」，就按线程排除。
+    代价：本线程上别处的附带 sleep 也会被数（如 v0.45.664 的 `subprocess.run(timeout=…)` 收子进程忙等）——这条路径不起子进程，
+    将来有了是变红、不是静默；生产若把取数挪到别的线程，它的 sleep 不再被数 ⇒ 出网那条同样变红。"""
+    me, real = threading.get_ident(), time.sleep
+    sleeps = []
 
-    def __init__(self, sleep):
-        self.sleep = sleep
+    def sleep(s):
+        if threading.get_ident() != me:
+            return real(s)
+        sleeps.append(s)
 
-    def __getattr__(self, name):
-        return getattr(time, name)
+    monkeypatch.setattr(time, "sleep", sleep)
+    return sleeps
 
 
 @pytest.fixture(params=["quiet", "other_thread"])
 def stray_sleeps(request, monkeypatch):
-    """别的线程对**全局** `time.sleep` 的调用——数 sleep 的测试必须不受它影响（v0.45.681，同 v0.45.664 的 `stray_sleeps`）。
+    """别的线程对**全局** `time.sleep` 的调用——数 sleep 的测试必须不受它影响（v0.45.681，同 v0.45.664 的 `stray_sleeps`；
+    v0.45.685 起靠 `_this_thread_sleeps` 按线程排除它）。
 
     `other_thread`：每次 `OutcomesFetcher.run` 开跑时另起一个线程调一次全局 `time.sleep(0)`、等它结束——确定性地落在测试计数的窗口里
     （整套里遗留的后台线程就是这个形状；靠真时间的定时线程撞不撞得上要看测试多快，这里不靠运气）。注入器没触发就在收尾报错，免得空过。"""
@@ -109,8 +117,7 @@ def test_fixture_reproduces_the_overload(universe):
 
 def test_one_run_drains_everything_locally_resolvable(universe, monkeypatch, stray_sleeps):
     """核心回归：一轮之内本地能查到的全部补上——包括字母序最后的 XOM；本地命中不 sleep、不占出网配额。"""
-    sleeps = []
-    monkeypatch.setattr(of, "time", _ModuleTime(sleeps.append))      # 只数被测模块自己的 sleep（见 `_ModuleTime`）
+    sleeps = _this_thread_sleeps(monkeypatch)       # 本线程的 sleep 不论出自哪都数（见 `_this_thread_sleeps`）
     f = OutcomesFetcher(str(universe), rate_limit=0.5, max_network_fetches=50)
     stats = f.run()
 
@@ -171,8 +178,7 @@ def _network_only_world(tmp_path, n):
 def test_network_budget_caps_only_network_and_defers_the_rest(tmp_path, monkeypatch, stray_sleeps):
     fake = _FakeYF()
     monkeypatch.setattr(of, "_yf", fake)
-    sleeps = []
-    monkeypatch.setattr(of, "time", _ModuleTime(sleeps.append))      # 只数被测模块自己的 sleep（见 `_ModuleTime`）
+    sleeps = _this_thread_sleeps(monkeypatch)
     d = _network_only_world(tmp_path, 8)
     stats = OutcomesFetcher(str(d), rate_limit=0.5, max_network_fetches=3).run()
     assert fake.calls == 3 and stats["network_fetches"] == 3 and stats["network_deferred"] == 5
@@ -185,7 +191,7 @@ def test_network_budget_caps_only_network_and_defers_the_rest(tmp_path, monkeypa
 def test_rate_limit_streak_stops_network_but_not_local(tmp_path, monkeypatch):
     fake = _FakeYF(rate_limited_first=10)
     monkeypatch.setattr(of, "_yf", fake)
-    monkeypatch.setattr(of, "time", _ModuleTime(lambda s: None))
+    _this_thread_sleeps(monkeypatch)                # 只为不真等
     d = _network_only_world(tmp_path, 6)
     # 再放一份本地能查到的：DDD 有当天快照 + 次日快照
     day0 = _bdays(date.today() - timedelta(days=12), 2)
