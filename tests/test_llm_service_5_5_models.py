@@ -245,20 +245,58 @@ class TestCounters:
         assert ("y" * llm_service._FAIL_PREVIEW_CHARS) in msg
         assert ("y" * (llm_service._FAIL_PREVIEW_CHARS + 1)) not in msg
 
-    def test_json_failure_log_carries_parser_error_and_offset(self, monkeypatch, caplog):
-        """围栏里的 JSON 在某处坏掉：日志要带解析器给的原因和偏移（相对被解析的片段），不用人肉数字符。"""
-        body = '{"bear_score": 6.2, "thesis": "他说"预期已满"然后"}'      # 值中间有未转义的双引号
-        text = "```json\n" + body + "\n```"
-        _install(monkeypatch, _FakeClient(resp=_Resp(text=text)))
+    @staticmethod
+    def _fail_msg(monkeypatch, caplog, text, **resp_kw):
+        _install(monkeypatch, _FakeClient(resp=_Resp(text=text, **resp_kw)))
         with caplog.at_level("WARNING", logger=llm_service._log.name):
             assert llm_service.call_json("hi") is None
         (rec,) = [r for r in caplog.records if "无法解析为 JSON" in r.getMessage()]
-        try:
-            import json as _j
-            _j.loads(body)
-        except _j.JSONDecodeError as e:
-            want = f"解析错误={e.msg}@{e.pos}"
-        assert want in rec.getMessage()
+        return rec.getMessage()
+
+    def test_json_failure_log_offset_is_relative_to_the_reply_not_the_parsed_fragment(self, monkeypatch, caplog):
+        """v0.45.680：err.pos 相对的是被解析的那一段。围栏 / 前置说明文字会把那一段推后几十字符，日志若直接报 err.pos，
+        读的人在原文里数出来的位置是错的。三条解析路径（整段 / 围栏 / 首尾花括号）各钉一次：报的偏移处必须真是出错的字符。"""
+        body = '{"bear_score": 6.2, "thesis": "他说"预期已满"然后"}'          # 值中间有未转义的双引号
+        cases = {
+            "整段": body,
+            "围栏": "```json\n" + body + "\n```",
+            "前置说明+围栏": "先说结论：以下是我的判断。\n```json\n" + body + "\n```",
+            "花括号(围栏没闭合)": "好的，结果如下：\n```json\n" + body,
+        }
+        for name, text in cases.items():
+            caplog.clear()
+            msg = self._fail_msg(monkeypatch, caplog, text)
+            at = int(msg.split("解析错误=")[1].split("@")[1].split(" ")[0])
+            assert text[at] == "预", (name, at, text[at - 3:at + 3])        # 解析器停在 "预"（紧接未转义的引号之后）
+            ctx = msg.split("出错处附近=")[1]
+            assert "预期已满" in ctx, name
+
+    def test_json_failure_log_offset_for_a_fenced_array_without_braces(self, monkeypatch, caplog):
+        """没有花括号时首尾花括号那条路不走，最后一次错误就是围栏那条的——它的起点也要换算（否则围栏路径的换算没人守）。"""
+        text = "先说明一下。\n```json\n[1, 2, oops]\n```"
+        msg = self._fail_msg(monkeypatch, caplog, text)
+        at = int(msg.split("解析错误=")[1].split("@")[1].split(" ")[0])
+        assert text[at] == "o", (at, text[at - 3:at + 3])
+
+    def test_json_failure_log_context_is_bounded_and_survives_a_bad_spot_past_the_preview(self, monkeypatch, caplog):
+        """回复比预览长、坏处在预览之外时，「出错处附近」仍给得出坏处；且只取前后各 _ERR_CONTEXT_CHARS，不是整篇。"""
+        pad = "z" * (llm_service._FAIL_PREVIEW_CHARS + 300)
+        text = '{"a": "' + pad + '", "b": oops}'
+        msg = self._fail_msg(monkeypatch, caplog, text)
+        ctx = msg.split("出错处附近=")[1].split(" 前")[0]
+        assert "oops" in ctx and "oops" not in msg.split("前%d字符=" % llm_service._FAIL_PREVIEW_CHARS)[-1]
+        assert ("z" * (llm_service._ERR_CONTEXT_CHARS * 2 + 10)) not in ctx
+
+    def test_json_failure_log_carries_stop_details_when_the_api_gives_one(self, monkeypatch, caplog):
+        """拒答原因若 API 给了（SDK 类型里没这个字段，靠 getattr）就进日志；没有就是 None，不报错。"""
+        resp = _Resp(text="```json\n{\"final_score\": 5.4, \"dir", stop="refusal")
+        resp.stop_details = {"type": "refusal", "category": "demo"}
+        _install(monkeypatch, _FakeClient(resp=resp))
+        with caplog.at_level("WARNING", logger=llm_service._log.name):
+            llm_service.call_json("hi")
+        assert "stop_details={'type': 'refusal', 'category': 'demo'}" in caplog.records[-1].getMessage()
+        caplog.clear()
+        assert "stop_details=None" in self._fail_msg(monkeypatch, caplog, "not json")
 
     def test_refusal_counted_separately_from_truncation_and_json_failure(self, monkeypatch):
         """2026-10-27 NFLX Queen：stop_reason=refusal、418 字符处断掉。三种原因（拒答 / 截断 / 格式坏）在
