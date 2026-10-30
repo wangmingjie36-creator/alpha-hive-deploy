@@ -69,6 +69,16 @@ BETA_FAIL_BACKOFF_SEC = 30.0
 #: （闸门冷却期内任何请求都会被它当场拒绝，等多久完全由冷却决定；此前我加的 60 秒下限与 5 分钟缓存只是多等）
 YF_RETRY_MIN_SEC = 5.0
 _BETA_SENS_REASONS = {"ledger_unreadable": "对冲账本读不了，没法对照", "no_audit_rows": "还没有带逐行暴露的放行审计"}
+#: 指数期权（v0.45.689）：键 = CBOE 文件名（`_SPX` / `_XSP`，裸 `SPX` 在 CBOE 是 403）。`label` 只用于展示；
+#: `am_root` = 这条链里**上午结算**的那个根（SPX 月度：到期日开盘按特别开盘价结算，当天盘中仍以 dte=0 留在链里，
+#: 已经不是活的 gamma ⇒ `drop_am_settled_expiring` 丢掉）。SPXW / XSP 是下午结算，不动。
+#: 只在 Alpha Bot 里存在：不进 WATCHLIST、不进卖权账本 / 预注册（样本定义不变）。
+INDEX_TICKERS = {"_SPX": {"label": "SPX", "am_root": "SPX"}, "_XSP": {"label": "XSP", "am_root": None}}
+INDEX_ALIASES = {f"{p}{x}": f"_{x}" for x in ("SPX", "XSP") for p in ("", "^", "$")}
+INDEX_HOWTO_NOTE = ("指数期权：欧式、现金结算——不会被提前指派，到期按结算价差额现金交割、不会接货或交出股票；"
+                    "下面讲「接货 / 持有 100 股 / 提前行权 / 备兑」的步骤不适用。名义 = 指数 × 100 / 张"
+                    "（SPX 约为 SPY 的 10 倍；XSP = SPX ÷ 10）。SPX 月度合约在到期日开盘结算，当天不计入。")
+_OCC_ROOT = re.compile(r"^([A-Z]+)\d{6}[CP]\d{8}$")
 _TICKER_RE = re.compile(r"^[A-Z_][A-Z0-9.\-]{0,9}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -83,9 +93,23 @@ class BadRequest(ValueError):
 
 def norm_ticker(t) -> str:
     s = str(t or "").upper().strip()
+    s = INDEX_ALIASES.get(s, s)            # SPX / ^SPX / $SPX → _SPX（CBOE 的文件名）
     if not _TICKER_RE.match(s):
         raise BadRequest(f"代码不合法：{t!r}")
     return s
+
+
+def drop_am_settled_expiring(raw: dict, am_root: str) -> dict:
+    """丢掉上午结算根在到期日（dte == 0）的合约：开盘已按特别开盘价结算，留着会把一份已结算的 OI 当成当天的 gamma。
+    返回新 dict（不改入参），丢了几张记在 `n_am_settled_expiry_day_excluded`（0 也写，页面 / 测试能看出这一步跑过）。"""
+    kept, n = [], 0
+    for c in raw.get("contracts") or []:
+        m = _OCC_ROOT.match(str(c.get("symbol") or "")) if isinstance(c, dict) else None
+        if m and m.group(1) == am_root and c.get("dte") == 0:
+            n += 1
+            continue
+        kept.append(c)
+    return {**raw, "contracts": kept, "n_am_settled_expiry_day_excluded": n}
 
 
 def norm_date(d) -> str:
@@ -202,6 +226,7 @@ class AlphaBotService:
         self._beta_cache: Dict[str, dict] = {}
         # Yahoo 限流时各票「最早什么时候值得再试」（self.clock() 的时刻）：`live()` 把它折成 `retry_after_sec` 给页面
         self._yf_retry_until: Dict[str, float] = {}
+        self._am_excluded: Dict[str, int] = {}      # 指数票最近一次现算丢掉的上午结算合约数（`_live_fetch` 写）
         self._premium_rules_cache: Optional[dict] = None     # 规则常量与文案表进程内不变：算一次
         self._cache: Dict[str, tuple] = {}
         self._bars_cache: Dict[tuple, dict] = {}
@@ -233,13 +258,18 @@ class AlphaBotService:
             if hit is not None and not force:
                 self.stats["live_cache_hits"] += 1
                 return self._stamp(hit)
-            res = clean_json(R.compute_live_detail(t, fetch_fn=self._chain_fetch(invalidate=True), state_dir=self.ledger_dir))
+            res = clean_json(R.compute_live_detail(t, fetch_fn=self._live_fetch(t), state_dir=self.ledger_dir))
             ok = bool(res.get("data_available"))
             ru = self._yf_retry_until.pop(t, None)
             if not ok and res.get("reason") == "yf_rate_limited" and ru is not None:
                 res["retry_until_clock"] = ru                # `_stamp` 折成 retry_after_sec（缓存命中时也按「现在」重算）
             if ok:
                 res["howto"] = self._howto(t, res)
+                if t in INDEX_TICKERS:
+                    res["index"] = {"label": INDEX_TICKERS[t]["label"],
+                                    "n_am_settled_expiry_day_excluded": self._am_excluded.pop(t, None)}
+                    if res["howto"].get("available"):
+                        res["howto"]["index_note"] = INDEX_HOWTO_NOTE
             self.stats["live_computed" if ok else "live_failures"] += 1
             if not ok:
                 _log.warning("[%s] 现算不可得：%s", t, res.get("reason"))
@@ -732,6 +762,22 @@ class AlphaBotService:
         **不清进程缓存**：页面先走过 live()（它清缓存再拉一份），这里命中同一份 payload，不多发请求。"""
         return self.fetch_fn or R.LG._default_fetch
 
+    def _live_fetch(self, t: str):
+        """现算用的取链：`_chain_fetch` + 指数链的上午结算根过滤（只对 `INDEX_TICKERS` 里有 `am_root` 的票）。"""
+        base = self._chain_fetch(invalidate=True)
+        am_root = (INDEX_TICKERS.get(t) or {}).get("am_root")
+        if not am_root:
+            return base
+
+        def fetch(ticker, *, as_of=None):
+            raw, reason = base(ticker, as_of=as_of)
+            if raw is None:
+                return None, reason
+            raw = drop_am_settled_expiring(raw, am_root)
+            self._am_excluded[t] = raw["n_am_settled_expiry_day_excluded"]
+            return raw, reason
+        return fetch
+
     def _chain_fetch(self, *, invalidate: bool):
         """Alpha Bot 取链的唯一入口：注入的取数函数（演示 / 测试）原样用；生产 = CBOE（与卖权页同一个取数函数），
         CBOE 报 `stale_vintage` 且该票在 `YF_FALLBACK_TICKERS` 里 ⇒ 改拉 yfinance（`alphabot.yf_chain`）。
@@ -925,7 +971,10 @@ class AlphaBotService:
     def watchlist(self) -> dict:
         wl = default_watchlist()
         favs = [t for t in self.settings().get("favorites", []) if t not in wl]
-        return {"watchlist": wl, "favorites": favs, "tickers": wl + favs}
+        idx = list(INDEX_TICKERS)
+        favs = [t for t in favs if t not in idx]
+        return {"watchlist": wl, "favorites": favs, "indices": idx,
+                "index_labels": {k: v["label"] for k, v in INDEX_TICKERS.items()}, "tickers": wl + favs + idx}
 
     # ── 盘中快照
     def _intraday_dir(self, date_et: str) -> Path:

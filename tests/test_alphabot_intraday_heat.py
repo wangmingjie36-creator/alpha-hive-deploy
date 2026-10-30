@@ -111,6 +111,42 @@ class TestClip:
         assert IH.build(S3)["rules"]["clip_quantile"] == 0.5
 
 
+class TestBuckets:
+    """SPX 在 ±12% 内约 450 个行权价：超过 MAX_ROWS 行时分桶求和。"""
+
+    def _snaps(self, n_strikes, n_snaps=2):
+        return [_snap(f"2026-10-28T10:{10 * i:02d}:00-04:00", 7700.0,
+                      [[7000.0 + 5 * j, 1.0 + i, 2.0 * (1 + i)] for j in range(n_strikes)]) for i in range(n_snaps)]
+
+    def test_no_bucket_at_or_below_max_rows(self):
+        out = IH.build(self._snaps(IH.MAX_ROWS))
+        assert out["bucket"] is None and len(out["strikes"]) == IH.MAX_ROWS and out["step"] == 5.0
+        assert all(c[4] == 1 for c in out["cells"])
+
+    def test_bucket_sums_and_counts(self):
+        out = IH.build(self._snaps(450))
+        assert out["bucket"] == 30.0 and out["n_strikes_raw"] == 450 and out["step"] == 30.0
+        assert len(out["strikes"]) <= IH.MAX_ROWS
+        first = [c for c in out["cells"] if c[0] == 0]
+        assert sum(c[4] for c in first) == 450                       # 每个行权价恰好进一个桶
+        assert sum(c[2] for c in first) == pytest.approx(450 * 1.0)   # 求和守恒
+        assert all(c[2] == pytest.approx(c[4] * 1.0) for c in first)
+
+    def test_bucket_centers_cover_their_strikes(self):
+        out = IH.build(self._snaps(450))
+        b = out["bucket"]
+        for k in (7000.0, 7025.0, 7030.0, 9245.0):
+            assert any(c - b / 2 <= k < c + b / 2 for c in out["strikes"]), k
+
+    def test_delta_is_per_strike_before_summing(self):
+        out = IH.build(self._snaps(450), mode="delta", basis="volume")
+        first = [c for c in out["cells"] if c[0] == 1]
+        assert all(c[2] == pytest.approx(2.0 * c[4]) for c in first)  # 每个行权价 4−2 = 2
+
+    def test_max_rows_is_in_rules(self):
+        assert IH.build(S3)["rules"]["max_rows"] == IH.MAX_ROWS
+
+
 class TestGaps:
     def test_long_interval_is_recorded(self):
         ts = ["10:00", "10:10", "10:20", "10:30", "11:15", "11:25"]

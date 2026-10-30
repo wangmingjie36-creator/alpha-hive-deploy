@@ -216,7 +216,7 @@ export function columns(el, { x, values, fmt = usdShort, diverging = true, color
 // 盘中热力图：x 时间、y 行权价、值 = 净 GEX（发散：橙—暖灰—蓝）
 // 盘中热力图（行权价 × 拍）叠现价 / Zero Gamma 路径。x 为类目轴（按拍、不等距），y 为数值轴——
 // 价格线才能画在两个行权价之间；格子用 custom series 自己画（ECharts 的 heatmap 只认两根类目轴）。
-// 数据由服务端 intraday_heat.build 排好：cells 每行 [拍, 行权价, 真值, 上色用的截断值]。
+// 数据由服务端 intraday_heat.build 排好：cells 每行 [拍, 行权价（分桶时 = 桶中心）, 真值, 上色用的截断值, 桶里几个行权价]。
 export function gammaTrace(el, hm) {
   const c = C();
   const { times, strikes, cells, price, zero_gamma: zg, clip } = hm;
@@ -227,7 +227,8 @@ export function gammaTrace(el, hm) {
     grid: { left: 56, right: 84, top: 30, bottom: 44 },
     legend: { top: 0, left: 0, data: ["现价", "Zero Gamma"] },
     tooltip: { trigger: "item", formatter: (p) => p.seriesType === "custom"
-      ? `${times[p.value[0]]} · 行权价 <b>${num(p.value[1])}</b><br>${hm.mode === "delta" ? "较上一拍" : "净 GEX"}：${usdShort(p.value[2])} / 1%`
+      ? `${times[p.value[0]]} · 行权价 <b>${hm.bucket ? `${num(p.value[1] - hm.bucket / 2)}–${num(p.value[1] + hm.bucket / 2)}` : num(p.value[1])}</b>`
+        + `${hm.bucket ? `（${p.value[4]} 个行权价合计）` : ""}<br>${hm.mode === "delta" ? "较上一拍" : "净 GEX"}：${usdShort(p.value[2])} / 1%`
       : `${times[p.value[0]]} · ${p.seriesName} <b>${num(p.value[1])}</b>` },
     xAxis: { type: "category", data: times, boundaryGap: true, splitArea: { show: false } },
     yAxis: { type: "value", min: lo, max: hi, splitLine: { show: false },
@@ -237,15 +238,16 @@ export function gammaTrace(el, hm) {
       textStyle: { color: c.ink3, fontSize: 11 }, formatter: (v) => usdShort(v),
       inRange: { color: [c.neg, c.negSoft, c.sunk, c.posSoft, c.pos] } },
     series: [
-      { name: "GEX", type: "custom", clip: true, data: cells, encode: { x: 0, y: 1, tooltip: [0, 1, 2] },
+      { name: "GEX", type: "custom", clip: true, data: cells, encode: { x: 0, y: 1, tooltip: [0, 1, 2, 4] },
         renderItem: (params, api) => {
           const p = api.coord([api.value(0), api.value(1)]), sz = api.size([1, st]);
           return { type: "rect", shape: { x: p[0] - sz[0] / 2, y: p[1] - sz[1] / 2, width: sz[0], height: sz[1] },
             style: { fill: api.visual("color"), stroke: c.surface, lineWidth: 0.5 } };
         } },
-      { name: "现价", type: "line", data: lineOf(price), showSymbol: false, connectNulls: false, z: 4,
+      // 只有一拍时一条线画不出来（只有一个点）⇒ 那时显示点
+      { name: "现价", type: "line", data: lineOf(price), showSymbol: times.length === 1, symbolSize: 8, connectNulls: false, z: 4,
         lineStyle: { width: 2.2, color: c.ink, shadowColor: c.surface, shadowBlur: 4 }, itemStyle: { color: c.ink } },
-      { name: "Zero Gamma", type: "line", data: lineOf(zg), showSymbol: false, connectNulls: false, z: 3,
+      { name: "Zero Gamma", type: "line", data: lineOf(zg), showSymbol: times.length === 1, symbol: "emptyCircle", symbolSize: 8, connectNulls: false, z: 3,
         lineStyle: { width: 1.6, color: c.ink, type: "dashed", shadowColor: c.surface, shadowBlur: 3 }, itemStyle: { color: c.ink } },
     ],
   });

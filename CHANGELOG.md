@@ -80,7 +80,30 @@
 - `tests/test_scan_timing.py` 两处对 `payload_stats()` 键集合的精确断言补上两个新键。
 - 整套（`-x`）：12940 passed / 1 failed，停在 `tests/test_write_sandbox.py::TestLiveOnThisMac::test_log_helper_sees_this_sessions_denials`（查统一日志的助手返回了别的拒绝、没返回测试刚触发的那条）；之后的文件单独补跑 301 passed。该文件在干净的 origin/main 上 29 passed，在本分支连跑两次也都是 29 passed ⇒ **偶发**（看起来是统一日志滞后，未深究，待验证），与本改动无关（本改动不碰写沙箱）。
 
-## [0.45.689] — 2026-10-29 — 占位（进行中：Alpha Bot 接 SPX / XSP 指数期权链——名字映射、SPX 月度上午结算合约到期日剔除、侧栏「指数」、热力图行权价分桶）
+## [0.45.689] — 2026-10-29 — Added：Alpha Bot 接 SPX / XSP 指数期权链（名字映射、SPX 月度上午结算合约在到期日剔除、侧栏「指数」、「怎么卖」指数说明、热力图行权价分桶）
+
+**起因**：竞品差距清单第 3 项——GEX「做市商对冲推动价格」那套理论在指数上比个股站得住（个股期权终端用户整体净卖方，put 侧符号可能反了）。
+
+**先验证再写**（2026-10-29 实测 CBOE 延迟接口，全部 307 跳到 `cdn-api.cboe.com`）：`_SPX` 200（12.8MB、28,872 个合约，根 `SPX` 9,394 + `SPXW` 19,478、54 个到期日）、`_XSP` 200（6.9MB、15,834、全是 `XSP`）、裸 `SPX` **403**。整条现算链（`compute_live_detail`）离线喂这份文件**一行不改就能出数**（SPX 0.5 秒，Zero Gamma 7735、净 GEX 为负）——所以要补的不是「跑起来」，而是三处会**无声出错**的地方：
+
+- **名字**：`alphabot/service.py::norm_ticker` 把 `SPX` / `^SPX` / `$SPX`（XSP 同）映射到 CBOE 文件名 `_SPX` / `_XSP`（`INDEX_ALIASES`）。不映射时页面只会说「取不到期权链」，把「写法不对」报成「数据源坏了」。NDX / RUT 在 CBOE 上的写法**没验证**，不映射。
+- **SPX 月度上午结算**：月度根 `SPX` 在到期日开盘按特别开盘价结算，盘中仍以 dte = 0 留在链里 ⇒ 已结算的 OI 会被当成当天的 gamma（独占「下一到期」视图）。`drop_am_settled_expiring` 在 Alpha Bot 现算入口（新 `_live_fetch`，只对 `INDEX_TICKERS` 里有 `am_root` 的票）丢掉**根恰好是 `SPX`**、dte == 0 的合约（`SPXW` 以 SPX 开头，按前缀判会误丢下午结算的 0DTE——测试钉住），丢了几张写进 `live` 返回的 `index.n_am_settled_expiry_day_excluded`（0 也写）。XSP 全是下午结算，不过滤。
+- **同一到期日两份同行权价合约**（月度到期日 SPX + SPXW，实测 2,942 对）：查过了**不用改**——GEX 按行权价求和（两份都是真 OI）、卖权腿 `_side_book` 同行权价取 OI 大的。
+- **「怎么卖」**：讲的是股票（接货 / 被指派持有 100 股 / 美式提前行权 / 备兑）。指数欧式、现金结算 ⇒ 面板顶部加一条 `index_note` 说明哪些步骤不适用、名义 = 指数 × 100。没重写各结构的文案。
+- **侧栏 / 搜索 / 标题**：`watchlist()` 加 `indices` + `index_labels`；侧栏多一组「指数」、标题与侧栏显示 SPX / XSP（`ticker.js::tLabel`），搜索框按 `index_labels` 反查。前端不另抄名单（测试只看字符串字面量）。指数加进自选也只列一次。
+- **热力图分桶**（`alphabot/intraday_heat.py`）：SPX 在 ±12% 内约 450 个行权价（实测一张快照 349 个），一行不到 2 像素。超过 `MAX_ROWS`（80）行 ⇒ 按固定宽度分桶**求和**（GEX 按行权价可加；逐拍差先逐行权价算再求和），每格带桶里的行权价个数、提示框给区间；`rules.max_rows` 给页面。只有一拍时现价 / Zero Gamma 改画点（一个点的折线画不出来）。
+- `alphabot/static/pages/help.js`：加「指数」一条。
+
+**只在 Alpha Bot**：不进 `config.WATCHLIST`、不进卖权账本 / 预注册（样本定义不变），根目录模块里不出现 `INDEX_TICKERS`（测试钉住）。没动 `cboe_options` / `sell_strike_*`。
+
+**已知的、这次没修**：
+- **首次载入慢**：Alpha Bot 里 SPX 第一次现算约 1 分钟，几乎全是下载。查下来 `cboe_options._fetch_cboe_payload` 用 `urllib` 下载、**不带 `Accept-Encoding: gzip`**——实测同一份 `_SPX` 不压缩 12.8MB / 45 秒，压缩后 1.66MB / 15 秒（SPY 5.4MB → 0.7MB）。这影响**所有**标的（含每日扫描的 30 只），是共享生产代码，另开任务处理。
+- 价格页的日线走 Twelve Data，指数代码能不能取、在不在套餐里**待验证**；取不到如实显示不可得。
+- 指数收盘：股票 16:00，SPX 期权交易到 16:15（实测 `last_trade_time` 16:14:59）。16:00–16:15 之间页面按「已收盘」处理（SPXW 的 0DTE 16:00 停止交易，这样处理正确）。
+
+**变异检查**（9 个，全红；首轮「指数也加进自选就列两次」**绿**——测试只断言 `_SPX` 不在自选里，而设置没规范化名字时这句话恒真；收紧成 `favorites == ["SPY"]` 后红）：根按前缀判 / 丢所有 dte=0 / 不映射名字 / 现算不过过滤 / 不带指数说明 / 自选重复 / 不分桶 / 桶里个数记错 / 桶内后写覆盖前写。
+
+**核对**：两份新测试 54 passed；`tests/test_alphabot*.py` + 卖权火墙 + CHANGELOG 1032 passed；worktree 起 Alpha Bot（真实数据根、`--no-poll`）看 SPX 水平页（Zero Gamma 7,735.12、Major+ 7,850、Major− 7,650、负 gamma）与「怎么卖」指数说明；另起一份数据根指向空临时目录的实例拍一张 SPX 快照看分桶热力图（349 个行权价 → 每 25 点一桶），控制台无报错。整套 13273 passed、2 xfailed（11:31，错开了同时段另一会话的整套）。
 
 ## [0.45.688] — 2026-10-29 — Fixed：v0.45.683 的 8 条新测试在 CI 上红（`No module named 'anthropic'`）——CI 刻意不装 anthropic、测试一律用假模块，我直接 `import anthropic` 取真异常类，本机装着所以一直绿
 

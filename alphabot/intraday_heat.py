@@ -11,6 +11,8 @@
 - 快照只存现价 ±`service.SNAPSHOT_STRIKE_BAND` 内的行权价 ⇒ 现价移动时边缘行权价会进出窗口，缺的格子留空。
 - 颜色按 |值| 的 `CLIP_QUANTILE` 分位截断（最近秩），超出的格子按截断值上色、提示框给真值——
   否则当天最大的一两个行权价会把其余格子全压成灰。
+- 行权价太密（SPX 在 ±12% 内约 450 个）⇒ 超过 `MAX_ROWS` 行时把相邻行权价按固定宽度分桶**求和**
+  （GEX 按行权价可加，桶和就是这一段价格区间的净 GEX）；逐拍差先逐行权价算、再求和。每格带桶里有几个行权价。
 - x 轴按拍排列，不是等距时间；相邻两拍间隔 > 中位间隔 `GAP_FACTOR` 倍的地方记在 `gaps`。
 
 只展示：不进评分、不写任何文件、不 import 卖权模块（数据只来自 `service.intraday` 已落盘的快照）。
@@ -23,6 +25,7 @@ from typing import Optional
 
 CLIP_QUANTILE = 0.95
 GAP_FACTOR = 2.0
+MAX_ROWS = 80
 VIEWS = ("le_45dte", "next_expiry")
 BASES = {"oi": 1, "volume": 2}          # 快照 strikes 行 = [strike, net_gex_oi, net_gex_volume]
 MODES = ("level", "delta")
@@ -71,7 +74,8 @@ def build(snaps: list, *, view: str = "le_45dte", basis: str = "oi", mode: str =
     out = {"view": view, "basis": basis, "mode": mode, "available": False, "reason": None,
            "times": [], "ts": [], "strikes": [], "step": None, "cells": [], "price": [], "zero_gamma": [],
            "clip": None, "max_abs": None, "n_clipped": 0, "gaps": [], "n_snapshots": len(snaps),
-           "rules": {"clip_quantile": CLIP_QUANTILE, "gap_factor": GAP_FACTOR}}
+           "bucket": None, "n_strikes_raw": 0,
+           "rules": {"clip_quantile": CLIP_QUANTILE, "gap_factor": GAP_FACTOR, "max_rows": MAX_ROWS}}
     if not snaps:
         out["reason"] = "no_snapshots"
         return out
@@ -100,11 +104,29 @@ def build(snaps: list, *, view: str = "le_45dte", basis: str = "oi", mode: str =
 
     strikes = sorted({k for m in rows for k in m})
     diffs = [b - a for a, b in zip(strikes, strikes[1:]) if b > a]
+    step = min(diffs) if diffs else None
+    bucket = None
+    if step and len(strikes) > MAX_ROWS:
+        bucket = step * math.ceil(((strikes[-1] - strikes[0]) / step + 1) / MAX_ROWS)
+        lo = strikes[0] - step / 2
+        center = lambda k: lo + (math.floor((k - lo) / bucket) + 0.5) * bucket  # noqa: E731
+        agg = {}
+        for ti, k, v in cells:
+            key = (ti, center(k))
+            tot, n = agg.get(key, (0.0, 0))
+            agg[key] = (tot + v, n + 1)
+        cells = [[ti, c, tot, n] for (ti, c), (tot, n) in sorted(agg.items())]
+        strikes = sorted({c for _, c, _, _ in cells})
+        step = bucket
+    else:
+        cells = [[ti, k, v, 1] for ti, k, v in cells]
     out.update({
         "times": [(s.get("ts") or "")[11:16] for s in snaps],
         "ts": [s.get("ts") for s in snaps],
         "strikes": strikes,
-        "step": min(diffs) if diffs else None,
+        "step": step,
+        "bucket": bucket,
+        "n_strikes_raw": len({k for m in rows for k in m}),
         "price": [_num(s.get("underlying_price")) for s in snaps],
         "zero_gamma": [_num((((s.get("views") or {}).get(view) or {}).get("zero_gamma") or {}).get("nearest"))
                        for s in snaps],
@@ -115,8 +137,8 @@ def build(snaps: list, *, view: str = "le_45dte", basis: str = "oi", mode: str =
         out["reason"] = "no_values"
         return out
     clip = _quantile_nearest_rank(absvals, CLIP_QUANTILE)
-    # 第 4 列 = 上色用的截断值；第 3 列是真值（提示框用）
-    out["cells"] = [[ti, k, v, max(-clip, min(clip, v))] for ti, k, v in cells]
+    # 列：[拍, 行权价（分桶时 = 桶中心）, 真值（提示框用）, 上色用的截断值, 桶里有几个行权价]
+    out["cells"] = [[ti, k, v, max(-clip, min(clip, v)), n] for ti, k, v, n in cells]
     out.update({"available": True, "clip": clip, "max_abs": max(absvals),
                 "n_clipped": sum(1 for c in cells if abs(c[2]) > clip)})
     return out

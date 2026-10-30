@@ -56,7 +56,10 @@ export function go(hash) { if (location.hash !== hash) location.hash = hash; els
 document.getElementById("search").addEventListener("submit", (e) => {
   e.preventDefault();
   const input = document.getElementById("search-input");
-  const t = input.value.trim().toUpperCase();
+  // 指数：输入展示名（SPX / ^SPX / $SPX）→ CBOE 文件名；映射表只取 /api/meta 的 index_labels（同服务端 INDEX_ALIASES）
+  const raw = input.value.trim().toUpperCase();
+  const byLabel = Object.fromEntries(Object.entries(state.meta?.watchlist?.index_labels || {}).map(([k, v]) => [v, k]));
+  const t = byLabel[raw.replace(/^[\^$]/, "")] || raw;
   if (!/^[A-Z_][A-Z0-9.\-]{0,9}$/.test(t)) { input.setCustomValidity("代码格式不对"); input.reportValidity(); return; }
   input.setCustomValidity(""); input.value = "";
   const onIntraday = location.hash.startsWith("#/intraday");

@@ -2,7 +2,7 @@
 import { api, h, helpLink, num, usdShort, seg, table, panel, pref, setPref, ROUTE_SHORT, fill } from "../lib.js";
 import { lines, gammaTrace, strikeBars, release, C } from "../charts.js";
 import { state, refreshMeta } from "../app.js";
-import { sidebar } from "./ticker.js";
+import { sidebar, tLabel } from "./ticker.js";
 
 export async function renderIntraday(root, t, alive) {
   const [dates, meta] = await Promise.all([api(`/api/intraday-dates/${encodeURIComponent(t)}`), refreshMeta()]);
@@ -24,7 +24,7 @@ export async function renderIntraday(root, t, alive) {
     charts.forEach(release); charts = [];
     const snaps = d.snapshots || [];
     const head = h("div", { class: "page-head" },
-      h("div", {}, h("h1", {}, `${t} 盘中`, h("span", { class: "sub" }, `${d.date} · ${snaps.length} 张快照`)),
+      h("div", {}, h("h1", {}, `${tLabel(t)} 盘中`, h("span", { class: "sub" }, `${d.date} · ${snaps.length} 张快照`)),
         h("p", { class: "lede" }, "关注列表里的标的在交易时段内定时拍照（只存聚合数值，不存原始链）。OI 在盘中不变，水平的移动来自现价与 IV 的变化；成交量口径随成交累积。 ", helpLink("intraday"))),
       h("div", { class: "controls" },
         (dates.dates || []).length > 1 ? h("select", { class: "sel", "aria-label": "日期", onchange: (e) => { date = e.target.value; draw(); } },
@@ -110,6 +110,7 @@ function heatNotes(hm) {
     `颜色按 |值| 的 ${Math.round((r.clip_quantile ?? 0) * 100)}% 分位截断在 ±${usdShort(hm.clip)}（最大 ${usdShort(hm.max_abs)}，${hm.n_clipped} 格按截断色画，悬停看真值）。`,
     `只存现价 ±${Math.round((r.strike_band ?? 0) * 100)}% 内的行权价，现价移动时边缘格子会空着（不是 0）。`,
   ];
+  if (hm.bucket) items.push(`行权价共 ${hm.n_strikes_raw} 个、超过 ${r.max_rows} 行：每 ${num(hm.bucket)} 点分一桶、桶内求和（GEX 按行权价可加），悬停看区间与个数。`);
   if (hm.mode === "delta") items.push(hm.basis === "oi"
     ? "OI 盘中不变：OI 口径的逐拍变化只来自现价与 IV 的移动。"
     : "成交量口径的逐拍变化 ≈ 这段时间新增成交带来的 GEX——没有买卖方向（延迟快照分不出主动买卖），不是 orderflow。");
