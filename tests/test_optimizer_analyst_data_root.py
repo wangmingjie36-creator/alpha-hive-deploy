@@ -131,6 +131,10 @@ class TestEndToEndUsesHome:
                 "entry_price": entry, "actual_prices": {"t7": t7},
             }), encoding="utf-8")
         monkeypatch.setattr(sys, "argv", ["self_analyst.py"])
+        # v0.45.686：main 现在还会算月报两节（monthly_review），其就绪度 / 429 读编排器日志目录（缺省 ~/.claude/logs，
+        # 数据根外）——指到 tmp，别让这条测试读到本机真实日志
+        import monthly_review
+        monkeypatch.setattr(monthly_review, "_log_dir", lambda log_dir=None: home.parent / "orch_logs")
         buf = io.StringIO()
         with redirect_stdout(buf):
             sa.main()
