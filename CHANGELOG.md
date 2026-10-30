@@ -5,6 +5,129 @@
 
 ---
 
+## [0.45.689] — 2026-10-29 — 占位（进行中：Alpha Bot 接 SPX / XSP 指数期权链——名字映射、SPX 月度上午结算合约到期日剔除、侧栏「指数」、热力图行权价分桶）
+
+## [0.45.688] — 2026-10-29 — Fixed：v0.45.683 的 8 条新测试在 CI 上红（`No module named 'anthropic'`）——CI 刻意不装 anthropic、测试一律用假模块，我直接 `import anthropic` 取真异常类，本机装着所以一直绿
+
+另一个会话（做 685 的那个）发现并转告：main 的 CI 自 `a86d1d1f`（683）起 8 failed / 13125 passed。我 683 的整套测试是在装着 anthropic 的开发机上跑的——这个环境差异正是 `requirements.txt` 第 28 行那条注释（v0.45.601）写明要避开的。
+
+### Fixed
+- 新 `tests/_anthropic_stub.py`：假 `anthropic` 模块，类层级抄自真 SDK 0.84.0（`AnthropicError ← APIError ← APIConnectionError ← APITimeoutError`，`APIError ← APIStatusError ← BadRequestError / RateLimitError`；已在装着真包的开发机上逐个核对过 MRO），`install(monkeypatch)` 装进 `sys.modules`。被测代码依赖的只有三件事：`APITimeoutError` 是 `APIConnectionError` 的子类、它们都不是内置 `ConnectionError / TimeoutError / OSError / ValueError` 的子类、`BadRequestError` 属于状态错误。
+- `tests/test_llm_service_5_5_models.py::TestApiConnectionErrors`（4 条）与 `tests/test_cross_ticker_step_cannot_kill_scan.py`（4 条参数化）改用假模块；不再 `import anthropic` / `httpx`。
+
+### 测试 / 变异
+- 用一个让 `import anthropic` 抛 ImportError 的 pytest 插件模拟 CI：**修前的测试复现了 CI 上同样的 8 failed**；修后同一批 + `test_llm_service.py` / `test_llm_shadow_*` 共 323 条通过；本机（真包在）也通过。
+- 变异：假模块里让 `APITimeoutError` 不再是 `APIConnectionError` 的子类 ⇒ 测试变红（文件已还原）。
+- ⚠️ 局限：假模块与真 SDK 的层级一致性**只在我核对的那一刻成立**，CI 里没有真包可比；升级 SDK 后若层级变了，要手动改 `_anthropic_stub.py`（文件头已写）。没有加「禁止测试直接 import anthropic」的守卫——CI 本身就是这道守卫，这次只是红了几个小时才被发现；`tests/test_alphabot_chat.py` 里还有几处 `pytest.importorskip("anthropic")`（CI 上跳过），属既有做法，这次没动。
+
+## [0.45.687] — 2026-10-29 — 占位（进行中：LLM 影子预注册修订 1——10-29 救回的 27 只按原规则纳入 + scan_error 规则自 10-30 起 + 补记脚本）
+
+## [0.45.686] — 2026-10-29 — Fixed：v0.45.677 / 678 二次检查——月报「数据质量」漏数漏扫日的 429、晚一天跑就整月丢失；「预注册进度」照抄上游进度行会在过检视点后转述结论、IC 重跑行在就绪度判不了时印成「None/None」、账本目录不在时显示成全 0；BullVeto 墓碑会被 docstring 误报
+
+用户 10-29 要求二次检查。独立审查代理（只读、不知道作者结论）报回 11 条，677 无正确性问题；678 的问题逐条复现后全部修掉。
+
+### Fixed（`monthly_review.py`）
+- **漏扫日的 429 不进合计**：漏扫（没有 `.swarm_results_<日>.json`）时直接 `continue`，跳过了数 429——而漏扫的日子最可能正是被限流打挂的那天；
+  也不进「没有日志可数」。改为每个交易日先数 429、再看有没有结果文件。（复现：10-02 漏扫且日志 500 次 429 ⇒ 旧合计 5）
+- **晚一天跑就整月丢失**：窗口原是「昨天所在的自然月、截至昨天」——定时任务推迟到 2 日（停在权限提示 / 机器睡着，记忆里周月任务都出过）⇒
+  「11-01 ~ 11-01、交易日 0 天、无漏扫」，整个 10 月从没被报告、也没有任何东西会红。改为：当月前 `LATE_RUN_DAYS`（7）天里跑 ⇒ 整个上月；
+  之后 ⇒ 本月 1 日到昨天。窗口里 0 个交易日另写一行警示，不渲染成健康的「无漏扫」。节标题带上窗口（原写「本月」，1 日跑报的其实是上月）。
+- **就绪度进度行照抄会转述结论（盲化）**：维度 IC / 共振 / F&G 三行原样抄 Step 11 就绪度 JSON 的进度行，而上游在过了检视点后会把结论写进去
+  （`in_progress`「已过 中期 检视（H1=significant_negative）」/ `concluded` / `confirmed` / `not_confirmed`）——与月报「已就绪也不印结论」的不变式矛盾，
+  而月报后面正要让 Claude 提评分假说。改为按状态放行：只有 `not_ready`（纯计数）原样抄；`cannot_judge` 等判不了的状态 ⇒「不可得」行（此前当正常行、
+  不计入「N 项取不到」）；其余状态**包括没见过的**一律改写成「已到检视点或已有结论（状态 X）——按协议看 <工具> 的全文，月报不转述」（失败往盲的那边错）。
+  今天生产三段都是 `not_ready`，尚未漏出过。
+- **IC 重跑行印成「None/None 个合格周」**：就绪度外壳判不了（库不在 ⇒ `status: undetermined` 只带 `reason`）或工具崩溃时，此行照常渲染、不计入取不到。
+  改为外壳判不了 / 合格周数缺失或不是整数 ⇒ 不可得。
+- **账本 / 影子根不在 ⇒ 显示成全 0**：跨式 × GEX、宽跨影子、LLM 影子三个进度函数在文件 / 目录不存在时返回空列表 ⇒ 数据根配错会渲染成「0/60」「0/30」「健康日 0/20」。
+  改为先核目录（跨式账本目录取自 `PATHS.straddle_prereg_result.parent` / `PATHS.straddle_strangle_shadow_result.parent`，不在月报里另抄目录名；影子根的 `shadow_status/`），
+  不在 ⇒ 不可得。
+- 判不了的日子（坏文件 / 标的不足日健康下限）逐日点名（此前只写第一天），且不进字段表（小样本的「降级」没有意义）；进度表单元格的换行也压平（异常消息带换行会拆开 Markdown 表）；
+  模块 docstring「不打网」改准（本模块不打网，它调用的策略层优势回测会取 SPY）。
+
+### Fixed（测试）
+- `tests/test_bull_veto_retired.py::_hits` 不扫 docstring（同卖权火墙与月报收益扫描器）：写「旧的 bull_veto_enabled 开关已删除」的 docstring 此前会红。
+- `tests/test_optimizer_analyst_data_root.py::test_self_analyst_main_reads_and_writes_under_home`：main 自 678 起会算月报两节、读编排器日志目录（缺省 `~/.claude/logs`，数据根外）——
+  指到 tmp，不再读本机真实日志（只读、断言不依赖它，但不该在测试里出现生产的进度行）。
+
+### 测试
+- `tests/test_monthly_review.py` 27 → 46 条：晚跑窗口（2 日 / 7 日 / 8 日）、漏扫日 500 次 429 计入、小样本与坏文件日逐日点名且不进字段表、0 交易日警示、
+  6 种非 `not_ready` 状态（含没见过的）都不转述结论（断言 significant / Δ / p= / 确认 / 结论 / 计数都不出现）、`cannot_judge` 成错误行、IC 重跑四种缺数形状成错误行、
+  三个账本目录不在成错误行、换行不拆表。
+- 变异 13 处全红：漏扫日不数 429、IC 重跑不核周数、外壳判不了照算、就绪度行照抄、没见过的状态照抄、cannot_judge 当正常行、账本目录不核、晚跑丢月、0 交易日不告警、
+  换行拆表、判不了的日子进字段表、只点名第一天、墓碑扫 docstring。
+- 拨钟审计（+7 / +45 天）三个测试文件 0 条新红。ruff 过。对生产数据根只读重跑一遍：9 行全部取到、数据质量与 678 实测一致。
+- 整套（与另一会话的整套错开跑）：**13191 passed / 0 failed**（82 deselected、2 xfailed）。
+
+### 审查报回、核过没问题的
+- 677：删的分支只在 `bull_veto_enabled` 为真时走、config 为 False 且无覆盖路径；全仓（含实验 / 重放脚本）无别的读者；今天 14:00 生产首跑正常（30 只、无异常）。
+- 678：`pdt_today()` 字符串已处理；11-01 03:00 PT（夏令时切换日）日期仍是 11-01；日志保留 30 天，10 月日志在 11-01 都在；策略层优势 / LLM 影子已就绪也不漏效应量；卖权火墙未越界；
+  `--ticker` 不出两节；两版都已进生产克隆。
+
+
+## [0.45.685] — 2026-10-29 — Fixed：v0.45.681 二次检查——「本地命中不许 sleep」只认被测模块 `time.sleep` 这一种写法，经别名 / 别的模块睡会静默漏；改成只数**测试线程**的全局 sleep
+
+**起因**：681 为了不让别的线程的 sleep 被数进来，把 `tests/test_outcomes_backlog_starvation.py` 改成只换 `outcomes_fetcher` 模块里的 `time` 名字（`_ModuleTime` 代理）。这把 `test_one_run_drains_everything_locally_resolvable` 的 `sleeps == []`（本次 starvation 修复的核心：本地命中不 sleep）变成了只认一种写法——本地路径上经辅助模块、或本模块 `import time as _t` 睡的，代理既数不到也拦不住（会真睡），测试照绿。变异实测：本地命中时 `import time as _t; _t.sleep(0)` ⇒ 681 版本 **16 passed**；本地命中时经另一个模块 `sleep(0)` ⇒ 681 前的写法红（660 次全数到）、681 绿。现状没有这类 sleep（只读探针：跑这个文件时走到全局 `time.sleep` 的只有注入器那一次），是测试变弱、不是现网有病。
+
+⭐ **缩小观测范围对两类断言后果相反**：「必须发生」（`== [0.5] * 3`）漏数 ⇒ 变红、看得见；「不许发生」（`== []`）漏数 ⇒ 静默绿。681 把两类一起缩了。要排除的干扰是「别的线程」，就该按线程排除，而不是按写法排除——后者顺带把同一线程上的合法观测也排除了。
+
+- `tests/test_outcomes_backlog_starvation.py`：删 `_ModuleTime`，新增 `_this_thread_sleeps(monkeypatch)`——替换全局 `time.sleep`，**本测试线程**的调用只记秒数、不真等（不论出自哪个模块、怎么写），别的线程照常真睡、不数。3 处都改用它（第三处只为不真等）。`stray_sleeps` 的 `other_thread` 注入照旧，现在靠线程过滤排除它。生产代码不动。
+- 代价（写在辅助函数 docstring 里）：本线程上别处的附带 sleep 也会被数，如 v0.45.664 的 `subprocess.run(timeout=…)` 收子进程忙等——这条路径不起子进程，将来有了是变红、不是静默；生产若把取数挪到别的线程，它的 sleep 不再被数 ⇒ 出网那条同样变红。
+
+**变异检查**（字节码关掉跑，还原后 16 passed）：本地命中经别名 sleep ⇒ drain 两条红 / 本地命中经别的模块 sleep ⇒ drain 两条红 / 本地命中 `time.sleep` ⇒ 红 / 出网后不再等 ⇒ 出网两条红 / 等的秒数不是 `rate_limit` ⇒ 红 / 去掉按线程过滤 ⇒ **只**红两条 `other_thread` / 注入器不起线程 ⇒ 两条收尾自证报错。另一条**单独不红**：退回 681 的「只换本模块名字」——现状生产代码里没有别处的 sleep，两种写法在当前代码上等价，只有叠上前两条变异才分得开，这正是 681 的盲区所在。
+
+**核对**：本文件 16 passed；`ruff` 全绿；拨钟审计 +7 / +45 / +400 新红 0 条；`select_tests.py --run`（本文件 + `CHANGELOG.md` ⇒ 26 个文件）1549 passed、退出码 0、无漏登。整套交给 CI。顺带补 681 的一处漏跑：681 本地选测只按测试文件选（15 个文件），没带上 `CHANGELOG.md` 的 11 个读者（CI 整套跑过）；本次复查补跑 401 passed。
+
+681 条目里对应的三句就地标了「685 更正」。
+
+## [0.45.684] — 2026-10-29 — 占位（进行中：Alpha Bot 盘中 GEX 热力图叠现价 / Zero Gamma 路径、逐拍变化视图、颜色按分位截断）
+
+## [0.45.683] — 2026-10-29 — Fixed：LLM 影子 10-29 丢天复盘——Anthropic 连接 / 超时错误不再带崩整只标的 / P4b / 整次扫描；付费跑中途出错时救回已写的逐只结果；开跑前探活加必需主机 api.anthropic.com
+
+背景（10-29 的 run，$2.04 / 260 次调用）：14:56 起访问 Anthropic API 反复 TLS 握手超时。`llm_service.call` 只接内置的 `ConnectionError / TimeoutError / OSError / ValueError`，而 SDK 的 `APITimeoutError`（`APIConnectionError` 子类）不是它们的子类，于是原样冒出去：17 次「并行分析失败」（整只标的丢掉，3 轮重试后 VZ / XOM / DELL 仍没补齐，产出 27/30）；蜂群跑完、27 只结果都写盘后，P4b（跨标的 LLM 步骤）又冒出一个，`run_swarm_scan` 抛出，影子入口只记了错误信息就退出——**27 只付费结果没进状态文件**（`tickers_scanned` 空、`queen_llm_rate=0%`）。当天已花钱，同日锁生效，无法重跑。探活当时全通，因为它只探三个数据源、没探花钱的那个 API。
+
+### Fixed
+- `llm_service.py`：新 `_handled_call_errors()`——`call()` 把 `anthropic.APIConnectionError`（含 `APITimeoutError`）和原来的内置四类一并当作「这次没拿到响应」：计一次 `failed_calls`、返回 None、调用方回落规则引擎。**只收连接 / 超时类**：400 / 401 / 5xx 这类 API 状态错误仍然抛（代码或额度问题，吞掉会藏起来），仍计一次 `failed_calls`。 `anthropic.APIConnectionError` 用 `getattr` 取（老版本 SDK / 被测试换成桩的模块里没有这个类时退回内置四类）——**整套测试抓到的**：第一版直接取属性，`tests/test_llm_service.py::TestRateLimitRetry::test_non_rate_limit_exception_not_retried`（把 `anthropic` 换成只有 `RateLimitError` 的桩）红了，因为在 `except` 子句求值时抛 `AttributeError`，把一个本来能处理的 `ConnectionError` 变成新的崩溃；补了对应的回归用例。
+- `alpha_hive_daily_report.py::_compute_cross_ticker`（P4b）：除原来的五类异常外兜底 `Exception`，留一行 **WARNING**「P4b 跨标的关联分析失败，已跳过」——可选的 LLM 增强步骤不许带崩已经跑完的整次扫描。失败的那次调用已在 `failed_calls` 里。
+- `llm_shadow_scan.py`：付费跑（`--run`）扫描抛异常时，从 `<影子根>/.swarm_results_<日期>.json` **救回已写的逐只结果**记进状态文件（新字段 `salvaged: true`，仍退出码 3、`error` 照记）；救回不了（文件不存在 / 是本次起跑之前写的 / 读不了）时把原因拼进 `error`，这条路径本身不抛。`control` 模式不救（免费、可重跑）。
+- `llm_shadow_scan.py::quality_report(error=...)`：扫描出错本身是一条**不健康理由**（`scan_error`）。必须有它——救回来后逐只数据不再是空的，`queen_llm_rate` 不再把这天判掉，没有这条的话「标的不全、后半截没跑完」的日子会悄悄进比较。**今天（10-29）这类日子的纳入与否仍由人决定**，代码只保证数据不丢、默认不入比较。
+- `llm_shadow_daily.py::probe_network`：新增必需主机 `NET_PROBE_REQUIRED_URLS = (api.anthropic.com,)`——通 ⇔ 数据源至少 2/3 通 **且** 必需主机全通；必需主机不计入数据源的法定数。对 api.anthropic.com 不带 key 的 GET 只会得到 4xx，不产生任何调用 / 费用。⚠️ 探活只是开跑那一刻的采样：10-29 的故障起于开跑 11 分钟之后，这条探活**挡不住**那种间歇故障；它挡的是开跑时就不通的日子。
+
+### 测试 / 变异
+- `tests/test_llm_service_5_5_models.py::TestApiConnectionErrors`（超时 / 连接错误只记一次 failed_calls 且归还在途预留、call_json 返回 None、400 仍抛、内置异常照旧、没装 SDK 时退回内置四类）；新 `tests/test_cross_ticker_step_cannot_kill_scan.py`（P4b 遇 API 超时 / 连接 / 任意异常都返回空分析并留 WARNING、非 LLM 模式不调用、成功路径不变）；`tests/test_llm_shadow_scan.py`（救回但仍不健康、`scan_error` 是唯一把救回日挡在比较外的理由、control 不救、旧文件不当本次结果、读不了不抛、干净跑没有 `salvaged` 键）；`tests/test_llm_shadow_daily.py`（Anthropic 不通即便数据源全通也不开跑、数据源坏一个仍开跑、HTTP 4xx 算通、默认调用探到必需主机、必需主机不凑数据源法定数）。既有探活用例显式 `required=()` 保持它们原来测的东西。
+- 12 种人为破坏（`call` 只收内置异常 / 吞掉所有异常 / P4b 不兜底 / 兜底但不留 WARNING / 出错不救回 / 出错不算不健康理由 / control 也救回 / 不看文件新旧 / 读坏文件会抛 / 探活不管必需主机 / 必需主机凑数据源法定数 / 默认不探必需主机）全部让测试变红，文件已原样还原。真环境（plist 同款代理变量）：`probe_network()` ⇒ 通 3/3、必需主机通 1/1；把必需主机换成不存在的域名 ⇒ 不通、原因写明。
+- 未做 / 待验证：10-29 当天的 27 只结果（`.swarm_results_2026-10-29.json` 还在）是否补记、按什么口径——需要对照预注册对「标的不全」的处理，由用户定；`llm_service` 的 5xx / 529 过载错误仍会抛（本次只收连接 / 超时）；开跑之后才出现的间歇性 API 故障只会让相应的蜂回落规则引擎、当天因 `failed_call_rate` / `queen_llm_rate` 判不健康，不会再带崩整次扫描。
+
+## [0.45.682] — 2026-10-29 — Fixed：尾部对冲候选面板选到期日——先看「实际能出几个可用候选」、再取离 45 天最近的（此前只看离 45 天近不近，选中行权价很少的周度合约，6 个候选里 4 个「没有够近的认沽」）
+
+### Fixed
+- `alphabot/tail_hedge.py::pick_expiry`：窗口 [21, 90] 天内的到期日，**先**按 `usable_pairs`（这个到期日实际能出几个可用候选）降序，**并列**再取离 `target_dte` 最近的、再并列取更近的。可用候选数相同时与旧行为一致。`usable_pairs` 数的是（卖出档, 买入档）组合里：两条腿都找得到（`pick_put`，差不超过 `delta_tolerance`）、买入腿行权价更低、两条腿都有可用报价与 IV 的个数。新增 `candidate_pairs` / `usable_pairs` / `_leg_problem`；**`_candidate` 的报价 / IV 检查改用 `_leg_problem`**，与选到期日共用同一处判据（「凑得齐」必须等于「候选真能出来」）。
+- 触发实例（2026-10-29，生产代码 + 真实 SPY 链只读复现）：离 45 天最近的 **12-11（43 天）是周度合约，CBOE 只列了 19 个认沽（行权价 725–815、最深 |Δ|=0.178）**，10Δ / 5Δ 的买入腿根本不存在 ⇒ `30x10 / 30x05 / 20x10 / 20x05` 四个候选「没有 |delta| 够接近目标档的认沽（long）」；该到期日 19 个认沽的未平仓量全是 0 ⇒ 整页 `oi_unknown`、OI 上限没法套。**不是取数层丢数据**（`n_dropped_unparseable=0`，只丢了 298 条当天到期）。改后选 **12-18（50 天，258 个认沽，6/6 候选可算）**，12-11 只有 2/6；OI 上限开始生效（`20x05` 因此标 `size_capped`）。该日 8 个窗口内到期日逐个核对：按 delta 算、按可报价算、`build` 实际产出的可用候选数三者一致。
+### Added
+- 链信息（`chain`）加纯新增字段：`candidates_usable` / `candidates_total`；没选离 45 天最近的那个到期日时再给 `nearest_expiry` / `nearest_expiry_dte` / `nearest_candidates_usable`（否则为 None）。页面「期权链」卡片据此写「x/6 个候选可算」与「离 N 天最近的 … 只有 y/6 个候选可算，所以没选它」（N 取 `meta.rules.target_dte`，不写死）；帮助页「尾部对冲候选」加「到期日怎么选」一条。
+### 二次检查（独立审查代理，只给代码与设计意图）+ 自查
+- 第一版数的是「目标档位」（5 档），审查与自查各发现的问题都已修：① **一个认沽可同时是 3 个档位里最接近的那个**（−0.15 对 0.20 / 0.15 / 0.10 都在容差内）——档位数相同的两个到期日，一个其实一个候选也出不来（反例：A 只有一个 −0.15 认沽、B 有 −0.30 / −0.20 两个，旧档位数都给 3 分、选 A、0 个候选）；② **`bid = 0` 的远端腿**——`_quote.ok` 要求 bid > 0，档位凑得齐而候选出不来（反例：C 凑齐 5 档但 0.15 / 0.10 / 0.05 的 bid 全是 0，选 C、0 个候选，D 有 6 个）；③ 页面写死「45 天」、测试只 grep 字面量（注释里有也过）。
+- **取舍（审查实测，已写进 docstring / 帮助页）**：可用候选数是唯一的先手条件、**没有离 `target_dte` 的惩罚**——窗口边缘（21 / 90 天）的到期日只要多算出一个候选就胜过离 45 天最近的。是取舍不是 bug；页面会写出没选哪个。
+### 测试 / 变异
+- `tests/test_alphabot_tail_hedge.py` 新增 `TestExpiryCoverage`（14 条）：可用候选胜过离得近、并列仍按旧距离规则、都不完整取最多者、`bid = 0` 与「一个认沽不能当两条腿」两个审查反例、缺 IV 与 `build` 的原因码一致、窗口仍然约束、边缘到期日无惩罚（文档化行为）、2026-10-29 形状的回归、链信息、页面接线（去掉注释再查、规则确实传入）；**差分测试**：300 组随机到期日（档位疏密 / bid = 0 / 缺 IV），`usable_pairs` 恒等于 `build` 实际产出的可用候选数（夹具有牙：「一个都出不来」与「全部可算」各出现 >10 次）。
+- 11 种人为破坏（选到期日只看距离 / 排序取反 / 不查报价与 IV / 不查行权价有序 / 共用判据丢 IV 检查 / 丢报价检查 / 容差放宽 / 丢窗口 / 链信息恒报总数 / 页面写死 45 天 / 页面不传规则）全部让测试变红（其中「页面不传规则」第一轮漏网，补断言后抓到），已还原。
+- ⚠️ **未改**：卖出 / 买入档位、1:2 比例、窗口、抵消比例仍是主观常数、无前向证据；选到期日**没有**把「该到期日的未平仓量是否已发布」当条件——新周度合约 OI 为 0 但候选数更多时仍可能被选中，页面照旧标 `oi_unknown`（要不要偏好有 OI 的到期日是另一个决定）。不进评分、不写账本、不成交。
+
+## [0.45.681] — 2026-10-29 — Fixed：`tests/test_outcomes_backlog_starvation.py` 数 sleep 的测试不再替换全局 `time.sleep`，改只数被测模块自己的 sleep；新增确定性注入「别的线程 sleep」
+
+**起因（2026-10-29 验证「4 条数全局 sleep 的测试」那项待验证）**：这个文件 3 处 `monkeypatch.setattr(of.time, "sleep", …)`——`of.time` **就是**全局 `time` 模块，换掉的是所有人的 `sleep`（同 v0.45.664 的形状）。其中两条在数：`test_one_run_drains_everything_locally_resolvable`（`sleeps == []`）、`test_network_budget_caps_only_network_and_defers_the_rest`（`len(sleeps) == 3`）。注入一个每 2ms `time.sleep(0)` 的遗留线程 ⇒ 两条**次次红**（`[0, 0, …] == []`、`6 == 3`）。整套里目前不会发生——只读探针实测它们跑的时候没有别的线程，唯一常驻的遗留线程（chromadb 带起的 posthog 消费线程）在 pytest 下被禁用、从不 sleep——但只要以后有测试在它们前面漏下一个会 sleep 的线程，就会偶发红。
+
+- `tests/test_outcomes_backlog_starvation.py`：
+  - 新增 `_ModuleTime`：被测模块自己看到的 `time`，只把 `sleep` 换成记录器、其余原样转给真 `time`（拨钟 harness 的补丁照样生效）。3 处都改成 `monkeypatch.setattr(of, "time", _ModuleTime(…))`——只换 `outcomes_fetcher` 模块里那个名字，**不改生产代码**：生产那行 `time.sleep(self.rate_limit)` 照旧被直接验证（没另造接缝：造了就得再证明接缝真在睡，见 `tests/test_retry_backoff_seams.py`）。（**685 更正**：这样一来 `sleeps == []` 只认本模块 `time.sleep` 这一种写法，本地路径上经别名 / 别的模块睡的会静默漏；`_ModuleTime` 已删，改成只数测试线程的全局 sleep，见 v0.45.685。）
+  - 新增夹具 `stray_sleeps`（`quiet` / `other_thread`）：`other_thread` 在每次 `OutcomesFetcher.run` 开跑时另起线程调一次全局 `time.sleep(0)` 并等它结束——**确定性**落在计数窗口里（靠真时间的定时线程撞不撞得上看测试多快，`test_network_budget…` 只跑几毫秒）；没触发就收尾报错。挂在两条数 sleep 的测试上（14 → 16 条）。
+  - `len(sleeps) == 3` 收紧为 `sleeps == [0.5] * 3`：顺带钉住等的秒数就是 `rate_limit`。
+
+**变异检查**（6 个，全红在预期断言上，还原后绿；字节码关掉跑）：退回替换全局 `time.sleep`（保留注入器）⇒ 只红两条 `other_thread`——正是本次要防的情形 / 注入器不起线程 ⇒ 收尾自证报错 / 代理不拦 `sleep` ⇒ 红 / 生产出网后不再等 ⇒ 红 / 生产本地命中也 sleep ⇒ 红（685 更正：只对写成本模块 `time.sleep` 的成立，写成别名 / 经别的模块睡的 681 版本照绿）/ 生产等的秒数不是 `rate_limit` ⇒ 红（旧的 `len == 3` 抓不到这个）。
+
+**核对**：本文件 16 passed；拨钟审计 +7 / +45 / +400 新红 0 条；`select_tests.py --run`（13 个元守卫 + 本文件等 15 个文件）1149 passed、登记表不过期。整套交给 CI。
+
+**没改**：`tests/test_llm_service.py` 也有 2 条数全局 sleep（`len(slept) == 1 / 0`）——测试体只跑几微秒，同样的注入实测撞不上；要改照本条的做法（685 更正：照 v0.45.685 按线程过滤的做法，不要用本条的只换模块名字）。
+
 ## [0.45.680] — 2026-10-29 — Fixed：v0.45.673 二次检查——JSON 失败日志里的解析偏移是相对「被解析的那一段」、不是相对回复原文（读的人会数错位置），改成相对原文 + 附出错处前后各 60 字符；失败日志再记 `stop_details`（API 给了就记）
 
 ### Fixed
@@ -67,6 +190,7 @@
     月报后面要让 Claude 提评分假说，正是火墙防的那条路——初稿 import 了 `sell_strike_report`、改读本地报告又碰了状态目录，两次都被整套里的火墙测试拦下；
     没有为月报放宽白名单（要在月报里看卖权计数 = 改火墙，用户定）。
     **某项已就绪时也只写「已就绪、去哪看」**，不印 assess / build_report 算出的效应量与命中数——月报后面还要让 Claude 提假说，等于把结果递给改评分的人。
+    〔v0.45.686 更正：维度 IC / 共振 / F&G 三行当时是原样照抄上游进度行，上游过了检视点会把结论写进去——这条不变式对它们并不成立，686 改为按状态放行。〕
   - 每个来源单独兜住：取不到 ⇒ 那一行写「⚠️ 不可得：原因」，节首数出几项取不到；数据质量自身失败 ⇒「不可得……不代表本月没有降级」，不写成无降级。
 - `self_analyst.format_briefing`：新增 `data_quality` / `prereg_progress` 两个参数，渲染成「三.五」「三.六」两节，放在「四、分析任务」之前；
   有这两节时追加「任务 5：数据质量 → 修复待办」（挑缺失最多的 1–3 个字段，分已知 / 新问题；进度表只有计数、不许据它推断效应）。
@@ -84,7 +208,7 @@
 - 月度任务跑的是**生产克隆**，克隆只在扫描日扫描前快进；11-01 是周日 ⇒ 要赶上 11-01 那次，须在 10-30（周五）14:00 扫描前进 main。本版 10-29 推 main ⇒ 当天 14:00 起克隆就带上。
 
 ### 测试
-- `tests/test_monthly_review.py`（新，26 条，不用 skip、日期全注入）：窗口（1 日 / 月中 / 跨年 / 闰年）；数据质量聚合（漏扫、故障日、逐字段缺失与最差一天、未记录、429 与无日志的天）、
+- `tests/test_monthly_review.py`（新，26 条〔v0.45.686 更正：实为 27 条〕，不用 skip、日期全注入）：窗口（1 日 / 月中 / 跨年 / 闰年）；数据质量聚合（漏扫、故障日、逐字段缺失与最差一天、未记录、429 与无日志的天）、
   判不了的日子单列、自身失败写成不可得；进度：一项失败不拖垮其余、陈旧标记、就绪度取不晚于今天的最新一份、
   **策略层优势与 LLM 影子造「已就绪 + 带效应量」的结果，断言一个数都不漏**、未定 ⇒ 错误行、各计数格式化、卖权行只指路、登记表每项都真被调用；
   接线：两节在任务四之前、单票不出（连任务 5）、rank-IC 提示带窗口起点、`main` 端到端写出两节；静态：本模块不碰收益字段与「算效应量」的入口（自证有牙）。

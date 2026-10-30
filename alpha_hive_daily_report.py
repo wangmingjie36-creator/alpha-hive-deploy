@@ -1663,6 +1663,10 @@ class AlphaHiveDailyReporter:
                             swarm_results[tk]["sector_momentum"] = mom
         except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
             _log.debug("P4b 跨标的关联分析不可用: %s", e)
+        except Exception as e:  # noqa: BLE001 —— v0.45.683：可选的 LLM 增强步骤，不许带崩已经跑完的整次扫描
+            # 2026-10-29：这里冒出 APITimeoutError，27 只已付费的结果没进影子状态文件。失败的那次调用已计入
+            # llm_service 的 failed_calls（影子状态文件里看得到），这里再留一行 WARNING 写明「跳过了」。
+            _log.warning("P4b 跨标的关联分析失败，已跳过（不影响本轮标的结果）: %s: %s", type(e).__name__, e)
         return cross_ticker_analysis
 
     def _fetch_report_context(self, swarm_results):

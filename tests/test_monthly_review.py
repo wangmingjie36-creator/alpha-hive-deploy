@@ -39,6 +39,9 @@ YF_ORACLE = ("rv_30d", "iv_rank", "iv_rv_spread")
     ("2026-10-29", "2026-10-01", "2026-10-28"),     # 月中手动跑：本月到昨天
     ("2027-01-01", "2026-12-01", "2026-12-31"),     # 跨年
     ("2028-03-01", "2028-02-01", "2028-02-29"),     # 闰年二月
+    ("2026-11-02", "2026-10-01", "2026-10-31"),     # v0.45.686：定时任务推迟到 2 日也报整个上月（此前是 11-01 ~ 11-01、0 个交易日）
+    ("2026-11-07", "2026-10-01", "2026-10-31"),     # 前 LATE_RUN_DAYS 天都算推迟
+    ("2026-11-08", "2026-11-01", "2026-11-07"),     # 之后才算月中手动跑
 ])
 def test_report_month(today, start, end):
     s, e = mr.report_month(date.fromisoformat(today))
@@ -96,7 +99,16 @@ class TestDataQuality:
         assert by["unusual_flow"]["not_recorded_days"] == 1 and by["unusual_flow"]["days"] == 3
         missing = [f["missing"] for f in dq["fields"]]
         assert missing == sorted(missing, reverse=True), "表要按缺失（日·票）降序"
-        assert dq["rate_limit"] == {"total": 3, "days": [("2026-10-02", 3)], "unknown_days": ["2026-10-06", "2026-10-07"]}
+        assert dq["rate_limit"] == {"total": 3, "days": [("2026-10-02", 3)],
+                                    "unknown_days": ["2026-10-05", "2026-10-06", "2026-10-07"]}
+
+    def test_rate_limit_counted_on_missed_scan_days(self, month):
+        """v0.45.686：漏扫的日子最可能正是被限流打挂的那天——此前它直接跳过、429 不进合计也不进「没日志可数」。"""
+        home, logs = month
+        (logs / "orchestrator-2026-10-05.log").write_text("14:01:00 Too Many Requests\n" * 500, encoding="utf-8")
+        dq = mr.data_quality(date(2026, 10, 8), home=home, log_dir=logs)
+        assert dq["missing_scan"] == ["2026-10-05"]
+        assert dq["rate_limit"]["total"] == 503 and ("2026-10-05", 500) in dq["rate_limit"]["days"]
 
     def test_render(self, month):
         home, logs = month
@@ -104,7 +116,8 @@ class TestDataQuality:
         assert "## 三.五、数据质量" in txt
         assert "漏扫 1 天**（10-05）" in txt
         assert "数据源故障日 1 天：10-02（yfinance×" in txt
-        assert "合计 3 次" in txt and "2 天没有日志可数" in txt
+        assert "合计 3 次" in txt and "3 天没有日志可数" in txt
+        assert "## 三.五、数据质量（2026-10-01 ~ 2026-10-07，不看收益）" in txt
         assert "| rv_30d | yfinance 日K | 12 | 1（10-02） | 10-02（0/12） |" in txt
         assert "1 天未记录" in txt
 
@@ -114,6 +127,25 @@ class TestDataQuality:
         dq = mr.data_quality(date(2026, 10, 8), home=home, log_dir=logs)
         assert dq["missing_scan"] == [] and [u["date"] for u in dq["undetermined"]] == ["2026-10-05"]
         assert "判不了 1 天" in "\n".join(mr.render_data_quality(dq))
+
+    def test_small_sample_days_named_and_kept_out_of_field_table(self, month):
+        """v0.45.686：标的不足日健康下限的日子判不了 ⇒ 不进字段表（小样本的「降级」没意义），且每一天都点名。"""
+        home, logs = month
+        _write_day(home, "2026-10-05", {"A": _ticker(yf_ok=False), "B": _ticker(yf_ok=False)})   # 2 只，全缺
+        (home / ".swarm_results_2026-10-07.json").write_text("{坏", encoding="utf-8")
+        dq = mr.data_quality(date(2026, 10, 8), home=home, log_dir=logs)
+        assert [u["date"] for u in dq["undetermined"]] == ["2026-10-05", "2026-10-07"]
+        by = {f["field"]: f for f in dq["fields"]}
+        assert "2026-10-05" not in by["rv_30d"]["degraded_days"] and by["rv_30d"]["missing"] == 12
+        txt = "\n".join(mr.render_data_quality(dq))
+        assert "10-05：" in txt and "10-07：" in txt and "不计入下表" in txt
+
+    def test_zero_trading_days_warns(self, tmp_path):
+        """窗口里一个交易日都没有 ⇒ 写明，不渲染成「无漏扫」的健康样子。"""
+        dq = {"available": True, "start": "2026-12-25", "end": "2026-12-25", "trading_days": 0, "scanned": 0,
+              "missing_scan": [], "outage": [], "degraded_days": [], "undetermined": [], "fields": [],
+              "rate_limit": {"total": 0, "days": [], "unknown_days": []}}
+        assert "一个交易日都没有" in "\n".join(mr.render_data_quality(dq))
 
     def test_own_failure_is_visible(self, month, monkeypatch):
         import scan_coverage_gate
@@ -125,7 +157,7 @@ class TestDataQuality:
         dq = mr.data_quality(date(2026, 10, 8), home=home, log_dir=logs)
         assert dq == {"available": False, "reason": "OSError: 盘坏了"}
         txt = "\n".join(mr.render_data_quality(dq))
-        assert "不可得" in txt and "不代表本月没有降级" in txt
+        assert "不可得" in txt and "不代表这个月没有降级" in txt
 
 
 # ═══════════════════════════════════════════════════════════════ C. 进度
@@ -148,6 +180,12 @@ class TestProgress:
         assert "| 乙 | ⚠️ 不可得：RuntimeError: boom |" in txt
         assert "| 丙 | a／b |" in txt, "表格里的 | 要换掉，否则 Markdown 表错位"
 
+    def test_newline_in_error_stays_on_one_row(self):
+        def nl(log_dir, today):
+            raise RuntimeError("第一行\n第二行")
+        txt = "\n".join(mr.render_progress(mr.prereg_progress(date(2026, 10, 8), sources=[("甲", nl)])))
+        assert "| 甲 | ⚠️ 不可得：RuntimeError: 第一行 第二行 |" in txt
+
     def test_stale_readiness_marked(self):
         rows = mr.prereg_progress(date(2026, 10, 8), sources=[("新", _ok("x", "2026-10-07")), ("旧", _ok("y", "2026-10-01"))])
         assert [r["stale"] for r in rows] == [False, True]
@@ -157,15 +195,56 @@ class TestProgress:
     def test_readiness_json_latest_not_after_today(self, tmp_path):
         for d, line in (("2026-10-05", "旧"), ("2026-10-06", "用这份"), ("2026-10-09", "未来")):
             (tmp_path / f"ic_rerun_readiness-{d}.json").write_text(json.dumps({
-                "dim_ic_forward_test": {"line": line}, "weeks_accrued": 2, "weeks_required": 25,
-                "eta_date": "2027-01-20", "ready": False}), encoding="utf-8")
-        r = mr._from_readiness("dim_ic_forward_test")(tmp_path, date(2026, 10, 8))
+                "dim_ic_forward_test": {"status": "not_ready", "line": line}, "weeks_accrued": 2, "weeks_required": 25,
+                "eta_date": "2027-01-20", "ready": False, "status": "ok"}), encoding="utf-8")
+        r = mr._from_readiness("dim_ic_forward_test", "x.py")(tmp_path, date(2026, 10, 8))
         assert r == {"line": "用这份", "as_of": "2026-10-06"}
         assert mr._ic_rerun(tmp_path, date(2026, 10, 8))["line"] == "2/25 个合格周，预计 2027-01-20"
         with pytest.raises(KeyError):
-            mr._from_readiness("resonance_forward_test")(tmp_path, date(2026, 10, 8))
+            mr._from_readiness("resonance_forward_test", "x.py")(tmp_path, date(2026, 10, 8))
         with pytest.raises(FileNotFoundError):
-            mr._from_readiness("dim_ic_forward_test")(tmp_path / "空", date(2026, 10, 8))
+            mr._from_readiness("dim_ic_forward_test", "x.py")(tmp_path / "空", date(2026, 10, 8))
+
+    @staticmethod
+    def _readiness(tmp_path, seg=None, **top):
+        doc = {"weeks_accrued": 2, "weeks_required": 25, "status": "ok", **top}
+        if seg is not None:
+            doc["dim_ic_forward_test"] = seg
+        (tmp_path / "ic_rerun_readiness-2026-10-07.json").write_text(json.dumps(doc), encoding="utf-8")
+
+    @pytest.mark.parametrize("status,line", [
+        ("in_progress", "🔔 维度 IC：已过 中期 检视（H1=significant_negative）；H1 合格周 13/26"),
+        ("concluded", "✅ 维度 IC：已出结论：H1=significant_negative，H2=not_significant"),
+        ("confirmed", "✅ 共振加成：确认（Δ=+0.031，p=0.004）"),
+        ("not_confirmed", "共振加成：未确认（p=0.21）"),
+        ("insample", "样本内 Δ=+0.05"),
+        ("some_future_status", "H1=significant_positive"),
+    ])
+    def test_readiness_verdicts_never_copied(self, tmp_path, status, line):
+        """v0.45.686：上游进度行过了检视点就写结论 ⇒ 只有 not_ready 原样抄，其余（含没见过的状态）一律改写成指路。"""
+        self._readiness(tmp_path, {"status": status, "line": line})
+        r = mr._from_readiness("dim_ic_forward_test", "experiments/dim_ic_forward_test.py")(tmp_path, date(2026, 10, 8))
+        for leak in ("significant", "Δ", "p=", "确认", "结论：", "13/26"):
+            assert leak not in r["line"], f"月报转述了 {status} 的结论 {leak!r}：{r['line']}"
+        assert status in r["line"] and "experiments/dim_ic_forward_test.py" in r["line"]
+
+    def test_readiness_cannot_judge_is_an_error_row(self, tmp_path):
+        self._readiness(tmp_path, {"status": "cannot_judge", "line": "⚠️ F&G：进程在 F&G 重放结束前终止"})
+        rows = mr.prereg_progress(date(2026, 10, 8), log_dir=tmp_path,
+                                  sources=[("甲", mr._from_readiness("dim_ic_forward_test", "x.py"))])
+        assert rows[0]["error"] and "判不了（cannot_judge）" in rows[0]["error"]
+
+    @pytest.mark.parametrize("top", [
+        {"status": "undetermined", "reason": "找不到 pheromone.db", "weeks_accrued": None, "weeks_required": None},
+        {"status": "error", "reason": "崩了"},
+        {"weeks_accrued": None},
+        {"weeks_required": True},
+    ])
+    def test_ic_rerun_without_numbers_is_an_error(self, tmp_path, top):
+        """v0.45.686：外壳判不了 / 合格周数缺失时此前渲染成「None/None 个合格周」、不计入取不到。"""
+        self._readiness(tmp_path, None, **top)
+        rows = mr.prereg_progress(date(2026, 10, 8), log_dir=tmp_path, sources=[("IC 重跑", mr._ic_rerun)])
+        assert rows[0]["error"] and rows[0]["line"] is None
 
     def test_strategy_edge_ready_does_not_leak_effect(self, monkeypatch):
         from experiments import strategy_edge_test as se
@@ -183,8 +262,11 @@ class TestProgress:
         rows = mr.prereg_progress(date(2026, 10, 8), sources=[("策略层优势", mr._strategy_edge)])
         assert rows[0]["error"] == "RuntimeError: 无法判定：无已验证预测数据"
 
-    def test_llm_shadow_ready_does_not_leak_result(self, monkeypatch):
+    def test_llm_shadow_ready_does_not_leak_result(self, monkeypatch, tmp_path):
         import llm_shadow_report as lr
+        import llm_shadow_scan
+        (tmp_path / lr.STATUS_DIRNAME).mkdir()
+        monkeypatch.setattr(llm_shadow_scan, "default_shadow_root", lambda home: tmp_path)
         monkeypatch.setattr(lr, "build_report", lambda root, db, today=None: {
             "describe": {"generation": "g2", "healthy_days": 25, "spend_usd": 70.0, "missing_run_days": [],
                          "mean_score_diff": 0.777, "direction_flip_rate": 0.3141},
@@ -201,9 +283,20 @@ class TestProgress:
         r = mr._sell_strike(None, date(2026, 10, 8))
         assert "火墙" in r["line"] and "账本就绪度" in r["line"] and "as_of" not in r
 
-    def test_count_only_formatters(self, monkeypatch):
+    def test_missing_ledger_dirs_are_errors_not_zeros(self, monkeypatch, tmp_path):
+        """v0.45.686：数据根配错时三个进度函数都返回空列表 ⇒ 此前渲染成「0/60」「0/30」「健康日 0/20」。"""
+        import llm_shadow_scan
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(tmp_path / "空根"))
+        monkeypatch.setattr(llm_shadow_scan, "default_shadow_root", lambda home: tmp_path / "空影子根")
+        rows = mr.prereg_progress(date(2026, 10, 8), sources=[
+            ("跨式 × GEX", mr._straddle_gex), ("宽跨影子", mr._strangle_shadow), ("LLM 影子", mr._llm_shadow)])
+        assert all(r["error"] and "不存在" in r["error"] for r in rows), rows
+
+    def test_count_only_formatters(self, monkeypatch, tmp_path):
         import straddle_gex_prereg as sg
         import straddle_strangle_shadow as ss
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(tmp_path))
+        (tmp_path / "options_paper_state").mkdir()
         monkeypatch.setattr(sg, "_load_rows", lambda: [])
         monkeypatch.setattr(sg, "progress", lambda rows: {
             "n_events": 32, "n_with_gex": 8, "n_eligible_settled": 1, "ready": False, "frozen": False,

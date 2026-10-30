@@ -301,33 +301,72 @@ class TestProbeNetwork:
     URLS = ("https://a.example/", "https://b.example/", "https://c.example/")
 
     def test_all_up(self):
-        ok, det = dly.probe_network(self.URLS, opener=self._opener({"a.example": 1, "b.example": 1, "c.example": 1}))
+        ok, det = dly.probe_network(self.URLS, required=(), opener=self._opener({"a.example": 1, "b.example": 1, "c.example": 1}))
         assert ok is True and "通 3/3" in det
 
     def test_http_error_counts_as_reachable(self):
         """Yahoo 常给 429：有响应说明握手通了。"""
         import urllib.error
         e = urllib.error.HTTPError("u", 429, "Too Many", {}, None)
-        ok, _ = dly.probe_network(self.URLS, opener=self._opener({"a.example": e, "b.example": e, "c.example": e}))
+        ok, _ = dly.probe_network(self.URLS, required=(), opener=self._opener({"a.example": e, "b.example": e, "c.example": e}))
         assert ok is True
 
     def test_tls_eof_on_all_hosts_is_down(self):
         """10-23 的形状：所有数据源同时 `EOF occurred in violation of protocol`。"""
         import ssl
         e = ssl.SSLEOFError(8, "EOF occurred in violation of protocol (_ssl.c:992)")
-        ok, det = dly.probe_network(self.URLS, opener=self._opener({"a.example": e, "b.example": e, "c.example": e}))
+        ok, det = dly.probe_network(self.URLS, required=(), opener=self._opener({"a.example": e, "b.example": e, "c.example": e}))
         assert ok is False and "SSLEOFError" in det and "通 0/3" in det
 
     def test_two_of_three_is_enough_one_is_not(self):
         e = OSError("timed out")
-        assert dly.probe_network(self.URLS, opener=self._opener({"a.example": 1, "b.example": 1, "c.example": e}))[0] is True
-        assert dly.probe_network(self.URLS, opener=self._opener({"a.example": 1, "b.example": e, "c.example": e}))[0] is False
+        assert dly.probe_network(self.URLS, required=(), opener=self._opener({"a.example": 1, "b.example": 1, "c.example": e}))[0] is True
+        assert dly.probe_network(self.URLS, required=(), opener=self._opener({"a.example": 1, "b.example": e, "c.example": e}))[0] is False
 
     def test_timeout_and_refused_count_as_down(self):
         import socket
-        ok, _ = dly.probe_network(self.URLS, opener=self._opener(
+        ok, _ = dly.probe_network(self.URLS, required=(), opener=self._opener(
             {"a.example": socket.timeout("t"), "b.example": ConnectionRefusedError("r"), "c.example": 1}))
         assert ok is False
+
+    ANTHROPIC = "https://api.anthropic.com/"
+
+    def _beh(self, anthropic, data=1):
+        return {"a.example": data, "b.example": data, "c.example": data, "api.anthropic.com": anthropic}
+
+    def test_anthropic_down_blocks_even_when_all_data_sources_are_up(self):
+        """v0.45.683：10-29 数据源探活全通，Anthropic 的 TLS 握手却在超时——花钱的 API 不通就不该开跑。"""
+        import ssl
+        e = ssl.SSLError("The handshake operation timed out")
+        ok, det = dly.probe_network(self.URLS, required=(self.ANTHROPIC,), opener=self._opener(self._beh(e)))
+        assert ok is False and "通 3/3" in det and "必需主机不通 api.anthropic.com" in det and "SSLError" in det
+
+    def test_anthropic_up_and_one_data_source_down_still_runs(self):
+        e = OSError("timed out")
+        beh = {"a.example": 1, "b.example": 1, "c.example": e, "api.anthropic.com": 1}
+        ok, det = dly.probe_network(self.URLS, required=(self.ANTHROPIC,), opener=self._opener(beh))
+        assert ok is True and "通 2/3" in det and "必需主机通 1/1" in det
+
+    def test_anthropic_http_error_counts_as_reachable(self):
+        """不带 key 的 GET 只会拿到 4xx——有响应就是握手通了，且没有任何调用 / 费用。"""
+        import urllib.error
+        e = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        assert dly.probe_network(self.URLS, required=(self.ANTHROPIC,), opener=self._opener(self._beh(e)))[0] is True
+
+    def test_required_hosts_default_is_anthropic_and_is_in_the_default_call(self):
+        assert [u.split("//")[1].split("/")[0] for u in dly.NET_PROBE_REQUIRED_URLS] == ["api.anthropic.com"]
+        seen = []
+
+        def op(url, timeout):
+            seen.append(url.split("//")[1].split("/")[0])
+        ok, _ = dly.probe_network(opener=op)                   # 全部默认：数据源 + 必需主机都被探到
+        assert ok is True and "api.anthropic.com" in seen and "cdn.cboe.com" in seen
+
+    def test_required_hosts_do_not_count_toward_the_data_source_quorum(self):
+        """数据源只通 1 个 + Anthropic 通：不能靠 Anthropic 凑够 min_ok。"""
+        e = OSError("x")
+        beh = {"a.example": 1, "b.example": e, "c.example": e, "api.anthropic.com": 1}
+        assert dly.probe_network(self.URLS, required=(self.ANTHROPIC,), opener=self._opener(beh))[0] is False
 
     def test_default_urls_are_the_three_scan_dependencies(self):
         hosts = {u.split("//")[1].split("/")[0] for u in dly.NET_PROBE_URLS}
@@ -507,7 +546,7 @@ class TestProbeClosesItsConnections:
                 events.append("exit")
 
         monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: Resp())
-        ok, _ = dly.probe_network(("https://a.example/", "https://b.example/"), min_ok=2)
+        ok, _ = dly.probe_network(("https://a.example/", "https://b.example/"), min_ok=2, required=())
         assert ok is True and events == ["enter", "exit", "enter", "exit"]
 
 

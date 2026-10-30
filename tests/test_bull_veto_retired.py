@@ -84,11 +84,15 @@ class TestConfig:
 
 
 def _hits(tree: ast.AST) -> list[str]:
-    """字符串常量 / 名字 / 属性 / 函数与参数名里含 TOKEN 的位置（大小写不敏感）。"""
+    """字符串常量 / 名字 / 属性 / 函数与参数名里含 TOKEN 的位置（大小写不敏感）。docstring 不算（v0.45.686：
+    写「旧的 bull_veto_enabled 开关已删除」是文档不是引用，误报会逼人去改冻结的历史叙述）。"""
+    doc_ids = {id(n.body[0].value) for n in ast.walk(tree)
+               if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.body
+               and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}
     out = []
     for node in ast.walk(tree):
         texts = []
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in doc_ids:
             texts.append(node.value)
         elif isinstance(node, ast.Name):
             texts.append(node.id)
@@ -139,6 +143,7 @@ class TestStatic:
         assert _hits(ast.parse(lesion)), f"探测器漏掉了：{lesion!r}"
 
     def test_detector_ignores_prose(self):
-        """历史叙述（注释、CamelCase 的「BullVeto」）不算引用——否则得去改 `_COHORT_HISTORY` 的冻结文本。"""
-        src = '# BullVeto 已退役\nNOTE = "BullVeto 当前 config 停用"\n'
+        """历史叙述（注释、CamelCase 的「BullVeto」、docstring）不算引用——否则得去改 `_COHORT_HISTORY` 的冻结文本。"""
+        src = ('"""模块说明：旧的 bull_veto_enabled 开关已删除。"""\n# BullVeto 已退役\nNOTE = "BullVeto 当前 config 停用"\n'
+               'def f():\n    """旧的 bull_veto_bear_score 阈值不再读。"""\n    return 1\n')
         assert not _hits(ast.parse(src))

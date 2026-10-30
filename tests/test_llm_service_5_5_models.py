@@ -201,6 +201,74 @@ class TestCostFormula:
 
 # ==================== 观测计数 ====================
 
+class TestApiConnectionErrors:
+    """v0.45.683：Anthropic SDK 的连接 / 超时错误不是内置 ConnectionError / TimeoutError 的子类，此前会原样冒出去——
+    2026-10-29 TLS 握手超时让 17 次并行分析的整只标的失败，最后一次冒在 P4b、带崩整次扫描。"""
+
+    @pytest.fixture(autouse=True)
+    def anthropic(self, monkeypatch):
+        """CI 不装 anthropic（requirements.txt），用 tests/_anthropic_stub.py 的假模块（类层级抄自 SDK 0.84.0）。"""
+        from tests import _anthropic_stub
+        return _anthropic_stub.install(monkeypatch)
+
+    @staticmethod
+    def _req():
+        return None
+
+    def test_timeout_is_a_failed_call_not_an_exception(self, monkeypatch, anthropic):
+        _install(monkeypatch, _FakeClient(raises=anthropic.APITimeoutError(request=self._req())))
+        assert llm_service.call("hi") is None
+        u = llm_service.get_usage()
+        assert u["failed_calls"] == 1 and u["call_count"] == 0           # 恰好记一次，不重复
+        assert llm_service._inflight_cost == 0.0                         # 在途预留归还
+
+    def test_connection_error_is_a_failed_call_not_an_exception(self, monkeypatch, anthropic):
+        _install(monkeypatch, _FakeClient(raises=anthropic.APIConnectionError(request=self._req())))
+        assert llm_service.call("hi") is None
+        assert llm_service.get_usage()["failed_calls"] == 1
+
+    def test_call_json_returns_none_on_timeout(self, monkeypatch, anthropic):
+        _install(monkeypatch, _FakeClient(raises=anthropic.APITimeoutError(request=self._req())))
+        assert llm_service.call_json("hi") is None
+        assert llm_service.get_usage()["json_parse_failures"] == 0       # 没拿到文本 ≠ 解析失败
+
+    def test_status_errors_still_raise_so_code_or_quota_problems_stay_visible(self, monkeypatch, anthropic):
+        """只收连接 / 超时类；400 这类是代码或额度问题，吞掉会藏起来。仍计一次 failed_calls。"""
+        import types
+        resp = types.SimpleNamespace(status_code=400, request=None)
+        _install(monkeypatch, _FakeClient(raises=anthropic.BadRequestError("bad", response=resp, body=None)))
+        with pytest.raises(anthropic.BadRequestError):
+            llm_service.call("hi")
+        assert llm_service.get_usage()["failed_calls"] == 1
+
+    def test_builtin_errors_still_handled_once(self, monkeypatch):
+        _install(monkeypatch, _FakeClient(raises=TimeoutError("t")))
+        assert llm_service.call("hi") is None
+        assert llm_service.get_usage()["failed_calls"] == 1
+
+    def test_sdk_without_the_connection_error_class_falls_back_to_builtin_errors(self, monkeypatch):
+        """整套测试抓到的：模块被换成只有 RateLimitError 的桩（或老版本 SDK）时，不能在 except 子句求值时抛 AttributeError。"""
+        import sys
+        import types
+        stub = types.ModuleType("anthropic")
+        stub.RateLimitError = type("RL", (Exception,), {})
+        monkeypatch.setitem(sys.modules, "anthropic", stub)
+        assert llm_service._handled_call_errors() == (ConnectionError, TimeoutError, OSError, ValueError)
+        _install(monkeypatch, _FakeClient(raises=ConnectionError("network down")))
+        assert llm_service.call("hi") is None                    # 内置异常照旧被处理，不变成 AttributeError
+
+    def test_without_the_sdk_only_builtin_errors_are_handled(self, monkeypatch):
+        import builtins
+        real_import = builtins.__import__
+
+        def no_sdk(name, *a, **k):
+            if name == "anthropic":
+                raise ImportError("no sdk")
+            return real_import(name, *a, **k)
+        monkeypatch.setattr(builtins, "__import__", no_sdk)
+        assert llm_service._handled_call_errors() == (ConnectionError, TimeoutError, OSError, ValueError)
+
+
 class TestCounters:
     def test_truncation_counted(self, monkeypatch):
         _install(monkeypatch, _FakeClient(_Resp(text='{"a": 1, "b":', stop="max_tokens")))

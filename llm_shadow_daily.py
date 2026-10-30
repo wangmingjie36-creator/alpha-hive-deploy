@@ -94,6 +94,10 @@ PROXY_ENV = {"HTTP_PROXY": PROXY_URL, "HTTPS_PROXY": PROXY_URL, "http_proxy": PR
 
 #: 开跑前的网络探活（v0.45.633）：三个扫描真正依赖的数据源，TLS 握手能通 ≥ NET_PROBE_MIN_OK 个才算网络可用。
 NET_PROBE_URLS = ("https://cdn.cboe.com/", "https://query1.finance.yahoo.com/", "https://finnhub.io/")
+#: v0.45.683：另外**必须**通的主机——扫描真正花钱的 API。10-29 数据源探活全通，14:56 起 Anthropic 的 TLS 握手反复超时
+#: （17 次并行分析失败、3 只标的丢失、整次扫描最后崩在 P4b），探活没碰这个主机所以看不见。
+#: ⚠️ 探活只是开跑那一刻的一次采样，管不到开跑之后才出现的间歇故障（10-29 的故障起于开跑 11 分钟后）。
+NET_PROBE_REQUIRED_URLS = ("https://api.anthropic.com/",)
 NET_PROBE_TIMEOUT = 10
 NET_PROBE_MIN_OK = 2
 
@@ -136,9 +140,12 @@ def production_done(state: Dict) -> bool:
 
 
 def probe_network(urls: Sequence[str] = NET_PROBE_URLS, *, timeout: float = NET_PROBE_TIMEOUT,
-                  min_ok: int = NET_PROBE_MIN_OK, opener: Optional[Callable] = None) -> Tuple[bool, str]:
-    """对几个数据源做 HTTPS 探测，返回 (通?, 明细)。**拿到任何 HTTP 响应（含 4xx / 5xx）都算通**——测的是 TLS 握手 / 连接，
-    不是授权（Yahoo 常给 429）；超时 / 握手失败 / 连接被拒才算不通。`opener` 仅供测试注入。"""
+                  min_ok: int = NET_PROBE_MIN_OK, opener: Optional[Callable] = None,
+                  required: Sequence[str] = NET_PROBE_REQUIRED_URLS) -> Tuple[bool, str]:
+    """对几个数据源做 HTTPS 探测，返回 (通?, 明细)。通 ⇔ `urls` 里至少 `min_ok` 个通 **且** `required` 里每个都通
+    （v0.45.683：Anthropic API 是必须的，数据源可以坏一个）。**拿到任何 HTTP 响应（含 4xx / 5xx）都算通**——测的是 TLS 握手 /
+    连接，不是授权（Yahoo 常给 429；对 api.anthropic.com 不带 key 的 GET 也只会拿到 4xx，不产生任何调用 / 费用）；
+    超时 / 握手失败 / 连接被拒才算不通。`opener` 仅供测试注入。"""
     import urllib.error
     import urllib.request
     def _real_open(u: str, t: float):
@@ -146,18 +153,26 @@ def probe_network(urls: Sequence[str] = NET_PROBE_URLS, *, timeout: float = NET_
             return None                                           # 只要握手 / 有响应；用 with 立即关连接，别等 GC
 
     open_fn = opener or _real_open
-    ok, bad = [], []
-    for u in urls:
+
+    def _one(u: str) -> Optional[str]:
+        """通 ⇒ None；不通 ⇒ 一行原因。"""
         host = u.split("//", 1)[-1].split("/", 1)[0]
         try:
             open_fn(u, timeout)
-            ok.append(host)
+            return None
         except urllib.error.HTTPError:
-            ok.append(host)                                   # 有响应 = 握手通了
+            return None                                       # 有响应 = 握手通了
         except Exception as e:  # noqa: BLE001 —— URLError / ssl.SSLError / socket.timeout / OSError 都算不通，明细写进日志
-            bad.append(f"{host}: {type(e).__name__}: {str(e)[:80]}")
-    detail = f"通 {len(ok)}/{len(urls)}" + (f"；不通 {'; '.join(bad)}" if bad else "")
-    return len(ok) >= min_ok, detail
+            return f"{host}: {type(e).__name__}: {str(e)[:80]}"
+
+    results = [_one(u) for u in urls]
+    n_ok = sum(1 for r in results if r is None)
+    bad = [r for r in results if r is not None]
+    req_bad = [r for r in (_one(u) for u in required) if r is not None]
+    detail = f"通 {n_ok}/{len(urls)}" + (f"；不通 {'; '.join(bad)}" if bad else "")
+    if required:
+        detail += ("；必需主机不通 " + "; ".join(req_bad)) if req_bad else f"；必需主机通 {len(required)}/{len(required)}"
+    return n_ok >= min_ok and not req_bad, detail
 
 
 def render_plist(*, python: str, script: str, log_dir: str) -> bytes:
