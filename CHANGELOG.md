@@ -65,7 +65,21 @@
 
 ## [0.45.684] — 2026-10-29 — 占位（进行中：Alpha Bot 盘中 GEX 热力图叠现价 / Zero Gamma 路径、逐拍变化视图、颜色按分位截断）
 
-## [0.45.683] — 2026-10-29 — 占位（进行中：LLM 影子 10-29 丢天复盘——API 超时不再带崩整只标的 / P4b / 整次扫描、扫描出错时救回已写的 swarm_results、探活加 api.anthropic.com）
+## [0.45.683] — 2026-10-29 — Fixed：LLM 影子 10-29 丢天复盘——Anthropic 连接 / 超时错误不再带崩整只标的 / P4b / 整次扫描；付费跑中途出错时救回已写的逐只结果；开跑前探活加必需主机 api.anthropic.com
+
+背景（10-29 的 run，$2.04 / 260 次调用）：14:56 起访问 Anthropic API 反复 TLS 握手超时。`llm_service.call` 只接内置的 `ConnectionError / TimeoutError / OSError / ValueError`，而 SDK 的 `APITimeoutError`（`APIConnectionError` 子类）不是它们的子类，于是原样冒出去：17 次「并行分析失败」（整只标的丢掉，3 轮重试后 VZ / XOM / DELL 仍没补齐，产出 27/30）；蜂群跑完、27 只结果都写盘后，P4b（跨标的 LLM 步骤）又冒出一个，`run_swarm_scan` 抛出，影子入口只记了错误信息就退出——**27 只付费结果没进状态文件**（`tickers_scanned` 空、`queen_llm_rate=0%`）。当天已花钱，同日锁生效，无法重跑。探活当时全通，因为它只探三个数据源、没探花钱的那个 API。
+
+### Fixed
+- `llm_service.py`：新 `_handled_call_errors()`——`call()` 把 `anthropic.APIConnectionError`（含 `APITimeoutError`）和原来的内置四类一并当作「这次没拿到响应」：计一次 `failed_calls`、返回 None、调用方回落规则引擎。**只收连接 / 超时类**：400 / 401 / 5xx 这类 API 状态错误仍然抛（代码或额度问题，吞掉会藏起来），仍计一次 `failed_calls`。 `anthropic.APIConnectionError` 用 `getattr` 取（老版本 SDK / 被测试换成桩的模块里没有这个类时退回内置四类）——**整套测试抓到的**：第一版直接取属性，`tests/test_llm_service.py::TestRateLimitRetry::test_non_rate_limit_exception_not_retried`（把 `anthropic` 换成只有 `RateLimitError` 的桩）红了，因为在 `except` 子句求值时抛 `AttributeError`，把一个本来能处理的 `ConnectionError` 变成新的崩溃；补了对应的回归用例。
+- `alpha_hive_daily_report.py::_compute_cross_ticker`（P4b）：除原来的五类异常外兜底 `Exception`，留一行 **WARNING**「P4b 跨标的关联分析失败，已跳过」——可选的 LLM 增强步骤不许带崩已经跑完的整次扫描。失败的那次调用已在 `failed_calls` 里。
+- `llm_shadow_scan.py`：付费跑（`--run`）扫描抛异常时，从 `<影子根>/.swarm_results_<日期>.json` **救回已写的逐只结果**记进状态文件（新字段 `salvaged: true`，仍退出码 3、`error` 照记）；救回不了（文件不存在 / 是本次起跑之前写的 / 读不了）时把原因拼进 `error`，这条路径本身不抛。`control` 模式不救（免费、可重跑）。
+- `llm_shadow_scan.py::quality_report(error=...)`：扫描出错本身是一条**不健康理由**（`scan_error`）。必须有它——救回来后逐只数据不再是空的，`queen_llm_rate` 不再把这天判掉，没有这条的话「标的不全、后半截没跑完」的日子会悄悄进比较。**今天（10-29）这类日子的纳入与否仍由人决定**，代码只保证数据不丢、默认不入比较。
+- `llm_shadow_daily.py::probe_network`：新增必需主机 `NET_PROBE_REQUIRED_URLS = (api.anthropic.com,)`——通 ⇔ 数据源至少 2/3 通 **且** 必需主机全通；必需主机不计入数据源的法定数。对 api.anthropic.com 不带 key 的 GET 只会得到 4xx，不产生任何调用 / 费用。⚠️ 探活只是开跑那一刻的采样：10-29 的故障起于开跑 11 分钟之后，这条探活**挡不住**那种间歇故障；它挡的是开跑时就不通的日子。
+
+### 测试 / 变异
+- `tests/test_llm_service_5_5_models.py::TestApiConnectionErrors`（超时 / 连接错误只记一次 failed_calls 且归还在途预留、call_json 返回 None、400 仍抛、内置异常照旧、没装 SDK 时退回内置四类）；新 `tests/test_cross_ticker_step_cannot_kill_scan.py`（P4b 遇 API 超时 / 连接 / 任意异常都返回空分析并留 WARNING、非 LLM 模式不调用、成功路径不变）；`tests/test_llm_shadow_scan.py`（救回但仍不健康、`scan_error` 是唯一把救回日挡在比较外的理由、control 不救、旧文件不当本次结果、读不了不抛、干净跑没有 `salvaged` 键）；`tests/test_llm_shadow_daily.py`（Anthropic 不通即便数据源全通也不开跑、数据源坏一个仍开跑、HTTP 4xx 算通、默认调用探到必需主机、必需主机不凑数据源法定数）。既有探活用例显式 `required=()` 保持它们原来测的东西。
+- 12 种人为破坏（`call` 只收内置异常 / 吞掉所有异常 / P4b 不兜底 / 兜底但不留 WARNING / 出错不救回 / 出错不算不健康理由 / control 也救回 / 不看文件新旧 / 读坏文件会抛 / 探活不管必需主机 / 必需主机凑数据源法定数 / 默认不探必需主机）全部让测试变红，文件已原样还原。真环境（plist 同款代理变量）：`probe_network()` ⇒ 通 3/3、必需主机通 1/1；把必需主机换成不存在的域名 ⇒ 不通、原因写明。
+- 未做 / 待验证：10-29 当天的 27 只结果（`.swarm_results_2026-10-29.json` 还在）是否补记、按什么口径——需要对照预注册对「标的不全」的处理，由用户定；`llm_service` 的 5xx / 529 过载错误仍会抛（本次只收连接 / 超时）；开跑之后才出现的间歇性 API 故障只会让相应的蜂回落规则引擎、当天因 `failed_call_rate` / `queen_llm_rate` 判不健康，不会再带崩整次扫描。
 
 ## [0.45.682] — 2026-10-29 — Fixed：尾部对冲候选面板选到期日——先看「实际能出几个可用候选」、再取离 45 天最近的（此前只看离 45 天近不近，选中行权价很少的周度合约，6 个候选里 4 个「没有够近的认沽」）
 

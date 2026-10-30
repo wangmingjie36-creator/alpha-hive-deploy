@@ -123,8 +123,12 @@ def check_roots(prod_root: Path, shadow_root: Path) -> None:
         raise ValueError(f"影子根 {s} 与生产根 {p} 相同或互相嵌套，拒绝运行")
 
 
-def quality_report(usage: Dict, per_ticker: Dict[str, Dict], *, llm_on: bool) -> Dict:
-    """由 llm_service 用量计数 + 逐只结果判这一天的 LLM 臂健不健康。control 模式（LLM 关）恒健康但标明。"""
+def quality_report(usage: Dict, per_ticker: Dict[str, Dict], *, llm_on: bool, error: Optional[str] = None) -> Dict:
+    """由 llm_service 用量计数 + 逐只结果判这一天的 LLM 臂健不健康。control 模式（LLM 关）恒健康但标明。
+
+    `error`（v0.45.683）：扫描中途出了异常。出错后会把已经写下的结果救回来记录（见 `salvage_swarm_results`），
+    于是逐只数据不再是空的、`queen_llm_rate` 也不再把这天判掉——所以出错本身必须是一条不健康理由，
+    否则一个标的不全、后半截没跑完的日子会悄悄进比较。"""
     calls = int(usage.get("call_count", 0) or 0)
     trunc = int(usage.get("truncated_calls", 0) or 0)
     jfail = int(usage.get("json_parse_failures", 0) or 0)
@@ -156,6 +160,8 @@ def quality_report(usage: Dict, per_ticker: Dict[str, Dict], *, llm_on: bool) ->
         if rates["failed_call_rate"] is not None and rates["failed_call_rate"] > MAX_FAIL_RATE:
             reasons.append(f"failed_call_rate={rates['failed_call_rate']:.0%} > {MAX_FAIL_RATE:.0%}"
                            f"（{failed} 次请求没拿到响应，对应的蜂回落规则引擎）")
+        if error:
+            reasons.append(f"scan_error（扫描中途出错，结果不完整）：{error[:200]}")
         if analogy:
             reasons.append(f"历史类比被触发（{' '.join(analogy)}）——第 2 代在影子里应已关闭，LLM 臂多出了预注册里没有的成分")
         if rates["queen_llm_rate"] is not None and rates["queen_llm_rate"] < MIN_QUEEN_LLM_RATE:
@@ -187,7 +193,8 @@ def per_ticker_from_swarm_results(swarm_results: Dict, tickers: Sequence[str]) -
 
 
 def build_status(*, day: date, mode: str, model: Optional[str], cap: float, requested: Sequence[str],
-                 usage: Dict, per_ticker: Dict[str, Dict], elapsed: float, error: Optional[str]) -> Dict:
+                 usage: Dict, per_ticker: Dict[str, Dict], elapsed: float, error: Optional[str],
+                 salvaged: bool = False) -> Dict:
     scanned = [tk for tk, v in per_ticker.items() if v.get("present")]
     llm_on = mode == "run"
     return {
@@ -204,9 +211,10 @@ def build_status(*, day: date, mode: str, model: Optional[str], cap: float, requ
             "total_cost_usd", "call_count", "input_tokens", "output_tokens",
             "truncated_calls", "json_parse_failures", "budget_refusals", "unpriced_refusals", "failed_calls",
             "model_refusals")},
-        "quality": quality_report(usage, per_ticker, llm_on=llm_on),
+        "quality": quality_report(usage, per_ticker, llm_on=llm_on, error=error),
         "per_ticker": per_ticker,
         "error": error,
+        **({"salvaged": True} if salvaged else {}),      # 逐只数据是出错后从已写的 swarm_results 救回来的
         "written_at": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -354,6 +362,29 @@ def default_scan(tickers: List[str]) -> Dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def salvage_swarm_results(shadow_root: Path, day: date, started_at: float) -> Tuple[Dict, Optional[str]]:
+    """扫描中途抛了异常时，把这次扫描已经写下的 `.swarm_results_<日期>.json` 救回来。返回 (内容, 失败说明)。
+
+    背景（2026-10-29）：蜂群已经跑完、27 只标的的付费结果都写盘了，随后 P4b（跨标的 LLM 步骤）抛了 API 超时，
+    影子入口只记了错误信息就退出——$2.04 买来的 27 只没有进状态文件。现在出错也把它们记下来，但**当天仍判不健康**
+    （`quality_report(error=...)`），是否纳入比较由人决定，数据不再丢。
+
+    只认「本次进程起跑之后写的」文件：同日更早一次零花费失败可能留下过旧文件，不能当成这次的结果。
+    读不到 / 太旧 / 解析不了 ⇒ 返回 ({}, 原因)，不抛——这条路径本身不许再制造新的异常。"""
+    path = Path(shadow_root) / f".swarm_results_{day.isoformat()}.json"
+    try:
+        if not path.exists():
+            return {}, f"{path.name} 不存在"
+        if path.stat().st_mtime < started_at - 1.0:
+            return {}, f"{path.name} 是本次起跑之前写的，不当作这次的结果"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return {}, f"读 {path.name} 失败：{type(e).__name__}: {e}"
+    if not isinstance(doc, dict) or not doc:
+        return {}, f"{path.name} 内容为空或不是对象"
+    return doc, None
+
+
 def build_child_env(environ: Dict[str, str], shadow_root: Path, cap: float) -> Dict[str, str]:
     """子进程环境：数据根指向影子根、预算上限交给 config、清掉会把路径指回别处的覆盖变量。
 
@@ -443,10 +474,21 @@ def run_child(args: argparse.Namespace, *, scan: Callable[[List[str]], Dict] = d
     except Exception as e:  # noqa: BLE001 —— 记录进状态文件并以退出码 3 告警，而不是吞掉
         error = f"{type(e).__name__}: {e}"
         print(f"❌ 扫描异常：{error}")
+    salvaged = False
+    if error and mode == "run":
+        # 付费跑出错：已经写盘的逐只结果是花了钱买来的，不能因为后面某一步抛了就丢（control 免费、可重跑，不救）
+        swarm_results, why_not = salvage_swarm_results(shadow_root, day, t0)
+        salvaged = bool(swarm_results)
+        if salvaged:
+            print(f"↩︎ 已从 .swarm_results_{day.isoformat()}.json 救回 {len(swarm_results)} 只标的的结果（当天仍判不健康）")
+        else:
+            error = f"{error} | 没救回已写的结果：{why_not}"
+            print(f"⚠️ 没救回已写的结果：{why_not}")
     usage = llm_service.get_usage()
     per_ticker = per_ticker_from_swarm_results(swarm_results, tickers)
     status = build_status(day=day, mode=mode, model=MODEL, cap=args.daily_cap, requested=tickers,
-                          usage=usage, per_ticker=per_ticker, elapsed=time.time() - t0, error=error)
+                          usage=usage, per_ticker=per_ticker, elapsed=time.time() - t0, error=error,
+                          salvaged=salvaged)
     carried = _carried_attempts(status_path(shadow_root, day.isoformat(), mode))
     if carried:
         status["previous_attempts"] = carried       # 同日重跑时，前面零花费失败的摘要不能被这次覆盖掉

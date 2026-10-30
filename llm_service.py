@@ -368,6 +368,25 @@ def call(
             _inflight_cost -= _estimated_cost
 
 
+def _handled_call_errors() -> tuple:
+    """call() 当作「这次没拿到响应」处理的异常（计 failed_calls、返回 None，调用方回落规则引擎）。
+
+    v0.45.683：补上 Anthropic SDK 自己的连接 / 超时错误（`APIConnectionError`，含 `APITimeoutError`）——它们不是
+    内置的 ConnectionError / TimeoutError 子类，此前会原样冒出去：2026-10-29 TLS 握手超时让 17 次「并行分析」整只标的
+    失败，最后一次冒在 P4b（跨标的 LLM 步骤）直接带崩整次扫描，27 只已付费的结果没进状态文件。
+    只收连接 / 超时类：400 / 401 / 5xx 这类 API 状态错误仍然抛（是代码或额度问题，吞掉会藏起来）。
+    """
+    errs = (ConnectionError, TimeoutError, OSError, ValueError)
+    try:
+        import anthropic
+    except ImportError:
+        return errs
+    # getattr：老版本 SDK / 被测试换成桩的模块里可能没有这个类——这里若再抛 AttributeError，就是在 except 子句求值时
+    # 把一个本来能处理的错误变成新的崩溃
+    conn_err = getattr(anthropic, "APIConnectionError", None)
+    return errs + (conn_err,) if isinstance(conn_err, type) else errs
+
+
 def _do_request(client, prompt: str, system: str, model: str, max_tokens: int,
                 temperature: float, cache_system: bool, pricing: Dict) -> Optional[str]:
     """call() 的实际请求部分（预算预检与在途预留由 call() 负责）。"""
@@ -463,7 +482,7 @@ def _do_request(client, prompt: str, system: str, model: str, max_tokens: int,
 
         return text
 
-    except (ConnectionError, TimeoutError, OSError, ValueError) as e:
+    except _handled_call_errors() as e:
         _log.error("LLM API call failed: %s", type(e).__name__)
         _log.debug("LLM API call details:", exc_info=True)
         _bump("failed_calls")
