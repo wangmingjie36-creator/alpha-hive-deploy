@@ -7,7 +7,18 @@
 
 ## [0.45.689] — 2026-10-29 — 占位（进行中：Alpha Bot 接 SPX / XSP 指数期权链——名字映射、SPX 月度上午结算合约到期日剔除、侧栏「指数」、热力图行权价分桶）
 
-## [0.45.688] — 2026-10-29 — 占位（进行中：683 的 8 条测试在 CI 上红（CI 刻意不装 anthropic，测试一律用假模块）——改用假 anthropic 模块）
+## [0.45.688] — 2026-10-29 — Fixed：v0.45.683 的 8 条新测试在 CI 上红（`No module named 'anthropic'`）——CI 刻意不装 anthropic、测试一律用假模块，我直接 `import anthropic` 取真异常类，本机装着所以一直绿
+
+另一个会话（做 685 的那个）发现并转告：main 的 CI 自 `a86d1d1f`（683）起 8 failed / 13125 passed。我 683 的整套测试是在装着 anthropic 的开发机上跑的——这个环境差异正是 `requirements.txt` 第 28 行那条注释（v0.45.601）写明要避开的。
+
+### Fixed
+- 新 `tests/_anthropic_stub.py`：假 `anthropic` 模块，类层级抄自真 SDK 0.84.0（`AnthropicError ← APIError ← APIConnectionError ← APITimeoutError`，`APIError ← APIStatusError ← BadRequestError / RateLimitError`；已在装着真包的开发机上逐个核对过 MRO），`install(monkeypatch)` 装进 `sys.modules`。被测代码依赖的只有三件事：`APITimeoutError` 是 `APIConnectionError` 的子类、它们都不是内置 `ConnectionError / TimeoutError / OSError / ValueError` 的子类、`BadRequestError` 属于状态错误。
+- `tests/test_llm_service_5_5_models.py::TestApiConnectionErrors`（4 条）与 `tests/test_cross_ticker_step_cannot_kill_scan.py`（4 条参数化）改用假模块；不再 `import anthropic` / `httpx`。
+
+### 测试 / 变异
+- 用一个让 `import anthropic` 抛 ImportError 的 pytest 插件模拟 CI：**修前的测试复现了 CI 上同样的 8 failed**；修后同一批 + `test_llm_service.py` / `test_llm_shadow_*` 共 323 条通过；本机（真包在）也通过。
+- 变异：假模块里让 `APITimeoutError` 不再是 `APIConnectionError` 的子类 ⇒ 测试变红（文件已还原）。
+- ⚠️ 局限：假模块与真 SDK 的层级一致性**只在我核对的那一刻成立**，CI 里没有真包可比；升级 SDK 后若层级变了，要手动改 `_anthropic_stub.py`（文件头已写）。没有加「禁止测试直接 import anthropic」的守卫——CI 本身就是这道守卫，这次只是红了几个小时才被发现；`tests/test_alphabot_chat.py` 里还有几处 `pytest.importorskip("anthropic")`（CI 上跳过），属既有做法，这次没动。
 
 ## [0.45.687] — 2026-10-29 — 占位（进行中：LLM 影子预注册修订 1——10-29 救回的 27 只按原规则纳入 + scan_error 规则自 10-30 起 + 补记脚本）
 

@@ -24,12 +24,11 @@ def _run(results):
     "timeout", "connection", "runtime", "key",
 ])
 def test_llm_step_failure_is_skipped_with_a_warning(monkeypatch, caplog, exc):
-    import anthropic
-    import httpx
-    req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    from tests import _anthropic_stub          # CI 不装 anthropic（requirements.txt），用假模块
+    anthropic = _anthropic_stub.install(monkeypatch)
     boom = {
-        "timeout": anthropic.APITimeoutError(request=req),
-        "connection": anthropic.APIConnectionError(request=req),
+        "timeout": anthropic.APITimeoutError(request=None),
+        "connection": anthropic.APIConnectionError(request=None),
         "runtime": RuntimeError("别的什么错"),
         "key": KeyError("x"),
     }[exc]

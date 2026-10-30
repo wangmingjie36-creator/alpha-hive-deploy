@@ -205,36 +205,37 @@ class TestApiConnectionErrors:
     """v0.45.683：Anthropic SDK 的连接 / 超时错误不是内置 ConnectionError / TimeoutError 的子类，此前会原样冒出去——
     2026-10-29 TLS 握手超时让 17 次并行分析的整只标的失败，最后一次冒在 P4b、带崩整次扫描。"""
 
+    @pytest.fixture(autouse=True)
+    def anthropic(self, monkeypatch):
+        """CI 不装 anthropic（requirements.txt），用 tests/_anthropic_stub.py 的假模块（类层级抄自 SDK 0.84.0）。"""
+        from tests import _anthropic_stub
+        return _anthropic_stub.install(monkeypatch)
+
     @staticmethod
     def _req():
-        import httpx
-        return httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        return None
 
-    def test_timeout_is_a_failed_call_not_an_exception(self, monkeypatch):
-        import anthropic
+    def test_timeout_is_a_failed_call_not_an_exception(self, monkeypatch, anthropic):
         _install(monkeypatch, _FakeClient(raises=anthropic.APITimeoutError(request=self._req())))
         assert llm_service.call("hi") is None
         u = llm_service.get_usage()
         assert u["failed_calls"] == 1 and u["call_count"] == 0           # 恰好记一次，不重复
         assert llm_service._inflight_cost == 0.0                         # 在途预留归还
 
-    def test_connection_error_is_a_failed_call_not_an_exception(self, monkeypatch):
-        import anthropic
+    def test_connection_error_is_a_failed_call_not_an_exception(self, monkeypatch, anthropic):
         _install(monkeypatch, _FakeClient(raises=anthropic.APIConnectionError(request=self._req())))
         assert llm_service.call("hi") is None
         assert llm_service.get_usage()["failed_calls"] == 1
 
-    def test_call_json_returns_none_on_timeout(self, monkeypatch):
-        import anthropic
+    def test_call_json_returns_none_on_timeout(self, monkeypatch, anthropic):
         _install(monkeypatch, _FakeClient(raises=anthropic.APITimeoutError(request=self._req())))
         assert llm_service.call_json("hi") is None
         assert llm_service.get_usage()["json_parse_failures"] == 0       # 没拿到文本 ≠ 解析失败
 
-    def test_status_errors_still_raise_so_code_or_quota_problems_stay_visible(self, monkeypatch):
+    def test_status_errors_still_raise_so_code_or_quota_problems_stay_visible(self, monkeypatch, anthropic):
         """只收连接 / 超时类；400 这类是代码或额度问题，吞掉会藏起来。仍计一次 failed_calls。"""
-        import anthropic
-        import httpx
-        resp = httpx.Response(400, request=self._req())
+        import types
+        resp = types.SimpleNamespace(status_code=400, request=None)
         _install(monkeypatch, _FakeClient(raises=anthropic.BadRequestError("bad", response=resp, body=None)))
         with pytest.raises(anthropic.BadRequestError):
             llm_service.call("hi")
