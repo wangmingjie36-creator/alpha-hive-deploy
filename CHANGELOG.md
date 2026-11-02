@@ -5,7 +5,17 @@
 
 ---
 
-## [0.45.697] — 2026-11-02 — 占位（进行中：Buzz 三个价格通道的长历史样本外回测——预注册 + 一次性留出期检验）
+## [0.45.697] — 2026-11-02 — Added：Buzz 三个价格通道的长历史样本外回测（预注册 + 留出期只跑一次）——留出期 4 个检验全部未检出
+
+### Added
+- `experiments/price_channel_backtest_prereg.md`：取数前登记（84c291f4）。对象 = Buzz 的 momentum / volume / volatility 三个通道（生产口径：`price_metrics.history_price_metrics` + 生产一个月窗口 + `buzz_bee` 映射），单独与合成；30 只现名单；开发期 2010–2019、留出期 2020-01-01 ~ 结果日 2026-10-09（停在维度 IC H1 窗口之前）；确认性 4 个 + 探索 6 个（开发期至多选 1 个进留出期）；横截面 Spearman IC、NW t、α = 0.01。
+- `experiments/price_channel_backtest.py`：`--dev` / `--holdout`（结果文件已在 ⇒ 拒绝重跑；开发期结果日不越过 2019-12-31）。行情缓存只放 `--cache` 目录、不进仓库。
+- 结果：`price_channel_backtest_dev.json` / `_dev_selection.json`（db309a6f，先于留出期）/ `_holdout.json` / `_report.md`。
+- 守卫 `tests/test_price_channel_backtest.py`：常量与预注册逐项相等、映射与 `buzz_bee.py` 同形、开发期不碰留出期价格、只用过去数据、留出期不能跑第二次。
+
+### 结论
+- 留出期 352 周：C0 合成 IC −0.005（t −0.38）、momentum +0.000、volume +0.014（t +1.26）、volatility −0.005，**全部未检出**；去掉 2026 年、换采样日结论不变。开发期 C0 的 −0.026（t −2.35）没有重现；探索变体无一选入。
+- **不改生产**（改 Buzz 通道 = 终止 H1）；局限（幸存者偏差、Yahoo 历史拼接）见报告。
 
 ## [0.45.696] — 2026-11-02 — Changed：跨式账本入场窗口放宽到**财报前最后 2 个交易日内**（用户 2026-11-02 定）；影子宽跨预注册修订 4（窗口 0 → 1）
 
