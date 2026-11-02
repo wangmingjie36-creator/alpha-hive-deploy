@@ -1495,7 +1495,7 @@ class AlertAnalyzer:
     def _check_cboe_content_encoding(self, status: Dict) -> None:
         """CBOE 响应的 Content-Encoding 不认识（v0.45.690；`cboe_options.payload_stats()["bad_encoding"]` 经 scan_timing 的 `counters.cboe` 进来）。
 
-        我们请求 gzip、只认 gzip / 未压缩。回了别的编码 ⇒ 那只标的的 CBOE 链取不到（出口 None、降级），
+        我们请求 gzip、只认 gzip / 未压缩。回了别的编码 ⇒ 那次 CBOE 下载作废（期权链 / VIX 历史与报价 / SKEW·VVIX CSV，v0.45.692 起全算），
         只有几只时到不了 day_health 的「整源故障」线，没有这条就只剩一行 ERROR 日志。计数缺失 ⇒ checks_skipped。"""
         st = status.get("scan_timing")
         if not isinstance(st, dict):
@@ -1509,10 +1509,10 @@ class AlertAnalyzer:
             return
         self.alerts.append(Alert(
             AlertLevel.MEDIUM,
-            f"📊 【P2 中】CBOE 有 {n} 次响应的 Content-Encoding 不认识，那几次期权链没取到",
-            {"影响": "对应标的的 CBOE 期权链本轮为空、走了降级（同「CBOE 拉取失败」）",
+            f"📊 【P2 中】CBOE 有 {n} 次响应的 Content-Encoding 不认识，那几次下载没取到",
+            {"影响": "对应的 CBOE 数据本轮没取到、走了降级（期权链 / VIX 历史与报价 / SKEW·VVIX CSV，同「CBOE 拉取失败」）",
              "建议": "日志里搜「不认识的 Content-Encoding」看是哪种编码；cboe_options._decode_cboe_body 只认 gzip / 未压缩，"
-                     "对端改了压缩方式就要在那里加一种解码（请求头 _CBOE_HEADERS 也只声明了 gzip）"},
+                     "对端改了压缩方式就要在那里加一种解码（请求头 _CBOE_HEADERS 也只声明了 gzip；全部 CBOE 下载经 _fetch_cboe_payload / fetch_cboe_bytes 两处）"},
             ["cboe", "data_quality"]
         ))
 

@@ -108,7 +108,8 @@ _CACHE_MAX_AGE = 4 * 3600.0
 #   failed   重试耗尽 / 返回空链，最终 None
 #   evicted  缓存里有但已不新鲜（vintage 翻页 / 超年龄上限），被弃、重抓（v0.45.123）
 #   compressed    响应带 `Content-Encoding: gzip`、已解压（v0.45.690；应约等于成功的 fetches）
-#   bad_encoding  响应的 Content-Encoding 不认识 ⇒ 不重试、记 failed，alert_manager 报 P2（v0.45.690）
+#   bad_encoding  响应的 Content-Encoding 不认识 ⇒ 不重试、记 failed，alert_manager 报 P2（v0.45.690）；
+#                 v0.45.692 起也数 fetch_cboe_bytes（VIX / 指数 CSV / close_correction），那些不计 failed
 _payload_stats = {"hits": 0, "fetches": 0, "stale": 0, "failed": 0, "evicted": 0,
                   "compressed": 0, "bad_encoding": 0}
 
@@ -257,6 +258,26 @@ def _response_encoding(resp) -> Optional[str]:
     测试的假响应（`io.BytesIO` 之类）没有 ⇒ 当未压缩。"""
     headers = getattr(resp, "headers", None)
     return headers.get("Content-Encoding") if headers is not None else None
+
+
+def fetch_cboe_bytes(url: str, timeout: float) -> bytes:
+    """GET 一个 cdn.cboe.com 地址：请求 gzip、按 Content-Encoding 还原，返回原文字节（v0.45.692）。
+
+    给 `_fetch_cboe_payload` 之外的 CBOE 下载用（cboe_vix 的 VIX 历史 CSV / 延迟报价、cboe_fetcher 的
+    SKEW / VVIX CSV、close_correction 的收盘印证）。`_fetch_cboe_payload` 自己那份不改走这里——它在 H1
+    单元 `price.fields` 的依赖闭包里，换调用会让指纹守卫变红，而行为是一样的。
+    不重试、不拿信号量：沿用各调用方原有的重试与 `_CBOE_SEM`。网络错误照原样抛；不认识的编码
+    抛 `CboeContentEncodingError`，抛之前在这里计 `bad_encoding`（源头登记 ⇒ 调用方吞了异常也照样
+    经 scan_timing 进 alert_manager 的 P2）。
+    """
+    req = urllib.request.Request(url, headers=dict(_CBOE_HEADERS))
+    resp = urllib.request.urlopen(req, timeout=timeout)
+    try:
+        return _decode_cboe_body(resp.read(), _response_encoding(resp))[0]
+    except CboeContentEncodingError:
+        with _cache_lock:
+            _payload_stats["bad_encoding"] += 1
+        raise
 
 
 class CboeStaleVintageError(RuntimeError):

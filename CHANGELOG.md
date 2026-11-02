@@ -41,7 +41,34 @@
   `tests/test_straddle_strangle_shadow.py::TestRevision3EntryWindow`（含与账本闸逐日同一判据）与协议常量更新；
   `tests/test_alphabot_straddle.py::TestEntryWindowStatus`。旧场景测试（09-03 入场、09-20 财报、默认多头）在夹具里显式钉回旧口径并注明。
 
-## [0.45.692] — 2026-11-02 — 占位（进行中：其余四处 CBOE 下载（close_correction / cboe_vix ×2 / cboe_fetcher）也请求 gzip）
+## [0.45.692] — 2026-11-02 — Changed：其余四处 CBOE 下载（cboe_vix 的 VIX 历史 CSV 与延迟报价、cboe_fetcher 的 SKEW / VVIX CSV、close_correction 的收盘印证）也请求 gzip，经新共用函数 `cboe_options.fetch_cboe_bytes`
+
+起因：690 只改了 `_fetch_cboe_payload`。二次检查时 grep `cdn.cboe.com` 发现另有四处自己发请求、请求头只有 User-Agent，「所有 CBOE 下载都走压缩」没做到。
+
+### Changed
+- `cboe_options.py`：新 `fetch_cboe_bytes(url, timeout)`——带 `_CBOE_HEADERS` 发请求、用 690 的 `_decode_cboe_body` 还原，返回原文字节；不重试、不拿信号量（沿用各调用方原有的）。不认识的编码在**这里**计 `bad_encoding` 再抛 `CboeContentEncodingError`（源头登记：四个调用方都吞异常，不在源头计 P2 就永远不响）；不计 `failed` / `compressed`（那两个是期权链 payload 的口径）。`_payload_stats` 上方注释写明 `bad_encoding` 自本版起也数这四处。
+- **`_fetch_cboe_payload` 刻意没改走它**：它在 H1 单元 `price.fields` 的依赖闭包里，换调用会让指纹再红一次，而行为相同。新函数不在任何冻结单元的闭包里，`tests/test_signal_code_fingerprints.py` 改后仍 79 passed，不需要用户判。
+- `cboe_vix.py`：`_download` / `_download_quote` 改用它（模块顶部同一个 `try` 里 import；`cboe_options` 都 import 不了时的降级分支保留旧的不压缩写法，与原有 `_CBOE_SEM` 降级同一模式）。
+- `cboe_fetcher.py`：`_download_cboe_index_csv` 改用它；编码异常在兜底 `except` 之前单独接住、**不重试**、`logger.error`。网络错误仍重试三次。
+- `close_correction.py`：`cboe_official_closes` 改用它（编码异常照旧落进 `fetch_failed` 计数）；删掉不再用的 `import urllib.request as _u`。
+- `alert_manager._check_cboe_content_encoding`：文案从「期权链没取到」改成「那几次下载没取到」，列出四类数据；判据不变。
+
+### 实测（真网络，2026-11-02 约 18:20 ET，每处各取一次未压缩、一次压缩）
+| 调用 | 未压缩 | 压缩 | 结果 |
+|---|---|---|---|
+| `cboe_vix._download`（VIX_History.csv） | 474.3 KB | 111.9 KB | 原文相同 |
+| `cboe_vix._download_quote`（_VIX.json） | 0.5 KB | 0.3 KB | `data` 段相同 |
+| `cboe_fetcher` SKEW_History.csv | 203.7 KB | 203.7 KB（**对端没压缩**） | 原文相同 |
+| `cboe_fetcher` VVIX_History.csv | 109.3 KB | 109.3 KB（**对端没压缩**） | 原文相同 |
+| `close_correction.cboe_official_closes(["SPY","NVDA"])` | 7251.5 KB | 990.0 KB | 收盘字典相同（非空） |
+
+- ⚠️ **SKEW / VVIX 两份 CSV 请求了 gzip，CBOE 仍回未压缩**（同一 CDN 路径下的 VIX_History.csv 却压缩了，原因未查，待验证）——代码走未压缩分支、结果正确，只是这两处省不了流量。
+- 耗时都在 1–3.4 秒，差别不显著（同 690：省多少时间看当时链路）。
+
+### 测试 / 变异
+- `tests/test_cboe_gzip.py` 加 12 条（共 29）：`fetch_cboe_bytes` 带 gzip 头、解压、不动 `compressed`、不认识的编码在源头计数并抛；cboe_vix 两处与 cboe_fetcher 压缩 / 未压缩结果相同、请求带 gzip、坏编码返回 None 并计数；cboe_fetcher 坏编码只请求一次；close_correction 压缩 / 未压缩解析出同一份非空收盘、坏编码记 `fetch_failed`。
+- 变异八个，每个都红（文件逐个还原并 `cmp` 核对）：helper 不带 gzip 头、helper 不解压、helper 不计 `bad_encoding`、cboe_vix 两处各退回旧写法、cboe_fetcher 退回旧写法、cboe_fetcher 编码异常落进重试、close_correction 退回旧写法。
+- 整套（`-x`）：12952 passed / 1 failed，**又**停在 `tests/test_write_sandbox.py::TestLiveOnThisMac::test_log_helper_sees_this_sessions_denials`；之后的文件补跑 301 passed，该文件单独跑 29 passed。⚠️ **更正 690 条目的「偶发」**：本 session 两次整套都红在这一处，单独跑从没红过——更像是「整套跑到末尾时统一日志查询变慢、超出该测试 10 × 0.5 秒的等待」，与压缩改动无关（不碰写沙箱），但不是偶发。未深究，待验证。
 
 ## [0.45.691] — 2026-11-02 — Added：Alpha Bot 总览表加 IV / RV 列（读每日扫描的 VRP 账本，不打网）
 

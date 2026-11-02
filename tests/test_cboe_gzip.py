@@ -173,3 +173,106 @@ class TestVisibility:
         assert hits == [] and not any("CBOE 响应编码" in s for s in a.checks_skipped)
         hits, a = _analyze(tmp_path, {"hits": 0, "fetches": 0})   # 旧版计数，没有这个键
         assert hits == [] and any("CBOE 响应编码" in s for s in a.checks_skipped)
+
+
+# ───────────────────────────── v0.45.692：其余四处 CBOE 下载经 fetch_cboe_bytes
+_CSV = b"DATE,OPEN,HIGH,LOW,CLOSE\n10/30/2026,17.1,18.0,16.9,17.44\n"
+_SKEW = b"DATE,SKEW\n10/30/2026,147.02\n"
+_QUOTE = json.dumps({"data": {"symbol": "^VIX", "current_price": 17.44,
+                              "last_trade_time": "2026-10-30T16:15:00"}}).encode()
+
+
+def _router(monkeypatch, bodies, encoding):
+    """按 URL 尾巴回不同的体；encoding=gzip 时压缩后回。记下每个 Request。"""
+    seen = []
+
+    def _open(req, timeout=0):
+        seen.append(req)
+        name = req.full_url.rsplit("/", 1)[-1]
+        body = bodies[name]
+        return _Resp(gzip.compress(body) if encoding == "gzip" else body, encoding)
+    monkeypatch.setattr(co.urllib.request, "urlopen", _open)
+    return seen
+
+
+def _asks_gzip(req):
+    return {k.lower(): v for k, v in req.header_items()}.get("accept-encoding") == "gzip"
+
+
+class TestFetchCboeBytes:
+
+    def test_header_and_decode(self, monkeypatch):
+        seen = _router(monkeypatch, {"X.csv": _CSV}, "gzip")
+        assert co.fetch_cboe_bytes("https://cdn.cboe.com/X.csv", 5) == _CSV
+        assert _asks_gzip(seen[0])
+        assert co.payload_stats()["compressed"] == 0, "compressed 只数期权链 payload，别把别的下载混进来"
+
+    def test_unknown_encoding_counted_at_source_and_raised(self, monkeypatch):
+        """变红的变异：源头不计 bad_encoding（调用方都吞异常，那样 P2 就永远不响）。"""
+        _router(monkeypatch, {"X.csv": _CSV}, "br")
+        with pytest.raises(co.CboeContentEncodingError):
+            co.fetch_cboe_bytes("https://cdn.cboe.com/X.csv", 5)
+        s = co.payload_stats()
+        assert s["bad_encoding"] == 1 and s["failed"] == 0, "failed 是期权链 payload 的口径，这里不计"
+
+
+class TestCboeVix:
+
+    @pytest.mark.parametrize("encoding", [None, "gzip"])
+    def test_history_csv_same_text(self, monkeypatch, encoding):
+        import cboe_vix
+        seen = _router(monkeypatch, {"VIX_History.csv": _CSV}, encoding)
+        assert cboe_vix._download() == _CSV.decode()
+        assert _asks_gzip(seen[0])
+
+    @pytest.mark.parametrize("encoding", [None, "gzip"])
+    def test_quote_same_data(self, monkeypatch, encoding):
+        import cboe_vix
+        seen = _router(monkeypatch, {"_VIX.json": _QUOTE}, encoding)
+        assert cboe_vix._download_quote() == json.loads(_QUOTE)["data"]
+        assert _asks_gzip(seen[0])
+
+    def test_unknown_encoding_is_none_and_counted(self, monkeypatch):
+        import cboe_vix
+        _router(monkeypatch, {"VIX_History.csv": _CSV, "_VIX.json": _QUOTE}, "br")
+        assert cboe_vix._download() is None and cboe_vix._download_quote() is None
+        assert co.payload_stats()["bad_encoding"] == 2
+
+
+class TestCboeFetcherIndexCsv:
+
+    @pytest.mark.parametrize("encoding", [None, "gzip"])
+    def test_same_text(self, monkeypatch, encoding):
+        import cboe_fetcher
+        seen = _router(monkeypatch, {"SKEW_History.csv": _SKEW}, encoding)
+        assert cboe_fetcher._download_cboe_index_csv("SKEW") == _SKEW.decode()
+        assert _asks_gzip(seen[0])
+
+    def test_unknown_encoding_not_retried(self, monkeypatch):
+        """变红的变异：编码异常落进兜底 except 重试三次。"""
+        import cboe_fetcher
+        monkeypatch.setattr(cboe_fetcher.time, "sleep", lambda s: None)
+        seen = _router(monkeypatch, {"SKEW_History.csv": _SKEW}, "br")
+        assert cboe_fetcher._download_cboe_index_csv("SKEW") is None
+        assert len(seen) == 1 and co.payload_stats()["bad_encoding"] == 1
+
+
+class TestCloseCorrection:
+
+    def test_gzip_and_plain_give_same_closes(self, monkeypatch):
+        import close_correction as cc
+        results = []
+        for encoding in (None, "gzip"):
+            seen = _router(monkeypatch, {"SPY.json": _BODY}, encoding)
+            v = {}
+            results.append((cc.cboe_official_closes(["SPY"], verdicts=v), v))
+            assert _asks_gzip(seen[0])
+        assert results[0] == results[1]
+        assert results[0][0] == {"SPY": {DAY: 511.9}}, "夹具得真能解析出收盘，比较才有意义"
+
+    def test_unknown_encoding_is_fetch_failed(self, monkeypatch):
+        import close_correction as cc
+        _router(monkeypatch, {"SPY.json": _BODY}, "br")
+        v = {}
+        assert cc.cboe_official_closes(["SPY"], verdicts=v) == {}
+        assert v.get(cc._CBOE_FETCH_FAILED) == 1 and co.payload_stats()["bad_encoding"] == 1

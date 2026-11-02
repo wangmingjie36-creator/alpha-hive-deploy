@@ -67,10 +67,14 @@ try:
     # 复用 cboe_options 的信号量：共用同一把锁，才能真正串行化所有 CBOE 请求，
     # 不给对端限流器加压。（⚠️ 原注「本机老 SSL 栈扛不住并发」的归因
     # 2026-08-25 已证伪，见 http_gate docstring。）
-    from cboe_options import _CBOE_SEM
+    from cboe_options import _CBOE_SEM, fetch_cboe_bytes   # v0.45.692：下载请求 gzip
 except Exception:  # pragma: no cover
     import threading
     _CBOE_SEM = threading.Semaphore(1)
+
+    def fetch_cboe_bytes(url, timeout):   # 降级：cboe_options 都 import 不了时的旧写法（不压缩）
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        return urllib.request.urlopen(req, timeout=timeout).read()
 
 _VIX_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
 # v0.45.160：`_CACHE_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.*`。
@@ -120,8 +124,7 @@ def _download() -> Optional[str]:
     """拉取 CBOE CSV 原文；失败返回 None（不抛，让调用方走缓存）"""
     try:
         with _CBOE_SEM:  # 串行化：不给对端限流器加压（非 TLS 栈原因，见 http_gate）
-            req = urllib.request.Request(_VIX_URL, headers={"User-Agent": "Mozilla/5.0"})
-            raw = urllib.request.urlopen(req, timeout=_NET_TIMEOUT).read()
+            raw = fetch_cboe_bytes(_VIX_URL, _NET_TIMEOUT)
         text = raw.decode("utf-8", errors="replace")
         if "DATE" not in text[:200]:
             _log.warning("CBOE VIX CSV 格式异常（首行无 DATE），丢弃")
@@ -225,8 +228,7 @@ def _download_quote() -> Optional[dict]:
     """CBOE 延迟报价 JSON 的 `data` 段；失败返回 None（不抛，调用方据此退回 CSV）。"""
     try:
         with _CBOE_SEM:
-            req = urllib.request.Request(_QUOTE_URL, headers={"User-Agent": "Mozilla/5.0"})
-            raw = urllib.request.urlopen(req, timeout=_NET_TIMEOUT).read()
+            raw = fetch_cboe_bytes(_QUOTE_URL, _NET_TIMEOUT)
         data = json.loads(raw.decode("utf-8", errors="replace")).get("data")
         return data if isinstance(data, dict) else None
     except Exception as e:  # noqa: BLE001 - 网络层 / JSON 什么都可能抛

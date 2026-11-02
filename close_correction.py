@@ -336,7 +336,6 @@ def cboe_official_closes(tickers: List[str],
     tally = verdicts if verdicts is not None else {}
     try:
         import cboe_options as co
-        import urllib.request as _u
         import json as _j
     except ImportError:
         return out
@@ -346,10 +345,9 @@ def cboe_official_closes(tickers: List[str],
         # （last_trade 是上一场 15:59:59），其 close 恰是要印证的那天的官方收盘，
         # 那道闸只会丢掉对得上的数据。旧代码的 `_payload_is_stale` 跳过同理已删。
         try:
-            raw = _u.urlopen(_u.Request(
+            raw = co.fetch_cboe_bytes(   # v0.45.692：请求 gzip（编码不认识 ⇒ 抛 ⇒ 下面记 fetch_failed）
                 f"https://cdn.cboe.com/api/global/delayed_quotes/options/"
-                f"{co._cboe_symbol(t.upper())}.json",  # noqa: SLF001
-                headers={"User-Agent": "Mozilla/5.0"}), timeout=15).read()
+                f"{co._cboe_symbol(t.upper())}.json", 15)  # noqa: SLF001
             data = _j.loads(raw).get("data") or {}
         except Exception:  # noqa: BLE001
             data = {}
