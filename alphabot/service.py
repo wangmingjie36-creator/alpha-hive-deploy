@@ -112,6 +112,35 @@ def drop_am_settled_expiring(raw: dict, am_root: str) -> dict:
     return {**raw, "contracts": kept, "n_am_settled_expiry_day_excluded": n}
 
 
+def vol_block(rows, err: Optional[str], as_of: Optional[str]) -> dict:
+    """总览的 IV / RV 列（v0.45.691）：VRP 账本（每日扫描 `vrp_signal.record_day` 写的）里 **as_of 那天**每只票的
+    `iv` 与 `rv_30d`——同一天、同一对定义，扫描自己就拿这一对算 `vrp_ex_ante`。不打网、不换别的日期顶替：
+    那天没有某票的行 ⇒ 该票不在 `by_ticker` 里（页面显示「—」）；同一天同一票有两行 ⇒ 不猜留哪行，记 `duplicate`。
+    账本读不了 ⇒ `available: False` + 原因（不当成「没有记录」）。"""
+    out = {"available": False, "reason": None, "date": as_of, "by_ticker": {}}
+    if err:
+        return out | {"reason": err}
+    if not as_of:
+        return out | {"reason": "no_as_of"}
+
+    def num(x):
+        return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) else None
+    by: Dict[str, dict] = {}
+    for r in rows or []:
+        if not isinstance(r, dict) or r.get("date") != as_of:
+            continue
+        t = str(r.get("ticker") or "").upper()
+        if not t:
+            continue
+        if t in by:
+            by[t] = {"iv": None, "rv_30d": None, "iv_rv": None, "iv_source": None, "duplicate": True}
+            continue
+        iv, rv = num(r.get("iv")), num(r.get("rv_30d"))
+        by[t] = {"iv": iv, "rv_30d": rv, "iv_rv": round(iv / rv, 3) if iv is not None and rv and rv > 0 else None,
+                 "iv_source": r.get("iv_source")}
+    return out | {"available": bool(by), "reason": None if by else "vrp_no_rows_for_date", "by_ticker": by}
+
+
 def norm_date(d) -> str:
     s = str(d or "").strip()
     if not _DATE_RE.match(s):
@@ -322,6 +351,9 @@ class AlphaBotService:
             date = dates[0]
         out = R.rows_for_date_view(norm_date(date), state_dir=self.ledger_dir, compact=True)
         out["source"] = "ledger"
+        # 账本文件不在 ⇒ 报「账本不在」，不是「那天没有行」（load_jsonl 对不存在的文件返回 []）
+        rows, err = self._vrp_rows() if self._vrp_path().is_file() else (None, "vrp_ledger_missing")
+        out["vol"] = vol_block(rows, err, out.get("as_of"))
         return clean_json(out)
 
     def _demo_overview(self) -> dict:
@@ -837,17 +869,25 @@ class AlphaBotService:
             return PM.iv_rank_block(None, PM._why("no_index_file"), as_of=as_of, deps=deps)
         return PM.iv_rank_block(iv_history._read_index(name, str(cdir)), None, as_of=as_of, deps=deps)
 
-    def _premium_vrp(self, t: str, as_of: str, deps) -> dict:
-        """VRP 账本里这只票最新一行。路径 = 数据根下与 `vrp_signal.SIGNALS_FILE` 同一个相对位置（调用时求值；
-        那个常量本身在 import 期就冻住了数据根）。坏账本如实报原因，不当成「没有记录」。"""
-        import ledger_io
+    def _vrp_path(self) -> Path:
+        """VRP 账本路径 = 数据根下与 `vrp_signal.SIGNALS_FILE` 同一个相对位置（调用时求值；那个常量本身在 import 期
+        就冻住了数据根）。"""
         import vrp_signal
-        rel = vrp_signal.SIGNALS_FILE.relative_to(vrp_signal.BASE_DIR)
+        return self._premium_home() / vrp_signal.SIGNALS_FILE.relative_to(vrp_signal.BASE_DIR)
+
+    def _vrp_rows(self):
+        """VRP 账本全部行 → `(rows, err)`。坏账本如实报原因，不当成「没有记录」。溢价页与总览共用。
+        ⚠️ 文件不存在时 `load_jsonl` 返回 []（溢价页沿用这个口径，测试钉住）；总览自己另判文件在不在。"""
+        import ledger_io
         try:
-            rows, err = ledger_io.load_jsonl(self._premium_home() / rel), None
+            return ledger_io.load_jsonl(self._vrp_path()), None
         except Exception as exc:  # noqa: BLE001 - LedgerCorrupt / OSError：显示原因
-            rows, err = None, PM._why("ledger_unreadable", type(exc).__name__)
-            _log.warning("[%s] VRP 账本读不了：%s: %s", t, type(exc).__name__, exc)
+            _log.warning("VRP 账本读不了：%s: %s", type(exc).__name__, exc)
+            return None, PM._why("ledger_unreadable", type(exc).__name__)
+
+    def _premium_vrp(self, t: str, as_of: str, deps) -> dict:
+        """VRP 账本里这只票最新一行（`_vrp_rows` 读）。"""
+        rows, err = self._vrp_rows()
         return PM.vrp_block(rows, err, ticker=self._local_name(t).upper(), as_of=as_of, deps=deps)
 
     def _premium_full(self, t: str, force: bool) -> dict:

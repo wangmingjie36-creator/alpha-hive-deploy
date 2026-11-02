@@ -61,6 +61,8 @@ export async function renderOverview(root, alive) {
       kpi("路由短腿不可报价", `${bad.length} / ${allLegs.length}`,
         bad.length ? `其中点差过宽 ${wide}、其余 ${bad.length - wide}` : "全部可报价"));
 
+    const vol = d.vol || {};
+    const volOf = (r) => vol.by_ticker?.[r.ticker];
     const cols = [
       { label: "代码", render: (r) => h("b", {}, r.ticker), csv: (r) => r.ticker },
       { label: "现价", cls: "r", render: (r) => num(r.underlying_price), csv: (r) => r.underlying_price },
@@ -68,6 +70,7 @@ export async function renderOverview(root, alive) {
         h("span", { class: "sub" }, CURVE_LABEL[r.env?.curve_state] || "")), csv: (r) => r.env?.sign_at_spot },
       { label: "最近零点", cls: "r", render: (r) => h("span", {}, num(r.env?.zg_nearest),
         h("span", { class: "sub" }, zgDist(r.env))), csv: (r) => r.env?.zg_nearest },
+      { label: "IV / RV（30 天）", cls: "r", render: (r) => volCell(volOf(r)), csv: (r) => volOf(r)?.iv_rv ?? "" },
       { label: "净 Major+ / −", cls: "r", render: (r) => `${num(r.env?.net_major_pos_strike, 0)} / ${num(r.env?.net_major_neg_strike, 0)}`,
         csv: (r) => `${r.env?.net_major_pos_strike ?? ""}/${r.env?.net_major_neg_strike ?? ""}` },
       { label: "路由 put · call", render: (r) => h("span", {}, routeTxt(r.route?.put), " · ", routeTxt(r.route?.call)),
@@ -92,6 +95,7 @@ export async function renderOverview(root, alive) {
       assess?.summary ? h("p", { class: "callout" }, assess.summary) : null,
       panel(`${TENOR_LABEL[tenor]}`, { right: h("div", { class: "controls" }, filters, exportBtn) },
         kpis, h("div", { style: { height: "14px" } }), tbl,
+        volNote(vol),
         h("p", { class: "note" }, "点任一行进入该标的的卖权工作台。单笔回报 = 权利金 ÷ 占用资金（卖 put 按现金担保 K）；年化只在标的页作次要参考。「不可报价」多半是短腿点差过宽（流动性不够），格子里的小字是点差与持仓量（OI）；金额不可当成交价。")),
       unav.length ? panel("不可得", { sub: "当日没有记成候选的标的与原因" },
         table([{ label: "代码", render: (r) => r.ticker }, { label: "原因", render: (r) => r.unavailable_reason || "—" }], unav)) : null);
@@ -102,6 +106,20 @@ export async function renderOverview(root, alive) {
 function kpi(k, v, sub) {
   return h("div", { class: "kpi" }, h("div", { class: "k" }, k), h("div", { class: "v" }, v),
     sub ? h("div", { class: "small muted" }, sub) : null);
+}
+// IV / RV：VRP 账本（每日扫描写）里同一天的 iv 与 rv_30d，服务端 vol_block 选好，这里只排版
+function volCell(v) {
+  if (!v) return h("span", { class: "muted" }, "—");
+  if (v.duplicate) return h("span", { class: "muted small" }, "当天有两行，不取");
+  const head = `${isNum(v.iv) ? num(v.iv, 1) : "—"} / ${isNum(v.rv_30d) ? num(v.rv_30d, 1) : "—"}`;
+  return h("span", {}, head, h("span", { class: "sub" }, isNum(v.iv_rv) ? `${num(v.iv_rv, 2)}×` : "比值不可得"));
+}
+const VOL_REASON = { vrp_ledger_missing: "VRP 账本文件不在", vrp_no_rows_for_date: "VRP 账本里没有这一天的行", no_as_of: "账本日期不明" };
+function volNote(vol) {
+  const base = "IV / RV：每日扫描的 VRP 账本里同一天的一对数（IV 为扫描取到的观测 IV；RV 为扫描的 rv_30d：最近 30 个日对数收益、年化，Twelve Data 取不到时退回 yfinance；单位 %），与标的页的 CBOE IV30 不是同一个量；比值高只说明期权相对近期波动贵，未经前向检验，不是卖出信号。";
+  if (vol.available) return h("p", { class: "note" }, base);
+  const why = VOL_REASON[vol.reason] || (String(vol.reason || "").startsWith("ledger_unreadable") ? "VRP 账本读不了" : vol.reason) || "—";
+  return h("p", { class: "callout warn" }, `IV / RV 这一列不可得：${why}${vol.date ? `（${vol.date}）` : ""}。`, base);
 }
 function routeTxt(v) { return v === "far" ? h("b", {}, "far") : (ROUTE_SHORT[v] || "—"); }
 function zgDist(env) {

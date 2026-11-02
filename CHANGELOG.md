@@ -43,7 +43,24 @@
 
 ## [0.45.692] — 2026-11-02 — 占位（进行中：其余四处 CBOE 下载（close_correction / cboe_vix ×2 / cboe_fetcher）也请求 gzip）
 
-## [0.45.691] — 2026-11-02 — 占位（进行中：Alpha Bot 总览表加 IV / RV 列）
+## [0.45.691] — 2026-11-02 — Added：Alpha Bot 总览表加 IV / RV 列（读每日扫描的 VRP 账本，不打网）
+
+**起因**：竞品差距清单第 5 项「多票扫描表」。核对后发现总览页**已经**是 30 只一屏（gamma 正负、最近零点及距离、净 Major、路由、卖腿），我之前说「要一只只点进去看」是没查就下的结论；真缺的只有 IV / RV。
+
+**取数选择**：
+- 没走溢价页那条 Twelve Data 日线路：免费档串行 7 次 / 分、缓存只在进程内 ⇒ 30 只冷启动约 4 分钟，而且和每日扫描共用同一个 key 的 8 次 / 分上限，两边同时跑会挤掉生产扫描的请求。
+- 改读**每日扫描已经写好的 VRP 账本**（`vrp_signal`，`vrp_state/vrp_signals.jsonl`）：每票每天一行 `iv` + `rv_30d`，扫描自己就拿这一对算 `vrp_ex_ante`。2026-11-02 实测 30 只全有、零缺值，与总览 30 只逐一对得上（含 BRK-B）。
+- IV 显示 VRP 账本自己的 `iv`（`iv_source = iv_raw_observed`），**不**拿总览行上的 CBOE `iv30` 去配 VRP 的 RV——两种 IV 定义不同（实测 VRP 的 iv 通常高 2–6 个点），混成一个比值没有意义。`iv_raw_observed` 具体出自哪里**没核**（待验证）；30 只里两只是整数（ABBV 30.0、XOM 39.0），跨日没有重复出现的常数，不像卡住的兜底值，也没逐一核实。
+- `rv_30d` 的口径按代码核实（`market_intelligence.calculate_iv_rv_spread` → `twelve_data.realized_vol(lookback=30)`）：最近 30 个日对数收益、`ddof=1`、×√252、剔除 |ln| ≥ 0.5；Twelve Data 取不到时退回 yfinance。页面说明照此写（初稿写成「21 个交易日」——那是 VRP 的**结算**窗口，不是 rv_30d，核对时改正）。
+
+**改动**：
+- `alphabot/service.py`：新纯函数 `vol_block(rows, err, as_of)`——只取总览那一天的行（**不拿别的日子顶替**）、同票同日两行记 `duplicate` 不猜、IV / RV 非有限 / 布尔 / RV ≤ 0 不出比值；`overview()` 带 `vol`。VRP 账本读取抽成 `_vrp_path` / `_vrp_rows`（溢价页共用）。`ledger_io.load_jsonl` 对**不存在的文件返回 []** ⇒ 总览另判文件在不在，报 `vrp_ledger_missing`，不报成「那天没有行」；溢价页的旧口径（文件不在 = 没有行，测试钉住）不动。
+- `alphabot/static/pages/overview.js`：「最近零点」后加一列「IV / RV（30 天）」（`30.0 / 18.6`，小字比值），CSV 导出比值；表下说明写明「与标的页 CBOE IV30 不是同一个量」「未经前向检验，不是卖出信号」；不可得时 callout 写原因（账本不在 / 读不了 / 那天没有行）。演示模式不带这一列（没有 VRP 账本）。
+- `alphabot/static/pages/help.js`：总览一节加 IV / RV 列说明。
+
+**变异**（6 个，全红）：不按日期筛 / 同票两行后者覆盖 / 文件不在当成空 / RV = 0 也出比值 / 布尔当数字 / 总览不接 `vol`。
+
+**核对**：新测试 19 passed；`tests/test_alphabot*.py` + 卖权火墙 1036 passed；真实数据根跑 `overview()`：2026-11-02 30 / 30 有值；用 node 把页面的 `volCell` / `volNote` 抽出来在真实数据上渲染（`ABBV 30.0 / 18.6 · 1.62×` 等）。⚠️ **没在浏览器里看过**：本会话限定在 worktree，改不了主检出里预览工具读的 `launch.json`，按规矩也不用 Bash 起服务——合入后重启 Alpha Bot 时第一次看到。整套（含 689 二次检查的修复）13320 passed、1 skipped、2 xfailed（12:09，无并发）；那 1 条 skip 是既有的 `tests/test_orchestrator_direct_fallback.py::test_bare_unset_is_not_direct_when_system_proxy_on`——本机此刻系统代理没开、构造不了负对照（v0.45.496 起就这样设计），与本次无关，前几次整套跑时代理开着所以没 skip。
 
 ## [0.45.690] — 2026-11-02 — Changed：`cboe_options._fetch_cboe_payload` 下载 CBOE 延迟期权链请求 gzip 压缩、按 `Content-Encoding` 解压（线上字节约少 7 倍）；不认识的编码不重试、计数、报 P2
 
