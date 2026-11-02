@@ -260,7 +260,10 @@ export const SECTIONS = [
     return [
       h("p", {}, "这是 Alpha Hive 每日扫描里的", b("财报跨式纸面账本"), "（模拟成交，不连券商）。规则：财报前比较「期权隐含的事件波动」和「这只票过去 ",
         String(s.history_n ?? "—"), " 次财报的实际波动中位数」，比值 ≥ ", num(s.rich_ratio, 2), " 卖跨式、≤ ", num(s.cheap_ratio, 2),
-        " 买跨式；任一腿点差超过 ", num((s.max_spread_pct || 0) * 100, 0), "% 不交易；财报后第一个有报价的交易日平仓，或到期前 ",
+        s.trade_cheap === false ? " 本可买跨式（v0.45.693 起账本不开多头，信号照记）" : " 买跨式",
+        "；任一腿点差超过 ", num((s.max_spread_pct || 0) * 100, 0), "% 不交易；",
+        s.entry_max_sessions_before_event === 0 ? "只在财报前最后一个交易日开仓（更早的合格信号显示「等待」）；" : "",
+        "财报后第一个有报价的交易日平仓，或到期前 ",
         String(s.expiry_buffer_days ?? "—"), " 天强平。每笔权利金上限是 NAV 的 ", num(s.risk_per_trade_pct, 0), "%，最多同时 ", String(s.max_open ?? "—"), " 笔。"),
       h("h3", {}, "页面上有什么"),
       kv([

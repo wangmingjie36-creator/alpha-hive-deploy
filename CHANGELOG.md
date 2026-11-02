@@ -7,8 +7,27 @@
 
 ## [0.45.694] — 2026-11-02 — 占位（进行中：test_log_helper_sees_this_sessions_denials 在整套里红、单独跑绿——查根因并修）
 
+## [0.45.693] — 2026-11-02 — Changed：跨式账本只在**财报前最后一个交易日**开仓、关掉买跨式（用户 2026-11-02 定）；影子宽跨预注册修订 3（起点后移到 2026-11-03，旧规则单位不进检验）
 
-## [0.45.693] — 2026-11-02 — 占位（进行中：跨式账本开仓改为只在财报前最后一个交易日开、关掉买跨式；影子宽跨预注册修订 3）
+**诊断**（Alpha Bot 跨式胜率低）：已平 10 笔 3 胜 7 负、合计 −$1,095。信号用 ~30 DTE 报价，账本在信号一出现就开（实际在财报前 5~17 个交易日），持有 2~4 周。
+同一批事件里卖方押的「隐含事件波动 > 实际」6/6 成立（COST / JNJ / T / VZ / AMZN / AMC；CVX / XOM 尚未结算），亏损来自事件前几周的普通涨跌
+（T 事件前 −4.3%、CVX +5.5%、XOM +2.8%、VZ −2.7%）——测的不是信号声称的东西。多头两笔（TSLA / NFLX）都亏：已结算 19 个事件里 18 个隐含 > 实际。
+另记未改：比值极端（≥3）的 4 笔 rich 全亏（分母是 8 次财报涨跌的**中位数**，低波动大盘股中位数很小 ⇒ 比值虚高），n 太小，不据此改阈值。
+
+### Changed
+- `options_paper_leg.py`：新配置 `entry_max_sessions_before_event = 0` + `entry_window_miss()`（as_of 之后第 1 个 NYSE 交易日 ≥ 财报日才开；
+  `is_trading_day.add_trading_days`，日历不可用 ⇒ 不开、原因可见）；窗口外记 `waiting: …`。那天扫描没跑 ⇒ 错过这次财报（不补、不提前）。
+  `trade_cheap` → False；被关掉的一侧不再静默 `continue`，跳过原因写 `cheap side disabled`。信号的 `eligible` 没动（GEX 预注册的样本定义）。
+- `alphabot/straddle.py::signals_today`：`waiting` 原因显示「等待：财报前最后一个交易日开仓」，不显示成「跳过」。
+- `straddle_strangle_shadow.py` + `experiments/straddle_strangle_shadow_prereg.md`：**修订 3**，`PREREG["version"]` 2 → 3、`start_date` 2026-10-21 → 2026-11-03、
+  新增 `entry_window_sessions = 0` 与状态 `entry_outside_window`（双保险：新代码晚进生产时按旧规则开的单也认得出）。修订前已计入的 2 个 `ok` 单位
+  与 2 笔带记录的持仓不进检验。改动前没看过任何影子盈亏（只读了 `progress()` 计数）。Alpha Bot 状态标签同步。
+- 存量持仓（NVDA / CRCL）不动，按原出场规则平。
+
+### Tests
+- `tests/test_options_paper_leg.py::TestEntryWindow`（生产值源码字面量钉住、周末 / 劳动节 / 感恩节、逐日对拍交易日历、多头关闭原因、日历不可用不开）；
+  `tests/test_straddle_strangle_shadow.py::TestRevision3EntryWindow`（含与账本闸逐日同一判据）与协议常量更新；
+  `tests/test_alphabot_straddle.py::TestEntryWindowStatus`。旧场景测试（09-03 入场、09-20 财报、默认多头）在夹具里显式钉回旧口径并注明。
 
 ## [0.45.692] — 2026-11-02 — 占位（进行中：其余四处 CBOE 下载（close_correction / cboe_vix ×2 / cboe_fetcher）也请求 gzip）
 

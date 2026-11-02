@@ -10,6 +10,13 @@
 目的是**测量**「隐含事件波动 vs 历史实际波动」这个信号在真实报价、真实点差下
 值不值钱，不是给任何人下单用的。
 
+入场时点（v0.45.693）
+--------------------
+只在**财报前最后一个交易日**开（`entry_max_sessions_before_event`，`entry_window_miss`），且只开卖跨式
+（`trade_cheap=False`）。此前信号一出现就开——信号用 ~30 DTE 报价，实际在财报前 5~17 个交易日入场、持有 2~4 周：
+已平 10 笔 3 胜 7 负，而同一批事件里卖方押的「隐含事件波动 > 实际」6/6 成立——亏损来自事件前几周的普通涨跌
+（T 事件前 −4.3%、CVX +5.5%），不是信号错了。窗口外的信号照算照落盘，跳过原因记 `waiting: …`。
+
 成交约定（诚实，付点差）
 ------------------------
     入场：long 两腿都按 **ask** 买入；short 两腿都按 **bid** 卖出
@@ -101,7 +108,14 @@ CONFIG = {
     "risk_per_trade_pct": 6.0,        # 每笔权利金（long 最大亏损 / short 名义）占 NAV 上限
     "max_open": 6,
     "trade_rich": True,               # rich → 卖跨式
-    "trade_cheap": True,              # cheap → 买跨式
+    # v0.45.693（用户 2026-11-02 定）：关掉买跨式。已结算 19 个事件里 18 个「隐含事件波动 > 实际」（事件波动溢价），
+    # 两笔多头（TSLA / NFLX）都亏；信号照算照落盘，只是账本不再开多头（跳过原因写进 skipped_entries）。
+    "trade_cheap": False,             # cheap → 买跨式
+    # v0.45.693（用户 2026-11-02 定）：入场窗口。as_of 与财报日之间**严格夹着**的交易日数 ≤ 这个数才开仓；
+    # 0 = 只在财报前最后一个交易日开。此前信号一出现就开（实际在财报前 5~17 个交易日），持有 2~4 周，
+    # 盈亏主要被事件前的普通涨跌主导（T 事件前 −4.3%、CVX +5.5%），测不到信号声称的「事件定价贵 / 便宜」。
+    # 那天扫描没跑 ⇒ 这次财报错过（不往后补、不提前开）。None = 不设窗口（只给测试 / 回放旧口径用）。
+    "entry_max_sessions_before_event": 0,
     "exit_after_event": True,         # 财报过后第一个有报价的日子平仓
     "expiry_buffer_days": 2,          # 到期前 2 天强平（避开到期日 gamma 与指派）
     # v0.45.449 删 "fallback_stale_max_days"（事件后 stale 超 3 天按内在价值平）：到期前的内在价值低估
@@ -183,6 +197,27 @@ def expiry_buffer_hit(as_of: str, expiry: str) -> bool:
     10-21 当晚按 expiry_buffer 强平，事件还没发生）。判不了到期（日期坏）⇒ False，与原行为一致。"""
     to_expiry = _days_between(as_of, expiry)
     return to_expiry is not None and to_expiry <= CONFIG["expiry_buffer_days"]
+
+
+def entry_window_miss(as_of: str, earnings_day: str) -> Optional[str]:
+    """`as_of` 还没进入场窗口 ⇒ 原因串；在窗口内 / 不设窗口 ⇒ None（v0.45.693）。
+
+    窗口 = as_of 与财报日之间严格夹着的 NYSE 交易日 ≤ `entry_max_sessions_before_event`，
+    等价于「as_of 之后第 k+1 个交易日 ≥ 财报日」（`is_trading_day.add_trading_days`，全仓交易日算术唯一实现）。
+    财报日落在休市日（周末盘前报的少见写法）也成立：周五之后第 1 个交易日是周一 ≥ 周六。
+    日历不可用 ⇒ 判不了 ⇒ **不开**（原因串说清楚、WARNING），不猜。"""
+    k = CONFIG.get("entry_max_sessions_before_event")
+    if k is None:
+        return None
+    try:
+        from is_trading_day import add_trading_days
+        latest = add_trading_days(datetime.strptime(as_of, "%Y-%m-%d").date(), int(k) + 1).isoformat()
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("[OptionsPaperLeg] 交易日历不可用（%s），入场窗口判不了，%s 不开仓", exc, as_of)
+        return "entry window unjudgeable: trading calendar unavailable"
+    if latest < earnings_day:
+        return f"waiting: opens on last session before earnings {earnings_day}"
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -561,6 +596,10 @@ def _open_from_signal(sig: Dict, nav: float, as_of: str) -> Tuple[Optional[Strad
         # 只在账本入口拒，不动信号的 `eligible`——后者是 GEX 预注册检验的样本定义（事件本身照样能量到实际波动）。
         # 原因串会原样显示在 Alpha Bot 状态列（`跳过：…`），保持短。
         return None, f"earnings {ed_day} within expiry buffer of {expiry}: forced exit before event"
+    if ed_day is not None:
+        wait = entry_window_miss(as_of, ed_day)
+        if wait is not None:
+            return None, wait
     mid_c, mid_p = _pos(call.get("mid")), _pos(put.get("mid"))
     mark = (mid_c + mid_p) if (mid_c is not None and mid_p is not None) else premium
     ratio = _num(sig.get("ratio"))
@@ -875,6 +914,8 @@ def _run_for_date(as_of, quotes_fn, signals, closes_fn) -> Dict:
         tk = sig.get("ticker")
         label = sig.get("label")
         if (label == "rich" and not CONFIG["trade_rich"]) or (label == "cheap" and not CONFIG["trade_cheap"]):
+            # v0.45.693：写原因，不再静默 continue（Alpha Bot 状态列此前只能显示「原因未记录」）
+            skipped.append({"ticker": tk, "reason": f"{label} side disabled"})
             continue
         if label not in ("rich", "cheap"):
             continue

@@ -47,6 +47,12 @@ MOVES = [{"earnings_date": d, "move_pct": m} for d, m in
 def _early_start(monkeypatch):
     """夹具日期是 2026-09，早于协议 start_date（2026-10-21）：钉到更早，让单位能进检验；「登记前排除」有单独的测试。"""
     monkeypatch.setitem(SS.PREREG, "start_date", "2026-01-01")
+    # v0.45.693（修订 3）：夹具入场 09-03、财报 09-20，早于「财报前最后一个交易日」——窗口判据有单独的测试
+    monkeypatch.setitem(SS.PREREG, "entry_window_sessions", None)
+    # 账本侧同理：本文件的场景是旧口径（09-03 入场、09-20 财报，默认多头）——钉回「信号一出现就开、开多头」，
+    # 测的是成交 / 定仓 / 盯市 / 出场本身。生产入场窗口与关多头由 test_options_paper_leg.py::TestEntryWindow 钉住。
+    monkeypatch.setitem(opl.CONFIG, "trade_cheap", True)
+    monkeypatch.setitem(opl.CONFIG, "entry_max_sessions_before_event", None)
 
 
 def _signal(*, with_quote=True, qs=None):
@@ -1002,11 +1008,47 @@ class TestRevealAfterFreeze:
         assert "function revealedBlock" in js[:a], "配对块的代码在盲期面板之外（面板那段的『不含盈亏字眼』守卫才有意义）"
 
 
+class TestRevision3EntryWindow:
+    """修订 3（v0.45.693）：起点后、但入场早于「财报前最后一个交易日」的单（新代码晚进生产时按旧规则开的）不进检验。"""
+
+    @pytest.fixture(autouse=True)
+    def _window_on(self, monkeypatch):
+        monkeypatch.setitem(SS.PREREG, "entry_window_sessions", 0)
+
+    @pytest.mark.parametrize("entry,earnings,status", [
+        ("2026-10-27", "2026-10-28", "ok"),
+        ("2026-10-30", "2026-11-02", "ok"),                       # 周五 → 周一
+        ("2026-11-25", "2026-11-27", "ok"),                       # 中间是感恩节休市
+        ("2026-10-22", "2026-10-28", "entry_outside_window"),
+        ("2026-10-27", "2026-10-29", "entry_outside_window"),     # 夹着一个交易日也不行
+    ])
+    def test_status(self, entry, earnings, status):
+        (u,) = SS.units([_closed_row(entry_date=entry, earnings_date=earnings)])
+        assert u["status"] == status and (u["d"] is None) is (status != "ok")
+
+    def test_start_date_is_checked_first(self):
+        (u,) = SS.units([_closed_row(entry_date="2025-12-22", earnings_date="2026-01-10")])
+        assert u["status"] == "before_start"
+
+    def test_same_predicate_as_the_ledger(self, monkeypatch):
+        """账本入场闸与本判据逐日一致（两边都是「下一个 NYSE 交易日 ≥ 财报日」）：账本开得出的单不会被这里误排，反之亦然。"""
+        monkeypatch.setitem(opl.CONFIG, "entry_max_sessions_before_event", SS.PREREG["entry_window_sessions"])
+        ed = "2026-11-27"
+        for k in range(1, 15):
+            entry = (date.fromisoformat(ed) - timedelta(days=k)).isoformat()
+            assert SS._outside_entry_window(entry, ed) is (opl.entry_window_miss(entry, ed) is not None), entry
+
+    def test_unparseable_dates_are_left_to_later_statuses(self):
+        assert SS._outside_entry_window("garbled", "2026-10-28") is False
+        assert SS._outside_entry_window("2026-10-22", "") is False
+
+
 class TestProtocolConstantsArePinned:
     """决策常量写在测试里：谁改 α / 种子 / 置换次数 / 就绪闸 / start_date，必须同时改这里，也就是必须按协议 §8 记修订。
     （读源码里的字面量，而不是运行时的 PREREG——这个文件的 autouse 夹具把 start_date 钉到了 2026-01-01。）"""
 
-    EXPECTED = {"version": 2, "registered": "2026-10-21", "start_date": "2026-10-21", "quote_schema": 1, "shadow_schema": 1,
+    EXPECTED = {"version": 3, "registered": "2026-10-21", "start_date": "2026-11-03", "entry_window_sessions": 0,
+                "quote_schema": 1, "shadow_schema": 1,
                 "strangle_roles": ("c25", "p25"), "min_units": 30, "min_blocks": 8, "alpha": 0.05, "enum_max_blocks": 16,
                 "n_perm": 20000, "seed": 20261021, "statistic": "mean(d)", "test": "two_sided_block_sign_flip",
                 "block": "earnings_iso_week"}
@@ -1019,7 +1061,8 @@ class TestProtocolConstantsArePinned:
 
     def test_the_protocol_text_names_the_same_numbers(self):
         doc = (REPO / "experiments" / "straddle_strangle_shadow_prereg.md").read_text(encoding="utf-8")
-        for needle in ("2026-10-21", "20261021", "20000", "α = 0.05", "≥ 30", "≥ 8", "修订 2"):
+        for needle in ("2026-10-21", "2026-11-03", "20261021", "20000", "α = 0.05", "≥ 30", "≥ 8", "修订 2", "修订 3",
+                       "entry_outside_window"):
             assert needle in doc, needle
 
 

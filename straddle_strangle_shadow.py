@@ -47,11 +47,15 @@ _log = get_logger("straddle_strangle_shadow")
 
 #: 协议常量。本文件与 experiments/straddle_strangle_shadow_prereg.md 不一致时以这里为准，并按协议 §8 记修订。
 PREREG = {
-    "version": 2,                    # 修订 2（2026-10-22，v0.45.593）：单位定义加「平仓不晚于财报日」一类（协议 §4、§14）
+    "version": 3,                    # 修订 3（2026-11-02，v0.45.693）：账本改为只在财报前最后一个交易日开仓 ⇒ 起点后移、旧规则单位不进（协议 §14）
     "registered": "2026-10-21",
     "doc": "experiments/straddle_strangle_shadow_prereg.md",
-    #: 只有 `entry_date >= start_date` 且入场当天带着影子记录的单位才进检验（协议 §0：登记前入场的 8 笔一律排除）
-    "start_date": "2026-10-21",
+    #: 只有 `entry_date >= start_date` 且入场当天带着影子记录的单位才进检验（协议 §0：登记前入场的 8 笔一律排除；
+    #: 修订 3：起点由 2026-10-21 后移到新开仓规则生效的第一个扫描日，此前按旧规则入场的单位只作描述性旁证）
+    "start_date": "2026-11-03",
+    #: 修订 3：入场日与财报日之间严格夹着的交易日数必须 ≤ 这个数（= 账本 `entry_max_sessions_before_event`）。
+    #: 与 start_date 双保险：新代码若晚于起点才进生产，起点后按旧规则开的单也会被这条认出来（`entry_outside_window`）。
+    "entry_window_sessions": 0,
     "unit": "closed_short_straddle_with_shadow_strangle",
     "quote_schema": 1,
     "shadow_schema": 1,
@@ -295,6 +299,21 @@ def _block(earnings_date) -> Optional[str]:
     return f"{y}-W{w:02d}"
 
 
+def _outside_entry_window(entry_date, earnings_day: str) -> bool:
+    """修订 3：入场日之后第 k+1 个交易日早于财报日 ⇒ 入场早于窗口（旧规则的单）。日期判不了 ⇒ False，
+    交给后面的 `unusable` 等状态去判（不在这里另造一类）。`entry_window_sessions` 为 None ⇒ 不判（只给测试用）。"""
+    k = PREREG.get("entry_window_sessions")
+    if k is None:
+        return False
+    try:
+        from is_trading_day import add_trading_days
+        d0 = date.fromisoformat(str(entry_date or "")[:10])
+        date.fromisoformat(earnings_day)
+    except (TypeError, ValueError):
+        return False
+    return add_trading_days(d0, int(k) + 1).isoformat() < earnings_day
+
+
 def units(closed: List[dict]) -> List[dict]:
     """协议 §4：每笔平仓一个单位，`status` 说明为什么进 / 不进检验。`d` 是结果——调用方在冻结前只许数个数。
     进检验 = `ok`：入场日 ≥ `start_date`、带着 schema 对的影子记录、空头、入场可成交、定得出张数、平仓有价、
@@ -308,6 +327,8 @@ def units(closed: List[dict]) -> List[dict]:
         ed, xd = str(c.get("earnings_date") or "")[:10], str(c.get("exit_date") or "")[:10]
         if str(c.get("entry_date") or "") < PREREG["start_date"]:
             u["status"] = "before_start"
+        elif _outside_entry_window(c.get("entry_date"), ed):
+            u["status"] = "entry_outside_window"
         elif not isinstance(sh, dict):
             u["status"] = "no_record"
         elif sh.get("schema_version") != PREREG["shadow_schema"]:
