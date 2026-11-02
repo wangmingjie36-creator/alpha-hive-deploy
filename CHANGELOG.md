@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.692] — 2026-11-02 — 占位（进行中：其余四处 CBOE 下载（close_correction / cboe_vix ×2 / cboe_fetcher）也请求 gzip）
+
 ## [0.45.691] — 2026-11-02 — 占位（进行中：Alpha Bot 总览表加 IV / RV 列）
 
 ## [0.45.690] — 2026-11-02 — Changed：`cboe_options._fetch_cboe_payload` 下载 CBOE 延迟期权链请求 gzip 压缩、按 `Content-Encoding` 解压（线上字节约少 7 倍）；不认识的编码不重试、计数、报 P2
