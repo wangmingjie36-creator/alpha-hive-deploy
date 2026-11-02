@@ -264,7 +264,7 @@ export const SECTIONS = [
         String(s.history_n ?? "—"), " 次财报的实际波动中位数」，比值 ≥ ", num(s.rich_ratio, 2), " 卖跨式、≤ ", num(s.cheap_ratio, 2),
         s.trade_cheap === false ? " 本可买跨式（v0.45.693 起账本不开多头，信号照记）" : " 买跨式",
         "；任一腿点差超过 ", num((s.max_spread_pct || 0) * 100, 0), "% 不交易；",
-        s.entry_max_sessions_before_event === 0 ? "只在财报前最后一个交易日开仓（更早的合格信号显示「等待」）；" : "",
+        Number.isInteger(s.entry_max_sessions_before_event) ? `只在财报前最后 ${s.entry_max_sessions_before_event + 1} 个交易日内开仓（窗口内第一个合格日就开，更早的合格信号显示「等待」）；` : "",
         "财报后第一个有报价的交易日平仓，或到期前 ",
         String(s.expiry_buffer_days ?? "—"), " 天强平。每笔权利金上限是 NAV 的 ", num(s.risk_per_trade_pct, 0), "%，最多同时 ", String(s.max_open ?? "—"), " 笔。"),
       h("h3", {}, "页面上有什么"),

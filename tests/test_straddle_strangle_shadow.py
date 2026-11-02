@@ -1013,14 +1013,15 @@ class TestRevision3EntryWindow:
 
     @pytest.fixture(autouse=True)
     def _window_on(self, monkeypatch):
-        monkeypatch.setitem(SS.PREREG, "entry_window_sessions", 0)
+        monkeypatch.setitem(SS.PREREG, "entry_window_sessions", 1)     # 修订 4 的生产值（源码字面量由常量测试钉住）
 
     @pytest.mark.parametrize("entry,earnings,status", [
         ("2026-10-27", "2026-10-28", "ok"),
-        ("2026-10-30", "2026-11-02", "ok"),                       # 周五 → 周一
-        ("2026-11-25", "2026-11-27", "ok"),                       # 中间是感恩节休市
+        ("2026-10-26", "2026-10-28", "ok"),                       # 夹着一个交易日（修订 4 放行）
+        ("2026-10-23", "2026-10-27", "ok"),                       # 周五 → 周二，夹着周一
+        ("2026-11-24", "2026-11-27", "ok"),                       # 夹着周三 + 感恩节休市
         ("2026-10-22", "2026-10-28", "entry_outside_window"),
-        ("2026-10-27", "2026-10-29", "entry_outside_window"),     # 夹着一个交易日也不行
+        ("2026-10-26", "2026-10-29", "entry_outside_window"),     # 夹着两个交易日
     ])
     def test_status(self, entry, earnings, status):
         (u,) = SS.units([_closed_row(entry_date=entry, earnings_date=earnings)])
@@ -1047,7 +1048,7 @@ class TestProtocolConstantsArePinned:
     """决策常量写在测试里：谁改 α / 种子 / 置换次数 / 就绪闸 / start_date，必须同时改这里，也就是必须按协议 §8 记修订。
     （读源码里的字面量，而不是运行时的 PREREG——这个文件的 autouse 夹具把 start_date 钉到了 2026-01-01。）"""
 
-    EXPECTED = {"version": 3, "registered": "2026-10-21", "start_date": "2026-11-03", "entry_window_sessions": 0,
+    EXPECTED = {"version": 4, "registered": "2026-10-21", "start_date": "2026-11-03", "entry_window_sessions": 1,
                 "quote_schema": 1, "shadow_schema": 1,
                 "strangle_roles": ("c25", "p25"), "min_units": 30, "min_blocks": 8, "alpha": 0.05, "enum_max_blocks": 16,
                 "n_perm": 20000, "seed": 20261021, "statistic": "mean(d)", "test": "two_sided_block_sign_flip",
@@ -1061,7 +1062,7 @@ class TestProtocolConstantsArePinned:
 
     def test_the_protocol_text_names_the_same_numbers(self):
         doc = (REPO / "experiments" / "straddle_strangle_shadow_prereg.md").read_text(encoding="utf-8")
-        for needle in ("2026-10-21", "2026-11-03", "20261021", "20000", "α = 0.05", "≥ 30", "≥ 8", "修订 2", "修订 3",
+        for needle in ("2026-10-21", "2026-11-03", "20261021", "20000", "α = 0.05", "≥ 30", "≥ 8", "修订 2", "修订 3", "修订 4",
                        "entry_outside_window"):
             assert needle in doc, needle
 

@@ -686,8 +686,8 @@ def _source_config():
 
 
 class TestEntryWindow:
-    """v0.45.693（用户 2026-11-02 定）：只在财报前最后一个交易日开仓、不开多头。
-    此前信号一出现就开（财报前 5~17 个交易日），盈亏被事件前几周的普通涨跌主导，测不到信号本身。"""
+    """v0.45.693（用户 2026-11-02 定）：贴着财报开仓、不开多头；v0.45.696 窗口放宽到财报前最后 2 个交易日内。
+    此前信号一出现就开（入场与财报日之间夹着 4~20 个交易日），盈亏被事件前几周的普通涨跌主导，测不到信号本身。"""
 
     @pytest.fixture(autouse=True)
     def _production_rules(self, monkeypatch):
@@ -703,21 +703,23 @@ class TestEntryWindow:
         return r, skip.get("XYZ")
 
     def test_production_values(self):
-        """改这两个数 = 改账本测的是什么（与影子宽跨预注册修订 3 的 `entry_window_sessions` 同值），要单独决定。"""
+        """改这两个数 = 改账本测的是什么（与影子宽跨预注册修订 4 的 `entry_window_sessions` 同值），要单独决定。"""
         src = _source_config()
-        assert src["entry_max_sessions_before_event"] == 0 and src["trade_cheap"] is False and src["trade_rich"] is True
+        assert src["entry_max_sessions_before_event"] == 1 and src["trade_cheap"] is False and src["trade_rich"] is True
 
     @pytest.mark.parametrize("as_of,earnings", [
         ("2026-09-03", "2026-09-04"),       # 周四 → 周五
         ("2026-09-04", "2026-09-08"),       # 周五 → 周二（周一 09-07 劳动节休市）
         ("2026-11-25", "2026-11-27"),       # 周三 → 周五（周四 11-26 感恩节休市）
+        ("2026-09-03", "2026-09-08"),       # 周四 → 周二：中间夹着 09-04 一个交易日（窗口 1 放行）
+        ("2026-11-24", "2026-11-27"),       # 周二 → 周五：夹着周三一个交易日 + 感恩节
     ])
-    def test_last_session_before_earnings_opens(self, as_of, earnings):
+    def test_inside_window_opens(self, as_of, earnings):
         r, why = self._run(as_of, earnings)
         assert len(r["opened_today"]) == 1 and why is None, why
 
     @pytest.mark.parametrize("as_of,earnings", [
-        ("2026-09-03", "2026-09-08"),       # 中间夹着 09-04 一个交易日
+        ("2026-09-02", "2026-09-08"),       # 夹着 09-03、09-04 两个交易日
         ("2026-09-03", "2026-09-20"),       # 旧口径的典型：两周多以前
     ])
     def test_earlier_sessions_wait_and_say_so(self, as_of, earnings):
@@ -726,14 +728,18 @@ class TestEntryWindow:
         assert len(why) <= 90, "原因串原样显示在 Alpha Bot 状态列，保持短"
 
     def test_window_matches_trading_calendar_day_by_day(self):
-        """逐日扫过：开得了 ⇔ as_of 之后的下一个 NYSE 交易日 ≥ 财报日（不挑边界点）。"""
+        """逐日扫过：开得了 ⇔ as_of 之后第 (窗口 + 1) 个 NYSE 交易日 ≥ 财报日（不挑边界点）。"""
         from datetime import date
         from is_trading_day import add_trading_days
+        n = opl.CONFIG["entry_max_sessions_before_event"] + 1
         ed = "2026-09-24"
+        opened = 0
         for k in range(1, 15):
             as_of = (date.fromisoformat(ed) - timedelta(days=k)).isoformat()
-            expect = add_trading_days(date.fromisoformat(as_of), 1).isoformat() >= ed
+            expect = add_trading_days(date.fromisoformat(as_of), n).isoformat() >= ed
+            opened += expect
             assert (opl.entry_window_miss(as_of, ed) is None) is expect, (as_of, ed)
+        assert opened == n, "财报 09-24（周四）⇒ 开得了的恰是前 n 个交易日（窗口 1：09-22、09-23）"
 
     def test_long_side_is_disabled_with_a_reason(self):
         r, why = self._run("2026-09-03", "2026-09-04", label="cheap")

@@ -47,7 +47,7 @@ _log = get_logger("straddle_strangle_shadow")
 
 #: 协议常量。本文件与 experiments/straddle_strangle_shadow_prereg.md 不一致时以这里为准，并按协议 §8 记修订。
 PREREG = {
-    "version": 3,                    # 修订 3（2026-11-02，v0.45.693）：账本改为只在财报前最后一个交易日开仓 ⇒ 起点后移、旧规则单位不进（协议 §14）
+    "version": 4,                    # 修订 4（2026-11-02，v0.45.696）：入场窗口 0 → 1（最后 2 个交易日内）；修订 3（v0.45.693）：起点后移、旧规则单位不进（协议 §14）
     "registered": "2026-10-21",
     "doc": "experiments/straddle_strangle_shadow_prereg.md",
     #: 只有 `entry_date >= start_date` 且入场当天带着影子记录的单位才进检验（协议 §0：登记前入场的 8 笔一律排除；
@@ -55,7 +55,7 @@ PREREG = {
     "start_date": "2026-11-03",
     #: 修订 3：入场日与财报日之间严格夹着的交易日数必须 ≤ 这个数（= 账本 `entry_max_sessions_before_event`）。
     #: 与 start_date 双保险：新代码若晚于起点才进生产，起点后按旧规则开的单也会被这条认出来（`entry_outside_window`）。
-    "entry_window_sessions": 0,
+    "entry_window_sessions": 1,
     "unit": "closed_short_straddle_with_shadow_strangle",
     "quote_schema": 1,
     "shadow_schema": 1,
