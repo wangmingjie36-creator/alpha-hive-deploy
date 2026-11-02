@@ -367,7 +367,8 @@ class AlphaBotService:
             for tenor, view in (d.get("tenors") or {}).items():
                 tenors.setdefault(tenor, []).append(clean_json(R.row_brief(view, blind=False)))
         return {"data_available": any(tenors.values()), "as_of": as_of, "tenors": tenors, "source": "demo",
-                "settlement_blinded": True, "state_dir": {"path": None, "exists": False, "hint": "演示模式不读账本"}}
+                "settlement_blinded": True, "state_dir": {"path": None, "exists": False, "hint": "演示模式不读账本"},
+                "vol": {"available": False, "reason": "demo", "date": as_of, "by_ticker": {}}}
 
     def ledger_rows(self, date, *, full: bool = False) -> dict:
         return clean_json(R.rows_for_date_view(norm_date(date), state_dir=self.ledger_dir, compact=not full))

@@ -91,6 +91,27 @@ class TestOverviewWiring:
         assert svc._vrp_rows() == ([], None)
 
 
+class TestSecondCheck691:
+    """691 合入前二次检查抓到的。"""
+
+    def test_demo_overview_says_demo_not_unavailable(self, tmp_path):
+        from alphabot import synthetic as syn
+        svc = AlphaBotService(demo=True, fetch_fn=syn.demo_fetch, state_dir=tmp_path / "demo")
+        v = svc.overview()["vol"]
+        assert v["available"] is False and v["reason"] == "demo"
+        assert 'demo: "演示模式没有 VRP 账本"' in TestPage.SRC
+
+    def test_fallback_iv_source_is_shown_in_the_cell(self):
+        assert 'v.iv_source !== "iv_raw_observed"' in TestPage.SRC and "IV 来源 ${v.iv_source}" in TestPage.SRC
+
+    def test_canonical_redirects_replace_history_and_encode(self):
+        app = (STATIC / "app.js").read_text(encoding="utf-8")
+        assert "location.replace(hash)" in app
+        assert app.count("redirect(`#/t/${encodeURIComponent(t)}/") == 1
+        assert app.count("redirect(`#/intraday/${encodeURIComponent(t)}`)") == 1
+        assert "go(`#/t/${t}/" not in app and "go(`#/intraday/${t}`)" not in app
+
+
 class TestPage:
     SRC = (STATIC / "pages" / "overview.js").read_text(encoding="utf-8")
 

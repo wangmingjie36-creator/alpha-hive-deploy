@@ -62,6 +62,16 @@
 
 **核对**：新测试 19 passed；`tests/test_alphabot*.py` + 卖权火墙 1036 passed；真实数据根跑 `overview()`：2026-11-02 30 / 30 有值；用 node 把页面的 `volCell` / `volNote` 抽出来在真实数据上渲染（`ABBV 30.0 / 18.6 · 1.62×` 等）。⚠️ **没在浏览器里看过**：本会话限定在 worktree，改不了主检出里预览工具读的 `launch.json`，按规矩也不用 Bash 起服务——合入后重启 Alpha Bot 时第一次看到。整套（含 689 二次检查的修复）13320 passed、1 skipped、2 xfailed（12:09，无并发）；那 1 条 skip 是既有的 `tests/test_orchestrator_direct_fallback.py::test_bare_unset_is_not_direct_when_system_proxy_on`——本机此刻系统代理没开、构造不了负对照（v0.45.496 起就这样设计），与本次无关，前几次整套跑时代理开着所以没 skip。
 
+**推送前二次检查（2026-11-02；评审能跑代码、只读，我另做真实数据扫描）**：
+- 真实数据：卖权账本全部 23 个日期（10-01 – 11-02）逐日跑 `overview(date)`：任何一天同票都没有两行；三处缺口都按设计显示——10-14 / 10-26 VRP 没记 BILI ⇒ 那格「—」，10-12 VRP 整天没有行 ⇒ 提示「VRP 账本里没有这一天的行」，不拿别的日子顶替。两个账本都写 `BRK-B`，对得上。
+- 修了评审抓到的四处（无一阻塞）：
+  - 689 二次检查加的规范化重定向用 `go()` ⇒ 每次往历史里**新增**一项：从 `#/t/spx` / `#/t/nvda` 这类地址进来后按「后退」会回到别名地址、又被重定向回来，退不出去。改成 `location.replace`（新 `app.js::redirect`，缺代码那条原有重定向也一起改）。
+  - 重定向时代码没有 `encodeURIComponent` ⇒ `#/t/%25e4` 会被改写成解码时抛 URIError 的 `#/t/%E4`、页面停在「加载中」（不现实的输入，顺手修）。
+  - 演示模式的总览没有 `vol` ⇒ 页面黄条写「IV / RV 这一列不可得：—」。改成 `reason: demo`，页面写「演示模式没有 VRP 账本」。
+  - VRP 账本取不到观测 IV 时会退回 `quote_set.iv30`（`vrp_signal.CONFIG["iv_source_order"]`），那时表下说明「与 CBOE IV30 不是同一个量」不成立。格子里对非 `iv_raw_observed` 的行写明 IV 来源。真实数据里这种行只有 VKTX 09-11 – 09-17 的 5 行，都不在卖权账本日期里，目前总览碰不到。
+- 评审确认没问题的：没有重定向循环（`canonTicker` 幂等）、子页签保留、带 `.` / `-` 的代码原样通过、显式历史日期跟着走、溢价页旧口径未变、对话工具不读 `tickers`。
+- 整套（推送前最后一次）：13341 passed、1 failed、1 skipped、2 xfailed（12:27）。skip 同上（系统代理没开）。那 1 条失败是既有的 `tests/test_write_sandbox.py::TestLiveOnThisMac::test_log_helper_sees_this_sessions_denials`：统一日志查询助手没查到本会话刚造的写拒绝，查到的两条是**另一个会话**同一秒的沙箱金丝雀（`child-52790.*`）——本次开跑时没有别的整套在跑，跑到一半别的会话起了测试。单独重跑这一类 3 passed。本次没碰写沙箱 / 日志助手，判为与本次无关的时序敏感测试，**未修**。
+
 ## [0.45.690] — 2026-11-02 — Changed：`cboe_options._fetch_cboe_payload` 下载 CBOE 延迟期权链请求 gzip 压缩、按 `Content-Encoding` 解压（线上字节约少 7 倍）；不认识的编码不重试、计数、报 P2
 
 起因：在 Alpha Bot 接 SPX 时发现 `_SPX` 一条链 12.8MB、首次载入约 1 分钟，几乎全是下载。查下来请求头只有 `User-Agent`，**所有标的**（每日扫描 30 只 + Alpha Bot 盘中快照）一直在下载未压缩文件；urllib 也不会替我们解压。

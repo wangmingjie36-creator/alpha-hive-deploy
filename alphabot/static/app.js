@@ -60,6 +60,9 @@ export function canonTicker(raw) {
   return byLabel[s.replace(/^[\^$]/, "")] || s;
 }
 export function go(hash) { if (location.hash !== hash) location.hash = hash; else route(); }
+// 规范化重定向（缺代码 / 小写 / 指数展示名 → 规范写法）：替换当前历史项而不是新增一项，
+// 否则「后退」会回到别名地址、又被重定向回来，退不出去（二次检查 #1）
+function redirect(hash) { if (location.hash !== hash) location.replace(hash); else route(); }
 
 document.getElementById("search").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -89,13 +92,13 @@ async function route() {
     if (page === "overview") await renderOverview(app, alive);
     else if (page === "t") {
       const t = a ? canonTicker(a) : pref("lastTicker", tickers()[0] || "NVDA");
-      if (!a || t !== a) { go(`#/t/${t}/${b || "levels"}`); return; }
+      if (!a || t !== a) { redirect(`#/t/${encodeURIComponent(t)}/${b || "levels"}`); return; }
       setPref("lastTicker", t);
       await renderTicker(app, t, b || "levels", alive);
     } else if (page === "intraday") {
       const focus = state.meta.settings?.focus || [];
       const t = a ? canonTicker(a) : (focus[0] || pref("lastTicker", "NVDA"));
-      if (!a || t !== a) { go(`#/intraday/${t}`); return; }
+      if (!a || t !== a) { redirect(`#/intraday/${encodeURIComponent(t)}`); return; }
       await renderIntraday(app, t, alive);
     } else if (page === "ledger") await renderLedger(app, alive);
     else if (page === "straddle") await renderStraddle(app, alive);

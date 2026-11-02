@@ -112,11 +112,14 @@ function volCell(v) {
   if (!v) return h("span", { class: "muted" }, "—");
   if (v.duplicate) return h("span", { class: "muted small" }, "当天有两行，不取");
   const head = `${isNum(v.iv) ? num(v.iv, 1) : "—"} / ${isNum(v.rv_30d) ? num(v.rv_30d, 1) : "—"}`;
-  return h("span", {}, head, h("span", { class: "sub" }, isNum(v.iv_rv) ? `${num(v.iv_rv, 2)}×` : "比值不可得"));
+  // VRP 账本取不到观测 IV 时退回别的源（如 quote_set.iv30）：那时下面的口径说明不适用，格子里写明来源
+  const src = v.iv_source && v.iv_source !== "iv_raw_observed" ? h("span", { class: "sub" }, `IV 来源 ${v.iv_source}`) : null;
+  return h("span", {}, head, h("span", { class: "sub" }, isNum(v.iv_rv) ? `${num(v.iv_rv, 2)}×` : "比值不可得"), src);
 }
-const VOL_REASON = { vrp_ledger_missing: "VRP 账本文件不在", vrp_no_rows_for_date: "VRP 账本里没有这一天的行", no_as_of: "账本日期不明" };
+const VOL_REASON = { vrp_ledger_missing: "VRP 账本文件不在", vrp_no_rows_for_date: "VRP 账本里没有这一天的行", no_as_of: "账本日期不明",
+  demo: "演示模式没有 VRP 账本" };
 function volNote(vol) {
-  const base = "IV / RV：每日扫描的 VRP 账本里同一天的一对数（IV 为扫描取到的观测 IV；RV 为扫描的 rv_30d：最近 30 个日对数收益、年化，Twelve Data 取不到时退回 yfinance；单位 %），与标的页的 CBOE IV30 不是同一个量；比值高只说明期权相对近期波动贵，未经前向检验，不是卖出信号。";
+  const base = "IV / RV：每日扫描的 VRP 账本里同一天的一对数（IV 为扫描取到的观测 IV，个别行退回别的源时格子里写明；RV 为扫描的 rv_30d：最近 30 个日对数收益、年化，Twelve Data 取不到时退回 yfinance；单位 %），与标的页的 CBOE IV30 不是同一个量；比值高只说明期权相对近期波动贵，未经前向检验，不是卖出信号。";
   if (vol.available) return h("p", { class: "note" }, base);
   const why = VOL_REASON[vol.reason] || (String(vol.reason || "").startsWith("ledger_unreadable") ? "VRP 账本读不了" : vol.reason) || "—";
   return h("p", { class: "callout warn" }, `IV / RV 这一列不可得：${why}${vol.date ? `（${vol.date}）` : ""}。`, base);
