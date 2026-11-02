@@ -331,6 +331,7 @@ class AlertAnalyzer:
         self._check_yf_daily_event_rows(status)  # v0.45.652：P2 其他日线读者（yf_daily 入口）最近一场缺了 / 中间的公司行动空行
         self._check_price_nonfinite(status)      # v0.45.653：P2 行情三字段算出非有限数、已改缺失（真 K 线缺收盘 / 缺量）
         self._check_macro_snapshot_calls(status)  # v0.45.674：P2 一轮扫描的宏观快照没有恰好取一次（读者绕过快照自己取）
+        self._check_cboe_content_encoding(status)  # v0.45.690：P2 CBOE 响应的 Content-Encoding 不认识（那几只期权链没取到）
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
         self._check_news_sources(status)
@@ -1490,6 +1491,30 @@ class AlertAnalyzer:
                  "影响": "评分用的行情不受影响；之后单独取日线的用途（报告阶段等）那一项缺失或走了回落"},
                 ["price_nonfinite", "data_quality"]
             ))
+
+    def _check_cboe_content_encoding(self, status: Dict) -> None:
+        """CBOE 响应的 Content-Encoding 不认识（v0.45.690；`cboe_options.payload_stats()["bad_encoding"]` 经 scan_timing 的 `counters.cboe` 进来）。
+
+        我们请求 gzip、只认 gzip / 未压缩。回了别的编码 ⇒ 那只标的的 CBOE 链取不到（出口 None、降级），
+        只有几只时到不了 day_health 的「整源故障」线，没有这条就只剩一行 ERROR 日志。计数缺失 ⇒ checks_skipped。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        cb = (st.get("counters") or {}).get("cboe")
+        if not isinstance(cb, dict) or "bad_encoding" not in cb:
+            self.checks_skipped.append("CBOE 响应编码检查（scan_timing 无 counters.cboe.bad_encoding）")
+            return
+        n = int(cb.get("bad_encoding") or 0)
+        if n <= 0:
+            return
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】CBOE 有 {n} 次响应的 Content-Encoding 不认识，那几次期权链没取到",
+            {"影响": "对应标的的 CBOE 期权链本轮为空、走了降级（同「CBOE 拉取失败」）",
+             "建议": "日志里搜「不认识的 Content-Encoding」看是哪种编码；cboe_options._decode_cboe_body 只认 gzip / 未压缩，"
+                     "对端改了压缩方式就要在那里加一种解码（请求头 _CBOE_HEADERS 也只声明了 gzip）"},
+            ["cboe", "data_quality"]
+        ))
 
     def _check_macro_snapshot_calls(self, status: Dict) -> None:
         """一轮扫描的宏观快照是不是只取了一次（v0.45.674；`fred_macro.stats()` 经 scan_timing 的 `counters.macro_context` 进来）。

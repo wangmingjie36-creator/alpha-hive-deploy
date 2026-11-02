@@ -299,6 +299,14 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "（_get_stock_data / _get_history_context 读这些实例属性）。生产代码没改。窗口审计：这 3 条在 10-12 至 10-28 共 13 个"
      "扫描日逐日未变，10-28 扫描提交 8c433b4 → 本次基线也未变（v0.45.674 在 __init__ 里加的 _prefetched_macro Buzz 不读，不在内）。"
      "**用户 2026-10-29 在对话里选「登记 coverage」**"),
+    # v0.45.690：cboe_options 下载期权链请求 gzip（_fetch_cboe_payload 在 price.fields 的依赖闭包里）
+    ("price.fields",    "d9799a3d89c1ae2c", "no_value_change",
+     "v0.45.690：_fetch_cboe_payload 请求头加 Accept-Encoding: gzip（新常量 _CBOE_HEADERS），按响应 Content-Encoding 解压"
+     "（_decode_cboe_body：gzip 解压、未压缩原样、别的编码抛 CboeContentEncodingError ⇒ 不重试、计 bad_encoding、出口 None）。"
+     "只改传输编码，交给下游的 data 段不变：2026-11-02 收盘后真网络同一时刻取 SPY / _SPX 各三次（未压缩 / 压缩 / 未压缩），"
+     "解析出的整份 payload JSON 的 SHA-256 三次全同（SPY 12150 个合约、current_price 753.1；_SPX 29578 个、7541.3999）；"
+     "离线测试压缩 / 未压缩 / identity 逐字节相同。重试、陈旧判定、进程缓存、_cboe_symbol 不变。"
+     "**用户 2026-11-02 在对话里选 no_value_change**；不登记边界"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change", "coverage"})

@@ -7,7 +7,40 @@
 
 ## [0.45.691] — 2026-11-02 — 占位（进行中：Alpha Bot 总览表加 IV / RV 列）
 
-## [0.45.690] — 2026-11-02 — 占位（进行中：cboe_options 下载 CBOE 延迟期权链请求 gzip 压缩）
+## [0.45.690] — 2026-11-02 — Changed：`cboe_options._fetch_cboe_payload` 下载 CBOE 延迟期权链请求 gzip 压缩、按 `Content-Encoding` 解压（线上字节约少 7 倍）；不认识的编码不重试、计数、报 P2
+
+起因：在 Alpha Bot 接 SPX 时发现 `_SPX` 一条链 12.8MB、首次载入约 1 分钟，几乎全是下载。查下来请求头只有 `User-Agent`，**所有标的**（每日扫描 30 只 + Alpha Bot 盘中快照）一直在下载未压缩文件；urllib 也不会替我们解压。
+
+### Changed
+- `cboe_options.py`：新常量 `_CBOE_HEADERS`（`User-Agent` + `Accept-Encoding: gzip`，每次请求用副本）；新 `_decode_cboe_body(raw, encoding)`——`gzip` / `x-gzip`（大小写、空白不计）⇒ `gzip.decompress`，缺省 / 空 / `identity` ⇒ 原样，**其他一律抛新异常 `CboeContentEncodingError`**，不许当未压缩往下传（否则会变成 JSON 解析失败、重试三次后混进网络失败）。`_response_encoding` 取响应头；没有 `.headers` 的假响应（既有测试的 `io.BytesIO`）当未压缩。
+- `_fetch_cboe_payload`：编码异常在兜底 `except` 之前单独接住——**不重试**（同一份文件重试还是同一种编码）、`log.error`、计 `failed` 与新计数 `bad_encoding`、出口 None（实时路径照常降级）。解压坏掉的 gzip 体（截断传输）仍走原来的重试。重试次数 / 退避、陈旧判定、进程缓存、`_cboe_symbol` 都没动。
+- `payload_stats()` 多两个键：`compressed`（解压了几次——判生产是否真走了压缩看它 ≈ 成功的 fetches）、`bad_encoding`。经 `scan_timing` 进 `status.json` 的 `counters.cboe`。
+
+### Added
+- `alert_manager._check_cboe_content_encoding`：`counters.cboe.bad_encoding > 0` ⇒ **P2**；计数缺失 ⇒ `checks_skipped`。只坏几只时到不了 `day_health` 的整源故障线，没这条就只剩一行 ERROR 日志。
+- `tests/test_cboe_gzip.py`（17 条，全离线）：请求头确实带 gzip 且原 User-Agent 不丢、模块常量不被改写；压缩 / 未压缩 / identity / 大小写 / x-gzip 解析出的 payload 逐字节相同；`br` / `deflate` / `compress`（内容碰巧是合法 JSON）都不重试、计 `bad_encoding` + `failed`、不入缓存；坏 gzip 体照常重试三次、不算编码问题；计数进 `scan_timing`、P2 告警、计数缺失进 `checks_skipped`。
+- `signal_code_fingerprints.ACKS`：`price.fields` 追加一条 `no_value_change`（见下）。
+
+### 输入层指纹（用户判）
+`_fetch_cboe_payload` 在 H1 单元 `price.fields` 的依赖闭包里，改动让指纹守卫变红（干净的 origin/main 上是绿的）。**用户 2026-11-02 在对话里选 no_value_change**，不登记世代边界：只改传输编码，交给下游的 `data` 段不变（证据见下）。没有动 `EXEMPT_DEPS`。
+
+### 实测（真网络，2026-11-02 约 16:52 ET 收盘后，同一时刻每个标的取三次：未压缩 / 压缩 / 未压缩）
+| 标的 | 编码 | 线上字节 | 耗时 | 合约数 | current_price | 整份 payload SHA-256 |
+|---|---|---|---|---|---|---|
+| SPY | 未压缩 | 5.41 MB | 2.5 s | 12150 | 753.1 | 13d3af96bf30… |
+| SPY | gzip | 0.73 MB | 1.6 s | 12150 | 753.1 | 13d3af96bf30… |
+| SPY | 未压缩（复测） | 5.41 MB | 1.6 s | 12150 | 753.1 | 13d3af96bf30… |
+| _SPX | 未压缩 | 13.17 MB | 2.4 s | 29578 | 7541.3999 | 7c7afc64f229… |
+| _SPX | gzip | 1.80 MB | 2.2 s | 29578 | 7541.3999 | 7c7afc64f229… |
+| _SPX | 未压缩（复测） | 13.17 MB | 2.1 s | 29578 | 7541.3999 | 7c7afc64f229… |
+
+- 解析结果三次逐位相同（比的是整份 `data` 段，不只合约数和价格）。测时把陈旧判定短路掉，只测下载与解析。
+- ⚠️ **耗时差这次很小**：当时网络快，未压缩 13MB 也只要 2 秒多。10-29 curl 单次测到的是 `_SPX` 45 s → 15 s、SPY 26 s → 13 s。省多少时间取决于当时的链路，字节少约 7 倍是稳定的，**两次的秒数都别当常数用**。生产上压缩到底有没有生效，看 `counters.cboe.compressed`。
+
+### 测试 / 变异
+- 变异七个，每个都让 `tests/test_cboe_gzip.py` 变红（文件已逐个还原、`cmp` 核对过）：去掉请求头里的 gzip、收到 gzip 不解压、不认识的编码当未压缩、不认识的编码当 gzip 解、编码异常落进兜底重试、不读响应头、`analyze()` 不调新检查。
+- `tests/test_scan_timing.py` 两处对 `payload_stats()` 键集合的精确断言补上两个新键。
+- 整套（`-x`）：12940 passed / 1 failed，停在 `tests/test_write_sandbox.py::TestLiveOnThisMac::test_log_helper_sees_this_sessions_denials`（查统一日志的助手返回了别的拒绝、没返回测试刚触发的那条）；之后的文件单独补跑 301 passed。该文件在干净的 origin/main 上 29 passed，在本分支连跑两次也都是 29 passed ⇒ **偶发**（看起来是统一日志滞后，未深究，待验证），与本改动无关（本改动不碰写沙箱）。
 
 ## [0.45.689] — 2026-10-29 — 占位（进行中：Alpha Bot 接 SPX / XSP 指数期权链——名字映射、SPX 月度上午结算合约到期日剔除、侧栏「指数」、热力图行权价分桶）
 

@@ -17,6 +17,7 @@ CBOE 延迟报价期权链获取器 — yfinance 限流/不可用时的真实数
 """
 from __future__ import annotations
 
+import gzip
 import json
 import math
 import re
@@ -106,7 +107,10 @@ _CACHE_MAX_AGE = 4 * 3600.0
 #   stale    拉回来但 vintage 陈旧、被弃用（不入缓存）
 #   failed   重试耗尽 / 返回空链，最终 None
 #   evicted  缓存里有但已不新鲜（vintage 翻页 / 超年龄上限），被弃、重抓（v0.45.123）
-_payload_stats = {"hits": 0, "fetches": 0, "stale": 0, "failed": 0, "evicted": 0}
+#   compressed    响应带 `Content-Encoding: gzip`、已解压（v0.45.690；应约等于成功的 fetches）
+#   bad_encoding  响应的 Content-Encoding 不认识 ⇒ 不重试、记 failed，alert_manager 报 P2（v0.45.690）
+_payload_stats = {"hits": 0, "fetches": 0, "stale": 0, "failed": 0, "evicted": 0,
+                  "compressed": 0, "bad_encoding": 0}
 
 
 def payload_stats() -> dict:
@@ -216,6 +220,43 @@ _SNAPSHOT_PROVIDER = None
 # 检出后返回 None → data_pipeline 落到 YFinanceSource（降级源 0）拿正确数据。
 _ET_TZ = ZoneInfo("America/New_York")
 _vintage_stats = {"checked": 0, "stale": 0}
+
+
+# v0.45.690：请求 gzip。CBOE 的文件不小（2026-10-29 curl 各测一次：SPY 未压缩 5.4MB / 26 秒、
+# 压缩 0.7MB / 13 秒；_SPX 12.8MB / 45 秒 → 1.66MB / 15 秒），此前一直在下载未压缩文件。
+# urllib 不会替我们解压，`Content-Encoding` 由 `_decode_cboe_body` 处理。
+_CBOE_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept-Encoding": "gzip"}
+
+
+class CboeContentEncodingError(RuntimeError):
+    """响应的 `Content-Encoding` 既不是 gzip 也不是未压缩（v0.45.690）。
+
+    我们只声明了 gzip，对端回别的编码是对端的事故，不是瞬时故障——重试拿到的还是同一种编码，
+    所以 `_fetch_cboe_payload` 不重试、计 `bad_encoding`（经 scan_timing 进 status.json，
+    alert_manager `_check_cboe_content_encoding` 报 P2），出口仍是 None（实时路径照常降级）。
+    """
+
+
+def _decode_cboe_body(raw: bytes, encoding: Optional[str]) -> Tuple[bytes, bool]:
+    """按 `Content-Encoding` 还原响应体，返回 (原文, 是否解压过)。
+
+    缺省 / 空 / `identity` ⇒ 原样；`gzip`（含 `x-gzip`，大小写、首尾空白不计）⇒ 解压；
+    其他一律抛 `CboeContentEncodingError`——**不许**当未压缩原样往下传（那会变成 JSON 解析失败，
+    被重试三次后混进网络失败，看不出是编码问题）。
+    """
+    enc = (encoding or "").strip().lower()
+    if enc in ("", "identity"):
+        return raw, False
+    if enc in ("gzip", "x-gzip"):
+        return gzip.decompress(raw), True
+    raise CboeContentEncodingError(f"不认识的 Content-Encoding：{encoding!r}")
+
+
+def _response_encoding(resp) -> Optional[str]:
+    """取响应头的 Content-Encoding。真 `HTTPResponse` 一定有 `.headers`；
+    测试的假响应（`io.BytesIO` 之类）没有 ⇒ 当未压缩。"""
+    headers = getattr(resp, "headers", None)
+    return headers.get("Content-Encoding") if headers is not None else None
 
 
 class CboeStaleVintageError(RuntimeError):
@@ -833,8 +874,13 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,
             with _cache_lock:
                 _payload_stats["fetches"] += 1
             with _CBOE_SEM:  # 串行化：不给对端限流器加压（非 TLS 栈原因，见 http_gate）
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                raw = urllib.request.urlopen(req, timeout=timeout).read()
+                req = urllib.request.Request(url, headers=dict(_CBOE_HEADERS))
+                resp = urllib.request.urlopen(req, timeout=timeout)
+                raw = resp.read()
+            raw, compressed = _decode_cboe_body(raw, _response_encoding(resp))
+            if compressed:
+                with _cache_lock:
+                    _payload_stats["compressed"] += 1
             data = (json.loads(raw) or {}).get("data") or {}
             if not data.get("options"):
                 _log.warning("CBOE %s 返回空期权链", ticker)
@@ -858,6 +904,13 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,
             # 白白重试 3 次、最后仍旧 return None —— 那等于这个参数没写。
             # 重试本身也无意义：同一份 CDN 文件，再拉几次还是同一天的。
             raise
+        except CboeContentEncodingError as e:
+            # 同样必须先于兜底 except：编码不对不是瞬时故障，重试白费，且要单独计数才看得出是它。
+            _log.error("CBOE 拉取 %s：%s（不重试；counters.cboe.bad_encoding）", ticker, e)
+            with _cache_lock:
+                _payload_stats["bad_encoding"] += 1
+                _payload_stats["failed"] += 1
+            return None
         except Exception as e:  # 网络/SSL/解析失败 → 退避重试
             last_err = e
             if attempt < retries - 1:

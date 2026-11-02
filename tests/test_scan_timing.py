@@ -98,6 +98,7 @@ class TestCounters:
         c = st.counters()
         assert set(c["twelve_data"]) >= {"hits", "misses", "fetches"}
         assert set(c["cboe"]) == {"hits", "fetches", "stale", "failed", "evicted",
+                                  "compressed", "bad_encoding",   # v0.45.690
                                   "price_stale_intraday", "price_unverifiable"}
         # v0.45.190：链构造观测是独立一项，不掺进 payload 计数（两者语义不同：
         # 前者数「构出来的链挡掉了多少近月」，后者数「发了几次 HTTP」）。
@@ -157,6 +158,7 @@ class TestCboePayloadStats:
         assert cb._fetch_cboe_payload("ZZZ", 5) is not None
         assert cb._fetch_cboe_payload("ZZZ", 5) is not None   # TTL 内 → 命中
         assert cb.payload_stats() == {"hits": 1, "fetches": 1, "stale": 0, "failed": 0, "evicted": 0,
+                                      "compressed": 0, "bad_encoding": 0,
                                       "price_stale_intraday": 0, "price_unverifiable": 0}
 
     def test_empty_chain_counts_failed(self, cb, monkeypatch):
