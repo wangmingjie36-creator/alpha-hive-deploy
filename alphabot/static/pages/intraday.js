@@ -110,7 +110,7 @@ function heatNotes(hm) {
     `颜色按 |值| 的 ${Math.round((r.clip_quantile ?? 0) * 100)}% 分位截断在 ±${usdShort(hm.clip)}（最大 ${usdShort(hm.max_abs)}，${hm.n_clipped} 格按截断色画，悬停看真值）。`,
     `只存现价 ±${Math.round((r.strike_band ?? 0) * 100)}% 内的行权价，现价移动时边缘格子会空着（不是 0）。`,
   ];
-  if (hm.bucket) items.push(`行权价共 ${hm.n_strikes_raw} 个、超过 ${r.max_rows} 行：每 ${num(hm.bucket)} 点分一桶、桶内求和（GEX 按行权价可加），悬停看区间与个数。`);
+  if (hm.bucket) items.push(`行权价共 ${hm.n_strikes_raw} 个、超过 ${r.max_rows} 行：每 ${num(hm.bucket)} 点分一桶、桶内求和（GEX 按行权价可加），悬停看区间与个数。窗口边缘的桶在现价移动时只装得下一部分行权价，那里的颜色变化可能只是进出窗口，悬停看个数。`);
   if (hm.mode === "delta") items.push(hm.basis === "oi"
     ? "OI 盘中不变：OI 口径的逐拍变化只来自现价与 IV 的移动。"
     : "成交量口径的逐拍变化 ≈ 这段时间新增成交带来的 GEX——没有买卖方向（延迟快照分不出主动买卖），不是 orderflow。");
@@ -133,11 +133,11 @@ function settingsBlock(t, rerender) {
   const lastRes = (poller.last_results || []).map((r) => `${r.ticker} ${r.recorded ? "✓" : (r.reason || "×")}`).join(" · ");
   return panel("盘中快照设置", { sub: `关注最多 ${max} 只（每只每拍约 1.5MB、串行 4–7 秒）· 只在美股常规交易时段拍` },
     h("div", { class: "focus-list" },
-      focus.map((x) => h("span", { class: "chip" }, h("a", { href: `#/intraday/${x}` }, x),
-        h("button", { type: "button", "aria-label": `移除 ${x}`, onclick: () => save({ focus: focus.filter((y) => y !== x) }) }, "×"))),
+      focus.map((x) => h("span", { class: "chip" }, h("a", { href: `#/intraday/${x}` }, tLabel(x)),
+        h("button", { type: "button", "aria-label": `移除 ${tLabel(x)}`, onclick: () => save({ focus: focus.filter((y) => y !== x) }) }, "×"))),
       focus.length < max ? h("form", { onsubmit: (e) => { e.preventDefault(); const v = input.value.trim().toUpperCase(); if (v) save({ focus: [...focus, v] }); } },
         input, " ", h("button", { class: "btn", type: "submit" }, "加入")) : null,
-      !focus.includes(t) && focus.length < max ? h("button", { class: "btn", type: "button", onclick: () => save({ focus: [...focus, t] }) }, `关注 ${t}`) : null),
+      !focus.includes(t) && focus.length < max ? h("button", { class: "btn", type: "button", onclick: () => save({ focus: [...focus, t] }) }, `关注 ${tLabel(t)}`) : null),
     h("div", { class: "controls", style: { marginTop: "14px" } },
       h("label", { class: "small" }, "间隔 ",
         h("select", { class: "sel", onchange: (e) => save({ interval_min: Number(e.target.value) }) },
@@ -149,8 +149,8 @@ function settingsBlock(t, rerender) {
         try { const r = await api(`/api/intraday/${encodeURIComponent(t)}/snap`, { method: "POST" });
           msg.textContent = r.recorded ? `已记录 ${r.ts.slice(11, 16)}` : `未记录：${r.reason}`; rerender(); }
         catch (err) { msg.textContent = err.message; }
-        finally { e.target.disabled = false; e.target.textContent = `立即给 ${t} 拍一张`; }
-      } }, `立即给 ${t} 拍一张`), msg),
+        finally { e.target.disabled = false; e.target.textContent = `立即给 ${tLabel(t)} 拍一张`; }
+      } }, `立即给 ${tLabel(t)} 拍一张`), msg),
     h("p", { class: "note" }, poller.disabled ? "定时快照未启动（--no-poll 或演示模式）。"
       : `后台：${poller.running ? "运行中" : "未运行"} · 已跑 ${poller.rounds ?? 0} 轮 · 最近一轮 ${poller.last_round_et ? poller.last_round_et.slice(11, 16) + " ET" : "—"}${lastRes ? " · " + lastRes : ""}${poller.errors ? ` · 异常 ${poller.errors} 次` : ""}`),
     st.settings_error ? h("p", { class: "callout warn" }, `设置文件读不了，按缺省处理：${st.settings_error}`) : null);

@@ -100,13 +100,62 @@ class TestLiveWiring:
     def test_watchlist_lists_indices_once(self, tmp_path):
         wl = self._svc(tmp_path, []).watchlist()
         assert wl["indices"] == ["_SPX", "_XSP"] and wl["index_labels"] == {"_SPX": "SPX", "_XSP": "XSP"}
-        assert wl["tickers"].count("_SPX") == 1 and "_SPX" not in wl["watchlist"]
+        # tickers = 观察列表 + 自选：概览演示 / 搜索候选 / 结果页下拉都按它走，指数没有账本行（二次检查 #2）
+        assert "_SPX" not in wl["tickers"] and "_SPX" not in wl["watchlist"]
 
     def test_index_added_as_favorite_is_listed_once(self, tmp_path):
         svc = AlphaBotService(fetch_fn=syn.demo_fetch, state_dir=tmp_path / "st")
         svc.update_settings({"favorites": ["SPX", "SPY"]})
         wl = svc.watchlist()
-        assert wl["favorites"] == ["SPY"] and wl["tickers"].count("_SPX") == 1
+        assert wl["favorites"] == ["SPY"] and "_SPX" not in wl["tickers"]
+
+
+class TestSecondCheck:
+    """684 / 689 二次检查抓到的。"""
+
+    def test_premium_tab_also_drops_am_settled_contracts(self, tmp_path, monkeypatch):
+        """溢价页取链不走 live()：调用处必须同样过滤，否则 dte_min=0 时已结算的月度合约会被排进去。"""
+        import alphabot.service as S
+
+        def fetch(t, *, as_of=None):
+            raw, why = syn.demo_fetch(t, as_of=as_of)
+            c0 = raw["contracts"][0]
+            return {**raw, "contracts": raw["contracts"] + [{**c0, "symbol": "SPX" + c0["symbol"][-15:], "dte": 0}]}, why
+        seen = []
+        real = S.drop_am_settled_expiring
+
+        def spy(raw, root):
+            out = real(raw, root)
+            seen.append(out["n_am_settled_expiry_day_excluded"])
+            return out
+        monkeypatch.setattr(S, "drop_am_settled_expiring", spy)
+        svc = AlphaBotService(demo=True, fetch_fn=fetch, state_dir=tmp_path / "demo")
+        svc._premium_full("_SPX", True)
+        svc._premium_full("NVDA", True)
+        assert seen == [1]                       # 只对 _SPX 过了一次、丢了那 1 张
+
+    def test_index_page_has_no_favorite_button_and_routes_canonicalise(self):
+        side = (STATIC / "pages" / "ticker.js").read_text(encoding="utf-8")
+        app = (STATIC / "app.js").read_text(encoding="utf-8")
+        assert "watchlist?.indices || []).includes(t)" in side
+        assert app.count("canonTicker(a)") == 2 and app.count("t !== a") == 2
+        assert "const t = canonTicker(input.value);" in app
+
+    def test_intraday_settings_show_labels(self):
+        page = (STATIC / "pages" / "intraday.js").read_text(encoding="utf-8")
+        assert "`关注 ${tLabel(t)}`" in page and "`立即给 ${tLabel(t)} 拍一张`" in page and "tLabel(x))" in page
+
+    def test_non_object_snapshot_lines_are_bad_lines(self, tmp_path):
+        svc = AlphaBotService(fetch_fn=syn.demo_fetch, state_dir=tmp_path / "st")
+        d = svc._intraday_dir("2026-10-28")
+        assert d.is_relative_to(tmp_path)        # 夹具只写进本测试的临时目录
+        d.mkdir(parents=True)
+        good = '{"ts": "2026-10-28T10:00:00-04:00", "underlying_price": 100.0, "views": {}}'
+        (d / "NVDA.jsonl").write_text("\n".join([good, "null", "[1, 2]", "{坏"]) + "\n", encoding="utf-8")
+        day = svc.intraday("NVDA", "2026-10-28")
+        assert len(day["snapshots"]) == 1 and day["n_bad_lines"] == 3
+        hm = svc.intraday_heat("NVDA", "2026-10-28")
+        assert hm["n_bad_lines"] == 3 and hm["reason"] == "no_values"
 
 
 class TestScope:

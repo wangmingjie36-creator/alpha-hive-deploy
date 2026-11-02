@@ -860,6 +860,9 @@ class AlphaBotService:
                     return {**ent[1], "cache_age_sec": round(max(0.0, self.clock() - ent[0]), 1)}
             try:
                 raw, reason = self._premium_fetch()(t, as_of=None)
+                am_root = (INDEX_TICKERS.get(t) or {}).get("am_root")
+                if raw is not None and am_root:              # 与 live() 同一条规则：已结算的上午结算根不进溢价排序
+                    raw = drop_am_settled_expiring(raw, am_root)
                 if raw is None:
                     full = {"data_available": False, "reason": reason or PM._why("fetch_returned_none")}
                 else:
@@ -974,7 +977,7 @@ class AlphaBotService:
         idx = list(INDEX_TICKERS)
         favs = [t for t in favs if t not in idx]
         return {"watchlist": wl, "favorites": favs, "indices": idx,
-                "index_labels": {k: v["label"] for k, v in INDEX_TICKERS.items()}, "tickers": wl + favs + idx}
+                "index_labels": {k: v["label"] for k, v in INDEX_TICKERS.items()}, "tickers": wl + favs}
 
     # ── 盘中快照
     def _intraday_dir(self, date_et: str) -> Path:
@@ -1048,8 +1051,12 @@ class AlphaBotService:
                 if not ln.strip():
                     continue
                 try:
-                    snaps.append(json.loads(ln))
+                    obj = json.loads(ln)
                 except ValueError:
+                    obj = None
+                if isinstance(obj, dict):
+                    snaps.append(obj)
+                else:
                     bad += 1
         return {"ticker": t, "date": d, "snapshots": snaps, "n_bad_lines": bad}
 

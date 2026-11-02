@@ -26,7 +26,8 @@ export async function refreshMeta() {
   );
   document.getElementById("demo-banner").hidden = !state.meta.demo;
   const dl = document.getElementById("ticker-list");
-  fill(dl, ...(state.meta.watchlist?.tickers || []).map((t) => h("option", { value: t })));
+  fill(dl, ...[...(state.meta.watchlist?.tickers || []), ...Object.values(state.meta.watchlist?.index_labels || {})]
+    .map((t) => h("option", { value: t })));
   fill(document.getElementById("foot"),
     h("span", {}, `Alpha Bot ${state.meta.version} · 本机运行，只读卖权账本、财报跨式账本与对冲账本 · 以下为公开信息研究与情景推演，不构成投资建议。`),
     state.meta.can_shutdown ? h("button", { class: "link-btn", type: "button", onclick: stopServer }, "停止服务") : null,
@@ -51,15 +52,19 @@ async function stopServer() {
 }
 
 export function tickers() { return state.meta?.watchlist?.tickers || []; }
+// 代码规范化：指数的展示名（SPX / ^SPX / $SPX）→ CBOE 文件名；映射表只取 /api/meta 的 index_labels（同服务端 INDEX_ALIASES）。
+// 搜索框和路由都经它：#/t/SPX 与 #/t/_SPX 是同一页，侧栏高亮 / 自选判断只认一种写法
+export function canonTicker(raw) {
+  const s = String(raw || "").trim().toUpperCase();
+  const byLabel = Object.fromEntries(Object.entries(state.meta?.watchlist?.index_labels || {}).map(([k, v]) => [v, k]));
+  return byLabel[s.replace(/^[\^$]/, "")] || s;
+}
 export function go(hash) { if (location.hash !== hash) location.hash = hash; else route(); }
 
 document.getElementById("search").addEventListener("submit", (e) => {
   e.preventDefault();
   const input = document.getElementById("search-input");
-  // 指数：输入展示名（SPX / ^SPX / $SPX）→ CBOE 文件名；映射表只取 /api/meta 的 index_labels（同服务端 INDEX_ALIASES）
-  const raw = input.value.trim().toUpperCase();
-  const byLabel = Object.fromEntries(Object.entries(state.meta?.watchlist?.index_labels || {}).map(([k, v]) => [v, k]));
-  const t = byLabel[raw.replace(/^[\^$]/, "")] || raw;
+  const t = canonTicker(input.value);
   if (!/^[A-Z_][A-Z0-9.\-]{0,9}$/.test(t)) { input.setCustomValidity("代码格式不对"); input.reportValidity(); return; }
   input.setCustomValidity(""); input.value = "";
   const onIntraday = location.hash.startsWith("#/intraday");
@@ -83,14 +88,14 @@ async function route() {
     if (!state.meta) await refreshMeta();
     if (page === "overview") await renderOverview(app, alive);
     else if (page === "t") {
-      const t = a ? a.toUpperCase() : pref("lastTicker", tickers()[0] || "NVDA");
-      if (!a) { go(`#/t/${t}/levels`); return; }
+      const t = a ? canonTicker(a) : pref("lastTicker", tickers()[0] || "NVDA");
+      if (!a || t !== a) { go(`#/t/${t}/${b || "levels"}`); return; }
       setPref("lastTicker", t);
       await renderTicker(app, t, b || "levels", alive);
     } else if (page === "intraday") {
       const focus = state.meta.settings?.focus || [];
-      const t = a ? a.toUpperCase() : (focus[0] || pref("lastTicker", "NVDA"));
-      if (!a) { go(`#/intraday/${t}`); return; }
+      const t = a ? canonTicker(a) : (focus[0] || pref("lastTicker", "NVDA"));
+      if (!a || t !== a) { go(`#/intraday/${t}`); return; }
       await renderIntraday(app, t, alive);
     } else if (page === "ledger") await renderLedger(app, alive);
     else if (page === "straddle") await renderStraddle(app, alive);

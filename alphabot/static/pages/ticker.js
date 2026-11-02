@@ -30,7 +30,8 @@ export async function renderTicker(root, t, tab, alive, force = false) {
   fill(root, h("div", { class: "with-side" }, sidebar(t, `#/t/{T}/${tab}`), main));
 
   const favs = state.meta?.settings?.favorites || [];
-  const inWatch = (state.meta?.watchlist?.watchlist || []).includes(t);
+  // 指数常驻侧栏「指数」组，不进自选（服务端也会把它们从自选里滤掉）⇒ 不给按钮
+  const inWatch = (state.meta?.watchlist?.watchlist || []).includes(t) || (state.meta?.watchlist?.indices || []).includes(t);
   const favBtn = inWatch ? null : h("button", { class: "btn", type: "button", onclick: async () => {
     const next = favs.includes(t) ? favs.filter((x) => x !== t) : [...favs, t];
     await api("/api/settings", { body: { favorites: next } });
