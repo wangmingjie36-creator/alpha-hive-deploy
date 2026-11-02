@@ -25,6 +25,11 @@ alpha-hive-data-root-migration）。豁免路径会盖住真写穿、按进程�
 ⚠️ `log show` 在沙箱里拒绝运行（「Cannot run while sandboxed」，实测）——而沙箱之后起的子进程全都继承沙箱。
    所以**套沙箱之前**先起一个常驻的查日志助手（`_HELPER`，只会跑 `log show`、不跑测试代码），会话末尾经它的 stdin/stdout 代查。
    进程内再跑 pytest 的内层会话起不了不受限的助手 ⇒ 内层不查（`check_log=False`），它期间的拒绝落在外层会话的查询窗里，由外层核对。
+⚠️ **内核的拒绝上报会丢，日志核对只是尽力而为（v0.45.694 实测）。** 拒写本身从不失手；但 `Sandbox: Python(…) deny` 这一行
+   会成段地**根本不进日志**（不是晚到：丢掉的那条事后永远查不到）。持续每 2–6 秒触发一次时，约每分钟出现一段 7–24 秒的窗口，
+   窗口内本进程与 Python 子进程的拒绝全丢，**同一时刻 `bash(…)` 的照记**；窗口里看不到任何别的 Python 拒绝在刷屏，触发条件未查明。
+   ⇒ 会话末尾「没有拒绝」不能证明没有测试试图写生产（生产照样没被写进去——那是内核拒写保证的）；
+   自检 `test_log_helper_sees_this_sessions_denials` 因此按「换新文件名重复触发直到查到」写，不能只等同一条。
 
 **并发会话归属（v0.45.577）。** 两个测试会话护同一个根时规则相同，`log show` 对谁都一样——内核那行只有
 `进程名(pid)`，没有父进程、没有会话（实测 ndjson 全字段）。只按路径筛，X 会话的写会让无辜的 Y 会话也红（实测复现）。
@@ -387,8 +392,9 @@ def parse_denials(text: str, root: str, canary: str | None = None) -> list[dict]
     return out
 
 
-def log_command(st: dict) -> list[str]:
-    start = st["started_local"].strftime("%Y-%m-%d %H:%M:%S")
+def log_command(st: dict, since: datetime.datetime | None = None) -> list[str]:
+    """缺省查会话开始至今；`since` 给自检用（只要自己刚触发的那几条——整套末尾查全会话窗约 4 秒一次，太贵）。"""
+    start = (since or st["started_local"]).strftime("%Y-%m-%d %H:%M:%S")
     return [LOG, "show", "--start", start, "--predicate", 'sender == "Sandbox"', "--style", "compact"]
 
 
