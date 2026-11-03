@@ -5,7 +5,38 @@
 
 ---
 
-## [0.45.707] — 2026-11-03 — 占位（进行中：全仓守卫的工作树遍历剪掉嵌套 git 仓库（mcp-servers 子模块致 test_yf_daily 本机红）；移除 mcp-servers 孤儿 gitlink）
+## [0.45.707] — 2026-11-03 — Fixed：全仓守卫的「本仓 .py」枚举剪掉嵌套 git 仓库（开发检出里 `test_yf_daily::TestSingleEntry` 两条红的根因）；移除 `mcp-servers/*` 孤儿 gitlink
+
+**现象**：开发检出里 `tests/test_yf_daily.py::TestSingleEntry` 两条红（0.45.704「未做」里记过，HEAD 干净 worktree 全绿）——多出来的命中全在
+`mcp-servers/maverick-mcp/maverick_mcp/…`（别人的仓库，直调 yfinance `.history(` / `.download(`）。
+
+**根因（两层）**：
+1. 共享件 `tests/_repo_files.py::walk_own_python_files` 读工作树，剪枝只认目录**名字**（skip / vendored / 点号 / iCloud），**不认「这是另一个 git 仓库」**。
+   `.venv` 剪掉了，maverick 自己的 392 个 `.py` 照扫。只在开发检出红：worktree / CI 里那些目录是空的。同一缺口此前靠两份手写清单各自补
+   （`test_no_fake_price._EXCLUDE_DIRS`、`test_scout_consensus_excluded` 的裸 rglob），`test_yf_daily` 没补就红了，下一条全仓守卫照样会漏。
+2. `mcp-servers/` 下 5 个目录是本仓索引里的 gitlink（mode 160000）却**没有 `.gitmodules`**——2026-03-16 日报自动提交（`d37cda98`）顺手带进来的，
+   生产克隆里全是空目录、无任何代码 / 配置引用（同类先例：2026-06-27 `2c22539f` 移除 FinanceNews-MCP）。
+
+### Fixed
+- `tests/_repo_files.py`：新判据 `_is_nested_repo`（目录里有 `.git`，文件或目录都算——子模块 / worktree 是文件、独立克隆是目录；`lexists`，坏链接也剪）。
+  `walk_own_python_files` 遍历时剪掉，`pruned` 原因记 `nested_repo`；`own_python_files` 的 git 分支与 rglob 回退**同口径**也剪（`_nested_repo_filter`，按目录缓存）。
+  只判根以下的目录（根自己有 `.git`）。按名字补一条 `mcp-servers` 会是第三份手抄清单，故不这么做：名叫 `mcp-servers` 但没有 `.git` 的目录仍算第一方。
+
+### Changed
+- `tests/test_scout_consensus_excluded.py::_calls_with_peer_census_false`：裸 `rglob` + 手写 `{.claude, mcp-servers, worktrees …}` 改走 `walk_own_python_files`
+  （`skip_dirs` 只留本守卫目的：tests / experiments / `_retired_pre_phase5`；本检出无更深层的同名目录，按任意深度剪与原「只看首段」等价）。顺带不再枚举 maverick 的 `.venv`。
+- `tests/test_no_fake_price.py`：`_EXCLUDE_DIRS` 去掉 `mcp-servers`（由嵌套仓库判据统一认）。
+
+### Removed
+- 索引里的 5 个孤儿 gitlink（`git rm --cached`：finance-tools-mcp / maverick-mcp / mcp-optionsflow / shareseer-mcp-server / yahoo-finance-mcp）；`.gitignore` 加 `/mcp-servers/`。
+  **磁盘上的克隆不动**（开发检出的 maverick-mcp 等照旧在）。快进后生产克隆里那几个空目录会被 git 顺手删掉，无读者。
+
+### Tests
+- `tests/test_repo_files_walk.py`：合成树加两种嵌套仓库形状（`.git` 文件 / `.git` 目录）与旁边的第一方 `ext/own.py`；新增「`own_python_files` 两条分支都剪」
+  （git 分支用假 `subprocess.run` 喂清单）；新增真实仓库对账「遍历到的每个目录按 `git rev-parse --show-toplevel` 都属于本仓」（独立于 `_is_nested_repo`）。
+- 已做变异（worktree 里先本地克隆一份 maverick 复现开发检出状态）：去掉遍历的 `nested_repo` 分支 ⇒ 合成树 3 条 + 真实仓库对账 + `test_yf_daily::TestSingleEntry` 红；
+  `_nested_repo_filter` 恒假 ⇒ 两分支那条红。修后 `TestSingleEntry` 9/9 绿（有 maverick 克隆在场）。
+- 整套（worktree 里放着本地 maverick 克隆，即开发检出的状态）：13488 passed、1 skipped、82 deselected、2 xfailed，1246 s，0 失败；开跑前无别的 pytest / 审计在跑。
 
 ## [0.45.706] — 2026-11-03 — Fixed：v0.45.704 二次检查——坏的旧审计会让「回落」本身把整轮对冲弄崩；日报没标注回落
 

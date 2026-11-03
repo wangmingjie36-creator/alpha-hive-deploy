@@ -24,6 +24,7 @@ import real_data_sources as rds
 import signal_archive as sa
 from pheromone_board import PheromoneBoard
 from swarm_agents.scout_bee import CONSENSUS_MARKER, ScoutBeeNova
+from tests._repo_files import walk_own_python_files
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _V = "v0.45.441"
@@ -246,12 +247,12 @@ class TestDiscriminator:
 # ════════════════════════════════════════════════════════════════════════════
 
 def _calls_with_peer_census_false():
-    """全仓生产代码里传 `peer_census=False` 的调用点（文件相对路径）。"""
+    """全仓生产代码里传 `peer_census=False` 的调用点（文件相对路径）。
+    枚举走共享件 `walk_own_python_files`（v0.45.707）：点号目录（含 `.claude/worktrees`）、第三方、嵌套 git 仓库
+    （`mcp-servers/*`）的排除口径都在那里，这里只给本守卫自己的目的——不扫测试 / 实验 / 阶段 5 前的归档。"""
     found = set()
-    for p in REPO_ROOT.rglob("*.py"):
+    for p in walk_own_python_files(REPO_ROOT, skip_dirs={"tests", "experiments", "_retired_pre_phase5"}).files:
         rel = p.relative_to(REPO_ROOT)
-        if rel.parts[0] in {"tests", "experiments", ".claude", "_retired_pre_phase5", "mcp-servers"} or "worktrees" in rel.parts:
-            continue
         try:
             tree = ast.parse(p.read_text(encoding="utf-8"))
         except (SyntaxError, UnicodeDecodeError):

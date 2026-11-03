@@ -223,3 +223,8 @@ alphabot_state/
 /strategy_backtest_report.txt
 /ML报告_2026-03-10.html
 /chart_*_NVDA_*.png
+
+# 第三方 MCP 服务器的本地克隆（各自是独立 git 仓库，不是本仓源码）。v0.45.707 起不再跟踪：此前是 2026-03-16
+# 日报自动提交顺手带进来的孤儿 gitlink（没有 .gitmodules）。全仓守卫靠 `tests/_repo_files.py` 的嵌套仓库判据
+# 不扫它们，与这条忽略规则无关——这条只让 `git status` 安静。
+/mcp-servers/
