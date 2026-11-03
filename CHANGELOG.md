@@ -21,7 +21,8 @@
   - `alphahive_get_corporate_actions`：近 N 年（缺省 5）现金分红 + 全部拆股史（比例 4.0 = 1 拆 4，0.1 = 10 并 1）。
   - **「Yahoo 给了空」不说成「没有」**：Yahoo 在取数静默失败时同样返回空表（`paper_portfolio.py` 记过 `splits` 这个坑）⇒ 空的一节返回 None，`unavailable` 里写明「分不清是没有还是取失败」。
   - **限流**：四个工具经 `yf_gate.gated_call`；429 ⇒ 返回 `rate_limited: true` + `retry_after_sec`、不重试，且进入闸门冷却（冷却中再调一次都不打 Yahoo）。
-    真实入口 `__main__` 先 `yf_gate.install()` 再 `mcp.run()` ⇒ 既有的 quote / options / price_history 也从此受闸（共享令牌桶 + 429 冷却）；import 本模块不装（不给测试进程打补丁）。
+    真实入口 `__main__` 先 `yf_gate.install()` 再 `mcp.run()` ⇒ 既有的 quote / options / price_history 也从此受闸（本进程的令牌桶 + 429 冷却）；import 本模块不装（不给测试进程打补丁）。
+    令牌桶是**进程内**的（`resilience.yfinance_limiter`，0.5 次/秒、burst 1），不与扫描进程共用——共用的只是 Yahoo 那一侧按 IP 的限额。代价：`get_options_snapshot` 一次 5 个 yfinance 调用（options + 4 个到期日链）⇒ 响应约多 8 秒；新工具 1–2 个调用、几乎无感。要放宽可在 `~/.claude.json` 该 server 的 env 里设 `ALPHA_HIVE_YF_RATE`（只影响 MCP 进程）。
 - `yf_gate.gated_call(fn, what)`：纯新增的公开包装（内部即 `_gated`）。`install()` 的 Ticker 成员名单只列扫描用的那几个，往名单里加 `income_stmt` / `splits` 等会连带改变
   `earnings_watcher`（`quarterly_income_stmt`）与 `swarm_agents/cache`（`splits`）在每日扫描里的取数行为——那是另一件要单独决定的事，本版不动名单。
 
