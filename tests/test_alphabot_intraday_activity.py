@@ -280,6 +280,19 @@ class TestHeat:
         assert IH.build(snaps, basis="activity", mode="delta")["reason"] == "activity_level_only"
         assert IH.build(snaps, basis="activity")["reason"] == "no_activity"
 
+    def test_all_zero_is_a_real_zero_not_missing_values(self):
+        """算出来了、只是两拍之间一张新成交都没有 ⇒ 报「真 0」，不能报成「快照里没有数值」。"""
+        zero = {"available": True, "strikes": [[100.0, 0.0, 0.0, 0], [101.0, 0.0, 0.0, 0]], "counts": {"n_used": 2}}
+        snaps = [self._snap(1, IA.unavailable("first_of_day")), self._snap(2, zero)]
+        for basis in ("activity", "activity_volume"):
+            hm = IH.build(snaps, basis=basis)
+            assert not hm["available"] and hm["reason"] == "no_new_volume"
+        # 对照：这一拍算了但一个合约都没进（各格 None）⇒ 仍是「没有数值」，不冒充真 0
+        empty = {"available": True, "strikes": [[100.0, None, None, 3]], "counts": {"n_no_previous": 3}}
+        assert IH.build([self._snap(1, IA.unavailable("first_of_day")), self._snap(2, empty)],
+                        basis="activity")["reason"] == "no_values"
+        assert "no_new_volume" in IH.REASONS
+
     def test_endpoint_labels_every_reason(self, tmp_path):
         svc = AlphaBotService(demo=True, fetch_fn=syn.demo_fetch, state_dir=tmp_path / "d")
         hm = svc.intraday_heat("NVDA", D, basis="activity")

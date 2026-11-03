@@ -40,6 +40,7 @@ REASONS = {
     "no_values": "快照里没有可画的行权价数值",
     "no_activity": "这一天没有一拍算出了成交活跃度（每拍原因见下方说明）",
     "activity_level_only": "成交活跃度本身就是逐拍增量，只有「当前值」",
+    "no_new_volume": "成交活跃度算出来了，但这段时间里这些行权价一张新成交都没有（是真 0，不是缺数据）",
 }
 # 快照里没有 activity 一节（v0.45.698 之前拍的）——与 intraday_activity.REASONS 并列，页面一起翻译
 ACTIVITY_MISSING = {"not_in_snapshot": "这一拍是加活跃度之前拍的，没有这项"}
@@ -164,7 +165,13 @@ def build(snaps: list, *, view: str = "le_45dte", basis: str = "oi", mode: str =
         out["activity_counts"] = counts or None
     absvals = [abs(c[2]) for c in cells if c[2] != 0]
     if not absvals:
-        out["reason"] = "no_activity" if activity and len(out["activity_missing"]) == len(snaps) else "no_values"
+        # 活跃度有算进去的格子、只是全为 0 ⇒ 真 0，别报成「没有数值」
+        if activity and cells:
+            out["reason"] = "no_new_volume"
+        elif activity and len(out["activity_missing"]) == len(snaps):
+            out["reason"] = "no_activity"
+        else:
+            out["reason"] = "no_values"
         return out
     clip = _quantile_nearest_rank(absvals, CLIP_QUANTILE)
     # 列：[拍, 行权价（分桶时 = 桶中心）, 真值（提示框用）, 上色用的截断值, 桶里有几个行权价]
