@@ -1243,6 +1243,96 @@ def _iso_weeks(dates) -> Set:
     return out
 
 
+#: 一条样本「成熟」= 回填拿到预测日之后第 7 个 NYSE 交易日的收盘（backtester `days_map["t7"]`，
+#: 交易日算术唯一实现 `is_trading_day.add_trading_days`）。实测当天即熟：10-19 那周 10-28 计入。
+T7_TRADING_DAYS = 7
+
+
+def _monday(d: dt.date) -> dt.date:
+    return d - dt.timedelta(days=d.weekday())
+
+
+def project_eta(ripe_dates, all_dates, required: int,
+                boundary: dt.date, today: dt.date) -> Dict:
+    """预计第 `required` 个不重叠周成熟的日期。纯函数（v0.45.705 重写）。
+
+    能算的都算，只估一样真不知道的东西——以后每周有没有扫描：
+    - 已成熟的周：数出来；
+    - 已扫描、未成熟的周（在路上）：成熟日 = 该周最早一条 + 7 个交易日，与回填同一个交易日函数；
+      该周最晚一条的 T+7 都过了还一条没成熟 ⇒ **逾期**，不计入预计、单独报数
+      （`close_t7` 另行取价，失败不一定会自己补上——见 `assess` 里成熟判据的注释）；
+    - 还要扫描的周：按「已过完的 ISO 周里有扫描的比例」（≤ 1）排到以后的周上，成熟日同上。
+      世代第 1 周还没有过完的周 ⇒ 按每周都扫描算，`pace_basis` 写明是假设。
+    自洽性：每周都有扫描时，这个日期逐日不变（测试逐交易日钉住）。漏扫一周 / 出现逾期周 ⇒ 往后挪；
+    漏扫之后若恢复每周扫描，观测节奏逐周回升，日期会逐步提前、收敛到「少了那一周」的真值（向上取整，从晚的一侧逼近）。
+
+    旧公式（≤ v0.45.704）：今天 + 还差周数 ÷（有扫描的 ISO 周数 ÷ floor(已过天数 / 7)）。分子含边界周与
+    还没过完的当周、分母只数满周 ⇒ 速率恒为 (N+1)/N > 1：世代第 1 周算出 2.0、ETA 被砍半，之后每周往后挪
+    （2026-11-03 查：10-30 报 2027-01-22、11-02 报 2027-02-22，本函数算 2027-04-14）。
+    """
+    from is_trading_day import add_trading_days
+
+    by_week: Dict[tuple, List[dt.date]] = {}
+    for x in all_dates:
+        try:
+            d = dt.date.fromisoformat(str(x)[:10])
+        except (ValueError, TypeError):
+            continue
+        by_week.setdefault(d.isocalendar()[:2], []).append(d)
+    ripe_weeks = _iso_weeks(ripe_dates)
+
+    cur_monday = _monday(today)
+    first_monday = _monday(boundary)
+    completed = max(0, (cur_monday - first_monday).days // 7)
+    scanned_completed = sum(1 for ds in by_week.values()
+                            if first_monday <= _monday(min(ds)) < cur_monday)
+
+    pipeline, overdue = [], 0
+    for wk, ds in by_week.items():
+        if wk in ripe_weeks:
+            continue
+        if add_trading_days(max(ds), T7_TRADING_DAYS) < today:
+            overdue += 1
+            continue
+        pipeline.append(max(today, add_trading_days(min(ds), T7_TRADING_DAYS)))
+    pipeline.sort()
+
+    out = {
+        "calendar_weeks_elapsed": completed,
+        "weeks_per_calendar_week": round(scanned_completed / completed, 3) if completed else 1.0,
+        "completed_weeks_scanned": scanned_completed,
+        "pace_basis": "observed" if completed else "assumed_every_week",
+        "weeks_in_pipeline": len(pipeline),
+        "weeks_overdue": overdue,
+        "eta_date": None,
+        "eta_calendar_weeks": None,
+    }
+    needed = required - len(ripe_weeks)
+    if needed <= 0:
+        out.update(eta_date=today.isoformat(), eta_calendar_weeks=0.0)
+        return out
+    if not by_week:
+        return out                       # 世代内还没有扫描产出：不给日期
+    if needed <= len(pipeline):
+        eta = pipeline[needed - 1]
+    else:
+        if completed and not scanned_completed:
+            return out                   # 过完的周一周都没扫：估不出节奏，不给日期
+        k = needed - len(pipeline)
+        # 第 k 个「以后会有扫描的周」是第几个候选周（向上取整，整数算）
+        idx = -(-k * completed // scanned_completed) if completed else k
+        # 候选周从当周起（当周还没扫、且今天起还有交易日），且不早于最晚一个已扫描周的下一周
+        start = cur_monday
+        if (today.isocalendar()[:2] in by_week
+                or _monday(add_trading_days(today, 0)) != cur_monday):
+            start = cur_monday + dt.timedelta(weeks=1)
+        start = max(start, _monday(max(max(ds) for ds in by_week.values())) + dt.timedelta(weeks=1))
+        target = start + dt.timedelta(weeks=idx - 1)
+        eta = add_trading_days(add_trading_days(max(today, target), 0), T7_TRADING_DAYS)
+    out.update(eta_date=eta.isoformat(), eta_calendar_weeks=round((eta - today).days / 7, 1))
+    return out
+
+
 def assess(db_path: Optional[Path] = None, target_ic: float = DEFAULT_TARGET_IC,
            max_pool_drift: float = MAX_POOL_DRIFT,
            today: Optional[str] = None) -> Dict:
@@ -1306,18 +1396,11 @@ def assess(db_path: Optional[Path] = None, target_ic: float = DEFAULT_TARGET_IC,
     n_weeks = len(weeks_ripe)
     ready = n_weeks >= required and pool_note is None
 
-    # ETA：按世代内的实际周产出速度外推（不是按日历）
+    # ETA：在路上的周按 T+7 算成熟日，以后的周按已过完各周的实际扫描比例排（v0.45.705，见 project_eta）
     today_d = dt.date.fromisoformat(today) if today else dt.date.today()
-    boundary_d = dt.date.fromisoformat(boundary)
-    calendar_weeks = max(1, ((today_d - boundary_d).days // 7) or 1)
-    # 已扫描的周 / 已过的日历周 = 有效产出率（T+7 到期滞后不算在内）
-    weeks_rate = len(weeks_scanned) / calendar_weeks if calendar_weeks else 0.0
+    eta = project_eta(ripe_dates, [r[0] for r in allrows], required,
+                      dt.date.fromisoformat(boundary), today_d)
     remaining = max(0, required - n_weeks)
-    if weeks_rate > 0:
-        eta_cal_weeks = remaining / weeks_rate
-        eta_date = (today_d + dt.timedelta(weeks=eta_cal_weeks)).isoformat()
-    else:
-        eta_cal_weeks, eta_date = float("inf"), None
 
     return {
         "cohort": cohort,
@@ -1328,11 +1411,7 @@ def assess(db_path: Optional[Path] = None, target_ic: float = DEFAULT_TARGET_IC,
         "n_ripe_samples": len(ripe),
         "n_all_samples": len(allrows),
         "scan_weeks_in_cohort": len(weeks_scanned),
-        "calendar_weeks_elapsed": calendar_weeks,
-        "weeks_per_calendar_week": round(weeks_rate, 3),
-        "eta_calendar_weeks": (None if eta_cal_weeks == float("inf")
-                               else round(eta_cal_weeks, 1)),
-        "eta_date": eta_date,
+        **eta,
         "pool_drift": round(pool_drift, 4),
         "pool_note": pool_note,
         "ready": ready,
@@ -1351,9 +1430,19 @@ def summary_line(res: Dict) -> str:
         return (f"✅ IC 重跑已就绪：世代内已攒 {res['weeks_accrued']}/"
                 f"{res['weeks_required']} 个不重叠周（{res['n_ripe_samples']} 条已回填样本）"
                 f"，该重跑了")
-    eta = (f"，按当前节奏约 {res['eta_calendar_weeks']} 个日历周后到位"
-           f"（≈{res['eta_date']}）" if res["eta_date"] else
-           "，但世代内还没有扫描产出 —— 先看扫描连续性")
+    if res["eta_date"]:
+        pace = ("按每周都有扫描算（世代还没有过完的周）" if res.get("pace_basis") == "assumed_every_week"
+                else f"按已过 {res.get('calendar_weeks_elapsed', '?')} 个整周里 "
+                     f"{res.get('completed_weeks_scanned', '?')} 周有扫描的节奏")
+        eta = (f"，预计 ≈{res['eta_date']} 到位（约 {res['eta_calendar_weeks']} 周后；"
+               f"第 {res['weeks_required']} 周到 T+7，{pace}）")
+    elif res.get("scan_weeks_in_cohort"):
+        eta = (f"，已过 {res.get('calendar_weeks_elapsed', '?')} 个整周都没有扫描、估不出节奏"
+               " —— 先看扫描连续性")
+    else:
+        eta = "，但世代内还没有扫描产出 —— 先看扫描连续性"
+    if res.get("weeks_overdue"):
+        eta += f"；⚠️ {res['weeks_overdue']} 周已过 T+7 仍没有一条回填，未计入预计"
     return (f"⏳ IC 重跑未就绪：{res['weeks_accrued']}/{res['weeks_required']} "
             f"个不重叠周{eta}")
 
@@ -3163,7 +3252,8 @@ def main() -> int:
     # `with` 退出——含 SIGTERM 转来的 SystemExit——时子进程若还活着一律终止。
     deadline = None if args.budget_seconds == 0 else t0 + args.budget_seconds
     with _start_fg_sub_status(args.today, deadline) as fg_run:
-        res = assess(db_path=db, target_ic=args.target_ic, today=args.today)
+        # v0.45.705：ETA 要分「在路上 / 逾期」，今天是哪天会改结果 ⇒ 与外壳同一个业务日（此前缺省读本机日期）
+        res = assess(db_path=db, target_ic=args.target_ic, today=date)
         fwd = resonance_forward_status(db.parent, db, today=args.today)
         fwd_detail = _take_detail(fwd)      # 取走私有细节后 fwd 只剩 {status, line}，payload 形状不变
         dim_fwd = dim_ic_forward_status(db, today=args.today)
@@ -3235,11 +3325,13 @@ def main() -> int:
           f"{res['weeks_required']}   还差 {res['weeks_remaining']}")
     print(f"  边界日期的数据证据:    {bev['line']}")
     print(f"  世代内有扫描的周:      {res['scan_weeks_in_cohort']}"
-          f"（已过 {res['calendar_weeks_elapsed']} 个日历周，"
-          f"产出率 {res['weeks_per_calendar_week']:.2f} 周/周）")
+          f"（已过完 {res['calendar_weeks_elapsed']} 个整周，其中 {res['completed_weeks_scanned']} 周有扫描"
+          + ("；还没有过完的周，按每周都扫描算"
+             if res["pace_basis"] == "assumed_every_week" and res["eta_date"] else "")
+          + f"；在路上 {res['weeks_in_pipeline']} 周、逾期 {res['weeks_overdue']} 周）")
     if res["eta_date"]:
-        print(f"  按当前节奏预计到位:    ≈{res['eta_date']}"
-              f"（{res['eta_calendar_weeks']} 个日历周后）")
+        print(f"  预计到位:              ≈{res['eta_date']}"
+              f"（{res['eta_calendar_weeks']} 周后，第 {res['weeks_required']} 周到 T+7）")
     print()
     if res["pool_note"]:
         print(f"  ⚠️ {res['pool_note']}")
