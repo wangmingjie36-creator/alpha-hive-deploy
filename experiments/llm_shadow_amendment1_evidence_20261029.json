@@ -1,0 +1,114 @@
+{
+  "close_t7_non_null_counts_at_decision_time": {
+    "2026-10-22": 0,
+    "2026-10-23": 0,
+    "2026-10-26": 0,
+    "2026-10-27": 0,
+    "2026-10-28": 0,
+    "2026-10-29": 0
+  },
+  "decided_at": "2026-10-29T17:49:19",
+  "descriptive_llm_vs_production_no_outcomes": {
+    "2026-10-22": {
+      "flip_rate": 0.4,
+      "mean_abs_diff": 0.529,
+      "mean_diff": -0.451,
+      "n": 30
+    },
+    "2026-10-27": {
+      "flip_rate": 0.3,
+      "mean_abs_diff": 0.703,
+      "mean_diff": -0.654,
+      "n": 30
+    },
+    "2026-10-28": {
+      "flip_rate": 0.4,
+      "mean_abs_diff": 0.817,
+      "mean_diff": -0.74,
+      "n": 30
+    },
+    "2026-10-29(救回)": {
+      "flip_rate": 0.185,
+      "mean_abs_diff": 0.571,
+      "mean_diff": -0.444,
+      "n": 27
+    }
+  },
+  "quality_under_preregistered_rules": {
+    "failed_call_rate": 0.0813,
+    "healthy": true,
+    "json_parse_failure_rate": 0.0,
+    "queen_llm_rate": 0.9,
+    "reasons": [],
+    "truncation_rate": 0.0
+  },
+  "quality_with_scan_error_rule_(revision_1,_from_2026-10-30)": {
+    "healthy": false,
+    "reasons": [
+      "scan_error（扫描中途出错，结果不完整）：APITimeoutError: Request timed out or interrupted. This could be due to a network timeout, dropped connection, or request cancellation. See https://docs.anthropic.com/en/api/errors#long-requests for m"
+    ]
+  },
+  "status_file_2026-10-29": {
+    "elapsed_sec": 2258.2,
+    "error": "APITimeoutError: Request timed out or interrupted. This could be due to a network timeout, dropped connection, or request cancellation. See https://docs.anthropic.com/en/api/errors#long-requests for more details.",
+    "tickers_scanned_in_file": [],
+    "usage": {
+      "budget_refusals": 0,
+      "call_count": 260,
+      "failed_calls": 23,
+      "input_tokens": 425841,
+      "json_parse_failures": 0,
+      "model_refusals": 0,
+      "output_tokens": 122014,
+      "total_cost_usd": 2.0364999999999998,
+      "truncated_calls": 0,
+      "unpriced_refusals": 0
+    },
+    "written_at": "2026-10-29T15:23:00"
+  },
+  "swarm_results_file": {
+    "bytes": 1873562,
+    "distill_mode_counts": {
+      "llm_enhanced": 27
+    },
+    "missing": [
+      "VZ",
+      "XOM",
+      "DELL"
+    ],
+    "mtime": "2026-10-29T15:22:27",
+    "n": 27,
+    "name": ".swarm_results_2026-10-29.json",
+    "sha256": "4d585493d381308614dd322a4af3e07006baafd35c201c4d262cfb2c72e180dd",
+    "tickers": [
+      "ABBV",
+      "AMC",
+      "AMZN",
+      "BILI",
+      "BRK-B",
+      "COST",
+      "CRCL",
+      "CRM",
+      "CVX",
+      "DE",
+      "ENPH",
+      "JNJ",
+      "META",
+      "MSFT",
+      "MU",
+      "NEE",
+      "NFLX",
+      "NVDA",
+      "QCOM",
+      "RKLB",
+      "SNOW",
+      "T",
+      "TMO",
+      "TMUS",
+      "TSLA",
+      "VKTX",
+      "WMT"
+    ]
+  },
+  "what": "LLM 影子预注册修订 1 的决定依据（冻结于决定时刻，2026-10-29）"
+}

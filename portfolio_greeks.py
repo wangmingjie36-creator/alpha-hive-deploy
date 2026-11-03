@@ -5,7 +5,8 @@
 做什么
 ------
 把三本账**读到一张风险表上**，然后只做一件动作——用 SPY 股票把组合的 β·$Delta 拉回带内：
-    ① 股票纸面组合   paper_portfolio.POSITIONS_FILE      （只读，不改它）
+    ① 股票纸面组合   paper_portfolio.POSITIONS_FILE      （只读，不改它；**v0.45.701 起缺省不出行**，只进 NAV 分母——
+                                                          `CONFIG["hedge_stock_book"]`，用户 2026-11-03 定「对冲只管跨式」）
     ② 财报跨式腿     options_paper_leg.POSITIONS_FILE    （只读，不改它；两腿用 CBOE 重新报价）
     ③ 本模块自己的 SPY 覆盖账本  hedge_state/            （唯一会写的账本）
 逐行算 $Delta / β·$Delta / $Gamma(1% 移动) / $Vega(每 vol 点) / $Theta(每日)，按合并 NAV 折成百分比，
@@ -138,6 +139,12 @@ CONFIG = {
     # 每天按建仓价估算它的名义额与 % NAV 写进审计 `excluded_from_hedge`（日报 / 对冲页都看得到），别让它悄悄变大。
     # BILI：CBOE 里它的标的价 last_trade 恒落后一天、Twelve Data 当晚又不给当天那根 ⇒ 10-15、10-16 连两天只它一只缺价。
     "hedge_exclude_tickers": ["BILI"],
+    # SPY 覆盖看不看股票纸面组合（v0.45.701，用户 2026-11-03 定：**对冲只管跨式，不看纸面组合**）。
+    # False ⇒ 股票纸面组合的持仓**不出行**：不进 $Delta / 聚合 / 带位 / 压力表 / 尾部预算 / 影子闸，它缺价也不再让整天判「数据不全」；
+    # 合并 NAV（百分比的分母）**照旧含股票账的净值**——只换分子、不换分母，带宽 / 告警线的美元含义不变（净值取自净值文件，不取价）。
+    # ⚠️ 纸面组合的市场敞口因此**完全没有对冲**（此前它约占 β·$Delta 的几个百分点，2026-11-02 审计 +$5.5k / −$101.7k）。
+    # 改回 True = 恢复 v0.45.700 及以前的口径（三本账合起来对冲），要单独提交。
+    "hedge_stock_book": False,
     # ── 逐票 Delta 对冲（v0.45.526；规则与理由见 `delta_hedge.py`）──
     "delta_hedge_mode": "shadow",    # off | shadow（只算不成交，缺省）| paper（纸面成交，改这一行单独提交）
     "delta_hedge_band_pct": 3.0,     # 每只标的 |跨式腿净 $Delta + 对冲市值| 超过 NAV 的这么多 % 才动手（v1 主观常数）
@@ -807,6 +814,8 @@ def excluded_exposure(nav: Optional[float], stock_positions: Optional[List[Dict]
     excl = _excluded_tickers()
     if not excl:
         return None
+    if stock_positions is None and not CONFIG["hedge_stock_book"]:
+        stock_positions = []        # v0.45.701：股票账本来就不进对冲 ⇒ 被排除的股票仓也无所谓「被挡在外面」
     if stock_positions is None:
         import paper_portfolio as pp
         stock_positions = _load_jsonl(pp.POSITIONS_FILE)
@@ -1247,15 +1256,70 @@ def hedge_overlay_value(as_of: str, spy_price: Optional[float]) -> Optional[floa
     return None if px is None else cash + shares * px
 
 
+def _audit_dates_desc(as_of: str) -> List[str]:
+    """`STATE_DIR` 里日期 ≤ as_of 的审计文件日期，新的在前。"""
+    out = []
+    for f in STATE_DIR.glob("greeks_*.json") if STATE_DIR.exists() else []:
+        d = f.stem[len("greeks_"):]
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", d) and d <= as_of:
+            out.append(d)
+    return sorted(out, reverse=True)
+
+
+def _stock_book_nav(as_of: str) -> Tuple[Optional[float], Optional[Dict]]:
+    """合并 NAV 里的「股票账」分量 → (值, 回落说明 | None)。
+
+    `hedge_stock_book=True`（旧口径，股票仓要进对冲）：照旧严格——读不了就抛 / None，整天不对冲。
+    `False`（v0.45.704，用户 2026-11-03 定「纸面组合坏了也不影响跨式对冲」）：股票账只剩 NAV 分母这一处依赖。
+    读不了（import 失败 / 账本损坏抛 `LedgerCorrupt` / 净值文件没了或没有 ≤ as_of 的行）⇒ 取**最近一份审计**
+    （`greeks_<日期>.json`，日期 ≤ as_of）里记下的股票账净值顶上，并返回回落说明——调用方写 ERROR、进 `price_check`、
+    alert_manager 报 P2。不让回落无声：分母是旧的，带宽 / 尾部线按旧分母算；连审计里也找不到 ⇒ None（照旧不对冲）。
+    回落链不会把值越传越「新」：`origin_date` 一直指向那个值**真正读到**的那天。"""
+    if CONFIG["hedge_stock_book"]:
+        import paper_portfolio as pp
+        return _latest_nav(pp.EQUITY_FILE, as_of), None
+    try:
+        import paper_portfolio as pp
+        v = _latest_nav(pp.EQUITY_FILE, as_of)
+        if v is not None:
+            return v, None
+        reason = "no_nav_row"               # 净值文件不存在 / 空 / 没有 ≤ as_of 的有效行
+    except Exception as exc:  # noqa: BLE001 —— 任何读失败都只该挡股票账自己，不挡跨式对冲
+        reason = f"{type(exc).__name__}: {exc}"[:300]
+    # 回落本身不许把整轮弄崩（v0.45.706 二次检查）：审计目录读不了 / 文件不是对象 / 字段形状不对 ⇒ 跳过那份，
+    # 全都不行 ⇒ 照旧 None（NAV 不可得、不对冲），原因并进 reason。审计里的日期必须与文件名一致，否则不认。
+    try:
+        days = _audit_dates_desc(as_of)
+    except OSError as exc:
+        return None, {"reason": f"{reason}；审计目录读不了：{type(exc).__name__}: {exc}"[:300],
+                      "from_audit": None, "origin_date": None}
+    for d in days:
+        try:
+            a = _load_audit(d)
+        except OSError:
+            continue
+        if not isinstance(a, dict) or a.get("as_of") != d:
+            continue
+        nav = a.get("nav")
+        comps = nav.get("components") if isinstance(nav, dict) else None
+        v = _num(comps.get("stock_book")) if isinstance(comps, dict) else None
+        if v is None:
+            continue
+        prev = nav.get("stock_book_fallback")
+        origin = prev.get("origin_date") if isinstance(prev, dict) else None
+        return v, {"reason": reason, "from_audit": d, "origin_date": origin if isinstance(origin, str) else d}
+    return None, {"reason": reason, "from_audit": None, "origin_date": None}
+
+
 def combined_nav_detail(as_of: str, closes_fn: Optional[Callable[[str, str], Optional[float]]] = None,
                         spy_price: Optional[float] = None) -> Dict:
     """三分量合并 NAV；任一缺失 → nav=None 且 `missing` 列出是哪一个。
     跨式腿的 10 万起始资本是名义的（测量账本），合并进来只为让百分比有一个分母。"""
-    import paper_portfolio as pp
     import options_paper_leg as opl
     closes_fn = closes_fn or _default_mark
+    stock_nav, stock_fallback = _stock_book_nav(as_of)     # v0.45.704：纸面组合读不了不挡跨式对冲（见该函数）
     comps: Dict[str, Optional[float]] = {
-        "stock_book": _latest_nav(pp.EQUITY_FILE, as_of),
+        "stock_book": stock_nav,
         "straddle_leg": _latest_nav(opl.EQUITY_FILE, as_of),
     }
     # 跨式腿**从未启动** ≠ 「今天缺一行」。前者是合法的零状态：没有期权仓，对合并 NAV
@@ -1285,6 +1349,8 @@ def combined_nav_detail(as_of: str, closes_fn: Optional[Callable[[str, str], Opt
     nav = None if missing else sum(comps.values())  # type: ignore[arg-type]
     out = {"nav": (round(nav, 2) if nav is not None else None), "components": comps,
            "missing": missing, "not_started": not_started, "spy_price": spy_price}
+    if stock_fallback is not None:
+        out["stock_book_fallback"] = stock_fallback
     if delta_diag is not None:
         out["delta_overlay_unmarked"] = list(delta_diag.get("unmarked") or [])
     return out
@@ -1537,7 +1603,7 @@ def _hedge_undecided(rec: Optional[Dict]) -> Optional[str]:
 
 
 def _price_check(as_of: str, rows: List[Dict], spy_mark: Dict, rec: Optional[Dict] = None,
-                 nav_missing: Optional[List[str]] = None) -> Dict:
+                 nav_missing: Optional[List[str]] = None, nav_fallback: Optional[Dict] = None) -> Dict:
     """这一天的每个价是不是 as_of 那一场的，以及对冲决定做没做得出来。
     审计文件、日报、status.json、alert_manager 读的都是这一份。
 
@@ -1566,6 +1632,7 @@ def _price_check(as_of: str, rows: List[Dict], spy_mark: Dict, rec: Optional[Dic
             "n_beta_missing": sum(1 for r in rows if r.get("beta_missing")),
             "beta_missing": beta_missing[:_PRICE_CHECK_LIST_MAX],
             "nav_missing": list(nav_missing or []),
+            "nav_fallback": dict(nav_fallback) if nav_fallback else None,     # v0.45.704：股票账净值读不了、用审计旧值顶上
             "hedge_undecided": _hedge_undecided(rec),
             "spy": {k: spy_mark.get(k) for k in ("price", "seen_price", "stale", "source", "session",
                                                    "at_close", "live")},
@@ -1598,6 +1665,10 @@ def _data_gaps(chk: Dict) -> List[str]:
         out.append(f"缺 β {chk['n_beta_missing']} 行（" + ",".join(chk.get("beta_missing") or []) + "）")
     if chk.get("nav_missing"):
         out.append("NAV 缺 " + ",".join(chk["nav_missing"]))
+        fb = chk.get("nav_fallback")
+        if isinstance(fb, dict) and not fb.get("from_audit"):
+            # v0.45.706：股票账读不了、审计里也没旧值可顶——告警里把「为什么缺」说出来
+            out.append(f"纸面组合净值读不了（{fb.get('reason')}），审计里也没有可顶上的旧值")
     return out
 
 
@@ -1668,18 +1739,17 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     spy_mark = _mark_from(closes_fn, CONFIG["hedge_instrument"], as_of)
     spy_price = spy_mark["price"]
     excl = _excluded_tickers()
-    stock_rows = stock_exposures(as_of, closes_fn=closes_fn, beta_fn=beta_fn, exclude=excl)
+    stock_rows = (stock_exposures(as_of, closes_fn=closes_fn, beta_fn=beta_fn, exclude=excl)
+                  if CONFIG["hedge_stock_book"] else [])     # v0.45.701：缺省不看股票纸面组合（见 CONFIG 注释）
     option_rows = option_exposures(as_of, quotes_fn=quotes_fn, beta_fn=beta_fn, closes_fn=closes_fn, exclude=excl)
     hedge_rows, today_trade = _hedge_rows_before_today(as_of, closes_fn, spy_price, spy_mark=spy_mark)
     nav_d = combined_nav_detail(as_of, closes_fn, spy_price=spy_price)
     excluded = excluded_exposure(nav_d["nav"])
     for e in (excluded or {}).get("names") or []:
         # WARNING 不是 ERROR：这是配置里写明的取舍；但每天都留一行，估算值跟着走，敞口变大时看得见
-        _log.warning("[PortfolioGreeks] %s：%s 在 hedge_exclude_tickers 里，不进对冲计算（股票仓 %d 笔，按建仓价估 %s"
-                     "，占 NAV %s；跨式 %d 笔）", as_of, e["ticker"], e["n_stock_positions"],
-                     (f"${e['stock_usd_est']:+,.0f}" if e["stock_usd_est"] is not None else "不可估"),
-                     (f"{e['stock_pct_nav_est']:+.2f}%" if e["stock_pct_nav_est"] is not None else "—"),
-                     e["n_straddles"])
+        # v0.45.703：股票账不进对冲时 n_stock_positions 恒 0，不再写「股票仓 0 笔，按建仓价估 不可估」这种像缺数据的话
+        _log.warning("[PortfolioGreeks] %s：%s 在 hedge_exclude_tickers 里，不进对冲计算（%s）", as_of, e["ticker"],
+                     _excluded_line({"names": [e]}).split("：", 1)[-1])
     # 逐票 Delta 对冲先于 SPY 带：paper 模式下 SPY 带看到的是逐票对冲**之后**的残余暴露；shadow / off 不进聚合
     # 逐票带宽的分母（v0.45.529）：NAV 缺的**只有** delta_overlay 且原因是某几只持仓标的缺价 ⇒ 带宽用「不含这一块」的 NAV。
     # 否则一只持仓标的的陈旧价（盘中陈旧文件约每 30 只里有 1 只）会把 NAV 整体做成 None，连价格正常的标的也判未知——
@@ -1702,7 +1772,16 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     rec = hedge_recommendation(agg, spy_price, nav_d["nav"])
     stress = stress_table(rows, spy_price)
     tail = _tail_section(as_of, rows, spy_price, nav_d["nav"])
-    chk = _price_check(as_of, rows, spy_mark, rec, nav_d.get("missing"))
+    chk = _price_check(as_of, rows, spy_mark, rec, nav_d.get("missing"), nav_d.get("stock_book_fallback"))
+    fb = nav_d.get("stock_book_fallback")
+    if fb:
+        # ERROR：纸面组合账本坏了 / 没了是要人去修的事；但跨式对冲照常（用户 2026-11-03 定）
+        if fb.get("from_audit"):
+            _log.error("[PortfolioGreeks] %s：纸面组合净值读不了（%s）——NAV 里的股票账改用 %s 审计记下的值"
+                       "（那个值读于 %s），跨式的 SPY 对冲照常", as_of, fb["reason"], fb["from_audit"], fb["origin_date"])
+        else:
+            _log.error("[PortfolioGreeks] %s：纸面组合净值读不了（%s），审计里也没有可顶上的旧值——NAV 不可得、"
+                       "今日不对冲", as_of, fb["reason"])
     chk["tail"] = tail.get("brief")               # 小简报 → scan_timing → alert_manager；完整表在审计文件的 `tail` 一节
     gaps = chk["gaps"]
     if chk["n_stale"] or chk["n_quote_stale"] or spy_mark["stale"]:
@@ -2108,7 +2187,8 @@ def _fmt_pct(v, nd=2) -> str:
 #: 对外展示的规则常量（Alpha Bot 对冲页 / 帮助页取这一份，不在前端另抄）
 PUBLIC_RULE_KEYS = ("beta_delta_band_pct", "beta_delta_target_pct", "rebalance_to", "hedge_instrument",
                     "vega_alert_pct", "gamma_alert_pct", "beta_window",
-                    "delta_hedge_mode", "delta_hedge_band_pct", "delta_hedge_rebalance_to", "delta_hedge_cost_bps")
+                    "delta_hedge_mode", "delta_hedge_band_pct", "delta_hedge_rebalance_to", "delta_hedge_cost_bps",
+                    "hedge_stock_book")
 
 
 def ledger_view(root=None) -> Dict:
@@ -2209,9 +2289,13 @@ def _excluded_line(ex: Optional[Dict]) -> str:
     bits = []
     for e in names:
         usd = e.get("stock_usd_est")
-        bits.append(f"{e['ticker']}（股票 {e.get('n_stock_positions', 0)} 笔"
-                    + (f"，按建仓价估 {_fmt_usd(usd)} / {_fmt_pct(e.get('stock_pct_nav_est'))} NAV" if usd is not None else "")
-                    + (f"；跨式 {e['n_straddles']} 笔" if e.get("n_straddles") else "") + "）")
+        part = []
+        if e.get("n_stock_positions"):
+            part.append(f"股票 {e['n_stock_positions']} 笔"
+                        + (f"，按建仓价估 {_fmt_usd(usd)} / {_fmt_pct(e.get('stock_pct_nav_est'))} NAV" if usd is not None else ""))
+        if e.get("n_straddles"):
+            part.append(f"跨式 {e['n_straddles']} 笔")
+        bits.append(f"{e['ticker']}（{'；'.join(part)}）")
     return "**不进对冲计算**（`hedge_exclude_tickers`，敞口仍在、SPY 覆盖不管）：" + "；".join(bits)
 
 
@@ -2276,9 +2360,13 @@ def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
 
     L = ["", "## 组合 Greeks 与对冲（观察项 + 纸面 SPY 覆盖）", ""]
     hedge_sh = sum(_num(r.get("qty")) or 0.0 for r in rows if r.get("kind") == "hedge")
-    L.append(f"截至 {as_of}：股票仓 {kinds.get('stock', 0)} 行 / 跨式腿合约 {kinds.get('option', 0)} 行 / "
+    stock_bit = (f"股票仓 {kinds.get('stock', 0)} 行" if CONFIG["hedge_stock_book"]
+                 else "股票纸面组合不进对冲（只对冲跨式）")
+    L.append(f"截至 {as_of}：{stock_bit} / 跨式腿合约 {kinds.get('option', 0)} 行 / "
              f"SPY 覆盖 {hedge_sh:+,.0f} 股（交易前）；合并 NAV "
              + (f"${nav:,.0f}" if nav is not None else f"不可得（缺：{', '.join(nav_d.get('missing') or ['?'])}）")
+             + (f"（⚠️ 纸面组合净值读不了，股票账用 {nav_d['stock_book_fallback']['origin_date']} 的旧值）"
+                if (nav_d.get("stock_book_fallback") or {}).get("from_audit") else "")
              + _spy_price_note(res)
              + "。")
     L += ["", "| 指标 | 数值 | % NAV | 备注 |", "|------|------|-------|------|"]

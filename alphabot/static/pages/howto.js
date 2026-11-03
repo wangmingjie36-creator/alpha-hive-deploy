@@ -77,6 +77,7 @@ export function howtoPanel({ hw, tenor, pick, S, redraw }) {
     sub: `${guide.oneline}　观点：${guide.stance}`, right: control, class: "howto",
   });
   const body = [];
+  if (hw.index_note) body.push(h("p", { class: "callout warn" }, hw.index_note));
   if (!tier) {
     body.push(h("p", { class: "callout warn" }, "这个结构在所选档位没有可用的腿（路由判不可用）。"));
   } else {

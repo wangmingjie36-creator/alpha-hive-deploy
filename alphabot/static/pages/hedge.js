@@ -165,7 +165,7 @@ export async function renderHedge(root, alive) {
   const rules = d.rules || {};
   const head = h("div", { class: "page-head" }, h("div", {},
     h("h1", {}, "对冲账本", h("span", { class: "sub" }, d.source === "demo" ? "演示数据" : (d.as_of ? `账本 ${d.as_of}` : ""))),
-    h("p", { class: "lede" }, `组合 Greeks 的纸面 ${rules.hedge_instrument || "SPY"} 覆盖（模拟成交，不连券商）：每个扫描日收盘后，把股票纸面组合和跨式腿合起来算 β·Delta 占合并 NAV 的百分比，出 ±${num(rules.beta_delta_band_pct, 0)}% 带就用 ${rules.hedge_instrument || "SPY"} 股票拉回带边，带内不动。 `, helpLink("hedge"))));
+    h("p", { class: "lede" }, `组合 Greeks 的纸面 ${rules.hedge_instrument || "SPY"} 覆盖（模拟成交，不连券商）：每个扫描日收盘后，${rules.hedge_stock_book ? "把股票纸面组合和跨式腿合起来" : "只拿财报跨式腿（不看股票纸面组合）"}算 β·Delta 占合并 NAV 的百分比，出 ±${num(rules.beta_delta_band_pct, 0)}% 带就用 ${rules.hedge_instrument || "SPY"} 股票拉回带边，带内不动。 `, helpLink("hedge"))));
   if (!d.data_available) {
     fill(root, head, panel(null, {}, h("div", { class: "empty" }, `没找到对冲账本目录：${d.state_dir?.path || "—"}`),
       Object.entries(d.errors || {}).map(([k, v]) => h("p", { class: "small muted" }, `${k}：${v}`)),
@@ -188,14 +188,21 @@ export async function renderHedge(root, alive) {
       ...(pc.unpriced || []).map((x) => `${x.ticker}（取不到价）`)];
     warns.push(`${L.date} 数据不全，对冲决定做不出来：${pc.hedge_undecided}${who.length ? `——缺价的是：${who.join("；")}` : ""}`);
   }
+  // v0.45.704：纸面组合净值读不了 ⇒ NAV 分母里的股票账用审计旧值顶上，跨式对冲照常——说出来，别让旧分母悄悄用下去
+  if (pc.nav_fallback?.from_audit) warns.push(`${L.date} 纸面组合净值读不了（${pc.nav_fallback.reason}）：NAV 分母里的股票账暂用 ${pc.nav_fallback.origin_date} 的值，跨式的 SPY 对冲照常。`);
   if ((pc.gaps || []).length) warns.push(`${L.date} 另缺：${pc.gaps.join("；")}`);
   // 买价为 0 的腿不是「缺」：Greeks 取 CBOE 模型值（没有 mid）、已计入带位——说出来，别让它悄悄进决定
   if (pc.n_bid_zero) warns.push(`${L.date} 带位含 ${pc.n_bid_zero} 张买价为 0 的腿（${(pc.bid_zero || []).join("、")}）：用的是 CBOE 模型 Greeks，没有中间价；这些腿没有进压力表。`);
   // 被排除的标的不是「没有敞口」：点名 + 估算额，让它变大时看得见（v0.45.545）
+  // v0.45.701：SPY 覆盖本来就不看股票纸面组合（rules.hedge_stock_book 为假）⇒ 只有被排除的「跨式」才值得点名；
+  // 旧审计里只有股票仓的那几行不再显示（它们现在跟别的股票仓一样本来就不进对冲）
   for (const x of L?.excluded_from_hedge || []) {
-    warns.push(`${L.date} ${x.ticker} 不进对冲计算（配置里排除）：股票 ${x.n_stock_positions} 笔` +
-      (x.stock_usd_est != null ? `，按建仓价估 ${sMoney(x.stock_usd_est, 0)}（${sPct(x.stock_pct_nav_est)} NAV）` : "") +
-      (x.n_straddles ? `，跨式 ${x.n_straddles} 笔` : "") + "；敞口仍在，SPY 覆盖不管它。");
+    const nStock = rules.hedge_stock_book ? (x.n_stock_positions || 0) : 0;
+    if (!nStock && !x.n_straddles) continue;
+    const bits = [];
+    if (nStock) bits.push(`股票 ${nStock} 笔` + (x.stock_usd_est != null ? `，按建仓价估 ${sMoney(x.stock_usd_est, 0)}（${sPct(x.stock_pct_nav_est)} NAV）` : ""));
+    if (x.n_straddles) bits.push(`跨式 ${x.n_straddles} 笔`);
+    warns.push(`${L.date} ${x.ticker} 不进对冲计算（配置里排除）：${bits.join("，")}；敞口仍在，SPY 覆盖不管它。`);
   }
 
   const kpis = h("div", { class: "kpis" },

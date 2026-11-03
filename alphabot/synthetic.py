@@ -487,7 +487,8 @@ def demo_hedge_view(as_of: Optional[str] = None, days: int = 12) -> dict:
         "meta": {"version": "demo", "starting_date": cal[0].isoformat(), "cash": round(cash, 4),
                  "last_run_date": cal[-1].isoformat()},
         "rules": {"beta_delta_band_pct": band, "beta_delta_target_pct": 0.0, "rebalance_to": "edge",
-                  "hedge_instrument": "SPY", "vega_alert_pct": 0.5, "gamma_alert_pct": 0.1, "alert_lines_source": "derived", "tail_alert_pct": 20.0, "beta_window": 60},
+                  "hedge_instrument": "SPY", "vega_alert_pct": 0.5, "gamma_alert_pct": 0.1, "alert_lines_source": "derived", "tail_alert_pct": 20.0, "beta_window": 60,
+                  "hedge_stock_book": False},   # v0.45.703：与生产缺省一致（演示数据本来就没有股票行）
         "measurement_start": cal[0].isoformat(),
         "history": {
             "trades": trades, "equity": equity, "audits": audits,

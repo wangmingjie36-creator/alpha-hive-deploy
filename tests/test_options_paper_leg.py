@@ -30,6 +30,10 @@ def state(tmp_path, monkeypatch):
     # 合约数断言不该跟着漂。
     monkeypatch.setitem(opl.CONFIG, "starting_capital", 20_000.0)
     monkeypatch.setitem(opl.CONFIG, "risk_per_trade_pct", 2.0)
+    # v0.45.693：本文件的场景是旧口径（09-03 入场、09-20 财报，默认多头）——钉回「信号一出现就开、开多头」，
+    # 测的是成交 / 定仓 / 盯市 / 出场本身。生产入场窗口与关多头由 test_options_paper_leg.py::TestEntryWindow 钉住。
+    monkeypatch.setitem(opl.CONFIG, "trade_cheap", True)
+    monkeypatch.setitem(opl.CONFIG, "entry_max_sessions_before_event", None)
     return sd
 
 
@@ -670,6 +674,91 @@ class TestEntryExpiryBufferGate:
     def test_unparseable_or_missing_earnings_date_is_not_judged_here(self):
         """判不了财报日就不在这道闸拒（原行为不变；财报日缺失本来就过不了信号的 eligible）。"""
         assert len(self._opened(None)["positions"]) == 1
+
+
+def _source_config():
+    """`options_paper_leg.CONFIG` 的**源码字面量**（本文件的 autouse 夹具把运行时 CONFIG 钉回了旧口径）。"""
+    import ast
+    from pathlib import Path
+    tree = ast.parse(Path(opl.__file__).read_text(encoding="utf-8"))
+    node = next(n for n in tree.body if isinstance(n, ast.Assign) and any(getattr(t, "id", None) == "CONFIG" for t in n.targets))
+    return ast.literal_eval(node.value)
+
+
+class TestEntryWindow:
+    """v0.45.693（用户 2026-11-02 定）：贴着财报开仓、不开多头；v0.45.696 窗口放宽到 2 个交易日，v0.45.702 改回只在最后一个交易日。
+    此前信号一出现就开（入场与财报日之间夹着 4~20 个交易日），盈亏被事件前几周的普通涨跌主导，测不到信号本身。"""
+
+    @pytest.fixture(autouse=True)
+    def _production_rules(self, monkeypatch):
+        src = _source_config()
+        monkeypatch.setitem(opl.CONFIG, "trade_cheap", src["trade_cheap"])
+        monkeypatch.setitem(opl.CONFIG, "entry_max_sessions_before_event", src["entry_max_sessions_before_event"])
+
+    @staticmethod
+    def _run(as_of, earnings, label="rich"):
+        sig = {**_sig(label=label, earnings=earnings, expiry="2026-12-18"), "as_of": as_of}   # 到期远离缓冲，只测窗口
+        r = opl.run_for_date(as_of, quotes_fn=_none_quotes, signals=[sig])
+        skip = {x["ticker"]: x["reason"] for x in r["skipped"]}
+        return r, skip.get("XYZ")
+
+    def test_production_values(self):
+        """改这两个数 = 改账本测的是什么（与影子宽跨预注册修订 5 的 `entry_window_sessions` 同值），要单独决定。"""
+        src = _source_config()
+        assert src["entry_max_sessions_before_event"] == 0 and src["trade_cheap"] is False and src["trade_rich"] is True
+
+    @pytest.mark.parametrize("as_of,earnings", [
+        ("2026-09-03", "2026-09-04"),       # 周四 → 周五
+        ("2026-09-04", "2026-09-08"),       # 周五 → 周二（周一 09-07 劳动节休市）
+        ("2026-11-25", "2026-11-27"),       # 周三 → 周五（周四 11-26 感恩节休市）
+    ])
+    def test_inside_window_opens(self, as_of, earnings):
+        r, why = self._run(as_of, earnings)
+        assert len(r["opened_today"]) == 1 and why is None, why
+
+    @pytest.mark.parametrize("as_of,earnings", [
+        ("2026-09-02", "2026-09-08"),       # 夹着 09-03、09-04 两个交易日
+        ("2026-09-03", "2026-09-08"),       # 周四 → 周二：夹着 09-04 一个交易日（窗口 1 时放行，现行不放）
+        ("2026-11-24", "2026-11-27"),       # 周二 → 周五：夹着周三一个交易日 + 感恩节
+        ("2026-09-03", "2026-09-20"),       # 旧口径的典型：两周多以前
+    ])
+    def test_earlier_sessions_wait_and_say_so(self, as_of, earnings):
+        r, why = self._run(as_of, earnings)
+        assert r["opened_today"] == [] and why.startswith("waiting") and earnings in why, why
+        assert len(why) <= 90, "原因串原样显示在 Alpha Bot 状态列，保持短"
+
+    def test_window_matches_trading_calendar_day_by_day(self):
+        """逐日扫过：开得了 ⇔ as_of 之后第 (窗口 + 1) 个 NYSE 交易日 ≥ 财报日（不挑边界点）。"""
+        from datetime import date
+        from is_trading_day import add_trading_days
+        n = opl.CONFIG["entry_max_sessions_before_event"] + 1
+        ed = "2026-09-24"
+        opened = 0
+        for k in range(1, 15):
+            as_of = (date.fromisoformat(ed) - timedelta(days=k)).isoformat()
+            expect = add_trading_days(date.fromisoformat(as_of), n).isoformat() >= ed
+            opened += expect
+            assert (opl.entry_window_miss(as_of, ed) is None) is expect, (as_of, ed)
+        assert opened == n, "财报 09-24（周四）⇒ 开得了的恰是前 n 个交易日（窗口 1：09-22、09-23）"
+
+    def test_long_side_is_disabled_with_a_reason(self):
+        r, why = self._run("2026-09-03", "2026-09-04", label="cheap")
+        assert r["opened_today"] == [] and why == "cheap side disabled"
+
+    def test_unjudgeable_calendar_does_not_open(self, monkeypatch):
+        """日历用不了 ⇒ 判不了窗口 ⇒ 不开，原因可见（不猜成「在窗口内」）。"""
+        import is_trading_day
+
+        def boom(*a, **k):
+            raise RuntimeError("calendar down")
+        monkeypatch.setattr(is_trading_day, "add_trading_days", boom)
+        r, why = self._run("2026-09-03", "2026-09-04")
+        assert r["opened_today"] == [] and "unjudgeable" in why
+
+    def test_none_disables_the_window(self, monkeypatch):
+        monkeypatch.setitem(opl.CONFIG, "entry_max_sessions_before_event", None)
+        r, why = self._run("2026-09-03", "2026-09-20")
+        assert len(r["opened_today"]) == 1, why
 
 
 def _trade(exit_date, earnings, pnl=-100.0, side="long", label="cheap", reason="expiry_buffer"):

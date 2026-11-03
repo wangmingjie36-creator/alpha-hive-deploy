@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🐝 Alpha Hive — 维度 IC 证据协议 · 登记常量（P1，v0.45.320；修订 1，v0.45.330）
+🐝 Alpha Hive — 维度 IC 证据协议 · 登记常量（P1，v0.45.320；修订 1，v0.45.330；修订 4，v0.45.708）
 =================================================================================
 规则全文在 `experiments/dim_ic_preregistration.md`，本文件是同一份登记的**机器可读**写法。
 两处必须一致，`tests/test_dim_ic_protocol.py` 钉住。
@@ -19,6 +19,13 @@ REGISTERED_ON = "2026-09-23"
 AMENDMENTS: Tuple[Tuple[str, str, str], ...] = (
     ("2026-09-23", "事后·窗口开始前、零数据",
      "修订 1：窗口推迟到 2026-10-12；H1 对象改为冻结版 Buzz 评分 v1（buzz_v1）"),
+    # 修订 2 / 3 当时只写进了文档、没追加到这里（v0.45.708 补登；文档标题与性质原样照抄，测试按位置逐条核对）
+    ("2026-10-13", "事后·窗口内、被排除日的结果尚不存在",
+     "修订 2：2026-10-12（事后整日重放补算）不进前瞻检验（signal_archive.FORWARD_TEST_EXCLUDED_DAYS）"),
+    ("2026-10-22", "事后·窗口内、只加敏感性分析（主分析不变）",
+     "修订 3：并列报告「去掉 source_outage 日」的敏感性分析（day_health 定义指纹冻结）"),
+    ("2026-11-03", "事后·窗口内、只看过输入不看收益",
+     "修订 4：H1 对象改为 buzz_v1 的非价格子合成（buzz_v1_np）；截断集合收窄为三个情绪通道；buzz_v1 降为描述项"),
 )
 
 #: 样本窗口起点（修订 1：2026-09-28 → 2026-10-12，2026-W42 周一）。之前的数据一律不进检验（协议 §1、§3、§13）
@@ -39,31 +46,42 @@ NW_LAG = 1
 OUTCOME_COLUMN = "close_t7"
 FORBIDDEN_OUTCOME_COLUMNS: Tuple[str, ...] = ("price_t7", "return_t7")
 
-#: H1 的输入层（修订 1，协议 §13.2）：冻结评分器读进来、自己挡不住的部分——7 个通道、通道读的行情量、F&G 观测。
-#: 边界触及其一 ⇒ H1 截断
-H1_INPUT_SIGNALS: Tuple[str, ...] = (
+#: buzz_v1 的输入层（修订 1，协议 §13.2）：冻结评分器读进来、自己挡不住的部分——7 个通道、通道读的行情量、F&G 观测。
+#: 修订 4 起它只是**描述项 buzz_v1** 的截断集合，不再截断 H1
+H1_V1_INPUT_SIGNALS: Tuple[str, ...] = (
     "buzz.comp.momentum_signal", "buzz.comp.volume_signal", "buzz.comp.volatility_signal",
     "buzz.comp.reddit_signal", "buzz.comp.news_signal", "buzz.comp.yahoo_signal",
     "buzz.comp.fear_greed_signal",
     "price.momentum_5d", "price.volume_ratio", "price.volatility_20d", "market.fear_greed",
 )
 
-#: H1 的冻结层（修订 1，协议 §13.2）：从通道值到 `score` 的计算。`sentiment.pct` = int(合成值)，也在这一层。
-#: 边界只触及这些 ⇒ 冻结评分器**实现且自证通过之后**吸收、不截断；此前照截断（保守，§13.4）
+#: buzz_v1 的冻结层（修订 1，协议 §13.2）：从通道值到 `score` 的计算。`sentiment.pct` = int(合成值)，也在这一层。
+#: 修订 4 起只属描述项 buzz_v1（H1 没有冻结层：子合成是纯线性、直接由归档通道算）
 H1_FROZEN_LAYER_SIGNALS: Tuple[str, ...] = ("agent.BuzzBeeWhisper.score", "sentiment.pct")
 
-#: 冻结层未被吸收时 H1 读的生产维度：截断点之前 buzz_v1 ≡ 锚点之后的生产分（定义如此，§13.2）
+#: 描述项 buzz_v1 读的生产维度：截断点之前 buzz_v1 ≡ 锚点之后的生产分（定义如此，§13.2）
 H1_PRODUCTION_DIM = "sentiment"
+
+#: H1（修订 4，协议 §13.13）= buzz_v1_np：三个非价格通道 × buzz_v1 的冻结权重，**按这个顺序**从左往右加；
+#: 无 clamp、无动量 / 背离调整（后两项的输入含价格）。值取自 `signal_archive` 的 `buzz.comp.*`，缺一个 ⇒ 该行无效
+H1_NP_WEIGHTS: Dict[str, float] = {"reddit_signal": 0.25, "news_signal": 0.25, "yahoo_signal": 0.05}
+
+#: H1 的截断集合（修订 4）：恰好是这三个通道。价格通道 / 行情量 / F&G / 合成与调整层改动都不再截断 H1
+H1_INPUT_SIGNALS: Tuple[str, ...] = tuple(f"buzz.comp.{c}" for c in H1_NP_WEIGHTS)
+
+#: 描述项 buzz_v1（修订 4）：每个检视点照报 IC / CI / 朴素 p，不进 Holm 族、不触发任何动作
+H1_V1_DESCRIPTIVE = ("buzz_v1", H1_V1_INPUT_SIGNALS + H1_FROZEN_LAYER_SIGNALS)
 
 #: buzz_v1 的定义锚点 = 阶段 1 修复在 `ic_rerun_readiness._COHORT_HISTORY` 里的 version。None = 尚未登记。
 #: 到 FORWARD_START 仍未登记、或该边界日期不早于 FORWARD_START ⇒ H1 回退到原登记对象，窗口不再推迟（§13.4）
-#: v0.45.340 填入（修订 1 预留的填空，事前实现对齐）：Buzz 情绪动量改按扫描日回看归档 + 通道全精度入档
+#: v0.45.340 填入（修订 1 预留的填空，事前实现对齐）：Buzz 情绪动量改按扫描日回看归档 + 通道全精度入档。
+#: 修订 4 起它同样是 buzz_v1_np 的前提：通道自这一版起全精度入档
 H1_ANCHOR_VERSION: Optional[str] = "v0.45.340"
 
 #: 固定序列，顺序即检验顺序（协议 §2）。
 #: 每项 = (编号, 对象, 用于截断判定的归档信号——`signal_archive.generation_boundaries()` 的输入)
 HYPOTHESES: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
-    ("H1", "buzz_v1", H1_INPUT_SIGNALS + H1_FROZEN_LAYER_SIGNALS),
+    ("H1", "buzz_v1_np", H1_INPUT_SIGNALS),
     ("H2", "weighted_composite", ("agent.ChronosBeeHorizon.score",
                                   "agent.BuzzBeeWhisper.score",
                                   "agent.OracleBeeEcho.score")),

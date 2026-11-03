@@ -26,7 +26,11 @@ def _tree(tmp_path):
                 "pkg/sub 13/m.py", ".git/e.py", ".claude/worktrees/w/d.py", "mcp-servers/m/.venv/lib/dep.py",
                 "mcp-servers/m/server.py", "libs/site-packages/lib.py", "node_modules/n.py", "vendor/v.py",
                 "third_party/t.py", "tests/t.py", "experiments/x.py", "pkg/.hidden/h.py", ".hidden_top.py",
-                "pkg/.hidden_file.py", "pkg/notes.txt"):
+                "pkg/.hidden_file.py", "pkg/notes.txt",
+                # v0.45.707 嵌套仓库两种形状：`.git` 是文件（子模块 / worktree）、`.git` 是目录（独立克隆）；
+                # 旁边 `ext/own.py` 是第一方——判据是「有没有 .git」，不是父目录叫什么
+                "ext/subm/.git", "ext/subm/s.py", "ext/clonerepo/.git/HEAD", "ext/clonerepo/c.py",
+                "ext/clonerepo/pkg/d.py", "ext/own.py"):
         f = tmp_path / rel
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("x = 1\n", encoding="utf-8")
@@ -41,7 +45,8 @@ class TestSyntheticTree:
     def test_only_first_party_python_files_survive(self, tmp_path):
         root = _tree(tmp_path)
         got = _rels(RF.walk_own_python_files(root, skip_dirs={"tests", "experiments"}), root)
-        assert got == ["a.py", "mcp-servers/m/server.py", "pkg/b.py", "pkg/deep/c.py"]
+        # `mcp-servers/m/` 没有 `.git` ⇒ 第一方，照扫：按目录名排除 `mcp-servers` 正是 v0.45.707 拿掉的手写清单
+        assert got == ["a.py", "ext/own.py", "mcp-servers/m/server.py", "pkg/b.py", "pkg/deep/c.py"]
 
     def test_skip_dirs_is_the_callers_choice(self, tmp_path):
         root = _tree(tmp_path)
@@ -62,6 +67,7 @@ class TestSyntheticTree:
         assert reasons["vendor"] == "vendored" and reasons["third_party"] == "vendored"
         assert reasons["alphabot 2"] == "icloud" and reasons["pkg/sub 13"] == "icloud"
         assert reasons["tests"] == "skip" and reasons["experiments"] == "skip"
+        assert reasons["ext/subm"] == "nested_repo" and reasons["ext/clonerepo"] == "nested_repo"
         assert res.pruned == sorted(res.pruned)
 
     def test_result_is_sorted_and_files_are_absolute_under_root(self, tmp_path):
@@ -83,7 +89,7 @@ class TestSyntheticTree:
         RF.walk_own_python_files(root, skip_dirs={"tests", "experiments"})
         bad = [v for v in visited if set(v.split("/")) & {".git", ".claude", ".venv", "site-packages", "node_modules",
                                                            "vendor", "third_party", "tests", "experiments", ".hidden",
-                                                           "alphabot 2", "sub 13"}]
+                                                           "alphabot 2", "sub 13", "subm", "clonerepo"}]
         assert not bad, bad
 
     def test_unreadable_directories_come_out_as_errors_instead_of_vanishing(self, tmp_path, monkeypatch):
@@ -105,6 +111,23 @@ class TestSyntheticTree:
 
     def test_clean_tree_has_no_errors(self, tmp_path):
         assert RF.walk_own_python_files(_tree(tmp_path)).errors == []
+
+    def test_manifest_listing_drops_nested_repos_on_both_branches(self, tmp_path, monkeypatch):
+        """`own_python_files` 的 rglob 回退与 git 分支都要剪嵌套仓库，与遍历同口径（模块 docstring：同一判据两份口径
+        早晚漂移，而哪条生效取决于这台机器有没有 git）。git 分支用假 `subprocess.run` 喂一份含嵌套仓库路径的清单。"""
+        import subprocess as sp
+        root = _tree(tmp_path)
+        files, how = RF.own_python_files(root)
+        assert how == "rglob", "夹具走到了 git 分支——这一半测的不是回退分支"
+        rels = sorted(p.relative_to(root).as_posix() for p in files)
+        assert not [r for r in rels if r.startswith(("ext/subm/", "ext/clonerepo/"))], rels
+        assert "ext/own.py" in rels and "mcp-servers/m/server.py" in rels
+
+        listing = "\x00".join(["a.py", "ext/own.py", "ext/subm/s.py", "ext/clonerepo/pkg/d.py"]) + "\x00"
+        monkeypatch.setattr(sp, "run", lambda *a, **k: sp.CompletedProcess(a, 0, stdout=listing, stderr=""))
+        files, how = RF.own_python_files(root)
+        assert how == "git"
+        assert sorted(p.relative_to(root).as_posix() for p in files) == ["a.py", "ext/own.py"]
 
 
 def _tracked_py():
@@ -154,10 +177,28 @@ class TestAgainstTheGitManifest:
         assert before, "仓库根下一个点号目录都没有——剪枝自证没有可对照的样本（.github / .claude 是被跟踪的）"
         missing = [d for d in before if (_ROOT / d).is_dir() and (d, "hidden") not in res.pruned]
         assert not missing, f"这些点号目录存在却没被剪——剪枝规则没生效：{missing}"
-        assert all(why in {"skip", "vendored", "hidden", "icloud"} for _, why in res.pruned)
+        assert all(why in {"skip", "vendored", "hidden", "icloud", "nested_repo"} for _, why in res.pruned)
         bad = [p.relative_to(_ROOT).as_posix() for p in res.files
                if {".venv", "site-packages", "node_modules"} & set(p.relative_to(_ROOT).parts)]
         assert not bad, bad[:5]
+
+
+    def test_every_walked_directory_belongs_to_this_repository(self):
+        """v0.45.707：遍历结果里每个文件所在的目录，按 **git 自己**的判断（`rev-parse --show-toplevel`）都属于本仓。
+        这是嵌套仓库剪枝的独立对账——不经 `_is_nested_repo`。开发检出里 `mcp-servers/maverick-mcp/` 是别人的克隆，
+        去掉剪枝这条就红（干净 worktree 里那些目录是空的，这里恒绿；处处可红的是合成树那几条）。"""
+        res = RF.walk_own_python_files(_ROOT)
+        dirs = sorted({p.parent for p in res.files})
+        assert dirs, "遍历一个文件都没有——下面的对账恒真"
+        root = _ROOT.resolve()
+        foreign = []
+        for d in dirs:
+            r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=str(d), capture_output=True, text=True,
+                               timeout=30)
+            assert r.returncode == 0, f"{d}: git rev-parse 失败（{r.returncode}）：{r.stderr[:200]}"
+            if Path(r.stdout.strip()).resolve() != root:
+                foreign.append((d.relative_to(_ROOT).as_posix(), r.stdout.strip()))
+        assert foreign == [], f"这些目录属于别的 git 仓库，却被当成本仓源码扫了：{foreign[:5]}"
 
 
 class TestGuardsUseTheSharedWalk:

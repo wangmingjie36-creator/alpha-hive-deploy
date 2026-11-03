@@ -154,27 +154,46 @@ class TestLiveOnThisMac:
         assert not [n for n in os.listdir(st["canary"]) if n.startswith("child-")]
 
     def test_log_helper_sees_this_sessions_denials(self, pytestconfig):
-        """会话末尾的「没有拒绝」要可信，得先证明助手看得见拒绝：金丝雀上的拒绝（会话开始那次 + 本条的）必须查得到。"""
+        """会话末尾的「没有拒绝」要可信，得先证明助手看得见拒绝：本进程在金丝雀上触发的拒绝必须查得到。
+
+        v0.45.694：内核会成段地丢掉 Python 进程的拒绝上报（不是晚到，见 `_write_sandbox` 模块 docstring）——
+        原写法只触发一次、再轮询同一条，碰上丢弃窗口就永远等不到（整套里两次红在这里，单独跑绿）。
+        现在每轮换新文件名重新触发，直到任一条查到；查不到时用 bash 子进程补一条对照，把「助手 / 查询坏了」和
+        「内核这段时间没记 Python 的拒绝」分开说。"""
         st = _live(pytestconfig)
         if not st.get("active"):
             pytest.fail(f"写沙箱没生效：{st.get('reason')}")
         if not st.get("check_log"):
             pytest.skip("本会话继承了外层沙箱（进程内再跑的 pytest），日志由外层核对")
-        target = os.path.join(st["canary"], f"seen-{os.getpid()}")
-        try:
-            open(target, "w").write("x")
-        except PermissionError:
-            pass
+        import datetime
         import time
-        found = []
-        for _ in range(10):        # 统一日志落盘有一两秒延迟
-            r = WS._ask_helper(st["helper"], WS.log_command(st))
+        since = datetime.datetime.now() - datetime.timedelta(seconds=2)   # `--start` 只到秒；只查本条触发的
+        ask = lambda: WS._ask_helper(st["helper"], WS.log_command(st, since=since))  # noqa: E731
+        targets, found = set(), []
+        deadline = time.monotonic() + 40   # 实测丢弃窗口最长约 24 秒；pytest 单条超时 60 秒
+        while True:
+            target = os.path.join(st["canary"], f"seen-{os.getpid()}-{len(targets)}")
+            targets.add(target)
+            try:
+                open(target, "w").write("x")
+            except PermissionError:
+                pass
+            time.sleep(1.0)   # 统一日志落盘有约一秒延迟
+            r = ask()
             assert r.get("rc") == 0, r.get("stderr")
             found = WS.parse_denials(r["stdout"], st["canary"])
-            if any(d["path"] == target for d in found):
+            if any(d["path"] in targets for d in found) or time.monotonic() > deadline:
                 break
-            time.sleep(0.5)
-        assert any(d["path"] == target for d in found), f"助手查不到本会话刚发生的拒绝：{found[-3:]}"
+        if any(d["path"] in targets for d in found):
+            return
+        probe = os.path.join(st["canary"], f"seen-{os.getpid()}-sh")
+        subprocess.run(["/bin/sh", "-c", f"echo x > '{probe}'"], capture_output=True)
+        time.sleep(1.5)
+        r = ask()
+        sh_seen = r.get("rc") == 0 and any(d["path"] == probe for d in WS.parse_denials(r["stdout"], st["canary"]))
+        why = ("bash 子进程的拒绝查得到 ⇒ 是内核这 40 秒没记本进程（Python）的拒绝，会话末尾的核对在此期间是瞎的"
+               if sh_seen else "连 bash 子进程的拒绝也查不到 ⇒ 助手 / 查询 / 解析坏了")
+        pytest.fail(f"助手 {len(targets)} 次都查不到本进程刚触发的拒绝；{why}。最近查到的：{found[-3:]}")
 
 
 # ---------------- v0.45.577 二次检查 ----------------

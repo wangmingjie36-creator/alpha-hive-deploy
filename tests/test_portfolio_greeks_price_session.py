@@ -34,6 +34,13 @@ import portfolio_greeks as pg
 import twelve_data as td
 from is_trading_day import is_trading_day
 
+
+@pytest.fixture(autouse=True)
+def _stock_book_in_hedge(monkeypatch):
+    """v0.45.701 起 SPY 覆盖缺省不看股票纸面组合（`hedge_stock_book=False`）。本文件的夹具拿股票仓当「一行有价的标的」
+    来测取价 / 成交 / 排除这些通用机制，所以钉回旧口径；缺省口径的行为在 `tests/test_portfolio_greeks_straddle_only.py`。"""
+    monkeypatch.setitem(pg.CONFIG, "hedge_stock_book", True)
+
 ET = ZoneInfo("America/New_York")
 LA = ZoneInfo("America/Los_Angeles")
 AS_OF, PREV = "2026-10-06", "2026-10-05"

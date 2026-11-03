@@ -732,3 +732,16 @@ class TestEventMissedMarker:
         assert "r.event_missed === true" in js and "事件前被平" in js
         assert 'kpi("其中测到事件"' in js and "event_split" in js
         assert "es.saw_event.by_side" in js, "「按方向」表要只含测到事件的那批，否则事件前被平的会拉低买跨式胜率"
+
+
+class TestEntryWindowStatus:
+    """v0.45.693：账本只在财报前最后一个交易日开仓——窗口外的合格信号显示「等待」，不显示成「跳过」。"""
+
+    def test_waiting_and_skipped_are_told_apart(self):
+        sigs = [{"ticker": t, "as_of": "2026-11-02", "eligible": True, "label": "rich", "ratio": 2.0}
+                for t in ("AAA", "BBB", "CCC")]
+        skipped = [{"date": "2026-11-02", "ticker": "AAA", "reason": "waiting: opens within last 2 sessions before earnings 2026-11-20"},
+                   {"date": "2026-11-02", "ticker": "BBB", "reason": "cheap side disabled"}]
+        out = {r["ticker"]: r["status"] for r in SD.signals_today(sigs, "2026-11-02", set(), skipped)["eligible"]}
+        assert out == {"AAA": "等待：进入财报前开仓窗口后再开", "BBB": "跳过：cheap side disabled",
+                       "CCC": "未开仓（原因未记录）"}

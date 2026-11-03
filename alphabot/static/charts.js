@@ -214,18 +214,47 @@ export function columns(el, { x, values, fmt = usdShort, diverging = true, color
 }
 
 // 盘中热力图：x 时间、y 行权价、值 = 净 GEX（发散：橙—暖灰—蓝）
-export function heatmap(el, { times, strikes, cells }) {
+// 盘中热力图（行权价 × 拍）叠现价 / Zero Gamma 路径。x 为类目轴（按拍、不等距），y 为数值轴——
+// 价格线才能画在两个行权价之间；格子用 custom series 自己画（ECharts 的 heatmap 只认两根类目轴）。
+// 数据由服务端 intraday_heat.build 排好：cells 每行 [拍, 行权价（分桶时 = 桶中心）, 真值, 上色用的截断值, 桶里几个行权价]。
+export function gammaTrace(el, hm) {
   const c = C();
-  const maxAbs = Math.max(1, ...cells.map((d) => Math.abs(d[2])).filter(isNum));
+  const { times, strikes, cells, price, zero_gamma: zg, clip } = hm;
+  const st = hm.step || 1;
+  const lo = Math.min(...strikes) - st / 2, hi = Math.max(...strikes) + st / 2;
+  const lineOf = (arr) => arr.map((v, i) => [i, isNum(v) ? v : null]);
+  // 成交活跃度不分正负（signed === false）：单色由浅到深，0 起；净 GEX 仍是发散色
+  const unsigned = hm.signed === false;
+  const valFmt = hm.basis === "activity_volume" ? (v) => `${num(v, 0)} 张` : (v) => `${usdShort(v)} / 1%`;
+  const cellLabel = unsigned ? (hm.basis === "activity_volume" ? "新增成交" : "新增成交 × gamma")
+    : (hm.mode === "delta" ? "较上一拍" : "净 GEX");
   return mount(el, {
-    grid: { left: 64, right: 90, top: 12, bottom: 44 },
-    tooltip: { formatter: (p) => `${times[p.value[0]]} · 行权价 <b>${num(strikes[p.value[1]])}</b><br>净 GEX：${usdShort(p.value[2])} / 1%` },
-    xAxis: { type: "category", data: times, splitArea: { show: false } },
-    yAxis: { type: "category", data: strikes.map((s) => num(s, s % 1 ? 1 : 0)) },
-    visualMap: { type: "continuous", min: -maxAbs, max: maxAbs, calculable: false, orient: "vertical", right: 0, top: "middle",
-      itemHeight: 160, itemWidth: 10, text: ["正", "负"], textStyle: { color: c.ink3, fontSize: 11 },
-      inRange: { color: [c.neg, c.negSoft, c.sunk, c.posSoft, c.pos] }, formatter: (v) => usdShort(v) },
-    series: [{ type: "heatmap", data: cells, itemStyle: { borderColor: c.surface, borderWidth: 1 } }],
+    grid: { left: 56, right: 84, top: 30, bottom: 44 },
+    legend: { top: 0, left: 0, data: ["现价", "Zero Gamma"] },
+    tooltip: { trigger: "item", formatter: (p) => p.seriesType === "custom"
+      ? `${times[p.value[0]]} · 行权价 <b>${hm.bucket ? `${num(p.value[1] - hm.bucket / 2)}–${num(p.value[1] + hm.bucket / 2)}` : num(p.value[1])}</b>`
+        + `${hm.bucket ? `（${p.value[4]} 个行权价合计）` : ""}<br>${cellLabel}：${valFmt(p.value[2])}`
+      : `${times[p.value[0]]} · ${p.seriesName} <b>${num(p.value[1])}</b>` },
+    xAxis: { type: "category", data: times, boundaryGap: true, splitArea: { show: false } },
+    yAxis: { type: "value", min: lo, max: hi, splitLine: { show: false },
+      axisLabel: { showMinLabel: false, showMaxLabel: false, formatter: (v) => num(v, st < 1 ? 1 : 0) } },
+    visualMap: { type: "continuous", dimension: 3, seriesIndex: 0, min: unsigned ? 0 : -clip, max: clip, calculable: false,
+      orient: "vertical", right: 0, top: "middle", itemHeight: 160, itemWidth: 10, text: unsigned ? ["多", "少"] : ["正", "负"],
+      textStyle: { color: c.ink3, fontSize: 11 }, formatter: (v) => (hm.basis === "activity_volume" ? num(v, 0) : usdShort(v)),
+      inRange: { color: unsigned ? [c.sunk, c.posSoft, c.pos] : [c.neg, c.negSoft, c.sunk, c.posSoft, c.pos] } },
+    series: [
+      { name: "GEX", type: "custom", clip: true, data: cells, encode: { x: 0, y: 1, tooltip: [0, 1, 2, 4] },
+        renderItem: (params, api) => {
+          const p = api.coord([api.value(0), api.value(1)]), sz = api.size([1, st]);
+          return { type: "rect", shape: { x: p[0] - sz[0] / 2, y: p[1] - sz[1] / 2, width: sz[0], height: sz[1] },
+            style: { fill: api.visual("color"), stroke: c.surface, lineWidth: 0.5 } };
+        } },
+      // 只有一拍时一条线画不出来（只有一个点）⇒ 那时显示点
+      { name: "现价", type: "line", data: lineOf(price), showSymbol: times.length === 1, symbolSize: 8, connectNulls: false, z: 4,
+        lineStyle: { width: 2.2, color: c.ink, shadowColor: c.surface, shadowBlur: 4 }, itemStyle: { color: c.ink } },
+      { name: "Zero Gamma", type: "line", data: lineOf(zg), showSymbol: times.length === 1, symbol: "emptyCircle", symbolSize: 8, connectNulls: false, z: 3,
+        lineStyle: { width: 1.6, color: c.ink, type: "dashed", shadowColor: c.surface, shadowBlur: 3 }, itemStyle: { color: c.ink } },
+    ],
   });
 }
 

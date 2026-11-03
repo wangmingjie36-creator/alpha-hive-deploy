@@ -89,17 +89,28 @@ def _download_cboe_index_csv(symbol: str) -> Optional[str]:
     """拉取 CBOE 指数日线 CSV 原文；失败返回 None（不抛，调用方据此降级）。"""
     try:
         from cboe_options import _CBOE_SEM  # 与全部 CBOE 请求共用一把锁，同 cboe_vix
+        from cboe_options import CboeContentEncodingError, fetch_cboe_bytes   # v0.45.692：请求 gzip
     except Exception:  # pragma: no cover
         import threading
         _CBOE_SEM = threading.Semaphore(1)
+
+        class CboeContentEncodingError(Exception):   # 降级分支里不会被抛
+            pass
+
+        def fetch_cboe_bytes(u, timeout):   # 降级：cboe_options 都 import 不了时的旧写法（不压缩）
+            return urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"}),
+                                          timeout=timeout).read()
     url = _CBOE_INDEX_CSV_URL.format(symbol)
     last_err = None
     for attempt in range(_CBOE_RETRIES):
         try:
             with _CBOE_SEM:
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                raw = urllib.request.urlopen(req, timeout=_CBOE_NET_TIMEOUT).read()
+                raw = fetch_cboe_bytes(url, _CBOE_NET_TIMEOUT)
             return raw.decode("utf-8", errors="replace")
+        except CboeContentEncodingError as e:
+            # 编码不对不是瞬时故障：不重试（已在 fetch_cboe_bytes 计 bad_encoding）
+            logger.error(f"CBOE {symbol} CSV：{e}（不重试；counters.cboe.bad_encoding）")
+            return None
         except Exception as e:  # noqa: BLE001 - 网络层什么都可能抛
             last_err = e
             if attempt < _CBOE_RETRIES - 1:

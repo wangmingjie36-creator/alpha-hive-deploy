@@ -5,7 +5,513 @@
 
 ---
 
-## [0.45.689] — 2026-10-29 — 占位（进行中：Alpha Bot 接 SPX / XSP 指数期权链——名字映射、SPX 月度上午结算合约到期日剔除、侧栏「指数」、热力图行权价分桶）
+## [0.45.710] — 2026-11-03 — 占位（进行中：CLAUDE.md 更正 BILI 的 CBOE 文件刷新说法）
+
+## [0.45.709] — 2026-11-03 — Added：alpha_hive MCP 加四个 yfinance 工具（财报三表 / 分析师评级与升降级 / 持仓结构 / 分红拆股）；MCP 进程的 yfinance 调用接上 `yf_gate`
+
+**为什么**（用户 2026-11-03 定）：想在对话里看基本面与分析师数据。`mcp-servers/yahoo-finance-mcp`（03-14 下载、从未装依赖 / 注册）有这些，
+但另起一个服务器会多一个打 Yahoo 的入口、带进质量更差的雅虎期权链；选择加进已注册的 `alpha_hive`（`~/.claude.json` 里唯一的 MCP）。
+⚠️ MCP 由**生产克隆** `~/alpha-hive-prod/alpha_hive_mcp.py` 启动 ⇒ 下一个扫描日克隆快进后、**新开会话**才看得到新工具。
+
+### Added
+- `alpha_hive_mcp.py`：
+  - `alphahive_get_financials`：`income` / `balance` / `cashflow` × `annual` / `quarterly`，最近 1–8 期（缺省 4），最新在前；每期全空的科目丢掉并计数；数值按 Yahoo 原样（公司报告币种，不换算）。
+  - `alphahive_get_analyst_ratings`：评级人数（当月与前几月）+ 窗口内（缺省 90 天）升降级，最多 30 条、另给窗口内总数；有目标价字段就带上。
+  - `alphahive_get_holders`：持股结构（内部人 / 机构占比、机构数）+ 前 10 机构、前 10 基金（13F，最多滞后一季；内部人交易仍以 SEC Form 4 工具为准）。
+  - `alphahive_get_corporate_actions`：近 N 年（缺省 5）现金分红 + 全部拆股史（比例 4.0 = 1 拆 4，0.1 = 10 并 1）。
+  - **「Yahoo 给了空」不说成「没有」**：Yahoo 在取数静默失败时同样返回空表（`paper_portfolio.py` 记过 `splits` 这个坑）⇒ 空的一节返回 None，`unavailable` 里写明「分不清是没有还是取失败」。
+  - **限流**：四个工具经 `yf_gate.gated_call`；429 ⇒ 返回 `rate_limited: true` + `retry_after_sec`、不重试，且进入闸门冷却（冷却中再调一次都不打 Yahoo）。
+    真实入口 `__main__` 先 `yf_gate.install()` 再 `mcp.run()` ⇒ 既有的 quote / options / price_history 也从此受闸（本进程的令牌桶 + 429 冷却）；import 本模块不装（不给测试进程打补丁）。
+    令牌桶是**进程内**的（`resilience.yfinance_limiter`，0.5 次/秒、burst 1），不与扫描进程共用——共用的只是 Yahoo 那一侧按 IP 的限额。代价：`get_options_snapshot` 一次 5 个 yfinance 调用（options + 4 个到期日链）⇒ 响应约多 8 秒；新工具 1–2 个调用、几乎无感。要放宽可在 `~/.claude.json` 该 server 的 env 里设 `ALPHA_HIVE_YF_RATE`（只影响 MCP 进程）。
+- `yf_gate.gated_call(fn, what)`：纯新增的公开包装（内部即 `_gated`）。`install()` 的 Ticker 成员名单只列扫描用的那几个，往名单里加 `income_stmt` / `splits` 等会连带改变
+  `earnings_watcher`（`quarterly_income_stmt`）与 `swarm_agents/cache`（`splits`）在每日扫描里的取数行为——那是另一件要单独决定的事，本版不动名单。
+
+### Tests
+- `tests/test_alpha_hive_mcp_fundamentals.py`（30 条，离线、假 `yf.Ticker`、读钟只有 `alpha_hive_mcp._today` 且钉住；闸门的冷却 / 计数逐条隔离，不让造出来的 429 波及同会话的扫描测试）：
+  形状与取值、NaN / NaT → None（严格 JSON 解析）、窗口边界、条数上限、空节为 None 加原因、四个工具各自 429 ⇒ `rate_limited`、
+  **冷却中再调假 Ticker 一次都不被碰**（证明每个工具真走闸门——只看返回值证明不了，`_yf_err` 按异常文本也认得出 429）、注册 / docstring / 入口装闸门（AST）。
+- 已做变异 7 条全红：财报 / 持仓绕过闸门、空分红说成 `[]`、NaN 不清洗、入口不装闸门、窗口边界 `<` → `<=`、限流当普通错误。
+- 真实冒烟（NVDA，13:38 扫描前、无别的扫描在跑）：四个工具全部取到数，闸门 5 次调用 0 次限流。
+- `tests/test_yf_rate_limit_handling.py::TestDocsAndScope`：「只有 Alpha Bot 层用 `is_rate_limited` / `retry_after_sec`」的登记加上 `alpha_hive_mcp.py`（对话用独立进程、不被任何生产模块 import；守卫本意「扫描路径不依赖」不变）。
+- 整套：13530 passed、1 failed（即上面这条守卫，登记前）、1 skipped、82 deselected、2 xfailed，728 s（14:00 扫描期间跑的，耗时不可比）；补登记后该文件与新测试文件 78 passed。
+
+### 未做 / 待验证
+- yfinance 对这几类数据被 429 时是**抛**还是**吞掉返回空**未实测（真 429 无法安全复现）：若是吞掉，会走「空 ⇒ None + 分不清」那条，不会说成「没有」，但也不会进冷却。
+- 没加新闻工具（BuzzBee 的情绪通道在 H1 检验中，对话里另开一个雅虎新闻入口无必要）。`mcp-servers/yahoo-finance-mcp` 本身未删，由用户定。
+
+## [0.45.708] — 2026-11-03 — Changed（**事后**·预注册修订 4）：维度 IC 协议的 H1 改测 buzz_v1 的非价格子合成 buzz_v1_np；buzz_v1 降为描述项
+
+**事后**（协议 §11）：窗口内（2026-10-12 起）修改 H1 的对象与截断集合。用户 2026-11-03 在对话里逐条确认草稿的五条待定项（全部同意）。
+**盲化声明**：H1 已结算合格周 1 / 26；起草与登记期间没有查看任何收益、IC、t 或 p，窗口内只读过 `buzz.comp.*` 通道值（方差份额）。
+理由、定义、功效重算、风险全文在 `experiments/dim_ic_preregistration.md` §13.13。
+
+### Changed
+- `experiments/dim_ic_preregistration.md`：新增「修订 4」/ §13.13；头部、§2、§6、§7、§9 各加修订 4 的指引。
+  - **H1 的对象 = buzz_v1_np** = `reddit` × 0.25 + `news` × 0.25 + `yahoo` × 0.05（buzz_v1 冻结权重、按序相加）。不含 clamp 和两项调整，因为调整的输入含价格。F&G 不进（横截面恒定）。
+  - 理由：
+    - v0.45.697 的长历史回测里，价格通道留出期全部未检出。
+    - 价格通道在窗口内约占合成值横截面方差的 40%（只读通道值）。
+    - 合成值与其非价格部分的秩相关只有 0.75，把 H1 的功效从登记承诺水平稀释掉（终检 IC=0.09：50% → 76%）。
+  - **截断集合收窄为三个情绪通道**：改生产 Buzz 的价格通道 / 行情量 / F&G / 合成与调整层不再终止 H1。
+  - **2026-10-14 回到 H1**：它原本是靠隔离 `price.volume_ratio` 才对 H1 无效的。当天按 §3 意向性口径照算，修订 3 的敏感性分析并列给出去掉它的结果。
+  - **buzz_v1 降为描述项**：每次检视照报 IC / CI / 朴素 p，不进 Holm 族，不触发动作，按修订 1 的两层照旧截断。
+- `experiments/dim_ic_protocol.py`：
+  - `HYPOTHESES[0]` → `("H1", "buzz_v1_np", H1_INPUT_SIGNALS)`。
+  - `H1_INPUT_SIGNALS` 改为三个通道。
+  - 新增 `H1_NP_WEIGHTS`、`H1_V1_DESCRIPTIVE`；修订 1 的 11 个输入层信号改名 `H1_V1_INPUT_SIGNALS`。
+  - `AMENDMENTS` 追加修订 4，并补登当时只写进文档、漏追加到这里的修订 2 / 3（照抄标题与性质，内容不变）。
+- `experiments/dim_ic_forward_test.py`（执行器）：
+  - `load_rows` 从 `signal_archive` 读三个通道挂到每行，表不在 ⇒ 无法判定，不当「没样本」。
+  - H1 值 = `nonprice_composite`，缺任一通道 ⇒ 该行无效，不补 0。
+  - 值函数改收整行。
+  - 描述项 buzz_v1 进 `items()` / `truncation`，`decide()` 在协议出结论时给出 `descriptive_buzz_v1`。
+  - `apply_self_proof` 不再把检视点改判「无法判定」（自证只关系到描述项）。
+  - `input_code_guard` 只让信号触及 H1 截断集合的指纹单元挡检视点。`price.fields` / `buzz.fear_greed` 的问题进 `descriptive_only`，进度行只提示。没有任何单元守着 H1 ⇒ 不 ok。
+  - 进度行标「修订 4：H1 = buzz_v1_np」；描述项截断只作提示。
+- `buzz_v1.py`：`frozen_only_boundary` 改读 `H1_V1_INPUT_SIGNALS`（buzz_v1 自己的输入层）。
+- `signal_code_fingerprints.py`：注释更新。单元覆盖的仍是 buzz_v1 的全部输入层，H1 用的是其子集。
+
+### Tests
+- `tests/test_dim_ic_protocol.py`：
+  - 钉修订 4 常量与四条修订。
+  - 文档检查加「H1 的对象 = **…**」、子合成权重、描述项信号。新增变异：H1 对象回到 buzz_v1、yahoo 权重改值。
+  - H1 不含价格 / F&G；子合成权重 = buzz_v1 冻结权重。
+- `tests/test_dim_ic_forward_test.py`：
+  - 夹具把三个通道（= sentiment）写进 `signal_archive`。
+  - 新增：
+    - H1 是有序线性子合成，通道反序时 IC = −1，同时 buzz_v1 = +1。
+    - 缺通道不补 0；表不在 ⇒ 无法判定。
+    - Buzz 分数隔离只打描述项。
+    - 价格 / F&G / 冻结层边界不截断 H1、只截断描述项。
+    - 指纹单元分流（行情 / F&G 只提示；四个情绪相关单元挡 H1；单元缺报不 ok）。
+    - 自证不再挡 H1。
+- `tests/test_quarantine_1014_prev_session.py`：10-14 回到 H1；描述项 buzz_v1 照旧丢这一天（含删条目的对照）。
+- `tests/test_signal_code_fingerprints.py`：覆盖对 `H1_V1_INPUT_SIGNALS`，H1 截断集合是其子集。
+- `tests/test_step_contract_ic_rerun.py`：`TestRealCli` 的沙箱库补一张**空**的 `signal_archive` 表（生产 schema）。
+  - 原因：整套里这 3 条红过——新规则「表不在 ⇒ 维度 IC 无法判定」把段首变成 cannot_judge，正是该规则要的可见性。
+  - 空表下「沙箱没有归档 ⇒ 自证不通过」这个前提照旧成立。
+
+### 真实数据核对（只有进度，没有效应量）
+- 执行器在生产库上跑：`not_ready`，H1 已结算合格周 1/26，三条截断全无。JSON 里没有任何 ic / p / t / ci95 键。
+- 桥接核对：情绪组 10/10 天通过（对 H1 有意义的那组），行情组 7/10。
+
+
+## [0.45.707] — 2026-11-03 — Fixed：全仓守卫的「本仓 .py」枚举剪掉嵌套 git 仓库（开发检出里 `test_yf_daily::TestSingleEntry` 两条红的根因）；移除 `mcp-servers/*` 孤儿 gitlink
+
+**现象**：开发检出里 `tests/test_yf_daily.py::TestSingleEntry` 两条红（0.45.704「未做」里记过，HEAD 干净 worktree 全绿）——多出来的命中全在
+`mcp-servers/maverick-mcp/maverick_mcp/…`（别人的仓库，直调 yfinance `.history(` / `.download(`）。
+
+**根因（两层）**：
+1. 共享件 `tests/_repo_files.py::walk_own_python_files` 读工作树，剪枝只认目录**名字**（skip / vendored / 点号 / iCloud），**不认「这是另一个 git 仓库」**。
+   `.venv` 剪掉了，maverick 自己的 392 个 `.py` 照扫。只在开发检出红：worktree / CI 里那些目录是空的。同一缺口此前靠两份手写清单各自补
+   （`test_no_fake_price._EXCLUDE_DIRS`、`test_scout_consensus_excluded` 的裸 rglob），`test_yf_daily` 没补就红了，下一条全仓守卫照样会漏。
+2. `mcp-servers/` 下 5 个目录是本仓索引里的 gitlink（mode 160000）却**没有 `.gitmodules`**——2026-03-16 日报自动提交（`d37cda98`）顺手带进来的，
+   生产克隆里全是空目录、无任何代码 / 配置引用（同类先例：2026-06-27 `2c22539f` 移除 FinanceNews-MCP）。
+
+### Fixed
+- `tests/_repo_files.py`：新判据 `_is_nested_repo`（目录里有 `.git`，文件或目录都算——子模块 / worktree 是文件、独立克隆是目录；`lexists`，坏链接也剪）。
+  `walk_own_python_files` 遍历时剪掉，`pruned` 原因记 `nested_repo`；`own_python_files` 的 git 分支与 rglob 回退**同口径**也剪（`_nested_repo_filter`，按目录缓存）。
+  只判根以下的目录（根自己有 `.git`）。按名字补一条 `mcp-servers` 会是第三份手抄清单，故不这么做：名叫 `mcp-servers` 但没有 `.git` 的目录仍算第一方。
+
+### Changed
+- `tests/test_scout_consensus_excluded.py::_calls_with_peer_census_false`：裸 `rglob` + 手写 `{.claude, mcp-servers, worktrees …}` 改走 `walk_own_python_files`
+  （`skip_dirs` 只留本守卫目的：tests / experiments / `_retired_pre_phase5`；本检出无更深层的同名目录，按任意深度剪与原「只看首段」等价）。顺带不再枚举 maverick 的 `.venv`。
+- `tests/test_no_fake_price.py`：`_EXCLUDE_DIRS` 去掉 `mcp-servers`（由嵌套仓库判据统一认）。
+
+### Removed
+- 索引里的 5 个孤儿 gitlink（`git rm --cached`：finance-tools-mcp / maverick-mcp / mcp-optionsflow / shareseer-mcp-server / yahoo-finance-mcp）；`.gitignore` 加 `/mcp-servers/`。
+  **磁盘上的克隆不动**（开发检出的 maverick-mcp 等照旧在）。快进后生产克隆里那几个空目录会被 git 顺手删掉，无读者。
+
+### Tests
+- `tests/test_repo_files_walk.py`：合成树加两种嵌套仓库形状（`.git` 文件 / `.git` 目录）与旁边的第一方 `ext/own.py`；新增「`own_python_files` 两条分支都剪」
+  （git 分支用假 `subprocess.run` 喂清单）；新增真实仓库对账「遍历到的每个目录按 `git rev-parse --show-toplevel` 都属于本仓」（独立于 `_is_nested_repo`）。
+- 已做变异（worktree 里先本地克隆一份 maverick 复现开发检出状态）：去掉遍历的 `nested_repo` 分支 ⇒ 合成树 3 条 + 真实仓库对账 + `test_yf_daily::TestSingleEntry` 红；
+  `_nested_repo_filter` 恒假 ⇒ 两分支那条红。修后 `TestSingleEntry` 9/9 绿（有 maverick 克隆在场）。
+- 整套（worktree 里放着本地 maverick 克隆，即开发检出的状态）：13488 passed、1 skipped、82 deselected、2 xfailed，1246 s，0 失败；开跑前无别的 pytest / 审计在跑。
+
+## [0.45.706] — 2026-11-03 — Fixed：v0.45.704 二次检查——坏的旧审计会让「回落」本身把整轮对冲弄崩；日报没标注回落
+
+### Fixed
+- `portfolio_greeks._stock_book_nav`：回落读的旧审计若不是对象（如 `[1,2]`）、`nav` / `components` 形状不对、上一轮回落记录的 `origin_date` 不是字符串，此前会抛 `AttributeError` 等 ⇒ **为了不挡对冲而加的回落反而让整轮异常中断**（跨式也不对冲）。现在逐份跳过坏审计、继续找更早的好审计；审计目录读不了（`OSError`）⇒ 不回落、NAV 不可得并把原因写进 `reason`。另加完整性检查：审计内容里的 `as_of` 必须与文件名日期一致，否则不认（防改名 / 拷错的文件把别的日子的值带进来）。
+- `_data_gaps`：股票账读不了且审计里也没有旧值时，「数据不全」告警此前只写「NAV 缺 stock_book」，现在补上原因（如 `LedgerCorrupt: …`）。
+- `render_markdown`（日报对冲段）：回落那天的「合并 NAV」后面标注「⚠️ 纸面组合净值读不了，股票账用 <日期> 的旧值」——此前日报里看不出分母是旧的。
+
+### 查过、没问题的
+- `combined_nav_detail` / `_stock_book_nav` 只在 `portfolio_greeks` 内部被调用；其他模块都不直接取 NAV。
+- 历史放行闸（`load_history`）管的是「别的模块绕开它读历史」，这里是账本属主读自己的审计、只取股票账净值（来自纸面组合净值文件，与定价场次无关），所以不套价格放行判据，只核对日期一致。
+
+### Tests
+- `tests/test_portfolio_greeks_straddle_only.py` 加 10 条：6 种坏审计（参数化）都跳过、改用更早的好审计；上一轮回落记录形状不对不崩；审计目录读不了 ⇒ 不回落且写明原因；「数据不全」写明原因；日报回落那天有标注、健康日没有。用 v0.45.704 的代码跑这 10 条 ⇒ 8 条红（剩下 2 条是坏 JSON 和非数字值，旧代码已经能正确处理）。
+
+## [0.45.705] — 2026-11-03 — Fixed：IC 重跑就绪度的「预计到位」日期系统性偏早、每周往后挪——按根因重写成可算的部分照算
+
+起因：11-03 月报里这行从 10-30 的 2027-01-22 跳到 11-02 的 2027-02-22（合格周都是 1/25）。
+
+**根因**（`ic_rerun_readiness.assess`，≤ v0.45.704）：`ETA = 今天 + 还差周数 ÷ 速率`，速率 = 世代内有扫描的 ISO 周数 ÷ `floor(已过天数/7)`。
+- 分子含边界周与**没过完的当周**、分母只数满周 ⇒ 每周都扫描时速率恒为 (N+1)/N，> 1（一个日历周最多产出一个合格周）。世代第 1 周算出 2.0 ⇒ 日期被砍半；之后速率 2.0 → 1.5 → 1.33 …，日期每到周一就往后跳（11-09 会报 ≈03-09、11-16 ≈03-19 …），慢慢逼近真值。
+- 公式还把两种不同的量混在一起：分子是「还差几个**已成熟**周」，速率是「**扫描**周」的节奏；已扫描、还在等 T+7 的周没算，T+7 滞后也没算（两者大致抵消，所以只修计数差一会留下逐日 ±1 周的锯齿）。
+- 只影响展示（Step 11 摘要行、月报三.六、命令行）；`ready` 判定只看已攒合格周数，**不受影响**。不是预注册检验，不碰任何盲化或样本。
+
+### Fixed
+- 新增纯函数 `ic_rerun_readiness.project_eta`：能算的照算，只估一样真不知道的东西——以后每周有没有扫描。
+  - 已成熟的周：数出来。
+  - 已扫描、没成熟的周（在路上）：成熟日 = 该周最早一条 + 7 个交易日，用 `is_trading_day.add_trading_days`（回填用的同一个交易日函数；实测 10-19 那周 10-28 当天计入）。
+  - 逾期周（该周最晚一条的 T+7 都过了、还一条没回填）：**不计入**预计（`close_t7` 另行取价，失败不一定会自己补上），单独报数，摘要行写「⚠️ N 周已过 T+7 仍没有一条回填，未计入预计」。
+  - 还要扫描的周：按「已过完的 ISO 周里有扫描的比例」（≤ 1，不含当周）排到以后的周上，向上取整（宁晚勿早），成熟日同上。世代第 1 周还没有过完的周 ⇒ 按每周都扫描算，`pace_basis="assumed_every_week"`，摘要行写明是假设。
+  - 过完的整周一周都没扫、只有当周有扫描 ⇒ 不给日期，摘要行写「估不出节奏」，不再说成「还没有扫描产出」。
+- **自洽性**：世界恰好按估计器的假设运行（每周都扫描、按时回填）时，日期逐日不变、等于真值；只有新信息（漏扫一周 / 出现逾期周）才挪它。生产库只读实跑：11-02、11-03 都是 **≈2027-04-14**（约 23 周后；第 25 周到 T+7，按已过 2 个整周里 2 周有扫描的节奏）。
+- 结果字段只增不减：`calendar_weeks_elapsed` 改为「已过完的 ISO 周数」（11-02 时与旧值同为 2），`weeks_per_calendar_week` 改为其中有扫描的比例（≤ 1）；新增 `completed_weeks_scanned` / `pace_basis` / `weeks_in_pipeline` / `weeks_overdue`。摘要行与命令行文案随之改写；摘要行对缺新键的旧形状结果照常出一行（`.get`）。
+- 命令行入口：`assess` 改用外壳同一个业务日（`--today` 缺省时 = 洛杉矶当日），此前缺省读本机日期——新算法的「在路上 / 逾期」与今天是哪天有关。编排器 Step 11 本就显式传 `--today`，生产无变化。
+
+### 二次检查（同日，整套 + 独立审查）
+- **整套抓到 8 红**：`tests/test_ic_rerun_fg_budget.py` 的真实进程树测试把生产文件按清单拷进 tmp 再起子进程，清单里没有 `is_trading_day.py` ⇒ `project_eta` 的导入在子进程里 `ModuleNotFoundError`、工具退出码 3。生产克隆是完整仓库、不受影响；清单补上该文件（它只依赖标准库，不会再连带别的）。开发期「相关测试」漏了它：按 `import ic_rerun_readiness` 圈，圈不到「把它当文件拷走」的测试。
+- 独立审查（只读代码、不给结论）：生产逻辑无缺陷；处置如下——
+  - 旧条 `test_eta_uses_observed_rate_not_calendar` 只断言「> 还差周数」，T+7 滞后与起点本身就多出约 0.3 周 ⇒ 塞「忽略节奏」变异照样绿。改为断言精确日期（节奏 1/2 ⇒ 第 42 个候选周）。
+  - 补 4 处缺口：逾期按该周**最晚**一条判（周一那条到期没熟、周五那条还没到 ⇒ 仍在路上）；当周没扫且今天是周末 ⇒ 候选从下周起；有日期晚于今天的行 ⇒ 候选排在它之后；命令行人读输出此前没有测试经过。
+  - 一条扫描都没有时，命令行不再印「按每周都扫描算」（那个假设没被用上）。
+  - `T7_TRADING_DAYS` 与 backtester 的 `days_map["t7"]` 加 AST 对账测试（两处各写各的会漂）。
+  - docstring 更正：「只有新信息才挪日期」只在稳态成立；漏扫后恢复扫描，节奏逐周回升，日期会逐步提前、从晚的一侧收敛到「少了那一周」的真值（向上取整的设计后果，不改）。
+  - 不改：手动跑不带 `--today` 时，共振 / 维度 IC / F&G 子项仍收 `None`（它们 `today=None` 的语义是「不判陈旧」，改了会改行为；编排器总是传 `--today`）。
+- 生产数据逐日回放（10-19 → 11-03，每个交易日按当天可见的行算）：新算法每天都是 **2027-04-14**；旧公式同期报 01-21 → 01-22 → 02-22。
+
+### Tests
+- `tests/test_ic_rerun_readiness.py` 新增 `TestEtaIsSelfConsistent`（12 条，其中不动点 2 条参数化）与 1 条「估不出节奏」，并收紧 1 条旧测试：
+  - **不动点**：世代起每个交易日都扫描，逐个交易日（9 周）跑 `assess`，预计日期必须恒等于独立算出的真值（第 25 / 第 5 个 ISO 周的第一个交易日 + 7 个交易日），且速率 ≤ 1；
+  - 世代第 1 周写明是假设；漏扫一周 ⇒ 至少晚到「少一周」的真值；逾期周不算供给且摘要行点名；节奏 2/3、还差 1 周 ⇒ 取第 2 个候选周（纯函数直测）；以及二次检查补的 6 条（见上）。
+- `tests/test_ic_rerun_fg_budget.py`：拷贝清单补 `is_trading_day.py`。
+- 变异 14 种全红：塞回旧公式、当周算进已过完的周、逾期周算成在路上、逾期按最早一条判、在路上按最晚一条算成熟、向上取整改向下、忽略节奏、忽略在路上的周、滞后按日历天、当周永不当候选、去掉周末判断、去掉「排在未来行之后」、T+7 常数漂移、无日期也印假设。第一轮「向下取整」没红 ⇒ 补节奏 2/3 那条；「忽略节奏」「逾期按最早一条」「去掉周末判断」「去掉未来行判断」4 种，审查按推理指出当时的测试拦不住（未逐一实测），补测试后实测全红。
+- 拨钟审计 +7 / +45 天：90 条 0 新红。
+
+## [0.45.704] — 2026-11-03 — Changed：纸面组合账本坏了也不挡跨式的 SPY 对冲（用户 2026-11-03 定）
+
+v0.45.701 之后，SPY 对冲对纸面组合只剩一处依赖：合并 NAV（百分比分母）里的「股票账」分量。此前它读不了（`LedgerCorrupt` / 净值文件没了 / import 出错）⇒ 整轮抛异常或 NAV 不可得 ⇒ 跨式也不对冲。
+
+### Changed
+- `portfolio_greeks._stock_book_nav`（新）：`hedge_stock_book=False` 时读纸面组合净值失败 ⇒ 用**最近一份审计**（`greeks_<日期>.json`，日期 ≤ as_of）记下的 `nav.components.stock_book` 顶上，跨式照常对冲；回落说明（原因 / 取自哪份审计 / `origin_date` = 那个值真正读到的那天，链式回落不往后挪）写进 `nav.stock_book_fallback` 与 `price_check.nav_fallback`。审计里也找不到 ⇒ NAV 照旧不可得、当日不对冲（不编值）。`hedge_stock_book=True`（旧口径）照旧严格：账本坏了停下。
+- 可见性：ERROR 日志；`alert_manager._check_portfolio_greeks_prices` 新增 P2「纸面组合净值读不了，NAV 分母暂用 <日期> 的旧值」（顶不上的那种由原有「数据不全」那条报）；Alpha Bot 对冲页黄条（`alphabot/hedge.py` 载荷带 `nav_fallback`、`hedge.js` 显示）；帮助页加一条说明。
+
+### 取舍
+- 回落期间带宽 / 尾部告警线按旧分母折算；股票账多日坏着时分母会越来越旧，但每天都有 P2 点名起始日期。
+
+### Tests
+- `tests/test_portfolio_greeks_straddle_only.py` 加 14 条：账本损坏 / 文件缺失 / import 失败三种都回落且照常判带；取最新且不取 as_of 之后的审计；跳过没值的审计；链式回落保留原始日期；审计里没有 ⇒ 不对冲并点名；健康日无回落；旧口径对照仍抛 `LedgerCorrupt`；真跑两天第二天账本坏照常落盘并在审计留回落说明；P2 告警与健康日静默；对冲页载荷。变异：去掉回落 ⇒ 10 条红；去掉告警 ⇒ 1 条红。
+
+## [0.45.703] — 2026-11-03 — Fixed：v0.45.701 二次检查的小修（没有逻辑 bug；三处措辞 / 一致性）
+
+二次检查范围：股票行的全部读者（只在 `portfolio_greeks` 内部）、对冲页 / 帮助页 / `/api/method` 规则接线、NAV 分母依赖、审计历史与告警路径。**没发现会算错或会误成交的问题。**
+
+### Fixed
+- `portfolio_greeks.compute_day`：被排除标的的每日 WARNING 改为复用日报那行的措辞——缺省口径下写「BILI（跨式 1 笔）」，不再写「股票仓 0 笔，按建仓价估 不可估」（读着像缺数据）。
+- `alphabot/synthetic.py`：演示数据的对冲规则补上 `hedge_stock_book: False`（演示里本来就没有股票行，与生产缺省一致；此前靠缺键当假）。
+- `alpha_hive_daily_report.py`：组合 Greeks 那段注释更正为「读跨式腿持仓，股票纸面组合只进 NAV 分母」。
+- 更正 v0.45.701 条目里「旧审计黄条即刻不再显示」：要等生产克隆快进（下一个扫描日）并**重启 Alpha Bot** 后才生效。
+
+### 记下、未改（设计如此）
+- 合并 NAV 仍读纸面组合净值文件（取 ≤ as_of 最近一行，纸面组合某天整天跳过不会挡对冲）；但该文件若损坏，`ledger_io` 照旧抛 `LedgerCorrupt` 停下整轮——跨式对冲也随之停。
+
+### Tests
+- `tests/test_portfolio_greeks_straddle_only.py` 加 1 条：缺省口径下排除日志只点名跨式、不含「股票」「不可估」。
+
+## [0.45.702] — 2026-11-03 — Changed：跨式账本入场窗口 1 → 0，只在财报前最后一个交易日开（用户 2026-11-03 定）；影子宽跨预注册修订 5
+
+用户看过「账本 10 笔按财报前一天、当天重选平值重放」（Massive 期权日线最后成交价，卖方 8/10，账本实际 3/10）后，要求账本开仓日与该重放对齐。
+代价照 v0.45.695 的统计：曾有可交易 rich 的 9 个事件，窗口 0 开得出 4 个、窗口 1 是 5 个；那天扫描没跑 ⇒ 这次财报错过。
+
+### Changed
+- `options_paper_leg.py`：`CONFIG["entry_max_sessions_before_event"]` 1 → 0；模块头与注释同步。判据 `entry_window_miss` 不变。
+- `straddle_strangle_shadow.py`：`PREREG["version"]` 4 → 5、`entry_window_sessions` 1 → 0（与账本同值）。
+- `experiments/straddle_strangle_shadow_prereg.md`：§14 新增修订 5（看过什么 / 截断声明：生产克隆仍在 v0.45.688，修订 3 / 4 计入单位为 0，不截断；`start_date` 不变）。
+- Alpha Bot：帮助页窗口为 0 时写「只在财报前最后一个交易日开仓」；跨式页导语同步。
+- 测试：`TestEntryWindow` / `TestRevision3EntryWindow` / `TestProtocolConstantsArePinned` 改为窗口 0 的值（原窗口 1 放行的样例改成断言「等待 / entry_outside_window」）。
+
+### 没改的
+- 到期日仍取信号的 ~30 DTE（重放用的是账本旧单的短到期，数字不能直接当新规则的预期）；只卖不买、财报后第一个交易日平仓、点差上限都不变。
+- ⚠️ 生产克隆在本版时停在 v0.45.688（693 / 696 / 702 都未进生产），下一个扫描日 production_sync 快进后生效。
+
+
+## [0.45.701] — 2026-11-03 — Changed：SPY 带状对冲只对冲跨式腿，不再看股票纸面组合（用户 2026-11-03 定）
+
+### Changed
+- `portfolio_greeks.py`：新增 `CONFIG["hedge_stock_book"]`（缺省 `False`）。股票纸面组合的持仓**不再出行**——不进 β·$Delta / 带位 / SPY 成交决定 / 压力表 / 尾部预算 / 影子闸；它缺价或价陈旧也不再让整天判「数据不全」。合并 NAV（百分比分母）**照旧含股票账净值**：只换分子不换分母，±15% 带与尾部告警线的美元含义不变。`True` = 恢复 v0.45.700 及以前「三本账合起来对冲」的口径。键进 `PUBLIC_RULE_KEYS`，页面 / 帮助页据此改文字。
+- `excluded_exposure`：股票账本来就不进对冲时不再数被排除标的的股票仓 ⇒ BILI 只有股票仓时 `names` 为空；还有跨式时只点名跨式。日报那行同步只写有的那部分。
+- Alpha Bot 对冲页（`static/pages/hedge.js`）：页头说明随 `rules.hedge_stock_book` 切换；「X 不进对冲计算」黄条只点名还有跨式的被排除标的——11-02 那条 BILI 股票黄条（旧审计）在新代码进生产克隆并重启 Alpha Bot 后不再显示（v0.45.703 更正：原写「即刻」）。帮助页（`help.js`）的对冲账本说明与影子闸说明同步。
+- `tail_budget.py`：模块头注明股票账此后贡献为空（只改文档）。
+
+### 影响（2026-11-02 审计实测）
+- 股票账 β·$Delta 约 +$5.5k（−$101.7k 合计里的一小块），去掉后带位几乎不变；但**纸面组合的市场敞口从此完全没有对冲**，这是设计取舍不是遗漏。
+- 已有审计 / 成交 / 净值历史按原口径保留，不重算。
+
+### Tests
+- 新增 `tests/test_portfolio_greeks_straddle_only.py`（12 条）：缺省值与公开规则；$500k 股票仓不出行不成交 + 翻回 `True` 的对照会卖 SPY；NAV 分母仍含股票账；股票缺价不再挡决定；尾部表有跨式无股票；排除黄条只认跨式 + 对照；日报文字；页面静态核对。把开关改回无条件出股票行 ⇒ 红。
+- 6 个既有对冲测试文件加 autouse 夹具钉回 `hedge_stock_book=True`：它们拿股票仓当「一行有价的标的」测取价场次 / 成交 / 排除等通用机制。
+
+## [0.45.700] — 2026-11-03 — Fixed：成交活跃度全为 0 时热力图误报「快照里没有可画的行权价数值」
+
+### Fixed
+- `alphabot/intraday_heat.py`（v0.45.698 二次检查发现）：活跃度口径下算出了格子、但两拍之间一张新成交都没有（冷门票 / 开盘早段常见）时，`build` 因上色截断只看非 0 值而落回通用原因 `no_values`，页面写「快照里没有可画的行权价数值」——把真 0 说成了缺数据，正是 698 要分开的「0 与空」。新增原因码 `no_new_volume`（「算出来了，但这段时间一张新成交都没有，是真 0」）；判定顺序：有格子全 0 ⇒ `no_new_volume`，每拍都没算出 ⇒ `no_activity`，其余（含算了但各格都是 None）仍是 `no_values`。OI / 成交量口径不受影响。
+- 测试 `tests/test_alphabot_intraday_activity.py::TestHeat::test_all_zero_is_a_real_zero_not_missing_values`（两个活跃度口径 + 「各格 None 不冒充真 0」对照）；去掉新分支即红。
+- ⚠️ 0 值格与空格在图上是否分得清（0 画 `--sunk` 最浅色、空格不画）仍未在浏览器里看过，待验证。
+
+## [0.45.699] — 2026-11-03 — Fixed：自攒索引回落的 momentum 窗口滞后一个场次，此前没有任何告警——补可见化（只记录 + P2，不改值、不补算）
+
+**事故（2026-11-02）**：14:31:13 起 CBOE 熔断（断网，`[CB-cboe] closed → open`），14:33:30 半开、14:33:33 恢复。熔断期里处理的 13 只
+（NVDA TSLA MSFT QCOM VKTX META BILI AMZN RKLB CRCL CVX VZ JNJ）没拿到核实收盘（`session_close is None`），`momentum_5d` 由自攒索引补上、
+窗口末端停在 10-30；14:33:50 之后的标的窗口到 11-02。JNJ 是恢复后第一只：CBOE 通了但文件是盘中生成的（`last_trade=15:49 ET`）⇒ 不收。
+重算后这 13 只与对齐窗口平均差 3.45 个点（中位 2.5；RKLB 12.4、BILI 8.0），其余 17 只 ≤ 0.17。不是 Twelve Data 丢末根造成的（momentum 不读 TD）。
+
+**为什么没人知道**：旧判据 `window_behind = session_close is not None and as_of != session_close[0]`——没有 `session_close`（CBOE 熔断 / 断网 / 盘中陈旧文件）
+就恒判「没滞后」；而且 `window_behind_session` 这个计数全仓零读者。判据依赖会失败的那条通道，通道挂了判据一起沉默。
+
+### Changed
+- `data_pipeline.py`：新 `_momentum_window_gap`——应有场次：核实了收盘 ⇒ 那一场；没核实 ⇒ `yf_daily.latest_completed_session()`（日历判不了 ⇒ 不猜）。
+  `history_fill_stats()` 新增 `window_behind`：ticker → `{as_of, expected, verified}`（各标的最近一次出口；评分快照 `at_scoring` 带着，后续重取改不了它）。
+  `_record_history_fill` 加可选参数 `window_gap`。**交给下游的任何字段都没动**。
+- `alert_manager.py`：`_check_history_fill` 新增 P2「动量窗口滞后：N 只」（分「没核实收盘」/「核实了却没进窗口」两类，列窗口末端与应有场次）。旧计数文件里没这个键 ⇒ 静默。
+- `signal_code_fingerprints.py`：`price.fields` 指纹 `0259255b0948f0dc` 登记 `no_value_change`（用户 2026-11-03 在对话里选）。依据：同一输入下 HEAD 与新版 `_fill_history_fields`
+  产出的 momentum / volume / volatility 及 source / as_of、observations、history_checked 全部相等（有 / 无 `session_close` 各比一次）；赋值这些字段的语句一行未动。
+
+### Added
+- `tests/test_momentum_window_behind.py`（15 条）：两种滞后都记、对齐 / 周末 / 收盘前 / 日历失败 / yfinance 来源都不记、后一次对齐清掉、reset、评分快照冻结、
+  P2 告警（含列名、只用快照、干净静默、旧计数静默）。已做变异：去掉「没核实收盘」分支 ⇒ 红。读钟只有 `yf_daily._now_et`，全部钉住；clockshift ±7 / ±45 天 0 红。
+
+### 未做 / 待验证
+- 11-02 那 13 只的存档值**未改写**（下游已用；重算会动已被消费的记录，由人定）。该日在 LLM 影子 A/B 比较里仍应按降级日对待。
+- 本机开发检出里 `tests/test_yf_daily.py::TestSingleEntry` 两条红（扫到本地 `mcp-servers/maverick-mcp` 的直调）——**既有**，HEAD 干净 worktree 里全绿，与本次无关。
+- 自攒索引回落本身少见（10-05 ~ 11-02 只有 10-12 / 10-14 / 10-22 / 10-26 / 11-02 用过），P2 噪声预计低；真实触发路径要等下一次回落日才算验证。
+
+## [0.45.698] — 2026-11-02 — Added：Alpha Bot 盘中热力图加「成交活跃度」口径（逐合约新增成交量 × gamma，call / put 都按正值相加；不分方向，不是 State GEX）
+
+**为什么**：684 热力图的「按成交量 × 逐拍变化」是成交量口径**净** GEX（call − put）前后两拍相减，当活跃度看会误导：
+① 同一行权价 call、put 同时放量，增量互相抵掉，最活跃的格子反而发灰；② 它是「全天累计成交量 × 当前 gamma」之差，
+现价一动 gamma 就变，早上的成交量乘新 gamma 也会出差值——整天没成交的行权价只因现价移过来就会亮。
+
+### Added
+- `alphabot/intraday_activity.py`（新，纯函数，不 import 卖权模块）：活跃度(K) = Σ_{K 上的合约}（本拍成交量 − 上一拍成交量）× 这一拍 gamma × 100 × S² × 1%，
+  **先逐合约减、再乘 gamma**（现价移动造成的 gamma 变化不混进来）；另给不乘 gamma 的纯增量张数做对照。合约身份用 OCC 代码（SPX 与 SPXW 同日同价同方向是两张，只有代码分得开），重复的整组不收。
+  算不出留空、不当 0：上一拍没有这个合约 / 成交量变小（数据源修正）/ 缺成交量 / 增量 > 0 时缺 gamma / 身份重复 ⇒ 这一张不进并计数；某行权价一张都没进 ⇒ 那格空（有合约进了、增量为 0 才是真 0）。
+  整拍不可比的原因码唯一表 `REASONS`：进程刚启动（上一拍的逐合约成交量只在内存里）/ 跨日 / 内存里的上一拍不是文件最后一拍 / 换了取数源（CBOE ↔ yfinance）/ 上一拍没算出 / 拿不到原始链 / 出错。
+- `alphabot/service.py`：`take_snapshot` 经 `live(_on_raw=…)` 拿到**这次现算实际用的那份**原始链（事后读缓存可能已被页面的另一次现算换掉），
+  在快照每个视图写 `activity`（`[行权价, 加权活跃度, 成交量增量, 未进张数]` + counts / totals / since_ts）；只有**落了盘**的一拍才当下一拍的「上一拍」（`payload_unchanged` 不动它）；
+  出错不挡快照落盘（写 `exception`、计 `stats.activity_failures`、日志 warning），下一拍报「上一拍没算出」而不冒充「刚启动」。
+  `activity_gamma` 与 `strike_profile` 同一条 gamma 规则（CBOE gamma > 0 优先，否则 BS）。演示模式把合成链的全天成交量按合约各自节奏摊成随拍累计。
+- `intraday_heat.build`：`basis="activity"` / `"activity_volume"`（`ACTIVITY_BASES`）读快照里的活跃度，`signed: False`，只有「当前值」（逐拍差 ⇒ `activity_level_only`）；
+  不可比的拍记 `activity_missing`（旧快照 = `not_in_snapshot`），全天一拍都没有 ⇒ `no_activity`；接口回 `activity_reason_labels`。
+- 页面：口径切换加「成交活跃度」「活跃度（张）」（这两项不显示「逐拍变化」）；单色由浅到深；说明写明不是 State / Orderflow、gamma 加权偏向临近到期平值、哪几拍为什么空、没算进去的合约计数；帮助页加一条。
+
+### 验证
+- `tests/test_alphabot_intraday_activity.py` 34 条：call/put 不抵消、现价动无新成交 ⇒ 0、只给增量乘当前 gamma、零增量不要 gamma、各种剔除留空不当 0、SPX/SPXW 分开、
+  gamma 规则与 `strike_profile` 逐行权价相等（CBOE 路径与 BS 兜底都核）、快照用同一份链（两拍之间插一次页面现算）、重启 / 跨日 / 换源 / 非最后一拍 / 出错各自的原因、热力图读法与页面文案。
+  **11 个变异全红**（第一轮「不先用 CBOE gamma」漏网：合成链 gamma 本就是 BS 算的，测试改成把 CBOE gamma 换成与 BS 不同的值后才红）。
+- 真实 CBOE 链（NVDA / _SPX / SPY，只读）：合约身份 0 缺失 0 重复；假想上一拍下增量合计与期望逐位相等，只差 SPX 3 个缺 gamma 的合约（被剔除并计数）。
+- 真实盘中快照（11-02 NVDA 33 拍，都在本版之前拍的）：活跃度口径报 `no_activity`、每拍 `not_in_snapshot`。clockshift +7 / +45 天 0 条新红。
+- ⚠️ 没在浏览器里看过（本 worktree 起不了预览）；下一个扫描日生产克隆快进、重启 Alpha Bot 后，**第二拍起**才有活跃度。
+
+## [0.45.697] — 2026-11-02 — Added：Buzz 三个价格通道的长历史样本外回测（预注册 + 留出期只跑一次）——留出期 4 个检验全部未检出
+
+### Added
+- `experiments/price_channel_backtest_prereg.md`：取数前登记（84c291f4）。对象 = Buzz 的 momentum / volume / volatility 三个通道（生产口径：`price_metrics.history_price_metrics` + 生产一个月窗口 + `buzz_bee` 映射），单独与合成；30 只现名单；开发期 2010–2019、留出期 2020-01-01 ~ 结果日 2026-10-09（停在维度 IC H1 窗口之前）；确认性 4 个 + 探索 6 个（开发期至多选 1 个进留出期）；横截面 Spearman IC、NW t、α = 0.01。
+- `experiments/price_channel_backtest.py`：`--dev` / `--holdout`（结果文件已在 ⇒ 拒绝重跑；开发期结果日不越过 2019-12-31）。行情缓存只放 `--cache` 目录、不进仓库。
+- 结果：`price_channel_backtest_dev.json` / `_dev_selection.json`（db309a6f，先于留出期）/ `_holdout.json` / `_report.md`。
+- 守卫 `tests/test_price_channel_backtest.py`：常量与预注册逐项相等、映射与 `buzz_bee.py` 同形、开发期不碰留出期价格、只用过去数据、留出期不能跑第二次。
+
+### 结论
+- 留出期 352 周：C0 合成 IC −0.005（t −0.38）、momentum +0.000、volume +0.014（t +1.26）、volatility −0.005，**全部未检出**；去掉 2026 年、换采样日结论不变。开发期 C0 的 −0.026（t −2.35）没有重现；探索变体无一选入。
+- **不改生产**（改 Buzz 通道 = 终止 H1）；局限（幸存者偏差、Yahoo 历史拼接）见报告。
+
+## [0.45.696] — 2026-11-02 — Changed：跨式账本入场窗口放宽到**财报前最后 2 个交易日内**（用户 2026-11-02 定）；影子宽跨预注册修订 4（窗口 0 → 1）
+
+依据（v0.45.695 实测）：曾出现过可交易 rich 信号的 9 个事件，窗口 0（只最后 1 个交易日）开得出 4 个、窗口 1 开得出 5 个（+COST：D-1 那天扫描漏跑）。
+代价：窗口内**第一个**合格日就开 ⇒ 通常在财报前倒数第 2 个交易日入场，多扛一个交易日的普通涨跌。
+
+### Changed
+- `options_paper_leg.py`：`entry_max_sessions_before_event` 0 → 1；等待原因串改为 `waiting: opens within last N sessions before earnings …`（N 随配置）；模块头 / 注释同步。
+- `straddle_strangle_shadow.py` + `experiments/straddle_strangle_shadow_prereg.md`：**修订 4**，`PREREG["version"]` 3 → 4、`entry_window_sessions` 0 → 1。
+  修订 3 起点（2026-11-03）未到、计入单位 0 ⇒ 不截断，`start_date` 不变。改动前只看了按窗口统计的信号行计数，没看任何盈亏。
+- Alpha Bot：帮助页按配置显示「最后 N 个交易日内开仓」（不再写死 0）；跨式页导语、等待状态、`entry_outside_window` 标签同步。
+
+### Tests
+- `TestEntryWindow` 生产值改为 1，新增「夹着一个交易日放行 / 两个交易日等待」与感恩节用例，逐日对拍按配置取 n 并核对开得了的天数；
+  `TestRevision3EntryWindow` 用修订 4 的值；协议常量 / 文档关键字（修订 4）更新；Alpha Bot 等待状态文案。
+
+## [0.45.695] — 2026-11-02 — Fixed（文档）：0.45.693 二次检查——「入场提前 5~17 个交易日」更正为 4~20；补记新规则的样本代价（可开仓事件约减半）
+
+二次检查结论：**代码层面未发现功能性 bug**（入场闸、关多头、修订 3 判据、Alpha Bot 状态 / 帮助页逐项复核）。两处补正：
+- **数字更正**：0.45.693 诊断里「实际在财报前 5~17 个交易日入场」是按信号行数数的，漏了没扫描的交易日（09-21、09-23~25、10-12）；
+  按 NYSE 日历精确算，10 笔已平仓的入场日与财报日之间夹着 **4~20** 个交易日。`options_paper_leg.py` 模块头 / CONFIG 注释、
+  `experiments/straddle_strangle_shadow_prereg.md` 修订 3 正文（标注更正，描述性数字、不改规则）同步改。0.45.693 条目原文保留不改。
+- **样本代价（实测，09-03~11-02 信号）**：曾出现过可交易 rich 信号的 9 个事件里，「只在财报前最后一个交易日开」只开得出 4 个（AMZN / CVX / TSLA / XOM）；
+  窗口放宽到 1 个交易日 5 个（+COST，扫描漏跑那天）、不设窗口 9 个。丢掉的 AMC / JNJ / T / VZ 在 D-1 当天信号已不可交易
+  （点差 > 15%、事件波动被扩散项压到 0、10-23 历史取数失败 n=0）或那天没扫描——是入场时点的真实约束，不是闸的 bug。写进 `options_paper_leg.py` 模块头。
+
+## [0.45.694] — 2026-11-02 — Fixed：写沙箱日志助手自检 `test_log_helper_sees_this_sessions_denials` 在整套里红、单独跑绿——根因是 macOS 内核成段丢弃 Python 进程的沙箱拒绝上报（不是落盘延迟）；自检改为换新文件名重复触发直到查到，失败时用 bash 子进程对照分清是谁坏了
+
+起因：做 v0.45.690 / 692 时两次整套（各约 12 分钟，带 `-x`）都停在这条，后面约 300 条没跑。原写法只在金丝雀上触发**一次**拒绝，再轮询 10 × 0.5 秒等同一条出现。
+
+### 根因（实测，统一日志取证）
+- 丢掉的那条**事后永远查不到**（翻 10 小时 `sender == "Sandbox"` 日志：失败会话 `seen-67653` 与 Python 子进程的 `child-67653` 都不在，同一秒 `bash(…)` 的 `child-67653.sh` / `.envi` 都在）⇒ 不是延迟，加等待无用。
+- 复现：一个沙箱进程每 2 秒各起一个 Python 子进程、一个 bash 子进程、本进程自己各写一次金丝雀，跑 80 轮：72 轮三条全记，8 轮（两段，约 61 秒一段、每段约 7 秒）**本进程与 Python 子进程的全丢、bash 的一条不丢**；降到每 6 秒一次仍出现一段约 24 秒的丢弃窗口。窗口里看不到别的 Python 拒绝在刷屏——触发条件**待查明**（与会话长短无关：一次刚起 5 秒的会话也撞上过；整套只是让这条测试有更多机会落进窗口）。
+- 影响面：拒写本身从不失手（生产仍写不进去）；但会话末尾「没有拒绝」只是**尽力而为**的归因——丢弃窗口里试图写生产的测试不会被点名。
+
+### Fixed
+- `tests/test_write_sandbox.py::TestLiveOnThisMac::test_log_helper_sees_this_sessions_denials`：每轮换新文件名 `seen-<pid>-<k>` 重新触发、等 1 秒、只查本条开始之后的窗口，任一条查到即过；上限 40 秒（实测最长窗口约 24 秒，pytest 单条 60 秒超时）。查不到时补一条 `/bin/sh` 子进程拒绝做对照，失败信息写明是「助手 / 查询 / 解析坏了」还是「内核这段时间没记 Python 的拒绝、会话末尾核对此期间是瞎的」。实测连跑 20 次全绿，其中 2 次分别在第 5、第 8 次触发才查到（日志核实前几条确被丢弃，旧写法这两次会红）。
+
+### Changed
+- `tests/_write_sandbox.py`：`log_command(st, since=None)` 加可选起点（整套末尾查全会话窗约 4 秒一次，自检只查自己那几秒）；模块 docstring 加「⚠️ 内核的拒绝上报会丢」一条。会话末尾核对的行为不变。
+
+### 有牙（变异）
+- 助手看不见任何拒绝（`_ask_helper` 回空输出）⇒ 红，信息为「连 bash 子进程的拒绝也查不到 ⇒ 助手 / 查询 / 解析坏了」（约 46 秒）。
+- 只丢本进程 Python 的拒绝 ⇒ 红，信息为「bash 子进程的拒绝查得到 ⇒ 是内核这 40 秒没记本进程（Python）的拒绝」。
+
+## [0.45.693] — 2026-11-02 — Changed：跨式账本只在**财报前最后一个交易日**开仓、关掉买跨式（用户 2026-11-02 定）；影子宽跨预注册修订 3（起点后移到 2026-11-03，旧规则单位不进检验）
+
+**诊断**（Alpha Bot 跨式胜率低）：已平 10 笔 3 胜 7 负、合计 −$1,095。信号用 ~30 DTE 报价，账本在信号一出现就开（实际在财报前 5~17 个交易日），持有 2~4 周。
+同一批事件里卖方押的「隐含事件波动 > 实际」6/6 成立（COST / JNJ / T / VZ / AMZN / AMC；CVX / XOM 尚未结算），亏损来自事件前几周的普通涨跌
+（T 事件前 −4.3%、CVX +5.5%、XOM +2.8%、VZ −2.7%）——测的不是信号声称的东西。多头两笔（TSLA / NFLX）都亏：已结算 19 个事件里 18 个隐含 > 实际。
+另记未改：比值极端（≥3）的 4 笔 rich 全亏（分母是 8 次财报涨跌的**中位数**，低波动大盘股中位数很小 ⇒ 比值虚高），n 太小，不据此改阈值。
+
+### Changed
+- `options_paper_leg.py`：新配置 `entry_max_sessions_before_event = 0` + `entry_window_miss()`（as_of 之后第 1 个 NYSE 交易日 ≥ 财报日才开；
+  `is_trading_day.add_trading_days`，日历不可用 ⇒ 不开、原因可见）；窗口外记 `waiting: …`。那天扫描没跑 ⇒ 错过这次财报（不补、不提前）。
+  `trade_cheap` → False；被关掉的一侧不再静默 `continue`，跳过原因写 `cheap side disabled`。信号的 `eligible` 没动（GEX 预注册的样本定义）。
+- `alphabot/straddle.py::signals_today`：`waiting` 原因显示「等待：财报前最后一个交易日开仓」，不显示成「跳过」。
+- `straddle_strangle_shadow.py` + `experiments/straddle_strangle_shadow_prereg.md`：**修订 3**，`PREREG["version"]` 2 → 3、`start_date` 2026-10-21 → 2026-11-03、
+  新增 `entry_window_sessions = 0` 与状态 `entry_outside_window`（双保险：新代码晚进生产时按旧规则开的单也认得出）。修订前已计入的 2 个 `ok` 单位
+  与 2 笔带记录的持仓不进检验。改动前没看过任何影子盈亏（只读了 `progress()` 计数）。Alpha Bot 状态标签同步。
+- 存量持仓（NVDA / CRCL）不动，按原出场规则平。
+
+### Tests
+- `tests/test_options_paper_leg.py::TestEntryWindow`（生产值源码字面量钉住、周末 / 劳动节 / 感恩节、逐日对拍交易日历、多头关闭原因、日历不可用不开）；
+  `tests/test_straddle_strangle_shadow.py::TestRevision3EntryWindow`（含与账本闸逐日同一判据）与协议常量更新；
+  `tests/test_alphabot_straddle.py::TestEntryWindowStatus`。旧场景测试（09-03 入场、09-20 财报、默认多头）在夹具里显式钉回旧口径并注明。
+
+## [0.45.692] — 2026-11-02 — Changed：其余四处 CBOE 下载（cboe_vix 的 VIX 历史 CSV 与延迟报价、cboe_fetcher 的 SKEW / VVIX CSV、close_correction 的收盘印证）也请求 gzip，经新共用函数 `cboe_options.fetch_cboe_bytes`
+
+起因：690 只改了 `_fetch_cboe_payload`。二次检查时 grep `cdn.cboe.com` 发现另有四处自己发请求、请求头只有 User-Agent，「所有 CBOE 下载都走压缩」没做到。
+
+### Changed
+- `cboe_options.py`：新 `fetch_cboe_bytes(url, timeout)`——带 `_CBOE_HEADERS` 发请求、用 690 的 `_decode_cboe_body` 还原，返回原文字节；不重试、不拿信号量（沿用各调用方原有的）。不认识的编码在**这里**计 `bad_encoding` 再抛 `CboeContentEncodingError`（源头登记：四个调用方都吞异常，不在源头计 P2 就永远不响）；不计 `failed` / `compressed`（那两个是期权链 payload 的口径）。`_payload_stats` 上方注释写明 `bad_encoding` 自本版起也数这四处。
+- **`_fetch_cboe_payload` 刻意没改走它**：它在 H1 单元 `price.fields` 的依赖闭包里，换调用会让指纹再红一次，而行为相同。新函数不在任何冻结单元的闭包里，`tests/test_signal_code_fingerprints.py` 改后仍 79 passed，不需要用户判。
+- `cboe_vix.py`：`_download` / `_download_quote` 改用它（模块顶部同一个 `try` 里 import；`cboe_options` 都 import 不了时的降级分支保留旧的不压缩写法，与原有 `_CBOE_SEM` 降级同一模式）。
+- `cboe_fetcher.py`：`_download_cboe_index_csv` 改用它；编码异常在兜底 `except` 之前单独接住、**不重试**、`logger.error`。网络错误仍重试三次。
+- `close_correction.py`：`cboe_official_closes` 改用它（编码异常照旧落进 `fetch_failed` 计数）；删掉不再用的 `import urllib.request as _u`。
+- `alert_manager._check_cboe_content_encoding`：文案从「期权链没取到」改成「那几次下载没取到」，列出四类数据；判据不变。
+
+### 实测（真网络，2026-11-02 约 18:20 ET，每处各取一次未压缩、一次压缩）
+| 调用 | 未压缩 | 压缩 | 结果 |
+|---|---|---|---|
+| `cboe_vix._download`（VIX_History.csv） | 474.3 KB | 111.9 KB | 原文相同 |
+| `cboe_vix._download_quote`（_VIX.json） | 0.5 KB | 0.3 KB | `data` 段相同 |
+| `cboe_fetcher` SKEW_History.csv | 203.7 KB | 203.7 KB（**对端没压缩**） | 原文相同 |
+| `cboe_fetcher` VVIX_History.csv | 109.3 KB | 109.3 KB（**对端没压缩**） | 原文相同 |
+| `close_correction.cboe_official_closes(["SPY","NVDA"])` | 7251.5 KB | 990.0 KB | 收盘字典相同（非空） |
+
+- ⚠️ **SKEW / VVIX 两份 CSV 请求了 gzip，CBOE 仍回未压缩**（同一 CDN 路径下的 VIX_History.csv 却压缩了，原因未查，待验证）——代码走未压缩分支、结果正确，只是这两处省不了流量。
+- 耗时都在 1–3.4 秒，差别不显著（同 690：省多少时间看当时链路）。
+
+### 测试 / 变异
+- `tests/test_cboe_gzip.py` 加 12 条（共 29）：`fetch_cboe_bytes` 带 gzip 头、解压、不动 `compressed`、不认识的编码在源头计数并抛；cboe_vix 两处与 cboe_fetcher 压缩 / 未压缩结果相同、请求带 gzip、坏编码返回 None 并计数；cboe_fetcher 坏编码只请求一次；close_correction 压缩 / 未压缩解析出同一份非空收盘、坏编码记 `fetch_failed`。
+- 变异八个，每个都红（文件逐个还原并 `cmp` 核对）：helper 不带 gzip 头、helper 不解压、helper 不计 `bad_encoding`、cboe_vix 两处各退回旧写法、cboe_fetcher 退回旧写法、cboe_fetcher 编码异常落进重试、close_correction 退回旧写法。
+- 整套（`-x`）：12952 passed / 1 failed，**又**停在 `tests/test_write_sandbox.py::TestLiveOnThisMac::test_log_helper_sees_this_sessions_denials`；之后的文件补跑 301 passed，该文件单独跑 29 passed。⚠️ **更正 690 条目的「偶发」**：本 session 两次整套都红在这一处，单独跑从没红过——更像是「整套跑到末尾时统一日志查询变慢、超出该测试 10 × 0.5 秒的等待」，与压缩改动无关（不碰写沙箱），但不是偶发。未深究，待验证。
+
+## [0.45.691] — 2026-11-02 — Added：Alpha Bot 总览表加 IV / RV 列（读每日扫描的 VRP 账本，不打网）
+
+**起因**：竞品差距清单第 5 项「多票扫描表」。核对后发现总览页**已经**是 30 只一屏（gamma 正负、最近零点及距离、净 Major、路由、卖腿），我之前说「要一只只点进去看」是没查就下的结论；真缺的只有 IV / RV。
+
+**取数选择**：
+- 没走溢价页那条 Twelve Data 日线路：免费档串行 7 次 / 分、缓存只在进程内 ⇒ 30 只冷启动约 4 分钟，而且和每日扫描共用同一个 key 的 8 次 / 分上限，两边同时跑会挤掉生产扫描的请求。
+- 改读**每日扫描已经写好的 VRP 账本**（`vrp_signal`，`vrp_state/vrp_signals.jsonl`）：每票每天一行 `iv` + `rv_30d`，扫描自己就拿这一对算 `vrp_ex_ante`。2026-11-02 实测 30 只全有、零缺值，与总览 30 只逐一对得上（含 BRK-B）。
+- IV 显示 VRP 账本自己的 `iv`（`iv_source = iv_raw_observed`），**不**拿总览行上的 CBOE `iv30` 去配 VRP 的 RV——两种 IV 定义不同（实测 VRP 的 iv 通常高 2–6 个点），混成一个比值没有意义。`iv_raw_observed` 具体出自哪里**没核**（待验证）；30 只里两只是整数（ABBV 30.0、XOM 39.0），跨日没有重复出现的常数，不像卡住的兜底值，也没逐一核实。
+- `rv_30d` 的口径按代码核实（`market_intelligence.calculate_iv_rv_spread` → `twelve_data.realized_vol(lookback=30)`）：最近 30 个日对数收益、`ddof=1`、×√252、剔除 |ln| ≥ 0.5；Twelve Data 取不到时退回 yfinance。页面说明照此写（初稿写成「21 个交易日」——那是 VRP 的**结算**窗口，不是 rv_30d，核对时改正）。
+
+**改动**：
+- `alphabot/service.py`：新纯函数 `vol_block(rows, err, as_of)`——只取总览那一天的行（**不拿别的日子顶替**）、同票同日两行记 `duplicate` 不猜、IV / RV 非有限 / 布尔 / RV ≤ 0 不出比值；`overview()` 带 `vol`。VRP 账本读取抽成 `_vrp_path` / `_vrp_rows`（溢价页共用）。`ledger_io.load_jsonl` 对**不存在的文件返回 []** ⇒ 总览另判文件在不在，报 `vrp_ledger_missing`，不报成「那天没有行」；溢价页的旧口径（文件不在 = 没有行，测试钉住）不动。
+- `alphabot/static/pages/overview.js`：「最近零点」后加一列「IV / RV（30 天）」（`30.0 / 18.6`，小字比值），CSV 导出比值；表下说明写明「与标的页 CBOE IV30 不是同一个量」「未经前向检验，不是卖出信号」；不可得时 callout 写原因（账本不在 / 读不了 / 那天没有行）。演示模式不带这一列（没有 VRP 账本）。
+- `alphabot/static/pages/help.js`：总览一节加 IV / RV 列说明。
+
+**变异**（6 个，全红）：不按日期筛 / 同票两行后者覆盖 / 文件不在当成空 / RV = 0 也出比值 / 布尔当数字 / 总览不接 `vol`。
+
+**核对**：新测试 19 passed；`tests/test_alphabot*.py` + 卖权火墙 1036 passed；真实数据根跑 `overview()`：2026-11-02 30 / 30 有值；用 node 把页面的 `volCell` / `volNote` 抽出来在真实数据上渲染（`ABBV 30.0 / 18.6 · 1.62×` 等）。⚠️ **没在浏览器里看过**：本会话限定在 worktree，改不了主检出里预览工具读的 `launch.json`，按规矩也不用 Bash 起服务——合入后重启 Alpha Bot 时第一次看到。整套（含 689 二次检查的修复）13320 passed、1 skipped、2 xfailed（12:09，无并发）；那 1 条 skip 是既有的 `tests/test_orchestrator_direct_fallback.py::test_bare_unset_is_not_direct_when_system_proxy_on`——本机此刻系统代理没开、构造不了负对照（v0.45.496 起就这样设计），与本次无关，前几次整套跑时代理开着所以没 skip。
+
+**推送前二次检查（2026-11-02；评审能跑代码、只读，我另做真实数据扫描）**：
+- 真实数据：卖权账本全部 23 个日期（10-01 – 11-02）逐日跑 `overview(date)`：任何一天同票都没有两行；三处缺口都按设计显示——10-14 / 10-26 VRP 没记 BILI ⇒ 那格「—」，10-12 VRP 整天没有行 ⇒ 提示「VRP 账本里没有这一天的行」，不拿别的日子顶替。两个账本都写 `BRK-B`，对得上。
+- 修了评审抓到的四处（无一阻塞）：
+  - 689 二次检查加的规范化重定向用 `go()` ⇒ 每次往历史里**新增**一项：从 `#/t/spx` / `#/t/nvda` 这类地址进来后按「后退」会回到别名地址、又被重定向回来，退不出去。改成 `location.replace`（新 `app.js::redirect`，缺代码那条原有重定向也一起改）。
+  - 重定向时代码没有 `encodeURIComponent` ⇒ `#/t/%25e4` 会被改写成解码时抛 URIError 的 `#/t/%E4`、页面停在「加载中」（不现实的输入，顺手修）。
+  - 演示模式的总览没有 `vol` ⇒ 页面黄条写「IV / RV 这一列不可得：—」。改成 `reason: demo`，页面写「演示模式没有 VRP 账本」。
+  - VRP 账本取不到观测 IV 时会退回 `quote_set.iv30`（`vrp_signal.CONFIG["iv_source_order"]`），那时表下说明「与 CBOE IV30 不是同一个量」不成立。格子里对非 `iv_raw_observed` 的行写明 IV 来源。真实数据里这种行只有 VKTX 09-11 – 09-17 的 5 行，都不在卖权账本日期里，目前总览碰不到。
+- 评审确认没问题的：没有重定向循环（`canonTicker` 幂等）、子页签保留、带 `.` / `-` 的代码原样通过、显式历史日期跟着走、溢价页旧口径未变、对话工具不读 `tickers`。
+- 整套（推送前最后一次）：13341 passed、1 failed、1 skipped、2 xfailed（12:27）。skip 同上（系统代理没开）。那 1 条失败是既有的 `tests/test_write_sandbox.py::TestLiveOnThisMac::test_log_helper_sees_this_sessions_denials`：统一日志查询助手没查到本会话刚造的写拒绝，查到的两条是**另一个会话**同一秒的沙箱金丝雀（`child-52790.*`）——本次开跑时没有别的整套在跑，跑到一半别的会话起了测试。单独重跑这一类 3 passed。本次没碰写沙箱 / 日志助手，判为与本次无关的时序敏感测试，**未修**。
+
+## [0.45.690] — 2026-11-02 — Changed：`cboe_options._fetch_cboe_payload` 下载 CBOE 延迟期权链请求 gzip 压缩、按 `Content-Encoding` 解压（线上字节约少 7 倍）；不认识的编码不重试、计数、报 P2
+
+起因：在 Alpha Bot 接 SPX 时发现 `_SPX` 一条链 12.8MB、首次载入约 1 分钟，几乎全是下载。查下来请求头只有 `User-Agent`，**所有标的**（每日扫描 30 只 + Alpha Bot 盘中快照）一直在下载未压缩文件；urllib 也不会替我们解压。
+
+### Changed
+- `cboe_options.py`：新常量 `_CBOE_HEADERS`（`User-Agent` + `Accept-Encoding: gzip`，每次请求用副本）；新 `_decode_cboe_body(raw, encoding)`——`gzip` / `x-gzip`（大小写、空白不计）⇒ `gzip.decompress`，缺省 / 空 / `identity` ⇒ 原样，**其他一律抛新异常 `CboeContentEncodingError`**，不许当未压缩往下传（否则会变成 JSON 解析失败、重试三次后混进网络失败）。`_response_encoding` 取响应头；没有 `.headers` 的假响应（既有测试的 `io.BytesIO`）当未压缩。
+- `_fetch_cboe_payload`：编码异常在兜底 `except` 之前单独接住——**不重试**（同一份文件重试还是同一种编码）、`log.error`、计 `failed` 与新计数 `bad_encoding`、出口 None（实时路径照常降级）。解压坏掉的 gzip 体（截断传输）仍走原来的重试。重试次数 / 退避、陈旧判定、进程缓存、`_cboe_symbol` 都没动。
+- `payload_stats()` 多两个键：`compressed`（解压了几次——判生产是否真走了压缩看它 ≈ 成功的 fetches）、`bad_encoding`。经 `scan_timing` 进 `status.json` 的 `counters.cboe`。
+
+### Added
+- `alert_manager._check_cboe_content_encoding`：`counters.cboe.bad_encoding > 0` ⇒ **P2**；计数缺失 ⇒ `checks_skipped`。只坏几只时到不了 `day_health` 的整源故障线，没这条就只剩一行 ERROR 日志。
+- `tests/test_cboe_gzip.py`（17 条，全离线）：请求头确实带 gzip 且原 User-Agent 不丢、模块常量不被改写；压缩 / 未压缩 / identity / 大小写 / x-gzip 解析出的 payload 逐字节相同；`br` / `deflate` / `compress`（内容碰巧是合法 JSON）都不重试、计 `bad_encoding` + `failed`、不入缓存；坏 gzip 体照常重试三次、不算编码问题；计数进 `scan_timing`、P2 告警、计数缺失进 `checks_skipped`。
+- `signal_code_fingerprints.ACKS`：`price.fields` 追加一条 `no_value_change`（见下）。
+
+### 输入层指纹（用户判）
+`_fetch_cboe_payload` 在 H1 单元 `price.fields` 的依赖闭包里，改动让指纹守卫变红（干净的 origin/main 上是绿的）。**用户 2026-11-02 在对话里选 no_value_change**，不登记世代边界：只改传输编码，交给下游的 `data` 段不变（证据见下）。没有动 `EXEMPT_DEPS`。
+
+### 实测（真网络，2026-11-02 约 16:52 ET 收盘后，同一时刻每个标的取三次：未压缩 / 压缩 / 未压缩）
+| 标的 | 编码 | 线上字节 | 耗时 | 合约数 | current_price | 整份 payload SHA-256 |
+|---|---|---|---|---|---|---|
+| SPY | 未压缩 | 5.41 MB | 2.5 s | 12150 | 753.1 | 13d3af96bf30… |
+| SPY | gzip | 0.73 MB | 1.6 s | 12150 | 753.1 | 13d3af96bf30… |
+| SPY | 未压缩（复测） | 5.41 MB | 1.6 s | 12150 | 753.1 | 13d3af96bf30… |
+| _SPX | 未压缩 | 13.17 MB | 2.4 s | 29578 | 7541.3999 | 7c7afc64f229… |
+| _SPX | gzip | 1.80 MB | 2.2 s | 29578 | 7541.3999 | 7c7afc64f229… |
+| _SPX | 未压缩（复测） | 13.17 MB | 2.1 s | 29578 | 7541.3999 | 7c7afc64f229… |
+
+- 解析结果三次逐位相同（比的是整份 `data` 段，不只合约数和价格）。测时把陈旧判定短路掉，只测下载与解析。
+- ⚠️ **耗时差这次很小**：当时网络快，未压缩 13MB 也只要 2 秒多。10-29 curl 单次测到的是 `_SPX` 45 s → 15 s、SPY 26 s → 13 s。省多少时间取决于当时的链路，字节少约 7 倍是稳定的，**两次的秒数都别当常数用**。生产上压缩到底有没有生效，看 `counters.cboe.compressed`。
+
+### 测试 / 变异
+- 变异七个，每个都让 `tests/test_cboe_gzip.py` 变红（文件已逐个还原、`cmp` 核对过）：去掉请求头里的 gzip、收到 gzip 不解压、不认识的编码当未压缩、不认识的编码当 gzip 解、编码异常落进兜底重试、不读响应头、`analyze()` 不调新检查。
+- `tests/test_scan_timing.py` 两处对 `payload_stats()` 键集合的精确断言补上两个新键。
+- 整套（`-x`）：12940 passed / 1 failed，停在 `tests/test_write_sandbox.py::TestLiveOnThisMac::test_log_helper_sees_this_sessions_denials`（查统一日志的助手返回了别的拒绝、没返回测试刚触发的那条）；之后的文件单独补跑 301 passed。该文件在干净的 origin/main 上 29 passed，在本分支连跑两次也都是 29 passed ⇒ **偶发**（看起来是统一日志滞后，未深究，待验证），与本改动无关（本改动不碰写沙箱）。
+
+## [0.45.689] — 2026-10-29 — Added：Alpha Bot 接 SPX / XSP 指数期权链（名字映射、SPX 月度上午结算合约在到期日剔除、侧栏「指数」、「怎么卖」指数说明、热力图行权价分桶）
+
+**起因**：竞品差距清单第 3 项——GEX「做市商对冲推动价格」那套理论在指数上比个股站得住（个股期权终端用户整体净卖方，put 侧符号可能反了）。
+
+**先验证再写**（2026-10-29 实测 CBOE 延迟接口，全部 307 跳到 `cdn-api.cboe.com`）：`_SPX` 200（12.8MB、28,872 个合约，根 `SPX` 9,394 + `SPXW` 19,478、54 个到期日）、`_XSP` 200（6.9MB、15,834、全是 `XSP`）、裸 `SPX` **403**。整条现算链（`compute_live_detail`）离线喂这份文件**一行不改就能出数**（SPX 0.5 秒，Zero Gamma 7735、净 GEX 为负）——所以要补的不是「跑起来」，而是三处会**无声出错**的地方：
+
+- **名字**：`alphabot/service.py::norm_ticker` 把 `SPX` / `^SPX` / `$SPX`（XSP 同）映射到 CBOE 文件名 `_SPX` / `_XSP`（`INDEX_ALIASES`）。不映射时页面只会说「取不到期权链」，把「写法不对」报成「数据源坏了」。NDX / RUT 在 CBOE 上的写法**没验证**，不映射。
+- **SPX 月度上午结算**：月度根 `SPX` 在到期日开盘按特别开盘价结算，盘中仍以 dte = 0 留在链里 ⇒ 已结算的 OI 会被当成当天的 gamma（独占「下一到期」视图）。`drop_am_settled_expiring` 在 Alpha Bot 现算入口（新 `_live_fetch`，只对 `INDEX_TICKERS` 里有 `am_root` 的票）丢掉**根恰好是 `SPX`**、dte == 0 的合约（`SPXW` 以 SPX 开头，按前缀判会误丢下午结算的 0DTE——测试钉住），丢了几张写进 `live` 返回的 `index.n_am_settled_expiry_day_excluded`（0 也写）。XSP 全是下午结算，不过滤。
+- **同一到期日两份同行权价合约**（月度到期日 SPX + SPXW，实测 2,942 对）：查过了**不用改**——GEX 按行权价求和（两份都是真 OI）、卖权腿 `_side_book` 同行权价取 OI 大的。
+- **「怎么卖」**：讲的是股票（接货 / 被指派持有 100 股 / 美式提前行权 / 备兑）。指数欧式、现金结算 ⇒ 面板顶部加一条 `index_note` 说明哪些步骤不适用、名义 = 指数 × 100。没重写各结构的文案。
+- **侧栏 / 搜索 / 标题**：`watchlist()` 加 `indices` + `index_labels`；侧栏多一组「指数」、标题与侧栏显示 SPX / XSP（`ticker.js::tLabel`），搜索框按 `index_labels` 反查。前端不另抄名单（测试只看字符串字面量）。指数加进自选也只列一次。
+- **热力图分桶**（`alphabot/intraday_heat.py`）：SPX 在 ±12% 内约 450 个行权价（实测一张快照 349 个），一行不到 2 像素。超过 `MAX_ROWS`（80）行 ⇒ 按固定宽度分桶**求和**（GEX 按行权价可加；逐拍差先逐行权价算再求和），每格带桶里的行权价个数、提示框给区间；`rules.max_rows` 给页面。只有一拍时现价 / Zero Gamma 改画点（一个点的折线画不出来）。
+- `alphabot/static/pages/help.js`：加「指数」一条。
+
+**只在 Alpha Bot**：不进 `config.WATCHLIST`、不进卖权账本 / 预注册（样本定义不变），根目录模块里不出现 `INDEX_TICKERS`（测试钉住）。没动 `cboe_options` / `sell_strike_*`。
+
+**已知的、这次没修**：
+- **首次载入慢**：Alpha Bot 里 SPX 第一次现算约 1 分钟，几乎全是下载。查下来 `cboe_options._fetch_cboe_payload` 用 `urllib` 下载、**不带 `Accept-Encoding: gzip`**——实测同一份 `_SPX` 不压缩 12.8MB / 45 秒，压缩后 1.66MB / 15 秒（SPY 5.4MB → 0.7MB）。这影响**所有**标的（含每日扫描的 30 只），是共享生产代码，另开任务处理。
+- 价格页的日线走 Twelve Data，指数代码能不能取、在不在套餐里**待验证**；取不到如实显示不可得。
+- 指数收盘：股票 16:00，SPX 期权交易到 16:15（实测 `last_trade_time` 16:14:59）。16:00–16:15 之间页面按「已收盘」处理（SPXW 的 0DTE 16:00 停止交易，这样处理正确）。
+
+**变异检查**（9 个，全红；首轮「指数也加进自选就列两次」**绿**——测试只断言 `_SPX` 不在自选里，而设置没规范化名字时这句话恒真；收紧成 `favorites == ["SPY"]` 后红）：根按前缀判 / 丢所有 dte=0 / 不映射名字 / 现算不过过滤 / 不带指数说明 / 自选重复 / 不分桶 / 桶里个数记错 / 桶内后写覆盖前写。
+
+**核对**：两份新测试 54 passed；`tests/test_alphabot*.py` + 卖权火墙 + CHANGELOG 1032 passed；worktree 起 Alpha Bot（真实数据根、`--no-poll`）看 SPX 水平页（Zero Gamma 7,735.12、Major+ 7,850、Major− 7,650、负 gamma）与「怎么卖」指数说明；另起一份数据根指向空临时目录的实例拍一张 SPX 快照看分桶热力图（349 个行权价 → 每 25 点一桶），控制台无报错。整套 13273 passed、2 xfailed（11:31，错开了同时段另一会话的整套）。
+
+**二次检查（2026-11-02，684 + 689 合入前；另起一个没看过我推理的评审只读代码，我另做真实数据扫描）**：
+- 真实数据：`intraday_heat.build` 跑遍数据根里全部盘中快照（85 个文件 × 两视图 × 四模式 = 680 次），零异常、零不变式违反（截断列 ≤ 截断值、未截断格真值 = 上色值、格子行权价在轴上、行数 ≤ `MAX_ROWS`）；另用当天真实 `_SPX` 链离线造两张快照（343 / 345 个行权价）核对分桶：每拍格子和与不分桶逐位相等、桶内个数之和 = 原格子数。拨钟审计 +7 / +45 / +400 天新红 0。
+- 修了评审抓到、我核实过的四处：
+  - `watchlist()["tickers"]` 里混进了指数 ⇒ 演示概览多出 `_SPX` / `_XSP` 两行、搜索候选与结果页下拉列出 `_SPX`（选了只会显示「没有记录」，指数没有账本行）。`tickers` 改回「观察列表 + 自选」，指数只在 `indices` / `index_labels`；搜索候选另加 SPX / XSP 展示名。
+  - 指数页仍显示「加入自选」：点了存进设置、但 `watchlist()` 把指数从自选里滤掉 ⇒ 按钮变「移出自选」、侧栏什么都不多。指数页不给这个按钮。另：`#/t/SPX/...`（展示名进地址栏）不规范化 ⇒ 侧栏高亮与按钮状态都对不上；新 `app.js::canonTicker`，搜索框与「标的」「盘中」两个路由都经它，不规范的地址重定向到 `_SPX`。
+  - 溢价页取链不走 `live()` ⇒ 上午结算过滤没覆盖到（`dte_min` 改成 0 时已结算的月度合约会被排进去）。`_premium_fetch` 本身不动（测试钉住它就是卖权页那个取数函数），在 `_premium_full` 调用处同样过滤。
+  - 快照文件里一行能解析、但不是对象（`null` / 列表）⇒ `build` 抛 AttributeError、接口 500。`service.intraday` 把这类行也算坏行（`n_bad_lines`），页面照常提示。
+  - 顺带：盘中设置块的关注标签 / 「关注」「立即拍一张」按钮显示展示名；分桶说明补「窗口边缘的桶只装得下一部分行权价」（此前说边缘格子会空着，分桶时其实是部分和）。
+- 评审另报、**不改**的：同页 `Promise.all` 两个请求之间若后台恰好新拍一张，折线与热力图可能差一拍（下次重画即一致）；快照时刻混用带 / 不带时区会让间隔计算抛错（真实快照都带美东时区）；行权价间距极不规则时格子按最小间距画会变细；Zero Gamma 落在行权价窗口外时那一点不画。
+- 变异：三处服务端修复各去掉一次 ⇒ 各红一条；`canonTicker` 用 node 抽出来对 9 个输入逐个核对（含 `SPXW` 不映射、meta 未载入时原样返回）。`tests/test_alphabot*.py` + 卖权火墙 1017 passed。
 
 ## [0.45.688] — 2026-10-29 — Fixed：v0.45.683 的 8 条新测试在 CI 上红（`No module named 'anthropic'`）——CI 刻意不装 anthropic、测试一律用假模块，我直接 `import anthropic` 取真异常类，本机装着所以一直绿
 
@@ -20,7 +526,18 @@
 - 变异：假模块里让 `APITimeoutError` 不再是 `APIConnectionError` 的子类 ⇒ 测试变红（文件已还原）。
 - ⚠️ 局限：假模块与真 SDK 的层级一致性**只在我核对的那一刻成立**，CI 里没有真包可比；升级 SDK 后若层级变了，要手动改 `_anthropic_stub.py`（文件头已写）。没有加「禁止测试直接 import anthropic」的守卫——CI 本身就是这道守卫，这次只是红了几个小时才被发现；`tests/test_alphabot_chat.py` 里还有几处 `pytest.importorskip("anthropic")`（CI 上跳过），属既有做法，这次没动。
 
-## [0.45.687] — 2026-10-29 — 占位（进行中：LLM 影子预注册修订 1——10-29 救回的 27 只按原规则纳入 + scan_error 规则自 10-30 起 + 补记脚本）
+## [0.45.687] — 2026-10-29 — Added：LLM 影子预注册修订 1——10-29 救回的 27 只按预注册原规则纳入（新 `llm_shadow_backfill.py` 补记）；`scan_error` 不健康理由自 10-30 起适用
+
+用户 2026-10-29 选定「纳入 27 只」。10-29 的扫描在蜂群跑完后因 P4b 的 API 超时中途出错，27 只付费结果写在 `<影子根>/.swarm_results_2026-10-29.json`，状态文件里逐只结果为空（v0.45.683 之后同类日子会当场自动救回，这个补的是 683 之前已发生的那一天）。
+
+### Added
+- `experiments/llm_shadow_prereg.md`「修订 1」：① `scan_error`（付费跑中途出异常 ⇒ 当天不健康）**自 2026-10-30 起**，不追溯；② 2026-10-29 **按预注册原规则判**——失败率 8.1%、走 LLM 90%、无截断 / JSON 失败 / 预算 / 定价拒绝 ⇒ 健康，纳入其 27 个标的日（依据：「检验只用实际覆盖到的标的日」；VZ / XOM / DELL 没有 LLM 臂输出，不入检验）；③ 不是新一代（提示词 / 模型 / `max_tokens` / 精简规则都没变）；④ 没验证的与局限（网络超时的原因、为什么偏偏那三只、37 分钟比正常 23 分钟长、纳入对结论有决定性影响时必须含 / 不含各报一次）。**决定先于任何 T+7 结果**：证据文件里 10-22 ~ 10-29 的 `close_t7` 全为空。
+- `experiments/llm_shadow_amendment1_evidence_20261029.json`：决定依据冻结（swarm_results 文件的 sha256 / 修改时间 / 标的集合、原规则与 scan_error 规则下的质量判定、`close_t7` 非空计数、LLM−生产的描述性对照——不含任何结果）。
+- `llm_shadow_backfill.py`：补记工具。**缺省只看、`--apply` 才写**；只写影子根（拒绝影子根与生产根相同 / 嵌套）；只补「出错、且逐只结果为空」的付费日——已有逐只结果、已补记过、没有 error、非付费日、swarm_results 副本已存在、文件修改时间不在这次扫描起止之内、标的不在请求名单里，一律拒绝；原状态文件留为 `<日期>.json.orig`（不匹配读者的 `????-??-??.json`），补记后状态带 `backfill` 一节（来源 / 规则 / 时间 / 原 error）与 `salvaged: true`；质量判定**调用 `llm_shadow_scan.quality_report` 且不传 `error`**（预注册原规则），判出不健康就如实写不健康；落盘顺序 swarm 副本 → `.orig` → 状态文件，前两步失败状态文件仍是原样。补记不解开当天的花费锁（`day_lock` 照样锁）。
+
+### 测试 / 变异
+- `tests/test_llm_shadow_backfill.py`（24 条）：计划只读、按原规则判（含「不健康也如实写」）、各种拒绝、报告读者看到 27 条且 `.orig` 不被当成另一天、二次补记被拒、有问题时一个字不写、落盘各步失败时状态文件不变、花费锁不解开、CLI 缺省不写 / `--apply` 才写 / 生产根被拒（生产根里放一个真能补记的状态，才分得出守卫在不在）。
+- 11 种人为破坏（按含 scan_error 的新规则判 / 先改状态再写副本 / 不留 `.orig` / 允许改写已有结果 / 不核对修改时间 / dry-run 也写 / 没有 error 也补 / 允许重复补 / 不核对根 / 不拒名单外标的 / 非付费日也补）全部变红；其中「落盘顺序」与「核对根」两条第一版测试没能分辨出来（前者只断言「失败后状态不变」，顺序反了照样满足；后者的生产根里没有可补的状态，没守卫也是退出 2），改成「前两步各自失败」「生产根里放真能补的状态」后变红。文件已原样还原。
 
 ## [0.45.686] — 2026-10-29 — Fixed：v0.45.677 / 678 二次检查——月报「数据质量」漏数漏扫日的 429、晚一天跑就整月丢失；「预注册进度」照抄上游进度行会在过检视点后转述结论、IC 重跑行在就绪度判不了时印成「None/None」、账本目录不在时显示成全 0；BullVeto 墓碑会被 docstring 误报
 
@@ -80,7 +597,21 @@
 
 681 条目里对应的三句就地标了「685 更正」。
 
-## [0.45.684] — 2026-10-29 — 占位（进行中：Alpha Bot 盘中 GEX 热力图叠现价 / Zero Gamma 路径、逐拍变化视图、颜色按分位截断）
+## [0.45.684] — 2026-10-29 — Changed：Alpha Bot 盘中 GEX 热力图叠现价 / Zero Gamma 路径（对标 SpotGamma TRACE 的那张图），加「逐拍变化」视图，颜色按 |值| 的 95% 分位截断
+
+**起因**：用户问 Alpha Bot 和 GEXBot 一类软件差在哪，我答「盘中只显示最新一份」——**说错了**，盘中页早就有行权价 × 时间的净 GEX 热力图（只是 y 轴是类目轴，现价画不上去）。实际补的是三处：① 价格路径叠不上热力图（TRACE 的核心就是看现价穿过 gamma 带）；② 颜色按当天最大格定标，NVDA 10-28 成交量口径逐拍差最大格是 95% 分位的约 9 倍 ⇒ 其余格子几乎全灰；③ 只有水平没有变化。
+
+- 新增 `alphabot/intraday_heat.py`（纯函数，不 import 卖权模块、不做 IO，AST 守纯度）：`build(snaps, view=, basis=, mode=)` 把**已落盘的单日快照**排成 `[拍, 行权价, 真值, 上色用的截断值]` + 现价 / Zero Gamma 路径。`mode="delta"` = 这一拍减**上一拍同一行权价**，任一侧缺值 ⇒ 没有格子（不当 0、不拿更早的拍配）；截断 = |值| 最近秩 `CLIP_QUANTILE` 分位，只进上色列；相邻两拍间隔 > 中位间隔 `GAP_FACTOR` 倍记进 `gaps`（x 轴按拍、不等距）。原因码 `REASONS`（`no_snapshots` / `need_two_snapshots` / `no_values`）。
+- `alphabot/service.py`：`intraday_heat()` 只把 `intraday()` 的同一份快照交给 `build`（不另取数），补 `rules.strike_band`；坏参数 `BadRequest` ⇒ 400。`alphabot/server.py`：`GET /api/intraday-heat/{ticker}?date=&view=&basis=&mode=`。
+- `alphabot/static/charts.js`：`heatmap()`（两根类目轴）换成 `gammaTrace()`——y 为数值轴、格子用 custom series 画、visualMap 读截断列、提示框给真值，叠现价实线与 Zero Gamma 虚线。
+- `alphabot/static/pages/intraday.js`：热力图提到最上方整宽，右上「按 OI / 按成交量」×「当前值 / 逐拍变化」；图下说明里的截断分位 / 行权价窗口**只读服务端 `rules`**（页面不写死常量，测试钉住）；成交量口径逐拍变化写明「没有买卖方向、不是 orderflow」；同页重画时 `release` 旧图（此前每次切换都在 `live` 里留一个已脱离页面的实例）。「现价与水平」与「回看」并排。
+- `alphabot/static/pages/help.js`：盘中一节同步。
+
+**只展示**：不进评分、不写任何文件、不碰卖权账本 / 盲期；数据仍只来自盘中快照（现价 ±12% 内的行权价、OI 盘中不变、成交量无方向）。
+
+**变异检查**（7 个，全红；字节码关掉跑、还原后逐字节核对）：缺值当 0 / 逐拍差拿更早的拍配 / 不截断 / 截断取最大值 / 成交量口径读错列 / 不记间隔 / Zero Gamma 读错期限视图（首轮这条**绿**——补了「两个视图各有 Zero Gamma」的测试后红）。
+
+**核对**：新测试 26 passed；`tests/test_alphabot*.py` + `tests/test_sell_strike_integration.py` 972 passed；worktree 起 Alpha Bot（真实数据根、`--no-poll`）在浏览器里看过 NVDA 10-29 四种组合，控制台无报错、提示框真值正确。整套 13185 passed、2 xfailed（10:39，错开了同时段另一会话的整套）。
 
 ## [0.45.683] — 2026-10-29 — Fixed：LLM 影子 10-29 丢天复盘——Anthropic 连接 / 超时错误不再带崩整只标的 / P4b / 整次扫描；付费跑中途出错时救回已写的逐只结果；开跑前探活加必需主机 api.anthropic.com
 

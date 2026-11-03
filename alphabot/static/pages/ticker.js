@@ -30,7 +30,8 @@ export async function renderTicker(root, t, tab, alive, force = false) {
   fill(root, h("div", { class: "with-side" }, sidebar(t, `#/t/{T}/${tab}`), main));
 
   const favs = state.meta?.settings?.favorites || [];
-  const inWatch = (state.meta?.watchlist?.watchlist || []).includes(t);
+  // 指数常驻侧栏「指数」组，不进自选（服务端也会把它们从自选里滤掉）⇒ 不给按钮
+  const inWatch = (state.meta?.watchlist?.watchlist || []).includes(t) || (state.meta?.watchlist?.indices || []).includes(t);
   const favBtn = inWatch ? null : h("button", { class: "btn", type: "button", onclick: async () => {
     const next = favs.includes(t) ? favs.filter((x) => x !== t) : [...favs, t];
     await api("/api/settings", { body: { favorites: next } });
@@ -43,12 +44,12 @@ export async function renderTicker(root, t, tab, alive, force = false) {
   if (!d.data_available) {
     const plan = retry.plan(t, { limited: d.reason === "yf_rate_limited", retryAfterSec: d.retry_after_sec, alive,
       run: () => renderTicker(root, t, tab, alive, true) });
-    fill(main, h("div", { class: "page-head" }, h("h1", {}, t), h("div", { class: "controls" }, favBtn, refresh)),
+    fill(main, h("div", { class: "page-head" }, h("h1", {}, tLabel(t)), h("div", { class: "controls" }, favBtn, refresh)),
       panel(null, {}, h("div", { class: "empty" }, "这只标的现在拿不到期权链。"),
         h("p", { class: "callout warn" }, `原因：${fetchReasonText(d.reason, d.retry_after_sec)}`),
         d.reason === "yf_rate_limited"
           ? h("p", { class: "small muted" }, RETRY_NOTE[plan])
-          : h("p", { class: "small muted" }, "CBOE 延迟行情只覆盖挂牌期权的美股 / ETF；指数请用 CBOE 写法（如 _SPX）。")));
+          : h("p", { class: "small muted" }, "CBOE 延迟行情覆盖挂牌期权的美股 / ETF，指数只接了左侧「指数」里的几只（其他指数在 CBOE 上的写法没验证过）。")));
     return;
   }
 
@@ -57,7 +58,7 @@ export async function renderTicker(root, t, tab, alive, force = false) {
   const S = d.underlying_price;
   const head = h("div", { class: "page-head" },
     h("div", {},
-      h("h1", {}, t, h("span", { class: "sub num" }, money(S))),
+      h("h1", {}, tLabel(t), h("span", { class: "sub num" }, money(S))),
       h("div", { class: "fresh" },
         signChip(zg.sign_at_spot),
         h("span", {}, "报价 ", h("b", {}, SOURCE_LABEL[d.underlying_price_source] || d.underlying_price_source || "—")),
@@ -75,14 +76,19 @@ export async function renderTicker(root, t, tab, alive, force = false) {
   await draw(body, d, t, alive, force);
 }
 
+// 展示名：指数显示 SPX / XSP（链接与接口仍用 CBOE 文件名），其余原样。名单只取 /api/meta 的 index_labels
+export const tLabel = (t) => state.meta?.watchlist?.index_labels?.[t] || t;
+
 export function sidebar(current, pattern) {
   const wl = state.meta?.watchlist?.watchlist || [];
   const favs = state.meta?.watchlist?.favorites || [];
-  const link = (x, cls) => h("a", { href: pattern.replace("{T}", x), class: cls || "", "aria-current": x === current ? "true" : null }, x);
-  const extra = !wl.includes(current) && !favs.includes(current) ? [h("h3", {}, "当前"), link(current)] : [];
+  const idx = state.meta?.watchlist?.indices || [];
+  const link = (x, cls) => h("a", { href: pattern.replace("{T}", x), class: cls || "", "aria-current": x === current ? "true" : null }, tLabel(x));
+  const extra = !wl.includes(current) && !favs.includes(current) && !idx.includes(current) ? [h("h3", {}, "当前"), link(current)] : [];
   return h("aside", { class: "side", "aria-label": "标的列表" },
     ...extra,
     favs.length ? [h("h3", {}, "自选"), ...favs.map((x) => link(x, "fav"))] : null,
+    idx.length ? [h("h3", {}, "指数"), ...idx.map((x) => link(x))] : null,
     h("h3", {}, `观察列表 · ${wl.length}`), ...wl.map((x) => link(x)));
 }
 

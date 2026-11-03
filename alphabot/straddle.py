@@ -551,6 +551,8 @@ def signals_today(signals: List[dict], as_of: Optional[str], open_tickers: set, 
         tk = str(s.get("ticker") or "")
         if tk in open_tickers:
             status = "持仓中"
+        elif tk in skip and str(skip[tk]).startswith("waiting"):
+            status = "等待：进入财报前开仓窗口后再开"     # v0.45.693/696 入场窗口（options_paper_leg.entry_window_miss）
         elif tk in skip:
             status = f"跳过：{skip[tk]}"
         elif s.get("label") in ("rich", "cheap"):

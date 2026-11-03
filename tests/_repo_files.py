@@ -71,6 +71,37 @@ def _is_ours(rel: Path) -> bool:
     return True
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 嵌套 git 仓库（v0.45.707）
+# ══════════════════════════════════════════════════════════════════════════════
+# 开发检出的 `mcp-servers/maverick-mcp/` 是别人的完整克隆（392 个 .py，在直调 yfinance），目录名既不以点号开头、
+# 也不是 vendored 名字 ⇒ 上面两道名字规则都拦不住，`test_yf_daily::TestSingleEntry` 只在这台开发检出上红
+# （干净 worktree 里那个目录是空的）。按名字补一条 `mcp-servers` 是第三份手写清单；能**正面**认出「这是另一个
+# 仓库」的判据是目录里有 `.git`——子模块与 worktree 是 `.git` 文件，独立克隆是 `.git` 目录，两种都算。
+# 只判**根以下**的目录：根自己当然有 `.git`（worktree 里是文件）。
+
+def _is_nested_repo(d: Path) -> bool:
+    """`d` 是不是另一个 git 仓库 / 子模块 / worktree 的根。`lexists`：坏链接的 `.git` 也算（宁可剪掉也不扫进来）。"""
+    return os.path.lexists(d / ".git")
+
+
+def _nested_repo_filter(root: Path):
+    """返回 `inside(rel) -> bool`：`rel` 是否落在 `root` 以下的某个嵌套仓库里。按目录缓存，一个目录只 stat 一次。
+    给 `own_python_files` 的两条分支共用——同一判据，两份口径早晚漂移（见模块 docstring）。"""
+    cache: dict = {}
+
+    def inside(rel: Path) -> bool:
+        for i in range(1, len(rel.parts)):          # 只看祖先目录，不含根、不含文件本身
+            key = rel.parts[:i]
+            if key not in cache:
+                cache[key] = _is_nested_repo(root.joinpath(*key))
+            if cache[key]:
+                return True
+        return False
+
+    return inside
+
+
 def own_python_files(root) -> tuple[list[Path], str]:
     """返回 (绝对路径清单, 口径名)，口径名是 ``"git"`` 或 ``"rglob"``。
 
@@ -85,18 +116,20 @@ def own_python_files(root) -> tuple[list[Path], str]:
     import subprocess
 
     root = Path(root)
+    nested = _nested_repo_filter(root)
     try:
         r = subprocess.run(["git", "ls-files", "-z", "*.py"], cwd=str(root),
                            capture_output=True, text=True, timeout=60)
         if r.returncode == 0 and r.stdout.strip("\x00").strip():
             rels = [Path(x) for x in r.stdout.split("\x00") if x]
-            return [root / x for x in rels if _is_ours(x)], "git"
+            return [root / x for x in rels if _is_ours(x) and not nested(x)], "git"
     except (OSError, subprocess.SubprocessError):
         pass                                        # 落到 rglob 回退
 
     files = []
     for p in root.rglob("*.py"):
-        if _is_ours(p.relative_to(root)):
+        rel = p.relative_to(root)
+        if _is_ours(rel) and not nested(rel):
             files.append(p)
     return files, "rglob"
 
@@ -116,7 +149,7 @@ class WalkResult(NamedTuple):
     * `files`   —— 排序后的绝对路径。
     * `errors`  —— `os.walk` 读不了的目录（权限 / iCloud 占位 …）。**默认的 `os.walk` 会吞掉它们**，被吞的目录里
                    的文件就从守卫的视野里无声消失；守卫要断言它是空的。
-    * `pruned`  —— `(相对路径, 原因)`：每一个**没有走进去**的目录。原因是 skip / vendored / hidden / icloud。
+    * `pruned`  —— `(相对路径, 原因)`：每一个**没有走进去**的目录。原因是 skip / vendored / hidden / icloud / nested_repo。
                    用来断言「被剪掉的里面没有第一方源码」（见 `tests/test_repo_files_walk.py`）。
     """
     files: List[Path]
@@ -124,7 +157,8 @@ class WalkResult(NamedTuple):
     pruned: List[Tuple[str, str]]
 
 
-def _prune_reason(name: str, skip) -> str:
+def _prune_reason(path: Path, skip) -> str:
+    name = path.name
     if name in skip:
         return "skip"
     if name in VENDORED:
@@ -133,6 +167,8 @@ def _prune_reason(name: str, skip) -> str:
         return "hidden"
     if ICLOUD_COPY.search(name):
         return "icloud"
+    if _is_nested_repo(path):
+        return "nested_repo"
     return ""
 
 
@@ -144,7 +180,8 @@ def walk_own_python_files(root, skip_dirs=()) -> WalkResult:
     pytest-timeout（v0.45.636 实测）。
 
     排除：`skip_dirs`（调用方按守卫的目的给，如 tests / experiments）、`VENDORED`、点号开头的目录与文件、
-    iCloud 冲突副本（文件与目录）。与 `_is_ours` 同口径，另加 iCloud 与 `skip_dirs`。
+    iCloud 冲突副本（文件与目录）、嵌套 git 仓库（含 `.git` 的子目录，v0.45.707）。与 `_is_ours` + 嵌套仓库判据
+    同口径（`own_python_files` 两条分支也剪嵌套仓库），另加 iCloud 与 `skip_dirs`。
     与 `own_python_files` 的区别：读**工作树**而不是 git 清单——没提交的新文件也扫得到。"""
     root = Path(root)
     skip = frozenset(skip_dirs)
@@ -158,7 +195,7 @@ def walk_own_python_files(root, skip_dirs=()) -> WalkResult:
     for dirpath, dirnames, filenames in os.walk(root, onerror=_onerror):
         keep = []
         for d in dirnames:
-            why = _prune_reason(d, skip)
+            why = _prune_reason(Path(dirpath) / d, skip)
             if why:
                 pruned.append(((Path(dirpath) / d).relative_to(root).as_posix(), why))
             else:

@@ -1,7 +1,8 @@
 """组合尾部预算（v0.45.649）：压力最差格告警 + 逐标的 / 板块尾部贡献表 + 卖跨式「若按预算会不会跳过」影子记录。
 
 **纯函数**：不读写文件、不联网、不 import 账本 / 对冲模块；压力函数（`portfolio_greeks.stress_table`）与板块函数由调用方注入。
-接线在 `portfolio_greeks.compute_day`（它是唯一同时看得到股票账、跨式账、SPY 覆盖三本账的地方）；结果进当天审计文件
+接线在 `portfolio_greeks.compute_day`（它是唯一同时看得到股票账、跨式账、SPY 覆盖三本账的地方）
+（v0.45.701 起股票纸面组合缺省不出行——`portfolio_greeks.CONFIG["hedge_stock_book"]`；下文提到「股票账」的地方此后贡献为空）；结果进当天审计文件
 `greeks_<日期>.json` 的 `tail` 一节、`price_check.tail` 简报（→ `scan_timing` → `alert_manager`），Alpha Bot 对冲页只读显示。
 
 为什么要这个（2026-10-25 查证，2026-10-23 审计、NAV $144,857）

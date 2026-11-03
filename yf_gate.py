@@ -219,6 +219,16 @@ def _gated(fn, what: str):
     return wrapper
 
 
+def gated_call(fn, what: str):
+    """在闸门下跑一次 `fn()`：冷却检查 → 共享限流令牌 → 429 识别并进冷却（抛 `YFRateLimited`）。
+
+    给 `install()` 管不到的 Ticker 成员用（v0.45.709，alpha_hive MCP 的财报 / 分析师 / 持仓 / 分红拆股）：
+    `_TICKER_PROPS` 只列了扫描用的那几个，往里加名字会连带改变每日扫描里 `earnings_watcher`
+    （`quarterly_income_stmt`）、`swarm_agents/cache`（`splits`）的取数行为——那是另一件要单独决定的事。
+    本函数是纯新增，不改任何既有调用点。不要求先 `install()`：冷却状态与令牌桶都是模块级的。"""
+    return _gated(fn, what)()
+
+
 # ---------------------------------------------------------------- Ticker 包装
 # 会打网的方法与 property。分开列是因为包法不同（property 要重建 property）。
 _TICKER_METHODS = ("history", "option_chain", "get_earnings_dates")

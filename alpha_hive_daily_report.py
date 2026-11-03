@@ -1269,7 +1269,7 @@ class AlphaHiveDailyReporter:
             _log.warning("VRP 信号更新失败(非致命): %s", e)
 
         # ── v0.45.103: 组合 Greeks 聚合 + β·Delta 带状对冲（纸面 SPY 覆盖）──
-        # 读股票纸面组合 + 跨式腿持仓（都只读），CBOE 重新报价、60 日 OLS β，
+        # 读跨式腿持仓（只读；v0.45.701 起缺省不看股票纸面组合，它只进 NAV 分母），CBOE 重新报价、60 日 OLS β，
         # 合并 NAV 折百分比；β·$Delta 出 ±15% 带才在独立的 hedge_state/ 账本里
         # 用 SPY 股票拉回带边。缺 β/缺价/缺报价 → partial → 一律不对冲。同日重跑幂等。
         try:

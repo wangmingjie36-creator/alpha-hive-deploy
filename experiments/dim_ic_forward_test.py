@@ -32,6 +32,17 @@
     `apply_code_guard()`。输入层代码有未确认的改动（`signal_code_fingerprints.ACKS` 没跟上）⇒ 进度行 ⚠️；
     到检视点仍未确认 ⇒「无法判定」、不出结论。守卫自己坏了同样算不 ok。
 
+修订 4（v0.45.708，协议 §13.13）↔ 实现——**上面第 8、10 条的「H1」此后指描述项 buzz_v1**
+-------------------------------------------------------------------------------------
+12. H1 对象 buzz_v1_np —— `load_rows()` 从 `signal_archive` 读三个情绪通道挂到每行的 `ch`，`items()` 按
+    `H1_NP_WEIGHTS` 的顺序线性加权（无 clamp、无调整）。三个缺一 ⇒ 该行对 H1 无效；`signal_archive` 表不在 ⇒ 无法判定
+    （不是「H1 没样本」）。截断集合 = 三个通道，`h1_truncation()` 的层恒为 `input`（H1 没有冻结层）。
+13. 描述项 buzz_v1 —— 照旧读生产 sentiment、照旧按输入层 + 冻结层截断；`decide()` 只在协议出结论时给出
+    `descriptive_buzz_v1`（IC / CI / 朴素 p，不进 Holm 族）。
+14. 自证（第 10 条）此后只关系到描述项 buzz_v1：未通过只在进度行 ⚠️、**不再**把检视点改判「无法判定」。
+15. 指纹守卫（第 11 条）只让**信号触及 H1 截断集合**的单元挡检视点；其余单元（行情字段、F&G）的未确认改动
+    只在进度行提示（它们只影响描述项 buzz_v1）。
+
 事前实现选择（协议没写到、这里补的；改动须在 CHANGELOG 标「事前实现对齐」或「事后」）
 ---------------------------------------------------------------------------------
 - **「这些周的 T+7 全部结算」**：一个 ISO 周里所有窗口内行都有结果变量，或该周周日之后已过
@@ -112,25 +123,39 @@ def _check_protocol(P) -> None:
         raise ProtocolError(f"登记的结果变量 {P.OUTCOME_COLUMN!r} ≠ ic_diagnostics.FORWARD_CLOSE_COL['t7']={want!r}")
     if P.OUTCOME_COLUMN in P.FORBIDDEN_OUTCOME_COLUMNS:
         raise ProtocolError(f"结果变量 {P.OUTCOME_COLUMN!r} 在登记的禁用列里")
-    if P.HYPOTHESES[0][1] != "buzz_v1":
-        # 执行器只实现了修订 1 的 H1；登记换了对象而执行器没跟 ⇒ 读错量，不能照常算
-        raise ProtocolError(f"执行器不认识 H1 对象 {P.HYPOTHESES[0][1]!r}（只实现了修订 1 的 buzz_v1）")
+    if P.HYPOTHESES[0][1] != "buzz_v1_np":
+        # 执行器只实现了修订 4 的 H1；登记换了对象而执行器没跟 ⇒ 读错量，不能照常算
+        raise ProtocolError(f"执行器不认识 H1 对象 {P.HYPOTHESES[0][1]!r}（只实现了修订 4 的 buzz_v1_np）")
+
+
+def nonprice_composite(ch: Dict[str, float], weights: Dict[str, float]) -> Optional[float]:
+    """buzz_v1_np（修订 4）：按 `weights` 的顺序从左往右加。缺一个通道 / 非有限 ⇒ None（该行对 H1 无效，不补值）。"""
+    total = 0.0
+    for c, w in weights.items():
+        v = ch.get(c)
+        if not _finite(v):
+            return None
+        total = total + v * w
+    return total
 
 
 def items(P) -> Dict[str, Dict]:
-    """协议里所有要算 IC 的对象：{名字: {"value": 取值函数, "signals": 截断/隔离用的归档信号}}。"""
+    """协议里所有要算 IC 的对象：{名字: {"value": 取值函数（收一整行）, "signals": 截断/隔离用的归档信号}}。"""
     def _dim(d):
-        return lambda ds: ds.get(d)
+        return lambda r: r["ds"].get(d)
 
-    def _composite(ds):
+    def _composite(r):
+        ds = r["ds"]
         if any(ds.get(d) is None for d in P.FROZEN_WEIGHTS):
             return None          # 协议 §3：H2 只用 5 维齐全的标的
         return sum(w * ds[d] for d, w in P.FROZEN_WEIGHTS.items())
 
     (h1, _h1_obj, h1_sigs), (h2, _h2_obj, h2_sigs) = P.HYPOTHESES
-    # H1 = buzz_v1。冻结评分器未实现 ⇒ 读生产维度，冻结层边界照截断（见文件头第 8 条）
-    out = {h1: {"value": _dim(P.H1_PRODUCTION_DIM), "signals": h1_sigs},
-           h2: {"value": _composite, "signals": h2_sigs}}
+    v1_name, v1_sigs = P.H1_V1_DESCRIPTIVE
+    out = {h1: {"value": lambda r: nonprice_composite(r.get("ch") or {}, P.H1_NP_WEIGHTS), "signals": h1_sigs},
+           h2: {"value": _composite, "signals": h2_sigs},
+           # 描述项 buzz_v1（修订 4）：读生产维度，冻结层与输入层边界照截断（文件头第 8、13 条）
+           v1_name: {"value": _dim(P.H1_PRODUCTION_DIM), "signals": v1_sigs}}
     for d in P.DESCRIPTIVE_DIMS:
         out[d] = {"value": _dim(d), "signals": (f"agent.{P.DIM_TO_AGENT[d]}.score",)}
     return out
@@ -180,6 +205,7 @@ def load_rows(db_path: Path, P, today: str) -> List[Dict]:
     finally:
         con.close()
 
+    ch_by_key = _load_channels(db_path, P, today)
     rows = []
     for r in raw:
         d = r["date"][:10]
@@ -198,8 +224,32 @@ def load_rows(db_path: Path, P, today: str) -> List[Dict]:
         ret = None
         if r["checked_t7"] == 1 and r["p_end"] is not None and r["p_end"] > 0:
             ret = (r["p_end"] / r["price_at_predict"] - 1) * 100.0
-        rows.append({"date": d, "ticker": r["ticker"], "ds": ds, "ret": ret})
+        rows.append({"date": d, "ticker": r["ticker"], "ds": ds, "ret": ret,
+                     "ch": ch_by_key.get((d, r["ticker"]), {})})
     return rows
+
+
+def _load_channels(db_path: Path, P, today: str) -> Dict[Tuple[str, str], Dict[str, float]]:
+    """H1（修订 4）读的三个情绪通道：{(日期, 标的): {通道: 值}}，取自 `signal_archive` 的归档值。
+
+    表不在 ⇒ `ProtocolError`（无法判定）——若当成空，H1 会静默地永远「没样本」，没人会红。
+    """
+    names = {f"buzz.comp.{c}": c for c in P.H1_NP_WEIGHTS}
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='signal_archive'").fetchone():
+            raise ProtocolError("pheromone.db 里没有 signal_archive 表——H1（buzz_v1_np）读不到通道值")
+        q = ",".join("?" * len(names))
+        raw = con.execute(f"SELECT date, ticker, signal, value FROM signal_archive "
+                          f"WHERE signal IN ({q}) AND date >= ? AND date <= ?",
+                          (*names, P.FORWARD_START, today + "\uffff")).fetchall()
+    finally:
+        con.close()
+    out: Dict[Tuple[str, str], Dict[str, float]] = defaultdict(dict)
+    for date, ticker, sig, val in raw:
+        if val is not None:
+            out[(str(date)[:10], ticker)][names[sig]] = float(val)
+    return out
 
 
 def _finite(v) -> bool:
@@ -215,7 +265,7 @@ def weekly_series(rows: List[Dict], value: Callable, signals: Tuple[str, ...], P
             continue
         if any(signal_archive.is_quarantined(r["date"], r["ticker"], s) for s in signals):
             continue
-        v = value(r["ds"])
+        v = value(r)
         if not _finite(v):
             continue
         by_day[r["date"]].append((float(v), r["ret"]))
@@ -265,9 +315,10 @@ def truncation_point(signals: Tuple[str, ...], P, history: Optional[list] = None
 
 
 def h1_truncation(P, history: Optional[list] = None) -> Optional[Dict]:
-    """H1 的截断点（修订 1）：输入层与冻结层一律截断（评分器未实现，§13.4 保守分支），并标出层。
+    """H1 的截断点，并标出层。修订 4 起 H1 的截断集合 = 三个情绪通道（全在输入层）⇒ 层恒为 `input`。
 
-    `layer="frozen"`：截断点那天只触及冻结层 ⇒ 冻结评分器自证通过后可解除；`"input"`：不可解除。
+    （修订 1 时期 H1 = buzz_v1，还有冻结层：`layer="frozen"` = 只触及冻结层、冻结评分器自证通过后可解除。
+    那条分支留着：截断集合里若再出现非输入层信号，它照旧能标出来。）
     """
     cut = truncation_point(P.HYPOTHESES[0][2], P, history)
     if cut is None:
@@ -438,12 +489,15 @@ def decide(h1_weeks: List[Tuple], h2_weeks: List[Tuple], P, *,
            h1_capacity: Optional[int] = None,
            h2_truncated: bool = False,
            h2_unknown: Optional[str] = None,
-           descriptive: Optional[Dict[str, List[Tuple]]] = None) -> Dict:
+           descriptive: Optional[Dict[str, List[Tuple]]] = None,
+           v1_weeks: Optional[List[Tuple]] = None) -> Dict:
     """协议 §5 的两次检视 + §2 的固定序列。
 
     `h1_weeks` / `h2_weeks`：**已结算前缀内**的 [(周, 周值, 日数)]，按周排序。
     `h1_capacity`：H1 被截断时，截断前最多可能有几个合格周（含未结算）；None = 未截断。
     `h2_unknown`：H2 的截断日无法判定（如权重历史不可读）⇒ 轮到 H2 时判「无法检验」。
+
+    `v1_weeks`：描述项 buzz_v1（修订 4）的周序列——只在协议结束时报 IC / CI / 朴素 p，不进 Holm 族。
 
     **盲化**：`verdicts` 里只放已出结论的假设；描述项只在协议结束（`concluded`）时给出。
     """
@@ -517,6 +571,8 @@ def decide(h1_weeks: List[Tuple], h2_weeks: List[Tuple], P, *,
                  for d, w in descriptive.items()}
         adj = holm({d: t["p"] for d, t in tests.items() if t["testable"]})
         out["descriptive"] = {d: {**t, "p_holm": adj.get(d)} for d, t in tests.items()}
+    if concluded and v1_weeks is not None:
+        out["descriptive_buzz_v1"] = series_test([v for wk, v, _ in v1_weeks if cut is None or wk <= cut], 0.05, P)
     return out
 
 
@@ -524,20 +580,39 @@ def decide(h1_weeks: List[Tuple], h2_weeks: List[Tuple], P, *,
 # 输入层代码指纹守卫（v0.45.554，协议 §6「按层声明」的机械执行、§12 第 11 条）
 # ────────────────────────────────────────────────────────────────────────────
 
-def input_code_guard() -> Dict:
-    """`signal_code_fingerprints.check()` 的摘要：{"ok", "unacknowledged": [单元], "errors": {单元: 原因}}。
+def input_code_guard(h1_signals: Optional[Tuple[str, ...]] = None) -> Dict:
+    """`signal_code_fingerprints.check()` 的摘要：{"ok", "unacknowledged": [单元], "errors": {单元: 原因},
+    "descriptive_only": {"unacknowledged": [...], "errors": {...}}}。
 
     H1 是否该截断，取决于「输入层代码的每次改动都登记了」——这一前提由指纹守卫核对。
+    修订 4：只有信号触及 H1 截断集合（`h1_signals`，缺省取登记）的单元算进 `ok`；其余单元（行情字段、F&G）
+    只影响描述项 buzz_v1，它们的问题放进 `descriptive_only`，只提示、不挡检视点。
     守卫自己加载 / 计算失败，同样当作不 ok（渲染成 ⚠️），不当作「没改动」。
     """
     try:
         import signal_code_fingerprints as scf   # 调用时导入：它坏了只影响这一项，不拖垮整个执行器
+        if h1_signals is None:
+            h1_signals = _protocol().HYPOTHESES[0][2]
         res = scf.check()
+        gating = {u for u, spec in scf.UNITS.items() if set(spec["signals"]) & set(h1_signals)}
     except Exception as e:  # noqa: BLE001 —— 任何失败都必须变成可见的 ⚠️
-        return {"ok": False, "unacknowledged": [], "errors": {"*": f"{type(e).__name__}: {e}"}}
-    return {"ok": bool(res["ok"]),
-            "unacknowledged": [u for u, x in res["units"].items() if x["state"] == "unacknowledged"],
-            "errors": {u: x["error"] for u, x in res["units"].items() if x["state"] == "error"}}
+        return {"ok": False, "unacknowledged": [], "errors": {"*": f"{type(e).__name__}: {e}"},
+                "descriptive_only": {"unacknowledged": [], "errors": {}}}
+    if not gating:
+        # 没有任何单元守着 H1 的截断集合 = 守卫形同虚设，不能当作通过
+        return {"ok": False, "unacknowledged": [], "errors": {"*": "没有任何指纹单元触及 H1 的截断信号"},
+                "descriptive_only": {"unacknowledged": [], "errors": {}}}
+    units = res["units"]
+
+    def _pick(keep):
+        return ([u for u, x in units.items() if keep(u) and x["state"] == "unacknowledged"],
+                {u: x["error"] for u, x in units.items() if keep(u) and x["state"] == "error"})
+
+    unack, errs = _pick(lambda u: u in gating)
+    d_unack, d_errs = _pick(lambda u: u not in gating)
+    return {"ok": all(units[u]["state"] == "ok" for u in gating if u in units) and gating <= set(units),
+            "unacknowledged": unack, "errors": errs,
+            "descriptive_only": {"unacknowledged": d_unack, "errors": d_errs}}
 
 
 def _guard_problem(guard: Dict) -> str:
@@ -626,13 +701,9 @@ def _self_proof_problem(sp: Dict) -> str:
 
 
 def apply_self_proof(res: Dict, sp: Dict) -> Dict:
-    """检视点上自证不通过 ⇒「无法判定」：H1 读的生产分是否仍等于 buzz_v1 无法确认（§13.2）。检视点前只附状态。"""
-    if sp.get("ok") or res.get("status") not in ("in_progress", "concluded"):
-        return {**res, "buzz_v1_self_proof": sp}
-    keep = {k: res[k] for k in ("forward_start", "today", "forward_test_excluded_days", "input_code_guard") if k in res}
-    return {**keep, "status": "cannot_judge", "buzz_v1_self_proof": sp,
-            "reason": (f"{_self_proof_problem(sp)}——H1 读到的生产分是否仍是 buzz_v1 无法判定（协议 §13.2），"
-                       "先跑 `buzz_v1.py` 看失配明细")}
+    """附上自证状态。修订 4 起自证只关系到描述项 buzz_v1（H1 = buzz_v1_np 直接由归档通道算，不经冻结评分器）⇒
+    未通过只在进度行 ⚠️，**不**改判检视结论（修订 1 时期这里会把检视点改判「无法判定」）。"""
+    return {**res, "buzz_v1_self_proof": sp}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -647,8 +718,9 @@ def sensitivity_block(dh: Dict, rows: List[Dict], decide_on: Callable[[List[Dict
     """
     def _reveal(r: Dict) -> Dict:
         out = {"status": r["status"], "verdicts": r["verdicts"]}
-        if "descriptive" in r:
-            out["descriptive"] = r["descriptive"]
+        for k in ("descriptive", "descriptive_buzz_v1"):
+            if k in r:
+                out[k] = r[k]
         return out
     return day_health.sensitivity_block(dh, rows, decide_on, revealed=revealed,
                                         counts=lambda r, kept: {"h1_weeks": r["h1_weeks"]}, reveal=_reveal)
@@ -698,14 +770,16 @@ def run(db_path: Optional[str] = None, today: Optional[str] = None,
         return decide(series[h1], series[h2], P, h1_capacity=h1_capacity,
                       h2_truncated=h2_cut is not None,
                       h2_unknown=(f"权重历史无法判定：{wchg['unknown']}" if "unknown" in wchg else None),
-                      descriptive={d: series[d] for d in P.DESCRIPTIVE_DIMS})
+                      descriptive={d: series[d] for d in P.DESCRIPTIVE_DIMS},
+                      v1_weeks=series[P.H1_V1_DESCRIPTIVE[0]])
 
     res = _decide_on(rows)
     stale = (not rows and (dt.date.fromisoformat(today) - dt.date.fromisoformat(P.FORWARD_START)).days
              >= STALE_DAYS)
-    out = {**base, **res, "truncation": {h1: trunc[h1], h2: trunc[h2]},
+    out = {**base, **res, "truncation": {h1: trunc[h1], h2: trunc[h2],
+                                         P.H1_V1_DESCRIPTIVE[0]: trunc[P.H1_V1_DESCRIPTIVE[0]]},
            "weight_change": wchg, "stale": stale, "h1_anchor": anchor}
-    out = apply_code_guard(out, code_guard if code_guard is not None else input_code_guard())
+    out = apply_code_guard(out, code_guard if code_guard is not None else input_code_guard(P.HYPOTHESES[0][2]))
     out = apply_self_proof(out, self_proof if self_proof is not None else buzz_v1_self_proof(db, today))
     # v0.45.583：桥接核对只是进度（阶段 4 前 H1 仍读入档通道），无论上面判成什么都附上
     out["buzz_v1_bridge"] = bridge if bridge is not None else buzz_v1_bridge(db, today)
@@ -719,9 +793,13 @@ def run(db_path: Optional[str] = None, today: Optional[str] = None,
     return out
 
 
+#: 描述项 buzz_v1 在结果里的键名（与 `dim_ic_protocol.H1_V1_DESCRIPTIVE[0]` 同一个，测试钉住）
+P_V1_NAME = "buzz_v1"
+
+
 def status_line(res: Dict) -> str:
     """给 `ic_rerun_readiness --quiet` 的一段。图标约定同 F&G 那段：⚠️ 要显著标出 / ⏳ 正常 / 🔔 已到检视点。"""
-    tag = "维度 IC 协议（v0.45.320 预注册·修订 1）"
+    tag = "维度 IC 协议（v0.45.320 预注册·修订 4：H1 = buzz_v1_np）"
     st = res.get("status")
     if st == "cannot_judge":
         return f"⚠️ {tag}无法判定：{res.get('reason')}"
@@ -749,9 +827,15 @@ def status_line(res: Dict) -> str:
     if guard is not None and not guard.get("ok"):
         warns.append(f"{_guard_problem(guard)}——跑 signal_code_fingerprints.py 按提示登记；"
                      "未登记前 H1 截断与否无法判定，到检视点将不出结论")
+    d_only = (guard or {}).get("descriptive_only") or {}
+    if d_only.get("unacknowledged") or d_only.get("errors"):
+        notes.append(f"描述项 buzz_v1：{_guard_problem(d_only)}（不影响 H1）")
     sp = res.get("buzz_v1_self_proof")
     if sp is not None and not sp.get("ok"):
-        warns.append(f"{_self_proof_problem(sp)}——跑 buzz_v1.py 看明细；未通过前到检视点将不出结论")
+        warns.append(f"{_self_proof_problem(sp)}——跑 buzz_v1.py 看明细；只影响描述项 buzz_v1，不影响 H1")
+    v1t = tr.get(P_V1_NAME) or {}
+    if v1t.get("date"):
+        notes.append(f"描述项 buzz_v1 已于 {v1t['date']}（{v1t['version']}）截断（不影响 H1）")
     br = res.get("buzz_v1_bridge")
     if br is not None:
         if br.get("ok"):
@@ -776,7 +860,7 @@ def status_line(res: Dict) -> str:
 
 def _print_report(res: Dict) -> None:
     print("━" * 72)
-    print("🐝 Alpha Hive · 维度 IC 证据协议（v0.45.320 预注册 · v0.45.330 修订 1，执行器 v0.45.325/330）")
+    print("🐝 Alpha Hive · 维度 IC 证据协议（v0.45.320 预注册 · v0.45.330 修订 1 · v0.45.708 修订 4，执行器 v0.45.325/330/708）")
     print("━" * 72)
     print(status_line(res))
     if res.get("status") == "cannot_judge":
@@ -805,6 +889,13 @@ def _print_report(res: Dict) -> None:
                 print(f"    {d:<9} IC {t['ic']:+.4f}  G={t['G']}  p={t['p']:.4f}  p_holm={t['p_holm']:.4f}")
             else:
                 print(f"    {d:<9} {t['reason']}")
+    v1 = res.get("descriptive_buzz_v1")
+    if v1 is not None:
+        print("\n  描述项 buzz_v1（修订 4 前的 H1 对象；不进 Holm 族、不触发动作）")
+        if v1["testable"]:
+            print(f"    IC {v1['ic']:+.4f}  G={v1['G']}  p={v1['p']:.4f}（朴素，未校正）")
+        else:
+            print(f"    {v1['reason']}")
 
 
 def main() -> int:

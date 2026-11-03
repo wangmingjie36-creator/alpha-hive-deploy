@@ -16,6 +16,7 @@ v0.44.1~0.44.3 修了 ML 预期收益的看多偏斜并把 RivalBee 三个硬编
 """
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -415,10 +416,19 @@ class TestEtaAndExitCodes:
         # 推出来的夹具日期是两个钟（v0.45.96 那类定时炸弹）——边界一动就把 8 周变成 4 周。
         rows = _weekly_rows(4)
         res = rr.assess(db_path=db(rows), today=_after_cohort(8))
-        assert res["weeks_per_calendar_week"] < 1.0
-        assert res["eta_calendar_weeks"] > res["weeks_remaining"], (
-            "ETA 没有把产出率折算进去"
-        )
+        assert res["weeks_per_calendar_week"] == 0.5
+        # v0.45.705：只断言「> 还差周数」已拦不住「忽略节奏」——T+7 滞后与起点本身就多出约 0.3 周（二次检查实测）。
+        # 还差 21 周、节奏 1/2 ⇒ 第 42 个候选周（当周周一、还没扫，算第 1 个）的第一个交易日 + 7 个交易日。
+        assert res["eta_date"] == _week_eta(_COHORT_START, 8 + 41), "ETA 没有把产出率折算进去"
+        assert res["eta_calendar_weeks"] >= 2 * res["weeks_remaining"] - 1
+
+    def test_no_completed_week_with_scans_gives_no_date_and_says_why(self, db):
+        """过完的整周一周都没扫、只有当周有扫描：估不出节奏 ⇒ 不给日期；也不能说成「还没有扫描产出」。"""
+        res = rr.assess(db_path=db(_weekly_rows(1, start=_after_cohort(2), ripe=False)),
+                        today=_after_cohort(2))
+        assert res["eta_date"] is None and res["scan_weeks_in_cohort"] == 1
+        line = rr.summary_line(res)
+        assert "估不出节奏" in line and "还没有扫描产出" not in line, line
 
     def test_no_output_yet_gives_no_false_eta(self, db):
         res = rr.assess(db_path=db([]), today="2026-08-24")
@@ -457,6 +467,191 @@ class TestEtaAndExitCodes:
                     "weeks_remaining", "eta_date", "pool_note", "ready",
                     "next_step"):
             assert key in payload, f"周度任务依赖的键 {key} 消失了"
+
+
+def _daily_rows(boundary, day, skip_weeks=(), stale_weeks=()):
+    """世代起每个交易日扫一次（一只标的），截至 `day`；成熟 = 第 7 个交易日 ≤ day（与回填同一交易日函数）。
+    `skip_weeks`：第几个世代周（0 起）整周没扫；`stale_weeks`：扫了但整周一条都没回填。"""
+    import datetime as dt
+    from is_trading_day import add_trading_days, is_trading_day
+    b0 = dt.date.fromisoformat(boundary)
+    m0 = b0 - dt.timedelta(days=b0.weekday())
+    out, d = [], b0
+    while d <= day:
+        wk = (d - m0).days // 7
+        if is_trading_day(d)[0] and wk not in skip_weeks:
+            ripe = wk not in stale_weeks and add_trading_days(d, 7) <= day
+            out.append((d.isoformat(), "AAA", ripe))
+        d += dt.timedelta(days=1)
+    return out
+
+
+def _true_eta(boundary, required, skip_weeks=()):
+    """独立真值：世代里第 `required` 个有扫描的 ISO 周，它的第一个交易日 + 7 个交易日。"""
+    import datetime as dt
+    from is_trading_day import add_trading_days
+    b0 = dt.date.fromisoformat(boundary)
+    m0 = b0 - dt.timedelta(days=b0.weekday())
+    weeks = [w for w in range(required + len(skip_weeks) + 1) if w not in skip_weeks]
+    first = max(b0, m0 + dt.timedelta(weeks=weeks[required - 1]))
+    return add_trading_days(add_trading_days(first, 0), 7).isoformat()
+
+
+class TestEtaIsSelfConsistent:
+    """v0.45.705：预计到位日期的根因修复。
+
+    旧公式把「有扫描的 ISO 周（含边界周与没过完的当周）」除以「floor(已过天数/7)」当速率，稳态恒为 (N+1)/N > 1：
+    世代第 1 周 2.0 ⇒ 日期被砍半，之后每周往后挪（2026-11-03 实测 10-30 报 2027-01-22、11-02 报 2027-02-22）。
+    判据：**世界恰好按估计器的假设运行（每周都扫描、按时回填）时，估计必须逐日不变且等于真值**——
+    旧公式这条每周都破；只有新信息（漏扫一周 / 回填逾期）才许挪日期。
+    """
+
+    @pytest.mark.parametrize("target_ic", [rr.DEFAULT_TARGET_IC, 0.2])
+    def test_steady_scanning_eta_is_a_fixed_point(self, db, target_ic):
+        """0.2 ⇒ 5 周：很快就只剩「在路上」的周，覆盖按已知成熟日给日期的分支。"""
+        import datetime as dt
+        from is_trading_day import is_trading_day
+        required = rr._WEEKS_REQUIRED[target_ic]
+        truth = _true_eta(_COHORT_START, required)
+        b0 = dt.date.fromisoformat(_COHORT_START)
+        seen = {}
+        for i in range(0, 7 * 9):
+            day = b0 + dt.timedelta(days=i)
+            if not is_trading_day(day)[0]:
+                continue
+            res = rr.assess(db_path=db(_daily_rows(_COHORT_START, day)), today=day.isoformat(),
+                            target_ic=target_ic)
+            if res["ready"]:
+                break
+            assert res["weeks_per_calendar_week"] <= 1.0, (day, res["weeks_per_calendar_week"])
+            seen[day.isoformat()] = res["eta_date"]
+        assert len(seen) >= 20, "循环没跑到足够多的扫描日——夹具没接上"
+        wrong = {d: e for d, e in seen.items() if e != truth}
+        assert not wrong, f"每天都扫描时预计日期应恒为 {truth}，实际漂移：{wrong}"
+
+    def test_first_week_assumes_every_week_and_says_so(self, db):
+        res = rr.assess(db_path=db(_daily_rows(_COHORT_START, _date(_COHORT_START))), today=_COHORT_START)
+        assert res["pace_basis"] == "assumed_every_week"
+        assert res["eta_date"] == _true_eta(_COHORT_START, res["weeks_required"])
+        assert "按每周都有扫描算" in rr.summary_line(res)
+
+    def test_skipped_week_moves_eta_later(self, db):
+        """漏扫一周是新信息：日期至少晚到「少了这一周」的真值，并按观测到的漏扫比例继续外推（更晚）。"""
+        day = _date(_after_cohort(6))
+        steady = rr.assess(db_path=db(_daily_rows(_COHORT_START, day)), today=day.isoformat())
+        skipped = rr.assess(db_path=db(_daily_rows(_COHORT_START, day, skip_weeks={3})), today=day.isoformat())
+        assert skipped["completed_weeks_scanned"] == skipped["calendar_weeks_elapsed"] - 1
+        assert skipped["eta_date"] >= _true_eta(_COHORT_START, 25, skip_weeks={3}) > steady["eta_date"]
+
+    def test_overdue_week_is_reported_and_not_counted(self, db):
+        """整周扫了却一条都没回填、T+7 早过了 ⇒ 不当「在路上」算（取价失败不一定会自己补上），单独报数。"""
+        day = _date(_after_cohort(5))
+        res = rr.assess(db_path=db(_daily_rows(_COHORT_START, day, stale_weeks={1})), today=day.isoformat())
+        assert res["weeks_overdue"] == 1
+        assert res["eta_date"] == _true_eta(_COHORT_START, 25, skip_weeks={1}), "逾期周被算成了供给"
+        assert "仍没有一条回填" in rr.summary_line(res)
+
+    def test_fractional_pace_rounds_to_the_later_week(self):
+        """过完 3 周扫了 2 周（节奏 2/3）、还差 1 周、当周（周一，还没扫）可扫：下一个有扫描的周期望在 1.5 周后
+        ⇒ 取第 2 个候选周（向上取整，宁晚勿早），不是当周。"""
+        import datetime as dt
+        from is_trading_day import add_trading_days, is_trading_day
+        b0 = _date(_COHORT_START)
+        m0 = b0 - dt.timedelta(days=b0.weekday())
+        scanned = [d for w in (0, 1) for i in range(5)
+                   if is_trading_day(d := m0 + dt.timedelta(weeks=w, days=i))[0] and d >= b0]
+        today = m0 + dt.timedelta(weeks=3)
+        dates = [d.isoformat() for d in scanned]
+        out = rr.project_eta(dates, dates, required=3, boundary=b0, today=today)
+        assert (out["calendar_weeks_elapsed"], out["completed_weeks_scanned"]) == (3, 2)
+        week4 = add_trading_days(m0 + dt.timedelta(weeks=4), 0)
+        assert out["eta_date"] == add_trading_days(week4, 7).isoformat(), out
+
+    def test_partly_due_unripe_week_is_pipeline_not_overdue(self, db):
+        """逾期按该周**最晚**一条的 T+7 判：周一那条到期没熟、周五那条还没到期 ⇒ 仍在路上，不报逾期。"""
+        from is_trading_day import add_trading_days
+        w2 = add_trading_days(_date(_after_cohort(2)), 0)
+        day = add_trading_days(w2, 8)                 # 周一那条的 T+7 已过一天，周五那条还没到
+        res = rr.assess(db_path=db(_daily_rows(_COHORT_START, day, stale_weeks={2})), today=day.isoformat())
+        assert res["weeks_overdue"] == 0, "按最早一条判逾期了：回填晚一天的周会被提前踢出预计"
+        assert res["weeks_in_pipeline"] >= 2
+
+    def test_weekend_today_in_unscanned_week_is_not_a_candidate(self):
+        """当周没扫、今天是周六（当周已没有交易日）⇒ 候选从下周起：还差 2 周 ⇒ 第 4 周，不是第 3 周。"""
+        import datetime as dt
+        b0 = _date(_COHORT_START)
+        m0 = b0 - dt.timedelta(days=b0.weekday())
+        dates = _scan_dates(b0, weeks=(0, 1))
+        out = rr.project_eta(dates, dates, required=4, boundary=b0, today=m0 + dt.timedelta(weeks=2, days=5))
+        assert out["eta_date"] == _week_eta(_COHORT_START, 4), out
+
+    def test_rows_dated_after_today_push_candidates_past_them(self):
+        """有日期晚于今天的行（本机时区落后于业务日时会有）：它算在路上，以后的候选周排在它之后。"""
+        import datetime as dt
+        b0 = _date(_COHORT_START)
+        m0 = b0 - dt.timedelta(days=b0.weekday())
+        ripe = _scan_dates(b0, weeks=(0, 1))
+        alld = ripe + _scan_dates(b0, weeks=(3,))
+        out = rr.project_eta(ripe, alld, required=4, boundary=b0, today=m0 + dt.timedelta(weeks=2))
+        assert out["weeks_in_pipeline"] == 1
+        assert out["eta_date"] == _week_eta(_COHORT_START, 4), out
+
+    def test_t7_matches_backtester(self):
+        """成熟日的 7 个交易日必须与回填同一个数（backtester 的 `days_map["t7"]`），两处各写各的会漂。"""
+        import ast
+        tree = ast.parse((Path(__file__).resolve().parent.parent / "backtester.py").read_text(encoding="utf-8"))
+        seen = [ast.literal_eval(n.value)["t7"] for n in ast.walk(tree)
+                if isinstance(n, ast.Assign) and isinstance(n.value, ast.Dict)
+                and any(isinstance(tg, ast.Name) and tg.id == "days_map" for tg in n.targets)
+                and "t7" in ast.literal_eval(n.value)]
+        assert seen, "backtester.py 里没找到 days_map —— 守卫空转"
+        assert set(seen) == {rr.T7_TRADING_DAYS}, seen
+
+    def test_cli_human_mode_renders_eta(self, monkeypatch, db, capsys):
+        """人读输出（不带 --quiet / --json）此前没有测试经过。"""
+        import sys as _s
+        monkeypatch.setattr(_s, "argv", ["ic_rerun_readiness.py", "--db", str(db(_weekly_rows(2))),
+                                         "--today", _after_cohort(3)])
+        assert rr.main() == 1
+        out = capsys.readouterr().out
+        assert "预计到位" in out and "在路上" in out and "按每周都扫描算" not in out, out
+
+    def test_cli_human_mode_empty_cohort_claims_no_assumption(self, monkeypatch, db, capsys):
+        """一条扫描都没有：不给日期，也不印「按每周都扫描算」（那个假设没被用上）。"""
+        import sys as _s
+        monkeypatch.setattr(_s, "argv", ["ic_rerun_readiness.py", "--db", str(db([])), "--today", _COHORT_START])
+        rr.main()
+        out = capsys.readouterr().out
+        assert "预计到位" not in out and "按每周都扫描算" not in out, out
+
+    def test_pipeline_weeks_are_counted_not_overdue(self, db):
+        day = _date(_after_cohort(2))
+        res = rr.assess(db_path=db(_daily_rows(_COHORT_START, day)), today=day.isoformat())
+        assert res["weeks_overdue"] == 0 and res["weeks_in_pipeline"] >= 1
+        assert "回填" not in rr.summary_line(res)
+
+
+def _date(s):
+    import datetime as dt
+    return dt.date.fromisoformat(s)
+
+
+def _scan_dates(b0, weeks):
+    """世代第 `weeks` 周（0 起）里不早于边界的全部交易日（ISO 字符串）。"""
+    import datetime as dt
+    from is_trading_day import is_trading_day
+    m0 = b0 - dt.timedelta(days=b0.weekday())
+    return [d.isoformat() for w in weeks for i in range(5)
+            if is_trading_day(d := m0 + dt.timedelta(weeks=w, days=i))[0] and d >= b0]
+
+
+def _week_eta(boundary, week):
+    """世代第 `week` 周（0 起）的第一个交易日 + 7 个交易日。"""
+    import datetime as dt
+    from is_trading_day import add_trading_days
+    b0 = _date(boundary)
+    m0 = b0 - dt.timedelta(days=b0.weekday())
+    return add_trading_days(add_trading_days(max(b0, m0 + dt.timedelta(weeks=week)), 0), 7).isoformat()
 
 
 class TestRequirementsTraceToPowerReport:

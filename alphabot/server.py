@@ -144,6 +144,12 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         return svc.intraday(request.path_params["ticker"], _q(request, "date"))
 
     @api
+    def intraday_heat(request):
+        return svc.intraday_heat(request.path_params["ticker"], _q(request, "date"),
+                                 view=_q(request, "view") or "le_45dte", basis=_q(request, "basis") or "oi",
+                                 mode=_q(request, "mode") or "level")
+
+    @api
     def intraday_dates(request):
         return svc.intraday_dates(request.path_params["ticker"])
 
@@ -231,6 +237,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/premium/{ticker}", premium),
         Route("/api/method", method),
         Route("/api/intraday/{ticker}", intraday),
+        Route("/api/intraday-heat/{ticker}", intraday_heat),
         Route("/api/intraday-dates/{ticker}", intraday_dates),
         Route("/api/intraday/{ticker}/snap", snap_now, methods=["POST"]),
         Route("/api/straddle", straddle),

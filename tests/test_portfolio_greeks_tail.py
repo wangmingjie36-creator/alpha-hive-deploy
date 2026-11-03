@@ -25,6 +25,12 @@ from tests.test_portfolio_greeks import (AS_OF, CALL, PUT, SPY, _all_finite, _be
 
 
 @pytest.fixture(autouse=True)
+def _stock_book_in_hedge(monkeypatch):
+    """夹具里有股票仓 AAA（尾部贡献表要有一行非跨式标的）；v0.45.701 起缺省不看股票账，这里钉回旧口径。"""
+    monkeypatch.setitem(pg.CONFIG, "hedge_stock_book", True)
+
+
+@pytest.fixture(autouse=True)
 def state(tmp_path, monkeypatch):
     """三本账的状态目录全部重定向到 tmp_path（与 `test_portfolio_greeks.state` 同一套；不导入它——
     导入的 fixture 再被当参数名用会触发 F811）。"""

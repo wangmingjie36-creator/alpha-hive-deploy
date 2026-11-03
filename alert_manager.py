@@ -331,6 +331,7 @@ class AlertAnalyzer:
         self._check_yf_daily_event_rows(status)  # v0.45.652：P2 其他日线读者（yf_daily 入口）最近一场缺了 / 中间的公司行动空行
         self._check_price_nonfinite(status)      # v0.45.653：P2 行情三字段算出非有限数、已改缺失（真 K 线缺收盘 / 缺量）
         self._check_macro_snapshot_calls(status)  # v0.45.674：P2 一轮扫描的宏观快照没有恰好取一次（读者绕过快照自己取）
+        self._check_cboe_content_encoding(status)  # v0.45.690：P2 CBOE 响应的 Content-Encoding 不认识（那几只期权链没取到）
 
         # 8. 检测 P1: 新闻通道降级（v0.45.444）
         self._check_news_sources(status)
@@ -840,6 +841,23 @@ class AlertAnalyzer:
                 ["portfolio_greeks", "data_quality"]
             ))
             return
+        fb = pg.get("nav_fallback")
+        if isinstance(fb, dict) and fb.get("from_audit"):
+            # v0.45.704：纸面组合账本读不了，NAV 分母里的股票账用审计旧值顶上——跨式对冲照常（用户定），但账本坏了要有人去修。
+            # 顶不上（审计里也没有）的那种 NAV 缺失会让对冲做不出来，由下面「数据不全」那条报，这里不重复。
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】组合 Greeks：{pg.get('as_of')} 纸面组合净值读不了，NAV 分母暂用 {fb.get('origin_date')} 的旧值，"
+                f"跨式的 SPY 对冲照常",
+                {
+                    "原因": str(fb.get("reason")),
+                    "顶上的值来自": f"{fb.get('from_audit')} 的审计（值读于 {fb.get('origin_date')}）",
+                    "影响": "带宽 / 尾部告警线按旧分母折算；纸面组合本身那天可能也没跑或没记账",
+                    "建议": "看纸面组合状态目录的 equity_curve.jsonl / positions.jsonl（LedgerCorrupt ⇒ 从备份恢复，"
+                            "别删了当新账本——meta.json 里存着现金）",
+                },
+                ["portfolio_greeks", "data_quality"]
+            ))
         dhc = pg.get("delta_hedge")
         if isinstance(dhc, dict) and dhc.get("mode") == "paper" and (dhc.get("n_undecided") or dhc.get("n_blocked")):
             # v0.45.526：逐票 Delta 对冲（纸面成交）：只影响缺数据的那几只，别的照常对冲——但停摆不能无人知道。
@@ -1256,6 +1274,31 @@ class AlertAnalyzer:
                 ["history_fill", "data_quality"]
             ))
 
+        wb = base.get("window_behind")
+        if isinstance(wb, dict) and wb:
+            unverified = sorted(t for t, v in wb.items() if not (v or {}).get("verified"))
+            verified = sorted(t for t, v in wb.items() if (v or {}).get("verified"))
+            ends = sorted({f"{(v or {}).get('as_of')} → 应有 {(v or {}).get('expected')}" for v in wb.values()})
+            details = {
+                "窗口滞后": _names(sorted(wb)),
+                "窗口末端": "；".join(ends),
+                "其中没核实收盘": _names(unverified) if unverified else "无",
+                "其中核实了收盘却没进窗口": _names(verified) if verified else "无",
+                "影响": "这些标的的 momentum_5d 是自攒索引回落给的、窗口末端比应有场次早（通常慢一个场次），"
+                        "与窗口对齐的标的混在同一天的横截面里；Buzz 动量通道与 signal_archive 的 price.* 吃的就是这个值",
+                "建议": "没核实收盘 ⇒ 多半是 CBOE 熔断 / 断网（看日志「[CB-cboe] closed → open」与「CBOE 拉取 … 失败」）或"
+                        "CBOE 文件是盘中生成的（「payload 是盘中生成的」）；核实了却没进窗口 ⇒ 看「当场收盘 … 没进自攒索引窗口」。"
+                        "当天要不要补算由人定——补算会改写已被下游用过的记录",
+            }
+            if not has_scored:
+                details["口径"] = "没有评分时的快照（at_scoring）——按进程内最后一次取数判"
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】动量窗口滞后：{len(wb)} 只的 momentum_5d 窗口末端早于应有场次",
+                details,
+                ["history_fill", "data_quality"]
+            ))
+
         if not has_scored:
             return
         after = _missing(hf)
@@ -1490,6 +1533,30 @@ class AlertAnalyzer:
                  "影响": "评分用的行情不受影响；之后单独取日线的用途（报告阶段等）那一项缺失或走了回落"},
                 ["price_nonfinite", "data_quality"]
             ))
+
+    def _check_cboe_content_encoding(self, status: Dict) -> None:
+        """CBOE 响应的 Content-Encoding 不认识（v0.45.690；`cboe_options.payload_stats()["bad_encoding"]` 经 scan_timing 的 `counters.cboe` 进来）。
+
+        我们请求 gzip、只认 gzip / 未压缩。回了别的编码 ⇒ 那次 CBOE 下载作废（期权链 / VIX 历史与报价 / SKEW·VVIX CSV，v0.45.692 起全算），
+        只有几只时到不了 day_health 的「整源故障」线，没有这条就只剩一行 ERROR 日志。计数缺失 ⇒ checks_skipped。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        cb = (st.get("counters") or {}).get("cboe")
+        if not isinstance(cb, dict) or "bad_encoding" not in cb:
+            self.checks_skipped.append("CBOE 响应编码检查（scan_timing 无 counters.cboe.bad_encoding）")
+            return
+        n = int(cb.get("bad_encoding") or 0)
+        if n <= 0:
+            return
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            f"📊 【P2 中】CBOE 有 {n} 次响应的 Content-Encoding 不认识，那几次下载没取到",
+            {"影响": "对应的 CBOE 数据本轮没取到、走了降级（期权链 / VIX 历史与报价 / SKEW·VVIX CSV，同「CBOE 拉取失败」）",
+             "建议": "日志里搜「不认识的 Content-Encoding」看是哪种编码；cboe_options._decode_cboe_body 只认 gzip / 未压缩，"
+                     "对端改了压缩方式就要在那里加一种解码（请求头 _CBOE_HEADERS 也只声明了 gzip；全部 CBOE 下载经 _fetch_cboe_payload / fetch_cboe_bytes 两处）"},
+            ["cboe", "data_quality"]
+        ))
 
     def _check_macro_snapshot_calls(self, status: Dict) -> None:
         """一轮扫描的宏观快照是不是只取了一次（v0.45.674；`fred_macro.stats()` 经 scan_timing 的 `counters.macro_context` 进来）。

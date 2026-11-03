@@ -33,7 +33,9 @@ ROOT = Path(__file__).parent.parent
 # `_repo_files._is_ours`（点号开头那道过滤）与「`__pycache__` 里没有 .py」覆盖，
 # 留在这里是**删掉也没有任何测试会红**的等价变异行。剩下的每一项都仍是
 # load-bearing 的：它们判的是「这段代码会不会进每日扫描」，而非「是不是垃圾目录」。
-_EXCLUDE_DIRS = {"tests", "experiments", "mcp-servers", "alpha_hive_bot"}
+# v0.45.707 移除 `mcp-servers`：那里是别人的 git 仓库（原先还是本仓的孤儿 gitlink），「不是本仓源码」由
+# `_repo_files` 的嵌套仓库判据（目录里有 `.git`）统一认，不再按目录名在各守卫里手抄。
+_EXCLUDE_DIRS = {"tests", "experiments", "alpha_hive_bot"}
 
 # 反模式：price 类变量被赋值为 100.0 字面量（允许注释里出现）
 _PATTERNS = [

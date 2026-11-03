@@ -105,6 +105,9 @@ class TestShadowChangesNothing:
             monkeypatch.setattr(evs, "SIGNALS_FILE", tmp_path / f"{name}.jsonl")
             sigs[name] = _scan(state, fn)
         opened = {}
+        # v0.45.693：夹具场景早于「财报前最后一个交易日」——放开入场窗口与多头，测的是 gex_ctx 有无不改开单
+        monkeypatch.setitem(opl.CONFIG, "entry_max_sessions_before_event", None)
+        monkeypatch.setitem(opl.CONFIG, "trade_cheap", True)
         for name in ("off", "on"):
             d = tmp_path / f"ledger_{name}"
             for attr, fname in (("STATE_DIR", ""), ("POSITIONS_FILE", "positions.jsonl"), ("CLOSED_FILE", "closed.jsonl"),

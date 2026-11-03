@@ -20,6 +20,15 @@ Available Tools
   alphahive_get_quote             Live price + fundamentals from yfinance
   alphahive_get_price_history     OHLCV candles from yfinance
   alphahive_get_insider_trades    Recent Form 4 filings from SEC EDGAR
+  alphahive_get_financials        Income / balance / cash-flow statements from yfinance
+  alphahive_get_analyst_ratings   Analyst rating counts + upgrades/downgrades from yfinance
+  alphahive_get_holders           Ownership breakdown + top institutional / fund holders from yfinance
+  alphahive_get_corporate_actions Dividends + stock splits from yfinance
+
+yfinance calls go through `yf_gate` (installed at startup; the four tools above use `yf_gate.gated_call`
+because the gate's Ticker member list only covers what the daily scan uses). This process shares the
+machine's Yahoo rate limit with the daily scan and Alpha Bot: on a 429 the tools stop and report
+`rate_limited` + `retry_after_sec` instead of retrying.
 
 Claude Desktop config  (~/.claude/claude_desktop_config.json):
   {
@@ -40,7 +49,7 @@ import asyncio
 import math
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import httpx
 import yfinance as yf
@@ -126,6 +135,66 @@ def _native(d: dict) -> dict:
     return out
 
 
+# ─── yfinance helpers (v0.45.709) ─────────────────────────────────────────────
+
+#: Yahoo hands back an empty table both when the data does not exist and when the fetch failed without raising
+#: (`paper_portfolio` hit this with `Ticker.splits`). Every "empty" answer says so instead of passing as "none".
+_EMPTY_NOTE = ("Yahoo returned nothing — either none exists or the fetch failed silently "
+               "(yfinance does not tell the two apart); not confirmed as 'none'.")
+
+
+def _today() -> date:
+    """Single clock read for the new tools (tests pin it)."""
+    return date.today()
+
+
+def _yf(fn, what: str):
+    """Run one yfinance fetch under `yf_gate` (cooldown → shared token bucket → 429 ⇒ cooldown + YFRateLimited)."""
+    import yf_gate
+    return yf_gate.gated_call(fn, f"mcp.{what}")
+
+
+def _yf_err(e: BaseException) -> str:
+    """Errors from the yfinance tools. A rate limit is reported as such, with when to retry — never as 'no data'."""
+    import yf_gate
+    if yf_gate.is_rate_limited(e):
+        return json.dumps({
+            "error": "Yahoo Finance rate limit — stopped instead of retrying (shared with the daily scan).",
+            "rate_limited": True,
+            "retry_after_sec": round(yf_gate.retry_after_sec(minimum=60.0)),
+        }, ensure_ascii=False)
+    return _err(f"{type(e).__name__}: {e}")
+
+
+def _cell(v):
+    """One table value → JSON-native: numpy scalars unwrapped, NaN / NaT / ±inf → None, timestamps → 'YYYY-MM-DD'."""
+    if v is None:
+        return None
+    if type(v).__name__ == "NaTType":
+        return None
+    if hasattr(v, "date") and callable(v.date) and hasattr(v, "year"):     # datetime / pandas Timestamp
+        return str(v.date())
+    if hasattr(v, "item") and not isinstance(v, (str, bytes)):
+        try:
+            v = v.item()
+        except (ValueError, AttributeError):
+            pass
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    return v
+
+
+def _day(x) -> str:
+    return str(x.date()) if hasattr(x, "date") and callable(x.date) else str(x)
+
+
+def _records(df, limit: int) -> Optional[list]:
+    """First `limit` rows of a DataFrame as JSON-native dicts; None when Yahoo gave nothing."""
+    if df is None or getattr(df, "empty", True):
+        return None
+    return [{str(k): _cell(v) for k, v in row.items()} for row in df.head(limit).to_dict("records")]
+
+
 # ─── Input Models ─────────────────────────────────────────────────────────────
 
 class TickerDateInput(BaseModel):
@@ -172,6 +241,45 @@ class PriceHistoryInput(BaseModel):
         default="1d",
         description="Bar interval: '1m','5m','15m','1h','1d','1wk','1mo'",
     )
+
+    @field_validator("ticker")
+    @classmethod
+    def _up(cls, v: str) -> str:
+        return v.upper().strip()
+
+
+class FinancialsInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    ticker: str = Field(..., description="Stock ticker symbol", min_length=1, max_length=10)
+    statement: Literal["income", "balance", "cashflow"] = Field(
+        default="income", description="'income' (P&L), 'balance' (balance sheet) or 'cashflow'",
+    )
+    frequency: Literal["annual", "quarterly"] = Field(default="annual", description="'annual' or 'quarterly'")
+    max_periods: int = Field(default=4, description="Most recent N periods to return", ge=1, le=8)
+
+    @field_validator("ticker")
+    @classmethod
+    def _up(cls, v: str) -> str:
+        return v.upper().strip()
+
+
+class AnalystInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    ticker: str = Field(..., description="Stock ticker symbol", min_length=1, max_length=10)
+    days_back: int = Field(
+        default=90, description="Window for upgrades/downgrades, in calendar days", ge=1, le=730,
+    )
+
+    @field_validator("ticker")
+    @classmethod
+    def _up(cls, v: str) -> str:
+        return v.upper().strip()
+
+
+class CorporateActionsInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    ticker: str = Field(..., description="Stock ticker symbol", min_length=1, max_length=10)
+    years: int = Field(default=5, description="Dividends from the last N years (splits: full history)", ge=1, le=30)
 
     @field_validator("ticker")
     @classmethod
@@ -880,6 +988,268 @@ async def alphahive_get_insider_trades(params: InsiderTradesInput) -> str:
         return _err(str(e))
 
 
+# ─── Tool 9 · Financial Statements ───────────────────────────────────────────
+
+_STATEMENT_ATTR = {"income": "income_stmt", "balance": "balance_sheet", "cashflow": "cashflow"}
+
+
+@mcp.tool(
+    name="alphahive_get_financials",
+    annotations={
+        "title": "Get Financial Statements (yfinance)",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def alphahive_get_financials(params: FinancialsInput) -> str:
+    """Fetch an income statement, balance sheet or cash-flow statement via yfinance.
+
+    Values are as Yahoo reports them, in the company's reporting currency (not converted).
+    Line items that are empty in every returned period are dropped (count in `empty_items_dropped`).
+
+    Args:
+        params (FinancialsInput):
+            - ticker (str): required
+            - statement (str): 'income' | 'balance' | 'cashflow' (default 'income')
+            - frequency (str): 'annual' | 'quarterly' (default 'annual')
+            - max_periods (int): most recent N periods, 1-8 (default 4)
+
+    Returns:
+        str: JSON with:
+            - ticker, statement, frequency
+            - periods (list[str]): period-end dates, newest first
+            - items (dict): line item → list of values aligned with `periods` (None = not reported)
+            - empty_items_dropped (int)
+    """
+    try:
+        attr = _STATEMENT_ATTR[params.statement]
+        if params.frequency == "quarterly":
+            attr = "quarterly_" + attr
+        df = await asyncio.to_thread(_yf, lambda: getattr(yf.Ticker(params.ticker), attr), attr)
+        if df is None or df.empty:
+            return _err(f"No {params.frequency} {params.statement} statement for {params.ticker}. {_EMPTY_NOTE}")
+
+        cols = sorted(df.columns, key=lambda c: _day(c), reverse=True)[: params.max_periods]
+        items, dropped = {}, 0
+        for name in df.index:
+            vals = [_cell(df.at[name, c]) for c in cols]
+            if all(v is None for v in vals):
+                dropped += 1
+                continue
+            items[str(name)] = vals
+        return _ok({
+            "ticker":              params.ticker,
+            "statement":           params.statement,
+            "frequency":           params.frequency,
+            "periods":             [_day(c) for c in cols],
+            "items":               items,
+            "empty_items_dropped": dropped,
+        })
+    except Exception as e:
+        return _yf_err(e)
+
+
+# ─── Tool 10 · Analyst Ratings ───────────────────────────────────────────────
+
+@mcp.tool(
+    name="alphahive_get_analyst_ratings",
+    annotations={
+        "title": "Get Analyst Ratings & Upgrades/Downgrades (yfinance)",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def alphahive_get_analyst_ratings(params: AnalystInput) -> str:
+    """Fetch analyst rating counts and recent rating changes via yfinance.
+
+    Args:
+        params (AnalystInput):
+            - ticker (str): required
+            - days_back (int): window for upgrades/downgrades, 1-730 (default 90)
+
+    Returns:
+        str: JSON with:
+            - rating_counts (list | None): one row per period ('0m' = current month, '-1m' …) with
+              strongBuy / buy / hold / sell / strongSell counts
+            - changes (list | None, newest first, up to 30): date, firm, to_grade, from_grade, action,
+              plus price-target fields when Yahoo provides them
+            - changes_in_window (int)
+            - unavailable (dict): section → why it is None
+    """
+    try:
+        def _fetch():
+            t = yf.Ticker(params.ticker)
+            return (_yf(lambda: t.recommendations, "recommendations"),
+                    _yf(lambda: t.upgrades_downgrades, "upgrades_downgrades"))
+
+        recs, ud = await asyncio.to_thread(_fetch)
+        unavailable = {}
+        rating_counts = _records(recs, 12)
+        if rating_counts is None:
+            unavailable["rating_counts"] = _EMPTY_NOTE
+
+        changes, n_window = None, 0
+        if ud is None or ud.empty:
+            unavailable["changes"] = _EMPTY_NOTE
+        else:
+            cutoff = _today() - timedelta(days=params.days_back)
+            rows = []
+            for idx, row in ud.iterrows():
+                d = _cell(idx)
+                if not isinstance(d, str) or d < cutoff.isoformat():
+                    continue
+                rec = {"date": d}
+                for src, dst in (("Firm", "firm"), ("ToGrade", "to_grade"), ("FromGrade", "from_grade"),
+                                 ("Action", "action"), ("priceTargetAction", "price_target_action"),
+                                 ("currentPriceTarget", "price_target"), ("priorPriceTarget", "prior_price_target")):
+                    if src in row.index:
+                        rec[dst] = _cell(row[src])
+                rows.append(rec)
+            rows.sort(key=lambda r: r["date"], reverse=True)
+            n_window = len(rows)
+            changes = rows[:30]
+
+        return _ok({
+            "ticker":            params.ticker,
+            "window":            f"last {params.days_back} days",
+            "rating_counts":     rating_counts,
+            "changes":           changes,
+            "changes_in_window": n_window,
+            "unavailable":       unavailable,
+        })
+    except Exception as e:
+        return _yf_err(e)
+
+
+# ─── Tool 11 · Holders ───────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="alphahive_get_holders",
+    annotations={
+        "title": "Get Ownership & Top Holders (yfinance)",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def alphahive_get_holders(params: TickerInput) -> str:
+    """Fetch the ownership breakdown and the top institutional / mutual-fund holders via yfinance.
+
+    Holdings come from 13F / fund filings and lag by up to a quarter (see each row's 'Date Reported').
+    For insider transactions use alphahive_get_insider_trades (SEC Form 4, the primary source).
+
+    Args:
+        params (TickerInput): ticker symbol
+
+    Returns:
+        str: JSON with:
+            - breakdown (dict | None): e.g. insidersPercentHeld, institutionsPercentHeld, institutionsCount
+            - top_institutions (list | None, up to 10)
+            - top_funds (list | None, up to 10)
+            - unavailable (dict): section → why it is None
+    """
+    try:
+        def _fetch():
+            t = yf.Ticker(params.ticker)
+            return _yf(lambda: (t.major_holders, t.institutional_holders, t.mutualfund_holders), "holders")
+
+        major, inst, funds = await asyncio.to_thread(_fetch)
+        unavailable = {}
+        breakdown = None
+        if major is not None and not major.empty:
+            if "Value" in major.columns:
+                breakdown = {str(k): _cell(v) for k, v in major["Value"].items()}
+            else:
+                breakdown = {str(i): [_cell(x) for x in row] for i, row in zip(major.index, major.values.tolist())}
+        else:
+            unavailable["breakdown"] = _EMPTY_NOTE
+        top_inst, top_funds = _records(inst, 10), _records(funds, 10)
+        if top_inst is None:
+            unavailable["top_institutions"] = _EMPTY_NOTE
+        if top_funds is None:
+            unavailable["top_funds"] = _EMPTY_NOTE
+        return _ok({
+            "ticker":           params.ticker,
+            "breakdown":        breakdown,
+            "top_institutions": top_inst,
+            "top_funds":        top_funds,
+            "unavailable":      unavailable,
+        })
+    except Exception as e:
+        return _yf_err(e)
+
+
+# ─── Tool 12 · Dividends & Splits ────────────────────────────────────────────
+
+@mcp.tool(
+    name="alphahive_get_corporate_actions",
+    annotations={
+        "title": "Get Dividends & Stock Splits (yfinance)",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def alphahive_get_corporate_actions(params: CorporateActionsInput) -> str:
+    """Fetch cash dividends (last N years) and the full stock-split history via yfinance.
+
+    An empty list here is NOT proof the company never paid / split: Yahoo returns an empty series
+    when the underlying fetch fails, too. Such cases come back as None with a reason in `unavailable`.
+
+    Args:
+        params (CorporateActionsInput):
+            - ticker (str): required
+            - years (int): dividend look-back, 1-30 (default 5)
+
+    Returns:
+        str: JSON with:
+            - dividends (list | None, newest first): {date, amount} per share, in the trading currency
+            - splits (list | None, newest first): {date, ratio}; ratio 4.0 = 4-for-1, 0.1 = 1-for-10 reverse split
+            - unavailable (dict): section → why it is None
+    """
+    try:
+        def _fetch():
+            t = yf.Ticker(params.ticker)
+            return _yf(lambda: (t.dividends, t.splits), "corporate_actions")
+
+        divs, splits = await asyncio.to_thread(_fetch)
+        unavailable = {}
+        dividends = None
+        if divs is not None and not divs.empty:
+            since = (_today() - timedelta(days=365 * params.years)).isoformat()
+            dividends = sorted(
+                ({"date": _cell(d), "amount": _cell(a)} for d, a in divs.items() if (_cell(d) or "") >= since),
+                key=lambda r: r["date"], reverse=True,
+            )
+        else:
+            unavailable["dividends"] = _EMPTY_NOTE
+        split_rows = None
+        if splits is not None and not splits.empty:
+            split_rows = sorted(({"date": _cell(d), "ratio": _cell(r)} for d, r in splits.items()),
+                                key=lambda r: r["date"] or "", reverse=True)
+        else:
+            unavailable["splits"] = _EMPTY_NOTE
+        return _ok({
+            "ticker":      params.ticker,
+            "window":      f"dividends: last {params.years} years; splits: full history",
+            "dividends":   dividends,
+            "splits":      split_rows,
+            "unavailable": unavailable,
+        })
+    except Exception as e:
+        return _yf_err(e)
+
+
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # v0.45.709：在闸门下跑本进程的全部 yfinance 调用（info / options / option_chain / history 由 install() 接管，
+    # 新四个工具经 gated_call）。只在真实入口装——测试 import 本模块不该给整个测试进程的 yfinance 打补丁。
+    import yf_gate
+    yf_gate.install()
     mcp.run()

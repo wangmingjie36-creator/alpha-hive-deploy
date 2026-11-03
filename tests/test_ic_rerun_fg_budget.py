@@ -10,7 +10,7 @@ F&G 重放拖过 60s ⇒ 进程被杀、`--out` 一次都没写 ⇒ 与 F&G 无�
     ——每条都落成 F&G 段的 `cannot_judge` + 专属 attention id，不抛、不吞；检查点在等 F&G **之前**写出、
     键序与最终结果相同；子进程在 `main()` 其余各项**之前**就起（并行）；`with` 退出连带终止子进程。
   · **真实进程树**（`TestRealProcessTree`）：把仓库里的 `ic_rerun_readiness.py` / `step_contract.py`
-    **原样**拷进 tmp，旁边放一个**假的** `experiments/fg_exposure_gate_forward_test.py`（会挂住 / 往 stdout 乱写）。
+    （及其仓内依赖 `is_trading_day.py`，v0.45.705 起 ETA 用它算 T+7）**原样**拷进 tmp，旁边放一个**假的** `experiments/fg_exposure_gate_forward_test.py`（会挂住 / 往 stdout 乱写）。
     父子进程都是生产代码，只有 F&G 执行器是假的：SIGTERM 父进程 ⇒ 退出码 143、`--out` 是检查点、子进程已死；
     SIGKILL 父进程 ⇒ 孤儿子进程靠看门狗自己退出；执行器往 fd 1 乱写不污染结果。
   · **消费方**（`TestOrchestratorReadsIt` / `TestBudgetFitsOrchestratorTimeout`）：编排器解释器
@@ -585,10 +585,11 @@ def status_line(res):
 
 @pytest.fixture
 def tree(tmp_path):
-    """tmp 里的「仓库」：生产的两个文件原样拷入 + 假 F&G 执行器 + 套接字闸。返回启动 CLI 的工具对象。"""
+    """tmp 里的「仓库」：生产文件原样拷入 + 假 F&G 执行器 + 套接字闸。返回启动 CLI 的工具对象。"""
     code = tmp_path / "code"
     (code / "experiments").mkdir(parents=True)
-    for rel in ("ic_rerun_readiness.py", "step_contract.py", "experiments/hv_gap_equivalence_20260928.json"):
+    for rel in ("ic_rerun_readiness.py", "step_contract.py", "is_trading_day.py",
+                "experiments/hv_gap_equivalence_20260928.json"):
         shutil.copyfile(REPO_ROOT / rel, code / rel)
     (code / "experiments" / "fg_exposure_gate_forward_test.py").write_text(_FAKE_EXECUTOR, encoding="utf-8")
     site = tmp_path / "site"

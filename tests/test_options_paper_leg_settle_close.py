@@ -319,7 +319,9 @@ class TestUnparseableExpiry:
         pos, why = opl._open_from_signal(_signal(expiry), 20_000.0, "2026-09-14")
         assert pos is None and why == f"expiry unparseable: {expiry!r}"
 
-    def test_valid_expiry_still_opens(self):
+    def test_valid_expiry_still_opens(self, monkeypatch):
+        # v0.45.693：本条测的是到期日解析，不是入场窗口（09-14 入场、10-13 财报早于窗口）
+        monkeypatch.setitem(opl.CONFIG, "entry_max_sessions_before_event", None)
         pos, why = opl._open_from_signal(_signal(EXPIRY), 20_000.0, "2026-09-14")
         assert why is None and pos.expiry == EXPIRY
 
