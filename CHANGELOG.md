@@ -7,7 +7,36 @@
 
 ## [0.45.710] — 2026-11-03 — 占位（进行中：CLAUDE.md 更正 BILI 的 CBOE 文件刷新说法）
 
-## [0.45.709] — 2026-11-03 — 占位（进行中：alpha_hive MCP 加基本面 / 分析师 / 机构持仓 / 分红拆股四个 yfinance 工具）
+## [0.45.709] — 2026-11-03 — Added：alpha_hive MCP 加四个 yfinance 工具（财报三表 / 分析师评级与升降级 / 持仓结构 / 分红拆股）；MCP 进程的 yfinance 调用接上 `yf_gate`
+
+**为什么**（用户 2026-11-03 定）：想在对话里看基本面与分析师数据。`mcp-servers/yahoo-finance-mcp`（03-14 下载、从未装依赖 / 注册）有这些，
+但另起一个服务器会多一个打 Yahoo 的入口、带进质量更差的雅虎期权链；选择加进已注册的 `alpha_hive`（`~/.claude.json` 里唯一的 MCP）。
+⚠️ MCP 由**生产克隆** `~/alpha-hive-prod/alpha_hive_mcp.py` 启动 ⇒ 下一个扫描日克隆快进后、**新开会话**才看得到新工具。
+
+### Added
+- `alpha_hive_mcp.py`：
+  - `alphahive_get_financials`：`income` / `balance` / `cashflow` × `annual` / `quarterly`，最近 1–8 期（缺省 4），最新在前；每期全空的科目丢掉并计数；数值按 Yahoo 原样（公司报告币种，不换算）。
+  - `alphahive_get_analyst_ratings`：评级人数（当月与前几月）+ 窗口内（缺省 90 天）升降级，最多 30 条、另给窗口内总数；有目标价字段就带上。
+  - `alphahive_get_holders`：持股结构（内部人 / 机构占比、机构数）+ 前 10 机构、前 10 基金（13F，最多滞后一季；内部人交易仍以 SEC Form 4 工具为准）。
+  - `alphahive_get_corporate_actions`：近 N 年（缺省 5）现金分红 + 全部拆股史（比例 4.0 = 1 拆 4，0.1 = 10 并 1）。
+  - **「Yahoo 给了空」不说成「没有」**：Yahoo 在取数静默失败时同样返回空表（`paper_portfolio.py` 记过 `splits` 这个坑）⇒ 空的一节返回 None，`unavailable` 里写明「分不清是没有还是取失败」。
+  - **限流**：四个工具经 `yf_gate.gated_call`；429 ⇒ 返回 `rate_limited: true` + `retry_after_sec`、不重试，且进入闸门冷却（冷却中再调一次都不打 Yahoo）。
+    真实入口 `__main__` 先 `yf_gate.install()` 再 `mcp.run()` ⇒ 既有的 quote / options / price_history 也从此受闸（共享令牌桶 + 429 冷却）；import 本模块不装（不给测试进程打补丁）。
+- `yf_gate.gated_call(fn, what)`：纯新增的公开包装（内部即 `_gated`）。`install()` 的 Ticker 成员名单只列扫描用的那几个，往名单里加 `income_stmt` / `splits` 等会连带改变
+  `earnings_watcher`（`quarterly_income_stmt`）与 `swarm_agents/cache`（`splits`）在每日扫描里的取数行为——那是另一件要单独决定的事，本版不动名单。
+
+### Tests
+- `tests/test_alpha_hive_mcp_fundamentals.py`（30 条，离线、假 `yf.Ticker`、读钟只有 `alpha_hive_mcp._today` 且钉住；闸门的冷却 / 计数逐条隔离，不让造出来的 429 波及同会话的扫描测试）：
+  形状与取值、NaN / NaT → None（严格 JSON 解析）、窗口边界、条数上限、空节为 None 加原因、四个工具各自 429 ⇒ `rate_limited`、
+  **冷却中再调假 Ticker 一次都不被碰**（证明每个工具真走闸门——只看返回值证明不了，`_yf_err` 按异常文本也认得出 429）、注册 / docstring / 入口装闸门（AST）。
+- 已做变异 7 条全红：财报 / 持仓绕过闸门、空分红说成 `[]`、NaN 不清洗、入口不装闸门、窗口边界 `<` → `<=`、限流当普通错误。
+- 真实冒烟（NVDA，13:38 扫描前、无别的扫描在跑）：四个工具全部取到数，闸门 5 次调用 0 次限流。
+- `tests/test_yf_rate_limit_handling.py::TestDocsAndScope`：「只有 Alpha Bot 层用 `is_rate_limited` / `retry_after_sec`」的登记加上 `alpha_hive_mcp.py`（对话用独立进程、不被任何生产模块 import；守卫本意「扫描路径不依赖」不变）。
+- 整套：13530 passed、1 failed（即上面这条守卫，登记前）、1 skipped、82 deselected、2 xfailed，728 s（14:00 扫描期间跑的，耗时不可比）；补登记后该文件与新测试文件 78 passed。
+
+### 未做 / 待验证
+- yfinance 对这几类数据被 429 时是**抛**还是**吞掉返回空**未实测（真 429 无法安全复现）：若是吞掉，会走「空 ⇒ None + 分不清」那条，不会说成「没有」，但也不会进冷却。
+- 没加新闻工具（BuzzBee 的情绪通道在 H1 检验中，对话里另开一个雅虎新闻入口无必要）。`mcp-servers/yahoo-finance-mcp` 本身未删，由用户定。
 
 ## [0.45.708] — 2026-11-03 — Changed（**事后**·预注册修订 4）：维度 IC 协议的 H1 改测 buzz_v1 的非价格子合成 buzz_v1_np；buzz_v1 降为描述项
 
