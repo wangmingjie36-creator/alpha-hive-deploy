@@ -10,7 +10,7 @@
    （否则每次合法的冻结层改动都会被误要求输入层确认）；同文件里不相干的函数 ⇒ 不变。
 3. 结构变了（定位不到）⇒ 抛 / 报 error，不当作「没变」。
 4. 登记表自洽：baseline 规则、说明长度、边界确认必须真在边界表里、声明过影响面、且触及该单元的信号。
-5. 覆盖：各单元信号的并集恰好等于协议的 `H1_INPUT_SIGNALS`。
+5. 覆盖：各单元信号的并集恰好等于协议的 `H1_V1_INPUT_SIGNALS`（buzz_v1 的输入层；修订 4 的 H1 截断集合是它的子集）。
 
 全部用本仓源码 + 内存里改过的副本，零外部依赖、不需要 skip。
 """
@@ -555,7 +555,8 @@ class TestCoverage:
         """多一个信号 ⇒ 不相干的改动也要求确认；少一个 ⇒ 那个输入没人守。"""
         P = _protocol()
         covered = {s for u in F.UNITS.values() for s in u["signals"]}
-        assert covered == set(P.H1_INPUT_SIGNALS)
+        assert covered == set(P.H1_V1_INPUT_SIGNALS)      # 修订 4 起 = buzz_v1 的输入层（H1 的三个通道是它的子集）
+        assert set(P.H1_INPUT_SIGNALS) <= covered
 
     def test_frozen_layer_signals_are_not_guarded_here(self):
         """冻结层由冻结评分器吸收，不该出现在输入层守卫里。"""

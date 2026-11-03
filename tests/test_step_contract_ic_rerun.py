@@ -96,6 +96,11 @@ def _make_db(home: Path, rows) -> Path:
     db = home / "pheromone.db"
     con = sqlite3.connect(db)
     con.execute(_SCHEMA)
+    # v0.45.708（维度 IC 修订 4）：H1 = buzz_v1_np 从 `signal_archive` 读通道，表不在 ⇒ 执行器 cannot_judge（⚠️ 段）。
+    # 建一张**空**表（生产 schema）：沙箱库照旧「没有归档」，自证照旧不通过——下面几条测试要的正是这个前提
+    con.execute("CREATE TABLE signal_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, "
+                "ticker TEXT NOT NULL, signal TEXT NOT NULL, value REAL, "
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(date, ticker, signal))")
     con.executemany("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?)",
                     [(d, t, None, 100.0, 1 if ripe else 0, 110.0 if ripe else None, None, None, None, None)
                      for d, t, ripe in rows])

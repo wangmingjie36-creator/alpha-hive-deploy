@@ -243,7 +243,7 @@ def frozen_only_boundary(history: Optional[list] = None, input_signals: Optional
     if history is None:
         history = signal_archive._cohort_history()
     if input_signals is None:
-        input_signals = _protocol().H1_INPUT_SIGNALS
+        input_signals = _protocol().H1_V1_INPUT_SIGNALS   # buzz_v1 自己的输入层（修订 4 起 H1 用的是另一个集合）
     hits = []
     for entry in history:
         if entry[0] <= ANCHOR_DATE:

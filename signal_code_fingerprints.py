@@ -71,7 +71,8 @@ _BUZZ_CHANNELS: Tuple[str, ...] = (
 )
 
 #: 单元名 → {"code": ((相对仓库根的文件, 定位器), …), "signals": 该单元决定的归档信号}
-#: 信号并集必须恰好等于维度 IC 协议的 `H1_INPUT_SIGNALS`（测试钉住：多了会误要求确认，少了会漏守）
+#: 信号并集必须恰好等于 buzz_v1 的输入层 `H1_V1_INPUT_SIGNALS`（测试钉住：多了会误要求确认，少了会漏守）。
+#: 修订 4 起只有触及 H1 截断集合（三个情绪通道）的单元挡维度 IC 的检视点，其余只影响描述项 buzz_v1（执行器 `input_code_guard`）
 UNITS: Dict[str, Dict] = {
     # Buzz 自己算通道的那段：analyze() 里合成之前的全部语句 + 模块级辅助函数；缩放用的 _safe_score。
     # 通道读的阈值（AGENT_SCORING 的 volume_thresholds / volatility_thresholds）v0.45.671 起由依赖闭包自动推出，不再手写

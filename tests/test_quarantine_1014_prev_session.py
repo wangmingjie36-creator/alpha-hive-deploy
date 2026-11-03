@@ -5,8 +5,9 @@ BILI 的 `price.momentum_5d` 来自自攒索引、窗口末端是 10-13。用户
 （`QUARANTINE`）只隔离观测层。本文件钉四件事：
 
 1. 名单本身：恰好这 29 只 × 量比、BILI × 动量；JNJ（当天未入档）与其余 29 只的动量不在内；
-2. 后果：维度 IC 的 H1（信号表含输入层）当天只剩 JNJ ⇒ 低于 `MIN_WIDTH` ⇒ 当天无效；**删掉条目该日回来**（对照，
-   证明丢天来自名单而不是夹具碰巧不够宽）；
+2. 后果：修订 1 的对象 buzz_v1（信号表含行情量）当天只剩 JNJ ⇒ 低于 `MIN_WIDTH` ⇒ 当天无效；**删掉条目该日回来**（对照，
+   证明丢天来自名单而不是夹具碰巧不够宽）。修订 4（v0.45.708，§13.13）起 buzz_v1 降为描述项、H1 = buzz_v1_np 只读三个
+   情绪通道 ⇒ **10-14 回到 H1**（不读 `price.*`），只有描述项 buzz_v1 照旧丢这一天；
 3. 范围：H2 不读 `price.*`，照算；派生的 `buzz.comp.*` 通道与 Agent 评分不隔离（§13.2 自证 ② 要它们在）；
 4. 登记早于该日结果：10-14 的 T+7 用 backtester 的交易日历算，晚于登记日。
 """
@@ -65,8 +66,14 @@ def _db(tmp_path, days):
     con.execute("CREATE TABLE predictions (date TEXT, ticker TEXT, dimension_scores TEXT, "
                 "price_at_predict REAL, checked_t7 INTEGER, close_t7 REAL, price_t7 REAL, "
                 "return_t7 REAL, exit_price REAL, exit_reason TEXT)")
+    # 修订 4：H1（buzz_v1_np）读 signal_archive 里的三个情绪通道——每只标的写满，值随 sentiment
+    con.execute("CREATE TABLE signal_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, "
+                "ticker TEXT NOT NULL, signal TEXT NOT NULL, value REAL, UNIQUE(date, ticker, signal))")
     for d in days:
         con.executemany("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?)", _rows(d))
+        con.executemany("INSERT INTO signal_archive (date, ticker, signal, value) VALUES (?,?,?,?)",
+                        [(d, tk, f"buzz.comp.{c}", float(i)) for i, tk in enumerate(_UNIVERSE)
+                         for c in P.H1_NP_WEIGHTS])
     con.commit()
     con.close()
     return db
@@ -129,16 +136,22 @@ class TestRegistry:
 
 
 class TestDimIcEffect:
-    def test_h1_loses_the_day(self, tmp_path, monkeypatch):
-        assert _series(tmp_path, monkeypatch, "H1", [_DAY]) == []
+    def test_buzz_v1_descriptive_loses_the_day(self, tmp_path, monkeypatch):
+        assert _series(tmp_path, monkeypatch, "buzz_v1", [_DAY]) == []
 
-    def test_h1_keeps_the_neighbour_day(self, tmp_path, monkeypatch):
-        s = _series(tmp_path, monkeypatch, "H1", [_DAY, _NEXT])
+    def test_buzz_v1_descriptive_keeps_the_neighbour_day(self, tmp_path, monkeypatch):
+        s = _series(tmp_path, monkeypatch, "buzz_v1", [_DAY, _NEXT])
         assert len(s) == 1 and s[0][2] == 1          # 同一周只有 10-15 一个有效日
 
     def test_control_entries_removed_brings_it_back(self, tmp_path, monkeypatch):
         monkeypatch.setattr(signal_archive, "QUARANTINE",
                             [q for q in signal_archive.QUARANTINE if q["date"] != _DAY])
+        s = _series(tmp_path, monkeypatch, "buzz_v1", [_DAY])
+        assert len(s) == 1 and s[0][2] == 1
+
+    def test_h1_keeps_the_day_after_revision_4(self, tmp_path, monkeypatch):
+        """修订 4（§13.13）：H1 不读 `price.*` ⇒ 这两条隔离管不到它，10-14 回到 H1（新闻通道当天降级，按 §3 意向性照算，
+        修订 3 的敏感性分析并列报告去掉它的结果）。"""
         s = _series(tmp_path, monkeypatch, "H1", [_DAY])
         assert len(s) == 1 and s[0][2] == 1
 

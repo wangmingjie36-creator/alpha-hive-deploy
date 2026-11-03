@@ -127,11 +127,25 @@ def _day_rows(date, n=25, sign=1.0, ripe=True, width_dims=DIMS, sltp_truncated=F
     return rows
 
 
-def _make_db(tmp_path, rows, name="p.db"):
+_ARCHIVE_SCHEMA = ("CREATE TABLE signal_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, "
+                   "ticker TEXT NOT NULL, signal TEXT NOT NULL, value REAL, UNIQUE(date, ticker, signal))")
+
+
+def _make_db(tmp_path, rows, name="p.db", channels=True):
+    """`channels`：同时把 H1（修订 4，buzz_v1_np）读的三个情绪通道写进 `signal_archive`——每个通道 = 该行的 sentiment，
+    于是 buzz_v1_np 与 sentiment 同序，修订 1 时期按 sentiment 写的判别夹具对 H1 照样成立。没有 sentiment 的行不写通道。
+    `channels=False`：连 `signal_archive` 表都不建（测「表不在 ⇒ 无法判定」）。"""
     db = tmp_path / name
     con = sqlite3.connect(db)
     con.execute(_SCHEMA)
     con.executemany("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+    if channels:
+        con.execute(_ARCHIVE_SCHEMA)
+        for r in rows:
+            sent = json.loads(r[2]).get("sentiment")
+            if sent is not None:
+                con.executemany("INSERT INTO signal_archive (date, ticker, signal, value) VALUES (?,?,?,?)",
+                                [(r[0], r[1], f"buzz.comp.{c}", float(sent)) for c in P.H1_NP_WEIGHTS])
     con.commit()
     con.close()
     return db
@@ -212,11 +226,58 @@ class TestDataLayer:
 
     def test_quarantine_excludes_only_the_named_hypothesis(self, tmp_path, monkeypatch):
         monkeypatch.setattr(signal_archive, "QUARANTINE", [
-            {"date": _d(0), "signals": ("agent.BuzzBeeWhisper.score",), "reason": "t"}])
+            {"date": _d(0), "signals": ("buzz.comp.news_signal",), "reason": "t"}])
         rows = fx.load_rows(_make_db(tmp_path, _day_rows(_d(0))), P, _TODAY)
         assert self._h1(rows) == []
         cat = fx.items(P)["catalyst"]
         assert len(fx.weekly_series(rows, cat["value"], cat["signals"], P)) == 1
+
+    def test_buzz_score_quarantine_hits_only_the_buzz_v1_descriptive(self, tmp_path, monkeypatch):
+        """修订 4：Buzz 的分数在 H1 的截断 / 隔离集合之外（H1 直接读通道），只属描述项 buzz_v1。"""
+        monkeypatch.setattr(signal_archive, "QUARANTINE", [
+            {"date": _d(0), "signals": ("agent.BuzzBeeWhisper.score",), "reason": "t"}])
+        rows = fx.load_rows(_make_db(tmp_path, _day_rows(_d(0))), P, _TODAY)
+        assert len(self._h1(rows)) == 1
+        v1 = fx.items(P)["buzz_v1"]
+        assert fx.weekly_series(rows, v1["value"], v1["signals"], P) == []
+
+    def test_h1_is_the_ordered_linear_nonprice_composite(self, tmp_path):
+        """H1 的值 = 三个通道 × 冻结权重，与 sentiment 无关：通道反序、sentiment 正序 ⇒ H1 的 IC 为 −1。"""
+        db = _make_db(tmp_path, _day_rows(_d(0)), channels=False)
+        con = sqlite3.connect(db)
+        con.execute(_ARCHIVE_SCHEMA)
+        n = 25
+        for i in range(n):
+            vals = {"reddit_signal": 50.0 - i, "news_signal": 80.0 - 2 * i, "yahoo_signal": 10.0}
+            con.executemany("INSERT INTO signal_archive (date, ticker, signal, value) VALUES (?,?,?,?)",
+                            [(_d(0), f"T{i:02d}", f"buzz.comp.{c}", v) for c, v in vals.items()])
+        con.commit()
+        con.close()
+        rows = fx.load_rows(db, P, _TODAY)
+        assert self._h1(rows)[0][1] == pytest.approx(-1.0)
+        r0 = next(r for r in rows if r["ticker"] == "T00")
+        assert fx.items(P)["H1"]["value"](r0) == 50.0 * 0.25 + 80.0 * 0.25 + 10.0 * 0.05
+        v1 = fx.items(P)["buzz_v1"]
+        assert fx.weekly_series(rows, v1["value"], v1["signals"], P)[0][1] == pytest.approx(1.0)
+
+    def test_missing_channel_drops_the_row_not_zero_fills(self, tmp_path):
+        db = _make_db(tmp_path, _day_rows(_d(0)))
+        con = sqlite3.connect(db)
+        con.execute("DELETE FROM signal_archive WHERE ticker IN ('T00','T01','T02','T03','T04','T05') "
+                    "AND signal='buzz.comp.yahoo_signal'")
+        con.commit()
+        con.close()
+        rows = fx.load_rows(db, P, _TODAY)
+        h1 = fx.items(P)["H1"]["value"]
+        assert sum(h1(r) is None for r in rows) == 6
+        assert self._h1(rows) == []          # 25 − 6 = 19 < MIN_WIDTH ⇒ 当天无效（若补 0 会照算）
+
+    def test_missing_archive_table_is_cannot_judge(self, tmp_path):
+        db = _make_db(tmp_path, _day_rows(_d(0)), channels=False)
+        with pytest.raises(fx.ProtocolError, match="signal_archive"):
+            fx.load_rows(db, P, _TODAY)
+        res = fx.run(db_path=str(db), today=_TODAY, repo_root=tmp_path, history=[])
+        assert res["status"] == "cannot_judge" and "signal_archive" in res["reason"]
 
     def test_week_value_is_equal_weight_mean_of_days(self, tmp_path):
         rows = (_day_rows(_d(0), sign=+1) + _day_rows(_d(1), sign=-1)
@@ -388,15 +449,22 @@ class TestTruncationPoint:
         monkeypatch.setattr(signal_archive, "COHORT_SIGNAL_SCOPE", {
             **signal_archive.COHORT_SIGNAL_SCOPE,
             "vT_buzz": ("agent.BuzzBeeWhisper.*",), "vT_scout": ("agent.ScoutBeeNova.*",),
+            "vT_news": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*"),
             "vT_queen": ()})
 
     def _h(self, k):
         return fx.items(P)[k]["signals"]
 
-    def test_buzz_boundary_truncates_h1_and_h2(self):
-        hist = [(_d(8), "vT_buzz", "改了 Buzz")]
-        assert fx.truncation_point(self._h("H1"), P, hist) == {"date": _d(8), "version": "vT_buzz"}
+    def test_buzz_score_boundary_truncates_h2_and_buzz_v1_not_h1(self):
+        """修订 4：只改 Buzz 合成 / 调整层（只点名分）⇒ H2 与描述项 buzz_v1 截断，H1（直接读通道）不截断。"""
+        hist = [(_d(8), "vT_buzz", "改了 Buzz 的合成层")]
+        assert fx.truncation_point(self._h("H1"), P, hist) is None
         assert fx.truncation_point(self._h("H2"), P, hist)["date"] == _d(8)
+        assert fx.truncation_point(self._h("buzz_v1"), P, hist) == {"date": _d(8), "version": "vT_buzz"}
+
+    def test_news_channel_boundary_truncates_h1(self):
+        hist = [(_d(8), "vT_news", "改了新闻通道")]
+        assert fx.truncation_point(self._h("H1"), P, hist) == {"date": _d(8), "version": "vT_news"}
 
     def test_scout_boundary_touches_neither_hypothesis(self):
         hist = [(_d(8), "vT_scout", "改了 Scout")]
@@ -414,44 +482,47 @@ class TestTruncationPoint:
         assert fx.truncation_point(self._h("H1"), P, [(_d(21), "v_undeclared", "")])["date"] == _d(21)
 
     def test_earliest_touching_boundary_wins(self):
-        hist = [(_d(50), "vT_buzz", ""), (_d(21), "vT_buzz", "")]
+        hist = [(_d(50), "vT_news", ""), (_d(21), "vT_news", "")]
         assert fx.truncation_point(self._h("H1"), P, hist)["date"] == _d(21)
 
 
 class TestH1Layers:
-    """修订 1：H1 按层截断。评分器未实现 ⇒ 两层都截断，但要标出层（冻结层的截断日后可解除）。"""
+    """修订 4：H1 = buzz_v1_np，截断集合只有三个情绪通道（全在输入层）。价格通道、行情量、F&G、合成 / 调整层的边界
+    都不再截断 H1——它们只截断描述项 buzz_v1（修订 1 的层语义原样留在那边）。"""
 
     @pytest.fixture(autouse=True)
     def _scopes(self, monkeypatch):
         monkeypatch.setattr(signal_archive, "COHORT_SIGNAL_SCOPE", {
             **signal_archive.COHORT_SIGNAL_SCOPE,
             "vT_frozen": ("agent.BuzzBeeWhisper.*",),                                # 只改合成 / 调整层
-            "vT_channel": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*"),        # 改通道（按层声明）
+            "vT_channel": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*"),        # 改新闻通道（按层声明）
+            "vT_reddit": ("buzz.comp.reddit_signal", "agent.BuzzBeeWhisper.*"),
+            "vT_yahoo": ("buzz.comp.yahoo_signal", "agent.BuzzBeeWhisper.*"),
+            "vT_mom": ("buzz.comp.momentum_signal", "agent.BuzzBeeWhisper.*"),        # 改价格通道
             "vT_price": ("price.volatility_20d",),                                    # 改通道读的行情量
             "vT_fg": ("market.fear_greed",),
             "vT_pct": ("sentiment.pct",)})
 
-    @pytest.mark.parametrize("version,layer", [
-        ("vT_frozen", "frozen"), ("vT_pct", "frozen"),
-        ("vT_channel", "input"), ("vT_price", "input"), ("vT_fg", "input")])
-    def test_every_layer_truncates_and_is_labelled(self, version, layer):
+    @pytest.mark.parametrize("version", ["vT_channel", "vT_reddit", "vT_yahoo"])
+    def test_each_nonprice_channel_truncates_h1_as_input(self, version):
         cut = fx.h1_truncation(P, [(_d(8), version, "")])
-        assert cut == {"date": _d(8), "version": version, "layer": layer}
+        assert cut == {"date": _d(8), "version": version, "layer": "input"}
 
-    def test_input_only_boundary_was_missed_by_the_original_registration(self):
-        """判别：原登记 H1 只看 `agent.BuzzBeeWhisper.score`，行情量换代它看不见；修订 1 会截断。"""
-        hist = [(_d(8), "vT_price", "")]
-        assert fx.truncation_point(("agent.BuzzBeeWhisper.score",), P, hist) is None
-        assert fx.h1_truncation(P, hist)["date"] == _d(8)
+    @pytest.mark.parametrize("version", ["vT_frozen", "vT_pct", "vT_mom", "vT_price", "vT_fg"])
+    def test_price_fg_and_frozen_layer_no_longer_truncate_h1(self, version):
+        """判别：修订 1 下这五条都截断 H1；修订 4 下都不截，但描述项 buzz_v1 照截。"""
+        hist = [(_d(8), version, "")]
+        assert fx.h1_truncation(P, hist) is None
+        assert fx.truncation_point(fx.items(P)["buzz_v1"]["signals"], P, hist)["date"] == _d(8)
 
-    def test_input_on_the_same_day_as_frozen_is_input(self):
-        hist = [(_d(8), "vT_frozen", ""), (_d(8), "vT_price", "")]
-        assert fx.h1_truncation(P, hist) == {"date": _d(8), "version": "vT_price", "layer": "input"}
-
-    def test_earlier_frozen_then_later_input_is_frozen(self):
-        """截断日由较早的冻结层边界决定 ⇒ 这一天的截断可解除（较晚那条输入层边界到时再截）。"""
-        hist = [(_d(8), "vT_frozen", ""), (_d(30), "vT_price", "")]
-        assert fx.h1_truncation(P, hist) == {"date": _d(8), "version": "vT_frozen", "layer": "frozen"}
+    def test_frozen_label_branch_still_works_for_a_wider_set(self):
+        """`frozen` 标签那条分支留着：截断集合里若再含非输入层信号，照样标得出来（用描述项 buzz_v1 的集合造一个）。"""
+        class _P:
+            FORWARD_START = P.FORWARD_START
+            H1_INPUT_SIGNALS = P.H1_V1_INPUT_SIGNALS
+            HYPOTHESES = (("H1", "x", P.H1_V1_DESCRIPTIVE[1]),) + P.HYPOTHESES[1:]
+        assert fx.h1_truncation(_P, [(_d(8), "vT_frozen", "")])["layer"] == "frozen"
+        assert fx.h1_truncation(_P, [(_d(8), "vT_price", "")])["layer"] == "input"
 
     def test_no_boundary_is_none(self):
         assert fx.h1_truncation(P, []) is None
@@ -590,25 +661,27 @@ class TestRun:
 
     def test_h1_boundary_in_window_shows_in_line(self, tmp_path, monkeypatch):
         monkeypatch.setattr(signal_archive, "COHORT_SIGNAL_SCOPE", {
-            **signal_archive.COHORT_SIGNAL_SCOPE, "vT_buzz": ("agent.BuzzBeeWhisper.*",)})
+            **signal_archive.COHORT_SIGNAL_SCOPE, "vT_news": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*")})
         days = _weekdays(_d(0), 10)
         res = fx.run(db_path=str(_make_db(tmp_path, [r for d in days for r in _day_rows(d)])),
                      today=_TODAY, repo_root=self._repo(tmp_path),
-                     history=[(_d(7), "vT_buzz", "")])
-        assert res["truncation"]["H1"] == {"date": _d(7), "version": "vT_buzz", "layer": "frozen"}
+                     history=[(_d(7), "vT_news", "")])
+        assert res["truncation"]["H1"] == {"date": _d(7), "version": "vT_news", "layer": "input"}
         # 截断前只有 1 周 < 26 ⇒ H1 永远到不了中检 ⇒ 无法检验、协议结束
         assert res["verdicts"]["H1"]["result"] == "untestable"
         line = fx.status_line(res)
-        assert f"H1 已于 {_d(7)}" in line and "可解除" in line
+        assert f"⚠️ H1 已于 {_d(7)}（vT_news）截断" in line and "可解除" not in line
 
-    def test_input_layer_cut_is_not_labelled_reversible(self, tmp_path, monkeypatch):
+    def test_price_boundary_truncates_only_the_buzz_v1_descriptive(self, tmp_path, monkeypatch):
+        """修订 4 判别：价格量换代 ⇒ H1 照常（不截断、不判无法检验），只在进度行注明描述项 buzz_v1 截断。"""
         monkeypatch.setattr(signal_archive, "COHORT_SIGNAL_SCOPE", {
             **signal_archive.COHORT_SIGNAL_SCOPE, "vT_price": ("price.volatility_20d",)})
         res = fx.run(db_path=str(_make_db(tmp_path, [])), today=_d(10), repo_root=self._repo(tmp_path),
                      history=[(_d(7), "vT_price", "")])
+        assert res["truncation"]["H1"] is None and res["truncation"]["buzz_v1"]["date"] == _d(7)
+        assert res["status"] == "not_ready" and "H1" not in res["verdicts"]
         line = fx.status_line(res)
-        # 截断前 0 周 < 26 ⇒ 协议已判「无法检验」（🔔 开头），截断原因在 ⚠️ 尾巴里
-        assert f"⚠️ H1 已于 {_d(7)}（vT_price）截断" in line and "可解除" not in line
+        assert "H1 已于" not in line and f"描述项 buzz_v1 已于 {_d(7)}（vT_price）截断（不影响 H1）" in line
 
     def test_anchor_pending_is_a_note_not_a_warning(self, tmp_path):
         """窗口前、锚点未登记：正常的待办，不该标 ⚠️（⚠️ 留给要显著标出的事）。"""
@@ -637,7 +710,8 @@ class TestInputCodeGuard:
 
     def test_real_code_passes_the_guard(self):
         g = fx.input_code_guard()
-        assert g == {"ok": True, "unacknowledged": [], "errors": {}}, g
+        assert g == {"ok": True, "unacknowledged": [], "errors": {},
+                     "descriptive_only": {"unacknowledged": [], "errors": {}}}, g
 
     def test_before_a_look_it_is_a_warning_naming_the_unit(self, tmp_path):
         res = fx.run(db_path=str(_make_db(tmp_path, [])), today=_d(-3), repo_root=self._repo(tmp_path),
@@ -678,13 +752,49 @@ class TestInputCodeGuard:
     def test_guard_error_state_is_reported(self, monkeypatch):
         import signal_code_fingerprints as scf
         monkeypatch.setattr(scf, "check", lambda *a, **k: {"ok": False, "units": {
-            "price.fields": {"state": "error", "error": "定位不到"}}})
+            u: {"state": "ok"} for u in scf.UNITS} | {"buzz.news": {"state": "error", "error": "定位不到"}}})
         g = fx.input_code_guard()
-        assert g == {"ok": False, "unacknowledged": [], "errors": {"price.fields": "定位不到"}}
+        assert g["ok"] is False and g["errors"] == {"buzz.news": "定位不到"}
+
+    def test_price_and_fg_units_only_warn_for_the_descriptive(self, monkeypatch):
+        """修订 4 判别：行情字段 / F&G 单元的未确认改动不挡 H1（`ok` 仍真），只进 `descriptive_only`、进度行只提示。"""
+        import signal_code_fingerprints as scf
+        units = {u: {"state": "ok"} for u in scf.UNITS}
+        units["price.fields"] = {"state": "unacknowledged"}
+        units["buzz.fear_greed"] = {"state": "error", "error": "定位不到"}
+        monkeypatch.setattr(scf, "check", lambda *a, **k: {"ok": False, "units": units})
+        g = fx.input_code_guard()
+        assert g["ok"] is True and g["unacknowledged"] == [] and g["errors"] == {}
+        assert g["descriptive_only"] == {"unacknowledged": ["price.fields"], "errors": {"buzz.fear_greed": "定位不到"}}
+        res = {"status": "in_progress", "verdicts": {}, "looks_done": ["中检"], "h1_weeks": 26, "next_look_at": 52}
+        out = fx.apply_code_guard(res, g)
+        assert out["status"] == "in_progress"
+        line = fx.status_line(out)
+        assert "price.fields" in line and "不影响 H1" in line and not line.startswith("⚠️")
+
+    @pytest.mark.parametrize("unit", ["buzz.channels", "buzz.reddit", "buzz.news", "buzz.yahoo"])
+    def test_units_touching_the_three_channels_gate_h1(self, monkeypatch, unit):
+        import signal_code_fingerprints as scf
+        units = {u: {"state": "ok"} for u in scf.UNITS}
+        units[unit] = {"state": "unacknowledged"}
+        monkeypatch.setattr(scf, "check", lambda *a, **k: {"ok": False, "units": units})
+        g = fx.input_code_guard()
+        assert g["ok"] is False and g["unacknowledged"] == [unit]
+
+    def test_a_unit_missing_from_the_report_is_not_ok(self, monkeypatch):
+        import signal_code_fingerprints as scf
+        monkeypatch.setattr(scf, "check", lambda *a, **k: {"ok": True, "units": {
+            u: {"state": "ok"} for u in scf.UNITS if u != "buzz.news"}})
+        assert fx.input_code_guard()["ok"] is False
+
+    def test_no_gating_unit_is_not_ok(self):
+        g = fx.input_code_guard(("no.such.signal",))
+        assert g["ok"] is False and "没有任何指纹单元" in g["errors"]["*"]
 
 
 class TestBuzzV1SelfProofWiring:
-    """v0.45.556：buzz_v1 自证接进执行器——未通过 ⇒ 检视点前 ⚠️、检视点上「无法判定」（§13.2、§12 第 10 条）。"""
+    """v0.45.556：buzz_v1 自证接进执行器。修订 4 起自证只关系到描述项 buzz_v1：未通过 ⇒ 进度行 ⚠️，
+    但**不再**把检视点改判「无法判定」（H1 直接读通道，不经冻结评分器）。"""
 
     BAD = {"ok": False, "window": ["2026-09-28", "2026-12-31"], "n": 450, "n_matched": 447,
            "n_mismatched": 2, "n_missing": 1, "stopped_by": None}
@@ -697,7 +807,7 @@ class TestBuzzV1SelfProofWiring:
                      history=[], self_proof=self.BAD)
         assert res["status"] == "not_ready" and res["buzz_v1_self_proof"] == self.BAD
         line = fx.status_line(res)
-        assert line.startswith("⚠️") and "447/450" in line and "buzz_v1.py" in line
+        assert line.startswith("⚠️") and "447/450" in line and "buzz_v1.py" in line and "不影响 H1" in line
 
     def test_passing_self_proof_adds_nothing(self, tmp_path):
         res = fx.run(db_path=str(_make_db(tmp_path, [])), today=_d(-3), repo_root=self._repo(tmp_path),
@@ -705,15 +815,15 @@ class TestBuzzV1SelfProofWiring:
         assert "自证" not in fx.status_line(res)
 
     @pytest.mark.parametrize("status", ["in_progress", "concluded"])
-    def test_at_a_look_a_failed_self_proof_blocks_verdicts(self, status):
+    def test_at_a_look_a_failed_self_proof_no_longer_blocks_h1(self, status):
+        """修订 4 判别：修订 1 时期这里改判 cannot_judge；现在原样放行，只附状态。"""
         res = {"forward_start": P.FORWARD_START, "today": _d(200), "status": status,
                "verdicts": {"H1": {"result": "significant_positive", "ic": 0.2, "p": 0.001}},
                "looks_done": ["中检"], "h1_weeks": 26, "next_look_at": 52,
                "input_code_guard": {"ok": True, "unacknowledged": [], "errors": {}}}
         out = fx.apply_self_proof(res, self.BAD)
-        assert out["status"] == "cannot_judge" and "自证未通过" in out["reason"]
-        assert "verdicts" not in out and out["input_code_guard"]["ok"] is True
-        assert not ({"ic", "p", "t", "ci95"} & set(_all_keys(out)))
+        assert out["status"] == status and out["verdicts"] == res["verdicts"]
+        assert out["buzz_v1_self_proof"] == self.BAD
 
     def test_code_guard_and_self_proof_both_reported_when_both_fail(self):
         res = {"status": "in_progress", "verdicts": {}, "looks_done": ["中检"], "h1_weeks": 26, "next_look_at": 52}

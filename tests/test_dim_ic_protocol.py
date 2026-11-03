@@ -12,6 +12,8 @@
    「受全部边界约束」——截断规则静默退化成「任何边界都截断」，没人会红）。
 5. 修订 1（v0.45.330）：H1 分输入层 / 冻结层；输入层的通道集合与归档、生产合成两处对齐；
    「窗口开始前」的修订真的早于窗口；边界声明「点名通道必连带点名分」（协议 §6 按层声明）。
+6. 修订 4（v0.45.708）：H1 = buzz_v1_np（三个非价格通道的线性子合成），截断集合恰好是这三个通道；
+   修订 1 的分层常量改归描述项 buzz_v1；子合成权重与 buzz_v1 的冻结权重、生产 config 三处一致。
 """
 from __future__ import annotations
 
@@ -50,14 +52,23 @@ class TestRegisteredConstants:
         assert proto.FORWARD_START == "2026-10-12"          # 修订 1（原 2026-09-28）
 
     def test_amendments(self):
-        assert proto.AMENDMENTS == (
-            ("2026-09-23", "事后·窗口开始前、零数据",
-             "修订 1：窗口推迟到 2026-10-12；H1 对象改为冻结版 Buzz 评分 v1（buzz_v1）"),)
+        assert [(d, k) for d, k, _s in proto.AMENDMENTS] == [
+            ("2026-09-23", "事后·窗口开始前、零数据"),
+            ("2026-10-13", "事后·窗口内、被排除日的结果尚不存在"),
+            ("2026-10-22", "事后·窗口内、只加敏感性分析（主分析不变）"),
+            ("2026-11-03", "事后·窗口内、只看过输入不看收益")]
+        assert proto.AMENDMENTS[0][2] == "修订 1：窗口推迟到 2026-10-12；H1 对象改为冻结版 Buzz 评分 v1（buzz_v1）"
+        assert all(s.startswith(f"修订 {i}：") for i, (_d, _k, s) in enumerate(proto.AMENDMENTS, 1))
 
     def test_h1_layers(self):
-        """修订 1：H1 截断信号分输入层 / 冻结层；锚点在阶段 1 登记前为 None。"""
-        assert proto.H1_INPUT_SIGNALS == _BUZZ_CHANNELS + (
+        """修订 4：H1 = buzz_v1_np，截断集合恰好三个情绪通道；修订 1 的输入层改名 `H1_V1_INPUT_SIGNALS`、归描述项。"""
+        assert proto.HYPOTHESES[0][1] == "buzz_v1_np"
+        assert proto.H1_NP_WEIGHTS == {"reddit_signal": 0.25, "news_signal": 0.25, "yahoo_signal": 0.05}
+        assert list(proto.H1_NP_WEIGHTS) == ["reddit_signal", "news_signal", "yahoo_signal"]   # 加法顺序
+        assert proto.H1_INPUT_SIGNALS == ("buzz.comp.reddit_signal", "buzz.comp.news_signal", "buzz.comp.yahoo_signal")
+        assert proto.H1_V1_INPUT_SIGNALS == _BUZZ_CHANNELS + (
             "price.momentum_5d", "price.volume_ratio", "price.volatility_20d", "market.fear_greed")
+        assert proto.H1_V1_DESCRIPTIVE == ("buzz_v1", proto.H1_V1_INPUT_SIGNALS + proto.H1_FROZEN_LAYER_SIGNALS)
         assert proto.H1_FROZEN_LAYER_SIGNALS == ("agent.BuzzBeeWhisper.score", "sentiment.pct")
         assert proto.H1_PRODUCTION_DIM == "sentiment"
         assert proto.H1_ANCHOR_VERSION == "v0.45.340"          # 阶段 1 填入（修订 1 预留的空）
@@ -87,7 +98,7 @@ class TestRegisteredConstants:
 
     def test_hypotheses_order_and_objects(self):
         assert [h[0] for h in proto.HYPOTHESES] == ["H1", "H2"]
-        assert proto.HYPOTHESES[0][1] == "buzz_v1"               # 修订 1（原 "sentiment"）
+        assert proto.HYPOTHESES[0][1] == "buzz_v1_np"            # 修订 4（修订 1 为 "buzz_v1"，原登记 "sentiment"）
         assert proto.HYPOTHESES[1][1] == "weighted_composite"
 
     def test_frozen_weights(self):
@@ -116,11 +127,16 @@ def _doc_mismatches(p, doc: str) -> list:
     for dim, w in p.FROZEN_WEIGHTS.items():
         if w:
             need[f"FROZEN_WEIGHTS[{dim}]"] = f"{dim} {w:g}"
-    # H1（修订 1）：对象名 + 每个截断信号的全名都写在 §6 / §13.2（带反引号）；
+    # H1（修订 4）：现行对象名写成「H1 的对象 = **名字**」（只出现在现行定义处，旧名不会碰巧命中）；
+    # 每个截断信号的全名都写在 §6 / §13（带反引号）；子合成权重按「`通道` × 权重」写在 §13.13。
     # H2 在 §6 按蜂的短名列（「Chronos / Buzz / Oracle 三只蜂」）
-    need["H1 对象"] = f"**{p.HYPOTHESES[0][1]}**"
+    need["H1 对象"] = f"H1 的对象 = **{p.HYPOTHESES[0][1]}**"
     for s in p.HYPOTHESES[0][2]:
         need[f"H1 截断信号 {s}"] = f"`{s}`"
+    for c, w in p.H1_NP_WEIGHTS.items():
+        need[f"H1_NP_WEIGHTS[{c}]"] = f"`{c}` × {w:g}"
+    for s in p.H1_V1_DESCRIPTIVE[1]:
+        need[f"描述项 buzz_v1 截断信号 {s}"] = f"`{s}`"
     for s in p.HYPOTHESES[1][2]:
         need[f"H2 截断信号 {s}"] = s.split(".")[1].split("Bee")[0]
     need["H1 生产维度"] = f"`dimension_scores.{p.H1_PRODUCTION_DIM}`"
@@ -161,13 +177,16 @@ class TestConstantsMatchDocument:
         {"HYPOTHESES": (("H1", "buzz_v1", proto.HYPOTHESES[0][2] + ("options.iv_rank",)),
                         proto.HYPOTHESES[1])},
         {"HYPOTHESES": (("H1", "sentiment", proto.HYPOTHESES[0][2]), proto.HYPOTHESES[1])},
+        {"HYPOTHESES": (("H1", "buzz_v1", proto.HYPOTHESES[0][2]), proto.HYPOTHESES[1])},
+        {"H1_NP_WEIGHTS": {**proto.H1_NP_WEIGHTS, "yahoo_signal": 0.1}},
         {"HYPOTHESES": (proto.HYPOTHESES[0], ("H2", "weighted_composite",
                                               proto.HYPOTHESES[1][2] + ("agent.GuardBeeSentinel.score",)))},
         {"H1_PRODUCTION_DIM": "odds"},
         {"H1_ANCHOR_VERSION": "v0.45.999"},
         {"AMENDMENTS": proto.AMENDMENTS + (("2026-10-01", "事后·窗口开始前、零数据", "修订 2"),)},
     ], ids=["窗口起点", "窗口起点回到原登记", "宽度", "NW滞后", "α拆分", "中检周数", "冻结权重", "结果变量",
-            "H1截断信号换蜂", "H1截断信号多一个", "H1对象回到原登记", "H2截断信号", "H1生产维度",
+            "H1截断信号换蜂", "H1截断信号多一个", "H1对象回到原登记", "H1对象回到修订1", "H1子合成权重",
+            "H2截断信号", "H1生产维度",
             "H1锚点", "多一条修订"])
     def test_checker_has_teeth(self, over):
         """只改常量、不改文档 ⇒ 检查必须报出不一致。"""
@@ -209,11 +228,24 @@ class TestInternalConsistency:
         assert set(proto.DESCRIPTIVE_DIMS) | {"sentiment"} == set(proto.DIM_TO_AGENT)
         assert "sentiment" not in proto.DESCRIPTIVE_DIMS
 
-    def test_h1_truncation_signals_are_the_two_layers(self):
-        """执行器只读 HYPOTHESES；分层常量是它的来源，两处不许各写各的。"""
-        assert proto.HYPOTHESES[0][2] == proto.H1_INPUT_SIGNALS + proto.H1_FROZEN_LAYER_SIGNALS
+    def test_h1_truncation_signals_are_the_three_channels(self):
+        """修订 4：执行器只读 HYPOTHESES；它的 H1 截断集合 = 子合成用的通道，一个不多一个不少，且都在 buzz_v1 的输入层里。"""
+        assert proto.HYPOTHESES[0][2] == proto.H1_INPUT_SIGNALS
+        assert set(proto.H1_INPUT_SIGNALS) == {f"buzz.comp.{c}" for c in proto.H1_NP_WEIGHTS}
+        assert set(proto.H1_INPUT_SIGNALS) < set(proto.H1_V1_INPUT_SIGNALS)
         assert not set(proto.H1_INPUT_SIGNALS) & set(proto.H1_FROZEN_LAYER_SIGNALS)
-        assert len(set(proto.HYPOTHESES[0][2])) == len(proto.HYPOTHESES[0][2])
+
+    def test_h1_has_no_price_or_fear_greed_input(self):
+        """修订 4 的全部意义：H1 不读任何价格通道、行情量或 F&G。"""
+        for s in proto.H1_INPUT_SIGNALS:
+            assert not s.startswith(("price.", "market.")), s
+            assert s not in ("buzz.comp.momentum_signal", "buzz.comp.volume_signal",
+                             "buzz.comp.volatility_signal", "buzz.comp.fear_greed_signal"), s
+
+    def test_buzz_v1_descriptive_keeps_the_revision_1_layers(self):
+        assert not set(proto.H1_V1_INPUT_SIGNALS) & set(proto.H1_FROZEN_LAYER_SIGNALS)
+        sigs = proto.H1_V1_DESCRIPTIVE[1]
+        assert len(set(sigs)) == len(sigs)
 
     def test_h1_frozen_layer_is_the_sentiment_bee(self):
         assert proto.H1_PRODUCTION_DIM == "sentiment"
@@ -251,17 +283,24 @@ class TestExternalFacts:
         import config
         assert set(proto.DIM_TO_AGENT) == set(config.EVALUATION_WEIGHTS)
 
-    def test_h1_channels_are_every_archived_buzz_channel(self):
-        """修订 1：H1 输入层的通道必须是全部通道。Buzz 加一个通道而这里没跟 ⇒ 改它不会截断 H1。"""
+    def test_buzz_v1_channels_are_every_archived_buzz_channel(self):
+        """修订 1：buzz_v1 输入层的通道必须是全部通道。Buzz 加一个通道而这里没跟 ⇒ 改它不会截断描述项 buzz_v1。"""
         import signal_archive as sa
         archived = {s for s in sa.SIGNAL_EXTRACTORS if s.startswith("buzz.comp.")}
-        assert {s for s in proto.H1_INPUT_SIGNALS if s.startswith("buzz.comp.")} == archived
+        assert {s for s in proto.H1_V1_INPUT_SIGNALS if s.startswith("buzz.comp.")} == archived
+        assert set(proto.H1_INPUT_SIGNALS) <= archived
 
-    def test_h1_channels_are_the_config_buzz_weights(self):
+    def test_buzz_v1_channels_are_the_config_buzz_weights(self):
         """通道集合的第二个来源：生产合成读的 `AGENT_SCORING["buzz_weights"]`。"""
         import config
         want = {f"buzz.comp.{k}_signal" for k in config.AGENT_SCORING["buzz_weights"]}
-        assert {s for s in proto.H1_INPUT_SIGNALS if s.startswith("buzz.comp.")} == want
+        assert {s for s in proto.H1_V1_INPUT_SIGNALS if s.startswith("buzz.comp.")} == want
+
+    def test_h1_np_weights_are_buzz_v1_frozen_weights(self):
+        """修订 4：子合成权重 = buzz_v1 的冻结权重（不是生产 config——config 以后改了，H1 不跟）。"""
+        import buzz_v1 as B
+        assert proto.H1_NP_WEIGHTS == {"reddit_signal": B.W_REDDIT, "news_signal": B.W_NEWS,
+                                       "yahoo_signal": B.W_YAHOO}
 
 
 def _buzz_scope_gaps(scope: dict) -> list:

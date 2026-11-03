@@ -9,7 +9,62 @@
 
 ## [0.45.709] — 2026-11-03 — 占位（进行中：alpha_hive MCP 加基本面 / 分析师 / 机构持仓 / 分红拆股四个 yfinance 工具）
 
-## [0.45.708] — 2026-11-03 — 占位（进行中：维度 IC 预注册修订 4，H1 改测 buzz_v1 的非价格子合成）
+## [0.45.708] — 2026-11-03 — Changed（**事后**·预注册修订 4）：维度 IC 协议的 H1 改测 buzz_v1 的非价格子合成 buzz_v1_np；buzz_v1 降为描述项
+
+**事后**（协议 §11）：窗口内（2026-10-12 起）修改 H1 的对象与截断集合。用户 2026-11-03 在对话里逐条确认草稿的五条待定项（全部同意）。
+**盲化声明**：H1 已结算合格周 1 / 26；起草与登记期间没有查看任何收益、IC、t 或 p，窗口内只读过 `buzz.comp.*` 通道值（方差份额）。
+理由、定义、功效重算、风险全文在 `experiments/dim_ic_preregistration.md` §13.13。
+
+### Changed
+- `experiments/dim_ic_preregistration.md`：新增「修订 4」/ §13.13；头部、§2、§6、§7、§9 各加修订 4 的指引。
+  - **H1 的对象 = buzz_v1_np** = `reddit` × 0.25 + `news` × 0.25 + `yahoo` × 0.05（buzz_v1 冻结权重、按序相加）。不含 clamp 和两项调整，因为调整的输入含价格。F&G 不进（横截面恒定）。
+  - 理由：
+    - v0.45.697 的长历史回测里，价格通道留出期全部未检出。
+    - 价格通道在窗口内约占合成值横截面方差的 40%（只读通道值）。
+    - 合成值与其非价格部分的秩相关只有 0.75，把 H1 的功效从登记承诺水平稀释掉（终检 IC=0.09：50% → 76%）。
+  - **截断集合收窄为三个情绪通道**：改生产 Buzz 的价格通道 / 行情量 / F&G / 合成与调整层不再终止 H1。
+  - **2026-10-14 回到 H1**：它原本是靠隔离 `price.volume_ratio` 才对 H1 无效的。当天按 §3 意向性口径照算，修订 3 的敏感性分析并列给出去掉它的结果。
+  - **buzz_v1 降为描述项**：每次检视照报 IC / CI / 朴素 p，不进 Holm 族，不触发动作，按修订 1 的两层照旧截断。
+- `experiments/dim_ic_protocol.py`：
+  - `HYPOTHESES[0]` → `("H1", "buzz_v1_np", H1_INPUT_SIGNALS)`。
+  - `H1_INPUT_SIGNALS` 改为三个通道。
+  - 新增 `H1_NP_WEIGHTS`、`H1_V1_DESCRIPTIVE`；修订 1 的 11 个输入层信号改名 `H1_V1_INPUT_SIGNALS`。
+  - `AMENDMENTS` 追加修订 4，并补登当时只写进文档、漏追加到这里的修订 2 / 3（照抄标题与性质，内容不变）。
+- `experiments/dim_ic_forward_test.py`（执行器）：
+  - `load_rows` 从 `signal_archive` 读三个通道挂到每行，表不在 ⇒ 无法判定，不当「没样本」。
+  - H1 值 = `nonprice_composite`，缺任一通道 ⇒ 该行无效，不补 0。
+  - 值函数改收整行。
+  - 描述项 buzz_v1 进 `items()` / `truncation`，`decide()` 在协议出结论时给出 `descriptive_buzz_v1`。
+  - `apply_self_proof` 不再把检视点改判「无法判定」（自证只关系到描述项）。
+  - `input_code_guard` 只让信号触及 H1 截断集合的指纹单元挡检视点。`price.fields` / `buzz.fear_greed` 的问题进 `descriptive_only`，进度行只提示。没有任何单元守着 H1 ⇒ 不 ok。
+  - 进度行标「修订 4：H1 = buzz_v1_np」；描述项截断只作提示。
+- `buzz_v1.py`：`frozen_only_boundary` 改读 `H1_V1_INPUT_SIGNALS`（buzz_v1 自己的输入层）。
+- `signal_code_fingerprints.py`：注释更新。单元覆盖的仍是 buzz_v1 的全部输入层，H1 用的是其子集。
+
+### Tests
+- `tests/test_dim_ic_protocol.py`：
+  - 钉修订 4 常量与四条修订。
+  - 文档检查加「H1 的对象 = **…**」、子合成权重、描述项信号。新增变异：H1 对象回到 buzz_v1、yahoo 权重改值。
+  - H1 不含价格 / F&G；子合成权重 = buzz_v1 冻结权重。
+- `tests/test_dim_ic_forward_test.py`：
+  - 夹具把三个通道（= sentiment）写进 `signal_archive`。
+  - 新增：
+    - H1 是有序线性子合成，通道反序时 IC = −1，同时 buzz_v1 = +1。
+    - 缺通道不补 0；表不在 ⇒ 无法判定。
+    - Buzz 分数隔离只打描述项。
+    - 价格 / F&G / 冻结层边界不截断 H1、只截断描述项。
+    - 指纹单元分流（行情 / F&G 只提示；四个情绪相关单元挡 H1；单元缺报不 ok）。
+    - 自证不再挡 H1。
+- `tests/test_quarantine_1014_prev_session.py`：10-14 回到 H1；描述项 buzz_v1 照旧丢这一天（含删条目的对照）。
+- `tests/test_signal_code_fingerprints.py`：覆盖对 `H1_V1_INPUT_SIGNALS`，H1 截断集合是其子集。
+- `tests/test_step_contract_ic_rerun.py`：`TestRealCli` 的沙箱库补一张**空**的 `signal_archive` 表（生产 schema）。
+  - 原因：整套里这 3 条红过——新规则「表不在 ⇒ 维度 IC 无法判定」把段首变成 cannot_judge，正是该规则要的可见性。
+  - 空表下「沙箱没有归档 ⇒ 自证不通过」这个前提照旧成立。
+
+### 真实数据核对（只有进度，没有效应量）
+- 执行器在生产库上跑：`not_ready`，H1 已结算合格周 1/26，三条截断全无。JSON 里没有任何 ic / p / t / ci95 键。
+- 桥接核对：情绪组 10/10 天通过（对 H1 有意义的那组），行情组 7/10。
+
 
 ## [0.45.707] — 2026-11-03 — Fixed：全仓守卫的「本仓 .py」枚举剪掉嵌套 git 仓库（开发检出里 `test_yf_daily::TestSingleEntry` 两条红的根因）；移除 `mcp-servers/*` 孤儿 gitlink
 
