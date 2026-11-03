@@ -841,6 +841,23 @@ class AlertAnalyzer:
                 ["portfolio_greeks", "data_quality"]
             ))
             return
+        fb = pg.get("nav_fallback")
+        if isinstance(fb, dict) and fb.get("from_audit"):
+            # v0.45.704：纸面组合账本读不了，NAV 分母里的股票账用审计旧值顶上——跨式对冲照常（用户定），但账本坏了要有人去修。
+            # 顶不上（审计里也没有）的那种 NAV 缺失会让对冲做不出来，由下面「数据不全」那条报，这里不重复。
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】组合 Greeks：{pg.get('as_of')} 纸面组合净值读不了，NAV 分母暂用 {fb.get('origin_date')} 的旧值，"
+                f"跨式的 SPY 对冲照常",
+                {
+                    "原因": str(fb.get("reason")),
+                    "顶上的值来自": f"{fb.get('from_audit')} 的审计（值读于 {fb.get('origin_date')}）",
+                    "影响": "带宽 / 尾部告警线按旧分母折算；纸面组合本身那天可能也没跑或没记账",
+                    "建议": "看纸面组合状态目录的 equity_curve.jsonl / positions.jsonl（LedgerCorrupt ⇒ 从备份恢复，"
+                            "别删了当新账本——meta.json 里存着现金）",
+                },
+                ["portfolio_greeks", "data_quality"]
+            ))
         dhc = pg.get("delta_hedge")
         if isinstance(dhc, dict) and dhc.get("mode") == "paper" and (dhc.get("n_undecided") or dhc.get("n_blocked")):
             # v0.45.526：逐票 Delta 对冲（纸面成交）：只影响缺数据的那几只，别的照常对冲——但停摆不能无人知道。

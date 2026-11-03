@@ -188,6 +188,8 @@ export async function renderHedge(root, alive) {
       ...(pc.unpriced || []).map((x) => `${x.ticker}（取不到价）`)];
     warns.push(`${L.date} 数据不全，对冲决定做不出来：${pc.hedge_undecided}${who.length ? `——缺价的是：${who.join("；")}` : ""}`);
   }
+  // v0.45.704：纸面组合净值读不了 ⇒ NAV 分母里的股票账用审计旧值顶上，跨式对冲照常——说出来，别让旧分母悄悄用下去
+  if (pc.nav_fallback?.from_audit) warns.push(`${L.date} 纸面组合净值读不了（${pc.nav_fallback.reason}）：NAV 分母里的股票账暂用 ${pc.nav_fallback.origin_date} 的值，跨式的 SPY 对冲照常。`);
   if ((pc.gaps || []).length) warns.push(`${L.date} 另缺：${pc.gaps.join("；")}`);
   // 买价为 0 的腿不是「缺」：Greeks 取 CBOE 模型值（没有 mid）、已计入带位——说出来，别让它悄悄进决定
   if (pc.n_bid_zero) warns.push(`${L.date} 带位含 ${pc.n_bid_zero} 张买价为 0 的腿（${(pc.bid_zero || []).join("、")}）：用的是 CBOE 模型 Greeks，没有中间价；这些腿没有进压力表。`);

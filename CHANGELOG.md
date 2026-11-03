@@ -7,7 +7,19 @@
 
 ## [0.45.705] — 2026-11-03 — 占位（进行中：IC 重跑就绪度的预计到位日期系统性偏早、每周后挪——按根因重写）
 
-## [0.45.704] — 2026-11-03 — 占位（进行中：纸面组合账本坏了也不挡跨式的 SPY 对冲）
+## [0.45.704] — 2026-11-03 — Changed：纸面组合账本坏了也不挡跨式的 SPY 对冲（用户 2026-11-03 定）
+
+v0.45.701 之后，SPY 对冲对纸面组合只剩一处依赖：合并 NAV（百分比分母）里的「股票账」分量。此前它读不了（`LedgerCorrupt` / 净值文件没了 / import 出错）⇒ 整轮抛异常或 NAV 不可得 ⇒ 跨式也不对冲。
+
+### Changed
+- `portfolio_greeks._stock_book_nav`（新）：`hedge_stock_book=False` 时读纸面组合净值失败 ⇒ 用**最近一份审计**（`greeks_<日期>.json`，日期 ≤ as_of）记下的 `nav.components.stock_book` 顶上，跨式照常对冲；回落说明（原因 / 取自哪份审计 / `origin_date` = 那个值真正读到的那天，链式回落不往后挪）写进 `nav.stock_book_fallback` 与 `price_check.nav_fallback`。审计里也找不到 ⇒ NAV 照旧不可得、当日不对冲（不编值）。`hedge_stock_book=True`（旧口径）照旧严格：账本坏了停下。
+- 可见性：ERROR 日志；`alert_manager._check_portfolio_greeks_prices` 新增 P2「纸面组合净值读不了，NAV 分母暂用 <日期> 的旧值」（顶不上的那种由原有「数据不全」那条报）；Alpha Bot 对冲页黄条（`alphabot/hedge.py` 载荷带 `nav_fallback`、`hedge.js` 显示）；帮助页加一条说明。
+
+### 取舍
+- 回落期间带宽 / 尾部告警线按旧分母折算；股票账多日坏着时分母会越来越旧，但每天都有 P2 点名起始日期。
+
+### Tests
+- `tests/test_portfolio_greeks_straddle_only.py` 加 14 条：账本损坏 / 文件缺失 / import 失败三种都回落且照常判带；取最新且不取 as_of 之后的审计；跳过没值的审计；链式回落保留原始日期；审计里没有 ⇒ 不对冲并点名；健康日无回落；旧口径对照仍抛 `LedgerCorrupt`；真跑两天第二天账本坏照常落盘并在审计留回落说明；P2 告警与健康日静默；对冲页载荷。变异：去掉回落 ⇒ 10 条红；去掉告警 ⇒ 1 条红。
 
 ## [0.45.703] — 2026-11-03 — Fixed：v0.45.701 二次检查的小修（没有逻辑 bug；三处措辞 / 一致性）
 

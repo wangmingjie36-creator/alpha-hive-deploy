@@ -77,6 +77,9 @@ def audit_brief(day: str, a: dict) -> dict:
         "price_check": {"n_stale": pc.get("n_stale"), "gaps": pc.get("gaps") or [],
                         "n_bid_zero": pc.get("n_bid_zero") or 0, "bid_zero": list(pc.get("bid_zero") or []),
                         "hedge_undecided": pc.get("hedge_undecided"),
+                        # v0.45.704：纸面组合净值读不了、NAV 分母用审计旧值顶上（页面黄条点名）
+                        "nav_fallback": ({k: pc["nav_fallback"].get(k) for k in ("reason", "from_audit", "origin_date")}
+                                         if isinstance(pc.get("nav_fallback"), dict) else None),
                         "stale": [{k: x.get(k) for k in ("ticker", "kind", "seen_price", "session", "source")}
                                   for x in pc.get("stale") or [] if isinstance(x, dict)],
                         "unpriced": [{k: x.get(k) for k in ("ticker", "kind", "source")}
