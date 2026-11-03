@@ -348,7 +348,7 @@ export async function renderStraddle(root, alive) {
   if (!alive()) return;
   const head = h("div", { class: "page-head" }, h("div", {},
     h("h1", {}, "财报跨式账本", h("span", { class: "sub" }, d.source === "demo" ? "演示数据" : (d.as_of ? `账本 ${d.as_of}` : ""))),
-    h("p", { class: "lede" }, "纸面账本（模拟成交，不连券商）：财报前比较「期权隐含的事件波动」和「这只票过去 8 次财报的实际波动」——贵就卖跨式（只在财报前最后 2 个交易日内开；买跨式已关），财报后平仓。每个扫描日收盘后更新一次；盘中可以另拉参考报价。 ", helpLink("straddle"))));
+    h("p", { class: "lede" }, "纸面账本（模拟成交，不连券商）：财报前比较「期权隐含的事件波动」和「这只票过去 8 次财报的实际波动」——贵就卖跨式（只在财报前最后一个交易日开；买跨式已关），财报后平仓。每个扫描日收盘后更新一次；盘中可以另拉参考报价。 ", helpLink("straddle"))));
   if (!d.data_available) {
     fill(root, head, panel(null, {}, h("div", { class: "empty" }, `没找到跨式账本目录：${d.state_dir?.path || "—"}`),
       h("p", { class: "small muted" }, "桌面程序用 --reset 重选数据根；终端运行要设 ALPHA_HIVE_HOME。")));

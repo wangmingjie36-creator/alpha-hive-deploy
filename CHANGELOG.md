@@ -23,7 +23,22 @@
 ### Tests
 - `tests/test_portfolio_greeks_straddle_only.py` 加 1 条：缺省口径下排除日志只点名跨式、不含「股票」「不可估」。
 
-## [0.45.702] — 2026-11-03 — 占位（进行中：跨式入场窗口 1 → 0，只在财报前一天开）
+## [0.45.702] — 2026-11-03 — Changed：跨式账本入场窗口 1 → 0，只在财报前最后一个交易日开（用户 2026-11-03 定）；影子宽跨预注册修订 5
+
+用户看过「账本 10 笔按财报前一天、当天重选平值重放」（Massive 期权日线最后成交价，卖方 8/10，账本实际 3/10）后，要求账本开仓日与该重放对齐。
+代价照 v0.45.695 的统计：曾有可交易 rich 的 9 个事件，窗口 0 开得出 4 个、窗口 1 是 5 个；那天扫描没跑 ⇒ 这次财报错过。
+
+### Changed
+- `options_paper_leg.py`：`CONFIG["entry_max_sessions_before_event"]` 1 → 0；模块头与注释同步。判据 `entry_window_miss` 不变。
+- `straddle_strangle_shadow.py`：`PREREG["version"]` 4 → 5、`entry_window_sessions` 1 → 0（与账本同值）。
+- `experiments/straddle_strangle_shadow_prereg.md`：§14 新增修订 5（看过什么 / 截断声明：生产克隆仍在 v0.45.688，修订 3 / 4 计入单位为 0，不截断；`start_date` 不变）。
+- Alpha Bot：帮助页窗口为 0 时写「只在财报前最后一个交易日开仓」；跨式页导语同步。
+- 测试：`TestEntryWindow` / `TestRevision3EntryWindow` / `TestProtocolConstantsArePinned` 改为窗口 0 的值（原窗口 1 放行的样例改成断言「等待 / entry_outside_window」）。
+
+### 没改的
+- 到期日仍取信号的 ~30 DTE（重放用的是账本旧单的短到期，数字不能直接当新规则的预期）；只卖不买、财报后第一个交易日平仓、点差上限都不变。
+- ⚠️ 生产克隆在本版时停在 v0.45.688（693 / 696 / 702 都未进生产），下一个扫描日 production_sync 快进后生效。
+
 
 ## [0.45.701] — 2026-11-03 — Changed：SPY 带状对冲只对冲跨式腿，不再看股票纸面组合（用户 2026-11-03 定）
 
