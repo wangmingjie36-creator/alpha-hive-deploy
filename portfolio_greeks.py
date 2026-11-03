@@ -1685,11 +1685,9 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     excluded = excluded_exposure(nav_d["nav"])
     for e in (excluded or {}).get("names") or []:
         # WARNING 不是 ERROR：这是配置里写明的取舍；但每天都留一行，估算值跟着走，敞口变大时看得见
-        _log.warning("[PortfolioGreeks] %s：%s 在 hedge_exclude_tickers 里，不进对冲计算（股票仓 %d 笔，按建仓价估 %s"
-                     "，占 NAV %s；跨式 %d 笔）", as_of, e["ticker"], e["n_stock_positions"],
-                     (f"${e['stock_usd_est']:+,.0f}" if e["stock_usd_est"] is not None else "不可估"),
-                     (f"{e['stock_pct_nav_est']:+.2f}%" if e["stock_pct_nav_est"] is not None else "—"),
-                     e["n_straddles"])
+        # v0.45.703：股票账不进对冲时 n_stock_positions 恒 0，不再写「股票仓 0 笔，按建仓价估 不可估」这种像缺数据的话
+        _log.warning("[PortfolioGreeks] %s：%s 在 hedge_exclude_tickers 里，不进对冲计算（%s）", as_of, e["ticker"],
+                     _excluded_line({"names": [e]}).split("：", 1)[-1])
     # 逐票 Delta 对冲先于 SPY 带：paper 模式下 SPY 带看到的是逐票对冲**之后**的残余暴露；shadow / off 不进聚合
     # 逐票带宽的分母（v0.45.529）：NAV 缺的**只有** delta_overlay 且原因是某几只持仓标的缺价 ⇒ 带宽用「不含这一块」的 NAV。
     # 否则一只持仓标的的陈旧价（盘中陈旧文件约每 30 只里有 1 只）会把 NAV 整体做成 None，连价格正常的标的也判未知——

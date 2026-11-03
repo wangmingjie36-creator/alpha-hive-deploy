@@ -114,6 +114,17 @@ class TestExcludedNotice:
         line = pg._excluded_line(ex)
         assert "跨式 1 笔" in line and "股票" not in line
 
+    def test_log_names_the_straddle_without_a_fake_stock_gap(self, state, monkeypatch, caplog):
+        """v0.45.703：缺省口径下日志只说「跨式 N 笔」，不再写「股票仓 0 笔，按建仓价估 不可估」（读着像缺数据）。"""
+        monkeypatch.setitem(pg.CONFIG, "hedge_exclude_tickers", ["BILI"])
+        _seed_navs(state)
+        _jsonl(pp.POSITIONS_FILE, [_stock("BILI", "bullish", 100)])
+        _jsonl(opl.POSITIONS_FILE, [_straddle("short", 1, ticker="BILI")])
+        with caplog.at_level("WARNING"):
+            pg.compute_day(AS_OF, closes_fn=_closes({"SPY": SPY}), quotes_fn=_quotes({}), beta_fn=_betas({}))
+        (msg,) = [m for m in caplog.messages if "hedge_exclude_tickers" in m]
+        assert "BILI（跨式 1 笔）" in msg and "股票" not in msg and "不可估" not in msg
+
     def test_control_legacy_mode_counts_the_stock(self, state, monkeypatch):
         monkeypatch.setitem(pg.CONFIG, "hedge_stock_book", True)
         _jsonl(pp.POSITIONS_FILE, [_stock("BILI", "bullish", 100)])
