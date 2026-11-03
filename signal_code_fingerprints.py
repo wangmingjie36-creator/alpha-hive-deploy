@@ -1273,13 +1273,39 @@ class _patched_scope:
         return False
 
 
+def _h1_truncation_signals() -> Optional[frozenset]:
+    """维度 IC 协议 H1 的截断集合（修订 4 起 = 三个情绪通道）。读不到 ⇒ None，调用方按「可能截断 H1」保守措辞。"""
+    try:
+        import importlib.util
+        path = Path(__file__).resolve().parent / "experiments" / "dim_ic_protocol.py"   # 代码锚点：登记常量
+        spec = importlib.util.spec_from_file_location("dim_ic_protocol", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return frozenset(mod.HYPOTHESES[0][2])
+    except Exception:  # noqa: BLE001 —— 只决定措辞；读不到就用保守措辞（见下），不吞掉守卫本身
+        return None
+
+
 def how_to_acknowledge(unit: str, fp: str) -> str:
-    """指纹失配时给改代码的人看的说明（测试与执行器共用）。"""
+    """指纹失配时给改代码的人看的说明（测试与执行器共用）。
+
+    修订 4（v0.45.708）起只有触及 H1 截断集合（三个情绪通道）的单元登记边界才截断 H1；行情字段 / F&G
+    只截断描述项 buzz_v1。措辞按单元分开写（v0.45.711：此前一律说「会截断 H1」，与执行器 `input_code_guard` 不符）。
+    """
     sigs = ", ".join(UNITS[unit]["signals"])
-    return (f"输入层代码单元 {unit!r} 变了（当前指纹 {fp}），它决定 H1 的输入：{sigs}。\n"
+    h1 = _h1_truncation_signals()
+    if h1 is None:
+        effect = "可能截断维度 IC 协议的 H1（协议常量读不到，按最坏情况说）"
+    elif set(UNITS[unit]["signals"]) & h1:
+        hit = [s for s in UNITS[unit]["signals"] if s in h1]
+        effect = (f"点名的信号含 {', '.join(hit)}{' 之一' if len(hit) > 1 else ''} ⇒ 截断维度 IC 协议的 H1"
+                  + ("；只点名其余的 ⇒ 只截断描述项 buzz_v1" if len(hit) < len(UNITS[unit]["signals"]) else ""))
+    else:
+        effect = "只截断描述项 buzz_v1，不截断 H1（修订 4）"
+    return (f"输入层代码单元 {unit!r} 变了（当前指纹 {fp}），它决定 buzz_v1 的输入：{sigs}。\n"
             f"三选一，然后在 signal_code_fingerprints.ACKS 末尾追加一条 ({unit!r}, {fp!r}, <确认方式>, <凭什么>)：\n"
             f"  ① 改了产生这些值的函数 ⇒ 在 ic_rerun_readiness._COHORT_HISTORY 登记边界，并在 "
-            f"signal_archive.COHORT_SIGNAL_SCOPE 点名上面至少一个信号（会截断维度 IC 协议的 H1）；确认方式 = 该 version\n"
+            f"signal_archive.COHORT_SIGNAL_SCOPE 点名上面至少一个信号（{effect}）；确认方式 = 该 version\n"
             f"  ② 修的是原始输入的测量误差（不是换函数）⇒ 确认方式 = 'measurement_fix'，坏日子另走 QUARANTINE\n"
             f"  ③ 重构 / 清理，产出值逐位不变 ⇒ 确认方式 = 'no_value_change'\n"
             f"②③ 要写清凭什么（≥{MIN_NOTE_CHARS} 字）。拿不准就选 ①——漏截断不可逆，多截断只损失样本。\n"

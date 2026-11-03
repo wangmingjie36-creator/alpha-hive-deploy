@@ -3047,9 +3047,11 @@ def _dim_ic_attention(d: Dict) -> List[Dict]:
         why = (f"算不出：{sp['error']}" if sp.get("error") else
                f"{sp.get('n_matched', 0)}/{sp.get('n', 0)} 逐位一致，失配 {sp.get('n_mismatched', 0)}、"
                f"缺输入 {sp.get('n_missing', 0)}")
+        # 修订 4（v0.45.708）起自证只关系到描述项 buzz_v1，执行器不再因它改判检视结论（`apply_self_proof`）——
+        # 这里此前仍写「到检视点将不出结论」，与执行器行为相反（v0.45.711 二次检查更正）
         out.append(item(f"{iid}.buzz_v1_self_proof", "warn",
                         f"{name}：buzz_v1 自证未通过（{why}）—— 跑 `/usr/local/bin/python3 buzz_v1.py` 看失配明细；"
-                        "未通过前到检视点将不出结论（协议 §13.11）"))
+                        "只影响描述项 buzz_v1，不影响 H1（协议修订 4，§13.13）"))
     br = d.get("buzz_v1_bridge")
     if isinstance(br, dict) and not br.get("ok"):
         if br.get("error"):

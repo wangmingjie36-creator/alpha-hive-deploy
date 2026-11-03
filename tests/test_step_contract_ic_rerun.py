@@ -557,6 +557,13 @@ class TestOkPath:
         err = rr._dim_ic_attention({**_DIM_BASE, "buzz_v1_self_proof": {"ok": False, "error": "OperationalError: x"}})
         assert "算不出：OperationalError: x" in err[0]["message"], err
 
+    def test_self_proof_message_matches_revision4(self):
+        """修订 4 起自证只关系到描述项 buzz_v1，执行器不再因它改判检视结论（`apply_self_proof`）。
+        条目若仍说「到检视点将不出结论」，就是在替执行器许一个它不做的动作（v0.45.708 漏改，v0.45.711 二次检查更正）。"""
+        (a,) = [x for x in rr._dim_ic_attention({**_DIM_BASE, "buzz_v1_self_proof": _SP_RED})
+                if x["id"] == "ic_rerun.dim_ic.buzz_v1_self_proof"]
+        assert "不出结论" not in a["message"] and "不影响 H1" in a["message"], a["message"]
+
     def test_detail_whitelist_carries_preconditions(self):
         """白名单漏了键 ⇒ 执行器给了也到不了 `_dim_ic_attention`（v0.45.554 的指纹守卫就是这样漏的）。"""
         assert {"input_code_guard", "buzz_v1_self_proof"} <= set(rr._DIM_DETAIL_KEYS)

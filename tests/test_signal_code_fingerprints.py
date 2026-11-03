@@ -201,6 +201,31 @@ def _changed(read):
     return {u for u in _UNITS6 if _fp(u, read) != _BASE_FPS[u]}
 
 
+class TestAcknowledgeWording:
+    """修订 4（v0.45.708）：只有触及 H1 截断集合（三个情绪通道）的单元登记边界才截断 H1。
+    提示若对行情 / F&G 单元也说「会截断 H1」，改代码的人可能为躲一次并不存在的截断去选 ②③——漏截断不可逆（v0.45.711）。"""
+
+    @staticmethod
+    def _line(unit):
+        (ln,) = [x for x in F.how_to_acknowledge(unit, "x").splitlines() if x.lstrip().startswith("①")]
+        return ln
+
+    def test_wording_follows_protocol_truncation_set(self):
+        h1 = F._h1_truncation_signals()
+        assert h1 == frozenset({"buzz.comp.reddit_signal", "buzz.comp.news_signal", "buzz.comp.yahoo_signal"})
+        for unit, spec in F.UNITS.items():
+            ln = self._line(unit)
+            if set(spec["signals"]) & h1:
+                assert "截断维度 IC 协议的 H1" in ln, (unit, ln)
+            else:
+                assert "不截断 H1" in ln and "会截断" not in ln, (unit, ln)
+        assert "只截断描述项 buzz_v1" in self._line("buzz.channels"), "七通道单元：只点名价格通道不截断 H1，要说清"
+
+    def test_unreadable_protocol_falls_back_to_worst_case(self, monkeypatch):
+        monkeypatch.setattr(F, "_h1_truncation_signals", lambda: None)
+        assert "可能截断维度 IC 协议的 H1" in self._line("price.fields")
+
+
 class TestDependencyClosure:
     """根因：单元盯哪些代码曾是手写清单，没人核对它全不全。这一组在 v0.45.671 之前的代码上全部红（缺口本身）。"""
 
