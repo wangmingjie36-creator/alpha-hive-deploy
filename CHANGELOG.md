@@ -7,7 +7,32 @@
 
 ## [0.45.700] — 2026-11-03 — 占位（进行中：成交活跃度全为 0 时热力图误报「没有可画的数值」）
 
-## [0.45.699] — 2026-11-03 — 占位（进行中：动量自攒索引回落的窗口末端滞后一个场次——CBOE 熔断期拿不到核实收盘时无人报警，补可见化）
+## [0.45.699] — 2026-11-03 — Fixed：自攒索引回落的 momentum 窗口滞后一个场次，此前没有任何告警——补可见化（只记录 + P2，不改值、不补算）
+
+**事故（2026-11-02）**：14:31:13 起 CBOE 熔断（断网，`[CB-cboe] closed → open`），14:33:30 半开、14:33:33 恢复。熔断期里处理的 13 只
+（NVDA TSLA MSFT QCOM VKTX META BILI AMZN RKLB CRCL CVX VZ JNJ）没拿到核实收盘（`session_close is None`），`momentum_5d` 由自攒索引补上、
+窗口末端停在 10-30；14:33:50 之后的标的窗口到 11-02。JNJ 是恢复后第一只：CBOE 通了但文件是盘中生成的（`last_trade=15:49 ET`）⇒ 不收。
+重算后这 13 只与对齐窗口平均差 3.45 个点（中位 2.5；RKLB 12.4、BILI 8.0），其余 17 只 ≤ 0.17。不是 Twelve Data 丢末根造成的（momentum 不读 TD）。
+
+**为什么没人知道**：旧判据 `window_behind = session_close is not None and as_of != session_close[0]`——没有 `session_close`（CBOE 熔断 / 断网 / 盘中陈旧文件）
+就恒判「没滞后」；而且 `window_behind_session` 这个计数全仓零读者。判据依赖会失败的那条通道，通道挂了判据一起沉默。
+
+### Changed
+- `data_pipeline.py`：新 `_momentum_window_gap`——应有场次：核实了收盘 ⇒ 那一场；没核实 ⇒ `yf_daily.latest_completed_session()`（日历判不了 ⇒ 不猜）。
+  `history_fill_stats()` 新增 `window_behind`：ticker → `{as_of, expected, verified}`（各标的最近一次出口；评分快照 `at_scoring` 带着，后续重取改不了它）。
+  `_record_history_fill` 加可选参数 `window_gap`。**交给下游的任何字段都没动**。
+- `alert_manager.py`：`_check_history_fill` 新增 P2「动量窗口滞后：N 只」（分「没核实收盘」/「核实了却没进窗口」两类，列窗口末端与应有场次）。旧计数文件里没这个键 ⇒ 静默。
+- `signal_code_fingerprints.py`：`price.fields` 指纹 `0259255b0948f0dc` 登记 `no_value_change`（用户 2026-11-03 在对话里选）。依据：同一输入下 HEAD 与新版 `_fill_history_fields`
+  产出的 momentum / volume / volatility 及 source / as_of、observations、history_checked 全部相等（有 / 无 `session_close` 各比一次）；赋值这些字段的语句一行未动。
+
+### Added
+- `tests/test_momentum_window_behind.py`（15 条）：两种滞后都记、对齐 / 周末 / 收盘前 / 日历失败 / yfinance 来源都不记、后一次对齐清掉、reset、评分快照冻结、
+  P2 告警（含列名、只用快照、干净静默、旧计数静默）。已做变异：去掉「没核实收盘」分支 ⇒ 红。读钟只有 `yf_daily._now_et`，全部钉住；clockshift ±7 / ±45 天 0 红。
+
+### 未做 / 待验证
+- 11-02 那 13 只的存档值**未改写**（下游已用；重算会动已被消费的记录，由人定）。该日在 LLM 影子 A/B 比较里仍应按降级日对待。
+- 本机开发检出里 `tests/test_yf_daily.py::TestSingleEntry` 两条红（扫到本地 `mcp-servers/maverick-mcp` 的直调）——**既有**，HEAD 干净 worktree 里全绿，与本次无关。
+- 自攒索引回落本身少见（10-05 ~ 11-02 只有 10-12 / 10-14 / 10-22 / 10-26 / 11-02 用过），P2 噪声预计低；真实触发路径要等下一次回落日才算验证。
 
 ## [0.45.698] — 2026-11-02 — Added：Alpha Bot 盘中热力图加「成交活跃度」口径（逐合约新增成交量 × gamma，call / put 都按正值相加；不分方向，不是 State GEX）
 

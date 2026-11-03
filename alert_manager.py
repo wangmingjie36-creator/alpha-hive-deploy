@@ -1257,6 +1257,31 @@ class AlertAnalyzer:
                 ["history_fill", "data_quality"]
             ))
 
+        wb = base.get("window_behind")
+        if isinstance(wb, dict) and wb:
+            unverified = sorted(t for t, v in wb.items() if not (v or {}).get("verified"))
+            verified = sorted(t for t, v in wb.items() if (v or {}).get("verified"))
+            ends = sorted({f"{(v or {}).get('as_of')} → 应有 {(v or {}).get('expected')}" for v in wb.values()})
+            details = {
+                "窗口滞后": _names(sorted(wb)),
+                "窗口末端": "；".join(ends),
+                "其中没核实收盘": _names(unverified) if unverified else "无",
+                "其中核实了收盘却没进窗口": _names(verified) if verified else "无",
+                "影响": "这些标的的 momentum_5d 是自攒索引回落给的、窗口末端比应有场次早（通常慢一个场次），"
+                        "与窗口对齐的标的混在同一天的横截面里；Buzz 动量通道与 signal_archive 的 price.* 吃的就是这个值",
+                "建议": "没核实收盘 ⇒ 多半是 CBOE 熔断 / 断网（看日志「[CB-cboe] closed → open」与「CBOE 拉取 … 失败」）或"
+                        "CBOE 文件是盘中生成的（「payload 是盘中生成的」）；核实了却没进窗口 ⇒ 看「当场收盘 … 没进自攒索引窗口」。"
+                        "当天要不要补算由人定——补算会改写已被下游用过的记录",
+            }
+            if not has_scored:
+                details["口径"] = "没有评分时的快照（at_scoring）——按进程内最后一次取数判"
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                f"📊 【P2 中】动量窗口滞后：{len(wb)} 只的 momentum_5d 窗口末端早于应有场次",
+                details,
+                ["history_fill", "data_quality"]
+            ))
+
         if not has_scored:
             return
         after = _missing(hf)

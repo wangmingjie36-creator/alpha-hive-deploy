@@ -307,6 +307,14 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "解析出的整份 payload JSON 的 SHA-256 三次全同（SPY 12150 个合约、current_price 753.1；_SPX 29578 个、7541.3999）；"
      "离线测试压缩 / 未压缩 / identity 逐字节相同。重试、陈旧判定、进程缓存、_cboe_symbol 不变。"
      "**用户 2026-11-02 在对话里选 no_value_change**；不登记边界"),
+    # v0.45.699：_fill_history_fields 多记一份「动量窗口滞后」的簿记（_momentum_window_gap / _record_history_fill 的新参数）
+    ("price.fields",    "0259255b0948f0dc", "no_value_change",
+     "v0.45.699：_fill_history_fields 在 momentum 回落补上之后多算一个 window_gap（_momentum_window_gap，没核实收盘时读 "
+     "yf_daily.latest_completed_session），交给 _record_history_fill 记进 history_fill_stats()['window_behind']，alert_manager 读它出 P2。"
+     "只加簿记，不改任何交给下游的字段：同一份输入下 HEAD 与新版的 _fill_history_fields 产出的 momentum_5d / volume_ratio / "
+     "volatility_20d 及其 source / as_of、observations、history_checked 全部相等（有 / 无 session_close 两种各比一次，均 True）；"
+     "diff 里赋值这些字段的语句一行未动。2026-11-02 的 13 只存档值不改写。"
+     "**用户 2026-11-03 在对话里选 no_value_change**；不登记边界"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change", "coverage"})

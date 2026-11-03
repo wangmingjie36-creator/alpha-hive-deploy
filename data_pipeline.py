@@ -1144,12 +1144,14 @@ _history_lock = threading.Lock()
 # 本进程还没解析过任何标的 ⇒ None（scan_timing 约定：None 是「没跑」，不是「零次」）
 _history_stats: Optional[Dict] = None
 _history_last: Dict[str, Dict[str, bool]] = {}   # ticker → {字段: 最近一次出口后仍缺}
+# v0.45.699：自攒索引回落的 momentum 窗口末端早于「应有场次」的标的 → {as_of, expected, verified}（最近一次出口的结果）
+_history_window: Dict[str, Dict] = {}
 # v0.45.625：评分用的那份行情取完那一刻的快照（`mark_history_fill_scoring`）；没标记过 ⇒ None
 _history_at_scoring: Optional[Dict] = None
 
 
 def _record_history_fill(ticker: str, path: str, outcome: Dict[str, str],
-                         window_behind: bool) -> None:
+                         window_behind: bool, window_gap: Optional[Dict] = None) -> None:
     global _history_stats
     with _history_lock:
         if _history_stats is None:
@@ -1170,6 +1172,10 @@ def _record_history_fill(ticker: str, path: str, outcome: Dict[str, str],
         if window_behind:
             _history_stats["window_behind_session"] += 1
         _history_last[ticker] = {f: outcome.get(f) in ("missing", "error") for f in _HISTORY_FIELDS}
+        if window_gap:
+            _history_window[ticker] = dict(window_gap)
+        else:
+            _history_window.pop(ticker, None)       # 后一次出口窗口对齐了 ⇒ 不再算滞后（同 still_missing 的语义）
 
 
 def history_fill_stats() -> Optional[Dict]:
@@ -1181,6 +1187,10 @@ def history_fill_stats() -> Optional[Dict]:
       过出口，所以 `cache_expired` 只会在有人绕过 `_emit` 写缓存时出现（v0.45.477 更正：473 写成会计）。
       「这一轮用了几次过期缓存」看 `[DataPipeline] … 使用过期缓存` 日志与 `get_all_metrics()["fetch_stats"]["stale"]`。
     - `window_behind_session`：回落给了 momentum，但窗口末端早于该源核实的那一场收盘（值滞后）。
+      ⚠️ 只数「源核实了收盘、却没进窗口」这一种；**源根本没核实收盘**（CBOE 熔断 / 断网 / 盘中陈旧文件）不在内。
+    - `window_behind`（v0.45.699）：ticker → `{as_of, expected, verified}`，回落给的 momentum 窗口末端早于「应有场次」
+      （`_momentum_window_gap`）——两种情形都收，`verified` 区分。2026-11-02 CBOE 熔断期里处理的 13 只窗口停在 10-30、
+      `window_behind_session` 恒为 0、没有任何告警；与 `still_missing` 一样按各标的**最近一次**出口记。
     - `still_missing`：各字段（momentum / volume / volatility，后者 v0.45.557 起）在**最近一次**出口后仍为 None 的标的。
     - `at_scoring`（v0.45.625）：评分用的那份行情取完那一刻（扫描预取结束，`mark_history_fill_scoring`）的同一组统计；
       没标记过 ⇒ None。⚠️ 「最近一次」会被评分之后的重取改写——10-22 生成 ML 报告时为 12 只票再取一轮、撞上断网，
@@ -1206,6 +1216,7 @@ def _history_stats_locked() -> Dict:
     }
     out["still_missing"] = {f: sorted(t for t, m in _history_last.items() if m.get(f))
                             for f in _HISTORY_FIELDS}
+    out["window_behind"] = {t: dict(v) for t, v in sorted(_history_window.items())}
     return out
 
 
@@ -1217,6 +1228,7 @@ def mark_history_fill_scoring() -> None:
     with _history_lock:
         if _history_stats is None:
             _history_at_scoring = {"resolutions": 0, "window_behind_session": 0, "by_path": {},
+                                   "window_behind": {},
                                    "still_missing": {f: [] for f in _HISTORY_FIELDS}}
         else:
             _history_at_scoring = _history_stats_locked()
@@ -1228,6 +1240,32 @@ def reset_history_fill_stats() -> None:
         _history_stats = None
         _history_at_scoring = None
         _history_last.clear()
+        _history_window.clear()
+
+
+def _momentum_window_gap(data: StockData) -> Optional[Dict]:
+    """回落给的 momentum 窗口末端是否早于「应有场次」（v0.45.699）→ `{as_of, expected, verified}`；对齐 / 判不了 ⇒ None。
+
+    应有场次：源核实了某一场官方收盘（`session_close`）⇒ 那一场（旧口径，`verified=True`）；
+    **没核实**（CBOE 熔断 / 断网 / 盘中生成的陈旧文件，`session_close is None`）⇒ 本机钟下最近一场已收盘的交易日
+    （`yf_daily.latest_completed_session`，`verified=False`）。此前只有前一种判——没有 `session_close` 就恒「没滞后」，
+    窗口停在上一个扫描日（比 yfinance 慢一个场次）却无人知道：2026-11-02 14:31~14:33 CBOE 熔断期处理的 13 只
+    （NVDA … JNJ）动量窗口停在 10-30，重算后与对齐窗口平均差 3.45 个点（RKLB 12.4、BILI 8.0）。
+    日历判不了（`latest_completed_session` 返回 None）⇒ 不猜，None。
+    """
+    as_of = data.momentum_as_of
+    if data.momentum_source != "price_index" or not as_of:
+        return None
+    if data.session_close is not None:
+        expected = data.session_close[0]
+        return ({"as_of": as_of, "expected": expected, "verified": True}
+                if as_of != expected else None)
+    from yf_daily import latest_completed_session
+    lcs = latest_completed_session()
+    if lcs is None:
+        return None
+    expected = lcs.isoformat()
+    return {"as_of": as_of, "expected": expected, "verified": False} if as_of < expected else None
 
 
 def _fill_history_fields(ticker: str, data: StockData, path: str) -> None:
@@ -1244,6 +1282,7 @@ def _fill_history_fields(ticker: str, data: StockData, path: str) -> None:
         return
     outcome: Dict[str, str] = {}
     window_behind = False
+    window_gap: Optional[Dict] = None
 
     if data.momentum_5d is None:
         try:
@@ -1263,6 +1302,7 @@ def _fill_history_fields(ticker: str, data: StockData, path: str) -> None:
                 outcome["momentum"] = "filled"
                 window_behind = (data.session_close is not None
                                  and data.momentum_as_of != data.session_close[0])
+                window_gap = _momentum_window_gap(data)
             else:
                 outcome["momentum"] = "missing"
         if data.momentum_5d is None:
@@ -1304,7 +1344,7 @@ def _fill_history_fields(ticker: str, data: StockData, path: str) -> None:
                 outcome["volatility"] = "missing"
 
     data.history_checked = True
-    _record_history_fill(ticker, path, outcome, window_behind)
+    _record_history_fill(ticker, path, outcome, window_behind, window_gap)
 
 
 # ==================== 多源聚合器 ====================
