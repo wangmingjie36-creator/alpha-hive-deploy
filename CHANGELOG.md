@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.708] — 2026-11-03 — 占位（进行中：维度 IC 预注册修订 4，H1 改测 buzz_v1 的非价格子合成）
+
 ## [0.45.707] — 2026-11-03 — Fixed：全仓守卫的「本仓 .py」枚举剪掉嵌套 git 仓库（开发检出里 `test_yf_daily::TestSingleEntry` 两条红的根因）；移除 `mcp-servers/*` 孤儿 gitlink
 
 **现象**：开发检出里 `tests/test_yf_daily.py::TestSingleEntry` 两条红（0.45.704「未做」里记过，HEAD 干净 worktree 全绿）——多出来的命中全在
