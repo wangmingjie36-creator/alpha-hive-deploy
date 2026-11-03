@@ -295,3 +295,50 @@ class TestFallbackIsVisible:
         assert ahedge.audit_brief(AS_OF, {"price_check": {}})["price_check"]["nav_fallback"] is None
         js = (_ROOT / "alphabot" / "static" / "pages" / "hedge.js").read_text(encoding="utf-8")
         assert "pc.nav_fallback?.from_audit" in js
+
+
+class TestFallbackSurvivesBadAudits:
+    """v0.45.706 二次检查：回落读的是旧审计——它们坏了只能让回落找不到值，不能让整轮对冲崩掉。"""
+
+    def _write(self, day, text):
+        pg.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        (pg.STATE_DIR / f"greeks_{day}.json").write_text(text, encoding="utf-8")
+
+    @pytest.mark.parametrize("text", [
+        "[1, 2]",                                                        # 不是对象
+        '{"as_of": "2026-09-02", "nav": [1]}',                           # nav 不是对象
+        '{"as_of": "2026-09-02", "nav": {"components": [1]}}',           # components 不是对象
+        '{"as_of": "2026-09-02", "nav": {"components": {"stock_book": "x"}}}',
+        "{broken",                                                       # 坏 JSON
+        '{"as_of": "2026-08-01", "nav": {"components": {"stock_book": 1.0}}}',   # 文件名与内容日期不符
+    ])
+    def test_bad_newer_audit_is_skipped_and_older_good_one_used(self, state, text):
+        _audit(state, "2026-08-28", 80_000.0)
+        self._write("2026-09-02", text)
+        res = pg.compute_day(AS_OF, **_straddle_day(state, corrupt=True))
+        assert res["nav"]["components"]["stock_book"] == 80_000.0
+        assert res["nav"]["stock_book_fallback"]["from_audit"] == "2026-08-28"
+
+    def test_weird_previous_fallback_record_does_not_crash(self, state):
+        _audit(state, "2026-09-02", 90_000.0, fallback={"origin_date": 123})
+        fb = pg.compute_day(AS_OF, **_straddle_day(state, corrupt=True))["nav"]["stock_book_fallback"]
+        assert fb["origin_date"] == "2026-09-02"
+
+    def test_unreadable_audit_dir_means_no_fallback_not_a_crash(self, state, monkeypatch):
+        def boom(as_of):
+            raise PermissionError("denied")
+        monkeypatch.setattr(pg, "_audit_dates_desc", boom)
+        res = pg.compute_day(AS_OF, **_straddle_day(state, corrupt=True))
+        fb = res["nav"]["stock_book_fallback"]
+        assert fb["from_audit"] is None and "审计目录读不了" in fb["reason"] and res["nav"]["nav"] is None
+
+    def test_no_fallback_gap_says_why(self, state):
+        res = pg.compute_day(AS_OF, **_straddle_day(state, corrupt=True))
+        assert any("纸面组合净值读不了" in g and "LedgerCorrupt" in g for g in res["price_check"]["gaps"])
+
+    def test_daily_report_marks_the_fallback(self, state):
+        _audit(state, "2026-09-02", 90_000.0)
+        res = pg.compute_day(AS_OF, **_straddle_day(state, corrupt=True))
+        assert "纸面组合净值读不了，股票账用 2026-09-02 的旧值" in pg.render_markdown(AS_OF, res)
+        healthy = pg.compute_day(AS_OF, **_straddle_day(state))
+        assert "纸面组合净值读不了" not in pg.render_markdown(AS_OF, healthy)

@@ -1286,14 +1286,28 @@ def _stock_book_nav(as_of: str) -> Tuple[Optional[float], Optional[Dict]]:
         reason = "no_nav_row"               # 净值文件不存在 / 空 / 没有 ≤ as_of 的有效行
     except Exception as exc:  # noqa: BLE001 —— 任何读失败都只该挡股票账自己，不挡跨式对冲
         reason = f"{type(exc).__name__}: {exc}"[:300]
-    for d in _audit_dates_desc(as_of):
-        a = _load_audit(d)
-        nav = (a or {}).get("nav") or {}
-        v = _num((nav.get("components") or {}).get("stock_book"))
+    # 回落本身不许把整轮弄崩（v0.45.706 二次检查）：审计目录读不了 / 文件不是对象 / 字段形状不对 ⇒ 跳过那份，
+    # 全都不行 ⇒ 照旧 None（NAV 不可得、不对冲），原因并进 reason。审计里的日期必须与文件名一致，否则不认。
+    try:
+        days = _audit_dates_desc(as_of)
+    except OSError as exc:
+        return None, {"reason": f"{reason}；审计目录读不了：{type(exc).__name__}: {exc}"[:300],
+                      "from_audit": None, "origin_date": None}
+    for d in days:
+        try:
+            a = _load_audit(d)
+        except OSError:
+            continue
+        if not isinstance(a, dict) or a.get("as_of") != d:
+            continue
+        nav = a.get("nav")
+        comps = nav.get("components") if isinstance(nav, dict) else None
+        v = _num(comps.get("stock_book")) if isinstance(comps, dict) else None
         if v is None:
             continue
-        prev = nav.get("stock_book_fallback") or {}
-        return v, {"reason": reason, "from_audit": d, "origin_date": prev.get("origin_date") or d}
+        prev = nav.get("stock_book_fallback")
+        origin = prev.get("origin_date") if isinstance(prev, dict) else None
+        return v, {"reason": reason, "from_audit": d, "origin_date": origin if isinstance(origin, str) else d}
     return None, {"reason": reason, "from_audit": None, "origin_date": None}
 
 
@@ -1651,6 +1665,10 @@ def _data_gaps(chk: Dict) -> List[str]:
         out.append(f"缺 β {chk['n_beta_missing']} 行（" + ",".join(chk.get("beta_missing") or []) + "）")
     if chk.get("nav_missing"):
         out.append("NAV 缺 " + ",".join(chk["nav_missing"]))
+        fb = chk.get("nav_fallback")
+        if isinstance(fb, dict) and not fb.get("from_audit"):
+            # v0.45.706：股票账读不了、审计里也没旧值可顶——告警里把「为什么缺」说出来
+            out.append(f"纸面组合净值读不了（{fb.get('reason')}），审计里也没有可顶上的旧值")
     return out
 
 
@@ -2347,6 +2365,8 @@ def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
     L.append(f"截至 {as_of}：{stock_bit} / 跨式腿合约 {kinds.get('option', 0)} 行 / "
              f"SPY 覆盖 {hedge_sh:+,.0f} 股（交易前）；合并 NAV "
              + (f"${nav:,.0f}" if nav is not None else f"不可得（缺：{', '.join(nav_d.get('missing') or ['?'])}）")
+             + (f"（⚠️ 纸面组合净值读不了，股票账用 {nav_d['stock_book_fallback']['origin_date']} 的旧值）"
+                if (nav_d.get("stock_book_fallback") or {}).get("from_audit") else "")
              + _spy_price_note(res)
              + "。")
     L += ["", "| 指标 | 数值 | % NAV | 备注 |", "|------|------|-------|------|"]
