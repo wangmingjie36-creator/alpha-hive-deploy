@@ -14,6 +14,9 @@
 - 行权价太密（SPX 在 ±12% 内约 450 个）⇒ 超过 `MAX_ROWS` 行时把相邻行权价按固定宽度分桶**求和**
   （GEX 按行权价可加，桶和就是这一段价格区间的净 GEX）；逐拍差先逐行权价算、再求和。每格带桶里有几个行权价。
 - x 轴按拍排列，不是等距时间；相邻两拍间隔 > 中位间隔 `GAP_FACTOR` 倍的地方记在 `gaps`。
+- `basis="activity"` / `"activity_volume"`（v0.45.698）：读快照里拍照时就算好的**成交活跃度**（`intraday_activity`：
+  逐合约新增成交量 × gamma、call 与 put 都按正值相加 / 不乘 gamma 的纯增量张数）。它本身就是「这一拍比上一拍」，
+  所以只有 `mode="level"`；**不分正负**（`signed: False`，页面用单色）。某拍没算出 ⇒ 那一列空、原因记在 `activity_missing`。
 
 只展示：不进评分、不写任何文件、不 import 卖权模块（数据只来自 `service.intraday` 已落盘的快照）。
 """
@@ -28,13 +31,18 @@ GAP_FACTOR = 2.0
 MAX_ROWS = 80
 VIEWS = ("le_45dte", "next_expiry")
 BASES = {"oi": 1, "volume": 2}          # 快照 strikes 行 = [strike, net_gex_oi, net_gex_volume]
+ACTIVITY_BASES = {"activity": 1, "activity_volume": 2}   # 快照 activity.strikes 行 = [strike, 加权活跃度, 成交量增量, 未进张数]
 MODES = ("level", "delta")
 
 REASONS = {
     "no_snapshots": "这一天没有快照",
     "need_two_snapshots": "逐拍变化至少要两张快照",
     "no_values": "快照里没有可画的行权价数值",
+    "no_activity": "这一天没有一拍算出了成交活跃度（每拍原因见下方说明）",
+    "activity_level_only": "成交活跃度本身就是逐拍增量，只有「当前值」",
 }
+# 快照里没有 activity 一节（v0.45.698 之前拍的）——与 intraday_activity.REASONS 并列，页面一起翻译
+ACTIVITY_MISSING = {"not_in_snapshot": "这一拍是加活跃度之前拍的，没有这项"}
 
 
 def _num(x) -> Optional[float]:
@@ -68,10 +76,12 @@ def _gaps(snaps: list) -> list:
 
 
 def build(snaps: list, *, view: str = "le_45dte", basis: str = "oi", mode: str = "level") -> dict:
-    if view not in VIEWS or basis not in BASES or mode not in MODES:
+    if view not in VIEWS or (basis not in BASES and basis not in ACTIVITY_BASES) or mode not in MODES:
         raise ValueError(f"view/basis/mode 不认识：{view}/{basis}/{mode}")
-    col = BASES[basis]
-    out = {"view": view, "basis": basis, "mode": mode, "available": False, "reason": None,
+    activity = basis in ACTIVITY_BASES
+    col = ACTIVITY_BASES[basis] if activity else BASES[basis]
+    out = {"view": view, "basis": basis, "mode": mode, "available": False, "reason": None, "signed": not activity,
+           "activity_missing": [], "activity_counts": None,
            "times": [], "ts": [], "strikes": [], "step": None, "cells": [], "price": [], "zero_gamma": [],
            "clip": None, "max_abs": None, "n_clipped": 0, "gaps": [], "n_snapshots": len(snaps),
            "bucket": None, "n_strikes_raw": 0,
@@ -79,15 +89,33 @@ def build(snaps: list, *, view: str = "le_45dte", basis: str = "oi", mode: str =
     if not snaps:
         out["reason"] = "no_snapshots"
         return out
+    if activity and mode != "level":
+        out["reason"] = "activity_level_only"
+        return out
     if mode == "delta" and len(snaps) < 2:
         out["reason"] = "need_two_snapshots"
         return out
 
     rows = []  # 每拍 {strike: value}
-    for s in snaps:
+    counts: dict = {}
+    for i, s in enumerate(snaps):
         v = (s.get("views") or {}).get(view) or {}
         m = {}
-        for r in v.get("strikes") or []:
+        src = v.get("strikes") or []
+        if activity:
+            act = v.get("activity")
+            if not isinstance(act, dict):
+                out["activity_missing"].append({"index": i, "reason": "not_in_snapshot"})
+                src = []
+            elif not act.get("available"):
+                out["activity_missing"].append({"index": i, "reason": act.get("reason")})
+                src = []
+            else:
+                src = act.get("strikes") or []
+                for ck, cv in (act.get("counts") or {}).items():
+                    if _num(cv) is not None:
+                        counts[ck] = counts.get(ck, 0) + int(cv)
+        for r in src:
             k = _num(r[0]) if isinstance(r, (list, tuple)) and len(r) > col else None
             if k is not None:
                 m[k] = _num(r[col])
@@ -132,9 +160,11 @@ def build(snaps: list, *, view: str = "le_45dte", basis: str = "oi", mode: str =
                        for s in snaps],
         "gaps": _gaps(snaps),
     })
+    if activity:
+        out["activity_counts"] = counts or None
     absvals = [abs(c[2]) for c in cells if c[2] != 0]
     if not absvals:
-        out["reason"] = "no_values"
+        out["reason"] = "no_activity" if activity and len(out["activity_missing"]) == len(snaps) else "no_values"
         return out
     clip = _quantile_nearest_rank(absvals, CLIP_QUANTILE)
     # 列：[拍, 行权价（分桶时 = 桶中心）, 真值（提示框用）, 上色用的截断值, 桶里有几个行权价]

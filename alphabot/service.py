@@ -32,6 +32,7 @@ from alphabot import beta_long as _BL
 from alphabot import chat as CH
 from alphabot import hedge as HG
 from alphabot import howto as HW
+from alphabot import intraday_activity as IA
 from alphabot import intraday_heat as IH
 from alphabot import macos_app as MA
 from alphabot import premium as PM
@@ -97,6 +98,26 @@ def norm_ticker(t) -> str:
     if not _TICKER_RE.match(s):
         raise BadRequest(f"代码不合法：{t!r}")
     return s
+
+
+def _chain_source(raw: Optional[dict]) -> Optional[str]:
+    """取数源（成交量只在同一源的相邻两拍之间可比）：yfinance 备用链带 `data_source`，CBOE 链不带 ⇒ "cboe"。"""
+    if not isinstance(raw, dict):
+        return None
+    return str(raw.get("data_source") or "cboe")
+
+
+def activity_gamma(c: dict, S: float) -> Optional[float]:
+    """成交活跃度用的逐合约 gamma——与 `sell_strike_levels.strike_profile` **同一条**取数规则：
+    CBOE gamma（非 None 且 > 0）优先，否则 BS（要 IV 与 dte）。两边一致由测试按 GEX 重建逐行权价核对。"""
+    L = R.L
+    g = L._pos(c.get("gamma"))
+    if g is not None:
+        return g
+    K, iv, T = L._pos(c.get("strike")), L._pos(c.get("iv")), L._contract_T(c)
+    if K is None or iv is None or T is None:
+        return None
+    return L.bs_gamma(S, K, T, L.RISK_FREE_RATE, iv)
 
 
 def drop_am_settled_expiring(raw: dict, am_root: str) -> dict:
@@ -256,6 +277,8 @@ class AlphaBotService:
         # Yahoo 限流时各票「最早什么时候值得再试」（self.clock() 的时刻）：`live()` 把它折成 `retry_after_sec` 给页面
         self._yf_retry_until: Dict[str, float] = {}
         self._am_excluded: Dict[str, int] = {}      # 指数票最近一次现算丢掉的上午结算合约数（`_live_fetch` 写）
+        # 盘中成交活跃度：各票上一张**落盘**快照的逐合约成交量（只在内存里；重启后第一拍没有可比的，见 intraday_activity）
+        self._act_prev: Dict[str, dict] = {}
         self._premium_rules_cache: Optional[dict] = None     # 规则常量与文案表进程内不变：算一次
         self._cache: Dict[str, tuple] = {}
         self._bars_cache: Dict[tuple, dict] = {}
@@ -265,7 +288,8 @@ class AlphaBotService:
         self.stats = {"live_computed": 0, "live_cache_hits": 0, "live_failures": 0,
                       "premium_computed": 0, "premium_cache_hits": 0, "premium_failures": 0,
                       "howto_failures": 0, "yf_fallback_used": 0, "yf_fallback_failed": 0,
-                      "beta_sens_computed": 0, "beta_sens_failures": 0, "yf_rate_limited": 0}
+                      "beta_sens_computed": 0, "beta_sens_failures": 0, "yf_rate_limited": 0,
+                      "activity_failures": 0}
 
     # ── 路径（调用时求值）
     def state_dir(self) -> Path:
@@ -276,8 +300,11 @@ class AlphaBotService:
             return self._locks.setdefault(key, threading.Lock())
 
     # ── 现算
-    def live(self, ticker, *, force: bool = False) -> dict:
+    def live(self, ticker, *, force: bool = False, _on_raw: Optional[Callable] = None) -> dict:
+        """`_on_raw`：只给 `take_snapshot` 用——这次现算实际用到的原始链原样交给它（逐合约成交量要与快照同一份链，
+        事后再读缓存可能已被别的现算换掉）。传了它就必然现算（`force` 语义）。"""
         t = norm_ticker(ticker)
+        force = force or _on_raw is not None
         hit = self._fresh(t)
         if hit is not None and not force:
             self.stats["live_cache_hits"] += 1
@@ -287,7 +314,16 @@ class AlphaBotService:
             if hit is not None and not force:
                 self.stats["live_cache_hits"] += 1
                 return self._stamp(hit)
-            res = clean_json(R.compute_live_detail(t, fetch_fn=self._live_fetch(t), state_dir=self.ledger_dir))
+            fetch = self._live_fetch(t)
+            if _on_raw is not None:
+                base_fetch = fetch
+
+                def fetch(ticker, *, as_of=None):
+                    raw, reason = base_fetch(ticker, as_of=as_of)
+                    if raw is not None:
+                        _on_raw(raw)
+                    return raw, reason
+            res = clean_json(R.compute_live_detail(t, fetch_fn=fetch, state_dir=self.ledger_dir))
             ok = bool(res.get("data_available"))
             ru = self._yf_retry_until.pop(t, None)
             if not ok and res.get("reason") == "yf_rate_limited" and ru is not None:
@@ -1053,7 +1089,8 @@ class AlphaBotService:
         """现拉一次并追加一张快照。payload 的最后成交时刻与上一张相同（CBOE 文件没更新）⇒ 不重复记。"""
         t = norm_ticker(ticker)
         now = (now or now_et()).astimezone(ET)
-        detail = self.live(t, force=True)
+        raws: List[dict] = []
+        detail = self.live(t, force=True, _on_raw=raws.append)
         if not detail.get("data_available"):
             return {"ticker": t, "recorded": False, "reason": detail.get("reason")}
         snap = self.snapshot_from(detail, now.isoformat(timespec="seconds"))
@@ -1064,10 +1101,46 @@ class AlphaBotService:
                     last.get("payload_last_trade_time") == snap.get("payload_last_trade_time") and \
                     last.get("underlying_price") == snap.get("underlying_price"):
                 return {"ticker": t, "recorded": False, "reason": "payload_unchanged"}
+            raw = raws[-1] if raws else None
+            vols = self._attach_activity(t, snap, raw, date_et=now.date().isoformat(),
+                                         last_ts=(last or {}).get("ts"))
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(snap, ensure_ascii=False) + "\n")
+            # 只有落了盘的一拍才能当下一拍的「上一拍」（没落盘就比，增量会跨过文件里看不见的一拍）
+            # 这一拍算不出（vols = None）也记下：下一拍报「上一拍没算出」，不冒充「刚启动」
+            self._act_prev[t] = {"date": now.date().isoformat(), "source": _chain_source(raw),
+                                 "ts": snap["ts"], "vols": vols}
         return {"ticker": t, "recorded": True, "ts": snap["ts"]}
+
+    def _attach_activity(self, t: str, snap: dict, raw: Optional[dict], *, date_et: str,
+                         last_ts: Optional[str]) -> Optional[dict]:
+        """把成交活跃度写进快照每个视图的 `activity`；返回这一拍的逐合约成交量（给下一拍比），算不了 ⇒ None。
+        出错不挡快照落盘：每个视图写 `available: False` + `exception`，计 `stats.activity_failures`、日志 warning。"""
+        views = snap.get("views") or {}
+        try:
+            if raw is None:
+                for v in views.values():
+                    v["activity"] = IA.unavailable("no_raw_chain")
+                return None
+            contracts = raw.get("contracts") or []
+            S = snap.get("underlying_price")
+            prev = self._act_prev.get(t)
+            why = IA.compare_state(prev, date_et=date_et, source=_chain_source(raw), last_ts=last_ts)
+            for name, v in views.items():
+                if why is not None:
+                    v["activity"] = IA.unavailable(why, since_ts=(prev or {}).get("ts"))
+                    continue
+                res = IA.build_view(prev["vols"], R.L.view_contracts(contracts, name), S,
+                                    gamma_fn=activity_gamma, band=SNAPSHOT_STRIKE_BAND)
+                v["activity"] = clean_json({"available": True, "reason": None, "since_ts": prev["ts"], **res})
+            return IA.volume_map(contracts)
+        except Exception as exc:  # noqa: BLE001 - 活跃度是附加展示，坏了不许连累快照本身
+            self.stats["activity_failures"] += 1
+            _log.warning("[%s] 盘中成交活跃度算不出：%s: %s", t, type(exc).__name__, exc)
+            for v in views.values():
+                v["activity"] = IA.unavailable("exception")
+            return None
 
     @staticmethod
     def _last_line(path: Path) -> Optional[dict]:
@@ -1104,13 +1177,14 @@ class AlphaBotService:
     def intraday_heat(self, ticker, date_et: Optional[str] = None, *, view: str = "le_45dte",
                       basis: str = "oi", mode: str = "level") -> dict:
         """盘中热力图（叠现价 / Zero Gamma）：同一份单日快照交给 `intraday_heat.build` 排，不另取数。"""
-        if view not in IH.VIEWS or basis not in IH.BASES or mode not in IH.MODES:
+        if view not in IH.VIEWS or (basis not in IH.BASES and basis not in IH.ACTIVITY_BASES) or mode not in IH.MODES:
             raise BadRequest(f"view / basis / mode 不认识：{view} / {basis} / {mode}")
         day = self.intraday(ticker, date_et)
         out = IH.build(day["snapshots"], view=view, basis=basis, mode=mode)
         out["rules"]["strike_band"] = SNAPSHOT_STRIKE_BAND
         out.update({"ticker": day["ticker"], "date": day["date"], "n_bad_lines": day.get("n_bad_lines", 0),
-                    "reason_label": IH.REASONS.get(out["reason"])})
+                    "reason_label": IH.REASONS.get(out["reason"]),
+                    "activity_reason_labels": {**IA.REASONS, **IH.ACTIVITY_MISSING}})
         return clean_json(out)
 
     def _demo_intraday(self, t: str, d: str) -> dict:
@@ -1119,15 +1193,29 @@ class AlphaBotService:
         key = ("demo_intraday", t, d)
         if key not in self._bars_cache:
             snaps = []
+            prev = None
+            base_vol = {c["symbol"]: c["volume"] for c in syn.demo_payload(t, d)["contracts"]}
             for i in range(40):
                 shift = 0.012 * math.sin(i / 6.0 + (syn._seed(t) % 7)) + 0.0006 * i
                 raw = syn.demo_payload(t, d, intraday_shift=shift)
+                for c in raw["contracts"]:      # 合成链的成交量是全天总量：按合约各自的节奏摊成随拍累计（单调不减）
+                    full = base_vol.get(c["symbol"], c["volume"])     # 全天总量固定在不偏移的那份链上，否则会随现价忽大忽小
+                    c["volume"] = float(int(full * ((i + 1) / 40.0) ** (0.6 + 0.8 * syn._rand(syn._seed(c["symbol"]), 7))))
                 hh, mm = divmod(9 * 60 + 30 + 10 * i, 60)
                 raw["payload_last_trade_time"] = f"{d}T{hh:02d}:{mm:02d}:00"
                 raw["session_live"] = True
                 detail = clean_json(R.compute_live_detail(t, fetch_fn=lambda *_a, _r=raw, **_k: (_r, None),
                                                           state_dir=self.ledger_dir))
-                snaps.append(self.snapshot_from(detail, f"{d}T{hh:02d}:{mm:02d}:00-04:00"))
+                snap = self.snapshot_from(detail, f"{d}T{hh:02d}:{mm:02d}:00-04:00")
+                for name, v in snap["views"].items():
+                    if prev is None:
+                        v["activity"] = IA.unavailable("first_of_day")
+                        continue
+                    res = IA.build_view(prev[1], R.L.view_contracts(raw["contracts"], name), snap["underlying_price"],
+                                        gamma_fn=activity_gamma, band=SNAPSHOT_STRIKE_BAND)
+                    v["activity"] = clean_json({"available": True, "reason": None, "since_ts": prev[0], **res})
+                prev = (snap["ts"], IA.volume_map(raw["contracts"]))
+                snaps.append(snap)
             self._bars_cache[key] = snaps
         return {"ticker": t, "date": d, "snapshots": self._bars_cache[key], "n_bad_lines": 0, "demo": True}
 

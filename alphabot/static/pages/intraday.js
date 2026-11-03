@@ -11,6 +11,7 @@ export async function renderIntraday(root, t, alive) {
   let view = pref("idView", "le_45dte");
   let basis = "oi";
   let mode = "level";
+  const isAct = () => basis === "activity" || basis === "activity_volume";
   let back = 3;
   let charts = [];
   const main = h("div", {});
@@ -19,7 +20,7 @@ export async function renderIntraday(root, t, alive) {
   async function draw() {
     const q = date ? `date=${date}&` : "";
     const [d, hm] = await Promise.all([api(`/api/intraday/${encodeURIComponent(t)}?${q}`),
-      api(`/api/intraday-heat/${encodeURIComponent(t)}?${q}view=${view}&basis=${basis}&mode=${mode}`)]);
+      api(`/api/intraday-heat/${encodeURIComponent(t)}?${q}view=${view}&basis=${basis}&mode=${isAct() ? "level" : mode}`)]);
     if (!alive()) return;
     charts.forEach(release); charts = [];
     const snaps = d.snapshots || [];
@@ -44,12 +45,14 @@ export async function renderIntraday(root, t, alive) {
     const lvEl = h("div", { class: "chart" });
     const hmEl = h("div", { class: "chart tall" });
     const hmHead = h("div", { class: "controls" },
-      seg([["oi", "按 OI"], ["volume", "按成交量"]], basis, (x) => { basis = x; draw(); }, "口径"),
-      seg([["level", "当前值"], ["delta", "逐拍变化"]], mode, (x) => { mode = x; draw(); }, "显示"));
+      seg([["oi", "按 OI"], ["volume", "按成交量"], ["activity", "成交活跃度"], ["activity_volume", "活跃度（张）"]],
+        basis, (x) => { basis = x; draw(); }, "口径"),
+      // 成交活跃度本身就是逐拍增量，没有「逐拍变化」
+      isAct() ? null : seg([["level", "当前值"], ["delta", "逐拍变化"]], mode, (x) => { mode = x; draw(); }, "显示"));
     const totEl = h("div", { class: "chart short" });
     const lbEl = h("div", { class: "chart tall" });
 
-    const idx = basis === "oi" ? 1 : 2;
+    const idx = basis === "oi" ? 1 : 2;     // 回看面板只比 OI / 成交量口径的净 GEX（活跃度口径时比成交量口径）
 
     // 回看
     const last = snaps[snaps.length - 1];
@@ -63,8 +66,9 @@ export async function renderIntraday(root, t, alive) {
     const changes = snaps.filter((s, i) => i === 0 || routeKey(s) !== routeKey(snaps[i - 1]));
 
     fill(main, head,
-      panel("净 GEX 热力图 · 价格路径", { sub: heatSub(hm), right: hmHead },
+      panel(hm.signed === false ? "成交活跃度热力图 · 价格路径" : "净 GEX 热力图 · 价格路径", { sub: heatSub(hm), right: hmHead },
         hm.available ? hmEl : h("div", { class: "empty" }, hm.reason_label || "—"),
+        activityNotes(hm),
         heatNotes(hm)),
       h("div", { style: { height: "20px" } }),
       h("div", { class: "grid two" },
@@ -100,6 +104,10 @@ export async function renderIntraday(root, t, alive) {
 
 // 热力图口径说明：数字只取服务端回传的 rules / clip（intraday_heat.py），这里不另写常量
 function heatSub(hm) {
+  if (hm.signed === false) {
+    const what = hm.basis === "activity" ? "这一拍比上一拍新增的成交量 × gamma（美元 / 现价每变动 1%）" : "这一拍比上一拍新增的成交量（张）";
+    return `行权价 × 拍；${what}；call 与 put 都按正值相加，颜色越深越活跃。实线 = 现价，虚线 = 最近 Zero Gamma`;
+  }
   const what = hm.mode === "delta" ? "这一拍减上一拍同一行权价" : "净 GEX（美元 / 现价每变动 1%）";
   return `行权价 × 拍；${what}；蓝 = 正、橙 = 负。实线 = 现价，虚线 = 最近 Zero Gamma`;
 }
@@ -107,7 +115,9 @@ function heatNotes(hm) {
   if (!hm.available) return null;
   const r = hm.rules || {};
   const items = [
-    `颜色按 |值| 的 ${Math.round((r.clip_quantile ?? 0) * 100)}% 分位截断在 ±${usdShort(hm.clip)}（最大 ${usdShort(hm.max_abs)}，${hm.n_clipped} 格按截断色画，悬停看真值）。`,
+    hm.signed === false
+      ? `颜色按 ${Math.round((r.clip_quantile ?? 0) * 100)}% 分位截断在 ${fmtHeat(hm, hm.clip)}（最大 ${fmtHeat(hm, hm.max_abs)}，${hm.n_clipped} 格按截断色画，悬停看真值）。`
+      : `颜色按 |值| 的 ${Math.round((r.clip_quantile ?? 0) * 100)}% 分位截断在 ±${usdShort(hm.clip)}（最大 ${usdShort(hm.max_abs)}，${hm.n_clipped} 格按截断色画，悬停看真值）。`,
     `只存现价 ±${Math.round((r.strike_band ?? 0) * 100)}% 内的行权价，现价移动时边缘格子会空着（不是 0）。`,
   ];
   if (hm.bucket) items.push(`行权价共 ${hm.n_strikes_raw} 个、超过 ${r.max_rows} 行：每 ${num(hm.bucket)} 点分一桶、桶内求和（GEX 按行权价可加），悬停看区间与个数。窗口边缘的桶在现价移动时只装得下一部分行权价，那里的颜色变化可能只是进出窗口，悬停看个数。`);
@@ -116,6 +126,31 @@ function heatNotes(hm) {
     : "成交量口径的逐拍变化 ≈ 这段时间新增成交带来的 GEX——没有买卖方向（延迟快照分不出主动买卖），不是 orderflow。");
   if ((hm.gaps || []).length) items.push(`x 轴按拍排列、不等距：${hm.gaps.map((g) => `${hm.times[g.index]} 前隔了 ${g.minutes} 分钟`).join("、")}。`);
   if (hm.n_bad_lines) items.push(`快照文件有 ${hm.n_bad_lines} 行读不了，已跳过。`);
+  return h("ul", { class: "note" }, items.map((x) => h("li", {}, x)));
+}
+
+const fmtHeat = (hm, v) => (hm.basis === "activity_volume" ? `${num(v, 0)} 张` : `${usdShort(v)} / 1%`);
+
+// 成交活跃度的口径与限制（无论这天能不能画都给：说清楚它是什么、不是什么，以及哪几拍为什么空着）
+function activityNotes(hm) {
+  if (hm.signed !== false) return null;
+  const labels = hm.activity_reason_labels || {};
+  const items = [
+    "只是活跃度：分不出买卖方向、分不出开仓还是平仓（CBOE 延迟快照没有这些信息），价差 / 跨式的每条腿都算——不是 GEXBot 的 State / Orderflow，不能据此推断做市商仓位朝哪边。",
+    "逐个合约先减成交量、再乘这一拍的 gamma，所以现价移动造成的 gamma 变化不会混进来；gamma 加权会让临近到期的平值合约压过其余行权价，「活跃度（张）」是不加权的对照。",
+    "CBOE 数据约延迟 15 分钟；两拍之间的成交只看得到总量。只展示，未经前向检验。",
+  ];
+  const by = {};
+  for (const m of hm.activity_missing || []) (by[m.reason] = by[m.reason] || []).push(hm.times?.[m.index] ?? m.index);
+  for (const [why, ts] of Object.entries(by)) {
+    const which = ts.length > 6 ? `${ts[0]} 到 ${ts[ts.length - 1]} 之间的 ${ts.length} 拍` : `${ts.join("、")} 这几拍`;
+    items.push(`${which}空着：${labels[why] || why}。`);
+  }
+  const n = hm.activity_counts || {};
+  const skipped = [["n_no_previous", "上一拍没有这个合约"], ["n_volume_decreased", "成交量比上一拍小（数据源修正）"],
+    ["n_no_volume", "缺成交量"], ["n_no_gamma", "缺 gamma"], ["n_duplicate_key", "合约身份重复"], ["n_bad_contract", "合约形状不对"]]
+    .filter(([k]) => n[k]).map(([k, lab]) => `${lab} ${n[k]}`);
+  if (skipped.length) items.push(`没算进去的合约（各拍合计；算进去的是 ${n.n_used ?? 0} 个合约 × 拍）：${skipped.join("，")}。某个行权价一个合约都没算进去时那格空着，不是 0。`);
   return h("ul", { class: "note" }, items.map((x) => h("li", {}, x)));
 }
 

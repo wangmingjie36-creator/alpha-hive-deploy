@@ -5,7 +5,32 @@
 
 ---
 
-## [0.45.698] — 2026-11-02 — 占位（进行中：Alpha Bot 盘中热力图加不分正负的成交活跃度口径，逐合约算成交量增量 × gamma）
+## [0.45.698] — 2026-11-02 — Added：Alpha Bot 盘中热力图加「成交活跃度」口径（逐合约新增成交量 × gamma，call / put 都按正值相加；不分方向，不是 State GEX）
+
+**为什么**：684 热力图的「按成交量 × 逐拍变化」是成交量口径**净** GEX（call − put）前后两拍相减，当活跃度看会误导：
+① 同一行权价 call、put 同时放量，增量互相抵掉，最活跃的格子反而发灰；② 它是「全天累计成交量 × 当前 gamma」之差，
+现价一动 gamma 就变，早上的成交量乘新 gamma 也会出差值——整天没成交的行权价只因现价移过来就会亮。
+
+### Added
+- `alphabot/intraday_activity.py`（新，纯函数，不 import 卖权模块）：活跃度(K) = Σ_{K 上的合约}（本拍成交量 − 上一拍成交量）× 这一拍 gamma × 100 × S² × 1%，
+  **先逐合约减、再乘 gamma**（现价移动造成的 gamma 变化不混进来）；另给不乘 gamma 的纯增量张数做对照。合约身份用 OCC 代码（SPX 与 SPXW 同日同价同方向是两张，只有代码分得开），重复的整组不收。
+  算不出留空、不当 0：上一拍没有这个合约 / 成交量变小（数据源修正）/ 缺成交量 / 增量 > 0 时缺 gamma / 身份重复 ⇒ 这一张不进并计数；某行权价一张都没进 ⇒ 那格空（有合约进了、增量为 0 才是真 0）。
+  整拍不可比的原因码唯一表 `REASONS`：进程刚启动（上一拍的逐合约成交量只在内存里）/ 跨日 / 内存里的上一拍不是文件最后一拍 / 换了取数源（CBOE ↔ yfinance）/ 上一拍没算出 / 拿不到原始链 / 出错。
+- `alphabot/service.py`：`take_snapshot` 经 `live(_on_raw=…)` 拿到**这次现算实际用的那份**原始链（事后读缓存可能已被页面的另一次现算换掉），
+  在快照每个视图写 `activity`（`[行权价, 加权活跃度, 成交量增量, 未进张数]` + counts / totals / since_ts）；只有**落了盘**的一拍才当下一拍的「上一拍」（`payload_unchanged` 不动它）；
+  出错不挡快照落盘（写 `exception`、计 `stats.activity_failures`、日志 warning），下一拍报「上一拍没算出」而不冒充「刚启动」。
+  `activity_gamma` 与 `strike_profile` 同一条 gamma 规则（CBOE gamma > 0 优先，否则 BS）。演示模式把合成链的全天成交量按合约各自节奏摊成随拍累计。
+- `intraday_heat.build`：`basis="activity"` / `"activity_volume"`（`ACTIVITY_BASES`）读快照里的活跃度，`signed: False`，只有「当前值」（逐拍差 ⇒ `activity_level_only`）；
+  不可比的拍记 `activity_missing`（旧快照 = `not_in_snapshot`），全天一拍都没有 ⇒ `no_activity`；接口回 `activity_reason_labels`。
+- 页面：口径切换加「成交活跃度」「活跃度（张）」（这两项不显示「逐拍变化」）；单色由浅到深；说明写明不是 State / Orderflow、gamma 加权偏向临近到期平值、哪几拍为什么空、没算进去的合约计数；帮助页加一条。
+
+### 验证
+- `tests/test_alphabot_intraday_activity.py` 34 条：call/put 不抵消、现价动无新成交 ⇒ 0、只给增量乘当前 gamma、零增量不要 gamma、各种剔除留空不当 0、SPX/SPXW 分开、
+  gamma 规则与 `strike_profile` 逐行权价相等（CBOE 路径与 BS 兜底都核）、快照用同一份链（两拍之间插一次页面现算）、重启 / 跨日 / 换源 / 非最后一拍 / 出错各自的原因、热力图读法与页面文案。
+  **11 个变异全红**（第一轮「不先用 CBOE gamma」漏网：合成链 gamma 本就是 BS 算的，测试改成把 CBOE gamma 换成与 BS 不同的值后才红）。
+- 真实 CBOE 链（NVDA / _SPX / SPY，只读）：合约身份 0 缺失 0 重复；假想上一拍下增量合计与期望逐位相等，只差 SPX 3 个缺 gamma 的合约（被剔除并计数）。
+- 真实盘中快照（11-02 NVDA 33 拍，都在本版之前拍的）：活跃度口径报 `no_activity`、每拍 `not_in_snapshot`。clockshift +7 / +45 天 0 条新红。
+- ⚠️ 没在浏览器里看过（本 worktree 起不了预览）；下一个扫描日生产克隆快进、重启 Alpha Bot 后，**第二拍起**才有活跃度。
 
 ## [0.45.697] — 2026-11-02 — Added：Buzz 三个价格通道的长历史样本外回测（预注册 + 留出期只跑一次）——留出期 4 个检验全部未检出
 
