@@ -5,7 +5,8 @@
 做什么
 ------
 把三本账**读到一张风险表上**，然后只做一件动作——用 SPY 股票把组合的 β·$Delta 拉回带内：
-    ① 股票纸面组合   paper_portfolio.POSITIONS_FILE      （只读，不改它）
+    ① 股票纸面组合   paper_portfolio.POSITIONS_FILE      （只读，不改它；**v0.45.701 起缺省不出行**，只进 NAV 分母——
+                                                          `CONFIG["hedge_stock_book"]`，用户 2026-11-03 定「对冲只管跨式」）
     ② 财报跨式腿     options_paper_leg.POSITIONS_FILE    （只读，不改它；两腿用 CBOE 重新报价）
     ③ 本模块自己的 SPY 覆盖账本  hedge_state/            （唯一会写的账本）
 逐行算 $Delta / β·$Delta / $Gamma(1% 移动) / $Vega(每 vol 点) / $Theta(每日)，按合并 NAV 折成百分比，
@@ -138,6 +139,12 @@ CONFIG = {
     # 每天按建仓价估算它的名义额与 % NAV 写进审计 `excluded_from_hedge`（日报 / 对冲页都看得到），别让它悄悄变大。
     # BILI：CBOE 里它的标的价 last_trade 恒落后一天、Twelve Data 当晚又不给当天那根 ⇒ 10-15、10-16 连两天只它一只缺价。
     "hedge_exclude_tickers": ["BILI"],
+    # SPY 覆盖看不看股票纸面组合（v0.45.701，用户 2026-11-03 定：**对冲只管跨式，不看纸面组合**）。
+    # False ⇒ 股票纸面组合的持仓**不出行**：不进 $Delta / 聚合 / 带位 / 压力表 / 尾部预算 / 影子闸，它缺价也不再让整天判「数据不全」；
+    # 合并 NAV（百分比的分母）**照旧含股票账的净值**——只换分子、不换分母，带宽 / 告警线的美元含义不变（净值取自净值文件，不取价）。
+    # ⚠️ 纸面组合的市场敞口因此**完全没有对冲**（此前它约占 β·$Delta 的几个百分点，2026-11-02 审计 +$5.5k / −$101.7k）。
+    # 改回 True = 恢复 v0.45.700 及以前的口径（三本账合起来对冲），要单独提交。
+    "hedge_stock_book": False,
     # ── 逐票 Delta 对冲（v0.45.526；规则与理由见 `delta_hedge.py`）──
     "delta_hedge_mode": "shadow",    # off | shadow（只算不成交，缺省）| paper（纸面成交，改这一行单独提交）
     "delta_hedge_band_pct": 3.0,     # 每只标的 |跨式腿净 $Delta + 对冲市值| 超过 NAV 的这么多 % 才动手（v1 主观常数）
@@ -807,6 +814,8 @@ def excluded_exposure(nav: Optional[float], stock_positions: Optional[List[Dict]
     excl = _excluded_tickers()
     if not excl:
         return None
+    if stock_positions is None and not CONFIG["hedge_stock_book"]:
+        stock_positions = []        # v0.45.701：股票账本来就不进对冲 ⇒ 被排除的股票仓也无所谓「被挡在外面」
     if stock_positions is None:
         import paper_portfolio as pp
         stock_positions = _load_jsonl(pp.POSITIONS_FILE)
@@ -1668,7 +1677,8 @@ def compute_day(as_of: str, closes_fn=None, quotes_fn=None, beta_fn=None) -> Dic
     spy_mark = _mark_from(closes_fn, CONFIG["hedge_instrument"], as_of)
     spy_price = spy_mark["price"]
     excl = _excluded_tickers()
-    stock_rows = stock_exposures(as_of, closes_fn=closes_fn, beta_fn=beta_fn, exclude=excl)
+    stock_rows = (stock_exposures(as_of, closes_fn=closes_fn, beta_fn=beta_fn, exclude=excl)
+                  if CONFIG["hedge_stock_book"] else [])     # v0.45.701：缺省不看股票纸面组合（见 CONFIG 注释）
     option_rows = option_exposures(as_of, quotes_fn=quotes_fn, beta_fn=beta_fn, closes_fn=closes_fn, exclude=excl)
     hedge_rows, today_trade = _hedge_rows_before_today(as_of, closes_fn, spy_price, spy_mark=spy_mark)
     nav_d = combined_nav_detail(as_of, closes_fn, spy_price=spy_price)
@@ -2108,7 +2118,8 @@ def _fmt_pct(v, nd=2) -> str:
 #: 对外展示的规则常量（Alpha Bot 对冲页 / 帮助页取这一份，不在前端另抄）
 PUBLIC_RULE_KEYS = ("beta_delta_band_pct", "beta_delta_target_pct", "rebalance_to", "hedge_instrument",
                     "vega_alert_pct", "gamma_alert_pct", "beta_window",
-                    "delta_hedge_mode", "delta_hedge_band_pct", "delta_hedge_rebalance_to", "delta_hedge_cost_bps")
+                    "delta_hedge_mode", "delta_hedge_band_pct", "delta_hedge_rebalance_to", "delta_hedge_cost_bps",
+                    "hedge_stock_book")
 
 
 def ledger_view(root=None) -> Dict:
@@ -2209,9 +2220,13 @@ def _excluded_line(ex: Optional[Dict]) -> str:
     bits = []
     for e in names:
         usd = e.get("stock_usd_est")
-        bits.append(f"{e['ticker']}（股票 {e.get('n_stock_positions', 0)} 笔"
-                    + (f"，按建仓价估 {_fmt_usd(usd)} / {_fmt_pct(e.get('stock_pct_nav_est'))} NAV" if usd is not None else "")
-                    + (f"；跨式 {e['n_straddles']} 笔" if e.get("n_straddles") else "") + "）")
+        part = []
+        if e.get("n_stock_positions"):
+            part.append(f"股票 {e['n_stock_positions']} 笔"
+                        + (f"，按建仓价估 {_fmt_usd(usd)} / {_fmt_pct(e.get('stock_pct_nav_est'))} NAV" if usd is not None else ""))
+        if e.get("n_straddles"):
+            part.append(f"跨式 {e['n_straddles']} 笔")
+        bits.append(f"{e['ticker']}（{'；'.join(part)}）")
     return "**不进对冲计算**（`hedge_exclude_tickers`，敞口仍在、SPY 覆盖不管）：" + "；".join(bits)
 
 
@@ -2276,7 +2291,9 @@ def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
 
     L = ["", "## 组合 Greeks 与对冲（观察项 + 纸面 SPY 覆盖）", ""]
     hedge_sh = sum(_num(r.get("qty")) or 0.0 for r in rows if r.get("kind") == "hedge")
-    L.append(f"截至 {as_of}：股票仓 {kinds.get('stock', 0)} 行 / 跨式腿合约 {kinds.get('option', 0)} 行 / "
+    stock_bit = (f"股票仓 {kinds.get('stock', 0)} 行" if CONFIG["hedge_stock_book"]
+                 else "股票纸面组合不进对冲（只对冲跨式）")
+    L.append(f"截至 {as_of}：{stock_bit} / 跨式腿合约 {kinds.get('option', 0)} 行 / "
              f"SPY 覆盖 {hedge_sh:+,.0f} 股（交易前）；合并 NAV "
              + (f"${nav:,.0f}" if nav is not None else f"不可得（缺：{', '.join(nav_d.get('missing') or ['?'])}）")
              + _spy_price_note(res)
