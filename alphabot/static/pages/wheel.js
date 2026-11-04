@@ -73,12 +73,13 @@ export async function renderWheel(root, alive) {
     h("p", { class: "lede" }, `纸面账本（模拟成交，不连券商）：${(r.universe || []).join(" / ") || "—"}。先卖 put（行权价 = 不高于接货价的最高合格档），到期收盘低于行权价就接货，`
       + "接货后卖 covered call，被叫走一圈结束；没有止损止盈。这是测量账本，不是检验，也不给任何推荐。")),
     helpLink("wheel"));
+  const tabs = h("p", { class: "small" }, h("b", {}, "账本"), "　·　", h("a", { href: "#/wheel/screen" }, "筛选：30 只标的里卖 put 好不好做 →"));
   if (!d.available && d.state_reason === "demo") {
-    fill(root, head, panel(null, {}, h("div", { class: "empty" }, "演示模式不展示这本账（合成数据不是它的记录）。")));
+    fill(root, head, tabs, panel(null, {}, h("div", { class: "empty" }, "演示模式不展示这本账（合成数据不是它的记录）。")));
     return;
   }
   if (!d.available) {
-    fill(root, head, panel(null, {}, h("div", { class: "empty" }, "接货型卖 put 账本还没开：每日扫描跑过一次才会有（数据根里还没有 sell_put_state/）。"),
+    fill(root, head, tabs, panel(null, {}, h("div", { class: "empty" }, "接货型卖 put 账本还没开：每日扫描跑过一次才会有（数据根里还没有 sell_put_state/）。"),
       h("p", { class: "small muted" }, `原因：${d.state_reason || "—"}。桌面程序用 --reset 重选数据根；终端运行要设 ALPHA_HIVE_HOME。`)));
     return;
   }
@@ -95,7 +96,7 @@ export async function renderWheel(root, alive) {
     kpi("收益", sPct(a.return_pct, 2), tone(a.return_pct)),
     kpi("现金", money(a.cash, 0)), kpi("put 担保占用", money(a.reserved_puts, 0)),
     kpi("持股市值", money(a.shares_value, 0)), kpi("累计权利金", money(d.kpis?.premium_collected_usd, 0)));
-  fill(root, head, ...warns.map((w) => h("p", { class: "callout warn" }, w)), kpis,
+  fill(root, head, tabs, ...warns.map((w) => h("p", { class: "callout warn" }, w)), kpis,
     skippedBits.length ? h("p", { class: "small muted" }, `今天没开 / 没卖的：${skippedBits.join("；")}`) : null,
     lotsPanel(d), benchmarkPanel(d), eventsPanel(d),
     h("p", { class: "note small muted" }, "成交一律按 bid（保守）、未到期的腿按 mid 盯市，所以刚开仓那天净值会比起始略低（点差）。"

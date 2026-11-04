@@ -97,7 +97,7 @@ make -C ~/alpha-hive-prod alphabot-demo
 | 盘中 | 关注列表在交易时段定时拍快照，看水平怎么移动（只看单日） | `#/help/intraday` |
 | 跨式 | 财报跨式纸面账本：持仓、平仓、逐仓风险、盘中参考报价（只读） | `#/help/straddle` |
 | 对冲 | 组合 Greeks 的纸面 SPY 覆盖账本（只读） | `#/help/hedge` |
-| 接货 | 接货型卖 put 纸面账本（XOM / WMT / NVDA）：持仓、到期、被行权、covered call、与两条基准并排（只读） | `#/help/wheel` |
+| 接货 | 接货型卖 put 纸面账本（XOM / WMT / NVDA）：持仓、到期、被行权、covered call、与两条基准并排；右上「筛选」子页：30 只标的里卖 put 好不好做的客观事实（只读，不排名、不推荐） | `#/help/wheel` |
 | 账本 | 卖权前向账本的预注册检验就绪度（只看样本量与计数，不看结果） | `#/help/ledger` |
 | 结果 | 预注册检验冻结后的结果；冻结前只说为什么锁着、还差多少 | `#/help/results` |
 | 口径 | 单位、符号约定、证据等级、路由冻结规则、收益口径、局限 | `#/help/limits` |

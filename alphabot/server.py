@@ -169,6 +169,19 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         return svc.wheel()
 
     @api
+    def wheel_screen(request):
+        return svc.wheel_screen(scope=_q(request, "scope") or "watch")
+
+    @api
+    def wheel_screen_prices(request):
+        return svc.wheel_screen_prices([t for t in (_q(request, "tickers") or "").split(",") if t.strip()],
+                                       force=_q(request, "force") == "1")
+
+    @api
+    def wheel_screen_chain(request):
+        return svc.wheel_screen_chain(request.path_params["ticker"])
+
+    @api
     def hedge_tail(request):
         return svc.tail_hedge(force=_q(request, "force") == "1")
 
@@ -250,6 +263,9 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/straddle", straddle),
         Route("/api/hedge", hedge),
         Route("/api/wheel", wheel),
+        Route("/api/wheel/screen", wheel_screen),
+        Route("/api/wheel/screen/prices", wheel_screen_prices),
+        Route("/api/wheel/screen/chain/{ticker}", wheel_screen_chain),
         Route("/api/hedge/tail", hedge_tail),
         Route("/api/hedge/beta", hedge_beta),
         Route("/api/straddle/live/{ticker}", straddle_live),
