@@ -1278,6 +1278,19 @@ class AlphaHiveDailyReporter:
         except Exception as e:
             _log.warning("期权纸面腿更新失败(非致命): %s", e)
 
+        # ── v0.45.720: 接货型卖 put 纸面账本（XOM / WMT / NVDA；先卖 put、被行权接货后卖 covered call）──
+        # 独立账本（`PATHS.sell_put_state`），**不进评分、不进对冲、不碰卖权选择器 / 跨式账本**；规则冻结在
+        # experiments/sell_put_wheel_prereg.md。链走 `fetch_cboe_raw_contracts` 的进程缓存（本轮前面的步骤已拉过 ⇒ 零额外网络）。
+        # 失败在源头登记（`sell_put_wheel.stats()` → scan_timing → alert_manager P2）；这里只吞成 WARNING，不拖死日报。
+        try:
+            import sell_put_wheel as _spw
+            _spw_result = _spw.run_for_date(self.date_str)
+            _log.info("接货型卖 put 账本已更新: %s (NAV %s / 事件 %d / 没开 %d / 结算延期 %d)", self.date_str,
+                      (_spw_result or {}).get("nav", "?"), len((_spw_result or {}).get("events") or []),
+                      len((_spw_result or {}).get("skipped") or []), len((_spw_result or {}).get("deferred") or []))
+        except Exception as e:
+            _log.warning("接货型卖 put 账本更新失败(非致命): %s", e)
+
         # ── v0.45.102: 方差风险溢价（VRP）信号 —— 只记录与结算，不下注 ──
         # 读当日 options_snapshot 的 iv_raw_observed / rv_30d 记一行 IV−RV，再给
         # 21 个交易日前的旧行回填事后 RV。逐票时序、闸门 63 条；同日重跑幂等。

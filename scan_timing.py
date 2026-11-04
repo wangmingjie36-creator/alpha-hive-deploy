@@ -131,7 +131,7 @@ def counters() -> Dict[str, Optional[dict]]:
                                       "options_snapshot": None, "hv_gap": None,
                                       "portfolio_greeks": None, "paper_portfolio": None,
                                       "ledger_io": None, "history_fill": None,
-                                      "strangle_shadow": None, "stock_fetch_legacy": None,
+                                      "strangle_shadow": None, "stock_fetch_legacy": None, "sell_put": None,
                                       "event_rows": None, "yf_daily": None,
                                       "price_nonfinite": None, "macro_context": None}
     try:
@@ -196,6 +196,12 @@ def counters() -> Dict[str, Optional[dict]]:
         out["strangle_shadow"] = straddle_strangle_shadow.stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("strangle_shadow stats 不可得: %s", e)
+    try:
+        import sell_put_wheel
+        # v0.45.720：接货型卖 put 账本的源头计数（整轮抛 / 全部标的取不到链 / 结算延期天数）；`_check_sell_put` 读它
+        out["sell_put"] = sell_put_wheel.stats()
+    except Exception as e:  # noqa: BLE001
+        _log.debug("sell_put stats 不可得: %s", e)
     try:
         from swarm_agents import cache as _swarm_cache
         # v0.45.639：data_pipeline 坏了时取数改走 cache.py 旧回落的次数（此前一个 `except ImportError: pass` 吞掉、不留痕）；

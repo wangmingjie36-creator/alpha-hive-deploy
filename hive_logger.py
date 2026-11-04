@@ -209,6 +209,18 @@ class _HivePaths:
         return self.home / "sell_strike_state"
 
     @property
+    def sell_put_state(self) -> Path:
+        """接货型卖 put 纸面账本目录（v0.45.720，`sell_put_wheel`）。
+
+        写：`sell_put_wheel.run_for_date`（`lots.jsonl` 当前持仓 / `events.jsonl` 卖出·作废·接货·被叫走 /
+            `equity_curve.jsonl` 每日净值 / `meta.json` 现金与最近一次运行的跳过原因），一律走 `ledger_io`。
+        读：`sell_put_wheel.load_state` / `kpis`、Alpha Bot 只读页。
+        调用时求值（读 `ALPHA_HIVE_HOME`）——不要在消费方存成模块级常量。不建目录：写入方自己 `mkdir`；
+        只读方看到目录不存在要说「账本还没开」，不许说成「账本为空」。
+        """
+        return self.home / "sell_put_state"
+
+    @property
     def alphabot_state(self) -> Path:
         """Alpha Bot（卖权选择器的本机前端）自己的状态目录（v0.45.388）。
 

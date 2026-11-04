@@ -1258,6 +1258,43 @@ def _isolate_sell_strike_state(_isolate_env, request, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_sell_put_state(_isolate_env, request, tmp_path):
+    """接货型卖 put 账本目录（v0.45.720，`sell_put_wheel`）的两道防线，写法同 `_isolate_sell_strike_state`。
+
+    ① setup 正面核对：`PATHS.sell_put_state` 与账本自己的解析器 `sell_put_wheel._state_dir()` 此刻都是绝对路径、
+       且（词法上）落在本测试的 tmp 沙箱里——被冻成模块级常量时这一道会在**每一条**测试上红。
+    ② teardown 比对真身指纹：checkout 根与 pytest 调用目录下的 `sell_put_state/`（stat 口径）。
+       兜住任何绕过 ① 的写法（硬编码路径 / `__file__` 派生 / subprocess 丢了 env）。"""
+    import hive_logger
+
+    real_dirs = {pathlib.Path(hive_logger.__file__).resolve().parent / "sell_put_state",
+                 pathlib.Path(request.config.invocation_params.dir).resolve() / "sell_put_state"}
+    before = {p: _artifact_signature(str(p)) for p in real_dirs}
+    resolved = {"PATHS.sell_put_state": hive_logger.PATHS.sell_put_state}
+    try:
+        import sell_put_wheel as _spw
+    except Exception:  # pragma: no cover - 模块坏了由它自己的测试报红，这里只核 PATHS
+        _spw = None
+    if _spw is not None:
+        resolved["sell_put_wheel._state_dir()"] = _spw._state_dir()
+    for name, raw in resolved.items():
+        p = pathlib.Path(raw)
+        assert p.is_absolute(), f"{name} 解析成了相对路径 {raw!r}：生产从仓库根跑会写穿仓库根"
+        assert pathlib.Path(os.path.normpath(p)).is_relative_to(tmp_path), (
+            f"{name} = {p} 逃出了测试沙箱（应在 {tmp_path} 内）——被冻成模块级常量了？改成调用时读 `PATHS.sell_put_state`。")
+    request.config._alpha_hive_sell_put_guard_checked = {k: str(pathlib.Path(v)) for k, v in resolved.items()}
+    if _spw is not None:
+        _spw.reset_stats()          # 源头计数是进程级的：一条测试跑了账本，之后每条测试读 scan_timing 都会看到它
+    yield
+    if _spw is not None:
+        _spw.reset_stats()
+    touched = sorted(str(p) for p in real_dirs if _artifact_signature(str(p)) != before[p])
+    assert not touched, (
+        f"测试写到了**真身** sell_put_state/：{touched}。路径已由 `PATHS.sell_put_state` 调用时求值指向 tmp，"
+        "还能写到真身说明有绕过它的写入路径——去把那条路径接到 `sell_put_wheel._state_dir()` 上，不要在这里放行。")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_alphabot_state(_isolate_env, tmp_path):
     """Alpha Bot 状态目录（v0.45.388）防线①：`PATHS.alphabot_state` 此刻是绝对路径且在本测试沙箱里。
     防线②（真身指纹）由仓库根默认拒绝总闸与真实数据根总闸（`_guard_real_data_root`）兜住。

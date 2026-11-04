@@ -75,6 +75,8 @@ MOVE_DIRS = (
     "migrations_state",
     # v0.45.568 H1 原始观测档案（扫描那一刻的 Reddit 榜 / 新闻条目 / 热搜表 / F&G，不可重取）
     "observation_archive",
+    # v0.45.720 接货型卖 put 纸面账本（当天报价事后拿不回来，不可重取）
+    "sell_put_state",
     # 向量库 / 日志 / 备份轮转
     "chroma_db", "logs", "db_backups",
     # 缓存：可重建，但冷缓存会引发 yfinance 限流（头号数据丢失原因）⇒ 一并带走
