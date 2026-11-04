@@ -637,7 +637,7 @@ out.fired = fire(); out.runs = runs;
 class TestDocsAndScope:
     def test_only_the_alpha_bot_layer_uses_the_new_gate_helpers(self):
         """`is_rate_limited` / `retry_after_sec` 是给 Alpha Bot 的失败后处理用的；生产扫描路径不依赖它们（没动它的行为）。
-        v0.45.709 加 `alpha_hive_mcp.py`：对话用的独立 MCP 进程（不被任何生产模块 import），限流时报「几秒后再试」，与 Alpha Bot 同类。"""
+        v0.45.709 加 `alpha_hive_mcp.py`：对话用的独立 MCP 进程（不被任何生产模块 import），限流时报「几秒后再试」，与 Alpha Bot 同类。v0.45.722 加 `alphabot/wheel_prices.py`：接货筛选页的日线取数，限流后带 `retry_after_sec` 返回（与 beta_long 同）。"""
         skip = {"tests", "experiments", "_archive"}
         users = set()
         for p in ROOT.rglob("*.py"):
@@ -648,7 +648,7 @@ class TestDocsAndScope:
             if re.search(r"\b(is_rate_limited|retry_after_sec)\b", src) and rel.as_posix() != "yf_gate.py":
                 users.add(rel.as_posix())
         assert users == {"alphabot/yf_chain.py", "alphabot/beta_long.py", "alphabot/service.py", "alphabot/hedge.py",
-                         "alpha_hive_mcp.py"}, users
+                         "alphabot/wheel_prices.py", "alpha_hive_mcp.py"}, users
 
     def test_the_gate_still_has_one_cooldown_and_no_retry_loop(self):
         """闸门的原则是「429 = 现在就停，不是再试试」：代码里（不看 docstring 的字眼）没有 sleep 调用、没有 while 循环。"""
