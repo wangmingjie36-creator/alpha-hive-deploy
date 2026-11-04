@@ -5,7 +5,10 @@
 
 ---
 
-## [0.45.718] — 2026-11-04 — 占位（进行中：删除过时的 MCP_INSTALL_GUIDE.md）
+## [0.45.718] — 2026-11-04 — Removed：过时的 `MCP_INSTALL_GUIDE.md`
+
+### Removed
+- `MCP_INSTALL_GUIDE.md`：讲的是安装 `mcp-servers/` 下五个第三方 MCP（optionsflow / yahoo-finance / finance-tools / shareseer / maverick）。五个目录已于 11-03 / 11-04 移到废纸篓（v0.45.707 起也不再被 git 跟踪）：都没接上过，有用的那部分（财报 / 分析师 / 持仓 / 分红拆股）已由 v0.45.709 并进 `alpha_hive` MCP。全仓（除 CHANGELOG）无引用；`.gitignore` 的 `/mcp-servers/` 保留。
 
 ## [0.45.717] — 2026-11-04 — 占位（进行中：扫描 yfinance 源末根不是最近一场已收盘交易日时当取不到——11-03 入库价全是 11-02 收盘）
 
