@@ -7,7 +7,22 @@
 
 ## [0.45.714] — 2026-11-04 — 占位（进行中：冬令时后扫描撞收盘——补跑闸改按美东收盘判，plist 触发移到本机 15:00）
 
-## [0.45.713] — 2026-11-04 — 占位（进行中：Alpha Bot 出站接代理探活——.app 启动无代理变量、yfinance 直连被 Yahoo 掐）
+## [0.45.713] — 2026-11-04 — Fixed：Alpha Bot 出站接代理探活——从 .app 启动时 yfinance 走直连、直连出口被 Yahoo 掐（备用源 NVDL / BILI、250 日 β 长期 429 的根因）
+
+### Fixed
+- **根因**：从 `Alpha Bot.app` 起的服务继承 launchd 环境，没有 `HTTPS_PROXY`；yfinance 1.2 用 curl_cffi，不读 macOS 系统代理 ⇒ 直连；直连出口被 Yahoo 掐（编排器 08-29 起就因此探活走代理，Alpha Bot 没有）。2026-11-04 同一时刻各起新进程、新 cookie 缓存：带代理变量 `Ticker("NVDL").options` 通，去掉就 429；生产 Alpha Bot 当天 07:31 起每 10 分钟 1 个请求、全 429，重启照旧。10-27 / 28「谁在耗额度日志里查不出」的答案是没人在耗：终端里开的排查进程带代理所以通。
+- `alphabot/outbound.py`（新）：启动时定出站方式——环境已有代理变量 ⇒ 原样（`inherited`）；`ALPHA_HIVE_PROXY=none` ⇒ 不探（`disabled`）；否则探 `ALPHA_HIVE_PROXY`（缺省 `http://127.0.0.1:7897`，与编排器同址同法：端口可连 + 经它连 `https://cdn.cboe.com/`）——通 ⇒ 导出 `HTTP(S)_PROXY` 并把回环并进 `NO_PROXY`（`proxy`）；不通 ⇒ **环境不改**（`unchanged`，保持原出站路径），WARNING 日志 + `/api/meta.outbound` + 页面顶部「未走代理」横幅。
+- `alphabot/__main__.py`：非演示模式在建 `AlphaBotService` **之前**调它（yfinance 会话在第一次取数时建）；演示模式不探。`server.create_app` 新增 `outbound=` 参数、`/api/meta` 原样报出。
+- ⚠️ 只在启动时探一次（不在运行中改环境）：代理晚于 Alpha Bot 起来 ⇒ 横幅提示重启。每日扫描不受影响（编排器本来就探活走代理）。
+
+### Changed
+- 帮助页「Yahoo 正在限流」一条补上根因与横幅；CLAUDE.md 的 yfinance 备用源指针更正「查不出谁在耗」。
+
+### 验证
+- `tests/test_alphabot_outbound.py` 19 条（离线：假探活 + 本机回环端口真探活两种失败形状 + 启动顺序 + `/api/meta` + 横幅模式名对账）；变异 8 个全杀。
+- 实测：以 `env -i`（同 launchd 无代理变量）起本分支 Alpha Bot（8799）⇒ `mode=proxy`，`/api/live/NVDL` 经 yfinance 备用源取到（OI 占比 0.9948）——同一时刻生产 Alpha Bot（直连）仍 429；`ALPHA_HIVE_PROXY=http://127.0.0.1:1` 起（8798）⇒ `unchanged`、页面横幅显示、控制台无错。
+- ⚠️ 生产 Alpha Bot 要等扫描日生产克隆快进后**重启**才用上。
+
 
 ## [0.45.712] — 2026-11-04 — 占位（进行中：维度 IC 预注册修订 5，H1 冻结到观测层 + H2 降为描述项）
 
