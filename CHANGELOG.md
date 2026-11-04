@@ -7,7 +7,15 @@
 
 ## [0.45.716] — 2026-11-04 — 占位（进行中：扫描撞 yfinance 429 冷却时，标的开跑前等冷却结束（整轮限时），不再让冷却期内的二十几只标的全丢 iv_rank / 异常流）
 
-## [0.45.715] — 2026-11-04 — 占位（进行中：v0.45.713 二次检查——只设 http_proxy 时误判「已有代理」、帮助页抄了代理地址）
+## [0.45.715] — 2026-11-04 — Fixed：v0.45.713 二次检查——只设 `http_proxy` 时误判「已有代理」（Yahoo 照样直连 429）；帮助页抄了代理地址
+
+### Fixed
+- `alphabot/outbound.py`：「环境已有代理 ⇒ 原样不动」原先把 `HTTP_PROXY` / `http_proxy` 也算进去。libcurl（curl_cffi）对 https URL 只认 `https_proxy` / `all_proxy`——11-04 实测只设 `http_proxy`（或 `HTTP_PROXY`）时 yfinance 照样直连、`YFRateLimitError`，只设 `ALL_PROXY` 则通。现只认 `HTTPS_PROXY_VARS`（HTTPS / ALL 两对）；只有 http 代理时照常探活、补上 https 那半，已有的 http 代理原样保留。修后同一场景实测 `mode=proxy`、NVDL 12 个到期日。
+- 帮助页「Yahoo 正在限流」一条写死了缺省代理地址（`TestHelpPage` 说的事故 ②：帮助页自抄会变的常量），改成「与每日扫描同一个地址」，实际地址由页面横幅写出。
+
+### 验证
+- `tests/test_alphabot_outbound.py` 新增 3 条（只设 http 代理 ×2 不算已有代理且原值保留、HTTPS 覆盖变量集合钉住）；两个新变异全杀。
+
 
 ## [0.45.714] — 2026-11-04 — Fixed：冬令时后每日扫描在美东收盘那一刻开跑——补跑闸改按美东钟判（16:30 ET），launchd 触发移到本机 15:00
 

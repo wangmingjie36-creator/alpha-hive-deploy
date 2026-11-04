@@ -27,13 +27,26 @@ class _Probe:
 
 
 class TestConfigure:
-    @pytest.mark.parametrize("var", ob.PROXY_VARS)
+    @pytest.mark.parametrize("var", ob.HTTPS_PROXY_VARS)
     def test_inherited_proxy_left_alone_and_not_probed(self, var):
         env = {var: "http://10.0.0.1:1"}
         p = _Probe("不该被调")
         st = ob.configure(env, probe=p)
         assert st["mode"] == "inherited" and st["proxy"] == "http://10.0.0.1:1"
         assert p.calls == [] and env == {var: "http://10.0.0.1:1"}
+
+    @pytest.mark.parametrize("var", ["HTTP_PROXY", "http_proxy"])
+    def test_http_only_proxy_is_not_enough(self, var):
+        """只设 http 代理：Yahoo 是 HTTPS，照样直连（11-04 实测 429）⇒ 必须照常探活并补上 https 那半，http 的原样留着。"""
+        env = {var: "http://10.0.0.1:1"}
+        p = _Probe(None)
+        st = ob.configure(env, probe=p)
+        assert p.calls == [ob.DEFAULT_PROXY] and st["mode"] == "proxy"
+        assert env["HTTPS_PROXY"] == env["https_proxy"] == URL
+        assert env[var] == "http://10.0.0.1:1"
+
+    def test_all_proxy_names_cover_https_in_libcurl_terms(self):
+        assert set(ob.HTTPS_PROXY_VARS) == {"HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"}
 
     @pytest.mark.parametrize("val", ["none", "NONE", " none "])
     def test_explicit_none_disables(self, val):
