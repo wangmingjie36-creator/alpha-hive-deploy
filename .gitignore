@@ -125,6 +125,8 @@ sell_strike_state/
 # v0.45.388 Alpha Bot（卖权选择器本机前端）自己的状态：设置 + 盘中快照。私有、不上网站；
 # 耐久性靠 data_backup/export.py 的 STATE_DIRS。守卫：tests/test_alphabot.py。
 alphabot_state/
+# v0.45.720 接货型卖 put 纸面账本（`sell_put_wheel`）：私有、不上网站；耐久性靠 data_backup/export.py 的 STATE_DIRS。
+sell_put_state/
 
 # ==================== Claude Code worktrees ====================
 # v0.45.124：`.claude/worktrees/` 是**每台机器各自的**临时 checkout，不该进版本库。
@@ -168,6 +170,7 @@ alphabot_state/
 /reports/
 /sell_strike_state/
 /alphabot_state/
+/sell_put_state/
 /replay_ohlc_state/
 /migrations_state/
 /observation_archive/
