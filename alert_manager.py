@@ -1299,6 +1299,43 @@ class AlertAnalyzer:
                 ["history_fill", "data_quality"]
             ))
 
+        # v0.45.717：yfinance 源末根早于最近一场已收盘交易日（拒给）/ 日历判不了（放行）。
+        yt = base.get("yf_tail")
+        if isinstance(yt, dict) and yt:
+            refused = sorted(t for t, v in yt.items() if (v or {}).get("refused"))
+            unjudged = sorted(t for t, v in yt.items() if not (v or {}).get("refused"))
+            if refused:
+                ends = sorted({f"末根 {(yt[t] or {}).get('last_bar')} → 应有 {(yt[t] or {}).get('expected')}"
+                               for t in refused})
+                details = {
+                    "标的": _names(refused),
+                    "日线末端": "；".join(ends),
+                    "处置": "yfinance 源这些票当取不到，改用后面的源（Finnhub / Alpha Vantage / CBOE 盘中价）——没有拿前一场收盘当现价",
+                    "影响": "这些票的现价不是 yfinance 日线收盘（看 predictions 的 price_source）；动量 / 量能 / 波动率由出口回落给，"
+                            "窗口可能慢一个场次（见同日「动量窗口滞后」）",
+                    "建议": "整批出现 ⇒ 多半是扫描开跑太早、Yahoo 还没出当天日线（2026-11-03 美东 16:00 开跑，30 只全中）："
+                            "看编排器日志开跑时刻与补跑闸；个别票 ⇒ 查该票的 Yahoo 日线是否停更",
+                }
+                if not has_scored:
+                    details["口径"] = "没有评分时的快照（at_scoring）——按进程内最后一次取数判"
+                self.alerts.append(Alert(
+                    AlertLevel.MEDIUM,
+                    f"📊 【P2 中】yfinance 日线缺最近一场：{len(refused)} 只改用其它源（没拿前一场收盘当现价）",
+                    details,
+                    ["history_fill", "data_quality"]
+                ))
+            if unjudged:
+                self.alerts.append(Alert(
+                    AlertLevel.MEDIUM,
+                    f"📊 【P2 中】判不了 yfinance 日线是否到最近一场：{len(unjudged)} 只（交易日历不可用，按旧行为放行）",
+                    {
+                        "标的": _names(unjudged),
+                        "影响": "这些票若 Yahoo 还没出当天日线，现价可能是前一场收盘（11-03 那种），本轮无法排除",
+                        "建议": "看 alpha_hive.log 里 is_trading_day / bars_integrity 的导入或日历错误",
+                    },
+                    ["history_fill", "data_quality"]
+                ))
+
         if not has_scored:
             return
         after = _missing(hf)

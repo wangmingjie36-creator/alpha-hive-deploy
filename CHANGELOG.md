@@ -26,7 +26,47 @@
 ### Removed
 - `MCP_INSTALL_GUIDE.md`：讲的是安装 `mcp-servers/` 下五个第三方 MCP（optionsflow / yahoo-finance / finance-tools / shareseer / maverick）。五个目录已于 11-03 / 11-04 移到废纸篓（v0.45.707 起也不再被 git 跟踪）：都没接上过，有用的那部分（财报 / 分析师 / 持仓 / 分红拆股）已由 v0.45.709 并进 `alpha_hive` MCP。全仓（除 CHANGELOG）无引用；`.gitignore` 的 `/mcp-servers/` 保留。
 
-## [0.45.717] — 2026-11-04 — 占位（进行中：扫描 yfinance 源末根不是最近一场已收盘交易日时当取不到——11-03 入库价全是 11-02 收盘）
+## [0.45.717] — 2026-11-04 — Fixed：扫描 yfinance 源末根早于「最近一场已收盘交易日」时当取不到——11-03 入库的 30 个现价全是 11-02 收盘
+
+**事故（2026-11-03）**：冬令时后本机 14:00 = 美东 16:00（v0.45.714 已改时），扫描在收盘那一刻开跑。CBOE 29 只是盘中生成的文件 ⇒ 正确地交给 yfinance；
+Yahoo 还没出 11-03 日线 ⇒ 末根是 11-02。`_drop_forming_bar` 只防「末根是今天且还没收」，`_completed_bar_close` 只证「末根已收」，**都不问「是不是最近一场」**
+⇒ predictions 11-03 的 30 个 `price_at_predict` **逐只等于 11-02 收盘**（与现在落定的 11-03 官方收盘比：ENPH −8.2%、RKLB −4.3%、CRCL −4.2%、DELL −3.8%，0/30 一致；
+对照 10-30 30/30 一致、11-02 28/30），动量 / 量比 / 波动率窗口同样止于 11-02。`session_close` 也标成 11-02 ⇒ v0.45.699 的滞后判据看着「对齐」，**没有任何告警**。
+仓库里本有「最近一场缺了」的判据（`yf_daily`，v0.45.652/658），但扫描主路径经 `observation_layer.yf_history` 直调 `.history(`、不经 `yf_daily`。
+
+### Fixed
+- `data_pipeline.YFinanceSource.fetch`：`_drop_forming_bar` 之后新增 `_yf_tail_gap`——末根 < 最近一场已收盘交易日 ⇒ 本源这只票当取不到（WARNING），交下一个源
+  （Finnhub / Alpha Vantage，再不行退 CBOE 盘中价并标 degraded），同 v0.45.645 公司行动空行的处置。
+  - 「此刻」读交易所时钟 `_exchange_now`（SPY 最后一根分钟线），与 `_drop_forming_bar` / `_completed_bar_close` **同一只钟**；收盘后它恒为该场最后一分钟，
+    加 1 分钟交给「最近一场」的唯一实现 `yf_daily.latest_completed_session(now=…)`，不另写判据（提前收盘日 12:59 + 1 = 13:00 同样成立）。
+  - 时钟 / 日历判不了 ⇒ **放行**（旧行为，同 `_drop_forming_bar`「任何异常原样返回」），但记 `calendar_unavailable`。
+  - **不记熔断失败**（同 CBOE 盘中陈旧文件）：个别票晚出时，连撞 3 只会把健康标的一起挡掉。
+- 可见性：`history_fill_stats()` 新增 `yf_tail`（ticker → `{last_bar, expected, reason, refused}`，按标的最近一次 yfinance 取数记；评分快照 `at_scoring` 带着、模板含空键）；
+  `alert_manager._check_history_fill` 新增 P2「yfinance 日线缺最近一场：N 只改用其它源」与 P2「判不了 yfinance 日线是否到最近一场」；旧计数没这个键 ⇒ 静默。
+- `signal_code_fingerprints.ACKS`：`price.fields` 指纹 `84596e6253ecda14` 登记 `measurement_fix`（**用户 2026-11-04 在对话里选**）——修的是原始输入的场次错位，
+  函数不换；正常日子交给下游的值逐位不变。不登记边界（修订 4 起该单元本也只截断描述项 buzz_v1，不截断 H1）。
+
+### Tests
+- `tests/test_yf_latest_session.py`（16 条，离线；读钟只有 `_exchange_now`，全部钉住）：11-03 形状被拒；对齐照用（价 / session_close = 11-03）；盘中末根 = 前一场不误拒；
+  周末周五末根照用；提前收盘日两种；时钟判不了放行且记录；连拒 5 只后熔断仍放行；后一次对齐清掉、reset 清掉；经 MultiSourceFetcher 出口是下一个源、价不是 11-02 收盘；
+  评分快照冻结；告警两种 + 干净静默 + 旧计数静默。
+- 变异 6 种全红：不拒（4 红）、记熔断（1）、不加 1 分钟（7）、改读墙钟（3）、删告警（2）、统计不带键（7）。
+- ⚠️ 第一版读的是墙钟（`latest_completed_session()` 缺省）——既有 YFinanceSource 测试的夹具日期在过去，14 条立刻红（夹具日期与真实钟比，时间炸弹形状）；
+  改读已被这些测试钉住的交易所时钟后 269 条照绿，三道判据也从此同钟。
+- `tests/test_signal_code_fingerprints.py` 81 passed；ruff 通过。
+
+### 生产数据修正（用户 2026-11-04 在对话里定「回填正确的入场价」）
+- 走既有工具 `close_correction.py --since 2026-11-03`（修「有价但价不对」的行；`entry_price_backfill.py` 只管价为 0 的行，不适用）：
+  dry-run 30 条需校正、30 条经 CBOE 交叉印证（11-04 快照的 `prev_day_close`，归属由 `last_trade_time` 自证）、0 条两源分歧、无别的日期；随后 `--apply`。
+- 写前 sqlite `backup()`：`~/alpha-hive-data/_manual_backups/pheromone.db.bak-close-correction-1103-20261104-104220`（2403 行，integrity ok）。
+- 写后逐行比对全表：**只有 11-03 的 30 行变了**，每行恰好 4 列（`price_at_predict` / `price_at_predict_raw` / `close_corrected_at` / `close_correction_source=yfinance_close+cboe_close`）；
+  `price_at_predict_raw` = 原值（11-02 收盘）30/30；新值与 yfinance 11-03 收盘 30/30 一致（≤0.01%）。
+- 派生列（`checked_t1/t7/t30` 都为 0，T+1 尚未算）不用重算：下一次回测按新基准正常算。
+
+### 未做 / 待验证
+- `signal_archive` 里 11-03 的 `price.*`（动量 / 量比 / 波动率，窗口止于 11-02）**未改写**；入场价之外的展示（网站 / ML 报告里的 11-03 现价）也没改。
+- 「入库价 vs 真实收盘」的单日闸 `scan_coverage_gate.check_prices` 只在显式 `--check-prices` 时跑、编排器不传；且收盘那一刻跑也取不到当天收盘 ⇒ 11-03 没有任何一道闸能抓住。次日核对前一扫描日入场价的观测点仍缺。
+- 下游源（Finnhub）收盘后给的是否就是官方收盘未逐只核过；交给 CBOE 盘中价那一支已有 degraded 标记。
 
 ## [0.45.716] — 2026-11-04 — Fixed：扫描撞上 yfinance 429 冷却时，标的开跑前先等冷却结束（整轮限时 600s），不再让冷却期内开工的二十几只标的全丢 iv_rank / 异常流
 

@@ -391,6 +391,14 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "修订 5 登记时（v0.45.712）的冻结通道层：sentiment_channels 改为按溯源地址判断有没有数据（不读生产的 expected），"
      "并加执行器入口 buzz_v1.h1_channels。等价性：10-20 至 11-03 共 330 行，四个情绪通道「expected 为真 ⇔ 地址在」无反例，"
      "重算值与存档值逐位相等 ⇒ 这次改动不改变任何已有 H1 取值"),
+    # v0.45.717：YFinanceSource 末根早于最近一场已收盘交易日 ⇒ 本源当取不到（_yf_tail_gap / _record_yf_tail）
+    ("price.fields",    "84596e6253ecda14", "measurement_fix",
+     "v0.45.717：YFinanceSource 在 _drop_forming_bar 之后比对末根与最近一场已收盘交易日（交易所时钟 _exchange_now + 1 分钟 "
+     "交给 yf_daily.latest_completed_session）；末根更早 ⇒ Yahoo 还没出那一场，本源不给、交下一个源（判不了照旧放行并计数）。"
+     "修的是原始输入的测量误差：2026-11-03 美东 16:00 开跑，30 只的现价全是 11-02 收盘（场次错位，ENPH −8.2%），动量窗口同样止于 11-02；"
+     "函数本身不换——末根就是最近一场的正常日子，交给下游的值逐位不变（tests/test_yf_latest_session.py::test_aligned_bar_is_used，"
+     "既有 YFinanceSource 测试 269 条不改照绿）。11-03 那天是否隔离另由人定（坏日子走 QUARANTINE）。"
+     "**用户 2026-11-04 在对话里选 measurement_fix**；不登记边界"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change", "coverage"})
