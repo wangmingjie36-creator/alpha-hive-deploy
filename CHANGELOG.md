@@ -5,7 +5,21 @@
 
 ---
 
-## [0.45.719] — 2026-11-04 — 占位（进行中：v0.45.716 二次检查——「等待不发请求」那条测试恒真，改成结构判定）
+## [0.45.719] — 2026-11-04 — Fixed：v0.45.716 二次检查——「等待不发请求」那条测试恒真，改成结构判定；其余核对无问题
+
+二次检查覆盖以下几项，**无问题**：
+- 测试间冷却泄漏：整套跑一遍、每条测试结束时探测 `yf_gate._cooldown_until`。只有 `test_alpha_hive_mcp_fundamentals.py` 的 9 条
+  结束时仍在冷却，该文件用 `monkeypatch.setattr(yf_gate, "_cooldown_until", 0.0)` 还原，不会让后面跑扫描的测试真睡 180s。
+- 标的层超时：`_run_pool` 的 `future.result(timeout=180)` 只作用于 `as_completed` 已完成的 future，永不超时 ⇒ 等待不会让标的被重复分析。
+- 生产路径只有 `run_swarm_scan` 一处构造 `_SwarmContext`、一处调 `_analyze_single_ticker`；闸门没装时冷却截止恒为 0，不等。
+- 被拒的冷却段不记账 ⇒ 后来的标的在剩余变短时会重新判、可能转为等待——设计内，不重复扣。
+
+### Fixed
+- `tests/test_yf_cooldown_wait.py::test_never_issues_requests`：原来比较 `yf_gate.stats()["calls"]` 前后。
+  测试里闸门没装、计数恒不变 ⇒ 断言恒真；变异「等待中真去取 Yahoo」时红的是全局断网守卫，不是这条。
+  - 改为 AST 判定：模块不 import yfinance / yf_daily / requests / urllib / http_gate / httpx，对 `yf_gate` 只用
+    `cooldown_deadline` / `note_cooldown_wait` / `RATE_LIMIT_COOLDOWN`。
+  - 变异核对：加 `import yfinance`、加一次 `yf_gate.gated_call` 各红；还原后全绿。
 
 ## [0.45.718] — 2026-11-04 — Removed：过时的 `MCP_INSTALL_GUIDE.md`
 

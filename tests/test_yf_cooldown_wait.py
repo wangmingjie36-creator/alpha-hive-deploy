@@ -112,13 +112,24 @@ class TestCooldownWaitBudget:
         assert yf_gate.stats()["cooldown_waits"] == 2
         assert b.spent_s == pytest.approx(280.0)
 
-    def test_never_issues_requests(self, monkeypatch):
-        # 等待不得经闸门发任何 yfinance 调用（不给 Yahoo 加压）
-        c = _Clock()
-        _cooldown(c, 50.0)
-        before = yf_gate.stats()["calls"]
-        _budget(c).wait("X")
-        assert yf_gate.stats()["calls"] == before
+    def test_never_issues_requests(self):
+        """等待不得发任何 yfinance 请求（不给 Yahoo 加压）。结构判定：模块不 import yfinance / yf_daily / http 取数，
+        对 yf_gate 只用只读截止时刻、计数与冷却常数。
+        （二次检查改：原写法比较 `stats()["calls"]` 前后——测试里闸门没装、计数恒不变，断言恒真；
+        真去取数时是全局断网守卫红、不是这条红。）"""
+        import ast
+        from pathlib import Path
+        tree = ast.parse(Path(yf_cooldown_wait.__file__).read_text(encoding="utf-8"))
+        imported = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                imported |= {a.name.split(".")[0] for a in n.names}
+            elif isinstance(n, ast.ImportFrom) and n.module:
+                imported.add(n.module.split(".")[0])
+        assert not imported & {"yfinance", "yf_daily", "requests", "urllib", "http_gate", "httpx"}, imported
+        used = {n.attr for n in ast.walk(tree)
+                if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "yf_gate"}
+        assert used <= {"cooldown_deadline", "note_cooldown_wait", "RATE_LIMIT_COOLDOWN"}, used
 
     def test_stats_keys_present_for_scan_timing(self):
         st = yf_gate.stats()
