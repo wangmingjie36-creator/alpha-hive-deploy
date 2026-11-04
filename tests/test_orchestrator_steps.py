@@ -883,7 +883,9 @@ class TestAttention:
         items = irr.build_attention({}, BEV_ALARM, {"status": "not_ready"}, {"status": "not_ready"},
                                     {"status": "not_ready", "h1_anchor": {"state": "ok"},
                                      "input_code_guard": {"ok": True}, "buzz_v1_self_proof": {"ok": True},
-                                     "buzz_v1_bridge": {"ok": True}})
+                                     "buzz_v1_bridge": {"ok": True},
+                                     # 修订 5（v0.45.712）：执行器恒带 H1 排除计数；缺了是一条 warn
+                                     "h1_excluded": {"n": 0, "by_day": {}, "n_frozen_errors": 0, "examples": []}})
         assert len(items) == 1 and items[0]["id"].startswith(ost._BOUNDARY_ATTENTION_ID + "."), items
         p = v1_json(tmp_path, "11", attention=items,
                     payload=dict(LEGACY["11"], cohort_boundary_evidence=BEV_ALARM))

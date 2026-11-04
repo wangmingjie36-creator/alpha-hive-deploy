@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🐝 Alpha Hive — 维度 IC 证据协议 · 登记常量（P1，v0.45.320；修订 1，v0.45.330；修订 4，v0.45.708）
+🐝 Alpha Hive — 维度 IC 证据协议 · 登记常量（P1，v0.45.320；修订 1，v0.45.330；修订 4，v0.45.708；修订 5，v0.45.712）
 =================================================================================
 规则全文在 `experiments/dim_ic_preregistration.md`，本文件是同一份登记的**机器可读**写法。
 两处必须一致，`tests/test_dim_ic_protocol.py` 钉住。
@@ -26,6 +26,9 @@ AMENDMENTS: Tuple[Tuple[str, str, str], ...] = (
      "修订 3：并列报告「去掉 source_outage 日」的敏感性分析（day_health 定义指纹冻结）"),
     ("2026-11-03", "事后·窗口内、只看过输入不看收益",
      "修订 4：H1 对象改为 buzz_v1 的非价格子合成（buzz_v1_np）；截断集合收窄为三个情绪通道；buzz_v1 降为描述项"),
+    ("2026-11-04", "事后·窗口内、只看过输入不看收益",
+     "修订 5：H1 的通道自 2026-10-20 起由冻结通道层从原始观测重算（之前沿用存档值、哈希钉住）；"
+     "截断集合换成取数层；H2 降为描述项"),
 )
 
 #: 样本窗口起点（修订 1：2026-09-28 → 2026-10-12，2026-W42 周一）。之前的数据一律不进检验（协议 §1、§3、§13）
@@ -63,11 +66,27 @@ H1_FROZEN_LAYER_SIGNALS: Tuple[str, ...] = ("agent.BuzzBeeWhisper.score", "senti
 H1_PRODUCTION_DIM = "sentiment"
 
 #: H1（修订 4，协议 §13.13）= buzz_v1_np：三个非价格通道 × buzz_v1 的冻结权重，**按这个顺序**从左往右加；
-#: 无 clamp、无动量 / 背离调整（后两项的输入含价格）。值取自 `signal_archive` 的 `buzz.comp.*`，缺一个 ⇒ 该行无效
+#: 无 clamp、无动量 / 背离调整（后两项的输入含价格）。缺一个通道 ⇒ 该行无效
 H1_NP_WEIGHTS: Dict[str, float] = {"reddit_signal": 0.25, "news_signal": 0.25, "yahoo_signal": 0.05}
 
-#: H1 的截断集合（修订 4）：恰好是这三个通道。价格通道 / 行情量 / F&G / 合成与调整层改动都不再截断 H1
-H1_INPUT_SIGNALS: Tuple[str, ...] = tuple(f"buzz.comp.{c}" for c in H1_NP_WEIGHTS)
+#: H1 三个通道在 `signal_archive` 里的名字（修订 4 起；修订 5 起只用于 `H1_ARCHIVE_START` 之前那段）
+H1_CHANNEL_SIGNALS: Tuple[str, ...] = tuple(f"buzz.comp.{c}" for c in H1_NP_WEIGHTS)
+
+#: 修订 5（协议 §13.14）：自这天起 H1 的三个通道由冻结通道层 `buzz_v1_channels` 从原始观测档案重算
+#: （`observation_links` → 档案 payload），不读生产写的通道值；观测不全的（日，标的）从 H1 排除。
+#: 这天之前（窗口内 10-13 至 10-19，档案尚未开始攒）沿用 `signal_archive` 的存档值，由下面的哈希钉住
+H1_ARCHIVE_START = "2026-10-20"
+
+#: `FORWARD_START` ≤ date < `H1_ARCHIVE_START`（不含协议排除日）的 `H1_CHANNEL_SIGNALS` 存档值的 sha256：
+#: 行 = [date, ticker, signal, value]，按 (date, ticker, signal) 排序，`json.dumps(rows, separators=(",", ":"),
+#: ensure_ascii=False)`。登记时 5 个扫描日 × 30 只 × 3 个通道 = 450 个值。对不上 ⇒ 执行器判无法判定
+H1_PRE_ARCHIVE_ROWS = 450
+H1_PRE_ARCHIVE_SHA256 = "60df3c1f7ee096a9d345ffe19548bfb51455081df1a7545ad16edec2dca42cee"
+
+#: H1 的截断集合（修订 5，§13.14）：取数层的三个伪节点（`signal_archive.UNARCHIVED_NODES`）。
+#: 改「取哪份原始观测 / 怎么链接」的边界点名它们 ⇒ H1 截断；只改解释原始观测的生产代码不截断 H1（冻结层不受影响）。
+#: 冻结通道层自己改动同样经指纹单元 `h1.frozen` 挡住（`signal_code_fingerprints`）
+H1_INPUT_SIGNALS: Tuple[str, ...] = ("obs.reddit", "obs.news", "obs.yahoo")
 
 #: 描述项 buzz_v1（修订 4）：每个检视点照报 IC / CI / 朴素 p，不进 Holm 族、不触发任何动作
 H1_V1_DESCRIPTIVE = ("buzz_v1", H1_V1_INPUT_SIGNALS + H1_FROZEN_LAYER_SIGNALS)
@@ -78,16 +97,19 @@ H1_V1_DESCRIPTIVE = ("buzz_v1", H1_V1_INPUT_SIGNALS + H1_FROZEN_LAYER_SIGNALS)
 #: 修订 4 起它同样是 buzz_v1_np 的前提：通道自这一版起全精度入档
 H1_ANCHOR_VERSION: Optional[str] = "v0.45.340"
 
-#: 固定序列，顺序即检验顺序（协议 §2）。
-#: 每项 = (编号, 对象, 用于截断判定的归档信号——`signal_archive.generation_boundaries()` 的输入)
+#: 确认性假设（协议 §2）。修订 5 起只剩 H1（原 H2 降为描述项 `H2_DESCRIPTIVE`）。
+#: 每项 = (编号, 对象, 用于截断判定的信号——`signal_archive.generation_boundaries()` 的输入)
 HYPOTHESES: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
     ("H1", "buzz_v1_np", H1_INPUT_SIGNALS),
-    ("H2", "weighted_composite", ("agent.ChronosBeeHorizon.score",
-                                  "agent.BuzzBeeWhisper.score",
-                                  "agent.OracleBeeEcho.score")),
 )
 
-#: H2 的权重，冻结为登记时的 `config.EVALUATION_WEIGHTS`。config 此后偏离这组值 ⇒ H2 在偏离日截断（协议 §6）
+#: 描述项 weighted_composite（修订 5：原 H2）：协议结束时报 IC / CI / 朴素 p，不进 Holm 族、不触发任何动作。
+#: 照旧在三蜂分数的边界或 config 权重偏离冻结值之日截断——只是描述项自己的说明，不影响 H1
+H2_DESCRIPTIVE = ("weighted_composite", ("agent.ChronosBeeHorizon.score",
+                                         "agent.BuzzBeeWhisper.score",
+                                         "agent.OracleBeeEcho.score"))
+
+#: weighted_composite 的权重，冻结为登记时的 `config.EVALUATION_WEIGHTS`。config 此后偏离这组值 ⇒ 该描述项在偏离日截断（协议 §6）
 FROZEN_WEIGHTS: Dict[str, float] = {
     "signal": 0.0, "catalyst": 0.332, "sentiment": 0.325, "odds": 0.343, "risk_adj": 0.0,
 }
@@ -96,7 +118,7 @@ FROZEN_WEIGHTS: Dict[str, float] = {
 DESCRIPTIVE_DIMS: Tuple[str, ...] = ("signal", "catalyst", "odds", "risk_adj")
 DESCRIPTIVE_CORRECTION = "holm"
 
-#: 维度 ↔ 产生它的蜂（各蜂 `analyze()` 里 `dimension=` 的声明）。H1/H2 的截断信号由此而来
+#: 维度 ↔ 产生它的蜂（各蜂 `analyze()` 里 `dimension=` 的声明）。描述项的截断信号由此而来
 DIM_TO_AGENT: Dict[str, str] = {
     "signal": "ScoutBeeNova", "catalyst": "ChronosBeeHorizon", "sentiment": "BuzzBeeWhisper",
     "odds": "OracleBeeEcho", "risk_adj": "GuardBeeSentinel",

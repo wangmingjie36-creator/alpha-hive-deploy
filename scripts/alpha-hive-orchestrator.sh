@@ -632,7 +632,10 @@ fi
 #   · 当前早于收盘后阈值  → 退出 0（**关键**：盘中跑会把盘中价当收盘价
 #                            写进 predictions，正是已知的样本污染源）
 #   · 否则                → 继续（这就是补跑）
-CATCHUP_AFTER_HHMM="1330"   # 本机 PDT/PST；美股 13:00 PT 收盘，留 30 分钟落定
+CATCHUP_AFTER_HHMM="1630"   # **美东**时间（v0.45.714）；美股 16:00 ET 收盘，留 30 分钟落定
+# v0.45.714：此前是「本机 13:30」，默认本机与洛杉矶同钟。本机钟跟 America/Vancouver，2026-11-01 起常年 UTC−7、
+# 不再回拨 ⇒ 冬季本机 13:30 = 美东 15:30（**收盘前**），14:00 定时 = 美东 16:00 收盘那一刻（11-03 实测 CBOE 30 只里
+# 29 只拿到盘中文件）。改为直接按美东钟判，与本机时区无关；半日市（13:00 收盘）照 16:30 判，只是更保守。
 SWARM_MARKER="$DATA_DIR/.swarm_results_${DATE_STR}.json"
 
 if [ -f "$SWARM_MARKER" ]; then
@@ -648,25 +651,33 @@ EOFJ
     exit 0
 fi
 
-NOW_HHMM=$(date +"%H%M")
+NOW_HHMM=$(TZ=America/New_York date +"%H%M")
+# 时区数据读不到时 macOS 的 date 不报错、**静默按 UTC** 算 ⇒ 先核对时区缩写。不是 EST/EDT ⇒ WARN，
+# 退回 UTC−5（= EST）：夏季比真实美东慢 1 小时，只会更晚放行、不会放进盘中。
+_ET_ZONE=$(TZ=America/New_York date +"%Z")
+if [ "$_ET_ZONE" != "EST" ] && [ "$_ET_ZONE" != "EDT" ]; then
+    log "WARN" "⚠️ 取美东时间得到时区「${_ET_ZONE}」（应为 EST/EDT），补跑闸改按 UTC−5 判"
+    NOW_HHMM=$(date -u -v-5H +"%H%M")
+fi
+unset _ET_ZONE
 # ⚠️ 必须用 [ -lt ]（按十进制解析）。**不要**改成 (( ))：$NOW_HHMM 在 10 点前
 # 带前导零（如 0905），算术上下文会当八进制，9 是非法八进制位 →
 # bash: ((: 0905: value too great for base，闸直接失效。实测确认。
 if [ "$NOW_HHMM" -lt "$CATCHUP_AFTER_HHMM" ]; then
-    log "INFO" "⏳ 现在 ${NOW_HHMM} 早于收盘后阈值 ${CATCHUP_AFTER_HHMM}，跳过"
+    log "INFO" "⏳ 现在美东 ${NOW_HHMM} 早于收盘后阈值 ${CATCHUP_AFTER_HHMM}（美东），跳过"
     log "INFO" "   （盘中跑会把盘中价写成收盘价污染样本；定时任务或稍后开机会补上）"
     cat > "$REPORTDIR/status.json" << EOFJ
 {
   "last_run": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "status": "skipped_before_close",
-  "reason": "now=${NOW_HHMM} < threshold=${CATCHUP_AFTER_HHMM}",
+  "reason": "now_et=${NOW_HHMM} < threshold_et=${CATCHUP_AFTER_HHMM}",
   "logfile": "$LOGFILE"
 }
 EOFJ
     exit 0
 fi
 
-log "INFO" "🔁 今日尚无产出且已过 ${CATCHUP_AFTER_HHMM}，执行扫描（定时或开机补跑）"
+log "INFO" "🔁 今日尚无产出且已过美东 ${CATCHUP_AFTER_HHMM}（现在美东 ${NOW_HHMM}），执行扫描（定时或开机补跑）"
 
 # v0.45.214：扫描前把生产 checkout 只快进到 origin/main（production_sync.py）。
 # 必须在扫描（Step 1 起）之前——扫描本身只跑一个代码版本，code_version 记的就是真跑的那版。

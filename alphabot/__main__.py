@@ -23,6 +23,15 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
+def _report_outbound(state: dict) -> None:
+    """出站方式写 stderr（.app 的日志文件）与结构化日志；探活失败是 WARNING（页面另有横幅）。"""
+    from hive_logger import get_logger
+    msg = f"出站方式 {state['mode']}：{state['detail']}"
+    print(f"alphabot: {msg}", file=sys.stderr)
+    log = get_logger("alphabot")
+    (log.warning if state["mode"] == "unchanged" else log.info)(msg)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="alphabot", description="Alpha Bot —— 卖权选择器本机前端")
     ap.add_argument("--host", default="127.0.0.1", help="只接受回环地址（缺省 127.0.0.1）")
@@ -41,6 +50,7 @@ def main(argv=None) -> int:
     from alphabot.server import create_app
     from alphabot.service import AlphaBotService, IntradayPoller
 
+    outbound = None
     if args.demo:
         from alphabot import synthetic as syn
         tmp = tempfile.mkdtemp(prefix="alphabot-demo-")
@@ -54,6 +64,10 @@ def main(argv=None) -> int:
             # v0.45.422 起未设时取缺省数据根 ~/alpha-hive-data（与编排器同址）；此前这里警告「读的是代码目录」
             print(f"alphabot: 未设 ALPHA_HIVE_HOME ⇒ 用缺省数据根 {PATHS.home}"
                   "（与编排器同址；数据根在别处请 export ALPHA_HIVE_HOME=<数据根>）", file=sys.stderr)
+        # v0.45.713：先定出站方式再建服务——yfinance 的会话在第一次取数时建，建之前环境变量必须就位
+        from alphabot import outbound as ob
+        outbound = ob.configure()
+        _report_outbound(outbound)
         svc = AlphaBotService()
         poller = None if args.no_poll else IntradayPoller(svc)
     holder = {}
@@ -63,7 +77,7 @@ def main(argv=None) -> int:
         holder["server"].should_exit = True
 
     app = create_app(svc, poller=poller, port=args.port, start_poller=poller is not None, on_shutdown=_stop,
-                     from_app=args.from_app)
+                     from_app=args.from_app, outbound=outbound)
     url = f"http://{args.host}:{args.port}/"
     print(f"alphabot: {url}", file=sys.stderr)
     if args.open:

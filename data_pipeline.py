@@ -984,6 +984,18 @@ class YFinanceSource:
                 self.breaker.record_failure("empty_history")
                 return None
 
+            # v0.45.717：末根早于「最近一场已收盘的交易日」⇒ Yahoo 还没出那一场的日线，末根是前一场——
+            # 拿它当现价就是把昨天的收盘写成今天的入场价（2026-11-03 美东 16:00 开跑：30 只全是 11-02 收盘，
+            # ENPH −8.2%）。`_drop_forming_bar` 只防「末根是今天且未收」，`_completed_bar_close` 只证「末根已收」，
+            # 都不问「是不是最近一场」。本源这只票当取不到，交给下一个源（同 v0.45.645 公司行动空行的处置）。
+            # 不记熔断失败：CBOE 盘中陈旧文件同理（个别票晚出时，连撞 3 只会把健康标的一起挡掉）。
+            _gap = _yf_tail_gap(hist)
+            _record_yf_tail(ticker, _gap)
+            if _gap is not None and _gap["refused"]:
+                _log.warning("[yfinance] %s 日线末根 %s 早于最近一场已收盘 %s（Yahoo 还没出这一场）—— 本源不给这只票的行情",
+                             ticker, _gap["last_bar"], _gap["expected"])
+                return None
+
             data = StockData(
                 data_source=DataQuality.REAL,
                 source_name=self.name,
@@ -1146,6 +1158,8 @@ _history_stats: Optional[Dict] = None
 _history_last: Dict[str, Dict[str, bool]] = {}   # ticker → {字段: 最近一次出口后仍缺}
 # v0.45.699：自攒索引回落的 momentum 窗口末端早于「应有场次」的标的 → {as_of, expected, verified}（最近一次出口的结果）
 _history_window: Dict[str, Dict] = {}
+# v0.45.717：yfinance 源末根早于最近一场已收盘交易日（拒给）/ 日历判不了（放行）的标的 → {last_bar, expected, reason, refused}
+_yf_tail: Dict[str, Dict] = {}
 # v0.45.625：评分用的那份行情取完那一刻的快照（`mark_history_fill_scoring`）；没标记过 ⇒ None
 _history_at_scoring: Optional[Dict] = None
 
@@ -1178,6 +1192,47 @@ def _record_history_fill(ticker: str, path: str, outcome: Dict[str, str],
             _history_window.pop(ticker, None)       # 后一次出口窗口对齐了 ⇒ 不再算滞后（同 still_missing 的语义）
 
 
+def _yf_tail_gap(hist) -> Optional[Dict]:
+    """yfinance 日线（已去掉形成中的末根）末根与「最近一场已收盘的交易日」比（v0.45.717）。
+
+    - 末根 < 最近一场 ⇒ `{"last_bar", "expected", "refused": True}`：Yahoo 还没出那一场，本源拒给。
+    - 时钟 / 日历判不了 ⇒ `{"last_bar", "expected": None, "reason": "calendar_unavailable", "refused": False}`：
+      **不拒**（判不了就按旧行为放行，同 `_drop_forming_bar`「任何异常原样返回」），但记下来、告警里看得见。
+    - 对齐（或末根更晚，不该发生）⇒ None。
+
+    「此刻」读的是交易所时钟 `_exchange_now`（SPY 最后一根分钟线）——与 `_drop_forming_bar` / `_completed_bar_close`
+    **同一只钟**，三道判据不会各说各话；它在收盘后恒为该场最后一分钟（平日 15:59），加 1 分钟 = 收盘时刻，
+    交给「最近一场」的唯一实现 `yf_daily.latest_completed_session(now=…)`，不另写判据。"""
+    try:
+        last = hist.index[-1].date()
+    except Exception:  # noqa: BLE001 —— 拿不到末根日期：前面已判过非空，这里不再拒
+        return None
+    lcs = None
+    try:
+        xnow = _exchange_now()
+        if xnow is not None:
+            from yf_daily import latest_completed_session
+            lcs = latest_completed_session(now=xnow.to_pydatetime() + timedelta(minutes=1))
+    except Exception:  # noqa: BLE001
+        lcs = None
+    if lcs is None:
+        return {"last_bar": last.isoformat(), "expected": None,
+                "reason": "calendar_unavailable", "refused": False}
+    if last < lcs:
+        return {"last_bar": last.isoformat(), "expected": lcs.isoformat(),
+                "reason": "latest_session_missing", "refused": True}
+    return None
+
+
+def _record_yf_tail(ticker: str, gap: Optional[Dict]) -> None:
+    """按标的记**最近一次** yfinance 取数的末根比对结果（同 `still_missing` 语义：后一次对齐就清掉）。"""
+    with _history_lock:
+        if gap:
+            _yf_tail[ticker] = dict(gap)
+        else:
+            _yf_tail.pop(ticker, None)
+
+
 def history_fill_stats() -> Optional[Dict]:
     """本进程出口回落计数（v0.45.473）→ `scan_timing.counters()["history_fill"]` ⇒ status.json。
 
@@ -1191,6 +1246,9 @@ def history_fill_stats() -> Optional[Dict]:
     - `window_behind`（v0.45.699）：ticker → `{as_of, expected, verified}`，回落给的 momentum 窗口末端早于「应有场次」
       （`_momentum_window_gap`）——两种情形都收，`verified` 区分。2026-11-02 CBOE 熔断期里处理的 13 只窗口停在 10-30、
       `window_behind_session` 恒为 0、没有任何告警；与 `still_missing` 一样按各标的**最近一次**出口记。
+    - `yf_tail`（v0.45.717）：ticker → `{last_bar, expected, reason, refused}`，yfinance 源末根早于最近一场已收盘交易日
+      （`latest_session_missing`，本源拒给、交下一个源）或日历判不了（`calendar_unavailable`，放行）；按各标的**最近一次**
+      yfinance 取数记。2026-11-03 美东 16:00 开跑时 30 只的末根都是 11-02，被当成 11-03 的现价入库、没有任何告警。
     - `still_missing`：各字段（momentum / volume / volatility，后者 v0.45.557 起）在**最近一次**出口后仍为 None 的标的。
     - `at_scoring`（v0.45.625）：评分用的那份行情取完那一刻（扫描预取结束，`mark_history_fill_scoring`）的同一组统计；
       没标记过 ⇒ None。⚠️ 「最近一次」会被评分之后的重取改写——10-22 生成 ML 报告时为 12 只票再取一轮、撞上断网，
@@ -1217,6 +1275,7 @@ def _history_stats_locked() -> Dict:
     out["still_missing"] = {f: sorted(t for t, m in _history_last.items() if m.get(f))
                             for f in _HISTORY_FIELDS}
     out["window_behind"] = {t: dict(v) for t, v in sorted(_history_window.items())}
+    out["yf_tail"] = {t: dict(v) for t, v in sorted(_yf_tail.items())}
     return out
 
 
@@ -1228,7 +1287,7 @@ def mark_history_fill_scoring() -> None:
     with _history_lock:
         if _history_stats is None:
             _history_at_scoring = {"resolutions": 0, "window_behind_session": 0, "by_path": {},
-                                   "window_behind": {},
+                                   "window_behind": {}, "yf_tail": {},
                                    "still_missing": {f: [] for f in _HISTORY_FIELDS}}
         else:
             _history_at_scoring = _history_stats_locked()
@@ -1241,6 +1300,7 @@ def reset_history_fill_stats() -> None:
         _history_at_scoring = None
         _history_last.clear()
         _history_window.clear()
+        _yf_tail.clear()
 
 
 def _momentum_window_gap(data: StockData) -> Optional[Dict]:

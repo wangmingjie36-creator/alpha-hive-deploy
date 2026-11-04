@@ -526,6 +526,46 @@ def bridge(db_path: Optional[str] = None, archive_base: Optional[str] = None, en
     return out
 
 
+def h1_channels(db_path: Optional[str] = None, start: Optional[str] = None, end: Optional[str] = None,
+                archive_base: Optional[str] = None, channels: Iterable[str] = ("reddit_signal", "news_signal", "yahoo_signal")
+                ) -> Dict[Tuple[str, str], Dict]:
+    """维度 IC 协议修订 5（v0.45.712，§13.14）：H1 的通道由冻结通道层从原始观测档案重算。
+
+    返回 {(日期, 标的): {"channels": {通道: 值}} 或 {"excluded": 原因}}，只含 `start` ≤ 日期 ≤ `end` 里**有溯源块**的格；
+    没有溯源块的（生产有分、却没写链接）由调用方按预测行补成排除——这里看不见预测行。
+    观测不全（`IncompleteObservations`）⇒ 排除，原因照写；冻结层在真实 payload 上抛别的异常 ⇒ 同样排除，原因以
+    「冻结层报错」开头，调用方据此单独计数（那是要查的 bug，不只是数据缺）。
+    `observation_links` 表不在 ⇒ 抛 `sqlite3.OperationalError`（调用方判无法判定，不当成「没样本」）。
+    """
+    import observation_archive as oa
+    import buzz_v1_channels as fc
+    db = Path(db_path) if db_path else _db_path()
+    base = Path(archive_base) if archive_base else oa.root()
+    lo, hi = start or "0000-00-00", end or dt.date.today().isoformat()
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        rows = con.execute(f"SELECT date, ticker, refs FROM {oa.LINKS_TABLE} WHERE consumer=? AND date >= ? AND date <= ?",
+                           (oa.CONSUMER_BUZZ, lo, hi)).fetchall()
+    finally:
+        con.close()
+    want = tuple(channels)
+    out: Dict[Tuple[str, str], Dict] = {}
+    for d, t, refs in rows:
+        key = (str(d)[:10], t)
+        try:
+            got = fc.sentiment_channels(t, json.loads(refs), lambda sha: oa.load(sha, base))
+            out[key] = {"channels": {c: got[c] for c in want}}
+        except fc.IncompleteObservations as e:
+            out[key] = {"excluded": f"观测不全：{e}"}
+        except Exception as e:  # noqa: BLE001 —— 不吞：变成带前缀的排除原因，调用方单独计数并标 ⚠️
+            out[key] = {"excluded": f"{H1_FROZEN_ERROR_PREFIX}{type(e).__name__}: {e}"}
+    return out
+
+
+#: `h1_channels` 排除原因里「冻结层在真实 payload 上抛了」的前缀（执行器按它单独计数）
+H1_FROZEN_ERROR_PREFIX = "冻结层报错："
+
+
 def bridge_line(res: Dict) -> str:
     if res.get("error"):
         return f"⚠️ 桥接核对算不出：{res['error']}"

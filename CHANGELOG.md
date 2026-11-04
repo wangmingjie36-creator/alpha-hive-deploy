@@ -5,7 +5,235 @@
 
 ---
 
-## [0.45.710] — 2026-11-03 — 占位（进行中：CLAUDE.md 更正 BILI 的 CBOE 文件刷新说法）
+## [0.45.721] — 2026-11-04 — 占位（进行中：Alpha Bot 只读页「接货型卖 put」——持仓 / 到期 / 被行权 / covered call / 与「限价买入」「一直持有」两条基准并排）
+
+## [0.45.720] — 2026-11-04 — 占位（进行中：接货型卖 put 纸面账本（XOM / WMT / NVDA）——先卖 put、被行权接货后卖 covered call，独立账本 + 预注册 + 每日钩子；不碰现有卖权 / 跨式账本）
+
+## [0.45.719] — 2026-11-04 — Fixed：v0.45.716 二次检查——「等待不发请求」那条测试恒真，改成结构判定；其余核对无问题
+
+二次检查覆盖以下几项，**无问题**：
+- 测试间冷却泄漏：整套跑一遍、每条测试结束时探测 `yf_gate._cooldown_until`。只有 `test_alpha_hive_mcp_fundamentals.py` 的 9 条
+  结束时仍在冷却，该文件用 `monkeypatch.setattr(yf_gate, "_cooldown_until", 0.0)` 还原，不会让后面跑扫描的测试真睡 180s。
+- 标的层超时：`_run_pool` 的 `future.result(timeout=180)` 只作用于 `as_completed` 已完成的 future，永不超时 ⇒ 等待不会让标的被重复分析。
+- 生产路径只有 `run_swarm_scan` 一处构造 `_SwarmContext`、一处调 `_analyze_single_ticker`；闸门没装时冷却截止恒为 0，不等。
+- 被拒的冷却段不记账 ⇒ 后来的标的在剩余变短时会重新判、可能转为等待——设计内，不重复扣。
+
+### Fixed
+- `tests/test_yf_cooldown_wait.py::test_never_issues_requests`：原来比较 `yf_gate.stats()["calls"]` 前后。
+  测试里闸门没装、计数恒不变 ⇒ 断言恒真；变异「等待中真去取 Yahoo」时红的是全局断网守卫，不是这条。
+  - 改为 AST 判定：模块不 import yfinance / yf_daily / requests / urllib / http_gate / httpx，对 `yf_gate` 只用
+    `cooldown_deadline` / `note_cooldown_wait` / `RATE_LIMIT_COOLDOWN`。
+  - 变异核对：加 `import yfinance`、加一次 `yf_gate.gated_call` 各红；还原后全绿。
+
+## [0.45.718] — 2026-11-04 — Removed：过时的 `MCP_INSTALL_GUIDE.md`
+
+### Removed
+- `MCP_INSTALL_GUIDE.md`：讲的是安装 `mcp-servers/` 下五个第三方 MCP（optionsflow / yahoo-finance / finance-tools / shareseer / maverick）。五个目录已于 11-03 / 11-04 移到废纸篓（v0.45.707 起也不再被 git 跟踪）：都没接上过，有用的那部分（财报 / 分析师 / 持仓 / 分红拆股）已由 v0.45.709 并进 `alpha_hive` MCP。全仓（除 CHANGELOG）无引用；`.gitignore` 的 `/mcp-servers/` 保留。
+
+## [0.45.717] — 2026-11-04 — Fixed：扫描 yfinance 源末根早于「最近一场已收盘交易日」时当取不到——11-03 入库的 30 个现价全是 11-02 收盘
+
+**事故（2026-11-03）**：冬令时后本机 14:00 = 美东 16:00（v0.45.714 已改时），扫描在收盘那一刻开跑。CBOE 29 只是盘中生成的文件 ⇒ 正确地交给 yfinance；
+Yahoo 还没出 11-03 日线 ⇒ 末根是 11-02。`_drop_forming_bar` 只防「末根是今天且还没收」，`_completed_bar_close` 只证「末根已收」，**都不问「是不是最近一场」**
+⇒ predictions 11-03 的 30 个 `price_at_predict` **逐只等于 11-02 收盘**（与现在落定的 11-03 官方收盘比：ENPH −8.2%、RKLB −4.3%、CRCL −4.2%、DELL −3.8%，0/30 一致；
+对照 10-30 30/30 一致、11-02 28/30），动量 / 量比 / 波动率窗口同样止于 11-02。`session_close` 也标成 11-02 ⇒ v0.45.699 的滞后判据看着「对齐」，**没有任何告警**。
+仓库里本有「最近一场缺了」的判据（`yf_daily`，v0.45.652/658），但扫描主路径经 `observation_layer.yf_history` 直调 `.history(`、不经 `yf_daily`。
+
+### Fixed
+- `data_pipeline.YFinanceSource.fetch`：`_drop_forming_bar` 之后新增 `_yf_tail_gap`——末根 < 最近一场已收盘交易日 ⇒ 本源这只票当取不到（WARNING），交下一个源
+  （Finnhub / Alpha Vantage，再不行退 CBOE 盘中价并标 degraded），同 v0.45.645 公司行动空行的处置。
+  - 「此刻」读交易所时钟 `_exchange_now`（SPY 最后一根分钟线），与 `_drop_forming_bar` / `_completed_bar_close` **同一只钟**；收盘后它恒为该场最后一分钟，
+    加 1 分钟交给「最近一场」的唯一实现 `yf_daily.latest_completed_session(now=…)`，不另写判据（提前收盘日 12:59 + 1 = 13:00 同样成立）。
+  - 时钟 / 日历判不了 ⇒ **放行**（旧行为，同 `_drop_forming_bar`「任何异常原样返回」），但记 `calendar_unavailable`。
+  - **不记熔断失败**（同 CBOE 盘中陈旧文件）：个别票晚出时，连撞 3 只会把健康标的一起挡掉。
+- 可见性：`history_fill_stats()` 新增 `yf_tail`（ticker → `{last_bar, expected, reason, refused}`，按标的最近一次 yfinance 取数记；评分快照 `at_scoring` 带着、模板含空键）；
+  `alert_manager._check_history_fill` 新增 P2「yfinance 日线缺最近一场：N 只改用其它源」与 P2「判不了 yfinance 日线是否到最近一场」；旧计数没这个键 ⇒ 静默。
+- `signal_code_fingerprints.ACKS`：`price.fields` 指纹 `84596e6253ecda14` 登记 `measurement_fix`（**用户 2026-11-04 在对话里选**）——修的是原始输入的场次错位，
+  函数不换；正常日子交给下游的值逐位不变。不登记边界（修订 4 起该单元本也只截断描述项 buzz_v1，不截断 H1）。
+
+### Tests
+- `tests/test_yf_latest_session.py`（16 条，离线；读钟只有 `_exchange_now`，全部钉住）：11-03 形状被拒；对齐照用（价 / session_close = 11-03）；盘中末根 = 前一场不误拒；
+  周末周五末根照用；提前收盘日两种；时钟判不了放行且记录；连拒 5 只后熔断仍放行；后一次对齐清掉、reset 清掉；经 MultiSourceFetcher 出口是下一个源、价不是 11-02 收盘；
+  评分快照冻结；告警两种 + 干净静默 + 旧计数静默。
+- 变异 6 种全红：不拒（4 红）、记熔断（1）、不加 1 分钟（7）、改读墙钟（3）、删告警（2）、统计不带键（7）。
+- ⚠️ 第一版读的是墙钟（`latest_completed_session()` 缺省）——既有 YFinanceSource 测试的夹具日期在过去，14 条立刻红（夹具日期与真实钟比，时间炸弹形状）；
+  改读已被这些测试钉住的交易所时钟后 269 条照绿，三道判据也从此同钟。
+- `tests/test_signal_code_fingerprints.py` 81 passed；ruff 通过。
+
+### 生产数据修正（用户 2026-11-04 在对话里定「回填正确的入场价」）
+- 走既有工具 `close_correction.py --since 2026-11-03`（修「有价但价不对」的行；`entry_price_backfill.py` 只管价为 0 的行，不适用）：
+  dry-run 30 条需校正、30 条经 CBOE 交叉印证（11-04 快照的 `prev_day_close`，归属由 `last_trade_time` 自证）、0 条两源分歧、无别的日期；随后 `--apply`。
+- 写前 sqlite `backup()`：`~/alpha-hive-data/_manual_backups/pheromone.db.bak-close-correction-1103-20261104-104220`（2403 行，integrity ok）。
+- 写后逐行比对全表：**只有 11-03 的 30 行变了**，每行恰好 4 列（`price_at_predict` / `price_at_predict_raw` / `close_corrected_at` / `close_correction_source=yfinance_close+cboe_close`）；
+  `price_at_predict_raw` = 原值（11-02 收盘）30/30；新值与 yfinance 11-03 收盘 30/30 一致（≤0.01%）。
+- 派生列（`checked_t1/t7/t30` 都为 0，T+1 尚未算）不用重算：下一次回测按新基准正常算。
+
+### 未做 / 待验证
+- `signal_archive` 里 11-03 的 `price.*`（动量 / 量比 / 波动率，窗口止于 11-02）**未改写**；入场价之外的展示（网站 / ML 报告里的 11-03 现价）也没改。
+- 「入库价 vs 真实收盘」的单日闸 `scan_coverage_gate.check_prices` 只在显式 `--check-prices` 时跑、编排器不传；且收盘那一刻跑也取不到当天收盘 ⇒ 11-03 没有任何一道闸能抓住。次日核对前一扫描日入场价的观测点仍缺。
+- 下游源（Finnhub）收盘后给的是否就是官方收盘未逐只核过；交给 CBOE 盘中价那一支已有 degraded 标记。
+
+## [0.45.716] — 2026-11-04 — Fixed：扫描撞上 yfinance 429 冷却时，标的开跑前先等冷却结束（整轮限时 600s），不再让冷却期内开工的二十几只标的全丢 iv_rank / 异常流
+
+### 为什么改（2026-11-03 取证，`alpha_hive_structured.jsonl` 21:12:53–21:14:27 UTC）
+- 扫描第 282 次 yfinance 请求（CRCL `Ticker.option_chain`）撞上**一次** 429（本进程 281 发 277 成、连续第 1 次、上次成功 3s 前；
+  0.5 req/s 的闸门没超速）⇒ `yf_gate` 180s 冷却，期间调用一律秒回 `YFRateLimited`。
+- 冷却期间仍在开新标的：二十几只的历史 HV（⇒ iv_rank 置 None）与 unusual_options 在 90 秒内全部失败 ⇒
+  iv_rank 10/30、unusual_flow 9/30，`day_health` 判 yfinance 故障日（P1）。
+- 失败是秒回的，标的处理节奏从 ≈1.2 只/分钟冲到十几只/分钟（日志 21:13 一分钟 232 行），
+  把 Massive 新闻的 5 次/分钟本地名额挤爆（40s 等不到 ⇒ 9 只降级 Yahoo 新闻，P1）——Massive 服务端没出错。
+- 对照：11-02 同样一次 429，落在 yfinance 步骤之后，冷却期内 0 次被挡、零损失。损失取决于 429 落在流程哪里。
+- 同日纸面组合（5 万本金账本）整天跳过（P2）也是这次冷却：21:14:27 取 11 只持仓日线时冷却还剩 86s。**本版不改它**（用户 11-04 定）。
+
+### Added
+- `yf_cooldown_wait.py`：`CooldownWaitBudget(total_s, per_wait_max)`，开工前 `wait(label)` 睡到冷却结束。
+  - 不重试、不发请求，不给 Yahoo 加压；放在 `yf_gate` 外面——闸门模块结构上不含循环 / 睡眠（守卫 `test_yf_rate_limit_handling` 原样不动）。
+  - 预算按**冷却段**扣、不按线程扣（4 个并行标的等同一段只扣一次）；单段剩余 > 185s 或超出整轮预算 ⇒ 不等、照旧失败。
+- `yf_gate.cooldown_deadline()`（只读）与 `note_cooldown_wait()`；`stats()` 新增 `cooldown_waits` / `cooldown_wait_s` / `cooldown_wait_refused`，
+  经现有 `scan_timing` 的 `yfinance` 一节落盘——等过几次、等了多久、没等几次都看得见。
+
+### Changed
+- `alpha_hive_daily_report._analyze_single_ticker`：在**有效性检测之前**（它也取 yfinance 日线）调 `ctx.yf_wait_budget.wait(ticker)`。
+  - 只能在标的这一层等：Phase-1 每只蜂 60s 超时，冷却 180s，蜂里等不了。
+  - `_SwarmContext.yf_wait_budget` 缺省 None = 不等；`_make_yf_wait_budget()` 按 `YF_COOLDOWN_WAIT_BUDGET_S = 600` 建。
+  - 效果：撞上 429 时只有正在跑的那 ≤4 只受影响；节奏保持正常，Massive 名额不再被挤爆（新闻通道不单独改）。
+- ⚠️ 600s 是**主观常数、未经检验**。代价：每段冷却最多让扫描晚 ≈180s；Step 2 预算按只数算（30 只 5400s，v0.45.518），
+  正常日 ≈2100–2700s，加 600s 仍在预算内。429 风暴日（10-27 九段）用完即退回原来的秒回失败。
+- 待验证：Yahoo 为何在 11-03 第 282 次请求回 429（同 IP 是否还有别的消耗者）——日志里查不出；
+  v0.45.713 记下 Alpha Bot 直连出口被 Yahoo 掐，扫描进程是否同样受影响未查。
+
+### Tests
+- `tests/test_yf_cooldown_wait.py`（11 条，假时钟、不睡真时间、不出网）：不在冷却直接返回；等 86s；超单次上限 / 超总预算不等且计数；
+  同一段只扣一次；等待中又进新一段会再判；等待不发请求；扫描在有效性检测之前等；无预算不等。
+- 变异核对：去掉扫描处的等待 / 同段重复扣 / 不看总预算 / 不记拒绝计数，各红 1 条；还原后全绿。
+
+## [0.45.715] — 2026-11-04 — Fixed：v0.45.713 二次检查——只设 `http_proxy` 时误判「已有代理」（Yahoo 照样直连 429）；帮助页抄了代理地址
+
+### Fixed
+- `alphabot/outbound.py`：「环境已有代理 ⇒ 原样不动」原先把 `HTTP_PROXY` / `http_proxy` 也算进去。libcurl（curl_cffi）对 https URL 只认 `https_proxy` / `all_proxy`——11-04 实测只设 `http_proxy`（或 `HTTP_PROXY`）时 yfinance 照样直连、`YFRateLimitError`，只设 `ALL_PROXY` 则通。现只认 `HTTPS_PROXY_VARS`（HTTPS / ALL 两对）；只有 http 代理时照常探活、补上 https 那半，已有的 http 代理原样保留。修后同一场景实测 `mode=proxy`、NVDL 12 个到期日。
+- 帮助页「Yahoo 正在限流」一条写死了缺省代理地址（`TestHelpPage` 说的事故 ②：帮助页自抄会变的常量），改成「与每日扫描同一个地址」，实际地址由页面横幅写出。
+
+### 验证
+- `tests/test_alphabot_outbound.py` 新增 3 条（只设 http 代理 ×2 不算已有代理且原值保留、HTTPS 覆盖变量集合钉住）；两个新变异全杀。
+
+
+## [0.45.714] — 2026-11-04 — Fixed：冬令时后每日扫描在美东收盘那一刻开跑——补跑闸改按美东钟判（16:30 ET），launchd 触发移到本机 15:00
+
+**事故（11-02、11-03）**：本机钟跟 `America/Vancouver`，本机 tzdata 里 2026-11-01 起常年 UTC−7（MST）、不再回拨；launchd「本机 14:00」= 美东 16:00，**恰好收盘**（此前是收盘后 1 小时）。
+11-03 扫描 16:00:05 ET 开跑：CBOE 30 只里 29 只拿到盘中生成的文件（`counters.cboe.price_stale_intraday=29`，last_trade 约 15:45 ET；10-29 / 10-30 为 0，11-02 为 7），核实收盘整批落空。
+补跑闸 `CATCHUP_AFTER_HHMM="1330"` 按本机钟判 ⇒ 冬季 = 美东 15:30，**收盘前**——开机补跑会把盘中价写进样本。
+09-28 已定方案（补跑闸改按美东收盘判 + 调触发时刻，截止 11-01）当时没有落地（auto-memory `alpha-hive-environment-facts.md`）。
+
+### Fixed
+- `scripts/alpha-hive-orchestrator.sh`（补跑闸）：当前时刻改读 `TZ=America/New_York date`，阈值 `CATCHUP_AFTER_HHMM="1630"`（美东），与本机时区无关；半日市照 16:30 判（更保守）。
+  - 时区数据读不到时 macOS 的 `date` 不报错、静默按 UTC 给时间 ⇒ 先核对缩写是 EST / EDT，不是 ⇒ WARN 并退回 `date -u -v-5H`（UTC−5：夏季比真美东慢 1 小时，只会更晚放行）。
+  - status.json 的 `reason` 改为 `now_et=… < threshold_et=…`，日志写明是美东时刻。
+  - 没用 `is_trading_day.session_close_et`：闸前不引入 Python 依赖；收盘后固定 30 分钟对半日市只是更晚。
+
+### Changed（本机配置，不在仓库）
+- `~/Library/LaunchAgents/com.alpha.hive.daily.plist`：周一~五触发 14:00 → **15:00**（本机），冬季 = 17:00 EST，夏季（本机仍 UTC−7）= 18:00 EDT。备份 `com.alpha.hive.daily.plist.bak-pre-1500-20261104`。11-04 上午已 `bootout` + `bootstrap` 重载、`launchctl print` 核对 5 个 Hour 都是 15。
+  - 重载时 RunAtLoad 立即触发一次，被（旧）补跑闸按本机 09:37 < 13:30 挡下，并把 `~/.claude/reports/status.json` 覆盖成 `skipped_before_close`；已从备份恢复成 11-03 那份 success。
+  - LLM 影子（`com.alpha.hive.llmshadow`，本机 14:45）不改：它起来后等生产写完再跑（最多等 3 小时），生产约 15:20 写完。
+
+### Tests
+- `tests/test_scan_catchup.py`：阈值下限改为 1600（美东）；新增 `test_gate_clock_is_eastern_not_local`（第一读钟必须是美东、兜底必须由 UTC 推算）；
+  `TestGateClockLive` 逐字取出编排器那段读钟代码真跑：读到的是纽约墙钟、本机 TZ 换成温哥华 / 东京 / UTC 都不变、时区数据坏（`date` 被换成返回 UTC 墙钟）⇒ WARN 且按 UTC−5。
+  - 变异：读钟改回本机 `date` ⇒ 3 条红；删掉兜底赋值 ⇒ 1 条红。⚠️ 兜底那条的假 `date` 最初只把缩写改成 UTC、读钟仍给真美东——冬季 EST 恰好 = UTC−5，删兜底照样绿；改成返回 UTC 墙钟后才红。
+- 选测 40 个文件 2629 passed；clockshift ±7 / ±45 天 0 新红；`-m integration` 那组沙箱真跑 5 passed。
+
+### 未做 / 待验证
+- 跳过分支仍会覆盖当天的 `status.json`（开机补跑在收盘前触发时就会发生，今天重载 plist 即撞上一次）；09-28 方案里的这一项没做。
+- 编排器改动按自动部署要到合入后的**第二个**扫描日才执行；当天的触发时刻由 plist 保证（本机 15:00 早于阈值的情况不会出现）。
+- 11-02、11-03 两天的存档（核实收盘落空）未改写，由人定。
+
+## [0.45.713] — 2026-11-04 — Fixed：Alpha Bot 出站接代理探活——从 .app 启动时 yfinance 走直连、直连出口被 Yahoo 掐（备用源 NVDL / BILI、250 日 β 长期 429 的根因）
+
+### Fixed
+- **根因**：从 `Alpha Bot.app` 起的服务继承 launchd 环境，没有 `HTTPS_PROXY`；yfinance 1.2 用 curl_cffi，不读 macOS 系统代理 ⇒ 直连；直连出口被 Yahoo 掐（编排器 08-29 起就因此探活走代理，Alpha Bot 没有）。2026-11-04 同一时刻各起新进程、新 cookie 缓存：带代理变量 `Ticker("NVDL").options` 通，去掉就 429；生产 Alpha Bot 当天 07:31 起每 10 分钟 1 个请求、全 429，重启照旧。10-27 / 28「谁在耗额度日志里查不出」的答案是没人在耗：终端里开的排查进程带代理所以通。
+- `alphabot/outbound.py`（新）：启动时定出站方式——环境已有代理变量 ⇒ 原样（`inherited`）；`ALPHA_HIVE_PROXY=none` ⇒ 不探（`disabled`）；否则探 `ALPHA_HIVE_PROXY`（缺省 `http://127.0.0.1:7897`，与编排器同址同法：端口可连 + 经它连 `https://cdn.cboe.com/`）——通 ⇒ 导出 `HTTP(S)_PROXY` 并把回环并进 `NO_PROXY`（`proxy`）；不通 ⇒ **环境不改**（`unchanged`，保持原出站路径），WARNING 日志 + `/api/meta.outbound` + 页面顶部「未走代理」横幅。
+- `alphabot/__main__.py`：非演示模式在建 `AlphaBotService` **之前**调它（yfinance 会话在第一次取数时建）；演示模式不探。`server.create_app` 新增 `outbound=` 参数、`/api/meta` 原样报出。
+- ⚠️ 只在启动时探一次（不在运行中改环境）：代理晚于 Alpha Bot 起来 ⇒ 横幅提示重启。每日扫描不受影响（编排器本来就探活走代理）。
+
+### Changed
+- 帮助页「Yahoo 正在限流」一条补上根因与横幅；CLAUDE.md 的 yfinance 备用源指针更正「查不出谁在耗」。
+
+### 验证
+- `tests/test_alphabot_outbound.py` 19 条（离线：假探活 + 本机回环端口真探活两种失败形状 + 启动顺序 + `/api/meta` + 横幅模式名对账）；变异 8 个全杀。
+- 实测：以 `env -i`（同 launchd 无代理变量）起本分支 Alpha Bot（8799）⇒ `mode=proxy`，`/api/live/NVDL` 经 yfinance 备用源取到（OI 占比 0.9948）——同一时刻生产 Alpha Bot（直连）仍 429；`ALPHA_HIVE_PROXY=http://127.0.0.1:1` 起（8798）⇒ `unchanged`、页面横幅显示、控制台无错。
+- ⚠️ 生产 Alpha Bot 要等扫描日生产克隆快进后**重启**才用上。
+
+
+## [0.45.712] — 2026-11-04 — Changed：维度 IC 预注册修订 5——H1 的通道改由冻结通道层从观测档案重算，截断集合移到取数层 `obs.*`，H2 降为描述项 weighted_composite
+
+用户 2026-11-04 批准（选 A）。修订时点：窗口内、只看过输入（计数 / 指纹 / 自证），**没看任何收益 / IC / p**。协议正文 §13.14，
+草稿与取舍过程 `experiments/dim_ic_amendment5_DRAFT.md`，登记常量 `experiments/dim_ic_protocol.py`（`AMENDMENTS` 第 5 条）。
+真实数据跑执行器：⏳ not_ready，H1 合格周 1/26，H1 截断 None，排除 0 行，无守卫告警；`signal_code_fingerprints.py` 11 个单元全 ✅。
+
+### Changed
+- **H1 通道按日期分两段**（`experiments/dim_ic_forward_test.py::_load_channels`）：
+  - `H1_ARCHIVE_START`（2026-10-20，观测档案起点）之前读 `signal_archive` 存档值，整段按
+    `H1_PRE_ARCHIVE_ROWS` / `H1_PRE_ARCHIVE_SHA256`（450 行，`pre_archive_digest`）核对；对不上 ⇒ 无法判定（同日重扫 / 回填改写了过去）。
+  - 之后由 `buzz_v1.h1_channels()` 从观测档案经冻结通道层（`buzz_v1_channels`）重算，不再读生产写的通道值。
+- **数据在不在按引用判**（`buzz_v1_channels.sentiment_channels`）：看观测链接里有没有那份原始观测，不再信生产的 `expected` 标志；
+  观测不全 / 没有溯源块 / 冻结层报错 ⇒ 该行排除、不补值，计数进结果 `h1_excluded`（`n` / `by_day` / `n_frozen_errors` / `examples`）。
+- **截断集合 = 取数层**（方案 A）：`HYPOTHESES` 的 H1 信号改为 `obs.reddit` / `obs.news` / `obs.yahoo`（`signal_archive.UNARCHIVED_NODES` 登记的伪节点）；
+  隔离名单仍按三个通道名查（`items()` 的 `quarantine` 键）。
+- **新增五个指纹单元**（`signal_code_fingerprints.py`）：`obs.reddit` / `obs.news` / `obs.yahoo`（取数切片）、`obs.links`（观测入档与链接）、
+  `h1.frozen`（冻结通道层 + `h1_channels`）；只有这五个挡 H1，`buzz.*` / `price.fields` 只关系到描述项 buzz_v1。
+  - 新定位器：`seeds:函数:名字`（只取提到这些名字的语句并切到相关项）、`before_assign:函数:变量`、`method:类.方法`；单元可带 `stop`（闭包不往下追的名字，过期即红）。
+  - 新确认方式 `raw_unchanged`（只许取数单元用：碰了取数切片但取到 / 链接的原始观测逐字节不变）。
+  - 既有单元指纹逐个对照 HEAD 模块不变。
+- **H2 降为描述项** `weighted_composite`（`P.H2_DESCRIPTIVE`）：固定序列只剩 H1，α 全给 H1（中检 0.01 / 终检 0.04）。
+  它的截断 / 权重偏离在 `ic_rerun_readiness` 里改为 info 条目（`weighted_composite_truncated` / `weight_changed` / `weight_history_unknown`）。
+- **桥接核对只是监测**：`buzz_v1 --bridge` 失配不再影响 H1，提示文字同步。
+
+### Added
+- `ic_rerun_readiness._dim_ic_attention`：`h1_frozen_errors`（warn，冻结层报错是 bug）、`h1_excluded`（info）、
+  `h1_excluded_unknown`（warn：执行器没给排除计数 ⇒ 被排除的行会无声消失）；`_DIM_DETAIL_KEYS` 加 `h1_excluded`。
+  进度行 `status_line` 同判（读不到排除计数 ⇒ ⚠️），条目 ↔ 图标对照测试钉住。
+
+### Tests
+- `tests/test_dim_ic_forward_test.py::TestRevision5`（两段切换、哈希核对、按引用排除）+ `TestStatusLine::test_missing_exclusion_count_is_warn`；
+  其余执行器夹具经 autouse `_pre_archive_segment_only` 测存档值那段。
+- `tests/test_signal_code_fingerprints.py::TestObsUnits`、`tests/test_buzz_v1_channels.py::TestRevision5RefRule` / `TestH1Channels`、
+  `tests/test_dim_ic_protocol.py`、`tests/test_step_contract_ic_rerun.py`（H2 状态换成描述项、加排除计数三态）、
+  `tests/test_quarantine_1014_prev_session.py`（H2 → weighted_composite）。
+- 整套首跑另红 9 条，都是执行器的其它读者没跟上：`tests/test_day_health.py` / `tests/test_forward_test_excluded_days.py`（合成夹具撞上登记哈希 ⇒ 同款 autouse 夹具；探针桩的 `decide` 签名去掉 h2）、`tests/test_orchestrator_steps.py`（健康维度 IC 结果补 `h1_excluded`）。
+- 变异：按 `expected` 判新闻在不在、关掉哈希核对、档案起点后仍读存档值、不排除无溯源块的行——各自有测试变红。
+
+## [0.45.711] — 2026-11-03 — Fixed：v0.45.708（预注册修订 4）二次检查——两处提示文字仍按修订 1 说话，与执行器行为相反
+
+二次检查覆盖执行器主路径，以下几项**无问题**（只核计数，不看任何收益 / IC）：
+- 子合成与 `buzz_v1.composite` 同权重、同书写顺序，没有按缺失通道重归一的分支，所以「去掉价格项」就是这三项相加。
+- 窗口内 17 个扫描日，每天 30/30 预测行都有齐三个通道。
+- 三个通道各自每个（日期，标的）恰好一行，没有空值。
+- `is_quarantined` 按信号名精确匹配，窗口内没有任何隔离条目点名这三个通道。
+
+### Fixed
+- `ic_rerun_readiness._dim_ic_attention`：buzz_v1 自证未通过那一条仍写「未通过前到检视点将不出结论（§13.11）」。
+  - 实际上修订 4 起执行器的 `apply_self_proof` 只附状态、不改判结论，这句话等于替执行器许了一个它不做的动作。
+  - 改为「只影响描述项 buzz_v1，不影响 H1（协议修订 4，§13.13）」。
+  - 进度行（`status_line`）在 708 已改对；漏的是另一位读者：按条目读的消费方。
+- `signal_code_fingerprints.how_to_acknowledge`：此前对每个单元都说选 ① 登记边界「会截断维度 IC 协议的 H1」。
+  - 修订 4 起行情字段 / F&G 单元只截断描述项 buzz_v1。
+  - 措辞错的代价在于：改代码的人可能为躲一次并不存在的截断去选 ②③，而漏截断不可逆。
+  - 现在按协议的 H1 截断集合分开写：
+    - 三个情绪通道单元写明「点名哪个信号 ⇒ 截断 H1」；
+    - 七通道单元 `buzz.channels` 另注明只点名价格通道时只截断 buzz_v1；
+    - 行情字段 / F&G 写「只截断描述项 buzz_v1，不截断 H1」；
+    - 协议常量读不到时写「可能截断 H1」（按最坏情况说）。
+  - 首句的「它决定 H1 的输入」改为「它决定 buzz_v1 的输入」。
+
+### Tests
+- `tests/test_step_contract_ic_rerun.py::test_self_proof_message_matches_revision4`
+- `tests/test_signal_code_fingerprints.py::TestAcknowledgeWording`：逐单元对照协议截断集合；读不到协议时用保守措辞。
+- 变异核对：两处各自换回旧文字，对应测试各红 1 条；还原后全绿。
+
+## [0.45.710] — 2026-11-03 — Changed：CLAUDE.md 更正 BILI 的 CBOE 文件刷新说法（「刷新时刻待验证」→「晚一天，已确认」）
+
+### Changed
+- `CLAUDE.md`（Alpha Bot yfinance 备用源一条）：BILI 由「10-27 一个时点实测、刷新时刻待验证」改为已确认的结论——CBOE 文件每天收盘后晚上才生成当天那份（只读探针实测 18:56 / 22:10 ET，时刻不固定），盘中不动（10-29、11-03 两个交易日盘中实测，同刻 AAPL 一分钟内刚更新），所以 17:00 ET 的扫描恒拿到前一天、卖权账本 9-30~10-28 记了 32 次 `stale_vintage`。
+- 同处写明用户 11-03 的处置：账本**保持现状**，不改预注册、不移出样本、不做次晨补取（缺失由数据源时刻决定、与行情无关，只减样本不致偏）。
+- 只改文档，无代码 / 行为变化。
 
 ## [0.45.709] — 2026-11-03 — Added：alpha_hive MCP 加四个 yfinance 工具（财报三表 / 分析师评级与升降级 / 持仓结构 / 分红拆股）；MCP 进程的 yfinance 调用接上 `yf_gate`
 

@@ -25,6 +25,11 @@ export async function refreshMeta() {
     h("span", { class: "num" }, (s.now_et || "").slice(11, 16) + " ET"),
   );
   document.getElementById("demo-banner").hidden = !state.meta.demo;
+  // v0.45.713：启动时代理探活失败 ⇒ yfinance 直连（常被 Yahoo 限流），横幅讲明原因与修法
+  const ob = state.meta.outbound;
+  const obBanner = document.getElementById("outbound-banner");
+  obBanner.hidden = !(ob && ob.mode === "unchanged");
+  obBanner.textContent = obBanner.hidden ? "" : `未走代理 · ${ob.detail}`;
   const dl = document.getElementById("ticker-list");
   fill(dl, ...[...(state.meta.watchlist?.tickers || []), ...Object.values(state.meta.watchlist?.index_labels || {})]
     .map((t) => h("option", { value: t })));

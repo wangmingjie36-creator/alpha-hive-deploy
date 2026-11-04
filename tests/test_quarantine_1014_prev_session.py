@@ -8,7 +8,7 @@ BILI 的 `price.momentum_5d` 来自自攒索引、窗口末端是 10-13。用户
 2. 后果：修订 1 的对象 buzz_v1（信号表含行情量）当天只剩 JNJ ⇒ 低于 `MIN_WIDTH` ⇒ 当天无效；**删掉条目该日回来**（对照，
    证明丢天来自名单而不是夹具碰巧不够宽）。修订 4（v0.45.708，§13.13）起 buzz_v1 降为描述项、H1 = buzz_v1_np 只读三个
    情绪通道 ⇒ **10-14 回到 H1**（不读 `price.*`），只有描述项 buzz_v1 照旧丢这一天；
-3. 范围：H2 不读 `price.*`，照算；派生的 `buzz.comp.*` 通道与 Agent 评分不隔离（§13.2 自证 ② 要它们在）；
+3. 范围：H2（修订 5 起降为描述项 weighted_composite）不读 `price.*`，照算；派生的 `buzz.comp.*` 通道与 Agent 评分不隔离（§13.2 自证 ② 要它们在）；
 4. 登记早于该日结果：10-14 的 T+7 用 backtester 的交易日历算，晚于登记日。
 """
 from __future__ import annotations
@@ -82,6 +82,9 @@ def _db(tmp_path, days):
 def _series(tmp_path, monkeypatch, name, days):
     # 本文件测隔离名单，不测协议排除日——清空后者，免得两份名单的效果混在一起
     monkeypatch.setattr(signal_archive, "FORWARD_TEST_EXCLUDED_DAYS", {})
+    # 修订 5（v0.45.712）：H1 通道在 `H1_ARCHIVE_START` 之后由观测档案重算、之前按登记哈希核对——本文件测的是存档值那段
+    # 上的隔离 ⇒ 把档案起点推到远期（10-14 本来就早于真实起点 10-20，语义不变）
+    monkeypatch.setattr(P, "H1_ARCHIVE_START", "9999-12-31")
     rows = fx.load_rows(_db(tmp_path, days), P, "2026-12-31")
     it = fx.items(P)[name]
     return fx.weekly_series(rows, it["value"], it["signals"], P)
@@ -155,6 +158,7 @@ class TestDimIcEffect:
         s = _series(tmp_path, monkeypatch, "H1", [_DAY])
         assert len(s) == 1 and s[0][2] == 1
 
-    def test_h2_untouched(self, tmp_path, monkeypatch):
-        s = _series(tmp_path, monkeypatch, "H2", [_DAY])
+    def test_weighted_composite_untouched(self, tmp_path, monkeypatch):
+        """修订 5：原 H2 降为描述项 weighted_composite，它不读 `price.*` ⇒ 照算。"""
+        s = _series(tmp_path, monkeypatch, P.H2_DESCRIPTIVE[0], [_DAY])
         assert len(s) == 1 and s[0][2] == 1

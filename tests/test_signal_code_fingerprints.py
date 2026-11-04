@@ -10,7 +10,10 @@
    （否则每次合法的冻结层改动都会被误要求输入层确认）；同文件里不相干的函数 ⇒ 不变。
 3. 结构变了（定位不到）⇒ 抛 / 报 error，不当作「没变」。
 4. 登记表自洽：baseline 规则、说明长度、边界确认必须真在边界表里、声明过影响面、且触及该单元的信号。
-5. 覆盖：各单元信号的并集恰好等于协议的 `H1_V1_INPUT_SIGNALS`（buzz_v1 的输入层；修订 4 的 H1 截断集合是它的子集）。
+5. 覆盖：各单元信号的并集恰好等于协议的 `H1_V1_INPUT_SIGNALS`（buzz_v1 的输入层）加修订 5 的取数层伪节点
+   `H1_INPUT_SIGNALS`（`obs.*`）。
+6. 修订 5（v0.45.712）：取数层单元只锁取数——改取数 / 链接 / 冻结通道层 ⇒ 对应 obs / h1 单元变；只改解释（打分常数、
+   情绪标签映射、生产通道阈值）⇒ obs / h1 单元都不变（只有 buzz.* 变）。停点过期、`raw_unchanged` 用错单元都会红。
 
 全部用本仓源码 + 内存里改过的副本，零外部依赖、不需要 skip。
 """
@@ -199,6 +202,37 @@ def _changed(read):
     if not _BASE_FPS:
         _BASE_FPS.update({u: _fp(u) for u in _UNITS6})
     return {u for u in _UNITS6 if _fp(u, read) != _BASE_FPS[u]}
+
+
+class TestAcknowledgeWording:
+    """修订 4（v0.45.708）：只有触及 H1 截断集合（三个情绪通道）的单元登记边界才截断 H1。
+    提示若对行情 / F&G 单元也说「会截断 H1」，改代码的人可能为躲一次并不存在的截断去选 ②③——漏截断不可逆（v0.45.711）。"""
+
+    @staticmethod
+    def _line(unit):
+        (ln,) = [x for x in F.how_to_acknowledge(unit, "x").splitlines() if x.lstrip().startswith("①")]
+        return ln
+
+    def test_wording_follows_protocol_truncation_set(self):
+        h1 = F._h1_truncation_signals()
+        assert h1 == frozenset(F.H1_OBS_SIGNALS)          # 修订 5：取数层伪节点（修订 4 为三个情绪通道）
+        for unit, spec in F.UNITS.items():
+            ln = self._line(unit)
+            if set(spec["signals"]) & h1:
+                assert "截断维度 IC 协议的 H1" in ln, (unit, ln)
+            else:
+                assert "不截断 H1" in ln and "会截断" not in ln, (unit, ln)
+        assert "只截断描述项 buzz_v1" in self._line("buzz.channels"), "修订 5 起 buzz.* 只关系到描述项，要说清"
+        for unit in ("obs.reddit", "obs.news", "obs.yahoo", "obs.links", "h1.frozen"):
+            assert "截断维度 IC 协议的 H1" in self._line(unit), unit
+
+    def test_raw_unchanged_option_only_offered_to_obs_units(self):
+        assert "raw_unchanged" in F.how_to_acknowledge("obs.news", "x")
+        assert "raw_unchanged" not in F.how_to_acknowledge("buzz.news", "x")
+
+    def test_unreadable_protocol_falls_back_to_worst_case(self, monkeypatch):
+        monkeypatch.setattr(F, "_h1_truncation_signals", lambda: None)
+        assert "可能截断维度 IC 协议的 H1" in self._line("price.fields")
 
 
 class TestDependencyClosure:
@@ -555,11 +589,97 @@ class TestCoverage:
         """多一个信号 ⇒ 不相干的改动也要求确认；少一个 ⇒ 那个输入没人守。"""
         P = _protocol()
         covered = {s for u in F.UNITS.values() for s in u["signals"]}
-        assert covered == set(P.H1_V1_INPUT_SIGNALS)      # 修订 4 起 = buzz_v1 的输入层（H1 的三个通道是它的子集）
-        assert set(P.H1_INPUT_SIGNALS) <= covered
+        # 修订 5 起 = buzz_v1 的输入层（描述项）+ H1 的取数层伪节点
+        assert covered == set(P.H1_V1_INPUT_SIGNALS) | set(P.H1_INPUT_SIGNALS)
+        assert set(P.H1_INPUT_SIGNALS) == set(F.H1_OBS_SIGNALS)
+
+    def test_only_obs_and_frozen_units_touch_h1(self):
+        """修订 5：挡 H1 检视点的恰好是五个取数 / 冻结层单元；buzz.* / price.fields 一个都不碰 H1 的截断集合。"""
+        P = _protocol()
+        gating = {u for u, spec in F.UNITS.items() if set(spec["signals"]) & set(P.H1_INPUT_SIGNALS)}
+        assert gating == {"obs.reddit", "obs.news", "obs.yahoo", "obs.links", "h1.frozen"}
+        assert all(set(F.UNITS[u]["signals"]) <= set(F.H1_OBS_SIGNALS) for u in gating)
 
     def test_frozen_layer_signals_are_not_guarded_here(self):
         """冻结层由冻结评分器吸收，不该出现在输入层守卫里。"""
         P = _protocol()
         covered = {s for u in F.UNITS.values() for s in u["signals"]}
         assert not covered & set(P.H1_FROZEN_LAYER_SIGNALS)
+
+
+# ── 6. 修订 5：取数层单元（v0.45.712，协议 §13.14）──────────────────────────────
+
+_OBS5 = ("obs.reddit", "obs.news", "obs.yahoo", "obs.links", "h1.frozen")
+_ALL_BASE: dict = {}
+
+
+def _changed_all(read):
+    if not _ALL_BASE:
+        _ALL_BASE.update({u: _fp(u) for u in F.UNITS})
+    return {u for u in F.UNITS if _fp(u, read) != _ALL_BASE[u]}
+
+
+class TestObsUnits:
+    """判别：obs 单元若整模块定位（像 buzz.*），下面「只改解释」的每一条都会让它变 ⇒ 改解释也截断 H1，修订 5 白做；
+    若切片切漏了，「改取数」那几条就不变 ⇒ 改了 H1 读到的原始观测却没人红。两个方向各钉一组。"""
+
+    @pytest.mark.parametrize("rel,old,new,want", [
+        # 改取数 / 链接 / 冻结层 ⇒ 对应单元变
+        ("reddit_sentiment.py", "timeout=15,", "timeout=20,", {"obs.reddit", "buzz.reddit"}),
+        ("reddit_sentiment.py", 'wsb = self._fetch_ranking("wallstreetbets")', 'wsb = self._fetch_ranking("stocks")',
+         {"obs.reddit", "buzz.reddit"}),
+        ("yahoo_trending.py", "    if not trending:\n", "    if trending is None:\n", {"obs.yahoo", "buzz.yahoo"}),
+        ("newsapi_client.py", "    if not articles:\n        return _fallback(ticker)",
+         "    if len(articles) < 2:\n        return _fallback(ticker)", {"obs.news", "buzz.news"}),
+        ("config.py", '"primary": "massive",', '"primary": "alpha_vantage",', {"obs.news", "buzz.news"}),
+        ("swarm_agents/buzz_bee.py", "get_ticker_news(ticker, max_articles=10)", "get_ticker_news(ticker, max_articles=20)",
+         {"obs.links", "buzz.channels"}),
+        ("observation_archive.py", 'exp = bool(isinstance(d, Mapping) and d.get("is_real_data"))',
+         "exp = isinstance(d, Mapping)", {"obs.links"}),
+        ("signal_archive.py", "link_rows(swarm_results, date) if only is None else []",
+         "link_rows(swarm_results, date)", {"obs.links"}),
+        ("buzz_v1_channels.py", "NEWS_MIN_ARTICLES = 3", "NEWS_MIN_ARTICLES = 4", {"h1.frozen"}),
+        # 只改解释 ⇒ 只有 buzz.* 变，obs / h1 一个都不变
+        ("reddit_sentiment.py", "score = 5.0  # 基准", "score = 5.5  # 基准", {"buzz.reddit"}),
+        ("yahoo_trending.py", "score = 8.5", "score = 9.0", {"buzz.yahoo"}),
+        ("newsapi_client.py", '_MASSIVE_LABELS = {"positive": "bullish"', '_MASSIVE_LABELS = {"positive": "neutral"',
+         {"buzz.news"}),
+        ("swarm_agents/buzz_bee.py", 'news_ext.get("total_articles", 0) >= 3:', 'news_ext.get("total_articles", 0) >= 4:',
+         {"buzz.channels"}),
+    ], ids=["reddit取数超时", "reddit换榜", "热搜空表判据", "新闻兜底判据", "新闻主源开关", "Buzz取新闻条数",
+            "溯源块expected", "链接写入条件", "冻结层常数",
+            "reddit打分常数", "热搜打分常数", "Massive标签映射", "Buzz新闻通道阈值"])
+    def test_exactly_the_right_units_move(self, rel, old, new, want):
+        assert _changed_all(_mutated(rel, old, new)) == want
+
+    def test_seed_name_gone_raises(self):
+        """切片按名字认：名字一个都匹配不上（改名了）⇒ 抛，不当作「没变」——否则确认一次之后那段取数就永远没人守。"""
+        read = _mutated("yahoo_trending.py", "trending = get_trending_tickers()", "trending = get_hot_tickers()")
+        with pytest.raises(F.FingerprintError):
+            _fp("obs.yahoo", read)
+
+    def test_before_assign_marker_gone_raises(self):
+        read = _mutated("newsapi_client.py", "    raw_count = len(articles)\n", "    n_raw = len(articles)\n")
+        with pytest.raises(F.FingerprintError):
+            _fp("obs.news", read)
+
+    def test_stale_stop_is_reported(self, monkeypatch):
+        """停点改名 / 搬走 ⇒ 闭包碰不到它 ⇒ 过期条目，必须红（否则停的位置早已不对、没人知道）。"""
+        assert F.exemption_problems() == []
+        spec = dict(F.UNITS["obs.news"], stop=F.UNITS["obs.news"]["stop"] + (("newsapi_client.py", "_no_such_fn"),))
+        monkeypatch.setitem(F.UNITS, "obs.news", spec)
+        assert any("_no_such_fn" in p for p in F.exemption_problems())
+
+    def test_stop_actually_stops(self, monkeypatch):
+        """去掉停点 ⇒ 解释函数进闭包（证明停点不是摆设）。"""
+        assert "newsapi_client.py::_from_massive" not in F.unit_dependencies("obs.news")
+        monkeypatch.setitem(F.UNITS, "obs.news", {k: v for k, v in F.UNITS["obs.news"].items() if k != "stop"})
+        assert "newsapi_client.py::_from_massive" in F.unit_dependencies("obs.news")
+
+    def test_raw_unchanged_is_only_for_obs_units(self):
+        base = [(u, _FP, "baseline", _NOTE) for u in F.UNITS]
+        assert F.registry_problems(base + [("obs.news", _FP, "raw_unchanged", _NOTE)], _HIST, _SCOPE) == []
+        probs = F.registry_problems(base + [("buzz.news", _FP, "raw_unchanged", _NOTE)], _HIST, _SCOPE)
+        assert any("只许取数单元" in p for p in probs), probs
+        probs = F.registry_problems(base + [("obs.news", _FP, "raw_unchanged", "短")], _HIST, _SCOPE)
+        assert any("凭什么" in p for p in probs), probs

@@ -14,6 +14,8 @@
    「窗口开始前」的修订真的早于窗口；边界声明「点名通道必连带点名分」（协议 §6 按层声明）。
 6. 修订 4（v0.45.708）：H1 = buzz_v1_np（三个非价格通道的线性子合成），截断集合恰好是这三个通道；
    修订 1 的分层常量改归描述项 buzz_v1；子合成权重与 buzz_v1 的冻结权重、生产 config 三处一致。
+7. 修订 5（v0.45.712）：H1 的截断集合换成取数层 `obs.*`（与指纹守卫的 `H1_OBS_SIGNALS` 同一组）；档案起点与
+   之前那段的哈希写进文档；原 H2 降为描述项 `H2_DESCRIPTIVE`，固定序列只剩 H1。
 """
 from __future__ import annotations
 
@@ -56,7 +58,8 @@ class TestRegisteredConstants:
             ("2026-09-23", "事后·窗口开始前、零数据"),
             ("2026-10-13", "事后·窗口内、被排除日的结果尚不存在"),
             ("2026-10-22", "事后·窗口内、只加敏感性分析（主分析不变）"),
-            ("2026-11-03", "事后·窗口内、只看过输入不看收益")]
+            ("2026-11-03", "事后·窗口内、只看过输入不看收益"),
+            ("2026-11-04", "事后·窗口内、只看过输入不看收益")]
         assert proto.AMENDMENTS[0][2] == "修订 1：窗口推迟到 2026-10-12；H1 对象改为冻结版 Buzz 评分 v1（buzz_v1）"
         assert all(s.startswith(f"修订 {i}：") for i, (_d, _k, s) in enumerate(proto.AMENDMENTS, 1))
 
@@ -65,7 +68,8 @@ class TestRegisteredConstants:
         assert proto.HYPOTHESES[0][1] == "buzz_v1_np"
         assert proto.H1_NP_WEIGHTS == {"reddit_signal": 0.25, "news_signal": 0.25, "yahoo_signal": 0.05}
         assert list(proto.H1_NP_WEIGHTS) == ["reddit_signal", "news_signal", "yahoo_signal"]   # 加法顺序
-        assert proto.H1_INPUT_SIGNALS == ("buzz.comp.reddit_signal", "buzz.comp.news_signal", "buzz.comp.yahoo_signal")
+        assert proto.H1_CHANNEL_SIGNALS == ("buzz.comp.reddit_signal", "buzz.comp.news_signal", "buzz.comp.yahoo_signal")
+        assert proto.H1_INPUT_SIGNALS == ("obs.reddit", "obs.news", "obs.yahoo")      # 修订 5：截断集合 = 取数层
         assert proto.H1_V1_INPUT_SIGNALS == _BUZZ_CHANNELS + (
             "price.momentum_5d", "price.volume_ratio", "price.volatility_20d", "market.fear_greed")
         assert proto.H1_V1_DESCRIPTIVE == ("buzz_v1", proto.H1_V1_INPUT_SIGNALS + proto.H1_FROZEN_LAYER_SIGNALS)
@@ -86,6 +90,15 @@ class TestRegisteredConstants:
         scope = sa.COHORT_SIGNAL_SCOPE[proto.H1_ANCHOR_VERSION]
         assert scope and set(scope) <= set(proto.H1_FROZEN_LAYER_SIGNALS)
 
+    def test_revision_5_constants(self):
+        """修订 5：档案起点、之前那段的行数与哈希逐值钉住（改它们 = 改 H1 的定义）。"""
+        assert proto.H1_ARCHIVE_START == "2026-10-20"
+        assert proto.H1_PRE_ARCHIVE_ROWS == 450
+        assert proto.H1_PRE_ARCHIVE_SHA256 == "60df3c1f7ee096a9d345ffe19548bfb51455081df1a7545ad16edec2dca42cee"
+        assert proto.H2_DESCRIPTIVE == ("weighted_composite", ("agent.ChronosBeeHorizon.score",
+                                                               "agent.BuzzBeeWhisper.score",
+                                                               "agent.OracleBeeEcho.score"))
+
     def test_looks_and_test_shape(self):
         assert proto.LOOKS == ((26, 0.01, "中检"), (52, 0.04, "终检"))
         assert proto.TWO_SIDED is True
@@ -97,9 +110,9 @@ class TestRegisteredConstants:
         assert set(proto.FORBIDDEN_OUTCOME_COLUMNS) == {"price_t7", "return_t7"}
 
     def test_hypotheses_order_and_objects(self):
-        assert [h[0] for h in proto.HYPOTHESES] == ["H1", "H2"]
+        assert [h[0] for h in proto.HYPOTHESES] == ["H1"]        # 修订 5：H2 降为描述项
         assert proto.HYPOTHESES[0][1] == "buzz_v1_np"            # 修订 4（修订 1 为 "buzz_v1"，原登记 "sentiment"）
-        assert proto.HYPOTHESES[1][1] == "weighted_composite"
+        assert proto.H2_DESCRIPTIVE[0] == "weighted_composite"
 
     def test_frozen_weights(self):
         assert proto.FROZEN_WEIGHTS == {
@@ -129,7 +142,7 @@ def _doc_mismatches(p, doc: str) -> list:
             need[f"FROZEN_WEIGHTS[{dim}]"] = f"{dim} {w:g}"
     # H1（修订 4）：现行对象名写成「H1 的对象 = **名字**」（只出现在现行定义处，旧名不会碰巧命中）；
     # 每个截断信号的全名都写在 §6 / §13（带反引号）；子合成权重按「`通道` × 权重」写在 §13.13。
-    # H2 在 §6 按蜂的短名列（「Chronos / Buzz / Oracle 三只蜂」）
+    # 描述项 weighted_composite（修订 5 前为 H2）在 §6 按蜂的短名列（「Chronos / Buzz / Oracle 三只蜂」）
     need["H1 对象"] = f"H1 的对象 = **{p.HYPOTHESES[0][1]}**"
     for s in p.HYPOTHESES[0][2]:
         need[f"H1 截断信号 {s}"] = f"`{s}`"
@@ -137,8 +150,12 @@ def _doc_mismatches(p, doc: str) -> list:
         need[f"H1_NP_WEIGHTS[{c}]"] = f"`{c}` × {w:g}"
     for s in p.H1_V1_DESCRIPTIVE[1]:
         need[f"描述项 buzz_v1 截断信号 {s}"] = f"`{s}`"
-    for s in p.HYPOTHESES[1][2]:
-        need[f"H2 截断信号 {s}"] = s.split(".")[1].split("Bee")[0]
+    for s in p.H2_DESCRIPTIVE[1]:
+        need[f"weighted_composite 截断信号 {s}"] = s.split(".")[1].split("Bee")[0]
+    # 修订 5：档案起点、之前那段的行数与哈希都按「`常量 = 值`」写在 §13.14
+    need["H1_ARCHIVE_START"] = f"`H1_ARCHIVE_START = {p.H1_ARCHIVE_START}`"
+    need["H1_PRE_ARCHIVE_ROWS"] = f"`H1_PRE_ARCHIVE_ROWS = {p.H1_PRE_ARCHIVE_ROWS}`"
+    need["H1_PRE_ARCHIVE_SHA256"] = f"`H1_PRE_ARCHIVE_SHA256 = {p.H1_PRE_ARCHIVE_SHA256}`"
     need["H1 生产维度"] = f"`dimension_scores.{p.H1_PRODUCTION_DIM}`"
     need["H1 锚点"] = ("`H1_ANCHOR_VERSION`" if p.H1_ANCHOR_VERSION is None
                      else f"`H1_ANCHOR_VERSION = {p.H1_ANCHOR_VERSION}`")
@@ -173,20 +190,21 @@ class TestConstantsMatchDocument:
         {"LOOKS": ((20, 0.01, "中检"), (52, 0.04, "终检"))},
         {"FROZEN_WEIGHTS": {**proto.FROZEN_WEIGHTS, "catalyst": 0.4}},
         {"OUTCOME_COLUMN": "price_t7"},
-        {"HYPOTHESES": (("H1", "buzz_v1", ("agent.ScoutBeeNova.score",)), proto.HYPOTHESES[1])},
-        {"HYPOTHESES": (("H1", "buzz_v1", proto.HYPOTHESES[0][2] + ("options.iv_rank",)),
-                        proto.HYPOTHESES[1])},
-        {"HYPOTHESES": (("H1", "sentiment", proto.HYPOTHESES[0][2]), proto.HYPOTHESES[1])},
-        {"HYPOTHESES": (("H1", "buzz_v1", proto.HYPOTHESES[0][2]), proto.HYPOTHESES[1])},
+        {"HYPOTHESES": (("H1", "buzz_v1_np", ("agent.ScoutBeeNova.score",)),)},
+        {"HYPOTHESES": (("H1", "buzz_v1_np", proto.HYPOTHESES[0][2] + ("options.iv_rank",)),)},
+        {"HYPOTHESES": (("H1", "sentiment", proto.HYPOTHESES[0][2]),)},
+        {"HYPOTHESES": (("H1", "buzz_v1", proto.HYPOTHESES[0][2]),)},
         {"H1_NP_WEIGHTS": {**proto.H1_NP_WEIGHTS, "yahoo_signal": 0.1}},
-        {"HYPOTHESES": (proto.HYPOTHESES[0], ("H2", "weighted_composite",
-                                              proto.HYPOTHESES[1][2] + ("agent.GuardBeeSentinel.score",)))},
+        {"H2_DESCRIPTIVE": ("weighted_composite", proto.H2_DESCRIPTIVE[1] + ("agent.GuardBeeSentinel.score",))},
+        {"H1_ARCHIVE_START": "2026-10-21"},
+        {"H1_PRE_ARCHIVE_ROWS": 449},
+        {"H1_PRE_ARCHIVE_SHA256": "0" * 64},
         {"H1_PRODUCTION_DIM": "odds"},
         {"H1_ANCHOR_VERSION": "v0.45.999"},
         {"AMENDMENTS": proto.AMENDMENTS + (("2026-10-01", "事后·窗口开始前、零数据", "修订 2"),)},
     ], ids=["窗口起点", "窗口起点回到原登记", "宽度", "NW滞后", "α拆分", "中检周数", "冻结权重", "结果变量",
             "H1截断信号换蜂", "H1截断信号多一个", "H1对象回到原登记", "H1对象回到修订1", "H1子合成权重",
-            "H2截断信号", "H1生产维度",
+            "描述项wc截断信号", "档案起点", "档案前行数", "档案前哈希", "H1生产维度",
             "H1锚点", "多一条修订"])
     def test_checker_has_teeth(self, over):
         """只改常量、不改文档 ⇒ 检查必须报出不一致。"""
@@ -229,15 +247,19 @@ class TestInternalConsistency:
         assert "sentiment" not in proto.DESCRIPTIVE_DIMS
 
     def test_h1_truncation_signals_are_the_three_channels(self):
-        """修订 4：执行器只读 HYPOTHESES；它的 H1 截断集合 = 子合成用的通道，一个不多一个不少，且都在 buzz_v1 的输入层里。"""
+        """修订 4：子合成用的通道 = 三个情绪通道，都在 buzz_v1 的输入层里。修订 5：执行器只读 HYPOTHESES，它的 H1 截断集合
+        = 取数层伪节点，一个通道一个、与指纹守卫的 `H1_OBS_SIGNALS` 同一组（两处各写一份，对不上就红）。"""
+        import signal_code_fingerprints as scf
         assert proto.HYPOTHESES[0][2] == proto.H1_INPUT_SIGNALS
-        assert set(proto.H1_INPUT_SIGNALS) == {f"buzz.comp.{c}" for c in proto.H1_NP_WEIGHTS}
-        assert set(proto.H1_INPUT_SIGNALS) < set(proto.H1_V1_INPUT_SIGNALS)
+        assert set(proto.H1_CHANNEL_SIGNALS) == {f"buzz.comp.{c}" for c in proto.H1_NP_WEIGHTS}
+        assert set(proto.H1_CHANNEL_SIGNALS) < set(proto.H1_V1_INPUT_SIGNALS)
+        assert proto.H1_INPUT_SIGNALS == tuple(f"obs.{c.split('_')[0]}" for c in proto.H1_NP_WEIGHTS)
+        assert proto.H1_INPUT_SIGNALS == scf.H1_OBS_SIGNALS
         assert not set(proto.H1_INPUT_SIGNALS) & set(proto.H1_FROZEN_LAYER_SIGNALS)
 
     def test_h1_has_no_price_or_fear_greed_input(self):
         """修订 4 的全部意义：H1 不读任何价格通道、行情量或 F&G。"""
-        for s in proto.H1_INPUT_SIGNALS:
+        for s in proto.H1_CHANNEL_SIGNALS:
             assert not s.startswith(("price.", "market.")), s
             assert s not in ("buzz.comp.momentum_signal", "buzz.comp.volume_signal",
                              "buzz.comp.volatility_signal", "buzz.comp.fear_greed_signal"), s
@@ -255,7 +277,7 @@ class TestInternalConsistency:
         """H2 截断信号 = 冻结权重非零的那几维的蜂。多了会误截断，少了会漏截断。"""
         want = {f"agent.{proto.DIM_TO_AGENT[d]}.score"
                 for d, w in proto.FROZEN_WEIGHTS.items() if w}
-        assert set(proto.HYPOTHESES[1][2]) == want
+        assert set(proto.H2_DESCRIPTIVE[1]) == want
 
 
 # ── 4. 外部事实 ──────────────────────────────────────────────────────────────
@@ -274,7 +296,7 @@ class TestExternalFacts:
     def test_truncation_signals_are_known_to_signal_archive(self):
         import signal_archive as sa
         known = set(sa.SIGNAL_EXTRACTORS) | set(sa.UNARCHIVED_NODES)
-        for _hid, _obj, sigs in proto.HYPOTHESES:
+        for _hid, _obj, sigs in proto.HYPOTHESES + (("weighted_composite",) + proto.H2_DESCRIPTIVE,):
             for s in sigs:
                 assert s in known, (f"{s} 不在 signal_archive 的已知信号里 ⇒ generation_boundaries() "
                                     f"会让它受全部边界约束，截断规则静默退化")
@@ -288,7 +310,7 @@ class TestExternalFacts:
         import signal_archive as sa
         archived = {s for s in sa.SIGNAL_EXTRACTORS if s.startswith("buzz.comp.")}
         assert {s for s in proto.H1_V1_INPUT_SIGNALS if s.startswith("buzz.comp.")} == archived
-        assert set(proto.H1_INPUT_SIGNALS) <= archived
+        assert set(proto.H1_CHANNEL_SIGNALS) <= archived
 
     def test_buzz_v1_channels_are_the_config_buzz_weights(self):
         """通道集合的第二个来源：生产合成读的 `AGENT_SCORING["buzz_weights"]`。"""

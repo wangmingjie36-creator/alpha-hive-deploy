@@ -518,32 +518,37 @@ def _need(load: Loader, sha: Any, what: str) -> Mapping:
 
 
 def sentiment_channels(ticker: str, block: Mapping, load: Loader) -> Dict[str, float]:
-    """四个情绪通道。`expected=False` 的通道 = 生产当时没拿到真实数据 ⇒ 中性（与生产同值同类型）。"""
+    """四个情绪通道。
+
+    有没有数据**按地址判断**（维度 IC 协议修订 5，v0.45.712），不读生产写的 `expected` 标志——否则生产改了
+    「什么时候算取数失败」就会经这个标志漏进 H1：地址为空 ⇒ 中性（生产取数失败时的定义，同值同类型）；
+    地址在、档案里有 ⇒ 算；地址在、档案里没有 ⇒ `IncompleteObservations`（调用方排除该行，不补值）。
+    登记时 10-20 至 11-03 共 330 行，四个通道都满足「`expected` 为真 ⇔ 地址在」，按哪个判结果逐位相同。
+    """
     out: Dict[str, float] = {}
     for ch in ("reddit", "news", "yahoo", "fear_greed"):
         if not isinstance(block.get(ch), Mapping):
             raise IncompleteObservations(f"溯源块里没有 {ch}")
-    r = block["reddit"]
-    if r.get("expected"):
-        ref = r.get("ref")
+    ref = block["reddit"].get("ref")
+    if ref is not None:
         if not isinstance(ref, Mapping):
-            raise IncompleteObservations("Reddit 缺链接")
+            raise IncompleteObservations(f"Reddit 的地址形状不对（{type(ref).__name__}）")
         lists = {f: _need(load, ref.get(f), f"Reddit {f}")["payload"]["results"] for f in ("all-stocks", "wallstreetbets")}
         out["reddit_signal"] = reddit_signal(ticker, lists["all-stocks"], lists["wallstreetbets"])
     else:
         out["reddit_signal"] = 50
-    n = block["news"]
-    if n.get("expected"):
-        doc = _need(load, n.get("ref"), "新闻")
+    ref = block["news"].get("ref")
+    if ref is not None:
+        doc = _need(load, ref, "新闻")
         out["news_signal"] = news_signal(doc["kind"], doc["payload"])
     else:
         out["news_signal"] = 50
-    y = block["yahoo"]
-    out["yahoo_signal"] = (yahoo_signal(ticker, _need(load, y.get("ref"), "热搜")["payload"]["symbols"])
-                           if y.get("expected") else NEUTRAL)
-    f = block["fear_greed"]
-    if f.get("expected"):
-        doc = _need(load, f.get("ref"), "F&G")
+    ref = block["yahoo"].get("ref")
+    out["yahoo_signal"] = (yahoo_signal(ticker, _need(load, ref, "热搜")["payload"]["symbols"])
+                           if ref is not None else NEUTRAL)
+    ref = block["fear_greed"].get("ref")
+    if ref is not None:
+        doc = _need(load, ref, "F&G")
         out["fear_greed_signal"] = fear_greed_signal(doc["kind"], doc["payload"])
     else:
         out["fear_greed_signal"] = NEUTRAL

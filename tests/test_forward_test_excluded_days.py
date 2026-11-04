@@ -13,6 +13,8 @@ from __future__ import annotations
 import datetime as dt
 import importlib.util
 import json
+
+import pytest
 from pathlib import Path
 
 
@@ -32,6 +34,14 @@ def _load(name, rel):
 
 fx = _load("dim_ic_forward_test_x", "experiments/dim_ic_forward_test.py")
 P = _load("dim_ic_protocol_x", "experiments/dim_ic_protocol.py")
+
+
+@pytest.fixture(autouse=True)
+def _pre_archive_segment_only(monkeypatch):
+    """修订 5（v0.45.712）：H1 通道 `H1_ARCHIVE_START` 起由观测档案重算、之前按登记哈希核对。本文件的合成夹具写在
+    `signal_archive`、测的是排除日 / 日健康口径 ⇒ 把档案起点推到远期，并让执行器经 `_protocol()` 取到同一个 P。"""
+    monkeypatch.setattr(P, "H1_ARCHIVE_START", "9999-12-31")
+    monkeypatch.setattr(fx, "_protocol", lambda: P)
 fwd = _load("resonance_boost_forward_test_x", "experiments/resonance_boost_forward_test.py")
 
 

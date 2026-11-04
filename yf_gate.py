@@ -83,7 +83,9 @@ _orig_ticker = None
 
 # 观测计数：供覆盖率闸/日志核对「跑完了吗」，永远不看退出标语。
 # ok / consecutive_429 / last_ok_at 只给日志与排查用（v0.45.675：谁、第几次连续 429、距上次成功多久），不参与任何决定。
-_stats = {"calls": 0, "rate_limited": 0, "blocked_by_cooldown": 0, "ok": 0, "consecutive_429": 0}
+_stats = {"calls": 0, "rate_limited": 0, "blocked_by_cooldown": 0, "ok": 0, "consecutive_429": 0,
+          # v0.45.716：`yf_cooldown_wait.CooldownWaitBudget` 的结局——等过几次冷却、墙钟共等了几秒、因预算 / 单次上限没等几次
+          "cooldown_waits": 0, "cooldown_wait_s": 0.0, "cooldown_wait_refused": 0}
 _cooldown_until = 0.0
 _last_ok_at = 0.0          # time.monotonic()；0 = 本进程还没成功过
 
@@ -161,6 +163,23 @@ def retry_after_sec(minimum: float = 0.0) -> float:
     with _lock:
         rem = _cooldown_until - time.monotonic()
     return max(float(minimum), rem)
+
+
+def cooldown_deadline() -> float:
+    """当前冷却段的截止时刻（`time.monotonic()` 口径；≤ 现在 = 不在冷却）。只读——`yf_cooldown_wait` 用它认「同一段冷却」（v0.45.716）。"""
+    with _lock:
+        return _cooldown_until
+
+
+def note_cooldown_wait(waited_s: float = 0.0, refused: bool = False) -> None:
+    """`yf_cooldown_wait.CooldownWaitBudget` 的结局计数（v0.45.716），经 `stats()` 进 scan_timing。
+    等待逻辑刻意不放在本模块：闸门只管「429 = 现在就停」，本模块不含任何循环 / 睡眠（守卫 `test_yf_rate_limit_handling`）。"""
+    with _lock:
+        if refused:
+            _stats["cooldown_wait_refused"] += 1
+        else:
+            _stats["cooldown_waits"] += 1
+            _stats["cooldown_wait_s"] += round(float(waited_s), 1)
 
 
 def _enter_cooldown(reason: str) -> None:

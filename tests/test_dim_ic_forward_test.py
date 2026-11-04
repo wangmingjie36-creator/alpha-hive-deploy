@@ -81,6 +81,15 @@ def _self_proof_ok(monkeypatch):
     monkeypatch.setattr(fx, "buzz_v1_bridge", lambda db, today: dict(_BR_OK))
 
 
+@pytest.fixture(autouse=True)
+def _pre_archive_segment_only(monkeypatch):
+    """修订 5（v0.45.712）：`H1_ARCHIVE_START` 起 H1 的通道从观测档案重算、之前那段按登记哈希核对。合成夹具的日期相对
+    FORWARD_START 写、通道写在 `signal_archive`——把档案起点推到远期，这些夹具测的仍是「存档值那段」的算术；
+    执行器经 `_protocol()` 取到的也是同一个（被改过的）P。两段的切换与哈希核对由 TestRevision5 单独测。"""
+    monkeypatch.setattr(P, "H1_ARCHIVE_START", "9999-12-31")
+    monkeypatch.setattr(fx, "_protocol", lambda: P)
+
+
 DIMS = ("signal", "catalyst", "sentiment", "odds", "risk_adj")
 _TOP_KEYS_ALWAYS = {"forward_start", "today", "status", "h1_weeks", "next_look_at", "looks_done",
                     "verdicts", "truncation", "weight_change", "stale", "h1_anchor",
@@ -89,7 +98,8 @@ _TOP_KEYS_ALWAYS = {"forward_start", "today", "status", "h1_weeks", "next_look_a
                     "buzz_v1_self_proof",           # v0.45.556：自证计数与窗口，不含效应量
                     "buzz_v1_bridge",               # v0.45.583：桥接核对计数与状态，不含效应量
                     "day_health",                   # v0.45.598：窗口内数据源故障日的日期与字段名，不含效应量
-                    "sensitivity_excl_outage_days"}  # v0.45.605（修订 3）：未出结论时只有计数，结论只在主分析也出结论时露出
+                    "sensitivity_excl_outage_days",  # v0.45.605（修订 3）：未出结论时只有计数，结论只在主分析也出结论时露出
+                    "h1_excluded"}                   # v0.45.712（修订 5）：H1 排除的行数、按日计数与原因，不含效应量
 
 #: 窗口首日（周一）。窗口内的夹具日期一律相对它写——修订 1 把起点从 09-28 挪到 10-12 时，
 #: 写死的日期整批落到窗口前，测试红的原因变成「夹具过期」而不是「执行器错了」
@@ -193,7 +203,7 @@ def _all_keys(obj):
 class TestDataLayer:
     def _h1(self, rows, **kw):
         it = fx.items(P)["H1"]
-        return fx.weekly_series(rows, it["value"], it["signals"], P, **kw)
+        return fx.weekly_series(rows, it["value"], it.get("quarantine", it["signals"]), P, **kw)
 
     def test_reads_close_t7_not_price_t7(self, tmp_path):
         """判别：close_t7 与 sentiment 同向、price_t7/return_t7 反向。读对列 ⇒ IC=+1。"""
@@ -291,11 +301,12 @@ class TestDataLayer:
         loaded = fx.load_rows(_make_db(tmp_path, rows), P, _TODAY)
         assert len(self._h1(loaded, truncate_at=_d(7))) == 1
 
-    def test_h2_requires_all_five_dims(self, tmp_path):
+    def test_weighted_composite_requires_all_five_dims(self, tmp_path):
+        """描述项 weighted_composite（修订 5 前为 H2）只用 5 维齐全的标的。"""
         rows = _day_rows(_d(0), width_dims=("catalyst", "sentiment", "odds"))
         loaded = fx.load_rows(_make_db(tmp_path, rows), P, _TODAY)
-        h2 = fx.items(P)["H2"]
-        assert fx.weekly_series(loaded, h2["value"], h2["signals"], P) == []
+        wc = fx.items(P)["weighted_composite"]
+        assert fx.weekly_series(loaded, wc["value"], wc["signals"], P) == []
 
     def test_truncated_outcome_fingerprint_is_cannot_judge(self, tmp_path):
         db = _make_db(tmp_path, _day_rows(_d(0), sltp_truncated=True))
@@ -344,7 +355,7 @@ class TestStatistics:
         assert s["t"] == pytest.approx(2.68)
         assert math.erfc(2.68 / math.sqrt(2)) < 0.01, "前提：正态近似在这里会拒绝"
         assert s["p"] == pytest.approx(0.01285, abs=2e-4) and not s["reject"]
-        res = fx.decide(_weeks(vals), _weeks(vals), P)
+        res = fx.decide(_weeks(vals), P)
         assert res["status"] == "in_progress" and res["verdicts"] == {}
 
     def test_too_few_weeks_is_not_testable(self):
@@ -363,82 +374,70 @@ class TestStatistics:
 # ── 3. 检视 + 固定序列 + 盲化 ────────────────────────────────────────────────
 
 class TestDecide:
+    """修订 5（§13.14）：固定序列只剩 H1。原 H2 降为描述项 weighted_composite——不进 verdicts、不挡结论、只在协议结束时报。"""
+
     def test_below_first_look_reports_progress_only(self):
-        res = fx.decide(_weeks(_series(20, 9.0)), _weeks(_series(20, 9.0)), P)
+        res = fx.decide(_weeks(_series(20, 9.0)), P)
         assert res["status"] == "not_ready" and res["verdicts"] == {}
-        assert res["next_look_at"] == 26 and "descriptive" not in res
+        assert res["next_look_at"] == 26 and "descriptive" not in res and "descriptive_extra" not in res
 
     def test_interim_not_crossed_reveals_nothing(self):
-        res = fx.decide(_weeks(_series(30, 1.0)), _weeks(_series(30, 1.0)), P,
-                        descriptive={"odds": _weeks(_series(30, 5.0))})
+        res = fx.decide(_weeks(_series(30, 1.0)), P, descriptive={"odds": _weeks(_series(30, 5.0))},
+                        extra={"weighted_composite": _weeks(_series(30, 5.0))})
         assert res["status"] == "in_progress" and res["looks_done"] == ["中检"]
-        assert res["verdicts"] == {} and "descriptive" not in res
+        assert res["verdicts"] == {} and "descriptive" not in res and "descriptive_extra" not in res
 
-    def test_interim_both_rejected_concludes(self):
-        res = fx.decide(_weeks(_series(26, 5.0)), _weeks(_series(26, 4.5)), P,
-                        descriptive={d: _weeks(_series(26, 0.5)) for d in P.DESCRIPTIVE_DIMS})
+    def test_interim_rejected_concludes_with_h1_only(self):
+        """判别：修订 5 前 H1 中检拒绝、H2 不拒绝 ⇒ 仍 in_progress（等 H2 终检）；现在 H1 一拒绝协议就结束。"""
+        res = fx.decide(_weeks(_series(26, 5.0)), P,
+                        descriptive={d: _weeks(_series(26, 0.5)) for d in P.DESCRIPTIVE_DIMS},
+                        extra={"weighted_composite": _weeks(_series(26, 0.5)), "buzz_v1": _weeks(_series(26, 4.0))})
         assert res["status"] == "concluded"
-        assert {h: v["result"] for h, v in res["verdicts"].items()} == {
-            "H1": "significant_positive", "H2": "significant_positive"}
+        assert {h: v["result"] for h, v in res["verdicts"].items()} == {"H1": "significant_positive"}
         assert set(res["descriptive"]) == set(P.DESCRIPTIVE_DIMS)
-
-    def test_h2_not_rejected_at_interim_stays_blinded(self):
-        res = fx.decide(_weeks(_series(30, 5.0)), _weeks(_series(30, 0.5)), P,
-                        descriptive={"odds": _weeks(_series(30, 5.0))})
-        assert res["status"] == "in_progress"
-        assert set(res["verdicts"]) == {"H1"}
-        assert "descriptive" not in res
+        assert set(res["descriptive_extra"]) == {"weighted_composite", "buzz_v1"}
+        assert not any("action" in t or "result" in t for t in res["descriptive_extra"].values()), "描述项不带动作"
 
     def test_interim_uses_only_the_first_26_weeks(self):
         h1 = _weeks(_series(26, 5.0) + [-50.0] * 10)
-        res = fx.decide(h1, _weeks(_series(36, 4.0)), P)
+        res = fx.decide(h1, P)
         assert res["verdicts"]["H1"]["result"] == "significant_positive"
         assert res["verdicts"]["H1"]["G"] == 26
 
-    def test_final_h1_not_significant_concludes_and_h2_not_tested(self):
-        res = fx.decide(_weeks(_series(52, 0.3)), _weeks(_series(52, 6.0)), P)
+    def test_final_h1_not_significant_concludes(self):
+        res = fx.decide(_weeks(_series(52, 0.3)), P, extra={"weighted_composite": _weeks(_series(52, 6.0))})
         assert res["status"] == "concluded"
-        assert res["verdicts"]["H1"]["result"] == "not_significant"
-        assert res["verdicts"]["H1"]["look"] == "终检"
-        assert res["verdicts"]["H2"]["result"] == "not_tested"
+        assert set(res["verdicts"]) == {"H1"}
+        assert res["verdicts"]["H1"]["result"] == "not_significant" and res["verdicts"]["H1"]["look"] == "终检"
+        assert res["descriptive_extra"]["weighted_composite"]["testable"]
 
-    def test_h1_rejected_at_final_then_h2_tested_at_final_alpha(self):
+    def test_h1_rejected_at_final_uses_final_alpha(self):
         h1 = _series(52, 3.0)
         assert not fx.series_test(h1[:26], 0.01, P)["reject"], "前提：中检不应已拒绝"
-        res = fx.decide(_weeks(h1), _weeks(_series(52, 0.5)), P)
-        assert res["status"] == "concluded"
+        res = fx.decide(_weeks(h1), P)
+        assert res["status"] == "concluded" and set(res["verdicts"]) == {"H1"}
         assert res["verdicts"]["H1"]["result"] == "significant_positive"
         assert res["verdicts"]["H1"]["alpha"] == 0.04
-        assert res["verdicts"]["H2"]["result"] == "not_significant"
 
     def test_significant_negative_maps_to_review_not_flip(self):
-        res = fx.decide(_weeks(_series(26, -5.0)), _weeks(_series(26, 0.0)), P)
+        res = fx.decide(_weeks(_series(26, -5.0)), P)
         v = res["verdicts"]["H1"]
         assert v["result"] == "significant_negative" and "不自动取反" in v["action"]
 
     def test_h1_truncated_below_next_look_is_untestable(self):
-        res = fx.decide(_weeks(_series(10, 9.0)), _weeks(_series(10, 9.0)), P, h1_capacity=12)
+        res = fx.decide(_weeks(_series(10, 9.0)), P, h1_capacity=12)
         assert res["status"] == "concluded"
-        assert res["verdicts"]["H1"]["result"] == "untestable"
-        assert res["verdicts"]["H2"]["result"] == "not_tested"
+        assert res["verdicts"] == {"H1": res["verdicts"]["H1"]} and res["verdicts"]["H1"]["result"] == "untestable"
 
     def test_h1_truncated_but_capacity_sufficient_keeps_waiting(self):
-        res = fx.decide(_weeks(_series(10, 9.0)), _weeks(_series(10, 9.0)), P, h1_capacity=30)
+        res = fx.decide(_weeks(_series(10, 9.0)), P, h1_capacity=30)
         assert res["status"] == "not_ready"
 
-    def test_h2_truncated_short_is_untestable(self):
-        res = fx.decide(_weeks(_series(26, 5.0)), _weeks(_series(12, 5.0)), P, h2_truncated=True)
-        assert res["verdicts"]["H2"]["result"] == "untestable"
-
-    def test_h2_weight_history_unknown_is_untestable_when_its_turn_comes(self):
-        res = fx.decide(_weeks(_series(26, 5.0)), _weeks(_series(26, 5.0)), P, h2_unknown="git 不可用")
-        assert res["verdicts"]["H2"]["result"] == "untestable"
-        assert "git 不可用" in res["verdicts"]["H2"]["reason"]
-
-    def test_h2_uses_only_weeks_up_to_the_h1_cut(self):
-        h2 = _series(26, 5.0) + [-50.0] * 10
-        res = fx.decide(_weeks(_series(26, 5.0)), _weeks(h2), P)
-        assert res["verdicts"]["H2"]["G"] == 26
+    def test_descriptive_extra_is_cut_at_the_concluding_look(self):
+        """描述项截止于给出结论的那次检视：中检出结论 ⇒ 描述项只用前 26 周（后面再长的周不算进去）。"""
+        wc = _series(26, 5.0) + [-50.0] * 10
+        res = fx.decide(_weeks(_series(26, 5.0) + [0.0] * 10), P, extra={"weighted_composite": _weeks(wc)})
+        assert res["descriptive_extra"]["weighted_composite"]["G"] == 26
 
 
 # ── 4. 截断 ─────────────────────────────────────────────────────────────────
@@ -450,26 +449,34 @@ class TestTruncationPoint:
             **signal_archive.COHORT_SIGNAL_SCOPE,
             "vT_buzz": ("agent.BuzzBeeWhisper.*",), "vT_scout": ("agent.ScoutBeeNova.*",),
             "vT_news": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*"),
+            "vT_obs": ("obs.news",),
             "vT_queen": ()})
 
     def _h(self, k):
         return fx.items(P)[k]["signals"]
 
-    def test_buzz_score_boundary_truncates_h2_and_buzz_v1_not_h1(self):
-        """修订 4：只改 Buzz 合成 / 调整层（只点名分）⇒ H2 与描述项 buzz_v1 截断，H1（直接读通道）不截断。"""
+    def test_buzz_score_boundary_truncates_the_descriptives_not_h1(self):
+        """只改 Buzz 合成 / 调整层（只点名分）⇒ 描述项 weighted_composite 与 buzz_v1 截断，H1 不截断。"""
         hist = [(_d(8), "vT_buzz", "改了 Buzz 的合成层")]
         assert fx.truncation_point(self._h("H1"), P, hist) is None
-        assert fx.truncation_point(self._h("H2"), P, hist)["date"] == _d(8)
+        assert fx.truncation_point(self._h("weighted_composite"), P, hist)["date"] == _d(8)
         assert fx.truncation_point(self._h("buzz_v1"), P, hist) == {"date": _d(8), "version": "vT_buzz"}
 
-    def test_news_channel_boundary_truncates_h1(self):
+    def test_news_channel_boundary_no_longer_truncates_h1(self):
+        """修订 5 判别：改新闻通道（解释层）⇒ 修订 4 下截断 H1；现在 H1 由冻结通道层重算、不截断，只截断描述项 buzz_v1。"""
         hist = [(_d(8), "vT_news", "改了新闻通道")]
-        assert fx.truncation_point(self._h("H1"), P, hist) == {"date": _d(8), "version": "vT_news"}
+        assert fx.truncation_point(self._h("H1"), P, hist) is None
+        assert fx.truncation_point(self._h("buzz_v1"), P, hist)["date"] == _d(8)
+
+    def test_fetch_layer_boundary_truncates_h1(self):
+        hist = [(_d(8), "vT_obs", "改了新闻取数")]
+        assert fx.truncation_point(self._h("H1"), P, hist) == {"date": _d(8), "version": "vT_obs"}
+        assert fx.truncation_point(self._h("buzz_v1"), P, hist) is None
 
     def test_scout_boundary_touches_neither_hypothesis(self):
         hist = [(_d(8), "vT_scout", "改了 Scout")]
         assert fx.truncation_point(self._h("H1"), P, hist) is None
-        assert fx.truncation_point(self._h("H2"), P, hist) is None
+        assert fx.truncation_point(self._h("weighted_composite"), P, hist) is None
         assert fx.truncation_point(self._h("signal"), P, hist)["date"] == _d(8)
 
     def test_queen_only_boundary_touches_nothing(self):
@@ -482,7 +489,7 @@ class TestTruncationPoint:
         assert fx.truncation_point(self._h("H1"), P, [(_d(21), "v_undeclared", "")])["date"] == _d(21)
 
     def test_earliest_touching_boundary_wins(self):
-        hist = [(_d(50), "vT_news", ""), (_d(21), "vT_news", "")]
+        hist = [(_d(50), "vT_obs", ""), (_d(21), "vT_obs", "")]
         assert fx.truncation_point(self._h("H1"), P, hist)["date"] == _d(21)
 
 
@@ -501,16 +508,19 @@ class TestH1Layers:
             "vT_mom": ("buzz.comp.momentum_signal", "agent.BuzzBeeWhisper.*"),        # 改价格通道
             "vT_price": ("price.volatility_20d",),                                    # 改通道读的行情量
             "vT_fg": ("market.fear_greed",),
-            "vT_pct": ("sentiment.pct",)})
+            "vT_pct": ("sentiment.pct",),
+            "vT_obs_news": ("obs.news",), "vT_obs_reddit": ("obs.reddit",), "vT_obs_yahoo": ("obs.yahoo",)})
 
-    @pytest.mark.parametrize("version", ["vT_channel", "vT_reddit", "vT_yahoo"])
-    def test_each_nonprice_channel_truncates_h1_as_input(self, version):
+    @pytest.mark.parametrize("version", ["vT_obs_news", "vT_obs_reddit", "vT_obs_yahoo"])
+    def test_each_fetch_layer_node_truncates_h1_as_input(self, version):
+        """修订 5：H1 的截断集合 = 取数层伪节点，每个都截断、层标 input。"""
         cut = fx.h1_truncation(P, [(_d(8), version, "")])
         assert cut == {"date": _d(8), "version": version, "layer": "input"}
 
-    @pytest.mark.parametrize("version", ["vT_frozen", "vT_pct", "vT_mom", "vT_price", "vT_fg"])
-    def test_price_fg_and_frozen_layer_no_longer_truncate_h1(self, version):
-        """判别：修订 1 下这五条都截断 H1；修订 4 下都不截，但描述项 buzz_v1 照截。"""
+    @pytest.mark.parametrize("version", ["vT_channel", "vT_reddit", "vT_yahoo",
+                                         "vT_frozen", "vT_pct", "vT_mom", "vT_price", "vT_fg"])
+    def test_interpretation_price_fg_and_frozen_layer_do_not_truncate_h1(self, version):
+        """判别：修订 1 下这八条都截断 H1；修订 4 下前三条（三个情绪通道）仍截断；修订 5 起全都不截，描述项 buzz_v1 照截。"""
         hist = [(_d(8), version, "")]
         assert fx.h1_truncation(P, hist) is None
         assert fx.truncation_point(fx.items(P)["buzz_v1"]["signals"], P, hist)["date"] == _d(8)
@@ -563,7 +573,7 @@ class TestAnchor:
 
     def test_unknown_h1_object_is_protocol_error(self, tmp_path):
         p = self._P(None)
-        p.HYPOTHESES = (("H1", "sentiment", P.HYPOTHESES[0][2]), P.HYPOTHESES[1])
+        p.HYPOTHESES = (("H1", "sentiment", P.HYPOTHESES[0][2]),)
         with pytest.raises(fx.ProtocolError):
             fx.load_rows(_make_db(tmp_path, _day_rows(_d(0))), p, _TODAY)
 
@@ -647,7 +657,9 @@ class TestRun:
                                        ("2026-09-25", {**P.FROZEN_WEIGHTS, "odds": 0.2, "catalyst": 0.475})])
         res = fx.run(db_path=str(_make_db(tmp_path, [])), today="2026-09-26", repo_root=repo, history=[])
         assert res["weight_change"]["date"] == "2026-09-25"
-        assert fx.status_line(res).startswith("⚠️")
+        line = fx.status_line(res)
+        # 修订 5：权重偏离只截断描述项 weighted_composite ⇒ 说明、不是 ⚠️（修订 5 前它截断 H2，是 ⚠️）
+        assert line.startswith("⏳") and "描述项 weighted_composite 截断（不影响 H1）" in line
 
     def test_stale_when_window_long_open_and_empty(self, tmp_path):
         res = fx.run(db_path=str(_make_db(tmp_path, [])), today=_d(fx.STALE_DAYS + 7),
@@ -661,7 +673,7 @@ class TestRun:
 
     def test_h1_boundary_in_window_shows_in_line(self, tmp_path, monkeypatch):
         monkeypatch.setattr(signal_archive, "COHORT_SIGNAL_SCOPE", {
-            **signal_archive.COHORT_SIGNAL_SCOPE, "vT_news": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*")})
+            **signal_archive.COHORT_SIGNAL_SCOPE, "vT_news": ("obs.news",)})
         days = _weekdays(_d(0), 10)
         res = fx.run(db_path=str(_make_db(tmp_path, [r for d in days for r in _day_rows(d)])),
                      today=_TODAY, repo_root=self._repo(tmp_path),
@@ -752,28 +764,33 @@ class TestInputCodeGuard:
     def test_guard_error_state_is_reported(self, monkeypatch):
         import signal_code_fingerprints as scf
         monkeypatch.setattr(scf, "check", lambda *a, **k: {"ok": False, "units": {
-            u: {"state": "ok"} for u in scf.UNITS} | {"buzz.news": {"state": "error", "error": "定位不到"}}})
+            u: {"state": "ok"} for u in scf.UNITS} | {"obs.news": {"state": "error", "error": "定位不到"}}})
         g = fx.input_code_guard()
-        assert g["ok"] is False and g["errors"] == {"buzz.news": "定位不到"}
+        assert g["ok"] is False and g["errors"] == {"obs.news": "定位不到"}
 
     def test_price_and_fg_units_only_warn_for_the_descriptive(self, monkeypatch):
-        """修订 4 判别：行情字段 / F&G 单元的未确认改动不挡 H1（`ok` 仍真），只进 `descriptive_only`、进度行只提示。"""
+        """修订 4 判别：行情字段 / F&G 单元的未确认改动不挡 H1（`ok` 仍真），只进 `descriptive_only`、进度行只提示。
+        修订 5 起三个情绪通道的整模块单元（buzz.news …）同理——H1 由冻结通道层重算，它们只关系到描述项 buzz_v1。"""
         import signal_code_fingerprints as scf
         units = {u: {"state": "ok"} for u in scf.UNITS}
         units["price.fields"] = {"state": "unacknowledged"}
+        units["buzz.news"] = {"state": "unacknowledged"}
         units["buzz.fear_greed"] = {"state": "error", "error": "定位不到"}
         monkeypatch.setattr(scf, "check", lambda *a, **k: {"ok": False, "units": units})
         g = fx.input_code_guard()
         assert g["ok"] is True and g["unacknowledged"] == [] and g["errors"] == {}
-        assert g["descriptive_only"] == {"unacknowledged": ["price.fields"], "errors": {"buzz.fear_greed": "定位不到"}}
-        res = {"status": "in_progress", "verdicts": {}, "looks_done": ["中检"], "h1_weeks": 26, "next_look_at": 52}
+        assert g["descriptive_only"] == {"unacknowledged": ["buzz.news", "price.fields"],
+                                         "errors": {"buzz.fear_greed": "定位不到"}}
+        res = {"status": "in_progress", "verdicts": {}, "looks_done": ["中检"], "h1_weeks": 26, "next_look_at": 52,
+               "h1_excluded": {"n": 0, "by_day": {}, "n_frozen_errors": 0, "examples": []}}
         out = fx.apply_code_guard(res, g)
         assert out["status"] == "in_progress"
         line = fx.status_line(out)
         assert "price.fields" in line and "不影响 H1" in line and not line.startswith("⚠️")
 
-    @pytest.mark.parametrize("unit", ["buzz.channels", "buzz.reddit", "buzz.news", "buzz.yahoo"])
-    def test_units_touching_the_three_channels_gate_h1(self, monkeypatch, unit):
+    @pytest.mark.parametrize("unit", ["obs.reddit", "obs.news", "obs.yahoo", "obs.links", "h1.frozen"])
+    def test_fetch_and_frozen_units_gate_h1(self, monkeypatch, unit):
+        """修订 5：挡 H1 检视点的是取数层与冻结通道层的五个单元。"""
         import signal_code_fingerprints as scf
         units = {u: {"state": "ok"} for u in scf.UNITS}
         units[unit] = {"state": "unacknowledged"}
@@ -784,7 +801,7 @@ class TestInputCodeGuard:
     def test_a_unit_missing_from_the_report_is_not_ok(self, monkeypatch):
         import signal_code_fingerprints as scf
         monkeypatch.setattr(scf, "check", lambda *a, **k: {"ok": True, "units": {
-            u: {"state": "ok"} for u in scf.UNITS if u != "buzz.news"}})
+            u: {"state": "ok"} for u in scf.UNITS if u != "obs.news"}})
         assert fx.input_code_guard()["ok"] is False
 
     def test_no_gating_unit_is_not_ok(self):
@@ -858,15 +875,134 @@ class TestBuzzV1SelfProofWiring:
         assert sp["excluded_days"] == ["2026-10-12"] and sp["n_excluded"] == 30, sp
 
 
+class TestRevision5:
+    """修订 5（§13.14）：H1 的通道在 `H1_ARCHIVE_START` 前读存档值（哈希钉住）、此后由冻结通道层从观测档案重算。
+
+    判别夹具：档案起点之后的存档值与 sentiment **反向**（IC 符号反），冻结层返回的值与 sentiment 同向——执行器若仍读存档值，
+    H1 的周值就是负的。"""
+
+    ARCH = 14            # 档案起点 = 窗口第 3 周的周一
+
+    def _setup(self, monkeypatch, tmp_path, h1ch, n_days=20):
+        days = _weekdays(_d(0), n_days)
+        rows = [r for d in days for r in _day_rows(d)]
+        db = _make_db(tmp_path, rows)
+        start = _d(self.ARCH)
+        con = sqlite3.connect(db)        # 档案起点之后的存档通道改成反向：读错段 ⇒ IC 变负
+        con.execute("UPDATE signal_archive SET value = -value WHERE date >= ?", (start,))
+        pre = [[d, t, sig, v] for d, t, sig, v in con.execute(
+            "SELECT date, ticker, signal, value FROM signal_archive WHERE date < ?", (start,))]
+        con.commit()
+        con.close()
+        monkeypatch.setattr(P, "H1_ARCHIVE_START", start)
+        monkeypatch.setattr(P, "H1_PRE_ARCHIVE_ROWS", len(pre))
+        monkeypatch.setattr(P, "H1_PRE_ARCHIVE_SHA256", fx.pre_archive_digest(pre))
+        import buzz_v1
+        post = {(r[0], r[1]): h1ch(r) for r in rows if r[0] >= start}
+        monkeypatch.setattr(buzz_v1, "h1_channels", lambda *a, **k: {k_: v for k_, v in post.items() if v is not None})
+        return db, rows, start
+
+    @staticmethod
+    def _good(r):
+        v = float(json.loads(r[2])["sentiment"])
+        return {"channels": {c: v for c in P.H1_NP_WEIGHTS}}
+
+    def test_post_archive_rows_come_from_the_frozen_layer(self, monkeypatch, tmp_path):
+        db, _rows, start = self._setup(monkeypatch, tmp_path, self._good)
+        loaded = fx.load_rows(db, P, _TODAY)
+        it = fx.items(P)["H1"]
+        w = fx.weekly_series(loaded, it["value"], it["quarantine"], P)
+        assert len(w) == 4 and all(v == pytest.approx(1.0) for _, v, _ in w), w
+        assert not any(r["h1_excluded"] for r in loaded)
+
+    def test_excluded_and_missing_rows_are_counted_not_filled(self, monkeypatch, tmp_path):
+        def h1ch(r):
+            if r[1] == "T00":
+                return None                                          # 没有溯源块
+            if r[1] == "T01":
+                return {"excluded": "观测不全：新闻 的观测不在档"}
+            if r[1] == "T02":
+                return {"excluded": "冻结层报错：KeyError: 'payload'"}
+            return self._good(r)
+        db, _rows, start = self._setup(monkeypatch, tmp_path, h1ch)
+        res = fx.run(db_path=str(db), today=_TODAY, repo_root=_config_repo(tmp_path, [("2026-09-09", dict(P.FROZEN_WEIGHTS))]),
+                     history=[])
+        ex = res["h1_excluded"]
+        n_post_days = len([d for d in _weekdays(_d(0), 20) if d >= start])
+        assert ex["n"] == 3 * n_post_days and ex["n_frozen_errors"] == n_post_days
+        assert sum(ex["by_day"].values()) == ex["n"] and min(ex["by_day"]) >= start
+        assert {e["why"][:4] for e in ex["examples"]} >= {"冻结层报"}
+        assert not ({"ic", "p", "t", "ci95"} & set(_all_keys(ex)))
+        line = fx.status_line(res)
+        assert line.startswith("⚠️") and f"冻结通道层报错 {n_post_days} 行" in line
+        assert f"H1 排除 {3 * n_post_days} 行" in line
+        loaded = fx.load_rows(db, P, _TODAY)
+        assert all(not r["ch"] for r in loaded if r["ticker"] in ("T00", "T01", "T02") and r["date"] >= start)
+        assert next(r for r in loaded if r["ticker"] == "T00" and r["date"] >= start)["h1_excluded"].startswith("没有溯源块")
+
+    def test_pre_archive_value_rewritten_is_cannot_judge(self, monkeypatch, tmp_path):
+        """同日重扫 / 回填改写了档案起点之前的一个值 ⇒ 哈希对不上 ⇒ 无法判定（H1 读的已不是登记的那些数）。"""
+        db, _rows, start = self._setup(monkeypatch, tmp_path, self._good)
+        assert fx.run(db_path=str(db), today=_TODAY, repo_root=tmp_path, history=[])["status"] != "cannot_judge"
+        con = sqlite3.connect(db)
+        con.execute("UPDATE signal_archive SET value = value + 0.5 WHERE id = (SELECT MIN(id) FROM signal_archive)")
+        con.commit()
+        con.close()
+        res = fx.run(db_path=str(db), today=_TODAY, repo_root=tmp_path, history=[])
+        assert res["status"] == "cannot_judge" and "与登记不符" in res["reason"]
+
+    def test_pre_archive_row_added_is_cannot_judge(self, monkeypatch, tmp_path):
+        db, _rows, start = self._setup(monkeypatch, tmp_path, self._good)
+        con = sqlite3.connect(db)
+        con.execute("INSERT INTO signal_archive (date, ticker, signal, value) VALUES (?,?,?,?)",
+                    (_d(0), "ZZZ", "buzz.comp.news_signal", 50.0))
+        con.commit()
+        con.close()
+        assert fx.run(db_path=str(db), today=_TODAY, repo_root=tmp_path, history=[])["status"] == "cannot_judge"
+
+    def test_missing_links_table_after_archive_start_is_cannot_judge(self, monkeypatch, tmp_path):
+        """真 `h1_channels`：链接表不在 ⇒ 抛 ⇒ 无法判定（不是「H1 没样本」）。"""
+        import buzz_v1
+        real = buzz_v1.h1_channels
+        db, _rows, start = self._setup(monkeypatch, tmp_path, self._good)
+        monkeypatch.setattr(buzz_v1, "h1_channels", real)
+        res = fx.run(db_path=str(db), today=_TODAY, repo_root=tmp_path, history=[])
+        assert res["status"] == "cannot_judge" and "observation_links" in res["reason"]
+
+    def test_before_archive_start_no_hash_check_yet(self, monkeypatch, tmp_path):
+        """today 早于档案起点：那段还在长，没有可比的定值 ⇒ 不核对。"""
+        monkeypatch.setattr(P, "H1_ARCHIVE_START", _d(60))
+        monkeypatch.setattr(P, "H1_PRE_ARCHIVE_SHA256", "0" * 64)
+        db = _make_db(tmp_path, _day_rows(_d(0)))
+        assert fx.run(db_path=str(db), today=_d(30), repo_root=tmp_path, history=[])["status"] != "cannot_judge"
+
+    def test_digest_algorithm_is_pinned(self):
+        """登记的哈希按这条规则算（协议 §13.14）：按 (date, ticker, signal) 排序、紧凑 JSON、UTF-8、sha256。"""
+        import hashlib
+        rows = [["2026-10-13", "B", "buzz.comp.news_signal", 50.0], ["2026-10-13", "A", "buzz.comp.yahoo_signal", 45.0],
+                ["2026-10-13", "A", "buzz.comp.news_signal", 61.5]]
+        want = hashlib.sha256(('[["2026-10-13","A","buzz.comp.news_signal",61.5],'
+                               '["2026-10-13","A","buzz.comp.yahoo_signal",45.0],'
+                               '["2026-10-13","B","buzz.comp.news_signal",50.0]]').encode("utf-8")).hexdigest()
+        assert fx.pre_archive_digest(rows) == want
+
+
 # ── 6. 进度行 ───────────────────────────────────────────────────────────────
 
 class TestStatusLine:
     def test_not_ready_line_has_counts_and_no_effect(self):
         line = fx.status_line({"status": "not_ready", "h1_weeks": 3, "next_look_at": 26,
-                               "forward_start": P.FORWARD_START, "truncation": {}, "weight_change": {}})
+                               "forward_start": P.FORWARD_START, "truncation": {}, "weight_change": {},
+                               "h1_excluded": {"n": 0, "by_day": {}, "n_frozen_errors": 0, "examples": []}})
         assert line.startswith("⏳") and "3/26" in line
         import re
         assert not re.search(r"[+-]\d+\.\d+|p=", line), "进度行里出现了像效应量的数字"
+
+    def test_missing_exclusion_count_is_warn(self):
+        """修订 5：读不到 H1 排除计数 ⇒ 被排除的行会无声消失 ⇒ 进度行 ⚠️（与外壳的 h1_excluded_unknown 同判）。"""
+        line = fx.status_line({"status": "not_ready", "h1_weeks": 3, "next_look_at": 26,
+                               "forward_start": P.FORWARD_START, "truncation": {}, "weight_change": {}})
+        assert line.startswith("⚠️") and "读不到 H1 排除计数" in line, line
 
     def test_cannot_judge_line_carries_reason(self):
         line = fx.status_line({"status": "cannot_judge", "reason": "路径错了"})

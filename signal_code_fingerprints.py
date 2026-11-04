@@ -43,6 +43,15 @@ v0.45.330 的 `_buzz_scope_gaps` 只守一个方向：「点名了通道，必�
 - **Python 小版本升级**可能改 `ast.unparse` 的输出 ⇒ 全部单元同时失配；核实是升级所致后，整批登记
   ``no_value_change``（写明升级前后版本）。
 
+修订 5（v0.45.712，协议 §13.14）：取数层单元
+------------------------------------------
+H1 的三个情绪通道自 2026-10-20 起由冻结通道层（`buzz_v1_channels`）从原始观测档案重算 ⇒ 生产里还决定 H1 的只剩
+「取到哪份原始观测、链接到哪份」。为此新增只锁取数的单元 `obs.reddit` / `obs.news` / `obs.yahoo`、锁溯源链接的
+`obs.links`、锁冻结通道层本身的 `h1.frozen`（信号都是 `H1_OBS_SIGNALS` 伪节点）；只有它们挡 H1 的检视点，`buzz.*` /
+`price.fields` 此后只关系到描述项 buzz_v1。取数与解释混写的函数用切片定位器（`method` / `seeds` / `before_assign`）只切
+取数那几句，闭包在 `UNITS[单元]["stop"]` 登记的解释函数处停（停点过期同样红）。取数单元多一种确认 `raw_unchanged`。
+⚠️ 切片按名字认：取数逻辑若改用一个不在名字表里的新变量传递，切片看不见——改取数函数时顺手看一眼 `--deps` 与切片文本。
+
 谁会红
 ------
 - 开发期：`tests/test_signal_code_fingerprints.py`（CI 每次推 main 都跑）。
@@ -70,9 +79,13 @@ _BUZZ_CHANNELS: Tuple[str, ...] = (
     "buzz.comp.fear_greed_signal",
 )
 
-#: 单元名 → {"code": ((相对仓库根的文件, 定位器), …), "signals": 该单元决定的归档信号}
-#: 信号并集必须恰好等于 buzz_v1 的输入层 `H1_V1_INPUT_SIGNALS`（测试钉住：多了会误要求确认，少了会漏守）。
-#: 修订 4 起只有触及 H1 截断集合（三个情绪通道）的单元挡维度 IC 的检视点，其余只影响描述项 buzz_v1（执行器 `input_code_guard`）
+#: 维度 IC 协议修订 5（§13.14）：H1 的截断集合 = 取数层三个伪节点（与 `dim_ic_protocol.H1_INPUT_SIGNALS` 同一组，测试钉住）
+H1_OBS_SIGNALS = ("obs.reddit", "obs.news", "obs.yahoo")
+
+#: 单元名 → {"code": ((相对仓库根的文件, 定位器), …), "signals": 该单元决定的归档信号[, "stop": ((文件, 名字), …)]}
+#: 信号并集必须恰好等于 buzz_v1 的输入层 `H1_V1_INPUT_SIGNALS` 加 `H1_OBS_SIGNALS`（测试钉住：多了会误要求确认，少了会漏守）。
+#: 修订 5 起只有触及 H1 截断集合（`obs.*`）的单元挡维度 IC 的检视点——即下面的 obs.* / h1.frozen；`buzz.*` / `price.fields`
+#: 只影响描述项 buzz_v1（执行器 `input_code_guard`）。`stop` = 闭包在这些「解释」定义处停（登记了却碰不到 ⇒ 过期，测试红）
 UNITS: Dict[str, Dict] = {
     # Buzz 自己算通道的那段：analyze() 里合成之前的全部语句 + 模块级辅助函数；缩放用的 _safe_score。
     # 通道读的阈值（AGENT_SCORING 的 volume_thresholds / volatility_thresholds）v0.45.671 起由依赖闭包自动推出，不再手写
@@ -106,6 +119,54 @@ UNITS: Dict[str, Dict] = {
         "signals": ("price.momentum_5d", "price.volume_ratio", "price.volatility_20d",
                     "buzz.comp.momentum_signal", "buzz.comp.volume_signal", "buzz.comp.volatility_signal"),
     },
+    # ── 修订 5（v0.45.712，§13.14）：只锁取数的单元 ──────────────────────────────────────────────────────
+    # 取到哪份原始观测、链接到哪份：取数函数、缓存与复用、写溯源地址的语句 + 依赖闭包；解释（查票打分、清洗、计数）在 stop 处停。
+    # 改这里 = 改了 H1 读到的原始观测 ⇒ 截断 H1（除非确认原始观测不变：`raw_unchanged`）
+    "obs.reddit": {
+        "code": (("reddit_sentiment.py", "method:RedditSentimentClient._fetch_ranking"),
+                 ("reddit_sentiment.py", "seeds:RedditSentimentClient.get_ticker_sentiment:_fetch_ranking,_obs"),
+                 ("reddit_sentiment.py", "def:get_reddit_sentiment")),
+        "signals": ("obs.reddit",),
+        # get_reddit_sentiment 引用整个类 ⇒ 闭包会把查票打分的方法全拉进来；取数用到的方法已由上面两条定位，类本身在此停
+        "stop": (("reddit_sentiment.py", "RedditSentimentClient"),),
+    },
+    "obs.news": {
+        # get_ticker_news 整段都是取数（主源选择、回落 Yahoo、缓存命中 / 写回）；_build_result 只锁「回不回兜底」那几道早退
+        # 与 is_real_data（它决定 buzz_refs 链不链接这份观测）
+        "code": (("newsapi_client.py", "def:get_ticker_news"),
+                 ("newsapi_client.py", "def:_fetch_massive_news"),
+                 ("newsapi_client.py", "def:_fetch_av_news"),
+                 ("newsapi_client.py", "def:_fetch_yf_news"),
+                 ("newsapi_client.py", "before_assign:_build_result:raw_count"),
+                 ("newsapi_client.py", "seeds:_build_result:is_real_data")),
+        "signals": ("obs.news",),
+        "stop": (("newsapi_client.py", "_from_massive"), ("newsapi_client.py", "_from_alpha_vantage"),
+                 ("newsapi_client.py", "_from_yahoo"), ("newsapi_client.py", "_INTERPRET"),
+                 ("newsapi_client.py", "_fallback")),
+    },
+    "obs.yahoo": {
+        "code": (("yahoo_trending.py", "def:get_trending_tickers"),
+                 ("yahoo_trending.py", "seeds:get_ticker_attention:get_trending_tickers,trending,_obs,is_real_data")),
+        "signals": ("obs.yahoo",),
+    },
+    # BuzzBee 交出溯源块（调三个取数入口的那几句、buzz_refs、details 里的 observations）+ 档案本身（地址算法、buzz_refs、
+    # 链接写入 / 读取）+ signal_archive 写链接的那几句
+    "obs.links": {
+        "code": (("swarm_agents/buzz_bee.py",
+                  "seeds:BuzzBeeWhisper.analyze:get_reddit_sentiment,get_ticker_news,get_ticker_attention,"
+                  "_obs_archive,_observations"),
+                 ("observation_archive.py", "module"),
+                 ("signal_archive.py", "seeds:archive:observation_archive,links")),
+        "signals": H1_OBS_SIGNALS,
+        # 热搜入口是取数 + 打分混写：取数那几句由 obs.yahoo 的切片认领，打分（rank → attention_score）在此停
+        "stop": (("yahoo_trending.py", "get_ticker_attention"),),
+    },
+    # 冻结通道层本身 + 执行器读它的入口：H1 的定义（照抄窗口起点的生产代码），改它 = 改 H1
+    "h1.frozen": {
+        "code": (("buzz_v1_channels.py", "def:sentiment_channels"),
+                 ("buzz_v1.py", "def:h1_channels")),
+        "signals": H1_OBS_SIGNALS,
+    },
 }
 
 #: 确认记录，**只追加**。每条 = (单元, 指纹, 确认方式, 凭什么)。每个单元的最后一条必须等于当前指纹。
@@ -116,6 +177,8 @@ UNITS: Dict[str, Dict] = {
 #: 窗口内只有 price.fields 在 10-16 变过一次（v0.45.505）；其余五个单元 10-12 至今逐位未变。
 _BASELINE_NOTE = ("窗口起点：维度 IC 协议窗口首个扫描日 2026-10-12 实际运行的代码（0993efde，生产日志 "
                   "alpha_hive.code_version 核实），H1 的全部窗口样本都出自它或其后已确认的改动")
+_OBS_BASELINE_NOTE = ("修订 5 登记时（v0.45.712）的取数代码；窗口审计：10-20 至 11-03 冻结层从档案重算的通道与存档值逐位相等，"
+                      "同期整模块单元的改动均已确认为非边界（见 ACKS 里 buzz.reddit / buzz.news / buzz.yahoo 各条）")
 ACKS: List[Tuple[str, str, str, str]] = [
     ("buzz.channels",   "38057d4d25d00bd1", "baseline", _BASELINE_NOTE),
     ("buzz.reddit",     "1cd1f6b26fac0af6", "baseline", _BASELINE_NOTE),
@@ -316,9 +379,32 @@ ACKS: List[Tuple[str, str, str, str]] = [
      "volatility_20d 及其 source / as_of、observations、history_checked 全部相等（有 / 无 session_close 两种各比一次，均 True）；"
      "diff 里赋值这些字段的语句一行未动。2026-11-02 的 13 只存档值不改写。"
      "**用户 2026-11-03 在对话里选 no_value_change**；不登记边界"),
+    # v0.45.712（维度 IC 修订 5，§13.14）：只锁取数的五个单元。基线 = 登记时的代码，不是窗口起点——它们是这次才切出来的。
+    # 窗口审计：① 10-20 至 11-03 共 11 个扫描日，冻结通道层按 observation_links 从档案重算的三个情绪通道与存档值 330/330 行
+    # 逐位相等，即取数层同期送进来的原始观测与生产当天用的完全一致；② 同期取数代码所在的整模块单元 buzz.reddit / buzz.news /
+    # buzz.yahoo 的全部改动（v0.45.568 / 591 / 671）都已逐条确认为非边界（见上）；③ 10-13 至 10-19 不走档案、读哈希钉住的存档值
+    ("obs.reddit", "be7b094a3e29ccb0", "baseline", _OBS_BASELINE_NOTE),
+    ("obs.news",   "b640f6a1bee5657e", "baseline", _OBS_BASELINE_NOTE),
+    ("obs.yahoo",  "ab64922e16280fb2", "baseline", _OBS_BASELINE_NOTE),
+    ("obs.links",  "a7b1abe489ca371d", "baseline", _OBS_BASELINE_NOTE),
+    ("h1.frozen",  "31f134ef285709f3", "baseline",
+     "修订 5 登记时（v0.45.712）的冻结通道层：sentiment_channels 改为按溯源地址判断有没有数据（不读生产的 expected），"
+     "并加执行器入口 buzz_v1.h1_channels。等价性：10-20 至 11-03 共 330 行，四个情绪通道「expected 为真 ⇔ 地址在」无反例，"
+     "重算值与存档值逐位相等 ⇒ 这次改动不改变任何已有 H1 取值"),
+    # v0.45.717：YFinanceSource 末根早于最近一场已收盘交易日 ⇒ 本源当取不到（_yf_tail_gap / _record_yf_tail）
+    ("price.fields",    "84596e6253ecda14", "measurement_fix",
+     "v0.45.717：YFinanceSource 在 _drop_forming_bar 之后比对末根与最近一场已收盘交易日（交易所时钟 _exchange_now + 1 分钟 "
+     "交给 yf_daily.latest_completed_session）；末根更早 ⇒ Yahoo 还没出那一场，本源不给、交下一个源（判不了照旧放行并计数）。"
+     "修的是原始输入的测量误差：2026-11-03 美东 16:00 开跑，30 只的现价全是 11-02 收盘（场次错位，ENPH −8.2%），动量窗口同样止于 11-02；"
+     "函数本身不换——末根就是最近一场的正常日子，交给下游的值逐位不变（tests/test_yf_latest_session.py::test_aligned_bar_is_used，"
+     "既有 YFinanceSource 测试 269 条不改照绿）。11-03 那天是否隔离另由人定（坏日子走 QUARANTINE）。"
+     "**用户 2026-11-04 在对话里选 measurement_fix**；不登记边界"),
 ]
 
 NON_BOUNDARY_KINDS = frozenset({"baseline", "measurement_fix", "no_value_change", "coverage"})
+#: 修订 5（§13.14）：只许取数单元（信号全在 `H1_OBS_SIGNALS` 里）用的非边界确认——改动混在取数函数里，但取到 / 链接的
+#: 原始观测不变（例：`get_ticker_sentiment` 里只改了查票打分那几句却碰到了切片）。须写凭什么
+OBS_ONLY_KINDS = frozenset({"raw_unchanged"})
 MIN_NOTE_CHARS = 20
 
 
@@ -420,9 +506,182 @@ def _loc_buzz_channels(tree: ast.Module, rel: str, _arg: str):
     return "\n".join(parts), helpers + pre, {n.name for n in helpers}
 
 
+# ── 修订 5（v0.45.712，协议 §13.14）：只锁「取数」的定位器 ─────────────────────────────────────────────
+# H1 自修订 5 起由冻结通道层从原始观测重算 ⇒ 生产代码里只有「取到哪份原始观测、链接到哪份」还决定 H1。取数与解释常写在
+# 同一个函数里（`get_ticker_sentiment` 先取两张榜、再查票打分），整函数 / 整模块会把解释层一并锁死。下面三个定位器只切出
+# 取数那几句；切片的规则写死在这里，测试逐条钉住（`tests/test_signal_code_fingerprints.py::TestObsLocators`）。
+
+def _find_function(tree: ast.Module, rel: str, qual: str):
+    """`func` 或 `Class.method` 的定义节点；找不到 ⇒ 抛。"""
+    cls_name, _, fn_name = qual.rpartition(".")
+    scope = tree.body
+    if cls_name:
+        cls = next((n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls_name), None)
+        if cls is None:
+            raise FingerprintError(f"{rel} 里找不到类 {cls_name}")
+        scope = cls.body
+    fn = next((n for n in scope if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn_name), None)
+    if fn is None:
+        raise FingerprintError(f"{rel} 里找不到 {qual}")
+    return fn
+
+
+def _loc_method(tree: ast.Module, rel: str, qual: str):
+    """一个类方法整段（`def:` 只认顶层定义）。不归属任何顶层名字：同一个类的别的方法改了不算它。"""
+    fn = _find_function(tree, rel, qual)
+    return ast.unparse(fn), [fn], set()
+
+
+def _names_in(node: ast.AST) -> set:
+    """节点里出现的名字：变量名、属性名、字符串常量、import 进来的名字。"""
+    out = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            out.add(n.id)
+        elif isinstance(n, ast.Attribute):
+            out.add(n.attr)
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+            out.add(n.value)
+        elif isinstance(n, ast.alias):
+            out.add(n.asname or n.name.split(".")[0])
+            out.add(n.name.split(".")[-1])
+    return out
+
+
+def _slice_expr(node: ast.AST, seeds: set) -> Tuple[str, list]:
+    """表达式里只留提到 `seeds` 的那几枝：字典只留相关的键值对、调用只留相关的参数（函数本身相关 ⇒ 整个调用）。
+    返回 (文本, 留下的原节点)——留原节点而不是新造节点，依赖闭包才能按原位置解析 `self` 与局部名。"""
+    if isinstance(node, ast.Dict):
+        parts, kept = [], []
+        for k, v in zip(node.keys, node.values):
+            if k is not None and _names_in(k) & seeds:
+                parts.append(f"{ast.unparse(k)}: {ast.unparse(v)}")
+                kept += [k, v]
+            elif _names_in(v) & seeds:
+                t, kk = _slice_expr(v, seeds)
+                parts.append(f"{ast.unparse(k) if k is not None else '**'}: {t}")
+                kept += ([k] if k is not None else []) + kk
+        return "{" + ", ".join(parts) + "}", kept
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Call)
+            and node.func.attr not in seeds and _names_in(node.func.value) & seeds):
+        # `X(…).to_dict()`：相关的在 X(…) 里 ⇒ 切 X(…)，后面的方法调用原样接上
+        head, kept = _slice_expr(node.func.value, seeds)
+        return f"{head}.{node.func.attr}(...)", kept
+    if isinstance(node, ast.Call) and not (_names_in(node.func) & seeds):
+        parts, kept = [], [node.func]
+        for a in node.args:
+            if _names_in(a) & seeds:
+                t, kk = _slice_expr(a, seeds)
+                parts.append(t)
+                kept += kk
+        for kw in node.keywords:
+            if _names_in(kw.value) & seeds:
+                t, kk = _slice_expr(kw.value, seeds)
+                parts.append(f"{kw.arg}={t}" if kw.arg else f"**{t}")
+                kept += kk
+        return f"{ast.unparse(node.func)}(" + ", ".join(parts) + ")", kept
+    return ast.unparse(node), [node]
+
+
+_COMPOUND = (ast.If, ast.While, ast.For, ast.AsyncFor, ast.With, ast.AsyncWith, ast.Try)
+
+
+def _headers(st: ast.stmt) -> list:
+    """复合语句的「头」：if / while 的条件、for 的目标与迭代对象、with 的上下文表达式。"""
+    if isinstance(st, (ast.If, ast.While)):
+        return [st.test]
+    if isinstance(st, (ast.For, ast.AsyncFor)):
+        return [st.target, st.iter]
+    if isinstance(st, (ast.With, ast.AsyncWith)):
+        return [it.context_expr for it in st.items]
+    return []
+
+
+def _children_bodies(st: ast.stmt) -> list:
+    out = []
+    for field in ("body", "orelse", "finalbody"):
+        out += getattr(st, field, None) or []
+    for h in getattr(st, "handlers", None) or []:
+        out += h.body
+    return out
+
+
+def _loc_seeds(tree: ast.Module, rel: str, arg: str):
+    """`seeds:<函数或类.方法>:<名字1>,<名字2>…`：函数体里提到这些名字的语句（嵌套在 if / try / for 里的也算），表达式按
+    `_slice_expr` 只留相关枝；复合语句的「头」提到这些名字、或提到上述语句赋值出来的名字 ⇒ 把头也算进来（决定取不取、
+    取到空的时候走哪条路）。嵌套的 def / class 不进。复合语句的头只按这些名字认（不顺着赋值传递：BuzzBee 里
+    `if news_ext.get('is_real_data') and … >= 3` 是生产通道的解释，不是取数——要锁哪个变量就把它写进名字）。**每个名字都必须至少命中一次**，否则抛（结构变了，守卫要重新定位）。"""
+    qual, _, names = arg.partition(":")
+    seeds = {n for n in names.split(",") if n}
+    if not seeds:
+        raise FingerprintError(f"{rel}：seeds 定位器没给名字（{arg!r}）")
+    fn = _find_function(tree, rel, qual)
+
+    def walk(stmts):
+        for st in stmts:
+            if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            yield st
+            if isinstance(st, _COMPOUND):
+                yield from walk(_children_bodies(st))
+
+    simple = [st for st in walk(fn.body) if not isinstance(st, _COMPOUND) and _names_in(st) & seeds]
+    hit = set()
+    parts, nodes = [], []
+    for st in walk(fn.body):
+        if isinstance(st, _COMPOUND):
+            hs = [h for h in _headers(st) if _names_in(h) & seeds]
+            if hs:
+                parts.append(f"# {type(st).__name__} " + " | ".join(ast.unparse(h) for h in hs))
+                nodes += hs
+                hit |= set().union(*(_names_in(h) for h in hs)) & seeds
+            continue
+        if st not in simple:
+            continue
+        hit |= _names_in(st) & seeds
+        value = getattr(st, "value", None)
+        if isinstance(st, (ast.Assign, ast.AnnAssign, ast.Return, ast.Expr)) and value is not None:
+            text, kept = _slice_expr(value, seeds)
+            head = (" = ".join(ast.unparse(t) for t in st.targets) + " = " if isinstance(st, ast.Assign)
+                    else f"{ast.unparse(st.target)} = " if isinstance(st, ast.AnnAssign)
+                    else "return " if isinstance(st, ast.Return) else "")
+            targets = st.targets if isinstance(st, ast.Assign) else [st.target] if isinstance(st, ast.AnnAssign) else []
+            parts.append(head + text)
+            nodes += list(targets) + kept
+        else:
+            parts.append(ast.unparse(st))
+            nodes.append(st)
+    missing = seeds - hit
+    if missing:
+        raise FingerprintError(f"{rel}::{qual} 里找不到 {sorted(missing)}——结构变了，守卫需要重新定位")
+    return f"# seeds {qual}\n" + "\n".join(parts), nodes, set()
+
+
+def _loc_before_assign(tree: ast.Module, rel: str, arg: str):
+    """`before_assign:<函数>:<变量>`：函数体里第一句给该变量赋值之前的全部顶层语句（如 `_build_result` 里决定「回不回
+    兜底」的那几道早退，它们决定这份观测会不会被标成真实数据、从而被链接）。找不到那句赋值 ⇒ 抛。"""
+    qual, _, var = arg.partition(":")
+    fn = _find_function(tree, rel, qual)
+    pre = []
+    for st in fn.body:
+        if isinstance(st, (ast.Assign, ast.AnnAssign)) and any(
+                isinstance(n, ast.Name) and n.id == var
+                for t in (st.targets if isinstance(st, ast.Assign) else [st.target]) for n in ast.walk(t)):
+            return f"# before {var} in {qual}\n" + "\n".join(ast.unparse(x) for x in pre), pre, set()
+        pre.append(st)
+    raise FingerprintError(f"{rel}::{qual} 里找不到 `{var} = …`——结构变了，守卫需要重新定位")
+
+
+#: 只切函数的一部分的定位器：切出来的语句不带函数作用域 ⇒ 依赖闭包要显式跳过那个函数自己绑定的名字（参数、局部变量），
+#: 否则局部变量 `trending` 会被认成同文件模块层的某个同名定义（`buzz_channel_block` 是 v0.45.554 的旧定位器，不改它，
+#: 免得已登记单元的指纹无故变化）
+_SLICE_KINDS = frozenset({"seeds", "before_assign"})
+
+
 _LOCATORS: Dict[str, Callable[[ast.Module, str, str], tuple]] = {
     "module": _loc_module, "def": _loc_def, "mentions_price_fields": _loc_mentions,
     "buzz_channel_block": _loc_buzz_channels,
+    "method": _loc_method, "seeds": _loc_seeds, "before_assign": _loc_before_assign,
 }
 
 
@@ -1018,13 +1277,30 @@ def unit_dependencies(unit: str, read: Optional[Callable[[str], str]] = None, _s
     located = _located(unit, src)
     own = _owners(src)
     my_signals = set(UNITS[unit]["signals"])
+    stops = set(UNITS[unit].get("stop", ()))
     mine = {(rel, n) for rel, _l, _t, _n, owned in located for n in owned}
     deps: Dict[str, str] = {}
     config_paths: Dict[str, set] = {}
     seen: set = set()
+
+    def slice_skip(rel: str, locator: str) -> frozenset:
+        kind, _, arg = locator.partition(":")
+        if kind not in _SLICE_KINDS:
+            return frozenset()
+        return frozenset(_bound_names(_find_function(src.tree(rel), rel, arg.partition(":")[0])))
+
     # 工作项 = (文件, 节点, 是否整文件, `self` 指的实例类, 不追的同文件名字)
     work: List[Tuple[str, list, bool, Optional[_Cls], frozenset]] = [
-        (rel, nodes, owned == {"*"}, None, frozenset()) for rel, _l, _t, nodes, owned in located if rel != "config.py"]
+        (rel, nodes, owned == {"*"}, None, slice_skip(rel, loc))
+        for rel, loc, _t, nodes, owned in located if rel != "config.py"]
+
+    def stopped(rel: str, name: str) -> bool:
+        """修订 5：本单元登记为「解释」的定义，闭包到此为止（`UNITS[单元]["stop"]`；碰到的记进 `_hits` 供过期检查）。"""
+        if (rel, name) not in stops:
+            return False
+        if _hits is not None:
+            _hits.add(("stop", unit, rel, name))
+        return True
 
     def guarded(rel: str, name: str) -> bool:
         """已由本单元的定位代码、或守同一信号的另一个单元认领。"""
@@ -1045,7 +1321,7 @@ def unit_dependencies(unit: str, read: Optional[Callable[[str], str]] = None, _s
     def visit(rel: str, name: str, path: Tuple[str, ...], hops: int = 0):
         if hops > 20:
             raise FingerprintError(f"{rel}::{name} 的转出口链太长——疑似循环 import，守卫判不了")
-        if exempted(_exempt_key(rel, name, path)) or guarded(rel, name):
+        if exempted(_exempt_key(rel, name, path)) or guarded(rel, name) or stopped(rel, name):
             return
         d = _definition(src, rel, name)
         if d is None:
@@ -1074,6 +1350,8 @@ def unit_dependencies(unit: str, read: Optional[Callable[[str], str]] = None, _s
             return
         if guarded(mrel, cls.name) or f"{mrel}::{cls.name}" in seen:
             return            # 整个类已在本单元 / 守同一信号的别的单元 / 本闭包里
+        if stopped(mrel, f"{cls.name}.{member.split('[')[0]}"):
+            return
         label = f"{mrel}::{cls.name}.{member}"
         if label in seen:
             return
@@ -1146,6 +1424,9 @@ def exemption_problems(read: Optional[Callable[[str], str]] = None) -> List[str]
     out = [f"豁免 {k} 没写凭什么（≥{MIN_NOTE_CHARS} 字）" for k, v in EXEMPT_DEPS.items()
            if len((v or "").strip()) < MIN_NOTE_CHARS]
     out += [f"豁免 {k} 没有任何单元碰到——过期条目，删掉" for k in EXEMPT_DEPS if k not in hits]
+    # 修订 5：`stop`（闭包在「解释」处停）同样不许过期——登记了却碰不到，说明函数改名 / 搬走了、停的位置已经不对
+    out += [f"单元 {u} 的 stop {k} 没被闭包碰到——过期条目（改名 / 搬走了？），删掉或改对"
+            for u, spec in UNITS.items() for k in spec.get("stop", ()) if ("stop", u) + tuple(k) not in hits]
     return out
 
 
@@ -1239,7 +1520,12 @@ def registry_problems(acks: Optional[list] = None, history: Optional[list] = Non
             out.append(f"{tag}：baseline 只能是该单元的第一条")
         if kind != "baseline" and first:
             out.append(f"{tag}：每个单元的第一条必须是 baseline")
-        if kind in NON_BOUNDARY_KINDS:
+        if kind in OBS_ONLY_KINDS:
+            if not set(UNITS[unit]["signals"]) <= set(H1_OBS_SIGNALS):
+                out.append(f"{tag}：{kind} 只许取数单元（信号全在 {list(H1_OBS_SIGNALS)}）用")
+            if len((note or "").strip()) < MIN_NOTE_CHARS:
+                out.append(f"{tag}：{kind} 必须写清凭什么（≥{MIN_NOTE_CHARS} 字）")
+        elif kind in NON_BOUNDARY_KINDS:
             if len((note or "").strip()) < MIN_NOTE_CHARS:
                 out.append(f"{tag}：{kind} 必须写清凭什么（≥{MIN_NOTE_CHARS} 字）")
         elif re.fullmatch(r"v\d+\.\d+\.\d+(~\d+\.\d+\.\d+)?", kind or ""):
@@ -1273,16 +1559,48 @@ class _patched_scope:
         return False
 
 
+def _h1_truncation_signals() -> Optional[frozenset]:
+    """维度 IC 协议 H1 的截断集合（修订 5 起 = 取数层 `obs.*`）。读不到 ⇒ None，调用方按「可能截断 H1」保守措辞。"""
+    try:
+        import importlib.util
+        path = Path(__file__).resolve().parent / "experiments" / "dim_ic_protocol.py"   # 代码锚点：登记常量
+        spec = importlib.util.spec_from_file_location("dim_ic_protocol", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return frozenset(mod.HYPOTHESES[0][2])
+    except Exception:  # noqa: BLE001 —— 只决定措辞；读不到就用保守措辞（见下），不吞掉守卫本身
+        return None
+
+
 def how_to_acknowledge(unit: str, fp: str) -> str:
-    """指纹失配时给改代码的人看的说明（测试与执行器共用）。"""
+    """指纹失配时给改代码的人看的说明（测试与执行器共用）。
+
+    修订 4（v0.45.708）起只有触及 H1 截断集合的单元登记边界才截断 H1；措辞按单元分开写（v0.45.711：此前一律说
+    「会截断 H1」，与执行器 `input_code_guard` 不符）。修订 5（v0.45.712）起截断集合 = 取数层 `obs.*`：只有
+    obs.* / h1.frozen 截断 H1，`buzz.*` / `price.fields` 只截断描述项 buzz_v1；取数单元多一种确认 `raw_unchanged`。
+    """
     sigs = ", ".join(UNITS[unit]["signals"])
-    return (f"输入层代码单元 {unit!r} 变了（当前指纹 {fp}），它决定 H1 的输入：{sigs}。\n"
-            f"三选一，然后在 signal_code_fingerprints.ACKS 末尾追加一条 ({unit!r}, {fp!r}, <确认方式>, <凭什么>)：\n"
+    h1 = _h1_truncation_signals()
+    if h1 is None:
+        effect = "可能截断维度 IC 协议的 H1（协议常量读不到，按最坏情况说）"
+    elif set(UNITS[unit]["signals"]) & h1:
+        hit = [s for s in UNITS[unit]["signals"] if s in h1]
+        effect = (f"点名的信号含 {', '.join(hit)}{' 之一' if len(hit) > 1 else ''} ⇒ 截断维度 IC 协议的 H1"
+                  + ("；只点名其余的 ⇒ 只截断描述项 buzz_v1" if len(hit) < len(UNITS[unit]["signals"]) else ""))
+    else:
+        effect = "只截断描述项 buzz_v1，不截断 H1（修订 5：H1 由冻结通道层从原始观测重算）"
+    obs = set(UNITS[unit]["signals"]) <= set(H1_OBS_SIGNALS)
+    what = (" H1 读到的原始观测（取数 / 链接 / 冻结通道层）" if obs else " buzz_v1 的输入")
+    extra = (f"  ④ 改动碰到了取数切片，但取到 / 链接的原始观测逐字节不变（例：只改了混写在同一函数里的打分）"
+             f" ⇒ 确认方式 = 'raw_unchanged'（只许取数单元用）\n" if obs else "")
+    return (f"输入层代码单元 {unit!r} 变了（当前指纹 {fp}），它决定{what}：{sigs}。\n"
+            f"{'四' if obs else '三'}选一，然后在 signal_code_fingerprints.ACKS 末尾追加一条 ({unit!r}, {fp!r}, <确认方式>, <凭什么>)：\n"
             f"  ① 改了产生这些值的函数 ⇒ 在 ic_rerun_readiness._COHORT_HISTORY 登记边界，并在 "
-            f"signal_archive.COHORT_SIGNAL_SCOPE 点名上面至少一个信号（会截断维度 IC 协议的 H1）；确认方式 = 该 version\n"
+            f"signal_archive.COHORT_SIGNAL_SCOPE 点名上面至少一个信号（{effect}）；确认方式 = 该 version\n"
             f"  ② 修的是原始输入的测量误差（不是换函数）⇒ 确认方式 = 'measurement_fix'，坏日子另走 QUARANTINE\n"
             f"  ③ 重构 / 清理，产出值逐位不变 ⇒ 确认方式 = 'no_value_change'\n"
-            f"②③ 要写清凭什么（≥{MIN_NOTE_CHARS} 字）。拿不准就选 ①——漏截断不可逆，多截断只损失样本。\n"
+            + extra +
+            f"②③{'④' if obs else ''} 要写清凭什么（≥{MIN_NOTE_CHARS} 字）。拿不准就选 ①——漏截断不可逆，多截断只损失样本。\n"
             f"（v0.45.671 起指纹含依赖闭包：改的可能不在单元自己的文件里，而在它引用的 config 项 / 别的模块——"
             f"`signal_code_fingerprints.py --deps {unit}` 列出它盯着的全部依赖。）")
 
