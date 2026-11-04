@@ -165,12 +165,75 @@ class TestCatchupGate:
         assert "SWARM_MARKER" in orch_text, "幂等标记不见了"
 
     def test_time_gate_not_before_market_close(self, orch_text):
-        """阈值必须在美股收盘（本机 13:00 PT）之后。
+        """阈值必须在美股收盘（16:00 ET）之后——v0.45.714 起阈值按**美东**钟判。
         调早到盘中 = 直接制造盘中价污染，比漏跑更糟。"""
         m = re.search(r'CATCHUP_AFTER_HHMM="(\d{4})"', orch_text)
         assert m, "读不到阈值"
-        assert int(m.group(1)) >= 1300, (
-            f"阈值 {m.group(1)} 早于美股收盘 1300 PT —— 会把盘中价当收盘价")
+        assert int(m.group(1)) >= 1600, (
+            f"阈值 {m.group(1)} 早于美股收盘 1600 ET —— 会把盘中价当收盘价")
+
+    def test_gate_clock_is_eastern_not_local(self, orch_text):
+        """v0.45.714：本机钟跟温哥华（2026-11-01 起常年 UTC−7），按本机钟判阈值在冬季会
+        早一小时放行（本机 13:30 = 美东 15:30）。闸读的必须是美东钟。"""
+        assigns = re.findall(r'^\s*NOW_HHMM=(.*)$', orch_text, flags=re.M)
+        assert assigns, "读不到 NOW_HHMM 赋值"
+        assert "TZ=America/New_York date" in assigns[0], f"闸的第一读钟不是美东：{assigns[0]}"
+        for a in assigns[1:]:
+            assert "date -u" in a, f"兜底读钟必须按 UTC 推算，不能回到本机钟：{a}"
+
+
+def _gate_clock_snippet(orch_text):
+    """编排器里「读美东钟」那一段（`NOW_HHMM=` 起到 `unset _ET_ZONE` 止），逐字取出。"""
+    start = orch_text.index("NOW_HHMM=")
+    end = orch_text.index("unset _ET_ZONE", start)
+    return orch_text[orch_text.rindex("\n", 0, start) + 1:end]
+
+
+def _run_clock(snippet, prelude=""):
+    script = ('log() { echo "LOG[$1] $2"; }\n' + prelude + "\n" + snippet
+              + '\necho "NOW=$NOW_HHMM"\n')
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def _hhmm_close(got, want_dt, slack_min=2):
+    g = int(got[:2]) * 60 + int(got[2:])
+    w = want_dt.hour * 60 + want_dt.minute
+    return min(abs(g - w), 1440 - abs(g - w)) <= slack_min
+
+
+class TestGateClockLive:
+    """真跑编排器里那段读钟代码（不起编排器、不写任何文件）。"""
+
+    def test_reads_new_york_wall_clock(self, orch_text):
+        from zoneinfo import ZoneInfo
+        out = _run_clock(_gate_clock_snippet(orch_text))
+        now = re.search(r"NOW=(\d{4})", out).group(1)
+        want = datetime.datetime.now(ZoneInfo("America/New_York"))
+        assert _hhmm_close(now, want), f"闸读到 {now}，美东实为 {want:%H%M}"
+        assert "LOG[WARN]" not in out, out
+
+    def test_local_timezone_does_not_matter(self, orch_text):
+        """本机时区换成任何值（含温哥华 / 东京），闸读到的都是美东钟。"""
+        from zoneinfo import ZoneInfo
+        want = datetime.datetime.now(ZoneInfo("America/New_York"))
+        for tz in ("America/Vancouver", "Asia/Tokyo", "UTC"):
+            out = _run_clock(_gate_clock_snippet(orch_text), prelude=f"export TZ={tz}")
+            now = re.search(r"NOW=(\d{4})", out).group(1)
+            assert _hhmm_close(now, want), f"本机 TZ={tz} 时闸读到 {now}，美东实为 {want:%H%M}"
+
+    def test_unreadable_zone_warns_and_falls_back_to_utc_minus_5(self, orch_text):
+        """时区数据读不到时 macOS date 静默给 UTC——必须 WARN 并按 UTC−5 判（只会更晚放行）。"""
+        # 模拟时区数据坏掉：带 TZ 的读钟拿到的是 UTC 墙钟（macOS 的真实表现），缩写报 UTC。
+        # ⚠️ 冬季 EST 恰好 = UTC−5，只把缩写改成 UTC 而让读钟仍返回真美东，删掉兜底也测不出来。
+        fake = ('date() { case "$*" in *%Z*) echo UTC ;; *-u*) command date "$@" ;; '
+                '*) TZ=UTC command date "$@" ;; esac; }')
+        out = _run_clock(_gate_clock_snippet(orch_text), prelude=fake)
+        assert "LOG[WARN]" in out and "UTC−5" in out, out
+        now = re.search(r"NOW=(\d{4})", out).group(1)
+        want = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5)
+        assert _hhmm_close(now, want), f"兜底读到 {now}，UTC−5 实为 {want:%H%M}"
 
     def test_gate_runs_before_any_scan_step(self, orch_text):
         """闸必须在 Step 1 之前，否则先抓完数据再退出等于白跑。"""

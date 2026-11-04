@@ -9,7 +9,34 @@
 
 ## [0.45.715] — 2026-11-04 — 占位（进行中：v0.45.713 二次检查——只设 http_proxy 时误判「已有代理」、帮助页抄了代理地址）
 
-## [0.45.714] — 2026-11-04 — 占位（进行中：冬令时后扫描撞收盘——补跑闸改按美东收盘判，plist 触发移到本机 15:00）
+## [0.45.714] — 2026-11-04 — Fixed：冬令时后每日扫描在美东收盘那一刻开跑——补跑闸改按美东钟判（16:30 ET），launchd 触发移到本机 15:00
+
+**事故（11-02、11-03）**：本机钟跟 `America/Vancouver`，本机 tzdata 里 2026-11-01 起常年 UTC−7（MST）、不再回拨；launchd「本机 14:00」= 美东 16:00，**恰好收盘**（此前是收盘后 1 小时）。
+11-03 扫描 16:00:05 ET 开跑：CBOE 30 只里 29 只拿到盘中生成的文件（`counters.cboe.price_stale_intraday=29`，last_trade 约 15:45 ET；10-29 / 10-30 为 0，11-02 为 7），核实收盘整批落空。
+补跑闸 `CATCHUP_AFTER_HHMM="1330"` 按本机钟判 ⇒ 冬季 = 美东 15:30，**收盘前**——开机补跑会把盘中价写进样本。
+09-28 已定方案（补跑闸改按美东收盘判 + 调触发时刻，截止 11-01）当时没有落地（auto-memory `alpha-hive-environment-facts.md`）。
+
+### Fixed
+- `scripts/alpha-hive-orchestrator.sh`（补跑闸）：当前时刻改读 `TZ=America/New_York date`，阈值 `CATCHUP_AFTER_HHMM="1630"`（美东），与本机时区无关；半日市照 16:30 判（更保守）。
+  - 时区数据读不到时 macOS 的 `date` 不报错、静默按 UTC 给时间 ⇒ 先核对缩写是 EST / EDT，不是 ⇒ WARN 并退回 `date -u -v-5H`（UTC−5：夏季比真美东慢 1 小时，只会更晚放行）。
+  - status.json 的 `reason` 改为 `now_et=… < threshold_et=…`，日志写明是美东时刻。
+  - 没用 `is_trading_day.session_close_et`：闸前不引入 Python 依赖；收盘后固定 30 分钟对半日市只是更晚。
+
+### Changed（本机配置，不在仓库）
+- `~/Library/LaunchAgents/com.alpha.hive.daily.plist`：周一~五触发 14:00 → **15:00**（本机），冬季 = 17:00 EST，夏季（本机仍 UTC−7）= 18:00 EDT。备份 `com.alpha.hive.daily.plist.bak-pre-1500-20261104`。11-04 上午已 `bootout` + `bootstrap` 重载、`launchctl print` 核对 5 个 Hour 都是 15。
+  - 重载时 RunAtLoad 立即触发一次，被（旧）补跑闸按本机 09:37 < 13:30 挡下，并把 `~/.claude/reports/status.json` 覆盖成 `skipped_before_close`；已从备份恢复成 11-03 那份 success。
+  - LLM 影子（`com.alpha.hive.llmshadow`，本机 14:45）不改：它起来后等生产写完再跑（最多等 3 小时），生产约 15:20 写完。
+
+### Tests
+- `tests/test_scan_catchup.py`：阈值下限改为 1600（美东）；新增 `test_gate_clock_is_eastern_not_local`（第一读钟必须是美东、兜底必须由 UTC 推算）；
+  `TestGateClockLive` 逐字取出编排器那段读钟代码真跑：读到的是纽约墙钟、本机 TZ 换成温哥华 / 东京 / UTC 都不变、时区数据坏（`date` 被换成返回 UTC 墙钟）⇒ WARN 且按 UTC−5。
+  - 变异：读钟改回本机 `date` ⇒ 3 条红；删掉兜底赋值 ⇒ 1 条红。⚠️ 兜底那条的假 `date` 最初只把缩写改成 UTC、读钟仍给真美东——冬季 EST 恰好 = UTC−5，删兜底照样绿；改成返回 UTC 墙钟后才红。
+- 选测 40 个文件 2629 passed；clockshift ±7 / ±45 天 0 新红；`-m integration` 那组沙箱真跑 5 passed。
+
+### 未做 / 待验证
+- 跳过分支仍会覆盖当天的 `status.json`（开机补跑在收盘前触发时就会发生，今天重载 plist 即撞上一次）；09-28 方案里的这一项没做。
+- 编排器改动按自动部署要到合入后的**第二个**扫描日才执行；当天的触发时刻由 plist 保证（本机 15:00 早于阈值的情况不会出现）。
+- 11-02、11-03 两天的存档（核实收盘落空）未改写，由人定。
 
 ## [0.45.713] — 2026-11-04 — Fixed：Alpha Bot 出站接代理探活——从 .app 启动时 yfinance 走直连、直连出口被 Yahoo 掐（备用源 NVDL / BILI、250 日 β 长期 429 的根因）
 
