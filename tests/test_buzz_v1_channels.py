@@ -770,11 +770,12 @@ class TestBridgeWiring:
         br = fx.buzz_v1_bridge(db, "2026-10-21")
         assert set(br) <= set(fx._BRIDGE_KEYS) | {"groups", "score", "n_errors"}
         assert br["ok"] is False and br["groups"]["sentiment"]["n_fail"] == 1
+        ex = {"n": 0, "by_day": {}, "n_frozen_errors": 0, "examples": []}   # 修订 5：执行器恒带排除计数
         line = fx.status_line({"status": "not_ready", "truncation": {}, "buzz_v1_bridge": br, "h1_weeks": 0,
-                               "next_look_at": 26, "forward_start": "2026-10-12"})
+                               "next_look_at": 26, "forward_start": "2026-10-12", "h1_excluded": ex})
         assert line.startswith("⚠️") and "桥接核对" in line and "首次 2026-10-21" in line
         ok = fx.status_line({"status": "not_ready", "truncation": {}, "h1_weeks": 0, "next_look_at": 26,
-                             "forward_start": "2026-10-12",
+                             "forward_start": "2026-10-12", "h1_excluded": ex,
                              "buzz_v1_bridge": {**br, "ok": True, "groups": {
                                  "sentiment": {"n_pass": 1, "n_fail": 0}, "price": {"n_pass": 0, "n_fail": 0}}}})
         assert ok.startswith("⏳") and "情绪 1/10" in ok
@@ -788,3 +789,83 @@ class TestBridgeWiring:
                                 "score": {"n": 3, "n_match": 3}, "n_errors": 0}}
         (it,) = [a for a in rr._dim_ic_attention(d) if a["id"].endswith("buzz_v1_bridge")]
         assert it["level"] == "warn" and "price 失败 2 天" in it["message"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 修订 5（v0.45.712，维度 IC 协议 §13.14）：按地址判断有没有数据；H1 从档案重算
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestRevision5RefRule:
+    """判别：若仍按生产的 `expected` 判，生产改了「什么时候算取数失败」就会经这个标志漏进 H1——下面前两条正是
+    `expected` 与地址不一致的两种情形，旧规则下两条都红。"""
+
+    def test_expected_true_but_no_address_is_neutral(self, on):
+        blk = _write_obs()
+        blk["news"] = {"expected": True, "ref": None}
+        assert fc.sentiment_channels("NVDA", blk, _load)["news_signal"] == 50
+
+    def test_expected_false_but_address_present_is_computed(self, on):
+        blk = _write_obs()
+        want = fc.sentiment_channels("NVDA", blk, _load)
+        for ch in ("reddit", "news", "yahoo", "fear_greed"):
+            blk[ch] = {"expected": False, "ref": blk[ch]["ref"]}
+        assert fc.sentiment_channels("NVDA", blk, _load) == want
+        assert want["yahoo_signal"] != fc.NEUTRAL, "前提：用到了真实热搜表（否则这条测试证明不了什么）"
+
+    @pytest.mark.parametrize("ch,bad", [("news", "f" * 64), ("yahoo", "e" * 64),
+                                        ("reddit", {"all-stocks": "d" * 64, "wallstreetbets": "d" * 64}),
+                                        ("reddit", "not-a-mapping")])
+    def test_address_not_in_archive_or_malformed_is_incomplete(self, on, ch, bad):
+        blk = _write_obs()
+        blk[ch] = {"expected": True, "ref": bad}
+        with pytest.raises(fc.IncompleteObservations):
+            fc.sentiment_channels("NVDA", blk, _load)
+
+    def test_missing_channel_entry_is_incomplete(self, on):
+        blk = _write_obs()
+        del blk["yahoo"]
+        with pytest.raises(fc.IncompleteObservations):
+            fc.sentiment_channels("NVDA", blk, _load)
+
+
+class TestH1Channels:
+    def _db(self, tmp_path, blocks):
+        db = tmp_path / "p.db"
+        con = sqlite3.connect(db)
+        oa.write_links(con, [(d, t, oa.CONSUMER_BUZZ, json.dumps(b)) for (d, t), b in blocks.items()])
+        con.commit()
+        con.close()
+        return db
+
+    def test_recomputes_from_the_archive(self, on, tmp_path):
+        blk = _write_obs()
+        db = self._db(tmp_path, {("2026-10-21", "NVDA"): blk})
+        got = B.h1_channels(str(db), "2026-10-20", "2026-10-31")
+        want = fc.sentiment_channels("NVDA", blk, _load)
+        assert got == {("2026-10-21", "NVDA"): {"channels": {c: want[c] for c in
+                                                             ("reddit_signal", "news_signal", "yahoo_signal")}}}
+
+    def test_date_bounds_are_inclusive_and_respected(self, on, tmp_path):
+        blk = _write_obs()
+        db = self._db(tmp_path, {("2026-10-19", "NVDA"): blk, ("2026-10-20", "NVDA"): blk, ("2026-10-22", "NVDA"): blk})
+        assert sorted(B.h1_channels(str(db), "2026-10-20", "2026-10-21")) == [("2026-10-20", "NVDA")]
+
+    def test_incomplete_and_frozen_errors_are_excluded_with_distinct_reasons(self, on, tmp_path, monkeypatch):
+        bad = _write_obs()
+        bad["news"] = {"expected": True, "ref": "f" * 64}
+        db = self._db(tmp_path, {("2026-10-21", "AAA"): bad, ("2026-10-21", "NVDA"): _write_obs()})
+        got = B.h1_channels(str(db), "2026-10-20", "2026-10-31")
+        assert got[("2026-10-21", "AAA")]["excluded"].startswith("观测不全")
+
+        def boom(*_a, **_k):
+            raise KeyError("payload 形状变了")
+        monkeypatch.setattr(fc, "news_signal", boom)
+        got = B.h1_channels(str(db), "2026-10-20", "2026-10-31")
+        assert got[("2026-10-21", "NVDA")]["excluded"].startswith(B.H1_FROZEN_ERROR_PREFIX)
+
+    def test_missing_links_table_raises(self, tmp_path):
+        """表不在 ⇒ 抛（执行器判无法判定），不当成「没样本」返回空。"""
+        db = tmp_path / "p.db"
+        sqlite3.connect(db).close()
+        with pytest.raises(sqlite3.OperationalError):
+            B.h1_channels(str(db), "2026-10-20", "2026-10-31")

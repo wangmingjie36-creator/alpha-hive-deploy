@@ -329,19 +329,19 @@ class TestRealCli:
 
     def test_code_guard_failure_reaches_envelope(self, tmp_path):
         """v0.45.554 起漏着的同一个洞：输入层指纹守卫红 ⇒ 段首 ⚠️ 且外壳有 `ic_rerun.dim_ic.input_code_guard`。
-        prelude 只把指纹核对换成「buzz.news 未确认」（自证换成通过，免得两条混在一起），被测脚本原样跑。"""
+        prelude 只把指纹核对换成「obs.news 未确认」（自证换成通过，免得两条混在一起），被测脚本原样跑。"""
         db = _make_db(tmp_path / "home", [])
         prelude = (
             "import signal_code_fingerprints as _scf, buzz_v1\n"
-            "_scf.check = lambda: {'ok': False, 'units': {'buzz.news': {'state': 'unacknowledged'}}}\n"
+            "_scf.check = lambda: {'ok': False, 'units': {'obs.news': {'state': 'unacknowledged'}}}\n"
             f"buzz_v1.self_proof = lambda *a, **k: dict({_SP_OK!r})\n")
         rc, env, out, err = _run(tmp_path, db, "--today", self.TODAY, "--quiet", prelude=prelude)
         ids = _check(rc, env, err, expect_rc=1, expect_date=self.TODAY, expect_status="attention")
         (a,) = ids["ic_rerun.dim_ic.input_code_guard"]
-        assert a["level"] == "warn" and "buzz.news" in a["message"], a
+        assert a["level"] == "warn" and "obs.news" in a["message"], a
         assert "ic_rerun.dim_ic.buzz_v1_self_proof" not in ids, "前提：自证已换成通过"
         seg = _quiet_segments(out)[3]
-        assert seg.startswith("⚠️ ") and "buzz.news" in seg, seg
+        assert seg.startswith("⚠️ ") and "obs.news" in seg, seg
         _assert_payload_intact(env)
 
     def test_crash_is_exit_3_with_error_envelope(self, tmp_path):
@@ -533,7 +533,7 @@ class TestOkPath:
         不让「读不到」渲染成「没事」。"""
         items = rr._dim_ic_attention({"status": "not_ready", "forward_start": P.FORWARD_START,
                                       "input_code_guard": _GUARD_OK, "buzz_v1_self_proof": _SP_OK,
-                                      "buzz_v1_bridge": _BR_OK})
+                                      "buzz_v1_bridge": _BR_OK, "h1_excluded": _EX_OK})
         assert [a["id"] for a in items] == ["ic_rerun.dim_ic.h1_anchor_unknown"]
         assert items[0]["level"] == "warn" and items[0]["deadline"] == P.FORWARD_START
 
@@ -552,7 +552,7 @@ class TestOkPath:
         got = {a["id"]: a["message"] for a in rr._dim_ic_attention(
             {**_DIM_BASE, "input_code_guard": _GUARD_RED, "buzz_v1_self_proof": _SP_RED})}
         g, s = got["ic_rerun.dim_ic.input_code_guard"], got["ic_rerun.dim_ic.buzz_v1_self_proof"]
-        assert "buzz.news" in g and "signal_code_fingerprints.py" in g, g
+        assert "obs.news" in g and "signal_code_fingerprints.py" in g, g
         assert "119/120" in s and "失配 1" in s and "buzz_v1.py" in s, s
         err = rr._dim_ic_attention({**_DIM_BASE, "buzz_v1_self_proof": {"ok": False, "error": "OperationalError: x"}})
         assert "算不出：OperationalError: x" in err[0]["message"], err
@@ -601,11 +601,13 @@ _BR_OK = {"ok": True, "ready": False, "end": "2026-10-01", "required_days": 10,
 _BR_RED = {**_BR_OK, "ok": False,
            "groups": {**_BR_OK["groups"],
                       "price": {"n_pass": 2, "n_fail": 1, "n_incomplete": 0, "ready": False, "first_fail": "2026-10-22"}}}
+_EX_OK = {"n": 0, "by_day": {}, "n_frozen_errors": 0, "examples": []}
 _DIM_BASE = {"status": "not_ready", "forward_start": P.FORWARD_START, "today": "2026-10-01", "h1_weeks": 0,
-             "next_look_at": 26, "looks_done": [], "verdicts": {}, "truncation": {"H1": None, "H2": None},
+             "next_look_at": 26, "looks_done": [], "verdicts": {}, "truncation": {"H1": None, "weighted_composite": None},
              "weight_change": {"date": None}, "stale": False, "h1_anchor": _ANC_OK,
-             "input_code_guard": _GUARD_OK, "buzz_v1_self_proof": _SP_OK, "buzz_v1_bridge": _BR_OK}
-_GUARD_RED = {"ok": False, "unacknowledged": ["buzz.news"], "errors": {}}
+             "input_code_guard": _GUARD_OK, "buzz_v1_self_proof": _SP_OK, "buzz_v1_bridge": _BR_OK,
+             "h1_excluded": _EX_OK}
+_GUARD_RED = {"ok": False, "unacknowledged": ["obs.news"], "errors": {}}
 _SP_RED = {**_SP_OK, "ok": False, "n_matched": 119, "n_mismatched": 1}
 _DIM_STATES = [
     ("clean", {}, set()),
@@ -614,9 +616,11 @@ _DIM_STATES = [
      {"h1_anchor_pending"}),
     ("anchor_fallback", {"h1_anchor": {"state": "fallback", "version": P.H1_ANCHOR_VERSION, "date": None,
                                        "problem": "x 不在 _COHORT_HISTORY 里"}}, {"h1_anchor_fallback"}),
-    ("h1_truncated", {"truncation": {"H1": {"date": "2026-11-02", "version": "vX", "layer": "input"}, "H2": None}},
+    ("h1_truncated", {"truncation": {"H1": {"date": "2026-11-02", "version": "vX", "layer": "input"}, "weighted_composite": None}},
      {"h1_truncated"}),
-    ("h2_truncated", {"truncation": {"H1": None, "H2": {"date": "2026-11-02", "version": "vX"}}}, {"h2_truncated"}),
+    # 修订 5（v0.45.712）：原 H2 降为描述项 ⇒ 它的截断 / 权重偏离只给 info、进度行不变色
+    ("wc_truncated", {"truncation": {"H1": None, "weighted_composite": {"date": "2026-11-02", "version": "vX"}}},
+     {"weighted_composite_truncated"}),
     ("weight_changed", {"weight_change": {"date": "2026-10-20", "source": "提交 abc"}}, {"weight_changed"}),
     ("weight_unknown", {"weight_change": {"unknown": "浅克隆"}}, {"weight_history_unknown"}),
     ("stale", {"stale": True}, {"stale"}),
@@ -624,8 +628,8 @@ _DIM_STATES = [
      {"checkpoint"}),
     ("in_progress_warn", {"status": "in_progress", "looks_done": ["中检"], "h1_weeks": 30, "next_look_at": 52,
                           "weight_change": {"unknown": "浅克隆"}}, {"checkpoint", "weight_history_unknown"}),
-    ("concluded", {"status": "concluded", "verdicts": {"H1": {"result": "not_significant"},
-                                                       "H2": {"result": "not_tested"}}}, {"checkpoint"}),
+    ("concluded", {"status": "concluded", "verdicts": {"H1": {"result": "not_significant"}}},
+     {"checkpoint"}),
     ("cannot_judge", {"status": "cannot_judge", "reason": "找不到库"}, {"cannot_judge"}),
     ("cannot_judge_anchor_pending", {"status": "cannot_judge", "reason": "predictions 缺列",
                                      "h1_anchor": {"state": "pending", "version": P.H1_ANCHOR_VERSION,
@@ -647,6 +651,12 @@ _DIM_STATES = [
     ("cannot_judge_by_both", {"status": "cannot_judge", "reason": "输入层代码有未确认的改动……",
                               "input_code_guard": _GUARD_RED, "buzz_v1_self_proof": _SP_RED},
      {"cannot_judge", "input_code_guard", "buzz_v1_self_proof"}),
+    # 修订 5：H1 排除计数——冻结层报错是 bug ⇒ warn；观测不全照实计数 ⇒ info；读不到计数 ⇒ warn（别让排除无声消失）
+    ("h1_excluded", {"h1_excluded": {**_EX_OK, "n": 3, "by_day": {"2026-11-03": 3}}}, {"h1_excluded"}),
+    ("h1_frozen_errors", {"h1_excluded": {**_EX_OK, "n": 2, "n_frozen_errors": 2}},
+     {"h1_excluded", "h1_frozen_errors"}),
+    ("h1_excluded_unknown", {"h1_excluded": None}, {"h1_excluded_unknown"}),
+    ("cannot_judge_no_excluded", {"status": "cannot_judge", "reason": "x", "h1_excluded": None}, {"cannot_judge"}),
 ]
 
 

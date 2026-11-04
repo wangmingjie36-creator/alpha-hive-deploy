@@ -216,6 +216,14 @@ def _load(name, rel):
 
 fx = _load("dim_ic_forward_test_dh", "experiments/dim_ic_forward_test.py")
 P = _load("dim_ic_protocol_dh", "experiments/dim_ic_protocol.py")
+
+
+@pytest.fixture(autouse=True)
+def _pre_archive_segment_only(monkeypatch):
+    """修订 5（v0.45.712）：H1 通道 `H1_ARCHIVE_START` 起由观测档案重算、之前按登记哈希核对。本文件的合成夹具写在
+    `signal_archive`、测的是排除日 / 日健康口径 ⇒ 把档案起点推到远期，并让执行器经 `_protocol()` 取到同一个 P。"""
+    monkeypatch.setattr(P, "H1_ARCHIVE_START", "9999-12-31")
+    monkeypatch.setattr(fx, "_protocol", lambda: P)
 fwd = _load("resonance_boost_forward_test_dh", "experiments/resonance_boost_forward_test.py")
 
 
@@ -448,7 +456,7 @@ class TestDimIcSensitivity:
         「主分析被悄悄改成敏感性的样本」这类变异在周数口径下是看不出来的，这里看进链的行。）"""
         seen = []
 
-        def _probe(h1_weeks, h2_weeks, P_, **k):
+        def _probe(h1_weeks, P_, **k):          # 修订 5：H2 降为描述项，decide 只收 H1
             n_days = sum(d for _w, _v, d in h1_weeks)
             seen.append(n_days)
             return {"status": "not_ready", "h1_weeks": n_days, "next_look_at": 26, "looks_done": [], "verdicts": {}}

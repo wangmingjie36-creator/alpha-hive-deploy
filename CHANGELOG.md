@@ -104,7 +104,43 @@
 - ⚠️ 生产 Alpha Bot 要等扫描日生产克隆快进后**重启**才用上。
 
 
-## [0.45.712] — 2026-11-04 — 占位（进行中：维度 IC 预注册修订 5，H1 冻结到观测层 + H2 降为描述项）
+## [0.45.712] — 2026-11-04 — Changed：维度 IC 预注册修订 5——H1 的通道改由冻结通道层从观测档案重算，截断集合移到取数层 `obs.*`，H2 降为描述项 weighted_composite
+
+用户 2026-11-04 批准（选 A）。修订时点：窗口内、只看过输入（计数 / 指纹 / 自证），**没看任何收益 / IC / p**。协议正文 §13.14，
+草稿与取舍过程 `experiments/dim_ic_amendment5_DRAFT.md`，登记常量 `experiments/dim_ic_protocol.py`（`AMENDMENTS` 第 5 条）。
+真实数据跑执行器：⏳ not_ready，H1 合格周 1/26，H1 截断 None，排除 0 行，无守卫告警；`signal_code_fingerprints.py` 11 个单元全 ✅。
+
+### Changed
+- **H1 通道按日期分两段**（`experiments/dim_ic_forward_test.py::_load_channels`）：
+  - `H1_ARCHIVE_START`（2026-10-20，观测档案起点）之前读 `signal_archive` 存档值，整段按
+    `H1_PRE_ARCHIVE_ROWS` / `H1_PRE_ARCHIVE_SHA256`（450 行，`pre_archive_digest`）核对；对不上 ⇒ 无法判定（同日重扫 / 回填改写了过去）。
+  - 之后由 `buzz_v1.h1_channels()` 从观测档案经冻结通道层（`buzz_v1_channels`）重算，不再读生产写的通道值。
+- **数据在不在按引用判**（`buzz_v1_channels.sentiment_channels`）：看观测链接里有没有那份原始观测，不再信生产的 `expected` 标志；
+  观测不全 / 没有溯源块 / 冻结层报错 ⇒ 该行排除、不补值，计数进结果 `h1_excluded`（`n` / `by_day` / `n_frozen_errors` / `examples`）。
+- **截断集合 = 取数层**（方案 A）：`HYPOTHESES` 的 H1 信号改为 `obs.reddit` / `obs.news` / `obs.yahoo`（`signal_archive.UNARCHIVED_NODES` 登记的伪节点）；
+  隔离名单仍按三个通道名查（`items()` 的 `quarantine` 键）。
+- **新增五个指纹单元**（`signal_code_fingerprints.py`）：`obs.reddit` / `obs.news` / `obs.yahoo`（取数切片）、`obs.links`（观测入档与链接）、
+  `h1.frozen`（冻结通道层 + `h1_channels`）；只有这五个挡 H1，`buzz.*` / `price.fields` 只关系到描述项 buzz_v1。
+  - 新定位器：`seeds:函数:名字`（只取提到这些名字的语句并切到相关项）、`before_assign:函数:变量`、`method:类.方法`；单元可带 `stop`（闭包不往下追的名字，过期即红）。
+  - 新确认方式 `raw_unchanged`（只许取数单元用：碰了取数切片但取到 / 链接的原始观测逐字节不变）。
+  - 既有单元指纹逐个对照 HEAD 模块不变。
+- **H2 降为描述项** `weighted_composite`（`P.H2_DESCRIPTIVE`）：固定序列只剩 H1，α 全给 H1（中检 0.01 / 终检 0.04）。
+  它的截断 / 权重偏离在 `ic_rerun_readiness` 里改为 info 条目（`weighted_composite_truncated` / `weight_changed` / `weight_history_unknown`）。
+- **桥接核对只是监测**：`buzz_v1 --bridge` 失配不再影响 H1，提示文字同步。
+
+### Added
+- `ic_rerun_readiness._dim_ic_attention`：`h1_frozen_errors`（warn，冻结层报错是 bug）、`h1_excluded`（info）、
+  `h1_excluded_unknown`（warn：执行器没给排除计数 ⇒ 被排除的行会无声消失）；`_DIM_DETAIL_KEYS` 加 `h1_excluded`。
+  进度行 `status_line` 同判（读不到排除计数 ⇒ ⚠️），条目 ↔ 图标对照测试钉住。
+
+### Tests
+- `tests/test_dim_ic_forward_test.py::TestRevision5`（两段切换、哈希核对、按引用排除）+ `TestStatusLine::test_missing_exclusion_count_is_warn`；
+  其余执行器夹具经 autouse `_pre_archive_segment_only` 测存档值那段。
+- `tests/test_signal_code_fingerprints.py::TestObsUnits`、`tests/test_buzz_v1_channels.py::TestRevision5RefRule` / `TestH1Channels`、
+  `tests/test_dim_ic_protocol.py`、`tests/test_step_contract_ic_rerun.py`（H2 状态换成描述项、加排除计数三态）、
+  `tests/test_quarantine_1014_prev_session.py`（H2 → weighted_composite）。
+- 整套首跑另红 9 条，都是执行器的其它读者没跟上：`tests/test_day_health.py` / `tests/test_forward_test_excluded_days.py`（合成夹具撞上登记哈希 ⇒ 同款 autouse 夹具；探针桩的 `decide` 签名去掉 h2）、`tests/test_orchestrator_steps.py`（健康维度 IC 结果补 `h1_excluded`）。
+- 变异：按 `expected` 判新闻在不在、关掉哈希核对、档案起点后仍读存档值、不排除无溯源块的行——各自有测试变红。
 
 ## [0.45.711] — 2026-11-03 — Fixed：v0.45.708（预注册修订 4）二次检查——两处提示文字仍按修订 1 说话，与执行器行为相反
 

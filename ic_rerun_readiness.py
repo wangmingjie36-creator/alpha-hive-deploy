@@ -2394,7 +2394,7 @@ _FWD_DETAIL_KEYS = ("status", "reason", "stale", "look", "weeks", "next_look_at"
 #: `buzz_v1_bridge`（v0.45.583）：冻结通道层桥接核对的计数与状态（阶段 4 前只是进度）。
 _DIM_DETAIL_KEYS = ("status", "reason", "forward_start", "today", "h1_weeks", "next_look_at",
                     "looks_done", "truncation", "weight_change", "stale", "h1_anchor",
-                    "input_code_guard", "buzz_v1_self_proof", "buzz_v1_bridge")
+                    "input_code_guard", "buzz_v1_self_proof", "buzz_v1_bridge", "h1_excluded")
 
 
 def _detail(fres: Dict, keys) -> Dict:
@@ -3018,16 +3018,31 @@ def _dim_ic_attention(d: Dict) -> List[Dict]:
         out.append(item(f"{iid}.h1_anchor_unknown", "warn",
                         f"{name}：读不到 H1 锚点状态（h1_anchor={anc!r}）—— 锚点{by}登记的截止日可能漏报",
                         deadline=fs))
-    h2 = tr.get("H2") or {}
-    if h2.get("date"):
-        out.append(item(f"{iid}.h2_truncated", "warn", f"{name}：H2 已于 {h2['date']}（{h2.get('version')}）截断"))
+    # 修订 5（v0.45.712，§13.14）：原 H2 降为描述项 weighted_composite ⇒ 它的截断 / 权重偏离只是说明（info），不影响 H1
+    wct = tr.get("weighted_composite") or {}
+    if wct.get("date"):
+        out.append(item(f"{iid}.weighted_composite_truncated", "info",
+                        f"{name}：描述项 weighted_composite 已于 {wct['date']}（{wct.get('version')}）截断（不影响 H1）"))
     wc = d.get("weight_change") or {}
     if wc.get("date"):
-        out.append(item(f"{iid}.weight_changed", "warn",
-                        f"{name}：config 权重已偏离冻结值（{wc['date']}，{wc.get('source')}）⇒ H2 截断"))
+        out.append(item(f"{iid}.weight_changed", "info",
+                        f"{name}：config 权重已偏离冻结值（{wc['date']}，{wc.get('source')}）⇒ 描述项 weighted_composite 截断（不影响 H1）"))
     if "unknown" in wc:
-        out.append(item(f"{iid}.weight_history_unknown", "warn",
-                        f"{name}：权重历史无法判定（{wc['unknown']}）"))
+        out.append(item(f"{iid}.weight_history_unknown", "info",
+                        f"{name}：权重历史无法判定（{wc['unknown']}；只影响描述项 weighted_composite）"))
+    # 修订 5：H1 排除的行（观测不全 / 没有溯源块 / 冻结层报错）。冻结层报错是要修的 bug ⇒ warn；其余照实计数 ⇒ info
+    ex = d.get("h1_excluded")
+    if isinstance(ex, dict):
+        if ex.get("n_frozen_errors"):
+            out.append(item(f"{iid}.h1_frozen_errors", "warn",
+                            f"{name}：H1 冻结通道层报错 {ex['n_frozen_errors']} 行（已排除、不补值）—— 跑 "
+                            "`/usr/local/bin/python3 buzz_v1.py --bridge` 查，这是要修的 bug，不是数据缺失"))
+        if ex.get("n"):
+            out.append(item(f"{iid}.h1_excluded", "info",
+                            f"{name}：H1 排除 {ex['n']} 行（观测不全 / 无溯源块，协议 §13.14 不补值）—— {run_it}"))
+    elif st not in ("cannot_judge",):
+        out.append(item(f"{iid}.h1_excluded_unknown", "warn",
+                        f"{name}：读不到 H1 排除计数（h1_excluded={ex!r}）—— 观测不全 / 冻结层报错的行会无声消失"))
     if d.get("stale"):
         out.append(item(f"{iid}.stale", "warn",
                         f"{name}：登记窗口起点 {fs} 后仍无任何样本 —— 扫描停了或路径错了"))
@@ -3067,7 +3082,7 @@ def _dim_ic_attention(d: Dict) -> List[Dict]:
             why = "；".join(fails) or "未给原因"
         out.append(item(f"{iid}.buzz_v1_bridge", "warn",
                         f"{name}：buzz_v1 桥接核对未通过（{why}）—— 跑 `/usr/local/bin/python3 buzz_v1.py --bridge` 看失配明细；"
-                        "冻结通道层与生产通道对不上（或有没存下的隐藏输入），查清前不能进阶段 4（阶段 4 前不影响 H1）"))
+                        "冻结通道层与生产通道对不上（或有没存下的隐藏输入）；修订 5 起只是监测，不影响 H1（§13.14）"))
     for key, what in (("input_code_guard", "输入层代码指纹守卫"), ("buzz_v1_self_proof", "buzz_v1 自证"),
                       ("buzz_v1_bridge", "buzz_v1 桥接核对")):
         if not isinstance(d.get(key), dict) and st != "cannot_judge":

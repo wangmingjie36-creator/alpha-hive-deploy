@@ -2116,8 +2116,12 @@ def _forward_realized_vol(tickers: List[str], dates: List[str],
 #   理论上也可能藏着同类问题。本机制只照登记表切，不会主动替未查的历史补登。
 
 #: 被入档信号读取、自身不入档的系统输出 —— 只为让边界与依赖边能指向它。
+#: `obs.*`（v0.45.712，维度 IC 协议修订 5）：H1 的取数层——BuzzBee 情绪通道用的原始观测「取哪份、怎么链接」。
+#: 改取数的边界在 `COHORT_SIGNAL_SCOPE` 点名它们 ⇒ H1 截断；不加依赖边：取数代码也在对应的 `buzz.*` 指纹单元里，
+#: 那边的确认会另外点名 `buzz.comp.*`（两边各管各的，见 `signal_code_fingerprints.UNITS`）
 UNARCHIVED_NODES = frozenset({"agent.CodeExecutorAgent.score",
-                              "agent.CodeExecutorAgent.direction"})
+                              "agent.CodeExecutorAgent.direction",
+                              "obs.reddit", "obs.news", "obs.yahoo"})
 
 # Phase-1 并行发布的蜂（`alpha_hive_daily_report._init_scan_context`）；其后顺序是 Rival → Guard → Bear
 _PHASE1 = ("ScoutBeeNova", "OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon", "CodeExecutorAgent")
