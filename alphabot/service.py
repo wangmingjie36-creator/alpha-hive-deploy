@@ -39,6 +39,7 @@ from alphabot import premium as PM
 from alphabot import straddle as SD
 from alphabot import strangle_compare as SC
 from alphabot import tail_hedge as TH
+from alphabot import wheel as WH
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("alphabot")
@@ -434,6 +435,7 @@ class AlphaBotService:
             "hedge": self.hedge_rules(),
             "premium": self.premium_rules(),
             "howto": HW.public_rules(),
+            "wheel": WH.public_rules(),
             # 帮助页「程序类」里给人抄的命令：进本代码目录、用运行本服务的解释器（从 .app 打开时就是 .app 记下的那个），
             # 不写死缺省、不假设人站在代码目录里（v0.45.611）
             "app": {"launcher": MA.here_command("-m alphabot.launcher"),
@@ -514,6 +516,21 @@ class AlphaBotService:
         return clean_json(SD.build_overview(led, now_et=now, rules=self.straddle_rules(),
                                             shadow=self._straddle_shadow(led.get("signals") or []),
                                             strangle_shadow=self._strangle_shadow(led)))
+
+    # ── 接货型卖 put 纸面账本（v0.45.721，只读）：数据只经账本属主的只读出口 `sell_put_wheel.load_state`
+    def wheel(self) -> dict:
+        """演示模式不读账本（合成数据不是这本账的记录）；读不了就如实报，不当成空账本。
+        懒 import：账本模块 import 时不求值数据根，但环境没设好时也不能连坐整个 Alpha Bot。"""
+        rules = WH.public_rules()
+        if self.demo:
+            return clean_json(WH.build_overview({"available": False, "state_reason": "demo"}, rules=rules))
+        try:
+            import sell_put_wheel as spw
+            state = spw.load_state()
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("接货型卖 put 账本不可得：%s: %s", type(exc).__name__, exc)
+            state = {"available": False, "state_reason": f"{type(exc).__name__}: {exc}"}
+        return clean_json(WH.build_overview(state, rules=rules))
 
     # ── 对冲账本（v0.45.459，只读）：组合 Greeks 的纸面 SPY 覆盖
     def _hedge_view(self, now: datetime) -> dict:

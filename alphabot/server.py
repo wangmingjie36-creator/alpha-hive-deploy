@@ -165,6 +165,10 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         return svc.hedge()
 
     @api
+    def wheel(request):
+        return svc.wheel()
+
+    @api
     def hedge_tail(request):
         return svc.tail_hedge(force=_q(request, "force") == "1")
 
@@ -245,6 +249,7 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/intraday/{ticker}/snap", snap_now, methods=["POST"]),
         Route("/api/straddle", straddle),
         Route("/api/hedge", hedge),
+        Route("/api/wheel", wheel),
         Route("/api/hedge/tail", hedge_tail),
         Route("/api/hedge/beta", hedge_beta),
         Route("/api/straddle/live/{ticker}", straddle_live),

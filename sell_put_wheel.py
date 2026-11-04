@@ -53,6 +53,15 @@ CONFIG: Dict[str, Any] = {
     "rank_by": "annual_yield",
 }
 
+def public_rules() -> dict:
+    """页面 / 帮助页用的规则常量（取 CONFIG 当下的值，前端不另抄）。元组转列表以便 JSON。"""
+    keys = ("universe", "accept_price", "placeholder_otm_pct", "starting_capital", "contracts", "per_name_cap_pct",
+            "total_cap_pct", "put_dte_range", "put_dte_target", "call_dte_range", "call_dte_target",
+            "call_target_delta", "max_spread_pct", "min_oi", "rank_by")
+    return {k: (list(CONFIG[k]) if isinstance(CONFIG[k], tuple) else (dict(CONFIG[k]) if isinstance(CONFIG[k], dict)
+                                                                      else CONFIG[k])) for k in keys}
+
+
 #: 口径世代（手写常量，只在账本口径变时改）
 _VERSION = "0.45.720"
 CONTRACT = 100
