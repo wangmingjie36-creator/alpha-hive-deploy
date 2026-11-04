@@ -9,7 +9,39 @@
 
 ## [0.45.717] — 2026-11-04 — 占位（进行中：扫描 yfinance 源末根不是最近一场已收盘交易日时当取不到——11-03 入库价全是 11-02 收盘）
 
-## [0.45.716] — 2026-11-04 — 占位（进行中：扫描撞 yfinance 429 冷却时，标的开跑前等冷却结束（整轮限时），不再让冷却期内的二十几只标的全丢 iv_rank / 异常流）
+## [0.45.716] — 2026-11-04 — Fixed：扫描撞上 yfinance 429 冷却时，标的开跑前先等冷却结束（整轮限时 600s），不再让冷却期内开工的二十几只标的全丢 iv_rank / 异常流
+
+### 为什么改（2026-11-03 取证，`alpha_hive_structured.jsonl` 21:12:53–21:14:27 UTC）
+- 扫描第 282 次 yfinance 请求（CRCL `Ticker.option_chain`）撞上**一次** 429（本进程 281 发 277 成、连续第 1 次、上次成功 3s 前；
+  0.5 req/s 的闸门没超速）⇒ `yf_gate` 180s 冷却，期间调用一律秒回 `YFRateLimited`。
+- 冷却期间仍在开新标的：二十几只的历史 HV（⇒ iv_rank 置 None）与 unusual_options 在 90 秒内全部失败 ⇒
+  iv_rank 10/30、unusual_flow 9/30，`day_health` 判 yfinance 故障日（P1）。
+- 失败是秒回的，标的处理节奏从 ≈1.2 只/分钟冲到十几只/分钟（日志 21:13 一分钟 232 行），
+  把 Massive 新闻的 5 次/分钟本地名额挤爆（40s 等不到 ⇒ 9 只降级 Yahoo 新闻，P1）——Massive 服务端没出错。
+- 对照：11-02 同样一次 429，落在 yfinance 步骤之后，冷却期内 0 次被挡、零损失。损失取决于 429 落在流程哪里。
+- 同日纸面组合（5 万本金账本）整天跳过（P2）也是这次冷却：21:14:27 取 11 只持仓日线时冷却还剩 86s。**本版不改它**（用户 11-04 定）。
+
+### Added
+- `yf_cooldown_wait.py`：`CooldownWaitBudget(total_s, per_wait_max)`，开工前 `wait(label)` 睡到冷却结束。
+  - 不重试、不发请求，不给 Yahoo 加压；放在 `yf_gate` 外面——闸门模块结构上不含循环 / 睡眠（守卫 `test_yf_rate_limit_handling` 原样不动）。
+  - 预算按**冷却段**扣、不按线程扣（4 个并行标的等同一段只扣一次）；单段剩余 > 185s 或超出整轮预算 ⇒ 不等、照旧失败。
+- `yf_gate.cooldown_deadline()`（只读）与 `note_cooldown_wait()`；`stats()` 新增 `cooldown_waits` / `cooldown_wait_s` / `cooldown_wait_refused`，
+  经现有 `scan_timing` 的 `yfinance` 一节落盘——等过几次、等了多久、没等几次都看得见。
+
+### Changed
+- `alpha_hive_daily_report._analyze_single_ticker`：在**有效性检测之前**（它也取 yfinance 日线）调 `ctx.yf_wait_budget.wait(ticker)`。
+  - 只能在标的这一层等：Phase-1 每只蜂 60s 超时，冷却 180s，蜂里等不了。
+  - `_SwarmContext.yf_wait_budget` 缺省 None = 不等；`_make_yf_wait_budget()` 按 `YF_COOLDOWN_WAIT_BUDGET_S = 600` 建。
+  - 效果：撞上 429 时只有正在跑的那 ≤4 只受影响；节奏保持正常，Massive 名额不再被挤爆（新闻通道不单独改）。
+- ⚠️ 600s 是**主观常数、未经检验**。代价：每段冷却最多让扫描晚 ≈180s；Step 2 预算按只数算（30 只 5400s，v0.45.518），
+  正常日 ≈2100–2700s，加 600s 仍在预算内。429 风暴日（10-27 九段）用完即退回原来的秒回失败。
+- 待验证：Yahoo 为何在 11-03 第 282 次请求回 429（同 IP 是否还有别的消耗者）——日志里查不出；
+  v0.45.713 记下 Alpha Bot 直连出口被 Yahoo 掐，扫描进程是否同样受影响未查。
+
+### Tests
+- `tests/test_yf_cooldown_wait.py`（11 条，假时钟、不睡真时间、不出网）：不在冷却直接返回；等 86s；超单次上限 / 超总预算不等且计数；
+  同一段只扣一次；等待中又进新一段会再判；等待不发请求；扫描在有效性检测之前等；无预算不等。
+- 变异核对：去掉扫描处的等待 / 同段重复扣 / 不看总预算 / 不记拒绝计数，各红 1 条；还原后全绿。
 
 ## [0.45.715] — 2026-11-04 — Fixed：v0.45.713 二次检查——只设 `http_proxy` 时误判「已有代理」（Yahoo 照样直连 429）；帮助页抄了代理地址
 

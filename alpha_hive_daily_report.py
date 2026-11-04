@@ -142,6 +142,23 @@ class _SwarmContext:
     prefetch_elapsed: float
     start_time: float
     checkpoint_file: object = None  # Path
+    yf_wait_budget: object = None   # v0.45.716：yf_cooldown_wait.CooldownWaitBudget（标的开跑前等 yfinance 冷却；None = 不等）
+
+
+#: v0.45.716：一轮扫描里「标的开跑前等 yfinance 冷却结束」的墙钟总预算（秒）。
+#: 一段冷却 180s ⇒ 最多等约 3 段；429 风暴日（10-27 九段）用完即退回原来的秒回失败，不把扫描拖进 Step 2 超时。
+#: 量级依据：Step 2 预算按只数算（30 只 5400s，v0.45.518），正常日 ≈2100–2700s，加 600s 仍有余量。主观常数、未经检验。
+YF_COOLDOWN_WAIT_BUDGET_S = 600.0
+
+
+def _make_yf_wait_budget():
+    """扫描用的冷却等待预算；模块不可得 ⇒ None（不等，行为同 v0.45.716 之前）。"""
+    try:
+        import yf_cooldown_wait
+        return yf_cooldown_wait.CooldownWaitBudget(YF_COOLDOWN_WAIT_BUDGET_S)
+    except Exception as e:  # pragma: no cover - 叶子模块缺失
+        _log.warning("yf_gate 冷却等待预算不可用（%s）：冷却期内开工的标的照旧秒回失败", e)
+        return None
 
 
 def _fetch_scan_macro() -> Dict:
@@ -686,6 +703,7 @@ class AlphaHiveDailyReporter:
             bear_agent=bear_agent, queen=queen, all_agents=all_agents,
             prefetch_elapsed=prefetch_elapsed, start_time=start_time,
             checkpoint_file=checkpoint_file,
+            yf_wait_budget=_make_yf_wait_budget(),
         )
 
     def _load_checkpoint(self, ctx: '_SwarmContext'):
@@ -721,6 +739,11 @@ class AlphaHiveDailyReporter:
     def _analyze_single_ticker(self, ctx: '_SwarmContext', ticker: str,
                                idx: int, total: int, progress_callback=None):
         """单标的全流程分析：有效性检测 → Phase1 并行 → Guard → Bear → Queen distill"""
+        # v0.45.716：yfinance 正在 429 冷却 ⇒ 先等它结束再开工（整轮限时，见 YF_COOLDOWN_WAIT_BUDGET_S）。
+        # 放在有效性检测之前（它也取 yfinance 日线）。只能在这一层等：Phase-1 每只蜂 60s 超时，冷却是 180s，蜂里等不了。不等的情形照旧秒回失败、由覆盖率闸判。
+        if ctx.yf_wait_budget is not None:
+            ctx.yf_wait_budget.wait(ticker)
+
         # Ticker 有效性检测
         try:
             from swarm_agents import check_ticker_validity
