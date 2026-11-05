@@ -57,7 +57,8 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
     `outbound`：启动时定下的出站方式（`alphabot.outbound.configure` 的返回，v0.45.713）；`/api/meta` 原样报出，
     页面在 `mode == "unchanged"`（代理探活失败）时挂横幅。演示模式 / 测试不传 ⇒ None。
     `code_version`（v0.45.726）：建服务这一刻记下的代码提交；`/api/meta` 的 `code` 报「正在跑的 vs 磁盘上的」，
-    页脚写提交号，磁盘上更新了就挂「重启生效」横幅。缺省在这里建 = 记下此刻的 HEAD；测试可换（配假 git）。"""
+    页脚写提交号，磁盘上更新了就挂「代码已更新」横幅、请人重启（没重启是新旧混用，v0.45.730）。
+    缺省在这里建 = 记下此刻的 HEAD；测试可换（配假 git）。"""
     svc = service or AlphaBotService()
     chat = chat or ChatEngine(svc)
     code_version = code_version or CodeVersion()

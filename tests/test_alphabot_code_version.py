@@ -13,18 +13,30 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
+import changelog_guard as cg
 from alphabot import code_version as cvm
 from alphabot.code_version import CodeVersion
 
 ROOT = Path(__file__).resolve().parent.parent
 _GIT_ENV_FLAGS = ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_git_location(monkeypatch):
+    """pytest 若从 git 钩子 / `rebase -x` 里被拉起，继承的 GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE 会让下面对临时仓库的
+    `commit` / `checkout --orphan` / `reset --hard` 打到**真仓库**上（`changelog_guard` 的钩子已清，这里是第二道）。
+    v0.45.730 实测：不清时把一个诱饵仓库切到孤儿分支、塞进 10 个提交、reset --hard 了工作区，19 条里 18 条照样绿。"""
+    for var in cg._GIT_LOCATION_VARS:
+        monkeypatch.delenv(var, raising=False)
 
 
 def _git(repo, *args):
@@ -105,6 +117,37 @@ class TestRealGit:
         cv.status()
         assert set(rec.subcommands) <= {"rev-parse", "log", "rev-list"}, rec.subcommands
         assert "rev-list" in rec.subcommands, "探针没走到数个数那一步（这条会对空集恒绿）"
+
+
+class TestInheritedGitLocation:
+    """第二道防线（`_no_inherited_git_location`）有牙：常规环境里没有定位变量，删掉夹具谁都不红，所以单独证一次。"""
+
+    def test_decoy_named_by_inherited_vars_is_left_alone(self, tmp_path):
+        """子进程带着指向诱饵仓库的 GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE，跑本文件里最狠的两条（`checkout --orphan`、
+        `reset --hard`），诱饵的分支 / HEAD / 提交数都不许变。变异：删掉 autouse 夹具 ⇒ 诱饵被切到孤儿分支、多出提交。
+        只跑别的两条、不跑本条 ⇒ 不递归。"""
+        decoy = tmp_path / "decoy"
+        decoy.mkdir()
+        clean = {k: v for k, v in os.environ.items() if k not in cg._GIT_LOCATION_VARS}
+
+        def g(*args):
+            return subprocess.run(["git", *_GIT_ENV_FLAGS, "-C", str(decoy), *args], capture_output=True, text=True,
+                                  env=clean, check=True).stdout.strip()
+
+        g("init", "-q")
+        g("commit", "--allow-empty", "-q", "-m", "decoy")
+        state = lambda: (g("symbolic-ref", "HEAD"), g("rev-parse", "HEAD"), g("rev-list", "--all", "--count"))  # noqa: E731
+        before = state()
+        env = dict(clean, GIT_DIR=str(decoy / ".git"), GIT_WORK_TREE=str(decoy),
+                   GIT_INDEX_FILE=str(decoy / ".git" / "index"))
+        me = Path(__file__).resolve()
+        r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                            f"{me}::TestRealGit::test_head_moved_to_unrelated_history_is_still_stale",
+                            f"{me}::TestRealGit::test_head_moved_back_is_stale_with_zero_new"],
+                           cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=180)
+        assert r.returncode == 0, (r.stdout[-1500:], r.stderr[-1500:])
+        assert "2 passed" in r.stdout, r.stdout[-1500:]
+        assert state() == before, "继承的定位变量把临时仓库的操作打到了它指向的仓库上"
 
 
 # ═══════════════════════════════ ② 判不了 ═══════════════════════════════
@@ -258,3 +301,21 @@ class TestFrontend:
         js = self.JS.read_text(encoding="utf-8")
         help_js = (ROOT / "alphabot/static/pages/help.js").read_text(encoding="utf-8")
         assert "代码已更新" in js and "「代码已更新」横幅" in help_js
+
+    def test_server_that_does_not_report_code_gets_the_banner_too(self):
+        """v0.45.730：服务端没报 `code`（726 前起的进程）而页面是新的——页面文件每次现读磁盘，旧进程照样发新页面——
+        ⇒ 横幅照挂。此前只在页脚写「版本未知」，偏偏是该重启的时候（生产克隆快进到 726 后、没重启的那个进程就是这样）。
+        变红的变异：判据改回只看 `stale` / 「键不在」改成「值为假」（726+ 服务判不了时 `code` 存在，不许误挂这条）。"""
+        js = self.JS.read_text(encoding="utf-8")
+        help_js = (ROOT / "alphabot/static/pages/help.js").read_text(encoding="utf-8")
+        assert 'const serverOlder = !Object.prototype.hasOwnProperty.call(state.meta, "code");' in js
+        assert "cvBanner.hidden = !(serverOlder || (cv && cv.stale === true));" in js
+        assert "服务比页面旧" in js and "「服务比页面旧」横幅" in help_js
+
+    def test_banner_says_the_unrestarted_process_is_already_mixed(self):
+        """没重启的进程是新旧混用（页面文件现读磁盘、`service` 的懒 import 第一次用到时载入新模块）⇒ 横幅讲「混用可能出错」，
+        不再说 726 那句「重启才会用上」（与事实相反：一部分新代码已经在用）。"""
+        js = self.JS.read_text(encoding="utf-8")
+        help_js = (ROOT / "alphabot/static/pages/help.js").read_text(encoding="utf-8")
+        assert "新旧混用" in js and "新旧混用" in help_js
+        assert "才会用上" not in js and "才会用上" not in help_js
