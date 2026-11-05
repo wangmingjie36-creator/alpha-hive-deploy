@@ -8,6 +8,8 @@
   健康样本不误报——误报的守卫会被整体关掉，而「只验一个方向」证明不了检测器在工作。
 * `TestClaimTool`：在临时仓库（bare origin + 克隆）里走真实 git：取号、在 origin/main 上另建提交、
   推送后以 ls-remote 核实、被抢号时重取、带进当前分支（快进 / cherry-pick）、以后 rebase 自动跳过重复提交。
+* `TestWorktreeView` / `TestAdoptAgain` / `TestClaimAfterPush`（v0.45.733 二次检查）：工作区只认被跟踪的文件；
+  adopt 重跑按认领行判、cherry-pick 停在半路就撤回；推完之后的环节出错时不让人重跑 claim。
 """
 
 from __future__ import annotations
@@ -471,3 +473,213 @@ class TestClaimTool:
                             cwd=a, env=env, capture_output=True, text=True)
         assert st.returncode == 0, st.stderr
         assert "下一个号 0.45.730" in st.stdout and "0.45.729  碎片" in st.stdout and "档案（冻结前占的号" in st.stdout
+
+    def test_push_without_the_guard_hook_says_so(self, remote, capsys):
+        """推送成功、输出里却没有守卫放行的字样 ⇒ 这个 checkout 没装钩子：要说出来（本 fixture 不装钩子）。
+        装了钩子时转述它的输出，见 `tests/test_changelog_guard_hook.py::TestFragments`（v0.45.733）。"""
+        a = remote.clone("a")
+        assert cf.claim(a, "x", push=True) == 0
+        err = capsys.readouterr().err
+        assert "没装 changelog_guard 钩子" in err and "--install-hook" in err, err
+
+
+# ═════════════════════════════ v0.45.733 二次检查 ═════════════════════════════
+
+class TestWorktreeView:
+    """`check` / 全量测试读的「工作区」= 被跟踪的文件、取工作区里的内容。"""
+
+    @staticmethod
+    def _commit_fragment(remote, a, version="0.45.729"):
+        text = cf.render_placeholder(version, "x", who="a", at="t", nonce="0123abcd", date="2026-11-05")
+        (a / "changelog.d" / f"{version}.md").write_text(text, encoding="utf-8")
+        remote.git("add", "-A", cwd=a)
+        remote.git("commit", "-qm", "碎片", cwd=a)
+        return text
+
+    def test_untracked_and_ignored_files_do_not_count(self, remote):
+        """Finder 的 `.DS_Store`（被忽略）与 iCloud 的「 2」副本（未跟踪）不会进提交，不该让全量测试红。
+        变异：`worktree_files` 改回按目录扫 ⇒ 两个文件都报「文件名不合规」⇒ 红（二次检查实测）。"""
+        a = remote.clone("a")
+        (a / ".gitignore").write_text(".DS_Store\n", encoding="utf-8")
+        text = self._commit_fragment(remote, a)
+        (a / "changelog.d" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+        (a / "changelog.d" / "0.45.729 2.md").write_text(text, encoding="utf-8")
+        files = cf.worktree_files(a)
+        assert sorted(files) == ["changelog.d/0.45.729.md", "changelog.d/README.md"], sorted(files)
+        assert cf.lint(files, TOP) == []
+
+    def test_tracked_bad_files_and_unstaged_edits_are_still_seen(self, remote):
+        """正对照：同一个副本被 `git add` 进来就红；被跟踪文件没暂存的改坏也看得见（读工作区内容，不读暂存区）。"""
+        a = remote.clone("a")
+        text = self._commit_fragment(remote, a)
+        (a / "changelog.d" / "0.45.729 2.md").write_text(text, encoding="utf-8")
+        remote.git("add", "-A", cwd=a)
+        only(cf.lint(cf.worktree_files(a), TOP), "0.45.729 2.md")
+
+        remote.git("rm", "-q", "--cached", "changelog.d/0.45.729 2.md", cwd=a)
+        (a / "changelog.d" / "0.45.729 2.md").unlink()
+        (a / "changelog.d" / "0.45.729.md").write_text(text.replace(cf.claim_of(text) + "\n", ""), encoding="utf-8")
+        only(cf.lint(cf.worktree_files(a), TOP), "实有 0 行")
+
+    def test_tracked_file_deleted_from_the_worktree_is_absent(self, remote):
+        a = remote.clone("a")
+        self._commit_fragment(remote, a)
+        (a / "changelog.d" / "0.45.729.md").unlink()
+        assert sorted(cf.worktree_files(a)) == ["changelog.d/README.md"]
+
+    def test_check_and_render_commands_read_the_same_view(self, remote, monkeypatch, capsys):
+        """命令行 `check` / `render` 共用 `_load_view`（v0.45.733；此前各写一份，也没有任何测试调过这两个命令）：
+        缺省读工作区里被跟踪的文件（含没提交的改动），`--rev` 读那个提交。"""
+        real_freeze = cf.archive_freeze_problems
+        monkeypatch.setattr(cf, "archive_freeze_problems",          # 夹具档案只有 2 条（真档案的冻结值是 871 条）
+                            lambda text: real_freeze(text, frozen_max=TOP, frozen_count=2))
+        a = remote.clone("a")
+        text = self._commit_fragment(remote, a)
+        (a / "changelog.d" / "0.45.729 2.md").write_text(text, encoding="utf-8")            # 未跟踪的 iCloud 副本
+        (a / "changelog.d" / "0.45.729.md").write_text(
+            text.replace("占位（进行中：x）", "做完了") + "\n正文。\n", encoding="utf-8")         # 没提交的完工
+
+        assert cf.check(a, rev=None) == 0
+        assert "碎片检查通过（1 个碎片" in capsys.readouterr().out
+        assert cf.render_cmd(a, rev=None, limit=None) == 0
+        out = capsys.readouterr().out
+        assert "做完了" in out and "认领" not in out and "档案顶" in out, out
+        assert cf.render_cmd(a, rev="HEAD", limit=None) == 0                               # 提交里还是占位
+        out = capsys.readouterr().out
+        assert "占位（进行中：x）" in out and "做完了" not in out, out
+
+        remote.git("add", "-A", cwd=a)                                                     # 副本被 add 进来 ⇒ 红
+        assert cf.check(a, rev=None) == 1
+        assert "0.45.729 2.md" in capsys.readouterr().out
+        assert cf.check(a, rev="HEAD") == 0, "--rev 读的是提交，不是暂存区 / 工作区"
+
+
+class TestAdoptAgain:
+    """adopt 判「已经带进来」按认领行、不按内容；同号另一份不去盖；cherry-pick 停在半路就撤回。"""
+
+    @staticmethod
+    def _diverged_claim(remote, capsys):
+        """分支有自己的提交 ⇒ claim --push 走 cherry-pick 带入。返回 (克隆, 占号提交)。"""
+        a = remote.clone("a")
+        remote.git("checkout", "-qb", "feat", cwd=a)
+        (a / "app.py").write_text("x = 2\n", encoding="utf-8")
+        remote.git("commit", "-qam", "本地进度", cwd=a)
+        assert cf.claim(a, "做到一半", push=True) == 0
+        assert "cherry-pick" in capsys.readouterr().out
+        return a, remote.origin_main()
+
+    @staticmethod
+    def _complete(remote, a):
+        frag = a / "changelog.d" / "0.45.729.md"
+        done = frag.read_text(encoding="utf-8").replace("占位（进行中：做到一半）", "做完了") + "\n正文。\n"
+        frag.write_text(done, encoding="utf-8")
+        remote.git("commit", "-qam", "完工", cwd=a)
+        return frag, done
+
+    @staticmethod
+    def _in_cherry_pick(remote, a):
+        return remote.git("rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD", cwd=a, check=False).returncode == 0
+
+    def test_adopting_again_after_completing_the_fragment_is_a_no_op(self, remote, capsys):
+        """二次检查实测：按内容判 ⇒ 再 cherry-pick 一次 ⇒ add/add 冲突、仓库停在 cherry-pick 中途、碎片里留冲突标记。"""
+        a, sha = self._diverged_claim(remote, capsys)
+        frag, done = self._complete(remote, a)
+        head = remote.git("rev-parse", "HEAD", cwd=a).stdout.strip()
+
+        assert cf.adopt(a, sha) == 0
+        assert "无需带入" in capsys.readouterr().out
+        assert not self._in_cherry_pick(remote, a)
+        assert frag.read_text(encoding="utf-8") == done
+        assert remote.git("rev-parse", "HEAD", cwd=a).stdout.strip() == head
+
+    def test_another_fragment_with_that_number_is_not_overwritten(self, remote, capsys):
+        a = remote.clone("a")
+        remote.git("checkout", "-qb", "feat", cwd=a)
+        mine = cf.render_placeholder("0.45.729", "手写的", who="feat", at="t", nonce="0badf00d", date="2026-11-05")
+        (a / "changelog.d" / "0.45.729.md").write_text(mine, encoding="utf-8")
+        remote.git("add", "-A", cwd=a)
+        remote.git("commit", "-qm", "手写碎片", cwd=a)
+        assert cf.claim(remote.clone("b"), "正经占的", push=True) == 0
+        sha = remote.origin_main()
+        capsys.readouterr()
+
+        assert cf.adopt(a, sha) == 1
+        err = capsys.readouterr().err
+        assert "同一个号有两份" in err and "0badf00d" in err, err
+        assert not self._in_cherry_pick(remote, a)
+        assert (a / "changelog.d" / "0.45.729.md").read_text(encoding="utf-8") == mine
+
+    def test_a_cherry_pick_that_stops_halfway_is_aborted(self, remote, monkeypatch, capsys):
+        """兜底：认领行那道判断万一漏了（这里让它看不见分支里那份），cherry-pick 撞冲突 ⇒ 撤回，不把仓库留在中途。"""
+        a, sha = self._diverged_claim(remote, capsys)
+        frag, done = self._complete(remote, a)
+        real = cf.blob_text
+        monkeypatch.setattr(cf, "blob_text",
+                            lambda spec, *, cwd: None if spec.startswith("HEAD:") else real(spec, cwd=cwd))
+
+        assert cf.adopt(a, sha) == 1
+        err = capsys.readouterr().err
+        assert "已 `git cherry-pick --abort`" in err, err
+        assert not self._in_cherry_pick(remote, a)
+        assert frag.read_text(encoding="utf-8") == done
+
+
+class TestClaimAfterPush:
+    """推上去之后的环节出错：号多半已经占住，报错不能让人去重跑 claim（那会再占一个号）。"""
+
+    @staticmethod
+    def _offline_after_first_fetch(monkeypatch):
+        """取号那次 fetch 正常；推完之后断网（ls-remote 拿不到、fetch 抛错）。返回「网络恢复」函数。"""
+        real_fetch, real_remote_main, calls = cf._fetch, cf._remote_main, []
+
+        def flaky_fetch(root, remote_name):
+            calls.append(1)
+            if len(calls) > 1:
+                raise cf.GitError("git fetch 退出码 128：网络断了（测试）")
+            return real_fetch(root, remote_name)
+
+        monkeypatch.setattr(cf, "_fetch", flaky_fetch)
+        monkeypatch.setattr(cf, "_remote_main", lambda root, remote_name: None)
+
+        def back_online():                              # 用 setattr 还原：fixture 删过的 git 变量不能跟着 undo 回来
+            monkeypatch.setattr(cf, "_fetch", real_fetch)
+            monkeypatch.setattr(cf, "_remote_main", real_remote_main)
+        return back_online
+
+    def test_successful_push_with_failed_verification_is_not_reported_as_unclaimed(self, remote, monkeypatch, capsys):
+        """二次检查：推送成功后核实时断网，原来报「推送失败」⇒ 人重跑 claim ⇒ 再占一个号、前一个成了孤儿占位。"""
+        a = remote.clone("a")
+        back_online = self._offline_after_first_fetch(monkeypatch)
+        assert cf.claim(a, "x", push=True) == 1
+        err = capsys.readouterr().err
+        sha = remote.origin_main()
+        assert "changelog.d/0.45.729.md" in remote.origin_files(), "推送本来就成功了"
+        assert "多半已经占住" in err and "别直接重跑 claim" in err and f"adopt {sha}" in err, err
+        assert not (a / "changelog.d" / "0.45.729.md").exists()
+
+        back_online()                                   # 照提示 adopt 即可，不用再占号
+        assert cf.adopt(a, sha) == 0 and (a / "changelog.d" / "0.45.729.md").is_file()
+
+    def test_failed_push_with_failed_verification_says_probably_not_claimed(self, remote, monkeypatch, capsys):
+        hook = remote.origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho 远端拒收：测试用 >&2\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+        a = remote.clone("a")
+        main = remote.origin_main()
+        self._offline_after_first_fetch(monkeypatch)
+        assert cf.claim(a, "x", push=True) == 1
+        err = capsys.readouterr().err
+        assert "推送失败" in err and "号大概没占住" in err and "远端拒收" in err, err
+        assert remote.origin_main() == main
+
+    def test_adopt_failing_after_a_verified_claim_says_not_to_claim_again(self, remote, monkeypatch, capsys):
+        a = remote.clone("a")
+
+        def broken_adopt(*_a, **_k):
+            raise cf.GitError("git fetch 退出码 128：网络断了（测试）")
+
+        monkeypatch.setattr(cf, "adopt", broken_adopt)
+        assert cf.claim(a, "x", push=True) == 1
+        out, err = capsys.readouterr()
+        assert "✅ 已占 0.45.729" in out, out
+        assert "号已占住" in err and "别重跑 claim" in err and "adopt " in err, err

@@ -39,6 +39,9 @@ fetch → 取号（origin/main 的碎片号与档案顶号取最大 +1）→ 在
 按这个流程，撞号只表现为「推送被拒、换下一个号」，不会出现冲突；冲突只发生在绕过工具手写碎片时。
 工具用 Python、每个 git 调用都核返回码：同一流程用 zsh 写时 `"$C:refs/heads/main"` 的 `:r` 会被当成修饰符、
 推送静默失败、后面照跑（实测）。
+推完之后（v0.45.733 二次检查）：转述推送输出里 pre-push 守卫的那几行，看不到放行那句（`GUARD_PASS_MARK`）就提示
+没装钩子；核实远端失败时按推送退出码分说「号多半已占住」/「号大概没占住」，号已占住的情形一律给 `adopt` 命令、
+写明别重跑 claim（重跑会再占一个号）。`adopt` 按认领行判「已带进来」（完工后内容早变了），cherry-pick 停在半路就撤回。
 
 判据（`lint` / `protect` / `archive_freeze_problems`，守卫与全量测试共用）
 -----------------------------------------------------------------------
@@ -80,6 +83,9 @@ README = "README.md"
 REMOTE = "origin"
 MAIN_REF = "refs/heads/main"
 CLAIM_MAX_ATTEMPTS = 5
+#: 守卫查过碎片、放行时打印的字样（`changelog_guard._report_fragments`）。`claim` 推送后在钩子输出里找它：
+#: 找不到 ⇒ 这次推送没经过碎片检查（没装钩子 / 钩子是旧代码），要说出来。
+GUARD_PASS_MARK = f"{FRAGMENT_DIRNAME}/ 碎片检查通过"
 
 #: 档案冻结值：冻结时 `CHANGELOG.md` 的最大号与 `## [` 标题数（合入碎片协议前最后一次 rebase 时现取）。
 #: 冻结后只许就地完成冻结前占的号，不许增删条目——两个值都不会再变。
@@ -444,15 +450,25 @@ def blob_text(spec: str, *, cwd) -> Optional[str]:
 
 
 def worktree_files(root: Path) -> dict:
-    base = Path(root) / FRAGMENT_DIRNAME
+    """`changelog.d/` 下**被跟踪**的条目（含已暂存的新文件），内容取**工作区**（没暂存的改动也查）。
+
+    未跟踪 / 被忽略的文件不算（v0.45.733）：开发检出在 iCloud 同步下，Finder 会写 `.DS_Store`（.gitignore 已忽略），
+    iCloud 会造 `0.45.730 2.md` 式副本——它们不会进提交（真 `git add` 进来时 pre-commit 照样拦），按目录扫却让
+    全量测试为一个不会被提交的文件变红。口径同 `tests/_repo_files.py`：git 跟踪的才是本仓的。
+    工作区里删掉了的被跟踪文件当它不在；冲突中的文件（多个 stage）照样列出，工作区里的冲突标记由 `lint` 报。"""
+    r = _git(["ls-files", "-z", "--cached", "--", FRAGMENT_DIRNAME], cwd=root, text=False)
     files = {}
-    if not base.is_dir():
-        return files
-    for dirpath, dirnames, filenames in os.walk(base):
-        for name in filenames + [d for d in dirnames if (Path(dirpath) / d).is_symlink()]:
-            full = Path(dirpath) / name
-            rel = full.relative_to(root).as_posix()
-            files[rel] = NotRegular("symlink") if full.is_symlink() else full.read_bytes()
+    for raw in r.stdout.split(b"\0"):
+        if not raw:
+            continue
+        rel = os.fsdecode(raw)
+        full = Path(root) / rel
+        if full.is_symlink():
+            files[rel] = NotRegular("symlink")
+        elif full.is_file():
+            files[rel] = full.read_bytes()
+        elif full.exists():
+            files[rel] = NotRegular("not-a-file")
     return files
 
 
@@ -516,8 +532,23 @@ def _claim_state(root, base: str):
     return files, top, versions
 
 
+def _abort_cherry_pick(root) -> str:
+    """cherry-pick 停在半路（冲突）就撤回，别把仓库留在中途；git 拒绝动手（没开始）就什么也不做。返回给人看的补充说明。"""
+    if _git(["rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"], cwd=root, check=False).returncode != 0:
+        return ""
+    ab = _git(["cherry-pick", "--abort"], cwd=root, check=False)
+    if ab.returncode == 0:
+        return "\n（已 `git cherry-pick --abort`：仓库回到执行前的状态。）"
+    return (f"\n⚠️ `git cherry-pick --abort` 也失败了：{(ab.stderr or ab.stdout).strip()[:300]}\n"
+            "仓库停在 cherry-pick 中途——先手动处理（`git status`）。")
+
+
 def adopt(root, commit: str, remote: str = REMOTE) -> int:
-    """把已推上 main 的占号提交带进当前分支：分支落后就快进，否则 cherry-pick。"""
+    """把已推上 main 的占号提交带进当前分支：分支落后就快进，否则 cherry-pick。
+
+    「已经带进来了」按**认领行**判、不按文件内容（v0.45.733）：带进来以后会话会改标题、补正文，内容早就不同了——
+    按内容判会再 cherry-pick 一次、撞 add/add 冲突、把仓库留在 cherry-pick 中途（二次检查实测）。
+    当前分支里已有同名碎片、认领行却不同 ⇒ 同一个号两份，拒绝，不去盖它。"""
     main = _fetch(root, remote)
     if not _is_ancestor(commit, main, cwd=root):
         print(f"❌ 远端 main 里还没有 {commit[:10]}——号**没占住**：先推送它（被拒就重跑 claim）。", file=sys.stderr)
@@ -527,11 +558,17 @@ def adopt(root, commit: str, remote: str = REMOTE) -> int:
         print(f"❌ {commit[:10]} 不是占号提交（它改了 {added[:5]}）", file=sys.stderr)
         return 1
     path = added[0]
-    want = _git(["rev-parse", f"{commit}:{path}"], cwd=root).stdout.strip()
-    have = _git(["rev-parse", "--verify", "-q", f"HEAD:{path}"], cwd=root, check=False).stdout.strip()
-    if have == want:
-        print(f"{path} 已在当前分支里，无需带入。")
-        return 0
+    want = claim_of(blob_text(f"{commit}:{path}", cwd=root) or "")
+    have_text = blob_text(f"HEAD:{path}", cwd=root)
+    if have_text is not None:
+        have = claim_of(have_text)
+        if want and have == want:
+            print(f"{path} 已在当前分支里（认领行一致），无需带入。")
+            return 0
+        print(f"❌ 当前分支里已经有 {path}，认领行却不是这个占号提交的——同一个号有两份，不去盖它：\n"
+              f"  当前分支：{have or '（没有合规的认领行）'}\n  占号提交：{want or '（没有合规的认领行）'}\n"
+              f"先查清分支里那份从哪来（`git log -- {path}`）。", file=sys.stderr)
+        return 1
     if _is_ancestor("HEAD", commit, cwd=root):
         r = _git(["merge", "--ff-only", "-q", commit], cwd=root, check=False)
         if r.returncode == 0:
@@ -547,12 +584,54 @@ def adopt(root, commit: str, remote: str = REMOTE) -> int:
         return 1
     r = _git(["cherry-pick", commit], cwd=root, check=False)
     if r.returncode != 0:
-        print(f"❌ cherry-pick {commit[:10]} 失败：{(r.stderr or r.stdout).strip()[:400]}\n"
+        note = _abort_cherry_pick(root)
+        print(f"❌ cherry-pick {commit[:10]} 失败：{(r.stderr or r.stdout).strip()[:400]}{note}\n"
               f"号已经占住（在 main 上），只是没带进当前分支：处理完工作区后重跑 `adopt {commit}`，"
               "或完工前 `git rebase origin/main` 取回。", file=sys.stderr)
         return 1
     print(f"已 cherry-pick 占号提交 {commit[:10]}：{path} 在工作区里了（以后 rebase 到 main 时 git 会自动跳过这个重复提交）。")
     return 0
+
+
+def _adopt_cmd(root, commit: str) -> str:
+    """交给人的接入命令。adopt 作用于**当前目录**所在的 checkout，所以带 `cd`。"""
+    return f"cd '{root}' && /usr/local/bin/python3 '{Path(__file__).resolve()}' adopt {commit}"
+
+
+def _landed(root, remote, commit):
+    """推送之后：占号提交在不在远端 main 上 → (在不在, 远端 main)。先问 ls-remote；对不上（推完别人紧跟着
+    又推了）再 fetch 判祖先。fetch 失败抛 GitError——调用方必须按「不知道」处理，不能当成「没推上去」。"""
+    if _remote_main(root, remote) == commit:
+        return True, commit
+    new_base = _fetch(root, remote)
+    return _is_ancestor(commit, new_base, cwd=root), new_base
+
+
+def _say_unverified(root, remote, commit, pushed, err) -> None:
+    """推完核实不了远端（网络断了）。推送命令成功了 ⇒ 号多半已占住：只报一句「出错了」的话，人会重跑 claim、
+    再占一个号，前一个变成挂着自己分支名的孤儿占位（v0.45.733 二次检查）。"""
+    if pushed.returncode == 0:
+        print(f"⚠️ 推送命令成功了（退出码 0），但之后核实远端失败：{err}\n"
+              f"号**多半已经占住**——先确认再动：`git -C '{root}' ls-remote {remote} {MAIN_REF}`"
+              f"（或 `changelog_fragments.py status`）。远端 main 是 {commit[:10]} 或含它 ⇒ 带进当前分支：\n"
+              f"  {_adopt_cmd(root, commit)}\n**别直接重跑 claim**——那会再占一个号。", file=sys.stderr)
+    else:
+        print(f"❌ 推送失败（退出码 {pushed.returncode}），之后核实远端也失败：{err}\n"
+              f"{(pushed.stderr or pushed.stdout).strip()[-1500:]}\n"
+              f"号大概没占住；网络恢复后先 `changelog_fragments.py status` 看一眼再重跑 claim。", file=sys.stderr)
+
+
+def _report_push_guard(root, pushed) -> None:
+    """把推送时守卫的输出带出来：`capture_output` 会吞掉它，成功时就看不出守卫跑没跑（v0.45.733 二次检查）。
+    没看到守卫放行的字样 ⇒ 这个 checkout 多半没装钩子、或钩子跑的是旧代码：这次的占位是工具自己生成、自己查过的，
+    但以后推完工的碎片就没人拦了——要说出来，安静地成功正是「谁会红？」要防的。"""
+    lines = [ln for ln in (pushed.stderr or "").splitlines() if ln.startswith("pre-push:")]
+    for ln in lines:
+        print(f"  {ln}")
+    if not any(GUARD_PASS_MARK in ln for ln in lines):
+        print(f"⚠️ 推送输出里没有守卫的「{GUARD_PASS_MARK}」——这个 checkout 多半没装 changelog_guard 钩子"
+              "（或钩子跑的是旧代码）：这次的占位是工具自己生成并检查过的，但以后推完工的碎片不会被拦。装钩子：\n"
+              f"  cd '{root}' && /usr/local/bin/python3 changelog_guard.py --install-hook", file=sys.stderr)
 
 
 def claim(root, desc: str, *, push: bool, trailers=(), remote: str = REMOTE, now=None) -> int:
@@ -593,25 +672,31 @@ def claim(root, desc: str, *, push: bool, trailers=(), remote: str = REMOTE, now
                   f"请立刻推送（在这个 checkout 里执行，pre-push 守卫会检查它）：\n"
                   f"  git -C '{root}' push {remote} {commit}:{MAIN_REF}\n"
                   f"推上去之后带进当前分支（adopt 作用于当前目录所在的 checkout，所以先 cd）：\n"
-                  f"  cd '{root}' && /usr/local/bin/python3 '{Path(__file__).resolve()}' adopt {commit}\n"
+                  f"  {_adopt_cmd(root, commit)}\n"
                   f"推送被拒（号被抢 / main 又动了）⇒ 重跑 claim。")
             return 0
         print(f"推送占号提交 {commit}（{version}）到 {remote}/main …")
         pushed = _git(["push", remote, f"{commit}:{MAIN_REF}"], cwd=root, check=False)
-        if _remote_main(root, remote) == commit:
-            ok = True
-        else:
-            new_base = _fetch(root, remote)
-            ok = _is_ancestor(commit, new_base, cwd=root)
-            if not ok and new_base == base:
-                print(f"❌ 推送失败，而远端 main 没有前进——不是被抢号，重试也没用：\n"
-                      f"{(pushed.stderr or pushed.stdout).strip()[-1500:]}", file=sys.stderr)
-                return 1
-            if not ok:
-                print(f"第 {attempt} 次推送被拒：{remote}/main 前进了（{base[:10]} → {new_base[:10]}），重新取号。")
-                continue
+        try:
+            ok, new_base = _landed(root, remote, commit)
+        except GitError as e:
+            _say_unverified(root, remote, commit, pushed, e)
+            return 1
+        if not ok and new_base == base:
+            print(f"❌ 推送失败，而远端 main 没有前进——不是被抢号，重试也没用：\n"
+                  f"{(pushed.stderr or pushed.stdout).strip()[-1500:]}", file=sys.stderr)
+            return 1
+        if not ok:
+            print(f"第 {attempt} 次推送被拒：{remote}/main 前进了（{base[:10]} → {new_base[:10]}），重新取号。")
+            continue
         print(f"✅ 已占 {version}：{remote}/main 含占号提交 {commit[:10]}（以 ls-remote 核实）。")
-        rc = adopt(root, commit, remote)
+        _report_push_guard(root, pushed)
+        try:
+            rc = adopt(root, commit, remote)
+        except GitError as e:
+            print(f"❌ 号已占住（{version}，已核实），但带进当前分支失败：{e}\n"
+                  f"稍后重跑这一步（**别重跑 claim**——那会再占一个号）：\n  {_adopt_cmd(root, commit)}", file=sys.stderr)
+            rc = 1
         print(f"完工时把 {fragment_path(version)} 的占位标题换成正式标题、补正文；认领那行原样保留。")
         return rc
     print(f"❌ 连续 {CLAIM_MAX_ATTEMPTS} 次推送都被拒（main 前进太快）——稍后重跑 claim。", file=sys.stderr)
@@ -653,14 +738,18 @@ def status(root, *, rev: Optional[str], fetch: bool, remote: str = REMOTE) -> in
     return 0
 
 
-def check(root, *, rev: Optional[str]) -> int:
+def _load_view(root, rev: Optional[str]):
+    """(碎片条目, 档案文本)：给了 `rev` 读那个提交；没给读工作区（被跟踪的文件，见 `worktree_files`）。
+    `check` 与 `render` 共用这一份——各写一份的话，改一处漏一处，两者就会对 changelog.d/ 里有什么各执一词。"""
     if rev:
         sha = _git(["rev-parse", "--verify", f"{rev}^{{commit}}"], cwd=root).stdout.strip()
-        files, arch = tree_files(sha, cwd=root), blob_text(f"{sha}:{ARCHIVE}", cwd=root)
-    else:
-        files = worktree_files(root)
-        p = Path(root) / ARCHIVE
-        arch = p.read_text(encoding="utf-8") if p.is_file() else None
+        return tree_files(sha, cwd=root), blob_text(f"{sha}:{ARCHIVE}", cwd=root)
+    p = Path(root) / ARCHIVE
+    return worktree_files(root), (p.read_text(encoding="utf-8") if p.is_file() else None)
+
+
+def check(root, *, rev: Optional[str]) -> int:
+    files, arch = _load_view(root, rev)
     problems = lint(files, archive_top(arch)) + (archive_freeze_problems(arch) if arch is not None else [])
     for p in problems:
         print("❌ " + p)
@@ -672,13 +761,7 @@ def check(root, *, rev: Optional[str]) -> int:
 def render_cmd(root, *, rev: Optional[str], limit: Optional[int]) -> int:
     """只打印到标准输出、不写文件：生成结果没有读者（要存就 `> 路径`），
     写盘就得进 `tests/test_persistent_writes_have_readers.py` 的登记——「没人读就别写」。"""
-    if rev:
-        sha = _git(["rev-parse", "--verify", f"{rev}^{{commit}}"], cwd=root).stdout.strip()
-        files, arch = tree_files(sha, cwd=root), blob_text(f"{sha}:{ARCHIVE}", cwd=root)
-    else:
-        files = worktree_files(root)
-        p = Path(root) / ARCHIVE
-        arch = p.read_text(encoding="utf-8") if p.is_file() else None
+    files, arch = _load_view(root, rev)
     sys.stdout.write(render(files, arch, limit))
     return 0
 
@@ -695,7 +778,7 @@ def main(argv=None) -> int:
     s = sub.add_parser("status", help="最大号 / 下一个号 / 进行中的占位 / 跳号")
     s.add_argument("--rev", help="看哪个提交（缺省 origin/main）")
     s.add_argument("--no-fetch", action="store_true")
-    k = sub.add_parser("check", help="碎片检查 + 档案冻结断言（缺省查工作区）")
+    k = sub.add_parser("check", help="碎片检查 + 档案冻结断言（缺省查工作区里被跟踪的文件；未跟踪 / 被忽略的不算）")
     k.add_argument("--rev")
     r = sub.add_parser("render", help="合并视图（碎片在前、档案在后）；**勿提交**生成结果")
     r.add_argument("--rev")

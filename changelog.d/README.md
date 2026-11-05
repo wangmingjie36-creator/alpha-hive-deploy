@@ -17,6 +17,9 @@
 - 号被别人抢先 ⇒ 推送被拒 ⇒ 工具自动取下一个号重推（最多 5 次）。
 - 推不了 main 的会话**不带** `--push`：照它打印的命令推送，推完在**同一个 checkout 里**再
   `/usr/local/bin/python3 changelog_fragments.py adopt <提交>`（打印的命令已带 `cd`）。**推上去之前号没占住。**
+- 推完之后的提示照字面做：说「号多半已经占住」「号已占住」时**别重跑 `claim`**（会再占一个号），照它给的
+  `adopt` 命令带进当前分支。`adopt` 可以放心重跑：已经带进来（认领行一致）就什么也不做，cherry-pick 撞冲突会自动撤回。
+  `claim` 会转述 pre-push 守卫的输出；提示「没装 changelog_guard 钩子」就照给的命令装。
 - **别手写碎片**：每个碎片必须恰好有一行认领注释 `<!-- 认领：<分支> <时刻> <8 位十六进制> -->`，
   只有 `claim` 会写它（理由见下面「撞号」）。
 
@@ -33,7 +36,8 @@
 - `foo.py`：……
 ```
 
-提交前可自查：`/usr/local/bin/python3 changelog_fragments.py check`（与 pre-commit / pre-push / 全量测试同一套判据）。
+提交前可自查：`/usr/local/bin/python3 changelog_fragments.py check`（与 pre-commit / pre-push / 全量测试同一套判据；
+查的是工作区里**被跟踪**的文件：未跟踪 / 被忽略的副本不算，`git add` 进来就算）。
 
 ## 撞号
 

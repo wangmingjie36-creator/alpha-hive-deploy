@@ -24,6 +24,7 @@ import pytest
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
+import changelog_fragments as cf  # noqa: E402
 import changelog_guard as cg  # noqa: E402
 
 _STUB = '''
@@ -439,6 +440,20 @@ class TestFragments:
         assert took.returncode == 0, took.stdout + took.stderr
         assert _frag_file(repo, "3.0.1").is_file()
         assert (repo.path / "CHANGELOG.md").read_text() == CONFLICTED, "adopt 动了工作区里别的文件"
+
+    def test_claim_push_relays_the_guard_result(self, repo):
+        """`claim --push` 推送时捕获了输出：原来钩子的话被整个吞掉，成功时看不出守卫跑没跑（v0.45.733 二次检查：
+        真仓库上 `claim --push` 两次，终端里一行钩子输出都没有）。装了钩子 ⇒ 转述放行那行、不报「没装」；
+        没装的那一侧见 `tests/test_changelog_fragments.py::TestClaimTool::test_push_without_the_guard_hook_says_so`。
+        也钉住工具找的字样 `GUARD_PASS_MARK` 就是钩子真说的那句——钩子改了措辞，这里先红，而不是从此每次误报没装。"""
+        _enable_fragments(repo)
+        run = subprocess.run([sys.executable, "changelog_fragments.py", "claim", "占号", "--push"], cwd=repo.path,
+                             capture_output=True, text=True)
+        assert run.returncode == 0, run.stdout + run.stderr
+        assert f"pre-push: {cf.GUARD_PASS_MARK}（被推提交" in run.stdout, run.stdout + run.stderr
+        assert "没装 changelog_guard 钩子" not in run.stderr, run.stderr
+        assert "✅ 已占 3.0.1" in run.stdout and _frag_file(repo, "3.0.1").is_file(), run.stdout
+        assert repo.stub_runs() == []
 
     def test_bad_fragment_that_skipped_pre_commit_is_blocked_at_push(self, repo):
         """`--no-verify` / `rebase --continue` 都绕过 pre-commit——pre-push 兜底。"""
