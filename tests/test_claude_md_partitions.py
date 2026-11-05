@@ -12,7 +12,7 @@
 1. `paths:` 写错、或它指向的文件被改名 / 删掉 ⇒ 规则文件再也不加载，里面的知识等于丢了。
    ⇒ 每个模式至少匹配一个被 git 跟踪的文件。没有 `paths:` 的规则文件每个会话都加载、
    等于写进根目录却逃过预算 ⇒ 也红。
-2. 根目录没指过去 ⇒ 新建文件的会话（新文件不触发按路径加载）、还没读到相关文件的会话都找不到它。
+2. 根目录没指过去 ⇒ 还没用 Read / Edit / Write 碰到相关文件的会话（规划阶段、只用 Bash 看过、新文件匹配不到 `paths:`）都找不到它。
    ⇒ 每个分区文件都被根目录点名；任何一份里点名的分区路径都真实存在。
 3. 代码注释常写「见 CLAUDE.md 的某节」、节名放在紧跟其后的书名号里（瘦身时 90 处）。被引的那节若只剩在别的目录的分区里，
    读这段代码的会话上下文里就没有它 ⇒ 引用必须在「读引用者时会加载的 CLAUDE.md」里找得到
@@ -195,7 +195,7 @@ class TestEveryPartitionIsPointedTo:
         pointed = set(_POINTER.findall(_root_text()))
         missing = [p for p in _partitions() if p not in pointed]
         assert not missing, (f"根目录 CLAUDE.md 没点名这些分区文件（要写成反引号包住的完整路径）"
-                             f"⇒ 新建文件的会话找不到它们：{missing}")
+                             f"⇒ 还没碰到相关文件的会话找不到它们：{missing}")
 
     def test_no_dangling_pointer(self):
         docs = [_ROOT / "CLAUDE.md"] + [_ROOT / p for p in _partitions()]

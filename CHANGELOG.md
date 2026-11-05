@@ -54,7 +54,7 @@
   原样保留：「版本历史规则 / 并发开工必须先占号 / CHANGELOG 完整性 hook」三节（逐字、原位——CHANGELOG 碎片化会话 0.45.728 约定只动这三段）、
   「历史改动查询指针」、GitHub Pages、硬检查项「这个失败，下游怎么知道？」全文、「已知问题」、评分说明与决策阈值、「风控与合规硬约束」、
   「LLM 扫描必须用户确认」与「Slack 通知精简规则」。**被代码注释引用的标题一律不改**；「新代码一律走它」类不变式
-  （`ledger_io` / `earnings_calendar` / `yf_daily` / 观测档案登记）留在根目录——新建文件不触发按路径加载。
+  （`ledger_io` / `earnings_calendar` / `yf_daily` / 观测档案登记）留在根目录——规则文件的 `paths:` 列的是现有模块名，新模块多半匹配不到。
 
 ### Added（分区文件；除 `experiments/CLAUDE.md` 外正文都是从原文**逐字**搬来的）
 - `alphabot/CLAUDE.md`（12,291 B，读 / 改 `alphabot/` 下文件时加载）：Alpha Bot 主条与页面类子条（怎么卖、热力图、成交活跃度、SPX/XSP、IV/RV、不可报价、溢价、对话抽屉、yf 备用源），文末指向放在规则文件里的其余子条。
@@ -79,7 +79,7 @@
 ### 加载机制（读二进制 + 本会话实测）
 - 桌面 App 内置 Claude Code 2.1.317：子目录 `CLAUDE.md` 与 `.claude/rules/*.md` 在 Read / Edit / Write 到匹配文件时注入（`paths:` 是 gitignore 式、相对仓库根）。
   **实测两种都生效**：本会话 Write `tests/test_claude_md_partitions.py` 时 `tests/CLAUDE.md`、Edit `CHANGELOG.md` 时 `.claude/rules/session-closing.md`（`paths: ["CHANGELOG.md"]`）都以 system-reminder 注入了上下文。
-  ⚠️ 新建文件、或还没读到相关文件时不会触发——所以根目录每块都留指针。
+  ⚠️ 只有 Read / Edit / Write 碰到才触发：Bash 里 grep / sed 读 `CHANGELOG.md`、`tests/` 下文件实测不触发（用 Write 新建 `tests/` 下的文件则会触发 `tests/CLAUDE.md`）；还没碰到相关文件时什么都没加载——所以根目录每块都留指针。
 - **worktree 双加载**：2.1.317 不双加载——认出「worktree 根 ≠ 主仓库根」后跳过属于主仓库的祖先目录，`.claude/worktrees/<名>/` 里的会话只读 worktree 自己那份（本会话系统提示也只列了那一份）。
   终端 CLI `~/.local/bin/claude` 仍是 2.1.63（2026-02-27）：祖先目录一路读、没有 worktree 判断 ⇒ 在 worktree 里开终端 `claude` 会双加载（只读代码，**未实测**），瘦身后这份代价约为原来的 1/3.6。
   `/context` 交互实测因会改用户本机配置而中止。
@@ -88,6 +88,10 @@
 - `tools/select_tests` 把 `tests/` 下非 `test_*.py` 的文件一律当核心文件 ⇒ 只改 `tests/CLAUDE.md` 时开发期选测也回退整套（安全但费时），没改。
 - 7 处存量意译引用（其中 2 处其实指用户级 `~/.claude/CLAUDE.md`）没改成逐字引用，只登记、只许减。
 - 分区文件合计 90,200 字节（含各自的说明头与根目录摘要的重复部分），只在读到对应文件时加载。
+
+### 更正（同日后续提交）
+- 首个提交 `4181d9a3` 把加载边界写成「新建文件不触发」，与本会话自己的实测相反——用 Write 新建 `tests/test_claude_md_partitions.py` 正是触发了 `tests/CLAUDE.md`。边界在**工具**，不在文件新旧：只有 Read / Edit / Write 碰到匹配的文件才加载，Bash 读不触发。复测挑的是本会话从没加载过的两份规则：Bash `head` / `sed` / `grep` / `cat` 读 `production_sync.py`、`alert_manager.py`，又隔一批调用仍没注入 `production-ops` / `slack`；换 Read 读 `production_sync.py`，`production-ops` 当即注入（正对照）。
+- 「新代码一律走它」类不变式照旧留根目录，理由改成「规则文件的 `paths:` 列的是现有模块名，新模块多半匹配不到」。改了根目录两处、`data-intake.md` 说明头一句、本条两处、守卫 docstring 与一条断言信息；根目录 24,673 → 24,866 字节。
 
 ## [0.45.726] — 2026-11-05 — Added：Alpha Bot 页脚显示正在运行的代码提交；磁盘上的代码更新后页面顶部挂「代码已更新，重启生效」横幅
 

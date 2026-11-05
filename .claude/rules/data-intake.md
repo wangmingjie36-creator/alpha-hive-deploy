@@ -29,7 +29,7 @@ paths:
 
 # 取数唯一入口与观测层：ledger_io / earnings_calendar / yf_daily / day_health / H1 观测档案 · 按路径加载
 
-> 读 / 改上面 `paths:` 匹配的文件时 Claude Code 自动加载。v0.45.727 从根目录 `CLAUDE.md` **逐字**搬来（「核心组件指针」）。⚠️ 「新代码一律走它」那几条在根目录各留了一行：**新建文件不会触发本文件**。
+> 读 / 改上面 `paths:` 匹配的文件时 Claude Code 自动加载。v0.45.727 从根目录 `CLAUDE.md` **逐字**搬来（「核心组件指针」）。⚠️ 「新代码一律走它」那几条在根目录各留了一行：**新模块的文件名多半不在上面的 `paths:` 里，触发不了本文件**。
 
 - **账本读写** `ledger_io.py`（v0.45.448；v0.45.452 加整文件文档 `write_json` / `load_json`）：加锁（目录 flock，同进程可重入）+ 原子替换 + 严格序列化（拒 NaN / 非对象）+ 写后回读；读到坏行 / 坏文档抛 `LedgerCorrupt`（外部损坏 ⇒ 停下、从备份恢复，**不跳过、不当新账本**——`meta.json` 里存着现金）。失败在它**源头**登记（`failures()` ⇒ status.json ⇒ P2），调用方吞异常也照红。⚠️ 新账本 / 状态写入**一律走它**，可再生缓存走 `hive_logger.atomic_json_write`；守卫 `tests/test_ledger_writes_go_through_ledger_io.py` 按**写入落点**认（不看函数名），存量 84 处逐条按类别登记在 `WRITERS`，「待迁移」类有上限、只许减
 - **财报日唯一入口** `earnings_calendar.py`（v0.45.500）：唯一日历解析器 + 读取入口（读本轮 / 已落盘的 ChronosBee `details.earnings_calendar` 按日观测，**不打网**）；扫描、卖权 / 跨式账本、展示一律经它。`EarningsWatcher.get_earnings_date` 与 `earnings_cache/{T}_date.json` 只服务 `--check-earnings`，**不得被别处读**（守卫 `tests/test_earnings_calendar.py::TestSingleEntry`）。ChronosBee 评分口径（丢当天财报）刻意不动——改它截断维度 IC 协议 H2

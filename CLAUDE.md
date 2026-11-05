@@ -8,7 +8,7 @@
   - 子目录 `CLAUDE.md`（`alphabot/`、`tests/`、`experiments/`）：读 / 改该目录下的文件时自动加载
   - `.claude/rules/*.md`：frontmatter `paths:` 匹配的文件被读 / 改时自动加载（根目录模块按领域分）
   - 项目 skill `alpha-hive-brief`（`.claude/skills/`）：投研人设与简报模板，按投研指令加载
-  - ⚠️ **新建文件、或还没读到相关文件时不会触发**——照下面的指针自己打开。新细节写进分区文件，这里只加指针；守卫 `tests/test_claude_md_partitions.py`（`paths:` 失效、指针缺失、本文件超预算都会红）
+  - ⚠️ **只有 Read / Edit / Write 碰到匹配的文件才触发**（实测：Bash 里 grep / sed 读不触发，用 Write 新建 `tests/` 下的文件会触发）；规划阶段还什么都没加载，新文件也多半匹配不到 `paths:`——照下面的指针自己打开。新细节写进分区文件，这里只加指针；守卫 `tests/test_claude_md_partitions.py`（`paths:` 失效、指针缺失、本文件超预算都会红）
 
 ## 用户偏好
 
@@ -87,7 +87,7 @@
 - **期权纸面账本**：卖权行权价选择器 `sell_strike_*`、财报跨式 `options_paper_leg` 与影子宽跨 `straddle_strangle_shadow`、接货型卖 put `sell_put_wheel`——**预注册盲期勿偷看、冻结只走登记入口**（通则 `experiments/CLAUDE.md`）→ `.claude/rules/options-ledgers.md`
 - **组合 Greeks / 对冲**：`portfolio_greeks`、逐票 `delta_hedge`（缺省 shadow，改 paper 要单独提交）、尾部预算 `tail_budget`（只观测）、bid = 0 虚值腿判据 `cboe_options.bid_zero_greeks_usable` → `.claude/rules/portfolio-hedging.md`
 - **Alpha Bot** `alphabot/`（卖权选择器等的本机前端，`make alphabot`）：**只绑回环、不上网站**；**只有 `alphabot/service.py` 可 import 卖权模块**；**不改 levels / candidates 既有输出与版本号**；对话抽屉默认关、**真调 API 前先问用户费用**；与 `alpha_hive_bot/`（Telegram）无关 → `alphabot/CLAUDE.md`
-- **取数唯一入口——新代码一律走它们**（新建文件不触发分区加载，所以写在这里）→ `.claude/rules/data-intake.md`
+- **取数唯一入口——新代码一律走它们**（新模块多半匹配不到这些规则的 `paths:`，所以写在这里）→ `.claude/rules/data-intake.md`
   - 新账本 / 状态写入走 `ledger_io`（可再生缓存走 `hive_logger.atomic_json_write`）；读到坏行抛 `LedgerCorrupt`，**不跳过、不当新账本**
   - 财报日只经 `earnings_calendar`（`earnings_cache/{T}_date.json` 不得被别处读）；yfinance 日线只经 `yf_daily`（**别用 `actions=False` 代替**）
   - 给 H1 通道加取数源 = 在 `observation_archive.KINDS` 登记 + 取数处 `observe`；输入层指纹守卫的 `EXEMPT_DEPS` **别拿来消红**；日健康 `day_health` 的故障日只告警 + 敏感性分析、不排除，改 `scan_coverage_gate.FIELDS` 会让冻结指纹变
