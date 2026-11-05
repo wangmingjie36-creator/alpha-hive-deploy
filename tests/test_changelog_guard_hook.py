@@ -504,3 +504,144 @@ class TestFragments:
         r = repo.git("push", str(repo.origin), "HEAD:main", check=False)
         assert r.returncode != 0
         assert "算不出远端 main 的基准" in r.stderr and "未被检查" in r.stderr, r.stderr
+
+
+# ═════════════════════════ 根目录 CLAUDE.md 预算闸（pre-push，v0.45.738） ═════════════════════════
+
+_BUDGET_LINE = re.compile(r"^ROOT_BUDGET_BYTES = .*$", re.M)
+
+
+def _claude(size):
+    """恰好 `size` 字节的根目录 CLAUDE.md：两节，中间隔开十几行（两个会话各改一头时 rebase 不冲突）；
+    增长都落在最后一行，「## 乙」始终是最大的一节。"""
+    head = "# 根\n## 甲\n" + "a\n" * 6 + "## 乙\n" + "b\n" * 6
+    assert len(head.encode()) < size
+    return head + "c" * (size - len(head.encode()) - 1) + "\n"
+
+
+def _budget_source(budget=None, line=None):
+    src = (_ROOT / "claude_md_budget.py").read_text(encoding="utf-8")
+    return _BUDGET_LINE.sub(line or f"ROOT_BUDGET_BYTES = {budget}", src, count=1)
+
+
+def _enable_budget(repo, budget=100, size=50, source=None):
+    """把预算模块（预算改成 `budget`）和 `size` 字节的根目录 CLAUDE.md 放进临时仓库并推上 origin/main。
+
+    `--no-verify`：这次提交带 `.py`，推送会触发契约闸，而临时仓库里没有契约测试（契约闸另有自己的测试文件）。"""
+    (repo.path / "claude_md_budget.py").write_text(source or _budget_source(budget), encoding="utf-8")
+    (repo.path / "CLAUDE.md").write_text(_claude(size), encoding="utf-8")
+    repo.git("add", "-A")
+    repo.git("commit", "-qm", "预算闸", "--no-verify")
+    repo.git("push", "-q", "--no-verify", "origin", "HEAD:main")
+
+
+def _commit_claude(repo, size):
+    """只提交根目录 CLAUDE.md（不用 `-a`：有的用例故意在工作区留着没提交的预算改动）。"""
+    (repo.path / "CLAUDE.md").write_text(_claude(size), encoding="utf-8")
+    repo.git("add", "CLAUDE.md")
+    repo.git("commit", "-qm", "改根目录")
+
+
+def _set_worktree_budget(repo, budget):
+    (repo.path / "claude_md_budget.py").write_text(_budget_source(budget), encoding="utf-8")
+
+
+class TestRootBudgetGate:
+    """推往 main 且被推区间动了根目录 CLAUDE.md ⇒ 拿**被推提交里**的那份，比**被推提交里**写的预算。"""
+
+    @pytest.fixture(autouse=True)
+    def _no_foreign_module(self, monkeypatch):
+        # 钩子按 sys.path 找预算模块：别让 PYTHONPATH 上别处的副本顶替临时仓库里的那份
+        monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    def test_growing_past_the_budget_is_blocked_with_the_instructions(self, repo):
+        _enable_budget(repo)
+        before = repo.origin_main()
+        _commit_claude(repo, 150)
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode != 0, r.stderr
+        assert "超预算 50（上限 100 是用户定的）" in r.stderr, r.stderr
+        # 读者手里只有这段话：最大的节、先问用户、别 --no-verify 都得在里面
+        assert "## 乙" in r.stderr and "先问用户" in r.stderr and "--no-verify" in r.stderr, r.stderr
+        assert repo.origin_main() == before
+
+    def test_exactly_at_the_budget_passes_and_reports_the_margin(self, repo):
+        """边界：恰好等于预算算过（与 `TestRootBudget` 的 `<=` 同口径）。"""
+        _enable_budget(repo)
+        _commit_claude(repo, 100)
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode == 0, r.stderr
+        assert "预算检查通过（100 / 100 字节" in r.stderr, r.stderr
+
+    def test_push_not_touching_it_is_not_checked_even_when_main_is_already_over(self, repo):
+        """没动根目录的推送不查：例行拦无关推送会把人养成 `--no-verify` 的习惯。"""
+        _enable_budget(repo, size=150)
+        _write(repo, "report.json", '{"a": 1}')
+        repo.git("commit", "-qam", "只动数据")
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode == 0, r.stderr
+        assert "预算" not in r.stderr, r.stderr
+
+    def test_two_sessions_under_budget_alone_are_blocked_together_after_rebase(self, repo):
+        """各加 40 字节、各自都没超；`rebase` 不跑 pre-commit，合到一起 130 > 100 只有 pre-push 看得到。"""
+        _enable_budget(repo)
+        other = repo.tmp / "other"
+        repo.git("clone", "-q", str(repo.origin), str(other), cwd=repo.tmp)    # 没装钩子的另一个会话
+        f = other / "CLAUDE.md"
+        f.write_text(f.read_text(encoding="utf-8").replace("a\n", "a" + "x" * 40 + "\n", 1), encoding="utf-8")
+        repo.git("-c", "user.email=o@o", "-c", "user.name=o", "commit", "-qam", "别的会话", cwd=other)
+        repo.git("push", "-q", "origin", "HEAD:main", cwd=other)
+        _commit_claude(repo, 90)
+        assert repo.git("push", "origin", "HEAD:main", check=False).returncode != 0    # 非快进
+        repo.git("pull", "-q", "--rebase", "origin", "main")
+        assert len((repo.path / "CLAUDE.md").read_bytes()) == 130
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode != 0 and "超预算 30（" in r.stderr, r.stderr
+
+    def test_checks_the_pushed_commit_not_the_worktree(self, repo):
+        _enable_budget(repo)
+        _commit_claude(repo, 150)
+        (repo.path / "CLAUDE.md").write_text(_claude(50), encoding="utf-8")    # 工作区改回去了、没提交
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode != 0 and "超预算 50（" in r.stderr, r.stderr
+
+    def test_uncommitted_budget_raise_does_not_count(self, repo):
+        _enable_budget(repo, budget=100)
+        _set_worktree_budget(repo, 1000)
+        _commit_claude(repo, 150)
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode != 0 and "超预算 50（上限 100 " in r.stderr, r.stderr
+
+    def test_committed_budget_counts_even_if_the_worktree_lowers_it(self, repo):
+        _enable_budget(repo, budget=1000)
+        _set_worktree_budget(repo, 100)
+        _commit_claude(repo, 150)
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode == 0 and "预算检查通过（150 / 1,000 字节" in r.stderr, r.stderr
+
+    def test_unreadable_budget_blocks_loudly(self, repo):
+        _enable_budget(repo, source=_budget_source(line="ROOT_BUDGET_BYTES = 100  # 行尾注释"))
+        _commit_claude(repo, 60)
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode != 0, "读不出预算却放行了"
+        assert "读不出它的预算" in r.stderr and "未被检查" in r.stderr, r.stderr
+
+    def test_missing_budget_module_blocks_loudly(self, repo):
+        _enable_budget(repo)
+        _commit_claude(repo, 60)
+        (repo.path / "claude_md_budget.py").unlink()                           # 未提交的删除：钩子 import 工作区那份
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode != 0, "预算模块不在却放行了"
+        assert "载入 claude_md_budget.py 失败" in r.stderr and "未被检查" in r.stderr, r.stderr
+
+    def test_module_from_elsewhere_is_refused(self, repo, monkeypatch):
+        """本 checkout 缺预算模块、PYTHONPATH 上有别处的副本 ⇒ 不许拿别人的判据冒充。"""
+        _enable_budget(repo)
+        _commit_claude(repo, 60)
+        elsewhere = repo.tmp / "elsewhere"
+        elsewhere.mkdir()
+        shutil.copy(_ROOT / "claude_md_budget.py", elsewhere / "claude_md_budget.py")
+        (repo.path / "claude_md_budget.py").unlink()
+        monkeypatch.setenv("PYTHONPATH", str(elsewhere))
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode != 0 and "不是本 checkout" in r.stderr, r.stderr

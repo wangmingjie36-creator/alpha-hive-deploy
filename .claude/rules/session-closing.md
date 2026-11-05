@@ -33,6 +33,9 @@ paths:
 
 - 动了档案：跑 `tests/test_changelog_entry_integrity.py`（冲突标记 / 重号 / 空标题 / 冻结：加号、删条目、改顶号都红）。
 - 动了碎片：跑 `changelog_fragments.py` 的检查（文件名 = 标题里的号、认领行恰好一行、日期、冲突标记、占位以外要有正文、号要大于档案顶号）。pre-commit 读**暂存区**、不读工作区；pre-push 读**被推的那个提交**并对照远端 main——已在 main 上的碎片不许删、认领行不许改，算不出远端 main 的基准就拦。
+- 推往 main 时另有两道与 CHANGELOG 无关的闸，各判各的：
+  - **契约闸**（v0.45.355）：被推区间动了代码 ⇒ 在导出树里跑步骤契约测试。
+  - **根目录 CLAUDE.md 预算闸**（v0.45.738）：被推区间动了根目录 `CLAUDE.md` ⇒ 拿被推提交里那份，比被推提交里 `claude_md_budget.py` 写的预算；超了就拦，并打印搬家步骤（与 `tests/test_claude_md_partitions.py` 的失败信息是同一段）。只放在 pre-push：rebase 不跑 pre-commit，两个会话各自没超、合起来才超的只有 pre-push 看得到。
 - ⚠️ **pre-commit 管不到 `git rebase --continue`**（实测只触发 post-rewrite）——解冲突后兜底的是 pre-push，别以为提交成功就代表检查过。
 - `.git/hooks` 不被跟踪：重新 clone 或清过之后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。钩子壳没变，碎片检查随代码合入即生效，已装的钩子不用重装。
 

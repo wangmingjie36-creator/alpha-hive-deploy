@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""CHANGELOG 完整性 + 步骤输出契约的 git hook（v0.45.216；契约闸 v0.45.355；版本碎片 v0.45.728）
+"""CHANGELOG 完整性 + 步骤输出契约的 git hook（v0.45.216；契约闸 v0.45.355；版本碎片 v0.45.728；根目录预算闸 v0.45.738）
 
 在**提交**与**推送到 main** 之前跑 `tests/test_changelog_entry_integrity.py`
 （冲突标记 / 重号 / 空标题 / 档案冻结）。只挡「动了 CHANGELOG.md」的那些，其余一律放行。
 动了 `changelog.d/` 的另查版本碎片（见「版本碎片」一节）。
-推送到 main 时另有一道**契约闸**（见文末「契约闸」一节），与 CHANGELOG 部分互不影响。
+推送到 main 时另有一道**契约闸**（见「契约闸」一节）和一道**根目录 CLAUDE.md 预算闸**（见文末同名一节），
+各判各的，与 CHANGELOG 部分互不影响。
 
     /usr/local/bin/python3 changelog_guard.py --install-hook   # 装 / 重装两个钩子（幂等）
 
@@ -130,6 +131,29 @@ pre-commit 只是更早报错。
 读的是当前 checkout 里的本文件 ⇒ 契约闸随本文件合入即生效，**不需要重装钩子**。
 `tests/test_changelog_guard_contract_gate.py` 钉住了薄调用的内容：谁改了它，谁就得让所有
 checkout 重跑 `--install-hook`（而已装的旧钩子不会告诉任何人它旧了）。
+
+根目录 CLAUDE.md 预算闸（v0.45.738，只在 pre-push、只看推往 `refs/heads/main` 的更新）
+------------------------------------------------------------------------------------
+根目录 `CLAUDE.md` 每个会话都整份加载。字节预算与超预算时的操作说明在 `claude_md_budget.py`，
+`tests/test_claude_md_partitions.py` 用同一个模块查工作区那份。为什么还要放进钩子（2026-11-05 量）：
+那条测试只在选测 / 整套 / CI 里跑。会话转录里，改了根目录再提交的 53 次中有 38 次（72%）改完没再跑
+会包含它的测试；main 的 CI 近 12 天 57% 被后来的推送取消，跑完的 34% 是红的。超预算一旦进了 main，
+之后每次 CI 都红、混进别的红里，最后由一个不知道超额是谁加的会话来收拾。
+
+* **为什么不在 pre-commit**：`rebase --continue` 不触发 pre-commit（见上表），而近 30 天动过根目录的
+  107 个提交里有 36 个写完 5 分钟后又被重新提交（rebase / amend）。两个会话各加一点、各自提交时都没超，
+  rebase 到一起才超——只有 pre-push 看得到真正要落进 main 的那棵树。
+* **什么时候查**：被推区间动了根目录 `CLAUDE.md` 才查；算不出区间按「动了」处理。没动的推送不查，
+  哪怕 main 上已经超了——例行拦无关推送会把人养成 `--no-verify` 的习惯（同「拦 / 放的分界」）。
+  被推提交里没有根目录 `CLAUDE.md` ⇒ 没东西可比，放行。
+* **读什么**：被推提交里的 `CLAUDE.md`（git 对象，不读工作区），比**被推提交里** `claude_md_budget.py`
+  写的预算——按 `BUDGET_LINE` 从源码读，不 import 被推的版本，所以工作区里没提交的调预算不算数。
+  读不出预算 ⇒ 拦（「没检查」不是「检查通过」）。渲染失败信息用本 checkout 的模块，且必须是本 checkout
+  的那份（理由同碎片判据模块）。
+* **只查预算**：分区的另几条检查（`paths:` 失效、指针缺失、引用找不到）要整棵树加 pytest，触发也少，
+  留给测试与 CI。
+* 绕过：`git push --no-verify` 会连碎片检查、契约测试一起跳过；超预算的正路是失败信息里那三步。
+* 薄调用同样没变 ⇒ 随本文件合入即生效，不需要重装钩子。
 """
 
 from __future__ import annotations
@@ -147,6 +171,9 @@ from pathlib import Path
 CHANGELOG = "CHANGELOG.md"
 #: 版本碎片目录（v0.45.728；判据在 `changelog_fragments.py`）。
 FRAGMENT_DIR = "changelog.d"
+#: 根目录预算闸（v0.45.738）查的文件，与预算 / 失败信息所在的模块（判据唯一真相在 `claude_md_budget.py`）。
+ROOT_CLAUDE_MD = "CLAUDE.md"
+BUDGET_MODULE = "claude_md_budget.py"
 INTEGRITY_TEST = "tests/test_changelog_entry_integrity.py"
 GUARDED_REMOTE_REF = "refs/heads/main"
 HOOK_NAMES = ("pre-commit", "pre-push")
@@ -613,12 +640,59 @@ def _run_contract_gate(hook: str, sha: str) -> int:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def _budget_module(hook: str, root: Path):
+    """预算判据模块（与 `tests/test_claude_md_partitions.py` 同一份）。按需 import，必须是**本 checkout** 的那份；
+    失败 ⇒ None（已出声），调用方拦。理由同 `_fragments_module`。"""
+    unchecked = f"—— 根目录 {ROOT_CLAUDE_MD} 预算**未被检查**（这不是「检查通过」）"
+    try:
+        import claude_md_budget
+    except Exception as e:  # noqa: BLE001 — 任何 import 失败（缺文件、语法错）都是「未被检查」
+        _say(hook, f"❌ 载入 {BUDGET_MODULE} 失败（{type(e).__name__}: {e}）{unchecked}")
+        return None
+    where = Path(claude_md_budget.__file__).resolve().parent
+    if where != root.resolve():
+        _say(hook, f"❌ 载入的 {BUDGET_MODULE} 在 {where}，不是本 checkout {root}{unchecked}")
+        return None
+    return claude_md_budget
+
+
+def _check_root_budget(hook: str, root: Path, sha: str) -> int:
+    """被推提交里的根目录 CLAUDE.md 不超过被推提交里写的预算。判据与理由见本文件开头模块说明的预算闸一节。"""
+    unchecked = f"—— 根目录 {ROOT_CLAUDE_MD} 预算**未被检查**（这不是「检查通过」）"
+    listed = _git("ls-tree", "--name-only", sha, "--", ROOT_CLAUDE_MD)
+    if listed.returncode != 0:
+        _say(hook, f"❌ 列不出被推提交 {sha[:10]} 的根目录文件：{listed.stderr.strip()}{unchecked}")
+        return 1
+    if not listed.stdout.strip():
+        return 0  # 被推提交里没有根目录 CLAUDE.md：没东西可比
+    mod = _budget_module(hook, root)
+    if mod is None:
+        return 1
+    # 按字节计数：取原始字节，不经文本解码（_git 是 text=True）
+    raw = subprocess.run(["git", "show", f"{sha}:{ROOT_CLAUDE_MD}"], capture_output=True)
+    src = _git("show", f"{sha}:{BUDGET_MODULE}")
+    budget = mod.budget_in_source(src.stdout) if src.returncode == 0 else None
+    if raw.returncode != 0 or budget is None:
+        _say(hook, f"❌ 读不到被推提交 {sha[:10]} 里的 {ROOT_CLAUDE_MD}，或读不出它的预算"
+                   f"（{BUDGET_MODULE} 里独占一行的 `ROOT_BUDGET_BYTES = <整数>`）{unchecked}")
+        return 1
+    size = len(raw.stdout)
+    if size <= budget:
+        _say(hook, f"根目录 {ROOT_CLAUDE_MD} 预算检查通过（{size:,} / {budget:,} 字节，被推提交 {sha[:10]}）")
+        return 0
+    _say(hook, f"❌ 要推往 main 的提交 {sha[:10]} 里，根目录 {ROOT_CLAUDE_MD} 超预算，拦下。\n"
+               f"{mod.over_budget_message(raw.stdout, budget)}\n"
+               "改好后提交再推。别用 `git push --no-verify` 绕过：它会连碎片检查和契约测试一起跳过。")
+    return 1
+
+
 def pre_push(root: Path, stdin_text: str, remote: str = "") -> int:
     hook = "pre-push"
     rc = 0
     must_check = False
     contract_shas = []
     fragment_pushes = []
+    budget_shas = []
     for line in stdin_text.splitlines():
         if not line.strip():
             continue
@@ -646,6 +720,12 @@ def pre_push(root: Path, stdin_text: str, remote: str = "") -> int:
             fragments_touched = _git("cat-file", "-e", f"{local_sha}:{FRAGMENT_DIR}").returncode == 0
         if fragments_touched:
             fragment_pushes.append((local_sha, base))
+        # 根目录 CLAUDE.md 预算闸（v0.45.738）：被推区间动了根目录才查；算不出区间 ⇒ 证明不了没动 ⇒ 查
+        claude_touched = _differs(hook, base, local_sha, "--", ROOT_CLAUDE_MD) if base else True
+        if claude_touched is None:
+            rc = 1
+        elif claude_touched:
+            budget_shas.append(local_sha)
         # 以下 CHANGELOG 部分拦了只记 rc、不提前返回：契约闸照跑（见文末）
         if not base:
             touched = True  # 算不出区间 ⇒ 证明不了没动
@@ -666,6 +746,8 @@ def pre_push(root: Path, stdin_text: str, remote: str = "") -> int:
         must_check = True
     for sha, base in fragment_pushes:
         rc = _check_fragments_commit(hook, root, sha, base, remote) or rc
+    for sha in budget_shas:
+        rc = _check_root_budget(hook, root, sha) or rc
     if must_check:
         rc = _run_integrity_test(hook, root) or rc
     # CHANGELOG 部分没过（测试红了、或「与工作区不同」）也照跑契约闸：
