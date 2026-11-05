@@ -32,14 +32,37 @@ export async function refreshMeta() {
   const obBanner = document.getElementById("outbound-banner");
   obBanner.hidden = !(ob && ob.mode === "unchanged");
   obBanner.textContent = obBanner.hidden ? "" : `未走代理 · ${ob.detail}`;
+  // v0.45.726：磁盘上的代码比正在跑的新 ⇒ 横幅（进程只在启动时载入代码；生产代码目录每个扫描日自动快进）
+  const cv = state.meta.code;
+  const cvBanner = document.getElementById("code-banner");
+  cvBanner.hidden = !(cv && cv.stale === true);
+  cvBanner.textContent = cvBanner.hidden ? "" : codeBannerText(cv);
+  cvBanner.title = cvBanner.hidden ? "" : (cv.on_disk_subject || "");
   const dl = document.getElementById("ticker-list");
   fill(dl, ...[...(state.meta.watchlist?.tickers || []), ...Object.values(state.meta.watchlist?.index_labels || {})]
     .map((t) => h("option", { value: t })));
   fill(document.getElementById("foot"),
-    h("span", {}, `Alpha Bot ${state.meta.version} · 本机运行，只读卖权账本、财报跨式账本与对冲账本 · 以下为公开信息研究与情景推演，不构成投资建议。`),
+    h("span", {}, `Alpha Bot ${state.meta.version} · `, codeLabel(cv),
+      " · 本机运行，只读卖权账本、财报跨式账本与对冲账本 · 以下为公开信息研究与情景推演，不构成投资建议。"),
     state.meta.can_shutdown ? h("button", { class: "link-btn", type: "button", onclick: stopServer }, "停止服务") : null,
   );
   return state.meta;
+}
+
+// 页脚的代码版本（v0.45.726）：正在跑的提交 + 启动时刻；判不了照实写——判不了 ≠ 没更新
+function codeLabel(cv) {
+  if (!cv) return "代码版本未知（服务端没报）";
+  if (!cv.running) return h("span", { title: cv.reason || "" }, "代码版本判不了");
+  const t = new Date(cv.started_at || "");
+  const when = isNaN(t) ? "" : `，${t.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })} 启动`;
+  return h("span", { title: cv.running_subject || "" }, `代码 ${cv.running}${when}`,
+    cv.available ? null : `（有没有更新判不了：${cv.reason || "原因未知"}）`);
+}
+
+function codeBannerText(cv) {
+  const n = Number.isInteger(cv.behind) && cv.behind > 0 ? `新了 ${cv.behind} 个提交` : "与正在运行的不同";
+  return `代码已更新 · 磁盘上的代码${n}（运行中 ${cv.running} → 磁盘 ${cv.on_disk}），重启 Alpha Bot 才会用上：`
+    + "页脚「停止服务」后，再双击 Alpha Bot.app 或重新运行启动命令";
 }
 
 async function stopServer() {
