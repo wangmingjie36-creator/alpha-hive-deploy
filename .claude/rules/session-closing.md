@@ -4,9 +4,37 @@ paths:
   - "changelog.d/**"
 ---
 
-# 收尾：Memory 2.0 规则原文 · 按路径加载
+# 收尾：版本条目与 Memory 2.0 规则原文 · 按路径加载
 
-> 读 / 改 `CHANGELOG.md` 或 `changelog.d/` 下的版本碎片（每个改了东西的会话收尾都要碰）时 Claude Code 自动加载。v0.45.728 起新条目写在 `changelog.d/<版本>.md`、`CHANGELOG.md` 冻结为档案——下文逐字原文里的「更新 CHANGELOG.md」即写好自己的碎片。v0.45.727 从根目录 `CLAUDE.md` **逐字**搬来「Memory 2.0 自动更新规则」全文；根目录保留同名标题与全部可执行规则的精简版（含提交推送命令）。
+> 读 / 改 `CHANGELOG.md` 或 `changelog.d/` 下的版本碎片（每个改了东西的会话收尾都要碰）时 Claude Code 自动加载。v0.45.728 起新条目写在 `changelog.d/<版本>.md`、`CHANGELOG.md` 冻结为档案——下文逐字原文里的「更新 CHANGELOG.md」即写好自己的碎片。v0.45.727 从根目录 `CLAUDE.md` **逐字**搬来「Memory 2.0 自动更新规则」全文；根目录保留同名标题与全部可执行规则的精简版（含提交推送命令）。v0.45.732 又从根目录**逐字**搬来「版本历史规则」「并发开工必须先占号」「CHANGELOG 完整性 hook」三节（0.45.728 改写后的全文）；根目录只留占号命令、两条 hook 警告与指针。
+
+## 版本历史规则
+
+- **每次 session 结束前必须写好自己那一版的条目**：v0.45.728 起写在 `changelog.d/<版本>.md`（一个版本一个文件，格式、示例、流程见 `changelog.d/README.md`）。`CHANGELOG.md` 已冻结为档案，**不许再加版本标题**（提交 / 推送 / 全量测试都会红）；冻结前在里面占的号就地完成
+- 格式：`Added` / `Changed` / `Fixed` / `Removed`，注明文件名和改动摘要
+- 版本号：patch（0.x.y+1）= bug fix；minor（0.x+1.0）= 新功能批次
+- 最大号 / 下一个号 / 谁还挂着占位：`/usr/local/bin/python3 changelog_fragments.py status`；合并视图 `... render`（生成结果不提交）
+
+### 并发开工必须先占号（2026-08-27 起；v0.45.728 起占号 = 往 main 推一个碎片）
+
+多个 session 同时开工时，**开工第一件事就是占号**，不要等完工再编号：
+
+`/usr/local/bin/python3 changelog_fragments.py claim "一句话说明在做什么" --push`
+
+它在 `origin/main` 上另建一个只含 `changelog.d/<下一个号>.md` 占位碎片的提交、推上 main 并用 `ls-remote` 核实（被抢了自动取下一个号），再把这个提交接进当前分支——不用先切分支、不用清工作区（暂存区有东西时拒绝接入，照提示做，**别用裸 `git stash`**）。完工时只改碎片的标题和正文，**认领行 `<!-- 认领：… -->` 不许改**。
+
+- ⚠️ **别手写碎片、别省 `--push`。** 认领行里的随机串让每次占号内容都不同——内容逐字相同的两个碎片，git 会无声合并成一个，撞号就看不见了；不推送的占号别的 session 看不见，等于没占。
+- **为什么值得**：2026-08-26~27 两条线并行，`0.45.36–0.45.40` 被双方各用了一遍、`0.45.47` 与 `0.45.48` 又各撞一次，前后返工三轮。改成碎片后，不同的号是不同的文件，合并不再互相冲突；只有同一个号才冲突——冲突本身就是撞号。
+- **撞上了怎么办**：**先进 main 的号算数**。后者 rebase 时在 `changelog.d/<号>.md` 上撞 add/add 冲突 ⇒ 保留 main 那份（`git checkout origin/main -- changelog.d/<号>.md`）、`rebase --continue`，再 `claim` 一个新号、把条目搬过去。占了不用的号：标题改成 `占位关闭：<原因>` 并写一句正文，**不删文件**（推往 main 时删已有碎片会被拦）。
+
+### CHANGELOG 完整性 hook（2026-09-13 起；v0.45.728 起含碎片检查）
+
+`changelog_guard.py` 挂在 pre-commit + pre-push 上，只挡**动了 `CHANGELOG.md` 或 `changelog.d/`** 的提交与推往 main 的推送。设计与实测全在该文件 docstring。
+
+- 动了档案：跑 `tests/test_changelog_entry_integrity.py`（冲突标记 / 重号 / 空标题 / 冻结：加号、删条目、改顶号都红）。
+- 动了碎片：跑 `changelog_fragments.py` 的检查（文件名 = 标题里的号、认领行恰好一行、日期、冲突标记、占位以外要有正文、号要大于档案顶号）。pre-commit 读**暂存区**、不读工作区；pre-push 读**被推的那个提交**并对照远端 main——已在 main 上的碎片不许删、认领行不许改，算不出远端 main 的基准就拦。
+- ⚠️ **pre-commit 管不到 `git rebase --continue`**（实测只触发 post-rewrite）——解冲突后兜底的是 pre-push，别以为提交成功就代表检查过。
+- `.git/hooks` 不被跟踪：重新 clone 或清过之后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。钩子壳没变，碎片检查随代码合入即生效，已装的钩子不用重装。
 
 ## Memory 2.0 自动更新规则
 

@@ -2,13 +2,13 @@
 
 ## 文档分工原则（防陈旧误导，v0.40.3 起）
 
-- **本文件只存指针与不变式，不存易变参数值与统计数字快照**——参数唯一真相在 `config.py` / 各模块 `CONFIG`，指标看 dashboard / `compute_kpis()`，历史改动看 `CHANGELOG.md` 与 MEMORY.md 版本历史表。
+- **本文件只存指针与不变式，不存易变参数值与统计数字快照**——参数唯一真相在 `config.py` / 各模块 `CONFIG`，指标看 dashboard / `compute_kpis()`，历史改动看 `changelog.d/`（+ 冻结档案 `CHANGELOG.md`）与 MEMORY.md 版本历史表。
 - 教训：v0.19 时代的 paper_portfolio 参数快照在本文件停留数月，与 v0.39 现行配置直接矛盾，误导每个新 session。
 - **分区（v0.45.727 起）**：本文件曾涨到 88KB（约 2.8 万 token，每个会话都付）。细节放进按需加载的文件，这里每块只留「是什么 + 何时去读哪个」：
   - 子目录 `CLAUDE.md`（`alphabot/`、`tests/`、`experiments/`）：读 / 改该目录下的文件时自动加载
   - `.claude/rules/*.md`：frontmatter `paths:` 匹配的文件被读 / 改时自动加载（根目录模块按领域分）
   - 项目 skill `alpha-hive-brief`（`.claude/skills/`）：投研人设与简报模板，按投研指令加载
-  - ⚠️ **只有 Read / Edit / Write 碰到匹配的文件才触发**（实测：Bash 里 grep / sed 读不触发，用 Write 新建 `tests/` 下的文件会触发）；规划阶段还什么都没加载，新文件也多半匹配不到 `paths:`——照下面的指针自己打开。新细节写进分区文件，这里只加指针；守卫 `tests/test_claude_md_partitions.py`（`paths:` 失效、指针缺失、本文件超预算都会红）
+  - ⚠️ **只有 Read / Edit / Write 碰到匹配的文件才触发**，Bash 读不触发；规划阶段还什么都没加载，新文件也多半匹配不到 `paths:`——照下面的指针自己打开。新细节写进分区文件，这里只加指针；守卫 `tests/test_claude_md_partitions.py`（`paths:` 失效、指针缺失、本文件超预算都会红）
 
 ## 用户偏好
 
@@ -35,31 +35,16 @@
 
 ## 版本历史规则
 
-- **每次 session 结束前必须写好自己那一版的条目**：v0.45.728 起写在 `changelog.d/<版本>.md`（一个版本一个文件，格式、示例、流程见 `changelog.d/README.md`）。`CHANGELOG.md` 已冻结为档案，**不许再加版本标题**（提交 / 推送 / 全量测试都会红）；冻结前在里面占的号就地完成
-- 格式：`Added` / `Changed` / `Fixed` / `Removed`，注明文件名和改动摘要
-- 版本号：patch（0.x.y+1）= bug fix；minor（0.x+1.0）= 新功能批次
-- 最大号 / 下一个号 / 谁还挂着占位：`/usr/local/bin/python3 changelog_fragments.py status`；合并视图 `... render`（生成结果不提交）
+- **每次 session 结束前必须写好自己那一版的条目**：写在 `changelog.d/<版本>.md`（v0.45.728 起一个版本一个文件）；`CHANGELOG.md` 已冻结为档案，**不许再加版本标题**。格式 `Added` / `Changed` / `Fixed` / `Removed`，注明文件名和改动摘要
+- 示例、撞号处理、判据、`status` / `render` → `changelog.d/README.md`；下面三节的原文与理由 → `.claude/rules/session-closing.md`（改 `changelog.d/` 时自动加载）
 
 ### 并发开工必须先占号（2026-08-27 起；v0.45.728 起占号 = 往 main 推一个碎片）
 
-多个 session 同时开工时，**开工第一件事就是占号**，不要等完工再编号：
-
-`/usr/local/bin/python3 changelog_fragments.py claim "一句话说明在做什么" --push`
-
-它在 `origin/main` 上另建一个只含 `changelog.d/<下一个号>.md` 占位碎片的提交、推上 main 并用 `ls-remote` 核实（被抢了自动取下一个号），再把这个提交接进当前分支——不用先切分支、不用清工作区（暂存区有东西时拒绝接入，照提示做，**别用裸 `git stash`**）。完工时只改碎片的标题和正文，**认领行 `<!-- 认领：… -->` 不许改**。
-
-- ⚠️ **别手写碎片、别省 `--push`。** 认领行里的随机串让每次占号内容都不同——内容逐字相同的两个碎片，git 会无声合并成一个，撞号就看不见了；不推送的占号别的 session 看不见，等于没占。
-- **为什么值得**：2026-08-26~27 两条线并行，`0.45.36–0.45.40` 被双方各用了一遍、`0.45.47` 与 `0.45.48` 又各撞一次，前后返工三轮。改成碎片后，不同的号是不同的文件，合并不再互相冲突；只有同一个号才冲突——冲突本身就是撞号。
-- **撞上了怎么办**：**先进 main 的号算数**。后者 rebase 时在 `changelog.d/<号>.md` 上撞 add/add 冲突 ⇒ 保留 main 那份（`git checkout origin/main -- changelog.d/<号>.md`）、`rebase --continue`，再 `claim` 一个新号、把条目搬过去。占了不用的号：标题改成 `占位关闭：<原因>` 并写一句正文，**不删文件**（推往 main 时删已有碎片会被拦）。
+多个 session 同时开工时，**开工第一件事就是占号**，不要等完工再编号：`/usr/local/bin/python3 changelog_fragments.py claim "一句话说明在做什么" --push`（推上 main、以 `ls-remote` 核实，再接进当前分支；被抢了自动换号）。⚠️ **别手写碎片、别省 `--push`**：不推送的占号别人看不见，等于没占；完工只改碎片的标题和正文，**认领行 `<!-- 认领：… -->` 不许改**。
 
 ### CHANGELOG 完整性 hook（2026-09-13 起；v0.45.728 起含碎片检查）
 
-`changelog_guard.py` 挂在 pre-commit + pre-push 上，只挡**动了 `CHANGELOG.md` 或 `changelog.d/`** 的提交与推往 main 的推送。设计与实测全在该文件 docstring。
-
-- 动了档案：跑 `tests/test_changelog_entry_integrity.py`（冲突标记 / 重号 / 空标题 / 冻结：加号、删条目、改顶号都红）。
-- 动了碎片：跑 `changelog_fragments.py` 的检查（文件名 = 标题里的号、认领行恰好一行、日期、冲突标记、占位以外要有正文、号要大于档案顶号）。pre-commit 读**暂存区**、不读工作区；pre-push 读**被推的那个提交**并对照远端 main——已在 main 上的碎片不许删、认领行不许改，算不出远端 main 的基准就拦。
-- ⚠️ **pre-commit 管不到 `git rebase --continue`**（实测只触发 post-rewrite）——解冲突后兜底的是 pre-push，别以为提交成功就代表检查过。
-- `.git/hooks` 不被跟踪：重新 clone 或清过之后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。钩子壳没变，碎片检查随代码合入即生效，已装的钩子不用重装。
+`changelog_guard.py` 挂在 pre-commit + pre-push 上，只挡动了 `CHANGELOG.md` 或 `changelog.d/` 的提交与推往 main 的推送。⚠️ **pre-commit 管不到 `git rebase --continue`**——兜底的是 pre-push；`.git/hooks` 不被跟踪，重新 clone 后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。
 
 ## 整套测试怎么跑（2026-10-21 起）
 
