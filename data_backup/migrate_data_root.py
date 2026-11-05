@@ -107,7 +107,7 @@ SKIP_EXACT = {
     "alphabot": "代码（Alpha Bot 前端，v0.45.388）", "scripts": "代码（受版本控制的编排器，v0.45.353）",
     "tools": "代码（拨钟审计 harness tools/clockshift，v0.45.495）",
     "vercel.json": "代码配置（Vercel，v0.45.389）",
-    "对比🆚": "文档",
+    "对比🆚": "文档", "changelog.d": "文档（版本碎片：CHANGELOG.md 冻结后的新条目，v0.45.728）",
     # 其它项目
     "alpha-hive-web": "独立前端项目", "mcp-servers": "独立 MCP 项目",
     # 随代码发布的静态资源 / 配置（阶段 4 部署从 git_repo_root 回落取）

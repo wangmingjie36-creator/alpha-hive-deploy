@@ -1,11 +1,12 @@
 ---
 paths:
   - "CHANGELOG.md"
+  - "changelog.d/**"
 ---
 
 # 收尾：Memory 2.0 规则原文 · 按路径加载
 
-> 读 / 改 `CHANGELOG.md`（每个改了东西的会话收尾都要碰）时 Claude Code 自动加载。v0.45.727 从根目录 `CLAUDE.md` **逐字**搬来「Memory 2.0 自动更新规则」全文；根目录保留同名标题与全部可执行规则的精简版（含提交推送命令）。
+> 读 / 改 `CHANGELOG.md` 或 `changelog.d/` 下的版本碎片（每个改了东西的会话收尾都要碰）时 Claude Code 自动加载。v0.45.728 起新条目写在 `changelog.d/<版本>.md`、`CHANGELOG.md` 冻结为档案——下文逐字原文里的「更新 CHANGELOG.md」即写好自己的碎片。v0.45.727 从根目录 `CLAUDE.md` **逐字**搬来「Memory 2.0 自动更新规则」全文；根目录保留同名标题与全部可执行规则的精简版（含提交推送命令）。
 
 ## Memory 2.0 自动更新规则
 

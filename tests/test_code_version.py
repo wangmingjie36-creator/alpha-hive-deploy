@@ -44,7 +44,10 @@ class TestResolvesRealValues:
         assert (Path(i["repo_dir"]) / ".git").exists(), "repo_dir 下没有 .git"
 
     def test_changelog_version_matches_file_top(self):
-        """读出来的版本号必须等于 CHANGELOG.md 行首第一条 `## [x.y.z]`。
+        """读出来的版本号必须等于「`changelog.d/` 碎片文件名 ∪ CHANGELOG.md 行首第一条 `## [x.y.z]`」的最大号。
+
+        v0.45.728 起 CHANGELOG.md 冻结为档案、新号在碎片里（`TestFragmentVersions` 守碎片那一半）；
+        本条的期望值在这里**独立**算（不调被测的 `fragment_versions`），只比真仓库此刻的结果。
 
         ⚠️ **本条没有它原先声称的那颗牙**（2026-09-11 三档实测，v0.45.200 更正）。
         原 docstring 写「把正则的 `^` 去掉 ⇒ 命中正文里引用的版本号 ⇒ 红」，实跑是绿：
@@ -71,6 +74,11 @@ class TestResolvesRealValues:
                     want = m.group(1)
                     break
         assert want, "CHANGELOG.md 里没有行首版本号，本条断言的锚点失效了"
+        frag_dir = _ROOT / "changelog.d"
+        names = sorted(p.name for p in frag_dir.iterdir()) if frag_dir.is_dir() else []
+        frags = [n[:-len(".md")] for n in names
+                 if re.fullmatch(r"(?:[1-9]\d*|0)\.(?:[1-9]\d*|0)\.(?:[1-9]\d*|0)\.md", n)]
+        want = max([want, *frags], key=lambda v: tuple(int(x) for x in v.split(".")))
         assert cv.changelog_version() == want
 
 
@@ -134,6 +142,69 @@ class TestHeadingMustBeLineAnchored:
         assert min(trap) < min(heads), (
             f"陷阱在第 {min(trap)} 行、真标题在第 {min(heads)} 行——"
             "陷阱必须排在真标题**之前**，否则 `changelog_version()` 先 return 就测不到")
+
+
+class TestFragmentVersions:
+    """v0.45.728：上报值 = 「`changelog.d/` 碎片文件名 ∪ 档案顶号」的最大号。
+
+    不接这一半的话，档案一冻结，status.json 与跨式账本 `meta.code_version` 上报的版本就永远停在冻结那个号——
+    而且没人会红（「报了一个号」看起来跟「报对了号」一样）。"""
+
+    _ARCHIVE = "# log\n\n---\n\n## [0.45.728] — 2026-11-05 — 档案顶\n\n正文\n"
+
+    def _repo(self, tmp_path, monkeypatch, names, archive=_ARCHIVE):
+        import code_version as cv
+
+        (tmp_path / "CHANGELOG.md").write_text(archive, encoding="utf-8")
+        d = tmp_path / "changelog.d"
+        d.mkdir()
+        for n in names:
+            (d / n).write_text("x\n", encoding="utf-8")
+        monkeypatch.setattr(cv, "_repo_dir", lambda: tmp_path)
+        return cv
+
+    def test_fragments_raise_the_reported_version(self, tmp_path, monkeypatch):
+        """变异：`changelog_version()` 不看碎片（退回只读档案）⇒ 报 0.45.728 ⇒ 红。"""
+        cv = self._repo(tmp_path, monkeypatch, ["0.45.729.md", "0.45.730.md", "README.md"])
+        assert cv.changelog_version() == "0.45.730"
+
+    def test_order_is_numeric_not_lexical(self, tmp_path, monkeypatch):
+        """`0.45.99 < 0.45.100`。变异：`max(..., key=version_key)` 换成按字符串 `max` ⇒ 报 0.45.99 ⇒ 红。"""
+        cv = self._repo(tmp_path, monkeypatch, ["0.45.99.md", "0.45.100.md"],
+                        archive="# log\n\n## [0.45.98] — 2026-11-05 — 顶\n\n正文\n")
+        assert cv.changelog_version() == "0.45.100"
+
+    def test_noncanonical_names_are_not_versions(self, tmp_path, monkeypatch):
+        """iCloud 副本、前导零、大写扩展名都不算版本（守卫另外报红），上报只认合规文件名。"""
+        cv = self._repo(tmp_path, monkeypatch, ["0.45.729.md", "0.45.731 2.md", "0.45.0732.md", "0.45.733.MD",
+                                                "0.45.734.md.bak"])
+        assert cv.changelog_version() == "0.45.729"
+        assert cv.fragment_versions(tmp_path) == ["0.45.729"]
+
+    def test_archive_top_when_it_is_larger_or_there_are_no_fragments(self, tmp_path, monkeypatch):
+        cv = self._repo(tmp_path, monkeypatch, ["README.md"])
+        assert cv.changelog_version() == "0.45.728"
+
+    def test_unlistable_fragment_dir_is_none_not_the_archive_top(self, tmp_path, monkeypatch):
+        """列不出碎片目录 ⇒ **不知道**最大号 ⇒ None。退回档案顶号就是「静默报小一个号」。
+
+        变异：`fragment_versions` 的 `except OSError` 改成返回 `[]` ⇒ 报 0.45.728 ⇒ 红。"""
+        import code_version as cv
+
+        (tmp_path / "CHANGELOG.md").write_text(self._ARCHIVE, encoding="utf-8")
+        (tmp_path / "changelog.d").write_text("不是目录\n", encoding="utf-8")   # listdir ⇒ NotADirectoryError
+        monkeypatch.setattr(cv, "_repo_dir", lambda: tmp_path)
+        assert cv.fragment_versions() is None
+        assert cv.changelog_version() is None
+
+    def test_missing_fragment_dir_is_an_empty_list(self, tmp_path, monkeypatch):
+        """目录不存在 = 碎片协议之前的 checkout，不是失败。"""
+        import code_version as cv
+
+        (tmp_path / "CHANGELOG.md").write_text(self._ARCHIVE, encoding="utf-8")
+        monkeypatch.setattr(cv, "_repo_dir", lambda: tmp_path)
+        assert cv.fragment_versions() == []
+        assert cv.changelog_version() == "0.45.728"
 
 
 class TestFailureNeverFabricates:

@@ -222,6 +222,7 @@ def test_cli_reports_are_written_under_new_root(roots):
     ("alpha-hive-daily-2026-09-01.md", False, "MOVE"),   # MOVE 先于 *.md → SKIP
     ("alpha-hive-thread-2026-09-01.txt", False, "MOVE"),  # MOVE 先于 *.txt → SKIP
     ("CHANGELOG.md", False, "SKIP"),
+    ("changelog.d", True, "SKIP"),                        # 版本碎片目录（v0.45.728）：文档，不是数据
     ("NVDA_raw.json", False, "MOVE"),
     ("report_snapshots", True, "MOVE"),
     ("report_snapshots", False, "UNKNOWN"),                # 同名但不是目录：不许按目录规则放行

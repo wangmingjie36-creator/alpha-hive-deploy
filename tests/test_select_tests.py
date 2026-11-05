@@ -252,6 +252,35 @@ class TestBuildMergeDrift:
         assert ST.observed_gaps(out, d, n_tests=N_TESTS) == []
 
 
+
+class TestNonpyDirKeys:
+    """v0.45.728：`changelog.d/` 每个版本一个碎片、文件随时增加——读者按**目录**登记（`NONPY_DIR_KEYS`）。
+
+    按文件登记的话，每个新碎片都是「登记表里没有读者」⇒ 开发期选测回退整套、CI 每次多一条 `::warning`；
+    而它的读者都是通读整个目录的测试，按目录登记即可。登记 / 比对 / 选测三处必须同一口径（都经 `nonpy_key`）。"""
+
+    REG_DIR = _reg(nonpy_readers={"changelog.d/": ["tests/test_changelog_fragments.py"]})
+
+    def test_key(self):
+        assert ST.nonpy_key("changelog.d/0.45.729.md") == "changelog.d/"
+        assert ST.nonpy_key("changelog.d/README.md") == "changelog.d/"
+        assert ST.nonpy_key("CHANGELOG.md") == "CHANGELOG.md"
+        assert ST.nonpy_key("docs/changelog.d/x.md") == "docs/changelog.d/x.md", "只认仓库根下的那个目录"
+
+    def test_a_new_fragment_selects_the_directory_readers_instead_of_full(self):
+        for status in ("A", "M", "D"):
+            p = _plan([(status, "changelog.d/0.45.999.md")], reg=self.REG_DIR)
+            assert p.mode == "subset" and p.selected == ["tests/test_changelog_fragments.py"], (status, p.reasons)
+
+    def test_build_merge_and_drift_use_the_directory_key(self):
+        d = _dump({"tests/test_changelog_fragments.py": {"nonpy": ["changelog.d/README.md", "changelog.d/0.45.729.md"]}})
+        reg = ST.build_registry(d, "abc", n_tests=N_TESTS)
+        assert reg["nonpy_readers"] == {"changelog.d/": ["tests/test_changelog_fragments.py"]}
+        later = _dump({"tests/test_changelog_fragments.py": {"nonpy": ["changelog.d/0.45.730.md"]}})   # 之后新加的碎片
+        assert ST.observed_gaps(reg, later, n_tests=N_TESTS) == [], "新碎片被当成了漏登"
+        merged = ST.merge_observation(ST.empty_registry(), d, n_tests=N_TESTS)
+        assert merged["nonpy_readers"] == {"changelog.d/": ["tests/test_changelog_fragments.py"]}
+
 class TestReadAllDenominator:
     """v0.45.619：「读 ≥ 一半测试文件」的分母曾取 dump 的 `n_collected_files`。`--update` / `--run` 只收集被改 / 被选的
     几个文件 ⇒ 分母小到 1 ⇒ 只读了一个别的测试文件的测试被当成元守卫、挪出 `reads_tests`
@@ -646,6 +675,16 @@ class TestRealRegistry:
         orphans = [(reader, read) for reader, reads in sorted(reg["reads_tests"].items()) for read in reads
                    if reader not in ST.static_importers(rev, read) and Path(read).name not in texts.get(reader, "")]
         assert reg["reads_tests"] and not orphans, orphans
+
+    def test_fragment_directory_readers_are_registered_by_directory(self):
+        """v0.45.728：新碎片要能选到读者——真登记表里 `changelog.d/` 必须按**目录键**登记了读者，不许出现按文件的键。"""
+        reg = ST.load_registry(_REPO / ST.REGISTRY_REL)
+        assert "tests/test_changelog_fragments.py" in reg["nonpy_readers"].get("changelog.d/", []), \
+            "changelog.d/ 没有登记读者——新碎片会让选测回退整套"
+        stray = [k for k in reg["nonpy_readers"] if k.startswith("changelog.d/") and k != "changelog.d/"]
+        assert not stray, f"按文件登记的碎片读者：{stray}（应归到目录键，见 NONPY_DIR_KEYS）"
+        p = ST.make_plan([("A", "changelog.d/0.45.999.md")], reg, exists=lambda x: True, test_texts={})
+        assert p.mode == "subset" and "tests/test_changelog_fragments.py" in p.selected, p.reasons
 
     def test_registry_is_saved_in_the_canonical_one_key_per_line_form(self, tmp_path):
         reg = ST.load_registry(_REPO / ST.REGISTRY_REL)

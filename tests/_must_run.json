@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "commit": "793d3db5b3a9116905d69abf1b548b024cbb8204",
+  "commit": "22246cb2f1de257d13e7d4207964d2d2ecaf2991",
   "reads_all_tests": [
     "tests/test_agent_weight_manager_retired.py",
     "tests/test_bare_env_children_pin_data_root.py",
@@ -53,7 +53,7 @@
     "ALPHA_BOT_GUIDE.md": ["tests/test_alphabot.py", "tests/test_alphabot_launcher.py", "tests/test_claude_md_partitions.py"],
     "Alpha_Hive_v0.12_升级路线图.md": ["tests/test_claude_md_partitions.py"],
     "Alpha_Hive_周度产出评审_vs_机构报告_2026W14.md": ["tests/test_claude_md_partitions.py"],
-    "CHANGELOG.md": ["tests/test_changelog_entry_integrity.py", "tests/test_code_version.py", "tests/test_options_paper_leg.py", "tests/test_options_paper_leg_settle_close.py", "tests/test_production_clone.py", "tests/test_production_sync.py", "tests/test_quarantine_1014_prev_session.py", "tests/test_quarantine_prev_window_0915_0925.py", "tests/test_scan_timing.py", "tests/test_straddle_gex_shadow.py", "tests/test_straddle_strangle_shadow.py"],
+    "CHANGELOG.md": ["tests/test_changelog_entry_integrity.py", "tests/test_changelog_fragments.py", "tests/test_code_version.py", "tests/test_options_paper_leg.py", "tests/test_options_paper_leg_settle_close.py", "tests/test_production_clone.py", "tests/test_production_sync.py", "tests/test_quarantine_1014_prev_session.py", "tests/test_quarantine_prev_window_0915_0925.py", "tests/test_scan_timing.py", "tests/test_straddle_gex_shadow.py", "tests/test_straddle_strangle_shadow.py"],
     "CLAUDE.md": ["tests/test_claude_md_partitions.py"],
     "DEEP_REPORT_CSS.txt": ["tests/test_claude_md_partitions.py"],
     "GMAIL_FALLBACK_SUMMARY.md": ["tests/test_claude_md_partitions.py"],
@@ -104,6 +104,7 @@
     "alphabot/static/pages/wheel_screen.js": ["tests/test_claude_md_partitions.py"],
     "alphabot/static/retry_gate.js": ["tests/test_alphabot.py", "tests/test_alphabot_launcher.py", "tests/test_claude_md_partitions.py"],
     "alphabot/static/vendor/echarts.min.js": ["tests/test_alphabot.py", "tests/test_claude_md_partitions.py"],
+    "changelog.d/": ["tests/test_changelog_fragments.py", "tests/test_changelog_guard_hook.py", "tests/test_claude_md_partitions.py"],
     "chart.umd.min.js": ["tests/test_claude_md_partitions.py"],
     "constraints.txt": ["tests/test_claude_md_partitions.py", "tests/test_requirements_match_installed.py"],
     "experiments/CLAUDE.md": ["tests/test_claude_md_partitions.py"],

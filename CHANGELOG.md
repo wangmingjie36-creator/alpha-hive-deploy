@@ -1,11 +1,48 @@
 # Alpha Hive · 版本变更历史
 
-> 格式：每次 Cowork session 结束后追加一条记录。
+> ⚠️ **本文件已冻结为历史档案（v0.45.728 起）。新条目一律写在 `changelog.d/<版本>.md`，一个版本一个文件**——
+> 占号：`/usr/local/bin/python3 changelog_fragments.py claim "一句话说明" --push`；格式与流程见 `changelog.d/README.md`。
+> 冻结前已在本文件里占的号**就地完成**（改标题、补正文）；**不要再加新的版本标题**——提交、推送、全量测试都会红。
+> 合并视图（碎片在前、本档案在后）：`/usr/local/bin/python3 changelog_fragments.py render`，生成结果不提交。
 > 规范：`Added` 新增 | `Changed` 修改 | `Fixed` Bug 修复 | `Removed` 删除
 
 ---
 
-## [0.45.728] — 2026-11-05 — 占位（进行中：CHANGELOG 改为每版一个碎片文件 changelog.d/，旧文件冻结为档案）
+## [0.45.728] — 2026-11-05 — Changed：新条目改为每版一个文件 `changelog.d/<版本>.md`，本文件冻结为档案；占号 = 工具往 main 推一个碎片
+
+**起因**：单文件 CHANGELOG 让占号、完工、合入都改同一处顶部 ⇒ 每次并发合入都在这里冲突；解这个冲突前后自造过九次事故（带冲突标记的 CHANGELOG 被提交），撞号返工过三轮（08-26~27），`git cherry` 也因为每个提交都改顶部而失效。改成一个版本一个文件后，不同的号是不同的文件、互不冲突；只有同一个号才冲突——冲突本身就是撞号。
+
+### Added
+- `changelog_fragments.py`（新）：碎片格式、检查、认领保护、档案冻结断言与命令行 `claim` / `adopt` / `status` / `check` / `render`。
+  - `claim "说明" --push`：在 origin/main 上**另建**一个只含占位碎片的提交（临时 `GIT_INDEX_FILE`，不碰工作区 / 暂存区 / 当前分支），推 `<提交>:refs/heads/main` 后以 `ls-remote` 核实；main 动过 ⇒ 重新取号（最多 5 次）；main 没动却推失败 ⇒ 停、不重试（不是被抢）。之后 `adopt` 把它接进当前分支（落后就快进，否则 cherry-pick；暂存区非空先拒绝）。不带 `--push` 只建提交、打印推送与接入命令交给人（接入命令带 `cd <本 checkout>`：`adopt` 作用于当前目录所在的 checkout）。origin/main 上还没有 `changelog.d/README.md`（协议没上线）⇒ 拒绝。
+  - 碎片规则：标题 `## [版本] — 日期 — 标题` 且号 = 文件名；**恰好一行**认领 `<!-- 认领：<分支> <时刻> <8 位随机 hex> -->`；标题是「占位（进行中：…）」才可以没正文；号必须大于档案顶号（按数值比）；无冲突标记、UTF-8、无子目录 / 非普通文件。认领行带随机串是因为**内容逐字相同的 add/add 会被 git 无声合并**，撞号就看不见了。
+  - 认领保护（推往 main 时对照远端 main）：已在 main 上的碎片不许删、认领行不许改。
+- `changelog.d/README.md`：协议、完工示例、撞号处理（保留 main 那份 → `rebase --continue` → 再 `claim`）、作废的号（标题改 `占位关闭：<原因>` + 一句正文，不删文件）、过渡规则。
+
+### Changed
+- `changelog_guard.py`：pre-commit 查**暂存区**里的碎片（读 index blob，`commit -- 路径` 用的临时 index 也认），pre-push 查**被推提交**的树并做认领保护；算不出远端 main 的基准 ⇒ 拦（不当成查过）。懒加载 `changelog_fragments` 并核对它来自本 checkout，载入失败 ⇒ 拦。薄调用 `_SHIM` 没变 ⇒ 已装的钩子不用重装。
+- `CHANGELOG.md`：文件头写明冻结；`tests/test_changelog_entry_integrity.py` 加 `TestArchiveFrozen`（冻结值 = 顶号 0.45.728、871 条，字面量在 `changelog_fragments.ARCHIVE_FROZEN_MAX / _COUNT`）：顶部加号、删 / 复制条目、改顶号都红，冻结前占的号就地完成照常可以。冲突标记判据移进 `changelog_fragments.CONFLICT_RE`（一处定义，测试从那里取）。
+- `code_version.changelog_version()`：取碎片文件名与档案顶号里的**数值**最大者；碎片目录列不出 ⇒ None（不退回档案顶号），目录不存在 ⇒ 只看档案。
+- `tools/select_tests/select_tests.py`：`NONPY_DIR_KEYS = ("changelog.d/",)`，碎片目录在 `tests/_must_run.json` 里**按目录**登记读者（重建 / 并入 / 漂移 / 选测都经 `nonpy_key`）⇒ 新加一个碎片选的是目录的读者，不再因「没登记的非代码文件」回退整套。
+- `tests/_root_data_guard.py`（`CODE_TOP_DIRS`）与 `data_backup/migrate_data_root.py`（`SKIP_EXACT`）：`changelog.d` 是文档、不是数据。
+- `CLAUDE.md`：「版本历史规则」「并发开工必须先占号」「CHANGELOG 完整性 hook」三节改写为碎片协议（标题保留，代码里按标题的引用照样解析）；另把 v0.45.727 瘦身后仍指向 `CHANGELOG.md` 的三行（「历史改动查询指针」、「Memory 2.0」两处）改指碎片（改前已告知 727 会话）。
+- `.claude/rules/session-closing.md`：`paths:` 加 `"changelog.d/**"`——728 起收尾改的是自己的碎片、不再碰 `CHANGELOG.md`，只认 `CHANGELOG.md` 的话收尾规则就不再加载；页首说明补一句，逐字搬来的正文不动。
+
+### 没动
+- 档案里的旧条目一个字没改；0.45.727 及更早在本文件里占的号照旧就地完成。
+- `render` 只打印到标准输出、不写文件（生成结果不提交；写文件会成为没有读者的落盘写入）。
+
+### 验证
+- `tests/test_changelog_fragments.py`（新，55 条）：每条检查规则各一个只触发它的样本；认领保护；`claim` / `adopt` 在临时 bare 仓库 + 克隆里真跑（不带 `--push` 只建在 origin/main 上；推进一个已分叉、有未提交改动的分支后 rebase 跳过重复提交；落后 ⇒ 快进；被抢 ⇒ 下一个号；远端拒收 ⇒ 不重试；同一秒占同一个号内容也不同；`adopt` 拒绝不在 main 上的提交与非空暂存区；协议上线前拒绝；命令行作用于当前目录所在的 checkout）。
+- `tests/test_claude_md_partitions.py`（727 的分区守卫）在合并后的树上全过：引用解析、根目录字节预算、新 `paths:` 模式命中被跟踪文件。
+- `tests/test_changelog_guard_hook.py::TestFragments`（11 条，真钩子 + 临时仓库）：暂存区坏、工作区好 ⇒ 拦；部分提交读临时 index；模块缺失 / 来自别处 ⇒ 拦；工作区不同时 off-tree 占号推送 + 接入；坏碎片、删碎片、改认领行在推送时拦；完工放行；基准不明 ⇒ 拦。另 `TestFragmentVersions`（6）、`TestNonpyDirKeys`（3）+ 真登记表、`TestArchiveFrozen`（6）。
+- 变异 49 个全部变红（不带 `--push` 时接入命令去掉 `cd` 1 个；碎片模块 26、钩子 7、`code_version` 4、选测 6、根闸 / 迁移表 2、档案头 / README 3），每个都还原后逐字节核对。⚠️ 档案头那条第一版没抓到：断言只认「冻结」二字，而「冻结前已在本文件里占的号」也含它——改成认「本文件已冻结」后才红。`test_persistent_writes_have_readers` 抓到第一版 `render --out` 是没登记的落盘写入 ⇒ 删掉 `--out`。
+- 本仓真钩子：本版本的 WIP 提交触发了新 pre-commit（「changelog.d/ 碎片检查通过（暂存区）」+ 档案完整性 25 passed）。
+- 整套：在提交 `05f90fca`（与最终提交只差本行）上跑、全程没碰工作树：**13,826 passed / 85 deselected / 2 xfailed / 0 failed / 0 error**，exit 0（12 分 06 秒；`-m "not integration and not network"`，带选测审计插件）。选测漂移检查：测试读测试 ✅；非代码文件漏登 10 处全是存量（`alphabot/static/*.js`、`experiments/price_channel_backtest_prereg.md`），与本次无关、未修。
+
+### ⚠️ 注意
+- 推不了 main 的会话：`claim` 不带 `--push`，把打印的命令交给人；推上去之前号没占住（同 10-09 的教训）。
+- `.git/hooks` 是所有 checkout 共用的；停在本版本之前提交上的 checkout 没有碎片检查（那里也没有 `changelog.d/`）。
 
 ## [0.45.727] — 2026-11-05 — Changed：根目录 CLAUDE.md 瘦身（88,362 → 24,673 字节）——细节逐字下沉到按需加载的子目录 CLAUDE.md、`.claude/rules/` 与项目 skill
 

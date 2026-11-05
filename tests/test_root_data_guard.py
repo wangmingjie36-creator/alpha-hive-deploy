@@ -58,6 +58,7 @@ EXCLUDED = [
     "alpha_hive_daily_report.py", "swarm_agents/cache.py", "tests/conftest.py", "run_alpha_hive_daily.sh",
     "templates/report.html", "templates/report.css", "prompts/bear.md", ".github/workflows/ci.yml",
     "CHANGELOG.md", "CLAUDE.md", "README.md", "requirements.txt", ".gitignore", "pyproject.toml",
+    "changelog.d/0.45.999.md", "changelog.d/README.md",   # 版本碎片（v0.45.728），人写的仓库元文件
     "__pycache__/config.cpython-311.pyc", "tests/__pycache__/conftest.cpython-311-pytest-9.0.2.pyc",
     ".pytest_cache/v/cache/lastfailed", ".ruff_cache/0.1/x",
     ".git", ".git/index",                            # worktree 里 .git 是文件

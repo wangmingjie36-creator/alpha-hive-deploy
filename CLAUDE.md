@@ -35,38 +35,31 @@
 
 ## 版本历史规则
 
-- **每次 session 结束前必须更新 `CHANGELOG.md`**
+- **每次 session 结束前必须写好自己那一版的条目**：v0.45.728 起写在 `changelog.d/<版本>.md`（一个版本一个文件，格式、示例、流程见 `changelog.d/README.md`）。`CHANGELOG.md` 已冻结为档案，**不许再加版本标题**（提交 / 推送 / 全量测试都会红）；冻结前在里面占的号就地完成
 - 格式：`Added` / `Changed` / `Fixed` / `Removed`，注明文件名和改动摘要
 - 版本号：patch（0.x.y+1）= bug fix；minor（0.x+1.0）= 新功能批次
+- 最大号 / 下一个号 / 谁还挂着占位：`/usr/local/bin/python3 changelog_fragments.py status`；合并视图 `... render`（生成结果不提交）
 
-### 并发开工必须先占号（2026-08-27 起）
+### 并发开工必须先占号（2026-08-27 起；v0.45.728 起占号 = 往 main 推一个碎片）
 
 多个 session 同时开工时，**开工第一件事就是占号**，不要等完工再编号：
 
-1. `git fetch origin` 后看 `origin/main` 的 `CHANGELOG.md` 取下一个可用号
-2. 在顶部插入占位条目：
-   `## [0.45.NN] — YYYY-MM-DD — 占位（进行中：一句话说明在做什么）`
-3. **立刻单独提交并推送到 main**（只含这一行改动，不带代码）
-4. 完工时把占位标题替换成真标题，正文补齐
+`/usr/local/bin/python3 changelog_fragments.py claim "一句话说明在做什么" --push`
 
-⚠️ **第 3 步不能省。** 占位写在自己的 worktree 里，别的 session 看不见 ——
-它们读的是主 checkout / `origin/main`。不推送的占号等于没占。
+它在 `origin/main` 上另建一个只含 `changelog.d/<下一个号>.md` 占位碎片的提交、推上 main 并用 `ls-remote` 核实（被抢了自动取下一个号），再把这个提交接进当前分支——不用先切分支、不用清工作区（暂存区有东西时拒绝接入，照提示做，**别用裸 `git stash`**）。完工时只改碎片的标题和正文，**认领行 `<!-- 认领：… -->` 不许改**。
 
-**为什么值得**：2026-08-26~27 两条线并行，`0.45.36–0.45.40` 被双方各用了一遍、
-`0.45.47` 与 `0.45.48` 又各撞一次，前后返工三轮（一方整批后移五个号、
-另一方让号两次）。占号只要几十秒，撞号的代价是改 CHANGELOG 标题 + 改提交信息
-+ 重跑核对。
+- ⚠️ **别手写碎片、别省 `--push`。** 认领行里的随机串让每次占号内容都不同——内容逐字相同的两个碎片，git 会无声合并成一个，撞号就看不见了；不推送的占号别的 session 看不见，等于没占。
+- **为什么值得**：2026-08-26~27 两条线并行，`0.45.36–0.45.40` 被双方各用了一遍、`0.45.47` 与 `0.45.48` 又各撞一次，前后返工三轮。改成碎片后，不同的号是不同的文件，合并不再互相冲突；只有同一个号才冲突——冲突本身就是撞号。
+- **撞上了怎么办**：**先进 main 的号算数**。后者 rebase 时在 `changelog.d/<号>.md` 上撞 add/add 冲突 ⇒ 保留 main 那份（`git checkout origin/main -- changelog.d/<号>.md`）、`rebase --continue`，再 `claim` 一个新号、把条目搬过去。占了不用的号：标题改成 `占位关闭：<原因>` 并写一句正文，**不删文件**（推往 main 时删已有碎片会被拦）。
 
-**撞上了怎么办**：沿用既定原则 —— **先提交（进 git 历史）的占号**，
-后者改号。若双方都只在工作区，则**批次大的保留、单条的让**（改号成本低者先动）。
+### CHANGELOG 完整性 hook（2026-09-13 起；v0.45.728 起含碎片检查）
 
-### CHANGELOG 完整性 hook（2026-09-13 起）
+`changelog_guard.py` 挂在 pre-commit + pre-push 上，只挡**动了 `CHANGELOG.md` 或 `changelog.d/`** 的提交与推往 main 的推送。设计与实测全在该文件 docstring。
 
-`changelog_guard.py` 挂在 pre-commit + pre-push 上跑 `tests/test_changelog_entry_integrity.py`
-（冲突标记 / 重号 / 空标题），只挡**动了 CHANGELOG** 的提交与推往 main 的推送。设计与实测全在该文件 docstring。
-
-- ⚠️ **pre-commit 管不到 `git rebase --continue`**（实测只触发 post-rewrite）——解 CHANGELOG 冲突后兜底的是 pre-push，别以为提交成功就代表检查过。
-- `.git/hooks` 不被跟踪：重新 clone 或清过之后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。
+- 动了档案：跑 `tests/test_changelog_entry_integrity.py`（冲突标记 / 重号 / 空标题 / 冻结：加号、删条目、改顶号都红）。
+- 动了碎片：跑 `changelog_fragments.py` 的检查（文件名 = 标题里的号、认领行恰好一行、日期、冲突标记、占位以外要有正文、号要大于档案顶号）。pre-commit 读**暂存区**、不读工作区；pre-push 读**被推的那个提交**并对照远端 main——已在 main 上的碎片不许删、认领行不许改，算不出远端 main 的基准就拦。
+- ⚠️ **pre-commit 管不到 `git rebase --continue`**（实测只触发 post-rewrite）——解冲突后兜底的是 pre-push，别以为提交成功就代表检查过。
+- `.git/hooks` 不被跟踪：重新 clone 或清过之后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。钩子壳没变，碎片检查随代码合入即生效，已装的钩子不用重装。
 
 ## 整套测试怎么跑（2026-10-21 起）
 
@@ -79,7 +72,7 @@
 
 历史改动**不在本文件维护**（v0.40.3 清理了此前 ~75 行 v0.10-0.19 时代的实现细节清单）：
 - 版本级摘要 → MEMORY.md 末尾「版本历史」表
-- 逐项细节 → `CHANGELOG.md`
+- 逐项细节 → `changelog.d/<版本>.md`（v0.45.728 起）+ 冻结档案 `CHANGELOG.md`；合并视图 `/usr/local/bin/python3 changelog_fragments.py render`
 - 定时任务（weekly-optimizer / monthly-self-analysis；每日扫描走 launchd `com.alpha.hive.daily`，不走 scheduled-tasks）的调度时刻 → 以 `list_scheduled_tasks` 返回的 `nextRunAt` 为唯一真相，勿引用文档里的旧时刻
 
 ## 核心组件指针（只记"在哪、归谁管"，不记参数值）
@@ -115,11 +108,11 @@
 - **Auto Memory 路径**：`~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/MEMORY.md`（旧路径 `~/.claude/projects/-Users-igg/memory/` 已弃用，勿再写入）。改了代码 / 新增模块 / 修了 bug ⇒ 自动更新 MEMORY.md 对应章节；控制在 200 行以内
 - **索引行只写「这条是什么 + 什么时候该打开它」，单条 ≤150 字符**，细节一律进 topic 文件；**裁之前先把索引行里的标志物逐个 grep topic 文件，缺的先搬回去再裁**（2026-09-11：有些教训只活在索引行里）
 - 守卫 `check_index_line_length.py`（memory 仓 pre-commit，v0.45.208）：**动了 `MEMORY.md` 才拦、只检测绝不自动裁**；钩子不进 git，接手 / 重装（必须写全路径）：`/usr/local/bin/python3 ~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/check_index_line_length.py --install-hook`
-- 全文（事故数字与每条规则的理由）→ `.claude/rules/session-closing.md`（读 / 改 `CHANGELOG.md` 时自动加载）
+- 全文（事故数字与每条规则的理由）→ `.claude/rules/session-closing.md`（读 / 改 `CHANGELOG.md` 或 `changelog.d/` 时自动加载）
 
 ### memory 目录已纳入 git，**每次 session 收尾必须提交并推送**（2026-09-11 起提交；2026-09-18 起加推送）
 
-独立 git 仓库（分支 `main`，远端 `origin` = 私有仓库 `wangmingjie36-creator/alpha-hive-memory`），没有任何东西会替你提交——与「更新 CHANGELOG.md」并列为收尾项：
+独立 git 仓库（分支 `main`，远端 `origin` = 私有仓库 `wangmingjie36-creator/alpha-hive-memory`），没有任何东西会替你提交——与「写好自己的版本条目」（`changelog.d/<版本>.md`）并列为收尾项：
 
 ```bash
 git -C ~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory add -A && git -C ~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory commit -m "<本次记了什么>" && git -C ~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory push origin main

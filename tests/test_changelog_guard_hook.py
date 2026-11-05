@@ -13,6 +13,7 @@
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -320,3 +321,171 @@ class TestShimAndInstall:
         refused = install()
         assert refused.returncode != 0 and "未覆盖" in refused.stderr, refused.stderr
         assert (hooks / "pre-push").read_text() == foreign
+
+
+# ═════════════════════════════ 版本碎片（v0.45.728） ═════════════════════════════
+
+def _frag(version, nonce, title="正式标题", body="正文。\n"):
+    return f"## [{version}] — 2026-11-05 — {title}\n<!-- 认领：main 2026-11-05T09:00:00-08:00 {nonce} -->\n\n{body}"
+
+
+def _enable_fragments(repo):
+    """把碎片协议放进临时仓库（判据模块 + README + 种子碎片 3.0.0）并推上 origin/main。
+
+    `--no-verify`：这次提交带 `.py`，推送会触发契约闸，而临时仓库里没有契约测试（契约闸另有自己的测试文件）。
+    档案 `CLEAN` 的顶号是 2 ⇒ 碎片号用 3.x.y（按数值比较大于它）。"""
+    for name in ("changelog_fragments.py", "code_version.py"):
+        shutil.copy(_ROOT / name, repo.path / name)
+    d = repo.path / "changelog.d"
+    d.mkdir()
+    shutil.copy(_ROOT / "changelog.d" / "README.md", d / "README.md")
+    (d / "3.0.0.md").write_text(_frag("3.0.0", "0000aaaa"))
+    repo.git("add", "-A")
+    repo.git("commit", "-qm", "碎片协议", "--no-verify")
+    repo.git("push", "-q", "--no-verify", "origin", "HEAD:main")
+
+
+def _frag_file(repo, version):
+    return repo.path / "changelog.d" / f"{version}.md"
+
+
+class TestFragments:
+    """碎片部分读 **git 对象**（暂存区 / 被推提交），不读工作区；只在动了 `changelog.d/` 时查。"""
+
+    @pytest.fixture(autouse=True)
+    def _no_foreign_module(self, monkeypatch):
+        # 钩子按 sys.path 找判据模块：别让 PYTHONPATH 上别处的副本顶替临时仓库里的那份
+        monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    # ── pre-commit ──
+
+    def test_good_fragment_commit_passes_without_running_the_changelog_test(self, repo):
+        _enable_fragments(repo)
+        _frag_file(repo, "3.0.1").write_text(_frag("3.0.1", "0000bbbb"))
+        repo.git("add", "changelog.d")
+        r = repo.git("commit", "-m", "碎片", check=False)
+        assert r.returncode == 0, r.stderr
+        assert "碎片检查通过（暂存区）" in r.stderr, r.stderr
+        assert repo.stub_runs() == [], "只动了碎片，不该跑档案的完整性测试"
+
+    def test_staged_bad_fragment_is_blocked_even_when_the_worktree_is_fixed(self, repo):
+        """查的是暂存区里的 blob：暂存了坏的、工作区改好了没暂存 ⇒ 照拦。"""
+        _enable_fragments(repo)
+        f = _frag_file(repo, "3.0.1")
+        f.write_text(_frag("3.0.1", "0000bbbb").replace("<!-- 认领：main 2026-11-05T09:00:00-08:00 0000bbbb -->\n", ""))
+        repo.git("add", "changelog.d")
+        f.write_text(_frag("3.0.1", "0000bbbb"))
+        r = repo.git("commit", "-m", "x", check=False)
+        assert r.returncode != 0 and "实有 0 行" in r.stderr, r.stderr
+        assert repo.stub_runs() == []
+
+    def test_partial_commit_reads_the_temporary_index(self, repo):
+        """`git commit -- <路径>` 用临时索引（`GIT_INDEX_FILE`）：查的必须是它，不是 `.git/index`。"""
+        _enable_fragments(repo)
+        f = _frag_file(repo, "3.0.0")
+        good = f.read_text()
+        f.write_text(good + "\n补一句。\n")
+        repo.git("add", "changelog.d")                                       # .git/index 里是好的
+        f.write_text(good.replace(" 0000aaaa -->", " 0000aaaa -->\n<!-- 认领：x y 0000dddd -->"))   # 要提交的是坏的
+        r = repo.git("commit", "-m", "x", "--", "changelog.d/3.0.0.md", check=False)
+        assert r.returncode != 0 and "实有 2 行" in r.stderr, r.stderr
+
+    def test_missing_fragment_module_blocks_loudly(self, repo):
+        _enable_fragments(repo)
+        (repo.path / "changelog_fragments.py").unlink()                     # 未暂存的删除：钩子用工作区那份
+        _frag_file(repo, "3.0.1").write_text(_frag("3.0.1", "0000bbbb"))
+        repo.git("add", "changelog.d")
+        r = repo.git("commit", "-m", "x", check=False)
+        assert r.returncode != 0, "判据模块不在却放行了"
+        assert "载入 changelog_fragments.py 失败" in r.stderr and "未被检查" in r.stderr, r.stderr
+
+    def test_module_from_elsewhere_is_refused(self, repo, monkeypatch):
+        """本 checkout 缺判据模块、PYTHONPATH 上有别处的副本 ⇒ 不许拿别人的判据冒充。"""
+        _enable_fragments(repo)
+        elsewhere = repo.tmp / "elsewhere"
+        elsewhere.mkdir()
+        for name in ("changelog_fragments.py", "code_version.py"):
+            shutil.copy(_ROOT / name, elsewhere / name)
+        (repo.path / "changelog_fragments.py").unlink()
+        monkeypatch.setenv("PYTHONPATH", str(elsewhere))
+        _frag_file(repo, "3.0.1").write_text(_frag("3.0.1", "0000bbbb"))
+        repo.git("add", "changelog.d")
+        r = repo.git("commit", "-m", "x", check=False)
+        assert r.returncode != 0 and "不是本 checkout" in r.stderr, r.stderr
+
+    # ── pre-push ──
+
+    def test_off_tree_claim_commit_is_pushed_while_the_worktree_differs(self, repo):
+        """`claim` 在 origin/main 上另建占号提交；当前分支有自己的提交、工作区还放着一份坏的 CHANGELOG ⇒
+        读工作区的守卫只能拒它。读 blob ⇒ 放行，且不跑档案测试、不跑契约闸。"""
+        _enable_fragments(repo)
+        _write(repo, "report.json", '{"day": 2}')
+        repo.git("commit", "-qam", "本地进度")
+        _write(repo, "CHANGELOG.md", CONFLICTED)
+        made = subprocess.run([sys.executable, "changelog_fragments.py", "claim", "占号"], cwd=repo.path,
+                              capture_output=True, text=True)
+        assert made.returncode == 0, made.stdout + made.stderr
+        sha = re.search(r"已建占号提交 ([0-9a-f]{40})", made.stdout).group(1)
+
+        r = repo.git("push", "origin", f"{sha}:refs/heads/main", check=False)
+        assert r.returncode == 0, r.stderr
+        assert "碎片检查通过（被推提交" in r.stderr, f"钩子没查碎片：{r.stderr}"
+        assert "与工作区不同" not in r.stderr and "契约" not in r.stderr, r.stderr
+        assert repo.origin_main() == sha
+        assert repo.stub_runs() == []
+
+        took = subprocess.run([sys.executable, "changelog_fragments.py", "adopt", sha], cwd=repo.path,
+                              capture_output=True, text=True)
+        assert took.returncode == 0, took.stdout + took.stderr
+        assert _frag_file(repo, "3.0.1").is_file()
+        assert (repo.path / "CHANGELOG.md").read_text() == CONFLICTED, "adopt 动了工作区里别的文件"
+
+    def test_bad_fragment_that_skipped_pre_commit_is_blocked_at_push(self, repo):
+        """`--no-verify` / `rebase --continue` 都绕过 pre-commit——pre-push 兜底。"""
+        _enable_fragments(repo)
+        _frag_file(repo, "3.0.1").write_text(_frag("3.0.1", "0000bbbb") + "\n## [3.0.2] — 2026-11-05 — 又一条\n\n正文\n")
+        repo.git("add", "changelog.d")
+        repo.git("commit", "-qm", "两个号挤一个文件", "--no-verify")
+        before = repo.origin_main()
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode != 0 and "2 个行首" in r.stderr, r.stderr
+        assert repo.origin_main() == before
+
+    def test_deleting_a_fragment_on_main_is_blocked(self, repo):
+        _enable_fragments(repo)
+        repo.git("rm", "-q", "changelog.d/3.0.0.md")
+        repo.git("commit", "-qm", "删", "--no-verify")
+        before = repo.origin_main()
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode != 0 and "被删掉" in r.stderr, r.stderr
+        assert repo.origin_main() == before
+
+    def test_changing_a_claim_line_on_main_is_blocked(self, repo):
+        """撞号后解冲突选错了边：自己的碎片盖掉了 main 上别人的，认领注释随之变了。"""
+        _enable_fragments(repo)
+        f = _frag_file(repo, "3.0.0")
+        f.write_text(f.read_text().replace("0000aaaa", "0000cccc"))
+        repo.git("commit", "-qam", "盖掉", "--no-verify")
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode != 0 and "认领注释变了" in r.stderr, r.stderr
+
+    def test_completing_a_fragment_on_main_passes(self, repo):
+        """正对照：改标题、补正文、认领行不动 ⇒ 放行。"""
+        _enable_fragments(repo)
+        f = _frag_file(repo, "3.0.0")
+        f.write_text(f.read_text() + "\n### Fixed\n- 又补了一句。\n")
+        repo.git("commit", "-qam", "补正文")
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode == 0, r.stderr
+        assert "碎片检查通过（被推提交" in r.stderr
+
+    def test_unknown_push_base_is_not_treated_as_checked(self, repo):
+        """算不出远端 main 的基准（远端提交本地没有、按 URL 推所以也没有跟踪分支）⇒ 认领保护无从比 ⇒ 拦。"""
+        _enable_fragments(repo)
+        _other_session_pushes(repo, "other", "\n## [7] — a\n\nbody\n")     # 远端前进，本地未 fetch
+        _frag_file(repo, "3.0.1").write_text(_frag("3.0.1", "0000bbbb"))
+        repo.git("add", "changelog.d")
+        repo.git("commit", "-qm", "碎片")
+        r = repo.git("push", str(repo.origin), "HEAD:main", check=False)
+        assert r.returncode != 0
+        assert "算不出远端 main 的基准" in r.stderr and "未被检查" in r.stderr, r.stderr

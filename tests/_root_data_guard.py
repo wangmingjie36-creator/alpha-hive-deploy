@@ -30,7 +30,8 @@ conftest 的 session 总闸与 `tests/test_root_data_guard.py` 共用这一份
    WATCHLIST——测试写它就是改生产扫描的标的，旁边的 `.json` 版受闸、它却不受。
    现已移出（仓库里的 yaml 只剩 `_config.yml` 与 `.github/` 下的，后者由第 2 条豁免）。
 2. **代码资源目录**（`CODE_TOP_DIRS`，仅顶层）：`templates/` `prompts/`（CLAUDE.md
-   那张表点名的「`__file__` 才对」的例子）与 `.github/`。
+   那张表点名的「`__file__` 才对」的例子）、`.github/`，以及人写的版本碎片 `changelog.d/`
+   （v0.45.728：`CHANGELOG.md` 冻结后的新条目，与它同属仓库元文件）。
 3. **仓库元文件**（`CODE_ROOT_FILES`，仅根目录）：每个 session 都会改的
    `CHANGELOG.md` / `CLAUDE.md` / `README.md` 与打包配置。刻意**不**含
    `QUICK_START.md` 之类的陈年文档——测试期间它们要是变了，本来就该红。
@@ -86,7 +87,7 @@ CODE_EXTS = frozenset({
     ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".css",
     ".toml", ".cfg", ".ini",
 })
-CODE_TOP_DIRS = frozenset({"templates", "prompts", ".github"})
+CODE_TOP_DIRS = frozenset({"templates", "prompts", ".github", "changelog.d"})
 CODE_ROOT_FILES = frozenset({
     "CHANGELOG.md", "CLAUDE.md", "README.md",
     "requirements.txt", "constraints.txt", ".gitignore", ".dockerignore", "Dockerfile", "Makefile", "Procfile",

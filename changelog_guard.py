@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""CHANGELOG 完整性 + 步骤输出契约的 git hook（v0.45.216；契约闸 v0.45.355）
+"""CHANGELOG 完整性 + 步骤输出契约的 git hook（v0.45.216；契约闸 v0.45.355；版本碎片 v0.45.728）
 
 在**提交**与**推送到 main** 之前跑 `tests/test_changelog_entry_integrity.py`
-（冲突标记 / 重号 / 空标题）。只挡「动了 CHANGELOG.md」的那些，其余一律放行。
+（冲突标记 / 重号 / 空标题 / 档案冻结）。只挡「动了 CHANGELOG.md」的那些，其余一律放行。
+动了 `changelog.d/` 的另查版本碎片（见「版本碎片」一节）。
 推送到 main 时另有一道**契约闸**（见文末「契约闸」一节），与 CHANGELOG 部分互不影响。
 
     /usr/local/bin/python3 changelog_guard.py --install-hook   # 装 / 重装两个钩子（幂等）
@@ -45,6 +46,20 @@ pre-commit 只是更早报错。
 * pre-commit：暂存版本 ≠ 工作区（部分暂存）⇒ 拒。
 * pre-push：被推提交里的 CHANGELOG.md ≠ 工作区 ⇒ 拒。
 最危险的正是「暂存 / 被推的那份坏了、工作区那份是好的」——不拒就会测好的、放坏的。
+
+版本碎片（v0.45.728，`changelog.d/`；判据唯一真相在 `changelog_fragments.py`）
+---------------------------------------------------------------------------
+`CHANGELOG.md` 自 v0.45.728 冻结为档案，新条目一个版本一个文件。这部分**读 git 对象、不读工作区**：
+* **pre-commit**：暂存区动了 `changelog.d/` 才查，查的是暂存区里的 blob（`check_index`）——
+  不需要上面那条「暂存 ≠ 工作区就拒」，测的就是要提交的。
+* **pre-push**：推往 main 的区间动了 `changelog.d/` 才查：被推提交树里的碎片全部过 `lint`，再与区间起点
+  （远端 main）比 `protect`——main 上已有的碎片不许删、认领注释不许改（撞号后解冲突选错边、
+  盖掉别人碎片的那种结局）。算不出区间起点 ⇒ 认领保护没有基准 ⇒ 拦。
+  为什么不能读工作区：`changelog_fragments.py claim` 在 origin/main 上另建只含一个碎片的占号提交，
+  推送时当前分支往往落后 main，工作区必然与被推提交不同——读工作区的守卫只能拒它。
+* 判据模块按需 import：只动代码的提交 / 推送不付这份开销，也不因它坏了被拦；import 失败 ⇒ 拦。
+* 碎片、档案、契约闸三部分各判各的，拦了只记 rc、照跑后面的：一次把问题都报出来。
+* 档案冻结（不许加新号、增删条目）由完整性测试断言，档案被动时照旧走上面的旧路径。
 
 跑测试前清掉 git 注入的定位变量
 ------------------------------
@@ -130,6 +145,8 @@ import time
 from pathlib import Path
 
 CHANGELOG = "CHANGELOG.md"
+#: 版本碎片目录（v0.45.728；判据在 `changelog_fragments.py`）。
+FRAGMENT_DIR = "changelog.d"
 INTEGRITY_TEST = "tests/test_changelog_entry_integrity.py"
 GUARDED_REMOTE_REF = "refs/heads/main"
 HOOK_NAMES = ("pre-commit", "pre-push")
@@ -309,13 +326,80 @@ def _run_integrity_test(hook: str, root: Path) -> int:
     return 1
 
 
+def _fragments_module(hook: str, root: Path):
+    """碎片判据模块（与全量测试同一份）。按需 import：只动代码的提交 / 推送不付这份开销，也不因它坏了被拦。
+
+    import 失败 ⇒ None（已出声），调用方拦——「没检查」不是「检查通过」。载入的必须是**本 checkout** 的那份：
+    本 checkout 缺这个文件时，`PYTHONPATH` 上别处的副本会被静默 import 进来，判据就不是这个提交的了。"""
+    try:
+        import changelog_fragments
+    except Exception as e:  # noqa: BLE001 — 任何 import 失败（缺文件、语法错、依赖缺）都是「未被检查」
+        _say(hook, f"❌ 载入 changelog_fragments.py 失败（{type(e).__name__}: {e}）—— {FRAGMENT_DIR}/ 碎片"
+                   "**未被检查**（这不是「检查通过」）")
+        return None
+    where = Path(changelog_fragments.__file__).resolve().parent
+    if where != root.resolve():
+        _say(hook, f"❌ 载入的 changelog_fragments.py 在 {where}，不是本 checkout {root}—— {FRAGMENT_DIR}/ 碎片"
+                   "**未被检查**（这不是「检查通过」）")
+        return None
+    return changelog_fragments
+
+
+def _report_fragments(hook: str, problems: list, what: str) -> int:
+    if not problems:
+        _say(hook, f"{FRAGMENT_DIR}/ 碎片检查通过（{what}）")
+        return 0
+    _say(hook, f"❌ {FRAGMENT_DIR}/ 碎片检查未通过（{what}）：")
+    for p in problems:
+        _say(hook, f"    · {p}")
+    _say(hook, f"格式与占号流程见 {FRAGMENT_DIR}/README.md；自查：/usr/local/bin/python3 changelog_fragments.py check")
+    return 1
+
+
+def _check_fragments_index(hook: str, root: Path) -> int:
+    """pre-commit：查**暂存区**里的碎片（读 blob，不读工作区）。0 = 放行，1 = 拦（已出声）。"""
+    cf = _fragments_module(hook, root)
+    if cf is None:
+        return 1
+    try:
+        problems = cf.check_index(root)
+    except cf.GitError as e:
+        _say(hook, f"❌ 读暂存区里的碎片失败：{e} —— 碎片**未被检查**（这不是「检查通过」）")
+        return 1
+    return _report_fragments(hook, problems, "暂存区")
+
+
+def _check_fragments_commit(hook: str, root: Path, sha: str, base: str, remote: str) -> int:
+    """pre-push：查被推提交 `sha` 树里的碎片 + 对远端 main（`base`）做认领保护。0 = 放行，1 = 拦（已出声）。"""
+    cf = _fragments_module(hook, root)
+    if cf is None:
+        return 1
+    try:
+        problems = cf.check_commit(root, sha, base or None)
+    except cf.GitError as e:
+        _say(hook, f"❌ 读被推提交 {sha[:10]} 里的碎片失败：{e} —— 碎片**未被检查**（这不是「检查通过」）")
+        return 1
+    if not base:
+        problems.append(f"算不出远端 main 的基准提交（远端那个提交本地没有，也没有 {remote or '<remote>'}/main 跟踪分支）"
+                        "⇒ 认领保护（main 上已有的碎片不许删、认领注释不许改）**未被检查**——"
+                        "用具名远端推送，先 `git fetch` 再推")
+    return _report_fragments(hook, problems, f"被推提交 {sha[:10]}")
+
+
 def pre_commit(root: Path) -> int:
     hook = "pre-commit"
+    rc = 0
+    # 碎片部分（v0.45.728）与下面的档案部分各判各的：一次提交可能两样都动
+    fragments_touched = _differs(hook, "--cached", "--", FRAGMENT_DIR)
+    if fragments_touched is None:
+        return 1
+    if fragments_touched:
+        rc = _check_fragments_index(hook, root)
     touched = _differs(hook, "--cached", "--", CHANGELOG)
     if touched is None:
         return 1
     if not touched:
-        return 0
+        return rc
     unstaged = _differs(hook, "--", CHANGELOG)
     if unstaged is None:
         return 1
@@ -323,7 +407,7 @@ def pre_commit(root: Path) -> int:
         _say(hook, "❌ CHANGELOG.md 的暂存版本与工作区不同。完整性测试读的是工作区，"
                    "结果不代表这次要提交的内容 —— 先 `git add CHANGELOG.md`（或撤掉未暂存的改动）再提交。")
         return 1
-    return _run_integrity_test(hook, root)
+    return _run_integrity_test(hook, root) or rc
 
 
 def _range_base(remote: str, remote_sha: str) -> str:
@@ -534,6 +618,7 @@ def pre_push(root: Path, stdin_text: str, remote: str = "") -> int:
     rc = 0
     must_check = False
     contract_shas = []
+    fragment_pushes = []
     for line in stdin_text.splitlines():
         if not line.strip():
             continue
@@ -551,6 +636,16 @@ def pre_push(root: Path, stdin_text: str, remote: str = "") -> int:
             return 1
         if code_touched:
             contract_shas.append(local_sha)
+        # 碎片部分（v0.45.728）：被推区间动了 changelog.d/ 才查。算不出区间 ⇒ 被推树里有这个目录就查
+        # （拦：认领保护没有基准可比）；没有这个目录 ⇒ 没东西可查（删光碎片的强推要先过远端的非快进拒绝）
+        if base:
+            fragments_touched = _differs(hook, base, local_sha, "--", FRAGMENT_DIR)
+            if fragments_touched is None:
+                rc = 1
+        else:
+            fragments_touched = _git("cat-file", "-e", f"{local_sha}:{FRAGMENT_DIR}").returncode == 0
+        if fragments_touched:
+            fragment_pushes.append((local_sha, base))
         # 以下 CHANGELOG 部分拦了只记 rc、不提前返回：契约闸照跑（见文末）
         if not base:
             touched = True  # 算不出区间 ⇒ 证明不了没动
@@ -569,6 +664,8 @@ def pre_push(root: Path, stdin_text: str, remote: str = "") -> int:
             rc = 1
             continue
         must_check = True
+    for sha, base in fragment_pushes:
+        rc = _check_fragments_commit(hook, root, sha, base, remote) or rc
     if must_check:
         rc = _run_integrity_test(hook, root) or rc
     # CHANGELOG 部分没过（测试红了、或「与工作区不同」）也照跑契约闸：
