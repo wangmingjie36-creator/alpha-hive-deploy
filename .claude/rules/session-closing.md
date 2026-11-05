@@ -12,7 +12,7 @@ paths:
 
 - **每次 session 结束前必须写好自己那一版的条目**：v0.45.728 起写在 `changelog.d/<版本>.md`（一个版本一个文件，格式、示例、流程见 `changelog.d/README.md`）。`CHANGELOG.md` 已冻结为档案，**不许再加版本标题**（提交 / 推送 / 全量测试都会红）；冻结前在里面占的号就地完成
 - 格式：`Added` / `Changed` / `Fixed` / `Removed`，注明文件名和改动摘要
-- 版本号：patch（0.x.y+1）= bug fix；minor（0.x+1.0）= 新功能批次
+- 版本号：一律由 `claim` 取（补丁位 +1），只当顺序编号；改动性质看条目标题里的 `Added` / `Changed` / `Fixed` / `Removed`，不靠版本号区分。**要升 minor 先问用户**，用户定了再给 `claim` 加 `--minor`。（v0.45.739 改。原文「patch = bug fix；minor = 新功能批次」自 0.45.0 起一次没执行过：号在开工时就占，那时还不知道这次算不算新功能批次；一个「批次」又横跨许多会话，没人负责宣布它开始。）
 - 最大号 / 下一个号 / 谁还挂着占位：`/usr/local/bin/python3 changelog_fragments.py status`；合并视图 `... render`（生成结果不提交）
 
 ### 并发开工必须先占号（2026-08-27 起；v0.45.728 起占号 = 往 main 推一个碎片）

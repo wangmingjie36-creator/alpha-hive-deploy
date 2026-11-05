@@ -48,7 +48,7 @@ fetch → 取号（origin/main 的碎片号与档案顶号取最大 +1）→ 在
 红：文件名不合规（前导零、`.MD`、iCloud 副本 `0.45.728 2.md`、子目录、多余文件）；标题缺失 / 格式或日期不对 /
 版本 ≠ 文件名 / 不止一个；冲突标记；空文件；非占位没有正文；认领行缺失、不止一行或格式不对；
 碎片号 ≤ 档案最大号；推送删掉或改了认领行的 main 上已有碎片；档案出现新号或条目数变了。
-**不红、只在 `status` 里报**：跳号（可能是别人占了还没推，也可能遗弃）、占位未完成（进行中是合法状态，
+**不红、只在 `status` 里报**：跳号（按 minor 系列分别算；可能是别人占了还没推，也可能遗弃）、占位未完成（进行中是合法状态，
 按时长报红会变成定时炸弹）。
 
 守卫接线（`changelog_guard.py`）
@@ -315,6 +315,21 @@ def next_version(versions) -> str:
     if len(parts) != 3:
         raise ValueError(f"最大号 {top} 不是三段式，无法自动取下一个号")
     return f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}"
+
+
+def skipped_versions(frags, frozen_max: str = ARCHIVE_FROZEN_MAX) -> list:
+    """冻结后的跳号，按 minor 系列分别算：档案所在系列从冻结最大号 +1 查起，之后的新系列从 `.0` 查起，
+    各查到本系列最大的碎片号为止。比档案系列还低的碎片不在冻结后的范围里（lint 已判红）。
+
+    v0.45.739 前只按档案那一个系列算：碎片一跨到下一个 minor，整段不查却照样报「无」。"""
+    base = version_key(frozen_max)
+    have = {version_key(v) for v in frags}
+    gaps = []
+    for series in sorted({k[:2] for k in have if k[:2] >= base[:2]}):
+        first = base[2] + 1 if series == base[:2] else 0
+        top = max(k[2] for k in have if k[:2] == series)
+        gaps += [f"{series[0]}.{series[1]}.{n}" for n in range(first, top) if (*series, n) not in have]
+    return gaps
 
 
 def fragment_versions_of(files: dict) -> list:
@@ -712,10 +727,7 @@ def status(root, *, rev: Optional[str], fetch: bool, remote: str = REMOTE) -> in
             open_rows.append(f"  {m['version']}  档案（冻结前占的号，就地完成）  {m['date']}  「{m['desc']}」")
     print("进行中的占位：" + ("\n" + "\n".join(open_rows) if open_rows else "无"))
     if frags:
-        lo, hi = version_key(ARCHIVE_FROZEN_MAX), version_key(frags[-1])
-        have = {version_key(v) for v in frags}
-        gaps = [f"{lo[0]}.{lo[1]}.{n}" for n in range(lo[2] + 1, hi[2]) if (lo[0], lo[1], n) not in have] \
-            if lo[:2] == hi[:2] else []
+        gaps = skipped_versions(frags)
         print("跳号（冻结后，可能是别人占了还没推，也可能遗弃）：" + (", ".join(gaps) if gaps else "无"))
     return 0
 
