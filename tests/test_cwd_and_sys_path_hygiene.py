@@ -19,9 +19,6 @@ v0.45.224 在**测试侧**把三处损害关住了：conftest `_isolate_cwd_and_
 """
 
 import ast
-import json
-import os
-import subprocess
 import sys
 import types
 from pathlib import Path
@@ -94,62 +91,6 @@ class TestWeeklyOptimizerImportRoot:
         assert not offenders, (
             "sys.path 只许在 `_ensure_code_dir_importable` 里改（它锚 `__file__` 且去重）：\n"
             + "\n".join(offenders))
-
-
-class TestDeepAnalysisImportHasNoSideEffects:
-    """import `deep_analysis` 不许挪 cwd、不许加 sys.path；CLI（`main()`）仍切到脚本目录。
-
-    v0.45.224 实测：原先 import 期 `os.chdir(脚本目录)` + `sys.path.insert(0, ".")`，
-    收集期被测试模块 import ⇒ 整个 pytest 进程在仓库根跑，从空目录跑全套与从仓库根
-    跑一模一样，9 条依赖 cwd 的测试被掩盖。
-    """
-
-    @staticmethod
-    def _run(code, cwd):
-        env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
-        r = subprocess.run([sys.executable, "-c", code], cwd=cwd, env=env,
-                           capture_output=True, text=True, timeout=60)
-        assert r.returncode == 0, f"子进程失败（rc={r.returncode}）：\n{r.stderr[-2000:]}"
-        lines = [ln for ln in r.stdout.splitlines() if ln.startswith("{")]
-        assert lines, f"子进程没吐出结果行：\nstdout={r.stdout[-1000:]}\nstderr={r.stderr[-1000:]}"
-        return json.loads(lines[-1])
-
-    def test_import_does_not_move_cwd_or_sys_path(self, tmp_path):
-        out = self._run(
-            "import json, os, sys\n"
-            "cwd, path = os.getcwd(), list(sys.path)\n"
-            "import deep_analysis\n"
-            "print(json.dumps({'cwd': cwd, 'cwd_after': os.getcwd(),\n"
-            "                  'added': [p for p in sys.path if p not in path]}))\n",
-            cwd=tmp_path)
-        assert out["cwd_after"] == out["cwd"], (
-            f"import deep_analysis 把 cwd 从 {out['cwd']} 挪到了 {out['cwd_after']}。"
-            "CLI 需要的 chdir 放 `main()` 里，别放 import 期。")
-        assert out["added"] == [], f"import deep_analysis 往 sys.path 加了 {out['added']}"
-
-    def test_cli_main_still_switches_to_script_dir(self, tmp_path):
-        """CLI 语义不变：`--json` 相对路径、报告落盘都按脚本目录。只截获 chdir，不真跑。"""
-        out = self._run(
-            "import json, os, sys\n"
-            "import deep_analysis\n"
-            "class _Stop(Exception): pass\n"
-            "seen = []\n"
-            "def _rec(p):\n"
-            "    seen.append(os.path.abspath(p)); raise _Stop\n"
-            "os.chdir = _rec\n"
-            "sys.argv = ['deep_analysis.py', '--json', 'data.json']\n"
-            "err = None\n"
-            "try:\n"
-            "    deep_analysis.main()\n"
-            "except _Stop:\n"
-            "    pass\n"
-            "except BaseException as e:  # 没 chdir 就会去 cwd 里开 data.json —— 记下来，别让子进程崩成一句 rc=1\n"
-            "    err = repr(e)\n"
-            "print(json.dumps({'chdir': seen, 'error': err}))\n",
-            cwd=tmp_path)
-        assert out["chdir"] and Path(out["chdir"][0]).resolve() == REPO_ROOT, (
-            f"`deep_analysis.main()` 没先切到脚本目录（截获到 {out['chdir']}，main 抛出 {out['error']}）："
-            "`--json data.json` 会改按调用者 cwd 解析、报告写进调用者 cwd —— CLI 行为变了。")
 
 
 class TestCboeFetcherDefaultCacheDir:

@@ -325,6 +325,7 @@ class AlertAnalyzer:
         self._check_paper_portfolio_run(status)
         self._check_ledger_io_failures(status)
         self._check_strangle_shadow(status)
+        self._check_sell_put(status)             # v0.45.720：接货型卖 put 账本整轮抛 / 链全取不到 / 结算延期 ≥ 3 天
         self._check_history_fill(status)
         self._check_stock_fetch_legacy(status)   # v0.45.639：P1 行情改走 cache.py 旧回落
         self._check_event_rows(status)           # v0.45.645：P2 日线公司行动空行不在首行（某个交易日的价格缺了）
@@ -1154,6 +1155,44 @@ class AlertAnalyzer:
                         "的上游（不要在写入端把它改成 null 了事）；LedgerLockTimeout ⇒ 查是否有别的写者卡住",
             },
             ["ledger_io", "data_quality"]
+        ))
+
+    def _check_sell_put(self, status: Dict) -> None:
+        """接货型卖 put 纸面账本（v0.45.720；`sell_put_wheel.stats()` 经 scan_timing 进来）。
+
+        日报钩子把整轮异常吞成一条 WARNING，账本只是「这天没记」——所以三种情形在源头登记、这里转 P2：
+        ① 整轮抛了（run_errors）；② 宇宙里每一只都没取到期权链（all_chains_missing，接线 / 数据源整批断了）；
+        ③ 到期腿拿不到结算那一场的收盘已 ≥ 3 天（deferred_alert，持仓卡在到期状态、现金与持股都没动）。
+        个别标的当天取不到链、或结算延期 1~2 天是常态（`_drop_forming_bar`：结算日当晚恒取不到），不在这里报。
+        计数缺失 ⇒ checks_skipped。"""
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            return
+        sp = (st.get("counters") or {}).get("sell_put")
+        if not isinstance(sp, dict):
+            self.checks_skipped.append("接货型卖 put 账本检查（scan_timing 无 sell_put 计数）")
+            return
+        problems = []
+        if sp.get("run_errors"):
+            problems.append(f"整轮抛了 {sp['run_errors']} 次")
+        if sp.get("all_chains_missing"):
+            problems.append(f"宇宙 {sp.get('chain_total')} 只一只期权链都没取到")
+        if sp.get("deferred_alert"):
+            problems.append(f"到期腿结算已延期 {sp.get('max_deferred_days')} 天（拿不到结算那一场的收盘）")
+        if not problems:
+            return
+        items = sp.get("items") or []
+        self.alerts.append(Alert(
+            AlertLevel.MEDIUM,
+            "📊 【P2 中】接货型卖 put 纸面账本没跑成：" + "；".join(problems),
+            {
+                "明细": "；".join(f"{i.get('kind')}：{i.get('detail')}" for i in items[:5]) or "（无明细）",
+                "影响": "这本账是测量账本、不进评分不进对冲；受影响的是它自己的记录——这天没开仓 / 没结算，"
+                        "到期的 put / call 会停在原状态等下一次运行（现金与持股不会被改成错的）",
+                "建议": "先看当晚 alpha_hive.log 里「接货型卖 put 账本更新失败」那条的异常；链取不到多半是 CBOE 整体不通；"
+                        "结算延期看 Twelve Data 是否给出到期日那一根收盘（`options_paper_leg._default_close` 的 reason）",
+            },
+            ["sell_put_wheel", "data_quality"]
         ))
 
     def _check_strangle_shadow(self, status: Dict) -> None:

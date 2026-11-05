@@ -14,9 +14,7 @@
 """
 
 import json
-import re
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -284,64 +282,3 @@ class TestIvRvSpreadWithoutIV:
 
 # ═══════════════════════════════════════════════════════════════ 读者：不可得渲染成「—」
 
-def _narrative_ctx(iv):
-    return {"put_call_ratio": 0.9, "total_oi": 1e6, "iv_current": iv, "iv_rank": 40, "iv_skew": 1.0,
-            "iv_skew_signal": "neutral", "flow_direction": "neutral", "key_levels": {},
-            # ctx 构造处把 None 价差兜成 0.0、RV 照给（calculate_iv_rv_spread 无 IV 时仍出 RV）
-            "iv_rv_spread": 0.0, "rv_30d": 31.2, "iv_rv_signal": "unknown",
-            "final_score": 6.0, "options_score": 6.0, "ml_7d": 1.0, "ml_30d": 2.0}
-
-
-class TestDeepReportReaders:
-
-    def test_narrative_renders_dash_and_skips_iv_rv_paragraph(self):
-        """深度报告期权叙事：IV None ⇒ 「IV Current —」，不写 IV-RV 段落。
-
-        变红的变异：`{iv:.1f}` 写回（TypeError，`_local_fallback` 整份报告崩）；
-        或 P2 判据去掉 `iv is not None`（写出「IV-RV 价差 +0.0%，期权定价合理」这种编出来的结论）。
-        """
-        import generate_deep_v2 as g
-        out = g._build_options_narrative(_narrative_ctx(None))
-        assert "IV Current —" in out
-        assert "IV-RV 价差" not in out and "定价合理" not in out
-
-    def test_narrative_with_iv_unchanged(self):
-        """正对照：有 IV 时照旧写 IV 与 IV-RV 段落。"""
-        import generate_deep_v2 as g
-        out = g._build_options_narrative(_narrative_ctx(34.0))
-        assert "IV Current 34.0%" in out and "IV-RV 价差" in out
-
-    def test_no_raw_iv_current_format_spec_left(self):
-        """LLM 提示词里的 `{ctx['iv_current']:.1f}` 一类写法遇 None 即 TypeError——全部经 `_iv_txt`。
-
-        变红的变异：任一处写回带格式说明符的直接取值（单 / 双引号都认）。
-        """
-        bad = re.findall(r"""\{ctx(?:\[['"]iv_current['"]\]|\.get\(['"]iv_current['"][^)]*\)):[^}]*\}""",
-                         _deep_src())
-        assert bad == [], bad
-
-    def test_ctx_keeps_none_for_iv_rv_and_rv30(self):
-        """ctx 构造处不能把 `iv_rv_spread` / `rv_30d` 兜成 0.0——否则 v0.45.54 Step 1 提示词的
-        「不可得」分支永远走不到，报告照写「IV-RV +0.0%」「HV30 0.0%」（v0.45.474）。
-
-        变红的变异：写回 `odet.get("iv_rv_spread") or 0.0` / `odet.get("rv_30d") or 0.0`；
-        或提示词写回 `(ctx.get('iv_rv_spread') or 0):+.1f` / `(ctx.get('rv_30d') or 0):.1f`。
-        """
-        src = _deep_src()
-        assert not re.search(r"""["'](?:iv_rv_spread|rv_30d)["']\s*:\s*odet\.get\([^)]*\)\s*or\s*0""", src)
-        assert not re.search(r"""\(ctx\.get\(['"](?:iv_rv_spread|rv_30d)['"][^)]*\)\s*or\s*0\)\s*:""", src)
-
-    def test_scenario_strategy_line_says_unavailable(self):
-        """情景推演的策略匹配段（`_local_fallback` 生产路径）：价差不可得 ⇒「IV-RV=不可得」，不是 +0.0%。
-
-        变红的变异：写回 `{iv_rv:+.1f}%` + `float(... or 0)`。
-        """
-        import generate_deep_v2 as g
-        ctx = {"iv_rv_spread": None, "rv_30d": 31.2, "iv_current": None, "iv_skew": 1.0, "iv_rank": 40,
-               "final_score": 6.0, "key_levels": {}, "direction_zh": "中性", "direction": "neutral"}
-        assert "IV-RV=不可得" in g._build_scenario_narrative(ctx)
-        assert "IV-RV=+7.3%" in g._build_scenario_narrative({**ctx, "iv_rv_spread": 7.3})
-
-
-def _deep_src():
-    return (Path(__file__).resolve().parent.parent / "generate_deep_v2.py").read_text(encoding="utf-8")

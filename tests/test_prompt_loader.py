@@ -6,20 +6,15 @@ import prompt_loader as pl
 
 
 def test_loads_real_md_and_strips_frontmatter():
-    body = pl.load_prompt("options_strategist", "FALLBACK")
+    # v0.45.724：原先读 options_strategist / step1_analysis_engine（深度报告专用，随 generate_deep_v2 退役）
+    body = pl.load_prompt("news_sentiment_analyst", "FALLBACK")
     assert body != "FALLBACK"
-    # frontmatter 已剥离：正文以 persona 开头，不含 frontmatter 字段
-    assert body.startswith("你是 Alpha Hive 首席期权策略师")
     assert "description:" not in body.splitlines()[0]
+    assert body.startswith("你是金融新闻情绪分析师")
 
 
 def test_missing_file_returns_fallback():
     assert pl.load_prompt("___does_not_exist___", "FB") == "FB"
-
-
-def test_step1_md_loads():
-    body = pl.load_prompt("step1_analysis_engine", "FB")
-    assert "量化信号分析引擎" in body
 
 
 def test_strip_frontmatter_helper():

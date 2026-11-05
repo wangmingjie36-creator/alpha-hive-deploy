@@ -660,6 +660,20 @@ if [ "$_ET_ZONE" != "EST" ] && [ "$_ET_ZONE" != "EDT" ]; then
     NOW_HHMM=$(date -u -v-5H +"%H%M")
 fi
 unset _ET_ZONE
+# v0.45.735：读不到钟 ⇒ **不扫描**（此前放行）。两次读钟都没读出 HHMM（date 坏了 / 找不到，或平台 date 不认 -v）时
+# $NOW_HHMM 是空串或乱码，下面的 [ -lt ] 报 "integer expression expected"、返回 2 ⇒ if 判假 ⇒ **照跑扫描**。
+# 本闸拦的正是盘中跑：判不了几点就判不了收没收盘——漏一轮比把盘中价写成收盘价好（定时点 / 下次开机会再试）。
+# 归「闸前失败」一族（failed_* + exit 1，同上面代码目录那几条），不归 skipped_*：钟坏了是环境故障，不是正常跳过。
+# 只认合法的 HHMM（0000–2359）：date +%H%M 正常时恒是这个形状，[ -lt ] 也只有这样的输入才比得出对的结果。
+case "$NOW_HHMM" in
+    [01][0-9][0-5][0-9] | 2[0-3][0-5][0-9]) ;;
+    *)
+        log "ERROR" "❌ 读不到美东时间（读到「${NOW_HHMM}」，不是 0000–2359 的 HHMM）—— 补跑闸判不了是否已收盘，本轮不扫描"
+        log "ERROR" "   排查：终端里各跑一次 TZ=America/New_York date +%H%M 与 date -u -v-5H +%H%M；修好后定时点或下次开机会补上"
+        _early_fail_status "failed_clock_unreadable" "cannot read Eastern time (NOW_HHMM is not a valid HHMM); the catch-up gate cannot tell whether the market has closed, so this run does not scan"
+        exit 1
+        ;;
+esac
 # ⚠️ 必须用 [ -lt ]（按十进制解析）。**不要**改成 (( ))：$NOW_HHMM 在 10 点前
 # 带前导零（如 0905），算术上下文会当八进制，9 是非法八进制位 →
 # bash: ((: 0905: value too great for base，闸直接失效。实测确认。

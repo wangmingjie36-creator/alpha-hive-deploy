@@ -23,6 +23,7 @@ from starlette.staticfiles import StaticFiles
 
 from alphabot import __version__
 from alphabot.chat import ChatEngine, ChatError
+from alphabot.code_version import CodeVersion
 from alphabot.service import (AlphaBotService, BadRequest, IntradayPoller, MAX_FOCUS, clean_json,
                               market_session)
 from hive_logger import get_logger
@@ -46,16 +47,21 @@ def _json(obj, status: int = 200) -> Response:
 def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[IntradayPoller] = None,
                port: int = 8765, start_poller: bool = False,
                on_shutdown: Optional[Callable[[], None]] = None, from_app: bool = False,
-               chat: Optional[ChatEngine] = None, outbound: Optional[dict] = None) -> Starlette:
+               chat: Optional[ChatEngine] = None, outbound: Optional[dict] = None,
+               code_version: Optional[CodeVersion] = None) -> Starlette:
     """`on_shutdown`：页面「停止服务」调它（`alphabot.__main__` 传入 uvicorn 的退出开关）；
     不传 ⇒ `/api/shutdown` 答 400，页面也不显示该按钮。
     `from_app`：由 Alpha Bot.app 起的（`--from-app`）——`/api/ping` 报出来，启动器据此决定关窗时停不停它；
     终端里起的服务关窗不停。
     `chat`：对话引擎（v0.45.614），只给测试换（配假的 API 客户端）；缺省按本服务建一个。
     `outbound`：启动时定下的出站方式（`alphabot.outbound.configure` 的返回，v0.45.713）；`/api/meta` 原样报出，
-    页面在 `mode == "unchanged"`（代理探活失败）时挂横幅。演示模式 / 测试不传 ⇒ None。"""
+    页面在 `mode == "unchanged"`（代理探活失败）时挂横幅。演示模式 / 测试不传 ⇒ None。
+    `code_version`（v0.45.726）：建服务这一刻记下的代码提交；`/api/meta` 的 `code` 报「正在跑的 vs 磁盘上的」，
+    页脚写提交号，磁盘上更新了就挂「代码已更新」横幅、请人重启（没重启是新旧混用，v0.45.730）。
+    缺省在这里建 = 记下此刻的 HEAD；测试可换（配假 git）。"""
     svc = service or AlphaBotService()
     chat = chat or ChatEngine(svc)
+    code_version = code_version or CodeVersion()
     allowed_hosts = {f"{h}:{port}" for h in LOOPBACK_HOSTS} | set(LOOPBACK_HOSTS)
 
     def _q(request: Request, name: str) -> Optional[str]:
@@ -82,7 +88,8 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
                 "alphabot_state": str(svc.state_dir()),
                 "poller": dict(poller.status) if poller else {"running": False, "disabled": True},
                 "stats": dict(svc.stats), "can_shutdown": on_shutdown is not None,
-                "outbound": dict(outbound) if outbound else None}
+                "outbound": dict(outbound) if outbound else None,
+                "code": code_version.status()}
 
     @api
     def ping(request):
@@ -114,13 +121,6 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         if d is None:
             raise BadRequest("缺 date")
         return svc.ledger_rows(d, full=_q(request, "full") == "1")
-
-    @api
-    def ledger_ticker(request):
-        d = _q(request, "date")
-        if d is None:
-            raise BadRequest("缺 date")
-        return svc.ticker_ledger(request.path_params["ticker"], d)
 
     @api
     def assess(request):
@@ -163,6 +163,23 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
     @api
     def hedge(request):
         return svc.hedge()
+
+    @api
+    def wheel(request):
+        return svc.wheel()
+
+    @api
+    def wheel_screen(request):
+        return svc.wheel_screen(scope=_q(request, "scope") or "watch")
+
+    @api
+    def wheel_screen_prices(request):
+        return svc.wheel_screen_prices([t for t in (_q(request, "tickers") or "").split(",") if t.strip()],
+                                       force=_q(request, "force") == "1")
+
+    @api
+    def wheel_screen_chain(request):
+        return svc.wheel_screen_chain(request.path_params["ticker"])
 
     @api
     def hedge_tail(request):
@@ -233,7 +250,6 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/overview", overview),
         Route("/api/ledger/dates", ledger_dates),
         Route("/api/ledger/rows", ledger_rows),
-        Route("/api/ledger/ticker/{ticker}", ledger_ticker),
         Route("/api/assess", assess),
         Route("/api/history/{ticker}", history),
         Route("/api/bars/{ticker}", bars),
@@ -245,6 +261,10 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/intraday/{ticker}/snap", snap_now, methods=["POST"]),
         Route("/api/straddle", straddle),
         Route("/api/hedge", hedge),
+        Route("/api/wheel", wheel),
+        Route("/api/wheel/screen", wheel_screen),
+        Route("/api/wheel/screen/prices", wheel_screen_prices),
+        Route("/api/wheel/screen/chain/{ticker}", wheel_screen_chain),
         Route("/api/hedge/tail", hedge_tail),
         Route("/api/hedge/beta", hedge_beta),
         Route("/api/straddle/live/{ticker}", straddle_live),

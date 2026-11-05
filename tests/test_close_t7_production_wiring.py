@@ -29,67 +29,6 @@ def _make_pheromone_db(db_path, rows):
     con.close()
 
 
-class TestGenerateDeepV2ClosePathWiring:
-    """_load_ticker_accuracy 必须从 ALPHAHIVE_DIR（而非 feedback_loop.py 的
-    __file__ 相对缺省值）读取 close_t7——out_dir（深度报告输出目录）与
-    ALPHAHIVE_DIR 本来就不是同一个目录，这正是本 fix 要处理的错位场景。
-    """
-
-    def test_uses_alphahive_dir_for_close_t7_not_feedback_loop_default(
-        self, tmp_path, monkeypatch,
-    ):
-        import generate_deep_v2 as g
-        from feedback_loop import ReportSnapshot
-
-        real_home = tmp_path / "real_alphahive"
-        real_home.mkdir()
-        _make_pheromone_db(real_home / "pheromone.db",
-                           [("AAA", "2026-08-14", 50.0)])
-        monkeypatch.setattr(g, "ALPHAHIVE_DIR", real_home)
-
-        # out_dir 故意用另一个、与 ALPHAHIVE_DIR 无关的目录
-        out_dir = tmp_path / "deep_output"
-        snap_dir = out_dir / "report_snapshots"
-        snap_dir.mkdir(parents=True)
-        snap = ReportSnapshot("AAA", "2026-08-14")
-        snap.direction = "Long"
-        snap.entry_price = 100.0
-        snap.actual_price_t7 = 999.0  # 脏值：若接线错了会被误用，制造 100% 胜率
-        snap.save_to_json(str(snap_dir))
-
-        result = g._load_ticker_accuracy("AAA", out_dir)
-
-        assert result, f"应有结果，实际: {result}"
-        # 干净价 50.0：收益 (50-100)/100*100% = -50%，方向 Long → 亏损
-        assert result["win_rate"] == 0.0, (
-            f"应使用 close_t7=50.0（亏损）而非脏值 999.0（盈利），实际: {result}"
-        )
-        assert abs(result["avg_ret_7d"] - (-50.0)) < 0.01, f"实际: {result}"
-
-    def test_falls_back_to_dirty_value_when_alphahive_dir_has_no_db(
-        self, tmp_path, monkeypatch,
-    ):
-        """对照组：ALPHAHIVE_DIR 下没有 pheromone.db 时必须保留旧行为
-        （不覆盖），不能把样本清零——回归 v0.45.86 的既有契约。"""
-        import generate_deep_v2 as g
-        from feedback_loop import ReportSnapshot
-
-        monkeypatch.setattr(g, "ALPHAHIVE_DIR", tmp_path / "no_such_home")
-
-        out_dir = tmp_path / "deep_output"
-        snap_dir = out_dir / "report_snapshots"
-        snap_dir.mkdir(parents=True)
-        snap = ReportSnapshot("AAA", "2026-08-14")
-        snap.direction = "Long"
-        snap.entry_price = 100.0
-        snap.actual_price_t7 = 110.0
-        snap.save_to_json(str(snap_dir))
-
-        result = g._load_ticker_accuracy("AAA", out_dir)
-
-        assert result and result.get("win_rate") == 100.0, f"实际: {result}"
-
-
 class TestQueenDistillerClosePathWiring:
     """queen_distiller.py 的历史胜率折扣块：`_snap_dir` 与 close_t7 库
     必须落到**同一个** `ALPHA_HIVE_HOME`（v0.45.260 起经 `hive_logger.PATHS`

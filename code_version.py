@@ -11,10 +11,15 @@
 当时「生产在跑的是哪一版代码」在日志与 `status.json` 里**都没有任何记录**。
 按 CLAUDE.md 那条「谁会红？」——没人会红。
 
-本模块只做一件事：把 `git rev-parse --short HEAD` + CHANGELOG 顶部版本号
+本模块只做一件事：把 `git rev-parse --short HEAD` + CHANGELOG 记录过的最大版本号
 写进日志与 `scan_timing.json`（编排器已用 jq 把后者并进 `status.json`，
 见 `alpha-hive-orchestrator.sh::write_status`，故**无需改编排器**）。
 **不改任何扫描行为**，任何失败都只降级为 None。
+
+版本号从哪来（v0.45.728 起）：`CHANGELOG.md` 冻结为历史档案，新条目一个版本一个文件
+`changelog.d/<版本>.md`（格式与规则的唯一真相在 `changelog_fragments.py`）。上报值 =
+「碎片文件名 ∪ 档案顶号」里的最大号。碎片的号**只从文件名取、不打开文件**——文件名与标题
+一致由守卫保证。两条正则（档案标题、碎片文件名）都只在本文件里定义一份，其余读者一律 import。
 
 两条设计约束
 ------------
@@ -28,6 +33,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -45,6 +51,18 @@ _GIT_TIMEOUT_S = 10
 # 塞进 status.json 会把它撑爆；但只报一个数字事后又没法用 —— 取中间。
 _DIRTY_SAMPLE = 12
 _CHANGELOG_RE = re.compile(r"^##\s*\[([0-9]+(?:\.[0-9]+)*)\]")
+
+#: 版本碎片目录（v0.45.728）。相对仓库根。
+FRAGMENT_DIRNAME = "changelog.d"
+#: 碎片文件名 = 版本号：三段整数、**不带前导零**、扩展名小写 `.md`。
+#: 不许前导零是为了让「文件名 ↔ 版本号」一一对应——否则 `0.45.0728.md` 与 `0.45.728.md`
+#: 是两个文件、同一个号，一个号只能有一个文件这条结构保证就破了。
+_FRAGMENT_NAME_RE = re.compile(r"^((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\.md$")
+
+
+def version_key(version: str) -> tuple:
+    """按数值比较版本号：`0.45.99 < 0.45.100`（字符串比较会反过来）。"""
+    return tuple(int(x) for x in version.split("."))
 
 
 def _repo_dir() -> Path:
@@ -112,8 +130,27 @@ def _parse_dirty(porcelain: str) -> list:
     return out
 
 
-def changelog_version() -> Optional[str]:
-    """CHANGELOG.md 顶部的版本号（形如 `0.45.182`）。读不到返回 None。
+def fragment_versions(root: Optional[Path] = None) -> Optional[list]:
+    """`changelog.d/` 里文件名合规的碎片版本号，按版本升序。
+
+    目录不存在 ⇒ `[]`（碎片协议之前的 checkout，不是失败）；列不出 ⇒ None（**不知道**，
+    不能当成「没有碎片」——那会让上报值静默退回档案顶号、报小一个号）。
+    文件名不合规的（iCloud 副本 `0.45.728 2.md`、`README.md` 等）不算版本，由守卫负责报红。
+    """
+    d = (root if root is not None else _repo_dir()) / FRAGMENT_DIRNAME
+    try:
+        names = os.listdir(d)
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        _log.warning("code_version: 列不出 %s，版本记为 None: %s", d, e)
+        return None
+    found = [m.group(1) for m in map(_FRAGMENT_NAME_RE.match, names) if m]
+    return sorted(found, key=version_key)
+
+
+def _archive_top_version() -> Optional[str]:
+    """CHANGELOG.md（v0.45.728 起是冻结档案）顶部的版本号。读不到返回 None。
 
     只认**行首** `## [` ——MEMORY.md 里记过：不锚定行首会把正文里引用的
     版本号也数进去。
@@ -130,6 +167,21 @@ def changelog_version() -> Optional[str]:
         return None
     _log.warning("code_version: %s 里没有行首 `## [x.y.z]`，记为 None", path)
     return None
+
+
+def changelog_version() -> Optional[str]:
+    """本 checkout 记录过的最大版本号（形如 `0.45.182`）：碎片文件名 ∪ 档案顶号。
+
+    没有碎片时就是档案顶号，与 v0.45.728 之前一致。碎片目录列不出 ⇒ None（见
+    `fragment_versions`）；两边都没有 ⇒ None。占位也算：进行中的号推上 main 后，
+    生产上报的就是它——与旧做法里顶部占位行被上报相同。
+    """
+    frags = fragment_versions()
+    if frags is None:
+        return None
+    top = _archive_top_version()
+    candidates = frags + ([top] if top else [])
+    return max(candidates, key=version_key) if candidates else None
 
 
 def resolve() -> dict:

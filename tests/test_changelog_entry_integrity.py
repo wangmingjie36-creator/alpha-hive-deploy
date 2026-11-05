@@ -1,4 +1,10 @@
-"""元守卫：CHANGELOG.md 每个版本号恰好一条条目，且条目必须有正文（v0.45.195）
+"""元守卫：CHANGELOG.md 每个版本号恰好一条条目，且条目必须有正文（v0.45.195）；档案冻结（v0.45.728）
+
+⚠️ v0.45.728 起 `CHANGELOG.md` **冻结为历史档案**：新条目一个版本一个文件 `changelog.d/<版本>.md`
+（判据与占号工具在 `changelog_fragments.py`，碎片自己的守卫在 `tests/test_changelog_fragments.py`）。
+本文件下面关于「顶部 == 下一个可用号」「占号协议」的叙述是冻结前的历史背景；现在的「下一个号」看
+`/usr/local/bin/python3 changelog_fragments.py status`。冻结后档案只许就地完成冻结前占的号，
+`TestArchiveFrozen` 断言条目数与最大号都等于冻结值——往档案里加新号会在这里红，报错直接给出 `claim` 命令。
 
 治的形状
 --------
@@ -100,7 +106,6 @@ v0.45.172 那次恰好是空标题，但那是运气，不是 ② 的能力边�
 from __future__ import annotations
 
 import collections
-import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -110,17 +115,14 @@ from code_version import _CHANGELOG_RE, _repo_dir
 _TESTS_DIR = Path(__file__).resolve().parent
 _ROOT = _TESTS_DIR.parent
 
-#: 标准 markdown 水平线的字符集。本仓当前只用 `---`（实测 173 处、无第二种），
-#: 但把 `***` / `___` 一并认掉是零成本的——漏认一种就会把分隔线当成正文，
-#: 于是 `标题 / *** / 标题` 这种畸形被静默放过。
-_RULE_CHARS = set("-*_")
+#: 冲突标记与水平线的判据只有一份（v0.45.728 起在 `changelog_fragments.py`，档案与碎片共用）。
+#: 下面的牙齿用例与变异记录照旧针对它们：`_CONFLICT_RE` 的「锚行首 + 恰好 7 个」、`_is_rule` 的「水平线不算正文」。
+from changelog_fragments import (  # noqa: E402
+    ARCHIVE_FROZEN_COUNT, ARCHIVE_FROZEN_MAX, CONFLICT_RE as _CONFLICT_RE, archive_freeze_problems, is_rule as _is_rule,
+)
 
 #: 占位条目的标志物。并发协议规定的写法见 CLAUDE.md「并发开工必须先占号」。
 _PLACEHOLDER_MARK = "占位"
-
-#: git 冲突标记：**恰好 7 个**字符，后接空格或行尾。
-#: `<<<<<<< HEAD` / `=======` / `>>>>>>> origin/main` / `||||||| merged common ancestors`（diff3）
-_CONFLICT_RE = re.compile(r"^(?:<{7}|={7}|>{7}|\|{7})(?=[ \t]|$)")
 
 #: 全文件枚举的下限。成对断言用：「没抓到畸形」必须配「确实解析到了条目」，
 #: 否则正则失配、解析出 0 条也会全绿。2026-09-11 实测 337 条，只增不减；
@@ -137,17 +139,6 @@ class Entry(NamedTuple):
     @property
     def is_placeholder(self) -> bool:
         return _PLACEHOLDER_MARK in self.title
-
-
-def _is_rule(line: str) -> bool:
-    """这行是不是水平线（`---`）。
-
-    ⚠️ 水平线**不算正文**。算了的话，`标题 / --- / 标题` 这种畸形就会被判成
-    「有正文」而放过；而本仓 CHANGELOG 恰好每条条目之间都隔着一条 `---`，
-    也就是说：把分隔线当正文，断言 ② 会对**绝大多数**形态失去判别力。
-    """
-    s = line.strip()
-    return len(s) >= 3 and set(s) <= _RULE_CHARS
 
 
 def parse_entries(text: str) -> list[Entry]:
@@ -568,3 +559,50 @@ class TestProductionReaderIsUnaffected:
         # 「为什么生产没事、而这条守卫仍然必要」。
         assert duplicate_versions(
             (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8"))
+
+
+class TestArchiveFrozen:
+    """v0.45.728：`CHANGELOG.md` 冻结为档案。冻结前已占的号就地完成（条目数与最大号不变），不许加新号、不许增删条目。
+
+    为什么值得断言：冻结只写在 CLAUDE.md / 文件头里的话，没读到的会话照旧往顶部插条目——那正是碎片化要消灭的
+    冲突热点，而且新号会同时落在档案与碎片两边。断言在这里，提交（pre-commit 跑本文件）、推送、全量测试都会红，
+    报错直接给出新命令。冻结值写死在 `changelog_fragments.ARCHIVE_FROZEN_*`（合入碎片协议时现取）。
+    """
+
+    def test_real_archive_matches_frozen_values(self):
+        problems = archive_freeze_problems(_real_changelog_text())
+        assert not problems, "\n".join(problems)
+
+    def test_frozen_values_are_sane(self):
+        """成对断言：冻结值本身要像样（否则上一条可能是拿空文件比空常量的恒真）。"""
+        assert ARCHIVE_FROZEN_COUNT >= _MIN_ENTRIES
+        assert ARCHIVE_FROZEN_MAX.count(".") == 2, ARCHIVE_FROZEN_MAX
+
+    # 合成档案：冻结值 0.1.2 / 2 条
+    FROZEN = "# log\n\n## [0.1.2] — 2026-01-02 — 占位（进行中：乙）\n\n---\n\n## [0.1.1] — 2026-01-01 — 甲\n\n正文。\n"
+
+    def _problems(self, text):
+        return archive_freeze_problems(text, frozen_max="0.1.2", frozen_count=2)
+
+    def test_completing_a_frozen_placeholder_in_place_is_allowed(self):
+        """过渡期规则的正对照：就地把占位换成正式标题、补正文 ⇒ 不红。"""
+        done = self.FROZEN.replace("占位（进行中：乙）\n", "乙完工\n\n正文乙。\n")
+        assert self._problems(self.FROZEN) == []
+        assert self._problems(done) == []
+
+    def test_new_heading_on_top_is_refused_with_the_claim_command(self):
+        newer = self.FROZEN.replace("## [0.1.2]", "## [0.1.3] — 2026-01-03 — 新条目\n\n正文。\n\n---\n\n## [0.1.2]", 1)
+        problems = self._problems(newer)
+        assert problems and "0.1.3" in problems[0] and "changelog_fragments.py claim" in problems[0], problems
+
+    def test_removed_or_duplicated_entry_is_refused(self):
+        removed = self.FROZEN.split("---")[0]
+        assert self._problems(removed) and "1 条" in self._problems(removed)[0]
+        dup = self.FROZEN + "\n## [0.1.1] — 2026-01-01 — 甲\n\n正文。\n"
+        assert self._problems(dup) and "3 条" in self._problems(dup)[0]
+
+    def test_reordered_top_is_refused(self):
+        """条数与最大号都没变、但顶部换了人（档案条目被挪动）⇒ 红。"""
+        swapped = "# log\n\n## [0.1.1] — 2026-01-01 — 甲\n\n正文。\n\n## [0.1.2] — 2026-01-02 — 乙\n\n正文。\n"
+        assert self._problems(swapped) and "顶部" in self._problems(swapped)[0]
+

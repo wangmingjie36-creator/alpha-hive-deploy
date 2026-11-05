@@ -1,13 +1,229 @@
 # Alpha Hive · 版本变更历史
 
-> 格式：每次 Cowork session 结束后追加一条记录。
+> ⚠️ **本文件已冻结为历史档案（v0.45.728 起）。新条目一律写在 `changelog.d/<版本>.md`，一个版本一个文件**——
+> 占号：`/usr/local/bin/python3 changelog_fragments.py claim "一句话说明" --push`；格式与流程见 `changelog.d/README.md`。
+> 冻结前已在本文件里占的号**就地完成**（改标题、补正文）；**不要再加新的版本标题**——提交、推送、全量测试都会红。
+> 合并视图（碎片在前、本档案在后）：`/usr/local/bin/python3 changelog_fragments.py render`，生成结果不提交。
 > 规范：`Added` 新增 | `Changed` 修改 | `Fixed` Bug 修复 | `Removed` 删除
 
 ---
 
-## [0.45.721] — 2026-11-04 — 占位（进行中：Alpha Bot 只读页「接货型卖 put」——持仓 / 到期 / 被行权 / covered call / 与「限价买入」「一直持有」两条基准并排）
+## [0.45.728] — 2026-11-05 — Changed：新条目改为每版一个文件 `changelog.d/<版本>.md`，本文件冻结为档案；占号 = 工具往 main 推一个碎片
 
-## [0.45.720] — 2026-11-04 — 占位（进行中：接货型卖 put 纸面账本（XOM / WMT / NVDA）——先卖 put、被行权接货后卖 covered call，独立账本 + 预注册 + 每日钩子；不碰现有卖权 / 跨式账本）
+**起因**：单文件 CHANGELOG 让占号、完工、合入都改同一处顶部 ⇒ 每次并发合入都在这里冲突；解这个冲突前后自造过九次事故（带冲突标记的 CHANGELOG 被提交），撞号返工过三轮（08-26~27），`git cherry` 也因为每个提交都改顶部而失效。改成一个版本一个文件后，不同的号是不同的文件、互不冲突；只有同一个号才冲突——冲突本身就是撞号。
+
+### Added
+- `changelog_fragments.py`（新）：碎片格式、检查、认领保护、档案冻结断言与命令行 `claim` / `adopt` / `status` / `check` / `render`。
+  - `claim "说明" --push`：在 origin/main 上**另建**一个只含占位碎片的提交（临时 `GIT_INDEX_FILE`，不碰工作区 / 暂存区 / 当前分支），推 `<提交>:refs/heads/main` 后以 `ls-remote` 核实；main 动过 ⇒ 重新取号（最多 5 次）；main 没动却推失败 ⇒ 停、不重试（不是被抢）。之后 `adopt` 把它接进当前分支（落后就快进，否则 cherry-pick；暂存区非空先拒绝）。不带 `--push` 只建提交、打印推送与接入命令交给人（接入命令带 `cd <本 checkout>`：`adopt` 作用于当前目录所在的 checkout）。origin/main 上还没有 `changelog.d/README.md`（协议没上线）⇒ 拒绝。
+  - 碎片规则：标题 `## [版本] — 日期 — 标题` 且号 = 文件名；**恰好一行**认领 `<!-- 认领：<分支> <时刻> <8 位随机 hex> -->`；标题是「占位（进行中：…）」才可以没正文；号必须大于档案顶号（按数值比）；无冲突标记、UTF-8、无子目录 / 非普通文件。认领行带随机串是因为**内容逐字相同的 add/add 会被 git 无声合并**，撞号就看不见了。
+  - 认领保护（推往 main 时对照远端 main）：已在 main 上的碎片不许删、认领行不许改。
+- `changelog.d/README.md`：协议、完工示例、撞号处理（保留 main 那份 → `rebase --continue` → 再 `claim`）、作废的号（标题改 `占位关闭：<原因>` + 一句正文，不删文件）、过渡规则。
+
+### Changed
+- `changelog_guard.py`：pre-commit 查**暂存区**里的碎片（读 index blob，`commit -- 路径` 用的临时 index 也认），pre-push 查**被推提交**的树并做认领保护；算不出远端 main 的基准 ⇒ 拦（不当成查过）。懒加载 `changelog_fragments` 并核对它来自本 checkout，载入失败 ⇒ 拦。薄调用 `_SHIM` 没变 ⇒ 已装的钩子不用重装。
+- `CHANGELOG.md`：文件头写明冻结；`tests/test_changelog_entry_integrity.py` 加 `TestArchiveFrozen`（冻结值 = 顶号 0.45.728、871 条，字面量在 `changelog_fragments.ARCHIVE_FROZEN_MAX / _COUNT`）：顶部加号、删 / 复制条目、改顶号都红，冻结前占的号就地完成照常可以。冲突标记判据移进 `changelog_fragments.CONFLICT_RE`（一处定义，测试从那里取）。
+- `code_version.changelog_version()`：取碎片文件名与档案顶号里的**数值**最大者；碎片目录列不出 ⇒ None（不退回档案顶号），目录不存在 ⇒ 只看档案。
+- `tools/select_tests/select_tests.py`：`NONPY_DIR_KEYS = ("changelog.d/",)`，碎片目录在 `tests/_must_run.json` 里**按目录**登记读者（重建 / 并入 / 漂移 / 选测都经 `nonpy_key`）⇒ 新加一个碎片选的是目录的读者，不再因「没登记的非代码文件」回退整套。
+- `tests/_root_data_guard.py`（`CODE_TOP_DIRS`）与 `data_backup/migrate_data_root.py`（`SKIP_EXACT`）：`changelog.d` 是文档、不是数据。
+- `CLAUDE.md`：「版本历史规则」「并发开工必须先占号」「CHANGELOG 完整性 hook」三节改写为碎片协议（标题保留，代码里按标题的引用照样解析）；另把 v0.45.727 瘦身后仍指向 `CHANGELOG.md` 的三行（「历史改动查询指针」、「Memory 2.0」两处）改指碎片（改前已告知 727 会话）。
+- `.claude/rules/session-closing.md`：`paths:` 加 `"changelog.d/**"`——728 起收尾改的是自己的碎片、不再碰 `CHANGELOG.md`，只认 `CHANGELOG.md` 的话收尾规则就不再加载；页首说明补一句，逐字搬来的正文不动。
+
+### 没动
+- 档案里的旧条目一个字没改；0.45.727 及更早在本文件里占的号照旧就地完成。
+- `render` 只打印到标准输出、不写文件（生成结果不提交；写文件会成为没有读者的落盘写入）。
+
+### 验证
+- `tests/test_changelog_fragments.py`（新，55 条）：每条检查规则各一个只触发它的样本；认领保护；`claim` / `adopt` 在临时 bare 仓库 + 克隆里真跑（不带 `--push` 只建在 origin/main 上；推进一个已分叉、有未提交改动的分支后 rebase 跳过重复提交；落后 ⇒ 快进；被抢 ⇒ 下一个号；远端拒收 ⇒ 不重试；同一秒占同一个号内容也不同；`adopt` 拒绝不在 main 上的提交与非空暂存区；协议上线前拒绝；命令行作用于当前目录所在的 checkout）。
+- `tests/test_claude_md_partitions.py`（727 的分区守卫）在合并后的树上全过：引用解析、根目录字节预算、新 `paths:` 模式命中被跟踪文件。
+- `tests/test_changelog_guard_hook.py::TestFragments`（11 条，真钩子 + 临时仓库）：暂存区坏、工作区好 ⇒ 拦；部分提交读临时 index；模块缺失 / 来自别处 ⇒ 拦；工作区不同时 off-tree 占号推送 + 接入；坏碎片、删碎片、改认领行在推送时拦；完工放行；基准不明 ⇒ 拦。另 `TestFragmentVersions`（6）、`TestNonpyDirKeys`（3）+ 真登记表、`TestArchiveFrozen`（6）。
+- 变异 49 个全部变红（不带 `--push` 时接入命令去掉 `cd` 1 个；碎片模块 26、钩子 7、`code_version` 4、选测 6、根闸 / 迁移表 2、档案头 / README 3），每个都还原后逐字节核对。⚠️ 档案头那条第一版没抓到：断言只认「冻结」二字，而「冻结前已在本文件里占的号」也含它——改成认「本文件已冻结」后才红。`test_persistent_writes_have_readers` 抓到第一版 `render --out` 是没登记的落盘写入 ⇒ 删掉 `--out`。
+- 本仓真钩子：本版本的 WIP 提交触发了新 pre-commit（「changelog.d/ 碎片检查通过（暂存区）」+ 档案完整性 25 passed）。
+- 整套：在提交 `05f90fca`（与最终提交只差本行）上跑、全程没碰工作树：**13,826 passed / 85 deselected / 2 xfailed / 0 failed / 0 error**，exit 0（12 分 06 秒；`-m "not integration and not network"`，带选测审计插件）。选测漂移检查：测试读测试 ✅；非代码文件漏登 10 处全是存量（`alphabot/static/*.js`、`experiments/price_channel_backtest_prereg.md`），与本次无关、未修。
+
+### ⚠️ 注意
+- 推不了 main 的会话：`claim` 不带 `--push`，把打印的命令交给人；推上去之前号没占住（同 10-09 的教训）。
+- `.git/hooks` 是所有 checkout 共用的；停在本版本之前提交上的 checkout 没有碎片检查（那里也没有 `changelog.d/`）。
+
+## [0.45.727] — 2026-11-05 — Changed：根目录 CLAUDE.md 瘦身（88,362 → 24,673 字节）——细节逐字下沉到按需加载的子目录 CLAUDE.md、`.claude/rules/` 与项目 skill
+
+起因：根目录 `CLAUDE.md` 每个会话都整份进上下文，涨到 578 行 / 88,362 字节（粗估约 2.77 万 token：CJK 每字算 1、其余每 3.5 字符算 1，**未实测**），
+其中「核心组件指针」占 51%（Alpha Bot 主条 + 21 条子条约 30KB）、文末「蜂群规格」15.7KB。用户过目搬迁表后定「按方案搬」，蜂群规格「改成项目 skill」。
+
+### Changed
+- **根目录 `CLAUDE.md`**：578 行 / 88,362 字节 → 229 行 / 24,673 字节（同法粗估约 7.7 千 token，降约 72%）。每块只留「是什么 + 何时去读哪个」。
+  原样保留：「版本历史规则 / 并发开工必须先占号 / CHANGELOG 完整性 hook」三节（逐字、原位——CHANGELOG 碎片化会话 0.45.728 约定只动这三段）、
+  「历史改动查询指针」、GitHub Pages、硬检查项「这个失败，下游怎么知道？」全文、「已知问题」、评分说明与决策阈值、「风控与合规硬约束」、
+  「LLM 扫描必须用户确认」与「Slack 通知精简规则」。**被代码注释引用的标题一律不改**；「新代码一律走它」类不变式
+  （`ledger_io` / `earnings_calendar` / `yf_daily` / 观测档案登记）留在根目录——规则文件的 `paths:` 列的是现有模块名，新模块多半匹配不到。
+
+### Added（分区文件；除 `experiments/CLAUDE.md` 外正文都是从原文**逐字**搬来的）
+- `alphabot/CLAUDE.md`（12,291 B，读 / 改 `alphabot/` 下文件时加载）：Alpha Bot 主条与页面类子条（怎么卖、热力图、成交活跃度、SPX/XSP、IV/RV、不可报价、溢价、对话抽屉、yf 备用源），文末指向放在规则文件里的其余子条。
+- `tests/CLAUDE.md`（17,190 B）：Python 解释器全文、「整套测试怎么跑」全文、四个硬检查项全文（skip / 默认路径 / 夹具日期 / 代码还是数据，标题与根目录同名）、iCloud 重名副本。
+- `experiments/CLAUDE.md`（3,133 B）：**新写**——各预注册协议的共同写法（摘自现行协议，不是新规则；协议文件永远优先）+ 协议登记表。
+- `.claude/rules/*.md`（frontmatter `paths:` 匹配的文件被读 / 改时加载）：`options-ledgers`（卖权选择器、接货型卖 put 账本与筛选页、跨式页 / 入场时点 / 事件前被平 / 对比卡 / 影子宽跨，7,909 B）、
+  `portfolio-hedging`（逐票 Delta 对冲、对冲页、尾部对冲候选、组合尾部预算、bid = 0 虚值腿，8,924 B）、`scoring-weights`（权重优化、三条已断开的进分通道全文、「评分与决策规则」原文，7,680 B）、
+  `data-intake`（取数唯一入口与 H1 观测档案 4 子条，8,635 B）、`llm-shadow`（4,894 B）、`production-ops`（生产克隆、编排器，3,498 B）、
+  `session-closing`（Memory 2.0 全文，改 `CHANGELOG.md` 时加载，3,716 B）、`slack`（Slack 推送规则全文，2,091 B）。
+- `.claude/skills/alpha-hive-brief/SKILL.md`（10,239 B）：蜂群规格（人设、三级模式、运行规则、Phase 1~6、模板 A/B/C、执行口令），description 带「开始晨扫」「生成今日简报」「分析一下」「深度研究」等指令词。
+- **守卫 `tests/test_claude_md_partitions.py`**（24 条）：`paths:` 每个模式至少匹配一个被跟踪的文件（没有 `paths:` 的规则文件也红）；每个分区都被根目录点名、任何一份里的分区指针都真实存在；
+  全仓按文件名加书名号节名写的引用（90 处）必须在读引用者时会加载的 CLAUDE.md（根目录 + 所在各级目录）里找得到，7 处存量意译登记在 `LEGACY_UNRESOLVED_CITATIONS`（只许减、过期也红）；
+  根目录 ≤ 30,000 字节；skill 的 `name` = 目录名、根目录与 description 都有五个指令词。15 个变异（模式写错 / 无 paths / 未加引号 / 漏指针 / 悬空指针 / 新分区未点名 / 被引标题挪走 / 存量过期 / 超预算 /
+  skill 名不符 / 缺指令词 / YAML 冒号 / 引用扫描坏掉 / 匹配器恒真 / 恒假）在临时克隆里全部按预期理由打红。
+- `tests/_must_run.json`：新守卫归入 `reads_all_tests`，并登记为根目录与各分区文件等非代码文件的读者。
+
+### 核实（「一条知识都不能丢」）
+- 逐行：原文 436 个非空行，每行（去首尾空白）都能在新文件集合里逐字找到，0 缺失。核出过 3 行缺口（`self_analyst` 的「含每蜂维度 rank-IC 小节（v0.40.0）」、IBKR 手动流程、蜂群规格标题），已逐字放回根目录。
+- 标志物：1,017 个去重标志物（反引号 647 / 版本号 125 / 阈值数值 102 / 引号短语 118 / 日期 25）——300 个仍在根目录、717 个在分区文件、0 个找不到。逐条落点清单是一次性产物，未入库。
+- 引用：原文里有的被引短语，在新根目录（或引用者所在目录的 CLAUDE.md）全部找得到；唯一只剩在分区里的「没读生产库」已补回根目录摘要。
+
+### 加载机制（读二进制 + 本会话实测）
+- 桌面 App 内置 Claude Code 2.1.317：子目录 `CLAUDE.md` 与 `.claude/rules/*.md` 在 Read / Edit / Write 到匹配文件时注入（`paths:` 是 gitignore 式、相对仓库根）。
+  **实测两种都生效**：本会话 Write `tests/test_claude_md_partitions.py` 时 `tests/CLAUDE.md`、Edit `CHANGELOG.md` 时 `.claude/rules/session-closing.md`（`paths: ["CHANGELOG.md"]`）都以 system-reminder 注入了上下文。
+  ⚠️ 只有 Read / Edit / Write 碰到才触发：Bash 里 grep / sed 读 `CHANGELOG.md`、`tests/` 下文件实测不触发（用 Write 新建 `tests/` 下的文件则会触发 `tests/CLAUDE.md`）；还没碰到相关文件时什么都没加载——所以根目录每块都留指针。
+- **worktree 双加载**：2.1.317 不双加载——认出「worktree 根 ≠ 主仓库根」后跳过属于主仓库的祖先目录，`.claude/worktrees/<名>/` 里的会话只读 worktree 自己那份（本会话系统提示也只列了那一份）。
+  终端 CLI `~/.local/bin/claude` 仍是 2.1.63（2026-02-27）：祖先目录一路读、没有 worktree 判断 ⇒ 在 worktree 里开终端 `claude` 会双加载（只读代码，**未实测**），瘦身后这份代价约为原来的 1/3.6。
+  `/context` 交互实测因会改用户本机配置而中止。
+
+### 没做 / 局限
+- `tools/select_tests` 把 `tests/` 下非 `test_*.py` 的文件一律当核心文件 ⇒ 只改 `tests/CLAUDE.md` 时开发期选测也回退整套（安全但费时），没改。
+- 7 处存量意译引用（其中 2 处其实指用户级 `~/.claude/CLAUDE.md`）没改成逐字引用，只登记、只许减。
+- 分区文件合计 90,200 字节（含各自的说明头与根目录摘要的重复部分），只在读到对应文件时加载。
+
+### 更正（同日后续提交）
+- 首个提交 `4181d9a3` 把加载边界写成「新建文件不触发」，与本会话自己的实测相反——用 Write 新建 `tests/test_claude_md_partitions.py` 正是触发了 `tests/CLAUDE.md`。边界在**工具**，不在文件新旧：只有 Read / Edit / Write 碰到匹配的文件才加载，Bash 读不触发（Grep / Glob / NotebookEdit 未测）。复测挑的是本会话从没加载过的两份规则：Bash `head` / `sed` / `grep` / `cat` 读 `production_sync.py`、`alert_manager.py`，又隔一批调用仍没注入 `production-ops` / `slack`；换 Read 读 `production_sync.py`，`production-ops` 当即注入（正对照）。
+- 「新代码一律走它」类不变式照旧留根目录，理由改成「规则文件的 `paths:` 列的是现有模块名，新模块多半匹配不到」。改了根目录两处、`data-intake.md` 说明头一句、本条两处、守卫 docstring 与一条断言信息；根目录 +193 字节（落在 0.45.728 之后，main 上 26,403 → 26,596；`17d1191e` 提交信息里的「24,673 → 24,866」是 rebase 前量的，main 上从没出现过）。
+
+## [0.45.726] — 2026-11-05 — Added：Alpha Bot 页脚显示正在运行的代码提交；磁盘上的代码更新后页面顶部挂「代码已更新，重启生效」横幅
+
+**起因**：Alpha Bot 只在启动时载入代码，它跑的生产克隆 `~/alpha-hive-prod` 却在每个扫描日被 `production_sync` 快进——磁盘上换成新代码、进程里还是旧的，页面上看不出来（页脚的 `0.45.411` 是 .app 壳的版本号，写进 Info.plist，不跟代码走）。2026-11-04：09:16 起的进程一直跑到晚上；09:51 合入的 v0.45.713（启动时探代理）18:01 已进生产克隆，进程没重启 ⇒ `/api/meta` 里没有 `outbound`、NVDL 备用源当天 19 次全被 Yahoo 限流，没有任何提示要重启。（⚠️ v0.45.730 更正：「只在启动时载入代码」不对——页面文件每次现读磁盘、`service` 里写在函数中的 import 第一次用到时载入新模块，没重启的进程是新旧混用；横幅措辞已改，见 `changelog.d/0.45.730.md`。）
+
+### Added
+- `alphabot/code_version.py`（新）：`CodeVersion` 建服务时记下代码目录（`alphabot/` 所在检出，`__file__` 在函数里求值）的 `git rev-parse HEAD` = 正在跑的代码。`status()` 在 `/api/meta` 每次问时再读一次 HEAD（结果缓存 30 秒）：不同 ⇒ `stale: true` + `behind`（`git rev-list --count 运行中..磁盘`）+ 新提交的说明。
+  - 判不了（不是 git 检出 / 找不到 git / 单次 5 秒超时 / 输出不是提交号 / 启动时就没读到）⇒ `available: false` + `reason`、`stale: null`，**不当成「没更新」**；启动时读不到另记 WARNING。数不出新了几个（启动时那个提交已不在检出里）⇒ 横幅照挂、只是不写个数。
+  - 只比**提交**，不比未提交的改动（生产克隆是干净的）；只用只读 git（`rev-parse` / `log` / `rev-list`），不写任何东西。线程安全（同步端点跑在线程池里）。
+- `/api/meta.code`；`server.create_app(code_version=…)` 可注入（测试 / 演示用），缺省 `CodeVersion()`。
+
+### Changed
+- `alphabot/static/app.js` / `index.html`：页脚「代码 <7 位>，MM/DD HH:MM 启动」（鼠标停留显示那次提交的说明）；判不了写「代码版本判不了」或「（有没有更新判不了：…）」。`stale === true` 时顶部挂横幅 `#code-banner`（沿用 `.demo-banner` 样式）：「代码已更新 · 磁盘上的代码新了 N 个提交（运行中 X → 磁盘 Y），重启 Alpha Bot 才会用上：页脚「停止服务」后，再双击 Alpha Bot.app 或重新运行启动命令」。页面本来每 60 秒刷一次 meta ⇒ 克隆快进后最迟约 90 秒（轮询 + 缓存）横幅自己出现，不用刷新页面。
+- `alphabot/static/pages/help.js`：帮助页加「代码版本」一行（判不了 ≠ 没更新）。
+
+### 没动
+- `__version__`（.app 壳版本）原样；不自动重启——停服务、重开由人做。
+
+### 验证
+- `tests/test_alphabot_code_version.py` 19 条：临时 git 仓库真跑（未变 ⇒ 不 stale；快进 2 个 ⇒ behind 2 + 说明；孤儿分支 ⇒ behind 1；回退到旧提交 ⇒ behind 0 仍 stale；只用只读子命令）；判不了各路径（非检出 + WARNING、找不到 git / 超时 / 权限错误、输出不是提交号、后来读不到、数不出个数）；缓存（TTL 内外、返回副本）；接线（建 app 时只快照一次、缺省读本检出）；前后端对账（`app.js` 用到的 `cv.*` 键后端都有、横幅只认 `stale === true`、帮助页有这一行）。
+- 变异 13 个全杀。⚠️「缓存命中返回存着的那个对象本身」第一版测试没抓到——测试改的是未命中路径的返回值；改成先预热、再改命中路径的返回值后才红。
+- 浏览器实测（演示模式 8799，`CodeVersion` 指向临时仓库）：页脚「代码 17d1038，11/05 07:11 启动」；给临时仓库再提交 2 个后不刷新页面，下一次轮询横幅自己出现；帮助页有该行。
+- ⚠️ 生产 Alpha Bot 要等扫描日生产克隆快进后**重启一次**才有这个功能；在那之前起的进程跑的是旧代码，不会显示横幅。（v0.45.730 起：这种旧进程送出的新页面，刷新后挂「服务比页面旧」横幅。）
+
+## [0.45.725] — 2026-11-05 — 撤销：纸面组合取 yfinance 日线前先等限流冷却——不做（占位撤回，无代码改动）
+
+**起因**：11-03 纸面组合（5 万本金账本）整天跳过（P2），是同一段 yfinance 429 冷却（取 11 只持仓日线时还剩 86s，见 v0.45.716）。v0.45.716 只改了扫描，纸面组合按用户 11-04 的决定**不改**。11-05 的优化建议重新提了这一条（提建议时漏看了 11-04 的决定），改动已写好、测试已过；用户 11-05 再次确认不做，撤回。
+
+**撤掉的做法**（留档，免得重想一遍）：`paper_portfolio` 取持仓日线（`_fetch_ohlc_direct`）与拆股事件（`_fetch_split_events`）真去取数之前（缓存命中不等），调扫描经 `run_for_date(yf_wait=ctx.yf_wait_budget)` 传进来的那份 `CooldownWaitBudget.wait(...)`（v0.45.716，与扫描共用 600s 整轮预算；`yf_wait=None` = 不等，重放 / 手动补跑照旧）。
+
+**勿再提议**：要重开由用户提出。
+
+## [0.45.724] — 2026-11-04 — Removed：退役死代码——深度报告整条链、无生产入口的研究 / 一次性脚本、Alpha Bot 两处无调用接口（Telegram 不动）
+
+起因：用户要求查死代码与很久不用的板块，看完普查结果后定「除了 Telegram 都 retire」。
+普查法：从生产入口（编排器提到的脚本、两个 launchd、MCP、Alpha Bot、周 / 月任务）沿 AST import 做可达性，
+只靠字符串可达的逐个追来源；再看结构化日志里各 logger 最后出现日与产物最后生成日。
+
+### Removed
+- **深度报告链**（约 1.2 万行）：`generate_deep_v2.py`（7787 行，最后一份产物 `deep-VKTX-2026-07-29.html`，此后无人运行，
+  但 6 月后仍有 23 次提交在维护）连同只被它 import 的 `finrl_bridge` / `vol_surface` / `quiver_fetcher` / `options_backtester` /
+  `chart_engine` / `iv_crush_scraper` / `factor_attribution`；更老的「方案B」`deep_analysis.py` + `collect_data.py`；
+  只有它读的两份提示词 `prompts/options_strategist.md` / `prompts/step1_analysis_engine.md`。
+  MCP 读取既有深度报告目录（`_DEEP_DIR`）不动——只是不再生成新的。
+- **零 import、零生产入口的脚本**：`risk_engine`、`backtest_engine`、`dynamic_exit_backtest`、`portfolio_factor_attribution`、
+  `regime_analyzer`、`walk_forward_validator`、`bootstrap_ci`、`param_optimizer`、`health_check`、`run_daily_scan`
+  （编排器直接跑 `alpha_hive_daily_report`）、`backfill_trading_costs`、`migrate_ambiguous_backfill`（H002 已跑过，history 记录保留）。
+  `report_snapshots` 的 `actual_prices` 照旧由 `outcomes_fetcher` 回填（生产 2281 份里 2191 份有值，最近 10-22），`backtest_engine` 不是它的生产写者。
+- `catalyst_exit_planner.load_catalysts_for_ticker`：唯一调用方 `dynamic_exit_backtest` 已删，函数本身自 v0.45.32 起恒返回 []。
+- **Alpha Bot**：`/api/ledger/ticker/{ticker}` + `service.ticker_ledger`（v0.45.387 起前端从未调用，只有测试；
+  底层 `sell_strike_report.rows_for_ticker` 仍被 MCP 用，保留）；`service.tail_hedge_rules`（零引用）。
+
+### Fixed
+- `generate_ml_report`：取价失败时不再回落读数据根的 `{T}_raw.json`——它的写者 `collect_data.py` 退役，数据根里只剩一份
+  09-23 的 `NVDA_raw.json`，回落会把六周前的价当现价写进报告。现在价格留 0.0 哨兵（下游注入本来就跳过 0），打 warning。
+
+### Changed（登记表与测试随删同步）
+- `yf_daily.SOURCES` 删 6 个调用点名；`tests/test_yf_daily.py::POLICY` 删对应 10 条。
+- `tests/test_persistent_writes_have_readers.py`：SITE_ARTIFACTS 删 17 处落点、ARTIFACTS 删 16 个只由已删模块写的产物、读者清单删 3 条；描述改正。
+- `tests/test_ledger_writes_go_through_ledger_io.py`：WRITERS 删 6 条，`CEILING` LEDGER 18→17、STATE 12→11、ARTIFACT 12→11、CACHE 6→4；`MIGRATED` 删 `options_backtester.py`。
+- `tests/test_paths_not_frozen_at_import.py` / `tests/test_price_history_default_paths.py`：KNOWN / MUST_STAY / cleaned / 解析器清单删已退役条目。
+- 墓碑：`test_iv_crush_out_of_scan` 改成「模块不在、谁也不许 import」；`test_dead_chains_batch2_retired` 加 `RETIRED_FILES`（`run_daily_scan.py`，必须真的不在），
+  正对照改认 `alpha_hive_daily_report.main`；`test_samples_only_mode_retired` 的 health_check 那条在文件不在时直接成立。
+- GEX 读者白名单（`test_gex_modifier_disconnected` / `test_gex_oracle_bear_neutralized`）删 `generate_deep_v2` 条目，病灶夹具里的「名单内」样本改种 `gex_regime.py` / `generate_ml_report.MLEnhancedReportGenerator._ch3_oracle`。
+- 删 7 个只测已退役模块的测试文件（`test_ticker_accuracy_direction` / `test_deep_report_no_fabrication` / `test_health_check_weekly_optimizer` /
+  `test_deep_analysis_output_root` / `test_deep_analysis_prefetch_injection` / `test_generate_deep_v2_alphahive_dir` / `test_param_optimizer_config_restore`），
+  另有 12 个文件里删掉只测已退役模块的类 / 方法；`test_prompt_loader` 改读仍在用的 `news_sentiment_analyst`；`tests/_must_run.json` 删两个已删提示词的键。
+- 文档：CLAUDE.md 两条（深度报告 opt-in 规则 / 图表在 chart_engine）改成退役说明；WORKFLOW.md 顶部标「已退役」。
+
+### 没做（留给用户）
+- Telegram `alpha_hive_bot/`：用户定不动（本机无 launchd、无 subscribers.db，云端是否在跑待确认）。
+- CodeExecutorAgent：不是死代码——每天在 Phase-1 跑、不在 `NON_VOTING_AGENTS` 里，成功时参与方向投票（1 个月价格的简单启发式，未经检验；10-26 / 11-04 两天 30/30 失败）。碰评分链，没动。
+- 数据根里的旧产物（`NVDA_raw.json`、`deep-*.html`、`.risk_cache/` 等）原样留着（删 = 改生产数据）。
+
+## [0.45.723] — 2026-11-04 — Added：Alpha Bot「接货 · 筛选」前端子页——名单 / 接货价输入、排序与过滤、按接货价取链、帮助与指南
+
+### Added
+- `alphabot/static/pages/wheel_screen.js`：`#/wheel/screen`。表格每只一行——距 52 周 / 3 月高、近 1 年波动、21 日最差 / 跌≥10% 频率（要先点「取行情统计」）、账本梯子 20Δ / 30Δ put（点差 / OI / 年化 / 占资金，点差或 OI 超账本上限打标）、财报是否在梯子到期前（缺 = 「待验证」）、**你的接货价**输入框（失焦即存；留空 = 占位）与「按接货价取链」；取链结果列在表下（选出的合约 / 被行权净成本 / 占资金 / 财报 / 权利金重放）。
+- 范围切换「我的名单 / 全部 30 只」、可编辑名单（逗号分隔、留空 = 账本现行名单）、排序（只按**单个事实列**：距高点 / 波动 / 20Δ 年化 / 占资金 / 跌≥10% 频率，**没有综合分排序**）、四个过滤勾选。
+- 「接货」页签、`help.js` 筛选子页一节（规则常量取自 `/api/method`，无字面量）、`ALPHA_BOT_GUIDE.md` 页面表一行。
+- 名单与接货价存在 Alpha Bot 设置里（`wheel_watch` / `wheel_accept`），**只供显示，不改接货账本**；清掉某只的接货价 = 回到占位。
+
+### 验证
+- 浏览器核对（真实数据根、`--no-poll`）：离线表秒开；填 NVDA 接货价 180 失焦后设置落盘、「离现价 −13.1%」；点「按接货价取链」选出 `NVDA270115P00180000`（bid 6.60、72 天、年化 18.6%、被行权净成本 173.40、占 $18,000），手算一致；点「取行情统计」后三只的回撤 / 波动 / 21 日最差与此前手工表一致；控制台无报错。核对后已清掉测试用的接货价。
+- 与既有页面一致的已知现象：整页横向有约 70px 的滚动（顶栏造成，`#/`、`#/wheel` 同样），不是本页引入。
+
+## [0.45.722] — 2026-11-04 — Added：接货筛选后端——行情统计（回撤 / 波动 / 权利金重放）、按接货价选合约、离线层读账本梯子、行情层与取链端点、名单与接货价设置
+
+### Added
+- `alphabot/wheel_screen.py`（纯函数，**不读文件、不联网**）：`price_stats`（52 周 / 3 月回撤、1 年波动、过去所有滚动 21 日窗口的最差与跌≥10% 频率）、`replay_put`（把今天这张 put 的 bid 放回过去每个同长度窗口；窗口少于 20 个不给）、`ladder_rungs`（只读账本行的梯子与财报日，**不碰结算 / 路由字段**——盲期；测试用毒值钉住）、`pick_for_accept`（**直接调 `sell_put_wheel.pick_put`**：选合约规则只有账本那一份）、`clean_watch` / `clean_accept`（坏输入当场拒、None 清掉）、`build_rows`（**没有排名 / 推荐 / 综合分字段**，测试按键名正则钉住）、原因码唯一一张表 `REASONS`。
+- `alphabot/wheel_prices.py`：日线取数，经唯一入口 `yf_daily`（`SOURCES` 登记 `alphabot_wheel_screen`、策略 ignore）；被 Yahoo 限流后**不再逐只去撞**，其余标的统一记 `rate_limited` + `retry_after_sec`；单只出错不连坐；永不抛。
+- `alphabot/service.py`：`wheel_screen`（离线层，秒开）/ `wheel_screen_prices`（行情层，补缺的、6 小时缓存、可强制）/ `wheel_screen_chain`（取链层）+ 三个只读 GET 端点；设置键 `wheel_watch` / `wheel_accept`（校验失败 400 带参数名）。
+- 取链层缺财报日时 `earnings_in_window` 为 None（待验证），不说成 False。
+
+### 验证
+- `tests/test_alphabot_wheel_screen.py` 60 条：行情统计与重放用**手工构造、答案能心算的序列**复算（含 52 周窗口与 3 月窗口分得开、1 / 3 月回看位置、百分位下标、各处边界恰等）；梯子 / 财报日边界；与账本同一选合约规则；设置往返；取数限流 / 单只出错 / 6 小时缓存 / 强制刷新 / 取数函数抛；原因码双向对账。
+- 变异检查 33 个：32 个被杀；唯一幸存的是「跌≥10%」的 `<=` 与 `<`——浮点下 90/100−1 不等于 −0.1，边界在这个量上观测不到（等价变异，记在此处）。
+- `tests/test_alphabot.py`、`tests/test_alphabot_wheel.py`、`tests/test_yf_daily.py` 同步通过。
+
+## [0.45.721] — 2026-11-04 — Added：Alpha Bot 只读页「接货」——接货型卖 put 账本的持仓 / 到期 / 被行权 / covered call，与「限价买入」「一直持有」两条基准并排
+
+### Added
+- `alphabot/wheel.py`（纯整理、**不读文件、不联网**）：`build_overview(state)` 把 `sell_put_wheel.load_state()` 整理成页面数据——持仓行（状态说明、离到期几天、put / call 浮动、持股浮动、占位接货价标记）、事件流（最近的在前）、**已结算 put 与两条基准并排**（卖 put 这一腿 / 同价位限价买入 / 一直持有，都在到期那一场的收盘上比，不含 covered call；限价买入的成交判据是开仓后任一天收盘 ≤ 行权价，收盘恰等于行权价也算成交）、没开 / 没卖的原因（唯一一张表在账本里）、结算延期的原因码翻成人话（没登记的原样给出，不编）。
+- `alphabot/service.py::wheel` + `GET /api/wheel` + `/api/method` 的 `wheel` 规则常量；账本目录不存在 ⇒ `available: False`（说「还没开」，不说成「账本为空」）；演示模式不读账本。
+- 前端：顶栏「接货」、`pages/wheel.js`、帮助章节 `#/help/wheel`（规则常量全取自 `/api/method` 的 `wheel.*`，无字面量）、`ALPHA_BOT_GUIDE.md` 页面表一行。页面首行写明「测量账本，不是检验」、不给任何推荐 / 综合分；接货价是占位时在持仓表和页首黄条各标一次。
+
+### 验证
+- `tests/test_alphabot_wheel.py` 25 条：手工数字复算持仓浮动与三条盈亏线（含「到期收盘恰等于行权价」「期间曾跌破行权价所以限价单成交」两个边界）、可用性、端点往返、前端接线与「页面不自己算盈亏」「没有推荐字段」、本模块不读文件 / 不 import 卖权选择器模块；变异 14 处，首轮活了 2 处（限价成交判据的 `<` / `<=`、持仓表的占位标记）——补了边界测试与标记钉后全杀。
+- 浏览器核对：用临时数据根里的样例账本渲染，持仓 / 基准 / 事件三块与手算一致，控制台无报错。
+
+
+## [0.45.720] — 2026-11-04 — Added：接货型卖 put 纸面账本（XOM / WMT / NVDA）——先卖 put、被行权接货后卖 covered call；独立账本 + 规则登记 + 每日钩子 + 失败告警；不碰卖权选择器 / 跨式账本
+
+**起因**：用户（2026-11-04）不做双卖、只卖 put，参考「愿意接货」的做法；名单从 30 只筛查表里挑出 XOM / WMT / NVDA，参数「按缺省走」，被行权后接货并卖 covered call。跨式账本被「财报前一天 + 15% 点差」卡得几乎不开仓，这条路径不依赖财报、每天都能评估。
+
+### Added
+- `sell_put_wheel.py`：一只标的一个循环的状态机（无仓 → 卖 put → 作废 / 接货 → 持股 + covered call → 作废 / 被叫走）。纯函数选合约（`pick_put`：不高于接货价的最高合格档；`pick_call`：行权价 ≥ 成本底线、|delta| 最接近 0.25）、`settle_put` / `settle_call`（收盘恰等于行权价 ⇒ 不接货 / 不被叫走）、`run_for_date`（到期结算 → 卖 call / 卖 put → 盯市净值，整轮持目录锁，同日重跑逐字节幂等）、`load_state` / `kpis` / `render_markdown` / 命令行。成交一律按 bid（保守）；结算按**到期那一场**的官方收盘（复用 `options_paper_leg._default_close`，场次不符 ⇒ 延期、不拿前一天的价顶替）；到期日当天不结。
+- `hive_logger.PATHS.sell_put_state`；备份（`data_backup/export.STATE_DIRS`）与数据根迁移（`MOVE_DIRS`）登记；`tests/conftest.py::_isolate_sell_put_state` 两道防线；读者登记表登记四个落盘文件。
+- 失败登记：`sell_put_wheel.stats()`（整轮抛 / 取不到期权链的标的数 / 结算延期天数）→ `scan_timing.counters()["sell_put"]` → `alert_manager._check_sell_put`：整轮抛 / 全部标的取不到链 / 结算延期 ≥ 3 个日历日 ⇒ **P2**（个别标的当天取不到、延期 1~2 天是常态，不报）。
+- `alpha_hive_daily_report._post_scan_notify`：在跨式账本后挂 `sell_put_wheel.run_for_date`（非致命 try；链走 `fetch_cboe_raw_contracts` 的进程缓存，本轮前面已拉过 ⇒ 零额外网络）。
+- `experiments/sell_put_wheel_prereg.md`：规则在看任何结果之前写下（§2 规则、§4 两条对照基准、§5 失败可见、§6 修订记录）。
+
+### 没动 / 明说的限制
+- **这是测量账本，不是检验**：几只标的、几个月，证明不了优势。不并入卖权选择器预注册、不碰跨式账本、不进评分 / 对冲 / 网站。
+- 三只的**接货价现在是占位**（开仓当天现价 × 90%，记录里标 `placeholder`），用户没给具体价；「选溢价标的」按字面解读为「额度不够时按年化权利金从高到低先开」，**待用户确认**。规则里每个数都是主观设定。
+- 美式提前行权、保证金、分红、手续费都不建模。Alpha Bot 只读页是 v0.45.721。
+
+### 验证
+- `tests/test_sell_put_wheel.py` 62 条（选合约 / 到期边界 / 手工数字复算的一圈盈亏与净值恒等式 / 结算时点与错场次 / 额度与排序 / 同日重跑与崩溃后重跑 / 原因码双向 / 失败登记与告警 / 钩子接线）；变异 32 处全杀（账本 23、接线 9）。
+- 测试抓到一个真 bug：净值行的 `n_events` 只数本次新增的事件 ⇒ 同日重跑那一行变成 0、账本不再逐字节幂等；改成按落盘后该日的条数算。另一处是我写了一条恒真断言（`... or True`）、换成精确数字。
+- 真实报价只读干跑（临时数据根，未碰 `~/alpha-hive-data`）：NVDA 行权价 180 / 年化 17.3% / 点差 3.2%、XOM 150 / 7.6% / 9.4%、WMT 115 / 6.4% / 5.4%，顺序按年化从高到低；NAV 99,975（−25 = 按 bid 卖、按 mid 盯市的点差）；同日重跑文件逐字节相同。
+
 
 ## [0.45.719] — 2026-11-04 — Fixed：v0.45.716 二次检查——「等待不发请求」那条测试恒真，改成结构判定；其余核对无问题
 

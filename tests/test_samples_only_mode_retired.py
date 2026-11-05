@@ -91,6 +91,9 @@ class TestSamplesOnlyModeStaysRetired:
         assert not back, f"`.samples-only-<date>.json` 的写入又出现了：{back}——它全仓零读者（v0.45.552 删除）"
 
     def test_health_check_no_longer_checks_the_retired_task(self):
+        """v0.45.724：health_check.py 整个退役——文件不在就更不会查这项；文件回来了照原判据核。"""
+        if not (REPO_ROOT / "health_check.py").exists():
+            return
         tree = _tree("health_check.py")
         names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
         called = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}

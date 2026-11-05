@@ -329,7 +329,10 @@ STATE_DIR_REFERENCERS = {"hive_logger.py", "sell_strike_ledger.py",
                          "data_backup/export.py", "data_backup/migrate_data_root.py"}
 #: 调 CBOE 原始合约视图的生产文件——**恰好**这一处（双向）。它是卖权专用的全链视图；
 #: 评分链要期权数据走 `fetch_cboe_chain` / GEX 视图，拿到这个视图就等于绕过了火墙②。
-RAW_FETCH_CALLERS = {"sell_strike_ledger.py"}
+#: v0.45.720 起多一个：`sell_put_wheel.py`（接货型卖 put 纸面账本）。它同样要「全链 + 逐合约 bid / ask / delta / OI」，且**不是评分链**：
+#: 独立账本、不进评分 / 对冲 / 网站、不 import 任何 sell_strike_* 模块（`tests/test_sell_put_wheel.py::TestPurity`），所以不构成绕过火墙②；
+#: 但白名单仍是**精确**的——别的文件要用，照样先在这里写理由。
+RAW_FETCH_CALLERS = {"sell_strike_ledger.py", "sell_put_wheel.py"}
 
 
 def token_refs(token: str, root=REPO):
@@ -420,6 +423,9 @@ class TestFirewallBeyondImports:
             "swarm_agents/queen_distiller.py": ("from hive_logger import PATHS\ndef _peek():\n"
                                                 "    return sorted((PATHS.sell_strike_state / 'monthly').glob('*'))\n"),
             "report_formatters.py": "import os\np = os.path.join(HOME, 'sell_strike_state', 'monthly')\n",
+            "sell_put_wheel.py": ("import cboe_options\n"
+                                  "def _default_contracts(t, as_of):\n"
+                                  "    return cboe_options.fetch_cboe_raw_contracts(t, as_of=as_of)\n"),
             "gex_regime.py": "from cboe_options import fetch_cboe_raw_contracts as _raw\n",
             "advanced_analyzer.py": "import cboe_options\nf = getattr(cboe_options, 'fetch_cboe_raw_contracts')\n",
             "oracle_bee.py": "import cboe_options\nx = cboe_options.fetch_cboe_raw_contracts('NVDA', as_of=None)\n",
@@ -435,7 +441,7 @@ class TestFirewallBeyondImports:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(src, encoding="utf-8")
         state, n, how, unparsable = token_refs("sell_strike_state", tmp_path)
-        assert n == 11 and not unparsable, (n, how, unparsable)
+        assert n == 12 and not unparsable, (n, how, unparsable)
         assert sorted(f for f in state if f not in STATE_DIR_REFERENCERS) == [
             "report_formatters.py", "swarm_agents/queen_distiller.py"], state
         assert STATE_DIR_REFERENCERS <= set(state), state
@@ -494,6 +500,7 @@ def notify(monkeypatch, tmp_path):
                        "render_markdown": lambda *a, **k: _STUB_MD["vrp_signal"]},
         "portfolio_greeks": {"run_for_date": lambda *a, **k: {},
                              "render_markdown": lambda *a, **k: _STUB_MD["portfolio_greeks"]},
+        "sell_put_wheel": {"run_for_date": lambda *a, **k: {}},        # v0.45.720：接货型卖 put 账本，离线下会取 CBOE 链
         "outcomes_fetcher": {"OutcomesFetcher": lambda **k: types.SimpleNamespace(run=lambda: None)},
         "earnings_watcher": {"EarningsWatcher": _BoomWatcher},
     }

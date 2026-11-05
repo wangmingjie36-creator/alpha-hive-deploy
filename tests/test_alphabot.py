@@ -144,7 +144,7 @@ class TestBlinding:
         svc = _demo_service(ledger_dir=ledger, demo=False)
         c = _client(svc)
         urls = (f"/api/overview?date={AS_OF}", f"/api/ledger/rows?date={AS_OF}", f"/api/ledger/rows?date={AS_OF}&full=1",
-                f"/api/ledger/ticker/NVDA?date={AS_OF}", "/api/assess", "/api/history/NVDA")
+                "/api/assess", "/api/history/NVDA")
         for u in urls:
             body = c.get(u).json()
             leaked = _LEAK_KEYS & set(_all_keys(body))
@@ -175,7 +175,7 @@ class TestReadOnlyLedger:
         before = _fingerprint(ledger)
         c = _client(_demo_service(ledger_dir=ledger, demo=False))
         for u in ("/api/meta", "/api/live/NVDA", "/api/live/NVDA?force=1", "/api/overview", f"/api/overview?date={AS_OF}",
-                  "/api/ledger/dates", f"/api/ledger/rows?date={AS_OF}&full=1", f"/api/ledger/ticker/JNJ?date={AS_OF}",
+                  "/api/ledger/dates", f"/api/ledger/rows?date={AS_OF}&full=1",
                   "/api/assess", "/api/history/NVDA", "/api/bars/NVDA", "/api/method", "/api/intraday/NVDA",
                   "/api/intraday-dates/NVDA", "/api/settings", "/api/premium/NVDA", "/api/premium/NVDA?side=put&force=1"):
             r = c.get(u)

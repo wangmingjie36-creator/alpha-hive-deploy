@@ -721,24 +721,17 @@ POLICY = {
     ("alpha_hive_mcp.py", "alphahive_get_price_history._fetch"): "ignore",          # 蜡烛自带日期
     ("swarm_agents/cache.py", "check_ticker_validity"): "ignore",                    # 只问有没有成交 / 价格是否极低
     ("vix_term_structure.py", "_get_spot_vix"): "refuse",
-    ("iv_crush_scraper.py", "get_iv_crush_data"): "ignore",                          # 财报涨跌按日期；现价只挑平值
     ("crowding_detector.py", "get_crowding_metrics"): "refuse",
-    ("risk_engine.py", "_fetch_daily_returns"): "ignore",
-    ("risk_engine.py", "historical_var"): "ignore",
-    ("risk_engine.py", "run_full_risk_analysis"): "refuse",
     ("alphabot/beta_long.py", "_fetch_closes"): "ignore",                          # 按日期对齐、只用 as_of 以前的收益；缺最近一根只是样本少一天
+    ("alphabot/wheel_prices.py", "_fetch"): "ignore",                              # 只展示的统计；缺最近一根只是少一天，按已有收盘算
     # ── history：带日期窗口、按日期用（v0.45.658 迁入）──
-    ("backtest_engine.py", "PriceBackfiller._get_price_on_date"): "ignore",
     ("backtester.py", "Backtester._history"): "ignore",
-    ("dynamic_exit_backtest.py", "_fetch_price_series"): "ignore",
-    ("factor_attribution.py", "_get_stock_returns"): "ignore",
     ("outcomes_fetcher.py", "OutcomesFetcher._fetch_remote"): "ignore",
     ("paper_portfolio.py", "prefetch_ohlc"): "ignore",
     ("paper_portfolio.py", "_ReplayOhlcWindow._download"): "ignore",
     ("paper_portfolio.py", "_fetch_ohlc_direct"): "ignore",
     ("portfolio_backtest.py", "load_verified_predictions"): "ignore",
     ("portfolio_backtest.py", "_fetch_spy_prices"): "ignore",
-    ("portfolio_factor_attribution.py", "_load_etf_factors"): "ignore",
     # ── download（v0.45.658 迁入）──
     ("swarm_agents/base.py", "prefetch_market_bundle"): "refuse",                   # Rival / Scout 主路径
     ("swarm_agents/base.py", "BeeAgent._yf_close_panel"): "refuse",                 # Scout 相对强度
@@ -747,8 +740,6 @@ POLICY = {
     ("cboe_fetcher.py", "CBOEDailyFetcher._fetch_index_level"): "refuse",           # 指数无分红，照核
     ("market_intelligence.py", "calculate_iv_rv_spread"): "ignore",                 # 窗口统计；Oracle → H2 输入，口径不动
     ("portfolio_concentration.py", "analyze_concentration"): "ignore",              # 一个月收益相关性
-    ("risk_engine.py", "_fetch_multi_returns"): "ignore",
-    ("risk_engine.py", "_estimate_beta"): "ignore",
     ("backtester.py", "Backtester._prefetch_backtest_prices"): "ignore",
     ("backfill_dir_accuracy.py", "_fetch_closes"): "ignore",
     ("close_correction.py", "official_closes"): "ignore",

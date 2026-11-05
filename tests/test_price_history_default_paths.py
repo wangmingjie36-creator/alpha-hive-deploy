@@ -209,18 +209,12 @@ _DATA_LITERAL = re.compile(
 KNOWN_CWD_RELATIVE_DEFAULTS = {
     # 无生产调用方 / 只在 __main__ / 研究脚本：
     ("iv_history.py", "_observed_accrual_rate", "cache"),          # 生产调用方 vrp_signal 显式传绝对路径
-    ("catalyst_exit_planner.py", "load_catalysts_for_ticker", "catalysts.json"),  # 仅 dynamic_exit_backtest
     ("alpha_hive_bot/config.py", "os.environ.get", "./subscribers.db"),  # Telegram bot，独立部署
-    ("backtest_engine.py", "__init__", "./report_snapshots"),      # 无调用方
-    ("regime_analyzer.py", "__init__", "report_snapshots"),        # 无调用方
     ("feedback_loop.py", "save_accuracy_dashboard", "accuracy_dashboard.html"),  # 仅 __main__
-    # 生产调用方全部显式传目录（daily_report / generate_deep_v2 / outcomes_fetcher / weekly_optimizer），
+    # 生产调用方全部显式传目录（daily_report / outcomes_fetcher / weekly_optimizer），
     # 缺省值只在 __main__ 用到：
     ("feedback_loop.py", "save_to_json", "report_snapshots"),
     ("feedback_loop.py", "__init__", "report_snapshots"),          # BacktestAnalyzer
-    ("finrl_bridge.py", "prepare_features", "report_snapshots"),
-    ("finrl_bridge.py", "generate_rl_insights", "report_snapshots"),
-    ("options_backtester.py", "__init__", "report_snapshots"),
     # 字面量相对、但**不跟 cwd 走**：拼到 PATHS.home（earnings_history 调用时求值；
     # earnings_vol_signal 经 BASE_DIR=PATHS.home，import 期冻结、另有 KNOWN 登记）。
     ("earnings_history.py", "earnings_move_stats_detail", "earnings_cache"),

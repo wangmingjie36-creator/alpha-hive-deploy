@@ -39,6 +39,9 @@ from alphabot import premium as PM
 from alphabot import straddle as SD
 from alphabot import strangle_compare as SC
 from alphabot import tail_hedge as TH
+from alphabot import wheel as WH
+from alphabot import wheel_prices as WP
+from alphabot import wheel_screen as WS
 from hive_logger import PATHS, get_logger
 
 _log = get_logger("alphabot")
@@ -221,6 +224,12 @@ def _atomic_write_json(path: Path, obj) -> None:
         raise
 
 
+def W_CONFIG_UNIVERSE() -> List[str]:
+    """接货账本现行名单（`sell_put_wheel.CONFIG`，调用时取，不存模块级常量）。"""
+    import sell_put_wheel
+    return list(sell_put_wheel.CONFIG["universe"])
+
+
 def default_watchlist() -> List[str]:
     try:
         from config import WATCHLIST
@@ -254,7 +263,7 @@ class AlphaBotService:
                  clock: Callable[[], float] = time.monotonic, demo: bool = False,
                  ledger_dir=None, live_ttl: float = LIVE_TTL_SEC, state_dir=None,
                  straddle_root=None, straddle_quote_fn=None, now_fn: Optional[Callable[[], datetime]] = None,
-                 premium_root=None, beta_long_fn=None):
+                 premium_root=None, beta_long_fn=None, wheel_prices_fn=None):
         self.fetch_fn = fetch_fn
         self.bars_fn = bars_fn or _default_bars
         self.clock = clock
@@ -274,6 +283,10 @@ class AlphaBotService:
         # 「β 窗口对照」（v0.45.662）：长窗口 β 取数函数（None ⇒ `alphabot.beta_long.fetch_long_betas`，yfinance）；按审计日缓存
         self.beta_long_fn = beta_long_fn
         self._beta_cache: Dict[str, dict] = {}
+        # 「接货 · 筛选」行情层（v0.45.722）：日线取数函数（None ⇒ `alphabot.wheel_prices.fetch_closes`，yfinance）；
+        # `{标的: (取到的时刻, {日期: 收盘})}`，6 小时内不重取（只补缺的 / 过期的）
+        self.wheel_prices_fn = wheel_prices_fn
+        self._wheel_closes: Dict[str, tuple] = {}
         # Yahoo 限流时各票「最早什么时候值得再试」（self.clock() 的时刻）：`live()` 把它折成 `retry_after_sec` 给页面
         self._yf_retry_until: Dict[str, float] = {}
         self._am_excluded: Dict[str, int] = {}      # 指数票最近一次现算丢掉的上午结算合约数（`_live_fetch` 写）
@@ -409,9 +422,6 @@ class AlphaBotService:
     def ledger_rows(self, date, *, full: bool = False) -> dict:
         return clean_json(R.rows_for_date_view(norm_date(date), state_dir=self.ledger_dir, compact=not full))
 
-    def ticker_ledger(self, ticker, date) -> dict:
-        return clean_json(R.rows_for_ticker(norm_date(date), norm_ticker(ticker), state_dir=self.ledger_dir))
-
     def assess(self) -> dict:
         return clean_json(R.assess_overview(state_dir=self.ledger_dir))
 
@@ -434,6 +444,7 @@ class AlphaBotService:
             "hedge": self.hedge_rules(),
             "premium": self.premium_rules(),
             "howto": HW.public_rules(),
+            "wheel": {**WH.public_rules(), "screen": WS.public_rules()},
             # 帮助页「程序类」里给人抄的命令：进本代码目录、用运行本服务的解释器（从 .app 打开时就是 .app 记下的那个），
             # 不写死缺省、不假设人站在代码目录里（v0.45.611）
             "app": {"launcher": MA.here_command("-m alphabot.launcher"),
@@ -515,6 +526,118 @@ class AlphaBotService:
                                             shadow=self._straddle_shadow(led.get("signals") or []),
                                             strangle_shadow=self._strangle_shadow(led)))
 
+    # ── 接货型卖 put 纸面账本（v0.45.721，只读）：数据只经账本属主的只读出口 `sell_put_wheel.load_state`
+    def wheel(self) -> dict:
+        """演示模式不读账本（合成数据不是这本账的记录）；读不了就如实报，不当成空账本。
+        懒 import：账本模块 import 时不求值数据根，但环境没设好时也不能连坐整个 Alpha Bot。"""
+        rules = WH.public_rules()
+        if self.demo:
+            return clean_json(WH.build_overview({"available": False, "state_reason": "demo"}, rules=rules))
+        try:
+            import sell_put_wheel as spw
+            state = spw.load_state()
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("接货型卖 put 账本不可得：%s: %s", type(exc).__name__, exc)
+            state = {"available": False, "state_reason": f"{type(exc).__name__}: {exc}"}
+        return clean_json(WH.build_overview(state, rules=rules))
+
+    # ── 接货 · 筛选（v0.45.722，只读）：我们手工做过的那张表——30 只标的里「卖 put 好不好做」的客观事实
+    WHEEL_CLOSES_TTL = 6 * 3600.0
+
+    def _wheel_ledger(self):
+        """卖权账本最近一日的 monthly 行（full 形状：带 put 梯子）。只读梯子与财报日，不碰结算 / 路由。"""
+        dates = R.ledger_dates(state_dir=self.ledger_dir, limit=1)
+        if not dates:
+            return None, {}, "no_ledger_rows"
+        v = R.rows_for_date_view(dates[0], state_dir=self.ledger_dir, compact=False)
+        rows = {r["ticker"]: r for r in ((v.get("tenors") or {}).get("monthly") or []) if r.get("status") == "recorded"}
+        return dates[0], rows, None
+
+    def _wheel_cached_closes(self, t: str):
+        ent = self._wheel_closes.get(t)
+        if ent and self.clock() - ent[0] < self.WHEEL_CLOSES_TTL and ent[1]:
+            return ent[1]
+        return None
+
+    def _wheel_universe(self, scope: str):
+        st = self.settings()
+        watch = list(st.get("wheel_watch") or W_CONFIG_UNIVERSE())
+        if scope == "all":
+            return default_watchlist(), watch, st
+        return watch, watch, st
+
+    def wheel_screen(self, scope: str = "watch") -> dict:
+        """离线层：名单（或全部）里每只标的的账本梯子 + 已缓存的行情统计 + 用户的接货价。不联网、秒开。"""
+        if scope not in ("watch", "all"):
+            raise BadRequest("scope 只接受 watch / all", param="scope")
+        rules = WS.public_rules()
+        if self.demo:
+            return clean_json({"available": False, "state_reason": "demo", "rules": rules})
+        tickers, watch, st = self._wheel_universe(scope)
+        as_of, rows, err = self._wheel_ledger()
+        stats = {}
+        for t in tickers:
+            c = self._wheel_cached_closes(t)
+            if c is not None:
+                stats[t] = WS.price_stats(c, as_of)
+        accepts = {k: v for k, v in (st.get("wheel_accept") or {}).items()}
+        return clean_json({"available": True, "as_of": as_of, "scope": scope, "tickers": tickers, "watch": watch,
+                           "wheel_universe": W_CONFIG_UNIVERSE(), "ledger_error": err, "accept": accepts,
+                           "rows": WS.build_rows(tickers, rows, stats, accepts, as_of=as_of, in_universe=W_CONFIG_UNIVERSE()),
+                           "stats_cached": sorted(stats), "rules": rules})
+
+    def wheel_screen_prices(self, tickers, force: bool = False) -> dict:
+        """行情层：补取缺的 / 过期的日线（6 小时缓存），回统计。被限流 ⇒ 带原因与 `retry_after_sec`，已有的照给。"""
+        if self.demo:
+            return clean_json({"available": False, "state_reason": "demo"})
+        ts = list(dict.fromkeys(norm_ticker(t) for t in (tickers or [])))[:max(WS.MAX_WATCH, 40)]
+        if not ts:
+            raise BadRequest("没有给标的", param="tickers")
+        as_of, _rows, _err = self._wheel_ledger()
+        need = [t for t in ts if force or self._wheel_cached_closes(t) is None]
+        info: Dict[str, dict] = {}
+        if need:
+            fn = self.wheel_prices_fn or WP.fetch_closes
+            try:
+                got, info = fn(need)
+            except Exception as exc:  # noqa: BLE001 - 取数函数不该抛；抛了也如实报，不当空
+                got, info = {}, {t: {"n": 0, "reason": f"exception:{type(exc).__name__}"} for t in need}
+            for t, c in (got or {}).items():
+                if c:
+                    self._wheel_closes[t] = (self.clock(), c)
+        stats = {}
+        for t in ts:
+            c = self._wheel_cached_closes(t)
+            if c is not None:
+                stats[t] = WS.price_stats(c, as_of)
+            else:
+                why = (info.get(t) or {}).get("reason") or "unavailable"
+                stats[t] = {"ok": False, "reason": why if why in WS.REASONS else "unavailable", "detail": why,
+                            "retry_after_sec": (info.get(t) or {}).get("retry_after_sec")}
+        waits = [s.get("retry_after_sec") for s in stats.values() if s.get("retry_after_sec")]
+        return clean_json({"available": True, "as_of": as_of, "stats": stats, "retry_after_sec": max(waits) if waits else None,
+                           "fetched": need})
+
+    def wheel_screen_chain(self, ticker) -> dict:
+        """取链层：对一只标的现取全链，按**接货账本同一条选合约规则**选那一张，并给净成本 / 占资金 / 权利金重放。"""
+        if self.demo:
+            return clean_json({"ok": False, "reason": "demo"})
+        t = norm_ticker(ticker)
+        raw, why = self._live_fetch(t)(t, as_of=None)
+        if raw is None:
+            return clean_json({"ok": False, "reason": "no_chain", "detail": why, "ticker": t})
+        spot = raw.get("underlying_price")
+        if not isinstance(spot, (int, float)) or spot <= 0:
+            return clean_json({"ok": False, "reason": "no_price", "ticker": t})
+        _as_of_ledger, rows, _err = self._wheel_ledger()
+        accept = (self.settings().get("wheel_accept") or {}).get(t)
+        closes = self._wheel_cached_closes(t)
+        out = WS.pick_for_accept(raw["contracts"], float(spot), accept, raw.get("as_of") or self.now_fn().date().isoformat(),
+                                 closes=closes, earnings_date=(rows.get(t) or {}).get("earnings_date"))
+        out.update({"ticker": t, "chain_as_of": raw.get("as_of"), "session_live": raw.get("session_live"),
+                    "price_source": raw.get("underlying_price_source"), "replay_needs_prices": closes is None})
+        return clean_json(out)
+
     # ── 对冲账本（v0.45.459，只读）：组合 Greeks 的纸面 SPY 覆盖
     def _hedge_view(self, now: datetime) -> dict:
         """数据只经账本属主的只读视图 `portfolio_greeks.ledger_view`（历史走 `load_history` 的放行闸）。
@@ -553,10 +676,6 @@ class AlphaBotService:
         return clean_json(HG.build_overview(self._hedge_view(now), now_et=now, stress_fn=self._stress_fn()))
 
     # ── 尾部对冲候选（v0.45.643，只读）：SPY 认沽后比例价差叠到组合压力网格上
-    def tail_hedge_rules(self) -> dict:
-        """规则常量与文案表（取自 `alphabot.tail_hedge`，前端不另抄）。"""
-        return TH.public_rules()
-
     def _tail_deps(self) -> "TH.Deps":
         """利率取 `portfolio_greeks.CONFIG`（与基线压力表同一个）、BS 价取 `greeks_engine`（压力表重定价用的同一个）、
         点差闸门取卖权 / 跨式用的同一把尺——候选的数与基线对得上。懒 import：环境没设好不连坐整个 Alpha Bot。"""
@@ -1005,7 +1124,9 @@ class AlphaBotService:
     def settings(self) -> dict:
         # chat_enabled 缺省关（v0.45.614）：对话每问都花 API 费用，只能由人在抽屉里点开（CLAUDE.md：不许「有 key 就自动开」）
         base = {"favorites": [], "focus": list(DEFAULT_FOCUS), "interval_min": DEFAULT_INTERVAL_MIN,
-                "poll_enabled": True, "chat_enabled": False}
+                "poll_enabled": True, "chat_enabled": False,
+                # 接货页「筛选」的名单与接货价（v0.45.722）：空名单 = 用接货账本的名单；接货价缺 = 占位（现价 × 90%）。只供显示，不改账本
+                "wheel_watch": [], "wheel_accept": {}}
         p = self._settings_path()
         if p.is_file():
             try:
@@ -1039,6 +1160,29 @@ class AlphaBotService:
                 if not 5 <= iv <= 60:
                     raise BadRequest("快照间隔须在 5–60 分钟")
                 cur["interval_min"] = iv
+            if "wheel_watch" in patch:
+                try:
+                    cur["wheel_watch"] = WS.clean_watch(patch["wheel_watch"], norm=norm_ticker)
+                except BadRequest:
+                    raise
+                except ValueError as exc:
+                    raise BadRequest(str(exc), param="wheel_watch") from exc
+            if "wheel_accept" in patch:
+                try:
+                    upd = WS.clean_accept(patch["wheel_accept"], norm=norm_ticker)
+                except BadRequest:
+                    raise
+                except ValueError as exc:
+                    raise BadRequest(str(exc), param="wheel_accept") from exc
+                merged = dict(cur.get("wheel_accept") or {})
+                for k, v in upd.items():
+                    if v is None:
+                        merged.pop(k, None)          # None = 清掉，回到占位
+                    else:
+                        merged[k] = v
+                if len(merged) > WS.MAX_ACCEPT:
+                    raise BadRequest(f"接货价最多 {WS.MAX_ACCEPT} 条", param="wheel_accept")
+                cur["wheel_accept"] = merged
             if "poll_enabled" in patch:
                 cur["poll_enabled"] = bool(patch["poll_enabled"])
             if "chat_enabled" in patch:

@@ -7,6 +7,8 @@ import { renderIntraday } from "./pages/intraday.js";
 import { renderLedger } from "./pages/ledger.js";
 import { renderStraddle } from "./pages/straddle.js";
 import { renderHedge } from "./pages/hedge.js";
+import { renderWheel } from "./pages/wheel.js";
+import { renderWheelScreen } from "./pages/wheel_screen.js";
 import { renderResults } from "./pages/results.js";
 import { renderMethod } from "./pages/method.js";
 import { renderHelp } from "./pages/help.js";
@@ -30,14 +32,46 @@ export async function refreshMeta() {
   const obBanner = document.getElementById("outbound-banner");
   obBanner.hidden = !(ob && ob.mode === "unchanged");
   obBanner.textContent = obBanner.hidden ? "" : `未走代理 · ${ob.detail}`;
+  // v0.45.726：磁盘上的代码比正在跑的新 ⇒ 横幅（生产代码目录每个扫描日自动快进；没重启的进程新旧混用）。
+  // v0.45.730：服务端根本没报 code ⇒ 它比这个页面旧（726 前起的进程）——页面文件每次现读磁盘、磁盘只往前走，
+  // 页面认得 code 而服务不报只可能是服务旧 ⇒ 同样挂横幅（此前这里只在页脚写「版本未知」，偏偏是该重启的时候）
+  const serverOlder = !Object.prototype.hasOwnProperty.call(state.meta, "code");
+  const cv = state.meta.code;
+  const cvBanner = document.getElementById("code-banner");
+  cvBanner.hidden = !(serverOlder || (cv && cv.stale === true));
+  cvBanner.textContent = cvBanner.hidden ? "" : (serverOlder ? OLDER_SERVER_BANNER : codeBannerText(cv));
+  cvBanner.title = cvBanner.hidden || serverOlder ? "" : (cv.on_disk_subject || "");
   const dl = document.getElementById("ticker-list");
   fill(dl, ...[...(state.meta.watchlist?.tickers || []), ...Object.values(state.meta.watchlist?.index_labels || {})]
     .map((t) => h("option", { value: t })));
   fill(document.getElementById("foot"),
-    h("span", {}, `Alpha Bot ${state.meta.version} · 本机运行，只读卖权账本、财报跨式账本与对冲账本 · 以下为公开信息研究与情景推演，不构成投资建议。`),
+    h("span", {}, `Alpha Bot ${state.meta.version} · `, codeLabel(cv),
+      " · 本机运行，只读卖权账本、财报跨式账本与对冲账本 · 以下为公开信息研究与情景推演，不构成投资建议。"),
     state.meta.can_shutdown ? h("button", { class: "link-btn", type: "button", onclick: stopServer }, "停止服务") : null,
   );
   return state.meta;
+}
+
+// 页脚的代码版本（v0.45.726）：正在跑的提交 + 启动时刻；判不了照实写——判不了 ≠ 没更新
+function codeLabel(cv) {
+  if (!cv) return "代码版本：服务端没报（它比这个页面旧，见顶部横幅）";
+  if (!cv.running) return h("span", { title: cv.reason || "" }, "代码版本判不了");
+  const t = new Date(cv.started_at || "");
+  const when = isNaN(t) ? "" : `，${t.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })} 启动`;
+  return h("span", { title: cv.running_subject || "" }, `代码 ${cv.running}${when}`,
+    cv.available ? null : `（有没有更新判不了：${cv.reason || "原因未知"}）`);
+}
+
+// 没重启的服务是新旧混用：页面文件刷新就是新的、部分功能第一次用到时才载入（也是新的），其余仍是启动时的旧代码
+// （v0.45.730 更正：726 的横幅说新代码要重启后才生效，实际一部分新代码已经在用）
+const RESTART_HOWTO = "新旧混用可能出错——请重启：页脚「停止服务」后，再双击 Alpha Bot.app 或重新运行启动命令";
+const OLDER_SERVER_BANNER = "服务比页面旧 · 这个 Alpha Bot 进程是在代码更新之前启动的（还不会报代码版本），"
+  + `页面已是新的、服务还是旧的，${RESTART_HOWTO}`;
+
+function codeBannerText(cv) {
+  const n = Number.isInteger(cv.behind) && cv.behind > 0 ? `新了 ${cv.behind} 个提交` : "与正在运行的不同";
+  return `代码已更新 · 磁盘上的代码${n}（运行中 ${cv.running} → 磁盘 ${cv.on_disk}）。`
+    + `服务还在跑启动时的代码，刷新后的页面和部分功能会读到新代码，${RESTART_HOWTO}`;
 }
 
 async function stopServer() {
@@ -108,6 +142,7 @@ async function route() {
     } else if (page === "ledger") await renderLedger(app, alive);
     else if (page === "straddle") await renderStraddle(app, alive);
     else if (page === "hedge") await renderHedge(app, alive);
+    else if (page === "wheel") await (a === "screen" ? renderWheelScreen(app, alive) : renderWheel(app, alive));
     else if (page === "results") await renderResults(app, a, alive);
     else if (page === "method") await renderMethod(app, alive);
     else if (page === "help") await renderHelp(app, a, alive);

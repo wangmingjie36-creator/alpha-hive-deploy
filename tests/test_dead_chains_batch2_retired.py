@@ -41,8 +41,15 @@ RETIRED_CLASSES = {
     ("ml_predictor.py", "HistoricalDataBuilder"),   # v0.45.558：8 条硬编码训练样本整类删除
 }
 
+#: 后来**整个文件**都退役了的（成员与字面量自然也不在）。同上：登记的文件必须真的不在（`test_retired_files_are_gone`）。
+RETIRED_FILES = {
+    "run_daily_scan.py",   # v0.45.724：编排器直接跑 alpha_hive_daily_report，这个手动入口整个删除
+}
+
 
 def _has_member(rel: str, cls, name: str) -> bool:
+    if rel in RETIRED_FILES:
+        return False
     tree = _ast_cache.parse_file(REPO_ROOT / rel)
     scope = tree.body
     if cls is not None:
@@ -56,6 +63,8 @@ def _has_member(rel: str, cls, name: str) -> bool:
 
 def _string_constants(rel: str) -> list:
     """字符串常量与 f-string（占位渲染成 `{}`）；f-string 的常量片段不单独再算。"""
+    if rel in RETIRED_FILES:
+        return []
     return string_constants(_ast_cache.parse_file(REPO_ROOT / rel))
 
 
@@ -79,6 +88,10 @@ class TestRetiredWritersStayRetired:
         assert not back, (f"这些写入方又回来了：{back}。它们写的文件全仓零读者（v0.45.550 删除）——"
                           "真要恢复，先在 tests/test_persistent_writes_have_readers.py 登记读者")
 
+    def test_retired_files_are_gone(self):
+        back = sorted(rel for rel in RETIRED_FILES if (REPO_ROOT / rel).exists())
+        assert not back, f"登记为整文件退役的文件又回来了：{back}——要恢复先从 RETIRED_FILES 删掉，让上面两条照常核它"
+
     def test_retired_classes_are_gone(self):
         back = [f"{rel}::{cls}" for rel, cls in RETIRED_CLASSES
                 if any(isinstance(n, ast.ClassDef) and n.name == cls
@@ -97,7 +110,7 @@ class TestTombstoneHasTeeth:
 
     def test_member_check_sees_live_members(self):
         assert _has_member("feedback_loop.py", "ReportSnapshot", "save_to_json")
-        assert _has_member("run_daily_scan.py", None, "main")
+        assert _has_member("alpha_hive_daily_report.py", None, "main")   # v0.45.724 前认的是已退役的 run_daily_scan.py
         # v0.45.558：原先认 `HistoricalDataBuilder.add_record`——整个类已删，换同文件里活着的成员
         assert _has_member("ml_predictor.py", "MLPredictionService", "train_model")
 

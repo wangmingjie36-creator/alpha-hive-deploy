@@ -137,7 +137,7 @@ class TestGuardsHaveTeeth:
         # 否则「零命中」只证明扫描器没扫到东西
         files = _production_files()
         names = {Path(f).name for f in files}
-        assert {"feedback_loop.py", "market_intelligence.py", "generate_deep_v2.py"} <= names
+        assert {"feedback_loop.py", "market_intelligence.py", "generate_ml_report.py"} <= names
         mi = next(f for f in files if Path(f).name == "market_intelligence.py")
         defs = {n.name for n in ast.walk(ast.parse(Path(mi).read_text(encoding="utf-8")))
                 if isinstance(n, ast.FunctionDef)}

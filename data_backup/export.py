@@ -79,6 +79,9 @@ STATE_DIRS: list[str] = [
     # ⚠️ **过渡安排**：用户 2026-10-20 定它最终走单独的私有备份仓（估算一年约 50–75 MB，不挤本仓 600 MB 预算）；
     # 建仓前先跟本仓走（用户同日选「先跟现有备份走，建仓后迁出」）。建好后从这里删掉、改由新仓备份。
     "observation_archive",
+    # v0.45.720 接货型卖 put 纸面账本（`sell_put_wheel`）：每笔开仓按 bid 成交、到期按那一场收盘结算，
+    # 当天的 CBOE 双边报价与 OI 事后拿不回来 ⇒ 不可重取。
+    "sell_put_state",
 ]
 ROOT_FILE_GLOBS: list[str] = [
     "weight_history.jsonl", "pheromone_fallback.jsonl",

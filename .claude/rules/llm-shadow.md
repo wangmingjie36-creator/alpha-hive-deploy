@@ -1,0 +1,14 @@
+---
+paths:
+  - "llm_shadow_*.py"
+  - "llm_service.py"
+  - "experiments/llm_shadow_*"
+  - "tests/test_llm_shadow_*.py"
+  - "tests/test_llm_service*.py"
+---
+
+# LLM 影子 A/B · 按路径加载
+
+> 读 / 改上面 `paths:` 匹配的文件时 Claude Code 自动加载。v0.45.727 从根目录 `CLAUDE.md` **逐字**搬来（「核心组件指针」）。花钱相关的三句（每日自动付费跑、唯一设 SPEND 的脚本、停法）根目录也留了。
+
+- **LLM 影子 A/B（v0.45.555）** `llm_shadow_scan.py`（入口）+ `llm_shadow_report.py`（读者）+ `experiments/llm_shadow_prereg.md`（预注册，**看数据之前写的**）：生产永远 `--no-llm`，想知道「LLM 开是否更准」只能前瞻——每天紧随生产扫描之后（生产 launchd 本机 15:00 起跑，v0.45.714 前是 14:00；影子 14:45 起来后等生产写完），在**独立数据根**（缺省生产根的同级 `alpha-hive-llm-shadow`）里开着 LLM 再跑一遍，**只记录、不进评分**。不变式：① **两进程**——`config.py` 在 import 期固化 `PATHS.*`，不能在已 import 的进程里改数据根，扫描必须在以影子根起的新子进程里跑（子进程开扫前核对 config 无任何值指向生产根）；② 缺省 `--plan` 不花钱，`--run` 还须环境变量 `ALPHA_HIVE_LLM_SHADOW_SPEND=1`，**首次真跑必须先问用户**（费用 / 上限常量在 `llm_shadow_scan.py`）；③ ⚠️ **影子里的 `rule_score` 不是规则臂**（蜂层面的 LLM 已混进维度分，只隔离 Queen 那层）——规则臂 = **生产同日同标的的结果**；④ 不健康的一天（预算 / 定价拒绝、截断 / JSON 失败率超阈值、蒸馏没走 LLM）整天不入比较；⑤ 提示词 / 模型 / `max_tokens` / 精简规则任一改动 ⇒ 新一代、重新计数；⑥（v0.45.560）**一天只许付费跑一次**——$3 上限只在进程内计，跨进程靠 `shadow_status/<日期>.json` 挡（子进程起飞前先落占位；`--control` 写 `<日期>.control.json` 分文件）；v0.45.633 起锁的是**花过钱或花费未知**（`day_lock`：占位 / 读不了 / 任何花费或调用迹象 ⇒ 锁；完整写完且花费全 0 的失败 ⇒ 允许同日重跑，旧记录并进 `previous_attempts`）。`llm_service` 的相关护栏：未登记定价的模型一律拒绝、5.5 代模型不传 `temperature`、成本公式里 `usage.input_tokens` **不含**缓存 token。（v0.45.673）模型自己中途停笔（`stop_reason=refusal`，10-27 NFLX Queen 418 字符处断掉）单独计数 `model_refusals`、写进状态文件，**只计数不重试、不进健康判定**；JSON 失败日志带 stop_reason / `stop_details`（有就记，API 是否给待验证）/ 块类型 / 解析错误及其相对原文的偏移（v0.45.680 更正：此前是相对被解析片段的）/ 出错处附近 / 前 2000 字符。⑦（v0.45.592）**第 2 代 = Sonnet 5.5、30 只全跑**（用户 2026-10-22 定；v0.45.594 起影子里**关掉历史类比**——`agent_memory` 的唯一读者，只在 LLM 模式生效、只改分不改方向；真实扫描入口里打补丁，触发了会判当天不健康）；状态文件带 `generation`，报告只数最新一代，并列出「生产有扫描而这一代没跑」的缺口日。**每日自动跑**：`llm_shadow_daily.py`（plist 标签 `com.alpha.hive.llmshadow`，工作日 14:45，跑生产克隆里的脚本；等生产写完、**开跑前先探活 3 个数据源的 HTTPS（v0.45.633，≥2 个通；10-23 全站 TLS EOF 丢了一天的教训）**才开跑，等不到 / 网络一直不通 / 太晚 / `<影子根>/DISABLED` 存在 ⇒ 跳过不花钱）——**全仓只有它替用户设 `ALPHA_HIVE_LLM_SHADOW_SPEND`**（守卫 `tests/test_llm_shadow_daily.py`）；⚠️ **仍没接编排器**（独立 launchd 任务）。（v0.45.687，**预注册修订 1**）`scan_error` 自 10-30 起适用、不追溯；2026-10-29 救回的 27 只按原规则纳入（补记工具 `llm_shadow_backfill.py`，缺省只看、`--apply` 才写，只补「出错且逐只结果为空」的付费日）。（v0.45.683）探活**另需** `api.anthropic.com` 通（数据源坏一个仍可开跑）；`llm_service.call` 把 SDK 的连接 / 超时错误当「没拿到响应」（`failed_calls`、回落规则引擎，不再冒出去）；付费跑中途出错会从 `.swarm_results_<日期>.json` **救回已写的逐只结果**（状态文件 `salvaged: true`），但出错本身是不健康理由（`scan_error`），那天默认不入比较、纳入与否由人定。停：`touch ~/alpha-hive-llm-shadow/DISABLED` 或 `launchctl bootout gui/$(id -u)/com.alpha.hive.llmshadow`。接入细节读 auto-memory `alpha-hive-llm-ab-pilot.md`。守卫 `tests/test_llm_service_5_5_models.py`、`tests/test_llm_shadow_scan.py`、`tests/test_llm_shadow_report.py`、`tests/test_llm_shadow_daily.py`

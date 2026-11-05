@@ -21,7 +21,7 @@ import types
 import pytest
 
 from tests._orchestrator import ASSIGN_PREFIX as _ASSIGN_PREFIX
-from tests._orchestrator import REPO_ORCH, repo_orchestrator_text
+from tests._orchestrator import REPO_ORCH, extract_function, repo_orchestrator_text
 from tests._orchestrator import orch_literal as _orch_literal
 
 ORCH = str(REPO_ORCH)  # 仓库里那份（v0.45.353 起受版本控制）
@@ -203,6 +203,27 @@ def _hhmm_close(got, want_dt, slack_min=2):
     return min(abs(g - w), 1440 - abs(g - w)) <= slack_min
 
 
+# 假 date 里「按 UTC 推算」那一支（v0.45.731）。编排器只在 macOS 上跑，兜底那行写的是 BSD date 的 `-v-5H`；
+# Linux CI 的 GNU date 不认 `-v`（`invalid option -- 'v'`）⇒ 兜底读出空串 ⇒ 这条自 v0.45.714 起在 CI 上恒红。
+# - 平台 date 认 `-v`（macOS：生产所在、本机全套）⇒ 原样调真 date，照旧验证真 BSD date 的行为；
+# - 不认（GNU）⇒ 只把 `-v±N[HMS]` 换算成 `-d @epoch`，其余参数原样交给真 date——不认的照样报错，不猜。
+_UTC_DATE_SHIM = r'''
+_utc_date() {
+  if command date -u -v+0S +%s >/dev/null 2>&1; then command date "$@"; return; fi
+  local a m off=0 out=()
+  for a in "$@"; do
+    if [[ $a =~ ^-v([+-])([0-9]+)([HMS])$ ]]; then
+      case ${BASH_REMATCH[3]} in H) m=3600 ;; M) m=60 ;; S) m=1 ;; esac
+      off=$(( off ${BASH_REMATCH[1]} 10#${BASH_REMATCH[2]} * m ))
+    else
+      out+=("$a")
+    fi
+  done
+  command date -d "@$(( $(command date -u +%s) + off ))" "${out[@]}"
+}
+'''
+
+
 class TestGateClockLive:
     """真跑编排器里那段读钟代码（不起编排器、不写任何文件）。"""
 
@@ -224,14 +245,17 @@ class TestGateClockLive:
             assert _hhmm_close(now, want), f"本机 TZ={tz} 时闸读到 {now}，美东实为 {want:%H%M}"
 
     def test_unreadable_zone_warns_and_falls_back_to_utc_minus_5(self, orch_text):
-        """时区数据读不到时 macOS date 静默给 UTC——必须 WARN 并按 UTC−5 判（只会更晚放行）。"""
+        """时区数据读不到时 macOS date 静默给 UTC——必须 WARN 并按 UTC−5 判（只会更晚放行）。
+        Linux CI 没有 BSD date 的 `-v`：「按 UTC 推算」那支经 `_UTC_DATE_SHIM` 换算；macOS 上走真 date。"""
         # 模拟时区数据坏掉：带 TZ 的读钟拿到的是 UTC 墙钟（macOS 的真实表现），缩写报 UTC。
         # ⚠️ 冬季 EST 恰好 = UTC−5，只把缩写改成 UTC 而让读钟仍返回真美东，删掉兜底也测不出来。
-        fake = ('date() { case "$*" in *%Z*) echo UTC ;; *-u*) command date "$@" ;; '
+        fake = ('date() { case "$*" in *%Z*) echo UTC ;; *-u*) _utc_date "$@" ;; '
                 '*) TZ=UTC command date "$@" ;; esac; }')
-        out = _run_clock(_gate_clock_snippet(orch_text), prelude=fake)
+        out = _run_clock(_gate_clock_snippet(orch_text), prelude=_UTC_DATE_SHIM + fake)
         assert "LOG[WARN]" in out and "UTC−5" in out, out
-        now = re.search(r"NOW=(\d{4})", out).group(1)
+        m = re.search(r"NOW=(\d{4})", out)
+        assert m, f"兜底没读出四位的 HHMM（平台 date 不认兜底那行的参数？）：{out!r}"
+        now = m.group(1)
         want = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5)
         assert _hhmm_close(now, want), f"兜底读到 {now}，UTC−5 实为 {want:%H%M}"
 
@@ -242,11 +266,26 @@ class TestGateClockLive:
         assert gate < step1, "补跑闸在 Step 1 之后，起不到节流作用"
 
     def test_gate_exits_zero_not_error(self, orch_text):
-        """跳过是正常状态，必须 exit 0 —— 非 0 会被编排器/监控当成故障。"""
+        """跳过是正常状态，必须 exit 0 —— 非 0 会被编排器/监控当成故障。
+
+        v0.45.735 起闸段里有且只有一个 exit 1：读不到钟（`failed_clock_unreadable`）。那不是正常跳过，是环境坏了，
+        归闸前失败一族（failed_* + exit 1），要在退出码和 status.json 上都显成故障。所以逐个 exit 配它前面
+        最近落盘的 status：skipped_* 必须配 exit 0、failed_* 必须配 exit 1，三个分支一个不多、一个不少。"""
         seg = orch_text[orch_text.index("CATCHUP_AFTER_HHMM"):
                         orch_text.index("STEP1_START")]
-        assert "exit 0" in seg
-        assert "exit 1" not in seg
+        code = "\n".join(ln for ln in seg.splitlines() if not ln.lstrip().startswith("#"))
+        pairs, prev = {}, 0
+        for m in re.finditer(r"^[ \t]*exit (\d+)\b", code, flags=re.M):
+            chunk = code[prev:m.start()]
+            written = re.findall(r'"status": "(\w+)"|_early_fail_status "(\w+)"', chunk)
+            assert written, f"exit {m.group(1)} 之前没落盘 status：{chunk[-400:]}"
+            status = "".join(written[-1])
+            want = "0" if status.startswith("skipped_") else "1" if status.startswith("failed_") else None
+            assert m.group(1) == want, f"{status} 之后是 exit {m.group(1)}（应为 exit {want}）"
+            pairs[status] = m.group(1)
+            prev = m.end()
+        assert pairs == {"skipped_already_scanned": "0", "failed_clock_unreadable": "1",
+                         "skipped_before_close": "0"}, pairs
 
     def test_sandbox_rebind_applies(self, orch_text, tmp_path):
         """`TestGateBranchesLive` 靠改绑把编排器关进沙箱。改绑不上时那组会拒绝真跑
@@ -263,6 +302,99 @@ class TestGateClockLive:
         # `returncode 127 / No such file` 假报「编排器语法错误」。
         r = subprocess.run(["bash", "-n", ORCH], capture_output=True, text=True)
         assert r.returncode == 0, f"编排器语法错误：{r.stderr}"
+
+
+def _gate_decision_snippet(orch_text):
+    """编排器里从读美东钟（`NOW_HHMM=` 那行）到时间闸判完（`-lt` 那个 if 的 `fi`）的整段，逐字取出。"""
+    start = orch_text.rindex("\n", 0, orch_text.index("NOW_HHMM=")) + 1
+    lt = orch_text.index('if [ "$NOW_HHMM" -lt "$CATCHUP_AFTER_HHMM" ]', start)
+    end = orch_text.index("\nfi\n", lt) + len("\nfi\n")
+    return orch_text[start:end]
+
+
+def _date_says(hhmm, zone="EST"):
+    """假 date：读钟（参数以 `%H%M` 结尾，含兜底那行）回 `hhmm`、问时区回 `zone`，其余（status.json 的 last_run）照走真 date。"""
+    return (f'date() {{ case "$*" in *%Z*) echo {zone} ;; *%H%M) echo "{hhmm}" ;; '
+            '*) command date "$@" ;; esac; }')
+
+
+def _run_gate(orch_text, workdir, fake_date):
+    """真跑那段闸：带编排器原样的 `set` 选项与 `_early_fail_status`，阈值取编排器的字面值，只把 `date` 换成
+    `fake_date`；status.json 写进 `workdir`。返回 (退出码, 输出, status.json 的 status 或 None)；
+    闸放行 ⇒ 输出里有 `GATE=PASSED`。"""
+    reports = workdir / "reports"
+    reports.mkdir(parents=True)
+    sets = re.findall(r"^set -.*$", orch_text, flags=re.M)
+    assert len(sets) == 1, f"编排器顶层 set 选项不是唯一一行：{sets}"
+    threshold = _orch_literal(orch_text, "CATCHUP_AFTER_HHMM")
+    assert threshold, "读不出阈值字面值"
+    script = "\n".join([
+        sets[0],
+        'log() { echo "LOG[$1] $2"; }',
+        extract_function(orch_text, "_early_fail_status"),
+        f'REPORTDIR="{reports}"',
+        f'LOGFILE="{workdir / "orch.log"}"',
+        f'CATCHUP_AFTER_HHMM="{threshold}"',
+        fake_date,
+        _gate_decision_snippet(orch_text),
+        'echo "GATE=PASSED"',
+    ])
+    r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=30)
+    sf = reports / "status.json"
+    status = json.loads(sf.read_text(encoding="utf-8"))["status"] if sf.is_file() else None
+    return r.returncode, r.stdout + r.stderr, status
+
+
+def _error_names_reading(out, reading):
+    """有一行 ERROR 原样写出了读到的值（`「…」` 括住，空串就是 `「」`）——光有 ERROR 不够，排查要看到读到了什么。"""
+    return any(ln.startswith("LOG[ERROR]") and f"「{reading}」" in ln for ln in out.splitlines())
+
+
+class TestGateUnreadableClock:
+    """v0.45.735：读不到钟（空串 / 乱码 / 不是合法 HHMM）⇒ 闸必须**拦下**并显成故障，不能放行扫描。
+
+    此前空读数让 `[ "" -lt 1630 ]` 报 "integer expression expected"、返回 2 ⇒ if 判假 ⇒ 照跑扫描（fail-open），
+    而本闸要拦的正是盘中跑——判不了几点就判不了收没收盘。真跑编排器里那段闸（逐字取出），只换 `date`、
+    不起编排器，status.json 写进 tmp_path。整个编排器里的同一件事见 `TestGateBranchesLive`（integration）。"""
+
+    @pytest.mark.parametrize("hhmm", ["", "abc", "930", "16:30", "2400", "1660", "12345", " 1700"])
+    def test_garbage_reading_blocks_the_scan(self, orch_text, tmp_path, hhmm):
+        rc, out, status = _run_gate(orch_text, tmp_path, _date_says(hhmm))
+        assert "GATE=PASSED" not in out, f"读到「{hhmm}」却放行了扫描：{out}"
+        assert (rc, status) == (1, "failed_clock_unreadable"), (rc, status, out)
+        assert _error_names_reading(out, hhmm), f"ERROR 里没写出读到的值「{hhmm}」（排查要靠它）：{out}"
+
+    def test_date_broken_entirely_blocks_the_scan(self, orch_text, tmp_path):
+        """date 整个坏掉（读钟、问时区全失败）：先 WARN 退到 UTC−5 兜底，兜底也读不出 ⇒ 拦下。"""
+        rc, out, status = _run_gate(orch_text, tmp_path, "date() { return 1; }")
+        assert "GATE=PASSED" not in out, out
+        assert (rc, status) == (1, "failed_clock_unreadable"), (rc, status, out)
+        assert "LOG[WARN]" in out and _error_names_reading(out, ""), out
+
+    def test_fallback_unreadable_blocks_even_though_first_read_looked_fine(self, orch_text, tmp_path):
+        """最像真事故的组合：时区数据坏了（第一读静默给 UTC 墙钟——四位数字、看着正常），兜底那行又读不出
+        （PATH 上的 date 不认 BSD 的 `-v`，如 GNU coreutils 排在前面）。校验必须查**兜底之后**的值：
+        放在兜底之前，验过的是被丢掉的第一读，空串照样放行。"""
+        fake = ('date() { case "$*" in *%Z*) echo UTC ;; -u*%H%M) return 1 ;; *%H%M) echo 1700 ;; '
+                '*) command date "$@" ;; esac; }')
+        rc, out, status = _run_gate(orch_text, tmp_path, fake)
+        assert "LOG[WARN]" in out, f"没走到 UTC−5 兜底，这条测的不是兜底：{out}"
+        assert "GATE=PASSED" not in out, out
+        assert (rc, status) == (1, "failed_clock_unreadable"), (rc, status, out)
+
+    def test_valid_reading_still_decides_by_threshold(self, orch_text, tmp_path):
+        """对照：合法读数照旧按阈值判——早于阈值走 skipped_before_close + exit 0，到了阈值放行。
+        没有这组，上面那组的绿也可能来自「闸把一切都拦了」。0905 带前导零：[ -lt ] 必须按十进制比。"""
+        threshold = _orch_literal(orch_text, "CATCHUP_AFTER_HHMM")
+        just_before = (datetime.datetime.strptime(threshold, "%H%M")
+                       - datetime.timedelta(minutes=1)).strftime("%H%M")
+        for hhmm in ("0000", "0905", just_before, threshold, "2359"):
+            rc, out, status = _run_gate(orch_text, tmp_path / hhmm, _date_says(hhmm))
+            assert rc == 0 and "LOG[ERROR]" not in out, (hhmm, out)
+            if hhmm >= threshold:
+                assert "GATE=PASSED" in out and status is None, (hhmm, status, out)
+            else:
+                assert "GATE=PASSED" not in out and status == "skipped_before_close", (hhmm, status, out)
 
 
 class TestPlistRunAtLoad:
@@ -332,7 +464,8 @@ class TestGateBranchesLive:
     - 看门狗没收掉 ⇒ `_reap_group` 超时；进程组没建起来 ⇒ `lingered` 为假
     """
 
-    def _gate_run(self, orch_text, tmp_path, *, with_marker, lc_ctype=None, project="stub"):
+    def _gate_run(self, orch_text, tmp_path, *, with_marker, lc_ctype=None, project="stub",
+                  path_prefix=None):
         """沙箱里跑一次编排器。
 
         ⚠️ 不能用 capture_output=True：看门狗继承 stdout/stderr，管道要等**所有**
@@ -369,6 +502,8 @@ class TestGateBranchesLive:
                "HOME": str(tmp_path / "home"), "ALPHA_HIVE_PROXY": "none"}
         if lc_ctype:
             env["LC_CTYPE"] = lc_ctype
+        if path_prefix:
+            env["PATH"] = f"{path_prefix}:{env['PATH']}"
         with open(out_path, "w") as fh:
             proc = subprocess.Popen(["bash", str(tmp_path / "orch.sh")], stdout=fh,
                                     stderr=subprocess.STDOUT, env=env,
@@ -427,6 +562,27 @@ class TestGateBranchesLive:
         r = self._gate_run(orch_text, tmp_path, with_marker=False, project=project)
         assert r.rc == 1, r.out[-1500:]
         assert r.status == status, f"{r.status}\n{r.out[-1500:]}"
+        self._assert_stayed_in_sandbox(r, tmp_path)
+
+    @pytest.mark.timeout(300)
+    def test_unreadable_clock_fails_closed(self, orch_text, tmp_path):
+        """v0.45.735：真编排器里读钟全失败 ⇒ exit 1 + failed_clock_unreadable，**不放行**。
+
+        假 date 放在 PATH 最前，只让闸的三种调用（读钟 / 问时区 / UTC−5 兜底）失败，第 59 行 TIMESTAMP 的
+        `%H%M%S` 等照走真 date。⚠️ 修复前这里会因 `[ "" -lt 2400 ]` 报错而放行、真跑进主流程——所以拿掉修复的
+        变异只在 `TestGateUnreadableClock` 那层做（停在 `GATE=PASSED`），不在这里做。"""
+        fakebin = tmp_path / "fakebin"
+        fakebin.mkdir()
+        (fakebin / "date").write_text(
+            '#!/bin/bash\n'
+            'case "$*" in "+%H%M" | "+%Z" | "-u -v-5H +%H%M") exit 1 ;; esac\n'
+            'exec /bin/date "$@"\n', encoding="utf-8")
+        (fakebin / "date").chmod(0o755)
+        r = self._gate_run(orch_text, tmp_path, with_marker=False, path_prefix=fakebin)
+        assert "执行扫描" not in r.out, f"读不到钟却放行了扫描\n{r.out[-2000:]}"
+        assert "补跑闸改按 UTC−5 判" in r.out, f"假 date 没接上（时区那一读没失败）\n{r.out[-2000:]}"
+        assert r.rc == 1, r.out[-1500:]
+        assert r.status == "failed_clock_unreadable", f"{r.status}\n{r.out[-1500:]}"
         self._assert_stayed_in_sandbox(r, tmp_path)
 
     @pytest.mark.timeout(300)

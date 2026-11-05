@@ -442,32 +442,6 @@ def test_legacy_snapshot_without_source_key_is_not_backfilled(tmp_path):
     )
 
 
-def test_deep_report_producer_labels_its_own_caliber(tmp_path):
-    """第二个快照生产者也必须自报口径，不能留空。
-
-    `generate_deep_v2._save_report_snapshot` 本来就不读板（直接取 7 只蜂的 ctx），
-    所以它没有截断问题；但它的**键域**与日报不同（无 CodeExecutorAgent、
-    无 QueenDistiller）。若它留空，`agent_votes_source == ""` 就同时意味着
-    「深度报告口径」和「v0.45.164 之前被板截断的历史快照」—— 而区分这两件事
-    正是这个字段存在的理由。
-    """
-    import json
-
-    from generate_deep_v2 import _save_report_snapshot
-
-    ctx = {"final_score": 7.1, "direction": "bullish", "price": 12.5}
-    for key in ("scout", "buzz", "oracle", "chronos", "rival", "guard", "bear"):
-        ctx[key] = {"score": 6.0}
-
-    _save_report_snapshot(ctx, "TEST", "2026-09-08", tmp_path)
-
-    out = tmp_path / "report_snapshots" / "TEST_2026-09-08.json"
-    assert out.exists(), "深度路径没写出快照"
-    src = json.load(open(out, encoding="utf-8")).get("agent_votes_source")
-    assert src == "deep_report_ctx", f"深度路径口径标签为 {src!r}"
-    assert src not in ("", "agent_details"), "深度口径与另外两种撞在了一起"
-
-
 # ══════════════════════════════════════════════════════════════════════════
 # v0.45.182：崩掉的蜂不是一张 5.0 中位票
 #

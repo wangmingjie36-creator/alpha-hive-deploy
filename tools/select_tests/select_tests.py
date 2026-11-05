@@ -17,7 +17,7 @@ v0.45.439、v0.45.592→596 都因此让 main 变红。所以选测不能按 imp
 | 改动 | 选什么 | 退出码 |
 |---|---|---|
 | `tests/test_*.py` | 读全部测试文件的元守卫 ∪ `EXTRA_ALWAYS` ∪ 被改文件自己 ∪ 读过它的「窄读者」∪ 直接或间接 import 它的测试（AST，含经 `tests/_*` 帮手中转） | 0 |
-| 被跟踪的非代码文件（CHANGELOG / 脚本 / 文档…） | 登记表里打开过它的测试 | 0 |
+| 被跟踪的非代码文件（CHANGELOG / 脚本 / 文档…；`changelog.d/` 下按目录登记，见 `NONPY_DIR_KEYS`） | 登记表里打开过它的测试 | 0 |
 | 登记表里**没有读者**的非代码文件（新文件 / 漏登 / 只在子进程里读） | **回退整套**（v0.45.661 前是「不选」） | 10 |
 | `tests/_must_run.json`（登记表自己） | `tests/test_select_tests.py` | 0 |
 | 核心文件（`conftest.py`、`tests/_*`、`config.py`、`hive_logger.py`、pytest 配置、`.github/`、`tools/clockshift|select_tests/`…） | **回退整套** | 10 |
@@ -72,7 +72,17 @@ CORE_EXACT = frozenset({"config.py", "hive_logger.py", "conftest.py", "sitecusto
                         "pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"})
 CORE_PREFIXES = (".github/", "tools/clockshift/", PLUGIN_DIR_REL + "/", "requirements")
 
+#: 按**目录**登记读者的非代码文件（v0.45.728）。`changelog.d/` 每个版本一个碎片、文件随时增加：按文件登记 ⇒ 每个新碎片
+#: 都是「没有登记读者」⇒ 开发期选测回退整套、CI 每次多一条 `::warning`。它的读者都是通读整个目录的测试，
+#: 所以目录下的读一律记在目录键（以 `/` 结尾）名下。登记表、观测比对、选测三处都经 `nonpy_key`，口径只有这一份。
+NONPY_DIR_KEYS = ("changelog.d/",)
+
 EXIT_OK, EXIT_USAGE, EXIT_UNCOVERED, EXIT_STALE, EXIT_FULL = 0, 2, 3, 4, 10
+
+
+def nonpy_key(path: str) -> str:
+    """非代码文件在登记表 `nonpy_readers` 里的键：`NONPY_DIR_KEYS` 目录下的文件归到目录键，其余原样。"""
+    return next((d for d in NONPY_DIR_KEYS if path.startswith(d)), path)
 
 
 class RegistryError(Exception):
@@ -161,9 +171,9 @@ def build_registry(dump: dict, commit: str = "", *, n_tests: int) -> dict:
         elif others:
             reg["reads_tests"][f] = sorted(others)
         for p in kinds.get("nonpy", []):
-            reg["nonpy_readers"].setdefault(p, []).append(f)
+            reg["nonpy_readers"].setdefault(nonpy_key(p), []).append(f)
     reg["reads_all_tests"].sort()
-    reg["nonpy_readers"] = {p: sorted(v) for p, v in reg["nonpy_readers"].items()}
+    reg["nonpy_readers"] = {p: sorted(set(v)) for p, v in reg["nonpy_readers"].items()}
     return reg
 
 
@@ -247,7 +257,7 @@ def observed_gaps(reg: dict, dump: dict, files=None, *, n_tests: int) -> list[Ga
                 extra = sorted(obs_others - others)
                 if extra:
                     out.append(Gap("other_test", f, f"{f}：读了登记表没有的测试文件 {extra[:5]}{' …' if len(extra) > 5 else ''}"))
-        extra_np = sorted(set(kinds.get("nonpy", ())) - nonpy)
+        extra_np = sorted({nonpy_key(p) for p in kinds.get("nonpy", ())} - nonpy)
         if extra_np:
             out.append(Gap("nonpy", f, f"{f}：读了登记表没有的非代码文件 {extra_np[:5]}{' …' if len(extra_np) > 5 else ''}"))
     return out
@@ -269,7 +279,7 @@ def merge_observation(reg: dict, dump: dict, files=None, *, n_tests: int) -> dic
             out["reads_tests"].pop(f, None)
         elif others:
             out["reads_tests"][f] = sorted(set(out["reads_tests"].get(f, ())) | others)
-        for p in kinds.get("nonpy", ()):
+        for p in map(nonpy_key, kinds.get("nonpy", ())):
             out["nonpy_readers"][p] = sorted(set(out["nonpy_readers"].get(p, ())) | {f})
     return out
 
@@ -372,7 +382,7 @@ def make_plan(changes: list[tuple[str, str]], reg: dict, *, exists, test_texts: 
         return plan
     # 没有登记读者的非代码文件：读者未知（新文件还没测过 / 漏登 / 只在子进程里读）⇒ 整套，不再「什么都不选」。
     # v0.45.661：CI 对非代码漏登改成只警告，靠的就是这一条——新文件漏登了也不会漏跑读它的测试。
-    unknown = [p for _, p in nonpy if not reg["nonpy_readers"].get(p)]
+    unknown = [p for _, p in nonpy if not reg["nonpy_readers"].get(nonpy_key(p))]
     if unknown:
         plan.mode = "full"
         plan.reasons = [f"{p}：登记表里没有测试读过它——读者未知（新文件 / 漏登 / 只在子进程里读）⇒ 整套" for p in unknown]
@@ -396,7 +406,7 @@ def make_plan(changes: list[tuple[str, str]], reg: dict, *, exists, test_texts: 
             plan.reasons.append(f"{path}：被 {', '.join(Path(r).name for r in sorted(imps))} import（含间接）")
         sel |= readers | imps
     for _, path in nonpy:
-        readers = set(reg["nonpy_readers"][path])            # 没有读者的已在上面回退整套
+        readers = set(reg["nonpy_readers"][nonpy_key(path)])   # 没有读者的已在上面回退整套
         plan.reasons.append(f"{path}：被 {len(readers)} 个测试文件打开过")
         sel |= readers
     if registry:
