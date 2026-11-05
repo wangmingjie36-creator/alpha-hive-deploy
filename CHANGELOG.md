@@ -90,8 +90,8 @@
 - 分区文件合计 90,200 字节（含各自的说明头与根目录摘要的重复部分），只在读到对应文件时加载。
 
 ### 更正（同日后续提交）
-- 首个提交 `4181d9a3` 把加载边界写成「新建文件不触发」，与本会话自己的实测相反——用 Write 新建 `tests/test_claude_md_partitions.py` 正是触发了 `tests/CLAUDE.md`。边界在**工具**，不在文件新旧：只有 Read / Edit / Write 碰到匹配的文件才加载，Bash 读不触发。复测挑的是本会话从没加载过的两份规则：Bash `head` / `sed` / `grep` / `cat` 读 `production_sync.py`、`alert_manager.py`，又隔一批调用仍没注入 `production-ops` / `slack`；换 Read 读 `production_sync.py`，`production-ops` 当即注入（正对照）。
-- 「新代码一律走它」类不变式照旧留根目录，理由改成「规则文件的 `paths:` 列的是现有模块名，新模块多半匹配不到」。改了根目录两处、`data-intake.md` 说明头一句、本条两处、守卫 docstring 与一条断言信息；根目录 24,673 → 24,866 字节。
+- 首个提交 `4181d9a3` 把加载边界写成「新建文件不触发」，与本会话自己的实测相反——用 Write 新建 `tests/test_claude_md_partitions.py` 正是触发了 `tests/CLAUDE.md`。边界在**工具**，不在文件新旧：只有 Read / Edit / Write 碰到匹配的文件才加载，Bash 读不触发（Grep / Glob / NotebookEdit 未测）。复测挑的是本会话从没加载过的两份规则：Bash `head` / `sed` / `grep` / `cat` 读 `production_sync.py`、`alert_manager.py`，又隔一批调用仍没注入 `production-ops` / `slack`；换 Read 读 `production_sync.py`，`production-ops` 当即注入（正对照）。
+- 「新代码一律走它」类不变式照旧留根目录，理由改成「规则文件的 `paths:` 列的是现有模块名，新模块多半匹配不到」。改了根目录两处、`data-intake.md` 说明头一句、本条两处、守卫 docstring 与一条断言信息；根目录 +193 字节（落在 0.45.728 之后，main 上 26,403 → 26,596；`17d1191e` 提交信息里的「24,673 → 24,866」是 rebase 前量的，main 上从没出现过）。
 
 ## [0.45.726] — 2026-11-05 — Added：Alpha Bot 页脚显示正在运行的代码提交；磁盘上的代码更新后页面顶部挂「代码已更新，重启生效」横幅
 
