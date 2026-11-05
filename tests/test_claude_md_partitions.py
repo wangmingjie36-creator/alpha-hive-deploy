@@ -17,7 +17,8 @@
 3. 代码注释常写「见 CLAUDE.md 的某节」、节名放在紧跟其后的书名号里（瘦身时 90 处）。被引的那节若只剩在别的目录的分区里，
    读这段代码的会话上下文里就没有它 ⇒ 引用必须在「读引用者时会加载的 CLAUDE.md」里找得到
    （根目录 + 引用者所在各级目录的 `CLAUDE.md`）。存量意译登记在 `LEGACY_UNRESOLVED_CITATIONS`，只许减。
-4. 根目录慢慢涨回去 ⇒ 每个会话照付 ⇒ 字节预算 `ROOT_BUDGET_BYTES`。
+4. 根目录慢慢涨回去 ⇒ 每个会话照付 ⇒ 字节预算 `ROOT_BUDGET_BYTES`，贴着目标设：
+   预算里的余量就是这种「慢慢涨」的藏身处，余量越大，这条断言对它越瞎。
 
 `paths:` 只认本守卫解析得了的写法（每项一行、双引号；不支持花括号 / `!` / `[]`）：写了别的就红，
 先在 `_pattern_regex` 补上语义——否则守卫对它恒真。双引号也是必需的：YAML 里以 `*` 开头的
@@ -33,9 +34,11 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent  # 代码锚点：查的就是本 checkout 的文档
 
-#: 根目录 CLAUDE.md 的字节上限。v0.45.727 瘦身后约 24.7KB，留约 5KB 余量给新指针。
-#: 红了 ⇒ 把细节搬进分区文件、根目录只留指针；**别先调大这个数**。
-ROOT_BUDGET_BYTES = 30_000
+#: 根目录 CLAUDE.md 的字节上限 = 用户定的目标（约 25KB），不另加余量（v0.45.734 从 30,000 降下来）。
+#: 余量就是看不见的漂移：0.45.728 让根目录涨了 1.7KB，落在旧预算约 5KB 的余量里，什么都没红。
+#: 红了 ⇒ 先把细节**逐字**搬进分区文件、根目录只留指针；**别先调大这个数**。确实必须留在根目录的
+#: （开工第一件事就要用的、新模块匹配不到 `paths:` 的不变式）才调大，并在同一提交的版本碎片里写理由。
+ROOT_BUDGET_BYTES = 25_000
 
 #: 项目 skill `alpha-hive-brief` 的指令词：根目录点名给人看，skill 的 description 给 harness 匹配，两边都得有。
 BRIEF_TRIGGERS = ("开始晨扫", "生成今日简报", "跑简报", "分析一下", "深度研究")
@@ -251,8 +254,10 @@ class TestRootBudget:
     def test_root_within_budget(self):
         size = len((_ROOT / "CLAUDE.md").read_bytes())
         assert size <= ROOT_BUDGET_BYTES, (
-            f"根目录 CLAUDE.md {size:,} 字节 > 预算 {ROOT_BUDGET_BYTES:,}：每个会话都整份加载它。"
-            "把细节搬进按需加载的分区（子目录 CLAUDE.md / .claude/rules/），根目录只留指针")
+            f"根目录 CLAUDE.md {size:,} 字节 > 预算 {ROOT_BUDGET_BYTES:,}（超 {size - ROOT_BUDGET_BYTES:,}）：每个会话都整份加载它。"
+            "① 首选：把细节逐字搬进按需加载的分区（子目录 CLAUDE.md / .claude/rules/），根目录只留指针，别为过闸压措辞丢知识；"
+            "② 确实必须留在根目录（开工第一件事就要用的、新模块匹配不到 paths: 的不变式）：在同一提交里调大 "
+            "ROOT_BUDGET_BYTES，并在版本碎片里写理由")
 
 
 class TestSkills:
