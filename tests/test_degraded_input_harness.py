@@ -114,28 +114,6 @@ class TestCrowdingDegraded:
 # ② 风险引擎：σ 不可得
 # ─────────────────────────────────────────────────────────────
 
-class TestRiskEngineDegraded:
-    """v0.45.15 的注释写着「σ 不可得就写 None，不要用 30 冒充一个观测值」，
-    而上游 `or 30.0` 在守卫之前就把缺失填成了 30.0 —— 守卫被架空。"""
-
-    @pytest.mark.parametrize("sd", [{}, {"volatility_20d": None},
-                                    {"price": 0.0, "volatility_20d": None}])
-    def test_sigma_unavailable_is_none(self, sd):
-        import risk_engine
-        v = risk_engine._vol_pct(sd)
-        assert v is None, f"σ 不可得应为 None，实得 {v}"
-        assert_not_fabricated(v, "risk_engine._vol_pct")
-
-    def test_upstream_does_not_prefill_sigma(self):
-        """回归闸：上游不得在守卫之前把缺失填成 30.0"""
-        import inspect
-
-        import risk_engine
-        src = inspect.getsource(risk_engine)
-        assert 'get("volatility_20d") or 30.0' not in src
-        assert '"volatility_20d": 30.0' not in src
-
-
 # ─────────────────────────────────────────────────────────────
 # ③ 0DTE：真实的 0 不得被改写成 30
 # ─────────────────────────────────────────────────────────────
@@ -282,7 +260,6 @@ class TestCrowdingDisplayDegraded:
 COVERED = {
     ("crowding_detector", "calculate_crowding_score"),
     ("crowding_detector", "get_adjustment_factor"),
-    ("risk_engine", "_vol_pct"),
     ("advanced_analyzer", "_calculate_risk_reward_ratio"),
     ("market_intelligence", "check_thesis_breaks"),
     ("pheromone_board", "_validate_entry"),

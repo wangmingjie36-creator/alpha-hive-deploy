@@ -213,31 +213,6 @@ class TestAppliedMarkerIsAlwaysWritten:
         assert mod["applied"] is False, mod
 
 
-class TestDeepReportBadgeIsHonest:
-    """`generate_deep_v2._render_regime_badge` 的「评分±x」：只在调整真的施加了时才印。"""
-
-    @staticmethod
-    def _ctx(**mod):
-        return {"gex_regime_mod": {"gex_regime": "negative_gex", "gex_adjustment": -0.5,
-                                   "flip_proximity_pct": 2.0, **mod},
-                "regime_weights_description": "权重未调整（中性环境）"}
-
-    def test_new_record_shows_no_score_delta(self):
-        """变红的变异：删掉 `gex_mod.get("applied", True) is not False` 那个条件（徽章在说谎）。"""
-        from generate_deep_v2 import _render_regime_badge
-        html = _render_regime_badge(self._ctx(applied=False))
-        assert "负GEX" in html, "前提：徽章本身照常渲染"
-        assert "评分" not in html, html
-
-    def test_legacy_record_still_shows_score_delta(self):
-        """旧记录（缺 applied）当时确实施加了 ⇒ 历史报告的展示不变。
-
-        变红的变异：把缺省值改成 `get("applied", False)`。
-        """
-        from generate_deep_v2 import _render_regime_badge
-        assert "评分-0.50" in _render_regime_badge(self._ctx())
-
-
 class TestNoGexAdjustmentArithmeticInProduction:
     """静态守卫：生产代码里 `gex_adj*` 不许进 `+`/`-`/`+=`/`-=`。
 
@@ -384,7 +359,6 @@ class TestGexAdjustmentKeyReadersAreKnown:
     ALLOWED = {
         "gex_regime.py": "生产者：`GexRegimeModifier.compute` / `_neutral_result` 的返回字典",
         "swarm_agents/queen_distiller.py": "步骤 0 的默认值 + 步骤 4.5 的诊断日志（applied=False 落盘）",
-        "generate_deep_v2.py": "深度报告徽章：只在记录的 applied 不为 False 时印「评分±x」",
     }
     _KEY = "gex_adjustment"
 
@@ -431,7 +405,7 @@ class TestGexAdjustmentKeyReadersAreKnown:
             "    a = sr['gex_regime_mod']['gex_adjustment']\n"
             "    s = s + a\n"
             "    return s\n", encoding="utf-8")
-        (root / "generate_deep_v2.py").write_text(            # 名单内
+        (root / "gex_regime.py").write_text(                  # 名单内
             "def badge(m):\n    return m.get('gex_adjustment', 0)\n", encoding="utf-8")
         (root / "notes.py").write_text(                        # docstring 顺带提到：不算
             '"""这里提到 gex_adjustment 只是文字。"""\n', encoding="utf-8")
@@ -452,7 +426,7 @@ class TestGexAdjustmentKeyReadersAreKnown:
         self._plant(tmp_path)
         found, scanned = self._scan(tmp_path)
         assert set(found) - set(self.ALLOWED) == {"paper_portfolio.py"}, found
-        assert found.get("generate_deep_v2.py") == 1, "前提：名单内那份确实被扫到并认出"
+        assert found.get("gex_regime.py") == 1, "前提：名单内那份确实被扫到并认出"
         assert "notes.py" in scanned and "notes.py" not in found, found
         assert not any(s.startswith(".claude") for s in scanned), scanned
         blind, _s, _m = TestNoGexAdjustmentArithmeticInProduction._scan(tmp_path)

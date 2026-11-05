@@ -185,44 +185,6 @@ class TestDataclassDefaultsAreHonest:
         assert data["volatility_20d"] is None
 
 
-class TestRiskEngineRefusesWithoutSigma:
-    """σ 未知时 VaR 在数学上没有意义——既不崩也不编，拒绝出数字。"""
-
-    @staticmethod
-    def _sd(**over):
-        base = {"price": 100.0, "volatility_20d": 30.0,
-                "momentum_5d": 2.0, "volume_ratio": 1.0}
-        base.update(over)
-        return base
-
-    def test_parametric_var_refuses_on_none_sigma(self):
-        from risk_engine import parametric_var
-        r = parametric_var(self._sd(volatility_20d=None), horizon_days=7)
-        assert "error" in r and "volatility_20d" in r["error"]
-
-    def test_parametric_var_refuses_on_non_numeric_sigma(self):
-        from risk_engine import parametric_var
-        r = parametric_var(self._sd(volatility_20d="n/a"), horizon_days=7)
-        assert "error" in r
-
-    def test_parametric_var_still_computes_normally(self):
-        from risk_engine import parametric_var
-        r = parametric_var(self._sd(), horizon_days=7)
-        assert "error" not in r
-
-    def test_none_momentum_does_not_crash(self):
-        """动量缺失不该阻断 VaR——它只影响漂移项，不像 σ 那样使结果无意义。"""
-        from risk_engine import parametric_var
-        r = parametric_var(self._sd(momentum_5d=None), horizon_days=7)
-        assert "error" not in r
-
-    def test_style_returns_unknown_and_does_not_keyerror(self):
-        """回归闸：`sens_map[style]` 曾是裸下标，'unknown' 会 KeyError。"""
-        from risk_engine import _classify_growth_value
-        assert _classify_growth_value(self._sd(volatility_20d=None)) == "unknown"
-        assert _classify_growth_value(self._sd()) in ("growth", "value", "blend")
-
-
 class TestMLFeatureImputationIsDeclared:
     """插补本身没问题（0.5 是本模型精确的无观点点），**沉默**才有问题。"""
 
@@ -317,16 +279,6 @@ class TestPromptRenderingDoesNotLieToTheModel:
         src = inspect.getsource(llm_service)
         assert "{stock_data.get('momentum_5d', 0):+.1f}%" not in src
         assert "{stock_data.get('volatility_20d', 0):.1f}%" not in src
-
-
-class TestCollectDataEmitsNullNotZero:
-    def test_none_becomes_json_null(self):
-        """回归闸：`round(float(sdet.get(k, 0)), n)` 在值为 None 时 TypeError。"""
-        import inspect
-        import collect_data
-        src = inspect.getsource(collect_data.extract_raw)
-        assert 'round(float(sdet.get("momentum_5d", 0)), 4)' not in src
-        assert 'round(float(sdet.get("crowding_score", 0)), 1)' not in src
 
 
 class _RealNetworkAttempted(RuntimeError):
@@ -476,7 +428,7 @@ class TestAgentsSurviveFullyDegradedData:
         yield
         assert not attempts, (
             "本测试不该打任何外网，但有人出网了——多半是新增了一个取数源而"
-            f"`_offline` 没跟着加一行：\n  " + "\n  ".join(dict.fromkeys(attempts))
+            "`_offline` 没跟着加一行：\n  " + "\n  ".join(dict.fromkeys(attempts))
         )
 
     @pytest.mark.parametrize("agent_path,cls_name", [

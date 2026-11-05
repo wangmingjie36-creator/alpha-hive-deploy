@@ -422,9 +422,6 @@ class AlphaBotService:
     def ledger_rows(self, date, *, full: bool = False) -> dict:
         return clean_json(R.rows_for_date_view(norm_date(date), state_dir=self.ledger_dir, compact=not full))
 
-    def ticker_ledger(self, ticker, date) -> dict:
-        return clean_json(R.rows_for_ticker(norm_date(date), norm_ticker(ticker), state_dir=self.ledger_dir))
-
     def assess(self) -> dict:
         return clean_json(R.assess_overview(state_dir=self.ledger_dir))
 
@@ -679,10 +676,6 @@ class AlphaBotService:
         return clean_json(HG.build_overview(self._hedge_view(now), now_et=now, stress_fn=self._stress_fn()))
 
     # ── 尾部对冲候选（v0.45.643，只读）：SPY 认沽后比例价差叠到组合压力网格上
-    def tail_hedge_rules(self) -> dict:
-        """规则常量与文案表（取自 `alphabot.tail_hedge`，前端不另抄）。"""
-        return TH.public_rules()
-
     def _tail_deps(self) -> "TH.Deps":
         """利率取 `portfolio_greeks.CONFIG`（与基线压力表同一个）、BS 价取 `greeks_engine`（压力表重定价用的同一个）、
         点差闸门取卖权 / 跨式用的同一把尺——候选的数与基线对得上。懒 import：环境没设好不连坐整个 Alpha Bot。"""

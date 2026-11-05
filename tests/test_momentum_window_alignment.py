@@ -145,9 +145,9 @@ class TestMainPathFormulasShareOneWindow:
     def test_full_history_formulas(self):
         hits = self._scan(self._FULL)
         # 扫描器自己没死：主路径公式的唯一实现在 price_metrics（v0.45.639 起 data_pipeline 三处与 cache.py 旧回落都调它），
-        # 另有 risk_engine / crowding_detector 各一份自用副本
+        # 另有 crowding_detector 一份自用副本（risk_engine 那份随模块 v0.45.724 退役）
         files = {f for f, _w in hits}
-        assert "price_metrics.py" in files and len(hits) >= 3, hits
+        assert {"price_metrics.py", "crowding_detector.py"} <= files and len(hits) >= 2, hits
         bad = [h for h in hits if h[1] != ph.MOMENTUM_LOOKBACK + 1]
         assert not bad, f"主路径公式窗口与回落 MOMENTUM_LOOKBACK={ph.MOMENTUM_LOOKBACK} 不一致: {bad}"
 

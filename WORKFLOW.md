@@ -1,5 +1,9 @@
 # Alpha Hive 报告生成流程
 
+> ⚠️ **已退役（v0.45.724，2026-11-04）**：本文描述的深度报告流程 `generate_deep_v2.py` 连同它专用的
+> `chart_engine` / `vol_surface` / `finrl_bridge` 等模块已删除（最后一份产物 2026-07-29）。下文只作历史记录。
+> 每日 ML 增强报告仍由 `generate_ml_report.py` 生成。
+
 ## 架构说明
 
 **本地 JSON 数据 + Claude Cowork 推理**，无需独立 API Key。

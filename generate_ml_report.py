@@ -2747,7 +2747,7 @@ def main():
 
     report_dir = PATHS.home
     # v0.45.546：不再读 realtime_metrics.json——写它的编排器 Step 1（data_fetcher）已删；留在数据根里的旧文件
-    # 不会再更新，读它 = 永远读一份过期价格。取价直接走下面的蜂群缓存 → fetch_stock_data → {T}_raw.json 链。
+    # 不会再更新，读它 = 永远读一份过期价格。取价直接走下面的蜂群缓存 → fetch_stock_data 链。
     metrics = {}
 
     # 创建生成器
@@ -2794,7 +2794,7 @@ def main():
         try:
             _log.info("生成 %s ML 增强报告...", ticker)
 
-            # 获取该标的的数据（swarm 缓存 → 多源链 → 磁盘 {T}_raw.json；v0.45.546 起不再有 realtime_metrics）
+            # 获取该标的的数据（swarm 缓存 → 多源链；v0.45.546 起不再有 realtime_metrics，v0.45.724 起不再回落 {T}_raw.json）
             ticker_data = metrics.get(ticker)
             if not ticker_data or not ticker_data.get("sources", {}).get("yahoo_finance", {}).get("current_price"):
                 # v0.40.1: 与 v36.0 同一反模式的第 3 处漏网之鱼——原初始化 100.0，
@@ -2821,46 +2821,12 @@ def main():
                         else:
                             raise ConnectionError("多源链全部失败")
                     except Exception as e:
-                        # yfinance 取价失败（含 YFRateLimitError 限流）→ 降级读磁盘最近一次价格，
-                        # 避免整份报告因一次取价崩溃。优先 {ticker}_raw.json 的 _meta.price。
+                        # 取价失败（含 YFRateLimitError 限流）⇒ 价格留 0.0 哨兵（下游注入跳过 0）。
+                        # v0.45.724：原先在这里回落读磁盘 `{ticker}_raw.json`——它的写者 `collect_data.py`
+                        # 已退役，数据根里只剩一份 09-23 的 NVDA_raw.json，回落只会把六周前的价当现价用。
                         _log.warning(
-                            "yfinance 取价失败（%s），改用磁盘缓存价格", type(e).__name__
+                            "取价失败（%s），%s 价格不可得（不再回落磁盘旧文件）", type(e).__name__, ticker
                         )
-                        try:
-                            import json as _json
-                            import os as _os
-                            # v0.45.260（数据根迁移阶段 2）：此前是
-                            # `os.path.dirname(os.path.abspath(__file__))`——
-                            # 不读 `ALPHA_HIVE_HOME`。改读 `PATHS.home`。
-                            # 写这份 `{ticker}_raw.json` 的 `collect_data.py`
-                            # 此前锚在硬编码 `~/Desktop/Alpha Hive`，v0.45.263
-                            # 已单独排期改读同一个 `PATHS.home`（Cowork VM 覆盖
-                            # 检测保持不变）——读写两端现在同源，`ALPHA_HIVE_HOME`
-                            # 被设置后也不会分叉。
-                            # （`PATHS` 已在本文件顶部模块级导入，此处直接复用——
-                            # 若在函数内重新 `import`，会因同名局部绑定，让本函数
-                            # 更早处 `report_dir = PATHS.home` 的引用变成
-                            # "referenced before assignment"，ruff F823 会抓到。）
-                            _raw_path = _os.path.join(
-                                str(PATHS.home),
-                                "%s_raw.json" % ticker,
-                            )
-                            if _os.path.exists(_raw_path):
-                                with open(_raw_path) as _f:
-                                    _raw = _json.load(_f)
-                                _disk_price = (_raw.get("_meta") or {}).get("price", 0) or 0
-                                if _disk_price > 0:
-                                    _real_price = float(_disk_price)
-                                    _real_change = float(
-                                        (_raw.get("fundamentals") or {}).get("momentum_5d", 0.0)
-                                        or 0.0
-                                    )
-                                    _log.info(
-                                        "已复用磁盘缓存价格 %s=%.2f（来自 %s_raw.json）",
-                                        ticker, _real_price, ticker,
-                                    )
-                        except Exception as _e2:
-                            _log.debug("磁盘价格降级失败: %s", _e2)
                 ticker_data = {
                     "ticker": ticker,
                     "sources": {

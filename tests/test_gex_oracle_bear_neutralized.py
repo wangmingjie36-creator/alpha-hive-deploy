@@ -852,8 +852,6 @@ class TestGexKeyComparisonsAreKnown:
     #: v0.45.362 删 `dashboard_renderer.py::_detail`：网站 GEX 改读蒸馏结果的 `gex_state`
     #: （全到期日视图、政体路由用的那份），不再读 Oracle 主链 `gamma_exposure`（守卫 tests/test_gex_state.py）。
     ALLOWED = {
-        ("generate_deep_v2.py", "_build_options_narrative"):
-            "展示：深度报告期权段按 `squeeze == 'high' / 'medium'`（`ctx.get('gamma_squeeze_risk')`）选一句解读文案",
         ("generate_ml_report.py", "MLEnhancedReportGenerator._ch3_oracle"):
             "展示：ML 报告第 3 章表格按 `str(gex).lower() in ('high','很高')` 选信号圆点"
             "（这里的 `gex` 装的是 `gamma_squeeze_risk`）",
@@ -1114,10 +1112,11 @@ class TestGexKeyComparisonsAreKnown:
             "        g = cached.get('gamma_exposure')\n"
             "        return g is not None and g < -0.001\n",
             encoding="utf-8")
-        (root / "generate_deep_v2.py").write_text(          # 名单内：分档选文案
-            "def _build_options_narrative(ctx):\n"
-            "    squeeze = ctx.get('gamma_squeeze_risk', '')\n"
-            "    return '高' if squeeze == 'high' else '中' if squeeze == 'medium' else '低'\n",
+        (root / "generate_ml_report.py").write_text(        # 名单内：分档选文案（v0.45.724 前种的是已退役的 generate_deep_v2）
+            "class MLEnhancedReportGenerator:\n"
+            "    def _ch3_oracle(self, ctx):\n"
+            "        squeeze = ctx.get('gamma_squeeze_risk', '')\n"
+            "        return '高' if squeeze == 'high' else '中' if squeeze == 'medium' else '低'\n",
             encoding="utf-8")
         (root / "display.py").write_text(                   # 不算：f-string / is None / 数值 == / 分档拼字符串
             "def show(d, html):\n"
@@ -1148,7 +1147,7 @@ class TestGexKeyComparisonsAreKnown:
         ("loops.py", "loop_like"): [3], ("loops.py", "comp_like"): [9],
         ("loops.py", "guard_like"): [13], ("loops.py", "rank_like"): [17],
         ("options_analyzer.py", "OptionsAgent._drop_legacy_gex_signal"): [4],
-        ("generate_deep_v2.py", "_build_options_narrative"): [3],
+        ("generate_ml_report.py", "MLEnhancedReportGenerator._ch3_oracle"): [4],
     }
 
     def test_pathology_is_caught_and_exclusions_hold(self, tmp_path):
@@ -1165,7 +1164,7 @@ class TestGexKeyComparisonsAreKnown:
         assert found == self._PLANTED_HITS, found
         assert {k for k in found if k not in self.ALLOWED} == set(self._PLANTED_HITS) - {
             ("options_analyzer.py", "OptionsAgent._drop_legacy_gex_signal"),
-            ("generate_deep_v2.py", "_build_options_narrative")}
+            ("generate_ml_report.py", "MLEnhancedReportGenerator._ch3_oracle")}
         assert "display.py" in scanned
         assert not any(s.startswith((".claude", "tests", "experiments")) for s in scanned), scanned
 

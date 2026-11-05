@@ -245,19 +245,6 @@ def _tool(args, home):
 
 
 class TestRepairToolsDefaultToDryRun:
-    def test_migrate_ambiguous_default_is_dry_and_apply_backs_up_and_records(self, tmp_path):
-        db = tmp_path / "pheromone.db"
-        _pred_db(db)
-        before = _md5(db)
-        r = _tool(["migrate_ambiguous_backfill.py", "--db", str(db)], tmp_path)
-        assert r.returncode == 0 and "DRY RUN" in r.stdout, r.stdout + r.stderr
-        assert _md5(db) == before and not (tmp_path / "db_backups").exists()
-        assert not (tmp_path / "migrations_state").exists()
-        r = _tool(["migrate_ambiguous_backfill.py", "--db", str(db), "--apply"], tmp_path)
-        assert r.returncode == 0 and "回填完成" in r.stdout, r.stdout + r.stderr
-        assert list((tmp_path / "db_backups").glob("pheromone_pre_P0_tolerance_fix_*.db"))
-        rec = R.read_ledger(tmp_path / "migrations_state")
-        assert rec and rec[-1]["tool"] == "migrate_ambiguous_backfill" and rec[-1]["kind"] == "manual_tool"
 
     def test_signal_archive_backfill_default_is_dry_and_apply_backs_up_and_records(self, tmp_path):
         db = tmp_path / "pheromone.db"

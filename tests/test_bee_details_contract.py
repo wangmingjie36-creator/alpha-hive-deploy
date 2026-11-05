@@ -477,20 +477,6 @@ class TestDownstreamReadersOfRealBuzz:
         sig = signal_archive.extract({"agent_details": {"BuzzBeeWhisper": _run_buzz()}})
         assert sig["market.fear_greed_is_cnn"] == 0.0
 
-    def test_deep_analysis_renders_fear_greed(self, buzz_sources):
-        import deep_analysis
-        r = _run_buzz()
-        assert "33" in deep_analysis._render_details("buzz", r).split("恐惧贪婪", 1)[-1][:80]
-        assert "恐惧贪婪指数 33" in deep_analysis._phase1_block("buzz", r)
-
-    def test_deep_analysis_does_not_render_fallback(self, buzz_sources):
-        import deep_analysis
-        import fear_greed
-        buzz_sources["fg"] = fear_greed._default_result()
-        r = _run_buzz()
-        assert "恐惧贪婪" not in deep_analysis._render_details("buzz", r)
-        assert "恐惧贪婪" not in deep_analysis._phase1_block("buzz", r)
-
     def test_ml_report_renders_fear_greed(self, buzz_sources):
         from generate_ml_report import MLEnhancedReportGenerator as G
         html = G._ch3_buzz(G.__new__(G), {"BuzzBeeWhisper": _run_buzz()})

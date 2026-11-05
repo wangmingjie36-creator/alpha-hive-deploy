@@ -16,14 +16,14 @@
 
 - **报告生成模式：Cowork 本地推理，永远不用 Claude API / Opus**
   - 用户使用 Cowork 本地 LLM 推理，不是 Anthropic API
-  - `generate_deep_v2.py` 永远跑 `_local_fallback`，禁止调用 `claude-opus-4-6`
+  - 深度报告生成器 `generate_deep_v2.py` 已于 v0.45.724 退役（最后产物 2026-07-29）；要恢复先问用户，且仍只许 opt-in 调 LLM
   - 任何脚本默认必须是 `--no-llm`，只有用户在终端显式确认才允许 `--use-llm`
   - 禁止在代码里用 `api_key 存在就自动开 LLM` 的逻辑
   - 不要添加"未找到 API Key"警告或提示创建 key 文件
   - 不要自动搜索 `.anthropic_api_key` 文件路径
   - 2026-03-16 事故：`generate_deep_v2.py` opt-out 设计导致 NVDA deep 报告静默消费 $0.47 Opus，已修复为 opt-in
 
-- **图表**：已嵌入 `chart_engine.py`，matplotlib 已安装在用户 Mac
+- **图表**：深度报告的 `chart_engine.py` 随其 v0.45.724 退役；matplotlib 仍在用户 Mac（`code_generator` 在用）
 
 - **knowledge-pool 召回规则**：
   - 召回必须调真实引擎 `weighted_recall.py`（CLI 或 `WeightedRecall().recall()`），**禁止手动简化算分**

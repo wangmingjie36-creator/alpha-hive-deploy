@@ -558,9 +558,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("ic_rerun_readiness.py", "ALPHAHIVE_DIR"),     # sys.path.insert
         ("backup_continuity.py", "ALPHAHIVE_DIR"),      # sys.path.insert（v0.45.284 新增文件、照抄 scan_continuity 的写法，当时漏登记，v0.45.289 补）
         ("weekly_optimizer.py", "_CODE_DIR"),           # sys.path.insert（v0.45.230，原先插的是写死的主 checkout）
-        ("health_check.py", "PROJECT"),               # git -C <仓库>
         ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
-        ("collect_data.py", "_SCRIPT_DIR"),           # 运行环境探测
         ("tools/constraints_lock.py", "ROOT"),        # 仓库根：读写 requirements.txt / constraints.txt（代码同址，v0.45.617）
         ("tools/clockshift/audit.py", "HERE"),        # harness 自己的目录：拨钟轮把它插到子 pytest 的 PYTHONPATH 首位（sitecustomize / `-p clockshift` 从这里加载），v0.45.495
         ("tools/clockshift/clockshift.py", "HERE"),   # 同上：补进拨钟下每个子进程的 PYTHONPATH；不进 MUST_STAY——那条参数化测试要 import 它，而 import 即安装（模块名不同 ⇒ `INSTALLED` 是另一份 ⇒ 审计轮里二次拨钟）。指错由 `test_clockshift_harness` 的子进程用例接住
@@ -764,9 +762,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("ic_rerun_readiness.py", "ALPHAHIVE_DIR"),
         ("backup_continuity.py", "ALPHAHIVE_DIR"),
         ("weekly_optimizer.py", "_CODE_DIR"),
-        ("health_check.py", "PROJECT"),               # git -C <仓库>
         ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
-        ("collect_data.py", "_SCRIPT_DIR"),           # 运行环境探测
         ("tools/constraints_lock.py", "ROOT"),        # 依赖清单在仓库根（v0.45.617；改成 PATHS.home ⇒ 去数据根找 requirements.txt）
         ("tools/clockshift/audit.py", "HERE"),        # 拨钟子进程的 PYTHONPATH（v0.45.495；改成 PATHS.home ⇒ 拨钟轮加载不到 harness）
         ("tools/select_tests/select_tests.py", "REPO"),   # git -C <仓库> / tests/ 目录 / 子 pytest 的 PYTHONPATH（v0.45.615）
@@ -850,9 +846,8 @@ class TestFileDerivedSpeciesDoesNotSpread:
             ("cboe_vix.py","_CACHE_PATH"), ("congress_trades_scraper.py","_CACHE_PATH"),
             ("fear_greed.py","_CACHE_PATH"), ("vix_term_structure.py","_CACHE_PATH"),
             ("yahoo_trending.py","_CACHE_PATH"), ("real_data_sources.py","CACHE_DIR"),
-            ("reddit_sentiment.py","CACHE_DIR"), ("factor_attribution.py","_CACHE_DIR"),
-            ("risk_engine.py","_SNAPSHOTS_DIR"), ("risk_engine.py","_CACHE_DIR"),
-            ("ibkr_sync.py","BASE"), ("param_optimizer.py","BASE_DIR"),
+            ("reddit_sentiment.py","CACHE_DIR"),
+            ("ibkr_sync.py","BASE"),   # factor_attribution / risk_engine / param_optimizer v0.45.724 退役
         }
         regressed = TestSpeciesDoesNotSpread._scan(marker="__file__") & cleaned
         assert not regressed, (
@@ -1244,8 +1239,7 @@ class TestEveryResolverFollowsEnv:
         ("close_correction", "_db_path"), ("replay_scoring", "_db_path"),
         ("feedback_loop", "_db_path"), ("backfill_dir_accuracy", "_db_path"),
         ("paper_portfolio", "_pheromone_db_path"), ("ibkr_sync", "_base_dir"),
-        ("param_optimizer", "_base_dir"), ("risk_engine", "_cache_dir"),
-        ("risk_engine", "_snapshots_dir"), ("factor_attribution", "_cache_dir"),
+        # param_optimizer / risk_engine / factor_attribution 的解析器随模块 v0.45.724 退役
         ("reddit_sentiment", "_cache_dir"), ("real_data_sources", "_cache_dir"),
         ("fear_greed", "_cache_path"), ("cboe_vix", "_cache_path"),
         ("yahoo_trending", "_cache_path"), ("vix_term_structure", "_cache_path"),

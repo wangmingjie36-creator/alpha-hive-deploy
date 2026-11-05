@@ -259,59 +259,6 @@ def _deep_data(state, dealer=None, oracle_gex=-7.7, oracle_squeeze="high"):
             "advanced_analysis": {"dealer_gex": dealer} if dealer else {}}
 
 
-class TestDeepReport:
-
-    def test_reads_state_and_squeeze_direction(self):
-        import generate_deep_v2 as g
-        ctx = g.extract(_deep_data(gex_state.build(_ok("positive_gex", 12.5))))
-        assert ctx["gamma_exposure"] == 12.5 and ctx["gex_regime"] == "positive_gex"
-        # 正 gamma ⇒ 压榨风险低。Oracle 的主链分档在这里写的是 "high"（方向相反），不许漏进来
-        assert ctx["gamma_squeeze_risk"] == "low"
-        assert (ctx["gex_flip"], ctx["gex_call_wall"], ctx["gex_put_wall"]) == (95.0, 110.0, 90.0)
-
-    def test_unavailable_state_rules_over_other_copies(self, monkeypatch):
-        """有状态但不可得 ⇒ 不可得：不读 ML 报告里另算的 dealer_gex，也不现场补算。
-        变红的变异：deep_v2 的 `if _gst is not None` 改回 `if _gst and _gst.get("available")`；
-        删掉 `_try_compute_gex` 的 `gex_state_present` 早退。"""
-        import generate_deep_v2 as g
-        import advanced_analyzer
-
-        # 记下调用而不是抛：`_try_compute_gex` 用宽 except 吞异常，抛在这里会被吞成「补算跳过」而测试照绿
-        calls = []
-        monkeypatch.setattr(advanced_analyzer.DealerGEXAnalyzer, "analyze",
-                            lambda self, t, p: calls.append((t, p)) or _ok("positive_gex", 9.0))
-        ctx = g.extract(_deep_data(gex_state.build(_ERR), dealer=_ok("negative_gex", -2.0)))
-        assert ctx["gamma_exposure"] == 0 and ctx["gamma_squeeze_risk"] == "" and ctx["gex_regime"] == ""
-        ctx["price"] = 100.0
-        g._try_compute_gex(ctx)
-        assert calls == [], "有状态（哪怕不可得）时不许现场补算 GEX"
-        assert ctx["gamma_exposure"] == 0
-
-    def test_old_record_still_recomputes(self, monkeypatch):
-        """正对照：没有状态的旧记录照旧现场补算——否则上一条的「没补算」可能只是补算坏了。"""
-        import generate_deep_v2 as g
-        import advanced_analyzer
-        calls = []
-        monkeypatch.setattr(advanced_analyzer.DealerGEXAnalyzer, "analyze",
-                            lambda self, t, p: calls.append((t, p)) or _ok("positive_gex", 9.0))
-        ctx = g.extract(_deep_data(None))
-        ctx["price"] = 100.0
-        g._try_compute_gex(ctx)
-        assert calls == [("SYN", 100.0)] and ctx["gamma_exposure"] == 9.0
-
-    def test_old_record_never_falls_back_to_main_chain(self):
-        """没有状态、也没有 dealer_gex 的旧记录：不许拿 Oracle 主链 −7.7 和它反向的分档顶上。"""
-        import generate_deep_v2 as g
-        ctx = g.extract(_deep_data(None))
-        assert ctx["gamma_exposure"] == 0 and ctx["gamma_squeeze_risk"] == ""
-        assert ctx["gex_state_present"] is False
-
-    def test_old_record_still_reads_same_view_dealer(self):
-        import generate_deep_v2 as g
-        ctx = g.extract(_deep_data(None, dealer=_ok("negative_gex", -2.0)))
-        assert ctx["gamma_exposure"] == -2.0 and ctx["gamma_squeeze_risk"] == "high"
-
-
 class TestSqueezeLabel:
 
     @pytest.mark.parametrize("st,dealer,want", [
@@ -442,33 +389,6 @@ class TestSnapshotModeIsLabelledTruncated:
                    for r in caplog.records)
 
 
-class TestSmallReaders:
-
-    def test_collect_data_uses_state_label(self):
-        """手动喂 Claude 的材料：正 gamma ⇒ low（Oracle 主链分档写的是 high，方向相反）。"""
-        import collect_data
-        d = {"ticker": "SYN", "advanced_analysis": {},
-             "swarm_results": {"gex_state": gex_state.build(_ok("positive_gex", 3.0)),
-                               "agent_details": {"OracleBeeEcho": {"details": {"gamma_squeeze_risk": "high"}}}}}
-        assert collect_data.extract_raw(d)["options"]["gamma_squeeze_risk"] == "low"
-
-    def test_chart_title_maps_gex_labels(self, monkeypatch, tmp_path):
-        """图表标题：DealerGEX 产出 positive_gex，旧映射只认 positive_gamma ⇒ 印英文原值。"""
-        import chart_engine
-        titles = []
-        import matplotlib.axes
-        orig = matplotlib.axes.Axes.set_title
-
-        def spy(self, label, *a, **k):
-            titles.append(label)
-            return orig(self, label, *a, **k)
-        monkeypatch.setattr(matplotlib.axes.Axes, "set_title", spy)
-        dg = _ok("positive_gex", 12.5)
-        dg["gex_profile"] = [{"strike": 90.0 + i, "call_gex": 1.0, "put_gex": -0.5, "net_gex": 0.5} for i in range(20)]
-        chart_engine.render_gex_profile_chart({"advanced_analysis": {"dealer_gex": dg}}, "SYN", str(tmp_path))
-        assert any("正Gamma（做市商抑制波动）" in t for t in titles), titles
-
-
 class TestReviewFollowups:
     """二次审查（v0.45.362）补的守卫。每条旁注能让它变红的变异。"""
 
@@ -500,45 +420,6 @@ class TestReviewFollowups:
         assert calls["_ch6_risk_radar"][1].get("squeeze") == "low"
         assert calls["_generate_options_section_html"][0][0]["gamma_squeeze_risk"] == "low"
         assert er["advanced_analysis"]["options_analysis"]["gamma_squeeze_risk"] == "high", "覆盖要在副本上做"
-
-    def test_deep_report_extras_follow_the_state(self):
-        """状态不可得 ⇒ 归一化 / vanna / 翻转加速度也不拿 ML 报告另算的那份顶上。"""
-        import generate_deep_v2 as g
-        dealer = {**_ok("negative_gex", -2.0), "flip_acceleration": {"level": "高"},
-                  "vanna_stress": {"can_flip_gex": True}}
-        ctx = g.extract(_deep_data(gex_state.build(_ERR), dealer=dealer))
-        assert ctx["gex_available"] is False and ctx["gex_state_reason"] == _ERR["error"]
-        assert ctx["flip_acceleration"] == {} and ctx["vanna_stress"] == {} and ctx["gex_normalized_pct"] is None
-        ctx_ok = g.extract(_deep_data(gex_state.build(_ok("positive_gex", 12.5)), dealer=dealer))
-        assert ctx_ok["gex_available"] is True and ctx_ok["gex_normalized_pct"] == 0.8
-        assert ctx_ok["vanna_stress"] == {"can_flip_gex": True}
-
-    def test_deep_chart_uses_state_or_is_skipped(self, monkeypatch):
-        import chart_engine
-        import generate_deep_v2 as g
-        seen = []
-        monkeypatch.setattr(chart_engine, "render_gex_profile_chart",
-                            lambda data, *a, **k: seen.append(data["advanced_analysis"]["dealer_gex"]) or "b64")
-        for name in ("render_confidence_chart", "render_options_chart", "render_iv_term_chart",
-                     "render_deep_skew_chart"):
-            monkeypatch.setattr(chart_engine, name, lambda *a, **k: None)
-        dealer = _ok("negative_gex", -2.0)
-        for st, want in ((gex_state.build(_ERR), None),
-                         (gex_state.build(_ok("positive_gex", 12.5)), ("positive_gex", 12.5))):
-            data = _deep_data(st, dealer=dealer)
-            ctx = g.extract(data)
-            ctx["_raw_data"], ctx["report_date"], ctx["price"] = data, "2026-09-28", 100.0
-            seen.clear()
-            out = g._try_charts(ctx)
-            if want is None:
-                assert seen == [] and out[3] == "", "状态不可得时不许画 ML 报告另算的那份"
-            else:
-                assert (seen[0]["regime"], seen[0]["total_gex"]) == want, "标题的总量 / regime 取自状态"
-
-    def test_deep_card_true_zero_is_not_failure(self):
-        import generate_deep_v2 as g
-        ctx = g.extract(_deep_data(gex_state.build(_ok("positive_gex", 0.0))))
-        assert ctx["gex_available"] is True and ctx["gamma_exposure"] == 0.0
 
     def test_mcp_routed_regime(self, monkeypatch):
         """快照截断链：路由其实按 positive_gex 偏移了，MCP 不许说成 unknown。"""

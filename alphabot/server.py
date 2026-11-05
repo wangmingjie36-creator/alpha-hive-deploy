@@ -116,13 +116,6 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         return svc.ledger_rows(d, full=_q(request, "full") == "1")
 
     @api
-    def ledger_ticker(request):
-        d = _q(request, "date")
-        if d is None:
-            raise BadRequest("缺 date")
-        return svc.ticker_ledger(request.path_params["ticker"], d)
-
-    @api
     def assess(request):
         return svc.assess()
 
@@ -250,7 +243,6 @@ def create_app(service: Optional[AlphaBotService] = None, *, poller: Optional[In
         Route("/api/overview", overview),
         Route("/api/ledger/dates", ledger_dates),
         Route("/api/ledger/rows", ledger_rows),
-        Route("/api/ledger/ticker/{ticker}", ledger_ticker),
         Route("/api/assess", assess),
         Route("/api/history/{ticker}", history),
         Route("/api/bars/{ticker}", bars),

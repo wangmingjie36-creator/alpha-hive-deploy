@@ -5,7 +5,47 @@
 
 ---
 
-## [0.45.724] — 2026-11-04 — 占位（进行中：退役死代码——深度报告链、无生产入口的研究脚本、Alpha Bot 两处无调用接口；Telegram 不动）
+## [0.45.724] — 2026-11-04 — Removed：退役死代码——深度报告整条链、无生产入口的研究 / 一次性脚本、Alpha Bot 两处无调用接口（Telegram 不动）
+
+起因：用户要求查死代码与很久不用的板块，看完普查结果后定「除了 Telegram 都 retire」。
+普查法：从生产入口（编排器提到的脚本、两个 launchd、MCP、Alpha Bot、周 / 月任务）沿 AST import 做可达性，
+只靠字符串可达的逐个追来源；再看结构化日志里各 logger 最后出现日与产物最后生成日。
+
+### Removed
+- **深度报告链**（约 1.2 万行）：`generate_deep_v2.py`（7787 行，最后一份产物 `deep-VKTX-2026-07-29.html`，此后无人运行，
+  但 6 月后仍有 23 次提交在维护）连同只被它 import 的 `finrl_bridge` / `vol_surface` / `quiver_fetcher` / `options_backtester` /
+  `chart_engine` / `iv_crush_scraper` / `factor_attribution`；更老的「方案B」`deep_analysis.py` + `collect_data.py`；
+  只有它读的两份提示词 `prompts/options_strategist.md` / `prompts/step1_analysis_engine.md`。
+  MCP 读取既有深度报告目录（`_DEEP_DIR`）不动——只是不再生成新的。
+- **零 import、零生产入口的脚本**：`risk_engine`、`backtest_engine`、`dynamic_exit_backtest`、`portfolio_factor_attribution`、
+  `regime_analyzer`、`walk_forward_validator`、`bootstrap_ci`、`param_optimizer`、`health_check`、`run_daily_scan`
+  （编排器直接跑 `alpha_hive_daily_report`）、`backfill_trading_costs`、`migrate_ambiguous_backfill`（H002 已跑过，history 记录保留）。
+  `report_snapshots` 的 `actual_prices` 照旧由 `outcomes_fetcher` 回填（生产 2281 份里 2191 份有值，最近 10-22），`backtest_engine` 不是它的生产写者。
+- `catalyst_exit_planner.load_catalysts_for_ticker`：唯一调用方 `dynamic_exit_backtest` 已删，函数本身自 v0.45.32 起恒返回 []。
+- **Alpha Bot**：`/api/ledger/ticker/{ticker}` + `service.ticker_ledger`（v0.45.387 起前端从未调用，只有测试；
+  底层 `sell_strike_report.rows_for_ticker` 仍被 MCP 用，保留）；`service.tail_hedge_rules`（零引用）。
+
+### Fixed
+- `generate_ml_report`：取价失败时不再回落读数据根的 `{T}_raw.json`——它的写者 `collect_data.py` 退役，数据根里只剩一份
+  09-23 的 `NVDA_raw.json`，回落会把六周前的价当现价写进报告。现在价格留 0.0 哨兵（下游注入本来就跳过 0），打 warning。
+
+### Changed（登记表与测试随删同步）
+- `yf_daily.SOURCES` 删 6 个调用点名；`tests/test_yf_daily.py::POLICY` 删对应 10 条。
+- `tests/test_persistent_writes_have_readers.py`：SITE_ARTIFACTS 删 17 处落点、ARTIFACTS 删 16 个只由已删模块写的产物、读者清单删 3 条；描述改正。
+- `tests/test_ledger_writes_go_through_ledger_io.py`：WRITERS 删 6 条，`CEILING` LEDGER 18→17、STATE 12→11、ARTIFACT 12→11、CACHE 6→4；`MIGRATED` 删 `options_backtester.py`。
+- `tests/test_paths_not_frozen_at_import.py` / `tests/test_price_history_default_paths.py`：KNOWN / MUST_STAY / cleaned / 解析器清单删已退役条目。
+- 墓碑：`test_iv_crush_out_of_scan` 改成「模块不在、谁也不许 import」；`test_dead_chains_batch2_retired` 加 `RETIRED_FILES`（`run_daily_scan.py`，必须真的不在），
+  正对照改认 `alpha_hive_daily_report.main`；`test_samples_only_mode_retired` 的 health_check 那条在文件不在时直接成立。
+- GEX 读者白名单（`test_gex_modifier_disconnected` / `test_gex_oracle_bear_neutralized`）删 `generate_deep_v2` 条目，病灶夹具里的「名单内」样本改种 `gex_regime.py` / `generate_ml_report.MLEnhancedReportGenerator._ch3_oracle`。
+- 删 7 个只测已退役模块的测试文件（`test_ticker_accuracy_direction` / `test_deep_report_no_fabrication` / `test_health_check_weekly_optimizer` /
+  `test_deep_analysis_output_root` / `test_deep_analysis_prefetch_injection` / `test_generate_deep_v2_alphahive_dir` / `test_param_optimizer_config_restore`），
+  另有 12 个文件里删掉只测已退役模块的类 / 方法；`test_prompt_loader` 改读仍在用的 `news_sentiment_analyst`；`tests/_must_run.json` 删两个已删提示词的键。
+- 文档：CLAUDE.md 两条（深度报告 opt-in 规则 / 图表在 chart_engine）改成退役说明；WORKFLOW.md 顶部标「已退役」。
+
+### 没做（留给用户）
+- Telegram `alpha_hive_bot/`：用户定不动（本机无 launchd、无 subscribers.db，云端是否在跑待确认）。
+- CodeExecutorAgent：不是死代码——每天在 Phase-1 跑、不在 `NON_VOTING_AGENTS` 里，成功时参与方向投票（1 个月价格的简单启发式，未经检验；10-26 / 11-04 两天 30/30 失败）。碰评分链，没动。
+- 数据根里的旧产物（`NVDA_raw.json`、`deep-*.html`、`.risk_cache/` 等）原样留着（删 = 改生产数据）。
 
 ## [0.45.723] — 2026-11-04 — Added：Alpha Bot「接货 · 筛选」前端子页——名单 / 接货价输入、排序与过滤、按接货价取链、帮助与指南
 

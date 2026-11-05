@@ -45,14 +45,13 @@ CATEGORIES = {LEDGER, STATE, ARTIFACT, CACHE, HUMAN, CODE}
 DEBT_CATEGORIES = (LEDGER, STATE, ARTIFACT)
 
 #: 「待迁移」三类的条数上限（等号比较）。迁走一条 ⇒ 删条目并把这里减一；**不许为了登记新写入方而加一**。
-CEILING = {LEDGER: 18, STATE: 12, ARTIFACT: 12, CACHE: 6}   # v0.45.546：删 data_fetcher.py（7 → 6）
+CEILING = {LEDGER: 17, STATE: 11, ARTIFACT: 11, CACHE: 4}   # v0.45.724：退役 backtest_engine / health_check / collect_data / quiver_fetcher / risk_engine（param_optimizer 是 HUMAN 不计）
 
 _NA = "⚠️非原子"   # 理由里带这个标记 = 现在就是 open("w") 直写，写到一半崩溃 = 半截文件（迁移优先级最高）
 
 #: 「文件::函数」→ (类别, 写的是什么 / 谁读回)。v0.45.452 全仓普查（逐条核过读者），迁一条删一条。
 WRITERS: dict = {
     # ── 账本·待迁移（按风险排：非原子的整文件重写最先）
-    "backtest_engine.py::BacktestEngine.backfill_prices.save_callback": (LEDGER, _NA + " report_snapshots/*.json 原地回填实际价格（backtest / weekly_optimizer / self_analyst 读回）"),
     "cloud_snapshot_fetch.py::main": (LEDGER, "云端当日期权链快照（逐票原子；market.json / manifest.json " + _NA + "）"),
     "cboe_vix.py::_write_ledger": (LEDGER, "VIX 报价收盘核对账本（原子，不拒 NaN、无锁；读坏 ⇒ 空账本）"),
     "replay_ohlc_store.py::ReplayOhlcStore._write": (LEDGER, "回放日线库（含不可重取的时点修订 first_seen；原子，无锁）"),
@@ -79,7 +78,6 @@ WRITERS: dict = {
     "alphabot/service.py::_atomic_write_json": (STATE, "Alpha Bot 用户设置 settings.json（原子）"),
     "alphabot/launcher.py::save_config": (STATE, "Alpha Bot 启动器配置（数据根；原子）"),
     "alpha_hive_daily_report.py::AlphaHiveDailyReporter.run_swarm_scan._analyze_and_save": (STATE, _NA + " 扫描断点 checkpoint（读坏 ⇒ 丢弃重扫）"),
-    "health_check.py::save_log": (STATE, "logs/health_*.json（health_check 只看 mtime）"),
     "deploy_orchestrator.py::main": (STATE, _NA + " 部署结局 orchestrator_deploy.json（一致性守卫 / status.json 读回）"),
     "data_migrations/__main__.py::main": (STATE, _NA + " 数据迁移步骤结局 --out（编排器读回）"),
     # ── 产物·待迁移
@@ -90,7 +88,6 @@ WRITERS: dict = {
     "alpha_hive_daily_report.py::AlphaHiveDailyReporter._fallback_dashboard_data": (ARTIFACT, _NA + " 降级仪表盘数据（report_deployer 读 _generated_at）"),
     "generate_ml_report.py::MLEnhancedReportGenerator._write_file_async": (ARTIFACT, _NA + " 异步写 ML 分析 JSON"),
     "dashboard_renderer.py::render_dashboard_html": (ARTIFACT, _NA + " 网站 dashboard-data.json（report_deployer 读 _generated_at）"),
-    "collect_data.py::main": (ARTIFACT, _NA + " 精简原始数据 {T}_raw.json（generate_ml_report 读回；Slack 读者 v0.45.571 删）"),
     "ml_predictor.py::HGBModel.save_model": (ARTIFACT, _NA + " 模型持久化（读坏 ⇒ 重训）"),
     "ml_predictor.py::SGDMLModel.save_model": (ARTIFACT, _NA + " 模型持久化（读坏 ⇒ 重训）"),
     "ml_predictor.py::SimpleMLModel.save_model": (ARTIFACT, _NA + " 模型持久化（读坏 ⇒ 重训）"),
@@ -99,8 +96,6 @@ WRITERS: dict = {
     "cboe_vix.py::_write_cache": (CACHE, "VIX 历史 CSV 缓存（原子；读坏退下载）"),
     "congress_trades_scraper.py::_save_cache": (CACHE, "国会交易缓存（读坏 ⇒ 重取）"),
     "pead_analyzer.py::_save_cache": (CACHE, "PEAD 缓存（读坏 ⇒ 重算）"),
-    "quiver_fetcher.py::QuiverFetcher._save_cache": (CACHE, "Quiver 响应缓存（原子；读坏 ⇒ 重取）"),
-    "risk_engine.py::_estimate_beta": (CACHE, "β 24h 缓存（读坏忽略）"),
     "vix_term_structure.py::get_vix_term_structure": (CACHE, "VIX 期限结构 30 分钟缓存（读坏 ⇒ 重取）"),
     # ── 只给人看
     "alert_manager.py::AlertAnalyzer.save_alerts": (HUMAN, "告警汇总文件"),
@@ -108,7 +103,6 @@ WRITERS: dict = {
     "ibkr_sync.py::export_daily_actions": (HUMAN, "给人手动下单的订单清单"),
     "ibkr_sync.py::reconcile": (HUMAN, "模拟 vs 真实成交对账报告"),
     "ml_model_guard.py::snapshot_model_file": (HUMAN, "模型留档 manifest.jsonl（无代码读者；v0.45.448 登记的「守卫读回」不对）"),
-    "param_optimizer.py::run_grid": (HUMAN, "参数网格结果（只给 --html 渲染）"),
     "portfolio_backtest.py::main": (HUMAN, "组合回测 --save 导出"),
     "sell_strike_report.py::write_local_report": (HUMAN, "卖权本地 Markdown 报告"),
     "thesis_breaks.py::ThesisBreakMonitor.save_to_json": (HUMAN, "论点失效配置导出（只有 __main__ 示例调用）"),
@@ -137,7 +131,7 @@ WRITERS: dict = {
 #: 迁完的模块：除「只给人看 / 代码与部署」外一个命中都不许有（账本读写全经 ledger_io）。
 MIGRATED = ("portfolio_greeks.py", "paper_portfolio.py",                      # v0.45.448
             "options_paper_leg.py", "vrp_signal.py", "earnings_vol_signal.py",  # v0.45.452
-            "hive_logger.py", "cboe_fetcher.py", "options_backtester.py")      # v0.45.452（缓存写入实现收口）
+            "hive_logger.py", "cboe_fetcher.py")      # v0.45.452（缓存写入实现收口；options_backtester v0.45.724 退役）
 
 
 # ─────────────────────────────── 扫描器
