@@ -76,7 +76,7 @@ import tempfile
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-from code_version import FRAGMENT_DIRNAME, _CHANGELOG_RE, _FRAGMENT_NAME_RE, _repo_dir, version_key
+from code_version import FRAGMENT_DIRNAME, _CHANGELOG_RE, _FRAGMENT_NAME_RE, version_key
 
 ARCHIVE = "CHANGELOG.md"
 README = "README.md"
@@ -328,7 +328,7 @@ def fragment_versions_of(files: dict) -> list:
 
 
 def _fragment_body(text: str) -> str:
-    """碎片去掉认领注释后的条目文本（合并视图 / `entry_text` 共用）。"""
+    """碎片去掉认领注释后的条目文本（合并视图用）。"""
     return "\n".join(ln for ln in text.splitlines() if not ln.strip().startswith(_CLAIM_PREFIX)).strip()
 
 
@@ -354,24 +354,6 @@ def render(files: dict, archive_text: Optional[str], limit: Optional[int] = None
             "> 由 `changelog_fragments.py render` 生成：`changelog.d/` 碎片在前、冻结档案 `CHANGELOG.md` 在后。"
             "**勿提交本文件。**\n")
     return head + "".join(f"\n---\n\n{b}\n" for b in blocks)
-
-
-def entry_text(version: str, root: Optional[Path] = None) -> Optional[str]:
-    """某个号的条目文本（工作区）：先找碎片 `changelog.d/<号>.md`，再找冻结档案；都没有 ⇒ None。
-
-    给要核对「某版本登记于哪天」之类的读者用——v0.45.728 之后的号不在 `CHANGELOG.md` 里，
-    别再直接读档案。碎片去掉认领注释；档案里同号不止一条（历史撞号）⇒ 抛 ValueError，不替调用方挑一条。"""
-    root = Path(root) if root is not None else _repo_dir()
-    frag = root / fragment_path(version)
-    if frag.is_file():
-        return _fragment_body(frag.read_text(encoding="utf-8"))
-    archive = root / ARCHIVE
-    if not archive.is_file():
-        return None
-    hits = [chunk for v, chunk in archive_entries(archive.read_text(encoding="utf-8")) if v == version]
-    if len(hits) > 1:
-        raise ValueError(f"{ARCHIVE} 里 {version} 有 {len(hits)} 条")
-    return hits[0] if hits else None
 
 
 # ───────────────────────────────────────── 读 git 对象 / 工作区 ──────────

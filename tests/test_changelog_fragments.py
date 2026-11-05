@@ -50,8 +50,8 @@ def only(problems, needle):
 class TestRealTree:
 
     def test_reads_this_worktree(self):
-        """锚点先对：`_repo_dir()` 必须是本 worktree，否则下面在审别的 checkout。"""
-        assert cf._repo_dir() == _ROOT
+        """锚点先对：被测的 `changelog_fragments` 必须是本 worktree 那份，否则下面在拿别的 checkout 的代码审这里。"""
+        assert Path(cf.__file__).resolve().parent == _ROOT
 
     def test_fragments_in_this_worktree_pass(self):
         files = cf.worktree_files(_ROOT)
@@ -218,20 +218,6 @@ class TestHelpers:
         assert order == ["0.45.730", "0.45.729", TOP, "0.45.727"]
         assert "认领" not in out and "勿提交" in out
         assert re.findall(r"^## \[([0-9.]+)\]", cf.render(files, archive, limit=3), re.M) == order[:3]
-
-    def test_entry_text_finds_fragments_then_archive(self, tmp_path):
-        (tmp_path / "changelog.d").mkdir()
-        (tmp_path / "changelog.d" / "0.45.730.md").write_text(DONE, encoding="utf-8")
-        (tmp_path / cf.ARCHIVE).write_text(f"# log\n\n## [{TOP}] — 2026-11-05 — 档案顶\n\n正文\n\n---\n", encoding="utf-8")
-        assert cf.entry_text("0.45.730", tmp_path).startswith("## [0.45.730] — 2026-11-05 — 正式标题")
-        assert "认领" not in cf.entry_text("0.45.730", tmp_path)
-        assert cf.entry_text(TOP, tmp_path) == f"## [{TOP}] — 2026-11-05 — 档案顶\n\n正文"
-        assert cf.entry_text("0.45.1", tmp_path) is None
-
-    def test_entry_text_refuses_to_pick_among_duplicates(self, tmp_path):
-        (tmp_path / cf.ARCHIVE).write_text("## [0.1.0] — d — 甲\n\n正文\n\n## [0.1.0] — d — 乙\n\n正文\n", encoding="utf-8")
-        with pytest.raises(ValueError):
-            cf.entry_text("0.1.0", tmp_path)
 
 
 # ═════════════════════════════ 占号工具（真实 git） ═════════════════════════════
