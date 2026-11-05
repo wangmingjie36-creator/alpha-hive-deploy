@@ -203,6 +203,27 @@ def _hhmm_close(got, want_dt, slack_min=2):
     return min(abs(g - w), 1440 - abs(g - w)) <= slack_min
 
 
+# 假 date 里「按 UTC 推算」那一支（v0.45.731）。编排器只在 macOS 上跑，兜底那行写的是 BSD date 的 `-v-5H`；
+# Linux CI 的 GNU date 不认 `-v`（`invalid option -- 'v'`）⇒ 兜底读出空串 ⇒ 这条自 v0.45.714 起在 CI 上恒红。
+# - 平台 date 认 `-v`（macOS：生产所在、本机全套）⇒ 原样调真 date，照旧验证真 BSD date 的行为；
+# - 不认（GNU）⇒ 只把 `-v±N[HMS]` 换算成 `-d @epoch`，其余参数原样交给真 date——不认的照样报错，不猜。
+_UTC_DATE_SHIM = r'''
+_utc_date() {
+  if command date -u -v+0S +%s >/dev/null 2>&1; then command date "$@"; return; fi
+  local a m off=0 out=()
+  for a in "$@"; do
+    if [[ $a =~ ^-v([+-])([0-9]+)([HMS])$ ]]; then
+      case ${BASH_REMATCH[3]} in H) m=3600 ;; M) m=60 ;; S) m=1 ;; esac
+      off=$(( off ${BASH_REMATCH[1]} 10#${BASH_REMATCH[2]} * m ))
+    else
+      out+=("$a")
+    fi
+  done
+  command date -d "@$(( $(command date -u +%s) + off ))" "${out[@]}"
+}
+'''
+
+
 class TestGateClockLive:
     """真跑编排器里那段读钟代码（不起编排器、不写任何文件）。"""
 
@@ -224,14 +245,17 @@ class TestGateClockLive:
             assert _hhmm_close(now, want), f"本机 TZ={tz} 时闸读到 {now}，美东实为 {want:%H%M}"
 
     def test_unreadable_zone_warns_and_falls_back_to_utc_minus_5(self, orch_text):
-        """时区数据读不到时 macOS date 静默给 UTC——必须 WARN 并按 UTC−5 判（只会更晚放行）。"""
+        """时区数据读不到时 macOS date 静默给 UTC——必须 WARN 并按 UTC−5 判（只会更晚放行）。
+        Linux CI 没有 BSD date 的 `-v`：「按 UTC 推算」那支经 `_UTC_DATE_SHIM` 换算；macOS 上走真 date。"""
         # 模拟时区数据坏掉：带 TZ 的读钟拿到的是 UTC 墙钟（macOS 的真实表现），缩写报 UTC。
         # ⚠️ 冬季 EST 恰好 = UTC−5，只把缩写改成 UTC 而让读钟仍返回真美东，删掉兜底也测不出来。
-        fake = ('date() { case "$*" in *%Z*) echo UTC ;; *-u*) command date "$@" ;; '
+        fake = ('date() { case "$*" in *%Z*) echo UTC ;; *-u*) _utc_date "$@" ;; '
                 '*) TZ=UTC command date "$@" ;; esac; }')
-        out = _run_clock(_gate_clock_snippet(orch_text), prelude=fake)
+        out = _run_clock(_gate_clock_snippet(orch_text), prelude=_UTC_DATE_SHIM + fake)
         assert "LOG[WARN]" in out and "UTC−5" in out, out
-        now = re.search(r"NOW=(\d{4})", out).group(1)
+        m = re.search(r"NOW=(\d{4})", out)
+        assert m, f"兜底没读出四位的 HHMM（平台 date 不认兜底那行的参数？）：{out!r}"
+        now = m.group(1)
         want = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5)
         assert _hhmm_close(now, want), f"兜底读到 {now}，UTC−5 实为 {want:%H%M}"
 
