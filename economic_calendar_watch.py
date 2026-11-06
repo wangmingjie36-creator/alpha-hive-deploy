@@ -94,6 +94,13 @@ BLS 设这个字段本意是留联系人，想做个好公民就设环境变量�
 `deadline` = 该表覆盖到的最后一天（此后该类事件从日历里消失）。
 `upstream_checked_at`（v0.45.740 新增）= `upstream` 这份结论出自哪次联网检查：本轮联网 ⇒ 本轮时刻（同一个值写进
 节流状态的 `last_checked_at`）；节流 ⇒ 上次的 `last_checked_at`。看一份 JSON 就知道结论新不新，不必再翻节流状态文件。
+v0.45.743 起这个时刻带本机时区偏移（`2026-11-06T15:00:12-07:00`）：外壳的 `generated_at` 是洛杉矶时间，2026-11-01 起
+冬令时与本机差一小时，不带偏移就分不清；v0.45.740 写下的无偏移旧值是本机时间。
+`upstream_cached_note`（v0.45.743）= 节流期内那句「（上游结论出自 … 的检查，…）」，本轮联网 ⇒ 空串。`--quiet` 结论行
+与编排器 Step 13 的摘要行都照抄它，这句话只在 `_cached_upstream_note` 一处拼。
+`throttle_skipped_because`（v0.45.743）= 本轮为什么没节流，空列表 = 节流了。取值：`force` / `no_previous_check` /
+`last_check_after_today` / `window_expired` / `action_pending` / `gdp_cache_predates_next_year` / `unresolved_in_cache`；
+最后一种是哪几张表，见同名键 `unresolved_in_cache`。
 """
 
 import argparse
@@ -694,10 +701,21 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
     # 之后每个扫描日都被原样重放，日志还看不出是旧结果。
     unresolved_in_cache = sorted(k for k in set(_SOURCES) | set(upstream_cache)
                                  if not (upstream_cache.get(k) or {}).get("determinable"))
-    # 上次查出「有新日程可抄」而人还没抄 → 不节流，天天提醒；GDP 缓存出自旧版 → 不节流，立即重查；
-    # 缓存里有表没有结论 → 不节流，本轮重查
-    throttled = (not force and age is not None and age < max_age_days
-                 and not prev_action and not gdp_cache_predates_next_year and not unresolved_in_cache)
+    # 不节流的理由逐条记进结果（v0.45.743；空列表 = 节流）：上次查出「有新日程可抄」而人还没抄 → 天天提醒；
+    # GDP 缓存出自旧版 → 立即重查；缓存里有表没有结论 → 本轮重查。此前只算出一个布尔，JSON 里只见
+    # `throttled: false`，「今天为什么联网了」得回头翻节流状态文件。
+    # 上次检查晚于今天（`--today` 往回钉的回放）⇒ age 为负：那份缓存出自「今天」之后，回答不了今天 ⇒ 不节流。
+    # 此前负数也满足 `age < max_age_days`，回放会不联网、原样报出之后那次检查的结论。
+    throttle_skipped_because = [why for why, hit in (
+        ("force", force),
+        ("no_previous_check", age is None),
+        ("last_check_after_today", age is not None and age < 0),
+        ("window_expired", age is not None and age >= max_age_days),
+        ("action_pending", prev_action),
+        ("gdp_cache_predates_next_year", gdp_cache_predates_next_year),
+        ("unresolved_in_cache", bool(unresolved_in_cache)),
+    ) if hit]
+    throttled = not throttle_skipped_because
 
     if throttled:
         # 走到这里 ⇒ `_SOURCES` 的每张表在缓存里都有可判定的结论（上面 unresolved_in_cache 为空）。
@@ -711,7 +729,8 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
     else:
         upstream = check_upstream(timeout=timeout)
         checked_now = True
-        upstream_checked_at = datetime.now().isoformat(timespec="seconds")
+        # v0.45.743：带本机时区偏移——外壳 `generated_at` 是洛杉矶时间，2026-11-01 起冬令时与本机差一小时
+        upstream_checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
 
     new_tables = sorted(k for k, v in upstream.items() if v.get("new_available"))
     undet = sorted(k for k, v in upstream.items() if not v.get("determinable"))
@@ -722,6 +741,9 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
         "network_checked_this_run": checked_now,
         "throttled": throttled,
         "days_since_last_check": age,
+        # v0.45.743：本轮为什么没节流（空 = 节流了）；`unresolved_in_cache` = 缓存里没有结论的表
+        "throttle_skipped_because": throttle_skipped_because,
+        "unresolved_in_cache": unresolved_in_cache,
         # v0.45.740：`upstream` 出自哪次联网检查（本轮联网 = 本轮时刻；节流 = 上次的 last_checked_at）
         "upstream_checked_at": upstream_checked_at,
         "max_age_days": max_age_days,
@@ -746,6 +768,8 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
         "upstream_conclusive": not undet,
         "action_required": bool(new_tables),
     }
+    # v0.45.743：那句出处只在这里拼一次；`main()` 的结论行与编排器 Step 13 的摘要行都照抄它
+    res["upstream_cached_note"] = _cached_upstream_note(res)
 
     if checked_now:
         state.update({
@@ -761,8 +785,15 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
 # ──────────────────────────── 渲染与 CLI ────────────────────────────
 
 def _upstream_stamp(res: Dict[str, Any]) -> str:
-    """`upstream_checked_at` 截到分钟（`2026-11-04T15:29:49` → `2026-11-04 15:29`）。"""
-    return str(res.get("upstream_checked_at")).replace("T", " ")[:16]
+    """`upstream_checked_at` 截到分钟，带偏移就写出偏移（v0.45.743）：`2026-11-06T15:00:12-07:00` →
+    `2026-11-06 15:00 UTC-07:00`；v0.45.740 写下的无偏移旧值（本机时间）→ `2026-11-04 15:29`。"""
+    raw = str(res.get("upstream_checked_at"))
+    try:
+        t = datetime.fromisoformat(raw)
+    except ValueError:
+        return raw
+    off = t.strftime("%z")                     # "-0700"；无偏移 ⇒ ""
+    return t.strftime("%Y-%m-%d %H:%M") + (f" UTC{off[:3]}:{off[3:]}" if off else "")
 
 
 def _cached_upstream_note(res: Dict[str, Any]) -> str:
@@ -770,7 +801,8 @@ def _cached_upstream_note(res: Dict[str, Any]) -> str:
 
     节流期内的结论一定出自四张表都查到了结论的那次（见 `check()`），但那是几天前的事。日志里不写明，读的人就会
     当成今天刚查的：11-05 那条「❓ 无法判定：cpi、nfp」读起来像当天又 403 了，实为 11-04 那一次的重放。
-    挂在 `network_checked_this_run` 上、不挂在哪个分支上：哪天又有分支开始重放缓存，标注自动跟上。"""
+    挂在 `network_checked_this_run` 上、不挂在哪个分支上：哪天又有分支开始重放缓存，标注自动跟上。
+    `check()` 把它存进结果的 `upstream_cached_note`（v0.45.743），结论行与编排器摘要行都照抄那个键，不再各拼一遍。"""
     if res["network_checked_this_run"]:
         return ""
     return f"（上游结论出自 {_upstream_stamp(res)} 的检查，节流 {res['max_age_days']} 天内不重复联网）"
@@ -850,7 +882,7 @@ def contract_attention(res: Dict[str, Any], health: Dict[str, Any]) -> List[Dict
 
     `health` 是 `economic_calendar.get_calendar_health(ref_date=<同一天>)` 的完整返回——
     JSON 里的 `calendar_health` 只留了 binding/shortest 两张表，逐表的截止日要从这里取
-    （不往 `--out` 的原有键里加东西，键集合保持不变）。
+    （不往 `--out` 的原有键里加东西；顶层另有 v0.45.740 起纯增的几个键，清单见模块 docstring 的输出契约）。
 
     · 上游新日程（每表一条 warn）：deadline = 本地该表覆盖到的最后一天——得在那之前抄完。
     · 本地表低于地平线阈值（每表一条）：stale ⇒ warn；exhausted（表已用尽，该类事件此刻就不在
@@ -945,8 +977,9 @@ def main() -> int:
     # 但退出码优先级是 action > health > undetermined，于是「本地将见底 + 四个源全抓不到」
     # 这一格会打出一句**毫无依据**的断言，且把抓取失败整个吃掉——
     # 恰好抵消掉这个监视器存在的意义。
-    # v0.45.740：节流期内，每条讲上游结论的结论行都注明那份结论出自哪次检查（本轮联网 ⇒ 空串）
-    _cached = _cached_upstream_note(res)
+    # v0.45.740：节流期内，每条讲上游结论的结论行都注明那份结论出自哪次检查（本轮联网 ⇒ 空串）；
+    # v0.45.743 起照抄 `check()` 存下的那句，编排器 Step 13 摘要行抄的是同一句
+    _cached = res["upstream_cached_note"]
     _up_note = ("上游暂无新日程" if res["upstream_conclusive"]
                 else f"⚠️ 上游 {len(undet)} 个源无法判定（{'、'.join(undet)}），"
                      f"本次**无法确认**上游有没有新日程") + _cached

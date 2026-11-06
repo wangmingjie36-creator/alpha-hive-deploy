@@ -1163,3 +1163,93 @@ class TestCachedUpstreamIsLabelled:
         rc, out = self._main(monkeypatch, capsys, tmp_state, "2026-08-29")     # 空状态 ⇒ 联网
         assert rc == 0 and "✅ 日历健康，上游无新日程" in out
         assert "上游结论出自" not in out
+
+
+def _cpi_nfp_as_403(up):
+    """11-04 的形状：缓存里 cpi / nfp 那次抓取 403"""
+    for k in ("cpi", "nfp"):
+        up[k].update(determinable=False, new_available=False, reason="抓取失败: HTTPError: HTTP Error 403: Forbidden")
+
+
+def _gdp_cache_before_next_year(up):
+    """GDP 缓存出自 v0.45.574 之前（没有次年页读数）"""
+    up["gdp"].pop("pages", None)
+
+
+class TestThrottleDiagnostics:
+    """v0.45.743 复查三条：结果写明为什么没节流；上次检查晚于今天不算在窗口内；时刻带时区偏移。
+
+    11-06 的 JSON 只写 `throttled: false, days_since_last_check: 2`，看不出「今天为什么联网」；`--today` 往回钉的回放
+    拿到负 age，旧判据当成窗口内，不联网、原样报出之后那次检查的结论；`upstream_checked_at` 是不带偏移的本机时间，
+    同一份 JSON 里的 `generated_at` 是洛杉矶时间，2026-11-01 起冬令时差一小时。
+    """
+
+    TODAY = date(2026, 8, 29)
+
+    def _check(self, monkeypatch, tmp_state, tmp_path, *, checked="2026-08-27T09:00:00", edit=None,
+               action=False, force=False, write=True):
+        """四张表都有结论的缓存（`edit(upstream)` 可改它）→ 跑一次 `check()`；会联网的场景打桩成五页都查通"""
+        import economic_calendar_watch as w
+        upstream = _concluded_upstream(monkeypatch, tmp_path)
+        if edit:
+            edit(upstream)
+        if write:
+            tmp_state.write_text(json.dumps({"last_checked_at": checked, "upstream": upstream,
+                                             "action_required": action}), encoding="utf-8")
+        monkeypatch.setattr(w, "_fetch", _stub_fetch(_healthy_pages()))
+        return w.check(force=force, state_path=tmp_state, today=self.TODAY)
+
+    def test_throttled_run_has_no_skip_reason(self, monkeypatch, tmp_state, tmp_path):
+        res = self._check(monkeypatch, tmp_state, tmp_path)
+        assert res["throttled"] is True and res["throttle_skipped_because"] == [] and res["unresolved_in_cache"] == []
+        assert res["upstream_cached_note"] == "（上游结论出自 2026-08-27 09:00 的检查，节流 7 天内不重复联网）"
+
+    @pytest.mark.parametrize("kw,expect", [
+        ({"edit": _cpi_nfp_as_403}, ["unresolved_in_cache"]),
+        ({"write": False}, ["no_previous_check", "unresolved_in_cache"]),
+        ({"checked": "2026-08-22T09:00:00"}, ["window_expired"]),
+        ({"action": True}, ["action_pending"]),
+        ({"force": True}, ["force"]),
+        ({"edit": _gdp_cache_before_next_year}, ["gdp_cache_predates_next_year"]),
+        # 上次检查（08-31）晚于回放的今天（08-29）⇒ age -2：此前负数满足 `age < 7`，被当成窗口内
+        ({"checked": "2026-08-31T09:00:00-07:00"}, ["last_check_after_today"]),
+    ], ids=["unresolved", "never-checked", "window-expired", "action-pending", "force", "old-gdp-cache",
+            "last-check-after-today"])
+    def test_each_reason_to_go_online_is_recorded(self, monkeypatch, tmp_state, tmp_path, kw, expect):
+        res = self._check(monkeypatch, tmp_state, tmp_path, **kw)
+        assert res["throttled"] is False and res["network_checked_this_run"] is True
+        assert res["throttle_skipped_because"] == expect
+        assert res["upstream_cached_note"] == "", "本轮联网 ⇒ 结论就是今天的，不加注"
+
+    def test_unresolved_tables_are_named(self, monkeypatch, tmp_state, tmp_path):
+        res = self._check(monkeypatch, tmp_state, tmp_path, edit=_cpi_nfp_as_403)
+        assert res["unresolved_in_cache"] == ["cpi", "nfp"]
+        tmp_state.unlink()
+        res = self._check(monkeypatch, tmp_state, tmp_path, write=False)
+        assert res["unresolved_in_cache"] == ["cpi", "fomc", "gdp", "nfp"], "从未查过 ⇒ 四张表都没有结论"
+
+    def test_fresh_check_time_carries_offset(self, monkeypatch, tmp_state, tmp_path):
+        """本轮联网的时刻带时区偏移，结果与节流状态同值；下一轮照它算 age、照常节流"""
+        import economic_calendar_watch as w
+        from datetime import datetime
+        res = self._check(monkeypatch, tmp_state, tmp_path, write=False)
+        assert datetime.fromisoformat(res["upstream_checked_at"]).tzinfo is not None, res["upstream_checked_at"]
+        saved = json.loads(tmp_state.read_text(encoding="utf-8"))
+        assert saved["last_checked_at"] == res["upstream_checked_at"]
+        # 下一轮：日期钉到两天前（check 写的是真实钟），时刻与偏移照留
+        saved["last_checked_at"] = "2026-08-27" + res["upstream_checked_at"][10:]
+        tmp_state.write_text(json.dumps(saved), encoding="utf-8")
+        res2 = w.check(state_path=tmp_state, today=self.TODAY)
+        assert res2["days_since_last_check"] == 2 and res2["throttled"] is True
+        assert res2["upstream_checked_at"] == saved["last_checked_at"]
+
+    def test_stamp_shows_offset_and_keeps_naive_legacy(self):
+        import economic_calendar_watch as w
+        assert w._upstream_stamp({"upstream_checked_at": "2026-11-06T15:00:12-07:00"}) == "2026-11-06 15:00 UTC-07:00"
+        assert w._upstream_stamp({"upstream_checked_at": "2026-11-04T15:29:49"}) == "2026-11-04 15:29", \
+            "v0.45.740 写下的无偏移旧值（本机时间）照旧"
+
+    def test_throttled_note_names_the_offset(self, monkeypatch, tmp_state, tmp_path):
+        res = self._check(monkeypatch, tmp_state, tmp_path, checked="2026-08-27T09:00:00-07:00")
+        assert res["throttled"] is True
+        assert res["upstream_cached_note"] == "（上游结论出自 2026-08-27 09:00 UTC-07:00 的检查，节流 7 天内不重复联网）"

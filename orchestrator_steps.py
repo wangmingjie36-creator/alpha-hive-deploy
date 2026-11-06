@@ -119,6 +119,9 @@ B 接线须知：日期必须**显式**传给生产方
       JSON 本轮不可用（rc≠2）时边界那句说「本轮未核对——JSON 没写出来 / 不可用（原因）」，不再推给「代码早于 v0.45.334」
       （那只在读到 JSON 却缺键时成立；09-30 的 rc=124 被它说成了版本问题）。秒数默认 `STEP11_TIMEOUT_DEFAULT`，
       与仓库编排器 Step 11 的 `run_step --timeout` 有测试核对。冻结副本对照里 rc=124 那一行的文案按此替换后比对。
+  (j) Step 13 讲上游结论的两句（rc=0「宏观日历健康，上游无新日程」、rc=1 摘要的上游那半句）后面，照抄生产方的
+      `upstream_cached_note`（v0.45.743）：节流期内那份结论出自几天前的哪次检查，本轮联网时它是空串。
+      旧格式 JSON 没有这个键 ⇒ 一个字不加，与 B 之前逐字相同。守卫 `TestCalwatchCachedNote`。
 
 **不归本解释器的：Step 5（gh-pages 部署）。** 自 v0.45.351 起由编排器的 `_step5_gh_pages_verdict` 调
 `report_deployer.py --gh-pages-step-status --since $STEP2_START`，按部署日志的**实际结局**判——那是比 Step 2
@@ -678,6 +681,16 @@ def _base12(rc: int, d: Optional[dict], ctx: _Ctx, why: str):
             {"status": "error", "rc": rc})
 
 
+def _calwatch_cached_note(d: Optional[dict]) -> str:
+    """节流期内那句「（上游结论出自 … 的检查，…）」（v0.45.743，见模块 docstring (j)）。
+
+    生产方写在 `upstream_cached_note` 里，这里照抄、不重拼：措辞与时刻格式只在
+    `economic_calendar_watch._cached_upstream_note` 一处。本轮联网 ⇒ 生产方写空串；没有这个键（旧格式 /
+    v0.45.743 之前的 JSON）或不是字符串 ⇒ 空串，那些 JSON 的日志与之前逐字相同。"""
+    note = d.get("upstream_cached_note") if isinstance(d, dict) else None
+    return _one_line(note, 200) if isinstance(note, str) else ""
+
+
 def _calwatch_summary(d: dict) -> str:
     """Step 13 的 CALWATCH_SUMMARY（`STEP13_RC=1` 支里的内联 python）。"""
     try:
@@ -692,7 +705,8 @@ def _calwatch_summary(d: dict) -> str:
             return s
         undet = d.get("undeterminable_tables") or []
         tail = ("上游暂无新日程可抄" if d.get("upstream_conclusive")
-                else f"⚠️ 上游 {len(undet)} 个源无法判定（{'、'.join(undet)}），本次无法确认上游有无新日程")
+                else f"⚠️ 上游 {len(undet)} 个源无法判定（{'、'.join(undet)}），本次无法确认上游有无新日程"
+                ) + _calwatch_cached_note(d)
         return (f"本地日历 {h.get('status')}：{h.get('binding_table')} 表只到 "
                 f"{h.get('binding_last_date')}（剩 {h.get('binding_horizon_days')} 天），{tail}")
     except Exception as e:  # noqa: BLE001
@@ -700,8 +714,8 @@ def _calwatch_summary(d: dict) -> str:
 
 
 def _base13(rc: int, d: Optional[dict], ctx: _Ctx, why: str):
-    if rc == 0:      # STEP13_RC=0
-        return "info", ["✅ Step 13：宏观日历健康，上游无新日程"], {"status": "healthy"}
+    if rc == 0:      # STEP13_RC=0（节流期内注明结论出自哪次检查，见 (j)）
+        return "info", ["✅ Step 13：宏观日历健康，上游无新日程" + _calwatch_cached_note(d)], {"status": "healthy"}
     if rc == 1:      # STEP13_RC=1（CALWATCH_SUMMARY）
         summ = _calwatch_summary(d) if d is not None else why
         return ("warn", [f"⚠️ Step 13：{summ}",

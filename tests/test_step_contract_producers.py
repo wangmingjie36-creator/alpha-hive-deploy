@@ -58,12 +58,13 @@ ORCH_READS = {
         ("fields",), ("fields", "*", "degraded"), ("fields", "*", "field"),
         ("fields", "*", "have"), ("fields", "*", "total"), ("likely_network_layer",),
     ],
-    # Step 13：orchestrator_steps._calwatch_summary（B 之前是 rc==1 分支里算 CALWATCH_SUMMARY 的内联 python）
+    # Step 13：orchestrator_steps._calwatch_summary（B 之前是 rc==1 分支里算 CALWATCH_SUMMARY 的内联 python）；
+    # `upstream_cached_note` 另由 _calwatch_cached_note 读（rc=0 / rc=1 两句都照抄，v0.45.743）
     "economic_calendar_watch": [
         ("calendar_health", "status"), ("calendar_health", "binding_table"),
         ("calendar_health", "binding_last_date"), ("calendar_health", "binding_horizon_days"),
         ("new_schedule_tables",), ("upstream", "<new>", "new_items"), ("upstream", "<new>", "source"),
-        ("undeterminable_tables",), ("upstream_conclusive",),
+        ("undeterminable_tables",), ("upstream_conclusive",), ("upstream_cached_note",),
     ],
     # Step 15：orchestrator_steps._backup_summary（B 之前是 rc==1 分支里算 BACKUP_CONT_SUMMARY 的内联 python）
     "backup_continuity": [
@@ -385,6 +386,9 @@ class TestEconomicCalendarWatch:
         _check(self.TOOL, rc, env, p, expect_rc=0, expect_date=today.isoformat(), expect_status="ok")
         # v0.45.740：节流时外壳写明上游结论出自哪次检查（= 节流状态的 last_checked_at）
         assert env["upstream_checked_at"] == state["last_checked_at"]
+        # v0.45.743：节流了 ⇒ 没有「不节流的理由」；出处那句写进外壳，编排器照抄
+        assert env["throttle_skipped_because"] == [] and env["unresolved_in_cache"] == []
+        assert env["upstream_cached_note"] == f"（上游结论出自 {today.isoformat()} 06:00 的检查，节流 7 天内不重复联网）"
 
     def test_new_schedule_warn_with_deadline(self, tmp_path):
         today = _day_all_ok()
@@ -434,6 +438,9 @@ class TestEconomicCalendarWatch:
         assert env["throttled"] is False and env["network_checked_this_run"] is True
         for k in ("fomc", "cpi", "nfp", "gdp"):
             assert "Connection refused" in (env["upstream"][k]["reason"] or ""), (k, env["upstream"][k])
+        # v0.45.743：为什么联网写在外壳里（状态里一张表的结论都没有）；本轮联网 ⇒ 出处那句是空串
+        assert env["throttle_skipped_because"] == ["unresolved_in_cache"]
+        assert env["unresolved_in_cache"] == ["cpi", "fomc", "gdp", "nfp"] and env["upstream_cached_note"] == ""
 
     @_FOREIGN_TZ
     def test_default_date_is_business_today(self, tmp_path, tz):
