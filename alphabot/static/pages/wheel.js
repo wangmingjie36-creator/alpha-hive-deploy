@@ -22,7 +22,9 @@ function lotsPanel(d) {
     { label: "标的", render: (r) => h("b", {}, r.ticker) },
     { label: "状态", render: (r) => r.state_zh },
     { label: "put（行权价 · 到期）", render: (r) => legCell(r.put) },
-    { label: "put 权利金", cls: "r", render: (r) => (r.put ? num(r.put.premium, 2) : "—") },
+    { label: "put 权利金", cls: "r", render: (r) => (r.put ? h("span", {}, num(r.put.premium, 2),
+      h("div", { class: "sub" }, `年化 ${isNum(r.put.annual_yield_pct) ? num(r.put.annual_yield_pct, 1) + "%" : "—"}`
+        + (isNum(r.put.iv_rv) ? ` · IV÷RV ${num(r.put.iv_rv, 2)}` : ""))) : "—") },
     { label: "接货价", cls: "r", render: (r) => (r.put ? h("span", {}, num(r.put.accept_price, 2),
       r.put.accept_price_source === "placeholder" ? h("span", { class: "chip warn", title: "用户还没给接货价，这是开仓当天现价打折的占位" }, "占位") : null) : "—") },
     { label: "持股", cls: "r", render: (r) => (r.shares ? `${r.shares.n} 股 @ ${num(r.shares.assigned_price, 2)}` : "—") },

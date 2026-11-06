@@ -43,6 +43,7 @@ function rungCell(r, k) {
 
 function chainDetail(c) {
   if (!c) return null;
+  if (!c.ok && c.reason === "no_rv" && c.replay_needs_prices) return h("div", { class: "small muted" }, "选合约要用实际波动率（IV ÷ RV 门槛与综合分）：先点「取行情统计」取日线。");
   if (!c.ok) return h("div", { class: "small muted" }, `取链 / 选合约：${c.reason}${c.detail ? `（${c.detail}）` : ""}`
     + (c.accept_price ? `；接货价 ${num(c.accept_price, 2)}（${c.accept_price_source === "user" ? "你给的" : "占位"}）` : ""));
   const rp = c.replay;
@@ -51,6 +52,7 @@ function chainDetail(c) {
     h("div", { class: "sd-row" }, `${c.symbol} · 行权价 ${num(c.strike, 2)}（${sPct(c.strike_dist_pct)}）· 到期 ${c.expiry}（${c.dte} 天）· bid ${num(c.bid, 2)} · 点差 ${num(c.spread_pct, 1)}% · OI ${num(c.oi, 0)} · Δ ${isNum(c.delta) ? num(c.delta, 2) : "—"}`),
     h("div", { class: "sd-row" }, `年化 ${num(c.annual_yield_pct, 1)}% · 被行权净成本 ${num(c.net_cost, 2)}（比现价 ${sPct(c.net_discount_pct)}）· 一张占资金 ${money(c.capital_usd, 0)} · `
       + (c.earnings_in_window === true ? "财报在到期前" : c.earnings_in_window === false ? "财报不在到期前" : "财报日待验证")),
+    h("div", { class: "sd-row" }, `IV ${isNum(c.iv_pct) ? num(c.iv_pct, 1) + "%" : "—"} · 30 日实际波动 ${isNum(c.rv_pct) ? num(c.rv_pct, 1) + "%" : "—"} · IV ÷ RV ${isNum(c.iv_over_rv) ? num(c.iv_over_rv, 2) : "—"}`),
     rp?.ok ? h("div", { class: "small muted" }, `把这张的 bid 放回过去的真实行情（重叠窗口 ${rp.n_windows} 个、互不重叠约 ${rp.independent_windows} 个）：平均净收益 ${sPct(rp.mean_net_pct, 2)}（占行权价）· 净赚 ${num(rp.win_pct, 0)}% · 5% 分位 ${sPct(rp.p05_net_pct, 1)} · 最差 ${sPct(rp.worst_net_pct, 1)}。偏乐观、样本很小，不是预测。`)
       : h("div", { class: "small muted" }, c.replay_needs_prices ? "权利金重放要日线：先点「取行情统计」。" : `权利金重放不给：${rp?.reason || "—"}`));
 }

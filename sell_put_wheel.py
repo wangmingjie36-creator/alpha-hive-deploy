@@ -44,26 +44,31 @@ CONFIG: Dict[str, Any] = {
     "contracts": 1,
     "per_name_cap_pct": 20.0,        # 单只 put 的现金担保（行权价 × 100 × 张数）占 NAV 上限
     "total_cap_pct": 60.0,           # put 担保 + 持股市值占 NAV 上限（再开新 put 之前判）
-    "put_dte_range": (55, 90), "put_dte_target": 70,
+    # put 到期窗口（日历日）。v2（用户 2026-11-06 定）：30–50 天；窗口内**每个**到期日都参与综合分比较（不再取离目标最近的那一个）
+    "put_dte_range": (30, 50),
     "call_dte_range": (25, 50), "call_dte_target": 35,
     "call_target_delta": 0.25,
     "max_spread_pct": 0.15,          # (ask − bid) / mid 超过它不开（点差吃权利金，同跨式账本的口径）
     "min_oi": 100,
-    # 同时有多只能开、但担保额度不够都开时，按「年化权利金」从高到低先开（用户 2026-11-04「选溢价标的」的字面解读，待用户确认）
-    "rank_by": "annual_yield",
+    # v2：期权要比实际波动「贵」才卖——合约 IV ÷ 标的 RV 低于它不开（主观门槛，未经检验）
+    "rv_window": 30,                 # RV = 最近 30 个日收益（31 个分红复权收盘，yfinance）的年化标准差，同 `vrp_signal.realized_vol_from_closes`
+    "min_iv_rv": 1.0,
+    # v2：综合分 = 年化权利金 × (IV ÷ RV)。同一只里用它在「窗口内到期日 × 不高于接货价的合格行权价」中选那一张；
+    # 担保额度不够都开时，也按它从高到低先开（用户 2026-11-06「年化也要考虑进去，要综合评价」；乘法不另设权重，公式本身是主观设定）
+    "rank_by": "annual_yield_x_iv_rv",
 }
 
 def public_rules() -> dict:
     """页面 / 帮助页用的规则常量（取 CONFIG 当下的值，前端不另抄）。元组转列表以便 JSON。"""
     keys = ("universe", "accept_price", "placeholder_otm_pct", "starting_capital", "contracts", "per_name_cap_pct",
-            "total_cap_pct", "put_dte_range", "put_dte_target", "call_dte_range", "call_dte_target",
-            "call_target_delta", "max_spread_pct", "min_oi", "rank_by")
+            "total_cap_pct", "put_dte_range", "call_dte_range", "call_dte_target",
+            "call_target_delta", "max_spread_pct", "min_oi", "rv_window", "min_iv_rv", "rank_by")
     return {k: (list(CONFIG[k]) if isinstance(CONFIG[k], tuple) else (dict(CONFIG[k]) if isinstance(CONFIG[k], dict)
                                                                       else CONFIG[k])) for k in keys}
 
 
 #: 口径世代（手写常量，只在账本口径变时改）
-_VERSION = "0.45.720"
+_VERSION = "0.45.742"          # v2 选合约规则（30–50 天、IV/RV 门槛、综合分）；0.45.720 = v1
 CONTRACT = 100
 
 
@@ -132,6 +137,9 @@ SKIP_REASONS = {
     "no_price": "取不到标的现价",
     "no_expiry": "没有落在期限窗口内的到期日",
     "no_strike": "没有不高于接货价的行权价",
+    "no_rv": "算不出标的实际波动率（日线取不到或不够 31 根）",
+    "no_iv": "合格行权价都没有隐含波动率",
+    "iv_below_rv": "隐含波动率 ÷ 实际波动率低于门槛（期权不比实际波动贵）",
     "no_bid": "该行权价没有买价（bid 为 0）",
     "bad_quote": "报价不合格（ask 缺失 / 倒挂）",
     "wide_spread": "点差超过上限",
@@ -167,31 +175,76 @@ def pick_expiry(contracts: List[dict], cp: str, as_of: str, rng: Tuple[int, int]
     return min(cand, key=lambda de: (abs(de[0] - target), -de[0]))[1]
 
 
-def pick_put(contracts: List[dict], spot: float, accept: Optional[float], as_of: str) -> Tuple[Optional[dict], Optional[str], dict]:
-    """卖哪一张 put：期限窗口内离目标最近的到期日；行权价 = **不高于接货价的最高一档且合格的**。
+def rv_from_closes(closes: Optional[Dict[str, float]], as_of: str) -> Optional[float]:
+    """`{YYYY-MM-DD: 收盘}` 里 ≤ as_of 的最后 `rv_window + 1` 根 → 年化实际波动率（%）。不够根数 / 算不出 ⇒ None（不猜）。
+    公式只有一份：`vrp_signal.realized_vol_from_closes`（对数收益、ddof=1、×√252）。"""
+    from vrp_signal import realized_vol_from_closes
+    if not closes:
+        return None
+    n = int(CONFIG["rv_window"]) + 1
+    days = sorted(d for d in closes if str(d)[:10] <= as_of)[-n:]
+    if len(days) < n:
+        return None
+    return realized_vol_from_closes([closes[d] for d in days])
 
-    返回 (选中的合约 | None, 没选中的原因码 | None, 附加信息)。附加信息带 accept_price / source，选不中也带（页面要解释）。
-    接货价缺省（None）⇒ 现价 ×(1 − 占位 %)，来源记 placeholder。"""
+
+def score_put(c: dict, dte: int, rv_pct: float) -> Optional[Tuple[float, float, float]]:
+    """一张 put 的 (综合分, 年化 %, IV/RV)。综合分 = 年化权利金 × (IV ÷ RV)。没有 IV ⇒ None。"""
+    iv = _pos(c.get("iv"))
+    if iv is None:
+        return None
+    ay = annual_yield(c["bid"], c["strike"], dte)
+    ratio = iv * 100.0 / rv_pct
+    return ay * ratio, ay, ratio
+
+
+def pick_put(contracts: List[dict], spot: float, accept: Optional[float], as_of: str,
+             rv_pct: Optional[float] = None) -> Tuple[Optional[dict], Optional[str], dict]:
+    """卖哪一张 put（v2，用户 2026-11-06 定）：候选 = 期限窗口内**所有**到期日 × **不高于接货价**的行权价，
+    要合格（bid / 点差 / OI）、有 IV、且 IV ÷ RV ≥ 门槛；在候选里取**综合分（年化 × IV/RV）最高**的那一张
+    （同分取更晚到期、再取更高行权价，结果与输入顺序无关）。
+
+    返回 (选中的合约 | None, 没选中的原因码 | None, 附加信息)。附加信息带 accept_price / source / rv_pct，选中时另带
+    iv_pct / iv_rv / annual_yield_pct / score；选不中也带前几项（页面要解释）。
+    接货价缺省（None）⇒ 现价 ×(1 − 占位 %)，来源记 placeholder。都不合格时报「最高行权价、最晚到期」那张的原因。"""
     placeholder = accept is None
     ap = _pos(accept) if not placeholder else spot * (1.0 - CONFIG["placeholder_otm_pct"] / 100.0)
-    info = {"accept_price": round(ap, 4) if ap else None, "accept_price_source": "placeholder" if placeholder else "user"}
+    rv = _pos(rv_pct)
+    info = {"accept_price": round(ap, 4) if ap else None, "accept_price_source": "placeholder" if placeholder else "user",
+            "rv_pct": round(rv, 2) if rv is not None else None}
     if ap is None:
         return None, "no_strike", info
-    exp = pick_expiry(contracts, "P", as_of, CONFIG["put_dte_range"], CONFIG["put_dte_target"])
-    if exp is None:
+    window = dict((e, d) for d, e in _expiries(contracts, "P", as_of, CONFIG["put_dte_range"]))
+    if not window:
         return None, "no_expiry", info
-    chain = sorted((c for c in contracts if c.get("cp") == "P" and c.get("expiry") == exp
+    cands = sorted((c for c in contracts if c.get("cp") == "P" and c.get("expiry") in window
                     and _pos(c.get("strike")) is not None and _pos(c["strike"]) <= ap + 1e-9),
-                   key=lambda c: -c["strike"])
-    if not chain:
+                   key=lambda c: (-c["strike"], -window[c["expiry"]]))
+    if not cands:
         return None, "no_strike", info
-    first_reason = None
-    for c in chain:                      # 从最高的合格档往下找；都不合格就报最高那档的原因
+    if rv is None:
+        return None, "no_rv", info
+    best, best_key, first_reason = None, None, None
+    for c in cands:
         ok, why = _liquid(c)
-        if ok:
-            return c, None, info
-        first_reason = first_reason or why
-    return None, first_reason, info
+        if not ok:
+            first_reason = first_reason or why
+            continue
+        s = score_put(c, window[c["expiry"]], rv)
+        if s is None:
+            first_reason = first_reason or "no_iv"
+            continue
+        if s[2] < CONFIG["min_iv_rv"] - 1e-12:
+            first_reason = first_reason or "iv_below_rv"
+            continue
+        key = (round(s[0], 9), window[c["expiry"]], c["strike"])     # 圆整到 1e-9：纸面同分不让浮点尾数决定，交给同分规则
+        if best_key is None or key > best_key:
+            best, best_key = (c, s), key
+    if best is None:
+        return None, first_reason, info
+    c, (score, ay, ratio) = best
+    return c, None, {**info, "iv_pct": round(_pos(c["iv"]) * 100.0, 2), "iv_rv": round(ratio, 4),
+                     "annual_yield_pct": round(ay, 2), "score": round(score, 4)}
 
 
 def pick_call(contracts: List[dict], basis_floor: float, as_of: str) -> Tuple[Optional[dict], Optional[str]]:
@@ -283,7 +336,8 @@ def _config_snapshot() -> Dict:
 DEFERRED_ALERT_DAYS = 3
 _ITEMS_MAX = 10
 _LOCK = threading.Lock()
-_ZERO = {"runs": 0, "run_errors": 0, "chain_total": 0, "chain_missing": 0, "max_deferred_days": 0}
+_ZERO = {"runs": 0, "run_errors": 0, "chain_total": 0, "chain_missing": 0, "max_deferred_days": 0,
+         "rv_total": 0, "rv_missing": 0}
 _STATS: Dict[str, Any] = {**_ZERO, "items": []}
 
 
@@ -303,12 +357,14 @@ def _note_item(kind: str, detail: Optional[str]) -> None:
 
 
 def stats() -> dict:
-    """进程内计数。`all_chains_missing`：一整轮宇宙里的标的一只链都没取到（接线 / 数据源整批断了）。"""
+    """进程内计数。`all_chains_missing`：一整轮宇宙里的标的一只链都没取到（接线 / 数据源整批断了）。
+    `all_rv_missing`（v0.45.742）：要开 put 的标的一只实际波动率都没算出来——选合约规则 v2 离不开 RV，整批取不到 = 这天一张都开不出。"""
     with _LOCK:
         out = {k: _STATS[k] for k in _ZERO}
         out["items"] = list(_STATS["items"])
     out["all_chains_missing"] = out["chain_total"] > 0 and out["chain_missing"] == out["chain_total"]
     out["deferred_alert"] = out["max_deferred_days"] >= DEFERRED_ALERT_DAYS
+    out["all_rv_missing"] = out["rv_total"] > 0 and out["rv_missing"] == out["rv_total"]
     return out
 
 
@@ -330,6 +386,31 @@ def _default_close(ticker: str, settle_date: str, *, as_of: Optional[str] = None
     return opl._default_close(ticker, settle_date, as_of=as_of)
 
 
+def _default_rv(ticker: str, as_of: str) -> Tuple[Optional[float], Optional[str]]:
+    """标的的实际波动率（%）与取不到的原因。日线经全仓唯一入口 `yf_daily`（分红复权；限流闸 `yf_gate`），
+    只用 ≤ min(as_of, 最近一个已收盘交易日) 的收盘——盘中跑也不会把正在形成的那根算进来。"""
+    import yf_daily
+    import yfinance as yf
+    try:
+        from yf_gate import ensure
+        ensure()
+    except ImportError:
+        pass
+    hist, _ = yf_daily.history(yf.Ticker(ticker), source="sell_put_rv", period="3mo", auto_adjust=True)
+    closes: Dict[str, float] = {}
+    if hist is not None and hasattr(hist, "index") and "Close" in getattr(hist, "columns", ()):
+        for ts, c in zip(hist.index, hist["Close"]):
+            v = _num(c)
+            if v is not None:
+                closes[str(ts)[:10]] = v
+    done = yf_daily.latest_completed_session()
+    if done is None:
+        return None, f"session_unknown:{as_of}"        # 明细（进 skipped.detail），不是原因码
+    cut = min(as_of, done.isoformat())
+    rv = rv_from_closes(closes, cut)
+    return (rv, None) if rv is not None else (None, f"too_few_closes:{sum(1 for d in closes if d <= cut)}")
+
+
 def _settle_session(day: str) -> str:
     import options_paper_leg as opl
     return opl._settle_session(day)
@@ -342,25 +423,28 @@ def _resolve_close(raw, session: str) -> Dict:
 
 def run_for_date(as_of: str,
                  contracts_fn: Optional[Callable[[str, str], Tuple[Optional[dict], Optional[str]]]] = None,
-                 closes_fn: Optional[Callable[..., Any]] = None) -> Dict:
+                 closes_fn: Optional[Callable[..., Any]] = None,
+                 rv_fn: Optional[Callable[[str, str], Tuple[Optional[float], Optional[str]]]] = None) -> Dict:
     """(a) 到期结算 → (b) 卖 call / 卖 put → (c) 盯市与净值。同日重跑幂等。
 
     整轮持账本目录锁：读 meta / 持仓 → 改 → 写回是一次读-改-写，手动补跑与定时扫描撞上时后写者会用旧快照覆盖先写者。
     `contracts_fn(ticker, as_of)` → (`fetch_cboe_raw_contracts` 形状 | None, 原因)；`closes_fn(ticker, settle_date, as_of=...)`
-    → 自报场次的 dict（缺省 `options_paper_leg._default_close`）或裸数字（测试注入，视为「就是那一场的收盘」）。"""
+    → 自报场次的 dict（缺省 `options_paper_leg._default_close`）或裸数字（测试注入，视为「就是那一场的收盘」）；
+    `rv_fn(ticker, as_of)` → (实际波动率 % | None, 原因)（缺省 `_default_rv`，yfinance 复权日线）。"""
     d = _paths()["dir"]
     d.mkdir(parents=True, exist_ok=True)
     _note(runs=1)
     try:
         with ledger_io.locked(d):
-            return _run_for_date(as_of, contracts_fn or _default_contracts, closes_fn or _default_close)
+            return _run_for_date(as_of, contracts_fn or _default_contracts, closes_fn or _default_close,
+                                 rv_fn or _default_rv)
     except Exception as exc:  # noqa: BLE001 - 登记后原样抛：调用方（日报钩子）会吞成 WARNING，计数才是红的那个
         _note(run_errors=1)
         _note_item("run_error", f"{type(exc).__name__}: {exc}")
         raise
 
 
-def _run_for_date(as_of: str, contracts_fn, closes_fn) -> Dict:
+def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
     p = _paths()
     meta = _load_meta()
     cash = _num(meta.get("cash"))
@@ -468,7 +552,7 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn) -> Dict:
                        "premium": c["bid"], "contracts": n, "cycle": lot["cycle"], "delta": c.get("delta"),
                        "basis_floor": lot["shares"]["basis"]})
 
-    # ── (b') 卖 put（无仓的标的）：按年化权利金从高到低排，逐只判额度 ──
+    # ── (b') 卖 put（无仓的标的）：按综合分（年化 × IV/RV）从高到低排，逐只判额度 ──
     meta_nav = _nav_estimate(cash, lots, chains, chain)
     cands: List[Tuple[float, str, dict, dict]] = []
     for tk in CONFIG["universe"]:
@@ -482,14 +566,22 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn) -> Dict:
         if spot is None:
             skipped.append({"ticker": tk, "leg": "put", "reason": "no_price"})
             continue
-        c, why, info = pick_put(ch["contracts"], spot, CONFIG["accept_price"].get(tk), as_of)
+        try:
+            rv, why_rv = rv_fn(tk, as_of)
+        except Exception as exc:  # noqa: BLE001 - 单只取不到不连坐其余；计数 + 原因进 skipped，整批取不到 ⇒ P2
+            rv, why_rv = None, f"{type(exc).__name__}: {exc}"
+        _note(rv_total=1, rv_missing=0 if _pos(rv) is not None else 1)
+        if _pos(rv) is None:
+            _note_item("rv_missing", f"{tk}: {why_rv}")
+        c, why, info = pick_put(ch["contracts"], spot, CONFIG["accept_price"].get(tk), as_of, rv_pct=rv)
         if c is None:
-            skipped.append({"ticker": tk, "leg": "put", "reason": why, **info})
+            skipped.append({"ticker": tk, "leg": "put", "reason": why, **info,
+                            **({"detail": why_rv} if why == "no_rv" else {})})
             continue
         dte = _dte(as_of, c["expiry"])
-        cands.append((annual_yield(c["bid"], c["strike"], dte), tk, c, {**info, "spot": spot, "dte": dte}))
+        cands.append((info["score"], tk, c, {**info, "spot": spot, "dte": dte}))
     cands.sort(key=lambda x: -x[0])
-    for yld, tk, c, info in cands:
+    for _score, tk, c, info in cands:
         n = int(CONFIG["contracts"])
         reserve = c["strike"] * CONTRACT * n
         nav = meta_nav["nav"]
@@ -511,12 +603,16 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn) -> Dict:
                             "sold_on": as_of, "delta": c.get("delta"), "last_mark": mark_of(c) or c["bid"],
                             "last_mark_date": as_of, "stale_days": 0, "spot_at_open": info["spot"],
                             "accept_price": info["accept_price"], "accept_price_source": info["accept_price_source"],
-                            "annual_yield_pct": round(yld, 2), "dte_at_open": info["dte"]}}
+                            "annual_yield_pct": info["annual_yield_pct"], "dte_at_open": info["dte"],
+                            "iv_pct": info["iv_pct"], "rv_pct": info["rv_pct"], "iv_rv": info["iv_rv"],
+                            "score": info["score"], "rule_version": _VERSION}}
         events.append({"date": as_of, "ticker": tk, "event": "put_sold", "strike": c["strike"], "expiry": c["expiry"],
                        "premium": c["bid"], "contracts": n, "cycle": cycle, "delta": c.get("delta"),
                        "spot": info["spot"], "accept_price": info["accept_price"],
-                       "accept_price_source": info["accept_price_source"], "annual_yield_pct": round(yld, 2),
-                       "dte": info["dte"], "spread_pct": round(_spread_pct(c) * 100, 2)})
+                       "accept_price_source": info["accept_price_source"], "annual_yield_pct": info["annual_yield_pct"],
+                       "dte": info["dte"], "spread_pct": round(_spread_pct(c) * 100, 2),
+                       "iv_pct": info["iv_pct"], "rv_pct": info["rv_pct"], "iv_rv": info["iv_rv"], "score": info["score"],
+                       "rule_version": _VERSION})
 
     # ── (c) 盯市与净值 ──
     nav_info = _nav_estimate(cash, lots, chains, chain, mark=True, as_of=as_of)

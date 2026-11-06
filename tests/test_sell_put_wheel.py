@@ -1,11 +1,12 @@
 """接货型卖 put 纸面账本（v0.45.720，`sell_put_wheel.py`）的守卫。离线：期权链 / 收盘一律注入，账本在 tmp。
 
 每组回答一句「谁会红」：
-  · 选合约的纯规则：行权价 = 不高于接货价的最高合格档、点差 / OI / 无 bid 各有原因码（`TestPickPut` / `TestPickCall`）；
+  · 选合约的纯规则（v2，v0.45.742）：窗口内到期日 × 不高于接货价的合格档里取「年化 × IV/RV」最高的那张，IV/RV 门槛、
+    缺 RV / 缺 IV、点差 / OI / 无 bid 各有原因码（`TestPickPut` / `TestRealizedVol` / `TestPickCall`）；
   · 到期边界：收盘 == 行权价 ⇒ 不接货；== call 行权价 ⇒ 不被叫走（`TestSettleBoundaries`）；
   · 账本算术：现金 / 持股 / 负债 / 净值用手工数字独立复算，一圈的盈亏（`TestLifecycle`）；
   · 到期当天不结、取不到那一场收盘就延期、**绝不拿前一天的价顶替**（`TestSettlementTiming`）；
-  · 额度：单只 / 总担保上限、同时可开多只时按年化权利金从高到低（`TestCaps`）；
+  · 额度：单只 / 总担保上限、同时可开多只时按综合分从高到低（`TestCaps`）；
   · 同日重跑逐字节幂等、坏 meta 抛、非有限数进不了账本（`TestLedgerSafety`）；
   · 原因码唯一一张表：写出的每个码都登记、表里无死键（`TestReasonTable`）。
 """
@@ -33,16 +34,27 @@ def pinned_config(monkeypatch):
     cfg = dict(W.CONFIG)
     cfg.update(universe=["AAA"], accept_price={"AAA": None}, placeholder_otm_pct=10.0, starting_capital=100_000.0,
                contracts=1, per_name_cap_pct=20.0, total_cap_pct=60.0, max_spread_pct=0.15, min_oi=100,
-               put_dte_range=(55, 90), put_dte_target=70, call_dte_range=(25, 50), call_dte_target=35,
-               call_target_delta=0.25)
+               put_dte_range=(55, 90), call_dte_range=(25, 50), call_dte_target=35,
+               call_target_delta=0.25, rv_window=30, min_iv_rv=1.0)
     monkeypatch.setattr(W, "CONFIG", cfg)
     return cfg
 
 
-def put(strike, bid, ask=None, oi=500, exp=PUT_EXP, delta=-0.2, sym=None):
+RV = 20.0                  # 测试里所有标的的实际波动率（%）；put() 缺省 IV 25% ⇒ IV/RV = 1.25
+
+
+@pytest.fixture(autouse=True)
+def offline_rv(monkeypatch):
+    """缺省 RV 取数会打 yfinance：一律换成常数，测试保持离线（要测「取不到」的用例自己再注入 rv_fn）。"""
+    calls = []
+    monkeypatch.setattr(W, "_default_rv", lambda tk, as_of: calls.append((tk, as_of)) or (RV, None))
+    return calls
+
+
+def put(strike, bid, ask=None, oi=500, exp=PUT_EXP, delta=-0.2, sym=None, iv=0.25):
     ask = ask if ask is not None else round(bid * 1.04, 2)
     return {"symbol": sym or f"AAA{exp.replace('-', '')}P{int(strike * 1000):08d}", "expiry": exp, "cp": "P",
-            "strike": float(strike), "bid": bid, "ask": ask, "oi": oi, "delta": delta}
+            "strike": float(strike), "bid": bid, "ask": ask, "oi": oi, "delta": delta, "iv": iv}
 
 
 def call(strike, bid, ask=None, oi=500, exp=CALL_EXP, delta=0.25, sym=None):
@@ -79,54 +91,110 @@ STD_PUTS = [put(90, 2.0), put(85, 1.2), put(95, 3.0, ask=3.1)]
 # ───────────────────────────── 选合约 ─────────────────────────────
 
 class TestPickPut:
-    def test_highest_qualified_strike_at_or_below_the_accept_price(self):
-        c, why, info = W.pick_put(STD_PUTS, 100.0, 92.0, D0)
+    def pick(self, cs, accept=92.0, rv=RV, spot=100.0):
+        return W.pick_put(cs, spot, accept, D0, rv_pct=rv)
+
+    def test_same_iv_means_annual_yield_decides_and_info_explains_the_pick(self):
+        c, why, info = self.pick(STD_PUTS)
         assert c["strike"] == 90.0 and why is None
-        assert info == {"accept_price": 92.0, "accept_price_source": "user"}
+        ay = W.annual_yield(2.0, 90.0, 72)
+        assert info == {"accept_price": 92.0, "accept_price_source": "user", "rv_pct": RV, "iv_pct": 25.0,
+                        "iv_rv": 1.25, "annual_yield_pct": round(ay, 2), "score": round(ay * 1.25, 4)}
+
+    def test_composite_overrides_a_higher_annual_yield_with_cheaper_iv(self):
+        """年化高的那张（90）IV/RV 只有 1.1；85 年化略低但 IV/RV 1.5 ⇒ 综合分 85 高。纯按年化会选 90——这条区分 v1 / v2。"""
+        a, b = put(90, 2.0, iv=0.22), put(85, 1.8, iv=0.30)
+        assert W.annual_yield(2.0, 90, 72) > W.annual_yield(1.8, 85, 72)
+        assert self.pick([a, b])[0]["strike"] == 85.0
+
+    def test_every_expiry_in_the_window_competes(self):
+        near, far = put(90, 2.0, exp="2027-01-08"), put(90, 2.4, exp="2027-01-29")   # DTE 65 / 86
+        assert W.annual_yield(2.0, 90, 65) > W.annual_yield(2.4, 90, 86)
+        assert self.pick([far, near])[0]["expiry"] == "2027-01-08"
+        richer_far = put(90, 3.0, exp="2027-01-29")
+        assert self.pick([near, richer_far])[0]["expiry"] == "2027-01-29"
+
+    def test_ties_go_to_the_later_expiry_then_the_higher_strike_whatever_the_order(self):
+        # 同分：年化与 IV/RV 都相同（bid ∝ 行权价 × 天数）
+        a, b = put(90, 1.30, exp="2027-01-08"), put(90, 1.30 * 86 / 65, exp="2027-01-29")
+        s_a = W.score_put(a, 65, RV)[0]
+        s_b = W.score_put(b, 86, RV)[0]
+        assert s_a == pytest.approx(s_b)
+        for cs in ([a, b], [b, a]):
+            assert self.pick(cs)[0]["expiry"] == "2027-01-29"
+        x, y = put(90, 1.8), put(80, 1.6)          # 1.8/90 == 1.6/80
+        for cs in ([x, y], [y, x]):
+            assert self.pick(cs)[0]["strike"] == 90.0
 
     def test_strike_equal_to_accept_price_is_allowed(self):
-        c, _, _ = W.pick_put(STD_PUTS, 100.0, 90.0, D0)
-        assert c["strike"] == 90.0
+        assert self.pick(STD_PUTS, accept=90.0)[0]["strike"] == 90.0
 
     def test_placeholder_uses_spot_less_ten_percent_and_says_so(self):
-        c, why, info = W.pick_put(STD_PUTS, 100.0, None, D0)
+        c, why, info = self.pick(STD_PUTS, accept=None)
         assert c["strike"] == 90.0 and why is None
-        assert info == {"accept_price": 90.0, "accept_price_source": "placeholder"}
+        assert info["accept_price"] == 90.0 and info["accept_price_source"] == "placeholder"
 
-    def test_walks_down_when_the_top_strike_is_not_tradable(self):
-        cs = [put(90, 2.0, ask=3.5), put(85, 1.2)]          # 90 点差 54% ⇒ 往下找 85
-        c, _, _ = W.pick_put(cs, 100.0, 92.0, D0)
-        assert c["strike"] == 85.0
+    def test_untradable_contracts_never_compete(self):
+        cs = [put(90, 2.0, ask=3.5), put(85, 1.2)]          # 90 点差 54% ⇒ 只剩 85
+        assert self.pick(cs)[0]["strike"] == 85.0
 
     @pytest.mark.parametrize("bad, code", [
         (put(90, 0.0, ask=0.2), "no_bid"),
         (put(90, 2.0, ask=1.0), "bad_quote"),               # ask < bid
         (put(90, 2.0, ask=3.0), "wide_spread"),             # 点差 40%
         (put(90, 2.0, oi=50), "low_oi"),
+        (put(90, 2.0, iv=None), "no_iv"),
+        (put(90, 2.0, iv=0.0), "no_iv"),
+        (put(90, 2.0, iv=0.19), "iv_below_rv"),             # 19 / 20 < 1
     ])
     def test_reason_codes_when_nothing_qualifies(self, bad, code):
-        c, why, _ = W.pick_put([bad], 100.0, 92.0, D0)
+        c, why, _ = self.pick([bad])
         assert c is None and why == code
 
+    def test_iv_exactly_at_the_threshold_is_allowed(self):
+        assert self.pick([put(90, 2.0, iv=0.20)])[0] is not None          # 20 / 20 == 1.0
+
+    def test_reported_reason_is_the_top_strike_latest_expiry(self):
+        cs = [put(80, 1.0, oi=50, exp="2027-01-29"), put(90, 2.0, iv=0.1, exp="2027-01-08"), put(90, 2.0, ask=3.0, exp="2027-01-29")]
+        assert self.pick(cs)[1] == "wide_spread"
+
+    def test_missing_rv_is_a_reason_not_a_guess(self):
+        for rv in (None, 0.0, float("nan"), -5.0):
+            c, why, info = self.pick(STD_PUTS, rv=rv)
+            assert c is None and why == "no_rv" and info["rv_pct"] is None
+
+    def test_structural_reasons_come_before_missing_rv(self):
+        assert self.pick([put(95, 3.0)], accept=90.0, rv=None)[1] == "no_strike"
+        assert self.pick([put(90, 2.0, exp="2026-12-04")], rv=None)[1] == "no_expiry"
+
     def test_no_strike_at_or_below_accept(self):
-        assert W.pick_put([put(95, 3.0)], 100.0, 90.0, D0)[1] == "no_strike"
+        assert self.pick([put(95, 3.0)], accept=90.0)[1] == "no_strike"
 
     def test_no_expiry_in_window(self):
-        assert W.pick_put([put(90, 2.0, exp="2026-12-04")], 100.0, 92.0, D0)[1] == "no_expiry"   # DTE 30 < 55
+        assert self.pick([put(90, 2.0, exp="2026-12-04")])[1] == "no_expiry"   # DTE 30 < 55
+        assert self.pick([put(90, 2.0, exp="2027-02-19")])[1] == "no_expiry"   # DTE 107 > 90
 
-    def test_nearest_expiry_to_target_and_later_one_on_a_tie(self):
-        a, b = put(90, 2.0, exp="2027-01-08"), put(90, 2.0, exp="2027-01-22")   # DTE 65 / 79：距目标 70 是 5 / 9
-        assert W.pick_put([a, b], 100.0, 92.0, D0)[0]["expiry"] == "2027-01-08"
-        c, d = put(90, 2.0, exp="2027-01-11"), put(90, 2.0, exp="2027-01-19")   # 68 / 76：距离 2 / 6
-        assert W.pick_put([c, d], 100.0, 92.0, D0)[0]["expiry"] == "2027-01-11"
-        e, f = put(90, 2.0, exp="2027-01-10"), put(90, 2.0, exp="2027-01-14")   # 67 / 71：距离 3 / 1
-        assert W.pick_put([e, f], 100.0, 92.0, D0)[0]["expiry"] == "2027-01-14"
 
-    def test_tie_goes_to_the_later_expiry(self):
-        e, f = put(90, 2.0, exp="2027-01-12"), put(90, 2.0, exp="2027-01-16")   # 69 / 73 → 距离 1 / 3，不是平局
-        g, h = put(90, 2.0, exp="2027-01-12"), put(90, 2.0, exp="2027-01-14")   # 69 / 71 → 距离都是 1
-        assert W.pick_put([g, h], 100.0, 92.0, D0)[0]["expiry"] == "2027-01-14"
-        assert W.pick_put([e, f], 100.0, 92.0, D0)[0]["expiry"] == "2027-01-12"
+class TestRealizedVol:
+    @staticmethod
+    def closes(n, start="2026-09-01"):
+        from datetime import date as _d, timedelta
+        d0 = _d.fromisoformat(start)
+        return {(d0 + timedelta(days=i)).isoformat(): 100.0 * (1.01 if i % 2 else 0.995) ** (i % 7) for i in range(n)}
+
+    def test_uses_exactly_the_last_window_plus_one_closes_up_to_as_of(self):
+        from vrp_signal import realized_vol_from_closes
+        cl = self.closes(60)
+        as_of = sorted(cl)[49]
+        days = sorted(d for d in cl if d <= as_of)[-31:]
+        assert W.rv_from_closes(cl, as_of) == pytest.approx(realized_vol_from_closes([cl[d] for d in days]))
+        later = {**cl, sorted(cl)[50]: 500.0}                     # as_of 之后的价不影响
+        assert W.rv_from_closes(later, as_of) == W.rv_from_closes(cl, as_of)
+
+    def test_too_few_closes_is_none(self):
+        cl = self.closes(30)
+        assert W.rv_from_closes(cl, "2099-01-01") is None
+        assert W.rv_from_closes({}, "2099-01-01") is None and W.rv_from_closes(None, "2099-01-01") is None
 
 
 class TestPickCall:
@@ -346,13 +414,25 @@ class TestCaps:
         assert sum(e["event"] == "put_sold" for e in r["events"]) == 1                # 9000 ≤ 12000，再加 9000 超
         assert any(s["reason"] == "total_cap" for s in r["skipped"])
 
-    def test_higher_annual_yield_gets_the_scarce_budget_first(self, pinned_config):
+    def test_higher_score_gets_the_scarce_budget_first(self, pinned_config):
         pinned_config.update(universe=["AAA", "BBB"], accept_price={"AAA": None, "BBB": None}, total_cap_pct=12.0)
         rich = [{**put(90, 4.0), "symbol": "BBB270115P00090000"}]                # BBB 权利金高一倍
         table = {D0: {"AAA": chain(100.0, [put(90, 2.0)]), "BBB": chain(100.0, rich)}}
         r = W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}))
         sold = [e["ticker"] for e in r["events"] if e["event"] == "put_sold"]
-        assert sold == ["BBB"]                                                    # 名额只够一只 ⇒ 年化高的先开
+        assert sold == ["BBB"]                                                    # 名额只够一只 ⇒ 综合分高的先开
+
+    def test_scarce_budget_follows_the_score_not_the_yield(self, pinned_config):
+        pinned_config.update(universe=["AAA", "BBB"], accept_price={"AAA": None, "BBB": None}, total_cap_pct=12.0)
+        aaa = [put(90, 2.2, iv=0.21)]                                              # 年化高、IV/RV 1.05
+        bbb = [{**put(90, 2.0, iv=0.30), "symbol": "BBB270115P00090000"}]          # 年化低、IV/RV 1.5
+        table = {D0: {"AAA": chain(100.0, aaa), "BBB": chain(100.0, bbb)}}
+        r = W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}))
+        assert [e["ticker"] for e in r["events"] if e["event"] == "put_sold"] == ["BBB"]
+        e = r["events"][0]
+        assert e["iv_rv"] == 1.5 and e["rv_pct"] == RV and e["iv_pct"] == 30.0 and e["rule_version"] == W._VERSION
+        assert _lot()["BBB"]["put"]["rule_version"] == W._VERSION
+        assert e["score"] == pytest.approx(round(W.annual_yield(2.0, 90, 72) * 1.5, 4))
 
     def test_user_accept_price_overrides_the_placeholder(self, pinned_config):
         pinned_config["accept_price"] = {"AAA": 86.0}
@@ -508,6 +588,38 @@ class TestFailuresAreVisible:
         assert s["chain_total"] == 2 and s["chain_missing"] == 2 and s["all_chains_missing"] is True
         assert any(i["kind"] == "chain_missing" and "BBB" in i["detail"] for i in s["items"])
 
+    def test_rv_failures_are_counted_skipped_with_detail_and_all_missing_is_flagged(self, pinned_config):
+        """v0.45.742：RV 取不到（返回 None 或抛）⇒ 这只记 no_rv + 明细、计数；要开的每只都取不到 ⇒ all_rv_missing（P2）。"""
+        pinned_config.update(universe=["AAA", "BBB"], accept_price={"AAA": None, "BBB": None})
+        bbb = [{**p, "symbol": p["symbol"].replace("AAA", "BBB")} for p in STD_PUTS]
+        table = {D0: {"AAA": chain(100.0, STD_PUTS), "BBB": chain(100.0, bbb)}}
+
+        def half(tk, as_of):
+            if tk == "BBB":
+                raise RuntimeError("429")
+            return RV, None
+        r = W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}), rv_fn=half)
+        s = W.stats()
+        assert s["rv_total"] == 2 and s["rv_missing"] == 1 and s["all_rv_missing"] is False
+        sk = [x for x in r["skipped"] if x["ticker"] == "BBB"][0]
+        assert sk["reason"] == "no_rv" and "RuntimeError: 429" in sk["detail"]
+        assert [e["ticker"] for e in r["events"]] == ["AAA"]
+        W.reset_stats()
+        pinned_config.update(universe=["BBB", "CCC"], accept_price={"BBB": None, "CCC": None})
+        ccc = [{**p, "symbol": p["symbol"].replace("AAA", "CCC")} for p in STD_PUTS]
+        r = W.run_for_date("2026-11-05", contracts_fn=contracts_for({"2026-11-05": {"BBB": chain(100.0, bbb), "CCC": chain(100.0, ccc)}}),
+                           closes_fn=closes_for({}), rv_fn=lambda tk, d: (None, "too_few_closes:3"))
+        s = W.stats()
+        assert s["rv_missing"] == 2 and s["all_rv_missing"] is True and r["events"] == []
+        assert any(i["kind"] == "rv_missing" and "too_few_closes:3" in i["detail"] for i in s["items"])
+
+    def test_names_already_holding_a_lot_never_fetch_rv(self, offline_rv):
+        table = {D0: {"AAA": chain(100.0, STD_PUTS)}}
+        W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}))
+        n = len(offline_rv)
+        W.run_for_date("2026-11-05", contracts_fn=contracts_for(table), closes_fn=closes_for({}))
+        assert n == 1 and len(offline_rv) == 1                        # 第二天已有仓 ⇒ 不再取
+
     def test_a_raising_run_is_counted_and_still_raises(self):
         table = {D0: {"AAA": chain(100.0, STD_PUTS)}}
         W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}))
@@ -559,6 +671,7 @@ class TestAlert:
         ({"run_errors": 1, "items": [{"kind": "run_error", "detail": "LedgerCorrupt: x"}]}, "整轮抛了"),
         ({"chain_missing": 3, "all_chains_missing": True}, "一只期权链都没取到"),
         ({"max_deferred_days": 3, "deferred_alert": True}, "结算已延期 3 天"),
+        ({"rv_total": 3, "rv_missing": 3, "all_rv_missing": True}, "实际波动率都没算出来"),
     ])
     def test_each_failure_shape_is_a_p2(self, tmp_path, change, phrase):
         alerts, _ = _analyze(tmp_path, {**self.CLEAN, **change})
@@ -567,7 +680,7 @@ class TestAlert:
         assert alerts[0].level == am.AlertLevel.MEDIUM
 
     def test_one_missing_chain_or_short_deferral_stays_quiet(self, tmp_path):
-        quiet = {**self.CLEAN, "chain_missing": 1, "max_deferred_days": 2}
+        quiet = {**self.CLEAN, "chain_missing": 1, "max_deferred_days": 2, "rv_total": 3, "rv_missing": 2, "all_rv_missing": False}
         assert _analyze(tmp_path, quiet)[0] == []
 
     def test_missing_counter_is_reported_as_skipped_not_as_clean(self, tmp_path):

@@ -724,6 +724,7 @@ POLICY = {
     ("crowding_detector.py", "get_crowding_metrics"): "refuse",
     ("alphabot/beta_long.py", "_fetch_closes"): "ignore",                          # 按日期对齐、只用 as_of 以前的收益；缺最近一根只是样本少一天
     ("alphabot/wheel_prices.py", "_fetch"): "ignore",                              # 只展示的统计；缺最近一根只是少一天，按已有收盘算
+    ("sell_put_wheel.py", "_default_rv"): "ignore",                                # 30 日 RV：缺最近一根 ⇒ 窗口整体早一天（仍是 31 根），不顶替、不补
     # ── history：带日期窗口、按日期用（v0.45.658 迁入）──
     ("backtester.py", "Backtester._history"): "ignore",
     ("outcomes_fetcher.py", "OutcomesFetcher._fetch_remote"): "ignore",
