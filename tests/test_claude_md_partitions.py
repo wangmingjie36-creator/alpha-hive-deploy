@@ -283,6 +283,7 @@ class TestOverBudgetMessage:
         raw = ("# 总标题\n## 小节\n" + "字" * 100 + "\n## 大节\n" + "字" * 300 + "\n").encode()
         msg = over_budget_message(raw, budget=len(raw) - 7)
         assert "超预算 7（" in msg
+        assert "最大的 3 节" in msg, "不足 5 节时照实写列出了几节"
         assert msg.index("## 大节") < msg.index("## 小节"), "大的节要排在前面"
         # 两条正路的关键词：逐字搬；调大预算先问用户——那不是撞线的会话能自己做的决定
         assert "逐字" in msg and "先问用户" in msg
