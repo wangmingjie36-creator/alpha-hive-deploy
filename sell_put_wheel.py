@@ -188,6 +188,58 @@ def rv_from_closes(closes: Optional[Dict[str, float]], as_of: str) -> Optional[f
     return realized_vol_from_closes([closes[d] for d in days])
 
 
+#: `rv_asof` 判不出 RV 的明细码（进 skipped.detail / 页面；不是 SKIP_REASONS 的原因码——那边统一记 `no_rv`）
+RV_DETAILS = {
+    "session_unknown": "判不了最近一个已收盘的交易日",
+    "closes_lag": "日线最后一根早于应有的那一场（数据源还没给出 / 缓存是那一场收盘前取的）",
+    "too_few_closes": "截止那一场之前的收盘不够 31 根",
+    "no_closes": "没有日线",
+}
+
+
+def expected_session(cut: str) -> Optional[str]:
+    """≤ cut 的最近一个美股交易日（含临时休市表）。纯日历，不联网。"""
+    from bars_integrity import AD_HOC_CLOSURES
+    from is_trading_day import is_trading_day
+    try:
+        d = date.fromisoformat(str(cut)[:10])
+    except ValueError:
+        return None
+    for _ in range(15):
+        if d not in AD_HOC_CLOSURES and is_trading_day(d)[0]:
+            return d.isoformat()
+        d = date.fromordinal(d.toordinal() - 1)
+    return None
+
+
+def rv_asof(closes: Optional[Dict[str, float]], as_of: str, completed: Optional[str]) -> Tuple[Optional[float], dict]:
+    """**账本与筛选页唯一的 RV 入口**（v0.45.744）：哪几根收盘算数、窗口末根对不对，只在这里判。
+
+    `completed` = **取这份日线那一刻**最近一个已收盘的交易日（调用方在取数前记下）。截止场次 = ≤ min(as_of, completed)
+    的最近交易日；窗口 = 截止场次及之前的最后 `rv_window + 1` 根。
+    ⚠️ 末根日期必须**恰好等于**截止场次：早了（数据源缺最近一场 / 缓存是那一场收盘前取的）⇒ `closes_lag`，不把窗口
+    悄悄往前挪一天算一个「看起来正常」的数（v0.45.742 两边各截各的，正是这样对不上的）。
+    返回 (RV % | None, {"end", "expected", "n", "why"})；why 为 None = 算出来了。"""
+    meta: dict = {"end": None, "expected": None, "n": 0, "why": None}
+    if not completed:
+        return None, {**meta, "why": "session_unknown"}
+    exp = expected_session(min(str(as_of)[:10], str(completed)[:10]))
+    meta["expected"] = exp
+    if exp is None:
+        return None, {**meta, "why": "session_unknown"}
+    days = sorted(d for d in (closes or {}) if str(d)[:10] <= exp)
+    meta["n"] = len(days)
+    if not days:
+        return None, {**meta, "why": "no_closes"}
+    meta["end"] = str(days[-1])[:10]
+    if meta["end"] != exp:
+        return None, {**meta, "why": "closes_lag"}
+    rv = rv_from_closes(closes, exp)
+    if rv is None:
+        return None, {**meta, "why": "too_few_closes"}
+    return rv, meta
+
+
 def score_put(c: dict, dte: int, rv_pct: float) -> Optional[Tuple[float, float, float]]:
     """一张 put 的 (综合分, 年化 %, IV/RV)。综合分 = 年化权利金 × (IV ÷ RV)。没有 IV ⇒ None。"""
     iv = _pos(c.get("iv"))
@@ -386,9 +438,9 @@ def _default_close(ticker: str, settle_date: str, *, as_of: Optional[str] = None
     return opl._default_close(ticker, settle_date, as_of=as_of)
 
 
-def _default_rv(ticker: str, as_of: str) -> Tuple[Optional[float], Optional[str]]:
-    """标的的实际波动率（%）与取不到的原因。日线经全仓唯一入口 `yf_daily`（分红复权；限流闸 `yf_gate`），
-    只用 ≤ min(as_of, 最近一个已收盘交易日) 的收盘——盘中跑也不会把正在形成的那根算进来。"""
+def _default_rv(ticker: str, as_of: str) -> Tuple[Optional[float], dict]:
+    """标的的实际波动率（%）与 `rv_asof` 的明细。日线经全仓唯一入口 `yf_daily`（分红复权；限流闸 `yf_gate`）；
+    **取数之前**记下已收盘场次交给 `rv_asof`——判哪几根算数只在那里。"""
     import yf_daily
     import yfinance as yf
     try:
@@ -396,19 +448,18 @@ def _default_rv(ticker: str, as_of: str) -> Tuple[Optional[float], Optional[str]
         ensure()
     except ImportError:
         pass
-    hist, _ = yf_daily.history(yf.Ticker(ticker), source="sell_put_rv", period="3mo", auto_adjust=True)
+    done = yf_daily.latest_completed_session()
+    hist, latest_missing = yf_daily.history(yf.Ticker(ticker), source="sell_put_rv", period="3mo", auto_adjust=True)
     closes: Dict[str, float] = {}
     if hist is not None and hasattr(hist, "index") and "Close" in getattr(hist, "columns", ()):
         for ts, c in zip(hist.index, hist["Close"]):
             v = _num(c)
             if v is not None:
                 closes[str(ts)[:10]] = v
-    done = yf_daily.latest_completed_session()
-    if done is None:
-        return None, f"session_unknown:{as_of}"        # 明细（进 skipped.detail），不是原因码
-    cut = min(as_of, done.isoformat())
-    rv = rv_from_closes(closes, cut)
-    return (rv, None) if rv is not None else (None, f"too_few_closes:{sum(1 for d in closes if d <= cut)}")
+    rv, meta = rv_asof(closes, as_of, done.isoformat() if done else None)
+    if latest_missing and rv is not None:           # yf_daily 说最近一场是公司行动空行（没有价）⇒ 同样不算
+        return None, {**meta, "why": "closes_lag"}
+    return rv, meta
 
 
 def _settle_session(day: str) -> str:
@@ -567,9 +618,14 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
             skipped.append({"ticker": tk, "leg": "put", "reason": "no_price"})
             continue
         try:
-            rv, why_rv = rv_fn(tk, as_of)
+            rv, rv_meta = rv_fn(tk, as_of)
         except Exception as exc:  # noqa: BLE001 - 单只取不到不连坐其余；计数 + 原因进 skipped，整批取不到 ⇒ P2
-            rv, why_rv = None, f"{type(exc).__name__}: {exc}"
+            rv, rv_meta = None, {"why": f"{type(exc).__name__}: {exc}"}
+        if not isinstance(rv_meta, dict):           # 测试桩可只给 (rv, None | 原因字符串)
+            rv_meta = {"why": rv_meta}
+        why_rv = rv_meta.get("why") or ("rv_not_positive" if _pos(rv) is None else None)
+        if why_rv in RV_DETAILS:
+            why_rv = f"{why_rv}（{RV_DETAILS[why_rv]}；末根 {rv_meta.get('end')}，应为 {rv_meta.get('expected')}，{rv_meta.get('n')} 根）"
         _note(rv_total=1, rv_missing=0 if _pos(rv) is not None else 1)
         if _pos(rv) is None:
             _note_item("rv_missing", f"{tk}: {why_rv}")
@@ -579,7 +635,7 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
                             **({"detail": why_rv} if why == "no_rv" else {})})
             continue
         dte = _dte(as_of, c["expiry"])
-        cands.append((info["score"], tk, c, {**info, "spot": spot, "dte": dte}))
+        cands.append((info["score"], tk, c, {**info, "spot": spot, "dte": dte, "rv_end": rv_meta.get("end")}))
     cands.sort(key=lambda x: -x[0])
     for _score, tk, c, info in cands:
         n = int(CONFIG["contracts"])
@@ -605,14 +661,14 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
                             "accept_price": info["accept_price"], "accept_price_source": info["accept_price_source"],
                             "annual_yield_pct": info["annual_yield_pct"], "dte_at_open": info["dte"],
                             "iv_pct": info["iv_pct"], "rv_pct": info["rv_pct"], "iv_rv": info["iv_rv"],
-                            "score": info["score"], "rule_version": _VERSION}}
+                            "score": info["score"], "rv_end": info["rv_end"], "rule_version": _VERSION}}
         events.append({"date": as_of, "ticker": tk, "event": "put_sold", "strike": c["strike"], "expiry": c["expiry"],
                        "premium": c["bid"], "contracts": n, "cycle": cycle, "delta": c.get("delta"),
                        "spot": info["spot"], "accept_price": info["accept_price"],
                        "accept_price_source": info["accept_price_source"], "annual_yield_pct": info["annual_yield_pct"],
                        "dte": info["dte"], "spread_pct": round(_spread_pct(c) * 100, 2),
                        "iv_pct": info["iv_pct"], "rv_pct": info["rv_pct"], "iv_rv": info["iv_rv"], "score": info["score"],
-                       "rule_version": _VERSION})
+                       "rv_end": info["rv_end"], "rule_version": _VERSION})
 
     # ── (c) 盯市与净值 ──
     nav_info = _nav_estimate(cash, lots, chains, chain, mark=True, as_of=as_of)

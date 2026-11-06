@@ -9,7 +9,7 @@
     账本的行只读它的梯子与财报日，**不碰任何结算 / 路由字段**（盲期）；
   · 行情层 = 日线统计（回撤 / 波动 / 过去 21 日的最差与跌超 10% 的频率）与「权利金重放」；
   · 取链层 = 对一只标的现取全链，按**接货账本同一条选合约规则**（`sell_put_wheel.pick_put`；v0.45.742 起是 v2：30–50 天窗口内、
-    不高于接货价、IV/RV ≥ 门槛的合格合约里取「年化 × IV/RV」最高的那张；RV 用行情层取到的日线算，同 `sell_put_wheel.rv_from_closes`）选出那一张，
+    不高于接货价、IV/RV ≥ 门槛的合格合约里取「年化 × IV/RV」最高的那张；RV 用行情层取到的日线、经账本唯一的 RV 入口 `sell_put_wheel.rv_asof` 算）选出那一张，
     并给被行权净成本、单张占资金、IV / RV。选合约规则只有那一份，这里不另抄。综合分只用来**在一只标的内部选合约**（账本规则本身），
     页面不输出它、也不拿它给标的排名。
 
@@ -156,16 +156,16 @@ def earnings_before(earnings_date: Optional[str], as_of: Optional[str], expiry: 
 
 def pick_for_accept(contracts: Sequence[dict], spot: float, accept: Optional[float], as_of: str,
                     *, closes: Optional[Mapping[str, float]] = None, earnings_date: Optional[str] = None,
-                    rv_cutoff: Optional[str] = None) -> dict:
+                    closes_completed: Optional[str] = None) -> dict:
     """现取全链后：用**接货账本同一条选合约规则**选出那一张，并给净成本 / 占资金 / 重放。
 
-    `rv_cutoff`：RV 只用 ≤ min(as_of, rv_cutoff) 的收盘（service 传最近一个已收盘交易日）——盘中 Yahoo 日线的末根是正在形成的那根，
-    账本 `_default_rv` 同样截掉它；不截的话筛选页与账本对同一张链算出的 RV 不一样。"""
-    cut = min(as_of, rv_cutoff) if rv_cutoff else as_of
-    rv = W.rv_from_closes(dict(closes), cut) if closes else None
+    `closes_completed` = **取这份日线那一刻**最近一个已收盘的交易日（service 在取数前记下、随缓存存）。RV 只经
+    `sell_put_wheel.rv_asof`——和账本同一个函数判「哪几根算数、末根对不对」，这里不另写截止规则（v0.45.744 根因修复）。"""
+    rv, rv_meta = W.rv_asof(dict(closes), as_of, closes_completed) if closes else (None, {"why": None})
     c, why, info = W.pick_put(list(contracts), spot, accept, as_of, rv_pct=rv)
     out = {"accept_price": info.get("accept_price"), "accept_price_source": info.get("accept_price_source"),
-           "rv_pct": info.get("rv_pct"),
+           "rv_pct": info.get("rv_pct"), "rv_end": rv_meta.get("end"), "rv_expected": rv_meta.get("expected"),
+           "rv_detail": rv_meta.get("why"),
            "spot": spot, "distance_pct": round((info["accept_price"] / spot - 1) * 100, 1) if info.get("accept_price") else None}
     if c is None:
         return {**out, "ok": False, "reason": why}

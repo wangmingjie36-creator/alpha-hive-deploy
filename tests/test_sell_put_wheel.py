@@ -26,6 +26,7 @@ REPO = Path(__file__).resolve().parent.parent
 D0 = "2026-11-04"          # 开仓日
 PUT_EXP = "2027-01-15"     # DTE 72（夹具把窗口钉成 55~90，与生产 30~50 无关；生产值见 TestProductionWindow）
 PROD_CONFIG = dict(W.CONFIG)   # 收集期取下的**生产** CONFIG（autouse 夹具会换掉 W.CONFIG）
+REAL_DEFAULT_RV = W._default_rv   # 同上：autouse 夹具 offline_rv 会把它换成常数桩
 CALL_EXP = "2026-12-11"    # 假定接货后的下一张 call 的到期日
 
 
@@ -186,6 +187,77 @@ class TestProductionWindow:
             exp = (_d.fromisoformat(D0) + timedelta(days=dte)).isoformat()
             c, why, _ = W.pick_put([put(90, 2.0, exp=exp)], 100.0, 92.0, D0, rv_pct=RV)
             assert (c is not None) is ok and (ok or why == "no_expiry"), (dte, why)
+
+
+class TestRvAsof:
+    """v0.45.744：账本与筛选页唯一的 RV 入口。末根必须恰是「≤ min(as_of, 取数时已收盘场次)」的最近交易日。"""
+    @staticmethod
+    def closes(end, n=60):
+        import pandas as pd
+        return {str(d.date()): 100.0 * (1.01 if i % 2 else 0.99) for i, d in enumerate(pd.bdate_range(end=end, periods=n))}
+
+    def test_expected_session_skips_weekends_and_holidays(self):
+        assert W.expected_session("2026-11-04") == "2026-11-04"          # 周三
+        assert W.expected_session("2026-11-08") == "2026-11-06"          # 周日 ⇒ 周五
+        assert W.expected_session("2026-11-26") == "2026-11-25"          # 感恩节 ⇒ 前一天
+        assert W.expected_session("not-a-date") is None
+
+    def test_window_ends_exactly_at_the_expected_session(self):
+        cl = self.closes("2026-11-04")
+        rv, m = W.rv_asof(cl, "2026-11-04", "2026-11-04")
+        assert rv == pytest.approx(W.rv_from_closes(cl, "2026-11-04")) and m == {"end": "2026-11-04", "expected": "2026-11-04", "n": 60, "why": None}
+
+    def test_completed_session_caps_as_of(self):
+        cl = {**self.closes("2026-11-04"), "2026-11-05": 130.0}          # 11-05 是取数时的半根
+        rv, m = W.rv_asof(cl, "2026-11-05", "2026-11-04")
+        assert m["expected"] == "2026-11-04" and m["end"] == "2026-11-04"
+        assert rv == pytest.approx(W.rv_from_closes(cl, "2026-11-04"))
+
+    def test_lag_is_refused_not_shifted(self):
+        cl = self.closes("2026-11-03")
+        rv, m = W.rv_asof(cl, "2026-11-04", "2026-11-04")
+        assert rv is None and m["why"] == "closes_lag" and m["end"] == "2026-11-03" and m["expected"] == "2026-11-04"
+        assert W.rv_from_closes(cl, "2026-11-04") is not None           # 旧做法会在这里算出一个数
+
+    @pytest.mark.parametrize("closes, completed, why", [
+        ({}, "2026-11-04", "no_closes"),
+        (None, "2026-11-04", "no_closes"),
+        ("short", "2026-11-04", "too_few_closes"),
+        ("ok", None, "session_unknown"),
+    ])
+    def test_other_failures_name_their_reason(self, closes, completed, why):
+        if closes == "short":
+            closes = self.closes("2026-11-04", n=20)
+        elif closes == "ok":
+            closes = self.closes("2026-11-04")
+        rv, m = W.rv_asof(closes, "2026-11-04", completed)
+        assert rv is None and m["why"] == why and why in W.RV_DETAILS
+
+    def test_default_rv_records_completed_before_fetching_and_refuses_a_missing_latest_row(self, monkeypatch):
+        """`_default_rv` 只取数 + 交给 rv_asof；yf_daily 说最近一场是空行 ⇒ closes_lag。全程不出网（桩）。"""
+        import sys, types, datetime as _dt
+        import pandas as pd
+        import yf_daily
+        idx = pd.bdate_range(end="2026-11-04", periods=60)
+        frame = pd.DataFrame({"Close": [100.0 * (1.01 if i % 2 else 0.99) for i in range(60)]}, index=idx)
+        order = []
+        monkeypatch.setattr(yf_daily, "latest_completed_session", lambda *a, **k: order.append("done") or _dt.date(2026, 11, 4))
+        flag = {"missing": False}
+        monkeypatch.setattr(yf_daily, "history", lambda tk, **k: order.append("fetch") or (frame, flag["missing"]))
+        monkeypatch.setitem(sys.modules, "yfinance", types.SimpleNamespace(Ticker=lambda t: object()))
+        monkeypatch.setitem(sys.modules, "yf_gate", types.SimpleNamespace(ensure=lambda: None))
+        rv, m = REAL_DEFAULT_RV("AAA", "2026-11-05")
+        assert rv is not None and m["end"] == "2026-11-04" and order == ["done", "fetch"]
+        flag["missing"] = True
+        rv, m = REAL_DEFAULT_RV("AAA", "2026-11-05")
+        assert rv is None and m["why"] == "closes_lag"
+
+    def test_ledger_skip_detail_explains_a_lag(self, pinned_config):
+        table = {D0: {"AAA": chain(100.0, STD_PUTS)}}
+        r = W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}),
+                           rv_fn=lambda tk, d: (None, {"end": "2026-11-03", "expected": "2026-11-04", "n": 40, "why": "closes_lag"}))
+        sk = r["skipped"][0]
+        assert sk["reason"] == "no_rv" and sk["detail"].startswith("closes_lag") and "末根 2026-11-03，应为 2026-11-04" in sk["detail"]
 
 
 class TestRealizedVol:

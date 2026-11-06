@@ -263,7 +263,8 @@ class AlphaBotService:
                  clock: Callable[[], float] = time.monotonic, demo: bool = False,
                  ledger_dir=None, live_ttl: float = LIVE_TTL_SEC, state_dir=None,
                  straddle_root=None, straddle_quote_fn=None, now_fn: Optional[Callable[[], datetime]] = None,
-                 premium_root=None, beta_long_fn=None, wheel_prices_fn=None):
+                 premium_root=None, beta_long_fn=None, wheel_prices_fn=None,
+                 completed_session_fn: Optional[Callable[[], Optional[str]]] = None):
         self.fetch_fn = fetch_fn
         self.bars_fn = bars_fn or _default_bars
         self.clock = clock
@@ -284,8 +285,10 @@ class AlphaBotService:
         self.beta_long_fn = beta_long_fn
         self._beta_cache: Dict[str, dict] = {}
         # 「接货 · 筛选」行情层（v0.45.722）：日线取数函数（None ⇒ `alphabot.wheel_prices.fetch_closes`，yfinance）；
-        # `{标的: (取到的时刻, {日期: 收盘})}`，6 小时内不重取（只补缺的 / 过期的）
+        # `{标的: (取到的时刻, {日期: 收盘}, 取数那一刻的已收盘场次)}`，6 小时内不重取（只补缺的 / 过期的）。
+        # 第三项（v0.45.744）：缓存可能是某一场收盘前取的——末根是半根；RV 只认 ≤ 这一场、且末根恰好是它（`sell_put_wheel.rv_asof`）
         self.wheel_prices_fn = wheel_prices_fn
+        self.completed_session_fn = completed_session_fn
         self._wheel_closes: Dict[str, tuple] = {}
         # Yahoo 限流时各票「最早什么时候值得再试」（self.clock() 的时刻）：`live()` 把它折成 `retry_after_sec` 给页面
         self._yf_retry_until: Dict[str, float] = {}
@@ -559,6 +562,22 @@ class AlphaBotService:
             return ent[1]
         return None
 
+    def _wheel_cached_completed(self, t: str) -> Optional[str]:
+        """这份缓存日线取数那一刻的已收盘场次（判不了 ⇒ None ⇒ `rv_asof` 报 session_unknown，不猜）。"""
+        ent = self._wheel_closes.get(t)
+        return ent[2] if ent and len(ent) > 2 else None
+
+    def _completed_session(self) -> Optional[str]:
+        """最近一个已收盘的交易日（`yf_daily.latest_completed_session`，可注入 `completed_session_fn` 给测试钉钟）。"""
+        try:
+            if self.completed_session_fn is not None:
+                return self.completed_session_fn()
+            import yf_daily
+            done = yf_daily.latest_completed_session()
+            return done.isoformat() if done else None
+        except Exception:  # noqa: BLE001 - 判不了 ⇒ None（下游报 session_unknown）
+            return None
+
     def _wheel_universe(self, scope: str):
         st = self.settings()
         watch = list(st.get("wheel_watch") or W_CONFIG_UNIVERSE())
@@ -598,13 +617,14 @@ class AlphaBotService:
         info: Dict[str, dict] = {}
         if need:
             fn = self.wheel_prices_fn or WP.fetch_closes
+            completed = self._completed_session()        # 取数**之前**记下：这份日线里哪一场之后的都可能是半根（v0.45.744）
             try:
                 got, info = fn(need)
             except Exception as exc:  # noqa: BLE001 - 取数函数不该抛；抛了也如实报，不当空
                 got, info = {}, {t: {"n": 0, "reason": f"exception:{type(exc).__name__}"} for t in need}
             for t, c in (got or {}).items():
                 if c:
-                    self._wheel_closes[t] = (self.clock(), c)
+                    self._wheel_closes[t] = (self.clock(), c, completed)
         stats = {}
         for t in ts:
             c = self._wheel_cached_closes(t)
@@ -632,14 +652,9 @@ class AlphaBotService:
         _as_of_ledger, rows, _err = self._wheel_ledger()
         accept = (self.settings().get("wheel_accept") or {}).get(t)
         closes = self._wheel_cached_closes(t)
-        try:
-            import yf_daily
-            done = yf_daily.latest_completed_session()
-        except Exception:  # noqa: BLE001 - 判不了 ⇒ 不截（与账本不同的只可能是盘中那一根），页面照常
-            done = None
         out = WS.pick_for_accept(raw["contracts"], float(spot), accept, raw.get("as_of") or self.now_fn().date().isoformat(),
                                  closes=closes, earnings_date=(rows.get(t) or {}).get("earnings_date"),
-                                 rv_cutoff=done.isoformat() if done else None)
+                                 closes_completed=self._wheel_cached_completed(t))
         out.update({"ticker": t, "chain_as_of": raw.get("as_of"), "session_live": raw.get("session_live"),
                     "price_source": raw.get("underlying_price_source"), "replay_needs_prices": closes is None})
         return clean_json(out)
