@@ -44,7 +44,7 @@
 
 ### CHANGELOG 完整性 hook（2026-09-13 起；v0.45.728 起含碎片检查）
 
-`changelog_guard.py` 挂在 pre-commit + pre-push 上，只挡动了 `CHANGELOG.md` 或 `changelog.d/` 的提交与推往 main 的推送。⚠️ **pre-commit 管不到 `git rebase --continue`**——兜底的是 pre-push；`.git/hooks` 不被跟踪，重新 clone 后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。
+`changelog_guard.py` 挂在 pre-commit + pre-push 上，挡动了 `CHANGELOG.md` 或 `changelog.d/` 的提交与推往 main 的推送；推往 main 时另有契约闸、根目录预算闸。⚠️ **pre-commit 管不到 `git rebase --continue`**——兜底的是 pre-push；`.git/hooks` 不被跟踪，重新 clone 后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。
 
 ## 整套测试怎么跑（2026-10-21 起）
 

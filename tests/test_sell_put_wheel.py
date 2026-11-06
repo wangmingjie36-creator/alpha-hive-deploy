@@ -235,7 +235,9 @@ class TestRvAsof:
 
     def test_default_rv_records_completed_before_fetching_and_refuses_a_missing_latest_row(self, monkeypatch):
         """`_default_rv` 只取数 + 交给 rv_asof；yf_daily 说最近一场是空行 ⇒ closes_lag。全程不出网（桩）。"""
-        import sys, types, datetime as _dt
+        import sys
+        import types
+        import datetime as _dt
         import pandas as pd
         import yf_daily
         idx = pd.bdate_range(end="2026-11-04", periods=60)
