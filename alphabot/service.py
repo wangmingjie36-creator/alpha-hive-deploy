@@ -632,8 +632,14 @@ class AlphaBotService:
         _as_of_ledger, rows, _err = self._wheel_ledger()
         accept = (self.settings().get("wheel_accept") or {}).get(t)
         closes = self._wheel_cached_closes(t)
+        try:
+            import yf_daily
+            done = yf_daily.latest_completed_session()
+        except Exception:  # noqa: BLE001 - 判不了 ⇒ 不截（与账本不同的只可能是盘中那一根），页面照常
+            done = None
         out = WS.pick_for_accept(raw["contracts"], float(spot), accept, raw.get("as_of") or self.now_fn().date().isoformat(),
-                                 closes=closes, earnings_date=(rows.get(t) or {}).get("earnings_date"))
+                                 closes=closes, earnings_date=(rows.get(t) or {}).get("earnings_date"),
+                                 rv_cutoff=done.isoformat() if done else None)
         out.update({"ticker": t, "chain_as_of": raw.get("as_of"), "session_live": raw.get("session_live"),
                     "price_source": raw.get("underlying_price_source"), "replay_needs_prices": closes is None})
         return clean_json(out)

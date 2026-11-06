@@ -1280,7 +1280,8 @@ class AlphaHiveDailyReporter:
 
         # ── v0.45.720: 接货型卖 put 纸面账本（XOM / WMT / NVDA；先卖 put、被行权接货后卖 covered call）──
         # 独立账本（`PATHS.sell_put_state`），**不进评分、不进对冲、不碰卖权选择器 / 跨式账本**；规则冻结在
-        # experiments/sell_put_wheel_prereg.md。链走 `fetch_cboe_raw_contracts` 的进程缓存（本轮前面的步骤已拉过 ⇒ 零额外网络）。
+        # experiments/sell_put_wheel_prereg.md。链走 `fetch_cboe_raw_contracts` 的进程缓存（本轮前面的步骤已拉过 ⇒ 链零额外网络）；
+        # v0.45.742 起每只**要开 put** 的标的另取一次 yfinance 日线算 RV（`_default_rv`，经 `yf_gate`；冷却中立即抛、不等待）。
         # 失败在源头登记（`sell_put_wheel.stats()` → scan_timing → alert_manager P2）；这里只吞成 WARNING，不拖死日报。
         try:
             import sell_put_wheel as _spw

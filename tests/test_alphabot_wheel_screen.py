@@ -197,6 +197,16 @@ class TestPickForAccept:
         out = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, self.AS_OF, closes=self.CLOSES)
         assert out["earnings_in_window"] is None                                    # 日期没给 ⇒ 待验证，不是 False
 
+    def test_rv_ignores_closes_after_the_cutoff(self):
+        """盘中 Yahoo 末根是正在形成的那根：传了 rv_cutoff 就只用它之前的收盘，与账本 `_default_rv` 同口径。"""
+        days = sorted(self.CLOSES)
+        as_of, cut = days[-1], days[-2]
+        forming = {**self.CLOSES, as_of: self.CLOSES[as_of] * 1.08}               # 末根盘中大涨
+        with_cut = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, as_of, closes=forming, rv_cutoff=cut)
+        assert with_cut["rv_pct"] == round(W.rv_from_closes(self.CLOSES, cut), 2)
+        no_cut = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, as_of, closes=forming)
+        assert no_cut["rv_pct"] != with_cut["rv_pct"]                            # 尺子有牙：不截就会把那一根算进去
+
     def test_output_carries_no_score_key(self):
         """综合分只在账本规则内部选合约；取链层输出不带它（页面不拿它给标的排名）。"""
         out = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, self.AS_OF, closes=self.CLOSES)

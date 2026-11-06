@@ -67,7 +67,7 @@ export async function renderWheelScreen(root, alive) {
       + "以及按你的接货价选出的合约。不排名、不推荐、不给综合分；「愿不愿意持有」是你的判断，这里只存你给的名单和接货价、只供显示。")),
     helpLink("wheel"));
   const warn = h("p", { class: "callout warn" }, "「权利金重放」把今天的权利金放回过去两年的行情：多数标的这两年在涨、30 天窗口互不重叠的样本只有二十来个，偏乐观，不是预测。"
-    + "梯子是账本里约 30 天的一档，取链层才是接货账本用的 55~90 天窗口。点差是收盘后记的，盘中可能更窄。");
+    + "梯子是账本里约 30 天的一档，取链层用的是接货账本的到期窗口（帮助页有当前值），要先「取行情统计」拿到日线才算得出实际波动率。点差是收盘后记的，盘中可能更窄。");
 
   async function load() {
     state.data = await api(`/api/wheel/screen?scope=${state.scope}`);
@@ -145,7 +145,7 @@ export async function renderWheelScreen(root, alive) {
     const detail = Object.entries(state.chain).map(([t, c]) => h("div", { class: "cmp" }, h("b", {}, t), chainDetail(c)));
     fill(holder, controls, filters, nameEdit,
       panel(`${rows.length} / ${d.rows.length} 只`, { sub: `账本 ${d.as_of || "—"}（${d.scope === "all" ? "全部" : "我的名单"}）` }, table(cols, rows)),
-      detail.length ? panel("按接货价取链的结果", { sub: "接货账本同一条选合约规则（期限窗口 + 不高于接货价的最高合格档）" }, ...detail) : null);
+      detail.length ? panel("按接货价取链的结果", { sub: "接货账本同一条选合约规则（期限窗口 + 不高于接货价 + IV ÷ RV 门槛，取账本的综合分最高那张）" }, ...detail) : null);
   }
 
   fill(root, head, warn, holder);

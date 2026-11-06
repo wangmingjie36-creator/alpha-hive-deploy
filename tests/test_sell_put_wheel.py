@@ -24,7 +24,8 @@ import sell_put_wheel as W
 
 REPO = Path(__file__).resolve().parent.parent
 D0 = "2026-11-04"          # 开仓日
-PUT_EXP = "2027-01-15"     # DTE 72（窗口 55~90 内）
+PUT_EXP = "2027-01-15"     # DTE 72（夹具把窗口钉成 55~90，与生产 30~50 无关；生产值见 TestProductionWindow）
+PROD_CONFIG = dict(W.CONFIG)   # 收集期取下的**生产** CONFIG（autouse 夹具会换掉 W.CONFIG）
 CALL_EXP = "2026-12-11"    # 假定接货后的下一张 call 的到期日
 
 
@@ -171,8 +172,20 @@ class TestPickPut:
         assert self.pick([put(95, 3.0)], accept=90.0)[1] == "no_strike"
 
     def test_no_expiry_in_window(self):
-        assert self.pick([put(90, 2.0, exp="2026-12-04")])[1] == "no_expiry"   # DTE 30 < 55
+        assert self.pick([put(90, 2.0, exp="2026-12-04")])[1] == "no_expiry"   # DTE 30 < 夹具的 55
         assert self.pick([put(90, 2.0, exp="2027-02-19")])[1] == "no_expiry"   # DTE 107 > 90
+
+
+class TestProductionWindow:
+    """夹具把窗口钉成 55~90 ⇒ 别的测试都看不见生产值；这里用收集期取下的生产 CONFIG 钉住 v2 的 30~50（两端都含）。"""
+    def test_window_is_thirty_to_fifty_inclusive(self, monkeypatch):
+        assert PROD_CONFIG["put_dte_range"] == (30, 50) and PROD_CONFIG["min_iv_rv"] == 1.0 and PROD_CONFIG["rv_window"] == 30
+        monkeypatch.setattr(W, "CONFIG", dict(PROD_CONFIG))
+        from datetime import date as _d, timedelta
+        for dte, ok in ((29, False), (30, True), (50, True), (51, False)):
+            exp = (_d.fromisoformat(D0) + timedelta(days=dte)).isoformat()
+            c, why, _ = W.pick_put([put(90, 2.0, exp=exp)], 100.0, 92.0, D0, rv_pct=RV)
+            assert (c is not None) is ok and (ok or why == "no_expiry"), (dte, why)
 
 
 class TestRealizedVol:
@@ -550,7 +563,7 @@ class TestReasonTable:
 class TestPurity:
     def test_pick_functions_do_not_touch_disk_or_network(self):
         tree = ast.parse((REPO / "sell_put_wheel.py").read_text(encoding="utf-8"))
-        pure = {"pick_expiry", "pick_put", "pick_call", "mark_of", "settle_put", "settle_call", "annual_yield",
+        pure = {"pick_expiry", "pick_put", "pick_call", "mark_of", "settle_put", "settle_call", "annual_yield", "rv_from_closes", "score_put",
                 "_liquid", "_spread_pct", "_expiries"}
         for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in pure):
             names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)} | {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}

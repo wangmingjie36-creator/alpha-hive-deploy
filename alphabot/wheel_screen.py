@@ -155,9 +155,14 @@ def earnings_before(earnings_date: Optional[str], as_of: Optional[str], expiry: 
 # ═══════════════════════════ 按接货价选合约（取链层） ═══════════════════════════
 
 def pick_for_accept(contracts: Sequence[dict], spot: float, accept: Optional[float], as_of: str,
-                    *, closes: Optional[Mapping[str, float]] = None, earnings_date: Optional[str] = None) -> dict:
-    """现取全链后：用**接货账本同一条选合约规则**选出那一张，并给净成本 / 占资金 / 重放。"""
-    rv = W.rv_from_closes(dict(closes), as_of) if closes else None
+                    *, closes: Optional[Mapping[str, float]] = None, earnings_date: Optional[str] = None,
+                    rv_cutoff: Optional[str] = None) -> dict:
+    """现取全链后：用**接货账本同一条选合约规则**选出那一张，并给净成本 / 占资金 / 重放。
+
+    `rv_cutoff`：RV 只用 ≤ min(as_of, rv_cutoff) 的收盘（service 传最近一个已收盘交易日）——盘中 Yahoo 日线的末根是正在形成的那根，
+    账本 `_default_rv` 同样截掉它；不截的话筛选页与账本对同一张链算出的 RV 不一样。"""
+    cut = min(as_of, rv_cutoff) if rv_cutoff else as_of
+    rv = W.rv_from_closes(dict(closes), cut) if closes else None
     c, why, info = W.pick_put(list(contracts), spot, accept, as_of, rv_pct=rv)
     out = {"accept_price": info.get("accept_price"), "accept_price_source": info.get("accept_price_source"),
            "rv_pct": info.get("rv_pct"),
