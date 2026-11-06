@@ -527,7 +527,12 @@ def _budget_source(budget=None, line=None):
 def _enable_budget(repo, budget=100, size=50, source=None):
     """把预算模块（预算改成 `budget`）和 `size` 字节的根目录 CLAUDE.md 放进临时仓库并推上 origin/main。
 
-    `--no-verify`：这次提交带 `.py`，推送会触发契约闸，而临时仓库里没有契约测试（契约闸另有自己的测试文件）。"""
+    另按 `cg.CONTRACT_REQUIRED_TESTS` 各放一条空测试：动了 `.py` 的推送会触发契约闸，缺必选契约测试就拦。
+    有的用例要推改了预算模块的提交——有了占位，契约闸在这里恒过，拦不拦只看预算闸（契约闸另有自己的测试文件）。
+    这次提交本身是夹具，用 `--no-verify` 推。"""
+    for req in cg.CONTRACT_REQUIRED_TESTS:
+        (repo.path / req).parent.mkdir(parents=True, exist_ok=True)
+        (repo.path / req).write_text("def test_present():\n    pass\n", encoding="utf-8")
     (repo.path / "claude_md_budget.py").write_text(source or _budget_source(budget), encoding="utf-8")
     (repo.path / "CLAUDE.md").write_text(_claude(size), encoding="utf-8")
     repo.git("add", "-A")
@@ -547,7 +552,7 @@ def _set_worktree_budget(repo, budget):
 
 
 class TestRootBudgetGate:
-    """推往 main 且被推区间动了根目录 CLAUDE.md ⇒ 拿**被推提交里**的那份，比**被推提交里**写的预算。"""
+    """推往 main 且被推区间动了根目录 CLAUDE.md 或预算模块 ⇒ 拿**被推提交里**的那份，比**被推提交里**写的预算。"""
 
     @pytest.fixture(autouse=True)
     def _no_foreign_module(self, monkeypatch):
@@ -645,3 +650,47 @@ class TestRootBudgetGate:
         monkeypatch.setenv("PYTHONPATH", str(elsewhere))
         r = repo.git("push", "origin", "HEAD:main", check=False)
         assert r.returncode != 0 and "不是本 checkout" in r.stderr, r.stderr
+
+    # ── 以下 v0.45.738 二次核对补：判据的第二个输入、失败信息第 3 步的正路、两个边界 ──
+
+    @pytest.mark.parametrize("change, expect", [
+        (dict(budget=80), "超预算 10（上限 80 "),
+        (dict(line="ROOT_BUDGET_BYTES: int = 100"), "读不出它的预算"),
+    ], ids=["lowered_below_current_size", "rewritten_unreadably"])
+    def test_changing_only_the_budget_module_is_checked(self, repo, change, expect):
+        """判据有两个输入。只盯 CLAUDE.md 的话，把预算调到现有大小以下、或把预算行改成读不出的写法，
+        都会不经检查进 main——之后第一个动根目录的会话被拦，背别人的锅。"""
+        _enable_budget(repo, size=90)
+        before = repo.origin_main()
+        (repo.path / "claude_md_budget.py").write_text(_budget_source(**change), encoding="utf-8")
+        repo.git("commit", "-qam", "只改预算模块")
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode != 0 and expect in r.stderr, r.stderr
+        assert repo.origin_main() == before
+
+    def test_raising_the_budget_in_the_same_commit_counts(self, repo):
+        """失败信息第 3 步的正路：用户同意后在同一提交里调大预算 ⇒ 按被推提交里的新预算算。
+        别的用例里被推提交与远端 main 的预算总是同一个数，分不出「读的是哪一份」。"""
+        _enable_budget(repo, budget=100)
+        _set_worktree_budget(repo, 200)
+        (repo.path / "CLAUDE.md").write_text(_claude(150), encoding="utf-8")
+        repo.git("add", "CLAUDE.md", "claude_md_budget.py")
+        repo.git("commit", "-qm", "用户同意调大预算")
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode == 0 and "预算检查通过（150 / 200 字节" in r.stderr, r.stderr
+
+    def test_unknown_range_is_checked(self, repo):
+        """算不出区间（推往还没有 main 的新远端：远端 sha 全零、也没有跟踪引用）⇒ 证明不了没动 ⇒ 照查。"""
+        _enable_budget(repo, size=150)                                         # 夹具用 --no-verify 推的，已超
+        fresh = repo.tmp / "fresh.git"
+        repo.git("init", "-q", "--bare", "-b", "main", str(fresh), cwd=repo.tmp)
+        r = repo.git("push", str(fresh), "HEAD:main", check=False)
+        assert r.returncode != 0 and "超预算 50（" in r.stderr, r.stderr
+
+    def test_pushed_commit_without_it_passes(self, repo):
+        """被推提交里没有根目录 CLAUDE.md ⇒ 没东西可比，放行（该不该有它是分区守卫的事）。"""
+        _enable_budget(repo, size=150)
+        repo.git("rm", "-q", "CLAUDE.md")
+        repo.git("commit", "-qm", "删根目录")
+        r = repo.git("push", "origin", "HEAD:main", check=False)
+        assert r.returncode == 0, r.stderr

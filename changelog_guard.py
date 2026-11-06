@@ -142,14 +142,17 @@ checkout 重跑 `--install-hook`（而已装的旧钩子不会告诉任何人它
 
 * **为什么不在 pre-commit**：`rebase --continue` 不触发 pre-commit（见上表），而近 30 天动过根目录的
   107 个提交里有 36 个写完 5 分钟后又被重新提交（rebase / amend）。两个会话各加一点、各自提交时都没超，
-  rebase 到一起才超——只有 pre-push 看得到真正要落进 main 的那棵树。
-* **什么时候查**：被推区间动了根目录 `CLAUDE.md` 才查；算不出区间按「动了」处理。没动的推送不查，
-  哪怕 main 上已经超了——例行拦无关推送会把人养成 `--no-verify` 的习惯（同「拦 / 放的分界」）。
+  rebase 到一起才超——本地钩子里只有 pre-push 看得到真正要落进 main 的那棵树。GitHub 网页上合并 PR
+  不经任何本地钩子（`d758f614` 就这样改过根目录），那条路只有 CI 兜底。
+* **什么时候查**：被推区间动了判据的任一输入——根目录 `CLAUDE.md` 或 `claude_md_budget.py`——才查；
+  算不出区间按「动了」处理。只盯 `CLAUDE.md` 不够：把预算调到现有大小以下、或把预算行改成读不出的写法，
+  都会不经检查进 main，之后第一个动根目录的会话被拦，背别人的锅（v0.45.738 二次核对）。两样都没动的
+  推送不查，哪怕 main 上已经超了——例行拦无关推送会把人养成 `--no-verify` 的习惯（同「拦 / 放的分界」）。
   被推提交里没有根目录 `CLAUDE.md` ⇒ 没东西可比，放行。
 * **读什么**：被推提交里的 `CLAUDE.md`（git 对象，不读工作区），比**被推提交里** `claude_md_budget.py`
-  写的预算——按 `BUDGET_LINE` 从源码读，不 import 被推的版本，所以工作区里没提交的调预算不算数。
-  读不出预算 ⇒ 拦（「没检查」不是「检查通过」）。渲染失败信息用本 checkout 的模块，且必须是本 checkout
-  的那份（理由同碎片判据模块）。
+  写的预算数——从源码读，不 import 被推的版本，所以工作区里没提交的调预算不算数。读法（`BUDGET_LINE`）
+  与失败信息用本 checkout 的模块，且必须是本 checkout 的那份（理由同碎片判据模块）。读不出预算 ⇒ 拦
+  （「没检查」不是「检查通过」）。
 * **只查预算**：分区的另几条检查（`paths:` 失效、指针缺失、引用找不到）要整棵树加 pytest，触发也少，
   留给测试与 CI。
 * 绕过：`git push --no-verify` 会连碎片检查、契约测试一起跳过；超预算的正路是失败信息里那三步。
@@ -171,7 +174,8 @@ from pathlib import Path
 CHANGELOG = "CHANGELOG.md"
 #: 版本碎片目录（v0.45.728；判据在 `changelog_fragments.py`）。
 FRAGMENT_DIR = "changelog.d"
-#: 根目录预算闸（v0.45.738）查的文件，与预算 / 失败信息所在的模块（判据唯一真相在 `claude_md_budget.py`）。
+#: 根目录预算闸（v0.45.738）判据的两个输入：根目录 CLAUDE.md，与写着预算的模块（预算与失败信息的唯一真相）。
+#: 被推区间动了任一个就查——只盯前者，调低预算或把预算行改成读不出的写法就会不经检查进 main。
 ROOT_CLAUDE_MD = "CLAUDE.md"
 BUDGET_MODULE = "claude_md_budget.py"
 INTEGRITY_TEST = "tests/test_changelog_entry_integrity.py"
@@ -720,11 +724,13 @@ def pre_push(root: Path, stdin_text: str, remote: str = "") -> int:
             fragments_touched = _git("cat-file", "-e", f"{local_sha}:{FRAGMENT_DIR}").returncode == 0
         if fragments_touched:
             fragment_pushes.append((local_sha, base))
-        # 根目录 CLAUDE.md 预算闸（v0.45.738）：被推区间动了根目录才查；算不出区间 ⇒ 证明不了没动 ⇒ 查
-        claude_touched = _differs(hook, base, local_sha, "--", ROOT_CLAUDE_MD) if base else True
-        if claude_touched is None:
+        # 根目录 CLAUDE.md 预算闸（v0.45.738）：被推区间动了判据的任一输入（根目录 CLAUDE.md、预算模块）才查；
+        # 算不出区间 ⇒ 证明不了没动 ⇒ 查
+        budget_inputs_touched = (_differs(hook, base, local_sha, "--", ROOT_CLAUDE_MD, BUDGET_MODULE)
+                                 if base else True)
+        if budget_inputs_touched is None:
             rc = 1
-        elif claude_touched:
+        elif budget_inputs_touched:
             budget_shas.append(local_sha)
         # 以下 CHANGELOG 部分拦了只记 rc、不提前返回：契约闸照跑（见文末）
         if not base:

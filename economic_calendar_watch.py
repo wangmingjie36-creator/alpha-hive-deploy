@@ -30,6 +30,15 @@ v0.45.65 修的那个 bug，本质是「用规律推算代替抄写」。如果�
 所以每个源都要求**解析出足够多的条目**（CPI/NFP ≥ 12、FOMC ≥ 8、GDP 两页合计 ≥ 1），
 达不到就报 `undetermined`（退出码 3），绝不报「健康」。
 
+## 节流只重放「查到了结论」的表（v0.45.740）
+
+上游日程一周内不会变，所以联网按周节流（`_DEFAULT_MAX_AGE_DAYS`），窗口内复用上次的结论。但「无法判定」不是结论，
+是那次没问到：缓存里只要有一张表没有可判定的结论（上次抓取失败 / 看不懂，或缓存里根本没有它），本轮就**不节流**、
+联网重查——与「有新日程待抄」不节流同一档。此前「无法判定」也被缓存整周：2026-11-04 那唯一一次联网撞上代理故障、
+退回直连被 bls.gov 拒（见下「User-Agent」），之后每个扫描日都原样重放那次的 403，日志里还看不出是旧结果。
+代价：某源持续失败（长期封锁 / 页面改版）期间，每个交易日都联网一次（五页）。
+窗口内的输出注明上游结论出自哪次检查（`upstream_checked_at`，见 `_cached_upstream_note`）。
+
 ## GDP 读两页（v0.45.574）
 
 BEA 的 `/news/schedule`（Upcoming Releases）只列**当年**剩下的发布（10-21 实测表头 `Year 2026`、末条 12-23），
@@ -56,12 +65,19 @@ next-year 页上，而监视器与 10-04 两次手工核对都记成「BEA 2027 
 
 ## User-Agent
 
-bls.gov 用 UA 做准入：浏览器 UA、`curl/8.4.0`、`python-urllib/3.11` 一律 403，
-**只要 UA 里带一个形如邮箱的 token 就放行**（实测 `nobody@nowhere.invalid` 同样 200，
+bls.gov 用 UA 做准入：浏览器 UA、`curl/8.4.0`、`python-urllib/3.11` 一律 403（BLS 自家的 bot-policy 拒页，约 1.3 KB），
+UA 里带一个形如邮箱的 token 才放行（实测 `nobody@nowhere.invalid` 同样 200，
 即它只校验格式、不校验地址）。默认 UA 因此用占位地址，不写入任何私人邮箱。
 BLS 设这个字段本意是留联系人，想做个好公民就设环境变量：
 
     export ALPHA_HIVE_CONTACT_EMAIL="you@example.com"
+
+⚠️ 合规 UA 是**必要条件、不是充分条件**（2026-11-06 实测）：上面那条只在**走代理**时成立。本机**直连**出口
+（IPv4、IPv6 都试过）被 bls.gov 前面的 Akamai 边缘按网络拒——带同一个合规 UA 照样 403，拒页是 Akamai 通用的
+`Access Denied … Reference #18.…`（约 400 B，0.3 s 就拒），不是 BLS 那页。编排器代理探活失败、退回直连的日子
+（10-14、11-04），cpi / nfp 就是这样「无法判定」的；同一天 FOMC（federalreserve.gov）、GDP（bea.gov）直连照常。
+看拒页分辨：BLS 那页 ⇒ 查 UA；Akamai 那页 ⇒ 查出口（多半是那天退回了直连）。
+设真实邮箱大概率救不了直连（没拿真实地址实测：不经用户同意不往 UA 里放真邮箱）。
 
 ## 输出契约（v0.45.355，`step_contract`）
 
@@ -76,6 +92,8 @@ BLS 设这个字段本意是留联系人，想做个好公民就设环境变量�
 （`run_tool` 兜不到 import，见其 docstring）。
 `attention` 由 `contract_attention()` 显式列出：上游新日程 / 本地表低于地平线阈值各一条，
 `deadline` = 该表覆盖到的最后一天（此后该类事件从日历里消失）。
+`upstream_checked_at`（v0.45.740 新增）= `upstream` 这份结论出自哪次联网检查：本轮联网 ⇒ 本轮时刻（同一个值写进
+节流状态的 `last_checked_at`）；节流 ⇒ 上次的 `last_checked_at`。看一份 JSON 就知道结论新不新，不必再翻节流状态文件。
 """
 
 import argparse
@@ -650,7 +668,7 @@ def check_upstream(timeout: int = 20, ua: Optional[str] = None) -> Dict[str, Any
 def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
           state_path: Optional[Path] = None, timeout: int = 20,
           today: Optional[date] = None) -> Dict[str, Any]:
-    """本地体检（免费、每次都做）+ 上游探查（按周节流）"""
+    """本地体检（免费、每次都做）+ 上游探查（按周节流；节流只重放查到了结论的表，v0.45.740）"""
     state_path = Path(state_path) if state_path else _state_path()   # v0.45.160：调用时求值
     from economic_calendar import get_calendar_health
 
@@ -666,31 +684,34 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
     age = _days_since(state.get("last_checked_at"), today)
 
     prev_action = bool(state.get("action_required"))
+    upstream_cache = state.get("upstream") or {}
     # v0.45.574：缓存里的 GDP 结论若出自只读滚动页的旧版，它的「无新」正是本版要治的盲区，不能再拿来用
-    _cached_gdp = (state.get("upstream") or {}).get("gdp")
+    _cached_gdp = upstream_cache.get("gdp")
     gdp_cache_predates_next_year = bool(_cached_gdp) and "next_year" not in (_cached_gdp.get("pages") or {})
-    # 上次查出「有新日程可抄」而人还没抄 → 不节流，天天提醒；GDP 缓存出自旧版 → 不节流，立即重查
+    # v0.45.740：节流只重放**查到了结论**的表。缓存里任一张表没有可判定的结论——上次判不了，或缓存里根本没有它
+    # （`_SOURCES` 新加的表；缓存里多出来的旧表同样算）——本轮就不节流、联网重查，重查后整份重写。
+    # 「无法判定」是那次没问到，不是答案：此前它也被缓存整周，11-04 代理挂、退回直连被 bls.gov 403 的那一次，
+    # 之后每个扫描日都被原样重放，日志还看不出是旧结果。
+    unresolved_in_cache = sorted(k for k in set(_SOURCES) | set(upstream_cache)
+                                 if not (upstream_cache.get(k) or {}).get("determinable"))
+    # 上次查出「有新日程可抄」而人还没抄 → 不节流，天天提醒；GDP 缓存出自旧版 → 不节流，立即重查；
+    # 缓存里有表没有结论 → 不节流，本轮重查
     throttled = (not force and age is not None and age < max_age_days
-                 and not prev_action and not gdp_cache_predates_next_year)
+                 and not prev_action and not gdp_cache_predates_next_year and not unresolved_in_cache)
 
     if throttled:
-        upstream = dict(state.get("upstream") or {})
-        # v0.45.68 二次检查：缓存里缺哪个源，就把哪个源判成「无法判定」。
-        # 旧实现直接用缓存的空 dict —— 于是「从未成功检查过任何源」被算成
-        # undeterminable=[]、new=[]，一路报「✅ 上游无新日程」。
-        # 监视器自己犯了它要治的那个静默失败。
-        for _k in _SOURCES:
-            if not upstream.get(_k):
-                upstream[_k] = {
-                    "source": _source_label(_k),
-                    "determinable": False,
-                    "new_available": False,
-                    "reason": "节流窗口内且无缓存结果 —— 此源从未被成功检查过",
-                }
+        # 走到这里 ⇒ `_SOURCES` 的每张表在缓存里都有可判定的结论（上面 unresolved_in_cache 为空）。
+        # v0.45.68 曾在这里把缓存缺的表补成「无法判定」——旧实现直接用缓存的空 dict，「从未成功检查过任何源」
+        # 被算成 undeterminable=[]、new=[]，一路报「✅ 上游无新日程」。v0.45.740 起缺表的缓存不进节流、本轮直接
+        # 联网重查，那段补丁就到不了了；「没查到的表绝不算无新」改由上面的节流条件承担
+        # （守卫 TestSecondPassRegressions / TestUnresolvedCacheIsNotReplayed）。
+        upstream = dict(upstream_cache)
         checked_now = False
+        upstream_checked_at = state.get("last_checked_at")
     else:
         upstream = check_upstream(timeout=timeout)
         checked_now = True
+        upstream_checked_at = datetime.now().isoformat(timespec="seconds")
 
     new_tables = sorted(k for k, v in upstream.items() if v.get("new_available"))
     undet = sorted(k for k, v in upstream.items() if not v.get("determinable"))
@@ -701,6 +722,8 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
         "network_checked_this_run": checked_now,
         "throttled": throttled,
         "days_since_last_check": age,
+        # v0.45.740：`upstream` 出自哪次联网检查（本轮联网 = 本轮时刻；节流 = 上次的 last_checked_at）
+        "upstream_checked_at": upstream_checked_at,
         "max_age_days": max_age_days,
         # ⚠️ binding_table（余量最小、最先报警）与 shortest_table（地平线最短）
         # 常常不是同一张表：阈值逐表不同。把甲的表名和乙的天数拼进同一句话，
@@ -726,7 +749,7 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
 
     if checked_now:
         state.update({
-            "last_checked_at": datetime.now().isoformat(timespec="seconds"),
+            "last_checked_at": upstream_checked_at,
             "upstream": upstream,
             "action_required": bool(new_tables),
         })
@@ -736,6 +759,22 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
 
 
 # ──────────────────────────── 渲染与 CLI ────────────────────────────
+
+def _upstream_stamp(res: Dict[str, Any]) -> str:
+    """`upstream_checked_at` 截到分钟（`2026-11-04T15:29:49` → `2026-11-04 15:29`）。"""
+    return str(res.get("upstream_checked_at")).replace("T", " ")[:16]
+
+
+def _cached_upstream_note(res: Dict[str, Any]) -> str:
+    """本轮没联网（节流）⇒ 一句注明上游结论出自哪次检查（v0.45.740）；本轮联网 ⇒ 空串。
+
+    节流期内的结论一定出自四张表都查到了结论的那次（见 `check()`），但那是几天前的事。日志里不写明，读的人就会
+    当成今天刚查的：11-05 那条「❓ 无法判定：cpi、nfp」读起来像当天又 403 了，实为 11-04 那一次的重放。
+    挂在 `network_checked_this_run` 上、不挂在哪个分支上：哪天又有分支开始重放缓存，标注自动跟上。"""
+    if res["network_checked_this_run"]:
+        return ""
+    return f"（上游结论出自 {_upstream_stamp(res)} 的检查，节流 {res['max_age_days']} 天内不重复联网）"
+
 
 def _render(res: Dict[str, Any]) -> str:
     h = res["calendar_health"]
@@ -750,8 +789,8 @@ def _render(res: Dict[str, Any]) -> str:
     if res.get("cache_problem"):
         out.append(f"⚠️ 节流缓存形状不对，已当作没有缓存、本轮联网重查并整份重写：{res['cache_problem']}")
     if res["throttled"]:
-        out.append(f"上游：本次未联网（{res['days_since_last_check']} 天前查过，"
-                   f"节流窗口 {res['max_age_days']} 天），下方为上次结果")
+        out.append(f"上游：本次未联网（{res['days_since_last_check']} 天前、{_upstream_stamp(res)} 查过，"
+                   f"节流窗口 {res['max_age_days']} 天），下方为那次的结果")
     out.append("")
     for key, v in sorted(res["upstream"].items()):
         if not v.get("determinable"):
@@ -906,13 +945,15 @@ def main() -> int:
     # 但退出码优先级是 action > health > undetermined，于是「本地将见底 + 四个源全抓不到」
     # 这一格会打出一句**毫无依据**的断言，且把抓取失败整个吃掉——
     # 恰好抵消掉这个监视器存在的意义。
+    # v0.45.740：节流期内，每条讲上游结论的结论行都注明那份结论出自哪次检查（本轮联网 ⇒ 空串）
+    _cached = _cached_upstream_note(res)
     _up_note = ("上游暂无新日程" if res["upstream_conclusive"]
                 else f"⚠️ 上游 {len(undet)} 个源无法判定（{'、'.join(undet)}），"
-                     f"本次**无法确认**上游有没有新日程")
+                     f"本次**无法确认**上游有没有新日程") + _cached
     # 分支顺序与 `_exit_code` 一致（action > health > undetermined）；返回值统一用 rc
     if res["action_required"]:
         if args.quiet:
-            print(f"🆕 上游已发布新日程：{'、'.join(res['new_schedule_tables'])} —— 待人工抄录")
+            print(f"🆕 上游已发布新日程：{'、'.join(res['new_schedule_tables'])} —— 待人工抄录{_cached}")
         return rc
     if h["status"] != "ok":
         if args.quiet:
@@ -921,10 +962,10 @@ def main() -> int:
         return rc
     if res["undeterminable_tables"]:
         if args.quiet:
-            print(f"❓ 无法判定：{'、'.join(res['undeterminable_tables'])}")
+            print(f"❓ 无法判定：{'、'.join(res['undeterminable_tables'])}{_cached}")
         return rc
     if args.quiet:
-        print("✅ 日历健康，上游无新日程")
+        print(f"✅ 日历健康，上游无新日程{_cached}")
     return rc
 
 

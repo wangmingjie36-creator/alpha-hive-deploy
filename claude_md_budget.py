@@ -4,8 +4,9 @@
 不另加余量（v0.45.734：余量就是看不见的漂移）。两处用这个模块，同一个数、同一段话：
 
 - `tests/test_claude_md_partitions.py::TestRootBudget`：查**工作区**那份（选测 / 整套 / CI）。
-- `changelog_guard.py` 的 pre-push 预算闸：推往 main、且被推区间动了根目录 `CLAUDE.md` 时，查**被推提交里**那份。
-  预算也从被推提交里本文件的源码读（`budget_in_source`，不 import 被推的版本）：工作区里没提交的改动不算数。
+- `changelog_guard.py` 的 pre-push 预算闸：推往 main、且被推区间动了根目录 `CLAUDE.md` 或本文件时，查**被推提交里**那份。
+  预算这个数也从被推提交里本文件的源码读（`budget_in_source`，不 import 被推的版本）：工作区里没提交的调预算不算数。
+  读法 `BUDGET_LINE` 与失败信息用的是本 checkout 的本文件（同碎片判据模块）。
 
 纯函数、只吃字节和字符串：不读文件、不碰 git，要查的那份内容由调用方拿来。
 """
@@ -59,11 +60,12 @@ def over_budget_message(raw: bytes, budget: int, top: int = 5) -> str:
     - 正路按代价从低到高排：先搬自己这次加的（它最清楚该放哪），再从最大的几节里搬，搬不出来才问用户。
     - 下一步要用的数据直接算好：超了多少、哪几节最大。"""
     over = len(raw) - budget
-    biggest = "\n".join(f"  {n:>7,}  {title}" for n, title in section_sizes(raw)[:top])
+    shown = section_sizes(raw)[:top]
+    biggest = "\n".join(f"  {n:>7,}  {title}" for n, title in shown)
     return (
         f"根目录 CLAUDE.md {len(raw):,} 字节，超预算 {over:,}（上限 {budget:,} 是用户定的）。"
         "每个会话都整份加载它，超出的字节每个会话都要付。\n"
-        f"最大的 {top} 节（字节）：\n{biggest}\n"
+        f"最大的 {len(shown)} 节（字节）：\n{biggest}\n"
         "别做：为过闸压措辞或删内容（会丢知识）；自己调大 `claude_md_budget.py` 的 ROOT_BUDGET_BYTES（等于改用户定的数）。\n"
         "按顺序做：\n"
         "  1. 这次你往根目录加了内容：先把细节逐字搬进分区文件，根目录只留一行「是什么 → 去读哪个文件」。"
