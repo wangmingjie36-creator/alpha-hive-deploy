@@ -168,13 +168,14 @@ class TestEndpoint:
         cfg = dict(W.CONFIG)
         cfg.update(universe=["AAA"], accept_price={"AAA": None})
         monkeypatch.setattr(W, "CONFIG", cfg)
-        contracts = [{"symbol": "AAA270115P00090000", "expiry": "2027-01-15", "cp": "P", "strike": 90.0, "bid": 2.0,
-                      "ask": 2.08, "oi": 500, "delta": -0.2}]
+        contracts = [{"symbol": "AAA261211P00090000", "expiry": "2026-12-11", "cp": "P", "strike": 90.0, "bid": 2.0,
+                      "ask": 2.08, "oi": 500, "delta": -0.2, "iv": 0.25}]          # 37 天，在 v2 窗口 30–50 内
         W.run_for_date("2026-11-04", contracts_fn=lambda tk, d: ({"underlying_price": 100.0, "contracts": contracts}, None),
-                       closes_fn=lambda *a, **k: None)
+                       closes_fn=lambda *a, **k: None, rv_fn=lambda tk, d: (20.0, None))   # RV 注入：测试不打 yfinance
         v = AlphaBotService().wheel()
         assert v["available"] is True and v["lots"][0]["ticker"] == "AAA" and v["lots"][0]["put"]["strike"] == 90.0
         assert v["lots"][0]["put"]["accept_price_source"] == "placeholder"
+        assert v["lots"][0]["put"]["iv_rv"] == 1.25 and v["lots"][0]["put"]["rv_pct"] == 20.0
         assert v["events"][0]["event_zh"] == WH.EVENT_ZH["put_sold"]
 
     def test_method_endpoint_carries_the_rules_for_the_help_page(self):
@@ -213,7 +214,7 @@ class TestFrontend:
     def test_help_constants_come_from_the_server_not_literals(self):
         sect = self.HELP[self.HELP.index('["wheel", "接货型卖 put"'):self.HELP.index('["ledger", "账本"')]
         assert len(sect) > 800, "切片取空了——测试在空转"
-        for key in ("universe", "placeholder_otm_pct", "per_name_cap_pct", "total_cap_pct", "put_dte_range", "put_dte_target",
+        for key in ("universe", "placeholder_otm_pct", "per_name_cap_pct", "total_cap_pct", "put_dte_range", "rv_window", "min_iv_rv",
                     "call_dte_range", "call_dte_target", "call_target_delta", "max_spread_pct", "min_oi", "starting_capital"):
             assert f"w.{key}" in sect, key
         assert not re.search(r"\b(20|60|70|35)\s*%", sect) and not re.search(r"≤ \d", sect), "规则常量写成了字面量"

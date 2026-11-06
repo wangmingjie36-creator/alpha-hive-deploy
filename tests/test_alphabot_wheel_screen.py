@@ -159,33 +159,73 @@ class TestLadder:
 
 
 class TestPickForAccept:
-    CONTRACTS = [{"symbol": "AAA270115P00090000", "expiry": "2027-01-15", "cp": "P", "strike": 90.0, "bid": 2.0, "ask": 2.08,
-                  "oi": 500, "delta": -0.2},
-                 {"symbol": "AAA270115P00085000", "expiry": "2027-01-15", "cp": "P", "strike": 85.0, "bid": 1.2, "ask": 1.25,
-                  "oi": 500, "delta": -0.15}]
+    """v0.45.742：选合约规则 v2 要 RV ⇒ 取链层用行情层的日线算（同 `sell_put_wheel.rv_from_closes`）；没日线 ⇒ no_rv。"""
+    AS_OF = "2026-11-04"
+    EXP = "2026-12-11"                       # 37 天，落在 v2 窗口 30–50 内
+    CONTRACTS = [{"symbol": "AAA261211P00090000", "expiry": EXP, "cp": "P", "strike": 90.0, "bid": 2.0, "ask": 2.08,
+                  "oi": 500, "delta": -0.2, "iv": 0.40},
+                 {"symbol": "AAA261211P00085000", "expiry": EXP, "cp": "P", "strike": 85.0, "bid": 1.2, "ask": 1.25,
+                  "oi": 500, "delta": -0.15, "iv": 0.42}]
+    #: 非退化（RV ≈ 32%），末根恰是 AS_OF 那一场（2026-11-04 周三）——v0.45.744 起末根不是应有那一场就不算
+    CLOSES = {str(d.date()): 100.0 * (1.01 if i % 2 else 0.99)
+              for i, d in enumerate(pd.bdate_range(end="2026-11-04", periods=120))}
+    DONE = "2026-11-04"                       # 取这份日线时已收盘的场次
 
     def test_same_contract_as_the_ledgers_own_rule(self):
-        out = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, "2026-11-04")
-        c, _, _ = W.pick_put(self.CONTRACTS, 100.0, 92.0, "2026-11-04")
-        assert out["ok"] and out["symbol"] == c["symbol"] and out["strike"] == 90.0
+        out = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, self.AS_OF, closes=self.CLOSES, closes_completed=self.DONE)
+        rv, _ = W.rv_asof(self.CLOSES, self.AS_OF, self.DONE)
+        c, _, info = W.pick_put(self.CONTRACTS, 100.0, 92.0, self.AS_OF, rv_pct=rv)
+        assert rv and out["ok"] and out["symbol"] == c["symbol"] and out["strike"] == 90.0
         assert out["net_cost"] == 88.0 and out["net_discount_pct"] == -12.0 and out["capital_usd"] == 9000.0
-        assert out["annual_yield_pct"] == pytest.approx(round(2.0 / 90.0 * 365.0 / 72 * 100, 1))   # 72 天
-        assert out["dte"] == 72 and out["accept_price_source"] == "user" and out["distance_pct"] == -8.0
+        assert out["annual_yield_pct"] == pytest.approx(round(2.0 / 90.0 * 365.0 / 37 * 100, 1))
+        assert out["dte"] == 37 and out["accept_price_source"] == "user" and out["distance_pct"] == -8.0
+        assert out["rv_pct"] == info["rv_pct"] and out["iv_pct"] == 40.0 and out["iv_over_rv"] == info["iv_rv"]
+
+    def test_no_closes_means_no_rv_not_a_guess(self):
+        out = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, self.AS_OF)
+        assert out["ok"] is False and out["reason"] == "no_rv" and out["rv_pct"] is None
 
     def test_placeholder_is_labelled_when_no_accept_price(self):
-        out = WS.pick_for_accept(self.CONTRACTS, 100.0, None, "2026-11-04")
+        out = WS.pick_for_accept(self.CONTRACTS, 100.0, None, self.AS_OF, closes=self.CLOSES, closes_completed=self.DONE)
         assert out["accept_price_source"] == "placeholder" and out["accept_price"] == 90.0
 
     def test_failure_carries_the_ledgers_reason_code(self):
-        out = WS.pick_for_accept(self.CONTRACTS, 100.0, 60.0, "2026-11-04")
-        _, why, _ = W.pick_put(self.CONTRACTS, 100.0, 60.0, "2026-11-04")
+        out = WS.pick_for_accept(self.CONTRACTS, 100.0, 60.0, self.AS_OF, closes=self.CLOSES, closes_completed=self.DONE)
+        _, why, _ = W.pick_put(self.CONTRACTS, 100.0, 60.0, self.AS_OF, rv_pct=W.rv_asof(self.CLOSES, self.AS_OF, self.DONE)[0])
         assert out["ok"] is False and out["reason"] == why and why
 
-    def test_earnings_flag_and_replay_only_when_asked(self):
-        out = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, "2026-11-04", earnings_date="2026-12-01")
-        assert out["earnings_in_window"] is True and "replay" not in out
-        out = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, "2026-11-04", closes=_closes([100.0] * 120))
-        assert out["replay"]["ok"] is True and out["earnings_in_window"] is None          # 日期没给 ⇒ 待验证，不是 False
+    def test_earnings_flag_and_replay(self):
+        out = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, self.AS_OF, closes=self.CLOSES, closes_completed=self.DONE, earnings_date="2026-12-01")
+        assert out["earnings_in_window"] is True and out["replay"]["ok"] is True
+        out = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, self.AS_OF, closes=self.CLOSES, closes_completed=self.DONE)
+        assert out["earnings_in_window"] is None                                    # 日期没给 ⇒ 待验证，不是 False
+
+    def test_cache_fetched_mid_session_never_uses_the_half_bar(self):
+        """缓存是 11-04 盘中取的（那一刻已收盘的是 11-03）：末根 11-04 是半根。之后不论何时看，RV 都只用到 11-03，
+        与账本在 11-03 那一场算的同一个数（v0.45.742 的 rv_cutoff 用「看的时候」的已收盘场次，收盘后会把半根当收盘）。"""
+        forming = {**self.CLOSES, "2026-11-04": self.CLOSES["2026-11-04"] * 1.08}
+        out = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, self.AS_OF, closes=forming, closes_completed="2026-11-03")
+        assert out["rv_end"] == "2026-11-03" and out["rv_expected"] == "2026-11-03"
+        ledger_rv, _ = W.rv_asof(self.CLOSES, "2026-11-03", "2026-11-03")
+        assert out["rv_pct"] == round(ledger_rv, 2)
+        wrong = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, self.AS_OF, closes=forming, closes_completed="2026-11-04")
+        assert wrong["rv_pct"] != out["rv_pct"]                                    # 尺子有牙：拿错已收盘场次就会把半根算进去
+
+    def test_lagging_closes_are_refused_not_shifted(self):
+        """日线缺了最近一场：不把窗口往前挪一天算个「看起来正常」的数，而是 no_rv + closes_lag。"""
+        lag = {d: v for d, v in self.CLOSES.items() if d != "2026-11-04"}
+        out = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, self.AS_OF, closes=lag, closes_completed=self.DONE)
+        assert out["ok"] is False and out["reason"] == "no_rv" and out["rv_detail"] == "closes_lag"
+        assert out["rv_end"] == "2026-11-03" and out["rv_expected"] == "2026-11-04"
+
+    def test_unknown_completed_session_is_no_rv(self):
+        out = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, self.AS_OF, closes=self.CLOSES, closes_completed=None)
+        assert out["reason"] == "no_rv" and out["rv_detail"] == "session_unknown"
+
+    def test_output_carries_no_score_key(self):
+        """综合分只在账本规则内部选合约；取链层输出不带它（页面不拿它给标的排名）。"""
+        out = WS.pick_for_accept(self.CONTRACTS, 100.0, 92.0, self.AS_OF, closes=self.CLOSES, closes_completed=self.DONE)
+        assert out["ok"] and not [k for k in out if re.search(r"score|rank|recommend|综合", k, re.I)]
 
 
 # ───────────────────────────── 设置 ─────────────────────────────
@@ -414,7 +454,9 @@ class TestEndpoints:
             _svc_l(tmp_path).wheel_screen_prices([])
 
     def _chain_svc(self, tmp_path):
-        svc = _svc_l(tmp_path, _ok_prices())
+        closes = TestPickForAccept.CLOSES                            # 非退化日线：v2 选合约要 RV
+        svc = _svc_l(tmp_path, lambda need: ({t: closes for t in need}, {t: {"n": len(closes), "reason": None} for t in need}))
+        svc.completed_session_fn = lambda: TestPickForAccept.DONE         # 钉住「取数那一刻已收盘的场次」
         raw = {"underlying_price": 100.0, "as_of": "2026-11-04", "contracts": TestPickForAccept.CONTRACTS,
                "session_live": False, "underlying_price_source": "cboe_close"}
         svc._live_fetch = lambda t: (lambda tk, as_of=None: (raw, None))
@@ -424,15 +466,28 @@ class TestEndpoints:
         svc = self._chain_svc(tmp_path)
         svc.update_settings({"wheel_accept": {"XOM": 92}})
         c = svc.wheel_screen_chain("XOM")
-        assert c["ok"] and c["strike"] == 90.0 and c["accept_price_source"] == "user" and c["replay_needs_prices"] is True
-        assert "replay" not in c
-        assert c["earnings_in_window"] is True                       # 账本财报 2026-11-20 落在 (11-04, 2027-01-15] 内
+        # 还没取日线 ⇒ 算不出 RV ⇒ v2 规则选不了（页面提示先「取行情统计」），不是猜一个
+        assert c["ok"] is False and c["reason"] == "no_rv" and c["replay_needs_prices"] is True
+        assert c["accept_price_source"] == "user" and c["accept_price"] == 92.0
         svc.wheel_screen_prices(["XOM"])
         c2 = svc.wheel_screen_chain("XOM")
-        assert c2["replay_needs_prices"] is False and c2["replay"]["ok"] is True
+        assert c2["ok"] and c2["strike"] == 90.0 and c2["replay_needs_prices"] is False and c2["replay"]["ok"] is True
+        assert c2["earnings_in_window"] is True                      # 账本财报 2026-11-20 落在 (11-04, 12-11] 内
+        assert c2["iv_pct"] == 40.0 and c2["rv_pct"] and c2["iv_over_rv"]
+
+    def test_completed_session_is_read_before_the_fetch_and_kept_with_the_cache(self, tmp_path):
+        """v0.45.744：缓存里每份日线带着「取数那一刻已收盘的场次」——先记后取（取数跨过收盘时宁可少认一场，不把半根当收盘）。"""
+        order = []
+        closes = TestPickForAccept.CLOSES
+        svc = _svc_l(tmp_path, lambda need: order.append("fetch") or ({t: closes for t in need}, {t: {"n": 1, "reason": None} for t in need}))
+        svc.completed_session_fn = lambda: order.append("done") or "2026-11-03"
+        svc.wheel_screen_prices(["XOM"])
+        assert order == ["done", "fetch"] and svc._wheel_cached_completed("XOM") == "2026-11-03"
 
     def test_chain_without_an_accept_price_says_placeholder(self, tmp_path):
-        c = self._chain_svc(tmp_path).wheel_screen_chain("WMT")
+        svc = self._chain_svc(tmp_path)
+        svc.wheel_screen_prices(["WMT"])
+        c = svc.wheel_screen_chain("WMT")
         assert c["ok"] and c["accept_price_source"] == "placeholder"
 
     def test_chain_failure_is_reported_with_the_reason(self, tmp_path):

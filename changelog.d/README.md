@@ -15,6 +15,8 @@
 - 它在 **origin/main 上**另建一个只含 `changelog.d/<号>.md` 的提交，推送、以 `git ls-remote` 核实成功，
   再带进当前分支（落后就快进，否则 cherry-pick）。不碰你的分支内容和工作区，做到一半也能占号。
 - 号被别人抢先 ⇒ 推送被拒 ⇒ 工具自动取下一个号重推（最多 5 次）。
+- 号一律是补丁位 +1：版本号只当顺序编号，改动性质看标题里的 `Added` / `Changed` / `Fixed` / `Removed`。
+  要升 minor 先问用户；`claim` 没有 `--minor`，用户定了再加（规则原文在 `.claude/rules/session-closing.md`）。
 - 推不了 main 的会话**不带** `--push`：照它打印的命令推送，推完在**同一个 checkout 里**再
   `/usr/local/bin/python3 changelog_fragments.py adopt <提交>`（打印的命令已带 `cd`）。**推上去之前号没占住。**
 - 推完之后的提示照字面做：说「号多半已经占住」「号已占住」时**别重跑 `claim`**（会再占一个号），照它给的

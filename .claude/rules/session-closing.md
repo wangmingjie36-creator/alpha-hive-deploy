@@ -12,7 +12,7 @@ paths:
 
 - **每次 session 结束前必须写好自己那一版的条目**：v0.45.728 起写在 `changelog.d/<版本>.md`（一个版本一个文件，格式、示例、流程见 `changelog.d/README.md`）。`CHANGELOG.md` 已冻结为档案，**不许再加版本标题**（提交 / 推送 / 全量测试都会红）；冻结前在里面占的号就地完成
 - 格式：`Added` / `Changed` / `Fixed` / `Removed`，注明文件名和改动摘要
-- 版本号：patch（0.x.y+1）= bug fix；minor（0.x+1.0）= 新功能批次
+- 版本号：一律由 `claim` 取（补丁位 +1），只当顺序编号；改动性质看条目标题里的 `Added` / `Changed` / `Fixed` / `Removed`，不靠版本号区分。**要升 minor 先问用户**，用户定了再给 `claim` 加 `--minor`。（v0.45.739 改。原文「patch = bug fix；minor = 新功能批次」自 0.45.0 起一次没执行过：号在开工时就占，那时还不知道这次算不算新功能批次；一个「批次」又横跨许多会话，没人负责宣布它开始。）
 - 最大号 / 下一个号 / 谁还挂着占位：`/usr/local/bin/python3 changelog_fragments.py status`；合并视图 `... render`（生成结果不提交）
 
 ### 并发开工必须先占号（2026-08-27 起；v0.45.728 起占号 = 往 main 推一个碎片）
@@ -33,6 +33,9 @@ paths:
 
 - 动了档案：跑 `tests/test_changelog_entry_integrity.py`（冲突标记 / 重号 / 空标题 / 冻结：加号、删条目、改顶号都红）。
 - 动了碎片：跑 `changelog_fragments.py` 的检查（文件名 = 标题里的号、认领行恰好一行、日期、冲突标记、占位以外要有正文、号要大于档案顶号）。pre-commit 读**暂存区**、不读工作区；pre-push 读**被推的那个提交**并对照远端 main——已在 main 上的碎片不许删、认领行不许改，算不出远端 main 的基准就拦。
+- 推往 main 时另有两道与 CHANGELOG 无关的闸，各判各的：
+  - **契约闸**（v0.45.355）：被推区间动了代码 ⇒ 在导出树里跑步骤契约测试。
+  - **根目录 CLAUDE.md 预算闸**（v0.45.738）：被推区间动了根目录 `CLAUDE.md` 或 `claude_md_budget.py`（判据的两个输入）⇒ 拿被推提交里那份，比被推提交里 `claude_md_budget.py` 写的预算；超了就拦，并打印搬家步骤（与 `tests/test_claude_md_partitions.py` 的失败信息是同一段）。只放在 pre-push：rebase 不跑 pre-commit，两个会话各自没超、合起来才超的只有 pre-push 看得到。GitHub 网页上合并 PR 不经本地钩子，那条路只有 CI 兜底。
 - ⚠️ **pre-commit 管不到 `git rebase --continue`**（实测只触发 post-rewrite）——解冲突后兜底的是 pre-push，别以为提交成功就代表检查过。
 - `.git/hooks` 不被跟踪：重新 clone 或清过之后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。钩子壳没变，碎片检查随代码合入即生效，已装的钩子不用重装。
 
@@ -40,7 +43,7 @@ paths:
 
 - **Auto Memory 路径**：`~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/MEMORY.md`
 - 每次 session 修改了代码/新增模块/修复 bug 后，Claude 必须自动更新 MEMORY.md 对应章节
-- 控制在 200 行以内；超出时压缩旧版本历史或移除已被代码覆盖的实现细节
+- 总量（字节、行数）由 memory 仓 pre-commit 的 `check_index_line_length.py` 拦，上限以脚本为准；撞线时把细节搬进 topic 文件，别删索引行（零丢失的做法见下面「索引行」一条）
 - 旧记忆路径 `~/.claude/projects/-Users-igg/memory/` 已弃用，勿再写入
 - **索引行只写「这条是什么 + 什么时候该打开它」，单条 ≤150 字符**；细节一律进 topic 文件
   （2026-09-11 实测教训：索引曾涨到 40KB、单条 2054 字符，且**有些教训只活在索引行里、

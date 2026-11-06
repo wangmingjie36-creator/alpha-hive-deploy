@@ -73,7 +73,7 @@ def _lot_view(lot: dict, as_of: Optional[str], prices: dict) -> dict:
             continue
         out[key] = {k: leg.get(k) for k in ("symbol", "strike", "expiry", "premium", "delta", "sold_on", "last_mark",
                                             "last_mark_date", "stale_days", "accept_price", "accept_price_source",
-                                            "annual_yield_pct", "dte_at_open", "spot_at_open",
+                                            "annual_yield_pct", "dte_at_open", "spot_at_open", "iv_pct", "rv_pct", "iv_rv",
                                             "settle_deferred_since", "settle_deferred_reason")}
         out[key]["days_to_expiry"] = _days_to(as_of, leg.get("expiry"))
         out[key]["settle_deferred_reason_zh"] = DEFER_ZH.get(leg.get("settle_deferred_reason"), leg.get("settle_deferred_reason"))

@@ -43,6 +43,9 @@ function rungCell(r, k) {
 
 function chainDetail(c) {
   if (!c) return null;
+  if (!c.ok && c.reason === "no_rv" && c.replay_needs_prices) return h("div", { class: "small muted" }, "选合约要用实际波动率（IV ÷ RV 门槛与综合分）：先点「取行情统计」取日线。");
+  if (!c.ok && c.reason === "no_rv" && c.rv_detail === "closes_lag") return h("div", { class: "small muted" },
+    `算不了实际波动率：日线最后一根是 ${c.rv_end || "—"}，应为 ${c.rv_expected || "—"}（缓存是那一场收盘前取的，或数据源还没给出）。不把窗口往前挪一天顶替——稍后重新「取行情统计」。`);
   if (!c.ok) return h("div", { class: "small muted" }, `取链 / 选合约：${c.reason}${c.detail ? `（${c.detail}）` : ""}`
     + (c.accept_price ? `；接货价 ${num(c.accept_price, 2)}（${c.accept_price_source === "user" ? "你给的" : "占位"}）` : ""));
   const rp = c.replay;
@@ -51,6 +54,7 @@ function chainDetail(c) {
     h("div", { class: "sd-row" }, `${c.symbol} · 行权价 ${num(c.strike, 2)}（${sPct(c.strike_dist_pct)}）· 到期 ${c.expiry}（${c.dte} 天）· bid ${num(c.bid, 2)} · 点差 ${num(c.spread_pct, 1)}% · OI ${num(c.oi, 0)} · Δ ${isNum(c.delta) ? num(c.delta, 2) : "—"}`),
     h("div", { class: "sd-row" }, `年化 ${num(c.annual_yield_pct, 1)}% · 被行权净成本 ${num(c.net_cost, 2)}（比现价 ${sPct(c.net_discount_pct)}）· 一张占资金 ${money(c.capital_usd, 0)} · `
       + (c.earnings_in_window === true ? "财报在到期前" : c.earnings_in_window === false ? "财报不在到期前" : "财报日待验证")),
+    h("div", { class: "sd-row" }, `IV ${isNum(c.iv_pct) ? num(c.iv_pct, 1) + "%" : "—"} · 30 日实际波动 ${isNum(c.rv_pct) ? num(c.rv_pct, 1) + "%" : "—"}（收盘截至 ${c.rv_end || "—"}）· IV ÷ RV ${isNum(c.iv_over_rv) ? num(c.iv_over_rv, 2) : "—"}`),
     rp?.ok ? h("div", { class: "small muted" }, `把这张的 bid 放回过去的真实行情（重叠窗口 ${rp.n_windows} 个、互不重叠约 ${rp.independent_windows} 个）：平均净收益 ${sPct(rp.mean_net_pct, 2)}（占行权价）· 净赚 ${num(rp.win_pct, 0)}% · 5% 分位 ${sPct(rp.p05_net_pct, 1)} · 最差 ${sPct(rp.worst_net_pct, 1)}。偏乐观、样本很小，不是预测。`)
       : h("div", { class: "small muted" }, c.replay_needs_prices ? "权利金重放要日线：先点「取行情统计」。" : `权利金重放不给：${rp?.reason || "—"}`));
 }
@@ -65,7 +69,7 @@ export async function renderWheelScreen(root, alive) {
       + "以及按你的接货价选出的合约。不排名、不推荐、不给综合分；「愿不愿意持有」是你的判断，这里只存你给的名单和接货价、只供显示。")),
     helpLink("wheel"));
   const warn = h("p", { class: "callout warn" }, "「权利金重放」把今天的权利金放回过去两年的行情：多数标的这两年在涨、30 天窗口互不重叠的样本只有二十来个，偏乐观，不是预测。"
-    + "梯子是账本里约 30 天的一档，取链层才是接货账本用的 55~90 天窗口。点差是收盘后记的，盘中可能更窄。");
+    + "梯子是账本里约 30 天的一档，取链层用的是接货账本的到期窗口（帮助页有当前值），要先「取行情统计」拿到日线才算得出实际波动率。点差是收盘后记的，盘中可能更窄。");
 
   async function load() {
     state.data = await api(`/api/wheel/screen?scope=${state.scope}`);
@@ -143,7 +147,7 @@ export async function renderWheelScreen(root, alive) {
     const detail = Object.entries(state.chain).map(([t, c]) => h("div", { class: "cmp" }, h("b", {}, t), chainDetail(c)));
     fill(holder, controls, filters, nameEdit,
       panel(`${rows.length} / ${d.rows.length} 只`, { sub: `账本 ${d.as_of || "—"}（${d.scope === "all" ? "全部" : "我的名单"}）` }, table(cols, rows)),
-      detail.length ? panel("按接货价取链的结果", { sub: "接货账本同一条选合约规则（期限窗口 + 不高于接货价的最高合格档）" }, ...detail) : null);
+      detail.length ? panel("按接货价取链的结果", { sub: "接货账本同一条选合约规则（期限窗口 + 不高于接货价 + IV ÷ RV 门槛，取账本的综合分最高那张）" }, ...detail) : null);
   }
 
   fill(root, head, warn, holder);

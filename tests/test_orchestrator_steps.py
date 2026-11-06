@@ -486,6 +486,45 @@ class TestGoldenLegacy:
         assert "（>90s）" in run("15", 124, None, timeout=90)["message"]
 
 
+class TestCalwatchCachedNote:
+    """刻意改动 (j)（v0.45.743）：Step 13 节流期内，讲上游结论的两句照抄生产方的 `upstream_cached_note`。
+
+    此前只有 Python 的 `--quiet` 结论行注明出处，编排器自己那两行（rc=0「上游无新日程」、rc=1 摘要「上游暂无新日程可抄」）
+    读起来都像今天刚查的，实为最多 6 天前那次检查的重放。旧格式 JSON 没有这个键 ⇒ 一个字不加（`TestGoldenLegacy` 逐字对照）。
+    """
+
+    NOTE = "（上游结论出自 2026-09-25 15:00 UTC-07:00 的检查，节流 7 天内不重复联网）"
+
+    def _payload(self, status="ok", note=NOTE):
+        p = dict(LEGACY["13"], network_checked_this_run=False, upstream_cached_note=note)
+        p["calendar_health"] = dict(LEGACY["13"]["calendar_health"], status=status)
+        return p
+
+    def test_healthy_line_carries_the_note(self, tmp_path):
+        out = run("13", 0, v1_json(tmp_path, "13", payload=self._payload()))
+        assert "✅ Step 13：宏观日历健康，上游无新日程" + self.NOTE in out["message"], out["message"]
+
+    def test_stale_summary_carries_the_note(self, tmp_path):
+        items = [sc.attention_item("economic_calendar_watch.horizon.nfp", "warn", "本地 nfp 表只到 2026-12-04")]
+        out = run("13", 1, v1_json(tmp_path, "13", attention=items, payload=self._payload(status="stale")))
+        assert SUMMARY["13"][0] + self.NOTE in out["message"], out["message"]
+
+    @pytest.mark.parametrize("note", ["", None, 5], ids=["fresh-check", "null", "not-a-string"])
+    def test_empty_or_odd_note_adds_nothing(self, tmp_path, note):
+        """本轮联网（空串）/ 值不对 ⇒ 与根本没有这个键时逐字相同"""
+        without = self._payload()
+        del without["upstream_cached_note"]
+        base = run("13", 0, v1_json(tmp_path, "13", payload=without, name="without"))
+        out = run("13", 0, v1_json(tmp_path, "13", payload=self._payload(note=note)))
+        assert out == base
+
+    def test_overlong_note_is_capped(self, tmp_path):
+        """生产方那句不到 60 字；JSON 里若是一大段，日志里只留 200 字（同 (h)：别让一个字段撑爆那一行）。
+        换行不用这里管：各段拼成 message 时已统一压成一行。"""
+        out = run("13", 0, v1_json(tmp_path, "13", payload=self._payload(note="长" * 500)))
+        assert "上游无新日程" + "长" * 199 + "…" in out["message"] and "长" * 200 not in out["message"]
+
+
 class TestStep11Timeout:
     """刻意改动 (i)（v0.45.391 复审 S5）：Step 11 被 `run_step` 看门狗杀掉（rc=124）时，message 说「超时」、
     边界那句说「JSON 没写出来、本轮没核对」——09-30 实况里旧文案把它说成「异常」+「代码早于 v0.45.334 或 JSON 不可读」。

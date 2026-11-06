@@ -19,6 +19,9 @@
 
 全部离线：`economic_calendar_watch` 只走节流缓存路径（从不联网），子进程另把代理指向一个
 不监听的本地端口兜底，并逐条断言 `network_checked_this_run is False`。
+唯一例外是 `TestEconomicCalendarWatch.test_unchecked_sources_are_undetermined`：v0.45.740 起节流只重放查到了结论的表，
+「无法判定」的外壳只能出自联网分支，它就故意走联网分支——五页全打到那个不监听的本地端口、连接被拒，不出本机；
+逐表断言失败原因是连接被拒（请求若绕过了那个端口，它会红）。
 """
 from __future__ import annotations
 
@@ -55,12 +58,13 @@ ORCH_READS = {
         ("fields",), ("fields", "*", "degraded"), ("fields", "*", "field"),
         ("fields", "*", "have"), ("fields", "*", "total"), ("likely_network_layer",),
     ],
-    # Step 13：orchestrator_steps._calwatch_summary（B 之前是 rc==1 分支里算 CALWATCH_SUMMARY 的内联 python）
+    # Step 13：orchestrator_steps._calwatch_summary（B 之前是 rc==1 分支里算 CALWATCH_SUMMARY 的内联 python）；
+    # `upstream_cached_note` 另由 _calwatch_cached_note 读（rc=0 / rc=1 两句都照抄，v0.45.743）
     "economic_calendar_watch": [
         ("calendar_health", "status"), ("calendar_health", "binding_table"),
         ("calendar_health", "binding_last_date"), ("calendar_health", "binding_horizon_days"),
         ("new_schedule_tables",), ("upstream", "<new>", "new_items"), ("upstream", "<new>", "source"),
-        ("undeterminable_tables",), ("upstream_conclusive",),
+        ("undeterminable_tables",), ("upstream_conclusive",), ("upstream_cached_note",),
     ],
     # Step 15：orchestrator_steps._backup_summary（B 之前是 rc==1 分支里算 BACKUP_CONT_SUMMARY 的内联 python）
     "backup_continuity": [
@@ -377,8 +381,14 @@ class TestEconomicCalendarWatch:
     def test_healthy_is_ok(self, tmp_path):
         today = _day_all_ok()
         assert _health(today)["status"] == "ok"
-        rc, env, p = self._run_state(tmp_path, today, self._throttled(today, self._cache()))
+        state = self._throttled(today, self._cache())
+        rc, env, p = self._run_state(tmp_path, today, state)
         _check(self.TOOL, rc, env, p, expect_rc=0, expect_date=today.isoformat(), expect_status="ok")
+        # v0.45.740：节流时外壳写明上游结论出自哪次检查（= 节流状态的 last_checked_at）
+        assert env["upstream_checked_at"] == state["last_checked_at"]
+        # v0.45.743：节流了 ⇒ 没有「不节流的理由」；出处那句写进外壳，编排器照抄
+        assert env["throttle_skipped_because"] == [] and env["unresolved_in_cache"] == []
+        assert env["upstream_cached_note"] == f"（上游结论出自 {today.isoformat()} 06:00 的检查，节流 7 天内不重复联网）"
 
     def test_new_schedule_warn_with_deadline(self, tmp_path):
         today = _day_all_ok()
@@ -414,11 +424,23 @@ class TestEconomicCalendarWatch:
             assert ids[f"{self.TOOL}.horizon.{k}"]["deadline"] == v["last_date"]
 
     def test_unchecked_sources_are_undetermined(self, tmp_path):
-        """节流窗口内且无缓存 ⇒ 四源「无法判定」⇒ 退出码 3，绝不报健康。"""
+        """节流窗口内但缓存里没有结论 ⇒ 不节流、联网重查（v0.45.740）⇒ 子进程的代理指向不监听的本地端口，五页
+        都连接被拒 ⇒ 四源「无法判定」⇒ 退出码 3，绝不报健康。
+
+        本文件唯一走联网分支的一条：v0.45.740 前这里走「节流 + 缓存缺表 ⇒ 补成无法判定」，那条路径已不存在，
+        「无法判定」的外壳只能出自联网分支。不出本机：逐表断言失败原因是连接被拒——请求若绕过了那个端口，这里会红。"""
         today = _day_all_ok()
-        rc, env, p = self._run_state(tmp_path, today, {"last_checked_at": f"{today.isoformat()}T06:00:00"})
+        st = tmp_path / "watch_state.json"
+        st.write_text(json.dumps({"last_checked_at": f"{today.isoformat()}T06:00:00"}), encoding="utf-8")
+        rc, env, p = _run(self.TOOL, ["--quiet", "--today", today.isoformat(), "--state", st], tmp_path)
         ids = _check(self.TOOL, rc, env, p, expect_rc=3, expect_date=today.isoformat(), expect_status="undetermined")
         assert f"{self.TOOL}.upstream_undetermined" in ids
+        assert env["throttled"] is False and env["network_checked_this_run"] is True
+        for k in ("fomc", "cpi", "nfp", "gdp"):
+            assert "Connection refused" in (env["upstream"][k]["reason"] or ""), (k, env["upstream"][k])
+        # v0.45.743：为什么联网写在外壳里（状态里一张表的结论都没有）；本轮联网 ⇒ 出处那句是空串
+        assert env["throttle_skipped_because"] == ["unresolved_in_cache"]
+        assert env["unresolved_in_cache"] == ["cpi", "fomc", "gdp", "nfp"] and env["upstream_cached_note"] == ""
 
     @_FOREIGN_TZ
     def test_default_date_is_business_today(self, tmp_path, tz):
@@ -447,11 +469,12 @@ class TestEconomicCalendarWatch:
 
         v0.45.579 前这里用「`upstream` 是列表」触发崩溃；那种**容器形状**不对现在当没有缓存、联网重查并重写
         （自愈，见 `economic_calendar_watch._cache_shape_problem`），不再崩——崩溃外壳要另找一条真实的未捕获异常。
-        字段级的坏值仍会在节流读缓存时崩（响亮），`--force` 或过了节流窗口的那一轮会整份重写。"""
+        字段级的坏值仍会在节流读缓存时崩（响亮），`--force` 或过了节流窗口的那一轮会整份重写。
+        v0.45.740 起缓存要四张表都有结论才节流 ⇒ 其余三张用 `_cache()` 补齐（缺表的缓存走联网分支，到不了这条崩溃）。"""
         today = _day_all_ok()
-        rc, env, p = self._run_state(tmp_path, today, {
-            "last_checked_at": f"{today.isoformat()}T06:00:00", "action_required": False,
-            "upstream": {"cpi": {"determinable": True, "new_available": True, "new_items": 5, "reason": None}}})
+        up = self._cache()
+        up["cpi"].update({"new_available": True, "new_items": 5})
+        rc, env, p = self._run_state(tmp_path, today, self._throttled(today, up))
         _crash_checks(self.TOOL, rc, env, p, today.isoformat())
 
 

@@ -8,8 +8,10 @@
   · 离线层 = 卖权账本最近一日的 put 梯子（每只标的约 30 天一档，|delta| 0.20 / 0.30 两档）：点差、OI、年化、单张占资金、财报是否在到期前。
     账本的行只读它的梯子与财报日，**不碰任何结算 / 路由字段**（盲期）；
   · 行情层 = 日线统计（回撤 / 波动 / 过去 21 日的最差与跌超 10% 的频率）与「权利金重放」；
-  · 取链层 = 对一只标的现取全链，按**接货账本同一条选合约规则**（`sell_put_wheel.pick_put`：期限窗口 + 不高于接货价的最高合格档）选出那一张，
-    并给被行权净成本、单张占资金。选合约规则只有那一份，这里不另抄。
+  · 取链层 = 对一只标的现取全链，按**接货账本同一条选合约规则**（`sell_put_wheel.pick_put`；v0.45.742 起是 v2：30–50 天窗口内、
+    不高于接货价、IV/RV ≥ 门槛的合格合约里取「年化 × IV/RV」最高的那张；RV 用行情层取到的日线、经账本唯一的 RV 入口 `sell_put_wheel.rv_asof` 算）选出那一张，
+    并给被行权净成本、单张占资金、IV / RV。选合约规则只有那一份，这里不另抄。综合分只用来**在一只标的内部选合约**（账本规则本身），
+    页面不输出它、也不拿它给标的排名。
 
 口径（和我们手工分析时一致，写在这里免得读者猜）：
   · 回撤 = 收盘距「过去 252 / 63 个交易日最高收盘」的跌幅；波动 = 近 252 个日对数收益的标准差 × √252；
@@ -153,10 +155,17 @@ def earnings_before(earnings_date: Optional[str], as_of: Optional[str], expiry: 
 # ═══════════════════════════ 按接货价选合约（取链层） ═══════════════════════════
 
 def pick_for_accept(contracts: Sequence[dict], spot: float, accept: Optional[float], as_of: str,
-                    *, closes: Optional[Mapping[str, float]] = None, earnings_date: Optional[str] = None) -> dict:
-    """现取全链后：用**接货账本同一条选合约规则**选出那一张，并给净成本 / 占资金 / 重放。"""
-    c, why, info = W.pick_put(list(contracts), spot, accept, as_of)
+                    *, closes: Optional[Mapping[str, float]] = None, earnings_date: Optional[str] = None,
+                    closes_completed: Optional[str] = None) -> dict:
+    """现取全链后：用**接货账本同一条选合约规则**选出那一张，并给净成本 / 占资金 / 重放。
+
+    `closes_completed` = **取这份日线那一刻**最近一个已收盘的交易日（service 在取数前记下、随缓存存）。RV 只经
+    `sell_put_wheel.rv_asof`——和账本同一个函数判「哪几根算数、末根对不对」，这里不另写截止规则（v0.45.744 根因修复）。"""
+    rv, rv_meta = W.rv_asof(dict(closes), as_of, closes_completed) if closes else (None, {"why": None})
+    c, why, info = W.pick_put(list(contracts), spot, accept, as_of, rv_pct=rv)
     out = {"accept_price": info.get("accept_price"), "accept_price_source": info.get("accept_price_source"),
+           "rv_pct": info.get("rv_pct"), "rv_end": rv_meta.get("end"), "rv_expected": rv_meta.get("expected"),
+           "rv_detail": rv_meta.get("why"),
            "spot": spot, "distance_pct": round((info["accept_price"] / spot - 1) * 100, 1) if info.get("accept_price") else None}
     if c is None:
         return {**out, "ok": False, "reason": why}
@@ -168,7 +177,8 @@ def pick_for_accept(contracts: Sequence[dict], spot: float, accept: Optional[flo
            "strike_dist_pct": round((K / spot - 1) * 100, 1),
            "annual_yield_pct": round(W.annual_yield(bid, K, dte), 1), "net_cost": round(K - bid, 4),
            "net_discount_pct": round(((K - bid) / spot - 1) * 100, 1), "capital_usd": round(K * CONTRACT, 0),
-           "earnings_in_window": earnings_before(earnings_date, as_of, c["expiry"])}
+           "earnings_in_window": earnings_before(earnings_date, as_of, c["expiry"]),
+           "iv_pct": info.get("iv_pct"), "iv_over_rv": info.get("iv_rv")}
     if closes is not None:
         row["replay"] = replay_put(closes, spot, K, bid, dte, as_of)
     return row
@@ -249,5 +259,5 @@ def public_rules() -> dict:
     return {"rungs": list(RUNGS), "min_closes": MIN_CLOSES, "min_replay_windows": MIN_REPLAY_WINDOWS,
             "max_watch": MAX_WATCH, "dd52_window": DD52_WINDOW, "dd3m_window": DD3M_WINDOW, "vol_window": VOL_WINDOW,
             "fwd_window": FWD_WINDOW, "max_spread_pct": W.CONFIG["max_spread_pct"], "min_oi": W.CONFIG["min_oi"],
-            "put_dte_range": list(W.CONFIG["put_dte_range"]), "put_dte_target": W.CONFIG["put_dte_target"],
+            "put_dte_range": list(W.CONFIG["put_dte_range"]), "min_iv_rv": W.CONFIG["min_iv_rv"], "rv_window": W.CONFIG["rv_window"],
             "placeholder_otm_pct": W.CONFIG["placeholder_otm_pct"], "reasons": dict(REASONS)}

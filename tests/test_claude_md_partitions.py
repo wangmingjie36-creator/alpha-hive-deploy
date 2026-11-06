@@ -17,10 +17,12 @@
 3. 代码注释常写「见 CLAUDE.md 的某节」、节名放在紧跟其后的书名号里（瘦身时 90 处）。被引的那节若只剩在别的目录的分区里，
    读这段代码的会话上下文里就没有它 ⇒ 引用必须在「读引用者时会加载的 CLAUDE.md」里找得到
    （根目录 + 引用者所在各级目录的 `CLAUDE.md`）。存量意译登记在 `LEGACY_UNRESOLVED_CITATIONS`，只许减。
-4. 根目录慢慢涨回去 ⇒ 每个会话照付 ⇒ 字节预算 `ROOT_BUDGET_BYTES`，贴着目标设：
+4. 根目录慢慢涨回去 ⇒ 每个会话照付 ⇒ 字节预算 `claude_md_budget.ROOT_BUDGET_BYTES`，贴着目标设：
    预算里的余量就是这种「慢慢涨」的藏身处，余量越大，这条断言对它越瞎。
-   贴着设就会常撞线，所以失败信息 `_over_budget_message` 是写给撞线的人的操作说明。它只在红的时候渲染，
+   贴着设就会常撞线，所以失败信息 `over_budget_message` 是写给撞线的人的操作说明。它只在红的时候渲染，
    平时渲染崩了、关键指引被改丢了都没人知道 ⇒ `TestOverBudgetMessage` 拿真文件和合成文本直接渲染它。
+   本条只在选测 / 整套 / CI 里跑；推往 main 且动了根目录时，`changelog_guard.py` 的 pre-push 预算闸
+   用同一个模块再查一次被推提交里那份（v0.45.738）。
 
 `paths:` 只认本守卫解析得了的写法（每项一行、双引号；不支持花括号 / `!` / `[]`）：写了别的就红，
 先在 `_pattern_regex` 补上语义——否则守卫对它恒真。双引号也是必需的：YAML 里以 `*` 开头的
@@ -34,12 +36,10 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-_ROOT = Path(__file__).resolve().parent.parent  # 代码锚点：查的就是本 checkout 的文档
+import claude_md_budget
+from claude_md_budget import ROOT_BUDGET_BYTES, budget_in_source, over_budget_message, section_sizes
 
-#: 根目录 CLAUDE.md 的字节上限 = 用户定的目标（约 25KB），不另加余量（v0.45.734 从 30,000 降下来）。
-#: 余量就是看不见的漂移：0.45.728 让根目录涨了 1.7KB，落在旧预算约 5KB 的余量里，什么都没红。
-#: **调大它 = 改用户定的数，先问用户**（v0.45.736）。红了之后按什么顺序做，写在 `_over_budget_message`。
-ROOT_BUDGET_BYTES = 25_000
+_ROOT = Path(__file__).resolve().parent.parent  # 代码锚点：查的就是本 checkout 的文档
 
 #: 项目 skill `alpha-hive-brief` 的指令词：根目录点名给人看，skill 的 description 给 harness 匹配，两边都得有。
 BRIEF_TRIGGERS = ("开始晨扫", "生成今日简报", "跑简报", "分析一下", "深度研究")
@@ -251,62 +251,23 @@ class TestCitedSectionsResolve:
         assert not stale, f"这些已经找得到出处或不再被引用，从 LEGACY_UNRESOLVED_CITATIONS 删掉：{stale}"
 
 
-def _section_sizes(raw: bytes) -> list[tuple[int, str]]:
-    """按 `#` / `##` 标题切节，返回 [(字节数, 标题行)]，大的在前。
-
-    `###` 及更深算进所在的节；代码块里以 `#` 开头的行（shell 注释）不算标题。每个字节恰好归一节、
-    合计等于文件大小（`TestOverBudgetMessage` 钉着）——列给读者的数才能直接拿来算要搬多少。"""
-    sections, title, size, fenced = [], "（第一个标题之前）", 0, False
-    for line in raw.splitlines(keepends=True):
-        text = line.decode("utf-8", errors="replace")
-        if text.startswith("```"):
-            fenced = not fenced
-        elif not fenced and re.match(r"#{1,2} ", text):
-            if size:
-                sections.append((size, title))
-            title, size = text.strip(), 0
-        size += len(line)
-    sections.append((size, title))
-    return sorted(sections, key=lambda s: -s[0])
-
-
-def _over_budget_message(raw: bytes, budget: int, top: int = 5) -> str:
-    """根目录超预算时给读者的操作说明。
-
-    读者多半是刚往根目录加了东西、用 Bash 跑选测的会话：Bash 不触发分区加载，它手里只有这段话。
-    所以这段话要自足，并且按读者最可能的反应来写：
-    - 先拦住两条最省事的错路：压措辞 / 删内容（丢知识），和自己调大预算（改的是用户定的数）。
-      v0.45.734 把「调大并在碎片里写理由」写成了第二条正路：改一个数加一句话，比搬家省事得多，
-      撞线的会话很容易认定自己加的正是「必须留根目录」的那种；碎片里的理由在推上 main 之前没人看。
-    - 正路按代价从低到高排：先搬自己这次加的（它最清楚该放哪），再从最大的几节里搬，搬不出来才问用户。
-    - 下一步要用的数据直接算好：超了多少、哪几节最大。"""
-    over = len(raw) - budget
-    biggest = "\n".join(f"  {n:>7,}  {title}" for n, title in _section_sizes(raw)[:top])
-    return (
-        f"根目录 CLAUDE.md {len(raw):,} 字节，超预算 {over:,}（上限 {budget:,} 是用户定的）。"
-        "每个会话都整份加载它，超出的字节每个会话都要付。\n"
-        f"最大的 {top} 节（字节）：\n{biggest}\n"
-        "别做：为过闸压措辞或删内容（会丢知识）；自己调大 ROOT_BUDGET_BYTES（等于改用户定的数）。\n"
-        "按顺序做：\n"
-        "  1. 这次你往根目录加了内容：先把细节逐字搬进分区文件，根目录只留一行「是什么 → 去读哪个文件」。"
-        "确实得留在根目录的（开工第一件事就要用的、新模块匹配不到 paths: 的不变式），也只留一两句核心规则，细节照样搬。\n"
-        "     搬到读相关文件时一定会加载的那份：子目录的 CLAUDE.md，或 .claude/rules/*.md（paths: 写这条规则管的文件）；"
-        "布局见根目录开篇「文档分工原则」里的「分区」。\n"
-        "  2. 还超，或超额不是你加的（几个会话各加一点会一起超，`git log --oneline --stat -5 -- CLAUDE.md` 看是谁）："
-        f"从上面几节里逐字搬出至少 {over:,} 字节。方法和三道核对见 auto-memory "
-        "`alpha-hive-claude-md-partitions.md` 的「再瘦身 / 搬家的方法」。\n"
-        "  3. 搬不出来：先问用户要不要调大预算。用户同意后，在同一提交里改 ROOT_BUDGET_BYTES，"
-        "并在版本碎片里写明用户的决定和理由。问不到人（定时任务、无人值守）就让它红着，在汇报里写明超了多少。\n"
-        "搬完重跑 `/usr/local/bin/python3 -m pytest tests/test_claude_md_partitions.py`。它会抓三种搬坏的情况："
-        "新分区文件没被根目录点名、paths: 一个文件都匹配不到、代码注释引用的节搬到了读那段代码时不加载的地方。"
-    )
-
-
 class TestRootBudget:
     def test_root_within_budget(self):
         raw = (_ROOT / "CLAUDE.md").read_bytes()
         size = len(raw)  # 单独取出来：直接断言 len(raw) 会让 pytest 在解释里把整份文件的 repr 打出来
-        assert size <= ROOT_BUDGET_BYTES, _over_budget_message(raw, ROOT_BUDGET_BYTES)
+        assert size <= ROOT_BUDGET_BYTES, over_budget_message(raw, ROOT_BUDGET_BYTES)
+
+    def test_the_push_gate_reads_the_same_budget_from_source(self):
+        """pre-push 闸不 import 被推的版本，而是按 `BUDGET_LINE` 从被推提交的源码里读预算。
+        写法一变（加了行尾注释、改成表达式、出现两处）它就读不出 ⇒ 每次动根目录的推送都被拦成「未被检查」。"""
+        source = Path(claude_md_budget.__file__).read_text(encoding="utf-8")
+        assert budget_in_source(source) == ROOT_BUDGET_BYTES
+
+    def test_budget_in_source_refuses_ambiguity(self):
+        assert budget_in_source("ROOT_BUDGET_BYTES = 100\n") == 100
+        assert budget_in_source("x = 1\n") is None, "读不出就是读不出，不能给个缺省数"
+        assert budget_in_source("ROOT_BUDGET_BYTES = 100\nROOT_BUDGET_BYTES = 200\n") is None, "两处时不许猜"
+        assert budget_in_source("ROOT_BUDGET_BYTES = 100  # 注释\n") is None
 
 
 class TestOverBudgetMessage:
@@ -314,21 +275,22 @@ class TestOverBudgetMessage:
 
     def test_renders_on_the_real_file(self):
         raw = (_ROOT / "CLAUDE.md").read_bytes()
-        sections = _section_sizes(raw)
+        sections = section_sizes(raw)
         assert sum(n for n, _ in sections) == len(raw), "切节漏算或重复算了字节：列给读者的数不能直接用"
-        assert sections[0][1] in _over_budget_message(raw, budget=1), "最大的那节没列出来"
+        assert sections[0][1] in over_budget_message(raw, budget=1), "最大的那节没列出来"
 
     def test_steers_to_moving_and_asking_the_user(self):
         raw = ("# 总标题\n## 小节\n" + "字" * 100 + "\n## 大节\n" + "字" * 300 + "\n").encode()
-        msg = _over_budget_message(raw, budget=len(raw) - 7)
+        msg = over_budget_message(raw, budget=len(raw) - 7)
         assert "超预算 7（" in msg
+        assert "最大的 3 节" in msg, "不足 5 节时照实写列出了几节"
         assert msg.index("## 大节") < msg.index("## 小节"), "大的节要排在前面"
         # 两条正路的关键词：逐字搬；调大预算先问用户——那不是撞线的会话能自己做的决定
         assert "逐字" in msg and "先问用户" in msg
 
     def test_shell_comments_in_code_fences_are_not_headings(self):
         raw = "## 甲\n```bash\n# 注释\n```\n## 乙\n".encode()
-        assert {title for _, title in _section_sizes(raw)} == {"## 甲", "## 乙"}
+        assert {title for _, title in section_sizes(raw)} == {"## 甲", "## 乙"}
 
 
 class TestSkills:

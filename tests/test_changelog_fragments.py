@@ -10,6 +10,7 @@
   推送后以 ls-remote 核实、被抢号时重取、带进当前分支（快进 / cherry-pick）、以后 rebase 自动跳过重复提交。
 * `TestWorktreeView` / `TestAdoptAgain` / `TestClaimAfterPush`（v0.45.733 二次检查）：工作区只认被跟踪的文件；
   adopt 重跑按认领行判、cherry-pick 停在半路就撤回；推完之后的环节出错时不让人重跑 claim。
+* `TestStatus`（v0.45.739）：`status` 的跳号那一行按 minor 系列分别算，跨到下一个 minor 也照查。
 """
 
 from __future__ import annotations
@@ -208,6 +209,15 @@ class TestHelpers:
         assert cf.next_version(["0.45.99", "0.45.100", "0.45.728"]) == "0.45.729"
         with pytest.raises(ValueError):
             cf.next_version(["2"])
+
+    def test_skipped_versions_per_minor_series(self):
+        """跳号按 minor 系列分别算（v0.45.739）。变异：改回只按档案那一个系列算 ⇒ 跨到 0.46 后整段不查、报「无」⇒ 红。"""
+        assert cf.skipped_versions(["0.45.729", "0.45.731"], TOP) == ["0.45.730"]
+        assert cf.skipped_versions(["0.45.729", "0.45.731", "0.46.0", "0.46.2"], TOP) == ["0.45.730", "0.46.1"]
+        assert cf.skipped_versions(["0.45.729", "0.46.1"], TOP) == ["0.46.0"]          # 新系列从 .0 查起
+        assert cf.skipped_versions(["0.45.729", "0.45.730"], TOP) == []
+        assert cf.skipped_versions(["0.44.3", "0.45.729"], TOP) == []                  # 比档案低的系列：lint 已判红
+        assert cf.skipped_versions(["0.45.730"]) == ["0.45.729"]                       # 缺省按模块的冻结值算
 
     def test_render_puts_fragments_first_newest_first_without_claims(self):
         files = {"changelog.d/0.45.729.md": DONE.replace("0.45.730", "0.45.729"), "changelog.d/0.45.730.md": DONE,
@@ -669,3 +679,19 @@ class TestClaimAfterPush:
         out, err = capsys.readouterr()
         assert "✅ 已占 0.45.729" in out, out
         assert "号已占住" in err and "别重跑 claim" in err and "adopt " in err, err
+
+
+# ═════════════════════════════ status（v0.45.739） ═════════════════════════════
+
+class TestStatus:
+
+    def test_gaps_are_reported_across_a_minor_bump(self, remote, capsys):
+        """走 `status` 本身（此前没有任何测试碰过它的跳号那一行）：跨到 0.46 后，两个系列的跳号都要报出来。
+        变异：`status` 不经 `skipped_versions`、改回旧的单系列算法 ⇒ 打印「无」⇒ 红。"""
+        a = remote.clone("a")
+        for v in ("0.45.729", "0.45.731", "0.46.0", "0.46.2"):
+            TestWorktreeView._commit_fragment(remote, a, v)
+        assert cf.status(a, rev="HEAD", fetch=False) == 0
+        out = capsys.readouterr().out
+        assert "跳号（冻结后，可能是别人占了还没推，也可能遗弃）：0.45.730, 0.46.1" in out, out
+        assert "下一个号 0.46.3" in out, out
