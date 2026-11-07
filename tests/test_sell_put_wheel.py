@@ -367,6 +367,27 @@ class TestCallRiseGate:
         assert "per_name_cap_pct" not in PROD_CONFIG and "contracts" not in PROD_CONFIG
 
 
+class TestUniverseExit:
+    """v3.2（v0.45.749，用户 11-06「只开 NVDA 的」）：名单只管**新开仓**；退出名单的标的，已开的那笔照常走完。"""
+
+    def test_production_universe_is_nvda_only(self):
+        assert PROD_CONFIG["universe"] == ["NVDA"]
+
+    def test_a_held_name_outside_the_universe_settles_sells_its_call_and_is_never_reopened(self, pinned_config, stub_close):
+        W.run_for_date(D0, contracts_fn=contracts_for({D0: {"AAA": chain(100.0, STD_PUTS)}}), closes_fn=closes_for({}))
+        pinned_config.update(universe=["BBB"], accept_price={"BBB": None}, total_cap_pct=60.0)   # AAA 退出名单
+        d1 = "2027-01-19"
+        stub_close["AAA"] = 95.0
+        aaa = chain(95.0, [call(96, 3.0, exp="2027-02-16")] + [put(85, 1.5, exp="2027-03-19")])
+        W.reset_stats()
+        r = W.run_for_date(d1, contracts_fn=contracts_for({d1: {"AAA": aaa}}), closes_fn=closes_for({PUT_EXP: 88.0}))
+        got = [(e["ticker"], e["event"]) for e in r["events"]]
+        assert got == [("AAA", "put_assigned"), ("AAA", "call_sold")]          # 照常接货、卖 call；不再给 AAA 开新 put
+        s = W.stats()
+        assert s["chain_total"] == 2 and s["chain_missing"] == 1               # AAA 的链（盯市 / 卖 call 用）也计入；BBB 取不到
+        assert any(x["ticker"] == "BBB" and x["reason"] == "no_chain" for x in r["skipped"])
+
+
 class TestSettleBoundaries:
     def test_close_equal_to_put_strike_is_not_assigned(self):
         assert W.settle_put(90.0, 90.0) == "expired"

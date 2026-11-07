@@ -76,7 +76,7 @@ export async function renderWheel(root, alive) {
   const r = d.rules || {};
   const head = h("div", { class: "page-head" }, h("div", {},
     h("h1", {}, "接货型卖 put", h("span", { class: "sub" }, d.available ? `账本 ${d.as_of || "—"}` : "")),
-    h("p", { class: "lede" }, `纸面账本（模拟成交，不连券商）：${(r.universe || []).join(" / ") || "—"}。先卖 put（30~50 天内、不高于接货价、IV ÷ RV ≥ 门槛的合格合约里，按账本规则「年化 × IV/RV」选一张），到期收盘低于行权价就接货，`
+    h("p", { class: "lede" }, `纸面账本（模拟成交，不连券商）。新开仓名单：${(r.universe || []).join(" / ") || "—"}（退出名单的标的，已开的那笔照常持有到结算）。先卖 put（30~50 天内、不高于接货价、IV ÷ RV ≥ 门槛的合格合约里，按账本规则「年化 × IV/RV」选一张），到期收盘低于行权价就接货，`
       + "接货后卖 covered call，被叫走一圈结束；没有止损止盈。这是测量账本，不是检验，也不给任何推荐。")),
     helpLink("wheel"));
   const tabs = h("p", { class: "small" }, h("b", {}, "账本"), "　·　", h("a", { href: "#/wheel/screen" }, "筛选：30 只标的里卖 put 好不好做 →"));

@@ -35,7 +35,9 @@ _log = logging.getLogger(__name__)
 
 # ── 全部参数（主观设定，没有一个经过检验；改任何一个 = 改账本测什么，要在预注册里记修订）──
 CONFIG: Dict[str, Any] = {
-    "universe": ["XOM", "WMT", "NVDA"],
+    # **新开仓**名单。v3.2（用户 2026-11-06「除了 NVDA 另外两个的权利金太少了，只开 NVDA 的」）：XOM / WMT 退出名单——
+    # 已开的那笔照常持有到结算，被行权就照规则卖 covered call 走完那一圈；持仓的结算 / 卖 call / 盯市不看本名单，只看持仓本身
+    "universe": ["NVDA"],
     # 每只的「接货价」（愿意买的最高价）。None = **占位**：开仓那天取现价 ×(1 − placeholder_otm_pct%)，记录里标 accept_price_source="placeholder"。
     # 用户 2026-11-04 没给具体接货价、明确选「按缺省走」，所以现在三只都是占位——别把占位当成估值判断。
     "accept_price": {"XOM": None, "WMT": None, "NVDA": None},
@@ -72,7 +74,7 @@ def public_rules() -> dict:
 
 
 #: 口径世代（手写常量，只在账本口径变时改）
-_VERSION = "0.45.747"          # v3.1：允许加仓（一只多个循环）；0.45.746 = v3：总额度按综合分装满、covered call 涨 5% 才卖且按综合分选；0.45.742 = v2；0.45.720 = v1
+_VERSION = "0.45.749"          # v3.2：新开仓只剩 NVDA；0.45.747 = v3.1：允许加仓（一只多个循环）；0.45.746 = v3：总额度按综合分装满、covered call 涨 5% 才卖且按综合分选；0.45.742 = v2；0.45.720 = v1
 CONTRACT = 100
 
 
@@ -731,7 +733,7 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
 
     # ── (c) 盯市与净值 ──
     nav_info = _nav_estimate(cash, lots, chains, chain, mark=True, as_of=as_of)
-    fetched = {tk: chains.get(tk) for tk in CONFIG["universe"] if tk in chains}
+    fetched = dict(chains)          # v3.2：名单外仍有持仓的标的（XOM / WMT）也要取链盯市，取不到同样算数
     n_missing = sum(1 for v in fetched.values() if v is None)
     max_def = max([(_dte(l[k]["settle_deferred_since"], as_of) or 0) for l in lots.values() for k in ("put", "call")
                    if l.get(k) and l[k].get("settle_deferred_since")] or [0])
