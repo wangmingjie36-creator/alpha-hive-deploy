@@ -41,13 +41,17 @@ CONFIG: Dict[str, Any] = {
     "accept_price": {"XOM": None, "WMT": None, "NVDA": None},
     "placeholder_otm_pct": 10.0,
     "starting_capital": 100_000.0,
-    "contracts": 1,
-    "per_name_cap_pct": 20.0,        # 单只 put 的现金担保（行权价 × 100 × 张数）占 NAV 上限
-    "total_cap_pct": 60.0,           # put 担保 + 持股市值占 NAV 上限（再开新 put 之前判）
+    # v3（用户 2026-11-06 定「总 60%，按筛选条件选出最优标的开仓」）：没有单只上限、张数不固定——
+    # 按综合分从高到低，每只开到「put 担保 + 持股市值 ≤ NAV × total_cap_pct」与现金担保都还容得下的最多张数
+    "total_cap_pct": 60.0,
+    "sizing": "fill_total_cap_by_score",
     # put 到期窗口（日历日）。v2（用户 2026-11-06 定）：30–50 天；窗口内**每个**到期日都参与综合分比较（不再取离目标最近的那一个）
     "put_dte_range": (30, 50),
-    "call_dte_range": (25, 50), "call_dte_target": 35,
-    "call_target_delta": 0.25,
+    # v3 covered call（用户 2026-11-06 定）：接货后最近一个已收盘场次的收盘 ≥ 接货价 × (1 + call_min_rise_pct%) 才卖；
+    # 选合约与 put 同一套：窗口内所有到期日 × 行权价 ≥ max(成本底线, 现价) 的合格档、IV/RV ≥ 门槛，取「年化 × IV/RV」最高
+    # （年化按现价算：权利金 ÷ 现价 × 365 ÷ 天数）。「行权价 ≥ 现价」是我加的：价内 call 的权利金含内在价值，按年化排会专挑深度价内
+    "call_dte_range": (30, 50),
+    "call_min_rise_pct": 5.0,
     "max_spread_pct": 0.15,          # (ask − bid) / mid 超过它不开（点差吃权利金，同跨式账本的口径）
     "min_oi": 100,
     # v2：期权要比实际波动「贵」才卖——合约 IV ÷ 标的 RV 低于它不开（主观门槛，未经检验）
@@ -60,15 +64,15 @@ CONFIG: Dict[str, Any] = {
 
 def public_rules() -> dict:
     """页面 / 帮助页用的规则常量（取 CONFIG 当下的值，前端不另抄）。元组转列表以便 JSON。"""
-    keys = ("universe", "accept_price", "placeholder_otm_pct", "starting_capital", "contracts", "per_name_cap_pct",
-            "total_cap_pct", "put_dte_range", "call_dte_range", "call_dte_target",
-            "call_target_delta", "max_spread_pct", "min_oi", "rv_window", "min_iv_rv", "rank_by")
+    keys = ("universe", "accept_price", "placeholder_otm_pct", "starting_capital", "total_cap_pct", "sizing",
+            "put_dte_range", "call_dte_range", "call_min_rise_pct", "max_spread_pct", "min_oi", "rv_window", "min_iv_rv",
+            "rank_by")
     return {k: (list(CONFIG[k]) if isinstance(CONFIG[k], tuple) else (dict(CONFIG[k]) if isinstance(CONFIG[k], dict)
                                                                       else CONFIG[k])) for k in keys}
 
 
 #: 口径世代（手写常量，只在账本口径变时改）
-_VERSION = "0.45.742"          # v2 选合约规则（30–50 天、IV/RV 门槛、综合分）；0.45.720 = v1
+_VERSION = "0.45.746"          # v3：总额度按综合分装满、covered call 涨 5% 才卖且按综合分选；0.45.742 = v2；0.45.720 = v1
 CONTRACT = 100
 
 
@@ -144,11 +148,11 @@ SKIP_REASONS = {
     "bad_quote": "报价不合格（ask 缺失 / 倒挂）",
     "wide_spread": "点差超过上限",
     "low_oi": "未平仓量低于下限",
-    "per_name_cap": "超过单只现金担保上限",
-    "total_cap": "超过总担保上限",
+    "total_cap": "总担保额度剩下的不够一张",
     "no_cash": "现金不够担保",
-    "no_call_strike": "没有不低于成本底线、且合格的 call",
-    "no_delta": "call 没有 delta，没法按目标 delta 选",
+    "no_call_strike": "没有不低于成本底线、也不低于现价的 call",
+    "no_close": "取不到最近一个已收盘场次的收盘价（判不了涨没涨）",
+    "not_risen": "收盘较接货价还没涨够，不卖 call",
     "settle_deferred": "上一腿到期了、还没拿到结算那一场的收盘",
 }
 
@@ -165,14 +169,6 @@ def _expiries(contracts: List[dict], cp: str, as_of: str, rng: Tuple[int, int]) 
         if d is not None and lo <= d <= hi:
             seen[str(c["expiry"])] = d
     return sorted((d, e) for e, d in seen.items())
-
-
-def pick_expiry(contracts: List[dict], cp: str, as_of: str, rng: Tuple[int, int], target: int) -> Optional[str]:
-    """期限窗口内离目标天数最近的到期日（同距取更晚的，免得每天在两个到期日之间跳）。"""
-    cand = _expiries(contracts, cp, as_of, rng)
-    if not cand:
-        return None
-    return min(cand, key=lambda de: (abs(de[0] - target), -de[0]))[1]
 
 
 def rv_from_closes(closes: Optional[Dict[str, float]], as_of: str) -> Optional[float]:
@@ -219,8 +215,9 @@ def rv_asof(closes: Optional[Dict[str, float]], as_of: str, completed: Optional[
     的最近交易日；窗口 = 截止场次及之前的最后 `rv_window + 1` 根。
     ⚠️ 末根日期必须**恰好等于**截止场次：早了（数据源缺最近一场 / 缓存是那一场收盘前取的）⇒ `closes_lag`，不把窗口
     悄悄往前挪一天算一个「看起来正常」的数（v0.45.742 两边各截各的，正是这样对不上的）。
-    返回 (RV % | None, {"end", "expected", "n", "why"})；why 为 None = 算出来了。"""
-    meta: dict = {"end": None, "expected": None, "n": 0, "why": None}
+    返回 (RV % | None, {"end", "expected", "n", "close", "why"})；why 为 None = 算出来了。`close` = 截止场次那一根收盘
+    （v0.45.746：covered call「涨没涨」只看它——与 RV 同一份日线、同一个场次，末根不对就没有）。"""
+    meta: dict = {"end": None, "expected": None, "n": 0, "close": None, "why": None}
     if not completed:
         return None, {**meta, "why": "session_unknown"}
     exp = expected_session(min(str(as_of)[:10], str(completed)[:10]))
@@ -234,20 +231,45 @@ def rv_asof(closes: Optional[Dict[str, float]], as_of: str, completed: Optional[
     meta["end"] = str(days[-1])[:10]
     if meta["end"] != exp:
         return None, {**meta, "why": "closes_lag"}
+    meta["close"] = _pos(closes[days[-1]])
     rv = rv_from_closes(closes, exp)
     if rv is None:
         return None, {**meta, "why": "too_few_closes"}
     return rv, meta
 
 
-def score_put(c: dict, dte: int, rv_pct: float) -> Optional[Tuple[float, float, float]]:
-    """一张 put 的 (综合分, 年化 %, IV/RV)。综合分 = 年化权利金 × (IV ÷ RV)。没有 IV ⇒ None。"""
+def score_put(c: dict, dte: int, rv_pct: float, base: Optional[float] = None) -> Optional[Tuple[float, float, float]]:
+    """一张期权的 (综合分, 年化 %, IV/RV)。综合分 = 年化权利金 × (IV ÷ RV)。没有 IV ⇒ None。
+    年化的分母 `base`：put 缺省 = 行权价（现金担保）；covered call 传现价（持股市值）。"""
     iv = _pos(c.get("iv"))
     if iv is None:
         return None
-    ay = annual_yield(c["bid"], c["strike"], dte)
+    ay = annual_yield(c["bid"], base if base is not None else c["strike"], dte)
     ratio = iv * 100.0 / rv_pct
     return ay * ratio, ay, ratio
+
+
+def _best_by_score(cands: List[dict], window: Dict[str, int], rv: float,
+                   base: Optional[float]) -> Tuple[Optional[Tuple[dict, Tuple[float, float, float]]], Optional[str]]:
+    """候选里取综合分最高的一张（put / call 共用）：要合格、有 IV、IV/RV ≥ 门槛；同分取更晚到期、再取更高行权价。
+    都不合格 ⇒ (None, 候选顺序里第一张的原因)。"""
+    best, best_key, first_reason = None, None, None
+    for c in cands:
+        ok, why = _liquid(c)
+        if not ok:
+            first_reason = first_reason or why
+            continue
+        s = score_put(c, window[c["expiry"]], rv, base)
+        if s is None:
+            first_reason = first_reason or "no_iv"
+            continue
+        if s[2] < CONFIG["min_iv_rv"] - 1e-12:
+            first_reason = first_reason or "iv_below_rv"
+            continue
+        key = (round(s[0], 9), window[c["expiry"]], c["strike"])     # 圆整到 1e-9：纸面同分不让浮点尾数决定，交给同分规则
+        if best_key is None or key > best_key:
+            best, best_key = (c, s), key
+    return best, (None if best else first_reason)
 
 
 def pick_put(contracts: List[dict], spot: float, accept: Optional[float], as_of: str,
@@ -276,51 +298,51 @@ def pick_put(contracts: List[dict], spot: float, accept: Optional[float], as_of:
         return None, "no_strike", info
     if rv is None:
         return None, "no_rv", info
-    best, best_key, first_reason = None, None, None
-    for c in cands:
-        ok, why = _liquid(c)
-        if not ok:
-            first_reason = first_reason or why
-            continue
-        s = score_put(c, window[c["expiry"]], rv)
-        if s is None:
-            first_reason = first_reason or "no_iv"
-            continue
-        if s[2] < CONFIG["min_iv_rv"] - 1e-12:
-            first_reason = first_reason or "iv_below_rv"
-            continue
-        key = (round(s[0], 9), window[c["expiry"]], c["strike"])     # 圆整到 1e-9：纸面同分不让浮点尾数决定，交给同分规则
-        if best_key is None or key > best_key:
-            best, best_key = (c, s), key
+    best, why = _best_by_score(cands, window, rv, None)
     if best is None:
-        return None, first_reason, info
+        return None, why, info
     c, (score, ay, ratio) = best
     return c, None, {**info, "iv_pct": round(_pos(c["iv"]) * 100.0, 2), "iv_rv": round(ratio, 4),
                      "annual_yield_pct": round(ay, 2), "score": round(score, 4)}
 
 
-def pick_call(contracts: List[dict], basis_floor: float, as_of: str) -> Tuple[Optional[dict], Optional[str]]:
-    """卖哪一张 covered call：期限窗口内离目标最近的到期日；行权价 ≥ 成本底线；合格；|delta| 最接近目标。"""
-    exp = pick_expiry(contracts, "C", as_of, CONFIG["call_dte_range"], CONFIG["call_dte_target"])
-    if exp is None:
-        return None, "no_expiry"
-    cand = [c for c in contracts if c.get("cp") == "C" and c.get("expiry") == exp
-            and _pos(c.get("strike")) is not None and c["strike"] >= basis_floor - 1e-9]
-    if not cand:
-        return None, "no_call_strike"
-    good, reason = [], None
-    for c in cand:
-        ok, why = _liquid(c)
-        if ok and _num(c.get("delta")) is not None:
-            good.append(c)
-        elif ok:
-            reason = reason or "no_delta"
-        else:
-            reason = reason or why
-    if not good:
-        return None, reason or "no_call_strike"
-    tgt = CONFIG["call_target_delta"]
-    return min(good, key=lambda c: (abs(abs(c["delta"]) - tgt), c["strike"])), None
+def call_rise_ok(assigned_price: float, close: Optional[float]) -> Tuple[Optional[bool], Optional[float]]:
+    """v3：covered call 只在「最近一个已收盘场次的收盘 ≥ 接货价 × (1 + call_min_rise_pct%)」时卖。
+    返回 (够不够 | None = 没有收盘、判不了, 门槛价)。"""
+    trigger = round(assigned_price * (1.0 + CONFIG["call_min_rise_pct"] / 100.0), 4)
+    px = _pos(close)
+    if px is None:
+        return None, trigger
+    return px >= trigger - 1e-9, trigger
+
+
+def pick_call(contracts: List[dict], basis_floor: float, spot: Optional[float], as_of: str,
+              rv_pct: Optional[float] = None) -> Tuple[Optional[dict], Optional[str], dict]:
+    """卖哪一张 covered call（v3，用户 2026-11-06 定「和卖 put 一样看综合条件」）：候选 = 期限窗口内**所有**到期日 ×
+    行权价 ≥ max(成本底线, 现价) 的 call，要合格、有 IV、IV/RV ≥ 门槛；取综合分（年化 × IV/RV，年化按现价）最高的那一张，
+    同分规则与 put 相同。返回 (合约 | None, 原因码 | None, 附加信息)。涨没涨的闸在调用方（`call_rise_ok`）。"""
+    rv = _pos(rv_pct)
+    px = _pos(spot)
+    info: dict = {"basis_floor": basis_floor, "rv_pct": round(rv, 2) if rv is not None else None}
+    if px is None:
+        return None, "no_price", info
+    window = dict((e, d) for d, e in _expiries(contracts, "C", as_of, CONFIG["call_dte_range"]))
+    if not window:
+        return None, "no_expiry", info
+    floor = max(basis_floor, px)
+    cands = sorted((c for c in contracts if c.get("cp") == "C" and c.get("expiry") in window
+                    and _pos(c.get("strike")) is not None and c["strike"] >= floor - 1e-9),
+                   key=lambda c: (c["strike"], -window[c["expiry"]]))
+    if not cands:
+        return None, "no_call_strike", info
+    if rv is None:
+        return None, "no_rv", info
+    best, why = _best_by_score(cands, window, rv, px)
+    if best is None:
+        return None, why, info
+    c, (score, ay, ratio) = best
+    return c, None, {**info, "iv_pct": round(_pos(c["iv"]) * 100.0, 2), "iv_rv": round(ratio, 4),
+                     "annual_yield_pct": round(ay, 2), "score": round(score, 4)}
 
 
 def mark_of(c: Optional[dict]) -> Optional[float]:
@@ -410,7 +432,7 @@ def _note_item(kind: str, detail: Optional[str]) -> None:
 
 def stats() -> dict:
     """进程内计数。`all_chains_missing`：一整轮宇宙里的标的一只链都没取到（接线 / 数据源整批断了）。
-    `all_rv_missing`（v0.45.742）：要开 put 的标的一只实际波动率都没算出来——选合约规则 v2 离不开 RV，整批取不到 = 这天一张都开不出。"""
+    `all_rv_missing`（v0.45.742；v0.45.746 起含要卖 call 的持股标的）：要取 RV 的标的一只都没算出来——put 与 call 的选合约都离不开 RV，整批取不到 = 这天一张都开不出。"""
     with _LOCK:
         out = {k: _STATS[k] for k in _ZERO}
         out["items"] = list(_STATS["items"])
@@ -520,6 +542,22 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
             chains[tk], why_no_chain[tk] = res, why
         return chains[tk]
 
+    def fetch_rv(tk: str) -> Tuple[Optional[float], dict, Optional[str]]:
+        """(RV | None, rv_asof 明细, 取不到时给人看的原因)。卖 put / 卖 call 共用；每次都记计数（整批取不到 ⇒ P2）。"""
+        try:
+            rv, rv_meta = rv_fn(tk, as_of)
+        except Exception as exc:  # noqa: BLE001 - 单只取不到不连坐其余；计数 + 原因进 skipped，整批取不到 ⇒ P2
+            rv, rv_meta = None, {"why": f"{type(exc).__name__}: {exc}"}
+        if not isinstance(rv_meta, dict):           # 测试桩可只给 (rv, None | 原因字符串)
+            rv_meta = {"why": rv_meta}
+        why_rv = rv_meta.get("why") or ("rv_not_positive" if _pos(rv) is None else None)
+        if why_rv in RV_DETAILS:
+            why_rv = f"{why_rv}（{RV_DETAILS[why_rv]}；末根 {rv_meta.get('end')}，应为 {rv_meta.get('expected')}，{rv_meta.get('n')} 根）"
+        _note(rv_total=1, rv_missing=0 if _pos(rv) is not None else 1)
+        if _pos(rv) is None:
+            _note_item("rv_missing", f"{tk}: {why_rv}")
+        return (_pos(rv), rv_meta, why_rv)
+
     # ── (a) 到期结算 ──
     for tk, lot in list(lots.items()):
         for leg_key in ("put", "call"):
@@ -589,19 +627,40 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
         if not ch:
             skipped.append({"ticker": tk, "leg": "call", "reason": "no_chain", "detail": why_no_chain.get(tk)})
             continue
-        c, why = pick_call(ch["contracts"], lot["shares"]["basis"], as_of)
+        rv, rv_meta, why_rv = fetch_rv(tk)
+        if rv is None:
+            skipped.append({"ticker": tk, "leg": "call", "reason": "no_rv", "detail": why_rv})
+            continue
+        close = _pos(rv_meta.get("close"))
+        rose, trigger = call_rise_ok(lot["shares"]["assigned_price"], close)
+        if rose is None:
+            skipped.append({"ticker": tk, "leg": "call", "reason": "no_close", "trigger": trigger,
+                            "detail": f"场次 {rv_meta.get('end')}"})
+            continue
+        if not rose:
+            skipped.append({"ticker": tk, "leg": "call", "reason": "not_risen", "close": close,
+                            "close_session": rv_meta.get("end"), "trigger": trigger,
+                            "detail": f"收盘 {close}（{rv_meta.get('end')}）< 接货价 {lot['shares']['assigned_price']} × "
+                                      f"(1 + {CONFIG['call_min_rise_pct']}%) = {trigger}"})
+            continue
+        c, why, info = pick_call(ch["contracts"], lot["shares"]["basis"], _pos(ch.get("underlying_price")), as_of,
+                                 rv_pct=rv)
         if c is None:
-            skipped.append({"ticker": tk, "leg": "call", "reason": why})
+            skipped.append({"ticker": tk, "leg": "call", "reason": why, **info})
             continue
         n = int(lot["contracts"])
         cash += c["bid"] * CONTRACT * n
         lot["premiums"] = round(lot["premiums"] + c["bid"], 4)
+        extra = {"spot_at_open": _pos(ch.get("underlying_price")), "dte_at_open": _dte(as_of, c["expiry"]),
+                 "close": close, "close_session": rv_meta.get("end"), "trigger": trigger,
+                 "annual_yield_pct": info["annual_yield_pct"], "iv_pct": info["iv_pct"], "rv_pct": info["rv_pct"],
+                 "iv_rv": info["iv_rv"], "score": info["score"], "rv_end": rv_meta.get("end"), "rule_version": _VERSION}
         lot["call"] = {"symbol": c["symbol"], "strike": c["strike"], "expiry": c["expiry"], "premium": c["bid"],
                        "sold_on": as_of, "delta": c.get("delta"), "last_mark": mark_of(c) or c["bid"],
-                       "last_mark_date": as_of, "stale_days": 0}
+                       "last_mark_date": as_of, "stale_days": 0, **extra}
         events.append({"date": as_of, "ticker": tk, "event": "call_sold", "strike": c["strike"], "expiry": c["expiry"],
                        "premium": c["bid"], "contracts": n, "cycle": lot["cycle"], "delta": c.get("delta"),
-                       "basis_floor": lot["shares"]["basis"]})
+                       "basis_floor": lot["shares"]["basis"], "spread_pct": round(_spread_pct(c) * 100, 2), **extra})
 
     # ── (b') 卖 put（无仓的标的）：按综合分（年化 × IV/RV）从高到低排，逐只判额度 ──
     meta_nav = _nav_estimate(cash, lots, chains, chain)
@@ -617,18 +676,7 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
         if spot is None:
             skipped.append({"ticker": tk, "leg": "put", "reason": "no_price"})
             continue
-        try:
-            rv, rv_meta = rv_fn(tk, as_of)
-        except Exception as exc:  # noqa: BLE001 - 单只取不到不连坐其余；计数 + 原因进 skipped，整批取不到 ⇒ P2
-            rv, rv_meta = None, {"why": f"{type(exc).__name__}: {exc}"}
-        if not isinstance(rv_meta, dict):           # 测试桩可只给 (rv, None | 原因字符串)
-            rv_meta = {"why": rv_meta}
-        why_rv = rv_meta.get("why") or ("rv_not_positive" if _pos(rv) is None else None)
-        if why_rv in RV_DETAILS:
-            why_rv = f"{why_rv}（{RV_DETAILS[why_rv]}；末根 {rv_meta.get('end')}，应为 {rv_meta.get('expected')}，{rv_meta.get('n')} 根）"
-        _note(rv_total=1, rv_missing=0 if _pos(rv) is not None else 1)
-        if _pos(rv) is None:
-            _note_item("rv_missing", f"{tk}: {why_rv}")
+        rv, rv_meta, why_rv = fetch_rv(tk)
         c, why, info = pick_put(ch["contracts"], spot, CONFIG["accept_price"].get(tk), as_of, rv_pct=rv)
         if c is None:
             skipped.append({"ticker": tk, "leg": "put", "reason": why, **info,
@@ -638,19 +686,15 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
         cands.append((info["score"], tk, c, {**info, "spot": spot, "dte": dte, "rv_end": rv_meta.get("end")}))
     cands.sort(key=lambda x: -x[0])
     for _score, tk, c, info in cands:
-        n = int(CONFIG["contracts"])
-        reserve = c["strike"] * CONTRACT * n
-        nav = meta_nav["nav"]
-        held = _reserved_and_shares(lots, meta_nav)
-        if reserve > nav * CONFIG["per_name_cap_pct"] / 100.0:
-            skipped.append({"ticker": tk, "leg": "put", "reason": "per_name_cap", "strike": c["strike"]})
-            continue
-        if held + reserve > nav * CONFIG["total_cap_pct"] / 100.0:
+        n_cap, n_cash = put_size(c["strike"], c["bid"], meta_nav["nav"], _reserved_and_shares(lots, meta_nav),
+                                 cash, _reserved_puts(lots))
+        if n_cap < 1:
             skipped.append({"ticker": tk, "leg": "put", "reason": "total_cap", "strike": c["strike"]})
             continue
-        if cash + c["bid"] * CONTRACT * n < reserve + _reserved_puts(lots):
+        if n_cash < 1:
             skipped.append({"ticker": tk, "leg": "put", "reason": "no_cash", "strike": c["strike"]})
             continue
+        n = min(n_cap, n_cash)
         cash += c["bid"] * CONTRACT * n
         cycle = f"{tk}-{as_of}"
         lots[tk] = {"ticker": tk, "state": "put", "cycle": cycle, "contracts": n, "opened_on": as_of,
@@ -705,6 +749,18 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
     ledger_io.write_json(p["meta"], _scrub(meta))
     return {"as_of": as_of, "nav": row["nav"], "cash": row["cash"], "events": events, "skipped": skipped,
             "deferred": deferred, "n_lots": len(lots)}
+
+
+def put_size(strike: float, bid: float, nav: float, held: float, cash: float, reserved: float) -> Tuple[int, int]:
+    """v3 张数（纯函数）：(总额度容得下的张数, 现金担保容得下的张数)，调用方取两者较小。
+    总额度：held + 行权价 × 100 × n ≤ NAV × total_cap_pct%。现金：开仓后现金（含收到的权利金）≥ 全部 put 担保。"""
+    per = strike * CONTRACT
+    room = nav * CONFIG["total_cap_pct"] / 100.0 - held
+    n_cap = int(math.floor(room / per + 1e-9)) if per > 0 else 0
+    net = per - bid * CONTRACT                 # 每多一张，担保增加 per、现金增加 bid × 100
+    free = cash - reserved
+    n_cash = int(math.floor(free / net + 1e-9)) if net > 0 else n_cap
+    return max(n_cap, 0), max(n_cash, 0)
 
 
 def _reserved_puts(lots: Dict[str, Dict]) -> float:

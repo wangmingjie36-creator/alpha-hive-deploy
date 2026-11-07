@@ -21,6 +21,7 @@ function lotsPanel(d) {
   const cols = [
     { label: "标的", render: (r) => h("b", {}, r.ticker) },
     { label: "状态", render: (r) => r.state_zh },
+    { label: "张数", cls: "r", render: (r) => num(r.contracts, 0) },
     { label: "put（行权价 · 到期）", render: (r) => legCell(r.put) },
     { label: "put 权利金", cls: "r", render: (r) => (r.put ? h("span", {}, num(r.put.premium, 2),
       h("div", { class: "sub" }, `年化 ${isNum(r.put.annual_yield_pct) ? num(r.put.annual_yield_pct, 1) + "%" : "—"}`
@@ -28,7 +29,10 @@ function lotsPanel(d) {
     { label: "接货价", cls: "r", render: (r) => (r.put ? h("span", {}, num(r.put.accept_price, 2),
       r.put.accept_price_source === "placeholder" ? h("span", { class: "chip warn", title: "用户还没给接货价，这是开仓当天现价打折的占位" }, "占位") : null) : "—") },
     { label: "持股", cls: "r", render: (r) => (r.shares ? `${r.shares.n} 股 @ ${num(r.shares.assigned_price, 2)}` : "—") },
-    { label: "call（行权价 · 到期）", render: (r) => legCell(r.call) },
+    { label: "call（行权价 · 到期）", render: (r) => (r.call ? h("span", {}, legCell(r.call),
+      h("div", { class: "sub" }, `权利金 ${num(r.call.premium, 2)} · 年化 ${isNum(r.call.annual_yield_pct) ? num(r.call.annual_yield_pct, 1) + "%" : "—"}`
+        + (isNum(r.call.iv_rv) ? ` · IV÷RV ${num(r.call.iv_rv, 2)}` : "")))
+      : (r.shares && isNum(r.shares.call_trigger) ? h("span", { class: "sub" }, `收盘到 ${num(r.shares.call_trigger, 2)} 才卖`) : "—")) },
     { label: "累计权利金", cls: "r", render: (r) => money(r.premiums_collected_usd, 0) },
     { label: "持股浮动", cls: "r", render: (r) => (r.shares ? h("span", { class: tone(r.shares.unrealized_usd) }, sMoney(r.shares.unrealized_usd)) : "—") },
   ];
@@ -92,7 +96,7 @@ export async function renderWheel(root, alive) {
   }
   for (const x of d.deferred || []) warns.push(`${x.ticker} 的 ${x.leg === "put" ? "put" : "call"}（到期 ${x.expiry}）还没结算：${x.reason_zh || x.reason}——拿不到到期那一场的收盘，不会拿前一天的价顶替。`);
   for (const [tk, why] of Object.entries(d.chain_errors || {})) warns.push(`${tk} 今天没取到期权链：${why}`);
-  const skippedBits = (d.skipped || []).map((s) => `${s.ticker} ${s.leg === "put" ? "put" : "call"}：${s.reason_zh}`);
+  const skippedBits = (d.skipped || []).map((s) => `${s.ticker} ${s.leg === "put" ? "put" : "call"}：${s.reason_zh}${s.leg === "call" && s.detail ? `（${s.detail}）` : ""}`);
   const kpis = h("div", { class: "kpis" },
     kpi("净值", money(a.nav, 0), "", `起始 ${money(a.starting_capital, 0)}`),
     kpi("收益", sPct(a.return_pct, 2), tone(a.return_pct)),
