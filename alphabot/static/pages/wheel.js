@@ -36,7 +36,7 @@ function lotsPanel(d) {
     { label: "累计权利金", cls: "r", render: (r) => money(r.premiums_collected_usd, 0) },
     { label: "持股浮动", cls: "r", render: (r) => (r.shares ? h("span", { class: tone(r.shares.unrealized_usd) }, sMoney(r.shares.unrealized_usd)) : "—") },
   ];
-  return panel("当前持仓", { sub: "每只一条；put 作废或被叫走后这一圈结束，回到「无仓」" },
+  return panel("当前持仓", { sub: "每个循环一条（加仓后同一只会有多条，各自到期、各自结算）；put 作废或被叫走后那一圈结束" },
     d.lots.length ? table(cols, d.lots) : h("div", { class: "empty" }, "现在没有持仓（还没开过，或这一圈刚结束、下一个交易日再开）。"));
 }
 
