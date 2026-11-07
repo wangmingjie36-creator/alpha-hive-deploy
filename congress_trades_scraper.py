@@ -1,12 +1,14 @@
 """
 国会议员交易追踪模块
 ━━━━━━━━━━━━━━━━━━
-数据源：Quiver Quant 免费公开端点（无需 API Key）
+⏸ **已暂停（v0.45.748，2026-11-06 用户定）**：见下方 `SOURCE_PAUSED`——不发请求、不碰缓存，按「没有交易」返回。
+
+原数据源：Quiver Quant 端点（当初是免费公开、无需 API Key；2026-06 起要凭证，回 401）
 https://api.quiverquant.com/beta/live/congresstrading
 返回最近 1000 条国会披露交易（House + Senate）
 
-为什么重要：
-  - 国会议员在立法前 45 天内必须申报交易（STOCK Act）
+为什么重要（接入时的设计说明，本系统没验证过）：
+  - 国会议员须在交易后 45 天内申报（STOCK Act）⇒ 披露本身最多滞后一个半月（v0.45.748 更正：原写「立法前 45 天内」）
   - 历史胜率显著高于市场（尤其委员会成员）
   - 大额买入（>$50k）是最强信号
   - ExcessReturn 字段直接给出相对 SPY 的 alpha 表现
@@ -47,6 +49,24 @@ def _cache_path() -> Path:
 _CACHE_TTL = 3600 * 4  # 4 小时（国会披露通常有 45 天延迟，无需高频刷新）
 _lock = threading.Lock()
 
+# ── 暂停（v0.45.748，2026-11-06 用户定）──────────────────────────────────────────
+# 为什么：
+#   · Quiver 端点 2026-06 起要凭证。11-06 用如实标识实测：401，正文 "Authentication credentials were not
+#     provided."，响应头 `www-authenticate: Basic realm="api"`。06-23 之后一条数据都没取到。
+#   · ScoutBee 所在的 signal 维度权重自 2026-09-10 起为 0（生产 dimension_weights 实测）⇒ 直接进总分的路是 0。
+#     还有一条间接的：国会项挪 Scout 分 ⇒ 可能把 Scout 方向推过 6.5 / 4.5 ⇒ Scout 那一票进共振加成与方向投票。
+#     源活着时（03-16~06-23）国会项每天挪中位数 3 只票的 Scout 分，共 203 次、-0.40~+0.39，其中约 20 次让
+#     方向翻线；翻线改没改掉当天的共振 / 投票结果没重放过（待验证）。
+#   · 每天只剩一次注定失败的请求和一行 WARNING。
+# 暂停做什么：`get_congress_trades` 直接返回 []，不发请求、不读写缓存。下游与此前 401 时**逐位相同**：
+#   Scout 国会项照旧按中性 5.0 进公式；details.congress 照旧 0 /「近 90 天无披露记录」；signal_archive 的
+#   congress.score 照旧 0.0 ⇒ 不用登世代边界。`tests/test_congress_source_paused.py` 钉住。
+# 恢复：换源（候选与条款见 changelog.d/0.45.748.md）会改 Scout 分和方向 ⇒ 先在
+#   `ic_rerun_readiness._COHORT_HISTORY` 登世代边界（共振加成前瞻检验会列出检验期内新增的边界），
+#   再把这里改成 False、改那份测试。
+SOURCE_PAUSED = True
+_paused_logged = False
+
 # 金额范围 → 中位数估算
 _AMOUNT_MAP = {
     "$1,001 - $15,000":      8000,
@@ -66,6 +86,16 @@ _KEY_COMMITTEES_KEYWORDS = [
     "Intelligence", "Appropriations", "Energy", "Health", "Technology",
     "Ways and Means", "Financial Services",
 ]
+
+
+def _log_paused_once() -> None:
+    """暂停时每个进程只说一次（Scout 每轮按名单每只票各调一次）。"""
+    global _paused_logged
+    with _lock:
+        if _paused_logged:
+            return
+        _paused_logged = True
+    _log.info("国会交易源已暂停（v0.45.748）：不请求 Quiver，Scout 国会项按中性 5.0")
 
 
 def get_congress_trades(
@@ -93,6 +123,10 @@ def get_congress_trades(
           description,
         }
     """
+    if SOURCE_PAUSED:
+        _log_paused_once()
+        return []
+
     with _lock:
         raw = _load_cached(force_refresh)
         if raw is None:
@@ -352,6 +386,9 @@ def _fetch_raw() -> List:
 # ── CLI 测试 ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
+
+    if SOURCE_PAUSED:
+        print("⏸ 国会交易源已暂停（见 SOURCE_PAUSED）：下面的空结果不代表没有交易")
 
     if len(sys.argv) > 1:
         ticker = sys.argv[1].upper()

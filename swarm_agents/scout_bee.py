@@ -188,7 +188,8 @@ class ScoutBeeNova(BeeAgent):
             except LLM_ERRORS as e:
                 _log.debug("ScoutBeeNova LLM unavailable for %s: %s", ticker, e)
 
-            # ---- 2b. 国会议员交易（Quiver Quant 免费端点）----
+            # ---- 2b. 国会议员交易（v0.45.748 起源已暂停 ⇒ 恒为「没有交易」、按中性 5.0；
+            #      见 congress_trades_scraper.SOURCE_PAUSED）----
             # v0.24.2 修复 Bug #2: 旧实现 c_score=0 时被当极端看空（拖低 0.5pp）
             # 实际 0 通常是 fallback 默认值（无数据/算不出），应保持中性 5.0
             congress_data = {}
