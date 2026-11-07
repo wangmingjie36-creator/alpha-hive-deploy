@@ -392,7 +392,7 @@ def _state():
 
 
 def _lot():
-    return {l["ticker"]: l for l in _state()["lots"]}
+    return {l["ticker"]: l for l in _state()["lots"]}            # 只在每只至多一个循环的用例里用
 
 
 class TestLifecycle:
@@ -414,10 +414,43 @@ class TestLifecycle:
         assert row["nav"] == pytest.approx(99_996.0) and row["reserved_puts"] == 9_000.0
         assert _lot()["AAA"]["state"] == "put"
 
-    def test_one_lot_per_name_no_second_put_while_one_is_open(self):
-        table, _ = self._open()
+    def test_no_second_put_when_the_total_cap_has_no_room(self):
+        table, _ = self._open()                                          # 10% 额度、一张 90 已占 9000
         r2 = W.run_for_date("2026-11-05", contracts_fn=contracts_for(table), closes_fn=closes_for({}))
-        assert r2["events"] == [] and len(_state()["lots"]) == 1
+        assert [e["event"] for e in r2["events"]] == [] and len(_state()["lots"]) == 1
+        assert [x["reason"] for x in r2["skipped"]] == ["total_cap"]
+
+    def test_adding_opens_a_second_cycle_for_the_same_name_when_room_allows(self, pinned_config):
+        """v3.1（用户 11-06「允许加仓」）：已有未到期 put 不再挡；额度够就再开一笔，作为同一只的另一个循环。"""
+        table, _ = self._open()
+        pinned_config["total_cap_pct"] = 20.0                            # 2 万 − 已占 9000 ⇒ 再容一张 90
+        d1 = "2026-11-05"
+        r = W.run_for_date(d1, contracts_fn=contracts_for(table), closes_fn=closes_for({}))
+        assert [(e["event"], e["cycle"], e["contracts"]) for e in r["events"]] == [("put_sold", f"AAA-{d1}", 1)]
+        cycles = sorted(l["cycle"] for l in _state()["lots"])
+        assert cycles == [f"AAA-{D0}", f"AAA-{d1}"]
+        assert _state()["equity"][-1]["reserved_puts"] == 18_000.0
+        assert _state()["meta"]["cash"] == pytest.approx(100_000 + 200 + 200)
+
+    def test_at_most_one_new_put_per_name_per_day(self):
+        """同日重跑时额度里若还有空（这里换了一张更便宜的档），也不再开第二笔：循环号 = 标的-日期，一天只能有一个。"""
+        table, _ = self._open()                                          # 9000 已占，剩约 1000
+        cheap = {D0: {"AAA": chain(100.0, STD_PUTS + [put(5, 0.3)])}}    # 5 的档一张只占 500
+        r = W.run_for_date(D0, contracts_fn=contracts_for(cheap), closes_fn=closes_for({}))
+        assert r["events"] == [] and len(_state()["lots"]) == 1
+
+    def test_each_cycle_settles_on_its_own(self, pinned_config):
+        table, _ = self._open()
+        pinned_config["total_cap_pct"] = 20.0
+        d1 = "2026-11-05"
+        later = [put(85, 1.5, exp="2027-01-22", sym="AAA270122P00085000")]  # 第二笔：别的行权价、晚一周到期
+        W.run_for_date(d1, contracts_fn=contracts_for({**table, d1: {"AAA": chain(100.0, later)}}), closes_fn=closes_for({}))
+        d2 = "2027-01-19"
+        r = W.run_for_date(d2, contracts_fn=contracts_for({d2: {"AAA": chain(87.0, [])}}),
+                           closes_fn=closes_for({PUT_EXP: 88.0}))
+        assert [(e["event"], e["cycle"]) for e in r["events"]] == [("put_assigned", f"AAA-{D0}")]
+        st = {l["cycle"]: l["state"] for l in _state()["lots"]}
+        assert st == {f"AAA-{D0}": "shares", f"AAA-{d1}": "put"}            # 01-22 那笔还没到期，不受影响
 
     def test_expired_worthless_keeps_the_premium_and_frees_the_name(self):
         table, _ = self._open()
@@ -568,6 +601,15 @@ class TestSettlementTiming:
         W.run_for_date("2027-01-19", contracts_fn=contracts_for({**table, "2027-01-19": {"AAA": chain(80.0, STD_PUTS)}}),
                        closes_fn=closes_for({}))
         assert _lot()["AAA"]["state"] == "put" and len(_state()["events"]) == 1       # 只有开仓那一条
+
+    def test_deferred_name_is_not_added_to_even_with_room(self, pinned_config):
+        """v3.1：额度够、允许加仓，但那一只的到期收盘还没拿到 ⇒ 当天不加，原因记 settle_deferred。"""
+        table = self._open()
+        pinned_config["total_cap_pct"] = 40.0
+        r = W.run_for_date("2027-01-19", contracts_fn=contracts_for({**table, "2027-01-19": {"AAA": chain(100.0, [put(90, 2.0, exp="2027-03-19")])}}),
+                           closes_fn=closes_for({}))
+        assert r["events"] == [] and len(_state()["lots"]) == 1
+        assert [(x["leg"], x["reason"]) for x in r["skipped"]] == [("put", "settle_deferred")]
 
     def test_deferred_then_settled_on_a_later_run(self):
         table = self._open()
@@ -814,12 +856,18 @@ class TestFailuresAreVisible:
         assert s["rv_missing"] == 2 and s["all_rv_missing"] is True and r["events"] == []
         assert any(i["kind"] == "rv_missing" and "too_few_closes:3" in i["detail"] for i in s["items"])
 
-    def test_names_already_holding_a_lot_never_fetch_rv(self, offline_rv):
+    def test_rv_is_fetched_once_per_name_per_run_and_counted_once(self, offline_rv, pinned_config, stub_close):
+        """v3.1：已有仓的标的也要取 RV（可能加仓）；同一只一轮只取一次、只记一次计数——多个循环不重复计。"""
+        pinned_config["total_cap_pct"] = 10.0
         table = {D0: {"AAA": chain(100.0, STD_PUTS)}}
         W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}))
-        n = len(offline_rv)
+        pinned_config["total_cap_pct"] = 20.0
         W.run_for_date("2026-11-05", contracts_fn=contracts_for(table), closes_fn=closes_for({}))
-        assert n == 1 and len(offline_rv) == 1                        # 第二天已有仓 ⇒ 不再取
+        assert len(_state()["lots"]) == 2                                # 两个 AAA 循环
+        W.reset_stats()
+        n = len(offline_rv)
+        W.run_for_date("2026-11-06", contracts_fn=contracts_for(table), closes_fn=closes_for({}))
+        assert len(offline_rv) == n + 1 and W.stats()["rv_total"] == 1
 
     def test_a_raising_run_is_counted_and_still_raises(self):
         table = {D0: {"AAA": chain(100.0, STD_PUTS)}}

@@ -1,6 +1,6 @@
 """接货型卖 put 纸面账本（v0.45.720，用户 2026-11-04 定；规则冻结在 experiments/sell_put_wheel_prereg.md）。
 
-做什么（一只标的一个循环，状态机）：
+做什么（每个循环一个状态机；v3.1 / v0.45.747 起一只标的可同时有多个循环——额度内允许加仓，每天每只最多新开一笔）：
 
     无仓 ──卖 put──▶ put ──到期价外──▶ 无仓（权利金落袋）
                       └─到期价内（收盘 < 行权价）──▶ 接货：持股 ──卖 covered call──▶ 持股 + call
@@ -72,7 +72,7 @@ def public_rules() -> dict:
 
 
 #: 口径世代（手写常量，只在账本口径变时改）
-_VERSION = "0.45.746"          # v3：总额度按综合分装满、covered call 涨 5% 才卖且按综合分选；0.45.742 = v2；0.45.720 = v1
+_VERSION = "0.45.747"          # v3.1：允许加仓（一只多个循环）；0.45.746 = v3：总额度按综合分装满、covered call 涨 5% 才卖且按综合分选；0.45.742 = v2；0.45.720 = v1
 CONTRACT = 100
 
 
@@ -526,7 +526,8 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
         return {"as_of": as_of, "error": "cash not finite"}
     if not meta.get("starting_date"):
         meta["starting_date"] = as_of
-    lots: Dict[str, Dict] = {str(r["ticker"]): r for r in ledger_io.load_jsonl(p["lots"])}
+    # v3.1（v0.45.747，用户 11-06「允许加仓」）：一只可同时有多个循环 ⇒ 持仓按**循环**（`cycle` = 标的-开仓日）索引，不再按标的
+    lots: Dict[str, Dict] = {_lot_key(r): r for r in ledger_io.load_jsonl(p["lots"])}
     events: List[Dict] = []
     skipped: List[Dict] = []
     deferred: List[Dict] = []
@@ -542,8 +543,15 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
             chains[tk], why_no_chain[tk] = res, why
         return chains[tk]
 
+    rv_cache: Dict[str, Tuple[Optional[float], dict, Optional[str]]] = {}
+
     def fetch_rv(tk: str) -> Tuple[Optional[float], dict, Optional[str]]:
-        """(RV | None, rv_asof 明细, 取不到时给人看的原因)。卖 put / 卖 call 共用；每次都记计数（整批取不到 ⇒ P2）。"""
+        """(RV | None, rv_asof 明细, 取不到时给人看的原因)。卖 put / 卖 call 共用；一轮里每只只取一次、记一次计数（整批取不到 ⇒ P2）。"""
+        if tk not in rv_cache:
+            rv_cache[tk] = _fetch_rv_once(tk)
+        return rv_cache[tk]
+
+    def _fetch_rv_once(tk: str) -> Tuple[Optional[float], dict, Optional[str]]:
         try:
             rv, rv_meta = rv_fn(tk, as_of)
         except Exception as exc:  # noqa: BLE001 - 单只取不到不连坐其余；计数 + 原因进 skipped，整批取不到 ⇒ P2
@@ -559,7 +567,8 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
         return (_pos(rv), rv_meta, why_rv)
 
     # ── (a) 到期结算 ──
-    for tk, lot in list(lots.items()):
+    for key, lot in list(lots.items()):
+        tk = lot["ticker"]
         for leg_key in ("put", "call"):
             leg = lot.get(leg_key)
             left = _dte(as_of, leg["expiry"]) if leg else None
@@ -614,10 +623,11 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
                                    "settle_session": sess, "contracts": n, "cycle": lot["cycle"]})
                 lot["call"] = None
         if lot.get("state") == "closed":
-            lots.pop(tk, None)
+            lots.pop(key, None)
 
     # ── (b) 卖 call（有股票、没有未到期 call）──
-    for tk, lot in lots.items():
+    for key, lot in lots.items():
+        tk = lot["ticker"]
         if lot.get("state") != "shares" or lot.get("call"):
             continue
         if any(x["ticker"] == tk for x in deferred):
@@ -666,7 +676,12 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
     meta_nav = _nav_estimate(cash, lots, chains, chain)
     cands: List[Tuple[float, str, dict, dict]] = []
     for tk in CONFIG["universe"]:
-        if tk in lots:
+        # v3.1：已有未到期 put / 持股不再挡（允许加仓）；但同一只**一天最多新开一笔**（同日重跑幂等、循环号 = 标的-日期不撞），
+        # 结算延期的标的当天也不加（那一只的收盘还没拿到）
+        if any(l["ticker"] == tk and l.get("opened_on") == as_of for l in lots.values()):
+            continue
+        if any(x["ticker"] == tk for x in deferred):
+            skipped.append({"ticker": tk, "leg": "put", "reason": "settle_deferred"})
             continue
         ch = chain(tk)
         if not ch:
@@ -697,7 +712,7 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
         n = min(n_cap, n_cash)
         cash += c["bid"] * CONTRACT * n
         cycle = f"{tk}-{as_of}"
-        lots[tk] = {"ticker": tk, "state": "put", "cycle": cycle, "contracts": n, "opened_on": as_of,
+        lots[cycle] = {"ticker": tk, "state": "put", "cycle": cycle, "contracts": n, "opened_on": as_of,
                     "premiums": c["bid"], "shares": None, "call": None,
                     "put": {"symbol": c["symbol"], "strike": c["strike"], "expiry": c["expiry"], "premium": c["bid"],
                             "sold_on": as_of, "delta": c.get("delta"), "last_mark": mark_of(c) or c["bid"],
@@ -736,7 +751,7 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
     row = {"date": as_of, "cash": round(cash, 2), "nav": round(nav_info["nav"], 2),
            "shares_value": round(nav_info["shares_value"], 2), "liability": round(nav_info["liability"], 2),
            "reserved_puts": round(_reserved_puts(lots), 2), "n_lots": len(lots),
-           "states": {tk: l["state"] for tk, l in lots.items()}, "prices": nav_info["prices"],
+           "states": {key: l["state"] for key, l in lots.items()}, "prices": nav_info["prices"],
            "n_events": n_events_today, "skipped": len(skipped), "deferred": len(deferred)}
     meta.update(cash=round(cash, 2), last_run_date=as_of, version=_VERSION, config_snapshot=_config_snapshot(),
                 last_run={"date": as_of, "skipped": skipped, "deferred": deferred,
@@ -763,6 +778,11 @@ def put_size(strike: float, bid: float, nav: float, held: float, cash: float, re
     return max(n_cap, 0), max(n_cash, 0)
 
 
+def _lot_key(lot: Dict) -> str:
+    """持仓的索引键 = 循环号（标的-开仓日）。缺循环号的旧行退回标的名（v3.1 之前一只一条）。"""
+    return str(lot.get("cycle") or lot["ticker"])
+
+
 def _reserved_puts(lots: Dict[str, Dict]) -> float:
     return sum(l["put"]["strike"] * CONTRACT * int(l["contracts"]) for l in lots.values() if l.get("put"))
 
@@ -770,9 +790,9 @@ def _reserved_puts(lots: Dict[str, Dict]) -> float:
 def _reserved_and_shares(lots: Dict[str, Dict], nav_info: Dict) -> float:
     """put 担保 + 持股市值（总担保上限的分子）。持股市值取最近一次盯市的价；还没有就按接货价。"""
     tot = _reserved_puts(lots)
-    for tk, l in lots.items():
+    for l in lots.values():
         if l.get("shares"):
-            px = nav_info["prices"].get(tk) or l["shares"]["assigned_price"]
+            px = nav_info["prices"].get(l["ticker"]) or l["shares"]["assigned_price"]
             tot += px * l["shares"]["n"]
     return tot
 
@@ -785,7 +805,8 @@ def _nav_estimate(cash: float, lots: Dict[str, Dict], chains: Dict, chain_fn, *,
     股价取 CBOE 链的 underlying_price（盘后快照 = 收盘价）；取不到的持股沿用上次价（prices 里没有就按接货价）并不更新。"""
     shares_value = liability = 0.0
     prices: Dict[str, float] = {}
-    for tk, l in lots.items():
+    for l in lots.values():
+        tk = l["ticker"]
         n = int(l["contracts"])
         ch = chains.get(tk) if tk in chains else (chain_fn(tk) if mark else None)
         spot = _pos((ch or {}).get("underlying_price"))
