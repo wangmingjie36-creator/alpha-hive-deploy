@@ -698,6 +698,38 @@ class TestCaps:
         assert _lot()["BBB"]["put"]["rule_version"] == W._VERSION
         assert e["score"] == pytest.approx(round(W.annual_yield(2.0, 90, 72) * 1.5, 4))
 
+    def test_cap_counts_held_shares_at_todays_price_not_the_assigned_price(self, pinned_config, stub_close):
+        """持股 + 未到期 call 的那一只，卖 call 那步不取链；额度若按开仓前那一遍估（价 = 接货价 90），
+        股价已涨到 150 时会少算 6000 的持股市值、多开一笔。额度要按当天取到的价（v0.45.750 二次检查发现）。"""
+        table = {D0: {"AAA": chain(100.0, STD_PUTS)}}
+        W.run_for_date(D0, contracts_fn=contracts_for(table), closes_fn=closes_for({}))
+        d1 = "2027-01-19"
+        stub_close["AAA"] = 95.0
+        t = {**table, d1: {"AAA": chain(95.0, [call(96, 3.0, ask=3.2, exp="2027-02-26")])}}
+        W.run_for_date(d1, contracts_fn=contracts_for(t), closes_fn=closes_for({PUT_EXP: 88.0}))
+        assert _lot()["AAA"]["call"]["strike"] == 96.0                          # 持股 100 + 未到期 call
+        pinned_config["total_cap_pct"] = 25.0
+        d2 = "2027-01-20"
+        deep_itm_call = call(96, 54.0, ask=54.4, exp="2027-02-26")                # 今天的 call 报价（mid 54.2）
+        t[d2] = {"AAA": chain(150.0, [put(130, 3.0, exp="2027-03-19"), deep_itm_call])}
+        r = W.run_for_date(d2, contracts_fn=contracts_for(t), closes_fn=closes_for({}))
+        # 真实：NAV = 91500 + 15000 − 5420 = 101080 ⇒ 额度 25270 − 持股 15000 = 10270 < 13000 ⇒ 不开
+        assert [e["event"] for e in r["events"]] == []
+        assert [x["reason"] for x in r["skipped"]] == ["total_cap"]
+
+    def test_sizing_estimate_uses_todays_quote_but_does_not_write_the_mark(self):
+        leg = {"symbol": "X", "premium": 3.0, "last_mark": 3.1, "last_mark_date": D0, "stale_days": 0}
+        lots = {"c": {"ticker": "AAA", "contracts": 1, "call": leg, "put": None, "shares": None}}
+        chains = {"AAA": chain(150.0, [{"symbol": "X", "bid": 54.0, "ask": 54.4}])}
+        est = W._nav_estimate(0.0, lots, chains, None)
+        assert est["liability"] == pytest.approx(5_420.0)
+        assert leg["last_mark"] == 3.1 and leg["last_mark_date"] == D0       # 估额度不动 mark
+
+    def test_cap_numerator_falls_back_to_the_last_marked_price_before_the_assigned_price(self):
+        lots = {"c": {"ticker": "AAA", "contracts": 1, "put": None,
+                      "shares": {"n": 100, "assigned_price": 90.0, "last_price": 120.0}}}
+        assert W._reserved_and_shares(lots, {"prices": {}}) == pytest.approx(12_000.0)
+
     def test_user_accept_price_overrides_the_placeholder(self, pinned_config):
         pinned_config["accept_price"] = {"AAA": 86.0}
         table = {D0: {"AAA": chain(100.0, STD_PUTS)}}

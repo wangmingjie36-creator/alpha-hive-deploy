@@ -433,7 +433,7 @@ def _note_item(kind: str, detail: Optional[str]) -> None:
 
 
 def stats() -> dict:
-    """进程内计数。`all_chains_missing`：一整轮宇宙里的标的一只链都没取到（接线 / 数据源整批断了）。
+    """进程内计数。`all_chains_missing`：一整轮取过链的标的（新开仓名单 + 名单外仍有持仓的，v0.45.749 起）一只链都没取到（接线 / 数据源整批断了）。
     `all_rv_missing`（v0.45.742；v0.45.746 起含要卖 call 的持股标的）：要取 RV 的标的一只都没算出来——put 与 call 的选合约都离不开 RV，整批取不到 = 这天一张都开不出。"""
     with _LOCK:
         out = {k: _STATS[k] for k in _ZERO}
@@ -675,7 +675,6 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
                        "basis_floor": lot["shares"]["basis"], "spread_pct": round(_spread_pct(c) * 100, 2), **extra})
 
     # ── (b') 卖 put（无仓的标的）：按综合分（年化 × IV/RV）从高到低排，逐只判额度 ──
-    meta_nav = _nav_estimate(cash, lots, chains, chain)
     cands: List[Tuple[float, str, dict, dict]] = []
     for tk in CONFIG["universe"]:
         # v3.1：已有未到期 put / 持股不再挡（允许加仓）；但同一只**一天最多新开一笔**（同日重跑幂等、循环号 = 标的-日期不撞），
@@ -702,6 +701,9 @@ def _run_for_date(as_of: str, contracts_fn, closes_fn, rv_fn) -> Dict:
         dte = _dte(as_of, c["expiry"])
         cands.append((info["score"], tk, c, {**info, "spot": spot, "dte": dte, "rv_end": rv_meta.get("end")}))
     cands.sort(key=lambda x: -x[0])
+    # 额度按**当天**的价估：要在候选取完链之后算（v0.45.752：原先在取链前算，持股 + 未到期 call 的那只卖 call 那步不取链 ⇒
+    # 持股按接货价、call 负债按旧 mark 计，股价大涨后少算持股市值、多开一笔）。取链只取一次；没取过链的持仓仍用已记的价 / mark
+    meta_nav = _nav_estimate(cash, lots, chains, chain) if cands else None
     for _score, tk, c, info in cands:
         n_cap, n_cash = put_size(c["strike"], c["bid"], meta_nav["nav"], _reserved_and_shares(lots, meta_nav),
                                  cash, _reserved_puts(lots))
@@ -790,11 +792,13 @@ def _reserved_puts(lots: Dict[str, Dict]) -> float:
 
 
 def _reserved_and_shares(lots: Dict[str, Dict], nav_info: Dict) -> float:
-    """put 担保 + 持股市值（总担保上限的分子）。持股市值取最近一次盯市的价；还没有就按接货价。"""
+    """put 担保 + 持股市值（总担保上限的分子）。持股市值取当天链上的价；没取到沿用上次盯市价，再没有才按接货价
+    （与 `_nav_estimate` 同一条回落链——分子分母各用各的价会让额度忽大忽小）。"""
     tot = _reserved_puts(lots)
     for l in lots.values():
         if l.get("shares"):
-            px = nav_info["prices"].get(l["ticker"]) or l["shares"]["assigned_price"]
+            px = (nav_info["prices"].get(l["ticker"]) or l["shares"].get("last_price")
+                  or l["shares"]["assigned_price"])
             tot += px * l["shares"]["n"]
     return tot
 
@@ -824,7 +828,9 @@ def _nav_estimate(cash: float, lots: Dict[str, Dict], chains: Dict, chain_fn, *,
                 leg["last_mark"], leg["last_mark_date"], leg["stale_days"] = m, as_of, 0
             elif mark and as_of and leg.get("last_mark_date"):
                 leg["stale_days"] = _dte(leg["last_mark_date"], as_of) or 0
-            liability += (leg.get("last_mark") if leg.get("last_mark") is not None else leg["premium"]) * CONTRACT * n
+            if m is None:            # 估额度那一遍有当天报价也用（只是不写回 mark）；都没有才用已记的 mark / 权利金
+                m = leg.get("last_mark") if leg.get("last_mark") is not None else leg["premium"]
+            liability += m * CONTRACT * n
         if l.get("shares"):
             px = spot if spot is not None else l["shares"].get("last_price") or l["shares"]["assigned_price"]
             if mark and spot is not None:

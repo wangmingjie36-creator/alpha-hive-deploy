@@ -1161,7 +1161,7 @@ class AlertAnalyzer:
         """接货型卖 put 纸面账本（v0.45.720；`sell_put_wheel.stats()` 经 scan_timing 进来）。
 
         日报钩子把整轮异常吞成一条 WARNING，账本只是「这天没记」——所以三种情形在源头登记、这里转 P2：
-        ① 整轮抛了（run_errors）；② 宇宙里每一只都没取到期权链（all_chains_missing，接线 / 数据源整批断了）；
+        ① 整轮抛了（run_errors）；② 本轮取过链的每一只都没取到（all_chains_missing：新开仓名单 + 名单外仍有持仓的，v0.45.749 起；接线 / 数据源整批断了）；
         ③ 到期腿拿不到结算那一场的收盘已 ≥ 3 天（deferred_alert，持仓卡在到期状态、现金与持股都没动）；
         ④ v0.45.742：要开 put 的标的一只实际波动率都没算出来（all_rv_missing，yfinance 日线整批取不到 ⇒ 开不出任何一张）。
         个别标的当天取不到链、或结算延期 1~2 天是常态（`_drop_forming_bar`：结算日当晚恒取不到），不在这里报。
@@ -1177,7 +1177,7 @@ class AlertAnalyzer:
         if sp.get("run_errors"):
             problems.append(f"整轮抛了 {sp['run_errors']} 次")
         if sp.get("all_chains_missing"):
-            problems.append(f"宇宙 {sp.get('chain_total')} 只一只期权链都没取到")
+            problems.append(f"取链的 {sp.get('chain_total')} 只一只期权链都没取到")
         if sp.get("deferred_alert"):
             problems.append(f"到期腿结算已延期 {sp.get('max_deferred_days')} 天（拿不到结算那一场的收盘）")
         if sp.get("all_rv_missing"):
