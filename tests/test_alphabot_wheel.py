@@ -76,6 +76,8 @@ class TestOverview:
         assert a["premiums_collected_usd"] == 200.0
         assert b["state_zh"] == WH.STATE_ZH["shares_call"]
         assert b["shares"]["unrealized_usd"] == pytest.approx((52.0 - 50.0) * 100)
+        # v0.45.746：卖 call 的门槛价由账本那一份规则算（接货价 × (1 + call_min_rise_pct%)），页面不另算
+        assert b["shares"]["call_trigger"] == W.call_rise_ok(50.0, None)[1] == pytest.approx(52.5)
         assert b["call"]["unrealized_usd"] == pytest.approx((3.0 - 2.0) * 100)
         assert b["premiums_collected_usd"] == 500.0
 
@@ -214,8 +216,8 @@ class TestFrontend:
     def test_help_constants_come_from_the_server_not_literals(self):
         sect = self.HELP[self.HELP.index('["wheel", "接货型卖 put"'):self.HELP.index('["ledger", "账本"')]
         assert len(sect) > 800, "切片取空了——测试在空转"
-        for key in ("universe", "placeholder_otm_pct", "per_name_cap_pct", "total_cap_pct", "put_dte_range", "rv_window", "min_iv_rv",
-                    "call_dte_range", "call_dte_target", "call_target_delta", "max_spread_pct", "min_oi", "starting_capital"):
+        for key in ("universe", "placeholder_otm_pct", "total_cap_pct", "put_dte_range", "rv_window", "min_iv_rv",
+                    "call_dte_range", "call_min_rise_pct", "max_spread_pct", "min_oi", "starting_capital"):
             assert f"w.{key}" in sect, key
         assert not re.search(r"\b(20|60|70|35)\s*%", sect) and not re.search(r"≤ \d", sect), "规则常量写成了字面量"
 

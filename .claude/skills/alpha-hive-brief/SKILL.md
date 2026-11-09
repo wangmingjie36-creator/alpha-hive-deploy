@@ -82,9 +82,6 @@ description: Alpha Hive 蜂群投研规格——投研人设、三级任务模�
    **Phase-2 顺序执行（需读取 Phase-1 + Phase-1.5 数据）**
    - BearBeeContrarian: 看空对冲蜂（读取全部信息素板后提出反驳视角）
 
-   **可选工蜂**
-   - CodeExecutorAgent: 代码执行蜂（动态运行数据分析代码，通过 CODE_EXECUTION_CONFIG 启用）
-
    **概念角色（泛指）**
    - ValidatorBee: 事实校验蜂
    - CrossBee: 交叉关联蜂

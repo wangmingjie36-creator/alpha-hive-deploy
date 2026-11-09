@@ -26,7 +26,7 @@
   - 不要自动搜索 `.anthropic_api_key` 文件路径
   - 2026-03-16 事故：`generate_deep_v2.py` opt-out 设计导致 NVDA deep 报告静默消费 $0.47 Opus，已修复为 opt-in
 
-- **图表**：深度报告的 `chart_engine.py` 随其 v0.45.724 退役；matplotlib 仍在用户 Mac（`code_generator` 在用）
+- **图表**：深度报告的 `chart_engine.py` 随其 v0.45.724 退役；`code_generator` 随 CodeExecutorAgent 于 v0.45.750 退役，matplotlib 生产已无使用者（`requirements.txt` 仍钉着，删不删另议）
 
 - **knowledge-pool 召回规则**：
   - 召回必须调真实引擎 `weighted_recall.py`（CLI 或 `WeightedRecall().recall()`），**禁止手动简化算分**
@@ -44,7 +44,7 @@
 
 ### CHANGELOG 完整性 hook（2026-09-13 起；v0.45.728 起含碎片检查）
 
-`changelog_guard.py` 挂在 pre-commit + pre-push 上，只挡动了 `CHANGELOG.md` 或 `changelog.d/` 的提交与推往 main 的推送。⚠️ **pre-commit 管不到 `git rebase --continue`**——兜底的是 pre-push；`.git/hooks` 不被跟踪，重新 clone 后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。
+`changelog_guard.py` 挂在 pre-commit + pre-push 上，挡动了 `CHANGELOG.md` 或 `changelog.d/` 的提交与推往 main 的推送；推往 main 时另有契约闸、根目录预算闸。⚠️ **pre-commit 管不到 `git rebase --continue`**——兜底的是 pre-push；`.git/hooks` 不被跟踪，重新 clone 后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。
 
 ## 整套测试怎么跑（2026-10-21 起）
 

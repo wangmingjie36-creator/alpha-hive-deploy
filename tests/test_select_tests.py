@@ -373,9 +373,12 @@ class TestCli:
         r = _run_cli("--registry", str(reg), "--check-drift", str(nonpy_only), github_actions=False)
         assert r.returncode == 0, r.stdout + r.stderr
         assert "只警告" in r.stdout and "new_page.js" in r.stdout and "--update" in r.stdout and "::warning" not in r.stdout
+        # v0.45.745：两种后果都要写。已有读者的文件漏登是漏挑（存量文件的常态），只写「回退整套」会被读成「只是慢」
+        assert "漏挑" in r.stdout and "回退整套" in r.stdout, "告警没把两种后果都写上：\n" + r.stdout
         r = _run_cli("--registry", str(reg), "--check-drift", str(nonpy_only), github_actions=True)
         assert r.returncode == 0 and "::warning title=" in r.stdout and "new_page.js" in r.stdout.split("::warning", 1)[1]
         assert "--files tests/test_plain.py --update" in r.stdout.split("::warning", 1)[1], "Actions 注记里也要有照做就能修的命令"
+        assert "漏挑" in r.stdout.split("::warning", 1)[1], "Actions 摘要里只看得到注记，注记也要说漏挑"
         r = _run_cli("--registry", str(reg), "--check-drift", str(mixed), github_actions=False)
         assert r.returncode == ST.EXIT_STALE and "test_unregistered" in r.stdout and "new_page.js" in r.stdout
         r = _run_cli("--registry", str(reg), "--check-drift", str(new_meta), github_actions=False)

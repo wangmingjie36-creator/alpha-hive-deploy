@@ -60,7 +60,7 @@ PEERS_ROUND = [
     ("OracleBeeEcho",     "bullish", 8.48),   # 高分，洪水后应存活
     ("BuzzBeeWhisper",    "bullish", 4.25),   # 低分，洪水后应被挤掉
     ("ChronosBeeHorizon", "bearish", 4.00),
-    ("CodeExecutorAgent", "neutral", 5.00),
+    # v0.45.750：原有 ("CodeExecutorAgent", "neutral", 5.00)——该蜂退役，Phase-1 同伴剩 3 个
 ]
 TRUE_BULLISH_COUNT = 2   # Oracle + Buzz
 
@@ -145,9 +145,9 @@ class TestLeaderboardUndercountsAfterEviction:
 class TestIdentityScoping:
 
     def test_non_phase1_peer_is_not_counted(self, board):
-        """板上若混进一条不属于「4 个 Phase-1 同伴」的高分看多条目
+        """板上若混进一条不属于「Phase-1 同伴」（v0.45.750 起 3 个）的高分看多条目
         （例如同一 ticker 上一轮遗留、或身份判断失手），不得被计入。
-        `signal_archive._PHASE1_DIRS` 排除 ScoutBeeNova 后就是这 4 个，
+        `real_data_sources._PHASE1_PEERS`（CodeExecutorAgent v0.45.750 退役后剩 3 个），
         RivalBeeVanguard／GuardBeeSentinel／BearBeeContrarian／ScoutBeeNova 自己
         都不该被数。"""
         _publish_peers(board)
@@ -155,7 +155,7 @@ class TestIdentityScoping:
         board.publish(_entry("ScoutBeeNova", direction="bullish", score=9.0))
         got = get_bullish_agents_count("TEST", board)
         assert got == TRUE_BULLISH_COUNT, (
-            f"应只数 4 个 Phase-1 同伴，实得 {got}（混进了非同伴条目）")
+            f"应只数 Phase-1 同伴，实得 {got}（混进了非同伴条目）")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -315,13 +315,12 @@ class TestRivalConsumptionSemanticsChanged:
         assert "ScoutBeeNova" not in _PHASE1_PEERS, (
             "_PHASE1_PEERS 排除 ScoutBeeNova 是本节其余断言的前提")
         for agent, direction in (("ScoutBeeNova", "bullish"), ("OracleBeeEcho", "bullish"),
-                                  ("BuzzBeeWhisper", "bearish"), ("ChronosBeeHorizon", "neutral"),
-                                  ("CodeExecutorAgent", "bullish")):
+                                  ("BuzzBeeWhisper", "bearish"), ("ChronosBeeHorizon", "bullish")):
             board.publish(_entry(agent, direction=direction))
         old_view = sum(1 for e in board.get_top_signals("TEST", n=10) if e.direction == "bullish")
         new_view = get_bullish_agents_count("TEST", board)
-        assert old_view == 3, "旧口径（无身份过滤）应数到 Scout+Oracle+CodeExec 三票看多"
-        assert new_view == 2, "新口径（_PHASE1_PEERS）应只数到 Oracle+CodeExec——Scout 结构上被排除"
+        assert old_view == 3, "旧口径（无身份过滤）应数到 Scout+Oracle+Chronos 三票看多"
+        assert new_view == 2, "新口径（_PHASE1_PEERS）应只数到 Oracle+Chronos——Scout 结构上被排除"
         assert old_view != new_view, (
             "Rival/Guard 读到的看多蜂数在这个场景下确实变了，"
             "不是「行为不变、只是多了一个字段」那么简单")

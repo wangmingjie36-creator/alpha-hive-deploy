@@ -57,7 +57,7 @@ class PheromoneBoard:
 
     # ⚠️ 80 这个值**按 9 只标的定的，早已不够**：`config.WATCHLIST` 现为 30 只，
     # 一轮满编 9 条/标的（8 只蜂 + CodeExecutorAgent 在 analyze 开头无条件发的
-    # 5.0/neutral 占位，见 code_executor_agent.py:75）≈ **270 条**。
+    # 5.0/neutral 占位）≈ **270 条**；v0.45.750 退役 CodeExecutorAgent 后为 8 条 ≈ 240。
     #
     # 溢出淘汰键是 `nlargest(MAX_ENTRIES, key=(self_score, support_count,
     # pheromone_strength))`，即**先扔分最低的** ⇒ 缺失与被测量的量**反相关**。
@@ -536,7 +536,7 @@ class PheromoneBoard:
         本方法只按身份取（复用 `_latest_by_agent`），因此条数只取决于**有几只蜂
         发布过**，与 `MAX_ENTRIES` 无关。同一只蜂重复发布只算最新一条 ——
         CodeExecutorAgent 在 `analyze` 开头无条件发的 5.0/neutral 占位
-        （`code_executor_agent.py:75`）因此不会被当成一票；而在排行榜口径下它
+        （该蜂 v0.45.750 已退役，此段是历史说明）因此不会被当成一票；而在排行榜口径下它
         分比真实结论高，溢出时留下的恰恰是那个**桩**（生产实测 16 例）。
 
         仍保留墙钟过期（`_AGENT_ENTRY_MAX_AGE_S`，口径与 `get_agent_entry`
@@ -570,7 +570,7 @@ class PheromoneBoard:
         证据与方法见 `tests/test_resonance_eviction.py` 模块 docstring。
 
         ⚠️ 同一只蜂重复发布只算最新一条（`_latest_by_agent` 按 (ticker, agent_id)
-        建键）。这与旧行为有一处**有意的**差别：CodeExecutorAgent 每轮发两条
+        建键）。这与旧行为有一处**有意的**差别：CodeExecutorAgent（v0.45.750 已退役）每轮发两条
         （5.0/neutral 占位 + 真实结论），旧行为下两条都进 `consistency` 分母。
         全量对照实测：collapse 前后 `resonance_detected` / `direction` /
         `supporting_agents` / `cross_dim_count` / `confidence_boost` **0/712 不同**，

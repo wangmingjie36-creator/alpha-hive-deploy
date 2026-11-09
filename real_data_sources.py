@@ -254,7 +254,8 @@ def get_short_interest(ticker: str) -> Dict:
 #: `parallel_agent_runner.PHASE_1_AGENTS`（含 RivalBeeVanguard）是未接入生产
 #: 主链的旧模块，口径不同，不能拿来对齐。
 _PHASE1_PEERS = frozenset({
-    "OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon", "CodeExecutorAgent",
+    "OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon",
+    # v0.45.750：CodeExecutorAgent 退役（`signal_archive._PHASE1` 为历史依赖边仍保留它）
 })
 
 

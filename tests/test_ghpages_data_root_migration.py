@@ -78,8 +78,7 @@ def _make_reporter(monkeypatch, tmp_path, repo_path):
     """
     import alpha_hive_daily_report as mod
     for name, val in [
-        ("MemoryStore", None), ("CodeExecutorAgent", None),
-        ("CODE_EXECUTION_CONFIG", {"enabled": False}),
+        ("MemoryStore", None),
         ("VectorMemory", None), ("VECTOR_MEMORY_CONFIG", {"enabled": False}),
         ("EarningsWatcher", None),
         ("Backtester", None),

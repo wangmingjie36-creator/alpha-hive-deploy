@@ -415,8 +415,11 @@ import code_version  # noqa: E402
 code_version.log_startup = lambda *a, **k: {}
 import outcomes_fetcher  # noqa: E402
 outcomes_fetcher.OutcomesFetcher.run = lambda self, *a, **k: {"skipped": "replay"}
-import code_executor  # noqa: E402
-if MODE == "corrected":
+try:  # v0.45.750：CodeExecutorAgent 及其执行器已退役；在退役后的代码上重放时没有这只蜂可录
+    import code_executor  # noqa: E402
+except ImportError:
+    code_executor = None
+if MODE == "corrected" and code_executor is not None:
     _orig_exec = code_executor.CodeExecutor.execute_python
 
     def _exec_py(self, code, return_output=True):

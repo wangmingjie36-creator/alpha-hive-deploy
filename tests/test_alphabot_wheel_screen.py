@@ -414,7 +414,10 @@ class TestEndpoints:
             with pytest.raises(BadRequest):
                 _svc_l(tmp_path).wheel_screen(bad)
 
-    def test_prices_layer_fetches_only_missing_and_caches_for_six_hours(self, tmp_path):
+    def test_prices_layer_fetches_only_missing_and_caches_for_six_hours(self, tmp_path, monkeypatch):
+        import sell_put_wheel
+        # 名单缺省取接货账本现行名单；本测试测缓存，把名单钉成三只（v0.45.749 起生产名单只剩 NVDA）
+        monkeypatch.setitem(sell_put_wheel.CONFIG, "universe", ["XOM", "WMT", "NVDA"])
         calls = []
         svc = _svc_l(tmp_path, _ok_prices(calls))
         p = svc.wheel_screen_prices(["XOM", "WMT"])

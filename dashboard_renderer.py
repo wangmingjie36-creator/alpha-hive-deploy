@@ -2300,18 +2300,16 @@ def render_dashboard_html(report: Dict, date_str: str,
     from datetime import datetime as _inj_dt
 
     def _inj_agent_price(_d):
-        """优先用当天 swarm_results 可靠 Agent 的真实股价（Chronos/RivalBee/CodeExecutor）。
+        """优先用当天 swarm_results 可靠 Agent 的真实股价（Chronos/RivalBee；CodeExecutor 已于 v0.45.750 退役）。
         刻意排除 OracleBee._snapshot_stock_price（期权快照价，可能被污染，如 NVDA 6-15
         显示 $145 实为期权快照污染，真实 $212）。"""
         _ad = (_d or {}).get("agent_details", {}) or {}
         for _src in (
             (_ad.get("ChronosBeeHorizon", {}).get("details", {}) or {}).get("analyst_targets", {}) or {},
             (_ad.get("RivalBeeVanguard", {}).get("details", {}) or {}).get("eps_revision", {}) or {},
-            _ad.get("CodeExecutorAgent", {}).get("details", {}) or {},
         ):
             try:
-                # current_price（Chronos/Rival/CodeExecutor 失败路径）或 price（CodeExecutor 成功路径键名不同）
-                _v = float((_src or {}).get("current_price") or (_src or {}).get("price"))
+                _v = float((_src or {}).get("current_price"))
                 if _v > 0:
                     return _v
             except (TypeError, ValueError):

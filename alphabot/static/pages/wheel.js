@@ -21,6 +21,7 @@ function lotsPanel(d) {
   const cols = [
     { label: "标的", render: (r) => h("b", {}, r.ticker) },
     { label: "状态", render: (r) => r.state_zh },
+    { label: "张数", cls: "r", render: (r) => num(r.contracts, 0) },
     { label: "put（行权价 · 到期）", render: (r) => legCell(r.put) },
     { label: "put 权利金", cls: "r", render: (r) => (r.put ? h("span", {}, num(r.put.premium, 2),
       h("div", { class: "sub" }, `年化 ${isNum(r.put.annual_yield_pct) ? num(r.put.annual_yield_pct, 1) + "%" : "—"}`
@@ -28,11 +29,14 @@ function lotsPanel(d) {
     { label: "接货价", cls: "r", render: (r) => (r.put ? h("span", {}, num(r.put.accept_price, 2),
       r.put.accept_price_source === "placeholder" ? h("span", { class: "chip warn", title: "用户还没给接货价，这是开仓当天现价打折的占位" }, "占位") : null) : "—") },
     { label: "持股", cls: "r", render: (r) => (r.shares ? `${r.shares.n} 股 @ ${num(r.shares.assigned_price, 2)}` : "—") },
-    { label: "call（行权价 · 到期）", render: (r) => legCell(r.call) },
+    { label: "call（行权价 · 到期）", render: (r) => (r.call ? h("span", {}, legCell(r.call),
+      h("div", { class: "sub" }, `权利金 ${num(r.call.premium, 2)} · 年化 ${isNum(r.call.annual_yield_pct) ? num(r.call.annual_yield_pct, 1) + "%" : "—"}`
+        + (isNum(r.call.iv_rv) ? ` · IV÷RV ${num(r.call.iv_rv, 2)}` : "")))
+      : (r.shares && isNum(r.shares.call_trigger) ? h("span", { class: "sub" }, `收盘到 ${num(r.shares.call_trigger, 2)} 才卖`) : "—")) },
     { label: "累计权利金", cls: "r", render: (r) => money(r.premiums_collected_usd, 0) },
     { label: "持股浮动", cls: "r", render: (r) => (r.shares ? h("span", { class: tone(r.shares.unrealized_usd) }, sMoney(r.shares.unrealized_usd)) : "—") },
   ];
-  return panel("当前持仓", { sub: "每只一条；put 作废或被叫走后这一圈结束，回到「无仓」" },
+  return panel("当前持仓", { sub: "每个循环一条（加仓后同一只会有多条，各自到期、各自结算）；put 作废或被叫走后那一圈结束" },
     d.lots.length ? table(cols, d.lots) : h("div", { class: "empty" }, "现在没有持仓（还没开过，或这一圈刚结束、下一个交易日再开）。"));
 }
 
@@ -72,7 +76,7 @@ export async function renderWheel(root, alive) {
   const r = d.rules || {};
   const head = h("div", { class: "page-head" }, h("div", {},
     h("h1", {}, "接货型卖 put", h("span", { class: "sub" }, d.available ? `账本 ${d.as_of || "—"}` : "")),
-    h("p", { class: "lede" }, `纸面账本（模拟成交，不连券商）：${(r.universe || []).join(" / ") || "—"}。先卖 put（30~50 天内、不高于接货价、IV ÷ RV ≥ 门槛的合格合约里，按账本规则「年化 × IV/RV」选一张），到期收盘低于行权价就接货，`
+    h("p", { class: "lede" }, `纸面账本（模拟成交，不连券商）。新开仓名单：${(r.universe || []).join(" / ") || "—"}（退出名单的标的，已开的那笔照常持有到结算）。先卖 put（30~50 天内、不高于接货价、IV ÷ RV ≥ 门槛的合格合约里，按账本规则「年化 × IV/RV」选一张），到期收盘低于行权价就接货，`
       + "接货后卖 covered call，被叫走一圈结束；没有止损止盈。这是测量账本，不是检验，也不给任何推荐。")),
     helpLink("wheel"));
   const tabs = h("p", { class: "small" }, h("b", {}, "账本"), "　·　", h("a", { href: "#/wheel/screen" }, "筛选：30 只标的里卖 put 好不好做 →"));
@@ -92,7 +96,7 @@ export async function renderWheel(root, alive) {
   }
   for (const x of d.deferred || []) warns.push(`${x.ticker} 的 ${x.leg === "put" ? "put" : "call"}（到期 ${x.expiry}）还没结算：${x.reason_zh || x.reason}——拿不到到期那一场的收盘，不会拿前一天的价顶替。`);
   for (const [tk, why] of Object.entries(d.chain_errors || {})) warns.push(`${tk} 今天没取到期权链：${why}`);
-  const skippedBits = (d.skipped || []).map((s) => `${s.ticker} ${s.leg === "put" ? "put" : "call"}：${s.reason_zh}`);
+  const skippedBits = (d.skipped || []).map((s) => `${s.ticker} ${s.leg === "put" ? "put" : "call"}：${s.reason_zh}${s.leg === "call" && s.detail ? `（${s.detail}）` : ""}`);
   const kpis = h("div", { class: "kpis" },
     kpi("净值", money(a.nav, 0), "", `起始 ${money(a.starting_capital, 0)}`),
     kpi("收益", sPct(a.return_pct, 2), tone(a.return_pct)),

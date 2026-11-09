@@ -195,6 +195,12 @@ def _dig(d, path):
     return d
 
 
+#: v0.45.751：刻意池化机制测试用的合成登记（真登记表已清空；与 `tests/test_signal_archive_generations.py::_SYNTH_POOLED` 同形）
+_SYNTH_POOLED = {"boundary": "v0.45.445", "changed_via": "buzz.comp.news_signal", "why": "测试用",
+                 "known_counter_evidence": "测试用", "recheck_when": "测试用条件",
+                 "recheck_on_or_after": "2026-11-03", "how": "测试用做法"}
+
+
 def _assert_payload_intact(env):
     for path in ORCH_READS:
         _dig(env, path)
@@ -415,7 +421,9 @@ class TestOkPath:
             monkeypatch.setattr(rr, fn, lambda *a, _n=name, **k: {"status": "not_ready", "line": f"⏳ {_n}：桩"})
         monkeypatch.setattr(rr, "dim_ic_forward_status", lambda *a, **k: {
             "status": "not_ready", "line": "⏳ 维度 IC 协议：桩", rr._DETAIL_KEY: dict(_DIM_BASE)})
-        due = signal_archive.DELIBERATELY_POOLED["sentiment.pct"]["recheck_on_or_after"]
+        # v0.45.751：真登记表已清空（sentiment.pct 复检后切）⇒ 注入合成登记测机制（同 test_signal_archive_generations）
+        monkeypatch.setattr(signal_archive, "DELIBERATELY_POOLED", {"sentiment.pct": dict(_SYNTH_POOLED)})
+        due = _SYNTH_POOLED["recheck_on_or_after"]
         before = (_dt.date.fromisoformat(due) - _dt.timedelta(days=1)).isoformat()
         db = _make_db(tmp_path / "home", _weekly_rows(2))
         got = {}
@@ -439,7 +447,9 @@ class TestOkPath:
             monkeypatch.setattr(rr, fn, lambda *a, _n=name, **k: {"status": "not_ready", "line": f"⏳ {_n}：桩"})
         monkeypatch.setattr(rr, "dim_ic_forward_status", lambda *a, **k: {
             "status": "not_ready", "line": "⏳ 维度 IC 协议：桩", rr._DETAIL_KEY: dict(_DIM_BASE)})
-        due = signal_archive.DELIBERATELY_POOLED["sentiment.pct"]["recheck_on_or_after"]
+        # v0.45.751：真登记表已清空（sentiment.pct 复检后切）⇒ 注入合成登记测机制（同 test_signal_archive_generations）
+        monkeypatch.setattr(signal_archive, "DELIBERATELY_POOLED", {"sentiment.pct": dict(_SYNTH_POOLED)})
+        due = _SYNTH_POOLED["recheck_on_or_after"]
         before = (_dt.date.fromisoformat(due) - _dt.timedelta(days=1)).isoformat()
         db = _make_db(tmp_path / "home", _weekly_rows(2))
         lines = {}

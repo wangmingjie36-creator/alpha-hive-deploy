@@ -1208,6 +1208,22 @@ _COHORT_HISTORY = [
      "（成功与出错路径都写，`guard_bee.GENERATION_MARKS`），实时行。预期判定：新代码首跑之前 `no_evidence_yet`；首跑后 `matches`。"
      "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.674\"]` = `agent.GuardBeeSentinel.*`（0 个信号后移）；`guard.macro_adj` 不点名（同 654 ~ 669）。"
      "维度 IC 协议 H1 / H2 不读 Guard 宏观票 ⇒ 不截断。`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 10-19 一代扩标签。"),
+    ("2026-11-09", "v0.45.750",
+     "CodeExecutorAgent 退役（用户 2026-11-09 定）。它是 `technical` 维（不进五维加权），但方向票照样进 "
+     "`QueenDistiller._compute_direction_vote`（遍历全部投票蜂，同 v0.45.191 那条的出边）；票本身 = 「RSI 超买 / 超卖，否则价在 "
+     "20 日均线上 / 下」。09-10 ~ 11-06 生产 1200 行：失败（取数 / 解析 / 异常）124 行 ≈10%；按记录的各蜂方向重算投票、拿掉它这一票，"
+     "`rule_direction` 167 行（13.9%）改变，多为看空 ↔ 中性（重算与记录方向一致 1051/1200，没模拟方向惯性，故是近似）；"
+     "同日横截面对 T+7 收盘收益，看多组 − 看空组 −0.18pp、t −0.35、命中 50.5% ⇒ 无可测信息。"
+     "**改了什么**：① 投票少一票 ⇒ `rule_direction` / `final_score`；② Guard 普查与拥挤度看多数少一只同伴 ⇒ Guard 分、"
+     "`guard.consistency_census`、`guard.adj_factor`；③ `composite.swarm_agreement` 少一个方向；④ `fund.pe_ratio` / "
+     "`fund.market_cap` 取自它的取数脚本、抽取器已摘除（不写新行，历史行不改写）。⑤ 兜底分支的 `data_quality={technical: fallback}` "
+     "不再进 Queen 的 data_real_pct（09 月起触发率 ~1%）。"
+     "`signal_archive.COHORT_SIGNAL_SCOPE[\"v0.45.750\"]` = `agent.CodeExecutorAgent.*`（下游经 `_PHASE1` 普查边与 aggregate 边推出）。"
+     "印记 `_BOUNDARY_MARKERS[\"v0.45.750\"]`：`agent_details` 有 Scout 而没有 CodeExecutorAgent（1268 份历史 analysis JSON 里 0 份如此）。"
+     "前瞻检验：共振加成 / F&G 敞口门两份的重放都从**记录里**的蜂结果重建，旧记录带它、新记录不带，自证不受影响（改动后实测）；"
+     "维度 IC 协议 H1（buzz_v1 观测层重算）结构上碰不到；H2 描述项见 CHANGELOG 0.45.750 的实测。"
+     "`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 同日新开一代（final_score 是 ML 特征）。"
+     "推送若晚于 11-09 的扫描，追加更正条目把日期顺延。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -2098,6 +2114,16 @@ def _equiv_macro_scan_snapshot(d: dict) -> bool:
     return sigs == {own}
 
 
+def _marker_code_executor_retired(d: dict) -> bool:
+    """v0.45.750：CodeExecutorAgent 退役后，`agent_details` 里有 Scout 却没有它。
+
+    缺键当印记只在「旧口径从不缺」时成立：退役前 1268 份带 Scout 的 analysis JSON 全带 CodeExecutorAgent（11-09 实测）。
+    要求 Scout 在场，是为了不把「整份 agent_details 缺失 / 残缺」认成新口径。
+    """
+    ad = (d.get("swarm_results") or {}).get("agent_details")
+    return isinstance(ad, dict) and "ScoutBeeNova" in ad and "CodeExecutorAgent" not in ad
+
+
 #: 世代边界（按 `_COHORT_HISTORY` 的 version 键）→（印记说明, 判定函数）。
 #: 判定函数吃一份 `analysis-*-ml-*.json` 的内容，新口径返回 True。
 #: v0.45.334：从「一个写死的印记 + 永远和表中最后一条比」改成按版本查表 —— 旧写法在
@@ -2151,6 +2177,8 @@ _BOUNDARY_MARKERS = {
                   _marker_guard_single_path),
     "v0.45.674": ("agent_details.GuardBeeSentinel.details.macro_scan_snapshot_checked is True",
                   _marker_guard_scan_snapshot),
+    "v0.45.750": ("agent_details 有 ScoutBeeNova、没有 CodeExecutorAgent",
+                  _marker_code_executor_retired),
 }
 
 #: 世代边界 →（等价判据说明, 判定函数）。v0.45.369 起；**只有登记在这里的边界**才放宽下面这一条，

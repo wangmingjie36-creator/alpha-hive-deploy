@@ -289,32 +289,6 @@ def _gex_state_sig(kind: str) -> Callable:
     return _f
 
 
-def _code_exec_fetch(key: str) -> Callable:
-    """CodeExecutorAgent 取数脚本（`CodeGenerator._generate_yfinance`）的输出字段。
-
-    v0.45.250：同一个 `data` 在 `analyze()` 里有**两个位置**，按路径分派：
-      · 技术分析跑通 ⇒ `details = {price, sma_20, rsi_signal, fetch_data: data, ...}`
-      · 技术分析失败（兜底）⇒ `details = data`
-
-    两种形状自 2026-02-25 就并存。本信号 2026-07-30 写成只读顶层时是对的——
-    那时技术分析脚本撞 yfinance MultiIndex 每次必崩，100% 走兜底。v0.43.10
-    （2026-08-12）修好它之后成功路径成了主路径，`fund.*` 每天 30 只只剩 0–4 只入档，
-    静默断供近一个月。**同一个量换了位置 ⇒ 合并读**（同 `_crowding_comp` 的 `_legacy`，
-    判据见下方 `guard.consistency_census` 注释；值跨形状连续、两形状互斥均已实测）。
-
-    ⚠️ 按「有没有 `fetch_data`」分派，**不要**改成「嵌套取不到就回头读顶层」：
-    成功路径的顶层是技术分析的命名空间，日后多出一个同名键就会被静默混读。
-    守卫：`tests/test_signal_archive_code_executor_shapes.py`（驱动真实 `analyze()`）。
-    """
-    def _f(tr: Dict) -> Optional[float]:
-        det = _dig(tr, "agent_details.CodeExecutorAgent.details")
-        if not isinstance(det, dict):
-            return None
-        src = det.get("fetch_data") if "fetch_data" in det else det
-        return _num(src.get(key)) if isinstance(src, dict) else None
-    return _f
-
-
 def _agent_score(agent: str) -> Callable:
     return lambda tr: _num(_dig(tr, f"agent_details.{agent}.score"))
 
@@ -466,10 +440,8 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     "ml.expected_7d": _path("agent_details.RivalBeeVanguard.details.expected_7d"),
     "ml.expected_30d": _path("agent_details.RivalBeeVanguard.details.expected_30d"),
 
-    # ── 基本面快照 ─────────────────────────────────────────────
-    # v0.45.250：原为 `_path("...CodeExecutorAgent.details.<键>")`，只认兜底路径的形状。
-    "fund.pe_ratio": _code_exec_fetch("pe_ratio"),
-    "fund.market_cap": _code_exec_fetch("market_cap"),
+    # v0.45.750：`fund.pe_ratio` / `fund.market_cap` 已摘除 —— 它们取自 CodeExecutorAgent 取数脚本的输出，
+    # 该蜂随本版退役。库里的历史行不改写，只是不再写入新行。
 
     # ── 各蜂原始分与方向 ───────────────────────────────────────
     **{f"agent.{a}.score": _agent_score(a) for a in (
@@ -2124,6 +2096,8 @@ UNARCHIVED_NODES = frozenset({"agent.CodeExecutorAgent.score",
                               "obs.reddit", "obs.news", "obs.yahoo"})
 
 # Phase-1 并行发布的蜂（`alpha_hive_daily_report._init_scan_context`）；其后顺序是 Rival → Guard → Bear
+# ⚠️ v0.45.750：CodeExecutorAgent 已退役，但这里**保留**——本元组只用于依赖边，边要能把它活着那段的
+# 历史边界传下去（v0.45.191 等）。它的节点今后不会再被任何边界点名，留着这条边不会白切下游。
 _PHASE1 = ("ScoutBeeNova", "OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon", "CodeExecutorAgent")
 _PHASE1_DIRS = tuple(f"agent.{a}.direction" for a in _PHASE1)
 
@@ -2246,6 +2220,12 @@ SIGNAL_UPSTREAM: Dict[str, Tuple[Edge, ...]] = {
         # v0.45.538 之前还读 Rival 的 `ml_probability`（< 0.45 ⇒ ml_bear 5.5）
         + _ML_PROBABILITY_READS),
     "agent.BearBeeContrarian.*": (Edge("bear.score", "self"),),
+    # v0.45.751：`sentiment.pct` = `int(sentiment_composite)`，合成值 = Σ `buzz_weights` × 通道（buzz_bee.py）——它是
+    # `buzz.comp.*` 的确定性函数，不是原始观测。此前登在 SIGNAL_LEAVES、跨 v0.45.445 刻意池化（v0.45.565）；复检时
+    # 用户 2026-11-09 定直接切、不看 IC（按登记做法算新世代 IC 会看到与 H1 三通道高度相关的结果，窗口与 H1 同期）。
+    # 挂上这条边，点名任一通道的边界都带上它；只改合成权重的边界（不动通道）仍须直接点名 pct。
+    # `TestSentimentPctFollowsChannels` 钉住：合成里每个通道都入档（通配盖得住）、点名任一通道 ⇒ pct 换代。
+    "sentiment.pct": (Edge("buzz.comp.*", "self"),),
     # 多数派占比：遍历 agent_details 里**全部**蜂的方向（含 CodeExecutor / Guard / Bear）
     "composite.swarm_agreement": (Edge("agent.*.direction", "aggregate"),),
 }
@@ -2264,11 +2244,7 @@ SIGNAL_LEAVES = frozenset({
     "options.iv_rank", "options.iv_percentile", "options.iv_rank_is_real",
     # v0.45.362：CBOE 链 + Scout 价（同 price.* 按原始数据算）；只有本版上线后的记录才有，早于它的边界无从作用
     "gex.available", "gex.total_gex", "gex.negative",
-    # ⚠️ 不是真叶子：= int(Buzz 合成值)，合成值是 buzz.comp.* 七个通道的加权和 ⇒ 通道换代它跟着换。
-    # 留在这里是**刻意池化**（v0.45.565，用户 2026-10-20 定）：理由与复检条件见 `DELIBERATELY_POOLED`。
-    # 复检决定切 ⇒ 移出本集合，在 SIGNAL_UPSTREAM 登 `Edge("buzz.comp.*", "self")`（结构修法，草稿见分支
-    # claude/gifted-hawking-5866b0 的 72137325，未合入）。
-    "sentiment.pct",
+    # v0.45.751：sentiment.pct 移出（= int(Σ 权重 × buzz.comp.*)，见 SIGNAL_UPSTREAM；v0.45.565 起曾在此刻意池化）
     # v0.45.349：bear.insider_bear / bear.options_bear 移出（读 Scout / Oracle 方向，见 SIGNAL_UPSTREAM）
     "bear.overval_bear", "bear.short_int_bear",
     "crowding.comp.social_volume", "crowding.comp.google_trends",
@@ -2279,7 +2255,6 @@ SIGNAL_LEAVES = frozenset({
     "buzz.comp.fear_greed_signal",
     "market.fear_greed", "market.fear_greed_is_cnn",
     "guard.macro_adj",                       # `_calc_macro_adjustment`，不走读板路径
-    "fund.pe_ratio", "fund.market_cap",
     # 这三只蜂不读板：输入全是原始数据
     "agent.OracleBeeEcho.score", "agent.OracleBeeEcho.direction",
     "agent.BuzzBeeWhisper.score", "agent.BuzzBeeWhisper.direction",
@@ -2439,7 +2414,8 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 按维度 IC 协议 §6「按层声明」：点名 `buzz.comp.news_signal` **和** `agent.BuzzBeeWhisper.*`（通道值变 ⇒ 分跟着变）。
     # 下游（Guard 读 Buzz 分与方向、Bear 读 Buzz 方向与情绪、swarm_agreement 等）由 _scope_closure 带出。
     # v0.45.561 更正：Scout 的 consensus_strength 同日（441）起不再读同伴，`ml.expected_*` 从来不读 Buzz ⇒ 都不在闭包里。
-    # ⚠️ 本条也改了 `sentiment.pct`（新闻通道权重 0.25），**刻意不点名**——见 `DELIBERATELY_POOLED`（v0.45.565）。
+    # 本条也改了 `sentiment.pct`（新闻通道权重 0.25）：v0.45.565 起刻意池化，v0.45.751 复检时切——不在这里写，
+    # 经 SIGNAL_UPSTREAM 的 `buzz.comp.*` self 边由 news_signal 带出（世代起点 10-09）。
     "v0.45.445": ("buzz.comp.news_signal", "agent.BuzzBeeWhisper.*"),
     # 10-19：蜂后 ML 反馈两个消费者（维度权重、方向票重）停用，只记影子乘数。蜂后层 ⇒ 不改任何归档蜂信号。
     "v0.45.537": (),
@@ -2483,6 +2459,8 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 结果不同的日子改首批标的的宏观票；10-19 起旧代码扫描日全部 Guard 行都是同一份 ⇒ 同 654 ~ 669 只点名 Guard（0 个信号后移），
     # `guard.macro_adj` 不点名
     "v0.45.674": ("agent.GuardBeeSentinel.*",),
+    # 11-09：CodeExecutorAgent 退役 —— 下游（Guard 普查 / 拥挤度看多数、swarm_agreement、final_score）由依赖边推出
+    "v0.45.750": ("agent.CodeExecutorAgent.*",),
 }
 
 
@@ -2492,28 +2470,12 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
 #: SKILL 规定 ⏳ 以外的图标在周报里显著标出；② 同一工具外壳 `attention[]` 的 warn（每日扫描 Step 11 经 `--out` 读，
 #: 进日志与 status.json，没有推送）；③ `analyze()` 世代报告标 ⏰。（v0.45.565 原注释写「周度任务读 attention」，是错的。）
 #: `tests/test_signal_archive_generations.py::TestDeliberatelyPooled` 钉住「边界确实改了它、确实没切、三处到期都出声」。复检后：维持 ⇒ 更新 `recheck_on_or_after` 并在 CHANGELOG 记结论；
-#: 切 ⇒ 删本条，按 `SIGNAL_LEAVES` 里 sentiment.pct 那段注释的结构修法改。
+#: 切 ⇒ 删本条，改成真依赖（多半是在 SIGNAL_UPSTREAM 登一条边，先例见 v0.45.751 的 sentiment.pct）。
 DELIBERATELY_POOLED: Dict[str, Dict[str, str]] = {
-    "sentiment.pct": {
-        "boundary": "v0.45.445",
-        "changed_via": "buzz.comp.news_signal",      # 该边界经它改了本信号（守卫要求边界直接点名它）
-        "why": ("10-09 新闻主源 AV → Massive 改了新闻通道（合成值权重 0.25）⇒ 改了 pct。切在 10-09 会让 analyze() 里 "
-                "pct 的 t7 / t30 样本从 1674 / 1104 清零到 11 月初 / 12 月初；且旧世代本身就是 AV / Yahoo 两种新闻刻度按天混，"
-                "切掉代码边界也去不掉那一层。pct 只用于探索性 IC 报告：生产评分不读世代，维度 IC 预注册检验（H1）"
-                "读的是 10-12 起的 buzz_v1，两种做法下都不受影响。"),
-        "known_counter_evidence": ("固定走 Yahoo 的 5 只（TMUS/ENPH/NFLX/NEE/SNOW）在 10-09 前后横截面位置变了："
-                                   "新闻分相对其余 25 只的落差 −25.0 → −5.0（AV 窗 09-28~10-02 → Massive 窗 10-09~10-19），"
-                                   "pct 落差 −6.1 → −2.9、日内分位 0.29 → 0.40；而 Massive 相对 AV 的整体水平几乎没动"
-                                   "（均值 +1.5、中位 −1.0）⇒ 变的是这 5 只的**相对位置**，逐日横截面 rank IC 吃的正是它。"
-                                   "（sentiment-pct-buzz 会话 10-20 实测，生产库只读副本、未做显著性检验、混有行情。）"
-                                   "这 5 只每天走 Yahoo 是因为 AV 配额只够 25 只。"),
-        "recheck_when": "10-09 之后 sentiment.pct 已结算的 t7 交易日 ≥ 10（逐日 IC 的出数门槛）",
-        # 第 10 个交易日 10-22 + 7 个交易日 = 11-02 结算，次日回填（`is_trading_day.add_trading_days`；漏扫一天就顺延）
-        "recheck_on_or_after": "2026-11-03",
-        "how": ("临时把 sentiment.pct 加进 COHORT_SIGNAL_SCOPE['v0.45.445'] 跑 `--analyze`，得 10-09 起的新世代 IC，"
-                "与缺省（池化）结果比；同时按上面 5 只是否进 / 出两端分位看排序。新世代与全史同号、且新世代自身不在"
-                "噪音带外反号 ⇒ 维持池化；否则切。"),
-    },
+    # 曾有：sentiment.pct 跨 v0.45.445（v0.45.565 登记，复检日 2026-11-03）。v0.45.751 复检：用户 2026-11-09 定
+    # **直接切、不看 IC**——登记的做法（算 10-09 起新世代 IC 与池化结果比）会看到与 H1 三个情绪通道高度相关、
+    # 且与 H1 窗口同期的收益关联，等于部分揭盲。改挂 `buzz.comp.*` self 边（见 SIGNAL_UPSTREAM），原记录全文见 CHANGELOG
+    # v0.45.565 与 changelog.d/0.45.751.md。机制留着：以后再有「已知换了、先不切」的取舍照此登记。
 }
 
 
@@ -2611,11 +2573,58 @@ def _truncation_share(con, end_col: str, checked_col: str) -> Tuple[int, float]:
     return icd.truncation_share(con, end_col, checked_col)
 
 
+#: 真实观测闸（v0.45.751，用户 2026-11-09 定「让这个通道的 IC 只用真实观测」，同日「一并处理」扩到动量 / 量比）：
+#: Buzz 的价格三通道是**另一个归档信号**的确定性函数，输入取不到时生产照样写一个回落值（多为中性 50）。这些行
+#: 不是观测，进探索性 IC 只会把「取不到」当成「中性」。这里登记 {信号: 闸}，`load_panel` 依次排除：
+#:   · `input`：同一 (日期, 标的) 上必须有值的输入信号（缺失值不入档 ⇒ 没有这一行）；输入在 `QUARANTINE` 里也排除——
+#:     入库口拦下的本来就没有这一行，但带 `keep_rows` 的条目（10-14 BILI 动量）**库里还在**，`load_panel` 自己不问隔离名单；
+#:   · `sentinel` / `sentinel_before`：输入等于这个值就是当时的缺失哨兵（不是观测）；`sentinel_before` 为 None = 任何日期都算；
+#:   · `fallback_value`：通道值恰好等于回落值就排除——只用在**真实输入几乎不可能落到这个值**的通道上。
+#: 只作用于 `load_panel`（探索性 IC 的唯一取数口）——**不在入库口拦**：冻结版 buzz_v1 的桥接 / 描述项要逐位复现
+#: 生产写下的全部 7 个通道（含回落的 50），入库口不写会让它们失配。排除计数经 `gate_stats` 进 `analyze()` 报告。
+#: 守卫 `tests/test_signal_archive.py::TestRealObservationGates`。行数均为 2026-11-09 对生产库的只读计数（未看收益）。
+REAL_OBSERVATION_GATES: Dict[str, Dict[str, Any]] = {
+    # buzz_bee：`volatility_20d is None` ⇒ 通道 50；v0.45.3（08-26）之前缺失被记成 0.0 ⇒ 落进最低档 = 75（「低波动、平稳」）。
+    # 08-26 前 283 行 / 24 天是假 75；之后 170 行 / 8 天（最近 11-02）是回落 50。08-26 后的 0 是值，不排除。
+    "buzz.comp.volatility_signal": {"input": "price.volatility_20d", "sentinel": 0.0,
+                                    "sentinel_before": "2026-08-26", "fallback_value": None},
+    # buzz_bee：`momentum_5d is None` ⇒ 50.0；有值时 (clamp±10 + 10)/20×100，**只有动量恰好 0 才落到 50.0**。
+    # 08-15 前缺失记成 0.0（Scout v0.43.25 才改 None）⇒ 也是 50.0。通道恰为 50.0 共 227 行 / 22 天，全在已知回落 / 哨兵日；
+    # 用通道值判，是因为入档的 `price.momentum_5d` 是 Scout 那份，与 Buzz 当时读到的不逐位相同（都在的 2524 行里
+    # 1483 行按映射逐位对得上）——08-26 NVDA、09-11 WMT 两行 Scout 有值、Buzz 却回落 50。代价：真实动量恰为 0 的行
+    # 也被排除（这 227 行之外没见过）。仍要求 Scout 输入入档：09-15 / 09-24 / 09-25 的动量被隔离（自攒索引错窗 / 陈旧拷贝，
+    # 09-25 的通道值与 09-24 逐位相同），通道是用同一个坏值算的。输入没入档、通道却非 50 的两类（v0.45.754 查明）：
+    #   · 03-23（TSLA/AMZN）/ 03-25（MSFT/QCOM/NVDA）5 行：Scout details 当天为空，Buzz 自己 details 的 momentum_5d
+    #     代进映射与通道逐位对得上（-4.613 → 26.9）⇒ 是真实观测，但存档里没有输入可证，按闸排除（代价 5 行）；
+    #   · 09-17 全 30 行：生产当天限流、通道全是回落 50；v0.45.270/271 次日用回落链**事后补算**并重放蜂群，v0.45.464
+    #     再把补算值写进本表（`_manual_backups/2026-10-12_0917_recompute_v0.45.464/plan.json` 记着改前值全为 50）——
+    #     不是生产当时的观测，排除是对的。
+    # 通道 3 月按 1 位小数存（26.9），之后全精度：|动量| < 0.01% 在 3 月会舍入成 50.0 被误排除，实测 227 行里没有。
+    "buzz.comp.momentum_signal": {"input": "price.momentum_5d", "sentinel": None,
+                                  "sentinel_before": None, "fallback_value": 50.0},
+    # buzz_bee：`volume_ratio is None` ⇒ 50，但 50 也是真实档位（1.0 < 量比 ≤ 1.5），不能按通道值判；入档的量比就是 Buzz 自己那份。
+    # 缺失哨兵 1.0：55 行全在 05-03～07-02（与动量 0.0 哨兵同一批行；06 月 43/108 行），通道记成 35（1.0 不 > 1.0）。
+    # 量比是全精度浮点，这批之外从未恰好等于 1.0。造 1.0 的路径都已删（v0.45.754 查明）：CBOESource 的
+    # `metrics.get("volume_ratio", 1.0)` 删于 v0.45.54（08-27，404e864e；只在 08-15~08-27 可达——yfinance 抛异常、
+    # 自攒索引补上动量时；窗口内 08-24~27 的 120 行一个 1.0 都没有），MultiSourceFetcher 的「均量 ≤ 0 ⇒ 1.0」删于
+    # v0.45.473（10-12）；v0.45.639 起量比只由 `price_metrics` 算、算不出给 None。不设截止日只是保守，任何日期都排除无代价。
+    # 输入没入档 386 行 / 19 天（最近 11-02）：多数是回落 50；10-14 是隔离的错窗量比；09-17 的 19 行非 50 是事后补算值
+    # （同上动量那段：生产当天全是 50，`price.volume_ratio` 补算时没插入），一并排除。均量 NaN ⇒ 量比 = 原始成交量那个旧 bug
+    # 从未落进归档（最大 10.0）。
+    "buzz.comp.volume_signal": {"input": "price.volume_ratio", "sentinel": 1.0,
+                                "sentinel_before": None, "fallback_value": None},
+}
+
+
 def load_panel(db_path: Optional[Path] = None, horizon: str = "t7",
                min_width: int = 5,
                with_ticker: bool = False,
-               target_metric: str = "return") -> Dict[str, Dict[str, List]]:
+               target_metric: str = "return",
+               gate_stats: Optional[Dict[str, Dict[str, int]]] = None) -> Dict[str, Dict[str, List]]:
     """联表取 {signal: {date: [(值, 前瞻收益)]}}。
+
+    v0.45.751：`REAL_OBSERVATION_GATES` 里的信号只留输入确实入档的行；给了 `gate_stats` 就按信号填
+    `{"kept", "missing_input", "quarantined_input", "sentinel", "fallback"}`（有前瞻收益、本该进面板的行里各有多少）。
 
     前瞻收益 = `(终点收盘价 − price_at_predict) / price_at_predict`，终点列查
     `ic_diagnostics.FORWARD_CLOSE_COL`（t7 → close_t7，t30 → price_t30）。
@@ -2669,15 +2678,47 @@ def load_panel(db_path: Optional[Path] = None, horizon: str = "t7",
             if not rets:
                 return {}
         panel: Dict[str, Dict[str, List]] = defaultdict(lambda: defaultdict(list))
+        gate_inputs = {g["input"] for g in REAL_OBSERVATION_GATES.values()}
+        inputs: Dict[tuple, float] = {}          # (输入信号, ticker, date) → 值
+        gated: List[tuple] = []                  # (信号, key, row)：等输入读全了再判
+        q_dates = {q["date"] for q in QUARANTINE}
         for r in con.execute(f"SELECT date, ticker, signal, value FROM {TABLE}"):
             key = (r["ticker"], r["date"][:10])
             if key not in rets or r["value"] is None:
                 continue
+            if r["signal"] in gate_inputs:
+                inputs[(r["signal"],) + key] = r["value"]
+            # v0.45.751：隔离名单在分析口也要问——带 `keep_rows` 的条目库里还在（`purge_due` 不删），此前会混进面板
+            if key[1] in q_dates and is_quarantined(key[1], key[0], r["signal"]):
+                continue
             row = ((r["value"], rets[key], r["ticker"]) if with_ticker
                    else (r["value"], rets[key]))
+            if r["signal"] in REAL_OBSERVATION_GATES:
+                gated.append((r["signal"], key, row))
+                continue
             panel[r["signal"]][r["date"][:10]].append(row)
     finally:
         con.close()
+    counts: Dict[str, Dict[str, int]] = {
+        s: {"kept": 0, "missing_input": 0, "quarantined_input": 0, "sentinel": 0, "fallback": 0}
+        for s in REAL_OBSERVATION_GATES}
+    for sig, key, row in gated:
+        gate = REAL_OBSERVATION_GATES[sig]
+        v = inputs.get((gate["input"],) + key)
+        if v is None:
+            counts[sig]["missing_input"] += 1
+        elif is_quarantined(key[1], key[0], gate["input"]):
+            counts[sig]["quarantined_input"] += 1     # 通道是用这个坏输入算的
+        elif (gate["sentinel"] is not None and v == gate["sentinel"]
+              and (gate["sentinel_before"] is None or key[1] < gate["sentinel_before"])):
+            counts[sig]["sentinel"] += 1
+        elif gate["fallback_value"] is not None and row[0] == gate["fallback_value"]:
+            counts[sig]["fallback"] += 1
+        else:
+            counts[sig]["kept"] += 1
+            panel[sig][key[1]].append(row)
+    if gate_stats is not None:
+        gate_stats.update(counts)
     return {s: {d: v for d, v in bd.items() if len(v) >= min_width}
             for s, bd in panel.items()}
 
@@ -2712,8 +2753,9 @@ def analyze(db_path: Optional[Path] = None, horizon: str = "t7",
     import ic_diagnostics as icd
 
     # 带 ticker 取一次，供固定效应/时变分解；IC 计算仍用 (值, 收益) 二元组
+    gate_stats: Dict[str, Dict[str, int]] = {}
     panel_t = load_panel(db_path, horizon, min_width, with_ticker=True,
-                         target_metric=target_metric)
+                         target_metric=target_metric, gate_stats=gate_stats)
     if not panel_t:
         return []
     panel = {s: {d: [(v, r) for v, r, _ in rows] for d, rows in bd.items()}
@@ -2744,6 +2786,7 @@ def analyze(db_path: Optional[Path] = None, horizon: str = "t7",
         "undeclared_versions": ([] if pool_generations else
                                 [v for _d, v, _r in history if v not in COHORT_SIGNAL_SCOPE]),
         "signals": {},
+        "real_obs_gates": gate_stats,          # v0.45.751：真实观测闸排除了多少（不随世代切片）
     }
 
     out = []
@@ -2906,6 +2949,16 @@ def _print_generations(rows: List[Dict], generations: Dict) -> None:
         print(f"    ⚠️ 未声明影响面的边界（已按全部信号切，原始观测在白丢样本）："
               f"{', '.join(generations['undeclared_versions'])} —— "
               f"去 signal_archive.COHORT_SIGNAL_SCOPE 补声明")
+    for s, c in sorted((generations.get("real_obs_gates") or {}).items()):
+        gate = REAL_OBSERVATION_GATES.get(s, {})
+        extra = f"、输入被隔离 {c['quarantined_input']} 行" if c.get("quarantined_input") else ""
+        if gate.get("sentinel") is not None:
+            when = f"{gate['sentinel_before']} 前" if gate.get("sentinel_before") else "任何日期"
+            extra += f"、{when}的缺失哨兵 {gate['sentinel']:g} {c['sentinel']} 行"
+        if gate.get("fallback_value") is not None:
+            extra += f"、通道恰为回落值 {gate['fallback_value']:g} {c['fallback']} 行"
+        print(f"    真实观测闸：{s} 只用 {gate.get('input')} 确实取到的行 —— 保留 {c['kept']}，"
+              f"排除输入缺失 {c['missing_input']} 行{extra}（signal_archive.REAL_OBSERVATION_GATES）")
     today = datetime.date.today().isoformat()
     for s, rec in sorted(DELIBERATELY_POOLED.items()):
         if s not in sigs:

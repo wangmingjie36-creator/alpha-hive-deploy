@@ -74,6 +74,7 @@ def _lot_view(lot: dict, as_of: Optional[str], prices: dict) -> dict:
         out[key] = {k: leg.get(k) for k in ("symbol", "strike", "expiry", "premium", "delta", "sold_on", "last_mark",
                                             "last_mark_date", "stale_days", "accept_price", "accept_price_source",
                                             "annual_yield_pct", "dte_at_open", "spot_at_open", "iv_pct", "rv_pct", "iv_rv",
+                                            "rule_version", "trigger", "close", "close_session",
                                             "settle_deferred_since", "settle_deferred_reason")}
         out[key]["days_to_expiry"] = _days_to(as_of, leg.get("expiry"))
         out[key]["settle_deferred_reason_zh"] = DEFER_ZH.get(leg.get("settle_deferred_reason"), leg.get("settle_deferred_reason"))
@@ -85,6 +86,8 @@ def _lot_view(lot: dict, as_of: Optional[str], prices: dict) -> dict:
         ap = _num(sh.get("assigned_price"))
         out["shares"] = {"n": sh.get("n"), "assigned_price": ap, "assigned_on": sh.get("assigned_on"),
                          "basis": sh.get("basis"), "last_price": px,
+                         # v0.45.746：收盘涨到这里（接货价 × (1 + call_min_rise_pct%)）才卖 covered call——门槛只在账本算
+                         "call_trigger": W.call_rise_ok(ap, None)[1] if ap is not None else None,
                          "unrealized_usd": round((px - ap) * (sh.get("n") or 0), 2) if (px is not None and ap is not None) else None}
     else:
         out["shares"] = None

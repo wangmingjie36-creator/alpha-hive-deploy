@@ -202,11 +202,16 @@ NEVER_SLICED_TODAY = (
     # v0.45.275: price.momentum_5d / price.volatility_20d 移出本表——各自在
     # 2026-08-15（scout_bee v0.43.25）/ 2026-08-26（data_pipeline v0.45.3）改过
     # 哨兵语义（缺失伪造 0.0 → 诚实 None），见 DOCUMENTED_REDEFINITIONS。
-    # price.volume_ratio 留在本表：dataclass 默认值同批改了，但至少一条取值路径
-    # （CBOESource）当时仍硬编码 `or 1.0` 未清，是否可达未查清，不认领。
+    # price.volume_ratio 留在本表：dataclass 默认值同批改了，CBOESource 的
+    # `metrics.get("volume_ratio", 1.0)` 次日（v0.45.54，08-27）才删。v0.45.754 验证：它只在
+    # 08-15（v0.43.25 加自攒动量索引）~08-27 可达——yfinance 取 K 线抛异常、索引补上动量 ⇒ metrics
+    # 只有动量没有量比键 ⇒ 1.0；此前异常直接返回 None、走不到。窗口内有扫描的 4 天（08-24~27）
+    # 120 行里没有一个 1.0（JSON 与归档都核过），归档里恰为 1.0 的量比最晚 07-02 ⇒ 没有一行值变，
+    # 不需要世代边界（探索性 IC 由 REAL_OBSERVATION_GATES 把 1.0 当哨兵排除）。
     "price.volume_ratio",
-    "fund.pe_ratio", "fund.market_cap", "market.fear_greed", "market.fear_greed_is_cnn",
-    "sentiment.pct", "crowding.comp.social_volume", "crowding.comp.google_trends",
+    "market.fear_greed", "market.fear_greed_is_cnn",   # v0.45.750：fund.* 随 CodeExecutorAgent 退役
+    # v0.45.751：sentiment.pct 移出——= int(Σ 权重 × buzz.comp.*)，v0.45.445 换新闻主源即换了它（见 DOCUMENTED_REDEFINITIONS）
+    "crowding.comp.social_volume", "crowding.comp.google_trends",
 )
 
 #: CHANGELOG 里实测过「换了量」的系统输出 → 其世代起点不得早于该日。
@@ -214,6 +219,7 @@ DOCUMENTED_REDEFINITIONS = {
     # v0.45.472（补登 v0.34.0）：期权链主源 yfinance → CBOE，主链 GEX 的 gamma 来源与 S 都换了——yfinance 时代 gamma 是
     # BS 补的、S 取行权价中位数；CBOE 时代 gamma 来自 CBOE。原在 NEVER_SLICED_TODAY，依据见 CHANGELOG v0.45.472。
     "options.gamma_exposure": "2026-06-30",
+    "sentiment.pct": "2026-10-09",                     # v0.45.751 复检后切：v0.45.445 新闻主源 AV→Massive 改了合成值
     "agent.GuardBeeSentinel.score": "2026-09-07",      # v0.45.163 普查读法
     "agent.GuardBeeSentinel.direction": "2026-09-07",  # v0.45.163 方向 26.2% 不一致
     "guard.consistency_census": "2026-09-07",          # v0.45.163
@@ -344,8 +350,7 @@ _NOT_BEE_MODULES = {
 _UNIMPORTABLE = sorted(p.name for p in (_REPO / "swarm_agents").glob("*.py") if not p.stem.isidentifier())
 _BEE_MODULES = {p.stem: p for p in sorted((_REPO / "swarm_agents").glob("*.py"))
                 if p.stem not in _NOT_BEE_MODULES and p.stem.isidentifier()}
-#: 不在 swarm_agents/ 里的 Phase-1 蜂（`_PHASE1` 里的 CodeExecutorAgent）
-_BEE_MODULES["code_executor_agent"] = _REPO / "code_executor_agent.py"
+#: v0.45.750：原先这里补登 swarm_agents/ 之外的 Phase-1 蜂 `code_executor_agent.py`——该蜂已退役、文件已删
 
 #: 读板的机制本身（不是消费者）：它们的内部读法由各自的专门测试管（定点索引 / 普查回退）
 _MECHANISM_METHODS = {("guard_bee", "_read_census")}
@@ -436,7 +441,7 @@ _CENSUS_SITES = {
     ),
     ("guard_bee", "analyze", "get_real_crowding_metrics"): (
         # `real_data_sources._PHASE1_PEERS`（不含 Scout）；Guard 随后用自己普查的 bull 覆盖 bullish_agents
-        ("OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon", "CodeExecutorAgent"),
+        ("OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon"),   # v0.45.750 起无 CodeExecutorAgent
         {"direction": ("guard.adj_factor",), "agent_id": _IDENTITY},
         ("real_data_sources.py", "get_bullish_agents_detail", "get_live_signals"),
     ),
@@ -737,7 +742,7 @@ class TestPeerReadEdgesMatchCode:
             "（副本可能含未提交内容，别无脑 rm）；见 CLAUDE.md「环境：~/Desktop 在 iCloud 同步下会造重名副本」")
         stems = {p.stem for p in (_REPO / "swarm_agents").glob("*.py") if p.stem.isidentifier()}
         assert set(_NOT_BEE_MODULES) <= stems, f"排除项里有不存在的模块：{sorted(set(_NOT_BEE_MODULES) - stems)}"
-        assert stems - set(_NOT_BEE_MODULES) == set(_BEE_MODULES) - {"code_executor_agent"}
+        assert stems - set(_NOT_BEE_MODULES) == set(_BEE_MODULES)
         touching = [m for m, (_why, may) in _NOT_BEE_MODULES.items()
                     if not may and "board" in (_REPO / "swarm_agents" / f"{m}.py").read_text(encoding="utf-8")]
         assert not touching, f"{touching} 登记为不碰 board，源码里却出现了 board —— 移出排除项让守卫扫它"
@@ -1016,45 +1021,78 @@ class TestBearSubscoreSlicing:
 # 刻意池化（v0.45.565）：已知边界改了它的值、用户决定先不切 —— 不许静默，到期要出声
 # ══════════════════════════════════════════════════════════════════════════
 
-class TestDeliberatelyPooled:
-    """`sentiment.pct` = int(Buzz 合成值)；v0.45.445 换新闻源改了新闻通道 ⇒ 改了它。用户 2026-10-20 定先不切，
-    11 月复检（理由、反证、复检条件与做法都在 `signal_archive.DELIBERATELY_POOLED`）。
+#: 机制测试用的合成登记——就是 v0.45.565 当初登的那条（v0.45.751 复检后已切、真登记表已清空）。
+#: 用它测「到期出声 / 读不到出声 / 报告点名」：真登记表空了，机制不能因此变成没人测。
+_SYNTH_POOLED = {
+    "boundary": "v0.45.445",
+    "changed_via": "buzz.comp.news_signal",
+    "why": "测试用合成登记（原 v0.45.565 sentiment.pct 跨 v0.45.445 的池化）",
+    "known_counter_evidence": "测试用",
+    "recheck_when": "测试用条件",
+    "recheck_on_or_after": "2026-11-03",
+    "how": "测试用做法",
+}
 
-    这里不按真实钟判「到期」（那是拨钟审计专抓的时间炸弹）：到期提醒走报告与 `ic_rerun_readiness` 的
-    attention，按传入的业务日判，下面用固定日期测两侧。
+
+def _record_problems(sig, rec):
+    """一条刻意池化登记的形状问题清单（空 = 合规）。真登记表与合成登记共用，免得判据只在空表上「通过」。"""
+    history = {v: d for d, v, _r in irr._COHORT_HISTORY}
+    out = []
+    if sig not in sa.SIGNAL_EXTRACTORS:
+        out.append("信号未入档")
+    if rec["boundary"] not in history or rec["boundary"] not in sa.COHORT_SIGNAL_SCOPE:
+        out.append("边界不在边界表 / 影响面表")
+    elif datetime.date.fromisoformat(rec["recheck_on_or_after"]) <= datetime.date.fromisoformat(history[rec["boundary"]]):
+        out.append("复检日不晚于边界日")
+    elif not sa._matching({rec["changed_via"]}, sa.COHORT_SIGNAL_SCOPE[rec["boundary"]]):
+        out.append("边界没有直接点名 changed_via")
+    out += [f"{k} 为空" for k in ("why", "known_counter_evidence", "recheck_when", "how") if not rec[k].strip()]
+    # 记录会拼进 `ic_rerun_readiness --quiet` 那一行，「｜」是段分隔符——出现就把复检段拆成两截（v0.45.589）
+    out += [f"{k} 含「｜」" for k, v in rec.items() if isinstance(v, str) and "｜" in v]
+    return out
+
+
+def _still_pooled(sig, rec):
+    """登记的边界确实没切到它（切了却忘删记录 ⇒ 报告 / attention 会对已切的信号喊复检）。"""
+    entry = next(e for e in irr._COHORT_HISTORY if e[1] == rec["boundary"])
+    return sa.generation_boundaries([sig], [entry]) == {}
+
+
+class TestDeliberatelyPooled:
+    """刻意池化登记（v0.45.565 起）：已知边界改了值、用户决定先不切 —— 不许静默，到期要出声。
+
+    唯一一条（sentiment.pct 跨 v0.45.445）v0.45.751 复检后已切（用户 2026-11-09 定直接切、不看 IC），真登记表现在为空；
+    到期出声的机制用 `_SYNTH_POOLED` 测。这里不按真实钟判「到期」（那是拨钟审计专抓的时间炸弹）：按传入的业务日判。
     """
 
-    def test_record_is_well_formed(self):
-        history = {v: d for d, v, _r in irr._COHORT_HISTORY}
+    @pytest.fixture
+    def synth(self, monkeypatch):
+        monkeypatch.setattr(sa, "DELIBERATELY_POOLED", {"sentiment.pct": dict(_SYNTH_POOLED)})
+        return sa.DELIBERATELY_POOLED["sentiment.pct"]
+
+    def test_real_records_are_well_formed_and_still_pooled(self):
         for sig, rec in sa.DELIBERATELY_POOLED.items():
-            assert sig in sa.SIGNAL_EXTRACTORS, sig
-            assert rec["boundary"] in history and rec["boundary"] in sa.COHORT_SIGNAL_SCOPE, rec
-            assert datetime.date.fromisoformat(rec["recheck_on_or_after"]) > datetime.date.fromisoformat(
-                history[rec["boundary"]]), rec
-            for k in ("why", "known_counter_evidence", "recheck_when", "how"):
-                assert rec[k].strip(), (sig, k)
-            # 记录会拼进 `ic_rerun_readiness --quiet` 那一行，「｜」是段分隔符——出现就把复检段拆成两截（v0.45.589）
-            bad = [k for k, v in rec.items() if isinstance(v, str) and "｜" in v]
-            assert not bad, f"{sig} 的 {bad} 含「｜」（--quiet 的段分隔符），换成别的标点"
+            assert not _record_problems(sig, rec), (sig, _record_problems(sig, rec))
+            assert _still_pooled(sig, rec), (sig, "已被切，删掉 DELIBERATELY_POOLED 里这条")
 
-    def test_boundary_really_changed_the_signal_input(self):
-        """「刻意不切」的前提是边界真的改了它——边界必须直接点名 `changed_via`，且它确实是本信号的输入。"""
-        rec = sa.DELIBERATELY_POOLED["sentiment.pct"]
-        assert sa._matching({rec["changed_via"]}, sa.COHORT_SIGNAL_SCOPE[rec["boundary"]]), rec
-        src = (_REPO / "swarm_agents" / "buzz_bee.py").read_text(encoding="utf-8")
-        assert "bullish_pct = int(sentiment_composite)" in src and '"sentiment_pct": bullish_pct' in src, (
-            "sentiment.pct 不再是 int(合成值) —— 前提变了，重审这条池化")
-        assert "news_signal        * _bw.get(\"news\"" in src, "新闻通道不再进合成值 —— 前提变了，重审这条池化"
+    def test_record_checker_has_teeth(self):
+        """判据自己会红：合成登记形状合规；坏一个字段就报；而它点名的 sentiment.pct 现在已被切 ⇒「还在池化」判假。"""
+        assert _record_problems("sentiment.pct", _SYNTH_POOLED) == []
+        assert _record_problems("sentiment.pct", {**_SYNTH_POOLED, "how": " "}) == ["how 为空"]
+        assert _record_problems("sentiment.pct", {**_SYNTH_POOLED, "why": "a｜b"}) == ["why 含「｜」"]
+        assert _record_problems("sentiment.pct", {**_SYNTH_POOLED, "changed_via": "price.momentum_5d"}) == [
+            "边界没有直接点名 changed_via"]
+        assert not _still_pooled("sentiment.pct", _SYNTH_POOLED), "v0.45.751 已切 pct；这里判「还在池化」说明切没生效"
 
-    def test_signal_is_actually_not_sliced(self):
-        """真切了却忘删记录 ⇒ 报告 / attention 会对一个已经切了的信号喊复检。变红的变异：把 sentiment.pct 加进 445 的范围。"""
-        for sig, rec in sa.DELIBERATELY_POOLED.items():
-            entry = next(e for e in irr._COHORT_HISTORY if e[1] == rec["boundary"])
-            assert sa.generation_boundaries([sig], [entry]) == {}, (sig, "已被切，删掉 DELIBERATELY_POOLED 里这条")
+    def test_sentiment_pct_recheck_concluded(self):
+        """v0.45.751：复检结论 = 切。登记已删、世代起点 = v0.45.445（10-09）。"""
+        assert "sentiment.pct" not in sa.DELIBERATELY_POOLED
+        g = sa.generation_boundaries(["sentiment.pct"])
+        assert g["sentiment.pct"]["version"] == "v0.45.445" and g["sentiment.pct"]["date"] == "2026-10-09", g
 
-    def test_attention_fires_on_and_after_recheck_day_only(self):
-        rec = sa.DELIBERATELY_POOLED["sentiment.pct"]
-        due = datetime.date.fromisoformat(rec["recheck_on_or_after"])
+    def test_attention_fires_on_and_after_recheck_day_only(self, synth):
+        due = datetime.date.fromisoformat(synth["recheck_on_or_after"])
+
         def ids(today):
             return {a["id"] for a in irr.build_attention(
                 {}, {}, {"status": "not_ready"}, {"status": "not_ready"}, {}, today=today)}
@@ -1062,6 +1100,12 @@ class TestDeliberatelyPooled:
         assert key not in ids((due - datetime.timedelta(days=1)).isoformat())
         assert key in ids(due.isoformat()) and key in ids((due + datetime.timedelta(days=30)).isoformat())
         assert key not in ids(None), "不传业务日 ⇒ 不判（不许偷读真实钟）"
+
+    def test_empty_registry_is_silent(self, monkeypatch):
+        """登记表空 ⇒ 不出任何池化条目 / 段（v0.45.751 之后的常态）。"""
+        monkeypatch.setattr(sa, "DELIBERATELY_POOLED", {})
+        assert irr._pooled_recheck_attention("2099-01-01") == []
+        assert irr._pooled_recheck_segment("2099-01-01") is None
 
     def test_attention_survives_unimportable_registry(self, monkeypatch):
         """读不到登记表 ⇒ 一条可见的 warn，不抛（`ic_rerun_readiness` 有只带 step_contract 的最小运行环境，
@@ -1071,9 +1115,9 @@ class TestDeliberatelyPooled:
         assert [a["id"] for a in items] == ["ic_rerun.deliberately_pooled.unavailable"], items
         assert items[0]["level"] == "warn", items
 
-    def test_quiet_segment_only_when_due(self):
+    def test_quiet_segment_only_when_due(self, synth):
         """`--quiet` 那一段：到期才有、以 ⏰ 开头；不传业务日不判；登记表读不到 ⇒ ⚠️ 段（不是静默没有）。"""
-        due = datetime.date.fromisoformat(sa.DELIBERATELY_POOLED["sentiment.pct"]["recheck_on_or_after"])
+        due = datetime.date.fromisoformat(synth["recheck_on_or_after"])
         assert irr._pooled_recheck_segment((due - datetime.timedelta(days=1)).isoformat()) is None
         assert irr._pooled_recheck_segment(None) is None
         seg = irr._pooled_recheck_segment(due.isoformat())
@@ -1084,10 +1128,65 @@ class TestDeliberatelyPooled:
         seg = irr._pooled_recheck_segment("2099-01-01")
         assert seg and seg.startswith("⚠️ 刻意池化复检核对不了"), seg
 
-    def test_report_names_the_pooled_signal(self, capsys):
+    def test_report_names_the_pooled_signal(self, capsys, synth):
         gens = {"signals": {"sentiment.pct": {"gen_start": None, "gen_version": None, "n_total": 10,
                                               "n_in_generation": 10, "n_excluded": 0}},
                 "undeclared_versions": []}
         sa._print_generations([], gens)
         out = capsys.readouterr().out
         assert "刻意池化：sentiment.pct" in out and "DELIBERATELY_POOLED" in out, out
+
+
+class TestSentimentPctFollowsChannels:
+    """v0.45.751：`sentiment.pct` = int(Σ `buzz_weights` × 通道)，挂在 `buzz.comp.*` 的 self 边下游。
+
+    这条边靠通配盖住全部通道，前提是**合成里的每个通道都有入档抽取器**——新加一个通道却不入档，
+    通配盖不到它，换它的边界就切不到 pct（v0.45.445 时 pct 被钉成叶子、跨换源池化，正是这个形状）。
+    变红的变异：删 self 边、把 pct 放回 SIGNAL_LEAVES、合成权重里加一个未入档的通道。"""
+
+    def _channels(self):
+        import config
+        return sorted(config.AGENT_SCORING["buzz_weights"])
+
+    def test_pct_is_int_of_the_composite(self):
+        src = (_REPO / "swarm_agents" / "buzz_bee.py").read_text(encoding="utf-8")
+        assert "bullish_pct = int(sentiment_composite)" in src and '"sentiment_pct": bullish_pct' in src, (
+            "sentiment.pct 不再是 int(合成值) —— 前提变了，重审这条 self 边")
+
+    def test_every_composite_channel_is_archived(self):
+        missing = [k for k in self._channels() if f"buzz.comp.{k}_signal" not in sa.SIGNAL_EXTRACTORS]
+        assert not missing, (f"合成权重里的通道 {missing} 没有 buzz.comp.*_signal 抽取器 —— "
+                             "换它的边界切不到 sentiment.pct")
+
+    def test_composite_reads_exactly_the_weighted_channels(self):
+        """合成式里用到的权重键 = config 的权重键（防：代码多读一个通道、config 没登记，本类前一条就失明）。"""
+        src = (_REPO / "swarm_agents" / "buzz_bee.py").read_text(encoding="utf-8")
+        keys = set()
+        for node in ast.walk(ast.parse(src)):
+            if (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "sentiment_composite"
+                                                     for t in node.targets)):
+                for sub in ast.walk(node.value):
+                    if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                            and sub.func.attr == "get" and isinstance(sub.func.value, ast.Name)
+                            and sub.func.value.id == "_bw" and sub.args
+                            and isinstance(sub.args[0], ast.Constant)):
+                        keys.add(sub.args[0].value)
+        assert keys, "buzz_bee.py 里找不到 sentiment_composite 的赋值 —— 定位器失效，别让本条恒真"
+        assert keys == set(self._channels()), (keys, self._channels())
+
+    def test_pct_is_not_a_leaf(self):
+        assert "sentiment.pct" not in sa.SIGNAL_LEAVES
+        assert "buzz.comp.*" in sa.active_upstream("sentiment.pct", None)
+
+    @pytest.mark.parametrize("channel", sorted(n for n in sa.SIGNAL_EXTRACTORS if n.startswith("buzz.comp.")))
+    def test_naming_any_channel_slices_pct(self, channel, monkeypatch):
+        monkeypatch.setitem(sa.COHORT_SIGNAL_SCOPE, "vTEST", (channel,))
+        g = sa.generation_boundaries(["sentiment.pct"], [("2026-12-01", "vTEST", "合成边界")])
+        assert g.get("sentiment.pct", {}).get("version") == "vTEST", f"点名 {channel} 没切到 sentiment.pct"
+
+    def test_pct_alone_does_not_slice_channels(self, monkeypatch):
+        """反方向：只改合成层（点名 pct）不该把原始通道一起切掉。"""
+        monkeypatch.setitem(sa.COHORT_SIGNAL_SCOPE, "vTEST", ("sentiment.pct",))
+        chans = [n for n in sa.SIGNAL_EXTRACTORS if n.startswith("buzz.comp.")]
+        g = sa.generation_boundaries(chans + ["sentiment.pct"], [("2026-12-01", "vTEST", "合成边界")])
+        assert set(g) == {"sentiment.pct"}, sorted(g)

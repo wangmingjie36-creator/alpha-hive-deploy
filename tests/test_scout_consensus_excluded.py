@@ -83,7 +83,7 @@ def _board_with(peers):
 
 
 ALL_BULLISH = [("OracleBeeEcho", "bullish"), ("BuzzBeeWhisper", "bullish"),
-               ("ChronosBeeHorizon", "bullish"), ("CodeExecutorAgent", "bullish")]
+               ("ChronosBeeHorizon", "bullish")]   # v0.45.750：CodeExecutorAgent 退役
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -93,7 +93,7 @@ ALL_BULLISH = [("OracleBeeEcho", "bullish"), ("BuzzBeeWhisper", "bullish"),
 class TestMetricsPeerCensus:
     def test_default_still_counts_peers(self):
         m = rds.get_real_crowding_metrics(TICKER, {"price": 100.0}, _board_with(ALL_BULLISH))
-        assert m["bullish_agents"] == 4 and m["data_quality"]["bullish_agents"] == "real"
+        assert m["bullish_agents"] == 3 and m["data_quality"]["bullish_agents"] == "real"
         assert m["consensus_census"]["peers_bullish"] == sorted(a for a, _ in ALL_BULLISH)
 
     def test_excluded_does_not_read_the_board(self):

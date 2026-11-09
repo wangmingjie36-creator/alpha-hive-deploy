@@ -191,8 +191,11 @@ class Gap(NamedTuple):
     **分级（v0.45.661）**：测试读测试的漏登**报红**——漏的是元守卫 / 窄读者，正是 v0.45.439、v0.45.592 那类「只跑相关测试、
     没跑元守卫，main 变红」的事故，且新元守卫少见、不造噪声。非代码文件漏登**只警告**：它几乎都是「加了被现有测试按目录通读的
     静态文件 / 新测试读文件、忘了 `--update`」，10-22 → 10-27 让 main 的 `tests` 有 48% 的红是它、真失败夹在其中；
-    而 `make_plan` 对**没有登记读者**的非代码文件回退整套，漏登不会让新文件漏跑。剩下的小缺口：已有读者的文件又多了新读者
-    （新测试读 `hedge.js`），只改它时少选那个新读者——收尾 / CI 整套兜底。
+    而 `make_plan` 对**没有登记读者**的非代码文件回退整套，漏登不会让新文件漏跑。剩下的缺口**并不小**（v0.45.745 更正原来
+    「小缺口」的说法）：已有读者的文件又多了新读者（新测试读 `hedge.js`）时，只改它会漏挑那个新读者——收尾 / CI 整套兜底。
+    存量非代码文件几乎都已有读者（v0.45.741 时 147 个里 125 个的读者含读遍全仓的 `test_claude_md_partitions.py`，70 个只有它），
+    所以漏登的常见后果是**漏挑、不是回退整套**（741 修前改 `pages/wheel.js` 只挑 1 个、漏 3 个真读者）。`report_gaps` 的告警与
+    Actions 注记因此两种后果都写：只写回退那种，看告警的人会当成「只是慢」而不补登（741 的会话就照括注这样转述过）。
 
     `file` = 漏登的那个读者（测试文件）：修法要点名它（`update_command`）。"""
     kind: str
@@ -224,14 +227,17 @@ def report_gaps(gaps: list, *, alt: str = "") -> bool:
         for g in blocking:
             print("  - " + g.text)
     if advisory:
-        print(f"[select_tests] ⚠️ 非代码文件漏登 {len(advisory)} 处——只警告、不报红（没有登记读者的非代码文件改动时选测回退整套）")
+        print(f"[select_tests] ⚠️ 非代码文件漏登 {len(advisory)} 处——只警告、不报红。补登之前改到这些被读的文件时：")
+        print("  它已有别的登记读者 ⇒ 选测漏挑下面列出的读者（存量文件几乎都是这样；漏挑的要等收尾整套 / CI 才跑到）；"
+              "它一个登记读者都没有 ⇒ 选测回退整套")
         for g in advisory:
             print("  - " + g.text)
     if gaps:
         print(f"  修法：{update_command(g.file for g in gaps)}，并把 {REGISTRY_REL} 一起提交" + (f"；或{alt}" if alt else ""))
     if advisory and os.environ.get("GITHUB_ACTIONS") == "true":
         for g in advisory:
-            msg = f"{g.text}——修法：{update_command([g.file])}"
+            msg = (f"{g.text}——补登之前改到这些文件时，若它们已有别的登记读者，选测会漏挑这个读者（收尾整套 / CI 才跑到）"
+                   f"——修法：{update_command([g.file])}")
             msg = msg.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
             print(f"::warning title=选测登记表：非代码文件漏登::{msg}")
     return bool(blocking)
@@ -382,6 +388,7 @@ def make_plan(changes: list[tuple[str, str]], reg: dict, *, exists, test_texts: 
         return plan
     # 没有登记读者的非代码文件：读者未知（新文件还没测过 / 漏登 / 只在子进程里读）⇒ 整套，不再「什么都不选」。
     # v0.45.661：CI 对非代码漏登改成只警告，靠的就是这一条——新文件漏登了也不会漏跑读它的测试。
+    # 这一条只管「一个读者都没有」：已有读者的文件又漏登了新读者走不到这里，会漏挑（见模块文档的缺口说明，v0.45.745）。
     unknown = [p for _, p in nonpy if not reg["nonpy_readers"].get(nonpy_key(p))]
     if unknown:
         plan.mode = "full"
