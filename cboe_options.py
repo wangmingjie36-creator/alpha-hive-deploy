@@ -461,6 +461,79 @@ def _parse_occ(sym: str) -> Optional[tuple]:
         return None
 
 
+# 非标准 root 的合约（v0.45.755）：形状仍是 OCC（root + YYMMDD + C|P + 8 位行权价），只是 root 带数字——
+# CVX1（赫斯并入雪佛龙后的调整合约，2027-01-15 一个到期日 64 个）、B1VDA / B1SLA（11-05 起，疑为 NYSE 二元期权）、
+# 拆股后的 AAPL1 一类。⚠️ **只用来给被剔除的合约分类、给告警定性，绝不能拿它放宽 `_OCC`**：`_parse_occ` 返回
+# `(expiry, cp, strike)`、丢掉 root，没人校验 root == 标的；放宽 ⇒ CVX1 按 100 股混进 CVX（实际交割物不同），
+# B1 二元期权会被当成 NVDA / TSLA 的正股期权。「root 不认数字」是现在唯一挡住它们的东西。
+_OCC_ANY_ROOT = re.compile(r"^([A-Z][A-Z0-9]*?)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$")
+#: 被剔除的非标准 root 合约占全链未平仓超过这个比例 ⇒ WARNING（剔除开始改变口径）；否则每进程每个标的只记一行 INFO
+_NONSTD_ROOT_OI_WARN = 0.05
+_nonstd_root_noted: set = set()   # 已记过 INFO 的 (标的, root 集合)；与 `_payload_cache` 同用 `_cache_lock`
+
+
+def _nonstandard_root(sym) -> Optional[str]:
+    """`_parse_occ` 失败的符号里，形状仍是 OCC、只是 root 带数字的 ⇒ 返回 root；真畸形 ⇒ None。
+
+    真畸形 = 缺字段 / 行权价不是 8 位 / 日期不合法 / root 全是字母（那样 `_OCC` 本该匹配，失败只能是日期不合法）。
+    这些才是「疑格式变更」要找的东西。
+    """
+    m = _OCC_ANY_ROOT.match(sym) if isinstance(sym, str) else None
+    if not m:
+        return None
+    root, yy, mm, dd = m.group(1), m.group(2), m.group(3), m.group(4)
+    if not any(ch.isdigit() for ch in root):
+        return None
+    try:
+        datetime.strptime(f"20{yy}-{mm}-{dd}", "%Y-%m-%d")
+    except ValueError:
+        return None
+    return root
+
+
+def _report_unparseable(ticker: str, options: list, dropped: list, fmt: str) -> None:
+    """被 `_parse_occ` 剔除的合约怎么报（v0.45.755）。剔除行为本身不变，这里只管告警定性。
+
+    此前一律按「丢弃 > 5% ⇒ WARNING 疑格式变更」：CVX 的 64 个 `CVX1` 合约（占未平仓 0.40%）在总合约数低于约 1280 的日子
+    天天触发，NVDA / TSLA 的 `B1VDA` / `B1SLA` 也在逼近 5%——都是误报，真有格式回归时反而淹在里面。现在：
+      · 真畸形的合约（`_nonstandard_root` 为 None）仍按 5% 的合约个数线报「疑格式变更」，措辞与旧版一致；
+      · 非标准 root 的合约另算：占全链未平仓 > `_NONSTD_ROOT_OI_WARN` ⇒ WARNING（剔除已经在改变口径）；
+        否则每进程每个 (标的, root 集合) 只记一行 INFO（看得见，但不是格式回归）。
+    `fmt` 是旧告警原文，依次填 ticker、真畸形个数、总合约数。
+    """
+    if not dropped:
+        return
+    nonstd: Dict[str, list] = {}
+    n_malformed = 0
+    for o in dropped:
+        root = _nonstandard_root(o.get("option") if isinstance(o, dict) else None)
+        if root is None:
+            n_malformed += 1
+            continue
+        ent = nonstd.setdefault(root, [0, 0.0])
+        ent[0] += 1
+        ent[1] += _qs_num(o.get("open_interest")) or 0.0
+    if options and n_malformed > len(options) * 0.05:
+        _log.warning(fmt, ticker, n_malformed, len(options))
+    if not nonstd:
+        return
+    total_oi = sum((_qs_num(o.get("open_interest")) or 0.0) for o in options if isinstance(o, dict))
+    nonstd_oi = sum(v[1] for v in nonstd.values())
+    share = nonstd_oi / total_oi if total_oi > 0 else None
+    desc = "、".join(f"{r} {v[0]} 个" for r, v in sorted(nonstd.items()))
+    if share is not None and share > _NONSTD_ROOT_OI_WARN:
+        _log.warning("CBOE %s：非标准 root 合约（%s）占未平仓 %.1f%%（> %.0f%%），已剔除、不进任何视图——口径受影响",
+                     ticker, desc, share * 100, _NONSTD_ROOT_OI_WARN * 100)
+        return
+    key = (ticker, tuple(sorted(nonstd)))
+    with _cache_lock:
+        first = key not in _nonstd_root_noted
+        _nonstd_root_noted.add(key)
+    if first:
+        _log.info("CBOE %s：非标准 root 合约（%s）占未平仓 %s，已剔除（调整后符号 / 非常规产品，不是格式变更）",
+                  ticker, desc, f"{share * 100:.2f}%" if share is not None else "不详")
+
+
 def _pdt_now() -> datetime:
     """PDT 锚定的 naive datetime。项目硬规则：绝不用裸 datetime.now()——用户本机钟
     可偏移 ~15h（UTC 绝对时间但时区 Asia/Shanghai），裸 now() 会把 DTE 算错 ±1 天、
@@ -779,11 +852,13 @@ def fetch_cboe_raw_contracts(ticker: str, *, as_of: Optional[str], timeout: int 
     as_of_date = date.fromisoformat(as_of_eff)
     contracts: List[dict] = []
     n_raw = n_unparseable = n_expired = n_today = 0
+    _dropped_unparseable: list = []
     for o in data.get("options") or []:
         n_raw += 1
         parsed = _parse_occ(o.get("option", "")) if isinstance(o, dict) else None
         if not parsed:
             n_unparseable += 1
+            _dropped_unparseable.append(o)
             continue
         expiry, cp, strike = parsed
         dte = (date.fromisoformat(expiry) - as_of_date).days
@@ -816,9 +891,8 @@ def fetch_cboe_raw_contracts(ticker: str, *, as_of: Optional[str], timeout: int 
             "last_trade_time": o.get("last_trade_time"),
         })
 
-    if n_raw and n_unparseable > n_raw * 0.05:
-        _log.warning("CBOE %s 原始合约：%d/%d OCC 符号解析失败（疑格式变更）",
-                     ticker, n_unparseable, n_raw)
+    _report_unparseable(ticker, data.get("options") or [], _dropped_unparseable,
+                        "CBOE %s 原始合约：%d/%d OCC 符号解析失败（疑格式变更）")
     if not contracts:
         return _raw_fail("no_parseable_contracts", "no_parseable_contracts")
 
@@ -1223,11 +1297,11 @@ def fetch_cboe_chain(
     # 直接用；深 ITM/低流动合约 iv=0 由下方 BS gamma 兜底。不做百分数/小数启发式检测，
     # 避免对高 IV 标的（biotech 催化剂期 >300%）误判压缩。
     by_expiry: Dict[str, dict] = {}
-    dropped = 0
+    dropped: list = []
     for o in options:
         parsed = _parse_occ(o.get("option", ""))
         if not parsed:
-            dropped += 1
+            dropped.append(o)
             continue
         expiry, cp, strike = parsed
         bucket = by_expiry.setdefault(expiry, {"C": [], "P": []})
@@ -1243,10 +1317,9 @@ def fetch_cboe_chain(
             "contractSymbol": o.get("option", ""),
         })
 
-    # 解析丢弃率告警：CBOE 格式变更 / 调整后符号（如拆股 AAPL1）会令 OCC 正则失配，
-    # 静默跳过在多标的批量里不可见 → 丢弃 >5% 时告警，及时暴露格式回归。
-    if options and dropped > len(options) * 0.05:
-        _log.warning("CBOE %s：%d/%d 合约 OCC 符号解析失败（疑格式变更）", ticker, dropped, len(options))
+    # 解析丢弃率告警：CBOE 格式变更会令 OCC 正则失配，静默跳过在多标的批量里不可见 → 真畸形的合约 > 5% 时告警，
+    # 及时暴露格式回归。调整后 / 非标准 root 的合约（CVX1、B1VDA、拆股 AAPL1）不算格式变更，另报（v0.45.755，见 `_report_unparseable`）
+    _report_unparseable(ticker, options, dropped, "CBOE %s：%d/%d 合约 OCC 符号解析失败（疑格式变更）")
 
     if not by_expiry:
         _log.warning("CBOE %s 无可解析合约", ticker)
