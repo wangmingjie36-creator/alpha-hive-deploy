@@ -180,6 +180,172 @@ class TestAnalysisPanel:
             "应使用 (105-100)/100=5%，而非离场价 110 或 return_t7 的 9.945"
 
 
+
+class TestRealObservationGates:
+    """v0.45.751：`REAL_OBSERVATION_GATES`——Buzz 价格三通道的探索性 IC 只用输入确实取到的行（用户 11-09 定）。
+
+    输入取不到时生产照写回落值，这些行不是观测。三条闸各自的排除法不同：
+    波动率 = 输入入档 + 08-26 前的 0.0 哨兵；动量 = 输入入档 + 通道恰为 50.0；量比 = 输入入档 + 任何日期的 1.0 哨兵。
+    变红的变异：闸整个去掉、不排除缺失、不排除哨兵、哨兵截止日写错方向、动量不判回落值、量比按通道 50 判、计数不进报告。"""
+
+    VOL, INP = "buzz.comp.volatility_signal", "price.volatility_20d"
+    MOM, MIN = "buzz.comp.momentum_signal", "price.momentum_5d"
+    VR, VIN = "buzz.comp.volume_signal", "price.volume_ratio"
+
+    def _db(self, tmp_path, rows):
+        """rows：(date, ticker, {信号: 值})；每个 (date, ticker) 都有已结算的 t7。"""
+        db = tmp_path / "p.db"
+        con = sqlite3.connect(db)
+        con.execute("""CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, ticker TEXT,
+            price_at_predict REAL, price_t7 REAL, return_t7 REAL, close_t7 REAL,
+            checked_t7 INTEGER DEFAULT 0)""")
+        con.commit()
+        con.close()
+        sa.ensure_schema(db)
+        con = sqlite3.connect(db)
+        for d, tk, sigs in rows:
+            con.execute("INSERT INTO predictions (date,ticker,price_at_predict,price_t7,return_t7,close_t7,checked_t7) "
+                        "VALUES (?,?,100.0,101.0,1.0,101.0,1)", (d, tk))
+            for sig, v in sigs.items():
+                con.execute(f"INSERT INTO {sa.TABLE} (date,ticker,signal,value) VALUES (?,?,?,?)", (d, tk, sig, v))
+        con.commit()
+        con.close()
+        return db
+
+    _ROWS = [
+        ("2026-08-20", "A", {VOL: 60.0, INP: 30.0, "composite.final_score": 5.0}),   # 真实观测
+        ("2026-08-20", "B", {VOL: 75.0, INP: 0.0, "composite.final_score": 5.0}),    # 08-26 前的缺失哨兵 ⇒ 假 75
+        ("2026-08-20", "C", {VOL: 50.0, "composite.final_score": 5.0}),             # 输入没入档
+        ("2026-09-01", "D", {VOL: 75.0, INP: 0.0, "composite.final_score": 5.0}),    # 08-26 后的 0 是值，不是缺失
+        ("2026-09-01", "E", {VOL: 50.0, "composite.final_score": 5.0}),             # 08-26 后取不到 ⇒ 回落 50
+    ]
+
+    # 动量：通道恰为 50.0 ⇒ 回落（与输入是否为 0 无关：Scout 那份输入不是 Buzz 读到的那份）
+    _MOM_ROWS = [
+        ("2026-09-01", "A", {MOM: 60.0, MIN: 2.0}),     # 真实观测
+        ("2026-06-09", "B", {MOM: 50.0, MIN: 0.0}),     # 08-15 前的 0.0 哨兵 ⇒ 通道 50.0
+        ("2026-09-11", "C", {MOM: 50.0, MIN: 0.0093}),  # Scout 有值、Buzz 回落（生产 09-11 WMT 的形状）
+        ("2026-09-25", "D", {MOM: 61.3}),               # 输入被隔离 / 没入档
+        ("2026-09-01", "E", {MOM: 50.05, MIN: 0.01}),   # 贴近 50 但不是 50.0 ⇒ 真实
+    ]
+
+    # 量比：1.0 是任何日期的哨兵；通道 50 是真实档位，不能当回落
+    _VR_ROWS = [
+        ("2026-09-01", "A", {VR: 50.0, VIN: 1.2}),      # 真实观测（50 档）
+        ("2026-06-09", "B", {VR: 35.0, VIN: 1.0}),      # 1.0 哨兵（旧）
+        ("2026-11-02", "C", {VR: 35.0, VIN: 1.0}),      # 1.0 哨兵（不设截止日：CBOESource 仍写着 `or 1.0`）
+        ("2026-11-02", "D", {VR: 50.0}),                # 输入没入档 ⇒ 回落 50
+        ("2026-09-01", "E", {VR: 35.0, VIN: 0.9999}),   # 贴近 1.0 但不是 ⇒ 真实
+    ]
+
+    @staticmethod
+    def _kept(panel, sig):
+        return sorted(tk for rows in panel.get(sig, {}).values() for _v, _r, tk in rows)
+
+    def test_only_real_observations_enter_the_panel(self, tmp_path):
+        st = {}
+        p = sa.load_panel(self._db(tmp_path, self._ROWS), "t7", min_width=1, with_ticker=True, gate_stats=st)
+        assert self._kept(p, self.VOL) == ["A", "D"]
+        assert st[self.VOL] == {"kept": 2, "missing_input": 2, "quarantined_input": 0, "sentinel": 1, "fallback": 0}, st
+
+    def test_momentum_drops_exact_fallback_value(self, tmp_path):
+        st = {}
+        p = sa.load_panel(self._db(tmp_path, self._MOM_ROWS), "t7", min_width=1, with_ticker=True, gate_stats=st)
+        assert self._kept(p, self.MOM) == ["A", "E"]
+        assert st[self.MOM] == {"kept": 2, "missing_input": 1, "quarantined_input": 0, "sentinel": 0, "fallback": 2}, st
+
+    def test_volume_drops_sentinel_at_any_date_but_keeps_real_50(self, tmp_path):
+        st = {}
+        p = sa.load_panel(self._db(tmp_path, self._VR_ROWS), "t7", min_width=1, with_ticker=True, gate_stats=st)
+        assert self._kept(p, self.VR) == ["A", "E"]
+        assert st[self.VR] == {"kept": 2, "missing_input": 1, "quarantined_input": 0, "sentinel": 2, "fallback": 0}, st
+
+    def test_quarantined_input_is_excluded_even_if_row_kept(self, tmp_path, monkeypatch):
+        """带 `keep_rows` 的隔离条目（10-14 BILI 动量）库里还在；通道是用那个坏输入算的 ⇒ 也排除。
+        `load_panel` 本身不问隔离名单，所以闸要自己问——只看「输入在不在」会把它当真实观测放进来。"""
+        monkeypatch.setattr(sa, "QUARANTINE", [{"date": "2026-10-14", "tickers": ("BILI",),
+                                                "signals": (self.MIN,), "reason": "测试", "keep_rows": "测试"}])
+        rows = [("2026-10-14", "BILI", {self.MOM: 52.01, self.MIN: 0.4021}),
+                ("2026-10-14", "NVDA", {self.MOM: 55.0, self.MIN: 1.0}),
+                ("2026-10-15", "BILI", {self.MOM: 52.01, self.MIN: 0.4021})]
+        st = {}
+        p = sa.load_panel(self._db(tmp_path, rows), "t7", min_width=1, with_ticker=True, gate_stats=st)
+        kept = sorted((d, tk) for d, rs in p[self.MOM].items() for *_x, tk in rs)
+        assert kept == [("2026-10-14", "NVDA"), ("2026-10-15", "BILI")], kept
+        assert st[self.MOM]["quarantined_input"] == 1, st
+        raw = sorted((d, tk) for d, rs in p[self.MIN].items() for *_x, tk in rs)
+        assert raw == [("2026-10-14", "NVDA"), ("2026-10-15", "BILI")], (
+            "隔离的输入本身也不进面板（keep_rows 只是不删库，分析照样排除）", raw)
+
+    def test_real_keep_rows_entries_hit_a_gate_input(self):
+        """真名单：带 `keep_rows`、点名闸输入的条目（现为 10-14 BILI 动量）确实会被闸接住——防名单改了、闸的说法没跟上。"""
+        gate_inputs = {g["input"] for g in sa.REAL_OBSERVATION_GATES.values()}
+        hits = [(q["date"], s) for q in sa.QUARANTINE if q.get("keep_rows") for s in q["signals"] if s in gate_inputs]
+        assert hits, "已没有带 keep_rows 的闸输入隔离条目 —— 上一条测试的合成场景已不对应生产，可降为纯机制测试"
+        for d, s in hits:
+            q = next(q for q in sa.QUARANTINE if q["date"] == d and s in q["signals"] and q.get("keep_rows"))
+            for tk in q.get("tickers") or ("X",):
+                assert sa.is_quarantined(d, tk, s), (d, tk, s)
+
+    def test_other_signals_untouched(self, tmp_path):
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        p = sa.load_panel(self._db(tmp_path / "a", self._ROWS), "t7", min_width=1, with_ticker=True)
+        assert self._kept(p, "composite.final_score") == list("ABCDE")
+        assert self._kept(p, self.INP) == list("ABD")
+        p = sa.load_panel(self._db(tmp_path / "b", self._VR_ROWS), "t7", min_width=1, with_ticker=True)
+        assert self._kept(p, self.VIN) == list("ABCE"), "输入信号本身不受闸影响（哨兵 1.0 照样在 price.volume_ratio 里）"
+
+    def test_analyze_reports_the_exclusions(self, tmp_path, capsys):
+        st = {}
+        sa.load_panel(self._db(tmp_path, self._ROWS + self._MOM_ROWS + self._VR_ROWS), "t7", min_width=1, gate_stats=st)
+        sa._print_generations([], {"signals": {}, "undeclared_versions": [], "real_obs_gates": st})
+        out = capsys.readouterr().out
+        assert "真实观测闸：buzz.comp.volatility_signal" in out and "2026-08-26 前的缺失哨兵 0 1 行" in out, out
+        assert "真实观测闸：buzz.comp.momentum_signal" in out and "通道恰为回落值 50 2 行" in out, out
+        assert "真实观测闸：buzz.comp.volume_signal" in out and "任何日期的缺失哨兵 1 2 行" in out, out
+
+    def test_analyze_carries_gate_stats(self, tmp_path, monkeypatch):
+        """`analyze()` 的报告里带 `real_obs_gates`（排除不能只发生、不出声）。"""
+        seen = {}
+        real = sa.load_panel
+
+        def _spy(*a, **k):
+            out = real(*a, **k)
+            seen["stats"] = k.get("gate_stats")
+            return out
+        monkeypatch.setattr(sa, "load_panel", _spy)
+        sa.analyze(self._db(tmp_path, self._ROWS), "t7", min_samples=1, min_width=1, draws=5)
+        assert seen["stats"] is not None and set(sa.REAL_OBSERVATION_GATES) <= set(seen["stats"]), seen
+
+    def test_registry_matches_the_code(self):
+        """登记的每个闸：两个信号都入档、字段齐；三条与 buzz_bee 的回落写法对得上。"""
+        assert set(sa.REAL_OBSERVATION_GATES) == {self.VOL, self.MOM, self.VR}
+        for sig, gate in sa.REAL_OBSERVATION_GATES.items():
+            assert set(gate) == {"input", "sentinel", "sentinel_before", "fallback_value"}, (sig, gate)
+            assert sig in sa.SIGNAL_EXTRACTORS and gate["input"] in sa.SIGNAL_EXTRACTORS, (sig, gate)
+            if gate["sentinel_before"]:
+                assert gate["sentinel"] is not None, sig
+                datetime.date.fromisoformat(gate["sentinel_before"])
+        src = (sa.Path(sa.__file__).parent / "swarm_agents" / "buzz_bee.py").read_text(encoding="utf-8")
+        assert 'vol20 = stock.get("volatility_20d")' in src and "if vol20 is None:\n                vol_sentiment = 50" in src, (
+            "buzz_bee 的波动率回落写法变了 —— 重审 REAL_OBSERVATION_GATES 那条")
+        # 动量按通道值判，前提是「有值时只有 0 映射到 50.0」——映射式变了这条就不成立
+        assert ('_mom_raw = stock.get("momentum_5d")\n            if _mom_raw is None:\n                momentum_sentiment = 50.0'
+                in src and "momentum_sentiment = (momentum_pct + 10) / 20 * 100" in src), (
+            "buzz_bee 的动量回落 / 映射写法变了 —— 重审 REAL_OBSERVATION_GATES 动量那条的 fallback_value")
+        assert sa.REAL_OBSERVATION_GATES[self.MOM]["fallback_value"] == 50.0
+        # 量比的 50 是真实档位 ⇒ 只能按输入判，不能按通道值判
+        assert "if vol_ratio is None:\n                volume_signal = 50" in src and "volume_signal = 50\n            elif" in src
+        assert sa.REAL_OBSERVATION_GATES[self.VR]["fallback_value"] is None, "量比通道 50 是真实档位，不能按回落值排除"
+
+    def test_dim_ic_does_not_read_through_the_gate(self):
+        """维度 IC（H1 / 描述项 buzz_v1）不走 load_panel：闸只管探索性 IC，冻结层仍逐位复现生产写下的通道。"""
+        src = (sa.Path(sa.__file__).parent / "experiments" / "dim_ic_forward_test.py").read_text(encoding="utf-8")
+        assert "load_panel" not in src and "REAL_OBSERVATION_GATES" not in src
+
+
 class TestBackfill:
     def test_backfill_parses_date_from_filename(self, tmp_path):
         (tmp_path / ".swarm_results_2026-03-02.json").write_text(
