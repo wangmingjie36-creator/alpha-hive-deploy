@@ -202,8 +202,9 @@ NEVER_SLICED_TODAY = (
     # v0.45.275: price.momentum_5d / price.volatility_20d 移出本表——各自在
     # 2026-08-15（scout_bee v0.43.25）/ 2026-08-26（data_pipeline v0.45.3）改过
     # 哨兵语义（缺失伪造 0.0 → 诚实 None），见 DOCUMENTED_REDEFINITIONS。
-    # price.volume_ratio 留在本表：dataclass 默认值同批改了，但至少一条取值路径
-    # （CBOESource）当时仍硬编码 `or 1.0` 未清，是否可达未查清，不认领。
+    # price.volume_ratio 留在本表：dataclass 默认值同批改了，CBOESource 的 `or 1.0` 次日
+    # （v0.45.54，08-27）才删——但归档里恰为 1.0 的量比最晚在 07-02，08-26/27 前后没有一行值变，
+    # 不需要世代边界（v0.45.754 查明；探索性 IC 由 REAL_OBSERVATION_GATES 把 1.0 当哨兵排除）。
     "price.volume_ratio",
     "market.fear_greed", "market.fear_greed_is_cnn",   # v0.45.750：fund.* 随 CodeExecutorAgent 退役
     # v0.45.751：sentiment.pct 移出——= int(Σ 权重 × buzz.comp.*)，v0.45.445 换新闻主源即换了它（见 DOCUMENTED_REDEFINITIONS）
