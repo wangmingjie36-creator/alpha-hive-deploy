@@ -650,6 +650,16 @@ class TestSortAndExpiryBeforeTruncation:
         got = [x[sort] for x in r["rows"] if x[sort] is not None]
         assert got == allv[:len(got)] and len(r["rows"]) == PM.MAX_ROWS
 
+    def test_iv_sort_matches_iv_over_rv_within_one_expiry(self):
+        """同到期日共用一个 RV ⇒ 只看一个到期日时「按 IV」与「按 IV/RV」顺序相同；混排时两者应不同（对照）。"""
+        svc = _svc()
+        mixed = {s: [x["symbol"] for x in svc.premium("NVDA", WIDE | {"sort": s})["rows"]] for s in ("iv", "iv_over_rv")}
+        assert mixed["iv"] != mixed["iv_over_rv"]                           # 对照：跨到期日两种排法确实不同
+        e = next(x["expiry"] for x in svc.premium("NVDA", WIDE)["expiries"] if x["n_rows"] > 1)
+        one = {s: [x["symbol"] for x in svc.premium("NVDA", WIDE | {"sort": s, "expiry": e})["rows"]]
+               for s in ("iv", "iv_over_rv")}
+        assert len(one["iv"]) > 1 and one["iv"] == one["iv_over_rv"]
+
     def test_picked_expiry_is_never_empty_when_its_count_is_not(self):
         svc = _svc()
         r = svc.premium("NVDA", WIDE)

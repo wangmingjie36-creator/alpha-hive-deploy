@@ -272,7 +272,7 @@ export async function premium(body, d, t, routeAlive, force = false) {
       { label: "成交量", csvOnly: true, csv: (x) => x.volume ?? "" },
       { label: "标记", render: flagChips, csv: (x) => Object.entries(x.flags || {}).filter(([, v]) => v === true).map(([k]) => k).join(" ") },
     ];
-    const SORT_LABEL = { iv_over_rv: "IV/RV", yield_ann: "年化收益", skew_pts: "偏度溢价" };
+    const SORT_LABEL = { iv_over_rv: "IV/RV", yield_ann: "年化收益", skew_pts: "偏度溢价", iv: "IV" };
     const sorts = (rules.sorts || ["iv_over_rv"]).map((k) => [k, SORT_LABEL[k] || k]);
     const funnelLine = (r.funnel || []).map((s) => `${stageZh(s.stage)} ${s.n}`).join(" → ");
     const rowPanel = panel(pick ? `再挑行权价：${pick}` : "再挑行权价：逐合约", {

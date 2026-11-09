@@ -40,7 +40,9 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 DISCLAIMER = ("公开信息研究与筛选，**不构成投资建议**。溢价高 ≠ 已证明对卖方有利：本页的排序从未被前向检验过；"
               "CBOE 延迟报价，按 bid 计收入。")
-SORTS = ("iv_over_rv", "yield_ann", "skew_pts")
+#: "iv" = 合约自己的 IV（v0.45.753）：跨到期日混排时与 IV/RV 不同（短期 / 含事件的到期日 IV 偏高）；
+#: 只看一个到期日时与 IV/RV 排出同一个顺序（同到期日共用一个 RV）
+SORTS = ("iv_over_rv", "yield_ann", "skew_pts", "iv")
 DEFAULTS = {"dte_min": 7, "dte_max": 60, "delta_min": 0.10, "delta_max": 0.35, "oi_min": 100, "side": "both",
             "sort": "iv_over_rv"}
 #: 不记在本机、只对这一次请求有效的参数（选中的到期日随链变，不能当偏好记）
