@@ -399,8 +399,10 @@ class TestBoundaryRegistered:
     def test_invalidates_no_rows(self):
         """「作废 0 条」。变红的变异：条目日期写成新代码上线日。"""
         import ic_rerun_readiness as rr
-        without = [e for e in rr._COHORT_HISTORY if e[1] != _V]
-        assert rr.cohort_start()["date"] == without[-1][0] == "2026-10-19"
+        # 截到这条登记时的历史：之后的边界（如 v0.45.750）会合法地挪动末条，与「这条作废 0 条」无关
+        upto = rr._COHORT_HISTORY[: [e[1] for e in rr._COHORT_HISTORY].index(_V) + 1]
+        without = [e for e in upto if e[1] != _V]
+        assert upto[-1][0] == without[-1][0] == "2026-10-19"
 
     def test_moves_no_signal_generation(self):
         """「0 个信号后移」。变红的变异：作用域里加上 `guard.macro_adj`。"""

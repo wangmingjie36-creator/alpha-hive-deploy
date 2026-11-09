@@ -205,7 +205,7 @@ NEVER_SLICED_TODAY = (
     # price.volume_ratio 留在本表：dataclass 默认值同批改了，但至少一条取值路径
     # （CBOESource）当时仍硬编码 `or 1.0` 未清，是否可达未查清，不认领。
     "price.volume_ratio",
-    "fund.pe_ratio", "fund.market_cap", "market.fear_greed", "market.fear_greed_is_cnn",
+    "market.fear_greed", "market.fear_greed_is_cnn",   # v0.45.750：fund.* 随 CodeExecutorAgent 退役
     "sentiment.pct", "crowding.comp.social_volume", "crowding.comp.google_trends",
 )
 
@@ -344,8 +344,7 @@ _NOT_BEE_MODULES = {
 _UNIMPORTABLE = sorted(p.name for p in (_REPO / "swarm_agents").glob("*.py") if not p.stem.isidentifier())
 _BEE_MODULES = {p.stem: p for p in sorted((_REPO / "swarm_agents").glob("*.py"))
                 if p.stem not in _NOT_BEE_MODULES and p.stem.isidentifier()}
-#: 不在 swarm_agents/ 里的 Phase-1 蜂（`_PHASE1` 里的 CodeExecutorAgent）
-_BEE_MODULES["code_executor_agent"] = _REPO / "code_executor_agent.py"
+#: v0.45.750：原先这里补登 swarm_agents/ 之外的 Phase-1 蜂 `code_executor_agent.py`——该蜂已退役、文件已删
 
 #: 读板的机制本身（不是消费者）：它们的内部读法由各自的专门测试管（定点索引 / 普查回退）
 _MECHANISM_METHODS = {("guard_bee", "_read_census")}
@@ -436,7 +435,7 @@ _CENSUS_SITES = {
     ),
     ("guard_bee", "analyze", "get_real_crowding_metrics"): (
         # `real_data_sources._PHASE1_PEERS`（不含 Scout）；Guard 随后用自己普查的 bull 覆盖 bullish_agents
-        ("OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon", "CodeExecutorAgent"),
+        ("OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon"),   # v0.45.750 起无 CodeExecutorAgent
         {"direction": ("guard.adj_factor",), "agent_id": _IDENTITY},
         ("real_data_sources.py", "get_bullish_agents_detail", "get_live_signals"),
     ),
@@ -737,7 +736,7 @@ class TestPeerReadEdgesMatchCode:
             "（副本可能含未提交内容，别无脑 rm）；见 CLAUDE.md「环境：~/Desktop 在 iCloud 同步下会造重名副本」")
         stems = {p.stem for p in (_REPO / "swarm_agents").glob("*.py") if p.stem.isidentifier()}
         assert set(_NOT_BEE_MODULES) <= stems, f"排除项里有不存在的模块：{sorted(set(_NOT_BEE_MODULES) - stems)}"
-        assert stems - set(_NOT_BEE_MODULES) == set(_BEE_MODULES) - {"code_executor_agent"}
+        assert stems - set(_NOT_BEE_MODULES) == set(_BEE_MODULES)
         touching = [m for m, (_why, may) in _NOT_BEE_MODULES.items()
                     if not may and "board" in (_REPO / "swarm_agents" / f"{m}.py").read_text(encoding="utf-8")]
         assert not touching, f"{touching} 登记为不碰 board，源码里却出现了 board —— 移出排除项让守卫扫它"

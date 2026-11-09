@@ -690,8 +690,10 @@ class TestBoundary654Registered:
         """「作废 0 条」：`assess()` 只按末条边界的日期切 ⇒ 加这条前后切点相同（10-19）。
         变红的变异：条目日期写成新代码上线日（10-28 ⇒ 10-19 ~ 10-27 的样本被作废）。"""
         import ic_rerun_readiness as rr
-        without = [e for e in rr._COHORT_HISTORY if e[1] != _V654]
-        assert rr.cohort_start()["date"] == without[-1][0] == "2026-10-19"
+        # 截到这条登记时的历史：之后的边界（如 v0.45.750）会合法地挪动末条，与「这条作废 0 条」无关
+        upto = rr._COHORT_HISTORY[: [e[1] for e in rr._COHORT_HISTORY].index(_V654) + 1]
+        without = [e for e in upto if e[1] != _V654]
+        assert upto[-1][0] == without[-1][0] == "2026-10-19"
 
     def test_moves_no_signal_generation(self):
         """「0 个信号后移」：加这条前后，归档全部信号的当代起点逐个相同（同 v0.45.652）。
@@ -978,8 +980,10 @@ class TestBoundary657Registered:
     def test_invalidates_no_rows(self):
         """「作废 0 条」：加这条前后 `assess()` 的切点相同（10-19）。变红的变异：条目日期写成新代码上线日。"""
         import ic_rerun_readiness as rr
-        without = [e for e in rr._COHORT_HISTORY if e[1] != _V657]
-        assert rr.cohort_start()["date"] == without[-1][0] == "2026-10-19"
+        # 截到这条登记时的历史：之后的边界（如 v0.45.750）会合法地挪动末条，与「这条作废 0 条」无关
+        upto = rr._COHORT_HISTORY[: [e[1] for e in rr._COHORT_HISTORY].index(_V657) + 1]
+        without = [e for e in upto if e[1] != _V657]
+        assert upto[-1][0] == without[-1][0] == "2026-10-19"
 
     def test_moves_no_signal_generation(self):
         """「0 个信号后移」。变红的变异：作用域里加上 `guard.macro_adj`。"""
@@ -1243,8 +1247,10 @@ class TestBoundary660Registered:
     def test_invalidates_no_rows(self):
         """「作废 0 条」：加这条前后 `assess()` 的切点相同（10-19）。变红的变异：条目日期写成新代码上线日。"""
         import ic_rerun_readiness as rr
-        without = [e for e in rr._COHORT_HISTORY if e[1] != _V660]
-        assert rr.cohort_start()["date"] == without[-1][0] == "2026-10-19"
+        # 截到这条登记时的历史：之后的边界（如 v0.45.750）会合法地挪动末条，与「这条作废 0 条」无关
+        upto = rr._COHORT_HISTORY[: [e[1] for e in rr._COHORT_HISTORY].index(_V660) + 1]
+        without = [e for e in upto if e[1] != _V660]
+        assert upto[-1][0] == without[-1][0] == "2026-10-19"
 
     def test_moves_no_signal_generation(self):
         """「0 个信号后移」。变红的变异：作用域里加上 `guard.macro_adj`。"""
@@ -1405,8 +1411,10 @@ class TestBoundary663Registered:
     def test_invalidates_no_rows(self):
         """「作废 0 条」：加这条前后 `assess()` 的切点相同（10-19）。变红的变异：条目日期写成新代码上线日。"""
         import ic_rerun_readiness as rr
-        without = [e for e in rr._COHORT_HISTORY if e[1] != _V663]
-        assert rr.cohort_start()["date"] == without[-1][0] == "2026-10-19"
+        # 截到这条登记时的历史：之后的边界（如 v0.45.750）会合法地挪动末条，与「这条作废 0 条」无关
+        upto = rr._COHORT_HISTORY[: [e[1] for e in rr._COHORT_HISTORY].index(_V663) + 1]
+        without = [e for e in upto if e[1] != _V663]
+        assert upto[-1][0] == without[-1][0] == "2026-10-19"
 
     def test_moves_no_signal_generation(self):
         """「0 个信号后移」。变红的变异：作用域里加上 `guard.macro_adj`。"""
@@ -1558,8 +1566,10 @@ class TestBoundary669Registered:
     def test_invalidates_no_rows(self):
         """「作废 0 条」：加这条前后 `assess()` 的切点相同（10-19）。变红的变异：条目日期写成新代码上线日。"""
         import ic_rerun_readiness as rr
-        without = [e for e in rr._COHORT_HISTORY if e[1] != _V669]
-        assert rr.cohort_start()["date"] == without[-1][0] == "2026-10-19"
+        # 截到这条登记时的历史：之后的边界（如 v0.45.750）会合法地挪动末条，与「这条作废 0 条」无关
+        upto = rr._COHORT_HISTORY[: [e[1] for e in rr._COHORT_HISTORY].index(_V669) + 1]
+        without = [e for e in upto if e[1] != _V669]
+        assert upto[-1][0] == without[-1][0] == "2026-10-19"
 
     def test_moves_no_signal_generation(self):
         """「0 个信号后移」。变红的变异：作用域里加上 `guard.macro_adj`。"""

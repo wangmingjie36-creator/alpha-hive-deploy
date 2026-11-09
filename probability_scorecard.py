@@ -301,6 +301,10 @@ _ML_ESTIMATOR_GENERATIONS = [
      "【v0.45.674】（同日零代价，归属不变——仍是同一代，只换标签）：一轮扫描的宏观快照只取一次、注入 Guard（此前 4 个并行线程各取一次，"
      "首批标的可能拿到不同的一份）⇒ 只在几次并发取数结果不同的日子改首批标的的宏观票；10-19 起旧代码扫描日全部 Guard 行都是同一份 ⇒ "
      "等价判据全部成立（见 `ic_rerun_readiness` 同版条目）。同样**没有重放 Δprobability**。"),
+    ("2026-11-09", "v0.45.750",
+     "CodeExecutorAgent 退役。`_prepare_ml_input` 一行没动；`final_score` 这个特征的**上游定义**变了：方向投票少一票"
+     "（离线按记录方向重算 09-10 → 11-06 共 1200 行，拿掉这一票 `rule_direction` 约 13.9% 改变）、Guard 普查少一只同伴、"
+     "兜底分支的 data_quality 不再进 data_real_pct。**没有重放 Δprobability**。详见 `ic_rerun_readiness` 同版条目。"),
 ]
 
 

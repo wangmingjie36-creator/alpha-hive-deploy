@@ -289,32 +289,6 @@ def _gex_state_sig(kind: str) -> Callable:
     return _f
 
 
-def _code_exec_fetch(key: str) -> Callable:
-    """CodeExecutorAgent 取数脚本（`CodeGenerator._generate_yfinance`）的输出字段。
-
-    v0.45.250：同一个 `data` 在 `analyze()` 里有**两个位置**，按路径分派：
-      · 技术分析跑通 ⇒ `details = {price, sma_20, rsi_signal, fetch_data: data, ...}`
-      · 技术分析失败（兜底）⇒ `details = data`
-
-    两种形状自 2026-02-25 就并存。本信号 2026-07-30 写成只读顶层时是对的——
-    那时技术分析脚本撞 yfinance MultiIndex 每次必崩，100% 走兜底。v0.43.10
-    （2026-08-12）修好它之后成功路径成了主路径，`fund.*` 每天 30 只只剩 0–4 只入档，
-    静默断供近一个月。**同一个量换了位置 ⇒ 合并读**（同 `_crowding_comp` 的 `_legacy`，
-    判据见下方 `guard.consistency_census` 注释；值跨形状连续、两形状互斥均已实测）。
-
-    ⚠️ 按「有没有 `fetch_data`」分派，**不要**改成「嵌套取不到就回头读顶层」：
-    成功路径的顶层是技术分析的命名空间，日后多出一个同名键就会被静默混读。
-    守卫：`tests/test_signal_archive_code_executor_shapes.py`（驱动真实 `analyze()`）。
-    """
-    def _f(tr: Dict) -> Optional[float]:
-        det = _dig(tr, "agent_details.CodeExecutorAgent.details")
-        if not isinstance(det, dict):
-            return None
-        src = det.get("fetch_data") if "fetch_data" in det else det
-        return _num(src.get(key)) if isinstance(src, dict) else None
-    return _f
-
-
 def _agent_score(agent: str) -> Callable:
     return lambda tr: _num(_dig(tr, f"agent_details.{agent}.score"))
 
@@ -466,10 +440,8 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     "ml.expected_7d": _path("agent_details.RivalBeeVanguard.details.expected_7d"),
     "ml.expected_30d": _path("agent_details.RivalBeeVanguard.details.expected_30d"),
 
-    # ── 基本面快照 ─────────────────────────────────────────────
-    # v0.45.250：原为 `_path("...CodeExecutorAgent.details.<键>")`，只认兜底路径的形状。
-    "fund.pe_ratio": _code_exec_fetch("pe_ratio"),
-    "fund.market_cap": _code_exec_fetch("market_cap"),
+    # v0.45.750：`fund.pe_ratio` / `fund.market_cap` 已摘除 —— 它们取自 CodeExecutorAgent 取数脚本的输出，
+    # 该蜂随本版退役。库里的历史行不改写，只是不再写入新行。
 
     # ── 各蜂原始分与方向 ───────────────────────────────────────
     **{f"agent.{a}.score": _agent_score(a) for a in (
@@ -2124,6 +2096,8 @@ UNARCHIVED_NODES = frozenset({"agent.CodeExecutorAgent.score",
                               "obs.reddit", "obs.news", "obs.yahoo"})
 
 # Phase-1 并行发布的蜂（`alpha_hive_daily_report._init_scan_context`）；其后顺序是 Rival → Guard → Bear
+# ⚠️ v0.45.750：CodeExecutorAgent 已退役，但这里**保留**——本元组只用于依赖边，边要能把它活着那段的
+# 历史边界传下去（v0.45.191 等）。它的节点今后不会再被任何边界点名，留着这条边不会白切下游。
 _PHASE1 = ("ScoutBeeNova", "OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon", "CodeExecutorAgent")
 _PHASE1_DIRS = tuple(f"agent.{a}.direction" for a in _PHASE1)
 
@@ -2279,7 +2253,6 @@ SIGNAL_LEAVES = frozenset({
     "buzz.comp.fear_greed_signal",
     "market.fear_greed", "market.fear_greed_is_cnn",
     "guard.macro_adj",                       # `_calc_macro_adjustment`，不走读板路径
-    "fund.pe_ratio", "fund.market_cap",
     # 这三只蜂不读板：输入全是原始数据
     "agent.OracleBeeEcho.score", "agent.OracleBeeEcho.direction",
     "agent.BuzzBeeWhisper.score", "agent.BuzzBeeWhisper.direction",
@@ -2483,6 +2456,8 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 结果不同的日子改首批标的的宏观票；10-19 起旧代码扫描日全部 Guard 行都是同一份 ⇒ 同 654 ~ 669 只点名 Guard（0 个信号后移），
     # `guard.macro_adj` 不点名
     "v0.45.674": ("agent.GuardBeeSentinel.*",),
+    # 11-09：CodeExecutorAgent 退役 —— 下游（Guard 普查 / 拥挤度看多数、swarm_agreement、final_score）由依赖边推出
+    "v0.45.750": ("agent.CodeExecutorAgent.*",),
 }
 
 

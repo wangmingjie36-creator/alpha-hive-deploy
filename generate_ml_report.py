@@ -579,6 +579,9 @@ class MLEnhancedReportGenerator:
         # 长度恒为 8：ScoutBeeNova / OracleBeeEcho / BuzzBeeWhisper /
         # ChronosBeeHorizon / RivalBeeVanguard / GuardBeeSentinel /
         # BearBeeContrarian / CodeExecutorAgent）。
+        # ⚠️ v0.45.750 起 CodeExecutorAgent 退役，新记录长度为 7：服务端分母 7、
+        # 训练端历史行分母 8，`agent_agreement` 的取值格点不同（k/7 vs k/8）——
+        # 温和的 train/serve 分布差，ML 估计器世代边界已登（probability_scorecard）。
         #
         # 公式**照抄训练端**，不自己发明共识度：
         #   ad = json.loads(r["agent_directions"]); _dir = r["direction"] or "neutral"

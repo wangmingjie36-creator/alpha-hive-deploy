@@ -268,7 +268,7 @@ def prefetch_shared_data(tickers: list, retriever=None, target_date: Optional[st
     v0.41.6: target_date 是当前报告的目标交易日（通常=调用方的 self.date_str）。
     非当日实时扫描时（`--date` 补跑历史交易日），透传给 _fetch_stock_data 让
     价格锚定该日期真实收盘价，而非"脚本运行那一刻"的实时报价——所有走
-    _get_stock_data()/共享快照价的 Agent（Scout/Oracle/Chronos/CodeExecutor 等）
+    _get_stock_data()/共享快照价的 Agent（Scout/Oracle/Chronos 等）
     自动获得一致、正确的历史价格。
 
     返回: {"stock_data": {ticker: data}, "contexts": {ticker: str}, "target_date": str|None}

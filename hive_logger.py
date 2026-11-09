@@ -155,10 +155,6 @@ class _HivePaths:
         return os.environ.get("ALPHA_HIVE_CHROMA_PATH", str(self.home / "chroma_db"))
 
     @property
-    def sandbox_dir(self) -> Path:
-        return Path(os.environ.get("ALPHA_HIVE_SANDBOX_DIR", "/tmp/alpha_hive_sandbox"))
-
-    @property
     def production_sync(self) -> Path:
         """扫描前生产 checkout 快进结果（v0.45.214，`production_sync.write_result`）。
 

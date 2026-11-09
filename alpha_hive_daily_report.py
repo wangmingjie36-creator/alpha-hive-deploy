@@ -42,13 +42,9 @@ from agent_toolbox import AgentHelper
 
 MemoryStore = optional_import("memory_store", "MemoryStore")
 
-# Phase 3 P4: Code Execution Agent（含 fallback dict，保留 try/except）
-try:
-    from code_executor_agent import CodeExecutorAgent
-    from config import CODE_EXECUTION_CONFIG
-except ImportError:
-    CodeExecutorAgent = None
-    CODE_EXECUTION_CONFIG = {"enabled": False}
+# v0.45.750：CodeExecutorAgent（Phase 3 P4 的代码执行蜂）已退役——它的方向票只是「价在 20 日均线上 / 下 + RSI」，
+# 09-10 ~ 11-06 共 1200 行：失败 ~10%、改变 rule_direction ~14%、对 T+7 横截面收益 t −0.35（无信息）。
+# 墓碑 tests/test_code_executor_retired.py。
 
 # v0.45.339：此处不再 import SlackReportNotifier（该模块 v0.45.575 已删）—— 本模块唯一的 Slack 发送是
 # 财报更新通知（CLAUDE.md「Slack 通知精简规则」白名单之外），已改为只写日志。
@@ -253,8 +249,8 @@ def build_agent_votes(data: dict) -> "tuple[dict, str]":
     `tests/test_agent_votes_census.py` 模块 docstring。
 
     `agent_details` 里本来就有每只蜂的分数，无截断、无过期，且就在调用点的
-    `_data` 里。它还**更正确**：CodeExecutorAgent 在 `analyze` 开头无条件发一条
-    `5.0/neutral` 占位（`code_executor_agent.py:75`），溢出淘汰按分留下的恰恰是
+    `_data` 里。它还**更正确**：CodeExecutorAgent（v0.45.750 退役）曾在 `analyze` 开头无条件发一条
+    `5.0/neutral` 占位，溢出淘汰按分留下的恰恰是
     那个桩，把真实结论挤掉 —— 生产 1024 对里 16 例不一致，**全部**是这一形状。
 
     `QueenDistiller` 不在 `agent_details` 里（它是**聚合**不是蜂），但它今天确实
@@ -450,15 +446,6 @@ class AlphaHiveDailyReporter:
         # 结果存储
         self.opportunities: List[OpportunityItem] = []
 
-        # Phase 3 P4: 初始化代码执行 Agent（失败时降级）
-        self.code_executor_agent = None
-        if CodeExecutorAgent and CODE_EXECUTION_CONFIG.get("enabled"):
-            try:
-                self.code_executor_agent = CodeExecutorAgent(board=None)
-                # board 在 run_swarm_scan 时注入
-            except (OSError, ValueError, RuntimeError, TypeError) as e:
-                _log.warning("CodeExecutorAgent 初始化失败: %s", e)
-
         # Phase 3 内存优化: 初始化向量记忆层（Chroma 长期记忆）
         self.vector_memory = None
         if VectorMemory and VECTOR_MEMORY_CONFIG.get("enabled"):
@@ -589,10 +576,6 @@ class AlphaHiveDailyReporter:
         rival_agent = RivalBeeVanguard(board, retriever=retriever)
         guard_agent = GuardBeeSentinel(board, retriever=retriever)
         bear_agent = BearBeeContrarian(board, retriever=retriever)
-
-        if self.code_executor_agent and CODE_EXECUTION_CONFIG.get("add_to_swarm"):
-            self.code_executor_agent.board = board
-            phase1_agents.append(self.code_executor_agent)
 
         # ── v0.45.176：adapted_weights 降级为只读诊断，不再喂给 QueenDistiller ──
         # 照 v0.44.0 对 weekly_optimizer 的处置（保留计算与审计轨迹、断掉写入生产的那条线）。

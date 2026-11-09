@@ -110,7 +110,6 @@ WRITERS: dict = {
     "data_backup/export.py::export_db": (HUMAN, "库导出 _meta.json（restore 只做核对展示）"),
     "vrp_signal.py::main": (HUMAN, "CLI --out 导出"),
     "paper_portfolio.py::main": (HUMAN, "CLI：KPI 打印 + HTML 报告导出"),
-    "code_executor.py::CodeExecutor._write_audit_log": (HUMAN, "代码执行沙箱审计日志（只原样读回给人看）"),
     "tools/clockshift/audit.py::main": (HUMAN, "拨钟审计报告追加进 GitHub Actions 的 $GITHUB_STEP_SUMMARY（Actions 渲染给人看，无代码读回；v0.45.495）"),
     "alphabot/straddle.py::read_jsonl": (HUMAN, "只读展示：坏行计数随结果返回并显示在页面上（不吞、也不因外部损坏让整页崩）"),
     # ── 代码与部署（不是 JSON 数据）

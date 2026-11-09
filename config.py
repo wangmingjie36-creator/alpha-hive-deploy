@@ -1017,17 +1017,6 @@ VECTOR_MEMORY_CONFIG = {
     "cleanup_on_startup": True,    # 启动时自动清理过期记忆
 }
 
-# ==================== 代码执行配置 (Phase 3 P1) ====================
-CODE_EXECUTION_CONFIG = {
-    "enabled": True,
-    "max_timeout": 30,           # 单次执行超时（秒）
-    "max_retries": 3,            # 自动调试最大重试次数
-    "sandbox_dir": str(PATHS.sandbox_dir),
-    "enable_network": True,      # BUG FIX: CodeExecutorAgent 需要网络才能抓取 yfinance 数据，原 False 导致永久 ConnectionError
-    "enable_file_write": True,   # 允许写入沙箱目录
-    "add_to_swarm": True,        # 是否将 CodeExecutorAgent 加入蜂群
-}
-
 # ==================== 财报自动监控配置 ====================
 EARNINGS_WATCHER_CONFIG = {
     "enabled": True,

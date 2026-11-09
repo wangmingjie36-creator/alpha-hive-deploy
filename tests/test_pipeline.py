@@ -57,8 +57,6 @@ class TestBuildSwarmReport:
         import alpha_hive_daily_report as mod
 
         monkeypatch.setattr(mod, "MemoryStore", None)
-        monkeypatch.setattr(mod, "CodeExecutorAgent", None)
-        monkeypatch.setattr(mod, "CODE_EXECUTION_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "VectorMemory", None)
         monkeypatch.setattr(mod, "VECTOR_MEMORY_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "EarningsWatcher", None)
@@ -176,8 +174,6 @@ class TestDataQualityGate:
     def reporter(self, monkeypatch, tmp_path):
         import alpha_hive_daily_report as mod
         monkeypatch.setattr(mod, "MemoryStore", None)
-        monkeypatch.setattr(mod, "CodeExecutorAgent", None)
-        monkeypatch.setattr(mod, "CODE_EXECUTION_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "VectorMemory", None)
         monkeypatch.setattr(mod, "VECTOR_MEMORY_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "EarningsWatcher", None)
@@ -340,8 +336,6 @@ class TestDeployStaticToGhPages:
         import alpha_hive_daily_report as mod
 
         monkeypatch.setattr(mod, "MemoryStore", None)
-        monkeypatch.setattr(mod, "CodeExecutorAgent", None)
-        monkeypatch.setattr(mod, "CODE_EXECUTION_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "VectorMemory", None)
         monkeypatch.setattr(mod, "VECTOR_MEMORY_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "EarningsWatcher", None)
@@ -729,8 +723,6 @@ class _ReporterMixin:
     def _make_reporter(monkeypatch, tmp_path):
         import alpha_hive_daily_report as mod
         monkeypatch.setattr(mod, "MemoryStore", None)
-        monkeypatch.setattr(mod, "CodeExecutorAgent", None)
-        monkeypatch.setattr(mod, "CODE_EXECUTION_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "VectorMemory", None)
         monkeypatch.setattr(mod, "VECTOR_MEMORY_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "EarningsWatcher", None)
