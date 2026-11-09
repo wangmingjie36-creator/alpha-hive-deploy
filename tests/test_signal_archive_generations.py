@@ -202,9 +202,12 @@ NEVER_SLICED_TODAY = (
     # v0.45.275: price.momentum_5d / price.volatility_20d 移出本表——各自在
     # 2026-08-15（scout_bee v0.43.25）/ 2026-08-26（data_pipeline v0.45.3）改过
     # 哨兵语义（缺失伪造 0.0 → 诚实 None），见 DOCUMENTED_REDEFINITIONS。
-    # price.volume_ratio 留在本表：dataclass 默认值同批改了，CBOESource 的 `or 1.0` 次日
-    # （v0.45.54，08-27）才删——但归档里恰为 1.0 的量比最晚在 07-02，08-26/27 前后没有一行值变，
-    # 不需要世代边界（v0.45.754 查明；探索性 IC 由 REAL_OBSERVATION_GATES 把 1.0 当哨兵排除）。
+    # price.volume_ratio 留在本表：dataclass 默认值同批改了，CBOESource 的
+    # `metrics.get("volume_ratio", 1.0)` 次日（v0.45.54，08-27）才删。v0.45.754 验证：它只在
+    # 08-15（v0.43.25 加自攒动量索引）~08-27 可达——yfinance 取 K 线抛异常、索引补上动量 ⇒ metrics
+    # 只有动量没有量比键 ⇒ 1.0；此前异常直接返回 None、走不到。窗口内有扫描的 4 天（08-24~27）
+    # 120 行里没有一个 1.0（JSON 与归档都核过），归档里恰为 1.0 的量比最晚 07-02 ⇒ 没有一行值变，
+    # 不需要世代边界（探索性 IC 由 REAL_OBSERVATION_GATES 把 1.0 当哨兵排除）。
     "price.volume_ratio",
     "market.fear_greed", "market.fear_greed_is_cnn",   # v0.45.750：fund.* 随 CodeExecutorAgent 退役
     # v0.45.751：sentiment.pct 移出——= int(Σ 权重 × buzz.comp.*)，v0.45.445 换新闻主源即换了它（见 DOCUMENTED_REDEFINITIONS）
